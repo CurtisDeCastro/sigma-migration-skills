@@ -58,6 +58,24 @@ MicroStrategy uses "Phase" numbering and is documented here rather than as an
 | C9 Security/RLS | "Security: RLS/CLS" section |
 | C10 Enhance | — |
 
+### gooddata-to-sigma
+
+GoodData Cloud / .CN uses "Phase" numbering (joined after the table was set).
+Its local mapping:
+
+| Canonical | gooddata-to-sigma |
+|---|---|
+| C1 Assess | gooddata-assessment skill (MAQL coverage + per-dashboard tag) |
+| C2 Discover | Phase 1 — Discover (declarative export) + Phase 1b gap-scout |
+| C3 Reuse-check | Phase 1c — Reuse an existing DM (find-or-pick) |
+| C4 Convert | Phase 2 — `convert.py` (LDM→DM, MAQL→formulas) |
+| C5 Post-DM gate | Phase 2 — POST + read back real ids (hard gate) |
+| C6 Build workbook | Phase 3 — `build_workbook.py` (insights→elements) |
+| C7 Layout | within Phase 3 (layout = LAST write) |
+| C8 Parity hard gate | Phase 4 — Verify parity vs same warehouse |
+| C9 Security/RLS | "Contract" + user-data-filter → user-attribute mapping (design-notes) |
+| C10 Enhance | — |
+
 Notes:
 
 - **Looker runs the RLS gate early** (before building, C9 ahead of C4) by
