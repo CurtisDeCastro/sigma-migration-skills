@@ -32,7 +32,7 @@ Synthetic XML (no live tenant), modeled on real Tableau 2024.1 `.twb` shapes.
 
 | File | What it is |
 |---|---|
-| `workbook-content.twb` | Synthetic workbook: 1 Automatic-mark crosstab worksheet `Metric Partner Closed Won` (Partner Name rows × Created FYQQ + Measure Names cols), 1 dashboard, a `<shared-view>` with 3 quick filters exercising all the failure modes — caption-less multi-word (`Customer Geo`), a Tableau GROUP (`Partner Level (group)`), and a slash name (`Mkt Sourced/Influenced`) — plus an integer measure-swap parameter (`Summary $ Choose`, 1→TCV / 2→Product TCV / 3→ACV) with value aliases |
+| `workbook-content.twb` | Synthetic workbook: 1 Automatic-mark crosstab worksheet `Metric Partner Closed Won` (Partner Name rows × Created FYQQ + Measure Names cols), 1 Automatic-mark `Bookings by Quarter Bar` worksheet that is the OVER-FIRE GUARD (Measure Names on cols but the measure VALUES on rows as `[Multiple Values]` → a bar, must NOT be a crosstab), 1 dashboard, a `<shared-view>` with 3 quick filters exercising all the failure modes — caption-less multi-word (`Customer Geo`), a Tableau GROUP (`Partner Level (group)`), and a slash name (`Mkt Sourced/Influenced`) — plus an integer measure-swap parameter (`Summary $ Choose`, 1→TCV / 2→Product TCV / 3→ACV) with value aliases |
 | `get-workbook.json`, `master-columns.json` | Minimal discovery fixtures so `build-charts-from-signals.rb` runs offline |
 | `chart-specs.json` | PINNED `build-charts-from-signals.rb` output — captures all three fixes in one deterministic artifact (see assertions) |
 
@@ -59,6 +59,12 @@ copy (deterministic — element ids are name-derived, no randomness).
   (mark `Automatic`, Measure Names on cols) emits a `kind: pivot-table`
   element with `rowsBy` (Partner Name), `columnsBy` (Created FYQQ), and a
   `values` array — NOT a flat `table`.
+- **Over-fire guard (fix 1, parse-level):** `parse-twb-layout` sets
+  `is_crosstab: true` for `Metric Partner Closed Won` but `is_crosstab: false`
+  for `Bookings by Quarter Bar` — the latter carries the Measure-VALUES pill
+  (`has_measure_values: true`), so an Automatic-mark multi-measure BAR is not
+  misclassified as a crosstab. (Real-world catch from the coverage sweep: a
+  public "Barchart of accident factors" sheet was being turned into a pivot.)
 - **Quick filters resolved → controls (fix 2):** all three shared filters emit
   `kind: control`, `controlType: list` elements wired to the master — the
   caption-less multi-word `Customer Geo`, the group `Partner Level (g)`, and the

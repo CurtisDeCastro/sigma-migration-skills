@@ -233,8 +233,16 @@ end
 # Parse a `<rows>` or `<cols>` shelf string into a structured summary.
 def parse_shelf(shelf_str)
   out = { 'raw' => shelf_str, 'fields' => [], 'dim_count' => 0,
-          'measure_count' => 0, 'has_measure_names' => false }
+          'measure_count' => 0, 'has_measure_names' => false,
+          'has_measure_values' => false }
   return out if shelf_str.nil? || shelf_str.strip.empty?
+  # The Measure-VALUES pill (`[Multiple Values]` / `[Measure Values]`) signals
+  # measures placed on this shelf as a VISUAL encoding (bar lengths / line
+  # values). Detect it from the RAW string as a flag — NOT as a per-field role —
+  # because a shelf can hold it ALONGSIDE a real measure pill
+  # (`([Multiple Values] + [usr:Calc:qk])`), and classifying the whole field as
+  # measure-values would drop that real measure and break line/bar inference.
+  out['has_measure_values'] = true if shelf_str =~ /\[(?:Multiple|Measure)\s+Values\]/i
   shelf_str.split('/').each do |f|
     # Nested shelves wrap the field list in parens —
     #   `([ds].[none:A:nk] / [ds].[none:B:nk])`
@@ -552,31 +560,35 @@ xml.elements.each('//worksheet') do |ws|
   cols_shelf = parse_shelf(cols_node&.text)
 
   # Crosstab signal:
-  #   (a) explicit Text/Square mark with ≥1 real dim on BOTH shelves, OR
-  #   (b) a shelf carrying Measure Names (with ≥2 measures + ≥1 dim) under a
-  #       crosstab-capable mark.
-  # Measure Names on a shelf is an UNAMBIGUOUS crosstab signal — you can't put
-  # the Measure-Names pill on a true bar/line; it lays measures out as a text
-  # grid. Tableau's DEFAULT "Automatic" mark renders that grid as text, so a
-  # multi-measure crosstab authored without flipping the mark to "Text" reports
-  # mark_class="Automatic" (or blank). Gating only on text/square missed every
-  # such table — EDNA's "Metric Partner Closed Won" / "1T.PartnerClosed
-  # size&Status" (Automatic mark, Measure Names on cols) fell through to flat
-  # `table`/`kpi`, dropping the grouped quarter headers + Grand Total the
-  # customer flagged. We keep the strict text/square gate for the (a) branch
-  # (a 1-dim×1-dim Automatic sheet with one measure is a heatmap/bar matrix, not
-  # a pivot) and relax ONLY the Measure-Names branch.
+  #   (a) explicit Text/Square mark with ≥1 real dim on BOTH shelves, OR a
+  #       Measure-Names shelf (≥2 measures + ≥1 dim) — the mark is unambiguous, OR
+  #   (b) Automatic/blank mark with Measure Names AND dims on BOTH shelves.
+  # Measure Names on a shelf lays measures out as a text grid, and Tableau's
+  # DEFAULT "Automatic" mark renders that grid as text — so a crosstab authored
+  # without flipping the mark to "Text" reports mark_class="Automatic" (or blank).
+  # Gating only on text/square missed every such table (EDNA's "Metric Partner
+  # Closed Won" / "1T.PartnerClosed size&Status" → flat table/kpi, losing the
+  # grouped quarter headers + Grand Total).
+  #
+  # BUT the AUTOMATIC relaxation excludes sheets carrying the Measure-VALUES pill
+  # (`[Multiple Values]` / `[Measure Values]`) on a shelf: that places the
+  # measures as a VISUAL encoding (bar lengths / line values), so an
+  # Automatic-mark sheet with Measure Names on one shelf and Measure Values on the
+  # other is a MULTI-MEASURE BAR, not a text crosstab (real-world catch: a public
+  # "Barchart of accident factors" sheet — Measure Names on cols, `[Multiple
+  # Values]` on rows — must stay a bar). A genuine text crosstab carries the
+  # measure values on the Text marks card, never as a row/col pill. Explicit
+  # Text/Square marks keep the lenient rule — the author's intent is unambiguous.
   is_text_mark = %w[text square].include?(mark_class.to_s.downcase)
-  crosstab_capable_mark = is_text_mark ||
-                          mark_class.to_s.downcase == 'automatic' ||
-                          mark_class.to_s.strip.empty?
+  automatic_mark = mark_class.to_s.downcase == 'automatic' || mark_class.to_s.strip.empty?
   both_have_dims = rows_shelf['dim_count'] >= 1 && cols_shelf['dim_count'] >= 1
+  shelf_has_measure_values = rows_shelf['has_measure_values'] || cols_shelf['has_measure_values']
   measure_names_crosstab =
     (rows_shelf['has_measure_names'] || cols_shelf['has_measure_names']) &&
     (rows_shelf['dim_count'] + cols_shelf['dim_count']) >= 1 &&
     (rows_shelf['measure_count'] + cols_shelf['measure_count'] + measures.size) >= 2
-  is_crosstab = (is_text_mark && both_have_dims) ||
-                (crosstab_capable_mark && measure_names_crosstab)
+  is_crosstab = (is_text_mark && (both_have_dims || measure_names_crosstab)) ||
+                (automatic_mark && measure_names_crosstab && !shelf_has_measure_values)
 
   # KPI signal: Text/Square/AUTOMATIC mark with ZERO dims on both shelves AND
   # ≥1 measure (on shelves or on the worksheet's Marks card). Tableau

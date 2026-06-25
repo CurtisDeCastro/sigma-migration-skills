@@ -74,6 +74,34 @@
         </panes>
       </table>
     </worksheet>
+    <worksheet name='Bookings by Quarter Bar'>
+      <!-- OVER-FIRE GUARD: Automatic mark + Measure Names on cols, but the
+           measure VALUES are on rows as the `[Multiple Values]` pill (a VISUAL
+           multi-measure bar). Must stay a BAR, NOT become a pivot-table — the
+           measure-values discriminator distinguishes it from the text crosstab
+           above (modeled on a real public "Barchart of accident factors"). -->
+      <table>
+        <view>
+          <datasources>
+            <datasource caption='Partner Bookings (CSA.TJ)' name='federated.primary' />
+          </datasources>
+          <datasource-dependencies datasource='federated.primary'>
+            <column datatype='string' name='[Created FYQQ]' role='dimension' type='nominal' />
+            <column caption='TCV' datatype='real' name='[TCV]' role='measure' type='quantitative' />
+            <column caption='ACV' datatype='real' name='[ACV]' role='measure' type='quantitative' />
+            <column-instance column='[Created FYQQ]' derivation='None' name='[none:Created FYQQ:nk]' pivot='key' type='nominal' />
+            <column-instance column='[TCV]' derivation='Sum' name='[sum:TCV:qk]' pivot='key' type='quantitative' />
+          </datasource-dependencies>
+        </view>
+        <rows>([federated.primary].[Multiple Values] + [federated.primary].[sum:TCV:qk])</rows>
+        <cols>([federated.primary].[none:Created FYQQ:nk] / [federated.primary].[:Measure Names])</cols>
+        <panes>
+          <pane>
+            <mark class='Automatic' />
+          </pane>
+        </panes>
+      </table>
+    </worksheet>
   </worksheets>
   <dashboards>
     <dashboard name='Partner Summary'>
