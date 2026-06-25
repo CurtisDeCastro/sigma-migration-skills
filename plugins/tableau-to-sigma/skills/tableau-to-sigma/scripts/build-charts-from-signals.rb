@@ -1408,7 +1408,18 @@ def build_pivot_element(z, meta, mmap, opts, warnings, data_elements = [])
         "[Master/#{m['name']}]"
       end
 
-    col_obj = { 'id' => col_id, 'name' => m['name'], 'formula' => formula }
+    # A calc field referenced on a shelf surfaces by its INTERNAL id
+    # (`Calculation_1466…` / `Calculation_summary`), which would render as an
+    # ugly column header. Resolve it to the calc's human caption (captured in
+    # columns_by_guid) when available — purely a display-name fix; the value
+    # array, Switch branch refs, and ws_calc match all key off ids / the raw
+    # name, so this is safe.
+    display_name = m['name']
+    if display_name.to_s =~ /\ACalculation_/i
+      cbg_cap = (meta['columns_by_guid'] || {}).dig(display_name.to_s, 'caption')
+      display_name = cbg_cap if cbg_cap && !cbg_cap.to_s.strip.empty? && cbg_cap.to_s !~ /\ACalculation_/i
+    end
+    col_obj = { 'id' => col_id, 'name' => display_name, 'formula' => formula }
     if field['role'] == 'measure'
       tab_fmt = pick_tableau_format(z['formats'], m['name'])
       col_obj['format'] = tab_fmt if tab_fmt

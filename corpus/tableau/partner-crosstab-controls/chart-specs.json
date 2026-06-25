@@ -142,7 +142,7 @@
             },
             {
               "id": "p-el-metric-partner-closed-won-value-calculation_summary",
-              "name": "Calculation_summary",
+              "name": "Summary $",
               "formula": "Switch([ctl-param-summary-choose-metric-partner-closed], \"1\", Sum([TCV]), \"2\", Sum([Product TCV]), \"3\", Sum([ACV]))",
               "format": {
                 "kind": "number",
