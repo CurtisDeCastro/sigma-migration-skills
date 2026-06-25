@@ -3190,9 +3190,26 @@ if opts[:auto_controls]
     }
     if p['param_domain'] == 'list'
       spec['controlType']   = 'segmented'
+      values = p['members'] || []
+      # Tableau list parameters often store integer-coded members (1..13) whose
+      # human meaning lives in the parameter's value ALIASES (1→"TCV", 3→"ACV").
+      # parse-twb-layout captures these in column_aliases keyed by the param
+      # caption. Map each member value to its alias label so the segmented
+      # control shows "TCV"/"ACV" instead of raw "1"/"3" — the selection VALUE
+      # stays the code (what the translated Switch([ctl-param-…], "1", …)
+      # compares against), only the display label changes. Without this the
+      # measure-switcher renders as a row of meaningless numbers (EDNA).
+      alias_pairs = (meta['column_aliases'] || {})[cap] ||
+                    (meta['column_aliases'] || {})[p['name'].to_s.gsub(/^\[|\]$/, '')]
+      labels = []
+      if alias_pairs && !alias_pairs.empty?
+        amap = alias_pairs.each_with_object({}) { |a, h| h[a['key'].to_s] = a['value'] }
+        labels = values.map { |v| amap[v.to_s] || v.to_s }
+        labels = [] if labels == values.map(&:to_s) # all unmapped → omit (no value-add)
+      end
       spec['source'] = {
         'kind' => 'manual', 'valueType' => 'text',
-        'values' => p['members'] || [], 'labels' => []
+        'values' => values, 'labels' => labels
       }
       spec['value'] = p['default_value']
     elsif p['param_domain'] == 'range' && %w[integer real].include?(p['datatype'])
