@@ -139,7 +139,12 @@ module MechanicalSpecs
     derived = els.select { |e| e.dig('source', 'kind') == 'table' && e.dig('source', 'elementId') }
                  .reject { |e| elem_name(e) =~ dim_re }
     return derived.max_by { |e| (e['columns'] || []).size } if derived.any?
-    base = els.select { |e| e.dig('source', 'kind') == 'warehouse-table' }
+    # Base candidates are warehouse-table elements OR custom-SQL ('sql') elements —
+    # the modern Tableau object/relationship model emits one kind:'sql' element per
+    # logical object (often the only kind present in a multi-custom-SQL workbook).
+    # Without 'sql' here, pick_fact returned nil and the whole mechanical path
+    # FATAL-aborted on object-model workbooks (the DDMX empty-DM dead-end).
+    base = els.select { |e| %w[warehouse-table sql].include?(e.dig('source', 'kind')) }
     return nil if base.empty?
     facts = base.reject { |e| elem_name(e) =~ dim_re }
     (facts.empty? ? base : facts).max_by { |e| (e['columns'] || []).size }
