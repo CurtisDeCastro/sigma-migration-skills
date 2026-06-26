@@ -405,6 +405,10 @@ module MechanicalSpecs
   # { "TABLE" => [{'name','type'}] } for picking the dim's date payload column.
   # Returns an array of human-readable action messages.
   def recover_computed_key_joins!(model, twb_xml, real_cols, dim_catalogs = {})
+    # Binary / mixed-encoding .twb content (some exports embed non-UTF-8 bytes)
+    # makes the raw caption regex .scan below throw "invalid byte sequence in
+    # UTF-8", aborting the whole mechanical pass. Scrub to valid UTF-8 first.
+    twb_xml = twb_xml.to_s.encode('UTF-8', 'binary', invalid: :replace, undef: :replace, replace: '')
     msgs = []
     els = all_elements(model)
     fact = els.select { |e| e.dig('source', 'kind') == 'warehouse-table' }
