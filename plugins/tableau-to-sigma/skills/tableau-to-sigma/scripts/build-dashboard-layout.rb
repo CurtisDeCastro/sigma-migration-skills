@@ -181,6 +181,11 @@ def resolve_leaf(node, ctx)
     if ctx[:title_el] && !ctx[:title_used]
       ctx[:title_used] = true
       ctx[:title_el]['id']
+    else
+      # B4 (gap ubr5.8): styled static-text zone → its emitted element
+      # (build-charts id "text-<zoneid>"), placed at the zone's own geometry.
+      el = ctx[:els_by_id]["text-#{node['id']}"]
+      el && el['id']
     end
   end
 end
@@ -226,10 +231,14 @@ def build_page_from_tree(dashboard, page, opts)
   els_by_name = page['elements'].each_with_object({}) { |e, h| h[e['name']] = e if e['name'] }
   ctl_by_name = page['elements'].select { |e| e['kind'] == 'control' && e['name'] }
                     .each_with_object({}) { |e, h| h[e['name'].to_s.downcase] = e }
-  title_el    = page['elements'].find { |e| e['kind'] == 'text' }
+  els_by_id   = page['elements'].each_with_object({}) { |e, h| h[e['id']] = e if e['id'] }
+  # Pin the header title to the dedicated title element (build-charts prepends id
+  # "title-text"/"title-<slug>"); a bare first-text-element match would grab a B4
+  # styled-text element once those exist. Falls back to the page name when absent.
+  title_el    = page['elements'].find { |e| e['kind'] == 'text' && e['id'].to_s.start_with?('title') }
 
   ctx = { page_id: page['id'], renames: opts[:renames], els_by_name: els_by_name,
-          ctl_by_name: ctl_by_name, title_el: title_el, title_used: false,
+          ctl_by_name: ctl_by_name, els_by_id: els_by_id, title_el: title_el, title_used: false,
           extra: [], placed: [], zone_to_ctl: {} }
 
   # Assign workbook control elements to control zones (filter/parameter), in
@@ -284,7 +293,9 @@ def build_page_from_tree(dashboard, page, opts)
   # zone, or a control with no dashboard zone) lands in a bottom band so nothing
   # silently drops from the layout.
   unplaced = page['elements'].select do |e|
-    %w[chart control].include?(e['kind']) && e['name'] && !ctx[:placed].include?(e['id'])
+    (%w[chart control].include?(e['kind']) && e['name'] ||
+     e['kind'] == 'text' && e['id'].to_s.start_with?('text-')) && # B4 styled text
+      !ctx[:placed].include?(e['id'])
   end
   unless unplaced.empty?
     n = unplaced.length
@@ -308,7 +319,9 @@ end
 def build_page_for_dashboard(dashboard, page, opts)
   chart_zones = dashboard['zones'].select { |z| z['kind'] == 'chart' && z['caption'] }
   els_by_name = page['elements'].each_with_object({}) { |e, h| h[e['name']] = e if e['name'] }
-  title_el = page['elements'].find { |e| e['kind'] == 'text' }
+  # Pin to the dedicated title element (see build_page_from_tree) so a B4
+  # styled-text element isn't mistaken for the header title.
+  title_el = page['elements'].find { |e| e['kind'] == 'text' && e['id'].to_s.start_with?('title') }
   ctl_els  = page['elements'].select { |e| e['kind'] == 'control' }
 
   # Per-dashboard copy of the band tuning — auto-fit must not leak between
@@ -394,6 +407,28 @@ def build_page_for_dashboard(dashboard, page, opts)
     cid = "#{ov_prefix}-#{i + 1}"
     extra_els << container_el(cid)
     children << band_container_xml(cid, band, row_offset: band_offset)
+  end
+
+  # B4 (gap ubr5.8): the banded fallback places charts by geometry but not text.
+  # Rather than orphan the emitted styled-text elements (present in the workbook,
+  # absent from the layout), tile them across a labelled bottom band so nothing
+  # silently drops — WARN, since their exact source position isn't reproduced in
+  # the banded path (the container-tree path DOES place them at zone geometry).
+  text_els = page['elements'].select { |e| e['kind'] == 'text' && e['id'].to_s.start_with?('text-') }
+  unless text_els.empty?
+    tn = text_els.length
+    r0 = 1 + HEADER_ROWS + ctl_rows + bands.sum { |b| b.map { |i| i[4] }.max - b.map { |i| i[3] }.min }
+    inner = text_els.each_with_index.map do |e, i|
+      c0 = 1 + (o[:page_cols] * i / tn.to_f).round
+      c1 = i == tn - 1 ? o[:page_cols] + 1 : [1 + (o[:page_cols] * (i + 1) / tn.to_f).round, c0 + 1].max
+      le(e['id'], c0, c1, 1, 4)
+    end.join("\n")
+    tid = "#{ov_prefix}-text"
+    extra_els << container_el(tid)
+    children << gc(tid, 1, o[:page_cols] + 1, r0, r0 + 4, inner)
+    warn "WARN: #{tn} styled-text element(s) placed in a bottom band on banded page #{page['name'].inspect} " \
+         "(source position not reproduced — the container-tree layout places them by geometry): " \
+         "#{text_els.map { |e| e['id'] }.join(', ')}"
   end
 
   [page_xml(page['id'], *children), extra_els, chart_layouts.length, bands.length, ctl_els.length]
