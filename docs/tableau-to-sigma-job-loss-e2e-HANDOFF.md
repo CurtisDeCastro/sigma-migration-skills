@@ -1,5 +1,7 @@
 # Handoff — Quick & Correct Migration of a Composed Tableau Dashboard (Job-Loss benchmark)
 
+> **⚠️ SUPERSEDED (2026-07-02) by `docs/tableau-to-sigma-job-loss-composition-HANDOFF.md`** — read that first. It has the real goal (reproduce Jared's 62-element composed workbook with the skill), the answer-key locations, Jared's gap roadmap, all unmerged PRs + this session's pushed commits, and the recommended plan. This doc remains useful for the P0 punch-list detail below.
+
 > **SESSION 2 PROGRESS (2026-07-02) — all three P0 correctness fixes DONE & verified (offline suite green, 32 pass):**
 > - **P0#1 region-scoped KPIs** ✓ commit `f1c6ab4`. `build_kpi_element` now applies each KPI zone's categorical `list` filters (the `chart_kind=kpi` fast path used to `next` past the value_filters block). Verified: region KPIs carry `Region include:['South']` + hidden passthrough col. Test extended in `test-kpi-composite-emit`.
 > - **P0#2 nested/page-level decollide** ✓ commit `0a17527`. New `resolve_overlaps_greedy` non-destructively pushes Tableau floating zones below the tiled root at the page level (was un-decollided → put-layout rejected whole page). Verified on the REAL Job-Loss tree: container-tree path, **0 sibling overlaps at any level**, all 4 region tints preserved. New `test-nested-container-overlap`.
