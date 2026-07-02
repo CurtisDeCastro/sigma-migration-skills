@@ -1,5 +1,11 @@
 # Handoff — Quick & Correct Migration of a Composed Tableau Dashboard (Job-Loss benchmark)
 
+> **SESSION 2 PROGRESS (2026-07-02) — all three P0 correctness fixes DONE & verified (offline suite green, 32 pass):**
+> - **P0#1 region-scoped KPIs** ✓ commit `f1c6ab4`. `build_kpi_element` now applies each KPI zone's categorical `list` filters (the `chart_kind=kpi` fast path used to `next` past the value_filters block). Verified: region KPIs carry `Region include:['South']` + hidden passthrough col. Test extended in `test-kpi-composite-emit`.
+> - **P0#2 nested/page-level decollide** ✓ commit `0a17527`. New `resolve_overlaps_greedy` non-destructively pushes Tableau floating zones below the tiled root at the page level (was un-decollided → put-layout rejected whole page). Verified on the REAL Job-Loss tree: container-tree path, **0 sibling overlaps at any level**, all 4 region tints preserved. New `test-nested-container-overlap`.
+> - **P0#3 DM blend relationship** ✓ LIVE. Added many-to-one **State Fact → Region Split on Region** (rel id `-d06Su9TE5`, keys `ary2QadcW0`→`e0a0l0XSxW`) to DM `a430348f` via PUT. Verified persisted; Region Split immigrant/US-born reconciles (South 1.34M+1.04M=2.38M).
+> - **NEXT: §4 step 4-6 — run the skill E2E, put-layout (should apply with NO hand-edit now), render the page PNG, read it, one focused fix pass.** Assets still live (DM verified South=2.38M). NOTE: State Fact now also carries its own Immigrant/US Born cols.
+
 **Date:** 2026-07-02 · **Goal:** prove the `tableau-to-sigma` skill can migrate a *design-heavy, composed* Tableau dashboard **quickly and correctly**, automatically — matching the hand/skill-built target Jared produced. This doc has everything learned in the prior session so a fresh session starts at the finish line, not the start.
 
 **The target (Jared's result, via the skill):** the full composed dashboard — 4 tinted region columns (South teal / West pink / Northeast purple / Midwest orange), each with a KPI composite (`2.4M` + "40% of U.S. total" + the 56/44 split + ▲TX/▼WV pills + "Most Impacted States" bar + per-state strip plot); a left rail (4.0M / 5.9M hero KPIs + deportations-vs-loss scatter + Most-Impacted bar); a control row (Immigrant/US-born, Rank, Metric dropdown, Labels/Median); header stat pill + "Learn More" chip; region palette throughout.
