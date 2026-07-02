@@ -710,12 +710,6 @@ def apply_patch!(spec, cand)
     spec['layout'] = spec['layout'].to_s.gsub(/elementId="#{Regexp.escape(el['id'])}"/,
                                               %(elementId="#{map_el['id']}"))
     "replaced #{el['id']} with point-map #{map_el['id']}"
-  when 'regroup_banded'
-    # Regroup the dashboard into header + row-band section containers. The heavy
-    # lifting is ensure_banded! (idempotent — also run globally pre-apply); calling
-    # it here makes the section-band regroup an explicitly acceptable enhancement.
-    ensure_banded!(spec)
-    "regrouped page #{patch['page_id']} into section bands"
   else
     raise "unknown patch op #{patch['op'].inspect}"
   end
