@@ -42,6 +42,7 @@ TWB = <<~XML
           <relation connection='snow' name='STATE_FACT' table='[TJ].[STATE_FACT]' type='table' />
         </connection>
         <column caption='Total Job Losses' name='[TJL]' datatype='real' role='measure' type='quantitative' />
+        <column caption='Region' name='[Region]' datatype='string' role='dimension' type='nominal' />
       </datasource>
     </datasources>
     <worksheets>
@@ -62,6 +63,9 @@ TWB = <<~XML
               </formatted-text>
             </customized-label>
           </pane>
+          <filter class='categorical' column='[federated.x].[Region]'>
+            <groupfilter function='member' member='&quot;South&quot;' level='[federated.x].[Region]' />
+          </filter>
         </table>
       </worksheet>
     </worksheets>
@@ -73,7 +77,10 @@ TWB = <<~XML
   </workbook>
 XML
 
-MASTER_MAP = { '(?i)^Total Job Losses$' => { 'id' => 'm-tjl', 'name' => 'Total Job Losses' } }
+MASTER_MAP = {
+  '(?i)^Total Job Losses$' => { 'id' => 'm-tjl', 'name' => 'Total Job Losses' },
+  '(?i)^Region$'           => { 'id' => 'm-region', 'name' => 'Region' }
+}
 
 build_out = nil
 build_log = ''
@@ -111,6 +118,22 @@ check(kpi && kpi['style'].nil?,
       "KPI keeps its DEFAULT card — no forced transparent style at the element level (got #{kpi && kpi['style'].inspect})", fails)
 check(build_log.include?('annotation is NOT reproduced'),
       'builder WARNs the dynamic-value annotation is not reproduced', fails)
+
+# P0 (bead ubr5.5): a composed region KPI is filtered to its region in the .twb.
+# The chart_kind=kpi fast path must carry that categorical filter onto the emitted
+# kpi-chart, else every region card shows the grand total. (This is THE correctness
+# gate for the composed Job-Loss dashboard.)
+kpi_filters = (kpi && kpi['filters']) || []
+region_filter = kpi_filters.find { |f| f['kind'] == 'list' && Array(f['values']).map(&:to_s) == ['South'] }
+check(!region_filter.nil?,
+      "KPI carries its region filter (Region include:['South']) so it shows the region subtotal, not the grand total (got filters=#{kpi_filters.inspect})", fails)
+region_col = kpi && (kpi['columns'] || []).find { |c| c['name'].to_s == 'Region' }
+check(!region_col.nil?,
+      'KPI gained a hidden Region passthrough column for the filter to reference (element filters must ref a column ON the element)', fails)
+check(region_filter && region_col && region_filter['columnId'] == region_col['id'],
+      'region filter columnId points at the passthrough Region column', fails)
+check(region_filter && region_filter['mode'] == 'include' && region_filter['id'].to_s.start_with?('flt-'),
+      'region filter is a well-formed include-list with an flt- id', fails)
 
 puts
 if fails.empty?

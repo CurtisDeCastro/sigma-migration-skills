@@ -2280,7 +2280,76 @@ def build_kpi_element(z, meta, mmap, opts, warnings, data_elements = [])
   # the number IS the chart), we don't need a separate dataLabel — kpi-chart
   # always renders the value. No-op.
 
+  # P0 (bead ubr5.5): scope the scorecard by its worksheet's categorical filters.
+  # Composed region cards ("South Job losses" etc.) are each filtered to their
+  # Region; the chart_kind=kpi FAST PATH (main loop) `next`s before the standard
+  # value_filters block runs, so without this every region KPI would show the
+  # grand total instead of its region subtotal.
+  apply_kpi_value_filters(element, z, meta, mmap, opts, warnings, source_eid)
+
   element
+end
+
+# Apply a KPI zone's per-worksheet categorical (`list`) filters as element-level
+# Sigma filters. The chart_kind=kpi fast path bypasses the main-loop value_filters
+# block, so composed/region-scoped scorecards need this to carry their region
+# (or any list) filter onto the emitted kpi-chart. Mirrors the main loop's
+# el_filter_col_for: reuse a plotted column when present, else add a hidden master
+# passthrough column (only possible when the KPI sources master — a two-stage /
+# dim-grain helper can't carry an arbitrary master column, so we surface that).
+# Non-`list` filters (relative-date / number-range) are surfaced, not silently
+# dropped — extend here if a composed KPI ever needs them.
+def apply_kpi_value_filters(element, z, meta, mmap, opts, warnings, source_eid)
+  cap = z['caption']
+  el_id = element['id']
+  value_filters = (z['filters'] || []).reject { |f| f['is_action'] }
+  return if value_filters.empty?
+
+  col_for = lambda do |m|
+    hit = (element['columns'] || []).find { |c| c['name'].to_s.strip.casecmp?(m['name'].to_s.strip) }
+    return hit['id'] if hit
+    if source_eid != opts[:master_id]
+      warnings << "value filter on '#{cap}' targets '#{m['name']}' but the KPI sources a two-stage/dim-grain helper " \
+                  'that does not carry that column — filter NOT emitted; verify region scoping by hand'
+      return nil
+    end
+    fid = "f-#{el_id}-#{m['name'].to_s.downcase.gsub(/\W+/, '-')}"
+    unless (element['columns'] || []).any? { |c| c['id'] == fid }
+      element['columns'] << { 'id' => fid, 'name' => m['name'], 'formula' => m['formula'] || "[Master/#{m['name']}]" }
+    end
+    fid
+  end
+
+  new_filters = []
+  value_filters.each do |f|
+    fcap = f['column_caption'] || f['raw_param']
+    unless f['kind'] == 'list'
+      warnings << "'#{cap}' KPI has a #{f['kind']} filter on '#{fcap}' — not auto-applied to the scorecard; verify by hand"
+      next
+    end
+    # No explicit members = Tableau "All" (member list only materializes for real
+    # selections). An empty Sigma include-list would drop every row — skip it.
+    next if (f['members'] || []).empty?
+    m = fcap ? map_column(fcap, mmap) : nil
+    if m.nil?
+      warnings << "value filter on '#{cap}' targets '#{fcap}' — no master column matched, skipping (KPI region scope may be missing)"
+      next
+    end
+    fcol = col_for.call(m)
+    next if fcol.nil?
+    new_filters << {
+      'columnId' => fcol, 'kind' => 'list', 'mode' => 'include',
+      'selectionMode' => 'multiple', 'values' => f['members'], 'includeNulls' => 'never'
+    }
+  end
+  return if new_filters.empty?
+
+  existing = element['filters'] || []
+  merged = existing + new_filters
+  merged.each_with_index { |nf, i| nf['id'] = "flt-#{el_id}-#{i}" }
+  element['filters'] = merged
+  scoped = new_filters.map { |nf| "#{nf['columnId']}=#{nf['values'].inspect}" }.join(', ')
+  warnings << "'#{cap}' KPI scoped by #{new_filters.size} element filter(s): #{scoped[0..120]}"
 end
 
 # A workbook may have multiple dashboards; iterate all and concatenate elements.
