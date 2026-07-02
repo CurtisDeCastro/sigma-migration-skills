@@ -160,6 +160,75 @@ else
   abort('chart-specs.json must be either { pages: [...] } or [ ... ]')
 end
 
+# ---- Unresolvable-column safety pass (mechanical; mirrors the id-dedupe above) --
+# build-charts emits best-effort helper/switch columns for complex Tableau calcs
+# (Sets, Parameters, FIXED LODs, RANK top-N) whose branch refs can't be mapped to
+# a real master column. A `[Master/X]` where X is not a master column name is a
+# hard "Dependency not found" at POST. Two mechanical actions, no hand-editing:
+#   1. Drop such columns AND (transitively) any sibling column that references a
+#      dropped column — these are unreferenced helpers, safe to remove.
+#   2. If a dropped column sat on a REQUIRED visual channel (xAxis / yAxis /
+#      value), the tile is unbuildable against this DM — drop the whole element
+#      and report it (honest coverage gap, never a broken tile shipped).
+# Everything that resolves against the master is kept untouched.
+master_names = master_columns.map { |c| c['name'].to_s.strip }
+$pruned_cols = 0
+$dropped_elements = []
+visible_pages.each do |pg|
+  pg['elements'] = (pg['elements'] || []).map do |el|
+    cols = el['columns'] || []
+    next el if cols.empty?
+    removed_ids = []
+    removed_names = []
+    bad_master = lambda do |f|
+      f.to_s.scan(%r{\[Master/([^\]]+)\]}).flatten.any? { |x| !master_names.include?(x.strip) }
+    end
+    # Seed with columns that reference a non-existent master column, then expand
+    # to any column that references (by [id] or bare [name]) an already-removed
+    # column, until stable.
+    loop do
+      newly = cols.select do |c|
+        next false if removed_ids.include?(c['id'])
+        next true if bad_master.call(c['formula'])
+        sib = c['formula'].to_s.scan(/\[([^\]\/]+)\]/).flatten
+        sib.any? { |r| removed_ids.include?(r) || removed_names.include?(r) }
+      end
+      break if newly.empty?
+      newly.each { |c| removed_ids << c['id']; removed_names << c['name'] }
+    end
+    # Second seed: orphan mechanical helper columns with a BLANK name that no
+    # channel or sibling formula references — param-switch / label-toggle
+    # artifacts that resolve their refs but still compile to type "error" and are
+    # never displayed. Real columns always carry a name, so blank-name +
+    # unreferenced is an unambiguous artifact signature.
+    loop do
+      live = cols.reject { |c| removed_ids.include?(c['id']) }
+      chan = [el.dig('xAxis', 'columnId'), el.dig('color', 'column'), el.dig('value', 'columnId')].compact
+      chan += Array(el.dig('yAxis', 'columnIds')).map { |y| y.is_a?(Hash) ? y['columnId'] : y }.compact
+      chan += Array(el['filters']).map { |f| f['columnId'] }.compact
+      Array(el['groupings']).each { |g| chan += Array(g['groupBy']).compact; chan += Array(g['calculations']).map { |c| c.is_a?(Hash) ? c['id'] : c } }
+      frefs = live.flat_map { |c| c['formula'].to_s.scan(/\[([^\]\/]+)\]/).flatten }
+      orphan = live.select { |c| c['name'].to_s.strip.empty? && !chan.include?(c['id']) && !frefs.include?(c['id']) }
+      break if orphan.empty?
+      orphan.each { |c| removed_ids << c['id'] }
+    end
+    next el if removed_ids.empty?
+    required = [el.dig('xAxis', 'columnId'), el.dig('value', 'columnId')].compact
+    required += Array(el.dig('yAxis', 'columnIds')).map { |y| y.is_a?(Hash) ? y['columnId'] : y }.compact
+    if (required & removed_ids).any?
+      $dropped_elements << (el['name'] || el['id'])
+      next nil
+    end
+    el.delete('color') if el['color'] && removed_ids.include?(el.dig('color', 'column'))
+    el['filters'] = Array(el['filters']).reject { |f| removed_ids.include?(f['columnId']) } if el['filters']
+    el['columns'] = cols.reject { |c| removed_ids.include?(c['id']) }
+    el['order'] = Array(el['order']).reject { |i| removed_ids.include?(i) } if el['order']
+    $pruned_cols += removed_ids.size
+    el
+  end.compact
+end
+warn "  prune pass: dropped #{$pruned_cols} orphan unresolvable helper column(s); #{$dropped_elements.size} unbuildable element(s) dropped: #{$dropped_elements.inspect}" if $pruned_cols.positive? || $dropped_elements.any?
+
 # Derive the workbook theme from the parsed layout (Phase-1 composition/style,
 # gaps D1 + Pass-7 canvas). Two pieces, both spec-authorable (themeName +
 # themeOverrides), emitted only when the source actually declares them:

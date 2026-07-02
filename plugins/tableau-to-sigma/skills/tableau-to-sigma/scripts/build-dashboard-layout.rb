@@ -172,6 +172,19 @@ def resolve_leaf(node, ctx)
   when 'chart'
     name = ctx[:renames][node['caption']] || node['caption']
     el = ctx[:els_by_name][name]
+    # KPI scorecards are RENAMED to their BAN label (B3: element name = the
+    # customized-label run, e.g. every region card's KPI becomes "Total Job
+    # Losses"), so a by-caption match fails and the KPI falls through to the
+    # unplaced safety-net band — which is what emptied the region cards and sent
+    # the 4 region KPIs to the page bottom. build_kpi_element derives a
+    # DETERMINISTIC id from the zone caption ("el-kpi-<caption-slug>") and
+    # workbook CREATE preserves client element ids, so recover the match by that
+    # id when the name lookup misses. (Keep this slug in sync with
+    # build_kpi_element's el_id in build-charts-from-signals.rb.)
+    unless el
+      kpi_id = "el-kpi-#{node['caption'].to_s.downcase.gsub(/\W+/, '-')[0..38]}".sub(/-$/, '')
+      el = ctx[:els_by_id][kpi_id]
+    end
     el && el['id']
   when 'filter', 'parameter'
     # Pre-assigned by build_page_from_tree (caption match, then rail-fill) so a

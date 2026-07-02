@@ -3748,7 +3748,18 @@ layout.each do |dash|
           rewired += 1
         end
         if rewired.zero?
-          calc_id = "calc-#{calc_name.downcase.gsub(/\W+/, '-')[0..40]}".sub(/-$/, '')
+          # calc_name can slug to EMPTY (nameless/quote-only Tableau calcs), which
+          # made every such standalone param-switch column collapse to the bare id
+          # "calc" — two on one element => POST 400 "Duplicate id: 'calc'". Anchor
+          # the id to this element and guarantee per-element uniqueness.
+          calc_slug = calc_name.downcase.gsub(/\W+/, '-').sub(/^-/, '').sub(/-$/, '')
+          calc_slug = 'calc' if calc_slug.empty?
+          calc_id   = "calc-#{calc_slug}-#{el_id}"[0..80]
+          if (element['columns'] || []).any? { |c2| c2['id'] == calc_id }
+            n = 2
+            n += 1 while (element['columns'] || []).any? { |c2| c2['id'] == "#{calc_id}-#{n}" }
+            calc_id = "#{calc_id}-#{n}"
+          end
           element['columns'] << { 'id' => calc_id, 'name' => calc_name, 'formula' => switch_sibling }
         end
         warnings << "'#{cap}' parameter-driven calc #{c['name']} → control-driven Switch over " \
