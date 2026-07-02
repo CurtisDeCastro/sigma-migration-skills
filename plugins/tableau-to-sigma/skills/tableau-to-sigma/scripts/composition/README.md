@@ -7,6 +7,26 @@ benchmark) and emits N tinted `GridContainer` cards, each stacking a transparent
 KPI + annotations + a Top/Bottom-N bar + a threshold strip, plus a left rail and a
 wired control row. Two halves — the GAPS report's "extract" and "emit":
 
+### One-command auto-trigger (Phase 5c)
+
+`compose-auto.py` is the entrypoint a migration calls: it runs signal detection and,
+if a repeated-per-category composition applies, auto-runs detect + emit with the
+**inferred** roles — nothing hand-passed. Exit 0 = composed; **exit 2 = does not
+apply** (caller routes to the standard non-composition build); 1 = error.
+
+```
+compose-auto.py --twb X.twb --master-csv m.csv \
+   ( --dm-ids dm-ids.json | --connection-id <uuid> --path DB,SCHEMA,TABLE ) \
+   --folder <id> --wb-name "..." --out-spec wb.json [--text-overrides t.json] \
+   [--min-confidence medium]
+# then: ../post-and-readback.rb --type workbook --spec wb.json ; ../sigma-export-png.py ; composition-verify.py --workbook <id>
+```
+
+**Integration:** run this at Phase 5c once Phase-1 parse (`.twb`) + the landed master
+table (CSV export) exist. It is intentionally a standalone step rather than inlined
+into `migrate-tableau.rb` — the gated orchestrator stays untouched; route on its exit
+code (2 → standard flow). The individual stages below are what it chains:
+
 ```
 detect-composition-signal.py  # DECIDE + INFER ROLES: does this route to composition?
   --twb X.twb --master-csv master.csv --emit-args

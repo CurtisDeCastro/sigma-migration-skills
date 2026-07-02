@@ -41,12 +41,13 @@ def classify(rows):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--twb", required=True)
+    ap.add_argument("--twb", help="source .twb (palette + measure-frequency signal). "
+                                  "Omit for data-only mode (measure inferred by magnitude, medium confidence).")
     ap.add_argument("--master-csv", required=True)
     ap.add_argument("--emit-args", action="store_true")
     a = ap.parse_args()
 
-    xml = open(a.twb, encoding="utf-8", errors="replace").read()
+    xml = open(a.twb, encoding="utf-8", errors="replace").read() if a.twb and a.twb != "/dev/null" else ""
     rows = list(csv.DictReader(open(a.master_csv)))
     info = classify(rows)
     strings = [c for c, i in info.items() if not i["numeric"]]
