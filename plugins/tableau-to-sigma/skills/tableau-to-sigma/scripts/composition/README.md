@@ -8,19 +8,41 @@ KPI + annotations + a Top/Bottom-N bar + a threshold strip, plus a left rail and
 wired control row. Two halves — the GAPS report's "extract" and "emit":
 
 ```
-detect-region-cards.py   # EXTRACT: parse signals -> config.json
+detect-composition-signal.py  # DECIDE + INFER ROLES: does this route to composition?
+  --twb X.twb --master-csv master.csv --emit-args
+  -> applies? + inferred {category,entity,measure,rate,secondary,split,threshold}
+     category via .twb color palette + low cardinality; entity via cardinality;
+     measure via .twb reference frequency (NOT magnitude); threshold via a '> N'
+     that flags ~10-40% of entities. Feed its ARGS line straight into ->
+
+detect-region-cards.py        # EXTRACT: parse signals -> config.json
   --twb X.twb                 category members + order      <- master CSV
   --master-csv master.csv     per-category color palette    <- .twb style <map> buckets
   --dm-ids dm-ids.json        card/header tints             <- derived (lighten/darken)
-  --category Region           per-category facts + cutoffs  <- computed from master CSV
-  --measure "Total Job Losses" --folder <id> --out config.json
+  --category .. --entity ..    per-category facts + cutoffs  <- computed from master CSV
+  --measure .. --rate ..       prose                          <- .twb text runs + --text-overrides
+  [--secondary --split-a --split-b --threshold --source-name --fact-name]
+  --folder <id> --out config.json
+  (--twb is OPTIONAL: omit for data-only mode — default palette + generic prose)
 
-compose-region-cards.py  # EMIT: config.json -> composed workbook spec (+embedded layout)
+compose-region-cards.py       # EMIT: config.json -> composed workbook spec (+embedded layout)
   --config config.json --out-spec wb.json [--out-layout layout.xml]
+  Nothing dashboard-specific is hardcoded: columns/measure/threshold/prose/palette
+  all come from config. Adapts to N cards; drops cshare when there's no split.
+
+composition-verify.py         # GATE: structural completeness + live per-card KPI check
+  --config config.json --spec wb.json [--workbook <id>]   # needs $SIGMA_API_TOKEN for --workbook
 ```
 
 Then POST via `../post-and-readback.rb --type workbook --spec wb.json` (layout is
-embedded top-level) and render with `../sigma-export-png.py`.
+embedded top-level), render with `../sigma-export-png.py`, and gate with
+`composition-verify.py --workbook <id>`.
+
+**Generality:** `config.example.json` (Job-Loss, 4 region cards, worker split, 60 el)
+and `config.example2.json` (cloud spend by team, different schema, no split, 59 el)
+both pass `test-compose.py` — the stage is schema-agnostic, not tied to this dashboard.
+The `.twb` reference-frequency signal is what makes measure inference high-confidence;
+in data-only mode (no `.twb`) it falls back to magnitude (medium confidence).
 
 ## What's spec-authorable (verified live on wb f067ec07)
 

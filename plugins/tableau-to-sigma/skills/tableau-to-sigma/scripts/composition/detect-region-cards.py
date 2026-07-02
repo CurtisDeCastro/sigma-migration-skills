@@ -80,7 +80,8 @@ def slug(s):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--twb", required=True)
+    ap.add_argument("--twb", help="source .twb (for palette/text extraction). "
+                                  "Omit for data-only mode: default palette + generic prose.")
     ap.add_argument("--master-csv", required=True)
     ap.add_argument("--dm-ids", required=True)
     ap.add_argument("--category", required=True)
@@ -99,7 +100,10 @@ def main():
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
 
-    xml = open(a.twb, encoding="utf-8", errors="replace").read()
+    xml = open(a.twb, encoding="utf-8", errors="replace").read() if a.twb else ""
+    # brand-neutral fallback palette (dataviz skill default categorical order)
+    DEFAULT_SCHEME = ["#4E79A7", "#F28E2B", "#59A14F", "#E15759", "#B07AA1",
+                      "#76B7B2", "#EDC948", "#FF9DA7"]
     rows = list(csv.DictReader(open(a.master_csv)))
     for r in rows:
         r["_m"] = float(r[a.measure] or 0)
@@ -110,7 +114,10 @@ def main():
     for r in rows:
         by_cat[r[a.category]].append(r)
     members = sorted(by_cat, key=lambda c: -sum(r["_m"] for r in by_cat[c]))
-    base_pal = extract_palette(xml, members)
+    base_pal = extract_palette(xml, members) if xml else {}
+    # fill any category with no .twb color from the default scheme (data-only mode)
+    for i, m in enumerate(members):
+        base_pal.setdefault(m, DEFAULT_SCHEME[i % len(DEFAULT_SCHEME)])
 
     dm = json.load(open(a.dm_ids))
     dm_id, fact_eid = dm["dataModelId"], dm["pages"][0]["elements"][0]["id"]

@@ -1,0 +1,246 @@
+{
+ "dm_id": "PLACEHOLDER-DM",
+ "state_fact_eid": "PLACEHOLDER-EL",
+ "folder_id": "9ca9bf60-6a33-43dd-967d-1ba6352c54bb",
+ "wb_name": "Cloud Spend by Team (composition test)",
+ "source_name": "Cloud Master",
+ "fact_name": "Cloud Fact",
+ "fields": {
+  "entity": {
+   "name": "Service",
+   "src": "Service"
+  },
+  "category": {
+   "name": "Team",
+   "src": "Team"
+  },
+  "measure": {
+   "name": "Monthly Cost",
+   "src": "Monthly Cost"
+  },
+  "rate": {
+   "name": "Utilization Pct",
+   "src": "Utilization Pct"
+  },
+  "secondary": {
+   "name": "Requests",
+   "src": "Requests"
+  }
+ },
+ "threshold": 100000.0,
+ "cat_scheme": [
+  "#4E79A7",
+  "#F28E2B",
+  "#59A14F",
+  "#E15759"
+ ],
+ "grand": 755000.0,
+ "national": {
+  "grand": 755000.0,
+  "median": 8000.0,
+  "over_thresh": 4,
+  "n_entities": 18
+ },
+ "regions": [
+  {
+   "key": "platform",
+   "label": "Platform",
+   "colors": {
+    "bar": "#4E79A7",
+    "card": "#EAEFF4",
+    "hdrbar": "#AFC3D7",
+    "hdrtext": "#2D4661"
+   },
+   "facts": {
+    "total": 437000.0,
+    "pct_of_total": 58,
+    "n_entities": 5,
+    "over_thresh": 2,
+    "split_a_pct": null,
+    "split_b_pct": null,
+    "top5": [
+     [
+      "Grafana",
+      240000.0
+     ],
+     [
+      "Feature Store",
+      120000.0
+     ],
+     [
+      "API Gateway",
+      60000.0
+     ],
+     [
+      "GPU Cluster",
+      15000.0
+     ],
+     [
+      "Object Store",
+      2000.0
+     ]
+    ],
+    "hi": [
+     "Grafana",
+     240000.0
+    ],
+    "lo": [
+     "Object Store",
+     2000.0
+    ],
+    "top5cut": 2000.0,
+    "bot5cut": 240000.0
+   }
+  },
+  {
+   "key": "security",
+   "label": "Security",
+   "colors": {
+    "bar": "#F28E2B",
+    "card": "#FDF1E6",
+    "hdrbar": "#F9CCA0",
+    "hdrtext": "#8C5219"
+   },
+   "facts": {
+    "total": 145000.0,
+    "pct_of_total": 19,
+    "n_entities": 4,
+    "over_thresh": 1,
+    "split_a_pct": null,
+    "split_b_pct": null,
+    "top5": [
+     [
+      "Search",
+      120000.0
+     ],
+     [
+      "Airflow",
+      15000.0
+     ],
+     [
+      "Redis",
+      8000.0
+     ],
+     [
+      "SIEM",
+      2000.0
+     ]
+    ],
+    "hi": [
+     "Search",
+     120000.0
+    ],
+    "lo": [
+     "SIEM",
+     2000.0
+    ],
+    "top5cut": 2000.0,
+    "bot5cut": 120000.0
+   }
+  },
+  {
+   "key": "data",
+   "label": "Data",
+   "colors": {
+    "bar": "#59A14F",
+    "card": "#EBF4EA",
+    "hdrbar": "#B4D5B0",
+    "hdrtext": "#345D2E"
+   },
+   "facts": {
+    "total": 143000.0,
+    "pct_of_total": 19,
+    "n_entities": 5,
+    "over_thresh": 1,
+    "split_a_pct": null,
+    "split_b_pct": null,
+    "top5": [
+     [
+      "Model Serving",
+      120000.0
+     ],
+     [
+      "CDN",
+      8000.0
+     ],
+     [
+      "Firewall",
+      8000.0
+     ],
+     [
+      "Batch",
+      5000.0
+     ],
+     [
+      "Kafka",
+      2000.0
+     ]
+    ],
+    "hi": [
+     "Model Serving",
+     120000.0
+    ],
+    "lo": [
+     "Kafka",
+     2000.0
+    ],
+    "top5cut": 2000.0,
+    "bot5cut": 120000.0
+   }
+  },
+  {
+   "key": "ml",
+   "label": "ML",
+   "colors": {
+    "bar": "#E15759",
+    "card": "#FBEBEB",
+    "hdrbar": "#F2B3B4",
+    "hdrtext": "#833234"
+   },
+   "facts": {
+    "total": 30000.0,
+    "pct_of_total": 4,
+    "n_entities": 4,
+    "over_thresh": 0,
+    "split_a_pct": null,
+    "split_b_pct": null,
+    "top5": [
+     [
+      "Lambda",
+      15000.0
+     ],
+     [
+      "Snowflake",
+      5000.0
+     ],
+     [
+      "Vault",
+      5000.0
+     ],
+     [
+      "Postgres",
+      5000.0
+     ]
+    ],
+    "hi": [
+     "Lambda",
+     15000.0
+    ],
+    "lo": [
+     "Postgres",
+     5000.0
+    ],
+    "top5cut": 5000.0,
+    "bot5cut": 15000.0
+   }
+  }
+ ],
+ "text": {
+  "entity_plural": "Services",
+  "most_hdr": "The Most Impacted Services",
+  "strip_hdr": "Monthly Cost by Service",
+  "rail_most_hdr": "Most Impacted",
+  "hdr_title": "## Monthly Cost by Team",
+  "share_name": "Monthly Cost"
+ }
+}
