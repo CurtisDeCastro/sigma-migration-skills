@@ -122,8 +122,33 @@ def main():
             frac = sum(1 for v in mvals if v > thr) / n
             reasons.append(f"threshold={int(thr)} (.twb '> N'; flags {frac:.0%} of {entity}s)")
 
-    applies = bool(cat and entity and measure)
-    conf = "high" if (cat and entity and measure and rate and (palette_members)) else "medium" if applies else "low"
+    # REPEATED-CONTAINER GATE (source-side): the composition only applies when the
+    # .twb actually lays out a container repeated per category member — otherwise
+    # we'd be imposing a foreign card-trellis on a dashboard that isn't one (e.g.
+    # Superstore). Sigma's spec has no repeat primitive, so this is purely a source
+    # signal; the emitter later materializes N explicit containers. Detected via
+    # category-member names recurring across dashboard zone names.
+    repeated = []
+    if cat and xml:
+        zblock = re.search(r"<dashboards>.*?</dashboards>", xml, re.S)
+        znames = re.findall(r"<zone\b[^>]*\bname='([^']*)'", zblock.group(0) if zblock else "")
+        for mbr in {r[cat] for r in rows}:
+            hits = sum(1 for zn in znames if re.search(r"\b" + re.escape(mbr) + r"\b", zn, re.I))
+            if hits >= 2:                       # member recurs across zones = a repeated card
+                repeated.append(mbr)
+    n_members = len({r[cat] for r in rows}) if cat else 0
+    has_repeat = cat and n_members >= 2 and len(repeated) >= (n_members + 1) // 2
+    if cat:
+        reasons.append(f"repeated-container: {len(repeated)}/{n_members} members recur in .twb zone "
+                       f"names {sorted(repeated)} -> {'DETECTED' if has_repeat else 'NOT a card-trellis'}")
+
+    # Applies ONLY if the source is genuinely a repeated-per-category card design.
+    # (No .twb / data-only mode cannot confirm this, so it does NOT auto-apply.)
+    applies = bool(cat and entity and measure and has_repeat)
+    if cat and entity and measure and not has_repeat:
+        reasons.append("→ data shape fits, but the source is NOT a repeated-per-category "
+                       "card layout — route to the standard (non-composition) build")
+    conf = "high" if (applies and rate and palette_members) else "medium" if applies else "low"
 
     print(f"composition applies: {applies}  (confidence: {conf})")
     for r in reasons:

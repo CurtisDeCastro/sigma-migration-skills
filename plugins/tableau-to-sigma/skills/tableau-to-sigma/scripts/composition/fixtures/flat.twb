@@ -1,0 +1,6 @@
+<?xml version='1.0'?>
+<workbook>
+ <dashboards><dashboard name='D'><zones>
+   <zone name='Overview'/><zone name='Sales Trend'/><zone name='Product Detail'/><zone name='Map'/>
+ </zones></dashboard></dashboards>
+</workbook>

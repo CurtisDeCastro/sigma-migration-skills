@@ -1,5 +1,25 @@
 # Composition stage (B1/B2/C2/D1) — repeated per-category cards
 
+## Applicability (read first)
+
+This stage reproduces **one specific source design**: a Tableau dashboard that lays
+out a **container repeated per category member** (the four region cards in the
+Job-Loss benchmark — `South Container`, `West Container`, … in the `.twb`, each with
+the same children). It is **not** a general design reconstructor. `compose-auto`
+only fires when `detect-composition-signal` finds that repeated container **in the
+source `.twb` zone tree** — a dashboard whose data merely has a category+entity+measure
+(e.g. Superstore) correctly routes to the standard build instead of getting this
+layout imposed on it. Sigma's spec has **no repeated-container primitive**, so the
+repeat is detected source-side and the emitter materializes N *explicit* GridContainers.
+
+**Current honest limit:** when it applies, the card's *children* (KPI + %-annotation +
+Top-N bar + strip) and the rail are still modeled on the Job-Loss source structure
+rather than derived per-dashboard from the matched container's own children. Deriving
+those from the source is the open follow-up; until then, treat this as faithful for
+the Job-Loss-class card-trellis and verify any new card design by eye.
+
+
+
 The data-correctness layer (right numbers, right chart kind, parity gate) doesn't
 reconstruct a design-heavy dashboard's *composition*. This stage does: it detects a
 **container repeated per category member** (the four region columns in the Job-Loss

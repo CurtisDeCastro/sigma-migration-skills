@@ -1,0 +1,8 @@
+<?xml version='1.0'?>
+<workbook>
+ <style><map to='#35BDA8'><bucket>&quot;South&quot;</bucket></map><map to='#EC5FA0'><bucket>&quot;West&quot;</bucket></map></style>
+ <dashboards><dashboard name='D'><zones>
+   <zone name='South Container'/><zone name='South Sales'/><zone name='Top - South'/>
+   <zone name='West Container'/><zone name='West Sales'/><zone name='Top - West'/>
+ </zones></dashboard></dashboards>
+</workbook>
