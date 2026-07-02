@@ -25,8 +25,11 @@ ap.add_argument("--out-layout")
 A = ap.parse_args()
 CFG = json.load(open(A.config))
 
-DM_ID = CFG["dm_id"]
-FACT_EID = CFG["state_fact_eid"]
+SOURCE_KIND = CFG.get("source_kind", "data-model")   # data-model | warehouse-table
+DM_ID = CFG.get("dm_id")
+FACT_EID = CFG.get("state_fact_eid")
+CONN_ID = CFG.get("connection_id")
+PATH = CFG.get("path")                                # [DB, SCHEMA, TABLE] for warehouse-table
 FOLDER_ID = CFG["folder_id"]
 CAT_SCHEME = CFG["cat_scheme"]
 REGIONS = CFG["regions"]                       # order == card order (by measure desc)
@@ -34,7 +37,9 @@ NAT = CFG["national"]
 GRAND = CFG["grand"]
 F = CFG["fields"]                              # role -> {name, src}
 SRC = CFG.get("source_name", "Master")         # workbook table element name
-FACT = CFG.get("fact_name", "Fact")            # DM element name (formula prefix)
+# formula prefix for the master table's own columns: the DM element name
+# (data-model) or the warehouse table name = last path segment (warehouse-table)
+FACT = PATH[-1] if SOURCE_KIND == "warehouse-table" else CFG.get("fact_name", "Fact")
 THRESH = CFG.get("threshold")
 TXT = CFG.get("text", {})
 HAS_SPLIT = "split_a" in F and "split_b" in F
@@ -183,10 +188,12 @@ if HAS_SPLIT:
 if THRESH is not None:
     mcols.append({"id": "m-over", "name": "Over Threshold",
                   "formula": f'[{FACT}/{F["measure"]["src"]}] > {int(THRESH)}'})
+msource = ({"kind": "warehouse-table", "connectionId": CONN_ID, "path": PATH}
+           if SOURCE_KIND == "warehouse-table"
+           else {"kind": "data-model", "dataModelId": DM_ID, "elementId": FACT_EID})
 state_master = {
     "id": "master", "kind": "table", "name": SRC, "visibleAsSource": False,
-    "source": {"kind": "data-model", "dataModelId": DM_ID, "elementId": FACT_EID},
-    "columns": mcols, "order": [c["id"] for c in mcols],
+    "source": msource, "columns": mcols, "order": [c["id"] for c in mcols],
 }
 
 # ---- left rail + header (prose from config.text, with sensible defaults) ----
@@ -274,6 +281,13 @@ main_elements = list(rail_and_header)
 for rg in REGIONS:
     main_elements += card_elements(rg)
 
+# Empty-body text elements render as error tiles (found on the cold-run cloud
+# dashboard where no --text-overrides were supplied). Drop them from both the
+# element list and the layout so the slot is simply absent, not broken.
+DROP = {e["id"] for e in main_elements
+        if e["kind"] == "text" and not (e.get("body") or "").strip()}
+main_elements = [e for e in main_elements if e["id"] not in DROP]
+
 # --- layout: 24-col grid, N cards left->right across the freed rail width ---
 n = len(REGIONS)
 CARD_START = 7
@@ -287,13 +301,15 @@ for i, rg in enumerate(REGIONS):
 
 
 def L(eid, c1, c2, r1, r2):
+    if eid in DROP:            # dropped empty-text element — omit its layout slot
+        return None
     return f'  <LayoutElement elementId="{eid}" gridColumn="{c1} / {c2}" gridRow="{r1} / {r2}"/>'
 
 
 def GC(eid, c1, c2, r1, r2, inner):
     return (f'  <GridContainer elementId="{eid}" type="grid" gridColumn="{c1} / {c2}" gridRow="{r1} / {r2}" '
             f'gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto">\n'
-            + "\n".join(inner) + '\n  </GridContainer>')
+            + "\n".join(x for x in inner if x) + '\n  </GridContainer>')
 
 
 control_row = [L("legend-key", 7, 8, 3, 6)]
@@ -324,7 +340,8 @@ for rg in REGIONS:
         L(f"reg-{k}-strip", 1, 25, 26, 40),
     ]))
 lay.append("</Page>")
-data_lay = ('<Page type="grid" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto" id="page-data">\n'
+lay = [x for x in lay if x]            # drop omitted (empty-text) layout slots
+data_lay =('<Page type="grid" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto" id="page-data">\n'
             '  <LayoutElement elementId="master" gridColumn="1 / 25" gridRow="1 / 11"/>\n</Page>')
 layout_xml = '<?xml version="1.0" encoding="utf-8"?>\n' + "\n".join(lay) + "\n" + data_lay
 

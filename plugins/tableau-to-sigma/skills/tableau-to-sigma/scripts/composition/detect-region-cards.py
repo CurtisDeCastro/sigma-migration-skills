@@ -83,7 +83,9 @@ def main():
     ap.add_argument("--twb", help="source .twb (for palette/text extraction). "
                                   "Omit for data-only mode: default palette + generic prose.")
     ap.add_argument("--master-csv", required=True)
-    ap.add_argument("--dm-ids", required=True)
+    ap.add_argument("--dm-ids", help="DM id map (data-model source). Omit if using --connection-id/--path.")
+    ap.add_argument("--connection-id", help="warehouse-table source: connection uuid")
+    ap.add_argument("--path", help="warehouse-table source: DB,SCHEMA,TABLE (comma-separated)")
     ap.add_argument("--category", required=True)
     ap.add_argument("--entity", required=True)
     ap.add_argument("--measure", required=True)
@@ -119,8 +121,12 @@ def main():
     for i, m in enumerate(members):
         base_pal.setdefault(m, DEFAULT_SCHEME[i % len(DEFAULT_SCHEME)])
 
-    dm = json.load(open(a.dm_ids))
-    dm_id, fact_eid = dm["dataModelId"], dm["pages"][0]["elements"][0]["id"]
+    warehouse = bool(a.connection_id and a.path)
+    if warehouse:
+        dm_id = fact_eid = None
+    else:
+        dm = json.load(open(a.dm_ids))
+        dm_id, fact_eid = dm["dataModelId"], dm["pages"][0]["elements"][0]["id"]
     has_split = bool(a.split_a and a.split_b)
 
     regions = []
@@ -175,7 +181,10 @@ def main():
         text.update(json.load(open(a.text_overrides)))
 
     cfg = {
-        "dm_id": dm_id, "state_fact_eid": fact_eid, "folder_id": a.folder,
+        "source_kind": "warehouse-table" if warehouse else "data-model",
+        "dm_id": dm_id, "state_fact_eid": fact_eid,
+        "connection_id": a.connection_id, "path": (a.path.split(",") if warehouse else None),
+        "folder_id": a.folder,
         "wb_name": a.wb_name, "source_name": a.source_name, "fact_name": a.fact_name,
         "fields": fields, "threshold": thr, "cat_scheme": [base_pal.get(m, "#888888") for m in members],
         "grand": grand,
