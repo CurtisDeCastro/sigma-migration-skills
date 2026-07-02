@@ -2240,6 +2240,26 @@ def build_kpi_element(z, meta, mmap, opts, warnings, data_elements = [])
     'value'   => { 'columnId' => measure_col_id }
   }
 
+  # B3 (gap ubr5.7): a Tableau "big number" BAN scorecard (Shape/Circle mark with
+  # a <customized-label>, surfaced by the parser as kpi_value_font_size). Style
+  # the composite faithfully: use the label run as the KPI title, keep the
+  # SOURCE font size (fidelity mandate — prefer the .twb value over a hand-tuned
+  # one), and render the hero transparent so a container tint shows through
+  # (composition layer, styling.md). Non-BAN KPIs (Automatic-mark scorecards)
+  # carry no kpi_value_font_size and keep their default styling.
+  if z['kpi_value_font_size']
+    element['name'] = z['kpi_label'] if z['kpi_label'] && !z['kpi_label'].to_s.strip.empty?
+    element['value']['fontSize'] = z['kpi_value_font_size']
+    element['style'] = { 'padding' => 'none', 'backgroundColor' => '#00000000' }
+    # The BAN's side annotation (e.g. "40% of U.S. total") is driven by a dynamic
+    # Tableau calc token that can't be reproduced as static text; emitting the
+    # literal remainder ("of U.S. total") alone would mislead. Surface the gap.
+    if Array(z['kpi_annotation_runs']).any? { |r| r['ref'] }
+      warnings << "'#{cap}' KPI has a customized-label annotation with a dynamic value " \
+                  "(e.g. a '% of total' calc) — the annotation is NOT reproduced (needs a computed column)"
+    end
+  end
+
   # Param measure-picker: materialise the hidden passthrough sibling cols the
   # Switch's branches reference, and register the control for emission (n4pi.10).
   if pswitch_plan
