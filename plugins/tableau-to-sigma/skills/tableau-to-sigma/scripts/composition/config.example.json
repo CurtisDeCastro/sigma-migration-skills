@@ -1,0 +1,224 @@
+{
+ "dm_id": "a430348f-780c-4be9-97f0-24102088b93a",
+ "state_fact_eid": "Xiw5N01yR_",
+ "folder_id": "9ca9bf60-6a33-43dd-967d-1ba6352c54bb",
+ "wb_name": "Job Losses from Deportations \u2014 composed (skill B1)",
+ "category": "Region",
+ "measure": "Total Job Losses",
+ "cat_scheme": [
+  "#50cabe",
+  "#e8519a",
+  "#827bb8",
+  "#f28e2b"
+ ],
+ "grand": 5886000.0,
+ "national": {
+  "grand": 5886000.0,
+  "median": 48000.0,
+  "over100k": 14,
+  "n_states": 51
+ },
+ "has_worker_split": true,
+ "regions": [
+  {
+   "key": "south",
+   "label": "South",
+   "colors": {
+    "bar": "#50CABE",
+    "card": "#EAF9F7",
+    "hdrbar": "#B0E7E2",
+    "hdrtext": "#2E756E"
+   },
+   "facts": {
+    "total": 2380000.0,
+    "pct_of_us": 40,
+    "n_states": 17,
+    "over100k": 6,
+    "imm_pct": 56,
+    "us_pct": 44,
+    "top5": [
+     [
+      "Texas",
+      865000.0
+     ],
+     [
+      "Florida",
+      543000.0
+     ],
+     [
+      "North Carolina",
+      188000.0
+     ],
+     [
+      "Georgia",
+      184000.0
+     ],
+     [
+      "Virginia",
+      120000.0
+     ]
+    ],
+    "hi": [
+     "TX",
+     865000.0
+    ],
+    "lo": [
+     "WV",
+     4000.0
+    ],
+    "top5cut": 120000.0,
+    "bot5cut": 24000.0
+   }
+  },
+  {
+   "key": "west",
+   "label": "West",
+   "colors": {
+    "bar": "#E8519A",
+    "card": "#FCEAF3",
+    "hdrbar": "#F5B1D2",
+    "hdrtext": "#872F59"
+   },
+   "facts": {
+    "total": 1767000.0,
+    "pct_of_us": 30,
+    "n_states": 13,
+    "over100k": 3,
+    "imm_pct": 56,
+    "us_pct": 44,
+    "top5": [
+     [
+      "California",
+      1141000.0
+     ],
+     [
+      "Washington",
+      152000.0
+     ],
+     [
+      "Arizona",
+      141000.0
+     ],
+     [
+      "Colorado",
+      83000.0
+     ],
+     [
+      "Nevada",
+      72000.0
+     ]
+    ],
+    "hi": [
+     "CA",
+     1141000.0
+    ],
+    "lo": [
+     "WY",
+     2000.0
+    ],
+    "top5cut": 72000.0,
+    "bot5cut": 21000.0
+   }
+  },
+  {
+   "key": "northeast",
+   "label": "Northeast",
+   "colors": {
+    "bar": "#827BB8",
+    "card": "#F0EFF6",
+    "hdrbar": "#C7C4DF",
+    "hdrtext": "#4B476B"
+   },
+   "facts": {
+    "total": 1023000.0,
+    "pct_of_us": 17,
+    "n_states": 9,
+    "over100k": 4,
+    "imm_pct": 56,
+    "us_pct": 44,
+    "top5": [
+     [
+      "New York",
+      429000.0
+     ],
+     [
+      "New Jersey",
+      234000.0
+     ],
+     [
+      "Massachusetts",
+      148000.0
+     ],
+     [
+      "Pennsylvania",
+      115000.0
+     ],
+     [
+      "Connecticut",
+      61000.0
+     ]
+    ],
+    "hi": [
+     "NY",
+     429000.0
+    ],
+    "lo": [
+     "VT",
+     3000.0
+    ],
+    "top5cut": 61000.0,
+    "bot5cut": 61000.0
+   }
+  },
+  {
+   "key": "midwest",
+   "label": "Midwest",
+   "colors": {
+    "bar": "#F28E2B",
+    "card": "#FDF1E6",
+    "hdrbar": "#F9CCA0",
+    "hdrtext": "#8C5219"
+   },
+   "facts": {
+    "total": 716000.0,
+    "pct_of_us": 12,
+    "n_states": 12,
+    "over100k": 1,
+    "imm_pct": 56,
+    "us_pct": 44,
+    "top5": [
+     [
+      "Illinois",
+      219000.0
+     ],
+     [
+      "Ohio",
+      84000.0
+     ],
+     [
+      "Michigan",
+      78000.0
+     ],
+     [
+      "Indiana",
+      73000.0
+     ],
+     [
+      "Minnesota",
+      69000.0
+     ]
+    ],
+    "hi": [
+     "IL",
+     219000.0
+    ],
+    "lo": [
+     "SD",
+     6000.0
+    ],
+    "top5cut": 69000.0,
+    "bot5cut": 36000.0
+   }
+  }
+ ]
+}
