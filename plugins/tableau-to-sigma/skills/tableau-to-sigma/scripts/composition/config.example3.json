@@ -1,0 +1,262 @@
+{
+ "source_kind": "warehouse-table",
+ "dm_id": null,
+ "state_fact_eid": null,
+ "connection_id": "cb2f5180-641f-47bd-8efa-da9d590d855a",
+ "path": [
+  "CSA",
+  "TJ",
+  "COMPO_SUPERSTORE"
+ ],
+ "folder_id": "9ca9bf60-6a33-43dd-967d-1ba6352c54bb",
+ "wb_name": "Superstore Sales by Region (real-.twb cold run)",
+ "source_name": "Store Master",
+ "fact_name": "Fact",
+ "fields": {
+  "entity": {
+   "name": "State",
+   "src": "State"
+  },
+  "category": {
+   "name": "Region",
+   "src": "Region"
+  },
+  "measure": {
+   "name": "Sales",
+   "src": "Sales"
+  },
+  "rate": {
+   "name": "Discount",
+   "src": "Discount"
+  },
+  "secondary": {
+   "name": "Profit",
+   "src": "Profit"
+  }
+ },
+ "threshold": null,
+ "cat_scheme": [
+  "#4E79A7",
+  "#F28E2B",
+  "#59A14F",
+  "#E15759"
+ ],
+ "grand": 2326534.0,
+ "national": {
+  "grand": 2326534.0,
+  "median": 13384.0,
+  "over_thresh": null,
+  "n_entities": 59
+ },
+ "regions": [
+  {
+   "key": "west",
+   "label": "West",
+   "colors": {
+    "bar": "#4E79A7",
+    "card": "#EAEFF4",
+    "hdrbar": "#AFC3D7",
+    "hdrtext": "#2D4661"
+   },
+   "facts": {
+    "total": 739812.0,
+    "pct_of_total": 32,
+    "n_entities": 14,
+    "over_thresh": null,
+    "split_a_pct": null,
+    "split_b_pct": null,
+    "top5": [
+     [
+      "California",
+      457688.0
+     ],
+     [
+      "Washington",
+      138641.0
+     ],
+     [
+      "Arizona",
+      35282.0
+     ],
+     [
+      "Colorado",
+      32108.0
+     ],
+     [
+      "Oregon",
+      17431.0
+     ]
+    ],
+    "hi": [
+     "California",
+     457688.0
+    ],
+    "lo": [
+     "Saskatchewan",
+     132.0
+    ],
+    "top5cut": 17431.0,
+    "bot5cut": 4784.0
+   }
+  },
+  {
+   "key": "east",
+   "label": "East",
+   "colors": {
+    "bar": "#F28E2B",
+    "card": "#FDF1E6",
+    "hdrbar": "#F9CCA0",
+    "hdrtext": "#8C5219"
+   },
+   "facts": {
+    "total": 691828.0,
+    "pct_of_total": 30,
+    "n_entities": 20,
+    "over_thresh": null,
+    "split_a_pct": null,
+    "split_b_pct": null,
+    "top5": [
+     [
+      "New York",
+      310876.0
+     ],
+     [
+      "Pennsylvania",
+      116512.0
+     ],
+     [
+      "Ohio",
+      78258.0
+     ],
+     [
+      "New Jersey",
+      35764.0
+     ],
+     [
+      "Massachusetts",
+      28634.0
+     ]
+    ],
+    "hi": [
+     "New York",
+     310876.0
+    ],
+    "lo": [
+     "New Brunswick",
+     226.0
+    ],
+    "top5cut": 28634.0,
+    "bot5cut": 1210.0
+   }
+  },
+  {
+   "key": "central",
+   "label": "Central",
+   "colors": {
+    "bar": "#59A14F",
+    "card": "#EBF4EA",
+    "hdrbar": "#B4D5B0",
+    "hdrtext": "#345D2E"
+   },
+   "facts": {
+    "total": 503171.0,
+    "pct_of_total": 22,
+    "n_entities": 14,
+    "over_thresh": null,
+    "split_a_pct": null,
+    "split_b_pct": null,
+    "top5": [
+     [
+      "Texas",
+      170188.0
+     ],
+     [
+      "Illinois",
+      80166.0
+     ],
+     [
+      "Michigan",
+      76270.0
+     ],
+     [
+      "Indiana",
+      53555.0
+     ],
+     [
+      "Wisconsin",
+      32115.0
+     ]
+    ],
+    "hi": [
+     "Texas",
+     170188.0
+    ],
+    "lo": [
+     "North Dakota",
+     920.0
+    ],
+    "top5cut": 32115.0,
+    "bot5cut": 4580.0
+   }
+  },
+  {
+   "key": "south",
+   "label": "South",
+   "colors": {
+    "bar": "#E15759",
+    "card": "#FBEBEB",
+    "hdrbar": "#F2B3B4",
+    "hdrtext": "#833234"
+   },
+   "facts": {
+    "total": 391723.0,
+    "pct_of_total": 17,
+    "n_entities": 11,
+    "over_thresh": null,
+    "split_a_pct": null,
+    "split_b_pct": null,
+    "top5": [
+     [
+      "Florida",
+      89474.0
+     ],
+     [
+      "Virginia",
+      70637.0
+     ],
+     [
+      "North Carolina",
+      55603.0
+     ],
+     [
+      "Georgia",
+      49096.0
+     ],
+     [
+      "Kentucky",
+      36592.0
+     ]
+    ],
+    "hi": [
+     "Florida",
+     89474.0
+    ],
+    "lo": [
+     "South Carolina",
+     8482.0
+    ],
+    "top5cut": 36592.0,
+    "bot5cut": 19511.0
+   }
+  }
+ ],
+ "text": {
+  "rail_scatter_hdr": "Sales Performance vs Target",
+  "entity_plural": "States",
+  "most_hdr": "The Most Impacted States",
+  "strip_hdr": "Sales by State",
+  "rail_most_hdr": "Most Impacted",
+  "hdr_title": "## Sales by Region",
+  "share_name": "Sales"
+ }
+}
