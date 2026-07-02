@@ -220,6 +220,36 @@ def decollide_rects(rects, my_rows)
   end
 end
 
+# Non-destructive greedy overlap resolver for a set of grid rects at ONE level
+# (used for page top-level placement). decollide_rects re-slices ALL siblings into
+# equal row bands the instant any pair collides — correct for a handful of floated
+# text zones inside a container, but CATASTROPHIC at the page level where a single
+# full-page tiled-root container coexists with the small zones Tableau floats on
+# top of it: restacking would crush the whole dashboard into 1/N of the height.
+# This instead PRESERVES every rect that doesn't collide and pushes only a
+# colliding rect straight down (columns kept) until it clears everything already
+# placed. Process order = document order, so the big structural zones (the tiled
+# root, emitted first) stay put and the floating pills/params/legends drop below —
+# a valid, non-overlapping page instead of put-layout's reject-to-vertical-stack.
+# rects: [[c0,c1,r0,r1], ...]; returns rects in the SAME order.
+def resolve_overlaps_greedy(rects)
+  overlap = ->(a, b) { a[0] < b[1] && b[0] < a[1] && a[2] < b[3] && b[2] < a[3] }
+  placed = []
+  rects.map do |r|
+    c0, c1, r0, r1 = r
+    h = [r1 - r0, 1].max
+    loop do
+      hits = placed.select { |p| overlap.call([c0, c1, r0, r1], p) }
+      break if hits.empty?
+      r0 = hits.map { |p| p[3] }.max # drop below the lowest colliding bottom edge
+      r1 = r0 + h
+    end
+    nr = [c0, c1, r0, r1]
+    placed << nr
+    nr
+  end
+end
+
 def emit_node(node, c0, c1, r0, r1, ctx)
   if node['kind'] == 'container'
     kids = node['children'] || []
@@ -307,11 +337,23 @@ def build_page_from_tree(dashboard, page, opts)
     children << header_band_xml(hdr_id, txt_id)
   end
 
-  # Top-level zones → page children, shifted below the header band.
-  tree.each do |node|
+  # Top-level zones → page children, shifted below the header band. Tableau layers
+  # floating zones (parameter/stat pills, highlighters, legends) ON TOP of the
+  # tiled root container; Sigma's grid can't overlap, so we must resolve those
+  # collisions or put-layout rejects the ENTIRE page into a vertical stack (P0#2).
+  # Drop zones Sigma renders inline / omits BEFORE placing so they don't reserve
+  # dead rows or spurious collisions, compute every rect, then greedily push the
+  # (document-order-later) floaters below the tiled root — which is emitted first
+  # and thus preserved at full size.
+  drop_kinds = %w[spacer legend highlighter bitmap image blank]
+  top_nodes = tree.reject { |n| drop_kinds.include?(n['kind']) }
+  top_rects = top_nodes.map do |node|
     c0, c1, r0, r1 = place_in_parent(node, page_pseudo, body_rows)
-    r0 += HEADER_ROWS; r1 += HEADER_ROWS
-    xml = emit_node(node, c0, c1, r0, r1, ctx)
+    [c0, c1, r0 + HEADER_ROWS, r1 + HEADER_ROWS]
+  end
+  top_rects = resolve_overlaps_greedy(top_rects)
+  top_nodes.each_with_index do |node, i|
+    xml = emit_node(node, *top_rects[i], ctx)
     children << xml if xml
   end
 
