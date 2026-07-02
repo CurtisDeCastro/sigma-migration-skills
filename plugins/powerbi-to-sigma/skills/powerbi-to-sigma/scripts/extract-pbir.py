@@ -335,6 +335,17 @@ def _fillrule_measure(rule):
     return _expr_queryref(fld) if fld else None
 
 
+def _donut_label_style(visual):
+    """PBI pie/donut detail-label style (objects.labels[].properties.labelStyle),
+    e.g. 'Category, percent of total' / 'Data value'. Maps to Sigma donut
+    dataLabel.labelDisplay so a percent-of-total donut migrates as percent, not $."""
+    for item in (visual.get("objects", {}) or {}).get("labels", []):
+        ls = _literal(((item or {}).get("properties", {}) or {}).get("labelStyle"))
+        if ls:
+            return str(ls)
+    return None
+
+
 def _card_value_color(visual):
     """PBI card/multiRowCard value font color (objects.labels[].properties.color)
     -> hex, or None. Style fidelity: PBI cards show the value in the theme accent;
@@ -418,6 +429,8 @@ def extract(pbir_dir):
                 "formats": formats,
                 # bead n9u9: PBI data-label toggle (objects.labels show) — true/false/None
                 "data_labels": _obj_flag(visual, "labels"),
+                # pie/donut detail-label style -> Sigma donut dataLabel.labelDisplay
+                "label_style": _donut_label_style(visual),
                 # bead ry0n: PBI legend toggle (objects.legend show) — true/false/None
                 "legend": _obj_flag(visual, "legend"),
                 # bead (A) reference lines: PBI analytics-pane constant lines ->

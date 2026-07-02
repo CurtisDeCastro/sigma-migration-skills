@@ -1213,7 +1213,25 @@ def build_element(rec, fields, masters, extra_data = [])
     el['value'] = { 'id' => vcid }
     # value labels on pie/donut slices — honor an explicit PBI labels-off signal
     # (bead n9u9); default (nil/absent) keeps the labels shown as before.
-    el['dataLabel'] = { 'labels' => 'shown' } unless rec['data_labels'] == false
+    unless rec['data_labels'] == false
+      dl = { 'labels' => 'shown' }
+      # Style fidelity: map PBI's detail-label style -> Sigma donut labelDisplay,
+      # so a "percent of total" donut migrates as % (not raw $). Only emit when PBI
+      # named a style; absent -> value labels as before (no blind percent default).
+      ls = rec['label_style'].to_s.downcase
+      disp = if ls.include?('percent') && (ls.include?('category') || ls.include?('detail'))
+               'color-percent'
+             elsif ls.include?('percent')
+               'percent'
+             elsif ls.include?('category') && ls.include?('data value')
+               'color-value'
+             end
+      if disp
+        dl['labelDisplay'] = disp
+        dl['precision'] = 1 if disp.include?('percent')
+      end
+      el['dataLabel'] = dl
+    end
   when 'table'
     # A plain table with measure columns renders FLAT/ungrouped unless it has a
     # grouping whose `calculations` lists the measure col ids (bead 14w(f)).

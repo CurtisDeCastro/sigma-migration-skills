@@ -39,6 +39,13 @@ a single/multi-dimension grouped table is **re-expressed as a pivot-table**
 grandTotalFontWeight: bold, totalPosition: last}`. Ratio measures (`Sum/Sum`) total
 correctly because the pivot recomputes them at the total level (not a naive average).
 
+### 3b. Donut/pie label style (percent-of-total)
+PBI's pie/donut detail-label style (`objects.labels.labelStyle`, e.g. "Category,
+percent of total") is captured as `rec['label_style']` and mapped to the donut
+`dataLabel.labelDisplay` (`color-percent` / `percent` / `color-value`), with
+`precision: 1` for percent modes — so a percent-of-total donut migrates as `%`, not
+raw `$`. Only emitted when PBI named a style (absent → value labels, as before).
+
 ### 4. Donut/pie null → `(Blank)` (color-order fix)
 PBI labels a null slice `(Blank)` and sorts it **first**, so its color lands on
 `scheme[0]`. Sigma sorts null **last**, which misaligns the whole palette on
