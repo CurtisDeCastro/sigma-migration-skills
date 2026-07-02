@@ -1,0 +1,269 @@
+{
+ "dm_id": "REPLACE_WITH_DM_ID",
+ "state_fact_eid": "REPLACE_WITH_FACT_ELEMENT_ID",
+ "folder_id": "REPLACE_WITH_FOLDER_ID",
+ "wb_name": "Job Losses from Deportations \u2014 composed (skill B1)",
+ "source_name": "State Master",
+ "fact_name": "State Fact",
+ "fields": {
+  "entity": {
+   "name": "State",
+   "src": "State"
+  },
+  "category": {
+   "name": "Region",
+   "src": "Region"
+  },
+  "measure": {
+   "name": "Total Job Losses",
+   "src": "Total Job Losses"
+  },
+  "rate": {
+   "name": "Job Loss Rate Pct",
+   "src": "Job Loss Rate Pct"
+  },
+  "secondary": {
+   "name": "Deportations",
+   "src": "Deportations"
+  },
+  "split_a": {
+   "name": "Immigrant",
+   "src": "Immigrant"
+  },
+  "split_b": {
+   "name": "US Born",
+   "src": "US Born"
+  }
+ },
+ "threshold": 100000.0,
+ "cat_scheme": [
+  "#50cabe",
+  "#e8519a",
+  "#827bb8",
+  "#f28e2b"
+ ],
+ "grand": 5886000.0,
+ "national": {
+  "grand": 5886000.0,
+  "median": 48000.0,
+  "over_thresh": 14,
+  "n_entities": 51
+ },
+ "regions": [
+  {
+   "key": "south",
+   "label": "South",
+   "colors": {
+    "bar": "#50CABE",
+    "card": "#EAF9F7",
+    "hdrbar": "#B0E7E2",
+    "hdrtext": "#2E756E"
+   },
+   "facts": {
+    "total": 2380000.0,
+    "pct_of_total": 40,
+    "n_entities": 17,
+    "over_thresh": 6,
+    "split_a_pct": 56,
+    "split_b_pct": 44,
+    "top5": [
+     [
+      "Texas",
+      865000.0
+     ],
+     [
+      "Florida",
+      543000.0
+     ],
+     [
+      "North Carolina",
+      188000.0
+     ],
+     [
+      "Georgia",
+      184000.0
+     ],
+     [
+      "Virginia",
+      120000.0
+     ]
+    ],
+    "hi": [
+     "TX",
+     865000.0
+    ],
+    "lo": [
+     "WV",
+     4000.0
+    ],
+    "top5cut": 120000.0,
+    "bot5cut": 24000.0
+   }
+  },
+  {
+   "key": "west",
+   "label": "West",
+   "colors": {
+    "bar": "#E8519A",
+    "card": "#FCEAF3",
+    "hdrbar": "#F5B1D2",
+    "hdrtext": "#872F59"
+   },
+   "facts": {
+    "total": 1767000.0,
+    "pct_of_total": 30,
+    "n_entities": 13,
+    "over_thresh": 3,
+    "split_a_pct": 56,
+    "split_b_pct": 44,
+    "top5": [
+     [
+      "California",
+      1141000.0
+     ],
+     [
+      "Washington",
+      152000.0
+     ],
+     [
+      "Arizona",
+      141000.0
+     ],
+     [
+      "Colorado",
+      83000.0
+     ],
+     [
+      "Nevada",
+      72000.0
+     ]
+    ],
+    "hi": [
+     "CA",
+     1141000.0
+    ],
+    "lo": [
+     "WY",
+     2000.0
+    ],
+    "top5cut": 72000.0,
+    "bot5cut": 21000.0
+   }
+  },
+  {
+   "key": "northeast",
+   "label": "Northeast",
+   "colors": {
+    "bar": "#827BB8",
+    "card": "#F0EFF6",
+    "hdrbar": "#C7C4DF",
+    "hdrtext": "#4B476B"
+   },
+   "facts": {
+    "total": 1023000.0,
+    "pct_of_total": 17,
+    "n_entities": 9,
+    "over_thresh": 4,
+    "split_a_pct": 56,
+    "split_b_pct": 44,
+    "top5": [
+     [
+      "New York",
+      429000.0
+     ],
+     [
+      "New Jersey",
+      234000.0
+     ],
+     [
+      "Massachusetts",
+      148000.0
+     ],
+     [
+      "Pennsylvania",
+      115000.0
+     ],
+     [
+      "Connecticut",
+      61000.0
+     ]
+    ],
+    "hi": [
+     "NY",
+     429000.0
+    ],
+    "lo": [
+     "VT",
+     3000.0
+    ],
+    "top5cut": 61000.0,
+    "bot5cut": 61000.0
+   }
+  },
+  {
+   "key": "midwest",
+   "label": "Midwest",
+   "colors": {
+    "bar": "#F28E2B",
+    "card": "#FDF1E6",
+    "hdrbar": "#F9CCA0",
+    "hdrtext": "#8C5219"
+   },
+   "facts": {
+    "total": 716000.0,
+    "pct_of_total": 12,
+    "n_entities": 12,
+    "over_thresh": 1,
+    "split_a_pct": 56,
+    "split_b_pct": 44,
+    "top5": [
+     [
+      "Illinois",
+      219000.0
+     ],
+     [
+      "Ohio",
+      84000.0
+     ],
+     [
+      "Michigan",
+      78000.0
+     ],
+     [
+      "Indiana",
+      73000.0
+     ],
+     [
+      "Minnesota",
+      69000.0
+     ]
+    ],
+    "hi": [
+     "IL",
+     219000.0
+    ],
+    "lo": [
+     "SD",
+     6000.0
+    ],
+    "top5cut": 69000.0,
+    "bot5cut": 36000.0
+   }
+  }
+ ],
+ "text": {
+  "rail_scatter_hdr": "Deportations vs Job Loss%\n<span style=\"color:#6B7280\">Select a state to filter numbers above \u00b7 Hover for full details</span>",
+  "pct_suffix": "of U.S. total",
+  "credit": "<span style=\"color:#9AA0A6\">Data: EPI.org  |  Design: @DatavizChimdi  |  Migrated from Tableau</span>",
+  "entity_plural": "States",
+  "most_hdr": "The Most Impacted States",
+  "strip_hdr": "Total Job Losses by State",
+  "rail_most_hdr": "Most Impacted\n<span style=\"color:#6B7280\">The Most Impacted states across the country are \u2026</span>",
+  "hdr_title": "## Job Losses by Region\n<span style=\"color:#6B7280\">Click circles in region titles to filter LHS</span>",
+  "share_name": "Job losses: total vs immigrant vs U.S.-born workers",
+  "title": "# Job Losses <span style=\"color:#2B2B2B; font-size: 20px\">from Deportations</span>\n<span style=\"color:#2B2B2B\">Estimating the job loss if 4 million immigrants are deported from the U.S. over 4 years</span>",
+  "kpi1_name": "Total Deportations",
+  "kpi1_ann": "<span style=\"color:#2B2B2B\">**Assumed** total over four years based on the proposed policy</span>",
+  "kpi2_ann": "<span style=\"color:#2B2B2B\">**Estimated** number of Total Job Losses resulting from the policy</span>"
+ }
+}
