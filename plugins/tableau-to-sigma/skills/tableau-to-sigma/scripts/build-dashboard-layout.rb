@@ -195,13 +195,39 @@ end
 # children are placed in the container's own 24-col internal grid; empty
 # containers (no resolvable children) are dropped. Appends new container spec
 # placeholders to ctx[:extra]; records placed element ids in ctx[:placed].
+# Resolve overlapping sibling placements within a container. Tableau floats text
+# objects (titles, captions, annotations) over/beside charts, so their derived
+# grid cells can overlap — and Sigma's put-layout REJECTS the whole layout on any
+# collision, dropping the page to a raw vertical stack. The banded path already
+# de-collides (lib/layout.rb decollide_bands); the container-tree path did not,
+# so a floated text zone could sink the entire layout (B4-emit regression).
+#
+# rects are [c0,c1,r0,r1] grid-line tuples, container-relative. NO-OP when the
+# children don't collide (clean source geometry — e.g. a KPI strip — is preserved
+# EXACTLY). Only when a collision exists do we re-flow: give every child an equal
+# vertical row slice (columns kept), which is collision-free by construction
+# (non-overlapping rows) and localized to the offending container — strictly
+# better than the previous whole-page stack fallback.
+def decollide_rects(rects, my_rows)
+  return rects if rects.length < 2
+  overlap = ->(a, b) { a[0] < b[1] && b[0] < a[1] && a[2] < b[3] && b[2] < a[3] }
+  return rects unless rects.combination(2).any? { |a, b| overlap.call(a, b) }
+  n = rects.length
+  rects.each_index.map do |i|
+    nr0 = 1 + (my_rows * i / n.to_f).round
+    nr1 = [1 + (my_rows * (i + 1) / n.to_f).round, nr0 + 1].max
+    [rects[i][0], rects[i][1], nr0, nr1] # keep columns, non-overlapping rows
+  end
+end
+
 def emit_node(node, c0, c1, r0, r1, ctx)
   if node['kind'] == 'container'
     kids = node['children'] || []
     my_rows = [r1 - r0, 2].max
-    inner = kids.map do |ch|
-      kc0, kc1, kr0, kr1 = place_in_parent(ch, node, my_rows)
-      emit_node(ch, kc0, kc1, kr0, kr1, ctx)
+    rects = kids.map { |ch| place_in_parent(ch, node, my_rows) }
+    rects = decollide_rects(rects, my_rows)
+    inner = kids.each_index.map do |i|
+      emit_node(kids[i], *rects[i], ctx)
     end.compact
     return nil if inner.empty?
     cid = "tc-#{ctx[:page_id]}-#{node['id']}"

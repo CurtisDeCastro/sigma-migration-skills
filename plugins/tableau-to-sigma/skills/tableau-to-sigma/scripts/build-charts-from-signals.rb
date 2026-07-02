@@ -2242,15 +2242,22 @@ def build_kpi_element(z, meta, mmap, opts, warnings, data_elements = [])
 
   # B3 (gap ubr5.7): a Tableau "big number" BAN scorecard (Shape/Circle mark with
   # a <customized-label>, surfaced by the parser as kpi_value_font_size). Style
-  # the composite faithfully: use the label run as the KPI title, keep the
+  # the composite faithfully: use the label run as the KPI title and keep the
   # SOURCE font size (fidelity mandate — prefer the .twb value over a hand-tuned
-  # one), and render the hero transparent so a container tint shows through
-  # (composition layer, styling.md). Non-BAN KPIs (Automatic-mark scorecards)
-  # carry no kpi_value_font_size and keep their default styling.
+  # one). Non-BAN KPIs (Automatic-mark scorecards) carry no kpi_value_font_size
+  # and keep their default styling.
+  #
+  # NOTE (transparency is a COMPOSITION decision, not an element one): a
+  # transparent hero (backgroundColor #00000000) only reads well when a container
+  # TINT sits behind it (the composed region-card look). Applied to a KPI that
+  # is NOT inside a tinted container it strips the default card and the number
+  # floats naked on the canvas — a regression vs the plain KPI card. The element
+  # builder can't see its container, so it must NOT force transparency here; the
+  # composition stage (B1/B2 region cards) sets it when it actually places a KPI
+  # into a tint. So we set label + fontSize only and leave the default card.
   if z['kpi_value_font_size']
     element['name'] = z['kpi_label'] if z['kpi_label'] && !z['kpi_label'].to_s.strip.empty?
     element['value']['fontSize'] = z['kpi_value_font_size']
-    element['style'] = { 'padding' => 'none', 'backgroundColor' => '#00000000' }
     # The BAN's side annotation (e.g. "40% of U.S. total") is driven by a dynamic
     # Tableau calc token that can't be reproduced as static text; emitting the
     # literal remainder ("of U.S. total") alone would mislead. Surface the gap.
@@ -3756,7 +3763,11 @@ def text_body_from_runs(runs, align: nil, bg: nil)
       next '' if raw.empty?
       next raw if raw.strip.empty? # whitespace spacer → literal (keeps run spacing)
       esc = raw.gsub('&', '&amp;').gsub('<', '&lt;').gsub('>', '&gt;')
-      esc = "**#{esc}**" if r['bold']
+      # Bold markers must hug the text — markdown won't bold "** Rank**" (leading
+      # space inside the **). Keep any leading/trailing whitespace OUTSIDE.
+      if r['bold'] && (mm = esc.match(/\A(\s*)(.*?)(\s*)\z/m)) && !mm[2].empty?
+        esc = "#{mm[1]}**#{mm[2]}**#{mm[3]}"
+      end
       styles = []
       styles << "color: #{r['color']}" if r['color']
       styles << "font-size: #{r['font_size']}px" if r['font_size']
@@ -3775,7 +3786,16 @@ end
 auto_title = nil
 if opts[:title].nil?
   layout.each do |dash|
-    next unless dash['zones'].any? { |z| %w[title text].include?(z['kind']) && (z['y_pct'] || 100) < 10 }
+    top = dash['zones'].select { |z| %w[title text].include?(z['kind']) && (z['y_pct'] || 100) < 10 }
+    next if top.empty?
+    # B4 (gap ubr5.8): a top text/title zone that carries run-level formatting
+    # is the dashboard's OWN hero title — it is emitted faithfully as a styled
+    # `text-<id>` element (black-on-canvas, at its position). Do NOT ALSO
+    # synthesize the white dashboard-name title here: the two double up, and the
+    # synthetic one (white, meant for the dark header band) renders invisibly
+    # over a light canvas when the composed layout has no dark band. Only
+    # synthesize when the top zone is a BARE title with no styled runs for B4.
+    next if top.any? { |z| z['text_runs'] }
     auto_title = dash['dashboard']
     break
   end
