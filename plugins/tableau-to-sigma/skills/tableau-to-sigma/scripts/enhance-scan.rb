@@ -681,6 +681,33 @@ end
 
 # ---------------------------------------------------------------------------
 # Emit.
+# ── fidelity-polish: section-band containers ───────────────────────────────
+# A flat card grid (no row-band GridContainers beyond an optional header) reads
+# as an undifferentiated wall of tiles. Phase-E apply's ensure_banded! regroups a
+# page into header + row-band section containers (SigmaLayout.banded_page) — the
+# sectioned, source-tool-like look. Propose it per content page whose layout is
+# flat. Low risk: banding is a layout regroup only; parity is unchanged.
+layout_xml_all = spec['layout'].to_s
+pages.each do |pg|
+  pid = pg['id']
+  next if pid == 'page-data' # hidden source/master page
+  content = (pg['elements'] || []).reject { |e| e['kind'] == 'container' }
+  next if content.size < 3
+  blk = layout_xml_all[/<Page\b[^>]*\bid="#{Regexp.escape(pid)}"[^>]*>.*?<\/Page>/m].to_s
+  next if blk.scan('<GridContainer').size >= 2 # already has section bands (header + >=1 band)
+  candidates << {
+    'id' => "layout-section-bands-#{pid}",
+    'category' => 'fidelity-polish',
+    'evidence' => "Page '#{pg['name']}' lays out #{content.size} elements in a flat grid " \
+                  "(#{blk.scan('<GridContainer').size} container(s)) — no section bands.",
+    'proposed' => 'Regroup the page into a header + row-band section containers ' \
+                  '(SigmaLayout banded layout) for a sectioned, source-tool-like look.',
+    'risk' => 'low',
+    'verdict_hint' => 'apply',
+    'patch' => { 'op' => 'regroup_banded', 'page_id' => pid }
+  }
+end
+
 # ---------------------------------------------------------------------------
 out = {
   'workbook_id' => WB,
