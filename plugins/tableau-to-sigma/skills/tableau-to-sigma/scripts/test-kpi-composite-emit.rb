@@ -103,8 +103,12 @@ check(kpi && kpi.dig('value', 'fontSize') == 26,
       "value.fontSize = SOURCE BAN font size 26 (got #{kpi && kpi.dig('value', 'fontSize').inspect})", fails)
 check(kpi && kpi.dig('value', 'columnId'),
       'value still carries columnId (kpi-chart contract)', fails)
-check(kpi && kpi.dig('style', 'backgroundColor') == '#00000000' && kpi.dig('style', 'padding') == 'none',
-      "KPI hero is transparent (style backgroundColor #00000000 + padding none) (got #{kpi && kpi['style'].inspect})", fails)
+# Transparency is a COMPOSITION decision (only reads well over a container tint),
+# so the element builder must NOT force it — the KPI keeps its default card until
+# the composition stage (B1/B2) places it in a tint. A naked transparent KPI on
+# the canvas was the regression we are fixing.
+check(kpi && kpi['style'].nil?,
+      "KPI keeps its DEFAULT card — no forced transparent style at the element level (got #{kpi && kpi['style'].inspect})", fails)
 check(build_log.include?('annotation is NOT reproduced'),
       'builder WARNs the dynamic-value annotation is not reproduced', fails)
 

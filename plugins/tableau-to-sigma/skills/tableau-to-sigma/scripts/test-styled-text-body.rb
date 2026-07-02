@@ -52,6 +52,11 @@ check(b.include?('**Job Losses**</span> <span style="font-size: 12px">from Depor
 check(b.split("\n\n").length == 2 && b.split("\n\n").last.include?('Estimating'),
       'hard-break run splits body into two paragraphs (\n\n)', fails)
 
+# ---- 4b. bold markers hug the text — leading/trailing space stays OUTSIDE --
+# (markdown won't bold "** Rank**"; the space must be outside the **).
+b = text_body_from_runs([{ 'text' => ' Rank', 'bold' => true }])
+check(b == ' **Rank**', "bold run with a leading space → ' **Rank**' not '** Rank**' (got #{b.inspect})", fails)
+
 # ---- 5. HTML in run text is escaped (can't inject markup) ------------------
 b = text_body_from_runs([{ 'text' => 'a < b & c > d' }])
 check(b == 'a &lt; b &amp; c &gt; d', "raw <, &, > escaped (got #{b.inspect})", fails)
