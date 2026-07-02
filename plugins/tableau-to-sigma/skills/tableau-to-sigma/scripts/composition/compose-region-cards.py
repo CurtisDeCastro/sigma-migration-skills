@@ -2,16 +2,17 @@
 """compose-region-cards.py — the EMIT half of the composition stage (B1+B2+C2+D1).
 
 Consumes the config produced by `detect-region-cards.py` and stamps a full
-composed workbook spec (elements + embedded grid layout): N tinted GridContainer
-cards (one per detected category member), each stacking a transparent hero KPI +
-%-of-total + worker-split/extremes/count annotations + a Top/Bottom-N bar +
+composed workbook spec (elements + embedded grid layout): one tinted GridContainer
+card per detected category member, each stacking a transparent hero KPI +
+%-of-total + optional worker-split/extremes/count annotations + a Top/Bottom-N bar +
 a threshold strip; plus a left rail and a wired control row.
 
-Everything data-bearing (category members, palette, facts, cutoffs, ids) comes
-from the config — nothing about this dashboard is hardcoded here. Wired controls:
-  * cshare  — 3-way measure switch Total/Immigrant/U.S.-born (chart-measure Switch)
-  * crank   — Most/Least Impacted (control-conditional cutoff boolean; window-free)
-  * cmedian — Show/Hide median reference line (refMarks with conditional formula)
+NOTHING about a specific dashboard is hardcoded here — column references, the
+measure, the threshold, the prose, and the palette all come from the config's
+`fields` / `text` / `threshold` blocks (see config.example.json). Wired controls:
+  * cshare  — measure switch Total/split_a/split_b (chart-measure Switch)   [if a split exists]
+  * crank   — Most/Least via control-conditional cutoff boolean (window-free)
+  * cmedian — Show/Hide median reference line (refMarks conditional formula)
 
 Usage: compose-region-cards.py --config config.json --out-spec wb.json [--out-layout layout.xml]
 """
@@ -25,22 +26,40 @@ A = ap.parse_args()
 CFG = json.load(open(A.config))
 
 DM_ID = CFG["dm_id"]
-STATE_FACT_EID = CFG["state_fact_eid"]
+FACT_EID = CFG["state_fact_eid"]
 FOLDER_ID = CFG["folder_id"]
 CAT_SCHEME = CFG["cat_scheme"]
 REGIONS = CFG["regions"]                       # order == card order (by measure desc)
 NAT = CFG["national"]
 GRAND = CFG["grand"]
-HAS_SPLIT = CFG.get("has_worker_split", False)
+F = CFG["fields"]                              # role -> {name, src}
+SRC = CFG.get("source_name", "Master")         # workbook table element name
+FACT = CFG.get("fact_name", "Fact")            # DM element name (formula prefix)
+THRESH = CFG.get("threshold")
+TXT = CFG.get("text", {})
+HAS_SPLIT = "split_a" in F and "split_b" in F
+HAS_SECONDARY = "secondary" in F               # e.g. Deportations for the rail scatter
 
-# --- E2: control-driven 3-way measure switch (the source "Type" param) ---
-_TOTAL = "Sum([State Master/Total Job Losses])"
-_IMM = ("Sum([State Master/Total Job Losses] * [State Master/Immigrant] / "
-        "([State Master/Immigrant] + [State Master/US Born]))")
-_USB = ("Sum([State Master/Total Job Losses] * [State Master/US Born] / "
-        "([State Master/Immigrant] + [State Master/US Born]))")
-MEASURE_SWITCH = (f'Switch([cshare], "Total", {_TOTAL}, '
-                  f'"Immigrant", {_IMM}, "U.S.-born", {_USB})') if HAS_SPLIT else _TOTAL
+
+def mref(role):                                # workbook ref to the master element column
+    return f'[{SRC}/{F[role]["name"]}]'
+
+
+def txt(key, default=""):
+    return TXT.get(key, default)
+
+
+# --- E2: control-driven measure switch (Total / split_a / split_b) ---
+_TOTAL = f'Sum({mref("measure")})'
+if HAS_SPLIT:
+    _A = f'Sum({mref("measure")} * {mref("split_a")} / ({mref("split_a")} + {mref("split_b")}))'
+    _B = f'Sum({mref("measure")} * {mref("split_b")} / ({mref("split_a")} + {mref("split_b")}))'
+    MEASURE_SWITCH = (f'Switch([cshare], "Total", {_TOTAL}, '
+                      f'"{F["split_a"]["name"]}", {_A}, "{F["split_b"]["name"]}", {_B})')
+else:
+    MEASURE_SWITCH = _TOTAL
+MEAS_NAME = F["measure"]["name"]
+THRESH_LABEL = txt("threshold_label", f"{int(THRESH):,}".replace(",", "K", 0) if THRESH else "")
 
 
 def hnum(v):
@@ -55,20 +74,32 @@ def hnum(v):
 def card_elements(rg):
     p, label, c, f = rg["key"], rg["label"], rg["colors"], rg["facts"]
     tot = f["total"]
-    top5 = [s for s, _ in f["top5"]]
     hi_ab, hi_v = f["hi"]; lo_ab, lo_v = f["lo"]
 
     sub_lines = []
-    if HAS_SPLIT and f.get("imm_pct") is not None:
-        immM, usM = hnum(tot * f["imm_pct"] / 100.0), hnum(tot * f["us_pct"] / 100.0)
-        sub_lines.append(f'<span style="color:#6B7280">{immM} | {f["imm_pct"]}% '
-                         f'&nbsp;&nbsp;&nbsp; {usM} | {f["us_pct"]}%</span>')
+    if HAS_SPLIT and f.get("split_a_pct") is not None:
+        aM, bM = hnum(tot * f["split_a_pct"] / 100.0), hnum(tot * f["split_b_pct"] / 100.0)
+        sub_lines.append(f'<span style="color:#6B7280">{aM} | {f["split_a_pct"]}% '
+                         f'&nbsp;&nbsp;&nbsp; {bM} | {f["split_b_pct"]}%</span>')
     sub_lines.append(
         f'<span style="background-color:{c["card"]}">&nbsp;'
         f'<span style="color:{c["hdrtext"]}">▲ {hi_ab} {hnum(hi_v)}</span> &nbsp;&nbsp; '
         f'<span style="color:#8A8A8A">▼ {lo_ab} {hnum(lo_v)}</span>&nbsp;</span>')
-    sub_lines.append(f'<span style="color:#9AA0A6">{f["n_states"]} States  |  '
-                     f'States > 100K : {f["over100k"]}</span>')
+    over_line = f'{f["n_entities"]} {txt("entity_plural", "items")}'
+    if THRESH is not None:
+        over_line += f'  |  &gt; {hnum(THRESH)} : {f["over_thresh"]}'
+    sub_lines.append(f'<span style="color:#9AA0A6">{over_line}</span>')
+
+    strip_cols = [
+        {"id": f"sp-{p}-en", "name": F["entity"]["name"], "formula": mref("entity")},
+        {"id": f"sp-{p}-cat", "name": F["category"]["name"], "formula": mref("category")},
+        {"id": f"sp-{p}-rate", "name": F["rate"]["name"], "formula": f'Sum({mref("rate")})'},
+        {"id": f"sp-{p}-m", "name": MEAS_NAME, "formula": _TOTAL,
+         "format": {"kind": "number", "formatString": ",.0f"}}]
+    strip_color = {"by": "single", "value": c["bar"]}
+    if THRESH is not None:
+        strip_cols.insert(2, {"id": f"sp-{p}-ov", "name": "Over Threshold", "formula": "[%s/Over Threshold]" % SRC})
+        strip_color = {"by": "category", "column": f"sp-{p}-ov", "scheme": [c["bar"], "#F2C037"]}
 
     return [
         {"id": f"hdrbar-{p}", "kind": "container",
@@ -77,162 +108,156 @@ def card_elements(rg):
          "body": f'## <span style="color:{c["hdrtext"]}">● {label}</span>'},
         {"id": f"reg-{p}", "kind": "container",
          "style": {"backgroundColor": c["card"], "borderRadius": "round"}},
-        {"id": f"reg-{p}-kpi", "kind": "kpi-chart", "name": "Total Job Losses",
-         "source": {"kind": "table", "elementId": "state-master"},
+        {"id": f"reg-{p}-kpi", "kind": "kpi-chart", "name": MEAS_NAME,
+         "source": {"kind": "table", "elementId": "master"},
          "columns": [
-             {"id": f"reg-{p}-kpi-v", "name": "Total Job Losses", "formula": MEASURE_SWITCH,
+             {"id": f"reg-{p}-kpi-v", "name": MEAS_NAME, "formula": MEASURE_SWITCH,
               "format": {"kind": "number", "formatString": ".2s"}},
-             {"id": f"reg-{p}-kpi-rg", "name": "Region", "formula": "[State Master/Region]"}],
+             {"id": f"reg-{p}-kpi-cat", "name": F["category"]["name"], "formula": mref("category")}],
          "value": {"columnId": f"reg-{p}-kpi-v", "fontSize": 44},
          "style": {"backgroundColor": "#00000000", "padding": "none"},
          "layout": {"anchor": "start"},
-         "filters": [{"id": f"reg-{p}-kpi-f", "columnId": f"reg-{p}-kpi-rg",
+         "filters": [{"id": f"reg-{p}-kpi-f", "columnId": f"reg-{p}-kpi-cat",
                       "kind": "list", "mode": "include", "values": [label]}]},
         {"id": f"reg-{p}-pct", "kind": "text", "verticalAlign": "middle",
-         "body": f'<span style="color:#2B2B2B">**{f["pct_of_us"]}%**</span> '
-                 f'<span style="color:#6B7280">of U.S. total</span>'},
+         "body": f'<span style="color:#2B2B2B">**{f["pct_of_total"]}%**</span> '
+                 f'<span style="color:#6B7280">{txt("pct_suffix", "of total")}</span>'},
         {"id": f"reg-{p}-sub", "kind": "text", "body": "\n\n".join(sub_lines)},
-        {"id": f"reg-{p}-mihdr", "kind": "text", "body": "### The Most Impacted States"},
+        {"id": f"reg-{p}-mihdr", "kind": "text", "body": "### " + txt("most_hdr", "Top")},
         {"id": f"reg-{p}-most", "kind": "bar-chart", "name": " ", "orientation": "horizontal",
          "style": {"backgroundColor": "#00000000"},
-         "source": {"kind": "table", "elementId": "state-master"},
+         "source": {"kind": "table", "elementId": "master"},
          "columns": [
-             {"id": f"rm-{p}-st", "name": "State", "formula": "[State Master/State]"},
-             {"id": f"rm-{p}-rg", "name": "Region", "formula": "[State Master/Region]"},
-             {"id": f"rm-{p}-tjl", "name": "Total Job Losses", "formula": MEASURE_SWITCH,
+             {"id": f"rm-{p}-en", "name": F["entity"]["name"], "formula": mref("entity")},
+             {"id": f"rm-{p}-cat", "name": F["category"]["name"], "formula": mref("category")},
+             {"id": f"rm-{p}-m", "name": MEAS_NAME, "formula": MEASURE_SWITCH,
               "format": {"kind": "number", "formatString": ".3~s"}},
              {"id": f"rm-{p}-sel", "name": "Rank Sel",
               "formula": (f'If([crank] = "Most Impacted", '
-                          f'Sum([State Master/Total Job Losses]) >= {int(f["top5cut"])}, '
-                          f'Sum([State Master/Total Job Losses]) <= {int(f["bot5cut"])})')}],
-         "xAxis": {"columnId": f"rm-{p}-st", "sort": {"by": f"rm-{p}-tjl", "direction": "descending"}},
-         "yAxis": {"columnIds": [f"rm-{p}-tjl"]},
+                          f'{_TOTAL} >= {int(f["top5cut"])}, {_TOTAL} <= {int(f["bot5cut"])})')}],
+         "xAxis": {"columnId": f"rm-{p}-en", "sort": {"by": f"rm-{p}-m", "direction": "descending"}},
+         "yAxis": {"columnIds": [f"rm-{p}-m"]},
          "color": {"by": "single", "value": c["bar"]},
          "legend": {"visibility": "hidden"}, "dataLabel": {"labels": "shown"},
          "filters": [
-             {"id": f"rm-{p}-rgf", "columnId": f"rm-{p}-rg", "kind": "list",
+             {"id": f"rm-{p}-catf", "columnId": f"rm-{p}-cat", "kind": "list",
               "mode": "include", "values": [label]},
              {"id": f"rm-{p}-self", "columnId": f"rm-{p}-sel", "kind": "list",
               "mode": "include", "values": [True]}]},
-        {"id": f"reg-{p}-sphdr", "kind": "text", "body": "### Total Job Losses by State"},
+        {"id": f"reg-{p}-sphdr", "kind": "text", "body": "### " + txt("strip_hdr", MEAS_NAME + " by " + F["entity"]["name"])},
         {"id": f"reg-{p}-strip", "kind": "scatter-chart", "name": " ",
          "style": {"backgroundColor": "#00000000"},
-         "source": {"kind": "table", "elementId": "state-master"},
-         "columns": [
-             {"id": f"sp-{p}-st", "name": "State", "formula": "[State Master/State]"},
-             {"id": f"sp-{p}-rg", "name": "Region", "formula": "[State Master/Region]"},
-             {"id": f"sp-{p}-ov", "name": "Over 100K", "formula": "[State Master/Over 100K]"},
-             {"id": f"sp-{p}-rate", "name": "Job Loss Rate %", "formula": "Sum([State Master/Job Loss Rate %])"},
-             {"id": f"sp-{p}-tjl", "name": "Total Job Losses", "formula": "Sum([State Master/Total Job Losses])",
-              "format": {"kind": "number", "formatString": ",.0f"}}],
-         "xAxis": {"columnId": f"sp-{p}-rate"}, "yAxis": {"columnIds": [f"sp-{p}-tjl"]},
-         "color": {"by": "category", "column": f"sp-{p}-ov", "scheme": [c["bar"], "#F2C037"]},
+         "source": {"kind": "table", "elementId": "master"},
+         "columns": strip_cols,
+         "xAxis": {"columnId": f"sp-{p}-rate"}, "yAxis": {"columnIds": [f"sp-{p}-m"]},
+         "color": strip_color,
          "legend": {"visibility": "hidden"},
          "refMarks": [{"type": "line", "axis": "series",
                        "value": {"type": "formula",
-                                 "formula": 'If([cmedian] = "Show", Median([State Master/Total Job Losses]), Null)'},
+                                 "formula": f'If([cmedian] = "Show", Median({mref("measure")}), Null)'},
                        "line": {"color": "#9AA0A6", "width": 1},
                        "label": {"visibility": "shown", "text": "Median"}}],
-         "filters": [{"id": f"sp-{p}-f", "columnId": f"sp-{p}-rg",
+         "filters": [{"id": f"sp-{p}-f", "columnId": f"sp-{p}-cat",
                       "kind": "list", "mode": "include", "values": [label]}]},
     ]
 
 
-# national top-5 states across all cards
+# national top-N entities across all cards (for the rail bar)
 all_top = []
 for rg in REGIONS:
     all_top += rg["facts"]["top5"]
 top5_nat = [s for s, _ in sorted(all_top, key=lambda x: -x[1])[:5]]
 
+# ---- master table element (built from the field role map) ----
+mcols = [
+    {"id": "m-entity", "name": F["entity"]["name"], "formula": f'[{FACT}/{F["entity"]["src"]}]'},
+    {"id": "m-cat", "name": F["category"]["name"], "formula": f'[{FACT}/{F["category"]["src"]}]'},
+    {"id": "m-meas", "name": F["measure"]["name"], "formula": f'[{FACT}/{F["measure"]["src"]}]'},
+    {"id": "m-rate", "name": F["rate"]["name"], "formula": f'[{FACT}/{F["rate"]["src"]}]'},
+]
+if HAS_SECONDARY:
+    mcols.append({"id": "m-sec", "name": F["secondary"]["name"], "formula": f'[{FACT}/{F["secondary"]["src"]}]'})
+if HAS_SPLIT:
+    mcols.append({"id": "m-sa", "name": F["split_a"]["name"], "formula": f'[{FACT}/{F["split_a"]["src"]}]'})
+    mcols.append({"id": "m-sb", "name": F["split_b"]["name"], "formula": f'[{FACT}/{F["split_b"]["src"]}]'})
+if THRESH is not None:
+    mcols.append({"id": "m-over", "name": "Over Threshold",
+                  "formula": f'[{FACT}/{F["measure"]["src"]}] > {int(THRESH)}'})
 state_master = {
-    "id": "state-master", "kind": "table", "name": "State Master", "visibleAsSource": False,
-    "source": {"kind": "data-model", "dataModelId": DM_ID, "elementId": STATE_FACT_EID},
-    "columns": [
-        {"id": "m-state", "name": "State", "formula": "[State Fact/State]"},
-        {"id": "m-region", "name": "Region", "formula": "[State Fact/Region]"},
-        {"id": "m-dep", "name": "Deportations", "formula": "[State Fact/Deportations]"},
-        {"id": "m-tjl", "name": "Total Job Losses", "formula": "[State Fact/Total Job Losses]"},
-        {"id": "m-rate", "name": "Job Loss Rate %", "formula": "[State Fact/Job Loss Rate Pct]"},
-        {"id": "m-imm", "name": "Immigrant", "formula": "[State Fact/Immigrant]"},
-        {"id": "m-usb", "name": "US Born", "formula": "[State Fact/US Born]"},
-        {"id": "m-over", "name": "Over 100K", "formula": "[State Fact/Total Job Losses] > 100000"},
-    ],
-    "order": ["m-state", "m-region", "m-dep", "m-tjl", "m-rate", "m-imm", "m-usb", "m-over"],
+    "id": "master", "kind": "table", "name": SRC, "visibleAsSource": False,
+    "source": {"kind": "data-model", "dataModelId": DM_ID, "elementId": FACT_EID},
+    "columns": mcols, "order": [c["id"] for c in mcols],
 }
 
+# ---- left rail + header (prose from config.text, with sensible defaults) ----
 rail_and_header = [
     {"id": "title-dots", "kind": "text",
      "body": " ".join(f'<span style="color:{s}">●</span>' for s in CAT_SCHEME)},
     {"id": "rail-title", "kind": "text",
-     "body": '# Job Losses <span style="color:#2B2B2B; font-size: 20px">from Deportations</span>\n'
-             '<span style="color:#2B2B2B">Estimating the job loss if 4 million immigrants are '
-             'deported from the U.S. over 4 years</span>'},
+     "body": txt("title", f'# {CFG["wb_name"]}')},
     {"id": "kpi1-box", "kind": "container", "style": {"backgroundColor": "#F4F4F4", "borderRadius": "round"}},
-    {"id": "kpi1", "kind": "kpi-chart", "name": "Total Deportations",
-     "source": {"kind": "table", "elementId": "state-master"},
-     "columns": [{"id": "kpi1-v", "name": "Total Deportations", "formula": "Sum([State Master/Deportations])",
+    {"id": "kpi1", "kind": "kpi-chart", "name": txt("kpi1_name", "Total"),
+     "source": {"kind": "table", "elementId": "master"},
+     "columns": [{"id": "kpi1-v", "name": txt("kpi1_name", "Total"),
+                  "formula": f'Sum({mref("secondary")})' if HAS_SECONDARY else _TOTAL,
                   "format": {"kind": "number", "formatString": ".2s"}}],
      "value": {"columnId": "kpi1-v", "fontSize": 34},
      "style": {"backgroundColor": "#00000000", "padding": "none"}, "layout": {"anchor": "start"}},
-    {"id": "kpi1-ann", "kind": "text",
-     "body": '<span style="color:#2B2B2B">**Assumed** total over four years based on the proposed policy</span>'},
+    {"id": "kpi1-ann", "kind": "text", "body": txt("kpi1_ann", "")},
     {"id": "kpi2-box", "kind": "container", "style": {"backgroundColor": "#F4F4F4", "borderRadius": "round"}},
-    {"id": "kpi2", "kind": "kpi-chart", "name": "Total Job Losses",
-     "source": {"kind": "table", "elementId": "state-master"},
-     "columns": [{"id": "kpi2-v", "name": "Total Job Losses", "formula": MEASURE_SWITCH,
+    {"id": "kpi2", "kind": "kpi-chart", "name": MEAS_NAME,
+     "source": {"kind": "table", "elementId": "master"},
+     "columns": [{"id": "kpi2-v", "name": MEAS_NAME, "formula": MEASURE_SWITCH,
                   "format": {"kind": "number", "formatString": ".2s"}}],
      "value": {"columnId": "kpi2-v", "fontSize": 34},
      "style": {"backgroundColor": "#00000000", "padding": "none"}, "layout": {"anchor": "start"}},
-    {"id": "kpi2-ann", "kind": "text",
-     "body": '<span style="color:#2B2B2B">**Estimated** number of Total Job Losses resulting from the policy</span>'},
-    {"id": "rail-sc-hdr", "kind": "text",
-     "body": '### Deportations vs Job Loss%\n<span style="color:#6B7280">Select a state to filter '
-             'numbers above · Hover for full details</span>'},
+    {"id": "kpi2-ann", "kind": "text", "body": txt("kpi2_ann", "")},
+    {"id": "rail-sc-hdr", "kind": "text", "body": "### " + txt("rail_scatter_hdr", "Distribution")},
     {"id": "rail-scatter", "kind": "scatter-chart", "name": " ",
      "style": {"backgroundColor": "#00000000"},
-     "source": {"kind": "table", "elementId": "state-master"},
+     "source": {"kind": "table", "elementId": "master"},
      "columns": [
-         {"id": "rs-state", "name": "State", "formula": "[State Master/State]"},
-         {"id": "rs-region", "name": "Region", "formula": "[State Master/Region]"},
-         {"id": "rs-rate", "name": "Total Job Loss %", "formula": "Sum([State Master/Job Loss Rate %])"},
-         {"id": "rs-dep", "name": "Deportations", "formula": "Sum([State Master/Deportations])",
+         {"id": "rs-en", "name": F["entity"]["name"], "formula": mref("entity")},
+         {"id": "rs-cat", "name": F["category"]["name"], "formula": mref("category")},
+         {"id": "rs-rate", "name": F["rate"]["name"], "formula": f'Sum({mref("rate")})'},
+         {"id": "rs-y", "name": (F["secondary"]["name"] if HAS_SECONDARY else MEAS_NAME),
+          "formula": (f'Sum({mref("secondary")})' if HAS_SECONDARY else _TOTAL),
           "format": {"kind": "number", "formatString": ",.0f"}}],
-     "xAxis": {"columnId": "rs-rate"}, "yAxis": {"columnIds": ["rs-dep"]},
-     "color": {"by": "category", "column": "rs-region", "scheme": CAT_SCHEME},
+     "xAxis": {"columnId": "rs-rate"}, "yAxis": {"columnIds": ["rs-y"]},
+     "color": {"by": "category", "column": "rs-cat", "scheme": CAT_SCHEME},
      "legend": {"visibility": "hidden"}},
-    {"id": "rail-mi-hdr", "kind": "text",
-     "body": '### Most Impacted\n<span style="color:#6B7280">The Most Impacted states across the country are …</span>'},
+    {"id": "rail-mi-hdr", "kind": "text", "body": "### " + txt("rail_most_hdr", "Most Impacted")},
     {"id": "rail-mostimp", "kind": "bar-chart", "name": " ", "orientation": "horizontal",
      "style": {"backgroundColor": "#00000000"},
-     "source": {"kind": "table", "elementId": "state-master"},
+     "source": {"kind": "table", "elementId": "master"},
      "columns": [
-         {"id": "rmi-state", "name": "State", "formula": "[State Master/State]"},
-         {"id": "rmi-region", "name": "Region", "formula": "[State Master/Region]"},
-         {"id": "rmi-tjl", "name": "Total Job Losses", "formula": MEASURE_SWITCH,
+         {"id": "rmi-en", "name": F["entity"]["name"], "formula": mref("entity")},
+         {"id": "rmi-cat", "name": F["category"]["name"], "formula": mref("category")},
+         {"id": "rmi-m", "name": MEAS_NAME, "formula": MEASURE_SWITCH,
           "format": {"kind": "number", "formatString": ".3~s"}}],
-     "xAxis": {"columnId": "rmi-state", "sort": {"by": "rmi-tjl", "direction": "descending"}},
-     "yAxis": {"columnIds": ["rmi-tjl"]},
-     "color": {"by": "category", "column": "rmi-region", "scheme": CAT_SCHEME},
+     "xAxis": {"columnId": "rmi-en", "sort": {"by": "rmi-m", "direction": "descending"}},
+     "yAxis": {"columnIds": ["rmi-m"]},
+     "color": {"by": "category", "column": "rmi-cat", "scheme": CAT_SCHEME},
      "legend": {"visibility": "hidden"}, "dataLabel": {"labels": "shown"},
-     "filters": [{"id": "rmi-f", "columnId": "rmi-state", "kind": "list", "mode": "include", "values": top5_nat}]},
-    {"id": "rail-credit", "kind": "text",
-     "body": '<span style="color:#9AA0A6">Data: EPI.org  |  Design: @DatavizChimdi  |  Migrated from Tableau</span>'},
-    {"id": "hdr-title", "kind": "text",
-     "body": '## Job Losses by Region\n<span style="color:#6B7280">Click circles in region titles to filter LHS</span>'},
-    {"id": "hdr-pill", "kind": "text",
-     "body": f'<span style="background-color:#EDEDED">&nbsp;&nbsp;**{hnum(GRAND)}** Total Job Losses '
-             f'&nbsp;·&nbsp; Median: **{hnum(NAT["median"])}** &nbsp;·&nbsp; '
-             f'<span style="color:#F2C037">●</span> Mark States &gt; **100K** &nbsp;·&nbsp; '
-             f'States &gt; 100K : **{NAT["over100k"]}**&nbsp;&nbsp;</span>'},
+     "filters": [{"id": "rmi-f", "columnId": "rmi-en", "kind": "list", "mode": "include", "values": top5_nat}]},
+    {"id": "rail-credit", "kind": "text", "body": txt("credit", "")},
+    {"id": "hdr-title", "kind": "text", "body": txt("hdr_title", f'## {F["measure"]["name"]} by {F["category"]["name"]}')},
+    {"id": "hdr-pill", "kind": "text", "body":
+        (f'<span style="background-color:#EDEDED">&nbsp;&nbsp;**{hnum(GRAND)}** {MEAS_NAME} '
+         f'&nbsp;·&nbsp; Median: **{hnum(NAT["median"])}**'
+         + (f' &nbsp;·&nbsp; <span style="color:#F2C037">●</span> Mark &gt; **{hnum(THRESH)}** '
+            f'&nbsp;·&nbsp; &gt; {hnum(THRESH)} : **{NAT["over_thresh"]}**' if THRESH is not None else '')
+         + '&nbsp;&nbsp;</span>')},
     {"id": "hdr-learn", "kind": "text",
      "body": '<p style="text-align: center"><span style="background-color:#FBE7A8">'
              '&nbsp;&nbsp;**Learn More**&nbsp;&nbsp;</span></p>'},
     {"id": "legend-key", "kind": "text",
      "body": "".join(f'<span style="color:{s}">▊</span>' for s in CAT_SCHEME)},
     {"id": "ctl-share", "kind": "control", "controlType": "segmented", "controlId": "cshare",
-     "name": "Job losses: total vs immigrant vs U.S.-born workers",
+     "name": txt("share_name", "Measure"),
      "source": {"kind": "manual", "valueType": "text",
-                "values": ["Total", "Immigrant", "U.S.-born"], "labels": ["Total", "Immigrant", "U.S.-born"]},
+                "values": ["Total", F.get("split_a", {}).get("name", "A"), F.get("split_b", {}).get("name", "B")],
+                "labels": ["Total", F.get("split_a", {}).get("name", "A"), F.get("split_b", {}).get("name", "B")]},
      "value": "Total"},
     {"id": "ctl-rank", "kind": "control", "controlType": "segmented", "controlId": "crank", "name": "Rank",
      "source": {"kind": "manual", "valueType": "text", "values": ["Most Impacted", "Least Impacted"],
@@ -242,7 +267,6 @@ rail_and_header = [
      "source": {"kind": "manual", "valueType": "text", "values": ["Hide", "Show"],
                 "labels": ["Hide", "Show"]}, "value": "Hide"},
 ]
-# drop the worker-split control on datasets with no immigrant/US-born columns
 if not HAS_SPLIT:
     rail_and_header = [e for e in rail_and_header if e.get("controlId") != "cshare"]
 
@@ -250,7 +274,7 @@ main_elements = list(rail_and_header)
 for rg in REGIONS:
     main_elements += card_elements(rg)
 
-# --- layout: 24-col grid, cards laid out left->right across the freed rail width ---
+# --- layout: 24-col grid, N cards left->right across the freed rail width ---
 n = len(REGIONS)
 CARD_START = 7
 span = (25 - CARD_START) // n
@@ -301,7 +325,7 @@ for rg in REGIONS:
     ]))
 lay.append("</Page>")
 data_lay = ('<Page type="grid" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto" id="page-data">\n'
-            '  <LayoutElement elementId="state-master" gridColumn="1 / 25" gridRow="1 / 11"/>\n</Page>')
+            '  <LayoutElement elementId="master" gridColumn="1 / 25" gridRow="1 / 11"/>\n</Page>')
 layout_xml = '<?xml version="1.0" encoding="utf-8"?>\n' + "\n".join(lay) + "\n" + data_lay
 
 spec = {
@@ -309,7 +333,7 @@ spec = {
     "themeOverrides": {"categoricalScheme": CAT_SCHEME, "colorOverrides": {"backgroundCanvas": "#FFFFFF"}},
     "pages": [
         {"id": "page-data", "name": "Data", "elements": [state_master]},
-        {"id": "page-main", "name": "Job Losses", "elements": main_elements},
+        {"id": "page-main", "name": "Composed", "elements": main_elements},
     ],
     "layout": layout_xml,
 }

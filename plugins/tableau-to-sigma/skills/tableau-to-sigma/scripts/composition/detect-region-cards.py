@@ -3,44 +3,66 @@
 
 Given the Tableau .twb + the landed master table (CSV export) + DM ids, detect a
 repeated-per-category container design and emit a composition config the emitter
-(`compose-region-cards.py`) turns into a composed workbook. This is the signal
-extraction the GAPS report says the skill was missing:
+turns into a composed workbook. Nothing dashboard-specific is baked in: column
+ROLES are passed (or defaulted) and mapped to the actual data; the palette, tints,
+facts, and prose are extracted/derived/computed.
 
-  * category members + order        <- master CSV (distinct category values)
-  * per-category color palette (D1)  <- .twb style <map> color buckets
-  * card/header tints                <- derived (lighten/darken the base hue)
-  * per-category facts + cutoffs     <- computed from the master CSV
+  * category members + order   <- master CSV (by measure desc)
+  * per-category palette (D1)   <- .twb style <map> color buckets
+  * card/header tints           <- derived (lighten/darken the base hue)
+  * per-category facts+cutoffs  <- computed from the master CSV
+  * prose (title/annotations)   <- .twb text runs (heuristic) + optional overrides
 
 Usage:
   detect-region-cards.py --twb X.twb --master-csv master.csv --dm-ids dm-ids.json \
-      --category Region --measure "Total Job Losses" --folder <id> --out config.json
+    --category Region --entity State --measure "Total Job Losses" --rate "Job Loss Rate Pct" \
+    [--secondary Deportations --split-a Immigrant --split-b "US Born" --threshold 100000] \
+    [--source-name "State Master" --fact-name "State Fact" --text-overrides t.json] \
+    --folder <id> --wb-name "..." --out config.json
 """
-import argparse, csv, json, re, statistics
+import argparse, csv, json, re, html, statistics
 from collections import defaultdict
 
 
-def mix(hex_a, hex_b, t):
-    a = [int(hex_a[i:i + 2], 16) for i in (1, 3, 5)]
-    b = [int(hex_b[i:i + 2], 16) for i in (1, 3, 5)]
-    return "#" + "".join(f"{round(x*(1-t)+y*t):02X}" for x, y in zip(a, b))
+def mix(a, b, t):
+    A = [int(a[i:i + 2], 16) for i in (1, 3, 5)]
+    B = [int(b[i:i + 2], 16) for i in (1, 3, 5)]
+    return "#" + "".join(f"{round(x*(1-t)+y*t):02X}" for x, y in zip(A, B))
 
 
 def derive_colors(base):
-    """Card tint / header bar / header text derived from the category's base hue."""
-    return {"bar": base.upper(),
-            "card": mix(base, "#FFFFFF", 0.88),
-            "hdrbar": mix(base, "#FFFFFF", 0.55),
-            "hdrtext": mix(base, "#000000", 0.42)}
+    return {"bar": base.upper(), "card": mix(base, "#FFFFFF", 0.88),
+            "hdrbar": mix(base, "#FFFFFF", 0.55), "hdrtext": mix(base, "#000000", 0.42)}
 
 
-def extract_palette(twb_path, members):
-    xml = open(twb_path, encoding="utf-8", errors="replace").read()
+def extract_palette(xml, members):
     pal = {}
     for hexc, bkt in re.findall(r"<map to='(#[0-9A-Fa-f]+)'>\s*<bucket>&quot;?([^<&]+?)&quot;?</bucket>", xml):
         bkt = bkt.strip()
         if bkt in members and bkt not in pal:
             pal[bkt] = hexc
     return pal
+
+
+def extract_text(xml):
+    """Heuristic prose extraction from .twb text runs -> known emitter slots."""
+    runs = []
+    for r in re.findall(r"<run[^>]*>([^<]{2,})</run>", xml):
+        t = html.unescape(r).strip()
+        if t and not t.replace(".", "").replace(",", "").isdigit() and "[" not in t and "<" not in t:
+            runs.append(t)
+    t = {}
+    for r in runs:
+        low = r.lower()
+        if ("data:" in low or "design:" in low or "@" in r) and "credit" not in t:
+            t["credit"] = f'<span style="color:#9AA0A6">{r}</span>'
+        if " vs " in low and "rail_scatter_hdr" not in t:
+            t["rail_scatter_hdr"] = r
+        if low.startswith("of ") and "pct_suffix" not in t:
+            t["pct_suffix"] = r
+        if "per region" in low or "per " + "" == "":
+            pass
+    return t, runs[:40]
 
 
 def hnum(v):
@@ -61,31 +83,38 @@ def main():
     ap.add_argument("--twb", required=True)
     ap.add_argument("--master-csv", required=True)
     ap.add_argument("--dm-ids", required=True)
-    ap.add_argument("--category", default="Region")
-    ap.add_argument("--measure", default="Total Job Losses")
+    ap.add_argument("--category", required=True)
+    ap.add_argument("--entity", required=True)
+    ap.add_argument("--measure", required=True)
+    ap.add_argument("--rate", required=True)
+    ap.add_argument("--secondary")
+    ap.add_argument("--split-a")
+    ap.add_argument("--split-b")
+    ap.add_argument("--threshold", type=float)
+    ap.add_argument("--source-name", default="Master")
+    ap.add_argument("--fact-name", default="Fact")
+    ap.add_argument("--text-overrides")
     ap.add_argument("--folder", required=True)
     ap.add_argument("--wb-name", default="Composed dashboard (skill B1)")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
 
+    xml = open(a.twb, encoding="utf-8", errors="replace").read()
     rows = list(csv.DictReader(open(a.master_csv)))
     for r in rows:
         r["_m"] = float(r[a.measure] or 0)
     grand = sum(r["_m"] for r in rows)
+    thr = a.threshold
 
-    # category members, ordered by measure desc (card order)
     by_cat = defaultdict(list)
     for r in rows:
         by_cat[r[a.category]].append(r)
     members = sorted(by_cat, key=lambda c: -sum(r["_m"] for r in by_cat[c]))
+    base_pal = extract_palette(xml, members)
 
-    base_pal = extract_palette(a.twb, members)
     dm = json.load(open(a.dm_ids))
-    dm_id = dm["dataModelId"]
-    # first element on the first page is the fact table (State Fact)
-    fact_eid = dm["pages"][0]["elements"][0]["id"]
-
-    has_imm = "Immigrant" in rows[0] and "US Born" in rows[0]
+    dm_id, fact_eid = dm["dataModelId"], dm["pages"][0]["elements"][0]["id"]
+    has_split = bool(a.split_a and a.split_b)
 
     regions = []
     for label in members:
@@ -93,42 +122,65 @@ def main():
         rs_desc = sorted(rs, key=lambda r: -r["_m"])
         vals = sorted(r["_m"] for r in rs)
         tot = sum(r["_m"] for r in rs)
-        # immigrant/US-born share (uniform-ish in this data), derived from State Fact
-        imm_pct = us_pct = None
-        if has_imm:
-            im = sum(float(r["Immigrant"] or 0) for r in rs)
-            ub = sum(float(r["US Born"] or 0) for r in rs)
-            imm_pct = round(100 * im / (im + ub)) if (im + ub) else 50
-            us_pct = 100 - imm_pct
+        sa_pct = sb_pct = None
+        if has_split:
+            sa = sum(float(r[a.split_a] or 0) for r in rs)
+            sb = sum(float(r[a.split_b] or 0) for r in rs)
+            sa_pct = round(100 * sa / (sa + sb)) if (sa + sb) else 50
+            sb_pct = 100 - sa_pct
         base = base_pal.get(label, "#888888")
         hi, lo = rs_desc[0], rs_desc[-1]
-        ab = "Abbrev" if "Abbrev" in rows[0] else a.category
+        abbr = "Abbrev" if "Abbrev" in rows[0] else a.entity
         regions.append({
-            "key": slug(label), "label": label,
-            "colors": derive_colors(base),
+            "key": slug(label), "label": label, "colors": derive_colors(base),
             "facts": {
-                "total": tot, "pct_of_us": round(100 * tot / grand),
-                "n_states": len(rs), "over100k": sum(1 for r in rs if r["_m"] > 100000),
-                "imm_pct": imm_pct, "us_pct": us_pct,
-                "top5": [[r[a.category] if False else r.get("State", r[a.category]), r["_m"]] for r in rs_desc[:5]],
-                "hi": [hi.get(ab, hi["State"]), hi["_m"]], "lo": [lo.get(ab, lo["State"]), lo["_m"]],
+                "total": tot, "pct_of_total": round(100 * tot / grand),
+                "n_entities": len(rs),
+                "over_thresh": sum(1 for r in rs if r["_m"] > thr) if thr is not None else None,
+                "split_a_pct": sa_pct, "split_b_pct": sb_pct,
+                "top5": [[r[a.entity], r["_m"]] for r in rs_desc[:5]],
+                "hi": [hi.get(abbr, hi[a.entity]), hi["_m"]],
+                "lo": [lo.get(abbr, lo[a.entity]), lo["_m"]],
                 "top5cut": sorted((r["_m"] for r in rs), reverse=True)[min(4, len(rs) - 1)],
                 "bot5cut": vals[min(4, len(vals) - 1)],
             }})
 
+    fields = {
+        "entity": {"name": a.entity, "src": a.entity},
+        "category": {"name": a.category, "src": a.category},
+        "measure": {"name": a.measure, "src": a.measure},
+        "rate": {"name": a.rate, "src": a.rate},
+    }
+    if a.secondary:
+        fields["secondary"] = {"name": a.secondary, "src": a.secondary}
+    if has_split:
+        fields["split_a"] = {"name": a.split_a, "src": a.split_a}
+        fields["split_b"] = {"name": a.split_b, "src": a.split_b}
+
+    text, _runs = extract_text(xml)
+    text.setdefault("entity_plural", a.entity + "s")
+    text.setdefault("most_hdr", "The Most Impacted " + a.entity + "s")
+    text.setdefault("strip_hdr", a.measure + " by " + a.entity)
+    text.setdefault("rail_most_hdr", "Most Impacted")
+    text.setdefault("hdr_title", f"## {a.measure} by {a.category}")
+    text.setdefault("share_name", f"{a.measure}: total vs {a.split_a} vs {a.split_b}" if has_split else a.measure)
+    if a.text_overrides:
+        text.update(json.load(open(a.text_overrides)))
+
     cfg = {
         "dm_id": dm_id, "state_fact_eid": fact_eid, "folder_id": a.folder,
-        "wb_name": a.wb_name, "category": a.category, "measure": a.measure,
-        "cat_scheme": [base_pal.get(m, "#888888") for m in members],
+        "wb_name": a.wb_name, "source_name": a.source_name, "fact_name": a.fact_name,
+        "fields": fields, "threshold": thr, "cat_scheme": [base_pal.get(m, "#888888") for m in members],
         "grand": grand,
         "national": {"grand": grand, "median": statistics.median([r["_m"] for r in rows]),
-                     "over100k": sum(1 for r in rows if r["_m"] > 100000), "n_states": len(rows)},
-        "has_worker_split": has_imm,
-        "regions": regions,
+                     "over_thresh": sum(1 for r in rows if r["_m"] > thr) if thr is not None else None,
+                     "n_entities": len(rows)},
+        "regions": regions, "text": text,
     }
     json.dump(cfg, open(a.out, "w"), indent=1)
-    print(f"detected {len(regions)} category cards: {', '.join(m for m in members)}")
+    print(f"detected {len(regions)} '{a.category}' cards: {', '.join(members)}")
     print("palette:", {m: base_pal.get(m) for m in members})
+    print("extracted text slots:", sorted(k for k in text))
 
 
 if __name__ == "__main__":
