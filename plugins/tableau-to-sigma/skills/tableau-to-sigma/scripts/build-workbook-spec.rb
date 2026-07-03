@@ -195,9 +195,19 @@ def derive_theme(layout)
     end
   end
   walk.call(roots, 0)
+  # Canvas: strip any 8-digit alpha so Sigma gets a solid #rrggbb.
+  canvas = canvas[0, 7] if canvas.is_a?(String) && canvas =~ /\A#[0-9a-fA-F]{8}\z/
+  # Palette preference: the source's real color-encoding brand palette (emitted
+  # by parse-twb-layout as brand_palette) beats the container-tint palette. The
+  # tint palette only fits the region-card idiom; a dashboard whose design is a
+  # color SCHEME (ER's reds, Udemy's subject dots) has no ≥2 tinted containers,
+  # so the old path degenerated to white card fills. Fall back to tints when the
+  # source encodes no brand colors.
+  brand = dashes.first['brand_palette']
+  scheme = (brand.is_a?(Array) && brand.size >= 2) ? brand : palette
   theme = {}
   theme['backgroundCanvas'] = canvas if canvas
-  theme['categoricalScheme'] = palette if palette.size >= 2 # only the multi-member region pattern
+  theme['categoricalScheme'] = scheme if scheme.size >= 2
   theme
 end
 
