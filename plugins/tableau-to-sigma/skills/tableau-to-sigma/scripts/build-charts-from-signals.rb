@@ -2113,6 +2113,63 @@ end
 
 # ---- KPI emission ---------------------------------------------------------
 # Tableau "scorecard" / "big number" tiles — mark=Text or mark=Square with a
+# KPI measure formula translator (bead: KPI value fidelity — ratio KPIs). A
+# validated calc like `[Amount Saved (copy)]/[Cost (copy)]` composes MATERIALIZED
+# measure columns via BARE refs (no explicit SUM), so translate_user_agg_formula
+# (which only rewrites explicit `SUM([x])`) returns nil and the KPI falls to a
+# naive `Sum(rawcol)`. Here we (a) translate any explicit aggregates, then
+# (b) wrap each remaining BARE column ref that maps to a known master column in
+# Sum() — yielding `Sum([Master/A]) / Sum([Master/B])`, the exact form verified
+# live against the source (ROI 4.66x, Avg Cost $378.8). Bails to nil (caller
+# keeps its other resolution paths) when a ref is a parameter, doesn't map to a
+# column, or non-arithmetic glue remains — never emits a half-resolved formula.
+# NB: end-to-end correctness requires the master to CARRY the `(copy)` columns
+# (mechanical-specs materialization) — this is the emit half.
+def translate_kpi_measure_formula(formula, mmap, columns_by_guid = {})
+  s = formula.to_s.gsub(/\s+/, ' ').strip
+  return nil if s.empty?
+  return nil if s =~ /\[Parameters\]/i          # param-scalar KPI — resolved elsewhere
+  s = s.gsub(/\[([0-9a-f\-]{36})\]/i) do          # 36-char GUID refs → captions
+    info = columns_by_guid[Regexp.last_match(1)]
+    info && info['caption'] ? "[#{info['caption']}]" : "[#{Regexp.last_match(1)}]"
+  end
+  s = s.gsub(/\bIIF\s*\(/i, 'If(')
+  # (a) explicit aggregates SUM([x]) / COUNT([x]) / …
+  s = s.gsub(/\b(SUM|AVG|MIN|MAX|MEDIAN|COUNTD|COUNT)\s*\(\s*\[([^\]]+)\]\s*\)/i) do
+    agg = Regexp.last_match(1).upcase
+    col = Regexp.last_match(2)
+    m   = map_column(col, mmap)
+    ref = "[Master/#{m ? m['name'] : col}]"
+    case agg
+    when 'COUNT'  then "CountIf(IsNotNull(#{ref}))"
+    when 'COUNTD' then "CountDistinct(#{ref})"
+    else "#{USER_AGG_FN[agg]}(#{ref})"
+    end
+  end
+  # (b) wrap remaining BARE column refs (materialized measures) in Sum()
+  ok = true
+  s = s.gsub(/\[([^\]]+)\]/) do
+    inner = Regexp.last_match(1)
+    if inner.start_with?('Master/')
+      Regexp.last_match(0)                        # already translated in (a)
+    elsif (m = map_column(inner, mmap))
+      "Sum([Master/#{m['name']}])"
+    else
+      ok = false
+      Regexp.last_match(0)
+    end
+  end
+  return nil unless ok
+  # residue: only arithmetic glue + our own fns may remain
+  residue = s.dup
+  residue.gsub!(/"(?:\\.|[^"\\])*"/, '1')
+  residue.gsub!(/\[Master\/[^\]]+\]/, '1')
+  allowed = %w[Sum Avg Min Max Median CountDistinct CountIf IsNotNull Coalesce If Abs]
+  residue.gsub!(/\b(#{allowed.map { |f| Regexp.escape(f) }.join('|')})\b/, '')
+  return nil unless residue =~ %r{\A[\s()+\-*/.,\d!=<>]*\z}
+  s
+end
+
 # Pick the KPI's VALUE measure from a marks-card measure list (bead: KPI value
 # fidelity). A Tableau scorecard commonly carries several measures on its Marks
 # card — a raw column (`[RAW_COL]` Sum), one or more internal calc ids, and the
@@ -2241,7 +2298,23 @@ def build_kpi_element(z, meta, mmap, opts, warnings, data_elements = [])
   #      shelf aggregation (Avg/Sum/...)
   #   4. plain master column wrapped in the shelf aggregation
   formula = (pswitch_plan && pswitch_plan['sibling_form']) || two_stage_formula || master['formula']
-  ws_calc = (z['calculations'] || []).find { |c| norm.call(c['name']) == norm.call(field_cap) }
+  # Match the worksheet calc by the resolved CAPTION *or* the measure's internal
+  # name (bead: KPI value fidelity) — z['calculations'] are keyed by internal
+  # name (`[<Field> (copy)_NNN]`), so a caption-only match misses the validated
+  # ratio calc that lives right on the zone.
+  raw_norm = norm.call(measure_field['raw'])
+  ws_calc = (z['calculations'] || []).find do |c|
+    n = norm.call(c['name'])
+    n == norm.call(field_cap) || n == raw_norm
+  end
+  # Ratio/arithmetic of MATERIALIZED measure columns (bead: KPI value fidelity):
+  # `[Amount Saved (copy)]/[Cost (copy)]` → `Sum([Master/…])/Sum([Master/…])`.
+  # Tried before the explicit-agg decompose because that path returns nil on
+  # bare measure refs and would otherwise drop the KPI to a naive Sum(rawcol).
+  if formula.nil? && ws_calc && %w[usr user].include?(deriv)
+    formula = translate_kpi_measure_formula(ws_calc['formula'], mmap, meta['columns_by_guid'] || {})
+    warnings << "'#{cap}' KPI measure '#{field_cap}' composes materialized measure columns — translated: #{formula[0..120]}" if formula
+  end
   if formula.nil? && ws_calc && %w[usr user].include?(deriv)
     formula = translate_user_agg_formula(ws_calc['formula'], mmap, meta['columns_by_guid'] || {})
     warnings << "'#{cap}' KPI measure '#{field_cap}' is a Tableau User-aggregated calc — decomposed: #{formula[0..120]}" if formula

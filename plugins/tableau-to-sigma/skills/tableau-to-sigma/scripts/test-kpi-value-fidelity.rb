@@ -24,7 +24,8 @@ require 'json'
 DIR = __dir__
 SRC = File.read(File.join(DIR, 'build-charts-from-signals.rb'))
 
-%w[map_column guid_from_text pick_kpi_measure resolve_shelf_field].each do |fn|
+USER_AGG_FN = { 'SUM' => 'Sum', 'AVG' => 'Avg', 'MIN' => 'Min', 'MAX' => 'Max', 'MEDIAN' => 'Median' }.freeze
+%w[map_column guid_from_text pick_kpi_measure resolve_shelf_field translate_kpi_measure_formula].each do |fn|
   m = SRC.match(/^def #{fn}\b.*?\n^end$/m) or abort("could not extract #{fn} from build-charts-from-signals.rb")
   eval(m[0]) # rubocop:disable Security/Eval — test-only extraction of first-party code
 end
@@ -97,9 +98,37 @@ field2 = { 'raw' => '[Some Raw Col]', 'guid' => nil }
 _m2, cap2 = resolve_shelf_field(field2, { 'columns_by_guid' => {} }, {})
 check(cap2 == 'Some Raw Col', "unknown raw column falls back to its stripped name (got #{cap2.inspect})", fails)
 
+# ---- 6. ratio translator: bare materialized-measure refs → Sum()/Sum() -------
+# mmap simulating the master AFTER the (copy) columns are materialized (generic
+# names). map_column matches a caption/name against these regex patterns.
+RMMAP = {
+  '(?i)^Amount Saved \(copy\)_20000000002$' => { 'id' => 'm-amt', 'name' => 'Amount Saved (copy)_20000000002' },
+  '(?i)^Cost \(copy\)_30000000003$'         => { 'id' => 'm-cost', 'name' => 'Cost (copy)_30000000003' },
+  '(?i)^ENTITY_ID$'                     => { 'id' => 'm-aid', 'name' => 'ENTITY_ID' },
+  '(?i)^BASE_AMT$'                       => { 'id' => 'm-rc', 'name' => 'BASE_AMT' }
+}
+# ratio of two bare materialized measure refs → Sum(a)/Sum(b)
+roi = translate_kpi_measure_formula('[Amount Saved (copy)_20000000002]/[Cost (copy)_30000000003]', RMMAP, {})
+check(roi == 'Sum([Master/Amount Saved (copy)_20000000002]) / Sum([Master/Cost (copy)_30000000003])' ||
+      roi == 'Sum([Master/Amount Saved (copy)_20000000002])/Sum([Master/Cost (copy)_30000000003])',
+      "ratio of bare copy refs → Sum(a)/Sum(b) (got #{roi.inspect})", fails)
+# bare measure ref / explicit COUNT → Sum(copy) / CountIf(IsNotNull(id))  (avg-cost shape)
+avg = translate_kpi_measure_formula('[Cost (copy)_30000000003]/COUNT([ENTITY_ID])', RMMAP, {})
+check(avg && avg.include?('Sum([Master/Cost (copy)_30000000003])') && avg.include?('CountIf(IsNotNull([Master/ENTITY_ID]))'),
+      "bare copy / COUNT(id) → Sum(copy)/CountIf(IsNotNull(id)) (got #{avg.inspect})", fails)
+# plain SUM of a base column (Cost-of-Service class) still resolves
+cost = translate_kpi_measure_formula('SUM([BASE_AMT])', RMMAP, {})
+check(cost == 'Sum([Master/BASE_AMT])', "explicit SUM([base]) → Sum([Master/base]) (got #{cost.inspect})", fails)
+# param-scalar KPI → nil (bails so the param→control path handles it)
+check(translate_kpi_measure_formula('MAX(If(Contains(Lower([Parameters].[X]),"y"),[Parameters].[A],[Parameters].[B]))', RMMAP, {}).nil?,
+      'param-scalar calc → nil (deferred to param→control handling)', fails)
+# unmappable bare ref → nil (never emits a half-resolved formula)
+check(translate_kpi_measure_formula('[Ghost Col]/[Cost (copy)_30000000003]', RMMAP, {}).nil?,
+      'unmappable bare ref → nil (no half-resolved formula)', fails)
+
 puts
 if fails.empty?
-  puts 'ALL PASS — KPI value fidelity: validated-calc preference + internal-name caption resolution'
+  puts 'ALL PASS — KPI value fidelity: validated-calc preference + internal-name caption resolution + ratio translation'
   exit 0
 else
   puts "FAILURES (#{fails.length}):"
