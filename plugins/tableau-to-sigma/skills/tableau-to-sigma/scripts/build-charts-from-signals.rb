@@ -3840,10 +3840,28 @@ end
 # annotations all vanished. Dashboard-level chrome, so skipped in
 # --page-per-worksheet (which ignores the dashboard layout by design).
 styled_text_by_dash = Hash.new { |h, k| h[k] = [] }
+# Normalize a label for KPI-title dedup: lowercase, drop all non-alphanumerics,
+# strip a trailing plural 's'. So "# Feature Types" (label) matches the KPI
+# caption "# Feature Type" — Tableau KPI-card labels routinely differ from the
+# scorecard sheet name by pluralization/punctuation.
+norm_label = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]/, '').sub(/s\z/, '') }
 unless opts[:pages_mode] == :worksheet
   layout.each do |dash|
+    # KPI captions on this dashboard. A Tableau "KPI card" is a label text zone
+    # ABOVE a scorecard worksheet; Sigma's kpi-chart renders its own title, so a
+    # standalone styled-text zone whose text just repeats a KPI's caption is a
+    # redundant duplicate — emitting it (and dumping it in a stray band) is the
+    # "orphan labels at the bottom" defect. Drop those; keep real prose/sections.
+    kpi_labels = (dash['zones'] || []).select { |z| z['is_kpi'] && z['caption'] }
+                                      .map { |z| norm_label.call(z['caption']) }
     (dash['zones'] || []).each do |z|
       next unless %w[text title].include?(z['kind']) && z['text_runs']
+      plain = norm_label.call(z['text_runs'].map { |r| r['text'] }.join)
+      if !plain.empty? && kpi_labels.include?(plain)
+        warnings << "dashboard '#{dash['dashboard']}' text zone #{z['id']} (#{plain.inspect}) " \
+                    'duplicates a KPI title — dropped (the Sigma kpi-chart renders its own title)'
+        next
+      end
       body = text_body_from_runs(z['text_runs'], align: z['text_align'],
                                  bg: (z['is_pill'] ? z['fill_color'] : nil))
       next if body.nil?
