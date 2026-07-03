@@ -3822,10 +3822,13 @@ if title_text
   extras << {
     'id'   => 'title-text',
     'kind' => 'text',
-    # White span: build-dashboard-layout.rb wraps this element in the DARK
-    # header band (HEADER_STYLE) — a plain body renders dark-on-dark
-    # (phase-e layout-quality screenshot-checklist catch).
-    'body' => %(# <span style="color: #FFFFFF">#{title_text}</span>)
+    # Theme-default colour (dark on a light canvas). build-dashboard-layout now
+    # emits a colored header band ONLY when the source actually has one; a bare
+    # source title (no styled runs, so we synthesize here) sits on the page
+    # canvas, where a forced-white title would render invisibly. Sources WITH a
+    # styled title zone are handled by the B4 path below (skipped above), which
+    # carries the source's own run colours.
+    'body' => "# #{title_text}"
   }
 end
 
@@ -4468,8 +4471,10 @@ elsif opts[:pages_mode] == :dashboard
     page_extras = [{
       'id'   => "title-#{d_slug}",
       'kind' => 'text',
-      # White span: the layout builder wraps this in the DARK header band.
-      'body' => %(# <span style="color: #FFFFFF">#{dash_name}</span>)
+      # Theme-default colour: the layout builder now emits a colored header band
+      # only when the source has one (else the title sits on the canvas, where
+      # forced-white would be invisible).
+      'body' => "# #{dash_name}"
     }]
     # B4: this dashboard's styled static-text elements (subtitle/annotations/
     # credit/section headers). Placed by the layout stage at their zone geometry.

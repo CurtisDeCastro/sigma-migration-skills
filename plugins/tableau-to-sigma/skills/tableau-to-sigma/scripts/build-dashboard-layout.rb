@@ -43,6 +43,54 @@ require 'optparse'
 require_relative 'lib/layout'
 include SigmaLayout
 
+# ---- Source-derived header chrome -----------------------------------------
+# The skill used to stamp a fixed dark-navy header band on EVERY dashboard,
+# which makes a minimalist white source (title text on the canvas) come out
+# looking nothing like itself. Instead, only emit a COLORED header band when
+# the source actually has a band-like fill in the header region; otherwise the
+# title sits on the page canvas (transparent container), matching the source.
+#
+# "Band-like" = a fill that reads as a deliberate header strip: dark (low
+# luminance, needs light text) OR saturated (a brand colour). Light-neutral
+# fills (white/near-white/grey card backgrounds) are NOT bands — they blend
+# into the canvas, so we emit no band. A full-page background (h≈100%) is the
+# canvas, not a header, so it's excluded by the height/width gate.
+def band_like_fill?(hex)
+  return false unless hex.is_a?(String) && hex =~ /\A#[0-9a-fA-F]{6}/
+  h = hex[1, 6]
+  r, g, b = h[0, 2].to_i(16), h[2, 2].to_i(16), h[4, 2].to_i(16)
+  luminance = 0.299 * r + 0.587 * g + 0.114 * b
+  chroma = [r, g, b].max - [r, g, b].min
+  luminance < 200 || chroma >= 40
+end
+
+# Returns the header container style hash derived from the source dashboard, or
+# nil when the source has no colored header band (→ transparent, title on the
+# canvas). Also returns whether the band is dark (so the title text needs a
+# light colour on the page-name fallback).
+def header_from_source(dashboard)
+  fill = nil
+  walk = lambda do |nodes|
+    (nodes || []).each do |n|
+      y = (n['y_pct'] || 0).to_f
+      w = (n['w_pct'] || 0).to_f
+      hpct = (n['h_pct'] || 0).to_f
+      fc = n['fill_color']
+      # header region: near the top, spans most of the width, but is a strip
+      # (not the full-page canvas background).
+      if fill.nil? && y < 18 && w >= 50 && hpct < 25 && band_like_fill?(fc)
+        fill = fc[0, 7]
+      end
+      walk.call(n['children'])
+    end
+  end
+  walk.call(dashboard['zone_tree'])
+  return [nil, false] unless fill
+  h = fill[1, 6]
+  dark = (0.299 * h[0, 2].to_i(16) + 0.587 * h[2, 2].to_i(16) + 0.114 * h[4, 2].to_i(16)) < 140
+  [{ 'backgroundColor' => fill, 'borderRadius' => 'round' }, dark]
+end
+
 opts = { page_cols: 24, page_rows: 32, row_scale: 1.5, chart_y0: 29.7,
          chart_y1: 100.0, chart_row0: 6, renames: {} }
 OptionParser.new do |p|
@@ -295,15 +343,17 @@ def build_page_from_tree(dashboard, page, opts)
   body_rows = [page_rows - HEADER_ROWS, 4].max
   page_pseudo = { 'x_pct' => 0.0, 'y_pct' => 0.0, 'w_pct' => 100.0, 'h_pct' => 100.0 }
 
-  # Header band (dark title strip), same chrome as the banded path.
+  # Header band derived from the source (colored strip only when the source has
+  # one; otherwise transparent — title on the canvas, no fabricated navy).
+  hdr_style, hdr_dark = header_from_source(dashboard)
   hdr_id = "tc-#{page['id']}-hdr"
-  extra_els << container_el(hdr_id, HEADER_STYLE.dup)
+  extra_els << container_el(hdr_id, hdr_style)
   if title_el
     children << header_band_xml(hdr_id, title_el['id'])
     ctx[:title_used] = true
   else
     txt_id = "tc-#{page['id']}-hdrtext"
-    extra_els << header_text_el(txt_id, page['name'])
+    extra_els << header_text_el(txt_id, page['name'], hdr_dark ? '#FFFFFF' : nil)
     children << header_band_xml(hdr_id, txt_id)
   end
 
@@ -403,15 +453,16 @@ def build_page_for_dashboard(dashboard, page, opts)
   extra_els = []
   ov_prefix = "band-#{page['id']}"
 
-  # Header band: reuse the page's existing title text if present, else add one
-  # (sidecar) named after the page (= the Tableau dashboard name).
+  # Header band derived from the source (colored strip only when the source has
+  # one; otherwise transparent — title on the canvas, no fabricated navy).
+  hdr_style, hdr_dark = header_from_source(dashboard)
   hdr_id = "#{ov_prefix}-hdr"
-  extra_els << container_el(hdr_id, HEADER_STYLE.dup)
+  extra_els << container_el(hdr_id, hdr_style)
   if title_el
     children << header_band_xml(hdr_id, title_el['id'])
   else
     txt_id = "#{ov_prefix}-hdrtext"
-    extra_els << header_text_el(txt_id, page['name'])
+    extra_els << header_text_el(txt_id, page['name'], hdr_dark ? '#FFFFFF' : nil)
     children << header_band_xml(hdr_id, txt_id)
   end
 
