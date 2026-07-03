@@ -323,6 +323,13 @@
       ]
     },
     {
+      "canonical": "shared/scripts/test-control-lint.rb",
+      "targets": [
+        "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-control-lint.rb",
+        "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-control-lint.rb"
+      ]
+    },
+    {
       "canonical": "shared/scripts/test-telemetry-gate.rb",
       "targets": [
         "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-telemetry-gate.rb",

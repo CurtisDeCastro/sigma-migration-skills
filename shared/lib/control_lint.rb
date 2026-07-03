@@ -270,7 +270,16 @@ module ControlLint
     end
 
     # (c) annotated controls that never made it into the spec ------------------
+    # A scope entry flagged as an ALREADY-SURFACED gap (needs-wiring: an orphan/
+    # unreferenced parameter the builder intentionally does not place as a dead
+    # control; needs-materialization: a calc-bound filter whose column isn't on
+    # the model yet) is recorded in the controls-coverage ledger, NOT silently
+    # dropped — so its absence from the spec is expected, not a "not migrated"
+    # failure. Only a control the builder recorded as EMITTED but that's missing
+    # from the spec is a real bug the source filter was lost.
+    surfaced_gap = %w[needs-wiring needs-materialization].freeze
     scope_by_cid.each do |cid, c|
+      next if surfaced_gap.include?(c['status'].to_s)
       violations << "missing control: control-scope.json expects control #{cid.inspect}" \
                     "#{c['sourceName'] ? " (source: #{c['sourceName'].inspect})" : ''} but the spec " \
                     'has no control with that controlId — the source filter was not migrated'
