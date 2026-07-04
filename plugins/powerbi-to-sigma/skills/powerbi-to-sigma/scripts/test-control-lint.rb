@@ -53,6 +53,19 @@ check(missing.call(v3), 'emitted scope entry absent from spec → DOES flag miss
 v4 = ControlLint.lint(SPEC, scope: scope_with(nil))
 check(missing.call(v4), 'missing status defaults to emitted → flags missing-control', fails)
 
+# --- "no controls built" (Qlik-class) must also honor surfaced gaps -----------
+no_built = ->(vs) { vs.any? { |v| v.include?('no controls built') } }
+# 1 filter signal, ZERO controls, but the only scope entry is a needs-wiring
+# orphan param → the signal is accounted for as a surfaced gap → NOT a failure.
+sig_gap = { 'sourceFilterSignals' => 1,
+            'controls' => [{ 'controlId' => 'ctl-orphan', 'name' => 'Orphan', 'status' => 'needs-wiring' }] }
+check(!no_built.call(ControlLint.lint(SPEC, scope: sig_gap)),
+      'signals>0 + zero controls but all scope entries needs-wiring → NO "no controls built" (the ComplexPivot case)', fails)
+# genuine silent miss: signals but NO scope entries explaining them → still fails.
+sig_silent = { 'sourceFilterSignals' => 1, 'controls' => [] }
+check(no_built.call(ControlLint.lint(SPEC, scope: sig_silent)),
+      'signals>0 + zero controls + NO scope entries → DOES flag "no controls built" (Qlik silent-miss preserved)', fails)
+
 puts
 if fails.empty?
   puts 'ALL PASS — control_lint honors needs-wiring/needs-materialization coverage gaps'

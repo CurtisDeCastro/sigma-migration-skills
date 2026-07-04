@@ -202,8 +202,18 @@ module ControlLint
         scope_by_cid[c['controlId']] = c if c.is_a?(Hash) && c['controlId']
       end
       # (c) the Qlik class: source had filter signals, spec built zero controls.
+      # BUT suppress when every scope entry is an already-surfaced gap
+      # (needs-wiring / needs-materialization): the builder DID account for each
+      # source signal in the coverage ledger — e.g. a dashboard whose only
+      # "filter" is an orphan/unreferenced parameter that legitimately becomes no
+      # placeable control. That's a surfaced gap, not the silent static-workbook
+      # miss this rule targets. A genuinely silent miss has signals but NO scope
+      # entries explaining them → still fails.
       signals = scope['sourceFilterSignals'].to_i
-      if signals.positive? && rows.empty?
+      scoped = Array(scope['controls'])
+      all_surfaced_gaps = scoped.any? &&
+                          scoped.all? { |c| %w[needs-wiring needs-materialization].include?(c['status'].to_s) }
+      if signals.positive? && rows.empty? && !all_surfaced_gaps
         violations << "no controls built: the source artifact reported #{signals} filter signal(s) " \
                       '(control-scope.json sourceFilterSignals) but the spec contains ZERO control ' \
                       'elements — the source dashboard is interactive and the migration shipped a ' \
