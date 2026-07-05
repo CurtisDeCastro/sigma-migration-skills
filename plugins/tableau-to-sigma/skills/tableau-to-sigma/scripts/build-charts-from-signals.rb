@@ -595,6 +595,43 @@ def map_column(header, mmap)
   nil
 end
 
+# Resolve a calc-bound quick-filter to an ALREADY-materialized master column by
+# the calc's IDENTITY, not a naive caption match (bead: calc-bound-filter wiring
+# / #259). A quick-filter on a calculated field maps to no raw column, so
+# map_column(cap) is nil and the control was recorded `needs-materialization` —
+# even when the calc is already a column on the master. The filter's caption can
+# arrive as EITHER form, so we bridge both against `columns_by_guid` (keyed by
+# internal name → friendly caption):
+#   - cap is an INTERNAL name, often blend-suffixed ("Calculation_NNN 1"): strip
+#     the " N" secondary-source suffix, resolve to the friendly caption, and try
+#     that against the master (a calc materialized + renamed to its caption — the
+#     an "N. <Level>" hierarchy-level calc case).
+#   - cap is a CAPTION ("Team Bucket"): find the internal name(s) carrying it and
+#     try those (a calc materialized under its raw internal name).
+# Returns the mmap column entry when the calc is already materialized (→ wire it
+# like any quick-filter), else nil (→ genuinely needs materialization). Pure.
+def materialized_calc_column(cap, columns_by_guid, mmap, norm)
+  return nil if cap.nil? || columns_by_guid.nil?
+  base   = cap.to_s.sub(/\s+\d+\z/, '').strip   # strip a blend/secondary suffix
+  target = norm.call(cap)
+  base_n = norm.call(base)
+
+  # Direction 1: cap IS an internal calc name → friendly caption → master.
+  info = columns_by_guid[cap.to_s] || columns_by_guid[base]
+  if info && info['caption']
+    m = map_column(info['caption'], mmap)
+    return m if m
+  end
+
+  # Direction 2: cap is a caption → internal name(s) carrying it → master.
+  columns_by_guid.each do |internal, ci|
+    next unless ci && [target, base_n].include?(norm.call(ci['caption']))
+    m = map_column(internal, mmap)
+    return m if m
+  end
+  nil
+end
+
 # Resolve which Sigma column a Tableau <sort column="..."> targets: the chart's
 # dim or its measure. Tableau sort columns look like
 # `[federated.X].[none:REGION:nk]` or `[sum:NET_REVENUE:qk]` — pull the middle
@@ -1773,11 +1810,28 @@ SHELF_TRUNC_FOR_PREFIX = {
 }.freeze
 
 def resolve_shelf_field(field, meta, mmap)
+  cols_by_guid = meta['columns_by_guid'] || {}
   guid = field['guid']
   cap_for_field = nil
   if guid
-    info = (meta['columns_by_guid'] || {})[guid]
+    info = cols_by_guid[guid]
     cap_for_field = info && info['caption']
+  end
+  # Bracket-stripped internal-name fallback (bead: KPI value fidelity). Tableau
+  # calc columns are named `[Calculation_NNN]` or `[<Field> (copy)_NNN]` — NOT a
+  # 36-char GUID — so guid_from_text() returns nil and the guid lookup above
+  # misses. But `columns_by_guid` IS keyed by that internal name and carries the
+  # real caption (e.g. a "…(validated)" calc). Without this the field falls back
+  # to the raw `(copy)_NNN` string, map_column + the calc-formula lookup both
+  # miss, and the KPI naively re-derives `Sum(rawcol)`.
+  if cap_for_field.nil?
+    raw_key = field['raw'].to_s
+                          .sub(/^\[[^\]]+\]\./, '')
+                          .gsub(/^\[|\]$/, '')
+                          .sub(/^[a-z]+:/i, '')
+                          .sub(/:[a-z]+$/i, '')
+    info2 = cols_by_guid[raw_key]
+    cap_for_field = info2 && info2['caption']
   end
   cap_for_field ||= field['raw'].to_s
                                  .sub(/^\[[^\]]+\]\./, '')
@@ -2096,6 +2150,104 @@ end
 
 # ---- KPI emission ---------------------------------------------------------
 # Tableau "scorecard" / "big number" tiles — mark=Text or mark=Square with a
+# KPI measure formula translator (bead: KPI value fidelity — ratio KPIs). A
+# validated calc like `[Amount Saved (copy)]/[Cost (copy)]` composes MATERIALIZED
+# measure columns via BARE refs (no explicit SUM), so translate_user_agg_formula
+# (which only rewrites explicit `SUM([x])`) returns nil and the KPI falls to a
+# naive `Sum(rawcol)`. Here we (a) translate any explicit aggregates, then
+# (b) wrap each remaining BARE column ref that maps to a known master column in
+# Sum() — yielding `Sum([Master/A]) / Sum([Master/B])`, the exact form verified
+# live against the source (ROI 4.66x, Avg Cost $378.8). Bails to nil (caller
+# keeps its other resolution paths) when a ref is a parameter, doesn't map to a
+# column, or non-arithmetic glue remains — never emits a half-resolved formula.
+# NB: end-to-end correctness requires the master to CARRY the `(copy)` columns
+# (mechanical-specs materialization) — this is the emit half.
+def translate_kpi_measure_formula(formula, mmap, columns_by_guid = {})
+  s = formula.to_s.gsub(/\s+/, ' ').strip
+  return nil if s.empty?
+  return nil if s =~ /\[Parameters\]/i          # param-scalar KPI — resolved elsewhere
+  s = s.gsub(/\[([0-9a-f\-]{36})\]/i) do          # 36-char GUID refs → captions
+    info = columns_by_guid[Regexp.last_match(1)]
+    info && info['caption'] ? "[#{info['caption']}]" : "[#{Regexp.last_match(1)}]"
+  end
+  s = s.gsub(/\bIIF\s*\(/i, 'If(')
+  # (a) explicit aggregates SUM([x]) / COUNT([x]) / …
+  s = s.gsub(/\b(SUM|AVG|MIN|MAX|MEDIAN|COUNTD|COUNT)\s*\(\s*\[([^\]]+)\]\s*\)/i) do
+    agg = Regexp.last_match(1).upcase
+    col = Regexp.last_match(2)
+    m   = map_column(col, mmap)
+    ref = "[Master/#{m ? m['name'] : col}]"
+    case agg
+    when 'COUNT'  then "CountIf(IsNotNull(#{ref}))"
+    when 'COUNTD' then "CountDistinct(#{ref})"
+    else "#{USER_AGG_FN[agg]}(#{ref})"
+    end
+  end
+  # (b) wrap remaining BARE column refs (materialized measures) in Sum()
+  ok = true
+  s = s.gsub(/\[([^\]]+)\]/) do
+    inner = Regexp.last_match(1)
+    if inner.start_with?('Master/')
+      Regexp.last_match(0)                        # already translated in (a)
+    elsif (m = map_column(inner, mmap))
+      "Sum([Master/#{m['name']}])"
+    else
+      ok = false
+      Regexp.last_match(0)
+    end
+  end
+  return nil unless ok
+  # residue: only arithmetic glue + our own fns may remain
+  residue = s.dup
+  residue.gsub!(/"(?:\\.|[^"\\])*"/, '1')
+  residue.gsub!(/\[Master\/[^\]]+\]/, '1')
+  allowed = %w[Sum Avg Min Max Median CountDistinct CountIf IsNotNull Coalesce If Abs]
+  residue.gsub!(/\b(#{allowed.map { |f| Regexp.escape(f) }.join('|')})\b/, '')
+  return nil unless residue =~ %r{\A[\s()+\-*/.,\d!=<>]*\z}
+  s
+end
+
+# Pick the KPI's VALUE measure from a marks-card measure list (bead: KPI value
+# fidelity). A Tableau scorecard commonly carries several measures on its Marks
+# card — a raw column (`[RAW_COL]` Sum), one or more internal calc ids, and the
+# MATERIALIZED VALIDATED calc the author actually trusts (`[<Field> (copy)_NNN]`,
+# whose caption ends "(validated)"). The old code took `measures.first`, which
+# is usually the raw column → `Sum(rawcol)` reproduces the wrong number (the
+# class where a KPI reads millions when the validated value is thousands). Prefer
+# the validated/materialized calc, and never pick a `(Label)` text calc as the
+# value. Pure + order-stable (earliest wins on a score tie) so it's testable.
+#   measures: [{ 'column' => '[…]', 'derivation' => 'Sum'|'User'|… }, …]
+#   columns_by_guid: internal-name → { 'caption' => … } (for caption-based scoring)
+def pick_kpi_measure(measures, columns_by_guid = {})
+  list = Array(measures)
+  return nil if list.empty?
+
+  cap_of = lambda do |m|
+    key = m['column'].to_s.gsub(/^\[|\]$/, '').sub(/^[a-z]+:/i, '').sub(/:[a-z]+$/i, '')
+    info = columns_by_guid[key]
+    ((info && info['caption']) || m['column'].to_s).to_s
+  end
+  is_label = ->(m) { (cap_of.call(m) =~ /\(label\)/i) || (m['column'].to_s =~ /\(label\)/i) }
+
+  # A `(Label)` calc is the scorecard's caption text, never its value — drop it
+  # unless it's ALL we have (then fall through so the tile isn't lost).
+  candidates = list.reject { |m| is_label.call(m) }
+  candidates = list if candidates.empty?
+
+  score = lambda do |m|
+    name = m['column'].to_s
+    cap  = cap_of.call(m)
+    s = 0
+    s += 4 if cap =~ /\(validated\)/i || name =~ /\(validated\)/i  # author's trusted calc
+    s += 2 if name =~ /\(copy\)_/i                                 # a materialized duplicate calc
+    s += 1 if m['derivation'].to_s.downcase == 'user'             # a calc, not a raw aggregate
+    s
+  end
+
+  # Highest score; earliest position breaks ties (stable, reproducible).
+  candidates.each_with_index.max_by { |m, i| [score.call(m), -i] }.first
+end
+
 # single measure and no dimensions — translate to a Sigma kpi-chart element.
 # Without this, the chart_kind=kpi worksheet would fall through to the
 # CSV-driven flat-table flow and quietly produce nothing usable.
@@ -2114,7 +2266,9 @@ def build_kpi_element(z, meta, mmap, opts, warnings, data_elements = [])
   (rows_shelf['fields'] || []).each { |f| measure_field ||= f if f['role'] == 'measure' }
   (cols_shelf['fields'] || []).each { |f| measure_field ||= f if f['role'] == 'measure' }
   if measure_field.nil? && (z['measures'] || []).any?
-    m = z['measures'].first
+    # Prefer the materialized VALIDATED calc over a raw aggregate column
+    # (bead: KPI value fidelity) instead of blindly taking measures.first.
+    m = pick_kpi_measure(z['measures'], meta['columns_by_guid'] || {}) || z['measures'].first
     measure_field = {
       'role'       => 'measure',
       'derivation' => (m['derivation'] || 'Sum').to_s.downcase,
@@ -2181,7 +2335,23 @@ def build_kpi_element(z, meta, mmap, opts, warnings, data_elements = [])
   #      shelf aggregation (Avg/Sum/...)
   #   4. plain master column wrapped in the shelf aggregation
   formula = (pswitch_plan && pswitch_plan['sibling_form']) || two_stage_formula || master['formula']
-  ws_calc = (z['calculations'] || []).find { |c| norm.call(c['name']) == norm.call(field_cap) }
+  # Match the worksheet calc by the resolved CAPTION *or* the measure's internal
+  # name (bead: KPI value fidelity) — z['calculations'] are keyed by internal
+  # name (`[<Field> (copy)_NNN]`), so a caption-only match misses the validated
+  # ratio calc that lives right on the zone.
+  raw_norm = norm.call(measure_field['raw'])
+  ws_calc = (z['calculations'] || []).find do |c|
+    n = norm.call(c['name'])
+    n == norm.call(field_cap) || n == raw_norm
+  end
+  # Ratio/arithmetic of MATERIALIZED measure columns (bead: KPI value fidelity):
+  # `[Amount Saved (copy)]/[Cost (copy)]` → `Sum([Master/…])/Sum([Master/…])`.
+  # Tried before the explicit-agg decompose because that path returns nil on
+  # bare measure refs and would otherwise drop the KPI to a naive Sum(rawcol).
+  if formula.nil? && ws_calc && %w[usr user].include?(deriv)
+    formula = translate_kpi_measure_formula(ws_calc['formula'], mmap, meta['columns_by_guid'] || {})
+    warnings << "'#{cap}' KPI measure '#{field_cap}' composes materialized measure columns — translated: #{formula[0..120]}" if formula
+  end
   if formula.nil? && ws_calc && %w[usr user].include?(deriv)
     formula = translate_user_agg_formula(ws_calc['formula'], mmap, meta['columns_by_guid'] || {})
     warnings << "'#{cap}' KPI measure '#{field_cap}' is a Tableau User-aggregated calc — decomposed: #{formula[0..120]}" if formula
@@ -4090,6 +4260,13 @@ unless opts[:no_auto_controls]   # default-on: never miss a .twb parameter/filte
         'kind' => 'manual', 'valueType' => 'text',
         'values' => values, 'labels' => labels
       }
+      # A Tableau parameter is ALWAYS single-valued. Sigma defaults a `list`
+      # control to selectionMode:"multiple", which (a) drops the scalar default
+      # `value` on readback and (b) makes the translated Switch/If measure-picker
+      # compile to type "error" — a scalar case-compare against a multi-select
+      # ARRAY. Pin single so the scalar default applies and the Switch resolves.
+      # (Verified live 2026-07-05: without this the picker ships dead.)
+      spec['selectionMode'] = 'single'
       spec['value'] = p['default_value']
     elsif p['param_domain'] == 'range' && %w[integer real].include?(p['datatype'])
       # Numeric range parameter → Sigma `number-range` control (discovered by
@@ -4165,6 +4342,10 @@ $param_switches.each do |sw|
     # its display mode, else segmented (button row).
     'controlType' => sigma_control_type(control_display_for(layout, pcap, norm_cap)),
     'source'      => { 'kind' => 'manual', 'valueType' => 'text', 'values' => values, 'labels' => values },
+    # Measure-pickers are single-valued (see the param-control path above): a
+    # `list` control defaults to multiple, which drops the scalar `value` and
+    # errors the Switch (scalar vs array). Pin single. Verified live 2026-07-05.
+    'selectionMode' => 'single',
     'value'       => values.first,
     'includeNulls' => 'when-no-value-is-selected'
   }
@@ -4190,6 +4371,15 @@ unless opts[:no_auto_controls]   # default-on: never miss a .twb parameter/filte
       next
     end
     m = map_column(cap, mmap)
+    if m.nil?
+      # Calc-bound filter that's ALREADY materialized on the master under its
+      # internal name (bead: calc-bound-filter wiring / #259) — match by the
+      # calc's identity, not its caption, and wire it like any quick-filter
+      # instead of falsely flagging needs-materialization. (The plan-hierarchy
+      # miss: a hierarchy-level filter whose Calculation_NNN column exists.)
+      m = materialized_calc_column(cap, meta['columns_by_guid'] || {}, mmap, norm_cap)
+      warnings << "quick filter '#{cap}' binds to a calculated field that is ALREADY materialized on the master (matched by calc identity) — wiring it" if m
+    end
     if m.nil?
       # No master-map regex matched. If the caption names a CALCULATED field,
       # that's expected — a calc dim ("Team Bucket", "Tier") has no raw column
@@ -4718,6 +4908,67 @@ unless actions.empty?
   warn "wrote #{actions_md_path} (#{actions.size} action entries)"
 end
 
+# ---- spec-API limits — unsupported source primitives/features (bead ubr5.20) --
+# Some Tableau viz kinds + features have NO Sigma spec path. When the builder
+# can't emit them it produces NOTHING and NO warning — so they vanish silently
+# from coverage.json (the #1 "the report said clean but the dashboard is missing
+# things" failure). Scan the SOURCE dashboard zones and name each unsupported
+# primitive/feature explicitly. Detectors are CONSERVATIVE (fire only on a clear
+# structural signal) to avoid false positives; one entry per zone.
+def spec_api_limit_entries(layout)
+  entries = []
+  add = lambda do |cap, severity, detail, action|
+    entries << { 'visual' => cap.to_s, 'source_type' => 'worksheet',
+                 'severity' => severity, 'recoverable' => false,
+                 'detail' => detail, 'action' => action }
+  end
+  (layout || []).each do |dash|
+    (dash['zones'] || []).each do |z|
+      next unless z['kind'] == 'chart'
+      cap  = (z['caption'] || z['id']).to_s
+      mk   = z['mark_class'].to_s
+      ck   = z['chart_kind'].to_s
+      calc = (z['calculations'] || []).map { |c| "#{c['caption']} #{c['formula']}" }.join(' ')
+      meas = (z['measures'] || []).map { |m| m['column'] }.join(' ')
+      # Bump / rank-flow: a line chart whose plotted value is a RANK/INDEX table
+      # calc (one line per entity connecting rank positions over time). ubr5.21.
+      if (mk == 'Line' || ck == 'line') &&
+         (meas =~ /\[?rank\b/i || calc =~ /\b(?:RANK(?:_UNIQUE|_DENSE|_MODIFIED|_PERCENTILE)?|INDEX)\s*\(/i)
+        add.call(cap, 'dropped',
+                 'bump / rank-flow chart (line-per-entity rank over a time axis) — no Sigma chart primitive',
+                 'Rebuild as a line chart with a computed Rank() y-value on an inverted axis, or omit (see bead ubr5.21).')
+        next
+      end
+      # Shape / image mark used as an icon or decorative graphic — Sigma has no
+      # shape mark; these are silently dropped today.
+      if mk == 'Shape'
+        add.call(cap, 'dropped',
+                 'shape / image-mark worksheet (icon or decorative graphic) — Sigma has no shape mark',
+                 'Recreate with a hosted image element (kind:image + URL) or omit; not auto-migrated.')
+        next
+      end
+      # Filled map / choropleth with a color gradient — limited Sigma geo support.
+      if z['geo_role'] && (mk =~ /map|polygon/i || ck =~ /map|choropleth/i)
+        add.call(cap, 'degraded',
+                 'filled map / choropleth — Sigma polygon/value-gradient geography support is limited',
+                 'Verify against a Sigma map element; a point/bubble-map fallback may be needed.')
+        next
+      end
+      # KPI ▲/▼ delta: the big number migrates, but the vs-prior comparison
+      # indicator (arrow + % change) is UI-only, not spec-authorable.
+      if (z['is_kpi'] || ck == 'kpi') &&
+         (calc =~ /(?:up|down)\s*arrow|%\s*change|change from prev|vs\.?\s*prev|prior (?:month|period|year)/i ||
+          meas =~ /arrow|%\s*change/i)
+        add.call(cap, 'degraded',
+                 'KPI comparison indicator (▲/▼ + % vs prior period) is UI-only — the value migrates, the delta does not',
+                 'Add the trend/comparison in the Sigma editor after publish (not spec-authorable; memory sigma-kpi-trend-comparison-ui-only).')
+        next
+      end
+    end
+  end
+  entries
+end
+
 # ---- coverage.json — ONE consolidated "what didn't carry over (and why)" ledger
 # (bead beads-sigma-59mk; ports powerbi-to-sigma PR #177). The builder already
 # emits the facts — 87 build WARN lines + the dropped-control / inferred-tile /
@@ -4779,6 +5030,14 @@ warnings.each do |w|
     'detail' => ws[0, 300],
     'action' => (recoverable ? 'Resolve the field on the master (map it / add the calc column), then re-run.' : nil)
   }
+end
+
+# (5) spec-API limits — unsupported source primitives/features (bead ubr5.20).
+# Skip any zone already surfaced by a warning above (avoid double-listing).
+_already = coverage_unresolved.map { |u| u['visual'].to_s.downcase }
+spec_api_limit_entries(layout).each do |e|
+  next if _already.include?(e['visual'].to_s.downcase)
+  coverage_unresolved << e
 end
 
 built_n = (defined?(elements) && elements.respond_to?(:size)) ? elements.size : 0

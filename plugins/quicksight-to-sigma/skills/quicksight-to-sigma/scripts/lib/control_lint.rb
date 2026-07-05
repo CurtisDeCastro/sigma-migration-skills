@@ -202,8 +202,18 @@ module ControlLint
         scope_by_cid[c['controlId']] = c if c.is_a?(Hash) && c['controlId']
       end
       # (c) the Qlik class: source had filter signals, spec built zero controls.
+      # BUT suppress when every scope entry is an already-surfaced gap
+      # (needs-wiring / needs-materialization): the builder DID account for each
+      # source signal in the coverage ledger — e.g. a dashboard whose only
+      # "filter" is an orphan/unreferenced parameter that legitimately becomes no
+      # placeable control. That's a surfaced gap, not the silent static-workbook
+      # miss this rule targets. A genuinely silent miss has signals but NO scope
+      # entries explaining them → still fails.
       signals = scope['sourceFilterSignals'].to_i
-      if signals.positive? && rows.empty?
+      scoped = Array(scope['controls'])
+      all_surfaced_gaps = scoped.any? &&
+                          scoped.all? { |c| %w[needs-wiring needs-materialization].include?(c['status'].to_s) }
+      if signals.positive? && rows.empty? && !all_surfaced_gaps
         violations << "no controls built: the source artifact reported #{signals} filter signal(s) " \
                       '(control-scope.json sourceFilterSignals) but the spec contains ZERO control ' \
                       'elements — the source dashboard is interactive and the migration shipped a ' \
@@ -270,7 +280,16 @@ module ControlLint
     end
 
     # (c) annotated controls that never made it into the spec ------------------
+    # A scope entry flagged as an ALREADY-SURFACED gap (needs-wiring: an orphan/
+    # unreferenced parameter the builder intentionally does not place as a dead
+    # control; needs-materialization: a calc-bound filter whose column isn't on
+    # the model yet) is recorded in the controls-coverage ledger, NOT silently
+    # dropped — so its absence from the spec is expected, not a "not migrated"
+    # failure. Only a control the builder recorded as EMITTED but that's missing
+    # from the spec is a real bug the source filter was lost.
+    surfaced_gap = %w[needs-wiring needs-materialization].freeze
     scope_by_cid.each do |cid, c|
+      next if surfaced_gap.include?(c['status'].to_s)
       violations << "missing control: control-scope.json expects control #{cid.inspect}" \
                     "#{c['sourceName'] ? " (source: #{c['sourceName'].inspect})" : ''} but the spec " \
                     'has no control with that controlId — the source filter was not migrated'
