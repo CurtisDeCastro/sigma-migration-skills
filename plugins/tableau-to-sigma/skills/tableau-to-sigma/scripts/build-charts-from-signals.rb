@@ -595,6 +595,43 @@ def map_column(header, mmap)
   nil
 end
 
+# Resolve a calc-bound quick-filter to an ALREADY-materialized master column by
+# the calc's IDENTITY, not a naive caption match (bead: calc-bound-filter wiring
+# / #259). A quick-filter on a calculated field maps to no raw column, so
+# map_column(cap) is nil and the control was recorded `needs-materialization` —
+# even when the calc is already a column on the master. The filter's caption can
+# arrive as EITHER form, so we bridge both against `columns_by_guid` (keyed by
+# internal name → friendly caption):
+#   - cap is an INTERNAL name, often blend-suffixed ("Calculation_NNN 1"): strip
+#     the " N" secondary-source suffix, resolve to the friendly caption, and try
+#     that against the master (a calc materialized + renamed to its caption — the
+#     an "N. <Level>" hierarchy-level calc case).
+#   - cap is a CAPTION ("Team Bucket"): find the internal name(s) carrying it and
+#     try those (a calc materialized under its raw internal name).
+# Returns the mmap column entry when the calc is already materialized (→ wire it
+# like any quick-filter), else nil (→ genuinely needs materialization). Pure.
+def materialized_calc_column(cap, columns_by_guid, mmap, norm)
+  return nil if cap.nil? || columns_by_guid.nil?
+  base   = cap.to_s.sub(/\s+\d+\z/, '').strip   # strip a blend/secondary suffix
+  target = norm.call(cap)
+  base_n = norm.call(base)
+
+  # Direction 1: cap IS an internal calc name → friendly caption → master.
+  info = columns_by_guid[cap.to_s] || columns_by_guid[base]
+  if info && info['caption']
+    m = map_column(info['caption'], mmap)
+    return m if m
+  end
+
+  # Direction 2: cap is a caption → internal name(s) carrying it → master.
+  columns_by_guid.each do |internal, ci|
+    next unless ci && [target, base_n].include?(norm.call(ci['caption']))
+    m = map_column(internal, mmap)
+    return m if m
+  end
+  nil
+end
+
 # Resolve which Sigma column a Tableau <sort column="..."> targets: the chart's
 # dim or its measure. Tableau sort columns look like
 # `[federated.X].[none:REGION:nk]` or `[sum:NET_REVENUE:qk]` — pull the middle
@@ -4302,6 +4339,15 @@ unless opts[:no_auto_controls]   # default-on: never miss a .twb parameter/filte
       next
     end
     m = map_column(cap, mmap)
+    if m.nil?
+      # Calc-bound filter that's ALREADY materialized on the master under its
+      # internal name (bead: calc-bound-filter wiring / #259) — match by the
+      # calc's identity, not its caption, and wire it like any quick-filter
+      # instead of falsely flagging needs-materialization. (The plan-hierarchy
+      # miss: a hierarchy-level filter whose Calculation_NNN column exists.)
+      m = materialized_calc_column(cap, meta['columns_by_guid'] || {}, mmap, norm_cap)
+      warnings << "quick filter '#{cap}' binds to a calculated field that is ALREADY materialized on the master (matched by calc identity) — wiring it" if m
+    end
     if m.nil?
       # No master-map regex matched. If the caption names a CALCULATED field,
       # that's expected — a calc dim ("Team Bucket", "Tier") has no raw column
