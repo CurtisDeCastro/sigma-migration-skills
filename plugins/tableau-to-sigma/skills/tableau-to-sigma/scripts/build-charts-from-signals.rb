@@ -4239,6 +4239,13 @@ unless opts[:no_auto_controls]   # default-on: never miss a .twb parameter/filte
         'kind' => 'manual', 'valueType' => 'text',
         'values' => values, 'labels' => labels
       }
+      # A Tableau parameter is ALWAYS single-valued. Sigma defaults a `list`
+      # control to selectionMode:"multiple", which (a) drops the scalar default
+      # `value` on readback and (b) makes the translated Switch/If measure-picker
+      # compile to type "error" — a scalar case-compare against a multi-select
+      # ARRAY. Pin single so the scalar default applies and the Switch resolves.
+      # (Verified live 2026-07-05: without this the picker ships dead.)
+      spec['selectionMode'] = 'single'
       spec['value'] = p['default_value']
     elsif p['param_domain'] == 'range' && %w[integer real].include?(p['datatype'])
       # Numeric range parameter → Sigma `number-range` control (discovered by
@@ -4314,6 +4321,10 @@ $param_switches.each do |sw|
     # its display mode, else segmented (button row).
     'controlType' => sigma_control_type(control_display_for(layout, pcap, norm_cap)),
     'source'      => { 'kind' => 'manual', 'valueType' => 'text', 'values' => values, 'labels' => values },
+    # Measure-pickers are single-valued (see the param-control path above): a
+    # `list` control defaults to multiple, which drops the scalar `value` and
+    # errors the Switch (scalar vs array). Pin single. Verified live 2026-07-05.
+    'selectionMode' => 'single',
     'value'       => values.first,
     'includeNulls' => 'when-no-value-is-selected'
   }
@@ -4874,6 +4885,67 @@ unless actions.empty?
   warn "wrote #{actions_md_path} (#{actions.size} action entries)"
 end
 
+# ---- spec-API limits — unsupported source primitives/features (bead ubr5.20) --
+# Some Tableau viz kinds + features have NO Sigma spec path. When the builder
+# can't emit them it produces NOTHING and NO warning — so they vanish silently
+# from coverage.json (the #1 "the report said clean but the dashboard is missing
+# things" failure). Scan the SOURCE dashboard zones and name each unsupported
+# primitive/feature explicitly. Detectors are CONSERVATIVE (fire only on a clear
+# structural signal) to avoid false positives; one entry per zone.
+def spec_api_limit_entries(layout)
+  entries = []
+  add = lambda do |cap, severity, detail, action|
+    entries << { 'visual' => cap.to_s, 'source_type' => 'worksheet',
+                 'severity' => severity, 'recoverable' => false,
+                 'detail' => detail, 'action' => action }
+  end
+  (layout || []).each do |dash|
+    (dash['zones'] || []).each do |z|
+      next unless z['kind'] == 'chart'
+      cap  = (z['caption'] || z['id']).to_s
+      mk   = z['mark_class'].to_s
+      ck   = z['chart_kind'].to_s
+      calc = (z['calculations'] || []).map { |c| "#{c['caption']} #{c['formula']}" }.join(' ')
+      meas = (z['measures'] || []).map { |m| m['column'] }.join(' ')
+      # Bump / rank-flow: a line chart whose plotted value is a RANK/INDEX table
+      # calc (one line per entity connecting rank positions over time). ubr5.21.
+      if (mk == 'Line' || ck == 'line') &&
+         (meas =~ /\[?rank\b/i || calc =~ /\b(?:RANK(?:_UNIQUE|_DENSE|_MODIFIED|_PERCENTILE)?|INDEX)\s*\(/i)
+        add.call(cap, 'dropped',
+                 'bump / rank-flow chart (line-per-entity rank over a time axis) — no Sigma chart primitive',
+                 'Rebuild as a line chart with a computed Rank() y-value on an inverted axis, or omit (see bead ubr5.21).')
+        next
+      end
+      # Shape / image mark used as an icon or decorative graphic — Sigma has no
+      # shape mark; these are silently dropped today.
+      if mk == 'Shape'
+        add.call(cap, 'dropped',
+                 'shape / image-mark worksheet (icon or decorative graphic) — Sigma has no shape mark',
+                 'Recreate with a hosted image element (kind:image + URL) or omit; not auto-migrated.')
+        next
+      end
+      # Filled map / choropleth with a color gradient — limited Sigma geo support.
+      if z['geo_role'] && (mk =~ /map|polygon/i || ck =~ /map|choropleth/i)
+        add.call(cap, 'degraded',
+                 'filled map / choropleth — Sigma polygon/value-gradient geography support is limited',
+                 'Verify against a Sigma map element; a point/bubble-map fallback may be needed.')
+        next
+      end
+      # KPI ▲/▼ delta: the big number migrates, but the vs-prior comparison
+      # indicator (arrow + % change) is UI-only, not spec-authorable.
+      if (z['is_kpi'] || ck == 'kpi') &&
+         (calc =~ /(?:up|down)\s*arrow|%\s*change|change from prev|vs\.?\s*prev|prior (?:month|period|year)/i ||
+          meas =~ /arrow|%\s*change/i)
+        add.call(cap, 'degraded',
+                 'KPI comparison indicator (▲/▼ + % vs prior period) is UI-only — the value migrates, the delta does not',
+                 'Add the trend/comparison in the Sigma editor after publish (not spec-authorable; memory sigma-kpi-trend-comparison-ui-only).')
+        next
+      end
+    end
+  end
+  entries
+end
+
 # ---- coverage.json — ONE consolidated "what didn't carry over (and why)" ledger
 # (bead beads-sigma-59mk; ports powerbi-to-sigma PR #177). The builder already
 # emits the facts — 87 build WARN lines + the dropped-control / inferred-tile /
@@ -4935,6 +5007,14 @@ warnings.each do |w|
     'detail' => ws[0, 300],
     'action' => (recoverable ? 'Resolve the field on the master (map it / add the calc column), then re-run.' : nil)
   }
+end
+
+# (5) spec-API limits — unsupported source primitives/features (bead ubr5.20).
+# Skip any zone already surfaced by a warning above (avoid double-listing).
+_already = coverage_unresolved.map { |u| u['visual'].to_s.downcase }
+spec_api_limit_entries(layout).each do |e|
+  next if _already.include?(e['visual'].to_s.downcase)
+  coverage_unresolved << e
 end
 
 built_n = (defined?(elements) && elements.respond_to?(:size)) ? elements.size : 0
