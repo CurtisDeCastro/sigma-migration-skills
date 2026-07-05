@@ -184,6 +184,7 @@ module MechanicalSpecs
         connectionId: #{conn.to_json},
         database: #{db.to_json},
         schema: #{schema.to_json},
+        tableMapping: #{(table_mapping || {}).to_json},
       });
       const bare = out.model || out.sigmaDataModel || out;
       writeFileSync(#{raw_out.to_json}, JSON.stringify(bare, null, 2));

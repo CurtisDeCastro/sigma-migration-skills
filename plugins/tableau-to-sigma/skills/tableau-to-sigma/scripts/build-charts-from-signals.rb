@@ -802,6 +802,74 @@ def param_control_ref(caption)
   "[ctl-param-#{caption.downcase.gsub(/\W+/, '-').sub(/-$/, '')}]"
 end
 
+# ---- Parameter → column data-scoping tracer (TASK C / #259) ----------------
+# A data-scoping parameter drives a boolean filter calc that compares a column
+# to the parameter — e.g. `[Region] = [Parameters].[Region Param]` — which
+# Tableau uses as a worksheet filter (keep only matching rows). To reproduce
+# that in Sigma the parameter's control must actually FILTER the column, not
+# merely be referenced by a translated calc (a materialized boolean column
+# filters nothing on its own). This PURE tracer scans every calc formula for
+# such comparisons against the given parameter and returns:
+#
+#   { 'clean' => [{ 'col' => <caption>, 'column_id' => <master col id>,
+#                   'op' => '='|'>='|'<='|'>'|'<' }, ...],
+#     'candidates' => [<caption>, ...] }
+#
+# `clean` = single, whole-formula comparisons "[Col] <op> [Param]" (either
+#           operand order) whose [Col] resolves to a master column. The caller
+#           auto-wires the EQUALITY ones to a filter target (directional ops are
+#           surfaced, not auto-wired — an inclusion filter can't express ">").
+# `candidates` = every non-parameter column any param-referencing calc mentions
+#           that resolves to a master column — surfaced so the operator knows the
+#           target(s) when the calc is a multi-param period engine we won't guess.
+# Pure (no I/O, no globals) so it is unit-testable in isolation.
+def param_filter_targets(param_cap, calc_formulas, mmap, columns_by_guid = {}, param_name: nil)
+  out = { 'clean' => [], 'candidates' => [] }
+  param_forms = [param_cap, param_name].map { |x| x.to_s.gsub(/^\[|\]$/, '').strip }
+                                       .reject(&:empty?).uniq
+  return out if param_forms.empty?
+  is_param = ->(ref) { param_forms.any? { |pf| pf.casecmp?(ref.to_s.strip) } }
+  op_re = /(>=|<=|<>|!=|=|>|<)/
+
+  (calc_formulas || {}).each_value do |raw|
+    next if raw.to_s.empty?
+    # Normalize [Parameters].[X] → [X] and resolve [<guid>] → [caption] so refs
+    # compare uniformly, then require the formula to touch this parameter.
+    s = raw.to_s.gsub(/\s+/, ' ')
+            .gsub(/\[Parameters\]\.\[([^\]]+)\]/i, '[\1]')
+            .gsub(/\[([0-9a-f\-]{36})\]/i) do
+              info = (columns_by_guid || {})[Regexp.last_match(1)]
+              info && info['caption'] ? "[#{info['caption'].strip}]" : Regexp.last_match(0)
+            end
+    next unless param_forms.any? { |pf| s =~ /\[#{Regexp.escape(pf)}\]/i }
+
+    # Candidate columns: every bracketed ref that is not the parameter and
+    # resolves to a master column.
+    s.scan(/\[([^\/\]]+)\]/).flatten.each do |ref|
+      r = ref.strip
+      next if is_param.call(r)
+      out['candidates'] << r if map_column(r, mmap)
+    end
+
+    # Clean single-comparison form: the WHOLE formula is "[A] <op> [B]" with the
+    # parameter on exactly one side and a master column on the other.
+    if (m = s.strip.match(/\A\[([^\/\]]+)\]\s*#{op_re}\s*\[([^\/\]]+)\]\z/))
+      a, op, b = m[1].strip, m[2], m[3].strip
+      col = if is_param.call(b) && !is_param.call(a) then a
+            elsif is_param.call(a) && !is_param.call(b) then b
+            end
+      if col && (mc = map_column(col, mmap))
+        # Normalize the operator to be column-relative regardless of operand order.
+        op = { '>' => '<', '<' => '>', '>=' => '<=', '<=' => '>=' }.fetch(op, op) if is_param.call(a)
+        out['clean'] << { 'col' => col, 'column_id' => mc['id'], 'op' => op }
+      end
+    end
+  end
+  out['clean'].uniq! { |c| [c['column_id'], c['op']] }
+  out['candidates'].uniq!
+  out
+end
+
 # ---- Tableau table-calc translators ---------------------------------------
 # Translate Tableau table-calculation functions to their Sigma equivalents.
 # Returns the translated formula, plus a placement hint. Sigma window
@@ -4301,15 +4369,57 @@ unless opts[:no_auto_controls]   # default-on: never miss a .twb parameter/filte
       spec['controlType'] = 'text'
       spec['value'] = p['default_value']
     end
+    # TASK C (#259): data-scoping wiring. If this parameter drives a boolean
+    # filter calc "[Col] = [Param]" whose [Col] resolves to a master column,
+    # give the control a real FILTER TARGET on that column so it actually scopes
+    # data (turns needs-wiring / inert-formula → emitted+filters). Only EQUALITY
+    # is auto-wired — an inclusion filter can't express a directional ">"/"<", so
+    # those (and multi-param period engines) are SURFACED with their candidate
+    # column(s) for the operator to finish, never silently mis-wired.
+    pft = param_filter_targets(cap, calc_formula_by_caption, mmap,
+                               meta['columns_by_guid'] || {}, param_name: p['name'])
+    filter_targets = []
+    pft['clean'].select { |c| c['op'] == '=' }.each do |c|
+      ts, = control_targets.call(c['col'], { 'id' => c['column_id'] })
+      filter_targets.concat(ts)
+    end
+    filter_targets.uniq! { |t| [t.dig('source', 'elementId'), t['columnId']] }
+    wired_cols = pft['clean'].select { |c| c['op'] == '=' }.map { |c| c['col'] }.uniq
+
+    if filter_targets.any?
+      spec['filters'] = filter_targets
+      warnings << "parameter '#{cap}' data-scopes #{wired_cols.join(', ')} via a boolean filter calc " \
+                  "→ wired control [#{spec['controlId']}] to filter #{filter_targets.size} element target(s)"
+    end
+
+    if filter_targets.any?
+      status = 'emitted'
+      mechanism = unreferenced_param ? 'filters' : 'formula+filters'
+      signal = "tableau parameter '#{cap}' data-scopes #{wired_cols.join(', ')} (boolean filter calc → filter target)"
+    elsif unreferenced_param
+      status = 'needs-wiring'
+      mechanism = 'formula'
+      # Enrich the surfaced record with the candidate column(s) the param's calcs
+      # reference (always-correct, low-risk) instead of a generic "wire it".
+      cands = pft['candidates']
+      signal = if cands.any?
+                 "tableau parameter '#{cap}' (NOT calc-referenced; its filter calc scopes " \
+                 "#{cands.join(', ')} — wire the control to filter that column)"
+               else
+                 "tableau parameter '#{cap}' (NOT calc-referenced — emitted for coverage; wire its filter target)"
+               end
+    else
+      status = 'emitted'
+      mechanism = 'formula'
+      signal = "tableau parameter '#{cap}' (referenced by worksheet calcs)"
+    end
+
     param_controls << spec
-    # Parameters drive charts through FORMULA references, not filter targets —
-    # record the formula-consumer set so the coverage lint knows the mechanism.
-    control_scope_records << {
-      'controlId' => spec['controlId'], 'name' => cap, 'mechanism' => 'formula',
-      'status' => (unreferenced_param ? 'needs-wiring' : 'emitted'),
-      'source_signal' => (unreferenced_param ?
-        "tableau parameter '#{cap}' (NOT calc-referenced — emitted for coverage; wire its filter target)" :
-        "tableau parameter '#{cap}' (referenced by worksheet calcs)"),
+    # Record the consumer set so the coverage lint knows the mechanism.
+    rec = {
+      'controlId' => spec['controlId'], 'name' => cap, 'mechanism' => mechanism,
+      'status' => status,
+      'source_signal' => signal,
       # Translated calcs reference the control by its CONTROL ID (line ~541's
       # "[ctl-param-<slug>]" form), not by caption — match what the lint's
       # formula-ref reach walk will actually see.
@@ -4317,6 +4427,9 @@ unless opts[:no_auto_controls]   # default-on: never miss a .twb parameter/filte
         (e['columns'] || []).any? { |c| c['formula'].to_s.include?("[#{spec['controlId']}]") }
       }.map { |e| { 'element_id' => e['id'], 'name' => e['name'] } }
     }
+    rec['targets'] = filter_targets if filter_targets.any?
+    rec['candidate_columns'] = pft['candidates'] if !filter_targets.any? && pft['candidates'].any?
+    control_scope_records << rec
   end
 end
 

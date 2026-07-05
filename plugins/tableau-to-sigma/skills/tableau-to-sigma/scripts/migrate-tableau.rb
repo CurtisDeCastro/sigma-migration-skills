@@ -98,6 +98,16 @@ OptionParser.new do |o|
   o.on('--folder ID')        { |v| opts[:folder]  = v }
   o.on('--db NAME')          { |v| opts[:db]      = v }
   o.on('--schema NAME')      { |v| opts[:schema]  = v }
+  o.on('--table-mapping PAIR',
+       "'TabRelation=WAREHOUSE_TABLE' — remap a Tableau logical table to its physical " \
+       'warehouse table (repeatable). Needed for packaged-extract (.twbx) workbooks whose ' \
+       'sheet name ("Orders$") does not match the warehouse table ("ORDERS"). The trailing ' \
+       '"$" extract suffix is stripped automatically, so a mapping is only required when the ' \
+       'stripped name still differs.') do |v|
+    k, val = v.split('=', 2)
+    abort "--table-mapping expects 'Src=DEST' (got #{v.inspect})" if val.nil? || k.to_s.empty? || val.empty?
+    (opts[:table_mapping] ||= {})[k.strip] = val.strip
+  end
   o.on('--specs PATH')       { |v| opts[:specs]   = File.expand_path(v) }
   # Agent-authored JSON specs — the manual path's re-entry into the GATED spine.
   # When the mechanical converter backend is unavailable, the agent authors the DM
@@ -770,7 +780,11 @@ if mechanical
   end
   conv = MechanicalSpecs.run_converter(
     twb_path: twb, conn: opts[:conn], db: (opts[:db] || 'CSA'),
-    schema: (opts[:schema] || 'TJ'), mcp_build: mcp_build, workdir: WORK)
+    schema: (opts[:schema] || 'TJ'), mcp_build: mcp_build, workdir: WORK,
+    table_mapping: opts[:table_mapping])
+  if opts[:table_mapping]&.any?
+    line "table mapping: #{opts[:table_mapping].map { |k, v| "#{k}→#{v}" }.join(', ')}"
+  end
   st = conv['stats'] || {}
   line "mechanical converter: #{st['elements']} element(s), #{st['columns']} column(s), " \
        "#{st['metrics']} metric(s), #{st['relationships']} relationship(s); #{(conv['warnings'] || []).size} warning(s)"

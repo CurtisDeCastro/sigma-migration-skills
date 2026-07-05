@@ -24,9 +24,9 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   mod
 ));
 
-// ../../../../../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/util.js
+// ../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/util.js
 var require_util = __commonJS({
-  "../../../../../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/util.js"(exports) {
+  "../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/util.js"(exports) {
     "use strict";
     var nameStartChar = ":A-Za-z_\\u00C0-\\u00D6\\u00D8-\\u00F6\\u00F8-\\u02FF\\u0370-\\u037D\\u037F-\\u1FFF\\u200C-\\u200D\\u2070-\\u218F\\u2C00-\\u2FEF\\u3001-\\uD7FF\\uF900-\\uFDCF\\uFDF0-\\uFFFD";
     var nameChar = nameStartChar + "\\-.\\d\\u00B7\\u0300-\\u036F\\u203F-\\u2040";
@@ -98,9 +98,9 @@ var require_util = __commonJS({
   }
 });
 
-// ../../../../../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/validator.js
+// ../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/validator.js
 var require_validator = __commonJS({
-  "../../../../../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/validator.js"(exports) {
+  "../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/validator.js"(exports) {
     "use strict";
     var util = require_util();
     var defaultOptions = {
@@ -410,9 +410,9 @@ var require_validator = __commonJS({
   }
 });
 
-// ../../../../../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/OptionsBuilder.js
+// ../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/OptionsBuilder.js
 var require_OptionsBuilder = __commonJS({
-  "../../../../../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/OptionsBuilder.js"(exports) {
+  "../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/OptionsBuilder.js"(exports) {
     var { DANGEROUS_PROPERTY_NAMES, criticalProperties } = require_util();
     var defaultOnDangerousProperty = (name) => {
       if (DANGEROUS_PROPERTY_NAMES.includes(name)) {
@@ -536,9 +536,9 @@ var require_OptionsBuilder = __commonJS({
   }
 });
 
-// ../../../../../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/xmlNode.js
+// ../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/xmlNode.js
 var require_xmlNode = __commonJS({
-  "../../../../../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/xmlNode.js"(exports, module) {
+  "../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/xmlNode.js"(exports, module) {
     "use strict";
     var XmlNode = class {
       constructor(tagname) {
@@ -563,9 +563,9 @@ var require_xmlNode = __commonJS({
   }
 });
 
-// ../../../../../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/DocTypeReader.js
+// ../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/DocTypeReader.js
 var require_DocTypeReader = __commonJS({
-  "../../../../../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/DocTypeReader.js"(exports, module) {
+  "../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/DocTypeReader.js"(exports, module) {
     var util = require_util();
     var DocTypeReader = class {
       constructor(options) {
@@ -851,9 +851,9 @@ var require_DocTypeReader = __commonJS({
   }
 });
 
-// ../../../../../../../Users/tjwells/sigma-data-model-mcp/node_modules/strnum/strnum.js
+// ../../../Users/tjwells/sigma-data-model-mcp/node_modules/strnum/strnum.js
 var require_strnum = __commonJS({
-  "../../../../../../../Users/tjwells/sigma-data-model-mcp/node_modules/strnum/strnum.js"(exports, module) {
+  "../../../Users/tjwells/sigma-data-model-mcp/node_modules/strnum/strnum.js"(exports, module) {
     var hexRegex = /^[-+]?0x[a-fA-F0-9]+$/;
     var numRegex = /^([\-\+])?(0*)([0-9]*(\.[0-9]*)?)$/;
     var consider = {
@@ -939,9 +939,9 @@ var require_strnum = __commonJS({
   }
 });
 
-// ../../../../../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/ignoreAttributes.js
+// ../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/ignoreAttributes.js
 var require_ignoreAttributes = __commonJS({
-  "../../../../../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/ignoreAttributes.js"(exports, module) {
+  "../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/ignoreAttributes.js"(exports, module) {
     function getIgnoreAttributesFn(ignoreAttributes) {
       if (typeof ignoreAttributes === "function") {
         return ignoreAttributes;
@@ -964,9 +964,9 @@ var require_ignoreAttributes = __commonJS({
   }
 });
 
-// ../../../../../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/OrderedObjParser.js
+// ../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/OrderedObjParser.js
 var require_OrderedObjParser = __commonJS({
-  "../../../../../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/OrderedObjParser.js"(exports, module) {
+  "../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/OrderedObjParser.js"(exports, module) {
     "use strict";
     var util = require_util();
     var xmlNode = require_xmlNode();
@@ -1569,9 +1569,9 @@ var require_OrderedObjParser = __commonJS({
   }
 });
 
-// ../../../../../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/node2json.js
+// ../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/node2json.js
 var require_node2json = __commonJS({
-  "../../../../../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/node2json.js"(exports) {
+  "../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/node2json.js"(exports) {
     "use strict";
     function prettify(node, options) {
       return compress(node, options);
@@ -1656,9 +1656,9 @@ var require_node2json = __commonJS({
   }
 });
 
-// ../../../../../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/XMLParser.js
+// ../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/XMLParser.js
 var require_XMLParser = __commonJS({
-  "../../../../../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/XMLParser.js"(exports, module) {
+  "../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/XMLParser.js"(exports, module) {
     var { buildOptions } = require_OptionsBuilder();
     var OrderedObjParser = require_OrderedObjParser();
     var { prettify } = require_node2json();
@@ -1714,9 +1714,9 @@ var require_XMLParser = __commonJS({
   }
 });
 
-// ../../../../../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlbuilder/orderedJs2Xml.js
+// ../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlbuilder/orderedJs2Xml.js
 var require_orderedJs2Xml = __commonJS({
-  "../../../../../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlbuilder/orderedJs2Xml.js"(exports, module) {
+  "../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlbuilder/orderedJs2Xml.js"(exports, module) {
     var EOL = "\n";
     function toXml(jArray, options) {
       let indentation = "";
@@ -1847,9 +1847,9 @@ var require_orderedJs2Xml = __commonJS({
   }
 });
 
-// ../../../../../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlbuilder/json2xml.js
+// ../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlbuilder/json2xml.js
 var require_json2xml = __commonJS({
-  "../../../../../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlbuilder/json2xml.js"(exports, module) {
+  "../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlbuilder/json2xml.js"(exports, module) {
     "use strict";
     var buildFromOrderedJs = require_orderedJs2Xml();
     var getIgnoreAttributesFn = require_ignoreAttributes();
@@ -2093,9 +2093,9 @@ var require_json2xml = __commonJS({
   }
 });
 
-// ../../../../../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/fxp.js
+// ../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/fxp.js
 var require_fxp = __commonJS({
-  "../../../../../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/fxp.js"(exports, module) {
+  "../../../Users/tjwells/sigma-data-model-mcp/node_modules/fast-xml-parser/src/fxp.js"(exports, module) {
     "use strict";
     var validator = require_validator();
     var XMLParser2 = require_XMLParser();
@@ -2108,10 +2108,10 @@ var require_fxp = __commonJS({
   }
 });
 
-// ../../../../../../../Users/tjwells/sigma-data-model-mcp/build/tableau.js
+// ../../../Users/tjwells/sigma-data-model-mcp/build/tableau.js
 var import_fast_xml_parser = __toESM(require_fxp(), 1);
 
-// ../../../../../../../Users/tjwells/sigma-data-model-mcp/build/sigma-ids.js
+// ../../../Users/tjwells/sigma-data-model-mcp/build/sigma-ids.js
 var SIGMA_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 var _usedIds = /* @__PURE__ */ new Set();
 var SIGMA_LOWERCASE_WORDS = /* @__PURE__ */ new Set([
@@ -2153,7 +2153,7 @@ function sigmaInodeId(identifier) {
 }
 function sigmaDisplayName(s) {
   const normalized = (s || "").replace(/([a-z])([A-Z])/g, "$1_$2").replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2").replace(/([A-Za-z])([0-9])/g, "$1_$2").replace(/([0-9])([A-Za-z])/g, "$1_$2");
-  const words = normalized.toLowerCase().split(/[_\s]+/).filter(Boolean);
+  const words = normalized.toLowerCase().split(/[_\s/-]+/).filter(Boolean);
   return words.map((w, i) => i === 0 || !SIGMA_LOWERCASE_WORDS.has(w) ? w.charAt(0).toUpperCase() + w.slice(1) : w).join(" ");
 }
 function formatFromMask(mask) {
@@ -2347,7 +2347,7 @@ function buildDerivedElements(elements) {
   return derived;
 }
 
-// ../../../../../../../Users/tjwells/sigma-data-model-mcp/build/formulas.js
+// ../../../Users/tjwells/sigma-data-model-mcp/build/formulas.js
 function decodeXmlEntities(s) {
   if (!s || s.indexOf("&") === -1)
     return s;
@@ -2941,7 +2941,7 @@ function tableauFormulaIsRls(formula) {
   return /\b(USERNAME|FULLNAME|USERDOMAIN|ISMEMBEROF|ISUSERNAME|USERATTRIBUTE)\s*\(/i.test(formula || "");
 }
 
-// ../../../../../../../Users/tjwells/sigma-data-model-mcp/build/tableau.js
+// ../../../Users/tjwells/sigma-data-model-mcp/build/tableau.js
 function paramControlId(rawName) {
   return "ctl-" + rawName.replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-|-$/g, "").toLowerCase();
 }
@@ -3601,6 +3601,20 @@ ${joins.join("\n")}`;
     consumedIds: [fact.id, ...rels.map((r) => r.targetElementId)]
   };
 }
+var _tableMapping = {};
+function resolveTableName(tbl) {
+  if (!tbl)
+    return tbl;
+  const stripped = tbl.replace(/\$+$/, "");
+  const up = tbl.toUpperCase();
+  const strippedUp = stripped.toUpperCase();
+  for (const [k, v] of Object.entries(_tableMapping)) {
+    const ku = k.toUpperCase();
+    if (k === tbl || k === stripped || ku === up || ku === strippedUp)
+      return v;
+  }
+  return stripped;
+}
 function extractPath(rel, dbOverride, schOverride) {
   const rawTable = attr(rel, "table") || attr(rel, "name") || "";
   const cleaned = rawTable.replace(/[\[\]]/g, "").replace(/\s*\([^)]*\)/g, "");
@@ -3608,11 +3622,11 @@ function extractPath(rel, dbOverride, schOverride) {
   const stripHash = (s) => s.replace(/_[0-9A-Fa-f]{16,}$/, "");
   let path;
   if (parts.length >= 2) {
-    path = [...parts.slice(0, -1), stripHash(parts[parts.length - 1])];
+    path = [...parts.slice(0, -1), resolveTableName(stripHash(parts[parts.length - 1]))];
   } else if (parts.length === 1) {
-    path = [schOverride || "SCHEMA", stripHash(parts[0])];
+    path = [schOverride || "SCHEMA", resolveTableName(stripHash(parts[0]))];
   } else {
-    path = [attr(rel, "name").toUpperCase() || "UNKNOWN"];
+    path = [resolveTableName(attr(rel, "name").toUpperCase()) || "UNKNOWN"];
   }
   if (dbOverride) {
     if (path.length >= 3)
@@ -3955,9 +3969,10 @@ function tryBuildBlendModel(parsed, datasources, dbOverride, schOverride, connId
 }
 function convertTableauToSigma(xmlContent, options = {}) {
   resetIds();
-  const { connectionId = "", database = "", schema = "", datasourceIndex = 0 } = options;
-  const dbOverride = (database || "").toUpperCase();
-  const schOverride = (schema || "").toUpperCase();
+  const { connectionId = "", database = "", schema = "", datasourceIndex = 0, tableMapping = {} } = options;
+  _tableMapping = tableMapping || {};
+  const dbOverride = database || "";
+  const schOverride = schema || "";
   let parsed;
   try {
     parsed = xmlParser.parse(xmlContent);
