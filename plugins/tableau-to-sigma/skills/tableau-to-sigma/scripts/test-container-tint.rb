@@ -80,9 +80,17 @@ tinted = containers.find { |c| c.dig('style', 'backgroundColor') == '#07b4a24e' 
 check(!tinted.nil?, "a container carries the zone tint backgroundColor '#07b4a24e' (8-digit alpha, verbatim)", fails)
 check(tinted && tinted.dig('style', 'borderRadius') == 'round', "tinted container has borderRadius: round", fails)
 check(tinted && tinted.dig('style', 'borderColor') == '#07b4a2', "tinted container carries borderColor from the zone", fails)
-# The dark page-header container (HEADER_STYLE) must remain distinct from the tint.
-check(containers.any? { |c| c.dig('style', 'backgroundColor') == '#0F172A' },
-      "page header container still emitted (unaffected)", fails)
+# #271: the page-header container is now SOURCE-DERIVED (header_from_source) — the
+# skill no longer stamps a fixed navy band on every dashboard. This fixture has no
+# header band in the source, so the header container is still emitted but carries
+# NO hardcoded fill (transparent), and stays distinct from the tint.
+# (Was: asserted the old fixed HEADER_STYLE '#0F172A', removed in #271.)
+hdr = containers.find { |c| c['id'].to_s.end_with?('-hdr') }
+check(!hdr.nil?, "page header container still emitted (source-derived)", fails)
+check(hdr && hdr.dig('style', 'backgroundColor') != '#07b4a24e',
+      "header container does NOT inherit the zone tint (stays distinct)", fails)
+check(hdr.nil? || hdr.dig('style', 'backgroundColor') != '#0F172A',
+      "no fixed navy band stamped when the source has no header fill", fails)
 
 puts
 if fails.empty?

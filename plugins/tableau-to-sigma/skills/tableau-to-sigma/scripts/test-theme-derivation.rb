@@ -64,9 +64,35 @@ dup = derive_theme([{ 'dashboard' => 'X', 'zone_tree' => [
 ] }])
 check(dup['categoricalScheme'] == %w[#07b4a2 #e8519a], "same base at 2 alphas dedups (got #{dup['categoricalScheme'].inspect})", fails)
 
+# --- brand_palette (general D1): the source's color-encoding palette wins ----
+# A color-SCHEME dashboard (no tinted region cards) still gets a real scheme
+# from parse-twb-layout's brand_palette, instead of degenerating to white fills.
+brand = derive_theme([{
+  'dashboard' => 'ER', 'brand_palette' => %w[#ba2020 #8f1716 #ac4746],
+  'zone_tree' => [{ 'id' => '1', 'kind' => 'container', 'fill_color' => '#ffffff6d', 'children' => [
+    { 'id' => 'c1', 'kind' => 'container', 'fill_color' => '#ffffff' }, # white card — must NOT be the palette
+    { 'id' => 'c2', 'kind' => 'container', 'fill_color' => '#fafafa' }
+  ] }]
+}])
+check(brand['categoricalScheme'] == %w[#ba2020 #8f1716 #ac4746],
+      "brand_palette (color encodings) beats white card fills (got #{brand['categoricalScheme'].inspect})", fails)
+check(brand['backgroundCanvas'] == '#ffffff',
+      "canvas 8-digit alpha stripped to solid #rrggbb (got #{brand['backgroundCanvas'].inspect})", fails)
+
+# brand_palette with a single colour → too few to theme, fall back to tints.
+fb = derive_theme([{
+  'dashboard' => 'X', 'brand_palette' => %w[#4e79a7],
+  'zone_tree' => [
+    { 'id' => 'a', 'kind' => 'container', 'fill_color' => '#07b4a24e' },
+    { 'id' => 'b', 'kind' => 'container', 'fill_color' => '#e8519a4e' }
+  ]
+}])
+check(fb['categoricalScheme'] == %w[#07b4a2 #e8519a],
+      "single-colour brand_palette falls back to the tint palette (got #{fb['categoricalScheme'].inspect})", fails)
+
 puts
 if fails.empty?
-  puts 'ALL PASS — D1/Pass-7 theme derivation (canvas + region palette)'
+  puts 'ALL PASS — D1/Pass-7 theme derivation (canvas + region palette + brand palette)'
   exit 0
 else
   puts "#{fails.size} FAILURE(S):"

@@ -88,7 +88,44 @@ def dashboard_in_scope?(name, page_id)
   name_hit || page_hit
 end
 
-xml = TwbXml.parse(File.read(INP))
+TWB_TEXT = File.read(INP)
+xml = TwbXml.parse(TWB_TEXT)
+
+# ---- Brand palette (Phase-1 D1, general) ----------------------------------
+# The workbook's real categorical/brand palette lives in the color ENCODING
+# (<encoding attr='color'> <map to='#rrggbb'>…) and any custom <color-palette>
+# — NOT in container fills. derive_theme previously read only container tints,
+# so a dashboard whose design is a color scheme (not tinted cards) degenerated
+# to picking white card backgrounds. We surface the encoded colors here,
+# frequency-ranked, with neutrals dropped (near-white/black card & text fills,
+# and low-chroma greys), so downstream theming can reproduce the source's own
+# palette. Neutral test mirrors the prototype validated across the benchmark
+# set (ER reds / Quota blue-teal / History blue+orange / Udemy subject dots).
+def color_neutral?(hex)
+  h = hex.delete('#')
+  return true unless h.length == 6
+  r, g, b = h[0, 2].to_i(16), h[2, 2].to_i(16), h[4, 2].to_i(16)
+  mx = [r, g, b].max
+  mn = [r, g, b].min
+  # Low chroma (grey), OR near-white (ALL channels high) OR near-black (ALL
+  # channels low). Test mn/mx not the opposite bound, so a vivid colour with a
+  # single near-max channel (orange #f06719, red #ff0000) is NOT dropped.
+  (mx - mn) < 24 || mn > 235 || mx < 26
+end
+
+def extract_brand_palette(twb_text)
+  freq = Hash.new(0)
+  # color-encoding buckets
+  twb_text.scan(/<map\s+to=(['"])(#[0-9a-fA-F]{6})\1/) { |_q, hex| freq[hex.downcase] += 1 }
+  # user-defined custom palettes
+  twb_text.scan(%r{<color-palette\b[^>]*>(.*?)</color-palette>}m) do |body,|
+    body.to_s.scan(/#[0-9a-fA-F]{6}/) { |hex| freq[hex.downcase] += 1 }
+  end
+  freq.reject! { |hex, _| color_neutral?(hex) }
+  freq.sort_by { |hex, n| [-n, hex] }.map(&:first)
+end
+
+BRAND_PALETTE = extract_brand_palette(TWB_TEXT)
 
 def pct(v)
   return nil if v.nil?
@@ -1173,10 +1210,15 @@ xml.elements.each('//dashboard') do |d|
   end
 
   dashboards << {
-    'dashboard' => d.attributes['name'],
-    'is_story'  => is_story,
-    'zones'     => zones,
-    'zone_tree' => zone_tree
+    'dashboard'     => d.attributes['name'],
+    'is_story'      => is_story,
+    'zones'         => zones,
+    'zone_tree'     => zone_tree,
+    # Phase-1 D1 (general): workbook brand palette from color encodings, so
+    # derive_theme can reproduce the source's own scheme instead of falling
+    # back to white card fills. Empty when the source encodes no non-neutral
+    # colors (theme then omitted — Sigma defaults apply, never worse).
+    'brand_palette' => BRAND_PALETTE
   }
 end
 

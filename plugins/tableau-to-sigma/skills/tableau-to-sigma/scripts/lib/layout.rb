@@ -58,10 +58,13 @@ module SigmaLayout
     el
   end
 
-  # Spec-side page-title text element (white text over the dark header band).
-  def header_text_el(id, title)
-    { 'id' => id, 'kind' => 'text',
-      'body' => %(# <span style="color: #FFFFFF">#{title}</span>) }
+  # Spec-side page-title text element. `color` sets the title colour: pass a
+  # light hex over a dark header band, or nil to leave the title in the theme's
+  # default text colour (correct when the title sits on the page canvas — no
+  # band — so it isn't forced white-on-white).
+  def header_text_el(id, title, color = nil)
+    span = color ? %(<span style="color: #{color}">#{title}</span>) : title.to_s
+    { 'id' => id, 'kind' => 'text', 'body' => "# #{span}" }
   end
 
   # Header band XML: dark full-width container at the top of the page wrapping
