@@ -116,6 +116,19 @@ check(idx2['region picker'] == true, 'GUID-keyed param_name resolves caption via
 idx3 = picker_param_caps_index(sws, [], {})
 check(idx3.empty?, 'un-wired picker → no dedup (control still emitted)', fails)
 
+# --- selectionMode:single regression (live-verified 2026-07-05) --------------
+# A Tableau parameter is single-valued. Sigma defaults a `list` control to
+# selectionMode:"multiple", which drops the scalar default `value` AND errors
+# the translated Switch/If (scalar case-compare vs a multi-select ARRAY) — the
+# picker ships DEAD. Both control-emission sites MUST pin single. These assert
+# on SRC because the emission is inline (not an extractable function).
+picker_block = SRC[/param_controls << \{.*?'controlId'\s*=>\s*sw\['control_id'\].*?\n\s*\}/m]
+check(picker_block && picker_block.include?("'selectionMode' => 'single'"),
+      "param measure-picker control pins selectionMode:'single'", fails)
+list_param_block = SRC[/if p\['param_domain'\] == 'list'.*?spec\['value'\] = p\['default_value'\]/m]
+check(list_param_block && list_param_block.include?("spec['selectionMode'] = 'single'"),
+      "list parameter control pins selectionMode:'single'", fails)
+
 puts
 if fails.empty?
   puts 'ALL PASS — param measure-picker: control-driven Switch, metric inlining, graceful null, window skip'
