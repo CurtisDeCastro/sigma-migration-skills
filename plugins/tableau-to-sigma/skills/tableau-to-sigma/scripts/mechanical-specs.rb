@@ -562,7 +562,7 @@ module MechanicalSpecs
   # warehouse-table columns whose physical name is NOT in the real table are
   # DROPPED as phantom (Tableau virtual-connection flattening invents columns
   # like "REGION (STORE_DIM (CSA.STORE_DIM))" that don't exist in ORDER_FACT).
-  def fixup_dm_spec(model, real_columns = nil)
+  def fixup_dm_spec(model, real_columns = nil, column_mapping: nil)
     begin
       require 'set'
       $LOAD_PATH.unshift File.expand_path('lib', __dir__)
@@ -572,6 +572,11 @@ module MechanicalSpecs
     end
     real = {}
     (real_columns || {}).each { |t, cols| real[t.to_s.upcase] = cols.map { |c| c.to_s.upcase }.to_set }
+    # Column-rename map (--column-mapping): a genuine extract-caption → warehouse
+    # rename ("State" → STATE_PROVINCE) that separator-folding can't recover.
+    # Keyed by the UPPER extract caption; value = the real warehouse column.
+    colmap = {}
+    (column_mapping || {}).each { |src, dest| colmap[src.to_s.strip.upcase] = dest.to_s.strip }
     # Caption hygiene FIRST (bead 320u): Sigma trims display names server-side,
     # so trailing-space captions must be trimmed everywhere refs are built.
     trim_spec_whitespace!(model)
@@ -597,6 +602,7 @@ module MechanicalSpecs
       e['name'] = display_name(tbl) unless tbl.empty?
     end
     phantom = 0
+    remapped = 0
     dropped_col_ids = Set.new
     dropped_disp_by_el = Hash.new { |h, k| h[k] = Set.new } # element id -> dropped display names
     unless real.empty?
@@ -616,10 +622,24 @@ module MechanicalSpecs
           # drop a calc column (it has functions / multiple refs).
           is_base_ref = c['formula'].to_s =~ /\A\[#{Regexp.escape((el.dig('source','path')||[]).last.to_s)}\/[^\]]+\]\z/
           if is_base_ref && phys && !rc.include?(phys)
-            drop[c['id']] = true
-            dn = col_display(c)
-            dropped_disp_by_el[el['id']] << dn if dn
-            phantom += 1
+            # Before dropping a base column absent from the real table, try the
+            # column-rename map: if the caption maps to a REAL warehouse column,
+            # rewrite the ref to it and KEEP the original caption as the display
+            # name (so downstream master/chart refs by caption still resolve).
+            disp = tail.split('/').last
+            dest = colmap[disp.to_s.strip.upcase] || colmap[phys]
+            if dest && rc.include?(dest.upcase)
+              tblname = (el.dig('source', 'path') || []).last.to_s
+              c['name'] = disp if c['name'].to_s.empty?
+              c['formula'] = "[#{tblname}/#{display_name(dest.upcase)}]"
+              remapped += 1
+              keep << c
+            else
+              drop[c['id']] = true
+              dn = col_display(c)
+              dropped_disp_by_el[el['id']] << dn if dn
+              phantom += 1
+            end
           else
             keep << c
           end
@@ -731,7 +751,7 @@ module MechanicalSpecs
         el['metrics'] = kept_metrics
       end
     end
-    { fixed: fixed, dropped: dropped.uniq, phantom: phantom }
+    { fixed: fixed, dropped: dropped.uniq, phantom: phantom, remapped: remapped }
   end
 
   # The display-name suffix Sigma stamps on a derived-view column when its bare

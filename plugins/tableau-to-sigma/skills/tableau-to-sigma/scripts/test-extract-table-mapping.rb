@@ -15,6 +15,8 @@
 #            (was a type=error / phantom-dropped column).
 #   Part C — fixup_dm_spec phantom-drop keeps a separator-mismatch column that
 #            exists in the warehouse and drops only a genuine rename.
+#   Part D — --column-mapping remaps a genuine rename to its warehouse column
+#            (keeping the original caption) instead of dropping it.
 #
 # Usage:  ruby scripts/test-extract-table-mapping.rb
 
@@ -95,6 +97,25 @@ check(kept.include?('[ORDERS/Country Region]'), 'Country Region KEPT (exists as 
 check(kept.include?('[ORDERS/Sub Category]'), 'Sub Category KEPT (exists as SUB_CATEGORY)', fails)
 check(kept.none? { |f| f == '[ORDERS/State]' }, 'State DROPPED (genuine rename → STATE_PROVINCE)', fails)
 check(pf[:phantom].to_i == 1, "exactly 1 phantom column dropped (got #{pf[:phantom]})", fails)
+
+puts 'Part D — --column-mapping remaps a genuine rename (keeps the caption)'
+model2 = nil
+Dir.mktmpdir do |dir|
+  twb_path = File.join(dir, 'extract.twb')
+  File.write(twb_path, TWB)
+  model2 = MechanicalSpecs.run_converter(
+    twb_path: twb_path, conn: 'conn-1', db: 'CSA', schema: 'Tableau Test',
+    mcp_build: VENDORED, workdir: dir, table_mapping: { 'Orders$' => 'ORDERS' })['model']
+end
+pf2 = MechanicalSpecs.fixup_dm_spec(model2, real_cols, column_mapping: { 'State' => 'STATE_PROVINCE' })
+el2 = (model2['pages'] || []).flat_map { |p| p['elements'] || [] }
+      .find { |e| e.dig('source', 'kind') == 'warehouse-table' }
+state_col = (el2['columns'] || []).find { |c| c['name'] == 'State' }
+check(pf2[:remapped].to_i == 1, "exactly 1 column remapped (got #{pf2[:remapped]})", fails)
+check(pf2[:phantom].to_i.zero?, "nothing dropped once State is mapped (got phantom #{pf2[:phantom]})", fails)
+check(state_col && state_col['formula'] == '[ORDERS/State Province]',
+      "State refs [ORDERS/State Province] (→ STATE_PROVINCE) (got #{state_col && state_col['formula']})", fails)
+check(state_col && state_col['name'] == 'State', 'original caption "State" preserved as the display name', fails)
 
 puts
 if fails.empty?

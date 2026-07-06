@@ -108,6 +108,16 @@ OptionParser.new do |o|
     abort "--table-mapping expects 'Src=DEST' (got #{v.inspect})" if val.nil? || k.to_s.empty? || val.empty?
     (opts[:table_mapping] ||= {})[k.strip] = val.strip
   end
+  o.on('--column-mapping PAIR',
+       "'ExtractCaption=WAREHOUSE_COL' — remap a base column whose extract caption " \
+       'is a genuine RENAME of the warehouse column (repeatable). Separator-folding ' \
+       'already handles "Country/Region"/"Sub-Category"; use this only for true renames ' \
+       'like "State"=STATE_PROVINCE, else the column is dropped as phantom. The original ' \
+       'caption is kept as the Sigma column display name.') do |v|
+    k, val = v.split('=', 2)
+    abort "--column-mapping expects 'Src=DEST' (got #{v.inspect})" if val.nil? || k.to_s.empty? || val.empty?
+    (opts[:column_mapping] ||= {})[k.strip] = val.strip
+  end
   o.on('--specs PATH')       { |v| opts[:specs]   = File.expand_path(v) }
   # Agent-authored JSON specs — the manual path's re-entry into the GATED spine.
   # When the mechanical converter backend is unavailable, the agent authors the DM
@@ -1427,8 +1437,9 @@ elsif mechanical
     dim_catalogs[tname.upcase] = cj['columns']
   end
   unless real_cols.empty?
-    pf = MechanicalSpecs.fixup_dm_spec(dm, real_cols)
+    pf = MechanicalSpecs.fixup_dm_spec(dm, real_cols, column_mapping: opts[:column_mapping])
     line "phantom-column filter: dropped #{pf[:phantom]} non-existent base column(s) using #{real_cols.size} live table catalog(s)" if pf[:phantom].to_i.positive?
+    line "column-rename remap: rewired #{pf[:remapped]} base column(s) to their warehouse names (--column-mapping)" if pf[:remapped].to_i.positive?
   end
   # Computed-key join recovery (bead ovud): joins the converter skipped
   # ("DATE([Order Date]) = [Date Key]") are recovered mechanically — via a calc
