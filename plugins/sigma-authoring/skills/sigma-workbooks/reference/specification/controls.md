@@ -18,7 +18,7 @@ A `control` element has exactly these fields:
 |---|---|---|
 | `kind` | yes | Always `control` |
 | `id` | yes | Element ID — must be unique on the page |
-| `controlId` | yes | Formula reference name (e.g., `RegionFilter`) — keep distinct from `id`. This is the human-meaningful handle used when referring to the control's value from formulas. |
+| `controlId` | yes | Formula reference name (e.g., `RegionFilter`) — keep distinct from `id`. This is the human-meaningful handle used when referring to the control's value from formulas (syntax + typed-value rules: see [Referencing a Control's Value in a Formula](#referencing-a-controls-value-in-a-formula)). |
 | `controlType` | yes | Any value the recipe above returns. Determines the widget and filter behavior. |
 | `filters` | — | Array of `{ source, columnId }` — connects the control to the column(s) it filters. `source` is `{ kind: table, elementId: ... }`. |
 | `source` | list/segmented | Where the widget's VALUE LIST comes from. Double-nested: `{ kind: source, source: { kind: table, elementId: ... }, columnId: ... }`. |
