@@ -97,3 +97,20 @@ Same class as the datetime strip: a list control whose filter target column is
 numeric returns PUT 200 but reads back `filters: null`. Fix: add a hidden
 `Text()` cast column on the target element and point the control at the cast.
 (Found live by gate 7 on the MicroStrategy retrofit, 2026-06-12.)
+
+## Gotcha: a `[controlId]` formula reference is only "reach" if consumed type-compatibly
+The lint counts a `[<controlId>]` reference in a calc/formula as control **reach**
+— but reach ≠ resolves. A control's value is **typed** (`number`/`slider`→number,
+`date-range`→a `{start,end}` variant, `list`/`segmented`→a set, `checkbox`/`switch`→
+bool, `text`→text). Consuming it in a type-incompatible op (bare arithmetic on a
+`date-range`/`list`, e.g. `[Range] + 1`) reads back clean but `#ERROR`s **at query
+time** with `Expected number; received variant` — the same silent-until-query class
+as the numeric-list-target strip above. Two failure shapes to avoid:
+- referencing the element **`id`** instead of the **`controlId`** → `Unknown column`
+  (never "reach"); and
+- a type-mismatched `controlId` reference → counts as reach, renders, then `#ERROR`s.
+
+Consume per type (`[Range].start`, `Text([Ctl])`, `[Col] = [ListCtl]`), don't strip
+the control. Full syntax + typed-value table + worked examples:
+`sigma-authoring/skills/sigma-workbooks/reference/specification/controls.md`
+→ "Referencing a Control's Value in a Formula". (Verified live 2026-07-01.)
