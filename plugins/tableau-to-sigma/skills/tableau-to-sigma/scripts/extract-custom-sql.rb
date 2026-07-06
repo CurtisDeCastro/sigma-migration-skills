@@ -37,6 +37,13 @@ abort 'usage: --out PATH (optional: --workbook-luid LUID  OR  --twb PATH)' unles
 results = []
 
 # --- GraphQL path ---
+# NB: do NOT add `isUnique` (or other newer CustomSQLTable fields) to these
+# queries. `isUnique` is undefined on `CustomSQLTable` in some Tableau Metadata
+# API versions (verified 2026-07-06 on 10ay.online.tableau.com): its presence
+# fails the ENTIRE query with a FieldUndefined ValidationError, `Tableau.graphql`
+# rescues it, and the extractor silently returns 0 custom-SQL blocks — which
+# then breaks published-datasource (sqlproxy) hydration downstream. Keep the
+# field set to the widely-supported minimum (name/query/connectionType + downstream).
 gql_scope = if opts[:wb_luid]
               <<~GQL
                 {
@@ -45,7 +52,7 @@ gql_scope = if opts[:wb_luid]
                     upstreamTables {
                       __typename name
                       ... on CustomSQLTable {
-                        query connectionType isUnique
+                        query connectionType
                       }
                     }
                   }
@@ -56,7 +63,7 @@ gql_scope = if opts[:wb_luid]
                 {
                   customSQLTablesConnection(first: 500) {
                     nodes {
-                      name query connectionType isUnique
+                      name query connectionType
                       downstreamWorkbooks { name luid }
                       downstreamDatasources { name luid }
                     }

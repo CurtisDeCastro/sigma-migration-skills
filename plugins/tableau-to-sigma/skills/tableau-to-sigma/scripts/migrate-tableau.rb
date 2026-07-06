@@ -83,6 +83,7 @@ require 'date'
 require 'time'
 require 'set'
 require_relative 'lib/scout_gate'
+require_relative 'hydrate-custom-sql'
 
 $stdout.sync = true # progress lines interleave correctly when piped/captured
 
@@ -788,8 +789,45 @@ if mechanical
       =====================================================================
     MSG
   end
+  # ── Published-datasource (sqlproxy) hydration ──────────────────────────────
+  # A workbook that connects to a PUBLISHED data source carries only a
+  # <connection class='sqlproxy'> placeholder — the real Custom SQL lives in the
+  # published DS on Tableau Server, not the .twb. Left as-is the converter emits a
+  # 0-column element → POST "Source not found". Pull the Custom SQL
+  # (extract-custom-sql.rb, via Metadata GraphQL — it traverses INTO the published
+  # DS) and splice it into the .twb as a real Custom SQL relation
+  # (hydrate-custom-sql.rb) BEFORE conversion, so the converter's normal kind:sql
+  # path builds the model. No-ops for non-sqlproxy workbooks.
+  conv_twb = twb
+  if have_twb && HydrateCustomSql.twb_has_sqlproxy?(twb)
+    line 'published-datasource (sqlproxy) connection detected — pulling Custom SQL to hydrate before conversion'
+    hcsql = File.join(WORK, 'hydrate-custom-sql.json')
+    if wb_luid
+      ext = ['ruby', File.join(HERE, 'extract-custom-sql.rb'),
+             '--workbook-luid', wb_luid, '--twb', twb, '--out', hcsql]
+      run!(['bash', '-c', "eval \"$(#{File.join(HERE, 'get-tableau-token.sh')})\" && " +
+            ext.map { |a| "'" + a.gsub("'", "'\\''") + "'" }.join(' ')], allow_fail: true)
+    else
+      line '  (no workbook LUID — cannot query Metadata GraphQL; hydration relies on any SQL already in the .twb)'
+    end
+    if File.exist?(hcsql)
+      hyd_twb = File.join(WORK, 'workbook-hydrated.twb')
+      _out, hst = run!(['ruby', File.join(HERE, 'hydrate-custom-sql.rb'),
+                        '--twb', twb, '--custom-sql', hcsql,
+                        '--db', (opts[:db] || 'CSA'), '--schema', (opts[:schema] || 'TJ'),
+                        '--out', hyd_twb], allow_fail: true)
+      if hst.success? && File.exist?(hyd_twb) && File.read(hyd_twb) != File.read(twb)
+        conv_twb = hyd_twb
+        line "  hydrated → workbook-hydrated.twb (converter will build a Custom SQL element from the published DS)"
+      else
+        line '  ⚠ could not hydrate (no Custom SQL retrieved, or no output columns) — converting the sqlproxy .twb as-is.'
+        line '     Expect "Source not found"; provide the Custom SQL manually (copy it into a <relation type=text>) or materialize the published DS as a warehouse view.'
+      end
+    end
+  end
+
   conv = MechanicalSpecs.run_converter(
-    twb_path: twb, conn: opts[:conn], db: (opts[:db] || 'CSA'),
+    twb_path: conv_twb, conn: opts[:conn], db: (opts[:db] || 'CSA'),
     schema: (opts[:schema] || 'TJ'), mcp_build: mcp_build, workdir: WORK,
     table_mapping: opts[:table_mapping])
   if opts[:table_mapping]&.any?
