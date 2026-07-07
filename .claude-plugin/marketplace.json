@@ -37,7 +37,7 @@
     {
       "name": "powerbi-to-sigma",
       "source": "./plugins/powerbi-to-sigma",
-      "description": "Power BI models/reports \u2192 Sigma, DAX translation + gap-scout, with parity verification. Bundles powerbi-to-sigma + powerbi-assessment.",
+      "description": "Power BI models/reports \u2192 Sigma, DAX translation + gap-scout, with parity verification. Bundles powerbi-to-sigma + powerbi-assessment + powerbi-import-to-snowflake (Import-mode data landing).",
       "category": "migration",
       "keywords": [
         "powerbi",
