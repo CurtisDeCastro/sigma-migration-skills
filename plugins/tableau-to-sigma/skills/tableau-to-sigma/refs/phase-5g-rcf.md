@@ -46,3 +46,5 @@ Only `spec-fixable` deltas block; classify UI-only / capability ceilings and mov
 
 ---
 
+
+> **Gate 8d — RCF fidelity ledger (exit 15).** The single recorded verdict (8b) proves *someone looked once*; the Phase 5g RCF loop proves the composition was iterated to convergence. `migrate-tableau.rb --finalize` passes `--require-fidelity-ledger` (unless the loop was disabled with `--rcf-passes 0`), so `assert-phase6-ran.rb` exits 15 until `fidelity-ledger.json` has zero unresolved `spec-fixable` deltas. See **Phase 5g** above. This gate is OPT-IN and shared byte-identically across converters — other plugins are unaffected until they pass the flag.
