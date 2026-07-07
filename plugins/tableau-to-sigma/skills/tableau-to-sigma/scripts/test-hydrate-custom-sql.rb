@@ -182,7 +182,7 @@ H.hydrate_pds!(hdoc, descriptors: [{'contentUrl'=>'PDS_X','relationType'=>'text'
 hrecs = {}
 hdoc.each_element("//metadata-record") { |m| hrecs[m.get_text('remote-name').value] = m }
 check(hrecs.keys.sort == %w[AMOUNT_USD SALES_REGION SFDC_OPPTY_ID], 'full 3-column set emitted (not just the 1 cached)', fails)
-check(hrecs['AMOUNT_USD'].attributes['class'] == 'measure', 'cached measure class PRESERVED', fails)
+check(hrecs['AMOUNT_USD'].attributes['class'] == 'column', 'class forced to "column" (converter drops non-column custom-SQL metadata-records)', fails)
 check(hrecs['AMOUNT_USD'].get_text('local-type').value == 'real', 'cached local-type=real PRESERVED (not downgraded to string)', fails)
 check(hrecs['SALES_REGION'].get_text('local-type').value == 'string' && hrecs['SALES_REGION'].attributes['class'] == 'column', 'uncached column defaults to string/column', fails)
 

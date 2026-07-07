@@ -836,6 +836,12 @@ module MechanicalSpecs
   # refs and the bare Tableau chart captions still resolve. Without real_labels
   # we fall back to the bare-name formula (correct only for non-virtual conns).
   def derive_master(fact_el, fact_name, base_el = nil, real_labels = nil, model = nil)
+    # A Custom SQL fact element is NAMELESS in the DM spec (rule 3), but Sigma
+    # assigns it the name "Custom SQL" server-side. An empty fact_name makes every
+    # master column formula an INVALID `[/Col]` (empty element segment) → the
+    # workbook POSTs but renders EMPTY (all published-DS / Custom-SQL-sourced
+    # workbooks). Fall back to the server-assigned name so refs are `[Custom SQL/Col]`.
+    fact_name = 'Custom SQL' if fact_name.to_s.strip.empty?
     master_columns = []
     mmap = {}
     seen = {}

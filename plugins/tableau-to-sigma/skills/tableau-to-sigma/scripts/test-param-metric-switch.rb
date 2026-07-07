@@ -65,10 +65,13 @@ def cols_of(spec)
 end
 
 puts 'Pattern A — numeric-coded param, CASE inside the aggregate: SUM(CASE [P] WHEN 0 THEN [A]…)'
+# Members are the REAL Tableau float form ("0."/"1.") — the shape that shipped a
+# blank switcher (control value "0." vs Switch key "0"). They must canonicalise
+# to match the WHEN keys.
 specA = build(zone_for('SUM(CASE [Parameters].[Type] WHEN 0 THEN [Net Revenue] WHEN 1 THEN [Cost] END)'),
               [{ 'caption' => 'Type', 'name' => '[Type]', 'param_domain' => 'list', 'datatype' => 'real',
-                 'members' => %w[0 1], 'default_value' => '0' }],
-              { 'Type' => [{ 'key' => '0', 'value' => 'Revenue' }, { 'key' => '1', 'value' => 'Cost' }] })
+                 'members' => ['0.', '1.'], 'default_value' => '0.' }],
+              { 'Type' => [{ 'key' => '0.', 'value' => 'Revenue' }, { 'key' => '1.', 'value' => 'Cost' }] })
 abort "build A produced no spec" unless specA
 elsA, colsA = cols_of(specA)
 measA = colsA.find { |c| c['formula'].to_s.include?('Switch([ctl-param-type]') }
@@ -81,8 +84,11 @@ ctlA = elsA.find { |e| e['kind'] == 'control' && e['controlId'] == 'ctl-param-ty
 check(!ctlA.nil?, 'Type control emitted', fails)
 vals = ctlA && (ctlA.dig('source', 'values') || ctlA['values'])
 labs = ctlA && (ctlA.dig('source', 'labels') || ctlA['labels'])
-check(vals == %w[0 1], "control option VALUES equal the Switch keys 0/1 — got #{vals.inspect}", fails)
-check(labs == %w[Revenue Cost], "alias LABELS carried (Revenue/Cost) — got #{labs.inspect}", fails)
+check(vals == %w[0 1], "control option VALUES canonicalised to match Switch keys 0/1 (float members '0.'/'1.') — got #{vals.inspect}", fails)
+check(labs == %w[Revenue Cost], "alias LABELS carried through canonicalisation (Revenue/Cost) — got #{labs.inspect}", fails)
+# The measure Switch keys and the control values must be identical strings.
+switch_keys = measA['formula'].scan(/"(\d+)"/).flatten
+check(switch_keys == vals, "Switch keys #{switch_keys.inspect} == control values #{vals.inspect} (the fix)", fails)
 check((ctlA && ctlA['selectionMode']) == 'single', 'control is single-select (scalar Switch compare)', fails)
 
 puts 'Pattern B — string param, per-branch aggregate: IF [P]="Revenue" THEN SUM([A]) ELSE SUM([B])'

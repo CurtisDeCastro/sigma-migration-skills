@@ -73,6 +73,12 @@ target = if opts[:dm_el_name]
          end
 dm_el_id   = target['id']
 dm_el_name = target['name']
+# A Custom SQL DM element is NAMELESS in the spec (rule 3: omit the element-level
+# name), but Sigma assigns it the name "Custom SQL" on the server. Without this
+# fallback the master column formula becomes an INVALID `[/Col]` (empty element
+# name) → the workbook POSTs but renders EMPTY (every published-DS / Custom-SQL-
+# sourced workbook). Use the server-assigned name so refs are `[Custom SQL/Col]`.
+dm_el_name = 'Custom SQL' if dm_el_name.to_s.strip.empty?
 
 # Master columns: either explicit from --master-cols or auto-passthrough from the DM element
 master_columns =
