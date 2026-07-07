@@ -42,7 +42,7 @@ def build(zone, params, column_aliases)
     File.write("#{d}/get-workbook.json", JSON.dump('views' => { 'view' => [{ 'id' => 'v1', 'name' => zone['caption'] }] }))
     Dir.mkdir("#{d}/views"); File.write("#{d}/views/v1.csv", "Partner Name,#{zone['caption']}\nAcme,1\n")
     o = "#{d}/specs.json"
-    `ruby #{BUILD} --tableau-dir #{d} --layout #{d}/layout.json --meta #{d}/meta.json --master-map #{d}/mm.json --master-element-id master --title Dash --auto-controls --out #{o} 2>&1`
+    `ruby #{BUILD} --tableau-dir #{d} --layout #{d}/layout.json --meta #{d}/meta.json --master-map #{d}/mm.json --master-element-id master --skip-dashboard-read unit-test --title Dash --auto-controls --out #{o} 2>&1`
     out = JSON.parse(File.read(o)) if File.exist?(o)
   end
   out

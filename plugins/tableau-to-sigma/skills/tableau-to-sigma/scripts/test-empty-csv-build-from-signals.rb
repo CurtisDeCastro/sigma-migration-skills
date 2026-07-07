@@ -90,6 +90,12 @@ Dir.mktmpdir do |d|
              JSON.dump('views' => { 'view' => [{ 'id' => 'v1', 'name' => 'Monthly Revenue Trend' }] }))
   Dir.mkdir(File.join(d, 'views'))
   File.write(File.join(d, 'views', 'v1.csv'), '')   # 0 bytes — the whole point
+  # Phase 1d dashboard-read artifact (the build script now gates on it). A real
+  # conversion writes this after Reading the dashboard PNG; enumerate the one tile.
+  File.write(File.join(d, 'png-read.json'),
+             JSON.dump('source_png' => 'views/v1.png',
+                       'tiles' => [{ 'title' => 'Monthly Revenue Trend', 'kind' => 'line-chart' }],
+                       'text_elements' => [], 'filter_shelf' => []))
   abort 'parse-twb-layout failed' unless system('ruby', PARSER, twb, lay, out: File::NULL, err: File::NULL)
   out = File.join(d, 'specs.json')
   build_log = `ruby #{BUILD} --tableau-dir #{d} --layout #{lay} --meta #{lay.sub(/\.json$/, '-meta.json')} --master-map #{mm} --master-element-id master --title Dash --out #{out} 2>&1`

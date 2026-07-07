@@ -82,8 +82,31 @@ OptionParser.new do |p|
   # Where the migration COVERAGE ledger lands (the aggregated drop/approx report
   # migrate-tableau.rb surfaces). Default: coverage.json next to --out. bead beads-sigma-59mk.
   p.on('--coverage-out PATH')       { |v| opts[:coverage_out] = v }
+  # 🚧 GATE escape hatch — waive the Phase 1d dashboard-read requirement. Use ONLY
+  # when the source dashboard PNG genuinely cannot be read; name the reason in your report.
+  p.on('--skip-dashboard-read REASON', 'waive the Phase 1d dashboard-read gate (REQUIRED reason; name it in your report)') { |v| opts[:skip_dashboard_read] = v }
 end.parse!
 %i[tab layout mmap out].each { |k| abort("missing --#{k.to_s.tr('_','-')}") unless opts[k] }
+
+# 🚧 GATE (Phase 1d) — refuse to build charts until the SOURCE dashboard PNG has
+# been read and enumerated. png-read.json is the artifact of that read; without it
+# the build produces the right numbers but silently drops tiles/text/filters the
+# source dashboard rendered (the most common Phase 5 escape). Escape hatch:
+# --skip-dashboard-read "<reason>". See scripts/lib/dashboard_read.rb + SKILL.md Phase 1d.
+require_relative 'lib/dashboard_read'
+if opts[:skip_dashboard_read]
+  warn "[SKIP] dashboard-read gate WAIVED (#{opts[:skip_dashboard_read]}) — name this in your migration report."
+else
+  dr_ok, dr_errs = DashboardRead.validate(opts[:tab])
+  unless dr_ok
+    warn "[FAIL] Phase 1d dashboard-read gate blocks chart build (#{DashboardRead.path(opts[:tab])}):"
+    dr_errs.each { |e| warn "       - #{e}" }
+    warn '       Read the dashboard PNG (get-view-image, solo) and write png-read.json enumerating'
+    warn '       every tile with its Sigma `kind` + text_elements + filter_shelf (SKILL.md Phase 1d),'
+    warn '       or waive with --skip-dashboard-read "<reason>" and name it in your report.'
+    exit 1
+  end
+end
 
 # ---- chart_kind → Sigma element kind ----
 SIGMA_KIND = {
