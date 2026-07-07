@@ -1,0 +1,129 @@
+<!-- Part of the tableau-to-sigma workflow — spine: ../SKILL.md. Phase 3 — build the data model spec -->
+
+## Phase 3 — Build the data model spec
+
+Write the spec to `/tmp/<name>/dm-spec.json`. Full schema is in
+`refs/data-model-spec.md`.
+
+### Critical rules
+
+1. **Endpoint**: `POST /v2/dataModels/spec` — NOT `/v2/workbooks/spec`.
+2. **`folderId` is required.** Find it via `GET /v2/files?typeFilters=workbook` — `parentId` on any of your workbooks.
+3. **Top-level shape uses `pages: [{elements: [...]}]`, NOT a bare `elements: [...]` at root.** The API rejects root-level `elements` with `pages: Invalid array: undefined`. Even if your DM only has one logical page (typical), still wrap the elements under a single page:
+   ```json
+   {
+     "name": "Orders",
+     "folderId": "<folder>",
+     "schemaVersion": 1,
+     "pages": [
+       {
+         "id": "p-data",
+         "name": "Data",
+         "elements": [ { /* warehouse-table or sql element */ } ]
+       }
+     ]
+   }
+   ```
+   This is the same shape `refs/data-model-spec.md` documents; the abbreviated examples below show only the element body — wrap them in `pages: [{elements: [...]}]` before POSTing.
+3. **Column name special characters** — read `refs/column-gotchas.md`. Rename any column whose `name` contains `/` ("Country/Region" → `"Country"`, "State/Province" → `"State"`).
+4. **Element name = formula prefix**. The `name` field on a DM element (e.g. `"Orders"`) becomes the prefix in all workbook formulas that reference it: `[Orders/Sales]`. Choose clean, stable names.
+5. **Relationships go on the source element**, not the target. See `refs/data-model-spec.md`.
+6. **Column formulas use the warehouse table name as prefix**: path `["CSA", "Tableau Test", "ORDERS"]` → formula `"[ORDERS/Column Name]"`.
+
+### When to use a Custom SQL element instead of a calc column
+
+> **Sigma window functions silently fail in DM calc columns and in workbook master (grouping-table) calc columns** — `CumulativeSum`, `Rank`, `Lag`, etc. POST successfully but resolve as `error` on GET, and the `*Over` family (`SumOver`/`RankOver`/`MaxOver`/...) is `Unknown function` in every spec context. **But they are FIRST-CLASS as CHART-element viz formulas on the yAxis** (WINPROBE-validated 2026-06-12, 930/930 cells): `build-charts-from-signals.rb` auto-emits the whole mainstream window/table-calc family that way — `RUNNING_*`→`Cumulative*`, bounded `WINDOW_*`→`Moving*`, share→`PercentOfTotal(agg, "grand_total")`, pareto→`CumulativeSum(PercentOfTotal(...))`, `RANK*`→`Rank/RankDense/RankPercentile(agg, "desc")`, `INDEX()`→`RowNumber()`, `LOOKUP(±n)`→`Lag/Lead`, unbounded `WINDOW_MAX/MIN/SUM`/`TOTAL`→hidden two-level grouped helper. Cumulative/rank formulas follow the chart's `xAxis.sort` (Tableau `<computed-sort>` is carried via a hidden companion measure) and auto-partition by the chart color dim. **Full mapping table + the broadcast-down/week-anchor gotchas: `refs/window-functions.md`.** The design rule stands: never write window functions as DM or master calc columns.
+
+> **`{FIXED ...}` LODs are AUTO-TRANSLATED — no Custom SQL needed.** When a
+> `{FIXED [dims] : AGG([m])}` calc is plotted as a chart/KPI measure,
+> `build-charts-from-signals.rb` emits a hidden TWO-LEVEL grouped helper
+> element on the Data page (`visibleAsSource:false`; inner grouping = the
+> FIXED dims computing the LOD aggregate, outer grouping = the chart's dims
+> computing the 2nd-stage aggregate over the inner GROUP values) and the chart
+> sources the helper, `Max()`-ing the outer calc (a chart re-aggregates a
+> grouped source at BASE grain with group calcs replicated per row — Max over
+> identical replicas is exact; verified live 2026-06-12). ⚠ Carried chart dims
+> must be functionally dependent on the FIXED dims (e.g. Customer Segment per
+> Customer Id) — the build emits a per-chart verify warning. The same helper
+> machinery handles **grain-aware averages**: `Avg` of a dim-table column
+> (Tableau relationship semantics evaluate it at the dim table's NATIVE grain,
+> including entities with no fact rows) sources the DM dim element directly.
+> NEVER write these as `SumOver`/`CountOver` master or DM calc columns — they
+> silently error.
+
+Any Tableau calc whose `requires_custom_sql: true` (from Phase 1e) — that is, a **manual window residue** (`WINDOW_MEDIAN/PERCENTILE/CORR/COVAR(P)/VAR(P)/STDEVP`, `PREVIOUS_VALUE`, `SIZE`, `FIRST`, `LAST`, `RANK_UNIQUE/MODIFIED`, or a compute-using/addressing variant beyond Table(Across)/simple partitions) or an `{INCLUDE/EXCLUDE}` LOD (those need the chart-grouping context) — must be implemented as a **Sigma Custom SQL data-model element**. (The mainstream `WINDOW_*`/`RUNNING_*`/`RANK*`/`INDEX`/`LOOKUP`/`TOTAL` family no longer routes here — it is auto-emitted as Sigma-native chart formulas, `refs/window-functions.md`.)
+
+```json
+{
+  "id": "el-orders-windowed",
+  "kind": "table",
+  "name": "Orders With Window Calcs",
+  "source": {
+    "connectionId": "<connection-id>",
+    "kind": "sql",
+    "statement": "SELECT o.ORDER_ID, o.REGION, o.SALES,\n  SUM(o.SALES) OVER (PARTITION BY o.REGION) AS REGION_TOTAL_SALES,\n  RANK() OVER (PARTITION BY o.REGION ORDER BY o.SALES DESC) AS SALES_RANK_IN_REGION,\n  SUM(o.SALES) OVER (ORDER BY o.ORDER_DATE ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS RUNNING_SALES\nFROM ANALYTICS.PUBLIC.ORDERS o"
+  },
+  "columns": [
+    { "id": "c-order-id",      "name": "Order Id",            "formula": "[Custom SQL/ORDER_ID]" },
+    { "id": "c-region",        "name": "Region",              "formula": "[Custom SQL/REGION]" },
+    { "id": "c-sales",         "name": "Sales",               "formula": "[Custom SQL/SALES]" },
+    { "id": "c-region-total",  "name": "Region Total Sales",  "formula": "[Custom SQL/REGION_TOTAL_SALES]" },
+    { "id": "c-sales-rank",    "name": "Sales Rank in Region","formula": "[Custom SQL/SALES_RANK_IN_REGION]" },
+    { "id": "c-running-sales", "name": "Running Sales",       "formula": "[Custom SQL/RUNNING_SALES]" }
+  ]
+}
+```
+
+Key points:
+- `source.kind` is `"sql"` (not `"warehouse-table"`).
+- `source.statement` is the raw SQL text (the field name is `statement`, NOT `sql`). Use the warehouse dialect for the underlying connection (Snowflake, BigQuery, etc.).
+- Column formula prefix is `[Custom SQL/<ALIAS_FROM_SELECT_LIST>]`. The alias is whatever you wrote in the `SELECT ... AS NAME` clause. **Use UPPERCASE aliases** (matches Snowflake's default identifier casing); Sigma's column lookup is case-sensitive against the SQL output.
+- Every column you want to expose in the DM needs both a SELECT-list entry in the SQL AND a corresponding `columns[]` entry on the DM element.
+- Translation hints from `extract-calc-fields.rb`:
+  - `RUNNING_*` / bounded `WINDOW_*` / `RANK*` / `INDEX` / `LOOKUP` / `TOTAL` — **do NOT route here anymore**: auto-emitted as Sigma-native chart viz formulas (`refs/window-functions.md`). The ANSI `OVER(...)` forms below are the fallback ONLY for the manual residues (`WINDOW_MEDIAN`/`WINDOW_PERCENTILE`/`PREVIOUS_VALUE`/`SIZE`/non-default addressing): e.g. `WINDOW_MEDIAN(SUM([X]))` → `MEDIAN(X) OVER (<partition>)`, `PREVIOUS_VALUE` → recursive logic in SQL.
+  - `{FIXED [Dim] : SUM([X])}` → `SUM(X) OVER (PARTITION BY Dim)` or a pre-aggregated subquery joined back — **fallback only**: when the LOD is plotted as a chart/KPI measure it is AUTO-TRANSLATED via the hidden two-level helper element (see the callout above), no Custom SQL needed
+  - **Nested LODs** (`{FIXED A : AVG({FIXED A, B : SUM([X])})}`) → a helper-element CHAIN, not one formula: innermost LOD = helper element 1 (grouped by its dims, aggregate as `Value`), each outer level consumes `[LOD Helper k/Value]` via a relationship on the shared dims. `build-charts-from-signals.rb` decomposes these automatically into `<out>-lod-chains.json` (innermost first) — build one grouped element (or Custom SQL `GROUP BY` subquery) per level. **Each outer level's source MUST carry `groupingId` pointing at the inner element's grouping** — a plain `{kind: table, elementId}` source reads BASE-grain rows with the aggregate repeated per row, so outer Avg/Median/Count silently come out row-weighted (caught live: 969.82 row-weighted vs 687.81 correct on CSA.TJ.ORDER_FACT). Live-verified pattern (exact parity vs warehouse SQL), 2026-06-11.
+
+When a workbook mixes plain calcs with window calcs, you can have BOTH kinds of DM elements in the same data model: one `warehouse-table` element for everything plain, plus one or more `sql` elements for the window/LOD calcs, related by key. Charts source from whichever element has the columns they need.
+
+> **DM PUT reassigns element IDs.** Combining a `warehouse-table` element with a `sql` element in the same DM works fine, but every PUT of the DM spec churns IDs — so plan to capture IDs once with `post-and-readback.rb`, build the workbook from those IDs, and avoid editing the DM in flight.
+
+### Translate Tableau calc fields here
+
+Each calc from `calc-fields.json` (Phase 1e) becomes a DM calc column (or a workbook-level
+calc on the master table, depending on grain). For calc columns that wrap a NULLABLE source
+in an IF/ELSEIF chain, **wrap with `Coalesce` to match Tableau's null-fallthrough behavior**.
+
+Example — Tableau:
+
+```
+IF [Lifetime Revenue] >= 5000 THEN "Platinum" ELSEIF >= 2000 THEN "Gold" ELSEIF >= 500 THEN "Silver" ELSE "Bronze" END
+```
+
+Sigma DM calc column on Order Fact (since the bucket depends on a joined dim):
+
+```
+If(Coalesce(Lookup([Customer Dim/Lifetime Revenue], [Customer Key], [Customer Dim/Customer Key]), -1) >= 5000, "Platinum",
+  If(Lookup([Customer Dim/Lifetime Revenue], [Customer Key], [Customer Dim/Customer Key]) >= 2000, "Gold",
+    If(Lookup([Customer Dim/Lifetime Revenue], [Customer Key], [Customer Dim/Customer Key]) >= 500, "Silver", "Bronze")))
+```
+
+Without `Coalesce(-1)` orphan-joined rows produce a NULL bucket instead of falling into "Bronze"
+the way Tableau's ELSE does — and parity will diverge.
+
+### Validate before posting
+
+```bash
+ruby scripts/validate-spec.rb --type datamodel /tmp/<name>/dm-spec.json
+```
+
+Catches: formula prefix mismatches, bare refs not matching a sibling, `kpi`/`pie`/`donut` kind
+mistakes, `rgb(...)` color strings (Cloudflare WAF blocks), missing yAxis on
+bar/line/area/combo/scatter, missing color+value on pie/donut, donut `holeValue.id` matching
+`value.id` (silent element drop), pivot-table missing rowsBy (single grand-total row), and
+nested-If on date functions without IsNull guard.
+
+Exit 0 = clean, exit 1 = errors printed to stdout.
+
+---
+
