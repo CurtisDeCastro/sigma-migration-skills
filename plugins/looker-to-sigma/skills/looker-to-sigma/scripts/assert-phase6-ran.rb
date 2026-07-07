@@ -109,6 +109,11 @@
 #      (grid_fill_pct < --min-grid-fill, default 0.45), OR a dashboard layout was
 #      built but no census was emitted. build-dashboard-layout.rb produces the
 #      census. Escape hatch: --skip-layout-fill "<reason>".
+#  15  RCF fidelity ledger unresolved (gate 8d; OPT-IN via --require-fidelity-ledger)
+#      — the Phase 5g render-compare-fix ledger (fidelity-ledger.json) is missing, or
+#      still carries spec-fixable deltas that were never resolved. Run the RCF loop
+#      (scripts/fidelity-loop.rb) to convergence, or waive named residuals with
+#      --accept-residuals id,id. Only enforced for converters that pass the flag.
 #
 # Prints a per-gate summary to stdout regardless of exit code.
 
@@ -147,6 +152,9 @@ OptionParser.new do |p|
   p.on('--min-grid-fill F', Float, 'gate 8c: minimum per-page grid_fill_pct (0..1, default 0.45) — pages below fail as mostly-empty') { |v| opts[:min_grid_fill] = v }
   p.on('--skip-layout-fill REASON', 'waive gate 8c (layout fill / grid coverage) — REQUIRED reason string. Use ONLY when a sparse/partial page is intentional. The reason MUST be named in your migration report.') { |v| opts[:skip_layout_fill] = v }
   p.on('--skip-telemetry-gate REASON', 'waive gate 10 (telemetry consent decision) — REQUIRED reason string. Use ONLY when the run genuinely cannot prompt (e.g. unattended CI). The reason MUST be named in your migration report.') { |v| opts[:skip_telemetry] = v }
+  p.on('--require-fidelity-ledger', 'gate 8d (OPT-IN, off by default): require an RCF fidelity-ledger.json (Phase 5g) with zero UNRESOLVED spec-fixable deltas. Adopters (tableau-to-sigma) pass this; other converters are unaffected until they do.') { opts[:require_fidelity] = true }
+  p.on('--fidelity-ledger PATH', 'gate 8d: path to the RCF ledger (default: <workdir>/fidelity-ledger.json)') { |v| opts[:fidelity_ledger] = v }
+  p.on('--accept-residuals LIST', 'gate 8d: comma-separated ledger entry ids/indices to WAIVE as accepted residuals (name them in the report)') { |v| opts[:accept_residuals] = v.split(',').map(&:strip) }
 end.parse!
 abort('--workdir (or --tableau) required') unless opts[:tab]
 
@@ -786,6 +794,51 @@ else
   else
     puts "[SKIP] gate 8c: no layout-census.json and no dashboard layout built — fill gate N/A"
   end
+end
+
+# ---------------------------------------------------------------------------
+# Gate 8d — RCF fidelity ledger (OPT-IN via --require-fidelity-ledger; #Phase 5g).
+# Structural + value + visual-render + recorded-verdict all passing still leaves
+# the composition gap the render-compare-fix loop closes: a workbook can be
+# faithful in data yet visibly off-brand (generic palette, wrong chart kind, KPI
+# format drift). The loop records each delta into fidelity-ledger.json classified
+# spec-fixable | ui-only | sigma-capability | data; only UNRESOLVED spec-fixable
+# entries block. Adopters pass --require-fidelity-ledger; other converters skip
+# this gate entirely (soft) until they do. Logic mirrors FidelityLoop
+# .unresolved_specfixable — inlined here so the shared gate has no cross-plugin dep.
+# ---------------------------------------------------------------------------
+if opts[:require_fidelity]
+  fl_path = opts[:fidelity_ledger] || File.join(opts[:tab], 'fidelity-ledger.json')
+  accepted = Array(opts[:accept_residuals]).map(&:to_s)
+  if !File.exist?(fl_path)
+    warn "[FAIL] gate 8d: --require-fidelity-ledger set but #{fl_path} is missing."
+    warn '       Run the Phase 5g render-compare-fix loop (scripts/fidelity-loop.rb init/render/record/'
+    warn '       apply-patch) to convergence, then re-run. See SKILL.md Phase 5g + refs/fidelity-rubric.md.'
+    exit 15
+  end
+  ledger = (JSON.parse(File.read(fl_path)) rescue nil)
+  if ledger.nil?
+    warn "[FAIL] gate 8d: #{fl_path} is malformed JSON."
+    exit 15
+  end
+  entries = ledger['entries'] || []
+  blocking = entries.each_with_index.select do |e, i|
+    e['cls'] == 'spec-fixable' && !e['resolved'] &&
+      !accepted.include?(i.to_s) && !accepted.include?(e['id'].to_s)
+  end
+  if blocking.any?
+    warn "[FAIL] gate 8d: #{blocking.length} unresolved spec-fixable RCF delta(s) in #{fl_path}:"
+    blocking.each do |e, _i|
+      warn "         #{e['id']} [#{e['dimension']}] #{e['delta']} (fix: #{e['fix'] || 'see refs/fidelity-recipes.md'})"
+    end
+    warn '       Apply the recipe fix (fidelity-loop.rb apply-patch) and re-render, or waive named'
+    warn '       residuals with --accept-residuals id,id (name them in your migration report).'
+    exit 15
+  end
+  resid = entries.reject { |e| e['cls'] == 'spec-fixable' && !e['resolved'] }
+                 .select { |e| %w[ui-only sigma-capability data].include?(e['cls']) }
+  puts "[OK] gate 8d: RCF fidelity ledger clean — #{entries.length} delta(s) over #{ledger['pass']} pass(es), " \
+       "0 unresolved spec-fixable#{resid.any? ? " (#{resid.length} recorded residual(s) → report)" : ''}"
 end
 
 # Gate 9 — Visual-verify tiles (build-from-signals). Tiles whose Tableau data

@@ -1,0 +1,48 @@
+<!-- Part of the tableau-to-sigma workflow — spine: ../SKILL.md. Phase 5g — RCF render-compare-fix fidelity loop -->
+
+## Phase 5g — RCF (Render-Compare-Fix) fidelity loop (MANDATORY — hard-gated by gate 8d)
+
+> **Why this phase exists.** The build pipeline is one-shot on *design*:
+> `build-charts-from-signals` emits once, the layout PUTs once. A mechanically-correct
+> workbook (0 error columns, CSV parity green) can still ship visibly off-brand — generic
+> palette, wrong chart kind, KPI format drift, missing containers. The exemplar migrations
+> reached near-exact parity only by iterating a **render → compare → classify → fix loop** that
+> uses spec surface the builder never touches. This phase makes that loop a first-class,
+> machine-enforced step so every conversion gets it — not just tribal knowledge in one session.
+>
+> **Runs BEFORE Phase 6** so composition fixes can't invalidate collected actuals, and each
+> `apply-patch` re-runs the column-type guard + layout/control lint. Staged automatically by
+> `migrate-tableau.rb` at the pass-1 tail (the ledger is initialized for you); enforced at
+> `--finalize` by `assert-phase6-ran.rb --require-fidelity-ledger` (gate 8d). Disable only with
+> `--rcf-passes 0` (loud WARN; gate 8d then waived).
+
+The loop, per pass (~30–90s):
+
+```
+RENDER    ruby scripts/fidelity-loop.rb render --workdir /tmp/<name>
+          → rcf-pass-N.png (export API), bumps the pass counter, prints the rubric,
+            enforces the pass budget (default 5; exit 3 when exhausted)
+COMPARE   Read rcf-pass-N.png against the SOURCE dashboard PNG (Phase 1d / visual-qa/
+          <slug>.source.png), score EVERY dimension in refs/fidelity-rubric.md — including
+          the two functional dimensions a visual diff misses: controls/parameters + accuracy
+CLASSIFY  ruby scripts/fidelity-loop.rb record --workdir /tmp/<name> --dimension <d> \
+            --delta "<what differs>" --class spec-fixable|ui-only|sigma-capability|data
+FIX       author a patch from refs/fidelity-recipes.md (ONLY the delta), then:
+          ruby scripts/fidelity-loop.rb apply-patch --workdir /tmp/<name> \
+            --patch patch.json --resolves <ledger-ids>
+          (single layout-preserving PUT → GET full spec, deep-merge by elementId, PUT back,
+           re-run guard + lints — a fix that breaks a column or the layout fails the pass)
+LOOP      render → compare → fix until `fidelity-loop.rb status` is clean
+EXIT      zero unresolved spec-fixable deltas (ui-only / sigma-capability / data residuals flow
+          to the report). Waive genuinely-unclosable spec-fixable residuals ONLY via
+          assert-phase6-ran.rb --accept-residuals id,id, NAMED in the report.
+```
+
+Convergence pattern: pass 1 fixes **structure** (missing tiles, wrong kinds); passes 2–3 fix
+**composition** (containers, tints, text); pass 4+ fixes **typography / number-format** detail.
+Only `spec-fixable` deltas block; classify UI-only / capability ceilings and move on — see the
+"When NOT to loop" list in `refs/fidelity-recipes.md`. Full rubric + classification table:
+`refs/fidelity-rubric.md`. Delta→fix catalog: `refs/fidelity-recipes.md`.
+
+---
+
