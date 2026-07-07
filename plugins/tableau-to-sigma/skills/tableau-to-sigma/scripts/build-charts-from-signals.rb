@@ -1490,10 +1490,26 @@ end
 # Tableau `WHEN 1`) makes Sigma reject the Switch: "Argument N invalid … Expected
 # text; received number." Quote bare numeric case literals so they match the
 # text control. Leave already-quoted strings and non-numeric tokens untouched.
+# Canonicalise a Switch match value so a param CONTROL's option value and the
+# translated Switch's WHEN key compare equal regardless of numeric form. Tableau
+# stores list-parameter member values as FLOATS ("0.", "1.", "2.0") but writes
+# CASE `WHEN 0` as an INTEGER — so the control emits value "0." while the Switch
+# key is "0", and Sigma's Switch matches NOTHING (the picker renders blank).
+# Verified live 2026-07-07 (metric-switch E2E). Fold both to a canonical numeric
+# string ("0."→"0", "1.0"→"1", "2.5"→"2.5"); non-numerics pass through.
+def canonical_switch_value(v)
+  s = v.to_s.strip.gsub(/\A["']|["']\z/, '')
+  if s =~ /\A-?\d+(?:\.\d*)?\z/ || s =~ /\A-?\.\d+\z/
+    f = s.to_f
+    return (f == f.to_i ? f.to_i.to_s : f.to_s)
+  end
+  s
+end
+
 def coerce_case_literal(v)
   s = v.to_s.strip
   return s if s.start_with?('"') || s.start_with?("'")
-  return "\"#{s}\"" if s =~ /\A-?\d+(?:\.\d+)?\z/
+  return "\"#{canonical_switch_value(s)}\"" if s =~ /\A-?\d+(?:\.\d*)?\z/ || s =~ /\A-?\.\d+\z/
   s
 end
 
@@ -4358,7 +4374,11 @@ unless opts[:no_auto_controls]   # default-on: never miss a .twb parameter/filte
       # E1: dropdown vs segmented from the Tableau control display mode; default
       # segmented (button row) when Tableau declared no explicit mode.
       spec['controlType']   = sigma_control_type(control_display_for(layout, cap, norm_cap))
-      values = p['members'] || []
+      # Canonicalise member values to the SAME numeric form the translated Switch
+      # uses for its WHEN keys (Tableau stores members as floats "0."/"1." but
+      # writes CASE `WHEN 0`), so the control's option value actually matches the
+      # Switch key — else the measure-switch renders blank (live-verified 2026-07-07).
+      values = (p['members'] || []).map { |m| canonical_switch_value(m) }
       # Tableau list parameters often store integer-coded members (1..13) whose
       # human meaning lives in the parameter's value ALIASES (1→"TCV", 3→"ACV").
       # parse-twb-layout captures these in column_aliases keyed by the param
@@ -4371,7 +4391,7 @@ unless opts[:no_auto_controls]   # default-on: never miss a .twb parameter/filte
                     (meta['column_aliases'] || {})[p['name'].to_s.gsub(/^\[|\]$/, '')]
       labels = []
       if alias_pairs && !alias_pairs.empty?
-        amap = alias_pairs.each_with_object({}) { |a, h| h[a['key'].to_s] = a['value'] }
+        amap = alias_pairs.each_with_object({}) { |a, h| h[canonical_switch_value(a['key'])] = a['value'] }
         labels = values.map { |v| amap[v.to_s] || v.to_s }
         labels = [] if labels == values.map(&:to_s) # all unmapped → omit (no value-add)
       end
@@ -4386,7 +4406,8 @@ unless opts[:no_auto_controls]   # default-on: never miss a .twb parameter/filte
       # ARRAY. Pin single so the scalar default applies and the Switch resolves.
       # (Verified live 2026-07-05: without this the picker ships dead.)
       spec['selectionMode'] = 'single'
-      spec['value'] = p['default_value']
+      # Canonicalise so the default matches a control option value (0.→0).
+      spec['value'] = canonical_switch_value(p['default_value'])
     elsif p['param_domain'] == 'range' && %w[integer real].include?(p['datatype'])
       # Numeric range parameter → Sigma `number-range` control (discovered by
       # gap-scout 2026-05-20, beads-sigma-ebw). Two-handle slider; the single-

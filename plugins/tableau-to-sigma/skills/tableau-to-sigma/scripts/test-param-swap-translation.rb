@@ -32,7 +32,7 @@ end
 # Extract the translation helpers from the (non-requireable, CLI) script and
 # eval them over stubs, so we test the shipped bodies verbatim.
 src = File.read(BUILD)
-defs = %w[coerce_case_literal remap_param_branch translate_case_on_param
+defs = %w[canonical_switch_value coerce_case_literal remap_param_branch translate_case_on_param
           translate_if_chain_on_param param_control_ref rewire_param_switch!].map do |fn|
   boundary = fn =~ /[!?]\z/ ? '' : '\b'
   m = src.match(/^def #{Regexp.escape(fn)}#{boundary}.*?\nend\n/m)

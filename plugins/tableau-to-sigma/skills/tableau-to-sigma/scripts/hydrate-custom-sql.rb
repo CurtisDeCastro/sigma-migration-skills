@@ -290,8 +290,7 @@ module HydrateCustomSql
         existing&.each_element('metadata-record') do |m|
           rn = (m.get_text('remote-name')&.value || '').strip
           cap = (m.get_text('caption')&.value || '').strip
-          info = { 'class' => (m.attributes['class'] || 'column'),
-                   'ltype' => (m.get_text('local-type')&.value || '').strip,
+          info = { 'ltype' => (m.get_text('local-type')&.value || '').strip,
                    'agg'   => (m.get_text('aggregation')&.value || '').strip }
           cached[alias_for(rn)] = info unless rn.empty?
           cached[cap.downcase] = info unless cap.empty?
@@ -300,7 +299,12 @@ module HydrateCustomSql
         mrs = REXML::Element.new('metadata-records')
         columns.each do |c|
           info = cached[alias_for(c)] || cached[c.to_s.downcase] || {}
-          rec = mrs.add_element('metadata-record', 'class' => (info['class'] || 'column'))
+          # ALWAYS class='column': the converter's Custom-SQL column build SKIPS
+          # any metadata-record whose class != 'column' (tableau.ts), so a cached
+          # class='measure' would silently DROP that column from the DM element —
+          # and a Switch measure referencing it then can't resolve (live-caught
+          # 2026-07-07: Amount USD/PROFIT vanished). Keep the local-type hint.
+          rec = mrs.add_element('metadata-record', 'class' => 'column')
           rec.add_element('remote-name').text = alias_for(c)
           rec.add_element('local-name').text = "[#{c}]"
           rec.add_element('parent-name').text = "[#{rel_name}]"
