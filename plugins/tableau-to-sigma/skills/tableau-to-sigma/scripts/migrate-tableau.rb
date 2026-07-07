@@ -160,6 +160,11 @@ OptionParser.new do |o|
   # --finalize with --enhance-accept <id,id,...> or 'all-low-risk'.
   o.on('--enhance')          {     opts[:enhance] = true }
   o.on('--enhance-accept L') { |v| opts[:enhance_accept] = v }
+  # Phase 5g — RCF (render-compare-fix) loop budget. Default 5 passes; the loop
+  # is agent-driven (staged at pass-1 tail, enforced at --finalize via gate 8d /
+  # --require-fidelity-ledger). --rcf-passes 0 DISABLES it with a loud WARN and
+  # the finalize gate does NOT require the ledger. Batch/headless callers pass 2.
+  o.on('--rcf-passes N', Integer, 'Phase 5g render-compare-fix loop budget (default 5; 0 disables it with a loud WARN and waives gate 8d).') { |v| opts[:rcf_passes] = v }
   o.on('--converter MODE', %w[local hosted], "converter backend: 'local' (default; zero-config, no " \
        'data egress — uses the vendored converter/tableau.mjs unless TABLEAU_MCP_BUILD points at a ' \
        "fresher build) or 'hosted' (sends the .twb to sigma-data-model-mcp.onrender.com — explicit " \
@@ -335,6 +340,11 @@ if opts[:finalize]
   # after the Phase 6f side-by-side read (see SKILL.md); without it the gate
   # exits 13. tableau-to-sigma is the reference adopter of this opt-in gate.
   gate += ['--require-visual-comparison']
+  # Phase 5g — require the RCF fidelity ledger (gate 8d) unless the loop was
+  # explicitly disabled at pass 1 (--rcf-passes 0). Legacy state (pre-5g) has no
+  # rcf_passes key → default to requiring it, since the ledger is the new bar.
+  rcf_enabled = state.fetch('rcf_passes', 5).to_i.positive?
+  gate += ['--require-fidelity-ledger'] if rcf_enabled
   gate += ['--allow-extract'] if state['extract_mode']
   gate += ['--allow-missing-tiles', opts[:allow_missing_tiles].to_s] if opts[:allow_missing_tiles]
   gate += ['--min-pass-rate', opts[:min_pass_rate].to_s] if opts[:min_pass_rate]
@@ -417,6 +427,26 @@ if opts[:finalize]
     puts '  2. If the page is INTENTIONALLY sparse, waive with'
     puts '     assert-phase6-ran.rb --skip-layout-fill "<reason>" (name it in your report),'
     puts '     or lower the bar with --min-grid-fill F.'
+    puts '============================================================================='
+  end
+
+  if gst.exitstatus == 15
+    puts
+    puts '==================== FIDELITY STOP (agent action required) =================='
+    puts 'The Phase 5g RCF (render-compare-fix) ledger is missing or still carries UNRESOLVED'
+    puts 'spec-fixable deltas (gate 8d). Data + structure + a single visual verdict passing does'
+    puts 'NOT mean the composition matches the source (palette, chart kind, KPI format, containers).'
+    puts 'Do this, then re-run this exact --finalize command:'
+    puts "  1. Render + compare a pass:  ruby scripts/fidelity-loop.rb render --workdir #{WORK}"
+    puts '     READ rcf-pass-N.png vs the source PNG, score against refs/fidelity-rubric.md.'
+    puts '  2. Per delta:  ruby scripts/fidelity-loop.rb record --workdir '"#{WORK}"' --dimension <d> \\'
+    puts '                   --delta "<what differs>" --class spec-fixable|ui-only|sigma-capability|data'
+    puts '  3. For spec-fixable deltas, author a patch (refs/fidelity-recipes.md) and apply it:'
+    puts "       ruby scripts/fidelity-loop.rb apply-patch --workdir #{WORK} --patch patch.json --resolves <ids>"
+    puts '     then render again. Loop until `fidelity-loop.rb status` is clean.'
+    puts '  4. Genuinely-unclosable residuals: waive them by name via'
+    puts '       assert-phase6-ran.rb --accept-residuals id,id  (name them in your report),'
+    puts '     or disable the loop entirely by re-running pass 1 with --rcf-passes 0.'
     puts '============================================================================='
   end
 
@@ -2007,8 +2037,42 @@ end
 state = { 'workbook_id' => wb_id, 'data_model_id' => dm_id,
           'extract_mode' => !!has_extracts, 'workbook_name' => display_wb_name,
           'reused_dm' => !!reuse_dm_id, 'pass1_at' => Time.now.utc.iso8601,
-          'enhance_requested' => !!opts[:enhance] }
+          'enhance_requested' => !!opts[:enhance],
+          'rcf_passes' => (opts[:rcf_passes] || 5) }
 File.write(File.join(WORK, 'migrate-state.json'), JSON.pretty_generate(state))
+
+# ---------------------------------------------------------------------------
+# Phase 5g — stage the RCF (render-compare-fix) fidelity loop. Agent-driven:
+# init the ledger now (so the pass budget + source-image pointer are recorded),
+# then the agent runs render → compare → record → apply-patch to convergence
+# BEFORE --finalize (which enforces the ledger via gate 8d). Skipped, with a
+# loud WARN, when --rcf-passes 0.
+# ---------------------------------------------------------------------------
+rcf_passes = (opts[:rcf_passes] || 5)
+if rcf_passes.to_i <= 0
+  line 'WARN: Phase 5g RCF fidelity loop DISABLED (--rcf-passes 0). The workbook will be gated on'
+  line '      structure + data + a single visual verdict only — composition drift (palette, chart'
+  line '      kind, KPI format) will NOT be iterated. --finalize will NOT require the fidelity ledger.'
+else
+  # Best-effort resolve the primary (first non-Data) page id + a source image to
+  # compare against, from the artifacts pass 1 already wrote.
+  wb_ids = (JSON.parse(File.read(File.join(WORK, 'wb-ids.json'))) rescue {})
+  primary_page = (wb_ids['pages'] || []).reject { |p| p['name'].to_s.downcase == 'data' }.first ||
+                 (wb_ids['pages'] || []).first
+  page_id = primary_page && primary_page['id']
+  cmani = (JSON.parse(File.read(File.join(WORK, 'visual-qa', 'compare-manifest.json'))) rescue [])
+  src_img = (cmani.find { |m| m['source_png'] } || {})['source_png']
+  if page_id
+    _, ist = run!(['ruby', File.join(HERE, 'fidelity-loop.rb'), 'init',
+                   '--workdir', WORK, '--workbook-id', wb_id, '--page-id', page_id,
+                   '--max-passes', rcf_passes.to_s] +
+                  (src_img ? ['--source-image', src_img] : []), allow_fail: true)
+    line "Phase 5g: RCF fidelity ledger initialized (page #{page_id}, budget #{rcf_passes})" if ist.success?
+  else
+    line 'Phase 5g: could not resolve a page id from wb-ids.json — init the ledger manually (see the prompt below)'
+  end
+  mark('phase5g-init')
+end
 
 unless structural_ok
   puts
@@ -2068,6 +2132,15 @@ if vv_tiles.any?
   puts "              ALSO #{vv_tiles.size} per-tile pair(s) under #{File.join(WORK, 'visual-verify')}/ — tiles with"
   puts '              EMPTY data exports or INFERRED chart kinds (no value-diff possible). Confirm each and set'
   puts '              "visual_verified": true in visual-verify/manifest.json (gate 9 blocks GREEN until done).'
+end
+if rcf_passes.to_i.positive?
+  puts "FIDELITY    : Phase 5g RCF loop STAGED (budget #{rcf_passes}). Iterate render→compare→fix to"
+  puts '              near-exact parity BEFORE --finalize (which requires the ledger — gate 8d):'
+  puts "                ruby scripts/fidelity-loop.rb render --workdir #{WORK}"
+  puts '              READ rcf-pass-N.png vs the source PNG, score against refs/fidelity-rubric.md, then'
+  puts '              per delta: fidelity-loop.rb record (classify spec-fixable/ui-only/sigma-capability/data),'
+  puts '              author a patch from refs/fidelity-recipes.md, fidelity-loop.rb apply-patch --resolves,'
+  puts '              and render again. Loop until `fidelity-loop.rb status` is clean (0 unresolved spec-fixable).'
 end
 finalize_cmd = "  ruby scripts/migrate-tableau.rb #{opts[:wb_id] ? "--workbook-id #{opts[:wb_id]}" : "--workbook \"#{opts[:wb_name]}\""}" \
                "#{opts[:out] ? " --out #{WORK}" : ''} \\\n    --finalize --actuals #{File.join(WORK, 'parity-actuals.json')}"
