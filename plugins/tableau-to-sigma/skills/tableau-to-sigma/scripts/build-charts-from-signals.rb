@@ -4182,24 +4182,32 @@ end
 # ---- Title text element ----
 # If --title given, emit a text element. If --title omitted AND the parser
 # found a title/text zone, infer the dashboard name from the parser output.
+#
+# The source's OWN top title zone (a text/title zone near the top carrying
+# run-level formatting) is emitted faithfully as a styled `text-<id>` element
+# (B4 path) and placed at the top. Synthesizing a second "# <name>" title here
+# then DOUBLES the title — the dashboard shows it at the top AND again in the
+# stray text band (the "title top + bottom" duplicate). So skip the synthetic
+# title WHENEVER the source has its own top title zone — regardless of whether
+# --title was passed. (migrate-tableau always passes --title, which is exactly
+# why the old `opts[:title].nil?`-only guard never fired and the title doubled.)
+source_has_top_title = layout.any? do |dash|
+  (dash['zones'] || []).any? do |z|
+    %w[title text].include?(z['kind']) && (z['y_pct'] || 100) < 10 && z['text_runs']
+  end
+end
 auto_title = nil
-if opts[:title].nil?
+if opts[:title].nil? && !source_has_top_title
   layout.each do |dash|
     top = dash['zones'].select { |z| %w[title text].include?(z['kind']) && (z['y_pct'] || 100) < 10 }
     next if top.empty?
-    # B4 (gap ubr5.8): a top text/title zone that carries run-level formatting
-    # is the dashboard's OWN hero title — it is emitted faithfully as a styled
-    # `text-<id>` element (black-on-canvas, at its position). Do NOT ALSO
-    # synthesize the white dashboard-name title here: the two double up, and the
-    # synthetic one (white, meant for the dark header band) renders invisibly
-    # over a light canvas when the composed layout has no dark band. Only
-    # synthesize when the top zone is a BARE title with no styled runs for B4.
-    next if top.any? { |z| z['text_runs'] }
     auto_title = dash['dashboard']
     break
   end
 end
-title_text = opts[:title] || auto_title
+# Source banner wins: when it exists, the styled text-<id> element IS the title
+# (placed at its own top geometry by the layout stage), so emit no synthetic one.
+title_text = source_has_top_title ? nil : (opts[:title] || auto_title)
 
 extras = []
 if title_text
@@ -4964,16 +4972,28 @@ elsif opts[:pages_mode] == :dashboard
     next if els.nil? || els.empty?
     els.each { |e| e.delete('_worksheet'); e.delete('_dashboard') }
     d_slug = dash_name.to_s.downcase.gsub(/\W+/, '-')[0..30].sub(/-$/, '')
-    page_extras = [{
-      'id'   => "title-#{d_slug}",
-      'kind' => 'text',
-      # Theme-default colour: the layout builder now emits a colored header band
-      # only when the source has one (else the title sits on the canvas, where
-      # forced-white would be invisible).
-      'body' => "# #{dash_name}"
-    }]
+    # Skip the synthetic "# <dashboard>" title when this dashboard has its OWN top
+    # title zone (a styled text/title zone near the top) — that zone is already
+    # emitted in styled_text_by_dash and placed at the top by the layout stage, so
+    # a synthetic one DOUBLES the title (renders at the top AND again in the stray
+    # text band — the reported "title top + bottom" duplicate). The source banner
+    # (richer, e.g. "Orders — Executive Overview") wins.
+    dash_has_top_title = (layout.find { |d| d['dashboard'] == dash_name } || {})['zones']
+                         &.any? { |z| %w[title text].include?(z['kind']) && (z['y_pct'] || 100) < 10 && z['text_runs'] }
+    page_extras = []
+    unless dash_has_top_title
+      page_extras << {
+        'id'   => "title-#{d_slug}",
+        'kind' => 'text',
+        # Theme-default colour: the layout builder now emits a colored header band
+        # only when the source has one (else the title sits on the canvas, where
+        # forced-white would be invisible).
+        'body' => "# #{dash_name}"
+      }
+    end
     # B4: this dashboard's styled static-text elements (subtitle/annotations/
-    # credit/section headers). Placed by the layout stage at their zone geometry.
+    # credit/section headers) — incl. the source's own top title banner. Placed by
+    # the layout stage at their zone geometry.
     styled_text_by_dash[dash_name].each { |e| page_extras << e.reject { |k, _| k == '_dashboard' } }
     ctl_rewrites = {}
     param_control_ids = param_controls.map { |c| c['controlId'] }
