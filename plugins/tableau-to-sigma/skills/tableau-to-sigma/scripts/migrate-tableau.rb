@@ -84,6 +84,7 @@ require 'time'
 require 'set'
 require_relative 'lib/scout_gate'
 require_relative 'lib/dashboard_read'
+require_relative 'lib/run_state'
 require_relative 'hydrate-custom-sql'
 
 $stdout.sync = true # progress lines interleave correctly when piped/captured
@@ -215,7 +216,12 @@ WORK = opts[:out] || File.expand_path("~/tableau-migration/#{slug}")
 FileUtils.mkdir_p(File.join(WORK, 'views'))
 
 TOTAL = 6
-def hdr(n, title) puts; puts "── Phase #{n}/#{TOTAL} · #{title} ──"; end
+def hdr(n, title)
+  puts; puts "── Phase #{n}/#{TOTAL} · #{title} ──"
+  # Ledger stamp — records that the orchestrator entered this phase (Tier 2
+  # run-state chain; assert-run-state.rb audits it). Best-effort; never fatal.
+  RunState.stamp(WORK, "phase-#{n}", note: title) if defined?(WORK)
+end
 def line(m) puts "   #{m}"; end
 
 # Phase-timing summary — printed at every terminal exit so the discovery
@@ -318,6 +324,14 @@ if opts[:finalize]
                         '--workdir', WORK, '--keep', wb_id], allow_fail: true)
   line 'WARN: orphan cleanup reported failures — assert-phase6-ran will gate on it' unless clst.success?
   mark('cleanup-orphans')
+
+  # Run-state chain audit (Tier 2 ledger) — confirms every always-required phase
+  # was actually entered this run, catching a silent shortcut the output gates
+  # can miss. Advisory in the orchestrator (allow_fail) since the hard gate below
+  # is authoritative; run standalone (SKILL.md Phase 6) it exits non-zero.
+  _, rsst = run!(['ruby', File.join(HERE, 'assert-run-state.rb'), '--workdir', WORK], allow_fail: true)
+  line 'WARN: run-state chain audit found a missing phase (see above)' unless rsst.success?
+  mark('assert-run-state')
 
   # The census-aware hard gate. NEVER bypassed — this command fails when it fails.
   gate = ['ruby', File.join(HERE, 'assert-phase6-ran.rb'), '--tableau', WORK, '--workbook-id', wb_id]
@@ -1518,6 +1532,7 @@ elsif DashboardRead.expected?(WORK)
     abort 'FATAL: Phase 1d dashboard-read not done — refusing to build a number-only dashboard.'
   end
   line "dashboard-read gate: #{DashboardRead.tile_count(WORK)} tile(s) enumerated (png-read.json)"
+  RunState.stamp(WORK, 'phase-1d', note: 'source dashboard-read (png-read.json)')
 end
 
 # ---------------------------------------------------------------------------
