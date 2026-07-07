@@ -83,6 +83,7 @@ require 'date'
 require 'time'
 require 'set'
 require_relative 'lib/scout_gate'
+require_relative 'lib/dashboard_read'
 require_relative 'hydrate-custom-sql'
 
 $stdout.sync = true # progress lines interleave correctly when piped/captured
@@ -138,6 +139,7 @@ OptionParser.new do |o|
   o.on('--force')            {     opts[:force]   = true }
   o.on('--reuse-dm [ID]')    { |v| opts[:reuse_dm] = v || :recommended }
   o.on('--skip-reuse-scan')  {     opts[:skip_reuse] = true }
+  o.on('--skip-dashboard-read REASON', 'waive the Phase 1d source dashboard-read gate — REQUIRED reason; name it in your report') { |v| opts[:skip_dashboard_read] = v }
   o.on('--row-scale F', Float) { |v| opts[:row_scale] = v }
   o.on('--master-col PAIR', "'Name=<Sigma formula>' — extra master column (repeatable). The resume path " \
                             'for the exit-4 handoff when a chart dim is a master-level calc the mechanical ' \
@@ -1456,6 +1458,37 @@ if opts[:folder].to_s.empty?
   end
 end
 mark('folder-resolve')
+
+# ---------------------------------------------------------------------------
+# 🚧 GATE (Phase 1d) — source dashboard-read, enforced BEFORE any DM/workbook
+# POST. The orchestrated pass fetches CSVs but CANNOT read the source dashboard
+# PNG (that's an agent vision step), so historically it shipped number-correct
+# workbooks missing tiles/text/filters the source rendered. build-charts later
+# runs under allow_fail:true, which would SWALLOW its own gate into a silent
+# empty dashboard — so enforce it HARD here, before we post anything, so a cold
+# first run aborts clean (no stray DM) and the agent re-runs after the read.
+# The agent must have fetched the dashboard PNG (mcp get-view-image, solo) and
+# written png-read.json (SKILL.md Phase 1d). Fires only on a Tableau workdir.
+# ---------------------------------------------------------------------------
+if opts[:skip_dashboard_read]
+  line "dashboard-read gate WAIVED (--skip-dashboard-read: #{opts[:skip_dashboard_read]}) — name this in your report"
+elsif DashboardRead.expected?(WORK)
+  dr_ok, dr_errs = DashboardRead.validate(WORK)
+  unless dr_ok
+    warn ''
+    warn "[FAIL] Phase 1d source dashboard-read gate — #{DashboardRead.path(WORK)}"
+    dr_errs.each { |e| warn "       - #{e}" }
+    warn ''
+    warn '       The orchestrator cannot read images. Before it can build the workbook you must:'
+    warn "         1. Fetch the dashboard view PNG with mcp__tableau__get-view-image (solo) into #{WORK}/views/"
+    warn '         2. Read it and write png-read.json enumerating every tile (with its Sigma `kind`),'
+    warn '            text_elements, and filter_shelf — schema in SKILL.md Phase 1d.'
+    warn "         3. Re-run this command (discovery artifacts in #{WORK} are reused — no stray DM was posted)."
+    warn '       Genuinely no PNG access? Re-run with --skip-dashboard-read "<reason>" (name it in your report).'
+    abort 'FATAL: Phase 1d dashboard-read not done — refusing to build a number-only dashboard.'
+  end
+  line "dashboard-read gate: #{DashboardRead.tile_count(WORK)} tile(s) enumerated (png-read.json)"
+end
 
 # ---------------------------------------------------------------------------
 # Phase 3 — Build + POST the data model.

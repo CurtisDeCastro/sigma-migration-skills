@@ -28,6 +28,15 @@ user-invocable: true
 Convert a Tableau datasource into a Sigma data model, then build a Sigma workbook
 that mirrors the Tableau dashboard layout as closely as possible.
 
+> **🚧 GATE convention.** A step marked **🚧 GATE** is backed by a script that
+> *fails the run* if the step was skipped — it is not advisory. Every 🚧 GATE
+> requires an **artifact** (a file on disk) and a downstream check that refuses
+> to proceed without it. If a step is important but merely prose, it will get
+> skipped under load — so the load-bearing steps are gated, one marker per real
+> gate. Current gates: **Phase 1d source dashboard-read** (`png-read.json` →
+> `assert-dashboard-read.rb`, enforced again inside `build-charts-from-signals.rb`),
+> **Phase 6 source-parity** and **Phase 6f visual render** (`assert-phase6-ran.rb`).
+
 **Read ALL of the following before replying or taking any action. Do not make assumptions about skill conventions, prompts, or global instructions — read the files.**
 - `refs/operating-contract.md` — **READ FIRST.** The non-negotiable guardrails: obtain the source render + calcs, build from the source's own logic (not `SUM(col)`), render + value-check EVERY page against the source, never ship empty or waive silently, don't spin. This is what keeps a run on the rails.
 - `refs/composition-recipe.md` — composition pass (hero/panels/carded KPIs + brand-from-source), value-fidelity rules (materialized `(copy)` calc columns, exact aggregate/population, period filter), controls/params rebuild, and the spec/API gotchas that otherwise cost round-trips.
@@ -76,6 +85,16 @@ ruby scripts/migrate-tableau.rb \
 ruby scripts/migrate-tableau.rb --workbook "<name>" \
   --finalize --actuals <workdir>/parity-actuals.json [--allow-missing-tiles N]
 ```
+
+> **🚧 Expect PASS 1 to hard-stop once for the Phase 1d dashboard-read.** The orchestrator
+> fetches view CSVs but **cannot read the source dashboard PNG** — that's your job. On the
+> first cold run it aborts **before posting the data model** (so no stray DM) with
+> "Phase 1d dashboard-read gate". When it does: fetch the dashboard view PNG with
+> `mcp__tableau__get-view-image` (solo), Read it, write `<workdir>/png-read.json` (schema in
+> Phase 1d — every tile with its Sigma `kind`, plus `text_elements` and `filter_shelf`), then
+> **re-run the same PASS 1 command** (discovery artifacts are reused). This is the fix for the
+> #1 escape: shipping a workbook with the right numbers but missing tiles the source rendered.
+> If the PNG is genuinely unavailable, re-run with `--skip-dashboard-read "<reason>"`.
 
 > **Converter backend — LOCAL by default, zero config, never upload customer data silently.**
 > The mechanical path needs the Tableau→Sigma converter, which is **not a server** — it's a
@@ -576,7 +595,29 @@ If `get-view-data` returns 401 for a view, retry that view solo (the contention 
 
 > **Do not parallel-fire `get-view-image` calls.** Even if the CSVs succeeded in parallel, concurrent image requests still 401 due to VizQL session contention. Images are always solo.
 
-> **Reading the dashboard image is MANDATORY before writing the workbook spec in Phase 5.** The CSV headers tell you a chart's dimensions and measures; they do NOT tell you (a) the chart's *kind* (a `Category, Count` CSV could back a bar OR a pie OR a donut), (b) any text annotations (titles, section headers, footnotes), or (c) the filter shelf. Skipping the image read is the most common Phase 5 mistake — you ship a workbook that has the right numbers but is missing tiles the source dashboard actually rendered.
+> **🚧 GATE — read the dashboard image AND record what you saw in `png-read.json` before Phase 5.** The CSV headers tell you a chart's dimensions and measures; they do NOT tell you (a) the chart's *kind* (a `Category, Count` CSV could back a bar OR a pie OR a donut), (b) any text annotations (titles, section headers, footnotes), or (c) the filter shelf. Skipping the image read is the most common Phase 5 mistake — you ship a workbook that has the right numbers but is missing tiles the source dashboard actually rendered.
+>
+> This step was prose-only, so it got skipped under load. It is now gated: after Reading the dashboard PNG, write `<workdir>/png-read.json` capturing your interpretation, then confirm the gate:
+>
+> ```bash
+> ruby scripts/assert-dashboard-read.rb --workdir /tmp/<name>
+> ```
+>
+> `png-read.json` schema (enumerate EVERY zone — chart AND non-chart):
+>
+> ```json
+> {
+>   "source_png": "views/<dashboardViewId>.png",
+>   "tiles": [
+>     { "title": "Revenue by Region", "kind": "bar-chart", "measures": ["Gross Revenue"] },
+>     { "title": "Filters", "kind": "control" }
+>   ],
+>   "text_elements": ["Orders Dashboard"],
+>   "filter_shelf": [ { "label": "Order Date", "control_type": "date-range" } ]
+> }
+> ```
+>
+> `kind` must be a valid Sigma element kind (see the "Sigma spec supports:" list below). Set `text_elements` / `filter_shelf` to `[]` only after confirming from the image that the dashboard genuinely has none. Both build paths enforce this file: `build-charts-from-signals.rb` (Phase 5a) **refuses to build without it**, and the orchestrator (`migrate-tableau.rb`) hard-stops **before posting the data model** if it's missing. The Phase 6 gate sequence re-runs `assert-dashboard-read.rb` as a final belt. Genuinely can't read the PNG? Pass `--skip-dashboard-read "<reason>"` and name the waiver in your report.
 
 **Phase 1d checklist — confirm before moving on:**
 
@@ -1166,6 +1207,8 @@ On error: read the message → fix the offending column formula → re-validate 
 
 ### 5a-auto. Run build-charts-from-signals first
 
+> **🚧 GATE:** this script exits 1 unless `<workdir>/png-read.json` exists (the Phase 1d dashboard-read artifact). If it blocks, go back to Phase 1d — Read the dashboard PNG and write `png-read.json` — don't reach for `--skip-dashboard-read` unless the PNG is genuinely unavailable.
+
 For most workbooks, `build-charts-from-signals.rb` produces a usable starting spec:
 
 ```bash
@@ -1527,6 +1570,7 @@ ruby scripts/build-parity-plan.rb --workbook-id <wb> \
   --out <WORK>/parity-plan.json --emit-spec <WORK>/wb-readback.json
 ruby scripts/verify-warehouse.rb --plan <WORK>/parity-plan.json \
   --workbook-id <wb> --workbook-spec <WORK>/wb-readback.json --out <WORK>/parity-final.json
+ruby scripts/assert-dashboard-read.rb --workdir <WORK>                  # 🚧 Phase 1d belt
 ruby scripts/assert-phase6-ran.rb --workdir <WORK> --workbook-id <wb>   # Gate 1 + banner
 ```
 

@@ -68,7 +68,7 @@ Dir.mktmpdir do |d|
   File.write(File.join(d, 'views', 'v1.csv'), '')
   File.write(File.join(d, 'views', 'v2.csv'), '')
   out = File.join(d, 'specs.json')
-  build_log = `ruby #{BUILD} --tableau-dir #{d} --layout #{lay} --meta #{meta} --master-map #{mm} --master-element-id master --title Dash --out #{out} 2>&1`
+  build_log = `ruby #{BUILD} --tableau-dir #{d} --layout #{lay} --meta #{meta} --master-map #{mm} --master-element-id master --skip-dashboard-read unit-test --title Dash --out #{out} 2>&1`
   build_out = JSON.parse(File.read(out)) if File.exist?(out)
 end
 
