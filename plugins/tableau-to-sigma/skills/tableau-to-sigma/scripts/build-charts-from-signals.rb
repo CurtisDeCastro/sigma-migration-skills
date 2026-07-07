@@ -1592,6 +1592,35 @@ def translate_if_chain_on_param(formula, param_captions, mmap = nil, columns_by_
   "Switch(#{parts.join(', ')})"
 end
 
+# Bind a parameter-driven Switch onto the chart column(s) that carry the calc,
+# in place, so the workbook CONTROL actually drives the value. Two column shapes:
+#   • DIMENSION grouping passthrough → bare `[Master/<calc>]`      → replace with the Switch
+#   • MEASURE (the metric-switch case) → `Agg([Master/<calc>])`    → keep the shelf
+#     aggregate around a bare-branch Switch → `Agg(Switch(...))`; but if the
+#     Switch branches are ALREADY aggregated (e.g. IF [P] THEN SUM(x) ELSE SUM(y)),
+#     the Switch replaces the whole formula (no double aggregation).
+# Returns the number of columns rewired. (Before this, only the exact bare form
+# was matched, so measure/metric switches silently missed and the control drove
+# nothing — an orphan un-aggregated Switch was appended instead. bead: param-msw.)
+def rewire_param_switch!(columns, calc_name, switch_sibling)
+  master_ref = "[Master/#{calc_name}]"
+  pre_aggregated = switch_sibling =~ /\b(?:Sum|Avg|Min|Max|Count|CountDistinct|Median|StdDev|StdDevPop|Variance|VariancePop)\s*\(/
+  rewired = 0
+  (columns || []).each do |col|
+    f = col['formula'].to_s.strip
+    if f == master_ref
+      col['formula'] = switch_sibling
+    elsif (mw = f.match(/\A([A-Za-z]\w*)\(\s*#{Regexp.escape(master_ref)}\s*\)\z/))
+      col['formula'] = pre_aggregated ? switch_sibling : "#{mw[1]}(#{switch_sibling})"
+    else
+      next
+    end
+    col.delete('column')
+    rewired += 1
+  end
+  rewired
+end
+
 # ---- Converter param measure-pickers (workbookPatterns kind:param-switch) ----
 # The Tableau→Sigma converter detects a parameter measure-picker
 # (`CASE [Parameters].[P] WHEN v THEN <measure> … END`) and emits a clean
@@ -2902,6 +2931,31 @@ layout.each do |dash|
       user_agg_formula ||= (window_plan.nil? || window_plan['mode'] != 'two-stage') && user_calc &&
                            translate_user_agg_formula(user_calc['formula'], mmap,
                                                       meta['columns_by_guid'] || {}) || nil
+      # Parameter-driven metric/measure SWITCH (bead param-msw): the calc picks
+      # which measure the chart shows via a control — SUM(CASE [Parameters].[P]
+      # WHEN 0 THEN [A] WHEN 1 THEN [B] END) or IF [P]="x" THEN SUM([A]) ELSE
+      # SUM([B]) END. translate_user_agg_formula can't decompose it, so without
+      # this it fell through to an unbound Sum([Master/<calc>]) and the control
+      # drove NOTHING (only dimension-swaps worked). Bind the control-driven
+      # Switch as THIS measure's yAxis formula; the calc-loop below materialises
+      # the branch sibling cols and registers the control under the same id.
+      if user_agg_formula.nil? && user_calc && !(window_plan && window_plan['mode'] == 'two-stage')
+        pcaps = (meta['parameters'] || []).map { |pp| pp['caption'] }.compact
+        pnmap = {}
+        (meta['parameters'] || []).each { |pp| pc = pp['caption']; pn = pp['name'].to_s.gsub(/^\[|\]$/, ''); pnmap[pn] = pc if pc && !pn.empty? }
+        fpn = user_calc['formula'].to_s.gsub(/(\[Parameters?\]\s*\.\s*\[)([^\]]+)(\])/i) { "#{$1}#{pnmap[$2] || $2}#{$3}" }
+        psw = translate_case_on_param(fpn, pcaps, mmap, meta['columns_by_guid'] || {}) ||
+              translate_if_chain_on_param(fpn, pcaps, mmap, meta['columns_by_guid'] || {})
+        if psw
+          psw_sibling = psw.gsub(%r{\[Master/([^\]]+)\]}) { "[#{Regexp.last_match(1)}]" }
+          # Branches already aggregated (IF [P] THEN SUM(x)…) → the Switch IS the
+          # measure; bare branches (SUM(CASE…THEN [col])) → wrap in the shelf agg.
+          pre_agg = psw_sibling =~ /\b(?:Sum|Avg|Min|Max|Count|CountDistinct|Median|StdDev|StdDevPop|Variance|VariancePop)\s*\(/
+          shelf_agg = SIGMA_AGG[infer_csv_agg(meas_hdr) || 'Sum'] || 'Sum'
+          user_agg_formula = pre_agg ? psw_sibling : "#{shelf_agg}(#{psw_sibling})"
+          warnings << "'#{cap}' measure '#{meas_hdr}' is a parameter-driven metric switch — bound to the control-driven Switch on the yAxis: #{user_agg_formula[0..140]}"
+        end
+      end
       if user_agg_formula && !(window_plan && window_plan['mode'] == 'inline')
         warnings << "'#{cap}' measure '#{meas['name']}' is a Tableau User-aggregated calc — emitted its decomposed Sigma formula directly: #{user_agg_formula[0..140]}"
       elsif user_agg_formula.nil? && !(window_plan && window_plan['mode'] == 'two-stage')
@@ -3923,15 +3977,12 @@ layout.each do |dash|
         # in place to the control-driven Switch (over the materialized siblings)
         # so the grouping itself does the swap; only append a standalone calc
         # column if no passthrough exists.
-        master_ref = "[Master/#{calc_name}]"
-        rewired = 0
-        (element['columns'] || []).each do |col|
-          next unless col['formula'].to_s.strip == master_ref
-          col['formula'] = switch_sibling
-          col.delete('column')
-          rewired += 1
-        end
-        if rewired.zero?
+        rewired = rewire_param_switch!(element['columns'], calc_name, switch_sibling)
+        # The measure-role path (above) may have ALREADY bound this Switch as the
+        # yAxis measure (e.g. Sum(Switch(...))). Don't also append a standalone
+        # orphan — only append when nothing carries the Switch yet.
+        already_bound = (element['columns'] || []).any? { |col| col['formula'].to_s.include?(switch_sibling) }
+        if rewired.zero? && !already_bound
           calc_id = "calc-#{calc_name.downcase.gsub(/\W+/, '-')[0..40]}".sub(/-$/, '')
           element['columns'] << { 'id' => calc_id, 'name' => calc_name, 'formula' => switch_sibling }
         end
