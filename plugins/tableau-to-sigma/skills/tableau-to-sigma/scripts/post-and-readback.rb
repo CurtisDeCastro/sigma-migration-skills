@@ -1,6 +1,10 @@
 #!/usr/bin/env ruby
 # POST a DM or workbook spec, parse the YAML response, then GET the spec back
 # and emit a clean JSON map of pages → elements with server-assigned IDs.
+# On the datamodel path, a post-readback COLUMN CENSUS (lib/column_census.rb)
+# compares the posted spec's per-element columns against the readback and
+# exits 2 on any silent drop — columns that vanish without an HTTP error or a
+# type="error" entry (a live migration lost 550 of 599 columns this way).
 #
 # Usage:
 #   ruby post-and-readback.rb --type datamodel|workbook --spec <spec.json> --out <id-map.json>
@@ -223,6 +227,41 @@ if res.is_a?(Net::HTTPSuccess)
   end
 else
   warn "WARN: could not fetch /columns for type guard (got HTTP #{res.code}); skipping"
+end
+
+# Column census (DM path — fix-workstream G). The type=error guard above only
+# catches columns that EXIST in the readback with a broken type. A live
+# migration POSTed a DM spec with 599 columns and the live DM resolved only 49
+# — 550 columns silently disappeared and every guard stayed green. Compare the
+# POSTED spec's per-element column names against the readback and abort loudly
+# (exit 2, same class as the type guard) on any silent drop.
+if opts[:type] == 'datamodel'
+  if cols_json
+    require_relative 'lib/column_census'
+    posted_spec = begin
+      JSON.parse(File.read(opts[:spec]))
+    rescue JSON::ParserError
+      nil # spec file already POSTed fine; census just can't re-read it
+    end
+    if posted_spec
+      problems = ColumnCensus.census(posted_spec, spec, cols_json['entries'] || [])
+      if problems.any?
+        warn "\n========================================"
+        warn "FAIL — column census: #{problems.size} element(s) lost columns between POST and readback:"
+        ColumnCensus.report_lines(problems).each { |l| warn "  #{l}" }
+        warn 'These columns were POSTed but the live DM did not resolve them (silent drop —'
+        warn 'no HTTP error, no type=error entry). Every downstream [Master/...] ref to a'
+        warn 'missing column becomes a "Dependency not found" POST rejection. Fix the DM'
+        warn 'spec (bad source path, poisoned element, unsupported column) and re-POST'
+        warn 'before building the workbook.'
+        warn '========================================'
+        exit(2)
+      end
+      warn "column census: #{ColumnCensus.posted_column_count(posted_spec)} posted column(s) all resolved in readback"
+    end
+  else
+    warn 'WARN: /columns unavailable — column census skipped'
+  end
 end
 
 # Layout-quality lint (shared scripts/lib/layout_lint.rb — vendored byte-

@@ -2,6 +2,11 @@
 # Validate a DM or workbook spec before POST/PUT.
 # Encapsulates the embedded Python validator from SKILL.md (in Ruby), and adds
 # cross-source ref support for workbook specs that reference DM elements.
+# Also (fix-workstream G): global element-ID uniqueness across ALL pages
+# (controlIds share the namespace), case-variant function names as errors with
+# a REPORT-ONLY FormulaNormalize listing (NORMALIZE: lines), and unknown
+# function names as non-fatal WARNs. Live [X/Y]-vs-DM column resolution is
+# scripts/assert-refs-resolve.rb's job, not this validator's.
 #
 # Usage:
 #   ruby validate-spec.rb --type datamodel <spec.json>
@@ -15,6 +20,7 @@ require 'optparse'
 require 'set'
 $LOAD_PATH.unshift File.expand_path('lib', __dir__)
 require 'sigma_functions'
+require 'formula_normalize'
 
 opts = { type: nil, dm_context: nil }
 op = OptionParser.new do |p|
@@ -47,6 +53,7 @@ if opts[:type] == 'workbook' && opts[:dm_context]
 end
 
 errors = []
+warnings = []
 all_element_names = []
 # Control-id tokens are legitimate bare refs inside Sigma formulas (a
 # parameter-driven Switch references its control by controlId, not a column).
@@ -54,13 +61,29 @@ all_element_names = []
 # "not a sibling column".
 control_ids = Set.new rescue nil
 control_ids ||= []
-spec.fetch('pages', []).each do |page|
+# Global element-ID uniqueness. Sigma requires element ids to be unique across
+# the WHOLE spec (all pages), and controlIds share the same namespace — see the
+# refs/troubleshooting.md entry: `Duplicate id: 'ctl-xxx'` on workbook POST when
+# a control element's `id` matches its `controlId`. A live converter run
+# emitted the same element id on two different pages and nothing caught it
+# before POST; collect every id/controlId occurrence and error on collisions.
+id_occurrences = Hash.new { |h, k| h[k] = [] }
+spec.fetch('pages', []).each_with_index do |page, pi|
+  page_label = page['name'] || page['id'] || "pages[#{pi}]"
   page.fetch('elements', []).each do |el|
     all_element_names << el['name'] if el['name']
+    el_label = "element \"#{el['name'] || el['id'] || '?'}\" (kind=#{el['kind'] || '?'})"
+    id_occurrences[el['id']] << "page \"#{page_label}\" #{el_label} [id]" if el['id']
     if el['kind'] == 'control' && el['controlId']
       control_ids.respond_to?(:add) ? control_ids.add(el['controlId']) : (control_ids << el['controlId'])
+      id_occurrences[el['controlId']] << "page \"#{page_label}\" #{el_label} [controlId]"
     end
   end
+end
+id_occurrences.each do |id, occ|
+  next if occ.size < 2
+  errors << "duplicate id \"#{id}\" used #{occ.size}x — element ids (and controlIds, same namespace) " \
+            "must be globally unique across ALL pages: #{occ.join('; ')}"
 end
 all_known_prefixes = (all_element_names + external_names).to_set rescue (all_element_names + external_names)
 require 'set' rescue nil
@@ -96,20 +119,34 @@ spec.fetch('pages', []).each do |page|
     cols.each do |col|
       f = (col['formula'] || '').to_s
 
-      # ---- Whitelist enforcement: every function call name must be in the
-      # canonical Sigma function library. Anything else is a Tableau-syntax
-      # leak, an imagined helper (IsIn / ToText), or a typo. Rewrite using a
-      # documented function OR move the logic into a Custom SQL element.
+      # ---- Function-name enforcement (two tiers, live-failure driven):
+      #   1. CASE-VARIANTS of known Sigma functions (`round(`, `DATETRUNC(`,
+      #      `left(`) → ERROR. Sigma is case-sensitive; these are exactly the
+      #      lowercase/Tableau-case leaks a live converter run POSTed. The
+      #      NORMALIZE report at the end lists the mechanical fix
+      #      (FormulaNormalize.normalize_spec! — the orchestrator applies it).
+      #   2. Everything else that looks like a function call but isn't a known
+      #      Sigma function → WARN, not error: the whitelist can't be
+      #      exhaustive, so an unlisted-but-real function must not hard-block a
+      #      migration. Definite Tableau leaks (IIF/COUNTD/IsIn/ToText/...) are
+      #      still ERRORS via the tableau_leaks patterns below.
+      # unknown_functions already skips identifiers inside [brackets] and
+      # "strings" — the regex only matches bare identifiers followed by `(`.
       unknown = SigmaFunctions.unknown_functions(f) - [name, col['name']].compact
-      # Tableau formula refs use lots of identifiers that look like fn calls
-      # but are bracket-delimited (e.g., `[ORDERS/Sales]`). The regex already
-      # only matches identifiers followed by `(`, so this is the cleanup set.
-      # Skip the IF chain on uppercase Tableau identifiers like `IF`, `THEN`,
-      # `END`, `WHEN`, which the agent may slip through inadvertently.
+      # sigma_functions.rb misses a few spellings the skill's refs document as
+      # valid (Week / Datetime / Ltrim / Rtrim) — FormulaNormalize's superset
+      # knows them; never flag an exact known spelling.
+      unknown.reject! { |n| FormulaNormalize.known_exact?(n) }
+      case_variants, unknown = unknown.partition { |n| FormulaNormalize.case_variant_of(n) }
+      case_variants.each do |n|
+        errors << "#{name}.#{col['name']}: function \"#{n}\" is a case-variant of Sigma's \"#{FormulaNormalize.case_variant_of(n)}\" — Sigma is case-sensitive. Apply FormulaNormalize.normalize_spec! (see the NORMALIZE report below) or fix the emitter."
+      end
+      # Skip uppercase Tableau reserved words like `THEN`, `END`, `WHEN`, which
+      # the agent may slip through inadvertently (IF/CASE-chain leftovers).
       reserved_tableau = %w[IF THEN ELSE ELSEIF END WHEN CASE AND OR NOT]
       unknown.reject! { |n| reserved_tableau.include?(n.upcase) }
-      unless unknown.empty?
-        errors << "#{name}.#{col['name']}: formula references function(s) not in Sigma's library: #{unknown.join(', ')}. Either rewrite using a documented function (see scripts/lib/sigma_functions.rb) OR move the logic into a Custom SQL data-model element (kind: \"sql\")."
+      unknown.each do |n|
+        warnings << "#{name}.#{col['name']}: \"#{n}(\" is not a known Sigma function — Sigma is case-sensitive; check refs (whitelist: scripts/lib/sigma_functions.rb — it can't be exhaustive, so this is a warning). If it's real, add it to the whitelist; otherwise rewrite with a documented function or move the logic into a Custom SQL data-model element (kind: \"sql\")."
       end
       # ---- Tableau-syntax leak detection. Catches IIF / COUNTD / WINDOW_* /
       # RUNNING_* / RANK_* / LOD braces / IsIn / ToText / etc. with explicit
@@ -274,6 +311,18 @@ if opts[:type] == 'workbook'
   end
 end
 
+# --- FormulaNormalize — REPORT-ONLY here. List every function token whose
+# case would be rewritten (round -> Round, DATETRUNC -> DateTrunc, ...) so the
+# fix is mechanical and visible; the ACTUAL rewrite happens where the
+# orchestrator chooses (migrate-tableau.rb calls FormulaNormalize.normalize_spec!
+# on the spec hash — contract in scripts/lib/formula_normalize.rb).
+_, would_rewrite = FormulaNormalize.normalize_spec!(Marshal.load(Marshal.dump(spec)))
+would_rewrite.each do |rw|
+  puts "NORMALIZE: #{rw[:path]}: \"#{rw[:from]}\" -> \"#{rw[:to]}\" (report-only — apply via FormulaNormalize.normalize_spec! before POST)"
+end
+
+warnings.each { |w| puts "WARN: #{w}" }
 errors.each { |e| puts "ERROR: #{e}" }
+puts "--- #{warnings.size} warnings (non-fatal)" if warnings.any?
 puts "--- #{errors.size} errors"
 exit(errors.empty? ? 0 : 1)
