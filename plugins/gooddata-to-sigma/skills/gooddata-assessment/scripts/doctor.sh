@@ -182,11 +182,23 @@ fi
 
 # --- agent capability fingerprint (v3 §2.2) --------------------------------
 # The doctor can't introspect the driving agent, so vision is asserted by the
-# caller: a vision-capable session exports SIGMA_AGENT_VISION=true. Default
-# false so the visual gate (D5) fails LOUDLY rather than accepting a blind
-# attestation. model_hint is free-form (e.g. "claude-opus-4-8").
-case "${SIGMA_AGENT_VISION:-}" in true|1|yes|TRUE|True) AGENT_VISION=true ;; *) AGENT_VISION=false ;; esac
+# caller: a vision-capable session exports SIGMA_AGENT_VISION=true. When that is
+# UNSET, auto-assert true iff the model_hint is a known vision-capable Claude
+# (Opus/Sonnet/Haiku/Fable/claude-3+), so a genuinely vision-capable session
+# isn't forced to hand-flip the flag before the visual gate will accept a
+# verdict. A model hint that does NOT match still defaults false, so the visual
+# gate (D5) still fails LOUDLY rather than accepting a blind attestation.
+# model_hint is free-form (e.g. "claude-opus-4-8").
 MODEL_HINT="${SIGMA_MODEL_HINT:-}"
+case "${SIGMA_AGENT_VISION:-}" in
+  true|1|yes|TRUE|True) AGENT_VISION=true ;;
+  '')
+    case "$(printf '%s' "$MODEL_HINT" | tr '[:upper:]' '[:lower:]')" in
+      *opus*|*sonnet*|*haiku*|*fable*|claude-3*|claude-4*|claude-5*) AGENT_VISION=true ;;
+      *) AGENT_VISION=false ;;
+    esac ;;
+  *) AGENT_VISION=false ;;
+esac
 
 # --- machine-readable fingerprint (doctor.json) ----------------------------
 # Written so (a) the run-state / preflight GATE can refuse to proceed on a

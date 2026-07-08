@@ -14,8 +14,13 @@ Preflight: `doctor.json` reports `hyperapi_present`. It is informational, not
 required — but extract-backed workbooks cannot land without it:
 
 ```
-pip install tableauhyperapi pandas snowflake-connector-python
+pip install tableauhyperapi 'pandas>=2.0,<3' pyarrow snowflake-connector-python
 ```
+
+Pin `pandas<3` and install `pyarrow` explicitly: the Snowflake connector's
+`write_pandas` requires pyarrow and does not yet support pandas 3.x — an
+unpinned `pip install pandas` grabs 3.x and the landing fails on
+`write_pandas` import. Use an isolated venv on PEP-668 (Homebrew) Pythons.
 
 ## The command
 
@@ -71,9 +76,24 @@ live-migration run. `--sigma-connection-id` does this per landed table and repor
 ok/fail counts. (This supersedes any older "no API can refresh the catalog"
 claims.)
 
+If you re-sync **manually** (e.g. after renaming a landed table) via
+`Sigma.request` / `sigma_rest.request`, the `body:` must be a **JSON string**,
+not a hash/dict — the shared helper does not auto-serialize. Pass
+`body: {path: [DB, SCHEMA, TABLE]}.to_json` (Ruby) / `body=json.dumps({"path": [...]})`
+(Python). `land-extracts.py`'s own `--sigma-connection-id` sync serializes
+correctly on its own; this note is only for a hand-rolled re-sync.
+
 ## The manifest (Phase 3 contract)
 
 `landing-manifest.json` is an array of
 `{slug, datasource, caption, hyper, hyper_table, sf_table, rows, columns:{orig: landed}}`
-— Phase 3 consumes it to remap DM source paths and column refs onto the landed
-tables. Keep it in the workdir next to the discovery artifacts.
+— Phase 3 consumes it automatically: `migrate-tableau.rb` calls
+`MechanicalSpecs.remap_from_manifest!` right after the converter runs, matching
+each generic "Extract" DM element to its manifest entry **by column-set overlap +
+`.hyper` filename** (never by name — embedded extracts all collapse to the name
+"Extract"), then repoints `source.path` onto the landed `sf_table`, rewrites the
+`[EXTRACT/…]` formula prefixes, and threads the `columns` orig→landed map into
+the phantom-filter so sanitized indicator names fold to their real warehouse
+column. Keep the manifest in the workdir next to the discovery artifacts. For
+landed extracts the manifest is authoritative — `--table-mapping` cannot
+disambiguate two identically-named "Extract" relations.

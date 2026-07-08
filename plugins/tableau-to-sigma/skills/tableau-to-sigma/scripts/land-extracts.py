@@ -42,7 +42,10 @@ payloads, e.g. a discovery workdir). --dry-run parses + plans (names, types,
 column maps) without connecting to Snowflake.
 
 Dependencies (import errors print a remediation line, not a stack trace):
-  pip install tableauhyperapi pandas snowflake-connector-python
+  pip install tableauhyperapi 'pandas>=2.0,<3' pyarrow snowflake-connector-python
+  # pandas is pinned <3 and pyarrow is explicit: snowflake-connector's
+  # write_pandas needs pyarrow and does not yet support pandas 3.x (an
+  # unpinned `pip install pandas` grabs 3.x and write_pandas fails to import).
 The pure functions (sanitization, type mapping, manifest building) are
 importable and testable WITHOUT those installed — see test_land_extracts.py.
 """
@@ -61,7 +64,7 @@ import zipfile
 from collections import OrderedDict
 from datetime import datetime, timezone
 
-PIP_HINT = "pip install tableauhyperapi pandas snowflake-connector-python"
+PIP_HINT = "pip install tableauhyperapi 'pandas>=2.0,<3' pyarrow snowflake-connector-python"
 
 # ---------------------------------------------------------------------------
 # Pure functions — no third-party imports; unit-tested offline.
@@ -198,6 +201,32 @@ def ds_captions(twb_path):
         if n == "Parameters":
             continue
         out[n] = ds.get("caption") or n
+    return out
+
+
+def ds_hyper_map(twb_path):
+    """Map each embedded .hyper basename -> (datasource name, caption), read from
+    the federated named-connection's <connection ... dbname='...hyper'>. This is
+    the RELIABLE hyper→datasource link: the extract .hyper file is GUID-named
+    (DATAENGINE_0tb9...) and shares no tokens with the caption ("Region"), so
+    match_ds' filename-substring heuristic falls back to the GUID stem — which is
+    exactly the "tables landed under GUID names" failure. dbname carries the real
+    .hyper filename, so this recovers the caption. Skips the Parameters
+    datasource; returns {} on any parse error (caller falls back to match_ds)."""
+    out = {}
+    try:
+        root = ET.parse(twb_path).getroot()
+    except Exception:
+        return out
+    for ds in root.findall("./datasources/datasource"):
+        name = ds.get("name", "")
+        if name == "Parameters":
+            continue
+        caption = ds.get("caption") or name
+        for conn in ds.findall(".//connection[@dbname]"):
+            base = os.path.basename(conn.get("dbname") or "")
+            if base.lower().endswith(".hyper"):
+                out.setdefault(base, (name, caption))
     return out
 
 
@@ -449,6 +478,7 @@ def land_all(args):
                     z.extractall(root)
             twb = args.twb if (args.twb and len(units) == 1) else find_twb(root)
             captions = ds_captions(twb) if twb else OrderedDict()
+            hyper_by_name = ds_hyper_map(twb) if twb else {}
             if not twb:
                 print(f"WARN {unit['slug']}: no .twb found — datasource captions "
                       "unavailable, falling back to hyper filenames", flush=True)
@@ -460,7 +490,10 @@ def land_all(args):
             prefix = args.prefix or clean_ident(unit["slug"])[:16]
 
             for hf in hypers:
-                ds_name, ds_cap = match_ds(hf, captions)
+                # Reliable dbname→caption map first (GUID-named hypers defeat the
+                # filename heuristic); fall back to token-matching only on a miss.
+                mapped = hyper_by_name.get(os.path.basename(hf))
+                ds_name, ds_cap = mapped if mapped else match_ds(hf, captions)
                 with Connection(hp.endpoint, hf) as hc:
                     for sname in hc.catalog.get_schema_names():
                         for tname in hc.catalog.get_table_names(sname):

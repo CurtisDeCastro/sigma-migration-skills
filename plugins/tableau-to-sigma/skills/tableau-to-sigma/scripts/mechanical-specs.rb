@@ -159,6 +159,77 @@ module MechanicalSpecs
     all_elements(model).find { |e| e['id'] == src_eid }
   end
 
+  # Remap a converter DM built from EMBEDDED extracts onto the landed Snowflake
+  # tables, using the landing-manifest.json produced by land-extracts.py. The
+  # converter only sees the generic in-.twbx table name ("Extract") for every
+  # embedded datasource, so N datasources collapse onto an IDENTICAL source.path
+  # + element name (TJ.PUBLIC.EXTRACT / "Extract") and their base-column formula
+  # prefixes point at a table Sigma cannot resolve. This is the step
+  # refs/extract-landing.md promised ("Phase 3 consumes the manifest to remap DM
+  # source paths and column refs") but nothing performed — everything the
+  # operator hand-fixed (colliding paths, wrong "Master" element, unresolvable
+  # [EXTRACT/...] formulas) cascades from its absence.
+  #
+  # Matching is by COLUMN-CAPTION OVERLAP (never element name — that collides):
+  # each element is scored against every manifest entry's ORIG column captions,
+  # then assigned greedily 1:1 by descending overlap, so distinct column sets
+  # (e.g. 36-col vs 19-col) separate two identically-named "Extract" elements.
+  # For each matched element it:
+  #   * repaths source.path        -> the entry's landed sf_table (split on '.')
+  #   * rewrites every column/metric formula prefix  [<oldlast>/x] -> [<sf_last>/x]
+  #   * sets a clean element name   (display_name of the landed table)
+  # and RETURNS { colmap:, elements:, tables: }. `colmap` is a merged
+  # {orig_caption => landed_column} map the caller threads into
+  # fixup_dm_spec(column_mapping:) so long/sanitized indicator names
+  # ("GDP (current US$)" -> GDP_CURRENT_US) fold to their real warehouse column
+  # instead of phantom-dropping. No manifest / no match => a no-op {elements:0}.
+  def remap_from_manifest!(model, manifest_path)
+    empty = { colmap: {}, elements: 0, tables: [] }
+    return empty unless manifest_path && File.exist?(manifest_path.to_s)
+    entries = (JSON.parse(File.read(manifest_path.to_s)) rescue nil)
+    return empty unless entries.is_a?(Array) && entries.any?
+
+    norm = ->(s) { s.to_s.gsub(/[^0-9a-z]/i, '').upcase }
+    entry_caps = entries.map { |e| [(e['columns'] || {}).keys.map { |k| norm.call(k) }.to_set, e] }
+    els = all_elements(model).select { |e| e.dig('source', 'kind') == 'warehouse-table' }
+
+    # Score every (element, entry) pair by orig-caption overlap; assign greedily
+    # 1:1 by descending score so the larger column set claims its entry first.
+    scored = []
+    els.each_with_index do |el, ei|
+      caps = (el['columns'] || []).map { |c| norm.call(col_display(c)) }.reject(&:empty?).to_set
+      entry_caps.each_with_index do |(ekeys, entry), si|
+        overlap = (caps & ekeys).size
+        scored << [overlap, ei, si, el, entry] if overlap.positive?
+      end
+    end
+    scored.sort_by! { |s| -s[0] }
+
+    colmap = {}
+    tables = []
+    claimed_el = {}
+    used_entry = {}
+    scored.each do |_overlap, ei, si, el, entry|
+      next if claimed_el[ei] || used_entry[si]
+      sf = entry['sf_table'].to_s.split('.')
+      new_last = sf.last.to_s
+      next if new_last.empty?
+      claimed_el[ei] = true
+      used_entry[si] = true
+      old_last = (el.dig('source', 'path') || []).last.to_s
+      el['source']['path'] = sf
+      el['name'] = display_name(new_last)
+      unless old_last.empty? || old_last == new_last
+        pfx = /\[#{Regexp.escape(old_last)}\//
+        (el['columns'] || []).each { |c| c['formula'] = c['formula'].to_s.gsub(pfx, "[#{new_last}/") }
+        (el['metrics'] || []).each { |m| m['formula'] = m['formula'].to_s.gsub(pfx, "[#{new_last}/") }
+      end
+      (entry['columns'] || {}).each { |orig, landed| colmap[orig] = landed }
+      tables << new_last
+    end
+    { colmap: colmap, elements: claimed_el.size, tables: tables }
+  end
+
   # Run the Tableau→Sigma converter. Two backends, same output contract
   # ({ model, warnings, stats, security }):
   #   - mcp_build present → node shim importing a LOCAL build/tableau.(m)js

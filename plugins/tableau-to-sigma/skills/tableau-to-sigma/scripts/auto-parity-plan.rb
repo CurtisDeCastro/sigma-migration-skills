@@ -362,11 +362,34 @@ warn "plan status: #{plan_status}" \
 require 'time'
 csv_mtime = Dir.glob(File.join(opts[:tab], 'views', '*.csv'))
                .map { |f| File.mtime(f).to_i }.max || 0
+# Composite-dashboard fallback (bead: composite-parity-plan): a SINGLE composite
+# dashboard view has no per-worksheet views/CSVs, so every Sigma chart `next`s
+# above and plan_entries is empty — which then dead-ends the gate on
+# charts_total==0. Emit a STUB entry per Sigma chart (expected:null, needs_source
+# marker) so the census is non-empty and the operator fills `actual` from a live
+# Sigma MCP query while the visual gate (8/8b) carries fidelity. Only triggers
+# when there is genuinely no CSV oracle — never masks a real rename mismatch
+# (which leaves CSVs present).
+composite_stub = false
+if plan_entries.empty? && csv_mtime.zero?
+  composite_stub = true
+  plan_entries = sigma_charts.map do |el|
+    { 'id' => el['id'], 'chart' => el['name'], 'name' => el['name'], 'expected' => nil,
+      'needs_source' => 'composite-dashboard: no per-worksheet CSV oracle — fill `actual` via a live ' \
+                        'Sigma MCP query if a value oracle exists; fidelity is otherwise carried by the ' \
+                        'visual gate (assert-phase6-ran.rb 8/8b).' }
+  end
+  plan_status = 'composite-stub'
+  warn "COMPOSITE fallback: no per-worksheet CSVs found — emitted #{plan_entries.size} stub chart(s) " \
+       '(expected:null). Value parity is manual (fill actual via Sigma MCP); visual gate carries fidelity.'
+end
+
 output = {
   'extract'              => extract,
   'charts'               => plan_entries,
   'hidden_filters'       => hidden_filters_gate,
   'plan_status'          => plan_status,
+  'composite_stub'       => composite_stub,
   'generated_at'         => Time.now.utc.iso8601,
   'source_csv_max_mtime' => csv_mtime
 }
