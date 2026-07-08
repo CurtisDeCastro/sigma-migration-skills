@@ -385,6 +385,38 @@ def fetch_via_twb_xml(twb_path)
   return { ok: false, error: "twb not found: #{twb_path}" } unless File.file?(twb_path)
   doc = TwbXml.parse(File.read(twb_path, encoding: 'UTF-8'))
 
+  # Pass 1 — build the field graph: internal name (e.g. "[Calculation_123]")
+  # => display caption, across EVERY <column> in EVERY datasource (source cols,
+  # calcs, and Parameters). Formulas reference other fields by that bracketed
+  # internal name, so this map is what lets us resolve dependencies straight
+  # from the .twb — no Metadata API needed. Parameters are included because
+  # calcs routinely reference them; omitting them would make param-driven calcs
+  # look like leaves.
+  name_to_caption = {}
+  doc.elements.each('//datasource') do |ds|
+    ds.elements.each('column') do |col|
+      internal = col.attributes['name']
+      next unless internal
+      next if internal.include?('__tableau_internal_object_id__')
+      name_to_caption[internal] ||= col.attributes['caption'] || internal
+    end
+  end
+  all_internal_names = name_to_caption.keys
+
+  # Find every OTHER field whose bracketed internal name appears verbatim in a
+  # formula. Keyed by internal name (unambiguous): a data BLEND can reuse a
+  # display caption across datasources, so a caption-keyed graph would collapse
+  # distinct fields into self-loops/cycles — internal-name keying stays a clean
+  # DAG, which dependency-ordered validation/repair needs. The closing "]" in
+  # each token stops "[AGE]" matching inside "[AGE_BRACKET]".
+  resolve_deps = lambda do |formula, self_internal|
+    return [] if formula.nil? || formula.empty?
+    all_internal_names.each_with_object([]) do |cand, acc|
+      next if cand == self_internal
+      acc << cand if formula.include?(cand)
+    end.uniq
+  end
+
   calcs = []
   # In a .twb, each <datasource> has a <column> children with optional
   # <calculation class='tableau' formula='...'/>. caption is the user-facing
@@ -407,6 +439,7 @@ def fetch_via_twb_xml(twb_path)
       hidden = col.attributes['hidden'] == 'true'
       default_agg = col.attributes['default-aggregation']
       sig = cached_signals(formula)
+      dep_internal = resolve_deps.call(formula, internal_name)
       calcs << {
         name: caption || internal_name,
         # internal_name is the .twb id (e.g. "[Calculation_123]" or
@@ -420,9 +453,14 @@ def fetch_via_twb_xml(twb_path)
         aggregation: default_agg,
         is_hidden: hidden,
         is_lod: sig[:is_lod],
-        # depends_on is derived post-hoc from the formula (see resolve_used_calcs)
-        # since the .twb path has no resolved field graph.
-        depends_on: [],
+        # depends_on: human-readable display names (matches the Metadata-API
+        # path). depends_on_internal: the DAG-safe graph keyed by internal name
+        # — use THIS for dependency-ordered validation/repair. resolve_used_calcs
+        # walks depends_on (normalizing captions to tokens) before falling back
+        # to formula parsing, so populating it here strengthens working-set
+        # scoping too.
+        depends_on: dep_internal.map { |n| name_to_caption[n] }.uniq,
+        depends_on_internal: dep_internal,
         formula_hash: sig[:formula_hash],
         requires_custom_sql: sig[:requires_custom_sql],
         translation_notes: sig[:translation_notes]
