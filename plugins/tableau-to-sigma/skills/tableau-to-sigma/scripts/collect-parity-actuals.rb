@@ -29,6 +29,19 @@
 # unmappable columns) are listed on stdout — the agent supplies those via
 # mcp-v2 (phase6-parity prints the exact queries).
 #
+# KNOWN-PLATFORM-BUG FALLBACK (SKILL_IMPROVEMENT_PLAN_V3 §D4): the element CSV
+# export returns HTTP 500 for some pivots (control-driven pivots;
+# totals.showGrandTotals:hidden — probe-isolated live) or an EMPTY/HTML body
+# (large pivots) while the rendered values are CORRECT. That must not fail the
+# run and must not push agents into ad-hoc --min-pass-rate waivers: such charts
+# are marked in --out as
+#   { "status": "render-verify-required",
+#     "reason": "pivot CSV export 500/empty (known Sigma limitation)" }
+# and listed in ONE summary line — the agent verifies them via render-read or
+# direct SQL, then sets "render_verified": true on the chart in parity-plan.json
+# (or replaces the marker with real rows). verify-parity reports the marker as
+# PENDING (never DIVERGE) until resolved.
+#
 # Exit codes: 0 = ran (collected what it could — uncollected charts are the
 # AGENT's list, not a failure); 1 = bad invocation / no plan.
 
@@ -69,9 +82,14 @@ def parse_cell(v)
 end
 
 RETRYABLE = /\b(429|408|50[234])\b|Too Many Requests|timed? ?out|Timeout/i
+# 5xx after retries (or a non-retryable 500) = the known pivot-export platform
+# bug → render-verify fallback, not a run failure.
+SERVER_ERR = /\b5\d\d\b|Internal Server Error/i
+RENDER_VERIFY_REASON = 'pivot CSV export 500/empty (known Sigma limitation)'
 
 # One chart: export → poll → download → map plan columns by display name.
-# Returns [:ok, rows] / [:skip, reason] / [:fail, reason].
+# Returns [:ok, rows] / [:skip, reason] / [:fail, reason] /
+# [:manual, reason] (export 500/empty/HTML → render-verify fallback).
 def collect_chart(c, el_by_id, wb, timeout)
   return [:skip, 'pivot-table — CSV export is the wide grid; agent-mediated (mcp-v2)'] if c['sigma_kind'] == 'pivot-table'
   el = el_by_id[c['sigma_element_id']]
@@ -103,9 +121,15 @@ def collect_chart(c, el_by_id, wb, timeout)
         raise unless msg =~ /\b404\b/ # query not materialized yet — keep polling
       end
     end
+    # HTML instead of CSV = the export renderer errored behind a 200 — same
+    # class as the 500 (seen live on control-driven pivots).
+    return [:manual, RENDER_VERIFY_REASON] if body.to_s.lstrip.start_with?('<')
     rows = CSV.parse(body)
-    return [:fail, 'export CSV empty'] if rows.empty?
+    # Empty / header-only exports (large pivots return a bodyless grid while the
+    # rendered values are correct) → render-verify fallback, not a failure.
+    return [:manual, RENDER_VERIFY_REASON] if rows.empty?
     headers = rows.shift.map { |h| h.to_s.strip }
+    return [:manual, RENDER_VERIFY_REASON] if rows.empty?
     # Map each plan column to a CSV index by display name, consuming indices so
     # duplicate names (x + color both "Region") bind in order.
     used = []
@@ -116,12 +140,15 @@ def collect_chart(c, el_by_id, wb, timeout)
     end
     return [:fail, "export headers #{headers.inspect[0, 120]} missing column(s) #{want_names.zip(idxs).select { |_, i| i.nil? }.map(&:first).join(', ')}"] if idxs.any?(&:nil?)
     [:ok, rows.map { |r2| idxs.map { |i| parse_cell(r2[i]) } }]
-  rescue Sigma::Error, Timeout::Error, Errno::ETIMEDOUT => e
+  rescue Sigma::Error, Timeout::Error, Errno::ETIMEDOUT, CSV::MalformedCSVError => e
     msg = e.message.lines.first.to_s
     if attempts < 4 && msg =~ RETRYABLE
       sleep((1.5 * (2**(attempts - 1))) + rand * 0.5)
       retry
     end
+    # A persistent 5xx (500 immediately; 502/503/504 after retries) is the known
+    # pivot-export platform bug — degrade to render-verify, don't fail the run.
+    return [:manual, RENDER_VERIFY_REASON] if msg =~ SERVER_ERR
     [:fail, msg[0, 160]]
   end
 end
@@ -148,17 +175,32 @@ threads.each(&:join)
 
 ok      = results.select { |_, (s, _)| s == :ok }
 skipped = results.select { |_, (s, _)| s == :skip }
+manual  = results.select { |_, (s, _)| s == :manual }
 failed  = results.select { |_, (s, _)| s == :fail }
 
 # Merge into --out (preserve any agent-collected keys already present).
 existing = (JSON.parse(File.read(opts[:out])) rescue {}) if File.exist?(opts[:out])
 existing ||= {}
 ok.each { |name, (_, rows)| existing[name] = rows }
+# Render-verify markers: never clobber real rows (agent-collected or from an
+# earlier successful export) — only fill gaps / refresh stale markers. Charts
+# already backed by rows need no verification and stay off the summary line.
+marked = []
+manual.each do |name, (_, reason)|
+  next if existing[name].is_a?(Array)
+  existing[name] = { 'status' => 'render-verify-required', 'reason' => reason }
+  marked << name
+end
 File.write(opts[:out], JSON.pretty_generate(existing))
 
 wall = (Time.now - t_start).round(1)
 puts "collect-parity-actuals: #{ok.size}/#{charts.size} chart(s) collected via pooled CSV export " \
      "in #{wall}s (pool=#{opts[:pool]}) → #{opts[:out]}"
 skipped.each { |name, (_, why)| puts "  AGENT-MEDIATED  #{name}: #{why}" }
+if marked.any?
+  puts "  RENDER-VERIFY REQUIRED (#{marked.size}): #{marked.join(', ')} — " \
+       "#{RENDER_VERIFY_REASON}; marked in #{opts[:out]}; verify each via render-read or direct SQL, " \
+       'then set "render_verified": true on the chart in parity-plan.json (or replace the marker with rows).'
+end
 failed.each  { |name, (_, why)| puts "  NOT COLLECTED   #{name}: #{why} — agent must supply via mcp-v2" }
 exit 0

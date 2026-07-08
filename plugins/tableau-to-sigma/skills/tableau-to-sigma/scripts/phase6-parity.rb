@@ -235,7 +235,12 @@ actuals = JSON.parse(File.read(opts[:actuals]))
 warn "Phase 6 PASS 2: injecting actuals (#{actuals.size} charts) → #{plan_path}"
 plan['charts'].each do |c|
   a = actuals[c['chart']]
-  c['actual'] = { 'rows' => a } if a
+  next unless a
+  # A render-verify marker ({"status":"render-verify-required","reason":...} —
+  # collect-parity-actuals' pivot-export 500/empty fallback) passes through
+  # as-is: verify-parity reports it PENDING (or PASS once the plan chart
+  # carries render_verified:true) instead of a bogus DIVERGE-against-empty.
+  c['actual'] = (a.is_a?(Hash) && a['status']) ? a : { 'rows' => a }
 end
 File.write(plan_path, JSON.pretty_generate(plan))
 
@@ -258,9 +263,11 @@ File.write(opts[:out], out)
 summary_path = File.join(opts[:tab], 'parity-final.json')
 total = plan['charts'].size
 # NB: verify-parity appends a "  (score NN%)" suffix (bead y9rd.2) — strip it so
-# chart names stay clean for the tile-census name match.
-passed_chart_names = out.scan(/^PASS\s+\[[^\]]+\]\s+(.+?)(?:\s+\(score [\d.]+%\))?$/).flatten
-failed_chart_names = out.scan(/^DIVERGE\s+\[[^\]]+\]\s+(.+?)(?:\s+\(score [\d.]+%\))?$/).flatten
+# chart names stay clean for the tile-census name match. PENDING lines (the
+# pivot-export render-verify fallback) carry a "(render-verify-required)" suffix.
+passed_chart_names  = out.scan(/^PASS\s+\[[^\]]+\]\s+(.+?)(?:\s+\(score [\d.]+%\))?$/).flatten
+failed_chart_names  = out.scan(/^DIVERGE\s+\[[^\]]+\]\s+(.+?)(?:\s+\(score [\d.]+%\))?$/).flatten
+pending_chart_names = out.scan(/^PENDING\s+\[[^\]]+\]\s+(.+?)(?:\s+\(render-verify-required\))?$/).flatten
 
 # ---- Tile census (bead gjhe) ------------------------------------------------
 # Compare the Tableau dashboard's chart-zone count against the charts that made
@@ -317,6 +324,16 @@ summary = {
   'fail_names'   => failed_chart_names,
   'status'       => (status.success? && total > 0 && passed_chart_names.size == total) ? 'PASS' : 'FAIL'
 }
+# Render-verify pendings (pivot-export 500/empty fallback) are surfaced by NAME
+# so the gate's failure message can say exactly what to resolve — they block
+# GREEN (status stays FAIL) but are pending-manual, not divergences.
+if pending_chart_names.any?
+  summary['charts_pending_manual'] = pending_chart_names.size
+  summary['pending_names']         = pending_chart_names
+  warn "pending render-verify (pivot CSV export 500/empty fallback): #{pending_chart_names.join(', ')} — " \
+       'verify via render-read or direct SQL, set "render_verified": true on each chart in ' \
+       "#{plan_path}, then re-run --finalize"
+end
 summary['tile_census'] = tile_census if tile_census
 
 # ---- Value-parity score + tier coverage report (bead y9rd.2) ----------------

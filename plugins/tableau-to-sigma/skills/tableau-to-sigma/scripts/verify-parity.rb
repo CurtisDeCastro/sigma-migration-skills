@@ -9,6 +9,15 @@
 #      "extract":  true|false   # optional per-chart override
 #   }]
 #
+# Render-verify fallback (known Sigma platform bug — pivot CSV export 500/empty):
+# collect-parity-actuals.rb may mark a chart's actual as
+#   "actual": { "status": "render-verify-required", "reason": "..." }
+# instead of rows. Such a chart reports PENDING (pending-manual, never DIVERGE)
+# and keeps the run failing until the agent EITHER replaces the marker with real
+# rows (direct SQL / mcp-v2) OR confirms the values via render-read and sets
+#   "render_verified": true            # + optional "render_verified_notes"
+# on the chart in the plan — which then PASSes with a named render-verified note.
+#
 # A top-level wrapper is also accepted:
 #   { "extract": true, "charts": [ ... ] }
 # in which case `extract` propagates to every chart.
@@ -262,7 +271,6 @@ mode_forced = opts[:mode] == :extract
 
 results = plan.map do |p|
   exp = (p['expected'] || []).map { |r| round_row(r) }
-  act = (p.dig('actual', 'rows') || []).map { |r| round_row(r) }
 
   this_extract = if p.key?('extract')
                    p['extract']
@@ -272,6 +280,30 @@ results = plan.map do |p|
                    default_extract
                  end
 
+  # Render-verify fallback (see header): a status marker instead of rows means
+  # the CSV export hit the known pivot 500/empty platform bug — the chart is
+  # PENDING manual verification, never DIVERGE-against-empty. Once the plan
+  # chart carries render_verified:true it PASSes with a named note.
+  if p.dig('actual', 'status') == 'render-verify-required'
+    reason = p.dig('actual', 'reason') || 'CSV export unavailable'
+    result =
+      if p['render_verified']
+        { status: 'PASS', score: 1.0, only_in_tableau: [], only_in_sigma: [],
+          n_expected: exp.size, n_actual: nil, n_matched: nil,
+          notes: ["render-verified: #{reason}; values confirmed via render-read/SQL" \
+                  "#{p['render_verified_notes'] ? " — #{p['render_verified_notes']}" : ''}"] }
+      else
+        { status: 'PENDING', score: nil, only_in_tableau: [], only_in_sigma: [],
+          n_expected: exp.size, n_actual: nil, n_matched: nil,
+          notes: ["render-verify-required: #{reason} — verify via render-read or direct SQL, " \
+                  'then set "render_verified": true on this chart in the plan ' \
+                  '(or replace the marker with actual rows) and re-run'] }
+      end
+    next result.merge(chart: p['chart'], extract: this_extract, columns: [])
+  end
+
+  act = (p.dig('actual', 'rows') || []).map { |r| round_row(r) }
+
   result = this_extract ? extract_compare(exp, act, tol: opts[:tol]) : strict_compare(exp, act)
   result.merge(chart: p['chart'], extract: this_extract,
                columns: per_column_scores(exp, act, p['sigma_columns']))
@@ -279,7 +311,11 @@ end
 
 results.each do |r|
   tag = r[:extract] ? '[extract]' : '[strict] '
-  printf "%-7s  %s  %s  (score %.0f%%)\n", r[:status], tag, r[:chart], (r[:score] || 0) * 100
+  if r[:status] == 'PENDING'
+    printf "%-7s  %s  %s  (render-verify-required)\n", r[:status], tag, r[:chart]
+  else
+    printf "%-7s  %s  %s  (score %.0f%%)\n", r[:status], tag, r[:chart], (r[:score] || 0) * 100
+  end
   if r[:status] != 'PASS' || (r[:notes] && r[:notes].any?)
     Array(r[:notes]).each { |n| puts "    #{n}" }
     if r[:only_in_tableau].any? || r[:only_in_sigma].any?
@@ -295,13 +331,17 @@ results.each do |r|
 end
 
 failed = results.count { |r| r[:status] != 'PASS' }
+pending = results.count { |r| r[:status] == 'PENDING' }
 # Overall value-parity score (bead y9rd.2): mean per-tile score — the real,
 # repeatable number behind "N% parity". Separate from pass/fail (a chart can
 # DIVERGE yet score 0.9 if only one bucket is off) so trends are visible.
-overall = results.empty? ? 1.0 : (results.sum { |r| r[:score] || 0.0 } / results.size).round(4)
+# PENDING (render-verify) tiles carry no score and are excluded from the mean.
+scored = results.map { |r| r[:score] }.compact
+overall = scored.empty? ? 1.0 : (scored.sum / scored.size).round(4)
 puts '---'
-puts "#{results.size - failed}/#{results.size} pass" + (mode_forced ? '  (extract-mode)' : '')
-puts "value-parity score: #{(overall * 100).round(1)}%  (mean per-tile, #{results.size} tile(s))"
+puts "#{results.size - failed}/#{results.size} pass" + (mode_forced ? '  (extract-mode)' : '') +
+     (pending.positive? ? "  (#{pending} pending render-verify)" : '')
+puts "value-parity score: #{(overall * 100).round(1)}%  (mean per-tile, #{scored.size} scored tile(s))"
 
 if opts[:score_out]
   score_doc = {
@@ -313,7 +353,8 @@ if opts[:score_out]
     'value_parity_score'  => overall,
     'tiles'               => results.map { |r|
       { 'chart' => r[:chart], 'status' => r[:status], 'extract' => r[:extract],
-        'score' => (r[:score] || 0.0),
+        # PENDING (render-verify) tiles carry score:null — unscored, not zero.
+        'score' => (r[:status] == 'PENDING' ? nil : (r[:score] || 0.0)),
         'n_expected' => r[:n_expected], 'n_actual' => r[:n_actual], 'n_matched' => r[:n_matched],
         # per-column (per-formula) scores (y9rd.14) — which column carried the divergence
         'columns' => (r[:columns] || []) }
