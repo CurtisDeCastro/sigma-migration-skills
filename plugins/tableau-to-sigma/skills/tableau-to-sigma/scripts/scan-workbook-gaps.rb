@@ -289,16 +289,15 @@ def detect_blends(xml)
   [features, { 'datasources' => ds_info.values, 'blends' => blends }]
 end
 
-# ---- Independent multi-datasource detection --------------------------------
-# DISTINCT from blending: N datasources each drive their OWN worksheets, with
-# no <datasource-dependencies> secondary blocks linking them (no linking
-# fields). The vendored converter (converter/tableau.mjs) converts ONE
-# datasource per invocation (`datasourceIndex`, default 0) — run with defaults
-# on this shape it keeps only datasource #1 and silently drops every other
-# datasource's columns and calc fields; the workbook spec still references
-# them via [Master/...] and the Sigma POST fails with "Dependency not found".
-# Detect the shape up front and route to the multi-element DM path
-# (refs/multi-datasource.md).
+# Detect the "N independent datasources feeding different worksheets" case —
+# DISTINCT from a Tableau blend (2 sources on ONE sheet, handled by
+# detect_blends). Here different sheets have different PRIMARY datasources. The
+# LOCAL converter (converter/tableau.mjs) collapses every worksheet onto the
+# primary datasource and silently drops the other sources' columns/calcs; the
+# workbook POST then fails with unresolved [Master/...] refs (see
+# a real multi-datasource workbook). Emit an ❌-unhandled gap so migrate-tableau
+# HARD-STOPS at the gap gate with the table/sheet breakdown, instead of posting
+# a doomed DM. Fixed for real by the multi-element DM path (Tier 2).
 #
 # Trigger — ALL must hold:
 #   - >=2 real datasources (Parameters excluded)
@@ -308,15 +307,17 @@ end
 #     workbook whose extra datasources are secondary-only never triggers
 #     (they are never primary — that is the blend case, blend-plan.json).
 #
-# Output: multi-ds-plan.json next to the gaps report (the orchestrator's
-# multi-DS gate consumes it — shape is a CONTRACT, keep it stable) + one
-# :manual gap-report row.
-#   { "independent": true,
-#     "datasources": [ { "name", "caption", "connection_class",
-#                        "table" ("db.schema.table" or null — null for
-#                        sqlproxy; hydration resolves published sources later),
-#                        "sqlproxy" (true|false),
-#                        "worksheets" [...], "dashboards" [...] } ] }
+# ONE detection pass feeds THREE outputs:
+#   - the ❌-unhandled gap-report row (drives the orchestrator's exit-11 stop)
+#   - the gaps-JSON `multi_datasource` detail (datasource→worksheet breakdown)
+#   - multi-ds-plan.json next to the gaps report (the per-datasource ROUTING
+#     table for the multi-element DM path — shape is a CONTRACT, keep stable):
+#       { "independent": true,
+#         "datasources": [ { "name", "caption", "connection_class",
+#                            "table" ("db.schema.table" or null — null for
+#                            sqlproxy; hydration resolves published sources
+#                            later), "sqlproxy" (true|false),
+#                            "worksheets" [...], "dashboards" [...] } ] }
 
 # Best-effort db.schema.table per datasource from its first table relation.
 # nil for Custom SQL (type='text') and for published stubs (table='[sqlproxy]').
@@ -353,10 +354,10 @@ def datasource_table_refs(xml)
   out
 end
 
-def detect_independent_multi_ds(xml, blend_plan)
-  return [[], nil] if xml.nil?
+def detect_multi_datasource(xml, blend_plan = nil)
+  return [nil, nil, nil] if xml.nil?
   ds_info = datasource_connections(xml)
-  return [[], nil] if ds_info.size < 2
+  return [nil, nil, nil] if ds_info.size < 2
 
   # primary per worksheet = FIRST real datasource in its <view> list
   primaries = Hash.new { |h, k| h[k] = [] } # ds name => [worksheet, ...]
@@ -368,17 +369,28 @@ def detect_independent_multi_ds(xml, blend_plan)
     next if used.empty? || ws_name.nil?
     primaries[used.first] << ws_name unless primaries[used.first].include?(ws_name)
   end
-  return [[], nil] if primaries.size < 2
+  return [nil, nil, nil] if primaries.size < 2 # single-primary workbook (incl. pure blends) — fine
 
-  # Primaries linked by a blend are NOT independent of each other.
+  # Primaries linked by a blend are NOT independent of each other — a primary
+  # set that is fully blend-linked stays on the blend path (blend-plan.json).
   blend_pairs = Set.new
   ((blend_plan && blend_plan['blends']) || []).each do |b|
     blend_pairs << [b['primary'], b['secondary']].sort
   end
   independent = primaries.keys.combination(2).any? { |pair| !blend_pairs.include?(pair.sort) }
-  return [[], nil] unless independent
+  return [nil, nil, nil] unless independent
 
-  # dashboards containing each worksheet (dashboard zone name refs)
+  # ❌-unhandled detail: the datasource→sheet breakdown the orchestrator's
+  # exit-11 gap stop prints (gaps JSON `multi_datasource`).
+  detail = primaries.keys.map do |n|
+    { 'datasource'  => n,
+      'caption'     => ds_info[n]['caption'],
+      'connections' => ds_info[n]['connections'],
+      'worksheets'  => primaries[n].uniq.sort }
+  end
+
+  # Routing plan (multi-ds-plan.json): dashboards containing each worksheet
+  # (dashboard zone name refs) + warehouse table refs + published-source flags.
   ws_dashboards = Hash.new { |h, k| h[k] = [] }
   xml.elements.each('/workbook/dashboards/dashboard') do |d|
     dname = d.attributes['name']
@@ -388,7 +400,6 @@ def detect_independent_multi_ds(xml, blend_plan)
       ws_dashboards[zn] << dname if zn && !ws_dashboards[zn].include?(dname)
     end
   end
-
   tables = datasource_table_refs(xml)
   entries = primaries.map do |ds_name, sheets|
     conns = ds_info[ds_name]['connections']
@@ -404,13 +415,18 @@ def detect_independent_multi_ds(xml, blend_plan)
     }
   end
 
-  feature = {
-    name:   'Independent multi-datasource workbook',
-    status: :manual,
-    count:  entries.length,
-    blurb:  "#{entries.length} datasources are each PRIMARY for their own worksheets with no linking fields — "               'NOT a blend. Converter default (datasourceIndex=0) keeps only datasource #1 and silently drops '               "every other datasource's columns/calcs (workbook spec refs then fail with \"Dependency not found\"). "               'route: multi-element DM (refs/multi-datasource.md). '               "Per-datasource worksheet/dashboard routing in multi-ds-plan.json. Datasources: "               "#{entries.map { |e| e['caption'] }.join(', ')}."
-  }
-  [[feature], { 'independent' => true, 'datasources' => entries }]
+  assigns = detail.map { |d| "#{d['caption']} → #{d['worksheets'].length} sheet(s)" }.join('; ')
+  blurb = "Workbook spans #{primaries.size} INDEPENDENT datasources across worksheets " \
+          "(#{assigns}). The local converter collapses all sheets onto the primary datasource " \
+          'and silently drops the other sources\' columns/calcs, so the workbook POST fails with ' \
+          'unresolved [Master/...] refs. This needs a MULTI-ELEMENT data model (one element per ' \
+          'datasource + relationships) or landing the extras and repointing — it is NOT a Tableau ' \
+          'blend. Per-datasource worksheet assignments are in the gaps JSON (multi_datasource); ' \
+          'route: multi-element DM (refs/multi-datasource.md); per-datasource worksheet/dashboard ' \
+          'routing table in multi-ds-plan.json.'
+  feat = { name: 'Multiple independent datasources (converter collapses to primary)',
+           status: :unhandled, count: primaries.size, blurb: blurb }
+  [feat, detail, { 'independent' => true, 'datasources' => entries }]
 end
 
 # --- Field-usage + calc-dependency analysis --------------------------------
@@ -633,8 +649,8 @@ def main
   results.concat(detect_point_map_geo_role_gaps(content))
   blend_features, blend_plan = detect_blends(xml)
   results.concat(blend_features)
-  multi_features, multi_ds_plan = detect_independent_multi_ds(xml, blend_plan)
-  results.concat(multi_features)
+  multi_ds_feature, multi_ds_detail, multi_ds_plan = detect_multi_datasource(xml, blend_plan)
+  results << multi_ds_feature if multi_ds_feature
   md_path = out
   json_path = out.sub(/\.md$/, '.json')
 
@@ -666,6 +682,7 @@ def main
     'detected_features' => results.map { |r| r.transform_keys(&:to_s) }
   }
   json_payload['field_statistics'] = fields.reject { |k, _| k == 'components' } if fields
+  json_payload['multi_datasource'] = multi_ds_detail if multi_ds_detail
   File.write(json_path, JSON.pretty_generate(json_payload))
 
   if fields && !fields['components'].empty?

@@ -98,9 +98,11 @@ SITE_ID=$(printf '%s' "$RESPONSE" | sed -n 's/.*<site id="\([^"]*\)".*/\1/p')
 
 (Adding `-H "Accept: application/json"` *asks* for a JSON response and usually gets one,
 but don't depend on it — some server configurations return XML regardless, so the regex
-parse is the only shape-proof option.) `get-tableau-token.sh` and `scripts/lib/tableau_rest.rb`
-already send the XML body; this section exists for anyone driving the API directly —
-especially on Windows, where the bash helpers may not be available (see refs/environment.md).
+parse is the only shape-proof option.) The shipped helpers already send the XML body:
+the orchestrator mints its token in-process (`scripts/lib/tableau_rest.rb`), and
+hand-driven calls have `get-tableau-token.sh` (bash) and its shell-neutral twin
+`python scripts/get-tableau-token.py` (Windows-safe — see refs/environment.md). This
+section exists for anyone driving the signin endpoint directly.
 
 ## Endpoint inventory
 

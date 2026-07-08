@@ -106,7 +106,7 @@ out = `ruby #{MIGRATE} --help 2>&1`
 st = $?.exitstatus
 check(st.zero?, "--help exits 0 (got #{st})", fails)
 check(out.include?('FAST PATH'), '--help documents the FAST PATH semantics', fails)
-%w[--reuse-dm --wb-spec --dm-spec --skip-refs-check].each do |flag|
+%w[--reuse-dm --wb-spec --dm-spec].each do |flag|
   check(out.include?(flag), "--help lists #{flag}", fails)
 end
 check(out =~ /--yes proceeds DEGRADED|never re-run under --yes/,

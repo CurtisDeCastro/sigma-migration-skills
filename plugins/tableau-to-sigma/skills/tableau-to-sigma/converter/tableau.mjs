@@ -3124,6 +3124,28 @@ function tableauParseLOD(formula) {
   });
   return { _isLOD: true, lodType, dims, rawAgg, aggFunc, aggExpr, sigmaAgg };
 }
+function _stripOuterAggAroundLod(formula) {
+  const m = formula.trim().match(/^(SUM|MAX|MIN|AVG|COUNT|COUNTD|ATTR)\s*\(\s*(\{\s*(?:FIXED|INCLUDE|EXCLUDE)[\s\S]*\})\s*\)$/i);
+  if (!m)
+    return null;
+  const inner = m[2].trim();
+  if (!/^\{[\s\S]*\}$/.test(inner))
+    return null;
+  return { aggFunc: m[1].toUpperCase(), inner };
+}
+function _repointCustomSqlSchema(sql, oldDb, oldSchema, newDb, newSchema) {
+  if (!sql || !newDb || !newSchema || !oldDb || !oldSchema)
+    return sql;
+  if (oldDb.toUpperCase() === newDb.toUpperCase() && oldSchema.toUpperCase() === newSchema.toUpperCase())
+    return sql;
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const seg = (s) => `(?:"${esc(s)}"|${esc(s)})`;
+  const re = new RegExp(`${seg(oldDb)}\\s*\\.\\s*${seg(oldSchema)}\\s*\\.`, "gi");
+  return sql.replace(re, `${newDb}.${newSchema}.`);
+}
+function _isTableauVirtualField(name) {
+  return (name || "").replace(/^\[|\]$/g, "").trim().startsWith(":");
+}
 function _windowInnerToSql(expr) {
   let s = expr;
   s = s.replace(/\bZN\s*\(([^()]+)\)/gi, "$1");
@@ -3976,9 +3998,93 @@ function tryBuildBlendModel(parsed, datasources, dbOverride, schOverride, connId
     }
   };
 }
+function buildMultiDatasourceModel(xmlContent, options, datasources) {
+  const dataElements = [];
+  const controls = [];
+  const controlNames = /* @__PURE__ */ new Set();
+  const workbookPatterns = [];
+  const patternKeys = /* @__PURE__ */ new Set();
+  const security = [];
+  const parameters = [];
+  const paramNames = /* @__PURE__ */ new Set();
+  const warnings = [];
+  const usedElementNames = /* @__PURE__ */ new Set();
+  const perDs = [];
+  datasources.forEach((dsMeta, i) => {
+    const sub = convertTableauToSigma(xmlContent, { ...options, datasourceIndex: i, __multiDsChild: true });
+    const els = sub.model?.pages?.[0]?.elements || [];
+    let kept = 0;
+    for (const el of els) {
+      if (el.kind === "control") {
+        const key = String(el.name ?? el.id);
+        if (!controlNames.has(key)) {
+          controlNames.add(key);
+          controls.push(el);
+        }
+        continue;
+      }
+      if (el.name && usedElementNames.has(el.name)) {
+        const suffix = (dsMeta.caption || dsMeta.name || `DS${i + 1}`).replace(/[^A-Za-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || `DS${i + 1}`;
+        const newName = `${el.name}_${suffix}`;
+        const oldRef = `[${el.name}/`, newRef = `[${newName}/`;
+        const rw = (s) => typeof s === "string" ? s.split(oldRef).join(newRef) : s;
+        for (const c of el.columns || [])
+          if (c.formula)
+            c.formula = rw(c.formula);
+        for (const m of el.metrics || [])
+          if (m.formula)
+            m.formula = rw(m.formula);
+        el.name = newName;
+      }
+      if (el.name)
+        usedElementNames.add(el.name);
+      dataElements.push(el);
+      kept++;
+    }
+    for (const p of sub.workbookPatterns || []) {
+      const k = `${p.kind}::${p.name}`;
+      if (!patternKeys.has(k)) {
+        patternKeys.add(k);
+        workbookPatterns.push(p);
+      }
+    }
+    for (const s of sub.security || [])
+      security.push(s);
+    for (const p of sub.parameters || []) {
+      const k = String(p.name ?? p.id);
+      if (!paramNames.has(k)) {
+        paramNames.add(k);
+        parameters.push(p);
+      }
+    }
+    perDs.push(`${dsMeta.caption || dsMeta.name} (${kept} element${kept === 1 ? "" : "s"})`);
+  });
+  warnings.unshift(`\u2139 Multi-datasource workbook: built a MULTI-ELEMENT data model \u2014 one element set per independent datasource, so no source's columns are dropped. Datasources: ${perDs.join("; ")}. No cross-datasource relationships were inferred; add joins in Sigma if the sources share keys. Charts resolve against their own datasource's element.`);
+  const sigmaModel = {
+    name: datasources[0]?.name || "Workbook",
+    schemaVersion: 1,
+    pages: [{ id: sigmaShortId(), name: "Page 1", elements: [...controls, ...dataElements] }]
+  };
+  const totalCols = dataElements.reduce((s, e) => s + (e.columns?.length || 0), 0);
+  return {
+    model: sigmaModel,
+    warnings,
+    ...security.length ? { security } : {},
+    ...workbookPatterns.length ? { workbookPatterns } : {},
+    ...parameters.length ? { parameters } : {},
+    stats: {
+      datasources: datasources.length,
+      elements: dataElements.length,
+      columns: totalCols,
+      metrics: 0,
+      relationships: 0
+    }
+  };
+}
 function convertTableauToSigma(xmlContent, options = {}) {
   resetIds();
   const { connectionId = "", database = "", schema = "", datasourceIndex = 0, tableMapping = {} } = options;
+  void options.__multiDsChild;
   _tableMapping = tableMapping || {};
   const dbOverride = database || "";
   const schOverride = schema || "";
@@ -4049,6 +4155,9 @@ function convertTableauToSigma(xmlContent, options = {}) {
     } catch {
     }
     return blendResult;
+  }
+  if (!options.__multiDsChild && datasources.length > 1) {
+    return buildMultiDatasourceModel(xmlContent, options, datasources);
   }
   const dsIdx = Math.min(datasourceIndex, datasources.length - 1);
   const ds = datasources[dsIdx];
@@ -4168,7 +4277,7 @@ function convertTableauToSigma(xmlContent, options = {}) {
       const columns = [], order = [];
       for (const col of asArray(rootRelation?.columns?.column || [])) {
         const key = attr(col, "name").toUpperCase();
-        if (!key)
+        if (!key || _isTableauVirtualField(attr(col, "name")))
           continue;
         const id = sigmaInodeId(key);
         columns.push({ id, formula: `[${tableName}/${sigmaDisplayName(key)}]` });
@@ -4196,7 +4305,7 @@ function convertTableauToSigma(xmlContent, options = {}) {
           const columns = [], order = [];
           for (const col of asArray(t.rel?.columns?.column || [])) {
             const key = attr(col, "name").toUpperCase();
-            if (!key)
+            if (!key || _isTableauVirtualField(attr(col, "name")))
               continue;
             const id = sigmaInodeId(key);
             columns.push({ id, formula: `[${tableName}/${sigmaDisplayName(key)}]` });
@@ -4502,7 +4611,7 @@ function convertTableauToSigma(xmlContent, options = {}) {
       }
     } else if (relType === "text") {
       const decodeNumericEntities = (s) => s.replace(/&#x([0-9a-fA-F]+);/g, (_m, h) => String.fromCodePoint(parseInt(h, 16))).replace(/&#(\d+);/g, (_m, d) => String.fromCodePoint(parseInt(d, 10)));
-      const statement = decodeNumericEntities((rootRelation["#text"] || "").toString()).trim();
+      const statement = _repointCustomSqlSchema(decodeNumericEntities((rootRelation["#text"] || "").toString()).trim(), attr(rootConn, "dbname"), attr(rootConn, "schema"), dbOverride, schOverride);
       if (!statement) {
         warnings.push("\u26A0 Custom SQL relation carried no SQL text \u2014 no element emitted.");
       } else {
@@ -5331,7 +5440,15 @@ ${joinSql}
         continue;
       }
       {
-        const lod = tableauParseLOD(formula);
+        let lod = tableauParseLOD(formula);
+        let lodOuterAgg = null;
+        if (!lod) {
+          const wrapped = _stripOuterAggAroundLod(formula);
+          if (wrapped) {
+            lod = tableauParseLOD(wrapped.inner);
+            lodOuterAgg = wrapped.aggFunc;
+          }
+        }
         if (lod) {
           const lodDimsResolved = [];
           let allFound = true;
@@ -5417,6 +5534,8 @@ ${suggestion}
             _ensureRelationship2(helperRes.signatureKey, dimResolved, relName);
             _addAggToHelper2(helperRes.signatureKey, alias, lod.aggFunc, lod.aggExpr, caption);
             warnings.push(`\u2705 LOD "${caption}" (${lod.lodType}) \u2192 helper "${helperRes.helper.name}" alias ${alias}`);
+            if (lodOuterAgg)
+              warnings.push(`\u2139 LOD "${caption}" was wrapped by ${lodOuterAgg}({\u2026}); emitted the row-level LOD value \u2014 apply ${lodOuterAgg} as the measure's aggregation in the workbook (verify the number vs source).`);
           }
           continue;
         }

@@ -6,7 +6,7 @@
 # (controlIds share the namespace), case-variant function names as errors with
 # a REPORT-ONLY FormulaNormalize listing (NORMALIZE: lines), and unknown
 # function names as non-fatal WARNs. Live [X/Y]-vs-DM column resolution is
-# scripts/assert-refs-resolve.rb's job, not this validator's.
+# scripts/assert-wb-refs-resolve.rb's job, not this validator's.
 #
 # Usage:
 #   ruby validate-spec.rb --type datamodel <spec.json>

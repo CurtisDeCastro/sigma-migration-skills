@@ -9,9 +9,10 @@
 # and the workbook spec POST failed ~28x with "Dependency not found".
 #
 # What this locks:
-#   1. multids-independent.twb  → TRIGGERS: one :manual gap row routing to
+#   1. multids-independent.twb  → TRIGGERS: one ❌-unhandled gap row (drives
+#      the orchestrator's exit-11 gap stop) routing to
 #      refs/multi-datasource.md + a multi-ds-plan.json sidecar with the exact
-#      orchestrator-gate contract shape (independent flag, per-datasource
+#      contract shape (independent flag, per-datasource
 #      name/caption/connection_class/table/sqlproxy/worksheets/dashboards).
 #   2. multids-blend.twb        → does NOT trigger (a genuine blend — secondary
 #      is never primary; blend-plan.json path unchanged).
@@ -64,7 +65,7 @@ def feature_row(gaps, name)
   (gaps['detected_features'] || []).find { |f| f['name'] == name }
 end
 
-MULTI_DS_ROW = 'Independent multi-datasource workbook'
+MULTI_DS_ROW = 'Multiple independent datasources (converter collapses to primary)'
 
 # ── 1. Independent multi-DS fixture MUST trigger ────────────────────────────
 puts 'multids-independent.twb (4 independent datasources — the live-failure shape):'
@@ -76,7 +77,7 @@ check('blend-plan.json NOT written (no linking fields anywhere)', r[:blend].nil?
 row = feature_row(r[:gaps], MULTI_DS_ROW)
 check("gap row \"#{MULTI_DS_ROW}\" present", !row.nil?)
 if row
-  check('gap row status is manual', row['status'] == 'manual')
+  check('gap row status is unhandled (drives the exit-11 gap stop)', row['status'] == 'unhandled')
   check('gap row routes to multi-element DM (refs/multi-datasource.md)',
         row['blurb'].to_s.include?('route: multi-element DM (refs/multi-datasource.md)'))
 end

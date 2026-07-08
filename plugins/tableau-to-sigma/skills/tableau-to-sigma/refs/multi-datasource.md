@@ -2,9 +2,14 @@
 
 # Independent multi-datasource workbooks → multi-element DM
 
-**Disposition: detected + guided manual path. The skill does NOT auto-build
-this today** — the detection stops the run with exact instructions; you (the
-agent) assemble the multi-element DM and re-enter the gated spine.
+**Disposition: detected + auto-built by the CURRENT vendored converter.**
+`converter/tableau.mjs` (PROVENANCE `source_commit: cc3e81a`, 2026-07-08+)
+natively emits a MULTI-ELEMENT data model for this shape — one element set
+per independent datasource, nothing dropped (§2). The gap scan still flags
+the shape ❌-unhandled so the orchestrator STOPS (exit 11) and a human/agent
+confirms the converter output before POSTing. The **guided manual path (§3)
+remains the fallback** for older vendored converters (pre-`cc3e81a`) and for
+edge cases the native merge mishandles.
 
 ## 1. What this shape is (and is not)
 
@@ -30,10 +35,14 @@ that decision tree. The two shapes route differently:
 
 `scripts/scan-workbook-gaps.rb` triggers when ≥2 real datasources are each
 the primary (first `<view>` datasource) of at least one worksheet and at
-least one pair of those primaries is not blend-linked. It emits a `manual`
-gap row ("Independent multi-datasource workbook") plus a sidecar next to the
-gaps report — **the shape is a contract** (the orchestrator's multi-DS gate
-consumes it):
+least one pair of those primaries is not blend-linked. One detection pass
+emits three outputs: an ❌-`unhandled` gap row ("Multiple independent
+datasources (converter collapses to primary)" — the name is a stable
+scout-ledger key; the CURRENT converter no longer collapses, see §2) that
+hard-stops `migrate-tableau.rb` at the gap gate (exit 11) with the
+datasource→sheet breakdown; a `multi_datasource` detail block in the gaps
+JSON; and a `multi-ds-plan.json` sidecar next to the gaps report — **the
+sidecar shape is a contract**:
 
 ```json
 { "independent": true,
@@ -51,29 +60,59 @@ consumes it):
 is `null` for published sources (`sqlproxy: true`) — the resolve→hydrate
 step fills those in later — and for Custom SQL relations.
 
-## 2. The converter fact (why defaults lose data)
+## 2. The converter fact (current: multi-element; older: silent collapse)
 
-`converter/tableau.mjs` (`convertTableauToSigma`) converts **ONE datasource
-per invocation**: it takes a `datasourceIndex` option, **default 0**, and
-builds the DM from `datasources[datasourceIndex]` only. (Its native blend
-path is separate and only fires on genuine blend relationships.) The
-orchestrated local shim in `scripts/mechanical-specs.rb` does not even pass
-`datasourceIndex` — the spine always converts datasource #1.
+**Current vendored converter (PROVENANCE `cc3e81a`, 2026-07-08+):**
+`convertTableauToSigma` dispatches multi-datasource workbooks to
+`buildMultiDatasourceModel`, which runs the single-DS conversion once per
+datasource internally (`datasourceIndex: i` + a private `__multiDsChild`
+flag) and merges the results into ONE model:
 
-So converting an independent multi-DS workbook with defaults **silently drops
-every other datasource's columns and calculated fields**. This is a live,
-observed failure mode: a 4-datasource workbook (2 published, 2 direct) lost
-19 calc fields from datasources 2–4; the workbook spec still referenced them
-as `[Master/...]` and the Sigma POST failed ~28 times with
-`Dependency not found`. Nothing errors at convert time — the loss is silent
-until publish.
+- **All data elements land on a single page** (`pages: [{ elements:
+  [...controls, ...dataElements] }]`) — one element set per datasource,
+  nothing dropped. `stats.elements` counts the merged data elements.
+- **Element-name collisions across datasources are auto-renamed** with a
+  `_<datasource-caption-slug>` suffix (fallback `_DSn`), and every
+  `[OldName/...]` formula prefix inside the renamed element is rewritten to
+  match — element names are formula prefixes, so verify chart refs against
+  the FINAL names in the emitted model.
+- **Controls and parameters are deduped by name** across datasources;
+  `workbookPatterns` dedupe by kind+name; `security` entries concatenate.
+- **NO cross-datasource relationships are inferred** (`stats.relationships:
+  0`); the emitted warning says to add joins in Sigma if the sources share
+  keys. Unrelated elements in one DM are fine.
+- The model `name` is the FIRST datasource's name, and the first warning line
+  announces the multi-element build with a per-datasource element count.
+- **`datasourceIndex` semantics changed:** on a multi-DS workbook the
+  top-level call ignores it (the multi-element path always wins); it only
+  selects a single datasource for internal child calls. The genuine-blend
+  path (`tryBuildBlendModel`) still takes precedence over the multi-element
+  path.
 
-**Never run the single-DM spine on this shape.** Either follow the guided
-path below, or stop and tell the user: *"this workbook requires a
-multi-element DM — here are the N tables and their worksheet assignments"*
-(read them out of `multi-ds-plan.json`).
+**Older vendored converters (pre-`cc3e81a`)** convert ONE datasource per
+invocation (`datasourceIndex`, default 0) and **silently drop every other
+datasource's columns and calculated fields**. This is a live, observed
+failure mode: a 4-datasource workbook (2 published, 2 direct) lost 19 calc
+fields from datasources 2–4; the workbook spec still referenced them as
+`[Master/...]` and the Sigma POST failed ~28 times with `Dependency not
+found`. Nothing errors at convert time — the loss is silent until publish.
+Two safety nets now catch a collapse that slips through: the DM column-
+droppage WARN in `post-and-readback.rb` and the pre-POST ref gate
+(`scripts/assert-wb-refs-resolve.rb`, waivable only via
+`--skip-ref-check "<reason>"`).
 
-## 3. The guided path (agent-assembled multi-element DM)
+**Never run an OLD single-DM converter on this shape with defaults.** Check
+the emitted `stats.datasources` vs `stats.elements` (a multi-element build
+reports all sources) — if the converter collapsed, follow the guided path
+below or stop and tell the user: *"this workbook requires a multi-element DM
+— here are the N tables and their worksheet assignments"* (read them out of
+`multi-ds-plan.json`).
+
+## 3. The guided path (fallback: agent-assembled multi-element DM)
+
+Use this when the vendored converter predates the native multi-element build
+(`PROVENANCE.json` `source_commit` older than `cc3e81a`) or when the native
+merge mishandles an edge case (e.g. a rename/rewrite you need to control).
 
 1. **Hydrate published sources first.** For every plan entry with
    `sqlproxy: true`, run `scripts/resolve-published-ds.rb` →
@@ -99,7 +138,10 @@ multi-element DM — here are the N tables and their worksheet assignments"*
    datasource's caption), **not** by array position — the converter indexes
    datasources in `.twb` document order, which need not match the plan's
    order. Keep each run's `warnings`/`security`/`workbookPatterns` — they are
-   per-datasource too.
+   per-datasource too. (On the CURRENT converter, `datasourceIndex` alone is
+   ignored for multi-DS workbooks — add `__multiDsChild: true` to the options
+   to force a single-datasource run; but on the current converter you rarely
+   need this path at all, see §2.)
 3. **Assemble ONE `dm-spec.json` with N elements**: take the element(s) from
    each per-index model and put them all under a single page
    (`pages: [{ elements: [...] }]`, schema in `refs/data-model-spec.md`).
@@ -128,12 +170,13 @@ multi-element DM — here are the N tables and their worksheet assignments"*
    This routes through the normal gates (POST, parity, reports) instead of
    bypassing them.
 
-## 4. Escalation (the proper fix lives in the converter)
+## 4. Escalation (residual converter gaps only)
 
 The durable fix — the converter natively emitting N elements from an
-independent multi-DS workbook — belongs to the converter repos, not this
-skill. If you hit this shape, offer the user the option to file it via
-`scripts/escalate-gap.py` with `--category converter` (routes to
-`sigma-data-model-manager` + `sigma-data-model-mcp`). Dry-run first — the
-script defaults to a draft and files NOTHING without `--yes`; filing is
-always user-opt-in.
+independent multi-DS workbook — **shipped** in the converter repos and is in
+the current vendored `converter/tableau.mjs` (§2). Escalate only residual
+gaps in the native merge (wrong rename/rewrite, dropped controls/parameters,
+a shape it misclassifies): file via `scripts/escalate-gap.py` with
+`--category converter` (routes to `sigma-data-model-manager` +
+`sigma-data-model-mcp`). Dry-run first — the script defaults to a draft and
+files NOTHING without `--yes`; filing is always user-opt-in.

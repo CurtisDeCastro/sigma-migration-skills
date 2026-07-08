@@ -112,6 +112,7 @@ require_relative 'lib/dashboard_read'
 require_relative 'lib/run_state'
 require_relative 'lib/fast_path' # FAST-PATH routing + BOM-tolerant JSON reads
 require_relative 'lib/sigma_rest' # in-process Sigma token minting (no bash/eval)
+require_relative 'lib/tableau_rest' # in-process Tableau token minting (Windows-safe; no bash/eval)
 require_relative 'hydrate-custom-sql'
 
 $stdout.sync = true # progress lines interleave correctly when piped/captured
@@ -188,6 +189,7 @@ OptionParser.new do |o|
   o.on('--skip-reuse-scan')  {     opts[:skip_reuse] = true }
   o.on('--skip-dashboard-read REASON', 'waive the Phase 1d source dashboard-read gate — REQUIRED reason; name it in your report') { |v| opts[:skip_dashboard_read] = v }
   o.on('--skip-doctor-gate REASON', 'waive the Step-0 environment gate (doctor.json) — REQUIRED reason; name it in your report') { |v| opts[:skip_doctor_gate] = v }
+  o.on('--skip-ref-check REASON', 'waive the pre-POST workbook ref-resolution gate — REQUIRED reason; name it in your report') { |v| opts[:skip_ref_check] = v }
   o.on('--skip-extract-landing REASON', 'proceed although every datasource is an embedded file extract and no ' \
                                         'landing manifest was found (exit 17 otherwise) — you own the DM table paths') { |v| opts[:skip_extract_landing] = v }
   o.on('--skip-postpublish-guide REASON', 'waive the finalize gate that requires POSTPUBLISH_GUIDE.md when the ' \
@@ -332,6 +334,38 @@ end
 # Wrap a command so a Sigma token is live for it (injected via child env).
 def sigma_run!(cmd, allow_fail: false)
   run!(cmd, allow_fail: allow_fail, env: { 'SIGMA_API_TOKEN' => sigma_token! })
+end
+
+# Mint a fresh Tableau token IN-PROCESS (pure Ruby via tableau_rest) and return
+# the env a child needs, instead of `bash -c "eval \"$(get-tableau-token.sh)\""`.
+# On Windows the bash path fails — PowerShell env vars don't propagate into the
+# bash subprocess and $HOME isn't set, so get-tableau-token.sh can't source
+# ~/.sigma-migration/env (a Windows/PowerShell subprocess token failure). Ruby's Tableau.refresh_token!
+# resolves the neutral cred file via Ruby's own ~ expansion and mints over
+# net/http — no shell involved. Falls back to a pre-set TABLEAU_AUTH_TOKEN when
+# no PAT creds are available to refresh (parity with a hand-minted token).
+def tableau_env
+  begin
+    Tableau.refresh_token! # fresh PAT signin, in-process
+  rescue Tableau::Error
+    raise if ENV['TABLEAU_AUTH_TOKEN'].to_s.empty? # nothing to fall back on
+  end
+  {
+    'TABLEAU_SERVER_URL'  => (Tableau.server_url  rescue ENV['TABLEAU_SERVER_URL']),
+    'TABLEAU_SITE_ID'     => (Tableau.site_id     rescue ENV['TABLEAU_SITE_ID']),
+    'TABLEAU_AUTH_TOKEN'  => (Tableau.auth_token  rescue ENV['TABLEAU_AUTH_TOKEN']),
+    'TABLEAU_API_VERSION' => (Tableau.api_version rescue (ENV['TABLEAU_API_VERSION'] || '3.22')),
+  }.compact
+rescue StandardError => e
+  abort "FATAL: could not mint a Tableau token in-process: #{e.message}\n" \
+        '  Check Tableau creds (run: ruby scripts/setup-tableau.rb), or set TABLEAU_AUTH_TOKEN.'
+end
+
+# Run a Ruby child script with a live Tableau token injected via env — the
+# Windows-safe, bash-free replacement for
+# `run!(['bash','-c',"eval \"$(get-tableau-token.sh)\" && <cmd>"])`.
+def tableau_run!(cmd, allow_fail: false)
+  run!(cmd, allow_fail: allow_fail, env: tableau_env)
 end
 
 # Raised when the MECHANICAL WORKBOOK layer (build / validate / POST) fails after
@@ -769,9 +803,9 @@ probe_rb << if opts[:wb_id]
               "h = Tableau.find_workbook_by_name(#{opts[:wb_name].inspect}) or abort 'no workbook'; wb = Tableau.get_workbook(h['id']); "
             end
 probe_rb << "puts JSON.generate({ 'id' => wb['id'], 'updatedAt' => wb['updatedAt'] })"
-probe_quoted = "'" + probe_rb.gsub("'") { "'\\''" } + "'"
-probe_out, probe_st = Open3.capture2e('bash', '-c',
-                                      "eval \"$(#{File.join(HERE, 'get-tableau-token.sh')})\" && ruby -e #{probe_quoted}")
+# Run ruby directly with the Tableau token injected via env (Windows-safe) —
+# no bash, no `eval "$(get-tableau-token.sh)"`, no shell-quoting of the script.
+probe_out, probe_st = Open3.capture2e(tableau_env, RbConfig.ruby, '-e', probe_rb)
 probe = (JSON.parse(probe_out.lines.last.to_s) rescue nil) if probe_st.success?
 stamp = (JSON.parse(File.read(stamp_path)) rescue nil)
 reuse_discovery = probe && stamp &&
@@ -808,10 +842,13 @@ else
   # Gap scan runs in the lane as soon as its input (the .twb) is ready — i.e.
   # right after discovery lands it. Scan failure is tolerated (same as before);
   # discovery failure is the lane's exit code.
-  lane_cmd = "eval \"$(#{File.join(HERE, 'get-tableau-token.sh')})\" && #{disc_sh}; rc=$?; " \
+  # Token injected via env (Windows-safe); bash still orchestrates the lane
+  # (rc capture + conditional gap scan) but no longer sources creds via a
+  # fragile `eval "$(get-tableau-token.sh)"` that breaks under PowerShell/$HOME.
+  lane_cmd = "#{disc_sh}; rc=$?; " \
              "if [ $rc -eq 0 ] && [ -f '#{twb}' ]; then #{scan_sh} || true; fi; exit $rc"
   lane = { started: Time.now, status: nil }
-  lane[:pid] = Process.spawn('bash', '-c', lane_cmd, %i[out err] => [disc_log, 'a'])
+  lane[:pid] = Process.spawn(tableau_env, 'bash', '-c', lane_cmd, %i[out err] => [disc_log, 'a'])
   line "Tableau discovery + gap scan: BACKGROUND lane (pid #{lane[:pid]}, log #{File.basename(disc_log)})"
   line 'Sigma-side phases 1.6 + 2 run concurrently; lanes join before discovery output is consumed.'
 end
@@ -1101,14 +1138,12 @@ if mechanical
     hcsql = File.join(WORK, 'hydrate-custom-sql.json')
     if wb_luid || true # resolution + GraphQL both need a Tableau token; get-*-token guards if absent
       # PRIMARY — REST content chase (covers table + Custom SQL PDSes).
-      run!(['bash', '-c', "eval \"$(#{File.join(HERE, 'get-tableau-token.sh')})\" && " +
-            ['ruby', File.join(HERE, 'resolve-published-ds.rb'), '--twb', twb, '--out', pds_json]
-              .map { |a| "'" + a.gsub("'", "'\\''") + "'" }.join(' ')], allow_fail: true)
+      tableau_run!(['ruby', File.join(HERE, 'resolve-published-ds.rb'), '--twb', twb, '--out', pds_json],
+                   allow_fail: true)
       # FALLBACK — GraphQL Custom SQL blocks (only helps the text case).
       if wb_luid
-        run!(['bash', '-c', "eval \"$(#{File.join(HERE, 'get-tableau-token.sh')})\" && " +
-              ['ruby', File.join(HERE, 'extract-custom-sql.rb'), '--workbook-luid', wb_luid, '--twb', twb, '--out', hcsql]
-                .map { |a| "'" + a.gsub("'", "'\\''") + "'" }.join(' ')], allow_fail: true)
+        tableau_run!(['ruby', File.join(HERE, 'extract-custom-sql.rb'), '--workbook-luid', wb_luid, '--twb', twb, '--out', hcsql],
+                     allow_fail: true)
       end
     end
     hyd_twb = File.join(WORK, 'workbook-hydrated.twb')
@@ -1362,9 +1397,7 @@ if wb_luid
   cf = ['ruby', File.join(HERE, 'extract-calc-fields.rb'),
         '--workbook-luid', wb_luid, '--out', calc_path]
   cf += ['--twb', twb] if have_twb
-  _, st = run!(['bash', '-c',
-                "eval \"$(#{File.join(HERE, 'get-tableau-token.sh')})\" && " +
-                cf.map { |a| "'" + a.gsub("'", "'\\''") + "'" }.join(' ')], allow_fail: true)
+  _, st = tableau_run!(cf, allow_fail: true)
   if File.exist?(calc_path)
     cfj = JSON.parse(File.read(calc_path)) rescue {}
     calcs = cfj['calcs'] || []
@@ -1406,9 +1439,7 @@ csql_path = File.join(WORK, 'custom-sql.json')
 if wb_luid && have_twb
   csql_cmd = ['ruby', File.join(HERE, 'extract-custom-sql.rb'),
               '--workbook-luid', wb_luid, '--twb', twb, '--out', csql_path]
-  run!(['bash', '-c',
-        "eval \"$(#{File.join(HERE, 'get-tableau-token.sh')})\" && " +
-        csql_cmd.map { |a| "'" + a.gsub("'", "'\\''") + "'" }.join(' ')], allow_fail: true)
+  tableau_run!(csql_cmd, allow_fail: true)
   custom_sql = (JSON.parse(File.read(csql_path)) rescue []) if File.exist?(csql_path)
   custom_sql = [] unless custom_sql.is_a?(Array)
 end
@@ -1505,65 +1536,6 @@ if unhandled_gaps.any?
     end
     line "--force/--yes: proceeding past #{escalated.size} scouted-but-escalated feature(s) — they will NOT migrate" if escalated.any?
     line "gap-scout: all #{unhandled_gaps.size} ❌-unhandled feature(s) resolved via validated rules" if unscouted.empty? && escalated.empty?
-  end
-end
-
-# ---------------------------------------------------------------------------
-# MULTI-DATASOURCE gate (scan-workbook-gaps.rb writes <workdir>/
-# multi-ds-plan.json when >=2 datasources each primary their own worksheets
-# with no blend link). The vendored converter keeps ONE datasource per run
-# (datasourceIndex, default 0 = the FIRST), so a single-DM mechanical build
-# SILENTLY DROPS every other datasource's worksheets. If the plan marks the
-# datasources independent and no explicit DM routing was given (--dm-spec /
-# --reuse-dm), STOP with the plan (exit 11 — same family as the gap-scan
-# stop). Escape: --force proceeds PRIMARY-ONLY (the plan's first datasource)
-# with a loud SILENT-DROP warning naming the dropped datasources. Wired
-# defensively: no plan file → no gate.
-# ---------------------------------------------------------------------------
-mds_path = File.join(WORK, 'multi-ds-plan.json')
-if File.exist?(mds_path) && !opts[:dm_spec] && !opts[:reuse_dm]
-  mds = (FastPath.read_json_utf8(mds_path) rescue nil)
-  if mds.is_a?(Hash) && mds['independent'] == true
-    mds_rows = (mds['datasources'].is_a?(Array) ? mds['datasources'] : []).map do |d|
-      d = {} unless d.is_a?(Hash)
-      { name: (d['caption'] || d['name'] || d['datasource'] || '?').to_s,
-        primary: d['primary'] == true,
-        sheets: Array(d['worksheets'] || d['sheets']).map(&:to_s) }
-    end
-    # The plan carries no explicit primary flag: the converter's default keep
-    # is datasource #1 (the plan's first entry).
-    mds_rows[0][:primary] = true if mds_rows.any? && mds_rows.none? { |r| r[:primary] }
-    if opts[:force]
-      dropped_ds = mds_rows.reject { |r| r[:primary] }
-      puts
-      line "⚠️  SILENT-DROP (--force): multi-ds-plan.json marks #{mds_rows.size} INDEPENDENT datasource(s);"
-      line "   proceeding PRIMARY-ONLY ('#{mds_rows.find { |r| r[:primary] }&.dig(:name)}')."
-      dropped_ds.each do |r|
-        line "   DROPPED datasource '#{r[:name]}' — its worksheet(s) will NOT migrate: " \
-             "#{r[:sheets].empty? ? '(none listed)' : r[:sheets].join(', ')}"
-      end
-      line '   Per-datasource recipe: refs/multi-datasource.md. Name the drop in your report.'
-    else
-      puts
-      puts '==================== MULTI-DATASOURCE STOP (plan required) ===================='
-      puts "This workbook draws on #{mds_rows.size} INDEPENDENT datasource(s) (multi-ds-plan.json);"
-      puts "a single-DM build would SILENTLY DROP every non-primary datasource's worksheets."
-      puts
-      puts 'datasource → worksheets:'
-      mds_rows.each do |r|
-        puts "  #{r[:primary] ? '● primary ' : '○         '}#{r[:name]}  →  " \
-             "#{r[:sheets].empty? ? '(none listed)' : r[:sheets].join(', ')}"
-      end
-      puts
-      puts 'Migrate per refs/multi-datasource.md (one data model per datasource, then attach'
-      puts 'the workbook via --dm-spec / --reuse-dm per model), or accept the degradation with'
-      puts '--force (primary-only; non-primary worksheets will NOT migrate).'
-      puts '==============================================================================='
-      puts 'No Sigma objects were created.'
-      mark('phase1-join')
-      phase_summary
-      exit 11
-    end
   end
 end
 
@@ -2203,25 +2175,6 @@ end
 File.write(wb_spec_path, JSON.pretty_generate(spec))
 wb_ids_path = File.join(WORK, 'wb-ids.json')
 
-# 🚧 REFS-RESOLVE preflight (sibling workstream: scripts/assert-refs-resolve.rb).
-# Before EVERY workbook POST/PUT — mechanical and --wb-spec paths alike — assert
-# that every column/element reference in the (placeholder-bound) workbook spec
-# resolves against the posted DM readback, so a misbound ref fails HERE with a
-# named report instead of as a blank chart. Wired defensively: absent script →
-# no gate. Waive with --skip-refs-check "<reason>" (name it in your report).
-refs_rb = File.join(HERE, 'assert-refs-resolve.rb')
-if File.exist?(refs_rb) && File.exist?(dm_ids_path)
-  if opts[:skip_refs_check]
-    line "refs-resolve preflight WAIVED (--skip-refs-check: #{opts[:skip_refs_check]}) — name this in your report"
-  else
-    _, refs_st = run!(['ruby', refs_rb, '--wb-spec', wb_spec_path, '--dm-ids', dm_ids_path], allow_fail: true)
-    unless refs_st.success?
-      abort 'FATAL: assert-refs-resolve found workbook-spec references the posted data model cannot ' \
-            'satisfy (report above). Fix the spec and re-run, or waive with --skip-refs-check "<reason>".'
-    end
-  end
-end
-
 # GRACEFUL AGENT-PATH FALLBACK. The DM is already posted + valid (dm_id above), so
 # if the MECHANICAL workbook layer (validate-spec / build / POST) hits a field it
 # cannot translate (Sigma rejects the spec / unresolved "Dependency not found" /
@@ -2231,6 +2184,15 @@ end
 begin
   v_log = run_wb!(['ruby', File.join(HERE, 'validate-spec.rb'), '--type', 'workbook',
                    '--dm-context', dm_ids_path, wb_spec_path])
+  # 🚧 Pre-POST ref-resolution gate: every [Element/Column] ref in the wb-spec must
+  # exist in the LIVE DM, or the POST fails one opaque "Dependency not found" at a
+  # time AFTER the DM is created (a multi-datasource enterprise workbook: multi-datasource
+  # collapse left 550 refs unresolvable). Catch it here with the full list; the
+  # WorkbookBuildError this raises routes to the friendly rebuild-against-DM handoff.
+  ref_cmd = ['ruby', File.join(HERE, 'assert-wb-refs-resolve.rb'),
+             '--wb-spec', wb_spec_path, '--dm-ids', dm_ids_path]
+  ref_cmd += ['--skip-ref-check', opts[:skip_ref_check]] if opts[:skip_ref_check]
+  run_wb!(ref_cmd)
   par_cmd = ['ruby', File.join(HERE, 'post-and-readback.rb'), '--type', 'workbook',
              '--spec', wb_spec_path, '--out', wb_ids_path, '--workdir', WORK]
   # PUT-append into the targeted existing workbook (instead of POST-create).
