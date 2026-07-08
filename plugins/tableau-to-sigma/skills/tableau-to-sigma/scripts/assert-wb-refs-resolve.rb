@@ -20,6 +20,23 @@
 # renames don't cause false positives: a ref resolves if its column exists in
 # ANY element of the DM.
 #
+# Merged capabilities (from the branch resolver assert-refs-resolve.rb, now
+# deleted — scripts/test-wb-refs-resolve.rb covers them):
+#   * INTERNAL workbook refs: when a ref's PREFIX names an element of the
+#     wb-spec itself, Sigma binds the ref to that element — so a master-level
+#     calc column (absent from the DM by design) resolves against the element's
+#     own columns/metrics instead of false-failing the DM check, and a ref to a
+#     workbook element defined LATER in the document fails loudly (spec
+#     dependency resolution is strictly forward-in-document-order —
+#     refs/troubleshooting.md).
+#   * SOURCE dependency checks: an element's source.elementId must exist in the
+#     spec (and precede it, for table sources); a data-model source's elementId
+#     must exist in the dm-ids readback (stale readback / wrong DM otherwise).
+#   * --dm-id live mode PAGINATES /columns and fails refs that resolve ONLY to
+#     columns whose type compiled to "error" (present but permanently broken).
+#   * --dm-ids accepts both {pages:[{elements:[...]}]} (post-and-readback.rb
+#     output) and a flat {elements:[...]} shape.
+#
 # Usage:
 #   ruby assert-wb-refs-resolve.rb --wb-spec <spec.json> \
 #     ( --dm-ids <dm-ids.json> | --dm-id <dataModelId> ) \
@@ -55,20 +72,44 @@ def norm(col)
 end
 
 # --- collect the DM's available column labels (normalized) -----------------
-available = Set.new
+available  = Set.new
+error_cols = Set.new # normalized labels whose type compiled to "error" (live mode)
+dm_el_ids  = Set.new # DM element ids (offline mode; for source.elementId checks)
 if opts[:dm_ids]
   idmap = JSON.parse(File.read(opts[:dm_ids], encoding: 'bom|utf-8'))
-  (idmap['pages'] || []).each do |pg|
-    (pg['elements'] || []).each do |el|
-      (el['columnLabels'] || []).each { |l| available << norm(l) }
-    end
+  dm_elements = if idmap['pages'].is_a?(Array)
+                  idmap['pages'].flat_map { |pg| pg['elements'] || [] }
+                else
+                  idmap['elements'] || [] # flat readback shape
+                end
+  dm_elements.each do |el|
+    dm_el_ids << el['id'] if el['id']
+    (el['columnLabels'] || []).each { |l| available << norm(l) }
   end
 else
-  # Live fetch via the shared REST lib (self-mints a token).
+  # Live fetch via the shared REST lib (self-mints a token). Paginated — big
+  # DMs (the collapse case declared 599 columns) overflow a single page.
   $LOAD_PATH.unshift File.expand_path('lib', __dir__)
   require 'sigma_rest'
-  cols = (Sigma.request(:get, "/v2/dataModels/#{opts[:dm_id]}/columns") rescue { 'entries' => [] })
-  (cols['entries'] || []).each { |c| available << norm(c['label']) if c['label'] }
+  clean = Set.new
+  page = nil
+  loop do
+    qs = 'limit=500'
+    qs += "&page=#{page}" if page
+    data = (Sigma.request(:get, "/v2/dataModels/#{opts[:dm_id]}/columns?#{qs}") rescue nil)
+    break unless data.is_a?(Hash)
+    (data['entries'] || []).each do |c|
+      next unless c['label']
+      k = norm(c['label'])
+      available << k
+      c.dig('type', 'type') == 'error' ? error_cols << k : clean << k
+    end
+    page = data['nextPage']
+    break if page.nil? || page.to_s.empty?
+  end
+  # A column that resolves cleanly in ANY element is usable even if a same-
+  # named column errored elsewhere — only fail labels that ONLY error.
+  error_cols.subtract(clean)
 end
 
 if available.empty?
@@ -78,27 +119,83 @@ if available.empty?
   exit 1
 end
 
-# --- extract every [Element/Column] ref from the workbook spec --------------
+wb = JSON.parse(File.read(opts[:spec], encoding: 'bom|utf-8'))
+
+# --- workbook-internal element index (name → own columns, id → doc order) ---
+wb_elements = []
+(wb['pages'] || []).each { |pg| (pg['elements'] || []).each { |el| wb_elements << el } }
+wb_order_by_id = {}
+wb_internal = {} # element name -> { names: Set(normalized own column names), order: min doc index }
+wb_elements.each_with_index do |el, i|
+  wb_order_by_id[el['id']] = i if el['id']
+  nm = el['name'].to_s.strip
+  next if nm.empty?
+  own = ((el['columns'] || []) + (el['metrics'] || [])).map { |c| norm(c['name']) if c['name'] }.compact
+  rec = (wb_internal[nm] ||= { names: Set.new, order: i })
+  rec[:names].merge(own)
+  rec[:order] = [rec[:order], i].min
+end
+
+# --- extract every [Element/Column] ref, element by element (doc order) -----
 REF = /\[([^\]\/]+)\/([^\]]+)\]/.freeze
-refs = {} # normalized column -> {display, elements:Set}
-walk = lambda do |obj|
+refs = {}       # normalized column -> {display, elements:Set}  (unresolved-vs-DM report)
+extra_fails = [] # forward-order / dangling-source / type=error findings
+walk = lambda do |obj, &blk|
   case obj
-  when Hash  then obj.each_value { |v| walk.call(v) }
-  when Array then obj.each { |v| walk.call(v) }
-  when String
-    obj.scan(REF) do |el, col|
-      k = norm(col)
-      (refs[k] ||= { display: col.strip, elements: Set.new })[:elements] << el.strip
-    end
+  when Hash  then obj.each_value { |v| walk.call(v, &blk) }
+  when Array then obj.each { |v| walk.call(v, &blk) }
+  when String then obj.scan(REF) { |el, col| blk.call(el, col) }
   end
 end
-walk.call(JSON.parse(File.read(opts[:spec], encoding: 'bom|utf-8')))
 
-unresolved = refs.reject { |k, _| available.include?(k) }
+unresolved = {}
+wb_elements.each_with_index do |el, i|
+  el_desc = "\"#{el['name'] || el['id'] || '?'}\" (kind=#{el['kind'] || '?'})"
 
-if unresolved.empty?
+  # source-level dependency: the element the formulas' prefixes lean on
+  src = el['source'] || {}
+  if src['kind'] == 'table' && src['elementId']
+    tgt = wb_order_by_id[src['elementId']]
+    if tgt.nil?
+      extra_fails << "element #{el_desc}: source elementId \"#{src['elementId']}\" not found in the spec — POST fails with Dependency not found"
+    elsif tgt > i
+      extra_fails << "element #{el_desc}: source element \"#{src['elementId']}\" is defined LATER in the document (spec dependency resolution is strictly forward-in-document-order — refs/troubleshooting.md); move it before this element"
+    end
+  elsif src['kind'] == 'data-model' && src['elementId'] && opts[:dm_ids] && !dm_el_ids.empty? && !dm_el_ids.include?(src['elementId'])
+    extra_fails << "element #{el_desc}: source data-model elementId \"#{src['elementId']}\" not in #{File.basename(opts[:dm_ids])} — stale readback or wrong DM"
+  end
+
+  walk.call(el) do |prefix, col|
+    k = norm(col)
+    rec = (refs[k] ||= { display: col.strip, elements: Set.new })
+    rec[:elements] << prefix.strip
+
+    if (internal = wb_internal[prefix.strip])
+      # The prefix names an element of THIS spec — Sigma binds the ref to it.
+      if internal[:names].include?(k)
+        if internal[:order] > i
+          extra_fails << "element #{el_desc}: [#{prefix.strip}/#{col.strip}] targets a workbook element defined LATER in the document — spec dependency resolution is strictly forward-in-document-order (refs/troubleshooting.md)"
+        end
+        next # resolves internally (order violations reported above)
+      end
+      # fall through: the element may have been renamed — give the global DM
+      # check (upstream behavior) the final say before failing the ref.
+    end
+
+    if available.include?(k)
+      if error_cols.include?(k)
+        extra_fails << "element #{el_desc}: [#{prefix.strip}/#{col.strip}] resolves only to a DM column whose type compiled to \"error\" — the ref would never produce data"
+      end
+      next
+    end
+    unresolved[k] ||= { display: col.strip, elements: Set.new }
+    unresolved[k][:elements] << prefix.strip
+  end
+end
+
+if unresolved.empty? && extra_fails.empty?
   puts "[PASS] workbook ref-resolution gate: all #{refs.size} referenced column(s) resolve " \
-       "against the live DM (#{available.size} columns)."
+       "against the live DM (#{available.size} columns) or the spec's own elements."
   exit 0
 end
 
@@ -108,6 +205,11 @@ unresolved.values.first(40).each do |r|
   warn "         ✗ #{r[:display]}   (referenced via #{r[:elements].to_a.map { |e| "[#{e}/…]" }.join(', ')})"
 end
 warn "         … and #{unresolved.size - 40} more." if unresolved.size > 40
+if extra_fails.any?
+  warn "       plus #{extra_fails.size} structural failure(s):"
+  extra_fails.first(20).each { |f| warn "         ✗ #{f}" }
+  warn "         … and #{extra_fails.size - 20} more." if extra_fails.size > 20
+end
 warn ''
 warn '       These refs would fail the workbook POST with "Dependency not found". The usual'
 warn '       cause is a MULTI-DATASOURCE workbook the local converter collapsed onto one'

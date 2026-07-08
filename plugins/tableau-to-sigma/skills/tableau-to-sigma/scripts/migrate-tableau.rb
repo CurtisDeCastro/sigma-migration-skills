@@ -53,6 +53,28 @@
 #     --finalize --actuals <WORKDIR>/parity-actuals.json \
 #     [--allow-missing-tiles N]   # explain legitimately unbuildable zones
 #
+# FAST PATH (workbook-layer re-entry — the exit-4 handoff):
+#   ruby scripts/migrate-tableau.rb --workbook "<name>" [--out DIR] \
+#     --connection <id> --reuse-dm <dataModelId> --wb-spec <WORKDIR>/wb-spec.json [--yes]
+#   When BOTH --reuse-dm <explicit id> AND --wb-spec are passed, the run skips
+#   Tableau discovery and the decisions checkpoint ENTIRELY (the spec is
+#   agent-authored — the open questions were answered when it was written; the
+#   DM is live) and runs: DM readback (GET spec/columns for element ids) →
+#   __DM_ID__/__DM_ELEMENT__ placeholder substitution → validate → preflight →
+#   workbook POST/PUT → layout → parity plan → exit 12, identical to the
+#   documented exit-4 re-entry. Discovery artifacts already in the workdir
+#   (dashboard-layout.json, views/*.csv, workbook-content.twb) are reused for
+#   layout/parity as normal; when any are MISSING the run degrades LOUDLY:
+#   with --yes it proceeds and prints exactly what's missing (Tableau discovery
+#   is never re-run under --yes); without --yes it falls back to the full
+#   discovery pipeline. A bare --reuse-dm (no id) or --dm-spec (fresh DM build)
+#   always takes the full path. Fresh runs, --finalize, resume-from-state, and
+#   the --dm-spec path are unaffected.
+#
+# Preflight hook (wired defensively — fires only when the lib exists):
+#   * scripts/lib/formula_normalize.rb → case-normalizes converter formulas on
+#     the mechanical dm-spec/wb-spec (one NOTE line per rewrite).
+#
 # Phase E (OPT-IN) — Enhance: pass --enhance (pass 1 or --finalize) to run the
 # shared enhancement engine AFTER all gates are green: enhance-scan.rb emits
 # candidates; nothing applies without --enhance-accept <ids|all-low-risk>
@@ -88,6 +110,7 @@ require 'set'
 require_relative 'lib/scout_gate'
 require_relative 'lib/dashboard_read'
 require_relative 'lib/run_state'
+require_relative 'lib/fast_path' # FAST-PATH routing + BOM-tolerant JSON reads
 require_relative 'lib/sigma_rest' # in-process Sigma token minting (no bash/eval)
 require_relative 'lib/tableau_rest' # in-process Tableau token minting (Windows-safe; no bash/eval)
 require_relative 'hydrate-custom-sql'
@@ -100,6 +123,23 @@ require 'coverage_gate' # build-charts coverage.json → consolidated report (be
 
 opts = {}
 OptionParser.new do |o|
+  o.banner = <<~BANNER
+    Usage: ruby scripts/migrate-tableau.rb --workbook <name>|--workbook-id <luid> \\
+             --connection <SIGMA_CONNECTION_ID> [--folder <id>] [options]
+
+    FAST PATH (workbook-layer re-entry, the exit-4 handoff): passing BOTH
+    --reuse-dm <id> AND --wb-spec <path> skips Tableau discovery and the
+    decisions checkpoint entirely and runs: DM readback -> __DM_ID__/
+    __DM_ELEMENT__ substitution -> validate -> preflight -> workbook POST/PUT ->
+    layout -> parity plan -> exit 12. Discovery artifacts already in the workdir
+    (dashboard-layout.json, views/*.csv, workbook-content.twb) are reused for
+    layout/parity; if any are missing, --yes proceeds DEGRADED and prints what's
+    missing (discovery is never re-run under --yes), while without --yes the run
+    falls back to full discovery. A bare --reuse-dm (no id) or --dm-spec always
+    takes the full path.
+
+    Options:
+  BANNER
   o.on('--workbook NAME')    { |v| opts[:wb_name] = v }
   o.on('--workbook-id LUID') { |v| opts[:wb_id]   = v }
   o.on('--connection ID')    { |v| opts[:conn]    = v }
@@ -136,14 +176,16 @@ OptionParser.new do |o|
   # The workbook JSON may reference the data model via the placeholder idiom
   # "__DM_ID__" (top-level dataModelId) and "__DM_ELEMENT__:<ElementName>"
   # (per-element source) — both are substituted against the live readback ids.
-  o.on('--dm-spec PATH')     { |v| opts[:dm_spec] = File.expand_path(v) }
-  o.on('--wb-spec PATH')     { |v| opts[:wb_spec] = File.expand_path(v) }
+  o.on('--dm-spec PATH', 'agent-authored data-model spec JSON (fresh DM build through the gated spine)') { |v| opts[:dm_spec] = File.expand_path(v) }
+  o.on('--wb-spec PATH', 'agent-authored workbook spec JSON (re-enters the gated spine). With an explicit ' \
+                         '--reuse-dm <id> this takes the FAST PATH (see banner).') { |v| opts[:wb_spec] = File.expand_path(v) }
   o.on('--out DIR')          { |v| opts[:out]     = File.expand_path(v) }
   o.on('--answers JSON')     { |v| opts[:answers] = v }
   o.on('--yes')              {     opts[:yes]     = true }
   o.on('--name PREFIX')      { |v| opts[:name]    = v }
   o.on('--force')            {     opts[:force]   = true }
-  o.on('--reuse-dm [ID]')    { |v| opts[:reuse_dm] = v || :recommended }
+  o.on('--reuse-dm [ID]', 'opt IN to DM reuse (default: build new; bare flag = use find-or-pick-dm\'s ' \
+                          'recommendation). An EXPLICIT id combined with --wb-spec takes the FAST PATH.') { |v| opts[:reuse_dm] = v || :recommended }
   o.on('--skip-reuse-scan')  {     opts[:skip_reuse] = true }
   o.on('--skip-dashboard-read REASON', 'waive the Phase 1d source dashboard-read gate — REQUIRED reason; name it in your report') { |v| opts[:skip_dashboard_read] = v }
   o.on('--skip-doctor-gate REASON', 'waive the Step-0 environment gate (doctor.json) — REQUIRED reason; name it in your report') { |v| opts[:skip_doctor_gate] = v }
@@ -364,6 +406,30 @@ def cull_failed_fields(*logs)
 end
 
 def yp(s) YAML.safe_load(s, permitted_classes: [Date, Time]) rescue {} end
+
+# Formula-normalize hook (fix-workstream G: scripts/lib/formula_normalize.rb).
+# Case-normalizes function names the converter can emit lowercase (round( →
+# Round() so Sigma's compiler doesn't reject them. Contract:
+#   spec, rewrites = FormulaNormalize.normalize_spec!(spec)   # mutates in place
+#   rewrites: [{ from:, to:, path: }, ...]
+# Wired DEFENSIVELY: a no-op when the lib is absent, and a hook failure never
+# sinks the run — the live POST + column-type guard remain the authoritative gate.
+def normalize_formulas!(spec, label)
+  fn = File.join(HERE, 'lib', 'formula_normalize.rb')
+  return unless File.exist?(fn)
+  require fn
+  return unless defined?(FormulaNormalize) && FormulaNormalize.respond_to?(:normalize_spec!)
+  _, rewrites = FormulaNormalize.normalize_spec!(spec)
+  Array(rewrites).each do |r|
+    if r.is_a?(Hash)
+      line "NOTE: normalized #{r[:from] || r['from']}( → #{r[:to] || r['to']}( at #{r[:path] || r['path']}"
+    else
+      line "NOTE: #{r}"
+    end
+  end
+rescue StandardError => e
+  line "WARN: formula-normalize hook (#{label}) failed: #{e.message} — spec left as the converter emitted it"
+end
 
 # ---------------------------------------------------------------------------
 # PASS 2 (--finalize) — phase6 finalize + cleanup-orphans + the census-aware
@@ -604,6 +670,104 @@ if opts[:finalize]
 end
 
 # ---------------------------------------------------------------------------
+# Agent-authored JSON specs (--dm-spec / --wb-spec) — validated + wrapped into
+# the `Specs` contract BEFORE discovery, so the FAST PATH below can route on
+# them. The manual path's re-entry into the GATED spine: instead of hand-driving
+# raw POSTs (which skip preflight/control lint, Phase 6 parity, and the
+# assert-phase6-ran hard gate), the agent drops JSON specs and re-runs. The JSON
+# is wrapped into the same `Specs` contract the .rb override uses, so the
+# DOWNSTREAM flow (validate → post-and-readback → layout → parity → assert) is
+# byte-for-byte identical to the hand-authored-.rb path. `wb_spec` returns the
+# raw JSON; live-id binding (the "__DM_ID__" / "__DM_ELEMENT__:<Name>"
+# placeholders) happens at the workbook assembly step, where dm_id / fact_eid /
+# the DM readback elements are known. Reads are BOM-tolerant (PowerShell's
+# Set-Content -Encoding UTF8 prepends a BOM plain JSON.parse rejects).
+# ---------------------------------------------------------------------------
+if opts[:dm_spec] || opts[:wb_spec]
+  # The workbook spec is always agent-authored on this path.
+  abort 'FATAL: --wb-spec is required for the agent-authored manual path ' \
+        '(pair it with --dm-spec for a fresh build, or --reuse-dm for an existing model).' \
+    unless opts[:wb_spec]
+  # The DATA-MODEL source is exactly one of: --dm-spec (build it fresh) OR
+  # --reuse-dm (attach to a model already in the org — the exit-4 re-entry, where
+  # the DM is already posted). Both/neither is ambiguous.
+  dm_sources = (opts[:dm_spec] ? 1 : 0) + (opts[:reuse_dm] ? 1 : 0)
+  abort 'FATAL: provide the data model via EITHER --dm-spec <json> (fresh build) OR ' \
+        '--reuse-dm <id> (attach to an existing model) — not both, not neither.' \
+    unless dm_sources == 1
+  abort "FATAL: --wb-spec #{opts[:wb_spec]} not found" unless File.exist?(opts[:wb_spec])
+  begin
+    wb_json = FastPath.read_json_utf8(opts[:wb_spec])
+    dm_json = opts[:dm_spec] ? FastPath.read_json_utf8(opts[:dm_spec]) : nil
+  rescue JSON::ParserError => e
+    abort "FATAL: --dm-spec/--wb-spec is not valid JSON: #{e.message}"
+  rescue Errno::ENOENT => e
+    abort "FATAL: #{e.message}"
+  end
+  abort 'FATAL: --dm-spec JSON is not a page-bearing data-model spec (no top-level "pages" array)' \
+    if dm_json && !(dm_json.is_a?(Hash) && dm_json['pages'].is_a?(Array))
+  abort 'FATAL: --wb-spec JSON is not a page-bearing workbook spec (no top-level "pages" array)' \
+    unless wb_json.is_a?(Hash) && wb_json['pages'].is_a?(Array)
+  Object.const_set(:Specs, Module.new do
+    # nil on the --reuse-dm path: the DM is read back from the API, never rebuilt
+    # from this module (so dm_spec is only consulted on the fresh --dm-spec path).
+    define_singleton_method(:dm_spec) { dm_json }
+    # Raw passthrough — live-id binding (the __DM_ID__/__DM_ELEMENT__ placeholders)
+    # is applied at the assembly step where the readback ids exist.
+    define_singleton_method(:wb_spec) { |_dm_id, _fact_eid| wb_json }
+  end)
+end
+MANUAL_JSON_SPECS = !opts[:wb_spec].nil?
+
+# ---------------------------------------------------------------------------
+# FAST PATH routing (--reuse-dm <id> + --wb-spec). See the header comment +
+# --help banner for the exact semantics; the decision itself is a pure,
+# offline-testable function (lib/fast_path.rb, scripts/test-fastpath-flags.rb).
+# ---------------------------------------------------------------------------
+twb = File.join(WORK, 'workbook-content.twb')
+layout_json = File.join(WORK, 'dashboard-layout.json')
+fp_artifacts = {
+  'dashboard-layout.json' => File.exist?(layout_json),
+  'views/*.csv'           => Dir[File.join(WORK, 'views', '*.csv')].any?,
+  'workbook-content.twb'  => File.exist?(twb)
+}
+FAST = FastPath.decide(reuse_dm: opts[:reuse_dm], wb_spec: opts[:wb_spec],
+                       dm_spec: opts[:dm_spec], finalize: opts[:finalize],
+                       yes: opts[:yes], artifacts: fp_artifacts)
+FASTPATH = FAST[:route] == :fast
+
+if FASTPATH
+  require File.join(HERE, 'mechanical-specs') # placeholder binding at Phase 4
+  puts
+  puts '── FAST PATH · --reuse-dm + --wb-spec ──'
+  line 'skipping Tableau discovery and the decisions checkpoint: the wb-spec is'
+  line "agent-authored (open questions were answered when it was written) and DM #{opts[:reuse_dm]} is live."
+  if (FAST[:degraded] || []).any?
+    line "WARN: DEGRADED — #{FAST[:degraded].size} discovery artifact(s) missing from #{WORK}:"
+    FAST[:degraded].each { |a| line "  - #{a}" }
+    line '  --yes: Tableau discovery is NOT re-run. Layout falls back to a stacked page and the'
+    line '  parity plan may be unbuildable — restore the workdir (or re-run without --yes to'
+    line '  re-fetch) before relying on the Phase 6 gates.'
+  else
+    line "discovery artifacts present in #{WORK} — reused for layout + parity as normal"
+  end
+  RunState.skip(WORK, 'phase-1', 'FAST PATH (--reuse-dm + --wb-spec): discovery skipped, workdir artifacts reused')
+  RunState.skip(WORK, 'phase-2', 'FAST PATH: DM is live — columns come from the readback')
+  gwp = File.join(WORK, 'get-workbook.json')
+  gw = File.exist?(gwp) ? (FastPath.read_json_utf8(gwp) rescue {}) : {}
+  wb = gw['workbook'] || gw
+  wb_name = wb['name'] || opts[:wb_name] || slug
+  has_extracts = wb['hasExtracts'] == true || [wb['hasExtracts'], wb['datasources']].to_s.include?('true')
+  reuse_dm_id = opts[:reuse_dm] # decide() guarantees an explicit id here (never :recommended)
+  mechanical = false
+  conv = nil
+  mark('fastpath-route')
+elsif opts[:reuse_dm] && opts[:wb_spec]
+  line "fast path NOT taken: #{FAST[:reason]}"
+end
+
+unless FASTPATH # ═══ FULL PIPELINE (discovery → gates → decisions) ═══════════
+# ---------------------------------------------------------------------------
 # Phase 1 — Discover (Tableau side), INTERLEAVED. tableau-discover.rb (its own
 # unified 5-fetch pool) + scan-workbook-gaps run as a BACKGROUND lane; the
 # pure-Sigma-side phases (1.6 DM-reuse scan + 2 warehouse columns — read-only,
@@ -614,7 +778,6 @@ end
 # ---------------------------------------------------------------------------
 hdr(1, 'Discover')
 $t_mark = Time.now
-twb = File.join(WORK, 'workbook-content.twb')
 
 # ---------------------------------------------------------------------------
 # Discovery REUSE (bead mg92). A 4-stop run must pay the ~112s Tableau fetch
@@ -752,8 +915,7 @@ views = (wb.dig('views', 'view') || [])
 views = [views] unless views.is_a?(Array)
 line "workbook '#{wb_name}' (#{wb_luid}): #{views.size} view(s)#{has_extracts ? ', hasExtracts=true' : ''}"
 
-layout_json = File.join(WORK, 'dashboard-layout.json')
-have_twb = lane_wait_for.call(twb, 'workbook-content.twb')
+have_twb = lane_wait_for.call(twb, 'workbook-content.twb') # layout_json defined at the FAST PATH routing block
 if have_twb
   run!(['ruby', File.join(HERE, 'parse-twb-layout.rb'), twb, layout_json] + DASH_SCOPE)
   line "per-dashboard scope: #{(opts[:dashboards] || []) + (opts[:pages] || [])} (single-tab build)" if SCOPED
@@ -781,61 +943,24 @@ end
 #   the mechanical path with a hand-authored `Specs` module, used verbatim.
 # ---------------------------------------------------------------------------
 require File.join(HERE, 'mechanical-specs')
-specs_path = opts[:specs] || [File.join(WORK, 'specs.rb')].find { |p| File.exist?(p) }
-have_specs = false
-if specs_path && File.exist?(specs_path)
-  begin
-    require specs_path.sub(/\.rb$/, '')
-    have_specs = defined?(Specs) && Specs.respond_to?(:dm_spec) && Specs.respond_to?(:wb_spec)
-    line "spec generator: hand-authored Specs module (#{specs_path})" if have_specs
-  rescue StandardError => e
-    line "(spec generator at #{specs_path} failed to load: #{e.message})"
-  end
-end
-
-# Agent-authored JSON specs (--dm-spec / --wb-spec). The manual path's re-entry
-# into the GATED spine: instead of hand-driving raw POSTs (which skip preflight/
-# control lint, Phase 6 parity, and the assert-phase6-ran hard gate), the agent
-# drops JSON specs and re-runs. We wrap them into the same `Specs` contract the
-# .rb override uses, so the DOWNSTREAM flow (validate → post-and-readback →
-# layout → parity → assert) is byte-for-byte identical to the hand-authored-.rb
-# path. `wb_spec` returns the raw JSON; live-id binding happens at the workbook
-# assembly step (where dm_id / fact_eid / the DM readback elements are known).
-if opts[:dm_spec] || opts[:wb_spec]
-  # The workbook spec is always agent-authored on this path.
-  abort 'FATAL: --wb-spec is required for the agent-authored manual path ' \
-        '(pair it with --dm-spec for a fresh build, or --reuse-dm for an existing model).' \
-    unless opts[:wb_spec]
-  # The DATA-MODEL source is exactly one of: --dm-spec (build it fresh) OR
-  # --reuse-dm (attach to a model already in the org — the exit-4 re-entry, where
-  # the DM is already posted). Both/neither is ambiguous.
-  dm_sources = (opts[:dm_spec] ? 1 : 0) + (opts[:reuse_dm] ? 1 : 0)
-  abort 'FATAL: provide the data model via EITHER --dm-spec <json> (fresh build) OR ' \
-        '--reuse-dm <id> (attach to an existing model) — not both, not neither.' \
-    unless dm_sources == 1
-  abort "FATAL: --wb-spec #{opts[:wb_spec]} not found" unless File.exist?(opts[:wb_spec])
-  begin
-    wb_json = JSON.parse(File.read(opts[:wb_spec]))
-    dm_json = opts[:dm_spec] ? JSON.parse(File.read(opts[:dm_spec])) : nil
-  rescue JSON::ParserError => e
-    abort "FATAL: --dm-spec/--wb-spec is not valid JSON: #{e.message}"
-  rescue Errno::ENOENT => e
-    abort "FATAL: #{e.message}"
-  end
-  abort 'FATAL: --dm-spec JSON is not a page-bearing data-model spec (no top-level "pages" array)' \
-    if dm_json && !(dm_json.is_a?(Hash) && dm_json['pages'].is_a?(Array))
-  abort 'FATAL: --wb-spec JSON is not a page-bearing workbook spec (no top-level "pages" array)' \
-    unless wb_json.is_a?(Hash) && wb_json['pages'].is_a?(Array)
-  Object.const_set(:Specs, Module.new do
-    # nil on the --reuse-dm path: the DM is read back from the API, never rebuilt
-    # from this module (so dm_spec is only consulted on the fresh --dm-spec path).
-    define_singleton_method(:dm_spec) { dm_json }
-    # Raw passthrough — live-id binding (the __DM_ID__/__DM_ELEMENT__ placeholders)
-    # is applied at the assembly step where the readback ids exist.
-    define_singleton_method(:wb_spec) { |_dm_id, _fact_eid| wb_json }
-  end)
-  have_specs = true
+# Agent-authored JSON specs (--dm-spec / --wb-spec) were validated + wrapped
+# into the `Specs` contract BEFORE discovery (see the hoisted block above the
+# FAST PATH routing) so the fast path can route on them. They take precedence
+# over a workdir specs.rb — an explicit CLI flag wins.
+have_specs = MANUAL_JSON_SPECS
+if MANUAL_JSON_SPECS
   line "spec generator: agent-authored JSON specs (#{opts[:dm_spec] ? "--dm-spec #{opts[:dm_spec]}" : "--reuse-dm #{opts[:reuse_dm]}"}, --wb-spec #{opts[:wb_spec]}) — routing through the gated spine"
+else
+  specs_path = opts[:specs] || [File.join(WORK, 'specs.rb')].find { |p| File.exist?(p) }
+  if specs_path && File.exist?(specs_path)
+    begin
+      require specs_path.sub(/\.rb$/, '')
+      have_specs = defined?(Specs) && Specs.respond_to?(:dm_spec) && Specs.respond_to?(:wb_spec)
+      line "spec generator: hand-authored Specs module (#{specs_path})" if have_specs
+    rescue StandardError => e
+      line "(spec generator at #{specs_path} failed to load: #{e.message})"
+    end
+  end
 end
 
 # Mechanical converter run (the default). Requires the .twb (parse-twb-layout
@@ -1634,6 +1759,7 @@ else
   line 'no open questions — running straight through'
 end
 mark('decisions')
+end # ═══ unless FASTPATH (full discovery → gates → decisions pipeline) ═══════
 
 # ---------------------------------------------------------------------------
 # folderId default (bead epvr). POST /v2/dataModels/spec REQUIRES folderId
@@ -1674,7 +1800,13 @@ mark('folder-resolve')
 # The agent must have fetched the dashboard PNG (mcp get-view-image, solo) and
 # written png-read.json (SKILL.md Phase 1d). Fires only on a Tableau workdir.
 # ---------------------------------------------------------------------------
-if opts[:skip_dashboard_read]
+if FASTPATH
+  # The spec is agent-authored against a workdir whose dashboard read (and every
+  # other Phase-1 stop) already ran before the exit-4 handoff — re-blocking here
+  # recreates the friction the fast path removes. Recorded, never silent.
+  line 'dashboard-read gate: SKIPPED (FAST PATH — the wb-spec was authored after the Phase 1d read)'
+  RunState.skip(WORK, 'phase-1d', 'FAST PATH (--reuse-dm + --wb-spec)')
+elsif opts[:skip_dashboard_read]
   line "dashboard-read gate WAIVED (--skip-dashboard-read: #{opts[:skip_dashboard_read]}) — name this in your report"
 elsif DashboardRead.expected?(WORK)
   # Seed a DRAFT png-read.json from the .twb zone tree if none exists yet, so the
@@ -1717,7 +1849,13 @@ if reuse_dm_id
   # master derivation resolves against them).
   $LOAD_PATH.unshift File.expand_path('lib', HERE)
   require 'sigma_rest'
-  dm_spec_rb = Sigma.request(:get, "/v2/dataModels/#{reuse_dm_id}/spec")
+  dm_spec_rb = begin
+    Sigma.request(:get, "/v2/dataModels/#{reuse_dm_id}/spec")
+  rescue StandardError => e
+    abort "FATAL: could not read back reused DM #{reuse_dm_id} (#{e.message.lines.first&.strip}) — " \
+          'the readback supplies the element ids for placeholder substitution. Check the id and the ' \
+          'SIGMA_* credentials (ruby scripts/setup.rb).'
+  end
   abort "FATAL: could not read back reused DM #{reuse_dm_id} spec" unless dm_spec_rb.is_a?(Hash) && dm_spec_rb['pages']
   cols_rb = (Sigma.request(:get, "/v2/dataModels/#{reuse_dm_id}/columns") rescue { 'entries' => [] })
   labels_by_el = Hash.new { |h, k| h[k] = [] }
@@ -1793,6 +1931,9 @@ elsif mechanical
     puts '================================================================='
     abort 'FATAL: relationship reachability guard failed'
   end
+  # Formula-normalize hook (sibling workstream): case-fix converter-emitted
+  # function names on the mechanical DM spec before validate/POST.
+  normalize_formulas!(dm, 'dm-spec')
 else
   dm = Specs.dm_spec
   dm['name'] = "#{opts[:name]} #{dm['name'] || wb_name}".strip if opts[:name]
@@ -1951,6 +2092,9 @@ if mechanical
     chart_elements: (chart_pages && chart_pages.any? ? chart_pages : chart_elements),
     data_elements: data_elements,
     folder_id: opts[:folder])
+  # Formula-normalize hook (sibling workstream): case-fix converter-derived
+  # formulas on the mechanical workbook spec before validate/POST.
+  normalize_formulas!(spec, 'wb-spec')
 else
   spec = Specs.wb_spec(dm_id, fact_eid)
   # Agent-authored JSON path: bind the DM placeholders ("__DM_ID__" and
@@ -2080,7 +2224,9 @@ rescue WorkbookBuildError => e
   puts '          (fact = "__DM_ELEMENT__:__FACT__"). See the sigma-workbooks skill.'
   puts '        • Re-run this exact command adding (REUSE the posted DM — do not rebuild it):'
   puts "            --reuse-dm #{dm_id} --wb-spec #{WORK}/wb-spec.json"
-  puts '          (attaches to the existing DM; the workbook re-POST is re-gated).'
+  puts '          (attaches to the existing DM; the workbook re-POST is re-gated. This is the'
+  puts '          FAST PATH: the re-run skips discovery + the decisions checkpoint and goes'
+  puts '          straight to the workbook layer — see --help.)'
   puts '   The data model is posted and ready to attach either way. A conversion is NOT done'
   puts '   until scripts/assert-phase6-ran.rb exits 0 — that hard gate applies on both paths.'
   mark('phase4-workbook')
@@ -2269,7 +2415,19 @@ end
 p6 = ['ruby', File.join(HERE, 'phase6-parity.rb'),
       '--tableau', WORK, '--workbook-id', wb_id]
 p6 += ['--extract-mode', '--extract-tol', '0.30'] if has_extracts
-sigma_run!(p6)
+if FASTPATH && (FAST[:degraded] || []).any?
+  # Degraded fast path (--yes, discovery artifacts missing): the plan may be
+  # unbuildable without the view CSVs / layout. Degrade LOUDLY, never re-fetch.
+  _, p6deg = sigma_run!(p6, allow_fail: true)
+  unless p6deg.success?
+    line 'WARN: FAST PATH degraded — parity pass 1 could not build a plan (missing discovery ' \
+         "artifact(s): #{FAST[:degraded].join(', ')}). The workbook is POSTed, but the Phase 6 " \
+         'gates need the discovery workdir: restore it (or re-run WITHOUT --yes to re-fetch) ' \
+         'before --finalize.'
+  end
+else
+  sigma_run!(p6)
+end
 
 # Phase 6f-visual — tiles whose Tableau data export came back EMPTY (action-
 # filter-gated etc.) were BUILT from .twb signals and have no actuals to value-

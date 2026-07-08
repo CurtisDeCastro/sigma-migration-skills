@@ -27,7 +27,7 @@ multi = <<~XML
   <?xml version='1.0'?>
   <workbook><datasources>
     <datasource name='sales' caption='Sales Funnel'><connection class='snowflake' server='x' dbname='WH'/></datasource>
-    <datasource name='sku' caption='SKU Master GA'><connection class='snowflake' server='x' dbname='BBBS'/></datasource>
+    <datasource name='sku' caption='SKU Master GA'><connection class='snowflake' server='x' dbname='WH2'/></datasource>
     <datasource name='Parameters'><connection class='sqlproxy'/></datasource>
   </datasources>
   <worksheet name='Funnel'><table><view><datasources><datasource name='sales'/></datasources></view></table></worksheet>

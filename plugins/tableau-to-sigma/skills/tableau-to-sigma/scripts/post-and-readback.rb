@@ -1,6 +1,12 @@
 #!/usr/bin/env ruby
 # POST a DM or workbook spec, parse the YAML response, then GET the spec back
 # and emit a clean JSON map of pages → elements with server-assigned IDs.
+# On the datamodel path, a post-readback COLUMN CENSUS (lib/column_census.rb)
+# compares the posted spec's per-element columns against the readback and
+# WARNs loudly on any silent drop — columns that vanish without an HTTP error
+# or a type="error" entry (a live migration lost 550 of 599 columns this way).
+# It is a WARN, not a hard stop: the pre-POST ref-resolution gate
+# (assert-wb-refs-resolve.rb) hard-stops the workbook build downstream.
 #
 # Usage:
 #   ruby post-and-readback.rb --type datamodel|workbook --spec <spec.json> --out <id-map.json>
@@ -231,9 +237,22 @@ end
 # the live DM (never posted) — no error type, so the guard above stays silent while
 # the spec declared hundreds more. Surface that gap loudly here; the pre-POST
 # ref-resolution gate (assert-wb-refs-resolve.rb) then hard-stops the workbook.
+# The per-element COLUMN CENSUS (lib/column_census.rb) enriches the warning
+# with posted-vs-resolved counts and the missing column names, and also WARNs
+# on smaller silent drops that miss the aggregate droppage threshold.
 if opts[:type] == 'datamodel' && res.is_a?(Net::HTTPSuccess)
   declared = (spec['pages'] || []).sum { |p| (p['elements'] || []).sum { |e| (e['columns'] || []).size } }
   live = (cols_json['entries'] || []).size
+
+  # One census pass feeds both the droppage detail and the small-drop warning.
+  require_relative 'lib/column_census'
+  posted_spec = begin
+    JSON.parse(File.read(opts[:spec]))
+  rescue JSON::ParserError
+    nil # spec file already POSTed fine; census just can't re-read it
+  end
+  census_problems = posted_spec ? ColumnCensus.census(posted_spec, spec, cols_json['entries'] || []) : []
+
   if declared > 20 && live < declared * 0.7
     pct = ((1.0 - live.to_f / declared) * 100).round
     warn "\n========================================"
@@ -242,7 +261,21 @@ if opts[:type] == 'datamodel' && res.is_a?(Net::HTTPSuccess)
     warn 'This is the multi-datasource-collapse signature: columns from non-primary datasources'
     warn 'were dropped. The workbook build will fail ref-resolution downstream. Verify the DM has'
     warn 'one element per datasource (multi-element DM) before building the workbook.'
+    if census_problems.any?
+      warn "Per-element census (#{census_problems.size} element(s) lost columns between POST and readback):"
+      ColumnCensus.report_lines(census_problems).each { |l| warn "  #{l}" }
+    end
     warn '========================================'
+  elsif census_problems.any?
+    warn "\n========================================"
+    warn "WARN — column census: #{census_problems.size} element(s) lost columns between POST and readback:"
+    ColumnCensus.report_lines(census_problems).each { |l| warn "  #{l}" }
+    warn 'These columns were POSTed but the live DM did not resolve them (silent drop —'
+    warn 'no HTTP error, no type=error entry). Downstream [Master/...] refs to missing'
+    warn 'columns will be caught by the pre-POST ref gate (assert-wb-refs-resolve.rb).'
+    warn '========================================'
+  elsif posted_spec
+    warn "column census: #{ColumnCensus.posted_column_count(posted_spec)} posted column(s) all resolved in readback"
   end
 end
 

@@ -298,36 +298,135 @@ end
 # a real multi-datasource workbook). Emit an ❌-unhandled gap so migrate-tableau
 # HARD-STOPS at the gap gate with the table/sheet breakdown, instead of posting
 # a doomed DM. Fixed for real by the multi-element DM path (Tier 2).
-def detect_multi_datasource(xml)
-  return [nil, nil] if xml.nil?
+#
+# Trigger — ALL must hold:
+#   - >=2 real datasources (Parameters excluded)
+#   - >=2 of them are each the PRIMARY (first <view> datasource — same
+#     convention as detect_blends) of at least one worksheet
+#   - at least one pair of those primaries is NOT linked by a blend. A
+#     workbook whose extra datasources are secondary-only never triggers
+#     (they are never primary — that is the blend case, blend-plan.json).
+#
+# ONE detection pass feeds THREE outputs:
+#   - the ❌-unhandled gap-report row (drives the orchestrator's exit-11 stop)
+#   - the gaps-JSON `multi_datasource` detail (datasource→worksheet breakdown)
+#   - multi-ds-plan.json next to the gaps report (the per-datasource ROUTING
+#     table for the multi-element DM path — shape is a CONTRACT, keep stable):
+#       { "independent": true,
+#         "datasources": [ { "name", "caption", "connection_class",
+#                            "table" ("db.schema.table" or null — null for
+#                            sqlproxy; hydration resolves published sources
+#                            later), "sqlproxy" (true|false),
+#                            "worksheets" [...], "dashboards" [...] } ] }
+
+# Best-effort db.schema.table per datasource from its first table relation.
+# nil for Custom SQL (type='text') and for published stubs (table='[sqlproxy]').
+def datasource_table_refs(xml)
+  out = {}
+  xml.elements.each('/workbook/datasources/datasource') do |ds|
+    name = ds.attributes['name'].to_s
+    next if name.empty? || name == 'Parameters' || name.start_with?('Parameters ')
+    conn = nil
+    ds.elements.each('.//connection') do |c|
+      cls = c.attributes['class'].to_s
+      next if cls.empty? || cls == 'federated' # wrapper; real conns are nested
+      conn ||= c
+    end
+    rel = nil
+    ds.elements.each('.//relation') do |r|
+      next unless r.attributes['type'].to_s == 'table' && r.attributes['table']
+      next if r.attributes['table'].to_s == '[sqlproxy]' # published-source stub
+      rel ||= r
+    end
+    next out[name] = nil if rel.nil?
+    parts = rel.attributes['table'].to_s.scan(/\[([^\]]+)\]/).flatten
+    parts = [rel.attributes['table'].to_s.gsub(/[\[\]]/, '')] if parts.empty?
+    db  = conn && conn.attributes['dbname']
+    sch = conn && conn.attributes['schema']
+    full = case parts.length
+           when 3 then parts
+           when 2 then [db, *parts]           # [SCHEMA].[TABLE] + conn dbname
+           else        [db, sch, *parts]      # [TABLE] + conn dbname/schema
+           end
+    ref = full.compact.reject { |p| p.to_s.empty? }.join('.')
+    out[name] = ref.empty? ? nil : ref
+  end
+  out
+end
+
+def detect_multi_datasource(xml, blend_plan = nil)
+  return [nil, nil, nil] if xml.nil?
   ds_info = datasource_connections(xml)
-  return [nil, nil] if ds_info.size < 2
-  primaries = {} # ds_name -> [worksheets where it is the PRIMARY source]
+  return [nil, nil, nil] if ds_info.size < 2
+
+  # primary per worksheet = FIRST real datasource in its <view> list
+  primaries = Hash.new { |h, k| h[k] = [] } # ds name => [worksheet, ...]
   xml.elements.each('//worksheet') do |ws|
     ws_name = ws.attributes['name']
     used = ws.elements.to_a('.//view/datasources/datasource')
-             .map { |d| d.attributes['name'] }.compact.select { |n| ds_info.key?(n) }
-    next if used.empty?
-    (primaries[used.first] ||= []) << ws_name
+             .map { |d| d.attributes['name'] }.compact
+             .select { |n| ds_info.key?(n) }
+    next if used.empty? || ws_name.nil?
+    primaries[used.first] << ws_name unless primaries[used.first].include?(ws_name)
   end
-  return [nil, nil] if primaries.size < 2 # single-primary workbook (incl. pure blends) — fine
+  return [nil, nil, nil] if primaries.size < 2 # single-primary workbook (incl. pure blends) — fine
 
+  # Primaries linked by a blend are NOT independent of each other — a primary
+  # set that is fully blend-linked stays on the blend path (blend-plan.json).
+  blend_pairs = Set.new
+  ((blend_plan && blend_plan['blends']) || []).each do |b|
+    blend_pairs << [b['primary'], b['secondary']].sort
+  end
+  independent = primaries.keys.combination(2).any? { |pair| !blend_pairs.include?(pair.sort) }
+  return [nil, nil, nil] unless independent
+
+  # ❌-unhandled detail: the datasource→sheet breakdown the orchestrator's
+  # exit-11 gap stop prints (gaps JSON `multi_datasource`).
   detail = primaries.keys.map do |n|
     { 'datasource'  => n,
       'caption'     => ds_info[n]['caption'],
       'connections' => ds_info[n]['connections'],
       'worksheets'  => primaries[n].uniq.sort }
   end
+
+  # Routing plan (multi-ds-plan.json): dashboards containing each worksheet
+  # (dashboard zone name refs) + warehouse table refs + published-source flags.
+  ws_dashboards = Hash.new { |h, k| h[k] = [] }
+  xml.elements.each('/workbook/dashboards/dashboard') do |d|
+    dname = d.attributes['name']
+    next unless dname
+    d.elements.each('.//zone') do |z|
+      zn = z.attributes['name']
+      ws_dashboards[zn] << dname if zn && !ws_dashboards[zn].include?(dname)
+    end
+  end
+  tables = datasource_table_refs(xml)
+  entries = primaries.map do |ds_name, sheets|
+    conns = ds_info[ds_name]['connections']
+    sqlproxy = conns.any? { |c| c['class'] == 'sqlproxy' }
+    {
+      'name'             => ds_name,
+      'caption'          => ds_info[ds_name]['caption'],
+      'connection_class' => (conns.first || {})['class'],
+      'table'            => sqlproxy ? nil : tables[ds_name],
+      'sqlproxy'         => sqlproxy,
+      'worksheets'       => sheets,
+      'dashboards'       => sheets.flat_map { |w| ws_dashboards[w] }.uniq
+    }
+  end
+
   assigns = detail.map { |d| "#{d['caption']} → #{d['worksheets'].length} sheet(s)" }.join('; ')
   blurb = "Workbook spans #{primaries.size} INDEPENDENT datasources across worksheets " \
           "(#{assigns}). The local converter collapses all sheets onto the primary datasource " \
           'and silently drops the other sources\' columns/calcs, so the workbook POST fails with ' \
           'unresolved [Master/...] refs. This needs a MULTI-ELEMENT data model (one element per ' \
           'datasource + relationships) or landing the extras and repointing — it is NOT a Tableau ' \
-          'blend. Per-datasource worksheet assignments are in the gaps JSON (multi_datasource).'
+          'blend. Per-datasource worksheet assignments are in the gaps JSON (multi_datasource); ' \
+          'route: multi-element DM (refs/multi-datasource.md); per-datasource worksheet/dashboard ' \
+          'routing table in multi-ds-plan.json.'
   feat = { name: 'Multiple independent datasources (converter collapses to primary)',
            status: :unhandled, count: primaries.size, blurb: blurb }
-  [feat, detail]
+  [feat, detail, { 'independent' => true, 'datasources' => entries }]
 end
 
 # --- Field-usage + calc-dependency analysis --------------------------------
@@ -550,7 +649,7 @@ def main
   results.concat(detect_point_map_geo_role_gaps(content))
   blend_features, blend_plan = detect_blends(xml)
   results.concat(blend_features)
-  multi_ds_feature, multi_ds_detail = detect_multi_datasource(xml)
+  multi_ds_feature, multi_ds_detail, multi_ds_plan = detect_multi_datasource(xml, blend_plan)
   results << multi_ds_feature if multi_ds_feature
   md_path = out
   json_path = out.sub(/\.md$/, '.json')
@@ -561,6 +660,13 @@ def main
     File.write(blend_plan_path, JSON.pretty_generate(blend_plan))
     warn "wrote #{blend_plan_path} (#{blend_plan['blends'].length} blend(s): " +
          blend_plan['blends'].map { |b| "#{b['worksheet']}→#{b['route']}" }.join(', ') + ')'
+  end
+
+  if multi_ds_plan
+    multi_ds_plan_path = File.join(File.dirname(File.expand_path(out)), 'multi-ds-plan.json')
+    File.write(multi_ds_plan_path, JSON.pretty_generate(multi_ds_plan))
+    warn "wrote #{multi_ds_plan_path} (#{multi_ds_plan['datasources'].length} independent datasource(s): " +
+         multi_ds_plan['datasources'].map { |d| "#{d['caption']}→#{d['worksheets'].length} worksheet(s)" }.join(', ') + ')'
   end
 
   fields = nil
