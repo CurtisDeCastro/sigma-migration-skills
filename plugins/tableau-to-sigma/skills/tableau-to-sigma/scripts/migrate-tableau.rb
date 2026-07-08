@@ -1089,9 +1089,15 @@ if mechanical
   # land-extracts.py; refs/extract-landing.md). Landing is byte-identical to what
   # Tableau rendered, so Phase 6 parity runs in EXACT mode — never drift mode.
   embedded_classes = %w[excel-direct textscan hyper ogrdirect csv msexcel]
+  # Basemap / non-data connection classes carry NO queryable data (map tile
+  # providers, WMS). They must not defeat the embedded-extract detection the way
+  # a stray class='MapBox' (from a geo mark) otherwise would — dropping the
+  # embedded path, the landing manifest, and the source.path remap.
+  nondata_classes = %w[mapbox tableau-map wms wms-server]
   if have_twb && !HydrateCustomSql.twb_has_sqlproxy?(twb)
     conn_classes = begin
-      File.read(twb, encoding: 'UTF-8').scan(/<connection[^>]*\bclass='([^']+)'/).flatten.uniq - ['federated']
+      File.read(twb, encoding: 'UTF-8').scan(/<connection[^>]*\bclass='([^']+)'/).flatten.uniq
+        .reject { |c| c == 'federated' || nondata_classes.include?(c.to_s.downcase) }
     rescue StandardError
       []
     end
