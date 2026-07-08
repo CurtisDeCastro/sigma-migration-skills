@@ -183,3 +183,21 @@ in `Text()` when concatenating into strings — `"Q" & 4` compiles but errors at
 - **List-control filters on a NUMBER column are silently stripped on PUT** — bind to a `Text(...)` filter-key column.
 - **Single-select manual list controls take scalar `value`**, not `values: []` (else filters + default drop).
 - **Integer/bit predicates need explicit comparison** — `If([flag] = 1, …)`, never `If([flag], …)`.
+
+### Multi-metric region dashboard — {Year-on-Year bars / Trend / Top-Countries} × N metrics
+
+The proven pattern for a dashboard that repeats the same 3-panel row per metric (the World Bank Macroeconomics shape). Applying it is the difference between the good hand-authored result and the regressed autonomous one (region-aggregate rows shown as countries, all-years sums, bars collapsed to one region). When Phase 1d has recorded a single list control with a mix of `target_tiles` and `highlight_tiles`, this is the shape.
+
+1. **Two master tables off the same DM element** — `master` (control-FILTERED) and `masterAll` (UNFILTERED, same columns). The Region control filters `master` only.
+   - Panels in the control's `highlight_tiles` (the Year-on-Year bars) source **`masterAll`** → show every region.
+   - Panels in `target_tiles` (Trend country line, Top-Countries) source **`master`** → the selected region.
+2. **Point-in-time / "Top" measures must pin the period AND exclude rollup rows.** A raw `Sum([metric])` over an extract that carries region/aggregate rows AND all years yields "North America" (a region) at the top, summed across decades. Use a conditional:
+   `Sum(If([Year] = <latestYearWithData> And Not IsNull([<entity-discriminator>]), [metric], null))`
+   - `<entity-discriminator>` = a column that is null on aggregate rows (World Bank: `Income Group`; generally the dimension that only real leaf entities carry).
+   - `<latestYearWithData>` is **per metric** — verify against the landed data (World Bank: GDP/FDI = 2015, TEU = 2014); don't assume the max year has data.
+3. **Top-Countries table is GROUPED** — `groupings:[{groupBy:[<entity>], sort:[{<measure> desc}]}]` + a `top-n` filter (`rowCount: 8`). Never emit it ungrouped (ungrouped → hundreds of raw rows).
+4. **Selected-region highlight (not a filter) on the bars** — add a category column `If([New Region] = [ctl-param-region], "Selected region", "Other")` and `color: {by: category, column: <that col>, scheme: ["#c9d1d3", "#027b8e"]}` (grey / brand-teal). Bars `orientation: horizontal`, sorted by value desc.
+5. **Trend = combo dual-axis, Country vs World** — Country line `Sum([metric])` (rides `master`, so it follows the region filter); World line `Max([metric World])` where `<metric> World` is a **DM Lookup column** (per-year global total, filter-independent) on `yAxis2`.
+6. **Section-header bands: keep the tinted container, size it thin.** The layout builder wraps column headers (YEAR ON YEAR / TREND / TOP COUNTRIES) in a tinted `GridContainer` — good. Give each band ~2 grid rows (e.g. `gridRow="1 / 3"`), a middle-aligned near-white label, and **align its columns to the chart column beneath it** (don't let one band span two columns). An oversized band (6 rows) reads as a big empty colored block.
+
+Reference implementation: session-1 `gen_wb_spec.py` (World Bank Macroeconomics). This recipe is the acceptance target for that class of dashboard.

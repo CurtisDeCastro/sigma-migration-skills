@@ -73,6 +73,10 @@ What the remaining message types mean — act on each one:
 - `'X' has N Tableau action filter(s) — skipped` — read `<out>-actions.md` and wire Sigma cross-element filtering manually.
 - `parameter '...' is a numeric range — skipped auto-control` — add a number control by hand (beads-sigma-ebw).
 
+### Multi-metric region dashboard (READ if a control's `png-read.json` mixes `target_tiles` and `highlight_tiles`)
+
+When Phase 1d recorded a list control that **filters** some tiles (`target_tiles`) but only **highlights/re-colors** others (`highlight_tiles`) — e.g. a Region control that filters the Trend/Top panels but leaves the Year-on-Year bars showing all regions — build to the **multi-metric region dashboard recipe** in `refs/fidelity-recipes.md` (two masters `master`/`masterAll`, latest-year + real-entity conditional measure, grouped top-N, highlight color column, dual-axis trend, thin aligned header bands). Skipping it is the regression that ships region-aggregate rows as "countries", all-years sums, and bars collapsed to one region.
+
 ### 5a. Write the workbook spec
 
 > **`folderId` is required here too.**
