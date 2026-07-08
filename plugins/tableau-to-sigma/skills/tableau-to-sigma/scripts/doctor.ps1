@@ -14,6 +14,7 @@
 #   -WorkDir <dir>  also drop doctor.json there (always also written to
 #                   ~/.sigma-migration/doctor.json).
 param([string]$WorkDir = "")
+if (-not $WorkDir -and $env:DOCTOR_WORKDIR) { $WorkDir = $env:DOCTOR_WORKDIR }
 
 $script:Pass = 0; $script:Fail = 0; $script:Warn = 0
 $script:Failures = @()
@@ -191,6 +192,7 @@ $doctor = [ordered]@{
   behind_count = $behindCount
   agent_vision = $agentVision
   model_hint   = "$modelHint"
+  generated_at = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
   pass         = ($script:Fail -eq 0)
   failures     = @($script:Failures)
 }

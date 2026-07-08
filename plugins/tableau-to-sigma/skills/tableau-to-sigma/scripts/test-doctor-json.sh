@@ -7,8 +7,9 @@
 #   Part A — --workdir writes <workdir>/doctor.json; valid JSON, full schema;
 #            pass mirrors the exit code
 #   Part B — DOCTOR_WORKDIR env variant works
-#   Part C — a plain run (no workdir) writes nothing and prints none of the
-#            new lines (human output stays byte-compatible)
+#   Part C — a plain run (no workdir) writes no doctor.json into the CWD and
+#            still runs the standard checks (hyperapi/drift print always —
+#            upstream doctor design; the stable copy goes to ~/.sigma-migration)
 #
 # Usage:  bash scripts/test-doctor-json.sh
 set -u
@@ -37,15 +38,16 @@ assert not missing, f"missing keys: {missing}"
 assert d["shell"] == "bash", d["shell"]
 for r in ("ruby", "python", "node", "bash"):
     assert r in d["runtimes"], f"runtimes missing {r}"
-    assert set(d["runtimes"][r]) == {"present", "version"}, d["runtimes"][r]
-    assert isinstance(d["runtimes"][r]["present"], bool)
-    v = d["runtimes"][r]["version"]
-    assert v is None or isinstance(v, str)
+    assert isinstance(d["runtimes"][r], bool), d["runtimes"][r]
+for r in ("ruby", "python", "node"):
+    assert isinstance(d["versions"][r], str), d["versions"][r]
 assert isinstance(d["hyperapi_present"], bool)
 assert d["skill_sha"] is None or isinstance(d["skill_sha"], str)
 assert d["behind_count"] is None or isinstance(d["behind_count"], int)
-assert d["agent_vision"] is None and d["model_hint"] is None, \
-    "agent_vision/model_hint must ship as null placeholders"
+assert isinstance(d["agent_vision"], bool), \
+    "agent_vision is caller-asserted via SIGMA_AGENT_VISION (default false)"
+assert isinstance(d["model_hint"], str)
+assert isinstance(d["sandbox_hint"], str)
 assert isinstance(d["pass"], bool) and isinstance(d["failures"], list)
 assert all(isinstance(f, str) for f in d["failures"])
 assert d["pass"] == (rc == 0), f"pass={d['pass']} but doctor exited {rc}"
@@ -60,12 +62,12 @@ DOCTOR_WORKDIR="$TMP/w2" bash "$HERE/doctor.sh" >/dev/null 2>&1
 python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$TMP/w2/doctor.json" 2>/dev/null
 check $? "DOCTOR_WORKDIR doctor.json is valid JSON"
 
-echo "Part C — plain run stays byte-compatible (no JSON, no new lines)"
+echo "Part C — plain run writes no doctor.json into the CWD; standard checks still print"
 mkdir -p "$TMP/plain" && cd "$TMP/plain"
 bash "$HERE/doctor.sh" >"$TMP/plain.out" 2>&1
-[ ! -e "$TMP/plain/doctor.json" ]; check $? "no doctor.json written without a workdir"
-! grep -q 'doctor\.json\|tableauhyperapi\|behind origin/main' "$TMP/plain.out"
-check $? "plain output has none of the workdir-mode additions"
+[ ! -e "$TMP/plain/doctor.json" ]; check $? "no doctor.json written into the CWD without a workdir"
+grep -q 'tableauhyperapi' "$TMP/plain.out"
+check $? "hyperapi check prints in plain mode (standard check, upstream doctor design)"
 grep -q '^Summary: ' "$TMP/plain.out"; check $? "plain output still ends with the Summary line"
 
 echo

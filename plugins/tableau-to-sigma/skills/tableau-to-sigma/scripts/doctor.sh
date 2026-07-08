@@ -20,7 +20,7 @@ set -u
 
 # --workdir DIR: also drop doctor.json here (in addition to the stable
 # ~/.sigma-migration/doctor.json). Everything else is positional-agnostic.
-WORKDIR=""
+WORKDIR="${DOCTOR_WORKDIR:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --workdir) WORKDIR="${2:-}"; shift 2 ;;
@@ -224,6 +224,7 @@ write_doctor_json() {
     printf '"behind_count":%s,' "$BEHIND_COUNT"
     printf '"agent_vision":%s,' "$AGENT_VISION"
     printf '"model_hint":"%s",' "$(jstr "$MODEL_HINT")"
+    printf '"generated_at":"%s",' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf '"pass":%s,' "$PASS_BOOL"
     printf '"failures":[%s]' "$fj"
     printf '}\n'
