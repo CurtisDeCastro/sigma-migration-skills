@@ -128,7 +128,7 @@ module MechanicalSpecs
   # cross-element + calc column the dashboards plot — base warehouse-table
   # elements carry only their own physical columns. So prefer the largest derived
   # view that is NOT a *Dim; fall back to a base warehouse-table fact otherwise.
-  def pick_fact(model)
+  def pick_fact(model, prefer_table: nil)
     els = all_elements(model)
     return nil if els.empty?
     # A dimension element's name is "<X> Dim" (trailing) OR "Dim <X>" (leading,
@@ -137,18 +137,79 @@ module MechanicalSpecs
     # trailing-only / Dim$/ and won max_by, making the workbook master source the
     # wrong element).
     dim_re = /(^Dim\b| Dim$)/i
+    by_id = els.each_with_object({}) { |e, h| h[e['id']] = e }
+    # The warehouse table an element resolves to (its own path, or its source
+    # element's path for a derived view). Used to honor `prefer_table`.
+    el_table = lambda do |e|
+      last = (e.dig('source', 'path') || []).last
+      if last.nil? && (sid = e.dig('source', 'elementId'))
+        last = (by_id[sid]&.dig('source', 'path') || []).last
+      end
+      last.to_s.upcase
+    end
     derived = els.select { |e| e.dig('source', 'kind') == 'table' && e.dig('source', 'elementId') }
                  .reject { |e| elem_name(e) =~ dim_re }
-    return derived.max_by { |e| (e['columns'] || []).size } if derived.any?
     # Base candidates are warehouse-table elements OR custom-SQL ('sql') elements —
     # the modern Tableau object/relationship model emits one kind:'sql' element per
     # logical object (often the only kind present in a multi-custom-SQL workbook).
+    base = els.select { |e| %w[warehouse-table sql].include?(e.dig('source', 'kind')) }
+    # `prefer_table` = the landed table the DASHBOARD worksheets actually use
+    # (dominant_fact_table). In a MULTI-embedded-extract workbook the converter
+    # projects more columns for an UNUSED secondary datasource than for the one
+    # the charts plot, so the max_by(columns.size) default below picks the wrong
+    # fact (the World Bank regression: 14-col unused Table B beat the 9-col used
+    # Table A). When a preferred table is named, restrict the pick to elements
+    # tied to it; only fall through to the count heuristic if nothing matches.
+    if prefer_table
+      pt = prefer_table.to_s.upcase
+      dpt = derived.select { |e| el_table.call(e) == pt }
+      return dpt.max_by { |e| (e['columns'] || []).size } if dpt.any?
+      bpt = base.select { |e| el_table.call(e) == pt }
+      unless bpt.empty?
+        f = bpt.reject { |e| elem_name(e) =~ dim_re }
+        return (f.empty? ? bpt : f).max_by { |e| (e['columns'] || []).size }
+      end
+    end
+    return derived.max_by { |e| (e['columns'] || []).size } if derived.any?
     # Without 'sql' here, pick_fact returned nil and the whole mechanical path
     # FATAL-aborted on object-model workbooks (the DDMX empty-DM dead-end).
-    base = els.select { |e| %w[warehouse-table sql].include?(e.dig('source', 'kind')) }
     return nil if base.empty?
     facts = base.reject { |e| elem_name(e) =~ dim_re }
     (facts.empty? ? base : facts).max_by { |e| (e['columns'] || []).size }
+  end
+
+  # The landed table (UPPER last path segment) of the datasource the DASHBOARD
+  # worksheets actually use — the correct fact for a multi-embedded-extract
+  # workbook. Counts each worksheet's <datasource-dependencies> (excluding
+  # Parameters), maps the dominant datasource → its caption → the landing-manifest
+  # entry → sf_table. Regex-based (no full XML parse) so it's fast on large .twb.
+  # Returns nil when there's no manifest, a single datasource, or no clear winner.
+  def dominant_fact_table(twb_text, manifest_path)
+    return nil unless twb_text && manifest_path && File.exist?(manifest_path.to_s)
+    entries = (JSON.parse(File.read(manifest_path.to_s)) rescue nil)
+    return nil unless entries.is_a?(Array) && entries.size > 1 # single-source: no ambiguity
+
+    name2cap = {}
+    twb_text.scan(/<datasource\b([^>]*)>/) do |m|
+      attrs = m[0]
+      nm = attrs[/\bname='([^']*)'/, 1]
+      cap = attrs[/\bcaption='([^']*)'/, 1]
+      name2cap[nm] ||= cap if nm && cap
+    end
+    usage = Hash.new(0)
+    twb_text.scan(/<datasource-dependencies\b[^>]*\bdatasource='([^']+)'/) do |m|
+      n = m[0]
+      next if n.nil? || n =~ /\AParameters\b/i
+      usage[n] += 1
+    end
+    return nil if usage.empty?
+    dominant = usage.max_by { |_n, c| c }&.first
+    cap = name2cap[dominant].to_s.strip
+    return nil if cap.empty?
+    entry = entries.find { |e| e['caption'].to_s.strip == cap } ||
+            entries.find { |e| e['datasource'].to_s == dominant }
+    return nil unless entry && entry['sf_table']
+    entry['sf_table'].to_s.split('.').last&.upcase
   end
 
   # The base element a derived view sources (for harvesting its metrics, which

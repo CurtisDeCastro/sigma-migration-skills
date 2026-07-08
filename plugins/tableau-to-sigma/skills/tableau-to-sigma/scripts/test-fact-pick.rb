@@ -45,6 +45,50 @@ mig = File.read(File.join(__dir__, 'migrate-tableau.rb'))
 check(mig.scan(/\(\^Dim\\b\| Dim\$\)/i).size >= 2, 'both fresh + reuse paths use the leading+trailing dim test', fails)
 check(mig.match?(/max_by \{ \|e\| \(e\['columnLabels'\] \|\| \[\]\)\.size \}/),
       'fact fallback tie-breaks by column count, not list order', fails)
+check(mig.include?('prefer_table: prefer_fact_table') || mig.include?('prefer_table: (defined?(prefer_fact_table)'),
+      'both pick_fact call sites thread prefer_fact_table', fails)
+
+puts 'Part C — prefer_table overrides column count (multi-extract regression)'
+# The World Bank shape: the UNUSED datasource projects MORE columns (14) than the
+# one the charts use (9). Default max_by picks the wide unused one; prefer_table
+# must override to the used table.
+m3 = { 'pages' => [{ 'elements' => [
+  { 'id' => 'e-unused', 'name' => 'Gdp2005',    'source' => { 'kind' => 'warehouse-table', 'path' => %w[TJ PUBLIC WB_GDP2005] },   'columns' => cols.call(14) },
+  { 'id' => 'e-used',   'name' => 'World Bank', 'source' => { 'kind' => 'warehouse-table', 'path' => %w[TJ PUBLIC WB_WORLD_BANK] }, 'columns' => cols.call(9) }
+] }] }
+check(MechanicalSpecs.pick_fact(m3)['id'] == 'e-unused', 'default (no hint): max_by columns picks the WIDE unused table', fails)
+check(MechanicalSpecs.pick_fact(m3, prefer_table: 'WB_WORLD_BANK')['id'] == 'e-used',
+      'prefer_table picks the USED (narrower) table, overriding count', fails)
+check(MechanicalSpecs.pick_fact(m3, prefer_table: 'NOPE_MISSING')['id'] == 'e-unused',
+      'unmatched prefer_table falls through to the default heuristic', fails)
+
+puts 'Part D — dominant_fact_table (worksheet deps → caption → manifest → sf_table)'
+require 'json'
+require 'tmpdir'
+TWB = <<~XML
+  <?xml version='1.0'?>
+  <workbook><datasources>
+    <datasource name='Parameters' caption='Parameters'/>
+    <datasource name='federated.aaa' caption='1. Macro World Bank Extract'/>
+    <datasource name='federated.bbb' caption='GFTGWOnullGDP2005 Extract'/>
+  </datasources>
+  <worksheets>
+    #{Array.new(9) { |i| "<worksheet name='w#{i}'><table><view><datasource-dependencies datasource='federated.aaa'/><datasource-dependencies datasource='Parameters'/></view></table></worksheet>" }.join}
+  </worksheets></workbook>
+XML
+MANIFEST = [
+  { 'datasource' => 'federated.aaa', 'caption' => '1. Macro World Bank Extract', 'hyper' => 'a.hyper', 'sf_table' => 'TJ.PUBLIC.WB_WORLD_BANK', 'columns' => {} },
+  { 'datasource' => 'federated.bbb', 'caption' => 'GFTGWOnullGDP2005 Extract', 'hyper' => 'b.hyper', 'sf_table' => 'TJ.PUBLIC.WB_GDP2005', 'columns' => {} }
+]
+Dir.mktmpdir do |d|
+  mp = File.join(d, 'landing-manifest.json')
+  File.write(mp, JSON.generate(MANIFEST))
+  got = MechanicalSpecs.dominant_fact_table(TWB, mp)
+  check(got == 'WB_WORLD_BANK', "dominant datasource (9 worksheets) → WB_WORLD_BANK (got #{got.inspect})", fails)
+  # single-source manifest → nil (no ambiguity to resolve)
+  sp = File.join(d, 'single.json'); File.write(sp, JSON.generate([MANIFEST[0]]))
+  check(MechanicalSpecs.dominant_fact_table(TWB, sp).nil?, 'single-source manifest → nil (no override)', fails)
+end
 
 puts
 if fails.empty?

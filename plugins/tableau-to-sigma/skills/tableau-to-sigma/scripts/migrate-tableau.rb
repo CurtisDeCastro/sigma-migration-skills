@@ -1262,6 +1262,16 @@ if mechanical
     end
   end
 
+  # Fact hint for a MULTI-embedded-extract workbook: the datasource the dashboard
+  # worksheets actually use (column count alone picks the wrong one — an unused
+  # secondary can project MORE columns than the plotted table). Computed from the
+  # .twb worksheet dependencies + the landing manifest; threaded into pick_fact.
+  prefer_fact_table = nil
+  if have_twb && defined?(landing_manifest) && landing_manifest
+    prefer_fact_table = (MechanicalSpecs.dominant_fact_table(File.read(twb, encoding: 'UTF-8'), landing_manifest) rescue nil)
+    line "fact hint: dashboard datasource → prefer table #{prefer_fact_table}" if prefer_fact_table
+  end
+
   # Mechanical DM fixup NOW (so dropped calcs feed the checkpoint): resolve
   # raw-table-name prefixes + GUID sibling refs, and DROP calc columns that
   # still cannot resolve (unknown functions / unresolved refs).
@@ -1274,7 +1284,7 @@ if mechanical
   # us surface any chart-PLOTTED metric that did not fully translate (GUID refs
   # the converter could not resolve) as an OPEN QUESTION rather than a silent
   # blank chart. Metrics that aren't plotted by any view are ignored.
-  conv_fact = MechanicalSpecs.pick_fact(conv['model'])
+  conv_fact = MechanicalSpecs.pick_fact(conv['model'], prefer_table: prefer_fact_table)
   conv_base = conv_fact ? MechanicalSpecs.base_of(conv['model'], conv_fact) : nil
   pre = conv_fact ? MechanicalSpecs.derive_master(conv_fact, (conv_fact['name'] || 'Order Fact'), conv_base, nil, conv['model']) : { 'untranslated_metrics' => [] }
   pre_untranslated = pre['untranslated_metrics'] || []
@@ -2003,7 +2013,7 @@ unless reuse_dm_id
   if mechanical
     # The master must source the SAME chart-ready element pick_fact chose (the
     # derived "<Fact> View" when present). Match it into the readback by name.
-    cf = MechanicalSpecs.pick_fact(conv['model'])
+    cf = MechanicalSpecs.pick_fact(conv['model'], prefer_table: (defined?(prefer_fact_table) ? prefer_fact_table : nil))
     cf_name = cf && (cf['name'] || MechanicalSpecs.elem_name(cf))
     # Fallback (when the exact name match misses): the fact is the WIDEST non-dim
     # element — never a narrow date/time dim. Match pick_fact's dim test (both
