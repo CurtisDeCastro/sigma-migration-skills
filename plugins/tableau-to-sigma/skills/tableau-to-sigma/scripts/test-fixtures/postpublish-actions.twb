@@ -1,6 +1,6 @@
 <?xml version='1.0' encoding='utf-8' ?>
 <!-- Minimal synthetic fixture for test-postpublish-guide.rb — XML structure
-     mirrors the Skills Test corpus (ecommerce-admin / superstore-performance
+     mirrors live-migration corpora (admin-dashboard / exec-overview
      action shapes) with invented names; no customer data. Covers: filter
      action (tsl-filter with link field mapping + exclude), highlight (brush),
      URL action, nav-action, edit-parameter-action, edit-set-action, a

@@ -306,7 +306,7 @@ def agent_brief(sub, cluster, batch_results_path, leader_dm_id_path, out_dir, ov
 
     >>>>>> LEARNINGS FROM PRIOR RUNS — bake in from the first POST <<<<<<
 
-    Live-verified on the 2026-07-07 Skills Test run (10/10 GREEN). One line
+    Live-verified on a 2026-07 10-workbook live migration (10/10 GREEN). One line
     each; spec-shaped detail in the skill's refs/fidelity-recipes.md and
     learned/starter-rules.yaml. Do NOT rediscover these at runtime:
 

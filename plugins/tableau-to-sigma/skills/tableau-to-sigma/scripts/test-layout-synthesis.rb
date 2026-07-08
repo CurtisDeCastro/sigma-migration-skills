@@ -15,7 +15,7 @@
 #   - census: exact-compatible pages + new bands_detected/min_row_expansions
 #   - determinism: two runs produce byte-identical outputs
 #
-# Fixtures are minimal derivations of the real Skills Test zone trees
+# Fixtures are minimal derivations of real live-migration zone trees
 # (supermart-sales' header + KPI band; superstore-performance's left
 # filter/param rail). Offline, creds-free. Run: ruby scripts/test-layout-synthesis.rb
 

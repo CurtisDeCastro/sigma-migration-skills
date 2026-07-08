@@ -1,6 +1,6 @@
 <?xml version='1.0' encoding='utf-8' ?>
 <!-- Minimal synthetic fixture for test-postpublish-guide.rb — the dynamic
-     zone visibility graph, mirroring the dynamic-zoning-kpi Skills Test
+     zone visibility graph, mirroring a dynamic-zone-visibility live-migration
      workbook's structure with invented names; no customer data. The chain:
      single-value-field-node (value-output-guid=vo-0001) → edge →
      dashboard-zone-visibility-node (visibility-input-guid=vi-0001, zone-id=10),

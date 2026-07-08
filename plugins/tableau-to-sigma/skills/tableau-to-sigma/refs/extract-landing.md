@@ -8,7 +8,7 @@ payload** — connection classes `excel-direct`, `textscan`, `hyper`, or `ogrdir
 connection** behind the workbook. The Sigma data model has nothing to point at
 until the frozen extract itself is landed. Do NOT abort, and do NOT fabricate
 warehouse paths: land the extract. (This is the community/consultant-workbook
-norm — the 2026-07 Skills Test event was 10/10 extract-backed.)
+norm — a 2026-07 live migration event was 10/10 extract-backed.)
 
 Preflight: `doctor.json` reports `hyperapi_present`. It is informational, not
 required — but extract-backed workbooks cannot land without it:
@@ -48,7 +48,7 @@ from**. SQL over them is a *true oracle* for every number visible in the source
 renders. Consequence: Phase 6 parity runs in **exact mode** — do not offer, and
 do not accept, drift tolerance (`--tolerance`, "data may have refreshed",
 `--min-pass-rate` waivers) for extract-landed sources. A mismatch is a
-conversion bug, full stop. (~620 exact checks held in the Skills Test run.)
+conversion bug, full stop. (~620 exact checks held in a 10-workbook live migration.)
 
 ## 'None' vs NULL
 
@@ -67,7 +67,7 @@ run. Do not "clean up" `'None'` strings in landed tables downstream.
 `POST /v2/connections/{connectionId}/sync` with body
 `{"path": ["DB", "SCHEMA", "TABLE"]}` makes a newly landed table visible to
 Sigma **immediately** — no UI "refresh schema" needed. Verified 48/48 in the
-Skills Test run. `--sigma-connection-id` does this per landed table and reports
+live-migration run. `--sigma-connection-id` does this per landed table and reports
 ok/fail counts. (This supersedes any older "no API can refresh the catalog"
 claims.)
 

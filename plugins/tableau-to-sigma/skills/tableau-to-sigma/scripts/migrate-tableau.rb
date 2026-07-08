@@ -929,7 +929,7 @@ if mechanical
   embedded_classes = %w[excel-direct textscan hyper ogrdirect csv msexcel]
   if have_twb && !HydrateCustomSql.twb_has_sqlproxy?(twb)
     conn_classes = begin
-      File.read(twb).scan(/<connection[^>]*\bclass='([^']+)'/).flatten.uniq - ['federated']
+      File.read(twb, encoding: 'UTF-8').scan(/<connection[^>]*\bclass='([^']+)'/).flatten.uniq - ['federated']
     rescue StandardError
       []
     end

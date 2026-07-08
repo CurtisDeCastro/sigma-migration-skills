@@ -4,8 +4,8 @@
 # consulted first by apply()'s first-match-wins.
 #
 # Provenance: every entry below was live-verified on the 2026-07-07 "Tableau
-# Skills Test" migration (10 workbooks / 30 dashboards, 10/10 GREEN, ~620
-# exact value checks). Evidence: SKILLS_TEST_MIGRATION_REPORT.md +
+# live-migration" migration (10 workbooks / 30 dashboards, 10/10 GREEN, ~620
+# exact value checks). Evidence:
 # skills-test-run/gaps-normalized.json in the sigma-migration-skills evidence
 # repo.
 #
@@ -21,7 +21,7 @@
 #     fields never rewrites anything); they surface via
 #     `ruby scripts/learned-rules.rb` and the loaded-rules count, and each
 #     one's full spec shape lives in refs/fidelity-recipes.md
-#     ("Live-verified recipes — 2026-07-07 Skills Test run").
+#     ("Live-verified recipes — 2026-07 10-workbook live migration").
 rules:
   - feature: "KPI_INLINE_AGGREGATE"
     description: >-

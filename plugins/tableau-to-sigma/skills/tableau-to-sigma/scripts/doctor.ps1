@@ -78,19 +78,23 @@ if ($script:PyExe) {
 
 # --- tableauhyperapi (informational - embedded-extract workbooks only) -----
 # Embedded-extract (.twbx) workbooks land their frozen data via
-# scripts/land-extracts.py, which needs the Hyper API. Not REQUIRED: warn-level
-# only, with the exact remediation. See refs/extract-landing.md.
+# land-extracts.py, which needs the Hyper API. Not REQUIRED: warn-level only.
+# The human check SELF-GATES on land-extracts.py existing next to this script,
+# so this shared doctor stays byte-identical across plugins and only speaks up
+# where the landing path exists (tableau). JSON field emitted everywhere.
 $hyperapiPresent = $false
 if ($script:PyExe) {
   $pyArgs = @(); if ($script:PyPre) { $pyArgs += $script:PyPre }
   $hp = (& $script:PyExe @pyArgs -c "import importlib.util as iu; print('HYPER_OK' if iu.find_spec('tableauhyperapi') else '')" 2>$null | Out-String).Trim()
   if ($hp -eq 'HYPER_OK') { $hyperapiPresent = $true }
 }
-if ($hyperapiPresent) {
-  Ok "tableauhyperapi present - embedded-extract workbooks can land via scripts/land-extracts.py"
-} else {
-  Warn "tableauhyperapi not installed (only needed for embedded-extract workbooks)" `
-       "pip install tableauhyperapi pandas snowflake-connector-python - see refs/extract-landing.md"
+if (Test-Path (Join-Path $PSScriptRoot 'land-extracts.py')) {
+  if ($hyperapiPresent) {
+    Ok "tableauhyperapi present - embedded-extract workbooks can land via scripts/land-extracts.py"
+  } else {
+    Warn "tableauhyperapi not installed (only needed for embedded-extract workbooks)" `
+         "pip install tableauhyperapi pandas snowflake-connector-python - see refs/extract-landing.md"
+  }
 }
 
 # --- node ------------------------------------------------------------------

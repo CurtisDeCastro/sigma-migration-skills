@@ -36,7 +36,7 @@
 #   (f) sub-minimum tile height — an element whose gridRow span is below its
 #       kind's minimum (KIND_MIN_ROWS). Sigma renders chart/KPI tiles BLANK
 #       under ~3-4 grid rows — in the live page AND in page/element PNG
-#       exports (hit twice in the 2026-07 Skills Test run). Element kinds come
+#       exports (hit twice in a 2026-07 live migration). Element kinds come
 #       from the spec's page elements; layout-only container shells (no spec
 #       kind) are skipped. A child's span is measured in its own container's
 #       row units (matched-inner-span convention: inner rows track page rows).

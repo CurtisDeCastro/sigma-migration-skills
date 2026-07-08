@@ -93,9 +93,9 @@ ledger flows them to the report instead of blocking the gate:
 
 ---
 
-## Live-verified recipes (2026-07-07 Skills Test run)
+## Live-verified recipes (2026-07 10-workbook live migration)
 
-Validated end-to-end on the 10-workbook / 30-dashboard Skills Test migration (10/10 GREEN,
+Validated end-to-end on the 10-workbook / 30-dashboard live-migration migration (10/10 GREEN,
 ~620 exact value checks). Each recipe rendered correctly, round-tripped through GET, and
 reproduced the source's numbers exactly. The transferable one-line rules also ship in the
 learned-rules starter pack (`learned/starter-rules.yaml`) — this section is the spec-shaped

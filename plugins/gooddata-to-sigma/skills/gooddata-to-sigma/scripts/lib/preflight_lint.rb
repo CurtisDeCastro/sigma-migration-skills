@@ -22,11 +22,32 @@
 #   C3  a list/segmented/hierarchy control wired to NOTHING — neither a `source`
 #       (value-list) nor `filters` (target columns). A filters-only list control
 #       is VALID (live-verified), so source is NOT independently required.
+#   K1  a kpi-chart whose `value.columnId` column's formula is a BARE reference
+#       to a sibling column ([X] with no function call) — compiles clean but
+#       renders NULL (live: the call-center WoW badges). Inline the aggregate.
+#   S1  `style.backgroundColor` on a kpi-chart or bar-chart — blanks the tile in
+#       PNG export and garbles thousands separators (live: call-center KPIs,
+#       supermart mini bars). Use container styling instead.
+#   C5  a control with selectionMode:"single" carrying `values` (array) instead
+#       of scalar `value` — the filter AND the default silently drop.
+#   N1  an element or column whose `name` is empty/whitespace-only — breaks
+#       parity header matching and blank-renders axes (title hiding belongs on
+#       the element, not the name).
+#
+# WARN-level (printed, never fail the lint — `lint_warnings(spec)`):
+#   P1  a `conditionalFormats` entry with includeValues:false — silently
+#       disables the format (live-verified: visual-vocabulary waffle).
+#   I1  heuristic: If()/Switch() whose FIRST argument is a bare column ref with
+#       no comparison operator — integer/bit predicates fail at render with
+#       "Invalid Query"; suggest an explicit `= 1` comparison.
 require 'json'
 
 AGG = /\A\s*(Sum|Avg|Count|CountDistinct|CountIf|SumIf|Min|Max|Median|Percentile|StdDev|Variance|VariancePop|GrandTotal)\s*\(/i
 PLAIN_REF = /\A\s*\[[^\]]+\]\s*\z/   # a bare column reference, e.g. [Table/Region]
 LISTY = %w[list segmented hierarchy].freeze
+# I1: If(/Switch( whose first argument is a bare [ref] immediately followed by
+# `,` or `)` — i.e. no comparison operator. `If([x] = 1, ...)` does NOT match.
+BARE_PREDICATE = /\b(If|Switch)\s*\(\s*(\[[^\]]+\])\s*[,)]/i
 
 def lint(spec)
   errs = []
@@ -42,6 +63,33 @@ def lint(spec)
       kind = el['kind']
       name = el['name'] || el['id'] || '(unnamed)'
       cols = el['columns'] || []
+
+      # N1: whitespace-only names (element + columns). A " " name "hides" the
+      # title but breaks verify-warehouse/parity header matching, blank-renders
+      # axes, and collapses parity keys. Hide titles on the ELEMENT instead.
+      if el.key?('name') && el['name'].to_s.strip.empty?
+        errs << "N1 element '#{el['id'] || '(no id)'}' (#{kind}): `name` is empty/whitespace-only — whitespace names break parity header matching and blank axis renders — use a real name (title hiding belongs on the element, not the name)."
+      end
+      cols.each do |c|
+        next unless c.key?('name') && c['name'].to_s.strip.empty?
+        errs << "N1 column '#{c['id'] || '(no id)'}' on element '#{name}': `name` is empty/whitespace-only — whitespace names break parity header matching and blank axis renders — use a real name (title hiding belongs on the element, not the name)."
+      end
+
+      # K1: a kpi-chart's value column must inline the FULL aggregate expression.
+      # A bare sibling ref ([Total Calls]) compiles clean and renders NULL.
+      if kind == 'kpi-chart'
+        vcid = el.dig('value', 'columnId')
+        vcol = cols.find { |c| c['id'] == vcid }
+        if vcol && vcol['formula'].to_s =~ PLAIN_REF
+          errs << "K1 kpi-chart '#{name}': value column '#{vcid}' formula is a bare sibling ref (`#{vcol['formula']}`) — kpi-chart value columns must inline the full aggregate expression — bare sibling refs compile clean but render null."
+        end
+      end
+
+      # S1: element-level backgroundColor on kpi/bar tiles breaks the export
+      # renderer (live UI fine, PNG export blank + garbled separators).
+      if %w[kpi-chart bar-chart].include?(kind) && el.dig('style', 'backgroundColor')
+        errs << "S1 #{kind} '#{name}': style.backgroundColor (#{el.dig('style', 'backgroundColor').inspect}) — backgroundColor on kpi/bar blanks the tile in PNG export and garbles number separators — use container styling instead."
+      end
 
       if kind == 'table'
         agg = cols.select { |c| c['formula'].to_s =~ AGG }
@@ -95,21 +143,60 @@ def lint(spec)
             errs << "C3 control '#{name}': list-type control has neither `source` (value-list) nor `filters` (target columns) — it controls nothing. Add filters:[{source:{kind:table,elementId}, columnId}] and/or a double-nested source."
           end
         end
+
+        # C5: single-select controls take a SCALAR `value`, never a `values`
+        # array — with values:[...] both the filter and the default silently
+        # drop on PUT (probe-isolated live, twice).
+        if el['selectionMode'].to_s == 'single' && el['values'].is_a?(Array)
+          scalar = el['values'].first
+          errs << "C5 control '#{name}': selectionMode \"single\" carries `values` (array) — the filter and the default silently drop. Use a scalar instead: replace `values: #{el['values'].inspect}` with `value: #{scalar.inspect}`."
+        end
       end
     end
   end
   errs
 end
 
+# WARN-level findings (P1/I1): printed by the CLI but never fail the lint —
+# P1 is a live-verified silent no-op, I1 a heuristic with known false positives
+# (a string-matching Switch([Region], "East", ...) is legitimate).
+def lint_warnings(spec)
+  warns = []
+  (spec['pages'] || []).each do |pg|
+    (pg['elements'] || []).each do |el|
+      kind = el['kind']
+      name = el['name'] || el['id'] || '(unnamed)'
+
+      # P1: conditionalFormats with includeValues:false is a silent no-op.
+      (el['conditionalFormats'] || []).each_with_index do |cf, i|
+        next unless cf.is_a?(Hash) && cf['includeValues'] == false
+        warns << "P1 #{kind} '#{name}': conditionalFormats[#{i}] has includeValues:false — includeValues:false silently disables the format — verified live. Keep includeValues:true."
+      end
+
+      # I1: If()/Switch() over a bare column ref (no comparison) — integer/bit
+      # predicates fail at render ("Invalid Query"). Suggest an explicit = 1.
+      (el['columns'] || []).each do |c|
+        c['formula'].to_s.scan(BARE_PREDICATE) do |fn, ref|
+          warns << "I1 column '#{c['name'] || c['id']}' on element '#{name}': #{fn}(#{ref}, ...) uses a bare column ref as the predicate — integer predicates fail at render ('Invalid Query'). Use an explicit comparison, e.g. #{fn}(#{ref} = 1, ...)."
+        end
+      end
+    end
+  end
+  warns
+end
+
 if __FILE__ == $PROGRAM_NAME
   path = ARGV[0] or abort('usage: preflight_lint.rb <workbook-spec.json>')
   spec = JSON.parse(File.read(path))
   errs = lint(spec)
+  warns = lint_warnings(spec)
   if errs.empty?
-    puts 'preflight lint: clean'
+    puts "preflight lint: clean#{warns.any? ? " (#{warns.size} warning(s))" : ''}"
+    warns.each { |w| warn "  ⚠ #{w}" }
     exit 0
   end
-  warn "preflight lint: #{errs.size} violation(s)"
+  warn "preflight lint: #{errs.size} violation(s)#{warns.any? ? ", #{warns.size} warning(s)" : ''}"
   errs.each { |e| warn "  ✗ #{e}" }
+  warns.each { |w| warn "  ⚠ #{w}" }
   exit 1
 end

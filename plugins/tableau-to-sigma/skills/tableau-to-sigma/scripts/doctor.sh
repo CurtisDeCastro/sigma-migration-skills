@@ -135,18 +135,23 @@ fi
 
 # --- tableauhyperapi (informational — embedded-extract workbooks only) -----
 # Embedded-extract (.twbx) workbooks land their frozen data via
-# scripts/land-extracts.py, which needs the Hyper API. Not REQUIRED: warn-level
-# only, with the exact remediation. See refs/extract-landing.md.
+# land-extracts.py, which needs the Hyper API. Not REQUIRED: warn-level only,
+# with the exact remediation. The human check SELF-GATES on land-extracts.py
+# existing next to this script, so this shared doctor stays byte-identical
+# across plugins and only speaks up where the landing path exists (tableau).
+# The JSON field is emitted everywhere for a uniform schema.
 HYPERAPI=false
 for _pyx in python3 python; do
   if command -v "$_pyx" >/dev/null 2>&1 && "$_pyx" -c 'import tableauhyperapi' >/dev/null 2>&1; then HYPERAPI=true; break; fi
 done
 if [ "$HYPERAPI" != true ] && command -v py >/dev/null 2>&1 && py -3 -c 'import tableauhyperapi' >/dev/null 2>&1; then HYPERAPI=true; fi
-if [ "$HYPERAPI" = true ]; then
-  ok "tableauhyperapi present — embedded-extract workbooks can land via scripts/land-extracts.py"
-else
-  warn "tableauhyperapi not installed (only needed for embedded-extract workbooks)" \
-       "pip install tableauhyperapi pandas snowflake-connector-python — see refs/extract-landing.md"
+if [ -f "$HERE/land-extracts.py" ]; then
+  if [ "$HYPERAPI" = true ]; then
+    ok "tableauhyperapi present — embedded-extract workbooks can land via scripts/land-extracts.py"
+  else
+    warn "tableauhyperapi not installed (only needed for embedded-extract workbooks)" \
+         "pip install tableauhyperapi pandas snowflake-connector-python — see refs/extract-landing.md"
+  fi
 fi
 
 # --- skill version drift (v3 §2.1) -----------------------------------------

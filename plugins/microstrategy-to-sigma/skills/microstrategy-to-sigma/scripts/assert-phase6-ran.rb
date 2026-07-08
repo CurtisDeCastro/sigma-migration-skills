@@ -98,12 +98,20 @@
 #      sent or declined (no telemetry-sent.json marker; gate 10, delegated to
 #      assert-telemetry-ran.rb). Ask the user, then run report-telemetry.py
 #      (--declined if they decline). Escape hatch: --skip-telemetry-gate "<reason>".
-#  13  Visual comparison not recorded (gate 8b) — ENFORCED BY DEFAULT: a valid
-#      render exists but parity-final.json carries no visual_checked/screenshot_path
-#      verdict. A structurally-clean workbook can still ship visually empty/wrong, so
-#      the source-vs-target comparison is mandatory. Run record-visual-check.rb after
-#      reading the rendered page against the source dashboard PNG, then re-run.
-#      Escape hatch (source image genuinely unobtainable): --skip-visual-comparison "<reason>".
+#  13  Visual comparison not recorded OR not executable (gate 8b) — ENFORCED BY
+#      DEFAULT. Two variants, same exit code:
+#      (a) a valid render exists but parity-final.json carries no
+#          visual_checked/screenshot_path verdict. A structurally-clean workbook
+#          can still ship visually empty/wrong, so the source-vs-target
+#          comparison is mandatory. Run record-visual-check.rb after reading the
+#          rendered page against the source dashboard PNG, then re-run.
+#      (b) parity-final.json carries agent_vision=false or
+#          visual_verdict="not-executable" (stamped by record-visual-check.rb
+#          §D5) — the driving agent could not READ the render, so any verdict is
+#          a blind attestation. Re-run the visual loop from a vision-capable
+#          session (Claude Code with image input).
+#      Escape hatch for both (source image genuinely unobtainable / knowingly
+#      accepting an unverified render): --skip-visual-comparison "<reason>".
 #  14  Layout fill / grid coverage failed (gate 8c; #259 item 1) — a page in
 #      layout-census.json dropped a tile (placed < zones) or ships under-filled
 #      (grid_fill_pct < --min-grid-fill, default 0.45), OR a dashboard layout was
@@ -114,6 +122,13 @@
 #      still carries spec-fixable deltas that were never resolved. Run the RCF loop
 #      (scripts/fidelity-loop.rb) to convergence, or waive named residuals with
 #      --accept-residuals id,id. Only enforced for converters that pass the flag.
+#  16  Post-publish interactivity guide missing (gate 11) — the source dashboards
+#      carry filter/highlight/nav ACTIONS (dashboard-layout-meta.json worksheets'
+#      is_action filters, or the *-gaps-report.json "Dashboard filter / highlight /
+#      nav actions" feature) that workbooks-as-code cannot port, and
+#      <workdir>/POSTPUBLISH_GUIDE.md does not exist. Run
+#      scripts/build-postpublish-guide.rb to generate the user handoff guide.
+#      Escape hatch: --skip-postpublish-guide "<reason>".
 #
 # Prints a per-gate summary to stdout regardless of exit code.
 
@@ -152,6 +167,7 @@ OptionParser.new do |p|
   p.on('--min-grid-fill F', Float, 'gate 8c: minimum per-page grid_fill_pct (0..1, default 0.45) — pages below fail as mostly-empty') { |v| opts[:min_grid_fill] = v }
   p.on('--skip-layout-fill REASON', 'waive gate 8c (layout fill / grid coverage) — REQUIRED reason string. Use ONLY when a sparse/partial page is intentional. The reason MUST be named in your migration report.') { |v| opts[:skip_layout_fill] = v }
   p.on('--skip-telemetry-gate REASON', 'waive gate 10 (telemetry consent decision) — REQUIRED reason string. Use ONLY when the run genuinely cannot prompt (e.g. unattended CI). The reason MUST be named in your migration report.') { |v| opts[:skip_telemetry] = v }
+  p.on('--skip-postpublish-guide REASON', 'waive gate 11 (post-publish interactivity guide) — REQUIRED reason string. Use ONLY when the source dashboard actions are genuinely not worth a handoff guide. The reason MUST be named in your migration report.') { |v| opts[:skip_postpublish] = v }
   p.on('--require-fidelity-ledger', 'gate 8d (OPT-IN, off by default): require an RCF fidelity-ledger.json (Phase 5g) with zero UNRESOLVED spec-fixable deltas. Adopters (tableau-to-sigma) pass this; other converters are unaffected until they do.') { opts[:require_fidelity] = true }
   p.on('--fidelity-ledger PATH', 'gate 8d: path to the RCF ledger (default: <workdir>/fidelity-ledger.json)') { |v| opts[:fidelity_ledger] = v }
   p.on('--accept-residuals LIST', 'gate 8d: comma-separated ledger entry ids/indices to WAIVE as accepted residuals (name them in the report)') { |v| opts[:accept_residuals] = v.split(',').map(&:strip) }
@@ -224,6 +240,11 @@ else
     warn "       Required: #{rate_gate_only ? '' : 'status=PASS and '}pass-rate >= #{(opts[:min_pass_rate] * 100).to_i}%"
     if (fail_names = summary['fail_names']) && !fail_names.empty?
       warn "       Failing charts: #{fail_names.join(', ')}"
+    end
+    if (pending = summary['pending_names']) && !pending.empty?
+      warn "       Pending render-verify (pivot CSV export 500/empty fallback): #{pending.join(', ')} —"
+      warn '       verify each via render-read or direct SQL, set "render_verified": true on the chart'
+      warn '       in parity-plan.json, then re-run phase6-parity.rb --finalize.'
     end
     exit 2
   end
@@ -717,11 +738,37 @@ else
   # clean workbook can still ship visually empty/wrong (0 error columns, but stacked
   # slivers / missing tiles). "Can't verify" must not equal "passes", so a missing
   # verdict hard-fails unless explicitly waived with a named reason.
+  #
+  # VISION PRECONDITION (§D5): record-visual-check.rb stamps agent_vision; when the
+  # driving agent could not READ the render (agent_vision=false, or the explicit
+  # visual_verdict="not-executable"), any recorded verdict — even one carrying a
+  # screenshot_path — is a blind attestation, and the gate fails with a NAMED
+  # degradation instead of passing on it.
   s = File.exist?(summary_path) ? (JSON.parse(File.read(summary_path)) rescue {}) : {}
   recorded = s['visual_checked'] || s['screenshot_path']
-  if recorded
+  vision_blocked = (s.key?('agent_vision') && s['agent_vision'] == false) ||
+                   s['visual_verdict'].to_s == 'not-executable'
+  if vision_blocked
+    if opts[:skip_visual_cmp]
+      puts "[SKIP] gate 8b: visual gate NOT EXECUTABLE (agent_vision=#{s['agent_vision'].inspect}, " \
+           "verdict=#{s['visual_verdict'].inspect}) — WAIVED via --skip-visual-comparison (#{opts[:skip_visual_cmp]})."
+      puts '       This waiver MUST be named in the migration report — the render was NEVER read by a vision-capable agent.'
+    else
+      warn '[FAIL] gate 8b: visual gate not executable — vision-capable agent required.'
+      warn "       parity-final.json records agent_vision=#{s['agent_vision'].inspect}" \
+           "#{s['visual_verdict'] ? " / visual_verdict=#{s['visual_verdict'].inspect}" : ''}: the driving"
+      warn '       agent lacks image input, so it cannot READ the render — any verdict it records is a'
+      warn '       blind attestation, never a pass. Re-run the RCF/visual loop from a vision-capable'
+      warn '       session (Claude Code with image input), then record the verdict:'
+      warn '         ruby scripts/record-visual-check.rb --workdir <dir> --agent-vision true --verdict pass --notes "..."'
+      warn '       Escape hatch (knowingly shipping an unverified render): --skip-visual-comparison "<reason>"'
+      warn '       (name it in your migration report).'
+      exit 13
+    end
+  elsif recorded
     v = s['visual_verdict'] ? " (#{s['visual_verdict']})" : ''
-    puts "[OK] gate 8b: source-vs-target visual comparison recorded#{v}."
+    av = s.key?('agent_vision') ? ", agent_vision=#{s['agent_vision']}" : ''
+    puts "[OK] gate 8b: source-vs-target visual comparison recorded#{v}#{av}."
   elsif opts[:skip_visual_cmp]
     puts "[SKIP] gate 8b: source-vs-target visual comparison WAIVED via --skip-visual-comparison (#{opts[:skip_visual_cmp]})."
   else
@@ -729,7 +776,7 @@ else
     warn '       a valid render exists, but nobody confirmed it matches the source dashboard.'
     warn '       Enforced by default: a structurally-clean workbook can still be visually empty/wrong.'
     warn '       Read each rendered page against the source PNG, then run:'
-    warn '         ruby scripts/record-visual-check.rb --workdir <dir> --verdict pass|divergent --notes "..."'
+    warn '         ruby scripts/record-visual-check.rb --workdir <dir> --agent-vision true --verdict pass|divergent --notes "..."'
     warn '       then re-run. If the source image is genuinely unobtainable, waive with'
     warn '       --skip-visual-comparison "<reason>" and name it in your migration report.'
     exit 13
@@ -894,6 +941,68 @@ if File.exist?(tele_gate)
   end
 else
   warn '[WARN] gate 10: assert-telemetry-ran.rb not found alongside this script — telemetry not enforced.'
+end
+
+# ---------------------------------------------------------------------------
+# Gate 11 — post-publish interactivity guide (exit 16). Dashboard ACTIONS
+# (filter / highlight / navigate / set-action / parameter-action / URL) are the
+# one interactivity class workbooks-as-code cannot port — the customer wires
+# cross-element filtering in the Sigma UI after publish. Every workbook in the
+# 10-conversion live run that carried actions needed a hand-written handoff
+# note; this gate makes the guide (POSTPUBLISH_GUIDE.md, generated by
+# scripts/build-postpublish-guide.rb) mandatory whenever the source recorded
+# actions. Action census sources, broadest wins:
+#   - <workdir>/dashboard-layout-meta.json — parse-twb-layout.rb marks each
+#     action-driven worksheet filter with is_action:true / kind:"action"
+#   - <workdir>/*-gaps-report.json — scan-workbook-gaps.rb's "Dashboard filter /
+#     highlight / nav actions" feature (command='tsc:tsl-*' matches; also covers
+#     highlight/nav actions that never materialize as worksheet filters)
+# Neither file present → census unavailable → stated SKIP (never a silent pass).
+# ---------------------------------------------------------------------------
+if opts[:skip_postpublish]
+  record_waiver.call('--skip-postpublish-guide', 'gate 11 (post-publish interactivity guide)', opts[:skip_postpublish])
+else
+  meta_actions = 0
+  gaps_actions = 0
+  census_sources = []
+  meta_path = File.join(opts[:tab], 'dashboard-layout-meta.json')
+  if File.exist?(meta_path)
+    meta = JSON.parse(File.read(meta_path)) rescue nil
+    if meta.is_a?(Hash) && meta['worksheets'].is_a?(Hash)
+      meta_actions = meta['worksheets'].values.sum do |ws|
+        next 0 unless ws.is_a?(Hash)
+        Array(ws['filters']).count { |f| f.is_a?(Hash) && (f['is_action'] == true || f['kind'] == 'action') }
+      end
+      census_sources << meta_path
+    end
+  end
+  Dir.glob(File.join(opts[:tab], '*-gaps-report.json')).sort.each do |gp|
+    gj = JSON.parse(File.read(gp)) rescue nil
+    next unless gj.is_a?(Hash)
+    feat = Array(gj['detected_features']).find do |f|
+      f.is_a?(Hash) && (f['pat'].to_s.include?('tsc:tsl-') || f['name'].to_s =~ %r{filter\s*/\s*highlight\s*/\s*nav actions}i)
+    end
+    next unless feat
+    gaps_actions = [gaps_actions, feat['count'].to_i].max
+    census_sources << gp
+  end
+  n_actions = [meta_actions, gaps_actions].max
+  guide_path = File.join(opts[:tab], 'POSTPUBLISH_GUIDE.md')
+  if census_sources.empty?
+    puts '[SKIP] gate 11: no dashboard-layout-meta.json / *-gaps-report.json in the workdir — dashboard-action census unavailable'
+  elsif n_actions.zero?
+    puts '[OK] gate 11: source recorded no dashboard filter/highlight/nav actions — post-publish guide not required'
+  elsif File.exist?(guide_path)
+    puts "[OK] gate 11: #{n_actions} source dashboard action(s) detected; POSTPUBLISH_GUIDE.md present (#{guide_path})"
+  else
+    warn "[FAIL] gate 11: source dashboards carry #{n_actions} interactive actions that workbooks-as-code"
+    warn '       cannot port — run scripts/build-postpublish-guide.rb to generate the user handoff guide.'
+    warn "       (census: #{census_sources.join(', ')})"
+    warn "       The guide must land at #{guide_path} — it tells the customer which"
+    warn '       cross-element filter/highlight/nav wirings to add in the Sigma UI after publish.'
+    warn '       Escape hatch: --skip-postpublish-guide "<reason>" (name it in your migration report).'
+    exit 16
+  end
 end
 
 puts "[OK] all gates pass — conversion may declare GREEN"

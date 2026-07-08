@@ -5,7 +5,7 @@
 Design quality on this skill is **not** model-independent. The same skill version, on the
 same healthy environment, produces measurably different dashboard fidelity depending on
 which agent/model drives it (measured root cause #2/#3 of cross-user variance in the
-2026-07-07 Skills Test audit: 10 workbooks, 30 dashboards, 10/10 GREEN — every GREEN came
+2026-07 10-workbook live migration: 10 workbooks, 30 dashboards, 10/10 GREEN — every GREEN came
 from 4–6 render-compare-fix passes by a vision-capable, top-tier agent). This ref makes the
 two preconditions explicit and gives you one mandatory checkpoint. It is short — read all
 of it.

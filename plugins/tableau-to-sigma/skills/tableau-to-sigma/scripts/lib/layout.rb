@@ -227,7 +227,7 @@ module SigmaLayout
 
   # ==== E1 — per-kind minimum row heights ====================================
   # Sigma renders chart/KPI tiles BLANK below ~3-4 grid rows — in the live page
-  # AND in page/element PNG exports (hit twice in the 2026-07 Skills Test run).
+  # AND in page/element PNG exports (hit twice in a 2026-07 live migration).
   # These are the floor row-spans the layout builder enforces after converting
   # Tableau zone percentages to grid rows, and that layout_lint rejects.
   # Keys are Sigma element kinds; 'chart' covers every *-chart kind without an

@@ -30,7 +30,7 @@
 #     [--json-out /tmp/<name>/postpublish-guide.json]
 #     [--sigma-url https://app.sigmacomputing.com/.../workbook/...]
 #
-# What gets parsed (structures verified against the Skills Test corpus:
+# What gets parsed (structures verified against a 10-workbook live migration:
 # ecommerce-admin, dynamic-zoning-kpi, superstore-performance, supermart-sales):
 #   <actions>/<action>            command tsc:tsl-filter → filter action
 #                                 command tsc:brush      → highlight action
@@ -499,7 +499,7 @@ module PostpublishGuide
   # guid=X> --<edge from=X to=Y>--> <dashboard-zone-visibility-node
   # visibility-input-guid=Y zone-id=… dashboard-identifier={uuid}>. The uuid
   # matches the dashboard's <simple-id>. (Structure verified against the
-  # dynamic-zoning-kpi Skills Test workbook.)
+  # dynamic-zoning-kpi live-migration workbook.)
   def extract_zone_visibility(xml, lut, dashboards)
     field_by_output = {}
     xml.elements.each('//single-value-field-node') do |n|

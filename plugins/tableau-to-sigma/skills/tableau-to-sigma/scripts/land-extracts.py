@@ -11,7 +11,7 @@ via snowflake-connector write_pandas, verifies zero-loss row counts, optionally
 syncs each table into the Sigma catalog, and emits landing-manifest.json
 (table + column lineage) that Phase 3 consumes for path remapping.
 
-TYPE DISCIPLINE (the bugs from the 2026-07 Skills Test run, fixed at READ time):
+TYPE DISCIPLINE (the bugs from a 2026-07 10-workbook live migration, fixed at READ time):
   * hyper DATE          -> datetime.date          (lands DATE)
   * hyper TIMESTAMP(_TZ)-> pandas datetime64      (lands TIMESTAMP_NTZ/_TZ)
   * hyper GEOGRAPHY     -> CAST(col AS TEXT) in the SELECT (WKT string)
@@ -30,9 +30,9 @@ drift tolerance must be refused, not offered. See refs/extract-landing.md.
 Usage (one workbook):
   python3 scripts/land-extracts.py \
     --twbx /tmp/wb/workbook-content.twbx --twb /tmp/wb/workbook-content.twb \
-    --db TABLEAU_BRIDGE --schema SKILLS_TEST --prefix ER \
-    --account BOHOBRV-BT41299 --user TABLEAU_PDS_SVC \
-    --key-path ~/.sigma-migration/tableau-keys/rsa_key.p8 \
+    --db <DATABASE> --schema <LANDING_SCHEMA> --prefix ER \
+    --account <SNOWFLAKE_ACCOUNT> --user <SERVICE_USER> \
+    --key-path <path/to/rsa_key.p8> \
     --role CLAUDE_BUILDER_ROLE --warehouse COMPUTE_WH \
     --sigma-connection-id <uuid> --manifest-out /tmp/wb/landing-manifest.json
 
@@ -71,7 +71,7 @@ GUID_RE = re.compile(r"_[0-9A-F]{32}$", re.I)
 # Cleaned hyper table names that say nothing about the data — such tables are
 # named after the datasource caption instead. Token-wise: "Extract
 # (Extract.Extract)" cleans to EXTRACT_EXTRACT_EXTRACT which is just as generic
-# as EXTRACT (observed in the Skills Test run's radar-chart hyper).
+# as EXTRACT (observed in a live migration's radar-chart hyper).
 GENERIC_TOKENS = {"EXTRACT", "SHEET1", "SHEET", "DATA", "MIGRATED"}
 
 
@@ -386,7 +386,7 @@ def sigma_token(base):
 
 def sigma_sync_tables(connection_id, tables, db, schema):
     """POST /v2/connections/{id}/sync {"path":[DB,SCHEMA,TABLE]} per table —
-    this endpoint WORKS (verified in the Skills Test run: 48/48 tables visible
+    this endpoint WORKS (verified in a 10-workbook live migration: 48/48 tables visible
     immediately, no UI 'refresh schema'). Returns (ok, fail) counts."""
     base = env_or_neutral("SIGMA_BASE_URL")
     if not base:

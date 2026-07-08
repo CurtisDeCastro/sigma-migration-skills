@@ -14,6 +14,7 @@
 #   -WorkDir <dir>  also drop doctor.json there (always also written to
 #                   ~/.sigma-migration/doctor.json).
 param([string]$WorkDir = "")
+if (-not $WorkDir -and $env:DOCTOR_WORKDIR) { $WorkDir = $env:DOCTOR_WORKDIR }
 
 $script:Pass = 0; $script:Fail = 0; $script:Warn = 0
 $script:Failures = @()
@@ -72,6 +73,27 @@ if ($script:PyExe) {
     $fix = "$script:PyExe"; if ($script:PyPre) { $fix = "$script:PyExe $script:PyPre" }
     Warn "python uses OpenSSL 3.x without 'truststore' - TLS verification may fail against some servers (e.g. Tableau Cloud) where curl/Ruby succeed" `
          "Fix: '$fix -m pip install truststore' (uses the OS trust store). Do NOT disable TLS verification."
+  }
+}
+
+# --- tableauhyperapi (informational - embedded-extract workbooks only) -----
+# Embedded-extract (.twbx) workbooks land their frozen data via
+# land-extracts.py, which needs the Hyper API. Not REQUIRED: warn-level only.
+# The human check SELF-GATES on land-extracts.py existing next to this script,
+# so this shared doctor stays byte-identical across plugins and only speaks up
+# where the landing path exists (tableau). JSON field emitted everywhere.
+$hyperapiPresent = $false
+if ($script:PyExe) {
+  $pyArgs = @(); if ($script:PyPre) { $pyArgs += $script:PyPre }
+  $hp = (& $script:PyExe @pyArgs -c "import importlib.util as iu; print('HYPER_OK' if iu.find_spec('tableauhyperapi') else '')" 2>$null | Out-String).Trim()
+  if ($hp -eq 'HYPER_OK') { $hyperapiPresent = $true }
+}
+if (Test-Path (Join-Path $PSScriptRoot 'land-extracts.py')) {
+  if ($hyperapiPresent) {
+    Ok "tableauhyperapi present - embedded-extract workbooks can land via scripts/land-extracts.py"
+  } else {
+    Warn "tableauhyperapi not installed (only needed for embedded-extract workbooks)" `
+         "pip install tableauhyperapi pandas snowflake-connector-python - see refs/extract-landing.md"
   }
 }
 
@@ -169,10 +191,12 @@ $doctor = [ordered]@{
   runtimes     = [ordered]@{ ruby = $rubyOk; python = $pyOk; node = $nodeOk; bash = [bool](Get-Command bash -ErrorAction SilentlyContinue) }
   versions     = [ordered]@{ ruby = "$rubyV"; python = "$pyV"; node = "$nodeV" }
   sandbox_hint = $sandbox
+  hyperapi_present = $hyperapiPresent
   skill_sha    = "$skillSha"
   behind_count = $behindCount
   agent_vision = $agentVision
   model_hint   = "$modelHint"
+  generated_at = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
   pass         = ($script:Fail -eq 0)
   failures     = @($script:Failures)
 }

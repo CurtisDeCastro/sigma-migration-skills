@@ -4,7 +4,7 @@
 Deterministic + offline: no Snowflake, no Sigma, no tableauhyperapi — the pure
 layer (sanitization, table naming, type-tag mapping, per-value converters,
 manifest shape) must be importable and correct WITHOUT the heavy deps
-installed. Name cases come straight from the Skills Test live run
+installed. Name cases come straight from a 10-workbook live migration
 (skills-test-run/landing-manifest.json): GUID-suffixed tables, fact!sales,
 HexStates.shp, leading-digit shapefiles, EXTRACT/SHEET1 generics.
 
@@ -199,7 +199,7 @@ finally:
 print("Part I — manifest entry shape (Phase 3 contract)")
 entry = le.manifest_entry("er-visits", "federated.abc", "Hospital ER",
                           "/tmp/x/federated_abc.hyper", "Extract",
-                          "TABLEAU_BRIDGE.SKILLS_TEST.ER_HOSPITAL_ER", 9216,
+                          "ANALYTICS.LANDING.ER_HOSPITAL_ER", 9216,
                           {"Date": "DATE_1"})
 check(list(entry.keys()) == ["slug", "datasource", "caption", "hyper",
                              "hyper_table", "sf_table", "rows", "columns"],
