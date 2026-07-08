@@ -129,6 +129,14 @@
 #      <workdir>/POSTPUBLISH_GUIDE.md does not exist. Run
 #      scripts/build-postpublish-guide.rb to generate the user handoff guide.
 #      Escape hatch: --skip-postpublish-guide "<reason>".
+#  17  Deferred DM elements unresolved (gate 12) — <workdir>/deferred-elements.json
+#      is non-empty: post-and-readback.rb --quarantine-on-failure removed broken
+#      element(s) at DM POST time to save the rest, so the LIVE data model is
+#      PARTIAL. Resolve the deferred elements and re-POST: fix each element spec
+#      in the file, restore it into the DM spec, PUT it back (post-and-readback
+#      --update-id <dmId>), then delete the file. Escape hatch:
+#      --accept-deferred-elements "<reason>" (knowingly shipping a partial DM —
+#      name it AND the dropped elements in your migration report).
 #
 # Prints a per-gate summary to stdout regardless of exit code.
 
@@ -168,6 +176,7 @@ OptionParser.new do |p|
   p.on('--skip-layout-fill REASON', 'waive gate 8c (layout fill / grid coverage) — REQUIRED reason string. Use ONLY when a sparse/partial page is intentional. The reason MUST be named in your migration report.') { |v| opts[:skip_layout_fill] = v }
   p.on('--skip-telemetry-gate REASON', 'waive gate 10 (telemetry consent decision) — REQUIRED reason string. Use ONLY when the run genuinely cannot prompt (e.g. unattended CI). The reason MUST be named in your migration report.') { |v| opts[:skip_telemetry] = v }
   p.on('--skip-postpublish-guide REASON', 'waive gate 11 (post-publish interactivity guide) — REQUIRED reason string. Use ONLY when the source dashboard actions are genuinely not worth a handoff guide. The reason MUST be named in your migration report.') { |v| opts[:skip_postpublish] = v }
+  p.on('--accept-deferred-elements REASON', 'waive gate 12 (deferred/quarantined DM elements) — REQUIRED reason string. Use ONLY when knowingly shipping a PARTIAL data model; the reason AND the dropped elements MUST be named in your migration report.') { |v| opts[:accept_deferred] = v }
   p.on('--require-fidelity-ledger', 'gate 8d (OPT-IN, off by default): require an RCF fidelity-ledger.json (Phase 5g) with zero UNRESOLVED spec-fixable deltas. Adopters (tableau-to-sigma) pass this; other converters are unaffected until they do.') { opts[:require_fidelity] = true }
   p.on('--fidelity-ledger PATH', 'gate 8d: path to the RCF ledger (default: <workdir>/fidelity-ledger.json)') { |v| opts[:fidelity_ledger] = v }
   p.on('--accept-residuals LIST', 'gate 8d: comma-separated ledger entry ids/indices to WAIVE as accepted residuals (name them in the report)') { |v| opts[:accept_residuals] = v.split(',').map(&:strip) }
@@ -1003,6 +1012,44 @@ else
     warn '       Escape hatch: --skip-postpublish-guide "<reason>" (name it in your migration report).'
     exit 16
   end
+end
+
+# ---------------------------------------------------------------------------
+# Gate 12 — deferred DM elements (exit 17). post-and-readback.rb
+# --quarantine-on-failure saves a DM POST killed by one broken element by
+# moving the offender(s) to <workdir>/deferred-elements.json and re-POSTing the
+# rest (hackathon Rec5). That DM is PARTIAL by construction — declaring GREEN
+# on it would silently ship a data model missing elements. Non-empty file →
+# hard FAIL until the elements are fixed + re-POSTed (then delete the file).
+# No file / empty deferred list → OK. Escape: --accept-deferred-elements
+# "<reason>" (recorded as a waiver; name it + the dropped elements in the report).
+# ---------------------------------------------------------------------------
+deferred_path = File.join(opts[:tab], 'deferred-elements.json')
+if opts[:accept_deferred]
+  record_waiver.call('--accept-deferred-elements', 'gate 12 (deferred/quarantined DM elements)', opts[:accept_deferred])
+elsif File.exist?(deferred_path)
+  ddoc = JSON.parse(File.read(deferred_path)) rescue nil
+  deferred = ddoc.is_a?(Hash) ? Array(ddoc['deferred']) : (ddoc.is_a?(Array) ? ddoc : nil)
+  if deferred.nil?
+    warn "[FAIL] gate 12: #{deferred_path} is malformed (expected {\"deferred\":[...]} or a bare array)."
+    warn '       Fix or delete the file (delete ONLY if every quarantined element was restored + re-POSTed).'
+    exit 17
+  elsif deferred.any?
+    names = deferred.map { |d| d.is_a?(Hash) ? (d.dig('element', 'name') || d.dig('element', 'id') || '(unnamed)') : d.to_s }
+    warn "[FAIL] gate 12: #{deferred.size} DM element(s) still deferred (quarantined at POST time) — the live"
+    warn '       data model is PARTIAL. Resolve the deferred elements and re-POST:'
+    names.each { |n| warn "         - #{n}" }
+    warn "       Fix each element spec in #{deferred_path}, restore it into the DM spec,"
+    warn '       PUT it back (ruby scripts/post-and-readback.rb --type datamodel --update-id <dmId> ...),'
+    warn '       then delete the file and re-run this gate.'
+    warn '       Escape hatch (knowingly shipping a partial DM): --accept-deferred-elements "<reason>"'
+    warn '       (name it AND the dropped elements in your migration report).'
+    exit 17
+  else
+    puts "[OK] gate 12: deferred-elements.json present but empty — all quarantined elements resolved"
+  end
+else
+  puts '[OK] gate 12: no deferred-elements.json — no DM elements were quarantined'
 end
 
 puts "[OK] all gates pass — conversion may declare GREEN"
