@@ -30,9 +30,12 @@ Exit 0 = good to go. Exit 1 = a required tool is missing (each ✗/[X] line has 
      (skipping the stub), and Python entrypoints re-spawn via `sys.executable`. The
      stub only blocks the **first** `python ...` launch — so use `py -3 scripts/<x>.py`.
 
-2. **No `bash`.** The Sigma token step (`eval "$(scripts/get-token.sh)"`) is a bash
-   script. Install **Git for Windows** (ships Git Bash) and run the `*.sh` helpers from
-   Git Bash (or via WSL). cmd/PowerShell alone can't run them.
+2. **No `bash` (or a flaky Git Bash).** The `*.sh` helpers need a bash; install
+   **Git for Windows** (ships Git Bash) for the scripts that still require it. But for
+   the **Sigma token step, don't fight bash at all** — `get-token.sh` (bash/base64/curl)
+   fails in some Git Bash setups, and per-invocation shells lose `eval`-exported vars
+   anyway. Use the shell-neutral Python twin instead — see
+   **"Windows: tokens, JSON files, and env vars"** below.
 
 3. **CRLF line endings.** If `git config core.autocrlf` is `true`, checkout can rewrite
    the shipped `.sh`/`.rb`/`.py` to CRLF and break shebangs (`\r: command not found`).
@@ -55,6 +58,47 @@ Exit 0 = good to go. Exit 1 = a required tool is missing (each ✗/[X] line has 
      explicit LTS version (do **not** grab whatever is "latest"), and prefer a build
      that is at least a few days old. This is a *documented, deliberate* step — not
      something to improvise mid-run.
+
+## Windows: tokens, JSON files, and env vars
+
+Three Windows-specific practices that prevent the most time-consuming failure loops
+(each one was hit in a real Windows/Cortex-Code run):
+
+1. **Mint Sigma tokens WITHOUT bash.** Prefer the shell-neutral Python twin of
+   `get-token.sh` (shipped since upstream #299):
+
+   ```powershell
+   python scripts/get_token.py --workdir <WORKDIR>     # or: py -3 scripts/get_token.py ...
+   ```
+
+   It writes `<WORKDIR>/auth.json` (`{"SIGMA_API_TOKEN": "...", "SIGMA_BASE_URL": "..."}`,
+   0600, covered by `.gitignore`), and the shared libs read it automatically — env vars
+   still win when set. This works identically under PowerShell, cmd, Git Bash, and any
+   agent sandbox, and it sidesteps the Git Bash setups where `get-token.sh`'s
+   base64/curl plumbing fails. For **Tableau** signin without bash, the PAT signin body
+   must be **XML** (JSON returns 400 "Payload malformed") — see the callout in
+   refs/tableau-rest.md for the exact call.
+
+2. **NEVER write workdir JSON with PowerShell `Set-Content -Encoding UTF8`.** On
+   Windows PowerShell it prepends a **UTF-8 BOM**, and Ruby's `JSON.parse` rejects
+   BOM'd files ("unexpected token") — so a hand-written `wb-spec.json` / `answers.json`
+   / `parity-actuals.json` breaks the orchestrator in ways that look like a spec bug.
+   Write BOM-less UTF-8 instead:
+
+   ```powershell
+   [System.IO.File]::WriteAllText($path, $json, (New-Object System.Text.UTF8Encoding($false)))
+   ```
+
+   or write the file from Python (`open(path, "w", encoding="utf-8")` never emits a BOM).
+   The orchestrator's reads of agent-authored specs are BOM-tolerant as a backstop, but
+   other scripts' reads are not — don't rely on it.
+
+3. **Expect per-invocation environment loss.** Agent runners on Windows often spawn a
+   FRESH shell per command, so `eval "$(...)"`/`$env:X = ...` exports from one step are
+   gone by the next. Use **file-based credentials** — `<WORKDIR>/auth.json` (above) and
+   the neutral cred file `~/.sigma-migration/env` written by `setup.rb` /
+   `setup-tableau.rb`, both of which every shared lib reads at load — rather than
+   exported variables that silently evaporate between invocations.
 
 > **Agents: do not silently install runtimes.** If the doctor reports a missing
 > runtime, surface its fix and get the user's OK before downloading binaries or

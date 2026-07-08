@@ -73,6 +73,35 @@ the duration of the session (Tableau Cloud session timeout, typically a few hour
 > Cloud invalidates a PAT after **four consecutive failed signins**, after which even
 > correct credentials return 401001 and the only fix is creating a fresh PAT.
 
+### ⚠️ PAT signin: the request body MUST be XML — JSON returns 400 "Payload malformed"
+
+If you hand-roll the signin (curl, PowerShell, a REST client) instead of using the shipped
+scripts, know this: `POST /api/<ver>/auth/signin` with a Personal Access Token **requires an
+XML request body with `Content-Type: application/xml`**. Sending the JSON equivalent — even
+a perfectly-shaped one with `Content-Type: application/json` — returns
+**`400 "Payload malformed"`**, which looks like a credential problem but isn't (and each
+retry-with-tweaked-JSON burns one of the PAT's four failed-signin strikes). **The response
+is XML too** — pull the token out with a regex, **never pipe it to `jq`**.
+
+The exact working call:
+
+```bash
+curl -sS -X POST "$TABLEAU_SERVER_URL/api/3.22/auth/signin" \
+  -H "Content-Type: application/xml" \
+  --data "<tsRequest><credentials personalAccessTokenName=\"$TABLEAU_PAT_NAME\" personalAccessTokenSecret=\"$TABLEAU_PAT_SECRET\"><site contentUrl=\"$TABLEAU_SITE_CONTENT_URL\"/></credentials></tsRequest>"
+
+# The response is XML — extract with a regex (jq will fail on it):
+#   <tsResponse ...><credentials token="..."><site id="..." .../></credentials></tsResponse>
+TOKEN=$(printf '%s' "$RESPONSE"   | sed -n 's/.*token="\([^"]*\)".*/\1/p')
+SITE_ID=$(printf '%s' "$RESPONSE" | sed -n 's/.*<site id="\([^"]*\)".*/\1/p')
+```
+
+(Adding `-H "Accept: application/json"` *asks* for a JSON response and usually gets one,
+but don't depend on it — some server configurations return XML regardless, so the regex
+parse is the only shape-proof option.) `get-tableau-token.sh` and `scripts/lib/tableau_rest.rb`
+already send the XML body; this section exists for anyone driving the API directly —
+especially on Windows, where the bash helpers may not be available (see refs/environment.md).
+
 ## Endpoint inventory
 
 All paths assume `$TABLEAU_BASE = $TABLEAU_SERVER_URL/api/$TABLEAU_API_VERSION/sites/$TABLEAU_SITE_ID`.
