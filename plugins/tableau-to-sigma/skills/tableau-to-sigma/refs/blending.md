@@ -27,6 +27,13 @@ route, recommendation) — plus a per-route row in the gap report.
 
 ## Decision tree (the `route` field)
 
+> **No linking fields + different sheets per datasource? That is NOT a blend**
+> — each datasource is the PRIMARY of its own worksheets and nothing joins
+> them at query time. See `refs/multi-datasource.md` (independent
+> multi-datasource route: `multi-ds-plan.json`, one DM with N elements).
+> Converting that shape down the single-DM path silently drops every
+> non-first datasource's columns.
+
 ```
 Is the secondary's <connection> the same warehouse as the primary's
 (class + server match, dbname compatible)?
