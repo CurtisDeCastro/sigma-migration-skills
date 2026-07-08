@@ -330,6 +330,22 @@ def plan_node(node, c0, c1, r0, r1, ctx)
       ctx[:min_row_expansions] += 1
       span = min
     end
+    # CAP a short single-line TEXT LABEL (a section-header / column-header band)
+    # to a thin banner. The source zone geometry can map a one-line header to
+    # many grid rows, which — once the layout builder tints it into a colored
+    # GridContainer band — renders as a big empty colored block (the World Bank
+    # "YEAR ON YEAR / TREND / TOP COUNTRIES" regression). Long/multi-line text
+    # blocks are left alone (they need the height to avoid clipping).
+    if el && el['kind'] == 'text'
+      body = el['body'].to_s.gsub(/<[^>]+>/, ' ').gsub(/\s+/, ' ').strip
+      if !body.empty? && body.length <= 60 && !el['body'].to_s.include?("\n")
+        capped = [span, SigmaLayout::HEADER_BAND_MAX_ROWS].min
+        if capped < span
+          ctx[:header_band_caps] = (ctx[:header_band_caps] || 0) + 1
+          span = capped
+        end
+      end
+    end
     [span, proc { |fc0, fc1, fr0, fr1| le(eid, fc0, fc1, fr0, fr1) }]
   end
 end

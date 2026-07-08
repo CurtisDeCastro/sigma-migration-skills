@@ -13,6 +13,9 @@ module SigmaLayout
 
   HEADER_STYLE = { 'backgroundColor' => '#0F172A', 'borderRadius' => 'round' }.freeze
   HEADER_ROWS  = 3 # header band height in grid rows
+  HEADER_BAND_MAX_ROWS = 3 # cap a short single-line text LABEL (section/column
+  #   header) to a thin banner — source geometry can inflate a one-line header to
+  #   many rows, which tints into a big empty colored block.
   GRID_COLS    = 24 # page/container grid width (gridTemplateColumns repeat(24))
   MIN_BAND_FILL = 0.60 # a band must fill >=60% of the grid columns (lint parity)
   # Generic auto-names (Sigma page names / source section names) that must
