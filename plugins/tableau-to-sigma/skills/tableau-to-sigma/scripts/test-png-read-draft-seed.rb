@@ -54,13 +54,46 @@ Dir.mktmpdir do |d|
   check(ok2, 'gate PASSES once verified:true', fails)
 end
 
-# A hand-written png-read.json WITHOUT a `verified` field stays valid (back-compat).
+# A hand-written png-read.json WITHOUT a `verified` field stays valid (back-compat)
+# once the load-bearing fields (bar orientation) are supplied.
+Dir.mktmpdir do |d|
+  File.write(DashboardRead.path(d), JSON.dump(
+    'tiles' => [{ 'title' => 'X', 'kind' => 'bar-chart', 'orientation' => 'horizontal' }],
+    'text_elements' => [], 'filter_shelf' => []
+  ))
+  ok, = DashboardRead.validate(d)
+  check(ok, 'hand-written file without a verified field is still accepted (back-compat)', fails)
+end
+
+# Bar/combo tile with NO orientation is REJECTED (defaults wrong in the build).
 Dir.mktmpdir do |d|
   File.write(DashboardRead.path(d), JSON.dump(
     'tiles' => [{ 'title' => 'X', 'kind' => 'bar-chart' }], 'text_elements' => [], 'filter_shelf' => []
   ))
+  ok, errs = DashboardRead.validate(d)
+  check(!ok && errs.any? { |e| e =~ /orientation/ }, 'bar-chart without orientation is rejected', fails)
+end
+
+# A control that declares no reach (no target_tiles / highlight_tiles) is REJECTED
+# — an unscoped page filter silently collapses every tile.
+Dir.mktmpdir do |d|
+  File.write(DashboardRead.path(d), JSON.dump(
+    'tiles' => [{ 'title' => 'X', 'kind' => 'kpi-chart' }], 'text_elements' => [],
+    'filter_shelf' => [{ 'label' => 'Region' }]
+  ))
+  ok, errs = DashboardRead.validate(d)
+  check(!ok && errs.any? { |e| e =~ /target_tiles/ }, 'filter_shelf entry without target_tiles is rejected', fails)
+end
+
+# The same control WITH an explicit filter/highlight split is accepted.
+Dir.mktmpdir do |d|
+  File.write(DashboardRead.path(d), JSON.dump(
+    'tiles' => [{ 'title' => 'Trend', 'kind' => 'line-chart' }, { 'title' => 'Bars', 'kind' => 'kpi-chart' }],
+    'text_elements' => [],
+    'filter_shelf' => [{ 'label' => 'Region', 'target_tiles' => ['Trend'], 'highlight_tiles' => ['Bars'] }]
+  ))
   ok, = DashboardRead.validate(d)
-  check(ok, 'hand-written file without a verified field is still accepted (back-compat)', fails)
+  check(ok, 'filter_shelf with explicit target_tiles/highlight_tiles is accepted', fails)
 end
 
 puts

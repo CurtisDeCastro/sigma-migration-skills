@@ -108,6 +108,20 @@ else
   end
 end
 
+# Human-verified bar orientation from png-read.json (Phase 1d) OVERRIDES the
+# shelf inference below: the operator confirmed it against the source image, so
+# it is authoritative where present. Keyed by tile title (a chart zone caption).
+PNG_ORIENTATION = begin
+  pr = (JSON.parse(File.read(DashboardRead.path(opts[:tab]))) rescue nil)
+  tiles = (pr && pr['tiles'].is_a?(Array)) ? pr['tiles'] : []
+  tiles.each_with_object({}) do |t, h|
+    o = t['orientation']
+    h[t['title'].to_s.downcase.strip] = o if %w[horizontal vertical].include?(o)
+  end
+rescue StandardError
+  {}
+end
+
 # ---- chart_kind → Sigma element kind ----
 SIGMA_KIND = {
   'bar'           => 'bar-chart',
@@ -3794,16 +3808,23 @@ layout.each do |dash|
       # bar-chart (omit for vertical — "vertical" is REJECTED). Round-trips live
       # (refs/workbook-layout.md, verified 2026-06-15).
       if kind == 'bar-chart'
-        # rows_shelf/cols_shelf are a Hash ({fields:[…]}) in the rich parse, but
-        # sometimes just the raw shelf STRING — only the Hash form carries roles.
-        rows_sh = z['rows_shelf']
-        cols_sh = z['cols_shelf']
-        rows_f = rows_sh.is_a?(Hash) ? (rows_sh['fields'] || []) : []
-        cols_f = cols_sh.is_a?(Hash) ? (cols_sh['fields'] || []) : []
-        dim_on_rows  = rows_f.any? { |f| %w[dim dimension].include?(f['role']) }
-        meas_on_cols = cols_f.any? { |f| f['role'] == 'measure' }
-        if dim_on_rows && meas_on_cols
-          element['orientation'] = 'horizontal'
+        pr_orient = PNG_ORIENTATION[z['caption'].to_s.downcase.strip]
+        if pr_orient
+          # Operator-confirmed (Phase 1d) wins. Sigma REJECTS orientation:
+          # "vertical" — vertical is expressed by omitting the field.
+          element['orientation'] = 'horizontal' if pr_orient == 'horizontal'
+        else
+          # rows_shelf/cols_shelf are a Hash ({fields:[…]}) in the rich parse,
+          # but sometimes just the raw shelf STRING — only the Hash carries roles.
+          rows_sh = z['rows_shelf']
+          cols_sh = z['cols_shelf']
+          rows_f = rows_sh.is_a?(Hash) ? (rows_sh['fields'] || []) : []
+          cols_f = cols_sh.is_a?(Hash) ? (cols_sh['fields'] || []) : []
+          dim_on_rows  = rows_f.any? { |f| %w[dim dimension].include?(f['role']) }
+          meas_on_cols = cols_f.any? { |f| f['role'] == 'measure' }
+          if dim_on_rows && meas_on_cols
+            element['orientation'] = 'horizontal'
+          end
         end
       end
 

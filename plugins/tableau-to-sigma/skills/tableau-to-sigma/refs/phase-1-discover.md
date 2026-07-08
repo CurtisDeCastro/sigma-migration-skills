@@ -120,15 +120,22 @@ If `get-view-data` returns 401 for a view, retry that view solo (the contention 
 >   "verified": true,
 >   "source_png": "views/<dashboardViewId>.png",
 >   "tiles": [
->     { "title": "Revenue by Region", "kind": "bar-chart", "measures": ["Gross Revenue"] },
+>     { "title": "Revenue by Region", "kind": "bar-chart", "orientation": "horizontal", "measures": ["Gross Revenue"] },
 >     { "title": "Filters", "kind": "control" }
 >   ],
 >   "text_elements": ["Orders Dashboard"],
->   "filter_shelf": [ { "label": "Order Date", "control_type": "date-range" } ]
+>   "filter_shelf": [
+>     { "label": "Region", "control_type": "list",
+>       "target_tiles": ["Revenue by Region"], "highlight_tiles": [] }
+>   ]
 > }
 > ```
 >
 > `"verified": true` is REQUIRED to pass the gate when the file was seeded as a draft (`verified: false`); a hand-written file may omit the field. `kind` must be a valid Sigma element kind (see the "Sigma spec supports:" list below). Set `text_elements` / `filter_shelf` to `[]` only after confirming from the image that the dashboard genuinely has none. Both build paths enforce this file: `build-charts-from-signals.rb` (Phase 5a) **refuses to build without it**, and the orchestrator (`migrate-tableau.rb`) hard-stops **before posting the data model** if it's missing. The Phase 6 gate sequence re-runs `assert-dashboard-read.rb` as a final belt. Genuinely can't read the PNG? Pass `--skip-dashboard-read "<reason>"` and name the waiver in your report.
+>
+> **Two fields are load-bearing and gate-enforced** (they encode the two most-expensive late-caught fidelity bugs):
+> - `tiles[].orientation` — **required** on every `bar-chart`/`combo-chart` (`"horizontal"` | `"vertical"`). A Tableau bar with the **dimension on the Rows shelf** renders **horizontal** (categories down the y-axis); the build defaults to *vertical* when this is unstated. The seed pre-fills it from the shelf roles — confirm it against the image.
+> - `filter_shelf[].target_tiles` / `highlight_tiles` — **required**: enumerate the tiles each control **filters** (`target_tiles`) and, separately, the tiles a parameter only **re-colors** (`highlight_tiles`, must NOT be filtered). A control left unscoped silently filters *every* tile on the page — the collapse-to-one-selection bug. A genuinely page-wide filter is fine; it just has to list every tile explicitly. See `refs/control-parity.md`.
 
 **Phase 1d checklist — confirm before moving on:**
 

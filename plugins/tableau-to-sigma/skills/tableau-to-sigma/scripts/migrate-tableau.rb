@@ -1237,6 +1237,24 @@ if mechanical
     line ''
   end
 
+  # Embedded-extract manifest remap (before any fixup / pick_fact): the converter
+  # can only see the generic in-.twbx table name ("Extract") for every embedded
+  # datasource, so multiple datasources collapse onto an identical source.path +
+  # element name and unresolvable [EXTRACT/...] formula prefixes. Repoint each
+  # element onto its landed Snowflake table (matched by column-caption overlap,
+  # NOT name) and thread the manifest's orig→landed column map into the
+  # phantom-filter (line ~1907) so long/sanitized indicator names fold to their
+  # real warehouse column instead of dropping. No-op without a manifest.
+  if defined?(landing_manifest) && landing_manifest
+    rm = MechanicalSpecs.remap_from_manifest!(conv['model'], landing_manifest)
+    if rm[:elements].to_i.positive?
+      opts[:column_mapping] ||= {}
+      rm[:colmap].each { |orig, landed| opts[:column_mapping][orig] ||= landed } # user --column-mapping wins
+      line "extract manifest remap: repointed #{rm[:elements]} element(s) onto landed table(s) " \
+           "#{rm[:tables].join(', ')}; threaded #{rm[:colmap].size} column rename(s) into the phantom-filter"
+    end
+  end
+
   # Mechanical DM fixup NOW (so dropped calcs feed the checkpoint): resolve
   # raw-table-name prefixes + GUID sibling refs, and DROP calc columns that
   # still cannot resolve (unknown functions / unresolved refs).

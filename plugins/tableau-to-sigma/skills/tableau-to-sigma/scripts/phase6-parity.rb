@@ -234,7 +234,13 @@ actuals = JSON.parse(File.read(opts[:actuals]))
 
 warn "Phase 6 PASS 2: injecting actuals (#{actuals.size} charts) → #{plan_path}"
 plan['charts'].each do |c|
-  a = actuals[c['chart']]
+  # Actuals are keyed by the chart's `chart` field, but a HAND-AUTHORED parity
+  # plan (the single-composite-dashboard case, no auto-plan) keys entries by
+  # `name` — without this fallback `actuals[nil]` is nil, `actual` stays empty,
+  # and every chart scores a FALSE 0% DIVERGE against nothing despite exact
+  # value matches. Normalize + look up under both keys.
+  c['chart'] ||= c['name']
+  a = actuals[c['chart']] || actuals[c['name']]
   next unless a
   # A render-verify marker ({"status":"render-verify-required","reason":...} —
   # collect-parity-actuals' pivot-export 500/empty fallback) passes through
@@ -415,6 +421,17 @@ unless formula_coverage.empty?
   warn "wrote #{fc_path} (#{formula_coverage.size} formula record(s): #{n_div} diverged, #{n_drop} dropped)"
 end
 
+# Idempotent finalize: this rebuilds `summary` from parity fields ONLY, so a
+# re-run of --finalize would otherwise WIPE the visual verdict that
+# record-visual-check.rb stamps onto this same parity-final.json (gate 8b), and
+# a gate that had passed starts failing again. Carry the visual fields forward
+# from the prior file so re-running finalize never un-does a recorded verdict.
+if File.exist?(summary_path)
+  prev = (JSON.parse(File.read(summary_path)) rescue {})
+  %w[visual_verdict visual_notes visual_checked screenshot_path agent_vision].each do |k|
+    summary[k] = prev[k] if prev.key?(k)
+  end
+end
 File.write(summary_path, JSON.pretty_generate(summary))
 warn "wrote #{summary_path} (status=#{summary['status']} #{summary['charts_pass']}/#{summary['charts_total']}" \
      "#{summary['value_parity_score'] ? format(' parity=%.1f%%', summary['value_parity_score'].to_f * 100) : ''})"
