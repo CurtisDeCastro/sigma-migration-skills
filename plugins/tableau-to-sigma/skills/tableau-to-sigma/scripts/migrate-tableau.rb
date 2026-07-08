@@ -1808,6 +1808,27 @@ unless reuse_dm_id
   _, dvst = run!(['ruby', File.join(HERE, 'validate-spec.rb'), '--type', 'datamodel', dm_spec_path],
                  allow_fail: mechanical)
   line 'DM validate-spec flagged issues (advisory in mechanical mode — live POST is the gate)' if mechanical && !dvst.success?
+  # Custom-SQL identifier preflight (hackathon F2 class): a kind:"sql" element
+  # whose statement references CUSTOMER_SFDC_ID unquoted while the live column
+  # is "Customer SFDC ID" compiles only at POST time (Snowflake "invalid
+  # identifier"). The catalog fetch needs connection context this orchestrator
+  # doesn't have inline, so we print the exact copy-paste preflight instead of
+  # auto-running it — run it if the POST below fails with a SQL compile error.
+  begin
+    require_relative 'lib/sql_ident_check'
+    _sql_tables = SqlIdentCheck.referenced_tables(JSON.parse(File.read(dm_spec_path, encoding: 'UTF-8')))
+    if _sql_tables.any?
+      line "DM spec contains Custom SQL element(s) referencing: #{_sql_tables.join(', ')}"
+      line 'If the POST fails with a SQL compile error (invalid identifier), preflight the identifiers:'
+      _sql_tables.each do |t|
+        line "  ruby #{File.join(HERE, 'discover-columns.rb')} --connection-id #{opts[:conn]} --table-path #{db}.#{schema}.#{t} --out #{File.join(WORK, "columns-#{t}.json")}"
+      end
+      line "  ruby #{File.join(HERE, 'check-sql-idents.rb')} --dm-spec #{dm_spec_path} " +
+           _sql_tables.map { |t| "--columns #{t}=#{File.join(WORK, "columns-#{t}.json")}" }.join(' ')
+    end
+  rescue StandardError => e
+    line "WARN: sql-ident preflight hint unavailable (#{e.class}: #{e.message})"
+  end
   sigma_run!(['ruby', File.join(HERE, 'post-and-readback.rb'), '--type', 'datamodel',
               '--spec', dm_spec_path, '--out', dm_ids_path, '--workdir', WORK])
   dm_ids = JSON.parse(File.read(dm_ids_path))
@@ -2160,7 +2181,8 @@ mark('phase5-layout')
 # layout can be reviewed against refs/layout-visual-qa.md AND compared to the
 # source Tableau dashboard — the cross-converter visual-QA gate. Page ids come
 # from the LOCAL wb-spec.json (deterministic; the live /spec readback is flaky
-# and returns YAML); token via get-token.sh inside sigma_run!. Non-fatal — a
+# and returns YAML); token minted IN-PROCESS (Sigma.refresh_token!) and injected
+# into the child env by sigma_run! — no get-token.sh subshell (#299/#310). Non-fatal — a
 # transient export failure must not sink a green migration; the REVIEW is the gate.
 # ---------------------------------------------------------------------------
 hdr('5b', 'Visual QA')
