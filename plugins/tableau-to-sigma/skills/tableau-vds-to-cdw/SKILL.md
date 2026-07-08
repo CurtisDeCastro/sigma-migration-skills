@@ -656,8 +656,10 @@ re-syncs:
 - The data is correct; the column *index* is what's stale.
 - Adding columns is harmless (surviving column refs keep working). Removing columns:
   wait for re-sync (minutes) or refresh in the Sigma connection UI.
-- There's no public API to force a connection re-sync today.
-- **Workaround for verification:** source via **raw Custom SQL** (`source.kind: sql`)
+- **Force a re-sync via the API** (live-verified 2026-07-07, 48/48 tables):
+  `POST /v2/connections/{connectionId}/sync` with body
+  `{"path": ["<DB>", "<SCHEMA>", "<TABLE>"]}` — one call per landed table.
+- **Fallback for verification:** source via **raw Custom SQL** (`source.kind: sql`)
   rather than the catalog table — raw SQL executes directly and bypasses the stale
   catalog index. (This is exactly how the parity check reads a just-landed table.)
 

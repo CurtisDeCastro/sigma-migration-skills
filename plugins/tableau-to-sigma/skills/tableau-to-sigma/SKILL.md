@@ -25,6 +25,14 @@ user-invocable: true
 > Windows use the no-admin path in `refs/environment.md` (#5), and let the **user** run it.
 > Details: `refs/environment.md`.
 
+> **Model fit & vision requirements — `refs/model-fit.md`.** Design fidelity depends on
+> the driving agent, not just the environment. One-line rule: **pixel-fidelity claims
+> require image input; very-large workbooks on non-top-tier models require asking the
+> user once before proceeding.** A text-only agent must record the visual verdict as
+> not-executable (named degradation), never `pass`. The mandatory Phase 0 checkpoint
+> (complexity bucket × model tier → ask-once) and the honest tier-introspection rules
+> are in `refs/model-fit.md` — read it before Phase 0 on any multi-dashboard workbook.
+
 Convert a Tableau datasource into a Sigma data model, then build a Sigma workbook
 that mirrors the Tableau dashboard layout as closely as possible.
 
@@ -245,7 +253,7 @@ which calc translation, which layout) — not orchestration.
 | `scripts/validate-sigma-formula.rb` | Scout primitive: POST a tiny test workbook with a candidate formula, read back column types, return JSON `{ status: ok|error }`. Auto-expands the DM element's columns onto the test master so candidate refs to real data resolve. |
 | `scripts/scout-validate-and-persist.rb` | Scout wrapper: call validate-sigma-formula, on success append the rule to `~/.tableau-to-sigma/learned-rules.yaml` (customer's HOME, never the skill repo), on failure write `~/.tableau-to-sigma/escalations/<ts>-<slug>.yaml` AND return an opt-in `escalate-gap.py` command (confirm-before-file). |
 | `scripts/escalate-gap.py` | Shared opt-in issue filer. Dry-run by default (drafts the issue + dedupes against open issues/beads); files only with `--yes`. Routes by gap category: converter→`sigma-data-model-manager`+`sigma-data-model-mcp` (mirrored), builder/skill→`sigma-migration-skills`. |
-| `scripts/learned-rules.rb` | Loader module: reads `~/.tableau-to-sigma/learned-rules.yaml` at startup. Customer-discovered rules apply BEFORE the built-in translators in `build-charts-from-signals.rb`. |
+| `scripts/learned-rules.rb` | Loader module: merges the repo-shipped starter pack (`learned/starter-rules.yaml` — live-verified rules from real runs, so no machine starts empty) with `~/.tableau-to-sigma/learned-rules.yaml` (user rules override starter rules on key collision). Customer-discovered rules apply BEFORE the built-in translators in `build-charts-from-signals.rb`; starter entries without a rewrite pattern are spec-guidance (surfaced by the CLI dump, mirrored in `refs/fidelity-recipes.md`, never blind-applied). |
 | `scripts/parse-twb-layout.rb` | Parse a `.twb` XML file into a per-dashboard zone list plus a sister `*-meta.json` (worksheets + shared_filters + parameters + column_aliases). Per chart zone surfaces: position (`x/y/w/h%`), `chart_kind`, `mark_class`, `geo_role`, `sort`, `filters` (with resolved column captions + member values + action-vs-value flag), `aggregations`, `channels`, `formats` (Tableau format strings → Sigma d3-format with paren-negative handling), `calculations`, `dual_axis` (synchronized-axes detection), `ref_marks` (reference lines/bands/trendlines), `filter_column_caption`. Detects Tableau **stories** (both `<story>` and storyboard-dashboard shapes): flags storyboard dashboards `is_story: true` and writes `story-plan.json` (story → ordered points with captions + captured sheets) — when present, run `build-story-pages.rb`. Bin calc columns surface `bin_size`/`bin_peg`. |
 | `scripts/build-charts-from-signals.rb` | Generate Sigma chart-element specs from parse-twb-layout output + view CSVs + master-column map. Auto-translates: column aliases → `Switch(…)` calc, parameter-driven CASE/IF chains → `Switch([ctl-param-x], …)` with controlId rewrite per page, table calcs (INDEX/LOOKUP/TOTAL/RANK/ZN/IIF/COUNTD) → Sigma equivalents, `DATEPART('iso-year')` → Thursday-of-ISO-week `Year(DateAdd(...))` composition, `FINDNTH` → `SplitToArray`/`ArraySlice`/`ArrayJoin` composition, Tableau bins → native `BinFixed`/`BinRange` recipe, **nested `{FIXED}` LODs → helper-element chain** (innermost LOD = helper element 1, outer consumes `[LOD Helper k/Value]`; machine-readable sidecar `<out>-lod-chains.json`), Tableau formats (p%.%/C1033%/`(neg)`) → Sigma d3-format. Honors `--page-per-worksheet`, `--auto-controls`. Loads customer learned-rules first. Writes `*-actions.md` companion listing Tableau action filters for post-publish cross-filter setup. **Writes `coverage.json`** (`--coverage-out`): aggregates every dropped/degraded/approximated component into one ledger (rendered by `migrate-tableau.rb`); classifies build messages so `WARN` = real gap, `NOTE` = success/verify (bead beads-sigma-59mk). |
 | `scripts/extract-custom-sql.rb` | Phase 1f: pull Custom SQL blocks behind a workbook via Metadata GraphQL + .twb XML fallback. Output → `/tmp/<name>/custom-sql.json`. |
@@ -255,7 +263,7 @@ which calc translation, which layout) — not orchestration.
 | `scripts/estimate-cost.rb` | Predict input/output token cost from workbook + datasource metadata |
 | `scripts/fetch-view-data.rb` | Parse pre-fetched view CSVs into a signals manifest (distinct values, date min/max, agg hints) |
 | `scripts/discover-warehouse-columns.rb` | Parallel-fetch Sigma column metadata for N table inodeIds |
-| `scripts/probe-custom-sql-columns.rb` | **Phase 1e.1:** when discover-columns 404s (catalog miss), probe column names + types via a one-shot Custom-SQL probe workbook that SELECTs INFORMATION_SCHEMA, exports CSV, and self-destructs. ~6s end-to-end. Saves ~120s on every Custom-SQL fallback vs. POST-fail-cleanup column-name guessing. |
+| `scripts/probe-custom-sql-columns.rb` | **Phase 1e.1:** when discover-columns 404s (catalog miss), FIRST force a catalog sync (`POST /v2/connections/{id}/sync`, body `{"path":["DB","SCHEMA","TABLE"]}` — works, verified 2026-07-07) and retry; only if still 404 probe column names + types via a one-shot Custom-SQL probe workbook that SELECTs INFORMATION_SCHEMA, exports CSV, and self-destructs. ~6s end-to-end. Saves ~120s on every Custom-SQL fallback vs. POST-fail-cleanup column-name guessing. |
 | `scripts/find-prior-cache.rb` | **Phase 1d-cache (Phase -1):** detect cached Tableau-discovery + Sigma-conversion artifacts from prior `audit-run-*` or `converter-test` runs so re-conversions skip discovery (~3 min saved). |
 | `scripts/remap-wb-spec-to-dm-ids.rb` | When a DM is re-POSTed and element IDs churn, remaps a cached `wb-spec.json` to the new IDs via name-based matching. Optional `--rename` for renamed elements. |
 | `scripts/extract-calc-fields.rb` | Phase 1e: pull every Tableau calc field (with formula) via Metadata API (`POST /api/metadata/graphql`); falls back to `.twb` XML when Metadata API is unavailable. Drops VDS dependency. Caches to `<wb-dir>/calc-fields.json`. |
@@ -425,8 +433,11 @@ everything competed for attention at once. Read the ref when you reach the step.
 Run `scan-workbook-gaps.rb` on the `.twb` **before anything else** (emits
 `gaps-report.md` + `gaps.json`; ❌-unhandled features go to the gap-scout subagent
 or `--force`). Then pick where to build (`pick-destination.rb`) and the conversion
-mode, and estimate token cost. **Full detail, incl. blend detection + gap-scout
-protocol: `refs/phase-0-scope.md`.**
+mode, and estimate token cost. **After the gap scan + cost estimate, execute the
+model-fit checkpoint** (`refs/model-fit.md` §3): large/very-large bucket (or >1
+dashboard / >30 zones / any ❌ gap rows / >50 calcs) on a non-top-tier model →
+ask the user once before proceeding; never silently proceed on very-large.
+**Full detail, incl. blend detection + gap-scout protocol: `refs/phase-0-scope.md`.**
 
 ### Phase 1 — discover the source — `refs/phase-1-discover.md`
 PAT mode: `tableau-discover.rb` fetches workbook + views + `.twb` + VDS/GraphQL +
@@ -451,10 +462,14 @@ skips Phases 2–3. When reusing a differently-shaped DM, run the 1.5b shape
 preflight (`inspect-dm-shape.rb`). **Detail: `refs/phase-1_5-dm-reuse.md`.**
 
 ### Phase 2 + 2.5 — warehouse columns + view filters — `refs/phase-2-columns-filters.md`
-Resolve real warehouse column names (`discover-warehouse-columns.rb`; Custom-SQL
-fallback probes INFORMATION_SCHEMA). Then **detect view-level filters** (mandatory)
-by diffing each view CSV's distinct values against the source and apply them at
-the correct grain. **Detail: `refs/phase-2-columns-filters.md`.**
+Resolve real warehouse column names (`discover-warehouse-columns.rb`). On a 404
+(catalog miss), **force a catalog sync and retry first**: `POST
+/v2/connections/{connectionId}/sync` with body `{"path":["DB","SCHEMA","TABLE"]}`
+(works — verified 2026-07-07, 48/48 freshly-landed tables) — only fall back to
+Custom SQL (INFORMATION_SCHEMA probe) if the retry still 404s. Then **detect
+view-level filters** (mandatory) by diffing each view CSV's distinct values
+against the source and apply them at the correct grain.
+**Detail: `refs/phase-2-columns-filters.md`.**
 
 ### Phase 3 — build the DM spec — `refs/phase-3-datamodel.md`
 Author the data-model spec (warehouse-table element for plain columns, `sql`

@@ -289,10 +289,25 @@ pulled from a same-named `LOYALTY_TIER` warehouse column.
 > a **Sigma static-catalog visibility** issue: the `warehouse-table` source
 > path requires the table to be indexed in Sigma's internal catalog, which
 > does NOT auto-refresh after every warehouse-side landing (VDS write, dbt
-> run, manual CREATE TABLE). There is currently no public API to force a
-> catalog refresh; the UI's "Refresh schema" action on the connection page
-> is the only mechanism, and you usually can't drive it from the conversion
-> agent.
+> run, manual CREATE TABLE).
+>
+> **Force a catalog refresh via the API first** — this works (verified
+> 2026-07-07: 48/48 freshly-landed tables became visible immediately, no UI
+> touch needed):
+>
+> ```bash
+> curl -sX POST -H "Authorization: Bearer $SIGMA_API_TOKEN" \
+>   -H "Content-Type: application/json" \
+>   "$SIGMA_BASE_URL/v2/connections/<connectionId>/sync" \
+>   -d '{"path": ["DB", "SCHEMA", "TABLE"]}'
+> ```
+>
+> One call per table (`path` is the 3-part `[db, schema, table]` array).
+> After the sync, retry `discover-columns.rb` / the `warehouse-table` POST.
+> Only fall back to Custom SQL (below) when the sync-then-retry still 404s.
+> (Older versions of this skill claimed no public API could refresh the
+> catalog — that claim is stale; do not route to the UI's "Refresh schema"
+> button or straight to Custom SQL without trying the sync endpoint.)
 
 The fallback is to source the same table via Custom SQL:
 
@@ -343,8 +358,8 @@ trade-offs vs `warehouse-table` are:
 - the warehouse-side query optimizer treats it as a sub-select
 
 For a customer-facing conversion these trade-offs are acceptable; for a
-"production" DM build, ask the customer to refresh the Sigma connection's
-schema in the UI and retry with `warehouse-table`.
+"production" DM build, run `POST /v2/connections/{id}/sync` for the table
+(shape above) and retry with `warehouse-table`.
 
 ### 1f. Extract Custom SQL (PAT mode)
 
