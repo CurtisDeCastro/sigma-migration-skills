@@ -109,6 +109,7 @@ require 'time'
 require 'set'
 require_relative 'lib/scout_gate'
 require_relative 'lib/dashboard_read'
+require_relative 'lib/recipe_multimetric'
 require_relative 'lib/run_state'
 require_relative 'lib/fast_path' # FAST-PATH routing + BOM-tolerant JSON reads
 require_relative 'lib/sigma_rest' # in-process Sigma token minting (no bash/eval)
@@ -2140,6 +2141,24 @@ if mechanical
   # Formula-normalize hook (sibling workstream): case-fix converter-derived
   # formulas on the mechanical workbook spec before validate/POST.
   normalize_formulas!(spec, 'wb-spec')
+  # Multi-metric region dashboard recipe (refs/fidelity-recipes.md): when png-read
+  # declares a control with `highlight_tiles`, rewrite the mechanical spec into the
+  # recipe shape — master/masterAll split + highlight color column, and (with
+  # png-read `point_in_time`) latest-year + real-entity grouped Top-N measures.
+  # No-op when the pattern isn't present. Tolerant: never aborts the build.
+  begin
+    _pr = (JSON.parse(File.read(DashboardRead.path(WORK))) rescue nil)
+    if _pr && RecipeMultimetric.applicable?(_pr)
+      rsum = RecipeMultimetric.apply!(spec, _pr)
+      if rsum[:applied]
+        line "multi-metric recipe: +#{rsum[:masters_added]} masterAll, #{rsum[:highlight_tiles]} highlight tile(s), " \
+             "#{rsum[:top_tables]} point-in-time measure(s) rewritten"
+      end
+      rsum[:notes].each { |n| line "  recipe note: #{n}" }
+    end
+  rescue StandardError => e
+    line "WARN: multi-metric recipe transform skipped (#{e.class}: #{e.message})"
+  end
 else
   spec = Specs.wb_spec(dm_id, fact_eid)
   # Agent-authored JSON path: bind the DM placeholders ("__DM_ID__" and

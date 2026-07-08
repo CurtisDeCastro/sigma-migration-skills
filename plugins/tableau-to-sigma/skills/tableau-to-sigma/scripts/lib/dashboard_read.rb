@@ -31,8 +31,20 @@
 #       { "label": "Region", "control_type": "list",
 #         "target_tiles":    ["Trend GDP", "Top GDP"],   # tiles this control FILTERS
 #         "highlight_tiles": ["YoY GDP", "YoY FDI"] }     # tiles it only RE-COLORS (not filter)
-#     ]
+#     ],
+#     "point_in_time": {                             # OPTIONAL — only for dashboards with
+#       "year_column":          "Year",              #   "latest snapshot" Top-N / magnitude tiles.
+#       "latest_year":          2015,                #   Consumed by the multi-metric recipe transform
+#       "entity_discriminator": "Income Group"       #   (RecipeMultimetric): rewrites Top-N/bar measures
+#     }                                              #   to Sum(If([Year]=latest And Not IsNull([discr]),m,null))
 #   }
+#
+# `point_in_time` records what CANNOT be inferred from build signals (D10): the
+# column that is null on rollup/aggregate rows (`entity_discriminator`, so a
+# "Top Countries" table shows countries not regions), plus the snapshot year.
+# `latest_year` is seeded mechanically from the year column's distinct values;
+# `entity_discriminator` is agent-confirmed (set to null when the source has no
+# aggregate rows to exclude). Absent → the recipe transform leaves measures as-is.
 #
 # Two fields exist because the two most-expensive late-caught fidelity bugs are
 # decided here or not at all:
