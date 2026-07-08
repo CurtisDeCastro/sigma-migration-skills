@@ -22,6 +22,8 @@
 # and other downstream tools can consume it programmatically.
 
 require 'json'
+require 'set'
+require 'csv'
 # Nokogiri-backed REXML drop-in — REXML is O(n^2) on large .twb files. See lib/twb_xml.rb.
 $LOAD_PATH.unshift File.expand_path('lib', __dir__)
 require 'twb_xml'
@@ -69,6 +71,8 @@ INVENTORY = [
     status: :auto, blurb: 'Auto-translated when plotted. Single-level {FIXED dims : AGG(m)}: hidden two-level grouped helper element (visibleAsSource:false; inner grouping = FIXED dims computing the LOD aggregate, outer = chart dims computing the 2nd-stage aggregate; chart Max()es the outer calc). Nested {FIXED ... {FIXED ...}}: auto-decomposed into a helper-element chain (innermost first; outer levels source the inner WITH groupingId) via build-charts-from-signals.rb → -lod-chains.json sidecar. ⚠ single-level helper is exact iff carried chart dims are functionally dependent on the FIXED dims — the build emits a per-chart verify warning. Never SumOver/CountOver in master/DM calc columns (silent error).' },
 
   # HINT — surfaces a translated formula or setup note as a WARN; agent acts
+  { name: 'Context filters',                           pat: /\bcontext='true'/,
+    status: :hint, blurb: 'Tableau context filters scope FIXED LODs and narrow downstream filter domains. They become Sigma filters/controls, but the SCOPING is not automatic — verify any FIXED-LOD calc that depended on the context still evaluates over the intended row set. High counts (10+) mean filter-order matters.' },
   { name: 'IF/ELSEIF chain calc',                      pat: /\bIF\b[^']+\bELSEIF\b[^']+\bEND\b/i,
     status: :hint, blurb: 'WARN with suggested Sigma If(...) chain or Switch(). Agent adds to master.' },
   { name: 'Ratio calc (SUM/SUM, SUM/COUNT)',           pat: /SUM\s*\([^)]+\)\s*\/\s*(?:SUM|COUNT)\s*\(/i,
@@ -285,7 +289,122 @@ def detect_blends(xml)
   [features, { 'datasources' => ds_info.values, 'blends' => blends }]
 end
 
-def render_md(wb_name, summary, results)
+# --- Field-usage + calc-dependency analysis --------------------------------
+# Works purely from the .twb — no VDS/metadata graph needed. Produces field
+# statistics (source/calc/param split, used vs dead), calc classification
+# (simple vs nested by dependency, LOD, table-calc), orphaned worksheets,
+# duplicate captions (Sigma name-collision risk), and a per-object component
+# inventory (the migration punch-list). `doc` is the TwbXml tree (field defs +
+# worksheet names); `content` is the raw .twb string (used for the reference-
+# region scans, since TwbXml exposes no node serializer).
+def analyze_fields(doc, content)
+  # 1. Field definitions from primary (non-Parameters) datasources. Skip
+  #    Tableau internal object-id columns (plumbing, not user fields).
+  defs = {}
+  doc.elements.to_a('/workbook/datasources/datasource').each do |ds|
+    is_param_ds = ds.attributes['name'].to_s == 'Parameters'
+    ds.elements.each('column') do |col|
+      name = col.attributes['name']
+      next unless name
+      next if name.include?('__tableau_internal_object_id__')
+      calc = col.elements['calculation']
+      formula = calc&.attributes&.[]('formula')
+      is_param = is_param_ds || !col.attributes['param-domain-type'].nil?
+      defs[name] ||= {
+        caption: col.attributes['caption'] || name,
+        formula: formula,
+        is_calc: !formula.nil? && !is_param,
+        is_param: is_param
+      }
+    end
+  end
+
+  # 2. Reference region = everything after the workbook-level </datasources>
+  #    (worksheets + dashboards + windows). A field is "directly used" if its
+  #    internal name appears there. Splitting the raw string avoids needing an
+  #    XML serializer and is robust across parsers.
+  ref_region = content.split('</datasources>', 2)[1] || content
+  used = defs.keys.select { |name| ref_region.include?(name) }.to_set
+
+  # 3. Transitive closure through calc formulas.
+  changed = true
+  while changed
+    changed = false
+    used.to_a.each do |uname|
+      f = defs[uname]&.[](:formula)
+      next unless f
+      defs.each_key do |cand|
+        next if used.include?(cand)
+        if f.include?(cand)
+          used << cand
+          changed = true
+        end
+      end
+    end
+  end
+  unused = defs.keys - used.to_a
+
+  # 4. Calc classification.
+  calc_names = defs.select { |_, v| v[:is_calc] }.keys.to_set
+  classify = lambda do |name|
+    f = defs[name][:formula].to_s
+    return :lod       if f =~ /\{\s*(FIXED|INCLUDE|EXCLUDE)\b/i
+    return :tablecalc if f =~ /\b(INDEX|LOOKUP|TOTAL|RANK\w*|WINDOW_\w+|RUNNING_\w+|FIRST|LAST|SIZE)\s*\(/
+    calc_names.any? { |c| c != name && f.include?(c) } ? :nested : :simple
+  end
+  calc_kinds = calc_names.each_with_object(Hash.new(0)) { |n, h| h[classify.call(n)] += 1 }
+
+  # 5. Orphaned worksheets (defined but on no dashboard).
+  dash_region = content[/<dashboards>.*<\/dashboards>/m] || ''
+  orphan_ws = doc.elements.to_a('/workbook/worksheets/worksheet')
+                 .map { |w| w.attributes['name'] }
+                 .reject { |w| dash_region.include?(w) }
+
+  # 6. Duplicate display captions (collide in Sigma display names).
+  dup_caps = defs.values.map { |v| v[:caption] }
+                 .group_by(&:itself).select { |_, v| v.size > 1 }.keys
+
+  # 7. Component inventory (per-object punch-list). Impact: LOD=high,
+  #    nested/table-calc=medium, simple calc / source=low.
+  components = defs.map do |name, v|
+    kind = v[:is_param] ? :param : (v[:is_calc] ? classify.call(name) : :source)
+    impact = case kind
+             when :lod then 'high'
+             when :nested, :tablecalc then 'medium'
+             else 'low'
+             end
+    {
+      'category' => v[:is_param] ? 'Parameter' : (v[:is_calc] ? 'Calculated Field' : 'Source Field'),
+      'name'     => v[:caption],
+      'kind'     => kind.to_s,
+      'used'     => used.include?(name),
+      'impact'   => impact
+    }
+  end.sort_by { |c| [{ 'high' => 0, 'medium' => 1, 'low' => 2 }[c['impact']], c['category'], c['name'].to_s] }
+
+  n_defs = defs.size
+  n_calc = calc_names.size
+  n_param = defs.count { |_, v| v[:is_param] }
+  {
+    'total_fields'       => n_defs,
+    'source_fields'      => n_defs - n_calc - n_param,
+    'calculated_fields'  => n_calc,
+    'parameters'         => n_param,
+    'used_fields'        => used.size,
+    'unused_fields'      => unused.size,
+    'pct_used'           => n_defs.zero? ? 0 : (100.0 * used.size / n_defs).round(1),
+    'calc_simple'        => calc_kinds[:simple],
+    'calc_nested'        => calc_kinds[:nested],
+    'calc_lod'           => calc_kinds[:lod],
+    'calc_tablecalc'     => calc_kinds[:tablecalc],
+    'orphan_worksheets'  => orphan_ws,
+    'duplicate_captions' => dup_caps,
+    'unused_field_names' => unused.map { |n| defs[n][:caption] },
+    'components'         => components
+  }
+end
+
+def render_md(wb_name, summary, results, fields = nil)
   by_status = results.group_by { |r| r[:status] }
   md = String.new
   md << "# Tableau→Sigma gap report — `#{wb_name}`\n\n"
@@ -293,6 +412,29 @@ def render_md(wb_name, summary, results)
   md << "## Workbook summary\n\n"
   summary.each { |k, v| md << "- **#{k}:** #{v}\n" }
   md << "\n"
+
+  if fields
+    md << "## Field statistics (migration scope)\n\n"
+    md << "- **#{fields['total_fields']} fields** — #{fields['source_fields']} source, "
+    md << "#{fields['calculated_fields']} calculated, #{fields['parameters']} parameters\n"
+    md << "- **#{fields['pct_used']}% used** (#{fields['used_fields']} used / #{fields['unused_fields']} dead)\n"
+    md << "- **Calc dependency:** #{fields['calc_simple']} simple, #{fields['calc_nested']} nested, "
+    md << "#{fields['calc_lod']} LOD, #{fields['calc_tablecalc']} table-calc\n"
+    unless fields['orphan_worksheets'].empty?
+      md << "- **#{fields['orphan_worksheets'].size} orphaned worksheet(s)** (on no dashboard): "
+      md << fields['orphan_worksheets'].map { |w| "`#{w}`" }.join(', ') << "\n"
+    end
+    unless fields['duplicate_captions'].empty?
+      md << "- **#{fields['duplicate_captions'].size} duplicate caption(s)** (Sigma name-collision risk): "
+      md << fields['duplicate_captions'].map { |c| "`#{c}`" }.join(', ') << "\n"
+    end
+    if fields['unused_fields'] > 0
+      md << "\n> **Scope tip:** #{fields['unused_fields']} fields are defined but referenced by no "
+      md << "worksheet — skip these during conversion. See the `-components.csv` sidecar for the full "
+      md << "per-object punch-list (dead flag + impact).\n"
+    end
+    md << "\n"
+  end
 
   emit = lambda do |status, label, header|
     rows = by_status[status] || []
@@ -378,11 +520,31 @@ def main
          blend_plan['blends'].map { |b| "#{b['worksheet']}→#{b['route']}" }.join(', ') + ')'
   end
 
-  File.write(md_path, render_md(File.basename(inp), summary, results))
-  File.write(json_path, JSON.pretty_generate({
+  fields = nil
+  begin
+    fields = analyze_fields(xml, content) if xml
+  rescue StandardError => e
+    warn "  field analysis skipped: #{e.message}"
+  end
+
+  File.write(md_path, render_md(File.basename(inp), summary, results, fields))
+  json_payload = {
     'workbook' => summary,
     'detected_features' => results.map { |r| r.transform_keys(&:to_s) }
-  }))
+  }
+  json_payload['field_statistics'] = fields.reject { |k, _| k == 'components' } if fields
+  File.write(json_path, JSON.pretty_generate(json_payload))
+
+  if fields && !fields['components'].empty?
+    csv_path = out.sub(/-gaps-report\.md$/, '').sub(/\.md$/, '') + '-components.csv'
+    CSV.open(csv_path, 'w') do |csv|
+      csv << %w[Category Name Kind Used Impact]
+      fields['components'].each do |c|
+        csv << [c['category'], c['name'], c['kind'], (c['used'] ? 'used' : 'DEAD'), c['impact']]
+      end
+    end
+    warn "wrote #{csv_path}"
+  end
 
   warn "wrote #{md_path}"
   warn "wrote #{json_path}"

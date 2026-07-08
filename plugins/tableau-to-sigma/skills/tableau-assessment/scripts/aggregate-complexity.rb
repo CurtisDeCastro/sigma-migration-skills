@@ -87,6 +87,7 @@ fetch_results.each do |luid, info|
   by_status = feats.group_by { |f| f['status'] }
   twb_size = info['twb_size'] || info['size'] || File.size(twb_path)
   parity_pct, parity_band = predicted_parity(feats)
+  fs = gaps['field_statistics'] || {}
 
   results[luid] = {
     'name'                 => info['name'],
@@ -96,6 +97,13 @@ fetch_results.each do |luid, info|
     'n_hint'               => (by_status['hint']      || []).size,
     'n_manual'             => (by_status['manual']    || []).size,
     'n_unhandled'          => (by_status['unhandled'] || []).size,
+    # Field-usage scope signals (from scan-workbook-gaps field analysis).
+    'total_fields'         => fs['total_fields'],
+    'unused_fields'        => fs['unused_fields'],
+    'pct_used'             => fs['pct_used'],
+    'calc_nested'          => fs['calc_nested'],
+    'calc_lod'             => fs['calc_lod'],
+    'orphan_worksheets'    => (fs['orphan_worksheets'] || []).size,
     # Pre-migration parity PREDICTION (y9rd.6): occurrence-weighted % + A-D band.
     # A prediction from static .twb signal, NOT a measured value-parity score
     # (that comes post-migration from verify-parity.rb) — flag hard workbooks early.
