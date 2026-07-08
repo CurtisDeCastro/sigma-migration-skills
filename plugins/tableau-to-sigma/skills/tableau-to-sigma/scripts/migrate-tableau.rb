@@ -71,6 +71,9 @@
 #      --finalize with --enhance --enhance-accept ...);
 # 15 = converter produced an EMPTY data model (0 elements/columns) — unsupported
 #      datasource shape; NO Sigma objects created (capture the .twb for the converter);
+# 17 = every datasource is an EMBEDDED file extract and no landing manifest was
+#      found — land the frozen data first (scripts/land-extracts.py, see
+#      refs/extract-landing.md), or re-run with --skip-extract-landing "<reason>";
 # 3 = parity/guard fail; 4 = workbook layer needs the agent path; other = error.
 require 'json'
 require 'csv'
@@ -143,6 +146,10 @@ OptionParser.new do |o|
   o.on('--skip-reuse-scan')  {     opts[:skip_reuse] = true }
   o.on('--skip-dashboard-read REASON', 'waive the Phase 1d source dashboard-read gate — REQUIRED reason; name it in your report') { |v| opts[:skip_dashboard_read] = v }
   o.on('--skip-doctor-gate REASON', 'waive the Step-0 environment gate (doctor.json) — REQUIRED reason; name it in your report') { |v| opts[:skip_doctor_gate] = v }
+  o.on('--skip-extract-landing REASON', 'proceed although every datasource is an embedded file extract and no ' \
+                                        'landing manifest was found (exit 17 otherwise) — you own the DM table paths') { |v| opts[:skip_extract_landing] = v }
+  o.on('--skip-postpublish-guide REASON', 'waive the finalize gate that requires POSTPUBLISH_GUIDE.md when the ' \
+                                          'source carries dashboard actions (gate 11) — name it in your report') { |v| opts[:skip_postpublish_guide] = v }
   o.on('--row-scale F', Float) { |v| opts[:row_scale] = v }
   o.on('--master-col PAIR', "'Name=<Sigma formula>' — extra master column (repeatable). The resume path " \
                             'for the exit-4 handoff when a chart dim is a master-level calc the mechanical ' \
@@ -195,24 +202,6 @@ DASH_SCOPE = (opts[:dashboards] || []).flat_map { |d| ['--dashboard', d] } +
              (opts[:pages]      || []).flat_map { |p| ['--page', p] }
 SCOPED = !DASH_SCOPE.empty?
 
-# Per-dashboard scope flags, assembled once and threaded into parse-twb-layout,
-# build-charts, and auto-parity. Empty ⇒ whole-workbook (current behavior).
-DASH_SCOPE = (opts[:dashboards] || []).flat_map { |d| ['--dashboard', d] } +
-             (opts[:pages]      || []).flat_map { |p| ['--page', p] }
-SCOPED = !DASH_SCOPE.empty?
-
-# Per-dashboard scope flags, assembled once and threaded into parse-twb-layout,
-# build-charts, and auto-parity. Empty ⇒ whole-workbook (current behavior).
-DASH_SCOPE = (opts[:dashboards] || []).flat_map { |d| ['--dashboard', d] } +
-             (opts[:pages]      || []).flat_map { |p| ['--page', p] }
-SCOPED = !DASH_SCOPE.empty?
-
-# Per-dashboard scope flags, assembled once and threaded into parse-twb-layout,
-# build-charts, and auto-parity. Empty ⇒ whole-workbook (current behavior).
-DASH_SCOPE = (opts[:dashboards] || []).flat_map { |d| ['--dashboard', d] } +
-             (opts[:pages]      || []).flat_map { |p| ['--page', p] }
-SCOPED = !DASH_SCOPE.empty?
-
 slug = (opts[:wb_name] || opts[:wb_id]).gsub(/[^A-Za-z0-9_-]/, '-').squeeze('-')
 WORK = opts[:out] || File.expand_path("~/tableau-migration/#{slug}")
 FileUtils.mkdir_p(File.join(WORK, 'views'))
@@ -228,6 +217,26 @@ _dg_cmd += ['--skip-doctor-gate', _dg_skip] if _dg_skip && !_dg_skip.to_s.empty?
 unless system(*_dg_cmd)
   abort 'FATAL: environment gate failed — run the doctor first (see remediation above), ' \
         'or re-run with --skip-doctor-gate "<reason>".'
+end
+
+# ── Design-consistency advisory readout (doctor.json) ────────────────────────
+# The hard gate above proves the environment passed; these two are the silent
+# DESIGN-variance killers the gate does not block on — surface them at every
+# run start. Advisory: the visual gates (8/8b/8d) enforce agent_vision later.
+begin
+  dj = JSON.parse(File.read(File.join(WORK, 'doctor.json')))
+  bc = dj['behind_count']
+  if bc.is_a?(Integer) && bc.positive?
+    warn "WARN: skill clone is #{bc} commit(s) behind origin/main — newer fidelity machinery exists. " \
+         'Run `git pull` in the marketplace clone before converting.'
+  end
+  if dj['agent_vision'] == false
+    warn 'WARN: doctor.json records agent_vision=false — the visual gates (8/8b/8d) cannot legitimately ' \
+         'pass from this session (export SIGMA_AGENT_VISION=true from a vision-capable session); ' \
+         'see refs/model-fit.md.'
+  end
+rescue StandardError
+  # never fatal — the hard gate above already validated presence/shape
 end
 
 TOTAL = 6
@@ -372,6 +381,9 @@ if opts[:finalize]
   gate += ['--allow-extract'] if state['extract_mode']
   gate += ['--allow-missing-tiles', opts[:allow_missing_tiles].to_s] if opts[:allow_missing_tiles]
   gate += ['--min-pass-rate', opts[:min_pass_rate].to_s] if opts[:min_pass_rate]
+  # Gate 11 (post-publish interactivity guide) waiver pass-through — the gate
+  # itself decides whether the source's actions require POSTPUBLISH_GUIDE.md.
+  gate += ['--skip-postpublish-guide', opts[:skip_postpublish_guide]] if opts[:skip_postpublish_guide]
   _, gst = sigma_run!(gate, allow_fail: true)
   mark('assert-phase6-ran')
 
@@ -430,6 +442,21 @@ if opts[:finalize]
     puts "       ruby scripts/record-visual-check.rb --workdir #{WORK} --verdict pass --notes \"<what matched>\""
     puts '     If they DIVERGE: --verdict divergent --notes "<gap>", fix the spec, re-render, re-read,'
     puts '     then re-record --verdict pass. The gate stays blocked until the verdict is pass.'
+    puts '============================================================================='
+  end
+
+  if gst.exitstatus == 16
+    puts
+    puts '================ INTERACTIVITY STOP (post-publish guide missing) ============'
+    puts 'The source dashboards carry interactive actions (filter/highlight/navigation/'
+    puts 'parameter actions, dynamic zones, drills) that workbooks-as-code CANNOT port.'
+    puts 'The user must be handed exact Sigma UI steps for each — generate the guide,'
+    puts 'then re-run this exact --finalize command:'
+    puts "    ruby scripts/build-postpublish-guide.rb --twb #{File.join(WORK, 'workbook-content.twb')} \\"
+    puts "      --wb-ids #{File.join(WORK, 'wb-ids.json')} --out #{File.join(WORK, 'POSTPUBLISH_GUIDE.md')} \\"
+    puts "      --json-out #{File.join(WORK, 'postpublish-guide.json')}"
+    puts 'LINK the guide in your migration report and walk the user through it.'
+    puts 'Waivable ONLY via --skip-postpublish-guide "<reason>" — name it in the report.'
     puts '============================================================================='
   end
 
@@ -893,6 +920,55 @@ if mechanical
   # FALLBACK: extract-custom-sql.rb (Metadata GraphQL) for Custom SQL. Then
   # hydrate-custom-sql.rb splices the real relation (table or SQL) so the
   # converter's normal path builds the model. No-ops for non-sqlproxy workbooks.
+  # ── Embedded-extract (file-based) source routing ────────────────────────────
+  # A workbook whose datasources are ALL embedded file federations (excel-direct /
+  # textscan / hyper / ogrdirect / csv / msexcel) has no live warehouse for Sigma
+  # to query — the frozen extract data must be LANDED first (scripts/
+  # land-extracts.py; refs/extract-landing.md). Landing is byte-identical to what
+  # Tableau rendered, so Phase 6 parity runs in EXACT mode — never drift mode.
+  embedded_classes = %w[excel-direct textscan hyper ogrdirect csv msexcel]
+  if have_twb && !HydrateCustomSql.twb_has_sqlproxy?(twb)
+    conn_classes = begin
+      File.read(twb, encoding: 'UTF-8').scan(/<connection[^>]*\bclass='([^']+)'/).flatten.uniq - ['federated']
+    rescue StandardError
+      []
+    end
+    if conn_classes.any? && (conn_classes - embedded_classes).empty?
+      landing_manifest = Dir[File.join(WORK, '*landing-manifest*.json')].first
+      if landing_manifest
+        line "embedded-extract sources (#{conn_classes.join(', ')}) — landing manifest found " \
+             "(#{File.basename(landing_manifest)}); parity mode is EXACT (frozen extract landed byte-identical)"
+      elsif opts[:skip_extract_landing]
+        line "WARN: embedded-extract sources with NO landing manifest — proceeding on --skip-extract-landing " \
+             "(#{opts[:skip_extract_landing]}); the DM's table paths are on you (--db/--schema)"
+      else
+        puts <<~MSG
+
+          ==================== EXTRACT LANDING REQUIRED (exit 17) ====================
+          Every datasource in this workbook is an EMBEDDED file extract
+          (#{conn_classes.join(', ')}) — there is no live warehouse for Sigma to query.
+          Land the frozen extract data first:
+
+            python3 scripts/land-extracts.py --twbx <workbook-with-extract.twbx> \\
+              --db <DB> --schema <SCHEMA> --prefix <WB_PREFIX> \\
+              --sigma-connection-id <connection-id> \\
+              --manifest-out #{File.join(WORK, 'landing-manifest.json')}
+
+          (Download the .twbx WITH extract payloads first:
+             GET .../workbooks/<luid>/content?includeExtract=true
+           Full guide incl. type rules + the /sync catalog step: refs/extract-landing.md.
+           The landed data is byte-identical to what Tableau rendered, so Phase 6
+           parity runs in EXACT mode — do NOT use extract-drift tolerance.)
+
+          Already landed under different names? Put the manifest in #{WORK} (or point
+          --db/--schema at the tables) and re-run with --skip-extract-landing "<reason>".
+          ============================================================================
+        MSG
+        exit 17
+      end
+    end
+  end
+
   conv_twb = twb
   if have_twb && HydrateCustomSql.twb_has_sqlproxy?(twb)
     line 'published-datasource (sqlproxy) connection detected — chasing the published DS to hydrate before conversion'
@@ -1224,6 +1300,22 @@ if have_twb
     gaps = (JSON.parse(File.read(gj))['detected_features'] || []) rescue []
     bys = gaps.group_by { |g| g['status'] }.transform_values(&:size)
     line "gap scan: #{bys.map { |k, v| "#{v} #{k}" }.join(', ')}"
+    # Model-fit checkpoint trigger (refs/model-fit.md): on complex workbooks a
+    # non-top-tier driving model must ASK the user once before building. The
+    # orchestrator cannot see which model is driving — print the trigger so the
+    # agent executes the checkpoint (it is mandatory per SKILL.md preflight).
+    begin
+      dl = JSON.parse(File.read(File.join(WORK, 'dashboard-layout.json')))
+      dashes = dl.is_a?(Array) ? dl : (dl['dashboards'] || [dl])
+      zones_max = dashes.map { |d| (d['zones'] || []).size }.max.to_i
+      if dashes.size > 1 || zones_max > 30 || bys['unhandled'].to_i.positive? || bys['manual'].to_i > 1
+        line "MODEL FIT: complex workbook (#{dashes.size} dashboard(s), max #{zones_max} zones/dashboard) — " \
+             'if the driving model is not top-tier, execute the ask-once checkpoint in refs/model-fit.md ' \
+             'BEFORE building (and confirm image input for the visual gates).'
+      end
+    rescue StandardError
+      # layout json not parsed yet on some paths — the SKILL.md checkpoint still applies
+    end
   end
 end
 
@@ -2189,6 +2281,14 @@ if rcf_passes.to_i.positive?
   puts '              author a patch from refs/fidelity-recipes.md, fidelity-loop.rb apply-patch --resolves,'
   puts '              and render again. Loop until `fidelity-loop.rb status` is clean (0 unresolved spec-fixable).'
 end
+puts 'INTERACTIVITY: generate the post-publish handoff guide — dashboard actions, nav'
+puts '              buttons, dynamic zones, drills, and tooltips cannot ride the spec;'
+puts '              the guide walks the user through adding each in the Sigma UI'
+puts '              (gate 11 at --finalize REQUIRES the file when the source has actions):'
+puts "                ruby scripts/build-postpublish-guide.rb --twb #{File.join(WORK, 'workbook-content.twb')} \\"
+puts "                  --wb-ids #{File.join(WORK, 'wb-ids.json')} --out #{File.join(WORK, 'POSTPUBLISH_GUIDE.md')} \\"
+puts "                  --json-out #{File.join(WORK, 'postpublish-guide.json')}"
+puts '              LINK the guide in your migration report and walk the user through it.'
 finalize_cmd = "  ruby scripts/migrate-tableau.rb #{opts[:wb_id] ? "--workbook-id #{opts[:wb_id]}" : "--workbook \"#{opts[:wb_name]}\""}" \
                "#{opts[:out] ? " --out #{WORK}" : ''} \\\n    --finalize --actuals #{File.join(WORK, 'parity-actuals.json')}"
 puts finalize_cmd

@@ -33,6 +33,13 @@
 #       PHASEE2 PBI regression: band 1 = one small bar chart at columns 1-6
 #       next to a 19-column hole). Deliberate KPI bands (<=4 tiles, all
 #       kpi-chart) are exempt.
+#   (f) sub-minimum tile height — an element whose gridRow span is below its
+#       kind's minimum (KIND_MIN_ROWS). Sigma renders chart/KPI tiles BLANK
+#       under ~3-4 grid rows — in the live page AND in page/element PNG
+#       exports (hit twice in a 2026-07 live migration). Element kinds come
+#       from the spec's page elements; layout-only container shells (no spec
+#       kind) are skipped. A child's span is measured in its own container's
+#       row units (matched-inner-span convention: inner rows track page rows).
 #
 # API:
 #   violations = LayoutLint.lint(spec)   # spec = parsed workbook spec Hash
@@ -47,8 +54,28 @@ module LayoutLint
   GRID_COLS = 24
   MIN_BAND_FILL = 0.60
   KPI_BAND_MAX_TILES = 4
+  # Per-kind minimum gridRow spans (check f). KEEP IN SYNC with
+  # SigmaLayout::KIND_MIN_ROWS (lib/layout.rb) — this lib is vendored
+  # standalone across plugins, so it carries its own copy. 'chart' covers
+  # every *-chart kind without an explicit entry.
+  KIND_MIN_ROWS = {
+    'kpi-chart'   => 4,  # value + label need ~4 rows to render at all
+    'chart'       => 8,  # axis/labels suppressed and tile blanks below ~8
+    'table'       => 10, # header row + a few data rows
+    'pivot-table' => 10,
+    'control'     => 2,  # one input strip; 2 rows keeps the label visible
+    'text'        => 2
+  }.freeze
 
   module_function
+
+  # Minimum gridRow span for a Sigma element kind (see KIND_MIN_ROWS).
+  def min_rows_for(kind)
+    k = kind.to_s
+    return KIND_MIN_ROWS[k] if KIND_MIN_ROWS.key?(k)
+    return KIND_MIN_ROWS['chart'] if k.end_with?('-chart')
+    KIND_MIN_ROWS['text']
+  end
 
   # All [element, page] pairs in the spec (skips layout-only container shells).
   def named_elements(spec)
@@ -208,6 +235,24 @@ module LayoutLint
                              kids.empty? ? 'no children' : "#{kids.length} element(s) (#{kids.map(&:first).join(', ')})",
                              covered.count(true), ncols, fill * 100, MIN_BAND_FILL * 100,
                              empty_cols.empty? ? '-' : empty_cols.slice_when { |a, x| x != a + 1 }.map { |g| g.length > 1 ? "#{g.first}-#{g.last}" : g.first.to_s }.join(', '))
+      end
+
+      # (f) sub-minimum tile height --------------------------------------------
+      tiles = entries.select { |k, _e, _r0, _r1| k == :element }
+                     .map { |_k, eid, r0, r1| [eid, r0, r1] }
+      bands.each do |b|
+        b[:children].each { |ceid, _c0, _c1, r0, r1| tiles << [ceid, r0, r1] }
+      end
+      tiles.each do |eid, r0, r1|
+        kind = el_kind[eid]
+        next if kind.nil? || kind == 'container' # layout-only shells
+        min = min_rows_for(kind)
+        span = [r1 - r0, 0].max
+        next if span >= min
+        violations << format('tile below minimum height: element %s (%s) on page %s spans %d grid row(s) ' \
+                             '(< %d required for %s) — Sigma renders sub-minimum tiles BLANK in the page ' \
+                             'and in PNG exports; grow the tile (see SigmaLayout::KIND_MIN_ROWS)',
+                             eid, kind, page_id, span, min, kind)
       end
 
       # (c) dead-zone heuristic ------------------------------------------------

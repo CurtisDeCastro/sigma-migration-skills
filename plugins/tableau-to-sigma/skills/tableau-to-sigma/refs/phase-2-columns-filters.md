@@ -56,10 +56,21 @@ ruby scripts/discover-columns.rb --connection-id <id> \
 ```
 
 If `discover-columns.rb` returns 404 — meaning the table physically exists in
-the warehouse but is not in Sigma's static catalog — the fallback is to source
-via Custom SQL (see Phase 1e.1 "Warehouse-table source rejected? Fall back to
-Custom SQL"). There is no public API today to force a Sigma catalog refresh;
-only the UI's "Refresh schema" action on the connection page can do that.
+the warehouse but is not in Sigma's static catalog — **sync the catalog via
+the API, then retry** (verified 2026-07-07, 48/48 tables):
+
+```bash
+curl -sX POST -H "Authorization: Bearer $SIGMA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  "$SIGMA_BASE_URL/v2/connections/<connectionId>/sync" \
+  -d '{"path": ["DB", "SCHEMA", "TABLE"]}'
+```
+
+One call per table; `path` is the 3-part `[db, schema, table]` array. If the
+retry still 404s, fall back to sourcing via Custom SQL (see Phase 1e.1
+"Warehouse-table source rejected? Fall back to Custom SQL"). Do not skip
+straight to Custom SQL — the sync endpoint works and preserves
+`warehouse-table` lineage/governance.
 
 The script:
 - runs all column-fetches in parallel,

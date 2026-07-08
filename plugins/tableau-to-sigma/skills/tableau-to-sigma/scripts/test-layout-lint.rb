@@ -103,5 +103,54 @@ three = {
 }
 check('explicit 3-track band (all filled) lints clean') { lint(three).none? { |x| x.include?('band under-filled') } }
 
+# --- 4. per-kind minimum tile heights (rule f, E1) ---------------------------
+# Sigma renders chart/KPI tiles BLANK under ~3-4 grid rows (page render AND
+# PNG exports). A kpi-chart under 4 rows / chart under 8 / table under 10 must
+# be rejected; tiles at or above their floor lint clean.
+short = {
+  'layout' => <<~XML,
+    <Page type="grid" gridTemplateColumns="repeat(24, 1fr)" id="p1">
+      <GridContainer elementId="band" type="grid" gridColumn="1 / 25" gridRow="1 / 30" gridTemplateColumns="repeat(24, 1fr)">
+        <LayoutElement elementId="kpi1" gridColumn="1 / 13" gridRow="1 / 3"/>
+        <LayoutElement elementId="bar1" gridColumn="13 / 25" gridRow="1 / 6"/>
+        <LayoutElement elementId="tbl1" gridColumn="1 / 25" gridRow="6 / 12"/>
+        <LayoutElement elementId="ok1"  gridColumn="1 / 25" gridRow="12 / 29"/>
+      </GridContainer>
+      <LayoutElement elementId="txt1" gridColumn="1 / 25" gridRow="30 / 31"/>
+    </Page>
+  XML
+  'pages' => [{ 'id' => 'p1', 'name' => 'P', 'elements' => [
+    { 'id' => 'kpi1', 'kind' => 'kpi-chart', 'name' => 'Revenue' },
+    { 'id' => 'bar1', 'kind' => 'bar-chart', 'name' => 'By Region' },
+    { 'id' => 'tbl1', 'kind' => 'table', 'name' => 'Detail' },
+    { 'id' => 'ok1', 'kind' => 'pivot-table', 'name' => 'Matrix' },
+    { 'id' => 'txt1', 'kind' => 'text', 'body' => 'note' }
+  ] }]
+}
+sv = lint(short)
+check('kpi-chart under 4 rows flagged')  { sv.any? { |x| x.include?('kpi1') && x.include?('below minimum height') } }
+check('bar-chart under 8 rows flagged')  { sv.any? { |x| x.include?('bar1') && x.include?('below minimum height') } }
+check('table under 10 rows flagged')     { sv.any? { |x| x.include?('tbl1') && x.include?('below minimum height') } }
+check('17-row pivot NOT flagged')        { sv.none? { |x| x.include?('ok1') && x.include?('below minimum height') } }
+check('1-row text flagged (floor 2)')    { sv.any? { |x| x.include?('txt1') && x.include?('below minimum height') } }
+
+tall = {
+  'layout' => <<~XML,
+    <Page type="grid" gridTemplateColumns="repeat(24, 1fr)" id="p1">
+      <GridContainer elementId="band" type="grid" gridColumn="1 / 25" gridRow="1 / 13" gridTemplateColumns="repeat(24, 1fr)">
+        <LayoutElement elementId="kpi1" gridColumn="1 / 13" gridRow="1 / 5"/>
+        <LayoutElement elementId="bar1" gridColumn="13 / 25" gridRow="1 / 13"/>
+      </GridContainer>
+    </Page>
+  XML
+  'pages' => [{ 'id' => 'p1', 'name' => 'P', 'elements' => [
+    { 'id' => 'kpi1', 'kind' => 'kpi-chart', 'name' => 'Revenue' },
+    { 'id' => 'bar1', 'kind' => 'bar-chart', 'name' => 'By Region' }
+  ] }]
+}
+check('tiles at their floors lint clean (no min-height violations)') do
+  lint(tall).none? { |x| x.include?('below minimum height') }
+end
+
 puts($failures.zero? ? "\nlayout-lint: all tests passed" : "\nlayout-lint: #{$failures} FAILED")
 exit($failures.zero? ? 0 : 1)

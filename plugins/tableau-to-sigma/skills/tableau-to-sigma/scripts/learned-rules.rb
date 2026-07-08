@@ -1,12 +1,23 @@
 #!/usr/bin/env ruby
-# Load + apply customer-accumulated translation rules. The rules live in the
-# customer's HOME directory (~/.tableau-to-sigma/learned-rules.yaml), NOT in
-# the skill repo — that means `git pull` of the skill never clobbers what a
-# customer has discovered locally, and one customer's wins persist across
-# every workbook they migrate.
+# Load + apply learned translation rules from TWO sources, merged:
 #
-# File location is canonical: ~/.tableau-to-sigma/learned-rules.yaml
-# Override for testing via TABLEAU_TO_SIGMA_HOME env var.
+#   1. The repo-shipped STARTER PACK (learned/starter-rules.yaml at the skill
+#      root) — transferable rules validated on real migration runs, shipped
+#      with the skill so no machine starts empty.
+#   2. The customer's accumulated rules in their HOME directory
+#      (~/.tableau-to-sigma/learned-rules.yaml), NOT in the skill repo — so
+#      `git pull` of the skill never clobbers what a customer has discovered
+#      locally, and one customer's wins persist across every workbook they
+#      migrate.
+#
+# Merge semantics: the starter pack loads first, then the user file; USER
+# rules OVERRIDE starter rules on key collision (feature + tableau_pattern)
+# and are consulted first by apply()'s first-match-wins. append() writes only
+# to the user file — the starter pack is read-only skill content.
+#
+# User file location is canonical: ~/.tableau-to-sigma/learned-rules.yaml
+# Override for testing via TABLEAU_TO_SIGMA_HOME env var (user home) and
+# TABLEAU_TO_SIGMA_STARTER_RULES (starter-pack path).
 #
 # Schema (YAML):
 #   rules:
@@ -19,6 +30,12 @@
 #       validated_workbook: "wb-id-here"
 #       example_from: "workbook.twb line 1234"
 #       confidence: "validated" | "proposed" | "experimental"
+#
+# Entries MAY omit tableau_pattern/sigma_template — those are SPEC-GUIDANCE
+# rules (spec shapes / Sigma-formula authoring rules that are not safe blind
+# regex rewrites). apply() skips them (it requires both fields); they surface
+# via the CLI dump below and refs/fidelity-recipes.md. The repo starter pack
+# (learned/starter-rules.yaml) uses this flavor heavily.
 #
 # ⚠ SHADOWING: learned rules run BEFORE the built-in translators in
 # build-charts-from-signals.rb. The WINDOW_* / RUNNING_* / RANK / LOOKUP /
@@ -41,6 +58,9 @@ require 'time'
 module LearnedRules
   HOME_OVERRIDE = ENV['TABLEAU_TO_SIGMA_HOME']
   DEFAULT_HOME  = File.expand_path('~/.tableau-to-sigma')
+  # Repo-shipped starter pack lives at the SKILL ROOT (learned/), sibling of
+  # scripts/. Env override exists for tests only.
+  DEFAULT_STARTER = File.expand_path('../learned/starter-rules.yaml', __dir__)
 
   def self.home
     HOME_OVERRIDE || DEFAULT_HOME
@@ -48,6 +68,10 @@ module LearnedRules
 
   def self.rules_path
     File.join(home, 'learned-rules.yaml')
+  end
+
+  def self.starter_path
+    ENV['TABLEAU_TO_SIGMA_STARTER_RULES'] || DEFAULT_STARTER
   end
 
   def self.escalations_dir
@@ -59,19 +83,41 @@ module LearnedRules
     Dir.mkdir(escalations_dir) unless Dir.exist?(escalations_dir)
   end
 
-  # Load the customer's accumulated rules. Returns [] if the file is missing —
-  # that's the normal first-time case, NOT an error.
+  # Load rules: repo starter pack first, then the customer's accumulated
+  # rules. USER rules override starter rules on key collision
+  # (feature + tableau_pattern) and come FIRST in the returned array so
+  # apply()'s first-match-wins consults them before any starter rule.
+  # Returns [] when neither file exists — normal first-time case, NOT an
+  # error (a fresh checkout still gets the starter pack).
   def self.load
-    return [] unless File.exist?(rules_path)
-    data = YAML.safe_load(File.read(rules_path), permitted_classes: [Time, Date]) || {}
-    (data['rules'] || []).select do |r|
+    starter = load_file(starter_path, 'starter')
+    user    = load_file(rules_path,   'user')
+    user_keys = user.map { |r| rule_key(r) }
+    user + starter.reject { |r| user_keys.include?(rule_key(r)) }
+  end
+
+  # Identity used for user-overrides-starter dedupe — the same identity
+  # append() dedupes on.
+  def self.rule_key(rule)
+    [rule['feature'], rule['tableau_pattern']]
+  end
+
+  # Load one rules file. Returns [] if the file is missing. Tags each rule
+  # with its 'origin' (starter|user) for the CLI dump / debugging; consumers
+  # that only read feature/pattern/template are unaffected.
+  def self.load_file(path, origin)
+    return [] unless File.exist?(path)
+    data = YAML.safe_load(File.read(path), permitted_classes: [Time, Date]) || {}
+    rules = (data['rules'] || []).select do |r|
       # Only apply confidence=validated rules by default. proposed/experimental
       # rules are loaded but flagged so the agent can dry-run before trusting.
       conf = r['confidence'] || 'validated'
       conf == 'validated'
     end
+    rules.each { |r| r['origin'] ||= origin }
+    rules
   rescue StandardError => e
-    warn "WARN  learned-rules.yaml at #{rules_path} unreadable: #{e.message}; skipping"
+    warn "WARN  learned-rules yaml at #{path} unreadable: #{e.message}; skipping"
     []
   end
 
@@ -133,11 +179,17 @@ end
 # CLI: when invoked directly, dump the loaded rules for debugging
 if $PROGRAM_NAME == __FILE__
   rules = LearnedRules.load
-  puts "Learned-rules file: #{LearnedRules.rules_path}"
+  puts "Starter-pack file:  #{LearnedRules.starter_path}#{File.exist?(LearnedRules.starter_path) ? '' : '  (missing)'}"
+  puts "User rules file:    #{LearnedRules.rules_path}#{File.exist?(LearnedRules.rules_path) ? '' : '  (missing — normal first-time case)'}"
   puts "  rules loaded:      #{rules.length}"
   rules.each_with_index do |r, i|
-    puts "  [#{i}] #{r['feature']} (#{r['confidence'] || 'validated'})"
-    puts "      pattern: #{r['tableau_pattern']}"
-    puts "      → #{r['sigma_template']}"
+    puts "  [#{i}] #{r['feature']} (#{r['confidence'] || 'validated'}, #{r['origin'] || 'user'})"
+    if r['tableau_pattern'] && r['sigma_template']
+      puts "      pattern: #{r['tableau_pattern']}"
+      puts "      → #{r['sigma_template']}"
+    else
+      puts "      [spec-guidance — not auto-applied] #{r['description'].to_s.strip.gsub(/\s+/, ' ')[0..140]}"
+      puts "      hint: #{r['hint'].to_s.strip.gsub(/\s+/, ' ')[0..140]}" if r['hint']
+    end
   end
 end

@@ -20,7 +20,7 @@ set -u
 
 # --workdir DIR: also drop doctor.json here (in addition to the stable
 # ~/.sigma-migration/doctor.json). Everything else is positional-agnostic.
-WORKDIR=""
+WORKDIR="${DOCTOR_WORKDIR:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --workdir) WORKDIR="${2:-}"; shift 2 ;;
@@ -133,6 +133,27 @@ else
   warn "no Sigma credentials found" "Run 'ruby scripts/setup.rb' once (writes ~/.sigma-migration/env), or export SIGMA_CLIENT_ID/SIGMA_CLIENT_SECRET."
 fi
 
+# --- tableauhyperapi (informational — embedded-extract workbooks only) -----
+# Embedded-extract (.twbx) workbooks land their frozen data via
+# land-extracts.py, which needs the Hyper API. Not REQUIRED: warn-level only,
+# with the exact remediation. The human check SELF-GATES on land-extracts.py
+# existing next to this script, so this shared doctor stays byte-identical
+# across plugins and only speaks up where the landing path exists (tableau).
+# The JSON field is emitted everywhere for a uniform schema.
+HYPERAPI=false
+for _pyx in python3 python; do
+  if command -v "$_pyx" >/dev/null 2>&1 && "$_pyx" -c 'import tableauhyperapi' >/dev/null 2>&1; then HYPERAPI=true; break; fi
+done
+if [ "$HYPERAPI" != true ] && command -v py >/dev/null 2>&1 && py -3 -c 'import tableauhyperapi' >/dev/null 2>&1; then HYPERAPI=true; fi
+if [ -f "$HERE/land-extracts.py" ]; then
+  if [ "$HYPERAPI" = true ]; then
+    ok "tableauhyperapi present — embedded-extract workbooks can land via scripts/land-extracts.py"
+  else
+    warn "tableauhyperapi not installed (only needed for embedded-extract workbooks)" \
+         "pip install tableauhyperapi pandas snowflake-connector-python — see refs/extract-landing.md"
+  fi
+fi
+
 # --- skill version drift (v3 §2.1) -----------------------------------------
 # A plugin install pins a git SHA and never self-updates; running a stale SHA
 # silently ships pre-fidelity-layer output. Record {skill_sha, behind_count};
@@ -203,10 +224,12 @@ write_doctor_json() {
     printf '"runtimes":{"ruby":%s,"python":%s,"node":%s,"bash":true},' "$RUBY_OK" "$PY_OK" "$NODE_OK"
     printf '"versions":{"ruby":"%s","python":"%s","node":"%s"},' "$(jstr "$RUBY_V")" "$(jstr "$PY_VER")" "$(jstr "$NODE_V")"
     printf '"sandbox_hint":"%s",' "$(jstr "$SANDBOX_HINT")"
+    printf '"hyperapi_present":%s,' "$HYPERAPI"
     printf '"skill_sha":"%s",' "$(jstr "$SKILL_SHA")"
     printf '"behind_count":%s,' "$BEHIND_COUNT"
     printf '"agent_vision":%s,' "$AGENT_VISION"
     printf '"model_hint":"%s",' "$(jstr "$MODEL_HINT")"
+    printf '"generated_at":"%s",' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf '"pass":%s,' "$PASS_BOOL"
     printf '"failures":[%s]' "$fj"
     printf '}\n'

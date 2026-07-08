@@ -185,6 +185,15 @@ def agent_brief(sub, cluster, batch_results_path, leader_dm_id_path, out_dir, ov
 
     SKILL: ~/.claude/skills/tableau-to-sigma/  (read SKILL.md fully)
 
+    MODEL-FIT CHECKPOINT (Phase 0 — see the skill's refs/model-fit.md):
+    after scan-workbook-gaps + estimate-cost, if the complexity bucket is
+    large/very-large (or >1 dashboard, >30 zones/dashboard, any ❌/manual
+    gap rows, >50 calc fields) AND you are not running on the top model
+    tier, pause and ask the user once before proceeding (never silently
+    proceed on very-large). Pixel-fidelity claims require image input: if
+    you cannot Read PNGs, record the visual verdict as not-executable
+    (named degradation) — never a blind `pass`.
+
     #{override_block}#{reuse ? <<~REUSE : <<~LEAD}
       DM REUSE — your cluster leader has already built/picked the DM. Read
       `#{leader_dm_id_path}` for `{ dataModelId, fact_element_id, denorm_plan_path }`.
@@ -260,6 +269,17 @@ def agent_brief(sub, cluster, batch_results_path, leader_dm_id_path, out_dir, ov
     6. The result line MUST include `screenshot_path: "<absolute path>"`.
        GREEN tier is INVALID without a non-null screenshot_path AND
        composition match.
+    7. **PER-PAGE RCF (render-compare-fix) — every page, not just page 1.**
+       Discovery caches every source dashboard at high resolution under
+       `<workdir>/dashboards/*.png` — those PNGs are your ground truth.
+       For EACH page: render the Sigma page, Read it against the matching
+       source dashboard PNG, fix deltas via the Phase 5g loop
+       (`fidelity-loop.rb render/record/apply-patch`, recipes in the
+       skill's refs/fidelity-recipes.md), and RECORD a verdict per page
+       (`record-visual-check.rb --verdict pass|divergent`). A conversion
+       with unrendered or unverdicted pages is not GREEN. If you cannot
+       read images, record the verdict as not-executable (see the
+       MODEL-FIT CHECKPOINT above) — never attest blind.
 
     SUBSTITUTIONS for unsupported Tableau chart types (when source PNG
     shows one of these, render the listed Sigma equivalent and note the
@@ -283,6 +303,39 @@ def agent_brief(sub, cluster, batch_results_path, leader_dm_id_path, out_dir, ov
       script works against any Sigma-supported warehouse (Snowflake, BigQuery,
       Databricks, Postgres, etc.). If it 404s, the table isn't in Sigma's
       catalog — fall back to Custom SQL per SKILL.md Phase 1e.1.
+
+    >>>>>> LEARNINGS FROM PRIOR RUNS — bake in from the first POST <<<<<<
+
+    Live-verified on a 2026-07 10-workbook live migration (10/10 GREEN). One line
+    each; spec-shaped detail in the skill's refs/fidelity-recipes.md and
+    learned/starter-rules.yaml. Do NOT rediscover these at runtime:
+
+    - KPI columns must INLINE the full aggregate expression — a bare
+      sibling-column ref compiles clean but renders null.
+    - Floating bars (waterfall/candlestick/gantt): stacked bar with a white
+      base series NAMED `zz base` — Sigma stacks the last-sorted category at
+      the bottom; the sort-name trick is load-bearing. Positive domain only.
+    - Bump/rank charts: inverted yAxis domain works —
+      `yAxis.format.scale.domain {min: 5.5, max: 0.5}` puts rank 1 on top.
+    - `{{formula | d3-format}}` text templating works with ELEMENT refs
+      (incl. cross-page); filtering-list-control refs render Invalid Query
+      (segmented refs work).
+    - Wrap numbers in `Text()` when concatenating with strings — `"Q" & 4`
+      compiles but errors at render.
+    - Integer/bit columns as If()/Switch() predicates need an explicit
+      comparison: `If([flag] = 1, ...)`, never `If([flag], ...)`.
+    - Single-select manual list controls take scalar `value`, NOT
+      `values: []` (else filters + default silently drop).
+    - List-control `filters` targeting a NUMBER column are silently
+      stripped on PUT — bind to a `Text(...)` filter-key column.
+    - pivot/table `conditionalFormats` need `includeValues: true` —
+      `false` silently kills the whole format.
+    - No `style.backgroundColor` on kpi-chart or bar-chart (blanks the tile
+      in PNG export); tiles under ~3-4 grid rows blank their value — reserve
+      height in the layout.
+    - Catalog miss (discover-columns 404): POST
+      /v2/connections/{id}/sync with {"path":["DB","SCHEMA","TABLE"]},
+      retry, and only then fall back to Custom SQL.
 
     >>>>>> SPEC-SHAPE GOTCHAS — pre-warning <<<<<<
 
@@ -321,6 +374,15 @@ def agent_brief(sub, cluster, batch_results_path, leader_dm_id_path, out_dir, ov
       `columnIds`. Verified 2026-05-24.
 
     >>>>>> PHASE 6 IS MANDATORY — HARD GATE <<<<<<
+
+    EXACT-PARITY RULE FOR LANDED EXTRACTS: if this workbook's data was
+    landed into the warehouse from frozen extracts (.hyper payloads —
+    check the landing manifest / DS OVERRIDE note), Sigma reads
+    byte-identical data, so parity is EXACT: every value must match or the
+    delta must be named per-check. Do NOT use `--extract-mode`, do NOT
+    accept drift tolerance, and refuse any "data freshness" explanation —
+    on landed extracts a value gap is always a real bug (missing filter,
+    wrong aggregate, ungrouped table).
 
     Phase 6 (parity verification) is the single most commonly-skipped step
     in subagent runs — beads-sigma-4pm. To prevent silent skips:
@@ -397,6 +459,12 @@ def agent_brief(sub, cluster, batch_results_path, leader_dm_id_path, out_dir, ov
     CONTINUE-ON-FAILURE — if you hit a hard blocker (POST rejects, column-type
     error you can't resolve in 2 retry attempts, etc.), file a beads ticket
     via `bd create` and write a RED result line. Do not block other workbooks.
+
+    TELEMETRY — do NOT run report-telemetry.py yourself. The batch
+    orchestrator asks the user once and sends (or skips) telemetry for the
+    whole batch after all waves complete; a per-subagent ping would
+    double-count and re-prompt the user. Just record your duration_s in the
+    result line.
 
     Do NOT push any code changes.
   BRIEF

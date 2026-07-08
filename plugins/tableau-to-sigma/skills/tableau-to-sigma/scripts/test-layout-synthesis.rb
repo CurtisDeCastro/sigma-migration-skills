@@ -1,0 +1,318 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+#
+# test-layout-synthesis.rb — E1/E2 layout synthesis regression tests.
+#
+# Covers the structure-aware synthesis in build-dashboard-layout.rb (workstream
+# E of the v3 consistency plan — the 10/10 hand-rolled-layout rate fix):
+#   - SigmaLayout band detection (pure): KPI rows (x-disjoint, similar height),
+#     sidebar rails, header text zones
+#   - E1 per-kind minimum row spans: expansion + push-down never overlaps
+#   - KPI rows emit ONE GridContainer, equal inner spans, inner gridRow
+#     matching the container span (the KPI-sliver rule)
+#   - sidebar rail: vertical repeat(1,1fr) container of stacked controls;
+#     the content grid gets the remaining columns
+#   - census: exact-compatible pages + new bands_detected/min_row_expansions
+#   - determinism: two runs produce byte-identical outputs
+#
+# Fixtures are minimal derivations of real live-migration zone trees
+# (supermart-sales' header + KPI band; superstore-performance's left
+# filter/param rail). Offline, creds-free. Run: ruby scripts/test-layout-synthesis.rb
+
+require 'json'
+require 'rexml/document'
+require 'tmpdir'
+require 'rbconfig'
+require_relative 'lib/layout'
+require_relative 'lib/layout_lint'
+
+BUILD = File.join(__dir__, 'build-dashboard-layout.rb')
+RUBY  = RbConfig.ruby
+
+$fail = 0
+def ok(name, cond)
+  puts((cond ? '  ok  ' : 'FAIL  ') + name)
+  $fail += 1 unless cond
+end
+
+def build(dl, wb, dir)
+  File.write(File.join(dir, 'dl.json'), JSON.generate(dl))
+  File.write(File.join(dir, 'wb.json'), JSON.generate(wb))
+  out = File.join(dir, 'layout.xml')
+  log = `#{RUBY} #{BUILD} --layout #{File.join(dir, 'dl.json')} --wb-ids #{File.join(dir, 'wb.json')} --out #{out} 2>&1`
+  xml = File.exist?(out) ? File.read(out) : nil
+  census = File.exist?(File.join(dir, 'layout-census.json')) ? JSON.parse(File.read(File.join(dir, 'layout-census.json'))) : nil
+  elements = File.exist?("#{out}.elements.json") ? File.read("#{out}.elements.json") : nil
+  [xml, census, log, elements]
+end
+
+def doc_for(xml)
+  REXML::Document.new("<Root>#{xml.sub(/\A<\?xml[^>]*\?>\s*/, '')}</Root>")
+end
+
+def rect(el)
+  gcc = el.attributes['gridColumn'].to_s.split('/').map { |s| s.strip.to_i }
+  grr = el.attributes['gridRow'].to_s.split('/').map { |s| s.strip.to_i }
+  [gcc[0], gcc[1], grr[0], grr[1]]
+end
+
+# No two SIBLINGS (page-level, or within one container) may overlap.
+def collisions(xml)
+  bad = []
+  check = lambda do |parent, label|
+    sibs = parent.elements.to_a.select { |e| %w[GridContainer LayoutElement].include?(e.name) }
+    sibs.map { |e| [e.attributes['elementId'], rect(e)] }.combination(2).each do |(ia, ra), (ib, rb)|
+      bad << "#{label}: #{ia} vs #{ib}" if ra[0] < rb[1] && rb[0] < ra[1] && ra[2] < rb[3] && rb[2] < ra[3]
+    end
+    sibs.each { |e| check.call(e, e.attributes['elementId']) if e.name == 'GridContainer' }
+  end
+  doc_for(xml).elements.each('Root/Page') { |pg| check.call(pg, "page #{pg.attributes['id']}") }
+  bad
+end
+
+# ---- 0. pure band-detection + min-row functions ------------------------------
+puts '-- pure functions'
+ok('min_rows_for: kpi-chart 4 / bar-chart 8 / pivot 10 / control 2',
+   SigmaLayout.min_rows_for('kpi-chart') == 4 && SigmaLayout.min_rows_for('bar-chart') == 8 &&
+   SigmaLayout.min_rows_for('pivot-table') == 10 && SigmaLayout.min_rows_for('control') == 2)
+
+kpi_z = lambda do |id, x, y, h = 10, w = 20|
+  { 'id' => id, 'kind' => 'chart', 'caption' => id, 'chart_kind' => 'kpi',
+    'measures' => ['m'], 'x_pct' => x, 'y_pct' => y, 'w_pct' => w, 'h_pct' => h }
+end
+row = [kpi_z.call('a', 2, 14), kpi_z.call('b', 27, 14), kpi_z.call('c', 52, 14.5), kpi_z.call('d', 77, 14)]
+rows = SigmaLayout.detect_kpi_rows(row)
+ok('detect_kpi_rows: 4 adjacent similar-height KPIs -> one row of 4',
+   rows.length == 1 && rows[0].map { |z| z['id'] } == %w[a b c d])
+stacked = [kpi_z.call('a', 10, 10, 4), kpi_z.call('b', 10, 13, 4)] # same x -> vertical stack
+ok('detect_kpi_rows: vertically stacked same-x tiles are NOT a row',
+   SigmaLayout.detect_kpi_rows(stacked).empty?)
+tallmix = [kpi_z.call('a', 2, 10, 6), kpi_z.call('b', 30, 10, 16)] # 2.6x height ratio
+ok('detect_kpi_rows: dissimilar heights do not group',
+   SigmaLayout.detect_kpi_rows(tallmix).empty?)
+furniture = [{ 'id' => 'f', 'kind' => 'chart', 'caption' => 'f', 'chart_kind' => 'kpi',
+               'measures' => [], 'rows_shelf' => {}, 'cols_shelf' => {},
+               'x_pct' => 2, 'y_pct' => 14, 'w_pct' => 20, 'h_pct' => 10 }, kpi_z.call('b', 27, 14)]
+ok('detect_kpi_rows: non-plotting furniture zones are not KPI candidates',
+   SigmaLayout.detect_kpi_rows(furniture).empty?)
+
+rail_zones = [
+  { 'id' => 'p1', 'kind' => 'parameter', 'x_pct' => 5, 'y_pct' => 30, 'w_pct' => 6, 'h_pct' => 3 },
+  { 'id' => 'f1', 'kind' => 'filter', 'x_pct' => 5, 'y_pct' => 35, 'w_pct' => 6, 'h_pct' => 3 },
+  { 'id' => 'f2', 'kind' => 'filter', 'x_pct' => 5, 'y_pct' => 40, 'w_pct' => 6, 'h_pct' => 3 },
+  { 'id' => 'ch', 'kind' => 'chart', 'caption' => 'T', 'measures' => ['m'],
+    'x_pct' => 16, 'y_pct' => 10, 'w_pct' => 80, 'h_pct' => 80 }
+]
+sb = SigmaLayout.detect_sidebar(rail_zones)
+ok('detect_sidebar: narrow left column of controls -> left rail',
+   sb && sb[:side] == :left && sb[:zones].map { |z| z['id'] } == %w[p1 f1 f2])
+wide = rail_zones.map { |z| z['kind'] == 'chart' ? z : z.merge('w_pct' => 25) }
+ok('detect_sidebar: a 25%-wide control column is NOT a rail (<20% rule)',
+   SigmaLayout.detect_sidebar(wide).nil?)
+
+hdr = SigmaLayout.detect_header_zones(
+  [{ 'id' => 't1', 'kind' => 'text', 'x_pct' => 5, 'y_pct' => 1, 'w_pct' => 60, 'h_pct' => 5 },
+   { 'id' => 't2', 'kind' => 'text', 'x_pct' => 5, 'y_pct' => 50, 'w_pct' => 90, 'h_pct' => 5 }]
+)
+ok('detect_header_zones: topmost full-width text only', hdr.map { |z| z['id'] } == ['t1'])
+
+r2, n2 = SigmaLayout.expand_min_rows([[1, 13, 1, 3], [1, 13, 3, 5]], [8, 8])
+ok('expand_min_rows: expands both and pushes the lower tile down (no overlap)',
+   n2 == 2 && r2 == [[1, 13, 1, 9], [1, 13, 9, 17]])
+ok('expand_min_rows: no-op when everything meets its floor',
+   SigmaLayout.expand_min_rows([[1, 13, 1, 9]], [8]) == [[[1, 13, 1, 9]], 0])
+
+# ---- 1. supermart-like: header + KPI band ------------------------------------
+puts '-- header + KPI band (supermart-sales shape)'
+DL_KPI = [{
+  'dashboard' => 'Overview',
+  'zones' => [
+    { 'id' => 't1', 'kind' => 'text', 'x_pct' => 5, 'y_pct' => 1, 'w_pct' => 60, 'h_pct' => 5 },
+    kpi_z.call('k1', 2, 14), kpi_z.call('k2', 27, 14), kpi_z.call('k3', 52, 14), kpi_z.call('k4', 77, 14),
+    { 'id' => 'c1', 'kind' => 'chart', 'caption' => 'Sales Trend', 'chart_kind' => 'bar',
+      'measures' => ['m'], 'x_pct' => 1, 'y_pct' => 30, 'w_pct' => 48, 'h_pct' => 30 },
+    { 'id' => 'c2', 'kind' => 'chart', 'caption' => 'Category Split', 'chart_kind' => 'line',
+      'measures' => ['m'], 'x_pct' => 51, 'y_pct' => 30, 'w_pct' => 48, 'h_pct' => 30 }
+  ],
+  'zone_tree' => []
+}]
+WB_KPI = { 'pages' => [
+  { 'name' => 'Data', 'id' => 'page-data', 'elements' => [{ 'id' => 'master', 'kind' => 'table', 'name' => 'M' }] },
+  { 'name' => 'Overview', 'id' => 'page-ov', 'elements' => [
+    { 'id' => 'title-ov', 'kind' => 'text', 'name' => nil },
+    { 'id' => 'text-t1', 'kind' => 'text', 'name' => nil },
+    { 'id' => 'el-k1', 'kind' => 'kpi-chart', 'name' => 'k1' },
+    { 'id' => 'el-k2', 'kind' => 'kpi-chart', 'name' => 'k2' },
+    { 'id' => 'el-k3', 'kind' => 'kpi-chart', 'name' => 'k3' },
+    { 'id' => 'el-k4', 'kind' => 'kpi-chart', 'name' => 'k4' },
+    { 'id' => 'el-c1', 'kind' => 'bar-chart', 'name' => 'Sales Trend' },
+    { 'id' => 'el-c2', 'kind' => 'line-chart', 'name' => 'Category Split' }
+  ] }
+] }
+
+Dir.mktmpdir do |d|
+  xml, census, log, _els = build(DL_KPI, WB_KPI, d)
+  ok('builder produced layout XML', !xml.nil?)
+  ok('took the synthesized path', log.include?('synthesized layout'))
+  next if xml.nil?
+  doc = doc_for(xml)
+  gcs = doc.elements.to_a('//GridContainer')
+  kpi_gc = gcs.find do |g|
+    ids = g.elements.to_a('LayoutElement').map { |l| l.attributes['elementId'] }
+    ids.sort == %w[el-k1 el-k2 el-k3 el-k4]
+  end
+  ok('the 4 KPI tiles live in ONE GridContainer', !kpi_gc.nil?)
+  if kpi_gc
+    cr = rect(kpi_gc)
+    span = cr[3] - cr[2]
+    kids = kpi_gc.elements.to_a('LayoutElement').map { |l| rect(l) }
+    ok('KPI container spans the full content width', cr[0] == 1 && cr[1] == 25)
+    ok('inner KPI spans are equal (24/4 = 6 cols each)',
+       kids.map { |r| r[1] - r[0] }.uniq == [6])
+    ok("inner gridRow matches the container span (KPI-sliver rule, span=#{span})",
+       kids.all? { |r| r[2] == 1 && r[3] == 1 + span })
+    ok('KPI container is at least the kpi-chart floor tall', span >= 4)
+  end
+  hdr_gc = gcs.find { |g| g.attributes['elementId'].to_s.end_with?('-hdr') }
+  hdr_ids = hdr_gc ? hdr_gc.elements.to_a('LayoutElement').map { |l| l.attributes['elementId'] } : []
+  ok('header band holds the title AND the detected source header text',
+     hdr_ids.include?('title-ov') && hdr_ids.include?('text-t1'))
+  ok('no collisions anywhere', collisions(xml).empty?)
+  ok('census pages stay exact-compatible (zones/placed/dropped/grid_fill_pct)',
+     census && census['pages'].first &&
+     %w[page zones placed dropped grid_fill_pct].all? { |k| census['pages'].first.key?(k) })
+  ok('census bands_detected: header + 1 KPI row, no sidebar',
+     census && census['bands_detected'] == { 'header' => true, 'kpi_rows' => 1, 'sidebar' => false })
+  ok('census carries min_row_expansions', census && census.key?('min_row_expansions'))
+  ok('all 6 content tiles placed',
+     census['pages'].first['placed'] == 6 && census['pages'].first['dropped'] == 0)
+  spec = { 'pages' => WB_KPI['pages'], 'layout' => xml }
+  ok('output passes layout lint (incl. the new min-row rule)', LayoutLint.lint(spec).empty?)
+end
+
+# ---- 2. superstore-like: left filter/param rail ------------------------------
+puts '-- sidebar rail (superstore-performance shape)'
+DL_RAIL = [{
+  'dashboard' => 'Order Detail',
+  'zones' => [
+    { 'id' => 'p1', 'kind' => 'parameter', 'caption' => nil, 'filter_column_caption' => 'Metric',
+      'x_pct' => 5, 'y_pct' => 30, 'w_pct' => 6, 'h_pct' => 3 },
+    { 'id' => 'f1', 'kind' => 'filter', 'caption' => 'tbl', 'filter_column_caption' => 'Region',
+      'x_pct' => 5, 'y_pct' => 35, 'w_pct' => 6, 'h_pct' => 3 },
+    { 'id' => 'f2', 'kind' => 'filter', 'caption' => 'tbl', 'filter_column_caption' => 'Segment',
+      'x_pct' => 5, 'y_pct' => 40, 'w_pct' => 6, 'h_pct' => 3 },
+    { 'id' => 'f3', 'kind' => 'filter', 'caption' => 'tbl', 'filter_column_caption' => 'Category',
+      'x_pct' => 5, 'y_pct' => 45, 'w_pct' => 6, 'h_pct' => 3 },
+    { 'id' => 'z1', 'kind' => 'chart', 'caption' => 'Order Detail Table', 'chart_kind' => 'other',
+      'measures' => ['m'], 'x_pct' => 16, 'y_pct' => 10, 'w_pct' => 80, 'h_pct' => 80 },
+    { 'id' => 'z2', 'kind' => 'chart', 'caption' => 'Detail Title', 'chart_kind' => 'kpi',
+      'measures' => ['m'], 'x_pct' => 16, 'y_pct' => 5, 'w_pct' => 30, 'h_pct' => 4 }
+  ],
+  'zone_tree' => []
+}]
+WB_RAIL = { 'pages' => [
+  { 'name' => 'Data', 'id' => 'page-data', 'elements' => [{ 'id' => 'master', 'kind' => 'table', 'name' => 'M' }] },
+  { 'name' => 'Order Detail', 'id' => 'page-od', 'elements' => [
+    { 'id' => 'title-od', 'kind' => 'text', 'name' => nil },
+    { 'id' => 'ctl-metric', 'kind' => 'control', 'name' => 'Metric' },
+    { 'id' => 'ctl-region', 'kind' => 'control', 'name' => 'Region' },
+    { 'id' => 'ctl-segment', 'kind' => 'control', 'name' => 'Segment' },
+    { 'id' => 'ctl-category', 'kind' => 'control', 'name' => 'Category' },
+    { 'id' => 'el-table', 'kind' => 'table', 'name' => 'Order Detail Table' },
+    { 'id' => 'el-title2', 'kind' => 'kpi-chart', 'name' => 'Detail Title' }
+  ] }
+] }
+
+first_run = nil
+Dir.mktmpdir do |d|
+  xml, census, log, els = build(DL_RAIL, WB_RAIL, d)
+  first_run = [xml, JSON.generate(census), els]
+  ok('builder produced layout XML', !xml.nil?)
+  ok('took the synthesized path (rail)', log.include?('synthesized layout') && log.include?('left sidebar rail'))
+  next if xml.nil?
+  doc = doc_for(xml)
+  gcs = doc.elements.to_a('//GridContainer')
+  rail_gc = gcs.find { |g| g.attributes['elementId'].to_s.end_with?('-rail') }
+  ok('a rail GridContainer is emitted', !rail_gc.nil?)
+  if rail_gc
+    ok('rail declares a single internal column (repeat(1, 1fr))',
+       rail_gc.attributes['gridTemplateColumns'] == 'repeat(1, 1fr)')
+    ids = rail_gc.elements.to_a('LayoutElement').map { |l| l.attributes['elementId'] }
+    ok('all 4 controls stack INSIDE the rail (source y-order)',
+       ids == %w[ctl-metric ctl-region ctl-segment ctl-category])
+    ok('the table is NOT in the rail', !ids.include?('el-table'))
+    kid_rects = rail_gc.elements.to_a('LayoutElement').map { |l| rect(l) }
+    ok('rail controls meet the control floor (>= 2 rows each)',
+       kid_rects.all? { |r| r[3] - r[2] >= 2 })
+    rr = rect(rail_gc)
+    ok('rail hugs the left edge', rr[0] == 1)
+    content_gcs = gcs - [rail_gc] - gcs.select { |g| g.attributes['elementId'].to_s.end_with?('-hdr') }
+    ok('content containers start where the rail ends (remaining columns)',
+       content_gcs.any? && content_gcs.all? { |g| rect(g)[0] == rr[1] })
+  end
+  table_le = doc.elements.to_a('//LayoutElement').find { |l| l.attributes['elementId'] == 'el-table' }
+  ok('table tile meets its 10-row floor', table_le && rect(table_le)[3] - rect(table_le)[2] >= 10)
+  ok('no collisions anywhere', collisions(xml).empty?)
+  ok('census bands_detected reports the sidebar',
+     census && census['bands_detected']['sidebar'] == true)
+  ok('nothing dropped', census['pages'].all? { |p| p['dropped'] == 0 })
+  spec = { 'pages' => WB_RAIL['pages'], 'layout' => xml }
+  ok('output passes layout lint', LayoutLint.lint(spec).empty?)
+  ok('documented XML shape: Page attrs + no empty elementId',
+     xml.include?('<Page type="grid" gridTemplateColumns="repeat(24, 1fr)"') &&
+     !xml.include?('elementId=""'))
+end
+
+# determinism: a second run must be byte-identical (same input, same XML)
+Dir.mktmpdir do |d|
+  xml, census, _log, els = build(DL_RAIL, WB_RAIL, d)
+  ok('deterministic: layout XML byte-identical across runs', xml == first_run[0])
+  ok('deterministic: census byte-identical across runs', JSON.generate(census) == first_run[1])
+  ok('deterministic: elements sidecar byte-identical across runs', els == first_run[2])
+end
+
+# ---- 3. E1 min-row expansion on the geometry-banded path ---------------------
+puts '-- min-row expansion (banded path)'
+DL_MIN = [{
+  'dashboard' => 'Dash',
+  'zones' => [
+    { 'id' => 'a', 'kind' => 'chart', 'caption' => 'A', 'chart_kind' => 'bar', 'measures' => ['m'],
+      'x_pct' => 0, 'y_pct' => 0, 'w_pct' => 50, 'h_pct' => 13 },
+    { 'id' => 'b', 'kind' => 'chart', 'caption' => 'B', 'chart_kind' => 'bar', 'measures' => ['m'],
+      'x_pct' => 50, 'y_pct' => 0, 'w_pct' => 50, 'h_pct' => 13 },
+    { 'id' => 'c', 'kind' => 'chart', 'caption' => 'C', 'chart_kind' => 'table', 'measures' => ['m'],
+      'x_pct' => 0, 'y_pct' => 13, 'w_pct' => 100, 'h_pct' => 87 }
+  ],
+  'zone_tree' => []
+}]
+WB_MIN = { 'pages' => [
+  { 'name' => 'Data', 'id' => 'page-data', 'elements' => [{ 'id' => 'master', 'kind' => 'table', 'name' => 'M' }] },
+  { 'name' => 'Dash', 'id' => 'page-d', 'elements' => [
+    { 'id' => 'title-d', 'kind' => 'text', 'name' => nil },
+    { 'id' => 'el-a', 'kind' => 'bar-chart', 'name' => 'A' },
+    { 'id' => 'el-b', 'kind' => 'bar-chart', 'name' => 'B' },
+    { 'id' => 'el-c', 'kind' => 'table', 'name' => 'C' }
+  ] }
+] }
+
+Dir.mktmpdir do |d|
+  xml, census, log, _els = build(DL_MIN, WB_MIN, d)
+  ok('builder produced layout XML', !xml.nil?)
+  ok('banded path taken (no structures, no controls)',
+     !log.include?('synthesized layout') && !log.include?('container-tree layout'))
+  next if xml.nil?
+  doc = doc_for(xml)
+  spans = {}
+  doc.elements.each('//LayoutElement') { |l| spans[l.attributes['elementId']] = rect(l) }
+  ok('short bar charts expanded to the 8-row floor',
+     spans['el-a'] && spans['el-a'][3] - spans['el-a'][2] >= 8 &&
+     spans['el-b'] && spans['el-b'][3] - spans['el-b'][2] >= 8)
+  ok('table meets the 10-row floor', spans['el-c'] && spans['el-c'][3] - spans['el-c'][2] >= 10)
+  ok('expansion pushed the lower band down — no collisions', collisions(xml).empty?)
+  ok('census counts the expansions', census && census['min_row_expansions'] >= 2)
+  spec = { 'pages' => WB_MIN['pages'], 'layout' => xml }
+  ok('output passes layout lint (no sub-minimum tiles shipped)', LayoutLint.lint(spec).empty?)
+end
+
+puts($fail.zero? ? "\nALL PASS — layout synthesis (bands, rail, KPI containers, min rows, determinism)" : "\n#{$fail} FAILED")
+exit($fail.zero? ? 0 : 1)

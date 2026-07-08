@@ -23,10 +23,11 @@
 #     "inode_id": "...",
 #     "columns": [ { "name": "...", "type": "..." }, ... ] }
 #
-# On 404 (table not found in Sigma's catalog), exits 4 with a stderr hint
-# pointing at the Custom-SQL fallback (Phase 1e.1 in SKILL.md). The table
-# may physically exist in the warehouse but not yet be indexed by Sigma —
-# only the UI's "Refresh schema" action on the connection page can re-index.
+# On 404 (table not found in Sigma's catalog), exits 4 with a stderr hint.
+# The table may physically exist in the warehouse but not yet be indexed by
+# Sigma. First re-index via the API — POST /v2/connections/{id}/sync with
+# body {"path":["DB","SCHEMA","TABLE"]} (verified 2026-07-07) — then retry;
+# fall back to Custom SQL (Phase 1e.1 in SKILL.md) only if the retry 404s.
 
 require 'net/http'
 require 'uri'
@@ -91,7 +92,11 @@ if status == 404
   warn "Table #{opts[:path]} not found in Sigma's catalog for connection #{opts[:conn]}."
   warn 'This usually means the table physically exists in the warehouse but'
   warn "Sigma's static catalog hasn't been re-indexed since it was created."
-  warn 'Fallback: source via Custom SQL — see SKILL.md Phase 1e.1.'
+  warn 'First: force a catalog sync via the API, then re-run this script:'
+  warn "  curl -sX POST -H \"Authorization: Bearer $SIGMA_API_TOKEN\" -H 'Content-Type: application/json' \\"
+  warn "    \"$SIGMA_BASE_URL/v2/connections/#{opts[:conn]}/sync\" \\"
+  warn "    -d '{\"path\": #{JSON.generate(path_parts)}}'"
+  warn 'If the retry still 404s, fall back to Custom SQL — see SKILL.md Phase 1e.1:'
   warn "  source: { kind: 'sql', connectionId: '#{opts[:conn]}', statement: 'SELECT * FROM #{opts[:path]}' }"
   exit 4
 end

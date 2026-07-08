@@ -90,3 +90,96 @@ ledger flows them to the report instead of blocking the gate:
 - `useAsFilter` (chart-as-filter), pie percent-labels (`valueFormat:'percent'`) — silently dropped.
 - point-map/region-map title+legend overlap (no position knob).
 - Log-axis PNG export renders linear (render-side, not a spec defect).
+
+---
+
+## Live-verified recipes (2026-07 10-workbook live migration)
+
+Validated end-to-end on the 10-workbook / 30-dashboard live-migration migration (10/10 GREEN,
+~620 exact value checks). Each recipe rendered correctly, round-tripped through GET, and
+reproduced the source's numbers exactly. The transferable one-line rules also ship in the
+learned-rules starter pack (`learned/starter-rules.yaml`) — this section is the spec-shaped
+detail behind them.
+
+### Floating bars — waterfall / candlestick / gantt (white-base recipe)
+Stacked bar with an invisible base series **named `zz base`** — Sigma stacks the
+**last-sorted** color category at the bottom, so the sort-name trick is load-bearing (rename
+it and the bars stop floating). Base value = the bar's offset (waterfall running total /
+candle low / gantt start); visible series = the span. Base color = the card background
+(`#FFFFFF` — `color.scheme` rejects 8-digit `#RRGGBBAA` hex, so true transparency is out).
+
+```json
+{ "kind": "bar-chart", "xAxis": {"columnIds": ["c-stage"]},
+  "yAxis": {"columnIds": ["c-base", "c-span"]}, "stacking": "stack",
+  "color": {"by": "category", "column": "c-series",
+            "scheme": ["#FFFFFF", "#4e79a7"]} }
+```
+- Series names: base column/category `zz base` (sorts last → stacks bottom), span series any name.
+- Candlestick: split span into up/down measures for green/red; tighten `yAxis.format.scale.domain` (e.g. 34–48). No high/low wicks — single mark layer; record `sigma-capability`.
+- **Positive-domain only.** Stacking splits pos/neg, so floating bars *crossing zero* are impossible — fall back to signed diverging bars (up/down/total colors + labels) and record `sigma-capability`.
+
+### Waffle / gridplot — pivot + `backgroundScale`
+10×10 pivot (row bucket × col bucket via SQL `ROW_NUMBER` division) with a computed
+`FILLED` 0/1 flag driving the fill:
+
+```json
+{ "kind": "pivot-table", "values": ["c-filled"],
+  "rowsBy": [{"id": "c-row"}], "columnsBy": [{"id": "c-col"}],
+  "conditionalFormats": [{ "type": "backgroundScale", "columnIds": ["c-filled"],
+    "scheme": ["#e8eaed", "#0e7c7b"], "includeValues": true }] }
+```
+**`includeValues: false` silently kills the whole format** — keep `true`; cell values cannot
+be hidden via spec (ship them visible rather than lose the fill). 13 filled cells = 13% exact.
+
+### Diverging bars — likert scales / population pyramids
+Signed measures (negate the "disagree"/left side in SQL or a calc column), one bar chart,
+category color per sentiment/sex band. Bars diverge around zero natively — no special mark
+needed; shares stay exact. Same recipe covers zero-crossing waterfalls (see above).
+
+### Strip / jitter / barbell / beeswarm — scatter with computed coordinates
+`scatter-plot` with a SQL-computed positional column + `size` channel:
+- **Strip/jitter:** deterministic hash jitter (`MOD(ABS(HASH(id)), 100)/100.0`) on the cross axis.
+- **Beeswarm:** symmetric stack — `ROW_NUMBER() OVER (PARTITION BY bin ORDER BY v)` with alternating sign.
+- **Barbell/strip with magnitude:** numeric-dimension x + `size: {id: c-measure}`.
+A column cannot sit on two channels (`xAxis` + `color`) — duplicate it under a second id.
+
+### Bump chart — inverted rank axis
+`yAxis.format.scale.domain` **inverted domains work**: `{"min": 5.5, "max": 0.5}` renders
+rank 1 on top. Half-step over/undershoot keeps the extreme rank lines unclipped. Rank via
+SQL helper (`RANK() OVER (PARTITION BY period ORDER BY v DESC)`).
+
+### Chord / sankey — matrix-heatmap fallback (no ribbon mark exists)
+Origin × destination pivot with `backgroundScale` on the flow measure preserves every flow
+value exactly; for sankey add normalized stacked bars per stage for the stage shares:
+
+```json
+{ "kind": "pivot-table", "values": ["c-flow"],
+  "rowsBy": [{"id": "c-origin"}], "columnsBy": [{"id": "c-dest"}],
+  "conditionalFormats": [{ "type": "backgroundScale", "columnIds": ["c-flow"],
+    "scheme": ["#FFFFFF", "#6a51a3"], "includeValues": true }] }
+```
+Record the ribbon geometry itself as `sigma-capability` (no spec or UI path).
+
+### Hex map — us-state choropleth fallback + sequential fill
+Tableau hex-tile maps (custom polygon grids) have no Sigma geometry; ship a `region-map`
+`regionType: "us-state"` choropleth. Sequential value fill **is spec-supported**:
+
+```json
+{ "kind": "region-map", "region": {"id": "c-state", "regionType": "us-state"},
+  "color": {"by": "scale", "column": "c-sales"} }
+```
+`by: "scale"` rendered a white→navy fill and round-tripped (49/49 state values exact);
+`by: "value"` remains rejected (HTTP 400). `color.column` must differ from `region.id`.
+
+### `{{formula | d3-format}}` text templating — delta badges, dynamic sentences, alerts
+Text elements template live values: `{{Max([OD Rollup/Order Year Text])}}`,
+`{{Sum([Master/Delta]) | +.1%}}`. **Element refs work (including cross-page); refs to a
+filtering list control render `Invalid Query`** (segmented-control refs work). Template on
+an element-ref formula over a helper column, never a filtering control's id. Wrap numbers
+in `Text()` when concatenating into strings — `"Q" & 4` compiles but errors at render.
+
+### KPI / control correctness rules that ride along with these recipes
+- **KPI columns must inline the full aggregate** — a bare sibling-column ref compiles clean, renders null.
+- **List-control filters on a NUMBER column are silently stripped on PUT** — bind to a `Text(...)` filter-key column.
+- **Single-select manual list controls take scalar `value`**, not `values: []` (else filters + default drop).
+- **Integer/bit predicates need explicit comparison** — `If([flag] = 1, …)`, never `If([flag], …)`.
