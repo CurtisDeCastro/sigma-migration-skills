@@ -9,6 +9,12 @@
 #   /tmp/<name>/graphql-fields.json   — metadata API field list (cleaner formulas)
 #   /tmp/<name>/views/<viewId>.csv    — every view's data CSV
 #   /tmp/<name>/views/<viewId>.png    — dashboard view image only (skip other views by default)
+#   /tmp/<name>/dashboards/<name>.png — EVERY dashboard view at resolution=high,
+#                                       keyed by (sanitized) dashboard name. This
+#                                       is the per-page ground truth the render-
+#                                       compare-fix (RCF) visual loop diffs
+#                                       against — without it the fidelity loop
+#                                       is structurally impossible.
 #   /tmp/<name>/workbook-content.twb  — raw .twb XML (or .twbx zip bytes)
 #   /tmp/<name>/timings.json          — per-task start/duration/attempts (ALWAYS
 #                                       written — the evidence trail for any
@@ -21,6 +27,14 @@
 # Only the initial workbook GET is serial (everything else needs its view
 # list). 5 is the measured sweet spot; 8+ risks long-tail stragglers (a
 # contended VizQL session can park one fetch for 40s+).
+#
+# EXCEPTION — the dashboards/ PNG set is fetched SERIALLY after the pool
+# drains: image renders are the heaviest per-request VizQL load and must be
+# SOLO (never concurrent with another image fetch). Dashboard names come from
+# the .twb's ./dashboards/dashboard elements, matched to the workbook's views
+# by trimmed name; ~10s each is trivial next to their value as RCF ground
+# truth. (--skip-images skips these too; the legacy views/<viewId>.png
+# heuristic single-dashboard fetch is kept for backward compatibility.)
 #
 # Resilience (insurance — none of it fired in validation, keep it anyway):
 #   * 429 / 408 / 5xx / timeouts retry with exponential backoff + jitter
@@ -164,6 +178,10 @@ queue = Queue.new
 twb_done = Queue.new # signals twb completion (for auto-ds fallback)
 
 # 2a. twb download task (.twbx auto-extract preserved from the serial version)
+# twb_xml_shared: the downloaded XML, read after the pool drains by the
+# all-dashboards PNG pass (3b) — safe: written once inside the task, read only
+# after pool.each(&:join).
+twb_xml_shared = nil
 unless opts[:skip_content]
   queue << lambda do
     bytes = run_task('twb-download') { Tableau.download_workbook_content(wb['id']) }
@@ -200,6 +218,7 @@ unless opts[:skip_content]
         twb_xml = bytes.force_encoding('UTF-8')
       end
     end
+    twb_xml_shared = twb_xml
     twb_done << twb_xml
   end
 end
@@ -335,6 +354,63 @@ pool = Array.new(n_threads) do
 end
 watcher&.join
 pool.each(&:join)
+
+# --- 3b. ALL dashboard PNGs at resolution=high (RCF ground truth) -------------
+# Runs SERIALLY after the pool drains — image renders must be SOLO (the skill's
+# own discovery contract: never run image requests concurrently with each
+# other; a VizQL render is the heaviest per-request load and concurrent renders
+# contend). run_task still wraps each fetch, so retry/backoff + timings apply.
+unless opts[:fetch_view_images] == 'none' || opts[:skip_content]
+  dash_names = []
+  if twb_xml_shared
+    block = twb_xml_shared[%r{<dashboards>.*?</dashboards>}m] || ''
+    dash_names = block.scan(/<dashboard\s[^>]*?name=(?:'([^']*)'|"([^"]*)")/)
+                      .map { |sq, dq| sq || dq }
+                      .map { |n| n.gsub('&lt;', '<').gsub('&gt;', '>').gsub('&quot;', '"')
+                                  .gsub('&apos;', "'").gsub('&amp;', '&') }
+                      .uniq
+  end
+  if dash_names.empty?
+    log 'no dashboards found in the .twb — skipping dashboards/ PNG set'
+  else
+    FileUtils.mkdir_p(File.join(opts[:out], 'dashboards'))
+    used_fnames = {}
+    fetched = 0
+    dash_names.each do |dname|
+      v = views.find { |vv| (vv['name'] || '').strip == dname.strip } ||
+          views.find { |vv| (vv['name'] || '').strip.casecmp?(dname.strip) }
+      unless v
+        log "dashboard #{dname.inspect}: no matching view (hidden/renamed on the server) — skipped"
+        next
+      end
+      fname = dname.strip.gsub(/[^\w.-]+/, '_').gsub(/\A_+|_+\z/, '')
+      fname = v['id'] if fname.empty?
+      if (n = used_fnames[fname])
+        used_fnames[fname] = n + 1
+        fname = "#{fname}_#{n + 1}"
+      else
+        used_fnames[fname] = 1
+      end
+      dest = File.join(opts[:out], 'dashboards', "#{fname}.png")
+      # --all-view-images already fetched this view at resolution=high (the lib
+      # default) into views/<id>.png — reuse the bytes instead of re-rendering.
+      pooled = File.join(opts[:out], 'views', "#{v['id']}.png")
+      if opts[:fetch_view_images] == 'all' && File.exist?(pooled)
+        atomic_write(dest, File.binread(pooled))
+        log "wrote dashboards/#{fname}.png  (reused views/#{v['id']}.png)"
+        fetched += 1
+        next
+      end
+      png = run_task("dashboard-png:#{dname}") { Tableau.view_image(v['id'], resolution: 'high') }
+      if png
+        atomic_write(dest, png)
+        log "wrote dashboards/#{fname}.png  (#{png.bytesize} bytes)"
+        fetched += 1
+      end
+    end
+    log "dashboards/: #{fetched}/#{dash_names.size} dashboard PNG(s) at resolution=high"
+  end
+end
 
 # timings.json is ALWAYS written — it's the evidence trail when someone reports
 # discovery slowness later (per-task start offsets show pool occupancy; attempts

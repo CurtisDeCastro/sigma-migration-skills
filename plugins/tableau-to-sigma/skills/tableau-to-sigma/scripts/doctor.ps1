@@ -75,6 +75,23 @@ if ($script:PyExe) {
   }
 }
 
+# --- tableauhyperapi (informational - embedded-extract workbooks only) -----
+# Embedded-extract (.twbx) workbooks land their frozen data via
+# scripts/land-extracts.py, which needs the Hyper API. Not REQUIRED: warn-level
+# only, with the exact remediation. See refs/extract-landing.md.
+$hyperapiPresent = $false
+if ($script:PyExe) {
+  $pyArgs = @(); if ($script:PyPre) { $pyArgs += $script:PyPre }
+  $hp = (& $script:PyExe @pyArgs -c "import importlib.util as iu; print('HYPER_OK' if iu.find_spec('tableauhyperapi') else '')" 2>$null | Out-String).Trim()
+  if ($hp -eq 'HYPER_OK') { $hyperapiPresent = $true }
+}
+if ($hyperapiPresent) {
+  Ok "tableauhyperapi present - embedded-extract workbooks can land via scripts/land-extracts.py"
+} else {
+  Warn "tableauhyperapi not installed (only needed for embedded-extract workbooks)" `
+       "pip install tableauhyperapi pandas snowflake-connector-python - see refs/extract-landing.md"
+}
+
 # --- node ------------------------------------------------------------------
 $node = Get-Command node -ErrorAction SilentlyContinue
 if ($node) { Ok "node - $((& node --version 2>$null))" }
@@ -169,6 +186,7 @@ $doctor = [ordered]@{
   runtimes     = [ordered]@{ ruby = $rubyOk; python = $pyOk; node = $nodeOk; bash = [bool](Get-Command bash -ErrorAction SilentlyContinue) }
   versions     = [ordered]@{ ruby = "$rubyV"; python = "$pyV"; node = "$nodeV" }
   sandbox_hint = $sandbox
+  hyperapi_present = $hyperapiPresent
   skill_sha    = "$skillSha"
   behind_count = $behindCount
   agent_vision = $agentVision
