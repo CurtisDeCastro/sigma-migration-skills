@@ -187,11 +187,18 @@ module LayoutLint
       next if entries.empty?
 
       # (b) controls outside any container on a containered page --------------
+      # A top-level control is fine when it sits in the control region ABOVE the
+      # first section band (the standard "filter over a banded grid" pattern the
+      # exemplar hand migrations use). It's only orphaned when it floats AT or
+      # BELOW the first band — i.e. lost among the banded chart content.
       if body.include?('<GridContainer')
-        entries.each do |kind, eid, _r0, _r1|
+        first_band_r0 = entries.select { |k,| k == :container }.map { |e| e[2] }.min
+        entries.each do |kind, eid, r0, _r1|
           next unless kind == :element && el_kind[eid] == 'control'
+          next if first_band_r0 && r0.positive? && r0 < first_band_r0
           violations << "orphan control: #{eid} sits OUTSIDE every GridContainer on page #{page_id} " \
-                        '(banded page) — place it in the control band or its chart\'s container'
+                        'and is not in the control region above the first band — place it in the ' \
+                        'control band or its chart\'s container'
         end
       end
 
