@@ -49,10 +49,12 @@ COLMAP = {
   'Year' => 'YEAR'
 }
 
-n = MechanicalSpecs.synthesize_fixed_lods!(model, fact, TWB, COLMAP)
+wmap = MechanicalSpecs.synthesize_fixed_lods!(model, fact, TWB, COLMAP)
+n = wmap.size
 
 puts 'Part A — synthesis scope + count'
 check(n == 2, "synthesized 2 year-LODs on this fact (ignored other-DS + non-year) (got #{n})", fails)
+check(wmap["gdp world"] == "GDP (current US$)", "world map: 'GDP World' -> source metric (got #{wmap['gdp world'].inspect})", fails)
 
 puts 'Part B — Custom SQL element'
 sql = model['pages'][0]['elements'].find { |e| e['id'] == 'el-world-by-year' }
@@ -78,11 +80,11 @@ check(mcols.any? { |nm, f| nm == 'GDP World' && f == '[World Bank/FIXED Year/GDP
 check(mcols.none? { |nm, _| nm == 'Year' && mcols.count { |x, _| x == 'Year' } > 1 }, 'no duplicate Year surfacing', fails)
 
 puts 'Part E — no-op guards'
-check(MechanicalSpecs.synthesize_fixed_lods!(model, fact, '<workbook/>', COLMAP).zero?, 'no LODs in twb -> 0', fails)
+check(MechanicalSpecs.synthesize_fixed_lods!(model, fact, '<workbook/>', COLMAP).empty?, 'no LODs in twb -> empty map', fails)
 factnoyear = { 'id' => 'f2', 'kind' => 'table', 'name' => 'X',
                'source' => { 'connectionId' => 'c', 'kind' => 'warehouse-table', 'path' => %w[A B C] },
                'columns' => [{ 'id' => 'x', 'formula' => '[C/Region]' }] }
-check(MechanicalSpecs.synthesize_fixed_lods!({ 'pages' => [{ 'elements' => [factnoyear] }] }, factnoyear, TWB, COLMAP).zero?,
+check(MechanicalSpecs.synthesize_fixed_lods!({ 'pages' => [{ 'elements' => [factnoyear] }] }, factnoyear, TWB, COLMAP).empty?,
       'fact without a Year key -> 0 (safe skip)', fails)
 
 puts 'Part F — retain_columns! adds recipe point-in-time cols the converter dropped'

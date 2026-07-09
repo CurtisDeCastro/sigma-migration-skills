@@ -67,12 +67,17 @@ module RecipeMultimetric
 
   # Main entry — mutate `spec` in place; returns a summary hash. `png_read` is the
   # parsed png-read.json. Never raises.
-  def apply!(spec, png_read)
-    summary = { applied: false, masters_added: 0, highlight_tiles: 0, top_tables: 0, notes: [] }
+  def apply!(spec, png_read, world_lod_map: {})
+    summary = { applied: false, masters_added: 0, highlight_tiles: 0, top_tables: 0, trends: 0, notes: [] }
     return summary unless spec.is_a?(Hash) && applicable?(png_read)
+    world_lod_map ||= {}
 
     pit = (png_read['point_in_time'] || {}).dup
     by_title = elements_by_title(spec)
+    # png-read tiles[].measure = the metric column the tile plots (agent-recorded
+    # in Phase 1d) — the reliable source for rebuilding a bar's obscured measure.
+    tile_measure = {}
+    Array(png_read['tiles']).each { |t| tile_measure[norm(t['title'])] = t['measure'] if t.is_a?(Hash) && t['measure'] }
 
     # Discriminator/year guard: the point-in-time rewrite refs [Master/<discr>] and
     # [Master/<year>]. The MECHANICAL data model retains only PLOTTED columns, so a
@@ -134,7 +139,17 @@ module RecipeMultimetric
         el = by_title[t]
         next unless el
         retarget_to_master_all!(el, master_name, ma_name)
-        add_highlight_column!(el, ma_name, dim_name, ctl_ref) if dim_name
+        # A data-scoping control has no bound columnId, so dim_name is nil — fall
+        # back to the tile's OWN category dimension (a bare [ma/Field] ref) so the
+        # selected-region highlight still gets built.
+        hl_dim = dim_name || tile_dimension(el)
+        add_highlight_column!(el, ma_name, hl_dim, ctl_ref) if hl_dim
+        # The bar's measure is often a `(copy)` %-change calc the converter can't
+        # decompose (renders literal 0). When png-read records the tile's metric,
+        # replace it with the latest-year magnitude (the intentional approximation
+        # of the source's proprietary growth measure).
+        m = tile_measure[t]
+        rewrite_bar_measure!(el, ma_name, m, pit) if m && !m.to_s.strip.empty?
         summary[:highlight_tiles] += 1
       end
     end
@@ -150,7 +165,18 @@ module RecipeMultimetric
       summary[:notes] << 'no point_in_time in png-read — Top-N/bar measures left as-is (regions may show as entities, all-years sums)'
     end
 
-    summary[:applied] = summary[:highlight_tiles].positive? || summary[:top_tables].positive?
+    # Trend dual-axis: a line/combo tile carrying a synthesized "<M> World" column
+    # should plot the region-filtered Country line Sum([Master/<M>]) opposite the
+    # World line on a second axis. build-charts often emits only the World measure
+    # single-axis (the country line is a copy-calc it can't decompose, or the World
+    # column won as the sole measure). Uses world_lod_map (world col -> source
+    # metric) to recover the correct metric column (name-inference is unreliable:
+    # "GDP World" != the metric column "GDP (current US$)").
+    unless world_lod_map.empty?
+      all_elements(spec).each { |el| summary[:trends] += ensure_dual_axis_trend!(el, world_lod_map) }
+    end
+
+    summary[:applied] = summary[:highlight_tiles].positive? || summary[:top_tables].positive? || summary[:trends].positive?
     summary
   end
 
@@ -228,9 +254,28 @@ module RecipeMultimetric
   # Rewrite the tile's MEASURE column(s) to a latest-year + real-entity
   # conditional, and (tables) ensure a groupBy on the dimension. Returns count of
   # measures rewritten.
-  def rewrite_point_in_time!(el, pit)
-    ly    = pit['latest_year']
+  # Resolve the snapshot year for a metric. `latest_year` may be a scalar (one
+  # year for all measures) or a per-measure map {metric => year} — TEU ends 2014
+  # while GDP/FDI end 2015, so a single year blanks TEU.
+  def latest_year_for(pit, metric)
+    ly = pit['latest_year']
+    return ly unless ly.is_a?(Hash)
+    ly[metric] || ly[metric.to_s] ||
+      ly.find { |k, _| k.to_s.downcase == metric.to_s.downcase }&.last
+  end
+
+  # The point-in-time conditional Sum(If([Year]=<ly> And Not IsNull([discr]), base, null)).
+  def pit_conditional(prefix, base_field, pit, metric)
+    ly = latest_year_for(pit, metric)
     discr = pit['entity_discriminator']
+    conds = []
+    conds << "[#{prefix}/#{pit['year_column'] || 'Year'}] = #{ly}" if ly
+    conds << "Not IsNull([#{prefix}/#{discr}])" if discr && !discr.to_s.strip.empty?
+    base = "[#{prefix}/#{base_field}]"
+    conds.empty? ? "Sum(#{base})" : "Sum(If(#{conds.join(' And ')}, #{base}, null))"
+  end
+
+  def rewrite_point_in_time!(el, pit)
     prefix = measure_prefix(el)
     return 0 unless prefix
 
@@ -239,11 +284,8 @@ module RecipeMultimetric
     (el['columns'] || []).each do |c|
       inner = base_metric_ref(c['formula'], prefix)
       next unless inner # only aggregated base-metric measures
-      conds = []
-      conds << "[#{prefix}/#{pit['year_column'] || 'Year'}] = #{ly}" if ly
-      conds << "Not IsNull([#{prefix}/#{discr}])" if discr && !discr.to_s.strip.empty?
-      next if conds.empty?
-      c['formula'] = "Sum(If(#{conds.join(' And ')}, [#{prefix}/#{inner}], null))"
+      next unless latest_year_for(pit, inner) || (pit['entity_discriminator'] && !pit['entity_discriminator'].to_s.strip.empty?)
+      c['formula'] = pit_conditional(prefix, inner, pit, inner)
       rewritten_ids << c['id']
       n += 1
     end
@@ -290,6 +332,62 @@ module RecipeMultimetric
   def base_metric_ref(formula, prefix)
     m = formula.to_s.match(/\A(?:Sum|Avg|Average|Min|Max|Total)\(\s*\[#{Regexp.escape(prefix)}\/([^\]]+)\]\s*\)\z/i)
     m && m[1]
+  end
+
+  # Reshape a trend line/combo tile that carries a synthesized "<M> World" column
+  # into a dual-axis Country-vs-World chart: add the region-filtered Country line
+  # Sum([<prefix>/<metric>]) (metric recovered from world_lod_map) and put the
+  # World line on yAxis2. Returns 1 if reshaped, else 0.
+  def ensure_dual_axis_trend!(el, world_lod_map)
+    kind = el['kind'].to_s
+    return 0 unless %w[line-chart combo-chart area-chart].include?(kind)
+    cols = el['columns'] || []
+    # The World column: its display name is a world_lod_map key (e.g. "GDP World").
+    world_col = cols.find { |c| world_lod_map.key?(col_disp(c).to_s.downcase) }
+    return 0 unless world_col
+    metric = world_lod_map[col_disp(world_col).to_s.downcase]
+    return 0 if metric.to_s.empty?
+    prefix = (world_col['formula'].to_s[/\[([^\/\]]+)\//, 1]) || 'Master'
+    return 0 if cols.any? { |c| base_metric_ref(c['formula'], prefix) == metric } # country line already there
+
+    country_id = "trend-country-#{el['id']}"
+    (el['columns'] ||= []) << { 'id' => country_id, 'name' => "Country #{metric}",
+                                'formula' => "Sum([#{prefix}/#{metric}])", 'format' => world_col['format'] }.compact
+    el['order'] << country_id if el['order'].is_a?(Array)
+    # World line: ensure it's aggregated to one value per x (Max — the per-year
+    # global total is constant within a year), on the secondary axis.
+    wref = world_col['formula'].to_s
+    world_col['formula'] = "Max(#{wref})" unless wref =~ /\A(?:Sum|Avg|Average|Min|Max|Total)\(/i
+    el['kind'] = 'combo-chart'
+    el['yAxis'] = { 'columnIds' => [{ 'columnId' => country_id, 'type' => 'line' },
+                                    { 'columnId' => world_col['id'], 'type' => 'line' }] }
+    el['yAxis2'] = { 'columnIds' => [world_col['id']] }
+    1
+  end
+
+  # The tile's category dimension = its first bare [prefix/Field] column (no agg).
+  def tile_dimension(el)
+    dim = (el['columns'] || []).find { |c| c['formula'].to_s =~ /\A\[[^\]]+\]\z/ }
+    dim && col_disp(dim)
+  end
+
+  # Replace a bar tile's measure column (the non-dimension, non-"Selected" column)
+  # with the latest-year magnitude of `metric`. Handles the (copy)-calc-collapsed
+  # measure that renders 0.
+  def rewrite_bar_measure!(el, prefix, metric, pit)
+    meas = (el['columns'] || []).find do |c|
+      c['name'] != 'Selected' && c['formula'].to_s !~ /\A\[[^\]]+\]\z/
+    end
+    return 0 unless meas
+    meas['formula'] = pit_conditional(prefix, metric, pit, metric)
+    1
+  end
+
+  # Display name of a column (explicit name, else the formula's final segment).
+  def col_disp(c)
+    return c['name'] if c['name'] && !c['name'].to_s.empty?
+    m = c['formula'].to_s.match(/\[([^\]]+)\]\s*\z/)
+    m && m[1].split('/').last
   end
 
   # Ensure a table groups by its first dimension column (a non-aggregated

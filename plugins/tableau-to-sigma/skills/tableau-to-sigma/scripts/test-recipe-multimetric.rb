@@ -122,6 +122,50 @@ bval = bar['columns'].find { |c| c['id'] == 'b_val' }
 check(bval['formula'].start_with?('Sum(If([Master All/Year] = 2015'),
       'bar magnitude measure also pinned to latest year (on masterAll)', fails)
 
+puts 'Part C2 — trend dual-axis via the world_lod_map'
+s_tr = build_spec
+# a trend tile that (like the mechanical build) carries ONLY the World measure
+s_tr['pages'][1]['elements'] << {
+  'id' => 'el-gdptrend', 'kind' => 'line-chart', 'name' => 'GDPRegionLine',
+  'source' => { 'kind' => 'table', 'elementId' => 'master' },
+  'columns' => [
+    { 'id' => 'tr_year',  'name' => 'Year', 'formula' => '[Master/Year]' },
+    { 'id' => 'tr_world', 'name' => 'GDP World', 'formula' => '[Master/GDP World]' }
+  ], 'order' => %w[tr_year tr_world]
+}
+sum_tr = RecipeMultimetric.apply!(s_tr, PNG, world_lod_map: { 'gdp world' => 'GDP' })
+tr = s_tr['pages'].flat_map { |p| p['elements'] }.find { |e| e['id'] == 'el-gdptrend' }
+check(sum_tr[:trends] == 1, "reshaped 1 trend (got #{sum_tr[:trends]})", fails)
+country = tr['columns'].find { |c| c['formula'] == 'Sum([Master/GDP])' }
+check(country, 'added the region-filtered Country line Sum([Master/GDP])', fails)
+check(tr['kind'] == 'combo-chart', 'trend promoted to combo-chart', fails)
+check(tr.dig('yAxis2', 'columnIds') == ['tr_world'], 'World line on the secondary axis (yAxis2)', fails)
+check(tr['columns'].find { |c| c['id'] == 'tr_world' }['formula'] == 'Max([Master/GDP World])',
+      'World line aggregated (Max) to one value per year', fails)
+
+puts 'Part C3 — data-scoping control (no columnId): highlight dim fallback + bar-measure rewrite + per-metric year'
+s_b = build_spec
+# make the control a data-scoping control with NO bound columnId
+s_b['pages'][1]['elements'].find { |e| e['id'] == 'ctrl' }['source'] = { 'kind' => 'source' }
+# give the bar a (copy)-calc-collapsed measure (renders 0)
+bar_b = s_b['pages'][1]['elements'].find { |e| e['id'] == 'el-gdppie' }
+bar_b['columns'].find { |c| c['id'] == 'b_val' }['formula'] = '0'
+png_b = {
+  'tiles' => [{ 'title' => 'GDPPie', 'kind' => 'bar-chart', 'measure' => 'GDP' }],
+  'filter_shelf' => [{ 'label' => 'Region', 'target_tiles' => ['GDP Top3'], 'highlight_tiles' => ['GDPPie'] }],
+  'point_in_time' => { 'year_column' => 'Year', 'latest_year' => { 'GDP' => 2015, 'TEU' => 2014 }, 'entity_discriminator' => 'Income Group' }
+}
+RecipeMultimetric.apply!(s_b, png_b)
+bar_b = s_b['pages'].flat_map { |p| p['elements'] }.find { |e| e['id'] == 'el-gdppie' }
+hlc = bar_b['columns'].find { |c| c['name'] == 'Selected' }
+check(hlc && hlc['formula'].include?('[Master All/New Region]'), 'highlight built from the bar\'s OWN dim when control has no columnId', fails)
+bval_b = bar_b['columns'].find { |c| c['id'] == 'b_val' }
+check(bval_b['formula'] == 'Sum(If([Master All/Year] = 2015 And Not IsNull([Master All/Income Group]), [Master All/GDP], null))',
+      "copy-calc bar measure replaced via png-read tile.measure (got #{bval_b['formula']})", fails)
+# per-metric year: a TEU tile would use 2014
+teu_year = RecipeMultimetric.latest_year_for(png_b['point_in_time'], 'TEU')
+check(teu_year == 2014, "per-metric latest_year map resolves TEU->2014 (got #{teu_year})", fails)
+
 puts 'Part D — no-op without highlight_tiles'
 s2 = build_spec
 sum2 = RecipeMultimetric.apply!(s2, { 'filter_shelf' => [{ 'label' => 'Region', 'target_tiles' => ['GDP Top3'] }] })

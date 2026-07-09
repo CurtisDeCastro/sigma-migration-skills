@@ -23,6 +23,8 @@
 #       { "title":    "Revenue by Region",
 #         "kind":     "bar-chart",                   # a valid Sigma element kind
 #         "orientation": "horizontal",               # REQUIRED for bar-chart/combo-chart
+#         "measure":  "Gross Revenue",               # the metric column (multi-metric recipe:
+#                                                    #   rebuilds a copy-calc/obscured bar measure)
 #         "measures": ["Gross Revenue"],             # optional
 #         "note":     "..." }                        # optional
 #     ],
@@ -34,10 +36,12 @@
 #     ],
 #     "point_in_time": {                             # OPTIONAL — only for dashboards with
 #       "year_column":          "Year",              #   "latest snapshot" Top-N / magnitude tiles.
-#       "latest_year":          2015,                #   Consumed by the multi-metric recipe transform
-#       "entity_discriminator": "Income Group"       #   (RecipeMultimetric): rewrites Top-N/bar measures
-#     }                                              #   to Sum(If([Year]=latest And Not IsNull([discr]),m,null))
-#   }
+#       "latest_year":          2015,                #   scalar OR a per-metric map, e.g.
+#                                                    #   {"GDP":2015,"TEU":2014} when metrics end in
+#                                                    #   different years (TEU lags GDP/FDI).
+#       "entity_discriminator": "Income Group"       #   Consumed by the multi-metric recipe transform:
+#     }                                              #   rewrites Top-N/bar measures to
+#   }                                                #   Sum(If([Year]=latest And Not IsNull([discr]),m,null))
 #
 # `point_in_time` records what CANNOT be inferred from build signals (D10): the
 # column that is null on rollup/aggregate rows (`entity_discriminator`, so a

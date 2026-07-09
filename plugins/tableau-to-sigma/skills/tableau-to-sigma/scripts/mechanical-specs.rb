@@ -225,11 +225,11 @@ module MechanicalSpecs
   FIXED_YEAR_LOD_RE = /\{\s*FIXED\s+([^:]+?)\s*:\s*(SUM|AVG|MIN|MAX|COUNT|COUNTD)\s*\(\s*\[([^\]]+)\]\s*\)\s*\}/i
 
   def synthesize_fixed_lods!(model, fact, twb_text, colmap = {})
-    return 0 unless model && fact && twb_text
+    return {} unless model && fact && twb_text
     return 0 unless fact.dig('source', 'kind') == 'warehouse-table'
     path = fact.dig('source', 'path') || []
     conn = fact.dig('source', 'connectionId')
-    return 0 if path.size < 3 || conn.to_s.empty?
+    return {} if path.size < 3 || conn.to_s.empty?
 
     # Key on col_display (formula-derived) — the converter leaves column['name']
     # null on extract-backed models (the display name lives in the [EXTRACT/<cap>]
@@ -241,7 +241,7 @@ module MechanicalSpecs
       h[disp.to_s.downcase] = c if disp && !disp.to_s.empty?
     end
     year_col = fact_caps['year']
-    return 0 unless year_col # need a physical Year key on the fact
+    return {} unless year_col # need a physical Year key on the fact
     # Decode XML entities PER captured formula — NOT on the whole text, which would
     # turn &apos; into literal ' inside formula='…' and break attribute scanning.
     decode = ->(s) { s.to_s.gsub('&apos;', "'").gsub('&quot;', '"').gsub('&amp;', '&') }
@@ -261,7 +261,7 @@ module MechanicalSpecs
       next unless fact_caps.key?(metric.to_s.downcase)                   # metric must be on THIS fact
       lods[cap] ||= { 'name' => cap, 'agg' => agg.upcase, 'metric' => metric }
     end
-    return 0 if lods.empty?
+    return {} if lods.empty?
 
     year_phys = phys.call(col_display(year_col))
     fqn = %(#{path[0]}.#{path[1]}."#{path[2]}")
@@ -285,7 +285,9 @@ module MechanicalSpecs
       'id' => 'rel-world-by-year', 'name' => 'FIXED Year', 'targetElementId' => 'el-world-by-year',
       'keys' => [{ 'sourceColumnId' => year_col['id'], 'targetColumnId' => 'wby-year' }]
     }
-    lods.size
+    # Return the world-column -> source-metric map (recipe uses it to add the
+    # region-filtered Country line opposite each synthesized World line).
+    lods.each_with_object({}) { |(cap, l), h| h[cap.to_s.downcase] = l['metric'] }
   end
 
   # Retain extra base columns on the fact that the recipe needs but the converter

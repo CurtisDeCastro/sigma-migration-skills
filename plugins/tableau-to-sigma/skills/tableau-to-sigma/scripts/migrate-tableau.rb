@@ -1289,9 +1289,10 @@ if mechanical
   # DATEPART('year',[Date]): SUM(m)}` "World"-total calcs, so a chart referencing
   # them dangles + blocks the POST. Synthesize the grouped Custom SQL helper +
   # `FIXED Year` relationship on the fact; derive_master surfaces the columns.
+  world_lod_map = {}
   if have_twb && conv_fact
-    syn = (MechanicalSpecs.synthesize_fixed_lods!(conv['model'], conv_fact, File.read(twb, encoding: 'UTF-8'), (opts[:column_mapping] || {})) rescue 0)
-    line "FIXED-LOD synthesis: materialized #{syn} per-year world-total column(s) via a grouped Custom SQL helper" if syn.positive?
+    world_lod_map = (MechanicalSpecs.synthesize_fixed_lods!(conv['model'], conv_fact, File.read(twb, encoding: 'UTF-8'), (opts[:column_mapping] || {})) rescue {})
+    line "FIXED-LOD synthesis: materialized #{world_lod_map.size} per-year world-total column(s) via a grouped Custom SQL helper" if world_lod_map.any?
   end
   conv_base = conv_fact ? MechanicalSpecs.base_of(conv['model'], conv_fact) : nil
   pre = conv_fact ? MechanicalSpecs.derive_master(conv_fact, (conv_fact['name'] || 'Order Fact'), conv_base, nil, conv['model']) : { 'untranslated_metrics' => [] }
@@ -2182,7 +2183,7 @@ if mechanical
   begin
     _pr = (JSON.parse(File.read(DashboardRead.path(WORK))) rescue nil)
     if _pr && RecipeMultimetric.applicable?(_pr)
-      rsum = RecipeMultimetric.apply!(spec, _pr)
+      rsum = RecipeMultimetric.apply!(spec, _pr, world_lod_map: (defined?(world_lod_map) ? world_lod_map : {}))
       if rsum[:applied]
         line "multi-metric recipe: +#{rsum[:masters_added]} masterAll, #{rsum[:highlight_tiles]} highlight tile(s), " \
              "#{rsum[:top_tables]} point-in-time measure(s) rewritten"
