@@ -27,7 +27,11 @@ def run_no_creds(mt, home, work, extra_env = {}, timeout: 20)
   env = {
     'HOME' => home, 'SIGMA_SKIP_DOCTOR_GATE' => 'test',
     'SIGMA_API_TOKEN' => nil, 'SIGMA_CLIENT_ID' => nil,
-    'SIGMA_CLIENT_SECRET' => nil, 'SIGMA_SKIP_CRED_GATE' => nil
+    'SIGMA_CLIENT_SECRET' => nil, 'SIGMA_SKIP_CRED_GATE' => nil,
+    # Clear Tableau creds too so cases abort at a gate (no network) and the
+    # Tableau gate is exercised hermetically.
+    'TABLEAU_PAT_NAME' => nil, 'TABLEAU_PAT_SECRET' => nil,
+    'SIGMA_SKIP_TABLEAU_GATE' => nil, 'SIGMA_TABLEAU_VIA_MCP' => nil
   }.merge(extra_env)
   cmd = ['ruby', mt, '--workbook-id', 'wb-x', '--connection', 'conn-x', '--out', work]
   io = IO.popen(env, cmd, err: %i[child out])
@@ -61,11 +65,34 @@ Dir.mktmpdir do |home|
     check(!out.include?('no Sigma credentials resolvable'),
           'SIGMA_SKIP_CRED_GATE waives the fail-closed abort', fails)
 
-    # (3) Client creds present in env => passes the cred gate (no cred abort).
+    # (3) Client creds present in env => passes the SIGMA cred gate (no Sigma abort).
     code, out = run_no_creds(MT, home, work,
                              'SIGMA_CLIENT_ID' => 'id-123', 'SIGMA_CLIENT_SECRET' => 'secret-456')
     check(!out.include?('no Sigma credentials resolvable'),
-          'env client creds satisfy the gate', fails)
+          'env client creds satisfy the Sigma gate', fails)
+
+    # ---- Tableau gate (reached once the Sigma gate is satisfied) --------------
+    sigma = { 'SIGMA_CLIENT_ID' => 'id-123', 'SIGMA_CLIENT_SECRET' => 'secret-456' }
+
+    # (4) Sigma ok, Tableau absent, fresh discovery => Tableau abort + remediation.
+    code, out = run_no_creds(MT, home, work, sigma)
+    check(out.include?('no Tableau credentials resolvable'), 'Tableau gate fires when PAT absent', fails)
+    check(out.include?('setup-tableau.rb'), 'names the setup-tableau.rb remediation', fails)
+
+    # (5) SIGMA_TABLEAU_VIA_MCP=1 => Tableau gate skipped (MCP-driven discovery).
+    code, out = run_no_creds(MT, home, work, sigma.merge('SIGMA_TABLEAU_VIA_MCP' => '1'))
+    check(!out.include?('no Tableau credentials resolvable'), 'SIGMA_TABLEAU_VIA_MCP=1 skips the Tableau gate', fails)
+
+    # (6) discovery-stamp present (reuse) => Tableau gate skipped.
+    File.write(File.join(work, 'discovery-stamp.json'), '{}')
+    code, out = run_no_creds(MT, home, work, sigma)
+    check(!out.include?('no Tableau credentials resolvable'), 'reused discovery (stamp present) skips the Tableau gate', fails)
+    File.delete(File.join(work, 'discovery-stamp.json'))
+
+    # (7) Tableau PAT present in env => Tableau gate passes.
+    code, out = run_no_creds(MT, home, work,
+                             sigma.merge('TABLEAU_PAT_NAME' => 'pat', 'TABLEAU_PAT_SECRET' => 'sec'))
+    check(!out.include?('no Tableau credentials resolvable'), 'env Tableau PAT satisfies the gate', fails)
   end
 end
 

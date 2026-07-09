@@ -442,19 +442,10 @@ def build_page_from_tree(dashboard, page, opts)
   # E1: flat zones carry chart_kind + plot signals (tree nodes don't) — the
   # per-kind row floor resolves through this map.
   zone_by_id  = (dashboard['zones'] || []).each_with_object({}) { |z, h| h[z['id']] = z if z['id'] }
-  title_el    = page['elements'].find { |e| e['kind'] == 'text' && e['id'].to_s.start_with?('title') }
-  # Fall back to the source's own TOP-BANNER text (a text element whose zone sits
-  # at y≈0 spanning most of the width) as the title. Otherwise we'd both fabricate
-  # a page-name H1 banner AND place that source title separately in the body — the
-  # duplicate-title bug. Topmost qualifying text element wins. (Marked placed in the
-  # header branch below so the body pass doesn't re-emit it.)
-  if title_el.nil?
-    zid = ->(e) { e['id'].to_s.sub(/\Atext-/, '') }
-    title_el = page['elements'].select { |e| e['kind'] == 'text' }
-                               .map { |e| [e, zone_by_id[zid.call(e)]] }
-                               .select { |_e, z| z && z['y_pct'].to_f < 12 && z['w_pct'].to_f >= 40 }
-                               .min_by { |_e, z| z['y_pct'].to_f }&.first
-  end
+  # Dedicated title-* element, else the source's own top banner (shared detector,
+  # used by the synthesis path too) — avoids the fabricate-H1-alongside-source-
+  # title duplicate-title bug. (Marked placed in the header branch below.)
+  title_el    = detect_header_title_el(page, zone_by_id)
 
   ctx = { page_id: page['id'], renames: opts[:renames], els_by_name: els_by_name,
           ctl_by_name: ctl_by_name, els_by_id: els_by_id, title_el: title_el, title_used: false,
@@ -565,12 +556,32 @@ end
 # build_page_for_dashboard (+ min_row_expansions).
 SECTION_TEXT_MIN_W_PCT = 60.0 # a text zone at least this wide separates sections
 
+# The source dashboard's title element, resolved identically for BOTH layout
+# paths (geometry `build_page_from_tree` and synthesis `build_page_synthesized`).
+# Prefer a dedicated `title-*` element; otherwise fall back to the source's own
+# TOP-BANNER text (a text zone at y≈0 spanning most of the width). Using the
+# source title as the header — instead of fabricating a page-name H1 alongside it
+# — is what prevents the duplicate-title bug. Previously only the geometry path
+# had the fallback, so synthesized pages shipped two titles. Shared here so the
+# two paths cannot drift again.
+def detect_header_title_el(page, zone_by_id)
+  title_el = page['elements'].find { |e| e['kind'] == 'text' && e['id'].to_s.start_with?('title') }
+  return title_el if title_el
+  zid = ->(e) { e['id'].to_s.sub(/\Atext-/, '') }
+  page['elements'].select { |e| e['kind'] == 'text' }
+                  .map { |e| [e, zone_by_id[zid.call(e)]] }
+                  .select { |_e, z| z && z['y_pct'].to_f < 12 && z['w_pct'].to_f >= 40 }
+                  .min_by { |_e, z| z['y_pct'].to_f }&.first
+end
+
 def build_page_synthesized(dashboard, page, opts, structure)
   zones       = dashboard['zones'] || []
   els_by_name = page['elements'].each_with_object({}) { |e, h| h[e['name']] = e if e['name'] }
   els_by_id   = page['elements'].each_with_object({}) { |e, h| h[e['id']] = e if e['id'] }
-  # Pin the header title to the dedicated title element (see build_page_from_tree).
-  title_el    = page['elements'].find { |e| e['kind'] == 'text' && e['id'].to_s.start_with?('title') }
+  # Header title: dedicated title-* element, else the source's own top banner
+  # (shared detector) — NOT a fabricated page-name H1 alongside the source title.
+  zone_by_id  = zones.each_with_object({}) { |z, h| h[z['id']] = z if z['id'] }
+  title_el    = detect_header_title_el(page, zone_by_id)
   page_rows   = opts[:page_rows]
   placed      = []
   extra_els   = []
@@ -857,9 +868,11 @@ end
 def build_page_for_dashboard(dashboard, page, opts)
   chart_zones = dashboard['zones'].select { |z| z['kind'] == 'chart' && z['caption'] }
   els_by_name = page['elements'].each_with_object({}) { |e, h| h[e['name']] = e if e['name'] }
-  # Pin to the dedicated title element (see build_page_from_tree) so a B4
-  # styled-text element isn't mistaken for the header title.
-  title_el = page['elements'].find { |e| e['kind'] == 'text' && e['id'].to_s.start_with?('title') }
+  # Dedicated title-* element, else the source's own top banner (shared detector,
+  # same as the tree + synthesis paths) — no fabricated page-name H1 alongside a
+  # source title.
+  zone_by_id = (dashboard['zones'] || []).each_with_object({}) { |z, h| h[z['id']] = z if z['id'] }
+  title_el = detect_header_title_el(page, zone_by_id)
   ctl_els  = page['elements'].select { |e| e['kind'] == 'control' }
 
   # Per-dashboard copy of the band tuning — auto-fit must not leak between

@@ -303,6 +303,46 @@ if !_creds_ok && _cred_skip && !_cred_skip.to_s.empty?
 end
 Offramp.log(WORK, kind: 'doctor-gate-waived', reason: _dg_skip.to_s) if _dg_skip && !_dg_skip.to_s.empty?
 
+# 🚧 Step-0 TABLEAU CREDENTIAL GATE (fail-closed). Tableau auth is a SECOND,
+# separate system from Sigma — and its absence was the #1 recurring blocker: the
+# orchestrated discovery lane signs in via PAT REST (tableau_rest.rb), so when
+# TABLEAU_PAT_* aren't in the env (people run setup.rb for Sigma but not
+# setup-tableau.rb; non-Claude-Code harnesses don't auto-load them) the run
+# starts and dies DEEP in discovery with an opaque "could not mint a Tableau
+# token / end of file reached" that a low-context agent flails against. Resolve
+# it HERE instead. Only required when FRESH discovery will run — skip on
+# --finalize (no discovery) and when discovery is being REUSED (stamp present),
+# and skip if the agent is driving discovery through the Tableau MCP
+# (SIGMA_TABLEAU_VIA_MCP=1). Waive with SIGMA_SKIP_TABLEAU_GATE="<reason>".
+_tab_skip     = ENV['SIGMA_SKIP_TABLEAU_GATE']
+_tab_via_mcp  = ENV['SIGMA_TABLEAU_VIA_MCP'].to_s == '1'
+_tab_reuse    = File.exist?(File.join(WORK, 'discovery-stamp.json'))
+_tab_needed   = !opts[:finalize] && !_tab_reuse && !_tab_via_mcp
+# Contents check, not mere existence: the neutral file often has Sigma creds
+# (setup.rb) but NOT Tableau (setup-tableau.rb) — the exact gap that let runs
+# start and fail deep. Require the Tableau PAT to actually be present.
+_tab_creds_ok = (!ENV['TABLEAU_PAT_NAME'].to_s.empty? && !ENV['TABLEAU_PAT_SECRET'].to_s.empty?) ||
+                (File.exist?(_neutral_env) && File.read(_neutral_env).include?('TABLEAU_PAT_SECRET'))
+if _tab_needed && !_tab_creds_ok && (_tab_skip.nil? || _tab_skip.to_s.empty?)
+  abort <<~MSG
+    FATAL: no Tableau credentials resolvable — discovery would fail at the Tableau
+    sign-in (the "could not mint a Tableau token" / "end of file reached" error).
+    Tableau auth is SEPARATE from Sigma: running setup.rb configures Sigma only.
+    Fix it ONCE, in a real terminal:
+        ruby scripts/setup-tableau.rb    # writes the Tableau PAT to ~/.sigma-migration/env
+    …or export TABLEAU_PAT_NAME + TABLEAU_PAT_SECRET + TABLEAU_SITE_CONTENT_URL
+    (+ TABLEAU_SERVER_URL) into this environment. If you are driving discovery via
+    the Tableau MCP tools instead of a PAT, re-run with SIGMA_TABLEAU_VIA_MCP=1.
+    (If sign-in fails even WITH creds set, that is a network/TLS-proxy issue
+    reaching your Tableau server, not a missing-cred issue — check connectivity.)
+    Then re-run this exact command.  (Waive: SIGMA_SKIP_TABLEAU_GATE="<reason>".)
+  MSG
+end
+if _tab_needed && !_tab_creds_ok && _tab_skip && !_tab_skip.to_s.empty?
+  warn "WARN: Tableau credential gate waived (SIGMA_SKIP_TABLEAU_GATE=#{_tab_skip})."
+  Offramp.log(WORK, kind: 'tableau-gate-waived', reason: _tab_skip.to_s)
+end
+
 # ── Design-consistency advisory readout (doctor.json) ────────────────────────
 # The hard gate above proves the environment passed; these two are the silent
 # DESIGN-variance killers the gate does not block on — surface them at every
