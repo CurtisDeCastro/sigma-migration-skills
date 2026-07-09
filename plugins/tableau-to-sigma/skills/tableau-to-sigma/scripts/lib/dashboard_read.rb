@@ -65,6 +65,7 @@
 # most-dropped non-chart surfaces.
 
 require 'json'
+require 'set'
 
 module DashboardRead
   # Valid Sigma element kinds a tile may declare — the chart kinds PLUS the
@@ -154,6 +155,29 @@ module DashboardRead
                              'RE-COLOR (highlight_tiles)? A page-scope filter silently hits every tile.'
       }
     end
+    # PARAMETER-driven controls (not just shared_filters): a Tableau parameter used
+    # as a selector — e.g. a Region highlight parameter — is NOT a shared_filter, so
+    # it was invisible to the seed and the whole multi-metric forcing function
+    # (measure + point_in_time gate) could be skipped. Surface each LIST parameter a
+    # chart worksheet actually REFERENCES in a calc formula (not the boilerplate
+    # redeclaration every sheet carries). Seed highlight_tiles = the tiles that
+    # reference it (a highlight calc); target_tiles = the rest — operator confirms.
+    already = filter_shelf.map { |f| f['label'].to_s.downcase }.to_set
+    (meta['parameters'] || []).each do |p|
+      next unless p['param_domain'].to_s == 'list' # a selector, not a numeric range
+      lbl = (p['caption'] || p['name']).to_s
+      next if lbl.empty? || already.include?(lbl.downcase)
+      pname = p['name'].to_s
+      hl = chart_titles.select { |t| param_used_in_formula?(ws_meta[t], pname) }
+      next if hl.empty? # not actually referenced by any chart calc → not a control here
+      filter_shelf << {
+        'label'           => lbl,
+        'target_tiles'    => (chart_titles - hl),
+        'highlight_tiles' => hl,
+        'note'            => 'CONFIRM (parameter control): tiles it FILTERS (target_tiles) vs only RE-COLORS ' \
+                             '(highlight_tiles). Seeded highlight = tiles whose calcs reference the parameter.'
+      }
+    end
 
     draft = {
       'verified'      => false,
@@ -238,6 +262,17 @@ module DashboardRead
       end
     end
     nil
+  end
+
+  # Does a worksheet actually USE parameter `pname` — i.e. some calc's FORMULA
+  # references it — vs. merely carrying the boilerplate redeclaration Tableau
+  # copies into every sheet (a bare column named `pname` with no formula ref)?
+  def self.param_used_in_formula?(wmeta, pname)
+    return false unless wmeta.is_a?(Hash) && pname && !pname.empty?
+    (wmeta['calculations'] || []).any? do |c|
+      next false if c['name'].to_s == pname # the redeclaration of the param itself
+      c['formula'].to_s.include?(pname)
+    end
   end
 
   def self.path(dir)
