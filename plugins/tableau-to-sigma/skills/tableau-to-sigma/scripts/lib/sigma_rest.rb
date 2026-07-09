@@ -7,7 +7,21 @@
 # This module mirrors the shape of `tableau_rest.rb`. It provides:
 #   - `Sigma.refresh_token!`         — re-do client_credentials exchange,
 #                                       update in-memory token under a mutex
+#   - `Sigma.auth_token`             — age-aware: re-mints automatically when
+#                                       the token is older than TOKEN_TTL_SECONDS
 #   - `Sigma.request(method, path)`  — catches 401, refreshes once, retries
+#
+# Token-freshness semantics (field lesson: sessions repeatedly hit 401s at
+# ~+25min-past-expiry because `auth_token` kept returning the stale env token):
+#   - A token minted by THIS process carries an in-memory minted_at stamp; when
+#     it ages past TOKEN_TTL_SECONDS (50 min), auth_token re-mints proactively.
+#   - The mint time is also surfaced as SIGMA_TOKEN_MINTED_AT (iso8601) so
+#     child processes inherit the token's AGE along with the token itself.
+#   - A token loaded from <WORK>/auth.json is aged by the file's mtime
+#     (get_token.py writes it at mint time, so mtime == mint time).
+#   - A bare env SIGMA_API_TOKEN with no known age is honored as-is
+#     (age-unknown) — the request helper's 401 handler re-mints ONCE and
+#     retries, then fails loudly.
 #
 # Required env: SIGMA_BASE_URL, SIGMA_CLIENT_ID, SIGMA_CLIENT_SECRET.
 # Optional env: SIGMA_API_TOKEN (initial token; refreshed on demand).
@@ -23,6 +37,7 @@ require 'net/http'
 require 'uri'
 require 'json'
 require 'base64'
+require 'time'
 
 # Agent-neutral credential bootstrap. Claude Code injects creds from
 # ~/.claude/settings.json into the env automatically; other agents (Cursor,
@@ -53,8 +68,14 @@ if ENV['SIGMA_API_TOKEN'].nil?
   if _auth_path
     begin
       _auth = JSON.parse(File.read(_auth_path, encoding: 'bom|utf-8'))
-      ENV['SIGMA_API_TOKEN'] ||= _auth['SIGMA_API_TOKEN'] if _auth['SIGMA_API_TOKEN']
-      ENV['SIGMA_BASE_URL']  ||= _auth['SIGMA_BASE_URL']  if _auth['SIGMA_BASE_URL']
+      if _auth['SIGMA_API_TOKEN']
+        ENV['SIGMA_API_TOKEN'] ||= _auth['SIGMA_API_TOKEN']
+        # get_token.py writes auth.json at mint time, so the file's mtime IS
+        # the token's mint time — record it so auth_token can age the token
+        # out proactively instead of discovering staleness via a mid-phase 401.
+        ENV['SIGMA_TOKEN_MINTED_AT'] ||= File.mtime(_auth_path).utc.iso8601
+      end
+      ENV['SIGMA_BASE_URL'] ||= _auth['SIGMA_BASE_URL'] if _auth['SIGMA_BASE_URL']
     rescue JSON::ParserError
       # A corrupt auth.json must not wedge the run — fall through to self-mint.
     end
@@ -65,8 +86,14 @@ module Sigma
   class Error < StandardError; end
   class AuthError < Error; end
 
+  # Sigma bearer tokens live ~60 minutes. Any token older than this is treated
+  # as stale and re-minted proactively (50 min leaves a safety margin), so long
+  # phases stop tripping over mid-run 401s from a token that quietly expired.
+  TOKEN_TTL_SECONDS = 50 * 60
+
   @token_mutex = Mutex.new
   @token_override = nil
+  @minted_at = nil
   @refresh_inflight = false
 
   module_function
@@ -75,8 +102,40 @@ module Sigma
     ENV.fetch('SIGMA_BASE_URL') { raise Error, 'SIGMA_BASE_URL not set' }
   end
 
+  # Return a token that is safe to use RIGHT NOW.
+  #   - No token anywhere → mint one.
+  #   - Known mint time (this process minted it, a parent surfaced
+  #     SIGMA_TOKEN_MINTED_AT, or auth.json's mtime) and age > TTL → re-mint
+  #     (requires SIGMA_CLIENT_ID; without creds the stale token is returned
+  #     and the 401 path surfaces the failure loudly).
+  #   - Age unknown (bare env SIGMA_API_TOKEN) → honored as-is; the request
+  #     helper's 401 handler re-mints once and retries.
   def auth_token
-    @token_mutex.synchronize { @token_override } || ENV['SIGMA_API_TOKEN'] || refresh_token!
+    tok = @token_mutex.synchronize { @token_override } || ENV['SIGMA_API_TOKEN']
+    return refresh_token! if tok.nil? || tok.empty?
+    return refresh_token! if token_stale? && ENV['SIGMA_CLIENT_ID']
+    tok
+  end
+
+  # When the current token was minted, if known. The in-memory stamp (set by
+  # refresh_token! in this process) wins; else SIGMA_TOKEN_MINTED_AT (iso8601,
+  # set by a parent process's mint or by the auth.json bootstrap from mtime).
+  # nil = age unknown.
+  def token_minted_at
+    m = @token_mutex.synchronize { @minted_at }
+    return m if m
+    ts = ENV['SIGMA_TOKEN_MINTED_AT'].to_s
+    return nil if ts.empty?
+    begin
+      Time.parse(ts)
+    rescue ArgumentError
+      nil
+    end
+  end
+
+  def token_stale?
+    minted = token_minted_at
+    !minted.nil? && (Time.now - minted) > TOKEN_TTL_SECONDS
   end
 
   # Re-do the OAuth client_credentials exchange and store the new token.
@@ -100,9 +159,16 @@ module Sigma
       raise AuthError, "token exchange -> #{res.code} #{res.body}" unless res.is_a?(Net::HTTPSuccess)
       tok = JSON.parse(res.body)['access_token']
       raise AuthError, "token exchange returned no access_token: #{res.body}" if tok.nil? || tok.empty?
-      @token_mutex.synchronize { @token_override = tok }
-      # Surface the refreshed token to child processes / shell evals.
+      now = Time.now
+      @token_mutex.synchronize do
+        @token_override = tok
+        @minted_at = now
+      end
+      # Surface the refreshed token — and its mint time, so child processes
+      # inherit the token's AGE and re-mint on schedule too — to child
+      # processes / shell evals.
       ENV['SIGMA_API_TOKEN'] = tok
+      ENV['SIGMA_TOKEN_MINTED_AT'] = now.utc.iso8601
       tok
     ensure
       @token_mutex.synchronize { @refresh_inflight = false }

@@ -103,6 +103,51 @@ Three Windows-specific practices that prevent the most time-consuming failure lo
    it) and `<WORKDIR>/auth.json` (above) — rather than exported variables that
    silently evaporate between invocations.
 
+## Unattended runs & permission prompts
+
+A conversion executes dozens of `ruby scripts/*.rb` / `python3 scripts/*.py`
+commands. Under an agent harness with default permissions, every one of them
+raises an approval prompt — and in an unattended session nobody is there to
+answer. **Measured in a real field run: 258 of 376 minutes (69%) were lost
+idle at unanswered permission prompts.** If a run will be unattended, have the
+*user* pre-approve the skill's script surface first.
+
+For Claude Code, a conservative allowlist in the project's
+`.claude/settings.json` (other agents have equivalents):
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(ruby scripts/*)",
+      "Bash(python3 scripts/*)",
+      "Bash(bash scripts/doctor.sh*)",
+      "Bash(node *)"
+    ]
+  }
+}
+```
+
+Why each entry (and why nothing broader):
+
+- `Bash(ruby scripts/*)` — the Ruby spine (orchestrator, discovery, gates,
+  tests). Scoped to the skill's `scripts/` directory, **not** `ruby` in
+  general.
+- `Bash(python3 scripts/*)` — the Python twins (`get_token.py`,
+  `land-extracts.py`, `visual-similarity.py`, telemetry).
+- `Bash(bash scripts/doctor.sh*)` — the mandatory Step-0 environment doctor
+  (read-only environment probe).
+- `Bash(node *)` — the vendored converter (`converter/tableau.mjs`) runs via
+  `node`; tighten to `Bash(node converter/*)` if your harness matches the full
+  command string.
+
+Keep everything else behind a prompt **on purpose** — git mutations, package
+installs, PATH edits, and raw `curl` are exactly the actions that should wait
+for a human. This pairs with the token rule above: the scripts mint tokens
+**in-process**, so an allowlisted `ruby scripts/...` command never needs a
+secret-bearing `curl` (which permission classifiers on managed machines block
+anyway — see the SKILL.md prerequisites rule).
+
 > **Agents: do not silently install runtimes.** If the doctor reports a missing
 > runtime, surface its fix and get the user's OK before downloading binaries or
 > editing PATH. Never munge the machine's PATH or fetch an unpinned installer on your

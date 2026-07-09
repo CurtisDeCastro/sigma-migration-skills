@@ -66,6 +66,17 @@ Handoff protocol (the machinery already exists — resume is cheap):
 **Never grind past fatigue signs.** A handoff costs ~5 minutes; a
 compaction-looping agent shipping a broken workbook costs a customer escalation.
 
+**The orchestrator now measures the 90-minute budget for you.**
+`migrate-tableau.rb` computes total elapsed time from the run-state ledger's
+FIRST phase stamp (stamps merge by phase key, so the pass-1 start survives
+resumes and `--finalize`) and, once it crosses 90 minutes, prints a one-time
+`⏰⏰⏰ HANDOFF NUDGE` line at the next phase header. Treat that line as this
+section firing: finish the current phase, write `<workdir>/HANDOFF.md` (step 2
+above), and hand off to a fresh builder. The nudge is advisory — it never
+blocks a phase — but ignoring it is exactly how the 6-hour single-context
+field failure happened (zero subagents in 6 hours; by hour 3 the agent was
+grepping its own transcript to recover commands it had already run).
+
 ## O3. Builder/verifier split (MUST — GREEN requires the countersignature)
 
 **The builder NEVER records the final visual verdict on its own work.** A

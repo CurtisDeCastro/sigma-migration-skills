@@ -104,6 +104,25 @@ hand-driven calls have `get-tableau-token.sh` (bash) and its shell-neutral twin
 `python scripts/get-tableau-token.py` (Windows-safe — see refs/environment.md). This
 section exists for anyone driving the signin endpoint directly.
 
+## Resolving a numeric `/projects/<N>` URL id (vizportal id) — never guess
+
+A Tableau URL like `.../#/site/<site>/projects/1234567` carries a **vizportal URL id**.
+**REST has no numeric project id anywhere**: Query Projects (`GET $TABLEAU_BASE/projects`)
+returns only `id` (the luid), `name`, `description`, `parentProjectId`, `owner`, and
+`contentCounts` (filterable by name/ownerName/parentProjectId) — so no REST call can match
+that number. The Metadata API can: `Workbook.projectVizportalUrlId` is "the ID of the project
+in which the workbook is visible", next to `projectLuid`/`projectName`.
+
+One command — `ruby scripts/resolve-project.rb --url "<url>"` — runs
+`{ workbooks { luid name projectVizportalUrlId projectLuid projectName } }` (plus the same
+project fields on `publishedDatasources` when the schema supports them) against
+`POST /api/metadata/graphql`, groups by `projectVizportalUrlId`, and exact-matches the URL's
+number → `{vizportal_id, project_luid, project_name, workbooks}`. **Exit 2** (empty project,
+or Metadata API off on self-hosted Server) means the number is UNRESOLVABLE — the script
+prints the REST project candidates; present them to the user and ask which project.
+**Never guess from name or recency** — a wrong project aims the entire run at the wrong
+content.
+
 ## Endpoint inventory
 
 All paths assume `$TABLEAU_BASE = $TABLEAU_SERVER_URL/api/$TABLEAU_API_VERSION/sites/$TABLEAU_SITE_ID`.

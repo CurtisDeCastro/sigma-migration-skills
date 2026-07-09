@@ -285,11 +285,42 @@ rescue StandardError
 end
 
 TOTAL = 6
+
+# ── Total-runtime handoff nudge (refs/orchestration.md O2) ──────────────────
+# Field failure, 2026-07: a single context drove one migration for 6+ hours,
+# compaction-looped by hour 3 (grepping its own transcript to recover
+# commands), and never handed off. The run-state ledger stamps a timestamp at
+# every phase entry, so TOTAL elapsed time — across passes/resumes, because
+# stamps merge by phase key and the FIRST stamp of pass 1 survives — is
+# computable for free. When it crosses the O2 budget, print ONE loud line per
+# run pointing at the handoff protocol. Advisory only — never changes behavior.
+HANDOFF_BUDGET_MIN = 90
+$handoff_nudged = false
+def handoff_nudge
+  return if $handoff_nudged
+  return unless defined?(WORK) && WORK
+  first = RunState.load(WORK)['phases'].values
+                  .map { |p| begin; Time.parse(p['ts'].to_s); rescue StandardError; nil; end }
+                  .compact.min
+  return unless first
+  elapsed_min = ((Time.now - first) / 60).round
+  return unless elapsed_min > HANDOFF_BUDGET_MIN
+  $handoff_nudged = true
+  puts
+  puts "⏰⏰⏰ HANDOFF NUDGE — this context has been driving for #{elapsed_min}m (budget #{HANDOFF_BUDGET_MIN}m)."
+  puts "   Per refs/orchestration.md (O2): write #{File.join(WORK, 'HANDOFF.md')} and hand off to a"
+  puts '   fresh builder agent; resume is cheap (discovery caches + phase stamps skip completed work).'
+rescue StandardError
+  nil # advisory only — a nudge failure must never touch the conversion
+end
+
 def hdr(n, title)
   puts; puts "── Phase #{n}/#{TOTAL} · #{title} ──"
   # Ledger stamp — records that the orchestrator entered this phase (Tier 2
   # run-state chain; assert-run-state.rb audits it). Best-effort; never fatal.
   RunState.stamp(WORK, "phase-#{n}", note: title) if defined?(WORK)
+  # Total-runtime check rides every phase header (prints at most once per run).
+  handoff_nudge
 end
 def line(m) puts "   #{m}"; end
 

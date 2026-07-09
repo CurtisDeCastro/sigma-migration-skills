@@ -1,0 +1,19 @@
+{
+  "workbooks_response": {
+    "data": {
+      "workbooks": [
+        { "luid": "wb-aaaa-1111", "name": "Sales Overview",  "projectVizportalUrlId": "1234567", "projectLuid": "proj-luid-finance", "projectName": "Finance Analytics" },
+        { "luid": "wb-bbbb-2222", "name": "Churn Deep Dive", "projectVizportalUrlId": "1234567", "projectLuid": "proj-luid-finance", "projectName": "Finance Analytics" },
+        { "luid": "wb-cccc-3333", "name": "Ops Monitor",     "projectVizportalUrlId": 7654321,   "projectLuid": "proj-luid-ops",     "projectName": "Operations" },
+        { "luid": "wb-dddd-4444", "name": "Orphan Sheet",    "projectVizportalUrlId": null,      "projectLuid": null,                "projectName": null }
+      ]
+    }
+  },
+  "datasources_response": {
+    "data": {
+      "publishedDatasources": [
+        { "luid": "ds-aaaa-1111", "name": "Orders DS", "projectVizportalUrlId": "1234567", "projectLuid": "proj-luid-finance", "projectName": "Finance Analytics" }
+      ]
+    }
+  }
+}

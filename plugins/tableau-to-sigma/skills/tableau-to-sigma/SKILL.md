@@ -253,6 +253,7 @@ which calc translation, which layout) — not orchestration.
 | `scripts/get-tableau-token.sh` | One-shot signin → exports `TABLEAU_AUTH_TOKEN` + `TABLEAU_SITE_ID` — **bash only** |
 | `scripts/get-tableau-token.py` | Shell-neutral twin (bash/PowerShell/cmd) for hand-driven Tableau REST. The orchestrator mints the Tableau token in-process (no bash) so it no longer calls either. |
 | `scripts/tableau-discover.rb` | PAT-mode Phase 1 discovery in one CLI: workbook + views + VDS metadata + GraphQL + .twb content. ONE unified fetch pool (default 5, `--pool N`, longest-job-first) with 429/timeout backoff + 401 re-mint; always writes per-task `timings.json`. Measured 61.8s → 13.7–18.9s on the 7-view reference workbook |
+| `scripts/resolve-project.rb` | **Phase 1a — numeric-project-URL resolver (⛔ no guessing).** The `/projects/<N>` number in a Tableau URL is a *vizportal URL id*; **REST Query Projects has NO numeric id** (only luid/name/contentCounts), so no REST call can resolve it — and guessing picked the WRONG project in a real field run. Resolves via Metadata GraphQL (`workbooks { luid name projectVizportalUrlId projectLuid projectName }`, + the same fields on `publishedDatasources` when the schema supports them), grouped by `projectVizportalUrlId`. Exact match → `{vizportal_id, project_luid, project_name, workbooks:[{luid,name}]}` (exit 0, `--out` JSON). No match / Metadata API off → **exit 2 with a REST candidates table: STOP and ask the user which project — NEVER assume.** Exit 3 = auth/transport (fix creds via `setup-tableau.rb`). |
 | `scripts/scan-workbook-gaps.rb` | **Phase 0a (mandatory):** scan a `.twb` and emit `gaps-report.md` + `gaps.json` categorising every feature into ✅ auto / ⚠️ hint / 🛠 manual / ❌ unhandled. Run BEFORE any other phase. Also detects multi-datasource **data blends** (secondary `datasource-dependencies` + linking fields) and writes `blend-plan.json` with a per-blend route — same-warehouse-repoint / materialize-via-vds / flag-unreachable (decision tree: `refs/blending.md`). |
 | `scripts/gap-scout.md` | **Phase 0a-scout:** subagent prompt + protocol for resolving ❌ Unhandled gaps. Main agent spawns one scout per gap via the Agent tool. |
 | `scripts/validate-sigma-formula.rb` | Scout primitive: POST a tiny test workbook with a candidate formula, read back column types, return JSON `{ status: ok|error }`. Auto-expands the DM element's columns onto the test master so candidate refs to real data resolve. |
@@ -299,6 +300,17 @@ which calc translation, which layout) — not orchestration.
 ---
 
 ## Prerequisites
+
+> **⛔ NEVER hand-roll a signin `curl` — for Sigma OR Tableau.** Managed
+> machines' permission classifiers **block secret-bearing raw `curl`**
+> invocations, and `curl -sf` hides the failure (silent empty output, no
+> error) — a real field session lost ~15 minutes to a silently-failing
+> hand-rolled signin before the skill's scripts worked on the first try. The
+> scripts are the sanctioned route AND the classifier-friendly one:
+> `setup.rb` / `setup-tableau.rb` for one-time credential setup, the
+> **in-process token paths** (`lib/sigma_rest.rb` / `lib/tableau_rest.rb` —
+> every orchestrated command mints its own tokens, no token step at all), and
+> `get_token.py` / `get-tableau-token.py` for hand-driven REST calls.
 
 ### Sigma credentials
 
@@ -456,6 +468,19 @@ the dashboard PNG in one pooled run. MCP mode is the no-PAT fallback. Discover
 calc fields (`extract-calc-fields.rb`) and Custom SQL (`extract-custom-sql.rb`)
 here. **Full detail (fetch patterns, calc discovery, custom-SQL fallback):
 `refs/phase-1-discover.md`.**
+
+> **🚧 GATE — Phase 1a: numeric `/projects/<id>` URLs MUST go through the
+> resolver.** When the user hands you a Tableau URL like
+> `.../#/site/<site>/projects/1234567`, that number is a **vizportal URL id**
+> the REST API cannot resolve (Query Projects returns only luid/name/counts —
+> no numeric id). Run `ruby scripts/resolve-project.rb --url "<url>"` **before
+> anything else**. Exit 0 → migrate exactly the workbooks it lists. **Exit 2 →
+> STOP and ask the user, presenting the printed candidate list — do not
+> proceed.** Guessing the project from its name or recency is a **gate
+> violation**: a wrong guess silently points the ENTIRE run (discovery, DM,
+> workbook, parity) at the wrong content — a real field session burned 6 hours
+> migrating the wrong project this way. Query shape + why REST can't do it:
+> `refs/tableau-rest.md`.
 
 > **🚧 GATE — Phase 1d dashboard-read.** The CSVs give you numbers, not the
 > dashboard. **Read the source dashboard PNG** (`get-view-image` on the
