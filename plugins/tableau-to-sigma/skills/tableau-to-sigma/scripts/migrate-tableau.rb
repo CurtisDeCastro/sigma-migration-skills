@@ -1285,6 +1285,14 @@ if mechanical
   # the converter could not resolve) as an OPEN QUESTION rather than a silent
   # blank chart. Metrics that aren't plotted by any view are ignored.
   conv_fact = MechanicalSpecs.pick_fact(conv['model'], prefer_table: prefer_fact_table)
+  # FIXED-LOD synthesis: the converter emits nothing for per-year `{FIXED
+  # DATEPART('year',[Date]): SUM(m)}` "World"-total calcs, so a chart referencing
+  # them dangles + blocks the POST. Synthesize the grouped Custom SQL helper +
+  # `FIXED Year` relationship on the fact; derive_master surfaces the columns.
+  if have_twb && conv_fact
+    syn = (MechanicalSpecs.synthesize_fixed_lods!(conv['model'], conv_fact, File.read(twb, encoding: 'UTF-8'), (opts[:column_mapping] || {})) rescue 0)
+    line "FIXED-LOD synthesis: materialized #{syn} per-year world-total column(s) via a grouped Custom SQL helper" if syn.positive?
+  end
   conv_base = conv_fact ? MechanicalSpecs.base_of(conv['model'], conv_fact) : nil
   pre = conv_fact ? MechanicalSpecs.derive_master(conv_fact, (conv_fact['name'] || 'Order Fact'), conv_base, nil, conv['model']) : { 'untranslated_metrics' => [] }
   pre_untranslated = pre['untranslated_metrics'] || []

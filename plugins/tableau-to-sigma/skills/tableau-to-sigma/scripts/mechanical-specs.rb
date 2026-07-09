@@ -212,6 +212,74 @@ module MechanicalSpecs
     entry['sf_table'].to_s.split('.').last&.upcase
   end
 
+  # Synthesize DM columns for per-year FIXED LODs the converter left unmaterialized
+  # — `{FIXED DATEPART('year',[Date]): SUM([metric])}` "World"-style global totals.
+  # The converter emits NOTHING for these worksheet/datasource LOD calcs, so a
+  # chart referencing e.g. "GDP World" dangles and blocks the POST. We build the
+  # helper the converter SHOULD have: a nameless grouped Custom SQL element
+  # (SUM per year over the landed fact table) + a `FIXED Year` relationship on the
+  # fact; derive_master's existing FIXED-helper surfacing (below) then exposes each
+  # World measure onto the master as [<fact>/FIXED Year/<Name>]. Scope: single
+  # year dimension keyed on a physical Year column on the fact (the common case).
+  # Returns the count of LOD measures synthesized. Mutates `model`/`fact`.
+  FIXED_YEAR_LOD_RE = /\{\s*FIXED\s+([^:]+?)\s*:\s*(SUM|AVG|MIN|MAX|COUNT|COUNTD)\s*\(\s*\[([^\]]+)\]\s*\)\s*\}/i
+
+  def synthesize_fixed_lods!(model, fact, twb_text, colmap = {})
+    return 0 unless model && fact && twb_text
+    return 0 unless fact.dig('source', 'kind') == 'warehouse-table'
+    path = fact.dig('source', 'path') || []
+    conn = fact.dig('source', 'connectionId')
+    return 0 if path.size < 3 || conn.to_s.empty?
+
+    fact_caps = (fact['columns'] || []).each_with_object({}) { |c, h| h[c['name'].to_s.downcase] = c if c['name'] }
+    year_col = fact_caps['year']
+    return 0 unless year_col # need a physical Year key on the fact
+    # Decode XML entities PER captured formula — NOT on the whole text, which would
+    # turn &apos; into literal ' inside formula='…' and break attribute scanning.
+    decode = ->(s) { s.to_s.gsub('&apos;', "'").gsub('&quot;', '"').gsub('&amp;', '&') }
+
+    phys = lambda do |cap|
+      dest = colmap[cap] || colmap[cap.to_s.strip.upcase]
+      (dest || cap).to_s.gsub(/[^0-9A-Za-z]+/, '_').gsub(/\A_+|_+\z/, '').upcase
+    end
+
+    lods = {}
+    twb_text.scan(/<column\b[^>]*\bcaption='([^']*)'[^>]*>\s*<calculation\b[^>]*\bformula='([^']*)'/m) do |cap_raw, f_raw|
+      cap = decode.call(cap_raw)
+      m = decode.call(f_raw).match(FIXED_YEAR_LOD_RE)
+      next unless m
+      dim, agg, metric = m[1], m[2], m[3]
+      next unless dim =~ /DATEPART\(\s*'year'|\bYEAR\s*\(|\[Year\]/i     # year-grain only
+      next unless fact_caps.key?(metric.to_s.downcase)                   # metric must be on THIS fact
+      lods[cap] ||= { 'name' => cap, 'agg' => agg.upcase, 'metric' => metric }
+    end
+    return 0 if lods.empty?
+
+    year_phys = phys.call(year_col['name'])
+    fqn = %(#{path[0]}.#{path[1]}."#{path[2]}")
+    sel = [%("#{year_phys}" AS "Year")]
+    cols = [{ 'id' => 'wby-year', 'name' => 'Year', 'formula' => '[Custom SQL/Year]' }]
+    lods.values.each do |l|
+      sel << %(#{l['agg']}("#{phys.call(l['metric'])}") AS "#{l['name']}")
+      cols << { 'id' => "wby-#{slug(l['name'])}", 'name' => l['name'], 'formula' => "[Custom SQL/#{l['name']}]" }
+    end
+    statement = %(SELECT #{sel.join(', ')} FROM #{fqn} GROUP BY "#{year_phys}")
+
+    sql_el = {
+      'id' => 'el-world-by-year', 'kind' => 'table',
+      'source' => { 'connectionId' => conn, 'kind' => 'sql', 'statement' => statement },
+      'columns' => cols, 'order' => cols.map { |c| c['id'] }
+    }
+    page = (model['pages'] || []).find { |p| (p['elements'] || []).any? { |e| e.equal?(fact) } } ||
+           (model['pages'] || []).first
+    (page['elements'] ||= []) << sql_el if page
+    (fact['relationships'] ||= []) << {
+      'name' => 'FIXED Year', 'targetElementId' => 'el-world-by-year',
+      'keys' => [{ 'sourceColumnId' => year_col['id'], 'targetColumnId' => 'wby-year' }]
+    }
+    lods.size
+  end
+
   # The base element a derived view sources (for harvesting its metrics, which
   # don't propagate to derived elements). Returns nil for a base fact.
   def base_of(model, fact_el)
