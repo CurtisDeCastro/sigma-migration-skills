@@ -85,15 +85,66 @@ Dir.mktmpdir do |d|
   check(!ok && errs.any? { |e| e =~ /target_tiles/ }, 'filter_shelf entry without target_tiles is rejected', fails)
 end
 
-# The same control WITH an explicit filter/highlight split is accepted.
-Dir.mktmpdir do |d|
-  File.write(DashboardRead.path(d), JSON.dump(
-    'tiles' => [{ 'title' => 'Trend', 'kind' => 'line-chart' }, { 'title' => 'Bars', 'kind' => 'kpi-chart' }],
+# A control WITH highlight_tiles now also requires: each highlighted tile carries
+# a `measure`, AND a point_in_time block (the multi-metric recipe contract).
+def hl_doc(extra = {})
+  { 'tiles' => [{ 'title' => 'Trend', 'kind' => 'line-chart' },
+                { 'title' => 'Bars', 'kind' => 'bar-chart', 'orientation' => 'horizontal', 'measure' => 'GDP (current US$)' }],
     'text_elements' => [],
-    'filter_shelf' => [{ 'label' => 'Region', 'target_tiles' => ['Trend'], 'highlight_tiles' => ['Bars'] }]
-  ))
+    'filter_shelf' => [{ 'label' => 'Region', 'target_tiles' => ['Trend'], 'highlight_tiles' => ['Bars'] }],
+    'point_in_time' => { 'year_column' => 'Year', 'entity_discriminator' => 'Income Group', 'latest_year' => 2015 } }.merge(extra)
+end
+Dir.mktmpdir do |d|
+  File.write(DashboardRead.path(d), JSON.dump(hl_doc))
   ok, = DashboardRead.validate(d)
-  check(ok, 'filter_shelf with explicit target_tiles/highlight_tiles is accepted', fails)
+  check(ok, 'highlight control WITH measure + point_in_time is accepted', fails)
+end
+# highlighted tile missing its `measure` → rejected
+Dir.mktmpdir do |d|
+  bad = hl_doc
+  bad['tiles'][1].delete('measure')
+  File.write(DashboardRead.path(d), JSON.dump(bad))
+  ok, errs = DashboardRead.validate(d)
+  check(!ok && errs.any? { |e| e =~ /measure/ }, 'highlight tile without `measure` is rejected', fails)
+end
+# highlight pattern but no point_in_time → rejected
+Dir.mktmpdir do |d|
+  bad = hl_doc
+  bad.delete('point_in_time')
+  File.write(DashboardRead.path(d), JSON.dump(bad))
+  ok, errs = DashboardRead.validate(d)
+  check(!ok && errs.any? { |e| e =~ /point_in_time/ }, 'highlight pattern without point_in_time is rejected', fails)
+end
+
+# A PARAMETER-driven highlight (not a shared_filter) is surfaced into filter_shelf
+# so the multi-metric forcing function can't be skipped. Only tiles that REFERENCE
+# the parameter in a calc formula (not the boilerplate redeclaration) are seeded
+# as highlight_tiles; point_in_time is seeded too.
+Dir.mktmpdir do |d|
+  layout = [{ 'dashboard' => 'M', 'zones' => [
+    { 'id' => 'bA', 'kind' => 'chart', 'caption' => 'BarA', 'chart_kind' => 'bar' },
+    { 'id' => 'bB', 'kind' => 'chart', 'caption' => 'BarB', 'chart_kind' => 'bar' },
+    { 'id' => 'tA', 'kind' => 'chart', 'caption' => 'TrendA', 'chart_kind' => 'line' }
+  ] }]
+  meta = {
+    'shared_filters' => [],
+    'parameters' => [{ 'name' => '[Parameter 5]', 'caption' => 'Region', 'param_domain' => 'list' }],
+    'worksheets' => {
+      # BarA/BarB reference the param in a highlight calc; TrendA only carries the
+      # boilerplate redeclaration (a bare column named like the param, no ref).
+      'BarA'   => { 'calculations' => [{ 'name' => 'hl',  'formula' => 'If([New Region]=[Parameter 5],1,0)' }] },
+      'BarB'   => { 'calculations' => [{ 'name' => 'hl2', 'formula' => 'If([New Region]=[Parameter 5],"S","O")' }] },
+      'TrendA' => { 'calculations' => [{ 'name' => '[Parameter 5]', 'formula' => '' }] }
+    }
+  }
+  File.write("#{d}/dashboard-layout.json", JSON.dump(layout))
+  File.write("#{d}/dashboard-layout-meta.json", JSON.dump(meta))
+  doc = JSON.parse(File.read(DashboardRead.seed_from_layout(d)))
+  reg = doc['filter_shelf'].find { |f| f['label'] == 'Region' }
+  check(reg, 'parameter "Region" surfaced into filter_shelf (not just shared_filters)', fails)
+  check(reg && reg['highlight_tiles'].sort == %w[BarA BarB], "highlight = tiles referencing the param (got #{reg && reg['highlight_tiles'].inspect})", fails)
+  check(reg && reg['target_tiles'] == ['TrendA'], 'target = the non-referencing tile (TrendA, boilerplate redeclaration only)', fails)
+  check(doc['point_in_time'].is_a?(Hash), 'point_in_time seeded once a highlight parameter is present', fails)
 end
 
 puts

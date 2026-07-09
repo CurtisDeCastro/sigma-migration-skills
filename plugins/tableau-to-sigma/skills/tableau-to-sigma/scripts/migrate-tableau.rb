@@ -109,6 +109,7 @@ require 'time'
 require 'set'
 require_relative 'lib/scout_gate'
 require_relative 'lib/dashboard_read'
+require_relative 'lib/recipe_multimetric'
 require_relative 'lib/run_state'
 require_relative 'lib/fast_path' # FAST-PATH routing + BOM-tolerant JSON reads
 require_relative 'lib/sigma_rest' # in-process Sigma token minting (no bash/eval)
@@ -232,6 +233,10 @@ OptionParser.new do |o|
   o.on('--dashboard NAME', 'Build/gate only this Tableau dashboard (repeatable). Enables one-tab-at-a-time large-workbook migration.') { |v| (opts[:dashboards] ||= []) << v }
   o.on('--page ID',        'Scope to the dashboard with this zone-root id (alt to --dashboard; repeatable).') { |v| (opts[:pages] ||= []) << v }
   o.on('--workbook-target ID', 'Existing Sigma workbook id to APPEND the scoped dashboard page to (PUT-append instead of POST-new).') { |v| opts[:wb_target] = v }
+  o.on('--reuse-workbook ID', 'Existing Sigma workbook id to UPDATE IN PLACE (PUT the freshly-built full spec to it, ' \
+                              'same id/URL, layout preserved) instead of POSTing a NEW workbook — the workbook twin of ' \
+                              '--reuse-dm. Iterating a fix? Re-run with --reuse-dm <id> --reuse-workbook <id> to edit the ' \
+                              'SAME dashboard rather than orphaning it.') { |v| opts[:reuse_workbook] = v }
 end.parse!
 
 abort 'missing --workbook or --workbook-id' unless opts[:wb_name] || opts[:wb_id]
@@ -1089,9 +1094,15 @@ if mechanical
   # land-extracts.py; refs/extract-landing.md). Landing is byte-identical to what
   # Tableau rendered, so Phase 6 parity runs in EXACT mode — never drift mode.
   embedded_classes = %w[excel-direct textscan hyper ogrdirect csv msexcel]
+  # Basemap / non-data connection classes carry NO queryable data (map tile
+  # providers, WMS). They must not defeat the embedded-extract detection the way
+  # a stray class='MapBox' (from a geo mark) otherwise would — dropping the
+  # embedded path, the landing manifest, and the source.path remap.
+  nondata_classes = %w[mapbox tableau-map wms wms-server]
   if have_twb && !HydrateCustomSql.twb_has_sqlproxy?(twb)
     conn_classes = begin
-      File.read(twb, encoding: 'UTF-8').scan(/<connection[^>]*\bclass='([^']+)'/).flatten.uniq - ['federated']
+      File.read(twb, encoding: 'UTF-8').scan(/<connection[^>]*\bclass='([^']+)'/).flatten.uniq
+        .reject { |c| c == 'federated' || nondata_classes.include?(c.to_s.downcase) }
     rescue StandardError
       []
     end
@@ -1255,6 +1266,16 @@ if mechanical
     end
   end
 
+  # Fact hint for a MULTI-embedded-extract workbook: the datasource the dashboard
+  # worksheets actually use (column count alone picks the wrong one — an unused
+  # secondary can project MORE columns than the plotted table). Computed from the
+  # .twb worksheet dependencies + the landing manifest; threaded into pick_fact.
+  prefer_fact_table = nil
+  if have_twb && defined?(landing_manifest) && landing_manifest
+    prefer_fact_table = (MechanicalSpecs.dominant_fact_table(File.read(twb, encoding: 'UTF-8'), landing_manifest) rescue nil)
+    line "fact hint: dashboard datasource → prefer table #{prefer_fact_table}" if prefer_fact_table
+  end
+
   # Mechanical DM fixup NOW (so dropped calcs feed the checkpoint): resolve
   # raw-table-name prefixes + GUID sibling refs, and DROP calc columns that
   # still cannot resolve (unknown functions / unresolved refs).
@@ -1267,7 +1288,19 @@ if mechanical
   # us surface any chart-PLOTTED metric that did not fully translate (GUID refs
   # the converter could not resolve) as an OPEN QUESTION rather than a silent
   # blank chart. Metrics that aren't plotted by any view are ignored.
-  conv_fact = MechanicalSpecs.pick_fact(conv['model'])
+  conv_fact = MechanicalSpecs.pick_fact(conv['model'], prefer_table: prefer_fact_table)
+  # FIXED-LOD synthesis: the converter emits nothing for per-year `{FIXED
+  # DATEPART('year',[Date]): SUM(m)}` "World"-total calcs, so a chart referencing
+  # them dangles + blocks the POST. Synthesize the grouped Custom SQL helper +
+  # `FIXED Year` relationship on the fact; derive_master surfaces the columns.
+  world_lod_map = {}
+  if have_twb && conv_fact
+    # The real-entity discriminator (png-read point_in_time) also scopes the World
+    # per-year SUM to real entities, so it doesn't double-count rollup rows.
+    _disc = ((JSON.parse(File.read(DashboardRead.path(WORK)))['point_in_time'] rescue nil) || {})['entity_discriminator']
+    world_lod_map = (MechanicalSpecs.synthesize_fixed_lods!(conv['model'], conv_fact, File.read(twb, encoding: 'UTF-8'), (opts[:column_mapping] || {}), discriminator: _disc) rescue {})
+    line "FIXED-LOD synthesis: materialized #{world_lod_map.size} per-year world-total column(s) via a grouped Custom SQL helper#{_disc ? " (real-entity scoped by #{_disc})" : ''}" if world_lod_map.any?
+  end
   conv_base = conv_fact ? MechanicalSpecs.base_of(conv['model'], conv_fact) : nil
   pre = conv_fact ? MechanicalSpecs.derive_master(conv_fact, (conv_fact['name'] || 'Order Fact'), conv_base, nil, conv['model']) : { 'untranslated_metrics' => [] }
   pre_untranslated = pre['untranslated_metrics'] || []
@@ -1925,6 +1958,15 @@ elsif mechanical
     pf = MechanicalSpecs.fixup_dm_spec(dm, real_cols, column_mapping: opts[:column_mapping])
     line "phantom-column filter: dropped #{pf[:phantom]} non-existent base column(s) using #{real_cols.size} live table catalog(s)" if pf[:phantom].to_i.positive?
     line "column-rename remap: rewired #{pf[:remapped]} base column(s) to their warehouse names (--column-mapping)" if pf[:remapped].to_i.positive?
+    # Retain the multi-metric recipe's point-in-time columns on the fact (the
+    # discriminator + year the source didn't plot) so the real-entity filter can
+    # run instead of being skipped as a dangling ref. From png-read point_in_time.
+    if defined?(conv_fact) && conv_fact
+      _pit = ((JSON.parse(File.read(DashboardRead.path(WORK)))['point_in_time'] rescue nil) || {})
+      want = [_pit['entity_discriminator'], _pit['year_column'] || 'Year'].compact
+      kept = MechanicalSpecs.retain_columns!(conv_fact, want, real_cols)
+      line "point-in-time retain: added #{kept} recipe column(s) (#{want.join(', ')}) to the fact" if kept.positive?
+    end
   end
   # Computed-key join recovery (bead ovud): joins the converter skipped
   # ("DATE([Order Date]) = [Date Key]") are recovered mechanically — via a calc
@@ -1996,7 +2038,7 @@ unless reuse_dm_id
   if mechanical
     # The master must source the SAME chart-ready element pick_fact chose (the
     # derived "<Fact> View" when present). Match it into the readback by name.
-    cf = MechanicalSpecs.pick_fact(conv['model'])
+    cf = MechanicalSpecs.pick_fact(conv['model'], prefer_table: (defined?(prefer_fact_table) ? prefer_fact_table : nil))
     cf_name = cf && (cf['name'] || MechanicalSpecs.elem_name(cf))
     # Fallback (when the exact name match misses): the fact is the WIDEST non-dim
     # element — never a narrow date/time dim. Match pick_fact's dim test (both
@@ -2029,7 +2071,13 @@ if mechanical
   #    AND the readback element's REAL column labels (the suffixed display names
   #    Sigma assigns to joined-dim columns, e.g. "Customer Id (CUSTOMER_DIM)") so
   #    the [fact/Col] formulas resolve for virtual-connection (denormalized) DMs.
-  conv_fact = MechanicalSpecs.pick_fact(conv['model'])
+  # Thread the fact hint (dominant dashboard datasource) so the master-map is
+  # derived from the SAME element the readback fact-selection (line ~2024/2031)
+  # picked. Without this, pick_fact defaults to the widest element (an unused
+  # secondary can be wider than the plotted table); derive_master then emits the
+  # secondary's columns under the MAIN fact's name → orphan [MainFact/SecondaryCol]
+  # refs that fail the workbook POST ("Dependency not found"). Mirrors line 2024.
+  conv_fact = MechanicalSpecs.pick_fact(conv['model'], prefer_table: (defined?(prefer_fact_table) ? prefer_fact_table : nil))
   abort 'FATAL: mechanical path could not identify a fact element in the converter output' unless conv_fact
   conv_base = MechanicalSpecs.base_of(conv['model'], conv_fact)
   real_labels = fact['columnLabels'] # from post-and-readback /columns (may be nil)
@@ -2134,6 +2182,24 @@ if mechanical
   # Formula-normalize hook (sibling workstream): case-fix converter-derived
   # formulas on the mechanical workbook spec before validate/POST.
   normalize_formulas!(spec, 'wb-spec')
+  # Multi-metric region dashboard recipe (refs/fidelity-recipes.md): when png-read
+  # declares a control with `highlight_tiles`, rewrite the mechanical spec into the
+  # recipe shape — master/masterAll split + highlight color column, and (with
+  # png-read `point_in_time`) latest-year + real-entity grouped Top-N measures.
+  # No-op when the pattern isn't present. Tolerant: never aborts the build.
+  begin
+    _pr = (JSON.parse(File.read(DashboardRead.path(WORK))) rescue nil)
+    if _pr && RecipeMultimetric.applicable?(_pr)
+      rsum = RecipeMultimetric.apply!(spec, _pr, world_lod_map: (defined?(world_lod_map) ? world_lod_map : {}))
+      if rsum[:applied]
+        line "multi-metric recipe: +#{rsum[:masters_added]} masterAll, #{rsum[:highlight_tiles]} highlight tile(s), " \
+             "#{rsum[:top_tables]} point-in-time measure(s) rewritten"
+      end
+      rsum[:notes].each { |n| line "  recipe note: #{n}" }
+    end
+  rescue StandardError => e
+    line "WARN: multi-metric recipe transform skipped (#{e.class}: #{e.message})"
+  end
 else
   spec = Specs.wb_spec(dm_id, fact_eid)
   # Agent-authored JSON path: bind the DM placeholders ("__DM_ID__" and
@@ -2234,8 +2300,15 @@ begin
   run_wb!(ref_cmd)
   par_cmd = ['ruby', File.join(HERE, 'post-and-readback.rb'), '--type', 'workbook',
              '--spec', wb_spec_path, '--out', wb_ids_path, '--workdir', WORK]
-  # PUT-append into the targeted existing workbook (instead of POST-create).
-  par_cmd += ['--update-id', append_update_id] if append_update_id
+  # UPDATE-IN-PLACE: --reuse-workbook PUTs the freshly-built full spec to an
+  # existing workbook (same id/URL, layout preserved by post-and-readback's re-PUT
+  # path) instead of POSTing a new one — so iterating a fix edits the SAME
+  # dashboard rather than orphaning it. --workbook-target (append) takes priority
+  # when both are set (it already computed append_update_id + merged the spec).
+  update_wb = append_update_id || opts[:reuse_workbook]
+  line "reuse-workbook: PUT the full spec to existing workbook #{opts[:reuse_workbook]} (no new workbook)" \
+    if opts[:reuse_workbook] && !append_update_id
+  par_cmd += ['--update-id', update_wb] if update_wb
   p_log = sigma_run_wb!(par_cmd)
 rescue WorkbookBuildError => e
   failed = cull_failed_fields(e.captured_output,

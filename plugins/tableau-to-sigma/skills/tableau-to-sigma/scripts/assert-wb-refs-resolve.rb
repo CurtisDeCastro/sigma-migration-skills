@@ -165,7 +165,14 @@ wb_elements.each_with_index do |el, i|
     extra_fails << "element #{el_desc}: source data-model elementId \"#{src['elementId']}\" not in #{File.basename(opts[:dm_ids])} — stale readback or wrong DM"
   end
 
-  walk.call(el) do |prefix, col|
+  walk.call(el) do |prefix, col_raw|
+    # A 3-part relationship ref [Element/RelName/Field] resolves THROUGH the DM
+    # relationship — the actual column to check is the FINAL segment (Field); the
+    # middle segment is a relationship name (existence validated DM-side by the
+    # reachability guard), NOT a column. Resolving the whole "RelName/Field" string
+    # as a column name was a false-negative on surfaced FIXED-LOD columns
+    # (e.g. [World Bank/FIXED Year/GDP World]).
+    col = col_raw.include?('/') ? col_raw.split('/').last : col_raw
     k = norm(col)
     rec = (refs[k] ||= { display: col.strip, elements: Set.new })
     rec[:elements] << prefix.strip

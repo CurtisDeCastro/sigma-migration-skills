@@ -204,6 +204,25 @@ def synthesize_view_from_signals(z, meta)
     g = guid_from_text(cc.to_s)
     dims << { 'guid' => g, 'role' => 'dim', 'derivation' => 'none' } if g && dims.none? { |f| f['guid'] == g }
   end
+  # TEXT-MARK TABLE recovery (Top-N country lists): a Tableau text/label table
+  # carries its measure on the Label mark, NOT on a shelf — so cols_shelf.fields
+  # is empty and the zone would drop with "no dim+measure" even though the value
+  # is fully known. Recover the measure from the sort's `using` clause
+  # (`[…].[sum:GDP (current US$):qk]`), then from the aggregations map (first
+  # numeric-agg field that isn't the dim). Without this the 3 Top-Countries
+  # tables silently vanish from the dashboard.
+  if meas.empty? && dims.any?
+    dim_guids = dims.map { |d| d['guid'].to_s.downcase }
+    recovered = nil
+    if (mm = z.dig('sort', 'using').to_s.match(/\.\[[a-z]+:(.+?):[a-z]+\]\s*\z/i))
+      recovered = mm[1]
+    end
+    recovered ||= (z['aggregations'] || {}).find { |k, agg|
+      %w[sum avg average min max count countd median].include?(agg.to_s.downcase) &&
+        !dim_guids.include?(k.to_s.gsub(/\A\[|\]\z/, '').downcase)
+    }&.first&.gsub(/\A\[|\]\z/, '')
+    meas << { 'guid' => recovered, 'role' => 'measure', 'derivation' => 'none' } if recovered && !recovered.empty?
+  end
   headers = (dims.map(&field_header) + meas.map(&field_header)).compact
   # Fallback for pie/detail marks: the dimension sits on the color/detail
   # encoding (not rows/cols shelves, and `channels` may be empty), so the only
@@ -5103,6 +5122,13 @@ elsif opts[:pages_mode] == :dashboard
       # (a user changes it and nothing reacts) that fails the control lint.
       if param_control_ids.include?(c['controlId'])
         used = els.any? { |el| (el['columns'] || []).any? { |col| col['formula'].to_s.include?("[#{c['controlId']}]") } }
+        # A DATA-SCOPING parameter control filters via its `filters` targets (a
+        # boolean filter-calc wired to a master column at ~L4649), NOT via a
+        # Switch/If formula ref — so it is NOT dead even when no chart formula
+        # names it. Keep it whenever it carries filter targets, else the Region
+        # data-scoper is silently dropped (control-lint FAIL + the multi-metric
+        # recipe can't find a control to build masterAll/highlight from).
+        used ||= (c['filters'].is_a?(Array) && c['filters'].any?)
         next unless used
       end
       dup = JSON.parse(c.to_json)
