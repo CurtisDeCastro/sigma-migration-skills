@@ -111,6 +111,7 @@ require_relative 'lib/scout_gate'
 require_relative 'lib/dashboard_read'
 require_relative 'lib/run_state'
 require_relative 'lib/fast_path' # FAST-PATH routing + BOM-tolerant JSON reads
+require_relative 'lib/phase_cache' # sha-stamped phase-output reuse on re-entry (refs/performance.md)
 require_relative 'lib/sigma_rest' # in-process Sigma token minting (no bash/eval)
 require_relative 'lib/tableau_rest' # in-process Tableau token minting (Windows-safe; no bash/eval)
 require_relative 'hydrate-custom-sql'
@@ -298,16 +299,75 @@ def line(m) puts "   #{m}"; end
 START_T = Time.now
 PHASE_T = {}
 $t_mark = Time.now
+
+# ── Wall-clock budgets (refs/performance.md, workstream S2) ─────────────────
+# EXPECTED seconds per phase for a MEDIUM workbook (~10 views / 1-2 dashboards,
+# warm caches where a cache exists), calibrated from the GREEN reference run
+# (~45-60 min per comparable workbook end-to-end). mark() prints ONE loud
+# advisory line when a phase's cumulative time exceeds ~3x its budget — no
+# behavioral change, just "this should have taken ~Ys; stop and read
+# refs/performance.md#slow-<phase> instead of restarting from scratch".
+# A COLD first run legitimately runs at the top of these ranges; the 3x
+# multiplier keeps cold runs quiet and only flags genuinely-wedged phases.
+PHASE_BUDGET = {
+  'fastpath-route'    => 10,  # pure routing + DM readback (no Tableau work)
+  'phase1-foreground' => 150, # parse-twb-layout + mechanical converter (cold); sha-cached re-entry ~5s
+  'phase1-lane(bg)'   => 240, # Tableau 5-fetch discovery pool, cold 2-4min; stamp-reused <5s
+  'join-wait'         => 240, # foreground wait on the lane (≈ lane time on a cold run, ~0s on reuse)
+  'phase1.6-dm-scan'  => 45,  # DM list + ≤25 spec fetches; signature-cached re-entry <1s
+  'phase2-columns'    => 90,  # ~2-5s per table via the Sigma catalog; cols-*.json reused on re-entry
+  'phase1-join'       => 120, # calc extraction + custom-SQL scan + gap-report parse (sha-cached on re-entry)
+  'decisions'         => 10,  # pure local
+  'folder-resolve'    => 15,  # one whoami + files listing
+  'phase3-dm'         => 90,  # validate + POST + readback (skipped entirely on --reuse-dm)
+  'phase4-workbook'   => 150, # master derive + build-charts + validate + ref-gate + POST
+  'phase5-layout'     => 45,  # layout build + PUT
+  'phase5b-visual-qa' => 120, # ~15s per page render
+  'phase5g-init'      => 10,  # ledger init only
+  'phase6-pass1'      => 240, # structural checks + pooled actuals collection (1-3min)
+  'phase6-finalize'   => 180, # verifier + census over collected actuals
+  'cleanup-orphans'   => 45,
+  'assert-run-state'  => 10,
+  'assert-phase6-ran' => 90,
+  'phaseE'            => 240
+}.freeze
+
+$budget_warned = {}
 def mark(key)
   now = Time.now
   PHASE_T[key] = (PHASE_T[key] || 0.0) + (now - $t_mark)
   $t_mark = now
+  budget = PHASE_BUDGET[key]
+  return unless budget && PHASE_T[key] > 3 * budget && !$budget_warned[key]
+  $budget_warned[key] = true
+  anchor = key.gsub(/[^A-Za-z0-9]+/, '-').gsub(/\A-|-\z/, '').downcase
+  puts "⚠️  PHASE '#{key}' is OVER BUDGET (#{(PHASE_T[key] / 60.0).round(1)}m elapsed > ~#{budget}s expected) — " \
+       "see refs/performance.md#slow-#{anchor} before retrying. Do NOT restart the migration from " \
+       'scratch: the resume machinery skips completed phases; a restart re-pays everything.'
 end
 def phase_summary
   return if PHASE_T.empty?
   puts
   puts "PHASE TIMINGS  #{PHASE_T.map { |k, v| "#{k}=#{v.round(1)}s" }.join('  ')}  " \
        "total=#{(Time.now - START_T).round(1)}s"
+  over = PHASE_T.select { |k, v| PHASE_BUDGET[k] && v > 3 * PHASE_BUDGET[k] }
+  puts "PHASE BUDGET   over-budget: #{over.map { |k, v| "#{k}=#{v.round(0)}s(>#{PHASE_BUDGET[k]}s)" }.join('  ')}  — see refs/performance.md" if over.any?
+end
+
+# Reap the background discovery lane with a HARD bound — an abort/stop path
+# must never hang forever on a wedged child process (poll-bounds audit,
+# refs/performance.md). Returns false when the lane did not exit in time; the
+# caller proceeds anyway (the child is detached and the run is stopping).
+def reap_lane!(lane_done, timeout = 60)
+  t0 = Time.now
+  until lane_done.call
+    if Time.now - t0 > timeout
+      puts "   WARN: discovery lane did not exit within #{timeout}s — proceeding without reaping it"
+      return false
+    end
+    sleep 0.1
+  end
+  true
 end
 
 # Run a child command, indenting its output. token_env: prepend a fresh
@@ -808,16 +868,30 @@ probe_rb << "puts JSON.generate({ 'id' => wb['id'], 'updatedAt' => wb['updatedAt
 probe_out, probe_st = Open3.capture2e(tableau_env, RbConfig.ruby, '-e', probe_rb)
 probe = (JSON.parse(probe_out.lines.last.to_s) rescue nil) if probe_st.success?
 stamp = (JSON.parse(File.read(stamp_path)) rescue nil)
+disc_complete = disc_artifacts.all? { |p| File.exist?(p) } &&
+                Dir[File.join(WORK, 'views', '*.csv')].any?
 reuse_discovery = probe && stamp &&
                   stamp['workbook_id'] == probe['id'] && stamp['updatedAt'] == probe['updatedAt'] &&
-                  disc_artifacts.all? { |p| File.exist?(p) } &&
-                  Dir[File.join(WORK, 'views', '*.csv')].any?
+                  disc_complete
+# Probe-failure resilience (speed hardening): a TRANSIENT probe failure must
+# not nuke a complete, stamped discovery and re-pay the full Tableau fetch —
+# worse, if Tableau is genuinely unreachable the re-fetch dies too, AFTER
+# clearing a perfectly good cache. Reuse the stamped artifacts with a loud
+# WARN instead; delete discovery-stamp.json to force a re-fetch.
+probe_failed_reuse = !probe && stamp && disc_complete
+reuse_discovery ||= probe_failed_reuse
 
 disc_log = File.join(WORK, 'phase1-discover.log')
 if reuse_discovery
   lane = { started: Time.now, ended: Time.now, status: FAKE_OK.new(0), reused: true }
-  line "discovery REUSED (stamp match: workbook #{probe['id']} updatedAt=#{probe['updatedAt']}; " \
-       "#{Dir[File.join(WORK, 'views', '*.csv')].size} view CSVs already on disk) — Tableau fetch skipped"
+  if probe_failed_reuse
+    line "WARN: workbook-revision probe FAILED (#{probe_out.lines.last.to_s.strip[0, 120]})"
+    line "      REUSING stamped discovery from #{stamp['stamped_at']} (workbook #{stamp['workbook_id']}, " \
+         'source revision UNVERIFIED this run) — delete discovery-stamp.json to force a re-fetch.'
+  else
+    line "discovery REUSED (stamp match: workbook #{probe['id']} updatedAt=#{probe['updatedAt']}; " \
+         "#{Dir[File.join(WORK, 'views', '*.csv')].size} view CSVs already on disk) — Tableau fetch skipped"
+  end
 else
   unless probe
     line "WARN: workbook-revision probe failed (#{probe_out.lines.last.to_s.strip[0, 120]}); discovery will re-fetch"
@@ -887,12 +961,19 @@ print_lane_log = lambda do
   File.read(disc_log, encoding: 'UTF-8').each_line { |l| puts "   │ #{l.rstrip}" } if File.exist?(disc_log)
 end
 # Wait for a lane artifact (tableau-discover writes them atomically). Returns
-# false when the lane exits without producing it.
+# false when the lane exits without producing it. Bounded (hard timeout) with a
+# 30s progress heartbeat so a long fetch never LOOKS wedged (poll-bounds audit).
 lane_wait_for = lambda do |path, what, timeout = 600|
   t0 = Time.now
+  beat = t0
   until File.exist?(path)
     if lane_done.call
       return File.exist?(path)
+    end
+    if Time.now - beat > 30
+      beat = Time.now
+      puts "   … still waiting for #{what} from the discovery lane " \
+           "(#{(Time.now - t0).round}s elapsed, timeout #{timeout}s; tail #{File.basename(disc_log)} for progress)"
     end
     abort "FATAL: timed out (#{timeout}s) waiting for #{what} from the discovery lane" if Time.now - t0 > timeout
     sleep 0.1
@@ -916,8 +997,17 @@ views = [views] unless views.is_a?(Array)
 line "workbook '#{wb_name}' (#{wb_luid}): #{views.size} view(s)#{has_extracts ? ', hasExtracts=true' : ''}"
 
 have_twb = lane_wait_for.call(twb, 'workbook-content.twb') # layout_json defined at the FAST PATH routing block
+# .twb content sha — the input key for every phase that is a pure function of
+# the workbook XML (parse-twb-layout, calc extraction, custom-SQL scan). On a
+# re-entry with the same .twb these skip via PhaseCache (refs/performance.md).
+twb_sha = have_twb ? PhaseCache.file_sha(twb) : nil
 if have_twb
-  run!(['ruby', File.join(HERE, 'parse-twb-layout.rb'), twb, layout_json] + DASH_SCOPE)
+  parse_st = PhaseCache.cached(WORK, 'parse-twb-layout',
+                               key: PhaseCache.key(twb_sha, DASH_SCOPE.join(' ')),
+                               outputs: [layout_json]) do
+    run!(['ruby', File.join(HERE, 'parse-twb-layout.rb'), twb, layout_json] + DASH_SCOPE)
+  end
+  line 'parse-twb-layout REUSED (.twb sha + scope unchanged) — delete dashboard-layout.json to force a re-parse' if parse_st == :reused
   line "per-dashboard scope: #{(opts[:dashboards] || []) + (opts[:pages] || [])} (single-tab build)" if SCOPED
   dash = JSON.parse(File.read(layout_json))
   zones = dash.is_a?(Array) ? dash.flat_map { |d| d['zones'] || [] } : (dash['zones'] || [])
@@ -970,7 +1060,7 @@ mechanical = !have_specs
 conv = nil
 if mechanical
   unless have_twb
-    sleep 0.1 until lane_done.call # reap the background lane before aborting
+    reap_lane!(lane_done) # bounded reap of the background lane before aborting
     print_lane_log.call
     abort <<~MSG
       FATAL: mechanical conversion needs the workbook .twb (for the data model +
@@ -1032,7 +1122,7 @@ if mechanical
     line 'converter: HOSTED MCP (sigma-data-model-mcp.onrender.com) — NOTE: the .twb is uploaded'
     line '           to this third-party server (opted in via --converter hosted / SIGMA_CONVERTER_ALLOW_HOSTED).'
   else
-    sleep 0.1 until lane_done.call # reap the background lane before aborting
+    reap_lane!(lane_done) # bounded reap of the background lane before aborting
     print_lane_log.call
     abort <<~MSG
       ==================== CONVERTER STOP (no backend) ====================
@@ -1159,7 +1249,7 @@ if mechanical
     # converter fabricate a bogus warehouse table (CSA.TJ.SQLPROXY) that POSTs and
     # then fails at the API. Stop with an actionable message instead.
     if HydrateCustomSql.twb_has_sqlproxy?(conv_twb)
-      sleep 0.1 until lane_done.call rescue nil
+      (reap_lane!(lane_done) rescue nil) # bounded reap before aborting
       print_lane_log.call rescue nil
       abort <<~MSG
         FATAL: workbook is bound to a PUBLISHED data source (sqlproxy) that could not be resolved.
@@ -1366,11 +1456,23 @@ if wh_tables.empty?
   line 'no warehouse tables resolved from metadata; relying on spec generator'
 else
   wh_tables.each do |t|
+    cols_path = File.join(WORK, "cols-#{t}.json")
+    # Re-entry reuse: a prior run of THIS workdir already probed the catalog for
+    # this table on this connection — the schema doesn't change between loop
+    # re-entries (minutes apart). Reuse only a NON-EMPTY catalog answer (an
+    # empty/failed probe is always re-tried). Delete cols-<T>.json to re-probe.
+    prior = (JSON.parse(File.read(cols_path)) rescue nil) if File.exist?(cols_path)
+    if prior.is_a?(Hash) && prior['columns'].is_a?(Array) && prior['columns'].any? &&
+       prior['connection_id'].to_s == opts[:conn].to_s &&
+       Array(prior['path']).join('.').to_s.casecmp?("#{db}.#{schema}.#{t}")
+      line "#{db}.#{schema}.#{t}: #{prior['columns'].size} columns (REUSED cols-#{t}.json — delete to re-probe)"
+      next
+    end
     _, st = sigma_run!(['ruby', File.join(HERE, 'discover-columns.rb'),
                         '--connection-id', opts[:conn],
                         '--table-path', "#{db}.#{schema}.#{t}",
-                        '--out', File.join(WORK, "cols-#{t}.json")], allow_fail: true)
-    cj = (JSON.parse(File.read(File.join(WORK, "cols-#{t}.json"))) rescue nil)
+                        '--out', cols_path], allow_fail: true)
+    cj = (JSON.parse(File.read(cols_path)) rescue nil)
     n = cj && cj['columns'] ? cj['columns'].size : '?'
     line "#{db}.#{schema}.#{t}: #{n} columns#{st.success? ? '' : ' (not in catalog — Custom SQL fallback may be needed)'}"
   end
@@ -1390,12 +1492,18 @@ puts '── Phase 1 (join) · Tableau discovery lane ──'
 # for large sites; override with TABLEAU_LANE_TIMEOUT (seconds).
 _lane_timeout = (ENV['TABLEAU_LANE_TIMEOUT'] || '1800').to_i
 _lane_t0 = Time.now
+_lane_beat = _lane_t0
 until lane_done.call
   if Time.now - _lane_t0 > _lane_timeout
     print_lane_log.call
     abort "FATAL: Tableau discovery lane did not finish within #{_lane_timeout}s — likely a " \
           "wedged Tableau REST call (see lane log above). Re-run, raise TABLEAU_LANE_TIMEOUT, " \
           "or pass the .twb directly with --twb to skip live discovery."
+  end
+  if Time.now - _lane_beat > 30 # heartbeat: a long fetch must never LOOK wedged
+    _lane_beat = Time.now
+    puts "   … discovery lane still running (#{(Time.now - _lane_t0).round}s elapsed, " \
+         "timeout #{_lane_timeout}s; tail #{File.basename(disc_log)} for per-task progress)"
   end
   sleep 0.1
 end
@@ -1412,15 +1520,27 @@ line "discovery lane: #{(lane[:ended] - lane[:started]).round(1)}s wall" \
 calc_path = File.join(WORK, 'calc-fields.json')
 calcs = []
 if wb_luid
-  cf = ['ruby', File.join(HERE, 'extract-calc-fields.rb'),
-        '--workbook-luid', wb_luid, '--out', calc_path]
-  cf += ['--twb', twb] if have_twb
-  _, st = tableau_run!(cf, allow_fail: true)
+  # sha-stamped reuse (stronger than extract-calc-fields' own 1h TTL): the
+  # extraction is a pure function of the .twb + workbook, so a re-entry with an
+  # unchanged .twb skips it entirely — hours later, not just within the TTL.
+  calc_key = have_twb ? PhaseCache.key('calc-fields', twb_sha, wb_luid) : nil
+  if calc_key && PhaseCache.fresh?(WORK, 'calc-fields', key: calc_key, outputs: [calc_path])
+    line 'calc-fields REUSED (.twb sha unchanged) — extract-calc-fields.rb --refresh to force'
+  else
+    cf = ['ruby', File.join(HERE, 'extract-calc-fields.rb'),
+          '--workbook-luid', wb_luid, '--out', calc_path]
+    cf += ['--twb', twb] if have_twb
+    _, st = tableau_run!(cf, allow_fail: true)
+  end
   if File.exist?(calc_path)
     cfj = JSON.parse(File.read(calc_path)) rescue {}
     calcs = cfj['calcs'] || []
     n_csql = calcs.count { |c| c['requires_custom_sql'] }
     line "#{calcs.size} calc field(s); #{n_csql} require Custom SQL (window/LOD)"
+    # Stamp ONLY a non-empty extraction: an empty result with calc nodes in the
+    # .twb is the BROKEN-extraction case (exit 13 below) and must never be
+    # blessed for reuse, or every re-entry would replay the failure.
+    PhaseCache.stamp!(WORK, 'calc-fields', key: calc_key, outputs: [calc_path]) if calc_key && calcs.any?
   end
 end
 
@@ -1455,9 +1575,17 @@ end
 custom_sql = []
 csql_path = File.join(WORK, 'custom-sql.json')
 if wb_luid && have_twb
-  csql_cmd = ['ruby', File.join(HERE, 'extract-custom-sql.rb'),
-              '--workbook-luid', wb_luid, '--twb', twb, '--out', csql_path]
-  tableau_run!(csql_cmd, allow_fail: true)
+  csql_key = PhaseCache.key('custom-sql', twb_sha, wb_luid)
+  if PhaseCache.fresh?(WORK, 'custom-sql', key: csql_key, outputs: [csql_path])
+    line 'custom-SQL scan REUSED (.twb sha unchanged) — delete custom-sql.json to force'
+  else
+    csql_cmd = ['ruby', File.join(HERE, 'extract-custom-sql.rb'),
+                '--workbook-luid', wb_luid, '--twb', twb, '--out', csql_path]
+    _, csql_st = tableau_run!(csql_cmd, allow_fail: true)
+    # Stamp only a SUCCESSFUL scan (an [] from a clean run is a legit "no
+    # custom SQL" answer; an auth/network failure is not, and must re-try).
+    PhaseCache.stamp!(WORK, 'custom-sql', key: csql_key, outputs: [csql_path]) if csql_st.success? && File.exist?(csql_path)
+  end
   custom_sql = (JSON.parse(File.read(csql_path)) rescue []) if File.exist?(csql_path)
   custom_sql = [] unless custom_sql.is_a?(Array)
 end
@@ -1469,6 +1597,17 @@ gaps = []
 gap_report_md = nil
 if have_twb
   gj = Dir[File.join(WORK, '*gaps*report*.json')].first || Dir[File.join(WORK, '*gaps*.json')].first
+  if gj.nil? && lane[:reused]
+    # Discovery was REUSED but no gap report exists (the prior lane's scan
+    # failed, or the stamp predates the report). The gap GATE below must never
+    # run against a silently-empty inventory — re-scan in the foreground: it is
+    # pure-local .twb parsing (<10s), no Tableau call.
+    line 'gap scan: no report on disk from the reused discovery — re-running scan-workbook-gaps.rb (local)'
+    run!(['ruby', File.join(HERE, 'scan-workbook-gaps.rb'), twb], allow_fail: true)
+    gj = Dir[File.join(WORK, '*gaps*report*.json')].first || Dir[File.join(WORK, '*gaps*.json')].first
+  elsif gj && lane[:reused]
+    line 'gap scan REUSED (ran with the stamped discovery; the .twb revision is unchanged)'
+  end
   if gj && File.exist?(gj)
     gap_report_md = gj.sub(/\.json$/, '.md')
     gaps = (JSON.parse(File.read(gj))['detected_features'] || []) rescue []
