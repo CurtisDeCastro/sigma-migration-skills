@@ -97,6 +97,24 @@ factnoyear = { 'id' => 'f2', 'kind' => 'table', 'name' => 'X',
 check(MechanicalSpecs.synthesize_fixed_lods!({ 'pages' => [{ 'elements' => [factnoyear] }] }, factnoyear, TWB, COLMAP).empty?,
       'fact without a Year key -> 0 (safe skip)', fails)
 
+# Part E2 — DERIVED-VIEW fact (source kind != 'warehouse-table') must return a
+# Hash ({}), NOT Integer 0. The caller does world_lod_map.any?, and 0.any? is a
+# NoMethodError that crashed the whole run on Virtual-Connection-backed workbooks
+# (found by the live Orders Executive Overview E2E, 2026-07-09).
+%w[sql table].each do |dkind|
+  dview = { 'id' => 'dv', 'kind' => 'table', 'name' => 'Order Fact View',
+            'source' => { 'kind' => dkind, 'statement' => 'SELECT ...' },
+            'columns' => [{ 'id' => 'y', 'formula' => '[V/Year]' }] }
+  r = MechanicalSpecs.synthesize_fixed_lods!({ 'pages' => [{ 'elements' => [dview] }] }, dview, TWB, COLMAP)
+  check(r.is_a?(Hash) && r.empty?, "derived-view fact (kind=#{dkind}) -> {} not 0 (no .any? crash)", fails)
+  begin
+    r.any?
+    check(true, "derived-view result responds to .any? (kind=#{dkind})", fails)
+  rescue NoMethodError
+    check(false, "derived-view result crashes on .any? (kind=#{dkind}) — the return-0 bug", fails)
+  end
+end
+
 puts 'Part F — retain_columns! adds recipe point-in-time cols the converter dropped'
 rfact = {
   'id' => 'rf', 'kind' => 'table', 'name' => 'F',
