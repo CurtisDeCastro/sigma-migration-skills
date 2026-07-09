@@ -235,6 +235,7 @@ module RecipeMultimetric
     return 0 unless prefix
 
     n = 0
+    rewritten_ids = []
     (el['columns'] || []).each do |c|
       inner = base_metric_ref(c['formula'], prefix)
       next unless inner # only aggregated base-metric measures
@@ -243,11 +244,36 @@ module RecipeMultimetric
       conds << "Not IsNull([#{prefix}/#{discr}])" if discr && !discr.to_s.strip.empty?
       next if conds.empty?
       c['formula'] = "Sum(If(#{conds.join(' And ')}, [#{prefix}/#{inner}], null))"
+      rewritten_ids << c['id']
       n += 1
     end
 
-    ensure_grouped!(el) if el['kind'] == 'table' && n.positive?
+    if el['kind'] == 'table' && n.positive?
+      ensure_grouped!(el)
+      # A "Top-Countries" table ranks the ENTITY by the point-in-time measure and
+      # keeps the top few — so the grouping must sort by the MEASURE (not the
+      # dimension the build carried over from Tableau's alpha sort), and a top-n
+      # filter (nulls excluded) trims the long tail. Without this the table shows
+      # all 47 entities alphabetically with null-metric rows on top instead of the
+      # real top-8 by value.
+      promote_top_n!(el, rewritten_ids.first)
+    end
     n
+  end
+
+  # Sort an already-grouped top table by its point-in-time measure (desc) and add
+  # a top-8 rank filter (nulls excluded) if none is present. No-op without a
+  # measure id or a grouping.
+  def promote_top_n!(el, measure_id)
+    return unless measure_id
+    grp = Array(el['groupings']).first
+    grp['sort'] = [{ 'columnId' => measure_id, 'direction' => 'descending' }] if grp
+    return if Array(el['filters']).any? { |f| f['kind'] == 'top-n' }
+    (el['filters'] ||= []) << {
+      'id' => "topn-#{el['id']}", 'columnId' => measure_id, 'kind' => 'top-n',
+      'rankingFunction' => 'row-number', 'mode' => 'top-n', 'rowCount' => 8,
+      'includeNulls' => 'never'
+    }
   end
 
   # The formula prefix used by this element's columns ([<prefix>/Field]).

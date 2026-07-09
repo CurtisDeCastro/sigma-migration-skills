@@ -85,6 +85,20 @@ factnoyear = { 'id' => 'f2', 'kind' => 'table', 'name' => 'X',
 check(MechanicalSpecs.synthesize_fixed_lods!({ 'pages' => [{ 'elements' => [factnoyear] }] }, factnoyear, TWB, COLMAP).zero?,
       'fact without a Year key -> 0 (safe skip)', fails)
 
+puts 'Part F — retain_columns! adds recipe point-in-time cols the converter dropped'
+rfact = {
+  'id' => 'rf', 'kind' => 'table', 'name' => 'F',
+  'source' => { 'kind' => 'warehouse-table', 'path' => %w[TJ PUBLIC WB] },
+  'columns' => [{ 'id' => 'c1', 'formula' => '[WB/Year]' }], 'order' => ['c1']
+}
+real = { 'WB' => %w[YEAR INCOMEGROUP GDP_CURRENT_US] }
+n2 = MechanicalSpecs.retain_columns!(rfact, ['IncomeGroup', 'Year'], real)
+check(n2 == 1, "adds only the MISSING real column (IncomeGroup; Year already present) (got #{n2})", fails)
+inc = rfact['columns'].find { |c| c['name'] == 'IncomeGroup' }
+check(inc && inc['formula'] == '[WB/IncomeGroup]', 'IncomeGroup added as a base ref on the fact table', fails)
+check(rfact['order'].include?(inc['id']), 'added column is in element order', fails)
+check(MechanicalSpecs.retain_columns!(rfact, ['NotAColumn'], real).zero?, 'a non-warehouse name is NOT added (no dangling ref)', fails)
+
 puts
 if fails.empty?
   puts 'ALL PASS'

@@ -1950,6 +1950,15 @@ elsif mechanical
     pf = MechanicalSpecs.fixup_dm_spec(dm, real_cols, column_mapping: opts[:column_mapping])
     line "phantom-column filter: dropped #{pf[:phantom]} non-existent base column(s) using #{real_cols.size} live table catalog(s)" if pf[:phantom].to_i.positive?
     line "column-rename remap: rewired #{pf[:remapped]} base column(s) to their warehouse names (--column-mapping)" if pf[:remapped].to_i.positive?
+    # Retain the multi-metric recipe's point-in-time columns on the fact (the
+    # discriminator + year the source didn't plot) so the real-entity filter can
+    # run instead of being skipped as a dangling ref. From png-read point_in_time.
+    if defined?(conv_fact) && conv_fact
+      _pit = ((JSON.parse(File.read(DashboardRead.path(WORK)))['point_in_time'] rescue nil) || {})
+      want = [_pit['entity_discriminator'], _pit['year_column'] || 'Year'].compact
+      kept = MechanicalSpecs.retain_columns!(conv_fact, want, real_cols)
+      line "point-in-time retain: added #{kept} recipe column(s) (#{want.join(', ')}) to the fact" if kept.positive?
+    end
   end
   # Computed-key join recovery (bead ovud): joins the converter skipped
   # ("DATE([Order Date]) = [Date Key]") are recovered mechanically — via a calc

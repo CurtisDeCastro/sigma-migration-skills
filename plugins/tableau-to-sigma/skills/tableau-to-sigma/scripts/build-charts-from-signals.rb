@@ -204,6 +204,25 @@ def synthesize_view_from_signals(z, meta)
     g = guid_from_text(cc.to_s)
     dims << { 'guid' => g, 'role' => 'dim', 'derivation' => 'none' } if g && dims.none? { |f| f['guid'] == g }
   end
+  # TEXT-MARK TABLE recovery (Top-N country lists): a Tableau text/label table
+  # carries its measure on the Label mark, NOT on a shelf — so cols_shelf.fields
+  # is empty and the zone would drop with "no dim+measure" even though the value
+  # is fully known. Recover the measure from the sort's `using` clause
+  # (`[…].[sum:GDP (current US$):qk]`), then from the aggregations map (first
+  # numeric-agg field that isn't the dim). Without this the 3 Top-Countries
+  # tables silently vanish from the dashboard.
+  if meas.empty? && dims.any?
+    dim_guids = dims.map { |d| d['guid'].to_s.downcase }
+    recovered = nil
+    if (mm = z.dig('sort', 'using').to_s.match(/\.\[[a-z]+:(.+?):[a-z]+\]\s*\z/i))
+      recovered = mm[1]
+    end
+    recovered ||= (z['aggregations'] || {}).find { |k, agg|
+      %w[sum avg average min max count countd median].include?(agg.to_s.downcase) &&
+        !dim_guids.include?(k.to_s.gsub(/\A\[|\]\z/, '').downcase)
+    }&.first&.gsub(/\A\[|\]\z/, '')
+    meas << { 'guid' => recovered, 'role' => 'measure', 'derivation' => 'none' } if recovered && !recovered.empty?
+  end
   headers = (dims.map(&field_header) + meas.map(&field_header)).compact
   headers.length >= 2 ? { headers: headers } : nil
 end

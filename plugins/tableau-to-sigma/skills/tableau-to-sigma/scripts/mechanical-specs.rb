@@ -288,6 +288,37 @@ module MechanicalSpecs
     lods.size
   end
 
+  # Retain extra base columns on the fact that the recipe needs but the converter
+  # dropped (it projects only PLOTTED columns). The multi-metric point-in-time
+  # filter references [Master/<discriminator>] + [Master/<year>]; if the source
+  # never plotted the discriminator (e.g. World-Bank "IncomeGroup"), it's absent
+  # from the DM → the recipe guard skips the real-entity filter. Add each wanted
+  # name as a base column [<table>/<Name>] when it's a REAL warehouse column
+  # (present in real_cols for the fact's table) and not already exposed. Returns
+  # the count added. Runs on the DM fact BEFORE POST so it flows into the master
+  # via derive_master.
+  def retain_columns!(fact, names, real_cols)
+    return 0 unless fact && fact.dig('source', 'kind') == 'warehouse-table'
+    tbl = (fact.dig('source', 'path') || []).last.to_s
+    return 0 if tbl.empty?
+    rc = (real_cols[tbl] || real_cols[tbl.upcase] || []).map { |c| c.to_s.upcase }.to_set
+    return 0 if rc.empty?
+    have = (fact['columns'] || []).map { |c| col_display(c).to_s.downcase }
+    added = 0
+    Array(names).compact.each do |nm|
+      s = nm.to_s.strip
+      next if s.empty? || have.include?(s.downcase)
+      phys = s.gsub(/[^0-9A-Za-z]+/, '_').gsub(/\A_+|_+\z/, '').upcase
+      next unless rc.include?(phys) || rc.include?(s.upcase)
+      id = "pit-#{slug(s)}"
+      (fact['columns'] ||= []) << { 'id' => id, 'name' => s, 'formula' => "[#{tbl}/#{s}]" }
+      fact['order'] << id if fact['order'].is_a?(Array)
+      have << s.downcase
+      added += 1
+    end
+    added
+  end
+
   # The base element a derived view sources (for harvesting its metrics, which
   # don't propagate to derived elements). Returns nil for a base fact.
   def base_of(model, fact_el)

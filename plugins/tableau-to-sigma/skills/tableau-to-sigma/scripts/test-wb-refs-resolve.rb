@@ -46,6 +46,21 @@ check(rc == 1, 'dropped-column refs fail (exit 1)')
 check(out.include?('Partner Name') && out.include?('Product Code'), 'names the unresolved columns')
 check(out.downcase.include?('multi-datasource'), 'points at the multi-datasource cause')
 
+# 3-part relationship ref [Element/RelName/Field] resolves on the FINAL segment
+# (surfaced FIXED-LOD column). The relationship name in the middle is NOT a column.
+DM_WORLD = { 'dataModelId' => 'dm1', 'pages' => [{ 'elements' => [
+  { 'id' => 'e1', 'name' => 'Master', 'columnLabels' => ['Net Revenue', 'GDP World'] }
+] }] }
+rc, = run_gate({ 'pages' => [{ 'elements' => [{ 'columns' => [
+  { 'formula' => '[World Bank/FIXED Year/GDP World]' }
+] }] }] }, DM_WORLD)
+check(rc == 0, '3-part FIXED-relationship ref resolves on its final column segment (exit 0)')
+# but a 3-part ref whose FINAL segment is missing still fails
+rc, out = run_gate({ 'pages' => [{ 'elements' => [{ 'columns' => [
+  { 'formula' => '[World Bank/FIXED Year/Nonexistent World]' }
+] }] }] }, DM_WORLD)
+check(rc == 1 && out.include?('Nonexistent World'), '3-part ref with a missing final column still fails (exit 1)')
+
 # empty DM → fail
 rc, = run_gate({ 'pages' => [{ 'elements' => [{ 'columns' => [{ 'formula' => '[Master/X]' }] }] }] },
                { 'pages' => [{ 'elements' => [{ 'name' => 'Master', 'columnLabels' => [] }] }] })
