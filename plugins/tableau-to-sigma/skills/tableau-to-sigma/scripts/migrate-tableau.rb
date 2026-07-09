@@ -233,6 +233,10 @@ OptionParser.new do |o|
   o.on('--dashboard NAME', 'Build/gate only this Tableau dashboard (repeatable). Enables one-tab-at-a-time large-workbook migration.') { |v| (opts[:dashboards] ||= []) << v }
   o.on('--page ID',        'Scope to the dashboard with this zone-root id (alt to --dashboard; repeatable).') { |v| (opts[:pages] ||= []) << v }
   o.on('--workbook-target ID', 'Existing Sigma workbook id to APPEND the scoped dashboard page to (PUT-append instead of POST-new).') { |v| opts[:wb_target] = v }
+  o.on('--reuse-workbook ID', 'Existing Sigma workbook id to UPDATE IN PLACE (PUT the freshly-built full spec to it, ' \
+                              'same id/URL, layout preserved) instead of POSTing a NEW workbook — the workbook twin of ' \
+                              '--reuse-dm. Iterating a fix? Re-run with --reuse-dm <id> --reuse-workbook <id> to edit the ' \
+                              'SAME dashboard rather than orphaning it.') { |v| opts[:reuse_workbook] = v }
 end.parse!
 
 abort 'missing --workbook or --workbook-id' unless opts[:wb_name] || opts[:wb_id]
@@ -2293,8 +2297,15 @@ begin
   run_wb!(ref_cmd)
   par_cmd = ['ruby', File.join(HERE, 'post-and-readback.rb'), '--type', 'workbook',
              '--spec', wb_spec_path, '--out', wb_ids_path, '--workdir', WORK]
-  # PUT-append into the targeted existing workbook (instead of POST-create).
-  par_cmd += ['--update-id', append_update_id] if append_update_id
+  # UPDATE-IN-PLACE: --reuse-workbook PUTs the freshly-built full spec to an
+  # existing workbook (same id/URL, layout preserved by post-and-readback's re-PUT
+  # path) instead of POSTing a new one — so iterating a fix edits the SAME
+  # dashboard rather than orphaning it. --workbook-target (append) takes priority
+  # when both are set (it already computed append_update_id + merged the spec).
+  update_wb = append_update_id || opts[:reuse_workbook]
+  line "reuse-workbook: PUT the full spec to existing workbook #{opts[:reuse_workbook]} (no new workbook)" \
+    if opts[:reuse_workbook] && !append_update_id
+  par_cmd += ['--update-id', update_wb] if update_wb
   p_log = sigma_run_wb!(par_cmd)
 rescue WorkbookBuildError => e
   failed = cull_failed_fields(e.captured_output,

@@ -189,12 +189,20 @@ module MechanicalSpecs
     entries = (JSON.parse(File.read(manifest_path.to_s)) rescue nil)
     return nil unless entries.is_a?(Array) && entries.size > 1 # single-source: no ambiguity
 
+    # Per-datasource: its caption AND its embedded .hyper basename. Split on the
+    # datasource OPEN tag (`<datasource ` — a trailing space, so it never matches
+    # `<datasource-dependencies`) so each chunk is one datasource's body, and pull
+    # the first `dbname='….hyper'` inside it.
     name2cap = {}
-    twb_text.scan(/<datasource\b([^>]*)>/) do |m|
-      attrs = m[0]
+    name2hyper = {}
+    twb_text.split(/<datasource\s/).drop(1).each do |chunk|
+      attrs = chunk[/\A([^>]*)>/, 1].to_s
       nm = attrs[/\bname='([^']*)'/, 1]
-      cap = attrs[/\bcaption='([^']*)'/, 1]
-      name2cap[nm] ||= cap if nm && cap
+      next unless nm
+      c = attrs[/\bcaption='([^']*)'/, 1]
+      name2cap[nm] ||= c if c
+      db = chunk[/<connection\b[^>]*\bdbname='([^']*\.hyper)'/i, 1]
+      name2hyper[nm] ||= File.basename(db) if db
     end
     usage = Hash.new(0)
     twb_text.scan(/<datasource-dependencies\b[^>]*\bdatasource='([^']+)'/) do |m|
@@ -204,9 +212,14 @@ module MechanicalSpecs
     end
     return nil if usage.empty?
     dominant = usage.max_by { |_n, c| c }&.first
+    # Match the manifest by .hyper FIRST (robust: land-extracts always records the
+    # hyper basename, but may LABEL the caption by the GUID filename when it can't
+    # resolve the datasource caption — which would defeat a caption-only match and
+    # send pick_fact to the wrong, unused table). Fall back to caption, then name.
+    hyp = name2hyper[dominant]
     cap = name2cap[dominant].to_s.strip
-    return nil if cap.empty?
-    entry = entries.find { |e| e['caption'].to_s.strip == cap } ||
+    entry = (hyp && entries.find { |e| e['hyper'].to_s == hyp }) ||
+            (!cap.empty? && entries.find { |e| e['caption'].to_s.strip == cap }) ||
             entries.find { |e| e['datasource'].to_s == dominant }
     return nil unless entry && entry['sf_table']
     entry['sf_table'].to_s.split('.').last&.upcase

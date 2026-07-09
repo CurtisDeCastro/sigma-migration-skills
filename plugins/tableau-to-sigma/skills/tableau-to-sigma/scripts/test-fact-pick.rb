@@ -69,22 +69,39 @@ TWB = <<~XML
   <?xml version='1.0'?>
   <workbook><datasources>
     <datasource name='Parameters' caption='Parameters'/>
-    <datasource name='federated.aaa' caption='1. Macro World Bank Extract'/>
-    <datasource name='federated.bbb' caption='GFTGWOnullGDP2005 Extract'/>
+    <datasource name='federated.aaa' caption='1. Macro World Bank Extract'>
+      <connection class='federated'><named-connections><named-connection>
+        <connection class='hyper' dbname='Data/dataengine_a.hyper'/>
+      </named-connection></named-connections></connection>
+    </datasource>
+    <datasource name='federated.bbb' caption='GFTGWOnullGDP2005 Extract'>
+      <connection class='federated'><named-connections><named-connection>
+        <connection class='hyper' dbname='dataengine_b.hyper'/>
+      </named-connection></named-connections></connection>
+    </datasource>
   </datasources>
   <worksheets>
     #{Array.new(9) { |i| "<worksheet name='w#{i}'><table><view><datasource-dependencies datasource='federated.aaa'/><datasource-dependencies datasource='Parameters'/></view></table></worksheet>" }.join}
   </worksheets></workbook>
 XML
 MANIFEST = [
-  { 'datasource' => 'federated.aaa', 'caption' => '1. Macro World Bank Extract', 'hyper' => 'a.hyper', 'sf_table' => 'TJ.PUBLIC.WB_WORLD_BANK', 'columns' => {} },
-  { 'datasource' => 'federated.bbb', 'caption' => 'GFTGWOnullGDP2005 Extract', 'hyper' => 'b.hyper', 'sf_table' => 'TJ.PUBLIC.WB_GDP2005', 'columns' => {} }
+  { 'datasource' => 'federated.aaa', 'caption' => '1. Macro World Bank Extract', 'hyper' => 'dataengine_a.hyper', 'sf_table' => 'TJ.PUBLIC.WB_WORLD_BANK', 'columns' => {} },
+  { 'datasource' => 'federated.bbb', 'caption' => 'GFTGWOnullGDP2005 Extract', 'hyper' => 'dataengine_b.hyper', 'sf_table' => 'TJ.PUBLIC.WB_GDP2005', 'columns' => {} }
 ]
 Dir.mktmpdir do |d|
   mp = File.join(d, 'landing-manifest.json')
   File.write(mp, JSON.generate(MANIFEST))
   got = MechanicalSpecs.dominant_fact_table(TWB, mp)
   check(got == 'WB_WORLD_BANK', "dominant datasource (9 worksheets) → WB_WORLD_BANK (got #{got.inspect})", fails)
+  # MISLABELED-caption manifest: land-extracts couldn't resolve the caption and
+  # labeled entries by the GUID hyper stem. Caption-only matching would fail; the
+  # .hyper match must still resolve the dominant datasource to the right table.
+  mislabeled = JSON.parse(JSON.generate(MANIFEST))
+  mislabeled[0]['caption'] = 'dataengine_a'
+  mislabeled[1]['caption'] = 'dataengine_b'
+  mp2 = File.join(d, 'mislabeled.json'); File.write(mp2, JSON.generate(mislabeled))
+  got2 = MechanicalSpecs.dominant_fact_table(TWB, mp2)
+  check(got2 == 'WB_WORLD_BANK', "mislabeled caption → still resolves via .hyper match (got #{got2.inspect})", fails)
   # single-source manifest → nil (no ambiguity to resolve)
   sp = File.join(d, 'single.json'); File.write(sp, JSON.generate([MANIFEST[0]]))
   check(MechanicalSpecs.dominant_fact_table(TWB, sp).nil?, 'single-source manifest → nil (no override)', fails)
