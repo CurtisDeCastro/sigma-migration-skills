@@ -253,6 +253,36 @@ When to escalate to a visual check rather than just CSV parity:
 
 ---
 
+### 6g. Verification handoff — builder/verifier split (GREEN needs a countersignature)
+
+The agent that built the workbook does **not** record the final `--verdict pass`
+on its own render — self-graded visual verdicts are the failure mode that shipped
+both field regressions this split exists to stop. Full requirements:
+`refs/orchestration.md`; the self-contained prompt files are
+`scripts/builder-brief.md` (conversion agent) and `scripts/verifier-brief.md`
+(verification agent).
+
+In short:
+
+1. The **builder** finishes pass 1 + the Phase 5g fidelity loop, may record
+   `--verdict divergent` while iterating, then STOPS with gate 8b unrecorded
+   (`migrate-tableau.rb --finalize` ending at exit 13 is the designed handoff
+   state). It proves everything else green via the self-check gate run with the
+   two split-granted waivers (`--skip-visual-comparison` + `--skip-telemetry-gate`,
+   reasons as in `scripts/builder-brief.md`) and requests verification.
+2. The driving session (or human) spawns a **fresh verifier agent** — no builder
+   history, given only the workdir + Sigma workbook id — which executes
+   `scripts/verifier-brief.md`: re-runs this gate with no new waivers, checks
+   `source-anchors.json`, runs the similarity check, and Reads source vs render
+   itself. Any wrong number → RED veto; structural divergence → YELLOW with
+   itemized fixes.
+3. Only the verifier records the pass verdict, and its notes MUST start with
+   `VERIFIER:` — that prefix is the countersignature. A `pass` without it is a
+   self-attestation, never GREEN. This applies to single-workbook conversions
+   too, not just batches.
+
+---
+
 ### 6 (optional) — Control flip test
 
 When the workbook has controls (or you just repaired/hand-wired any), get
