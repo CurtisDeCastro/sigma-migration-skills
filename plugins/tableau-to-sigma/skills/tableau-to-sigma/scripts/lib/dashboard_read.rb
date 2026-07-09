@@ -120,6 +120,13 @@ module DashboardRead
         if %w[bar-chart combo-chart].include?(kind)
           tile['orientation'] = seed_orientation(z, ws_meta[z['caption'].to_s])
         end
+        # Seed the tile's metric column (the multi-metric recipe rebuilds an
+        # obscured bar measure from it). Clean for Top/Trend tiles (a real base
+        # column); often unresolvable for a bar whose measure is a Calculation_
+        # GUID / "(copy)" growth calc — left unset there so the gate forces the
+        # operator to name the real metric column.
+        mcol = seed_measure(ws_meta[z['caption'].to_s])
+        tile['measure'] = mcol if mcol
         tiles << tile
       elsif %w[text title].include?(z['kind']) && z['text_runs']
         t = z['text_runs'].map { |r| r['text'] }.join.strip
@@ -156,6 +163,21 @@ module DashboardRead
       'text_elements' => text_elements,
       'filter_shelf'  => filter_shelf
     }
+    # Multi-metric pattern (a control that highlights some tiles): seed a
+    # point_in_time skeleton so the operator confirms the two data-dependent
+    # facts the recipe needs (which the .twb can't supply). Without this block
+    # the recipe's latest-year + real-entity Top-N/bar rewrite silently no-ops.
+    if filter_shelf.any? { |f| Array(f['highlight_tiles']).reject { |t| t.to_s.strip.empty? }.any? }
+      draft['point_in_time'] = {
+        'year_column'          => seed_year_column(ws_meta) || 'Year',
+        'entity_discriminator' => nil,
+        'latest_year'          => nil,
+        'note'                 => 'CONFIRM against the landed data: entity_discriminator = a column NULL on ' \
+                                  'rollup/aggregate rows (so Top-N shows real entities, e.g. "Income Group"; ' \
+                                  'null if none). latest_year = the latest year WITH DATA — a per-metric map ' \
+                                  '{"<metric col>": <year>} when metrics end in different years.'
+      }
+    end
     File.write(path(dir), JSON.pretty_generate(draft) + "\n")
     path(dir)
   end
@@ -188,6 +210,34 @@ module DashboardRead
       hay = [color['column'], color['field']].compact.map { |s| s.to_s.downcase.gsub(/[^0-9a-z]/, '') }.join
       toks.any? { |t| hay.include?(t) }
     end
+  end
+
+  # Best-effort metric column for a tile: the first measure that's a real base
+  # column — skip Calculation_<guid> internal calcs, "(copy)" growth calcs, and
+  # the Date dim. Returns nil (→ operator supplies it) when none is clean.
+  def self.seed_measure(wmeta)
+    return nil unless wmeta
+    (wmeta['measures'] || []).each do |m|
+      col = m['column'].to_s.gsub(/\A\[|\]\z/, '').strip
+      next if col.empty? || col =~ /\ACalculation_\d+\z/ || col =~ /\(copy\)/i || col =~ /\ADate\z/i
+      return col
+    end
+    nil
+  end
+
+  # A dimension column named ~"Year" among the worksheets' shelves (the snapshot
+  # dimension the point-in-time filter keys on). Falls back to nil → caller uses "Year".
+  def self.seed_year_column(ws_meta)
+    (ws_meta || {}).each_value do |wm|
+      %w[rows_shelf cols_shelf].each do |sh|
+        f = wm.is_a?(Hash) ? (wm[sh].is_a?(Hash) ? wm[sh]['fields'] : nil) : nil
+        (f || []).each do |fld|
+          raw = fld['raw'].to_s
+          return 'Year' if raw =~ /\byear\b/i
+        end
+      end
+    end
+    nil
   end
 
   def self.path(dir)
@@ -263,6 +313,10 @@ module DashboardRead
     # (target_tiles) and/or the tiles it only re-colors (highlight_tiles). A
     # page-wide filter is fine — it just has to list the tiles explicitly.
     fshelf = doc['filter_shelf']
+    tiles_by_title = (tiles.is_a?(Array) ? tiles : []).each_with_object({}) do |t, h|
+      h[t['title'].to_s.downcase.strip] = t if t.is_a?(Hash) && t['title']
+    end
+    any_highlight = false
     if fshelf.is_a?(Array)
       fshelf.each_with_index do |f, i|
         next unless f.is_a?(Hash)
@@ -281,6 +335,34 @@ module DashboardRead
                   '(target_tiles and highlight_tiles both empty) — list the tiles it filters ' \
                   'and/or highlights, or drop the control.'
         end
+        # A HIGHLIGHT control triggers the multi-metric recipe, which rebuilds each
+        # highlighted tile's measure from its `measure` — so every highlighted tile
+        # MUST name its metric column, or the bar silently renders 0 / a %-calc.
+        Array(hl).reject { |t| t.to_s.strip.empty? }.each do |t|
+          any_highlight = true
+          tile = tiles_by_title[t.to_s.downcase.strip]
+          if tile && tile['measure'].to_s.strip.empty?
+            errs << "highlight tile #{t.inspect} has no `measure` — name the metric column it plots " \
+                    '(the real DM column, e.g. "GDP (current US$)"), or the recipe rebuilds it to 0/a %-calc.'
+          end
+        end
+      end
+    end
+
+    # When any control highlights (the multi-metric pattern), the recipe's
+    # latest-year + real-entity rewrite needs a `point_in_time` block — require it
+    # so the bars/Top-N aren't silently left as all-year sums / aggregate rows.
+    if any_highlight
+      pit = doc['point_in_time']
+      if !pit.is_a?(Hash)
+        errs << 'a control highlights tiles (multi-metric pattern) but there is no `point_in_time` block — ' \
+                'add { year_column, entity_discriminator (null if none), latest_year (scalar or per-metric map) }.'
+      else
+        errs << 'point_in_time.year_column is required' if pit['year_column'].to_s.strip.empty?
+        errs << 'point_in_time.latest_year is required (scalar year or {metric: year} map)' \
+          if pit['latest_year'].nil? || (pit['latest_year'].respond_to?(:empty?) && pit['latest_year'].empty?)
+        errs << 'point_in_time must include an `entity_discriminator` key (set null if the source has no aggregate rows)' \
+          unless pit.key?('entity_discriminator')
       end
     end
 

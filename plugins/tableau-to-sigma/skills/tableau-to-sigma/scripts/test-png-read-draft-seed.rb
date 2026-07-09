@@ -85,15 +85,35 @@ Dir.mktmpdir do |d|
   check(!ok && errs.any? { |e| e =~ /target_tiles/ }, 'filter_shelf entry without target_tiles is rejected', fails)
 end
 
-# The same control WITH an explicit filter/highlight split is accepted.
-Dir.mktmpdir do |d|
-  File.write(DashboardRead.path(d), JSON.dump(
-    'tiles' => [{ 'title' => 'Trend', 'kind' => 'line-chart' }, { 'title' => 'Bars', 'kind' => 'kpi-chart' }],
+# A control WITH highlight_tiles now also requires: each highlighted tile carries
+# a `measure`, AND a point_in_time block (the multi-metric recipe contract).
+def hl_doc(extra = {})
+  { 'tiles' => [{ 'title' => 'Trend', 'kind' => 'line-chart' },
+                { 'title' => 'Bars', 'kind' => 'bar-chart', 'orientation' => 'horizontal', 'measure' => 'GDP (current US$)' }],
     'text_elements' => [],
-    'filter_shelf' => [{ 'label' => 'Region', 'target_tiles' => ['Trend'], 'highlight_tiles' => ['Bars'] }]
-  ))
+    'filter_shelf' => [{ 'label' => 'Region', 'target_tiles' => ['Trend'], 'highlight_tiles' => ['Bars'] }],
+    'point_in_time' => { 'year_column' => 'Year', 'entity_discriminator' => 'Income Group', 'latest_year' => 2015 } }.merge(extra)
+end
+Dir.mktmpdir do |d|
+  File.write(DashboardRead.path(d), JSON.dump(hl_doc))
   ok, = DashboardRead.validate(d)
-  check(ok, 'filter_shelf with explicit target_tiles/highlight_tiles is accepted', fails)
+  check(ok, 'highlight control WITH measure + point_in_time is accepted', fails)
+end
+# highlighted tile missing its `measure` → rejected
+Dir.mktmpdir do |d|
+  bad = hl_doc
+  bad['tiles'][1].delete('measure')
+  File.write(DashboardRead.path(d), JSON.dump(bad))
+  ok, errs = DashboardRead.validate(d)
+  check(!ok && errs.any? { |e| e =~ /measure/ }, 'highlight tile without `measure` is rejected', fails)
+end
+# highlight pattern but no point_in_time → rejected
+Dir.mktmpdir do |d|
+  bad = hl_doc
+  bad.delete('point_in_time')
+  File.write(DashboardRead.path(d), JSON.dump(bad))
+  ok, errs = DashboardRead.validate(d)
+  check(!ok && errs.any? { |e| e =~ /point_in_time/ }, 'highlight pattern without point_in_time is rejected', fails)
 end
 
 puts

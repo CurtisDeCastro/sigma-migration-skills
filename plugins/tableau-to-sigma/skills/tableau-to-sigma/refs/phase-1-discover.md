@@ -120,16 +120,20 @@ If `get-view-data` returns 401 for a view, retry that view solo (the contention 
 >   "verified": true,
 >   "source_png": "views/<dashboardViewId>.png",
 >   "tiles": [
->     { "title": "Revenue by Region", "kind": "bar-chart", "orientation": "horizontal", "measures": ["Gross Revenue"] },
+>     { "title": "Revenue by Region", "kind": "bar-chart", "orientation": "horizontal",
+>       "measure": "Gross Revenue" },
 >     { "title": "Filters", "kind": "control" }
 >   ],
 >   "text_elements": ["Orders Dashboard"],
 >   "filter_shelf": [
 >     { "label": "Region", "control_type": "list",
 >       "target_tiles": ["Revenue by Region"], "highlight_tiles": [] }
->   ]
+>   ],
+>   "point_in_time": { "year_column": "Year", "entity_discriminator": null, "latest_year": 2015 }
 > }
 > ```
+>
+> **When a control HIGHLIGHTS tiles** (`highlight_tiles` non-empty → the multi-metric recipe): every highlighted tile MUST carry `measure` = the real metric column it plots (e.g. `"GDP (current US$)"`, not `"GDP"`), and a `point_in_time` block is REQUIRED — `year_column`, `entity_discriminator` (a column null on rollup/aggregate rows so Top-N shows real entities; `null` if none), and `latest_year` (a scalar, or a per-metric map `{"<metric col>": <year>}` when metrics end in different years). The seed pre-fills what the `.twb` can supply and leaves the data-dependent fields for you to confirm; the gate blocks until they're set. Skipping them silently ships 0-value bars / all-year-sum Top-N.
 >
 > `"verified": true` is REQUIRED to pass the gate when the file was seeded as a draft (`verified: false`); a hand-written file may omit the field. `kind` must be a valid Sigma element kind (see the "Sigma spec supports:" list below). Set `text_elements` / `filter_shelf` to `[]` only after confirming from the image that the dashboard genuinely has none. Both build paths enforce this file: `build-charts-from-signals.rb` (Phase 5a) **refuses to build without it**, and the orchestrator (`migrate-tableau.rb`) hard-stops **before posting the data model** if it's missing. The Phase 6 gate sequence re-runs `assert-dashboard-read.rb` as a final belt. Genuinely can't read the PNG? Pass `--skip-dashboard-read "<reason>"` and name the waiver in your report.
 >
