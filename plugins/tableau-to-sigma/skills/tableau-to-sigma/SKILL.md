@@ -63,6 +63,20 @@ that mirrors the Tableau dashboard layout as closely as possible.
 
 ---
 
+## Step −1 — Mission intake (MANDATORY — before anything else)
+
+Restate the user's request as `<workdir>/mission.json` (schema + rules in
+**`MIGRATION_REQUEST.md`**): source, Sigma connection, destination, landing
+target, workbook scope — each marked `stated` (the user's words pin it) or
+`inferred` (you filled it in). **Any `inferred` field → STOP and confirm with
+the user before building.** Field evidence: every scope decision an agent has
+invented (a guessed project, an assumed folder) has invalidated the entire run
+before the first gate could fire. `MIGRATION_REQUEST.md` also carries the
+copy-paste kickoff template to hand users who ask "how should I request a
+migration?".
+
+---
+
 ## Step 0 — Environment doctor (MANDATORY — the orchestrator gates on it)
 
 Run the environment doctor FIRST. It reports missing runtimes with per-OS fixes
