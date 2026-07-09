@@ -29,6 +29,24 @@
 
 require 'json'
 require 'optparse'
+require_relative 'lib/offramp'
+
+# Print the off-ramp trail + any gate waivers for this workdir — the "where did
+# this run leave the golden path" readout. Advisory; shown under every verdict.
+def print_offramps(wd)
+  trail = Offramp.trail(wd)
+  waivers = begin
+    JSON.parse(File.read(File.join(wd, 'waivers.json')))
+  rescue StandardError
+    nil
+  end
+  wv = waivers.is_a?(Array) ? waivers : (waivers.is_a?(Hash) ? (waivers['waivers'] || []) : [])
+  return if trail.empty? && wv.empty?
+  warn ''
+  warn "   off-ramps taken this run (#{trail.size} logged, #{wv.size} gate waiver(s)) — where it left the golden path:"
+  trail.each { |r| warn "     • #{r['kind']}#{r['reason'] ? " — #{r['reason']}" : ''}#{r['detail'] ? " (#{r['detail']})" : ''}" }
+  warn "     • #{wv.size} assert-phase6-ran gate waiver(s) — see waivers.json" unless wv.empty?
+end
 
 opts = {}
 OptionParser.new do |p|
@@ -53,6 +71,7 @@ if File.exist?(pending)
   warn "   workbook: #{pj['workbookId'] || '?'}   stage: #{pj['stage'] || '?'}"
   warn '   Collect parity actuals, then run the --finalize command PASS 1 printed,'
   warn '   which runs assert-phase6-ran.rb (the only path to GREEN).'
+  print_offramps(wd)
   exit 3
 end
 
@@ -60,6 +79,7 @@ unless File.exist?(success)
   warn '⛔ NOT DONE — no phase6-success.json in the workdir.'
   warn '   The hard-gate suite (assert-phase6-ran.rb) has not passed for this run.'
   warn "   Run PASS 1, then --finalize. Workdir checked: #{wd}"
+  print_offramps(wd)
   exit 2
 end
 
@@ -74,4 +94,5 @@ puts '✅ DONE — assert-phase6-ran.rb passed all gates for this run.'
 puts "   workbook : #{sj['workbookId']}"
 puts "   gates    : #{sj['gates']}"
 puts "   stamped  : #{sj['generatedAt']}"
+print_offramps(wd) # even a GREEN run can carry waivers/degradations — surface them
 exit 0

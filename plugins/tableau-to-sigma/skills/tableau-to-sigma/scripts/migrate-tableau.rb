@@ -111,6 +111,7 @@ require_relative 'lib/scout_gate'
 require_relative 'lib/dashboard_read'
 require_relative 'lib/recipe_multimetric'
 require_relative 'lib/run_state'
+require_relative 'lib/offramp' # structured "where did this run leave the golden path" trail
 require_relative 'lib/fast_path' # FAST-PATH routing + BOM-tolerant JSON reads
 require_relative 'lib/sigma_rest' # in-process Sigma token minting (no bash/eval)
 require_relative 'lib/tableau_rest' # in-process Tableau token minting (Windows-safe; no bash/eval)
@@ -180,6 +181,9 @@ OptionParser.new do |o|
   o.on('--dm-spec PATH', 'agent-authored data-model spec JSON (fresh DM build through the gated spine)') { |v| opts[:dm_spec] = File.expand_path(v) }
   o.on('--wb-spec PATH', 'agent-authored workbook spec JSON (re-enters the gated spine). With an explicit ' \
                          '--reuse-dm <id> this takes the FAST PATH (see banner).') { |v| opts[:wb_spec] = File.expand_path(v) }
+  o.on('--allow-manual-spec REASON', 'deliberately hand-author --dm-spec/--wb-spec COLD (no prior ' \
+                                     'orchestrator STOP). Normally the orchestrator authorizes this path; ' \
+                                     'this waives that requirement — named in the report.') { |v| opts[:allow_manual_spec] = v }
   o.on('--out DIR')          { |v| opts[:out]     = File.expand_path(v) }
   o.on('--answers JSON')     { |v| opts[:answers] = v }
   o.on('--yes')              {     opts[:yes]     = true }
@@ -293,7 +297,11 @@ if !_creds_ok && (_cred_skip.nil? || _cred_skip.to_s.empty?)
     (Genuinely offline/no-Sigma run? Re-run with SIGMA_SKIP_CRED_GATE="<reason>".)
   MSG
 end
-warn "WARN: credential gate waived (SIGMA_SKIP_CRED_GATE=#{_cred_skip}) — Sigma calls will fail if reached." if !_creds_ok && _cred_skip && !_cred_skip.to_s.empty?
+if !_creds_ok && _cred_skip && !_cred_skip.to_s.empty?
+  warn "WARN: credential gate waived (SIGMA_SKIP_CRED_GATE=#{_cred_skip}) — Sigma calls will fail if reached."
+  Offramp.log(WORK, kind: 'cred-gate-waived', reason: _cred_skip.to_s)
+end
+Offramp.log(WORK, kind: 'doctor-gate-waived', reason: _dg_skip.to_s) if _dg_skip && !_dg_skip.to_s.empty?
 
 # ── Design-consistency advisory readout (doctor.json) ────────────────────────
 # The hard gate above proves the environment passed; these two are the silent
@@ -716,6 +724,30 @@ end
 # Set-Content -Encoding UTF8 prepends a BOM plain JSON.parse rejects).
 # ---------------------------------------------------------------------------
 if opts[:dm_spec] || opts[:wb_spec]
+  # 🚧 Manual-spec authorization gate (P1). Hand-authored specs must be a ROUTED
+  # fallback, not a cold default — cold hand-authoring is the #1 way a run skips
+  # the converter + gated spine. Accept --dm-spec/--wb-spec only when: (a) an
+  # orchestrator STOP emitted <WORK>/manual-path-authorized.json, (b) --reuse-dm
+  # carries an EXPLICIT id (the documented exit-4 fast-path re-entry against an
+  # already-posted DM), or (c) an explicit --allow-manual-spec "<reason>" waiver.
+  _ms_token  = File.exist?(File.join(WORK, 'manual-path-authorized.json'))
+  _ms_reuse  = opts[:reuse_dm] && opts[:reuse_dm] != :recommended
+  _ms_waiver = opts[:allow_manual_spec].to_s
+  unless _ms_token || _ms_reuse || !_ms_waiver.empty?
+    abort <<~MSG
+      FATAL: --dm-spec/--wb-spec (hand-authored specs) is a ROUTED fallback, not a cold
+      entry point. No orchestrator STOP is on record for this workdir
+      (#{File.join(WORK, 'manual-path-authorized.json')} is absent) and no --reuse-dm <id>
+      was given. Start with the one command so the converter + gates actually run:
+          ruby scripts/migrate-tableau.rb --workbook "<name>" --connection <id>
+      If it STOPS (CONVERTER STOP / workbook handoff) it authorizes this path and prints
+      the exact --dm-spec/--wb-spec (or --reuse-dm --wb-spec) re-run.
+      Deliberately hand-authoring anyway? Re-run adding --allow-manual-spec "<reason>".
+    MSG
+  end
+  Offramp.log(WORK, kind: 'manual-spec',
+              reason: (!_ms_waiver.empty? ? "waiver: #{_ms_waiver}" : (_ms_token ? 'authorized-by-stop' : 'reuse-dm-id')))
+
   # The workbook spec is always agent-authored on this path.
   abort 'FATAL: --wb-spec is required for the agent-authored manual path ' \
         '(pair it with --dm-spec for a fresh build, or --reuse-dm for an existing model).' \
@@ -780,6 +812,8 @@ if FASTPATH
     line '  --yes: Tableau discovery is NOT re-run. Layout falls back to a stacked page and the'
     line '  parity plan may be unbuildable — restore the workdir (or re-run without --yes to'
     line '  re-fetch) before relying on the Phase 6 gates.'
+    Offramp.log(WORK, kind: 'degraded-fastpath',
+                detail: "#{FAST[:degraded].size} missing discovery artifact(s): #{FAST[:degraded].join(', ')}")
   else
     line "discovery artifacts present in #{WORK} — reused for layout + parity as normal"
   end
@@ -1066,6 +1100,17 @@ if mechanical
   else
     sleep 0.1 until lane_done.call # reap the background lane before aborting
     print_lane_log.call
+    # Authorize the option-2 agent-authored-spec re-entry (the re-run passes
+    # --dm-spec/--wb-spec; the manual-spec gate requires this token or refuses a
+    # cold hand-author).
+    begin
+      File.write(File.join(WORK, 'manual-path-authorized.json'),
+                 JSON.pretty_generate('via' => 'converter-stop',
+                                      'at' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')))
+    rescue StandardError
+      # best-effort
+    end
+    Offramp.log(WORK, kind: 'converter-stop', reason: 'no converter backend configured')
     abort <<~MSG
       ==================== CONVERTER STOP (no backend) ====================
       No mechanical Tableau→Sigma converter is configured, and hosted conversion was not
@@ -2368,6 +2413,18 @@ rescue WorkbookBuildError => e
   puts '          straight to the workbook layer — see --help.)'
   puts '   The data model is posted and ready to attach either way. A conversion is NOT done'
   puts '   until scripts/assert-phase6-ran.rb exits 0 — that hard gate applies on both paths.'
+  # Authorize the hand-authoring re-entry: this STOP is the ONLY sanctioned way to
+  # reach --wb-spec/--dm-spec. The token lets the re-run's manual-spec gate pass
+  # (a COLD hand-author with no prior orchestrator run is refused).
+  begin
+    File.write(File.join(WORK, 'manual-path-authorized.json'),
+               JSON.pretty_generate('via' => 'workbook-handoff', 'dataModelId' => dm_id,
+                                    'fields' => failed,
+                                    'at' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')))
+  rescue StandardError
+    # best-effort
+  end
+  Offramp.log(WORK, kind: 'workbook-handoff', detail: "untranslatable field(s): #{names}")
   mark('phase4-workbook')
   phase_summary
   exit 4
@@ -2650,6 +2707,7 @@ begin
 rescue StandardError
   # best-effort — never fail the run on sentinel bookkeeping
 end
+Offramp.log(WORK, kind: 'pass1-stop', detail: "workbook #{wb_id} — parity + gates not yet run")
 puts
 puts '⛔ NOT DONE — this is PASS 1 of 2. Do NOT report success or hand off yet.'
 puts '   To confirm completion at any point, run (exit 0 == done, nothing else counts):'

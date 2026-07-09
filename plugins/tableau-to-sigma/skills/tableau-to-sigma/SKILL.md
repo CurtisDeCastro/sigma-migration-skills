@@ -270,6 +270,8 @@ the map of what the orchestrator runs.
 | Script | Purpose |
 |---|---|
 | `scripts/migrate-tableau.rb` | **The one command** — chains the whole scripted spine (gap gate → DM-reuse scan → DM → workbook → layout → two-pass parity → cleanup + census gate) and stops with exact instructions where agent judgment is required. See "One command" above. |
+| `scripts/verify-complete.rb` | **The single offline "are we done?" check** — exit 0 / ✅ DONE only when `phase6-success.json` is present (stamped by `assert-phase6-ran.rb` exit 0) and no `parity-pending.json` remains. A clean PASS 1 (exit 12) reports NOT DONE. Also prints the run's off-ramp trail. Run before claiming success. |
+| `scripts/lib/offramp.rb` + `offramps.jsonl` | **Observability trail** — every point a run leaves the golden path (cred/doctor waiver, PASS-1 stop, converter-stop, workbook-handoff, degraded fast path, manual-spec) appends a structured record to `<WORK>/offramps.jsonl`. Read it (or `verify-complete.rb`) to pinpoint *where* a run defected. |
 | `scripts/setup.rb` | One-time Sigma credential setup |
 | `scripts/get-token.sh` | Exchange `SIGMA_CLIENT_ID`/`SIGMA_CLIENT_SECRET` for `SIGMA_API_TOKEN` (~1h TTL) — **bash only** |
 | `scripts/get_token.py` | Shell-neutral twin of `get-token.sh` (bash/PowerShell/cmd): writes `<WORK>/auth.json` (0600), read automatically by the scripts |
