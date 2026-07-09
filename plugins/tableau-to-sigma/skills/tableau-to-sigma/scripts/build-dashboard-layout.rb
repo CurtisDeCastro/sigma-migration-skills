@@ -288,12 +288,26 @@ def plan_node(node, c0, c1, r0, r1, ctx)
     plans = []
     kids.each_index do |i|
       pl = plan_node(kids[i], *rects[i], ctx)
-      plans << [rects[i], pl[0], pl[1]] if pl
+      plans << [rects[i], pl[0], pl[1], pl[2]] if pl
     end
     return nil if plans.empty?
-    grown = plans.map { |(rc, needed, _)| [rc[0], rc[1], rc[2], [rc[3], rc[2] + needed].max] }
+    # Grow each child rect to fit its content, THEN clamp a header-label child
+    # (cmax present) down to its max height — the layout otherwise never shrinks
+    # below the source zone geometry, so a one-line header stays ~6 rows tall.
+    grown = plans.map do |(rc, needed, _ep, cmax)|
+      r1 = [rc[3], rc[2] + needed].max
+      r1 = [r1, rc[2] + cmax].min if cmax
+      [rc[0], rc[1], rc[2], r1]
+    end
     packed = SigmaLayout.pack_rects(grown)
     needed_rows = [my_rows, packed.map { |r| r[3] }.max - 1].max
+    # If EVERY child is a header label, this container IS a header band — clamp its
+    # own height and propagate the clamp up (3rd return element) so the OUTER tinted
+    # band row shrinks too, not just the inner leaf. Mixed containers (a chart +
+    # a label) get no container clamp; the label child is still clamped via `grown`.
+    child_maxes = plans.map { |pl| pl[3] }
+    band_max = (!child_maxes.empty? && child_maxes.all?) ? child_maxes.compact.max : nil
+    needed_rows = [needed_rows, band_max].min if band_max
     cid = "tc-#{ctx[:page_id]}-#{node['id']}"
     # B2 (gap ubr5.6): apply the Tableau zone's fill as the Sigma container tint.
     # parse-twb-layout surfaces fill_color (region-card tints, e.g. #07b4a24e) and
@@ -310,7 +324,7 @@ def plan_node(node, c0, c1, r0, r1, ctx)
       inner = plans.each_with_index.map { |(_, _, ep), i| ep.call(*packed[i]) }.join("\n")
       gc(cid, fc0, fc1, fr0, fr1, inner)
     end
-    [needed_rows, emit]
+    [needed_rows, emit, band_max]
   else
     eid = resolve_leaf(node, ctx)
     return nil unless eid && !ctx[:placed].include?(eid)
@@ -330,23 +344,19 @@ def plan_node(node, c0, c1, r0, r1, ctx)
       ctx[:min_row_expansions] += 1
       span = min
     end
-    # CAP a short single-line TEXT LABEL (a section-header / column-header band)
-    # to a thin banner. The source zone geometry can map a one-line header to
-    # many grid rows, which — once the layout builder tints it into a colored
-    # GridContainer band — renders as a big empty colored block (the World Bank
-    # "YEAR ON YEAR / TREND / TOP COUNTRIES" regression). Long/multi-line text
-    # blocks are left alone (they need the height to avoid clipping).
+    # A short single-line TEXT LABEL (section/column header) must render as a THIN
+    # banner, not a tall colored block. Return a MAX-rows clamp (3rd element) that
+    # the parent's grow-to-fit honors — capping `span` alone does nothing because
+    # the layout grows to max(geometry, needed) and never shrinks below the source
+    # zone geometry (which maps a one-line header to ~6 rows). See the parent
+    # branch: it clamps each child rect to `cmax` and, when EVERY child is a header
+    # label, propagates the clamp up so the whole tinted band row shrinks too.
+    maxr = nil
     if el && el['kind'] == 'text'
       body = el['body'].to_s.gsub(/<[^>]+>/, ' ').gsub(/\s+/, ' ').strip
-      if !body.empty? && body.length <= 60 && !el['body'].to_s.include?("\n")
-        capped = [span, SigmaLayout::HEADER_BAND_MAX_ROWS].min
-        if capped < span
-          ctx[:header_band_caps] = (ctx[:header_band_caps] || 0) + 1
-          span = capped
-        end
-      end
+      maxr = SigmaLayout::HEADER_BAND_MAX_ROWS if !body.empty? && body.length <= 60 && !el['body'].to_s.include?("\n")
     end
-    [span, proc { |fc0, fc1, fr0, fr1| le(eid, fc0, fc1, fr0, fr1) }]
+    [span, proc { |fc0, fc1, fr0, fr1| le(eid, fc0, fc1, fr0, fr1) }, maxr]
   end
 end
 
