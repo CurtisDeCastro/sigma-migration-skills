@@ -32,6 +32,9 @@ module RecipeMultimetric
   module_function
 
   HL_SCHEME = ['#c9d1d3', '#027b8e'].freeze # unselected grey / selected brand-teal
+  # Compact SI number format (17.9T / 1.77T) — matches the clean reference; raw
+  # ",.0f" prints 15-digit values that overflow axes/labels.
+  SI_FMT = { 'kind' => 'number', 'formatString' => ',.3~s' }.freeze
 
   # Applicable iff png-read declares at least one control with highlight_tiles.
   def applicable?(png_read)
@@ -286,8 +289,20 @@ module RecipeMultimetric
       next unless inner # only aggregated base-metric measures
       next unless latest_year_for(pit, inner) || (pit['entity_discriminator'] && !pit['entity_discriminator'].to_s.strip.empty?)
       c['formula'] = pit_conditional(prefix, inner, pit, inner)
+      c['format'] = SI_FMT # compact SI (raw ",.0f" overflows the cell)
       rewritten_ids << c['id']
       n += 1
+    end
+    # Top-table cleanup to match the reference: drop the spurious Date column
+    # build-charts carries onto a point-in-time table (it shows "2015-01-01"),
+    # leaving just the entity + value.
+    if el['kind'] == 'table' && n.positive?
+      before = (el['columns'] || []).size
+      el['columns'] = (el['columns'] || []).reject { |c| col_disp(c).to_s.downcase == 'date' }
+      if (el['columns'] || []).size < before
+        dropped = el['order'].is_a?(Array) # keep order in sync
+        el['order'] = el['order'].select { |id| el['columns'].any? { |c| c['id'] == id } } if dropped
+      end
     end
 
     if el['kind'] == 'table' && n.positive?
@@ -352,7 +367,7 @@ module RecipeMultimetric
 
     country_id = "trend-country-#{el['id']}"
     (el['columns'] ||= []) << { 'id' => country_id, 'name' => "Country #{metric}",
-                                'formula' => "Sum([#{prefix}/#{metric}])", 'format' => world_col['format'] }.compact
+                                'formula' => "Sum([#{prefix}/#{metric}])", 'format' => SI_FMT }
     el['order'] << country_id if el['order'].is_a?(Array)
     # World line: aggregate to one value per x with Max — the per-year global
     # total is constant within a year, so Sum over the (region-filtered) rows the
@@ -366,10 +381,24 @@ module RecipeMultimetric
       else
         "Max(#{wref})"
       end
+    world_col['format'] = SI_FMT
     el['kind'] = 'combo-chart'
+    # BOTH lines share ONE axis (no yAxis2) — so the region reads honestly as a
+    # fraction of the world total (the clean reference behavior). A second axis
+    # auto-scales each line independently and prints raw 15-digit ticks.
     el['yAxis'] = { 'columnIds' => [{ 'columnId' => country_id, 'type' => 'line' },
                                     { 'columnId' => world_col['id'], 'type' => 'line' }] }
-    el['yAxis2'] = { 'columnIds' => [world_col['id']] }
+    el.delete('yAxis2')
+    el.delete('dataLabel') # no per-point value labels smeared across the lines
+    # Integer Year x-axis (build-charts uses a DateTrunc datetime column). Rewrite
+    # the bound x column to the plain Year field so ticks read 1960…2014, not "Jan 1960".
+    xid = el.dig('xAxis', 'columnId')
+    xcol = (el['columns'] || []).find { |c| c['id'] == xid }
+    if xcol && xcol['formula'].to_s =~ /DateTrunc|\[[^\]]*Date\]/i
+      xcol['formula'] = "[#{prefix}/Year]"
+      xcol['name'] = 'Year'
+      xcol.delete('format')
+    end
     1
   end
 
@@ -388,11 +417,20 @@ module RecipeMultimetric
     end
     return 0 unless meas
     meas['formula'] = pit_conditional(prefix, metric, pit, metric)
-    # The tile's measure was the source's %-change "(copy)" calc, so its format is
-    # a percent (",.0%"). Now that the column holds a raw metric MAGNITUDE (GDP $,
-    # FDI $, TEU count), a percent format renders "$24T" as "2,400,000,000,000,000%".
-    # Reset to a compact SI number so the label matches the source's magnitude style.
-    meas['format'] = { 'kind' => 'number', 'formatString' => ',.2s' }
+    # The tile's measure was the source's %-change "(copy)" calc, so its format was
+    # a percent (",.0%") — a raw magnitude then renders "$24T" as "…345%". Reset to
+    # a compact SI number to match the clean reference.
+    meas['format'] = SI_FMT
+    # Bar presentation to match the reference: rank bars by VALUE (build-charts
+    # sorts by the category NAME → scrambled order), drop per-bar data labels, and
+    # clear the broken {min:0,max:0} axis-domain artifact.
+    el.delete('dataLabel')
+    el['xAxis'] ||= {}
+    el['xAxis']['sort'] = { 'by' => meas['id'], 'direction' => 'descending' }
+    if (dom = el.dig('xAxis', 'format', 'scale', 'domain')).is_a?(Hash) &&
+       dom['min'].to_f.zero? && dom['max'].to_f.zero?
+      el['xAxis']['format']['scale'].delete('domain')
+    end
     1
   end
 

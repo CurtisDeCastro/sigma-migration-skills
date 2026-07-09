@@ -139,9 +139,14 @@ check(sum_tr[:trends] == 1, "reshaped 1 trend (got #{sum_tr[:trends]})", fails)
 country = tr['columns'].find { |c| c['formula'] == 'Sum([Master/GDP])' }
 check(country, 'added the region-filtered Country line Sum([Master/GDP])', fails)
 check(tr['kind'] == 'combo-chart', 'trend promoted to combo-chart', fails)
-check(tr.dig('yAxis2', 'columnIds') == ['tr_world'], 'World line on the secondary axis (yAxis2)', fails)
+check(!tr.key?('yAxis2'), 'no yAxis2 — Country + World share ONE axis (region reads as a fraction of world)', fails)
+check(tr['yAxis']['columnIds'].map { |c| c.is_a?(Hash) ? c['columnId'] : c }.sort == %w[tr_world trend-country-el-gdptrend].sort,
+      'both lines live in yAxis', fails)
+check(tr['dataLabel'].nil?, 'no per-point data labels on the trend', fails)
 check(tr['columns'].find { |c| c['id'] == 'tr_world' }['formula'] == 'Max([Master/GDP World])',
       'World line aggregated (Max) to one value per year', fails)
+check(tr['columns'].find { |c| c['id'] == 'tr_world' }.dig('format', 'formatString') == ',.3~s',
+      'World line uses the compact SI format', fails)
 # build-charts often emits the World col as Sum([…World]); the OUTER agg must be
 # rewritten to Max (Sum over region-filtered rows inflates the per-year constant ~40x).
 s_trs = build_spec
@@ -175,8 +180,10 @@ check(hlc && hlc['formula'].include?('[Master All/New Region]'), 'highlight buil
 bval_b = bar_b['columns'].find { |c| c['id'] == 'b_val' }
 check(bval_b['formula'] == 'Sum(If([Master All/Year] = 2015 And Not IsNull([Master All/Income Group]), [Master All/GDP], null))',
       "copy-calc bar measure replaced via png-read tile.measure (got #{bval_b['formula']})", fails)
-check(bval_b.dig('format', 'formatString') == ',.2s',
-      'bar measure re-formatted to SI number (not the source %-calc format that renders $24T as billions-of-%)', fails)
+check(bval_b.dig('format', 'formatString') == ',.3~s',
+      'bar measure re-formatted to compact SI number (not the source %-calc format)', fails)
+check(bar_b['dataLabel'].nil?, 'no data labels on the bar', fails)
+check(bar_b.dig('xAxis', 'sort', 'by') == 'b_val', 'bar sorted by the VALUE column (not the category name)', fails)
 # per-metric year: a TEU tile would use 2014
 teu_year = RecipeMultimetric.latest_year_for(png_b['point_in_time'], 'TEU')
 check(teu_year == 2014, "per-metric latest_year map resolves TEU->2014 (got #{teu_year})", fails)
