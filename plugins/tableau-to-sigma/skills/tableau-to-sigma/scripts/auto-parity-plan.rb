@@ -148,6 +148,26 @@ def normalize(s)
   s.to_s.downcase.gsub(/[^a-z0-9]/, '')
 end
 
+# Auto-bridge the display-title rename. Sigma tiles are named by their worksheet
+# display_title ("Net Revenue"), but Tableau views are keyed by the worksheet
+# caption/nickname ("OV KPI Revenue"). Seed the caption→display_title map from the
+# dashboard-layout zones so parity matches WITHOUT a manual --rename (explicit
+# --rename still wins). Keeps parity matching in lockstep with the element namer.
+_dl_path = File.join(opts[:tab], 'dashboard-layout.json')
+if File.exist?(_dl_path)
+  begin
+    _dl = JSON.parse(File.read(_dl_path))
+    (_dl.is_a?(Array) ? _dl : (_dl['dashboards'] || [_dl])).each do |d|
+      (d['zones'] || []).each do |z|
+        cap = z['caption'].to_s; dt = z['display_title'].to_s.strip
+        opts[:renames][cap] ||= dt unless cap.empty? || dt.empty? || cap == dt
+      end
+    end
+  rescue StandardError
+    nil # best-effort; fall back to name==name matching
+  end
+end
+
 # Build reverse-rename map: tableau-name → sigma-name was the input;
 # we want sigma-name → tableau-name for lookup.
 rev_renames = opts[:renames].each_with_object({}) { |(k, v), h| h[v] = k }

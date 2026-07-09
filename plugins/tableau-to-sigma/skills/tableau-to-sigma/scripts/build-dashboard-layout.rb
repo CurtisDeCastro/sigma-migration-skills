@@ -520,7 +520,7 @@ def build_page_from_tree(dashboard, page, opts)
   # element made it into ctx[:placed]. Header band excluded from the fill rects.
   content_zones = ZoneCensus.content_zones(dashboard['zones'])
   placed = content_zones.count do |z|
-    e = els_by_name[opts[:renames][z['caption']] || z['caption']]
+    e = els_by_name[zone_el_name(z, opts[:renames])]
     e && ctx[:placed].include?(e['id'])
   end
   fill = ZoneCensus.grid_fill_pct(content_rects, opts[:page_cols], page_rows)
@@ -564,6 +564,20 @@ SECTION_TEXT_MIN_W_PCT = 60.0 # a text zone at least this wide separates section
 # — is what prevents the duplicate-title bug. Previously only the geometry path
 # had the fallback, so synthesized pages shipped two titles. Shared here so the
 # two paths cannot drift again.
+# Resolve the Sigma element NAME a source zone maps to. Tiles are now named by
+# the worksheet display_title (human title, e.g. "Net Revenue"), NOT the caption/
+# nickname ("OV KPI Revenue"), so zone→element matching must prefer display_title
+# (after any explicit --rename), falling back to the caption (still == the name
+# when the worksheet had no custom title). This keeps the layout + parity matchers
+# in lockstep with the element namer — changing the display name in one place must
+# not silently drop every tile from the layout.
+def zone_el_name(z, renames)
+  explicit = renames && renames[z['caption']]
+  return explicit if explicit
+  dt = z['display_title'].to_s.strip
+  dt.empty? ? z['caption'] : dt
+end
+
 def detect_header_title_el(page, zone_by_id)
   title_el = page['elements'].find { |e| e['kind'] == 'text' && e['id'].to_s.start_with?('title') }
   return title_el if title_el
@@ -666,7 +680,7 @@ def build_page_synthesized(dashboard, page, opts, structure)
   resolve_zone_el = lambda do |z|
     case z['kind'].to_s
     when 'chart'
-      el = els_by_name[opts[:renames][z['caption']] || z['caption']]
+      el = els_by_name[zone_el_name(z, opts[:renames])]
       el && el['id']
     when 'text', 'title'
       el = els_by_id["text-#{z['id']}"]
@@ -847,7 +861,7 @@ def build_page_synthesized(dashboard, page, opts, structure)
 
   content_zones = ZoneCensus.content_zones(zones)
   placed_count = content_zones.count do |z|
-    e = els_by_name[opts[:renames][z['caption']] || z['caption']]
+    e = els_by_name[zone_el_name(z, opts[:renames])]
     e && placed.include?(e['id'])
   end
   rects = []
@@ -894,7 +908,7 @@ def build_page_for_dashboard(dashboard, page, opts)
   end
 
   chart_layouts = chart_zones.map do |z|
-    lookup_name = o[:renames][z['caption']] || z['caption']
+    lookup_name = zone_el_name(z, o[:renames])
     el = els_by_name[lookup_name]
     if el.nil?
       warn "WARN: no Sigma element matched zone caption #{z['caption'].inspect} on page #{page['name'].inspect}" \
@@ -997,7 +1011,7 @@ def build_page_for_dashboard(dashboard, page, opts)
   #          furniture (header band, styled-text band) excluded from the fill
   #          numerator.
   content_zones = ZoneCensus.content_zones(dashboard['zones'])
-  placed = content_zones.count { |z| els_by_name[o[:renames][z['caption']] || z['caption']] }
+  placed = content_zones.count { |z| els_by_name[zone_el_name(z, o[:renames])] }
   content_rects = bands.flat_map { |b| b.map { |i| [i[1], i[2], i[3] + band_offset, i[4] + band_offset] } }
   content_rects << [1, o[:page_cols] + 1, 1 + HEADER_ROWS, 1 + HEADER_ROWS + ctl_rows] if ctl_els.length.positive?
   fill = ZoneCensus.grid_fill_pct(content_rects, o[:page_cols], o[:page_rows])
