@@ -354,10 +354,18 @@ module RecipeMultimetric
     (el['columns'] ||= []) << { 'id' => country_id, 'name' => "Country #{metric}",
                                 'formula' => "Sum([#{prefix}/#{metric}])", 'format' => world_col['format'] }.compact
     el['order'] << country_id if el['order'].is_a?(Array)
-    # World line: ensure it's aggregated to one value per x (Max — the per-year
-    # global total is constant within a year), on the secondary axis.
+    # World line: aggregate to one value per x with Max — the per-year global
+    # total is constant within a year, so Sum over the (region-filtered) rows the
+    # trend rides multiplies it by the row count and inflates the axis. build-charts
+    # usually emits it as Sum([P/<M> World]); rewrite the OUTER aggregate to Max
+    # (not just the bare no-agg case) so the World line reads its true per-year value.
     wref = world_col['formula'].to_s
-    world_col['formula'] = "Max(#{wref})" unless wref =~ /\A(?:Sum|Avg|Average|Min|Max|Total)\(/i
+    world_col['formula'] =
+      if (m = wref.match(/\A(?:Sum|Avg|Average|Min|Max|Total)\((.*)\)\z/m))
+        "Max(#{m[1]})"
+      else
+        "Max(#{wref})"
+      end
     el['kind'] = 'combo-chart'
     el['yAxis'] = { 'columnIds' => [{ 'columnId' => country_id, 'type' => 'line' },
                                     { 'columnId' => world_col['id'], 'type' => 'line' }] }
@@ -380,6 +388,11 @@ module RecipeMultimetric
     end
     return 0 unless meas
     meas['formula'] = pit_conditional(prefix, metric, pit, metric)
+    # The tile's measure was the source's %-change "(copy)" calc, so its format is
+    # a percent (",.0%"). Now that the column holds a raw metric MAGNITUDE (GDP $,
+    # FDI $, TEU count), a percent format renders "$24T" as "2,400,000,000,000,000%".
+    # Reset to a compact SI number so the label matches the source's magnitude style.
+    meas['format'] = { 'kind' => 'number', 'formatString' => ',.2s' }
     1
   end
 

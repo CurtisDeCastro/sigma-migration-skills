@@ -142,6 +142,19 @@ check(tr['kind'] == 'combo-chart', 'trend promoted to combo-chart', fails)
 check(tr.dig('yAxis2', 'columnIds') == ['tr_world'], 'World line on the secondary axis (yAxis2)', fails)
 check(tr['columns'].find { |c| c['id'] == 'tr_world' }['formula'] == 'Max([Master/GDP World])',
       'World line aggregated (Max) to one value per year', fails)
+# build-charts often emits the World col as Sum([…World]); the OUTER agg must be
+# rewritten to Max (Sum over region-filtered rows inflates the per-year constant ~40x).
+s_trs = build_spec
+s_trs['pages'][1]['elements'] << {
+  'id' => 'el-fditrend', 'kind' => 'line-chart', 'name' => 'FDIRegionLine',
+  'source' => { 'kind' => 'table', 'elementId' => 'master' },
+  'columns' => [{ 'id' => 'y2', 'name' => 'Year', 'formula' => '[Master/Year]' },
+                { 'id' => 'w2', 'name' => 'FDI World', 'formula' => 'Sum([Master/FDI World])' }],
+  'order' => %w[y2 w2]
+}
+RecipeMultimetric.apply!(s_trs, PNG, world_lod_map: { 'fdi world' => 'FDI' })
+w2 = s_trs['pages'].flat_map { |p| p['elements'] }.find { |e| e['id'] == 'el-fditrend' }['columns'].find { |c| c['id'] == 'w2' }
+check(w2['formula'] == 'Max([Master/FDI World])', "Sum([…World]) outer-agg rewritten to Max (got #{w2['formula']})", fails)
 
 puts 'Part C3 — data-scoping control (no columnId): highlight dim fallback + bar-measure rewrite + per-metric year'
 s_b = build_spec
@@ -162,6 +175,8 @@ check(hlc && hlc['formula'].include?('[Master All/New Region]'), 'highlight buil
 bval_b = bar_b['columns'].find { |c| c['id'] == 'b_val' }
 check(bval_b['formula'] == 'Sum(If([Master All/Year] = 2015 And Not IsNull([Master All/Income Group]), [Master All/GDP], null))',
       "copy-calc bar measure replaced via png-read tile.measure (got #{bval_b['formula']})", fails)
+check(bval_b.dig('format', 'formatString') == ',.2s',
+      'bar measure re-formatted to SI number (not the source %-calc format that renders $24T as billions-of-%)', fails)
 # per-metric year: a TEU tile would use 2014
 teu_year = RecipeMultimetric.latest_year_for(png_b['point_in_time'], 'TEU')
 check(teu_year == 2014, "per-metric latest_year map resolves TEU->2014 (got #{teu_year})", fails)
