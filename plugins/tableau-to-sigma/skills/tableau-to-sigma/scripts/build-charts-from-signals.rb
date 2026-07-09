@@ -3412,17 +3412,18 @@ layout.each do |dash|
     end
 
     meas_col_obj = { 'id' => "y-#{el_id}", 'name' => meas['name'], 'formula' => measure_formula }
-    # Format priority:
-    #   1. explicit `format` on the master-map entry
-    #   2. Tableau's own format string for this measure (zone.formats — only set
-    #      when --meta was provided)
+    # Format priority (source-fidelity order):
+    #   1. the worksheet's OWN Tableau format for this measure (zone.formats) —
+    #      the DISPLAY ground truth; the same measure can render at different
+    #      precision per sheet, and the DM's auto-inferred master format often
+    #      picks 2 decimals for a percent calc where the source shows 1 (65.04%
+    #      vs 65.0%). The source viz wins.
+    #   2. explicit `format` on the master-map entry (DM/curated)
     #   3. heuristic by header name
-    meas_col_obj['format'] = meas['format'] if meas['format'].is_a?(Hash)
-    if meas_col_obj['format'].nil?
-      tab_fmt = pick_tableau_format(z['formats'], meas_hdr) ||
-                pick_tableau_format(z['formats'], meas['name'])
-      meas_col_obj['format'] = tab_fmt if tab_fmt
-    end
+    tab_fmt = pick_tableau_format(z['formats'], meas_hdr) ||
+              pick_tableau_format(z['formats'], meas['name'])
+    meas_col_obj['format'] = tab_fmt
+    meas_col_obj['format'] ||= meas['format'] if meas['format'].is_a?(Hash)
     if meas_col_obj['format'].nil?
       meas_col_obj['format'] =
         case meas['name'].downcase
