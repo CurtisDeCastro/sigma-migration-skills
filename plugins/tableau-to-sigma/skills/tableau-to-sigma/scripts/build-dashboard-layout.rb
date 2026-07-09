@@ -439,10 +439,22 @@ def build_page_from_tree(dashboard, page, opts)
   # Pin the header title to the dedicated title element (build-charts prepends id
   # "title-text"/"title-<slug>"); a bare first-text-element match would grab a B4
   # styled-text element once those exist. Falls back to the page name when absent.
-  title_el    = page['elements'].find { |e| e['kind'] == 'text' && e['id'].to_s.start_with?('title') }
   # E1: flat zones carry chart_kind + plot signals (tree nodes don't) — the
   # per-kind row floor resolves through this map.
   zone_by_id  = (dashboard['zones'] || []).each_with_object({}) { |z, h| h[z['id']] = z if z['id'] }
+  title_el    = page['elements'].find { |e| e['kind'] == 'text' && e['id'].to_s.start_with?('title') }
+  # Fall back to the source's own TOP-BANNER text (a text element whose zone sits
+  # at y≈0 spanning most of the width) as the title. Otherwise we'd both fabricate
+  # a page-name H1 banner AND place that source title separately in the body — the
+  # duplicate-title bug. Topmost qualifying text element wins. (Marked placed in the
+  # header branch below so the body pass doesn't re-emit it.)
+  if title_el.nil?
+    zid = ->(e) { e['id'].to_s.sub(/\Atext-/, '') }
+    title_el = page['elements'].select { |e| e['kind'] == 'text' }
+                               .map { |e| [e, zone_by_id[zid.call(e)]] }
+                               .select { |_e, z| z && z['y_pct'].to_f < 12 && z['w_pct'].to_f >= 40 }
+                               .min_by { |_e, z| z['y_pct'].to_f }&.first
+  end
 
   ctx = { page_id: page['id'], renames: opts[:renames], els_by_name: els_by_name,
           ctl_by_name: ctl_by_name, els_by_id: els_by_id, title_el: title_el, title_used: false,

@@ -57,6 +57,11 @@ check(band, 'outer header band container present', fails)
 check(band && (band[3].to_i - band[2].to_i) <= maxrows + 1,
       "outer band container shrank to ~#{maxrows} rows (got #{band && (band[3].to_i - band[2].to_i)}) — propagation reached it", fails)
 
+# 3) Title dedup: the source top-banner text (text-28) is the TITLE in the header
+# band — used ONCE, and no fabricated page-name H1 ("hdrtext") banner alongside it.
+check(xml.scan('elementId="text-28"').size == 1, 'source title (text-28) placed once — no duplicate title', fails)
+check(!xml.include?('hdrtext'), 'no fabricated page-name H1 banner (source title used instead)', fails)
+
 puts
 if fails.empty?
   puts 'ALL PASS'
