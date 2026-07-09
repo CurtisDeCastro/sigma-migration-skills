@@ -268,6 +268,33 @@ unless system(*_dg_cmd)
         'or re-run with --skip-doctor-gate "<reason>".'
 end
 
+# 🚧 Step-0 CREDENTIAL GATE (fail-closed). The doctor treats missing creds as a
+# warning, so a harness that does NOT auto-load ~/.claude/settings.json (Coco,
+# Cursor, plain shell) can sail past it and then die at the FIRST Sigma API call
+# with an opaque auth error — which a low-context agent misreads as a TASK
+# failure and improvises around (hand-rolled curl, self-writing creds, a
+# hallucinated token). Resolve creds HERE, before any Tableau/discovery work, and
+# stop with the exact remediation if they're absent. Waive only for genuinely
+# offline runs with SIGMA_SKIP_CRED_GATE="<reason>".
+_cred_skip = ENV['SIGMA_SKIP_CRED_GATE']
+_neutral_env = File.expand_path('~/.sigma-migration/env')
+_creds_ok = !ENV['SIGMA_API_TOKEN'].to_s.empty? ||
+            (!ENV['SIGMA_CLIENT_ID'].to_s.empty? && !ENV['SIGMA_CLIENT_SECRET'].to_s.empty?) ||
+            File.exist?(_neutral_env)
+if !_creds_ok && (_cred_skip.nil? || _cred_skip.to_s.empty?)
+  abort <<~MSG
+    FATAL: no Sigma credentials resolvable — the run would fail at the first API call.
+    This almost always means you are NOT on Claude Code (which auto-loads
+    ~/.claude/settings.json). Other harnesses (Coco, Cursor, plain shell) do not,
+    so the neutral credential file is REQUIRED. Fix it ONCE, in a real terminal:
+        ruby scripts/setup.rb        # writes ~/.sigma-migration/env
+    …or export SIGMA_CLIENT_ID + SIGMA_CLIENT_SECRET (and SIGMA_BASE_URL) into the
+    environment this orchestrator runs in. Then re-run this exact command.
+    (Genuinely offline/no-Sigma run? Re-run with SIGMA_SKIP_CRED_GATE="<reason>".)
+  MSG
+end
+warn "WARN: credential gate waived (SIGMA_SKIP_CRED_GATE=#{_cred_skip}) — Sigma calls will fail if reached." if !_creds_ok && _cred_skip && !_cred_skip.to_s.empty?
+
 # ── Design-consistency advisory readout (doctor.json) ────────────────────────
 # The hard gate above proves the environment passed; these two are the silent
 # DESIGN-variance killers the gate does not block on — surface them at every
@@ -2606,6 +2633,27 @@ puts finalize_cmd
 puts '(--finalize runs phase6 finalize + orphan cleanup + the census-aware'
 puts ' assert-phase6-ran hard gate; exit 0 there is the ONLY green exit.)'
 puts 'PHASE E     : requested (--enhance) — runs at --finalize AFTER all gates are green' if opts[:enhance]
+puts '=================================================================='
+
+# Completion sentinel (run-scoped). PASS 1 is NOT a done state: the gate suite
+# lives in --finalize. Drop a pending marker keyed to this workbook and CLEAR any
+# stale success marker from a prior run, so verify-complete.rb (the sole done-
+# check the SKILL points at) reports NOT DONE until --finalize's hard gate stamps
+# phase6-success.json. This is the structural backstop for the "agent stops at
+# PASS 1 and narrates success" failure mode.
+begin
+  File.write(File.join(WORK, 'parity-pending.json'),
+             JSON.pretty_generate('workbookId' => wb_id, 'dataModelId' => dm_id,
+                                  'stage' => 'pass1', 'note' => 'parity + gates NOT run — run --finalize'))
+  _succ = File.join(WORK, 'phase6-success.json')
+  File.delete(_succ) if File.exist?(_succ)
+rescue StandardError
+  # best-effort — never fail the run on sentinel bookkeeping
+end
+puts
+puts '⛔ NOT DONE — this is PASS 1 of 2. Do NOT report success or hand off yet.'
+puts '   To confirm completion at any point, run (exit 0 == done, nothing else counts):'
+puts "     ruby scripts/verify-complete.rb --workdir #{WORK}"
 puts '=================================================================='
 mark('phase6-pass1')
 phase_summary
