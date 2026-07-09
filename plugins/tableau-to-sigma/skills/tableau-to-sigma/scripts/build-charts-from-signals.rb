@@ -5085,6 +5085,13 @@ elsif opts[:pages_mode] == :dashboard
       # (a user changes it and nothing reacts) that fails the control lint.
       if param_control_ids.include?(c['controlId'])
         used = els.any? { |el| (el['columns'] || []).any? { |col| col['formula'].to_s.include?("[#{c['controlId']}]") } }
+        # A DATA-SCOPING parameter control filters via its `filters` targets (a
+        # boolean filter-calc wired to a master column at ~L4649), NOT via a
+        # Switch/If formula ref — so it is NOT dead even when no chart formula
+        # names it. Keep it whenever it carries filter targets, else the Region
+        # data-scoper is silently dropped (control-lint FAIL + the multi-metric
+        # recipe can't find a control to build masterAll/highlight from).
+        used ||= (c['filters'].is_a?(Array) && c['filters'].any?)
         next unless used
       end
       dup = JSON.parse(c.to_json)

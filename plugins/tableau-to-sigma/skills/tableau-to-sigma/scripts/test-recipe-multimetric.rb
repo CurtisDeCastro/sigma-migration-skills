@@ -28,8 +28,7 @@ def master_cols
     { 'id' => 'm_region', 'name' => 'New Region',   'formula' => "[#{WE}/New Region]" },
     { 'id' => 'm_country','name' => 'Country Name', 'formula' => "[#{WE}/Country Name]" },
     { 'id' => 'm_year',   'name' => 'Year',         'formula' => "[#{WE}/Year]" },
-    # NB: Income Group deliberately OMITTED — the mechanical master doesn't plot
-    # it, so the transform must ADD it from the DM element for the discriminator.
+    { 'id' => 'm_income', 'name' => 'Income Group', 'formula' => "[#{WE}/Income Group]" },
     { 'id' => 'm_gdp',    'name' => 'GDP',          'formula' => "[#{WE}/GDP (current US$)]" }
   ]
 end
@@ -89,11 +88,22 @@ check(hl && hl['formula'].include?('[ctl-param-region]') && hl['formula'].includ
 check(bar.dig('color', 'column') == hl['id'] && bar.dig('color', 'scheme').is_a?(Array),
       'bar color = category by the highlight column', fails)
 
-puts 'Part A2 — discriminator missing from master is added from the DM element'
-mstr = by_id['master']
-inc = mstr['columns'].find { |c| c['name'] == 'Income Group' }
-check(inc && inc['formula'] == "[#{WE}/Income Group]", 'Income Group added to master from the DM element', fails)
-check(ma['columns'].any? { |c| c['name'] == 'Income Group' }, 'masterAll clone also carries the added discriminator', fails)
+puts 'Part A2 — discriminator ABSENT from the master is dropped (guard), not fabricated'
+# The mechanical DM retains only PLOTTED columns, so a png-read discriminator the
+# source never plotted isn't on the fact — fabricating [Master/discr] would dangle
+# and fail the POST. The guard must DROP it (with a note) and fall back to a
+# year-only conditional, NOT invent a broken ref.
+s_nodisc = build_spec
+s_nodisc['pages'][0]['elements'][0]['columns'].reject! { |c| c['id'] == 'm_income' } # master has no Income Group
+s_nodisc['pages'][0]['elements'][0]['order']&.delete('m_income')
+sum_nd = RecipeMultimetric.apply!(s_nodisc, PNG)
+nd_top = s_nodisc['pages'].flat_map { |p| p['elements'] }.find { |e| e['id'] == 'el-gdptop' }
+nd_val = nd_top['columns'].find { |c| c['id'] == 't_val' }
+check(!nd_val['formula'].include?('Income Group'), 'absent discriminator NOT fabricated into the measure', fails)
+check(nd_val['formula'].include?('[Master/Year] = 2015'), 'still applies the latest-year filter (year IS on the master)', fails)
+check(s_nodisc['pages'].flat_map { |p| p['elements'] }.none? { |e| (e['columns'] || []).any? { |c| c['name'] == 'Income Group' } },
+      'no dangling Income Group column added anywhere', fails)
+check(sum_nd[:notes].any? { |n| n =~ /discriminator/i }, 'guard emits a note about the skipped discriminator', fails)
 
 puts 'Part B — filtered tile stays on master; control unchanged'
 top = by_id['el-gdptop']

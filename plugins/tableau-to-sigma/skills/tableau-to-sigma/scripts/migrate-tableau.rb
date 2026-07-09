@@ -2054,7 +2054,13 @@ if mechanical
   #    AND the readback element's REAL column labels (the suffixed display names
   #    Sigma assigns to joined-dim columns, e.g. "Customer Id (CUSTOMER_DIM)") so
   #    the [fact/Col] formulas resolve for virtual-connection (denormalized) DMs.
-  conv_fact = MechanicalSpecs.pick_fact(conv['model'])
+  # Thread the fact hint (dominant dashboard datasource) so the master-map is
+  # derived from the SAME element the readback fact-selection (line ~2024/2031)
+  # picked. Without this, pick_fact defaults to the widest element (an unused
+  # secondary can be wider than the plotted table); derive_master then emits the
+  # secondary's columns under the MAIN fact's name → orphan [MainFact/SecondaryCol]
+  # refs that fail the workbook POST ("Dependency not found"). Mirrors line 2024.
+  conv_fact = MechanicalSpecs.pick_fact(conv['model'], prefer_table: (defined?(prefer_fact_table) ? prefer_fact_table : nil))
   abort 'FATAL: mechanical path could not identify a fact element in the converter output' unless conv_fact
   conv_base = MechanicalSpecs.base_of(conv['model'], conv_fact)
   real_labels = fact['columnLabels'] # from post-and-readback /columns (may be nil)

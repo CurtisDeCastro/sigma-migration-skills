@@ -17,15 +17,18 @@ fails = []
 def check(c, m, fails) fails << m unless c; puts "  #{c ? 'PASS' : 'FAIL'}  #{m}" end
 
 # A fact with a physical Year column + the metrics the World LODs aggregate.
+# NB: columns carry NO `name` — the converter leaves name null on extract-backed
+# models (the display name lives in the [TABLE/<cap>] formula, read via
+# col_display). This shape is what defeated the original name-keyed lookup, so
+# the fixture must mirror it or the test doesn't guard the real path.
 fact = {
   'id' => 'el-fact', 'kind' => 'table', 'name' => 'World Bank',
   'source' => { 'connectionId' => 'conn-1', 'kind' => 'warehouse-table', 'path' => %w[TJ PUBLIC WB_WORLD_BANK] },
   'columns' => [
-    { 'id' => 'c-year', 'name' => 'Year',              'formula' => '[WB_WORLD_BANK/Year]' },
-    { 'id' => 'c-reg',  'name' => 'New Region',        'formula' => '[WB_WORLD_BANK/New Region]' },
-    { 'id' => 'c-gdp',  'name' => 'GDP (current US$)', 'formula' => '[WB_WORLD_BANK/GDP (current US$)]' },
-    { 'id' => 'c-teu',  'name' => 'Container port traffic (TEU: 20 foot equivalent units)',
-      'formula' => '[WB_WORLD_BANK/Container port traffic (TEU: 20 foot equivalent units)]' }
+    { 'id' => 'c-year', 'formula' => '[WB_WORLD_BANK/Year]' },
+    { 'id' => 'c-reg',  'formula' => '[WB_WORLD_BANK/New Region]' },
+    { 'id' => 'c-gdp',  'formula' => '[WB_WORLD_BANK/GDP (current US$)]' },
+    { 'id' => 'c-teu',  'formula' => '[WB_WORLD_BANK/Container port traffic (TEU: 20 foot equivalent units)]' }
   ]
 }
 model = { 'pages' => [{ 'elements' => [fact] }] }
@@ -78,7 +81,7 @@ puts 'Part E — no-op guards'
 check(MechanicalSpecs.synthesize_fixed_lods!(model, fact, '<workbook/>', COLMAP).zero?, 'no LODs in twb -> 0', fails)
 factnoyear = { 'id' => 'f2', 'kind' => 'table', 'name' => 'X',
                'source' => { 'connectionId' => 'c', 'kind' => 'warehouse-table', 'path' => %w[A B C] },
-               'columns' => [{ 'id' => 'x', 'name' => 'Region', 'formula' => '[C/Region]' }] }
+               'columns' => [{ 'id' => 'x', 'formula' => '[C/Region]' }] }
 check(MechanicalSpecs.synthesize_fixed_lods!({ 'pages' => [{ 'elements' => [factnoyear] }] }, factnoyear, TWB, COLMAP).zero?,
       'fact without a Year key -> 0 (safe skip)', fails)
 

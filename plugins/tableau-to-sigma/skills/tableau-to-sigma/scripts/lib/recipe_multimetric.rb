@@ -26,6 +26,7 @@
 # data transform (no I/O) so it is unit-testable spec-in → spec-out.
 
 require 'json'
+require 'set'
 
 module RecipeMultimetric
   module_function
@@ -70,8 +71,31 @@ module RecipeMultimetric
     summary = { applied: false, masters_added: 0, highlight_tiles: 0, top_tables: 0, notes: [] }
     return summary unless spec.is_a?(Hash) && applicable?(png_read)
 
-    pit = png_read['point_in_time'] || {}
+    pit = (png_read['point_in_time'] || {}).dup
     by_title = elements_by_title(spec)
+
+    # Discriminator/year guard: the point-in-time rewrite refs [Master/<discr>] and
+    # [Master/<year>]. The MECHANICAL data model retains only PLOTTED columns, so a
+    # png-read discriminator that the source never plotted (e.g. World-Bank
+    # "IncomeGroup") is NOT on the DM fact — fabricating [fact/IncomeGroup] on the
+    # master dangles and fails the workbook POST. Only use fields that are already
+    # resolvable master columns; drop (with a note) the ones that aren't, instead of
+    # inventing a broken ref. (The correct long-term fix is to retain the
+    # discriminator in the DM build; until then this keeps the recipe POST-safe.)
+    master_probe = find_master(spec, all_elements(spec).find { |e| e['kind'] == 'control' } || {})
+    have_cols = master_probe ? (master_probe['columns'] || []).map { |c| c['name'].to_s.downcase }.to_set : nil
+    if have_cols
+      d = pit['entity_discriminator']
+      if d && !d.to_s.strip.empty? && !have_cols.include?(d.to_s.downcase)
+        summary[:notes] << "discriminator '#{d}' not on the mechanical DM fact (only plotted columns retained) — point-in-time real-entity filter SKIPPED; Top/bar measures may include aggregate rows"
+        pit.delete('entity_discriminator')
+      end
+      yc = pit['year_column'] || 'Year'
+      if pit['latest_year'] && !have_cols.include?(yc.to_s.downcase)
+        summary[:notes] << "year column '#{yc}' not on the mechanical DM fact — latest-year point-in-time filter SKIPPED"
+        pit.delete('latest_year')
+      end
+    end
 
     Array(png_read['filter_shelf']).each do |ctl_spec|
       next unless ctl_spec.is_a?(Hash)

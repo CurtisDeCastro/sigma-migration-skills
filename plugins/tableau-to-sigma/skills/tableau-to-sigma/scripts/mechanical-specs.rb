@@ -231,7 +231,15 @@ module MechanicalSpecs
     conn = fact.dig('source', 'connectionId')
     return 0 if path.size < 3 || conn.to_s.empty?
 
-    fact_caps = (fact['columns'] || []).each_with_object({}) { |c, h| h[c['name'].to_s.downcase] = c if c['name'] }
+    # Key on col_display (formula-derived) — the converter leaves column['name']
+    # null on extract-backed models (the display name lives in the [EXTRACT/<cap>]
+    # formula, resolved by col_display). Reading c['name'] here returned an empty
+    # map → no 'year' key → this whole synthesis silently no-op'd on every
+    # extract-landed workbook (the World-total dual-axis line then dangled).
+    fact_caps = (fact['columns'] || []).each_with_object({}) do |c, h|
+      disp = col_display(c)
+      h[disp.to_s.downcase] = c if disp && !disp.to_s.empty?
+    end
     year_col = fact_caps['year']
     return 0 unless year_col # need a physical Year key on the fact
     # Decode XML entities PER captured formula — NOT on the whole text, which would
@@ -255,7 +263,7 @@ module MechanicalSpecs
     end
     return 0 if lods.empty?
 
-    year_phys = phys.call(year_col['name'])
+    year_phys = phys.call(col_display(year_col))
     fqn = %(#{path[0]}.#{path[1]}."#{path[2]}")
     sel = [%("#{year_phys}" AS "Year")]
     cols = [{ 'id' => 'wby-year', 'name' => 'Year', 'formula' => '[Custom SQL/Year]' }]
@@ -274,7 +282,7 @@ module MechanicalSpecs
            (model['pages'] || []).first
     (page['elements'] ||= []) << sql_el if page
     (fact['relationships'] ||= []) << {
-      'name' => 'FIXED Year', 'targetElementId' => 'el-world-by-year',
+      'id' => 'rel-world-by-year', 'name' => 'FIXED Year', 'targetElementId' => 'el-world-by-year',
       'keys' => [{ 'sourceColumnId' => year_col['id'], 'targetColumnId' => 'wby-year' }]
     }
     lods.size
