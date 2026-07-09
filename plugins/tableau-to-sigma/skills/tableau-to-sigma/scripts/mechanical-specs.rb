@@ -239,7 +239,11 @@ module MechanicalSpecs
 
   def synthesize_fixed_lods!(model, fact, twb_text, colmap = {}, discriminator: nil)
     return {} unless model && fact && twb_text
-    return 0 unless fact.dig('source', 'kind') == 'warehouse-table'
+    # Must return the SAME type ({}) as every other exit — the caller does
+    # world_lod_map.any?, and `0.any?` is a NoMethodError that crashes the run.
+    # This fires whenever the plotted fact is a DERIVED VIEW (source kind 'sql'/
+    # 'table', e.g. a Virtual-Connection-backed workbook), not a raw table.
+    return {} unless fact.dig('source', 'kind') == 'warehouse-table'
     path = fact.dig('source', 'path') || []
     conn = fact.dig('source', 'connectionId')
     return {} if path.size < 3 || conn.to_s.empty?

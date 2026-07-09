@@ -140,6 +140,16 @@ SIGMA_KIND = {
   'other'         => 'bar-chart'
 }.freeze
 
+# The human display name for a built tile: the source-displayed worksheet title
+# (parse-twb-layout's `display_title`, from the worksheet <title> run — e.g.
+# "Net Revenue") when present, else the worksheet nickname/caption ("OV KPI
+# Revenue"). One source of truth so every tile builder names elements the way the
+# source labels them, not by internal sheet name.
+def tile_title(zone, fallback)
+  t = zone && zone['display_title']
+  t && !t.to_s.strip.empty? ? t.to_s.strip : fallback
+end
+
 # ---- Tableau derivation → Sigma aggregation function name ----
 SIGMA_AGG = {
   'Sum'    => 'Sum',
@@ -2361,7 +2371,7 @@ def build_pivot_element(z, meta, mmap, opts, warnings, data_elements = [])
   {
     'id'        => el_id,
     'kind'      => 'pivot-table',
-    'name'      => cap,
+    'name'      => tile_title(z, cap),
     'source'    => source,
     'columns'   => cols_array,
     'values'    => values_arr,
@@ -2638,7 +2648,7 @@ def build_kpi_element(z, meta, mmap, opts, warnings, data_elements = [])
   element = {
     'id'      => el_id,
     'kind'    => 'kpi-chart',
-    'name'    => cap,
+    'name'    => tile_title(z, cap),
     'source'  => { 'kind' => 'table', 'elementId' => source_eid },
     'columns' => [measure_col],
     # value.columnId, NOT value.id — the live API 400s with
@@ -2663,7 +2673,10 @@ def build_kpi_element(z, meta, mmap, opts, warnings, data_elements = [])
   # composition stage (B1/B2 region cards) sets it when it actually places a KPI
   # into a tint. So we set label + fontSize only and leave the default card.
   if z['kpi_value_font_size']
-    element['name'] = z['kpi_label'] if z['kpi_label'] && !z['kpi_label'].to_s.strip.empty?
+    # kpi_label (BAN scorecard label) only when the source has no displayed title
+    # — the worksheet <title> (already applied above) is the more authoritative name.
+    element['name'] = z['kpi_label'] if z['kpi_label'] && !z['kpi_label'].to_s.strip.empty? &&
+                                        z['display_title'].to_s.strip.empty?
     element['value']['fontSize'] = z['kpi_value_font_size']
     # The BAN's side annotation (e.g. "40% of U.S. total") is driven by a dynamic
     # Tableau calc token that can't be reproduced as static text; emitting the
@@ -2899,7 +2912,7 @@ layout.each do |dash|
       end
       if y_cols.any?
         element = {
-          'id' => el_id, 'kind' => SIGMA_KIND[z['chart_kind']] || 'line-chart', 'name' => cap,
+          'id' => el_id, 'kind' => SIGMA_KIND[z['chart_kind']] || 'line-chart', 'name' => tile_title(z, cap),
           'source' => { 'kind' => 'table', 'elementId' => opts[:master_id] },
           'columns' => [dim_col_obj] + y_cols,
           'xAxis' => { 'columnId' => dim_col_obj['id'] },
@@ -3518,7 +3531,7 @@ layout.each do |dash|
       money_fmt = { 'kind' => 'number', 'formatString' => '$,.0f', 'currencySymbol' => '$' }
       num_fmt = ->(n) { n.to_s.downcase =~ /(revenue|profit|cost|sales|amount|spend)/ ? money_fmt : { 'kind' => 'number', 'formatString' => ',.0f' } }
       element = {
-        'id' => el_id, 'kind' => 'scatter-chart', 'name' => cap,
+        'id' => el_id, 'kind' => 'scatter-chart', 'name' => tile_title(z, cap),
         'source' => { 'kind' => 'table', 'elementId' => src_id },
         'columns' => [
           { 'id' => "c-#{el_id}", 'name' => dim['name'], 'formula' => "[#{src_name}/#{dim['name']}]" },
@@ -3583,7 +3596,7 @@ layout.each do |dash|
     element = {
       'id'      => el_id,
       'kind'    => kind,
-      'name'    => cap,
+      'name'    => tile_title(z, cap),
       'source'  => { 'kind' => 'table', 'elementId' => chart_source_eid },
       'columns' => [dim_col_obj, meas_col_obj]
     }

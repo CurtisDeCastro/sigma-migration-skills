@@ -25,6 +25,31 @@ user-invocable: true
 > Windows use the no-admin path in `refs/environment.md` (#5), and let the **user** run it.
 > Details: `refs/environment.md`.
 
+> ## ⛔ STEP 1 — THE ONE PATH (there is a single entry point; do not improvise one)
+> After the doctor, **always run the orchestrator** — it chains every phase
+> (discover → gates → DM → workbook → layout → two-pass parity → cleanup) in one
+> process and self-gates:
+> ```
+> ruby scripts/migrate-tableau.rb --workbook "<name>" --connection <id>
+> ```
+> - **Do NOT hand-drive the per-phase scripts, and do NOT hand-author DM/workbook
+>   JSON, UNLESS an orchestrator STOP message explicitly routes you there** (e.g.
+>   "CONVERTER STOP", the exit-4 workbook handoff). The per-phase table further
+>   down is a **map for understanding and recovery, not a menu** — picking scripts
+>   off it à la carte is the #1 way runs go inconsistent (the run-state audit
+>   silently no-ops when you bypass the orchestrator).
+> - **"Done" is not something you decide — it is a file on disk.** The migration
+>   is complete **only** when this exits 0:
+>   ```
+>   ruby scripts/verify-complete.rb --workdir <WORK>
+>   ```
+>   A clean **PASS 1 (exit 12) is NOT done** — it means "run `--finalize`". Never
+>   report success, hand off, or write a completion summary until
+>   `verify-complete.rb` prints ✅ DONE. Nothing else counts as green.
+> - **Credentials:** if you are **not** on Claude Code, the orchestrator will stop
+>   at step 0 telling you to run `ruby scripts/setup.rb` once — that is expected;
+>   do it (in a real terminal) rather than working around the auth error.
+
 > **Model fit & vision requirements — `refs/model-fit.md`.** Design fidelity depends on
 > the driving agent, not just the environment. One-line rule: **pixel-fidelity claims
 > require image input; very-large workbooks on non-top-tier models require asking the
@@ -233,13 +258,20 @@ Optional `--enhance [--enhance-accept <ids|all-low-risk>]` runs Phase E
 
 ## Scripts
 
-The conversion is driven by `scripts/*.rb`. Each script encapsulates one mechanical
-phase. You compose them; the agent's role is judgment (which DM/workbook shape,
-which calc translation, which layout) — not orchestration.
+The conversion is driven by `scripts/*.rb`. **`migrate-tableau.rb` composes them
+for you** (see STEP 1 at the top) — it is the orchestrator and the only entry
+point you run cold. Each other script encapsulates one mechanical phase; you
+invoke one **directly only when an orchestrator STOP message tells you to**
+(recovery/handoff), never as an à-la-carte alternative to the one command. The
+agent's role is judgment (which DM/workbook shape, which calc translation, which
+layout) inside that spine — not re-orchestrating it by hand. The table below is
+the map of what the orchestrator runs.
 
 | Script | Purpose |
 |---|---|
 | `scripts/migrate-tableau.rb` | **The one command** — chains the whole scripted spine (gap gate → DM-reuse scan → DM → workbook → layout → two-pass parity → cleanup + census gate) and stops with exact instructions where agent judgment is required. See "One command" above. |
+| `scripts/verify-complete.rb` | **The single offline "are we done?" check** — exit 0 / ✅ DONE only when `phase6-success.json` is present (stamped by `assert-phase6-ran.rb` exit 0) and no `parity-pending.json` remains. A clean PASS 1 (exit 12) reports NOT DONE. Also prints the run's off-ramp trail. Run before claiming success. |
+| `scripts/lib/offramp.rb` + `offramps.jsonl` | **Observability trail** — every point a run leaves the golden path (cred/doctor waiver, PASS-1 stop, converter-stop, workbook-handoff, degraded fast path, manual-spec) appends a structured record to `<WORK>/offramps.jsonl`. Read it (or `verify-complete.rb`) to pinpoint *where* a run defected. |
 | `scripts/setup.rb` | One-time Sigma credential setup |
 | `scripts/get-token.sh` | Exchange `SIGMA_CLIENT_ID`/`SIGMA_CLIENT_SECRET` for `SIGMA_API_TOKEN` (~1h TTL) — **bash only** |
 | `scripts/get_token.py` | Shell-neutral twin of `get-token.sh` (bash/PowerShell/cmd): writes `<WORK>/auth.json` (0600), read automatically by the scripts |
@@ -507,8 +539,11 @@ ruby scripts/assert-dashboard-read.rb --workdir <WORK>                  # 🚧 P
 ruby scripts/assert-run-state.rb --workdir <WORK>                       # 🚧 phase-chain ledger audit
 ruby scripts/assert-phase6-ran.rb --workdir <WORK> --workbook-id <wb>   # 🚧 hard gate — must exit 0
 ```
-**A conversion is NOT done until `assert-phase6-ran.rb` exits 0.** Full detail
-(raw-warehouse mode, triage, visual checklist): `refs/phase-6-parity.md`.
+**A conversion is NOT done until `assert-phase6-ran.rb` exits 0** (which stamps
+`<WORK>/phase6-success.json`). Confirm it before claiming success with the single
+offline check — `ruby scripts/verify-complete.rb --workdir <WORK>` must print
+✅ DONE / exit 0. Full detail (raw-warehouse mode, triage, visual checklist):
+`refs/phase-6-parity.md`.
 
 ### Phase 5g — RCF (render-compare-fix) fidelity loop — `refs/phase-5g-rcf.md`
 After the workbook renders, iterate composition to convergence: `fidelity-loop.rb render`

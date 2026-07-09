@@ -74,8 +74,8 @@ Sigma SEs, technical CSMs, and migration partners running 1:1 Tableau-to-Sigma c
   <li>How to invoke the <code>tableau-to-sigma</code> skill from Claude Code with a single dashboard URL.</li>
   <li>What each conversion phase does — discovery, gap scan, DM reuse check, spec build, parity verification.</li>
   <li>How to read the gap report and accept / override the proposed Sigma translations.</li>
-  <li>How the four hard-gate checks (parity ran, no orphans, no runtime errors, layout applied) prevent silent regressions.</li>
-  <li>When to fall back to a hand-written layout vs the auto-layout from <code>build-dashboard-layout.rb</code>.</li>
+  <li>How the finalize hard gate (<code>assert-phase6-ran.rb</code> — a stack of ~15 independent checks: parity ran, no orphans, no runtime errors, layout applied + filled, controls wired, visual verdict recorded, fidelity ledger clean, telemetry, …) prevents silent regressions, and why a clean PASS 1 is <em>not</em> "done".</li>
+  <li>Why you drive the whole conversion through the <strong>one orchestrator command</strong> (<code>migrate-tableau.rb</code>) rather than running the per-phase scripts by hand.</li>
 </ul>
 
 ### What You'll Build
@@ -93,7 +93,7 @@ Duration: 5
 
 <ul>
   <li><strong><code>tableau-assessment</code></strong> — <em>Phase 0: scoping</em>. Point it at a Tableau Cloud site and it inventories everything in ~90 seconds — environment counts, licenses, datasource mix, refresh history, per-workbook usage, per-workbook complexity (via a <code>.twb</code> gap-scan), and a value/cost-ranked migration shortlist. Run this BEFORE you commit to a conversion plan; the output tells you which workbooks convert clean today, which need redesign, and which to leave on Tableau. Complements (does not replace) Hakkoda's deeper Assessment App. Also emits the cluster plan that <code>tableau-to-sigma</code> consumes for batch runs.</li>
-  <li><strong><code>tableau-to-sigma</code></strong> — <em>Phases 1–6: the conversion</em>. The subject of this QuickStart. Takes a single workbook URL (or a cluster plan from <code>tableau-assessment</code>) and produces a live Sigma workbook with verified parity. Hardened against the four most-common silent regressions via a four-gate finalize check.</li>
+  <li><strong><code>tableau-to-sigma</code></strong> — <em>Phases 1–6: the conversion</em>. The subject of this QuickStart. Takes a single workbook URL (or a cluster plan from <code>tableau-assessment</code>) and produces a live Sigma workbook with verified parity. Hardened against the most-common silent regressions via the <code>assert-phase6-ran.rb</code> finalize hard gate.</li>
   <li><strong><code>tableau-vds-to-cdw</code></strong> — <em>Phase 0.5: data landing, when needed</em>. Extracts a published Tableau datasource via the VizQL Data Service (VDS) API and lands it in your cloud warehouse — Snowflake (stored procedure + External Access Integration) or Databricks (serverless notebook on Unity Catalog), optionally scheduled for ongoing refresh. Reach for this when a customer's data lives <em>only</em> inside Tableau (extracts, Tableau Prep outputs, Web Data Connector feeds) and isn't already in the warehouse Sigma reads. Sigma needs warehouse-native data; this skill is the bridge.</li>
 </ul>
 
@@ -172,6 +172,38 @@ Your agent should respond with the skill's preamble — a short summary of phase
 ![Footer](assets/sigma_footer.png)
 <!-- END OF SECTION -->
 
+## **The one command (read this before the phases)**
+Duration: 2
+
+In practice you do **not** run the phase scripts by hand. The skill has a single
+entry point — the orchestrator — that chains every phase below in one process and
+self-gates:
+
+```console
+ruby scripts/migrate-tableau.rb --workbook "Orders Overview" --connection <sigma-connection-id>
+```
+
+It runs discovery → gap gate → DM (build or reuse) → workbook → layout → two-pass
+parity → cleanup, stamping run-state as it goes, and **stops with an exact
+next-command message** anywhere your judgment is needed (read the source PNG,
+collect pivot actuals, resolve an untranslatable field). The phase-by-phase
+sections that follow exist so you understand *what the one command is doing* and
+can pick up from an orchestrator STOP — they are a **map, not a menu**. Running
+individual scripts à la carte instead of the orchestrator is the most common way
+a conversion drifts (the run-state audit silently no-ops when bypassed).
+
+Two rules that keep a run honest:
+
+- **PASS 1 ends at exit 12 — that is not "done."** It means "collect actuals, then
+  run the printed `--finalize` command," which runs the `assert-phase6-ran.rb`
+  hard gate. Exit 0 there is the only green.
+- **Confirm completion with one offline check, not by eyeballing HTTP 200s:**
+  `ruby scripts/verify-complete.rb --workdir <WORK>` must print ✅ DONE. Until it
+  does, the migration is not finished.
+
+![Footer](assets/sigma_footer.png)
+<!-- END OF SECTION -->
+
 ## **Phase 1 — Discovery**
 Duration: 10
 
@@ -191,10 +223,10 @@ Claude resolves the URL to a workbook LUID and runs `scripts/tableau-discover.rb
   <li><strong>Dashboard PNG</strong> — fetched solo after the CSVs to avoid VizQL session contention</li>
 </ul>
 
-The output lands in `/tmp/<workbook-slug>/`:
+The output lands in `~/tableau-migration/<slug>/`:
 
 ```console
-/tmp/orders-conv/
+~/tableau-migration/orders-conv/
   get-workbook.json
   workbook-content.twb
   ds-metadata.json
@@ -281,13 +313,13 @@ After the workbook POST + readback, Claude builds and applies the layout:
 
 ```console
 ruby scripts/build-dashboard-layout.rb \
-  --layout /tmp/<name>/dashboard-layout.json \
-  --wb-ids /tmp/<name>/wb-ids.json \
-  --out /tmp/<name>/layout.xml
+  --layout ~/tableau-migration/<slug>/dashboard-layout.json \
+  --wb-ids ~/tableau-migration/<slug>/wb-ids.json \
+  --out ~/tableau-migration/<slug>/layout.xml
 
 ruby scripts/put-layout.rb \
   --workbook <workbook-id> \
-  --layout /tmp/<name>/layout.xml
+  --layout ~/tableau-migration/<slug>/layout.xml
 ```
 
 `build-dashboard-layout.rb` walks each Tableau zone, converts its `x_pct` / `y_pct` / `w_pct` / `h_pct` into Sigma 24-column grid spans, and stretches adjacent tiles to close gaps where Tableau had legend or filter zones Sigma doesn't render. **Skipping this step makes Sigma render every tile in a single-column auto-stack** — the regression the hard gate catches.
@@ -308,10 +340,10 @@ The conversion is not complete until every chart's Sigma values match Tableau's 
 </ul>
 
 ```console
-ruby scripts/phase6-parity.rb --tableau /tmp/<name> --workbook-id <id>
+ruby scripts/phase6-parity.rb --tableau ~/tableau-migration/<slug> --workbook-id <id>
 # ... agent collects actuals via mcp__sigma-mcp-v2__query ...
-ruby scripts/phase6-parity.rb --tableau /tmp/<name> --finalize \
-  --actuals /tmp/<name>/parity-actuals.json
+ruby scripts/phase6-parity.rb --tableau ~/tableau-migration/<slug> --finalize \
+  --actuals ~/tableau-migration/<slug>/parity-actuals.json
 ```
 
 ![tts_parity_pass](assets/tts_parity_pass.png)
@@ -328,7 +360,7 @@ The conversion is gated by `scripts/assert-phase6-ran.rb`, which checks **four**
 </ol>
 
 ```console
-ruby scripts/assert-phase6-ran.rb --tableau /tmp/<name>
+ruby scripts/assert-phase6-ran.rb --tableau ~/tableau-migration/<slug>
 ```
 
 ![tts_hard_gate](assets/tts_hard_gate.png)
@@ -352,7 +384,7 @@ on any shift. See the SKILL.md "Phase E (opt-in) — Enhance" section.
 Duration: 5
 
 <ul>
-  <li><strong>Three workbooks in My Documents.</strong> POST is create-only; each retry creates a new workbook. Run <code>ruby scripts/cleanup-orphan-workbooks.rb --workdir /tmp/&lt;name&gt;</code> to delete all-but-the-most-recent ID via <code>DELETE /v2/files/{id}</code>.</li>
+  <li><strong>Three workbooks in My Documents.</strong> POST is create-only; each retry creates a new workbook. Run <code>ruby scripts/cleanup-orphan-workbooks.rb --workdir ~/tableau-migration/&lt;slug&gt;</code> to delete all-but-the-most-recent ID via <code>DELETE /v2/files/{id}</code>.</li>
   <li><strong>Single-column auto-stack layout.</strong> Sigma's server auto-generates a left-half stacked layout when a workbook is POSTed without one. <code>assert-phase6-ran.rb</code> gate 4 catches this; fix by running <code>build-dashboard-layout.rb</code> + <code>put-layout.rb</code>.</li>
   <li><strong>Chart renders blank in Sigma but spec compiled.</strong> A column resolved to <code>type=error</code> — typo'd ref, <code>IsIn()</code>, a window function in a calc column. Run <code>verify-workbook.rb</code> for the diagnostic; <code>mcp__sigma-mcp-v2__describe</code> on the element shows which column is broken.</li>
   <li><strong>Pivot table appears as a flat table.</strong> Verify <code>parse-twb-layout.rb</code> emitted <code>chart_kind: pivot-table</code>. If it emitted <code>table</code> instead, the source worksheet had dims on only one shelf — that's a flat detail list, not a crosstab.</li>

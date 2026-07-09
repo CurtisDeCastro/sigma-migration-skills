@@ -111,6 +111,7 @@ require_relative 'lib/scout_gate'
 require_relative 'lib/dashboard_read'
 require_relative 'lib/recipe_multimetric'
 require_relative 'lib/run_state'
+require_relative 'lib/offramp' # structured "where did this run leave the golden path" trail
 require_relative 'lib/fast_path' # FAST-PATH routing + BOM-tolerant JSON reads
 require_relative 'lib/sigma_rest' # in-process Sigma token minting (no bash/eval)
 require_relative 'lib/tableau_rest' # in-process Tableau token minting (Windows-safe; no bash/eval)
@@ -180,6 +181,9 @@ OptionParser.new do |o|
   o.on('--dm-spec PATH', 'agent-authored data-model spec JSON (fresh DM build through the gated spine)') { |v| opts[:dm_spec] = File.expand_path(v) }
   o.on('--wb-spec PATH', 'agent-authored workbook spec JSON (re-enters the gated spine). With an explicit ' \
                          '--reuse-dm <id> this takes the FAST PATH (see banner).') { |v| opts[:wb_spec] = File.expand_path(v) }
+  o.on('--allow-manual-spec REASON', 'deliberately hand-author --dm-spec/--wb-spec COLD (no prior ' \
+                                     'orchestrator STOP). Normally the orchestrator authorizes this path; ' \
+                                     'this waives that requirement — named in the report.') { |v| opts[:allow_manual_spec] = v }
   o.on('--out DIR')          { |v| opts[:out]     = File.expand_path(v) }
   o.on('--answers JSON')     { |v| opts[:answers] = v }
   o.on('--yes')              {     opts[:yes]     = true }
@@ -266,6 +270,77 @@ _dg_cmd += ['--skip-doctor-gate', _dg_skip] if _dg_skip && !_dg_skip.to_s.empty?
 unless system(*_dg_cmd)
   abort 'FATAL: environment gate failed — run the doctor first (see remediation above), ' \
         'or re-run with --skip-doctor-gate "<reason>".'
+end
+
+# 🚧 Step-0 CREDENTIAL GATE (fail-closed). The doctor treats missing creds as a
+# warning, so a harness that does NOT auto-load ~/.claude/settings.json (Coco,
+# Cursor, plain shell) can sail past it and then die at the FIRST Sigma API call
+# with an opaque auth error — which a low-context agent misreads as a TASK
+# failure and improvises around (hand-rolled curl, self-writing creds, a
+# hallucinated token). Resolve creds HERE, before any Tableau/discovery work, and
+# stop with the exact remediation if they're absent. Waive only for genuinely
+# offline runs with SIGMA_SKIP_CRED_GATE="<reason>".
+_cred_skip = ENV['SIGMA_SKIP_CRED_GATE']
+_neutral_env = File.expand_path('~/.sigma-migration/env')
+_creds_ok = !ENV['SIGMA_API_TOKEN'].to_s.empty? ||
+            (!ENV['SIGMA_CLIENT_ID'].to_s.empty? && !ENV['SIGMA_CLIENT_SECRET'].to_s.empty?) ||
+            File.exist?(_neutral_env)
+if !_creds_ok && (_cred_skip.nil? || _cred_skip.to_s.empty?)
+  abort <<~MSG
+    FATAL: no Sigma credentials resolvable — the run would fail at the first API call.
+    This almost always means you are NOT on Claude Code (which auto-loads
+    ~/.claude/settings.json). Other harnesses (Coco, Cursor, plain shell) do not,
+    so the neutral credential file is REQUIRED. Fix it ONCE, in a real terminal:
+        ruby scripts/setup.rb        # writes ~/.sigma-migration/env
+    …or export SIGMA_CLIENT_ID + SIGMA_CLIENT_SECRET (and SIGMA_BASE_URL) into the
+    environment this orchestrator runs in. Then re-run this exact command.
+    (Genuinely offline/no-Sigma run? Re-run with SIGMA_SKIP_CRED_GATE="<reason>".)
+  MSG
+end
+if !_creds_ok && _cred_skip && !_cred_skip.to_s.empty?
+  warn "WARN: credential gate waived (SIGMA_SKIP_CRED_GATE=#{_cred_skip}) — Sigma calls will fail if reached."
+  Offramp.log(WORK, kind: 'cred-gate-waived', reason: _cred_skip.to_s)
+end
+Offramp.log(WORK, kind: 'doctor-gate-waived', reason: _dg_skip.to_s) if _dg_skip && !_dg_skip.to_s.empty?
+
+# 🚧 Step-0 TABLEAU CREDENTIAL GATE (fail-closed). Tableau auth is a SECOND,
+# separate system from Sigma — and its absence was the #1 recurring blocker: the
+# orchestrated discovery lane signs in via PAT REST (tableau_rest.rb), so when
+# TABLEAU_PAT_* aren't in the env (people run setup.rb for Sigma but not
+# setup-tableau.rb; non-Claude-Code harnesses don't auto-load them) the run
+# starts and dies DEEP in discovery with an opaque "could not mint a Tableau
+# token / end of file reached" that a low-context agent flails against. Resolve
+# it HERE instead. Only required when FRESH discovery will run — skip on
+# --finalize (no discovery) and when discovery is being REUSED (stamp present),
+# and skip if the agent is driving discovery through the Tableau MCP
+# (SIGMA_TABLEAU_VIA_MCP=1). Waive with SIGMA_SKIP_TABLEAU_GATE="<reason>".
+_tab_skip     = ENV['SIGMA_SKIP_TABLEAU_GATE']
+_tab_via_mcp  = ENV['SIGMA_TABLEAU_VIA_MCP'].to_s == '1'
+_tab_reuse    = File.exist?(File.join(WORK, 'discovery-stamp.json'))
+_tab_needed   = !opts[:finalize] && !_tab_reuse && !_tab_via_mcp
+# Contents check, not mere existence: the neutral file often has Sigma creds
+# (setup.rb) but NOT Tableau (setup-tableau.rb) — the exact gap that let runs
+# start and fail deep. Require the Tableau PAT to actually be present.
+_tab_creds_ok = (!ENV['TABLEAU_PAT_NAME'].to_s.empty? && !ENV['TABLEAU_PAT_SECRET'].to_s.empty?) ||
+                (File.exist?(_neutral_env) && File.read(_neutral_env).include?('TABLEAU_PAT_SECRET'))
+if _tab_needed && !_tab_creds_ok && (_tab_skip.nil? || _tab_skip.to_s.empty?)
+  abort <<~MSG
+    FATAL: no Tableau credentials resolvable — discovery would fail at the Tableau
+    sign-in (the "could not mint a Tableau token" / "end of file reached" error).
+    Tableau auth is SEPARATE from Sigma: running setup.rb configures Sigma only.
+    Fix it ONCE, in a real terminal:
+        ruby scripts/setup-tableau.rb    # writes the Tableau PAT to ~/.sigma-migration/env
+    …or export TABLEAU_PAT_NAME + TABLEAU_PAT_SECRET + TABLEAU_SITE_CONTENT_URL
+    (+ TABLEAU_SERVER_URL) into this environment. If you are driving discovery via
+    the Tableau MCP tools instead of a PAT, re-run with SIGMA_TABLEAU_VIA_MCP=1.
+    (If sign-in fails even WITH creds set, that is a network/TLS-proxy issue
+    reaching your Tableau server, not a missing-cred issue — check connectivity.)
+    Then re-run this exact command.  (Waive: SIGMA_SKIP_TABLEAU_GATE="<reason>".)
+  MSG
+end
+if _tab_needed && !_tab_creds_ok && _tab_skip && !_tab_skip.to_s.empty?
+  warn "WARN: Tableau credential gate waived (SIGMA_SKIP_TABLEAU_GATE=#{_tab_skip})."
+  Offramp.log(WORK, kind: 'tableau-gate-waived', reason: _tab_skip.to_s)
 end
 
 # ── Design-consistency advisory readout (doctor.json) ────────────────────────
@@ -689,6 +764,30 @@ end
 # Set-Content -Encoding UTF8 prepends a BOM plain JSON.parse rejects).
 # ---------------------------------------------------------------------------
 if opts[:dm_spec] || opts[:wb_spec]
+  # 🚧 Manual-spec authorization gate (P1). Hand-authored specs must be a ROUTED
+  # fallback, not a cold default — cold hand-authoring is the #1 way a run skips
+  # the converter + gated spine. Accept --dm-spec/--wb-spec only when: (a) an
+  # orchestrator STOP emitted <WORK>/manual-path-authorized.json, (b) --reuse-dm
+  # carries an EXPLICIT id (the documented exit-4 fast-path re-entry against an
+  # already-posted DM), or (c) an explicit --allow-manual-spec "<reason>" waiver.
+  _ms_token  = File.exist?(File.join(WORK, 'manual-path-authorized.json'))
+  _ms_reuse  = opts[:reuse_dm] && opts[:reuse_dm] != :recommended
+  _ms_waiver = opts[:allow_manual_spec].to_s
+  unless _ms_token || _ms_reuse || !_ms_waiver.empty?
+    abort <<~MSG
+      FATAL: --dm-spec/--wb-spec (hand-authored specs) is a ROUTED fallback, not a cold
+      entry point. No orchestrator STOP is on record for this workdir
+      (#{File.join(WORK, 'manual-path-authorized.json')} is absent) and no --reuse-dm <id>
+      was given. Start with the one command so the converter + gates actually run:
+          ruby scripts/migrate-tableau.rb --workbook "<name>" --connection <id>
+      If it STOPS (CONVERTER STOP / workbook handoff) it authorizes this path and prints
+      the exact --dm-spec/--wb-spec (or --reuse-dm --wb-spec) re-run.
+      Deliberately hand-authoring anyway? Re-run adding --allow-manual-spec "<reason>".
+    MSG
+  end
+  Offramp.log(WORK, kind: 'manual-spec',
+              reason: (!_ms_waiver.empty? ? "waiver: #{_ms_waiver}" : (_ms_token ? 'authorized-by-stop' : 'reuse-dm-id')))
+
   # The workbook spec is always agent-authored on this path.
   abort 'FATAL: --wb-spec is required for the agent-authored manual path ' \
         '(pair it with --dm-spec for a fresh build, or --reuse-dm for an existing model).' \
@@ -753,6 +852,8 @@ if FASTPATH
     line '  --yes: Tableau discovery is NOT re-run. Layout falls back to a stacked page and the'
     line '  parity plan may be unbuildable — restore the workdir (or re-run without --yes to'
     line '  re-fetch) before relying on the Phase 6 gates.'
+    Offramp.log(WORK, kind: 'degraded-fastpath',
+                detail: "#{FAST[:degraded].size} missing discovery artifact(s): #{FAST[:degraded].join(', ')}")
   else
     line "discovery artifacts present in #{WORK} — reused for layout + parity as normal"
   end
@@ -1039,6 +1140,17 @@ if mechanical
   else
     sleep 0.1 until lane_done.call # reap the background lane before aborting
     print_lane_log.call
+    # Authorize the option-2 agent-authored-spec re-entry (the re-run passes
+    # --dm-spec/--wb-spec; the manual-spec gate requires this token or refuses a
+    # cold hand-author).
+    begin
+      File.write(File.join(WORK, 'manual-path-authorized.json'),
+                 JSON.pretty_generate('via' => 'converter-stop',
+                                      'at' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')))
+    rescue StandardError
+      # best-effort
+    end
+    Offramp.log(WORK, kind: 'converter-stop', reason: 'no converter backend configured')
     abort <<~MSG
       ==================== CONVERTER STOP (no backend) ====================
       No mechanical Tableau→Sigma converter is configured, and hosted conversion was not
@@ -2341,6 +2453,18 @@ rescue WorkbookBuildError => e
   puts '          straight to the workbook layer — see --help.)'
   puts '   The data model is posted and ready to attach either way. A conversion is NOT done'
   puts '   until scripts/assert-phase6-ran.rb exits 0 — that hard gate applies on both paths.'
+  # Authorize the hand-authoring re-entry: this STOP is the ONLY sanctioned way to
+  # reach --wb-spec/--dm-spec. The token lets the re-run's manual-spec gate pass
+  # (a COLD hand-author with no prior orchestrator run is refused).
+  begin
+    File.write(File.join(WORK, 'manual-path-authorized.json'),
+               JSON.pretty_generate('via' => 'workbook-handoff', 'dataModelId' => dm_id,
+                                    'fields' => failed,
+                                    'at' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')))
+  rescue StandardError
+    # best-effort
+  end
+  Offramp.log(WORK, kind: 'workbook-handoff', detail: "untranslatable field(s): #{names}")
   mark('phase4-workbook')
   phase_summary
   exit 4
@@ -2606,6 +2730,28 @@ puts finalize_cmd
 puts '(--finalize runs phase6 finalize + orphan cleanup + the census-aware'
 puts ' assert-phase6-ran hard gate; exit 0 there is the ONLY green exit.)'
 puts 'PHASE E     : requested (--enhance) — runs at --finalize AFTER all gates are green' if opts[:enhance]
+puts '=================================================================='
+
+# Completion sentinel (run-scoped). PASS 1 is NOT a done state: the gate suite
+# lives in --finalize. Drop a pending marker keyed to this workbook and CLEAR any
+# stale success marker from a prior run, so verify-complete.rb (the sole done-
+# check the SKILL points at) reports NOT DONE until --finalize's hard gate stamps
+# phase6-success.json. This is the structural backstop for the "agent stops at
+# PASS 1 and narrates success" failure mode.
+begin
+  File.write(File.join(WORK, 'parity-pending.json'),
+             JSON.pretty_generate('workbookId' => wb_id, 'dataModelId' => dm_id,
+                                  'stage' => 'pass1', 'note' => 'parity + gates NOT run — run --finalize'))
+  _succ = File.join(WORK, 'phase6-success.json')
+  File.delete(_succ) if File.exist?(_succ)
+rescue StandardError
+  # best-effort — never fail the run on sentinel bookkeeping
+end
+Offramp.log(WORK, kind: 'pass1-stop', detail: "workbook #{wb_id} — parity + gates not yet run")
+puts
+puts '⛔ NOT DONE — this is PASS 1 of 2. Do NOT report success or hand off yet.'
+puts '   To confirm completion at any point, run (exit 0 == done, nothing else counts):'
+puts "     ruby scripts/verify-complete.rb --workdir #{WORK}"
 puts '=================================================================='
 mark('phase6-pass1')
 phase_summary

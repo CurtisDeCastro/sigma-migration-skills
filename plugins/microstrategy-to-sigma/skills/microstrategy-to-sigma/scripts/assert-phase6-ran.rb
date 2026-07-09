@@ -1073,5 +1073,22 @@ else
   puts '[OK] gate 12: no deferred-elements.json — no DM elements were quarantined'
 end
 
+# Completion sentinel — stamp a run-scoped success marker keyed to the workbook
+# and clear any PASS-1 pending marker. verify-complete.rb (the offline done-check
+# the SKILL points agents at) reports GREEN only when this file exists for the
+# workbook and no parity-pending.json remains. This makes "done" a token only the
+# gate can mint, closing the "agent narrates success without the gate" hole.
+begin
+  _wd = opts[:tab]
+  File.write(File.join(_wd, 'phase6-success.json'),
+             JSON.pretty_generate('workbookId' => (opts[:wb] || ''),
+                                  'gates' => 'all-pass',
+                                  'generatedAt' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')))
+  _pend = File.join(_wd, 'parity-pending.json')
+  File.delete(_pend) if File.exist?(_pend)
+rescue StandardError
+  # never fail the gate on sentinel bookkeeping
+end
+
 puts "[OK] all gates pass — conversion may declare GREEN"
 exit 0
