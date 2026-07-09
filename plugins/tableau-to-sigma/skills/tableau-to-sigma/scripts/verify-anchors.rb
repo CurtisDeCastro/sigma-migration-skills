@@ -1,0 +1,327 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+#
+# verify-anchors.rb — the MEASURED value bar for a converted workbook.
+#
+# WHY. Two field migrations recorded passing visual verdicts over dashboards
+# whose NUMBERS were wrong: a ranked list showed different members with 10x-off
+# values ("$1.8T" rendered where the source printed "18,037B"), and a
+# multi-bucket panel collapsed to a single bar. Every judgment gate is an
+# attestation, and lenient models attest generously — so this script replaces
+# the judgment with a MEASUREMENT: each printed value the agent transcribed
+# from the SOURCE dashboard image (Phase 1d, <workdir>/source-anchors.json)
+# must literally appear in the LIVE Sigma workbook's element CSV exports, at
+# the printed precision (scripts/lib/anchor_values.rb). An anchor value that
+# appears NOWHERE in the workbook exports is the loudest possible signal the
+# data is wrong.
+#
+# INPUT  <workdir>/source-anchors.json — authored by the AGENT at Phase 1d
+#        while reading the source dashboard PNG (schema: SKILL.md Phase 1d,
+#        refs/source-anchors.md):
+#          { "source_image": "views/<id>.png", "transcribed_at": "...",
+#            "anchors": [ { "id": "a1", "panel": "TOP COUNTRIES",
+#                           "label": "United States GDP", "raw": "18,037B",
+#                           "kind": "currency",
+#                           "sigma_element_hint": "Top Countries" } ] }
+# OUTPUT <workdir>/anchors-verdict.json:
+#          { "checked": N, "matched": M,
+#            "missing": [ { "id", "label", "raw", "best_candidate" } ],
+#            "pass": true|false }
+#        Also stamps an `anchors` summary into parity-final.json when present.
+#
+# HOW. Fetches the live workbook spec for element names, then pools element
+# CSV exports (the same POST /v2/workbooks/{wb}/export → poll
+# GET /v2/query/{q}/download flow collect-parity-actuals.rb uses). Each anchor
+# is searched in the element whose name best matches its label/panel (token
+# overlap; `sigma_element_hint` wins when present); when the matched element
+# doesn't carry the value, every other export is searched before declaring the
+# anchor MISSING — found-elsewhere still counts as matched (the value exists;
+# only the label→element mapping was fuzzy) and is noted in the verdict.
+#
+# Usage (live):
+#   ruby scripts/verify-anchors.rb --workdir <W> --workbook-id <id> \
+#     [--anchors PATH] [--out PATH] [--pool 4] [--timeout 120]
+# Usage (offline — tests / pre-collected exports):
+#   ruby scripts/verify-anchors.rb --workdir <W> --workbook-spec spec.json \
+#     --exports-dir <dir-with-<elementId>.csv>
+#
+# Exit codes: 0 = every anchor matched; 1 = one or more anchors missing (the
+# per-miss report names each, with its closest candidate); 2 = usage / missing
+# inputs.
+
+require 'json'
+require 'csv'
+require 'optparse'
+require_relative 'lib/anchor_values'
+
+# ---------------------------------------------------------------------------
+# Pure core — unit-tested offline in test-verify-anchors.rb.
+# ---------------------------------------------------------------------------
+module AnchorVerify
+  STOPWORDS = %w[the a an of by per and or in on for to vs].freeze
+
+  module_function
+
+  def tokens(s)
+    s.to_s.downcase.scan(/[a-z0-9]+/) - STOPWORDS
+  end
+
+  # Overlap score between an anchor and an element name. sigma_element_hint,
+  # when present, is the only signal; otherwise panel+label tokens are used.
+  def element_score(anchor, el_name)
+    hint = anchor['sigma_element_hint'].to_s
+    name_toks = tokens(el_name)
+    return 0 if name_toks.empty?
+    if !hint.strip.empty?
+      return 1_000 if hint.strip.casecmp?(el_name.to_s.strip)
+      return (tokens(hint) & name_toks).length
+    end
+    ((tokens(anchor['panel']) | tokens(anchor['label'])) & name_toks).length
+  end
+
+  # Element names ordered best-match-first for this anchor; zero-score names
+  # are appended (search everywhere before declaring a value missing).
+  def ranked_elements(anchor, el_names)
+    scored = el_names.map { |n| [n, element_score(anchor, n)] }
+    hits = scored.select { |_, s| s.positive? }.sort_by { |n, s| [-s, n.to_s] }.map(&:first)
+    hits + (el_names - hits)
+  end
+
+  # Numeric face values of a CSV cell (both percent interpretations kept so
+  # AnchorValues candidate matching sees whichever the export carried).
+  def cell_numbers(cell)
+    s = cell.to_s.strip
+    return [] if s.empty?
+    neg = s.start_with?('(') && s.end_with?(')')
+    s = s[1..-2] if neg
+    body = s.gsub(/[,$€£¥\s]/, '')
+    pct = body.end_with?('%')
+    body = body.chomp('%')
+    f = begin
+      Float(body)
+    rescue ArgumentError, TypeError
+      return []
+    end
+    f = -f if neg
+    pct ? [f, f / 100.0] : [f]
+  end
+
+  def rows_numbers(rows)
+    rows.flat_map { |r| Array(r).flat_map { |c| cell_numbers(c) } }
+  end
+
+  # Verify anchors against { element_name => [[cell, ...], ...] } exports.
+  # Returns the verdict Hash (contract shape + per-anchor detail).
+  def verify(anchors, exports)
+    el_names = exports.keys
+    numbers = exports.transform_values { |rows| rows_numbers(rows) }
+    detail = []
+    missing = []
+    anchors.each do |a|
+      raw = a['raw'].to_s
+      order = ranked_elements(a, el_names)
+      found_in = order.find { |n| numbers[n].any? { |v| AnchorValues.match?(raw, v) } }
+      if found_in
+        primary = order.first
+        detail << { 'id' => a['id'], 'raw' => raw, 'matched_in' => found_in,
+                    'note' => (found_in == primary ? nil : "found outside best-match element #{primary.inspect}") }.compact
+      else
+        # Closest candidate WITHIN the best-matching element that carries any
+        # numbers (walking down the ranking until one does) — the wrong value
+        # almost always lives in the anchor's own panel, so this surfaces the
+        # impostor ("$1.8T where the source printed 18,037B") rather than a
+        # coincidentally-near number from an unrelated tile.
+        best = nil
+        order.each do |n|
+          numbers[n].each do |v|
+            d = AnchorValues.relative_distance(raw, v)
+            best = { 'value' => v, 'element' => n, 'distance' => d.round(6) } if best.nil? || d < best['distance']
+          end
+          break if best
+        end
+        missing << { 'id' => a['id'], 'label' => a['label'], 'raw' => raw,
+                     'best_candidate' => best }
+      end
+    end
+    { 'checked' => anchors.length,
+      'matched' => anchors.length - missing.length,
+      'missing' => missing,
+      'pass' => missing.empty?,
+      'detail' => detail }
+  end
+end
+
+# ---------------------------------------------------------------------------
+# CLI (IO / REST) — thin wrapper around the pure core above.
+# ---------------------------------------------------------------------------
+return if $PROGRAM_NAME != __FILE__ && !ENV['VERIFY_ANCHORS_CLI'] # allow `require` in tests
+
+opts = { pool: 4, timeout: 120 }
+OptionParser.new do |p|
+  p.on('--workdir DIR')        { |v| opts[:dir] = v }
+  p.on('--tableau DIR', 'alias of --workdir') { |v| opts[:dir] = v }
+  p.on('--workbook-id ID')     { |v| opts[:wb] = v }
+  p.on('--anchors PATH', 'default: <workdir>/source-anchors.json') { |v| opts[:anchors] = v }
+  p.on('--out PATH', 'default: <workdir>/anchors-verdict.json')    { |v| opts[:out] = v }
+  p.on('--pool N', Integer)    { |v| opts[:pool] = v }
+  p.on('--timeout S', Integer) { |v| opts[:timeout] = v }
+  p.on('--workbook-spec PATH', 'offline: read element names from this spec instead of the live workbook') { |v| opts[:spec] = v }
+  p.on('--exports-dir DIR', 'offline: read <elementId>.csv files instead of exporting live') { |v| opts[:exports] = v }
+end.parse!
+abort('--workdir required') unless opts[:dir]
+
+anchors_path = opts[:anchors] || File.join(opts[:dir], 'source-anchors.json')
+out_path     = opts[:out]     || File.join(opts[:dir], 'anchors-verdict.json')
+
+unless File.exist?(anchors_path)
+  warn "FATAL: #{anchors_path} not found — transcribe the source dashboard's printed values"
+  warn '       at Phase 1d (every KPI, top-3 of every ranked list/table, one bucket value per'
+  warn '       chart; EXACTLY as printed). Schema: SKILL.md Phase 1d / refs/source-anchors.md.'
+  exit 2
+end
+doc = begin
+  JSON.parse(File.read(anchors_path))
+rescue JSON::ParserError => e
+  warn "FATAL: #{anchors_path} is malformed JSON: #{e.message}"
+  exit 2
+end
+anchors = Array(doc['anchors'])
+if anchors.empty?
+  warn "FATAL: #{anchors_path} has no anchors[] — nothing to verify."
+  exit 2
+end
+bad = anchors.reject { |a| a.is_a?(Hash) && AnchorValues.parse(a['raw']) }
+unless bad.empty?
+  warn "FATAL: #{bad.length} anchor(s) have an unparseable `raw` printed value:"
+  bad.first(10).each { |a| warn "         #{a.is_a?(Hash) ? a['id'] : '(bad entry)'}: raw=#{(a['raw'] rescue nil).inspect}" }
+  warn '       `raw` must be the value EXACTLY as printed on the source image ("18,037B", "-2%", "$733,215.26").'
+  exit 2
+end
+
+# --- element names + rows: offline (spec+exports dir) or live (REST) ---------
+exports = {} # element name => rows (arrays of cells)
+
+if opts[:exports]
+  spec_path = opts[:spec] || File.join(opts[:dir], 'wb-readback.json')
+  unless File.exist?(spec_path)
+    warn "FATAL: offline mode needs --workbook-spec (or <workdir>/wb-readback.json); #{spec_path} not found."
+    exit 2
+  end
+  spec = JSON.parse(File.read(spec_path))
+  elements = (spec['pages'] || []).flat_map { |p| p['elements'] || [] }
+  elements.each do |el|
+    csv = File.join(opts[:exports], "#{el['id']}.csv")
+    next unless File.exist?(csv)
+    exports[el['name'].to_s] = CSV.read(csv)
+  end
+else
+  # Live: resolve workbook id, GET the spec, pool the element CSV exports —
+  # the same export → poll → download flow collect-parity-actuals.rb uses.
+  wb = opts[:wb]
+  if wb.nil?
+    ids = File.join(opts[:dir], 'wb-ids.json')
+    wb = (JSON.parse(File.read(ids))['workbookId'] rescue nil) if File.exist?(ids)
+  end
+  abort('--workbook-id required (or a <workdir>/wb-ids.json with workbookId)') if wb.to_s.empty?
+
+  $LOAD_PATH.unshift File.expand_path('lib', __dir__)
+  require 'sigma_rest'
+
+  body = Sigma.request(:get, "/v2/workbooks/#{wb}/spec", accept: 'text/yaml')
+  spec = begin
+    JSON.parse(body)
+  rescue JSON::ParserError, TypeError
+    require 'yaml'
+    require 'date'
+    body.is_a?(Hash) ? body : (YAML.safe_load(body.to_s, permitted_classes: [Date, Time]) || {})
+  end
+  elements = (spec['pages'] || []).flat_map { |p| p['elements'] || [] }
+  queryable = elements.reject { |el| %w[control text image container].include?(el['kind'].to_s) }
+
+  export_one = lambda do |el|
+    r = Sigma.request(:post, "/v2/workbooks/#{wb}/export",
+                      body: JSON.generate({ elementId: el['id'], format: { type: 'csv' } }))
+    qid = r && r['queryId']
+    return nil unless qid
+    t0 = Time.now
+    loop do
+      return nil if Time.now - t0 > opts[:timeout]
+      sleep 1.0
+      begin
+        b = Sigma.request(:get, "/v2/query/#{qid}/download", accept: 'text/csv', binary: true)
+        next if b.to_s.empty? # still rendering
+        return nil if b.to_s.lstrip.start_with?('<') # HTML behind a 200 = renderer error
+        return CSV.parse(b)
+      rescue Sigma::Error => e
+        raise unless e.message.lines.first.to_s =~ /\b404\b/ # not materialized yet
+      end
+    end
+  rescue Sigma::Error, CSV::MalformedCSVError => e
+    warn "  [WARN] export failed for element #{el['name'].inspect}: #{e.message.lines.first.to_s.strip[0, 120]}"
+    nil
+  end
+
+  require 'thread'
+  queue = Queue.new
+  queryable.each { |el| queue << el }
+  mutex = Mutex.new
+  Array.new([opts[:pool], queryable.size].min.clamp(1, 8)) do
+    Thread.new do
+      loop do
+        el = begin
+          queue.pop(true)
+        rescue ThreadError
+          break
+        end
+        rows = export_one.call(el)
+        mutex.synchronize { exports[el['name'].to_s] = rows } if rows
+      end
+    end
+  end.each(&:join)
+end
+
+if exports.empty?
+  warn 'FATAL: no element exports could be collected — cannot verify anchors.'
+  warn '       (live: check SIGMA_* credentials and the workbook id; offline: check --exports-dir)'
+  exit 2
+end
+
+verdict = AnchorVerify.verify(anchors, exports)
+verdict['source_anchors'] = anchors_path
+verdict['verified_at'] = Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')
+File.write(out_path, JSON.pretty_generate(verdict))
+
+# Stamp the summary into parity-final.json when Phase 6 already finalized —
+# the anchors result travels with the parity verdict the final gate reads.
+pf = File.join(opts[:dir], 'parity-final.json')
+if File.exist?(pf)
+  begin
+    s = JSON.parse(File.read(pf))
+    s['anchors'] = { 'checked' => verdict['checked'], 'matched' => verdict['matched'],
+                     'pass' => verdict['pass'], 'missing' => verdict['missing'].map { |m| m['id'] } }
+    File.write(pf, JSON.pretty_generate(s))
+  rescue JSON::ParserError
+    warn "[WARN] #{pf} is malformed — anchors summary not stamped."
+  end
+end
+
+puts "verify-anchors: #{verdict['matched']}/#{verdict['checked']} anchor(s) matched " \
+     "across #{exports.length} element export(s) → #{out_path}"
+verdict['detail'].each do |d|
+  puts "  MATCHED  #{d['id']} #{d['raw'].inspect} in #{d['matched_in'].inspect}#{d['note'] ? " (#{d['note']})" : ''}"
+end
+if verdict['pass']
+  puts '[OK] every source anchor value is present in the live workbook exports.'
+  exit 0
+end
+warn "[FAIL] #{verdict['missing'].length} anchor(s) MISSING from the live workbook exports:"
+verdict['missing'].each do |m|
+  bc = m['best_candidate']
+  warn "  MISSING  #{m['id']} #{m['label'].inspect} raw=#{m['raw'].inspect}" \
+       "#{bc ? " — closest candidate #{bc['value']} in #{bc['element'].inspect}" : ' — no numeric candidates at all'}"
+end
+warn '       A printed source value that appears NOWHERE in the workbook exports is the'
+warn '       loudest possible signal the data is wrong (wrong aggregate, wrong unit/10x,'
+warn '       missing filter, collapsed buckets). Fix the workbook — or, if the SOURCE'
+warn '       transcription was wrong, correct source-anchors.json — then re-run.'
+exit 1

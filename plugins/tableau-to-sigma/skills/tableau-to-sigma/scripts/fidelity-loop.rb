@@ -26,6 +26,13 @@
 #            --require-fidelity-ledger blocks GREEN while any spec-fixable delta is
 #            unresolved and not named in --accept-residuals.
 #
+# DATA-CLASS deltas are special: `data` means the rendered VALUES diverge from
+# the source — the numbers are wrong. Unresolved data-class entries block the
+# gate whenever the ledger exists (no --require-fidelity-ledger needed), and
+# --accept-residuals does NOT apply to them. Fix the spec/data and `resolve`
+# the entry, or — only after PROVING the values match — re-record it under its
+# true class with the evidence.
+#
 # Recipes for each delta→fix live in refs/fidelity-recipes.md. See SKILL.md Phase 5g.
 #
 # Subcommands
@@ -115,6 +122,14 @@ module FidelityLoop
       e['cls'] == 'spec-fixable' && !e['resolved'] &&
         !accepted.include?(i.to_s) && !accepted.include?(e['id'].to_s)
     end.map(&:last)
+  end
+
+  # Unresolved data-class entries — the numbers are wrong. These block the
+  # gate UNCONDITIONALLY: no accepted-residual list applies (see file header).
+  def unresolved_data(ledger)
+    (ledger['entries'] || []).each_with_index
+                             .select { |e, _i| e['cls'] == 'data' && !e['resolved'] }
+                             .map(&:last)
   end
 
   def ledger_ok?(ledger, accepted = [])
@@ -256,6 +271,10 @@ when 'record'
   save_ledger(opts[:dir], ledger)
   puts "[OK] recorded #{e['id']} pass=#{e['pass']} [#{e['cls']}] #{e['dimension']}: #{e['delta']}"
   puts "     (spec-fixable + unresolved → blocks the gate until apply-patch/resolve)" if e['cls'] == 'spec-fixable' && !e['resolved']
+  if e['cls'] == 'data' && !e['resolved']
+    puts '     (data-class = the NUMBERS are wrong → blocks the gate unconditionally; no'
+    puts '      --accept-residuals waiver exists. Fix + resolve, or reclassify with evidence.)'
+  end
 
 when 'resolve'
   ledger = load_ledger(opts[:dir])
@@ -382,16 +401,28 @@ when 'status'
     puts "  #{c}: #{grp.length} (#{unresolved} unresolved)"
   end
   blocking = FidelityLoop.unresolved_specfixable(ledger, opts[:accept] || [])
-  if blocking.empty?
-    puts '[OK] no unresolved spec-fixable deltas — RCF ledger satisfies the gate.'
+  data_blocking = FidelityLoop.unresolved_data(ledger)
+  if blocking.empty? && data_blocking.empty?
+    puts '[OK] no unresolved spec-fixable or data-class deltas — RCF ledger satisfies the gate.'
     exit 0
   else
-    warn "[BLOCK] #{blocking.length} unresolved spec-fixable delta(s) remain:"
-    blocking.each do |i|
-      e = entries[i]
-      warn "         #{e['id']} [#{e['dimension']}] #{e['delta']}  (fix: #{e['fix'] || 'see refs/fidelity-recipes.md'})"
+    if data_blocking.any?
+      warn "[BLOCK] #{data_blocking.length} unresolved DATA-class delta(s) — the numbers are wrong:"
+      data_blocking.each do |i|
+        e = entries[i]
+        warn "         #{e['id']} [#{e['dimension']}] #{e['delta']}"
+      end
+      warn '       data-class residuals can never be waved through (--accept-residuals does not apply).'
+      warn '       Fix + resolve, or reclassify with evidence.'
     end
-    warn '       apply-patch/resolve them, or waive with --accept-residuals <id,id> and NAME them in the report.'
+    if blocking.any?
+      warn "[BLOCK] #{blocking.length} unresolved spec-fixable delta(s) remain:"
+      blocking.each do |i|
+        e = entries[i]
+        warn "         #{e['id']} [#{e['dimension']}] #{e['delta']}  (fix: #{e['fix'] || 'see refs/fidelity-recipes.md'})"
+      end
+      warn '       apply-patch/resolve them, or waive with --accept-residuals <id,id> and NAME them in the report.'
+    end
     exit 6
   end
 

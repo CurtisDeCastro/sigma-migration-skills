@@ -55,6 +55,9 @@ that mirrors the Tableau dashboard layout as closely as possible.
 - `refs/blending.md` — data-blend detection + routing decision tree (same-warehouse repoint / VDS materialize / flag)
 - `refs/window-functions.md` — Tableau window/table calcs → Sigma-native window math (WINPROBE-validated mapping table, two-level helper shape, sort/partition/week-anchor rules, manual residues)
 - `refs/coverage-matrix.md` — converter-wide Tableau→Sigma coverage matrix (every construct → Sigma output + status: ✅ spec / 🧩 workbook pattern / 🔐 reported / 🟡 verify / ❌ flagged / ⛔ silent gap). Static companion to the per-workbook `scan-workbook-gaps.rb` readout.
+- `refs/source-anchors.md` — the **measured value bar**: why source-value anchors exist (two field migrations shipped wrong NUMBERS behind passing visual verdicts), the `source-anchors.json` schema, canonicalization rules, and a worked example.
+- `refs/orchestration.md` — orchestration/runbook guidance (see that file).
+- `refs/performance.md` — performance guidance (see that file).
 
 **For canonical workbook spec shape** (element kinds, source kinds, controls, formulas, formatting), defer to the companion **`sigma-workbooks`** skill, which ships as the **`sigma-authoring`** plugin in this same marketplace — install it alongside this converter (it's the canonical Sigma workbook spec reference, and this converter assumes it is present). This skill restates only the Tableau-conversion-specific patterns; everything else (KPI fields, color channel, pivot-table shape, manual sources, container styling, YAML default, etc.) lives there. Read its `reference/specification/` whenever you need the current spec surface.
 
@@ -275,7 +278,8 @@ which calc translation, which layout) — not orchestration.
 | `scripts/put-layout.rb` | Apply a layout XML to an existing workbook (strips read-only fields) |
 | `scripts/auto-parity-plan.rb` | Phase 6a: auto-build a parity plan by matching Sigma chart elements to Tableau view CSVs (with `--rename` for renamed tiles). Output → `/tmp/<name>/parity-plan.json` wrapped as `{ extract, charts: [...] }` |
 | `scripts/verify-parity.rb` | Phase 6c: diff expected (Tableau) vs actual (Sigma) per chart. `--extract-mode` switches to structural comparison (bucket count + dim set + sort) with value-drift tolerance for hasExtracts=true workbooks |
-| `scripts/assert-phase6-ran.rb` | **Conversion hard gate** — exits 0 only when ALL pass: (1) Phase 6 ran and parity-final.json shows status=PASS at the required rate, (2) no uncleaned orphan workbooks (posted-workbooks.jsonl has ≤1 entry OR cleanup-marker.json shows a successful non-dry-run cleanup), (3) the live workbook's `/columns` endpoint shows no column with `type=error` (catches circular refs / runtime errors introduced after the initial POST's column-type guard), (4) a non-empty top-level layout XML is applied (beads-sigma-bw3), (5) tile census — parity-final.json's `tile_census` shows no unexplained dashboard zones without a matching chart (catches the empty-view-CSV N-1-charts escape, bead gjhe; `--allow-missing-tiles N` for legitimately unbuildable zones), (6) layout lint, (7) control lint, **(8) Phase 6f visual render — a valid Sigma render PNG exists in the workdir (`sigma-render.png` or a `screenshots/_manifest.json` entry), proving the mandatory full-dashboard visual comparison could run. Closes the "declared done on HTTP 200 / CSV-parity-only" regression where the workbook shipped without anyone rendering the PNG**, plus (8b) a RECORDED source-vs-target visual verdict, and **(8c) layout fill / grid coverage — reads `layout-census.json` (emitted by `build-dashboard-layout.rb`) and fails any page that dropped a tile (`placed < zones`) or ships mostly empty (`grid_fill_pct < --min-grid-fill`, default 0.45); #259 item 1.** Exits 1 for missing parity sentinel, 2 for parity FAIL / extract-mode-without-flag / charts_total==0, 4 for uncleaned orphans, 5 for live type=error columns, 6 for missing layout, 7 for census failure, 8 for layout-lint violations (`lib/layout_lint.rb`, `--skip-layout-lint`), 9 for control-lint violations (`lib/control_lint.rb` — dead controls / ghost targets / partial reach / control-scope coverage; `--skip-control-lint`, `--control-scope PATH`), 10 for missing visual render (`--sigma-render PATH`, escape hatch `--skip-visual-gate "<reason>"`), 13 for an unrecorded visual verdict (`--skip-visual-comparison "<reason>"`), 14 for a layout-fill/coverage failure (`--min-grid-fill F`, escape hatch `--skip-layout-fill "<reason>"`), **15 for an unresolved Phase 5g RCF fidelity ledger (gate 8d — OPT-IN via `--require-fidelity-ledger`, which `migrate-tableau.rb --finalize` passes unless `--rcf-passes 0`: the `fidelity-ledger.json` is missing or still carries spec-fixable deltas that were never resolved; waive named residuals with `--accept-residuals id,id`).** Subagent flows MUST call this as their final step. |
+| `scripts/verify-anchors.rb` | **Phase 6 — the MEASURED value bar.** Loads `<workdir>/source-anchors.json` (printed source values transcribed at Phase 1d, EXACTLY as printed), pools the live workbook's element CSV exports (same export→poll→download flow as `collect-parity-actuals.rb`), and checks each anchor is present at the printed precision (`scripts/lib/anchor_values.rb` canonicalization: `"18,037B"`→(1.8037e13, ±0.5e9); `sigma_element_hint` wins, else label→element token-overlap fuzzy match, then search everywhere). Writes `anchors-verdict.json` `{checked, matched, missing:[{id,label,raw,best_candidate}], pass}` + stamps an `anchors` summary into `parity-final.json`. Exit 0 all matched / 1 with a per-miss report. An anchor value appearing NOWHERE in the exports is the loudest possible signal the data is wrong. See `refs/source-anchors.md`. |
+| `scripts/assert-phase6-ran.rb` | **Conversion hard gate** — exits 0 only when ALL pass: (1) Phase 6 ran and parity-final.json shows status=PASS at the required rate, (2) no uncleaned orphan workbooks (posted-workbooks.jsonl has ≤1 entry OR cleanup-marker.json shows a successful non-dry-run cleanup), (3) the live workbook's `/columns` endpoint shows no column with `type=error` (catches circular refs / runtime errors introduced after the initial POST's column-type guard), (4) a non-empty top-level layout XML is applied (beads-sigma-bw3), (5) tile census — parity-final.json's `tile_census` shows no unexplained dashboard zones without a matching chart (catches the empty-view-CSV N-1-charts escape, bead gjhe; `--allow-missing-tiles N` for legitimately unbuildable zones), (6) layout lint, (7) control lint, **(8) Phase 6f visual render — a valid Sigma render PNG exists in the workdir (`sigma-render.png` or a `screenshots/_manifest.json` entry), proving the mandatory full-dashboard visual comparison could run. Closes the "declared done on HTTP 200 / CSV-parity-only" regression where the workbook shipped without anyone rendering the PNG**, plus (8b) a RECORDED source-vs-target visual verdict, and **(8c) layout fill / grid coverage — reads `layout-census.json` (emitted by `build-dashboard-layout.rb`) and fails any page that dropped a tile (`placed < zones`) or ships mostly empty (`grid_fill_pct < --min-grid-fill`, default 0.45); #259 item 1.** Exits 1 for missing parity sentinel, 2 for parity FAIL / extract-mode-without-flag / charts_total==0, 4 for uncleaned orphans, 5 for live type=error columns, 6 for missing layout, 7 for census failure, 8 for layout-lint violations (`lib/layout_lint.rb`, `--skip-layout-lint`), 9 for control-lint violations (`lib/control_lint.rb` — dead controls / ghost targets / partial reach / control-scope coverage; `--skip-control-lint`, `--control-scope PATH`), 10 for missing visual render (`--sigma-render PATH`, escape hatch `--skip-visual-gate "<reason>"`), 13 for an unrecorded visual verdict (`--skip-visual-comparison "<reason>"`), 14 for a layout-fill/coverage failure (`--min-grid-fill F`, escape hatch `--skip-layout-fill "<reason>"`), **15 for an unresolved Phase 5g RCF fidelity ledger (gate 8d — OPT-IN via `--require-fidelity-ledger`, which `migrate-tableau.rb --finalize` passes unless `--rcf-passes 0`: the `fidelity-ledger.json` is missing or still carries spec-fixable deltas that were never resolved; waive named residuals with `--accept-residuals id,id` — but data-class ids are NEVER accepted, and any unresolved `data`-class entry blocks whenever the ledger exists, flag or no flag)**, **18 for the source-anchor value gate (gate 13 — when a source dashboard PNG exists, `source-anchors.json` must carry ≥5 anchors and `anchors-verdict.json` must pass; also raised when `--skip-parity-gate` is passed without a passing anchors verdict — the anchors oracle replaces parity, never nothing; escape `--skip-anchors-gate "<reason>"`)**, **19 for the waiver budget (>2 quality waivers → GREEN unavailable, YELLOW cap; `waivers` + `waiver_count` stamped into parity-final.json on every run; no escape flag)**, and **20 for the measured visual-similarity floor (gate 14, behind `scripts/visual-similarity.py`; escape `--skip-visual-similarity "<reason>"`)**. Subagent flows MUST call this as their final step. |
 | `scripts/fidelity-loop.rb` | **Phase 5g — RCF (render-compare-fix) loop MECHANICS.** Subcommands `init` / `render` (export the live page to `rcf-pass-N.png`, bump the pass counter, print the scored rubric + enforce the pass budget) / `record` (append a classified delta to `fidelity-ledger.json`: spec-fixable \| ui-only \| sigma-capability \| data) / `apply-patch` (a **single layout-preserving PUT** — GET the full live spec, deep-merge the agent's patch by `elementId`/`id`, PUT the whole spec back so the layout is never wiped, then re-run the column-type guard + layout/control lint) / `resolve` / `status`. The *judgment* stays with the agent (it Reads the render vs the source and authors patches from `refs/fidelity-recipes.md`); this script is only the spine. The ledger is the input to `assert-phase6-ran.rb` gate 8d (`--require-fidelity-ledger`). |
 | `scripts/assert-run-state.rb` | **Phase 6 (chain audit)** — reads the per-run `run-state.json` ledger (stamped by the orchestrator's `hdr()` as it walks each phase, plus explicit `phase-1d`) and fails if any always-required phase (discover, dashboard-read, workbook, layout, parity) was never entered — catching a silent shortcut (re-run on stale artifacts, a dropped phase) the output gates can miss. A deliberately skipped phase records `status:"skip"` + reason and is not flagged. NO-OP (advisory) when `run-state.json` is absent (hand-driven manual path). Lib: `scripts/lib/run_state.rb`. Escape: `--skip-run-state "<reason>"`. |
 | `scripts/probe-controls.rb` | **Phase 6 (optional) — control flip test**: per control, export one in-closure element CSV with and without `parameters:{controlId: <first non-default value>}` (must differ) and, with `--check-out-of-closure`, one out-of-closure element (must NOT differ). Runtime proof the wiring works; the static check is gate 7. Shared, vendored byte-identical (md5 discipline). See `refs/control-parity.md`. |
@@ -413,14 +417,14 @@ everything competed for attention at once. Read the ref when you reach the step.
 | 0a | **Gap scan** (mandatory) | `scan-workbook-gaps.rb` | `gaps.json` — ❌ features → scout or `--force` | `refs/phase-0-scope.md` |
 | 0b | Destination + mode (ask) | `pick-destination.rb` | folder id + conversion mode | `refs/phase-0-scope.md` |
 | 1 | Discover the source | `tableau-discover.rb` (PAT) or MCP | `get-workbook.json`, `views/*.csv`, `.twb` | `refs/phase-1-discover.md` |
-| 1d | **🚧 Dashboard read** | `get-view-image` (solo) → **Read** → write `png-read.json` | 🚧 `png-read.json` (`assert-dashboard-read.rb`) | `refs/phase-1-discover.md` |
+| 1d | **🚧 Dashboard read + anchors** | `get-view-image` (solo) → **Read** → write `png-read.json` + `source-anchors.json` | 🚧 `png-read.json` (`assert-dashboard-read.rb`) + `source-anchors.json` ≥5 anchors (final gate exit 18) | `refs/phase-1-discover.md`, `refs/source-anchors.md` |
 | 1.5 | Reuse an existing DM | `find-or-pick-dm.rb` | `dm-match.json` (reuse-first) | `refs/phase-1_5-dm-reuse.md` |
 | 2 | Warehouse column names | `discover-warehouse-columns.rb` | real column ids | `refs/phase-2-columns-filters.md` |
 | 2.5 | View-level filters (mandatory) | detect from CSV distinct values | filters applied to the right grain | `refs/phase-2-columns-filters.md` |
 | 3 | Build the DM spec | author → `validate-spec.rb --type datamodel` | clean `dm-spec.json` | `refs/phase-3-datamodel.md` |
 | 4 | POST the DM + **read back** | `post-and-readback.rb --type datamodel` | `dm-ids.json` (server ids) | `refs/phase-4-post-dm.md` |
 | 5 | Build the workbook | `build-charts-from-signals.rb` → `post-and-readback` → `build-dashboard-layout.rb` → `put-layout.rb` | `preflight_lint` clean; **layout is the LAST write** | `refs/phase-5-workbook.md` |
-| 6 | **🚧 Parity + visual** | `phase6-parity.rb`; then `assert-dashboard-read.rb` + `assert-run-state.rb` + `assert-phase6-ran.rb` | 🚧 `parity-final.json` PASS + recorded visual verdict + full `run-state.json` chain | `refs/phase-6-parity.md` |
+| 6 | **🚧 Parity + anchors + visual** | `phase6-parity.rb`; `verify-anchors.rb`; then `assert-dashboard-read.rb` + `assert-run-state.rb` + `assert-phase6-ran.rb` | 🚧 `parity-final.json` PASS + `anchors-verdict.json` pass + recorded visual verdict + full `run-state.json` chain | `refs/phase-6-parity.md`, `refs/source-anchors.md` |
 | 5g | **RCF fidelity loop** | `fidelity-loop.rb` render → compare vs source → fix, until clean | 🚧 (opt-in) `fidelity-ledger.json` no unresolved spec-fixable deltas (gate 8d) | `refs/phase-5g-rcf.md` |
 | E | Enhance (opt-in) | `enhance-scan.rb` → `enhance-apply.rb` | cloned "— Enhanced" workbook | `refs/phase-e-enhance.md` |
 | — | Security RLS/CLS | detect always; apply opt-in | `apply_sigma_rls.py` | *(spine ↓)* |
@@ -463,6 +467,37 @@ here. **Full detail (fetch patterns, calc discovery, custom-SQL fallback):
 > This is the fix for the #1 escape: right numbers, missing tiles. Escape hatch
 > `--skip-dashboard-read "<reason>"` (name it in your report).
 
+> **🚧 GATE — Phase 1d source-value anchors (MANDATORY checklist item).** While
+> you are reading that same PNG, **transcribe the printed numbers into
+> `<workdir>/source-anchors.json` — EXACTLY as printed** (keep the raw string:
+> `"18,037B"`, never `18037`; `"(12.3%)"`, never `-0.123`). Minimum anchors —
+> **every KPI value, the top 3 values of every ranked list/table, and one
+> representative bucket value per chart** (≥ 5 total). Schema:
+>
+> ```json
+> {
+>   "source_image": "views/<dashboardViewId>.png",
+>   "transcribed_at": "2026-07-08T12:00:00Z",
+>   "anchors": [
+>     { "id": "a1", "panel": "TOP COUNTRIES", "label": "United States GDP",
+>       "raw": "18,037B", "kind": "currency",
+>       "sigma_element_hint": "Top Countries" }
+>   ]
+> }
+> ```
+>
+> `kind` ∈ `currency|number|percent`; `sigma_element_hint` (optional) names the
+> Sigma element the value should land in. These anchors are the **measured value
+> bar**: Phase 6 runs `verify-anchors.rb`, which checks every printed value
+> against the LIVE workbook's element exports at the printed precision — a
+> printed source value that appears NOWHERE in the exports means the numbers are
+> wrong (wrong unit/10x, wrong aggregate, collapsed buckets). The final gate
+> **fails (exit 18)** whenever a source dashboard PNG exists but anchors are
+> missing (< 5) or unverified/failing. Two field migrations shipped wrong
+> numbers behind passing visual verdicts — this is the fix. Why + rules + worked
+> example: `refs/source-anchors.md`. Escape hatch `--skip-anchors-gate
+> "<reason>"` (counted against the waiver budget; name it in your report).
+
 ### Phase 1.5 — reuse an existing DM (do this first) — `refs/phase-1_5-dm-reuse.md`
 `find-or-pick-dm.rb` scores existing org DMs; reuse-first collapses DM sprawl and
 skips Phases 2–3. When reusing a differently-shaped DM, run the 1.5b shape
@@ -497,18 +532,46 @@ on any `type=error` column). **Detail: `refs/phase-4-post-dm.md`.**
 it. Then compile-check every element. **Full detail (spec writing, param
 metric-switch, coverage WARN vs NOTE, layout XML): `refs/phase-5-workbook.md`.**
 
-### Phase 6 — 🚧 parity + visual verification (hard-gated) — `refs/phase-6-parity.md`
+### Phase 6 — 🚧 parity + anchors + visual verification (hard-gated) — `refs/phase-6-parity.md`
 `phase6-parity.rb` diffs Sigma actuals vs Tableau (EXACT for warehouse-backed;
 `--extract-mode` only for `hasExtracts=true`). **Phase 6f visual is mandatory:**
 render the full Sigma page and Read it against the source dashboard PNG. Finish
 with the gate sequence:
 ```bash
 ruby scripts/assert-dashboard-read.rb --workdir <WORK>                  # 🚧 Phase 1d belt
+ruby scripts/verify-anchors.rb --workdir <WORK> --workbook-id <wb>      # 🚧 measured value bar → anchors-verdict.json
 ruby scripts/assert-run-state.rb --workdir <WORK>                       # 🚧 phase-chain ledger audit
 ruby scripts/assert-phase6-ran.rb --workdir <WORK> --workbook-id <wb>   # 🚧 hard gate — must exit 0
 ```
 **A conversion is NOT done until `assert-phase6-ran.rb` exits 0.** Full detail
 (raw-warehouse mode, triage, visual checklist): `refs/phase-6-parity.md`.
+
+**No-standalone-views path (dashboard-embedded worksheets).** When the source
+dashboard's worksheets are embedded-only (no standalone views to export CSVs
+from), chart-by-chart CSV parity may be genuinely unavailable. The parity
+oracle is then **anchors + warehouse** — `verify-anchors.rb` (printed source
+values found in the live exports) plus `verify-warehouse.rb` (elements evaluate
+against real warehouse data). **`--skip-parity-gate` alone is no longer a valid
+combination:** the gate **rejects it (exit 18)** unless `anchors-verdict.json`
+exists and passes. The anchors oracle replaces parity — never nothing.
+
+**Visual-similarity floor (measured).** When `scripts/visual-similarity.py` is
+present, the gate runs
+`python3 scripts/visual-similarity.py --source <src> --render <render> --json-out <WORK>/visual-similarity.json`
+and fails (exit 20) when its JSON `pass` field is false — a measured companion
+to the recorded visual verdict (details: `refs/visual-similarity.md`). Escape
+`--skip-visual-similarity "<reason>"` (counted as a waiver).
+
+> **Waiver discipline — waivers are for impossibilities, not obstacles.** Every
+> `--skip-*` / `--allow-*` / `--accept-*` / `--min-pass-rate <1` flag is an
+> attestation that a verification could NOT run — not a lever to turn a red gate
+> green. The gate now enforces this: it stamps `waivers` + `waiver_count` into
+> `parity-final.json` on every run, **more than 2 quality waivers caps the
+> migration at YELLOW** (exit 19 — "GREEN unavailable"; `--skip-telemetry-gate`
+> and the sanctioned builder→verifier `--skip-visual-comparison` handoff are
+> policy exclusions), and **data-class fidelity residuals can never be waived at
+> all** — the numbers are wrong; fix or reclassify with evidence. Reaching for a
+> third waiver means the run is telling you something: stop and fix.
 
 ### Phase 5g — RCF (render-compare-fix) fidelity loop — `refs/phase-5g-rcf.md`
 After the workbook renders, iterate composition to convergence: `fidelity-loop.rb render`

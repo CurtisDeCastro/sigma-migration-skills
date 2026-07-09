@@ -1,0 +1,154 @@
+# Source-value anchors — the measured value bar
+
+## Why this exists
+
+Two field migrations shipped dashboards whose **numbers were wrong** while every
+judgment gate recorded "pass":
+
+1. **The 10x/ranking failure.** A "top members" ranked panel showed *different
+   members* with values ~10x off — the migrated dashboard rendered **"$1.8T"**
+   where the source printed **"18,037B"** (≈ $18.0T). A multi-region YoY panel
+   collapsed to **one bar where the source showed six**, and a trend line
+   crashed to zero on a partial final period. The run followed the pipeline,
+   executed a real 3-pass RCF loop *reading* the render PNGs — and still
+   recorded `--verdict pass`.
+2. **The waiver-stacking failure.** A second workbook "passed" by combining
+   `--skip-parity-gate` with `--allow-missing-tiles 6`, discovered by grepping
+   `--help` for skip flags. Nothing measured the values; every gate that could
+   have was waived.
+
+The lesson: **every judgment gate is an attestation, and lenient models attest
+generously.** Visual verdicts, RCF scoring, and parity waivers are all places
+where "looks right" substitutes for "is right." Anchors replace that judgment
+with a **measurement**: printed values transcribed from the source image either
+appear in the live workbook's exports at the printed precision, or they don't.
+
+A printed source value that appears **nowhere** in the workbook exports is the
+loudest possible signal the data is wrong — wrong unit (10x), wrong aggregate,
+missing filter, collapsed buckets, or the wrong column entirely.
+
+## The contract
+
+### `source-anchors.json` — authored BY THE AGENT at Phase 1d
+
+Written **while reading the source dashboard PNG** (the same read that produces
+`png-read.json`). Never generated from CSVs — the whole point is transcribing
+what the source *renders*.
+
+```json
+{
+  "source_image": "views/<dashboardViewId>.png",
+  "transcribed_at": "2026-07-08T12:00:00Z",
+  "anchors": [
+    { "id": "a1",
+      "panel": "TOP COUNTRIES",
+      "label": "United States GDP",
+      "raw": "18,037B",
+      "kind": "currency",
+      "sigma_element_hint": "Top Countries" }
+  ]
+}
+```
+
+- `raw` — the value **EXACTLY as printed**. Keep the raw string: `"18,037B"`,
+  never `18037`; `"(12.3%)"`, never `-0.123`; `"$733,215.26"` with the `$` and
+  commas. The printed form *is* the precision contract.
+- `kind` — `currency` | `number` | `percent`.
+- `sigma_element_hint` — optional; the Sigma element name the value should land
+  in. When present it wins over fuzzy matching.
+- **Minimum anchors (the gate requires ≥ 5):** every KPI value, the **top 3
+  values of every ranked list/table**, and **one representative bucket value
+  per chart**. Top-of-ranked-list anchors are what catch the
+  different-members-with-different-values failure.
+
+### `anchors-verdict.json` — written by `scripts/verify-anchors.rb`
+
+```json
+{ "checked": 9, "matched": 8,
+  "missing": [ { "id": "a1", "label": "United States GDP", "raw": "18,037B",
+                 "best_candidate": { "value": 1.8e12, "element": "Top Countries" } } ],
+  "pass": false }
+```
+
+`verify-anchors.rb --workdir <W> --workbook-id <id>` pools the live workbook's
+element CSV exports (the same export→poll→download flow
+`collect-parity-actuals.rb` uses), searches each anchor in the element whose
+name best matches its label/panel (token overlap; the hint wins), then searches
+every other export before declaring a miss. Found-elsewhere still matches (the
+value exists; only the label→element mapping was fuzzy) and is noted. It also
+stamps an `anchors` summary into `parity-final.json` when present. Exit 0 all
+matched / 1 with a per-miss report naming each miss and its closest candidate.
+
+## Canonicalization rules (`scripts/lib/anchor_values.rb`)
+
+**Match rule:** a printed value MATCHES a real number when the real number
+**rounds to the printed form at the printed precision** — i.e.
+`|actual − printed| ≤ half of the last printed digit's place value`, scaled by
+any suffix.
+
+| Printed | Canonical value | Tolerance | Notes |
+|---|---|---|---|
+| `18,037B` | 1.8037e13 | ±0.5e9 | last digit = units of B |
+| `$1.8T` | 1.8e12 | ±0.05e12 | currency; one decimal of T |
+| `46.5M` | 4.65e7 | ±0.05e6 | |
+| `-2%` | −2 points | ±0.5 | also matches the fraction −0.02 ± 0.005 |
+| `1,687` | 1687 | ±0.5 | |
+| `$733,215.26` | 733215.26 | ±0.005 | cents precision |
+| `(12.3%)` | −12.3 points | ±0.05 | accounting-paren negative |
+| `12.3k` | 12300 | ±50 | lowercase suffixes accepted |
+
+Extra interpretations checked (they never weaken 10x detection):
+
+- Suffixed forms also match the **unscaled face value** (`18,037B` ↔ a column
+  already denominated in billions storing `18037`).
+- Percents match both **points** (−2) and **fraction** (−0.02) storage.
+
+So `1.8e12` does **not** match `18,037B` under any interpretation — the exact
+field failure — while `18,036,800,000,000` (rounds to 18,037B) does.
+
+## Worked example
+
+Source image shows a KPI `$86.5T`, a TOP COUNTRIES list headed by
+`United States 18,037B`, `China 13,608B`, `Japan 4,971B`, and a YoY panel with
+`-2%` on one bucket:
+
+```json
+{ "source_image": "views/abc123.png", "transcribed_at": "2026-07-08T15:04:00Z",
+  "anchors": [
+    { "id": "a1", "panel": "KPI",           "label": "World GDP total", "raw": "$86.5T",  "kind": "currency" },
+    { "id": "a2", "panel": "TOP COUNTRIES", "label": "United States",   "raw": "18,037B", "kind": "number", "sigma_element_hint": "Top Countries" },
+    { "id": "a3", "panel": "TOP COUNTRIES", "label": "China",           "raw": "13,608B", "kind": "number", "sigma_element_hint": "Top Countries" },
+    { "id": "a4", "panel": "TOP COUNTRIES", "label": "Japan",           "raw": "4,971B",  "kind": "number", "sigma_element_hint": "Top Countries" },
+    { "id": "a5", "panel": "YOY BY REGION", "label": "largest decline bucket", "raw": "-2%", "kind": "percent" }
+  ] }
+```
+
+If the built workbook's Top Countries element exports `1.8e12` for the top row,
+`verify-anchors.rb` reports:
+
+```
+MISSING  a2 "United States" raw="18,037B" — closest candidate 1.8e12 in "Top Countries"
+```
+
+— the 10x failure caught mechanically, before any visual verdict is consulted.
+
+## Gate wiring (`assert-phase6-ran.rb`)
+
+- **Gate 13 (exit 18):** whenever the workdir carries a source dashboard PNG
+  (the Phase 1d artifact — `png-read.json` `source_png`, `views/*.png`, or
+  `dashboards/*.png`), `source-anchors.json` must exist with ≥ 5 anchors AND
+  `anchors-verdict.json` must pass with every anchor checked (a stale verdict —
+  fewer checked than transcribed — fails). No source PNG → stated SKIP.
+  Escape: `--skip-anchors-gate "<reason>"` (counted against the waiver budget).
+- **Conditional `--skip-parity-gate` (exit 18):** waiving source parity is
+  REJECTED unless `anchors-verdict.json` exists and passes. The anchors oracle
+  replaces parity — never nothing. This is the no-standalone-views path's
+  contract too: parity oracle = anchors + warehouse (`verify-warehouse.rb`).
+- **Data-class RCF residuals (exit 15):** any unresolved `data`-class entry in
+  `fidelity-ledger.json` blocks GREEN whenever the ledger exists —
+  `--accept-residuals` does not apply. The numbers are wrong; fix or reclassify
+  with evidence.
+- **Waiver budget (exit 19):** more than 2 quality waivers → GREEN unavailable
+  (YELLOW cap). Anchors and similarity skips count; `--skip-telemetry-gate`
+  (policy) and the sanctioned builder→verifier `--skip-visual-comparison`
+  handoff do not.
