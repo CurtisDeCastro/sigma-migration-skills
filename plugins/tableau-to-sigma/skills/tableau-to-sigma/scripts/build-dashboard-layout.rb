@@ -353,8 +353,17 @@ def plan_node(node, c0, c1, r0, r1, ctx)
     # label, propagates the clamp up so the whole tinted band row shrinks too.
     maxr = nil
     if el && el['kind'] == 'text'
-      body = el['body'].to_s.gsub(/<[^>]+>/, ' ').gsub(/\s+/, ' ').strip
-      maxr = SigmaLayout::HEADER_BAND_MAX_ROWS if !body.empty? && body.length <= 60 && !el['body'].to_s.include?("\n")
+      # Read the label from the ZONE's text_runs — NOT the readback element's
+      # `body`. The /columns readback drops `body`, so keying on it left maxr nil
+      # and starved the whole band_max clamp (the false-green: the unit test had
+      # supplied a body the real readback omits). A short SINGLE-LINE label is a
+      # section/column header → thin band; multi-line or long text keeps its height.
+      zone = ctx[:zone_by_id][node['id']] || node
+      runs = zone.is_a?(Hash) ? (zone['text_runs'] || []) : []
+      txt = runs.map { |r| r['text'].to_s }.join
+      clean = txt.gsub(/\s+/, ' ').strip
+      multiline = txt.include?("\n") || runs.any? { |r| r['break'] }
+      maxr = SigmaLayout::HEADER_BAND_MAX_ROWS if !clean.empty? && clean.length <= 60 && !multiline
     end
     [span, proc { |fc0, fc1, fr0, fr1| le(eid, fc0, fc1, fr0, fr1) }, maxr]
   end

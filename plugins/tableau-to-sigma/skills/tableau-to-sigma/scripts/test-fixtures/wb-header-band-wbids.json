@@ -1,0 +1,180 @@
+{
+  "workbookId": "0d7648b6-3f17-4f87-99cc-d9b750fd59fc",
+  "pages": [
+    {
+      "id": "page-data",
+      "name": "Data",
+      "visibility": null,
+      "elements": [
+        {
+          "id": "master",
+          "kind": "table",
+          "name": "Master",
+          "columnLabels": [
+            "Container port traffic (TEU: 20 foot equivalent units)",
+            "Country Code",
+            "Country Name",
+            "Date",
+            "FDI World",
+            "Foreign direct investment, net inflows (BoP, current US$)",
+            "GDP (current US$)",
+            "GDP World",
+            "IncomeGroup",
+            "New Region",
+            "Region",
+            "TEU world",
+            "Year"
+          ]
+        },
+        {
+          "id": "masterAll",
+          "kind": "table",
+          "name": "Master All",
+          "columnLabels": [
+            "Container port traffic (TEU: 20 foot equivalent units)",
+            "Country Code",
+            "Country Name",
+            "Date",
+            "FDI World",
+            "Foreign direct investment, net inflows (BoP, current US$)",
+            "GDP (current US$)",
+            "GDP World",
+            "IncomeGroup",
+            "New Region",
+            "Region",
+            "TEU world",
+            "Year"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "page-dash-1",
+      "name": "Macroeconomics",
+      "visibility": null,
+      "elements": [
+        {
+          "id": "text-28",
+          "kind": "text",
+          "name": null
+        },
+        {
+          "id": "text-46",
+          "kind": "text",
+          "name": null
+        },
+        {
+          "id": "text-47",
+          "kind": "text",
+          "name": null
+        },
+        {
+          "id": "text-48",
+          "kind": "text",
+          "name": null
+        },
+        {
+          "id": "el-param-region-macroeconomics",
+          "kind": "control",
+          "name": "Region"
+        },
+        {
+          "id": "el-gdppie",
+          "kind": "bar-chart",
+          "name": "GDPPie",
+          "columnLabels": [
+            "Selected",
+            "New Region Not Null",
+            "New Region",
+            "0"
+          ]
+        },
+        {
+          "id": "el-gdpregionline",
+          "kind": "combo-chart",
+          "name": "GDPRegionLine",
+          "columnLabels": [
+            "Date Not Null",
+            "Country GDP (current US$)",
+            "Date",
+            "GDP World"
+          ]
+        },
+        {
+          "id": "el-gdp-top3",
+          "kind": "table",
+          "name": "GDP Top3",
+          "columnLabels": [
+            "Date",
+            "Country Name",
+            "GDP (current US$)"
+          ]
+        },
+        {
+          "id": "el-fdipie",
+          "kind": "bar-chart",
+          "name": "FDIPie",
+          "columnLabels": [
+            "Selected",
+            "New Region Not Null",
+            "New Region",
+            "0"
+          ]
+        },
+        {
+          "id": "el-fdiregionline",
+          "kind": "combo-chart",
+          "name": "FDIRegionLine",
+          "columnLabels": [
+            "Date Not Null",
+            "Country Foreign direct investment, net inflows (BoP, current US$)",
+            "Date",
+            "FDI World"
+          ]
+        },
+        {
+          "id": "el-fdi-top3",
+          "kind": "table",
+          "name": "FDI Top3",
+          "columnLabels": [
+            "Date",
+            "Country Name",
+            "Foreign direct investment, net inflows (BoP, current US$)"
+          ]
+        },
+        {
+          "id": "el-teupie",
+          "kind": "bar-chart",
+          "name": "TEUPie",
+          "columnLabels": [
+            "Selected",
+            "New Region Not Null",
+            "New Region",
+            "0"
+          ]
+        },
+        {
+          "id": "el-teuregionline",
+          "kind": "combo-chart",
+          "name": "TEURegionLine",
+          "columnLabels": [
+            "Date Not Null",
+            "Country Container port traffic (TEU: 20 foot equivalent units)",
+            "Date",
+            "TEU world"
+          ]
+        },
+        {
+          "id": "el-teu-top3",
+          "kind": "table",
+          "name": "TEU Top3",
+          "columnLabels": [
+            "Date",
+            "Country Name",
+            "Container port traffic (TEU: 20 foot equivalent units)"
+          ]
+        }
+      ]
+    }
+  ]
+}
