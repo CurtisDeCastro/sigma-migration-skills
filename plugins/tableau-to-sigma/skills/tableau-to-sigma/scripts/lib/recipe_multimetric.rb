@@ -297,11 +297,18 @@ module RecipeMultimetric
     # build-charts carries onto a point-in-time table (it shows "2015-01-01"),
     # leaving just the entity + value.
     if el['kind'] == 'table' && n.positive?
-      before = (el['columns'] || []).size
-      el['columns'] = (el['columns'] || []).reject { |c| col_disp(c).to_s.downcase == 'date' }
-      if (el['columns'] || []).size < before
-        dropped = el['order'].is_a?(Array) # keep order in sync
-        el['order'] = el['order'].select { |id| el['columns'].any? { |c| c['id'] == id } } if dropped
+      # Capture the dropped Date column ids so we can also strip anything that
+      # references them. The latest-year snapshot is now INLINED into the measure
+      # (Sum(If([Year]=<ly>...))), so build-charts' hidden Date passthrough column
+      # (id "f-<el>-date") AND the list filter that referenced it are redundant —
+      # and leaving the filter behind dangles a "Dependency not found" ref that
+      # 400s the whole PUT/POST (found dogfooding --reuse-workbook, 2026-07-09).
+      dropped_ids = (el['columns'] || []).select { |c| col_disp(c).to_s.downcase == 'date' }
+                                         .map { |c| c['id'] }.to_set
+      unless dropped_ids.empty?
+        el['columns'] = (el['columns'] || []).reject { |c| dropped_ids.include?(c['id']) }
+        el['order'] = el['order'].reject { |id| dropped_ids.include?(id) } if el['order'].is_a?(Array)
+        el['filters'] = Array(el['filters']).reject { |f| dropped_ids.include?(f['columnId']) } if el['filters']
       end
     end
 

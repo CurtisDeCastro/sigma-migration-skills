@@ -47,14 +47,21 @@ def build_spec
             { 'id' => 'b_dim', 'name' => 'New Region', 'formula' => '[Master/New Region]' },
             { 'id' => 'b_val', 'name' => 'GDP', 'formula' => 'Sum([Master/GDP])' }
           ], 'order' => %w[b_dim b_val] }
-  # Top-N table (should filter to selected region, real countries, latest year)
+  # Top-N table (should filter to selected region, real countries, latest year).
+  # Carries the spurious Date passthrough column + its list filter that
+  # build-charts emits for the point-in-time year — both must be dropped once
+  # the latest-year is inlined into the measure (else the filter dangles → 400).
   top = { 'id' => 'el-gdptop', 'kind' => 'table', 'name' => 'GDP Top3',
           'source' => { 'kind' => 'table', 'elementId' => 'master' },
           'columns' => [
             { 'id' => 't_country', 'name' => 'Country', 'formula' => '[Master/Country Name]' },
-            { 'id' => 't_val', 'name' => 'GDP', 'formula' => 'Sum([Master/GDP])' }
-          ], 'order' => %w[t_country t_val],
-          'filters' => [{ 'id' => 'topn', 'columnId' => 't_val', 'kind' => 'top-n', 'rowCount' => 8 }] }
+            { 'id' => 't_val', 'name' => 'GDP', 'formula' => 'Sum([Master/GDP])' },
+            { 'id' => 'f-el-gdptop-date', 'name' => 'Date', 'formula' => '[Master/Date]' }
+          ], 'order' => %w[t_country t_val f-el-gdptop-date],
+          'filters' => [
+            { 'id' => 'flt-date', 'columnId' => 'f-el-gdptop-date', 'kind' => 'list', 'values' => ['2015'] },
+            { 'id' => 'topn', 'columnId' => 't_val', 'kind' => 'top-n', 'rowCount' => 8 }
+          ] }
   { 'pages' => [
     { 'id' => 'pg-data', 'name' => 'Data', 'elements' => [master] },
     { 'id' => 'pg-dash', 'name' => 'Macroeconomics', 'elements' => [control, bar, top] }
@@ -118,6 +125,9 @@ check(tval['formula'] == 'Sum(If([Master/Year] = 2015 And Not IsNull([Master/Inc
 check(Array(top['groupings']).any? && top['groupings'][0]['groupBy'] == ['t_country'],
       'Top table grouped by Country (not ungrouped)', fails)
 check(top['groupings'][0]['sort'][0]['direction'] == 'descending', 'grouped sort is value-descending', fails)
+check(top['columns'].none? { |c| c['id'] == 'f-el-gdptop-date' }, 'spurious Date column dropped from the Top table', fails)
+check(top['filters'].none? { |f| f['columnId'] == 'f-el-gdptop-date' },
+      'orphaned Date list filter dropped with the column (no dangling dependency → no 400)', fails)
 bval = bar['columns'].find { |c| c['id'] == 'b_val' }
 check(bval['formula'].start_with?('Sum(If([Master All/Year] = 2015'),
       'bar magnitude measure also pinned to latest year (on masterAll)', fails)

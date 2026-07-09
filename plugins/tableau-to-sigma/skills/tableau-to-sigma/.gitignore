@@ -28,3 +28,5 @@ wb-spec-*.json
 chart-specs-*.json
 dashboard-layout-*.json
 dashboard-layout-*-meta.json
+hyperd.log
+runs/
