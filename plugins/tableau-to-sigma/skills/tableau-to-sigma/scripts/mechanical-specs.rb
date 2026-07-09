@@ -237,7 +237,7 @@ module MechanicalSpecs
   # Returns the count of LOD measures synthesized. Mutates `model`/`fact`.
   FIXED_YEAR_LOD_RE = /\{\s*FIXED\s+([^:]+?)\s*:\s*(SUM|AVG|MIN|MAX|COUNT|COUNTD)\s*\(\s*\[([^\]]+)\]\s*\)\s*\}/i
 
-  def synthesize_fixed_lods!(model, fact, twb_text, colmap = {})
+  def synthesize_fixed_lods!(model, fact, twb_text, colmap = {}, discriminator: nil)
     return {} unless model && fact && twb_text
     return 0 unless fact.dig('source', 'kind') == 'warehouse-table'
     path = fact.dig('source', 'path') || []
@@ -284,7 +284,16 @@ module MechanicalSpecs
       sel << %(#{l['agg']}("#{phys.call(l['metric'])}") AS "#{l['name']}")
       cols << { 'id' => "wby-#{slug(l['name'])}", 'name' => l['name'], 'formula' => "[Custom SQL/#{l['name']}]" }
     end
-    statement = %(SELECT #{sel.join(', ')} FROM #{fqn} GROUP BY "#{year_phys}")
+    # Exclude aggregate/rollup rows from the per-year WORLD total. World Bank–style
+    # extracts carry region / income-group / "World" rollup rows ALONGSIDE the real
+    # countries, so an unfiltered SUM(...) OVER year double-counts them (the World
+    # trend line came out ~6-10x too high). The point-in-time discriminator (a
+    # column NULL on rollup rows, e.g. IncomeGroup) selects real entities only.
+    where = ''
+    if discriminator && !discriminator.to_s.strip.empty?
+      where = %( WHERE "#{phys.call(discriminator)}" IS NOT NULL)
+    end
+    statement = %(SELECT #{sel.join(', ')} FROM #{fqn}#{where} GROUP BY "#{year_phys}")
 
     sql_el = {
       'id' => 'el-world-by-year', 'kind' => 'table',

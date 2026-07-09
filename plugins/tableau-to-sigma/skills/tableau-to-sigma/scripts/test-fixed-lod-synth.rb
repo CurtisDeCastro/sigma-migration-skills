@@ -66,6 +66,16 @@ check(st&.include?('GROUP BY "YEAR"'), 'grouped by the physical Year column', fa
 check(st&.include?('FROM TJ.PUBLIC."WB_WORLD_BANK"'), 'from the landed fact table (quoted)', fails)
 check(sql['columns'].map { |c| c['formula'] }.all? { |f| f.start_with?('[Custom SQL/') }, 'columns use the Custom SQL prefix', fails)
 
+puts 'Part B2 — discriminator scopes the World SUM to real entities (no rollup double-count)'
+model2 = { 'pages' => [{ 'elements' => [JSON.parse(JSON.generate(fact))] }] }
+f2 = model2['pages'][0]['elements'][0]
+wmap2 = MechanicalSpecs.synthesize_fixed_lods!(model2, f2, TWB, COLMAP.merge('IncomeGroup' => 'INCOMEGROUP'), discriminator: 'IncomeGroup')
+sql2 = model2['pages'][0]['elements'].find { |e| e['id'] == 'el-world-by-year' }
+st2 = sql2 && sql2.dig('source', 'statement')
+check(!wmap2.empty? && st2&.include?('WHERE "INCOMEGROUP" IS NOT NULL'),
+      "World SQL excludes rollup rows via the discriminator (got: #{st2})", fails)
+check(st2 && st2.index('WHERE') < st2.index('GROUP BY'), 'WHERE precedes GROUP BY', fails)
+
 puts 'Part C — FIXED relationship on the fact'
 rel = (fact['relationships'] || []).find { |r| r['name'] == 'FIXED Year' }
 check(rel && rel['targetElementId'] == 'el-world-by-year', 'FIXED Year relationship -> the SQL element', fails)
