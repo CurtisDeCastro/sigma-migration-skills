@@ -90,7 +90,12 @@ module AnchorVerify
   # Numeric face values of a CSV cell (both percent interpretations kept so
   # AnchorValues candidate matching sees whichever the export carried).
   def cell_numbers(cell)
-    s = cell.to_s.strip
+    s = cell.to_s
+    # Export bytes arrive as ASCII-8BIT off the HTTP body; a UTF-8 regexp match
+    # on that raises Encoding::CompatibilityError (live-caught). Normalize first.
+    s = s.dup.force_encoding(Encoding::UTF_8) unless s.encoding == Encoding::UTF_8
+    s = s.scrub('') unless s.valid_encoding?
+    s = s.strip
     return [] if s.empty?
     neg = s.start_with?('(') && s.end_with?(')')
     s = s[1..-2] if neg

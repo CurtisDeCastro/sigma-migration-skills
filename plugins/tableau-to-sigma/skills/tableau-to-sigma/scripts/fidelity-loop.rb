@@ -185,7 +185,7 @@ def print_rubric
   if File.exist?(rubric)
     puts "───── SCORE THIS PASS against refs/fidelity-rubric.md ─────"
     # Print just the dimension headers so the agent has the checklist inline.
-    File.foreach(rubric) do |l|
+    File.foreach(rubric, encoding: 'UTF-8') do |l|
       puts "  #{l.rstrip}" if l =~ /^\s*[-*]\s*\*\*/ || l =~ /^#{'#'}{2,4}\s/
     end
   else

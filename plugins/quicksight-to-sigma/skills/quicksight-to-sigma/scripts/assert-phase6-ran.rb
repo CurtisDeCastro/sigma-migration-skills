@@ -441,25 +441,50 @@ else
   mode = summary['mode'].to_s
 
   if total <= 0
-    warn "[FAIL] parity-final.json reports charts_total=#{total} — no charts were verified."
-    warn "       This usually means auto-parity-plan.rb matched zero Tableau views."
-    warn "       Phase 6 must verify at least one chart to declare GREEN."
-    exit 2
+    # ORACLE SUBSTITUTION (not a waiver): a workbook whose every worksheet is
+    # dashboard-embedded exports NO standalone view CSVs, so the value-parity
+    # pool is legitimately empty. The numbers are still machine-verified when
+    # BOTH hold: (a) anchors-verdict.json passes with EVERY source anchor
+    # matched against live element exports, and (b) every empty-export tile is
+    # image-verified (visual-verify manifest all true). Then the anchors
+    # oracle IS the parity evidence — same doctrine as the conditional
+    # --skip-parity-gate acceptance, but deterministic, and it burns no waiver
+    # budget because nothing is skipped.
+    _av = (JSON.parse(File.read(File.join(opts[:tab], 'anchors-verdict.json'))) rescue nil)
+    _vv = (JSON.parse(File.read(File.join(opts[:tab], 'visual-verify', 'manifest.json'))) rescue nil)
+    _vv_ok = _vv.is_a?(Array) && _vv.any? && _vv.all? { |t| t['visual_verified'] == true }
+    if _av && _av['pass'] && _av['checked'].to_i >= 5 && _av['matched'] == _av['checked'] && _vv_ok
+      puts "[PASS] gate 2 (value parity): 0 exportable view CSVs (all worksheets dashboard-embedded) — " \
+           "the ANCHORS ORACLE stands in: anchors-verdict.json pass " \
+           "(#{_av['matched']}/#{_av['checked']} anchors matched) + all #{_vv.size} tile(s) image-verified."
+    else
+      warn "[FAIL] parity-final.json reports charts_total=#{total} — no charts were verified."
+      warn "       This usually means auto-parity-plan.rb matched zero Tableau views."
+      warn "       Phase 6 must verify at least one chart to declare GREEN."
+      warn '       If every worksheet is dashboard-embedded (no exportable view CSVs), the'
+      warn '       anchors oracle can stand in — BOTH must hold:'
+      warn "         a) verify-anchors.rb pass with EVERY anchor matched (#{_av ? "currently #{_av['matched']}/#{_av['checked']}" : 'anchors-verdict.json missing'})"
+      warn "         b) every visual-verify tile confirmed (#{_vv_ok ? 'ok' : 'incomplete'})"
+      exit 2
+    end
   end
 
-  if mode == 'extract' && !opts[:allow_extract]
+  if total.positive? && mode == 'extract' && !opts[:allow_extract]
     warn "[FAIL] parity ran in extract-mode but --allow-extract was not passed."
     warn "       Extract-mode permits up to ±#{((summary['extract_tol'] || 0.30) * 100).to_i}% drift —"
     warn "       only acceptable when the source Tableau workbook has hasExtracts=true."
     exit 2
   end
 
-  pass_rate = passed.to_f / total
+  # (total==0 only reaches here through the anchors-oracle substitution above —
+  # there is no rate/status to gate on an empty pool.)
+  pass_rate = total.positive? ? passed.to_f / total : 1.0
   # status=PASS requires 100% — when the caller explicitly accepts a lower
   # pass-rate (--min-pass-rate, for honest NAMED divergences like LOD
   # placeholders / cross-grain semantics), the rate is the gate, not the status.
   rate_gate_only = opts[:min_pass_rate] < 1.0
-  if (rate_gate_only ? pass_rate < opts[:min_pass_rate] : (status != 'PASS' || pass_rate < opts[:min_pass_rate]))
+  if total.positive? &&
+     (rate_gate_only ? pass_rate < opts[:min_pass_rate] : (status != 'PASS' || pass_rate < opts[:min_pass_rate]))
     warn "[FAIL] parity status=#{status} pass-rate=#{(pass_rate * 100).round(1)}% (#{passed}/#{total})"
     warn "       Required: #{rate_gate_only ? '' : 'status=PASS and '}pass-rate >= #{(opts[:min_pass_rate] * 100).to_i}%"
     if (fail_names = summary['fail_names']) && !fail_names.empty?
@@ -589,13 +614,19 @@ unless opts[:skip_column]
     base = ENV['SIGMA_BASE_URL']
     tok  = ENV['SIGMA_API_TOKEN']
     if base.nil? || base.empty? || tok.nil? || tok.empty?
-      warn "[SKIP] gate 3/7: SIGMA_BASE_URL / SIGMA_API_TOKEN not set — cannot fetch /columns"
+      # FAIL CLOSED (field-caught): a hard gate that SKIPS without credentials
+      # "passes" on any machine where the env wasn't sourced — the exact way a
+      # run ships with unverified live columns. The gate needs the live check.
+      warn '[FAIL] gate 3/7: SIGMA_BASE_URL / SIGMA_API_TOKEN not set — the live column-type check CANNOT run.'
+      warn '       Source your env (e.g. `source ~/.sigma-migration/env && eval "$(scripts/get-token.sh)"`)'
+      warn '       and re-run this gate. A credential-less run is NOT a passing run.'
+      exit 5
     else
       uri = URI("#{base}/v2/workbooks/#{wb_id}/columns")
       req = Net::HTTP::Get.new(uri)
       req['Authorization'] = "Bearer #{tok}"
       req['Accept'] = 'application/json'
-      res = Net::HTTP.start(uri.host, uri.port, use_ssl: true, read_timeout: 30) { |h| h.request(req) }
+      res = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https', read_timeout: 30) { |h| h.request(req) }
 
       if res.is_a?(Net::HTTPSuccess)
         cols = (JSON.parse(res.body)['entries'] rescue []) || []
@@ -648,13 +679,17 @@ unless opts[:skip_layout]
     base = ENV['SIGMA_BASE_URL']
     tok  = ENV['SIGMA_API_TOKEN']
     if base.nil? || base.empty? || tok.nil? || tok.empty?
-      warn "[SKIP] gate 4/7: SIGMA_BASE_URL / SIGMA_API_TOKEN not set — cannot fetch spec"
+      # FAIL CLOSED — same doctrine as gate 3/7: no credentials, no live layout
+      # verification, no pass.
+      warn '[FAIL] gate 4/7: SIGMA_BASE_URL / SIGMA_API_TOKEN not set — the live layout check CANNOT run.'
+      warn '       Source your env and re-run this gate. A credential-less run is NOT a passing run.'
+      exit 6
     else
       uri = URI("#{base}/v2/workbooks/#{wb_id}/spec")
       req = Net::HTTP::Get.new(uri)
       req['Authorization'] = "Bearer #{tok}"
       req['Accept'] = 'application/json'
-      res = Net::HTTP.start(uri.host, uri.port, use_ssl: true, read_timeout: 30) { |h| h.request(req) }
+      res = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https', read_timeout: 30) { |h| h.request(req) }
 
       if res.is_a?(Net::HTTPSuccess)
         body = res.body.to_s
@@ -748,6 +783,25 @@ else
   built     = census['charts_built'].to_i
   unmatched = census['zones_unmatched'].to_i
   names     = Array(census['unmatched_zone_names'])
+  # The census keys on the PARITY PLAN's matched charts — empty for a workbook
+  # whose worksheets are all dashboard-embedded (no standalone views), which
+  # flags every zone "unmatched" even though each chart was BUILT and
+  # image-verified. Count a zone as matched when its tile carries a confirmed
+  # visual-verify entry (the per-tile side-by-side oracle) — deterministic,
+  # per-name, and loud below.
+  _vv_ok = begin
+    Array(JSON.parse(File.read(File.join(opts[:tab], 'visual-verify', 'manifest.json'))))
+      .select { |t| t['visual_verified'] == true }.map { |t| t['worksheet'].to_s }
+  rescue StandardError
+    []
+  end
+  oracle_matched = names & _vv_ok
+  if oracle_matched.any?
+    names -= oracle_matched
+    unmatched = names.size
+    puts "[OK] gate 5/7: #{oracle_matched.size} zone(s) matched via the image-verification oracle " \
+         "(no standalone view in the parity plan; visual-verify confirmed): #{oracle_matched.join(', ')}"
+  end
   if unmatched > opts[:allow_missing_tiles]
     warn "[FAIL] gate 5/7: tile census — #{zones} dashboard zone(s), #{built} chart(s) built, #{unmatched} unmatched:"
     names.each { |n| warn "         - #{n}" }
@@ -800,7 +854,7 @@ else
       req = Net::HTTP::Get.new(uri)
       req['Authorization'] = "Bearer #{tok}"
       req['Accept'] = 'application/json'
-      res = Net::HTTP.start(uri.host, uri.port, use_ssl: true, read_timeout: 30) { |h| h.request(req) }
+      res = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https', read_timeout: 30) { |h| h.request(req) }
       if res.is_a?(Net::HTTPSuccess)
         spec =
           begin
@@ -866,7 +920,7 @@ else
       req = Net::HTTP::Get.new(uri)
       req['Authorization'] = "Bearer #{tok}"
       req['Accept'] = 'application/json'
-      res = Net::HTTP.start(uri.host, uri.port, use_ssl: true, read_timeout: 30) { |h| h.request(req) }
+      res = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https', read_timeout: 30) { |h| h.request(req) }
       if res.is_a?(Net::HTTPSuccess)
         spec =
           begin
@@ -938,7 +992,17 @@ else
   ok_png = nil
   if valid_png.call(render_path)
     ok_png = render_path
-  elsif opts[:sigma_render].nil? && File.exist?(manifest_path)
+  elsif opts[:sigma_render].nil?
+    # The v4 pipeline's own full-page renders: phase 5b visual QA
+    # (<workdir>/visual-qa/<dash>.sigma.png) and the phase 5g RCF loop
+    # (<workdir>/rcf-pass-N.png). Both ARE live sigma-export-png renders —
+    # this gate predates those paths and used to fail runs that had rendered
+    # (and compared) the page several times over. Newest first.
+    ok_png = (Dir[File.join(opts[:tab], 'visual-qa', '*.sigma.png')] +
+              Dir[File.join(opts[:tab], 'rcf-pass-*.png')])
+             .select { |p| valid_png.call(p) }.max_by { |p| File.mtime(p) }
+  end
+  if ok_png.nil? && opts[:sigma_render].nil? && File.exist?(manifest_path)
     # Fall back to the per-element screenshot manifest (export-chart-png.rb):
     # accept if it lists at least one rendered PNG that validates.
     entries = (JSON.parse(File.read(manifest_path)) rescue nil)

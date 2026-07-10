@@ -594,6 +594,7 @@ Key facts:
 - **`{columnId, type}` object in `columnIds` = secondary axis** (right). `type` overrides the mark shape (`line` typical, also `bar`/`area`/`scatter`).
 - The right axis **auto-scales by default** — no explicit `axis: right` field is needed because the object form *is* the signal.
 - `yAxis.format` governs the **left axis only**. How to customize the right-axis scale (log/min/max/zero) via spec is **unverified** — likely either a `secondaryYAxis.format` / `yAxis2.format` field or another nested form. Don't speculate; probe when needed.
+- **Dual-axis contract** (live-verified 2026-07-10): `yAxis.columnIds` lists **ALL** series (typed `{columnId, type}` entries on combo charts); `yAxis2.columnIds` is a **plain-string subset** naming which of those series ride the right axis. A `yAxis2` id absent from `yAxis` → 400 `"'<id>' is not listed on yAxis.columnIds"`; a typed object inside `yAxis2` → 400 `"Invalid string: object"`. Element-level `filters[*]` entries also require an explicit `id` (400 `"filters[N].id: Invalid string: undefined"` without one).
 
 `build-charts-from-signals.rb` already emits the correct dual-axis combo shape when Tableau dual-axis is detected (shipped in `33f1f35`).
 

@@ -479,6 +479,14 @@ def build_page_from_tree(dashboard, page, opts)
     # dropping the page to a stacked fallback. (The banded path is immune: its
     # text-band selector only matches ids starting "text-", never "title".)
     ctx[:placed] << title_el['id']
+    # The extracted banner's SOURCE ZONE would otherwise still reserve its
+    # y-extent inside the tree — clip it out and renormalize the page domain to
+    # the title's bottom edge so content shifts UP into the freed rows.
+    tb = clip_extracted_title_zone!(tree, zone_by_id[title_el['id'].to_s.sub(/\Atext-/, '')])
+    if tb && tb < 50
+      page_pseudo['y_pct'] = tb
+      page_pseudo['h_pct'] = 100.0 - tb
+    end
   else
     txt_id = "tc-#{page['id']}-hdrtext"
     extra_els << header_text_el(txt_id, page['name'], hdr_dark ? '#FFFFFF' : nil)
@@ -576,6 +584,63 @@ def zone_el_name(z, renames)
   return explicit if explicit
   dt = z['display_title'].to_s.strip
   dt.empty? ? z['caption'] : dt
+end
+
+# Ancestor-container chain (outermost first) leading to zone id `zid`; [] for a
+# top-level zone, nil when absent from the tree.
+def find_zone_path(nodes, zid, path = [])
+  (nodes || []).each do |n|
+    return path if n['id'] == zid
+    if n['children']
+      found = find_zone_path(n['children'], zid, path + [n])
+      return found if found
+    end
+  end
+  nil
+end
+
+# The source's own top-banner text zone gets EXTRACTED into the page header
+# band — but its zone stays in the tree, so its y-extent is reserved TWICE:
+# header rows up top PLUS an equal dead band inside every top-aligned ancestor
+# container (live-caught: the title cost ~20% of the page instead of the
+# source's 8%, and the page failed the visual-similarity floor on dead space
+# alone). Remove the zone, clip each top-aligned ancestor's y-domain to the
+# title's bottom edge, and return that edge — the caller renormalizes the page
+# pseudo-container to it so the remaining content SHIFTS UP into the freed
+# rows (clipping alone keeps absolute proportions and the gap survives).
+# Returns the title's bottom y_pct, or nil when nothing was clipped.
+def clip_extracted_title_zone!(tree, tz, eps = 1.5)
+  return nil unless tz && tz['id'] && tz['y_pct'] && tz['h_pct']
+  path = find_zone_path(tree, tz['id'])
+  return nil unless path
+  ty = tz['y_pct'].to_f
+  tb = ty + tz['h_pct'].to_f
+  (path.empty? ? tree : (path.last['children'] || [])).reject! { |k| k['id'] == tz['id'] }
+  # Prune ancestors the removal left CONTENT-FREE (spacers only): a dead
+  # title-row container still maps to a rect at its siblings' top edge, and
+  # that phantom collision trips decollide_rects' equal-slicing — which throws
+  # away every sibling's source proportions (live-caught: the whole page
+  # re-flowed into uniform bands, dead space intact).
+  placeable = lambda do |n|
+    next false if n['kind'] == 'spacer'
+    next true unless n['kind'] == 'container'
+    (n['children'] || []).any? { |c| placeable.call(c) }
+  end
+  (path.length - 1).downto(0) do |i|
+    node = path[i]
+    break if placeable.call(node)
+    (i.zero? ? tree : (path[i - 1]['children'] || [])).reject! { |k| k['id'] == node['id'] }
+  end
+  # Clip surviving top-aligned ancestors so children map from the title's
+  # bottom edge.
+  path.each do |a|
+    next unless a['y_pct'] && a['h_pct'] && (a['y_pct'].to_f - ty).abs <= eps
+    shrink = tb - a['y_pct'].to_f
+    next unless shrink.positive?
+    a['y_pct'] = tb
+    a['h_pct'] = [a['h_pct'].to_f - shrink, 1.0].max
+  end
+  tb
 end
 
 def detect_header_title_el(page, zone_by_id)

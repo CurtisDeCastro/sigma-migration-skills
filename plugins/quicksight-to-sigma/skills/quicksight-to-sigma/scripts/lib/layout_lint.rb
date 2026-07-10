@@ -129,31 +129,40 @@ module LayoutLint
     n.positive? ? n : GRID_COLS
   end
 
+  # NESTING-AWARE GridContainer extraction. The old version matched the FIRST
+  # </GridContainer> after an open tag, so an OUTER band's body was truncated
+  # at its first nested container's close — the band then appeared to hold
+  # only that fragment's leaves and false-failed the fill check on every
+  # container-tree layout (live-caught: the whole-page content container
+  # "held" only the region control). Children are the container's DIRECT
+  # LayoutElements PLUS its direct child containers' spans (a nested
+  # container's own leaves live in a different local column space, but the
+  # container itself covers its gridColumn span in the parent's grid).
   def containers(page_xml)
     out = []
-    s = page_xml.to_s
-    pos = 0
-    while (m = s.match(%r{<GridContainer\b([^>]*?)(/>|>)}m, pos))
-      attrs, close = m[1], m[2]
-      eid = attrs[/elementId="([^"]*)"/, 1]
-      cols = grid_col_count(attrs)
-      r0 = attrs[/gridRow="\s*(\d+)/, 1].to_i
-      r1 = attrs[/gridRow="\s*\d+\s*\/\s*(\d+)/, 1].to_i
-      inner = ''
-      if close == '>'
-        endm = s.match(%r{</GridContainer>}m, m.end(0))
-        inner = endm ? s[m.end(0)...endm.begin(0)] : ''
-        pos = endm ? endm.end(0) : m.end(0)
-      else
-        pos = m.end(0)
-      end
-      children = inner.scan(%r{<LayoutElement\b[^>]*?/?>}m).map do |le|
-        [le[/elementId="([^"]*)"/, 1],
-         le[/gridColumn="\s*(\d+)/, 1].to_i, le[/gridColumn="\s*\d+\s*\/\s*(\d+)/, 1].to_i,
-         le[/gridRow="\s*(\d+)/, 1].to_i, le[/gridRow="\s*\d+\s*\/\s*(\d+)/, 1].to_i]
-      end
-      out << { eid: eid, r0: r0, r1: r1, cols: cols, children: children }
+    stack = []
+    span = lambda do |tag|
+      [tag[/elementId="([^"]*)"/, 1],
+       tag[/gridColumn="\s*(\d+)/, 1].to_i, tag[/gridColumn="\s*\d+\s*\/\s*(\d+)/, 1].to_i,
+       tag[/gridRow="\s*(\d+)/, 1].to_i, tag[/gridRow="\s*\d+\s*\/\s*(\d+)/, 1].to_i]
     end
+    page_xml.to_s.scan(%r{</GridContainer>|<GridContainer\b[^>]*?/?>|<LayoutElement\b[^>]*?/?>}m) do
+      tag = Regexp.last_match(0)
+      if tag.start_with?('</GridContainer')
+        c = stack.pop
+        out << c if c
+      elsif tag.start_with?('<GridContainer')
+        stack.last[:children] << span.call(tag) unless stack.empty?
+        c = { eid: tag[/elementId="([^"]*)"/, 1], cols: grid_col_count(tag),
+              r0: tag[/gridRow="\s*(\d+)/, 1].to_i,
+              r1: tag[/gridRow="\s*\d+\s*\/\s*(\d+)/, 1].to_i,
+              children: [] }
+        tag.end_with?('/>') ? (out << c) : (stack << c)
+      else # LayoutElement — a direct child of the innermost open container
+        stack.last[:children] << span.call(tag) unless stack.empty?
+      end
+    end
+    out.concat(stack) # tolerate unclosed tags rather than dropping them
     out
   end
 
@@ -223,6 +232,12 @@ module LayoutLint
         kpi_band = kids.any? && kids.length <= KPI_BAND_MAX_TILES &&
                    kids.all? { |k| el_kind[k[0]] == 'kpi-chart' }
         next if kpi_band
+        # A control-only band is sparse BY DESIGN: source dashboards render a
+        # narrow parameter/filter row with the rest of the band empty, and
+        # stretching a lone dropdown to 60% width would be a fidelity bug, not
+        # a fix. (The orphan-control check above still catches controls parked
+        # OUTSIDE any band.)
+        next if kids.any? && kids.all? { |k| el_kind[k[0]] == 'control' }
         # Measure fill against the container's OWN column count — a child's
         # gridColumn is local to its container's gridTemplateColumns. A vertical
         # rail (repeat(1, 1fr)) whose children fill its one column is 100% full,

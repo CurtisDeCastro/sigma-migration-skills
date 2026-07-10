@@ -4280,9 +4280,28 @@ end
 # test-styled-text-body.rb can extract and eval it.
 def text_body_from_runs(runs, align: nil, bg: nil)
   return nil if runs.nil? || runs.empty?
-  # Split into paragraphs on hard-break runs.
+  # Split into paragraphs on hard-break runs. A break run often CARRIES text
+  # (the parser marks any run containing newlines as break:true — "G\nD\nP"
+  # vertical letter stacks, "\nSource: …" credit lines): split that
+  # text on its newlines into successive paragraphs. Discarding it (the old
+  # behavior) silently erased every such zone — a letter-stack zone rendered
+  # as an EMPTY body and the whole element was dropped.
   lines = [[]]
-  runs.each { |r| r['break'] ? (lines << []) : (lines.last << r) }
+  runs.each do |r|
+    unless r['break']
+      lines.last << r
+      next
+    end
+    segs = r['text'].to_s.split("\n", -1)
+    if segs.all? { |s| s.strip.empty? }
+      lines << [] # pure hard-break sentinel — paragraph split only
+    else
+      segs.each_with_index do |seg, i|
+        lines << [] if i.positive?
+        lines.last << r.merge('text' => seg, 'break' => false) unless seg.empty?
+      end
+    end
+  end
   rendered = lines.map do |line|
     line.map do |r|
       raw = r['text'].to_s

@@ -1,5 +1,12 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+
+# Locale-proof the whole run: with LANG unset (fresh machines, CI, some SSH
+# sessions) Ruby defaults external encoding to US-ASCII, and any UTF-8 byte in
+# child-process output or an API error body then raises mid-pipeline. Field
+# names in real workbooks routinely carry non-ASCII ($, ©, accented captions).
+Encoding.default_external = Encoding::UTF_8
+
 # migrate-tableau.rb — ONE-SHOT, single-process orchestrator for the
 # tableau-to-sigma pipeline. Runs the whole phased workflow in one Ruby process
 # to cut agent turns / token cost, WITHOUT turning the migration into a black
@@ -614,7 +621,13 @@ end
 
 # Pull likely-offending field/column names out of a failed workbook build/POST log.
 def cull_failed_fields(*logs)
+  # Child output arrives in the LOCALE encoding (US-ASCII when LANG is unset —
+  # common on fresh machines/CI), and Sigma error bodies carry UTF-8 field
+  # names; an un-scrubbed scan then crashes the RESCUE path itself with
+  # "invalid byte sequence in US-ASCII". Never let log mining raise.
   text = logs.join("\n")
+  text = text.force_encoding(Encoding::UTF_8) unless text.encoding == Encoding::UTF_8
+  text = text.scrub('?') unless text.valid_encoding?
   names = []
   text.scan(/Dependency not found:?\s*([^\n,]+)/i) { |m| names << m[0].strip }
   text.scan(/Unknown column\s*"?\[?([^"\]\n]+)\]?"?/i) { |m| names << m[0].strip }
@@ -878,7 +891,15 @@ if opts[:finalize]
   puts '================ RESULT ================'
   puts "dataModelId : #{state['data_model_id']}"
   puts "workbookId  : #{wb_id}"
-  puts "PARITY      : #{pf['status'] || '?'} (#{pf['charts_pass']}/#{pf['charts_total']} charts#{state['extract_mode'] ? ', extract-mode' : ''})"
+  # An all-embedded workbook has 0 exportable charts — when the hard gate
+  # accepted the anchors oracle instead, say THAT (a "FAIL (0/0)" line next to
+  # STATUS: GREEN reads like a contradiction in the report).
+  _av_sum = (JSON.parse(File.read(File.join(WORK, 'anchors-verdict.json'))) rescue nil)
+  if pf['charts_total'].to_i.zero? && gst.success? && _av_sum && _av_sum['pass']
+    puts "PARITY      : ANCHORS ORACLE (0 exportable view CSVs; #{_av_sum['matched']}/#{_av_sum['checked']} source anchors matched)"
+  else
+    puts "PARITY      : #{pf['status'] || '?'} (#{pf['charts_pass']}/#{pf['charts_total']} charts#{state['extract_mode'] ? ', extract-mode' : ''})"
+  end
   puts "GATES       : phase6=#{p6st.success? ? 'PASS' : 'FAIL'} cleanup=#{clst.success? ? 'PASS' : 'FAIL'} assert-phase6-ran=#{gst.success? ? 'PASS' : "FAIL(#{gst.exitstatus})"}"
   puts "ENHANCE     : #{enhance_line}" if enhance_line
   puts "STATUS      : #{all_green ? 'GREEN' : 'NOT GREEN'}"
@@ -1616,8 +1637,59 @@ if mechanical
     # The real-entity discriminator (png-read point_in_time) also scopes the World
     # per-year SUM to real entities, so it doesn't double-count rollup rows.
     _disc = ((JSON.parse(File.read(DashboardRead.path(WORK)))['point_in_time'] rescue nil) || {})['entity_discriminator']
-    world_lod_map = (MechanicalSpecs.synthesize_fixed_lods!(conv['model'], conv_fact, File.read(twb, encoding: 'UTF-8'), (opts[:column_mapping] || {}), discriminator: _disc) rescue {})
+    # The fact table's REAL columns (landing manifest) — the LOD's base metric is
+    # usually never plotted, so it's absent from the projected DM element and a
+    # projection-only check drops the LOD (the chart ref then dangles).
+    _fact_tbl = (conv_fact.dig('source', 'path') || []).last.to_s.upcase
+    # landing_manifest is a PATH (Dir[] hit above) — parse it here.
+    _real_map = if defined?(landing_manifest) && landing_manifest && !_fact_tbl.empty?
+                  _man = (JSON.parse(File.read(landing_manifest, encoding: 'UTF-8')) rescue nil)
+                  ent = Array(_man).find { |e| e.is_a?(Hash) && e['sf_table'].to_s.upcase.end_with?(".#{_fact_tbl}") }
+                  ent && ent['columns']
+                end
+    world_lod_map = (MechanicalSpecs.synthesize_fixed_lods!(conv['model'], conv_fact, File.read(twb, encoding: 'UTF-8'), (opts[:column_mapping] || {}), discriminator: _disc, real_map: _real_map) rescue {})
     line "FIXED-LOD synthesis: materialized #{world_lod_map.size} per-year world-total column(s) via a grouped Custom SQL helper#{_disc ? " (real-entity scoped by #{_disc})" : ''}" if world_lod_map.any?
+  end
+  # YoY-% helper for the multi-metric recipe (the signed % the source prints
+  # beside each YoY bar — source-anchor values, so approximating them away
+  # fails the anchors gate). Inputs are all deterministic: the bar tiles' dim
+  # and the top tables' entity come from the parsed shelf signals, metrics +
+  # snapshot years from png-read point_in_time.
+  yoy_map = {}
+  if have_twb && conv_fact
+    begin
+      _pngr = (JSON.parse(File.read(DashboardRead.path(WORK))) rescue nil) || {}
+      _pit2 = _pngr['point_in_time'] || {}
+      _hl = Array(_pngr['filter_shelf']).flat_map { |f| Array(f['highlight_tiles']) }.map(&:to_s)
+      _zones = ((JSON.parse(File.read(File.join(WORK, 'dashboard-layout.json'), encoding: 'UTF-8')) rescue nil) || [])
+               .flat_map { |dd| dd['zones'] || [] }
+      _shelf_dim = lambda do |cap|
+        z = _zones.find { |zz| zz['caption'] == cap }
+        f = z && z.dig('rows_shelf', 'fields')
+        f && f.length == 1 && f[0]['role'] == 'dim' ? f[0]['guid'] : nil
+      end
+      _bar_dims = _hl.map { |t| _shelf_dim.call(t) }.compact.uniq
+      _entities = Array(_pngr['tiles']).select { |t| t['kind'].to_s == 'table' }
+                                       .map { |t| _shelf_dim.call(t['title'].to_s) }.compact.uniq
+      if _bar_dims.length == 1 && _entities.length == 1 && _pit2['latest_year'] && _hl.any?
+        require_relative 'lib/recipe_multimetric'
+        _metrics = {}
+        Array(_pngr['tiles']).each do |t|
+          next unless _hl.include?(t['title'].to_s) && t['measure']
+          y = RecipeMultimetric.latest_year_for(_pit2, t['measure'], context: t['title'])
+          _metrics[t['measure']] = y if y
+        end
+        yoy_map = MechanicalSpecs.synthesize_yoy_by_dim!(
+          conv['model'], conv_fact,
+          dim: _bar_dims[0], entity: _entities[0], metrics: _metrics,
+          year: _pit2['year_column'] || 'Year',
+          discriminator: _disc, real_map: _real_map, colmap: (opts[:column_mapping] || {})
+        )
+        line "YoY synthesis: #{yoy_map.size} pairwise-complete YoY column(s) by #{_bar_dims[0]} (helper SQL + FIXED YoY relationship)" if yoy_map.any?
+      end
+    rescue StandardError => e
+      line "WARN: YoY synthesis skipped (#{e.class}: #{e.message})"
+    end
   end
   conv_base = conv_fact ? MechanicalSpecs.base_of(conv['model'], conv_fact) : nil
   pre = conv_fact ? MechanicalSpecs.derive_master(conv_fact, (conv_fact['name'] || 'Order Fact'), conv_base, nil, conv['model']) : { 'untranslated_metrics' => [] }
@@ -2337,6 +2409,11 @@ elsif mechanical
     if defined?(conv_fact) && conv_fact
       _pit = ((JSON.parse(File.read(DashboardRead.path(WORK)))['point_in_time'] rescue nil) || {})
       want = [_pit['entity_discriminator'], _pit['year_column'] || 'Year'].compact
+      # The world-LOD BASE metrics too: the recipe's dual-axis trend plots the
+      # region-filtered Country line Sum([Master/<metric>]) opposite each
+      # synthesized World line, and an LOD-only metric is typically never
+      # plotted directly — absent from the fact, the country line dangles.
+      want |= world_lod_map.values if defined?(world_lod_map) && world_lod_map.is_a?(Hash)
       kept = MechanicalSpecs.retain_columns!(conv_fact, want, real_cols)
       line "point-in-time retain: added #{kept} recipe column(s) (#{want.join(', ')}) to the fact" if kept.positive?
     end
@@ -2563,7 +2640,8 @@ if mechanical
   begin
     _pr = (JSON.parse(File.read(DashboardRead.path(WORK))) rescue nil)
     if _pr && RecipeMultimetric.applicable?(_pr)
-      rsum = RecipeMultimetric.apply!(spec, _pr, world_lod_map: (defined?(world_lod_map) ? world_lod_map : {}))
+      rsum = RecipeMultimetric.apply!(spec, _pr, world_lod_map: (defined?(world_lod_map) ? world_lod_map : {}),
+                                                 yoy_map: (defined?(yoy_map) ? yoy_map : {}))
       if rsum[:applied]
         line "multi-metric recipe: +#{rsum[:masters_added]} masterAll, #{rsum[:highlight_tiles]} highlight tile(s), " \
              "#{rsum[:top_tables]} point-in-time measure(s) rewritten"

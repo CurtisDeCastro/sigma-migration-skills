@@ -15,9 +15,12 @@
 # parity-final.json additionally carries the off-ramp telemetry fields
 # {route, manual_path_authorized, success_sentinel} (P2).
 #
-# Offline: drives the real assert-phase6-ran.rb in scratch workdirs (no SIGMA_*
-# env, so live gates SKIP), plus source-level pins on the orchestrator's
-# sentinel writes (a full pass-1 needs live Tableau/Sigma).
+# Offline: drives the real assert-phase6-ran.rb in scratch workdirs against a
+# LOOPBACK Sigma API stub (the live gates 3/4 FAIL CLOSED without credentials
+# — field fix: a credential-less gate run must never read as passing — so the
+# test serves a minimal clean workbook over 127.0.0.1 and the live gates run
+# for real), plus source-level pins on the orchestrator's sentinel writes (a
+# full pass-1 needs live Tableau/Sigma).
 #
 # Usage: ruby scripts/test-run-sentinels.rb
 
@@ -25,6 +28,7 @@ require 'json'
 require 'open3'
 require 'tmpdir'
 require 'rbconfig'
+require 'webrick'
 
 DIR    = __dir__
 GATE   = File.join(DIR, 'assert-phase6-ran.rb')
@@ -44,8 +48,41 @@ def green_workdir(dir)
   File.write(File.join(dir, 'telemetry-sent.json'), JSON.generate('status' => 'sent', 'tool' => 'test'))
 end
 
+# Loopback Sigma stub: /spec returns a one-band workbook whose layout lints
+# clean; /columns returns one clean (non-error) column.
+STUB_SPEC = {
+  'workbookId' => 'wb-test',
+  'pages' => [
+    { 'id' => 'p0', 'name' => 'Data', 'elements' => [
+      { 'id' => 'master', 'kind' => 'table', 'name' => 'Master',
+        'columns' => [{ 'id' => 'c0', 'name' => 'Sales', 'formula' => '[T/Sales]' }] }
+    ] },
+    { 'id' => 'p1', 'name' => 'Dash', 'elements' => [
+      { 'id' => 'el1', 'kind' => 'bar-chart', 'name' => 'Sales by Region',
+        'columns' => [{ 'id' => 'c1', 'name' => 'Sales', 'formula' => 'Sum([Master/Sales])' }] }
+    ] }
+  ],
+  'layout' => '<Page type="grid" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto" id="p0">' \
+              '<LayoutElement elementId="master" gridColumn="1 / 25" gridRow="1 / 21"/></Page>' \
+              '<Page type="grid" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto" id="p1">' \
+              '<GridContainer elementId="band1" type="grid" gridColumn="1 / 25" gridRow="1 / 10" ' \
+              'gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto">' \
+              '<LayoutElement elementId="el1" gridColumn="1 / 25" gridRow="1 / 9"/></GridContainer></Page>'
+}.freeze
+STUB_COLS = { 'entries' => [{ 'elementId' => 'el1', 'columnId' => 'c1', 'label' => 'Sales',
+                              'type' => { 'type' => 'number' } }] }.freeze
+stub = WEBrick::HTTPServer.new(Port: 0, BindAddress: '127.0.0.1',
+                               Logger: WEBrick::Log.new(File::NULL), AccessLog: [])
+stub.mount_proc('/') do |req, res|
+  res['Content-Type'] = 'application/json'
+  res.body = JSON.generate(req.path.end_with?('/columns') ? STUB_COLS : STUB_SPEC)
+end
+Thread.new { stub.start }
+STUB_URL = "http://127.0.0.1:#{stub.config[:Port]}"
+at_exit { stub.shutdown }
+
 def run_gate(dir, *args)
-  Open3.capture3({ 'SIGMA_BASE_URL' => nil, 'SIGMA_API_TOKEN' => nil },
+  Open3.capture3({ 'SIGMA_BASE_URL' => STUB_URL, 'SIGMA_API_TOKEN' => 'stub-token' },
                  RbConfig.ruby, GATE, '--workdir', dir, '--workbook-id', 'wb-test', *args)
 end
 

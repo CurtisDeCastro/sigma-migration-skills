@@ -195,6 +195,8 @@ module MechanicalSpecs
     # the first `dbname='….hyper'` inside it.
     name2cap = {}
     name2hyper = {}
+    name2remote = Hash.new { |h, k| h[k] = Set.new }
+    sanitize = ->(s) { s.to_s.gsub(/[^0-9A-Za-z]+/, '_').gsub(/\A_+|_+\z/, '').upcase }
     twb_text.split(/<datasource\s/).drop(1).each do |chunk|
       attrs = chunk[/\A([^>]*)>/, 1].to_s
       nm = attrs[/\bname='([^']*)'/, 1]
@@ -203,6 +205,8 @@ module MechanicalSpecs
       name2cap[nm] ||= c if c
       db = chunk[/<connection\b[^>]*\bdbname='([^']*\.hyper)'/i, 1]
       name2hyper[nm] ||= File.basename(db) if db
+      # Physical extract column names (metadata-records) — the tie-breaker below.
+      chunk.scan(%r{<remote-name>([^<]+)</remote-name>}) { |r| name2remote[nm] << sanitize.call(r[0]) }
     end
     usage = Hash.new(0)
     twb_text.scan(/<datasource-dependencies\b[^>]*\bdatasource='([^']+)'/) do |m|
@@ -221,6 +225,24 @@ module MechanicalSpecs
     entry = (hyp && entries.find { |e| e['hyper'].to_s == hyp }) ||
             (!cap.empty? && entries.find { |e| e['caption'].to_s.strip == cap }) ||
             entries.find { |e| e['datasource'].to_s == dominant }
+    # Server-downloaded .twb reference their extracts by GUID dbname (no .hyper
+    # basename), and land-extracts GUID-labels the caption when the datasource
+    # caption can't be resolved — so all three matches above can fail on exactly
+    # the workbooks that need the hint most (the count heuristic then picks the
+    # wrong, unused table). Tie-break by PHYSICAL column overlap: the dominant
+    # datasource's <metadata-records> remote names ARE the landed column set
+    # (near-total overlap on the right table, incidental on the wrong one).
+    # Require a strict winner so an ambiguous match never masquerades as a hint.
+    if entry.nil? && name2remote[dominant].any?
+      remote = name2remote[dominant]
+      scored = entries.map do |e|
+        phys = (e['columns'] || {}).values.map { |v| v.to_s.upcase }
+        [e, phys.count { |p| remote.include?(p) }]
+      end.sort_by { |_e, n| -n }
+      best_e, best_n = scored[0]
+      runner_n = scored[1] ? scored[1][1] : 0
+      entry = best_e if best_n.positive? && best_n > runner_n
+    end
     return nil unless entry && entry['sf_table']
     entry['sf_table'].to_s.split('.').last&.upcase
   end
@@ -237,7 +259,14 @@ module MechanicalSpecs
   # Returns the count of LOD measures synthesized. Mutates `model`/`fact`.
   FIXED_YEAR_LOD_RE = /\{\s*FIXED\s+([^:]+?)\s*:\s*(SUM|AVG|MIN|MAX|COUNT|COUNTD)\s*\(\s*\[([^\]]+)\]\s*\)\s*\}/i
 
-  def synthesize_fixed_lods!(model, fact, twb_text, colmap = {}, discriminator: nil)
+  # real_map (optional): the landing manifest's caption→physical map for the
+  # fact's landed table. The custom SQL references PHYSICAL warehouse columns,
+  # so with a manifest the metric/discriminator checks resolve against the
+  # table's REAL columns — the DM element projects only PLOTTED columns, and a
+  # World LOD's base metric is typically never plotted directly (it only
+  # appears inside the LOD), so a projection-only check silently drops the LOD
+  # and the chart ref dangles at the POST.
+  def synthesize_fixed_lods!(model, fact, twb_text, colmap = {}, discriminator: nil, real_map: nil)
     return {} unless model && fact && twb_text
     # Must return the SAME type ({}) as every other exit — the caller does
     # world_lod_map.any?, and `0.any?` is a NoMethodError that crashes the run.
@@ -264,8 +293,22 @@ module MechanicalSpecs
     decode = ->(s) { s.to_s.gsub('&apos;', "'").gsub('&quot;', '"').gsub('&amp;', '&') }
 
     phys = lambda do |cap|
-      dest = colmap[cap] || colmap[cap.to_s.strip.upcase]
+      dest = (real_map && (real_map[cap] || real_map[cap.to_s.strip])) ||
+             colmap[cap] || colmap[cap.to_s.strip.upcase]
       (dest || cap).to_s.gsub(/[^0-9A-Za-z]+/, '_').gsub(/\A_+|_+\z/, '').upcase
+    end
+
+    # A caption is SQL-usable iff its physical column exists on the landed
+    # table (manifest truth). Without a manifest, fall back to the projected
+    # DM columns OR an explicit colmap entry — a threaded caption→physical
+    # rename is itself evidence the column exists on the landed table.
+    real_set = real_map && real_map.values.map { |v| v.to_s.upcase }.to_set
+    sql_usable = lambda do |cap|
+      if real_set
+        real_set.include?(phys.call(cap))
+      else
+        fact_caps.key?(cap.to_s.downcase) || colmap.key?(cap) || colmap.key?(cap.to_s.strip.upcase)
+      end
     end
 
     lods = {}
@@ -275,7 +318,11 @@ module MechanicalSpecs
       next unless m
       dim, agg, metric = m[1], m[2], m[3]
       next unless dim =~ /DATEPART\(\s*'year'|\bYEAR\s*\(|\[Year\]/i     # year-grain only
-      next unless fact_caps.key?(metric.to_s.downcase)                   # metric must be on THIS fact
+      # The metric must resolve to a REAL column on THIS fact's table. A caption
+      # can be defined per-datasource with different base metrics (e.g. "GDP World"
+      # = SUM([GDP Value]) on one datasource, SUM([GDP (current US$)]) on another)
+      # — keep the first definition whose metric this table actually carries.
+      next unless sql_usable.call(metric)
       lods[cap] ||= { 'name' => cap, 'agg' => agg.upcase, 'metric' => metric }
     end
     return {} if lods.empty?
@@ -293,9 +340,23 @@ module MechanicalSpecs
     # countries, so an unfiltered SUM(...) OVER year double-counts them (the World
     # trend line came out ~6-10x too high). The point-in-time discriminator (a
     # column NULL on rollup rows, e.g. IncomeGroup) selects real entities only.
+    #
+    # SCOPE GUARD (live-caught): the discriminator lives on the COUNTRY-grain fact.
+    # When the FIXED-Year metrics resolve to a DIFFERENT table (e.g. an already
+    # world-grain companion extract), that table may not carry the column at all —
+    # emitting the WHERE anyway makes the whole DM POST fail with
+    # `invalid identifier`. Only filter when the discriminator's caption resolves
+    # to a column ON THIS fact; a single-entity/world-grain table needs no
+    # rollup exclusion in the first place.
     where = ''
     if discriminator && !discriminator.to_s.strip.empty?
-      where = %( WHERE "#{phys.call(discriminator)}" IS NOT NULL)
+      if sql_usable.call(discriminator)
+        where = %( WHERE "#{phys.call(discriminator)}" IS NOT NULL)
+      else
+        warn "NOTE world-by-year: discriminator #{discriminator.inspect} is not a column on " \
+             "#{path[2]} — rollup-exclusion WHERE omitted (verify the world totals against " \
+             'the source render in Phase 6; a table without the discriminator usually has no rollup rows).'
+      end
     end
     statement = %(SELECT #{sel.join(', ')} FROM #{fqn}#{where} GROUP BY "#{year_phys}")
 
@@ -314,6 +375,93 @@ module MechanicalSpecs
     # Return the world-column -> source-metric map (recipe uses it to add the
     # region-filtered Country line opposite each synthesized World line).
     lods.each_with_object({}) { |(cap, l), h| h[cap.to_s.downcase] = l['metric'] }
+  end
+
+  # Synthesize the "<Metric> YoY" helper for a multi-metric YoY panel: the
+  # source prints a signed % beside each category bar. That change is
+  # PAIRWISE-COMPLETE year-over-year — only entities carrying BOTH years count
+  # (one-sided entities distort the group total: live-calibrated, a naive
+  # region sum gave -22% where the source prints -11%). Emits ONE grouped
+  # Custom SQL element over the fact table (dim + one "<metric> YoY" column
+  # per metric, each at ITS OWN latest year vs the prior year, real entities
+  # only) + a `FIXED YoY` relationship on the fact keyed by the dim —
+  # derive_master's FIXED-helper surfacing then exposes each YoY column onto
+  # the master; the multimetric recipe adds it to the bar tiles (and the
+  # anchors gate can verify the printed percentages).
+  # metrics: {caption => latest_year}. Returns {metric_caption.downcase =>
+  # "<caption> YoY"} (empty when not applicable). Mutates model/fact.
+  def synthesize_yoy_by_dim!(model, fact, dim:, entity:, metrics:, year: 'Year',
+                             discriminator: nil, real_map: nil, colmap: {})
+    return {} unless model && fact && metrics.is_a?(Hash) && !metrics.empty?
+    return {} if dim.to_s.strip.empty? || entity.to_s.strip.empty?
+    return {} unless fact.dig('source', 'kind') == 'warehouse-table'
+    path = fact.dig('source', 'path') || []
+    conn = fact.dig('source', 'connectionId')
+    return {} if path.size < 3 || conn.to_s.empty?
+
+    phys = lambda do |cap|
+      dest = (real_map && (real_map[cap] || real_map[cap.to_s.strip])) ||
+             colmap[cap] || colmap[cap.to_s.strip.upcase]
+      (dest || cap).to_s.gsub(/[^0-9A-Za-z]+/, '_').gsub(/\A_+|_+\z/, '').upcase
+    end
+    real_set = real_map && real_map.values.map { |v| v.to_s.upcase }.to_set
+    usable = ->(cap) { real_set.nil? || real_set.include?(phys.call(cap)) }
+    return {} unless usable.call(dim) && usable.call(entity) && usable.call(year)
+
+    fact_caps = (fact['columns'] || []).each_with_object({}) do |c, h|
+      disp = col_display(c)
+      h[disp.to_s.downcase] = c if disp && !disp.to_s.empty?
+    end
+    dim_col = fact_caps[dim.to_s.downcase]
+    return {} unless dim_col # the relationship key must be projected on the fact
+
+    yp = phys.call(year)
+    agg = []
+    out = []
+    cols = [{ 'id' => 'yoy-dim', 'name' => dim, 'formula' => "[Custom SQL/#{dim}]" }]
+    ymap = {}
+    metrics.each_with_index do |(cap, yr), i|
+      next unless usable.call(cap) && yr.to_s =~ /\A\d{4}\z/
+      mp = phys.call(cap)
+      y = yr.to_i
+      agg << %(SUM(CASE WHEN "#{yp}" = #{y} THEN "#{mp}" END) AS m#{i}a)
+      agg << %(SUM(CASE WHEN "#{yp}" = #{y - 1} THEN "#{mp}" END) AS m#{i}b)
+      name = "#{cap} YoY"
+      out << %(SUM(CASE WHEN m#{i}a IS NOT NULL AND m#{i}b IS NOT NULL THEN m#{i}a END) / ) +
+             %(NULLIF(SUM(CASE WHEN m#{i}a IS NOT NULL AND m#{i}b IS NOT NULL THEN m#{i}b END), 0) - 1 AS "#{name}")
+      cols << { 'id' => "yoy-#{slug(name)}", 'name' => name, 'formula' => "[Custom SQL/#{name}]" }
+      ymap[cap.to_s.downcase] = name
+    end
+    return {} if ymap.empty?
+
+    where = ''
+    if discriminator && !discriminator.to_s.strip.empty? && usable.call(discriminator)
+      where = %( WHERE "#{phys.call(discriminator)}" IS NOT NULL)
+    end
+    fqn = %(#{path[0]}.#{path[1]}."#{path[2]}")
+    statement = <<~SQL.gsub(/\s+/, ' ').strip
+      SELECT "#{phys.call(dim)}" AS "#{dim}", #{out.join(', ')}
+      FROM (
+        SELECT "#{phys.call(dim)}", "#{phys.call(entity)}", #{agg.join(', ')}
+        FROM #{fqn}#{where}
+        GROUP BY "#{phys.call(dim)}", "#{phys.call(entity)}"
+      ) t
+      GROUP BY "#{phys.call(dim)}"
+    SQL
+
+    sql_el = {
+      'id' => 'el-yoy-by-dim', 'kind' => 'table',
+      'source' => { 'connectionId' => conn, 'kind' => 'sql', 'statement' => statement },
+      'columns' => cols, 'order' => cols.map { |c| c['id'] }
+    }
+    page = (model['pages'] || []).find { |p| (p['elements'] || []).any? { |e| e.equal?(fact) } } ||
+           (model['pages'] || []).first
+    (page['elements'] ||= []) << sql_el if page
+    (fact['relationships'] ||= []) << {
+      'id' => 'rel-yoy-by-dim', 'name' => 'FIXED YoY', 'targetElementId' => 'el-yoy-by-dim',
+      'keys' => [{ 'sourceColumnId' => dim_col['id'], 'targetColumnId' => 'yoy-dim' }]
+    }
+    ymap
   end
 
   # Retain extra base columns on the fact that the recipe needs but the converter

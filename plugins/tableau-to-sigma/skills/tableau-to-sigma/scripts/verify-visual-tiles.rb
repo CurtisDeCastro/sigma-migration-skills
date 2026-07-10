@@ -32,10 +32,47 @@ OptionParser.new do |p|
   p.on('--tableau-dir DIR') { |v| opts[:tab] = v }
   p.on('--w N', Integer)    { |v| opts[:w] = v }
   p.on('--h N', Integer)    { |v| opts[:h] = v }
+  p.on('--layout PATH')     { |v| opts[:layout] = v }
+  p.on('--dash-dir DIR')    { |v| opts[:dash_dir] = v }
 end.parse!
 %i[wb tab].each { |k| abort("missing --#{k.to_s.tr('_', '-')}") unless opts[k] }
 opts[:w] ||= 1400
 opts[:h] ||= 900
+opts[:layout]   ||= File.join(opts[:tab], 'dashboard-layout.json')
+opts[:dash_dir] ||= File.join(opts[:tab], 'dashboards')
+
+# Dashboard-crop fallback: a "signal-only-…" view id is a PLACEHOLDER (the
+# worksheet is dashboard-embedded with no standalone REST view — fetching it can
+# only 404). The tile's ground truth still exists: the FULL-DASHBOARD render from
+# discovery + the zone rect from the .twb layout. Crop it out. Also used when a
+# real view-image fetch fails (perms, stale token) — a crop beats no image.
+zone_rects = {}
+if File.exist?(opts[:layout])
+  ((JSON.parse(File.read(opts[:layout])) rescue nil) || []).each do |dash|
+    (dash['zones'] || []).each do |z|
+      cap = z['caption'].to_s
+      next if cap.empty? || z['x_pct'].nil?
+      zone_rects[cap] ||= [dash['dashboard'], z.values_at('x_pct', 'y_pct', 'w_pct', 'h_pct')]
+    end
+  end
+end
+CROP_PY = <<~PY
+  from PIL import Image
+  import sys
+  src, out = sys.argv[1], sys.argv[2]
+  x, y, w, h = [float(a) for a in sys.argv[3:7]]
+  im = Image.open(src); W, H = im.size
+  im.crop((round(W*x/100), round(H*y/100), round(W*(x+w)/100), round(H*(y+h)/100))).save(out)
+PY
+crop_from_dashboard = lambda do |ws, out_png|
+  dash, rect = zone_rects[ws]
+  return false unless dash && rect
+  src = File.join(opts[:dash_dir], "#{dash}.png")
+  src = Dir[File.join(opts[:dash_dir], '*.png')].first unless File.exist?(src)
+  return false unless src && File.exist?(src)
+  system(*PyResolve.argv, '-c', CROP_PY, src, out_png, *rect.map(&:to_s),
+         out: File::NULL, err: File::NULL) && File.size?(out_png)
+end
 
 sidecar = File.join(opts[:tab], 'visual-verify-tiles.json')
 unless File.exist?(sidecar)
@@ -63,15 +100,21 @@ tiles.each do |t|
           'reason' => t['reason'], 'tableau_png' => nil, 'sigma_png' => nil,
           'visual_verified' => false }
 
-  # 1) Tableau view image (renders fine even though its data export was empty)
+  # 1) Tableau view image (renders fine even though its data export was empty).
+  #    "signal-only-…" ids are placeholders (no standalone view) — skip straight
+  #    to the dashboard-crop fallback instead of a guaranteed 404.
   begin
-    if t['view_id']
+    if t['view_id'] && !t['view_id'].to_s.start_with?('signal-only-')
       bytes = Tableau.view_image(t['view_id'], width: opts[:w], height: opts[:h])
       File.binwrite(tab_png, bytes)
       rec['tableau_png'] = tab_png if File.size?(tab_png)
     end
   rescue StandardError => e
     warn "  WARN  Tableau image fetch failed for #{ws.inspect}: #{e.class}: #{e.message}"
+  end
+  if rec['tableau_png'].nil? && crop_from_dashboard.call(ws, tab_png)
+    rec['tableau_png'] = tab_png
+    rec['tableau_source'] = 'dashboard-crop'
   end
 
   # 2) Sigma element render

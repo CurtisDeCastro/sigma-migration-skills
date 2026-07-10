@@ -70,10 +70,11 @@ module RecipeMultimetric
 
   # Main entry — mutate `spec` in place; returns a summary hash. `png_read` is the
   # parsed png-read.json. Never raises.
-  def apply!(spec, png_read, world_lod_map: {})
+  def apply!(spec, png_read, world_lod_map: {}, yoy_map: {})
     summary = { applied: false, masters_added: 0, highlight_tiles: 0, top_tables: 0, trends: 0, notes: [] }
     return summary unless spec.is_a?(Hash) && applicable?(png_read)
     world_lod_map ||= {}
+    yoy_map ||= {}
 
     pit = (png_read['point_in_time'] || {}).dup
     by_title = elements_by_title(spec)
@@ -153,6 +154,12 @@ module RecipeMultimetric
         # of the source's proprietary growth measure).
         m = tile_measure[t]
         rewrite_bar_measure!(el, ma_name, m, pit) if m && !m.to_s.strip.empty?
+        # The signed YoY % the source prints beside each bar — a REAL measure
+        # (pairwise-complete helper surfaced on the master by the DM synthesis),
+        # so the anchors gate can verify the printed percentages.
+        if m && (yc = yoy_map[m.to_s.downcase])
+          add_yoy_column!(el, ma_name, yc)
+        end
         summary[:highlight_tiles] += 1
       end
     end
@@ -245,6 +252,20 @@ module RecipeMultimetric
     el['color'] = { 'by' => 'category', 'column' => hid, 'scheme' => HL_SCHEME }
   end
 
+  # Add the surfaced "<Metric> YoY" master column to a bar tile as a visible
+  # signed-percent measure (Max over the per-category rows — the relationship
+  # join makes it constant within a category). Idempotent.
+  def add_yoy_column!(el, ma_name, yoy_col)
+    return if (el['columns'] || []).any? { |c| c['name'] == 'YoY %' }
+    id = "yoy-#{el['id']}"
+    (el['columns'] ||= []) << {
+      'id' => id, 'name' => 'YoY %',
+      'formula' => "Max([#{ma_name}/#{yoy_col}])",
+      'format' => { 'kind' => 'number', 'formatString' => '+.0%' }
+    }
+    el['order'] << id if el['order'].is_a?(Array)
+  end
+
   def top_table?(el)
     el['kind'] == 'table' &&
       (Array(el['filters']).any? { |f| f['kind'] == 'top-n' } || norm(el['name']).include?('top'))
@@ -260,16 +281,41 @@ module RecipeMultimetric
   # Resolve the snapshot year for a metric. `latest_year` may be a scalar (one
   # year for all measures) or a per-measure map {metric => year} — TEU ends 2014
   # while GDP/FDI end 2015, so a single year blanks TEU.
-  def latest_year_for(pit, metric)
+  # Resolve the snapshot year for a measure. Phase 1d records shorthand keys
+  # ({"GDP"=>2015, "TEU"=>2014} — the schema's own example) while the measure
+  # column is the full caption, and some captions never contain the shorthand
+  # at all ("FDI" vs "Foreign direct investment, net inflows (BoP, current
+  # US$)" — live-caught: that miss shipped an ALL-YEARS sum as a "top" table).
+  # Tiered match, longest key wins per tier:
+  #   1. exact caption match (case-insensitive)
+  #   2. key as a whole WORD of the caption ("GDP" ∈ "GDP (current US$)",
+  #      boundary-guarded so "GDP" ∉ "GDPPP Value")
+  #   3. key as a whole word of the TILE TITLE (context — "FDI" ∈ "FDI Top3")
+  #   4. key as a word PREFIX of caption or title ("FDI" ∈ "FDIPie")
+  def latest_year_for(pit, metric, context: nil)
     ly = pit['latest_year']
     return ly unless ly.is_a?(Hash)
-    ly[metric] || ly[metric.to_s] ||
-      ly.find { |k, _| k.to_s.downcase == metric.to_s.downcase }&.last
+    exact = ly[metric] || ly[metric.to_s] ||
+            ly.find { |k, _| k.to_s.downcase == metric.to_s.downcase }&.last
+    return exact if exact
+    m = metric.to_s.downcase
+    ctx = context.to_s.downcase
+    word   = ->(k, t) { !t.empty? && t =~ /(\A|[^a-z0-9])#{Regexp.escape(k)}([^a-z0-9]|\z)/ }
+    prefix = ->(k, t) { !t.empty? && t =~ /(\A|[^a-z0-9])#{Regexp.escape(k)}/ }
+    tiers = [->(k) { word.call(k, m) },
+             ->(k) { word.call(k, ctx) },
+             ->(k) { prefix.call(k, m) || prefix.call(k, ctx) }]
+    tiers.each do |match|
+      best = ly.select { |k, _| !k.to_s.empty? && match.call(k.to_s.downcase) }
+               .max_by { |k, _| k.to_s.length }
+      return best.last if best
+    end
+    nil
   end
 
   # The point-in-time conditional Sum(If([Year]=<ly> And Not IsNull([discr]), base, null)).
-  def pit_conditional(prefix, base_field, pit, metric)
-    ly = latest_year_for(pit, metric)
+  def pit_conditional(prefix, base_field, pit, metric, context: nil)
+    ly = latest_year_for(pit, metric, context: context)
     discr = pit['entity_discriminator']
     conds = []
     conds << "[#{prefix}/#{pit['year_column'] || 'Year'}] = #{ly}" if ly
@@ -287,8 +333,9 @@ module RecipeMultimetric
     (el['columns'] || []).each do |c|
       inner = base_metric_ref(c['formula'], prefix)
       next unless inner # only aggregated base-metric measures
-      next unless latest_year_for(pit, inner) || (pit['entity_discriminator'] && !pit['entity_discriminator'].to_s.strip.empty?)
-      c['formula'] = pit_conditional(prefix, inner, pit, inner)
+      next unless latest_year_for(pit, inner, context: el['name']) ||
+                  (pit['entity_discriminator'] && !pit['entity_discriminator'].to_s.strip.empty?)
+      c['formula'] = pit_conditional(prefix, inner, pit, inner, context: el['name'])
       c['format'] = SI_FMT # compact SI (raw ",.0f" overflows the cell)
       rewritten_ids << c['id']
       n += 1
@@ -321,6 +368,15 @@ module RecipeMultimetric
       # all 47 entities alphabetically with null-metric rows on top instead of the
       # real top-8 by value.
       promote_top_n!(el, rewritten_ids.first)
+      # Value-gradient cells (source look: value column shaded light→brand teal,
+      # top row darkest). backgroundScale is spec-supported on tables (verified —
+      # refs/workbook-layout.md); hex colors only (rgb() trips the WAF).
+      unless Array(el['conditionalFormats']).any? { |cf| cf['type'] == 'backgroundScale' }
+        (el['conditionalFormats'] ||= []) << {
+          'type' => 'backgroundScale', 'columnIds' => rewritten_ids.dup,
+          'scheme' => ['#f4f9fa', '#027b8e'], 'includeValues' => true
+        }
+      end
     end
     n
   end
@@ -390,13 +446,32 @@ module RecipeMultimetric
       end
     world_col['format'] = SI_FMT
     el['kind'] = 'combo-chart'
-    # BOTH lines share ONE axis (no yAxis2) — so the region reads honestly as a
-    # fraction of the world total (the clean reference behavior). A second axis
-    # auto-scales each line independently and prints raw 15-digit ticks.
-    el['yAxis'] = { 'columnIds' => [{ 'columnId' => country_id, 'type' => 'line' },
-                                    { 'columnId' => world_col['id'], 'type' => 'line' }] }
-    el.delete('yAxis2')
+    # DUAL AXIS, matching the source design: Country on the left, World on the
+    # right — separate scales make the two lines TRACK each other (the reading
+    # the source composes; one shared axis pins the region to the floor of the
+    # world total). Raw 15-digit ticks are prevented by the SI column formats,
+    # not by collapsing the axes.
+    # Dual-axis spec contract (live-verified): yAxis.columnIds lists ALL series
+    # (typed {columnId, type} entries); yAxis2.columnIds is a PLAIN-STRING SUBSET
+    # naming which of those series ride the right axis. A yAxis2 id absent from
+    # yAxis 400s ("not listed on yAxis.columnIds"); a typed object in yAxis2
+    # 400s ("Invalid string: object").
+    el['yAxis']  = { 'columnIds' => [{ 'columnId' => country_id, 'type' => 'line' },
+                                     { 'columnId' => world_col['id'], 'type' => 'line' }] }
+    el['yAxis2'] = { 'columnIds' => [world_col['id']] }
     el.delete('dataLabel') # no per-point value labels smeared across the lines
+    # Trim trailing no-data years: the master carries rows for every year ANY
+    # metric covers, so a metric that ends earlier (TEU stops before GDP) plots
+    # its trailing all-null years as a cliff to 0. Row-level IsNotNull filter
+    # (the verified bool-filter shape) ends each trend at ITS metric's last
+    # real year — exactly the source's per-tile x-domain.
+    nn_id = "nn-trend-#{el['id']}"
+    unless cols.any? { |c| c['id'] == nn_id }
+      (el['columns'] ||= []) << { 'id' => nn_id, 'name' => "#{metric} Not Null",
+                                  'formula' => "IsNotNull([#{prefix}/#{metric}])" }
+      (el['filters'] ||= []) << { 'id' => "f-#{nn_id}", 'columnId' => nn_id, 'kind' => 'list',
+                                  'mode' => 'include', 'selectionMode' => 'multiple', 'values' => [true] }
+    end
     # Integer Year x-axis (build-charts uses a DateTrunc datetime column). Rewrite
     # the bound x column to the plain Year field so ticks read 1960…2014, not "Jan 1960".
     xid = el.dig('xAxis', 'columnId')
@@ -423,7 +498,7 @@ module RecipeMultimetric
       c['name'] != 'Selected' && c['formula'].to_s !~ /\A\[[^\]]+\]\z/
     end
     return 0 unless meas
-    meas['formula'] = pit_conditional(prefix, metric, pit, metric)
+    meas['formula'] = pit_conditional(prefix, metric, pit, metric, context: el['name'])
     # The tile's measure was the source's %-change "(copy)" calc, so its format was
     # a percent (",.0%") — a raw magnitude then renders "$24T" as "…345%". Reset to
     # a compact SI number to match the clean reference.

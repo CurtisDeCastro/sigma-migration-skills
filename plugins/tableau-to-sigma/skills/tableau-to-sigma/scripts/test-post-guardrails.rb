@@ -89,11 +89,15 @@ end
 # ---- source-level pins: PUT discipline (network paths can't be unit-driven) ----
 par = File.read(PAR)
 check(par.match?(/migrate-state\.json.*workbook_id/), 'migrate-state.json is a workbook-id source for the PUT default', fails)
-check(par.include?("prior_ids.last || state_wb_id"), 'PUT is the forced default whenever an id is known', fails)
+check(par.include?('prior_ids.last || state_id'), 'PUT is the forced default whenever an id is known', fails)
 check(par.include?('--force-new-workbook'), 'the only plain-POST escape is --force-new-workbook', fails)
 check(par.match?(/force-new-workbook.*contradicts.*--update-id/m), 'contradictory flags abort', fails)
 check(par.match?(/Offramp\.log\(.*force-new-workbook/m), 'forced new workbook records the waiver off-ramp', fails)
-check(par.include?('same-workbook PUT discipline'), 'auto-PUT announces itself + the escape', fails)
+check(par.match?(/same-.*PUT discipline/), 'auto-PUT announces itself + the escape', fails)
+# DM twin of the discipline: posted DMs are recorded and auto-PUT on re-run
+# (the duplicate-DM-per-iteration field failure).
+check(par.include?('posted-datamodels.jsonl'), 'posted DMs are recorded per-workdir', fails)
+check(par.match?(/dataModelId.*rescue nil/), 'prior dm-ids id-map is a DM id source for the PUT default', fails)
 
 puts
 if fails.empty?

@@ -143,7 +143,8 @@ end
 # second invocation in the same conversion, the previous workbook is being
 # orphaned in the customer's My Documents. WARN loudly and emit the PUT
 # alternative. Tracked at beads-sigma-38a (3-workbook customer regression).
-posted_log = File.join(opts[:workdir], 'posted-workbooks.jsonl') if opts[:type] == 'workbook'
+posted_log = File.join(opts[:workdir],
+                       opts[:type] == 'workbook' ? 'posted-workbooks.jsonl' : 'posted-datamodels.jsonl')
 prior_ids = []
 if posted_log && File.exist?(posted_log)
   prior_ids = File.readlines(posted_log).map { |l| JSON.parse(l)['id'] rescue nil }.compact
@@ -156,30 +157,34 @@ end
 # a workdir whose posted-workbooks.jsonl never existed — the new-workbook-per-fix
 # field failure). PUT is the FORCED default whenever an id is known; a plain POST
 # on such a workdir requires --force-new-workbook "<reason>" (quality waiver —
-# the old workbook is orphaned). DM updates require an explicit --update-id
-# (Phase 3 normally reuses a DM via the ref-dm path).
-state_wb_id = nil
+# the old object is orphaned). DATAMODELS get the SAME discipline (field
+# failure: every mechanical re-run POSTed a fresh DM, littering the customer
+# folder with near-identical models): the last id from posted-datamodels.jsonl —
+# or, for workdirs that predate that log, the prior run's --out id-map — is
+# auto-PUT unless --force-new-workbook names a reason.
+state_id = nil
 if opts[:type] == 'workbook'
-  state_wb_id = (JSON.parse(File.read(File.join(opts[:workdir], 'migrate-state.json')))['workbook_id'] rescue nil)
+  state_id = (JSON.parse(File.read(File.join(opts[:workdir], 'migrate-state.json')))['workbook_id'] rescue nil)
+elsif File.exist?(opts[:out].to_s)
+  state_id = (JSON.parse(File.read(opts[:out]))['dataModelId'] rescue nil)
 end
-known_id = opts[:update_id] ||
-           (opts[:type] == 'workbook' ? (prior_ids.last || state_wb_id) : nil)
-if opts[:force_new] && opts[:type] == 'workbook'
+known_id = opts[:update_id] || prior_ids.last || state_id
+if opts[:force_new]
   abort 'FATAL: --force-new-workbook contradicts --update-id — pass one or the other.' if opts[:update_id]
   if known_id
-    warn "WARN: --force-new-workbook (#{opts[:force_new]}) — POSTing a NEW workbook although this workdir " \
-         "already recorded #{known_id}. The old workbook is ORPHANED. Counted as a quality waiver; " \
+    warn "WARN: --force-new-workbook (#{opts[:force_new]}) — POSTing a NEW #{opts[:type]} although this workdir " \
+         "already recorded #{known_id}. The old #{opts[:type]} is ORPHANED. Counted as a quality waiver; " \
          'name it in your report.'
     Offramp.log(opts[:workdir], kind: 'force-new-workbook',
-                reason: opts[:force_new].to_s, detail: "prior workbook #{known_id} orphaned") if defined?(Offramp)
+                reason: opts[:force_new].to_s, detail: "prior #{opts[:type]} #{known_id} orphaned") if defined?(Offramp)
   end
   known_id = nil
 end
 update_id = known_id
 if update_id && !opts[:update_id]
-  warn "same-workbook PUT discipline: this workdir already recorded workbook #{update_id} " \
-       "(#{prior_ids.any? ? 'posted-workbooks.jsonl' : 'migrate-state.json'}) — updating it IN PLACE. " \
-       'A plain POST would orphan it; to deliberately create a new workbook, re-run with ' \
+  warn "same-#{opts[:type]} PUT discipline: this workdir already recorded #{opts[:type]} #{update_id} " \
+       "(#{prior_ids.any? ? File.basename(posted_log) : 'prior id-map/state'}) — updating it IN PLACE. " \
+       "A plain POST would orphan it; to deliberately create a new #{opts[:type]}, re-run with " \
        '--force-new-workbook "<reason>" (quality waiver).'
 end
 
@@ -192,7 +197,14 @@ if update_id
   # workbook falls back to a single-column stack. If the outgoing spec carries no
   # layout, carry over the LIVE workbook's current layout so this PUT is
   # layout-preserving. put-layout.rb (the intended LAST write) still overrides.
-  if opts[:type] == 'workbook'
+  # Under the orchestrator, put-layout.rb re-derives and re-applies the layout
+  # right after this PUT — carrying the live layout here is at best redundant
+  # and at worst wrong: mechanical element ids are DETERMINISTIC across
+  # rebuilds, so a stale-generation layout can pass the overlap check yet no
+  # longer match the freshly planned bands (live-caught: the phase-4 lint then
+  # fails on the prior run's geometry). Standalone spot fixes (no orchestrator,
+  # no follow-up put-layout) still get the carry.
+  if opts[:type] == 'workbook' && ENV['SIGMA_ORCHESTRATED_RUN'] != '1'
     out_spec = (YAML.safe_load(put_body, permitted_classes: [Date, Time]) rescue nil)
     if out_spec.is_a?(Hash) && out_spec['layout'].to_s.strip.empty?
       live = http(:get, format(GET_PATH, update_id))
@@ -208,7 +220,19 @@ if update_id
         ref_ids  = live_layout.scan(/elementId="([^"]+)"/).flatten.uniq
         have_ids = (out_spec['pages'] || []).flat_map { |p| (p['elements'] || []).map { |e| e['id'] } }.compact
         missing  = ref_ids - have_ids
-        if missing.any? && live_spec['pages'].is_a?(Array)
+        # GENERATION check: a carry is only sound when the outgoing spec still
+        # contains the elements the layout places (a spot fix — ids stable). A
+        # FULL REBUILD assigns all-new chart ids; carrying the old layout then
+        # imports the old charts below (duplicates) and leaves every new chart
+        # unplaced (empty bands + dead rows — caught live by the layout lint).
+        # Drop it and let put-layout.rb re-derive placement from layout.xml,
+        # which the orchestrator runs right after this PUT.
+        stale_generation = (ref_ids & have_ids).size < (ref_ids.size * 0.3).ceil
+        if stale_generation
+          warn "layout NOT carried: the live layout places #{ref_ids.size} element(s) but only " \
+               "#{(ref_ids & have_ids).size} exist in the outgoing spec (stale generation — full rebuild). " \
+               'Run put-layout.rb AFTER this PUT or it renders single-column (the orchestrator does).'
+        elsif missing.any? && live_spec['pages'].is_a?(Array)
           live_by_id = {}
           live_spec['pages'].each { |p| (p['elements'] || []).each { |e| live_by_id[e['id']] = [p, e] } }
           out_by_id  = (out_spec['pages'] || []).each_with_object({}) { |p, h| h[p['id']] = p }
@@ -221,11 +245,11 @@ if update_id
             missing.delete(mid)
           end
         end
-        if missing.empty?
+        if !stale_generation && missing.empty?
           out_spec['layout'] = live_layout
           put_body = JSON.generate(out_spec)
           warn 'layout-preserve: carried the live workbook layout (+ its container/header elements) into the PUT.'
-        else
+        elsif !stale_generation
           warn "layout NOT auto-preserved: #{missing.size} layout-referenced element(s) missing and unrecoverable " \
                "(#{missing.first(3).join(', ')}) — run put-layout.rb AFTER this PUT or it renders single-column."
         end

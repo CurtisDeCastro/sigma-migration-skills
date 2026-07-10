@@ -45,7 +45,7 @@ require 'time'
 # them from the neutral cred file written by setup.rb. Existing env always wins.
 _neutral_env = File.expand_path('~/.sigma-migration/env')
 if ENV['SIGMA_CLIENT_ID'].nil? && File.exist?(_neutral_env)
-  File.foreach(_neutral_env) do |line|
+  File.foreach(_neutral_env, encoding: 'UTF-8') do |line|
     next unless (m = line.chomp.match(/\A\s*(?:export\s+)?([A-Z_][A-Z0-9_]*)=(.*)\z/))
     key, raw = m[1], m[2].strip
     raw = raw[1..-2] if raw.length >= 2 &&
