@@ -2932,6 +2932,21 @@ function tableauFormulaToSigma(formula, warnings) {
   if (warnings && TABLEAU_TABLE_CALC_TOKEN_RE.test(f)) {
     warnings.push(`\u26A0 Table-calc function embedded in a larger expression \u2014 NOT translated in place. Untranslated fragment: ${f.slice(0, 120)}`);
   }
+  if (warnings) {
+    const masked = f.replace(/"[^"]*"/g, '""').replace(/\[[^\]]*\]/g, "[]");
+    const unmapped = /* @__PURE__ */ new Set();
+    const scan = /\b([A-Z][A-Z0-9_]+)\s*\(/g;
+    let mm;
+    while ((mm = scan.exec(masked)) !== null) {
+      const fn = mm[1];
+      if (TABLEAU_TABLE_CALC_TOKEN_RE.test(fn + "("))
+        continue;
+      unmapped.add(fn);
+    }
+    if (unmapped.size) {
+      warnings.push(`\u26A0 Unmapped Tableau function(s) passed through unconverted: ${[...unmapped].join(", ")} \u2014 no validated Sigma equivalent yet. Rewrite manually; left as-is they error at query time.`);
+    }
+  }
   return f.trim();
 }
 function tableauIsAggregate(formula) {

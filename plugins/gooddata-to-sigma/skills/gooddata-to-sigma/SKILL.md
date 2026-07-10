@@ -10,8 +10,10 @@ description: >-
   and dashboards to pages + layout, ports user data filters (RLS) to Sigma user
   attributes, and verifies parity against the same warehouse. Translates what
   maps cleanly and flags what doesn't (compute-engine-only metrics, exotic MAQL
-  context, unsupported widgets) instead of emitting wrong logic. Legacy GoodData
-  Platform (/gdc/md classic) is out of scope for now — Cloud / .CN only.
+  context, unsupported widgets) instead of emitting wrong logic. Also handles the
+  legacy GoodData Platform (classic "bear", /gdc metadata API, SST/TT auth) for
+  discovery + assessment — one identity sweeps every project under a domain — with
+  DM/workbook conversion still Cloud-only (refs/gooddata-platform-api.md).
 user-invocable: true
 ---
 
@@ -37,7 +39,8 @@ and all data-model authoring to **sigma-data-models**.
 
 ## Read these first
 
-- `refs/gooddata-api.md` — declarative export API, auth, LDM + analytics shape.
+- `refs/gooddata-api.md` — Cloud/.CN declarative export API, auth, LDM + analytics shape.
+- `refs/gooddata-platform-api.md` — legacy Platform (`/gdc`) API, SST/TT auth, classic MAQL.
 - `refs/maql-mapping.md` — MAQL → Sigma formula contract (the hard part).
 - `refs/viz-type-mapping.md` — insight + dashboard → Sigma element mapping.
 - `refs/design-notes.md` — full architecture, parity, RLS, risks, build order.
@@ -135,6 +138,28 @@ opt-in escalate):
 
 ## Scope
 
-GoodData **Cloud / .CN** (`/api/v1` declarative API). Legacy **Platform**
-(`/gdc/md/{project}`, classic MAQL, MUF) is a documented fast-follow — see
-`design-notes.md` — not built.
+GoodData **Cloud / .CN** (`/api/v1` declarative API) — full path: discover → DM →
+workbook → parity → RLS.
+
+Legacy **GoodData Platform** (classic "bear", `/gdc`) — **discovery + assessment
+built; conversion not yet.** Different product, different API (SST/TT auth, `/gdc`
+metadata API, MUF). See `refs/gooddata-platform-api.md`. Use it when the customer's
+URLs/docs point at `help.gooddata.com/doc/enterprise` or a `/gdc/...` API rather
+than `<org>.cloud.gooddata.com` + `/api/v1`.
+
+```bash
+# Platform auth is SST/TT (username/password), NOT a Bearer token:
+export GOODDATA_PLATFORM_HOST=https://acme.on.gooddata.com
+export GOODDATA_PLATFORM_USER=...  GOODDATA_PLATFORM_PASSWORD=...
+python3 scripts/platform_auth.py --check                 # login + list accessible projects
+python3 scripts/discover_platform.py --list              # every project the user can see (one token)
+python3 scripts/discover_platform.py --project <pid>     # -> platform_layout.json (normalized to Cloud shape)
+```
+
+The classic multi-"instance" story: instances are **projects under one domain**, so
+one identity/token sweeps them all (`--list` / assessment `--all`) — unlike Cloud,
+where each org is a separate host+token. Classic MAQL is normalized into the same
+`maql.py` translator, so coverage scoring is shared. **Not built for Platform yet:**
+LDM→DM conversion (Platform data often isn't a customer-owned warehouse → parity
+caveat) and MUF→RLS extraction — both flagged as manual. Details + honest limits in
+`refs/gooddata-platform-api.md`.

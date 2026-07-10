@@ -9,7 +9,8 @@ description: >-
   gooddata-to-sigma converter's actual coverage. Use when a user wants to scope
   a GoodData→Sigma migration, audit estate sprawl, or pick which dashboards to
   convert first. Read-only, all-free pre-scoping over the declarative workspace
-  export.
+  export. Also assesses the legacy GoodData Platform (classic /gdc, SST/TT auth)
+  and sweeps EVERY project a user can access under one domain in a single run.
 user-invocable: true
 ---
 
@@ -37,10 +38,31 @@ the declarative layout (no writes) and scores it against what
 
 ## Usage
 
+**GoodData Cloud / .CN** (Bearer API token, `/api/v1`):
+
 ```bash
 eval "$(../gooddata-to-sigma/scripts/get-token.sh)"
-python3 scripts/assess.py --workspace <id>     # or --all
+python3 scripts/assess.py --workspace <id>     # or --all (all workspaces in ONE org)
 ```
+
+**Legacy GoodData Platform** (classic `/gdc`, SST/TT auth) — different product,
+detected by a `help.gooddata.com/doc/enterprise` / `/gdc/...` footprint rather
+than `<org>.cloud.gooddata.com`:
+
+```bash
+export GOODDATA_PLATFORM_HOST=https://acme.on.gooddata.com
+export GOODDATA_PLATFORM_USER=...  GOODDATA_PLATFORM_PASSWORD=...
+python3 scripts/assess_platform.py --all       # EVERY project the user can access — one identity, one sweep
+python3 scripts/assess_platform.py --project <pid>
+```
+
+> **Multi-"instance" note.** On the Platform, "separate instances" are **projects
+> under one domain**, so `--all` sweeps them all from a single login — this is the
+> answer to "can one API pull across instances?" On **Cloud**, each org is a
+> separate host+token; there you re-point `GOODDATA_HOST`/`GOODDATA_TOKEN` and
+> re-run `assess.py --all` per org, then merge. Platform scoring reuses the same
+> MAQL translator as Cloud (classic refs are normalized first). See
+> `../gooddata-to-sigma/refs/gooddata-platform-api.md`.
 
 Usage telemetry (per-dashboard view counts) is the universal weak spot — it is
 not in the declarative model; note it as a manual input if needed.

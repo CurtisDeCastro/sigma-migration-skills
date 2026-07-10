@@ -1,0 +1,1030 @@
+{
+ "generated_for": "beads-sigma-tt3z.2",
+ "source": "sigma-data-model-mcp/src/formulas.ts tableauFormulaToSigma + TABLEAU_FUNC_MAP",
+ "note": "status=unmapped is now caught by the B1 catch-all (emits a loud warning) \u2014 no longer silent. B2 will add real mappings for the trivially-mappable subset (CHAR, FINDNTH, MAKEDATETIME, trig, DIV, ...).",
+ "counts": {
+  "chart_only": 18,
+  "flagged": 21,
+  "reported": 4,
+  "spec": 71,
+  "unmapped": 29,
+  "verify": 2
+ },
+ "functions": [
+  {
+   "fn": "ABS",
+   "category": "number",
+   "sigma": "Abs",
+   "status": "spec",
+   "probe": "ABS([GROSS_PROFIT])"
+  },
+  {
+   "fn": "CEILING",
+   "category": "number",
+   "sigma": "Ceiling",
+   "status": "spec",
+   "probe": "CEILING([UNIT_PRICE])"
+  },
+  {
+   "fn": "FLOOR",
+   "category": "number",
+   "sigma": "Floor",
+   "status": "spec",
+   "probe": "FLOOR([UNIT_PRICE])"
+  },
+  {
+   "fn": "ROUND",
+   "category": "number",
+   "sigma": "Round",
+   "status": "spec",
+   "probe": "ROUND([NET_REVENUE], 2)"
+  },
+  {
+   "fn": "SQRT",
+   "category": "number",
+   "sigma": "Sqrt",
+   "status": "spec",
+   "probe": "SQRT([GROSS_REVENUE])"
+  },
+  {
+   "fn": "POWER",
+   "category": "number",
+   "sigma": "Power",
+   "status": "spec",
+   "probe": "POWER([QUANTITY_ORDERED], 2)"
+  },
+  {
+   "fn": "SQUARE",
+   "category": "number",
+   "sigma": null,
+   "status": "unmapped",
+   "probe": null
+  },
+  {
+   "fn": "LN",
+   "category": "number",
+   "sigma": "Ln",
+   "status": "spec",
+   "probe": "LN([GROSS_REVENUE] + 1)"
+  },
+  {
+   "fn": "LOG",
+   "category": "number",
+   "sigma": "Log",
+   "status": "spec",
+   "probe": "LOG([GROSS_REVENUE] + 1)"
+  },
+  {
+   "fn": "EXP",
+   "category": "number",
+   "sigma": "Exp",
+   "status": "spec",
+   "probe": "EXP([IS_FIRST_ORDER])"
+  },
+  {
+   "fn": "SIGN",
+   "category": "number",
+   "sigma": "Sign",
+   "status": "spec",
+   "probe": "SIGN([GROSS_PROFIT])"
+  },
+  {
+   "fn": "PI",
+   "category": "number",
+   "sigma": "Pi",
+   "status": "spec",
+   "probe": "PI()"
+  },
+  {
+   "fn": "DIV",
+   "category": "number",
+   "sigma": null,
+   "status": "unmapped",
+   "probe": null
+  },
+  {
+   "fn": "SIN",
+   "category": "number",
+   "sigma": null,
+   "status": "unmapped",
+   "probe": null
+  },
+  {
+   "fn": "COS",
+   "category": "number",
+   "sigma": null,
+   "status": "unmapped",
+   "probe": null
+  },
+  {
+   "fn": "TAN",
+   "category": "number",
+   "sigma": null,
+   "status": "unmapped",
+   "probe": null
+  },
+  {
+   "fn": "COT",
+   "category": "number",
+   "sigma": null,
+   "status": "unmapped",
+   "probe": null
+  },
+  {
+   "fn": "ASIN",
+   "category": "number",
+   "sigma": null,
+   "status": "unmapped",
+   "probe": null
+  },
+  {
+   "fn": "ACOS",
+   "category": "number",
+   "sigma": null,
+   "status": "unmapped",
+   "probe": null
+  },
+  {
+   "fn": "ATAN",
+   "category": "number",
+   "sigma": null,
+   "status": "unmapped",
+   "probe": null
+  },
+  {
+   "fn": "ATAN2",
+   "category": "number",
+   "sigma": null,
+   "status": "unmapped",
+   "probe": null
+  },
+  {
+   "fn": "DEGREES",
+   "category": "number",
+   "sigma": null,
+   "status": "unmapped",
+   "probe": null
+  },
+  {
+   "fn": "RADIANS",
+   "category": "number",
+   "sigma": null,
+   "status": "unmapped",
+   "probe": null
+  },
+  {
+   "fn": "HEXBINX",
+   "category": "number",
+   "sigma": null,
+   "status": "unmapped",
+   "probe": null
+  },
+  {
+   "fn": "HEXBINY",
+   "category": "number",
+   "sigma": null,
+   "status": "unmapped",
+   "probe": null
+  },
+  {
+   "fn": "LEN",
+   "category": "string",
+   "sigma": "Len",
+   "status": "spec",
+   "probe": "LEN([ORDER_ID])"
+  },
+  {
+   "fn": "UPPER",
+   "category": "string",
+   "sigma": "Upper",
+   "status": "spec",
+   "probe": "UPPER([ORDER_STATUS])"
+  },
+  {
+   "fn": "LOWER",
+   "category": "string",
+   "sigma": "Lower",
+   "status": "spec",
+   "probe": "LOWER([ORDER_STATUS])"
+  },
+  {
+   "fn": "TRIM",
+   "category": "string",
+   "sigma": "Trim",
+   "status": "spec",
+   "probe": "TRIM([ORDER_STATUS])"
+  },
+  {
+   "fn": "LTRIM",
+   "category": "string",
+   "sigma": "Ltrim",
+   "status": "spec",
+   "probe": "LTRIM([ORDER_STATUS])"
+  },
+  {
+   "fn": "RTRIM",
+   "category": "string",
+   "sigma": "Rtrim",
+   "status": "spec",
+   "probe": "RTRIM([ORDER_STATUS])"
+  },
+  {
+   "fn": "LEFT",
+   "category": "string",
+   "sigma": "Left",
+   "status": "spec",
+   "probe": "LEFT([ORDER_ID], 3)"
+  },
+  {
+   "fn": "RIGHT",
+   "category": "string",
+   "sigma": "Right",
+   "status": "spec",
+   "probe": "RIGHT([ORDER_ID], 3)"
+  },
+  {
+   "fn": "MID",
+   "category": "string",
+   "sigma": "Mid",
+   "status": "spec",
+   "probe": "MID([ORDER_ID], 2, 3)"
+  },
+  {
+   "fn": "REPLACE",
+   "category": "string",
+   "sigma": "Replace",
+   "status": "spec",
+   "probe": "REPLACE([ORDER_STATUS], \"e\", \"E\")"
+  },
+  {
+   "fn": "CONTAINS",
+   "category": "string",
+   "sigma": "Contains",
+   "status": "spec",
+   "probe": "CONTAINS([ORDER_STATUS], \"omp\")"
+  },
+  {
+   "fn": "STARTSWITH",
+   "category": "string",
+   "sigma": "StartsWith",
+   "status": "spec",
+   "probe": "STARTSWITH([ORDER_STATUS], \"C\")"
+  },
+  {
+   "fn": "ENDSWITH",
+   "category": "string",
+   "sigma": "EndsWith",
+   "status": "spec",
+   "probe": "ENDSWITH([ORDER_STATUS], \"e\")"
+  },
+  {
+   "fn": "FIND",
+   "category": "string",
+   "sigma": "Find",
+   "status": "spec",
+   "probe": "FIND([ORDER_ID], \"-\")"
+  },
+  {
+   "fn": "SPLIT",
+   "category": "string",
+   "sigma": "SplitPart",
+   "status": "spec",
+   "probe": "SPLIT([ORDER_ID], \"-\", 1)"
+  },
+  {
+   "fn": "ASCII",
+   "category": "string",
+   "sigma": null,
+   "status": "unmapped",
+   "probe": null
+  },
+  {
+   "fn": "CHAR",
+   "category": "string",
+   "sigma": null,
+   "status": "unmapped",
+   "probe": null
+  },
+  {
+   "fn": "FINDNTH",
+   "category": "string",
+   "sigma": null,
+   "status": "unmapped",
+   "probe": null
+  },
+  {
+   "fn": "PROPER",
+   "category": "string",
+   "sigma": null,
+   "status": "unmapped",
+   "probe": null
+  },
+  {
+   "fn": "SPACE",
+   "category": "string",
+   "sigma": null,
+   "status": "unmapped",
+   "probe": null
+  },
+  {
+   "fn": "REGEXP_EXTRACT",
+   "category": "string",
+   "sigma": "RegexpExtract",
+   "status": "spec",
+   "probe": "REGEXP_EXTRACT([ORDER_ID], \"([0-9]+)\")"
+  },
+  {
+   "fn": "REGEXP_MATCH",
+   "category": "string",
+   "sigma": "RegexpMatch",
+   "status": "spec",
+   "probe": "REGEXP_MATCH([ORDER_ID], \"[0-9]+\")"
+  },
+  {
+   "fn": "REGEXP_REPLACE",
+   "category": "string",
+   "sigma": "RegexpReplace",
+   "status": "spec",
+   "probe": "REGEXP_REPLACE([ORDER_ID], \"[0-9]\", \"#\")"
+  },
+  {
+   "fn": "REGEXP_EXTRACT_NTH",
+   "category": "string",
+   "sigma": null,
+   "status": "unmapped",
+   "probe": null
+  },
+  {
+   "fn": "DATE",
+   "category": "typeconv",
+   "sigma": "Date",
+   "status": "spec",
+   "probe": "DATE(\"2024-01-15\")"
+  },
+  {
+   "fn": "DATETIME",
+   "category": "typeconv",
+   "sigma": "Datetime",
+   "status": "spec",
+   "probe": "DATETIME(\"2024-01-15 10:30:00\")"
+  },
+  {
+   "fn": "MAKEDATE",
+   "category": "date",
+   "sigma": "MakeDate",
+   "status": "spec",
+   "probe": "MAKEDATE(2024, 1, 15)"
+  },
+  {
+   "fn": "STR",
+   "category": "typeconv",
+   "sigma": "Text",
+   "status": "spec",
+   "probe": "STR([QUANTITY_ORDERED])"
+  },
+  {
+   "fn": "INT",
+   "category": "typeconv",
+   "sigma": "Int",
+   "status": "spec",
+   "probe": "INT([UNIT_PRICE])"
+  },
+  {
+   "fn": "FLOAT",
+   "category": "typeconv",
+   "sigma": "Number",
+   "status": "spec",
+   "probe": "FLOAT([QUANTITY_ORDERED])"
+  },
+  {
+   "fn": "BOOL",
+   "category": "typeconv",
+   "sigma": null,
+   "status": "unmapped",
+   "probe": null
+  },
+  {
+   "fn": "YEAR",
+   "category": "date",
+   "sigma": "Year",
+   "status": "spec",
+   "probe": "YEAR(MAKEDATE(2024, 1, 15))"
+  },
+  {
+   "fn": "MONTH",
+   "category": "date",
+   "sigma": "Month",
+   "status": "spec",
+   "probe": "MONTH(MAKEDATE(2024, 1, 15))"
+  },
+  {
+   "fn": "DAY",
+   "category": "date",
+   "sigma": "Day",
+   "status": "spec",
+   "probe": "DAY(MAKEDATE(2024, 1, 15))"
+  },
+  {
+   "fn": "WEEK",
+   "category": "date",
+   "sigma": "Week",
+   "status": "spec",
+   "probe": "WEEK(MAKEDATE(2024, 1, 15))"
+  },
+  {
+   "fn": "QUARTER",
+   "category": "date",
+   "sigma": "Quarter",
+   "status": "spec",
+   "probe": "QUARTER(MAKEDATE(2024, 1, 15))"
+  },
+  {
+   "fn": "HOUR",
+   "category": "date",
+   "sigma": "Hour",
+   "status": "spec",
+   "probe": "HOUR(DATETIME(\"2024-01-15 10:30:00\"))"
+  },
+  {
+   "fn": "MINUTE",
+   "category": "date",
+   "sigma": "Minute",
+   "status": "spec",
+   "probe": "MINUTE(DATETIME(\"2024-01-15 10:30:00\"))"
+  },
+  {
+   "fn": "SECOND",
+   "category": "date",
+   "sigma": "Second",
+   "status": "spec",
+   "probe": "SECOND(DATETIME(\"2024-01-15 10:30:00\"))"
+  },
+  {
+   "fn": "TODAY",
+   "category": "date",
+   "sigma": "Today",
+   "status": "spec",
+   "probe": "TODAY()"
+  },
+  {
+   "fn": "NOW",
+   "category": "date",
+   "sigma": "Now",
+   "status": "spec",
+   "probe": "NOW()"
+  },
+  {
+   "fn": "DATEPART",
+   "category": "date",
+   "sigma": "(Year/Month/\u2026)",
+   "status": "spec",
+   "probe": "DATEPART('year', MAKEDATE(2024, 1, 15))"
+  },
+  {
+   "fn": "DATENAME",
+   "category": "date",
+   "sigma": "MonthName/WeekdayName",
+   "status": "spec",
+   "probe": null
+  },
+  {
+   "fn": "DATETRUNC",
+   "category": "date",
+   "sigma": "DateTrunc",
+   "status": "spec",
+   "probe": "DATETRUNC('month', MAKEDATE(2024, 1, 15))"
+  },
+  {
+   "fn": "DATEADD",
+   "category": "date",
+   "sigma": "DateAdd",
+   "status": "spec",
+   "probe": "DATEADD('day', 5, MAKEDATE(2024, 1, 15))"
+  },
+  {
+   "fn": "DATEDIFF",
+   "category": "date",
+   "sigma": "DateDiff",
+   "status": "spec",
+   "probe": "DATEDIFF('day', MAKEDATE(2024, 1, 1), MAKEDATE(2024, 1, 15))"
+  },
+  {
+   "fn": "DATEPARSE",
+   "category": "date",
+   "sigma": "DateParse",
+   "status": "verify",
+   "probe": "DATEPARSE(\"yyyy-MM-dd\", \"2024-01-15\")"
+  },
+  {
+   "fn": "ISDATE",
+   "category": "date",
+   "sigma": null,
+   "status": "unmapped",
+   "probe": null
+  },
+  {
+   "fn": "MAKEDATETIME",
+   "category": "date",
+   "sigma": null,
+   "status": "unmapped",
+   "probe": null
+  },
+  {
+   "fn": "MAKETIME",
+   "category": "date",
+   "sigma": null,
+   "status": "unmapped",
+   "probe": null
+  },
+  {
+   "fn": "IF",
+   "category": "logical",
+   "sigma": "If",
+   "status": "spec",
+   "probe": "IF [GROSS_PROFIT] > 0 THEN \"P\" ELSE \"L\" END"
+  },
+  {
+   "fn": "IIF",
+   "category": "logical",
+   "sigma": "If",
+   "status": "spec",
+   "probe": "IIF([GROSS_PROFIT] > 0, \"P\", \"L\")"
+  },
+  {
+   "fn": "CASE",
+   "category": "logical",
+   "sigma": "If-chain",
+   "status": "spec",
+   "probe": "CASE [ORDER_STATUS] WHEN \"Complete\" THEN 1 ELSE 0 END"
+  },
+  {
+   "fn": "ISNULL",
+   "category": "logical",
+   "sigma": "IsNull",
+   "status": "spec",
+   "probe": "ISNULL([ORDER_STATUS])"
+  },
+  {
+   "fn": "IFNULL",
+   "category": "logical",
+   "sigma": "Coalesce",
+   "status": "spec",
+   "probe": "IFNULL([ORDER_STATUS], \"n/a\")"
+  },
+  {
+   "fn": "IFERROR",
+   "category": "logical",
+   "sigma": "Coalesce",
+   "status": "spec",
+   "probe": "IFERROR([ORDER_STATUS], \"n/a\")"
+  },
+  {
+   "fn": "ZN",
+   "category": "logical",
+   "sigma": "Coalesce(x,0)",
+   "status": "spec",
+   "probe": "ZN([DISCOUNT_AMOUNT])"
+  },
+  {
+   "fn": "IN",
+   "category": "logical",
+   "sigma": "or-chain",
+   "status": "spec",
+   "probe": "IF [ORDER_STATUS] IN (\"Complete\", \"Shipped\") THEN 1 ELSE 0 END"
+  },
+  {
+   "fn": "SUM",
+   "category": "agg",
+   "sigma": "Sum",
+   "status": "spec",
+   "probe": "SUM([NET_REVENUE])"
+  },
+  {
+   "fn": "AVG",
+   "category": "agg",
+   "sigma": "Avg",
+   "status": "spec",
+   "probe": "AVG([NET_REVENUE])"
+  },
+  {
+   "fn": "MIN",
+   "category": "agg",
+   "sigma": "Min",
+   "status": "spec",
+   "probe": "MIN([NET_REVENUE])"
+  },
+  {
+   "fn": "MAX",
+   "category": "agg",
+   "sigma": "Max",
+   "status": "spec",
+   "probe": "MAX([NET_REVENUE])"
+  },
+  {
+   "fn": "MEDIAN",
+   "category": "agg",
+   "sigma": "Median",
+   "status": "spec",
+   "probe": "MEDIAN([NET_REVENUE])"
+  },
+  {
+   "fn": "COUNT",
+   "category": "agg",
+   "sigma": "CountIf(IsNotNull)",
+   "status": "spec",
+   "probe": "COUNT([ORDER_ID])"
+  },
+  {
+   "fn": "COUNTD",
+   "category": "agg",
+   "sigma": "CountDistinct",
+   "status": "spec",
+   "probe": "COUNTD([ORDER_ID])"
+  },
+  {
+   "fn": "STDEV",
+   "category": "agg",
+   "sigma": "StdDev",
+   "status": "spec",
+   "probe": "STDEV([NET_REVENUE])"
+  },
+  {
+   "fn": "STDEVP",
+   "category": "agg",
+   "sigma": "Sqrt(VariancePop)",
+   "status": "spec",
+   "probe": "STDEVP([NET_REVENUE])"
+  },
+  {
+   "fn": "VAR",
+   "category": "agg",
+   "sigma": "Variance",
+   "status": "spec",
+   "probe": "VAR([NET_REVENUE])"
+  },
+  {
+   "fn": "VARP",
+   "category": "agg",
+   "sigma": "VariancePop",
+   "status": "spec",
+   "probe": "VARP([NET_REVENUE])"
+  },
+  {
+   "fn": "PERCENTILE",
+   "category": "agg",
+   "sigma": "PercentileCont",
+   "status": "spec",
+   "probe": "PERCENTILE([NET_REVENUE], 0.5)"
+  },
+  {
+   "fn": "CORR",
+   "category": "agg",
+   "sigma": "Corr",
+   "status": "verify",
+   "probe": "CORR([NET_REVENUE], [GROSS_PROFIT])"
+  },
+  {
+   "fn": "ATTR",
+   "category": "agg",
+   "sigma": "(passthrough)",
+   "status": "spec",
+   "probe": "ATTR([ORDER_STATUS])"
+  },
+  {
+   "fn": "COVAR",
+   "category": "agg",
+   "sigma": null,
+   "status": "flagged",
+   "probe": null
+  },
+  {
+   "fn": "COVARP",
+   "category": "agg",
+   "sigma": null,
+   "status": "flagged",
+   "probe": null
+  },
+  {
+   "fn": "COLLECT",
+   "category": "agg",
+   "sigma": null,
+   "status": "flagged",
+   "probe": null
+  },
+  {
+   "fn": "USERNAME",
+   "category": "user",
+   "sigma": "CurrentUserEmail",
+   "status": "reported",
+   "probe": "USERNAME()"
+  },
+  {
+   "fn": "ISMEMBEROF",
+   "category": "user",
+   "sigma": "CurrentUserInTeam",
+   "status": "reported",
+   "probe": "ISMEMBEROF(\"Administrators\")"
+  },
+  {
+   "fn": "USERATTRIBUTE",
+   "category": "user",
+   "sigma": "CurrentUserAttributeText",
+   "status": "reported",
+   "probe": null
+  },
+  {
+   "fn": "ISUSERNAME",
+   "category": "user",
+   "sigma": "email-match",
+   "status": "reported",
+   "probe": null
+  },
+  {
+   "fn": "FULLNAME",
+   "category": "user",
+   "sigma": null,
+   "status": "unmapped",
+   "probe": null
+  },
+  {
+   "fn": "ISFULLNAME",
+   "category": "user",
+   "sigma": null,
+   "status": "unmapped",
+   "probe": null
+  },
+  {
+   "fn": "USERDOMAIN",
+   "category": "user",
+   "sigma": null,
+   "status": "unmapped",
+   "probe": null
+  },
+  {
+   "fn": "WINDOW_SUM",
+   "category": "tablecalc",
+   "sigma": "MovingSum/GrandTotal",
+   "status": "chart_only",
+   "probe": null
+  },
+  {
+   "fn": "WINDOW_AVG",
+   "category": "tablecalc",
+   "sigma": "MovingAvg",
+   "status": "chart_only",
+   "probe": null
+  },
+  {
+   "fn": "WINDOW_MIN",
+   "category": "tablecalc",
+   "sigma": "MovingMin",
+   "status": "chart_only",
+   "probe": null
+  },
+  {
+   "fn": "WINDOW_MAX",
+   "category": "tablecalc",
+   "sigma": "MovingMax",
+   "status": "chart_only",
+   "probe": null
+  },
+  {
+   "fn": "WINDOW_COUNT",
+   "category": "tablecalc",
+   "sigma": "MovingCount",
+   "status": "chart_only",
+   "probe": null
+  },
+  {
+   "fn": "WINDOW_STDEV",
+   "category": "tablecalc",
+   "sigma": "MovingStdDev",
+   "status": "chart_only",
+   "probe": null
+  },
+  {
+   "fn": "RUNNING_SUM",
+   "category": "tablecalc",
+   "sigma": "CumulativeSum",
+   "status": "chart_only",
+   "probe": null
+  },
+  {
+   "fn": "RUNNING_AVG",
+   "category": "tablecalc",
+   "sigma": "CumulativeAvg",
+   "status": "chart_only",
+   "probe": null
+  },
+  {
+   "fn": "RUNNING_MIN",
+   "category": "tablecalc",
+   "sigma": "CumulativeMin",
+   "status": "chart_only",
+   "probe": null
+  },
+  {
+   "fn": "RUNNING_MAX",
+   "category": "tablecalc",
+   "sigma": "CumulativeMax",
+   "status": "chart_only",
+   "probe": null
+  },
+  {
+   "fn": "RUNNING_COUNT",
+   "category": "tablecalc",
+   "sigma": "CumulativeCount",
+   "status": "chart_only",
+   "probe": null
+  },
+  {
+   "fn": "RANK",
+   "category": "tablecalc",
+   "sigma": "Rank",
+   "status": "chart_only",
+   "probe": null
+  },
+  {
+   "fn": "RANK_DENSE",
+   "category": "tablecalc",
+   "sigma": "RankDense",
+   "status": "chart_only",
+   "probe": null
+  },
+  {
+   "fn": "RANK_PERCENTILE",
+   "category": "tablecalc",
+   "sigma": "RankPercentile",
+   "status": "chart_only",
+   "probe": null
+  },
+  {
+   "fn": "RANK_UNIQUE",
+   "category": "tablecalc",
+   "sigma": "Rank",
+   "status": "chart_only",
+   "probe": null
+  },
+  {
+   "fn": "INDEX",
+   "category": "tablecalc",
+   "sigma": "RowNumber",
+   "status": "chart_only",
+   "probe": null
+  },
+  {
+   "fn": "LOOKUP",
+   "category": "tablecalc",
+   "sigma": "Lag/Lead",
+   "status": "chart_only",
+   "probe": null
+  },
+  {
+   "fn": "TOTAL",
+   "category": "tablecalc",
+   "sigma": "GrandTotal/PercentOfTotal",
+   "status": "chart_only",
+   "probe": null
+  },
+  {
+   "fn": "WINDOW_MEDIAN",
+   "category": "tablecalc",
+   "sigma": null,
+   "status": "flagged",
+   "probe": null
+  },
+  {
+   "fn": "WINDOW_PERCENTILE",
+   "category": "tablecalc",
+   "sigma": null,
+   "status": "flagged",
+   "probe": null
+  },
+  {
+   "fn": "WINDOW_CORR",
+   "category": "tablecalc",
+   "sigma": null,
+   "status": "flagged",
+   "probe": null
+  },
+  {
+   "fn": "WINDOW_COVAR",
+   "category": "tablecalc",
+   "sigma": null,
+   "status": "flagged",
+   "probe": null
+  },
+  {
+   "fn": "PREVIOUS_VALUE",
+   "category": "tablecalc",
+   "sigma": null,
+   "status": "flagged",
+   "probe": null
+  },
+  {
+   "fn": "FIRST",
+   "category": "tablecalc",
+   "sigma": null,
+   "status": "flagged",
+   "probe": null
+  },
+  {
+   "fn": "LAST",
+   "category": "tablecalc",
+   "sigma": null,
+   "status": "flagged",
+   "probe": null
+  },
+  {
+   "fn": "SIZE",
+   "category": "tablecalc",
+   "sigma": null,
+   "status": "flagged",
+   "probe": null
+  },
+  {
+   "fn": "FIXED",
+   "category": "lod",
+   "sigma": "(DM helper / placeholder)",
+   "status": "flagged",
+   "probe": null
+  },
+  {
+   "fn": "INCLUDE",
+   "category": "lod",
+   "sigma": "(DM helper / placeholder)",
+   "status": "flagged",
+   "probe": null
+  },
+  {
+   "fn": "EXCLUDE",
+   "category": "lod",
+   "sigma": "(DM helper / placeholder)",
+   "status": "flagged",
+   "probe": null
+  },
+  {
+   "fn": "RAWSQL",
+   "category": "passthrough",
+   "sigma": null,
+   "status": "flagged",
+   "probe": null
+  },
+  {
+   "fn": "RAWSQLAGG",
+   "category": "passthrough",
+   "sigma": null,
+   "status": "flagged",
+   "probe": null
+  },
+  {
+   "fn": "MODEL_PERCENTILE",
+   "category": "predictive",
+   "sigma": null,
+   "status": "unmapped",
+   "probe": null
+  },
+  {
+   "fn": "MODEL_QUANTILE",
+   "category": "predictive",
+   "sigma": null,
+   "status": "unmapped",
+   "probe": null
+  },
+  {
+   "fn": "MAKEPOINT",
+   "category": "spatial",
+   "sigma": null,
+   "status": "flagged",
+   "probe": null
+  },
+  {
+   "fn": "MAKELINE",
+   "category": "spatial",
+   "sigma": null,
+   "status": "flagged",
+   "probe": null
+  },
+  {
+   "fn": "DISTANCE",
+   "category": "spatial",
+   "sigma": null,
+   "status": "flagged",
+   "probe": null
+  },
+  {
+   "fn": "BUFFER",
+   "category": "spatial",
+   "sigma": null,
+   "status": "flagged",
+   "probe": null
+  },
+  {
+   "fn": "AREA",
+   "category": "spatial",
+   "sigma": null,
+   "status": "flagged",
+   "probe": null
+  }
+ ]
+}
