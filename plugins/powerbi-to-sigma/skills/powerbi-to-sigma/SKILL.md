@@ -10,6 +10,37 @@ user-invocable: true
 > `bash scripts/doctor.sh` (macOS/Linux/Git Bash) or `powershell -ExecutionPolicy Bypass -File scripts\doctor.ps1` (Windows).
 > It checks Ruby/Python/Node/bash and flags the Python "Store stub" + CRLF with exact fixes. Details: `refs/environment.md`.
 
+> ## ⛔ STEP 1 — THE ONE PATH (do not improvise a workbook)
+> This conversion runs through **one orchestrator** that builds every chart and
+> **verifies each one's data against Power BI before it's done**:
+> ```
+> ruby scripts/migrate-powerbi.rb --tmsl <model.bim> --pbir <report-bundle.json> --connection <id> --out <WORK>
+> ```
+> - **You need the model (TMSL) + report layout (PBIR) first. Get them by
+>   CONNECTING to Power BI — do NOT ask the user to hand them over and do NOT
+>   proceed without them.** Run the device-code login (no Entra app):
+>   ```
+>   python scripts/fabric-extract.py --report "<report name>" [--workspace "<ws id|name>"] \
+>     --out-dir <WORK> --report-out-dir <WORK> --report-bundle <WORK>/report-bundle.json
+>   ```
+>   It prints a **device code + `https://microsoft.com/devicelogin`** — tell the
+>   user to open that URL and enter the code (one sign-in; token caches). Then run
+>   the orchestrator with the extracted `--tmsl`/`--pbir`. Full recipe: `refs/connection.md`.
+> - **NEVER hand-author a workbook JSON and `curl`-POST it to `/v2/workbooks`, and
+>   never lay out empty "placeholder" pages.** That bypasses the DAX conversion,
+>   chart build, and parity gate and ships an EMPTY workbook (invented page names,
+>   no elements) — the #1 way this migration fails. If you cannot extract the
+>   model (no Fabric access / not published), **STOP and tell the user you need to
+>   connect to Power BI (device-code) or that the report must be published** — do
+>   not fall back to a hand-built shell.
+> - **"Done" is not "pages exist."** The migration is complete only when
+>   `ruby scripts/verify-complete.rb --workdir <WORK>` prints ✅ DONE — i.e. the
+>   `assert-phase6-ran` parity gate passed with real chart elements. An empty or
+>   placeholder workbook is never done, no matter how it looks.
+> - Small/older models (e.g. running on Haiku): if the report is large or complex,
+>   say so and confirm scope with the user before building — don't silently
+>   degrade to a partial shell.
+
 ## Preflight the workbook spec before POST (mandatory)
 
 Before POSTing any workbook spec, run `ruby scripts/lib/preflight_lint.rb <spec.json>` — it exits 1 with a precise message on the two migration-killer bugs: a `table` with aggregate columns + dimensions but **no `groupings`** (renders raw detail rows), and a malformed `control` (missing `id`/`controlId`/`controlType` or nesting value fields under a `value` object instead of flat, a non-double-nested `source`, or a list control wired to neither `source` nor `filters` — a filters-only list control is valid). Fix every violation first — never POST past it, and **never conclude a feature is "unsupported" from an `Invalid kind` error** (it means the inner fields are wrong). Verified shapes: `sigma-workbooks` `controls.md` / `tables.md`.

@@ -78,7 +78,12 @@ def main():
         print("NO_SEMANTIC_MODEL found in any accessible workspace.", flush=True)
         sys.exit(4)
     if model and not ARGS.model_name:
-        print("[note] no --model-name given — defaulting to the first model found", flush=True)
+        if ARGS.report:
+            print("[note] no --model-name given — bound the report's own semantic model "
+                  "(via datasetId; falls back to first model only if that lookup fails)", flush=True)
+        else:
+            print("[note] no --model-name given and no --report to bind against — "
+                  "defaulting to the FIRST model in the workspace; pass --model-name to be sure", flush=True)
     if model:
         print(f"[TARGET] ws='{ws.get('name')}' model='{model.get('name')}' id={model['id']}", flush=True)
     if report:

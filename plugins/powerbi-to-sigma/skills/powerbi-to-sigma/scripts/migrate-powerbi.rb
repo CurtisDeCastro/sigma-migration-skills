@@ -152,10 +152,23 @@ if opts[:print_converter]
   exit 0
 end
 
-abort 'missing --tmsl' unless opts[:tmsl]
-abort "--tmsl not found: #{opts[:tmsl]}" unless opts[:tmsl] && File.exist?(opts[:tmsl])
-abort 'missing --pbir' unless opts[:pbir]
-abort "--pbir not found: #{opts[:pbir]}" unless File.exist?(opts[:pbir])
+# The orchestrator REQUIRES the extracted model (TMSL) + report layout (PBIR).
+# When they're missing, the failure mode we must prevent is an agent improvising
+# a hand-built empty workbook. So the remediation is explicit: CONNECT to Power
+# BI via device-code and extract them — never hand-author a spec.
+CONNECT_HINT = <<~HINT.freeze
+  Extract them by CONNECTING to Power BI (device-code login, no Entra app):
+      python scripts/fabric-extract.py --report "<report name>" [--workspace "<ws id|name>"] \\
+        --out-dir <WORK> --report-out-dir <WORK> --report-bundle <WORK>/report-bundle.json
+  It prints a device code + https://microsoft.com/devicelogin — the USER signs in
+  once, then re-run this command with the extracted --tmsl (model.bim) + --pbir
+  (report-bundle.json). See refs/connection.md. Do NOT hand-author a workbook spec
+  or proceed without the model — if you can't extract it, STOP and tell the user.
+HINT
+abort "FATAL: missing --tmsl (the Power BI semantic model, TMSL/model.bim).\n#{CONNECT_HINT}" unless opts[:tmsl]
+abort "FATAL: --tmsl not found: #{opts[:tmsl]}\n#{CONNECT_HINT}" unless File.exist?(opts[:tmsl])
+abort "FATAL: missing --pbir (the Power BI report layout / PBIR bundle).\n#{CONNECT_HINT}" unless opts[:pbir]
+abort "FATAL: --pbir not found: #{opts[:pbir]}\n#{CONNECT_HINT}" unless File.exist?(opts[:pbir])
 # intake.rb (front-door) caches the resolved connection in <out>/connection.json; honor it
 # when --connection is omitted so the agent need not re-pass the id it just resolved.
 opts[:conn] ||= (JSON.parse(File.read(File.join(opts[:out], 'connection.json')))['connection_id'] rescue nil) if opts[:out]
@@ -1481,5 +1494,30 @@ if fresh_ok
        "#{freshness['credsSuspect'] ? ' — REFRESH FAILING (creds)' : ''}"
 end
 puts "ENHANCE     : #{enhance_line}" if enhance_line
+# Empty-workbook guard + completion sentinel. parity_ok is VACUOUSLY true when no
+# chart elements were built (0 cols, 0 divergent) — an empty/placeholder workbook
+# would otherwise exit 0 and look "done" (the exact PBI failure: pages, no
+# elements). Require real elements, and stamp a run-scoped success marker only on
+# a genuine pass so verify-complete.rb (the done-check the SKILL points at) can't
+# green an empty result.
+built_ok = parity_ok && chart_els.size.positive?
+if chart_els.size.zero?
+  puts 'ELEMENTS    : 0 chart elements built — EMPTY workbook, NOT a complete migration.'
+  puts '              Parity is vacuous with no elements. Do NOT report success: re-extract the'
+  puts '              report layout (--pbir) or investigate why no visuals were produced. Never'
+  puts '              hand-author placeholder pages to fill it.'
+end
+begin
+  succ = File.join(WORK, 'phase6-success.json')
+  if built_ok
+    File.write(succ, JSON.pretty_generate('workbookId' => wb_id, 'chartCount' => chart_els.size,
+                                          'gates' => 'parity-pass',
+                                          'generatedAt' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')))
+  elsif File.exist?(succ)
+    File.delete(succ) # a prior success marker is stale if this run isn't green
+  end
+rescue StandardError
+  nil # sentinel bookkeeping never fails the run
+end
 puts '======================================='
-exit(parity_ok ? 0 : 3)
+exit(built_ok ? 0 : 3)

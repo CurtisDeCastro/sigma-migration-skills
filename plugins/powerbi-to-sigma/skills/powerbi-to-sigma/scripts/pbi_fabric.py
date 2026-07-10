@@ -306,16 +306,10 @@ def resolve_targets(tok, model_name=None, workspace=None, report=None,
         scope = [ws] if ws else wss
         model = rep = None
         m_ws = r_ws = ws
-        if model_name:
-            for w in scope:
-                m = _match(w["models"], model_name)
-                if m:
-                    model, m_ws = m, w
-                    break
-            if not model:
-                return None
-        elif scope and scope[0]["models"]:
-            model, m_ws = scope[0]["models"][0], scope[0]
+        # Resolve the report FIRST so that, absent an explicit --model-name, we can
+        # bind the model the report ACTUALLY uses (its datasetId) instead of the
+        # workspace's first model — a silent mismatch that converts the WRONG model
+        # (observed: --report "Superstore Overview" pulled "Workforce KitchenSink").
         if report:
             for w in scope:
                 rr = _match(w["reports"], report)
@@ -324,6 +318,32 @@ def resolve_targets(tok, model_name=None, workspace=None, report=None,
                     break
             if not rep:
                 return None
+        if model_name:
+            for w in scope:
+                m = _match(w["models"], model_name)
+                if m:
+                    model, m_ws = m, w
+                    break
+            if not model:
+                return None
+        elif rep:
+            # Bind the report's own semantic model (GET reports/{id} -> datasetId).
+            dsid = report_dataset_id((r_ws or {}).get("id"), rep["id"])
+            if dsid:
+                for w in scope:
+                    m = next((mm for mm in w["models"] if mm.get("id") == dsid), None)
+                    if m:
+                        model, m_ws = m, w
+                        break
+                if not model:  # dataset not in the enumerated estate — use its id directly
+                    model, m_ws = {"id": dsid, "name": None}, r_ws
+            if not model and scope and scope[0]["models"]:
+                log("[model] WARNING: could not bind the report to its dataset (datasetId "
+                    "unavailable) — falling back to the workspace's FIRST model. Pass "
+                    "--model-name if this converts the wrong model.")
+                model, m_ws = scope[0]["models"][0], scope[0]
+        elif scope and scope[0]["models"]:
+            model, m_ws = scope[0]["models"][0], scope[0]
         return {"workspace": m_ws or r_ws, "model": model,
                 "report": rep, "report_workspace": r_ws}
 
