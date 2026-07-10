@@ -60,6 +60,20 @@ end
 rb = JSON.parse(File.read(opts[:rb]))
 dm_id = rb['dataModelId']
 
+# THEME palette — QuickSight colors are theme-driven and absent from the definition export;
+# discovery resolves them into signals.json (co-located with analysis.json). We apply them as
+# (1) a workbook-level themeOverrides.categoricalScheme — the ONLY spec path to pie/donut slice
+# colors and the palette for every categorical chart — and (2) a single-hue color on
+# single-measure bar/line/area (QuickSight paints those in the theme's primary data color).
+THEME = begin
+  sig = File.join(File.dirname(File.expand_path(opts[:an])), 'signals.json')
+  File.exist?(sig) ? JSON.parse(File.read(sig))['theme'] : nil
+rescue StandardError
+  nil
+end
+THEME_COLORS = (THEME && THEME['dataColors']).is_a?(Array) ? THEME['dataColors'].compact : []
+THEME_PRIMARY = THEME && THEME['primaryColor']
+
 def disp(raw); raw.to_s.gsub(/[_.]/, ' ').split.map { |w| w[0..0].upcase + w[1..-1].to_s.downcase }.join(' '); end
 
 # Boolean columns (display names), derived from the discovery datasets' PhysicalTable
@@ -1065,10 +1079,15 @@ defn['Sheets'].each_with_index do |sh, sheet_idx|
 
     case kind
     when 'kpi-chart'
-      # KPI + Gauge both surface a single value
+      # KPI + Gauge both surface a single value. STYLE for QuickSight fidelity: QS renders
+      # KPIs as prominent big-number tiles, so give the value a larger font and center it
+      # (Sigma's default is a small, top-anchored number). Card chrome comes from the
+      # workbook-level themeOverrides.hasCards below (theme-aware light/dark), not per-element.
       vals = rol.('Values'); (next if vals.empty?)
       c, cid = meas_col(vals[0], calc, mc_, dmel_, m_)
-      el = base.merge('columns' => [c.merge('name' => title)], 'value' => { 'columnId' => cid })
+      el = base.merge('columns' => [c.merge('name' => title)],
+                      'value' => { 'columnId' => cid, 'fontSize' => 24 },
+                      'layout' => { 'anchor' => 'middle' })
     when 'bar-chart', 'line-chart', 'area-chart'
       # funnel/treemap land here too: their dim is in Category/Groups, measure in Values/Sizes
       if is_fallback
@@ -1118,6 +1137,12 @@ defn['Sheets'].each_with_index do |sh, sheet_idx|
       # B-gap COLOR: by-measure (ColorScale dup column) / by-dimension (Colors well).
       cclr = qs_color(inner, w, el, [did], ycids, calc, mc_, dmel_, m_)
       el['color'] = cclr if cclr
+      # THEME single-hue: a single-measure chart with NO explicit QS color encoding is
+      # painted by QuickSight in the theme's PRIMARY data color. Match it (Sigma otherwise
+      # picks its own default hue). Multi-measure charts keep the categorical scheme.
+      if !cclr && THEME_PRIMARY && ycids.size == 1
+        el['color'] = { 'by' => 'single', 'value' => THEME_PRIMARY }
+      end
       # A-gap REFERENCE LINES -> refMarks (wrapped value:{type:formula}).
       rms = qs_reference_lines(inner, calc, mc_, dmel_, m_, title, build_warnings)
       el['refMarks'] = rms unless rms.empty?
@@ -1402,6 +1427,22 @@ spec = { 'name' => (an['Name'] || 'QuickSight Migration') + ' (from QuickSight)'
          'schemaVersion' => 1,
          'pages' => [{ 'id' => 'page-data', 'name' => 'Data', 'elements' => data_elements }] + dash_pages }
 spec['folderId'] = opts[:folder] if opts[:folder]
+# THEME -> workbook themeOverrides. Two fidelity moves:
+#  (1) categoricalScheme: the ONLY spec path to pie/donut slice colors (per-element
+#      color.scheme is silently dropped there) + the palette for every categorical chart.
+#  (2) card chrome: QuickSight renders every tile as a bordered card, so hasCards + a
+#      subtle elementBorder + rounded corners mirror that look (theme-aware: the light
+#      border is skipped on a dark QS theme, which also flips the base to Sigma "Dark").
+unless THEME_COLORS.empty?
+  ov = { 'categoricalScheme' => THEME_COLORS, 'hasCards' => 'shown', 'borderRadius' => 'round' }
+  if THEME && THEME['isDark']
+    spec['themeName'] = 'Dark'
+  else
+    ov['elementBorder'] = { 'color' => '#E2E8F0', 'width' => 1 }
+  end
+  spec['themeOverrides'] = ov
+  STDERR.puts "  theme: applied QuickSight palette (#{THEME_COLORS.size} colors) + card chrome via themeOverrides#{THEME['isDark'] ? ' + themeName:Dark' : ''}"
+end
 
 File.write(opts[:out], JSON.pretty_generate(spec))
 map_out = opts[:out].sub(/\.json$/, '') + '.map.json'
