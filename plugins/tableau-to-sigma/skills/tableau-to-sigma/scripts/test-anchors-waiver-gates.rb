@@ -379,6 +379,62 @@ Dir.mktmpdir do |dir|
   check(pf['waivers'].include?('--skip-visual-similarity'), 'similarity waiver counted in the stamp')
 end
 
+# ---- runtime off-ramp waivers (offramps.jsonl) consume the budget too ---------
+# v4.2: escapes honored MID-RUN by the scripts (--force-new-workbook,
+# --force-route-switch, an unauthorized --allow-manual-spec) are recorded to
+# <workdir>/offramps.jsonl and counted here exactly like gate flags — otherwise
+# a run could stack script-level escapes invisibly under the cap.
+def add_offramps(dir, records)
+  File.open(File.join(dir, 'offramps.jsonl'), 'a') do |f|
+    records.each { |r| f.puts(JSON.generate(r)) }
+  end
+end
+
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  add_offramps(dir, [
+    { 'kind' => 'force-new-workbook', 'reason' => 'demo', 'at' => '2026-07-10T00:00:00Z' },
+    { 'kind' => 'route-switch-forced', 'reason' => 'demo', 'at' => '2026-07-10T00:00:01Z' },
+    { 'kind' => 'manual-spec', 'reason' => 'waiver: cold hand-author', 'at' => '2026-07-10T00:00:02Z' }
+  ])
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 19, "3 runtime off-ramp waivers → exit 19 (got #{st.exitstatus})")
+  check(err.include?('--force-new-workbook') && err.include?('--force-route-switch') && err.include?('--allow-manual-spec'),
+        'cap message names the runtime pseudo-flags')
+  check(err.include?('deliberately orphaned'), 'cap message says what force-new-workbook hid')
+  pf = JSON.parse(File.read(File.join(dir, 'parity-final.json')))
+  check(pf['waivers'].sort == ['--allow-manual-spec', '--force-new-workbook', '--force-route-switch'],
+        'runtime waivers stamped into the parity-final census')
+end
+
+Dir.mktmpdir do |dir|
+  # 1 runtime waiver + 2 flag waivers => over budget; 1 runtime + 1 flag => within.
+  base_workdir(dir)
+  add_offramps(dir, [{ 'kind' => 'force-new-workbook', 'reason' => 'demo', 'at' => '2026-07-10T00:00:00Z' }])
+  _out, _err, st = run_gate(dir, '--skip-orphan-check', 'r1', '--skip-layout-lint', 'r2')
+  check(st.exitstatus == 19, "1 runtime + 2 flag waivers → exit 19 (got #{st.exitstatus})")
+  out2, _err2, st2 = run_gate(dir, '--skip-orphan-check', 'r1')
+  check(st2.success?, "1 runtime + 1 flag waiver → exit 0, within budget (got #{st2.exitstatus})")
+  check(out2.include?('--force-new-workbook'), 'in-budget runtime waiver still surfaced on the WAIVERS line')
+end
+
+Dir.mktmpdir do |dir|
+  # NON-waiver off-ramp kinds (pass1-stop, an AUTHORIZED manual-spec, duplicate
+  # records of the same kind) never consume the budget.
+  base_workdir(dir)
+  add_offramps(dir, [
+    { 'kind' => 'pass1-stop', 'detail' => 'workbook wb-test', 'at' => '2026-07-10T00:00:00Z' },
+    { 'kind' => 'manual-spec', 'reason' => 'authorized-by-stop', 'at' => '2026-07-10T00:00:01Z' },
+    { 'kind' => 'force-new-workbook', 'reason' => 'r', 'at' => '2026-07-10T00:00:02Z' },
+    { 'kind' => 'force-new-workbook', 'reason' => 'r again', 'at' => '2026-07-10T00:00:03Z' }
+  ])
+  out, _err, st = run_gate(dir)
+  check(st.success?, "informational off-ramps + deduped repeats → exit 0 (got #{st.exitstatus})")
+  pf = JSON.parse(File.read(File.join(dir, 'parity-final.json')))
+  check(pf['waivers'] == ['--force-new-workbook'],
+        'only the real runtime waiver counted, once (authorized manual-spec + pass1-stop excluded)')
+end
+
 puts
 if $fails.empty?
   puts 'ALL PASS — anchors gate + conditional skip-parity + data-class block + waiver budget + similarity floor'

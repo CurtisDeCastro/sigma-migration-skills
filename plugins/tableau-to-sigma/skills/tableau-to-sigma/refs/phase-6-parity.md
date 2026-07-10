@@ -2,7 +2,7 @@
 
 ## Phase 6 — Verify chart data matches Tableau (MANDATORY — hard-gated)
 
-> **A conversion is not complete until `scripts/assert-phase6-ran.rb` exits 0.** This is a *hard gate*, not a guideline. `phase6-parity.rb --finalize` writes `/tmp/<name>/parity-final.json` as a sentinel; `assert-phase6-ran.rb` reads it and exits non-zero if Phase 6 was skipped, ran in extract-mode without permission, or failed parity. Subagent flows (cluster followers via `tableau-assessment`) MUST run the assertion as their final step before writing the result line — without it, an agent can silently skip Phase 6 entirely and self-report `charts_pass: 0, charts_total: 0` to slip past the GREEN check. See `beads-sigma-4pm` for the regression that motivated the gate.
+> **A conversion is not complete until `scripts/assert-phase6-ran.rb` exits 0.** This is a *hard gate*, not a guideline. `phase6-parity.rb --finalize` writes `<WORK>/parity-final.json` as a sentinel; `assert-phase6-ran.rb` reads it and exits non-zero if Phase 6 was skipped, ran in extract-mode without permission, or failed parity. Subagent flows (cluster followers via `tableau-assessment`) MUST run the assertion as their final step before writing the result line — without it, an agent can silently skip Phase 6 entirely and self-report `charts_pass: 0, charts_total: 0` to slip past the GREEN check. See `beads-sigma-4pm` for the regression that motivated the gate.
 
 > **PUT returning `success: true` is not verification.** It only proves the spec parsed. Two recent customer-visible bugs reached the customer because Phase 6 was skipped: a window-function calc compiling silently as `error` and a pie chart wired to the wrong dimension. Compile-clean from `verify-workbook.rb` is also not parity verification — that only confirms each formula resolves, not that the numbers match.
 
@@ -42,14 +42,14 @@ and run the normal `verify-parity.rb`.)
 
 ```bash
 ruby scripts/phase6-parity.rb \
-  --tableau /tmp/<name> \
+  --tableau <WORK> \
   --workbook-id <sigma-workbook-id>
 # add --extract-mode --extract-tol 0.30 when source workbook has a .hyper extract
 ```
 
 This runs everything below as one command: builds the plan, fetches Sigma
 actuals via the workbook elements API, runs the verifier, prints a
-pass/fail summary, writes `/tmp/<name>/parity-final.json`. Exits non-zero
+pass/fail summary, writes `<WORK>/parity-final.json`. Exits non-zero
 on divergence. Use this as the default — the per-step path below is for
 debugging.
 
@@ -59,10 +59,10 @@ After it finishes, **always** run the hard gate:
 # If you POSTed multiple workbooks during the conversion (e.g., iterative
 # spec retries), clean up the orphans first — POST is create-only and each
 # retry leaves an orphan in the customer's My Documents:
-ruby scripts/cleanup-orphan-workbooks.rb --workdir /tmp/<name>
+ruby scripts/cleanup-orphan-workbooks.rb --workdir <WORK>
 
 # Then run the hard gate:
-ruby scripts/assert-phase6-ran.rb --tableau /tmp/<name>
+ruby scripts/assert-phase6-ran.rb --tableau <WORK>
 # add --allow-extract when running parity in extract-mode
 ```
 
@@ -120,10 +120,10 @@ Don't hand-write the plan. Use the auto-builder, which matches Sigma chart-eleme
 
 ```bash
 ruby scripts/auto-parity-plan.rb \
-  --tableau /tmp/<name> \
-  --workbook-spec /tmp/<name>/wb-spec.json \
+  --tableau <WORK> \
+  --workbook-spec <WORK>/wb-spec.json \
   --workbook-id <sigma-workbook-id> \
-  --out /tmp/<name>/parity-plan.json
+  --out <WORK>/parity-plan.json
 ```
 
 On `--finalize`, `phase6-parity.rb` also writes a `tile_census` field into `parity-final.json` (zones vs charts built vs unmatched, read from `dashboard-layout.json`) — gate 5 of `assert-phase6-ran.rb` fails on unmatched zones.
@@ -164,11 +164,11 @@ The plan file pre-populates `sql_template` and `workbookId` on each chart — ju
 
 ```bash
 # Strict (default): exact value comparison
-ruby scripts/verify-parity.rb --plan /tmp/<name>/parity-plan.json
+ruby scripts/verify-parity.rb --plan <WORK>/parity-plan.json
 
 # Extract mode: structural comparison only, tolerant of value drift
-ruby scripts/verify-parity.rb --plan /tmp/<name>/parity-plan.json --extract-mode
-ruby scripts/verify-parity.rb --plan /tmp/<name>/parity-plan.json --extract-mode --extract-tol 0.50
+ruby scripts/verify-parity.rb --plan <WORK>/parity-plan.json --extract-mode
+ruby scripts/verify-parity.rb --plan <WORK>/parity-plan.json --extract-mode --extract-tol 0.50
 ```
 
 Output: per-chart `PASS` or `DIVERGE`. Exit 0 on full pass, 1 on any divergence.
@@ -218,9 +218,9 @@ Harmless — your explicitly-SELECTed columns return correct values alongside th
 
 After workbook PUT and before declaring GREEN you MUST:
 1. POST `/v2/workbooks/{wb}/export` with body `{pageId, format: {type: "png", pixelWidth: 1920, pixelHeight: 1500}}`.
-2. Poll `GET /v2/query/{q}/download` until content-type is `image/png` and save to `/tmp/<name>/sigma-render.png`.
+2. Poll `GET /v2/query/{q}/download` until content-type is `image/png` and save to `<WORK>/sigma-render.png`.
 3. Read `sigma-render.png` via the Read tool and visually compare against the source dashboard PNG you read in Phase 1d (and any per-sheet PNGs).
-4. **Record the verdict (now machine-enforced — gate 8b):** run `ruby scripts/record-visual-check.rb --workdir /tmp/<name> --verdict pass --notes "<what you compared>"`. This stamps `visual_checked`/`screenshot_path` into `parity-final.json`; `assert-phase6-ran.rb --require-visual-comparison` (which `migrate-tableau.rb --finalize` passes for you) **exits 13** until it's recorded. If the render DIVERGES from the source, record `--verdict divergent --notes "<gap>"` (the gate stays blocked), fix the spec, re-render, re-read, then re-record `--verdict pass`. Any visual divergence forces YELLOW (or RED if a tile is missing or unreadable).
+4. **Record the verdict (now machine-enforced — gate 8b):** run `ruby scripts/record-visual-check.rb --workdir <WORK> --verdict pass --notes "<what you compared>"`. This stamps `visual_checked`/`screenshot_path` into `parity-final.json`; `assert-phase6-ran.rb --require-visual-comparison` (which `migrate-tableau.rb --finalize` passes for you) **exits 13** until it's recorded. If the render DIVERGES from the source, record `--verdict divergent --notes "<gap>"` (the gate stays blocked), fix the spec, re-render, re-read, then re-record `--verdict pass`. Any visual divergence forces YELLOW (or RED if a tile is missing or unreadable).
 
 > **Visual QA is a mandatory gate — never skip, never declare done on HTTP 200.** A workbook that POSTs cleanly and passes CSV parity can still be visually broken (overlapping tiles, clipped titles, dead zones, floating filters; Sigma's grid has no z-order). After `export-chart-png.rb` renders the pages/elements:
 > 1. **Read each PNG** and check it against `refs/layout-visual-qa.md` (no overlaps/stacking, no dead zones, controls placed in-band, no clipped titles, even heights, right chart kind/format). Pair with the Tableau MCP `get-view-image` for source-vs-target.
@@ -230,7 +230,7 @@ After workbook PUT and before declaring GREEN you MUST:
 ```bash
 ruby scripts/export-chart-png.rb \
   --workbook <workbookId> \
-  --out-dir /tmp/<name>/screenshots/ \
+  --out-dir <WORK>/screenshots/ \
   --width 1400 --height 700
 ```
 

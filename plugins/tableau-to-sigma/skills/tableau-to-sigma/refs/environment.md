@@ -103,6 +103,25 @@ Three Windows-specific practices that prevent the most time-consuming failure lo
    it) and `<WORKDIR>/auth.json` (above) — rather than exported variables that
    silently evaporate between invocations.
 
+## Managed-machine permission classifiers
+
+Corporate-managed machines (and some agent harnesses) run **permission
+classifiers** that can block two things a migration legitimately does:
+executing "code from an external repository" and running credential-bearing
+commands. Symptoms: script invocations denied with a generic policy message,
+or every `ruby scripts/...` call stalling for approval. The fixes, in order:
+
+1. **Install the skill as a PLUGIN** (marketplace install), not a bare `git
+   clone` — plugin-installed script paths are recognized as part of the tool,
+   where a clone under `~/src/...` reads as arbitrary external code.
+2. **Apply the permissions allowlist** below (scoped to `scripts/*` — never a
+   blanket `Bash(*)`), so the classifier sees a bounded, pre-approved surface.
+3. **Never inline secrets into commands.** The scripts read credentials from
+   the environment / `~/.sigma-migration/env` (written once by `setup.rb` /
+   `setup-tableau.rb`) and mint tokens **in-process** — a command line should
+   never contain a secret, and a secret-bearing `curl` is exactly what the
+   classifier is right to block.
+
 ## Unattended runs & permission prompts
 
 A conversion executes dozens of `ruby scripts/*.rb` / `python3 scripts/*.py`

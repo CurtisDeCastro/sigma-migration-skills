@@ -25,6 +25,31 @@ user-invocable: true
 > Windows use the no-admin path in `refs/environment.md` (#5), and let the **user** run it.
 > Details: `refs/environment.md`.
 
+> ## ⛔ STEP 1 — THE ONE PATH (there is a single entry point; do not improvise one)
+> After the doctor, **always run the orchestrator** — it chains every phase
+> (discover → gates → DM → workbook → layout → two-pass parity → cleanup) in one
+> process and self-gates:
+> ```
+> ruby scripts/migrate-tableau.rb --workbook "<name>" --connection <id>
+> ```
+> - **Do NOT hand-drive the per-phase scripts, and do NOT hand-author DM/workbook
+>   JSON, UNLESS an orchestrator STOP message explicitly routes you there** (e.g.
+>   "CONVERTER STOP", the exit-4 workbook handoff). The per-phase table further
+>   down is a **map for understanding and recovery, not a menu** — picking scripts
+>   off it à la carte is the #1 way runs go inconsistent (the run-state audit
+>   silently no-ops when you bypass the orchestrator).
+> - **"Done" is not something you decide — it is a file on disk.** The migration
+>   is complete **only** when this exits 0:
+>   ```
+>   ruby scripts/verify-complete.rb --workdir <WORK>
+>   ```
+>   A clean **PASS 1 (exit 12) is NOT done** — it means "run `--finalize`". Never
+>   report success, hand off, or write a completion summary until
+>   `verify-complete.rb` prints ✅ DONE. Nothing else counts as green.
+> - **Credentials:** if you are **not** on Claude Code, the orchestrator will stop
+>   at step 0 telling you to run `ruby scripts/setup.rb` once — that is expected;
+>   do it (in a real terminal) rather than working around the auth error.
+
 > **Model fit & vision requirements — `refs/model-fit.md`.** Design fidelity depends on
 > the driving agent, not just the environment. One-line rule: **pixel-fidelity claims
 > require image input; very-large workbooks on non-top-tier models require asking the
@@ -250,13 +275,20 @@ Optional `--enhance [--enhance-accept <ids|all-low-risk>]` runs Phase E
 
 ## Scripts
 
-The conversion is driven by `scripts/*.rb`. Each script encapsulates one mechanical
-phase. You compose them; the agent's role is judgment (which DM/workbook shape,
-which calc translation, which layout) — not orchestration.
+The conversion is driven by `scripts/*.rb`. **`migrate-tableau.rb` composes them
+for you** (see STEP 1 at the top) — it is the orchestrator and the only entry
+point you run cold. Each other script encapsulates one mechanical phase; you
+invoke one **directly only when an orchestrator STOP message tells you to**
+(recovery/handoff), never as an à-la-carte alternative to the one command. The
+agent's role is judgment (which DM/workbook shape, which calc translation, which
+layout) inside that spine — not re-orchestrating it by hand. The table below is
+the map of what the orchestrator runs.
 
 | Script | Purpose |
 |---|---|
 | `scripts/migrate-tableau.rb` | **The one command** — chains the whole scripted spine (gap gate → DM-reuse scan → DM → workbook → layout → two-pass parity → cleanup + census gate) and stops with exact instructions where agent judgment is required. See "One command" above. |
+| `scripts/verify-complete.rb` | **The single offline "are we done?" check** — exit 0 / ✅ DONE only when `phase6-success.json` is present (stamped by `assert-phase6-ran.rb` exit 0) and no `parity-pending.json` remains. A clean PASS 1 (exit 12) reports NOT DONE. Also prints the run's off-ramp trail. Run before claiming success. |
+| `scripts/lib/offramp.rb` + `offramps.jsonl` | **Observability trail** — every point a run leaves the golden path (cred/doctor waiver, PASS-1 stop, converter-stop, workbook-handoff, degraded fast path, manual-spec) appends a structured record to `<WORK>/offramps.jsonl`. Read it (or `verify-complete.rb`) to pinpoint *where* a run defected. |
 | `scripts/setup.rb` | One-time Sigma credential setup |
 | `scripts/get-token.sh` | Exchange `SIGMA_CLIENT_ID`/`SIGMA_CLIENT_SECRET` for `SIGMA_API_TOKEN` (~1h TTL) — **bash only** |
 | `scripts/get_token.py` | Shell-neutral twin of `get-token.sh` (bash/PowerShell/cmd): writes `<WORK>/auth.json` (0600), read automatically by the scripts |
@@ -267,7 +299,7 @@ which calc translation, which layout) — not orchestration.
 | `scripts/get-tableau-token.sh` | One-shot signin → exports `TABLEAU_AUTH_TOKEN` + `TABLEAU_SITE_ID` — **bash only** |
 | `scripts/get-tableau-token.py` | Shell-neutral twin (bash/PowerShell/cmd) for hand-driven Tableau REST. The orchestrator mints the Tableau token in-process (no bash) so it no longer calls either. |
 | `scripts/tableau-discover.rb` | PAT-mode Phase 1 discovery in one CLI: workbook + views + VDS metadata + GraphQL + .twb content. ONE unified fetch pool (default 5, `--pool N`, longest-job-first) with 429/timeout backoff + 401 re-mint; always writes per-task `timings.json`. Measured 61.8s → 13.7–18.9s on the 7-view reference workbook |
-| `scripts/resolve-project.rb` | **Phase 1a — numeric-project-URL resolver (⛔ no guessing).** The `/projects/<N>` number in a Tableau URL is a *vizportal URL id*; **REST Query Projects has NO numeric id** (only luid/name/contentCounts), so no REST call can resolve it — and guessing picked the WRONG project in a real field run. Resolves via Metadata GraphQL (`workbooks { luid name projectVizportalUrlId projectLuid projectName }`, + the same fields on `publishedDatasources` when the schema supports them), grouped by `projectVizportalUrlId`. Exact match → `{vizportal_id, project_luid, project_name, workbooks:[{luid,name}]}` (exit 0, `--out` JSON). No match / Metadata API off → **exit 2 with a REST candidates table: STOP and ask the user which project — NEVER assume.** Exit 3 = auth/transport (fix creds via `setup-tableau.rb`). |
+| `scripts/resolve-project.rb` | **Phase 1a — numeric-URL resolver, project AND workbook (⛔ no guessing).** A `/workbooks/<N>` URL resolves via `Workbook.vizportalUrlId` to `{workbook_luid, name, project_luid, project_name}` (exit 0). The `/projects/<N>` number in a Tableau URL is a *vizportal URL id*; **REST Query Projects has NO numeric id** (only luid/name/contentCounts), so no REST call can resolve it — and guessing picked the WRONG project in a real field run. Resolves via Metadata GraphQL (`workbooks { luid name projectVizportalUrlId projectLuid projectName }`, + the same fields on `publishedDatasources` when the schema supports them), grouped by `projectVizportalUrlId`. Exact match → `{vizportal_id, project_luid, project_name, workbooks:[{luid,name}]}` (exit 0, `--out` JSON). No match / Metadata API off → **exit 2 with a REST candidates table: STOP and ask the user which project — NEVER assume.** Exit 3 = auth/transport (fix creds via `setup-tableau.rb`). |
 | `scripts/scan-workbook-gaps.rb` | **Phase 0a (mandatory):** scan a `.twb` and emit `gaps-report.md` + `gaps.json` categorising every feature into ✅ auto / ⚠️ hint / 🛠 manual / ❌ unhandled. Run BEFORE any other phase. Also detects multi-datasource **data blends** (secondary `datasource-dependencies` + linking fields) and writes `blend-plan.json` with a per-blend route — same-warehouse-repoint / materialize-via-vds / flag-unreachable (decision tree: `refs/blending.md`). |
 | `scripts/gap-scout.md` | **Phase 0a-scout:** subagent prompt + protocol for resolving ❌ Unhandled gaps. Main agent spawns one scout per gap via the Agent tool. |
 | `scripts/validate-sigma-formula.rb` | Scout primitive: POST a tiny test workbook with a candidate formula, read back column types, return JSON `{ status: ok|error }`. Auto-expands the DM element's columns onto the test master so candidate refs to real data resolve. |
@@ -276,7 +308,7 @@ which calc translation, which layout) — not orchestration.
 | `scripts/learned-rules.rb` | Loader module: merges the repo-shipped starter pack (`learned/starter-rules.yaml` — live-verified rules from real runs, so no machine starts empty) with `~/.tableau-to-sigma/learned-rules.yaml` (user rules override starter rules on key collision). Customer-discovered rules apply BEFORE the built-in translators in `build-charts-from-signals.rb`; starter entries without a rewrite pattern are spec-guidance (surfaced by the CLI dump, mirrored in `refs/fidelity-recipes.md`, never blind-applied). |
 | `scripts/parse-twb-layout.rb` | Parse a `.twb` XML file into a per-dashboard zone list plus a sister `*-meta.json` (worksheets + shared_filters + parameters + column_aliases). Per chart zone surfaces: position (`x/y/w/h%`), `chart_kind`, `mark_class`, `geo_role`, `sort`, `filters` (with resolved column captions + member values + action-vs-value flag), `aggregations`, `channels`, `formats` (Tableau format strings → Sigma d3-format with paren-negative handling), `calculations`, `dual_axis` (synchronized-axes detection), `ref_marks` (reference lines/bands/trendlines), `filter_column_caption`. Detects Tableau **stories** (both `<story>` and storyboard-dashboard shapes): flags storyboard dashboards `is_story: true` and writes `story-plan.json` (story → ordered points with captions + captured sheets) — when present, run `build-story-pages.rb`. Bin calc columns surface `bin_size`/`bin_peg`. |
 | `scripts/build-charts-from-signals.rb` | Generate Sigma chart-element specs from parse-twb-layout output + view CSVs + master-column map. Auto-translates: column aliases → `Switch(…)` calc, parameter-driven CASE/IF chains → `Switch([ctl-param-x], …)` with controlId rewrite per page, table calcs (INDEX/LOOKUP/TOTAL/RANK/ZN/IIF/COUNTD) → Sigma equivalents, `DATEPART('iso-year')` → Thursday-of-ISO-week `Year(DateAdd(...))` composition, `FINDNTH` → `SplitToArray`/`ArraySlice`/`ArrayJoin` composition, Tableau bins → native `BinFixed`/`BinRange` recipe, **nested `{FIXED}` LODs → helper-element chain** (innermost LOD = helper element 1, outer consumes `[LOD Helper k/Value]`; machine-readable sidecar `<out>-lod-chains.json`), Tableau formats (p%.%/C1033%/`(neg)`) → Sigma d3-format. Honors `--page-per-worksheet`, `--auto-controls`. Loads customer learned-rules first. Writes `*-actions.md` companion listing Tableau action filters for post-publish cross-filter setup. **Writes `coverage.json`** (`--coverage-out`): aggregates every dropped/degraded/approximated component into one ledger (rendered by `migrate-tableau.rb`); classifies build messages so `WARN` = real gap, `NOTE` = success/verify (bead beads-sigma-59mk). |
-| `scripts/extract-custom-sql.rb` | Phase 1f: pull Custom SQL blocks behind a workbook via Metadata GraphQL + .twb XML fallback. Output → `/tmp/<name>/custom-sql.json`. |
+| `scripts/extract-custom-sql.rb` | Phase 1f: pull Custom SQL blocks behind a workbook via Metadata GraphQL + .twb XML fallback. Output → `<WORK>/custom-sql.json`. |
 | `scripts/resolve-published-ds.rb` | **Published-datasource (sqlproxy) resolver — the reliable chase.** For each `<connection class='sqlproxy'>` datasource, resolves the PDS by contentUrl (== the sqlproxy `dbname` / `<repository-location id>`), `GET /datasources/{id}/content`, and reads the inner `.tds`'s REAL relation — a warehouse **table** OR a Custom SQL `<relation type='text'>`. Emits a descriptor per PDS `{contentUrl, relationType, sql|table, db, schema, columns}`. Uses REST content (NOT Metadata GraphQL lineage, which lags hours on fresh PDSes and often has empty downstream links). |
 | `scripts/hydrate-custom-sql.rb` | **Published-datasource (sqlproxy) hydration.** A workbook on a published DS carries only a `<connection class='sqlproxy'>` placeholder; left as-is the converter fabricates a phantom table (`CSA.TJ.SQLPROXY`) → POST "Source not found". `hydrate_pds!` (PRIMARY, `--pds`) splices the resolver's descriptor: **table** PDS → a real `<relation type='table'>` (qualified from the PDS db/schema); **Custom SQL** PDS → a `<relation type='text'>` with the SQL wrapped and its output columns projected as upper-snake aliases (`"Sales Region" AS SALES_REGION`) for Snowflake-safe casing, and **synthesized `<metadata-records>`** from the parsed SQL columns (published-DS workbooks cache none, so without this the element POSTs with 0 columns). GraphQL Custom SQL blocks (`--custom-sql`) remain a fallback. The existing converter then builds a normal element — no new DM-shaping code. `migrate-tableau.rb` runs resolve→hydrate before conversion when `HydrateCustomSql.twb_has_sqlproxy?`, and ABORTS (never fabricates a phantom) if a sqlproxy DS stays unresolved. Pure module + offline unit test `test-hydrate-custom-sql.rb`. |
 | `scripts/lib/tableau_rest.rb` | Ruby wrapper for the Tableau REST endpoints the skill uses |
@@ -288,10 +320,10 @@ which calc translation, which layout) — not orchestration.
 | `scripts/remap-wb-spec-to-dm-ids.rb` | When a DM is re-POSTed and element IDs churn, remaps a cached `wb-spec.json` to the new IDs via name-based matching. Optional `--rename` for renamed elements. |
 | `scripts/extract-calc-fields.rb` | Phase 1e: pull every Tableau calc field (with formula) via Metadata API (`POST /api/metadata/graphql`); falls back to `.twb` XML when Metadata API is unavailable. Drops VDS dependency. Caches to `<wb-dir>/calc-fields.json`. |
 | `scripts/validate-spec.rb` | DM or workbook spec validator. Accepts `--type` and `--dm-context` |
-| `scripts/post-and-readback.rb` | POST a DM or workbook spec, parse YAML response, GET back the spec, emit element ID map. Also runs a universal **column-type guard** afterward: any column whose formula resolved to type `error` aborts the script with exit 2 and the failing formula. Catches silent-error columns the validator doesn't pattern-match (typo refs, `IsIn`, unsupported functions) without waiting for Phase 6. Then the shared **layout lint** (exit 3) and **control lint** (`scripts/lib/control_lint.rb`, exit 4 — dead controls / ghost targets / partial same-page reach; honors the `<workdir>/control-scope.json` sidecar, `--skip-control-lint` escape). |
+| `scripts/post-and-readback.rb` | POST a DM or workbook spec, parse YAML response, GET back the spec, emit element ID map. Also runs a universal **column-type guard** afterward: any column whose formula resolved to type `error` aborts the script with exit 2 and the failing formula. Catches silent-error columns the validator doesn't pattern-match (typo refs, `IsIn`, unsupported functions) without waiting for Phase 6. Then the shared **layout lint** (exit 3) and **control lint** (`scripts/lib/control_lint.rb`, exit 4 — dead controls / ghost targets / partial same-page reach; honors the `<workdir>/control-scope.json` sidecar, `--skip-control-lint` escape). **Same-workbook PUT discipline:** when the workdir already recorded a workbook id (`posted-workbooks.jsonl` / `migrate-state.json`), the spec is PUT to it in place — `--force-new-workbook "<reason>"` is the only way to POST a new one (waiver-counted). **Standalone runs on an orchestrator workdir are refused (exit 7)** unless an orchestrator STOP is on record (`manual-path-authorized.json`) or `--allow-manual-spec "<reason>"` is passed. |
 | `scripts/lib/preflight_lint.rb` | **MANDATORY before any workbook POST** — static lint of the spec that catches the two enterprise-class failure modes with a precise message instead of the opaque `Invalid kind: control` / a silently-detail-rendered table: (T1) a `table` with aggregate columns + dimensions but **no `groupings`** → renders raw 9.6M detail rows; (T2) a grouping calculation that passes through an already-aggregated column → "multiple values"; (C1/C2/C3) a `control` missing `id`/`controlId`/`controlType` nesting value fields under a `value` object (must be FLAT top-level), carrying a non-double-nested `source`, or a list-type control wired to neither `source` nor `filters` (a filters-only list control is valid). `ruby scripts/lib/preflight_lint.rb <spec.json>` (exit 1 on violations). Fix all violations before POST. Verified shapes: `sigma-workbooks` `controls.md`/`tables.md`. |
 | `scripts/put-layout.rb` | Apply a layout XML to an existing workbook (strips read-only fields) |
-| `scripts/auto-parity-plan.rb` | Phase 6a: auto-build a parity plan by matching Sigma chart elements to Tableau view CSVs (with `--rename` for renamed tiles). Output → `/tmp/<name>/parity-plan.json` wrapped as `{ extract, charts: [...] }` |
+| `scripts/auto-parity-plan.rb` | Phase 6a: auto-build a parity plan by matching Sigma chart elements to Tableau view CSVs (with `--rename` for renamed tiles). Output → `<WORK>/parity-plan.json` wrapped as `{ extract, charts: [...] }` |
 | `scripts/verify-parity.rb` | Phase 6c: diff expected (Tableau) vs actual (Sigma) per chart. `--extract-mode` switches to structural comparison (bucket count + dim set + sort) with value-drift tolerance for hasExtracts=true workbooks |
 | `scripts/verify-anchors.rb` | **Phase 6 — the MEASURED value bar.** Loads `<workdir>/source-anchors.json` (printed source values transcribed at Phase 1d, EXACTLY as printed), pools the live workbook's element CSV exports (same export→poll→download flow as `collect-parity-actuals.rb`), and checks each anchor is present at the printed precision (`scripts/lib/anchor_values.rb` canonicalization: `"18,037B"`→(1.8037e13, ±0.5e9); `sigma_element_hint` wins, else label→element token-overlap fuzzy match, then search everywhere). Writes `anchors-verdict.json` `{checked, matched, missing:[{id,label,raw,best_candidate}], pass}` + stamps an `anchors` summary into `parity-final.json`. Exit 0 all matched / 1 with a per-miss report. An anchor value appearing NOWHERE in the exports is the loudest possible signal the data is wrong. See `refs/source-anchors.md`. |
 | `scripts/assert-phase6-ran.rb` | **Conversion hard gate** — exits 0 only when ALL pass: (1) Phase 6 ran and parity-final.json shows status=PASS at the required rate, (2) no uncleaned orphan workbooks (posted-workbooks.jsonl has ≤1 entry OR cleanup-marker.json shows a successful non-dry-run cleanup), (3) the live workbook's `/columns` endpoint shows no column with `type=error` (catches circular refs / runtime errors introduced after the initial POST's column-type guard), (4) a non-empty top-level layout XML is applied (beads-sigma-bw3), (5) tile census — parity-final.json's `tile_census` shows no unexplained dashboard zones without a matching chart (catches the empty-view-CSV N-1-charts escape, bead gjhe; `--allow-missing-tiles N` for legitimately unbuildable zones), (6) layout lint, (7) control lint, **(8) Phase 6f visual render — a valid Sigma render PNG exists in the workdir (`sigma-render.png` or a `screenshots/_manifest.json` entry), proving the mandatory full-dashboard visual comparison could run. Closes the "declared done on HTTP 200 / CSV-parity-only" regression where the workbook shipped without anyone rendering the PNG**, plus (8b) a RECORDED source-vs-target visual verdict, and **(8c) layout fill / grid coverage — reads `layout-census.json` (emitted by `build-dashboard-layout.rb`) and fails any page that dropped a tile (`placed < zones`) or ships mostly empty (`grid_fill_pct < --min-grid-fill`, default 0.45); #259 item 1.** Exits 1 for missing parity sentinel, 2 for parity FAIL / extract-mode-without-flag / charts_total==0, 4 for uncleaned orphans, 5 for live type=error columns, 6 for missing layout, 7 for census failure, 8 for layout-lint violations (`lib/layout_lint.rb`, `--skip-layout-lint`), 9 for control-lint violations (`lib/control_lint.rb` — dead controls / ghost targets / partial reach / control-scope coverage; `--skip-control-lint`, `--control-scope PATH`), 10 for missing visual render (`--sigma-render PATH`, escape hatch `--skip-visual-gate "<reason>"`), 13 for an unrecorded visual verdict (`--skip-visual-comparison "<reason>"`), 14 for a layout-fill/coverage failure (`--min-grid-fill F`, escape hatch `--skip-layout-fill "<reason>"`), **15 for an unresolved Phase 5g RCF fidelity ledger (gate 8d — OPT-IN via `--require-fidelity-ledger`, which `migrate-tableau.rb --finalize` passes unless `--rcf-passes 0`: the `fidelity-ledger.json` is missing or still carries spec-fixable deltas that were never resolved; waive named residuals with `--accept-residuals id,id` — but data-class ids are NEVER accepted, and any unresolved `data`-class entry blocks whenever the ledger exists, flag or no flag)**, **18 for the source-anchor value gate (gate 13 — when a source dashboard PNG exists, `source-anchors.json` must carry ≥5 anchors and `anchors-verdict.json` must pass; also raised when `--skip-parity-gate` is passed without a passing anchors verdict — the anchors oracle replaces parity, never nothing; escape `--skip-anchors-gate "<reason>"`)**, **19 for the waiver budget (>2 quality waivers → GREEN unavailable, YELLOW cap; `waivers` + `waiver_count` stamped into parity-final.json on every run; no escape flag)**, and **20 for the measured visual-similarity floor (gate 14, behind `scripts/visual-similarity.py`; escape `--skip-visual-similarity "<reason>"`)**. Subagent flows MUST call this as their final step. |
@@ -393,7 +425,7 @@ process).
 eval "$(scripts/get-tableau-token.sh)"
 ruby scripts/tableau-discover.rb \
   --workbook-id <luid> \
-  --out /tmp/<name>   # [--pool N] (default 5)
+  --out <WORK>   # [--pool N] (default 5)
 ```
 
 Produces the same artifacts as MCP-driven Phase 1 in a single run: `get-workbook.json`,
@@ -483,17 +515,20 @@ calc fields (`extract-calc-fields.rb`) and Custom SQL (`extract-custom-sql.rb`)
 here. **Full detail (fetch patterns, calc discovery, custom-SQL fallback):
 `refs/phase-1-discover.md`.**
 
-> **🚧 GATE — Phase 1a: numeric `/projects/<id>` URLs MUST go through the
-> resolver.** When the user hands you a Tableau URL like
-> `.../#/site/<site>/projects/1234567`, that number is a **vizportal URL id**
-> the REST API cannot resolve (Query Projects returns only luid/name/counts —
-> no numeric id). Run `ruby scripts/resolve-project.rb --url "<url>"` **before
-> anything else**. Exit 0 → migrate exactly the workbooks it lists. **Exit 2 →
-> STOP and ask the user, presenting the printed candidate list — do not
-> proceed.** Guessing the project from its name or recency is a **gate
+> **🚧 GATE — Phase 1a: ANY numeric Tableau URL (project *or* workbook) MUST go
+> through the resolver.** When the user hands you a Tableau URL like
+> `.../#/site/<site>/projects/1234567` **or**
+> `.../#/site/<site>/workbooks/4242001/views`, that number is a **vizportal URL
+> id** the REST API cannot resolve (no REST endpoint carries it). Run
+> `ruby scripts/resolve-project.rb --url "<url>"` **before anything else**.
+> Exit 0 → migrate exactly the workbook(s) it lists (a workbook URL resolves
+> straight to `{workbook_luid, name, project_luid, project_name}` — no
+> hand-searching). **Exit 2 → STOP and ask the user, presenting the printed
+> candidate list — do not proceed.** Guessing from name or recency is a **gate
 > violation**: a wrong guess silently points the ENTIRE run (discovery, DM,
-> workbook, parity) at the wrong content — a real field session burned 6 hours
-> migrating the wrong project this way. Query shape + why REST can't do it:
+> workbook, parity) at the wrong content — one real field session burned 6
+> hours migrating the wrong project, another burned 20 minutes hand-hunting a
+> workbook it had a DIRECT link to. Query shape + why REST can't do it:
 > `refs/tableau-rest.md`.
 
 > **🚧 GATE — Phase 1d dashboard-read.** The CSVs give you numbers, not the
@@ -582,7 +617,13 @@ ruby scripts/verify-anchors.rb --workdir <WORK> --workbook-id <wb>      # 🚧 m
 ruby scripts/assert-run-state.rb --workdir <WORK>                       # 🚧 phase-chain ledger audit
 ruby scripts/assert-phase6-ran.rb --workdir <WORK> --workbook-id <wb>   # 🚧 hard gate — must exit 0
 ```
-**A conversion is NOT done until `assert-phase6-ran.rb` exits 0.** Full detail
+**A conversion is NOT done until `assert-phase6-ran.rb` exits 0** (which stamps
+`<WORK>/phase6-success.json`). Confirm it before claiming success with the single
+offline check — `ruby scripts/verify-complete.rb --workdir <WORK>` must print
+✅ DONE / exit 0. The marker is **run-scoped**: a migration may be reported
+complete ONLY when `<WORK>/phase6-success.json` exists **for the current run id**
+(the gate deletes a stale marker from a previous run on any failure) — quote the
+marker's workbook id + run id verbatim in your report. Full detail
 (raw-warehouse mode, triage, visual checklist): `refs/phase-6-parity.md`.
 
 **No-standalone-views path (dashboard-embedded worksheets).** When the source

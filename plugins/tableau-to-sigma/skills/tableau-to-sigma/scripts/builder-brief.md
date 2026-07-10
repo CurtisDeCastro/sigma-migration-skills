@@ -163,6 +163,12 @@ When you believe the render matches the source:
 
 DELIVERABLES (all in `{{WORKDIR}}`)
 
+- **Completion is a file, not a feeling:** a migration may be reported complete
+  ONLY when `{{WORKDIR}}/phase6-success.json` exists **for the current run id**
+  (`ruby scripts/verify-complete.rb --workdir {{WORKDIR}}` reads it) — quote the
+  marker's workbook id + run id verbatim in your report. (Under the
+  builder/verifier split your designed stop is exit 13 — say so explicitly and
+  hand off; never claim GREEN yourself.)
 - `MIGRATION_REPORT.md` — what was built, every waiver + reason + evidence,
   named degradations/substitutions, extract-mode notes, live workbook URL.
 - `migration-result.json`:

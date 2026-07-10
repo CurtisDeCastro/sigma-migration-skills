@@ -41,7 +41,7 @@ against any Sigma connection regardless of underlying warehouse:
 
 ```bash
 eval "$(scripts/get-token.sh)" && \
-ruby scripts/discover-warehouse-columns.rb /tmp/<name>/columns \
+ruby scripts/discover-warehouse-columns.rb <WORK>/columns \
   <inodeId1> <inodeId2> ...
 ```
 
@@ -51,7 +51,7 @@ and emits a JSON column list:
 
 ```bash
 ruby scripts/discover-columns.rb --connection-id <id> \
-  --table-path TJ.PUBLIC.ORDERS --out /tmp/<name>/orders-cols.json
+  --table-path TJ.PUBLIC.ORDERS --out <WORK>/orders-cols.json
 # (or any warehouse path: my_project.my_dataset.orders, main.public.orders, etc.)
 ```
 

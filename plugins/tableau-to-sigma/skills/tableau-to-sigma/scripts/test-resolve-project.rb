@@ -43,6 +43,31 @@ puts 'test-resolve-project.rb — URL parse + grouping + CLI exit contract'
   check(got == want, "parse #{url.inspect[0, 80]} → #{want.inspect} (got #{got.inspect})", fails)
 end
 
+# --- 1b. workbook-URL parsing (v4.2 — the direct-workbook-link fix) ----------
+{
+  'https://prod-useast-b.online.tableau.com/#/site/examplecorp/workbooks/4242001' => '4242001',
+  'https://prod-useast-b.online.tableau.com/#/site/examplecorp/workbooks/4242001/views' => '4242001',
+  'https://tableau.example.com/#/workbooks/999?:origin=card_share_link' => '999', # default site + query
+  'https://tableau.example.com/#/site/x/projects/1234567/workbooks' => nil,       # project URL, not workbook
+  'https://tableau.example.com/#/site/x/workbooks/SalesWB' => nil,                # non-numeric
+  '' => nil,
+  nil => nil
+}.each do |url, want|
+  got = ResolveProject.parse_workbook_vizportal_id(url)
+  check(got == want, "wb-parse #{url.inspect[0, 80]} → #{want.inspect} (got #{got.inspect})", fails)
+end
+
+# --- 1c. workbook exact-match lookup (pure function) -------------------------
+wb_fixture_rows = JSON.parse(File.read(FX_GQL)).dig('workbooks_response', 'data', 'workbooks')
+whit = ResolveProject.resolve_workbook(wb_fixture_rows, '4242001')
+check(!whit.nil? && whit[:workbook_luid] == 'wb-aaaa-1111' && whit[:name] == 'Sales Overview' &&
+        whit[:project_luid] == 'proj-luid-finance' && whit[:project_name] == 'Finance Analytics',
+      'workbook vizportal id resolves {workbook_luid, name, project_luid, project_name}', fails)
+check(ResolveProject.resolve_workbook(wb_fixture_rows, 2233445)[:name] == 'Churn Deep Dive',
+      'Integer workbook vizportal ids from the API resolve too (canonicalized)', fails)
+check(ResolveProject.resolve_workbook(wb_fixture_rows, '424242').nil?,
+      'unknown workbook id resolves to nil (never a guess)', fails)
+
 # --- 2. grouping + exact-match lookup (pure functions) -----------------------
 fx = JSON.parse(File.read(FX_GQL))
 wb_rows = fx.dig('workbooks_response', 'data', 'workbooks')
@@ -115,11 +140,31 @@ Dir.mktmpdir do |d|
   check(st == 2 && err.include?('NEVER assume'),
         "empty metadata graph → exit 2 with candidates (got #{st})", fails)
 
-  # URL without a /projects/<N> segment → exit 2 with usage
-  _out, err, st = run.call('--url', 'https://tableau.example.com/#/site/x/workbooks/999',
+  # WORKBOOK URL happy path (v4.2): /workbooks/<N> resolves the workbook itself
+  wb_out_path = File.join(d, 'resolved-wb.json')
+  out, _err, st = run.call('--url', 'https://prod-useast-b.online.tableau.com/#/site/examplecorp/workbooks/4242001/views',
+                           '--fixture-graphql', FX_GQL, '--fixture-rest', FX_REST,
+                           '--out', wb_out_path)
+  check(st == 0, "workbook URL happy path exits 0 (got #{st})", fails)
+  wdoc = File.exist?(wb_out_path) ? JSON.parse(File.read(wb_out_path)) : {}
+  check(wdoc['workbook_vizportal_id'] == 4242001 && wdoc['workbook_luid'] == 'wb-aaaa-1111' &&
+          wdoc['name'] == 'Sales Overview' && wdoc['project_luid'] == 'proj-luid-finance' &&
+          wdoc['project_name'] == 'Finance Analytics',
+        '--out JSON carries {workbook_vizportal_id, workbook_luid, name, project_luid, project_name}', fails)
+  check(out.include?('wb-aaaa-1111'), 'workbook happy path prints the resolved workbook luid', fails)
+
+  # WORKBOOK URL, unknown id → exit 2 + workbook candidates + never-assume
+  _out, err, st = run.call('--url', 'https://tableau.example.com/#/site/x/workbooks/424242',
                            '--fixture-graphql', FX_GQL, '--fixture-rest', FX_REST)
-  check(st == 2 && err.include?('no numeric /projects/<id>'),
-        "URL without /projects/<N> → exit 2 usage error (got #{st})", fails)
+  check(st == 2, "unknown workbook id exits 2 (got #{st})", fails)
+  check(err.include?('Sales Overview') && err.include?('Ops Monitor') && err.include?('NEVER assume'),
+        'workbook exit-2 output lists candidates + the ask-the-user instruction', fails)
+
+  # URL with NEITHER /projects/<N> nor /workbooks/<N> → exit 2 with usage
+  _out, err, st = run.call('--url', 'https://tableau.example.com/#/site/x/views/SalesWB/Dash',
+                           '--fixture-graphql', FX_GQL, '--fixture-rest', FX_REST)
+  check(st == 2 && err.include?('no numeric /projects/<id> or /workbooks/<id>'),
+        "URL without any numeric id → exit 2 usage error (got #{st})", fails)
 
   # --help works with no creds, no fixtures, no network
   out, _err, st = run.call('--help')

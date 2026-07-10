@@ -8,7 +8,7 @@ the agent can plan around real translation gaps instead of discovering them
 mid-conversion.
 
 ```bash
-ruby scripts/scan-workbook-gaps.rb /tmp/<name>/workbook-content.twb
+ruby scripts/scan-workbook-gaps.rb <WORK>/workbook-content.twb
 # writes <name>-workbook-content-gaps-report.md + <name>-workbook-content-gaps.json
 ```
 
@@ -132,12 +132,12 @@ multi-workbook migration.
 
 ```bash
 # Pre-fetch workbook + datasource metadata
-mcp__tableau__get-workbook  workbookId="<luid>"            > /tmp/<name>/get-workbook.json
-mcp__tableau__get-datasource-metadata  datasourceLuid="..." > /tmp/<name>/ds-metadata.json
+mcp__tableau__get-workbook  workbookId="<luid>"            > <WORK>/get-workbook.json
+mcp__tableau__get-datasource-metadata  datasourceLuid="..." > <WORK>/ds-metadata.json
 
 ruby scripts/estimate-cost.rb \
-  --workbook /tmp/<name>/get-workbook.json \
-  --datasource /tmp/<name>/ds-metadata.json
+  --workbook <WORK>/get-workbook.json \
+  --datasource <WORK>/ds-metadata.json
 ```
 
 The estimator emits a JSON record with `features` (dashboards, sheets, calc

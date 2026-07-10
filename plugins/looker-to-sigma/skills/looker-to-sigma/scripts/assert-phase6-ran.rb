@@ -243,6 +243,37 @@ end
 
 summary_path = File.join(opts[:tab], 'parity-final.json')
 
+# ── Run-scoped completion sentinel (current run id) ─────────────────────────
+# The orchestrator mints a run_id at each PASS-1 start (migrate-state.json /
+# run-state.json). phase6-success.json is only valid FOR that run: on exit 0 we
+# stamp it with the current id; on ANY failure we delete a success marker left
+# by a PREVIOUS run id, so verify-complete.rb can never report DONE off a stale
+# marker. Converters without a run_id concept fall back to nil (the marker is
+# then deleted on every failure — fail-closed).
+current_run_id = begin
+  JSON.parse(File.read(File.join(opts[:tab], 'migrate-state.json')))['run_id']
+rescue StandardError
+  nil
+end
+current_run_id ||= begin
+  JSON.parse(File.read(File.join(opts[:tab], 'run-state.json')))['run_id']
+rescue StandardError
+  nil
+end
+at_exit do
+  st = $!
+  next unless st.is_a?(SystemExit) && !st.success?
+  succ = File.join(opts[:tab], 'phase6-success.json')
+  next unless File.exist?(succ)
+  old_id = (JSON.parse(File.read(succ))['run_id'] rescue nil)
+  # Keep a same-run success (a re-run of an already-green run with a failing
+  # extra flag must not unmint it); delete anything else — it is stale.
+  unless current_run_id && old_id && old_id == current_run_id
+    File.delete(succ) rescue nil
+    warn "[SENTINEL] stale phase6-success.json (run #{old_id || '?'}) deleted — this run (#{current_run_id || '?'}) FAILED the gate."
+  end
+end
+
 # ---------------------------------------------------------------------------
 # Waiver budget (exit 19). EVERY waiver/escape flag is counted — --skip-*,
 # --allow-extract, --allow-missing-tiles>0, --min-pass-rate<1, --accept-* —
@@ -272,7 +303,13 @@ WAIVER_HIDES = {
   '--skip-postpublish-guide'   => 'gate 11: interactivity handoff guide not required',
   '--accept-deferred-elements' => 'gate 12: a PARTIAL data model was accepted',
   '--skip-anchors-gate'        => 'gate 13: source-anchor values never verified (the measured value bar)',
-  '--skip-visual-similarity'   => 'gate 14: visual-similarity floor never measured'
+  '--skip-visual-similarity'   => 'gate 14: visual-similarity floor never measured',
+  # Runtime off-ramps (recorded to <workdir>/offramps.jsonl by the scripts that
+  # honored them; counted here so an escape taken MID-RUN spends budget exactly
+  # like a gate flag):
+  '--force-new-workbook'       => 'run: a prior workbook for this workdir was deliberately orphaned (new POST)',
+  '--force-route-switch'       => 'run: the workdir was re-driven via the OTHER route (orchestrated vs manual)',
+  '--allow-manual-spec'        => 'run: hand-authored specs / standalone POST with no orchestrator STOP on record'
 }.freeze
 waiver_flags = []
 waiver_flags << '--skip-parity-gate'         if opts[:skip_parity]
@@ -295,6 +332,27 @@ waiver_flags << '--accept-deferred-elements' if opts[:accept_deferred]
 waiver_flags << '--skip-anchors-gate'        if opts[:skip_anchors]
 waiver_flags << '--skip-visual-similarity'   if opts[:skip_vsim]
 
+# Runtime waivers taken MID-RUN (off-ramp trail, offramps.jsonl): a forced new
+# workbook, a forced route switch, or an unauthorized manual-spec run each spend
+# the same budget as a gate flag — otherwise an escape honored by a SCRIPT would
+# be invisible to the cap that exists to stop waiver stacking. Read directly
+# (plain JSONL; no lib dependency — this file is shared across plugins). Counted
+# once per kind.
+begin
+  _or_path = File.join(opts[:tab], 'offramps.jsonl')
+  if File.exist?(_or_path)
+    _or_kinds = File.readlines(_or_path).map { |l| JSON.parse(l) rescue nil }.compact
+    waiver_flags << '--force-new-workbook' if _or_kinds.any? { |r| r['kind'] == 'force-new-workbook' } &&
+                                              !waiver_flags.include?('--force-new-workbook')
+    waiver_flags << '--force-route-switch' if _or_kinds.any? { |r| r['kind'] == 'route-switch-forced' } &&
+                                              !waiver_flags.include?('--force-route-switch')
+    waiver_flags << '--allow-manual-spec'  if _or_kinds.any? { |r| r['kind'] == 'manual-spec' && r['reason'].to_s.start_with?('waiver:') } &&
+                                              !waiver_flags.include?('--allow-manual-spec')
+  end
+rescue StandardError
+  nil # observability only — never sink the gate on trail parsing
+end
+
 # QUALITY waivers consume the budget; POLICY waivers never do:
 #   - --skip-telemetry-gate is a consent-policy decision, not workbook quality;
 #   - --skip-visual-comparison under the sanctioned builder→verifier split
@@ -312,6 +370,14 @@ if File.exist?(summary_path)
     _pf = JSON.parse(File.read(summary_path))
     _pf['waivers'] = waiver_flags
     _pf['waiver_count'] = waiver_flags.length
+    # Off-ramp telemetry fields (P2): where did this run defect? route comes from
+    # the orchestrator's migrate-state.json ('orchestrated' | 'manual-authorized';
+    # null for converters without the concept); manual_path_authorized records an
+    # orchestrator STOP token; success_sentinel is stamped false here and flipped
+    # true ONLY at the green exit below.
+    _pf['route'] = (JSON.parse(File.read(File.join(opts[:tab], 'migrate-state.json')))['route'] rescue nil)
+    _pf['manual_path_authorized'] = File.exist?(File.join(opts[:tab], 'manual-path-authorized.json'))
+    _pf['success_sentinel'] = false
     File.write(summary_path, JSON.pretty_generate(_pf))
   rescue JSON::ParserError
     nil
@@ -1388,6 +1454,41 @@ if budget_flags.length > WAIVER_BUDGET
   warn "       <= #{WAIVER_BUDGET} remain, or report this migration as YELLOW (never GREEN) and name"
   warn '       every waiver in the report. There is no escape flag for this cap.'
   exit 19
+end
+
+# Completion sentinel — stamp a run-scoped success marker keyed to the workbook
+# and clear any PASS-1 pending marker. verify-complete.rb (the offline done-check
+# the SKILL points agents at) reports GREEN only when this file exists for the
+# workbook and no parity-pending.json remains. This makes "done" a token only the
+# gate can mint, closing the "agent narrates success without the gate" hole.
+# run_id scopes the marker to THIS run (see the at_exit stale-deletion above);
+# the waiver census rides along so a report can quote the marker verbatim.
+begin
+  _wd = opts[:tab]
+  # chartCount from parity-final.json (gate 1 already required charts_total > 0 to
+  # reach here) so verify-complete.rb has a uniform element count across plugins.
+  _pf = (JSON.parse(File.read(File.join(_wd, 'parity-final.json'))) rescue {})
+  _cc = (_pf['charts_total'] || _pf['charts_pass'] || 0).to_i
+  File.write(File.join(_wd, 'phase6-success.json'),
+             JSON.pretty_generate('workbookId' => (opts[:wb] || ''),
+                                  'chartCount' => _cc,
+                                  'gates' => 'all-pass',
+                                  'run_id' => current_run_id,
+                                  'waivers' => waiver_flags,
+                                  'generatedAt' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')))
+  _pend = File.join(_wd, 'parity-pending.json')
+  File.delete(_pend) if File.exist?(_pend)
+  # Flip the off-ramp telemetry field now that success is minted (P2).
+  if File.exist?(File.join(_wd, 'parity-final.json'))
+    begin
+      _pf['success_sentinel'] = true
+      File.write(File.join(_wd, 'parity-final.json'), JSON.pretty_generate(_pf))
+    rescue StandardError
+      nil
+    end
+  end
+rescue StandardError
+  # never fail the gate on sentinel bookkeeping
 end
 
 puts "[OK] all gates pass — conversion may declare GREEN" \

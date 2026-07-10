@@ -10,7 +10,7 @@
 | `dependency not found: formula reference 'orders/country region'` | Slash in column `name` field | Rename the column to "Country" before saving the DM spec |
 | All columns on a table fail together | One bad formula poisons the element | Find the specific bad ref in the error message; fix only that column |
 | `jq: parse error: Invalid numeric literal` | Sigma spec endpoints return YAML | Use `post-and-readback.rb` (it parses YAML); never pipe spec responses to `jq` |
-| Validator flags `[X/col]` as unknown prefix on a workbook spec | `--dm-context` not passed | Re-run with `--dm-context /tmp/<name>/dm-ids.json` |
+| Validator flags `[X/col]` as unknown prefix on a workbook spec | `--dm-context` not passed | Re-run with `--dm-context <WORK>/dm-ids.json` |
 | `401` on `get-view-data` in parallel batch | VizQL session contention — batches of 5+ trigger this | Cap batches at 4. Retry that view solo after 1-2s (PAT-mode `tableau-discover.rb` does this automatically); if still 401, skip — view is inaccessible |
 | `401` on `get-view-image` | Always solo, never parallel with other view calls | Retry the image solo, no concurrent requests |
 | `429` on Tableau view image | Rate limited | Wait and retry |

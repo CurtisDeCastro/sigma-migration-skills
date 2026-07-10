@@ -5,13 +5,35 @@
 #                                 (Cursor, Cortex Code, plain shell) can use
 # get-token.sh and lib/sigma_rest.rb fall back to the neutral file when the
 # env vars aren't already set, so the skill works under any agent.
+#
+# THE USER RUNS THIS ONCE, in a real terminal. Two modes:
+#   * interactive (a TTY): prompts for each value (secret hidden), OR
+#   * flags (no TTY / automation):
+#       ruby scripts/setup.rb --client-id <id> --client-secret <secret> \
+#         [--base-url https://aws-api.sigmacomputing.com] [--connection-id <uuid>]
+# When stdin is NOT a TTY (agent harness, piped run) and the required values
+# were not passed as flags, this prints the exact flag invocation and exits 2
+# instead of hanging forever on a prompt nobody can answer.
 
 require 'io/console'
 require 'json'
 require 'fileutils'
+require 'optparse'
 
 SETTINGS_PATH = File.expand_path("~/.claude/settings.json")
 NEUTRAL_PATH  = File.expand_path("~/.sigma-migration/env")
+DEFAULT_BASE  = "https://aws-api.sigmacomputing.com"
+
+flags = {}
+OptionParser.new do |p|
+  p.banner = "usage: ruby scripts/setup.rb [--client-id ID --client-secret SECRET] " \
+             "[--base-url URL] [--connection-id UUID]"
+  p.on('--base-url URL',       "Sigma API base URL (default: #{DEFAULT_BASE})") { |v| flags[:base] = v }
+  p.on('--client-id ID',       'Sigma API client id (not a secret)')            { |v| flags[:cid]  = v }
+  p.on('--client-secret SEC',  'Sigma API client secret')                       { |v| flags[:sec]  = v }
+  p.on('--connection-id UUID', 'full warehouse-connection UUID (optional)')     { |v| flags[:conn] = v }
+  p.on('-h', '--help') { puts p; exit 0 }
+end.parse!
 
 # Upsert `export KEY='value'` lines into the neutral cred file (0600), preserving
 # any other vars already there (e.g. Tableau creds from setup-tableau.rb).
@@ -31,23 +53,52 @@ def upsert_neutral_env(pairs)
   File.chmod(0o600, NEUTRAL_PATH)
 end
 
-puts "Sigma credential setup"
+puts "Sigma credential setup — the user runs this ONCE (interactive or via flags)."
 puts "Values are stored in #{SETTINGS_PATH} and loaded automatically into every Claude Code session."
 puts
 
-print "Base URL [https://aws-api.sigmacomputing.com]: "
-base = $stdin.gets.chomp
-base = "https://aws-api.sigmacomputing.com" if base.empty?
+interactive = $stdin.tty?
+need_prompt = flags[:cid].to_s.empty? || flags[:sec].to_s.empty?
 
-# Client ID is NOT a secret — echo it so the reader can eyeball it. A hidden
-# (noecho) prompt here was a recurring quickstart confusion: people paste the
-# wrong value blind and only discover it when auth fails.
-print "Client ID (not a secret — will echo): "
-cid = $stdin.gets.chomp
+if need_prompt && !interactive
+  # No TTY and no flags: NEVER hang on gets — print the exact invocation instead.
+  warn 'ERROR: stdin is not a TTY, so the interactive prompts cannot run — and'
+  warn '--client-id/--client-secret were not passed. Run it non-interactively:'
+  warn ''
+  warn '  ruby scripts/setup.rb \\'
+  warn "    --client-id <SIGMA_CLIENT_ID> --client-secret '<SIGMA_CLIENT_SECRET>' \\"
+  warn "    [--base-url #{DEFAULT_BASE}] [--connection-id <uuid>]"
+  warn ''
+  warn '…or run it once from a real terminal (it will prompt). Never inline the'
+  warn 'secret into a shared command log — prefer the interactive prompt when a'
+  warn 'human is present.'
+  exit 2
+end
 
-print "Client Secret (hidden): "
-sec = $stdin.noecho(&:gets).chomp
-puts
+base = flags[:base].to_s
+cid  = flags[:cid].to_s
+sec  = flags[:sec].to_s
+conn = flags[:conn].to_s
+
+if need_prompt
+  if base.empty?
+    print "Base URL [#{DEFAULT_BASE}]: "
+    base = $stdin.gets.chomp
+  end
+  # Client ID is NOT a secret — echo it so the reader can eyeball it. A hidden
+  # (noecho) prompt here was a recurring quickstart confusion: people paste the
+  # wrong value blind and only discover it when auth fails.
+  if cid.empty?
+    print "Client ID (not a secret — will echo): "
+    cid = $stdin.gets.chomp
+  end
+  if sec.empty?
+    print "Client Secret (hidden): "
+    sec = $stdin.noecho(&:gets).chomp
+    puts
+  end
+end
+base = DEFAULT_BASE if base.empty?
 
 if [base, cid, sec].any?(&:empty?)
   abort "Base URL, Client ID, and Client Secret are all required. Aborting without writing settings."
@@ -56,8 +107,10 @@ end
 # The one-command orchestrators (migrate-looker.py, migrate-qlik.rb, ...) need
 # the FULL warehouse-connection UUID for DM conversion. Capturing it here (when
 # known) saves an export step on every run. Optional — Enter to skip.
-print "Connection ID (full warehouse-connection UUID, optional — Enter to skip): "
-conn = $stdin.gets.chomp
+if conn.empty? && need_prompt
+  print "Connection ID (full warehouse-connection UUID, optional — Enter to skip): "
+  conn = $stdin.gets.chomp
+end
 
 settings = File.exist?(SETTINGS_PATH) ? JSON.parse(File.read(SETTINGS_PATH)) : {}
 settings["env"] ||= {}

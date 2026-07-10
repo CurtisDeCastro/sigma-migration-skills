@@ -110,6 +110,7 @@ require 'set'
 require_relative 'lib/scout_gate'
 require_relative 'lib/dashboard_read'
 require_relative 'lib/run_state'
+require_relative 'lib/offramp' # structured "where did this run leave the golden path" trail
 require_relative 'lib/fast_path' # FAST-PATH routing + BOM-tolerant JSON reads
 require_relative 'lib/phase_cache' # sha-stamped phase-output reuse on re-entry (refs/performance.md)
 require_relative 'lib/sigma_rest' # in-process Sigma token minting (no bash/eval)
@@ -122,6 +123,11 @@ HERE = __dir__
 $LOAD_PATH.unshift File.expand_path('lib', HERE)
 require 'coverage_gate' # build-charts coverage.json → consolidated report (bead beads-sigma-59mk)
 
+require 'rbconfig'
+# Children (post-and-readback.rb, phase6-parity.rb, …) inherit this marker so
+# they can tell an ORCHESTRATED invocation from a cold standalone one — the
+# standalone manual-path gate in post-and-readback.rb keys off it.
+ENV['SIGMA_ORCHESTRATED_RUN'] = '1'
 opts = {}
 OptionParser.new do |o|
   o.banner = <<~BANNER
@@ -180,6 +186,12 @@ OptionParser.new do |o|
   o.on('--dm-spec PATH', 'agent-authored data-model spec JSON (fresh DM build through the gated spine)') { |v| opts[:dm_spec] = File.expand_path(v) }
   o.on('--wb-spec PATH', 'agent-authored workbook spec JSON (re-enters the gated spine). With an explicit ' \
                          '--reuse-dm <id> this takes the FAST PATH (see banner).') { |v| opts[:wb_spec] = File.expand_path(v) }
+  o.on('--allow-manual-spec REASON', 'deliberately hand-author --dm-spec/--wb-spec COLD (no prior ' \
+                                     'orchestrator STOP). Normally the orchestrator authorizes this path; ' \
+                                     'this waives that requirement — named in the report.') { |v| opts[:allow_manual_spec] = v }
+  o.on('--force-route-switch REASON', 'override the route-persistence check (a workdir driven via one route ' \
+                                      'must normally be finished the same way) — counted as a quality waiver; ' \
+                                      'name it in your report.') { |v| opts[:force_route_switch] = v }
   o.on('--out DIR')          { |v| opts[:out]     = File.expand_path(v) }
   o.on('--answers JSON')     { |v| opts[:answers] = v }
   o.on('--yes')              {     opts[:yes]     = true }
@@ -233,6 +245,10 @@ OptionParser.new do |o|
   o.on('--dashboard NAME', 'Build/gate only this Tableau dashboard (repeatable). Enables one-tab-at-a-time large-workbook migration.') { |v| (opts[:dashboards] ||= []) << v }
   o.on('--page ID',        'Scope to the dashboard with this zone-root id (alt to --dashboard; repeatable).') { |v| (opts[:pages] ||= []) << v }
   o.on('--workbook-target ID', 'Existing Sigma workbook id to APPEND the scoped dashboard page to (PUT-append instead of POST-new).') { |v| opts[:wb_target] = v }
+  o.on('--reuse-workbook ID', 'Existing Sigma workbook id to UPDATE IN PLACE (PUT the freshly-built full spec to it, ' \
+                              'same id/URL, layout preserved) instead of POSTing a NEW workbook — the workbook twin of ' \
+                              '--reuse-dm. Iterating a fix? Re-run with --reuse-dm <id> --reuse-workbook <id> to edit the ' \
+                              'SAME dashboard rather than orphaning it.') { |v| opts[:reuse_workbook] = v }
 end.parse!
 
 abort 'missing --workbook or --workbook-id' unless opts[:wb_name] || opts[:wb_id]
@@ -251,6 +267,19 @@ slug = (opts[:wb_name] || opts[:wb_id]).gsub(/[^A-Za-z0-9_-]/, '-').squeeze('-')
 WORK = opts[:out] || File.expand_path("~/tableau-migration/#{slug}")
 FileUtils.mkdir_p(File.join(WORK, 'views'))
 
+# ── run_id (run-scoped completion sentinels) ─────────────────────────────────
+# Each PASS-1 invocation mints a fresh uuid (persisted in the run-state ledger,
+# copied into migrate-state.json at the end of pass 1). --finalize RESUMES the
+# run, so it reuses the pass-1 id. The sentinels (parity-pending.json /
+# phase6-success.json) are keyed to it: a success marker from a previous run id
+# can never vouch for the current run.
+RUN_ID = if opts[:finalize]
+           (JSON.parse(File.read(File.join(WORK, 'migrate-state.json')))['run_id'] rescue nil) ||
+             RunState.run_id(WORK)
+         else
+           RunState.new_run_id!(WORK)
+         end
+
 # 🚧 Step-0 environment GATE. The doctor writes a doctor.json fingerprint; this
 # refuses to run on an env that never passed the doctor, instead of letting the
 # pipeline improvise around a missing runtime (the #1 source of cross-user
@@ -260,8 +289,84 @@ _dg_skip = opts[:skip_doctor_gate] || ENV['SIGMA_SKIP_DOCTOR_GATE']
 _dg_cmd = ['ruby', File.join(HERE, 'assert-doctor-ran.rb'), '--workdir', WORK]
 _dg_cmd += ['--skip-doctor-gate', _dg_skip] if _dg_skip && !_dg_skip.to_s.empty?
 unless system(*_dg_cmd)
-  abort 'FATAL: environment gate failed — run the doctor first (see remediation above), ' \
+  # Host-dispatched doctor hint: PowerShell/cmd users get the .ps1 twin, not a
+  # bash script they cannot run (RbConfig::CONFIG['host_os'] — docs-level P1.3).
+  _doc_hint = RbConfig::CONFIG['host_os'] =~ /mswin|mingw|cygwin/ ?
+                'powershell -ExecutionPolicy Bypass -File scripts\\doctor.ps1' :
+                'bash scripts/doctor.sh'
+  abort "FATAL: environment gate failed — run the doctor first (#{_doc_hint}; see remediation above), " \
         'or re-run with --skip-doctor-gate "<reason>".'
+end
+
+# 🚧 Step-0 CREDENTIAL GATE (fail-closed). The doctor treats missing creds as a
+# warning, so a harness that does NOT auto-load ~/.claude/settings.json (Coco,
+# Cursor, plain shell) can sail past it and then die at the FIRST Sigma API call
+# with an opaque auth error — which a low-context agent misreads as a TASK
+# failure and improvises around (hand-rolled curl, self-writing creds, a
+# hallucinated token). Resolve creds HERE, before any Tableau/discovery work, and
+# stop with the exact remediation if they're absent. Waive only for genuinely
+# offline runs with SIGMA_SKIP_CRED_GATE="<reason>".
+_cred_skip = ENV['SIGMA_SKIP_CRED_GATE']
+_neutral_env = File.expand_path('~/.sigma-migration/env')
+_creds_ok = !ENV['SIGMA_API_TOKEN'].to_s.empty? ||
+            (!ENV['SIGMA_CLIENT_ID'].to_s.empty? && !ENV['SIGMA_CLIENT_SECRET'].to_s.empty?) ||
+            File.exist?(_neutral_env)
+if !_creds_ok && (_cred_skip.nil? || _cred_skip.to_s.empty?)
+  abort <<~MSG
+    FATAL: no Sigma credentials resolvable — the run would fail at the first API call.
+    This almost always means you are NOT on Claude Code (which auto-loads
+    ~/.claude/settings.json). Other harnesses (Coco, Cursor, plain shell) do not,
+    so the neutral credential file is REQUIRED. Fix it ONCE, in a real terminal:
+        ruby scripts/setup.rb        # writes ~/.sigma-migration/env
+    …or export SIGMA_CLIENT_ID + SIGMA_CLIENT_SECRET (and SIGMA_BASE_URL) into the
+    environment this orchestrator runs in. Then re-run this exact command.
+    (Genuinely offline/no-Sigma run? Re-run with SIGMA_SKIP_CRED_GATE="<reason>".)
+  MSG
+end
+if !_creds_ok && _cred_skip && !_cred_skip.to_s.empty?
+  warn "WARN: credential gate waived (SIGMA_SKIP_CRED_GATE=#{_cred_skip}) — Sigma calls will fail if reached."
+  Offramp.log(WORK, kind: 'cred-gate-waived', reason: _cred_skip.to_s)
+end
+Offramp.log(WORK, kind: 'doctor-gate-waived', reason: _dg_skip.to_s) if _dg_skip && !_dg_skip.to_s.empty?
+
+# 🚧 Step-0 TABLEAU CREDENTIAL GATE (fail-closed). Tableau auth is a SECOND,
+# separate system from Sigma — and its absence was the #1 recurring blocker: the
+# orchestrated discovery lane signs in via PAT REST (tableau_rest.rb), so when
+# TABLEAU_PAT_* aren't in the env (people run setup.rb for Sigma but not
+# setup-tableau.rb; non-Claude-Code harnesses don't auto-load them) the run
+# starts and dies DEEP in discovery with an opaque "could not mint a Tableau
+# token / end of file reached" that a low-context agent flails against. Resolve
+# it HERE instead. Only required when FRESH discovery will run — skip on
+# --finalize (no discovery) and when discovery is being REUSED (stamp present),
+# and skip if the agent is driving discovery through the Tableau MCP
+# (SIGMA_TABLEAU_VIA_MCP=1). Waive with SIGMA_SKIP_TABLEAU_GATE="<reason>".
+_tab_skip     = ENV['SIGMA_SKIP_TABLEAU_GATE']
+_tab_via_mcp  = ENV['SIGMA_TABLEAU_VIA_MCP'].to_s == '1'
+_tab_reuse    = File.exist?(File.join(WORK, 'discovery-stamp.json'))
+_tab_needed   = !opts[:finalize] && !_tab_reuse && !_tab_via_mcp
+# Contents check, not mere existence: the neutral file often has Sigma creds
+# (setup.rb) but NOT Tableau (setup-tableau.rb) — the exact gap that let runs
+# start and fail deep. Require the Tableau PAT to actually be present.
+_tab_creds_ok = (!ENV['TABLEAU_PAT_NAME'].to_s.empty? && !ENV['TABLEAU_PAT_SECRET'].to_s.empty?) ||
+                (File.exist?(_neutral_env) && File.read(_neutral_env).include?('TABLEAU_PAT_SECRET'))
+if _tab_needed && !_tab_creds_ok && (_tab_skip.nil? || _tab_skip.to_s.empty?)
+  abort <<~MSG
+    FATAL: no Tableau credentials resolvable — discovery would fail at the Tableau
+    sign-in (the "could not mint a Tableau token" / "end of file reached" error).
+    Tableau auth is SEPARATE from Sigma: running setup.rb configures Sigma only.
+    Fix it ONCE, in a real terminal:
+        ruby scripts/setup-tableau.rb    # writes the Tableau PAT to ~/.sigma-migration/env
+    …or export TABLEAU_PAT_NAME + TABLEAU_PAT_SECRET + TABLEAU_SITE_CONTENT_URL
+    (+ TABLEAU_SERVER_URL) into this environment. If you are driving discovery via
+    the Tableau MCP tools instead of a PAT, re-run with SIGMA_TABLEAU_VIA_MCP=1.
+    (If sign-in fails even WITH creds set, that is a network/TLS-proxy issue
+    reaching your Tableau server, not a missing-cred issue — check connectivity.)
+    Then re-run this exact command.  (Waive: SIGMA_SKIP_TABLEAU_GATE="<reason>".)
+  MSG
+end
+if _tab_needed && !_tab_creds_ok && _tab_skip && !_tab_skip.to_s.empty?
+  warn "WARN: Tableau credential gate waived (SIGMA_SKIP_TABLEAU_GATE=#{_tab_skip})."
+  Offramp.log(WORK, kind: 'tableau-gate-waived', reason: _tab_skip.to_s)
 end
 
 # ── Design-consistency advisory readout (doctor.json) ────────────────────────
@@ -312,6 +417,22 @@ def handoff_nudge
   puts '   fresh builder agent; resume is cheap (discovery caches + phase stamps skip completed work).'
 rescue StandardError
   nil # advisory only — a nudge failure must never touch the conversion
+end
+
+# Authorize the manual (hand-authored spec) path — written at every designed
+# judgment STOP (converter-stop, the exit-4 workbook handoff, exit-10 decisions,
+# exit-11 gap stops). The manual-spec gate refuses --dm-spec/--wb-spec (and
+# post-and-readback refuses a standalone run on an orchestrated workdir) unless
+# this token exists: the manual path is entered via an orchestrator STOP, not
+# cold. Best-effort — bookkeeping never sinks a run.
+def authorize_manual_path!(via:, reason:, exit_code:, extra: {})
+  File.write(File.join(WORK, 'manual-path-authorized.json'),
+             JSON.pretty_generate({ 'via' => via, 'reason' => reason,
+                                    'exit_code' => exit_code,
+                                    'run_id' => (defined?(RUN_ID) ? RUN_ID : nil),
+                                    'at' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ') }.merge(extra).compact))
+rescue StandardError
+  nil
 end
 
 def hdr(n, title)
@@ -775,6 +896,30 @@ end
 # Set-Content -Encoding UTF8 prepends a BOM plain JSON.parse rejects).
 # ---------------------------------------------------------------------------
 if opts[:dm_spec] || opts[:wb_spec]
+  # 🚧 Manual-spec authorization gate (P1). Hand-authored specs must be a ROUTED
+  # fallback, not a cold default — cold hand-authoring is the #1 way a run skips
+  # the converter + gated spine. Accept --dm-spec/--wb-spec only when: (a) an
+  # orchestrator STOP emitted <WORK>/manual-path-authorized.json, (b) --reuse-dm
+  # carries an EXPLICIT id (the documented exit-4 fast-path re-entry against an
+  # already-posted DM), or (c) an explicit --allow-manual-spec "<reason>" waiver.
+  _ms_token  = File.exist?(File.join(WORK, 'manual-path-authorized.json'))
+  _ms_reuse  = opts[:reuse_dm] && opts[:reuse_dm] != :recommended
+  _ms_waiver = opts[:allow_manual_spec].to_s
+  unless _ms_token || _ms_reuse || !_ms_waiver.empty?
+    abort <<~MSG
+      FATAL: --dm-spec/--wb-spec (hand-authored specs) is a ROUTED fallback, not a cold
+      entry point. No orchestrator STOP is on record for this workdir
+      (#{File.join(WORK, 'manual-path-authorized.json')} is absent) and no --reuse-dm <id>
+      was given. Start with the one command so the converter + gates actually run:
+          ruby scripts/migrate-tableau.rb --workbook "<name>" --connection <id>
+      If it STOPS (CONVERTER STOP / workbook handoff) it authorizes this path and prints
+      the exact --dm-spec/--wb-spec (or --reuse-dm --wb-spec) re-run.
+      Deliberately hand-authoring anyway? Re-run adding --allow-manual-spec "<reason>".
+    MSG
+  end
+  Offramp.log(WORK, kind: 'manual-spec',
+              reason: (!_ms_waiver.empty? ? "waiver: #{_ms_waiver}" : (_ms_token ? 'authorized-by-stop' : 'reuse-dm-id')))
+
   # The workbook spec is always agent-authored on this path.
   abort 'FATAL: --wb-spec is required for the agent-authored manual path ' \
         '(pair it with --dm-spec for a fresh build, or --reuse-dm for an existing model).' \
@@ -811,6 +956,50 @@ end
 MANUAL_JSON_SPECS = !opts[:wb_spec].nil?
 
 # ---------------------------------------------------------------------------
+# 🚧 ROUTE PERSISTENCE (P2). migrate-state.json records HOW this workdir was
+# driven ('orchestrated' | 'manual-authorized'). A re-entry on the OTHER route
+# produces inconsistent state (a mechanical rebuild over hand-authored specs, or
+# vice versa), so it fails closed. Sanctioned exceptions:
+#   * switching TO the manual route through the same admit set as the
+#     manual-spec gate above (STOP token / explicit --reuse-dm id /
+#     --allow-manual-spec) — the designed handoff;
+#   * an explicit --force-route-switch "<reason>" (recorded as an off-ramp and
+#     counted as a quality waiver by assert-phase6-ran).
+# --finalize is route-neutral: it resumes whatever pass 1 recorded.
+# ---------------------------------------------------------------------------
+CURRENT_ROUTE = MANUAL_JSON_SPECS ? 'manual-authorized' : 'orchestrated'
+unless opts[:finalize]
+  _prev_route = (JSON.parse(File.read(File.join(WORK, 'migrate-state.json')))['route'] rescue nil)
+  if _prev_route && _prev_route != CURRENT_ROUTE
+    _switch_ok =
+      if opts[:force_route_switch] && !opts[:force_route_switch].to_s.empty?
+        warn "WARN: route switch FORCED (#{_prev_route} → #{CURRENT_ROUTE}): #{opts[:force_route_switch]} — " \
+             'counted as a quality waiver; name it in your report.'
+        Offramp.log(WORK, kind: 'route-switch-forced',
+                    reason: opts[:force_route_switch].to_s,
+                    detail: "#{_prev_route} → #{CURRENT_ROUTE}")
+        true
+      elsif CURRENT_ROUTE == 'manual-authorized'
+        # same admit set as the manual-spec gate (which already ran above)
+        File.exist?(File.join(WORK, 'manual-path-authorized.json')) ||
+          (opts[:reuse_dm] && opts[:reuse_dm] != :recommended) ||
+          !opts[:allow_manual_spec].to_s.empty?
+      else
+        false
+      end
+    unless _switch_ok
+      abort <<~MSG
+        FATAL: this workdir was driven via the #{_prev_route} route; finish it the same way.
+        (migrate-state.json records route=#{_prev_route}; this invocation is #{CURRENT_ROUTE}.)
+        Re-run the way pass 1 was driven#{_prev_route == 'manual-authorized' ? ' (--reuse-dm <id> --wb-spec <path>)' : ' (the plain orchestrator command, no --wb-spec)'} —
+        or, if the switch is deliberate, add --force-route-switch "<reason>" (a quality
+        waiver: it is counted against the gate's waiver budget and must be in your report).
+      MSG
+    end
+  end
+end
+
+# ---------------------------------------------------------------------------
 # FAST PATH routing (--reuse-dm <id> + --wb-spec). See the header comment +
 # --help banner for the exact semantics; the decision itself is a pure,
 # offline-testable function (lib/fast_path.rb, scripts/test-fastpath-flags.rb).
@@ -839,6 +1028,8 @@ if FASTPATH
     line '  --yes: Tableau discovery is NOT re-run. Layout falls back to a stacked page and the'
     line '  parity plan may be unbuildable — restore the workdir (or re-run without --yes to'
     line '  re-fetch) before relying on the Phase 6 gates.'
+    Offramp.log(WORK, kind: 'degraded-fastpath',
+                detail: "#{FAST[:degraded].size} missing discovery artifact(s): #{FAST[:degraded].join(', ')}")
   else
     line "discovery artifacts present in #{WORK} — reused for layout + parity as normal"
   end
@@ -1155,6 +1346,11 @@ if mechanical
   else
     reap_lane!(lane_done) # bounded reap of the background lane before aborting
     print_lane_log.call
+    # Authorize the option-2 agent-authored-spec re-entry (the re-run passes
+    # --dm-spec/--wb-spec; the manual-spec gate requires this token or refuses a
+    # cold hand-author).
+    authorize_manual_path!(via: 'converter-stop', reason: 'no converter backend configured', exit_code: 1)
+    Offramp.log(WORK, kind: 'converter-stop', reason: 'no converter backend configured')
     abort <<~MSG
       ==================== CONVERTER STOP (no backend) ====================
       No mechanical Tableau→Sigma converter is configured, and hosted conversion was not
@@ -1700,6 +1896,8 @@ if unhandled_gaps.any?
     puts 'or re-run with --yes/--force to accept the degradation (features MISSING/flagged).'
     puts '======================================================='
     puts 'No Sigma objects were created.'
+    authorize_manual_path!(via: 'gap-scan-stop', reason: "#{unscouted.size} unscouted ❌-unhandled feature(s)", exit_code: 11)
+    Offramp.log(WORK, kind: 'gap-scan-stop', detail: "#{unscouted.size} unscouted feature(s)")
     mark('phase1-join')
     phase_summary
     exit 11
@@ -1714,6 +1912,8 @@ if unhandled_gaps.any?
     puts 'in the Sigma workbook. (The validated ones still migrate.)'
     puts '======================================================='
     puts 'No Sigma objects were created.'
+    authorize_manual_path!(via: 'gap-scan-stop', reason: "#{escalated.size} scouted-but-escalated feature(s)", exit_code: 11)
+    Offramp.log(WORK, kind: 'gap-scan-stop', detail: "#{escalated.size} escalated feature(s)")
     mark('phase1-join')
     phase_summary
     exit 11
@@ -1928,6 +2128,8 @@ if questions.any? && !opts[:yes] && answers.nil?
   puts '======================================================='
   puts
   puts "#{questions.size} decision(s) need a human. No Sigma objects were created."
+  authorize_manual_path!(via: 'decisions-stop', reason: "#{questions.size} open question(s) need a human", exit_code: 10)
+  Offramp.log(WORK, kind: 'decisions-stop', detail: "#{questions.size} open question(s)")
   phase_summary
   exit 10
 end
@@ -2404,8 +2606,18 @@ begin
   run_wb!(ref_cmd)
   par_cmd = ['ruby', File.join(HERE, 'post-and-readback.rb'), '--type', 'workbook',
              '--spec', wb_spec_path, '--out', wb_ids_path, '--workdir', WORK]
-  # PUT-append into the targeted existing workbook (instead of POST-create).
-  par_cmd += ['--update-id', append_update_id] if append_update_id
+  # UPDATE-IN-PLACE: --reuse-workbook PUTs the freshly-built full spec to an
+  # existing workbook (same id/URL, layout preserved by post-and-readback's re-PUT
+  # path) instead of POSTing a new one — so iterating a fix edits the SAME
+  # dashboard rather than orphaning it. --workbook-target (append) takes priority
+  # when both are set (it already computed append_update_id + merged the spec).
+  # Even without either flag, post-and-readback itself forces PUT when this
+  # workdir already recorded a workbook id (posted-workbooks.jsonl /
+  # migrate-state.json) — see its same-workbook PUT discipline.
+  update_wb = append_update_id || opts[:reuse_workbook]
+  line "reuse-workbook: PUT the full spec to existing workbook #{opts[:reuse_workbook]} (no new workbook)" \
+    if opts[:reuse_workbook] && !append_update_id
+  par_cmd += ['--update-id', update_wb] if update_wb
   p_log = sigma_run_wb!(par_cmd)
 rescue WorkbookBuildError => e
   failed = cull_failed_fields(e.captured_output,
@@ -2438,6 +2650,12 @@ rescue WorkbookBuildError => e
   puts '          straight to the workbook layer — see --help.)'
   puts '   The data model is posted and ready to attach either way. A conversion is NOT done'
   puts '   until scripts/assert-phase6-ran.rb exits 0 — that hard gate applies on both paths.'
+  # Authorize the hand-authoring re-entry: this STOP is the ONLY sanctioned way to
+  # reach --wb-spec/--dm-spec. The token lets the re-run's manual-spec gate pass
+  # (a COLD hand-author with no prior orchestrator run is refused).
+  authorize_manual_path!(via: 'workbook-handoff', reason: "untranslatable field(s): #{names}",
+                         exit_code: 4, extra: { 'dataModelId' => dm_id, 'fields' => failed })
+  Offramp.log(WORK, kind: 'workbook-handoff', detail: "untranslatable field(s): #{names}")
   mark('phase4-workbook')
   phase_summary
   exit 4
@@ -2568,11 +2786,14 @@ else
   err_cols.first(8).each { |c| line "  [#{c['elementId']}] #{c['label']}: #{c['formula']}" }
 end
 
-# Persist resume state for --finalize (pass 2) BEFORE stopping.
+# Persist resume state for --finalize (pass 2) BEFORE stopping. run_id scopes
+# the completion sentinels to THIS run; route records how the workdir was driven
+# (the route-persistence check refuses a re-entry on the other route).
 state = { 'workbook_id' => wb_id, 'data_model_id' => dm_id,
           'extract_mode' => !!has_extracts, 'workbook_name' => display_wb_name,
           'reused_dm' => !!reuse_dm_id, 'pass1_at' => Time.now.utc.iso8601,
           'enhance_requested' => !!opts[:enhance],
+          'run_id' => RUN_ID, 'route' => CURRENT_ROUTE,
           'rcf_passes' => (opts[:rcf_passes] || 5) }
 File.write(File.join(WORK, 'migrate-state.json'), JSON.pretty_generate(state))
 
@@ -2703,6 +2924,31 @@ puts finalize_cmd
 puts '(--finalize runs phase6 finalize + orphan cleanup + the census-aware'
 puts ' assert-phase6-ran hard gate; exit 0 there is the ONLY green exit.)'
 puts 'PHASE E     : requested (--enhance) — runs at --finalize AFTER all gates are green' if opts[:enhance]
+puts '=================================================================='
+
+# Completion sentinel (run-scoped). PASS 1 is NOT a done state: the gate suite
+# lives in --finalize. Drop a pending marker keyed to this workbook AND this
+# run_id, and CLEAR any stale success marker from a prior run, so
+# verify-complete.rb (the sole done-check the SKILL points at) reports NOT DONE
+# until --finalize's hard gate stamps phase6-success.json. This is the
+# structural backstop for the "agent stops at PASS 1 and narrates success"
+# failure mode.
+begin
+  File.write(File.join(WORK, 'parity-pending.json'),
+             JSON.pretty_generate('workbookId' => wb_id, 'dataModelId' => dm_id,
+                                  'run_id' => RUN_ID,
+                                  'written_at' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                                  'stage' => 'pass1', 'note' => 'parity + gates NOT run — run --finalize'))
+  _succ = File.join(WORK, 'phase6-success.json')
+  File.delete(_succ) if File.exist?(_succ)
+rescue StandardError
+  # best-effort — never fail the run on sentinel bookkeeping
+end
+Offramp.log(WORK, kind: 'pass1-stop', detail: "workbook #{wb_id} — parity + gates not yet run")
+puts
+puts '⛔ NOT DONE — this is PASS 1 of 2. Do NOT report success or hand off yet.'
+puts '   To confirm completion at any point, run (exit 0 == done, nothing else counts):'
+puts "     ruby scripts/verify-complete.rb --workdir #{WORK}"
 puts '=================================================================='
 mark('phase6-pass1')
 phase_summary

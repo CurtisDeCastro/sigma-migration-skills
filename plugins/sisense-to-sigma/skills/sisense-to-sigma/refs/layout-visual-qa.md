@@ -19,7 +19,7 @@ migration done.
 
 1. **Render the FULL Sigma page** (the whole dashboard, one image — not per-element) at a
    realistic width:
-   `python3 scripts/sigma-export-png.py --workbook <id> --page <pageId> --out /tmp/<page>.png --w 1600`
+   `python3 scripts/sigma-export-png.py --workbook <id> --page <pageId> --out <WORK>/visual-qa/<page>.png --w 1600`
    (Contract: `POST /v2/workbooks/{id}/export` → poll `/v2/query/{q}/download`. Plugins that ship
    their own renderer — `export-chart-png.rb`, `compare.py` — use the same contract.)
 1b. **Render the FULL SOURCE dashboard** as ONE image and compare full-dashboard ↔ full-dashboard:

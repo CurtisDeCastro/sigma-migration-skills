@@ -43,18 +43,18 @@ Returns the list of views (sheets) with their `id` and `name`. Record all view I
 ### 1d-cache. Reuse prior conversion artifacts when present (PHASE -1)
 
 Before re-running tableau-discover / fetch-view-data / parse-twb-layout, check
-for cached artifacts from a previous run. The standalone Workforce conversion
-on 2026-05-22 found cached audit-run-1 artifacts in
-`/tmp/audit-run-1/workforce/` (views CSVs, view PNGs, signature, dm-spec,
-wb-spec, dashboard layout meta) — re-running discovery cost ~3 minutes that
-could have been zero.
+for cached artifacts from a previous run. A prior conversion of the same
+workbook typically left views CSVs, view PNGs, the signature, dm-spec,
+wb-spec, and the dashboard layout meta under its workdir — re-running
+discovery costs ~3 minutes that could be zero.
 
 ```bash
-ruby scripts/find-prior-cache.rb --name <workbook-slug> --out /tmp/<name>/prior-cache.json
+ruby scripts/find-prior-cache.rb --name <workbook-slug> --out <WORK>/prior-cache.json
 ```
 
-The script searches `/tmp/audit-run-*/<name>/`, `/tmp/converter-test/<name>/`,
-and `/tmp/<name>/` for: views CSVs, views PNGs, `workbook-content.twb`,
+The script searches the workdir convention `~/tableau-migration/<name>/` plus
+the legacy /tmp cache locations older runs used (audit-run-*, converter-test,
+and the bare slug) for: views CSVs, views PNGs, `workbook-content.twb`,
 gaps-report, dashboard-layout JSON, get-workbook.json, dm-spec.json /
 wb-spec.json (and their ID maps), and the workbook signature. Output is a
 JSON map of artifact name → absolute path (or null).
@@ -80,10 +80,10 @@ Two different fetches with very different cost profiles. **Don't conflate them.*
 | Distinct values + date min/max for Phase 2.5 filter detection | Each sheet's CSV | Same parallel batch |
 | What an individual sheet looks like in isolation | Sheet PNG | **Skip by default** — fetch one only if you need to disambiguate a tile whose dashboard title is misleading or truncated |
 
-Save each fetched CSV to `/tmp/<name>/views/<viewId>.csv` and parse them with:
+Save each fetched CSV to `<WORK>/views/<viewId>.csv` and parse them with:
 
 ```bash
-ruby scripts/fetch-view-data.rb /tmp/<name>/views /tmp/<name>/signals.json
+ruby scripts/fetch-view-data.rb <WORK>/views <WORK>/signals.json
 ```
 
 The output (`signals.json`) contains, per view, a `columns` map with `kind`
@@ -110,7 +110,7 @@ If `get-view-data` returns 401 for a view, retry that view solo (the contention 
 > This step was prose-only, so it got skipped under load. It is now gated: after Reading the dashboard PNG, write (or verify+correct the seeded) `<workdir>/png-read.json`, then confirm the gate:
 >
 > ```bash
-> ruby scripts/assert-dashboard-read.rb --workdir /tmp/<name>
+> ruby scripts/assert-dashboard-read.rb --workdir <WORK>
 > ```
 >
 > `png-read.json` schema (enumerate EVERY zone — chart AND non-chart):
@@ -155,7 +155,7 @@ Use the dashboard image to understand:
 **Alternative / supplement: parse the `.twb` zone tree.** If you have `workbook-content.twb` from PAT-mode Phase 1, run:
 
 ```bash
-ruby scripts/parse-twb-layout.rb /tmp/<name>/workbook-content.twb /tmp/<name>/dashboard-layout.json
+ruby scripts/parse-twb-layout.rb <WORK>/workbook-content.twb <WORK>/dashboard-layout.json
 ```
 
 It emits a per-dashboard zone list with `caption`, `view_ref`, `x/y/w/h` in percent, **and `chart_kind` extracted from each worksheet's `<mark>` element + Rows/Cols shelves** (`bar` / `line` / `pie` / `scatter` / `map-region` / `map-point` / `pivot-table` / `table` / `automatic` / `other`). For text-mark worksheets, the parser disambiguates `pivot-table` (dims on both shelves — Tableau crosstab) from flat `table` (dims on one shelf — detail list) via the `rows_shelf` / `cols_shelf` summary; `build-charts-from-signals.rb` honors this and emits `rowsBy` / `columnsBy` / `values` for crosstabs. This is more reliable than inferring chart type from the view CSV — the CSV headers can't distinguish bar-vs-pie or pivot-vs-flat-table. Map every zone in the output to a Sigma element using the tables in `refs/workbook-layout.md` (`Reading the .twb dashboard layout` section).
@@ -205,8 +205,8 @@ calc discovery anymore.**
 eval "$(scripts/get-tableau-token.sh)"
 ruby scripts/extract-calc-fields.rb \
   --workbook-luid <luid> \
-  --out /tmp/<name>/calc-fields.json \
-  [--twb /tmp/<name>/workbook-content.twb]   # used if metadata-api fails
+  --out <WORK>/calc-fields.json \
+  [--twb <WORK>/workbook-content.twb]   # used if metadata-api fails
 ```
 
 The script caches its result to `--out` and reuses it (< 1h old) on subsequent
@@ -351,7 +351,7 @@ trade-offs vs `warehouse-table` are:
 >   --connection-id <id> \
 >   --table-path DB.SCHEMA.TABLE \
 >   [--dialect snowflake|postgres|bigquery|redshift|sqlserver] \
->   --out /tmp/<name>/probe-columns.json
+>   --out <WORK>/probe-columns.json
 > ```
 >
 > Validated 2026-05-24 against TJ.PUBLIC.SUPERSTORE_ORDERS — 19 columns
@@ -376,8 +376,8 @@ mixed alongside warehouse tables — run:
 ```bash
 ruby scripts/extract-custom-sql.rb \
   --workbook-luid <wb-luid> \
-  --twb /tmp/<name>/workbook-content.twb \
-  --out /tmp/<name>/custom-sql.json
+  --twb <WORK>/workbook-content.twb \
+  --out <WORK>/custom-sql.json
 ```
 
 The script tries two paths:

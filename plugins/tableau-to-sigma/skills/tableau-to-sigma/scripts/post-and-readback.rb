@@ -23,6 +23,11 @@
 #      be declared GREEN while deferred-elements.json is non-empty
 #      (assert-phase6-ran.rb enforces this). Fix the deferred elements, restore
 #      them into the spec, re-POST, then delete the file.
+#   7  MANUAL-PATH REFUSED: this is a STANDALONE invocation against a workdir the
+#      orchestrator drove (migrate-state.json present) with no orchestrator STOP
+#      on record (<workdir>/manual-path-authorized.json absent). The manual path
+#      is entered via an orchestrator STOP, not cold — re-run the orchestrator,
+#      or (deliberately) add --allow-manual-spec "<reason>" (a quality waiver).
 
 require 'net/http'
 require 'uri'
@@ -41,7 +46,13 @@ OptionParser.new do |p|
   p.on('--skip-layout-lint') { opts[:skip_lint] = true }
   p.on('--skip-control-lint') { opts[:skip_control_lint] = true }
   p.on('--control-scope P', 'control-scope.json sidecar (default: <workdir>/control-scope.json if present)') { |v| opts[:control_scope] = v }
-  p.on('--update-id ID', 'PUT the spec to this existing workbook/DM id instead of POSTing a new one (retry-safe; avoids orphan workbooks). For workbooks, if omitted, the last id in posted-workbooks.jsonl is reused automatically.') { |v| opts[:update_id] = v }
+  p.on('--update-id ID', 'PUT the spec to this existing workbook/DM id instead of POSTing a new one (retry-safe; avoids orphan workbooks). For workbooks, if omitted, the last id in posted-workbooks.jsonl (or migrate-state.json) is reused automatically.') { |v| opts[:update_id] = v }
+  p.on('--force-new-workbook REASON', 'workbooks only: POST a brand-new workbook even though this workdir already ' \
+       'recorded one (posted-workbooks.jsonl / migrate-state.json). The old workbook is ORPHANED. Counted as a ' \
+       'quality waiver by assert-phase6-ran; name the reason in your report.') { |v| opts[:force_new] = v }
+  p.on('--allow-manual-spec REASON', 'deliberately run this script STANDALONE on an orchestrator-driven workdir ' \
+       'with no orchestrator STOP on record (manual-path-authorized.json absent). Counted as a quality waiver; ' \
+       'name the reason in your report.') { |v| opts[:allow_manual_spec] = v }
   p.on('--quarantine-on-failure', 'DATAMODEL only: when the POST fails naming specific element(s), or the post-POST column census resolves specific elements to type=error, move those elements to <workdir>/deferred-elements.json, re-POST ONCE without them, and exit 6 (PARTIAL DM — never GREEN until the file is resolved). Default (no flag): fail loudly, quarantine nothing.') { opts[:quarantine] = true }
 end.parse!
 %i[type spec out].each { |k| abort("missing --#{k}") unless opts[k] }
@@ -52,6 +63,45 @@ FileUtils.mkdir_p(opts[:workdir])
 $LOAD_PATH.unshift File.expand_path('lib', __dir__)
 require 'sigma_rest'
 require 'dm_quarantine'
+begin
+  require 'offramp' # off-ramp trail (waiver observability); optional — never load-bearing
+rescue LoadError
+  nil
+end
+
+# ── 🚧 Standalone manual-path gate (P1) ──────────────────────────────────────
+# The exact field failure: an agent hand-drives post-and-readback against a
+# workdir the ORCHESTRATOR was driving, skipping the gated spine (preflight,
+# Phase 6, the hard gate) — and POSTs a fresh workbook per fix attempt. When
+# this is a cold standalone run (the orchestrator marks its children with
+# SIGMA_ORCHESTRATED_RUN=1) on an orchestrator workdir (migrate-state.json
+# present), require an orchestrator STOP on record (manual-path-authorized.json)
+# or an explicit --allow-manual-spec waiver. The manual path is entered via an
+# orchestrator STOP, not cold.
+_manual_token = File.join(opts[:workdir], 'manual-path-authorized.json')
+_orchestrated = ENV['SIGMA_ORCHESTRATED_RUN'] == '1'
+if !_orchestrated && File.exist?(File.join(opts[:workdir], 'migrate-state.json')) &&
+   !File.exist?(_manual_token)
+  if opts[:allow_manual_spec].to_s.strip.empty?
+    warn '========================================================================'
+    warn 'REFUSED — the manual path is entered via an orchestrator STOP, not cold.'
+    warn "This workdir (#{opts[:workdir]}) is orchestrator-driven (migrate-state.json"
+    warn "present) but no STOP is on record (#{File.basename(_manual_token)} absent)."
+    warn 'Hand-driving this script skips the gated spine (preflight/control lint,'
+    warn 'Phase 6 parity, assert-phase6-ran) — the exact way runs ship unverified.'
+    warn 'Do ONE of:'
+    warn '  * re-run the orchestrator (it invokes this script itself):'
+    warn '      ruby scripts/migrate-tableau.rb --workbook "<name>" --connection <id> [--out <workdir>]'
+    warn '  * if an orchestrator STOP routed you here, its token authorizes the path'
+    warn '    (converter-stop / workbook-handoff / decisions-stop write it);'
+    warn '  * deliberately standalone? add --allow-manual-spec "<reason>" (quality waiver).'
+    warn '========================================================================'
+    exit 7
+  end
+  warn "WARN: standalone run on an orchestrated workdir ALLOWED (--allow-manual-spec: #{opts[:allow_manual_spec]}) — " \
+       'counted as a quality waiver; name it in your report.'
+  Offramp.log(opts[:workdir], kind: 'manual-spec', reason: "waiver: #{opts[:allow_manual_spec]}") if defined?(Offramp)
+end
 
 QUARANTINE = opts[:quarantine] && opts[:type] == 'datamodel'
 DEFERRED_PATH = File.join(opts[:workdir], 'deferred-elements.json')
@@ -101,9 +151,37 @@ end
 # Decide POST (create) vs PUT (update existing). An explicit --update-id always
 # wins; otherwise, for a workbook retry, auto-reuse the last id we posted in this
 # conversion so a re-run UPDATES the workbook in place instead of orphaning it
-# (beads-sigma-38a — the 3-workbook customer regression). DM updates require an
-# explicit --update-id (Phase 3 normally reuses a DM via the ref-dm path).
-update_id = opts[:update_id] || (prior_ids.last if opts[:type] == 'workbook' && prior_ids.any?)
+# (beads-sigma-38a — the 3-workbook customer regression). The orchestrator's
+# migrate-state.json is a second id source (a standalone fix attempt may point at
+# a workdir whose posted-workbooks.jsonl never existed — the new-workbook-per-fix
+# field failure). PUT is the FORCED default whenever an id is known; a plain POST
+# on such a workdir requires --force-new-workbook "<reason>" (quality waiver —
+# the old workbook is orphaned). DM updates require an explicit --update-id
+# (Phase 3 normally reuses a DM via the ref-dm path).
+state_wb_id = nil
+if opts[:type] == 'workbook'
+  state_wb_id = (JSON.parse(File.read(File.join(opts[:workdir], 'migrate-state.json')))['workbook_id'] rescue nil)
+end
+known_id = opts[:update_id] ||
+           (opts[:type] == 'workbook' ? (prior_ids.last || state_wb_id) : nil)
+if opts[:force_new] && opts[:type] == 'workbook'
+  abort 'FATAL: --force-new-workbook contradicts --update-id — pass one or the other.' if opts[:update_id]
+  if known_id
+    warn "WARN: --force-new-workbook (#{opts[:force_new]}) — POSTing a NEW workbook although this workdir " \
+         "already recorded #{known_id}. The old workbook is ORPHANED. Counted as a quality waiver; " \
+         'name it in your report.'
+    Offramp.log(opts[:workdir], kind: 'force-new-workbook',
+                reason: opts[:force_new].to_s, detail: "prior workbook #{known_id} orphaned") if defined?(Offramp)
+  end
+  known_id = nil
+end
+update_id = known_id
+if update_id && !opts[:update_id]
+  warn "same-workbook PUT discipline: this workdir already recorded workbook #{update_id} " \
+       "(#{prior_ids.any? ? 'posted-workbooks.jsonl' : 'migrate-state.json'}) — updating it IN PLACE. " \
+       'A plain POST would orphan it; to deliberately create a new workbook, re-run with ' \
+       '--force-new-workbook "<reason>" (quality waiver).'
+end
 
 if update_id
   warn "UPDATE mode: PUT #{opts[:type]} #{update_id} (no new #{opts[:type]} created)"

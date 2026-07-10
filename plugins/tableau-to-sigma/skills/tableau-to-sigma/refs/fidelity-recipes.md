@@ -23,7 +23,7 @@ the whole thing back — the layout rides through untouched. Arrays of elements 
 ```bash
 # patch.json — ONLY the delta:
 # { "themeOverrides": { "categoricalScheme": ["#0e7c7b","#14b8a6","#f2a900"] } }
-ruby scripts/fidelity-loop.rb apply-patch --workdir /tmp/<name> \
+ruby scripts/fidelity-loop.rb apply-patch --workdir <WORK> \
   --patch patch.json --resolves e2,e3        # marks those ledger entries resolved on success
 ```
 

@@ -104,9 +104,10 @@ hand-driven calls have `get-tableau-token.sh` (bash) and its shell-neutral twin
 `python scripts/get-tableau-token.py` (Windows-safe — see refs/environment.md). This
 section exists for anyone driving the signin endpoint directly.
 
-## Resolving a numeric `/projects/<N>` URL id (vizportal id) — never guess
+## Resolving a numeric `/projects/<N>` or `/workbooks/<N>` URL id (vizportal id) — never guess
 
-A Tableau URL like `.../#/site/<site>/projects/1234567` carries a **vizportal URL id**.
+A Tableau URL like `.../#/site/<site>/projects/1234567` — or a DIRECT workbook link like
+`.../#/site/<site>/workbooks/4242001/views` — carries a **vizportal URL id**.
 **REST has no numeric project id anywhere**: Query Projects (`GET $TABLEAU_BASE/projects`)
 returns only `id` (the luid), `name`, `description`, `parentProjectId`, `owner`, and
 `contentCounts` (filterable by name/ownerName/parentProjectId) — so no REST call can match
@@ -114,12 +115,14 @@ that number. The Metadata API can: `Workbook.projectVizportalUrlId` is "the ID o
 in which the workbook is visible", next to `projectLuid`/`projectName`.
 
 One command — `ruby scripts/resolve-project.rb --url "<url>"` — runs
-`{ workbooks { luid name projectVizportalUrlId projectLuid projectName } }` (plus the same
-project fields on `publishedDatasources` when the schema supports them) against
-`POST /api/metadata/graphql`, groups by `projectVizportalUrlId`, and exact-matches the URL's
-number → `{vizportal_id, project_luid, project_name, workbooks}`. **Exit 2** (empty project,
-or Metadata API off on self-hosted Server) means the number is UNRESOLVABLE — the script
-prints the REST project candidates; present them to the user and ask which project.
+`{ workbooks { luid name vizportalUrlId projectVizportalUrlId projectLuid projectName } }`
+(plus the same project fields on `publishedDatasources` when the schema supports them) against
+`POST /api/metadata/graphql`. A project URL groups by `projectVizportalUrlId` and exact-matches
+the URL's number → `{vizportal_id, project_luid, project_name, workbooks}`; a workbook URL
+exact-matches `Workbook.vizportalUrlId` → `{workbook_vizportal_id, workbook_luid, name,
+project_luid, project_name}`. **Exit 2** (empty project, deleted workbook, or Metadata API off
+on self-hosted Server) means the number is UNRESOLVABLE — the script prints the candidates
+table; present it to the user and ask which project/workbook.
 **Never guess from name or recency** — a wrong project aims the entire run at the wrong
 content.
 
@@ -149,7 +152,7 @@ eval "$(scripts/get-tableau-token.sh)"
 ruby scripts/tableau-discover.rb \
   --workbook-name "Orders Conversion Test" \
   --datasource-name "ORDER_FACT (CSA.ORDER_FACT)+ (New Virtual Connection)" \
-  --out /tmp/orders
+  --out ~/tableau-migration/orders
 ```
 
 Writes:

@@ -1,5 +1,10 @@
 # Composition, fidelity & spec-gotcha recipe — turning a correct migration into a *good* one
 
+> **Applied via the orchestrator's build path** (`migrate-tableau.rb` runs the builders that
+> consume these recipes). Hand-composition against the live API is NOT a parallel entry
+> point — it is available only after an orchestrator STOP authorizes the manual path
+> (`<WORK>/manual-path-authorized.json`; see SKILL.md "THE ONE PATH").
+
 > A mechanically-correct migration (0 error columns) can still ship visually empty and
 > numerically wrong. This ref captures the composition pass, the value-fidelity rules, and
 > the spec/API gotchas that otherwise cost round-trips. Pair it with `operating-contract.md`.
