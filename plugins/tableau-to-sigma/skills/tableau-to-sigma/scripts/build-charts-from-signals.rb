@@ -435,6 +435,15 @@ def translate_row_level_calc(formula, mmap, columns_by_guid = {})
   s = s.gsub(/\bIIF\s*\(/i, 'If(')
   s = s.gsub(/\bIFNULL\s*\(/i, 'Coalesce(')
   s = s.gsub(/\bABS\s*\(/i, 'Abs(')
+  # Date-part extracts — align with the TS TABLEAU_FUNC_MAP so a row-level date
+  # calc auto-translates instead of failing the residue check and dropping to a
+  # manual warning (bead tt3z.4). WEEK has NO Sigma Week() fn — it maps to
+  # DatePart("week", …) exactly like formulas.ts (bead tt3z.2). Run before the
+  # single→double-quote pass; "week" is already double-quoted here.
+  s = s.gsub(/\bWEEK\s*\(/i, 'DatePart("week", ')
+  s = s.gsub(/\bYEAR\s*\(/i, 'Year(').gsub(/\bMONTH\s*\(/i, 'Month(').gsub(/\bDAY\s*\(/i, 'Day(')
+  s = s.gsub(/\bQUARTER\s*\(/i, 'Quarter(').gsub(/\bHOUR\s*\(/i, 'Hour(')
+  s = s.gsub(/\bMINUTE\s*\(/i, 'Minute(').gsub(/\bSECOND\s*\(/i, 'Second(')
   s = s.gsub(/'([^']*)'/) { %("#{Regexp.last_match(1)}") } # remaining single-quoted strings
   out = s.gsub(/\[([^\/\]]+)\]/) do
     cap = Regexp.last_match(1).strip
@@ -444,7 +453,7 @@ def translate_row_level_calc(formula, mmap, columns_by_guid = {})
   residue = out.dup
   residue.gsub!(/"(?:\\.|[^"\\])*"/, '1')
   residue.gsub!(/\[Master\/[^\]]+\]/, '1')
-  residue.gsub!(/\b(DateDiff|DateAdd|DateTrunc|DatePart|Today|Now|If|Coalesce|Abs)\b/, '')
+  residue.gsub!(/\b(DateDiff|DateAdd|DateTrunc|DatePart|Today|Now|If|Coalesce|Abs|Year|Month|Day|Quarter|Hour|Minute|Second)\b/, '')
   return nil unless residue =~ %r{\A[\s()+\-*/.,\d!=<>]*\z}
   out
 end
