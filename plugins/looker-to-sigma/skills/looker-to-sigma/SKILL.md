@@ -70,6 +70,18 @@ offline-only path that normalizes into the same contract.
 
 ## ONE COMMAND (preferred): migrate-looker.py
 
+> ## ⛔ THE ONE PATH (do not improvise a workbook)
+> `migrate-looker.py` is the single entry point; it only reaches GREEN when the
+> `assert-phase6-ran` hard gate passes with real charts. Rules:
+> - **NEVER hand-drive the per-phase scripts, hand-author a DM/workbook JSON, or
+>   `curl`-POST to `/v2/workbooks` / lay out empty "placeholder" pages** — that
+>   bypasses parity + the gate and ships an EMPTY workbook (the #1 failure mode).
+>   If Looker isn't reachable (no `~/.looker/looker.ini` / API creds), **STOP and
+>   tell the user to authenticate** — do not build a shell.
+> - **"Done" is a file on disk, not "pages exist."** Complete only when
+>   `ruby scripts/verify-complete.rb --workdir <WORK>` prints ✅ DONE (the gate
+>   stamped `phase6-success.json`). An empty workbook is never done.
+
 The whole pipeline — parse → **RLS gate** → convert → **DM-reuse check** → DM
 POST + readback → workbook build (layout inline) → **source-freshness
 preflight** → **scripted parity + hard gate** — as a single command (mirrors
