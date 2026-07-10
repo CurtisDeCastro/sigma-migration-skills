@@ -53,6 +53,20 @@ of emitting wrong logic.
 
 ## One command (orchestrated path)
 
+> ## ⛔ THE ONE PATH (do not ship an unverified/empty workbook)
+> `migrate-cognos.mjs` is the entry point. Rules:
+> - **NEVER hand-author a DM/workbook JSON and `curl`-POST it, and never ship
+>   empty "placeholder" pages.** Post only what the converter produces. If Cognos
+>   is unreachable (no CA session), **STOP and tell the user to authenticate** —
+>   don't build a shell.
+> - **Dashboards ARE hand-authored** (the converter doesn't do exploration JSON —
+>   see `refs/dashboard-migration.md`). That is the one sanctioned hand-authored
+>   path — but it is NOT exempt from verification: a hand-authored dashboard must
+>   still pass `assert-parity.mjs --check` **GREEN with real comparisons**.
+> - **"Done" requires parity GREEN with real values.** `assert-parity.mjs --check`
+>   now **refuses a vacuous pass** — 0 expected values is "NOT parity-clean" (exit
+>   1), never "0/0 GREEN". An empty/placeholder workbook is never done.
+
 ```bash
 node scripts/migrate-cognos.mjs \
   --module <module.json> --report <report.xml> \
