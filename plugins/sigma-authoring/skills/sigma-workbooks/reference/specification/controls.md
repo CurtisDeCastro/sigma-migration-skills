@@ -358,5 +358,16 @@ Multiple controls on the same target compose with **AND** — selecting region "
 They are not the same and both are required:
 - `id` is the element ID used internally and in `layout.md`.
 - `controlId` is a human-facing handle used when referring to this control's value from formulas or downstream logic. Pick it to be meaningful (e.g., `RegionFilter`, `DateRange`).
+
+## Cross-element filters (click-to-filter) — what IS and ISN'T spec-authorable
+
+Sigma "cross-element filtering" (user interacts with one element, other elements filter) is a **3-part construct**: a *trigger* element + a *control* + a *target*. Only part of it lives in the workbook spec — verified live 2026-07-10.
+
+- **The control half IS spec-authorable** and is the whole filtering mechanism. Author a `control` whose `filters` bind the value to the target element(s) by `elementId` + `columnId` (exactly the shape above). Any element that sources the filtered element inherits the filter. This gives a fully working cross-element filter driven by the control (a dropdown / list / range picker). Proven: setting a list control's value collapsed the target chart to exactly the filtered rows.
+- **The click-to-trigger action is UI-only** — there is **no `action` / `sequence` / `setControlValue` node in the workbook spec**. The "click a bar/cell to set the control value" binding is configured in the UI (element → **Actions** tab → *Set control value*). So a spec can deliver the *filter*, but the *click-to-fire* gesture is a post-publish UI step. (This is why a Tableau `tsl-filter` action auto-converts only ~80%: the control + targets are emittable; the click binding is documented, not generated.)
+
+### Gotcha: list-control values are STRINGS — cast numeric filter columns
+
+A `list` control's parameter/filter **values are strings**. If the target column is **numeric** (e.g. an integer `period`, `year`, `store_id`), the filter throws `400 "Expecting string"` on the value and then a runtime **500 (type mismatch)** when applied. Cast the numeric dimension to text in the control's value-source column (e.g. a `Text([…/period])` column) and bind the control to that. Text columns filter cleanly with no cast. (Verified: a text `Team` control worked; a numeric `Period` control 500'd until cast.)
 </content>
 </invoke>
