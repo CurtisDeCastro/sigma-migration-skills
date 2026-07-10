@@ -86,7 +86,7 @@ INVENTORY = [
 
   # MANUAL — non-translatable today; needs customer to do post-publish work
   { name: 'Dashboard filter / highlight / nav actions', pat: /command='tsc:tsl-(filter|highlight|navigate|set-action|parameter-action|url)'/,
-    status: :manual, blurb: 'Skill writes actions.md listing each action; customer wires Sigma cross-element filtering after publish.' },
+    status: :manual, blurb: 'tsl-filter → Sigma cross-element filter. FAITHFUL but ~80% automatable (verified 2026-07-10): the CONTROL half is spec-authorable — emit a list control whose filters bind {source:{kind:table,elementId},columnId} to the target element(s); elements sourcing the filtered element inherit it. The click-to-trigger is UI-ONLY (no action/setControlValue node in the workbook spec) — configured post-publish via the element Actions tab. GOTCHA: list-control values are STRINGS, so a NUMERIC filter column (period/year/id) 400s ("Expecting string") then 500s at query time — cast the numeric dim to text (Text([…])) in the control value-source column; text columns work as-is. Skill still writes actions.md for the click bindings. See sigma-workbooks controls.md "Cross-element filters".' },
   { name: 'Forecast / trendline model',                pat: /<forecast\b/,
     status: :manual, blurb: 'No Sigma forecast primitive; agent emits a note + Custom SQL option (beads-sigma-yi0).' },
   { name: 'Story points (sequential narrative)',       pat: /<story\b/,
