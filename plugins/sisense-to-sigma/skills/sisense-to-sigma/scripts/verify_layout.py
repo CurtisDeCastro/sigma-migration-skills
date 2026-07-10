@@ -87,9 +87,14 @@ def main():
         if not cond:
             failed += 1
 
-    # PLACED — every mapped, layout-present widget has exactly one placement
+    # NON-EMPTY — a dashboard with no widgets mapped to elements is an EMPTY
+    # workbook; it must NOT pass vacuously (the old code was GREEN when nothing
+    # was placeable). A layout with zero elements is never a valid migration.
     placeable = [(wid, ck, w) for (wid, ck, w) in seq if wid in wid2elem]
     elem_ids = [wid2elem[wid] for wid, _, _ in placeable]
+    check("NON-EMPTY: dashboard has widgets mapped to elements", len(elem_ids) > 0,
+          f"sisense widgets={len(seq)}, mapped elements={len(elem_ids)}")
+    # PLACED — every mapped, layout-present widget has exactly one placement
     missing = [e for e in elem_ids if e not in P]
     check("PLACED: every mapped widget placed", not missing,
           f"unplaced={missing}" if missing else f"{len(elem_ids)} placed")

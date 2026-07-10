@@ -69,6 +69,14 @@ def cmp_result(sis, snow, tol):
     return len(sis) == len(snow) and all(approx(a, b, tol) for a, b in zip(sis, snow))
 
 def run(checks, conn):
+    # Empty-check guard: a parity gate with ZERO checks must NOT report green — the
+    # old loop printed "0/0 GREEN" and returned True, so an empty/placeholder
+    # workbook (no widgets → no checks) passed vacuously. A migration with nothing
+    # to verify is not verified.
+    if not checks:
+        print("⛔ RED — 0 parity checks: nothing to verify. An empty/placeholder "
+              "workbook cannot pass parity. Build the widgets and re-run.")
+        return False
     results, ok = [], True
     for c in checks:
         sis = sisense_jaql(c["datasource"], c["jaql"])
