@@ -17,6 +17,15 @@ user-invocable: true
 > `bash scripts/doctor.sh` (macOS/Linux/Git Bash) or `powershell -ExecutionPolicy Bypass -File scripts\doctor.ps1` (Windows).
 > It checks Ruby/Python/Node/bash and flags the Python "Store stub" + CRLF with exact fixes. Details: `refs/environment.md`.
 
+> ## ⛔ THE ONE PATH (do not ship an unverified/empty workbook)
+> Convert with `convert.py`, POST its specs, then verify with `verify_parity.py`. Rules:
+> - **NEVER hand-author a DM/workbook JSON and `curl`-POST it, and never ship empty
+>   "placeholder" pages.** Post only what `convert.py` produces. If MicroStrategy is
+>   unreachable (no session), **STOP and tell the user to authenticate** — don't build a shell.
+> - **`verify_parity.py` must be GREEN with REAL reports before you're done.** It now
+>   **refuses a vacuous pass** — an `expected_parity.json` with 0 reports is "NOT
+>   parity-clean" (exit 1), never a silent green. An empty/placeholder workbook is never done.
+
 ## Preflight the workbook spec before POST (mandatory)
 
 Before POSTing any workbook spec, run `ruby scripts/lib/preflight_lint.rb <spec.json>` — it exits 1 with a precise message on the two migration-killer bugs: a `table` with aggregate columns + dimensions but **no `groupings`** (renders raw detail rows), and a malformed `control` (missing `id`/`controlId`/`controlType` or nesting value fields under a `value` object instead of flat, a non-double-nested `source`, or a list control wired to neither `source` nor `filters` — a filters-only list control is valid). Fix every violation first — never POST past it, and **never conclude a feature is "unsupported" from an `Invalid kind` error** (it means the inner fields are wrong). Verified shapes: `sigma-workbooks` `controls.md` / `tables.md`.
