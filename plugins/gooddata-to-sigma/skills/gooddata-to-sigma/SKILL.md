@@ -55,6 +55,18 @@ conversion leaves your machine.
 
 ## Phases
 
+> ## ⛔ THE ONE PATH (do not ship an unverified/empty workbook)
+> Run the phases below **in order** and finish with **Phase 4 (`verify-warehouse.rb`)**. Rules:
+> - **NEVER hand-author a DM/workbook JSON off this flow, and never ship empty
+>   "placeholder" pages.** POST only the specs `convert.py` / `build_workbook.py`
+>   produce. If GoodData isn't reachable (no token), **STOP and tell the user to
+>   authenticate** (`get-token.sh`) — don't build a shell.
+> - **`verify-warehouse.rb` must PASS (exit 0) with REAL elements before you're
+>   done** — it fails when an element returns no rows / errors AND when there are
+>   **0 elements** (`total > 0` guard), so an empty/placeholder workbook cannot
+>   pass. Running it is mandatory, not optional. "Done" is that gate green, not
+>   "pages exist."
+
 **Phase 0 — Assess.** Run the `gooddata-assessment` skill for an inventory +
 readiness readout before committing to a conversion.
 
