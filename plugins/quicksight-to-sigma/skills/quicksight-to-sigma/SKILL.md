@@ -62,6 +62,18 @@ never guesses.
 
 ## One command (preferred): `scripts/migrate-quicksight.rb`
 
+> ## ⛔ THE ONE PATH (do not improvise a workbook)
+> `migrate-quicksight.rb` is the single entry point; it only exits 0 when the
+> `assert-phase6-ran` hard gate passes with real charts. Rules:
+> - **NEVER hand-drive the per-phase scripts, hand-author a DM/workbook JSON, or
+>   `curl`-POST to `/v2/workbooks` / lay out empty "placeholder" pages** — that
+>   bypasses parity + the gate and ships an EMPTY workbook (the #1 failure mode).
+>   If you can't reach QuickSight (no AWS creds / wrong `--profile`/`--region`),
+>   **STOP and tell the user to authenticate** — do not build a shell.
+> - **"Done" is a file on disk, not "pages exist."** Complete only when
+>   `ruby scripts/verify-complete.rb --workdir <WORK>` prints ✅ DONE (the gate
+>   stamped `phase6-success.json`). An empty workbook is never done.
+
 The single-process orchestrator chains every phase below — discover (live AWS or `--from-fixtures <dir>`), convert (**zero-config**: the self-contained `converter/quicksight.mjs` bundle vendored in the skill runs `convertQuickSightToSigma` locally via `node` — no clone, no npm, no MCP; a dev's `--mcp-dir`/`$QS_MCP_DIR` build still wins; refresh with `tools/vendor-converters.sh`; only if the bundle is also absent does `convert-model.rb --emit-mcp` gate + `--converted` resume apply), the **Phase 3.5 DM-reuse check** (`qs-dm-signature.py` + `find-or-pick-dm.rb`; **reuse-first** — auto-reuses an existing DM covering all the analysis's source tables, `--reuse-dm <id>` pins one, `--skip-reuse-check` forces build new), fixup `--folder-id` → validate → post-and-readback, workbook build, layout, then the **two-pass Phase 7 parity** (`phase6-parity-quicksight.rb` emits the per-chart query list and gates; write `parity-expected.json` + `parity-actuals.json` and re-run the SAME command — phases 1–5 skip automatically) and the `assert-phase6-ran.rb --workdir` hard gate:
 
 ```bash

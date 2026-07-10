@@ -1080,8 +1080,13 @@ end
 # gate can mint, closing the "agent narrates success without the gate" hole.
 begin
   _wd = opts[:tab]
+  # chartCount from parity-final.json (gate 1 already required charts_total > 0 to
+  # reach here) so verify-complete.rb has a uniform element count across plugins.
+  _pf = (JSON.parse(File.read(File.join(_wd, 'parity-final.json'))) rescue {})
+  _cc = (_pf['charts_total'] || _pf['charts_pass'] || 0).to_i
   File.write(File.join(_wd, 'phase6-success.json'),
              JSON.pretty_generate('workbookId' => (opts[:wb] || ''),
+                                  'chartCount' => _cc,
                                   'gates' => 'all-pass',
                                   'generatedAt' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')))
   _pend = File.join(_wd, 'parity-pending.json')
