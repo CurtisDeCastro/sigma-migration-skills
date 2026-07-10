@@ -11,10 +11,12 @@
 |---|---|---|
 | **GoodData Cloud** (SaaS) | `/api/v1` REST + declarative layout | ✅ primary |
 | **GoodData.CN** (containerized) | same `/api/v1` + declarative layout | ✅ same code path |
-| **GoodData Platform** (classic / "bear", `/gdc/md/{project}`) | different REST, MUF user filters | ⏳ fast-follow only |
+| **GoodData Platform** (classic / "bear", `/gdc/md/{project}`) | different REST (SST/TT auth), MUF user filters | 🟡 discovery + assessment (see `gooddata-platform-api.md`) |
 
 Cloud and .CN share the API and the declarative model, so one client covers
-both. Classic Platform is a separate extraction client — deferred.
+both. Classic Platform is a **separate extraction client** — its own auth
+(SST/TT) and metadata API — now scaffolded for discovery + assessment; DM/workbook
+conversion is still Cloud-only. Full details: `gooddata-platform-api.md`.
 
 ## Auth
 

@@ -159,6 +159,14 @@ that fails the export). Keeps the migrated dashboard interactive, mirroring Good
 
 ## Scope note
 
-GoodData **Cloud / .CN** only for v0.1. Legacy **GoodData Platform**
-(`/gdc/md/{project}`, classic MAQL dialect, MUF) is a separate extraction client
-— documented fast-follow, not built.
+GoodData **Cloud / .CN** is the full path (discover → DM → workbook → parity → RLS).
+
+Legacy **GoodData Platform** (classic "bear", `/gdc` metadata API, SST/TT auth,
+classic MAQL dialect, MUF) now has a **discovery + assessment** path
+(`platform_auth.py`, `discover_platform.py`, `assess_platform.py`) — it enumerates
+every project a user can access under one domain and scores classic MAQL via the
+same `maql.py` translator (classic object-URI/identifier refs are normalized to
+`{type/id}` tokens first). **Still fast-follow for Platform:** LDM→DM conversion
+(Platform data is often GoodData's own datastore, not a customer warehouse → the
+same-warehouse parity assumption breaks) and MUF→RLS extraction. Full endpoint map
++ honest limits: `refs/gooddata-platform-api.md`.
