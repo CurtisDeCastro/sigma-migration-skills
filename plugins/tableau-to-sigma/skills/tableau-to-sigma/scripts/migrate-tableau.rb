@@ -123,6 +123,12 @@ HERE = __dir__
 $LOAD_PATH.unshift File.expand_path('lib', HERE)
 require 'coverage_gate' # build-charts coverage.json → consolidated report (bead beads-sigma-59mk)
 
+require 'rbconfig'
+# Snapshot ARGV before OptionParser consumes it — the reuse self-heal re-invokes
+# this orchestrator verbatim + `--skip-reuse-scan` (see the WorkbookBuildError
+# rescue). :recommended reuse comes from auto-pick, never a CLI arg, so the
+# snapshot carries no --reuse-dm to strip.
+ORIGINAL_ARGV = ARGV.dup.freeze
 opts = {}
 OptionParser.new do |o|
   o.banner = <<~BANNER
@@ -2423,6 +2429,30 @@ begin
   par_cmd += ['--update-id', update_wb] if update_wb
   p_log = sigma_run_wb!(par_cmd)
 rescue WorkbookBuildError => e
+  # ── SELF-HEAL: auto-picked reuse DM couldn't satisfy the workbook ──────────
+  # When the DM was AUTO-PICKED for reuse (opts[:reuse_dm] == :recommended, the
+  # orchestrator's choice — not an explicit user --reuse-dm <id>) and the build
+  # failed, rebuild a FRESH DM automatically instead of the exit-4 handoff. This
+  # closes the column-superset gate's KNOWN RESIDUAL: a reused DM can be a full
+  # column-superset yet lack a role-playing dimension alias the master needs
+  # (DATE_DIM as both Order + Return Date), which only surfaces at the pre-POST
+  # ref gate — after Phase 3 was skipped. A fresh DM is built from the workbook's
+  # own model, so it has exactly the structure the wb-spec needs. Re-invokes this
+  # orchestrator verbatim + --skip-reuse-scan (same --out → discovery is reused,
+  # so it's fast and creates no orphan: the ref gate is PRE-POST, nothing shipped).
+  # Fires once (SIGMA_SELFHEAL_RETRIED guard); an EXPLICIT --reuse-dm <id> is the
+  # user's decision and is respected (falls through to the handoff below).
+  if opts[:reuse_dm] == :recommended && ENV['SIGMA_SELFHEAL_RETRIED'].to_s.empty?
+    puts
+    puts "── SELF-HEAL: the auto-picked reuse DM (#{reuse_dm_id}) could not satisfy the"
+    puts "   workbook (#{e.message.lines.first&.strip}). Rebuilding a FRESH data model"
+    puts '   automatically (--skip-reuse-scan) — no manual step needed. ──'
+    Offramp.log(WORK, kind: 'reuse-selfheal', detail: "auto-picked DM #{reuse_dm_id} failed the build; rebuilding fresh") if defined?(Offramp)
+    ok = system({ 'SIGMA_SELFHEAL_RETRIED' => '1' }, RbConfig.ruby, File.expand_path(__FILE__),
+                *ORIGINAL_ARGV, '--skip-reuse-scan')
+    child = $?&.exitstatus
+    exit(ok ? 0 : (child.nil? ? 1 : child))
+  end
   failed = cull_failed_fields(e.captured_output,
                               (defined?(v_log) ? v_log : ''), (defined?(p_log) ? p_log : ''))
   # Fall back to the mechanically-known untranslatable fields when the log itself
