@@ -288,12 +288,26 @@ def plan_node(node, c0, c1, r0, r1, ctx)
     plans = []
     kids.each_index do |i|
       pl = plan_node(kids[i], *rects[i], ctx)
-      plans << [rects[i], pl[0], pl[1]] if pl
+      plans << [rects[i], pl[0], pl[1], pl[2]] if pl
     end
     return nil if plans.empty?
-    grown = plans.map { |(rc, needed, _)| [rc[0], rc[1], rc[2], [rc[3], rc[2] + needed].max] }
+    # Grow each child rect to fit its content, THEN clamp a header-label child
+    # (cmax present) down to its max height — the layout otherwise never shrinks
+    # below the source zone geometry, so a one-line header stays ~6 rows tall.
+    grown = plans.map do |(rc, needed, _ep, cmax)|
+      r1 = [rc[3], rc[2] + needed].max
+      r1 = [r1, rc[2] + cmax].min if cmax
+      [rc[0], rc[1], rc[2], r1]
+    end
     packed = SigmaLayout.pack_rects(grown)
     needed_rows = [my_rows, packed.map { |r| r[3] }.max - 1].max
+    # If EVERY child is a header label, this container IS a header band — clamp its
+    # own height and propagate the clamp up (3rd return element) so the OUTER tinted
+    # band row shrinks too, not just the inner leaf. Mixed containers (a chart +
+    # a label) get no container clamp; the label child is still clamped via `grown`.
+    child_maxes = plans.map { |pl| pl[3] }
+    band_max = (!child_maxes.empty? && child_maxes.all?) ? child_maxes.compact.max : nil
+    needed_rows = [needed_rows, band_max].min if band_max
     cid = "tc-#{ctx[:page_id]}-#{node['id']}"
     # B2 (gap ubr5.6): apply the Tableau zone's fill as the Sigma container tint.
     # parse-twb-layout surfaces fill_color (region-card tints, e.g. #07b4a24e) and
@@ -310,7 +324,7 @@ def plan_node(node, c0, c1, r0, r1, ctx)
       inner = plans.each_with_index.map { |(_, _, ep), i| ep.call(*packed[i]) }.join("\n")
       gc(cid, fc0, fc1, fr0, fr1, inner)
     end
-    [needed_rows, emit]
+    [needed_rows, emit, band_max]
   else
     eid = resolve_leaf(node, ctx)
     return nil unless eid && !ctx[:placed].include?(eid)
@@ -330,7 +344,28 @@ def plan_node(node, c0, c1, r0, r1, ctx)
       ctx[:min_row_expansions] += 1
       span = min
     end
-    [span, proc { |fc0, fc1, fr0, fr1| le(eid, fc0, fc1, fr0, fr1) }]
+    # A short single-line TEXT LABEL (section/column header) must render as a THIN
+    # banner, not a tall colored block. Return a MAX-rows clamp (3rd element) that
+    # the parent's grow-to-fit honors — capping `span` alone does nothing because
+    # the layout grows to max(geometry, needed) and never shrinks below the source
+    # zone geometry (which maps a one-line header to ~6 rows). See the parent
+    # branch: it clamps each child rect to `cmax` and, when EVERY child is a header
+    # label, propagates the clamp up so the whole tinted band row shrinks too.
+    maxr = nil
+    if el && el['kind'] == 'text'
+      # Read the label from the ZONE's text_runs — NOT the readback element's
+      # `body`. The /columns readback drops `body`, so keying on it left maxr nil
+      # and starved the whole band_max clamp (the false-green: the unit test had
+      # supplied a body the real readback omits). A short SINGLE-LINE label is a
+      # section/column header → thin band; multi-line or long text keeps its height.
+      zone = ctx[:zone_by_id][node['id']] || node
+      runs = zone.is_a?(Hash) ? (zone['text_runs'] || []) : []
+      txt = runs.map { |r| r['text'].to_s }.join
+      clean = txt.gsub(/\s+/, ' ').strip
+      multiline = txt.include?("\n") || runs.any? { |r| r['break'] }
+      maxr = SigmaLayout::HEADER_BAND_MAX_ROWS if !clean.empty? && clean.length <= 60 && !multiline
+    end
+    [span, proc { |fc0, fc1, fr0, fr1| le(eid, fc0, fc1, fr0, fr1) }, maxr]
   end
 end
 
@@ -404,10 +439,13 @@ def build_page_from_tree(dashboard, page, opts)
   # Pin the header title to the dedicated title element (build-charts prepends id
   # "title-text"/"title-<slug>"); a bare first-text-element match would grab a B4
   # styled-text element once those exist. Falls back to the page name when absent.
-  title_el    = page['elements'].find { |e| e['kind'] == 'text' && e['id'].to_s.start_with?('title') }
   # E1: flat zones carry chart_kind + plot signals (tree nodes don't) — the
   # per-kind row floor resolves through this map.
   zone_by_id  = (dashboard['zones'] || []).each_with_object({}) { |z, h| h[z['id']] = z if z['id'] }
+  # Dedicated title-* element, else the source's own top banner (shared detector,
+  # used by the synthesis path too) — avoids the fabricate-H1-alongside-source-
+  # title duplicate-title bug. (Marked placed in the header branch below.)
+  title_el    = detect_header_title_el(page, zone_by_id)
 
   ctx = { page_id: page['id'], renames: opts[:renames], els_by_name: els_by_name,
           ctl_by_name: ctl_by_name, els_by_id: els_by_id, title_el: title_el, title_used: false,
@@ -482,7 +520,7 @@ def build_page_from_tree(dashboard, page, opts)
   # element made it into ctx[:placed]. Header band excluded from the fill rects.
   content_zones = ZoneCensus.content_zones(dashboard['zones'])
   placed = content_zones.count do |z|
-    e = els_by_name[opts[:renames][z['caption']] || z['caption']]
+    e = els_by_name[zone_el_name(z, opts[:renames])]
     e && ctx[:placed].include?(e['id'])
   end
   fill = ZoneCensus.grid_fill_pct(content_rects, opts[:page_cols], page_rows)
@@ -518,12 +556,46 @@ end
 # build_page_for_dashboard (+ min_row_expansions).
 SECTION_TEXT_MIN_W_PCT = 60.0 # a text zone at least this wide separates sections
 
+# The source dashboard's title element, resolved identically for BOTH layout
+# paths (geometry `build_page_from_tree` and synthesis `build_page_synthesized`).
+# Prefer a dedicated `title-*` element; otherwise fall back to the source's own
+# TOP-BANNER text (a text zone at y≈0 spanning most of the width). Using the
+# source title as the header — instead of fabricating a page-name H1 alongside it
+# — is what prevents the duplicate-title bug. Previously only the geometry path
+# had the fallback, so synthesized pages shipped two titles. Shared here so the
+# two paths cannot drift again.
+# Resolve the Sigma element NAME a source zone maps to. Tiles are now named by
+# the worksheet display_title (human title, e.g. "Net Revenue"), NOT the caption/
+# nickname ("OV KPI Revenue"), so zone→element matching must prefer display_title
+# (after any explicit --rename), falling back to the caption (still == the name
+# when the worksheet had no custom title). This keeps the layout + parity matchers
+# in lockstep with the element namer — changing the display name in one place must
+# not silently drop every tile from the layout.
+def zone_el_name(z, renames)
+  explicit = renames && renames[z['caption']]
+  return explicit if explicit
+  dt = z['display_title'].to_s.strip
+  dt.empty? ? z['caption'] : dt
+end
+
+def detect_header_title_el(page, zone_by_id)
+  title_el = page['elements'].find { |e| e['kind'] == 'text' && e['id'].to_s.start_with?('title') }
+  return title_el if title_el
+  zid = ->(e) { e['id'].to_s.sub(/\Atext-/, '') }
+  page['elements'].select { |e| e['kind'] == 'text' }
+                  .map { |e| [e, zone_by_id[zid.call(e)]] }
+                  .select { |_e, z| z && z['y_pct'].to_f < 12 && z['w_pct'].to_f >= 40 }
+                  .min_by { |_e, z| z['y_pct'].to_f }&.first
+end
+
 def build_page_synthesized(dashboard, page, opts, structure)
   zones       = dashboard['zones'] || []
   els_by_name = page['elements'].each_with_object({}) { |e, h| h[e['name']] = e if e['name'] }
   els_by_id   = page['elements'].each_with_object({}) { |e, h| h[e['id']] = e if e['id'] }
-  # Pin the header title to the dedicated title element (see build_page_from_tree).
-  title_el    = page['elements'].find { |e| e['kind'] == 'text' && e['id'].to_s.start_with?('title') }
+  # Header title: dedicated title-* element, else the source's own top banner
+  # (shared detector) — NOT a fabricated page-name H1 alongside the source title.
+  zone_by_id  = zones.each_with_object({}) { |z, h| h[z['id']] = z if z['id'] }
+  title_el    = detect_header_title_el(page, zone_by_id)
   page_rows   = opts[:page_rows]
   placed      = []
   extra_els   = []
@@ -608,7 +680,7 @@ def build_page_synthesized(dashboard, page, opts, structure)
   resolve_zone_el = lambda do |z|
     case z['kind'].to_s
     when 'chart'
-      el = els_by_name[opts[:renames][z['caption']] || z['caption']]
+      el = els_by_name[zone_el_name(z, opts[:renames])]
       el && el['id']
     when 'text', 'title'
       el = els_by_id["text-#{z['id']}"]
@@ -789,7 +861,7 @@ def build_page_synthesized(dashboard, page, opts, structure)
 
   content_zones = ZoneCensus.content_zones(zones)
   placed_count = content_zones.count do |z|
-    e = els_by_name[opts[:renames][z['caption']] || z['caption']]
+    e = els_by_name[zone_el_name(z, opts[:renames])]
     e && placed.include?(e['id'])
   end
   rects = []
@@ -810,9 +882,11 @@ end
 def build_page_for_dashboard(dashboard, page, opts)
   chart_zones = dashboard['zones'].select { |z| z['kind'] == 'chart' && z['caption'] }
   els_by_name = page['elements'].each_with_object({}) { |e, h| h[e['name']] = e if e['name'] }
-  # Pin to the dedicated title element (see build_page_from_tree) so a B4
-  # styled-text element isn't mistaken for the header title.
-  title_el = page['elements'].find { |e| e['kind'] == 'text' && e['id'].to_s.start_with?('title') }
+  # Dedicated title-* element, else the source's own top banner (shared detector,
+  # same as the tree + synthesis paths) — no fabricated page-name H1 alongside a
+  # source title.
+  zone_by_id = (dashboard['zones'] || []).each_with_object({}) { |z, h| h[z['id']] = z if z['id'] }
+  title_el = detect_header_title_el(page, zone_by_id)
   ctl_els  = page['elements'].select { |e| e['kind'] == 'control' }
 
   # Per-dashboard copy of the band tuning — auto-fit must not leak between
@@ -834,7 +908,7 @@ def build_page_for_dashboard(dashboard, page, opts)
   end
 
   chart_layouts = chart_zones.map do |z|
-    lookup_name = o[:renames][z['caption']] || z['caption']
+    lookup_name = zone_el_name(z, o[:renames])
     el = els_by_name[lookup_name]
     if el.nil?
       warn "WARN: no Sigma element matched zone caption #{z['caption'].inspect} on page #{page['name'].inspect}" \
@@ -937,7 +1011,7 @@ def build_page_for_dashboard(dashboard, page, opts)
   #          furniture (header band, styled-text band) excluded from the fill
   #          numerator.
   content_zones = ZoneCensus.content_zones(dashboard['zones'])
-  placed = content_zones.count { |z| els_by_name[o[:renames][z['caption']] || z['caption']] }
+  placed = content_zones.count { |z| els_by_name[zone_el_name(z, o[:renames])] }
   content_rects = bands.flat_map { |b| b.map { |i| [i[1], i[2], i[3] + band_offset, i[4] + band_offset] } }
   content_rects << [1, o[:page_cols] + 1, 1 + HEADER_ROWS, 1 + HEADER_ROWS + ctl_rows] if ctl_els.length.positive?
   fill = ZoneCensus.grid_fill_pct(content_rects, o[:page_cols], o[:page_rows])

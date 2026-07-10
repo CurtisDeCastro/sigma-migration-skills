@@ -10,6 +10,37 @@ user-invocable: true
 > `bash scripts/doctor.sh` (macOS/Linux/Git Bash) or `powershell -ExecutionPolicy Bypass -File scripts\doctor.ps1` (Windows).
 > It checks Ruby/Python/Node/bash and flags the Python "Store stub" + CRLF with exact fixes. Details: `refs/environment.md`.
 
+> ## ⛔ STEP 1 — THE ONE PATH (do not improvise a workbook)
+> This conversion runs through **one orchestrator** that builds every chart and
+> **verifies each one's data against Power BI before it's done**:
+> ```
+> ruby scripts/migrate-powerbi.rb --tmsl <model.bim> --pbir <report-bundle.json> --connection <id> --out <WORK>
+> ```
+> - **You need the model (TMSL) + report layout (PBIR) first. Get them by
+>   CONNECTING to Power BI — do NOT ask the user to hand them over and do NOT
+>   proceed without them.** Run the device-code login (no Entra app):
+>   ```
+>   python scripts/fabric-extract.py --report "<report name>" [--workspace "<ws id|name>"] \
+>     --out-dir <WORK> --report-out-dir <WORK> --report-bundle <WORK>/report-bundle.json
+>   ```
+>   It prints a **device code + `https://microsoft.com/devicelogin`** — tell the
+>   user to open that URL and enter the code (one sign-in; token caches). Then run
+>   the orchestrator with the extracted `--tmsl`/`--pbir`. Full recipe: `refs/connection.md`.
+> - **NEVER hand-author a workbook JSON and `curl`-POST it to `/v2/workbooks`, and
+>   never lay out empty "placeholder" pages.** That bypasses the DAX conversion,
+>   chart build, and parity gate and ships an EMPTY workbook (invented page names,
+>   no elements) — the #1 way this migration fails. If you cannot extract the
+>   model (no Fabric access / not published), **STOP and tell the user you need to
+>   connect to Power BI (device-code) or that the report must be published** — do
+>   not fall back to a hand-built shell.
+> - **"Done" is not "pages exist."** The migration is complete only when
+>   `ruby scripts/verify-complete.rb --workdir <WORK>` prints ✅ DONE — i.e. the
+>   `assert-phase6-ran` parity gate passed with real chart elements. An empty or
+>   placeholder workbook is never done, no matter how it looks.
+> - Small/older models (e.g. running on Haiku): if the report is large or complex,
+>   say so and confirm scope with the user before building — don't silently
+>   degrade to a partial shell.
+
 ## Preflight the workbook spec before POST (mandatory)
 
 Before POSTing any workbook spec, run `ruby scripts/lib/preflight_lint.rb <spec.json>` — it exits 1 with a precise message on the two migration-killer bugs: a `table` with aggregate columns + dimensions but **no `groupings`** (renders raw detail rows), and a malformed `control` (missing `id`/`controlId`/`controlType` or nesting value fields under a `value` object instead of flat, a non-double-nested `source`, or a list control wired to neither `source` nor `filters` — a filters-only list control is valid). Fix every violation first — never POST past it, and **never conclude a feature is "unsupported" from an `Invalid kind` error** (it means the inner fields are wrong). Verified shapes: `sigma-workbooks` `controls.md` / `tables.md`.
@@ -73,7 +104,7 @@ The corporate tenant blocks Entra app creation, Git integration, and XMLA (PPU).
 - **Batch / fleet extraction** (the assessment path): `fabric-extract-batch.py --reports "A,B,C" [--workspace W] [--all] --out-root DIR --pool 4` flattens each report into two artifact tasks (model TMSL + report definition) and pools them 4-wide; each report's bound model resolves via the Power BI REST `datasetId` (name-match fallback). Measured: 3 reports (6 artifacts) = **7.5s wall** vs ~16s serial-equivalent fast-polling and **~2.3 min** on the old per-report serial path. Output per report: `model/`, `report/`, `report-bundle.json` + a root `manifest.json` and `timings.json`.
 - **Layout**: a `.pbix` is a zip; `Report/Layout` is **UTF-16LE** JSON with per-visual `x,y,w,h` (canvas px, 1280×720 default). The model in a `.pbix` is a *binary* `DataModel` blob — NOT usable; get the model via getDefinition or a `.pbit`'s `DataModelSchema`.
 - See `refs/powerbi-visual-layout.md` for the Report/Layout & PBIR parsers and the visualType→Sigma-kind table. The shared fetch layer (token, fast LRO, pooled fetch, estate cache, timings) lives in `scripts/pbi_fabric.py`.
-- **Style fidelity — `refs/style-fidelity.md`**: reproducing the PBI report's *look*, not just its data. The extractor captures the report theme name, card value color, and matrix totals; the builder emits a Sigma `themeName`/`themeOverrides` (palette from `lib/pbi_theme.rb` — drives donut/pie + series colors), KPI-card styling (`value.color` + `titleOrient: bottom`), a donut null→`(Blank)` coalesce so the palette maps per-slice like PBI, and re-expresses a totals-bearing tableEx/matrix as a `pivot-table` with a grand-total row. Also documents the one deliberate non-transform (PBI thousands-K number format).
+- **Style fidelity — `refs/style-fidelity.md`**: reproducing the PBI report's *look*, not just its data. The extractor captures the report theme name, card value color, and matrix totals; the builder emits a Sigma `themeName`/`themeOverrides` (palette from `lib/pbi_theme.rb` — drives donut/pie + series colors), KPI-card styling (`value.color` + `titleOrient: bottom`), a donut null→`(Blank)` coalesce so the palette maps per-slice like PBI, and re-expresses a totals-bearing tableEx/matrix as a `pivot-table` with a grand-total row. **Table/matrix conditional formatting** (color scales, font-color scales, data bars, and rules/thresholds) is carried onto the Sigma table as element-level `conditionalFormats` (`extract-pbir.py` `_conditional_formats` → `lib/pbi_conditional_formats.rb`): gradient→`backgroundScale`/`fontScale`, dataBars→`dataBars`, rules→one `single` per band (ranges via `condition: formula`). Field-value (DAX-measure-driven) CF and un-mappable rule shapes (cross-column, else-default) are recorded to `coverage.json` (never silently dropped). Also documents the one deliberate non-transform (PBI thousands-K number format).
 
 ## Phase 2.5 — SOURCE-FRESHNESS PREFLIGHT (import-mode models, bead fmte)
 Import-mode PBI models are **frozen snapshots**; Sigma reads the LIVE warehouse. Before any parity side-by-side, capture the dataset's freshness so staleness deltas are called out UP FRONT (mirrors qlik-to-sigma Phase 1.5):

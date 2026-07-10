@@ -62,6 +62,18 @@ never guesses.
 
 ## One command (preferred): `scripts/migrate-quicksight.rb`
 
+> ## ⛔ THE ONE PATH (do not improvise a workbook)
+> `migrate-quicksight.rb` is the single entry point; it only exits 0 when the
+> `assert-phase6-ran` hard gate passes with real charts. Rules:
+> - **NEVER hand-drive the per-phase scripts, hand-author a DM/workbook JSON, or
+>   `curl`-POST to `/v2/workbooks` / lay out empty "placeholder" pages** — that
+>   bypasses parity + the gate and ships an EMPTY workbook (the #1 failure mode).
+>   If you can't reach QuickSight (no AWS creds / wrong `--profile`/`--region`),
+>   **STOP and tell the user to authenticate** — do not build a shell.
+> - **"Done" is a file on disk, not "pages exist."** Complete only when
+>   `ruby scripts/verify-complete.rb --workdir <WORK>` prints ✅ DONE (the gate
+>   stamped `phase6-success.json`). An empty workbook is never done.
+
 The single-process orchestrator chains every phase below — discover (live AWS or `--from-fixtures <dir>`), convert (**zero-config**: the self-contained `converter/quicksight.mjs` bundle vendored in the skill runs `convertQuickSightToSigma` locally via `node` — no clone, no npm, no MCP; a dev's `--mcp-dir`/`$QS_MCP_DIR` build still wins; refresh with `tools/vendor-converters.sh`; only if the bundle is also absent does `convert-model.rb --emit-mcp` gate + `--converted` resume apply), the **Phase 3.5 DM-reuse check** (`qs-dm-signature.py` + `find-or-pick-dm.rb`; **reuse-first** — auto-reuses an existing DM covering all the analysis's source tables, `--reuse-dm <id>` pins one, `--skip-reuse-check` forces build new), fixup `--folder-id` → validate → post-and-readback, workbook build, layout, then the **two-pass Phase 7 parity** (`phase6-parity-quicksight.rb` emits the per-chart query list and gates; write `parity-expected.json` + `parity-actuals.json` and re-run the SAME command — phases 1–5 skip automatically) and the `assert-phase6-ran.rb --workdir` hard gate:
 
 ```bash
@@ -183,6 +195,13 @@ ruby scripts/build-workbook-from-quicksight.rb \
 ruby scripts/post-and-readback.rb --type workbook --spec wb-spec.json --out wb-readback.json
 ```
 
+**Color + style fidelity (theme).** QuickSight visual colors AND its card/big-number chrome are theme-driven and NOT in the definition export, so the builder reads `signals.json.theme` (resolved in Phase 2) and applies:
+- **Colors:** top-level `themeOverrides.categoricalScheme` = the QS data-color palette (the ONLY spec path to pie/donut slice colors, and the palette for every categorical chart), plus `color:{by:single, value:<primaryColor>}` on single-measure bar/line/area (QuickSight paints those in the theme's primary data color), and `themeName:Dark` when the QS theme is dark.
+- **Card chrome:** QuickSight renders every tile as a bordered card, so `themeOverrides.hasCards:shown` + `borderRadius:round` + a subtle `elementBorder` (light border skipped on dark themes) mirror that look theme-agnostically.
+- **KPI tiles:** QuickSight KPIs are prominent big-number tiles, so each `kpi-chart` gets `value.fontSize:24` + `layout.anchor:middle` (Sigma's default is a small top-anchored number). 24 fits the scaled QS KPI row height without clipping; card bg/border come from `hasCards` (not per-element) so they stay theme-aware.
+
+No `theme` in signals (e.g. offline `--from-fixtures`) → colors + card chrome fall to Sigma defaults, unchanged. **Limitations:** (1) `categoricalScheme` is one *global, positional* palette applied in Sigma's category sort order — the color SET matches QuickSight but a pie's slice→label assignment can differ (QS assigns by value-descending); per-slice label parity isn't expressible via Sigma's single global scheme. (2) `build-quicksight-layout.rb` ports grid *geometry* faithfully but flattens QS SectionBasedLayout headers and approximates exact spacing/padding; inline chrome hexes (title color) aren't mapped.
+
 Mirrors the QuickSight visuals as Sigma elements off Data-page master tables, and emits a `wb-spec.map.json` (visualId → element-id) the layout phase consumes. Element shapes:
 - Workbook element column refs use **`[<source element name>/<col>]`** (the source element name comes from the DM element name set in Phase 4).
 - bar/line: `xAxis:{columnId}`, `yAxis:{columnIds:[...]}`.
@@ -251,7 +270,7 @@ ruby scripts/assert-phase6-ran.rb --workdir /tmp/<name> --workbook-id <WORKBOOK_
 - **Dynamic text date format = strftime, UNQUOTED**: `{{Max([El/Col]) | %B %-d, %Y}}` → "June 17, 2026". Quoted formats leak the quotes; `DateFormat()` echoes the pattern literally; `Date()` doesn't strip the time.
 - **QS `*_FLAG` columns are often warehouse BOOLEAN even when QS types them INTEGER** — `[flag] = 1` throws `Argument 2 invalid for '='` at query time. Verify via `/v2/connections/tables/{inode}/columns` and emit a boolean-safe predicate.
 - **Database name is usually NOT in the export** (it lives in the DataSource, which `describe-dashboard-definition` omits). Resolve it via `POST /v2/connection/{connectionId}/lookup` (**singular** `connection`) with `{"path":[DB,SCHEMA,TABLE]}`, probing candidate DBs until 200. A schema not granted to the connection's role 404s even when the DB resolves.
-- **Parity needs the customer's runtime control state + a rendered reference.** A customer screenshot is often filtered to a value that is NOT a saved default (e.g. `Organization = "Arine Demo Organization"` — 0 occurrences in the definition). Capture which control values are active before comparing, and request a screenshot + `describe-theme <id>` up front (the theme — hence the categorical color palette — is not in the definition export).
+- **Parity needs the customer's runtime control state + a rendered reference.** A customer screenshot is often filtered to a value that is NOT a saved default (e.g. `Organization = "Arine Demo Organization"` — 0 occurrences in the definition). Capture which control values are active before comparing, and request a screenshot + `describe-theme <id>` up front (the theme — hence the categorical color palette — is not in the definition export; **discovery now auto-resolves it** into `signals.json.theme` and the builder applies it — see Phase 5 color fidelity).
 - **Verify without MCP via the Export API**: when the customer org isn't wired to `sigma-mcp-v2`, query an element with `POST /v2/workbooks/{wb}/export {elementId, format:{type:csv}}` → poll `GET /v2/query/{queryId}/download`. This is how you confirm real values (and filtered parity) on any org.
 
 ## Reuse, don't reinvent

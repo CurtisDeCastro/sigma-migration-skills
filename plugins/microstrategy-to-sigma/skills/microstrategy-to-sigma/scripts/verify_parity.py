@@ -84,6 +84,13 @@ def main():
     args = ap.parse_args()
 
     expected = json.load(open(args.expected))
+    # Empty-check guard: 0 expected reports means nothing to verify — the loop
+    # below is skipped, all_green stays True, and an empty/placeholder workbook
+    # passes vacuously. A migration with nothing to compare is not parity-clean.
+    if not expected:
+        raise SystemExit("⛔ NOT parity-clean — expected_parity.json has 0 reports: nothing to "
+                         "verify. An empty/placeholder workbook cannot pass parity. Capture the "
+                         "MicroStrategy ground-truth values and re-run.")
     key_cols_by_report = {}
     if os.path.exists(args.keys):
         key_cols_by_report = json.load(open(args.keys))

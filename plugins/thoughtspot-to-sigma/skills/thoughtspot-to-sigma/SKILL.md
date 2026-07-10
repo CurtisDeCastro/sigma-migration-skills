@@ -45,6 +45,21 @@ context (curl uses the system store and works).
 
 ## ONE COMMAND (preferred): migrate-thoughtspot.py
 
+> ## ⛔ THE ONE PATH (do not improvise a workbook)
+> **Use `migrate-thoughtspot.py`** — it runs the `assert-phase6-ran` hard gate, so
+> it only reaches GREEN with real charts. Rules:
+> - **Prefer the one command over the manual `migrate.py` per-phase path** (below):
+>   the manual path does not run the completion gate, so it can leave an unverified
+>   or empty result. If you must run phases by hand, you MUST still finish with
+>   parity + `assert-phase6-ran.rb` and `verify-complete.rb`.
+> - **Never hand-drive the per-phase scripts as a cold shortcut, never hand-author
+>   a DM/workbook JSON and `curl`-POST it, and never lay out empty "placeholder"
+>   pages.** If ThoughtSpot isn't reachable (no `TS_HOST`/`TS_TOKEN`), **STOP and
+>   tell the user to authenticate** — do not build a shell.
+> - **"Done" is a file on disk.** Complete only when
+>   `ruby scripts/verify-complete.rb --workdir <WORK>` prints ✅ DONE (the gate
+>   stamped `phase6-success.json`). An empty workbook is never done.
+
 The whole pipeline — discover → DM-reuse check → convert → DM → workbooks →
 layout → **source-freshness preflight** → **scripted parity + hard gate** — as a
 single command (mirrors qlik-to-sigma's `migrate-qlik.rb`). Gates are never

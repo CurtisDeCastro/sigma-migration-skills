@@ -415,6 +415,25 @@ end
 # value + side annotation). Runs mirror zone_text_fields' shape (Æ = U+00C6
 # line-break sentinel); `ref`=true marks a dynamic <[…]> field/measure token.
 KPI_BAN_MIN_FONT = 16
+# The worksheet's DISPLAYED title (shown above the viz on a dashboard) — the
+# source of the human element name ("Net Revenue"), distinct from the worksheet
+# NAME/nickname ("OV KPI Revenue"). Path: layout-options/title/formatted-text.
+# Custom text only: a DEFAULT title is the "<Sheet Name>" field token (or the
+# element is absent), which we skip so the builder falls back to the nickname.
+# Concatenates runs (a title can be multi-span).
+def worksheet_display_title(ws)
+  t = ws.elements['layout-options/title'] || ws.elements['title']
+  return nil unless t
+  ft = t.elements['formatted-text']
+  return nil unless ft
+  # .elements.to_a('run') / .text — supported by BOTH backends of twb_xml
+  # (the Nokogiri shim and the REXML fallback); get_elements is REXML-only.
+  txt = ft.elements.to_a('run').map { |r| r.text.to_s }.join.strip
+  return nil if txt.empty?
+  return nil if txt =~ /\A<[^<>]+>\z/ # "<Sheet Name>" / field-token default
+  txt
+end
+
 def parse_customized_label(ws)
   cl = ws.elements['.//customized-label']
   return nil unless cl
@@ -645,6 +664,16 @@ xml.elements.each('//worksheet') do |ws|
       field:  e.attributes['field']
     }
   end
+  # Alt/older form: the channel is the ELEMENT NAME, not an attr — e.g.
+  #   <encodings><color column='…Customer Value Tier…'/></encodings>
+  # (vs the newer <encoding attr='color' …/> above). Without this, a dimension
+  # on the color shelf (categorical bar coloring) is silently dropped.
+  ws.elements.each('.//encodings/*') do |e|
+    ch = e.name.to_s
+    next unless %w[color size shape detail label tooltip text].include?(ch)
+    next if channels.key?(ch) # newer form already captured this channel
+    channels[ch] = { column: e.attributes['column'], field: e.attributes['field'] }
+  end
 
   # Per-worksheet calculated fields. Tableau emits these as
   #   <column datatype='X' name='[Calc Name]' role='dimension|measure' type='...'>
@@ -818,6 +847,9 @@ xml.elements.each('//worksheet') do |ws|
     cols_shelf:       cols_shelf,
     is_crosstab:      is_crosstab,
     is_kpi:           is_kpi,
+    # The source-displayed worksheet title → human element name (falls back to
+    # the nickname when the title is default/absent). See worksheet_display_title.
+    display_title:        worksheet_display_title(ws),
     # Phase-1 B3: KPI composite signals (nil unless a BAN scorecard label exists)
     kpi_label:            kpi_ban && kpi_ban['label'],
     kpi_value_font_size:  kpi_ban && kpi_ban['value_font_size'],
@@ -1191,6 +1223,8 @@ xml.elements.each('//dashboard') do |d|
       'h_pct'        => pct(z.attributes['h']),
       'chart_kind'   => chart_kind,
       'chart_kind_inferred' => chart_kind_inferred,
+      # Source-displayed worksheet title → human element name (nil = use nickname).
+      'display_title' => ws_meta&.dig(:display_title),
       'mark_class'   => ws_meta&.dig(:mark_class),
       'geo_role'     => ws_meta&.dig(:geo_role),
       # New per-worksheet signal fields (nil for non-chart zones)

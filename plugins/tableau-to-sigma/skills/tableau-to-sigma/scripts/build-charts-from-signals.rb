@@ -140,6 +140,16 @@ SIGMA_KIND = {
   'other'         => 'bar-chart'
 }.freeze
 
+# The human display name for a built tile: the source-displayed worksheet title
+# (parse-twb-layout's `display_title`, from the worksheet <title> run — e.g.
+# "Net Revenue") when present, else the worksheet nickname/caption ("OV KPI
+# Revenue"). One source of truth so every tile builder names elements the way the
+# source labels them, not by internal sheet name.
+def tile_title(zone, fallback)
+  t = zone && zone['display_title']
+  t && !t.to_s.strip.empty? ? t.to_s.strip : fallback
+end
+
 # ---- Tableau derivation → Sigma aggregation function name ----
 SIGMA_AGG = {
   'Sum'    => 'Sum',
@@ -204,7 +214,44 @@ def synthesize_view_from_signals(z, meta)
     g = guid_from_text(cc.to_s)
     dims << { 'guid' => g, 'role' => 'dim', 'derivation' => 'none' } if g && dims.none? { |f| f['guid'] == g }
   end
+  # TEXT-MARK TABLE recovery (Top-N country lists): a Tableau text/label table
+  # carries its measure on the Label mark, NOT on a shelf — so cols_shelf.fields
+  # is empty and the zone would drop with "no dim+measure" even though the value
+  # is fully known. Recover the measure from the sort's `using` clause
+  # (`[…].[sum:GDP (current US$):qk]`), then from the aggregations map (first
+  # numeric-agg field that isn't the dim). Without this the 3 Top-Countries
+  # tables silently vanish from the dashboard.
+  if meas.empty? && dims.any?
+    dim_guids = dims.map { |d| d['guid'].to_s.downcase }
+    recovered = nil
+    if (mm = z.dig('sort', 'using').to_s.match(/\.\[[a-z]+:(.+?):[a-z]+\]\s*\z/i))
+      recovered = mm[1]
+    end
+    recovered ||= (z['aggregations'] || {}).find { |k, agg|
+      %w[sum avg average min max count countd median].include?(agg.to_s.downcase) &&
+        !dim_guids.include?(k.to_s.gsub(/\A\[|\]\z/, '').downcase)
+    }&.first&.gsub(/\A\[|\]\z/, '')
+    meas << { 'guid' => recovered, 'role' => 'measure', 'derivation' => 'none' } if recovered && !recovered.empty?
+  end
   headers = (dims.map(&field_header) + meas.map(&field_header)).compact
+  # Fallback for pie/detail marks: the dimension sits on the color/detail
+  # encoding (not rows/cols shelves, and `channels` may be empty), so the only
+  # signal is the zone's `aggregations` map — a "None"-aggregated column is the
+  # dim, anything with a real aggregator is the measure. Without this a pie/
+  # donut whose dim isn't shelf-bound gets "no dim+measure" and is dropped.
+  if headers.length < 2 && (aggs = z['aggregations']).is_a?(Hash) && !aggs.empty?
+    dcaps = []
+    mcaps = []
+    aggs.each do |col, agg|
+      g = guid_from_text(col.to_s)
+      next unless g
+      cap = (cbg[g] || {})['caption']
+      cap = g if cap.nil? || cap.to_s.empty?
+      (agg.to_s.casecmp('none').zero? ? dcaps : mcaps) << cap
+    end
+    fb = (dcaps + mcaps).compact
+    headers = fb if fb.length >= 2
+  end
   headers.length >= 2 ? { headers: headers } : nil
 end
 
@@ -2324,7 +2371,7 @@ def build_pivot_element(z, meta, mmap, opts, warnings, data_elements = [])
   {
     'id'        => el_id,
     'kind'      => 'pivot-table',
-    'name'      => cap,
+    'name'      => tile_title(z, cap),
     'source'    => source,
     'columns'   => cols_array,
     'values'    => values_arr,
@@ -2601,7 +2648,7 @@ def build_kpi_element(z, meta, mmap, opts, warnings, data_elements = [])
   element = {
     'id'      => el_id,
     'kind'    => 'kpi-chart',
-    'name'    => cap,
+    'name'    => tile_title(z, cap),
     'source'  => { 'kind' => 'table', 'elementId' => source_eid },
     'columns' => [measure_col],
     # value.columnId, NOT value.id — the live API 400s with
@@ -2626,7 +2673,10 @@ def build_kpi_element(z, meta, mmap, opts, warnings, data_elements = [])
   # composition stage (B1/B2 region cards) sets it when it actually places a KPI
   # into a tint. So we set label + fontSize only and leave the default card.
   if z['kpi_value_font_size']
-    element['name'] = z['kpi_label'] if z['kpi_label'] && !z['kpi_label'].to_s.strip.empty?
+    # kpi_label (BAN scorecard label) only when the source has no displayed title
+    # — the worksheet <title> (already applied above) is the more authoritative name.
+    element['name'] = z['kpi_label'] if z['kpi_label'] && !z['kpi_label'].to_s.strip.empty? &&
+                                        z['display_title'].to_s.strip.empty?
     element['value']['fontSize'] = z['kpi_value_font_size']
     # The BAN's side annotation (e.g. "40% of U.S. total") is driven by a dynamic
     # Tableau calc token that can't be reproduced as static text; emitting the
@@ -2862,7 +2912,7 @@ layout.each do |dash|
       end
       if y_cols.any?
         element = {
-          'id' => el_id, 'kind' => SIGMA_KIND[z['chart_kind']] || 'line-chart', 'name' => cap,
+          'id' => el_id, 'kind' => SIGMA_KIND[z['chart_kind']] || 'line-chart', 'name' => tile_title(z, cap),
           'source' => { 'kind' => 'table', 'elementId' => opts[:master_id] },
           'columns' => [dim_col_obj] + y_cols,
           'xAxis' => { 'columnId' => dim_col_obj['id'] },
@@ -3362,17 +3412,18 @@ layout.each do |dash|
     end
 
     meas_col_obj = { 'id' => "y-#{el_id}", 'name' => meas['name'], 'formula' => measure_formula }
-    # Format priority:
-    #   1. explicit `format` on the master-map entry
-    #   2. Tableau's own format string for this measure (zone.formats — only set
-    #      when --meta was provided)
+    # Format priority (source-fidelity order):
+    #   1. the worksheet's OWN Tableau format for this measure (zone.formats) —
+    #      the DISPLAY ground truth; the same measure can render at different
+    #      precision per sheet, and the DM's auto-inferred master format often
+    #      picks 2 decimals for a percent calc where the source shows 1 (65.04%
+    #      vs 65.0%). The source viz wins.
+    #   2. explicit `format` on the master-map entry (DM/curated)
     #   3. heuristic by header name
-    meas_col_obj['format'] = meas['format'] if meas['format'].is_a?(Hash)
-    if meas_col_obj['format'].nil?
-      tab_fmt = pick_tableau_format(z['formats'], meas_hdr) ||
-                pick_tableau_format(z['formats'], meas['name'])
-      meas_col_obj['format'] = tab_fmt if tab_fmt
-    end
+    tab_fmt = pick_tableau_format(z['formats'], meas_hdr) ||
+              pick_tableau_format(z['formats'], meas['name'])
+    meas_col_obj['format'] = tab_fmt
+    meas_col_obj['format'] ||= meas['format'] if meas['format'].is_a?(Hash)
     if meas_col_obj['format'].nil?
       meas_col_obj['format'] =
         case meas['name'].downcase
@@ -3481,7 +3532,7 @@ layout.each do |dash|
       money_fmt = { 'kind' => 'number', 'formatString' => '$,.0f', 'currencySymbol' => '$' }
       num_fmt = ->(n) { n.to_s.downcase =~ /(revenue|profit|cost|sales|amount|spend)/ ? money_fmt : { 'kind' => 'number', 'formatString' => ',.0f' } }
       element = {
-        'id' => el_id, 'kind' => 'scatter-chart', 'name' => cap,
+        'id' => el_id, 'kind' => 'scatter-chart', 'name' => tile_title(z, cap),
         'source' => { 'kind' => 'table', 'elementId' => src_id },
         'columns' => [
           { 'id' => "c-#{el_id}", 'name' => dim['name'], 'formula' => "[#{src_name}/#{dim['name']}]" },
@@ -3546,7 +3597,7 @@ layout.each do |dash|
     element = {
       'id'      => el_id,
       'kind'    => kind,
-      'name'    => cap,
+      'name'    => tile_title(z, cap),
       'source'  => { 'kind' => 'table', 'elementId' => chart_source_eid },
       'columns' => [dim_col_obj, meas_col_obj]
     }
@@ -5085,6 +5136,13 @@ elsif opts[:pages_mode] == :dashboard
       # (a user changes it and nothing reacts) that fails the control lint.
       if param_control_ids.include?(c['controlId'])
         used = els.any? { |el| (el['columns'] || []).any? { |col| col['formula'].to_s.include?("[#{c['controlId']}]") } }
+        # A DATA-SCOPING parameter control filters via its `filters` targets (a
+        # boolean filter-calc wired to a master column at ~L4649), NOT via a
+        # Switch/If formula ref — so it is NOT dead even when no chart formula
+        # names it. Keep it whenever it carries filter targets, else the Region
+        # data-scoper is silently dropped (control-lint FAIL + the multi-metric
+        # recipe can't find a control to build masterAll/highlight from).
+        used ||= (c['filters'].is_a?(Array) && c['filters'].any?)
         next unless used
       end
       dup = JSON.parse(c.to_json)

@@ -41,6 +41,18 @@ widgets) — never emit confidently-wrong logic.
 > never fake — treemap/sunburst (no native Sigma equivalent) and unsupported
 > JAQL functions. See `refs/design-notes.md`.
 
+> ## ⛔ THE ONE PATH (do not improvise a workbook)
+> Run the phases below **in order** — Discover → Convert model → Convert
+> dashboards → **Verify (Phase 4)**. Rules:
+> - **NEVER hand-author a DM/workbook JSON and `curl`-POST it, and never lay out
+>   empty "placeholder" pages.** Post only the specs `convert.py` produces. If you
+>   can't reach Sisense (no host/token), **STOP and tell the user to
+>   authenticate** — do not build a shell.
+> - **Both verify gates must be GREEN with REAL elements before you're done.**
+>   `verify_parity.py` and `verify_layout.py` now **refuse a vacuous pass** — a
+>   workbook with zero widgets/checks is RED, not "0/0 GREEN". A migration with
+>   nothing to verify is not done.
+>
 > **READ FIRST — `refs/operating-contract.md`**: the fidelity guardrails (render + value-check EVERY page against the source; never ship empty or silently drop a tile; don't spin — surface blockers).
 > Read `refs/` before relying on shapes: `sisense-rest-api.md` (validated
 > endpoint map + auth + the access-key-vs-token gotcha), `jaql-mapping.md`

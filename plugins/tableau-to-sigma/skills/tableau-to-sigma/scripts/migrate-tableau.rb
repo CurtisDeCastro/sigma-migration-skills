@@ -109,6 +109,7 @@ require 'time'
 require 'set'
 require_relative 'lib/scout_gate'
 require_relative 'lib/dashboard_read'
+require_relative 'lib/recipe_multimetric'
 require_relative 'lib/run_state'
 require_relative 'lib/offramp' # structured "where did this run leave the golden path" trail
 require_relative 'lib/fast_path' # FAST-PATH routing + BOM-tolerant JSON reads
@@ -128,6 +129,11 @@ require 'rbconfig'
 # they can tell an ORCHESTRATED invocation from a cold standalone one — the
 # standalone manual-path gate in post-and-readback.rb keys off it.
 ENV['SIGMA_ORCHESTRATED_RUN'] = '1'
+# Snapshot ARGV before OptionParser consumes it — the reuse self-heal re-invokes
+# this orchestrator verbatim + `--skip-reuse-scan` (see the WorkbookBuildError
+# rescue). :recommended reuse comes from auto-pick, never a CLI arg, so the
+# snapshot carries no --reuse-dm to strip.
+ORIGINAL_ARGV = ARGV.dup.freeze
 opts = {}
 OptionParser.new do |o|
   o.banner = <<~BANNER
@@ -1406,9 +1412,15 @@ if mechanical
   # land-extracts.py; refs/extract-landing.md). Landing is byte-identical to what
   # Tableau rendered, so Phase 6 parity runs in EXACT mode — never drift mode.
   embedded_classes = %w[excel-direct textscan hyper ogrdirect csv msexcel]
+  # Basemap / non-data connection classes carry NO queryable data (map tile
+  # providers, WMS). They must not defeat the embedded-extract detection the way
+  # a stray class='MapBox' (from a geo mark) otherwise would — dropping the
+  # embedded path, the landing manifest, and the source.path remap.
+  nondata_classes = %w[mapbox tableau-map wms wms-server]
   if have_twb && !HydrateCustomSql.twb_has_sqlproxy?(twb)
     conn_classes = begin
-      File.read(twb, encoding: 'UTF-8').scan(/<connection[^>]*\bclass='([^']+)'/).flatten.uniq - ['federated']
+      File.read(twb, encoding: 'UTF-8').scan(/<connection[^>]*\bclass='([^']+)'/).flatten.uniq
+        .reject { |c| c == 'federated' || nondata_classes.include?(c.to_s.downcase) }
     rescue StandardError
       []
     end
@@ -1572,6 +1584,16 @@ if mechanical
     end
   end
 
+  # Fact hint for a MULTI-embedded-extract workbook: the datasource the dashboard
+  # worksheets actually use (column count alone picks the wrong one — an unused
+  # secondary can project MORE columns than the plotted table). Computed from the
+  # .twb worksheet dependencies + the landing manifest; threaded into pick_fact.
+  prefer_fact_table = nil
+  if have_twb && defined?(landing_manifest) && landing_manifest
+    prefer_fact_table = (MechanicalSpecs.dominant_fact_table(File.read(twb, encoding: 'UTF-8'), landing_manifest) rescue nil)
+    line "fact hint: dashboard datasource → prefer table #{prefer_fact_table}" if prefer_fact_table
+  end
+
   # Mechanical DM fixup NOW (so dropped calcs feed the checkpoint): resolve
   # raw-table-name prefixes + GUID sibling refs, and DROP calc columns that
   # still cannot resolve (unknown functions / unresolved refs).
@@ -1584,7 +1606,19 @@ if mechanical
   # us surface any chart-PLOTTED metric that did not fully translate (GUID refs
   # the converter could not resolve) as an OPEN QUESTION rather than a silent
   # blank chart. Metrics that aren't plotted by any view are ignored.
-  conv_fact = MechanicalSpecs.pick_fact(conv['model'])
+  conv_fact = MechanicalSpecs.pick_fact(conv['model'], prefer_table: prefer_fact_table)
+  # FIXED-LOD synthesis: the converter emits nothing for per-year `{FIXED
+  # DATEPART('year',[Date]): SUM(m)}` "World"-total calcs, so a chart referencing
+  # them dangles + blocks the POST. Synthesize the grouped Custom SQL helper +
+  # `FIXED Year` relationship on the fact; derive_master surfaces the columns.
+  world_lod_map = {}
+  if have_twb && conv_fact
+    # The real-entity discriminator (png-read point_in_time) also scopes the World
+    # per-year SUM to real entities, so it doesn't double-count rollup rows.
+    _disc = ((JSON.parse(File.read(DashboardRead.path(WORK)))['point_in_time'] rescue nil) || {})['entity_discriminator']
+    world_lod_map = (MechanicalSpecs.synthesize_fixed_lods!(conv['model'], conv_fact, File.read(twb, encoding: 'UTF-8'), (opts[:column_mapping] || {}), discriminator: _disc) rescue {})
+    line "FIXED-LOD synthesis: materialized #{world_lod_map.size} per-year world-total column(s) via a grouped Custom SQL helper#{_disc ? " (real-entity scoped by #{_disc})" : ''}" if world_lod_map.any?
+  end
   conv_base = conv_fact ? MechanicalSpecs.base_of(conv['model'], conv_fact) : nil
   pre = conv_fact ? MechanicalSpecs.derive_master(conv_fact, (conv_fact['name'] || 'Order Fact'), conv_base, nil, conv['model']) : { 'untranslated_metrics' => [] }
   pre_untranslated = pre['untranslated_metrics'] || []
@@ -2297,6 +2331,15 @@ elsif mechanical
     pf = MechanicalSpecs.fixup_dm_spec(dm, real_cols, column_mapping: opts[:column_mapping])
     line "phantom-column filter: dropped #{pf[:phantom]} non-existent base column(s) using #{real_cols.size} live table catalog(s)" if pf[:phantom].to_i.positive?
     line "column-rename remap: rewired #{pf[:remapped]} base column(s) to their warehouse names (--column-mapping)" if pf[:remapped].to_i.positive?
+    # Retain the multi-metric recipe's point-in-time columns on the fact (the
+    # discriminator + year the source didn't plot) so the real-entity filter can
+    # run instead of being skipped as a dangling ref. From png-read point_in_time.
+    if defined?(conv_fact) && conv_fact
+      _pit = ((JSON.parse(File.read(DashboardRead.path(WORK)))['point_in_time'] rescue nil) || {})
+      want = [_pit['entity_discriminator'], _pit['year_column'] || 'Year'].compact
+      kept = MechanicalSpecs.retain_columns!(conv_fact, want, real_cols)
+      line "point-in-time retain: added #{kept} recipe column(s) (#{want.join(', ')}) to the fact" if kept.positive?
+    end
   end
   # Computed-key join recovery (bead ovud): joins the converter skipped
   # ("DATE([Order Date]) = [Date Key]") are recovered mechanically — via a calc
@@ -2368,7 +2411,7 @@ unless reuse_dm_id
   if mechanical
     # The master must source the SAME chart-ready element pick_fact chose (the
     # derived "<Fact> View" when present). Match it into the readback by name.
-    cf = MechanicalSpecs.pick_fact(conv['model'])
+    cf = MechanicalSpecs.pick_fact(conv['model'], prefer_table: (defined?(prefer_fact_table) ? prefer_fact_table : nil))
     cf_name = cf && (cf['name'] || MechanicalSpecs.elem_name(cf))
     # Fallback (when the exact name match misses): the fact is the WIDEST non-dim
     # element — never a narrow date/time dim. Match pick_fact's dim test (both
@@ -2401,7 +2444,13 @@ if mechanical
   #    AND the readback element's REAL column labels (the suffixed display names
   #    Sigma assigns to joined-dim columns, e.g. "Customer Id (CUSTOMER_DIM)") so
   #    the [fact/Col] formulas resolve for virtual-connection (denormalized) DMs.
-  conv_fact = MechanicalSpecs.pick_fact(conv['model'])
+  # Thread the fact hint (dominant dashboard datasource) so the master-map is
+  # derived from the SAME element the readback fact-selection (line ~2024/2031)
+  # picked. Without this, pick_fact defaults to the widest element (an unused
+  # secondary can be wider than the plotted table); derive_master then emits the
+  # secondary's columns under the MAIN fact's name → orphan [MainFact/SecondaryCol]
+  # refs that fail the workbook POST ("Dependency not found"). Mirrors line 2024.
+  conv_fact = MechanicalSpecs.pick_fact(conv['model'], prefer_table: (defined?(prefer_fact_table) ? prefer_fact_table : nil))
   abort 'FATAL: mechanical path could not identify a fact element in the converter output' unless conv_fact
   conv_base = MechanicalSpecs.base_of(conv['model'], conv_fact)
   real_labels = fact['columnLabels'] # from post-and-readback /columns (may be nil)
@@ -2506,6 +2555,24 @@ if mechanical
   # Formula-normalize hook (sibling workstream): case-fix converter-derived
   # formulas on the mechanical workbook spec before validate/POST.
   normalize_formulas!(spec, 'wb-spec')
+  # Multi-metric region dashboard recipe (refs/fidelity-recipes.md): when png-read
+  # declares a control with `highlight_tiles`, rewrite the mechanical spec into the
+  # recipe shape — master/masterAll split + highlight color column, and (with
+  # png-read `point_in_time`) latest-year + real-entity grouped Top-N measures.
+  # No-op when the pattern isn't present. Tolerant: never aborts the build.
+  begin
+    _pr = (JSON.parse(File.read(DashboardRead.path(WORK))) rescue nil)
+    if _pr && RecipeMultimetric.applicable?(_pr)
+      rsum = RecipeMultimetric.apply!(spec, _pr, world_lod_map: (defined?(world_lod_map) ? world_lod_map : {}))
+      if rsum[:applied]
+        line "multi-metric recipe: +#{rsum[:masters_added]} masterAll, #{rsum[:highlight_tiles]} highlight tile(s), " \
+             "#{rsum[:top_tables]} point-in-time measure(s) rewritten"
+      end
+      rsum[:notes].each { |n| line "  recipe note: #{n}" }
+    end
+  rescue StandardError => e
+    line "WARN: multi-metric recipe transform skipped (#{e.class}: #{e.message})"
+  end
 else
   spec = Specs.wb_spec(dm_id, fact_eid)
   # Agent-authored JSON path: bind the DM placeholders ("__DM_ID__" and
@@ -2620,6 +2687,30 @@ begin
   par_cmd += ['--update-id', update_wb] if update_wb
   p_log = sigma_run_wb!(par_cmd)
 rescue WorkbookBuildError => e
+  # ── SELF-HEAL: auto-picked reuse DM couldn't satisfy the workbook ──────────
+  # When the DM was AUTO-PICKED for reuse (opts[:reuse_dm] == :recommended, the
+  # orchestrator's choice — not an explicit user --reuse-dm <id>) and the build
+  # failed, rebuild a FRESH DM automatically instead of the exit-4 handoff. This
+  # closes the column-superset gate's KNOWN RESIDUAL: a reused DM can be a full
+  # column-superset yet lack a role-playing dimension alias the master needs
+  # (DATE_DIM as both Order + Return Date), which only surfaces at the pre-POST
+  # ref gate — after Phase 3 was skipped. A fresh DM is built from the workbook's
+  # own model, so it has exactly the structure the wb-spec needs. Re-invokes this
+  # orchestrator verbatim + --skip-reuse-scan (same --out → discovery is reused,
+  # so it's fast and creates no orphan: the ref gate is PRE-POST, nothing shipped).
+  # Fires once (SIGMA_SELFHEAL_RETRIED guard); an EXPLICIT --reuse-dm <id> is the
+  # user's decision and is respected (falls through to the handoff below).
+  if opts[:reuse_dm] == :recommended && ENV['SIGMA_SELFHEAL_RETRIED'].to_s.empty?
+    puts
+    puts "── SELF-HEAL: the auto-picked reuse DM (#{reuse_dm_id}) could not satisfy the"
+    puts "   workbook (#{e.message.lines.first&.strip}). Rebuilding a FRESH data model"
+    puts '   automatically (--skip-reuse-scan) — no manual step needed. ──'
+    Offramp.log(WORK, kind: 'reuse-selfheal', detail: "auto-picked DM #{reuse_dm_id} failed the build; rebuilding fresh") if defined?(Offramp)
+    ok = system({ 'SIGMA_SELFHEAL_RETRIED' => '1' }, RbConfig.ruby, File.expand_path(__FILE__),
+                *ORIGINAL_ARGV, '--skip-reuse-scan')
+    child = $?&.exitstatus
+    exit(ok ? 0 : (child.nil? ? 1 : child))
+  end
   failed = cull_failed_fields(e.captured_output,
                               (defined?(v_log) ? v_log : ''), (defined?(p_log) ? p_log : ''))
   # Fall back to the mechanically-known untranslatable fields when the log itself

@@ -346,11 +346,25 @@ best = candidates.first
 second = candidates[1]
 
 # Auto-pick gate (reuse-first). Fires when --auto-pick is set and the top
-# candidate (a) clears the auto-pick threshold AND (b) COVERS ALL of the
-# workbook's source tables (table_match 1.0). Table coverage is the safety
-# invariant: a DM that sources every table the workbook needs can satisfy every
-# column ref through its element set, so reusing it is safe; a DM missing a table
-# is never auto-picked (its denorm view can't resolve the missing columns).
+# candidate (a) clears the auto-pick threshold AND (b) is a COLUMN-SUPERSET of
+# the workbook's references — table_match 1.0 AND column_match 1.0 (every
+# referenced column present in the DM).
+#
+# Column coverage, not just table coverage, is the safety invariant. The old gate
+# required only table_match 1.0 on the theory that "every table present ⇒ every
+# column resolvable through the element set" — but that is FALSE when a DM merely
+# scores well on table names: a DM can source all the workbook's tables yet still
+# be missing referenced columns (col_match < 1.0, e.g. 0.8) and auto-pick anyway
+# (0.2·1.0 + 0.7·0.8 ≈ 0.76 ≥ threshold), then fail the pre-POST ref gate. Require
+# the full column-superset so a DM missing ANY referenced column is NOT silently
+# reused — it can still be RECOMMENDED for human opt-in below.
+#
+# KNOWN RESIDUAL (role-playing dimensions): column-NAME coverage cannot express
+# "the master needs table T joined under TWO aliases" (e.g. DATE_DIM as both Order
+# Date and Return Date). A DM with T once can be a full column-superset yet lack
+# the second alias; the pre-POST ref gate still catches it (exit-4 handoff). A
+# self-heal (auto-rebuild fresh on ref-gate failure of an auto-picked DM) is the
+# proper fix for that case — tracked separately.
 #
 # We deliberately DO NOT block on a score tie here. A tie among table-covering
 # candidates is duplicate-DM SPRAWL (the same star modeled two or three times) —
@@ -375,7 +389,7 @@ best_is_superset     = best_covers_tables && best['column_match'].to_f >= 1.0
 # tie). Narrow ties (<=2) still collapse as before — reuse-first for the common case.
 tie_window_count     = best ? candidates.count { |c| (best['score'] - c['score'].to_f) < auto_pick_tie_window } : 0
 ambiguous_wide_tie   = tie_window_count >= 3 && !best_name_matches && !best_is_superset
-auto_picked          = !!(opts[:auto_pick] && best && best['score'] >= auto_pick_threshold && best_covers_tables && !ambiguous_wide_tie)
+auto_picked          = !!(opts[:auto_pick] && best && best['score'] >= auto_pick_threshold && best_is_superset && !ambiguous_wide_tie)
 
 # Standard recommend path keeps the old semantics (printed for human opt-in).
 recommended_via_std  = best && best['score'] >= opts[:min_score] && !ambiguous_wide_tie

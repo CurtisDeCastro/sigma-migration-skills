@@ -36,6 +36,15 @@ if (a.check) {
   const actual = JSON.parse(readFileSync(a.actual, 'utf8'));
   const expected = JSON.parse(readFileSync(a.expected, 'utf8'));
   const tol = Number(a.tol ?? 0.01);
+  // Empty-check guard: 0 expected values means there is NOTHING to verify — the
+  // old loop printed "PARITY GREEN: 0/0" and exited 0, so an empty/placeholder
+  // workbook (or empty {} in/out) passed vacuously. A migration with nothing to
+  // compare is not parity-clean.
+  if (Object.keys(expected).length === 0) {
+    console.error('⛔ NOT parity-clean — 0 expected values: nothing to verify. An empty/placeholder '
+      + 'workbook cannot pass parity. Build the elements + capture the source numbers, then re-run.');
+    process.exit(1);
+  }
   const rows = []; let fail = 0;
   for (const k of Object.keys(expected)) {
     const e = Number(expected[k]), av = Number(actual[k]);

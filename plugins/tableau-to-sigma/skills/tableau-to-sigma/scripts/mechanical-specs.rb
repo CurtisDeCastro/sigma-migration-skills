@@ -128,7 +128,7 @@ module MechanicalSpecs
   # cross-element + calc column the dashboards plot — base warehouse-table
   # elements carry only their own physical columns. So prefer the largest derived
   # view that is NOT a *Dim; fall back to a base warehouse-table fact otherwise.
-  def pick_fact(model)
+  def pick_fact(model, prefer_table: nil)
     els = all_elements(model)
     return nil if els.empty?
     # A dimension element's name is "<X> Dim" (trailing) OR "Dim <X>" (leading,
@@ -137,18 +137,214 @@ module MechanicalSpecs
     # trailing-only / Dim$/ and won max_by, making the workbook master source the
     # wrong element).
     dim_re = /(^Dim\b| Dim$)/i
+    by_id = els.each_with_object({}) { |e, h| h[e['id']] = e }
+    # The warehouse table an element resolves to (its own path, or its source
+    # element's path for a derived view). Used to honor `prefer_table`.
+    el_table = lambda do |e|
+      last = (e.dig('source', 'path') || []).last
+      if last.nil? && (sid = e.dig('source', 'elementId'))
+        last = (by_id[sid]&.dig('source', 'path') || []).last
+      end
+      last.to_s.upcase
+    end
     derived = els.select { |e| e.dig('source', 'kind') == 'table' && e.dig('source', 'elementId') }
                  .reject { |e| elem_name(e) =~ dim_re }
-    return derived.max_by { |e| (e['columns'] || []).size } if derived.any?
     # Base candidates are warehouse-table elements OR custom-SQL ('sql') elements —
     # the modern Tableau object/relationship model emits one kind:'sql' element per
     # logical object (often the only kind present in a multi-custom-SQL workbook).
+    base = els.select { |e| %w[warehouse-table sql].include?(e.dig('source', 'kind')) }
+    # `prefer_table` = the landed table the DASHBOARD worksheets actually use
+    # (dominant_fact_table). In a MULTI-embedded-extract workbook the converter
+    # projects more columns for an UNUSED secondary datasource than for the one
+    # the charts plot, so the max_by(columns.size) default below picks the wrong
+    # fact (the Global Macro regression: 14-col unused Table B beat the 9-col used
+    # Table A). When a preferred table is named, restrict the pick to elements
+    # tied to it; only fall through to the count heuristic if nothing matches.
+    if prefer_table
+      pt = prefer_table.to_s.upcase
+      dpt = derived.select { |e| el_table.call(e) == pt }
+      return dpt.max_by { |e| (e['columns'] || []).size } if dpt.any?
+      bpt = base.select { |e| el_table.call(e) == pt }
+      unless bpt.empty?
+        f = bpt.reject { |e| elem_name(e) =~ dim_re }
+        return (f.empty? ? bpt : f).max_by { |e| (e['columns'] || []).size }
+      end
+    end
+    return derived.max_by { |e| (e['columns'] || []).size } if derived.any?
     # Without 'sql' here, pick_fact returned nil and the whole mechanical path
     # FATAL-aborted on object-model workbooks (the DDMX empty-DM dead-end).
-    base = els.select { |e| %w[warehouse-table sql].include?(e.dig('source', 'kind')) }
     return nil if base.empty?
     facts = base.reject { |e| elem_name(e) =~ dim_re }
     (facts.empty? ? base : facts).max_by { |e| (e['columns'] || []).size }
+  end
+
+  # The landed table (UPPER last path segment) of the datasource the DASHBOARD
+  # worksheets actually use — the correct fact for a multi-embedded-extract
+  # workbook. Counts each worksheet's <datasource-dependencies> (excluding
+  # Parameters), maps the dominant datasource → its caption → the landing-manifest
+  # entry → sf_table. Regex-based (no full XML parse) so it's fast on large .twb.
+  # Returns nil when there's no manifest, a single datasource, or no clear winner.
+  def dominant_fact_table(twb_text, manifest_path)
+    return nil unless twb_text && manifest_path && File.exist?(manifest_path.to_s)
+    entries = (JSON.parse(File.read(manifest_path.to_s)) rescue nil)
+    return nil unless entries.is_a?(Array) && entries.size > 1 # single-source: no ambiguity
+
+    # Per-datasource: its caption AND its embedded .hyper basename. Split on the
+    # datasource OPEN tag (`<datasource ` — a trailing space, so it never matches
+    # `<datasource-dependencies`) so each chunk is one datasource's body, and pull
+    # the first `dbname='….hyper'` inside it.
+    name2cap = {}
+    name2hyper = {}
+    twb_text.split(/<datasource\s/).drop(1).each do |chunk|
+      attrs = chunk[/\A([^>]*)>/, 1].to_s
+      nm = attrs[/\bname='([^']*)'/, 1]
+      next unless nm
+      c = attrs[/\bcaption='([^']*)'/, 1]
+      name2cap[nm] ||= c if c
+      db = chunk[/<connection\b[^>]*\bdbname='([^']*\.hyper)'/i, 1]
+      name2hyper[nm] ||= File.basename(db) if db
+    end
+    usage = Hash.new(0)
+    twb_text.scan(/<datasource-dependencies\b[^>]*\bdatasource='([^']+)'/) do |m|
+      n = m[0]
+      next if n.nil? || n =~ /\AParameters\b/i
+      usage[n] += 1
+    end
+    return nil if usage.empty?
+    dominant = usage.max_by { |_n, c| c }&.first
+    # Match the manifest by .hyper FIRST (robust: land-extracts always records the
+    # hyper basename, but may LABEL the caption by the GUID filename when it can't
+    # resolve the datasource caption — which would defeat a caption-only match and
+    # send pick_fact to the wrong, unused table). Fall back to caption, then name.
+    hyp = name2hyper[dominant]
+    cap = name2cap[dominant].to_s.strip
+    entry = (hyp && entries.find { |e| e['hyper'].to_s == hyp }) ||
+            (!cap.empty? && entries.find { |e| e['caption'].to_s.strip == cap }) ||
+            entries.find { |e| e['datasource'].to_s == dominant }
+    return nil unless entry && entry['sf_table']
+    entry['sf_table'].to_s.split('.').last&.upcase
+  end
+
+  # Synthesize DM columns for per-year FIXED LODs the converter left unmaterialized
+  # — `{FIXED DATEPART('year',[Date]): SUM([metric])}` "World"-style global totals.
+  # The converter emits NOTHING for these worksheet/datasource LOD calcs, so a
+  # chart referencing e.g. "GDP World" dangles and blocks the POST. We build the
+  # helper the converter SHOULD have: a nameless grouped Custom SQL element
+  # (SUM per year over the landed fact table) + a `FIXED Year` relationship on the
+  # fact; derive_master's existing FIXED-helper surfacing (below) then exposes each
+  # World measure onto the master as [<fact>/FIXED Year/<Name>]. Scope: single
+  # year dimension keyed on a physical Year column on the fact (the common case).
+  # Returns the count of LOD measures synthesized. Mutates `model`/`fact`.
+  FIXED_YEAR_LOD_RE = /\{\s*FIXED\s+([^:]+?)\s*:\s*(SUM|AVG|MIN|MAX|COUNT|COUNTD)\s*\(\s*\[([^\]]+)\]\s*\)\s*\}/i
+
+  def synthesize_fixed_lods!(model, fact, twb_text, colmap = {}, discriminator: nil)
+    return {} unless model && fact && twb_text
+    # Must return the SAME type ({}) as every other exit — the caller does
+    # world_lod_map.any?, and `0.any?` is a NoMethodError that crashes the run.
+    # This fires whenever the plotted fact is a DERIVED VIEW (source kind 'sql'/
+    # 'table', e.g. a Virtual-Connection-backed workbook), not a raw table.
+    return {} unless fact.dig('source', 'kind') == 'warehouse-table'
+    path = fact.dig('source', 'path') || []
+    conn = fact.dig('source', 'connectionId')
+    return {} if path.size < 3 || conn.to_s.empty?
+
+    # Key on col_display (formula-derived) — the converter leaves column['name']
+    # null on extract-backed models (the display name lives in the [EXTRACT/<cap>]
+    # formula, resolved by col_display). Reading c['name'] here returned an empty
+    # map → no 'year' key → this whole synthesis silently no-op'd on every
+    # extract-landed workbook (the World-total dual-axis line then dangled).
+    fact_caps = (fact['columns'] || []).each_with_object({}) do |c, h|
+      disp = col_display(c)
+      h[disp.to_s.downcase] = c if disp && !disp.to_s.empty?
+    end
+    year_col = fact_caps['year']
+    return {} unless year_col # need a physical Year key on the fact
+    # Decode XML entities PER captured formula — NOT on the whole text, which would
+    # turn &apos; into literal ' inside formula='…' and break attribute scanning.
+    decode = ->(s) { s.to_s.gsub('&apos;', "'").gsub('&quot;', '"').gsub('&amp;', '&') }
+
+    phys = lambda do |cap|
+      dest = colmap[cap] || colmap[cap.to_s.strip.upcase]
+      (dest || cap).to_s.gsub(/[^0-9A-Za-z]+/, '_').gsub(/\A_+|_+\z/, '').upcase
+    end
+
+    lods = {}
+    twb_text.scan(/<column\b[^>]*\bcaption='([^']*)'[^>]*>\s*<calculation\b[^>]*\bformula='([^']*)'/m) do |cap_raw, f_raw|
+      cap = decode.call(cap_raw)
+      m = decode.call(f_raw).match(FIXED_YEAR_LOD_RE)
+      next unless m
+      dim, agg, metric = m[1], m[2], m[3]
+      next unless dim =~ /DATEPART\(\s*'year'|\bYEAR\s*\(|\[Year\]/i     # year-grain only
+      next unless fact_caps.key?(metric.to_s.downcase)                   # metric must be on THIS fact
+      lods[cap] ||= { 'name' => cap, 'agg' => agg.upcase, 'metric' => metric }
+    end
+    return {} if lods.empty?
+
+    year_phys = phys.call(col_display(year_col))
+    fqn = %(#{path[0]}.#{path[1]}."#{path[2]}")
+    sel = [%("#{year_phys}" AS "Year")]
+    cols = [{ 'id' => 'wby-year', 'name' => 'Year', 'formula' => '[Custom SQL/Year]' }]
+    lods.values.each do |l|
+      sel << %(#{l['agg']}("#{phys.call(l['metric'])}") AS "#{l['name']}")
+      cols << { 'id' => "wby-#{slug(l['name'])}", 'name' => l['name'], 'formula' => "[Custom SQL/#{l['name']}]" }
+    end
+    # Exclude aggregate/rollup rows from the per-year WORLD total. Global Macro–style
+    # extracts carry region / income-group / "World" rollup rows ALONGSIDE the real
+    # countries, so an unfiltered SUM(...) OVER year double-counts them (the World
+    # trend line came out ~6-10x too high). The point-in-time discriminator (a
+    # column NULL on rollup rows, e.g. IncomeGroup) selects real entities only.
+    where = ''
+    if discriminator && !discriminator.to_s.strip.empty?
+      where = %( WHERE "#{phys.call(discriminator)}" IS NOT NULL)
+    end
+    statement = %(SELECT #{sel.join(', ')} FROM #{fqn}#{where} GROUP BY "#{year_phys}")
+
+    sql_el = {
+      'id' => 'el-world-by-year', 'kind' => 'table',
+      'source' => { 'connectionId' => conn, 'kind' => 'sql', 'statement' => statement },
+      'columns' => cols, 'order' => cols.map { |c| c['id'] }
+    }
+    page = (model['pages'] || []).find { |p| (p['elements'] || []).any? { |e| e.equal?(fact) } } ||
+           (model['pages'] || []).first
+    (page['elements'] ||= []) << sql_el if page
+    (fact['relationships'] ||= []) << {
+      'id' => 'rel-world-by-year', 'name' => 'FIXED Year', 'targetElementId' => 'el-world-by-year',
+      'keys' => [{ 'sourceColumnId' => year_col['id'], 'targetColumnId' => 'wby-year' }]
+    }
+    # Return the world-column -> source-metric map (recipe uses it to add the
+    # region-filtered Country line opposite each synthesized World line).
+    lods.each_with_object({}) { |(cap, l), h| h[cap.to_s.downcase] = l['metric'] }
+  end
+
+  # Retain extra base columns on the fact that the recipe needs but the converter
+  # dropped (it projects only PLOTTED columns). The multi-metric point-in-time
+  # filter references [Master/<discriminator>] + [Master/<year>]; if the source
+  # never plotted the discriminator (e.g. Global-Macro "IncomeGroup"), it's absent
+  # from the DM → the recipe guard skips the real-entity filter. Add each wanted
+  # name as a base column [<table>/<Name>] when it's a REAL warehouse column
+  # (present in real_cols for the fact's table) and not already exposed. Returns
+  # the count added. Runs on the DM fact BEFORE POST so it flows into the master
+  # via derive_master.
+  def retain_columns!(fact, names, real_cols)
+    return 0 unless fact && fact.dig('source', 'kind') == 'warehouse-table'
+    tbl = (fact.dig('source', 'path') || []).last.to_s
+    return 0 if tbl.empty?
+    rc = (real_cols[tbl] || real_cols[tbl.upcase] || []).map { |c| c.to_s.upcase }.to_set
+    return 0 if rc.empty?
+    have = (fact['columns'] || []).map { |c| col_display(c).to_s.downcase }
+    added = 0
+    Array(names).compact.each do |nm|
+      s = nm.to_s.strip
+      next if s.empty? || have.include?(s.downcase)
+      phys = s.gsub(/[^0-9A-Za-z]+/, '_').gsub(/\A_+|_+\z/, '').upcase
+      next unless rc.include?(phys) || rc.include?(s.upcase)
+      id = "pit-#{slug(s)}"
+      (fact['columns'] ||= []) << { 'id' => id, 'name' => s, 'formula' => "[#{tbl}/#{s}]" }
+      fact['order'] << id if fact['order'].is_a?(Array)
+      have << s.downcase
+      added += 1
+    end
+    added
   end
 
   # The base element a derived view sources (for harvesting its metrics, which

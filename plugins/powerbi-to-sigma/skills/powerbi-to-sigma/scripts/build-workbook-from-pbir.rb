@@ -50,6 +50,8 @@ require 'json'
 require 'optparse'
 require_relative 'lib/layout'
 require_relative 'lib/pbi_theme'
+require_relative 'lib/pbi_style'
+require_relative 'lib/pbi_conditional_formats'
 include SigmaLayout
 
 opts = {}
@@ -498,6 +500,19 @@ def measure_color_channel(rec, fields, master, vfmts, eid, cols, ycids)
   { 'by' => 'scale', 'column' => cid, 'scheme' => scheme }
 end
 
+# Table/matrix conditional formatting (rec['conditional_formats'] from
+# extract-pbir) -> Sigma element-level `conditionalFormats`. The mapping lives in
+# lib/pbi_conditional_formats.rb (pure + unit-tested); here we just resolve the
+# CF records against the built column ids and route any non-mappable modes
+# (field-value measures, rules) to coverage — never silently dropped.
+def build_conditional_formats(rec, qr_cids, name, kind)
+  cfs = rec['conditional_formats']
+  return nil unless cfs.is_a?(Array) && !cfs.empty?
+  res = PbiConditionalFormats.build(cfs, qr_cids, name, kind)
+  res['coverage'].each { |c| record_unresolved(**c) }
+  res['formats'].empty? ? nil : res['formats']
+end
+
 # Deterministic, collision-free short id from a PBIR visual id. PBIR visual ids
 # often share a long common prefix (e.g. a1b2c3d4e5f60001 / ...0002), so a naive
 # prefix-truncate collides. Take a stable suffix of the sanitized id plus a short
@@ -903,8 +918,11 @@ def build_element(rec, fields, masters, extra_data = [])
         col = { 'id' => "#{kid}-v", 'formula' => measure_formula(fs), 'name' => qr_leaf(qr) }
         apply_fmt(col, qr, fields, vfmts)
         e = { 'id' => kid, 'kind' => 'kpi-chart', 'name' => qr_leaf(qr),
-              'columns' => [col], 'value' => { 'columnId' => "#{kid}-v" } }
+              'columns' => [col], 'value' => { 'columnId' => "#{kid}-v" },
+              'layout' => { 'titleOrient' => 'bottom', 'anchor' => PbiStyle.kpi_anchor(rec['value_align']) } }
         e['source'] = { 'elementId' => master_id, 'kind' => 'table' } if master_id
+        # Style fidelity: abbreviate the card value (early return skips the tail).
+        PbiStyle.abbreviate_measures!(e, rec['display_units'], 'kpi-chart')
         e
       end
     end
@@ -924,7 +942,10 @@ def build_element(rec, fields, masters, extra_data = [])
     el['value']['color'] = rec['value_color'] || $pbi_accent
     el['name'] = { 'text' => qr_leaf(qr, 'Value'),
                    'color' => { 'kind' => 'theme', 'ref' => 'colors-textNeutral' } }
-    el['layout'] = { 'titleOrient' => 'bottom' }
+    # Style fidelity: caption below the value (titleOrient), and CENTER the card
+    # contents (anchor) — PBI stat cards center; overridable from a PBI alignment
+    # signal. Abbreviation of the value column happens in the shared tail below.
+    el['layout'] = { 'titleOrient' => 'bottom', 'anchor' => PbiStyle.kpi_anchor(rec['value_align']) }
   when 'region-map'
     loc = (b['Category'] || b['Location'] || []).first
     meas = (b['Y'] || b['Values'] || []).first
@@ -1330,8 +1351,24 @@ def build_element(rec, fields, masters, extra_data = [])
   # case so a grouped table's sort can nest inside its grouping entry).
   apply_sort(el, kind, rec, qr_cids, name)
 
+  # Conditional formatting (color scales / data bars) on table + pivot-table.
+  # Runs AFTER the case so it sees the final kind (a totals-bearing table is
+  # re-expressed as a pivot-table above) — the column ids in qr_cids are unchanged.
+  if %w[table pivot-table].include?(el['kind'])
+    cf = build_conditional_formats(rec, qr_cids, name, el['kind'])
+    el['conditionalFormats'] = cf if cf
+  end
+
   # Controls reference a master column; they carry no columns array of their own.
   el['columns'] = cols unless el['kind'] == 'control'
+  # Style fidelity (refs/style-fidelity.md §5-7) — applied AFTER columns are
+  # attached so the measure-column formats exist to rewrite:
+  #   §5 number abbreviation — KPI/chart measure columns render compact ("$126k")
+  #       to match PBI's default "Auto" display units (tables keep full precision).
+  #   §7 presentation table style — PBI matrices/tableEx read as roomy tables.
+  # (KPI anchor §6 is set in the kpi-chart branch, next to titleOrient.)
+  PbiStyle.abbreviate_measures!(el, rec['display_units'], el['kind'])
+  PbiStyle.presentation_table!(el, el['kind'])
   # bead miu7: never ship an unresolved literal-ref column (type=error). Drop it
   # and prune its references — the tile degrades honestly into coverage instead.
   drop_unresolved_columns!(el, rec, kind) unless el['kind'] == 'control'

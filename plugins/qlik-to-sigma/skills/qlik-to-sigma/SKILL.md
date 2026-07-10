@@ -58,6 +58,20 @@ never guesses.
 
 ## The one command
 
+> ## ⛔ THE ONE PATH (do not improvise a workbook)
+> `migrate-qlik.rb` is the single entry point — it discovers the Qlik app, builds
+> the DM + workbook, and **only exits 0 when parity/layout/control pass with real
+> elements built**. Rules:
+> - **NEVER hand-drive the per-phase scripts, hand-author a DM/workbook JSON, or
+>   `curl`-POST to `/v2/workbooks` / lay out empty "placeholder" pages.** That
+>   bypasses parity + the element guard and ships an EMPTY workbook — the #1 way a
+>   migration fails. If you can't reach the Qlik app (no `qlik-cli` context /
+>   auth), **STOP and tell the user to authenticate** (`qlik context` / OAuth) —
+>   do not build a shell.
+> - **"Done" is a file on disk, not "pages exist."** Complete only when
+>   `ruby scripts/verify-complete.rb --workdir <WORK>` prints ✅ DONE (the run
+>   stamped `phase6-success.json` with real elements). An empty workbook is never done.
+
 ```bash
 eval "$(scripts/vendor/get-token.sh)"          # SIGMA_BASE_URL + SIGMA_API_TOKEN
 ruby scripts/migrate-qlik.rb \
