@@ -939,6 +939,25 @@ puts "CONTROLS    : #{control_ok ? 'GREEN' : 'RED'} — gate 7 control lint, #{c
      "#{ctl_violations.any? ? ", #{ctl_violations.size} violation(s)" : ''}"
 puts "freshness   : Qlik last reload #{app_meta['lastReloadTime'] || '?'} (#{stale_days} days ago)" if stale_days
 puts "warnings    : #{conv_warnings.size} converter, #{(wb_res['warnings'] || []).size} workbook-build" if conv_warnings.any? || (wb_res['warnings'] || []).any?
+# Empty-workbook guard + completion sentinel (parity with tableau/powerbi). A
+# workbook with 0 elements must never be "done" — require real elements, and
+# stamp a run-scoped success marker only on a genuine green so verify-complete.rb
+# (the done-check the SKILL points at) can't green an empty/hand-built result.
+n_elements = wb_res['elements'].to_i
+built_ok = parity_ok && layout_ok && control_ok && n_elements.positive?
+puts 'ELEMENTS    : 0 workbook elements built — EMPTY workbook, NOT done (investigate the build).' if n_elements.zero?
+begin
+  succ = File.join(WORK, 'phase6-success.json')
+  if built_ok
+    File.write(succ, JSON.pretty_generate('workbookId' => WB_ID, 'chartCount' => n_elements,
+                                          'gates' => 'parity+layout+control',
+                                          'generatedAt' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')))
+  elsif File.exist?(succ)
+    File.delete(succ)
+  end
+rescue StandardError
+  nil
+end
 puts '======================================='
 phase_summary
-exit(parity_ok && layout_ok && control_ok ? 0 : 3)
+exit(built_ok ? 0 : 3)
