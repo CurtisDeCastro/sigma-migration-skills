@@ -346,6 +346,37 @@ def _require_snowflake():
 # Snowflake + Sigma I/O
 # ---------------------------------------------------------------------------
 
+def load_private_key(key_path):
+    """Load (and validate) the key-pair BEFORE any long-running work.
+
+    Field-caught failure mode: a passphrase-ENCRYPTED key with no
+    SNOWFLAKE_KEY_PASSPHRASE set only exploded ~10 minutes into the run, deep
+    inside the landing, with a raw cryptography TypeError — and agents then
+    (correctly) got blocked trying to hunt for a passphrase in credential
+    stores. Fail FAST with the remediation instead. Called as a preflight at
+    argument-parse time and again by connect_snowflake.
+    """
+    _require("cryptography", "loads the key-pair for --key-path auth "
+                             "(ships with snowflake-connector-python)")
+    from cryptography.hazmat.primitives import serialization
+    passphrase = os.environ.get("SNOWFLAKE_KEY_PASSPHRASE")
+    with open(os.path.expanduser(key_path), "rb") as f:
+        pem = f.read()
+    try:
+        return serialization.load_pem_private_key(
+            pem, password=passphrase.encode() if passphrase else None)
+    except TypeError:
+        sys.exit(
+            f"FATAL: the private key at {key_path} is PASSPHRASE-ENCRYPTED and "
+            "SNOWFLAKE_KEY_PASSPHRASE is not set.\n"
+            "  ASK THE USER for the passphrase (or for an unencrypted service key) — "
+            "do NOT scan the machine, env files, or keychain for one.\n"
+            "  Then: export SNOWFLAKE_KEY_PASSPHRASE='<passphrase>' and re-run.")
+    except ValueError as e:
+        sys.exit(f"FATAL: could not parse the private key at {key_path}: {e}\n"
+                 "  Expected a PEM (PKCS#8) RSA key — regenerate or point --key-path at the right file.")
+
+
 def connect_snowflake(args):
     connector, _ = _require_snowflake()
     kw = dict(account=args.account, user=args.user, login_timeout=30)
@@ -354,13 +385,8 @@ def connect_snowflake(args):
     if args.warehouse:
         kw["warehouse"] = args.warehouse
     if args.key_path:
-        _require("cryptography", "loads the key-pair for --key-path auth "
-                                 "(ships with snowflake-connector-python)")
         from cryptography.hazmat.primitives import serialization
-        passphrase = os.environ.get("SNOWFLAKE_KEY_PASSPHRASE")
-        with open(os.path.expanduser(args.key_path), "rb") as f:
-            priv = serialization.load_pem_private_key(
-                f.read(), password=passphrase.encode() if passphrase else None)
+        priv = load_private_key(args.key_path)
         kw["private_key"] = priv.private_bytes(
             serialization.Encoding.DER,
             serialization.PrivateFormat.PKCS8,
@@ -599,6 +625,10 @@ def parse_args(argv=None):
         missing = [f"--{k}" for k in ("account", "user") if not getattr(args, k)]
         if missing:
             ap.error(f"{', '.join(missing)} required (or use --dry-run to plan only)")
+        # Key PREFLIGHT: validate the key loads NOW (seconds), not after the
+        # hyper extraction has run for minutes (see load_private_key).
+        if args.key_path:
+            load_private_key(args.key_path)
     return args
 
 

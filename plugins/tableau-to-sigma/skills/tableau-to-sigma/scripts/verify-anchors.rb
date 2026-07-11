@@ -51,6 +51,7 @@
 
 require 'json'
 require 'csv'
+require 'set'
 require 'optparse'
 require_relative 'lib/anchor_values'
 
@@ -115,16 +116,53 @@ module AnchorVerify
     rows.flat_map { |r| Array(r).flat_map { |c| cell_numbers(c) } }
   end
 
+  # Normalized text cells of an export (for kind:"text" roster anchors).
+  def rows_texts(rows)
+    # (map+compact, not filter_map — the skill's floor is the system Ruby 2.6)
+    rows.flat_map { |r| Array(r) }.map do |c|
+      s = c.to_s
+      s = s.dup.force_encoding(Encoding::UTF_8) unless s.encoding == Encoding::UTF_8
+      s = s.scrub('') unless s.valid_encoding?
+      s = s.strip.downcase
+      s.empty? ? nil : s
+    end.compact.to_set
+  end
+
   # Verify anchors against { element_name => [[cell, ...], ...] } exports.
   # Returns the verdict Hash (contract shape + per-anchor detail).
+  #
+  # Two anchor kinds:
+  #   numeric (default) — `raw` is a printed VALUE; matches any export cell at
+  #     printed precision.
+  #   kind: "text" (aka "roster") — `raw` is a LABEL that must appear as a cell
+  #     (case-insensitive, trimmed). Use these on ranked/top-N tiles so a
+  #     WRONGLY-SELECTED or dropped member fails loudly (a materialized top-15
+  #     built from the wrong rank, a renamed category, a missing path label).
+  #     Scope note: exports carry the element's full underlying data, so a
+  #     roster anchor canNOT catch an UNFILTERED tile that merely WINDOWS the
+  #     wrong first-N on screen — that class is caught by gate 9b (shape
+  #     identity: the reviewer sees the wrong columns) and by the render-bisect
+  #     playbook (unbounded pivots kill the renderer). Use both.
   def verify(anchors, exports)
     el_names = exports.keys
     numbers = exports.transform_values { |rows| rows_numbers(rows) }
+    texts = exports.transform_values { |rows| rows_texts(rows) }
     detail = []
     missing = []
     anchors.each do |a|
       raw = a['raw'].to_s
       order = ranked_elements(a, el_names)
+      if %w[text roster member].include?(a['kind'].to_s)
+        want = raw.strip.downcase
+        found_in = order.find { |n| texts[n].include?(want) }
+        if found_in
+          detail << { 'id' => a['id'], 'raw' => raw, 'matched_in' => found_in }
+        else
+          missing << { 'id' => a['id'], 'label' => a['label'], 'raw' => raw,
+                       'best_candidate' => { 'note' => 'text anchor: label not present in any element export' } }
+        end
+        next
+      end
       found_in = order.find { |n| numbers[n].any? { |v| AnchorValues.match?(raw, v) } }
       if found_in
         primary = order.first
@@ -195,11 +233,17 @@ if anchors.empty?
   warn "FATAL: #{anchors_path} has no anchors[] — nothing to verify."
   exit 2
 end
-bad = anchors.reject { |a| a.is_a?(Hash) && AnchorValues.parse(a['raw']) }
+# kind:"text"/"roster"/"member" anchors carry a LABEL in `raw` (displayed-set
+# membership for ranked tiles) — only NUMERIC anchors must parse as values.
+bad = anchors.reject do |a|
+  next false unless a.is_a?(Hash)
+  %w[text roster member].include?(a['kind'].to_s) ? !a['raw'].to_s.strip.empty? : AnchorValues.parse(a['raw'])
+end
 unless bad.empty?
   warn "FATAL: #{bad.length} anchor(s) have an unparseable `raw` printed value:"
   bad.first(10).each { |a| warn "         #{a.is_a?(Hash) ? a['id'] : '(bad entry)'}: raw=#{(a['raw'] rescue nil).inspect}" }
-  warn '       `raw` must be the value EXACTLY as printed on the source image ("18,037B", "-2%", "$733,215.26").'
+  warn '       `raw` must be the value EXACTLY as printed on the source image ("18,037B", "-2%",'
+  warn '       "$733,215.26") — or, for kind:"text" roster anchors, a non-empty displayed label.'
   exit 2
 end
 

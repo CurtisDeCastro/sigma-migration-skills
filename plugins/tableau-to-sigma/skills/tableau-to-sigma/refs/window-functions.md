@@ -40,6 +40,7 @@ plotted (pareto / rank charts).
 | `WINDOW_*(agg, -n, m)` | `Moving*(agg, n, m)` | SUM/MAX/MIN/COUNT same pattern |
 | `WINDOW_STDEV(agg, -n[, m])` | `MovingStdDev(agg, n[, m])` | |
 | `agg / WINDOW_SUM(agg)` (unbounded, same agg) | `PercentOfTotal(agg, "grand_total")` | share-of-total |
+| same, but Tableau's window is PARTITIONED (compute-using a subset of the view dims) | `PercentOfTotal(agg, "parent_grouping")` — or `"row"`/`"column"` on pivots (normalize within each pivot row/column) | **the common per-partition percentage** ("% within each direction/category"). `parent_grouping` is live-verified in the sibling powerbi-to-sigma skill; `"column"` was live-verified here 2026-07-10 (a 4-direction × N-preset pivot whose cells sum to 100% per column). A `grand_total`-only mapping silently mis-normalizes every partitioned calc — two independent field runs hit this. |
 | `RUNNING_SUM(agg) / TOTAL(agg)` (same agg) | `CumulativeSum(PercentOfTotal(agg, "grand_total"))` | pareto; accumulation follows xAxis sort |
 | `RANK(agg)` / `RANK_DENSE` / `RANK_PERCENTILE` | `Rank / RankDense / RankPercentile(agg, "desc")` | **Tableau defaults to DESC, Sigma to asc — the direction arg is mandatory** |
 | `INDEX()` | `RowNumber()` | |

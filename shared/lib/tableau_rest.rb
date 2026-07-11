@@ -200,6 +200,33 @@ module Tableau
     nil
   end
 
+  # Resolve a workbook by its contentUrl slug — the identifier carried by the
+  # MOST COMMON Tableau share-link shape, /#/site/<site>/views/<workbookContentUrl>/<view>.
+  # A workbook's display Name routinely diverges from its contentUrl slug
+  # ("Quarterly Revenue Review" vs "QuarterlyRevenueReview_16899..."), so find_workbook_by_name
+  # is the wrong tool for URLs (field-caught: three independent runs each burned
+  # time rediscovering this). Mirrors find_datasource_by_content_url: server-side
+  # filter first, paged scan fallback for sites that don't index contentUrl.
+  def find_workbook_by_content_url(content_url)
+    encoded = CGI.escape("contentUrl:eq:#{content_url}")
+    j = request(:get, "#{base_path}/workbooks?filter=#{encoded}")
+    list = j.dig('workbooks', 'workbook') || []
+    list = [list] unless list.is_a?(Array)
+    return list.first if list.first
+    page = 1
+    loop do
+      jj = request(:get, "#{base_path}/workbooks?pageSize=100&pageNumber=#{page}")
+      wbs = jj.dig('workbooks', 'workbook') || []
+      wbs = [wbs] unless wbs.is_a?(Array)
+      hit = wbs.find { |w| w['contentUrl'].to_s == content_url.to_s }
+      return hit if hit
+      total = jj.dig('pagination', 'totalAvailable').to_i
+      break if wbs.empty? || page * 100 >= total
+      page += 1
+    end
+    nil
+  end
+
   # Download a published datasource's content (.tdsx zip, or bare .tds).
   def download_datasource_content(datasource_id, include_extract: false)
     qs = include_extract ? '' : '?includeExtract=false'

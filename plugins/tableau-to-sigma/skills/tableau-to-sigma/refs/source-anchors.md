@@ -53,12 +53,21 @@ what the source *renders*.
 - `raw` — the value **EXACTLY as printed**. Keep the raw string: `"18,037B"`,
   never `18037`; `"(12.3%)"`, never `-0.123`; `"$733,215.26"` with the `$` and
   commas. The printed form *is* the precision contract.
-- `kind` — `currency` | `number` | `percent`.
+- `kind` — `currency` | `number` | `percent` | **`text`** (alias `roster`/`member`).
+  A `text` anchor's `raw` is a **displayed LABEL** (case-insensitive cell match),
+  not a value — use it for ranked/top-N tiles so a wrongly-selected or dropped
+  member fails loudly (a top-15 materialized from the wrong rank, a renamed
+  category, a missing path label). Scope: exports carry the element's full
+  underlying data, so `text` anchors can't catch an UNFILTERED tile that merely
+  windows the wrong first-N on screen — gate 9b (shape identity) owns that class.
 - `sigma_element_hint` — optional; the Sigma element name the value should land
   in. When present it wins over fuzzy matching.
 - **Minimum anchors (the gate requires ≥ 5):** every KPI value, the **top 3
-  values of every ranked list/table**, and **one representative bucket value
-  per chart**. Top-of-ranked-list anchors are what catch the
+  values of every ranked list/table**, **one representative bucket value
+  per chart**, and — for every ranked/top-N tile — **2–3 `text` roster anchors**
+  naming members the source actually displays (include at least one from the
+  BOTTOM half of the list: top members often survive a wrong ranking, bottom
+  members don't). Top-of-ranked-list anchors are what catch the
   different-members-with-different-values failure.
 
 ### `anchors-verdict.json` — written by `scripts/verify-anchors.rb`

@@ -530,6 +530,14 @@ here. **Full detail (fetch patterns, calc discovery, custom-SQL fallback):
 > hours migrating the wrong project, another burned 20 minutes hand-hunting a
 > workbook it had a DIRECT link to. Query shape + why REST can't do it:
 > `refs/tableau-rest.md`.
+>
+> **`/views/<slug>/<view>` share links (the MOST COMMON shape) are handled by the
+> orchestrator directly** — paste the whole URL as `--workbook "<url>"` and
+> `migrate-tableau.rb` resolves the workbook via the REST `contentUrl:eq:` filter
+> (`Tableau.find_workbook_by_content_url`). Do NOT hand the slug to
+> `--workbook <name>`: a workbook's display Name routinely diverges from its
+> contentUrl slug, so the name lookup misses (three independent field runs each
+> rediscovered this the hard way).
 
 > **🚧 GATE — Phase 1d dashboard-read.** The CSVs give you numbers, not the
 > dashboard. **Read the source dashboard PNG** (`get-view-image` on the

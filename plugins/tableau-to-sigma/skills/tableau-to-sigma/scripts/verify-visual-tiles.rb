@@ -90,6 +90,19 @@ FileUtils.mkdir_p(outdir)
 png_script = File.join(__dir__, 'sigma-export-png.py')
 
 slugify = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]+/, '-').gsub(/^-|-$/, '')[0..50] }
+# Source chart kind per worksheet (from the parsed .twb zones) — context for the
+# SHAPE-IDENTITY attestation below.
+expected_kind_for = {}
+begin
+  ((JSON.parse(File.read(opts[:layout])) rescue nil) || []).each do |dash|
+    (dash['zones'] || []).each do |z|
+      cap = z['caption'].to_s
+      expected_kind_for[cap] = z['chart_kind'] if !cap.empty? && z['chart_kind']
+    end
+  end
+rescue StandardError
+  nil
+end
 manifest = []
 tiles.each do |t|
   ws   = t['worksheet']
@@ -98,7 +111,16 @@ tiles.each do |t|
   sigma_png = File.join(outdir, "#{slug}.sigma.png")
   rec = { 'worksheet' => ws, 'element_id' => t['element_id'], 'view_id' => t['view_id'],
           'reason' => t['reason'], 'tableau_png' => nil, 'sigma_png' => nil,
-          'visual_verified' => false }
+          'visual_verified' => false,
+          # SHAPE IDENTITY is a separate attestation from visual_verified
+          # (field-caught: a run marked reshaped tiles "verified" because the
+          # DATA matched — a ranked bar-table shipped as a wall of grouped
+          # bars and passed). shape_match means: the Sigma tile is
+          # RECOGNIZABLY THE SAME VISUALIZATION as the source zone — same
+          # chart family, same encoding (bars/dots/cells), same per-row/column
+          # structure. Right data in a different viz is shape_match: false.
+          'expected_kind' => expected_kind_for[ws],
+          'shape_match' => false }
 
   # 1) Tableau view image (renders fine even though its data export was empty).
   #    "signal-only-…" ids are placeholders (no standalone view) — skip straight
@@ -137,6 +159,10 @@ puts
 puts "wrote #{man_path} (#{ready}/#{manifest.size} tile(s) ready for visual review)"
 puts 'NEXT: READ each tableau_png / sigma_png pair and compare (trend, axis, magnitudes).'
 puts '      Set "visual_verified": true per reviewed tile so assert-phase6-ran.rb counts it as passed.'
+puts '      ALSO set "shape_match": true ONLY if the Sigma tile is RECOGNIZABLY THE SAME'
+puts '      VISUALIZATION as the source (same chart family + encoding + row/column structure).'
+puts '      Right data rendered as a different viz is shape_match: false — the gate fails it;'
+puts '      rebuild the tile to the source shape (see refs/fidelity-recipes.md) instead.'
 # Non-zero exit if any tile could not be staged for review — the orchestrator
 # surfaces it rather than declaring parity done with an unverifiable tile.
 exit(ready == manifest.size ? 0 : 7)

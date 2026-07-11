@@ -1020,8 +1020,12 @@ else
     warn '       CSV parity passing does NOT mean the workbook renders correctly. Render the full'
     warn '       page and READ it against the source dashboard PNG before declaring done:'
     warn "         python3 scripts/sigma-export-png.py --workbook <id> --page <pageId> --out #{default_render}"
-    warn '       then re-run this gate. See SKILL.md Phase 6f. Escape hatch (genuinely un-renderable'
-    warn '       workbooks only): --skip-visual-gate "<reason>" (name it in your report).'
+    warn '       then re-run this gate. See SKILL.md Phase 6f.'
+    warn '       Export returning HTTP 500 / timing out? That is usually YOUR workbook content'
+    warn '       (e.g. an unbounded pivot dimension from a dropped source rank filter), not the'
+    warn '       service — run the bisect playbook in refs/layout-visual-qa.md ("Render 500 /'
+    warn '       export-timeout bisect") BEFORE reaching for the escape hatch. Escape hatch'
+    warn '       (only with other-workbook probe evidence): --skip-visual-gate "<reason>".'
     exit 10
   end
   size_kb = (File.size(ok_png) / 1024.0).round
@@ -1375,7 +1379,28 @@ if File.exist?(vv_sidecar)
       warn '       visual-verify/manifest.json. Escape hatch: --skip-visual-tiles "<reason>" (name it in your report).'
       exit 11
     end
-    puts "[OK] gate 9: #{man.size} build-from-signals tile(s) image-verified (empty data export → visual parity)"
+    # Gate 9b — SHAPE IDENTITY (field-caught: a run marked reshaped tiles
+    # "verified" because their DATA matched — a ranked bar-table shipped as a
+    # wall of grouped bars, annotated strip panels shipped as generic bars, and
+    # the owner immediately judged the result "furthest from desired" while
+    # every gate was green). visual_verified attests values/trends;
+    # shape_match attests the tile is RECOGNIZABLY THE SAME VISUALIZATION.
+    # Manifests written by current verify-visual-tiles.rb always carry the
+    # field; legacy manifests (no shape_match key anywhere) are grandfathered.
+    if man.any? { |m| m.key?('shape_match') }
+      reshaped = man.select { |m| m['shape_match'] != true }
+      if reshaped.any?
+        warn "[FAIL] gate 9b: #{reshaped.size}/#{man.size} tile(s) verified for DATA but not for SHAPE: " \
+             "#{reshaped.map { |m| "#{m['worksheet']}#{m['expected_kind'] ? " (source: #{m['expected_kind']})" : ''}" }.join(', ')}."
+        warn '       Right data rendered as a DIFFERENT visualization is not fidelity — rebuild each'
+        warn '       tile to the source shape (refs/fidelity-recipes.md; e.g. ranked bar-table →'
+        warn '       pivot + dataBars, strip panel → per-panel chart + refMarks), re-render, then set'
+        warn '       "shape_match": true in visual-verify/manifest.json. Escape hatch (only for a'
+        warn '       VERIFIED product limitation, evidence in your report): --skip-visual-tiles "<reason>".'
+        exit 11
+      end
+    end
+    puts "[OK] gate 9: #{man.size} build-from-signals tile(s) image-verified (values + shape identity)"
   end
 end
 

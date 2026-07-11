@@ -185,17 +185,21 @@ twb_xml_shared = nil
 unless opts[:skip_content]
   queue << lambda do
     bytes = run_task('twb-download') { Tableau.download_workbook_content(wb['id']) }
-    twb_xml = nil
-    if bytes
-      if bytes.start_with?("PK\x03\x04")
+    # Persist the download (zip or bare .twb) and surface the inner XML.
+    # Returns [twb_xml, had_hyper_payload].
+    persist = lambda do |payload|
+      xml = nil
+      hypers = false
+      if payload.start_with?("PK\x03\x04")
         twbx_path = File.join(opts[:out], 'workbook-content.twbx')
-        atomic_write(twbx_path, bytes)
-        log "wrote workbook-content.twbx  (#{bytes.bytesize} bytes)"
+        atomic_write(twbx_path, payload)
+        log "wrote workbook-content.twbx  (#{payload.bytesize} bytes)"
         require 'tmpdir'
         Dir.mktmpdir do |tmp|
           unless system('unzip', '-o', '-q', twbx_path, '-d', tmp)
             log '.twbx auto-unzip failed (unzip command not available?); leaving .twbx in place'
           else
+            hypers = Dir.glob(File.join(tmp, '**', '*.hyper')).any?
             inner = Dir.glob(File.join(tmp, '**', '*.twb')).first
             if inner
               twb_path = File.join(opts[:out], 'workbook-content.twb')
@@ -205,7 +209,7 @@ unless opts[:skip_content]
               # many systems) and raises "invalid byte sequence in US-ASCII" on the
               # first non-ASCII byte (em-dash, @handles, curly quotes). The direct-
               # download branch below already force_encodes; the .twbx path must too.
-              twb_xml = File.read(twb_path, encoding: 'UTF-8')
+              xml = File.read(twb_path, encoding: 'UTF-8')
             else
               log '.twbx contained no inner .twb — odd'
             end
@@ -213,9 +217,35 @@ unless opts[:skip_content]
         end
       else
         twb_path = File.join(opts[:out], 'workbook-content.twb')
-        atomic_write(twb_path, bytes)
-        log "wrote workbook-content.twb  (#{bytes.bytesize} bytes)"
-        twb_xml = bytes.force_encoding('UTF-8')
+        atomic_write(twb_path, payload)
+        log "wrote workbook-content.twb  (#{payload.bytesize} bytes)"
+        xml = payload.force_encoding('UTF-8')
+      end
+      [xml, hypers]
+    end
+
+    twb_xml = nil
+    if bytes
+      twb_xml, had_hypers = persist.call(bytes)
+      # EXTRACT-BACKED workbook, thin download: the default REST download
+      # excludes the extract payload (includeExtract=false), so the .twbx has
+      # NO Data/**/*.hyper inside — directly contradicting what the landing
+      # step needs (three independent field runs each hand-rewrote this
+      # re-fetch; refs/extract-landing.md wrongly claimed discovery already
+      # had it). Detect extract markers in the ACTUAL XML and re-download WITH
+      # the payload; non-extract workbooks never pay the big download.
+      if twb_xml && !had_hypers &&
+         (twb_xml.include?('<extract') || twb_xml =~ /class='(?:hyper|textscan)'/)
+        log 'embedded extract detected but no .hyper payload in the download — re-fetching WITH includeExtract=true'
+        with_extract = run_task('twb-download-extract') { Tableau.download_workbook_content(wb['id'], include_extract: true) }
+        if with_extract && with_extract.bytesize > bytes.bytesize
+          twb_xml2, had2 = persist.call(with_extract)
+          twb_xml = twb_xml2 || twb_xml
+          log had2 ? 'extract payload landed in workbook-content.twbx' :
+                     'WARN: re-fetch still contained no .hyper — land-extracts.py will need a manual includeExtract=true download'
+        else
+          log 'WARN: includeExtract=true re-fetch returned nothing larger — proceeding with the thin .twb'
+        end
       end
     end
     twb_xml_shared = twb_xml

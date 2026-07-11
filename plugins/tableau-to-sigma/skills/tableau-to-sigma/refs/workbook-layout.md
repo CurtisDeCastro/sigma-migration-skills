@@ -1014,7 +1014,20 @@ markdown (`# Heading`) still renders left-aligned — alignment must be expresse
 
 ### Image element
 
-Uses `"kind": "image"`. The `url` field is a public remote image URL. No `source`, `columns`, or axes.
+Uses `"kind": "image"`. No `source`, `columns`, or axes. The `url` field accepts **either** a
+public remote URL **or an inline `data:image/png;base64,…` data URI** — data URIs POST cleanly
+and render in both the app and PNG exports (live-verified 2026-07-10 against three ~100–200 KB
+embedded PNGs; an earlier revision of this file claimed hosted-URL-only, and a field run
+substituted plain text for a source's title art because it trusted that claim).
+
+**Migrating Tableau image zones (logos, stylized titles, decorative art):** the source's bitmaps
+ship inside the .twbx (`unzip -l workbook-content.twbx | grep -iE 'png|jpe?g'`). Extract each,
+base64 it, and emit an image element:
+
+```bash
+b64=$(base64 < extracted/Image/title-art.png | tr -d '\n')
+# → {"id": "img-title", "kind": "image", "url": "data:image/png;base64,'"$b64"'"}
+```
 
 ```json
 {
@@ -1023,6 +1036,11 @@ Uses `"kind": "image"`. The `url` field is a public remote image URL. No `source
   "url": "https://example.com/logo.png"
 }
 ```
+
+> **Layering caveat:** Tableau floats images BEHIND other zones (z-stacked); Sigma's grid layout
+> REJECTS overlapping elements, so background art cannot be layered under a chart or text via
+> spec. Composite the art + text into ONE image (or place the art adjacent) — placing it
+> elsewhere on the page reads as misplacement, not fidelity.
 
 In layout XML, image elements use a standard `<LayoutElement>`:
 ```xml

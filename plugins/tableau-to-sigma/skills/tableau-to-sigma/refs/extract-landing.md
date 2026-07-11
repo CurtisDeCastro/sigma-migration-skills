@@ -24,10 +24,14 @@ unpinned `pip install pandas` grabs 3.x and the landing fails on
 
 ## The command
 
-Re-download the workbook **with** its extract payload
-(`GET /workbooks/{id}/content?includeExtract=true` — discovery's
-`workbook-content.twbx` already is this when the workbook is extract-backed),
-then:
+Discovery now **auto-detects** an extract-backed workbook (an `<extract>` block
+or `hyper`/`textscan` connection class in the .twb) and re-downloads
+`workbook-content.twbx` **with** the payload (`includeExtract=true`) — check the
+discovery log for "extract payload landed". If the payload is missing anyway
+(older discovery output, or the re-fetch WARNed), verify with
+`unzip -l <workdir>/workbook-content.twbx | grep -c '\.hyper'` and re-download
+via `Tableau.download_workbook_content(<wb-luid>, include_extract: true)` before
+landing — a 0-hyper .twbx makes `land-extracts.py` a silent no-op. Then:
 
 ```bash
 python3 scripts/land-extracts.py \

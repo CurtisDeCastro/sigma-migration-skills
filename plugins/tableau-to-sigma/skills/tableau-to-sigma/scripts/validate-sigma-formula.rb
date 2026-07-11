@@ -137,6 +137,22 @@ test_el = {
     { 'id' => 'col-scout-test', 'name' => label, 'formula' => formula }
   ]
 }
+# CHART kinds require wired axes — a bare columns array 400s with
+# "yAxis: Invalid object: undefined" REGARDLESS of the candidate formula, so
+# every chart-kind probe used to fail vacuously (field-caught: the one
+# placement the window-function docs call mandatory was untestable). Wire a
+# minimal x dimension (the first master column) + the candidate on yAxis.
+if opts[:chart_kind].to_s.end_with?('-chart')
+  x_src = master_columns.first
+  test_el['columns'].unshift(
+    'id' => 'col-scout-x', 'name' => 'Scout X',
+    'formula' => "[Master/#{x_src['name']}]"
+  )
+  series_type = { 'bar-chart' => 'bar', 'line-chart' => 'line', 'area-chart' => 'area',
+                  'scatter-chart' => 'scatter', 'combo-chart' => 'line' }.fetch(opts[:chart_kind], 'bar')
+  test_el['xAxis'] = { 'columnId' => 'col-scout-x' }
+  test_el['yAxis'] = { 'columnIds' => [{ 'columnId' => 'col-scout-test', 'type' => series_type }] }
+end
 
 spec = {
   'name'           => "[scout-test] #{label}-#{Time.now.to_i}",

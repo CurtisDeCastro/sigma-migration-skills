@@ -264,6 +264,34 @@ OptionParser.new do |o|
                               'SAME dashboard rather than orphaning it.') { |v| opts[:reuse_workbook] = v }
 end.parse!
 
+# Share-URL intake (field-caught: three independent runs each rediscovered that
+# the MOST COMMON Tableau link shape — /#/site/<site>/views/<workbookContentUrl>/<view>
+# — resolves through NO existing path: resolve-project.rb is numeric-vizportal-only
+# and --workbook <name> fails because a workbook's display Name routinely diverges
+# from its contentUrl slug). Accept a URL pasted into --workbook, parse the
+# workbookContentUrl segment, and resolve it via the REST contentUrl filter.
+# Numeric /workbooks/<id> and /projects/<id> URLs keep routing to resolve-project.rb.
+if opts[:wb_name].to_s =~ %r{\Ahttps?://} || opts[:wb_name].to_s =~ %r{#/site/}
+  url = opts[:wb_name]
+  if (m = url.match(%r{/views/([^/?#]+)}))
+    content_url = m[1]
+    puts "── share-URL intake: /views/ link → resolving workbook contentUrl #{content_url.inspect}"
+    require_relative 'lib/tableau_rest'
+    hit = Tableau.find_workbook_by_content_url(content_url)
+    abort "FATAL: no workbook with contentUrl #{content_url.inspect} is visible to this PAT — " \
+          'check the site (TABLEAU_SITE_CONTENT_URL) and the PAT user\'s project permissions.' unless hit
+    opts[:wb_id] = hit['id']
+    opts[:wb_name] = nil
+    puts "   resolved: #{hit['name'].inspect} → workbook LUID #{hit['id']}"
+  elsif url =~ %r{/(workbooks|projects)/(\d+)}
+    abort "FATAL: numeric vizportal URL — resolve it first:\n" \
+          "  ruby scripts/resolve-project.rb --vizportal-id #{Regexp.last_match(2)}\n" \
+          'then re-run with --workbook-id <luid>.'
+  else
+    abort 'FATAL: unrecognized Tableau URL shape — pass --workbook-id <luid>, or a /views/… share link.'
+  end
+end
+
 abort 'missing --workbook or --workbook-id' unless opts[:wb_name] || opts[:wb_id]
 # intake.rb (front-door) caches the resolved connection in <out>/connection.json; honor it
 # when --connection is omitted so the agent need not re-pass the id it just resolved.

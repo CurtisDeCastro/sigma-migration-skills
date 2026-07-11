@@ -179,11 +179,16 @@ if [ -f "$HERE/setup-tableau.rb" ] && [ -f "$HERE/lib/tableau_rest.rb" ]; then
   elif [ -n "${SIGMA_SKIP_CRED_SMOKE:-}" ]; then
     ok "Tableau credentials present (live PAT signin smoke SKIPPED: SIGMA_SKIP_CRED_SMOKE)"
   elif command -v ruby >/dev/null 2>&1; then
-    if ruby -e '$LOAD_PATH.unshift File.join(ARGV[0], "lib"); require "timeout"; require "tableau_rest"; Timeout.timeout(20) { Tableau.refresh_token! }' "$HERE" >/dev/null 2>&1; then
+    # Two attempts, 30s bound each: a single 20s-bounded probe false-negatived
+    # in a real field run (parallel-agent load) while get-tableau-token.sh
+    # minted fine seconds later — a doctor that cries wolf trains agents to
+    # ignore it.
+    _TAB_SMOKE_RB='$LOAD_PATH.unshift File.join(ARGV[0], "lib"); require "timeout"; require "tableau_rest"; Timeout.timeout(30) { Tableau.refresh_token! }'
+    if ruby -e "$_TAB_SMOKE_RB" "$HERE" >/dev/null 2>&1 || ruby -e "$_TAB_SMOKE_RB" "$HERE" >/dev/null 2>&1; then
       ok "Tableau credentials present + live PAT signin OK"
       SMOKE_TABLEAU="pass"
     else
-      bad "Tableau credentials present but the live PAT signin FAILED (expired/revoked PAT, wrong site or server URL)" \
+      bad "Tableau credentials present but the live PAT signin FAILED twice (expired/revoked PAT, wrong site or server URL)" \
           "Re-run 'ruby scripts/setup-tableau.rb' with a fresh PAT. Genuinely offline? SIGMA_SKIP_CRED_SMOKE=1 skips this probe."
       SMOKE_TABLEAU="fail"
     fi

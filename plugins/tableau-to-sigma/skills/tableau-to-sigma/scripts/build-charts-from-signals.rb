@@ -2772,6 +2772,20 @@ layout.each do |dash|
       # else: fall through with the warning already logged
     end
 
+    # MULTI-DATASOURCE ROUTING SENTRY: every chart below is sourced from the ONE
+    # master (opts[:master_id]) — correct only when its worksheet rides the SAME
+    # datasource as the master's fact. Record each worksheet's federated
+    # datasource id (from its shelf refs); after the loop, charts on a MINORITY
+    # datasource get a loud, actionable warning (field-caught: two pivots riding
+    # a different datasource were silently routed to the primary master and
+    # emitted refs to columns that don't exist there — the pre-POST ref gate
+    # stopped the run, but with no explanation of WHY or WHAT to do).
+    _zshelves = [z['rows_shelf'], z['cols_shelf']].compact.map { |s| s['raw'].to_s }.join(' ') +
+                (z['channels'] || {}).values.map { |c| c.is_a?(Hash) ? c['column'].to_s : '' }.join(' ')
+    _zds = _zshelves.scan(/\[(federated\.[a-z0-9]+)\]/).flatten
+                    .group_by(&:itself).max_by { |_k, v| v.length }&.first # (no .tally — Ruby 2.6 floor)
+    ($zone_datasource ||= {})[cap] = _zds if _zds
+
     view = view_by_name[cap]
     if view.nil?
       # No standalone Tableau REST view for this worksheet — it's a sheet
@@ -5321,6 +5335,26 @@ if opts[:tab]
   unless vv.empty?
     by_reason = vv.group_by { |t| t['reason'] }.transform_values(&:size)
     warn "wrote #{vv_path} (#{vv.size} tile(s) need IMAGE verification: #{by_reason.map { |r, n| "#{n} #{r}" }.join(', ')})"
+  end
+end
+
+# Multi-datasource routing sentry (see the collection point in the zone loop):
+# charts whose worksheet rides a MINORITY datasource are still sourced from the
+# single master — name each one and the fix, so the pre-POST ref-gate failure
+# that follows (if the master lacks their columns) is diagnosable in one read.
+if $zone_datasource && $zone_datasource.values.uniq.length > 1
+  groups = $zone_datasource.group_by { |_ws, ds| ds }
+  dominant_ds = groups.max_by { |_ds, pairs| pairs.length }.first
+  outliers = $zone_datasource.reject { |_ws, ds| ds == dominant_ds }
+  unless outliers.empty?
+    warn '=== MULTI-DATASOURCE ROUTING WARNING ============================================'
+    warn "The dashboard's worksheets ride #{groups.length} DIFFERENT datasources, but every chart"
+    warn "is sourced from the single master (#{opts[:master_id].inspect}) riding the DOMINANT one (#{dominant_ds})."
+    outliers.each { |ws, ds| warn "  • '#{ws}' rides #{ds} — its column refs resolve ONLY if the master's fact carries them" }
+    warn 'If the pre-POST ref gate fails on these charts: build a SECOND master over the DM'
+    warn 'element for that datasource and re-source them (refs/multi-datasource.md). Do NOT'
+    warn 'point their formulas at the primary master by renaming columns — wrong data, silently.'
+    warn '================================================================================='
   end
 end
 

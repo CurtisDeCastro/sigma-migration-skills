@@ -212,3 +212,33 @@ The one-shot layout builder is geometry-derived: it preserves the source's margi
 - **Card each panel** — wrap/style each chart with a surface (`style.{backgroundColor:'#FFFFFF', borderColor, borderWidth, borderRadius:'round'}`); set the chart's own `style.backgroundColor:'#00000000'` if it sits over a tint.
 - **Semantic panel titles** — set each element's `name` to `<Metric> <SECTION>` ("GDP YEAR ON YEAR" / "GDP TREND" / "GDP TOP COUNTRIES"), not the raw worksheet nickname ("GDPPie" / "GDPRegionLine").
 - **In-place PUT (`--reuse-workbook`) carries STALE layout elements** — `layout-preserve` merges the live layout, so a header/band element the *new* spec dropped (e.g. a prior page-name H1) LINGERS. When updating in place, the RCF patch must explicitly DROP the stale layout elements (author the full corrected `layout` XML without them), or the fix won't show. (A fresh POST wouldn't have the residual — this is an in-place-update-only trap.)
+
+## Infographic recipe pack (long-scroll analytical posters — field-derived 2026-07-10)
+
+Three shapes the generic build gets wrong on this dashboard class; all three are
+POST-verified. Use them when the shape-identity gate (9b) fails a tile.
+
+1. **Ranked bar-table** (source: rank + row label + one BAR COLUMN per category, printed %,
+   ranks 1–N) → a `pivot-table`, NOT a grouped bar chart: `rowsBy` the ranked label (pre-sorted
+   by rank), `columnsBy` the category, one measure with `conditionalFormats:
+   [{type: dataBars, columnIds: [<measure>], scheme: [...]}]` + `includeValues: true`. Grouped
+   bars scramble rank order and lose the table reading — a real run shipped that and failed the
+   owner's eye while every value matched.
+
+2. **Rank-limited pivot source** (source shows top-N of a HIGH-CARDINALITY dimension via a
+   Tableau rank≤N table calc): the rank must live in the DATA, not the element — there is NO
+   renderer-honored top-n filter on a pivot's `columnsBy` (two spec shapes verified
+   accepted-then-500), and an unbounded pivot dimension at ~40k+ values kills every PNG export
+   for the whole workbook. Land or derive a rank-limited source (Custom SQL:
+   `QUALIFY RANK() OVER (ORDER BY <bias metric> DESC) <= N` per category) and point the pivot
+   at it. Keep the raw table on the hidden Data page for interactivity/drill.
+
+3. **Per-partition percentage cells** (heatmap cells that sum to 100% per row/column):
+   `PercentOfTotal(agg, "column")` / `"row"` / `"parent_grouping"` — never `grand_total`
+   (see refs/window-functions.md; a grand-total-only mapping mis-normalizes every cell).
+
+Also: title art / stylized typography ship as **data-URI image elements** (see
+refs/workbook-layout.md "Image element" — extraction one-liner included; background layering
+is impossible, composite instead), and element titles that leak worksheet names ("Sheet 9")
+must be renamed to the source's visible caption — the source shows NO inner titles on most
+infographic tiles, so match the element name to the section header or the tile's on-canvas title.
