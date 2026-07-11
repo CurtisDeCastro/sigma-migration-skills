@@ -91,6 +91,27 @@ all_known_set = all_known_prefixes.is_a?(Set) ? all_known_prefixes : Set.new(all
 
 errors << 'spec contains rgb(...) color strings (Cloudflare WAF blocks)' if JSON.generate(spec).include?('rgb(')
 
+# ENVELOPE checks (field-caught round 2): a hand-authored spec missing these
+# passed "0 errors" locally and then burned one live 400 per defect, one
+# network round-trip at a time.
+errors << 'missing top-level "schemaVersion" (POST 400s with schemaVersion: Invalid)' unless spec.key?('schemaVersion')
+errors << 'missing top-level "name" (the workbook/DM display name)' if spec['name'].to_s.strip.empty?
+warnings << 'no top-level "folderId" — the POST lands in My Documents (pass the assigned folder)' unless spec.key?('folderId')
+spec.fetch('pages', []).each_with_index do |page, pi|
+  errors << "pages[#{pi}] has no \"id\" — PUT/layout targeting needs stable page ids" unless page['id']
+  page.fetch('elements', []).each do |el|
+    src = el['source']
+    next unless src.is_a?(Hash)
+    kind = src['kind'].to_s
+    if kind == 'table' && src['dataModelId']
+      errors << "element \"#{el['name'] || el['id']}\": source.kind \"table\" carries a dataModelId — " \
+                'a DM-sourced element needs source.kind "data-model" (live 400: Dependency not found)'
+    elsif kind == 'data-model' && !src['dataModelId']
+      errors << "element \"#{el['name'] || el['id']}\": source.kind \"data-model\" without dataModelId"
+    end
+  end
+end
+
 spec.fetch('pages', []).each do |page|
   page.fetch('elements', []).each do |el|
     kind = el['kind'] || ''

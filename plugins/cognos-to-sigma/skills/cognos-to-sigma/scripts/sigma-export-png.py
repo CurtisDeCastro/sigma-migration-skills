@@ -31,18 +31,35 @@ def main():
     if a.element: body["elementId"] = a.element
     elif a.page:  body["pageId"] = a.page
     else: sys.exit("need --page or --element")
-    r = requests.post(f"{base}/v2/workbooks/{a.workbook}/export", headers=h, json=body)
+    # Explicit network timeouts (field-caught: a stuck render job left the
+    # bare POST/GET hanging INDEFINITELY — the caller saw a frozen script, not
+    # a diagnosable failure). Repeated 500s on the poll are surfaced loudly:
+    # that pattern is usually the workbook's own content — run the bisect
+    # playbook (refs/layout-visual-qa.md) before blaming the service.
+    r = requests.post(f"{base}/v2/workbooks/{a.workbook}/export", headers=h, json=body, timeout=60)
     if r.status_code != 200: sys.exit(f"export POST {r.status_code}: {r.text[:300]}")
     qid = r.json()["queryId"]
     dl = f"{base}/v2/query/{qid}/download"
+    n500 = 0
     for i in range(60):
-        g = requests.get(dl, headers={"Authorization": f"Bearer {tok}"})
+        try:
+            g = requests.get(dl, headers={"Authorization": f"Bearer {tok}"}, timeout=60)
+        except requests.exceptions.Timeout:
+            time.sleep(3); continue
         ct = g.headers.get("Content-Type", "")
         if g.status_code == 200 and ("image" in ct or g.content[:8] == b"\x89PNG\r\n\x1a\n"):
             open(a.out, "wb").write(g.content)
             print(f"[png] {len(g.content)} bytes -> {a.out}"); return
+        if g.status_code == 500:
+            n500 += 1
+            if n500 >= 5:
+                sys.exit("render job failed: HTTP 500 x5 on download — this is usually the "
+                         "WORKBOOK'S OWN content (e.g. an unbounded pivot dimension), not a "
+                         "service outage. Run the bisect playbook in refs/layout-visual-qa.md "
+                         "('Render 500 / export-timeout bisect') before waiving any gate.")
         time.sleep(3)
-    sys.exit("timed out waiting for PNG")
+    sys.exit("timed out waiting for PNG (job never materialized) — run the bisect playbook in "
+             "refs/layout-visual-qa.md before treating this as a service outage.")
 
 if __name__ == "__main__":
     main()

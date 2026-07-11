@@ -206,6 +206,10 @@ OptionParser.new do |o|
                                       'must normally be finished the same way) — counted as a quality waiver; ' \
                                       'name it in your report.') { |v| opts[:force_route_switch] = v }
   o.on('--out DIR')          { |v| opts[:out]     = File.expand_path(v) }
+  # Alias: every sibling script (doctor, intake, verify-complete, assert-*)
+  # takes --workdir; this orchestrator uniquely used --out — a copy-paste trap
+  # that aborted runs at argv parse (field-caught round 2). Both now work.
+  o.on('--workdir DIR', 'alias of --out') { |v| opts[:out] = File.expand_path(v) }
   o.on('--answers JSON')     { |v| opts[:answers] = v }
   o.on('--yes')              {     opts[:yes]     = true }
   o.on('--name PREFIX')      { |v| opts[:name]    = v }
@@ -277,6 +281,15 @@ if opts[:wb_name].to_s =~ %r{\Ahttps?://} || opts[:wb_name].to_s =~ %r{#/site/}
     content_url = m[1]
     puts "── share-URL intake: /views/ link → resolving workbook contentUrl #{content_url.inspect}"
     require_relative 'lib/tableau_rest'
+    # Cold-env order bug (field-caught round 2): with only PAT creds set (no
+    # TABLEAU_SITE_ID/AUTH_TOKEN minted yet) this resolver ran before any token
+    # existed and crashed with "TABLEAU_SITE_ID not set". Mint in-process first.
+    begin
+      Tableau.site_id
+    rescue Tableau::Error
+      puts '   no Tableau session yet — minting one in-process (PAT signin)'
+      Tableau.refresh_token!
+    end
     hit = Tableau.find_workbook_by_content_url(content_url)
     abort "FATAL: no workbook with contentUrl #{content_url.inspect} is visible to this PAT — " \
           'check the site (TABLEAU_SITE_CONTENT_URL) and the PAT user\'s project permissions.' unless hit
@@ -2756,7 +2769,20 @@ if opts[:wb_target]
   line "append: workbook now has #{existing['pages'].size} page(s) after merge (+#{new_pages.size} new content page(s))"
 end
 
-File.write(wb_spec_path, JSON.pretty_generate(spec))
+# NON-DESTRUCTIVE placeholder resolution (field-caught round 2): on the
+# agent-authored path the __DM_ID__/__DM_ELEMENT__ substitution used to
+# OVERWRITE the authored wb-spec.json with resolved live ids — and since every
+# DM PUT mints new element ids, any fix-and-retry loop silently went stale
+# with no placeholder source left to re-resolve. Write the resolved spec to a
+# sibling file and leave the authored source untouched.
+if MANUAL_JSON_SPECS
+  resolved_path = File.join(WORK, 'wb-spec.resolved.json')
+  File.write(resolved_path, JSON.pretty_generate(spec))
+  line "resolved spec → #{File.basename(resolved_path)} (authored wb-spec.json left untouched — placeholders stay re-resolvable)"
+  wb_spec_path = resolved_path
+else
+  File.write(wb_spec_path, JSON.pretty_generate(spec))
+end
 wb_ids_path = File.join(WORK, 'wb-ids.json')
 
 # GRACEFUL AGENT-PATH FALLBACK. The DM is already posted + valid (dm_id above), so

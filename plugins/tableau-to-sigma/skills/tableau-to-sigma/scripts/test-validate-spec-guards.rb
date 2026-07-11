@@ -24,7 +24,17 @@ def check(cond, msg, fails)
   puts "  #{cond ? 'PASS' : 'FAIL'}  #{msg}"
 end
 
-def validate(spec, type: 'workbook')
+def validate(spec, type: 'workbook', envelope: true)
+  # Auto-envelope the minimal fixtures (schemaVersion/name/page ids) so each
+  # part tests ITS guard in isolation; envelope: false exercises the envelope
+  # checks themselves (Part F).
+  if envelope
+    spec = JSON.parse(JSON.generate(spec))
+    spec['schemaVersion'] ||= 1
+    spec['name'] ||= 'guards-test'
+    spec['folderId'] ||= 'folder-test' # keeps warn-count assertions envelope-neutral
+    (spec['pages'] || []).each_with_index { |p, i| p['id'] ||= "pg-#{i}" }
+  end
   tmp = Tempfile.new(['validate-guards-', '.json'])
   tmp.write(JSON.generate(spec))
   tmp.close
@@ -117,8 +127,19 @@ check(code == 1, 'IIF/IsIn still exit 1', fails)
 check(out.include?('IIF(c, t, e)') && out.include?('IsIn()'), 'leak hints still emitted', fails)
 
 puts
+puts 'Part F — envelope checks (schemaVersion/name/page id/source.kind) fail locally, not at POST'
+bare = { 'pages' => [{ 'name' => 'P1', 'elements' => [
+  { 'id' => 'e1', 'kind' => 'table', 'name' => 'T',
+    'source' => { 'kind' => 'table', 'dataModelId' => 'dm-123', 'elementId' => 'x' } }
+] }] }
+out, code = validate(bare, envelope: false)
+check(code == 1, "bare spec exits 1 (got #{code})", fails)
+check(out.include?('schemaVersion'), 'names the missing schemaVersion', fails)
+check(out =~ /pages\[0\] has no "id"/, 'names the missing page id', fails)
+check(out.include?('needs source.kind "data-model"'), 'catches table-kind-with-dataModelId misbinding', fails)
+
 if fails.empty?
-  puts 'OK — validate-spec ID-uniqueness + function-tier guards all pass'
+  puts 'OK — validate-spec ID-uniqueness + function-tier + envelope guards all pass'
   exit 0
 else
   warn "FAIL — #{fails.size} check(s) failed:"

@@ -973,6 +973,24 @@ end
 # floor). nil when gate 8 was waived or no render resolved.
 render_png = nil
 if opts[:skip_visual]
+  # BISECT-EVIDENCE demand (field-caught, twice): both rounds of a live test
+  # produced a "render outage / persistent 500" waiver that an evaluator's
+  # 6-probe bisect refuted in minutes — the poison was the run's OWN content
+  # (an unbounded pivot column dimension) and the waiver silently absorbed
+  # FOUR visual gates. A 500/timeout reason is only acceptable WITH bisect
+  # evidence: the reason must name the playbook's step-1/step-2 probes.
+  if opts[:skip_visual] =~ /500|timeout|timed?\s*out|hang|render.*(fail|outage|error)/i &&
+     opts[:skip_visual] !~ /bisect|probe/i
+    warn '[FAIL] gate 8: --skip-visual-gate cites a render failure but names NO bisect evidence.'
+    warn '       A render 500/timeout is usually YOUR workbook content, not the service (an'
+    warn '       unbounded pivot dimension has caused this in two independent field runs).'
+    warn '       Run the bisect playbook (refs/layout-visual-qa.md "Render 500 / export-timeout'
+    warn '       bisect") and re-waive ONLY if step 1 (another workbook fails too) or step 2'
+    warn "       (a minimal probe on your DM fails) holds — include e.g. 'bisect: other-workbook"
+    warn "       probe also 500s' or 'bisect: isolated to element <id>, verified product limit'"
+    warn '       in the reason string.'
+    exit 10
+  end
   puts "[SKIP] gate 8: Phase 6f visual render WAIVED via --skip-visual-gate (#{opts[:skip_visual]})."
   puts "       This waiver MUST be named in the migration report — the workbook was NOT visually verified."
 else

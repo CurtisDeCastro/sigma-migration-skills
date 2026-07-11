@@ -227,12 +227,24 @@ die 'missing --workdir' unless opts[:dir]
 case cmd
 when 'init'
   die '--workbook-id and --page-id required for init' unless opts[:wb] && opts[:page]
-  ledger = FidelityLoop.new_ledger(
-    workbook_id: opts[:wb], page_id: opts[:page],
-    source_image: opts[:src], max_passes: opts[:max] || 5
-  )
-  save_ledger(opts[:dir], ledger)
-  puts "[OK] initialized #{ledger_path(opts[:dir])} (max_passes=#{ledger['max_passes']})"
+  # PRESERVE an existing ledger for the same workbook (field-caught: every
+  # FAST PATH orchestrator re-entry re-ran init and WIPED the recorded deltas
+  # — the natural fix-and-re-run loop destroyed its own audit trail). Only a
+  # DIFFERENT workbook id starts fresh; same-workbook re-init is a no-op.
+  # (direct file check — load_ledger die()s with SystemExit on a missing file,
+  # which `rescue nil` does NOT catch; a fresh init would exit 2)
+  existing = File.exist?(ledger_path(opts[:dir])) ? (JSON.parse(File.read(ledger_path(opts[:dir]))) rescue nil) : nil
+  if existing.is_a?(Hash) && existing['workbook_id'] == opts[:wb]
+    puts "[OK] fidelity ledger already initialized for #{opts[:wb]} " \
+         "(#{(existing['entries'] || []).length} entries, pass #{existing['pass']}/#{existing['max_passes']}) — preserved."
+  else
+    ledger = FidelityLoop.new_ledger(
+      workbook_id: opts[:wb], page_id: opts[:page],
+      source_image: opts[:src], max_passes: opts[:max] || 5
+    )
+    save_ledger(opts[:dir], ledger)
+    puts "[OK] initialized #{ledger_path(opts[:dir])} (max_passes=#{ledger['max_passes']})"
+  end
 
 when 'render'
   ledger = load_ledger(opts[:dir])

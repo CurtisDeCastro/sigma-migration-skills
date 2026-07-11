@@ -120,8 +120,18 @@ master_ids =
     end
     detected.uniq
   end
-abort("auto-parity-plan.rb: no master element(s) detected; pass --master-id explicitly") if master_ids.empty?
-warn "matching charts that source from master element(s): #{master_ids.join(', ')}"
+if master_ids.empty?
+  # A hand-authored spec may have NO intermediate master tables at all — every
+  # chart sources the data model directly. That's a valid documented shape,
+  # not an error (the chart loop below matches DM-sourced charts on its own).
+  has_dm_charts = spec['pages'].any? do |pg|
+    (pg['elements'] || []).any? { |e| e.dig('source', 'kind') == 'data-model' && e['kind'] != 'table' }
+  end
+  abort('auto-parity-plan.rb: no master element(s) detected; pass --master-id explicitly') unless has_dm_charts
+  warn 'no master tables detected — matching data-model-sourced charts directly'
+else
+  warn "matching charts that source from master element(s): #{master_ids.join(', ')}"
+end
 
 master_id_set = master_ids.to_set
 # Transitive: hidden helper tables that THEMSELVES source a master (e.g. the
@@ -138,7 +148,15 @@ sigma_charts = []
 pages.each do |pg|
   pg['elements'].each do |e|
     next if master_id_set.include?(e['id'])
-    next unless e['source'] && master_id_set.include?(e['source']['elementId'])
+    # A chart counts when it sources a detected master — OR sources the data
+    # model DIRECTLY (source.kind=='data-model' on the chart itself, the
+    # documented hand-authored shape). The master-only check silently produced
+    # a "0 CSV tiles" census on every exit-4 workbook, forcing an
+    # --allow-missing-tiles waiver for tiles that were fully verifiable
+    # (field-caught round 2, two independent runs).
+    from_master = e['source'] && master_id_set.include?(e['source']['elementId'])
+    from_dm     = e.dig('source', 'kind') == 'data-model' && !%w[table control text image container].include?(e['kind'].to_s)
+    next unless from_master || from_dm
     sigma_charts << e
   end
 end

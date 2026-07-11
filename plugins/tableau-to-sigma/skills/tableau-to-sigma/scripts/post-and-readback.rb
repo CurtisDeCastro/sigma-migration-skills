@@ -463,6 +463,37 @@ if opts[:type] == 'datamodel' && res.is_a?(Net::HTTPSuccess)
   end
 end
 
+# FILTERS census (both types) — field-caught round 2: element `filters` on a
+# pivot-table were SILENTLY DROPPED at PUT (HTTP 200, filter simply absent in
+# the readback), so a rank/top-n limit vanished with no signal and the tile
+# rendered unbounded. Compare per-element posted-vs-readback filter counts and
+# warn loudly on any loss (match by id, then name — DM POST reassigns ids).
+begin
+  posted_spec ||= (JSON.parse(File.read(opts[:spec])) rescue nil)
+  if posted_spec && spec.is_a?(Hash)
+    rb_els = (spec['pages'] || []).flat_map { |p| p['elements'] || [] }
+    rb_by_id   = rb_els.each_with_object({}) { |e, h| h[e['id']] = e if e['id'] }
+    rb_by_name = rb_els.each_with_object({}) { |e, h| h[e['name']] = e if e['name'] }
+    (posted_spec['pages'] || []).flat_map { |p| p['elements'] || [] }.each do |pel|
+      posted_f = Array(pel['filters'])
+      next if posted_f.empty?
+      live = rb_by_id[pel['id']] || rb_by_name[pel['name']]
+      next unless live
+      live_f = Array(live['filters'])
+      next unless live_f.length < posted_f.length
+      lost = posted_f.length - live_f.length
+      warn "WARN — FILTER silently dropped: element \"#{pel['name'] || pel['id']}\" POSTed #{posted_f.length} " \
+           "filter(s) but the readback carries #{live_f.length} (#{lost} lost; kinds posted: " \
+           "#{posted_f.map { |f| f['kind'] }.compact.join(', ')}). Sigma accepted the spec and dropped the " \
+           'filter without an error — a rank/top-n limit vanishing here renders the element UNBOUNDED. ' \
+           'Re-shape the filter (see refs/workbook-layout.md filters) or move the limit into the SOURCE ' \
+           '(rank-limited SQL, refs/fidelity-recipes.md).'
+    end
+  end
+rescue StandardError => e
+  warn "WARN: filters census skipped (#{e.class}: #{e.message[0, 80]})"
+end
+
 # Rec5 quarantine final report: the (re-)POST succeeded and the census is clean,
 # but only because broken element(s) were REMOVED. The DM is PARTIAL — exit with
 # the distinct code so no caller mistakes this for a full green POST.

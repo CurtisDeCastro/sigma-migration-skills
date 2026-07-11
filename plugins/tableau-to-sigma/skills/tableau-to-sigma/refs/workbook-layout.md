@@ -1341,3 +1341,22 @@ curl -s -X PUT \
 | Overlapping row ranges | Elements hidden behind each other | Draw row ranges on paper; ensure no two elements share rows on the same column span |
 | Fallback `els.values[N]` when page has fewer elements than expected | `elementId=""` in XML — PUT rejected with `invalid_request` | Guard with `(le(id, ...) if id)` and call `.compact` on the children array before passing to `page_xml` |
 | Using `dimension` on a `line-chart` | Works but is non-canonical | Use `xAxis` for both `bar-chart` and `line-chart` |
+
+### Minimum tile heights (grid rows) — the render-blank floor
+
+Sigma renders a tile BLANK (page and PNG export) below a per-kind grid-row
+minimum, and hand-authored layouts routinely trip the layout lint on this (a
+real run collected 19 violations). The enforced floors
+(`SigmaLayout::KIND_MIN_ROWS`, mirrored in the layout lint):
+
+| element kind | min gridRow span | why |
+|---|---|---|
+| `kpi-chart` | 4 | value + label need ~4 rows to render at all |
+| any `*-chart` | 8 | axis/labels suppressed and the tile blanks below ~8 |
+| `table` / `pivot-table` | 10 | header row + a few data rows |
+| `control` | 2 | one input strip; 2 keeps the label visible |
+| `text` | 2 | |
+
+When authoring `layout` XML by hand, give every element at least its floor —
+the lint (gate 6) fails otherwise, and shrinking a section to match tight
+source geometry must come out of GAPS, not out of tile heights.

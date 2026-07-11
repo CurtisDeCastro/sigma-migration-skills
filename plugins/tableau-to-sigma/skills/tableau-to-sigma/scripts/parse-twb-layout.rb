@@ -249,13 +249,26 @@ def normalize_filter(f)
   case cls
   when 'categorical'
     members = []
+    conditions = []
     f.each_element('.//groupfilter') do |gf|
-      next unless gf.attributes['function'] == 'member'
-      m = unquote_member(gf.attributes['member'])
-      members << m if m
+      if gf.attributes['function'] == 'member'
+        m = unquote_member(gf.attributes['member'])
+        members << m if m
+      end
+      # CONDITION filters (function='filter' with an expression, e.g. a
+      # minimum-sample gate `COUNTD([seed]) > 20` guarding a Top-N ranking)
+      # were silently invisible — the emitted kind:list carried only members,
+      # and two independent field runs had to grep raw XML to discover why
+      # their Top-15 rosters were wrong. Surface every expression verbatim.
+      expr = gf.attributes['expression']
+      conditions << expr if expr && !expr.strip.empty?
     end
     out['kind']    = 'list'
     out['members'] = members
+    unless conditions.empty?
+      out['condition_expressions'] = conditions.uniq
+      out['kind'] = 'list+condition' if members.empty?
+    end
   when 'relative-date'
     out['kind']           = 'relative-date'
     out['first_period']   = f.attributes['first-period']

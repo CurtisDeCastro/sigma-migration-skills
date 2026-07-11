@@ -5347,13 +5347,29 @@ if $zone_datasource && $zone_datasource.values.uniq.length > 1
   dominant_ds = groups.max_by { |_ds, pairs| pairs.length }.first
   outliers = $zone_datasource.reject { |_ws, ds| ds == dominant_ds }
   unless outliers.empty?
+    # Enrich with the gap-scan's routing plan (multi-ds-plan.json): it names
+    # each federated datasource's CAPTION + owning worksheets, so the fix
+    # instruction can name the exact DM element to re-source from instead of
+    # leaving each agent to reverse-engineer the federated ids.
+    ds_caption = {}
+    if opts[:tab]
+      plan = (JSON.parse(File.read(File.join(opts[:tab], 'multi-ds-plan.json'))) rescue nil)
+      (plan && plan['datasources'] || []).each { |d| ds_caption[d['name']] = d['caption'] }
+    end
     warn '=== MULTI-DATASOURCE ROUTING WARNING ============================================'
     warn "The dashboard's worksheets ride #{groups.length} DIFFERENT datasources, but every chart"
-    warn "is sourced from the single master (#{opts[:master_id].inspect}) riding the DOMINANT one (#{dominant_ds})."
-    outliers.each { |ws, ds| warn "  • '#{ws}' rides #{ds} — its column refs resolve ONLY if the master's fact carries them" }
-    warn 'If the pre-POST ref gate fails on these charts: build a SECOND master over the DM'
-    warn 'element for that datasource and re-source them (refs/multi-datasource.md). Do NOT'
-    warn 'point their formulas at the primary master by renaming columns — wrong data, silently.'
+    warn "is sourced from the single master (#{opts[:master_id].inspect}) riding the DOMINANT one " \
+         "(#{ds_caption[dominant_ds] || dominant_ds})."
+    outliers.each do |ws, ds|
+      cap = ds_caption[ds]
+      warn "  • '#{ws}' rides #{cap ? "'#{cap}'" : ds} — re-source it from THAT datasource's DM element" \
+           "#{cap ? " (element named after '#{cap}' in the posted DM)" : ''}; its refs resolve on the" \
+           ' master ONLY if the master fact happens to carry the same columns'
+    end
+    warn 'Routing table: multi-ds-plan.json (per-datasource caption → worksheets). Fix = source'
+    warn "each outlier chart from its own DM element ([<Element Name>/<Column>] refs, or a second"
+    warn 'master per refs/multi-datasource.md). Do NOT point their formulas at the primary master'
+    warn 'by renaming columns — wrong data, silently.'
     warn '================================================================================='
   end
 end
