@@ -55,6 +55,8 @@ require 'optparse'
 require 'base64'
 require 'open3'
 require_relative 'learned-rules'
+require_relative 'lib/theme_derive'
+require_relative 'lib/png_classify'
 
 opts = { master_id: 'master' }
 OptionParser.new do |p|
@@ -931,6 +933,28 @@ def tableau_format_to_sigma(s)
     return { 'kind' => 'datetime', 'formatString' => f }
   end
   nil
+end
+
+# Tableau scale-comma + literal-suffix formats ('n#,##0,,,B;-#,##0,,,B'):
+# each trailing comma after the digit mask divides by 1,000 (',,,' = /1e9),
+# '.0…' = decimals, the trailing letter is a LITERAL suffix. Sigma's d3 enum
+# can NEVER render these exactly (,.2s shows SI 'G' for 1e9, not 'B') — the
+# exact path is a Text() formula column. Returns {scale, decimals, suffix} or
+# nil when there are no scale-commas (the enum branches above keep those).
+def parse_scaled_suffix_format(s)
+  return nil if s.nil? || s.empty?
+  pos = s.split(';')[0].to_s
+  m = pos.match(/\A[nc]?[#,0]+?(,+)(?:\.(0+))?\s*([A-Za-z%€£$]{1,3})?\z/)
+  return nil unless m
+  { 'scale' => 1000**m[1].length, 'decimals' => m[2].to_s.length, 'suffix' => m[3].to_s }
+end
+
+# The exact-format Text() formula for a scaled-suffix format (the
+# fidelity-recipes KPI exact-format recipe, mechanized). Grouping is lost
+# (1234B not 1,234B) — acceptable for scaled values, rarely >3 digits.
+def scaled_suffix_formula(inner_formula, spec)
+  "Text(Round((#{inner_formula}) / #{spec['scale']}, #{spec['decimals']}))" \
+    "#{spec['suffix'].empty? ? '' : %( & "#{spec['suffix']}")}"
 end
 
 # Sigma formulas reference controls by `controlId` in brackets, NOT by display
@@ -1991,6 +2015,21 @@ def pick_tableau_format(formats, header)
   nil
 end
 
+# The RAW Tableau format string for a header (same matching loop as
+# pick_tableau_format) — for formats the enum translator returns nil on
+# (scale-comma + suffix), where the exact path is a Text() formula column.
+def pick_tableau_format_raw(formats, header)
+  return nil if formats.nil? || formats.empty?
+  hkey = header.to_s.downcase.gsub(/\W+/, '')
+  formats.each do |field, val|
+    inner = field.to_s.downcase.scan(/\[([^\]]+)\]/).flatten.last.to_s
+    parts = inner.split(':')
+    friendly = parts.length >= 3 ? parts[1].to_s.gsub(/\W+/, '') : ''
+    return val if !friendly.empty? && (friendly == hkey || hkey.include?(friendly) || friendly.include?(hkey))
+  end
+  nil
+end
+
 # ---- "Measure Names on rows" → ordered values[] members -------------------
 # First-class the DDMX crosstab pattern (N bespoke calc measures stacked as the
 # rows of a crosstab). z['measures'] is the parser's document-order walk of the
@@ -2656,16 +2695,31 @@ def build_kpi_element(z, meta, mmap, opts, warnings, data_elements = [])
       { 'kind' => 'number', 'formatString' => ',.0f' }
     end
 
+  # Scale-comma + literal-suffix source format ('#,##0,,,B' → "1B"): the d3
+  # enum can't render it (,.2s shows 'G' for 1e9), so the enum translator
+  # returned nil above. Mechanize the fidelity-recipes exact-format recipe:
+  # a Text() formula column carries the EXACT rendering and the KPI value
+  # points at it (numeric column kept for anything else that needs it).
+  fmt_columns = []
+  if tab_fmt.nil? && (raw_fmt = pick_tableau_format_raw(z['formats'], master['name'])) &&
+     (sspec = parse_scaled_suffix_format(raw_fmt))
+    fmt_col_id = "#{measure_col_id}-fmt"
+    fmt_columns << { 'id' => fmt_col_id, 'name' => "#{master['name'].to_s.strip} (fmt)",
+                     'formula' => scaled_suffix_formula(formula, sspec) }
+    warnings << "NOTE '#{cap}' KPI: source format #{raw_fmt.inspect} is scale+suffix (not d3-expressible) — " \
+                "emitted exact-format Text() column and pointed the KPI value at it"
+  end
+
   element = {
     'id'      => el_id,
     'kind'    => 'kpi-chart',
     'name'    => tile_title(z, cap),
     'source'  => { 'kind' => 'table', 'elementId' => source_eid },
-    'columns' => [measure_col],
+    'columns' => [measure_col] + fmt_columns,
     # value.columnId, NOT value.id — the live API 400s with
     # "value.columnId: Invalid string: undefined" (bead 3w4d; same fix as
     # qlik-to-sigma scout-validate + refs/sigma-build-gotchas.md).
-    'value'   => { 'columnId' => measure_col_id }
+    'value'   => { 'columnId' => fmt_columns.any? ? fmt_columns.first['id'] : measure_col_id }
   }
 
   # B3 (gap ubr5.7): a Tableau "big number" BAN scorecard (Shape/Circle mark with
@@ -4334,14 +4388,20 @@ def text_body_from_runs(runs, align: nil, bg: nil)
       next '' if raw.empty?
       next raw if raw.strip.empty? # whitespace spacer → literal (keeps run spacing)
       esc = raw.gsub('&', '&amp;').gsub('<', '&lt;').gsub('>', '&gt;')
-      # Bold markers must hug the text — markdown won't bold "** Rank**" (leading
-      # space inside the **). Keep any leading/trailing whitespace OUTSIDE.
-      if r['bold'] && (mm = esc.match(/\A(\s*)(.*?)(\s*)\z/m)) && !mm[2].empty?
-        esc = "#{mm[1]}**#{mm[2]}**#{mm[3]}"
+      # Bold/italic markers must hug the text — markdown won't style "** Rank**"
+      # (leading space inside the markers). Keep leading/trailing whitespace
+      # OUTSIDE. Sigma has no font-style/font-weight span props (whitelist:
+      # color/background-color/font-size/font-family) — bold+italic are
+      # markdown (**/*, combined ***), underline the whitelisted <u> tag.
+      marker = "#{'**' if r['bold']}#{'*' if r['italic']}"
+      if !marker.empty? && (mm = esc.match(/\A(\s*)(.*?)(\s*)\z/m)) && !mm[2].empty?
+        esc = "#{mm[1]}#{marker}#{mm[2]}#{marker.reverse}#{mm[3]}"
       end
+      esc = "<u>#{esc}</u>" if r['underline'] && !esc.strip.empty?
       styles = []
       styles << "color: #{r['color']}" if r['color']
       styles << "font-size: #{r['font_size']}px" if r['font_size']
+      styles << "font-family: #{r['font']}" if r['font']
       styles.empty? ? esc : %(<span style="#{styles.join('; ')}">#{esc}</span>)
     end.join
   end
@@ -4508,6 +4568,29 @@ unless opts[:pages_mode] == :worksheet
                  'is_background' => !!z['is_background'],
                  'is_scaled' => z['is_scaled'], 'is_centered' => z['is_centered'] }
       record['image_file_url'] = z['image_file_url'] if z['image_file_url']
+      # v5.0 pixel classification (lib/png_classify): a bitmap whose pixels
+      # read as a ROUNDED CARD (transparent corners + near-uniform interior)
+      # is Tableau's faked-container idiom — the faithful Sigma target is a
+      # styled container (style.backgroundColor + borderRadius), not a
+      # stretched image. v1 records the verdict + extracted fill/radius and
+      # NOTEs it for the RCF loop; fail-open (decode failure → 'art' → the
+      # data-URI element path, never worse than today).
+      if asset
+        cls = PngClassify.classify(asset, zone_w_pct: z['w_pct'], zone_h_pct: z['h_pct'],
+                                          canvas_w: dash.dig('canvas_px', 'w'),
+                                          canvas_h: dash.dig('canvas_px', 'h'))
+        if cls.is_a?(Hash)
+          record['pixel_kind'] = cls['kind']
+          if cls['kind'] == 'rounded_card'
+            record['card_fill']      = cls['fill']
+            record['card_radius_px'] = cls['radius_px']
+            warnings << "NOTE dashboard '#{dash['dashboard']}' image zone #{z['id']} " \
+                        "(#{File.basename(asset)}) is a ROUNDED-CARD bitmap (fill #{cls['fill']}, " \
+                        "r=#{cls['radius_px']}px) — prefer a styled container " \
+                        "(backgroundColor + borderRadius) over the image element (image-assets.json)"
+          end
+        end
+      end
       image_asset_records << record
       if z['is_background']
         warnings << "dashboard '#{dash['dashboard']}' image zone #{z['id']} is a FULL-CANVAS " \
@@ -4619,12 +4702,14 @@ def control_display_for(layout, cap, norm)
   nil
 end
 
-# Map a Tableau control_display to a Sigma controlType for a discrete/list param.
-# compact → list (dropdown); type_in → text; otherwise segmented (button row).
+# Map a Tableau control_display (zone `mode`) to a Sigma controlType for a
+# discrete/list signal. Full Tableau zone-mode vocabulary (v5.0 matrix):
+# compact/checkdropdown → list (dropdown), checklist → list (multi),
+# radiolist → segmented, type_in/pattern → text, otherwise segmented.
 def sigma_control_type(disp)
   case disp
-  when 'compact' then 'list'
-  when 'type_in' then 'text'
+  when 'compact', 'checkdropdown', 'checklist' then 'list'
+  when 'type_in', 'pattern' then 'text'
   else 'segmented'
   end
 end
@@ -4716,14 +4801,25 @@ unless opts[:no_auto_controls]   # default-on: never miss a .twb parameter/filte
       warnings << "parameter '#{cap}' is not referenced by any worksheet calc — emitting it anyway (likely a filter/period picker); complete its filter wiring per controls-coverage.json"
     end
     slug = cap.downcase.gsub(/\W+/, '-').sub(/-$/, '')
+    # Base spec. includeNulls is added PER BRANCH — the OpenAPI carries it on
+    # only 7 controlTypes (text/number/number-range/date/date-range/slider/
+    # range-slider); stray on list/segmented/switch it's out-of-schema.
     spec = {
       'id'        => "el-param-#{slug}",
       'kind'      => 'control',
       'controlId' => "ctl-param-#{slug}",
-      'name'      => cap,
-      'includeNulls' => 'when-no-value-is-selected'
+      'name'      => cap
     }
-    if p['param_domain'] == 'list'
+    if p['param_domain'] == 'list' &&
+       sigma_control_type(control_display_for(layout, cap, norm_cap)) == 'text'
+      # type_in zone mode: a free-text input has NO source/selectionMode in the
+      # schema (mode is REQUIRED); attaching the manual-source block made the
+      # whole element off-schema (live leak class).
+      spec['controlType'] = 'text'
+      spec['mode'] = 'equals'
+      spec['value'] = p['default_value']
+      spec['includeNulls'] = 'when-no-value-is-selected'
+    elsif p['param_domain'] == 'list'
       # E1: dropdown vs segmented from the Tableau control display mode; default
       # segmented (button row) when Tableau declared no explicit mode.
       spec['controlType']   = sigma_control_type(control_display_for(layout, cap, norm_cap))
@@ -4757,42 +4853,55 @@ unless opts[:no_auto_controls]   # default-on: never miss a .twb parameter/filte
       # `value` on readback and (b) makes the translated Switch/If measure-picker
       # compile to type "error" — a scalar case-compare against a multi-select
       # ARRAY. Pin single so the scalar default applies and the Switch resolves.
-      # (Verified live 2026-07-05: without this the picker ships dead.)
-      spec['selectionMode'] = 'single'
+      # (Verified live 2026-07-05: without this the picker ships dead. The
+      # OpenAPI enum says multiple-only — live behavior wins; do not "fix".
+      # segmented is inherently single: no selectionMode in its schema.)
+      spec['selectionMode'] = 'single' if spec['controlType'] == 'list'
       # Canonicalise so the default matches a control option value (0.→0).
       spec['value'] = canonical_switch_value(p['default_value'])
     elsif p['param_domain'] == 'range' && %w[integer real].include?(p['datatype'])
       # Numeric range parameter → Sigma `number-range` control (discovered by
       # gap-scout 2026-05-20, beads-sigma-ebw). Two-handle slider; the single-
       # value Tableau parameter is rendered as a range with handles initially
-      # collapsed to the default. `mode` and `values` don't round-trip on
-      # readback but the workbook renders correctly (known Sigma quirk).
+      # collapsed to the default. Bounds are the schema's flat min/max (the old
+      # mode:'between' + values:[…] pair was out-of-schema and never
+      # round-tripped on readback).
       spec['controlType'] = 'number-range'
-      spec['mode']        = 'between'
       min = p['min'] ? (p['datatype'] == 'real' ? p['min'].to_f : p['min'].to_i) : nil
       max = p['max'] ? (p['datatype'] == 'real' ? p['max'].to_f : p['max'].to_i) : nil
-      spec['values']      = [min, max].compact if min && max
+      spec['min'] = min if min
+      spec['max'] = max if max
+      spec['includeNulls'] = 'when-no-value-is-selected'
       warnings << "parameter '#{cap}' is a numeric range — emitted as number-range control (Sigma 2-handle slider; Tableau's single-handle UX needs manual post-publish tweak)"
     elsif p['param_domain'] == 'range' && %w[date datetime].include?(p['datatype'])
       spec['controlType'] = 'date-range'
       spec['mode'] = 'between'
+      spec['includeNulls'] = 'when-no-value-is-selected'
     elsif p['datatype'] == 'boolean'
-      # Boolean parameter → Sigma switch (on/off toggle). Default from the raw value.
+      # Boolean parameter → Sigma switch (on/off toggle). Default from the raw
+      # value. mode is REQUIRED on switch (True/False vs True/All).
       spec['controlType'] = 'switch'
+      spec['mode']  = 'True/False'
       spec['value'] = %w[true 1].include?(p['default_value'].to_s.downcase.strip)
     elsif %w[date datetime].include?(p['datatype'])
       # Single-value date parameter (not a range) → Sigma `date` control.
+      # mode is REQUIRED on date (=|>=|<=).
       spec['controlType'] = 'date'
+      spec['mode']  = '='
       spec['value'] = p['default_value']
+      spec['includeNulls'] = 'when-no-value-is-selected'
     elsif %w[integer real].include?(p['datatype'])
       # Single-value numeric parameter (not a range) → Sigma `number` control.
       spec['controlType'] = 'number'
       spec['mode']  = '='
       spec['value'] = p['datatype'] == 'real' ? p['default_value'].to_f : p['default_value'].to_i
+      spec['includeNulls'] = 'when-no-value-is-selected'
     else
-      # Generic fallback — text input
+      # Generic fallback — text input. mode is REQUIRED on text.
       spec['controlType'] = 'text'
+      spec['mode']  = 'equals'
       spec['value'] = p['default_value']
+      spec['includeNulls'] = 'when-no-value-is-selected'
     end
     # TASK C (#259): data-scoping wiring. If this parameter drives a boolean
     # filter calc "[Col] = [Param]" whose [Col] resolves to a master column,
@@ -4883,9 +4992,9 @@ $param_switches.each do |sw|
     # Measure-pickers are single-valued (see the param-control path above): a
     # `list` control defaults to multiple, which drops the scalar `value` and
     # errors the Switch (scalar vs array). Pin single. Verified live 2026-07-05.
+    # (No includeNulls — not in the list/segmented schema.)
     'selectionMode' => 'single',
-    'value'       => values.first,
-    'includeNulls' => 'when-no-value-is-selected'
+    'value'       => values.first
   }
   control_scope_records << {
     'controlId' => sw['control_id'], 'name' => pcap, 'mechanism' => 'formula',
@@ -4967,8 +5076,7 @@ unless opts[:no_auto_controls]   # default-on: never miss a .twb parameter/filte
       'id'           => "el-ctl-#{slug}",
       'kind'         => 'control',
       'controlId'    => "ctl-#{slug}",
-      'name'         => cap.strip,
-      'includeNulls' => 'when-no-value-is-selected'
+      'name'         => cap.strip
     }
     # Quick-filter zones apply per-dashboard: place the control only on the
     # dashboard pages whose zone tree shows it (page-per-dashboard mode);
@@ -4984,17 +5092,28 @@ unless opts[:no_auto_controls]   # default-on: never miss a .twb parameter/filte
       'unreachable' => unreachable, 'status' => 'emitted'
     }
     case f['kind']
-    when 'list'
-      spec['controlType']   = 'list'
-      spec['mode']          = 'include'
-      spec['selectionMode'] = 'multiple'
-      spec['values']        = []  # default to all; user adjusts in UI
+    when 'list', 'list+condition'
+      # radiolist zones → segmented (single-select); everything else a
+      # column-backed multi-select list. list+condition keeps the member list
+      # control; the CONDITION itself is not a control — surface it.
+      disp = control_display_for(layout, cap, norm_cap)
+      spec['controlType'] = disp == 'radiolist' ? 'segmented' : 'list'
+      if spec['controlType'] == 'list'
+        spec['mode']          = 'include'
+        spec['selectionMode'] = 'multiple'
+        spec['values']        = []  # default to all; user adjusts in UI
+      end
       spec['source'] = {
         'kind'     => 'source',
         'source'   => { 'kind' => 'table', 'elementId' => opts[:master_id] },
         'columnId' => m['id']
       }
       spec['filters'] = targets
+      if f['kind'] == 'list+condition'
+        warnings << "quick filter '#{cap}' carries a CONDITION beyond its member list " \
+                    "(#{Array(f['condition_expressions']).join('; ')[0, 120]}) — the member control is emitted; " \
+                    'apply the condition as an element filter or accept the wider domain'
+      end
     when 'relative-date'
       # Tableau relative-date → ROLLING Sigma date-range control (same rolling
       # mode vocabulary as an element filter; shapes verified in sigma-workbooks
@@ -5026,8 +5145,39 @@ unless opts[:no_auto_controls]   # default-on: never miss a .twb parameter/filte
         end
       end
     when 'number-range'
-      spec['controlType'] = 'range-slider'
+      if %w[date datetime].include?(f['datatype'].to_s)
+        # Quantitative filter on a DATE column: a range-slider is the wrong
+        # widget (renders epoch numbers) — date-range with the parsed bounds.
+        spec['controlType'] = 'date-range'
+        spec['mode'] = 'between'
+        spec['startDate'] = f['min'] if f['min']
+        spec['endDate']   = f['max'] if f['max']
+      elsif f['min'] && f['max']
+        spec['controlType'] = 'range-slider'
+        # Bounds are load-bearing: a bare range-slider renders 0..0 and filters
+        # everything out. low/high = the slider track, min/max = selected band.
+        spec['low']  = f['min']
+        spec['high'] = f['max']
+        spec['min']  = f['min']
+        spec['max']  = f['max']
+      else
+        # single-bound quantitative filter (at-least / at-most) → one-handle slider
+        spec['controlType'] = 'slider'
+        spec['mode']  = f['min'] ? '>=' : '<='
+        spec['value'] = f['min'] || f['max']
+      end
+      spec['includeNulls'] = 'when-no-value-is-selected'
       spec['filters'] = targets
+    else
+      # Unknown filter kind: NEVER append a controlType-less spec (controlType
+      # is REQUIRED on every schema branch — the old fallthrough shipped an
+      # invalid element that killed the whole POST). Downgrade the scope record
+      # just pushed above and skip emission.
+      rec = control_scope_records.reverse.find { |r| r['controlId'] == spec['controlId'] }
+      rec['status'] = 'needs-wiring' if rec
+      warnings << "shared filter '#{cap}' kind=#{f['kind'].inspect} has no controlType mapping — " \
+                  'NOT emitted (needs-wiring in controls-coverage); wire via --controls'
+      next
     end
     auto_controls << spec
   end
@@ -5095,6 +5245,41 @@ if opts[:controls]
         'kind' => 'manual', 'valueType' => 'text', 'values' => c['values'] || [], 'labels' => []
       }
       spec['value'] = c['value']
+    # v5.0: every remaining schema type gets its REQUIRED fields — the old
+    # passthrough shipped switch/checkbox/text/number/date/slider without
+    # `mode` (required on each) and they 400'd the POST.
+    when 'switch', 'checkbox'
+      spec['mode']  = c['mode'] || 'True/False'
+      spec['value'] = c['value'] unless c['value'].nil?
+    when 'text'
+      spec['mode']  = c['mode'] || 'equals'
+      spec['value'] = c['value'] if c['value']
+    when 'text-area'
+      spec['value'] = c['value'] if c['value']
+    when 'number'
+      spec['mode']  = c['mode'] || '='
+      spec['value'] = c['value'] if c['value']
+    when 'date'
+      spec['mode']  = c['mode'] || '='
+      spec['value'] = c['value'] if c['value']
+    when 'number-range'
+      spec['min'] = c['min'] if c['min']
+      spec['max'] = c['max'] if c['max']
+    when 'slider'
+      spec['mode']  = c['mode'] || '<='
+      %w[low high step value].each { |k| spec[k] = c[k] if c[k] }
+    when 'range-slider'
+      %w[low high step min max].each { |k| spec[k] = c[k] if c[k] }
+    when 'top-n'
+      # no extra spec fields exist in the OpenAPI — wiring (filters) only
+    when 'hierarchy'
+      spec['mode']   = c['mode'] || 'include'
+      spec['values'] = c['values'] || []
+      spec['source'] = c['source'] if c['source']
+    end
+    # includeNulls exists on only 7 types — strip it where out-of-schema.
+    unless %w[text number number-range date date-range slider range-slider].include?(spec['controlType'])
+      spec.delete('includeNulls')
     end
     extras << spec
   end
@@ -5142,6 +5327,73 @@ begin
               (missing.any? ? "; #{missing.size} UNACCOUNTED (#{missing.map { |r| r['name'] }.join(', ')}) — must be 0" : '; 0 unaccounted ✓')
 rescue => e
   warnings << "control-coverage reconciliation error: #{e.message}"
+end
+
+# ---- Multi-DS routing (v5.0) ------------------------------------------------
+# Three rounds' #1 recurring gap, mechanized. multi-ds-plan.json (gap-scan)
+# maps each worksheet to its owning federated datasource; every chart used to
+# be hardwired to the ONE master (built from the dominant datasource), so
+# outlier-datasource charts showed the wrong numbers and a WARN wall told a
+# human to re-source them. Now: for each outlier worksheet whose element is
+# MECHANICAL (source == the master, formulas plain [Master/…]), lazily emit a
+# hidden sub-master per outlier datasource ("Master (<caption>)", DM-element
+# placeholder resolved by the orchestrator like the grain helpers) and repoint
+# the element + rewrite its formulas in lock-step. Charts needing window/LOD/
+# two-stage helpers keep the WARN (v1 scope cut: the translators emit literal
+# [Master/…] internally — threading a source through them is the blast-radius
+# trap).
+def route_multi_ds!(elements, data_elements, plan, master_id, warnings)
+  routed = {}
+  return routed unless plan && plan['datasources'].is_a?(Array) && plan['datasources'].size > 1
+  norm = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]/, '') }
+  dominant = plan['datasources'].max_by { |d| (d['worksheets'] || []).size }
+  ws_to_ds = {}
+  plan['datasources'].each do |d|
+    next if d == dominant
+    (d['worksheets'] || []).each { |w| ws_to_ds[norm.call(w)] = d }
+  end
+  submasters = {} # ds caption → sub-master element (lazy)
+  elements.each do |el|
+    ds = ws_to_ds[norm.call(el['_worksheet'])]
+    next unless ds
+    # mechanical-only guard: source must be exactly the shared master
+    next unless el['source'] == { 'kind' => 'table', 'elementId' => master_id }
+    caption = ds['caption'].to_s
+    sm = submasters[caption] ||= {
+      'id' => "submaster-#{norm.call(caption)[0, 24]}", 'kind' => 'table',
+      'name' => "Master (#{caption})", 'visibleAsSource' => false,
+      'source' => { 'kind' => 'data-model', 'elementId' => "__DM_ELEMENT__:#{caption}" },
+      'columns' => []
+    }
+    # Repoint + rewrite formulas in lock-step; collect the referenced column
+    # names so the sub-master exposes exactly what its charts consume
+    # (formulas [<caption>/<col>] — the orchestrator's placeholder resolver
+    # rewrites the prefix too when the live DM element name differs).
+    json = JSON.generate(el)
+    cols = json.scan(%r{\[Master/([^\]/]+)\]}).flatten.uniq
+    cols.each do |cn|
+      next if sm['columns'].any? { |c| c['name'] == cn }
+      sm['columns'] << { 'id' => "#{sm['id']}-c#{sm['columns'].size}", 'name' => cn,
+                         'formula' => "[#{caption}/#{cn}]" }
+    end
+    rewritten = JSON.parse(json.gsub('[Master/', "[Master (#{caption})/"))
+    el.replace(rewritten)
+    el['source'] = { 'kind' => 'table', 'elementId' => sm['id'] }
+    routed[el['_worksheet']] = caption
+    warnings << "NOTE multi-DS: '#{el['_worksheet']}' auto-routed to datasource '#{caption}' " \
+                "(sub-master #{sm['id']}, #{cols.size} column(s))"
+  end
+  data_elements.concat(submasters.values)
+  routed
+end
+
+$ds_routed = {}
+begin
+  plan_path = File.join(opts[:tab], 'multi-ds-plan.json')
+  plan = File.exist?(plan_path) ? (JSON.parse(File.read(plan_path)) rescue nil) : nil
+  $ds_routed = route_multi_ds!(elements, data_elements, plan, opts[:master_id], warnings)
+rescue => e
+  warnings << "multi-DS routing error (charts left on the master + WARN wall): #{e.message}"
 end
 
 # ---- Output mode ----
@@ -5196,7 +5448,8 @@ if opts[:pages_mode] == :worksheet
       'elements' => page_extras + els
     }
   end
-  File.write(opts[:out], JSON.pretty_generate({ 'pages' => pages }))
+  theme = ThemeDerive.derive(layout)
+  File.write(opts[:out], JSON.pretty_generate({ 'pages' => pages, 'theme' => theme }))
   warn "wrote #{opts[:out]} (page-per-worksheet: #{pages.size} pages, #{auto_controls.size} auto-controls per page)"
 elsif opts[:pages_mode] == :dashboard
   # One Sigma page per Tableau DASHBOARD (bead ptrt) — the fat-workbook fix:
@@ -5292,9 +5545,21 @@ elsif opts[:pages_mode] == :dashboard
         el
       end
     end
-    pages << { 'name' => dash_name, 'elements' => page_extras + els }
+    page = { 'name' => dash_name, 'elements' => page_extras + els }
+    # v5.0: full-canvas designed background (the Figma/PPT card-art pattern) →
+    # page-level backgroundImage (data URI live-verified rendering behind the
+    # page's elements). image_asset_records carries the extracted asset.
+    bg = image_asset_records.find { |r| r['dashboard'] == dash_name && r['is_background'] && r['asset'] }
+    if bg
+      url = bg['image_file_url'] ||
+            "data:image/png;base64,#{Base64.strict_encode64(File.binread(bg['asset']))}"
+      page['backgroundImage'] = { 'url' => url, 'style' => { 'fit' => bg['is_scaled'] ? 'stretch' : 'cover' } }
+      warn "page '#{dash_name}': designed background #{File.basename(bg['asset'])} → page backgroundImage"
+    end
+    pages << page
   end
-  File.write(opts[:out], JSON.pretty_generate({ 'pages' => pages, 'data_elements' => data_elements }))
+  theme = ThemeDerive.derive(layout)
+  File.write(opts[:out], JSON.pretty_generate({ 'pages' => pages, 'data_elements' => data_elements, 'theme' => theme }))
   warn "wrote #{opts[:out]} (page-per-dashboard: #{pages.size} page(s), #{data_elements.size} hidden data element(s), #{(param_controls + auto_controls).size} controls per page)"
 else
   elements.each { |e| e.delete('_worksheet'); e.delete('_dashboard') }
@@ -5308,6 +5573,14 @@ else
     side = opts[:out].sub(/\.json$/, '-data-elements.json')
     File.write(side, JSON.pretty_generate(data_elements))
     warn "wrote #{side} (#{data_elements.size} HIDDEN data-page element(s) — scatter grouped sources; add them to the workbook's Data page)"
+  end
+  # Flat-array mode can't carry a top-level theme key — sidecar (mirrors the
+  # -data-elements.json pattern).
+  theme = ThemeDerive.derive(layout)
+  unless theme.empty?
+    tside = opts[:out].sub(/\.json$/, '-theme.json')
+    File.write(tside, JSON.pretty_generate(theme))
+    warn "wrote #{tside} (derived theme — apply via ThemeDerive.apply! / build-workbook-spec)"
   end
 end
 
@@ -5418,6 +5691,14 @@ if $zone_datasource && $zone_datasource.values.uniq.length > 1
   groups = $zone_datasource.group_by { |_ws, ds| ds }
   dominant_ds = groups.max_by { |_ds, pairs| pairs.length }.first
   outliers = $zone_datasource.reject { |_ws, ds| ds == dominant_ds }
+  # v5.0: auto-routed worksheets are handled (sub-master + rewritten formulas)
+  # — the WARN wall is only for what routing could NOT mechanize.
+  routed = outliers.select { |ws, _| $ds_routed && $ds_routed.key?(ws) }
+  outliers = outliers.reject { |ws, _| $ds_routed && $ds_routed.key?(ws) }
+  unless routed.empty?
+    warn "multi-DS: #{routed.size} outlier chart(s) AUTO-ROUTED to their own datasource's DM element " \
+         "(#{routed.map { |ws, _| "'#{ws}'→'#{$ds_routed[ws]}'" }.join(', ')}) — verify in Phase 6 as usual."
+  end
   unless outliers.empty?
     # Enrich with the gap-scan's routing plan (multi-ds-plan.json): it names
     # each federated datasource's CAPTION + owning worksheets, so the fix

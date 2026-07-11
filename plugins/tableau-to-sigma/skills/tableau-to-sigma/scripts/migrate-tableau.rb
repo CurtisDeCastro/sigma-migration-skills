@@ -2625,10 +2625,33 @@ if mechanical
     next unless ph.start_with?('__DM_ELEMENT__:')
     want = ph.split(':', 2).last
     hit = dm_els.find { |e| e['name'].to_s.strip.casecmp?(want) }
+    # v5.0 hardening (multi-DS sub-masters): DM element names don't always
+    # equal plan captions ("Diablo Sum Dir Bias by Bilevel Preset" vs plan
+    # "Sum Dir Bias by BiLevel Preset" — prefix + case). Fall back to
+    # normalized matching: exact normalized, then UNIQUE containment. Ambiguity
+    # or zero still aborts (no-silent-misbind contract).
+    if hit.nil?
+      nrm = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]/, '') }
+      wantn = nrm.call(want)
+      cands = dm_els.select { |e| nrm.call(e['name']) == wantn }
+      cands = dm_els.select { |e| nrm.call(e['name']).include?(wantn) || wantn.include?(nrm.call(e['name'])) } if cands.empty?
+      abort "FATAL: helper '#{de['name']}' needs DM element '#{want}' but the match is AMBIGUOUS " \
+            "(#{cands.map { |e| e['name'] }.join(' | ')}) — rename to disambiguate" if cands.size > 1
+      hit = cands.first
+    end
     abort "FATAL: grain helper '#{de['name']}' needs DM element '#{want}' but the posted data model has no element " \
           "by that name (have: #{dm_els.map { |e| e['name'] }.join(', ')})" unless hit
     de['source'] = { 'kind' => 'data-model', 'dataModelId' => dm_id, 'elementId' => hit['id'] }
-    line "grain helper '#{de['name']}' → DM element '#{want}' (#{hit['id']})"
+    # A fuzzy match means the helper's passthrough formulas were authored with
+    # the REQUESTED name prefix ([<want>/Col]) — rewrite to the live element's
+    # real name in lock-step or every column errors on POST.
+    real = hit['name'].to_s.strip
+    if real != want && de['columns'].is_a?(Array)
+      de['columns'].each do |c|
+        c['formula'] = c['formula'].gsub("[#{want}/", "[#{real}/") if c['formula'].is_a?(String)
+      end
+    end
+    line "grain helper '#{de['name']}' → DM element '#{real}' (#{hit['id']})#{real == want ? '' : " [name-normalized from '#{want}']"}"
   end
   if chart_elements.empty?
     line 'WARN: build-charts produced 0 elements (no usable view CSVs / zones); emitting an empty dashboard page'
@@ -2669,7 +2692,11 @@ if mechanical
     master_columns: master_columns,
     chart_elements: (chart_pages && chart_pages.any? ? chart_pages : chart_elements),
     data_elements: data_elements,
+    theme: (raw_charts.is_a?(Hash) ? raw_charts['theme'] : nil),
     folder_id: opts[:folder])
+  if spec['themeOverrides']
+    line "theme: #{spec['themeOverrides'].keys.join(', ')} (derived from source style rules)"
+  end
   # Formula-normalize hook (sibling workstream): case-fix converter-derived
   # formulas on the mechanical workbook spec before validate/POST.
   normalize_formulas!(spec, 'wb-spec')

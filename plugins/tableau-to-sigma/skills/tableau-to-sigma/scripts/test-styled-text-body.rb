@@ -79,6 +79,22 @@ b = text_body_from_runs([{ 'text' => 'Learn More', 'bold' => true }], align: 'ce
 check(b == '<p style="text-align: center"><span style="background-color: #fbe7a8">**Learn More**</span></p>',
       "pill: bg span nests inside the align <p> (got #{b.inspect})", fails)
 
+# ---- 9. v5.0 full run surface: italic / bold+italic / underline / family -----
+# Sigma span-style whitelist has no font-style/font-weight/text-decoration —
+# italic must be markdown *…*, bold+italic ***…***, underline the <u> tag.
+b = text_body_from_runs([{ 'text' => 'Source: World Bank', 'italic' => true }])
+check(b == '*Source: World Bank*', "italic → markdown * markers (got #{b.inspect})", fails)
+b = text_body_from_runs([{ 'text' => ' Note ', 'bold' => true, 'italic' => true }])
+check(b == ' ***Note*** ', "bold+italic → *** hugging text, whitespace outside (got #{b.inspect})", fails)
+b = text_body_from_runs([{ 'text' => 'terms', 'underline' => true }])
+check(b == '<u>terms</u>', "underline → whitelisted <u> tag (got #{b.inspect})", fails)
+b = text_body_from_runs([{ 'text' => 'Headline', 'font' => 'Roboto Black', 'font_size' => 24 }])
+check(b == '<span style="font-size: 24px; font-family: Roboto Black">Headline</span>',
+      "font-family span AFTER font-size (existing key order pinned; got #{b.inspect})", fails)
+b = text_body_from_runs([{ 'text' => 'x', 'color' => '#1b1b1b', 'font_size' => 24, 'bold' => true }])
+check(b == '<span style="color: #1b1b1b; font-size: 24px">**x**</span>',
+      "pre-v5.0 span shape unchanged when no new attrs present (got #{b.inspect})", fails)
+
 puts
 if fails.empty?
   puts 'ALL PASS — B4 text_body_from_runs'

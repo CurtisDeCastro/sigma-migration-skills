@@ -125,8 +125,13 @@ def extract_brand_palette(twb_text)
   freq = Hash.new(0)
   # color-encoding buckets
   twb_text.scan(/<map\s+to=(['"])(#[0-9a-fA-F]{6})\1/) { |_q, hex| freq[hex.downcase] += 1 }
-  # user-defined custom palettes
-  twb_text.scan(%r{<color-palette\b[^>]*>(.*?)</color-palette>}m) do |body,|
+  # user-defined custom palettes — CATEGORICAL ONLY. ordered-sequential /
+  # ordered-diverging bodies are RAMPS (heatmap gradients); ingesting them
+  # polluted categoricalScheme with 9-11 near-duplicate ramp steps
+  # (field-caught: a 30-color "brand palette" mixing CB_Paired with the
+  # CB_PuBu ramp). type='regular' is Tableau's categorical marker.
+  twb_text.scan(%r{<color-palette\b([^>]*)>(.*?)</color-palette>}m) do |attrs, body|
+    next unless attrs =~ /type=(['"])regular\1/
     body.to_s.scan(/#[0-9a-fA-F]{6}/) { |hex| freq[hex.downcase] += 1 }
   end
   freq.reject! { |hex, _| color_neutral?(hex) }
@@ -134,6 +139,31 @@ def extract_brand_palette(twb_text)
 end
 
 BRAND_PALETTE = extract_brand_palette(TWB_TEXT)
+
+# ---- Workbook/dashboard style rules (theme channel) ------------------------
+# Tableau's Format▸Workbook + Format▸Dashboard land as <style><style-rule
+# element='all|worksheet|title|dash-title|dash-text|table'> blocks at workbook
+# and dashboard scope. These are the THEME inputs (fonts, dashboard shading) —
+# a separate channel from per-zone <zone-style> (zone_style_fields) and
+# worksheet-level chart chrome. style-rules under <mapsource-defaults> or
+# <datasource> are Mapbox/mark-encoding config, not theme — excluded by
+# walking only the two scopes we want. Consumed by lib/theme_derive.
+def style_rules_for(scope_el)
+  out = {}
+  return out unless scope_el
+  scope_el.elements.each('style/style-rule') do |sr|
+    el = sr.attributes['element'].to_s
+    next if el.empty?
+    sr.elements.each('format') do |f|
+      a = f.attributes['attr']; v = f.attributes['value']
+      next if a.nil? || v.nil?
+      (out[el] ||= {})[a] = v
+    end
+  end
+  out
+end
+
+WORKBOOK_STYLE_RULES = style_rules_for(xml.elements['/workbook'])
 
 def pct(v)
   return nil if v.nil?
@@ -1174,6 +1204,13 @@ def zone_text_fields(z)
       'color'     => (c = a['fontcolor']) && !c.empty? ? c : nil,
       'font_size' => (fs = a['fontsize']) && !fs.empty? ? fs.to_i : nil,
       'bold'      => a['bold'] == 'true',
+      # v5.0 full run surface: family ('Roboto Light'), italic/underline, and
+      # per-run alignment (fontalignment enum PNG-verified: 1=center 2=right;
+      # absent/0=left). nil-compacted so absent attrs don't bloat every run.
+      'font'      => (fn = a['fontname']) && !fn.empty? ? fn : nil,
+      'italic'    => a['italic'] == 'true' || nil,
+      'underline' => a['underline'] == 'true' || nil,
+      'align'     => { '1' => 'center', '2' => 'right' }[a['fontalignment'].to_s],
       'break'     => txt.include?("\n")
     }.compact
   end
@@ -1186,6 +1223,14 @@ def zone_text_fields(z)
       v = f.attributes['value'].to_s
       out['text_align'] = v if %w[center right].include?(v)
     end
+  end
+  # Run-level alignment fallback: a zone whose alignment lives ONLY on its runs
+  # (no zone-style text-align — the diablo credit-line defect) still aligns:
+  # when every visible run agrees, promote to the zone level.
+  if out['text_align'].nil?
+    vis = runs.reject { |r| r['text'].to_s.strip.empty? }
+    aligns = vis.map { |r| r['align'] }.uniq
+    out['text_align'] = aligns.first if vis.any? && aligns.size == 1 && %w[center right].include?(aligns.first)
   end
   # A short single-run zone with a solid fill reads as a pill/chip (e.g. a
   # "Learn More" button) — flag it so the builder can render a background chip.
@@ -1389,6 +1434,10 @@ xml.elements.each('//dashboard') do |d|
     'dashboard'     => d.attributes['name'],
     'is_story'      => is_story,
     'canvas_px'     => canvas_px,
+    # Theme channel: this dashboard's Format▸Dashboard rules + the workbook's
+    # Format▸Workbook rules (lib/theme_derive resolves precedence).
+    'style_rules'   => { 'workbook' => WORKBOOK_STYLE_RULES,
+                         'dashboard' => style_rules_for(d) },
     'zones'         => zones,
     'zone_tree'     => zone_tree,
     # Phase-1 D1 (general): workbook brand palette from color encodings, so
@@ -1412,6 +1461,11 @@ if dashboards.empty? && !worksheets.empty?
     chart_kind = chart_kind_for(ws_meta)
     dashboards << {
       'dashboard' => "[synthetic] #{ws_name}",
+      # Sheet-only workbooks still carry workbook-level Format▸Workbook rules
+      # + encoded brand colors (theme channel); no dashboard scope exists.
+      'style_rules'   => { 'workbook' => WORKBOOK_STYLE_RULES, 'dashboard' => {} },
+      'brand_palette' => BRAND_PALETTE,
+      'canvas_px'     => nil,
       'zones'     => [{
         'id'           => '1',
         'kind'         => 'chart',

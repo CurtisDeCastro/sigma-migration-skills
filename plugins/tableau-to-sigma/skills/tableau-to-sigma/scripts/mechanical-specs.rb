@@ -32,6 +32,7 @@ require 'set'
 require 'json'
 require 'open3'
 require_relative 'lib/py_resolve' # real-Python resolver (Windows Store-stub safe)
+require_relative 'lib/theme_derive' # shared theme derivation/emission (v5.0)
 
 module MechanicalSpecs
   module_function
@@ -1415,8 +1416,11 @@ module MechanicalSpecs
   # (one Sigma page per Tableau dashboard — bead ptrt).
   # data_elements: extra HIDDEN elements for the data page (e.g. the scatter
   # grouped-source tables — bead z1d0).
+  # theme: ThemeDerive.derive output (build-charts 'theme' key) — the
+  # orchestrated path previously dropped it, so every mechanical run shipped
+  # themeless even when the source declared fonts/canvas/palette (v5.0 fix).
   def build_wb_spec(name:, dm_id:, fact_eid:, master_columns:, chart_elements:, folder_id: nil,
-                    data_elements: [])
+                    data_elements: [], theme: nil)
     master = {
       'id' => 'master', 'kind' => 'table', 'name' => 'Master', 'visibleAsSource' => false,
       'source' => { 'kind' => 'data-model', 'dataModelId' => dm_id, 'elementId' => fact_eid },
@@ -1425,7 +1429,12 @@ module MechanicalSpecs
     chart_pages =
       if chart_elements.is_a?(Array) && chart_elements.all? { |e| e.is_a?(Hash) && e.key?('elements') && e.key?('name') }
         chart_elements.each_with_index.map do |pg, i|
-          { 'id' => "page-dash-#{i + 1}", 'name' => pg['name'], 'elements' => pg['elements'] }
+          page = { 'id' => "page-dash-#{i + 1}", 'name' => pg['name'], 'elements' => pg['elements'] }
+          # v5.0: designed-background passthrough — build-charts attaches
+          # backgroundImage to its page hashes; dropping it here silently
+          # strips the art.
+          page['backgroundImage'] = pg['backgroundImage'] if pg['backgroundImage']
+          page
         end
       else
         [{ 'id' => 'page-dash', 'name' => name, 'elements' => chart_elements }]
@@ -1441,6 +1450,7 @@ module MechanicalSpecs
       ]
     }
     spec['folderId'] = folder_id if folder_id
+    ThemeDerive.apply!(spec, theme) if defined?(ThemeDerive)
     spec
   end
 

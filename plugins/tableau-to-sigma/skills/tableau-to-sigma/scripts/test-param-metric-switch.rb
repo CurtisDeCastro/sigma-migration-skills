@@ -89,7 +89,14 @@ check(labs == %w[Revenue Cost], "alias LABELS carried through canonicalisation (
 # The measure Switch keys and the control values must be identical strings.
 switch_keys = measA['formula'].scan(/"(\d+)"/).flatten
 check(switch_keys == vals, "Switch keys #{switch_keys.inspect} == control values #{vals.inspect} (the fix)", fails)
-check((ctlA && ctlA['selectionMode']) == 'single', 'control is single-select (scalar Switch compare)', fails)
+# v5.0: single-valuedness contract — a `list` control must PIN
+# selectionMode:'single' (Sigma defaults to multiple → array vs scalar Switch
+# = type error); `segmented` has NO selectionMode in the schema and is
+# inherently single-valued, so nil is the schema-correct emission there.
+single_ok = ctlA && (ctlA['controlType'] == 'segmented' ? ctlA['selectionMode'].nil?
+                                                        : ctlA['selectionMode'] == 'single')
+check(single_ok, "control is single-valued (list pins 'single'; segmented carries none — got " \
+                 "#{ctlA && ctlA['controlType']}/#{ctlA && ctlA['selectionMode'].inspect})", fails)
 
 puts 'Pattern B — string param, per-branch aggregate: IF [P]="Revenue" THEN SUM([A]) ELSE SUM([B])'
 specB = build(zone_for('IF [Parameters].[Metric] = "Revenue" THEN SUM([Net Revenue]) ELSE SUM([Cost]) END'),

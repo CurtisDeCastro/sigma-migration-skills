@@ -126,6 +126,28 @@ check(translate_kpi_measure_formula('MAX(If(Contains(Lower([Parameters].[X]),"y"
 check(translate_kpi_measure_formula('[Ghost Col]/[Cost (copy)_30000000003]', RMMAP, {}).nil?,
       'unmappable bare ref → nil (no half-resolved formula)', fails)
 
+# ---- v5.0 exact-format Text() columns for scale-comma + suffix formats ------
+# Tableau '#,##0,,,B' renders "1B"; Sigma's d3 enum can't (,.2s shows SI 'G').
+# The mechanized fidelity recipe: parse the scale/suffix, emit a Text() column.
+%w[parse_scaled_suffix_format scaled_suffix_formula pick_tableau_format_raw].each do |fn|
+  m = SRC.match(/^def #{fn}\b.*?\n^end$/m) or abort("could not extract #{fn}")
+  eval(m[0]) # rubocop:disable Security/Eval
+end
+b = parse_scaled_suffix_format('n#,##0,,,B;-#,##0,,,B')
+check(b == { 'scale' => 1_000_000_000, 'decimals' => 0, 'suffix' => 'B' },
+      "',,,B' → /1e9 + literal B (got #{b.inspect})", fails)
+m6 = parse_scaled_suffix_format('n#,##0,,.0M;-#,##0,,.0M')
+check(m6 == { 'scale' => 1_000_000, 'decimals' => 1, 'suffix' => 'M' },
+      "',,.0M' → /1e6, 1 decimal, literal M (got #{m6.inspect})", fails)
+check(parse_scaled_suffix_format('#,##0').nil?, 'no scale-commas → nil (enum path keeps it)', fails)
+check(parse_scaled_suffix_format('p0.0%').nil?, 'percent format → nil (enum path keeps it)', fails)
+f = scaled_suffix_formula('Sum([Master/GDP])', b)
+check(f == 'Text(Round((Sum([Master/GDP])) / 1000000000, 0)) & "B"',
+      "exact-format Text() formula (got #{f.inspect})", fails)
+raw = pick_tableau_format_raw({ '[federated.x].[sum:GDP (current US$):qk]' => 'n#,##0,,,B;-#,##0,,,B' },
+                              'GDP (current US$)')
+check(raw == 'n#,##0,,,B;-#,##0,,,B', "raw format string resolvable by header (got #{raw.inspect})", fails)
+
 puts
 if fails.empty?
   puts 'ALL PASS — KPI value fidelity: validated-calc preference + internal-name caption resolution + ratio translation'

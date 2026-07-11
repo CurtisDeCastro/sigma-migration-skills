@@ -74,6 +74,17 @@ Migrations commonly drop the interactive layer. Rebuild from the source's parame
 - **Parameters → controls, wired into the formulas** (number controls are safe to reference by
   `[ControlId]` in arithmetic; only date/list control refs hit the variant bug). Don't hardcode.
 - Gate idea: source has parameters/quick-filters but the workbook has 0 controls → flag it.
+- **Required fields per controlType** (canary-verified server-side 2026-07-11, 13/14 clean):
+  `switch`/`checkbox` need `mode: 'True/False'|'True/All'`; `text` needs `mode` (e.g. `equals`);
+  `number`/`date`/`slider` need `mode: '='|'>='|'<='`; `number-range` bounds are flat `min`/`max`
+  (NOT mode/values); `range-slider` needs `low`/`high` (track) — bare emits a 0..0 slider that
+  filters everything out; `includeNulls` exists on ONLY text/number/number-range/date/date-range/
+  slider/range-slider (stray elsewhere = off-schema). A controlType-less control spec is invalid —
+  never emit one for an unmapped filter kind (record needs-wiring instead).
+- **`top-n` is docs-only**: in the published OpenAPI but the live tenant 400s even its minimal
+  schema shape (probed 2026-07-11) — keep top-N as a rank-filter on the element, not a control.
+- **`selectionMode: 'single'`** on param-backed list pickers is a live-verified divergence from the
+  OpenAPI enum (says multiple-only) — keep it; scalar Switch compares break against multi-select.
 
 ## Spec/API gotchas (each avoids a wasted round-trip)
 - **`/spec` GET returns YAML; PUT takes JSON.**

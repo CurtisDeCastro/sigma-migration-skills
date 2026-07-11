@@ -125,9 +125,11 @@ check(idx3.empty?, 'un-wired picker → no dedup (control still emitted)', fails
 picker_block = SRC[/param_controls << \{.*?'controlId'\s*=>\s*sw\['control_id'\].*?\n\s*\}/m]
 check(picker_block && picker_block.include?("'selectionMode' => 'single'"),
       "param measure-picker control pins selectionMode:'single'", fails)
-list_param_block = SRC[/if p\['param_domain'\] == 'list'.*?spec\['value'\] = p\['default_value'\]/m]
-check(list_param_block && list_param_block.include?("spec['selectionMode'] = 'single'"),
-      "list parameter control pins selectionMode:'single'", fails)
+# v5.0: selectionMode is pinned only when the resolved controlType is `list`
+# — segmented has NO selectionMode in the schema (inherently single-valued),
+# and text (type_in) carries neither source nor selectionMode.
+check(SRC.include?("spec['selectionMode'] = 'single' if spec['controlType'] == 'list'"),
+      "list parameter control pins selectionMode:'single' (list controlType only)", fails)
 
 puts
 if fails.empty?

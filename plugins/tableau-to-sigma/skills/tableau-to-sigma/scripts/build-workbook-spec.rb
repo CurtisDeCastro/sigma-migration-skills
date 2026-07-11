@@ -36,6 +36,7 @@ require 'yaml'
 require 'optparse'
 require 'net/http'
 require 'uri'
+require_relative 'lib/theme_derive'
 require 'base64'
 
 opts = { mode: 'page-per-worksheet' }
@@ -165,11 +166,15 @@ if specs.is_a?(Hash) && specs['pages']
     slug = p['name'].to_s.downcase
     %w[ / ( ) %].each { |ch| slug = slug.tr(ch, '-') }
     slug = slug.tr(' ', '-').gsub(/-+/, '-').sub(/^-/, '').sub(/-$/, '')[0..40]
-    visible_pages << {
+    page = {
       'id'       => "page-#{slug}",
       'name'     => p['name'],
       'elements' => p['elements']
     }
+    # v5.0: designed-background passthrough (build-charts attaches
+    # backgroundImage to its page hashes; a 3-key copy silently strips it).
+    page['backgroundImage'] = p['backgroundImage'] if p['backgroundImage']
+    visible_pages << page
   end
 elsif specs.is_a?(Array)
   # Dashboard mode → single visible page
@@ -182,55 +187,11 @@ else
   abort('chart-specs.json must be either { pages: [...] } or [ ... ]')
 end
 
-# Derive the workbook theme from the parsed layout (Phase-1 composition/style,
-# gaps D1 + Pass-7 canvas). Two pieces, both spec-authorable (themeName +
-# themeOverrides), emitted only when the source actually declares them:
-#   - backgroundCanvas: the outermost dashboard zone's fill (the page canvas).
-#   - categoricalScheme: the SOURCE region palette, recovered from the tinted
-#     container cards. Tableau stores region-card tints as 8-digit-alpha hex
-#     (#07b4a24e = the saturated base #07b4a2 over the canvas); stripping the
-#     alpha yields the mark color, which is the faithful chart palette (the
-#     hand-built spec's hexes are aesthetic tweaks not present in the .twb, so
-#     the source colors are the correct automated target). Ordered by first
-#     appearance, deduped. Solid 6-digit fills (grey KPI cards) are excluded so
-#     only the categorical region hues form the scheme. Returns {} when nothing
-#     is derivable → no theme emitted (Sigma defaults apply; never worse).
+# Derive the workbook theme from the parsed layout — shared implementation in
+# lib/theme_derive.rb (v5.0: fonts + pageWidth + canvas + categoricalScheme) so
+# this standalone path and the orchestrated mechanical path cannot diverge.
 def derive_theme(layout)
-  dashes = layout.is_a?(Array) ? layout : []
-  return {} if dashes.empty?
-  roots = dashes.first['zone_tree'] || []
-  canvas = nil
-  palette = []
-  seen = {}
-  walk = lambda do |nodes, depth|
-    (nodes || []).each do |n|
-      fc = n['fill_color']
-      canvas ||= fc if depth.zero? && fc # outermost zone fill = page canvas
-      if n['kind'] == 'container' && fc.is_a?(String) && fc =~ /\A#[0-9a-fA-F]{8}\z/
-        base = fc[0, 7].downcase # strip 8-digit alpha → saturated base (mark color)
-        unless seen[base]
-          seen[base] = true
-          palette << base
-        end
-      end
-      walk.call(n['children'], depth + 1)
-    end
-  end
-  walk.call(roots, 0)
-  # Canvas: strip any 8-digit alpha so Sigma gets a solid #rrggbb.
-  canvas = canvas[0, 7] if canvas.is_a?(String) && canvas =~ /\A#[0-9a-fA-F]{8}\z/
-  # Palette preference: the source's real color-encoding brand palette (emitted
-  # by parse-twb-layout as brand_palette) beats the container-tint palette. The
-  # tint palette only fits the region-card idiom; a dashboard whose design is a
-  # color SCHEME (ER's reds, Udemy's subject dots) has no ≥2 tinted containers,
-  # so the old path degenerated to white card fills. Fall back to tints when the
-  # source encodes no brand colors.
-  brand = dashes.first['brand_palette']
-  scheme = (brand.is_a?(Array) && brand.size >= 2) ? brand : palette
-  theme = {}
-  theme['backgroundCanvas'] = canvas if canvas
-  theme['categoricalScheme'] = scheme if scheme.size >= 2
-  theme
+  ThemeDerive.derive(layout)
 end
 
 wb = {
@@ -241,16 +202,16 @@ wb = {
 }
 wb['description'] = opts[:description] if opts[:description]
 
-# Phase-1 theme (D1 palette + Pass-7 canvas), when a --layout was provided.
+# Phase-1 theme (D1 palette + Pass-7 canvas; v5.0 adds fonts + pageWidth),
+# when a --layout was provided. Shared emission (ThemeDerive.apply!).
 if opts[:layout]
   theme = derive_theme(JSON.parse(File.read(opts[:layout])))
+  ThemeDerive.apply!(wb, theme)
   unless theme.empty?
-    wb['themeName'] = 'Light'
-    overrides = {}
-    overrides['colorOverrides'] = { 'backgroundCanvas' => theme['backgroundCanvas'] } if theme['backgroundCanvas']
-    overrides['categoricalScheme'] = theme['categoricalScheme'] if theme['categoricalScheme']
-    wb['themeOverrides'] = overrides unless overrides.empty?
-    warn "  theme: canvas=#{theme['backgroundCanvas'] || '(default)'}, categoricalScheme=#{(theme['categoricalScheme'] || []).size} color(s)"
+    warn "  theme: canvas=#{theme['backgroundCanvas'] || '(default)'}, " \
+         "fonts=#{(theme['fonts'] || {}).values.uniq.join('/')}, " \
+         "pageWidth=#{theme['maxPageWidth'] || '(default)'}, " \
+         "categoricalScheme=#{(theme['categoricalScheme'] || []).size} color(s)"
   end
 end
 
