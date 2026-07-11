@@ -66,6 +66,19 @@ module SigmaLayout
     el
   end
 
+  # Spec-side native divider (v5.0-P2, live-verified POST+readback 2026-07-11)
+  # from a Tableau thin-rule zone. Stroke color is the zone fill with any
+  # 8-digit alpha stripped (divider style.color is documented 6-digit only);
+  # stroke width = the source px, clamped 1..4 (the stroke centers in its grid
+  # cell, so the CELL height never thickens the rule).
+  def divider_el(id, z)
+    { 'id' => id, 'kind' => 'divider',
+      'direction' => (z['w_pct'].to_f >= z['h_pct'].to_f ? 'horizontal' : 'vertical'),
+      'style' => { 'color' => z['fill_color'].to_s[0, 7],
+                   'width' => [[z['fixed_size'].to_i, 1].max, 4].min,
+                   'strokeStyle' => 'solid' } }
+  end
+
   # Spec-side page-title text element. `color` sets the title colour: pass a
   # light hex over a dark header band, or nil to leave the title in the theme's
   # default text colour (correct when the title sits on the page canvas — no
@@ -244,7 +257,9 @@ module SigmaLayout
     'table'       => 10, # header row + a few data rows
     'pivot-table' => 10,
     'control'     => 2,  # one input strip; 2 rows keeps the label visible
-    'text'        => 2
+    'text'        => 2,
+    'divider'     => 1,  # hairline rule — stroke centers in the cell
+    'button'      => 2   # control-sized pill
   }.freeze
 
   # Minimum grid-row span for a Sigma element kind (see KIND_MIN_ROWS).

@@ -1152,6 +1152,50 @@ end
 # pixel-exact asset recovery; is-scaled/is-centered mirror the product's
 # Fit/Center options; image-file-url carries web-hosted images. Shared by the
 # flat-zone loop and build_zone_tree so the two never diverge.
+# ---- Dashboard-object BUTTONS (v5.0-P2) ------------------------------------
+# A Tableau button zone is <zone type-v2='dashboard-object'><button action=…>
+# with <button-visual-state> children (caption/image-path/tooltip/font).
+# Navigation targets are window-id GUIDs → resolve via //windows/window
+# simple-id (census: all 21 corpus navigate targets are class='dashboard',
+# i.e. 1:1 Sigma pages). Export/toggle buttons have no Sigma spec equivalent
+# and become named residue downstream.
+WINDOW_BY_UUID = {}
+xml.elements.each('//windows/window') do |w|
+  sid = w.elements['simple-id']
+  WINDOW_BY_UUID[sid.attributes['uuid']] = {
+    'name' => w.attributes['name'], 'class' => w.attributes['class']
+  } if sid
+end
+
+def zone_button_fields(z)
+  b = z.elements['button'] or return {}
+  out = {}
+  action = b.attributes['action'].to_s
+  out['button_intent'] =
+    if action =~ /goto-sheet/ then 'navigate'
+    elsif b.elements['.//export-button-action'] || b.attributes['button-click-action-metadata']
+      "export-#{b.attributes['button-click-action-metadata'] || 'image'}"
+    elsif b.elements['.//toggle-action'] || action =~ /toggle/ then 'toggle'
+    else 'unknown'
+    end
+  if out['button_intent'] == 'navigate' &&
+     (g = action[/window-id="?\{([0-9A-Fa-f-]+)\}/, 1]) && (w = WINDOW_BY_UUID["{#{g}}"])
+    out['button_nav_target']       = w['name']
+    out['button_nav_target_class'] = w['class'] # 'dashboard' | 'worksheet'
+  end
+  cap = (c = b.elements['.//caption']) && c.text.to_s.strip
+  # call-center carries the junk caption " ." — punctuation-only falls through
+  out['button_caption'] = cap unless cap.nil? || cap.empty? || cap =~ /\A[.\s]+\z/
+  out['button_tooltip']    = (t = b.elements['.//tooltip-text']) && t.text
+  out['button_image_path'] = (ip = b.elements['.//image-path']) && ip.text
+  out['button_type']       = b.attributes['button-type'] # 'text' | nil (image)
+  if (f = b.elements['.//button-caption-font-style'])
+    out['button_font_color'] = f.attributes['fontcolor']
+    out['button_font_size']  = f.attributes['fontsize'] && f.attributes['fontsize'].to_i
+  end
+  out.reject { |_, v| v.nil? }
+end
+
 def zone_image_fields(z)
   a = z.attributes
   out = {
@@ -1277,6 +1321,8 @@ def build_zone_tree(z)
   node['control_display'] = cd if cd
   # Phase-1 B4: styled static text (run-level formatting) on text/title zones.
   node.merge!(zone_text_fields(z)) if kind == 'text' || kind == 'title'
+  # v5.0-P2: button payload on dashboard-object zones.
+  node.merge!(zone_button_fields(z)) if kind == 'dashboard-object'
   # filter/param zones resolve their target column from `param` (a column GUID).
   if kind == 'filter' || kind == 'parameter'
     g = guid_from_param(param)
@@ -1341,6 +1387,8 @@ xml.elements.each('//dashboard') do |d|
     ztext  = (kind == 'text' || kind == 'title') ? zone_text_fields(z) : {}
     # Image zones: asset path + fit options (+ full-canvas background flag).
     zimg   = kind == 'image' ? zone_image_fields(z) : {}
+    # Button payload (dashboard-object zones).
+    zbtn   = kind == 'dashboard-object' ? zone_button_fields(z) : {}
     if kind == 'image' && pct(z.attributes['w']) >= 95.0 && pct(z.attributes['h']) >= 95.0
       zimg['is_background'] = true
     end
@@ -1402,7 +1450,17 @@ xml.elements.each('//dashboard') do |d|
       'is_scaled'      => (kind == 'image' ? zimg['is_scaled']   : nil),
       'is_centered'    => (kind == 'image' ? zimg['is_centered'] : nil),
       'image_file_url' => zimg['image_file_url'],
-      'is_background'  => zimg['is_background']
+      'is_background'  => zimg['is_background'],
+      # Button signals (dashboard-object zones; nil elsewhere)
+      'button_intent'           => zbtn['button_intent'],
+      'button_nav_target'       => zbtn['button_nav_target'],
+      'button_nav_target_class' => zbtn['button_nav_target_class'],
+      'button_caption'          => zbtn['button_caption'],
+      'button_tooltip'          => zbtn['button_tooltip'],
+      'button_image_path'       => zbtn['button_image_path'],
+      'button_type'             => zbtn['button_type'],
+      'button_font_color'       => zbtn['button_font_color'],
+      'button_font_size'        => zbtn['button_font_size']
     }
   end
   # A "storyboard" dashboard is Tableau's story container (sequential story

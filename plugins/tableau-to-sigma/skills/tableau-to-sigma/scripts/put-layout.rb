@@ -20,12 +20,14 @@ require 'json'
 require 'yaml'
 require 'date'
 require 'optparse'
+require 'cgi'
 
 opts = {}
 OptionParser.new do |p|
   p.on('--workbook ID') { |v| opts[:wb] = v }
   p.on('--layout PATH') { |v| opts[:layout] = v }
   p.on('--elements PATH', 'spec elements to inject (default: <layout>.elements.json if present)') { |v| opts[:elements] = v }
+  p.on('--nav-buttons PATH', 'nav-button sidecar (default: sibling *-nav-buttons.json) — rewrites the nav.invalid placeholder URLs to live page URLs') { |v| opts[:nav_buttons] = v }
 end.parse!
 %i[wb layout].each { |k| abort("missing --#{k}") unless opts[k] }
 
@@ -71,6 +73,50 @@ if File.exist?(elements_path)
   end
   puts "injected #{injected} container/header element(s) from #{elements_path}"
 end
+# ---- v5.0-P2: navigation-button URL rewrite ---------------------------------
+# Nav buttons are POSTed with the machine-recognizable placeholder
+# https://nav.invalid/#page=<name> (the workbook URL doesn't exist until the
+# POST returns). Now that it does: resolve each target page NAME to its live
+# page id and rewrite the placeholder — in button `actions[].effects[].url`
+# AND in text-pill markdown bodies (the workspace-gated-button fallback).
+nav_path = opts[:nav_buttons] || Dir.glob(File.join(File.dirname(opts[:layout]), '*-nav-buttons.json')).first
+if nav_path && File.exist?(nav_path)
+  wb_meta = JSON.parse(http(:get, "/v2/workbooks/#{opts[:wb]}").body) rescue {}
+  wb_url = wb_meta['url'].to_s
+  if wb_url.empty?
+    warn 'WARN: workbook URL unavailable — nav-button placeholders left in place'
+  else
+    page_id_by_name = spec['pages'].each_with_object({}) { |p, h| h[p['name'].to_s.strip.downcase] = p['id'] }
+    rewritten = 0
+    unresolved = []
+    rewrite = lambda do |s|
+      s.gsub(%r{https://nav\.invalid/#page=([^)"'\s<]+)}) do
+        name = CGI.unescape(Regexp.last_match(1)) rescue Regexp.last_match(1)
+        pid = page_id_by_name[name.strip.downcase]
+        if pid
+          rewritten += 1
+          "#{wb_url}/page/#{pid}"
+        else
+          unresolved << name
+          Regexp.last_match(0)
+        end
+      end
+    end
+    spec['pages'].each do |p|
+      (p['elements'] || []).each do |el|
+        el['body'] = rewrite.call(el['body']) if el['body'].is_a?(String) && el['body'].include?('nav.invalid')
+        (el['actions'] || []).each do |a|
+          (a['effects'] || []).each do |ef|
+            ef['url'] = rewrite.call(ef['url']) if ef['url'].is_a?(String) && ef['url'].include?('nav.invalid')
+          end
+        end
+      end
+    end
+    puts "nav buttons: #{rewritten} placeholder URL(s) rewritten to live page links"
+    unresolved.uniq.each { |n| warn "WARN: nav button targets page #{n.inspect} — no live page by that name; placeholder left (verify by hand)" }
+  end
+end
+
 %w[workbookId url ownerId createdBy updatedBy createdAt updatedAt latestDocumentVersion].each { |k| spec.delete(k) }
 
 resp = http(:put, "/v2/workbooks/#{opts[:wb]}/spec", JSON.pretty_generate(spec))

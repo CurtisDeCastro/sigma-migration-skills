@@ -259,6 +259,12 @@ def resolve_leaf(node, ctx)
     return nil if node['is_background']
     el = ctx[:els_by_id]["img-#{node['id']}"]
     el && el['id']
+  when 'dashboard-object'
+    # v5.0-P2: navigation buttons → their emitted element (build-charts id
+    # "btn-<zoneid>"). Export/toggle buttons emit nothing (named residue) —
+    # nil drops the zone from the grid, correctly.
+    el = ctx[:els_by_id]["btn-#{node['id']}"]
+    el && el['id']
   end
 end
 
@@ -302,6 +308,18 @@ end
 # needed_rows never shrinks below its original allocation, so source
 # proportions are preserved when no floor kicks in.
 def plan_node(node, c0, c1, r0, r1, ctx)
+  # v5.0-P2 divider synthesis: a thin filled rule (spacer / childless container
+  # / blank-text zone) becomes a NATIVE Sigma divider (live-verified). Checked
+  # FIRST so it catches the childless-container idiom (which the container
+  # branch would drop as plans.empty?) and preempts resolve_leaf's nil for
+  # spacer/blank-text rules. Horizontal rules clamp to 1 row (cmax — the
+  # stroke centers in its cell); vertical rules keep their source row span.
+  if ZoneCensus.divider_zone?(node, ctx[:canvas_px])
+    did = "dv-#{ctx[:page_id]}-#{node['id']}"
+    ctx[:extra] << SigmaLayout.divider_el(did, node)
+    horizontal = node['w_pct'].to_f >= node['h_pct'].to_f
+    return [1, proc { |fc0, fc1, fr0, fr1| le(did, fc0, fc1, fr0, fr1) }, horizontal ? 1 : nil]
+  end
   if node['kind'] == 'container'
     kids = node['children'] || []
     # Wrapper-chain collapse: Tableau nests single-child pass-through
@@ -441,7 +459,9 @@ end
 def safety_net_band(page, placed, extra_els, children, prefix, below_row, page_rows)
   placeable = lambda do |e|
     k = e['kind'].to_s
-    k.end_with?('-chart') || %w[table pivot-table control text image].include?(k)
+    # dividers deliberately EXCLUDED: an unplaced divider must never generate
+    # a stray bottom band (it only exists when the tree placed it anyway).
+    k.end_with?('-chart') || %w[table pivot-table control text image button].include?(k)
   end
   unplaced = page['elements'].select { |e| placeable.call(e) && !placed.include?(e['id']) }
   return nil if unplaced.empty?

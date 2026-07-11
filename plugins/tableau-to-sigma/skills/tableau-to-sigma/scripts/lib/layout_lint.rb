@@ -64,7 +64,9 @@ module LayoutLint
     'table'       => 10, # header row + a few data rows
     'pivot-table' => 10,
     'control'     => 2,  # one input strip; 2 rows keeps the label visible
-    'text'        => 2
+    'text'        => 2,
+    'divider'     => 1,  # hairline rule — stroke centers in the cell
+    'button'      => 2   # control-sized pill
   }.freeze
 
   module_function

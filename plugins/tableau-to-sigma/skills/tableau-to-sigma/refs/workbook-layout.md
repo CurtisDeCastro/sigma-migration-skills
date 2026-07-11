@@ -1062,6 +1062,29 @@ In layout XML, image elements use a standard `<LayoutElement>`:
 <LayoutElement elementId="img-logo" gridColumn="1 / 9" gridRow="1 / 9"/>
 ```
 
+### Divider element
+
+`{"id": …, "kind": "divider", "direction": "horizontal|vertical", "style": {"color": "#hex6",
+"width": 1-4, "strokeStyle": "solid|dashed|dotted"}}` — live-verified POST + readback
+2026-07-11. The stroke centers in its grid cell, so a 1-row `<LayoutElement>` renders a clean
+hairline. This is the native target for Tableau's thin filled rules (spacers / childless
+containers / blank-text bars ≤12px with a fill — `ZoneCensus.divider_zone?`); the layout
+builder emits them automatically (`dv-<page>-<zone>` ids). Unfilled thin zones are true gaps
+and stay dropped.
+
+### Button element (workspace-gated)
+
+`kind: "button"` ({text, appearance filled|outline|text, fillColor/fontColor, actions:
+[{trigger: "on-click", effects: [{effect: "open-url", openTarget: "_self|_blank|_parent",
+url}]}]}) is in the OpenAPI and passes spec/verify, but the live PUT is FEATURE-FLAGGED per
+workspace (probed 2026-07-11: 400 "`button` elements are not enabled for this workspace").
+Default emission for Tableau navigation buttons is therefore a **text-pill link**
+(`[**Label**](url)` + pill background); set `SIGMA_BUTTON_ELEMENTS=on` to emit real buttons
+on workspaces with the flag. Either way the URL is the placeholder
+`https://nav.invalid/#page=<name>` — put-layout.rb rewrites it to the live workbook page URL
+after publish (the URL doesn't exist until the POST returns). Export/toggle buttons emit
+nothing (named residue in coverage.json).
+
 ### Container element
 
 Uses `"kind": "container"`. Children are nested inside it via `<GridContainer>` in the layout

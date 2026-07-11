@@ -155,10 +155,48 @@ module Tableau
     request(:get, "#{base_path}/views/#{view_id}/data", accept: '*/*')
   end
 
-  def view_image(view_id, width: 1400, height: 900, resolution: 'high')
+  # NOTE: the /image endpoint has NO size params — `resolution=high` caps at
+  # ~1568px wide and that's it. The old `vf_width/vf_height` pair here were
+  # silent NO-OPS (vf_* is the view-FILTER prefix; 'width'/'height' are not
+  # fields, so Tableau ignored them — review-caught 2026-07-11). Exact-size
+  # renders come from view_pdf below. `filters` applies real vf_ view filters:
+  # {'Region' => 'West'} → &vf_Region=West (field caption, URL-encoded).
+  def view_image(view_id, resolution: 'high', filters: nil)
     qs = "?resolution=#{resolution}&maxAge=1"
-    qs += "&vf_width=#{width}&vf_height=#{height}" if width && height
+    (filters || {}).each { |f, v| qs += "&vf_#{CGI.escape(f.to_s)}=#{CGI.escape(v.to_s)}" }
     request(:get, "#{base_path}/views/#{view_id}/image#{qs}", accept: '*/*', binary: true)
+  end
+
+  # Exact-size render: the /pdf endpoint takes vizWidth/vizHeight (px) —
+  # the ONLY REST path that honors authored canvas dimensions. Rasterize
+  # downstream (or fall back to view_image + resize).
+  def view_pdf(view_id, viz_width:, viz_height:, type: 'Unspecified', orientation: 'Landscape', filters: nil)
+    qs = "?type=#{type}&orientation=#{orientation}&vizWidth=#{viz_width.to_i}&vizHeight=#{viz_height.to_i}&maxAge=1"
+    (filters || {}).each { |f, v| qs += "&vf_#{CGI.escape(f.to_s)}=#{CGI.escape(v.to_s)}" }
+    request(:get, "#{base_path}/views/#{view_id}/pdf#{qs}", accept: '*/*', binary: true)
+  end
+
+  # CSV of a view's summary data, optionally with vf_ view filters applied —
+  # the value channel the interaction oracle diffs (values, not pixels).
+  def view_data_filtered(view_id, filters: nil)
+    qs = '?maxAge=1'
+    (filters || {}).each { |f, v| qs += "&vf_#{CGI.escape(f.to_s)}=#{CGI.escape(v.to_s)}" }
+    request(:get, "#{base_path}/views/#{view_id}/data#{qs}", accept: '*/*')
+  end
+
+  # ---- VizQL Data Service (VDS) ---------------------------------------------
+  # POST /api/v1/vizql-data-service/query-datasource — executes queries
+  # INCLUDING table calcs server-side against a PUBLISHED datasource. The
+  # table-calc oracle: Tableau computes its own WINDOW_*/RUNNING_*/RANK values
+  # (live-verified 2026-07-11: bare calculations 400 with "requires a
+  # tableCalculation specification"; tableCalcType CUSTOM + dimensions =
+  # addressing; unlisted query dims = partition). Same PAT auth; VDS lives
+  # OUTSIDE /api/<ver>/sites, so this bypasses base_path.
+  def query_datasource(datasource_luid, query)
+    body = { 'datasource' => { 'datasourceLuid' => datasource_luid }, 'query' => query }
+    # request() URI.joins against server_url, so the leading /api/v1 path
+    # (outside the site-scoped base_path) resolves correctly as-is.
+    request(:post, '/api/v1/vizql-data-service/query-datasource', body: JSON.generate(body))
   end
 
   # ---- datasources ---------------------------------------------------------

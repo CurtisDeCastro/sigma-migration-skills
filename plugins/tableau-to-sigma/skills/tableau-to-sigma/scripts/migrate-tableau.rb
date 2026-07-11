@@ -3172,6 +3172,18 @@ if rcf_passes.to_i.positive?
   puts '              author a patch from refs/fidelity-recipes.md, fidelity-loop.rb apply-patch --resolves,'
   puts '              and render again. Loop until `fidelity-loop.rb status` is clean (0 unresolved spec-fixable).'
 end
+# v5.0-P2 advisory oracles (never gate; results ride the report):
+wc_side = File.join(WORK, 'window-calcs.json')
+wc_any = File.exist?(wc_side) &&
+         ((JSON.parse(File.read(wc_side))['entries'] || []).any? rescue false)
+if wc_any
+  puts 'VDS ORACLE  : window calcs detected — verify the translations against Tableau itself:'
+  puts "                ruby scripts/vds-oracle.rb --workdir #{WORK}"
+  puts "              (advisory; emits #{File.join(WORK, 'vds-oracle.json')}; published datasources only)"
+end
+puts 'RENDER/INTERACTION (advisory): exact-size Tableau baseline + one-control flip oracle:'
+puts "                ruby scripts/render-baseline.rb --workdir #{WORK}"
+puts "                ruby scripts/verify-interaction.rb --workdir #{WORK}"
 puts 'INTERACTIVITY: generate the post-publish handoff guide — dashboard actions, nav'
 puts '              buttons, dynamic zones, drills, and tooltips cannot ride the spec;'
 puts '              the guide walks the user through adding each in the Sigma UI'

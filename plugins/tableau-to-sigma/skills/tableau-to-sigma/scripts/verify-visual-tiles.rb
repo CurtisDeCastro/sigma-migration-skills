@@ -127,7 +127,7 @@ tiles.each do |t|
   #    to the dashboard-crop fallback instead of a guaranteed 404.
   begin
     if t['view_id'] && !t['view_id'].to_s.start_with?('signal-only-')
-      bytes = Tableau.view_image(t['view_id'], width: opts[:w], height: opts[:h])
+      bytes = Tableau.view_image(t['view_id'])
       File.binwrite(tab_png, bytes)
       rec['tableau_png'] = tab_png if File.size?(tab_png)
     end

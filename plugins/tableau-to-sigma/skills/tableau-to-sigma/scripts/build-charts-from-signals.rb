@@ -57,6 +57,8 @@ require 'open3'
 require_relative 'learned-rules'
 require_relative 'lib/theme_derive'
 require_relative 'lib/png_classify'
+require_relative 'lib/zone_census'
+require 'erb'
 
 opts = { master_id: 'master' }
 OptionParser.new do |p|
@@ -1373,6 +1375,28 @@ WINDOW_TC_RE = /\b(?:RUNNING_[A-Z]+|WINDOW_[A-Z]+|RANK(?:_[A-Z]+)?|INDEX|LOOKUP|
 #   { 'mode' => 'two-stage', 'stage_agg' => 'Max|Min|Sum', 'retrieve_agg' =>
 #                            'Max|Min', 'value_formula' => <inner agg>, 'note' => ... }
 #   { 'mode' => 'manual',    'note' => why }
+# v5.0-P2: structured record of every window-calc translation, for the VDS
+# table-calc oracle (scripts/vds-oracle.rb — Tableau computes the ORIGINAL
+# calc server-side and the values are compared in Phase 6). Best-effort
+# context: entries without dims get a clean oracle SKIP, never an error.
+$window_calc_records = []
+def record_window_calc(zone, calc, plan, mode: nil)
+  return unless plan
+  $window_calc_records << {
+    'id'              => "wc-#{$window_calc_records.size + 1}",
+    'worksheet'       => zone && zone['caption'],
+    'element_id'      => nil, # enriched downstream when known
+    'calc_name'       => calc && (calc['caption'] || calc['name']).to_s.gsub(/^\[|\]$/, ''),
+    'tableau_formula' => calc && calc['formula'],
+    'sigma_formula'   => plan['formula'],
+    'mode'            => mode || plan['mode'],
+    'dims'            => (zone && Array(zone['channels']).select { |c| c.is_a?(Hash) && c['role'].to_s == 'dimension' }
+                               .map { |c| { 'caption' => c['caption'] || c['column'] } }),
+    'filters_present' => !(zone && Array(zone['filters']).empty?),
+    'translator_note' => plan['note']
+  }
+end
+
 def translate_window_calc(formula, mmap, columns_by_guid = {})
   s = formula.to_s.gsub(/\s+/, ' ').strip
   return nil if s.empty? || s !~ WINDOW_TC_RE
@@ -2299,6 +2323,7 @@ def build_pivot_element(z, meta, mmap, opts, warnings, data_elements = [])
     end
     next unless ws_calc
     plan = translate_window_calc(ws_calc['formula'], mmap, meta['columns_by_guid'] || {})
+    record_window_calc(z, ws_calc, plan, mode: 'pivot-value') if plan
     if plan.nil?
       # Parameter-driven Switch value (the "Switch Metric" class): a pivot value
       # like IF [Parameters].[X] = … THEN SUM([A]) ELSE SUM([B]) END becomes a
@@ -2968,6 +2993,7 @@ layout.each do |dash|
         formula = nil
         if ws_calc
           wp = translate_window_calc(ws_calc['formula'], mmap, meta['columns_by_guid'] || {})
+          record_window_calc(z, ws_calc, wp) if wp
           if wp && wp['mode'] == 'inline'
             formula = wp['formula']
             warnings << "'#{cap}' measure '#{label}' is a window table-calc — emitted as a Sigma viz formula [#{wp['note']}]"
@@ -3165,6 +3191,7 @@ layout.each do |dash|
       window_plan = user_calc &&
                     translate_window_calc(user_calc['formula'], mmap,
                                           meta['columns_by_guid'] || {})
+      record_window_calc(z, user_calc, window_plan) if window_plan
       window_calc_name = user_calc && user_calc['name'].to_s.gsub(/^\[|\]$/, '')
       case window_plan && window_plan['mode']
       when 'inline'
@@ -4072,6 +4099,7 @@ layout.each do |dash|
       end
       return nil unless calc
       plan = translate_window_calc(calc['formula'], mmap, meta['columns_by_guid'] || {})
+      record_window_calc(z, calc, plan, mode: 'top-n-filter') if plan && plan['operand_raw']
       return nil unless plan && plan['operand_raw'] # only the top-N branch sets this
       # The filter must KEEP the top rows (member 'true'); a keep-false would
       # invert it. Tableau exports the keep-list in members.
@@ -4508,6 +4536,10 @@ unless opts[:pages_mode] == :worksheet
     end
     (dash['zones'] || []).each do |z|
       next unless %w[text title].include?(z['kind']) && z['text_runs']
+      # v5.0-P2: a blank-text DIVIDER zone becomes a native divider in the
+      # layout (plan_node) — emitting its whitespace body here too would leave
+      # an unplaced text element that lands in a stray bottom band.
+      next if ZoneCensus.divider_zone?(z, dash['canvas_px'])
       full_text = z['text_runs'].map { |r| r['text'] }.join
       plain = norm_label.call(full_text)
       is_short_label = full_text.split.length <= 5 && z['text_runs'].none? { |r| r['break'] }
@@ -4621,6 +4653,63 @@ unless opts[:pages_mode] == :worksheet
     File.write(File.join(opts[:tab], 'image-assets.json'), JSON.pretty_generate(image_asset_records))
     warn "image zones: #{image_asset_records.size} found, " \
          "#{image_asset_records.count { |r| r['is_background'] }} background(s) — image-assets.json written"
+  end
+end
+
+# ---- v5.0-P2: dashboard-object BUTTONS -------------------------------------
+# Corpus census: navigate (dashboard→dashboard, i.e. page→page in Sigma),
+# export-image/pdf (redundant — Sigma has a built-in export menu), toggle
+# (show/hide container — no spec equivalent). NAVIGATE buttons are emitted;
+# the rest become named residue (spec_api_limit_entries).
+#
+# Emission shape: Sigma's native kind:button is spec-valid but WORKSPACE-GATED
+# (live-probed 2026-07-11: verify 200, PUT 400 "`button` elements are not
+# enabled for this workspace") — so the default is the proven text-pill
+# fallback (markdown link + pill background), with real buttons behind
+# SIGMA_BUTTON_ELEMENTS=on for workspaces that have the flag. Both carry the
+# machine-recognizable placeholder URL https://nav.invalid/#page=<name>;
+# put-layout.rb rewrites it to the live workbook page URL post-publish
+# (the workbook URL doesn't exist until the POST returns).
+nav_button_records = []
+unless opts[:pages_mode] == :worksheet
+  layout.each do |dash|
+    (dash['zones'] || []).each do |z|
+      next unless z['kind'] == 'dashboard-object' && z['button_intent'] == 'navigate'
+      unless z['button_nav_target'] && z['button_nav_target_class'] == 'dashboard'
+        warnings << "dashboard '#{dash['dashboard']}' button zone #{z['id']} navigates to a " \
+                    "#{z['button_nav_target_class'] || 'unresolved'} target — no Sigma page equivalent (named residue)"
+        next
+      end
+      label = z['button_caption'] ||
+              z['button_tooltip'].to_s[/\Aclick to (?:navigate to|open) (?:the )?(.+)\z/i, 1] ||
+              z['button_nav_target']
+      url = "https://nav.invalid/#page=#{ERB::Util.url_encode(z['button_nav_target'])}"
+      el =
+        if ENV['SIGMA_BUTTON_ELEMENTS'] == 'on'
+          e = { 'id' => "btn-#{z['id']}", 'kind' => 'button', 'text' => label,
+                'appearance' => 'filled', 'align' => 'center', 'size' => 'small',
+                'actions' => [{ 'trigger' => 'on-click', 'effects' => [{
+                  'effect' => 'open-url', 'openTarget' => '_self', 'url' => url }] }] }
+          e['fillColor'] = z['fill_color'][0, 7] if z['fill_color']
+          e['fontColor'] = z['button_font_color'] if z['button_font_color']
+          e
+        else
+          # Text-pill fallback (proven live): bold markdown link, pill bg.
+          body = "[**#{label}**](#{url})"
+          body = %(<span style="background-color: #{z['fill_color'][0, 7]}">#{body}</span>) if z['fill_color']
+          { 'id' => "btn-#{z['id']}", 'kind' => 'text',
+            'body' => %(<p style="text-align: center">#{body}</p>), 'verticalAlign' => 'middle' }
+        end
+      el['_dashboard'] = dash['dashboard']
+      styled_text_by_dash[dash['dashboard']] << el
+      nav_button_records << { 'element_id' => "btn-#{z['id']}", 'dashboard' => dash['dashboard'],
+                              'target_page_name' => z['button_nav_target'], 'label' => label }
+    end
+  end
+  if nav_button_records.any?
+    side = opts[:out].sub(/\.json$/, '-nav-buttons.json')
+    File.write(side, JSON.pretty_generate(nav_button_records))
+    warn "wrote #{side} (#{nav_button_records.size} navigation button(s) — put-layout.rb rewrites the placeholder URLs post-publish)"
   end
 end
 
@@ -5832,21 +5921,33 @@ actions = []
     end
   end
 end
-unless actions.empty?
+unless actions.empty? && nav_button_records.empty?
   actions_md_path = opts[:out].sub(/\.json$/, '-actions.md')
   md = String.new
   md << "# Tableau dashboard actions — post-publish setup\n\n"
-  md << "Sigma cross-chart filtering replaces Tableau's filter actions. For each\n"
-  md << "row below, in the published Sigma workbook: select the source element,\n"
-  md << "open Actions → Add filter action, target the listed element on the named\n"
-  md << "column.\n\n"
-  md << "| Source dim | Target chart | Filter column |\n"
-  md << "|---|---|---|\n"
-  actions.uniq.each do |a|
-    md << "| #{a['source']} | #{a['target']} | #{a['column']} |\n"
+  unless actions.empty?
+    md << "Sigma cross-chart filtering replaces Tableau's filter actions. For each\n"
+    md << "row below, in the published Sigma workbook: select the source element,\n"
+    md << "open Actions → Add filter action, target the listed element on the named\n"
+    md << "column.\n\n"
+    md << "| Source dim | Target chart | Filter column |\n"
+    md << "|---|---|---|\n"
+    actions.uniq.each do |a|
+      md << "| #{a['source']} | #{a['target']} | #{a['column']} |\n"
+    end
+  end
+  unless nav_button_records.empty?
+    md << "\n## Navigation buttons (wired automatically)\n\n"
+    md << "Emitted with a placeholder URL; put-layout.rb rewrites each to the live\n"
+    md << "workbook page URL after publish. Verify each link navigates correctly.\n\n"
+    md << "| Source dashboard | Button | Target page |\n"
+    md << "|---|---|---|\n"
+    nav_button_records.each do |b|
+      md << "| #{b['dashboard']} | #{b['label']} | #{b['target_page_name']} |\n"
+    end
   end
   File.write(actions_md_path, md)
-  warn "wrote #{actions_md_path} (#{actions.size} action entries)"
+  warn "wrote #{actions_md_path} (#{actions.size} action + #{nav_button_records.size} nav-button entries)"
 end
 
 # ---- spec-API limits — unsupported source primitives/features (bead ubr5.20) --
@@ -5905,6 +6006,28 @@ def spec_api_limit_entries(layout)
                  'Add the trend/comparison in the Sigma editor after publish (not spec-authorable; memory sigma-kpi-trend-comparison-ui-only).')
         next
       end
+    end
+    # v5.0-P2: dashboard-object BUTTON residue (the ubr5.20 anti-silent-vanish
+    # rule). Navigate buttons are EMITTED (btn- elements); export buttons are
+    # redundant (Sigma has a built-in export menu); toggles have no spec
+    # equivalent. Dedupe toggles per (dashboard, tooltip/image) — the corpus
+    # has one workbook with 88 accordion toggles, and 88 identical ledger rows
+    # is noise, not coverage.
+    btns = (dash['zones'] || []).select { |z| z['kind'] == 'dashboard-object' && z['button_intent'] }
+    btns.select { |z| z['button_intent'].to_s.start_with?('export') }.each do |z|
+      entries << { 'visual' => (z['button_caption'] || z['button_tooltip'] || "button #{z['id']}").to_s,
+                   'source_type' => 'button', 'severity' => 'dropped', 'recoverable' => true,
+                   'detail' => "Tableau #{z['button_intent']} download button — redundant in Sigma (built-in export menu)",
+                   'action' => "none needed; point users at Sigma's export menu." }
+    end
+    toggles = btns.select { |z| z['button_intent'] == 'toggle' }
+    toggles.group_by { |z| [z['button_tooltip'], z['button_image_path']] }.each do |_, grp|
+      z = grp.first
+      entries << { 'visual' => (z['button_caption'] || z['button_tooltip'] || "toggle button #{z['id']}").to_s +
+                               (grp.size > 1 ? " (×#{grp.size})" : ''),
+                   'source_type' => 'button', 'severity' => 'dropped', 'recoverable' => false,
+                   'detail' => 'show/hide container toggle button — Sigma has no spec-authorable container-visibility toggle',
+                   'action' => 'replicate as a separate (hidden) page, or leave the region expanded (post-publish).' }
     end
   end
   entries
@@ -5980,6 +6103,14 @@ spec_api_limit_entries(layout).each do |e|
   next if _already.include?(e['visual'].to_s.downcase)
   coverage_unresolved << e
 end
+
+# v5.0-P2: window-calc sidecar for the VDS table-calc oracle (vds-oracle.rb).
+# Always written — an empty entries list tells the oracle "no window calcs"
+# vs "builder predates the sidecar".
+wc_path = File.join(File.dirname(File.expand_path(opts[:out])), 'window-calcs.json')
+File.write(wc_path, JSON.pretty_generate(
+             { 'version' => 1, 'entries' => $window_calc_records }))
+warn "wrote #{wc_path} (#{$window_calc_records.size} window-calc translation(s) for the VDS oracle)" if $window_calc_records.any?
 
 built_n = (defined?(elements) && elements.respond_to?(:size)) ? elements.size : 0
 dropped_n = coverage_unresolved.select { |u| u['severity'] == 'dropped' }.map { |u| u['visual'] }.uniq.size

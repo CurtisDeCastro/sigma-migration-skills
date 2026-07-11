@@ -65,7 +65,7 @@ dash_layout.each do |d|
     if cached && File.size?(cached)
       FileUtils.cp(cached, src_png)
     elsif vid
-      File.binwrite(src_png, Tableau.view_image(vid, width: opts[:w], height: opts[:h]))
+      File.binwrite(src_png, Tableau.view_image(vid))
     end
     rec['source_png'] = src_png if File.size?(src_png)
   rescue StandardError => e
