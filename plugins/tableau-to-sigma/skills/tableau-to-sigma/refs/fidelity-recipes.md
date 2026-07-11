@@ -57,15 +57,16 @@ Each row: **the visible delta** · the spec path · notes/gotcha.
 - **KPI hero number too small / not the focal point** → `value.fontSize` up + transparent element `style` + widen the tile's `layout.anchor`/grid span.
 - **KPI value in the wrong format** (`$473.0k` vs source `$473.0K`) → emit an **exact-format text-formula column** (e.g. an uppercase-K suffix builder) and point the KPI value at it; don't rely on the number-format enum when the source uses a non-standard suffix. Format basics: money `$,.0f`; compact `$,.2s`.
 - **KPI shows its own title *and* the card label** (duplicated) → set the KPI value-column `name: ' '` (single space; `''` re-derives the title).
-- **KPI title clipped** → the tile is < ~5 grid rows; grow `gridRow`. Sparkline/comparison KPIs need ~8+ rows. NOTE: KPI sparklines + comparison/delta badges are **UI-only** — classify those as `ui-only`, don't loop on them.
+- **KPI title clipped** → the tile is < ~5 grid rows; grow `gridRow`. Sparkline/comparison KPIs need ~8+ rows. NOTE on KPI sparklines + comparison/delta badges (live-probed 2026-07-11): the spec ACCEPTS `comparison`/`trend` FORMATTING blocks (spec/verify 200), but there is **no create-spec property that binds** the comparison column / trend axis, and the PUT rejects formatting-without-binding (`comparison.display: requires a comparison column or period comparison on the KPI`). Classify `ui-only` for creation; once a user binds it in the UI, the styling round-trips.
 
 ### Status, thresholds & tables
 - **Status chip / traffic-light cell** → `conditionalFormats` `type: single` with a **flat** `condition`/`value` (not nested).
-- **Threshold highlight** (a layered-mark reference band in Tableau) → a computed boolean column + a 2-color `scheme` (`conditionalFormats`), the layered-marks fallback.
+- **Reference line / band / trendline** (Tableau analytics-pane marks) → NATIVE `refMarks` + `trendlines` (live-probed 2026-07-11: POST + readback + PNG render all green). Shapes: `refMarks: [{type: 'line'|'band', axis: 'axis'|'series'|'series2', value: {type: 'constant', value: N} | {type: 'column', columnId, func} | {type: 'formula', formula}, endValue: {…} (band only)}]`; `trendlines: [{columnId, model: linear|quadratic|polynomial|exponential|logarithmic|power}]`. Emit from parse-twb-layout's `ref_marks`. The computed-boolean + 2-color `scheme` trick is now only the fallback for layered-mark effects refMarks can't express.
 - **Table too dense vs the source's roomy grid** → `tableStyle.{preset: presentation, cellSpacing, textStyles}`. `presentation` is the default to reach for; keep `spreadsheet` only for a true data grid.
 - **In-cell data bars dropped** → `conditionalFormats: [{type: dataBars, columnIds: [<agg col id>], scheme: ["#a4dfc0","#4caf7d"]}]`.
 - **Table at order-grain but source shows a rollup** → build a hidden grouped rollup element and source the table from it via `groupingId`.
-- **Table sort not honored** → spec `sorts` is **silently dropped**; use a `top-n` rank-filter as the sort fallback (documented ceiling).
+- **Sort** → NATIVE (the old "spec sorts silently dropped" rule is STALE — re-probed 2026-07-11: axis sort POSTs, survives readback, and renders in the sorted order). Charts: `xAxis.sort: {by: <columnId>, direction: ascending|descending, aggregation?}`; tables: `sort: [{columnId, direction, nulls?}]`. Keep the `top-n` rank-filter ONLY for truncation (top-N), not as a sort substitute.
+- **Pivot grand totals / subtotals** → NATIVE `totals: {showGrandTotals: shown|hidden, showSubtotals: always|when-collapsed, totalPosition: first|last, …colors/fontWeight}` (live-probed 2026-07-11: `showGrandTotals: 'hidden'` renders with no grand-total row). Supersedes the earlier failed 2-shape grand-total-hiding attempts.
 
 ### Chart kind, marks & axes
 - **Wrong chart kind** (source horizontal bar rendered as a vertical bar, KPI rendered as a 1-row table, heatmap as bars) → set the element `kind` to the source's declared `visualizationType` equivalent; for bar orientation see `refs/window-functions.md`/coverage-matrix and the bar-orientation enum note in memory.
@@ -85,8 +86,8 @@ Each row: **the visible delta** · the spec path · notes/gotcha.
 These are **ceilings**, not spec-fixable — `record` them `ui-only` / `sigma-capability` so the
 ledger flows them to the report instead of blocking the gate:
 
-- KPI sparklines, comparison/delta badges (UI-only).
-- Tooltip beyond `columnNames`; trellis facet-column binding (UI-only).
+- KPI sparklines, comparison/delta badges (binding is UI-only; formatting blocks spec-round-trip — see §KPIs, probed 2026-07-11).
+- Tooltip beyond `columnNames`; trellis facet-column binding (UI-only — schema-confirmed 2026-07-11: the spec `trellis` object is facet STYLING only `{column/row: {border,labels,title}, share, tileSize}`; no property binds a facet column).
 - `useAsFilter` (chart-as-filter), pie percent-labels (`valueFormat:'percent'`) — silently dropped.
 - point-map/region-map title+legend overlap (no position knob).
 - Log-axis PNG export renders linear (render-side, not a spec defect).

@@ -54,6 +54,7 @@ OptionParser.new do |p|
        'with no orchestrator STOP on record (manual-path-authorized.json absent). Counted as a quality waiver; ' \
        'name the reason in your report.') { |v| opts[:allow_manual_spec] = v }
   p.on('--quarantine-on-failure', 'DATAMODEL only: when the POST fails naming specific element(s), or the post-POST column census resolves specific elements to type=error, move those elements to <workdir>/deferred-elements.json, re-POST ONCE without them, and exit 6 (PARTIAL DM — never GREEN until the file is resolved). Default (no flag): fail loudly, quarantine nothing.') { opts[:quarantine] = true }
+  p.on('--skip-spec-verify REASON', 'workbooks only: skip the POST /v2/workbooks/spec/verify server-side preflight (quality waiver — name it in your report).') { |v| opts[:skip_spec_verify] = v }
 end.parse!
 %i[type spec out].each { |k| abort("missing --#{k}") unless opts[k] }
 opts[:workdir] ||= File.dirname(File.expand_path(opts[:spec]))
@@ -138,6 +139,46 @@ def http(method, path, body = nil, accept_json: false)
     return res
   end
 end
+
+# v5.0 preflight: POST /v2/workbooks/spec/verify — Sigma's own server-side
+# spec validation with NO persistence. Runs the real validator before the
+# create/update, so a spec defect surfaces as a clean local error instead of
+# a failed create (workbook POSTs are create-only; a half-validated failure
+# costs an orphan-management cycle). Fail-closed on a validation verdict
+# (4xx WITH a parseable error body), fail-open on endpoint availability
+# (404/405/5xx/network — older tenants may not serve it). Workbooks only;
+# no verify endpoint is documented for dataModels. --skip-spec-verify "<reason>"
+# bypasses (quality waiver — name it in your report).
+def verify_spec!(body, skip_reason, update: false)
+  return unless opts_type_workbook?
+  if skip_reason
+    warn "WARN: spec/verify preflight SKIPPED (--skip-spec-verify: #{skip_reason}) — quality waiver."
+    return
+  end
+  res = http(:post, '/v2/workbooks/spec/verify', body, accept_json: true)
+  code = res.code.to_i
+  if res.is_a?(Net::HTTPSuccess)
+    warn 'spec/verify preflight ok (server-side validation passed)'
+  elsif [400, 409, 422].include?(code)
+    parsed = (JSON.parse(res.body) rescue nil)
+    msg = parsed.is_a?(Hash) ? parsed['message'].to_s : res.body.to_s[0, 800]
+    # verify validates the CREATE envelope (folderId required — live-probed
+    # 2026-07-11). An update body legitimately carries no folderId, so an
+    # envelope-only complaint on a PUT is a shape mismatch, not a spec defect.
+    if update && msg.include?('folderId')
+      warn 'NOTE: spec/verify wants the create envelope (folderId) this PUT body lacks — preflight skipped for update.'
+      return
+    end
+    warn "\nFAIL — Sigma spec/verify rejected the spec (HTTP #{code}) BEFORE any create/update:"
+    warn(parsed ? (JSON.pretty_generate(parsed) rescue msg) : msg)
+    abort 'Fix the spec (validate-spec.rb hints + the server errors above), then re-run. ' \
+          'Nothing was posted — no orphan to clean up.'
+  else
+    warn "NOTE: spec/verify preflight unavailable (HTTP #{code}) — proceeding without it."
+  end
+end
+def opts_type_workbook?; $opts_type == 'workbook'; end
+$opts_type = opts[:type]
 
 # Orphan-prevention pre-check: workbook POSTs are create-only. If this is a
 # second invocation in the same conversion, the previous workbook is being
@@ -256,13 +297,16 @@ if update_id
       end
     end
   end
+  verify_spec!(put_body, opts[:skip_spec_verify], update: true)
   resp = http(:put, format(GET_PATH, update_id), put_body)
   parsed = YAML.safe_load(resp.body, permitted_classes: [Date, Time])
   oid = parsed[ID_FIELD] || update_id
   abort("PUT failed (HTTP #{resp.code}): #{parsed.inspect}") unless resp.is_a?(Net::HTTPSuccess)
   warn "PUT ok: #{ID_FIELD}=#{oid}"
 else
-  resp = http(:post, POST_PATH, File.read(opts[:spec]))
+  post_body = File.read(opts[:spec])
+  verify_spec!(post_body, opts[:skip_spec_verify])
+  resp = http(:post, POST_PATH, post_body)
   parsed = YAML.safe_load(resp.body, permitted_classes: [Date, Time])
   oid = parsed.is_a?(Hash) ? parsed[ID_FIELD] : nil
   # Rec5 quarantine (opt-in): a POST killed by ONE broken element must not lose

@@ -88,7 +88,15 @@ def dashboard_in_scope?(name, page_id)
   name_hit || page_hit
 end
 
-TWB_TEXT = File.read(INP, encoding: 'UTF-8')
+TWB_TEXT = begin
+  raw = File.read(INP, encoding: 'UTF-8')
+  # Defensive FCP normalization for pre-existing workdirs whose .twb was
+  # written before discovery normalized at download time (idempotent; see
+  # lib/fcp_normalize — literal-name XPaths are otherwise blind to native
+  # rounded corners and every other forward-compatibility feature).
+  require_relative 'lib/fcp_normalize'
+  FcpNormalize.needed?(raw) ? FcpNormalize.normalize(raw) : raw
+end
 xml = TwbXml.parse(TWB_TEXT)
 
 # ---- Brand palette (Phase-1 D1, general) ----------------------------------
@@ -1044,6 +1052,7 @@ def zone_kind(type_v2, caption)
   when 'paramctrl'                   then 'parameter'
   when 'color'                       then 'legend'
   when 'empty'                       then 'spacer'
+  when 'bitmap'                      then 'image'
   when 'dashboard-object'            then 'dashboard-object'
   when nil
     # No type-v2 + a worksheet name → this is the chart tile
@@ -1070,18 +1079,57 @@ end
 # them verbatim. Returns {} when the zone has no explicit styling (→ plain container,
 # never worse than today's output). Verified against the "Job Loss from Mass
 # Deportations" benchmark (region tints #07b4a2/#e8519a/#827bb8/#f28e2b at alpha).
+# Full zone-style surface (official StyleAttribute-ST enum, twb XSD 2026.2):
+# background, per-side borders, NATIVE rounded corners (Tableau 2026.1+ —
+# reached here via the FCP normalization pass; previously invisible),
+# margins/padding. Emitted keys are consumed by the layout/style compiler
+# (container style.{backgroundColor,borderColor,borderWidth,borderRadius}).
 def zone_style_fields(z)
   out = {}
+  corners = {}
   z.elements.each('zone-style/format') do |f|
     a = f.attributes['attr']; v = f.attributes['value']
     next if v.nil? || v.empty?
     case a
     when 'background-color'
       out['fill_color'] = v unless v.downcase == '#00000000' # skip fully-transparent
+    when 'background-transparency' then out['fill_transparency'] = v
     when 'border-color'  then out['border_color'] = v
     when 'border-style'  then out['border_style'] = v
+    when 'border-width'  then out['border_width'] = v
+    when /\Aborder-(color|style|width)-(top|right|bottom|left)\z/
+      prop, side = Regexp.last_match(1), Regexp.last_match(2)
+      ((out['border_sides'] ||= {})[side] ||= {})[prop] = (prop == 'width' ? v.to_i : v)
+    when 'corner-radius' then out['corner_radius'] = v.to_i
+    when /\Acorner-radius-(top|bottom)-(left|right)\z/
+      corners[a.sub('corner-radius-', '')] = v.to_i
+    when 'rounding' then out['rounding'] = v
+    when /\Amargin(-top|-right|-bottom|-left)?\z/
+      (out['margins'] ||= {})[a == 'margin' ? 'all' : a.sub('margin-', '')] = v.to_i
+    when /\Apadding(-top|-right|-bottom|-left)?\z/
+      (out['paddings'] ||= {})[a == 'padding' ? 'all' : a.sub('padding-', '')] = v.to_i
     end
   end
+  out['corner_radii'] = corners unless corners.empty?
+  # A per-corner-only spec still means "rounded" — surface the max as the
+  # scalar so downstream style mapping needs one lookup.
+  out['corner_radius'] ||= corners.values.max if corners.any?
+  out
+end
+
+# Bitmap (image) zones: the design-compiler input for backgrounds/cards/art.
+# `param` is the exact zip path inside the .twbx (e.g. 'Image/hero.png') →
+# pixel-exact asset recovery; is-scaled/is-centered mirror the product's
+# Fit/Center options; image-file-url carries web-hosted images. Shared by the
+# flat-zone loop and build_zone_tree so the two never diverge.
+def zone_image_fields(z)
+  a = z.attributes
+  out = {
+    'image_path'  => a['param'],
+    'is_scaled'   => %w[1 true].include?(a['is-scaled'].to_s),
+    'is_centered' => %w[1 true].include?(a['is-centered'].to_s)
+  }
+  out['image_file_url'] = a['image-file-url'] if a['image-file-url']
   out
 end
 
@@ -1163,6 +1211,21 @@ def build_zone_tree(z)
   # layout-flow's `param` is the stack direction; a vertical flow stacks its
   # children top-to-bottom (the classic left filter-rail), horizontal L→R.
   node['direction'] = (param == 'vert' ? 'vert' : 'horz') if type_v2 == 'layout-flow'
+  # Fixed-pixel geometry: is-fixed zones size one axis in PIXELS (fixed-size),
+  # not canvas-percent — px-fixed rails/dividers must map to exact grid spans.
+  node['is_fixed']   = true if z.attributes['is-fixed'] == 'true'
+  node['fixed_size'] = z.attributes['fixed-size'].to_i if z.attributes['fixed-size']
+  # Bitmap zones: the design-compiler input for background/card/art images.
+  # `param` is the exact zip path inside the .twbx (Image/<name>.png);
+  # is-scaled/is-centered mirror the product's Fit/Center options and
+  # image-file-url carries web-hosted images.
+  if kind == 'image'
+    node.merge!(zone_image_fields(z))
+    # Full-canvas image = the Figma/PPT designed-background pattern (the
+    # rounded "cards" live inside the PNG). Charts paint over it, so it maps
+    # to a page/container backgroundImage, not a grid element.
+    node['is_background'] = true if node['w_pct'] >= 95.0 && node['h_pct'] >= 95.0
+  end
   # Phase-1 style: per-zone fill/border (region-card tints, canvas) + control mode.
   node.merge!(zone_style_fields(z))
   cd = zone_control_display(z)
@@ -1190,7 +1253,14 @@ xml.elements.each('//dashboard') do |d|
   next unless dashboard_in_scope?(dash_name, zone_root_id)
   zones = []
   seen_ids = {}
-  d.elements.each('.//zone') do |z|
+  # Iterate ONLY the dashboard's default <zones> tree. A bare `.//zone` also
+  # descends into <devicelayouts> (phone/tablet variants carry their OWN zone
+  # trees with different geometry) — contaminating the flat zone list with
+  # duplicate-content zones at device-specific coordinates (official schema:
+  # devicelayouts is a sibling of zones). Device layouts are a per-device
+  # concern the desktop migration must not ingest.
+  default_zones_root = d.elements['zones'] || d
+  default_zones_root.elements.each('.//zone') do |z|
     next if z.attributes['id'].nil?
     next if seen_ids[z.attributes['id']]
     seen_ids[z.attributes['id']] = true
@@ -1224,6 +1294,11 @@ xml.elements.each('//dashboard') do |d|
     zdisp  = zone_control_display(z)
     # Phase-1 B4: styled static text (run-level formatting) on text/title zones.
     ztext  = (kind == 'text' || kind == 'title') ? zone_text_fields(z) : {}
+    # Image zones: asset path + fit options (+ full-canvas background flag).
+    zimg   = kind == 'image' ? zone_image_fields(z) : {}
+    if kind == 'image' && pct(z.attributes['w']) >= 95.0 && pct(z.attributes['h']) >= 95.0
+      zimg['is_background'] = true
+    end
 
     zones << {
       'id'           => z.attributes['id'],
@@ -1271,7 +1346,18 @@ xml.elements.each('//dashboard') do |d|
       # Phase-1 B4: styled static text signals (nil for non-text zones / unstyled)
       'text_runs'  => ztext['text_runs'],
       'text_align' => ztext['text_align'],
-      'is_pill'    => ztext['is_pill']
+      'is_pill'    => ztext['is_pill'],
+      # v5.0 design-compiler signals (nil when absent — additive)
+      'corner_radius' => zstyle['corner_radius'],
+      'border_width'  => zstyle['border_width'],
+      'is_fixed'      => (z.attributes['is-fixed'] == 'true' || nil),
+      'fixed_size'    => (z.attributes['fixed-size'] ? z.attributes['fixed-size'].to_i : nil),
+      # Image (bitmap) zone signals: .twbx asset path + fit + background flag
+      'image_path'     => zimg['image_path'],
+      'is_scaled'      => (kind == 'image' ? zimg['is_scaled']   : nil),
+      'is_centered'    => (kind == 'image' ? zimg['is_centered'] : nil),
+      'image_file_url' => zimg['image_file_url'],
+      'is_background'  => zimg['is_background']
     }
   end
   # A "storyboard" dashboard is Tableau's story container (sequential story
@@ -1286,9 +1372,23 @@ xml.elements.each('//dashboard') do |d|
     root.elements.each('zone') { |z| next if z.attributes['id'].nil?; zone_tree << build_zone_tree(z) }
   end
 
+  # Authored canvas size in PIXELS (dashboard <size> maxwidth/maxheight;
+  # sizing-mode=fixed means these are exact). The px density is what makes
+  # fixed-size zone spans and row-height math exact downstream.
+  canvas_px = nil
+  if (sz = d.elements['size'])
+    w_px = sz.attributes['maxwidth'].to_i
+    h_px = sz.attributes['maxheight'].to_i
+    if w_px.positive? && h_px.positive?
+      canvas_px = { 'w' => w_px, 'h' => h_px,
+                    'sizing_mode' => sz.attributes['sizing-mode'] }
+    end
+  end
+
   dashboards << {
     'dashboard'     => d.attributes['name'],
     'is_story'      => is_story,
+    'canvas_px'     => canvas_px,
     'zones'         => zones,
     'zone_tree'     => zone_tree,
     # Phase-1 D1 (general): workbook brand palette from color encodings, so

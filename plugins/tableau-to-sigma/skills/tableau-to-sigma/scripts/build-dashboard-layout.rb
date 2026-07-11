@@ -201,7 +201,12 @@ end
 
 # Place a child within its parent container's internal 24-col grid from pct
 # bounds. parent_rows = grid row-lines the parent spans internally.
-def place_in_parent(ch, p, parent_rows)
+# canvas_px ({'w','h'} from the dashboard <size>, sizing-mode=fixed) makes
+# px-FIXED zones exact: a child with `fixed_size` inside a layout-flow parent
+# is sized in PIXELS on the flow axis (verified: zone h_pct == fixed_size /
+# canvas_h to the digit), so its span comes from px density, not from rounding
+# an already-rounded pct — thin fixed rails/headers keep their exact height.
+def place_in_parent(ch, p, parent_rows, canvas_px = nil)
   pw = (p['w_pct'] || 100).to_f; pw = 1.0 if pw <= 0
   ph = (p['h_pct'] || 100).to_f; ph = 1.0 if ph <= 0
   px = (p['x_pct'] || 0).to_f;   py = (p['y_pct'] || 0).to_f
@@ -211,6 +216,16 @@ def place_in_parent(ch, p, parent_rows)
   c1 = clampc(1 + ((cx + cw - px) / pw * 24).round, c0 + 1, 25)
   r0 = [1, 1 + ((cy - py) / ph * parent_rows).round].max
   r1 = [r0 + 1, 1 + ((cy + chh - py) / ph * parent_rows).round].max
+  if canvas_px && ch['fixed_size'].to_i.positive? && p['direction']
+    fixed = ch['fixed_size'].to_f
+    if p['direction'] == 'vert' && canvas_px['h'].to_i.positive?
+      px_per_row = (ph / 100.0 * canvas_px['h']) / parent_rows
+      r1 = r0 + [(fixed / px_per_row).round, 1].max if px_per_row.positive?
+    elsif p['direction'] == 'horz' && canvas_px['w'].to_i.positive?
+      px_per_col = (pw / 100.0 * canvas_px['w']) / 24
+      c1 = clampc(c0 + [(fixed / px_per_col).round, 1].max, c0 + 1, 25) if px_per_col.positive?
+    end
+  end
   [c0, c1, r0, r1]
 end
 
@@ -237,6 +252,13 @@ def resolve_leaf(node, ctx)
       el = ctx[:els_by_id]["text-#{node['id']}"]
       el && el['id']
     end
+  when 'image'
+    # v5.0: bitmap zone → its emitted image element (build-charts id
+    # "img-<zoneid>", data-URI body from the .twbx Image/ asset). Full-canvas
+    # backgrounds (is_background) are page-level, not grid tiles — skip here.
+    return nil if node['is_background']
+    el = ctx[:els_by_id]["img-#{node['id']}"]
+    el && el['id']
   end
 end
 
@@ -282,8 +304,19 @@ end
 def plan_node(node, c0, c1, r0, r1, ctx)
   if node['kind'] == 'container'
     kids = node['children'] || []
+    # Wrapper-chain collapse: Tableau nests single-child pass-through
+    # containers several levels deep (authoring artifacts). Each one used to
+    # become a real GridContainer — 12 no-op containers on the benchmark,
+    # each adding padding + a rounding pass that drifts the geometry. A
+    # single-child container that carries NO visual identity of its own
+    # (no fill/border/corner style) is pure structure: plan the child
+    # directly at the container's cell.
+    if kids.length == 1 && !node['fill_color'] && !node['border_color'] &&
+       !node['corner_radius'] && !node['rounding']
+      return plan_node(kids[0], c0, c1, r0, r1, ctx)
+    end
     my_rows = [r1 - r0, 2].max
-    rects = kids.map { |ch| place_in_parent(ch, node, my_rows) }
+    rects = kids.map { |ch| place_in_parent(ch, node, my_rows, ctx[:canvas_px]) }
     rects = decollide_rects(rects, my_rows)
     plans = []
     kids.each_index do |i|
@@ -408,7 +441,7 @@ end
 def safety_net_band(page, placed, extra_els, children, prefix, below_row, page_rows)
   placeable = lambda do |e|
     k = e['kind'].to_s
-    k.end_with?('-chart') || %w[table pivot-table control text].include?(k)
+    k.end_with?('-chart') || %w[table pivot-table control text image].include?(k)
   end
   unplaced = page['elements'].select { |e| placeable.call(e) && !placed.include?(e['id']) }
   return nil if unplaced.empty?
@@ -449,7 +482,8 @@ def build_page_from_tree(dashboard, page, opts)
 
   ctx = { page_id: page['id'], renames: opts[:renames], els_by_name: els_by_name,
           ctl_by_name: ctl_by_name, els_by_id: els_by_id, title_el: title_el, title_used: false,
-          extra: [], placed: [], zone_to_ctl: {}, zone_by_id: zone_by_id, min_row_expansions: 0 }
+          extra: [], placed: [], zone_to_ctl: {}, zone_by_id: zone_by_id, min_row_expansions: 0,
+          canvas_px: dashboard['canvas_px'] }
 
   # Assign workbook control elements to control zones in document order (see
   # assign_controls) so a rail's controls land INSIDE the rail even when a

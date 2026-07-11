@@ -186,7 +186,12 @@ unless opts[:skip_content]
   queue << lambda do
     bytes = run_task('twb-download') { Tableau.download_workbook_content(wb['id']) }
     # Persist the download (zip or bare .twb) and surface the inner XML.
-    # Returns [twb_xml, had_hyper_payload].
+    # The .twb is FCP-NORMALIZED at write time (lib/fcp_normalize) so every
+    # downstream parser sees canonical element names — Tableau hides newer
+    # design features (native rounded corners etc.) behind
+    # `_.fcp.<Feature>.<bool>...` mangled names that literal-name XPaths
+    # silently drop. Returns [twb_xml, had_hyper_payload].
+    require_relative 'lib/fcp_normalize'
     persist = lambda do |payload|
       xml = nil
       hypers = false
@@ -203,13 +208,18 @@ unless opts[:skip_content]
             inner = Dir.glob(File.join(tmp, '**', '*.twb')).first
             if inner
               twb_path = File.join(opts[:out], 'workbook-content.twb')
-              atomic_write(twb_path, File.binread(inner))
-              log "extracted workbook-content.twb  (#{File.size(twb_path)} bytes) from .twbx"
               # Force UTF-8: a bare File.read uses the locale default (US-ASCII on
               # many systems) and raises "invalid byte sequence in US-ASCII" on the
               # first non-ASCII byte (em-dash, @handles, curly quotes). The direct-
               # download branch below already force_encodes; the .twbx path must too.
-              xml = File.read(twb_path, encoding: 'UTF-8')
+              xml = File.read(inner, encoding: 'UTF-8')
+              if FcpNormalize.needed?(xml)
+                n = xml.scan(/_\.fcp\./).length
+                xml = FcpNormalize.normalize(xml)
+                log "FCP-normalized workbook XML (#{n} forward-compatibility token(s) → canonical names)"
+              end
+              atomic_write(twb_path, xml)
+              log "extracted workbook-content.twb  (#{File.size(twb_path)} bytes) from .twbx"
             else
               log '.twbx contained no inner .twb — odd'
             end
@@ -217,9 +227,14 @@ unless opts[:skip_content]
         end
       else
         twb_path = File.join(opts[:out], 'workbook-content.twb')
-        atomic_write(twb_path, payload)
-        log "wrote workbook-content.twb  (#{payload.bytesize} bytes)"
         xml = payload.force_encoding('UTF-8')
+        if FcpNormalize.needed?(xml)
+          n = xml.scan(/_\.fcp\./).length
+          xml = FcpNormalize.normalize(xml)
+          log "FCP-normalized workbook XML (#{n} forward-compatibility token(s) → canonical names)"
+        end
+        atomic_write(twb_path, xml)
+        log "wrote workbook-content.twb  (#{xml.bytesize} bytes)"
       end
       [xml, hypers]
     end

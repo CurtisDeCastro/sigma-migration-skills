@@ -52,6 +52,8 @@ require 'json'
 require 'csv'
 require 'date'
 require 'optparse'
+require 'base64'
+require 'open3'
 require_relative 'learned-rules'
 
 opts = { master_id: 'master' }
@@ -4463,6 +4465,76 @@ unless opts[:pages_mode] == :worksheet
     end
   end
 end
+# ---- v5.0: image (bitmap) zones → Sigma image elements ---------------------
+# Tableau image zones ship their bitmap INSIDE the .twbx (`image_path` is the
+# exact zip path, e.g. 'Image/title art.png'). Extract each to <tab>/assets/
+# and emit {kind:"image", url:"data:image/…;base64,…"} (data URIs live-verified
+# — refs/workbook-layout.md). Zones with a web-hosted `image_file_url` use the
+# URL directly. Full-canvas backgrounds (is_background) are page-level design,
+# not grid tiles: extracted + recorded in <tab>/image-assets.json for the
+# background/composite step, never emitted as elements (the layout builder
+# skips them too). Same per-dashboard bucket as styled text so page routing
+# and the final merge treat them identically.
+image_asset_records = []
+unless opts[:pages_mode] == :worksheet
+  twbx = Dir.glob(File.join(opts[:tab], '*.twbx')).first
+  assets_dir = File.join(opts[:tab], 'assets')
+  extract_asset = lambda do |zip_path|
+    return nil unless twbx && zip_path
+    dest = File.join(assets_dir, File.basename(zip_path))
+    unless File.exist?(dest)
+      data, st = Open3.capture2('unzip', '-p', twbx, zip_path)
+      return nil unless st.success? && !data.empty?
+      require 'fileutils'
+      FileUtils.mkdir_p(assets_dir)
+      File.binwrite(dest, data)
+    end
+    dest
+  end
+  mime_for = lambda do |path|
+    case File.extname(path.to_s).downcase
+    when '.jpg', '.jpeg' then 'image/jpeg'
+    when '.gif'          then 'image/gif'
+    when '.svg'          then 'image/svg+xml'
+    else 'image/png'
+    end
+  end
+  layout.each do |dash|
+    (dash['zones'] || []).each do |z|
+      next unless z['kind'] == 'image'
+      asset = extract_asset.call(z['image_path'])
+      record = { 'dashboard' => dash['dashboard'], 'zone_id' => z['id'],
+                 'image_path' => z['image_path'], 'asset' => asset,
+                 'is_background' => !!z['is_background'],
+                 'is_scaled' => z['is_scaled'], 'is_centered' => z['is_centered'] }
+      record['image_file_url'] = z['image_file_url'] if z['image_file_url']
+      image_asset_records << record
+      if z['is_background']
+        warnings << "dashboard '#{dash['dashboard']}' image zone #{z['id']} is a FULL-CANVAS " \
+                    "background (#{z['image_path']}) — extracted to #{asset || 'UNEXTRACTED'}; " \
+                    'apply as page background / composite, not a grid element (image-assets.json)'
+        next
+      end
+      url = z['image_file_url']
+      if url.nil? && asset
+        url = "data:#{mime_for.call(asset)};base64,#{Base64.strict_encode64(File.binread(asset))}"
+      end
+      if url.nil?
+        warnings << "dashboard '#{dash['dashboard']}' image zone #{z['id']} " \
+                    "(#{z['image_path'].inspect}) — asset not extractable (no .twbx?); NAMED RESIDUE"
+        next
+      end
+      styled_text_by_dash[dash['dashboard']] <<
+        { 'id' => "img-#{z['id']}", 'kind' => 'image', 'url' => url, '_dashboard' => dash['dashboard'] }
+    end
+  end
+  if image_asset_records.any?
+    File.write(File.join(opts[:tab], 'image-assets.json'), JSON.pretty_generate(image_asset_records))
+    warn "image zones: #{image_asset_records.size} found, " \
+         "#{image_asset_records.count { |r| r['is_background'] }} background(s) — image-assets.json written"
+  end
+end
+
 styled_text_all = styled_text_by_dash.values.flatten(1)
 
 # ---- Control targeting: intended-scope closure ------------------------------

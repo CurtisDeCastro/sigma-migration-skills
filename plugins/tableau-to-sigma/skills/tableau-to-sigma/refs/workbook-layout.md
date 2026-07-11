@@ -1017,8 +1017,16 @@ markdown (`# Heading`) still renders left-aligned — alignment must be expresse
 Uses `"kind": "image"`. No `source`, `columns`, or axes. The `url` field accepts **either** a
 public remote URL **or an inline `data:image/png;base64,…` data URI** — data URIs POST cleanly
 and render in both the app and PNG exports (live-verified 2026-07-10 against three ~100–200 KB
-embedded PNGs; an earlier revision of this file claimed hosted-URL-only, and a field run
-substituted plain text for a source's title art because it trusted that claim).
+embedded PNGs; RE-verified 2026-07-11 in the stale-classification probe batch alongside
+page/container `backgroundImage` data URIs; an earlier revision of this file claimed
+hosted-URL-only, and a field run substituted plain text for a source's title art because it
+trusted that claim — the docs still say "external URL only" and the docs are wrong).
+
+**Mechanical path (v5.0):** build-charts-from-signals now does this automatically — every
+Tableau bitmap zone is extracted from the .twbx to `<workdir>/assets/`, emitted as an
+`img-<zoneid>` data-URI element, recorded in `<workdir>/image-assets.json`, and placed by
+build-dashboard-layout at the zone's geometry. Full-canvas backgrounds (`is_background`) are
+withheld from the grid and routed to page/container `backgroundImage`.
 
 **Migrating Tableau image zones (logos, stylized titles, decorative art):** the source's bitmaps
 ship inside the .twbx (`unzip -l workbook-content.twbx | grep -iE 'png|jpe?g'`). Extract each,
@@ -1038,9 +1046,16 @@ b64=$(base64 < extracted/Image/title-art.png | tr -d '\n')
 ```
 
 > **Layering caveat:** Tableau floats images BEHIND other zones (z-stacked); Sigma's grid layout
-> REJECTS overlapping elements, so background art cannot be layered under a chart or text via
-> spec. Composite the art + text into ONE image (or place the art adjacent) — placing it
-> elsewhere on the page reads as misplacement, not fidelity.
+> REJECTS overlapping elements, so background art cannot be layered under a chart or text as an
+> image ELEMENT. But **pages and containers accept `backgroundImage`** — live-probed 2026-07-11:
+> `page.backgroundImage = {url: <data URI or external URL>, style: {fit: contain|cover|none|
+> scale-down|stretch, horizontalAlign/verticalAlign, tiling}}` POSTs, survives readback, and
+> RENDERS behind the page's elements (data URI included — the docs' "external URL only" wording
+> is wrong for backgroundImage too). Containers take the same shape alongside `style`. So the
+> Tableau full-canvas designed-background pattern (Figma/PPT card art — parse-twb-layout flags
+> these `is_background: true`, assets in `image-assets.json`) maps DIRECTLY to page/container
+> backgroundImage. Composite art + text into one image only when the art must sit between two
+> specific elements rather than behind a whole page/container.
 
 In layout XML, image elements use a standard `<LayoutElement>`:
 ```xml
@@ -1049,14 +1064,28 @@ In layout XML, image elements use a standard `<LayoutElement>`:
 
 ### Container element
 
-Uses `"kind": "container"`. The element spec has no extra fields — children are nested inside it via `<GridContainer>` in the layout XML (see GridContainer section above).
+Uses `"kind": "container"`. Children are nested inside it via `<GridContainer>` in the layout
+XML (see GridContainer section above). Style + background image are spec-supported (live-probed
+2026-07-11: pill radius + border + data-URI backgroundImage all render):
 
 ```json
 {
   "id": "kpi-row",
-  "kind": "container"
+  "kind": "container",
+  "style": { "backgroundColor": "#112233", "borderRadius": "pill",
+             "borderWidth": 2, "borderColor": "#52BAEE" },
+  "backgroundImage": { "url": "data:image/png;base64,…", "style": { "fit": "cover" } }
 }
 ```
+
+`style` rules: `borderRadius` enum `square|round|pill`; `borderWidth` 1–3; border fields cannot
+combine with `padding: 'none'` (schema-enforced XOR). This is the native target for Tableau
+zone-style fills, borders, and the FCP `corner-radius` surface (parse-twb-layout emits
+`fill_color`/`border_*`/`corner_radius` per zone; radius/height > 0.3 → `pill`, else `round`).
+
+**Element titles can be hidden via spec**: `"name": { "visibility": "hidden" }` (live-probed,
+survives readback, renders untitled) — use for Tableau tiles with hidden titles instead of
+blank-name hacks.
 
 ### Histogram
 
