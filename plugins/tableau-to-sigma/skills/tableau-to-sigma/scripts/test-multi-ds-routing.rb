@@ -18,8 +18,10 @@ require 'json'
 
 DIR = __dir__
 SRC = File.read(File.join(DIR, 'build-charts-from-signals.rb'))
-m = SRC.match(/^def route_multi_ds!.*?\n^end$/m) or abort('could not extract route_multi_ds!')
-eval(m[0]) # rubocop:disable Security/Eval — test-only extraction of first-party code
+%w[deep_gsub! route_multi_ds!].each do |fn|
+  m = SRC.match(/^def #{Regexp.escape(fn)}.*?\n^end$/m) or abort("could not extract #{fn}")
+  eval(m[0]) # rubocop:disable Security/Eval — test-only extraction of first-party code
+end
 
 fails = []
 def check(cond, msg, fails)
@@ -102,6 +104,65 @@ check(r2 == {} && els2[1]['columns'][1]['formula'] == 'Sum([Master/Share])',
       'single-datasource plan → no routing', fails)
 r3 = route_multi_ds!(mk_elements, [], nil, 'master', [])
 check(r3 == {}, 'nil plan → no routing', fails)
+
+puts
+puts 'Part 5 — review-caught hardening (quoted captions, control retargeting, id collisions)'
+# A caption with quotes/backslash/brackets must not corrupt anything (the old
+# JSON-text splice raised mid-loop and left dangling sub-masters).
+qplan = { 'datasources' => [
+  { 'name' => 'federated.aaa', 'caption' => 'Main', 'worksheets' => ['Sheet A', 'Sheet B'] },
+  { 'name' => 'federated.bbb', 'caption' => 'Sales "West" [v2]/\\raw', 'worksheets' => ['% of total by room name'] }
+] }
+els5 = mk_elements
+de5 = []
+w5 = []
+r5 = route_multi_ds!(els5, de5, qplan, 'master', w5)
+room5 = els5.find { |e| e['id'] == 'el-room' }
+sm5 = de5.first
+check(r5.size == 1 && sm5 && sm5['name'] == 'Master (Sales West v2 raw)',
+      "quoted/bracketed caption routed safely, unsafe chars stripped (name=#{sm5 && sm5['name'].inspect})", fails)
+check(room5['columns'][0]['formula'].include?('[Master (') &&
+      !room5['columns'][0]['formula'].include?('[') == false &&
+      !room5['columns'][0]['formula'].include?('\\'),
+      "formula refs carry the SANITIZED caption, no escapes (got #{room5['columns'][0]['formula'].inspect})", fails)
+check(sm5['source']['elementId'] == '__DM_ELEMENT__:Sales "West" [v2]/\\raw',
+      'placeholder keeps the RAW caption (resolver matches normalized)', fails)
+
+# Control retargeting: a master-targeted filter also targets the sub-master
+# when it exposes the column; missing columns are named residue, not guessed.
+els6 = mk_elements
+de6 = []
+w6 = []
+ctl_reach = { 'name' => 'Room Filter', 'kind' => 'control',
+              'filters' => [{ 'source' => { 'kind' => 'table', 'elementId' => 'master' }, 'columnId' => 'm-room' }] }
+ctl_miss  = { 'name' => 'Region Filter', 'kind' => 'control',
+              'filters' => [{ 'source' => { 'kind' => 'table', 'elementId' => 'master' }, 'columnId' => 'm-region' }] }
+route_multi_ds!(els6, de6, JSON.parse(JSON.generate(PLAN)), 'master', w6,
+                controls: [ctl_reach, ctl_miss],
+                id2name: { 'm-room' => 'Room Name', 'm-region' => 'Region' })
+sm6 = de6.first
+sm_target = ctl_reach['filters'].find { |t| t.dig('source', 'elementId') == sm6['id'] }
+check(!sm_target.nil? && sm_target['columnId'] == sm6['columns'].find { |c| c['name'] == 'Room Name' }['id'],
+      'control targeting a master column the sub-master exposes gains a sub-master target', fails)
+check(ctl_miss['filters'].none? { |t| t.dig('source', 'elementId') == sm6['id'] } &&
+      w6.any? { |m| m.include?('Region Filter') && m.include?('does not expose') },
+      'control on a column the outlier lacks stays master-only + named residue', fails)
+
+# 24-char normalized-id collision → unique suffixed ids.
+cplan = { 'datasources' => [
+  { 'name' => 'f.a', 'caption' => 'Main', 'worksheets' => %w[W1 W2] },
+  { 'name' => 'f.b', 'caption' => 'North America Sales Extract 2024', 'worksheets' => ['O1'] },
+  { 'name' => 'f.c', 'caption' => 'North America Sales Extract 2025', 'worksheets' => ['O2'] }
+] }
+els7 = %w[O1 O2].map do |ws|
+  { 'id' => "el-#{ws.downcase}", 'kind' => 'bar-chart', 'name' => ws, '_worksheet' => ws,
+    'source' => { 'kind' => 'table', 'elementId' => 'master' },
+    'columns' => [{ 'id' => "#{ws.downcase}-x", 'name' => 'X', 'formula' => '[Master/X]' }] }
+end
+de7 = []
+route_multi_ds!(els7, de7, cplan, 'master', [])
+check(de7.size == 2 && de7.map { |s| s['id'] }.uniq.size == 2,
+      "long-caption siblings get UNIQUE sub-master ids (got #{de7.map { |s| s['id'] }.inspect})", fails)
 
 puts
 if fails.empty?

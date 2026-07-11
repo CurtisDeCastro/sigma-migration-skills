@@ -949,12 +949,17 @@ def parse_scaled_suffix_format(s)
   { 'scale' => 1000**m[1].length, 'decimals' => m[2].to_s.length, 'suffix' => m[3].to_s }
 end
 
-# The exact-format Text() formula for a scaled-suffix format (the
-# fidelity-recipes KPI exact-format recipe, mechanized). Grouping is lost
-# (1234B not 1,234B) — acceptable for scaled values, rarely >3 digits.
-def scaled_suffix_formula(inner_formula, spec)
-  "Text(Round((#{inner_formula}) / #{spec['scale']}, #{spec['decimals']}))" \
-    "#{spec['suffix'].empty? ? '' : %( & "#{spec['suffix']}")}"
+# The exact-format column for a scaled-suffix format: a NUMERIC scaled
+# formula + a d3 fixed-decimal formatString + the schema's literal `suffix`
+# field (spec/verify-confirmed 2026-07-11). Strictly better than a Text()
+# concat: trailing zeros survive (',.1f' renders 3.0 not 3), grouping
+# survives, and the column stays numeric (sortable).
+def scaled_suffix_column(inner_formula, spec)
+  {
+    'formula' => "(#{inner_formula}) / #{spec['scale']}",
+    'format'  => { 'kind' => 'number', 'formatString' => ",.#{spec['decimals']}f" }
+                 .merge(spec['suffix'].empty? ? {} : { 'suffix' => spec['suffix'] })
+  }
 end
 
 # Sigma formulas reference controls by `controlId` in brackets, NOT by display
@@ -2698,16 +2703,17 @@ def build_kpi_element(z, meta, mmap, opts, warnings, data_elements = [])
   # Scale-comma + literal-suffix source format ('#,##0,,,B' → "1B"): the d3
   # enum can't render it (,.2s shows 'G' for 1e9), so the enum translator
   # returned nil above. Mechanize the fidelity-recipes exact-format recipe:
-  # a Text() formula column carries the EXACT rendering and the KPI value
-  # points at it (numeric column kept for anything else that needs it).
+  # a scaled NUMERIC column with a fixed-decimal format + literal `suffix`
+  # carries the EXACT rendering (trailing zeros + grouping intact) and the
+  # KPI value points at it (raw column kept for anything else).
   fmt_columns = []
   if tab_fmt.nil? && (raw_fmt = pick_tableau_format_raw(z['formats'], master['name'])) &&
      (sspec = parse_scaled_suffix_format(raw_fmt))
     fmt_col_id = "#{measure_col_id}-fmt"
-    fmt_columns << { 'id' => fmt_col_id, 'name' => "#{master['name'].to_s.strip} (fmt)",
-                     'formula' => scaled_suffix_formula(formula, sspec) }
+    fmt_columns << { 'id' => fmt_col_id, 'name' => "#{master['name'].to_s.strip} (fmt)" }
+                   .merge(scaled_suffix_column(formula, sspec))
     warnings << "NOTE '#{cap}' KPI: source format #{raw_fmt.inspect} is scale+suffix (not d3-expressible) — " \
-                "emitted exact-format Text() column and pointed the KPI value at it"
+                'emitted exact-format scaled column (numeric + format suffix) and pointed the KPI value at it'
   end
 
   element = {
@@ -5342,7 +5348,19 @@ end
 # two-stage helpers keep the WARN (v1 scope cut: the translators emit literal
 # [Master/…] internally — threading a source through them is the blast-radius
 # trap).
-def route_multi_ds!(elements, data_elements, plan, master_id, warnings)
+# Recursively gsub a string pattern across every String in a JSON-shaped
+# structure IN PLACE. Structural (never a JSON-text splice), so captions
+# containing quotes/backslashes can't corrupt anything.
+def deep_gsub!(node, from, to)
+  case node
+  when Hash  then node.each { |k, v| node[k] = deep_gsub!(v, from, to) }
+  when Array then node.map! { |v| deep_gsub!(v, from, to) }
+  when String then node = node.gsub(from, to)
+  end
+  node
+end
+
+def route_multi_ds!(elements, data_elements, plan, master_id, warnings, controls: [], id2name: {})
   routed = {}
   return routed unless plan && plan['datasources'].is_a?(Array) && plan['datasources'].size > 1
   norm = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]/, '') }
@@ -5359,29 +5377,68 @@ def route_multi_ds!(elements, data_elements, plan, master_id, warnings)
     # mechanical-only guard: source must be exactly the shared master
     next unless el['source'] == { 'kind' => 'table', 'elementId' => master_id }
     caption = ds['caption'].to_s
-    sm = submasters[caption] ||= {
-      'id' => "submaster-#{norm.call(caption)[0, 24]}", 'kind' => 'table',
-      'name' => "Master (#{caption})", 'visibleAsSource' => false,
-      'source' => { 'kind' => 'data-model', 'elementId' => "__DM_ELEMENT__:#{caption}" },
-      'columns' => []
-    }
-    # Repoint + rewrite formulas in lock-step; collect the referenced column
-    # names so the sub-master exposes exactly what its charts consume
-    # (formulas [<caption>/<col>] — the orchestrator's placeholder resolver
-    # rewrites the prefix too when the live DM element name differs).
-    json = JSON.generate(el)
-    cols = json.scan(%r{\[Master/([^\]/]+)\]}).flatten.uniq
+    # The caption rides inside Sigma formula refs ([Master (X)/Col]) — strip
+    # the characters that would break the ref grammar ([ ] /) or read as
+    # escapes. The PLACEHOLDER keeps the raw caption (the orchestrator's
+    # resolver matches normalized, so punctuation is irrelevant there).
+    safe_cap = caption.gsub(%r{[\[\]/"\\]}, ' ').squeeze(' ').strip
+    sm = submasters[caption]
+    if sm.nil?
+      base_id = "submaster-#{norm.call(caption)[0, 24]}"
+      # 24-char truncation can collide across long sibling captions — suffix
+      # a counter so ids stay globally unique.
+      sid = base_id
+      n = 1
+      while submasters.values.any? { |s| s['id'] == sid }
+        n += 1
+        sid = "#{base_id}-#{n}"
+      end
+      sm = submasters[caption] = {
+        'id' => sid, 'kind' => 'table',
+        'name' => "Master (#{safe_cap})", 'visibleAsSource' => false,
+        'source' => { 'kind' => 'data-model', 'elementId' => "__DM_ELEMENT__:#{caption}" },
+        'columns' => []
+      }
+    end
+    # Repoint + rewrite formulas in lock-step (structural, in place); collect
+    # the referenced column names so the sub-master exposes exactly what its
+    # charts consume (formulas [<caption>/<col>] — the orchestrator's
+    # placeholder resolver rewrites the prefix when the live name differs).
+    cols = JSON.generate(el).scan(%r{\[Master/([^\]/]+)\]}).flatten.uniq
     cols.each do |cn|
       next if sm['columns'].any? { |c| c['name'] == cn }
       sm['columns'] << { 'id' => "#{sm['id']}-c#{sm['columns'].size}", 'name' => cn,
-                         'formula' => "[#{caption}/#{cn}]" }
+                         'formula' => "[#{safe_cap}/#{cn}]" }
     end
-    rewritten = JSON.parse(json.gsub('[Master/', "[Master (#{caption})/"))
-    el.replace(rewritten)
+    deep_gsub!(el, '[Master/', "[Master (#{safe_cap})/")
     el['source'] = { 'kind' => 'table', 'elementId' => sm['id'] }
     routed[el['_worksheet']] = caption
     warnings << "NOTE multi-DS: '#{el['_worksheet']}' auto-routed to datasource '#{caption}' " \
                 "(sub-master #{sm['id']}, #{cols.size} column(s))"
+  end
+  # A filter on the master does NOT propagate to sub-master-sourced charts
+  # (propagation follows the source chain). Retarget: every control targeting
+  # a master column ALSO targets each sub-master that exposes the same column
+  # name; sub-masters lacking it are named residue (the outlier datasource may
+  # genuinely not carry the column — never guess).
+  submasters.each_value do |sm|
+    sm_cols = sm['columns'].each_with_object({}) { |c, h| h[c['name']] = c['id'] }
+    controls.each do |ctl|
+      next unless ctl['filters'].is_a?(Array)
+      ctl['filters'].select { |t| t.dig('source', 'elementId') == master_id }.each do |t|
+        cname = id2name[t['columnId']]
+        next unless cname
+        next if ctl['filters'].any? { |x| x.dig('source', 'elementId') == sm['id'] }
+        if sm_cols[cname]
+          ctl['filters'] << { 'source' => { 'kind' => 'table', 'elementId' => sm['id'] },
+                              'columnId' => sm_cols[cname] }
+        else
+          warnings << "multi-DS: control '#{ctl['name']}' targets master column '#{cname}' which " \
+                      "'#{sm['name']}' does not expose — routed charts on that datasource are NOT " \
+                      'filtered by it (named residue; verify the outlier datasource carries the column)'
+        end
+      end
+    end
   end
   data_elements.concat(submasters.values)
   routed
@@ -5391,7 +5448,13 @@ $ds_routed = {}
 begin
   plan_path = File.join(opts[:tab], 'multi-ds-plan.json')
   plan = File.exist?(plan_path) ? (JSON.parse(File.read(plan_path)) rescue nil) : nil
-  $ds_routed = route_multi_ds!(elements, data_elements, plan, opts[:master_id], warnings)
+  if ENV['SIGMA_MULTI_DS_ROUTING'] == 'off'
+    warn 'multi-DS routing DISABLED (SIGMA_MULTI_DS_ROUTING=off) — outlier charts stay on the master + WARN wall.'
+  elsif plan
+    id2name = mmap.values.each_with_object({}) { |v, h| h[v['id']] = v['name'] if v['id'] && v['name'] }
+    $ds_routed = route_multi_ds!(elements, data_elements, plan, opts[:master_id], warnings,
+                                 controls: param_controls + auto_controls + extras, id2name: id2name)
+  end
 rescue => e
   warnings << "multi-DS routing error (charts left on the master + WARN wall): #{e.message}"
 end
@@ -5449,8 +5512,12 @@ if opts[:pages_mode] == :worksheet
     }
   end
   theme = ThemeDerive.derive(layout)
-  File.write(opts[:out], JSON.pretty_generate({ 'pages' => pages, 'theme' => theme }))
-  warn "wrote #{opts[:out]} (page-per-worksheet: #{pages.size} pages, #{auto_controls.size} auto-controls per page)"
+  # data_elements must ride EVERY output shape — multi-DS sub-masters (and any
+  # hidden helpers) live there, and a routed chart whose sub-master never
+  # reaches the spec is a dangling source ref (review-caught regression).
+  File.write(opts[:out], JSON.pretty_generate({ 'pages' => pages, 'data_elements' => data_elements, 'theme' => theme }))
+  warn "wrote #{opts[:out]} (page-per-worksheet: #{pages.size} pages, #{auto_controls.size} auto-controls per page" \
+       "#{data_elements.any? ? ", #{data_elements.size} hidden data element(s)" : ''})"
 elsif opts[:pages_mode] == :dashboard
   # One Sigma page per Tableau DASHBOARD (bead ptrt) — the fat-workbook fix:
   # 4 dashboards must become 4 laid-out pages, each with its own title text and

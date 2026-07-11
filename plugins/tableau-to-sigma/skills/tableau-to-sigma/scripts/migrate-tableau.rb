@@ -2625,22 +2625,34 @@ if mechanical
     next unless ph.start_with?('__DM_ELEMENT__:')
     want = ph.split(':', 2).last
     hit = dm_els.find { |e| e['name'].to_s.strip.casecmp?(want) }
-    # v5.0 hardening (multi-DS sub-masters): DM element names don't always
-    # equal plan captions ("Diablo Sum Dir Bias by Bilevel Preset" vs plan
-    # "Sum Dir Bias by BiLevel Preset" — prefix + case). Fall back to
-    # normalized matching: exact normalized, then UNIQUE containment. Ambiguity
-    # or zero still aborts (no-silent-misbind contract).
-    if hit.nil?
+    # v5.0 hardening (multi-DS sub-masters ONLY): DM element names don't
+    # always equal plan captions ("Diablo Sum Dir Bias by Bilevel Preset" vs
+    # plan "Sum Dir Bias by BiLevel Preset" — prefix + case). Fall back to
+    # normalized matching: exact normalized, then UNIQUE containment with a
+    # length floor (the shorter normalized name must be ≥8 chars and ≥50% of
+    # the longer — a short generic element name must never absorb an
+    # unrelated caption). Grain helpers keep the strict exact contract (their
+    # names are converter-derived and DO match; fuzzy there is pure risk).
+    if hit.nil? && de['id'].to_s.start_with?('submaster-')
       nrm = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]/, '') }
       wantn = nrm.call(want)
       cands = dm_els.select { |e| nrm.call(e['name']) == wantn }
-      cands = dm_els.select { |e| nrm.call(e['name']).include?(wantn) || wantn.include?(nrm.call(e['name'])) } if cands.empty?
-      abort "FATAL: helper '#{de['name']}' needs DM element '#{want}' but the match is AMBIGUOUS " \
+      if cands.empty?
+        cands = dm_els.select do |e|
+          en = nrm.call(e['name'])
+          shorter, longer = [en, wantn].sort_by(&:length)
+          shorter.length >= 8 && shorter.length >= (longer.length * 0.5).ceil && longer.include?(shorter)
+        end
+      end
+      abort "FATAL: sub-master '#{de['name']}' needs DM element '#{want}' but the match is AMBIGUOUS " \
             "(#{cands.map { |e| e['name'] }.join(' | ')}) — rename to disambiguate" if cands.size > 1
       hit = cands.first
     end
-    abort "FATAL: grain helper '#{de['name']}' needs DM element '#{want}' but the posted data model has no element " \
-          "by that name (have: #{dm_els.map { |e| e['name'] }.join(', ')})" unless hit
+    abort "FATAL: helper '#{de['name']}' needs DM element '#{want}' but the posted data model has no element " \
+          "by that name (have: #{dm_els.map { |e| e['name'] }.join(', ')})." +
+          (de['id'].to_s.start_with?('submaster-') ?
+            ' This sub-master was auto-created by multi-DS routing — either add the datasource to the DM, ' \
+            'or re-run with SIGMA_MULTI_DS_ROUTING=off to restore the warn-and-ship behavior.' : '') unless hit
     de['source'] = { 'kind' => 'data-model', 'dataModelId' => dm_id, 'elementId' => hit['id'] }
     # A fuzzy match means the helper's passthrough formulas were authored with
     # the REQUESTED name prefix ([<want>/Col]) — rewrite to the live element's
