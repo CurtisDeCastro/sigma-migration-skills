@@ -805,13 +805,17 @@ xml.elements.each('//worksheet') do |ws|
     # and z['measures'] recorded only the bare CountD — the pivot shipped raw
     # counts where the source renders percentages (review round). The
     # PctTotal addressing dim decides the Sigma PercentOfTotal scope.
-    if (qm = ci.attributes['name'].to_s.match(/\A\[pcto:([a-z]+):([^:\]]+)(?::[a-z]+)*\]\z/i))
-      addr = of && of.to_s[/\.\[(?:[a-z]+:)?([^:\]]+)(?::[a-z]+)*\]\z/, 1]
+    # (?::[a-z0-9]+)* — Tableau appends a NUMERIC instance suffix when the
+    # same quick-calc pill exists twice in the workbook ([pcto:ctd:seed:qk:2],
+    # present in the reference twb itself); [a-z]+ silently missed those and
+    # the second crosstab shipped raw counts (v5.1.3 review-caught).
+    if (qm = ci.attributes['name'].to_s.match(/\A\[pcto:([a-z]+):([^:\]]+)(?::[a-z0-9]+)*\]\z/i))
+      addr = of && of.to_s[/\.\[(?:[a-z]+:)?([^:\]]+)(?::[a-z0-9]+)*\]\z/, 1]
       quick_calc_pcto << { 'agg' => qm[1].downcase, 'col' => qm[2],
                            'addressing' => addr, 'token' => ci.attributes['name'].to_s }
     end
     next unless of
-    inner = of.to_s[/\.\[(?:[a-z]+:)?([^:\]]+)(?::[a-z]+)*\]\z/, 1]
+    inner = of.to_s[/\.\[(?:[a-z]+:)?([^:\]]+)(?::[a-z0-9]+)*\]\z/, 1]
     next unless inner
     c = calcs.find { |x| x['name'].to_s.gsub(/^\[|\]$/, '') == ci_col }
     c['ordering_field'] = inner if c && !c['ordering_field']
@@ -935,7 +939,7 @@ xml.elements.each('//worksheet') do |ws|
   # ([fed].[none:Concat_X:nk] → Concat_X; [fed].[ctd:seed:qk] → ctd:seed).
   shelf_sorts = []
   ws.elements.each('.//shelf-sort-v2') do |ss|
-    tok = ->(s) { s.to_s[/\[[^\]]+\]\.\[(?:[a-z]+:)?([^:\]]+)(?::[a-z]+)*\]/, 1] || s.to_s }
+    tok = ->(s) { s.to_s[/\[[^\]]+\]\.\[(?:[a-z]+:)?([^:\]]+)(?::[a-z0-9]+)*\]/, 1] || s.to_s }
     shelf_sorts << {
       'dimension' => tok.call(ss.attributes['dimension-to-sort']),
       'measure'   => tok.call(ss.attributes['measure-to-sort-by']),

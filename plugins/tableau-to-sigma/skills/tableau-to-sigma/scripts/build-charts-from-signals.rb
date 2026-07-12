@@ -2624,9 +2624,24 @@ def build_pivot_element(z, meta, mmap, opts, warnings, data_elements = [])
   Array(z['quick_calc_pcto']).each do |qc|
     nq = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]/, '') }
     inner_cap = (meta['columns_by_guid'] || {}).dig(qc['col'].to_s, 'caption') || qc['col']
+    qc_agg = SHELF_AGG_FOR_PREFIX[qc['agg'].to_s] || 'Sum'
+    qc_agg_name = qc_agg[/\A[A-Za-z]+/].to_s # 'CountIf(IsNotNull(%s))' → 'CountIf'
+    # If a value already carries PercentOfTotal over the SAME inner (the pill
+    # also rode a rows/cols shelf and add_col wrapped it), this quick calc is
+    # HANDLED — bail before the loose match wraps a sibling raw value
+    # (review-caught: dual-pill pivots corrupted the raw count column).
+    handled = cols_array.any? do |c|
+      values_arr.include?(c['id']) &&
+        c['formula'].to_s =~ /\APercentOfTotal\(\s*#{Regexp.escape(qc_agg_name)}/ &&
+        (ir = c['formula'].to_s[%r{\[Master/([^\]]+)\]}, 1]) && nq.call(ir) == nq.call(inner_cap)
+    end
+    next if handled
     vcol = cols_array.find do |c|
       next false unless values_arr.include?(c['id'])
       next false if c['formula'].to_s.include?('PercentOfTotal(')
+      # the AGGREGATION must match the pill's too — a crosstab can carry the
+      # same base column under two aggs (review-caught)
+      next false unless c['formula'].to_s.start_with?("#{qc_agg_name}(")
       ref = c['formula'].to_s[%r{\[Master/([^\]]+)\]}, 1]
       ref && (nq.call(ref) == nq.call(inner_cap) || nq.call(c['name']) == nq.call(inner_cap))
     end
@@ -2643,10 +2658,13 @@ def build_pivot_element(z, meta, mmap, opts, warnings, data_elements = [])
             else 'grand_total'
             end
     vcol['formula'] = %(PercentOfTotal(#{vcol['formula']}, "#{scope}"))
-    # exact decimals from the pill's own text-format (p0.0% → ,.1%) when the
-    # source carries one; the ,.1% default block below covers the rest
+    # exact decimals from the pill's own text-format (p0.0% → ,.1%); with no
+    # pill format, FORCE a percent format — add_col already stamped the
+    # measure default ',.0f', which renders every share as 0 (review-caught:
+    # the trailing default block only repairs nil/,.0% formats, not ,.0f).
     fkey = (z['formats'] || {}).keys.find { |k| k.to_s.downcase.include?("pcto:#{qc['agg']}:#{qc['col']}".downcase) }
     fmt = fkey && tableau_format_to_sigma((z['formats'] || {})[fkey])
+    fmt ||= { 'kind' => 'number', 'formatString' => ',.1%' } unless vcol.dig('format', 'formatString').to_s.include?('%')
     vcol['format'] = fmt if fmt
     warnings << "'#{cap}' pivot value '#{vcol['name']}' is a marks-card percent-of-total quick calc → " \
                 "PercentOfTotal(…, \"#{scope}\") [PctTotal addressing: #{addr_cap.inspect}]"
@@ -2689,7 +2707,7 @@ def build_pivot_element(z, meta, mmap, opts, warnings, data_elements = [])
   if Array(z['shelf_sorts']).empty? && z['sort'].is_a?(Hash) && z['sort']['using']
     norm = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]/, '') }
     refname = lambda do |raw|
-      tok = raw.to_s[/\[(?:[a-z\-]+:)?([^:\]]+?)(?::[a-z]+)?\]\z/i, 1]
+      tok = raw.to_s[/\[(?:[a-z\-]+:)?([^:\]]+?)(?::[a-z0-9]+)*\]\z/i, 1]
       info = (meta['columns_by_guid'] || {})[guid_from_text(raw.to_s)] ||
              (meta['columns_by_guid'] || {})[tok]
       (info && info['caption']) || tok
@@ -2801,11 +2819,19 @@ end
 # SORTED BY RANK (the CSV row order is data order, NOT render order —
 # live-checked: first-occurrence gave rank 3,1,2,8,…). Returns nil when no
 # trustworthy source exists (caller writes the probe sidecar).
-def topn_members_for(calc_caption, entity_name, opts, _zone, element_cols: [], own_view_id: nil)
+def topn_members_for(calc_caption, entity_name, opts, zone, element_cols: [], own_view_id: nil)
   mpath = File.join(opts[:tab], 'topn-members.json')
   if File.exist?(mpath)
     map = JSON.parse(File.read(mpath)) rescue {}
-    hit = map[calc_caption.to_s] || map.find { |k, _| k.to_s.strip.casecmp?(calc_caption.to_s.strip) }&.last
+    # ZONE-SCOPED key first ('<zone caption>::<calc caption>') — two zones
+    # routinely share one rank-calc name ('Rank N' on both fixture pivots),
+    # and a caption-only key fed one zone the OTHER zone's roster
+    # (review-caught, live-reproduced: disjoint domain → empty tile). The
+    # bare calc-caption key stays as the single-zone fallback.
+    zcap = zone.is_a?(Hash) ? zone['caption'].to_s : ''
+    scoped = "#{zcap}::#{calc_caption}"
+    hit = map[scoped] || map.find { |k, _| k.to_s.strip.casecmp?(scoped.strip) }&.last
+    hit = map[calc_caption.to_s] || map.find { |k, _| k.to_s.strip.casecmp?(calc_caption.to_s.strip) }&.last if hit.nil?
     return hit if hit.is_a?(Array) && hit.any?
   end
   return nil unless entity_name
@@ -2824,11 +2850,14 @@ def topn_members_for(calc_caption, entity_name, opts, _zone, element_cols: [], o
   end
   return nil unless best
   _, rows, hdr = best
-  # Rank-ordered members when the CSV carries a rank column (the rank pill
-  # exports alongside the data): member => its constant rank, ascending.
+  # Rank-ordered members when the CSV carries THE rank pill's column: the
+  # header must BE 'rank' or the rank calc's caption (a containment match
+  # let an ordinary 'Rank Points' data measure hijack the order —
+  # review-caught), and the per-member values must form a permutation
+  # (distinct rank per member) — a data measure repeats values.
   rank_h = rows.headers.find do |h|
     hn = nrm.call(h)
-    !hn.empty? && hn.include?('rank') && rows.first && rows.first[h].to_s =~ /\A\d+\z/
+    (hn == 'rank' || hn == nrm.call(calc_caption)) && rows.first && rows.first[h].to_s =~ /\A\d+\z/
   end
   if rank_h
     by_rank = {}
@@ -2837,7 +2866,9 @@ def topn_members_for(calc_caption, entity_name, opts, _zone, element_cols: [], o
       next if m.nil?
       by_rank[m.to_s] ||= r[rank_h].to_i
     end
-    return by_rank.keys.sort_by { |m| by_rank[m] } if by_rank.any?
+    if by_rank.any? && by_rank.values.uniq.size == by_rank.size
+      return by_rank.keys.sort_by { |m| by_rank[m] }
+    end
   end
   vals = rows.map { |r| r[hdr] }.compact.map(&:to_s)
   vals.any? ? vals.uniq : nil
@@ -2911,7 +2942,13 @@ def apply_topn_prefilter!(tp, element:, cap:, z:, opts:, warnings:, data_element
       # is a data-independent Switch. The pivot sorts its entity axis by
       # Min(SORT_ORD) below; sorting by a share value is the constant-key trap.
       ent_ref = "[Master/#{helper['columns'].find { |c| c['id'] == helper['filters'][0]['columnId'] }['name']}]"
-      pairs = members.each_with_index.map { |m, i| "#{JSON.generate(m.to_s)}, #{i + 1}" }.join(', ')
+      # numeric entity members emit UNQUOTED literals — Switch([numeric],
+      # "70", …) type-mismatches (review-caught)
+      numeric_members = members.all? { |m| m.to_s =~ /\A-?\d+(?:\.\d+)?\z/ }
+      pairs = members.each_with_index.map do |m, i|
+        lit = numeric_members ? m.to_s : JSON.generate(m.to_s)
+        "#{lit}, #{i + 1}"
+      end.join(', ')
       helper['columns'] << { 'id' => "#{src_id}-sortord", 'name' => 'SORT_ORD',
                              'formula' => "Switch(#{ent_ref}, #{pairs}, #{members.size + 1})" }
       # The element no longer rides the master, so multi-DS routing must route
@@ -2929,14 +2966,28 @@ def apply_topn_prefilter!(tp, element:, cap:, z:, opts:, warnings:, data_element
     # Entity axis order = RANK order (Tableau's hidden rank pill drives the
     # render; a vestigial <computed-sort> matched it at 1/15 — live-checked).
     # A source shelf-sort on the same dimension is a real user sort and wins.
+    # Pivots sort the axis entry; CHART-shaped elements (the CSV flow's
+    # topn-prefilter mode) sort the xAxis — element['values'] is nil there,
+    # so every pivot-shaped access below is guarded (review-caught: the
+    # denominator check never fired for charts and the success warning
+    # over-claimed).
+    is_pivot = element['kind'] == 'pivot-table'
     shelf_sorted = Array(z['shelf_sorts']).any? { |ss| norm.call(ss['dimension']) == norm.call(entity_col['name']) }
+    so_id = "p-#{element['id']}-sortord"
     axis_entry = ((element['rowsBy'] || []) + (element['columnsBy'] || [])).find { |r| r['id'] == entity_col['id'] }
+    ordered = false
     if axis_entry && !shelf_sorted
-      so_id = "p-#{element['id']}-sortord"
       unless (element['columns'] || []).any? { |c| c['id'] == so_id }
         element['columns'] << { 'id' => so_id, 'name' => 'SORT_ORD', 'formula' => "[#{hname}/SORT_ORD]" }
       end
       axis_entry['sort'] = { 'direction' => 'ascending', 'by' => so_id, 'aggregation' => 'min' }
+      ordered = true
+    elsif !is_pivot && element['xAxis'].is_a?(Hash) && element['xAxis']['sort'].nil? && !shelf_sorted && !z['sort']
+      unless (element['columns'] || []).any? { |c| c['id'] == so_id }
+        element['columns'] << { 'id' => so_id, 'name' => 'SORT_ORD', 'formula' => "[#{hname}/SORT_ORD]" }
+      end
+      element['xAxis']['sort'] = { 'by' => so_id, 'direction' => 'ascending', 'aggregation' => 'min' }
+      ordered = true
     end
     # Share-denominator honesty: Tableau's RANK filter is a TABLE-CALC filter —
     # shares compute over the FULL domain, then marks hide. A share whose scope
@@ -2944,24 +2995,28 @@ def apply_topn_prefilter!(tp, element:, cap:, z:, opts:, warnings:, data_element
     # members here and INFLATES. Scope orthogonal to the entity axis is exact.
     ent_on_cols = (element['columnsBy'] || []).any? { |r| r['id'] == entity_col['id'] }
     bad_scope = ent_on_cols ? 'row' : 'column'
-    inflated = (element['values'] || []).select do |vid|
+    value_ids = element['values'] || element.dig('yAxis', 'columnIds') || []
+    inflated = value_ids.select do |vid|
       c = (element['columns'] || []).find { |x| x['id'] == vid }
-      c && c['formula'].to_s =~ /PercentOfTotal\s*\([^\v]*"(?:#{bad_scope}|grand_total)"\s*\)/
+      re = is_pivot ? /PercentOfTotal\s*\([^\v]*"(?:#{bad_scope}|grand_total)"\s*\)/ : /PercentOfTotal\s*\(/
+      c && c['formula'].to_s =~ re
     end
     if inflated.any?
-      warnings << "'#{cap}' WARNING: #{inflated.size} share value(s) scope across the PRUNED #{ent_on_cols ? 'columns' : 'rows'} " \
-                  'axis (or the grand total) — Tableau ranks over the FULL domain, so these will read HIGH on the ' \
-                  'pre-filtered source. Denominator needs the full-domain total (hand-build; see fidelity-recipes §Ranked pivot).'
+      warnings << "'#{cap}' WARNING: #{inflated.size} share value(s) re-compute over the PRE-FILTERED domain — " \
+                  'Tableau ranks over the FULL domain, so these can read HIGH here. Verify against the source; ' \
+                  'full-domain denominators need a hand-build (fidelity-recipes §Ranked pivot).'
     end
     warnings << "'#{cap}' top-#{tp['top_n']} '#{label}' → rank-limited PRE-FILTERED source " \
-                "'#{hname}' (#{members.size} member(s), rank-ordered via SORT_ORD; element filters don't prune pivots)"
+                "'#{hname}' (#{members.size} member(s)#{ordered ? ', rank-ordered via SORT_ORD' : ''}; " \
+                'element filters don\'t prune pivots)'
   else
     probes_path = opts[:out].sub(/\.json$/, '-topn-probes.json')
     probe = { 'zone' => cap, 'calc' => label, 'top_n' => tp['top_n'],
               'entity_dim' => entity_col && entity_col['name'],
               'sql_template' => "SELECT entity, MAX(share) ms, RANK() OVER (ORDER BY MAX(share) DESC) rnk " \
                                 "FROM (<share-per-entity query over the landed table>) GROUP BY entity " \
-                                "QUALIFY rnk <= #{tp['top_n']} -- write members to <tab>/topn-members.json {\"#{label}\": [..]} and re-run" }
+                                "QUALIFY rnk <= #{tp['top_n']} -- write members (rank order) to <tab>/topn-members.json " \
+                                "under the ZONE-SCOPED key {\"#{cap}::#{label}\": [..]} and re-run" }
     existing = File.exist?(probes_path) ? (JSON.parse(File.read(probes_path)) rescue []) : []
     # dedup: re-entries (multi-dashboard zones, orchestrator re-runs within one
     # build) must not balloon the sidecar
@@ -5993,6 +6048,10 @@ elements.each do |el|
       # captions like 'Total (USD)' / 'Count (copy)' / 'Max (F)' are mixed
       # case — /i dropped all of those (v5.1.2 review-caught).
       inner =~ /\b(?:WINDOW_[A-Z]+|RUNNING_[A-Z]+|TOTAL|RANK[A-Z_]*|SUM|AVG|MIN|MAX|MEDIAN|COUNTD?|ZN|LOOKUP|INDEX)\s*\(/ ||
+        # a NESTED bracket inside the inner name is always a leaked formula
+        # ref — Tableau captions cannot legally contain [ or ] — and catches
+        # lowercase author-typed leaks the case-sensitive branch would miss
+        inner =~ /[\[\]]/ ||
         inner =~ /:(?:ok|qk)\b/
     end
   end
@@ -6173,9 +6232,14 @@ begin
   ht_path = opts[:out].sub(/\.json$/, '-hidden-titles.json')
   # put-layout UNIONS every *-hidden-titles.json in the dir, so a stale
   # sidecar from a build under a DIFFERENT --out basename would re-hide
-  # titles forever (element ids are deterministic across builds) — clear ALL
-  # siblings, then write this build's (v5.1.2 review-caught).
+  # titles forever (element ids are deterministic across builds). Clear the
+  # stale ones — but ONLY those whose ids belong to THIS workbook's elements
+  # (own basename, or id overlap): a different workbook legitimately sharing
+  # the directory keeps its sidecar (v5.1.3 review-caught).
+  own_ids = elements.map { |e| e['id'].to_s }
   Dir.glob(File.join(File.dirname(opts[:out]), '*-hidden-titles.json')).each do |stale|
+    sids = JSON.parse(File.read(stale)) rescue []
+    next unless stale == ht_path || (sids.is_a?(Array) && (sids.map(&:to_s) & own_ids).any?)
     File.delete(stale)
     warn "removed stale #{stale}" unless stale == ht_path
   end
@@ -6347,7 +6411,19 @@ elsif opts[:pages_mode] == :dashboard
       stem = el['id']
       if stem && seen_el_ids[stem]
         ns = "#{stem}-#{d_slug[0..20]}"
-        JSON.parse(el.to_json.gsub(stem, ns))
+        src_before = el.dig('source', 'elementId')
+        el2 = JSON.parse(el.to_json.gsub(stem, ns))
+        # v5.1.3: the stem gsub also rewrites a source.elementId that EMBEDS
+        # the stem (top-N prefilter helpers are '<stem>-topn-src'). The helper
+        # is a SHARED data element that keeps its original id — restore the
+        # ref, or the second page's copy points at a helper that doesn't
+        # exist and the POST hard-fails (review-caught, live-reproduced).
+        src_after = el2.dig('source', 'elementId')
+        if src_after != src_before && data_elements.any? { |d| d['id'] == src_before } &&
+           data_elements.none? { |d| d['id'] == src_after }
+          el2['source']['elementId'] = src_before
+        end
+        el2
       else
         seen_el_ids[stem] = true if stem
         el
