@@ -1085,9 +1085,36 @@ else
       exit 13
     end
   elsif recorded
+    # v5.3.1: a PASS verdict must carry the per-dimension STYLE CHECKLIST
+    # (round-5: gestalt self-passes shipped renders an exacting owner
+    # rejected on all six runs). record-visual-check.rb refuses new passes
+    # without one; this catches hand-edited parity-final.json + stale verdicts.
+    cl_keys = %w[element_titles_hidden palette_match composition_match
+                 chart_shapes_match labels_legible numbers_formatted]
+    if s['visual_verdict'].to_s == 'pass' && !opts[:skip_visual_cmp]
+      cl = s['style_checklist']
+      cl_missing = cl.is_a?(Hash) ? (cl_keys - cl.keys) : cl_keys
+      cl_fails = cl.is_a?(Hash) ? cl.select { |k, v2| cl_keys.include?(k) && v2 == 'fail' }.keys : []
+      unless cl_missing.empty? && cl_fails.empty?
+        warn '[FAIL] gate 8b: visual PASS recorded WITHOUT a complete clean style checklist —'
+        warn "       missing: #{cl_missing.join(', ')}" if cl_missing.any?
+        warn "       failing: #{cl_fails.join(', ')}" if cl_fails.any?
+        warn '       Re-judge the render against the SOURCE image per dimension (layout-visual-qa.md section 1b), then:'
+        warn '         ruby scripts/record-visual-check.rb --workdir <dir> --agent-vision true --verdict pass \\'
+        warn "           --checklist \"#{cl_keys.map { |k| "#{k}=pass" }.join(',')}\""
+        warn '       (fail on any dimension means the verdict is divergent — fix it first).'
+        exit 13
+      end
+    end
     v = s['visual_verdict'] ? " (#{s['visual_verdict']})" : ''
     av = s.key?('agent_vision') ? ", agent_vision=#{s['agent_vision']}" : ''
-    puts "[OK] gate 8b: source-vs-target visual comparison recorded#{v}#{av}."
+    cls = if s['style_checklist'].is_a?(Hash)
+            counts = s['style_checklist'].values.each_with_object(Hash.new(0)) { |v2, h| h[v2] += 1 }
+            ", style_checklist=#{counts.map { |k, n| "#{n}x#{k}" }.join('/')}"
+          else
+            ''
+          end
+    puts "[OK] gate 8b: source-vs-target visual comparison recorded#{v}#{av}#{cls}."
   elsif opts[:skip_visual_cmp]
     puts "[SKIP] gate 8b: source-vs-target visual comparison WAIVED via --skip-visual-comparison (#{opts[:skip_visual_cmp]})."
   else
@@ -1095,7 +1122,8 @@ else
     warn '       a valid render exists, but nobody confirmed it matches the source dashboard.'
     warn '       Enforced by default: a structurally-clean workbook can still be visually empty/wrong.'
     warn '       Read each rendered page against the source PNG, then run:'
-    warn '         ruby scripts/record-visual-check.rb --workdir <dir> --agent-vision true --verdict pass|divergent --notes "..."'
+    warn '         ruby scripts/record-visual-check.rb --workdir <dir> --agent-vision true --verdict pass|divergent --notes "..." \\'
+    warn '           --checklist "<six style dimensions - layout-visual-qa.md section 1b>"'
     warn '       then re-run. If the source image is genuinely unobtainable, waive with'
     warn '       --skip-visual-comparison "<reason>" and name it in your migration report.'
     exit 13
