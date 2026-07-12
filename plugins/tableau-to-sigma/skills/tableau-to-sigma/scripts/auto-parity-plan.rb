@@ -393,6 +393,11 @@ if File.exist?(dash_layout_path)
               'caption'     => hf['caption'],
               'filter_type' => hf['filter_type'],
               'members'     => hf['members'],
+              # quantitative bounds ride along so the carry-forward fingerprint
+              # (and a human reviewing the plan) can SEE a range change —
+              # members-only compared trivially-equal nils (review-caught)
+              'min'         => hf['min'],
+              'max'         => hf['max'],
               # Default status: unresolved. Caller must set "translated" or "waived".
               'status'      => 'unresolved'
             }.compact
@@ -403,7 +408,8 @@ if File.exist?(dash_layout_path)
               # 248→52-row silent wrong-numbers class this gate exists to
               # block; review-caught).
               same_def = prev['filter_type'].to_s == entry['filter_type'].to_s &&
-                         Array(prev['members']).map(&:to_s).sort == Array(entry['members']).map(&:to_s).sort
+                         Array(prev['members']).map(&:to_s).sort == Array(entry['members']).map(&:to_s).sort &&
+                         prev['min'].to_s == entry['min'].to_s && prev['max'].to_s == entry['max'].to_s
               if same_def
                 entry['status'] = prev['status']
                 %w[waive_reason translation translated_to note].each { |k| entry[k] = prev[k] if prev[k] }

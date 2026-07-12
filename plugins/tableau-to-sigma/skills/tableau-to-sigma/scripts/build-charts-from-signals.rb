@@ -2863,7 +2863,11 @@ def topn_members_for(calc_caption, entity_name, opts, zone, element_cols: [], ow
     end
   end
   bare_hit ||= lambda { nil }
-  return bare_hit.call unless entity_name
+  # No entity → the members could never be APPLIED (the helper's list filter
+  # needs the entity column) — do NOT consult the bare key here, or its
+  # single-consumer claim starves the zone that can actually use it
+  # (review-caught).
+  return nil unless entity_name
   nrm = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]/, '') }
   other_cols = element_cols.map { |c| nrm.call(c['name']) } - [nrm.call(entity_name)]
   best = nil # [coverage, rows, hdr]
@@ -2979,9 +2983,18 @@ def apply_topn_prefilter!(tp, element:, cap:, z:, opts:, warnings:, data_element
       # UNQUOTED literals only with EXPLICIT numeric datatype evidence from
       # the twb — a digit-string TEXT column ('070' room codes) must stay
       # quoted, and members-look-numeric alone proved nothing (review-caught).
-      ent_dt = tp['entity_ref'] && (meta['columns_by_guid'] || {}).dig(tp['entity_ref'], 'datatype').to_s
+      # Evidence: entity_ref's datatype, else a caption match into
+      # columns_by_guid (entity_ref is nil on older twbs; review-caught).
+      ent_dt = tp['entity_ref'] && (meta['columns_by_guid'] || {}).dig(tp['entity_ref'], 'datatype')
+      ent_dt ||= (meta['columns_by_guid'] || {}).values.find do |v|
+        v.is_a?(Hash) && v['caption'].to_s.strip.casecmp?(entity_col['name'].to_s.strip)
+      end&.dig('datatype')
       numeric_members = %w[integer real].include?(ent_dt.to_s) &&
                         members.all? { |m| m.to_s =~ /\A-?(?:0|[1-9]\d*)(?:\.\d+)?\z/ }
+      if !numeric_members && ent_dt.to_s.empty? && members.all? { |m| m.to_s =~ /\A-?\d+(?:\.\d+)?\z/ }
+        warnings << "'#{cap}' SORT_ORD members look numeric but the entity's twb datatype is unknown — " \
+                    'emitted QUOTED literals; if the column is numeric in Sigma, fix the Switch by hand'
+      end
       pairs = members.each_with_index.map do |m, i|
         lit = numeric_members ? m.to_s : JSON.generate(m.to_s)
         "#{lit}, #{i + 1}"
@@ -6303,8 +6316,14 @@ begin
     owned =
       if stale == ht_path
         true
-      elsif body.is_a?(Hash) && body['workbook']
-        $hidden_title_wb_sha && body['workbook'] == $hidden_title_wb_sha
+      elsif body.is_a?(Hash)
+        # sha match is exact ownership; the id-overlap fallback covers the
+        # SAME workbook whose twb changed between builds (or a null sha from
+        # a missing .twb) — without it those sidecars re-hid titles forever
+        # (review-caught). A cross-workbook slug collision deleting a shared
+        # sidecar is the lesser failure (it regenerates on that build).
+        ($hidden_title_wb_sha && body['workbook'] == $hidden_title_wb_sha) ||
+          (Array(body['ids']).map(&:to_s) & own_ids).any?
       elsif body.is_a?(Array)
         (body.map(&:to_s) & own_ids).any? # legacy shape
       else

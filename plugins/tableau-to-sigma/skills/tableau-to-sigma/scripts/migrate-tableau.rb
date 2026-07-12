@@ -1516,6 +1516,16 @@ if mechanical
     end
     if conn_classes.any? && (conn_classes - embedded_classes).empty?
       landing_manifest = Dir[File.join(WORK, '*landing-manifest*.json')].first
+      # A pre-existing EMPTY manifest ([], from a pre-v5.2.1 payload-less run)
+      # must not satisfy the gate either (review-caught) — treat as absent.
+      if landing_manifest
+        lm_body = JSON.parse(File.read(landing_manifest)) rescue nil
+        if lm_body.is_a?(Array) && lm_body.empty?
+          line "WARN: #{File.basename(landing_manifest)} is EMPTY (0 tables) — ignoring it (nothing was landed)"
+          File.delete(landing_manifest)
+          landing_manifest = nil
+        end
+      end
       # v5.2 (speed): AUTO-LAND when everything the manual step needs is
       # already on disk — discovery auto-refetched the .twbx WITH the extract
       # payload (v4.4), the connection id is a required arg, and --db/--schema
@@ -1531,7 +1541,10 @@ if mechanical
       neutral = File.expand_path('~/.sigma-migration/env')
       if File.exist?(neutral)
         File.readlines(neutral).each do |l|
-          m = l.match(/\A\s*(?:export\s+)?(SNOWFLAKE_\w+)\s*=\s*(.+?)\s*\z/)
+          # SAME grammar as land-extracts.py's load_neutral_env (KEY=VALUE, no
+          # whitespace around '=') — a laxer Ruby regex would say "resolvable"
+          # for a line Python then can't read (review-caught).
+          m = l.match(/\A\s*(?:export\s+)?(SNOWFLAKE_\w+)=(.+?)\s*\z/)
           sf_env[m[1]] = m[2].gsub(/\A["']|["']\z/, '') if m
         end
       end
@@ -1553,14 +1566,21 @@ if mechanical
                         '--manifest-out', File.join(WORK, 'landing-manifest.json')],
                        allow_fail: true)
         mani_p = File.join(WORK, 'landing-manifest.json')
-        landed = lst.success? && File.exist?(mani_p) ? (JSON.parse(File.read(mani_p)) rescue []) : []
-        if landed.is_a?(Array) && landed.any?
+        # Parse the manifest INDEPENDENTLY of the exit status — a nonzero exit
+        # AFTER the tables landed (e.g. the catalog /sync step failed) leaves a
+        # POPULATED manifest that must survive (review-caught: the delete-if-
+        # empty guard, keyed off a short-circuited [], destroyed it).
+        mani_body = File.exist?(mani_p) ? (JSON.parse(File.read(mani_p)) rescue nil) : nil
+        if lst.success? && mani_body.is_a?(Array) && mani_body.any?
           landing_manifest = mani_p
-          Offramp.log(WORK, kind: 'auto-land', detail: "landed #{landed.size} table(s), prefix #{prefix}") if defined?(Offramp)
+          Offramp.log(WORK, kind: 'auto-land', detail: "landed #{mani_body.size} table(s), prefix #{prefix}") if defined?(Offramp)
+        elsif mani_body.is_a?(Array) && mani_body.any?
+          line "WARN: auto-landing exited nonzero AFTER landing #{mani_body.size} table(s) (manifest kept) — " \
+               'verify the landing log, then re-run (the manifest satisfies the gate on re-entry)'
         else
           # An EMPTY manifest (twbx without .hyper payloads) exits 0 — it must
           # NOT pass the gate as "landed" (review-caught false pass).
-          File.delete(mani_p) if landed.is_a?(Array) && landed.empty? && File.exist?(mani_p)
+          File.delete(mani_p) if mani_body.is_a?(Array) && mani_body.empty?
           line 'WARN: auto-landing landed nothing (failure or payload-less .twbx) — manual landing gate (exit 17)'
         end
       elsif landing_manifest.nil? && !opts[:no_auto_land] && !opts[:skip_extract_landing] &&
