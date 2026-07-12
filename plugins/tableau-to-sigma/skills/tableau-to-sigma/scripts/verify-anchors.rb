@@ -199,6 +199,18 @@ end
 # ---------------------------------------------------------------------------
 return if $PROGRAM_NAME != __FILE__ && !ENV['VERIFY_ANCHORS_CLI'] # allow `require` in tests
 
+# Element display name for export keys. put-layout replaces `name` with a
+# visibility hash on hidden-title elements — every such element would
+# stringify to the SAME key and overwrite each other's exports (false RED on
+# any anchor living in the clobbered tile). Fall back to text, then the id
+# slug (unique by construction; token matching still ranks it).
+def el_display_name(el)
+  n = el['name']
+  return n.to_s unless n.is_a?(Hash)
+  t = n['text'].to_s
+  t.empty? ? el['id'].to_s.sub(/\Ael-/, '').tr('-', ' ') : t
+end
+
 opts = { pool: 4, timeout: 120 }
 OptionParser.new do |p|
   p.on('--workdir DIR')        { |v| opts[:dir] = v }
@@ -261,7 +273,7 @@ if opts[:exports]
   elements.each do |el|
     csv = File.join(opts[:exports], "#{el['id']}.csv")
     next unless File.exist?(csv)
-    exports[el['name'].to_s] = CSV.read(csv)
+    exports[el_display_name(el)] = CSV.read(csv)
   end
 else
   # Live: resolve workbook id, GET the spec, pool the element CSV exports —
@@ -306,7 +318,7 @@ else
       end
     end
   rescue Sigma::Error, CSV::MalformedCSVError => e
-    warn "  [WARN] export failed for element #{el['name'].inspect}: #{e.message.lines.first.to_s.strip[0, 120]}"
+    warn "  [WARN] export failed for element #{el_display_name(el).inspect}: #{e.message.lines.first.to_s.strip[0, 120]}"
     nil
   end
 
@@ -323,7 +335,7 @@ else
           break
         end
         rows = export_one.call(el)
-        mutex.synchronize { exports[el['name'].to_s] = rows } if rows
+        mutex.synchronize { exports[el_display_name(el)] = rows } if rows
       end
     end
   end.each(&:join)

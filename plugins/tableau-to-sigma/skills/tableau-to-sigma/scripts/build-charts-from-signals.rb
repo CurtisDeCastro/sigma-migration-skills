@@ -1451,21 +1451,26 @@ end
 
 def translate_window_calc(formula, mmap, columns_by_guid = {}, depth: 0)
   s = formula.to_s.gsub(/\s+/, ' ').strip
-  # v5.1: a LEADING unary minus on a window calc is a Tableau DESC-sort trick
-  # (e.g. `-WINDOW_MAX(share)` as a hidden sort pill). Strip it and carry the
-  # flag — the minus must NEVER reach a column name/formula (the round-4
-  # `Sum([Master/-WINDOW_MAX(…)])` class died here).
+  # v5.1: a LEADING unary minus on a window-share pill or a bare calc ref is a
+  # Tableau DESC-sort trick (`-WINDOW_MAX(share)`, `-[CalcRef]`). Strip it and
+  # carry the flag — the minus must NEVER reach a column name/formula (the
+  # round-4 `Sum([Master/-WINDOW_MAX(…)])` class died here). SCOPED to those
+  # two shapes only: a minus on any other window calc (-RUNNING_SUM(…)) is a
+  # genuine negation and keeps its sign through the generic path
+  # (review-caught: the blanket strip silently changed those values).
   negated = false
-  if s.start_with?('-')
+  if s.start_with?('-') && s[1..-1].to_s.strip =~ /\A(?:WINDOW_(?:MAX|MIN|AVG)\s*\(|\[[^\]]+\]\z)/i
     negated = true
     s = s[1..-1].to_s.strip
   end
   # v5.1: one-level calc-ref dereference — a bare `[CalcRef]` whose formula is
-  # known resolves to that formula and re-enters ONCE (depth guard).
-  if depth.zero? && (ref = s[/\A\[([^\]]+)\]\z/, 1])
+  # known resolves to that formula and re-enters. Allowed at depth 0 AND 1
+  # (Rule T1 hands the RANK operand in at depth 1 — review-caught: gating on
+  # depth.zero? made the T1 ref path dead); depth 2 stops the recursion.
+  if depth < 2 && (ref = s[/\A\[([^\]]+)\]\z/, 1])
     info = columns_by_guid[ref] || columns_by_guid.values.find { |v| v.is_a?(Hash) && v['caption'].to_s == ref }
     if info.is_a?(Hash) && info['formula'].to_s =~ WINDOW_TC_RE
-      plan = translate_window_calc(info['formula'], mmap, columns_by_guid, depth: 1)
+      plan = translate_window_calc(info['formula'], mmap, columns_by_guid, depth: depth + 1)
       return plan && plan.merge('negated_for_sort' => (negated || plan['negated_for_sort'] || false))
     end
   end
@@ -2362,7 +2367,8 @@ def build_pivot_element(z, meta, mmap, opts, warnings, data_elements = [])
     # param measure-picker can be matched by id, not just the resolved caption
     # (the Calculation_NNN→caption bridge — n4pi.10).
     user_vals << { 'col' => col_obj, 'name' => m['name'].to_s.strip,
-                   'raw' => (field['column'] || field['raw']).to_s } if target == :value && %w[usr user].include?(deriv)
+                   'raw' => (field['column'] || field['raw']).to_s,
+                   'shelf' => shelf } if target == :value && %w[usr user].include?(deriv)
     case target
     when :row   then rows_by    << { 'id' => col_id }
     when :col   then cols_by    << { 'id' => col_id }
@@ -2520,11 +2526,11 @@ def build_pivot_element(z, meta, mmap, opts, warnings, data_elements = [])
     elsif plan['mode'] == 'two-stage'
       win_stage << { 'col' => uv['col'], 'plan' => plan }
     elsif plan['mode'] == 'inline-share'
-      # v5.1 Rule W1 emission (pivot): scope from the axis carrying the share —
-      # the same deterministic rule as the pcto quick calc (value came from the
-      # rows shelf → each row sums to 1 → "row"; cols shelf → "column").
-      # PIVOT-ONLY partition modes per round-3 consensus.
-      shelf_of = (rows_shelf['fields'] || []).any? { |f| (f['column'] || f['raw']).to_s.include?(uv['raw'].to_s[/Calculation_\w+/].to_s) } ? 'row' : 'column'
+      # v5.1 Rule W1 emission (pivot): scope from the SHELF the value pill sat
+      # on (recorded by add_col — review-caught: a regex re-derivation matched
+      # everything and always said 'row'). rows shelf → each row sums to 1 →
+      # "row"; cols shelf → "column". PIVOT-ONLY partition modes per round-3.
+      shelf_of = uv['shelf'] == :cols ? 'column' : 'row'
       uv['col']['formula'] =
         if plan['share_kind'] == 'percent_of_total'
           %(PercentOfTotal(#{plan['inner']}, "#{shelf_of}"))
@@ -2625,6 +2631,42 @@ def build_pivot_element(z, meta, mmap, opts, warnings, data_elements = [])
     end
   end
 
+  # v5.1.1: legacy <computed-sort> fallback — "sort field X by measure Y" in
+  # older workbooks lands ONLY here, not in <shelf-sort-v2>, and those pivots
+  # shipped alphabetical (review-caught). Same emission + constant-key guard
+  # as above; skipped whenever a shelf sort exists.
+  if Array(z['shelf_sorts']).empty? && z['sort'].is_a?(Hash) && z['sort']['using']
+    norm = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]/, '') }
+    refname = lambda do |raw|
+      tok = raw.to_s[/\[(?:[a-z\-]+:)?([^:\]]+?)(?::[a-z]+)?\]\z/i, 1]
+      info = (meta['columns_by_guid'] || {})[guid_from_text(raw.to_s)] ||
+             (meta['columns_by_guid'] || {})[tok]
+      (info && info['caption']) || tok
+    end
+    dim_name  = refname.call(z['sort']['column'])
+    meas_name = refname.call(z['sort']['using'])
+    (rows_by + cols_by).each do |entry|
+      next if entry['sort']
+      col = cols_array.find { |c| c['id'] == entry['id'] }
+      next unless col && dim_name && norm.call(col['name']) == norm.call(dim_name)
+      by_col = cols_array.find { |c| values_arr.include?(c['id']) && meas_name && norm.call(c['name']).include?(norm.call(meas_name)) } ||
+               cols_array.find { |c| values_arr.include?(c['id']) }
+      break unless by_col
+      scope_word = cols_by.include?(entry) ? 'column' : 'row'
+      if by_col['formula'].to_s =~ /PercentOfTotal\s*\(.*"#{scope_word}"\s*\)/
+        warnings << "'#{cap}' pivot computed-sort key '#{by_col['name']}' is PercentOfTotal(…,\"#{scope_word}\") — " \
+                    'CONSTANT across the sorted axis (sorts alphabetically at render). Sort by the inner aggregate ' \
+                    'instead (refs/fidelity-recipes.md §Ranked pivot).'
+      else
+        entry['sort'] = { 'direction' => z['sort']['direction'] || 'ascending', 'by' => by_col['id'] }
+        agg = by_col['formula'].to_s[/\A(Sum|Avg|Min|Max|Median|Count|CountDistinct)\(/, 1]
+        entry['sort']['aggregation'] = agg.downcase if agg
+        warnings << "'#{cap}' pivot sorted by '#{by_col['name']}' #{z['sort']['direction']} (source computed-sort)"
+      end
+      break
+    end
+  end
+
   el = {
     'id'        => el_id,
     'kind'      => 'pivot-table',
@@ -2667,13 +2709,18 @@ end
 def build_topn_prefilter_helper(el_id:, master_id:, entity_col:, carry_cols:, members:)
   src_id = "#{el_id}-topn-src"
   src_name = "TopN Source (#{el_id.sub(/^el-/, '')})"
-  cols = carry_cols.each_with_index.map do |c, i|
-    { 'id' => "#{src_id}-c#{i}", 'name' => c['name'],
-      # passthrough at ROW grain: aggregates re-compute on the pivot, so the
-      # helper carries the BASE refs its formulas mention
-      'formula' => c['formula'].to_s[/\[Master\/[^\]]+\]/] || c['formula'] }
-  end.uniq { |c| c['name'] }
-  ent = cols.find { |c| c['name'] == entity_col['name'] }
+  # One passthrough column per DISTINCT base ref across ALL carry formulas —
+  # a ratio measure Sum([Master/A])/Sum([Master/B]) needs BOTH A and B at row
+  # grain (review-caught: a first-ref slice dropped every ref after the first,
+  # and naming columns by the pivot header broke the re-pointed ref lookup).
+  # Aggregates re-compute on the pivot, so bare refs are all it must carry.
+  refs = carry_cols.flat_map { |c| c['formula'].to_s.scan(%r{\[Master/([^\]/]+)\]}).flatten }.uniq
+  ent_name = entity_col['formula'].to_s[%r{\[Master/([^\]/]+)\]}, 1] || entity_col['name']
+  refs << ent_name unless refs.include?(ent_name)
+  cols = refs.each_with_index.map do |rn, i|
+    { 'id' => "#{src_id}-c#{i}", 'name' => rn, 'formula' => "[Master/#{rn}]" }
+  end
+  ent = cols.find { |c| c['name'] == ent_name }
   {
     'id' => src_id, 'kind' => 'table', 'name' => src_name, 'visibleAsSource' => false,
     'source' => { 'kind' => 'table', 'elementId' => master_id },
@@ -2703,6 +2750,81 @@ def topn_members_for(calc_caption, entity_name, opts, _zone)
     return vals.uniq if vals.any?
   end
   nil
+end
+
+# v5.1.1: shared top-N idiom detection — the CSV flow's inline lambda made the
+# interception unreachable for pivots (the fast path `next`s out of the zone
+# loop long before it; review-caught). Given ONE zone filter, return the
+# translated plan (merged with keeps_true/calc_caption) or nil.
+def detect_topn_plan(f, z, mmap, meta)
+  norm = ->(x) { x.to_s.gsub(/^\[|\]$/, '').strip.downcase }
+  ref = [f['column_caption'], f['raw_param']].compact.map(&:to_s).join(' ')
+  calc = (z['calculations'] || []).find do |c|
+    cap_n  = norm.call(c['caption'])
+    name_n = norm.call(c['name'])
+    next false if c['formula'].to_s !~ /\bRANK(?:_UNIQUE)?\s*\(/i
+    (!cap_n.empty? && norm.call(f['column_caption']) == cap_n) ||
+      (!name_n.empty? && ref.downcase.include?(name_n))
+  end
+  return nil unless calc
+  plan = translate_window_calc(calc['formula'], mmap, meta['columns_by_guid'] || {})
+  record_window_calc(z, calc, plan, mode: 'top-n-filter') if plan && plan['operand_raw']
+  return nil unless plan && plan['operand_raw'] # only the top-N branch sets this
+  # The filter must KEEP the top rows (member 'true'); a keep-false inverts it.
+  kept = (f['members'] || []).map { |v| v.to_s.downcase }
+  plan.merge('keeps_true' => kept.empty? || kept.include?('true'),
+             'calc_caption' => calc['caption'] || calc['name'],
+             # "compute using" dim from the calc's table-calc addressing — the
+             # RANKED ENTITY (parser ordering_field, v5.1.1); nil on older twbs.
+             'entity_ref' => calc['ordering_field'])
+end
+
+# v5.1.1: re-source an element to the rank-limited PRE-FILTERED helper (or
+# write the probe sidecar when no member source exists). Shared by the pivot
+# fast path and the CSV flow's pivot/topn-prefilter branch.
+def apply_topn_prefilter!(tp, element:, cap:, z:, opts:, warnings:, data_elements:, meta: {})
+  label = tp['calc_caption']
+  norm = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]/, '') }
+  # The ranked entity comes from the rank calc's OWN addressing when the twb
+  # carries it (entity_ref, exact) — the axis heuristic below picked the wrong
+  # dim on real column-ranked pivots (rooms ride columnsBy, not rowsBy.first).
+  entity_col = nil
+  if tp['entity_ref']
+    hint = (meta['columns_by_guid'] || {}).dig(tp['entity_ref'], 'caption') || tp['entity_ref']
+    entity_col = (element['columns'] || []).find { |c| norm.call(c['name']) == norm.call(hint) }
+  end
+  entity_col ||= (element['rowsBy'] || []).map { |r| (element['columns'] || []).find { |c| c['id'] == r['id'] } }.compact.first ||
+                 (element['columnsBy'] || []).map { |r| (element['columns'] || []).find { |c| c['id'] == r['id'] } }.compact
+                   .reject { |c| c['formula'].to_s =~ /\A\[Master\/Rank/i }.last
+  members = topn_members_for(label, entity_col && entity_col['name'], opts, z)
+  if entity_col && members && members.any?
+    helper = build_topn_prefilter_helper(
+      el_id: element['id'], master_id: (element.dig('source', 'elementId') || opts[:master_id]),
+      entity_col: entity_col, carry_cols: element['columns'], members: members)
+    # The element no longer rides the master, so multi-DS routing must route
+    # the HELPER — tag it with the worksheet (routing includes tagged helpers).
+    helper['_worksheet'] = cap
+    data_elements << helper
+    hname = helper['name']
+    element['source'] = { 'kind' => 'table', 'elementId' => helper['id'] }
+    (element['columns'] || []).each do |c|
+      c['formula'] = c['formula'].to_s.gsub('[Master/', "[#{hname}/")
+    end
+    warnings << "'#{cap}' top-#{tp['top_n']} '#{label}' → rank-limited PRE-FILTERED source " \
+                "'#{hname}' (#{members.size} member(s); element filters don't prune pivots)"
+  else
+    probes_path = opts[:out].sub(/\.json$/, '-topn-probes.json')
+    probe = { 'zone' => cap, 'calc' => label, 'top_n' => tp['top_n'],
+              'entity_dim' => entity_col && entity_col['name'],
+              'sql_template' => "SELECT entity, MAX(share) ms, RANK() OVER (ORDER BY MAX(share) DESC) rnk " \
+                                "FROM (<share-per-entity query over the landed table>) GROUP BY entity " \
+                                "QUALIFY rnk <= #{tp['top_n']} -- write members to <tab>/topn-members.json {\"#{label}\": [..]} and re-run" }
+    existing = File.exist?(probes_path) ? (JSON.parse(File.read(probes_path)) rescue []) : []
+    File.write(probes_path, JSON.pretty_generate(existing + [probe]))
+    warnings << "'#{cap}' top-#{tp['top_n']} '#{label}': no member source (no CSV covers the entity dim) — " \
+                "probe written to #{File.basename(probes_path)}; run it, save members to topn-members.json, re-run build"
+  end
+  true
 end
 
 # Minimal GUID-from-text helper for shelf measures whose `column` reads like
@@ -3081,6 +3203,22 @@ layout.each do |dash|
       if pivot_el
         pivot_el['_worksheet'] = cap
         pivot_el['_dashboard'] = dash['dashboard']
+        # v5.1.1: intercept the top-N idiom HERE — the fast path `next`s out of
+        # the zone loop, so the CSV flow's value-filter interception never sees
+        # pivots (review-caught: the v5.1 pre-filtered-source branch was dead
+        # for every real pivot). Element filters don't prune a pivot's
+        # dimension, so the ONLY correct emission is the pre-filtered source.
+        (z['filters'] || []).reject { |f| f['is_action'] }.each do |f|
+          tp = detect_topn_plan(f, z, mmap, meta)
+          next unless tp && tp['top_n']
+          unless tp['keeps_true']
+            warnings << "'#{cap}' top-N filter '#{tp['calc_caption']}' keeps FALSE (anti-top-N) — not auto-emitted; re-create by hand"
+            next
+          end
+          apply_topn_prefilter!(tp, element: pivot_el, cap: cap, z: z, meta: meta,
+                                opts: opts, warnings: warnings, data_elements: data_elements)
+          break
+        end
         elements << pivot_el
         warnings << "'#{cap}' auto-emitted as Sigma pivot-table from Tableau crosstab (rows/cols shelves) — verify dim placement"
         next
@@ -3452,7 +3590,9 @@ layout.each do |dash|
           else
             window_plan['inner']
           end
-        window_plan = window_plan.merge('mode' => 'inline') # downstream treats as inline
+        # downstream reads window_plan['formula'] (top-N auto-sort, dedup) —
+        # carry the emitted share so it is never nil (review-caught).
+        window_plan = window_plan.merge('mode' => 'inline', 'formula' => user_agg_formula)
         warnings << "'#{cap}' measure '#{meas_hdr}' is a window-wrapped share — emitted " \
                     "#{user_agg_formula[0..120]} [#{window_plan['note']}]"
       when 'two-stage'
@@ -4344,30 +4484,12 @@ layout.each do |dash|
     # (rowCount=N, rankingFunction row-number/rank) + sort the tile by it. An
     # untranslatable LOD operand is surfaced (build the helper measure first),
     # never emitted as a sort-dependent RowNumber.
-    norm_calc = ->(x) { x.to_s.gsub(/^\[|\]$/, '').strip.downcase }
-    topn_filter_plan = lambda do |f|
-      ref = [f['column_caption'], f['raw_param']].compact.map { |x| x.to_s }.join(' ')
-      calc = (z['calculations'] || []).find do |c|
-        cap_n  = norm_calc.call(c['caption'])
-        name_n = norm_calc.call(c['name'])
-        next false if c['formula'].to_s !~ /\bRANK(?:_UNIQUE)?\s*\(/i
-        (!cap_n.empty? && norm_calc.call(f['column_caption']) == cap_n) ||
-          (!name_n.empty? && ref.downcase.include?(name_n))
-      end
-      return nil unless calc
-      plan = translate_window_calc(calc['formula'], mmap, meta['columns_by_guid'] || {})
-      record_window_calc(z, calc, plan, mode: 'top-n-filter') if plan && plan['operand_raw']
-      return nil unless plan && plan['operand_raw'] # only the top-N branch sets this
-      # The filter must KEEP the top rows (member 'true'); a keep-false would
-      # invert it. Tableau exports the keep-list in members.
-      kept = (f['members'] || []).map { |v| v.to_s.downcase }
-      plan = plan.merge('keeps_true' => kept.empty? || kept.include?('true'))
-      plan.merge('calc_caption' => calc['caption'] || calc['name'])
-    end
     value_filters.each do |f|
       fcap = f['column_caption'] || f['raw_param']
       # --- Top-N idiom interception (before master-column resolution) ---------
-      if (tp = topn_filter_plan.call(f))
+      # (detection + prefilter emission shared with the pivot fast path via
+      # detect_topn_plan / apply_topn_prefilter! — v5.1.1)
+      if (tp = detect_topn_plan(f, z, mmap, meta))
         label = tp['calc_caption']
         unless tp['keeps_true']
           warnings << "'#{cap}' top-N filter '#{label}' keeps FALSE (anti-top-N) — not auto-emitted; re-create by hand"
@@ -4381,34 +4503,8 @@ layout.each do |dash|
         # (Tableau already applied the rank — distinct entity values ARE the
         # exact member set); else emit the probe SQL and stay manual.
         if tp['top_n'] && (kind == 'pivot-table' || tp['mode'] == 'topn-prefilter')
-          entity_col = (element['rowsBy'] || []).map { |r| (element['columns'] || []).find { |c| c['id'] == r['id'] } }.compact.first ||
-                       (element['columnsBy'] || []).map { |r| (element['columns'] || []).find { |c| c['id'] == r['id'] } }.compact
-                         .reject { |c| c['formula'].to_s =~ /\A\[Master\/Rank/i }.last
-          members = topn_members_for(label, entity_col && entity_col['name'], opts, z)
-          if entity_col && members && members.any?
-            helper = build_topn_prefilter_helper(
-              el_id: el_id, master_id: (element.dig('source', 'elementId') || opts[:master_id]),
-              entity_col: entity_col, carry_cols: element['columns'], members: members)
-            data_elements << helper
-            hname = helper['name']
-            element['source'] = { 'kind' => 'table', 'elementId' => helper['id'] }
-            (element['columns'] || []).each do |c|
-              c['formula'] = c['formula'].to_s.gsub('[Master/', "[#{hname}/")
-            end
-            warnings << "'#{cap}' top-#{tp['top_n']} '#{label}' → rank-limited PRE-FILTERED source " \
-                        "'#{hname}' (#{members.size} member(s); element filters don't prune pivots)"
-          else
-            probes_path = opts[:out].sub(/\.json$/, '-topn-probes.json')
-            probe = { 'zone' => cap, 'calc' => label, 'top_n' => tp['top_n'],
-                      'entity_dim' => entity_col && entity_col['name'],
-                      'sql_template' => "SELECT entity, MAX(share) ms, RANK() OVER (ORDER BY MAX(share) DESC) rnk " \
-                                        "FROM (<share-per-entity query over the landed table>) GROUP BY entity " \
-                                        "QUALIFY rnk <= #{tp['top_n']} -- write members to <tab>/topn-members.json {\"#{label}\": [..]} and re-run" }
-            existing = File.exist?(probes_path) ? (JSON.parse(File.read(probes_path)) rescue []) : []
-            File.write(probes_path, JSON.pretty_generate(existing + [probe]))
-            warnings << "'#{cap}' top-#{tp['top_n']} '#{label}': no member source (no CSV covers the entity dim) — " \
-                        "probe written to #{File.basename(probes_path)}; run it, save members to topn-members.json, re-run build"
-          end
+          apply_topn_prefilter!(tp, element: element, cap: cap, z: z, meta: meta,
+                                opts: opts, warnings: warnings, data_elements: data_elements)
           next
         end
         unless tp['top_n'] && tp['ranked_measure']
@@ -5728,7 +5824,12 @@ end
 elements.each do |el|
   bad = (el['columns'] || []).select do |c|
     c['formula'].to_s.scan(/\[[^\]\/]+\/([^\]]+)\]/).flatten.any? do |inner|
-      inner =~ /[()]/ || inner =~ /:(?:ok|qk)\b/
+      # FUNCTION-CALL shapes and pill qualifiers only. Legit captions carry
+      # parens too ('GDP (current US$)', 'Cost (copy)_123' — real resolvable
+      # DM columns in the corpus; review-caught: a blanket paren test dropped
+      # them), so match aggregate/window CALLS, not punctuation.
+      inner =~ /\b(?:WINDOW_[A-Z]+|RUNNING_[A-Z]+|TOTAL|RANK[A-Z_]*|SUM|AVG|MIN|MAX|MEDIAN|COUNTD?|ZN|LOOKUP|INDEX)\s*\(/i ||
+        inner =~ /:(?:ok|qk)\b/
     end
   end
   next if bad.empty?
@@ -5736,6 +5837,14 @@ elements.each do |el|
     el['columns'].delete(c)
     Array(el.dig('yAxis', 'columnIds')).delete(c['id'])
     Array(el['values']).delete(c['id'])
+    # Clean every other structure that references the dropped id — a dangling
+    # sort.by / conditionalFormats columnId fails the PUT just as hard.
+    %w[rowsBy columnsBy].each do |ax|
+      Array(el[ax]).each { |e2| e2.delete('sort') if e2.is_a?(Hash) && e2.dig('sort', 'by') == c['id'] }
+      el[ax] = Array(el[ax]).reject { |e2| (e2.is_a?(Hash) ? e2['id'] : e2) == c['id'] } if el[ax]
+    end
+    Array(el['conditionalFormats']).each { |cf| Array(cf['columnIds']).delete(c['id']) }
+    el['conditionalFormats'] = Array(el['conditionalFormats']).reject { |cf| Array(cf['columnIds']).empty? } if el['conditionalFormats']
     warnings << "FAIL-CLOSED '#{el['name']}': column '#{c['name']}' referenced leaked formula text/pill " \
                 "(#{c['formula'].to_s[0, 90]}) — DROPPED (would hard-fail the POST); translate or re-author it"
   end
@@ -5777,7 +5886,12 @@ def route_multi_ds!(elements, data_elements, plan, master_id, warnings, controls
     (d['worksheets'] || []).each { |w| ws_to_ds[norm.call(w)] = d }
   end
   submasters = {} # ds caption → sub-master element (lazy)
-  elements.each do |el|
+  # v5.1.1: hidden helpers tagged with _worksheet (top-N prefilter sources)
+  # ride the master DIRECTLY while their chart sources the helper — the chart
+  # fails the mechanical guard below, so the HELPER must be routed in its
+  # place (review-caught: the helper kept [Master/ refs + the wrong master on
+  # outlier-datasource pivots → Dependency-not-found at POST).
+  (elements + data_elements.select { |d| d['_worksheet'] }).each do |el|
     ds = ws_to_ds[norm.call(el['_worksheet'])]
     next unless ds
     # mechanical-only guard: source must be exactly the shared master
@@ -5864,6 +5978,8 @@ begin
 rescue => e
   warnings << "multi-DS routing error (charts left on the master + WARN wall): #{e.message}"
 end
+# routing tags on hidden helpers are internal — never emit them in the spec
+data_elements.each { |e| e.delete('_worksheet') }
 
 # v5.1: HIDDEN-TITLES sidecar. The source hides worksheet titles via the zone
 # attr show-title='false' (parser: zone show_title) — three rounds leaked
@@ -5882,10 +5998,15 @@ begin
   hidden = elements.select do |e|
     e['kind'] != 'kpi-chart' && st_by_ws.key?(e['_worksheet']) && st_by_ws[e['_worksheet']] == false
   end.map { |e| e['id'] }
+  ht_path = opts[:out].sub(/\.json$/, '-hidden-titles.json')
   if hidden.any?
-    ht_path = opts[:out].sub(/\.json$/, '-hidden-titles.json')
     File.write(ht_path, JSON.pretty_generate(hidden))
     warn "wrote #{ht_path} (#{hidden.size} element(s) whose source hides the title — applied by put-layout.rb)"
+  elsif File.exist?(ht_path)
+    # A stale sidecar from a prior build would re-hide titles that are no
+    # longer hidden (review-caught) — remove it when this build hides none.
+    File.delete(ht_path)
+    warn "removed stale #{ht_path} (this build hides no titles)"
   end
 rescue => e
   warnings << "hidden-titles sidecar error (titles stay visible): #{e.message}"

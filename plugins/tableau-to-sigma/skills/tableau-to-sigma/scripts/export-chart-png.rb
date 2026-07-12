@@ -124,7 +124,9 @@ end
 queue.each do |q|
   manifest[q[:element]['id']] = {
     'kind'     => q[:element]['kind'],
-    'name'     => q[:element]['name'],
+    # hidden-title elements carry a visibility hash as `name` — keep the
+    # manifest human-readable (text, else the element id)
+    'name'     => (q[:element]['name'].is_a?(Hash) ? (q[:element]['name']['text'] || q[:element]['id']) : q[:element]['name']),
     'status'   => q[:status].to_s,
     'png_path' => q[:png_path],
     'bytes'    => q[:bytes],

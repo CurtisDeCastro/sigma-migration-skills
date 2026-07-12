@@ -124,9 +124,12 @@ end
 # probed 2026-07-12) and the bare {visibility:'hidden'} object breaks every
 # upstream name-keyed matcher (layout els_by_name, parity, tile verify). At
 # this point nothing else needs names.
-ht_path = Dir.glob(File.join(File.dirname(opts[:layout]), '*-hidden-titles.json')).first
-if ht_path && File.exist?(ht_path)
-  hidden_ids = JSON.parse(File.read(ht_path))
+# All sidecars, sorted (an unsorted `.first` was nondeterministic when more
+# than one build wrote here — review-caught); ids are unioned. The builder
+# deletes its sidecar when a rebuild hides nothing, so stale ids don't linger.
+ht_paths = Dir.glob(File.join(File.dirname(opts[:layout]), '*-hidden-titles.json')).sort
+if ht_paths.any?
+  hidden_ids = ht_paths.flat_map { |p| JSON.parse(File.read(p)) rescue [] }.uniq
   hid = 0
   spec['pages'].each do |p|
     (p['elements'] || []).each do |el|
@@ -135,7 +138,7 @@ if ht_path && File.exist?(ht_path)
       hid += 1
     end
   end
-  puts "hidden titles: #{hid}/#{hidden_ids.size} element title(s) hidden (source show-title=false)"
+  puts "hidden titles: #{hid}/#{hidden_ids.size} element title(s) hidden (source show-title=false; #{ht_paths.map { |p| File.basename(p) }.join(', ')})"
 end
 
 %w[workbookId url ownerId createdBy updatedBy createdAt updatedAt latestDocumentVersion].each { |k| spec.delete(k) }

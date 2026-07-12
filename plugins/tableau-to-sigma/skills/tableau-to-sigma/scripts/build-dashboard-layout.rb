@@ -1396,7 +1396,10 @@ dash_layout.each do |d|
   if cpx.is_a?(Hash) && cpx['sizing_mode'] == 'fixed' && cpx['h'].to_i >= 400
     canvas_rows = [[(cpx['h'].to_f / SigmaLayout::SIGMA_ROW_PX).round, 24].max, 400].min
   end
-  if !o[:page_rows_explicit] && canvas_rows
+  # An explicit --page-rows OR --row-scale is an operator override of the row
+  # model — the px derivation would silently neutralize it (review-caught:
+  # row_scale_explicit was recorded but never honored).
+  if !o[:page_rows_explicit] && !o[:row_scale_explicit] && canvas_rows
     o[:page_rows] = canvas_rows
     o[:row_scale] = 1.0
     warn "px-derived rows: #{d['dashboard'].inspect} canvas #{cpx['w']}x#{cpx['h']} → " \

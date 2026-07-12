@@ -162,6 +162,16 @@ pages.each do |pg|
 end
 
 # Match Sigma chart → Tableau view
+# Element display name: put-layout replaces `name` with a visibility hash on
+# hidden-title elements — recover text, else the id slug, so Tableau-view
+# matching keeps working (and keys stay unique).
+def el_display_name(el)
+  n = el['name']
+  return n.to_s unless n.is_a?(Hash)
+  t = n['text'].to_s
+  t.empty? ? el['id'].to_s.sub(/\Ael-/, '').tr('-', ' ') : t
+end
+
 def normalize(s)
   s.to_s.downcase.gsub(/[^a-z0-9]/, '')
 end
@@ -192,7 +202,7 @@ rev_renames = opts[:renames].each_with_object({}) { |(k, v), h| h[v] = k }
 
 plan_entries = []
 sigma_charts.each do |el|
-  sigma_name = el['name']
+  sigma_name = el_display_name(el)
   tableau_name = rev_renames[sigma_name] || sigma_name
 
   view = view_by_name[tableau_name]
@@ -412,7 +422,7 @@ composite_stub = false
 if plan_entries.empty? && csv_mtime.zero?
   composite_stub = true
   plan_entries = sigma_charts.map do |el|
-    { 'id' => el['id'], 'chart' => el['name'], 'name' => el['name'], 'expected' => nil,
+    { 'id' => el['id'], 'chart' => el_display_name(el), 'name' => el_display_name(el), 'expected' => nil,
       'needs_source' => 'composite-dashboard: no per-worksheet CSV oracle — fill `actual` via a live ' \
                         'Sigma MCP query if a value oracle exists; fidelity is otherwise carried by the ' \
                         'visual gate (assert-phase6-ran.rb 8/8b).' }

@@ -42,8 +42,9 @@
 #   record      --workdir DIR --dimension D --delta "..." --class C
 #               [--fix "..."] [--resolved]
 #   resolve     --workdir DIR (--entry N | --dimension D)    mark entry(ies) resolved
-#   apply-patch --workdir DIR --patch patch.json             GET→merge→PUT→guard→lint
+#   apply-patch --workdir DIR --patch patch.json             GET→merge→normalize→PUT→guard→lint
 #               [--full-spec spec.json]  replace the whole spec instead of merging
+#               [--skip-style-normalize REASON]  waive the v5.1 style contract (named)
 #               [--resolves 0,2,3]       mark these ledger entries resolved on success
 #               [--dry-run --live-spec f.json --out merged.json]  no network (tests)
 #   status      --workdir DIR [--accept-residuals id,id]     print ledger + gate verdict
@@ -220,6 +221,7 @@ parser = OptionParser.new do |p|
   p.on('--dry-run')           { opts[:dry] = true }
   p.on('--live-spec P')       { |v| opts[:live] = v }
   p.on('--out P')             { |v| opts[:out] = v }
+  p.on('--skip-style-normalize REASON', 'skip the v5.1 style contract on apply-patch (quality waiver — name it in your report)') { |v| opts[:skip_style_normalize] = v }
 end
 parser.parse!(ARGV)
 die 'missing --workdir' unless opts[:dir]
@@ -336,6 +338,26 @@ when 'apply-patch'
     end
 
   die 'merged spec has no `pages`', 4 unless merged['pages']
+
+  # v5.1.1: the SAME style contract post-and-readback enforces (pivot totals,
+  # format grammar, scheme defaults) — a fidelity patch PUT was the one write
+  # path that bypassed it (review-caught), so a patch could silently
+  # reintroduce what style-normalize had repaired. --skip-style-normalize
+  # waives (named), matching the post-and-readback flag.
+  if opts[:skip_style_normalize]
+    warn "WARN: style-normalize SKIPPED (--skip-style-normalize: #{opts[:skip_style_normalize]}) — quality waiver."
+  else
+    begin
+      require_relative 'lib/style_normalize'
+      changes = StyleNormalize.normalize!(merged)
+      if changes.any?
+        File.write(File.join(opts[:dir], 'style-normalize.json'), JSON.pretty_generate(changes)) rescue nil
+        puts "style-normalize: #{changes.size} change(s) applied (#{changes.map { |c| c['rule'] }.uniq.join(', ')}) — style-normalize.json"
+      end
+    rescue LoadError
+      warn 'WARN: lib/style_normalize unavailable — patch PUT proceeds un-normalized.'
+    end
+  end
 
   if opts[:dry]
     out = opts[:out] || File.join(opts[:dir], 'rcf-merged-spec.json')

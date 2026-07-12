@@ -225,6 +225,8 @@ OptionParser.new do |o|
   o.on('--skip-postpublish-guide REASON', 'waive the finalize gate that requires POSTPUBLISH_GUIDE.md when the ' \
                                           'source carries dashboard actions (gate 11) — name it in your report') { |v| opts[:skip_postpublish_guide] = v }
   o.on('--row-scale F', Float) { |v| opts[:row_scale] = v }
+  o.on('--page-rows N', Integer, 'override the layout row model (passed through to build-dashboard-layout.rb; ' \
+                                 'wins over the px-derived canvas rows)') { |v| opts[:page_rows] = v }
   o.on('--master-col PAIR', "'Name=<Sigma formula>' — extra master column (repeatable). The resume path " \
                             'for the exit-4 handoff when a chart dim is a master-level calc the mechanical ' \
                             'map cannot derive (e.g. a binned/categorized dimension).') do |v|
@@ -1292,8 +1294,12 @@ have_twb = lane_wait_for.call(twb, 'workbook-content.twb') # layout_json defined
 # re-entry with the same .twb these skip via PhaseCache (refs/performance.md).
 twb_sha = have_twb ? PhaseCache.file_sha(twb) : nil
 if have_twb
+  # The key carries the PARSER's own sha too: the output is a function of the
+  # .twb AND the parser code — without it, a resumed workdir kept serving a
+  # stale dashboard-layout.json across parser upgrades (v5.1.1 review-caught).
+  parser_sha = PhaseCache.file_sha(File.join(HERE, 'parse-twb-layout.rb'))
   parse_st = PhaseCache.cached(WORK, 'parse-twb-layout',
-                               key: PhaseCache.key(twb_sha, DASH_SCOPE.join(' ')),
+                               key: PhaseCache.key(twb_sha, parser_sha, DASH_SCOPE.join(' ')),
                                outputs: [layout_json]) do
     run!(['ruby', File.join(HERE, 'parse-twb-layout.rb'), twb, layout_json] + DASH_SCOPE)
   end
@@ -1897,7 +1903,8 @@ if wb_luid
   # sha-stamped reuse (stronger than extract-calc-fields' own 1h TTL): the
   # extraction is a pure function of the .twb + workbook, so a re-entry with an
   # unchanged .twb skips it entirely — hours later, not just within the TTL.
-  calc_key = have_twb ? PhaseCache.key('calc-fields', twb_sha, wb_luid) : nil
+  calc_key = have_twb ? PhaseCache.key('calc-fields', twb_sha, wb_luid,
+                                       PhaseCache.file_sha(File.join(HERE, 'extract-calc-fields.rb'))) : nil
   if calc_key && PhaseCache.fresh?(WORK, 'calc-fields', key: calc_key, outputs: [calc_path])
     line 'calc-fields REUSED (.twb sha unchanged) — extract-calc-fields.rb --refresh to force'
   else
@@ -2961,19 +2968,27 @@ if layout_xml
   # parsed zone tree (best-effort, scratch --out so the shipped layout.xml is
   # untouched) — the placed/zones drop count is layout-source-independent and
   # the grid-fill is a faithful proxy for these dense hand-composed layouts.
+  # Row-model overrides ride through ONLY when the user gave them — an
+  # unconditional --row-scale 1.5 would mark row_scale explicit downstream and
+  # disable the px-derived canvas row model on every orchestrated run
+  # (v5.1.1 review-caught).
+  row_model_args = []
+  row_model_args += ['--row-scale', opts[:row_scale].to_s] if opts[:row_scale]
+  row_model_args += ['--page-rows', opts[:page_rows].to_s] if opts[:page_rows]
   if File.exist?(layout_json)
     run!(['ruby', File.join(HERE, 'build-dashboard-layout.rb'),
           '--layout', layout_json, '--wb-ids', wb_ids_path,
           '--out', File.join(WORK, 'layout-census-scratch.xml'),
-          '--census-out', census_path,
-          '--row-scale', (opts[:row_scale] || 1.5).to_s],
+          '--census-out', census_path] + row_model_args,
          allow_fail: true)
   end
 elsif File.exist?(layout_json)
+  row_model_args = []
+  row_model_args += ['--row-scale', opts[:row_scale].to_s] if opts[:row_scale]
+  row_model_args += ['--page-rows', opts[:page_rows].to_s] if opts[:page_rows]
   _, lst = run!(['ruby', File.join(HERE, 'build-dashboard-layout.rb'),
                  '--layout', layout_json, '--wb-ids', wb_ids_path, '--out', layout_path,
-                 '--census-out', census_path,
-                 '--row-scale', (opts[:row_scale] || 1.5).to_s],
+                 '--census-out', census_path] + row_model_args,
                 allow_fail: true)
   line 'WARN: layout build failed — workbook will render in default stacked order' unless lst.success?
 else

@@ -183,6 +183,9 @@ xml.elements.each('//column') do |c|
   raw = c.attributes['name'].to_s
   cap = c.attributes['caption']
   dt  = c.attributes['datatype']
+  # v5.1.1: carry the calc FORMULA — the translator's one-level calc-ref
+  # dereference (RANK([CalcRef])<=N over a window share) resolves through it.
+  cf  = (calc_el = c.elements['calculation']) && calc_el.attributes['formula']
   next if raw.empty?
   # Names look like `[guid]`, `[guid (foo)]`, `[Friendly Name]`,
   # `[Calculation_123]`, or a Tableau group/copy `[Partner Level (group)]`.
@@ -194,7 +197,15 @@ xml.elements.each('//column') do |c|
   # when a caption exists (the GUID itself is not human-readable).
   if body =~ /\A([0-9a-f]{8}-[0-9a-f\-]{20,}|Calculation_\d+)/i
     head = body.split(/\s/, 2).first
-    COL_BY_GUID[head] ||= { caption: cap, datatype: dt } if cap && !cap.empty?
+    if cap && !cap.empty?
+      COL_BY_GUID[head] ||= { caption: cap, datatype: dt }
+      COL_BY_GUID[head][:formula] ||= cf if cf
+    elsif cf
+      # Caption-less calc columns (Calculation_NNN with only a formula) still
+      # need to resolve for the deref — register with the id as caption.
+      COL_BY_GUID[head] ||= { caption: head, datatype: dt }
+      COL_BY_GUID[head][:formula] ||= cf
+    end
   else
     # Friendly / group / copy names are referenced VERBATIM by their full body
     # (e.g. instance ref `[none:Customer Geo:nk]` → "Customer Geo", filter
@@ -205,6 +216,7 @@ xml.elements.each('//column') do |c|
     # back to the body; that is the fix for the ~40 enterprise quick-filters that were
     # silently dropped ("shared filter has no resolvable column_caption").
     COL_BY_GUID[body] ||= { caption: (cap && !cap.empty? ? cap : body), datatype: dt }
+    COL_BY_GUID[body][:formula] ||= cf if cf
   end
 end
 
@@ -344,7 +356,10 @@ end
 #   - OR one shelf has a real dim + the other has Measure Names
 #     plus the worksheet has ≥2 measures                          → pivot-table
 #   - Otherwise (one shelf empty, or both empty)                  → table
-MEASURE_PREFIXES = %w[sum avg min max count countd cntd median stdev stdevp var varp attr usr].freeze
+# v5.1.1: pcto/rtot are Tableau QUICK-CALC measure tokens (percent-of-total /
+# running-total) — without them a pcto pill classified role='dim' and the
+# builder's PercentOfTotal mapping was unreachable (review-caught).
+MEASURE_PREFIXES = %w[sum avg min max count countd cntd median stdev stdevp var varp attr usr pcto rtot].freeze
 DATE_TRUNC_PREFIXES = %w[yr qr mn wk dy hr mi sc mdy md qd ymd y q m d w h s].freeze
 
 # Classify a single shelf-field bracketed spec like "none:GUID:qk" or "sum:GUID:qk"
@@ -763,6 +778,28 @@ xml.elements.each('//worksheet') do |ws|
       entry['formula'] = ds_f
     end
     calcs << entry
+  end
+
+  # v5.1.1: table-calc ADDRESSING ("compute using <dim>") — serialized on the
+  # worksheet's <column-instance> as <table-calc ordering-field='[ds].[dim]'
+  # ordering-type='Field'/>. For RANK-family calcs this names the RANKED
+  # ENTITY dimension, which the top-N prefilter must filter (review round: a
+  # rowsBy-first heuristic picked the pivot's other axis — directions, not
+  # rooms). A column-instance can carry several <table-calc> children: the one
+  # WITHOUT a field= attr is this calc's own addressing (field='[X]' entries
+  # belong to nested calc X).
+  ws.elements.each('.//column-instance') do |ci|
+    ci_col = ci.attributes['column'].to_s[/\[([^\]]+)\]/, 1]
+    next if ci_col.nil? || ci_col.empty?
+    tcs = []
+    ci.elements.each('table-calc') { |t| tcs << t }
+    tc = tcs.find { |t| t.attributes['field'].nil? } || tcs.first
+    of = tc && tc.attributes['ordering-field']
+    next unless of
+    inner = of.to_s[/\.\[(?:[a-z]+:)?([^:\]]+)(?::[a-z]+)*\]\z/, 1]
+    next unless inner
+    c = calcs.find { |x| x['name'].to_s.gsub(/^\[|\]$/, '') == ci_col }
+    c['ordering_field'] = inner if c && !c['ordering_field']
   end
 
   # Worksheet-level "Show Mark Labels" toggle. Tableau emits this on the
@@ -1845,7 +1882,11 @@ meta = {
   'shared_filters' => scoped_shared_filters,
   'parameters'     => parameters,
   'column_aliases' => column_aliases,
-  'columns_by_guid'=> COL_BY_GUID.transform_values { |v| { 'caption' => v[:caption], 'datatype' => v[:datatype] } }
+  'columns_by_guid'=> COL_BY_GUID.transform_values { |v|
+    h = { 'caption' => v[:caption], 'datatype' => v[:datatype] }
+    h['formula'] = v[:formula] if v[:formula] # calc-ref deref (v5.1.1)
+    h
+  }
 }
 META_OUT = OUT.sub(/\.json$/, '-meta.json')
 File.write(META_OUT, JSON.pretty_generate(meta))
