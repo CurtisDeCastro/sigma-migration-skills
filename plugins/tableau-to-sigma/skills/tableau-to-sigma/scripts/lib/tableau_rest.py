@@ -238,24 +238,29 @@ def find_workbook_by_name(name):
     encoded = urllib.parse.quote_plus(f"name:eq:{name}")
     j = request("get", f"{base_path()}/workbooks?filter={encoded}")
     lst = _as_list(_dig(j, "workbooks", "workbook"))
-    return lst[0] if lst else scan_workbooks_for_name(name)
+    # not-found stays ONE filtered request (v5.3.1: an unconditional scan
+    # fallback paged the whole site on every legitimate miss)
+    return lst[0] if lst else None
 
 
 def scan_workbooks_for_name(name):
-    """Paged client-side name match (exact, then case-insensitive) - the
-    fallback for names the server-side filter grammar cannot express."""
+    """Paged client-side name match: exact wins across ALL pages; a
+    case-insensitive hit is only returned after the full scan (v5.3.1: a
+    per-page short-circuit let an early case-variant beat a later exact)."""
+    ci_hit = None
     page = 1
     while True:
         j = request("get", f"{base_path()}/workbooks?pageSize=100&pageNumber={page}")
         lst = _as_list(_dig(j, "workbooks", "workbook"))
-        hit = next((w for w in lst if w.get("name") == name), None) or             next((w for w in lst if str(w.get("name", "")).strip().lower() == str(name).strip().lower()), None)
-        if hit:
-            return hit
+        exact = next((w for w in lst if w.get("name") == name), None)
+        if exact:
+            return exact
+        if ci_hit is None:
+            ci_hit = next((w for w in lst if str(w.get("name", "")).strip().lower() == str(name).strip().lower()), None)
         total = int((_dig(j, "pagination", "totalAvailable") or 0))
         if not lst or page * 100 >= total:
-            return None
+            return ci_hit
         page += 1
-
 
 def get_workbook(workbook_id):
     return request("get", f"{base_path()}/workbooks/{workbook_id}")["workbook"]

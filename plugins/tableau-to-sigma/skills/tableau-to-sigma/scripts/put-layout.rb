@@ -145,13 +145,18 @@ begin
   if File.exist?(dl_path)
     dl = JSON.parse(File.read(dl_path))
     dl = [dl] unless dl.is_a?(Array)
-    hide_caps = dl.flat_map { |d| d['zones'] || [] }
-                  .select { |z| z['kind'] == 'chart' && z['show_title'] == false && !z['caption'].to_s.empty? }
-                  .map { |z| z['caption'].to_s.strip.downcase }.uniq
+    chart_zones = dl.flat_map { |d| d['zones'] || [] }
+                    .select { |z| z['kind'] == 'chart' && !z['caption'].to_s.empty? }
+    hide_caps  = chart_zones.select { |z| z['show_title'] == false }.map { |z| z['caption'].to_s.strip.downcase }.uniq
+    # CONFLICT-SAFE (v5.3.1): a worksheet hidden on one dashboard but SHOWN on
+    # another must not be hidden globally — drop conflicted captions.
+    shown_caps = chart_zones.reject { |z| z['show_title'] == false }.map { |z| z['caption'].to_s.strip.downcase }.uniq
+    hide_caps -= shown_caps
+    non_viz = %w[kpi-chart control text image container divider]
     if hide_caps.any?
       spec['pages'].each do |p|
         (p['elements'] || []).each do |el|
-          next unless el['name'].is_a?(String) && el['kind'].to_s != 'kpi-chart'
+          next unless el['name'].is_a?(String) && !non_viz.include?(el['kind'].to_s)
           next unless hide_caps.include?(el['name'].strip.downcase)
           hidden_ids << el['id'] unless hidden_ids.include?(el['id'])
         end

@@ -57,9 +57,21 @@ OptionParser.new do |p|
                         'composition_match = same canvas grid/proportions, section headers adjacent to their charts, no dead ' \
                         'zones; chart_shapes_match = every tile same chart family + encoding; labels_legible = no truncated/' \
                         'clipped labels or leaked control stubs; numbers_formatted = value formats as printed in the source)') do |v|
-    opts[:checklist] = v.split(',').map { |kv| kv.split('=', 2).map(&:strip) }.to_h
+    pairs = v.split(',').map(&:strip).reject(&:empty?)
+    bad = pairs.reject { |kv| kv.include?('=') }
+    abort "FATAL: --checklist entries need key=value (bad: #{bad.join(', ')})" if bad.any?
+    opts[:checklist] = pairs.map { |kv| kv.split('=', 2).map(&:strip) }.to_h
   end
 end.parse!
+
+# checklist keys/values are validated for EVERY verdict that carries one — a
+# divergent record feeds the fix loop and must not stamp junk (v5.3.1).
+if opts[:checklist]
+  missing_v = opts[:checklist].reject { |_k, v| CHECKLIST_VALS.include?(v) }
+  abort "FATAL: --checklist value(s) must be pass|fail|na: #{missing_v.keys.join(', ')}" if missing_v.any?
+  unknown_k = opts[:checklist].keys - CHECKLIST_KEYS
+  abort "FATAL: --checklist unknown key(s): #{unknown_k.join(', ')} (want: #{CHECKLIST_KEYS.join(', ')})" if unknown_k.any?
+end
 
 abort 'FATAL: --workdir required' unless opts[:dir]
 abort "FATAL: --verdict #{VERDICTS.join('|')} required" unless opts[:verdict]

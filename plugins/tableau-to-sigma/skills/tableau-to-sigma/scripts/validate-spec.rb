@@ -88,11 +88,12 @@ end
 all_known_prefixes = (all_element_names + external_names).to_set rescue (all_element_names + external_names)
 require 'set' rescue nil
 all_known_set = all_known_prefixes.is_a?(Set) ? all_known_prefixes : Set.new(all_known_prefixes)
-# workbook element name → id, for the cross-source ref guard below
-wb_el_id_by_name = {}
+# workbook element name → ALL ids (duplicate names exist across pages), for
+# the cross-source ref guard below
+wb_el_ids_by_name = Hash.new { |h, k| h[k] = [] }
 spec.fetch('pages', []).each do |page|
   page.fetch('elements', []).each do |el|
-    wb_el_id_by_name[el['name']] ||= el['id'] if el['name'].is_a?(String) && el['id']
+    wb_el_ids_by_name[el['name']] << el['id'] if el['name'].is_a?(String) && el['id']
   end
 end
 
@@ -194,11 +195,15 @@ spec.fetch('pages', []).each do |page|
           # v5.3 RENDER-500 guard: a formula referencing a workbook element
           # that is NOT this element's source opaquely 500s EVERY png
           # render/export in the whole workbook (round-5 field-caught,
-          # canary-bisect-proven). DM-internal prefixes aren't workbook
-          # element names and pass through untouched.
-          src_eid = (el['source'] || {})['elementId']
-          if wb_el_id_by_name.key?(prefix) && wb_el_id_by_name[prefix] != src_eid &&
-             prefix != el['name']
+          # canary-bisect-proven). Scoped to ELEMENT-sourced elements only
+          # (v5.3.1 review-caught: data-model/warehouse passthrough prefixes
+          # legitimately collide with element names — own_prefixes/bead-1t6c
+          # whitelists them and the ref resolves inside the DM), and a
+          # duplicate NAME counts as the source when ANY of its ids is the
+          # source id.
+          if src['kind'].to_s == 'table' && src['elementId'] &&
+             wb_el_ids_by_name.key?(prefix) && !own_prefixes.include?(prefix) &&
+             !wb_el_ids_by_name[prefix].include?(src['elementId']) && prefix != el['name']
             errors << "#{name}.#{col['name']}: ref [#{ref}] targets workbook element \"#{prefix}\" which is " \
                       'NOT this element\'s source — cross-element refs break EVERY render/export in the ' \
                       "workbook (opaque 500s); source this element from \"#{prefix}\" or re-derive the column locally"

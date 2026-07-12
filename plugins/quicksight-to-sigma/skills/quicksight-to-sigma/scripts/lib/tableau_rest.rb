@@ -139,22 +139,26 @@ def find_workbook_by_name(name)
   j = request(:get, "#{base_path}/workbooks?filter=#{encoded}")
   list = j.dig("workbooks", "workbook") || []
   list = [list] unless list.is_a?(Array)
-  list.first || scan_workbooks_for_name(name)
+  # not-found stays ONE filtered request (v5.3.1: an unconditional scan
+  # fallback paged the whole site on every legitimate miss)
+  list.first
 end
 
-# Paged client-side name match (exact, then case-insensitive) - the fallback
-# for names the server-side filter grammar cannot express.
+# Paged client-side name match: exact wins across ALL pages; a
+# case-insensitive hit is only returned after the full scan (v5.3.1: a
+# per-page short-circuit let an early case-variant beat a later exact).
 def scan_workbooks_for_name(name)
+  ci_hit = nil
   page = 1
   loop do
     j = request(:get, "#{base_path}/workbooks?pageSize=100&pageNumber=#{page}")
     list = j.dig("workbooks", "workbook") || []
     list = [list] unless list.is_a?(Array)
-    hit = list.find { |w| w["name"] == name } ||
-          list.find { |w| w["name"].to_s.strip.casecmp?(name.to_s.strip) }
-    return hit if hit
+    exact = list.find { |w| w["name"] == name }
+    return exact if exact
+    ci_hit ||= list.find { |w| w["name"].to_s.strip.casecmp?(name.to_s.strip) }
     total = j.dig("pagination", "totalAvailable").to_i
-    return nil if list.empty? || page * 100 >= total
+    return ci_hit if list.empty? || page * 100 >= total
     page += 1
   end
 end

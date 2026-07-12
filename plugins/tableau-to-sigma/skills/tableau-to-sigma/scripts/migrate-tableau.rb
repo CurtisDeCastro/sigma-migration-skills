@@ -819,7 +819,7 @@ if opts[:finalize]
     puts "     side-by-side against the source dashboard PNG in #{WORK} (Phase 1d)."
     puts '     Fix any visual divergence (re-PUT the spec) and re-render until they match.'
     puts '  3. Record the verdict so gate 8b confirms the comparison ran, then re-run --finalize:'
-    puts "       ruby scripts/record-visual-check.rb --workdir #{WORK} --verdict pass --notes \"<what you compared>\""
+    puts "       ruby scripts/record-visual-check.rb --workdir #{WORK} --verdict pass --notes \"<what you compared>\" --checklist \"<layout-visual-qa.md section 1b>\""
     puts '  If the workbook genuinely cannot be rendered (export API unavailable), the gate'
     puts '  can be waived ONLY via assert-phase6-ran.rb --skip-visual-gate "<reason>" —'
     puts '  name the reason in your migration report.'
@@ -835,7 +835,7 @@ if opts[:finalize]
     puts "  1. READ the rendered page (#{File.join(WORK, 'sigma-render.png')}) side-by-side"
     puts "     against the source dashboard PNG in #{WORK} (Phase 1d)."
     puts '  2. Record your verdict (this is what the gate checks):'
-    puts "       ruby scripts/record-visual-check.rb --workdir #{WORK} --verdict pass --notes \"<what matched>\""
+    puts "       ruby scripts/record-visual-check.rb --workdir #{WORK} --verdict pass --notes \"<what matched>\" --checklist \"<layout-visual-qa.md section 1b>\""
     puts '     If they DIVERGE: --verdict divergent --notes "<gap>", fix the spec, re-render, re-read,'
     puts '     then re-record --verdict pass. The gate stays blocked until the verdict is pass.'
     puts '============================================================================='
@@ -1554,9 +1554,15 @@ if mechanical
       # found "no .hyper payloads", and fell to exit 17 while the payload
       # arrived seconds later). A .twbx is a ZIP — the .hyper member names are
       # visible as plain bytes; wait briefly for them before invoking.
-      if landing_manifest.nil? && !opts[:no_auto_land] && File.exist?(twbx_payload)
+      # Wait ONLY when auto-land could actually proceed (v5.3.1 review-caught:
+      # the loop stalled 30s on runs that were headed to the manual gate
+      # anyway), and stop as soon as the discovery lane has exited — no
+      # further .twbx replacement is possible after that.
+      if landing_manifest.nil? && !opts[:no_auto_land] && !opts[:skip_extract_landing] &&
+         opts[:conn] && sf_ok && File.exist?(twbx_payload)
         6.times do
           break if (File.binread(twbx_payload).include?('.hyper') rescue false)
+          break if (defined?(lane_done) && (lane_done.call rescue true)) # lane exited — file is final
           line 'auto-land: .twbx has no .hyper payload yet — waiting 5s for the extract re-download lane'
           sleep 5
         end
@@ -2829,6 +2835,12 @@ if mechanical
     if labels.any? && de['columns'].is_a?(Array)
       nrmc = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]/, '') }
       by_norm = labels.each_with_object({}) { |l, h| h[nrmc.call(l)] ||= l }
+      # ambiguity is a repair hazard, not a silent choice (v5.3.1 review)
+      dup_norms = labels.group_by { |l| nrmc.call(l) }.select { |_k, v| v.size > 1 }
+      dup_norms.each_value do |ls|
+        line "  WARN: DM labels #{ls.map(&:inspect).join(' / ')} normalize identically — " \
+             'column-label repair uses the FIRST; verify refs on this helper'
+      end
       fixed = 0
       missed = []
       de['columns'].each do |c|

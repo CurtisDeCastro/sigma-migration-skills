@@ -630,6 +630,8 @@ def parse_args(argv=None):
     # (round-5 field-caught on a manual invocation).
     if args.prefix:
         args.prefix = re.sub(r"[^A-Za-z0-9]+", "_", args.prefix).strip("_").upper()
+        if re.match(r"^\d", args.prefix):  # unquoted identifiers can't lead with a digit
+            args.prefix = "T_" + args.prefix
     args.account = args.account or env_or_neutral("SNOWFLAKE_ACCOUNT")
     args.user = args.user or env_or_neutral("SNOWFLAKE_USER")
     args.key_path = args.key_path or env_or_neutral("SNOWFLAKE_KEY_PATH")
