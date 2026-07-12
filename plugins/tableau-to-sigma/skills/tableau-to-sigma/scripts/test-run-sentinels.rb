@@ -41,7 +41,7 @@ def green_workdir(dir)
   parity = { 'workbook_id' => 'wb-test', 'mode' => 'strict', 'status' => 'PASS',
              'charts_total' => 2, 'charts_pass' => 2, 'charts_fail' => 0,
              'pass_names' => ['KPI', 'Trend'], 'fail_names' => [],
-             'visual_checked' => true, 'visual_verdict' => 'pass',
+             'visual_checked' => true, 'visual_verdict' => 'pass', 'style_checklist' => { 'element_titles_hidden' => 'pass', 'palette_match' => 'pass', 'composition_match' => 'pass', 'chart_shapes_match' => 'pass', 'labels_legible' => 'pass', 'numbers_formatted' => 'pass' },
              'agent_vision' => true }
   File.write(File.join(dir, 'parity-final.json'), JSON.pretty_generate(parity))
   File.binwrite(File.join(dir, 'sigma-render.png'), "\x89PNG\r\n\x1a\n".b + ("\x00".b * 6000))
