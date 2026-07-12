@@ -104,7 +104,29 @@ rescue StandardError
   nil
 end
 manifest = []
-tiles.each do |t|
+# v5.2 (speed): tiles render CONCURRENTLY (pool 3) — each tile is a Tableau
+# image fetch + a 30-90s server-bound Sigma export, and the serial loop cost
+# ~2min per tile on the round-4 timeline. Every iteration writes its own
+# files and spawns its own child process; the manifest append is mutexed.
+require 'thread'
+# Pre-warm the Tableau token SERIALLY — three threads lazily minting at once
+# is the concurrent-PAT-signin race that produces the transient 401s.
+begin
+  Tableau.refresh_token! if ENV['TABLEAU_AUTH_TOKEN'].to_s.empty?
+rescue StandardError
+  nil # per-tile fetches report their own failures
+end
+tile_q = Queue.new
+tiles.each { |t| tile_q << t }
+mani_mx = Mutex.new
+Array.new([3, tiles.size].min.clamp(1, 3)) do
+  Thread.new do
+    loop do
+      t = begin
+        tile_q.pop(true)
+      rescue ThreadError
+        break
+      end
   ws   = t['worksheet']
   slug = slugify.call(ws)
   tab_png   = File.join(outdir, "#{slug}.tableau.png")
@@ -148,9 +170,15 @@ tiles.each do |t|
   end
 
   status = (rec['tableau_png'] && rec['sigma_png']) ? 'READY for review' : 'INCOMPLETE'
-  puts "  #{ws}  → #{status}  (tableau=#{rec['tableau_png'] ? 'ok' : 'MISSING'}, sigma=#{rec['sigma_png'] ? 'ok' : 'MISSING'})"
-  manifest << rec
-end
+  mani_mx.synchronize do
+    puts "  #{ws}  → #{status}  (tableau=#{rec['tableau_png'] ? 'ok' : 'MISSING'}, sigma=#{rec['sigma_png'] ? 'ok' : 'MISSING'})"
+    manifest << rec
+  end
+    end
+  end
+end.each(&:join)
+# deterministic manifest order regardless of which render finished first
+manifest.sort_by! { |m| tiles.index { |t| t['worksheet'] == m['worksheet'] } || 999 }
 
 man_path = File.join(outdir, 'manifest.json')
 File.write(man_path, JSON.pretty_generate(manifest))

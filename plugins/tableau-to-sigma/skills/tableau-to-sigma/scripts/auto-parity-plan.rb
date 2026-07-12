@@ -352,6 +352,22 @@ puts "        then merge the rows into the parity plan's actual.rows arrays."
 # The dashboard-layout path is looked up next to the --tableau dir as
 # `dashboard-layout.json` (the default parse-twb-layout output location).
 hidden_filters_gate = []
+# v5.2 (speed): carry RESOLUTIONS forward across plan regenerations. The
+# orchestrator re-runs this script on every re-entry, and a hardcoded
+# 'unresolved' default silently WIPED the operator's translated/waived
+# statuses — round-4 runs burned three identical Phase-6 FATALs re-doing the
+# same waive (timeline-proven). Keyed by tile + calc_ref.
+prior_hf = {}
+if File.exist?(opts[:out])
+  begin
+    (JSON.parse(File.read(opts[:out]))['hidden_filters'] || []).each do |hf|
+      next unless %w[translated waived].include?(hf['status'])
+      prior_hf[[hf['tile'], hf['calc_ref']]] = hf
+    end
+  rescue JSON::ParserError
+    nil
+  end
+end
 dash_layout_path = File.join(opts[:tab], 'dashboard-layout.json')
 if File.exist?(dash_layout_path)
   begin
@@ -368,7 +384,7 @@ if File.exist?(dash_layout_path)
           hf_list = z['hidden_filters']
           next if hf_list.nil? || hf_list.empty?
           hf_list.each do |hf|
-            hidden_filters_gate << {
+            entry = {
               'tile'        => z['caption'],
               'calc_ref'    => hf['calc_ref'],
               'caption'     => hf['caption'],
@@ -377,14 +393,22 @@ if File.exist?(dash_layout_path)
               # Default status: unresolved. Caller must set "translated" or "waived".
               'status'      => 'unresolved'
             }.compact
+            if (prev = prior_hf[[entry['tile'], entry['calc_ref']]])
+              entry['status'] = prev['status']
+              %w[waive_reason translation translated_to note].each { |k| entry[k] = prev[k] if prev[k] }
+              warn "hidden_filters gate: carried '#{prev['status']}' forward for [#{entry['tile']}] #{entry['calc_ref']} (prior plan)"
+            end
+            hidden_filters_gate << entry
           end
         end
       end
       if hidden_filters_gate.any?
-        warn "hidden_filters gate: #{hidden_filters_gate.size} unresolved calc-filter(s) found — " \
-             "plan will be 'needs_review' until each is translated or waived"
+        open_hf = hidden_filters_gate.count { |hf| !%w[translated waived].include?(hf['status']) }
+        warn "hidden_filters gate: #{open_hf} unresolved calc-filter(s) " \
+             "(#{hidden_filters_gate.size - open_hf} carried resolved)" \
+             "#{open_hf.positive? ? " — plan is 'needs_review' until each is translated or waived" : ''}"
         hidden_filters_gate.each do |hf|
-          warn "  [#{hf['tile']}] #{hf['calc_ref']} (#{hf['caption']}) filter_type=#{hf['filter_type']}"
+          warn "  [#{hf['tile']}] #{hf['calc_ref']} (#{hf['caption']}) filter_type=#{hf['filter_type']} status=#{hf['status']}"
         end
       else
         warn "hidden_filters gate: no hidden calc-filters found in dashboard layout"

@@ -1,10 +1,38 @@
 # Performance — wall-clock budgets, re-entry caches, and the slow-phase playbook
 
-A single-dashboard migration should take **~45–60 minutes end-to-end** (the
-GREEN reference run), most of it agent review time (visual QA, RCF loop,
-decisions) — **not** script wall-clock. If the orchestrator itself is eating
-hours, something specific is wedged; this file tells you what to check, per
-phase, before you touch anything.
+A single-dashboard migration should take **~30–45 minutes end-to-end** (v5.2
+target; the round-4 GREEN reference was 57 min before the v5.2 speed wave),
+most of it agent review time (visual QA, RCF loop, decisions) — **not** script
+wall-clock. If the orchestrator itself is eating hours, something specific is
+wedged; this file tells you what to check, per phase, before you touch anything.
+
+## v5.2 speed wave — what no longer costs a round-trip
+
+Round-4 timeline forensics (all three model runs) showed the wall-clock was
+dominated by MODEL-SERIAL work between script invocations, not script time
+(orchestrator phases totalled ~10s per re-entry). The following round-trips
+are now absorbed:
+
+- **Extract landing (exit 17) auto-runs.** When discovery already fetched the
+  `.twbx` WITH the extract payload and `--connection` is set, the orchestrator
+  runs `land-extracts.py` itself (prefix = workdir/name slug). `--no-auto-land`
+  keeps the manual gate; failures fall through to the original exit-17 text.
+- **Tableau signin 401s retry in-process** (2 attempts, 3s/6s backoff) — they
+  are routinely transient on Tableau Online; round 4 burned a full re-entry on
+  one that succeeded seconds later.
+- **Hidden calc-filter resolutions SURVIVE plan regeneration.** auto-parity-plan
+  carries `translated`/`waived` statuses forward (keyed tile+calc_ref) — the
+  round-4 runs burned three identical Phase-6 FATALs because every re-entry
+  wiped the waive they had just recorded. Waive ONCE; re-runs keep it.
+- **Visual renders are pooled.** Visual-QA page exports, the per-tile
+  verify-visual-tiles renders (pool 3), and the two Phase-6f visual stages run
+  concurrently — each Sigma export is a 30–90s server-side render that used to
+  be paid serially.
+- **The exit-4 workbook handoff should now be RARE.** Round 4's 14–18 min
+  hand-authored workbook layer was triggered by window-share/rank/pcto shapes
+  the mechanical path could not translate — v5.1.x mechanized those. If you
+  hit exit 4, the untranslatable fields are named: translate THOSE (usually a
+  `--master-col`), don't hand-author the whole spec.
 
 ## The cardinal rule
 

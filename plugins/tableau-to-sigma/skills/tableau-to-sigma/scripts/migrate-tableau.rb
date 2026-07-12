@@ -224,6 +224,8 @@ OptionParser.new do |o|
   o.on('--skip-ref-check REASON', 'waive the pre-POST workbook ref-resolution gate — REQUIRED reason; name it in your report') { |v| opts[:skip_ref_check] = v }
   o.on('--skip-extract-landing REASON', 'proceed although every datasource is an embedded file extract and no ' \
                                         'landing manifest was found (exit 17 otherwise) — you own the DM table paths') { |v| opts[:skip_extract_landing] = v }
+  o.on('--no-auto-land', 'keep the manual extract-landing gate (exit 17) instead of auto-running land-extracts.py ' \
+                         'when the .twbx payload + connection id are already available') { opts[:no_auto_land] = true }
   o.on('--skip-postpublish-guide REASON', 'waive the finalize gate that requires POSTPUBLISH_GUIDE.md when the ' \
                                           'source carries dashboard actions (gate 11) — name it in your report') { |v| opts[:skip_postpublish_guide] = v }
   o.on('--row-scale F', Float) { |v| opts[:row_scale] = v }
@@ -616,7 +618,22 @@ end
 # no PAT creds are available to refresh (parity with a hand-minted token).
 def tableau_env
   begin
-    Tableau.refresh_token! # fresh PAT signin, in-process
+    # v5.2 (speed): PAT signin 401s are routinely TRANSIENT on Tableau Online
+    # (session teardown races, concurrent signins on one PAT) — round 4's run
+    # died on one and the very next re-run succeeded, costing a full
+    # orchestrator round-trip. Retry twice with backoff before giving up.
+    attempts = 0
+    begin
+      Tableau.refresh_token! # fresh PAT signin, in-process
+    rescue Tableau::Error => te
+      attempts += 1
+      if attempts <= 2 && te.message =~ /401|Signin/i
+        warn "Tableau signin failed (#{te.message.lines.first.to_s.strip[0, 80]}) — retry #{attempts}/2 in #{3 * attempts}s"
+        sleep(3 * attempts)
+        retry
+      end
+      raise
+    end
   rescue Tableau::Error
     raise if ENV['TABLEAU_AUTH_TOKEN'].to_s.empty? # nothing to fall back on
   end
@@ -1496,6 +1513,32 @@ if mechanical
     end
     if conn_classes.any? && (conn_classes - embedded_classes).empty?
       landing_manifest = Dir[File.join(WORK, '*landing-manifest*.json')].first
+      # v5.2 (speed): AUTO-LAND when everything the manual step needs is
+      # already on disk — discovery auto-refetched the .twbx WITH the extract
+      # payload (v4.4), the connection id is a required arg, and --db/--schema
+      # default the target. Round 4 burned a full exit-17 → model → re-run
+      # round-trip on a step that was deterministic. Failure falls through to
+      # the original exit-17 instructions; --no-auto-land opts out.
+      twbx_payload = File.join(WORK, 'workbook-content.twbx')
+      if landing_manifest.nil? && !opts[:no_auto_land] && !opts[:skip_extract_landing] &&
+         File.exist?(twbx_payload) && opts[:conn]
+        prefix = (opts[:name] || File.basename(WORK)).to_s.upcase.gsub(/[^A-Z0-9]+/, '_')
+                                                       .sub(/\A_+|_+\z/, '')[0, 24]
+        line "embedded-extract sources (#{conn_classes.join(', ')}) — AUTO-LANDING the frozen extract " \
+             "(prefix #{prefix}; --no-auto-land to keep the manual gate)"
+        _o, lst = run!([*PyResolve.argv, File.join(HERE, 'land-extracts.py'),
+                        '--twbx', twbx_payload,
+                        '--db', (opts[:db] || 'CSA'), '--schema', (opts[:schema] || 'TJ'),
+                        '--prefix', prefix, '--sigma-connection-id', opts[:conn],
+                        '--manifest-out', File.join(WORK, 'landing-manifest.json')],
+                       allow_fail: true)
+        if lst.success? && File.exist?(File.join(WORK, 'landing-manifest.json'))
+          landing_manifest = File.join(WORK, 'landing-manifest.json')
+          Offramp.log(WORK, kind: 'auto-land', detail: "landed extract with prefix #{prefix}") if defined?(Offramp)
+        else
+          line 'WARN: auto-landing failed — falling through to the manual landing gate (exit 17)'
+        end
+      end
       if landing_manifest
         line "embedded-extract sources (#{conn_classes.join(', ')}) — landing manifest found " \
              "(#{File.basename(landing_manifest)}); parity mode is EXACT (frozen extract landed byte-identical)"
@@ -3020,14 +3063,32 @@ hdr('5b', 'Visual QA')
 vqa = File.join(WORK, 'visual-qa'); FileUtils.mkdir_p(vqa)
 wbspec_local = (JSON.parse(File.read(wb_spec_path)) rescue {})
 content_pages = (wbspec_local['pages'] || []).reject { |p| p['id'].to_s.downcase.include?('data') }
+# v5.2 (speed): pages render CONCURRENTLY (pool 3) — each export is a 30-90s
+# server-side render; multi-page workbooks paid it serially.
 rendered = 0
-content_pages.each do |pg|
-  out = File.join(vqa, "#{pg['id']}.png")
-  _o, st = sigma_run!([*PyResolve.argv, File.join(HERE, 'sigma-export-png.py'),
-                       '--workbook', wb_id, '--page', pg['id'], '--out', out, '--w', '1800', '--h', '1000'],
-                      allow_fail: true)
-  st.success? ? (rendered += 1) : line("WARN: visual-QA render failed for page #{pg['id']}")
-end
+vqa_tok = sigma_token! # mint ONCE, serially (concurrent mints race)
+vqa_mx = Mutex.new
+vqa_q = Queue.new
+content_pages.each { |pg| vqa_q << pg }
+Array.new([3, content_pages.size].min.clamp(1, 3)) do
+  Thread.new do
+    loop do
+      pg = begin
+        vqa_q.pop(true)
+      rescue ThreadError
+        break
+      end
+      out = File.join(vqa, "#{pg['id']}.png")
+      o, st = Open3.capture2e({ 'SIGMA_API_TOKEN' => vqa_tok },
+                              *PyResolve.argv, File.join(HERE, 'sigma-export-png.py'),
+                              '--workbook', wb_id, '--page', pg['id'], '--out', out, '--w', '1800', '--h', '1000')
+      vqa_mx.synchronize do
+        o.each_line { |l| puts "   #{l.rstrip}" } unless o.strip.empty?
+        st.success? ? (rendered += 1) : line("WARN: visual-QA render failed for page #{pg['id']}")
+      end
+    end
+  end
+end.each(&:join)
 line "rendered #{rendered}/#{content_pages.size} full-page PNG(s) → #{vqa}"
 line 'VISUAL QA (review, do not skip): open each PNG; check vs refs/layout-visual-qa.md AND the source Tableau dashboard — titles, right chart kinds, colors, no overlaps/dead zones.' if rendered.positive?
 mark('phase5b-visual-qa')
@@ -3145,10 +3206,17 @@ end
 # so they're verified visually instead of silently passing parity.
 vv_sidecar = File.join(WORK, 'visual-verify-tiles.json')
 vv_tiles = File.exist?(vv_sidecar) ? (JSON.parse(File.read(vv_sidecar)) rescue []) : []
+# v5.2 (speed): the per-tile and full-dashboard visual stages are independent
+# (distinct outputs, both read-only against the live workbook) — run them
+# CONCURRENTLY instead of paying two serial render waits.
+vis_tok = sigma_token!
+vis_threads = []
 if vv_tiles.any?
   line "Phase 6f-visual: #{vv_tiles.size} tile(s) had EMPTY data exports / inferred chart kinds — staging per-tile image comparison"
-  sigma_run!(['ruby', File.join(HERE, 'verify-visual-tiles.rb'),
-              '--workbook', wb_id, '--tableau-dir', WORK], allow_fail: true)
+  vis_threads << Thread.new do
+    Open3.capture2e({ 'SIGMA_API_TOKEN' => vis_tok }, 'ruby', File.join(HERE, 'verify-visual-tiles.rb'),
+                    '--workbook', wb_id, '--tableau-dir', WORK)
+  end
 end
 
 # Phase 6f — FULL-DASHBOARD ground truth: stage the source Tableau dashboard
@@ -3156,8 +3224,14 @@ end
 # visual comparison (and the repair loop: diff → fix → re-render) has both sides
 # ready. Writes visual-qa/compare-manifest.json (agent sets visual_match).
 line 'Phase 6f-visual: staging full-dashboard source-vs-Sigma image pairs for the repair loop'
-sigma_run!(['ruby', File.join(HERE, 'verify-dashboard-visual.rb'),
-            '--workbook', wb_id, '--tableau-dir', WORK], allow_fail: true)
+vis_threads << Thread.new do
+  Open3.capture2e({ 'SIGMA_API_TOKEN' => vis_tok }, 'ruby', File.join(HERE, 'verify-dashboard-visual.rb'),
+                  '--workbook', wb_id, '--tableau-dir', WORK)
+end
+vis_threads.each do |th|
+  o, _st = th.value
+  o.each_line { |l| puts "   #{l.rstrip}" } unless o.to_s.strip.empty?
+end
 
 puts
 puts '================ RESULT (pass 1 — parity PENDING) ================'
