@@ -1377,24 +1377,76 @@ WINDOW_TC_RE = /\b(?:RUNNING_[A-Z]+|WINDOW_[A-Z]+|RANK(?:_[A-Z]+)?|INDEX|LOOKUP|
 #   { 'mode' => 'manual',    'note' => why }
 # v5.0-P2: structured record of every window-calc translation, for the VDS
 # table-calc oracle (scripts/vds-oracle.rb — Tableau computes the ORIGINAL
-# calc server-side and the values are compared in Phase 6). Best-effort
-# context: entries without dims get a clean oracle SKIP, never an error.
+# calc server-side and the values are compared in Phase 6). Recorded thin at
+# the translation sites, then ENRICHED against the built elements
+# (enrich_window_calcs!) — element ids, the value column, and the addressing
+# dims come from the emitted chart itself, the only place they're authoritative
+# (review-caught: guessing dims from zone['channels'] yielded [] always).
 $window_calc_records = []
 def record_window_calc(zone, calc, plan, mode: nil)
   return unless plan
   $window_calc_records << {
     'id'              => "wc-#{$window_calc_records.size + 1}",
     'worksheet'       => zone && zone['caption'],
-    'element_id'      => nil, # enriched downstream when known
+    'element_id'      => nil, # enrich_window_calcs! fills from the built element
     'calc_name'       => calc && (calc['caption'] || calc['name']).to_s.gsub(/^\[|\]$/, ''),
     'tableau_formula' => calc && calc['formula'],
     'sigma_formula'   => plan['formula'],
     'mode'            => mode || plan['mode'],
-    'dims'            => (zone && Array(zone['channels']).select { |c| c.is_a?(Hash) && c['role'].to_s == 'dimension' }
-                               .map { |c| { 'caption' => c['caption'] || c['column'] } }),
+    'dims'            => [],
     'filters_present' => !(zone && Array(zone['filters']).empty?),
     'translator_note' => plan['note']
   }
+end
+
+# Fill element_id/element_name/column_id/dims/datasource_caption from the
+# BUILT elements (must run while elements still carry _worksheet, i.e. before
+# the output modes strip the tags). dims = the chart's category axis / pivot
+# grouping columns — in the mechanical path their Sigma names ARE the Tableau
+# captions (master columns are caption-named), which is what VDS addresses by.
+def enrich_window_calcs!(records, elements, ds_plan)
+  by_ws = elements.group_by { |e| e['_worksheet'] }
+  ws_to_ds_caption = {}
+  if ds_plan && ds_plan['datasources'].is_a?(Array)
+    dominant = ds_plan['datasources'].max_by { |d| (d['worksheets'] || []).size }
+    ds_plan['datasources'].each do |d|
+      (d['worksheets'] || []).each { |w| ws_to_ds_caption[w.to_s.strip.downcase] = d['caption'] }
+    end
+    ws_to_ds_caption.default = dominant && dominant['caption']
+  end
+  records.each do |r|
+    # Match by the translated formula when the plan carried one; a mode
+    # without a formula (manual / top-n-filter) still binds to the
+    # worksheet's element by name — its VALUE column is then the yAxis /
+    # values column, never a blank-formula include-all match (review-caught:
+    # include?('') matched the x-axis column and starved dims).
+    sf = r['sigma_formula'].to_s
+    ws_els = by_ws[r['worksheet']] || []
+    el = (sf.empty? ? nil : ws_els.find { |e| (e['columns'] || []).any? { |c| c['formula'].to_s.include?(sf) } }) ||
+         ws_els.first
+    next unless el
+    r['element_id']   = el['id']
+    r['element_name'] = el['name']
+    vcol = (!sf.empty? && (el['columns'] || []).find { |c| c['formula'].to_s.include?(sf) }) || nil
+    if vcol.nil?
+      vids = []
+      vids.concat(Array(el.dig('yAxis', 'columnIds')).map { |x| x.is_a?(Hash) ? x['columnId'] : x })
+      vids.concat(Array(el['values']))
+      vcol = (el['columns'] || []).find { |c| vids.include?(c['id']) }
+    end
+    r['column_id']   = vcol && vcol['id']
+    r['column_name'] = vcol && vcol['name']
+    cols_by_id = (el['columns'] || []).each_with_object({}) { |c, h| h[c['id']] = c }
+    dim_ids = []
+    dim_ids << el.dig('xAxis', 'columnId') if el.dig('xAxis', 'columnId')
+    dim_ids.concat(Array(el['rowsBy']).map { |x| x.is_a?(Hash) ? x['id'] : x })
+    dim_ids.concat(Array(el['columnsBy']).map { |x| x.is_a?(Hash) ? x['id'] : x })
+    r['dims'] = dim_ids.compact.uniq.map { |cid| cols_by_id[cid] }.compact
+                       .reject { |c| c['id'] == r['column_id'] }
+                       .map { |c| { 'caption' => c['name'] } }
+    dsc = ws_to_ds_caption[r['worksheet'].to_s.strip.downcase] || ws_to_ds_caption.default
+    r['datasource_caption'] = dsc if dsc
+  end
 end
 
 def translate_window_calc(formula, mmap, columns_by_guid = {})
@@ -5548,6 +5600,19 @@ rescue => e
   warnings << "multi-DS routing error (charts left on the master + WARN wall): #{e.message}"
 end
 
+# v5.0-P2: window-calc sidecar for the VDS oracle — enriched from the BUILT
+# elements and written HERE (before the output modes strip the _worksheet
+# tags the enrichment joins on). Always written: empty entries tell the
+# oracle "no window calcs" vs "builder predates the sidecar".
+begin
+  enrich_window_calcs!($window_calc_records, elements, (plan rescue nil))
+  wc_path = File.join(File.dirname(File.expand_path(opts[:out])), 'window-calcs.json')
+  File.write(wc_path, JSON.pretty_generate({ 'version' => 1, 'entries' => $window_calc_records }))
+  warn "wrote #{wc_path} (#{$window_calc_records.size} window-calc translation(s) for the VDS oracle)" if $window_calc_records.any?
+rescue => e
+  warnings << "window-calcs sidecar error (VDS oracle will report nothing-to-verify): #{e.message}"
+end
+
 # ---- Output mode ----
 #   Default       → flat array of elements (legacy behaviour). Extras first.
 #   --page-per-worksheet → emit { pages: [{name, elements:[]}] }. One page per
@@ -6014,6 +6079,18 @@ def spec_api_limit_entries(layout)
     # has one workbook with 88 accordion toggles, and 88 identical ledger rows
     # is noise, not coverage.
     btns = (dash['zones'] || []).select { |z| z['kind'] == 'dashboard-object' && z['button_intent'] }
+    # Navigate buttons whose target ISN'T a dashboard (worksheet windows,
+    # unresolved window-id GUIDs) are NOT emitted — they must appear here or
+    # they vanish silently (review-caught: the build warning classifies as
+    # NOTE, which the coverage loop skips).
+    btns.select { |z| z['button_intent'] == 'navigate' &&
+                      !(z['button_nav_target'] && z['button_nav_target_class'] == 'dashboard') }.each do |z|
+      entries << { 'visual' => (z['button_caption'] || z['button_tooltip'] || "button #{z['id']}").to_s,
+                   'source_type' => 'button', 'severity' => 'dropped', 'recoverable' => false,
+                   'detail' => "navigation button targets #{z['button_nav_target_class'] || 'an unresolved window'} " \
+                               '— no Sigma page equivalent',
+                   'action' => 'link the nearest equivalent page by hand post-publish, or omit.' }
+    end
     btns.select { |z| z['button_intent'].to_s.start_with?('export') }.each do |z|
       entries << { 'visual' => (z['button_caption'] || z['button_tooltip'] || "button #{z['id']}").to_s,
                    'source_type' => 'button', 'severity' => 'dropped', 'recoverable' => true,
@@ -6103,14 +6180,6 @@ spec_api_limit_entries(layout).each do |e|
   next if _already.include?(e['visual'].to_s.downcase)
   coverage_unresolved << e
 end
-
-# v5.0-P2: window-calc sidecar for the VDS table-calc oracle (vds-oracle.rb).
-# Always written — an empty entries list tells the oracle "no window calcs"
-# vs "builder predates the sidecar".
-wc_path = File.join(File.dirname(File.expand_path(opts[:out])), 'window-calcs.json')
-File.write(wc_path, JSON.pretty_generate(
-             { 'version' => 1, 'entries' => $window_calc_records }))
-warn "wrote #{wc_path} (#{$window_calc_records.size} window-calc translation(s) for the VDS oracle)" if $window_calc_records.any?
 
 built_n = (defined?(elements) && elements.respond_to?(:size)) ? elements.size : 0
 dropped_n = coverage_unresolved.select { |u| u['severity'] == 'dropped' }.map { |u| u['visual'] }.uniq.size

@@ -728,6 +728,20 @@ Array(pds).each do |d|
 end
 luids = {}
 datasources = {}
+# Entries WITHOUT a datasource_caption (single-datasource workbooks — the
+# builder only names captions when a multi-DS plan exists) resolve through
+# the workdir's published-DS descriptors / the --datasource-luid override:
+# a lone pds.json entry or a lone override IS the datasource (review-caught:
+# `next if key.empty?` starved the fallback and every check skipped-no-luid).
+if entries.any? { |e| e['datasource_caption'].to_s.strip.empty? }
+  fallback = if opts[:luid_overrides].size == 1
+               opts[:luid_overrides].values.first
+             elsif pds_luids.values.uniq.size == 1
+               pds_luids.values.first
+             end
+  luids[''] = fallback if fallback
+  datasources['(default)'] = fallback if fallback
+end
 entries.map { |e| e['datasource_caption'].to_s }.uniq.each do |cap|
   key = VdsOracle.norm_caption(cap)
   next if key.empty?

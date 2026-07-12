@@ -252,11 +252,25 @@ def view_data(view_id):
     return request("get", f"{base_path()}/views/{view_id}/data", accept="*/*")
 
 
-def view_image(view_id, width=1400, height=900, resolution="high"):
+def view_image(view_id, resolution="high", filters=None):
+    # NOTE: /image has NO size params — the old vf_width/vf_height pair were
+    # silent NO-OPS (vf_* is the view-FILTER prefix; 'width'/'height' are not
+    # fields — live-verified 2026-07-11, fixed in lock-step with the Ruby
+    # twin). `filters` applies real vf_ view filters: {"Region": "West"}.
     qs = f"?resolution={resolution}&maxAge=1"
-    if width and height:
-        qs += f"&vf_width={width}&vf_height={height}"
+    for f, v in (filters or {}).items():
+        qs += f"&vf_{urllib.parse.quote(str(f))}={urllib.parse.quote(str(v))}"
     return request("get", f"{base_path()}/views/{view_id}/image{qs}", accept="*/*", binary=True)
+
+
+def view_pdf(view_id, viz_width, viz_height, type_="Unspecified", orientation="Landscape", filters=None):
+    # Exact-size render: the ONLY REST path honoring authored canvas dims
+    # (renders at 0.75pt/px + 36pt margins — rasterize at 4/3 and crop).
+    qs = (f"?type={type_}&orientation={orientation}"
+          f"&vizWidth={int(viz_width)}&vizHeight={int(viz_height)}&maxAge=1")
+    for f, v in (filters or {}).items():
+        qs += f"&vf_{urllib.parse.quote(str(f))}={urllib.parse.quote(str(v))}"
+    return request("get", f"{base_path()}/views/{view_id}/pdf{qs}", accept="*/*", binary=True)
 
 
 # ---- datasources ----------------------------------------------------------

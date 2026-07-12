@@ -139,7 +139,8 @@ All paths assume `$TABLEAU_BASE = $TABLEAU_SERVER_URL/api/$TABLEAU_API_VERSION/s
 | VDS read-metadata (field list + calc formulas) | `POST /api/v1/vizql-data-service/read-metadata` | Body `{"datasource":{"datasourceLuid":"..."}}`. Returns `data[]` with `fieldName`, `fieldCaption`, `dataType`, `columnClass`, `formula` (for `CALCULATION` fields). |
 | Metadata GraphQL (cleaner formulas) | `POST /api/metadata/graphql` | Returns formulas with **display-name field refs** like `SUM([Net Revenue])` instead of GUIDs. |
 | View data (CSV) | `GET $TABLEAU_BASE/views/VID/data` | Cheap. Fire all views in parallel. |
-| View image (PNG) | `GET $TABLEAU_BASE/views/VID/image?vf_width=W&vf_height=H` | Fetch dashboard view only by default. Solo (no concurrent image calls) — VizQL session contention causes 401s otherwise. |
+| View image (PNG) | `GET $TABLEAU_BASE/views/VID/image?resolution=high` | Fetch dashboard view only by default. Solo (no concurrent image calls) — VizQL session contention causes 401s otherwise. The endpoint has NO size params (`vf_*` is the view-FILTER prefix; `vf_width`/`vf_height` were live-verified silent no-ops 2026-07-11) — exact-size renders come from the PDF row below. |
+| View PDF (exact size) | `GET $TABLEAU_BASE/views/VID/pdf?type=Unspecified&vizWidth=W&vizHeight=H` | The ONLY REST path honoring authored canvas dims. Renders the canvas at 0.75pt/px + 36pt margins — rasterize at 4/3 and crop (scripts/render-baseline.rb does this). `vf_<Field>=<value>` applies view filters. |
 | Workbook content download | `GET $TABLEAU_BASE/workbooks/WBID/content[?includeExtract=false]` | Returns raw `.twb` XML for workbooks with published datasources, or `.twbx` zip bytes if there are embedded extracts. Detect by checking the first 4 bytes for the ZIP magic `PK\x03\x04`. |
 | Logout (optional) | `POST $TABLEAU_BASE/auth/signout` | Frees the session token; signin doesn't count against site quotas. |
 
@@ -213,9 +214,11 @@ return formulas with display-name refs.
 
 ### Image resolution
 
-Default `get-view-image` returns 800x800. Pass `?vf_width=W&vf_height=H&resolution=high`
-to get a usable dashboard screenshot. The MCP defaults to a similar size; this is just an
-FYI for the REST path.
+Default `get-view-image` returns 800x800. Pass `?resolution=high` for a usable dashboard
+screenshot (caps ~1568px wide). The /image endpoint has NO size parameters — the old
+`?vf_width=W&vf_height=H` advice was a silent no-op (`vf_` is the view-FILTER prefix;
+`width`/`height` are not fields — live-verified 2026-07-11). For EXACT authored-size
+renders use the /pdf endpoint (vizWidth/vizHeight) via scripts/render-baseline.rb.
 
 ### Pagination
 

@@ -3182,8 +3182,8 @@ if wc_any
   puts "              (advisory; emits #{File.join(WORK, 'vds-oracle.json')}; published datasources only)"
 end
 puts 'RENDER/INTERACTION (advisory): exact-size Tableau baseline + one-control flip oracle:'
-puts "                ruby scripts/render-baseline.rb --workdir #{WORK}"
-puts "                ruby scripts/verify-interaction.rb --workdir #{WORK}"
+puts "                ruby scripts/render-baseline.rb --tableau-dir #{WORK}"
+puts "                ruby scripts/verify-interaction.rb --workdir #{WORK} --workbook-id #{wb_id}"
 puts 'INTERACTIVITY: generate the post-publish handoff guide — dashboard actions, nav'
 puts '              buttons, dynamic zones, drills, and tooltips cannot ride the spec;'
 puts '              the guide walks the user through adding each in the Sigma UI'
