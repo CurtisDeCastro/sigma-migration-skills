@@ -55,6 +55,7 @@ OptionParser.new do |p|
        'name the reason in your report.') { |v| opts[:allow_manual_spec] = v }
   p.on('--quarantine-on-failure', 'DATAMODEL only: when the POST fails naming specific element(s), or the post-POST column census resolves specific elements to type=error, move those elements to <workdir>/deferred-elements.json, re-POST ONCE without them, and exit 6 (PARTIAL DM — never GREEN until the file is resolved). Default (no flag): fail loudly, quarantine nothing.') { opts[:quarantine] = true }
   p.on('--skip-spec-verify REASON', 'workbooks only: skip the POST /v2/workbooks/spec/verify server-side preflight (quality waiver — name it in your report).') { |v| opts[:skip_spec_verify] = v }
+  p.on('--skip-style-normalize REASON', 'workbooks only: skip the v5.1 source-derived style contract (pivot totals, format grammar, scheme defaults). Quality waiver — name it in your report.') { |v| opts[:skip_style_normalize] = v }
 end.parse!
 %i[type spec out].each { |k| abort("missing --#{k}") unless opts[k] }
 opts[:workdir] ||= File.dirname(File.expand_path(opts[:spec]))
@@ -138,6 +139,31 @@ def http(method, path, body = nil, accept_json: false)
     end
     return res
   end
+end
+
+# v5.1 STYLE-NORMALIZE: deterministic source-derived style contract enforced
+# on EVERY workbook spec reaching this choke point — mechanical AND
+# hand-authored (round-4 forensics: 2 of 3 runs hand-authored after exit-4,
+# so builder-only fixes could not close the chrome gaps). Rules are
+# conservative (grammar-invalid formats, missing pivot totals, default-royal
+# schemes only); every change is logged to <workdir>/style-normalize.json.
+# --skip-style-normalize "<reason>" bypasses (named waiver).
+def style_normalize!(body_str, workdir, skip_reason)
+  return body_str unless $opts_type == 'workbook'
+  if skip_reason
+    warn "WARN: style-normalize SKIPPED (--skip-style-normalize: #{skip_reason}) — quality waiver."
+    return body_str
+  end
+  spec = JSON.parse(body_str) rescue nil
+  return body_str unless spec.is_a?(Hash) && spec['pages']
+  require_relative 'lib/style_normalize'
+  changes = StyleNormalize.normalize!(spec)
+  if changes.any?
+    File.write(File.join(workdir, 'style-normalize.json'), JSON.pretty_generate(changes)) rescue nil
+    warn "style-normalize: #{changes.size} change(s) applied (#{changes.map { |c| c['rule'] }.uniq.join(', ')}) — style-normalize.json"
+    return JSON.generate(spec)
+  end
+  body_str
 end
 
 # v5.0 preflight: POST /v2/workbooks/spec/verify — Sigma's own server-side
@@ -297,6 +323,7 @@ if update_id
       end
     end
   end
+  put_body = style_normalize!(put_body, opts[:workdir], opts[:skip_style_normalize])
   verify_spec!(put_body, opts[:skip_spec_verify], update: true)
   resp = http(:put, format(GET_PATH, update_id), put_body)
   parsed = YAML.safe_load(resp.body, permitted_classes: [Date, Time])
@@ -304,7 +331,7 @@ if update_id
   abort("PUT failed (HTTP #{resp.code}): #{parsed.inspect}") unless resp.is_a?(Net::HTTPSuccess)
   warn "PUT ok: #{ID_FIELD}=#{oid}"
 else
-  post_body = File.read(opts[:spec])
+  post_body = style_normalize!(File.read(opts[:spec]), opts[:workdir], opts[:skip_style_normalize])
   verify_spec!(post_body, opts[:skip_spec_verify])
   resp = http(:post, POST_PATH, post_body)
   parsed = YAML.safe_load(resp.body, permitted_classes: [Date, Time])

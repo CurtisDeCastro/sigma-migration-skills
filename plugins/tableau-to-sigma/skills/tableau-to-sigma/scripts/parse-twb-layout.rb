@@ -876,6 +876,45 @@ xml.elements.each('//worksheet') do |ws|
     hf.compact
   end
 
+  # v5.1: pivot/shelf sorts live in <shelf-sort-v2> (dimension-to-sort +
+  # measure-to-sort-by + direction + shelf) — a DIFFERENT surface from
+  # <sort>/<computed-sort>, and the reason three rounds of ranked pivots
+  # shipped alphabetical. Resolve the field tokens to captions best-effort
+  # ([fed].[none:Concat_X:nk] → Concat_X; [fed].[ctd:seed:qk] → ctd:seed).
+  shelf_sorts = []
+  ws.elements.each('.//shelf-sort-v2') do |ss|
+    tok = ->(s) { s.to_s[/\[[^\]]+\]\.\[(?:[a-z]+:)?([^:\]]+)(?::[a-z]+)*\]/, 1] || s.to_s }
+    shelf_sorts << {
+      'dimension' => tok.call(ss.attributes['dimension-to-sort']),
+      'measure'   => tok.call(ss.attributes['measure-to-sort-by']),
+      'measure_raw' => ss.attributes['measure-to-sort-by'],
+      'direction' => ss.attributes['direction'].to_s.downcase == 'desc' ? 'descending' : 'ascending',
+      'shelf'     => ss.attributes['shelf']
+    }
+  end
+
+  # v5.1: per-worksheet HEAT RAMP — the color encoding's sequential palette IS
+  # the source heat scale (e.g. #f1f1f1→#52baee). Two serializations:
+  # type='custom-interpolated' carries inline stops; type='interpolated'
+  # references a named <preferences> palette (palette='CB_PuBu'). Emitted so
+  # pivots derive backgroundScale from the source, never a default. NOT
+  # neutral-stripped — a near-white low stop is legitimate.
+  heat_scheme = nil
+  ws.elements.each(".//encoding[@attr='color']") do |enc|
+    case enc.attributes['type']
+    when 'custom-interpolated'
+      cols = []
+      enc.elements.each('color-palette/color') { |c| cols << c.text.to_s.strip.downcase }
+      heat_scheme = cols if cols.size >= 2
+    when 'interpolated'
+      pname = enc.attributes['palette'].to_s
+      next if pname.empty? || heat_scheme
+      body = TWB_TEXT[/<color-palette[^>]*name='#{Regexp.escape(pname)}'[^>]*type='ordered-(?:sequential|diverging)'[^>]*>(.*?)<\/color-palette>/m, 1]
+      cols = body.to_s.scan(/#[0-9a-fA-F]{6}/).map(&:downcase)
+      heat_scheme = cols if cols.size >= 2
+    end
+  end
+
   worksheets[name] = {
     mark_class:       mark_class,
     geo_role:         geo_role,
@@ -883,6 +922,8 @@ xml.elements.each('//worksheet') do |ws|
     has_long:         has_long,
     has_geometry:     has_geometry,
     sort:             sort_info,
+    shelf_sorts:      shelf_sorts,
+    heat_scheme:      heat_scheme,
     filters:          filters_info,
     hidden_filters:   hidden_filters,
     aggregations:     aggregations,
@@ -1410,6 +1451,12 @@ xml.elements.each('//dashboard') do |d|
       'geo_role'     => ws_meta&.dig(:geo_role),
       # New per-worksheet signal fields (nil for non-chart zones)
       'sort'           => (kind == 'chart' ? ws_meta&.dig(:sort)           : nil),
+      'shelf_sorts'    => (kind == 'chart' ? ws_meta&.dig(:shelf_sorts)   : nil),
+      'heat_scheme'    => (kind == 'chart' ? ws_meta&.dig(:heat_scheme)   : nil),
+      # v5.1: zone show-title='false' = the source HIDES the worksheet title
+      # (all 6 Diablo tiles carry it; three rounds leaked "Sheet 9" because
+      # nothing read the attribute). Absent attr = shown (fails safe).
+      'show_title'   => z.attributes['show-title'] != 'false',
       'filters'        => (kind == 'chart' ? ws_meta&.dig(:filters)       : nil),
       'hidden_filters' => (kind == 'chart' ? (ws_meta&.dig(:hidden_filters) || []) : nil),
       'aggregations'   => (kind == 'chart' ? ws_meta&.dig(:aggregations)  : nil),

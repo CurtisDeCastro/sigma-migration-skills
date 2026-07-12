@@ -117,6 +117,27 @@ if nav_path && File.exist?(nav_path)
   end
 end
 
+# ---- v5.1: hidden-titles application ----------------------------------------
+# The source hides these elements' worksheet titles (zone show-title='false').
+# Applied HERE — the FINAL spec mutation — because the live API rejects
+# name:{text, visibility:'hidden'} ("cannot mix … Use one or the other",
+# probed 2026-07-12) and the bare {visibility:'hidden'} object breaks every
+# upstream name-keyed matcher (layout els_by_name, parity, tile verify). At
+# this point nothing else needs names.
+ht_path = Dir.glob(File.join(File.dirname(opts[:layout]), '*-hidden-titles.json')).first
+if ht_path && File.exist?(ht_path)
+  hidden_ids = JSON.parse(File.read(ht_path))
+  hid = 0
+  spec['pages'].each do |p|
+    (p['elements'] || []).each do |el|
+      next unless hidden_ids.include?(el['id'])
+      el['name'] = { 'visibility' => 'hidden' }
+      hid += 1
+    end
+  end
+  puts "hidden titles: #{hid}/#{hidden_ids.size} element title(s) hidden (source show-title=false)"
+end
+
 %w[workbookId url ownerId createdBy updatedBy createdAt updatedAt latestDocumentVersion].each { |k| spec.delete(k) }
 
 resp = http(:put, "/v2/workbooks/#{opts[:wb]}/spec", JSON.pretty_generate(spec))

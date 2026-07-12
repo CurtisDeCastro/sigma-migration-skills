@@ -1449,8 +1449,26 @@ def enrich_window_calcs!(records, elements, ds_plan)
   end
 end
 
-def translate_window_calc(formula, mmap, columns_by_guid = {})
+def translate_window_calc(formula, mmap, columns_by_guid = {}, depth: 0)
   s = formula.to_s.gsub(/\s+/, ' ').strip
+  # v5.1: a LEADING unary minus on a window calc is a Tableau DESC-sort trick
+  # (e.g. `-WINDOW_MAX(share)` as a hidden sort pill). Strip it and carry the
+  # flag — the minus must NEVER reach a column name/formula (the round-4
+  # `Sum([Master/-WINDOW_MAX(…)])` class died here).
+  negated = false
+  if s.start_with?('-')
+    negated = true
+    s = s[1..-1].to_s.strip
+  end
+  # v5.1: one-level calc-ref dereference — a bare `[CalcRef]` whose formula is
+  # known resolves to that formula and re-enters ONCE (depth guard).
+  if depth.zero? && (ref = s[/\A\[([^\]]+)\]\z/, 1])
+    info = columns_by_guid[ref] || columns_by_guid.values.find { |v| v.is_a?(Hash) && v['caption'].to_s == ref }
+    if info.is_a?(Hash) && info['formula'].to_s =~ WINDOW_TC_RE
+      plan = translate_window_calc(info['formula'], mmap, columns_by_guid, depth: 1)
+      return plan && plan.merge('negated_for_sort' => (negated || plan['negated_for_sort'] || false))
+    end
+  end
   return nil if s.empty? || s !~ WINDOW_TC_RE
   s = s.gsub(/\[([0-9a-f\-]{36})\]/i) do
     info = columns_by_guid[Regexp.last_match(1)]
@@ -1465,6 +1483,34 @@ def translate_window_calc(formula, mmap, columns_by_guid = {})
   agg_src = '(?:SUM|AVG|MIN|MAX|MEDIAN|COUNTD|COUNT)\s*\(\s*\[[^\]]+\]\s*\)'
   norm = ->(x) { x.to_s.gsub(/\s+/, '').downcase }
   tx_agg = ->(a) { translate_user_agg_formula(a, mmap, {}) }
+
+  # v5.1 Rule W1 — window-wrapped share (the round-4 exit-4 class):
+  # WINDOW_MAX|MIN|AVG( agg/TOTAL(agg) | agg/WINDOW_SUM(agg) | agg1/agg2 ).
+  # The wrapper flattens to the partition max in Tableau but all three round-4
+  # runs (and their anchors) treat it as the per-cell share for DISPLAY —
+  # value-identical when the window is a single cell (nested addressing) or
+  # shares are uniform. The emit layer picks the PercentOfTotal scope from the
+  # pivot axes; the VDS oracle re-checks every emission (window-calcs.json).
+  if (w1 = s.match(%r{\A\s*WINDOW_(MAX|MIN|AVG)\s*\(\s*(#{agg_src})\s*/\s*(?:(?:WINDOW_SUM|TOTAL)\s*\(\s*(#{agg_src})\s*\)|(#{agg_src}))\s*\)\s*\z}i))
+    num = w1[2]
+    if w1[3] && norm.call(num) == norm.call(w1[3]) # same-agg → percent of total
+      inner = tx_agg.call(num)
+      return { 'mode' => 'manual', 'note' => 'window-wrapped share whose inner aggregate did not translate' } unless inner
+      return { 'mode' => 'inline-share', 'share_kind' => 'percent_of_total',
+               'inner' => inner, 'wrapper' => "WINDOW_#{w1[1].upcase}",
+               'negated_for_sort' => negated,
+               'note' => "WINDOW_#{w1[1].upcase}(share) treated as the per-cell share for display; " \
+                         'exact when the window is a single cell — VDS oracle verifies' }
+    elsif w1[4] # different-agg ratio
+      a = tx_agg.call(num)
+      b = tx_agg.call(w1[4])
+      return { 'mode' => 'manual', 'note' => 'window-wrapped ratio whose aggregates did not translate' } unless a && b
+      return { 'mode' => 'inline-share', 'share_kind' => 'ratio',
+               'inner' => "#{a} / #{b}", 'wrapper' => "WINDOW_#{w1[1].upcase}",
+               'negated_for_sort' => negated,
+               'note' => "WINDOW_#{w1[1].upcase}(ratio) treated as the per-cell ratio for display — VDS oracle verifies" }
+    end
+  end
 
   # Top-N idiom: RANK(<expr>)<=N or RANK_UNIQUE(<expr>)<=N (bead pnxp).
   # The generic rewrite below collapses RANK_UNIQUE(<expr>) → RowNumber() and
@@ -1498,6 +1544,19 @@ def translate_window_calc(formula, mmap, columns_by_guid = {})
       return base.merge('mode' => 'inline', 'formula' => "RowNumber() #{op} #{n}",
                'follows_sort' => true, 'ranked_measure' => ranked,
                'note' => "RANK#{tn[0] =~ /_UNIQUE/i ? '_UNIQUE' : ''}(expr) #{op} #{n} top-N → #{filt}")
+    end
+    # v5.1 Rule T1: a RANK operand that is (a ref to) a WINDOW-WRAPPED SHARE
+    # classifies as topn-prefilter — the rank-limited pre-filtered source
+    # table all three round-4 runs hand-built, now mechanical.
+    if row_count && depth.zero?
+      share_plan = translate_window_calc(operand, mmap, columns_by_guid, depth: 1)
+      if share_plan && share_plan['mode'] == 'inline-share'
+        return base.merge('mode' => 'topn-prefilter', 'top_n' => row_count,
+                 'operand_share' => share_plan,
+                 'note' => "RANK(<window share>) #{op} #{n}: keep the top #{row_count} entities by their " \
+                           'max per-partition share — emit the rank-limited pre-filtered source table ' \
+                           '(refs/fidelity-recipes.md §Ranked pivot)')
+      end
     end
     # Untranslatable LOD operand: cannot key a filter on a measure we couldn't
     # build. STAY MANUAL, but carry the parsed top-N facts so the caller can
@@ -2232,7 +2291,7 @@ def build_pivot_element(z, meta, mmap, opts, warnings, data_elements = [])
   seen_ids   = {}
   user_vals  = [] # User-derivation measures (window / ratio calcs) — resolved below
 
-  add_col = lambda do |field, target|
+  add_col = lambda do |field, target, shelf = nil|
     m, _cap = resolve_shelf_field(field, meta, mmap)
     base = "p-#{el_id}-#{target}-#{(m['name'] || 'x').downcase.gsub(/\W+/, '-')}"
     col_id = base
@@ -2245,7 +2304,22 @@ def build_pivot_element(z, meta, mmap, opts, warnings, data_elements = [])
 
     deriv = field['derivation'].to_s.downcase
     formula =
-      if field['role'] == 'measure'
+      if field['role'] == 'measure' && deriv == 'pcto'
+        # v5.1 (D1): Tableau's percent-of-total QUICK CALC shelf token
+        # [pcto:<agg>:<col>:qk] — previously unmapped, fell through to a wrong
+        # bare Sum. Scope = the axis the token sits on (live-verified: pcto in
+        # cols shelf sums each COLUMN to 100%). PIVOT-ONLY partition modes per
+        # round-3 consensus; the shelf context is only set on pivot paths.
+        raw = (field['column'] || field['raw']).to_s
+        iagg, icol = raw[/pcto:([a-z]+):([^:\]]+)/i, 1], raw[/pcto:[a-z]+:([^:\]]+)/i, 1]
+        agg_fn = SHELF_AGG_FOR_PREFIX[iagg.to_s.downcase] || 'CountDistinct'
+        inner_ref = "[Master/#{(meta['columns_by_guid'] || {}).dig(icol.to_s, 'caption') || icol || m['name']}]"
+        inner = agg_fn.include?('%s') ? agg_fn.sub('%s', inner_ref) : "#{agg_fn}(#{inner_ref})"
+        scope = shelf == :cols ? 'column' : (shelf == :rows ? 'row' : 'grand_total')
+        %(PercentOfTotal(#{inner}, "#{scope}"))
+      elsif field['role'] == 'measure' && deriv == 'rtot'
+        "CumulativeSum(Sum([Master/#{m['name']}]))"
+      elsif field['role'] == 'measure'
         agg = SHELF_AGG_FOR_PREFIX[deriv] || 'Sum'
         if agg.include?('%s')
           agg.sub('%s', "[Master/#{m['name']}]")
@@ -2296,13 +2370,19 @@ def build_pivot_element(z, meta, mmap, opts, warnings, data_elements = [])
     end
   end
 
+  # v5.1 (D4): `:ok` qualified pills are Tableau's HIDDEN SORT KEYS, never
+  # displayed values — enrolling them as pivot values shipped ghost columns
+  # ("Rank N (copy)_…:ok:9"). Skip them; the shelf-sort path carries ordering.
+  hidden_sort_pill = ->(f) { (f['column'] || f['raw']).to_s.include?(':ok') }
   (rows_shelf['fields'] || []).each do |f|
-    add_col.call(f, :row)   if f['role'] == 'dim'
-    add_col.call(f, :value) if f['role'] == 'measure'
+    next if hidden_sort_pill.call(f)
+    add_col.call(f, :row, :rows)   if f['role'] == 'dim'
+    add_col.call(f, :value, :rows) if f['role'] == 'measure'
   end
   (cols_shelf['fields'] || []).each do |f|
-    add_col.call(f, :col)   if f['role'] == 'dim'
-    add_col.call(f, :value) if f['role'] == 'measure'
+    next if hidden_sort_pill.call(f)
+    add_col.call(f, :col, :cols)   if f['role'] == 'dim'
+    add_col.call(f, :value, :cols) if f['role'] == 'measure'
   end
 
   # ---- "Measure Names on rows" crosstab recipe (first-classed) -------------
@@ -2439,6 +2519,21 @@ def build_pivot_element(z, meta, mmap, opts, warnings, data_elements = [])
       end
     elsif plan['mode'] == 'two-stage'
       win_stage << { 'col' => uv['col'], 'plan' => plan }
+    elsif plan['mode'] == 'inline-share'
+      # v5.1 Rule W1 emission (pivot): scope from the axis carrying the share —
+      # the same deterministic rule as the pcto quick calc (value came from the
+      # rows shelf → each row sums to 1 → "row"; cols shelf → "column").
+      # PIVOT-ONLY partition modes per round-3 consensus.
+      shelf_of = (rows_shelf['fields'] || []).any? { |f| (f['column'] || f['raw']).to_s.include?(uv['raw'].to_s[/Calculation_\w+/].to_s) } ? 'row' : 'column'
+      uv['col']['formula'] =
+        if plan['share_kind'] == 'percent_of_total'
+          %(PercentOfTotal(#{plan['inner']}, "#{shelf_of}"))
+        else
+          plan['inner']
+        end
+      uv['col']['format'] = { 'kind' => 'number', 'formatString' => ',.1%' } if plan['share_kind'] == 'percent_of_total'
+      warnings << "'#{cap}' pivot value '#{uv['name']}' → #{plan['wrapper']}(share) emitted as " \
+                  "#{uv['col']['formula'][0..90]} [#{plan['note']}]"
     elsif plan['mode'] == 'inline' && plan['formula']
       # VALIDATED live 2026-06-24 (wb cd9058fe): Sigma accepts window functions
       # (PercentOfTotal(…, "grand_total"), CumulativeSum(…)) as pivot-table value
@@ -2500,7 +2595,37 @@ def build_pivot_element(z, meta, mmap, opts, warnings, data_elements = [])
     end
   end
 
-  {
+  # v5.1: source shelf sorts (<shelf-sort-v2> — three rounds of ranked pivots
+  # shipped alphabetical because this surface was never parsed). Resolve the
+  # sorted dimension to its rowsBy/columnsBy entry and the sort measure to a
+  # value column. GUARD (the opus trap, live-probed): a PercentOfTotal whose
+  # scope is the SORTED axis is constant (100%) → the sort silently no-ops to
+  # alphabetical; sort by the inner aggregate instead when detectable.
+  Array(z['shelf_sorts']).each do |ss|
+    norm = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]/, '') }
+    axis = ss['shelf'].to_s == 'columns' ? cols_by : rows_by
+    entry = axis.find do |e|
+      col = cols_array.find { |c| c['id'] == e['id'] }
+      col && norm.call(col['name']) == norm.call(ss['dimension'])
+    end
+    next unless entry
+    by_col = cols_array.find { |c| values_arr.include?(c['id']) && norm.call(c['name']).include?(norm.call(ss['measure'])) } ||
+             cols_array.find { |c| values_arr.include?(c['id']) }
+    next unless by_col
+    scope_word = ss['shelf'].to_s == 'columns' ? 'column' : 'row'
+    if by_col['formula'].to_s =~ /PercentOfTotal\s*\(.*"#{scope_word}"\s*\)/
+      warnings << "'#{cap}' pivot sort key '#{by_col['name']}' is PercentOfTotal(…,\"#{scope_word}\") — CONSTANT " \
+                  'across the sorted axis (sorts alphabetically at render). Sort by the inner aggregate instead ' \
+                  '(refs/fidelity-recipes.md §Ranked pivot).'
+    else
+      entry['sort'] = { 'direction' => ss['direction'] || 'ascending', 'by' => by_col['id'] }
+      agg = by_col['formula'].to_s[/\A(Sum|Avg|Min|Max|Median|Count|CountDistinct)\(/, 1]
+      entry['sort']['aggregation'] = agg.downcase if agg
+      warnings << "'#{cap}' pivot #{ss['shelf']} sorted by '#{by_col['name']}' #{ss['direction']} (source shelf-sort)"
+    end
+  end
+
+  el = {
     'id'        => el_id,
     'kind'      => 'pivot-table',
     'name'      => tile_title(z, cap),
@@ -2508,8 +2633,76 @@ def build_pivot_element(z, meta, mmap, opts, warnings, data_elements = [])
     'columns'   => cols_array,
     'values'    => values_arr,
     'rowsBy'    => rows_by,
-    'columnsBy' => cols_by
+    'columnsBy' => cols_by,
+    # v5.1 defect-2 fix: Tableau pivots in this pipeline never show grand
+    # totals; Sigma defaults them SHOWN. showSubtotals enum is only
+    # always|when-collapsed ('hidden' is rejected) — when-collapsed is the
+    # no-visible-subtotals setting for expanded pivots (live-probed).
+    'totals'    => { 'showGrandTotals' => 'hidden', 'showSubtotals' => 'when-collapsed' }
   }
+  # v5.1 defect-4 fix: heat scale from the SOURCE ramp (parser heat_scheme),
+  # 3-point downsample; never a default accent. Value-format cascade: a
+  # PercentOfTotal value with no matched format renders 1-decimal like the
+  # corpus sources (defect-5).
+  if z['heat_scheme'].is_a?(Array) && z['heat_scheme'].size >= 2 && values_arr.any?
+    stops = z['heat_scheme']
+    el['conditionalFormats'] = [{
+      'type' => 'backgroundScale', 'columnIds' => values_arr.dup,
+      'scheme' => [stops.first, stops[stops.size / 2], stops.last].uniq
+    }]
+  end
+  cols_array.each do |c|
+    next unless values_arr.include?(c['id'])
+    next unless c['formula'].to_s.include?('PercentOfTotal(')
+    fs = c.dig('format', 'formatString')
+    c['format'] = { 'kind' => 'number', 'formatString' => ',.1%' } if fs.nil? || fs =~ /\A,?\.0%\z/
+  end
+  el
+end
+
+# v5.1: rank-limited PRE-FILTERED source table — mechanizes the pattern all
+# three round-4 runs hand-built for RANK()<=N pivots. The list filter lives on
+# a hidden TABLE element the pivot re-sources; element-level filters on the
+# pivot itself silently do NOT prune its dimension (round-4 bisect-proven).
+def build_topn_prefilter_helper(el_id:, master_id:, entity_col:, carry_cols:, members:)
+  src_id = "#{el_id}-topn-src"
+  src_name = "TopN Source (#{el_id.sub(/^el-/, '')})"
+  cols = carry_cols.each_with_index.map do |c, i|
+    { 'id' => "#{src_id}-c#{i}", 'name' => c['name'],
+      # passthrough at ROW grain: aggregates re-compute on the pivot, so the
+      # helper carries the BASE refs its formulas mention
+      'formula' => c['formula'].to_s[/\[Master\/[^\]]+\]/] || c['formula'] }
+  end.uniq { |c| c['name'] }
+  ent = cols.find { |c| c['name'] == entity_col['name'] }
+  {
+    'id' => src_id, 'kind' => 'table', 'name' => src_name, 'visibleAsSource' => false,
+    'source' => { 'kind' => 'table', 'elementId' => master_id },
+    'columns' => cols,
+    'filters' => [{ 'columnId' => ent['id'], 'kind' => 'list', 'mode' => 'include',
+                    'selectionMode' => 'multiple', 'values' => members }]
+  }
+end
+
+# Member resolution for the prefilter: (1) <tab>/topn-members.json — a
+# {calc_caption => [members]} map fed by one probe run (or by hand); (2) the
+# zone's rendered view CSV — Tableau already applied the rank, so the distinct
+# entity values ARE the exact member set (ties included), in rendered order.
+def topn_members_for(calc_caption, entity_name, opts, _zone)
+  mpath = File.join(opts[:tab], 'topn-members.json')
+  if File.exist?(mpath)
+    map = JSON.parse(File.read(mpath)) rescue {}
+    hit = map[calc_caption.to_s] || map.find { |k, _| k.to_s.strip.casecmp?(calc_caption.to_s.strip) }&.last
+    return hit if hit.is_a?(Array) && hit.any?
+  end
+  return nil unless entity_name
+  Dir.glob(File.join(opts[:tab], 'views', '*.csv')).each do |csvp|
+    rows = CSV.read(csvp, headers: true) rescue next
+    next unless rows.headers&.any? { |h| h.to_s.strip.casecmp?(entity_name.to_s.strip) }
+    hdr = rows.headers.find { |h| h.to_s.strip.casecmp?(entity_name.to_s.strip) }
+    vals = rows.map { |r| r[hdr] }.compact.map(&:to_s)
+    return vals.uniq if vals.any?
+  end
+  nil
 end
 
 # Minimal GUID-from-text helper for shelf measures whose `column` reads like
@@ -3250,6 +3443,18 @@ layout.each do |dash|
         user_agg_formula = window_plan['formula']
         warnings << "'#{cap}' measure '#{meas_hdr}' is a Tableau window table-calc — auto-emitted as a Sigma " \
                     "viz formula on the yAxis: #{user_agg_formula[0..140]}  [#{window_plan['note']}]"
+      when 'inline-share'
+        # v5.1 Rule W1 (chart): non-pivot shares stay grand_total (partition
+        # modes are PIVOT-ONLY per round-3 consensus).
+        user_agg_formula =
+          if window_plan['share_kind'] == 'percent_of_total'
+            %(PercentOfTotal(#{window_plan['inner']}, "grand_total"))
+          else
+            window_plan['inner']
+          end
+        window_plan = window_plan.merge('mode' => 'inline') # downstream treats as inline
+        warnings << "'#{cap}' measure '#{meas_hdr}' is a window-wrapped share — emitted " \
+                    "#{user_agg_formula[0..120]} [#{window_plan['note']}]"
       when 'two-stage'
         # Helper built below once the dim/color column objects exist.
         warnings << "'#{cap}' measure '#{meas_hdr}' is an unbounded window aggregate — auto-built as a hidden " \
@@ -4166,6 +4371,44 @@ layout.each do |dash|
         label = tp['calc_caption']
         unless tp['keeps_true']
           warnings << "'#{cap}' top-N filter '#{label}' keeps FALSE (anti-top-N) — not auto-emitted; re-create by hand"
+          next
+        end
+        # v5.1: PIVOTS require the PRE-FILTERED SOURCE TABLE — element-level
+        # filters silently do NOT prune a pivot's dimension (round-4
+        # bisect-proven), and RANK(<window share>) operands (topn-prefilter
+        # mode) can't key an element filter at all. Members come from
+        # <tab>/topn-members.json (one probe run) or the zone's rendered CSV
+        # (Tableau already applied the rank — distinct entity values ARE the
+        # exact member set); else emit the probe SQL and stay manual.
+        if tp['top_n'] && (kind == 'pivot-table' || tp['mode'] == 'topn-prefilter')
+          entity_col = (element['rowsBy'] || []).map { |r| (element['columns'] || []).find { |c| c['id'] == r['id'] } }.compact.first ||
+                       (element['columnsBy'] || []).map { |r| (element['columns'] || []).find { |c| c['id'] == r['id'] } }.compact
+                         .reject { |c| c['formula'].to_s =~ /\A\[Master\/Rank/i }.last
+          members = topn_members_for(label, entity_col && entity_col['name'], opts, z)
+          if entity_col && members && members.any?
+            helper = build_topn_prefilter_helper(
+              el_id: el_id, master_id: (element.dig('source', 'elementId') || opts[:master_id]),
+              entity_col: entity_col, carry_cols: element['columns'], members: members)
+            data_elements << helper
+            hname = helper['name']
+            element['source'] = { 'kind' => 'table', 'elementId' => helper['id'] }
+            (element['columns'] || []).each do |c|
+              c['formula'] = c['formula'].to_s.gsub('[Master/', "[#{hname}/")
+            end
+            warnings << "'#{cap}' top-#{tp['top_n']} '#{label}' → rank-limited PRE-FILTERED source " \
+                        "'#{hname}' (#{members.size} member(s); element filters don't prune pivots)"
+          else
+            probes_path = opts[:out].sub(/\.json$/, '-topn-probes.json')
+            probe = { 'zone' => cap, 'calc' => label, 'top_n' => tp['top_n'],
+                      'entity_dim' => entity_col && entity_col['name'],
+                      'sql_template' => "SELECT entity, MAX(share) ms, RANK() OVER (ORDER BY MAX(share) DESC) rnk " \
+                                        "FROM (<share-per-entity query over the landed table>) GROUP BY entity " \
+                                        "QUALIFY rnk <= #{tp['top_n']} -- write members to <tab>/topn-members.json {\"#{label}\": [..]} and re-run" }
+            existing = File.exist?(probes_path) ? (JSON.parse(File.read(probes_path)) rescue []) : []
+            File.write(probes_path, JSON.pretty_generate(existing + [probe]))
+            warnings << "'#{cap}' top-#{tp['top_n']} '#{label}': no member source (no CSV covers the entity dim) — " \
+                        "probe written to #{File.basename(probes_path)}; run it, save members to topn-members.json, re-run build"
+          end
           next
         end
         unless tp['top_n'] && tp['ranked_measure']
@@ -5476,6 +5719,28 @@ rescue => e
   warnings << "control-coverage reconciliation error: #{e.message}"
 end
 
+# ---- v5.1 leaked-ref guard (fail-closed) ------------------------------------
+# A column ref whose inner name contains formula punctuation or a Tableau pill
+# qualifier ([Master/-WINDOW_MAX(…)], [Master/Rank N (copy)_…:ok:9]) is ALWAYS
+# leaked formula text / an internal sort pill — it can never resolve and
+# hard-fails the POST ("Dependency not found"). Never ship one: drop the
+# column loudly (round-4 D3/D4 class, the exit-4 trigger).
+elements.each do |el|
+  bad = (el['columns'] || []).select do |c|
+    c['formula'].to_s.scan(/\[[^\]\/]+\/([^\]]+)\]/).flatten.any? do |inner|
+      inner =~ /[()]/ || inner =~ /:(?:ok|qk)\b/
+    end
+  end
+  next if bad.empty?
+  bad.each do |c|
+    el['columns'].delete(c)
+    Array(el.dig('yAxis', 'columnIds')).delete(c['id'])
+    Array(el['values']).delete(c['id'])
+    warnings << "FAIL-CLOSED '#{el['name']}': column '#{c['name']}' referenced leaked formula text/pill " \
+                "(#{c['formula'].to_s[0, 90]}) — DROPPED (would hard-fail the POST); translate or re-author it"
+  end
+end
+
 # ---- Multi-DS routing (v5.0) ------------------------------------------------
 # Three rounds' #1 recurring gap, mechanized. multi-ds-plan.json (gap-scan)
 # maps each worksheet to its owning federated datasource; every chart used to
@@ -5598,6 +5863,32 @@ begin
   end
 rescue => e
   warnings << "multi-DS routing error (charts left on the master + WARN wall): #{e.message}"
+end
+
+# v5.1: HIDDEN-TITLES sidecar. The source hides worksheet titles via the zone
+# attr show-title='false' (parser: zone show_title) — three rounds leaked
+# "Sheet 9"/"Bi assets" chrome because nothing carried the signal. The live
+# API rejects name:{text, visibility:'hidden'} ("cannot mix"), and bare
+# {visibility:'hidden'} breaks every name-keyed matcher upstream — so titles
+# are hidden as the FINAL spec mutation in put-layout.rb, driven by this
+# sidecar. kpi-chart excluded (its name IS the rendered KPI label).
+begin
+  st_by_ws = {}
+  layout.each do |dash|
+    (dash['zones'] || []).each do |z|
+      st_by_ws[z['caption']] = z['show_title'] if z['kind'] == 'chart' && !z['caption'].to_s.empty?
+    end
+  end
+  hidden = elements.select do |e|
+    e['kind'] != 'kpi-chart' && st_by_ws.key?(e['_worksheet']) && st_by_ws[e['_worksheet']] == false
+  end.map { |e| e['id'] }
+  if hidden.any?
+    ht_path = opts[:out].sub(/\.json$/, '-hidden-titles.json')
+    File.write(ht_path, JSON.pretty_generate(hidden))
+    warn "wrote #{ht_path} (#{hidden.size} element(s) whose source hides the title — applied by put-layout.rb)"
+  end
+rescue => e
+  warnings << "hidden-titles sidecar error (titles stay visible): #{e.message}"
 end
 
 # v5.0-P2: window-calc sidecar for the VDS oracle — enriched from the BUILT

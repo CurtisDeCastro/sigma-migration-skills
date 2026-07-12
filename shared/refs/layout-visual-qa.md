@@ -158,8 +158,10 @@ doesn't dictate otherwise — §3 fidelity caveat):
 present tables and reads better than Sigma's dense `spreadsheet` default). Keep `spreadsheet` only when
 the source is explicitly a dense data grid. This is spec-authorable and round-trips but is **frequently
 dropped** in migrations — set it deliberately. While you're styling the table, carry over any source
-in-cell bars with `conditionalFormats: [{type: dataBars, columnIds: [<aggregate col id>], scheme: ["#a4dfc0","#4caf7d"]}]`
-(also spec-authorable, also commonly dropped). See sigma-workbooks `tables.md` for the full field set.
+in-cell bars with `conditionalFormats: [{type: dataBars, columnIds: [<aggregate col id>], scheme: [<tint>, <hue>]}]`
+(also spec-authorable, also commonly dropped). The scheme must DERIVE from the source — the worksheet's
+`heat_scheme` ramp, else `[mix(dominant, white, 88%), dominant]` from the theme's categoricalScheme;
+never the Sigma default royal `#1a70f1` (round-4 defect). See sigma-workbooks `tables.md` for the full field set.
 
 ## Known render caveats (not fixable via spec — keep titles short, drop redundant legends)
 

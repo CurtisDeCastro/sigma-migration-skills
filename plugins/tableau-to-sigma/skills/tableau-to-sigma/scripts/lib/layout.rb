@@ -17,6 +17,13 @@ module SigmaLayout
   #   header) to a thin banner — source geometry can inflate a one-line header to
   #   many rows, which tints into a big empty colored block.
   GRID_COLS    = 24 # page/container grid width (gridTemplateColumns repeat(24))
+  SIGMA_ROW_PX = 28 # grid row height in CSS px, invariant of export width when
+  #   pageWidth=custom — derived from live renders at maxPageWidth custom 1200
+  #   (2026-07: a 103-row page exported 2885 px tall at BOTH 1200 and 1600
+  #   export widths; 103*28+1). Verified at two export widths at ONE custom
+  #   page width only — re-verify at other widths before trusting universally
+  #   (if row px turns out to vary with page width, make this a lookup from
+  #   canvas_w; the page_rows formula structure is unchanged either way).
   MIN_BAND_FILL = 0.60 # a band must fill >=60% of the grid columns (lint parity)
   # Generic auto-names (Sigma page names / source section names) that must
   # NEVER become a header-band title — "Page 1" / "Sheet 3" / "Dashboard 2".
@@ -25,6 +32,19 @@ module SigmaLayout
   # True when a candidate header title is a generic auto-name.
   def generic_title?(s)
     s.to_s.strip.match?(GENERIC_TITLE)
+  end
+
+  # A text zone reads as a TITLE/label only when its runs form ONE short line.
+  # Single source of truth (v5.1 defect 2) for (a) the header-band height clamp
+  # in build-dashboard-layout's plan_node and (b) the header-title detection in
+  # detect_header_zones / detect_header_title_el: a wide multi-paragraph INTRO
+  # near the top is BODY TEXT — promoting it into the header band inverts the
+  # source order (intro above the real title band).
+  def title_like_runs?(runs)
+    txt = Array(runs).map { |r| r['text'].to_s }.join
+    clean = txt.gsub(/\s+/, ' ').strip
+    !clean.empty? && clean.length <= 60 &&
+      !txt.include?("\n") && Array(runs).none? { |r| r['break'] }
   end
 
   # First usable header-band title from a priority-ordered candidate list:
@@ -258,6 +278,9 @@ module SigmaLayout
     'pivot-table' => 10,
     'control'     => 2,  # one input strip; 2 rows keeps the label visible
     'text'        => 2,
+    'image'       => 2,  # v5.1: was falling to the text floor by accident of
+    #   min_rows_for's default — deliberate now (floated art / wordmarks; the
+    #   lint's vendored copy needs no change: its fallback already yields 2).
     'divider'     => 1,  # hairline rule — stroke centers in the cell
     'button'      => 2   # control-sized pill
   }.freeze
@@ -404,7 +427,12 @@ module SigmaLayout
       %w[text title].include?(z['kind'].to_s) &&
         (z['y_pct'] || 0).to_f <= HEADER_MAX_Y_PCT &&
         (z['w_pct'] || 0).to_f >= HEADER_MIN_W_PCT &&
-        (z['h_pct'] || 100).to_f <= HEADER_MAX_H_PCT
+        (z['h_pct'] || 100).to_f <= HEADER_MAX_H_PCT &&
+        # v5.1 defect 2 (path parity with detect_header_title_el): a wide
+        # multi-paragraph INTRO in the top region is body text, not a banner —
+        # only zones whose runs read as one short line join the header band.
+        # Zones with no run data (no 'text_runs' key) keep the geometric rule.
+        (!z.key?('text_runs') || title_like_runs?(z['text_runs']))
     end.sort_by { |z| [(z['y_pct'] || 0).to_f, (z['x_pct'] || 0).to_f, z['id'].to_s] }
   end
 
