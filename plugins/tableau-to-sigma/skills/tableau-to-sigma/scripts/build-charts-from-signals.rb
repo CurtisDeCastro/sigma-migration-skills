@@ -54,6 +54,7 @@ require 'date'
 require 'optparse'
 require 'base64'
 require 'open3'
+require 'digest'
 require_relative 'learned-rules'
 require_relative 'lib/theme_derive'
 require_relative 'lib/png_classify'
@@ -2231,8 +2232,11 @@ end
 SHELF_AGG_FOR_PREFIX = {
   'sum' => 'Sum', 'avg' => 'Avg', 'min' => 'Min', 'max' => 'Max',
   'median' => 'Median', 'count' => 'CountIf(IsNotNull(%s))',
-  # quick-calc pills abbreviate CountD as 'ctd' ([pcto:ctd:seed:qk])
-  'countd' => 'CountDistinct', 'cntd' => 'CountDistinct', 'ctd' => 'CountDistinct'
+  # quick-calc pills abbreviate CountD as 'ctd' and Count as 'cnt'
+  # ([pcto:ctd:seed:qk], [cnt:3 digit:qk] — corpus-verified); 'med'/'mdn' =
+  # Median instance abbreviations
+  'countd' => 'CountDistinct', 'cntd' => 'CountDistinct', 'ctd' => 'CountDistinct',
+  'cnt' => 'CountIf(IsNotNull(%s))', 'med' => 'Median', 'mdn' => 'Median'
 }.freeze
 SHELF_TRUNC_FOR_PREFIX = {
   'yr' => 'year', 'qr' => 'quarter', 'mn' => 'month',
@@ -2624,24 +2628,29 @@ def build_pivot_element(z, meta, mmap, opts, warnings, data_elements = [])
   Array(z['quick_calc_pcto']).each do |qc|
     nq = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]/, '') }
     inner_cap = (meta['columns_by_guid'] || {}).dig(qc['col'].to_s, 'caption') || qc['col']
-    qc_agg = SHELF_AGG_FOR_PREFIX[qc['agg'].to_s] || 'Sum'
-    qc_agg_name = qc_agg[/\A[A-Za-z]+/].to_s # 'CountIf(IsNotNull(%s))' → 'CountIf'
+    qc_agg = SHELF_AGG_FOR_PREFIX[qc['agg'].to_s]
+    # UNKNOWN prefix → agg-agnostic matching (the 0d206e2 behavior). A 'Sum'
+    # fallback made both the handled-bail and the vcol match key on the wrong
+    # aggregation and SILENTLY skipped the wrap (review-caught regression:
+    # [pcto:cnt:…] shipped raw counts).
+    qc_agg_name = qc_agg && qc_agg[/\A[A-Za-z]+/].to_s # 'CountIf(IsNotNull(%s))' → 'CountIf'
+    warnings << "'#{cap}' pcto quick calc has UNKNOWN agg prefix '#{qc['agg']}' — matching by inner column only; verify the wrapped aggregation" if qc_agg_name.nil?
     # If a value already carries PercentOfTotal over the SAME inner (the pill
     # also rode a rows/cols shelf and add_col wrapped it), this quick calc is
     # HANDLED — bail before the loose match wraps a sibling raw value
     # (review-caught: dual-pill pivots corrupted the raw count column).
     handled = cols_array.any? do |c|
       values_arr.include?(c['id']) &&
-        c['formula'].to_s =~ /\APercentOfTotal\(\s*#{Regexp.escape(qc_agg_name)}/ &&
+        c['formula'].to_s =~ /\APercentOfTotal\(\s*#{qc_agg_name ? Regexp.escape(qc_agg_name) : '[A-Za-z]+'}/ &&
         (ir = c['formula'].to_s[%r{\[Master/([^\]]+)\]}, 1]) && nq.call(ir) == nq.call(inner_cap)
     end
     next if handled
     vcol = cols_array.find do |c|
       next false unless values_arr.include?(c['id'])
       next false if c['formula'].to_s.include?('PercentOfTotal(')
-      # the AGGREGATION must match the pill's too — a crosstab can carry the
-      # same base column under two aggs (review-caught)
-      next false unless c['formula'].to_s.start_with?("#{qc_agg_name}(")
+      # the AGGREGATION must match the pill's too when the prefix is KNOWN — a
+      # crosstab can carry the same base column under two aggs (review-caught)
+      next false if qc_agg_name && !c['formula'].to_s.start_with?("#{qc_agg_name}(")
       ref = c['formula'].to_s[%r{\[Master/([^\]]+)\]}, 1]
       ref && (nq.call(ref) == nq.call(inner_cap) || nq.call(c['name']) == nq.call(inner_cap))
     end
@@ -2821,20 +2830,40 @@ end
 # trustworthy source exists (caller writes the probe sidecar).
 def topn_members_for(calc_caption, entity_name, opts, zone, element_cols: [], own_view_id: nil)
   mpath = File.join(opts[:tab], 'topn-members.json')
+  bare_hit = nil
   if File.exist?(mpath)
     map = JSON.parse(File.read(mpath)) rescue {}
     # ZONE-SCOPED key first ('<zone caption>::<calc caption>') — two zones
     # routinely share one rank-calc name ('Rank N' on both fixture pivots),
     # and a caption-only key fed one zone the OTHER zone's roster
-    # (review-caught, live-reproduced: disjoint domain → empty tile). The
-    # bare calc-caption key stays as the single-zone fallback.
+    # (review-caught, live-reproduced: disjoint domain → empty tile).
     zcap = zone.is_a?(Hash) ? zone['caption'].to_s : ''
     scoped = "#{zcap}::#{calc_caption}"
     hit = map[scoped] || map.find { |k, _| k.to_s.strip.casecmp?(scoped.strip) }&.last
-    hit = map[calc_caption.to_s] || map.find { |k, _| k.to_s.strip.casecmp?(calc_caption.to_s.strip) }&.last if hit.nil?
     return hit if hit.is_a?(Array) && hit.any?
+    # The BARE calc-caption key is legacy/ambiguous: it now ranks BELOW the
+    # zone's own CSV evidence, and at most ONE zone per build may consume it
+    # (review-caught: a legacy bare-key file fed a disjoint roster to a
+    # second zone AND truncated a zone that had perfectly good CSV members).
+    bh = map[calc_caption.to_s] || map.find { |k, _| k.to_s.strip.casecmp?(calc_caption.to_s.strip) }&.last
+    if bh.is_a?(Array) && bh.any?
+      # ownership is claimed at USE time (below), not lookup time — a zone
+      # that resolves from its own CSV must not block another zone's fallback
+      bare_hit = lambda do
+        $topn_bare_consumers ||= {}
+        owner = ($topn_bare_consumers[calc_caption.to_s] ||= zcap)
+        if owner == zcap
+          bh
+        else
+          warn "topn-members: bare key #{calc_caption.inspect} already consumed by zone #{owner.inspect} — " \
+               "#{zcap.inspect} needs its own ZONE-SCOPED key (\"#{zcap}::#{calc_caption}\")"
+          nil
+        end
+      end
+    end
   end
-  return nil unless entity_name
+  bare_hit ||= lambda { nil }
+  return bare_hit.call unless entity_name
   nrm = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]/, '') }
   other_cols = element_cols.map { |c| nrm.call(c['name']) } - [nrm.call(entity_name)]
   best = nil # [coverage, rows, hdr]
@@ -2848,30 +2877,35 @@ def topn_members_for(calc_caption, entity_name, opts, zone, element_cols: [], ow
     score = (own ? 1000 : 0) + coverage
     best = [score, rows, hdr] if best.nil? || score > best[0]
   end
-  return nil unless best
+  return bare_hit.call unless best
   _, rows, hdr = best
   # Rank-ordered members when the CSV carries THE rank pill's column: the
   # header must BE 'rank' or the rank calc's caption (a containment match
   # let an ordinary 'Rank Points' data measure hijack the order —
-  # review-caught), and the per-member values must form a permutation
-  # (distinct rank per member) — a data measure repeats values.
+  # review-caught). Tableau RANK is COMPETITION ranking — ties legitimately
+  # share a value (a strict-permutation check threw away the whole ordering
+  # on any tie; review-caught) — so accept duplicates and break ties by CSV
+  # first-occurrence, but reject value ranges a rank can't have (a 'Rank
+  # Points' 1500/2000 measure fails the bound).
   rank_h = rows.headers.find do |h|
     hn = nrm.call(h)
     (hn == 'rank' || hn == nrm.call(calc_caption)) && rows.first && rows.first[h].to_s =~ /\A\d+\z/
   end
   if rank_h
     by_rank = {}
+    order   = {}
     rows.each do |r|
       m = r[hdr]
       next if m.nil?
+      order[m.to_s] ||= order.size
       by_rank[m.to_s] ||= r[rank_h].to_i
     end
-    if by_rank.any? && by_rank.values.uniq.size == by_rank.size
-      return by_rank.keys.sort_by { |m| by_rank[m] }
-    end
+    plausible = by_rank.any? && by_rank.values.min.to_i >= 1 &&
+                by_rank.values.max.to_i <= by_rank.size * 2
+    return by_rank.keys.sort_by { |m| [by_rank[m], order[m]] } if plausible
   end
   vals = rows.map { |r| r[hdr] }.compact.map(&:to_s)
-  vals.any? ? vals.uniq : nil
+  vals.any? ? vals.uniq : bare_hit.call
 end
 
 # v5.1.1: shared top-N idiom detection — the CSV flow's inline lambda made the
@@ -2942,9 +2976,12 @@ def apply_topn_prefilter!(tp, element:, cap:, z:, opts:, warnings:, data_element
       # is a data-independent Switch. The pivot sorts its entity axis by
       # Min(SORT_ORD) below; sorting by a share value is the constant-key trap.
       ent_ref = "[Master/#{helper['columns'].find { |c| c['id'] == helper['filters'][0]['columnId'] }['name']}]"
-      # numeric entity members emit UNQUOTED literals — Switch([numeric],
-      # "70", …) type-mismatches (review-caught)
-      numeric_members = members.all? { |m| m.to_s =~ /\A-?\d+(?:\.\d+)?\z/ }
+      # UNQUOTED literals only with EXPLICIT numeric datatype evidence from
+      # the twb — a digit-string TEXT column ('070' room codes) must stay
+      # quoted, and members-look-numeric alone proved nothing (review-caught).
+      ent_dt = tp['entity_ref'] && (meta['columns_by_guid'] || {}).dig(tp['entity_ref'], 'datatype').to_s
+      numeric_members = %w[integer real].include?(ent_dt.to_s) &&
+                        members.all? { |m| m.to_s =~ /\A-?(?:0|[1-9]\d*)(?:\.\d+)?\z/ }
       pairs = members.each_with_index.map do |m, i|
         lit = numeric_members ? m.to_s : JSON.generate(m.to_s)
         "#{lit}, #{i + 1}"
@@ -2972,22 +3009,37 @@ def apply_topn_prefilter!(tp, element:, cap:, z:, opts:, warnings:, data_element
     # denominator check never fired for charts and the success warning
     # over-claimed).
     is_pivot = element['kind'] == 'pivot-table'
-    shelf_sorted = Array(z['shelf_sorts']).any? { |ss| norm.call(ss['dimension']) == norm.call(entity_col['name']) }
+    shelf_ss = Array(z['shelf_sorts']).find { |ss| norm.call(ss['dimension']) == norm.call(entity_col['name']) }
     so_id = "p-#{element['id']}-sortord"
     axis_entry = ((element['rowsBy'] || []) + (element['columnsBy'] || [])).find { |r| r['id'] == entity_col['id'] }
-    ordered = false
-    if axis_entry && !shelf_sorted
+    ordered = nil
+    add_sortord = lambda do
       unless (element['columns'] || []).any? { |c| c['id'] == so_id }
         element['columns'] << { 'id' => so_id, 'name' => 'SORT_ORD', 'formula' => "[#{hname}/SORT_ORD]" }
       end
+    end
+    if axis_entry && !shelf_ss
+      add_sortord.call
       axis_entry['sort'] = { 'direction' => 'ascending', 'by' => so_id, 'aggregation' => 'min' }
-      ordered = true
-    elsif !is_pivot && element['xAxis'].is_a?(Hash) && element['xAxis']['sort'].nil? && !shelf_sorted && !z['sort']
-      unless (element['columns'] || []).any? { |c| c['id'] == so_id }
-        element['columns'] << { 'id' => so_id, 'name' => 'SORT_ORD', 'formula' => "[#{hname}/SORT_ORD]" }
+      ordered = 'SORT_ORD'
+    elsif !is_pivot && element['xAxis'].is_a?(Hash) && element['xAxis']['sort'].nil? && !z['sort']
+      if shelf_ss
+        # A shelf-sorted CHART must get its order HERE — build_pivot_element's
+        # shelf-sort emission never sees charts, so deferring shipped the tile
+        # with NO axis order at all (review-caught on the fixture's own top-N
+        # bar). Sort by the yAxis measure the shelf sort names.
+        yids = element.dig('yAxis', 'columnIds') || []
+        ycols = yids.map { |vid| (element['columns'] || []).find { |c| c['id'] == vid } }.compact
+        by = ycols.find { |c| norm.call(c['name']).include?(norm.call(shelf_ss['measure'])) } || ycols.first
+        if by
+          element['xAxis']['sort'] = { 'by' => by['id'], 'direction' => shelf_ss['direction'] || 'descending' }
+          ordered = 'source shelf-sort'
+        end
+      else
+        add_sortord.call
+        element['xAxis']['sort'] = { 'by' => so_id, 'direction' => 'ascending', 'aggregation' => 'min' }
+        ordered = 'SORT_ORD'
       end
-      element['xAxis']['sort'] = { 'by' => so_id, 'direction' => 'ascending', 'aggregation' => 'min' }
-      ordered = true
     end
     # Share-denominator honesty: Tableau's RANK filter is a TABLE-CALC filter —
     # shares compute over the FULL domain, then marks hide. A share whose scope
@@ -2995,7 +3047,10 @@ def apply_topn_prefilter!(tp, element:, cap:, z:, opts:, warnings:, data_element
     # members here and INFLATES. Scope orthogonal to the entity axis is exact.
     ent_on_cols = (element['columnsBy'] || []).any? { |r| r['id'] == entity_col['id'] }
     bad_scope = ent_on_cols ? 'row' : 'column'
-    value_ids = element['values'] || element.dig('yAxis', 'columnIds') || []
+    value_ids = element['values'] || element.dig('yAxis', 'columnIds') ||
+                # TABLE-kind elements carry values as plain columns (review-
+                # caught: the honesty warning could never fire for them)
+                (element['kind'] == 'table' ? (element['columns'] || []).map { |c| c['id'] } - [entity_col['id'], so_id] : [])
     inflated = value_ids.select do |vid|
       c = (element['columns'] || []).find { |x| x['id'] == vid }
       re = is_pivot ? /PercentOfTotal\s*\([^\v]*"(?:#{bad_scope}|grand_total)"\s*\)/ : /PercentOfTotal\s*\(/
@@ -3007,7 +3062,7 @@ def apply_topn_prefilter!(tp, element:, cap:, z:, opts:, warnings:, data_element
                   'full-domain denominators need a hand-build (fidelity-recipes §Ranked pivot).'
     end
     warnings << "'#{cap}' top-#{tp['top_n']} '#{label}' → rank-limited PRE-FILTERED source " \
-                "'#{hname}' (#{members.size} member(s)#{ordered ? ', rank-ordered via SORT_ORD' : ''}; " \
+                "'#{hname}' (#{members.size} member(s)#{ordered ? ", ordered via #{ordered}" : ''}; " \
                 'element filters don\'t prune pivots)'
   else
     probes_path = opts[:out].sub(/\.json$/, '-topn-probes.json')
@@ -6226,26 +6281,38 @@ begin
       st_by_ws[z['caption']] = z['show_title'] if z['kind'] == 'chart' && !z['caption'].to_s.empty?
     end
   end
-  hidden = elements.select do |e|
+  $hidden_title_ids = elements.select do |e|
     e['kind'] != 'kpi-chart' && st_by_ws.key?(e['_worksheet']) && st_by_ws[e['_worksheet']] == false
   end.map { |e| e['id'] }
+  # namespaced duplicates (worksheet on a 2nd+ dashboard) get their own ids
+  # appended by the page-per-dashboard emitter; the sidecar is WRITTEN after
+  # the emitters run (review-caught: pre-namespace ids never matched the
+  # copies, leaking title chrome on later pages).
+  $hidden_title_ns_ids = []
+  # Ownership marker for stale-sidecar cleanup: the workbook's .twb sha —
+  # caption-derived element ids ('el-sheet-1') collide across workbooks, so a
+  # bare id-overlap test could delete ANOTHER workbook's sidecar in a shared
+  # directory (review-caught). Legacy array-shaped sidecars fall back to the
+  # id-overlap heuristic.
+  twb_p = File.join(opts[:tab], 'workbook-content.twb')
+  $hidden_title_wb_sha = File.exist?(twb_p) ? Digest::SHA256.file(twb_p).hexdigest[0, 16] : nil
   ht_path = opts[:out].sub(/\.json$/, '-hidden-titles.json')
-  # put-layout UNIONS every *-hidden-titles.json in the dir, so a stale
-  # sidecar from a build under a DIFFERENT --out basename would re-hide
-  # titles forever (element ids are deterministic across builds). Clear the
-  # stale ones — but ONLY those whose ids belong to THIS workbook's elements
-  # (own basename, or id overlap): a different workbook legitimately sharing
-  # the directory keeps its sidecar (v5.1.3 review-caught).
   own_ids = elements.map { |e| e['id'].to_s }
   Dir.glob(File.join(File.dirname(opts[:out]), '*-hidden-titles.json')).each do |stale|
-    sids = JSON.parse(File.read(stale)) rescue []
-    next unless stale == ht_path || (sids.is_a?(Array) && (sids.map(&:to_s) & own_ids).any?)
+    body = JSON.parse(File.read(stale)) rescue []
+    owned =
+      if stale == ht_path
+        true
+      elsif body.is_a?(Hash) && body['workbook']
+        $hidden_title_wb_sha && body['workbook'] == $hidden_title_wb_sha
+      elsif body.is_a?(Array)
+        (body.map(&:to_s) & own_ids).any? # legacy shape
+      else
+        false
+      end
+    next unless owned
     File.delete(stale)
     warn "removed stale #{stale}" unless stale == ht_path
-  end
-  if hidden.any?
-    File.write(ht_path, JSON.pretty_generate(hidden))
-    warn "wrote #{ht_path} (#{hidden.size} element(s) whose source hides the title — applied by put-layout.rb)"
   end
 rescue => e
   warnings << "hidden-titles sidecar error (titles stay visible): #{e.message}"
@@ -6411,6 +6478,10 @@ elsif opts[:pages_mode] == :dashboard
       stem = el['id']
       if stem && seen_el_ids[stem]
         ns = "#{stem}-#{d_slug[0..20]}"
+        # a namespaced copy of a hidden-title element needs ITS id in the
+        # sidecar too (written post-emitters) — exact-id matching in
+        # put-layout would otherwise leak the copy's title chrome
+        ($hidden_title_ns_ids ||= []) << ns if ($hidden_title_ids || []).include?(stem)
         src_before = el.dig('source', 'elementId')
         el2 = JSON.parse(el.to_json.gsub(stem, ns))
         # v5.1.3: the stem gsub also rewrites a source.elementId that EMBEDS
@@ -6466,6 +6537,21 @@ else
     File.write(tside, JSON.pretty_generate(theme))
     warn "wrote #{tside} (derived theme — apply via ThemeDerive.apply! / build-workbook-spec)"
   end
+end
+
+# hidden-titles sidecar WRITE — after the emitters so namespaced duplicate ids
+# (worksheet on 2+ dashboards) are included; shape {workbook:, ids:} so the
+# stale-cleanup ownership check can tell workbooks apart (legacy arrays read
+# fine in put-layout).
+begin
+  ht_ids = (($hidden_title_ids || []) + ($hidden_title_ns_ids || [])).uniq
+  if ht_ids.any?
+    ht_path = opts[:out].sub(/\.json$/, '-hidden-titles.json')
+    File.write(ht_path, JSON.pretty_generate({ 'workbook' => $hidden_title_wb_sha, 'ids' => ht_ids }))
+    warn "wrote #{ht_path} (#{ht_ids.size} element title(s) hidden at put-layout, incl. #{($hidden_title_ns_ids || []).size} namespaced cop(ies))"
+  end
+rescue => e
+  warnings << "hidden-titles sidecar write error (titles stay visible): #{e.message}"
 end
 
 # ---- Intended-scope contract (control-scope.json) ---------------------------

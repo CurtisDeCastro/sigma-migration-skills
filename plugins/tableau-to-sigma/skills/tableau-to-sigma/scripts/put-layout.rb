@@ -129,7 +129,11 @@ end
 # deletes its sidecar when a rebuild hides nothing, so stale ids don't linger.
 ht_paths = Dir.glob(File.join(File.dirname(opts[:layout]), '*-hidden-titles.json')).sort
 if ht_paths.any?
-  hidden_ids = ht_paths.flat_map { |p| JSON.parse(File.read(p)) rescue [] }.uniq
+  hidden_ids = ht_paths.flat_map do |p|
+    body = JSON.parse(File.read(p)) rescue []
+    # v5.1.4 shape {workbook:, ids:} or the legacy bare array
+    body.is_a?(Hash) ? Array(body['ids']) : Array(body)
+  end.uniq
   hid = 0
   spec['pages'].each do |p|
     (p['elements'] || []).each do |el|
