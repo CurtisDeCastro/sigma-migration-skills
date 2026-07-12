@@ -621,10 +621,20 @@ def parse_args(argv=None):
                     help="parse + plan (names, types, column maps) without writing "
                          "anything to Snowflake")
     args = ap.parse_args(argv)
+    # v5.2.1: connection identity falls back to env / ~/.sigma-migration/env
+    # (same pattern as the SIGMA_* creds) — the orchestrator's auto-landing
+    # can't know the operator's Snowflake identity, and a hard argparse error
+    # made auto-land unconditionally dead (review-caught). Explicit flags win.
+    args.account = args.account or env_or_neutral("SNOWFLAKE_ACCOUNT")
+    args.user = args.user or env_or_neutral("SNOWFLAKE_USER")
+    args.key_path = args.key_path or env_or_neutral("SNOWFLAKE_KEY_PATH")
+    args.role = args.role or env_or_neutral("SNOWFLAKE_ROLE")
+    args.warehouse = args.warehouse or env_or_neutral("SNOWFLAKE_WAREHOUSE")
     if not args.dry_run:
         missing = [f"--{k}" for k in ("account", "user") if not getattr(args, k)]
         if missing:
-            ap.error(f"{', '.join(missing)} required (or use --dry-run to plan only)")
+            ap.error(f"{', '.join(missing)} required (flag, env, or ~/.sigma-migration/env "
+                     f"SNOWFLAKE_ACCOUNT/SNOWFLAKE_USER; or use --dry-run to plan only)")
         # Key PREFLIGHT: validate the key loads NOW (seconds), not after the
         # hyper extraction has run for minutes (see load_private_key).
         if args.key_path:

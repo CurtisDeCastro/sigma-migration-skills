@@ -360,11 +360,14 @@ hidden_filters_gate = []
 prior_hf = {}
 if File.exist?(opts[:out])
   begin
-    (JSON.parse(File.read(opts[:out]))['hidden_filters'] || []).each do |hf|
-      next unless %w[translated waived].include?(hf['status'])
-      prior_hf[[hf['tile'], hf['calc_ref']]] = hf
+    parsed = JSON.parse(File.read(opts[:out]))
+    if parsed.is_a?(Hash)
+      (parsed['hidden_filters'] || []).each do |hf|
+        next unless hf.is_a?(Hash) && %w[translated waived].include?(hf['status'])
+        prior_hf[[hf['tile'], hf['calc_ref']]] = hf
+      end
     end
-  rescue JSON::ParserError
+  rescue JSON::ParserError, TypeError
     nil
   end
 end
@@ -394,9 +397,21 @@ if File.exist?(dash_layout_path)
               'status'      => 'unresolved'
             }.compact
             if (prev = prior_hf[[entry['tile'], entry['calc_ref']]])
-              entry['status'] = prev['status']
-              %w[waive_reason translation translated_to note].each { |k| entry[k] = prev[k] if prev[k] }
-              warn "hidden_filters gate: carried '#{prev['status']}' forward for [#{entry['tile']}] #{entry['calc_ref']} (prior plan)"
+              # A resolution only carries when the filter DEFINITION is
+              # unchanged — a waive granted for members ["2025"] must not
+              # bless the same calc_ref now filtering ["2025","2026"] (the
+              # 248→52-row silent wrong-numbers class this gate exists to
+              # block; review-caught).
+              same_def = prev['filter_type'].to_s == entry['filter_type'].to_s &&
+                         Array(prev['members']).map(&:to_s).sort == Array(entry['members']).map(&:to_s).sort
+              if same_def
+                entry['status'] = prev['status']
+                %w[waive_reason translation translated_to note].each { |k| entry[k] = prev[k] if prev[k] }
+                warn "hidden_filters gate: carried '#{prev['status']}' forward for [#{entry['tile']}] #{entry['calc_ref']} (definition unchanged)"
+              else
+                warn "hidden_filters gate: DROPPED prior '#{prev['status']}' for [#{entry['tile']}] #{entry['calc_ref']} — " \
+                     'the filter definition CHANGED (members/type differ); re-review and re-resolve it'
+              end
             end
             hidden_filters_gate << entry
           end

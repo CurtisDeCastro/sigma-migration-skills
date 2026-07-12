@@ -109,12 +109,23 @@ manifest = []
 # ~2min per tile on the round-4 timeline. Every iteration writes its own
 # files and spawns its own child process; the manifest append is mutexed.
 require 'thread'
-# Pre-warm the Tableau token SERIALLY — three threads lazily minting at once
-# is the concurrent-PAT-signin race that produces the transient 401s.
+# Pre-warm the Tableau token SERIALLY and UNCONDITIONALLY — three threads
+# lazily minting at once is the concurrent-PAT-signin race, and an inherited
+# env token can be STALE (review-caught: skipping the refresh when a token
+# was set let all three threads 401 concurrently). A refresh failure is fine
+# when the env token is actually valid — per-tile fetches report their own.
 begin
-  Tableau.refresh_token! if ENV['TABLEAU_AUTH_TOKEN'].to_s.empty?
+  Tableau.refresh_token!
 rescue StandardError
-  nil # per-tile fetches report their own failures
+  nil
+end
+# Slug collisions (punctuation folding + truncation) would make two threads
+# write the SAME png paths concurrently (review-caught) — dedup up front.
+seen_slugs = {}
+tiles.each do |t|
+  s = slugify.call(t['worksheet'])
+  n = (seen_slugs[s] = (seen_slugs[s] || 0) + 1)
+  t['_slug'] = n == 1 ? s : "#{s}-#{n}"
 end
 tile_q = Queue.new
 tiles.each { |t| tile_q << t }
@@ -128,7 +139,7 @@ Array.new([3, tiles.size].min.clamp(1, 3)) do
         break
       end
   ws   = t['worksheet']
-  slug = slugify.call(ws)
+  slug = t['_slug'] || slugify.call(ws)
   tab_png   = File.join(outdir, "#{slug}.tableau.png")
   sigma_png = File.join(outdir, "#{slug}.sigma.png")
   rec = { 'worksheet' => ws, 'element_id' => t['element_id'], 'view_id' => t['view_id'],

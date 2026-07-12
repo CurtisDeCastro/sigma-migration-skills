@@ -627,7 +627,10 @@ def tableau_env
       Tableau.refresh_token! # fresh PAT signin, in-process
     rescue Tableau::Error => te
       attempts += 1
-      if attempts <= 2 && te.message =~ /401|Signin/i
+      # retry only when there is NO hand-minted fallback token — with one
+      # available, fail FAST to it (a permanently-revoked PAT would otherwise
+      # tax every call 9s; review-caught)
+      if attempts <= 2 && te.message =~ /401|Signin/i && ENV['TABLEAU_AUTH_TOKEN'].to_s.empty?
         warn "Tableau signin failed (#{te.message.lines.first.to_s.strip[0, 80]}) — retry #{attempts}/2 in #{3 * attempts}s"
         sleep(3 * attempts)
         retry
@@ -1520,10 +1523,27 @@ if mechanical
       # round-trip on a step that was deterministic. Failure falls through to
       # the original exit-17 instructions; --no-auto-land opts out.
       twbx_payload = File.join(WORK, 'workbook-content.twbx')
+      # Identity PRECONDITION (v5.2.1 review-caught: without it the AUTO-LANDING
+      # banner printed and then always failed — land-extracts.py hard-requires
+      # account+user). Resolvable = env or the neutral cred file carries them;
+      # land-extracts.py itself resolves the same way.
+      sf_env = {}
+      neutral = File.expand_path('~/.sigma-migration/env')
+      if File.exist?(neutral)
+        File.readlines(neutral).each do |l|
+          m = l.match(/\A\s*(?:export\s+)?(SNOWFLAKE_\w+)\s*=\s*(.+?)\s*\z/)
+          sf_env[m[1]] = m[2].gsub(/\A["']|["']\z/, '') if m
+        end
+      end
+      sf_ok = %w[SNOWFLAKE_ACCOUNT SNOWFLAKE_USER].all? { |k| !ENV[k].to_s.empty? || !sf_env[k].to_s.empty? }
       if landing_manifest.nil? && !opts[:no_auto_land] && !opts[:skip_extract_landing] &&
-         File.exist?(twbx_payload) && opts[:conn]
-        prefix = (opts[:name] || File.basename(WORK)).to_s.upcase.gsub(/[^A-Z0-9]+/, '_')
-                                                       .sub(/\A_+|_+\z/, '')[0, 24]
+         File.exist?(twbx_payload) && opts[:conn] && sf_ok
+        # Prefix carries a LUID fragment so two workbooks whose names share the
+        # slug can never clobber each other's landed tables (write_pandas
+        # overwrite=true; review-caught) — and stays stable across re-runs.
+        slug = (opts[:name] || File.basename(WORK)).to_s.upcase.gsub(/[^A-Z0-9]+/, '_')
+                                                    .sub(/\A_+|_+\z/, '')[0, 17]
+        prefix = wb_luid ? "#{slug}_#{wb_luid.to_s.delete('-')[0, 6].upcase}" : slug
         line "embedded-extract sources (#{conn_classes.join(', ')}) — AUTO-LANDING the frozen extract " \
              "(prefix #{prefix}; --no-auto-land to keep the manual gate)"
         _o, lst = run!([*PyResolve.argv, File.join(HERE, 'land-extracts.py'),
@@ -1532,12 +1552,21 @@ if mechanical
                         '--prefix', prefix, '--sigma-connection-id', opts[:conn],
                         '--manifest-out', File.join(WORK, 'landing-manifest.json')],
                        allow_fail: true)
-        if lst.success? && File.exist?(File.join(WORK, 'landing-manifest.json'))
-          landing_manifest = File.join(WORK, 'landing-manifest.json')
-          Offramp.log(WORK, kind: 'auto-land', detail: "landed extract with prefix #{prefix}") if defined?(Offramp)
+        mani_p = File.join(WORK, 'landing-manifest.json')
+        landed = lst.success? && File.exist?(mani_p) ? (JSON.parse(File.read(mani_p)) rescue []) : []
+        if landed.is_a?(Array) && landed.any?
+          landing_manifest = mani_p
+          Offramp.log(WORK, kind: 'auto-land', detail: "landed #{landed.size} table(s), prefix #{prefix}") if defined?(Offramp)
         else
-          line 'WARN: auto-landing failed — falling through to the manual landing gate (exit 17)'
+          # An EMPTY manifest (twbx without .hyper payloads) exits 0 — it must
+          # NOT pass the gate as "landed" (review-caught false pass).
+          File.delete(mani_p) if landed.is_a?(Array) && landed.empty? && File.exist?(mani_p)
+          line 'WARN: auto-landing landed nothing (failure or payload-less .twbx) — manual landing gate (exit 17)'
         end
+      elsif landing_manifest.nil? && !opts[:no_auto_land] && !opts[:skip_extract_landing] &&
+            File.exist?(twbx_payload) && opts[:conn] && !sf_ok
+        line 'NOTE: auto-landing available but SNOWFLAKE_ACCOUNT/SNOWFLAKE_USER are not in env or ' \
+             '~/.sigma-migration/env — add them once to skip this manual gate on future runs.'
       end
       if landing_manifest
         line "embedded-extract sources (#{conn_classes.join(', ')}) — landing manifest found " \
