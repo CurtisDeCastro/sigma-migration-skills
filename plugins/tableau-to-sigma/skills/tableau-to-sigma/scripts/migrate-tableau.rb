@@ -45,7 +45,9 @@ Encoding.default_external = Encoding::UTF_8
 #     --workbook "<name>" | --workbook-id <luid> \
 #     --connection <SIGMA_CONNECTION_ID> --folder <SIGMA_FOLDER_ID> \
 #     [--db CSA --schema TJ] [--specs <path/to/specs.rb>] \
-#     [--name '<prefix for DM/workbook names>'] [--row-scale 1.5] \
+#     [--name '<prefix for DM/workbook names>'] \
+#     [--row-scale F | --page-rows N]  # row-model OVERRIDES: pass only to override —
+#                             # either flag disables the px-derived canvas rows \
 #     [--force]               # proceed past ❌-unhandled gap-scan features
 #     [--reuse-dm [ID]]       # opt IN to DM reuse (default: build new; bare
 #                             # flag = use find-or-pick-dm's recommendation)

@@ -788,6 +788,7 @@ xml.elements.each('//worksheet') do |ws|
   # rooms). A column-instance can carry several <table-calc> children: the one
   # WITHOUT a field= attr is this calc's own addressing (field='[X]' entries
   # belong to nested calc X).
+  quick_calc_pcto = []
   ws.elements.each('.//column-instance') do |ci|
     ci_col = ci.attributes['column'].to_s[/\[([^\]]+)\]/, 1]
     next if ci_col.nil? || ci_col.empty?
@@ -795,6 +796,20 @@ xml.elements.each('//worksheet') do |ws|
     ci.elements.each('table-calc') { |t| tcs << t }
     tc = tcs.find { |t| t.attributes['field'].nil? } || tcs.first
     of = tc && tc.attributes['ordering-field']
+    # v5.1.2: percent-of-total QUICK CALC on the MARKS CARD — the canonical
+    # Tableau crosstab heatmap. The pill never touches rows/cols shelves
+    # (MEASURE_PREFIXES can't see it); it serializes as
+    #   <column-instance column='[seed]' derivation='CountD'
+    #                    name='[pcto:ctd:seed:qk]'>
+    #     <table-calc ordering-field='[..].[summoner_dir]' type='PctTotal'/>
+    # and z['measures'] recorded only the bare CountD — the pivot shipped raw
+    # counts where the source renders percentages (review round). The
+    # PctTotal addressing dim decides the Sigma PercentOfTotal scope.
+    if (qm = ci.attributes['name'].to_s.match(/\A\[pcto:([a-z]+):([^:\]]+)(?::[a-z]+)*\]\z/i))
+      addr = of && of.to_s[/\.\[(?:[a-z]+:)?([^:\]]+)(?::[a-z]+)*\]\z/, 1]
+      quick_calc_pcto << { 'agg' => qm[1].downcase, 'col' => qm[2],
+                           'addressing' => addr, 'token' => ci.attributes['name'].to_s }
+    end
     next unless of
     inner = of.to_s[/\.\[(?:[a-z]+:)?([^:\]]+)(?::[a-z]+)*\]\z/, 1]
     next unless inner
@@ -960,6 +975,7 @@ xml.elements.each('//worksheet') do |ws|
     has_geometry:     has_geometry,
     sort:             sort_info,
     shelf_sorts:      shelf_sorts,
+    quick_calc_pcto:  quick_calc_pcto,
     heat_scheme:      heat_scheme,
     filters:          filters_info,
     hidden_filters:   hidden_filters,
@@ -1489,6 +1505,7 @@ xml.elements.each('//dashboard') do |d|
       # New per-worksheet signal fields (nil for non-chart zones)
       'sort'           => (kind == 'chart' ? ws_meta&.dig(:sort)           : nil),
       'shelf_sorts'    => (kind == 'chart' ? ws_meta&.dig(:shelf_sorts)   : nil),
+      'quick_calc_pcto' => (kind == 'chart' ? ws_meta&.dig(:quick_calc_pcto) : nil),
       'heat_scheme'    => (kind == 'chart' ? ws_meta&.dig(:heat_scheme)   : nil),
       # v5.1: zone show-title='false' = the source HIDES the worksheet title
       # (all 6 Diablo tiles carry it; three rounds leaked "Sheet 9" because
@@ -1621,6 +1638,8 @@ if dashboards.empty? && !worksheets.empty?
         'mark_class'     => ws_meta[:mark_class],
         'geo_role'       => ws_meta[:geo_role],
         'sort'           => ws_meta[:sort],
+        'shelf_sorts'    => ws_meta[:shelf_sorts],
+        'quick_calc_pcto' => ws_meta[:quick_calc_pcto],
         'filters'        => ws_meta[:filters],
         'hidden_filters' => ws_meta[:hidden_filters] || [],
         'aggregations'   => ws_meta[:aggregations],
