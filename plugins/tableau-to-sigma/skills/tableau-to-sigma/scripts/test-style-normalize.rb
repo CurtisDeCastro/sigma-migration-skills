@@ -132,18 +132,20 @@ cols = spec['pages'][0]['elements'][0]['columns']
 col = lambda { |cid| cols.find { |c| c['id'] == cid } }
 check(col.call('p1')['format'] == { 'kind' => 'number', 'formatString' => ',.1%' },
       'PercentOfTotal + NO format → {kind:number, formatString:,.1%}', fails)
-check(col.call('p2')['format']['formatString'] == ',.1%', "',.0%' → ',.1%'", fails)
-check(col.call('p3')['format']['formatString'] == ',.1%', "'.0%' → ',.1%'", fails)
+# v5.3: valid integer-percent formats are SOURCE-faithful and preserved
+# (round-5: forcing ,.1% over a source printing "25%" cost a full waiver)
+check(col.call('p2')['format']['formatString'] == ',.0%', "valid ',.0%' PRESERVED (v5.3)", fails)
+check(col.call('p3')['format']['formatString'] == '.0%', "valid '.0%' PRESERVED (v5.3)", fails)
 check(col.call('p4')['format']['formatString'] == ',.2%',
       "explicit 2-decimal ',.2%' stays (never override a deliberate choice)", fails)
 check(col.call('p5')['format']['formatString'] == ',.1%' &&
       ch.none? { |c| c['field'].include?('[p5]') },
       "already-',.1%' records no change", fails)
 check(!col.call('p6').key?('format'), 'non-PercentOfTotal column gains no format', fails)
-check(col.call('p7')['format']['formatString'] == ',.1%' &&
+check(col.call('p7')['format']['formatString'] == ',.0%' &&
       ch.select { |c| c['field'].include?('[p7]') }.map { |c| c['rule'] } ==
-        [StyleNormalize::RULE_GRAMMAR, StyleNormalize::RULE_PERCENT],
-      "Excel '0%' repairs to ',.0%' (SN-3) then upgrades to ',.1%' (SN-4)", fails)
+        [StyleNormalize::RULE_GRAMMAR],
+      "Excel '0%' repairs to ',.0%' (SN-3) and STAYS integer-percent (v5.3: no SN-4 coercion)", fails)
 check(col.call('p8')['format'] == { 'kind' => 'number', 'formatString' => ',.1%' },
       'format hash without formatString counts as missing → ,.1%', fails)
 

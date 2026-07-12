@@ -37,7 +37,7 @@ def run_case(args, env: {})
 end
 
 # --- pass + vision true → exit 0, stamps ------------------------------------
-out, _err, st, pf = run_case(%w[--verdict pass --agent-vision true --notes ok])
+out, _err, st, pf = run_case(%w[--verdict pass --agent-vision true --notes ok] + ['--checklist', 'element_titles_hidden=pass,palette_match=pass,composition_match=pass,chart_shapes_match=pass,labels_legible=pass,numbers_formatted=pass'])
 check(st.success?, 'pass + --agent-vision true → exit 0', fails)
 check(pf['visual_checked'] == true && pf['visual_verdict'] == 'pass', 'pass stamps visual_checked:true', fails)
 check(pf['agent_vision'] == true, 'pass stamps agent_vision:true', fails)
@@ -59,7 +59,7 @@ check(!st.success? && err.include?('REFUSED'), 'env AGENT_VISION=false + pass �
 check(!pf.key?('agent_vision'), 'env-refused run writes nothing', fails)
 
 # ...and the flag beats the env
-_out, _err, st, pf = run_case(%w[--verdict pass --agent-vision true], env: { 'AGENT_VISION' => 'false' })
+_out, _err, st, pf = run_case((%w[--verdict pass --agent-vision true] + ['--checklist', 'element_titles_hidden=pass,palette_match=pass,composition_match=pass,chart_shapes_match=pass,labels_legible=pass,numbers_formatted=pass']), env: { 'AGENT_VISION' => 'false' })
 check(st.success? && pf['agent_vision'] == true, '--agent-vision flag overrides AGENT_VISION env', fails)
 
 # --- not-executable: notes mandatory, stamps the degradation -----------------
@@ -88,7 +88,7 @@ check(st.success? && pf['visual_checked'] == false && pf['agent_vision'] == fals
       'divergent + vision false → recorded with agent_vision:false (gate 8b blocks)', fails)
 
 # --- back-compat: omitted flag → loud WARN + assume true ----------------------
-_out, err, st, pf = run_case(%w[--verdict pass --notes legacy-caller])
+_out, err, st, pf = run_case(%w[--verdict pass --notes legacy-caller] + ['--checklist', 'element_titles_hidden=pass,palette_match=pass,composition_match=pass,chart_shapes_match=pass,labels_legible=pass,numbers_formatted=pass'])
 check(st.success?, 'omitted --agent-vision → still exit 0 (back-compat)', fails)
 check(pf['agent_vision'] == true && pf['visual_checked'] == true, 'omitted flag assumes agent_vision:true', fails)
 check(err.include?('DEPRECATED') && err.include?('--agent-vision'),
@@ -97,6 +97,28 @@ check(err.include?('DEPRECATED') && err.include?('--agent-vision'),
 # --- bad values rejected -------------------------------------------------------
 _out, _err, st, _pf = run_case(%w[--verdict pass --agent-vision maybe])
 check(!st.success?, '--agent-vision maybe → rejected by the option parser', fails)
+
+
+# --- v5.3 style checklist contract ---------------------------------------------
+CL = 'element_titles_hidden=pass,palette_match=pass,composition_match=pass,' \
+     'chart_shapes_match=pass,labels_legible=pass,numbers_formatted=pass'
+_out, err, st, pf = run_case(%w[--verdict pass --agent-vision true --notes x])
+check(!st.success? && err.include?('--checklist'), 'pass WITHOUT checklist → refused naming --checklist', fails)
+check(!pf.key?('visual_verdict'), 'checklist refusal writes nothing', fails)
+_out, err, st, pf = run_case(['--verdict', 'pass', '--agent-vision', 'true',
+                              '--checklist', CL.sub('palette_match=pass', 'palette_match=fail')])
+check(!st.success? && err.include?('palette_match'), 'checklist fail dimension → pass refused, names it', fails)
+_out, _err, st, pf = run_case(['--verdict', 'pass', '--agent-vision', 'true', '--checklist',
+                               CL.sub('numbers_formatted=pass', 'numbers_formatted=na')])
+check(st.success? && pf['style_checklist']['numbers_formatted'] == 'na',
+      'na dimension accepted + checklist stamped', fails)
+_out, err, st, _pf = run_case(['--verdict', 'pass', '--agent-vision', 'true',
+                               '--checklist', 'palette_match=pass'])
+check(!st.success? && err.include?('missing key'), 'incomplete checklist → fatal naming missing keys', fails)
+_out, _err, st, pf = run_case(['--verdict', 'divergent', '--agent-vision', 'true', '--notes', 'gaps',
+                               '--checklist', CL.sub('palette_match=pass', 'palette_match=fail')])
+check(st.success? && pf['style_checklist']['palette_match'] == 'fail',
+      'divergent records a failing checklist for the fix loop', fails)
 
 puts
 if fails.empty?

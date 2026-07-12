@@ -88,6 +88,13 @@ end
 all_known_prefixes = (all_element_names + external_names).to_set rescue (all_element_names + external_names)
 require 'set' rescue nil
 all_known_set = all_known_prefixes.is_a?(Set) ? all_known_prefixes : Set.new(all_known_prefixes)
+# workbook element name → id, for the cross-source ref guard below
+wb_el_id_by_name = {}
+spec.fetch('pages', []).each do |page|
+  page.fetch('elements', []).each do |el|
+    wb_el_id_by_name[el['name']] ||= el['id'] if el['name'].is_a?(String) && el['id']
+  end
+end
 
 errors << 'spec contains rgb(...) color strings (Cloudflare WAF blocks)' if JSON.generate(spec).include?('rgb(')
 
@@ -183,6 +190,18 @@ spec.fetch('pages', []).each do |page|
           unless own_prefixes.include?(prefix) || all_known_set.include?(prefix)
             errors << "#{name}.#{col['name']}: ref [#{ref}] — prefix \"#{prefix}\" unknown " \
                       "(known: #{(own_prefixes + all_known_set).to_a.sort.join(', ')})"
+          end
+          # v5.3 RENDER-500 guard: a formula referencing a workbook element
+          # that is NOT this element's source opaquely 500s EVERY png
+          # render/export in the whole workbook (round-5 field-caught,
+          # canary-bisect-proven). DM-internal prefixes aren't workbook
+          # element names and pass through untouched.
+          src_eid = (el['source'] || {})['elementId']
+          if wb_el_id_by_name.key?(prefix) && wb_el_id_by_name[prefix] != src_eid &&
+             prefix != el['name']
+            errors << "#{name}.#{col['name']}: ref [#{ref}] targets workbook element \"#{prefix}\" which is " \
+                      'NOT this element\'s source — cross-element refs break EVERY render/export in the ' \
+                      "workbook (opaque 500s); source this element from \"#{prefix}\" or re-derive the column locally"
           end
         else
           is_control = control_ids.include?(ref) || ref.start_with?('ctl-')

@@ -128,14 +128,36 @@ module Tableau
 
   # ---- workbooks -----------------------------------------------------------
 
-  # Returns the first workbook matching name, or nil. Use search_workbooks for full list.
-  def find_workbook_by_name(name)
-    encoded = CGI.escape("name:eq:#{name}")
-    j = request(:get, "#{base_path}/workbooks?filter=#{encoded}")
-    list = j.dig('workbooks', 'workbook') || []
+# Returns the first workbook matching name, or nil. Use search_workbooks for full list.
+def find_workbook_by_name(name)
+  # A comma is the REST filter predicate DELIMITER - a name containing one
+  # ("Four paths, One choice.") breaks `name:eq:` unrecoverably (round-5
+  # field-caught: 2 lost orchestrator invocations). Fall back to a paged
+  # client-side scan for such names.
+  return scan_workbooks_for_name(name) if name.to_s.include?(",")
+  encoded = CGI.escape("name:eq:#{name}")
+  j = request(:get, "#{base_path}/workbooks?filter=#{encoded}")
+  list = j.dig("workbooks", "workbook") || []
+  list = [list] unless list.is_a?(Array)
+  list.first || scan_workbooks_for_name(name)
+end
+
+# Paged client-side name match (exact, then case-insensitive) - the fallback
+# for names the server-side filter grammar cannot express.
+def scan_workbooks_for_name(name)
+  page = 1
+  loop do
+    j = request(:get, "#{base_path}/workbooks?pageSize=100&pageNumber=#{page}")
+    list = j.dig("workbooks", "workbook") || []
     list = [list] unless list.is_a?(Array)
-    list.first
+    hit = list.find { |w| w["name"] == name } ||
+          list.find { |w| w["name"].to_s.strip.casecmp?(name.to_s.strip) }
+    return hit if hit
+    total = j.dig("pagination", "totalAvailable").to_i
+    return nil if list.empty? || page * 100 >= total
+    page += 1
   end
+end
 
   def get_workbook(workbook_id)
     request(:get, "#{base_path}/workbooks/#{workbook_id}")['workbook']

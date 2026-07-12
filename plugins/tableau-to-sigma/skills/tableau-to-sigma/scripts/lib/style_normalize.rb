@@ -219,12 +219,16 @@ module StyleNormalize
     return unless fmt.is_a?(Hash)
     return if fmt['kind'] && fmt['kind'] != 'number' # datetime etc. — not ours
     fs = fmt['formatString']
-    missing = fs.to_s.empty?
-    return unless missing || INTEGER_PERCENT_STRINGS.include?(fs)
+    # v5.3: only FILL a missing format — never coerce a VALID integer-percent
+    # one. Sources legitimately print integer percents ("25%"); forcing ,.1%
+    # made a round-5 run waive the whole normalizer to keep source fidelity.
+    # (The builder derives precision from the source pill's own text-format,
+    # so a set value is trusted.)
+    return unless fs.to_s.empty?
     fmt['kind'] ||= 'number'
     fmt['formatString'] = ',.1%'
     record(changes, el, "#{column_label(col, idx)}.format.formatString",
-           missing ? nil : fs, ',.1%', RULE_PERCENT)
+           nil, ',.1%', RULE_PERCENT)
   end
 
   # -- SN-5 ------------------------------------------------------------------

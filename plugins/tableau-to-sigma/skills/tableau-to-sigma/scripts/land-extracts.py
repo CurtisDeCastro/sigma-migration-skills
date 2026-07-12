@@ -625,6 +625,11 @@ def parse_args(argv=None):
     # (same pattern as the SIGMA_* creds) — the orchestrator's auto-landing
     # can't know the operator's Snowflake identity, and a hard argparse error
     # made auto-land unconditionally dead (review-caught). Explicit flags win.
+    # v5.3: the prefix is spliced into an UNQUOTED table FQN — sanitize to
+    # UPPER_SNAKE here so a raw caption with spaces can't break the COUNT(*)
+    # (round-5 field-caught on a manual invocation).
+    if args.prefix:
+        args.prefix = re.sub(r"[^A-Za-z0-9]+", "_", args.prefix).strip("_").upper()
     args.account = args.account or env_or_neutral("SNOWFLAKE_ACCOUNT")
     args.user = args.user or env_or_neutral("SNOWFLAKE_USER")
     args.key_path = args.key_path or env_or_neutral("SNOWFLAKE_KEY_PATH")

@@ -1549,6 +1549,18 @@ if mechanical
         end
       end
       sf_ok = %w[SNOWFLAKE_ACCOUNT SNOWFLAKE_USER].all? { |k| !ENV[k].to_s.empty? || !sf_env[k].to_s.empty? }
+      # v5.3: the extract re-download lane can still be REPLACING the .twbx
+      # when this gate runs (round 5: auto-land saw the thin pre-refetch file,
+      # found "no .hyper payloads", and fell to exit 17 while the payload
+      # arrived seconds later). A .twbx is a ZIP — the .hyper member names are
+      # visible as plain bytes; wait briefly for them before invoking.
+      if landing_manifest.nil? && !opts[:no_auto_land] && File.exist?(twbx_payload)
+        6.times do
+          break if (File.binread(twbx_payload).include?('.hyper') rescue false)
+          line 'auto-land: .twbx has no .hyper payload yet — waiting 5s for the extract re-download lane'
+          sleep 5
+        end
+      end
       if landing_manifest.nil? && !opts[:no_auto_land] && !opts[:skip_extract_landing] &&
          File.exist?(twbx_payload) && opts[:conn] && sf_ok
         # Prefix carries a LUID fragment so two workbooks whose names share the
@@ -1623,6 +1635,41 @@ if mechanical
   end
 
   conv_twb = twb
+  # v5.3: UNION-OF-ONE collapse. Tableau serializes a single-table datasource
+  # that was once a wildcard union as <relation type='union' all='true'> with
+  # ONE inner table relation — the converter models unions as unsupported and
+  # emits an EMPTY data model (round-5 root cause: Udemy #VOTD forced all
+  # three models onto the manual path). A union of one is semantically its
+  # inner table; collapse it on a COPY (inner relation inherits the union's
+  # name so downstream column refs keep resolving).
+  if have_twb
+    begin
+      require 'rexml/document'
+      raw = File.read(conv_twb, encoding: 'UTF-8')
+      if raw.include?("type='union'") || raw.include?('type="union"')
+        doc = REXML::Document.new(raw)
+        collapsed = 0
+        REXML::XPath.each(doc, "//relation[@type='union']").to_a.each do |u|
+          rels = u.get_elements('relation')
+          next unless rels.size == 1 && rels.first.attributes['type'] == 'table'
+          inner = rels.first
+          inner.remove
+          inner.attributes['name'] = u.attributes['name'] if u.attributes['name']
+          u.parent.replace_child(u, inner)
+          collapsed += 1
+        end
+        if collapsed.positive?
+          uc_twb = File.join(WORK, 'workbook-unioncollapsed.twb')
+          File.open(uc_twb, 'w:UTF-8') { |f| doc.write(f) }
+          conv_twb = uc_twb
+          line "union-of-one collapse: #{collapsed} single-table union relation(s) collapsed to their " \
+               'inner table (converter models unions as unsupported → empty DM; round-5 fix)'
+        end
+      end
+    rescue StandardError => e
+      line "WARN: union-of-one collapse skipped (#{e.class}: #{e.message.to_s[0, 80]}) — converter sees the raw twb"
+    end
+  end
   if have_twb && HydrateCustomSql.twb_has_sqlproxy?(twb)
     line 'published-datasource (sqlproxy) connection detected — chasing the published DS to hydrate before conversion'
     pds_json = File.join(WORK, 'pds.json')
@@ -1638,7 +1685,8 @@ if mechanical
       end
     end
     hyd_twb = File.join(WORK, 'workbook-hydrated.twb')
-    hyd_args = ['ruby', File.join(HERE, 'hydrate-custom-sql.rb'), '--twb', twb,
+    # hydrate from conv_twb (not twb) so a union-of-one collapse survives hydration
+    hyd_args = ['ruby', File.join(HERE, 'hydrate-custom-sql.rb'), '--twb', conv_twb,
                 '--db', (opts[:db] || 'CSA'), '--schema', (opts[:schema] || 'TJ'), '--out', hyd_twb]
     hyd_args += ['--pds', pds_json] if File.exist?(pds_json)
     hyd_args += ['--custom-sql', hcsql] if File.exist?(hcsql)
@@ -1694,6 +1742,14 @@ if mechanical
     (conv['warnings'] || []).first(8).each { |w| puts "  - #{w.to_s[0, 160]}" }
     puts ''
     puts 'No Sigma objects were created. Capture the .twb datasource shape for the converter repo.'
+    puts 'The MANUAL-SPEC route is authorized: author dm-spec.json/wb-spec.json against the landed'
+    puts 'tables (see the sigma-workbooks skill) and re-enter with --reuse-dm/--dm-spec/--wb-spec.'
+    # v5.3: stamp the manual-path token (the exit-1 no-backend stop already
+    # does) — round 5 proved the printed route was unreachable without a
+    # waiver flag, costing every empty-DM run an extra round-trip.
+    authorize_manual_path!(via: 'converter-empty-model',
+                           reason: "converter produced 0 elements/columns (unsupported datasource shape)",
+                           exit_code: 15)
     mark('phase1-join')
     phase_summary
     exit 15
@@ -2762,6 +2818,37 @@ if mechanical
     if real != want && de['columns'].is_a?(Array)
       de['columns'].each do |c|
         c['formula'] = c['formula'].gsub("[#{want}/", "[#{real}/") if c['formula'].is_a?(String)
+      end
+    end
+    # v5.3: repair COLUMN names against the DM element's live columnLabels.
+    # The builder authors refs from RAW Tableau field names ('summoner_dir');
+    # the DM labels them cased ('Summoner Dir') — round 5 proved this pushed
+    # all three Diablo runs off the mechanical path into exit-4 hand-patching.
+    # Normalized (case/punct-insensitive) match, exact rewrite, loud misses.
+    labels = Array(hit['columnLabels']).map(&:to_s)
+    if labels.any? && de['columns'].is_a?(Array)
+      nrmc = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]/, '') }
+      by_norm = labels.each_with_object({}) { |l, h| h[nrmc.call(l)] ||= l }
+      fixed = 0
+      missed = []
+      de['columns'].each do |c|
+        next unless c['formula'].is_a?(String)
+        c['formula'] = c['formula'].gsub(/\[#{Regexp.escape(real)}\/([^\]]+)\]/) do
+          col = Regexp.last_match(1)
+          exact = labels.include?(col) ? col : by_norm[nrmc.call(col)]
+          if exact
+            fixed += 1 if exact != col
+            "[#{real}/#{exact}]"
+          else
+            missed << col
+            "[#{real}/#{col}]"
+          end
+        end
+      end
+      line "  column-label repair: #{fixed} ref(s) re-cased to live DM labels" if fixed.positive?
+      missed.uniq.each do |col|
+        line "  WARN: '#{de['name']}' references [#{real}/#{col}] — no matching DM column label " \
+             "(have: #{labels.join(', ')[0, 120]}); the pre-POST ref gate will name it if plotted"
       end
     end
     line "grain helper '#{de['name']}' → DM element '#{real}' (#{hit['id']})#{real == want ? '' : " [name-normalized from '#{want}']"}"

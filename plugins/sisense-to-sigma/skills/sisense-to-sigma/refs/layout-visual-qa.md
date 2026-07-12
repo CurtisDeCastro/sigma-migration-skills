@@ -61,6 +61,31 @@ chrome (theme toggles, native nav) has no spec equivalent. When the user scopes 
 ("layout + metrics, skip branding"), record exactly what was descoped in the final summary — never
 drop it silently.
 
+
+### 1b. STYLE CHECKLIST — required to record a visual PASS (v5.3, gate 8b)
+
+`record-visual-check.rb --verdict pass` now REQUIRES `--checklist` covering six dimensions, each
+judged against the SOURCE image (not your intent, not your memory of the fix). Round 5 proved
+gestalt self-passes ship renders an exacting owner rejects — attest each dimension separately,
+and be harsh: a "mostly" is a `fail`.
+
+- `element_titles_hidden` — no element-title chrome the source hides ("Area Ch…", "Student Bar
+  Chart"); no truncated titles anywhere.
+- `palette_match` — pick 3-5 swatches off the source (series fill, background, accent) and eyeball
+  them against the render; a teal source with navy/lavender output is a `fail`, as is a
+  categorical palette leaking onto a monochrome chart.
+- `composition_match` — same canvas grid and proportions (a wide 2-panel source must not become a
+  portrait stack); section headers sit ADJACENT to their charts; no dead zones or overflow bands.
+- `chart_shapes_match` — every tile keeps its chart family AND encoding (dot strips stay dot
+  strips, pill bars stay pill bars); verified per tile, not per page.
+- `labels_legible` — no truncated/clipped labels, values, or rows/columns; no leaked control stubs
+  or raw data-prep tables on the canvas.
+- `numbers_formatted` — percent decimals, currency, and delta chips print as the source prints
+  them.
+
+Any `fail` ⇒ the verdict is `divergent` (the recorder refuses a pass; the gate re-checks stale or
+hand-edited verdicts). `na` is only for dimensions the page genuinely lacks (e.g. no numbers).
+
 ## 2. Structural rubric (read the PNG against every item)
 
 - [ ] **No overlaps / no stacking.** No two elements occupy the same cell; no filter, legend, or

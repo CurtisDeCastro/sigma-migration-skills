@@ -230,10 +230,31 @@ def _as_list(v):
 # ---- workbooks ------------------------------------------------------------
 
 def find_workbook_by_name(name):
+    # A comma is the REST filter predicate DELIMITER - a name containing one
+    # breaks `name:eq:` unrecoverably (round-5 field-caught). Fall back to a
+    # paged client-side scan for such names.
+    if "," in str(name):
+        return scan_workbooks_for_name(name)
     encoded = urllib.parse.quote_plus(f"name:eq:{name}")
     j = request("get", f"{base_path()}/workbooks?filter={encoded}")
     lst = _as_list(_dig(j, "workbooks", "workbook"))
-    return lst[0] if lst else None
+    return lst[0] if lst else scan_workbooks_for_name(name)
+
+
+def scan_workbooks_for_name(name):
+    """Paged client-side name match (exact, then case-insensitive) - the
+    fallback for names the server-side filter grammar cannot express."""
+    page = 1
+    while True:
+        j = request("get", f"{base_path()}/workbooks?pageSize=100&pageNumber={page}")
+        lst = _as_list(_dig(j, "workbooks", "workbook"))
+        hit = next((w for w in lst if w.get("name") == name), None) or             next((w for w in lst if str(w.get("name", "")).strip().lower() == str(name).strip().lower()), None)
+        if hit:
+            return hit
+        total = int((_dig(j, "pagination", "totalAvailable") or 0))
+        if not lst or page * 100 >= total:
+            return None
+        page += 1
 
 
 def get_workbook(workbook_id):

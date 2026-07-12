@@ -128,12 +128,40 @@ end
 # than one build wrote here — review-caught); ids are unioned. The builder
 # deletes its sidecar when a rebuild hides nothing, so stale ids don't linger.
 ht_paths = Dir.glob(File.join(File.dirname(opts[:layout]), '*-hidden-titles.json')).sort
-if ht_paths.any?
-  hidden_ids = ht_paths.flat_map do |p|
-    body = JSON.parse(File.read(p)) rescue []
-    # v5.1.4 shape {workbook:, ids:} or the legacy bare array
-    body.is_a?(Hash) ? Array(body['ids']) : Array(body)
-  end.uniq
+hidden_ids = ht_paths.flat_map do |p|
+  body = JSON.parse(File.read(p)) rescue []
+  # v5.1.4 shape {workbook:, ids:} or the legacy bare array
+  body.is_a?(Hash) ? Array(body['ids']) : Array(body)
+end.uniq
+# v5.3 PATH-INDEPENDENT fallback: the sidecar is written by the MECHANICAL
+# builder, so hand-authored specs (manual path, exit-4/15 recoveries) shipped
+# every source-hidden worksheet title as visible chrome (round-5 owner-eye
+# consensus defect on all six runs). Derive the hide-set directly from
+# dashboard-layout.json (parse always runs): any element whose NAME equals a
+# worksheet caption with show-title=false gets hidden too. kpi-chart excluded
+# (its name IS the rendered KPI label).
+begin
+  dl_path = File.join(File.dirname(opts[:layout]), 'dashboard-layout.json')
+  if File.exist?(dl_path)
+    dl = JSON.parse(File.read(dl_path))
+    dl = [dl] unless dl.is_a?(Array)
+    hide_caps = dl.flat_map { |d| d['zones'] || [] }
+                  .select { |z| z['kind'] == 'chart' && z['show_title'] == false && !z['caption'].to_s.empty? }
+                  .map { |z| z['caption'].to_s.strip.downcase }.uniq
+    if hide_caps.any?
+      spec['pages'].each do |p|
+        (p['elements'] || []).each do |el|
+          next unless el['name'].is_a?(String) && el['kind'].to_s != 'kpi-chart'
+          next unless hide_caps.include?(el['name'].strip.downcase)
+          hidden_ids << el['id'] unless hidden_ids.include?(el['id'])
+        end
+      end
+    end
+  end
+rescue StandardError => e
+  warn "WARN: hidden-title caption fallback skipped (#{e.class}: #{e.message.to_s[0, 80]})"
+end
+if hidden_ids.any?
   hid = 0
   spec['pages'].each do |p|
     (p['elements'] || []).each do |el|
@@ -142,7 +170,8 @@ if ht_paths.any?
       hid += 1
     end
   end
-  puts "hidden titles: #{hid}/#{hidden_ids.size} element title(s) hidden (source show-title=false; #{ht_paths.map { |p| File.basename(p) }.join(', ')})"
+  puts "hidden titles: #{hid}/#{hidden_ids.size} element title(s) hidden (source show-title=false; " \
+       "#{ht_paths.any? ? ht_paths.map { |p| File.basename(p) }.join(', ') : 'caption fallback'})"
 end
 
 %w[workbookId url ownerId createdBy updatedBy createdAt updatedAt latestDocumentVersion].each { |k| spec.delete(k) }
