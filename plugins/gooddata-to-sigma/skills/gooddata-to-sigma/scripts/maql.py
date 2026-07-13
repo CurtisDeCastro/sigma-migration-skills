@@ -9,12 +9,22 @@ flagged here, to be measured by gap-scout, not silently mis-translated.
 translate(maql, syms) -> {"ok": bool, "formula": str|None, "reason": str|None}
   syms = {"fact": {id: "Display Name"}, "attribute": {id:.}, "metric": {id:.}}
 """
-import re
+import re, os, sys
 
-AGG = {"SUM": "Sum", "AVG": "Avg", "MIN": "Min", "MAX": "Max", "MEDIAN": "Median"}
+# ── documentation-grounded aggregation catalog (SINGLE SOURCE OF TRUTH) ──────
+# The MAQL scalar aggregate map is loaded from refs/catalogs/aggregation.json — the
+# SAME catalog build_workbook.py loads, so the two copies of this map can never drift
+# (beads-sigma-kvza). Keys upper-cased to match the (SUM|AVG|MIN|MAX|MEDIAN) regex;
+# COUNT is carried for coverage but resolved compositionally in count_attr (COUNT of
+# an attribute -> CountDistinct). Loader: shared/lib/coverage_catalog.py.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
+import coverage_catalog as _cc  # noqa: E402
+_AGG_CAT = _cc.load(_cc.default_catalog_dir(__file__), "aggregation")
+AGG = {r["source"].upper(): r["sigma"] for r in _AGG_CAT.rows if r.get("sigma")}
 # Hard MAQL surface, categorized so flags are actionable (not just "unsupported").
 # These are workbook-level constructs, NOT data-model metrics — they route to the
 # workbook builder, not the DM. category drives gap-scout / assessment reporting.
+# Cited: refs/maql-mapping.md + GoodData MAQL docs (context keywords + FOR time).
 TIME_KW = ["FOR PREVIOUS", "FOR NEXT", "FOR "]      # -> Sigma DateLookback in a date-grouped element
 CONTEXT_KW = ["BY ALL", "WITHIN", " BY "]            # -> Sigma grouping / Level-scoped aggregate
 
