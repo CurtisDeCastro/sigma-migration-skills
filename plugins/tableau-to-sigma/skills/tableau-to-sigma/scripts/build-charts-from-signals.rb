@@ -451,6 +451,18 @@ def translate_row_level_calc(formula, mmap, columns_by_guid = {})
   s = s.gsub(/\bYEAR\s*\(/i, 'Year(').gsub(/\bMONTH\s*\(/i, 'Month(').gsub(/\bDAY\s*\(/i, 'Day(')
   s = s.gsub(/\bQUARTER\s*\(/i, 'Quarter(').gsub(/\bHOUR\s*\(/i, 'Hour(')
   s = s.gsub(/\bMINUTE\s*\(/i, 'Minute(').gsub(/\bSECOND\s*\(/i, 'Second(')
+  # 1:1 STRING functions (identical name modulo case + identical signature in
+  # both formula languages; every target spelling is in the canonical
+  # sigma_functions.rb registry). v5.4: row-level string chains
+  # (REPLACE(REPLACE([col], "a", ""), "b", "") derived dims) failed the
+  # residue check and dropped to a manual warning without these.
+  s = s.gsub(/\bREPLACE\s*\(/i, 'Replace(').gsub(/\bUPPER\s*\(/i, 'Upper(')
+       .gsub(/\bLOWER\s*\(/i, 'Lower(').gsub(/\bLTRIM\s*\(/i, 'Ltrim(')
+       .gsub(/\bRTRIM\s*\(/i, 'Rtrim(').gsub(/\bTRIM\s*\(/i, 'Trim(')
+       .gsub(/\bLEFT\s*\(/i, 'Left(').gsub(/\bRIGHT\s*\(/i, 'Right(')
+       .gsub(/\bLEN\s*\(/i, 'Len(').gsub(/\bCONTAINS\s*\(/i, 'Contains(')
+       .gsub(/\bSTARTSWITH\s*\(/i, 'StartsWith(').gsub(/\bENDSWITH\s*\(/i, 'EndsWith(')
+       .gsub(/\bMID\s*\(/i, 'Mid(')
   s = s.gsub(/'([^']*)'/) { %("#{Regexp.last_match(1)}") } # remaining single-quoted strings
   out = s.gsub(/\[([^\/\]]+)\]/) do
     cap = Regexp.last_match(1).strip
@@ -460,7 +472,7 @@ def translate_row_level_calc(formula, mmap, columns_by_guid = {})
   residue = out.dup
   residue.gsub!(/"(?:\\.|[^"\\])*"/, '1')
   residue.gsub!(/\[Master\/[^\]]+\]/, '1')
-  residue.gsub!(/\b(DateDiff|DateAdd|DateTrunc|DatePart|Today|Now|If|Coalesce|Abs|Year|Month|Day|Quarter|Hour|Minute|Second)\b/, '')
+  residue.gsub!(/\b(DateDiff|DateAdd|DateTrunc|DatePart|Today|Now|If|Coalesce|Abs|Year|Month|Day|Quarter|Hour|Minute|Second|Replace|Upper|Lower|Ltrim|Rtrim|Trim|Left|Right|Len|Contains|StartsWith|EndsWith|Mid)\b/, '')
   return nil unless residue =~ %r{\A[\s()+\-*/.,\d!=<>]*\z}
   out
 end
@@ -6575,7 +6587,7 @@ def deep_gsub!(node, from, to)
   node
 end
 
-def route_multi_ds!(elements, data_elements, plan, master_id, warnings, controls: [], id2name: {})
+def route_multi_ds!(elements, data_elements, plan, master_id, warnings, controls: [], id2name: {}, cbg: {}, mmap: {})
   routed = {}
   return routed unless plan && plan['datasources'].is_a?(Array) && plan['datasources'].size > 1
   norm = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]/, '') }
@@ -6620,6 +6632,88 @@ def route_multi_ds!(elements, data_elements, plan, master_id, warnings, controls
         'columns' => []
       }
     end
+    # v5.4 DERIVED CALCS on the sub-master: a routed chart's [Master/<name>]
+    # ref can name a Tableau CALC (not a physical column of the outlier
+    # datasource) — the old blind passthrough emitted [<caption>/<calc name>],
+    # a ref to a DM column that does not exist, and the POST hard-failed.
+    # Resolve each ref against the workbook calc registry (columns_by_guid —
+    # an entry with a formula IS a calc). Row-level/dim calcs become derived
+    # COLUMNS on the sub-master (translated, source-relative refs); aggregated
+    # calcs (ratio-of-sums) cannot live at row grain — their decomposition is
+    # spliced into the CHART formulas at viz level and the base aggregates'
+    # refs fall through to passthroughs. Untranslatable calcs get NO column
+    # and a loud STAYS-MANUAL (the pre-POST ref gate names the broken ref) —
+    # never a silently broken passthrough.
+    nrmv = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]/, '') }
+    calc_of = lambda do |cn|
+      k = nrmv.call(cn)
+      next nil if k.empty?
+      hits = cbg.values.select do |v|
+        v.is_a?(Hash) && !v['formula'].to_s.strip.empty? && nrmv.call(v['caption']) == k
+      end
+      hits.map { |v| v['formula'] }.uniq.size == 1 ? hits.first : nil
+    end
+    manual_calcs = []
+    splice_strings = lambda do |node, wrap_re, bare, repl|
+      case node
+      when Hash   then node.each { |k, v| node[k] = splice_strings.call(v, wrap_re, bare, repl) }
+      when Array  then node.map! { |v| splice_strings.call(v, wrap_re, bare, repl) }
+      when String then node.gsub(wrap_re, repl).gsub(bare, repl)
+      else node
+      end
+    end
+    JSON.generate(el).scan(%r{\[Master/([^\]/]+)\]}).flatten.uniq.each do |cn|
+      calc = calc_of.call(cn)
+      next unless calc
+      next if sm['columns'].any? { |c| c['name'] == cn }
+      f = calc['formula']
+      agg_t = translate_user_agg_formula(f, mmap, cbg)
+      row_t = agg_t ? nil : (translate_row_level_calc(f, mmap, cbg) || translate_dim_calc(f, mmap, cbg))
+      if agg_t
+        agg_wrap = /(?:Sum|Avg|Min|Max|Median|CountDistinct|Count)\(\[Master\/#{Regexp.escape(cn)}\]\)/
+        if data_elements.include?(el)
+          # el is a row-grain HELPER (top-N prefilter source etc.) — an
+          # aggregate cannot live as one of its base-grain columns. Drop the
+          # calc's passthrough column, expose the decomposition's BASE columns
+          # instead, and splice the aggregate into every CONSUMER formula that
+          # wraps or references the dropped column (consumers reference the
+          # helper by NAME, evaluated per viz cell — the correct grain).
+          el['columns'] = (el['columns'] || []).reject do |c|
+            c['name'] == cn && c['formula'].to_s.include?("[Master/#{cn}]")
+          end
+          agg_t.scan(%r{\[Master/([^\]/]+)\]}).flatten.uniq.each do |b|
+            next if (el['columns'] || []).any? { |c| c['name'] == b }
+            el['columns'] << { 'id' => "#{el['id']}-agg#{el['columns'].size}", 'name' => b,
+                               'formula' => "[Master/#{b}]" }
+          end
+          agg_c = agg_t.gsub('[Master/', "[#{el['name']}/")
+          wrap_c = /(?:Sum|Avg|Min|Max|Median|CountDistinct|Count)\(\[#{Regexp.escape(el['name'])}\/#{Regexp.escape(cn)}\]\)/
+          elements.each do |cons|
+            next unless cons.dig('source', 'elementId') == el['id']
+            splice_strings.call(cons, wrap_c, "[#{el['name']}/#{cn}]", agg_c)
+          end
+          warnings << "NOTE multi-DS: '#{el['_worksheet']}' calc '#{cn}' is an aggregated calc — decomposed " \
+                      "into its consumer chart formulas as #{agg_c[0, 110]} (helper exposes the base columns)"
+        else
+          # el is a CHART: splice the decomposition at viz level; its
+          # [Master/…] base refs are prefix-rewritten with everything below.
+          splice_strings.call(el, agg_wrap, "[Master/#{cn}]", agg_t)
+          warnings << "NOTE multi-DS: '#{el['_worksheet']}' calc '#{cn}' is an aggregated calc — decomposed at " \
+                      "viz level over sub-master columns: #{agg_t.gsub('[Master/', "[#{safe_cap}/")[0, 110]}"
+        end
+      elsif row_t
+        sm['columns'] << { 'id' => "#{sm['id']}-c#{sm['columns'].size}", 'name' => cn,
+                           'formula' => row_t.gsub('[Master/', "[#{safe_cap}/") }
+        warnings << "NOTE multi-DS: '#{el['_worksheet']}' calc '#{cn}' emitted as a DERIVED column on " \
+                    "sub-master '#{sm['name']}': #{sm['columns'].last['formula'][0, 110]}"
+      else
+        manual_calcs << cn
+        warnings << "multi-DS STAYS-MANUAL: '#{el['_worksheet']}' references calc '#{cn}' on datasource " \
+                    "'#{caption}' whose formula could not be auto-translated " \
+                    "(#{f.to_s.gsub(/\s+/, ' ')[0, 90]}) — no sub-master column emitted; the pre-POST ref " \
+                    'gate will name the broken ref; author it on the sub-master by hand (--master-col)'
+      end
+    end
     # Repoint + rewrite formulas in lock-step (structural, in place); collect
     # the referenced column names so the sub-master exposes exactly what its
     # charts consume (formulas [<caption>/<col>] — the orchestrator's
@@ -6627,6 +6721,7 @@ def route_multi_ds!(elements, data_elements, plan, master_id, warnings, controls
     cols = JSON.generate(el).scan(%r{\[Master/([^\]/]+)\]}).flatten.uniq
     cols.each do |cn|
       next if sm['columns'].any? { |c| c['name'] == cn }
+      next if manual_calcs.include?(cn) # loud above — never a broken passthrough
       sm['columns'] << { 'id' => "#{sm['id']}-c#{sm['columns'].size}", 'name' => cn,
                          'formula' => "[#{safe_cap}/#{cn}]" }
     end
@@ -6673,7 +6768,8 @@ begin
   elsif plan
     id2name = mmap.values.each_with_object({}) { |v, h| h[v['id']] = v['name'] if v['id'] && v['name'] }
     $ds_routed = route_multi_ds!(elements, data_elements, plan, opts[:master_id], warnings,
-                                 controls: param_controls + auto_controls + extras, id2name: id2name)
+                                 controls: param_controls + auto_controls + extras, id2name: id2name,
+                                 cbg: meta['columns_by_guid'] || {}, mmap: mmap)
   end
 rescue => e
   warnings << "multi-DS routing error (charts left on the master + WARN wall): #{e.message}"

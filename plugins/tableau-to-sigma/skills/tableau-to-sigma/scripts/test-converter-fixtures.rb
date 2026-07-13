@@ -175,15 +175,19 @@ RUBY_FIXTURES = [
   # already handled on the agg path (R-X2) — port to the row path; until then
   # fail-closed nil is the contract.
   { id: 'R-F3',  entry: :row, input: 'ZN([Profit])', expect: nil },
-  # Text functions reach Sigma via the node converter (DM calc columns), not
-  # the worksheet-calc path — fail-closed nil IS the locked contract for the
-  # seven rows below (translation coverage lives in Part A: N-F6..N-F20).
-  { id: 'R-F6',  entry: :row, input: 'LEN([Customer Name])', expect: nil },
-  { id: 'R-F7',  entry: :row, input: 'RIGHT([Order ID], 4)', expect: nil },
-  { id: 'R-F8',  entry: :row, input: 'CONTAINS([Segment], "Corp")', expect: nil },
-  { id: 'R-F9',  entry: :row, input: 'TRIM([City])', expect: nil },
+  # v5.4: 1:1 STRING functions now translate on the row path too (identical
+  # name modulo case + identical signature; every spelling is in the
+  # canonical sigma_functions.rb registry) — REPLACE-chain derived dims on
+  # sub-masters needed them. Unmapped refs keep the raw name (repaired
+  # downstream by the global ref-label repair).
+  { id: 'R-F6',  entry: :row, input: 'LEN([Customer Name])', expect: 'Len([Master/Customer Name])' },
+  { id: 'R-F7',  entry: :row, input: 'RIGHT([Order ID], 4)', expect: 'Right([Master/Order ID], 4)' },
+  { id: 'R-F8',  entry: :row, input: 'CONTAINS([Segment], "Corp")', expect: 'Contains([Master/Segment], "Corp")' },
+  { id: 'R-F9',  entry: :row, input: 'TRIM([City])', expect: 'Trim([Master/City])' },
+  { id: 'R-F19', entry: :row, input: 'UPPER([City])', expect: 'Upper([Master/City])' },
+  # SPLIT is deliberately NOT mapped (Sigma SplitPart negative-token semantics
+  # unverified) — fail-closed nil stays the locked contract.
   { id: 'R-F10', entry: :row, input: 'SPLIT([Name], "-", 1)', expect: nil },
-  { id: 'R-F19', entry: :row, input: 'UPPER([City])', expect: nil },
   { id: 'R-F20', entry: :row, input: 'TRIM(SPLIT([Name], "-", 1))', expect: nil },
   { id: 'R-F13', entry: :dim, input: 'IF [Sales] > 100 THEN "High" ELSE "Low" END',
     expect: 'If([Master/SALES] > 100, "High", "Low")' },

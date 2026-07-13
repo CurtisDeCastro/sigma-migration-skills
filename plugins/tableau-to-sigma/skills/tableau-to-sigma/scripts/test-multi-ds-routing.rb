@@ -165,8 +165,89 @@ check(de7.size == 2 && de7.map { |s| s['id'] }.uniq.size == 2,
       "long-caption siblings get UNIQUE sub-master ids (got #{de7.map { |s| s['id'] }.inspect})", fails)
 
 puts
+puts 'Part 6 — v5.4 derived calcs on the sub-master'
+# A routed chart's [Master/<name>] ref can name a Tableau CALC, not a physical
+# column of the outlier datasource. Contract:
+#   row-level calc  → DERIVED column on the sub-master (translated formula),
+#   aggregated calc → decomposed at viz level; sub-master exposes base columns;
+#                     on a row-grain HELPER the passthrough is dropped and
+#                     CONSUMER formulas rewritten,
+#   untranslatable  → NO column + loud STAYS-MANUAL (never a broken passthrough).
+%w[map_column translate_user_agg_formula translate_row_level_calc translate_dim_calc].each do |fn|
+  m = SRC.match(/^def #{Regexp.escape(fn)}\b.*?\n^end$/m) or abort("could not extract #{fn}")
+  eval(m[0]) # rubocop:disable Security/Eval
+end
+USER_AGG_FN = { 'SUM' => 'Sum', 'AVG' => 'Avg', 'MIN' => 'Min', 'MAX' => 'Max', 'MEDIAN' => 'Median' }.freeze
+
+CBG = {
+  'Calc_1' => { 'caption' => 'Room Clean', 'formula' => 'REPLACE([RoomName], "Act 1 - ", "")' },
+  'Calc_2' => { 'caption' => '% Lab',      'formula' => 'SUM([Count])/SUM([Sum_Count])' },
+  'Calc_3' => { 'caption' => 'Opaque',     'formula' => "RAWSQL_STR('x')" }
+}.freeze
+
+els8 = [
+  { 'id' => 'el-room2', 'kind' => 'pivot-table', 'name' => '% of total by room name',
+    '_worksheet' => '% of total by room name',
+    'source' => { 'kind' => 'table', 'elementId' => 'master' },
+    'columns' => [
+      { 'id' => 'q-room', 'name' => 'Room Clean', 'formula' => '[Master/Room Clean]' },
+      { 'id' => 'q-lab',  'name' => '% Lab',      'formula' => 'Sum([Master/% Lab])' },
+      { 'id' => 'q-op',   'name' => 'Opaque',     'formula' => 'Sum([Master/Opaque])' }
+    ] }
+]
+de8 = []
+w8 = []
+route_multi_ds!(els8, de8, JSON.parse(JSON.generate(PLAN)), 'master', w8, cbg: CBG, mmap: {})
+sm8 = de8.first
+check(!sm8.nil?, 'derived-calc case still creates the sub-master', fails)
+rc = sm8 && sm8['columns'].find { |c| c['name'] == 'Room Clean' }
+check(rc && rc['formula'] == 'Replace([Dir Bias by Level/RoomName], "Act 1 - ", "")',
+      "row-level calc becomes a DERIVED sub-master column (got #{rc && rc['formula']})", fails)
+lab = els8[0]['columns'].find { |c| c['id'] == 'q-lab' }
+check(lab['formula'] == 'Sum([Master (Dir Bias by Level)/Count])/Sum([Master (Dir Bias by Level)/Sum_Count])',
+      "aggregated calc decomposed at viz level (got #{lab['formula']})", fails)
+check(sm8 && %w[Count Sum_Count].all? { |n| sm8['columns'].any? { |c| c['name'] == n } },
+      'sub-master exposes the decomposition base columns', fails)
+check(sm8 && sm8['columns'].none? { |c| c['name'] == '% Lab' },
+      'no row-grain passthrough for the aggregated calc', fails)
+check(sm8 && sm8['columns'].none? { |c| c['name'] == 'Opaque' },
+      'untranslatable calc gets NO sub-master column', fails)
+check(w8.any? { |m| m.include?('STAYS-MANUAL') && m.include?('Opaque') },
+      'untranslatable calc is flagged STAYS-MANUAL by name', fails)
+
+# Row-grain helper variant: the tagged helper carries the calc passthrough;
+# its consumer chart wraps the helper column. The passthrough must be dropped,
+# base columns exposed, and the consumer formula rewritten.
+helper9 = { 'id' => 'el-x-topn-src', 'kind' => 'table', 'name' => 'TopN Source (x)',
+            '_worksheet' => '% of total by room name', 'visibleAsSource' => false,
+            'source' => { 'kind' => 'table', 'elementId' => 'master' },
+            'columns' => [
+              { 'id' => 'h-room', 'name' => 'Room Clean', 'formula' => '[Master/Room Clean]' },
+              { 'id' => 'h-lab',  'name' => '% Lab',      'formula' => '[Master/% Lab]' }
+            ] }
+cons9 = { 'id' => 'el-x', 'kind' => 'pivot-table', 'name' => 'consumer',
+          'source' => { 'kind' => 'table', 'elementId' => 'el-x-topn-src' },
+          'columns' => [{ 'id' => 'c-lab', 'name' => '% Lab', 'formula' => 'Sum([TopN Source (x)/% Lab])' }] }
+els9 = [cons9]
+de9 = [helper9]
+w9 = []
+route_multi_ds!(els9, de9, JSON.parse(JSON.generate(PLAN)), 'master', w9, cbg: CBG, mmap: {})
+check(helper9['columns'].none? { |c| c['name'] == '% Lab' },
+      'helper: aggregated-calc passthrough dropped from the row-grain helper', fails)
+check(%w[Count Sum_Count].all? { |n| helper9['columns'].any? { |c| c['name'] == n } },
+      'helper: base columns exposed on the helper', fails)
+check(cons9['columns'][0]['formula'] == 'Sum([TopN Source (x)/Count])/Sum([TopN Source (x)/Sum_Count])',
+      "helper: consumer formula rewritten to the ratio-of-sums (got #{cons9['columns'][0]['formula']})", fails)
+hrc = helper9['columns'].find { |c| c['name'] == 'Room Clean' }
+check(hrc && hrc['formula'] == '[Master (Dir Bias by Level)/Room Clean]',
+      'helper: row-level calc passthrough re-pointed at the sub-master derived column', fails)
+sm9 = de9.find { |e| e['id'].to_s.start_with?('submaster-') }
+check(sm9 && sm9['columns'].any? { |c| c['name'] == 'Room Clean' && c['formula'].include?('Replace(') },
+      'helper: sub-master carries the derived Room Clean column', fails)
+
+puts
 if fails.empty?
-  puts 'OK — multi-DS auto-routing holds (sub-master, lock-step rewrite, scope cut, no-ops)'
+  puts 'OK — multi-DS auto-routing holds (sub-master, lock-step rewrite, derived calcs, scope cut, no-ops)'
   exit 0
 else
   warn "FAIL — #{fails.size} check(s) failed:"
