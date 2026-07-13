@@ -3228,6 +3228,19 @@ def translate_kpi_measure_formula(formula, mmap, columns_by_guid = {})
   s
 end
 
+# An axis-anchor PLACEHOLDER: a measure whose entire formula is an aggregate of
+# a numeric literal (min(-1.0), AVG(0), SUM(1)) or a bare literal. This is the
+# standard Tableau dummy-axis idiom — dashboarders pin BAN/scorecard marks to a
+# constant axis so the text sits where they want it. Such a pill carries NO
+# data; binding it as a KPI value reproduces the constant, not the metric
+# (round 6: every headline KPI on one shape bound min(-1.0)).
+def placeholder_calc?(formula)
+  s = formula.to_s.strip
+  return false if s.empty?
+  return true if s =~ /\A-?\d+(?:\.\d+)?\z/
+  !!(s =~ /\A(?:MIN|MAX|AVG|SUM|MEDIAN|ATTR)\s*\(\s*-?\d+(?:\.\d+)?\s*\)\z/i)
+end
+
 # Pick the KPI's VALUE measure from a marks-card measure list (bead: KPI value
 # fidelity). A Tableau scorecard commonly carries several measures on its Marks
 # card — a raw column (`[RAW_COL]` Sum), one or more internal calc ids, and the
@@ -3249,10 +3262,18 @@ def pick_kpi_measure(measures, columns_by_guid = {})
     ((info && info['caption']) || m['column'].to_s).to_s
   end
   is_label = ->(m) { (cap_of.call(m) =~ /\(label\)/i) || (m['column'].to_s =~ /\(label\)/i) }
+  is_placeholder = lambda do |m|
+    key = m['column'].to_s.gsub(/^\[|\]$/, '').sub(/^[a-z]+:/i, '').sub(/:[a-z]+$/i, '')
+    info = columns_by_guid[key]
+    info.is_a?(Hash) && placeholder_calc?(info['formula'])
+  end
 
-  # A `(Label)` calc is the scorecard's caption text, never its value — drop it
-  # unless it's ALL we have (then fall through so the tile isn't lost).
-  candidates = list.reject { |m| is_label.call(m) }
+  # A `(Label)` calc is the scorecard's caption text, and an axis-anchor
+  # placeholder (min(-1.0) / AVG(0)) is mark plumbing — neither is ever the
+  # value. Drop them unless they're ALL we have (then fall through so the tile
+  # isn't lost).
+  candidates = list.reject { |m| is_label.call(m) || is_placeholder.call(m) }
+  candidates = list.reject { |m| is_label.call(m) } if candidates.empty?
   candidates = list if candidates.empty?
 
   score = lambda do |m|
@@ -3269,6 +3290,163 @@ def pick_kpi_measure(measures, columns_by_guid = {})
   candidates.each_with_index.max_by { |m, i| [score.call(m), -i] }.first
 end
 
+# ---- Generic period/param-scoped KPI recipe (v5.4) --------------------------
+# Two serializations put a parameter's CURRENT value between a scorecard and
+# its number, and both shipped unscoped (all-periods) values in the field:
+#   (a) the measure itself:  AGG(IF <expr> = [Parameters].[P] THEN [col] END)
+#   (b) a worksheet filter:  boolean calc "<expr> = [Parameters].[P]" kept true
+# <expr> is a column ref (bracketed or BARE — the Tableau formula grammar
+# allows both) or a calc reducing to a date-part of a datetime column
+# (DATEPART('year', [d]) / YEAR([d])) — the "period lives only in a datetime
+# column" case. Sigma elements cannot evaluate a Tableau parameter, so the
+# general recipe is a hidden FILTERED helper element the KPI sources: one
+# column per scope expression, one list filter (with id) per scope pinned to
+# the parameter's current value. Conservative contract: if ANY scope
+# expression or parameter value fails to resolve, NO helper is built and the
+# tile is flagged STAYS-MANUAL — a partially scoped number is worse than a
+# named gap.
+
+# Parse form (a). Returns { 'agg','col','lhs','param' } or nil. Only the
+# single-branch current-period shape qualifies — offsets ([P]-1, prior-period
+# comparisons) are delta plumbing, not the headline value.
+def parse_param_if_measure(formula)
+  s = formula.to_s.gsub(/\s+/, ' ').strip
+  m = s.match(/\A(SUM|AVG|MIN|MAX|MEDIAN|COUNTD|COUNT)\s*\(\s*IF\s+(.+?)\s+THEN\s+\[([^\]]+)\]\s*(?:ELSE\s+NULL\s+)?END\s*\)\z/i)
+  return nil unless m
+  cm = m[2].match(/\A(\[?[\w .\-]+\]?)\s*=\s*\[Parameters?\]\s*\.\s*\[([^\]]+)\]\z/i)
+  return nil unless cm
+  { 'agg' => m[1].upcase, 'col' => m[3], 'lhs' => cm[1], 'param' => cm[2] }
+end
+
+# map_column with a NORMALIZED fallback for the scope recipe: formulas
+# reference raw twb serialization tokens (NUM_SUBSCRIBERS, PUBLISHED DATE)
+# while the master-map regexes are built from display labels ("Num
+# Subscribers"). Same drift class the global ref-label repair handles —
+# match case/punct-insensitively when the normalized name is UNIQUE among
+# master columns; ambiguity returns nil (never guessed).
+def scope_map_column(name, mmap)
+  hit = map_column(name, mmap)
+  return hit if hit
+  key = name.to_s.downcase.gsub(/[^a-z0-9]/, '')
+  return nil if key.empty?
+  cands = mmap.values.select do |v|
+    v.is_a?(Hash) && v['name'].to_s.downcase.gsub(/[^a-z0-9]/, '') == key
+  end
+  cands.map { |v| v['name'] }.uniq.size == 1 ? cands.first : nil
+end
+
+# Resolve a scope expression's LEFT side to a master-relative Sigma formula.
+# Column ref → passthrough; calc reducing to a date-part → DatePart(...);
+# other translatable dim calcs → their translation. nil = unresolvable.
+def param_scope_resolve_lhs(lhs, z, meta, mmap)
+  name = lhs.to_s.strip.gsub(/^\[|\]$/, '').strip
+  return nil if name.empty?
+  if (mc = scope_map_column(name, mmap))
+    return { 'name' => mc['name'], 'formula' => "[Master/#{mc['name']}]" }
+  end
+  nrm = ->(x) { x.to_s.gsub(/^\[|\]$/, '').strip.downcase }
+  cinfo = (z['calculations'] || []).find do |c|
+    nrm.call(c['name']) == name.downcase || nrm.call(c['caption']) == name.downcase
+  end
+  cinfo ||= (meta['columns_by_guid'] || {})[name]
+  f = cinfo.is_a?(Hash) ? cinfo['formula'].to_s.gsub(/\s+/, ' ').strip : ''
+  return nil if f.empty?
+  disp = cinfo['caption'].to_s.strip
+  disp = name if disp.empty?
+  if (dm = f.match(/\ADATEPART\s*\(\s*'(year|quarter|month|week|day)'\s*,\s*\[([^\]]+)\]\s*\)\z/i))
+    base = scope_map_column(dm[2], mmap)
+    return base && { 'name' => disp, 'formula' => %(DatePart("#{dm[1].downcase}", [Master/#{base['name']}])) }
+  end
+  if (ym = f.match(/\A(YEAR|QUARTER|MONTH|WEEK|DAY)\s*\(\s*\[([^\]]+)\]\s*\)\z/i))
+    base = scope_map_column(ym[2], mmap)
+    return base && { 'name' => disp, 'formula' => %(DatePart("#{ym[1].downcase}", [Master/#{base['name']}])) }
+  end
+  tf = translate_dim_calc(f, mmap, meta['columns_by_guid'] || {}) ||
+       translate_row_level_calc(f, mmap, meta['columns_by_guid'] || {})
+  tf && { 'name' => disp, 'formula' => tf }
+end
+
+# The parameter's CURRENT value: parser meta first (default_value), then the
+# param's own serialized <calculation formula='...'> literal. Typed by the
+# param's datatype so numeric filters carry numbers, not strings.
+def param_current_value(pcap, z, meta)
+  key = pcap.to_s.strip
+  p = (meta['parameters'] || []).find do |pp|
+    pp['caption'].to_s.strip.casecmp?(key) || pp['name'].to_s.gsub(/^\[|\]$/, '').strip.casecmp?(key)
+  end
+  raw = p && p['default_value']
+  dt  = p && p['datatype']
+  if raw.nil? || raw.to_s.strip.empty?
+    c = (z['calculations'] || []).find do |cc|
+      [cc['caption'], cc['name']].compact.any? { |x| x.to_s.gsub(/^\[|\]$/, '').strip.casecmp?(key) }
+    end
+    raw = c && c['formula']
+    dt  = (c && c['datatype']) || dt
+  end
+  return nil if raw.nil? || raw.to_s.strip.empty?
+  v = raw.to_s.strip.sub(/\A"(.*)"\z/m, '\1')
+  case dt.to_s
+  when 'integer' then v =~ /\A-?\d+\z/ ? v.to_i : nil
+  when 'real'    then v =~ /\A-?(?:\d+\.?\d*|\.\d+)\z/ ? v.to_f : nil
+  else v
+  end
+end
+
+# Form (b): collect the zone's param-equality boolean filters (kept 'true').
+# Returns { 'scopes' => [{name,formula,value,param,via}], 'unresolved' => [] }.
+# Boolean-true filters that are NOT param equalities are not scopes — skipped.
+def param_scopes_for_kpi(z, meta, mmap)
+  scopes = []
+  unresolved = []
+  seen = {}
+  (Array(z['filters']) + Array(z['hidden_filters'])).each do |f|
+    next unless f.is_a?(Hash) && f['kind'].to_s == 'list'
+    next unless Array(f['members']).map(&:to_s) == ['true']
+    capn = (f['column_caption'] || f['caption']).to_s.strip
+    next if capn.empty? || seen[capn.downcase]
+    calc = (z['calculations'] || []).find do |c|
+      [c['caption'], c['name']].compact.any? { |x| x.to_s.gsub(/^\[|\]$/, '').strip.casecmp?(capn) }
+    end
+    next unless calc
+    cm = calc['formula'].to_s.gsub(/\s+/, ' ').strip
+             .match(/\A(\[?[\w .\-]+\]?)\s*=\s*\[Parameters?\]\s*\.\s*\[([^\]]+)\]\z/i)
+    next unless cm
+    seen[capn.downcase] = true
+    lhs = param_scope_resolve_lhs(cm[1], z, meta, mmap)
+    val = param_current_value(cm[2], z, meta)
+    if lhs && !val.nil?
+      scopes << lhs.merge('value' => val, 'param' => cm[2], 'via' => capn)
+    else
+      unresolved << "filter '#{capn}' (#{cm[1]} = [Parameters].[#{cm[2]}])"
+    end
+  end
+  { 'scopes' => scopes, 'unresolved' => unresolved }
+end
+
+# The hidden filtered helper the scoped KPI sources. Every filter carries an
+# 'id' (the API rejects filters without one).
+def build_param_scope_helper(el_id:, master_id:, value_name:, value_formula:, scopes:)
+  src_id = "#{el_id}-scoped-src"
+  src_name = "#{value_name} Scoped (#{el_id.sub(/^el-(kpi-)?/, '')})"
+  value_col = { 'id' => "#{src_id}-v", 'name' => value_name, 'formula' => value_formula }
+  scope_cols = []
+  filters = []
+  scopes.each_with_index do |sc, i|
+    col = { 'id' => "#{src_id}-f#{i}", 'name' => sc['name'], 'formula' => sc['formula'] }
+    scope_cols << col
+    filters << { 'id' => "flt-#{src_id}-#{i}", 'columnId' => col['id'], 'kind' => 'list',
+                 'mode' => 'include', 'selectionMode' => 'multiple', 'values' => [sc['value']] }
+  end
+  element = {
+    'id' => src_id, 'kind' => 'table', 'name' => src_name,
+    'source' => { 'kind' => 'table', 'elementId' => master_id },
+    'columns' => [value_col] + scope_cols,
+    'filters' => filters,
+    'visibleAsSource' => false
+  }
+  [element, src_name]
+end
+
 # single measure and no dimensions — translate to a Sigma kpi-chart element.
 # Without this, the chart_kind=kpi worksheet would fall through to the
 # CSV-driven flat-table flow and quietly produce nothing usable.
@@ -3283,9 +3461,31 @@ def build_kpi_element(z, meta, mmap, opts, warnings, data_elements = [])
   # Find the KPI's measure: first from shelves (preferred — explicit derivation),
   # then fall back to the worksheet's `measures` array (when the measure is on
   # the Marks card via Text/Color/Size encoding rather than a shelf).
+  # v5.4: a shelf field that resolves to an axis-anchor PLACEHOLDER calc
+  # (min(-1.0) / AVG(0) — the dummy-axis idiom) is mark plumbing, not the
+  # value; skip it so the marks-card fallback below binds the real measure.
+  shelf_formula = lambda do |f|
+    g = f['guid'].to_s
+    info = (z['calculations'] || []).find { |c| c['name'].to_s.gsub(/^\[|\]$/, '') == g } ||
+           (meta['columns_by_guid'] || {})[g]
+    info.is_a?(Hash) ? info['formula'].to_s : ''
+  end
   measure_field = nil
-  (rows_shelf['fields'] || []).each { |f| measure_field ||= f if f['role'] == 'measure' }
-  (cols_shelf['fields'] || []).each { |f| measure_field ||= f if f['role'] == 'measure' }
+  skipped_placeholder = nil
+  [rows_shelf, cols_shelf].each do |shelf|
+    (shelf['fields'] || []).each do |f|
+      next unless f['role'] == 'measure'
+      if placeholder_calc?(shelf_formula.call(f))
+        skipped_placeholder ||= f
+        next
+      end
+      measure_field ||= f
+    end
+  end
+  if measure_field.nil? && skipped_placeholder
+    warnings << "'#{cap}' KPI shelf carries only an axis-anchor placeholder " \
+                "(#{shelf_formula.call(skipped_placeholder).strip[0, 30].inspect}) — binding the real measure from the marks card instead"
+  end
   if measure_field.nil? && (z['measures'] || []).any?
     # Prefer the materialized VALIDATED calc over a raw aggregate column
     # (bead: KPI value fidelity) instead of blindly taking measures.first.
@@ -3370,6 +3570,71 @@ def build_kpi_element(z, meta, mmap, opts, warnings, data_elements = [])
   ws_calc = (z['calculations'] || []).find do |c|
     n = norm.call(c['name'])
     n == norm.call(field_cap) || n == raw_norm
+  end
+  # v5.4 GENERIC PERIOD/PARAM-SCOPED KPI (see the recipe block above
+  # build_kpi_element). Runs before the decompose cascade: a param-IF measure
+  # decomposes to NOTHING there (translate_kpi_measure_formula bails on
+  # [Parameters]) and previously fell to a naive unresolvable Sum().
+  if formula.nil? && source_eid == opts[:master_id]
+    pif = ws_calc && parse_param_if_measure(ws_calc['formula'])
+    zone_sc = param_scopes_for_kpi(z, meta, mmap)
+    scopes = zone_sc['scopes'].dup
+    unresolved = zone_sc['unresolved'].dup
+    sc_value_name = nil
+    sc_value_formula = nil
+    sc_agg = nil
+    if pif
+      lhs = param_scope_resolve_lhs(pif['lhs'], z, meta, mmap)
+      val = param_current_value(pif['param'], z, meta)
+      vm  = scope_map_column(pif['col'], mmap)
+      if lhs && !val.nil? && vm
+        scopes << lhs.merge('value' => val, 'param' => pif['param'], 'via' => field_cap.to_s)
+        sc_value_name = vm['name']
+        sc_value_formula = "[Master/#{vm['name']}]"
+        sc_agg = pif['agg']
+      else
+        miss = []
+        miss << "condition '#{pif['lhs']} = [Parameters].[#{pif['param']}]'" unless lhs && !val.nil?
+        miss << "value column '#{pif['col']}'" unless vm
+        unresolved << "measure '#{field_cap}': #{miss.join(' + ')}"
+      end
+    elsif scopes.any? && ws_calc.nil? && master['formula'].nil?
+      # Plain-column measure + param scope filters: same helper, shelf agg.
+      sc_value_name = master['name'].to_s.strip
+      sc_value_formula = "[Master/#{sc_value_name}]"
+      sc_agg = nil # shelf-derivation template below
+    end
+    if unresolved.any?
+      warnings << "'#{cap}' KPI is parameter-scoped but its scope did not resolve (#{unresolved.join('; ')}) — " \
+                  'STAYS-MANUAL: build the period-scoped helper by hand (a hidden filtered element the KPI ' \
+                  'sources); an unscoped value silently diverges from the source'
+    elsif scopes.any? && sc_value_formula
+      helper, src_name = build_param_scope_helper(
+        el_id: el_id, master_id: opts[:master_id], value_name: sc_value_name,
+        value_formula: sc_value_formula, scopes: scopes)
+      data_elements << helper
+      source_eid = helper['id']
+      sc_ref = "[#{src_name}/#{sc_value_name}]"
+      formula =
+        if sc_agg
+          case sc_agg
+          when 'COUNT'  then "CountIf(IsNotNull(#{sc_ref}))"
+          when 'COUNTD' then "CountDistinct(#{sc_ref})"
+          else "#{USER_AGG_FN[sc_agg] || 'Sum'}(#{sc_ref})"
+          end
+        else
+          tmpl = SHELF_AGG_FOR_PREFIX[deriv] || 'Sum'
+          tmpl.include?('%s') ? tmpl.sub('%s', sc_ref) : "#{tmpl}(#{sc_ref})"
+        end
+      pins = scopes.map { |sc| "#{sc['name']} = #{sc['value'].inspect} ([#{sc['param']}] current value)" }
+      warnings << "'#{cap}' KPI is parameter-scoped — emitted hidden filtered helper '#{src_name}' pinning " \
+                  "#{pins.join(', ')}; re-bind the helper's filter(s) to the parameter control(s) post-publish " \
+                  'to keep the tile interactive'
+    elsif scopes.any?
+      warnings << "'#{cap}' KPI carries parameter-scope filter(s) " \
+                  "(#{scopes.map { |s| s['via'] || s['name'] }.join(', ')}) that could not be auto-applied to " \
+                  'its calc-based measure — VERIFY: the emitted value is UNSCOPED vs the source'
+    end
   end
   # Ratio/arithmetic of MATERIALIZED measure columns (bead: KPI value fidelity):
   # `[Amount Saved (copy)]/[Cost (copy)]` → `Sum([Master/…])/Sum([Master/…])`.

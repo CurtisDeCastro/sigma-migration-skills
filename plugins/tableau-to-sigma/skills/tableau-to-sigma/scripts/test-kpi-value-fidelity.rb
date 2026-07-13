@@ -25,7 +25,7 @@ DIR = __dir__
 SRC = File.read(File.join(DIR, 'build-charts-from-signals.rb'))
 
 USER_AGG_FN = { 'SUM' => 'Sum', 'AVG' => 'Avg', 'MIN' => 'Min', 'MAX' => 'Max', 'MEDIAN' => 'Median' }.freeze
-%w[map_column guid_from_text pick_kpi_measure resolve_shelf_field translate_kpi_measure_formula].each do |fn|
+%w[map_column guid_from_text placeholder_calc? pick_kpi_measure resolve_shelf_field translate_kpi_measure_formula].each do |fn|
   m = SRC.match(/^def #{fn}\b.*?\n^end$/m) or abort("could not extract #{fn} from build-charts-from-signals.rb")
   eval(m[0]) # rubocop:disable Security/Eval — test-only extraction of first-party code
 end
