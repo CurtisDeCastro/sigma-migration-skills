@@ -2865,6 +2865,31 @@ if mechanical
     end
     line "grain helper '#{de['name']}' → DM element '#{real}' (#{hit['id']})#{real == want ? '' : " [name-normalized from '#{want}']"}"
   end
+  # v5.4: GLOBAL ref-label repair — the v5.3 columnLabels repair above only
+  # covered grain helpers' refs to their DM source element. Chart elements
+  # carry the same drift class against WORKBOOK-LOCAL elements: the builder
+  # authors [Master/<raw twb token>] (physical names, twb casing) while the
+  # master columns carry Sigma display labels; cross-element refs to generated
+  # source elements drift the same way. Repair EVERY generated element's
+  # column formulas against the live labels of every workbook-local element
+  # (master + hidden data elements). Normalized match, exact rewrite, loud
+  # misses; ambiguity is reported, never guessed (same contract as v5.3).
+  begin
+    require File.join(HERE, 'lib', 'ref_label_repair')
+    registry = { 'Master' => master_columns.map { |c| c['name'].to_s } }
+    data_elements.each do |de|
+      next unless de['name'].is_a?(String) && de['columns'].is_a?(Array)
+      registry[de['name']] = de['columns'].map { |c| c['name'].to_s }
+    end
+    rep = RefLabelRepair.repair!(chart_elements + data_elements, registry)
+    line "ref-label repair: #{rep[:fixed]} formula ref(s) re-cased to live element labels" if rep[:fixed].positive?
+    rep[:ambiguous].each { |m| line "  WARN: ref-label repair skipped #{m} — disambiguate manually" }
+    rep[:misses].each do |m|
+      line "  WARN: #{m} — no matching live label; the pre-POST ref gate will name it if plotted"
+    end
+  rescue StandardError => e
+    line "WARN: global ref-label repair failed: #{e.message} — formulas left as the builder authored them"
+  end
   if chart_elements.empty?
     line 'WARN: build-charts produced 0 elements (no usable view CSVs / zones); emitting an empty dashboard page'
   else
