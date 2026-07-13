@@ -56,7 +56,8 @@
     "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/vendor/lib/sigma_rest.rb",
     "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/lib/sigma_rest.rb",
     "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/lib/sigma_rest.rb",
-    "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/lib/sigma_rest.rb"
+    "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/lib/sigma_rest.rb",
+    "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/lib/sigma_rest.rb"
    ]
   },
   {
@@ -509,7 +510,11 @@
     "plugins/looker-to-sigma/skills/looker-to-sigma/scripts/verify-anchors.rb",
     "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/verify-anchors.rb",
     "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/verify-anchors.rb",
-    "plugins/microstrategy-to-sigma/skills/microstrategy-to-sigma/scripts/verify-anchors.rb"
+    "plugins/microstrategy-to-sigma/skills/microstrategy-to-sigma/scripts/verify-anchors.rb",
+    "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/verify-anchors.rb",
+    "plugins/cognos-to-sigma/skills/cognos-to-sigma/scripts/verify-anchors.rb",
+    "plugins/gooddata-to-sigma/skills/gooddata-to-sigma/scripts/verify-anchors.rb",
+    "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/verify-anchors.rb"
    ]
   },
   {
@@ -520,7 +525,11 @@
     "plugins/looker-to-sigma/skills/looker-to-sigma/scripts/test-verify-anchors.rb",
     "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/test-verify-anchors.rb",
     "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/test-verify-anchors.rb",
-    "plugins/microstrategy-to-sigma/skills/microstrategy-to-sigma/scripts/test-verify-anchors.rb"
+    "plugins/microstrategy-to-sigma/skills/microstrategy-to-sigma/scripts/test-verify-anchors.rb",
+    "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/test-verify-anchors.rb",
+    "plugins/cognos-to-sigma/skills/cognos-to-sigma/scripts/test-verify-anchors.rb",
+    "plugins/gooddata-to-sigma/skills/gooddata-to-sigma/scripts/test-verify-anchors.rb",
+    "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/test-verify-anchors.rb"
    ]
   },
   {
@@ -531,7 +540,11 @@
     "plugins/looker-to-sigma/skills/looker-to-sigma/scripts/lib/anchor_values.rb",
     "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/lib/anchor_values.rb",
     "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/lib/anchor_values.rb",
-    "plugins/microstrategy-to-sigma/skills/microstrategy-to-sigma/scripts/lib/anchor_values.rb"
+    "plugins/microstrategy-to-sigma/skills/microstrategy-to-sigma/scripts/lib/anchor_values.rb",
+    "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/lib/anchor_values.rb",
+    "plugins/cognos-to-sigma/skills/cognos-to-sigma/scripts/lib/anchor_values.rb",
+    "plugins/gooddata-to-sigma/skills/gooddata-to-sigma/scripts/lib/anchor_values.rb",
+    "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/lib/anchor_values.rb"
    ]
   },
   {
@@ -542,7 +555,11 @@
     "plugins/looker-to-sigma/skills/looker-to-sigma/scripts/visual-similarity.py",
     "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/visual-similarity.py",
     "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/visual-similarity.py",
-    "plugins/microstrategy-to-sigma/skills/microstrategy-to-sigma/scripts/visual-similarity.py"
+    "plugins/microstrategy-to-sigma/skills/microstrategy-to-sigma/scripts/visual-similarity.py",
+    "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/visual-similarity.py",
+    "plugins/cognos-to-sigma/skills/cognos-to-sigma/scripts/visual-similarity.py",
+    "plugins/gooddata-to-sigma/skills/gooddata-to-sigma/scripts/visual-similarity.py",
+    "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/visual-similarity.py"
    ]
   },
   {
@@ -553,7 +570,11 @@
     "plugins/looker-to-sigma/skills/looker-to-sigma/scripts/test_visual_similarity.py",
     "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/test_visual_similarity.py",
     "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/test_visual_similarity.py",
-    "plugins/microstrategy-to-sigma/skills/microstrategy-to-sigma/scripts/test_visual_similarity.py"
+    "plugins/microstrategy-to-sigma/skills/microstrategy-to-sigma/scripts/test_visual_similarity.py",
+    "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/test_visual_similarity.py",
+    "plugins/cognos-to-sigma/skills/cognos-to-sigma/scripts/test_visual_similarity.py",
+    "plugins/gooddata-to-sigma/skills/gooddata-to-sigma/scripts/test_visual_similarity.py",
+    "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/test_visual_similarity.py"
    ]
   },
   {
@@ -564,7 +585,11 @@
     "plugins/looker-to-sigma/skills/looker-to-sigma/refs/source-anchors.md",
     "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/refs/source-anchors.md",
     "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/refs/source-anchors.md",
-    "plugins/microstrategy-to-sigma/skills/microstrategy-to-sigma/refs/source-anchors.md"
+    "plugins/microstrategy-to-sigma/skills/microstrategy-to-sigma/refs/source-anchors.md",
+    "plugins/qlik-to-sigma/skills/qlik-to-sigma/refs/source-anchors.md",
+    "plugins/cognos-to-sigma/skills/cognos-to-sigma/refs/source-anchors.md",
+    "plugins/gooddata-to-sigma/skills/gooddata-to-sigma/refs/source-anchors.md",
+    "plugins/sisense-to-sigma/skills/sisense-to-sigma/refs/source-anchors.md"
    ]
   },
   {
@@ -575,7 +600,11 @@
     "plugins/looker-to-sigma/skills/looker-to-sigma/refs/visual-similarity.md",
     "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/refs/visual-similarity.md",
     "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/refs/visual-similarity.md",
-    "plugins/microstrategy-to-sigma/skills/microstrategy-to-sigma/refs/visual-similarity.md"
+    "plugins/microstrategy-to-sigma/skills/microstrategy-to-sigma/refs/visual-similarity.md",
+    "plugins/qlik-to-sigma/skills/qlik-to-sigma/refs/visual-similarity.md",
+    "plugins/cognos-to-sigma/skills/cognos-to-sigma/refs/visual-similarity.md",
+    "plugins/gooddata-to-sigma/skills/gooddata-to-sigma/refs/visual-similarity.md",
+    "plugins/sisense-to-sigma/skills/sisense-to-sigma/refs/visual-similarity.md"
    ]
   }
  ]
