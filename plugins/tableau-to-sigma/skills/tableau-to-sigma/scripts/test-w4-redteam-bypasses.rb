@@ -54,8 +54,8 @@ Dir.mktmpdir do |d|
   File.write(File.join(d, 'source-anchors.json'), JSON.generate(a))
   o2, e2, s2 = Open3.capture3('ruby', File.join(HERE, 'verify-anchors.rb'),
     '--workdir', d, '--workbook-spec', File.join(d, 'wb-readback.json'), '--exports-dir', exdir)
-  ok(!s2.success? && (o2 + e2) =~ /has CHANGED since it was first verified/i,
-     '(A) post-hoc source-anchor edit is REFUSED')
+  ok(!s2.success? && (o2 + e2) =~ /source-anchor VALUE\(s\) changed since first verification/i,
+     '(A) post-hoc source-anchor VALUE edit is REFUSED')
 
   # authorized re-transcription proceeds and logs the diff
   o3, e3, s3 = Open3.capture3('ruby', File.join(HERE, 'verify-anchors.rb'),
@@ -116,6 +116,39 @@ Dir.mktmpdir do |d|
   o, _, _ = Open3.capture3('ruby', '-e', code, File.join(HERE, 'lib'), d)
   ok(o =~ /PRESERVED (\d+)/ && $1.to_i >= 90,
      "(D) run_started_at survives re-stamping — nudge would fire (#{o.strip})")
+end
+
+# --- (E) FALSE-POSITIVE guard: benign cosmetic deltas mentioning "data" ARE OK -
+# (review-caught: an over-greedy regex rejected "no data labels" etc.)
+Dir.mktmpdir do |d|
+  Open3.capture3('ruby', File.join(HERE, 'fidelity-loop.rb'), 'init',
+    '--workdir', d, '--workbook-id', 'wb', '--page-id', 'p')
+  benign = ['legend shows no data labels', 'no data-label padding on bars',
+            'axis has no data ticks shown', 'blank chart background color wrong']
+  all_ok = benign.all? do |delta|
+    _o, _e, s = Open3.capture3('ruby', File.join(HERE, 'fidelity-loop.rb'), 'record',
+      '--workdir', d, '--dimension', 'palette', '--delta', delta, '--class', 'ui-only')
+    s.success?
+  end
+  ok(all_ok, '(E) benign cosmetic deltas that merely mention "data"/"blank" are ALLOWED (no false reject)')
+end
+
+# --- (F) FALSE-POSITIVE guard: re-serializing identical anchors does NOT refuse -
+# (review-caught: a byte hash tripped on a pretty-print / key reorder of identical anchors)
+Dir.mktmpdir do |d|
+  Dir.mkdir(File.join(d, 'exports'))
+  File.write(File.join(d, 'wb.json'), JSON.generate('pages' => [{ 'id' => 'p', 'elements' => [
+    { 'id' => 'tbl', 'kind' => 'table', 'name' => 'T' }] }]))
+  File.write(File.join(d, 'exports', 'tbl.csv'), "v\n100\n999\n")
+  anchors = (1..5).map { |i| { 'id' => "a#{i}", 'raw' => (i.even? ? '999' : '100'), 'kind' => 'number', 'label' => "L#{i}" } }
+  File.write(File.join(d, 'source-anchors.json'), JSON.generate('anchors' => anchors))
+  a1 = ['ruby', File.join(HERE, 'verify-anchors.rb'), '--workdir', d, '--workbook-spec', File.join(d, 'wb.json'), '--exports-dir', File.join(d, 'exports')]
+  _o1, _e1, s1 = Open3.capture3(*a1)
+  # rewrite identical anchors with different key order + pretty whitespace
+  reordered = anchors.map { |a| { 'label' => a['label'], 'kind' => a['kind'], 'raw' => a['raw'], 'id' => a['id'] } }
+  File.write(File.join(d, 'source-anchors.json'), JSON.pretty_generate('anchors' => reordered))
+  _o2, _e2, s2 = Open3.capture3(*a1)
+  ok(s1.success? && s2.success?, '(F) reorder/whitespace re-serialization of identical anchors does NOT false-refuse')
 end
 
 puts

@@ -266,8 +266,18 @@ end
 # header}; a missing key = export never succeeded (failed/HTML/timeout — distinct
 # from an empty result). Returns one record per queryable element.
 def tile_emptiness_census(elements, exports, workdir)
+  # FEEDER detection: an element is a feeder only when another element derives its
+  # DATA from it, i.e. appears in that element's `source` subtree (master/masterAll
+  # twins). Collect ONLY from the `source` of QUERYABLE elements — NOT the whole
+  # element node, and NOT from controls. A control filters the tiles it targets via
+  # `filters:[{source:{elementId:<tile>}}]`; walking that (the original bug, review-
+  # caught) marked every control-filtered DISPLAYED chart as a feeder, so its
+  # emptiness was never gated and the Macroeconomics false-GREEN stayed reachable.
   referenced = Set.new
-  elements.each { |el| collect_source_elids(el, referenced) }
+  elements.each do |el|
+    next if VIZ_NONQUERY_KINDS.include?(el['kind'].to_s) # controls/text/etc create no feeders
+    collect_source_elids(el['source'], referenced)
+  end
   declared = declared_tile_ids(workdir)
   elements.map do |el|
     kind = el['kind'].to_s
@@ -335,49 +345,50 @@ unless bad.empty?
 end
 
 # --- W1.3: source-anchor immutability ---------------------------------------
-# The anchors are the MEASUREMENT; editing them after seeing the live actuals
-# defeats the entire bar. The 2026-07 run changed a1 "18,037B" -> "18,028B" (the
-# Sigma value) to flip a 14/15 FAIL into a 15/15 PASS. Lock the file's hash on
-# first verification; a later change is refused unless --retranscribed authorizes
-# a genuine re-transcription (re-read the SOURCE PNG, not the actuals). The
-# old->new diff is logged into the verdict so it surfaces in the report.
+# The anchors are the MEASUREMENT; editing a printed VALUE after seeing the live
+# actuals defeats the entire bar. The 2026-07 run changed a1 "18,037B" ->
+# "18,028B" (the Sigma value) to flip a 14/15 FAIL into a 15/15 PASS. Lock the
+# per-anchor id->raw map on first verification and refuse a later change to an
+# EXISTING anchor's printed value unless --retranscribed authorizes a genuine
+# re-transcription (re-read the SOURCE PNG, not the actuals). The decision is on
+# the VALUE map, not the file bytes — reordering keys, re-indenting, editing a
+# label, or ADDING/removing anchors is NOT tampering and must not false-refuse
+# (review-caught: a byte hash tripped on a pretty-print of identical anchors).
 require 'digest'
 lock_path = File.join(opts[:dir], 'source-anchors.lock.json')
-cur_sha = Digest::SHA256.hexdigest(File.read(anchors_path))
+cur_map = anchors.each_with_object({}) { |a, h| h[a['id'].to_s] = a['raw'].to_s if a.is_a?(Hash) && a['id'] }
 anchor_retranscribe = nil
 if File.exist?(lock_path)
   lock = (JSON.parse(File.read(lock_path)) rescue {})
-  prev_sha = lock['sha256'].to_s
-  if !prev_sha.empty? && prev_sha != cur_sha
+  prev_map = lock['anchors'].is_a?(Hash) ? lock['anchors'] : {}
+  # Tamper signal: an id present in BOTH whose printed value changed.
+  changed = cur_map.select { |id, raw| prev_map.key?(id) && prev_map[id].to_s != raw }
+                   .map { |id, raw| { 'id' => id, 'from' => prev_map[id], 'to' => raw } }
+  if changed.any?
     if opts[:retranscribed].to_s.strip.empty?
-      warn 'FATAL: source-anchors.json has CHANGED since it was first verified.'
-      warn "       first-seen sha256 #{prev_sha[0, 12]}… (locked #{lock['stamped_at']}), now #{cur_sha[0, 12]}…"
-      warn '       Editing the transcribed source values after seeing the live actuals defeats the'
-      warn '       measurement (the 2026-07 run flipped a FAIL to a PASS this way). If — and only if —'
-      warn '       you RE-READ the source dashboard PNG and corrected a genuine transcription error,'
-      warn '       re-run with --retranscribed "<why, referencing the source image>". Otherwise revert'
-      warn '       source-anchors.json and FIX THE WORKBOOK so the printed value actually appears.'
+      warn "FATAL: #{changed.length} source-anchor VALUE(s) changed since first verification:"
+      changed.each { |c| warn "         #{c['id']}: #{c['from'].inspect} -> #{c['to'].inspect}" }
+      warn "       (locked #{lock['stamped_at']}) Editing a transcribed printed value after seeing the"
+      warn '       live actuals defeats the measurement (the 2026-07 run flipped a FAIL to a PASS this'
+      warn '       way). If — and ONLY if — you RE-READ the source dashboard PNG and corrected a genuine'
+      warn '       transcription error, re-run with --retranscribed "<why, referencing the source image>".'
+      warn '       Otherwise revert source-anchors.json and FIX THE WORKBOOK so the printed value appears.'
       exit 2
     end
-    # Authorized re-transcription: capture the diff for the verdict + re-stamp.
-    old_anchors = (lock['anchors'] || {})
-    new_anchors = anchors.each_with_object({}) { |a, h| h[a['id'].to_s] = a['raw'] if a.is_a?(Hash) }
-    changed = new_anchors.select { |id, raw| old_anchors.key?(id) && old_anchors[id] != raw }
-              .map { |id, raw| { 'id' => id, 'from' => old_anchors[id], 'to' => raw } }
-    anchor_retranscribe = { 'reason' => opts[:retranscribed], 'changed' => changed,
-                            'prev_sha256' => prev_sha, 'sha256' => cur_sha }
-    warn "[RETRANSCRIBED] source-anchors.json change AUTHORIZED — #{opts[:retranscribed]}"
+    anchor_retranscribe = { 'reason' => opts[:retranscribed], 'changed' => changed }
+    warn "[RETRANSCRIBED] #{changed.length} source-anchor value change(s) AUTHORIZED — #{opts[:retranscribed]}"
     changed.each { |c| warn "                #{c['id']}: #{c['from'].inspect} -> #{c['to'].inspect}" }
     warn '                This MUST be named in your migration report.'
   end
 end
-# (Re)stamp the lock: first sight, or an authorized re-transcription.
+# (Re)stamp the lock every run: first sight, an authorized re-transcription, or a
+# benign additions/reorder/label change all update the baseline id->raw map.
 begin
   File.write(lock_path, JSON.pretty_generate(
-    'sha256' => cur_sha,
+    'content_sha256' => Digest::SHA256.hexdigest(File.read(anchors_path)), # record only, not the decision
     'stamped_at' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ'),
     'anchor_count' => anchors.length,
-    'anchors' => anchors.each_with_object({}) { |a, h| h[a['id'].to_s] = a['raw'] if a.is_a?(Hash) }))
+    'anchors' => cur_map))
 rescue StandardError => e
   warn "  [WARN] could not write source-anchors lock (#{e.class}: #{e.message.to_s[0, 60]})"
 end

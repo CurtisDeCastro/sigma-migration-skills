@@ -159,7 +159,19 @@ module FidelityLoop
   # block. (2026-07 field failure: exactly this delta was classed sigma-capability
   # on the FALSE theory "Sigma's export API doesn't run queries," and a dataless
   # dashboard shipped GREEN.)
-  NO_DATA_RX = /\bno[\s-]*data\b|empty (chart|tile|export|render|dashboard)|renders?\s+(no|nothing|blank)|\bblank (chart|tile|dashboard)\b|\b(no|zero) rows\b|shows?\s+no\s+data/i
+  #
+  # Match the rendered-EMPTY state precisely, NOT any mention of "data"/"blank"
+  # (review-caught false positives: "no data LABELS", "no data-label PADDING",
+  # "no data TICKS", "BLANK CHART BACKGROUND color" are cosmetic, not empty-state).
+  # A viz noun that can carry data (so "legend"/"axis"/"background" don't trigger).
+  _NOUN = '(?:chart|charts|tile|tiles|dashboard|panel|viz|pivot|table|render|element)'
+  NO_DATA_RX = Regexp.new(
+    '\bno[\s-]?data\b(?![\s-]*(?:label|point|tick|marker|mark|pad|value|ink|axis|grid|legend|colou?r|background|border|title))' \
+    "|\\b#{_NOUN}s?\\s+(?:is|are|was|were|came\\s+back|comes?\\s+back|returned?|renders?|shows?|displays?)\\s+(?:empty|blank|no\\s+data)\\b" \
+    '|\bempty\s+(?:data\s+)?(?:export|result)s?\b' \
+    '|\b(?:zero|no)\s+rows?\b' \
+    '|renders?\s+nothing',
+    Regexp::IGNORECASE)
   def no_data_delta?(delta)
     delta.to_s =~ NO_DATA_RX ? true : false
   end

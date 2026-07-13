@@ -36,7 +36,14 @@ def build_fixture(dir)
           'source' => { 'kind' => 'element', 'elementId' => 'masterAll' } }
       ] },
       { 'id' => 'page-dash-1', 'name' => 'Dashboard', 'elements' => (
-        [{ 'id' => 'el-param-region', 'kind' => 'control', 'name' => 'Region' }] +
+        # The Region control FILTERS all 9 tiles — realistic wiring (filters[].source.
+        # elementId points at each tile). A prior version of this test left the control
+        # with NO filters, which hid a blocker: control-filter targets were being
+        # misclassified as feeders, so the empty tiles escaped the gate. Keep the real
+        # filter wiring so that regression can never re-hide.
+        [{ 'id' => 'el-param-region', 'kind' => 'control', 'name' => 'Region',
+           'selectionMode' => 'single', 'value' => 'Americas & Caribbean',
+           'filters' => tiles.map { |t| { 'source' => { 'elementId' => t }, 'columnId' => "#{t}-region" } } }] +
         tiles.map { |t| { 'id' => t, 'kind' => (t.end_with?('pie') ? 'chart' : 'table'),
                           'name' => t.sub(/\Ael-/, '').tr('-', ' '),
                           'source' => { 'kind' => 'table', 'elementId' => 'master' } } }
