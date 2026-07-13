@@ -747,6 +747,9 @@ ruby scripts/phase6-parity-looker.rb --workdir /tmp/<name> --workbook-id <wb>   
 #   (Looker POST /queries/run/json, or the warehouse re-aggregation offline) …
 #   → write parity-expected.json + parity-actuals.json (shape: {"<chart>": [[dim,val],…]})
 ruby scripts/phase6-parity-looker.rb --workdir /tmp/<name> --finalize           # PASS 2: sentinel
+# MEASURED bars — Phase 4a must have authored source-anchors.json (>=5) + landed a source PNG on disk:
+ruby scripts/verify-anchors.rb      --workdir /tmp/<name> --workbook-id <wb>    # -> anchors-verdict.json (gate 13)
+python3 scripts/visual-similarity.py --source /tmp/<name>/dashboards/looker-<dash>.png --render /tmp/<name>/sigma-<dash>.png --json-out /tmp/<name>/visual-similarity.json  # gate 14
 ruby scripts/assert-phase6-ran.rb   --workdir /tmp/<name> --workbook-id <wb>    # must exit 0
 ```
 
@@ -754,8 +757,12 @@ The finalize pass writes the **`parity-final.json` sentinel**; `assert-phase6-ra
 (hard gate, vendored byte-identical across the 5 plugins) refuses GREEN unless
 parity ran + PASSed, no orphan workbooks were left, the live workbook has no
 `type=error` columns, a real layout is applied, the layout lint passes (gate 6),
-and the control lint passes (gate 7 — dead/ghost/partial controls; see
-`refs/control-parity.md`). Optional runtime follow-up when controls exist:
+the control lint passes (gate 7 — dead/ghost/partial controls; see
+`refs/control-parity.md`), **the source-anchor values verify (gate 13** — needs
+`source-anchors.json` ≥5 + a passing `anchors-verdict.json`; arms when a source
+PNG is on disk; `--skip-anchors-gate "<reason>"`**)**, and **the visual-similarity
+floor holds (gate 14** — `visual-similarity.json`; `--skip-visual-similarity "<reason>"`**)**;
+no source PNG on disk → both self-SKIP (stated), never a silent pass. Optional runtime follow-up when controls exist:
 `ruby scripts/probe-controls.rb --workbook-id <wb> --check-out-of-closure`
 (flip test — in-closure export must change under a non-default control value,
 out-of-closure must not). `migrate-looker.py` automates
@@ -780,8 +787,13 @@ where Looker showed `$`/`%`). After POSTing, render **both** the Looker source d
 migrated Sigma workbook to PNG and inspect them side-by-side:
 
 ```bash
-# (1) SOURCE — render the live Looker dashboard (reads ~/.looker/looker.ini)
-python3 scripts/looker-render-dashboard.py <dashboardId> /tmp/<name>/looker-<dash>.png
+# (1) SOURCE — render the live Looker dashboard (reads ~/.looker/looker.ini).
+#     Land it under dashboards/ (a gate-discovered path) so the anchors bar (gate 13) arms:
+mkdir -p /tmp/<name>/dashboards
+python3 scripts/looker-render-dashboard.py <dashboardId> /tmp/<name>/dashboards/looker-<dash>.png
+#     Then READ that PNG and transcribe its printed values into /tmp/<name>/source-anchors.json
+#     (>=5 anchors, EXACTLY as printed — every KPI, top-3 of each ranked list/table, one bucket
+#     per chart; schema: refs/source-anchors.md). Verified in 4-pre (gate 13) + fed to gate 14.
 
 # (2) MIGRATED — render the Sigma workbook page
 bash -c 'eval "$(scripts/get-token.sh)" && python3 scripts/sigma-export-png.py \
