@@ -4464,6 +4464,23 @@ layout.each do |dash|
                       else
                         render_agg(sigma_agg, "[Master/#{meas['name']}]")
                       end
+    # v5.4: NUMERIC aggregates over a TEXT column compile to type=error on the
+    # live workbook (Sum/Avg/Median are numeric-only). Tableau's CSV header
+    # order can hand a string column to the measure slot (the scatter
+    # y=Sum(text) class) — emit the raw column ref + a loud note instead of a
+    # dead column. Datatype from the twb column registry; unknown types pass.
+    if (tm = measure_formula.match(/\A(Sum|Avg|Median)\(\[Master\/([^\]]+)\]\)\z/))
+      tinfo = (meta['columns_by_guid'] || {}).values.find do |v|
+        v.is_a?(Hash) && v['caption'].to_s.strip.casecmp?(tm[2].strip)
+      end
+      tinfo ||= (meta['columns_by_guid'] || {})[tm[2]]
+      if tinfo.is_a?(Hash) && tinfo['datatype'].to_s == 'string'
+        warnings << "'#{cap}' measure #{tm[1]}([#{tm[2]}]) aggregates a TEXT column — emitted the raw column " \
+                    'instead (numeric aggregates over text compile to type=error); the source likely encodes ' \
+                    'this on label/shape/detail — VERIFY the tile or re-author'
+        measure_formula = "[Master/#{tm[2]}]"
+      end
+    end
 
     dim_col_obj = { 'id' => "x-#{el_id}", 'name' => dim['name'], 'formula' => dim_formula }
     if dim_trunc
@@ -5615,7 +5632,12 @@ end
 # the content in a background-color span (a pill/chip). Returns nil when nothing
 # visible remains. All colors are hex (var(--…) 400s). Pure/self-contained so
 # test-styled-text-body.rb can extract and eval it.
-def text_body_from_runs(runs, align: nil, bg: nil)
+# default_px (v5.4): a run WITHOUT an explicit fontsize inherits Tableau's
+# zone-sized rendering — for single-line title/banner zones the text is sized
+# to the zone box. Callers derive a px-true default from the zone's pixel
+# height (see the B4 call site) and thread it here; explicit run sizes always
+# win.
+def text_body_from_runs(runs, align: nil, bg: nil, default_px: nil)
   return nil if runs.nil? || runs.empty?
   # Split into paragraphs on hard-break runs. A break run often CARRIES text
   # (the parser marks any run containing newlines as break:true — "G\nD\nP"
@@ -5658,7 +5680,9 @@ def text_body_from_runs(runs, align: nil, bg: nil)
       esc = "<u>#{esc}</u>" if r['underline'] && !esc.strip.empty?
       styles = []
       styles << "color: #{r['color']}" if r['color']
-      styles << "font-size: #{r['font_size']}px" if r['font_size']
+      if (fs = r['font_size'] || default_px)
+        styles << "font-size: #{fs}px"
+      end
       styles << "font-family: #{r['font']}" if r['font']
       styles.empty? ? esc : %(<span style="#{styles.join('; ')}">#{esc}</span>)
     end.join
@@ -5772,8 +5796,26 @@ unless opts[:pages_mode] == :worksheet
                     'labels a KPI card — dropped (the Sigma kpi-chart renders its own title)'
         next
       end
+      # v5.4 px-true titles: a single-line title/banner zone whose runs carry
+      # NO explicit fontsize renders zone-sized in Tableau. Derive the px from
+      # the zone's own pixel height: a vertically-centered single text line
+      # occupies ~0.55 of its line box (standard 1.2–1.4em line height + zone
+      # padding — a typographic constant, not a fixture fit). Explicit run
+      # sizes always win; multi-line zones are left to Sigma defaults.
+      default_px = nil
+      if z['text_runs'].none? { |r| r['font_size'] } &&
+         z['text_runs'].none? { |r| r['break'] } &&
+         (ch = dash.dig('canvas_px', 'h')).is_a?(Numeric) && z['h_pct'].is_a?(Numeric)
+        zone_px_h = ch * z['h_pct'] / 100.0
+        if zone_px_h >= 18
+          default_px = [[(zone_px_h * 0.55).round, 11].max, 48].min
+          warnings << "dashboard '#{dash['dashboard']}' text zone #{z['id']}: no explicit run sizes — " \
+                      "derived font-size #{default_px}px from the zone's #{zone_px_h.round}px height (px-true title)"
+        end
+      end
       body = text_body_from_runs(z['text_runs'], align: z['text_align'],
-                                 bg: (z['is_pill'] ? z['fill_color'] : nil))
+                                 bg: (z['is_pill'] ? z['fill_color'] : nil),
+                                 default_px: default_px)
       next if body.nil?
       if z['text_runs'].any? { |r| r['text'].to_s.include?('<[') }
         warnings << "dashboard '#{dash['dashboard']}' text zone #{z['id']}: dynamic Tableau token(s) " \

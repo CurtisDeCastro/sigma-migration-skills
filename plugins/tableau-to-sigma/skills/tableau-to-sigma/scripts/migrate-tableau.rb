@@ -686,6 +686,19 @@ def sigma_run_wb!(cmd)
 end
 
 # Pull likely-offending field/column names out of a failed workbook build/POST log.
+def plausible_field_name?(s)
+  # v5.4: the capture regexes below take "everything to the newline/comma" —
+  # an error body like "Dependency not found. The usual cause is …" captured
+  # ". The usual cause is …" as a FIELD NAME (round-6: exit-4 offramps named
+  # the untranslatable field '. The usual'). A field name never starts with
+  # sentence punctuation, and Tableau captions are short — reject prose.
+  t = s.to_s.strip
+  return false if t.empty? || t.length > 80
+  return false if t.start_with?('.', ',', ';', ':', '-')
+  return false if t.split.length > 7
+  true
+end
+
 def cull_failed_fields(*logs)
   # Child output arrives in the LOCALE encoding (US-ASCII when LANG is unset —
   # common on fresh machines/CI), and Sigma error bodies carry UTF-8 field
@@ -695,11 +708,14 @@ def cull_failed_fields(*logs)
   text = text.force_encoding(Encoding::UTF_8) unless text.encoding == Encoding::UTF_8
   text = text.scrub('?') unless text.valid_encoding?
   names = []
-  text.scan(/Dependency not found:?\s*([^\n,]+)/i) { |m| names << m[0].strip }
+  # v5.4: the colon is MANDATORY — "Dependency not found. The usual cause…"
+  # (prose after a period) previously captured '. The usual' as a field name.
+  text.scan(/Dependency not found:\s*([^\n,]+)/i) { |m| names << m[0].strip }
   text.scan(/Unknown column\s*"?\[?([^"\]\n]+)\]?"?/i) { |m| names << m[0].strip }
   text.scan(/unmapped (?:derived[- ]dim|measure|field)\s*[:=]?\s*([^\n,]+)/i) { |m| names << m[0].strip }
   text.scan(/Circular column reference[^\n]*\[([^\]]+)\]/i) { |m| names << m[0].strip }
-  names.map { |n| n.gsub(/[\[\]"]/, '').strip }.reject(&:empty?).uniq
+  names.map { |n| n.gsub(/[\[\]"]/, '').strip }
+       .select { |n| plausible_field_name?(n) }.uniq
 end
 
 def yp(s) YAML.safe_load(s, permitted_classes: [Date, Time]) rescue {} end
@@ -2775,6 +2791,15 @@ if mechanical
   (opts[:master_cols] || []).each do |(nm, fx)|
     id = "m-#{nm.downcase.gsub(/[^a-z0-9]+/, '-').gsub(/^-|-$/, '')}"
     master_columns.reject! { |c| c['name'].casecmp?(nm) }
+    # v5.4: slug collision guard — two DIFFERENT names can slug identically
+    # (an alias like "NUM_SUBSCRIBERS" vs the auto-derived "Num Subscribers"),
+    # and duplicate column ids fail the POST. Suffix until unique.
+    base_id = id
+    n = 2
+    while master_columns.any? { |c| c['id'] == id }
+      id = "#{base_id}-#{n}"
+      n += 1
+    end
     master_columns << { 'id' => id, 'name' => nm, 'formula' => fx }
     # Register the override in the header->column regex map too (same pattern
     # shape as derive_master's entries) so chart dim headers AND shared-filter
