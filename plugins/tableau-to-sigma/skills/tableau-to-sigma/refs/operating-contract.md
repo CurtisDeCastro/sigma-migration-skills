@@ -37,6 +37,44 @@
 - Escape hatches (skip/allow flags) require a **named reason that goes in the report**.
 - If you've retried the same failing step ~2×, change approach or surface it — never grind.
 
+## "No data" and product-limitation discipline (field-proven; 2026-07)
+- **A chart that renders "No data" is YOUR build being broken until proven otherwise.**
+  Never conclude it is a platform/render artifact. **PRODUCT FACT:** Sigma's export
+  endpoints (CSV *and* PNG) execute the live warehouse query — a CSV that returns rows
+  proves the query runs, so a blank PNG over that element means the chart's own query
+  returns **zero rows**. "The export doesn't run queries" is false and is the exact
+  rationalization that shipped a dataless dashboard GREEN.
+- **The two real causes** (fix these, never wave them): a **control/filter literal that
+  matches no rows** (e.g. control value `"Americas & Caribbean"` vs a calc emitting
+  `"Americas and Caribbean"`), and a **calc comparing a NUMBER column to a string
+  literal** (`If([Year] = "2014", …)` compiles clean, renders NULL; a date-part filter as
+  a string list `["2015"]` against a `TIMESTAMP` never matches). `verify-anchors.rb`
+  reports empty displayed tiles (`dashboard_tiles_empty`); the gate refuses GREEN.
+- **Confirm a fix by looking at the RENDER, not the DM.** A correct DM formula is
+  necessary, not sufficient — re-render or re-run `verify-anchors.rb` and confirm the
+  tile shows data (`tiles_all_nonempty`).
+- **Never conclude a product limitation without a probe.** Before recording any
+  `sigma-capability` residual, prove it: run the same operation two ways (e.g. table
+  export vs chart render) and attach the evidence. `fidelity-loop.rb` refuses a
+  "no data / empty" delta classed as `sigma-capability`/`ui-only` without a `--probe`.
+- **The measurement is the anchors, not the actuals.** Never edit `source-anchors.json`
+  to match what the live workbook returns — that reconciles the ruler to the thing it
+  measures. A genuine re-transcription (you re-read the SOURCE image) uses
+  `--retranscribed "<why>"`, which logs the diff into the report. `verify-anchors.rb`
+  locks the file hash and refuses a silent edit.
+
+## Tooling discipline (don't burn the clock)
+- **Run `--help` before any flag you have not used this session.** Inventing a flag
+  (`--force-new-workbook`, `--dm-spec`, `--workdir` on the wrong script) costs a
+  round-trip each; the scripts print usage on an unknown flag.
+- **Stay on the orchestrated path.** Hand-editing generated specs and driving raw
+  POST/PUTs is where runs fall off the rails (the orchestrator regenerates specs and
+  overwrites hand fixes; a raw DM PUT can re-mint element ids and brick a live
+  workbook). If a STOP asks for one fix, do that one thing and re-run the same command.
+- **Long single-context runs drift.** If the handoff nudge fires (60/90/120m), write
+  `HANDOFF.md` and hand off — resume is cheap. A run pushed to GREEN deep in one
+  compaction-looped context is how a false GREEN happens.
+
 ## Done means
 - 0 error columns; every page rendered and visually matching the source; every KPI's
   number matching the source (or the delta explained); controls present and wired; no

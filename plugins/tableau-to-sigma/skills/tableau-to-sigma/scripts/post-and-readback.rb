@@ -361,6 +361,16 @@ if update_id
   put_body = style_normalize!(put_body, opts[:workdir], opts[:skip_style_normalize])
   put_body = ensure_theme!(put_body, opts[:workdir])
   verify_spec!(put_body, opts[:skip_spec_verify], update: true)
+  # W2.5: DM PUT id-stability guard. A Sigma dataModel PUT can RE-MINT element ids
+  # (field-caught 2026-07: AAAAAAAAAB -> b4pAUi0swJ), which silently bricks any
+  # dependent workbook — every tile then errors "graph resolver exceeded the
+  # iteration limit: 200" (~12 min of rebuild + an orphaned broken workbook). Snapshot
+  # the live DM element ids before the PUT so the reassignment is caught after.
+  $dm_pre_ids = nil
+  if opts[:type] == 'datamodel'
+    _pre = (JSON.parse(http(:get, format(GET_PATH, update_id), accept_json: true).body) rescue nil)
+    $dm_pre_ids = _pre.is_a?(Hash) ? (_pre['pages'] || []).flat_map { |p| (p['elements'] || []).map { |e| e['id'] } }.compact : nil
+  end
   resp = http(:put, format(GET_PATH, update_id), put_body)
   parsed = YAML.safe_load(resp.body, permitted_classes: [Date, Time])
   oid = parsed[ID_FIELD] || update_id
@@ -431,6 +441,53 @@ readback = lambda do
   [spec, cols_res, cols_json, labels_by_el]
 end
 spec, cols_res, cols_json, labels_by_el = readback.call
+
+# W2.5: detect a DM element-id REASSIGNMENT by the PUT and stop before a dependent
+# workbook ships bricked. Only meaningful on the datamodel update path.
+if opts[:type] == 'datamodel' && $dm_pre_ids && !$dm_pre_ids.empty?
+  post_ids = (spec['pages'] || []).flat_map { |p| (p['elements'] || []).map { |e| e['id'] } }.compact
+  vanished = $dm_pre_ids - post_ids # ids present before the PUT, gone after → re-minted/dropped
+  if vanished.any?
+    # A dependent workbook is one already POSTed in this workdir (it sources the DM
+    # by the OLD ids). Track via posted-workbooks.jsonl / migrate-state.json.
+    dep_wb = nil
+    begin
+      pwl = File.join(opts[:workdir], 'posted-workbooks.jsonl')
+      dep_wb = File.readlines(pwl).map { |l| (JSON.parse(l)['id'] rescue nil) }.compact.last if File.exist?(pwl)
+      if dep_wb.nil?
+        ms = File.join(opts[:workdir], 'migrate-state.json')
+        dep_wb = (JSON.parse(File.read(ms))['workbook_id'] rescue nil) if File.exist?(ms)
+      end
+    rescue StandardError
+      dep_wb = nil
+    end
+    warn ''
+    warn "⚠️  DM PUT REASSIGNED ELEMENT IDS — #{vanished.size} element id(s) that existed before the PUT are gone:"
+    warn "     #{vanished.first(6).join(', ')}#{vanished.size > 6 ? ' …' : ''}"
+    warn '     A Sigma dataModel PUT can re-mint element ids. Any workbook sourcing this DM by the OLD ids'
+    warn '     now points at dead elements and renders "graph resolver exceeded the iteration limit: 200".'
+    if dep_wb
+      # Record an off-ramp so the waiver budget / report see the forced situation.
+      begin
+        File.open(File.join(opts[:workdir], 'offramps.jsonl'), 'a') do |f|
+          f.puts(JSON.generate({ 'kind' => 'dm-put-id-reassignment', 'data_model_id' => oid,
+                                 'workbook_id' => dep_wb, 'vanished' => vanished.first(20),
+                                 'at' => Time.now.utc.iso8601 }))
+        end
+      rescue StandardError
+        nil
+      end
+      warn "     A dependent workbook is tracked (#{dep_wb}) and is now BROKEN. STOPPING so the run does not"
+      warn '     ship a bricked workbook GREEN. Recover by POSTing the workbook FRESH against the new DM'
+      warn '     element ids (a new workbook POST re-resolves its sources), or --force-new-workbook. Prefer'
+      warn '     POSTing the DM once and building the workbook AFTER, so the DM is never re-PUT under a live workbook.'
+      exit 1
+    else
+      warn '     No dependent workbook is tracked yet — safe to continue. POST the workbook AFTER this DM so'
+      warn '     it binds the new element ids (do not build the workbook, then re-PUT the DM).'
+    end
+  end
+end
 
 # Rec5 quarantine, census leg (opt-in, datamodel only): the POST succeeded but
 # specific live element(s) resolved columns to type=error. Defer those elements,
