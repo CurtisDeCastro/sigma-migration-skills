@@ -264,6 +264,16 @@ fi
 # gate (D5) still fails LOUDLY rather than accepting a blind attestation.
 # model_hint is free-form (e.g. "claude-opus-4-8").
 MODEL_HINT="${SIGMA_MODEL_HINT:-}"
+# W1.8 env-var hygiene: the flag is SIGMA_AGENT_VISION (UPPERCASE). A lowercase
+# `sigma_agent_vision` (copied verbatim from a task brief) is a silent no-op — it
+# was exactly why the 2026-07 run's visual gates reported "cannot legitimately
+# pass" and the agent then hand-edited doctor.json to force the flag. Detect the
+# common miscase, warn loudly, and HONOR it so no hand-edit is tempted.
+if [ -z "${SIGMA_AGENT_VISION:-}" ] && [ -n "${sigma_agent_vision:-}" ]; then
+  warn "env var 'sigma_agent_vision' is set (=${sigma_agent_vision}) but IGNORED — the flag is SIGMA_AGENT_VISION (uppercase)" \
+       "The visual gates read only the uppercase name; a lowercase copy is a silent no-op. Honoring it this run — fix your export to: SIGMA_AGENT_VISION=${sigma_agent_vision}"
+  SIGMA_AGENT_VISION="${sigma_agent_vision}"
+fi
 case "${SIGMA_AGENT_VISION:-}" in
   true|1|yes|TRUE|True) AGENT_VISION=true ;;
   '')

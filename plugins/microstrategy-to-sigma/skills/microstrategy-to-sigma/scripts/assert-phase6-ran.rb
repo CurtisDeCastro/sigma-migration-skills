@@ -1456,6 +1456,24 @@ if File.exist?(vv_sidecar)
       warn '       <tile>.tableau.png vs <tile>.sigma.png pair and mark "visual_verified": true.'
       exit 11
     end
+    # W1.4 contradiction guard: a tile attested visual_verified=true whose LIVE
+    # element export returns ZERO data rows is a false attestation — the exact
+    # 2026-07 bulk python one-liner that set visual_verified=true over "No data"
+    # tiles without reading the render. Cross-check the manifest against
+    # verify-anchors' measured per-element emptiness.
+    _av9 = (JSON.parse(File.read(File.join(opts[:tab], 'anchors-verdict.json'))) rescue nil)
+    if _av9.is_a?(Hash) && _av9['tiles'].is_a?(Array) && opts[:allow_empty_tiles].nil?
+      rows_by_id = _av9['tiles'].each_with_object({}) { |t, h| h[t['id'].to_s] = t['data_rows'] }
+      attested_empty = man.select { |m| m['visual_verified'] == true && rows_by_id[m['element_id'].to_s] == 0 }
+      if attested_empty.any?
+        warn "[FAIL] gate 9: #{attested_empty.size} tile(s) attested visual_verified=true but their live element"
+        warn '       export returns ZERO data rows — a false attestation over a "No data" render:'
+        attested_empty.first(8).each { |m| warn "         #{m['element_id']} #{m['worksheet'].inspect}" }
+        warn '       Fix the data path, re-run verify-anchors.rb, re-render, and re-verify honestly. A genuinely'
+        warn '       empty source chart is waived with --allow-empty-tiles "<reason citing the source PNG>".'
+        exit 11
+      end
+    end
     unverified = man.reject { |m| m['visual_verified'] }
     if unverified.any?
       warn "[FAIL] gate 9: #{unverified.size}/#{man.size} build-from-signals tile(s) NOT visually verified: " \

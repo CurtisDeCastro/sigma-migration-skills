@@ -122,6 +122,24 @@ if opts[:verdict] == 'pass'
     warn '         Record --verdict divergent with the same checklist, fix, re-render, re-judge.'
     exit 2
   end
+  # W1.4 contradiction guard: a PASS must not contradict the machine signal. If
+  # verify-anchors measured empty DISPLAYED tiles (charts return no rows), a
+  # "pass" is a false attestation over a "No data" render — the exact 2026-07
+  # move (record-visual-check PASS + 6x-pass checklist over a dataless render).
+  av_path = File.join(opts[:dir], 'anchors-verdict.json')
+  if File.exist?(av_path)
+    av = (JSON.parse(File.read(av_path)) rescue nil)
+    if av.is_a?(Hash) && av.key?('tiles_all_nonempty') && av['tiles_all_nonempty'] != true
+      empty = Array(av['dashboard_tiles_empty'])
+      warn "REFUSED: cannot record a visual PASS — verify-anchors measured #{empty.length} displayed tile(s)"
+      warn '         that export ZERO data rows (the charts render "No data"):'
+      empty.first(8).each { |t| warn "           #{t['id']} #{t['name'].inspect} [#{t['kind']}]" }
+      warn '         A visual "pass" over a dataless render is a false attestation. Fix the data path'
+      warn '         (filter literal / calc types), re-run verify-anchors.rb, then re-judge. A genuinely'
+      warn '         empty SOURCE chart is waived at the gate (--allow-empty-tiles), never by a pass here.'
+      exit 2
+    end
+  end
 end
 
 path = File.join(opts[:dir], 'parity-final.json')
