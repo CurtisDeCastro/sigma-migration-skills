@@ -29,6 +29,7 @@ require 'json'
 require 'optparse'
 require 'securerandom'
 require 'set'
+require_relative 'lib/coverage_catalog'
 
 opts = {}
 OptionParser.new do |o|
@@ -188,8 +189,30 @@ M = opts[:mname] || DMEL
 
 def nid(p = 'el'); "#{p}-" + SecureRandom.hex(5); end
 NUM = ->(fs) { { 'kind' => 'number', 'formatString' => fs } }
-AGG = { 'SUM' => 'Sum', 'AVERAGE' => 'Avg', 'MIN' => 'Min', 'MAX' => 'Max',
-        'COUNT' => 'Count', 'DISTINCT_COUNT' => 'CountDistinct', 'MEDIAN' => 'Median' }
+
+# ── documentation-grounded mapping catalogs (SINGLE SOURCE OF TRUTH) ──────────
+# Every enumerable classifier map (viz-kind KIND/QS_FALLBACK/QS_UNSUPPORTED derived at
+# line ~550, aggregation AGG below, control list-vs-date-range) is LOADED from
+# refs/catalogs/<dimension>.json — cited rows (QuickSight API-reference doc + Sigma
+# target) with a LOUD fallback on anything unmapped: no silent Sum/Avg, no name-substring
+# number-format guessing. NO inline mapping literal may bypass these catalogs (grep-
+# enforced by tests/test-grounding.rb). refs/quicksight-coverage.md is GENERATED from
+# them. Mirrors the merged Looker/Qlik pilot (build_workbook.py): catalog = data, code =
+# thin resolver. (beads-sigma-kvza)
+CATALOGS = Coverage.load_all(Coverage.default_catalog_dir(__FILE__))
+VIZ_CAT  = CATALOGS.fetch('viz-kind')
+AGG_CAT  = CATALOGS.fetch('aggregation')
+FMT_CAT  = CATALOGS.fetch('number-format')
+CTRL_CAT = CATALOGS.fetch('control')
+# QuickSight aggregation function -> Sigma aggregate, derived from aggregation.json (same
+# source->target pairs the old inline hash carried). The LOUD miss-handling lives at each
+# USE site (meas_col / qs_reference_lines) — never a silent `|| 'Sum'` / `|| 'Avg'` here.
+AGG = AGG_CAT.rows.each_with_object({}) { |r, h| h[r['source']] = r['sigma'] if r['sigma'] }.freeze
+# Loud notes raised by the top-level `def` classifiers (meas_col / fmt_for) that cannot
+# see the build_warnings local; folded into build_warnings before the sidecar is written.
+# Hash-shaped to match build_warnings. FMT_WARNED dedupes the per-column format notes.
+CLASSIFIER_WARNINGS = []
+FMT_WARNED = {}
 
 # QuickSight window / table-calc function names (must match convert-model.rb). A
 # calc field using any of these can't be a live Sigma formula — neutralize to Null.
@@ -231,6 +254,14 @@ def qs_expr_to_sigma(expr, dmel, params = {})
   # already in place, so this only rewrites function-call heads. Longest-first so
   # distinct_countIf matches before distinct_count and *If before the base. The negative
   # lookbehind + required '(' avoids touching identifiers/column names (RCA #9/#10).
+  # COMPOSITIONAL, cited: this in-expression function-head substitution (incl. the
+  # filtered *If variants) is NOT a flat one-key lookup, so it intentionally stays as code
+  # and is NOT flattened into refs/catalogs/aggregation.json. That catalog holds only the
+  # enumerable field-well AggregationFunction map (SimpleNumericalAggregation ->
+  # AGG). QuickSight/moment date-format tokens are handled by qs_datefmt_to_strftime above.
+  # Sources: QuickSight calc-field function reference
+  # https://docs.aws.amazon.com/quicksight/latest/user/functions-and-operators.html ;
+  # Sigma aggregate functions https://help.sigmacomputing.com/docs/aggregate-functions
   [%w[distinct_countIf CountDistinctIf], %w[distinct_count CountDistinct],
    %w[countIf CountIf], %w[sumIf SumIf], %w[avgIf AvgIf], %w[minIf MinIf], %w[maxIf MaxIf],
    %w[percentOfTotal PercentOfTotal], %w[count Count], %w[sum Sum], %w[avg Avg],
@@ -434,7 +465,16 @@ def qs_reference_lines(inner, calc, master_cols, dmel, m, title, warnings)
               dyn.dig('MeasureAggregationFunction', 'SimpleNumericalAggregation') || 'AVERAGE').to_s.upcase
       if col
         ref = master_ref(col, calc, master_cols, dmel)
-        formula = "#{AGG[aggk] || 'Avg'}([#{m}/#{ref['name']}])"
+        # aggregation is CATALOG-resolved (AGG from aggregation.json). On a miss, LOUDLY
+        # warn + skip the line — NEVER a silent `|| 'Avg'` (the old default quietly drew
+        # the reference line at the wrong aggregate).
+        sig_agg = AGG[aggk]
+        if sig_agg.nil?
+          warnings << { 'visual' => title, 'type' => 'ReferenceLine',
+                        'reason' => "dynamic reference-line aggregation '#{aggk}' has no documented Sigma mapping — line skipped (was silently defaulting to Avg); add a cited row to refs/catalogs/aggregation.json if it should map" }
+          next
+        end
+        formula = "#{sig_agg}([#{m}/#{ref['name']}])"
       end
     end
     if formula.nil? || formula.empty?
@@ -547,55 +587,34 @@ end
 # NAME (state/country/city/zip); GeospatialMapVisual maps to point-map only when it
 # carries real latitude+longitude fields (handled in the dispatch). LayerMapVisual
 # (multi-layer) has no clean single-element equivalent -> dropped with a warning.
-KIND = { 'KPIVisual' => 'kpi-chart', 'BarChartVisual' => 'bar-chart',
-         'LineChartVisual' => 'line-chart', 'PieChartVisual' => 'pie-chart',
-         'ComboChartVisual' => 'combo-chart', 'ScatterPlotVisual' => 'scatter-chart',
-         'TableVisual' => 'table', 'PivotTableVisual' => 'pivot-table',
-         'GaugeChartVisual' => 'kpi-chart', 'FunnelChartVisual' => 'bar-chart',
-         'TreeMapVisual' => 'bar-chart',
-         'FilledMapVisual' => 'region-map', 'GeospatialMapVisual' => 'region-map' }
-
-# QuickSight visual types Sigma has NO native equivalent for. Rather than dropping
-# them (which left whole dashboards empty - beads D18), we DATA-MIGRATE each one as a
-# Sigma fallback element built from the visual\'s underlying dims + measures, so the
-# query/data still migrates with parity. A clear per-visual warning is still recorded
-# (the chart KIND is the (c)-tail, not the data).
-#
-#   QS_FALLBACK maps the type -> the Sigma kind to approximate it with:
-#     - \'bar-chart\'  where a single category+measure shape reads sensibly as bars
-#       (waterfall: a running category total; histogram: a binned distribution that
-#       we approximate as a per-value bar - true auto-binning is still (c)-tail).
-#     - \'table\'      for everything multi-dimensional or non-cartesian (sankey: a
-#       source->dest->weight table; box-plot/word-cloud/radar/heat-map: the underlying
-#       grouped measure table). A table is always data-complete + query-parity.
-# Reason text is surfaced to STDERR + a sidecar warnings file either way.
-QS_UNSUPPORTED = {
-  'HeatMapVisual'       => 'Sigma has no heat-map element kind; migrated as a grouped table of the underlying measure',
-  'HistogramVisual'     => 'Sigma has no histogram element kind (auto-binning); approximated as a bar-chart of the measure (true binning is manual in Sigma)',
-  'BoxPlotVisual'       => 'Sigma has no box-plot element kind; migrated as a grouped table of the underlying values',
-  'WaterfallVisual'     => 'Sigma has no waterfall element kind; approximated as a bar-chart of the category totals',
-  'SankeyDiagramVisual' => 'Sigma has no sankey element kind; migrated as a source/destination/weight table',
-  'WordCloudVisual'     => 'Sigma has no word-cloud element kind; migrated as a grouped table of the term counts',
-  'RadarChartVisual'    => 'Sigma has no radar/spider element kind; migrated as a grouped table of the measure',
-  'LayerMapVisual'      => 'Sigma has no multi-layer map element kind (single-layer point/region-map only)',
-  'InsightVisual'       => 'QuickSight ML insight (forecast/anomaly/narrative) - no Sigma equivalent',
-  'CustomContentVisual' => 'QuickSight custom content (iframe/HTML/image embed) - re-author as a Sigma image/embed element',
-  'PluginVisual'        => 'QuickSight third-party plugin visual (e.g. Highcharts) - no Sigma equivalent',
-  'EmptyVisual'         => 'QuickSight placeholder (no chart configured) - nothing to build'
-}.freeze
-
-# Fallback Sigma kind for each unsupported QS type (D18 data-migration). Types absent
-# here (Insight / CustomContent / Plugin / Empty / LayerMap) have no underlying
-# dim+measure field-well to migrate, so they remain genuine drops with a warning.
-QS_FALLBACK = {
-  'WaterfallVisual'     => 'bar-chart',
-  'HistogramVisual'     => 'bar-chart',
-  'HeatMapVisual'       => 'table',
-  'BoxPlotVisual'       => 'table',
-  'SankeyDiagramVisual' => 'table',
-  'WordCloudVisual'     => 'table',
-  'RadarChartVisual'    => 'table'
-}.freeze
+# KIND / QS_FALLBACK / QS_UNSUPPORTED are DERIVED from refs/catalogs/viz-kind.json
+# (loaded above as VIZ_CAT), so this dispatch and refs/quicksight-coverage.md cannot
+# drift from a single cited source. Row classes (see the catalog's `description`):
+#   * NATIVE (no `unsupported_reason`)      -> KIND[type] = Sigma kind. Gauge/Funnel/
+#     TreeMap are native-dispatch approximations (Sigma has no gauge/funnel/treemap
+#     element) and carry a `notes` rationale in the catalog.
+#   * FALLBACK (`fallback:true`+reason)     -> QS_FALLBACK[type] = the approximation kind
+#     (bar/table) AND QS_UNSUPPORTED[type] = reason. Sigma has NO native equivalent, so
+#     the visual is DATA-MIGRATED from its underlying dims+measures with a loud warning
+#     (query/data parity preserved; the chart KIND is the (c)-tail, not the data).
+#   * DROP (`sigma:null`+reason)            -> QS_UNSUPPORTED[type] = reason only. No
+#     underlying dim+measure well to migrate (Insight/CustomContent/Plugin/Empty/
+#     LayerMap) -> a genuine drop with a loud warning. Reason text is surfaced to STDERR
+# + a sidecar warnings file either way. Same mapping the old inline hashes held.
+KIND = {}
+QS_FALLBACK = {}
+QS_UNSUPPORTED = {}
+VIZ_CAT.rows.each do |r|
+  if r['unsupported_reason']
+    QS_UNSUPPORTED[r['source']] = r['unsupported_reason']
+    QS_FALLBACK[r['source']] = r['sigma'] if r['fallback'] && r['sigma']
+  else
+    KIND[r['source']] = r['sigma']
+  end
+end
+KIND.freeze
+QS_FALLBACK.freeze
+QS_UNSUPPORTED.freeze
 build_warnings = []
 # Hidden GROUPED source tables emitted for scatter-charts (one row per point dim),
 # appended to the Data page next to the master. See the scatter branch below
@@ -680,12 +699,22 @@ qs_insight_text = lambda do |inner|
   "<p style=\"text-align: #{align}\"><span style=\"font-size: 16px\">#{prefix} #{value}</span></p>"
 end
 
+# number-format (beads-sigma-kvza): a Sigma number format may ONLY come from a real
+# QuickSight FormatConfiguration — NEVER guessed from the column NAME. The old body was
+# the disease: a column-NAME regex matcher that assigned a currency format to any name
+# containing revenue/profit/cost/etc, a percent format to margin/pct/etc, and a hardcoded
+# thousands-integer format to everything else. That name-substring guessing AND its silent
+# default are REMOVED. The builder does not yet parse FormatConfiguration, so this returns
+# nil (no format — Sigma applies its type default) and raises a LOUD, deduped note so a
+# real Sigma format can be applied. The D3 targets a FormatConfiguration would map to are
+# documented in refs/catalogs/number-format.json (Sigma data-types-and-formats).
 def fmt_for(name)
-  case name
-  when /margin|pct|percent|ratio|rate/i then '.1%'
-  when /revenue|profit|cost|sales|amount|price|discount/i then '$,.0f'
-  else ',.0f'
+  unless FMT_WARNED[name]
+    FMT_WARNED[name] = true
+    CLASSIFIER_WARNINGS << { 'visual' => '(format)', 'type' => 'NumberFormat',
+                             'reason' => "no QuickSight source format found for measure '#{name}' — shipped UNFORMATTED (Sigma type default); apply a Sigma number format if needed (documented D3 targets in refs/catalogs/number-format.json). Name-substring format guessing is intentionally disabled." }
   end
+  nil
 end
 
 # Infer a Sigma region-map regionType from the geo dimension's (raw) column name.
@@ -781,7 +810,9 @@ def meas_col(role, calc, mc, dmel, m)
       # aggregate itself as the measure (refs resolve to the master via the `m` prefix).
       calc[col].scan(/\{([^}]+)\}/).flatten.each { |bc| master_ref(bc.strip, calc, mc, dmel) }
       id = nid('m')
-      return [{ 'id' => id, 'formula' => expr, 'name' => col, 'format' => NUM.(fmt_for(col)) }, id]
+      col_h = { 'id' => id, 'formula' => expr, 'name' => col }
+      (fs = fmt_for(col)) && (col_h['format'] = NUM.(fs))
+      return [col_h, id]
     end
   end
   ref = master_ref(col, calc, mc, dmel); id = nid('m')
@@ -790,8 +821,19 @@ def meas_col(role, calc, mc, dmel, m)
     return [{ 'id' => id, 'formula' => 'Null', 'name' => ref['name'],
               'description' => ref['description'] }, id]
   end
-  [{ 'id' => id, 'formula' => "#{AGG[agg] || 'Sum'}([#{m}/#{ref['name']}])", 'name' => ref['name'],
-     'format' => NUM.(fmt_for(ref['name'])) }, id]
+  # aggregation is CATALOG-resolved (AGG from aggregation.json). On a miss, LOUDLY warn +
+  # neutralize to Null — NEVER a silent `|| 'Sum'` (the old default quietly turned an
+  # unmapped QuickSight aggregation, e.g. STDEV/VAR/PERCENTILE, into a wrong Sum number).
+  sig_agg = AGG[agg]
+  if sig_agg.nil?
+    CLASSIFIER_WARNINGS << { 'visual' => '(measure)', 'type' => 'Aggregation',
+                             'reason' => "QuickSight aggregation '#{agg}' on '#{ref['name']}' has no documented Sigma mapping — measure neutralized to Null (was silently defaulting to Sum); add a cited row to refs/catalogs/aggregation.json if it should map" }
+    return [{ 'id' => id, 'formula' => 'Null', 'name' => ref['name'],
+              'description' => "unmapped QuickSight aggregation '#{agg}' — re-author in Sigma" }, id]
+  end
+  col_h = { 'id' => id, 'formula' => "#{sig_agg}([#{m}/#{ref['name']}])", 'name' => ref['name'] }
+  (fs = fmt_for(ref['name'])) && (col_h['format'] = NUM.(fs))
+  [col_h, id]
 end
 
 # D12: a measure that resolves to a QuickSight window / table-calc field (runningSum,
@@ -974,7 +1016,12 @@ def build_qs_control(wrap, master_cols, calc, dmel, scope, unbound, seen_cols, w
   seen_cols[raw_col] = ctl_id
   el = { 'id' => nid('ctlel'), 'kind' => 'control', 'controlId' => ctl_id,
          'name' => label.to_s }
-  is_date = ctype == 'DateTimePicker' || ctype == 'RelativeDateTime' ||
+  # control kind is CATALOG-resolved (refs/catalogs/control.json): DateTimePicker /
+  # RelativeDateTime -> date-range, every other wrap type -> list (the documented
+  # default). The date-NAME heuristic stays as cited compositional code: a `list` control
+  # bound to a datetime column is silently stripped by the spec API, so a date-typed
+  # TARGET COLUMN must also become a date-range control regardless of the QS control type.
+  is_date = CTRL_CAT.target(ctype) == 'date-range' ||
             raw_col.to_s =~ /(^|_)(date|dt|timestamp)(_|$)/i
   if is_date
     # date target: a `list` control on a datetime column is silently stripped by the
@@ -1469,6 +1516,10 @@ File.write(map_out, JSON.pretty_generate(
 # Sigma can't recreate (sankey/radar/box-plot/waterfall/word-cloud/histogram/heat-map/
 # layer-map/insight-ML/custom-content/plugin). This is the (c)-tail record — a clear
 # "dropped, here's why" rather than a silent omission.
+# Fold in the loud de-silencing notes raised by the top-level `def` classifiers
+# (unmapped aggregation -> neutralized; measure shipped with no source number format).
+# These live in a top-level array because `def`s can't see the build_warnings local.
+build_warnings.concat(CLASSIFIER_WARNINGS)
 warn_out = opts[:out].sub(/\.json$/, '') + '.warnings.json'
 File.write(warn_out, JSON.pretty_generate('warnings' => build_warnings))
 
