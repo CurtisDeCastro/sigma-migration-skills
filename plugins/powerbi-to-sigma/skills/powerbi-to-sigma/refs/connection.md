@@ -15,15 +15,36 @@ The path that needs **no app and no IT toggle**: device-code login against a Mic
 ```python
 import truststore; truststore.inject_into_ssl()   # MANDATORY — see TLS note
 import msal, requests
+_tenant = os.environ.get("PBI_TENANT", "organizations")  # override for guest/B2B — see below
 app = msal.PublicClientApplication(
     "ea0616ba-638b-4df5-95b9-636659ae5121",          # well-known "Power BI Desktop" public client
-    authority="https://login.microsoftonline.com/organizations",
+    authority=f"https://login.microsoftonline.com/{_tenant}",
     token_cache=<SerializableTokenCache from /tmp/pbiauth/cache.bin>)
 flow = app.initiate_device_flow(scopes=["https://api.fabric.microsoft.com/.default"])
 # print flow["verification_uri"] + flow["user_code"]; user signs in once
 res  = app.acquire_token_by_device_flow(flow)        # token aud=api.fabric.microsoft.com, scp=user_impersonation
 ```
 `scripts/fabric-extract.py` (read) and `scripts/fabric-auth-check.py` (write-capability/capacity probe) implement this with a persistent cache + silent re-auth.
+
+## Cross-tenant / guest (B2B) — `--tenant` (#347)
+The default `organizations` authority always authenticates into the caller's **home**
+tenant. When the report lives in a **different** tenant — the normal consultant/partner
+case where you're a **guest (B2B)** in a client's tenant — a home-tenant token makes every
+Fabric call 404 as `WorkspaceNotFound`, even though you can open the report in a browser.
+
+Target the report's tenant with `--tenant` (or `PBI_TENANT`). It accepts a raw tenant GUID
+**or** a pasted report URL (the `ctid=<guid>` query param is extracted automatically):
+```
+# the tenant GUID is the ctid= in the report URL:  https://app.powerbi.com/.../reports/<id>?ctid=<TENANT>
+python scripts/fabric-extract.py --tenant <TENANT-GUID-or-report-URL> --report "<name>" ...
+# or, driving the whole pipeline:
+ruby scripts/migrate-powerbi.rb --tenant <TENANT> ...   # exported as PBI_TENANT to every PBI child
+```
+The token cache is **namespaced per tenant** (`/tmp/pbiauth/cache-<tenant>.bin`) so a guest
+token never collides with the cached home-tenant token. `--tenant` is available on
+`fabric-extract.py`, `fabric-extract-batch.py`, `migrate-powerbi.rb`,
+`pbi_import_to_snowflake.py`, and the assessment scripts (`probe-admin.py`,
+`fabric-inventory.py`); the orchestrator-invoked helpers inherit `PBI_TENANT` from the env.
 
 ## TLS inspection — the gotcha that bit us
 Corp network MITM-inspects `api.fabric.microsoft.com` → Python raises `CERTIFICATE_VERIFY_FAILED: self-signed certificate in certificate chain`. Fix: **`truststore.inject_into_ssl()` as the first import** (uses the macOS keychain, which trusts the corp root CA). Note `login.microsoftonline.com` is *not* inspected (proxy bypass), so msal auth succeeds even without truststore — only the API calls fail. Always inject.

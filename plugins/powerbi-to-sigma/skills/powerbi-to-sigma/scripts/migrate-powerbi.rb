@@ -129,6 +129,10 @@ OptionParser.new do |o|
   o.on('--workspace ID')       { |v| opts[:ws] = v }
   o.on('--dataset ID')         { |v| opts[:dataset] = v }
   o.on('--skip-freshness')     {     opts[:skip_fresh] = true }
+  # #347: target a report/model in a DIFFERENT tenant than your HOME tenant
+  # (guest / B2B). A raw tenant GUID, or a pasted report URL (ctid=... parsed).
+  # Threaded to every Power BI child via ENV['PBI_TENANT'] (they inherit env).
+  o.on('--tenant ID')          { |v| opts[:tenant] = v }
   # Phase E (opt-in) — Enhance. NEVER runs without --enhance; with --enhance
   # but no --enhance-accept the run stops at exit 14 with the scan proposals
   # (present them per-item to the human, e.g. AskUserQuestion), then re-run
@@ -143,6 +147,14 @@ OptionParser.new do |o|
   o.on('--reuse-dm ID')        { |v| opts[:reuse_dm] = v }
   o.on('--no-reuse')           {     opts[:no_reuse] = true }
 end.parse!
+
+# #347: publish the target tenant into the env so EVERY Power BI child process
+# (fabric-extract.py, pbi-freshness.py, phase6 harness, …) inherits it and
+# authenticates against the report's tenant instead of the caller's home tenant.
+if opts[:tenant]
+  ctid = opts[:tenant][/[?&]ctid=([0-9a-fA-F-]{36})/, 1]
+  ENV['PBI_TENANT'] = ctid || opts[:tenant]
+end
 
 VENDORED_PBI = File.expand_path('../converter/powerbi.mjs', __dir__)
 if opts[:print_converter]
@@ -159,11 +171,15 @@ end
 CONNECT_HINT = <<~HINT.freeze
   Extract them by CONNECTING to Power BI (device-code login, no Entra app):
       python scripts/fabric-extract.py --report "<report name>" [--workspace "<ws id|name>"] \\
+        [--tenant "<tenant GUID | report URL with ctid=...>"] \\
         --out-dir <WORK> --report-out-dir <WORK> --report-bundle <WORK>/report-bundle.json
   It prints a device code + https://microsoft.com/devicelogin — the USER signs in
   once, then re-run this command with the extracted --tmsl (model.bim) + --pbir
   (report-bundle.json). See refs/connection.md. Do NOT hand-author a workbook spec
   or proceed without the model — if you can't extract it, STOP and tell the user.
+  Cross-tenant (guest/B2B): if the report lives in a client's tenant, pass
+  --tenant <that tenant GUID or the ctid= in the report URL> here AND to
+  fabric-extract.py, or every Fabric call 404s as WorkspaceNotFound.
 HINT
 abort "FATAL: missing --tmsl (the Power BI semantic model, TMSL/model.bim).\n#{CONNECT_HINT}" unless opts[:tmsl]
 abort "FATAL: --tmsl not found: #{opts[:tmsl]}\n#{CONNECT_HINT}" unless File.exist?(opts[:tmsl])

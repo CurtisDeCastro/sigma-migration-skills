@@ -44,9 +44,14 @@ ap.add_argument("--out-root", default="/tmp/pbi-batch")
 ap.add_argument("--pool", type=int, default=4,
                 help="concurrent definition fetches (hard cap 4 — Fabric per-principal throttling)")
 ap.add_argument("--no-cache", action="store_true", help="bypass the estate-map session cache")
+ap.add_argument("--tenant", default=None,
+                help="target tenant when reports live in a DIFFERENT tenant than your home tenant "
+                     "(guest/B2B). A raw tenant GUID, or a pasted report URL (ctid=... is extracted).")
 ARGS = ap.parse_args()
 if not ARGS.reports and not ARGS.all:
     ap.error("need --reports or --all")
+if ARGS.tenant:
+    os.environ["PBI_TENANT"] = fab.normalize_tenant(ARGS.tenant)
 
 
 def slug(s):
@@ -63,7 +68,7 @@ def main():
     # ---- estate map (session cache -> live parallel enumeration) -------------
     estate = None if ARGS.no_cache else fab.load_estate_cache()
     if estate:
-        print(f"[estate-cache] using {fab.ESTATE_CACHE}", flush=True)
+        print(f"[estate-cache] using {fab.estate_cache_path()}", flush=True)
     else:
         estate = fab.enumerate_estate(tok, timings=tm)
         fab.save_estate_cache(estate)
