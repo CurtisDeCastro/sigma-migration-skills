@@ -11,6 +11,56 @@ Sigma denorm element suffixes joined-table columns with the relationship name
 derives it from the model TML itself, so it works for ANY model.
 """
 import json, re, secrets, string
+import os, sys
+
+# ── documentation-grounded mapping catalogs (beads-sigma-kvza) ────────────────
+# The tile/format/aggregation/control classifiers below are DATA-driven: every
+# enumerable ThoughtSpot->Sigma map is loaded from refs/catalogs/<dim>.json (the
+# single source of truth), with a LOUD fallback on anything unmapped. NO inline
+# mapping literal may bypass these catalogs (grep-enforced by
+# tests/test_grounding.py). The human-readable coverage matrix in
+# refs/thoughtspot-coverage.md is GENERATED from these files. Loader:
+# shared/lib/coverage_catalog.py (synced to scripts/lib/); catalog = data,
+# code = thin resolver + cited compositional predicates.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
+import coverage_catalog as _cc  # noqa: E402
+_CAT_DIR = _cc.default_catalog_dir(__file__)
+VIZ_CAT  = _cc.load(_CAT_DIR, "viz-kind")        # TS chart_type   -> Sigma element kind
+FMT_CAT  = _cc.load(_CAT_DIR, "number-format")   # currency ISO    -> Unicode symbol
+AGG_CAT  = _cc.load(_CAT_DIR, "aggregation")     # TS aggregation  -> Sigma aggregate fn
+CTRL_CAT = _cc.load(_CAT_DIR, "control")         # TS filter op    -> Sigma control mode
+
+# Loud-fallback sink. resolve_or_warn() appends a standardized warning here on a
+# miss (mirrors looker build_workbook.py's threaded `warnings` list); drained by
+# the caller (or a test) and echoed to STDERR so a CLI run surfaces it too.
+_WARNINGS = []
+
+def drain_warnings():
+    """Pop the loud unmapped-construct warnings accumulated since the last drain."""
+    out = list(_WARNINGS)
+    _WARNINGS.clear()
+    return out
+
+def _resolve_or_warn(cat, key, context=""):
+    """Resolve `key` in `cat`; on a miss append a LOUD warning to _WARNINGS AND
+    echo it to STDERR, then return None so the caller does an EXPLICIT fallback /
+    degrade (never a silent wrong default). Returns the catalog row on a hit."""
+    n = len(_WARNINGS)
+    row = cat.resolve_or_warn(key, _WARNINGS, context=context)
+    if row is None and len(_WARNINGS) > n:
+        sys.stderr.write(_WARNINGS[-1] + "\n")
+    return row
+
+def _resolve_agg(token, context=""):
+    """ThoughtSpot aggregation token -> Sigma aggregate fn via the aggregation
+    catalog. An UNSPECIFIED token defaults to the ThoughtSpot documented default
+    SUM as the SOURCE token before lookup (data-grounded, per
+    docs.thoughtspot.com/cloud/latest/data-modeling-aggreg-additive). A token that
+    is PRESENT but NOT in the catalog WARNS loudly and falls back to 'Sum'
+    EXPLICITLY — never a silent wrong Sum default (beads-sigma-kvza)."""
+    tok = token or "SUM"
+    row = _resolve_or_warn(AGG_CAT, tok, context=context)
+    return row["sigma"] if (row and row.get("sigma")) else "Sum"
 
 SIGMA_LOWERCASE_WORDS = {'a','an','the','and','but','or','for','nor','so','yet',
                          'at','by','in','of','on','to','up','as','into','via','per'}
@@ -45,14 +95,23 @@ def drain_scatter_sources():
     _SCATTER_SRC.clear()
     return out
 
-_CUR = {"USD": "$", "CAD": "$", "AUD": "$", "NZD": "$", "EUR": "€", "GBP": "£",
-        "JPY": "¥", "CNY": "¥", "INR": "₹", "KRW": "₩", "BRL": "R$"}
+# Currency ISO-4217 -> Unicode symbol. DERIVED from refs/catalogs/number-format.json
+# (the single source of truth); an ISO not in the table falls back to the literal
+# ISO code + space below (explicit, source-faithful — never a name-substring guess).
+_CUR = {r["source"]: r["sigma"] for r in FMT_CAT.rows}
 
 def ts_format_to_sigma(pattern, currency_iso=None):
     """Map a ThoughtSpot column `format_pattern` (Java DecimalFormat, e.g. '#,##0.00',
     '0.0%') + optional `currency_type.iso_code` to a Sigma column format. The pattern
     never carries a currency symbol (that's currency_type) — so a '$' only appears
-    when the source actually set a currency. Returns None if neither is set."""
+    when the source actually set a currency. Returns None if neither is set.
+
+    Compositional (stays as code, not a flat catalog): the pattern is parsed for
+    decimals/grouping/percent per ThoughtSpot's DecimalFormat number formatting
+    (https://docs.thoughtspot.com/cloud/latest/data-modeling-patterns —
+    'currency symbols are not supported in number format patterns'); only the
+    ISO-code -> symbol table is enumerable (see _CUR / number-format.json). Emits a
+    Sigma format object (https://help.sigmacomputing.com/docs/data-types-and-formats)."""
     if not pattern and not currency_iso:
         return None
     pct = "%" in (pattern or "")
@@ -557,15 +616,16 @@ def parse_filters(search_query):
     return out
 
 _NUM = lambda fs: {"kind": "number", "formatString": fs}
-KIND = {"KPI": "kpi-chart", "COLUMN": "bar-chart", "BAR": "bar-chart", "LINE": "line-chart",
-        "STACKED_COLUMN": "bar-chart", "STACKED_BAR": "bar-chart",
-        "AREA": "area-chart", "STACKED_AREA": "area-chart",
-        "ADVANCED_COLUMN": "table", "TABLE": "table"}
+# ThoughtSpot chart_type -> Sigma element kind. DERIVED from refs/catalogs/viz-kind.json
+# (the single source of truth); direct-mapped rows (no `no_sigma_equiv`) feed KIND.
+# A genuinely UNKNOWN chart string (not in the catalog) warns+degrades to a flagged
+# table at the use site (see _element_core) — never a silent bar-chart.
+KIND = {r["source"]: r["sigma"] for r in VIZ_CAT.rows if not r.get("no_sigma_equiv")}
 
 # ThoughtSpot chart types Sigma cannot faithfully reproduce → flagged degrade to
-# table (see _element_core). Keep in sync with the assessment's unsupported list.
-_NO_SIGMA_EQUIV = {"WATERFALL", "FUNNEL", "TREEMAP", "HEATMAP", "HISTOGRAM", "GAUGE",
-                   "SANKEY", "PARETO", "CANDLESTICK", "SPIDER_WEB", "RADAR"}
+# table (see _element_core). DERIVED from the `no_sigma_equiv` rows of
+# refs/catalogs/viz-kind.json (keep the assessment's unsupported list in that catalog).
+_NO_SIGMA_EQUIV = {r["source"] for r in VIZ_CAT.rows if r.get("no_sigma_equiv")}
 
 def _region_type(name):
     # Infer a Sigma region-map regionType from the geo dimension's name. Sigma's
@@ -825,7 +885,7 @@ def _element_core(spec, resolver, master="OFV"):
         if mt and mt.get("kind") == "window":         # FLAGGED: inner raw aggregate fallback
             inner = window_inner_ref(mt.get("expr")) or b
             return f"Sum([{master}/{_resolve(resolver, inner)['friendly']}])"
-        agg = TS_AGG_TO_SIGMA.get((mt or {}).get("agg") or "SUM", "Sum")
+        agg = _resolve_agg((mt or {}).get("agg"), context=b)
         return f"{agg}([{master}/{_resolve(resolver, b)['friendly']}])"
 
     def mfmt(b):
@@ -853,7 +913,7 @@ def _element_core(spec, resolver, master="OFV"):
             # over OFV over-counts (chasm trap). ThoughtSpot aggregates at the
             # OWNING table's grain — source the DM's raw dim-table element.
             de = dim_els[tbl]
-            agg = TS_AGG_TO_SIGMA.get(mt0.get("agg") or ent.get("agg") or "SUM", "Sum")
+            agg = _resolve_agg(mt0.get("agg") or ent.get("agg"), context=meas[0])
             return {"id": nid(), "kind": "kpi-chart", "name": name,
                     "source": {"dataModelId": resolver.get("__dm_id__"),
                                "elementId": de["id"], "kind": "data-model"},
@@ -977,10 +1037,24 @@ def _element_core(spec, resolver, master="OFV"):
                   "format": mfmt(m)} for m in meas]
         return {"id": nid(), "kind": "table", "source": src, "columns": cols,
                 "name": f"{name} [{chart} → table: no Sigma chart equivalent]"}
+    # Generic axis-chart branch: COLUMN/BAR/LINE/AREA (+ stacked) map via KIND.
+    # A chart string that reached here yet is NOT in the viz-kind catalog is a
+    # GENUINELY UNKNOWN ThoughtSpot type (known-unsupported types were caught by
+    # _NO_SIGMA_EQUIV above). Silently coercing it to a bar-chart MISREPRESENTS the
+    # data, so warn LOUDLY + degrade to a flagged table — same posture as the
+    # _NO_SIGMA_EQUIV path — never a silent bar (beads-sigma-kvza).
+    kind = KIND.get(chart)
+    if kind is None:
+        _resolve_or_warn(VIZ_CAT, chart, context=name)
+        cols = [{"id": nid("c"), "formula": dref(d), "name": d} for d in dims]
+        cols += [{"id": nid("c"), "formula": mref(m), "name": m,
+                  "format": mfmt(m)} for m in meas]
+        return {"id": nid(), "kind": "table", "source": src, "columns": cols,
+                "name": f"{name} [{chart} → table: unknown ThoughtSpot chart type, no Sigma mapping]"}
     x = nid("x"); cols = [{"id": x, "formula": dref(dims[0]), "name": dims[0]}]; ymids = []
     for m in meas:
         y = nid("y"); cols.append({"id": y, "formula": mref(m), "name": m, "format": mfmt(m)}); ymids.append(y)
-    el = {"id": nid(), "kind": KIND.get(chart, "bar-chart"), "name": name, "source": src,
+    el = {"id": nid(), "kind": kind, "name": name, "source": src,
           "columns": cols, "xAxis": {"columnId": x}, "yAxis": {"columnIds": ymids}}
     if color_dim:
         cc = nid("c"); cols.append({"id": cc, "formula": dref(color_dim), "name": color_dim})
@@ -998,8 +1072,10 @@ def _element_core(spec, resolver, master="OFV"):
 # so the dropdown populates from the data, AND carries a `filters` target so the
 # selection propagates to every chart that sources the master (the single shared
 # OFV master = global reach, matching the Liveboard's cross-tile semantics).
-_TS_FILTER_OP = {"IN": "include", "EQ": "include", "=": "include", "EQUALS": "include",
-                 "NOT_IN": "exclude", "NE": "exclude", "!=": "exclude", "NOT_EQUALS": "exclude"}
+# ThoughtSpot filter operator -> Sigma control filter MODE (include/exclude).
+# DERIVED from refs/catalogs/control.json (the single source of truth). An operator
+# not in the catalog warns loudly + falls back to include at the use site below.
+_TS_FILTER_OP = {r["source"]: r["sigma"] for r in CTRL_CAT.rows}
 
 def parse_liveboard_filters(lb):
     """Liveboard page filters → [{col, mode, values, type}]. Defensive about the
@@ -1028,7 +1104,11 @@ def parse_liveboard_filters(lb):
         if isinstance(vals, (str, int, float)):
             vals = [vals]
         is_date = bool(re.search(r"date|month|year|quarter|week|day|time", col, re.I))
-        out.append({"col": col, "mode": _TS_FILTER_OP.get(op, "include"),
+        # Resolve the operator via the control catalog; an UNKNOWN op WARNS loudly
+        # and falls back to include EXPLICITLY (never a silent include; beads-sigma-kvza).
+        oprow = _resolve_or_warn(CTRL_CAT, op, context=col)
+        mode = oprow["sigma"] if (oprow and oprow.get("sigma")) else "include"
+        out.append({"col": col, "mode": mode,
                     "values": [v for v in (vals or []) if v not in (None, "")],
                     "type": "date" if is_date else "list"})
     return out
@@ -1161,9 +1241,10 @@ _AGG_FN_RE = re.compile(
     r'std_deviation|stddev|variance|sum_if|count_if|average_if|max_if|min_if|unique_count_if)\s*\(', re.I)
 _UNIQUE_COUNT_RE = re.compile(r'\bunique\s+count\s*\(', re.I)
 
-TS_AGG_TO_SIGMA = {"SUM": "Sum", "AVERAGE": "Avg", "AVG": "Avg", "MIN": "Min", "MAX": "Max",
-                   "COUNT": "Count", "COUNT_DISTINCT": "CountDistinct", "MEDIAN": "Median",
-                   "STD_DEVIATION": "StdDev", "VARIANCE": "Variance"}
+# ThoughtSpot aggregation token -> Sigma aggregate fn. DERIVED from
+# refs/catalogs/aggregation.json (the single source of truth). Resolution + the
+# loud no-silent-Sum fallback live in _resolve_agg() at the use sites.
+TS_AGG_TO_SIGMA = {r["source"]: r["sigma"] for r in AGG_CAT.rows}
 
 def formula_class(expr):
     if not expr:
@@ -1250,6 +1331,12 @@ def ts_expr_to_sigma(expr, ref):
                lambda m: f"In({m.group(1)}, {', '.join(v.strip() for v in m.group(2).split(','))})",
                s, flags=re.I)
     s = _UNIQUE_COUNT_RE.sub("CountDistinct(", s)
+    # Compositional (stays as code, not a flat catalog): rewrite ThoughtSpot formula
+    # FUNCTION names embedded in an expression to their Sigma equivalents. This is
+    # distinct from the TS_AGG_TO_SIGMA column-aggregation map (aggregation.json) —
+    # these are in-formula function tokens per ThoughtSpot's formula reference
+    # (https://docs.thoughtspot.com/cloud/latest/formula-reference), targeting Sigma
+    # functions (https://help.sigmacomputing.com/docs/aggregate-functions).
     for ts_fn, sig_fn in [("count_distinct", "CountDistinct"), ("unique_count", "CountDistinct"),
                           ("count_not_null", "CountDistinct"), ("std_deviation", "StdDev"),
                           ("average", "Avg"), ("avg", "Avg"), ("variance", "Variance"),
