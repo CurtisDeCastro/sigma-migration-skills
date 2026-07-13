@@ -1,10 +1,11 @@
 import truststore; truststore.inject_into_ssl()
 import sys, os, json, msal, requests
-CACHE="/tmp/pbiauth/cache.bin"
+_T=os.environ.get("PBI_TENANT","organizations")  # #347: guest/B2B tenant via PBI_TENANT
+CACHE=os.environ.get("PBI_TOKEN_CACHE") or ("/tmp/pbiauth/cache.bin" if _T=="organizations" else f"/tmp/pbiauth/cache-{_T}.bin")
 cache=msal.SerializableTokenCache()
 if os.path.exists(CACHE): cache.deserialize(open(CACHE).read())
 app=msal.PublicClientApplication("ea0616ba-638b-4df5-95b9-636659ae5121",
-    authority="https://login.microsoftonline.com/organizations", token_cache=cache)
+    authority=f"https://login.microsoftonline.com/{_T}", token_cache=cache)
 SCOPE=["https://analysis.windows.net/powerbi/api/.default"]
 tok=None
 for a in app.get_accounts():

@@ -24,13 +24,31 @@ Usage:
 """
 
 import truststore; truststore.inject_into_ssl()
-import sys, os, json, time, argparse, atexit
+import sys, os, json, time, argparse, atexit, re
 import requests
 import msal
 
-CACHE = "/tmp/pbiauth/cache.bin"
+
+def _tenant_from_argv(argv):
+    """#347: pre-read --tenant BEFORE the module-level MSAL app/cache are built.
+    Accepts a raw tenant GUID or a pasted report URL (ctid=... is extracted)."""
+    for i, a in enumerate(argv):
+        v = a.split("=", 1)[1] if a.startswith("--tenant=") else (
+            argv[i + 1] if a == "--tenant" and i + 1 < len(argv) else None)
+        if v:
+            m = re.search(r"[?&]ctid=([0-9a-fA-F-]{36})", v)
+            return m.group(1) if m else v
+    return None
+
+
+_t = _tenant_from_argv(sys.argv)
+if _t:
+    os.environ["PBI_TENANT"] = _t
+_TENANT = os.environ.get("PBI_TENANT", "organizations")  # default = caller's home tenant
+
+CACHE = os.environ.get("PBI_TOKEN_CACHE") or ("/tmp/pbiauth/cache.bin" if _TENANT == "organizations" else f"/tmp/pbiauth/cache-{_TENANT}.bin")
 CLIENT_ID = "ea0616ba-638b-4df5-95b9-636659ae5121"
-AUTHORITY = "https://login.microsoftonline.com/organizations"
+AUTHORITY = f"https://login.microsoftonline.com/{_TENANT}"
 PBI_SCOPE = ["https://analysis.windows.net/powerbi/api/.default"]
 PBI_BASE = "https://api.powerbi.com/v1.0/myorg"
 
@@ -66,6 +84,9 @@ def classify(status):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-interactive", action="store_true")
+    ap.add_argument("--tenant", default=None,
+                    help="target tenant (guest/B2B) — raw GUID or a report URL with ctid=...; "
+                         "pre-parsed at import (default: home tenant)")
     args = ap.parse_args()
     tok = get_token(interactive=not args.no_interactive)
     if not tok:

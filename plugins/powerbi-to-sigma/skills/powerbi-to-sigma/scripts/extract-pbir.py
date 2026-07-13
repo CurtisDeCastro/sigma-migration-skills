@@ -32,9 +32,10 @@ Idempotent: re-running overwrites signals.json; a fetch only re-downloads when
 import argparse, base64, json, os, sys, time
 
 CLIENT_ID = "ea0616ba-638b-4df5-95b9-636659ae5121"  # Power BI Desktop public client
-AUTHORITY = "https://login.microsoftonline.com/organizations"
+_TENANT   = os.environ.get("PBI_TENANT", "organizations")  # #347: guest/B2B tenant via PBI_TENANT
+AUTHORITY = f"https://login.microsoftonline.com/{_TENANT}"
 SCOPES    = ["https://api.fabric.microsoft.com/.default"]
-CACHE     = "/tmp/pbiauth/cache.bin"
+CACHE     = os.environ.get("PBI_TOKEN_CACHE") or ("/tmp/pbiauth/cache.bin" if _TENANT == "organizations" else f"/tmp/pbiauth/cache-{_TENANT}.bin")
 FAB_BASE  = "https://api.fabric.microsoft.com/v1"
 
 # PBIR visualType -> Sigma element kind (research/powerbi-visual-layout.md §4e).
