@@ -52,7 +52,23 @@ require_relative 'lib/layout'
 require_relative 'lib/pbi_theme'
 require_relative 'lib/pbi_style'
 require_relative 'lib/pbi_conditional_formats'
+require_relative 'lib/coverage_catalog'
 include SigmaLayout
+
+# ---------------------------------------------------------------------------
+# Documentation-grounded mapping catalogs (beads-sigma-kvza). The dashboard
+# classifier's enumerable maps are LOADED from refs/catalogs/*.json (the single
+# source of truth, cited to Power BI + Sigma docs) rather than hardcoded here —
+# so the human-readable matrix in refs/powerbi-coverage.md can never drift and
+# every unmapped construct gets a LOUD fallback, never a silent wrong-default.
+# Loader: shared/lib/coverage_catalog.rb (synced to scripts/lib/). Mirrors the
+# beads-sigma-93ps contract: catalog = data, code = thin resolver/predicates.
+_CAT_DIR = Coverage.default_catalog_dir(__FILE__)
+VIZ_CAT = Coverage.load(_CAT_DIR, 'viz-kind')      # PBI kind token   -> Sigma element kind
+FMT_CAT = Coverage.load(_CAT_DIR, 'number-format') # PBI format cat.  -> Sigma d3 format string
+CTL_CAT = Coverage.load(_CAT_DIR, 'control')       # PBI slicer       -> Sigma control kind
+# aggregation.json is documentation-only (no hash to load: measure_formula reads
+# the aggregator from the master-map's explicit `agg`, never fabricates one).
 
 opts = {}
 OptionParser.new do |p|
@@ -237,13 +253,11 @@ NATIVE_VISUAL_TYPES = %w[card multiRowCard kpi textbox actionButton lineChart ar
                          lineStackedColumnComboChart pieChart donutChart scatterChart tableEx
                          pivotTable matrix slicer map filledMap shapeMap azureMap image].freeze
 
-SIGMA_KIND = {
-  'kpi' => 'kpi-chart', 'bar' => 'bar-chart', 'line' => 'line-chart',
-  'area' => 'area-chart', 'combo' => 'combo-chart', 'scatter' => 'scatter-chart',
-  'pie' => 'pie-chart', 'donut' => 'donut-chart',
-  'table' => 'table', 'pivot-table' => 'pivot-table', 'text' => 'text',
-  'control' => 'control', 'map' => 'map', 'image' => 'image'
-}.freeze
+# PBI kind token -> Sigma element kind. DERIVED from refs/catalogs/viz-kind.json
+# (the SIGMA_KIND hash was extracted VERBATIM into that catalog; these are the
+# same source->target pairs). The loud fallback on an unmapped/blank token lives
+# at the USE site (build_element), not here. beads-sigma-kvza.
+SIGMA_KIND = VIZ_CAT.rows.each_with_object({}) { |r, h| h[r['source']] = r['sigma'] }.freeze
 
 # PBI role -> (dim_role?, value_role?) per visual kind handled below.
 # A field_map entry may carry `alts` — alternative {master, ref[, agg]} resolutions
@@ -370,12 +384,18 @@ KIND_LABEL = {
 # Sigma format strings are d3-format syntax (e.g. ",.0f", "$,.0f", ".1%"),
 # NOT Excel masks ("#,##0") — the latter is rejected as "Invalid number format
 # string". Matches the converter's metric.format output (",.0f").
-PBI_FMT = {
-  'currency' => { 'format' => { 'kind' => 'number', 'formatString' => '$,.0f' } },
-  'percent'  => { 'format' => { 'kind' => 'number', 'formatString' => '.1%' } },
-  'comma'    => { 'format' => { 'kind' => 'number', 'formatString' => ',.1f' } },
-  'integer'  => { 'format' => { 'kind' => 'number', 'formatString' => ',.0f' } }
-}.freeze
+# PBI format category -> Sigma column format object. DERIVED from
+# refs/catalogs/number-format.json (the PBI_FMT hash was extracted verbatim;
+# `sigma` is the d3 formatString). beads-sigma-kvza.
+PBI_FMT = FMT_CAT.rows.each_with_object({}) do |r, h|
+  h[r['source']] = { 'format' => { 'kind' => 'number', 'formatString' => r['sigma'] } }
+end.freeze
+# COMPOSITIONAL predicate (stays as cited code, per beads-sigma-kvza): parses the
+# PBI format-HINT string (from signals 'formats' / master-map field 'format' — NOT
+# the column NAME, so this is not name-substring guessing) and returns one of the
+# grounded PBI_FMT entries above, or nil (ship unformatted — a benign default, no
+# silent concrete format is ever invented). The regexes classify the hint into a
+# catalog category; the actual d3 strings come only from number-format.json.
 def sigma_format(hint)
   return nil if hint.nil? || hint.to_s.empty?
   h = hint.to_s
@@ -699,7 +719,24 @@ def drop_unresolved_columns!(el, rec, kind)
 end
 
 def build_element(rec, fields, masters, extra_data = [])
-  kind = SIGMA_KIND[rec['sigma_kind']] || 'bar-chart'
+  # viz-kind resolution (grounded by refs/catalogs/viz-kind.json; SIGMA_KIND is
+  # derived from it). An UNMAPPED/blank kind token used to SILENTLY become a
+  # bar-chart via "|| 'bar-chart'". Now the miss WARNS before the explicit
+  # bar-chart fallback, and the substitution is RECORDED as an honest
+  # 'approximated' coverage entry below (the NATIVE_VISUAL_TYPES block, which
+  # also fires for the empty/unknown visualType this token would carry). This
+  # is the loud counterpart to extract-pbir.py's upstream
+  # VISUAL_KIND.get(vtype,'bar') coercion. beads-sigma-kvza.
+  kind = SIGMA_KIND[rec['sigma_kind']]
+  if kind.nil?
+    _vt = rec['visual_type'].to_s
+    _vt = 'unknown/blank' if _vt.empty?
+    warn "[build-workbook] WARN visual '#{rec['title'] || rec['visual_id']}': no documented " \
+         "viz-kind mapping for sigma_kind #{rec['sigma_kind'].inspect} (PBI visualType '#{_vt}') " \
+         '— approximated as bar-chart. Add a cited row to refs/catalogs/viz-kind.json if this ' \
+         'is a real Power BI visual.'
+    kind = 'bar-chart'
+  end
   if kind == 'map'
     t0 = rec['title'].to_s.strip
     kind = resolve_map_kind(rec, t0.empty? ? rec['visual_id'] : t0)
@@ -789,12 +826,20 @@ def build_element(rec, fields, masters, extra_data = [])
   # → bar/kpi). map/image carry their own, more specific coverage entries above,
   # so they're excluded from NATIVE_VISUAL_TYPES handling here. This is what makes
   # the coverage report honest about "looks like the source" vs "same numbers".
+  # beads-sigma-kvza: an EMPTY/unknown visualType used to be SILENTLY skipped
+  # here (the old `vt.empty? ||` guard) — but extract-pbir.py coerces an unknown
+  # visualType to the 'bar' token upstream (VISUAL_KIND.get(vtype,'bar')), so a
+  # blank/unknown visual shipped as an UN-ANNOUNCED bar-chart. Now EVERY miss —
+  # including an empty visual_type — warns + is recorded, not just non-empty ones.
   vt = rec['visual_type'].to_s
-  unless vt.empty? || NATIVE_VISUAL_TYPES.include?(vt)
-    record_unresolved(visual: name, pbi_type: vt, sigma_kind: kind,
+  unless NATIVE_VISUAL_TYPES.include?(vt)
+    shown_vt = vt.empty? ? 'unknown/blank' : vt
+    warn "[build-workbook] WARN visual '#{name}': PBI visualType '#{shown_vt}' has no native " \
+         "Sigma element kind — approximated as #{kind}."
+    record_unresolved(visual: name, pbi_type: shown_vt, sigma_kind: kind,
                       severity: 'approximated', recoverable: false,
-                      detail: "#{vt} has no native Sigma element kind — approximated as #{kind}",
-                      action: "Sigma has no native #{vt}; the data is preserved as a #{kind}. Accept or pick a different Sigma chart.")
+                      detail: "#{shown_vt} has no native Sigma element kind — approximated as #{kind}",
+                      action: "Sigma has no native #{shown_vt}; the data is preserved as a #{kind}. Accept or pick a different Sigma chart.")
   end
   master_id = master && masters[master] ? masters[master]['id'] : nil
   el = { 'id' => eid, 'kind' => kind, 'name' => name }
@@ -875,6 +920,10 @@ def build_element(rec, fields, masters, extra_data = [])
     el['kind'] = 'control'
     el['controlId'] = ctl_id
     el['name'] = name
+    # Control kind is COMPOSITIONAL (list vs date-range depends on the sliced
+    # column's TMSL type), so it stays as code — but the two target kinds are
+    # grounded in refs/catalogs/control.json (CTL_CAT), cited to the PBI slicer
+    # + Sigma control docs, so the literals can't drift. beads-sigma-kvza.
     if tmsl_date_column?(ent, leaf)
       # date-typed slicer -> date-range control. A `list` control bound to a
       # datetime column gets its filter targets SILENTLY STRIPPED by Sigma
@@ -882,11 +931,11 @@ def build_element(rec, fields, masters, extra_data = [])
       # date-range needs no `source` (columns come from `filters`) but DOES
       # require a flat `mode` — without it the POST 400s with the misleading
       # "Invalid kind: control" (live-verified 2026-06-12).
-      el['controlType'] = 'date-range'
+      el['controlType'] = CTL_CAT.target('slicer:date') # -> 'date-range'
       el['mode'] = 'between'
       el['includeNulls'] = 'when-no-value-is-selected'
     else
-      el['controlType'] = 'list'
+      el['controlType'] = CTL_CAT.target('slicer')      # -> 'list' (documented default)
       el['mode'] = 'include'
       el['selectionMode'] = 'multiple'
       el['values'] = []
