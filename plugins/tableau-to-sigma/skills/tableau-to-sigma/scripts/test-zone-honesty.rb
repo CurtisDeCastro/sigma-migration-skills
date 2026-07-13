@@ -83,21 +83,49 @@ plain_pie['cols_shelf'] = {
 gantt = JSON.parse(JSON.generate(base_zone)).merge(
   'id' => '3', 'caption' => 'Level Strip', 'chart_kind' => 'other', 'mark_class' => 'GanttBar', 'y_pct' => 30.0)
 
-layout = [{ 'dashboard' => 'Dash', 'is_story' => false, 'zones' => [donut, plain_pie, gantt] }]
+# KPI-adjacent sparkline: dual-instance measure shelf — full trend + a
+# conditional current-period highlight. Must plot the FULL series.
+spark = JSON.parse(JSON.generate(base_zone)).merge(
+  'id' => '4', 'caption' => 'Trend Mini', 'chart_kind' => 'area', 'mark_class' => 'Area', 'y_pct' => 60.0,
+  'aggregations' => { '[VAL]' => 'Sum', '[CalcHL]' => 'Sum', '[PUBDATE]' => 'Month-Trunc' },
+  'measures' => [{ 'column' => '[CalcHL]', 'derivation' => 'Sum' }, { 'column' => '[VAL]', 'derivation' => 'Sum' }],
+  'calculations' => [
+    { 'name' => '[CalcHL]', 'caption' => 'CY Val 4 Area', 'datatype' => 'integer', 'role' => 'measure',
+      'class' => 'tableau', 'formula' => 'IF [SomeBool] = TRUE Then [VAL] END' }
+  ])
+spark['rows_shelf'] = {
+  'raw' => "(#{FED}.[sum:VAL:qk] + #{FED}.[sum:CalcHL:qk])",
+  'fields' => [{ 'raw' => "#{FED}.[sum:VAL:qk] + #{FED}.[sum:CalcHL:qk]",
+                 'role' => 'measure', 'derivation' => 'sum', 'discrete' => false, 'guid' => 'CalcHL' }],
+  'dim_count' => 0, 'measure_count' => 1, 'cont_measure_count' => 1,
+  'has_measure_names' => false, 'has_measure_values' => false
+}
+spark['cols_shelf'] = {
+  'raw' => "#{FED}.[tmn:PUBDATE:qk]",
+  'fields' => [{ 'raw' => "#{FED}.[tmn:PUBDATE:qk]", 'role' => 'dim', 'derivation' => 'tmn', 'guid' => 'PUBDATE' }],
+  'dim_count' => 1, 'measure_count' => 0, 'cont_measure_count' => 0,
+  'has_measure_names' => false, 'has_measure_values' => false
+}
+
+layout = [{ 'dashboard' => 'Dash', 'is_story' => false, 'zones' => [donut, plain_pie, gantt, spark] }]
 meta = {
   'worksheets' => {}, 'stories' => [], 'shared_filters' => [], 'parameters' => [], 'column_aliases' => {},
   'columns_by_guid' => {
     'CalcA'   => { 'caption' => 'AVG(0)', 'formula' => 'AVG(0)' },
     'IS_PAID' => { 'caption' => 'Is Paid' },
     'NUM_SUBSCRIBERS' => { 'caption' => 'Num Subscribers' },
-    'Segment' => { 'caption' => 'Segment' }, 'Sales' => { 'caption' => 'Sales' }
+    'Segment' => { 'caption' => 'Segment' }, 'Sales' => { 'caption' => 'Sales' },
+    'CalcHL'  => { 'caption' => 'CY Val 4 Area', 'formula' => 'IF [SomeBool] = TRUE Then [VAL] END' },
+    'VAL'     => { 'caption' => 'Val' }, 'PUBDATE' => { 'caption' => 'Pub Date' }
   }
 }
 mmap = {
   '(?i)^Is Paid$' => { 'id' => 'm-paid', 'name' => 'Is Paid' },
   '(?i)^Num Subscribers$' => { 'id' => 'm-subs', 'name' => 'Num Subscribers' },
   '(?i)^Segment$' => { 'id' => 'm-seg', 'name' => 'Segment' },
-  '(?i)^Sales$' => { 'id' => 'm-sales', 'name' => 'Sales' }
+  '(?i)^Sales$' => { 'id' => 'm-sales', 'name' => 'Sales' },
+  '(?i)^Val$' => { 'id' => 'm-val', 'name' => 'Val' },
+  '(?i)^(?:Month of )?Pub Date$' => { 'id' => 'm-pd', 'name' => 'Pub Date' }
 }
 
 els = []
@@ -142,6 +170,16 @@ ge = els.find { |e| e['name'].to_s == 'Level Strip' }
 check(ge.nil?, 'GanttBar zone NOT auto-built as a stand-in bar', fails)
 check(log.include?("ZONE DROPPED / STAYS-MANUAL: 'Level Strip'") && log.include?("'GanttBar'"),
       'handoff names the zone AND the mark class', fails)
+
+puts 'sparkline dual-instance trend (full series, not the highlighted period)'
+sp = els.find { |e| e['name'].to_s == 'Trend Mini' }
+check(!sp.nil?, 'sparkline tile emitted', fails)
+sp_y = sp ? Array(sp.dig('yAxis', 'columnIds')) : []
+sp_formulas = sp ? (sp['columns'] || []).select { |c| sp_y.include?(c['id']) }.map { |c| c['formula'].to_s } : []
+check(sp_formulas.any? { |f| f == 'Sum([Master/Val])' },
+      "full-trend series emitted alongside the highlight (got #{sp_formulas.inspect})", fails)
+check(sp_y.size >= 2, "tile plots BOTH series (got #{sp_y.size})", fails)
+check(log.include?('multi-instance trend shelf'), 'overlay expansion is disclosed', fails)
 
 # ---- topo order (build_wb_spec) ---------------------------------------------
 puts 'data-page topo order (source before consumer)'

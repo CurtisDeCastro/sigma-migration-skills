@@ -554,6 +554,7 @@ module MechanicalSpecs
     tables = []
     claimed_el = {}
     used_entry = {}
+    rename_pairs = [] # [old_last, old_name, new_last, new_name, element]
     scored.each do |_overlap, ei, si, el, entry|
       next if claimed_el[ei] || used_entry[si]
       sf = entry['sf_table'].to_s.split('.')
@@ -562,6 +563,7 @@ module MechanicalSpecs
       claimed_el[ei] = true
       used_entry[si] = true
       old_last = (el.dig('source', 'path') || []).last.to_s
+      old_name = el['name'].to_s
       el['source']['path'] = sf
       el['name'] = display_name(new_last)
       unless old_last.empty? || old_last == new_last
@@ -569,10 +571,133 @@ module MechanicalSpecs
         (el['columns'] || []).each { |c| c['formula'] = c['formula'].to_s.gsub(pfx, "[#{new_last}/") }
         (el['metrics'] || []).each { |m| m['formula'] = m['formula'].to_s.gsub(pfx, "[#{new_last}/") }
       end
+      rename_pairs << [old_last, old_name, new_last, el['name'].to_s, el]
       (entry['columns'] || {}).each { |orig, landed| colmap[orig] = landed }
       tables << new_last
     end
-    { colmap: colmap, elements: claimed_el.size, tables: tables }
+
+    # v5.4: repair DERIVED elements' refs. A converter "View"/calc-table
+    # element references its base by the base's OLD identifier; the per-claim
+    # rewrite above only fixes the claimed element itself, leaving the derived
+    # element broken — the union-collapse orphan class. Rewrite refs on
+    # UNCLAIMED elements only, and only when the old identifier maps to
+    # EXACTLY ONE landed table — shared generic identifiers ("Extract" on
+    # every embedded datasource) are unattributable and stay as NAMED residue,
+    # never a guess.
+    claimed_ids = rename_pairs.map { |r| r[4].object_id }
+    { 0 => 2, 1 => 3 }.each do |old_idx, new_idx|
+      rename_pairs.group_by { |r| r[old_idx] }.each do |old, rs|
+        next if old.to_s.empty?
+        news = rs.map { |r| r[new_idx] }.uniq
+        next if news == [old]
+        if news.size > 1
+          warn "manifest remap: original identifier '#{old}' landed on #{news.size} tables — derived-element " \
+               'refs to it are unattributable and left as-is (repoint by hand / --table-mapping)'
+          next
+        end
+        pfx_old = /\[#{Regexp.escape(old)}\//
+        repl = "[#{news.first}/"
+        all_elements(model).each do |other|
+          next if claimed_ids.include?(other.object_id)
+          (Array(other['columns']) + Array(other['metrics'])).each do |c|
+            c['formula'] = c['formula'].gsub(pfx_old, repl) if c['formula'].is_a?(String)
+          end
+        end
+      end
+    end
+
+    # v5.4 (item: kind:'sql' FROM identifiers): Custom-SQL / FIXED-LOD helper
+    # elements embed the ORIGINAL workbook table identifier in their
+    # source.statement ("FROM ...'UDEMY COURSE$'") — repointing only
+    # warehouse-table elements left them querying a table that does not exist
+    # in the warehouse (field-confirmed twice; sanctioned recovery was a
+    # manual --table-mapping). Attribute each statement to a manifest entry by
+    # column-identifier overlap, then rewrite SINGLE-TABLE statements:
+    #   FROM <orig identifier>  → FROM <landed sf_table>
+    #   "orig col" / [orig col] → landed column name (manifest colmap)
+    # Multi-table SQL (JOINs / several FROMs) is named residue — never guessed.
+    sql_remapped = 0
+    all_elements(model).each do |el|
+      next unless el.dig('source', 'kind') == 'sql' && el.dig('source', 'statement').is_a?(String)
+      stmt = el['source']['statement']
+      idents = stmt.scan(/"([^"]+)"|\[([^\]]+)\]|'([^']+)'/).flatten.compact
+                   .map { |x| norm.call(x) }.reject(&:empty?).to_set
+      best = nil
+      entries.each do |entry|
+        keys = (entry['columns'] || {}).keys.map { |k| norm.call(k) }.to_set
+        ov = (idents & keys).size
+        best = [ov, entry] if ov.positive? && (best.nil? || ov > best[0])
+      end
+      next unless best
+      entry = best[1]
+      if stmt.scan(/\bFROM\b/i).size + stmt.scan(/\bJOIN\b/i).size > 1
+        warn "custom-SQL element '#{el['name']}' references multiple tables — NOT auto-remapped; " \
+             "repoint it with --table-mapping (landed table: #{entry['sf_table']})"
+        next
+      end
+      ident_pat = %q{(?:"[^"]+"|\[[^\]]+\]|'[^']+'|[A-Za-z0-9_$#]+)}
+      new_stmt = stmt.sub(/\bFROM\s+#{ident_pat}(?:\s*\.\s*#{ident_pat})*/i) { "FROM #{entry['sf_table']}" }
+      (entry['columns'] || {}).each do |orig, landed|
+        next if orig == landed
+        new_stmt = new_stmt.gsub(/"#{Regexp.escape(orig)}"/, landed.to_s)
+                           .gsub(/\[#{Regexp.escape(orig)}\]/, landed.to_s)
+      end
+      next if new_stmt == stmt
+      el['source']['statement'] = new_stmt
+      sql_remapped += 1
+    end
+
+    { colmap: colmap, elements: claimed_el.size, tables: tables, sql_elements: sql_remapped }
+  end
+
+  # v5.4: prune ORPHANED BROKEN elements from the converter model (the
+  # union-collapse leftover class). The union-of-one collapse and other
+  # relation rewrites can leave the converter emitting an element whose
+  # cross-refs name elements that no longer exist, with nothing referencing
+  # it — it compiles to type=error / 400s the POST while contributing
+  # nothing. Prune ONLY when BOTH hold:
+  #   (a) BROKEN: ≥1 formula ref [X/…] where X is neither an existing element
+  #       name nor one of the element's own SOURCE identities (its name, its
+  #       source path last segment, the sql-source 'Custom SQL' alias, or its
+  #       source element's name) — source-relative refs are valid;
+  #   (b) UNREFERENCED: no other element's formulas and no model relationship
+  #       name it (by name or id), and it is not the kept fact.
+  # Loud per-element log; returns the pruned names.
+  def prune_broken_orphans!(model, keep: nil)
+    els = all_elements(model)
+    names = els.map { |e| e['name'].to_s }.reject(&:empty?)
+    by_id = els.each_with_object({}) { |e, h| h[e['id'].to_s] = e }
+    pruned = []
+    els.each do |el|
+      el_name = el['name'].to_s
+      next if keep && el_name == keep.to_s
+      own = [el_name,
+             (el.dig('source', 'path') || []).last.to_s,
+             'Custom SQL',
+             by_id[el.dig('source', 'elementId').to_s] && by_id[el.dig('source', 'elementId').to_s]['name'].to_s]
+            .compact.reject(&:empty?)
+      refs = (Array(el['columns']) + Array(el['metrics']))
+             .flat_map { |c| c['formula'].to_s.scan(/\[([^\[\]\/]+)\/[^\[\]]*\]/).flatten }.uniq
+      broken = refs.reject { |r| names.include?(r) || own.include?(r) }
+      next if broken.empty?
+      referenced = els.any? do |other|
+        next false if other.equal?(el)
+        (Array(other['columns']) + Array(other['metrics'])).any? { |c| c['formula'].to_s.include?("[#{el_name}/") } ||
+          other.dig('source', 'elementId').to_s == el['id'].to_s
+      end
+      referenced ||= Array(model['relationships']).any? do |r|
+        blob = JSON.generate(r)
+        blob.include?(el['id'].to_s) || (!el_name.empty? && blob.include?(el_name))
+      end
+      next if referenced
+      pruned << el
+    end
+    pruned.each do |el|
+      (model['pages'] || []).each { |p| (p['elements'] || []).delete(el) }
+      warn "pruned ORPHANED BROKEN element '#{el['name']}' (#{el['id']}) from the DM spec — " \
+           'unreferenced, with cross-refs to non-existent elements (union-collapse leftover class)'
+    end
+    pruned.map { |e| e['name'].to_s }
   end
 
   # Run the Tableau→Sigma converter. Two backends, same output contract

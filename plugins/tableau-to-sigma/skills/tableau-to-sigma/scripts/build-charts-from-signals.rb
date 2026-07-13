@@ -5143,6 +5143,53 @@ layout.each do |dash|
           { 'columnId' => extra_meas_col['id'], 'type' => 'line' } :
           extra_meas_col['id'])
       end
+      # v5.4 KPI-adjacent SPARKLINE overlays: a trend tile whose measure shelf
+      # is a multi-instance EXPRESSION ("SUM(base) + SUM(conditional
+      # highlight)") plots the FULL date series with a highlighted current
+      # period. The single-field pick takes only ONE instance (the parser's
+      # expression-field guid is the LAST token — typically the conditional
+      # highlight), so the tile shipped the current period alone. Emit one y
+      # column per ADDITIONAL instance that resolves; an instance that doesn't
+      # translate is a NAMED note — the full trend must never silently reduce
+      # to a point.
+      if %w[line-chart area-chart].include?(kind) && chart_source_eid == opts[:master_id]
+        m_raw = [z.dig('rows_shelf', 'raw'), z.dig('cols_shelf', 'raw')].compact
+                .map(&:to_s).find { |r| r.include?('+') && r =~ /:qk/ }.to_s
+        toks = m_raw.scan(/\[([a-z]+):([^:\[\]]+):qk(?::\d+)?\]/i)
+        if toks.size > 1
+          nrm_sp = ->(x) { x.to_s.downcase.gsub(/[^a-z0-9]/, '') }
+          existing_f = (element['columns'] || []).map { |c| c['formula'].to_s.gsub(/\s+/, '') }
+          toks.each_with_index do |(deriv2, g2), ti|
+            info2 = (meta['columns_by_guid'] || {})[g2] || {}
+            cap2 = info2['caption'].to_s.strip
+            cap2 = g2 if cap2.empty?
+            # skip the instance the standard pick already bound
+            next if nrm_sp.call(cap2) == nrm_sp.call(meas['name']) || nrm_sp.call(cap2) == nrm_sp.call(meas_hdr)
+            f2 =
+              if (mc2 = map_column(cap2, mmap) || scope_map_column(cap2, mmap))
+                render_agg(SHELF_AGG_FOR_PREFIX[deriv2.to_s.downcase] || 'Sum', "[Master/#{mc2['name']}]")
+              elsif info2['formula'].to_s.strip != ''
+                translate_user_agg_formula(info2['formula'], mmap, meta['columns_by_guid'] || {}) ||
+                  (rl = translate_row_level_calc(info2['formula'], mmap, meta['columns_by_guid'] || {})) &&
+                  "Sum((#{rl}))"
+              end
+            if f2.nil? || f2 == false
+              warnings << "'#{cap}' trend overlay instance '#{cap2}' did not translate — the series ships " \
+                          'without this overlay (typically a parameter-bound period highlight); re-author it ' \
+                          'as a conditional measure if needed'
+              next
+            end
+            next if existing_f.include?(f2.gsub(/\s+/, ''))
+            oc = { 'id' => "y#{ti + 2}-#{el_id}", 'name' => cap2, 'formula' => f2 }
+            oc['format'] = meas_col_obj['format'] if meas_col_obj['format']
+            element['columns'] << oc
+            existing_f << f2.gsub(/\s+/, '')
+            y_column_ids << oc['id']
+            warnings << "'#{cap}' multi-instance trend shelf: emitted overlay series '#{cap2}' (#{f2[0, 80]}) — " \
+                        'the tile plots the full series, not just the highlighted period'
+          end
+        end
+      end
       element['yAxis'] = { 'columnIds' => y_column_ids }
 
       # Bar orientation (bead: bar-orientation). Tableau puts the DIMENSION on

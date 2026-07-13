@@ -1825,6 +1825,10 @@ if mechanical
       line "extract manifest remap: repointed #{rm[:elements]} element(s) onto landed table(s) " \
            "#{rm[:tables].join(', ')}; threaded #{rm[:colmap].size} column rename(s) into the phantom-filter"
     end
+    if rm[:sql_elements].to_i.positive?
+      line "extract manifest remap: rewrote FROM + column identifiers on #{rm[:sql_elements]} custom-SQL " \
+           'element(s) (single-table statements attributed by column overlap)'
+    end
   end
 
   # Fact hint for a MULTI-embedded-extract workbook: the datasource the dashboard
@@ -1843,6 +1847,15 @@ if mechanical
   fx = MechanicalSpecs.fixup_dm_spec(conv['model'])
   line "DM fixup: rewrote #{fx[:fixed]} formula(s); dropped #{fx[:dropped].size} unresolvable calc col(s)" if fx[:fixed].positive? || fx[:dropped].any?
   dropped_calcs = fx[:dropped]
+  # v5.4: prune orphaned BROKEN leftovers (union-collapse class) AFTER remap +
+  # fixup have had their chance to repair refs — strict double condition
+  # (broken cross-refs AND unreferenced), loud per-element log.
+  begin
+    pruned = MechanicalSpecs.prune_broken_orphans!(conv['model'])
+    line "DM prune: removed #{pruned.size} orphaned broken element(s): #{pruned.join(', ')}" if pruned.any?
+  rescue StandardError => e
+    line "WARN: orphan prune failed (#{e.message}) — model left as converted"
+  end
 
   # Pre-derive the master-map now (deterministic; uses the converter element
   # name — Phase 4 re-derives against the authoritative readback name). This lets

@@ -166,6 +166,41 @@ def style_normalize!(body_str, workdir, skip_reason)
   body_str
 end
 
+# v5.4: PATH-INDEPENDENT palette. Apply the source-derived theme to EVERY
+# workbook spec reaching this choke point — mechanical AND hand-authored
+# (the exit-4 recovery PUT shipped default-blue where the source declares its
+# own palette, because only build_wb_spec applied the theme). The derived
+# theme lives in the builder's output ('theme' key of chart-specs.json) or
+# its flat-mode sidecar (chart-specs-theme.json). No-op when the spec already
+# carries themeOverrides or no derived theme exists; never load-bearing.
+def ensure_theme!(body_str, workdir)
+  return body_str unless $opts_type == 'workbook'
+  spec = JSON.parse(body_str) rescue nil
+  return body_str unless spec.is_a?(Hash) && spec['pages']
+  return body_str if spec['themeOverrides'].is_a?(Hash) && spec['themeOverrides'].any?
+  theme = nil
+  side = File.join(workdir, 'chart-specs-theme.json')
+  main = File.join(workdir, 'chart-specs.json')
+  if File.exist?(side)
+    theme = JSON.parse(File.read(side)) rescue nil
+  elsif File.exist?(main)
+    cs = JSON.parse(File.read(main)) rescue nil
+    theme = cs['theme'] if cs.is_a?(Hash)
+  end
+  return body_str unless theme.is_a?(Hash) && theme.any?
+  require_relative 'lib/theme_derive'
+  ThemeDerive.apply!(spec, theme)
+  if spec['themeOverrides'].is_a?(Hash) && spec['themeOverrides'].any?
+    warn "theme: source-derived theme applied at post time (#{spec['themeOverrides'].keys.join(', ')}) — " \
+         'path-independent palette (the incoming spec carried none)'
+    return JSON.generate(spec)
+  end
+  body_str
+rescue StandardError => e
+  warn "WARN: theme-ensure hook failed (#{e.message}) — spec posted as provided"
+  body_str
+end
+
 # v5.0 preflight: POST /v2/workbooks/spec/verify — Sigma's own server-side
 # spec validation with NO persistence. Runs the real validator before the
 # create/update, so a spec defect surfaces as a clean local error instead of
@@ -324,6 +359,7 @@ if update_id
     end
   end
   put_body = style_normalize!(put_body, opts[:workdir], opts[:skip_style_normalize])
+  put_body = ensure_theme!(put_body, opts[:workdir])
   verify_spec!(put_body, opts[:skip_spec_verify], update: true)
   resp = http(:put, format(GET_PATH, update_id), put_body)
   parsed = YAML.safe_load(resp.body, permitted_classes: [Date, Time])
@@ -332,6 +368,7 @@ if update_id
   warn "PUT ok: #{ID_FIELD}=#{oid}"
 else
   post_body = style_normalize!(File.read(opts[:spec]), opts[:workdir], opts[:skip_style_normalize])
+  post_body = ensure_theme!(post_body, opts[:workdir])
   verify_spec!(post_body, opts[:skip_spec_verify])
   resp = http(:post, POST_PATH, post_body)
   parsed = YAML.safe_load(resp.body, permitted_classes: [Date, Time])
