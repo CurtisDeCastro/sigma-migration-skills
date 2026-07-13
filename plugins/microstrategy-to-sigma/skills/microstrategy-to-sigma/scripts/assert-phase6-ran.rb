@@ -1393,7 +1393,19 @@ else
     if opts[:allow_empty_tiles] && av['tiles_all_nonempty'] != true
       record_waiver.call('--allow-empty-tiles', 'gate 13 (empty displayed tiles)', opts[:allow_empty_tiles])
     end
-    tnote = av.key?('tiles_all_nonempty') ? (av['tiles_all_nonempty'] ? '; all displayed tiles return data' : '; EMPTY tiles ACCEPTED via --allow-empty-tiles') : ''
+    if av.key?('tiles_all_nonempty')
+      tnote = av['tiles_all_nonempty'] ? '; all displayed tiles return data' : '; EMPTY tiles ACCEPTED via --allow-empty-tiles'
+    else
+      # A verdict that predates the tile-emptiness measurement (no field) is a
+      # stale cross-version artifact — a fresh this-branch verify-anchors always
+      # writes it. Pass (it is a valid anchors verdict) but WARN so the gap is not
+      # silent; the all-embedded oracle path (above) independently fails closed on
+      # the absent field, and re-running verify-anchors measures emptiness.
+      tnote = ''
+      warn '[WARN] gate 13: anchors-verdict.json predates the tile-emptiness measurement (no'
+      warn '       tiles_all_nonempty field) — re-run verify-anchors.rb to measure displayed-tile'
+      warn '       emptiness (a stale verdict cannot confirm the charts render data).'
+    end
     puts "[OK] gate 13: source anchors verified — #{av['matched']}/#{av['checked']} printed source values " \
          "found in the live workbook exports at printed precision#{tnote}"
   end

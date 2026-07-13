@@ -199,22 +199,17 @@ if !opts[:finalize]
   puts "=" * 70
   puts ""
   if remaining.empty?
-    collectible = plan['charts'].select { |c| (c['sigma_columns'] || []).length >= 1 }
-    if collected.empty? && collectible.any?
-      # Every chart that HAD columns to query returned nothing from the pooled
-      # exporter. This is the loudest signal the live Sigma element exports are
-      # EMPTY — the exact false-GREEN precursor from the 2026-07 Macroeconomics
-      # run, where "ALL 0 chart actuals ... complete. No MCP queries needed." was
-      # printed over a dataless workbook. Do NOT phrase zero coverage as success.
-      puts "⚠️  PARITY POOL EMPTY — #{collectible.size} chart(s) had columns to query but the pooled"
-      puts "    exporter collected 0 actuals. The live Sigma charts are likely returning NO ROWS."
-      puts "    This is NOT parity. Verification is carried by the non-empty-chart gate (verify-anchors"
-      puts "    writes dashboard_tiles_empty) + the anchors oracle — and gate 2/13 FAIL if any dashboard"
-      puts "    tile exports 0 rows. Investigate filter literals / calc types before re-running."
-    elsif collected.empty?
-      # No collectible charts at all (every plan chart is dashboard-embedded /
-      # signal-only, 0 sigma_columns). Parity is legitimately deferred to the
+    # remaining == [] means either everything collectible was collected, OR there
+    # was nothing collectible (all plan charts are dashboard-embedded / signal-only,
+    # 0 sigma_columns — the all-embedded case). NB: "collectible charts exist but 0
+    # were collected" does NOT land here (those charts stay in `remaining`, routed to
+    # the agent-query path below); that broken-data-path state is caught downstream
+    # by verify-parity and the verify-anchors non-empty-chart gate.
+    if collected.empty?
+      # No exportable-view actuals at all: parity is legitimately deferred to the
       # anchors oracle — but chart emptiness is still gated downstream (verify-anchors).
+      # Do NOT phrase this as "complete. No MCP queries needed." (the 2026-07 vacuous
+      # success that helped a dataless workbook read as done).
       puts "No exportable-view actuals to collect (all charts dashboard-embedded / signal-only)."
       puts "#{actuals_path} is intentionally empty; value parity is carried by the anchors oracle +"
       puts "the non-empty-chart gate (verify-anchors), NOT by this pass."

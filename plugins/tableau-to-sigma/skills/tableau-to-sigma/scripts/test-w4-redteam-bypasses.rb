@@ -16,6 +16,11 @@ require 'tmpdir'
 require 'open3'
 require 'time'
 
+# Locale robustness: the gate scripts emit UTF-8 (arrows, em-dashes). Under a bare
+# LANG="" CI, capturing + regex-matching that output raises "invalid byte sequence
+# in US-ASCII". Tag read strings UTF-8 so the checks are locale-independent.
+Encoding.default_external = Encoding::UTF_8
+
 HERE = __dir__
 PASS = []
 FAIL = []
@@ -149,6 +154,31 @@ Dir.mktmpdir do |d|
   File.write(File.join(d, 'source-anchors.json'), JSON.pretty_generate('anchors' => reordered))
   _o2, _e2, s2 = Open3.capture3(*a1)
   ok(s1.success? && s2.success?, '(F) reorder/whitespace re-serialization of identical anchors does NOT false-refuse')
+end
+
+# --- (G) FALSE-NEGATIVE guard: a referenced dual-role CHART stays displayed -----
+# (review-caught: a referenced element was blanket-classed feeder. Only a base
+# TABLE that is referenced is a feeder; a referenced chart/kpi is still displayed
+# and its emptiness must be gated.)
+Dir.mktmpdir do |d|
+  Dir.mkdir(File.join(d, 'exports'))
+  # el-src is a CHART that el-derived sources from (dual role); el-src is EMPTY.
+  spec = { 'pages' => [{ 'id' => 'dash', 'elements' => [
+    { 'id' => 'el-src', 'kind' => 'chart', 'name' => 'Source Chart' },
+    { 'id' => 'el-derived', 'kind' => 'chart', 'name' => 'Derived', 'source' => { 'elementId' => 'el-src' } },
+    { 'id' => 'base', 'kind' => 'table', 'name' => 'Base' } ] }] }
+  File.write(File.join(d, 'wb.json'), JSON.generate(spec))
+  File.write(File.join(d, 'exports', 'el-src.csv'), "x,y\n")        # EMPTY dual-role chart
+  File.write(File.join(d, 'exports', 'el-derived.csv'), "x,y\n1,2\n")
+  File.write(File.join(d, 'exports', 'base.csv'), "v\n7\n")
+  File.write(File.join(d, 'source-anchors.json'), JSON.generate('anchors' =>
+    (1..5).map { |i| { 'id' => "a#{i}", 'raw' => %w[2 1 7 2 7][i - 1], 'kind' => 'number', 'label' => "L#{i}" } }))
+  _o, _e, s = Open3.capture3('ruby', File.join(HERE, 'verify-anchors.rb'),
+    '--workdir', d, '--workbook-spec', File.join(d, 'wb.json'), '--exports-dir', File.join(d, 'exports'))
+  v = JSON.parse(File.read(File.join(d, 'anchors-verdict.json')))
+  src = v['tiles'].find { |t| t['id'] == 'el-src' }
+  ok(!s.success? && src && src['displayed'] == true,
+     '(G) a referenced dual-role CHART stays displayed; its empty export is caught')
 end
 
 puts

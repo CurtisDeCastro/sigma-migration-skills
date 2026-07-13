@@ -16,6 +16,11 @@ require 'json'
 require 'tmpdir'
 require 'open3'
 
+# Locale robustness: the gate scripts emit UTF-8 (arrows, em-dashes). Under a bare
+# LANG="" CI, capturing + regex-matching that output raises "invalid byte sequence
+# in US-ASCII". Tag read strings UTF-8 so the checks are locale-independent.
+Encoding.default_external = Encoding::UTF_8
+
 HERE = __dir__
 PASS = []
 FAIL = []

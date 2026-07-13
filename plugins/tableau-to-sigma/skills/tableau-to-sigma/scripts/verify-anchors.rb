@@ -286,9 +286,16 @@ def tile_emptiness_census(elements, exports, workdir)
     rows = exports[el_display_name(el)]
     # CSV export carries a header row; data_rows = rows-1. nil = export failed.
     data_rows = rows.is_a?(Array) ? [rows.length - 1, 0].max : nil
-    is_feeder = referenced.include?(id)
+    # A feeder is a raw base DATA TABLE another element derives from (master/
+    # masterAll). Require kind=='table' so a referenced CHART/KPI/pivot (a dual-role
+    # tile that is displayed AND sourced by another tile) is NOT misclassified as a
+    # feeder and un-gated (review-caught false-negative). Genuine base tables stay
+    # feeders, avoiding a false-positive on a legitimately-empty undisplayed base.
+    is_feeder = referenced.include?(id) && kind == 'table'
     # Displayed tile: named by the build (authoritative) or, lacking artifacts, a
     # LEAF nothing else sources from (feeders are referenced by their consumers).
+    # (A dual-role displayed TABLE in an artifact-less run remains a residual hole;
+    # any real migration carries a parity-plan/visual-verify manifest → declared.)
     displayed = declared.empty? ? !is_feeder : declared.include?(id)
     { 'id' => id, 'name' => el_display_name(el), 'kind' => kind,
       'data_rows' => data_rows, 'displayed' => displayed, 'is_feeder' => is_feeder }
