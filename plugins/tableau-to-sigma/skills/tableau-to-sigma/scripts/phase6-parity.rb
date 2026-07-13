@@ -199,8 +199,29 @@ if !opts[:finalize]
   puts "=" * 70
   puts ""
   if remaining.empty?
-    puts "ALL #{collected.size} chart actuals were collected by the pooled exporter —"
-    puts "#{actuals_path} is complete. No MCP queries needed."
+    collectible = plan['charts'].select { |c| (c['sigma_columns'] || []).length >= 1 }
+    if collected.empty? && collectible.any?
+      # Every chart that HAD columns to query returned nothing from the pooled
+      # exporter. This is the loudest signal the live Sigma element exports are
+      # EMPTY — the exact false-GREEN precursor from the 2026-07 Macroeconomics
+      # run, where "ALL 0 chart actuals ... complete. No MCP queries needed." was
+      # printed over a dataless workbook. Do NOT phrase zero coverage as success.
+      puts "⚠️  PARITY POOL EMPTY — #{collectible.size} chart(s) had columns to query but the pooled"
+      puts "    exporter collected 0 actuals. The live Sigma charts are likely returning NO ROWS."
+      puts "    This is NOT parity. Verification is carried by the non-empty-chart gate (verify-anchors"
+      puts "    writes dashboard_tiles_empty) + the anchors oracle — and gate 2/13 FAIL if any dashboard"
+      puts "    tile exports 0 rows. Investigate filter literals / calc types before re-running."
+    elsif collected.empty?
+      # No collectible charts at all (every plan chart is dashboard-embedded /
+      # signal-only, 0 sigma_columns). Parity is legitimately deferred to the
+      # anchors oracle — but chart emptiness is still gated downstream (verify-anchors).
+      puts "No exportable-view actuals to collect (all charts dashboard-embedded / signal-only)."
+      puts "#{actuals_path} is intentionally empty; value parity is carried by the anchors oracle +"
+      puts "the non-empty-chart gate (verify-anchors), NOT by this pass."
+    else
+      puts "ALL #{collected.size} chart actuals were collected by the pooled exporter —"
+      puts "#{actuals_path} is complete. No MCP queries needed."
+    end
   else
     puts "The pooled exporter filled #{actuals_path} for #{collected.size} chart(s)."
     puts "Agent: run ONE mcp__sigma-mcp-v2__query call per REMAINING chart below and"

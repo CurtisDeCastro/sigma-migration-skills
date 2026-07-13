@@ -223,6 +223,7 @@ OptionParser.new do |p|
   p.on('--fidelity-ledger PATH', 'gate 8d: path to the RCF ledger (default: <workdir>/fidelity-ledger.json)') { |v| opts[:fidelity_ledger] = v }
   p.on('--accept-residuals LIST', 'gate 8d: comma-separated ledger entry ids/indices to WAIVE as accepted residuals (name them in the report). Does NOT apply to data-class entries — those must be fixed or reclassified with evidence.') { |v| opts[:accept_residuals] = v.split(',').map(&:strip) }
   p.on('--skip-anchors-gate REASON', 'waive gate 13 (source-anchor value verification) — REQUIRED reason string. Use ONLY when the source image values are genuinely untranscribable. Counted against the waiver budget; name it in your migration report.') { |v| opts[:skip_anchors] = v }
+  p.on('--allow-empty-tiles REASON', 'gate 13: accept displayed dashboard tile(s) that export ZERO data rows — REQUIRED reason string that MUST cite the source PNG showing the chart is genuinely empty on the SOURCE dashboard. Never use this to wave away a broken data path (filter/calc bug). Counted against the waiver budget; name it in your migration report.') { |v| opts[:allow_empty_tiles] = v }
   p.on('--skip-visual-similarity REASON', 'waive gate 14 (measured visual-similarity floor) — REQUIRED reason string. Counted against the waiver budget; name it in your migration report.') { |v| opts[:skip_vsim] = v }
 end.parse!
 abort('--workdir (or --tableau) required') unless opts[:tab]
@@ -303,6 +304,7 @@ WAIVER_HIDES = {
   '--skip-postpublish-guide'   => 'gate 11: interactivity handoff guide not required',
   '--accept-deferred-elements' => 'gate 12: a PARTIAL data model was accepted',
   '--skip-anchors-gate'        => 'gate 13: source-anchor values never verified (the measured value bar)',
+  '--allow-empty-tiles'        => 'gate 13: displayed dashboard tile(s) that render no data were accepted',
   '--skip-visual-similarity'   => 'gate 14: visual-similarity floor never measured',
   # Runtime off-ramps (recorded to <workdir>/offramps.jsonl by the scripts that
   # honored them; counted here so an escape taken MID-RUN spends budget exactly
@@ -330,6 +332,7 @@ waiver_flags << '--skip-telemetry-gate'      if opts[:skip_telemetry]
 waiver_flags << '--skip-postpublish-guide'   if opts[:skip_postpublish]
 waiver_flags << '--accept-deferred-elements' if opts[:accept_deferred]
 waiver_flags << '--skip-anchors-gate'        if opts[:skip_anchors]
+waiver_flags << '--allow-empty-tiles'        if opts[:allow_empty_tiles]
 waiver_flags << '--skip-visual-similarity'   if opts[:skip_vsim]
 
 # Runtime waivers taken MID-RUN (off-ramp trail, offramps.jsonl): a forced new
@@ -453,18 +456,35 @@ else
     _av = (JSON.parse(File.read(File.join(opts[:tab], 'anchors-verdict.json'))) rescue nil)
     _vv = (JSON.parse(File.read(File.join(opts[:tab], 'visual-verify', 'manifest.json'))) rescue nil)
     _vv_ok = _vv.is_a?(Array) && _vv.any? && _vv.all? { |t| t['visual_verified'] == true }
-    if _av && _av['pass'] && _av['checked'].to_i >= 5 && _av['matched'] == _av['checked'] && _vv_ok
+    # W1.1: condition (c) — every DISPLAYED dashboard tile must export >=1 data
+    # row. The 2026-07 Macroeconomics run passed (a) + (b) with all 15 anchors
+    # matched, yet every chart rendered "No data": the anchors matched only in the
+    # raw unfiltered feeder table, and no gate checked that the DISPLAYED tiles
+    # carry data. verify-anchors now writes tiles_all_nonempty + dashboard_tiles_empty.
+    # Fail closed if the field is absent (a stale anchors-verdict from a pre-W1.1
+    # verify-anchors) — re-running verify-anchors is cheap and mandatory here.
+    _tiles_ok = _av.is_a?(Hash) && _av['tiles_all_nonempty'] == true
+    _tiles_field_present = _av.is_a?(Hash) && _av.key?('tiles_all_nonempty')
+    if _av && _av['pass'] && _av['checked'].to_i >= 5 && _av['matched'] == _av['checked'] && _vv_ok && _tiles_ok
       puts "[PASS] gate 2 (value parity): 0 exportable view CSVs (all worksheets dashboard-embedded) — " \
            "the ANCHORS ORACLE stands in: anchors-verdict.json pass " \
-           "(#{_av['matched']}/#{_av['checked']} anchors matched) + all #{_vv.size} tile(s) image-verified."
+           "(#{_av['matched']}/#{_av['checked']} anchors matched, #{_av['anchors_matched_in_displayed'] || '?'} in displayed tiles) " \
+           "+ all #{_vv.size} tile(s) image-verified + all displayed tiles return data."
     else
       warn "[FAIL] parity-final.json reports charts_total=#{total} — no charts were verified."
       warn "       This usually means auto-parity-plan.rb matched zero Tableau views."
       warn "       Phase 6 must verify at least one chart to declare GREEN."
       warn '       If every worksheet is dashboard-embedded (no exportable view CSVs), the'
-      warn '       anchors oracle can stand in — BOTH must hold:'
+      warn '       anchors oracle can stand in — ALL THREE must hold:'
       warn "         a) verify-anchors.rb pass with EVERY anchor matched (#{_av ? "currently #{_av['matched']}/#{_av['checked']}" : 'anchors-verdict.json missing'})"
       warn "         b) every visual-verify tile confirmed (#{_vv_ok ? 'ok' : 'incomplete'})"
+      if _tiles_field_present
+        empty = (_av['dashboard_tiles_empty'] || [])
+        warn "         c) every displayed tile returns >=1 data row (#{_tiles_ok ? 'ok' : "#{empty.length} tile(s) EMPTY: #{empty.map { |t| t['name'] }.first(6).join(', ')}"})"
+      else
+        warn '         c) every displayed tile returns >=1 data row (UNKNOWN — anchors-verdict.json'
+        warn '            predates this gate; re-run scripts/verify-anchors.rb to measure tile emptiness)'
+      end
       exit 2
     end
   end
@@ -1352,9 +1372,30 @@ else
     warn '       collapsed buckets). Fix the workbook — or correct a mistranscribed anchor — then'
     warn '       re-run verify-anchors.rb and this gate. There is no per-anchor waiver.'
     exit 18
+  elsif av.key?('tiles_all_nonempty') && av['tiles_all_nonempty'] != true && opts[:allow_empty_tiles].nil?
+    # W1.1 general path: anchors matched, but a DISPLAYED tile renders no data.
+    # Anchor matches can land entirely in the raw unfiltered feeder table (the
+    # Macroeconomics false-GREEN); a displayed tile that exports 0 data rows is a
+    # broken data path regardless of anchor arithmetic. Unwaivable except via the
+    # source-PNG-citing --allow-empty-tiles budget waiver.
+    empty = Array(av['dashboard_tiles_empty'])
+    warn "[FAIL] gate 13: anchors matched, but #{empty.length} displayed dashboard tile(s) export ZERO data rows —"
+    warn '       the charts render "No data". A displayed tile with 0 rows is a broken data path even when'
+    warn '       every anchor "matched" (they can match only in the raw, unfiltered feeder table).'
+    empty.first(10).each { |t| warn "         EMPTY  #{t['id']} #{t['name'].inspect} [#{t['kind']}]" }
+    warn '       Common causes: a control/filter literal that matches no rows (e.g. "Americas & Caribbean"'
+    warn '       vs a calc emitting "Americas and Caribbean"), or a calc comparing a NUMBER column to a'
+    warn '       string literal (compiles clean, renders NULL). Fix the workbook, re-run verify-anchors.rb,'
+    warn '       then re-run this gate. If a chart is GENUINELY empty on the SOURCE dashboard, waive with'
+    warn '       --allow-empty-tiles "<reason citing the source PNG>".'
+    exit 18
   else
+    if opts[:allow_empty_tiles] && av['tiles_all_nonempty'] != true
+      record_waiver.call('--allow-empty-tiles', 'gate 13 (empty displayed tiles)', opts[:allow_empty_tiles])
+    end
+    tnote = av.key?('tiles_all_nonempty') ? (av['tiles_all_nonempty'] ? '; all displayed tiles return data' : '; EMPTY tiles ACCEPTED via --allow-empty-tiles') : ''
     puts "[OK] gate 13: source anchors verified — #{av['matched']}/#{av['checked']} printed source values " \
-         'found in the live workbook exports at printed precision'
+         "found in the live workbook exports at printed precision#{tnote}"
   end
 end
 

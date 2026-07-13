@@ -287,13 +287,19 @@ if opts[:wb_name].to_s =~ %r{\Ahttps?://} || opts[:wb_name].to_s =~ %r{#/site/}
     content_url = m[1]
     puts "── share-URL intake: /views/ link → resolving workbook contentUrl #{content_url.inspect}"
     require_relative 'lib/tableau_rest'
-    # Cold-env order bug (field-caught round 2): with only PAT creds set (no
-    # TABLEAU_SITE_ID/AUTH_TOKEN minted yet) this resolver ran before any token
-    # existed and crashed with "TABLEAU_SITE_ID not set". Mint in-process first.
+    # Cold-env order bug (field-caught round 2, re-caught round 3): with only PAT
+    # creds set this resolver ran before a session existed and crashed. Round 2
+    # rescued a missing TABLEAU_SITE_ID — but the 2026-07 Macroeconomics run had a
+    # STALE TABLEAU_SITE_ID set in the env file with NO AUTH_TOKEN, so site_id
+    # returned fine, the mint was skipped, and find_workbook_by_content_url then
+    # crashed on "TABLEAU_AUTH_TOKEN not set" — sending the run down a 4.5-min
+    # token detour (incl. a permission-classifier denial). Mint when EITHER the
+    # site id OR the auth token is unavailable.
     begin
       Tableau.site_id
+      Tableau.auth_token
     rescue Tableau::Error
-      puts '   no Tableau session yet — minting one in-process (PAT signin)'
+      puts '   no Tableau session yet (missing site id or auth token) — minting one in-process (PAT signin)'
       Tableau.refresh_token!
     end
     hit = Tableau.find_workbook_by_content_url(content_url)
@@ -452,29 +458,33 @@ end
 TOTAL = 6
 
 # ── Total-runtime handoff nudge (refs/orchestration.md O2) ──────────────────
-# Field failure, 2026-07: a single context drove one migration for 6+ hours,
-# compaction-looped by hour 3 (grepping its own transcript to recover
-# commands), and never handed off. The run-state ledger stamps a timestamp at
-# every phase entry, so TOTAL elapsed time — across passes/resumes, because
-# stamps merge by phase key and the FIRST stamp of pass 1 survives — is
-# computable for free. When it crosses the O2 budget, print ONE loud line per
-# run pointing at the handoff protocol. Advisory only — never changes behavior.
-HANDOFF_BUDGET_MIN = 90
-$handoff_nudged = false
+# Field failure, 2026-07: TWO context-runaways in one quarter — a 6+ hour run,
+# and a 131-minute / ~12-pass run (World Bank Macroeconomics) that ended GREEN
+# over a dataless workbook. The nudge that should have fired at 90m never did,
+# because RunState.stamp overwrote each phase's `ts` on every pass, resetting
+# min(ts) each re-run (the comment claiming "the FIRST stamp of pass 1 survives"
+# was false). The ledger now persists run_started_at (stamped ONCE) so TOTAL run
+# age — across passes/resumes — is computable regardless of re-stamping. When it
+# crosses the escalating thresholds, print ONE loud line per threshold pointing
+# at the handoff protocol. Advisory only — never changes behavior.
+HANDOFF_THRESHOLDS_MIN = [60, 90, 120].freeze
+$handoff_nudged_at = []
 def handoff_nudge
-  return if $handoff_nudged
   return unless defined?(WORK) && WORK
-  first = RunState.load(WORK)['phases'].values
-                  .map { |p| begin; Time.parse(p['ts'].to_s); rescue StandardError; nil; end }
-                  .compact.min
+  started = RunState.started_at(WORK)
+  first = begin; Time.parse(started.to_s); rescue StandardError; nil; end
   return unless first
   elapsed_min = ((Time.now - first) / 60).round
-  return unless elapsed_min > HANDOFF_BUDGET_MIN
-  $handoff_nudged = true
+  crossed = HANDOFF_THRESHOLDS_MIN.select { |t| elapsed_min >= t && !$handoff_nudged_at.include?(t) }.max
+  return unless crossed
+  $handoff_nudged_at << crossed
+  budget = HANDOFF_THRESHOLDS_MIN.last
   puts
-  puts "⏰⏰⏰ HANDOFF NUDGE — this context has been driving for #{elapsed_min}m (budget #{HANDOFF_BUDGET_MIN}m)."
+  puts "⏰⏰⏰ HANDOFF NUDGE — this run has been going #{elapsed_min}m (thresholds #{HANDOFF_THRESHOLDS_MIN.join('/')}m; hard budget #{budget}m)."
+  puts "   Long single-context runs compaction-loop and (field-proven) can drift to a FALSE GREEN."
   puts "   Per refs/orchestration.md (O2): write #{File.join(WORK, 'HANDOFF.md')} and hand off to a"
   puts '   fresh builder agent; resume is cheap (discovery caches + phase stamps skip completed work).'
+  puts "   Over #{budget}m: STOP and hand off — do not push a run to GREEN this deep in one context." if elapsed_min >= budget
 rescue StandardError
   nil # advisory only — a nudge failure must never touch the conversion
 end
