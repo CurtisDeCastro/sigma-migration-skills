@@ -215,7 +215,14 @@ def synthesize_view_from_signals(z, meta)
   end
   fields = ((z.dig('cols_shelf', 'fields') || []) + (z.dig('rows_shelf', 'fields') || []))
   dims = fields.select { |f| f['role'] == 'dim' }
-  meas = fields.select { |f| f['role'] == 'measure' }
+  # v5.4: skip axis-anchor PLACEHOLDER measures (AVG(0) / min(-1.0) — the
+  # dummy-axis idiom; on pie marks it's the dual-axis donut-hole hack). They
+  # carry no data, and picking one as the synthesized measure header binds the
+  # constant instead of the real marks-card measure (recovered below).
+  meas = fields.select do |f|
+    next false unless f['role'] == 'measure'
+    !placeholder_calc?((cbg[f['guid'].to_s] || {})['formula'])
+  end
   # Include a color-channel dimension if the encoding names one not on a shelf.
   if (cc = z.dig('channels', 'color', 'column'))
     g = guid_from_text(cc.to_s)
@@ -258,6 +265,28 @@ def synthesize_view_from_signals(z, meta)
     end
     fb = (dcaps + mcaps).compact
     headers = fb if fb.length >= 2
+  end
+  # v5.4 LAST-RESORT — NAME-KEYED workbooks (textscan/excel-direct/live
+  # datasources key column instances by NAME, not hex GUID; every resolver
+  # above returns nil on them, and the zone dropped). Applied ONLY when the
+  # zone would otherwise drop, so hex-GUID workbooks' header synthesis is
+  # byte-identical to before.
+  if headers.length < 2
+    dims2 = dims.dup
+    if (cc2 = z.dig('channels', 'color', 'column')) && (g2 = name_or_guid_from_text(cc2.to_s))
+      dims2 << { 'guid' => g2, 'role' => 'dim', 'derivation' => 'none' } if dims2.none? { |f| f['guid'] == g2 }
+    end
+    meas2 = meas.dup
+    if meas2.empty? && dims2.any?
+      dim_keys = dims2.map { |d| d['guid'].to_s.downcase }
+      rec = (z['aggregations'] || {}).find do |k, agg|
+        %w[sum avg average min max count countd median].include?(agg.to_s.downcase) &&
+          !dim_keys.include?(k.to_s.gsub(/\A\[|\]\z/, '').downcase)
+      end&.first&.gsub(/\A\[|\]\z/, '')
+      meas2 << { 'guid' => rec, 'role' => 'measure', 'derivation' => 'none' } if rec && !rec.empty?
+    end
+    h2 = (dims2.map(&field_header) + meas2.map(&field_header)).compact
+    headers = h2 if h2.length >= 2
   end
   headers.length >= 2 ? { headers: headers } : nil
 end
@@ -2885,8 +2914,10 @@ def build_topn_prefilter_helper(el_id:, master_id:, entity_col:, carry_cols:, me
     'id' => src_id, 'kind' => 'table', 'name' => src_name, 'visibleAsSource' => false,
     'source' => { 'kind' => 'table', 'elementId' => master_id },
     'columns' => cols,
-    'filters' => [{ 'columnId' => ent['id'], 'kind' => 'list', 'mode' => 'include',
-                    'selectionMode' => 'multiple', 'values' => members }]
+    # 'id' is REQUIRED — the API rejects filters without one (round-6 field:
+    # a 400 with a 507-line union dump traced to exactly this missing key).
+    'filters' => [{ 'id' => "flt-#{src_id}-0", 'columnId' => ent['id'], 'kind' => 'list',
+                    'mode' => 'include', 'selectionMode' => 'multiple', 'values' => members }]
   }
 end
 
@@ -3179,6 +3210,26 @@ def guid_from_text(s)
   return nil if s.nil? || s.empty?
   m = s.match(/\[(?:[a-z\-]+:)?([0-9a-f\-]{36})(?::[a-z]+)?\]/i)
   m && m[1]
+end
+
+# v5.4 — NAME-KEYED serialization variant of guid_from_text, SCOPED to the
+# signal-only view synthesis. Hex GUIDs are only one of Tableau's column
+# identity schemes: textscan/excel-direct/federated-live datasources key
+# <column-instance> tokens by NAME ([none:IS_PAID:nk], [usr:Calculation_N:qk:2]).
+# Those workbooks resolved to nil in guid_from_text, so color-channel dims and
+# aggregation fallbacks silently vanished (the dropped-pie class). Kept as a
+# SEPARATE resolver because guid_from_text feeds many measure/color pickers
+# whose semantics are tuned to hex-GUID workbooks — broadening it globally
+# re-picked measures across unrelated tiles (corpus-regression-caught).
+def name_or_guid_from_text(s)
+  g = guid_from_text(s)
+  return g if g
+  return nil if s.nil? || s.empty?
+  m = s.match(/\[[a-z]+:([^:\[\]]+):[a-z]+k(?::\d+)?\]/i)
+  return m[1] if m
+  m = s.match(/\]\.\[([^:\/\[\]]+)\]\z/) || s.match(/\A\[([^:\/\[\]]+)\]\z/)
+  g = m && m[1]
+  g && g.casecmp?('Parameters') ? nil : g
 end
 
 # ---- KPI emission ---------------------------------------------------------
@@ -3863,6 +3914,28 @@ layout.each do |dash|
         next
       end
       # else: fall through with the warning already logged
+    end
+
+    # v5.4 ZONE-DROP HONESTY: a NAMED mark class with no Sigma equivalent
+    # (GanttBar waterfalls/candlesticks/strips, VizExtension third-party
+    # marks, …) previously fell through SIGMA_KIND['other'] → 'bar-chart' and
+    # shipped a silently WRONG chart shape. Emit a LOUD named handoff instead:
+    # the zone is not auto-built, the coverage ledger records it dropped with
+    # the mark class as root cause, and the Phase-6 tile census reports it
+    # unmatched. A BLANK mark ('other' with no mark_class) keeps the bar
+    # fallback — loudly.
+    if z['chart_kind'].to_s == 'other'
+      mc = z['mark_class'].to_s
+      if mc.empty?
+        warnings << "'#{cap}' has a blank mark class — defaulted to bar-chart; VERIFY against the source image"
+      else
+        warnings << "ZONE DROPPED / STAYS-MANUAL: '#{cap}' uses Tableau mark class '#{mc}' with no Sigma " \
+                    'chart equivalent — NOT auto-built (a bar-chart stand-in misrepresents the mark). ' \
+                    'Re-author in Sigma by hand (waterfall/candlestick: bar + running-total helper; ' \
+                    'gantt: no native equivalent; viz-extension: rebuild with a native chart). ' \
+                    'The Phase-6 tile census will report this zone unmatched.'
+        next
+      end
     end
 
     # MULTI-DATASOURCE ROUTING SENTRY: every chart below is sourced from the ONE
@@ -4668,6 +4741,22 @@ layout.each do |dash|
     kind = SIGMA_KIND[z['chart_kind']] || 'bar-chart'
     if z['chart_kind'] == 'automatic'
       warnings << "'#{cap}' has chart_kind=automatic — defaulted to bar-chart; verify against PNG"
+    end
+    # v5.4 DONUT discriminator: Tableau has no donut mark — a donut is a Pie
+    # mark whose rows/cols shelf carries ONLY constant-aggregate placeholder
+    # instances (the dual-AVG(0) dummy-axis hack that stacks two pies to make
+    # the hole). A plain pie has no such shelf. Grammar-level test, no fixture
+    # knowledge: every shelf measure resolves to a placeholder calc.
+    if kind == 'pie-chart'
+      shelf_meas = ((z.dig('rows_shelf', 'fields') || []) + (z.dig('cols_shelf', 'fields') || []))
+                   .select { |f| f['role'] == 'measure' }
+      if shelf_meas.any? && shelf_meas.all? { |f|
+           placeholder_calc?(((meta['columns_by_guid'] || {})[f['guid'].to_s] || {})['formula'])
+         }
+        kind = 'donut-chart'
+        warnings << "'#{cap}' pie mark rides constant-aggregate dummy axes (the Tableau donut idiom) — " \
+                    'emitted as donut-chart'
+      end
     end
 
     # Scatter fast path (bead z1d0, ported from the PBI builder's verified
@@ -6847,6 +6936,25 @@ rescue => e
   warnings << "window-calcs sidecar error (VDS oracle will report nothing-to-verify): #{e.message}"
 end
 
+# v5.4: EVERY generated element filter carries an 'id' — the API rejects
+# filters without one, and in the field the failure surfaces as an opaque 400
+# with a multi-hundred-line union dump. Belt-and-suspenders over the per-site
+# ids so no construction site (present or future) can regress the contract.
+# Control filter-TARGETS ({source:, columnId:} on control elements) are a
+# different shape and are skipped (keyed by 'source').
+stamp_filter_ids = lambda do |els_list|
+  Array(els_list).each do |e|
+    next unless e.is_a?(Hash) && e['filters'].is_a?(Array)
+    e['filters'].each_with_index do |f, i|
+      next unless f.is_a?(Hash) && !f.key?('source')
+      f['id'] = "flt-#{e['id']}-#{i}" if f['id'].to_s.empty?
+    end
+  end
+end
+stamp_filter_ids.call(elements)
+stamp_filter_ids.call(data_elements)
+stamp_filter_ids.call(all_extras) if defined?(all_extras)
+
 # ---- Output mode ----
 #   Default       → flat array of elements (legacy behaviour). Extras first.
 #   --page-per-worksheet → emit { pages: [{name, elements:[]}] }. One page per
@@ -7139,8 +7247,8 @@ end
 #   :note     — success or a verify nudge (NOT a gap)
 def warning_severity(w)
   s = w.to_s
-  return :dropped  if s =~ /dropped from the grid|—\s*skipping|could not be carried|cannot reconstruct/i
-  return :degraded if s =~ /STAYS MANUAL|could not be auto-decomposed|not composable as agg-of-agg|not auto-emitted|falling (through|back)/i
+  return :dropped  if s =~ /ZONE DROPPED|NOT auto-built|dropped from the grid|—\s*skipping|could not be carried|cannot reconstruct/i
+  return :degraded if s =~ /STAYS[ -]MANUAL|could not be auto-decomposed|not composable as agg-of-agg|not auto-emitted|falling (through|back)/i
   :note
 end
 warnings.each do |w|

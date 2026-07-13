@@ -1426,6 +1426,25 @@ module MechanicalSpecs
       'source' => { 'kind' => 'data-model', 'dataModelId' => dm_id, 'elementId' => fact_eid },
       'columns' => master_columns, 'order' => master_columns.map { |c| c['id'] }
     }
+    # v5.4: document-order the data page SOURCE-BEFORE-CONSUMER. The API
+    # resolves element refs in document order at POST, so a helper emitted
+    # before the sub-master it sources 400s (round-6 field: TopN Source before
+    # its sub-master). Kahn-style passes: an element is placeable once its
+    # source elementId is not among the still-unplaced data elements (already
+    # placed, the master, or external — data-model refs, placeholders). A
+    # cycle (impossible for generated helpers, but never trust input) falls
+    # back to insertion order for the stuck remainder.
+    remaining = (data_elements || []).dup
+    ordered = []
+    until remaining.empty?
+      batch = remaining.select do |e|
+        src = e.is_a?(Hash) ? e.dig('source', 'elementId').to_s : ''
+        remaining.none? { |o| !o.equal?(e) && o.is_a?(Hash) && o['id'] == src }
+      end
+      batch = [remaining.first] if batch.empty?
+      ordered.concat(batch)
+      remaining -= batch
+    end
     chart_pages =
       if chart_elements.is_a?(Array) && chart_elements.all? { |e| e.is_a?(Hash) && e.key?('elements') && e.key?('name') }
         chart_elements.each_with_index.map do |pg, i|
@@ -1445,7 +1464,7 @@ module MechanicalSpecs
       'schemaVersion' => 1,
       'pages' => [
         { 'id' => 'page-data', 'name' => 'Data',
-          'elements' => [master] + (data_elements || []) },
+          'elements' => [master] + ordered },
         *chart_pages
       ]
     }
