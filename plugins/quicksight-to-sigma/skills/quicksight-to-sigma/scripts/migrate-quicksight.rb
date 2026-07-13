@@ -220,9 +220,20 @@ if opts[:converted]
 elsif CONV_MODULE
   puts "   converter: #{CONV_MODULE == VENDORED_QS ? 'vendored bundle (converter/quicksight.mjs)' : CONV_MODULE} (no data leaves this machine)"
   shim = File.join(WORK, '_convert.mjs')
+  # Node ESM on Windows rejects a bare drive-letter specifier
+  # (`import ... from "C:/path/quicksight.mjs"` → ERR_UNSUPPORTED_ESM_URL_SCHEME,
+  # protocol 'c:'). Absolute paths must be file:// URLs there. POSIX absolute
+  # paths import fine as-is, so we only rewrite on Windows and leave the
+  # (working) macOS/Linux path byte-identical.
+  import_specifier =
+    if Gem.win_platform? && CONV_MODULE.to_s.match?(/\A[A-Za-z]:/)
+      'file:///' + CONV_MODULE.gsub('\\', '/')
+    else
+      CONV_MODULE
+    end
   File.write(shim, <<~JS)
     import { readFileSync, writeFileSync } from 'node:fs';
-    import { convertQuickSightToSigma } from #{CONV_MODULE.to_json};
+    import { convertQuickSightToSigma } from #{import_specifier.to_json};
     const files = #{conv_files.to_json}.map(p => ({ name: p.split('/').pop(), content: readFileSync(p, 'utf8') }));
     const out = convertQuickSightToSigma(files, {
       connectionId: #{opts[:conn].to_json},

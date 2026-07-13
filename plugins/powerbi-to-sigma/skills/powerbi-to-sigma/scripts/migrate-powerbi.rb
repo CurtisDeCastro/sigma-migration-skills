@@ -404,9 +404,20 @@ end
 unless opts[:cvt_out]
 puts "   converter: #{CONV_MODULE == VENDORED_PBI ? 'vendored bundle (converter/powerbi.mjs)' : CONV_MODULE} (no data leaves this machine)"
 shim = File.join(WORK, '_convert.mjs')
+# Node ESM on Windows rejects a bare drive-letter specifier
+# (`import ... from "C:/path/powerbi.mjs"` → ERR_UNSUPPORTED_ESM_URL_SCHEME,
+# protocol 'c:'). Absolute paths must be file:// URLs there. POSIX absolute
+# paths import fine as-is, so we only rewrite on Windows and leave the
+# (working) macOS/Linux path byte-identical.
+import_specifier =
+  if Gem.win_platform? && CONV_MODULE.to_s.match?(/\A[A-Za-z]:/)
+    'file:///' + CONV_MODULE.gsub('\\', '/')
+  else
+    CONV_MODULE
+  end
 File.write(shim, <<~JS)
   import { readFileSync, writeFileSync } from 'node:fs';
-  import { convertPowerBIToSigma } from #{CONV_MODULE.to_json};
+  import { convertPowerBIToSigma } from #{import_specifier.to_json};
   const model = JSON.parse(readFileSync(#{opts[:tmsl].to_json}, 'utf8'));
   const out = convertPowerBIToSigma(model, {
     connectionId: #{(opts[:conn] || '').to_json},

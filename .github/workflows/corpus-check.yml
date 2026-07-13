@@ -146,6 +146,11 @@ jobs:
         # C8 parity / C9 RLS gates and appear in docs/phase-schema.md. Known
         # gaps are tracked in tools/skill-lint-baseline.json (WARN, not fail).
         run: ruby tools/lint-skills.rb
+      - name: Lint ESM converter imports for the Windows file:// footgun (#348)
+        # A shim importing the converter by bare absolute path throws
+        # ERR_UNSUPPORTED_ESM_URL_SCHEME on Windows (latent on macOS). Require a
+        # pathToFileURL / Gem.win_platform?+file:/// / Path.as_uri() guard.
+        run: ruby tools/lint-esm-imports.rb
       - name: Check agent variants are in sync with SKILL.md
         # The Cursor/Codex/Cline/Continue instruction files are generated from
         # each skill's SKILL.md by tools/gen-agent-variants.rb. Fail if a
