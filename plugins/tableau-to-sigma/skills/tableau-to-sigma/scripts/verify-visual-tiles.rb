@@ -23,6 +23,7 @@
 require 'json'
 require 'optparse'
 require 'fileutils'
+require 'open3'
 require_relative 'lib/tableau_rest'
 require_relative 'lib/py_resolve' # real-Python resolver (Windows Store-stub safe)
 
@@ -173,16 +174,24 @@ Array.new([3, tiles.size].min.clamp(1, 3)) do
   end
 
   # 2) Sigma element render
+  render_out = nil
   if t['element_id']
-    ok = system(*PyResolve.argv, png_script, '--workbook', opts[:wb], '--element', t['element_id'],
-                '--out', sigma_png, '--w', opts[:w].to_s, '--h', opts[:h].to_s,
-                out: File::NULL, err: File::NULL)
-    rec['sigma_png'] = sigma_png if ok && File.size?(sigma_png)
+    render_out, render_st = Open3.capture2e(*PyResolve.argv, png_script, '--workbook', opts[:wb], '--element', t['element_id'],
+                                            '--out', sigma_png, '--w', opts[:w].to_s, '--h', opts[:h].to_s)
+    rec['sigma_png'] = sigma_png if render_st.success? && File.size?(sigma_png)
   end
 
   status = (rec['tableau_png'] && rec['sigma_png']) ? 'READY for review' : 'INCOMPLETE'
   mani_mx.synchronize do
     puts "  #{ws}  → #{status}  (tableau=#{rec['tableau_png'] ? 'ok' : 'MISSING'}, sigma=#{rec['sigma_png'] ? 'ok' : 'MISSING'})"
+    # NAME the ceiling instead of an opaque MISSING: a tile render that 500s is
+    # usually the pivot's own `totals` key (probe-isolated v5.4 as the CSV-500
+    # trigger; can also sink a render). Verification runs totals-free; put-layout
+    # --apply-pivot-totals re-hides grand totals at ship. See refs/layout-visual-qa.md.
+    if rec['sigma_png'].nil? && render_out.to_s =~ /HTTP 500/i
+      puts "     [PIVOT-TOTALS/RENDER CEILING] #{ws} tile render 500'd — if it is a pivot-table, a `totals` " \
+           'key is the likely cause; run the render-500 bisect in refs/layout-visual-qa.md.'
+    end
     manifest << rec
   end
     end

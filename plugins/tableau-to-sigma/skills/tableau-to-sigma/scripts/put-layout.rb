@@ -28,8 +28,19 @@ OptionParser.new do |p|
   p.on('--layout PATH') { |v| opts[:layout] = v }
   p.on('--elements PATH', 'spec elements to inject (default: <layout>.elements.json if present)') { |v| opts[:elements] = v }
   p.on('--nav-buttons PATH', 'nav-button sidecar (default: sibling *-nav-buttons.json) — rewrites the nav.invalid placeholder URLs to live page URLs') { |v| opts[:nav_buttons] = v }
+  # v5.4: the pivot grand-totals SHIP step. A pivot carrying a `totals` key
+  # 500s its CSV export (probe-isolated v5.4: `totals` is the SOLE trigger —
+  # value type is irrelevant; ratio/PercentOfTotal export fine), which poisons
+  # verify-anchors' pivot exports. So the `totals` key is kept OFF the pivots
+  # during verification and re-applied HERE — the final spec mutation — once the
+  # gates are green. --apply-pivot-totals runs a totals-ONLY pass (no --layout
+  # needed): GET spec → set showGrandTotals:hidden on every pivot lacking a
+  # totals key (path-independent, like hidden-titles; an optional sibling
+  # *-pivot-totals.json sidecar overrides per element id) → PUT. Idempotent.
+  p.on('--apply-pivot-totals', 'ship step: (re)hide pivot grand totals as a final PUT (see header). --layout optional.') { opts[:apply_pivot_totals] = true }
 end.parse!
-%i[wb layout].each { |k| abort("missing --#{k}") unless opts[k] }
+abort('missing --workbook') unless opts[:wb]
+abort('missing --layout') unless opts[:layout] || opts[:apply_pivot_totals]
 
 BASE = ENV.fetch('SIGMA_BASE_URL')
 TOK  = ENV.fetch('SIGMA_API_TOKEN')
@@ -45,16 +56,21 @@ def http(method, path, body = nil)
   Net::HTTP.start(uri.host, uri.port, use_ssl: true) { |h| h.request(req) }
 end
 
-xml = File.read(opts[:layout], encoding: 'UTF-8')
-abort "FATAL: empty elementId in layout XML" if xml.match?(/elementId=""/)
-
 spec = JSON.parse(http(:get, "/v2/workbooks/#{opts[:wb]}/spec").body)
-spec['pages'].each { |p| p.delete('layout') }
-spec['layout'] = xml
+
+# Layout application is skipped in the totals-ONLY ship pass (--apply-pivot-totals
+# with no --layout): the layout + hidden-titles already rode the Phase-5 PUT;
+# this pass touches nothing but the pivot `totals` keys.
+if opts[:layout]
+  xml = File.read(opts[:layout], encoding: 'UTF-8')
+  abort "FATAL: empty elementId in layout XML" if xml.match?(/elementId=""/)
+  spec['pages'].each { |p| p.delete('layout') }
+  spec['layout'] = xml
+end
 
 # Inject container/header-text spec elements (see header comment).
-elements_path = opts[:elements] || "#{opts[:layout]}.elements.json"
-if File.exist?(elements_path)
+elements_path = opts[:elements] || (opts[:layout] && "#{opts[:layout]}.elements.json")
+if elements_path && File.exist?(elements_path)
   inject = JSON.parse(File.read(elements_path))
   injected = 0
   inject.each do |page_id, els|
@@ -79,7 +95,7 @@ end
 # POST returns). Now that it does: resolve each target page NAME to its live
 # page id and rewrite the placeholder — in button `actions[].effects[].url`
 # AND in text-pill markdown bodies (the workspace-gated-button fallback).
-nav_path = opts[:nav_buttons] || Dir.glob(File.join(File.dirname(opts[:layout]), '*-nav-buttons.json')).first
+nav_path = opts[:nav_buttons] || (opts[:layout] && Dir.glob(File.join(File.dirname(opts[:layout]), '*-nav-buttons.json')).first)
 if nav_path && File.exist?(nav_path)
   wb_meta = JSON.parse(http(:get, "/v2/workbooks/#{opts[:wb]}").body) rescue {}
   wb_url = wb_meta['url'].to_s
@@ -127,7 +143,7 @@ end
 # All sidecars, sorted (an unsorted `.first` was nondeterministic when more
 # than one build wrote here — review-caught); ids are unioned. The builder
 # deletes its sidecar when a rebuild hides nothing, so stale ids don't linger.
-ht_paths = Dir.glob(File.join(File.dirname(opts[:layout]), '*-hidden-titles.json')).sort
+ht_paths = opts[:layout] ? Dir.glob(File.join(File.dirname(opts[:layout]), '*-hidden-titles.json')).sort : []
 hidden_ids = ht_paths.flat_map do |p|
   body = JSON.parse(File.read(p)) rescue []
   # v5.1.4 shape {workbook:, ids:} or the legacy bare array
@@ -141,8 +157,8 @@ end.uniq
 # worksheet caption with show-title=false gets hidden too. kpi-chart excluded
 # (its name IS the rendered KPI label).
 begin
-  dl_path = File.join(File.dirname(opts[:layout]), 'dashboard-layout.json')
-  if File.exist?(dl_path)
+  dl_path = opts[:layout] && File.join(File.dirname(opts[:layout]), 'dashboard-layout.json')
+  if dl_path && File.exist?(dl_path)
     dl = JSON.parse(File.read(dl_path))
     dl = [dl] unless dl.is_a?(Array)
     chart_zones = dl.flat_map { |d| d['zones'] || [] }
@@ -177,6 +193,40 @@ if hidden_ids.any?
   end
   puts "hidden titles: #{hid}/#{hidden_ids.size} element title(s) hidden (source show-title=false; " \
        "#{ht_paths.any? ? ht_paths.map { |p| File.basename(p) }.join(', ') : 'caption fallback'})"
+end
+
+# ---- v5.4: pivot grand-totals SHIP step -------------------------------------
+# Re-hide pivot grand totals as the FINAL mutation, once verification has run
+# against totals-free pivots (a `totals` key 500s a pivot's CSV export — probe-
+# isolated v5.4: the key's PRESENCE is the sole trigger, value type irrelevant).
+# Path-independent (like the hidden-titles caption fallback): every pivot-table
+# lacking a `totals` key gains {showGrandTotals:'hidden'}. An optional sibling
+# *-pivot-totals.json sidecar ({workbook?, totals:{elId => totalsSpec}}) OVERRIDES
+# per element id (preserves a deliberate showGrandTotals:'shown' or subtotals
+# choice). Runs whenever --apply-pivot-totals is set; idempotent (a pivot that
+# already carries a totals key is left as-is).
+if opts[:apply_pivot_totals]
+  overrides = {}
+  side = opts[:layout] ? Dir.glob(File.join(File.dirname(opts[:layout]), '*-pivot-totals.json')).sort : []
+  side.each do |p|
+    body = JSON.parse(File.read(p)) rescue nil
+    tot = body.is_a?(Hash) ? (body['totals'] || {}) : {}
+    tot.each { |k, v| overrides[k.to_s] = v } if tot.is_a?(Hash)
+  end
+  applied = 0
+  (spec['pages'] || []).each do |p|
+    (p['elements'] || []).each do |el|
+      next unless el.is_a?(Hash) && el['kind'] == 'pivot-table'
+      ov = overrides[el['id'].to_s]
+      if ov
+        el['totals'] = ov; applied += 1
+      elsif !el.key?('totals')
+        el['totals'] = { 'showGrandTotals' => 'hidden' }; applied += 1
+      end
+    end
+  end
+  puts "pivot totals: showGrandTotals applied to #{applied} pivot(s)" \
+       "#{overrides.any? ? " (#{overrides.size} sidecar override(s))" : ''}"
 end
 
 %w[workbookId url ownerId createdBy updatedBy createdAt updatedAt latestDocumentVersion].each { |k| spec.delete(k) }

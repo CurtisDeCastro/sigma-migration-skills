@@ -541,7 +541,8 @@ PHASE_BUDGET = {
   'cleanup-orphans'   => 45,
   'assert-run-state'  => 10,
   'assert-phase6-ran' => 90,
-  'phaseE'            => 240
+  'phaseE'            => 240,
+  'pivot-totals-ship' => 20   # one GET+PUT to re-hide pivot grand totals at ship
 }.freeze
 
 $budget_warned = {}
@@ -951,6 +952,24 @@ if opts[:finalize]
   end
 
   mark('phaseE') if enhance_requested
+
+  # ---- v5.4: pivot grand-totals SHIP step -------------------------------------
+  # A pivot carrying a `totals` key 500s its CSV export (probe-isolated v5.4:
+  # the key's PRESENCE is the sole trigger — value type irrelevant), which
+  # poisons verify-anchors' pivot exports, so verification runs totals-FREE.
+  # Now that every gate is GREEN, re-hide grand totals on the shipped workbook
+  # as the FINAL spec mutation — the same put-layout late-mutation channel
+  # hidden-titles uses. Runs AFTER Phase E (the enhance clone verifies against
+  # totals-free pivots too). Idempotent + non-fatal: a failure only means
+  # visible grand-total rows, a documented cosmetic residual (ROUND6 §2.4).
+  if all_green
+    _, tst = sigma_run!(['ruby', File.join(HERE, 'put-layout.rb'),
+                         '--workbook', wb_id, '--apply-pivot-totals'], allow_fail: true)
+    line(tst.success? ? 'pivot grand-totals re-hidden on shipped workbook (final mutation)' :
+         'WARN: pivot totals re-apply failed — workbook ships with visible grand-total rows (cosmetic residual)')
+    mark('pivot-totals-ship')
+  end
+
   pf = (JSON.parse(File.read(File.join(WORK, 'parity-final.json'))) rescue {})
   puts
   puts '================ RESULT ================'

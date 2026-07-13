@@ -299,6 +299,36 @@ else
   elements = (spec['pages'] || []).flat_map { |p| p['elements'] || [] }
   queryable = elements.reject { |el| %w[control text image container].include?(el['kind'].to_s) }
 
+  # v5.4 PIVOT-TOTALS CEILING: a pivot carrying a `totals` key 500s its CSV
+  # export (probe-isolated: the key's PRESENCE is the sole trigger — value type
+  # irrelevant), so a totals-bearing pivot's anchor values would read as MISSING
+  # here through no fault of the data. Bracket the exports: capture + STRIP each
+  # pivot's totals (one PUT), export against totals-free pivots, then RESTORE the
+  # captured totals (ensure). Renders keep their hidden grand totals before and
+  # after — only the brief export window is totals-free. The shipped hide state
+  # is re-guaranteed by `put-layout.rb --apply-pivot-totals` at the finalize ship
+  # step. Read-only spec fields are stripped before each PUT (Sigma rejects them).
+  READONLY_SPEC_KEYS = %w[workbookId url ownerId createdBy updatedBy createdAt updatedAt latestDocumentVersion].freeze
+  put_spec = lambda do |s|
+    body = s.reject { |k, _| READONLY_SPEC_KEYS.include?(k) }
+    Sigma.request(:put, "/v2/workbooks/#{wb}/spec", body: JSON.generate(body))
+  end
+  captured_totals = {}
+  queryable.each do |el|
+    next unless el['kind'] == 'pivot-table' && el.is_a?(Hash) && el.key?('totals')
+    captured_totals[el['id'].to_s] = el.delete('totals')
+  end
+  if captured_totals.any?
+    begin
+      put_spec.call(spec)
+      warn "  [totals-ceiling] stripped grand-total key from #{captured_totals.size} pivot(s) for CSV export (restored after)"
+    rescue Sigma::Error => e
+      warn "  [WARN] could not strip pivot totals (#{e.message.lines.first.to_s.strip[0, 100]}) — " \
+           'totals-bearing pivot exports may 500; those anchors can only be checked via a totals-free export'
+      captured_totals.clear # nothing was stripped; don't attempt a restore
+    end
+  end
+
   export_one = lambda do |el|
     r = Sigma.request(:post, "/v2/workbooks/#{wb}/export",
                       body: JSON.generate({ elementId: el['id'], format: { type: 'csv' } }))
@@ -318,27 +348,47 @@ else
       end
     end
   rescue Sigma::Error, CSV::MalformedCSVError => e
-    warn "  [WARN] export failed for element #{el_display_name(el).inspect}: #{e.message.lines.first.to_s.strip[0, 120]}"
+    msg = e.message.lines.first.to_s.strip[0, 120]
+    ceiling = (el['kind'] == 'pivot-table' && e.is_a?(Sigma::Error) && msg =~ /\b500\b/) ?
+      ' [PIVOT-TOTALS CEILING: a `totals` key 500s a pivot CSV export — this pivot still carries one; ' \
+      'the strip/restore bracket should have removed it. See refs/layout-visual-qa.md]' : ''
+    warn "  [WARN] export failed for element #{el_display_name(el).inspect}: #{msg}#{ceiling}"
     nil
   end
 
   require 'thread'
-  queue = Queue.new
-  queryable.each { |el| queue << el }
-  mutex = Mutex.new
-  Array.new([opts[:pool], queryable.size].min.clamp(1, 8)) do
-    Thread.new do
-      loop do
-        el = begin
-          queue.pop(true)
-        rescue ThreadError
-          break
+  begin
+    queue = Queue.new
+    queryable.each { |el| queue << el }
+    mutex = Mutex.new
+    Array.new([opts[:pool], queryable.size].min.clamp(1, 8)) do
+      Thread.new do
+        loop do
+          el = begin
+            queue.pop(true)
+          rescue ThreadError
+            break
+          end
+          rows = export_one.call(el)
+          mutex.synchronize { exports[el_display_name(el)] = rows } if rows
         end
-        rows = export_one.call(el)
-        mutex.synchronize { exports[el_display_name(el)] = rows } if rows
+      end
+    end.each(&:join)
+  ensure
+    # Restore the grand-total keys stripped for the export window so renders
+    # (and the shipped workbook) keep hidden grand totals — even if an export
+    # above raised. Best-effort: the finalize ship step re-guarantees it.
+    if captured_totals.any?
+      begin
+        elements.each { |el| (t = captured_totals[el['id'].to_s]) && el['totals'] = t }
+        put_spec.call(spec)
+        warn "  [totals-ceiling] restored grand-total key on #{captured_totals.size} pivot(s)"
+      rescue Sigma::Error => e
+        warn "  [WARN] pivot totals RESTORE failed (#{e.message.lines.first.to_s.strip[0, 100]}) — " \
+             'the finalize ship step (put-layout.rb --apply-pivot-totals) will re-hide grand totals'
       end
     end
-  end.each(&:join)
+  end
 end
 
 if exports.empty?

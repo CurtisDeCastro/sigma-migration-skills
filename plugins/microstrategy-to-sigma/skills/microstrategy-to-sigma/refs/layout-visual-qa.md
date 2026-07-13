@@ -196,5 +196,37 @@ never the Sigma default royal `#1a70f1` (round-4 defect). See sigma-workbooks `t
   borderRadius, borderColor, borderWidth, padding (`borderColor/Width` incompatible with
   `padding: none`).
 
+## Render 500 / CSV-export ceiling — the pivot `totals` key (bisect)
+
+A pivot-table element that carries a **`totals`** key **500s its CSV export** — a platform
+ceiling, not a data defect. Live probe matrix (v5.4, small landed table, 5 single-pivot pages):
+
+| pivot value | no `totals` | with `totals` |
+|---|---|---|
+| plain `Sum`            | CSV ✅ · PNG ✅ | CSV **500** · PNG ✅ |
+| `PercentOfTotal`       | CSV ✅ · PNG ✅ | CSV **500** · PNG ✅ |
+| ratio-of-sums (`a/b`)  | CSV ✅ · PNG ✅ | — |
+
+**The key's PRESENCE is the sole trigger** — value type is irrelevant (plain sum, PercentOfTotal,
+and ratio/division all export fine WITHOUT `totals`; both totals-bearing variants 500). Ratio /
+`PercentOfTotal` values are **NOT** a trigger. **PNG renders tolerate the `totals` key** (all five
+variants rendered), so a totals-bearing pivot still renders with hidden grand totals — but its CSV
+export (verify-anchors' pivot pooling, `collect-parity-actuals`) is dead.
+
+**Mechanism (v5.4 fix):** the `totals` key is kept OFF the pivots during verification and applied
+only at the **ship step**:
+- `verify-anchors.rb` brackets its live pivot CSV exports — capture + strip each pivot's `totals`
+  (one PUT), export against totals-free pivots, then restore (ensure). Renders keep hidden grand
+  totals before/after; only the brief export window is totals-free.
+- `put-layout.rb --apply-pivot-totals` re-hides grand totals as the FINAL spec mutation once the
+  gates are green (`migrate-tableau.rb --finalize` runs it automatically; run it by hand on the
+  manual/recovery path). Optional sibling `*-pivot-totals.json` sidecar overrides per element id.
+- `verify-visual-tiles.rb` / `verify-dashboard-visual.rb` NAME this ceiling on a render 500 instead
+  of an opaque MISSING.
+
+**Bisect a render/export 500:** strip the `totals` key first (or run the totals-free export) — if
+it clears, this ceiling is the cause; do **not** waive the gate. Only if it persists totals-free is
+it a genuine unbounded-dimension / service issue.
+
 _Base patterns verified 2026-06-10 on tj-wells-1989 (workbooks bc24d476, 3e23b761, 9733fcd9)
 against a known-good native layout (Chart Zoo Enhanced v4, 39a8f826)._

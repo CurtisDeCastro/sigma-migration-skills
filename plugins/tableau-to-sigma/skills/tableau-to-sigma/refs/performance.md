@@ -226,3 +226,8 @@ DM readback only. If slow, the Sigma API is slow — everything else will be too
 Opt-in enhancement scan/apply clones the workbook and re-checks parity per
 item; budget scales with accepted items. Accept fewer items per pass if it
 drags.
+
+### slow-pivot-totals-ship
+One GET + one PUT to re-hide pivot grand totals as the final ship mutation
+(`put-layout.rb --apply-pivot-totals`), after every gate is green. Slowness is
+pure API latency on a single spec round-trip; the mutation itself is instant.
