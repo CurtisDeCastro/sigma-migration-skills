@@ -15,28 +15,32 @@ dashboard: dashboard widgets -> Sigma workbook spec; widget type -> element,
 import json, sys, re, os
 import jaql_expr as J
 
+# ── documentation-grounded mapping catalogs (SINGLE SOURCE OF TRUTH) ─────────
+# Every widget/format/control map below is LOADED from refs/catalogs/<dim>.json
+# — cited rows (Sisense doc + Sigma target + sigma_verified), complete coverage,
+# and a loud fallback on anything unmapped. NO inline mapping literal may bypass
+# these catalogs (grep-enforced by tests/test_grounding.py). The human-readable
+# coverage matrix in refs/sisense-coverage.md is GENERATED from these files.
+# Loader: shared/lib/coverage_catalog.py (synced to scripts/lib/). The JAQL `agg`
+# map is loaded the same way inside jaql_expr.py.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
+import coverage_catalog as _cc  # noqa: E402
+_CAT_DIR = _cc.default_catalog_dir(__file__)
+VIZ_CAT  = _cc.load(_CAT_DIR, "viz-kind")        # Sisense widget type -> Sigma element kind
+FMT_CAT  = _cc.load(_CAT_DIR, "number-format")   # JAQL format mask    -> Sigma number format
+CTRL_CAT = _cc.load(_CAT_DIR, "control")         # dashboard filter    -> Sigma control kind
+
 # Sisense type code -> Sigma column type
 TYPE = {4: "datetime", 5: "number", 8: "number", 18: "text", 6: "datetime", 31: "datetime"}
 
-# Sisense widget type -> Sigma workbook element + coverage tag
-WIDGET_MAP = {
-    "indicator":     ("kpi",   "AUTO"),
-    "chart/column":  ("bar",   "AUTO"),
-    "chart/bar":     ("bar",   "AUTO"),
-    "chart/line":    ("line",  "AUTO"),
-    "chart/area":    ("area",  "AUTO"),
-    "chart/pie":     ("pie",   "AUTO"),
-    "pivot2":        ("pivot", "AUTO"),
-    "pivot":         ("pivot", "AUTO"),
-    "tablewidget":   ("table", "AUTO"),
-    "chart/scatter": ("scatter", "HINT"),
-    "chart/polar":   ("radar", "HINT"),
-    "chart/funnel":  ("bar",   "HINT"),   # no native funnel -> bar + flag note
-    "treemap":       (None,    "MANUAL"), # no native equivalent
-    "sunburst":      (None,    "MANUAL"),
-    "map/area":      ("geography-region", "HINT"),
-    "map/scatter":   ("geography-point",  "HINT"),
-}
+# Sisense widget type -> (coarse Sigma element, coverage tag) for the assessment
+# coverage report (classify_dashboard). Derived from the viz-kind catalog rows;
+# a null `coverage_element` (treemap/sunburst) keeps the old (None, tag) shape,
+# so WIDGET_MAP.get(wt, (None, "UNHANDLED")) still classifies unknown types.
+WIDGET_MAP = {r["source"]: (r.get("coverage_element"), r.get("tag", "AUTO"))
+              for r in VIZ_CAT.rows}
+# control-kind vocabulary, catalog-driven (refs/catalogs/control.json).
+_CTRL_KIND = {r["source"]: r["sigma"] for r in CTRL_CAT.rows}
 
 # ---------- model -> DM ----------
 import random, string
@@ -249,14 +253,15 @@ def classify_dashboard(dashboards):
     return rows
 
 # ---------- dashboard -> workbook (generic emit) ----------
-# Sisense widget type -> Sigma workbook element kind
-SIGMA_KIND = {
-    "indicator": "kpi-chart", "chart/column": "bar-chart", "chart/bar": "bar-chart",
-    "chart/line": "line-chart", "chart/area": "area-chart", "chart/pie": "pie-chart",
-    "chart/polar": "bar-chart", "chart/funnel": "bar-chart", "chart/scatter": "scatter-chart",
-    "pivot2": "pivot-table", "pivot": "pivot-table", "tablewidget": "table",
-}
-MONEY = {"kind": "number", "formatString": "$,.0f", "currencySymbol": "$"}
+# Sisense widget type -> Sigma workbook element kind (the builder path). Derived
+# from the viz-kind catalog: rows whose `sigma` is null (treemap/sunburst/maps)
+# are intentionally ABSENT, so convert_dashboard's SIGMA_KIND.get(wt) -> None ->
+# loud flag (no element faked). refs/catalogs/viz-kind.json.
+SIGMA_KIND = {r["source"]: r["sigma"] for r in VIZ_CAT.rows if r.get("sigma")}
+# Sisense currency mask -> Sigma currency number format. The formatString comes
+# from the number-format catalog; USD '$' is Sisense's documented default symbol.
+MONEY = {"kind": "number", "formatString": FMT_CAT.target("mask.currency"),
+         "currencySymbol": "$"}
 # Sisense panel name -> logical role
 DIM_PANELS = {"categories", "x-axis", "rows", "point", "geo", "break by"}
 MEAS_PANELS = {"value", "values", "y-axis", "size", "color"}
@@ -265,9 +270,28 @@ def _masterize(formula):
     """Rewrite bare [Col] refs to [Master/Col] (skip refs that already have '/')."""
     return re.sub(r"\[([^/\]]+)\]", r"[Master/\1]", formula)
 
-def _money_fmt(jaql):
-    fmt = (jaql.get("format") or {})
-    return MONEY if (fmt.get("mask", {}) or {}).get("currency") or "Revenue" in (jaql.get("title") or "") or "Cost" in (jaql.get("title") or "") else None
+def _money_fmt(jaql, warns=None):
+    """Return the Sigma currency number-format IFF the JAQL carries a real
+    currency mask (format.mask.currency) — the ONLY documentation-grounded
+    numeric-format signal (refs/catalogs/number-format.json).
+
+    beads-sigma-kvza: the previous implementation ALSO returned a $ format when
+    the widget TITLE contained the substring 'Revenue' or 'Cost'. That was a
+    name-guessing heuristic that mis-formatted any non-currency measure titled
+    that way; it has been REMOVED. A `format.mask` that is present but is NOT a
+    currency signal (percent/number/etc.) is a formatting intent we do not yet
+    port -> append a LOUD warning to `warns` (when provided) and ship the column
+    UNFORMATTED — never a silent wrong default."""
+    mask = ((jaql.get("format") or {}).get("mask") or {})
+    if mask.get("currency"):
+        return dict(MONEY)
+    if mask and warns is not None:
+        warns.append(
+            "number-format: widget field '%s' carries a non-currency format mask "
+            "%s with no documented Sigma mapping — shipping UNFORMATTED (verify). "
+            "See refs/catalogs/number-format.json."
+            % (jaql.get("title") or "?", sorted(mask.keys())))
+    return None
 
 # ---------- layout: Sisense columnar grid -> Sigma 24-col grid XML ----------
 # Sisense stores layout as `layout.columns[]` (vertical strips, % width) ->
@@ -487,9 +511,14 @@ def convert_dashboard(dashboards, model, dm_info):
                     vid = "c_" + cid()
                     spec = {"id": vid, "formula": _masterize(formula),
                             "name": jaql.get("title") or k}
-                    fmt = _money_fmt(jaql)
-                    if fmt and k == "measure":
-                        spec["format"] = fmt
+                    if k == "measure":
+                        _fmt_warns = []
+                        fmt = _money_fmt(jaql, _fmt_warns)
+                        if fmt:
+                            spec["format"] = fmt
+                        for _wmsg in _fmt_warns:   # loud fallback: non-currency mask dropped
+                            flags.append({"widget": w.get("title"),
+                                          "field": jaql.get("title"), "reason": _wmsg})
                     (meas if (k == "measure" or role == "meas") else dims).append((vid, spec, jaql))
             if not ok and not (dims or meas):
                 continue
@@ -526,19 +555,25 @@ def _emit_control(fl, master_ref, master_idx, cid):
     base = {"kind": "control", "id": "ctrl_" + cid(), "controlId": re.sub(r"\W+", "", name) or ("F" + cid()),
             "name": name, "filters": [bind]}
     dt = jq.get("datatype") or jq.get("dimType")
+    # control kind is documentation-grounded (refs/catalogs/control.json). The
+    # compound branching (filter-shape + datatype + date-level) stays as code —
+    # it is not a flat 1:1 lookup — but the resulting control-kind strings are
+    # resolved from the catalog so the vocabulary lives in one cited place.
     if "members" in flt or "explicit" in flt or jq.get("level") in (None,) and dt in ("text", None):
         # member list filter (most common)
         vals = flt.get("members") or (flt.get("explicit", {}) or {}).get("members") or []
-        return {**base, "controlType": "list", "mode": "exclude" if flt.get("exclude") else "include",
+        return {**base, "controlType": _CTRL_KIND["members"], "mode": "exclude" if flt.get("exclude") else "include",
                 "selectionMode": "multiple", "values": vals,
                 "source": {"kind": "source", "source": {"kind": "table", "elementId": "master"}, "columnId": col_id}}
     if jq.get("level") or dt in ("datetime", "date"):
-        return {**base, "controlType": "date-range", "mode": "between",
+        return {**base, "controlType": _CTRL_KIND["datetime"], "mode": "between",
                 "includeNulls": "when-no-value-is-selected"}
     if dt in ("numeric", "number"):
-        return {**base, "controlType": "number-range", "mode": "between", "values": []}
-    # default to a list control
-    return {**base, "controlType": "list", "mode": "include", "selectionMode": "multiple", "values": [],
+        return {**base, "controlType": _CTRL_KIND["numeric"], "mode": "between", "values": []}
+    # DOCUMENTED DEFAULT (refs/catalogs/control.json '*' row): an unrecognized
+    # filter datatype becomes a categorical list control — Sisense's own default
+    # filter kind for descriptive fields, not a silent wrong-guess.
+    return {**base, "controlType": _CTRL_KIND["*"], "mode": "include", "selectionMode": "multiple", "values": [],
             "source": {"kind": "source", "source": {"kind": "table", "elementId": "master"}, "columnId": col_id}}
 
 def _emit_viz(kind, title, dims, meas):
