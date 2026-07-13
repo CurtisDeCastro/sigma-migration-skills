@@ -30,7 +30,11 @@ if [ "$SIGMA_CLIENT_SECRET" = "$SIGMA_CLIENT_ID" ]; then
   exit 1
 fi
 
-CREDENTIALS=$(printf '%s:%s' "$SIGMA_CLIENT_ID" "$SIGMA_CLIENT_SECRET" | base64)
+# NB: `| tr -d '\n'` is mandatory. GNU coreutils `base64` (Git Bash on Windows,
+# Linux CI) wraps output at 76 columns, injecting newlines that corrupt the
+# multi-line Authorization header and make Sigma reject a VALID credential.
+# `tr -d` (not `base64 -w0`, which BSD/macOS `base64` lacks) is cross-platform.
+CREDENTIALS=$(printf '%s:%s' "$SIGMA_CLIENT_ID" "$SIGMA_CLIENT_SECRET" | base64 | tr -d '\n')
 
 RESPONSE=$(curl -sf -X POST \
   -H "Authorization: Basic ${CREDENTIALS}" \
