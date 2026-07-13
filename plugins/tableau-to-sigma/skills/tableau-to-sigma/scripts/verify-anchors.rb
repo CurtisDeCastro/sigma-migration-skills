@@ -296,6 +296,7 @@ OptionParser.new do |p|
   p.on('--timeout S', Integer) { |v| opts[:timeout] = v }
   p.on('--workbook-spec PATH', 'offline: read element names from this spec instead of the live workbook') { |v| opts[:spec] = v }
   p.on('--exports-dir DIR', 'offline: read <elementId>.csv files instead of exporting live') { |v| opts[:exports] = v }
+  p.on('--retranscribed REASON', 'authorize a CHANGE to source-anchors.json since its first verification — ONLY when you RE-READ the source dashboard PNG and corrected a genuine transcription error. REQUIRED reason string; the old->new diff is logged into the verdict and MUST be named in your report. NEVER use this to reconcile anchors against the live actuals (that defeats the whole measurement).') { |v| opts[:retranscribed] = v }
 end.parse!
 abort('--workdir required') unless opts[:dir]
 
@@ -331,6 +332,54 @@ unless bad.empty?
   warn '       `raw` must be the value EXACTLY as printed on the source image ("18,037B", "-2%",'
   warn '       "$733,215.26") — or, for kind:"text" roster anchors, a non-empty displayed label.'
   exit 2
+end
+
+# --- W1.3: source-anchor immutability ---------------------------------------
+# The anchors are the MEASUREMENT; editing them after seeing the live actuals
+# defeats the entire bar. The 2026-07 run changed a1 "18,037B" -> "18,028B" (the
+# Sigma value) to flip a 14/15 FAIL into a 15/15 PASS. Lock the file's hash on
+# first verification; a later change is refused unless --retranscribed authorizes
+# a genuine re-transcription (re-read the SOURCE PNG, not the actuals). The
+# old->new diff is logged into the verdict so it surfaces in the report.
+require 'digest'
+lock_path = File.join(opts[:dir], 'source-anchors.lock.json')
+cur_sha = Digest::SHA256.hexdigest(File.read(anchors_path))
+anchor_retranscribe = nil
+if File.exist?(lock_path)
+  lock = (JSON.parse(File.read(lock_path)) rescue {})
+  prev_sha = lock['sha256'].to_s
+  if !prev_sha.empty? && prev_sha != cur_sha
+    if opts[:retranscribed].to_s.strip.empty?
+      warn 'FATAL: source-anchors.json has CHANGED since it was first verified.'
+      warn "       first-seen sha256 #{prev_sha[0, 12]}… (locked #{lock['stamped_at']}), now #{cur_sha[0, 12]}…"
+      warn '       Editing the transcribed source values after seeing the live actuals defeats the'
+      warn '       measurement (the 2026-07 run flipped a FAIL to a PASS this way). If — and only if —'
+      warn '       you RE-READ the source dashboard PNG and corrected a genuine transcription error,'
+      warn '       re-run with --retranscribed "<why, referencing the source image>". Otherwise revert'
+      warn '       source-anchors.json and FIX THE WORKBOOK so the printed value actually appears.'
+      exit 2
+    end
+    # Authorized re-transcription: capture the diff for the verdict + re-stamp.
+    old_anchors = (lock['anchors'] || {})
+    new_anchors = anchors.each_with_object({}) { |a, h| h[a['id'].to_s] = a['raw'] if a.is_a?(Hash) }
+    changed = new_anchors.select { |id, raw| old_anchors.key?(id) && old_anchors[id] != raw }
+              .map { |id, raw| { 'id' => id, 'from' => old_anchors[id], 'to' => raw } }
+    anchor_retranscribe = { 'reason' => opts[:retranscribed], 'changed' => changed,
+                            'prev_sha256' => prev_sha, 'sha256' => cur_sha }
+    warn "[RETRANSCRIBED] source-anchors.json change AUTHORIZED — #{opts[:retranscribed]}"
+    changed.each { |c| warn "                #{c['id']}: #{c['from'].inspect} -> #{c['to'].inspect}" }
+    warn '                This MUST be named in your migration report.'
+  end
+end
+# (Re)stamp the lock: first sight, or an authorized re-transcription.
+begin
+  File.write(lock_path, JSON.pretty_generate(
+    'sha256' => cur_sha,
+    'stamped_at' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ'),
+    'anchor_count' => anchors.length,
+    'anchors' => anchors.each_with_object({}) { |a, h| h[a['id'].to_s] = a['raw'] if a.is_a?(Hash) }))
+rescue StandardError => e
+  warn "  [WARN] could not write source-anchors lock (#{e.class}: #{e.message.to_s[0, 60]})"
 end
 
 # --- element names + rows: offline (spec+exports dir) or live (REST) ---------
@@ -518,6 +567,7 @@ verdict['tiles_all_nonempty'] = empty_displayed.empty?
 verdict['detail'].each { |d| d['in_displayed_tile'] = displayed_names.include?(d['matched_in']) }
 verdict['anchors_matched_in_displayed'] = verdict['detail'].count { |d| d['in_displayed_tile'] }
 verdict['anchors_only_in_feeders'] = verdict['detail'].reject { |d| d['in_displayed_tile'] }.map { |d| d['id'] }
+verdict['anchors_retranscribed'] = anchor_retranscribe if anchor_retranscribe
 
 File.write(out_path, JSON.pretty_generate(verdict))
 
