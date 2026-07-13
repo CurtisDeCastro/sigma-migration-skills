@@ -78,6 +78,18 @@ else
   fi
 fi
 
+# --- visual-similarity deps (gate 14's measured floor) ----------------------
+# visual-similarity.py needs Pillow + numpy; without them the gate exits
+# "SKIPPED: dep missing" instead of measuring (A/B-report field-caught: the
+# deps were undeclared and the floor silently could not run on a fresh box).
+if command -v "${PY_CMD:-python3}" >/dev/null 2>&1; then
+  if "${PY_CMD:-python3}" -c "import PIL, numpy" >/dev/null 2>&1; then
+    ok "python imaging deps (Pillow + numpy) — visual-similarity floor can run"
+  else
+    warn "Pillow/numpy missing — the visual-similarity floor (gate 14) cannot MEASURE and will need a named waiver"          "pip install pillow numpy   (numpy 2.3+ preferred; 2.2.x histogram regression is worked around in-script)"
+  fi
+fi
+
 # --- python TLS trust (P1.4) -----------------------------------------------
 # Python's OpenSSL 3.x is stricter than curl/Ruby and rejects some valid server
 # chains (e.g. Tableau Cloud's intermediate — "Basic Constraints not marked
@@ -126,11 +138,73 @@ if [ -f "$GT" ] && grep -q $'\r' "$GT" 2>/dev/null; then
       "Fix: 'sed -i \$'s/\\r\$//' scripts/*.sh' (or set core.autocrlf=input and re-checkout)."
 fi
 
-# --- Sigma credentials (informational) -------------------------------------
+# --- Sigma credentials (REQUIRED — fail-closed) + live token-mint smoke ----
+# Missing creds used to be a WARN, so a run could start doomed and die at its
+# first API call with an opaque auth error the agent improvises around. Now:
+# absent creds = ✗ REQUIRED failure. When creds ARE present and the sibling
+# Ruby lib exists (lib/sigma_rest.rb — the same in-process mint path the
+# orchestrators use), a live token mint (bounded ~20s) proves they WORK:
+# present-but-broken creds are ✗ too. SIGMA_SKIP_CRED_SMOKE=1 skips the live
+# probe (genuinely offline runs). Recorded in doctor.json
+# {cred_smoke:{sigma: pass|fail|skipped}}.
+SMOKE_SIGMA="skipped"
+_SIGMA_CREDS=false
 if [ -f "$HOME/.sigma-migration/env" ] || [ -n "${SIGMA_API_TOKEN:-}" ] || [ -n "${SIGMA_CLIENT_ID:-}" ]; then
-  ok "Sigma credentials present (env or ~/.sigma-migration/env)"
+  _SIGMA_CREDS=true
+fi
+if [ "$_SIGMA_CREDS" != true ]; then
+  bad "no Sigma credentials found (REQUIRED — the run would die at its first Sigma API call)" \
+      "Run 'ruby scripts/setup.rb' once (writes ~/.sigma-migration/env), or export SIGMA_CLIENT_ID/SIGMA_CLIENT_SECRET (+ SIGMA_BASE_URL)."
+elif [ -n "${SIGMA_SKIP_CRED_SMOKE:-}" ]; then
+  ok "Sigma credentials present (live token-mint smoke SKIPPED: SIGMA_SKIP_CRED_SMOKE)"
+elif [ -f "$HERE/lib/sigma_rest.rb" ] && command -v ruby >/dev/null 2>&1; then
+  if ruby -e '$LOAD_PATH.unshift File.join(ARGV[0], "lib"); require "timeout"; require "sigma_rest"; Timeout.timeout(20) { Sigma.refresh_token! }' "$HERE" >/dev/null 2>&1; then
+    ok "Sigma credentials present + live token mint OK"
+    SMOKE_SIGMA="pass"
+  else
+    bad "Sigma credentials present but the live token mint FAILED (bad/stale client id/secret, or wrong SIGMA_BASE_URL)" \
+        "Re-run 'ruby scripts/setup.rb' with fresh values (Sigma: Administration → APIs & Embed Secrets). Genuinely offline? SIGMA_SKIP_CRED_SMOKE=1 skips this probe."
+    SMOKE_SIGMA="fail"
+  fi
 else
-  warn "no Sigma credentials found" "Run 'ruby scripts/setup.rb' once (writes ~/.sigma-migration/env), or export SIGMA_CLIENT_ID/SIGMA_CLIENT_SECRET."
+  ok "Sigma credentials present (mint smoke skipped — no ruby lib next to this doctor)"
+fi
+
+# --- Tableau credentials (self-gated: tableau skill only) --------------------
+# Plugin-aware like the hyperapi check: only speaks up where the sibling
+# Tableau scripts exist (setup-tableau.rb + lib/tableau_rest.rb). ABSENT
+# Tableau creds stay a WARN — Sigma-only skills share this doctor and must not
+# fail on them. PRESENT-but-broken creds are ✗: a live PAT signin smoke
+# (bounded ~20s) catches the expired-PAT / wrong-site class before a run
+# starts doomed. SIGMA_SKIP_CRED_SMOKE=1 skips. Recorded in doctor.json
+# {cred_smoke:{tableau: pass|fail|skipped}}.
+SMOKE_TABLEAU="skipped"
+if [ -f "$HERE/setup-tableau.rb" ] && [ -f "$HERE/lib/tableau_rest.rb" ]; then
+  _TAB_CREDS=false
+  if { [ -n "${TABLEAU_PAT_NAME:-}" ] && [ -n "${TABLEAU_PAT_SECRET:-}" ]; } || \
+     grep -q 'TABLEAU_PAT_SECRET' "$HOME/.sigma-migration/env" 2>/dev/null; then
+    _TAB_CREDS=true
+  fi
+  if [ "$_TAB_CREDS" != true ]; then
+    warn "no Tableau credentials found (needed for Tableau discovery)" \
+         "Run 'ruby scripts/setup-tableau.rb' once (PAT), or export TABLEAU_PAT_NAME/TABLEAU_PAT_SECRET/TABLEAU_SITE_CONTENT_URL (+ TABLEAU_SERVER_URL)."
+  elif [ -n "${SIGMA_SKIP_CRED_SMOKE:-}" ]; then
+    ok "Tableau credentials present (live PAT signin smoke SKIPPED: SIGMA_SKIP_CRED_SMOKE)"
+  elif command -v ruby >/dev/null 2>&1; then
+    # Two attempts, 30s bound each: a single 20s-bounded probe false-negatived
+    # in a real field run (parallel-agent load) while get-tableau-token.sh
+    # minted fine seconds later — a doctor that cries wolf trains agents to
+    # ignore it.
+    _TAB_SMOKE_RB='$LOAD_PATH.unshift File.join(ARGV[0], "lib"); require "timeout"; require "tableau_rest"; Timeout.timeout(30) { Tableau.refresh_token! }'
+    if ruby -e "$_TAB_SMOKE_RB" "$HERE" >/dev/null 2>&1 || ruby -e "$_TAB_SMOKE_RB" "$HERE" >/dev/null 2>&1; then
+      ok "Tableau credentials present + live PAT signin OK"
+      SMOKE_TABLEAU="pass"
+    else
+      bad "Tableau credentials present but the live PAT signin FAILED twice (expired/revoked PAT, wrong site or server URL)" \
+          "Re-run 'ruby scripts/setup-tableau.rb' with a fresh PAT. Genuinely offline? SIGMA_SKIP_CRED_SMOKE=1 skips this probe."
+      SMOKE_TABLEAU="fail"
+    fi
+  fi
 fi
 
 # --- tableauhyperapi (informational — embedded-extract workbooks only) -----
@@ -236,6 +310,7 @@ write_doctor_json() {
     printf '"runtimes":{"ruby":%s,"python":%s,"node":%s,"bash":true},' "$RUBY_OK" "$PY_OK" "$NODE_OK"
     printf '"versions":{"ruby":"%s","python":"%s","node":"%s"},' "$(jstr "$RUBY_V")" "$(jstr "$PY_VER")" "$(jstr "$NODE_V")"
     printf '"sandbox_hint":"%s",' "$(jstr "$SANDBOX_HINT")"
+    printf '"cred_smoke":{"sigma":"%s","tableau":"%s"},' "$SMOKE_SIGMA" "$SMOKE_TABLEAU"
     printf '"hyperapi_present":%s,' "$HYPERAPI"
     printf '"skill_sha":"%s",' "$(jstr "$SKILL_SHA")"
     printf '"behind_count":%s,' "$BEHIND_COUNT"

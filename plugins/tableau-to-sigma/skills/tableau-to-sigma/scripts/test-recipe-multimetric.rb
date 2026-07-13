@@ -3,7 +3,7 @@
 # Regression test for lib/recipe_multimetric.rb (2026-07-08).
 #
 # Deterministic + offline: a synthetic BUILT wb-spec in the shape build-charts +
-# build_wb_spec produce for the World Bank Macroeconomics dashboard (the E2E's
+# build_wb_spec produce for the Global Macro Series dashboard (the E2E's
 # degraded output), transformed → the recipe shape. Asserts the transform:
 #  A — clones master → an UNFILTERED masterAll and routes the highlight (bar)
 #      tile to it (rewriting [Master/…] → [Master All/…]) + a highlight color col
@@ -21,7 +21,7 @@ require_relative 'lib/recipe_multimetric'
 fails = []
 def check(c, m, fails) fails << m unless c; puts "  #{c ? 'PASS' : 'FAIL'}  #{m}" end
 
-WE = 'World Bank (World)' # DM element name (base-column formula prefix)
+WE = 'Global Macro (World)' # DM element name (base-column formula prefix)
 
 def master_cols
   [
@@ -149,7 +149,10 @@ check(sum_tr[:trends] == 1, "reshaped 1 trend (got #{sum_tr[:trends]})", fails)
 country = tr['columns'].find { |c| c['formula'] == 'Sum([Master/GDP])' }
 check(country, 'added the region-filtered Country line Sum([Master/GDP])', fails)
 check(tr['kind'] == 'combo-chart', 'trend promoted to combo-chart', fails)
-check(!tr.key?('yAxis2'), 'no yAxis2 — Country + World share ONE axis (region reads as a fraction of world)', fails)
+# Dual-axis contract (matches the source design; live-verified): yAxis lists
+# ALL series, yAxis2 is a PLAIN-STRING SUBSET naming which ride the right axis.
+check(tr.dig('yAxis2', 'columnIds') == %w[tr_world],
+      'World line marked onto yAxis2 as a plain-string subset of yAxis', fails)
 check(tr['yAxis']['columnIds'].map { |c| c.is_a?(Hash) ? c['columnId'] : c }.sort == %w[tr_world trend-country-el-gdptrend].sort,
       'both lines live in yAxis', fails)
 check(tr['dataLabel'].nil?, 'no per-point data labels on the trend', fails)

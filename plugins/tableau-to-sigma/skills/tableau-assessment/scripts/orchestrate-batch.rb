@@ -21,10 +21,21 @@
 #
 # Aggregate semantics (continue-on-failure):
 #   - GREEN: workbook posted clean (0 column-errors, verify-workbook.rb clean)
-#            AND all chart actuals strict-PASS (or PASS in extract-mode).
+#            AND all chart actuals strict-PASS (or PASS in extract-mode)
+#            AND the VERIFIER countersigned (builder/verifier split — see the
+#            tableau-to-sigma skill's refs/orchestration.md).
 #   - YELLOW: workbook posted clean BUT one or more charts diverge in values.
 #            Structural conversion succeeded; needs human review.
 #   - RED: column-type errors, POST failure, verify failure, or no actuals.
+#
+# Verifier stage (builder/verifier split): each subagent entry carries BOTH an
+# `agent_brief` (the builder) and a `verifier_brief`. After a workbook's builder
+# completes and appends its SELF-ASSESSED result line (verdict_by:"builder"),
+# the conversation-layer spawns a FRESH agent with the verifier_brief — no
+# builder history. The verifier appends the FINAL result line for the workbook
+# (verdict_by:"verifier"); aggregate-results.rb prefers verifier lines and marks
+# builder-only lines as verification-pending. The batch verdict for a workbook
+# is the VERIFIER's, never the builder's.
 #
 # Usage:
 #   ruby scripts/orchestrate-batch.rb \
@@ -238,6 +249,12 @@ def agent_brief(sub, cluster, batch_results_path, leader_dm_id_path, out_dir, ov
        parallel requests 401).
     2. For each PNG, decide: chart kind, dual-axis vs single, annotations,
        data labels, axis scale (log vs linear), reference lines, palette.
+       While reading, transcribe every legible number (KPI values, axis
+       endpoints, totals, labeled points) into
+       `/tmp/#{wb_dir_hint}/source-anchors.json` (schema: the skill's
+       refs/source-anchors.md) — the VERIFIER diffs the final render
+       against these anchors; a number you can't read goes in as
+       "illegible", never guessed.
     3. **LAYOUT COMPOSITION** — the dashboard PNG (named like
        `Dashboard*`, `*Overview*`, or whichever zone is the largest /
        multi-element) tells you the GRID. Count its columns and rows of
@@ -275,11 +292,20 @@ def agent_brief(sub, cluster, batch_results_path, leader_dm_id_path, out_dir, ov
        For EACH page: render the Sigma page, Read it against the matching
        source dashboard PNG, fix deltas via the Phase 5g loop
        (`fidelity-loop.rb render/record/apply-patch`, recipes in the
-       skill's refs/fidelity-recipes.md), and RECORD a verdict per page
-       (`record-visual-check.rb --verdict pass|divergent`). A conversion
-       with unrendered or unverdicted pages is not GREEN. If you cannot
-       read images, record the verdict as not-executable (see the
-       MODEL-FIT CHECKPOINT above) — never attest blind.
+       skill's refs/fidelity-recipes.md), recording each remaining gap
+       via `record-visual-check.rb --verdict divergent --notes "<gap>"`.
+       A conversion with unrendered or uncompared pages is not done. If
+       you cannot read images, record the verdict as not-executable (see
+       the MODEL-FIT CHECKPOINT above) — never attest blind.
+    8. **BUILDER/VERIFIER SPLIT — do NOT record the final `--verdict
+       pass`.** The final visual verdict on this conversion is
+       countersigned by a SEPARATE verifier agent with a fresh context
+       (the skill's refs/orchestration.md + scripts/verifier-brief.md).
+       When you believe the render matches the source, STOP the visual
+       loop and leave gate 8b unrecorded — your self-check gate run
+       (Phase 6 step 6 below) waives it with a named reason. Ignore any
+       script output telling you to record `--verdict pass`; that
+       instruction is for solo self-attested runs.
 
     SUBSTITUTIONS for unsupported Tableau chart types (when source PNG
     shows one of these, render the listed Sigma equivalent and note the
@@ -409,15 +435,22 @@ def agent_brief(sub, cluster, batch_results_path, leader_dm_id_path, out_dir, ov
        one measure and no dims) now auto-emit as Sigma kpi-chart from
        parse-twb-layout; verify they appear in the readback before
        running the layout script.
-    6. **MANDATORY FINAL STEP — before writing the result line, run:**
-       `ruby scripts/assert-phase6-ran.rb --tableau /tmp/<wb-dir>`
-       The gate checks FOUR things: Phase 6 ran, no orphan workbooks
-       remain, no live column has type=error, and a layout XML is
-       applied. Exit 0 → write GREEN if all other gates pass. Any
-       non-zero exit → you MUST downgrade to YELLOW (parity skipped/
-       incomplete, orphans uncleaned, runtime errors, layout missing)
-       or RED (parity failed). Do NOT declare GREEN if assert-phase6-ran.rb
-       did not exit 0. There is no exception.
+    6. **MANDATORY FINAL STEP — before writing the result line, run the
+       SELF-CHECK gate:**
+       `ruby scripts/assert-phase6-ran.rb --tableau /tmp/<wb-dir> \\
+          --workbook-id <sigma-wb-id> --require-fidelity-ledger \\
+          --skip-visual-comparison "builder/verifier split: final visual verdict reserved for the verifier" \\
+          --skip-telemetry-gate "telemetry deferred to the batch orchestrator"`
+       Those two --skip flags are the ONLY waivers the split grants you
+       (they also consume the gate's waiver budget — stacking any further
+       waiver caps the run at YELLOW, exit 19); any OTHER waiver needs a
+       reason AND evidence documented in your MIGRATION_REPORT.md or the
+       verifier will VETO the workbook.
+       Exit 0 → write parity_tier "GREEN" (SELF-ASSESSED — the verifier
+       issues the final verdict). Any non-zero exit → you MUST downgrade
+       to YELLOW (parity skipped/incomplete, orphans uncleaned, runtime
+       errors, layout missing) or RED (parity failed). There is no
+       exception.
 
     **If MCP query fails mid-Phase-6 with an auth-related error**, the
     Sigma MCP session has staled. Re-call `mcp__sigma-mcp-v2__begin_session`
@@ -432,20 +465,27 @@ def agent_brief(sub, cluster, batch_results_path, leader_dm_id_path, out_dir, ov
     readback.rb now logs every POST to posted-workbooks.jsonl and prints
     a loud warning on second+ invocation.
 
-    DELIVERABLES on completion — APPEND ONE LINE to `#{batch_results_path}`
-    as JSON (newline-delimited; tolerate races with file locking):
+    DELIVERABLES on completion — write `/tmp/<wb-dir>/MIGRATION_REPORT.md`
+    (what was built; EVERY waiver with reason + evidence; named
+    degradations/substitutions — the verifier reads it), then APPEND ONE
+    LINE to `#{batch_results_path}` as JSON (newline-delimited; tolerate
+    races with file locking):
       { workbookId, cluster_id: "#{sub['cluster_id']}", role: "#{reuse ? 'follower' : 'leader'}",
+        verdict_by: "builder",                # your tier is SELF-ASSESSED
+        workdir: "/tmp/<wb-dir>",             # the verifier needs this
         sigma_workbook_url, sigma_workbook_id, dm_id_used,
         parity_tier: "GREEN" | "YELLOW" | "RED",
         column_errors: <int>, verify_status: "clean" | "fail",
         charts_pass: <int>, charts_total: <int>,
-        phase6_assert_exit: <0|1|2|3>,        # MANDATORY — must be present
+        phase6_assert_exit: <int>,            # MANDATORY — the SELF-CHECK gate exit
         screenshot_path: "<absolute path to sigma-render.png>" | null,
         duration_s: <float>, error_summary: <string|null> }
 
-    PARITY TIER RULES
+    PARITY TIER RULES (SELF-ASSESSED — the final batch verdict for this
+    workbook is the VERIFIER's result line, not yours)
     - GREEN: column_errors==0 AND verify=="clean" AND charts_total > 0 AND
-             charts_pass==charts_total AND phase6_assert_exit==0 AND
+             charts_pass==charts_total AND phase6_assert_exit==0 on the
+             SELF-CHECK gate run (split + telemetry waivers only) AND
              screenshot_path != null AND you Read-back the Sigma PNG and
              confirmed visual parity with the source dashboard PNG(s).
              (charts_total==0 is NOT GREEN — that's the historic loophole;
@@ -455,6 +495,14 @@ def agent_brief(sub, cluster, batch_results_path, leader_dm_id_path, out_dir, ov
               error_summary)
     - RED: any column_error OR verify=="fail" OR POST failure OR
            screenshot_path is null (couldn't render the Sigma workbook)
+
+    VERIFICATION HANDOFF — after you complete, the batch orchestrator
+    spawns a FRESH verifier agent (the skill's scripts/verifier-brief.md)
+    on your workdir. Leave every artifact it needs in /tmp/<wb-dir>:
+    source dashboard PNG(s), sigma-render.png, parity-final.json,
+    fidelity-ledger.json, source-anchors.json, png-read.json,
+    MIGRATION_REPORT.md. Do NOT record the final visual pass verdict
+    yourself — request verification and stop.
 
     CONTINUE-ON-FAILURE — if you hit a hard blocker (POST rejects, column-type
     error you can't resolve in 2 retry attempts, etc.), file a beads ticket
@@ -468,6 +516,64 @@ def agent_brief(sub, cluster, batch_results_path, leader_dm_id_path, out_dir, ov
 
     Do NOT push any code changes.
   BRIEF
+end
+
+# Verifier-brief generator (builder/verifier split — the tableau-to-sigma
+# skill's refs/orchestration.md). The conversation-layer fires this as a FRESH
+# Agent() call after the workbook's builder completes; the verifier's result
+# line is the workbook's FINAL batch verdict.
+def verifier_brief(sub, batch_results_path)
+  wb = sub['workbook']
+  wb_dir_hint = wb['name'].to_s.gsub(/\W+/, '-').downcase
+  <<~VBRIEF
+    Verify one completed Tableau→Sigma conversion. You are the VERIFIER — a
+    fresh-context agent with NO builder history and no investment in this
+    passing. Your ONLY job is to find what the builder missed.
+
+    WORKBOOK
+    - name:       #{wb['name']}
+    - workbookId: #{wb['workbookId']}
+
+    INPUTS — read `#{batch_results_path}`, find the line with workbookId
+    "#{wb['workbookId']}" and verdict_by "builder"; take its `workdir`
+    (expected: /tmp/#{wb_dir_hint}) and `sigma_workbook_id`. Judge only the
+    artifacts on disk — never the builder's narrative.
+
+    PROCEDURE — read and execute IN FULL the verifier brief in the
+    tableau-to-sigma skill (~/.claude/skills/tableau-to-sigma/):
+      scripts/verifier-brief.md
+    with WORKDIR=<workdir> and SIGMA_WORKBOOK_ID=<sigma_workbook_id>.
+    In summary (the brief is authoritative): re-run assert-phase6-ran.rb
+    with ONLY the builder's documented waivers (an undocumented waiver =
+    VETO → RED); run verify-anchors.rb and visual-similarity.py yourself;
+    READ the source dashboard PNG(s) vs the final Sigma render YOURSELF and
+    list every visible divergence with a severity. Verdict rules:
+      - any wrong NUMBER → RED (veto)
+      - structural divergence → YELLOW with itemized fixes
+      - only near-exact → countersign GREEN:
+        `ruby scripts/record-visual-check.rb --workdir <workdir> --agent-vision true \\
+           --verdict pass --notes "VERIFIER: <what you compared>"`
+        (notes MUST start with "VERIFIER:"), then re-run the gate — exit 0
+        is required before claiming GREEN.
+
+    DELIVERABLE — APPEND ONE LINE to `#{batch_results_path}` (newline-
+    delimited JSON; tolerate races with file locking):
+      { workbookId: "#{wb['workbookId']}", verdict_by: "verifier",
+        parity_tier: "GREEN" | "YELLOW" | "RED",
+        countersigned: <bool>, gate_exit: <int>,
+        divergences: [ { severity: "number"|"structural"|"cosmetic",
+                         description: <string> } ],
+        workdir, sigma_workbook_id, sigma_workbook_url,
+        duration_s: <float>, error_summary: <string|null> }
+    (copy sigma_workbook_url from the builder's line). Your line is the
+    workbook's FINAL batch verdict.
+
+    TELEMETRY — do NOT run report-telemetry.py; the batch orchestrator
+    handles it once for the whole batch.
+    Public-repo hygiene: no credentials/tokens in notes or reports.
+    Do NOT push any code changes. Do NOT modify the workbook — you verify;
+    fixes belong to a builder.
+  VBRIEF
 end
 
 # Emit the plan: per-wave, per-subagent briefs the conversation-layer fires.
@@ -491,7 +597,8 @@ schedule = waves.map do |wave|
         'workbookId'       => sub['workbook']['workbookId'],
         'workbook_name'    => sub['workbook']['name'],
         'leader_dm_id_path'=> leader_dm_id_path,
-        'agent_brief'      => agent_brief(sub, cluster, batch_results_path, leader_dm_id_path, opts[:out], overrides)
+        'agent_brief'      => agent_brief(sub, cluster, batch_results_path, leader_dm_id_path, opts[:out], overrides),
+        'verifier_brief'   => verifier_brief(sub, batch_results_path)
       }
     end
   }
@@ -502,10 +609,11 @@ File.write(File.join(opts[:out], 'batch-plan.json'),
              'concurrent'           => opts[:concurrent],
              'continue_on_failure'  => true,
              'parity_tiers'         => {
-               'GREEN'  => 'workbook clean + all charts strict-PASS',
+               'GREEN'  => 'workbook clean + all charts strict-PASS + VERIFIER countersigned',
                'YELLOW' => 'workbook clean + some chart parity diverges',
-               'RED'    => 'column errors / POST fail / verify fail'
+               'RED'    => 'column errors / POST fail / verify fail / verifier veto'
              },
+             'verdict_authority'    => 'verifier — builder result lines are self-assessed (verdict_by:"builder"); the batch verdict per workbook is its verdict_by:"verifier" line',
              'cluster_count'        => clusters.size,
              'workbook_count'       => selected.size,
              'batch_results_path'   => batch_results_path,
@@ -520,6 +628,9 @@ agg_path = File.join(opts[:out], 'aggregate-results.rb')
 agg_src = <<~'AGG'
   #!/usr/bin/env ruby
   # Read batch-results.jsonl and emit a summary table.
+  # Builder lines (verdict_by:"builder") are SELF-ASSESSED; a workbook's final
+  # verdict is its VERIFIER line (verdict_by:"verifier"). Builder-only entries
+  # are flagged as verification-pending.
   require 'json'
   results_path = '__BATCH_RESULTS_PATH__'
   results = File.readlines(results_path).map { |l| JSON.parse(l) rescue nil }.compact
@@ -527,13 +638,26 @@ agg_src = <<~'AGG'
     puts "no results yet"
     exit 0
   end
-  by_tier = results.group_by { |r| r["parity_tier"] }
-  puts "Batch result (#{results.size} workbooks):"
+  finals = results.group_by { |r| r["workbookId"] }.map do |_id, rs|
+    verifier = rs.select { |r| r["verdict_by"] == "verifier" }.last
+    builder  = rs.reject { |r| r["verdict_by"] == "verifier" }.last
+    if verifier
+      # carry display fields the verifier line may lack
+      (builder || {}).merge(verifier)
+    else
+      (builder || rs.last).merge("pending_verification" => true)
+    end
+  end
+  pending = finals.count { |r| r["pending_verification"] }
+  puts "Batch result (#{finals.size} workbooks#{pending.positive? ? ", #{pending} awaiting verifier" : ''}):"
   %w[GREEN YELLOW RED].each do |t|
-    rs = by_tier[t] || []
+    rs = finals.select { |r| r["parity_tier"] == t }
     next if rs.empty?
     puts "  #{t}: #{rs.size}"
-    rs.each { |r| puts "    - #{r["workbook_name"] || r["workbookId"]} (#{r["duration_s"]&.round(1)}s) → #{r["sigma_workbook_url"]}" }
+    rs.each do |r|
+      tag = r["pending_verification"] ? " [SELF-ASSESSED — verification pending]" : ""
+      puts "    - #{r["workbook_name"] || r["workbookId"]}#{tag} (#{r["duration_s"]&.round(1)}s) → #{r["sigma_workbook_url"]}"
+    end
   end
   total_s = results.sum { |r| r["duration_s"].to_f }
   puts ""
@@ -562,5 +686,9 @@ puts ""
 puts "To execute (from the conversation-layer agent):"
 puts "  1. For each wave in order, batch its subagents into messages of #{opts[:concurrent]} parallel Agent() calls"
 puts "  2. Use each subagent_label as the Agent() description, agent_brief as the prompt"
-puts "  3. After each wave: ruby #{agg_path}  → mid-batch summary"
-puts "  4. After all waves:  ruby #{agg_path}  → final batch report"
+puts "  3. VERIFIER STAGE — as each builder completes and appends its (self-assessed)"
+puts "     result line, spawn a FRESH Agent() with that subagent's verifier_brief."
+puts "     Never reuse the builder's context. The workbook's batch verdict is the"
+puts "     VERIFIER's result line (verdict_by: \"verifier\"), not the builder's."
+puts "  4. After each wave: ruby #{agg_path}  → mid-batch summary"
+puts "  5. After all waves + verifiers: ruby #{agg_path}  → final batch report"

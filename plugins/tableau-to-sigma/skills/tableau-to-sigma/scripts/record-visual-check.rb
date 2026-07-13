@@ -36,6 +36,13 @@ require 'json'
 require 'optparse'
 
 VERDICTS = %w[pass divergent not-executable].freeze
+# v5.3 STYLE CHECKLIST (round-5 owner-eye consensus dimensions). A gestalt
+# "pass" repeatedly shipped exposed chrome, broken palettes, and decomposed
+# layouts that an exacting owner rejected — the verdict must now attest each
+# dimension separately, judged against the SOURCE image, not the intent.
+CHECKLIST_KEYS = %w[element_titles_hidden palette_match composition_match
+                    chart_shapes_match labels_legible numbers_formatted].freeze
+CHECKLIST_VALS = %w[pass fail na].freeze
 
 opts = {}
 OptionParser.new do |p|
@@ -44,7 +51,27 @@ OptionParser.new do |p|
   p.on('--notes S')       { |v| opts[:notes] = v }
   p.on('--screenshot P')  { |v| opts[:shot] = v }
   p.on('--agent-vision B', %w[true false], 'REQUIRED: can the driving agent actually read images? (env AGENT_VISION accepted as fallback)') { |v| opts[:vision] = (v == 'true') }
+  p.on('--checklist S', "REQUIRED with --verdict pass: 'k=pass|fail|na,...' covering #{CHECKLIST_KEYS.join(', ')} — " \
+                        'each judged against the SOURCE image (element_titles_hidden = no exposed/truncated element-title ' \
+                        'chrome the source hides; palette_match = series/background/accent colors match the source swatches; ' \
+                        'composition_match = same canvas grid/proportions, section headers adjacent to their charts, no dead ' \
+                        'zones; chart_shapes_match = every tile same chart family + encoding; labels_legible = no truncated/' \
+                        'clipped labels or leaked control stubs; numbers_formatted = value formats as printed in the source)') do |v|
+    pairs = v.split(',').map(&:strip).reject(&:empty?)
+    bad = pairs.reject { |kv| kv.include?('=') }
+    abort "FATAL: --checklist entries need key=value (bad: #{bad.join(', ')})" if bad.any?
+    opts[:checklist] = pairs.map { |kv| kv.split('=', 2).map(&:strip) }.to_h
+  end
 end.parse!
+
+# checklist keys/values are validated for EVERY verdict that carries one — a
+# divergent record feeds the fix loop and must not stamp junk (v5.3.1).
+if opts[:checklist]
+  missing_v = opts[:checklist].reject { |_k, v| CHECKLIST_VALS.include?(v) }
+  abort "FATAL: --checklist value(s) must be pass|fail|na: #{missing_v.keys.join(', ')}" if missing_v.any?
+  unknown_k = opts[:checklist].keys - CHECKLIST_KEYS
+  abort "FATAL: --checklist unknown key(s): #{unknown_k.join(', ')} (want: #{CHECKLIST_KEYS.join(', ')})" if unknown_k.any?
+end
 
 abort 'FATAL: --workdir required' unless opts[:dir]
 abort "FATAL: --verdict #{VERDICTS.join('|')} required" unless opts[:verdict]
@@ -74,6 +101,28 @@ end
 if opts[:verdict] == 'not-executable' && opts[:notes].to_s.strip.empty?
   abort 'FATAL: --verdict not-executable requires --notes (say WHY the visual loop could not run).'
 end
+# v5.3: a PASS must attest every style dimension; any 'fail' means the render
+# does NOT match the source — record divergent and fix instead.
+if opts[:verdict] == 'pass'
+  cl = opts[:checklist]
+  if cl.nil?
+    warn 'REFUSED: --verdict pass now requires --checklist (round-5: gestalt passes shipped exposed'
+    warn "         chrome/broken palettes an exacting owner rejected). Provide all of:"
+    warn "         --checklist \"#{CHECKLIST_KEYS.map { |k| "#{k}=pass" }.join(',')}\""
+    warn '         judging each against the SOURCE image; use fail/na honestly (fail ⇒ record divergent).'
+    exit 2
+  end
+  missing = CHECKLIST_KEYS - cl.keys
+  bad_vals = cl.reject { |_k, v| CHECKLIST_VALS.include?(v) }
+  abort "FATAL: --checklist missing key(s): #{missing.join(', ')}" if missing.any?
+  abort "FATAL: --checklist value(s) must be pass|fail|na: #{bad_vals.keys.join(', ')}" if bad_vals.any?
+  fails = cl.select { |k, v| CHECKLIST_KEYS.include?(k) && v == 'fail' }.keys
+  if fails.any?
+    warn "REFUSED: checklist marks #{fails.join(', ')} = fail — that is a DIVERGENT render, not a pass."
+    warn '         Record --verdict divergent with the same checklist, fix, re-render, re-judge.'
+    exit 2
+  end
+end
 
 path = File.join(opts[:dir], 'parity-final.json')
 abort "FATAL: #{path} not found — run phase6-parity.rb --finalize first (the visual check records onto the parity result)." unless File.exist?(path)
@@ -83,6 +132,7 @@ s['visual_verdict']  = opts[:verdict]
 s['visual_notes']    = opts[:notes] if opts[:notes]
 s['visual_checked']  = (opts[:verdict] == 'pass')
 s['screenshot_path'] = opts[:shot] if opts[:shot]
+s['style_checklist'] = opts[:checklist] if opts[:checklist]
 # not-executable means the driving agent could not read the render — stamp
 # agent_vision:false regardless of the flag so gate 8b sees the degradation.
 s['agent_vision']    = opts[:verdict] == 'not-executable' ? false : opts[:vision]

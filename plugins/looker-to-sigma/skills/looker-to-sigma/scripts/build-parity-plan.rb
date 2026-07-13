@@ -87,8 +87,12 @@ charts = []
 pages.each do |pg|
   (pg['elements'] || []).each do |el|
     next unless chartable?(el)
+    # `name` can be a visibility hash on hidden-title elements (put-layout) —
+    # recover the text, else fall through to title/id.
+    ename = el['name'].is_a?(Hash) ? el['name']['text'] : el['name']
+    ename = nil if ename.to_s.empty?
     charts << {
-      'chart'            => (el['name'] || el['title'] || el['id']).to_s,
+      'chart'            => (ename || el['title'] || el['id']).to_s,
       'sigma_element_id' => el['id'],
       'sigma_kind'       => el['kind'],
       'sigma_columns'    => plotted_column_ids(el),

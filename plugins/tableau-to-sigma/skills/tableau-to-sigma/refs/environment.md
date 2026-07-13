@@ -103,6 +103,70 @@ Three Windows-specific practices that prevent the most time-consuming failure lo
    it) and `<WORKDIR>/auth.json` (above) — rather than exported variables that
    silently evaporate between invocations.
 
+## Managed-machine permission classifiers
+
+Corporate-managed machines (and some agent harnesses) run **permission
+classifiers** that can block two things a migration legitimately does:
+executing "code from an external repository" and running credential-bearing
+commands. Symptoms: script invocations denied with a generic policy message,
+or every `ruby scripts/...` call stalling for approval. The fixes, in order:
+
+1. **Install the skill as a PLUGIN** (marketplace install), not a bare `git
+   clone` — plugin-installed script paths are recognized as part of the tool,
+   where a clone under `~/src/...` reads as arbitrary external code.
+2. **Apply the permissions allowlist** below (scoped to `scripts/*` — never a
+   blanket `Bash(*)`), so the classifier sees a bounded, pre-approved surface.
+3. **Never inline secrets into commands.** The scripts read credentials from
+   the environment / `~/.sigma-migration/env` (written once by `setup.rb` /
+   `setup-tableau.rb`) and mint tokens **in-process** — a command line should
+   never contain a secret, and a secret-bearing `curl` is exactly what the
+   classifier is right to block.
+
+## Unattended runs & permission prompts
+
+A conversion executes dozens of `ruby scripts/*.rb` / `python3 scripts/*.py`
+commands. Under an agent harness with default permissions, every one of them
+raises an approval prompt — and in an unattended session nobody is there to
+answer. **Measured in a real field run: 258 of 376 minutes (69%) were lost
+idle at unanswered permission prompts.** If a run will be unattended, have the
+*user* pre-approve the skill's script surface first.
+
+For Claude Code, a conservative allowlist in the project's
+`.claude/settings.json` (other agents have equivalents):
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(ruby scripts/*)",
+      "Bash(python3 scripts/*)",
+      "Bash(bash scripts/doctor.sh*)",
+      "Bash(node *)"
+    ]
+  }
+}
+```
+
+Why each entry (and why nothing broader):
+
+- `Bash(ruby scripts/*)` — the Ruby spine (orchestrator, discovery, gates,
+  tests). Scoped to the skill's `scripts/` directory, **not** `ruby` in
+  general.
+- `Bash(python3 scripts/*)` — the Python twins (`get_token.py`,
+  `land-extracts.py`, `visual-similarity.py`, telemetry).
+- `Bash(bash scripts/doctor.sh*)` — the mandatory Step-0 environment doctor
+  (read-only environment probe).
+- `Bash(node *)` — the vendored converter (`converter/tableau.mjs`) runs via
+  `node`; tighten to `Bash(node converter/*)` if your harness matches the full
+  command string.
+
+Keep everything else behind a prompt **on purpose** — git mutations, package
+installs, PATH edits, and raw `curl` are exactly the actions that should wait
+for a human. This pairs with the token rule above: the scripts mint tokens
+**in-process**, so an allowlisted `ruby scripts/...` command never needs a
+secret-bearing `curl` (which permission classifiers on managed machines block
+anyway — see the SKILL.md prerequisites rule).
+
 > **Agents: do not silently install runtimes.** If the doctor reports a missing
 > runtime, surface its fix and get the user's OK before downloading binaries or
 > editing PATH. Never munge the machine's PATH or fetch an unpinned installer on your

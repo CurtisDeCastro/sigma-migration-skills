@@ -37,6 +37,8 @@ require 'yaml'
 require 'net/http'
 require 'uri'
 require 'optparse'
+require 'digest'
+require 'time'
 
 # Default limit 25: perf testing (2026-05-22) showed the picker's top-score
 # saturates by ~25 DMs in this org; the wall-time curve elbows hard after 50
@@ -54,6 +56,7 @@ OptionParser.new do |p|
        'Auto-recommend without UX prompt when top score >= --auto-pick-threshold AND no other candidate within --auto-pick-tie-window of it. Sets `auto_picked: true` on the result so the caller can WARN about inherited columns.') { |_| opts[:auto_pick] = true }
   p.on('--auto-pick-threshold F', Float, 'Min score for auto-pick (default 0.55).')                  { |v| opts[:auto_pick_threshold] = v }
   p.on('--auto-pick-tie-window F', Float, 'Gap from top score within which other candidates count as a tie that disables auto-pick (default 0.05).') { |v| opts[:auto_pick_tie_window] = v }
+  p.on('--refresh', 'Force a rescan even when --out already answers this exact signature (see the re-entry cache below).') { |_| opts[:refresh] = true }
 end.parse!
 %i[sig out].each { |k| abort "missing --#{k}" unless opts[k] }
 
@@ -84,6 +87,35 @@ sig = JSON.parse(File.read(opts[:sig]))
 warn "workbook: #{sig['tableau_workbook'] || '(unnamed)'}"
 warn "  warehouse_tables:   #{sig['warehouse_tables']&.size || 0}"
 warn "  referenced_columns: #{sig['referenced_columns']&.size || 0}"
+
+# ── Re-entry cache (refs/performance.md) ─────────────────────────────────────
+# The orchestrator re-invokes this scan on EVERY loop re-entry (exit 10/11/13),
+# and on a large org that re-pays a full DM list + N parallel spec fetches each
+# time for an answer that cannot have changed: the recommendation is a pure
+# function of the workbook SIGNATURE and the org's DM set. So the --out file is
+# stamped with a canonical hash of the signature it was computed from —
+# same signature ⇒ reuse the recommendation without touching the API.
+# The org's DM set IS live external state, so reuse carries a 24h staleness
+# bound; --refresh forces a rescan (e.g. after posting/deleting DMs mid-run).
+def signature_sha(sig)
+  canon = {
+    'tables'   => (sig['warehouse_tables'] || []).map(&:to_s).sort,
+    'columns'  => (sig['referenced_columns'] || []).map(&:to_s).sort,
+    'measures' => (sig['measures'] || []).map { |m| "#{m['col']}/#{m['derivation']}" }.sort
+  }
+  Digest::SHA256.hexdigest(JSON.generate(canon))
+end
+SIG_SHA = signature_sha(sig)
+CACHE_MAX_AGE = 24 * 3600
+if !opts[:refresh] && !opts[:force_new] && File.exist?(opts[:out])
+  prev = (JSON.parse(File.read(opts[:out])) rescue nil)
+  prev_at = prev && (Time.parse(prev['scanned_at'].to_s) rescue nil)
+  if prev.is_a?(Hash) && prev['signature_sha256'] == SIG_SHA && prev_at && (Time.now - prev_at) < CACHE_MAX_AGE
+    warn "dm-match REUSED (signature unchanged; scanned #{prev['scanned_at']}) — pass --refresh to rescan"
+    warn "best score: #{prev['score']}  →  #{prev['rationale']}"
+    exit(prev['recommended_dm_id'].nil? ? 1 : 0)
+  end
+end
 
 # Force-new short-circuit: emit a no-match result and exit 1.
 if opts[:force_new]
@@ -382,6 +414,10 @@ rationale =
 
 result = {
   'workbook_signature_path' => opts[:sig],
+  # Re-entry cache stamp (see the header block): same signature within 24h ⇒
+  # the next invocation reuses this file instead of re-scanning the org.
+  'signature_sha256'        => SIG_SHA,
+  'scanned_at'              => Time.now.utc.iso8601,
   'scanned_dm_count'        => candidates.size,
   'recommended_dm_id'       => recommended_dm_id,
   'auto_picked'             => auto_picked,

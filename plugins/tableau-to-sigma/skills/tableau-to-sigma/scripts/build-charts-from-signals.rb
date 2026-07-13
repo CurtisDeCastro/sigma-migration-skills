@@ -52,7 +52,14 @@ require 'json'
 require 'csv'
 require 'date'
 require 'optparse'
+require 'base64'
+require 'open3'
+require 'digest'
 require_relative 'learned-rules'
+require_relative 'lib/theme_derive'
+require_relative 'lib/png_classify'
+require_relative 'lib/zone_census'
+require 'erb'
 
 opts = { master_id: 'master' }
 OptionParser.new do |p|
@@ -208,7 +215,14 @@ def synthesize_view_from_signals(z, meta)
   end
   fields = ((z.dig('cols_shelf', 'fields') || []) + (z.dig('rows_shelf', 'fields') || []))
   dims = fields.select { |f| f['role'] == 'dim' }
-  meas = fields.select { |f| f['role'] == 'measure' }
+  # v5.4: skip axis-anchor PLACEHOLDER measures (AVG(0) / min(-1.0) — the
+  # dummy-axis idiom; on pie marks it's the dual-axis donut-hole hack). They
+  # carry no data, and picking one as the synthesized measure header binds the
+  # constant instead of the real marks-card measure (recovered below).
+  meas = fields.select do |f|
+    next false unless f['role'] == 'measure'
+    !placeholder_calc?((cbg[f['guid'].to_s] || {})['formula'])
+  end
   # Include a color-channel dimension if the encoding names one not on a shelf.
   if (cc = z.dig('channels', 'color', 'column'))
     g = guid_from_text(cc.to_s)
@@ -252,8 +266,61 @@ def synthesize_view_from_signals(z, meta)
     fb = (dcaps + mcaps).compact
     headers = fb if fb.length >= 2
   end
+  # v5.4 LAST-RESORT — NAME-KEYED workbooks (textscan/excel-direct/live
+  # datasources key column instances by NAME, not hex GUID; every resolver
+  # above returns nil on them, and the zone dropped). Applied ONLY when the
+  # zone would otherwise drop, so hex-GUID workbooks' header synthesis is
+  # byte-identical to before.
+  #
+  # QUALITY FLOOR (v5.4.9 review fix): every field this block emits must be a
+  # REAL column — its key must carry a <column> definition in columns_by_guid
+  # and must not be a Tableau pseudo-field (the shelf parser mangles a
+  # multi-pill shelf expression into a pseudo-dim whose guid is Tableau's
+  # placeholder caption 'Multiple Values' — no column definition exists for
+  # it). And the recovered MEASURE must actually be measure-shaped: never
+  # promote a role=dimension or non-numeric (boolean/string/date) calc to a
+  # Sum() measure. Without the floor this block emitted [Master/...] refs that
+  # can never resolve, converting the old loud zone-drop into a hard exit-4 at
+  # the pre-POST ref gate. When the floor rejects, headers stay short and the
+  # zone falls back to the pre-v5.4 behavior: dropped with a loud warning.
+  if headers.length < 2
+    real_col = lambda do |key|
+      k = key.to_s
+      info = cbg[k]
+      info.is_a?(Hash) && !TABLEAU_PSEUDO_FIELDS.include?(k) ? info : nil
+    end
+    dims2 = dims.select { |f| real_col.call(f['guid']) }
+    if (cc2 = z.dig('channels', 'color', 'column')) && (g2 = name_or_guid_from_text(cc2.to_s))
+      dims2 << { 'guid' => g2, 'role' => 'dim', 'derivation' => 'none' } if real_col.call(g2) && dims2.none? { |f| f['guid'] == g2 }
+    end
+    meas2 = meas.select { |f| real_col.call(f['guid']) }
+    if meas2.empty? && dims2.any?
+      dim_keys = dims2.map { |d| d['guid'].to_s.downcase }
+      rec = (z['aggregations'] || {}).find do |k, agg|
+        %w[sum avg average min max count countd median].include?(agg.to_s.downcase) &&
+          !dim_keys.include?(k.to_s.gsub(/\A\[|\]\z/, '').downcase)
+      end&.first&.gsub(/\A\[|\]\z/, '')
+      rec_info = rec && real_col.call(rec)
+      if rec_info && rec_info['role'].to_s != 'dimension' &&
+         (rec_info['datatype'].to_s.empty? || %w[integer real].include?(rec_info['datatype'].to_s)) &&
+         !placeholder_calc?(rec_info['formula'])
+        meas2 << { 'guid' => rec, 'role' => 'measure', 'derivation' => 'none' }
+      end
+    end
+    d2 = dims2.map(&field_header).compact
+    m2 = meas2.map(&field_header).compact
+    # The block's own contract (and the caller's): dims first, then measures —
+    # at least one of EACH. Two dims are not a chart; reject and drop loudly.
+    headers = d2 + m2 if d2.any? && m2.any?
+  end
   headers.length >= 2 ? { headers: headers } : nil
 end
+
+# Tableau reserved placeholder captions that the shelf parser can surface as
+# field keys but that are NEVER columns. 'Multiple Values' is the caption
+# Tableau renders for a multi-pill shelf expression (grammar-level constant,
+# not workbook-specific).
+TABLEAU_PSEUDO_FIELDS = ['Multiple Values'].freeze
 
 # Tableau relative-date offset window (first-period..last-period, in periods
 # relative to now — e.g. first=-2,last=0 = "last 3 months") → explicit
@@ -444,6 +511,18 @@ def translate_row_level_calc(formula, mmap, columns_by_guid = {})
   s = s.gsub(/\bYEAR\s*\(/i, 'Year(').gsub(/\bMONTH\s*\(/i, 'Month(').gsub(/\bDAY\s*\(/i, 'Day(')
   s = s.gsub(/\bQUARTER\s*\(/i, 'Quarter(').gsub(/\bHOUR\s*\(/i, 'Hour(')
   s = s.gsub(/\bMINUTE\s*\(/i, 'Minute(').gsub(/\bSECOND\s*\(/i, 'Second(')
+  # 1:1 STRING functions (identical name modulo case + identical signature in
+  # both formula languages; every target spelling is in the canonical
+  # sigma_functions.rb registry). v5.4: row-level string chains
+  # (REPLACE(REPLACE([col], "a", ""), "b", "") derived dims) failed the
+  # residue check and dropped to a manual warning without these.
+  s = s.gsub(/\bREPLACE\s*\(/i, 'Replace(').gsub(/\bUPPER\s*\(/i, 'Upper(')
+       .gsub(/\bLOWER\s*\(/i, 'Lower(').gsub(/\bLTRIM\s*\(/i, 'Ltrim(')
+       .gsub(/\bRTRIM\s*\(/i, 'Rtrim(').gsub(/\bTRIM\s*\(/i, 'Trim(')
+       .gsub(/\bLEFT\s*\(/i, 'Left(').gsub(/\bRIGHT\s*\(/i, 'Right(')
+       .gsub(/\bLEN\s*\(/i, 'Len(').gsub(/\bCONTAINS\s*\(/i, 'Contains(')
+       .gsub(/\bSTARTSWITH\s*\(/i, 'StartsWith(').gsub(/\bENDSWITH\s*\(/i, 'EndsWith(')
+       .gsub(/\bMID\s*\(/i, 'Mid(')
   s = s.gsub(/'([^']*)'/) { %("#{Regexp.last_match(1)}") } # remaining single-quoted strings
   out = s.gsub(/\[([^\/\]]+)\]/) do
     cap = Regexp.last_match(1).strip
@@ -453,7 +532,7 @@ def translate_row_level_calc(formula, mmap, columns_by_guid = {})
   residue = out.dup
   residue.gsub!(/"(?:\\.|[^"\\])*"/, '1')
   residue.gsub!(/\[Master\/[^\]]+\]/, '1')
-  residue.gsub!(/\b(DateDiff|DateAdd|DateTrunc|DatePart|Today|Now|If|Coalesce|Abs|Year|Month|Day|Quarter|Hour|Minute|Second)\b/, '')
+  residue.gsub!(/\b(DateDiff|DateAdd|DateTrunc|DatePart|Today|Now|If|Coalesce|Abs|Year|Month|Day|Quarter|Hour|Minute|Second|Replace|Upper|Lower|Ltrim|Rtrim|Trim|Left|Right|Len|Contains|StartsWith|EndsWith|Mid)\b/, '')
   return nil unless residue =~ %r{\A[\s()+\-*/.,\d!=<>]*\z}
   out
 end
@@ -931,6 +1010,33 @@ def tableau_format_to_sigma(s)
   nil
 end
 
+# Tableau scale-comma + literal-suffix formats ('n#,##0,,,B;-#,##0,,,B'):
+# each trailing comma after the digit mask divides by 1,000 (',,,' = /1e9),
+# '.0…' = decimals, the trailing letter is a LITERAL suffix. Sigma's d3 enum
+# can NEVER render these exactly (,.2s shows SI 'G' for 1e9, not 'B') — the
+# exact path is a Text() formula column. Returns {scale, decimals, suffix} or
+# nil when there are no scale-commas (the enum branches above keep those).
+def parse_scaled_suffix_format(s)
+  return nil if s.nil? || s.empty?
+  pos = s.split(';')[0].to_s
+  m = pos.match(/\A[nc]?[#,0]+?(,+)(?:\.(0+))?\s*([A-Za-z%€£$]{1,3})?\z/)
+  return nil unless m
+  { 'scale' => 1000**m[1].length, 'decimals' => m[2].to_s.length, 'suffix' => m[3].to_s }
+end
+
+# The exact-format column for a scaled-suffix format: a NUMERIC scaled
+# formula + a d3 fixed-decimal formatString + the schema's literal `suffix`
+# field (spec/verify-confirmed 2026-07-11). Strictly better than a Text()
+# concat: trailing zeros survive (',.1f' renders 3.0 not 3), grouping
+# survives, and the column stays numeric (sortable).
+def scaled_suffix_column(inner_formula, spec)
+  {
+    'formula' => "(#{inner_formula}) / #{spec['scale']}",
+    'format'  => { 'kind' => 'number', 'formatString' => ",.#{spec['decimals']}f" }
+                 .merge(spec['suffix'].empty? ? {} : { 'suffix' => spec['suffix'] })
+  }
+end
+
 # Sigma formulas reference controls by `controlId` in brackets, NOT by display
 # name. This helper computes the controlId the auto-controls block will emit
 # for a given parameter caption so the translated Switch/If formulas match.
@@ -1342,8 +1448,146 @@ WINDOW_TC_RE = /\b(?:RUNNING_[A-Z]+|WINDOW_[A-Z]+|RANK(?:_[A-Z]+)?|INDEX|LOOKUP|
 #   { 'mode' => 'two-stage', 'stage_agg' => 'Max|Min|Sum', 'retrieve_agg' =>
 #                            'Max|Min', 'value_formula' => <inner agg>, 'note' => ... }
 #   { 'mode' => 'manual',    'note' => why }
-def translate_window_calc(formula, mmap, columns_by_guid = {})
+# v5.0-P2: structured record of every window-calc translation, for the VDS
+# table-calc oracle (scripts/vds-oracle.rb — Tableau computes the ORIGINAL
+# calc server-side and the values are compared in Phase 6). Recorded thin at
+# the translation sites, then ENRICHED against the built elements
+# (enrich_window_calcs!) — element ids, the value column, and the addressing
+# dims come from the emitted chart itself, the only place they're authoritative
+# (review-caught: guessing dims from zone['channels'] yielded [] always).
+$window_calc_records = []
+def record_window_calc(zone, calc, plan, mode: nil)
+  return unless plan
+  $window_calc_records << {
+    'id'              => "wc-#{$window_calc_records.size + 1}",
+    'worksheet'       => zone && zone['caption'],
+    'element_id'      => nil, # enrich_window_calcs! fills from the built element
+    'calc_name'       => calc && (calc['caption'] || calc['name']).to_s.gsub(/^\[|\]$/, ''),
+    'tableau_formula' => calc && calc['formula'],
+    'sigma_formula'   => plan['formula'],
+    'mode'            => mode || plan['mode'],
+    'dims'            => [],
+    'filters_present' => !(zone && Array(zone['filters']).empty?),
+    'translator_note' => plan['note']
+  }
+end
+
+# Fill element_id/element_name/column_id/dims/datasource_caption from the
+# BUILT elements (must run while elements still carry _worksheet, i.e. before
+# the output modes strip the tags). dims = the chart's category axis / pivot
+# grouping columns — in the mechanical path their Sigma names ARE the Tableau
+# captions (master columns are caption-named), which is what VDS addresses by.
+def enrich_window_calcs!(records, elements, ds_plan)
+  by_ws = elements.group_by { |e| e['_worksheet'] }
+  ws_to_ds_caption = {}
+  if ds_plan && ds_plan['datasources'].is_a?(Array)
+    dominant = ds_plan['datasources'].max_by { |d| (d['worksheets'] || []).size }
+    ds_plan['datasources'].each do |d|
+      (d['worksheets'] || []).each { |w| ws_to_ds_caption[w.to_s.strip.downcase] = d['caption'] }
+    end
+    ws_to_ds_caption.default = dominant && dominant['caption']
+  end
+  records.each do |r|
+    # Match by the translated formula when the plan carried one; a mode
+    # without a formula (manual / top-n-filter) still binds to the
+    # worksheet's element by name — its VALUE column is then the yAxis /
+    # values column, never a blank-formula include-all match (review-caught:
+    # include?('') matched the x-axis column and starved dims).
+    sf = r['sigma_formula'].to_s
+    ws_els = by_ws[r['worksheet']] || []
+    el = (sf.empty? ? nil : ws_els.find { |e| (e['columns'] || []).any? { |c| c['formula'].to_s.include?(sf) } }) ||
+         ws_els.first
+    next unless el
+    r['element_id']   = el['id']
+    r['element_name'] = el['name']
+    vcol = (!sf.empty? && (el['columns'] || []).find { |c| c['formula'].to_s.include?(sf) }) || nil
+    if vcol.nil?
+      vids = []
+      vids.concat(Array(el.dig('yAxis', 'columnIds')).map { |x| x.is_a?(Hash) ? x['columnId'] : x })
+      vids.concat(Array(el['values']))
+      vcol = (el['columns'] || []).find { |c| vids.include?(c['id']) }
+    end
+    r['column_id']   = vcol && vcol['id']
+    r['column_name'] = vcol && vcol['name']
+    cols_by_id = (el['columns'] || []).each_with_object({}) { |c, h| h[c['id']] = c }
+    dim_ids = []
+    dim_ids << el.dig('xAxis', 'columnId') if el.dig('xAxis', 'columnId')
+    dim_ids.concat(Array(el['rowsBy']).map { |x| x.is_a?(Hash) ? x['id'] : x })
+    dim_ids.concat(Array(el['columnsBy']).map { |x| x.is_a?(Hash) ? x['id'] : x })
+    r['dims'] = dim_ids.compact.uniq.map { |cid| cols_by_id[cid] }.compact
+                       .reject { |c| c['id'] == r['column_id'] }
+                       .map { |c| { 'caption' => c['name'] } }
+    dsc = ws_to_ds_caption[r['worksheet'].to_s.strip.downcase] || ws_to_ds_caption.default
+    r['datasource_caption'] = dsc if dsc
+  end
+end
+
+def translate_window_calc(formula, mmap, columns_by_guid = {}, depth: 0)
   s = formula.to_s.gsub(/\s+/, ' ').strip
+  # v5.1: a LEADING unary minus on a window-share pill or a bare calc ref is a
+  # Tableau DESC-sort trick (`-WINDOW_MAX(share)`, `-[CalcRef]`). Strip it and
+  # carry the flag — the minus must NEVER reach a column name/formula (the
+  # round-4 `Sum([Master/-WINDOW_MAX(…)])` class died here). SCOPED to those
+  # two shapes only: a minus on any other window calc (-RUNNING_SUM(…)) is a
+  # genuine negation and keeps its sign through the generic path
+  # (review-caught: the blanket strip silently changed those values).
+  negated = false
+  if s.start_with?('-') && s[1..-1].to_s.strip =~ /\A(?:WINDOW_(?:MAX|MIN|AVG)\s*\(|\[[^\]]+\]\z)/i
+    negated = true
+    s = s[1..-1].to_s.strip
+  end
+  # v5.1: one-level calc-ref dereference — a bare `[CalcRef]` whose formula is
+  # known resolves to that formula and re-enters. Allowed at depth 0 AND 1
+  # (Rule T1 hands the RANK operand in at depth 1 — review-caught: gating on
+  # depth.zero? made the T1 ref path dead); depth 2 stops the recursion.
+  if depth < 2 && (ref = s[/\A\[([^\]]+)\]\z/, 1])
+    info = columns_by_guid[ref] || columns_by_guid.values.find { |v| v.is_a?(Hash) && v['caption'].to_s == ref }
+    if info.is_a?(Hash) && info['formula'].to_s =~ WINDOW_TC_RE
+      plan = translate_window_calc(info['formula'], mmap, columns_by_guid, depth: depth + 1)
+      return plan && plan.merge('negated_for_sort' => (negated || plan['negated_for_sort'] || false))
+    end
+  end
+  # v5.4: EMBEDDED calc-ref inlining (one hop). Tableau authors routinely split
+  # a share across two serialized <calculation>s — [Total X] = TOTAL(SUM([X]))
+  # and [% X] = SUM([X]) / [Total X] — so the window construct never appears in
+  # the referring formula's own text and every classifier below is blind to it
+  # (the calc translated as an unresolvable plain ref, or worse, a co-shelf
+  # positional calc was picked instead). Substitute each embedded ref whose
+  # KNOWN formula carries a window construct: verbatim when that formula is a
+  # single closed call (TOTAL(...) — keeps the share regexes matchable), else
+  # parenthesized for precedence safety. Gated to formulas that do NOT already
+  # match WINDOW_TC_RE, so it strictly ADDS translations (previous nil returns)
+  # and never re-routes a formula the classifiers already handled.
+  if depth < 2 && s !~ WINDOW_TC_RE
+    single_call = lambda do |f|
+      return false unless f =~ /\A[A-Za-z_][A-Za-z0-9_]*\s*\(/ && f.end_with?(')')
+      d = 0
+      f.each_char.with_index do |ch, i|
+        d += 1 if ch == '('
+        if ch == ')'
+          d -= 1
+          return false if d.negative?
+          return false if d.zero? && i < f.length - 1
+        end
+      end
+      d.zero?
+    end
+    inlined = false
+    s2 = s.gsub(/\[([^\]]+)\]/) do
+      ref = Regexp.last_match(1)
+      whole = Regexp.last_match(0)
+      info = columns_by_guid[ref] ||
+             columns_by_guid.values.find { |v| v.is_a?(Hash) && v['caption'].to_s.strip == ref }
+      f = info.is_a?(Hash) ? info['formula'].to_s.gsub(/\s+/, ' ').strip : ''
+      if !f.empty? && f =~ WINDOW_TC_RE
+        inlined = true
+        single_call.call(f) ? f : "(#{f})"
+      else
+        whole
+      end
+    end
+    s = s2 if inlined
+  end
   return nil if s.empty? || s !~ WINDOW_TC_RE
   s = s.gsub(/\[([0-9a-f\-]{36})\]/i) do
     info = columns_by_guid[Regexp.last_match(1)]
@@ -1358,6 +1602,34 @@ def translate_window_calc(formula, mmap, columns_by_guid = {})
   agg_src = '(?:SUM|AVG|MIN|MAX|MEDIAN|COUNTD|COUNT)\s*\(\s*\[[^\]]+\]\s*\)'
   norm = ->(x) { x.to_s.gsub(/\s+/, '').downcase }
   tx_agg = ->(a) { translate_user_agg_formula(a, mmap, {}) }
+
+  # v5.1 Rule W1 — window-wrapped share (the round-4 exit-4 class):
+  # WINDOW_MAX|MIN|AVG( agg/TOTAL(agg) | agg/WINDOW_SUM(agg) | agg1/agg2 ).
+  # The wrapper flattens to the partition max in Tableau but all three round-4
+  # runs (and their anchors) treat it as the per-cell share for DISPLAY —
+  # value-identical when the window is a single cell (nested addressing) or
+  # shares are uniform. The emit layer picks the PercentOfTotal scope from the
+  # pivot axes; the VDS oracle re-checks every emission (window-calcs.json).
+  if (w1 = s.match(%r{\A\s*WINDOW_(MAX|MIN|AVG)\s*\(\s*(#{agg_src})\s*/\s*(?:(?:WINDOW_SUM|TOTAL)\s*\(\s*(#{agg_src})\s*\)|(#{agg_src}))\s*\)\s*\z}i))
+    num = w1[2]
+    if w1[3] && norm.call(num) == norm.call(w1[3]) # same-agg → percent of total
+      inner = tx_agg.call(num)
+      return { 'mode' => 'manual', 'note' => 'window-wrapped share whose inner aggregate did not translate' } unless inner
+      return { 'mode' => 'inline-share', 'share_kind' => 'percent_of_total',
+               'inner' => inner, 'wrapper' => "WINDOW_#{w1[1].upcase}",
+               'negated_for_sort' => negated,
+               'note' => "WINDOW_#{w1[1].upcase}(share) treated as the per-cell share for display; " \
+                         'exact when the window is a single cell — VDS oracle verifies' }
+    elsif w1[4] # different-agg ratio
+      a = tx_agg.call(num)
+      b = tx_agg.call(w1[4])
+      return { 'mode' => 'manual', 'note' => 'window-wrapped ratio whose aggregates did not translate' } unless a && b
+      return { 'mode' => 'inline-share', 'share_kind' => 'ratio',
+               'inner' => "#{a} / #{b}", 'wrapper' => "WINDOW_#{w1[1].upcase}",
+               'negated_for_sort' => negated,
+               'note' => "WINDOW_#{w1[1].upcase}(ratio) treated as the per-cell ratio for display — VDS oracle verifies" }
+    end
+  end
 
   # Top-N idiom: RANK(<expr>)<=N or RANK_UNIQUE(<expr>)<=N (bead pnxp).
   # The generic rewrite below collapses RANK_UNIQUE(<expr>) → RowNumber() and
@@ -1391,6 +1663,19 @@ def translate_window_calc(formula, mmap, columns_by_guid = {})
       return base.merge('mode' => 'inline', 'formula' => "RowNumber() #{op} #{n}",
                'follows_sort' => true, 'ranked_measure' => ranked,
                'note' => "RANK#{tn[0] =~ /_UNIQUE/i ? '_UNIQUE' : ''}(expr) #{op} #{n} top-N → #{filt}")
+    end
+    # v5.1 Rule T1: a RANK operand that is (a ref to) a WINDOW-WRAPPED SHARE
+    # classifies as topn-prefilter — the rank-limited pre-filtered source
+    # table all three round-4 runs hand-built, now mechanical.
+    if row_count && depth.zero?
+      share_plan = translate_window_calc(operand, mmap, columns_by_guid, depth: 1)
+      if share_plan && share_plan['mode'] == 'inline-share'
+        return base.merge('mode' => 'topn-prefilter', 'top_n' => row_count,
+                 'operand_share' => share_plan,
+                 'note' => "RANK(<window share>) #{op} #{n}: keep the top #{row_count} entities by their " \
+                           'max per-partition share — emit the rank-limited pre-filtered source table ' \
+                           '(refs/fidelity-recipes.md §Ranked pivot)')
+      end
     end
     # Untranslatable LOD operand: cannot key a filter on a measure we couldn't
     # build. STAY MANUAL, but carry the parsed top-N facts so the caller can
@@ -1989,6 +2274,21 @@ def pick_tableau_format(formats, header)
   nil
 end
 
+# The RAW Tableau format string for a header (same matching loop as
+# pick_tableau_format) — for formats the enum translator returns nil on
+# (scale-comma + suffix), where the exact path is a Text() formula column.
+def pick_tableau_format_raw(formats, header)
+  return nil if formats.nil? || formats.empty?
+  hkey = header.to_s.downcase.gsub(/\W+/, '')
+  formats.each do |field, val|
+    inner = field.to_s.downcase.scan(/\[([^\]]+)\]/).flatten.last.to_s
+    parts = inner.split(':')
+    friendly = parts.length >= 3 ? parts[1].to_s.gsub(/\W+/, '') : ''
+    return val if !friendly.empty? && (friendly == hkey || hkey.include?(friendly) || friendly.include?(hkey))
+  end
+  nil
+end
+
 # ---- "Measure Names on rows" → ordered values[] members -------------------
 # First-class the DDMX crosstab pattern (N bespoke calc measures stacked as the
 # rows of a crosstab). z['measures'] is the parser's document-order walk of the
@@ -2045,7 +2345,11 @@ end
 SHELF_AGG_FOR_PREFIX = {
   'sum' => 'Sum', 'avg' => 'Avg', 'min' => 'Min', 'max' => 'Max',
   'median' => 'Median', 'count' => 'CountIf(IsNotNull(%s))',
-  'countd' => 'CountDistinct', 'cntd' => 'CountDistinct'
+  # quick-calc pills abbreviate CountD as 'ctd' and Count as 'cnt'
+  # ([pcto:ctd:seed:qk], [cnt:3 digit:qk] — corpus-verified); 'med'/'mdn' =
+  # Median instance abbreviations
+  'countd' => 'CountDistinct', 'cntd' => 'CountDistinct', 'ctd' => 'CountDistinct',
+  'cnt' => 'CountIf(IsNotNull(%s))', 'med' => 'Median', 'mdn' => 'Median'
 }.freeze
 SHELF_TRUNC_FOR_PREFIX = {
   'yr' => 'year', 'qr' => 'quarter', 'mn' => 'month',
@@ -2110,7 +2414,7 @@ def build_pivot_element(z, meta, mmap, opts, warnings, data_elements = [])
   seen_ids   = {}
   user_vals  = [] # User-derivation measures (window / ratio calcs) — resolved below
 
-  add_col = lambda do |field, target|
+  add_col = lambda do |field, target, shelf = nil|
     m, _cap = resolve_shelf_field(field, meta, mmap)
     base = "p-#{el_id}-#{target}-#{(m['name'] || 'x').downcase.gsub(/\W+/, '-')}"
     col_id = base
@@ -2123,7 +2427,34 @@ def build_pivot_element(z, meta, mmap, opts, warnings, data_elements = [])
 
     deriv = field['derivation'].to_s.downcase
     formula =
-      if field['role'] == 'measure'
+      if field['role'] == 'measure' && deriv == 'pcto'
+        # v5.1 (D1): Tableau's percent-of-total QUICK CALC shelf token
+        # [pcto:<agg>:<col>:qk] — previously unmapped, fell through to a wrong
+        # bare Sum. Scope = the axis the token sits on (live-verified: pcto in
+        # cols shelf sums each COLUMN to 100%). PIVOT-ONLY partition modes per
+        # round-3 consensus; the shelf context is only set on pivot paths.
+        raw = (field['column'] || field['raw']).to_s
+        iagg, icol = raw[/pcto:([a-z]+):([^:\]]+)/i, 1], raw[/pcto:[a-z]+:([^:\]]+)/i, 1]
+        agg_fn = SHELF_AGG_FOR_PREFIX[iagg.to_s.downcase] || 'CountDistinct'
+        inner_ref = "[Master/#{(meta['columns_by_guid'] || {}).dig(icol.to_s, 'caption') || icol || m['name']}]"
+        inner = agg_fn.include?('%s') ? agg_fn.sub('%s', inner_ref) : "#{agg_fn}(#{inner_ref})"
+        scope = shelf == :cols ? 'column' : (shelf == :rows ? 'row' : 'grand_total')
+        %(PercentOfTotal(#{inner}, "#{scope}"))
+      elsif field['role'] == 'measure' && deriv == 'rtot'
+        # v5.1.2: running-total quick calc pills carry the same 4-segment
+        # shape as pcto ([rtot:<agg>:<col>:qk]) — m['name'] keeps the extra
+        # 'agg:' segment and emitted an unresolvable ref (review-caught).
+        raw = (field['column'] || field['raw']).to_s
+        riagg, ricol = raw[/rtot:([a-z]+):([^:\]]+)/i, 1], raw[/rtot:[a-z]+:([^:\]]+)/i, 1]
+        if ricol
+          agg_fn = SHELF_AGG_FOR_PREFIX[riagg.to_s.downcase] || 'Sum'
+          inner_ref = "[Master/#{(meta['columns_by_guid'] || {}).dig(ricol.to_s, 'caption') || ricol}]"
+          inner = agg_fn.include?('%s') ? agg_fn.sub('%s', inner_ref) : "#{agg_fn}(#{inner_ref})"
+          "CumulativeSum(#{inner})"
+        else
+          "CumulativeSum(Sum([Master/#{m['name']}]))"
+        end
+      elsif field['role'] == 'measure'
         agg = SHELF_AGG_FOR_PREFIX[deriv] || 'Sum'
         if agg.include?('%s')
           agg.sub('%s', "[Master/#{m['name']}]")
@@ -2166,7 +2497,8 @@ def build_pivot_element(z, meta, mmap, opts, warnings, data_elements = [])
     # param measure-picker can be matched by id, not just the resolved caption
     # (the Calculation_NNN→caption bridge — n4pi.10).
     user_vals << { 'col' => col_obj, 'name' => m['name'].to_s.strip,
-                   'raw' => (field['column'] || field['raw']).to_s } if target == :value && %w[usr user].include?(deriv)
+                   'raw' => (field['column'] || field['raw']).to_s,
+                   'shelf' => shelf } if target == :value && %w[usr user].include?(deriv)
     case target
     when :row   then rows_by    << { 'id' => col_id }
     when :col   then cols_by    << { 'id' => col_id }
@@ -2174,13 +2506,19 @@ def build_pivot_element(z, meta, mmap, opts, warnings, data_elements = [])
     end
   end
 
+  # v5.1 (D4): `:ok` qualified pills are Tableau's HIDDEN SORT KEYS, never
+  # displayed values — enrolling them as pivot values shipped ghost columns
+  # ("Rank N (copy)_…:ok:9"). Skip them; the shelf-sort path carries ordering.
+  hidden_sort_pill = ->(f) { (f['column'] || f['raw']).to_s.include?(':ok') }
   (rows_shelf['fields'] || []).each do |f|
-    add_col.call(f, :row)   if f['role'] == 'dim'
-    add_col.call(f, :value) if f['role'] == 'measure'
+    next if hidden_sort_pill.call(f)
+    add_col.call(f, :row, :rows)   if f['role'] == 'dim'
+    add_col.call(f, :value, :rows) if f['role'] == 'measure'
   end
   (cols_shelf['fields'] || []).each do |f|
-    add_col.call(f, :col)   if f['role'] == 'dim'
-    add_col.call(f, :value) if f['role'] == 'measure'
+    next if hidden_sort_pill.call(f)
+    add_col.call(f, :col, :cols)   if f['role'] == 'dim'
+    add_col.call(f, :value, :cols) if f['role'] == 'measure'
   end
 
   # ---- "Measure Names on rows" crosstab recipe (first-classed) -------------
@@ -2253,6 +2591,7 @@ def build_pivot_element(z, meta, mmap, opts, warnings, data_elements = [])
     end
     next unless ws_calc
     plan = translate_window_calc(ws_calc['formula'], mmap, meta['columns_by_guid'] || {})
+    record_window_calc(z, ws_calc, plan, mode: 'pivot-value') if plan
     if plan.nil?
       # Parameter-driven Switch value (the "Switch Metric" class): a pivot value
       # like IF [Parameters].[X] = … THEN SUM([A]) ELSE SUM([B]) END becomes a
@@ -2316,6 +2655,43 @@ def build_pivot_element(z, meta, mmap, opts, warnings, data_elements = [])
       end
     elsif plan['mode'] == 'two-stage'
       win_stage << { 'col' => uv['col'], 'plan' => plan }
+    elsif plan['mode'] == 'inline-share'
+      # v5.4 Rule W1 emission (pivot): scope from the table-calc ADDRESSING
+      # first. The twb serializes "compute using <dim>" as <table-calc
+      # ordering-field=...> and the parser stamps it on the calc as
+      # ordering_field — the share's denominator is the partition total ACROSS
+      # that dim. Addressing dim on the pivot COLUMNS → each row sums to 100%
+      # → "row"; on ROWS → "column". Only when no addressing resolves to a
+      # pivot axis fall back to the value pill's own shelf (the v5.1
+      # heuristic, which guessed wrong on row-normalized shares whose pill sat
+      # elsewhere) — and name the fallback so a wrong scope is auditable.
+      nqs = ->(x) { x.to_s.downcase.gsub(/[^a-z0-9]/, '') }
+      addr = ws_calc['ordering_field']
+      axis_has_addr = lambda do |entries|
+        entries.any? do |e|
+          c = cols_array.find { |x| x['id'] == e['id'] }
+          c && addr && nqs.call(c['name']) == nqs.call(addr)
+        end
+      end
+      scope, scope_src =
+        if addr && axis_has_addr.call(cols_by)
+          ['row', "table-calc addressing '#{addr}' rides the columns axis"]
+        elsif addr && axis_has_addr.call(rows_by)
+          ['column', "table-calc addressing '#{addr}' rides the rows axis"]
+        else
+          [uv['shelf'] == :cols ? 'column' : 'row',
+           addr ? "addressing '#{addr}' not on either pivot axis — pill-shelf fallback, VERIFY scope" \
+                : 'no table-calc addressing — pill-shelf fallback, VERIFY scope']
+        end
+      uv['col']['formula'] =
+        if plan['share_kind'] == 'percent_of_total'
+          %(PercentOfTotal(#{plan['inner']}, "#{scope}"))
+        else
+          plan['inner']
+        end
+      uv['col']['format'] = { 'kind' => 'number', 'formatString' => ',.1%' } if plan['share_kind'] == 'percent_of_total'
+      warnings << "'#{cap}' pivot value '#{uv['name']}' → #{plan['wrapper']}(share) emitted as " \
+                  "#{uv['col']['formula'][0..90]} [scope=#{scope}: #{scope_src}] [#{plan['note']}]"
     elsif plan['mode'] == 'inline' && plan['formula']
       # VALIDATED live 2026-06-24 (wb cd9058fe): Sigma accepts window functions
       # (PercentOfTotal(…, "grand_total"), CumulativeSum(…)) as pivot-table value
@@ -2377,7 +2753,141 @@ def build_pivot_element(z, meta, mmap, opts, warnings, data_elements = [])
     end
   end
 
-  {
+  # v5.1.2: percent-of-total QUICK CALC riding the MARKS CARD (parser
+  # quick_calc_pcto) — z['measures'] only carries the bare inner aggregate
+  # (column-instance derivation), so the value shipped as raw counts where the
+  # source renders percentages (review round: THE room-share pivot). Wrap the
+  # matching value in PercentOfTotal; scope from the PctTotal table-calc's
+  # addressing dim: addressing on the ROWS shelf → each column sums to 100% →
+  # "column"; cols shelf → "row"; no/unresolved addressing → "grand_total".
+  Array(z['quick_calc_pcto']).each do |qc|
+    nq = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]/, '') }
+    inner_cap = (meta['columns_by_guid'] || {}).dig(qc['col'].to_s, 'caption') || qc['col']
+    qc_agg = SHELF_AGG_FOR_PREFIX[qc['agg'].to_s]
+    # UNKNOWN prefix → agg-agnostic matching (the 0d206e2 behavior). A 'Sum'
+    # fallback made both the handled-bail and the vcol match key on the wrong
+    # aggregation and SILENTLY skipped the wrap (review-caught regression:
+    # [pcto:cnt:…] shipped raw counts).
+    qc_agg_name = qc_agg && qc_agg[/\A[A-Za-z]+/].to_s # 'CountIf(IsNotNull(%s))' → 'CountIf'
+    warnings << "'#{cap}' pcto quick calc has UNKNOWN agg prefix '#{qc['agg']}' — matching by inner column only; verify the wrapped aggregation" if qc_agg_name.nil?
+    # If a value already carries PercentOfTotal over the SAME inner (the pill
+    # also rode a rows/cols shelf and add_col wrapped it), this quick calc is
+    # HANDLED — bail before the loose match wraps a sibling raw value
+    # (review-caught: dual-pill pivots corrupted the raw count column).
+    handled = cols_array.any? do |c|
+      values_arr.include?(c['id']) &&
+        c['formula'].to_s =~ /\APercentOfTotal\(\s*#{qc_agg_name ? Regexp.escape(qc_agg_name) : '[A-Za-z]+'}/ &&
+        (ir = c['formula'].to_s[%r{\[Master/([^\]]+)\]}, 1]) && nq.call(ir) == nq.call(inner_cap)
+    end
+    next if handled
+    vcol = cols_array.find do |c|
+      next false unless values_arr.include?(c['id'])
+      next false if c['formula'].to_s.include?('PercentOfTotal(')
+      # the AGGREGATION must match the pill's too when the prefix is KNOWN — a
+      # crosstab can carry the same base column under two aggs (review-caught)
+      next false if qc_agg_name && !c['formula'].to_s.start_with?("#{qc_agg_name}(")
+      ref = c['formula'].to_s[%r{\[Master/([^\]]+)\]}, 1]
+      ref && (nq.call(ref) == nq.call(inner_cap) || nq.call(c['name']) == nq.call(inner_cap))
+    end
+    next unless vcol
+    addr_cap = (meta['columns_by_guid'] || {}).dig(qc['addressing'].to_s, 'caption') || qc['addressing']
+    axis_of = lambda do |entries|
+      entries.any? do |e|
+        c = cols_array.find { |x| x['id'] == e['id'] }
+        c && addr_cap && nq.call(c['name']) == nq.call(addr_cap)
+      end
+    end
+    scope = if axis_of.call(rows_by) then 'column'
+            elsif axis_of.call(cols_by) then 'row'
+            else 'grand_total'
+            end
+    vcol['formula'] = %(PercentOfTotal(#{vcol['formula']}, "#{scope}"))
+    # exact decimals from the pill's own text-format (p0.0% → ,.1%); with no
+    # pill format, FORCE a percent format — add_col already stamped the
+    # measure default ',.0f', which renders every share as 0 (review-caught:
+    # the trailing default block only repairs nil/,.0% formats, not ,.0f).
+    fkey = (z['formats'] || {}).keys.find { |k| k.to_s.downcase.include?("pcto:#{qc['agg']}:#{qc['col']}".downcase) }
+    fmt = fkey && tableau_format_to_sigma((z['formats'] || {})[fkey])
+    fmt ||= { 'kind' => 'number', 'formatString' => ',.1%' } unless vcol.dig('format', 'formatString').to_s.include?('%')
+    vcol['format'] = fmt if fmt
+    warnings << "'#{cap}' pivot value '#{vcol['name']}' is a marks-card percent-of-total quick calc → " \
+                "PercentOfTotal(…, \"#{scope}\") [PctTotal addressing: #{addr_cap.inspect}]"
+  end
+
+  # v5.1: source shelf sorts (<shelf-sort-v2> — three rounds of ranked pivots
+  # shipped alphabetical because this surface was never parsed). Resolve the
+  # sorted dimension to its rowsBy/columnsBy entry and the sort measure to a
+  # value column. GUARD (the opus trap, live-probed): a PercentOfTotal whose
+  # scope is the SORTED axis is constant (100%) → the sort silently no-ops to
+  # alphabetical; sort by the inner aggregate instead when detectable.
+  Array(z['shelf_sorts']).each do |ss|
+    norm = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]/, '') }
+    axis = ss['shelf'].to_s == 'columns' ? cols_by : rows_by
+    entry = axis.find do |e|
+      col = cols_array.find { |c| c['id'] == e['id'] }
+      col && norm.call(col['name']) == norm.call(ss['dimension'])
+    end
+    next unless entry
+    by_col = cols_array.find { |c| values_arr.include?(c['id']) && norm.call(c['name']).include?(norm.call(ss['measure'])) } ||
+             cols_array.find { |c| values_arr.include?(c['id']) }
+    next unless by_col
+    scope_word = ss['shelf'].to_s == 'columns' ? 'column' : 'row'
+    if by_col['formula'].to_s =~ /PercentOfTotal\s*\(.*"#{scope_word}"\s*\)/
+      warnings << "'#{cap}' pivot sort key '#{by_col['name']}' is PercentOfTotal(…,\"#{scope_word}\") — CONSTANT " \
+                  'across the sorted axis (sorts alphabetically at render). Sort by the inner aggregate instead ' \
+                  '(refs/fidelity-recipes.md §Ranked pivot).'
+    else
+      entry['sort'] = { 'direction' => ss['direction'] || 'ascending', 'by' => by_col['id'] }
+      agg = by_col['formula'].to_s[/\A(Sum|Avg|Min|Max|Median|Count|CountDistinct)\(/, 1]
+      entry['sort']['aggregation'] = agg.downcase if agg
+      warnings << "'#{cap}' pivot #{ss['shelf']} sorted by '#{by_col['name']}' #{ss['direction']} (source shelf-sort)"
+    end
+  end
+
+  # v5.1.1: legacy <computed-sort> fallback — "sort field X by measure Y" in
+  # older workbooks lands ONLY here, not in <shelf-sort-v2>, and those pivots
+  # shipped alphabetical (review-caught). Same emission + constant-key guard
+  # as above; skipped whenever a shelf sort exists.
+  if Array(z['shelf_sorts']).empty? && z['sort'].is_a?(Hash) && z['sort']['using']
+    norm = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]/, '') }
+    refname = lambda do |raw|
+      tok = raw.to_s[/\[(?:[a-z\-]+:)?([^:\]]+?)(?::[a-z0-9]+)*\]\z/i, 1]
+      info = (meta['columns_by_guid'] || {})[guid_from_text(raw.to_s)] ||
+             (meta['columns_by_guid'] || {})[tok]
+      (info && info['caption']) || tok
+    end
+    dim_name  = refname.call(z['sort']['column'])
+    meas_name = refname.call(z['sort']['using'])
+    (rows_by + cols_by).each do |entry|
+      next if entry['sort']
+      col = cols_array.find { |c| c['id'] == entry['id'] }
+      next unless col && dim_name && norm.call(col['name']) == norm.call(dim_name)
+      by_match = cols_array.find { |c| values_arr.include?(c['id']) && meas_name && norm.call(c['name']).include?(norm.call(meas_name)) }
+      by_col = by_match || cols_array.find { |c| values_arr.include?(c['id']) }
+      break unless by_col
+      # v5.1.2: honesty on the fallback — the emitted key may not be the
+      # source's sort measure (review: silent substitution masked a divergent
+      # order behind a fidelity-claiming warning).
+      if by_match.nil?
+        warnings << "'#{cap}' computed-sort measure #{meas_name.inspect} is not among the pivot values — " \
+                    "sorted by '#{by_col['name']}' instead; VERIFY the axis order against the source"
+      end
+      scope_word = cols_by.include?(entry) ? 'column' : 'row'
+      if by_col['formula'].to_s =~ /PercentOfTotal\s*\(.*"#{scope_word}"\s*\)/
+        warnings << "'#{cap}' pivot computed-sort key '#{by_col['name']}' is PercentOfTotal(…,\"#{scope_word}\") — " \
+                    'CONSTANT across the sorted axis (sorts alphabetically at render). Sort by the inner aggregate ' \
+                    'instead (refs/fidelity-recipes.md §Ranked pivot).'
+      else
+        entry['sort'] = { 'direction' => z['sort']['direction'] || 'ascending', 'by' => by_col['id'] }
+        agg = by_col['formula'].to_s[/\A(Sum|Avg|Min|Max|Median|Count|CountDistinct)\(/, 1]
+        entry['sort']['aggregation'] = agg.downcase if agg
+        warnings << "'#{cap}' pivot sorted by '#{by_col['name']}' #{z['sort']['direction']} (source computed-sort)"
+      end
+      break
+    end
+  end
+
+  el = {
     'id'        => el_id,
     'kind'      => 'pivot-table',
     'name'      => tile_title(z, cap),
@@ -2385,8 +2895,344 @@ def build_pivot_element(z, meta, mmap, opts, warnings, data_elements = [])
     'columns'   => cols_array,
     'values'    => values_arr,
     'rowsBy'    => rows_by,
-    'columnsBy' => cols_by
+    'columnsBy' => cols_by,
+    # v5.1 defect-2 fix: Tableau pivots in this pipeline never show grand
+    # totals; Sigma defaults them SHOWN. showSubtotals enum is only
+    # always|when-collapsed ('hidden' is rejected) — when-collapsed is the
+    # no-visible-subtotals setting for expanded pivots (live-probed).
+    'totals'    => { 'showGrandTotals' => 'hidden', 'showSubtotals' => 'when-collapsed' }
   }
+  # v5.1 defect-4 fix: heat scale from the SOURCE ramp (parser heat_scheme),
+  # 3-point downsample; never a default accent. Value-format cascade: a
+  # PercentOfTotal value with no matched format renders 1-decimal like the
+  # corpus sources (defect-5).
+  if z['heat_scheme'].is_a?(Array) && z['heat_scheme'].size >= 2 && values_arr.any?
+    stops = z['heat_scheme']
+    el['conditionalFormats'] = [{
+      'type' => 'backgroundScale', 'columnIds' => values_arr.dup,
+      'scheme' => [stops.first, stops[stops.size / 2], stops.last].uniq
+    }]
+  end
+  cols_array.each do |c|
+    next unless values_arr.include?(c['id'])
+    next unless c['formula'].to_s.include?('PercentOfTotal(')
+    fs = c.dig('format', 'formatString')
+    c['format'] = { 'kind' => 'number', 'formatString' => ',.1%' } if fs.nil? || fs =~ /\A,?\.0%\z/
+  end
+  el
+end
+
+# v5.1: rank-limited PRE-FILTERED source table — mechanizes the pattern all
+# three round-4 runs hand-built for RANK()<=N pivots. The list filter lives on
+# a hidden TABLE element the pivot re-sources; element-level filters on the
+# pivot itself silently do NOT prune its dimension (round-4 bisect-proven).
+def build_topn_prefilter_helper(el_id:, master_id:, entity_col:, carry_cols:, members:)
+  src_id = "#{el_id}-topn-src"
+  src_name = "TopN Source (#{el_id.sub(/^el-/, '')})"
+  # One passthrough column per DISTINCT base ref across ALL carry formulas —
+  # a ratio measure Sum([Master/A])/Sum([Master/B]) needs BOTH A and B at row
+  # grain (review-caught: a first-ref slice dropped every ref after the first,
+  # and naming columns by the pivot header broke the re-pointed ref lookup).
+  # Aggregates re-compute on the pivot, so bare refs are all it must carry.
+  refs = carry_cols.flat_map { |c| c['formula'].to_s.scan(%r{\[Master/([^\]/]+)\]}).flatten }.uniq
+  ent_name = entity_col['formula'].to_s[%r{\[Master/([^\]/]+)\]}, 1] || entity_col['name']
+  refs << ent_name unless refs.include?(ent_name)
+  cols = refs.each_with_index.map do |rn, i|
+    { 'id' => "#{src_id}-c#{i}", 'name' => rn, 'formula' => "[Master/#{rn}]" }
+  end
+  ent = cols.find { |c| c['name'] == ent_name }
+  {
+    'id' => src_id, 'kind' => 'table', 'name' => src_name, 'visibleAsSource' => false,
+    'source' => { 'kind' => 'table', 'elementId' => master_id },
+    'columns' => cols,
+    # 'id' is REQUIRED — the API rejects filters without one (round-6 field:
+    # a 400 with a 507-line union dump traced to exactly this missing key).
+    'filters' => [{ 'id' => "flt-#{src_id}-0", 'columnId' => ent['id'], 'kind' => 'list',
+                    'mode' => 'include', 'selectionMode' => 'multiple', 'values' => members }]
+  }
+end
+
+# Member resolution for the prefilter, in trust order:
+#   (1) <tab>/topn-members.json — {calc_caption => [members]} fed by one probe
+#       run (or by hand); array order = desired display (rank) order.
+#   (2) a rendered view CSV that is ATTRIBUTABLE to this zone: either the
+#       zone's own view (own_view_id) or a CSV whose headers cover the entity
+#       dim PLUS at least one more of the element's own columns — a bare
+#       entity-header match is NOT enough (v5.1.2 review-caught: 'Bi assets'
+#       silently inherited another worksheet's member set from a different
+#       datasource; disjoint domain → empty pivot reported as success).
+# When the matched CSV also carries the rank pill's column, members come back
+# SORTED BY RANK (the CSV row order is data order, NOT render order —
+# live-checked: first-occurrence gave rank 3,1,2,8,…). Returns nil when no
+# trustworthy source exists (caller writes the probe sidecar).
+def topn_members_for(calc_caption, entity_name, opts, zone, element_cols: [], own_view_id: nil)
+  mpath = File.join(opts[:tab], 'topn-members.json')
+  bare_hit = nil
+  if File.exist?(mpath)
+    map = JSON.parse(File.read(mpath)) rescue {}
+    # ZONE-SCOPED key first ('<zone caption>::<calc caption>') — two zones
+    # routinely share one rank-calc name ('Rank N' on both fixture pivots),
+    # and a caption-only key fed one zone the OTHER zone's roster
+    # (review-caught, live-reproduced: disjoint domain → empty tile).
+    zcap = zone.is_a?(Hash) ? zone['caption'].to_s : ''
+    scoped = "#{zcap}::#{calc_caption}"
+    hit = map[scoped] || map.find { |k, _| k.to_s.strip.casecmp?(scoped.strip) }&.last
+    return hit if hit.is_a?(Array) && hit.any?
+    # The BARE calc-caption key is legacy/ambiguous: it now ranks BELOW the
+    # zone's own CSV evidence, and at most ONE zone per build may consume it
+    # (review-caught: a legacy bare-key file fed a disjoint roster to a
+    # second zone AND truncated a zone that had perfectly good CSV members).
+    bh = map[calc_caption.to_s] || map.find { |k, _| k.to_s.strip.casecmp?(calc_caption.to_s.strip) }&.last
+    if bh.is_a?(Array) && bh.any?
+      # ownership is claimed at USE time (below), not lookup time — a zone
+      # that resolves from its own CSV must not block another zone's fallback
+      bare_hit = lambda do
+        $topn_bare_consumers ||= {}
+        owner = ($topn_bare_consumers[calc_caption.to_s] ||= zcap)
+        if owner == zcap
+          bh
+        else
+          warn "topn-members: bare key #{calc_caption.inspect} already consumed by zone #{owner.inspect} — " \
+               "#{zcap.inspect} needs its own ZONE-SCOPED key (\"#{zcap}::#{calc_caption}\")"
+          nil
+        end
+      end
+    end
+  end
+  bare_hit ||= lambda { nil }
+  # No entity → the members could never be APPLIED (the helper's list filter
+  # needs the entity column) — do NOT consult the bare key here, or its
+  # single-consumer claim starves the zone that can actually use it
+  # (review-caught).
+  return nil unless entity_name
+  nrm = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]/, '') }
+  other_cols = element_cols.map { |c| nrm.call(c['name']) } - [nrm.call(entity_name)]
+  best = nil # [coverage, rows, hdr]
+  Dir.glob(File.join(opts[:tab], 'views', '*.csv')).sort.each do |csvp|
+    rows = CSV.read(csvp, headers: true) rescue next
+    hdr = rows.headers&.find { |h| h.to_s.strip.casecmp?(entity_name.to_s.strip) }
+    next unless hdr
+    own = own_view_id && File.basename(csvp, '.csv') == own_view_id.to_s
+    coverage = (rows.headers.map { |h| nrm.call(h) } & other_cols).length
+    next unless own || coverage >= 1
+    score = (own ? 1000 : 0) + coverage
+    best = [score, rows, hdr] if best.nil? || score > best[0]
+  end
+  return bare_hit.call unless best
+  _, rows, hdr = best
+  # Rank-ordered members when the CSV carries THE rank pill's column: the
+  # header must BE 'rank' or the rank calc's caption (a containment match
+  # let an ordinary 'Rank Points' data measure hijack the order —
+  # review-caught). Tableau RANK is COMPETITION ranking — ties legitimately
+  # share a value (a strict-permutation check threw away the whole ordering
+  # on any tie; review-caught) — so accept duplicates and break ties by CSV
+  # first-occurrence, but reject value ranges a rank can't have (a 'Rank
+  # Points' 1500/2000 measure fails the bound).
+  rank_h = rows.headers.find do |h|
+    hn = nrm.call(h)
+    (hn == 'rank' || hn == nrm.call(calc_caption)) && rows.first && rows.first[h].to_s =~ /\A\d+\z/
+  end
+  if rank_h
+    by_rank = {}
+    order   = {}
+    rows.each do |r|
+      m = r[hdr]
+      next if m.nil?
+      order[m.to_s] ||= order.size
+      by_rank[m.to_s] ||= r[rank_h].to_i
+    end
+    plausible = by_rank.any? && by_rank.values.min.to_i >= 1 &&
+                by_rank.values.max.to_i <= by_rank.size * 2
+    return by_rank.keys.sort_by { |m| [by_rank[m], order[m]] } if plausible
+  end
+  vals = rows.map { |r| r[hdr] }.compact.map(&:to_s)
+  vals.any? ? vals.uniq : bare_hit.call
+end
+
+# v5.1.1: shared top-N idiom detection — the CSV flow's inline lambda made the
+# interception unreachable for pivots (the fast path `next`s out of the zone
+# loop long before it; review-caught). Given ONE zone filter, return the
+# translated plan (merged with keeps_true/calc_caption) or nil.
+def detect_topn_plan(f, z, mmap, meta)
+  norm = ->(x) { x.to_s.gsub(/^\[|\]$/, '').strip.downcase }
+  ref = [f['column_caption'], f['raw_param']].compact.map(&:to_s).join(' ')
+  calc = (z['calculations'] || []).find do |c|
+    cap_n  = norm.call(c['caption'])
+    name_n = norm.call(c['name'])
+    next false if c['formula'].to_s !~ /\bRANK(?:_UNIQUE)?\s*\(/i
+    (!cap_n.empty? && norm.call(f['column_caption']) == cap_n) ||
+      (!name_n.empty? && ref.downcase.include?(name_n))
+  end
+  return nil unless calc
+  plan = translate_window_calc(calc['formula'], mmap, meta['columns_by_guid'] || {})
+  record_window_calc(z, calc, plan, mode: 'top-n-filter') if plan && plan['operand_raw']
+  return nil unless plan && plan['operand_raw'] # only the top-N branch sets this
+  # The filter must KEEP the top rows (member 'true'); a keep-false inverts it.
+  kept = (f['members'] || []).map { |v| v.to_s.downcase }
+  plan.merge('keeps_true' => kept.empty? || kept.include?('true'),
+             'calc_caption' => calc['caption'] || calc['name'],
+             # "compute using" dim from the calc's table-calc addressing — the
+             # RANKED ENTITY (parser ordering_field, v5.1.1); nil on older twbs.
+             'entity_ref' => calc['ordering_field'])
+end
+
+# v5.1.1: re-source an element to the rank-limited PRE-FILTERED helper (or
+# write the probe sidecar when no member source exists). Shared by the pivot
+# fast path and the CSV flow's pivot/topn-prefilter branch.
+def apply_topn_prefilter!(tp, element:, cap:, z:, opts:, warnings:, data_elements:, meta: {}, own_view_id: nil)
+  label = tp['calc_caption']
+  norm = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]/, '') }
+  # v5.1.2 guard: the helper builder + re-pointing assume the element still
+  # rides the MASTER with [Master/ refs. A pivot already rewired onto a
+  # two-stage window helper would get an unresolvable helper (its refs scan
+  # finds nothing) and dangling window refs — POST hard-fails. Stay manual.
+  if element.dig('source', 'elementId') != opts[:master_id]
+    warnings << "'#{cap}' top-#{tp['top_n']} '#{label}': element already rides a helper source " \
+                "(#{element.dig('source', 'elementId')}) — top-N prefilter NOT auto-emitted; add the " \
+                'member list filter to that helper by hand (refs/fidelity-recipes.md §Ranked pivot)'
+    return false
+  end
+  # The ranked entity comes from the rank calc's OWN addressing when the twb
+  # carries it (entity_ref, exact) — the axis heuristic below picked the wrong
+  # dim on real column-ranked pivots (rooms ride columnsBy, not rowsBy.first).
+  entity_col = nil
+  if tp['entity_ref']
+    hint = (meta['columns_by_guid'] || {}).dig(tp['entity_ref'], 'caption') || tp['entity_ref']
+    entity_col = (element['columns'] || []).find { |c| norm.call(c['name']) == norm.call(hint) }
+  end
+  entity_col ||= (element['rowsBy'] || []).map { |r| (element['columns'] || []).find { |c| c['id'] == r['id'] } }.compact.first ||
+                 (element['columnsBy'] || []).map { |r| (element['columns'] || []).find { |c| c['id'] == r['id'] } }.compact
+                   .reject { |c| c['formula'].to_s =~ /\A\[Master\/Rank/i }.last
+  members = topn_members_for(label, entity_col && entity_col['name'], opts, z,
+                             element_cols: element['columns'] || [], own_view_id: own_view_id)
+  if entity_col && members && members.any?
+    src_id = "#{element['id']}-topn-src"
+    helper = data_elements.find { |d| d['id'] == src_id }
+    if helper.nil?
+      helper = build_topn_prefilter_helper(
+        el_id: element['id'], master_id: opts[:master_id],
+        entity_col: entity_col, carry_cols: element['columns'], members: members)
+      # SORT_ORD: the recipe's exact render-order device (refs/fidelity-recipes
+      # §Ranked pivot) — members are already rank-ordered, so the position map
+      # is a data-independent Switch. The pivot sorts its entity axis by
+      # Min(SORT_ORD) below; sorting by a share value is the constant-key trap.
+      ent_ref = "[Master/#{helper['columns'].find { |c| c['id'] == helper['filters'][0]['columnId'] }['name']}]"
+      # UNQUOTED literals only with EXPLICIT numeric datatype evidence from
+      # the twb — a digit-string TEXT column ('070' room codes) must stay
+      # quoted, and members-look-numeric alone proved nothing (review-caught).
+      # Evidence: entity_ref's datatype, else a caption match into
+      # columns_by_guid (entity_ref is nil on older twbs; review-caught).
+      ent_dt = tp['entity_ref'] && (meta['columns_by_guid'] || {}).dig(tp['entity_ref'], 'datatype')
+      ent_dt ||= (meta['columns_by_guid'] || {}).values.find do |v|
+        v.is_a?(Hash) && v['caption'].to_s.strip.casecmp?(entity_col['name'].to_s.strip)
+      end&.dig('datatype')
+      numeric_members = %w[integer real].include?(ent_dt.to_s) &&
+                        members.all? { |m| m.to_s =~ /\A-?(?:0|[1-9]\d*)(?:\.\d+)?\z/ }
+      if !numeric_members && ent_dt.to_s.empty? && members.all? { |m| m.to_s =~ /\A-?\d+(?:\.\d+)?\z/ }
+        warnings << "'#{cap}' SORT_ORD members look numeric but the entity's twb datatype is unknown — " \
+                    'emitted QUOTED literals; if the column is numeric in Sigma, fix the Switch by hand'
+      end
+      pairs = members.each_with_index.map do |m, i|
+        lit = numeric_members ? m.to_s : JSON.generate(m.to_s)
+        "#{lit}, #{i + 1}"
+      end.join(', ')
+      helper['columns'] << { 'id' => "#{src_id}-sortord", 'name' => 'SORT_ORD',
+                             'formula' => "Switch(#{ent_ref}, #{pairs}, #{members.size + 1})" }
+      # The element no longer rides the master, so multi-DS routing must route
+      # the HELPER — tag it with the worksheet (routing includes tagged helpers).
+      helper['_worksheet'] = cap
+      data_elements << helper
+    end
+    # (helper reuse: the same rank-filtered worksheet placed on a second
+    # dashboard re-enters here — a duplicate data_element id fails the POST.)
+    hname = helper['name']
+    element['source'] = { 'kind' => 'table', 'elementId' => helper['id'] }
+    (element['columns'] || []).each do |c|
+      c['formula'] = c['formula'].to_s.gsub('[Master/', "[#{hname}/")
+    end
+    # Entity axis order = RANK order (Tableau's hidden rank pill drives the
+    # render; a vestigial <computed-sort> matched it at 1/15 — live-checked).
+    # A source shelf-sort on the same dimension is a real user sort and wins.
+    # Pivots sort the axis entry; CHART-shaped elements (the CSV flow's
+    # topn-prefilter mode) sort the xAxis — element['values'] is nil there,
+    # so every pivot-shaped access below is guarded (review-caught: the
+    # denominator check never fired for charts and the success warning
+    # over-claimed).
+    is_pivot = element['kind'] == 'pivot-table'
+    shelf_ss = Array(z['shelf_sorts']).find { |ss| norm.call(ss['dimension']) == norm.call(entity_col['name']) }
+    so_id = "p-#{element['id']}-sortord"
+    axis_entry = ((element['rowsBy'] || []) + (element['columnsBy'] || [])).find { |r| r['id'] == entity_col['id'] }
+    ordered = nil
+    add_sortord = lambda do
+      unless (element['columns'] || []).any? { |c| c['id'] == so_id }
+        element['columns'] << { 'id' => so_id, 'name' => 'SORT_ORD', 'formula' => "[#{hname}/SORT_ORD]" }
+      end
+    end
+    if axis_entry && !shelf_ss
+      add_sortord.call
+      axis_entry['sort'] = { 'direction' => 'ascending', 'by' => so_id, 'aggregation' => 'min' }
+      ordered = 'SORT_ORD'
+    elsif !is_pivot && element['xAxis'].is_a?(Hash) && element['xAxis']['sort'].nil? && !z['sort']
+      if shelf_ss
+        # A shelf-sorted CHART must get its order HERE — build_pivot_element's
+        # shelf-sort emission never sees charts, so deferring shipped the tile
+        # with NO axis order at all (review-caught on the fixture's own top-N
+        # bar). Sort by the yAxis measure the shelf sort names.
+        yids = element.dig('yAxis', 'columnIds') || []
+        ycols = yids.map { |vid| (element['columns'] || []).find { |c| c['id'] == vid } }.compact
+        by = ycols.find { |c| norm.call(c['name']).include?(norm.call(shelf_ss['measure'])) } || ycols.first
+        if by
+          element['xAxis']['sort'] = { 'by' => by['id'], 'direction' => shelf_ss['direction'] || 'descending' }
+          ordered = 'source shelf-sort'
+        end
+      else
+        add_sortord.call
+        element['xAxis']['sort'] = { 'by' => so_id, 'direction' => 'ascending', 'aggregation' => 'min' }
+        ordered = 'SORT_ORD'
+      end
+    end
+    # Share-denominator honesty: Tableau's RANK filter is a TABLE-CALC filter —
+    # shares compute over the FULL domain, then marks hide. A share whose scope
+    # spans the pruned axis (or the grand total) re-computes over only the kept
+    # members here and INFLATES. Scope orthogonal to the entity axis is exact.
+    ent_on_cols = (element['columnsBy'] || []).any? { |r| r['id'] == entity_col['id'] }
+    bad_scope = ent_on_cols ? 'row' : 'column'
+    value_ids = element['values'] || element.dig('yAxis', 'columnIds') ||
+                # TABLE-kind elements carry values as plain columns (review-
+                # caught: the honesty warning could never fire for them)
+                (element['kind'] == 'table' ? (element['columns'] || []).map { |c| c['id'] } - [entity_col['id'], so_id] : [])
+    inflated = value_ids.select do |vid|
+      c = (element['columns'] || []).find { |x| x['id'] == vid }
+      re = is_pivot ? /PercentOfTotal\s*\([^\v]*"(?:#{bad_scope}|grand_total)"\s*\)/ : /PercentOfTotal\s*\(/
+      c && c['formula'].to_s =~ re
+    end
+    if inflated.any?
+      warnings << "'#{cap}' WARNING: #{inflated.size} share value(s) re-compute over the PRE-FILTERED domain — " \
+                  'Tableau ranks over the FULL domain, so these can read HIGH here. Verify against the source; ' \
+                  'full-domain denominators need a hand-build (fidelity-recipes §Ranked pivot).'
+    end
+    warnings << "'#{cap}' top-#{tp['top_n']} '#{label}' → rank-limited PRE-FILTERED source " \
+                "'#{hname}' (#{members.size} member(s)#{ordered ? ", ordered via #{ordered}" : ''}; " \
+                'element filters don\'t prune pivots)'
+  else
+    probes_path = opts[:out].sub(/\.json$/, '-topn-probes.json')
+    probe = { 'zone' => cap, 'calc' => label, 'top_n' => tp['top_n'],
+              'entity_dim' => entity_col && entity_col['name'],
+              'sql_template' => "SELECT entity, MAX(share) ms, RANK() OVER (ORDER BY MAX(share) DESC) rnk " \
+                                "FROM (<share-per-entity query over the landed table>) GROUP BY entity " \
+                                "QUALIFY rnk <= #{tp['top_n']} -- write members (rank order) to <tab>/topn-members.json " \
+                                "under the ZONE-SCOPED key {\"#{cap}::#{label}\": [..]} and re-run" }
+    existing = File.exist?(probes_path) ? (JSON.parse(File.read(probes_path)) rescue []) : []
+    # dedup: re-entries (multi-dashboard zones, orchestrator re-runs within one
+    # build) must not balloon the sidecar
+    unless existing.any? { |p| p['zone'] == probe['zone'] && p['calc'] == probe['calc'] }
+      File.write(probes_path, JSON.pretty_generate(existing + [probe]))
+    end
+    warnings << "'#{cap}' top-#{tp['top_n']} '#{label}': no ATTRIBUTABLE member source (a CSV must be the zone's own " \
+                "view or cover the entity dim plus another of its columns) — probe written to #{File.basename(probes_path)}; " \
+                'run it, save members to topn-members.json (rank order), re-run build'
+  end
+  true
 end
 
 # Minimal GUID-from-text helper for shelf measures whose `column` reads like
@@ -2395,6 +3241,26 @@ def guid_from_text(s)
   return nil if s.nil? || s.empty?
   m = s.match(/\[(?:[a-z\-]+:)?([0-9a-f\-]{36})(?::[a-z]+)?\]/i)
   m && m[1]
+end
+
+# v5.4 — NAME-KEYED serialization variant of guid_from_text, SCOPED to the
+# signal-only view synthesis. Hex GUIDs are only one of Tableau's column
+# identity schemes: textscan/excel-direct/federated-live datasources key
+# <column-instance> tokens by NAME ([none:IS_PAID:nk], [usr:Calculation_N:qk:2]).
+# Those workbooks resolved to nil in guid_from_text, so color-channel dims and
+# aggregation fallbacks silently vanished (the dropped-pie class). Kept as a
+# SEPARATE resolver because guid_from_text feeds many measure/color pickers
+# whose semantics are tuned to hex-GUID workbooks — broadening it globally
+# re-picked measures across unrelated tiles (corpus-regression-caught).
+def name_or_guid_from_text(s)
+  g = guid_from_text(s)
+  return g if g
+  return nil if s.nil? || s.empty?
+  m = s.match(/\[[a-z]+:([^:\[\]]+):[a-z]+k(?::\d+)?\]/i)
+  return m[1] if m
+  m = s.match(/\]\.\[([^:\/\[\]]+)\]\z/) || s.match(/\A\[([^:\/\[\]]+)\]\z/)
+  g = m && m[1]
+  g && g.casecmp?('Parameters') ? nil : g
 end
 
 # ---- KPI emission ---------------------------------------------------------
@@ -2456,6 +3322,28 @@ def translate_kpi_measure_formula(formula, mmap, columns_by_guid = {})
   s
 end
 
+# An axis-anchor PLACEHOLDER: a measure whose formula is a ROW-INDEPENDENT
+# constant — MIN/MAX/AVG/MEDIAN/ATTR of any numeric literal (min(-1.0), AVG(0))
+# or a zero/negative literal. This is the standard Tableau dummy-axis idiom —
+# dashboarders pin BAN/scorecard marks to a constant axis so the text sits
+# where they want it. Such a pill carries NO data; binding it as a KPI value
+# reproduces the constant, not the metric (round 6: every headline KPI on one
+# shape bound min(-1.0)).
+#
+# NOT placeholders (v5.4.9 review fix): row-COUNT measures. Bare literal `1`
+# is exactly the formula of Tableau's auto-generated [Number of Records]
+# field (default Sum aggregation → row count), and SUM(<positive literal>) is
+# the ad-hoc row-count idiom — both scale with the data and are real headline
+# values ("Total Orders" BANs). Only row-independent constants are plumbing.
+def placeholder_calc?(formula)
+  s = formula.to_s.strip
+  return false if s.empty?
+  return s.to_f <= 0 if s =~ /\A-?\d+(?:\.\d+)?\z/
+  m = s.match(/\A(MIN|MAX|AVG|SUM|MEDIAN|ATTR)\s*\(\s*(-?\d+(?:\.\d+)?)\s*\)\z/i)
+  return false unless m
+  m[1].casecmp('SUM').zero? ? m[2].to_f <= 0 : true
+end
+
 # Pick the KPI's VALUE measure from a marks-card measure list (bead: KPI value
 # fidelity). A Tableau scorecard commonly carries several measures on its Marks
 # card — a raw column (`[RAW_COL]` Sum), one or more internal calc ids, and the
@@ -2477,10 +3365,18 @@ def pick_kpi_measure(measures, columns_by_guid = {})
     ((info && info['caption']) || m['column'].to_s).to_s
   end
   is_label = ->(m) { (cap_of.call(m) =~ /\(label\)/i) || (m['column'].to_s =~ /\(label\)/i) }
+  is_placeholder = lambda do |m|
+    key = m['column'].to_s.gsub(/^\[|\]$/, '').sub(/^[a-z]+:/i, '').sub(/:[a-z]+$/i, '')
+    info = columns_by_guid[key]
+    info.is_a?(Hash) && placeholder_calc?(info['formula'])
+  end
 
-  # A `(Label)` calc is the scorecard's caption text, never its value — drop it
-  # unless it's ALL we have (then fall through so the tile isn't lost).
-  candidates = list.reject { |m| is_label.call(m) }
+  # A `(Label)` calc is the scorecard's caption text, and an axis-anchor
+  # placeholder (min(-1.0) / AVG(0)) is mark plumbing — neither is ever the
+  # value. Drop them unless they're ALL we have (then fall through so the tile
+  # isn't lost).
+  candidates = list.reject { |m| is_label.call(m) || is_placeholder.call(m) }
+  candidates = list.reject { |m| is_label.call(m) } if candidates.empty?
   candidates = list if candidates.empty?
 
   score = lambda do |m|
@@ -2497,6 +3393,174 @@ def pick_kpi_measure(measures, columns_by_guid = {})
   candidates.each_with_index.max_by { |m, i| [score.call(m), -i] }.first
 end
 
+# ---- Generic period/param-scoped KPI recipe (v5.4) --------------------------
+# Two serializations put a parameter's CURRENT value between a scorecard and
+# its number, and both shipped unscoped (all-periods) values in the field:
+#   (a) the measure itself:  AGG(IF <expr> = [Parameters].[P] THEN [col] END)
+#   (b) a worksheet filter:  boolean calc "<expr> = [Parameters].[P]" kept true
+# <expr> is a column ref (bracketed or BARE — the Tableau formula grammar
+# allows both) or a calc reducing to a date-part of a datetime column
+# (DATEPART('year', [d]) / YEAR([d])) — the "period lives only in a datetime
+# column" case. Sigma elements cannot evaluate a Tableau parameter, so the
+# general recipe is a hidden FILTERED helper element the KPI sources: one
+# column per scope expression, one list filter (with id) per scope pinned to
+# the parameter's current value. Conservative contract: if ANY scope
+# expression or parameter value fails to resolve, NO helper is built and the
+# tile is flagged STAYS-MANUAL — a partially scoped number is worse than a
+# named gap.
+
+# Parse form (a). Returns { 'agg','col','lhs','param' } or nil. Only the
+# single-branch current-period shape qualifies — offsets ([P]-1, prior-period
+# comparisons) are delta plumbing, not the headline value.
+def parse_param_if_measure(formula)
+  s = formula.to_s.gsub(/\s+/, ' ').strip
+  m = s.match(/\A(SUM|AVG|MIN|MAX|MEDIAN|COUNTD|COUNT)\s*\(\s*IF\s+(.+?)\s+THEN\s+\[([^\]]+)\]\s*(?:ELSE\s+NULL\s+)?END\s*\)\z/i)
+  return nil unless m
+  cm = m[2].match(/\A(\[?[\w .\-]+\]?)\s*=\s*\[Parameters?\]\s*\.\s*\[([^\]]+)\]\z/i)
+  return nil unless cm
+  { 'agg' => m[1].upcase, 'col' => m[3], 'lhs' => cm[1], 'param' => cm[2] }
+end
+
+# map_column with a NORMALIZED fallback for the scope recipe: formulas
+# reference raw twb serialization tokens (NUM_SUBSCRIBERS, PUBLISHED DATE)
+# while the master-map regexes are built from display labels ("Num
+# Subscribers"). Same drift class the global ref-label repair handles —
+# match case/punct-insensitively when the normalized name is UNIQUE among
+# master columns; ambiguity returns nil (never guessed).
+def scope_map_column(name, mmap)
+  hit = map_column(name, mmap)
+  return hit if hit
+  key = name.to_s.downcase.gsub(/[^a-z0-9]/, '')
+  return nil if key.empty?
+  cands = mmap.values.select do |v|
+    v.is_a?(Hash) && v['name'].to_s.downcase.gsub(/[^a-z0-9]/, '') == key
+  end
+  cands.map { |v| v['name'] }.uniq.size == 1 ? cands.first : nil
+end
+
+# Resolve a scope expression's LEFT side to a master-relative Sigma formula.
+# Column ref → passthrough; calc reducing to a date-part → DatePart(...);
+# other translatable dim calcs → their translation. nil = unresolvable.
+def param_scope_resolve_lhs(lhs, z, meta, mmap)
+  name = lhs.to_s.strip.gsub(/^\[|\]$/, '').strip
+  return nil if name.empty?
+  if (mc = scope_map_column(name, mmap))
+    return { 'name' => mc['name'], 'formula' => "[Master/#{mc['name']}]" }
+  end
+  nrm = ->(x) { x.to_s.gsub(/^\[|\]$/, '').strip.downcase }
+  cinfo = (z['calculations'] || []).find do |c|
+    nrm.call(c['name']) == name.downcase || nrm.call(c['caption']) == name.downcase
+  end
+  cinfo ||= (meta['columns_by_guid'] || {})[name]
+  f = cinfo.is_a?(Hash) ? cinfo['formula'].to_s.gsub(/\s+/, ' ').strip : ''
+  return nil if f.empty?
+  disp = cinfo['caption'].to_s.strip
+  disp = name if disp.empty?
+  if (dm = f.match(/\ADATEPART\s*\(\s*'(year|quarter|month|week|day)'\s*,\s*\[([^\]]+)\]\s*\)\z/i))
+    base = scope_map_column(dm[2], mmap)
+    return base && { 'name' => disp, 'formula' => %(DatePart("#{dm[1].downcase}", [Master/#{base['name']}])) }
+  end
+  if (ym = f.match(/\A(YEAR|QUARTER|MONTH|WEEK|DAY)\s*\(\s*\[([^\]]+)\]\s*\)\z/i))
+    base = scope_map_column(ym[2], mmap)
+    return base && { 'name' => disp, 'formula' => %(DatePart("#{ym[1].downcase}", [Master/#{base['name']}])) }
+  end
+  tf = translate_dim_calc(f, mmap, meta['columns_by_guid'] || {}) ||
+       translate_row_level_calc(f, mmap, meta['columns_by_guid'] || {})
+  tf && { 'name' => disp, 'formula' => tf }
+end
+
+# The parameter's CURRENT value: parser meta first (default_value), then the
+# param's own serialized <calculation formula='...'> literal. Typed by the
+# param's datatype so numeric filters carry numbers, not strings.
+def param_current_value(pcap, z, meta)
+  key = pcap.to_s.strip
+  p = (meta['parameters'] || []).find do |pp|
+    pp['caption'].to_s.strip.casecmp?(key) || pp['name'].to_s.gsub(/^\[|\]$/, '').strip.casecmp?(key)
+  end
+  raw = p && p['default_value']
+  dt  = p && p['datatype']
+  if raw.nil? || raw.to_s.strip.empty?
+    c = (z['calculations'] || []).find do |cc|
+      [cc['caption'], cc['name']].compact.any? { |x| x.to_s.gsub(/^\[|\]$/, '').strip.casecmp?(key) }
+    end
+    raw = c && c['formula']
+    dt  = (c && c['datatype']) || dt
+  end
+  return nil if raw.nil? || raw.to_s.strip.empty?
+  v = raw.to_s.strip.sub(/\A"(.*)"\z/m, '\1')
+  case dt.to_s
+  when 'integer' then v =~ /\A-?\d+\z/ ? v.to_i : nil
+  when 'real'    then v =~ /\A-?(?:\d+\.?\d*|\.\d+)\z/ ? v.to_f : nil
+  when 'date', 'datetime'
+    # v5.4.9 review fix: a date/datetime param default serializes as a Tableau
+    # date literal ('#2026-06-30#'); pinning that string in a list filter
+    # matches NO date value — the KPI renders blank while the warning claims
+    # success. Sigma list-filter pin semantics for date values are not
+    # live-verified, so fail CLOSED: nil routes the tile to the recipe's
+    # STAYS-MANUAL contract (a named gap beats a silently blank number).
+    nil
+  else
+    # Same date-literal shape with the datatype missing from the meta — still
+    # a date param; fail closed rather than pin '#...#' verbatim.
+    v =~ /\A#.*#\z/m ? nil : v
+  end
+end
+
+# Form (b): collect the zone's param-equality boolean filters (kept 'true').
+# Returns { 'scopes' => [{name,formula,value,param,via}], 'unresolved' => [] }.
+# Boolean-true filters that are NOT param equalities are not scopes — skipped.
+def param_scopes_for_kpi(z, meta, mmap)
+  scopes = []
+  unresolved = []
+  seen = {}
+  (Array(z['filters']) + Array(z['hidden_filters'])).each do |f|
+    next unless f.is_a?(Hash) && f['kind'].to_s == 'list'
+    next unless Array(f['members']).map(&:to_s) == ['true']
+    capn = (f['column_caption'] || f['caption']).to_s.strip
+    next if capn.empty? || seen[capn.downcase]
+    calc = (z['calculations'] || []).find do |c|
+      [c['caption'], c['name']].compact.any? { |x| x.to_s.gsub(/^\[|\]$/, '').strip.casecmp?(capn) }
+    end
+    next unless calc
+    cm = calc['formula'].to_s.gsub(/\s+/, ' ').strip
+             .match(/\A(\[?[\w .\-]+\]?)\s*=\s*\[Parameters?\]\s*\.\s*\[([^\]]+)\]\z/i)
+    next unless cm
+    seen[capn.downcase] = true
+    lhs = param_scope_resolve_lhs(cm[1], z, meta, mmap)
+    val = param_current_value(cm[2], z, meta)
+    if lhs && !val.nil?
+      scopes << lhs.merge('value' => val, 'param' => cm[2], 'via' => capn)
+    else
+      unresolved << "filter '#{capn}' (#{cm[1]} = [Parameters].[#{cm[2]}])"
+    end
+  end
+  { 'scopes' => scopes, 'unresolved' => unresolved }
+end
+
+# The hidden filtered helper the scoped KPI sources. Every filter carries an
+# 'id' (the API rejects filters without one).
+def build_param_scope_helper(el_id:, master_id:, value_name:, value_formula:, scopes:)
+  src_id = "#{el_id}-scoped-src"
+  src_name = "#{value_name} Scoped (#{el_id.sub(/^el-(kpi-)?/, '')})"
+  value_col = { 'id' => "#{src_id}-v", 'name' => value_name, 'formula' => value_formula }
+  scope_cols = []
+  filters = []
+  scopes.each_with_index do |sc, i|
+    col = { 'id' => "#{src_id}-f#{i}", 'name' => sc['name'], 'formula' => sc['formula'] }
+    scope_cols << col
+    filters << { 'id' => "flt-#{src_id}-#{i}", 'columnId' => col['id'], 'kind' => 'list',
+                 'mode' => 'include', 'selectionMode' => 'multiple', 'values' => [sc['value']] }
+  end
+  element = {
+    'id' => src_id, 'kind' => 'table', 'name' => src_name,
+    'source' => { 'kind' => 'table', 'elementId' => master_id },
+    'columns' => [value_col] + scope_cols,
+    'filters' => filters,
+    'visibleAsSource' => false
+  }
+  [element, src_name]
+end
+
 # single measure and no dimensions — translate to a Sigma kpi-chart element.
 # Without this, the chart_kind=kpi worksheet would fall through to the
 # CSV-driven flat-table flow and quietly produce nothing usable.
@@ -2511,9 +3575,31 @@ def build_kpi_element(z, meta, mmap, opts, warnings, data_elements = [])
   # Find the KPI's measure: first from shelves (preferred — explicit derivation),
   # then fall back to the worksheet's `measures` array (when the measure is on
   # the Marks card via Text/Color/Size encoding rather than a shelf).
+  # v5.4: a shelf field that resolves to an axis-anchor PLACEHOLDER calc
+  # (min(-1.0) / AVG(0) — the dummy-axis idiom) is mark plumbing, not the
+  # value; skip it so the marks-card fallback below binds the real measure.
+  shelf_formula = lambda do |f|
+    g = f['guid'].to_s
+    info = (z['calculations'] || []).find { |c| c['name'].to_s.gsub(/^\[|\]$/, '') == g } ||
+           (meta['columns_by_guid'] || {})[g]
+    info.is_a?(Hash) ? info['formula'].to_s : ''
+  end
   measure_field = nil
-  (rows_shelf['fields'] || []).each { |f| measure_field ||= f if f['role'] == 'measure' }
-  (cols_shelf['fields'] || []).each { |f| measure_field ||= f if f['role'] == 'measure' }
+  skipped_placeholder = nil
+  [rows_shelf, cols_shelf].each do |shelf|
+    (shelf['fields'] || []).each do |f|
+      next unless f['role'] == 'measure'
+      if placeholder_calc?(shelf_formula.call(f))
+        skipped_placeholder ||= f
+        next
+      end
+      measure_field ||= f
+    end
+  end
+  if measure_field.nil? && skipped_placeholder
+    warnings << "'#{cap}' KPI shelf carries only an axis-anchor placeholder " \
+                "(#{shelf_formula.call(skipped_placeholder).strip[0, 30].inspect}) — binding the real measure from the marks card instead"
+  end
   if measure_field.nil? && (z['measures'] || []).any?
     # Prefer the materialized VALIDATED calc over a raw aggregate column
     # (bead: KPI value fidelity) instead of blindly taking measures.first.
@@ -2599,6 +3685,71 @@ def build_kpi_element(z, meta, mmap, opts, warnings, data_elements = [])
     n = norm.call(c['name'])
     n == norm.call(field_cap) || n == raw_norm
   end
+  # v5.4 GENERIC PERIOD/PARAM-SCOPED KPI (see the recipe block above
+  # build_kpi_element). Runs before the decompose cascade: a param-IF measure
+  # decomposes to NOTHING there (translate_kpi_measure_formula bails on
+  # [Parameters]) and previously fell to a naive unresolvable Sum().
+  if formula.nil? && source_eid == opts[:master_id]
+    pif = ws_calc && parse_param_if_measure(ws_calc['formula'])
+    zone_sc = param_scopes_for_kpi(z, meta, mmap)
+    scopes = zone_sc['scopes'].dup
+    unresolved = zone_sc['unresolved'].dup
+    sc_value_name = nil
+    sc_value_formula = nil
+    sc_agg = nil
+    if pif
+      lhs = param_scope_resolve_lhs(pif['lhs'], z, meta, mmap)
+      val = param_current_value(pif['param'], z, meta)
+      vm  = scope_map_column(pif['col'], mmap)
+      if lhs && !val.nil? && vm
+        scopes << lhs.merge('value' => val, 'param' => pif['param'], 'via' => field_cap.to_s)
+        sc_value_name = vm['name']
+        sc_value_formula = "[Master/#{vm['name']}]"
+        sc_agg = pif['agg']
+      else
+        miss = []
+        miss << "condition '#{pif['lhs']} = [Parameters].[#{pif['param']}]'" unless lhs && !val.nil?
+        miss << "value column '#{pif['col']}'" unless vm
+        unresolved << "measure '#{field_cap}': #{miss.join(' + ')}"
+      end
+    elsif scopes.any? && ws_calc.nil? && master['formula'].nil?
+      # Plain-column measure + param scope filters: same helper, shelf agg.
+      sc_value_name = master['name'].to_s.strip
+      sc_value_formula = "[Master/#{sc_value_name}]"
+      sc_agg = nil # shelf-derivation template below
+    end
+    if unresolved.any?
+      warnings << "'#{cap}' KPI is parameter-scoped but its scope did not resolve (#{unresolved.join('; ')}) — " \
+                  'STAYS-MANUAL: build the period-scoped helper by hand (a hidden filtered element the KPI ' \
+                  'sources); an unscoped value silently diverges from the source'
+    elsif scopes.any? && sc_value_formula
+      helper, src_name = build_param_scope_helper(
+        el_id: el_id, master_id: opts[:master_id], value_name: sc_value_name,
+        value_formula: sc_value_formula, scopes: scopes)
+      data_elements << helper
+      source_eid = helper['id']
+      sc_ref = "[#{src_name}/#{sc_value_name}]"
+      formula =
+        if sc_agg
+          case sc_agg
+          when 'COUNT'  then "CountIf(IsNotNull(#{sc_ref}))"
+          when 'COUNTD' then "CountDistinct(#{sc_ref})"
+          else "#{USER_AGG_FN[sc_agg] || 'Sum'}(#{sc_ref})"
+          end
+        else
+          tmpl = SHELF_AGG_FOR_PREFIX[deriv] || 'Sum'
+          tmpl.include?('%s') ? tmpl.sub('%s', sc_ref) : "#{tmpl}(#{sc_ref})"
+        end
+      pins = scopes.map { |sc| "#{sc['name']} = #{sc['value'].inspect} ([#{sc['param']}] current value)" }
+      warnings << "'#{cap}' KPI is parameter-scoped — emitted hidden filtered helper '#{src_name}' pinning " \
+                  "#{pins.join(', ')}; re-bind the helper's filter(s) to the parameter control(s) post-publish " \
+                  'to keep the tile interactive'
+    elsif scopes.any?
+      warnings << "'#{cap}' KPI carries parameter-scope filter(s) " \
+                  "(#{scopes.map { |s| s['via'] || s['name'] }.join(', ')}) that could not be auto-applied to " \
+                  'its calc-based measure — VERIFY: the emitted value is UNSCOPED vs the source'
+    end
+  end
   # Ratio/arithmetic of MATERIALIZED measure columns (bead: KPI value fidelity):
   # `[Amount Saved (copy)]/[Cost (copy)]` → `Sum([Master/…])/Sum([Master/…])`.
   # Tried before the explicit-agg decompose because that path returns nil on
@@ -2654,16 +3805,32 @@ def build_kpi_element(z, meta, mmap, opts, warnings, data_elements = [])
       { 'kind' => 'number', 'formatString' => ',.0f' }
     end
 
+  # Scale-comma + literal-suffix source format ('#,##0,,,B' → "1B"): the d3
+  # enum can't render it (,.2s shows 'G' for 1e9), so the enum translator
+  # returned nil above. Mechanize the fidelity-recipes exact-format recipe:
+  # a scaled NUMERIC column with a fixed-decimal format + literal `suffix`
+  # carries the EXACT rendering (trailing zeros + grouping intact) and the
+  # KPI value points at it (raw column kept for anything else).
+  fmt_columns = []
+  if tab_fmt.nil? && (raw_fmt = pick_tableau_format_raw(z['formats'], master['name'])) &&
+     (sspec = parse_scaled_suffix_format(raw_fmt))
+    fmt_col_id = "#{measure_col_id}-fmt"
+    fmt_columns << { 'id' => fmt_col_id, 'name' => "#{master['name'].to_s.strip} (fmt)" }
+                   .merge(scaled_suffix_column(formula, sspec))
+    warnings << "NOTE '#{cap}' KPI: source format #{raw_fmt.inspect} is scale+suffix (not d3-expressible) — " \
+                'emitted exact-format scaled column (numeric + format suffix) and pointed the KPI value at it'
+  end
+
   element = {
     'id'      => el_id,
     'kind'    => 'kpi-chart',
     'name'    => tile_title(z, cap),
     'source'  => { 'kind' => 'table', 'elementId' => source_eid },
-    'columns' => [measure_col],
+    'columns' => [measure_col] + fmt_columns,
     # value.columnId, NOT value.id — the live API 400s with
     # "value.columnId: Invalid string: undefined" (bead 3w4d; same fix as
     # qlik-to-sigma scout-validate + refs/sigma-build-gotchas.md).
-    'value'   => { 'columnId' => measure_col_id }
+    'value'   => { 'columnId' => fmt_columns.any? ? fmt_columns.first['id'] : measure_col_id }
   }
 
   # B3 (gap ubr5.7): a Tableau "big number" BAN scorecard (Shape/Circle mark with
@@ -2727,6 +3894,10 @@ warn "loaded #{$agg_dims.size} aggregate-derived dimension(s) from #{opts[:wb_pa
 elements = []
 data_elements = [] # hidden helper elements (scatter grouped sources — bead z1d0)
 warnings = []
+# topn-probes sidecar is rebuilt from scratch each run — append-only growth
+# left resolved/stale probes lingering across builds (review-caught).
+_stale_probes = opts[:out].sub(/\.json$/, '-topn-probes.json')
+File.delete(_stale_probes) if File.exist?(_stale_probes)
 lod_chains = [] # nested-FIXED helper-element chains (beads-sigma-t67b)
 # Tiles built from .twb signals because their Tableau data export was EMPTY
 # (action-filter-gated, etc). They can't be value-diffed (no actuals), so they
@@ -2749,6 +3920,30 @@ layout.each do |dash|
       if pivot_el
         pivot_el['_worksheet'] = cap
         pivot_el['_dashboard'] = dash['dashboard']
+        # v5.1.1: intercept the top-N idiom HERE — the fast path `next`s out of
+        # the zone loop, so the CSV flow's value-filter interception never sees
+        # pivots (review-caught: the v5.1 pre-filtered-source branch was dead
+        # for every real pivot). Element filters don't prune a pivot's
+        # dimension, so the ONLY correct emission is the pre-filtered source.
+        (z['filters'] || []).reject { |f| f['is_action'] }.each do |f|
+          tp = detect_topn_plan(f, z, mmap, meta)
+          next unless tp
+          unless tp['top_n']
+            # mirror the CSV flow's honesty: a detected rank filter that can't
+            # auto-emit (>= / > op, LOD operand) must be SURFACED, not dropped
+            # (v5.1.2 review-caught)
+            warnings << "'#{cap}' top-N filter '#{tp['calc_caption']}': #{tp['note'] || 'rank operand did not translate'} — not auto-emitted; re-create by hand"
+            next
+          end
+          unless tp['keeps_true']
+            warnings << "'#{cap}' top-N filter '#{tp['calc_caption']}' keeps FALSE (anti-top-N) — not auto-emitted; re-create by hand"
+            next
+          end
+          apply_topn_prefilter!(tp, element: pivot_el, cap: cap, z: z, meta: meta,
+                                opts: opts, warnings: warnings, data_elements: data_elements,
+                                own_view_id: view_by_name[cap] && view_by_name[cap]['id'])
+          break
+        end
         elements << pivot_el
         warnings << "'#{cap}' auto-emitted as Sigma pivot-table from Tableau crosstab (rows/cols shelves) — verify dim placement"
         next
@@ -2771,6 +3966,42 @@ layout.each do |dash|
       end
       # else: fall through with the warning already logged
     end
+
+    # v5.4 ZONE-DROP HONESTY: a NAMED mark class with no Sigma equivalent
+    # (GanttBar waterfalls/candlesticks/strips, VizExtension third-party
+    # marks, …) previously fell through SIGMA_KIND['other'] → 'bar-chart' and
+    # shipped a silently WRONG chart shape. Emit a LOUD named handoff instead:
+    # the zone is not auto-built, the coverage ledger records it dropped with
+    # the mark class as root cause, and the Phase-6 tile census reports it
+    # unmatched. A BLANK mark ('other' with no mark_class) keeps the bar
+    # fallback — loudly.
+    if z['chart_kind'].to_s == 'other'
+      mc = z['mark_class'].to_s
+      if mc.empty?
+        warnings << "'#{cap}' has a blank mark class — defaulted to bar-chart; VERIFY against the source image"
+      else
+        warnings << "ZONE DROPPED / STAYS-MANUAL: '#{cap}' uses Tableau mark class '#{mc}' with no Sigma " \
+                    'chart equivalent — NOT auto-built (a bar-chart stand-in misrepresents the mark). ' \
+                    'Re-author in Sigma by hand (waterfall/candlestick: bar + running-total helper; ' \
+                    'gantt: no native equivalent; viz-extension: rebuild with a native chart). ' \
+                    'The Phase-6 tile census will report this zone unmatched.'
+        next
+      end
+    end
+
+    # MULTI-DATASOURCE ROUTING SENTRY: every chart below is sourced from the ONE
+    # master (opts[:master_id]) — correct only when its worksheet rides the SAME
+    # datasource as the master's fact. Record each worksheet's federated
+    # datasource id (from its shelf refs); after the loop, charts on a MINORITY
+    # datasource get a loud, actionable warning (field-caught: two pivots riding
+    # a different datasource were silently routed to the primary master and
+    # emitted refs to columns that don't exist there — the pre-POST ref gate
+    # stopped the run, but with no explanation of WHY or WHAT to do).
+    _zshelves = [z['rows_shelf'], z['cols_shelf']].compact.map { |s| s['raw'].to_s }.join(' ') +
+                (z['channels'] || {}).values.map { |c| c.is_a?(Hash) ? c['column'].to_s : '' }.join(' ')
+    _zds = _zshelves.scan(/\[(federated\.[a-z0-9]+)\]/).flatten
+                    .group_by(&:itself).max_by { |_k, v| v.length }&.first # (no .tally — Ruby 2.6 floor)
+    ($zone_datasource ||= {})[cap] = _zds if _zds
 
     view = view_by_name[cap]
     if view.nil?
@@ -2892,6 +4123,7 @@ layout.each do |dash|
         formula = nil
         if ws_calc
           wp = translate_window_calc(ws_calc['formula'], mmap, meta['columns_by_guid'] || {})
+          record_window_calc(z, ws_calc, wp) if wp
           if wp && wp['mode'] == 'inline'
             formula = wp['formula']
             warnings << "'#{cap}' measure '#{label}' is a window table-calc — emitted as a Sigma viz formula [#{wp['note']}]"
@@ -3089,12 +4321,100 @@ layout.each do |dash|
       window_plan = user_calc &&
                     translate_window_calc(user_calc['formula'], mmap,
                                           meta['columns_by_guid'] || {})
+      record_window_calc(z, user_calc, window_plan) if window_plan
       window_calc_name = user_calc && user_calc['name'].to_s.gsub(/^\[|\]$/, '')
+      # v5.4: a POSITIONAL window calc (INDEX()/FIRST() → bare RowNumber()±k,
+      # no comparison) as the VALUE axis is a rank HEADER mis-pick, not a
+      # measure. In the twb grammar the ranked-bar idiom serializes INDEX() as
+      # a DISCRETE instance alongside the category dim while the real
+      # bar-length measure (typically a percent-of-total share) rides a shelf
+      # as a CONTINUOUS (:qk) instance. Bar length = row position is never the
+      # source semantics when such a measure exists — re-target the value to
+      # the first continuous shelf calc that translates, and say so loudly.
+      if window_plan && window_plan['mode'] == 'inline' &&
+         window_plan['formula'].to_s =~ /\A\s*RowNumber\s*\(\s*\)\s*(?:[-+]\s*\d+)?\s*\z/i
+        cur_guid = user_calc['name'].to_s.gsub(/^\[|\]$/, '')
+        cand_guids = []
+        %w[rows_shelf cols_shelf].each do |sh|
+          (z.dig(sh, 'fields') || []).each do |ff|
+            next unless ff['role'] == 'measure' && ff['raw'].to_s =~ /:qk(?::\d+)?\]/
+            g = ff['guid'].to_s
+            cand_guids << g unless g.empty? || g == cur_guid
+          end
+          # A shelf EXPRESSION ("(inst + inst)" — the dual-instance overlay
+          # idiom) parses as one field with guid nil; recover the instance
+          # guids from the raw shelf text ([<deriv>:<guid>:qk[:n]] tokens).
+          z.dig(sh, 'raw').to_s.scan(/\[[a-z]+:([^:\[\]]+):qk(?::\d+)?\]/i) do |(g)|
+            cand_guids << g unless g.to_s.empty? || g == cur_guid
+          end
+        end
+        cand_guids.uniq.each do |g|
+          # Prefer the worksheet-calc entry — it carries ordering_field (the
+          # table-calc addressing) which the share-scope audit below needs.
+          info = (z['calculations'] || []).find { |c| c['name'].to_s.gsub(/^\[|\]$/, '') == g } ||
+                 (meta['columns_by_guid'] || {})[g]
+          cform = info.is_a?(Hash) ? info['formula'].to_s : ''
+          next if cform.strip.empty?
+          plan2 = translate_window_calc(cform, mmap, meta['columns_by_guid'] || {})
+          next unless plan2 && %w[inline inline-share].include?(plan2['mode']) &&
+                      plan2['formula'].to_s !~ /\A\s*RowNumber\s*\(\s*\)\s*(?:[-+]\s*\d+)?\s*\z/i
+          cap2 = (info['caption'] || info['name']).to_s.gsub(/^\[|\]$/, '').strip
+          cap2 = g if cap2.empty?
+          warnings << "'#{cap}' value axis: '#{meas_hdr}' (#{user_calc['formula'].to_s[0..40]}) is a positional " \
+                      "rank header, never a bar value — re-targeted to the continuous shelf measure '#{cap2}'"
+          user_calc = { 'name' => "[#{g}]", 'caption' => cap2, 'formula' => cform,
+                        'ordering_field' => (info.is_a?(Hash) ? info['ordering_field'] : nil) }
+          window_plan = plan2
+          record_window_calc(z, user_calc, window_plan)
+          window_calc_name = g
+          meas_hdr = cap2
+          meas = { 'id' => "m-#{cap2.downcase.gsub(/\W+/, '-')}", 'name' => cap2 }
+          break
+        end
+      end
       case window_plan && window_plan['mode']
       when 'inline'
         user_agg_formula = window_plan['formula']
         warnings << "'#{cap}' measure '#{meas_hdr}' is a Tableau window table-calc — auto-emitted as a Sigma " \
                     "viz formula on the yAxis: #{user_agg_formula[0..140]}  [#{window_plan['note']}]"
+      when 'inline-share'
+        # v5.1 Rule W1 (chart): non-pivot shares stay grand_total (partition
+        # modes are PIVOT-ONLY per round-3 consensus + live-probed product
+        # fact: partition scopes collapse to grand-total on chart formulas).
+        user_agg_formula =
+          if window_plan['share_kind'] == 'percent_of_total'
+            %(PercentOfTotal(#{window_plan['inner']}, "grand_total"))
+          else
+            window_plan['inner']
+          end
+        # v5.4 scope AUDIT: the table-calc addressing ("compute using <dim>",
+        # parser ordering_field) names the dim the share normalizes ACROSS;
+        # everything else in the view partitions it. grand_total is only
+        # value-correct when the addressing spans the chart's whole dim set.
+        # A partitioned share can't be expressed as a Sigma chart formula —
+        # ship grand_total but say LOUDLY that the number diverges from the
+        # source and the tile needs a grouped-helper rebuild (STAYS-MANUAL
+        # class), instead of a silently wrong export.
+        if window_plan['share_kind'] == 'percent_of_total'
+          addr = user_calc['ordering_field'].to_s
+          chart_dims = [dim_hdr, color_hdr].map { |x| x.to_s.strip }.reject(&:empty?)
+          nrmw = ->(x) { x.to_s.downcase.gsub(/[^a-z0-9]/, '') }
+          covers_all = chart_dims.size <= 1 &&
+                       (chart_dims.empty? || nrmw.call(addr) == nrmw.call(chart_dims.first))
+          if !addr.empty? && !covers_all
+            part = chart_dims.reject { |dh| nrmw.call(dh) == nrmw.call(addr) }
+            warnings << "'#{cap}' share scope MISMATCH: the source computes this share across " \
+                        "'#{addr}' only (partitioned by #{part.empty? ? 'the remaining view dims' : part.map(&:inspect).join(', ')}); " \
+                        'Sigma chart formulas support grand_total ONLY, so the emitted values will diverge ' \
+                        'from the source — STAYS-MANUAL: rebuild via a grouped helper element that computes ' \
+                        'the partitioned share (refs/fidelity-recipes.md §Ranked pivot)'
+          end
+        end
+        # downstream reads window_plan['formula'] (top-N auto-sort, dedup) —
+        # carry the emitted share so it is never nil (review-caught).
+        window_plan = window_plan.merge('mode' => 'inline', 'formula' => user_agg_formula)
+        warnings << "'#{cap}' measure '#{meas_hdr}' is a window-wrapped share — emitted " \
+                    "#{user_agg_formula[0..120]} [#{window_plan['note']}]"
       when 'two-stage'
         # Helper built below once the dim/color column objects exist.
         warnings << "'#{cap}' measure '#{meas_hdr}' is an unbounded window aggregate — auto-built as a hidden " \
@@ -3195,6 +4515,23 @@ layout.each do |dash|
                       else
                         render_agg(sigma_agg, "[Master/#{meas['name']}]")
                       end
+    # v5.4: NUMERIC aggregates over a TEXT column compile to type=error on the
+    # live workbook (Sum/Avg/Median are numeric-only). Tableau's CSV header
+    # order can hand a string column to the measure slot (the scatter
+    # y=Sum(text) class) — emit the raw column ref + a loud note instead of a
+    # dead column. Datatype from the twb column registry; unknown types pass.
+    if (tm = measure_formula.match(/\A(Sum|Avg|Median)\(\[Master\/([^\]]+)\]\)\z/))
+      tinfo = (meta['columns_by_guid'] || {}).values.find do |v|
+        v.is_a?(Hash) && v['caption'].to_s.strip.casecmp?(tm[2].strip)
+      end
+      tinfo ||= (meta['columns_by_guid'] || {})[tm[2]]
+      if tinfo.is_a?(Hash) && tinfo['datatype'].to_s == 'string'
+        warnings << "'#{cap}' measure #{tm[1]}([#{tm[2]}]) aggregates a TEXT column — emitted the raw column " \
+                    'instead (numeric aggregates over text compile to type=error); the source likely encodes ' \
+                    'this on label/shape/detail — VERIFY the tile or re-author'
+        measure_formula = "[Master/#{tm[2]}]"
+      end
+    end
 
     dim_col_obj = { 'id' => "x-#{el_id}", 'name' => dim['name'], 'formula' => dim_formula }
     if dim_trunc
@@ -3472,6 +4809,27 @@ layout.each do |dash|
     kind = SIGMA_KIND[z['chart_kind']] || 'bar-chart'
     if z['chart_kind'] == 'automatic'
       warnings << "'#{cap}' has chart_kind=automatic — defaulted to bar-chart; verify against PNG"
+    end
+    # v5.4 DONUT discriminator: Tableau has no donut mark — a donut is a Pie
+    # mark whose rows/cols shelf carries ONLY constant-aggregate placeholder
+    # instances, STACKED on a dual/blended axis (the dual-AVG(0) hack: two pies
+    # share one constant axis, the smaller one making the hole). A plain pie
+    # has no such shelf. Grammar-level test, no fixture knowledge: every shelf
+    # measure resolves to a placeholder calc AND the shelf raw carries the
+    # multi-instance '+' axis marker (`[..] + [..]`) — a SINGLE dummy-axis
+    # instance is just a vertically-positioned pie, not the donut idiom
+    # (v5.4.9 review fix).
+    if kind == 'pie-chart'
+      shelf_meas = ((z.dig('rows_shelf', 'fields') || []) + (z.dig('cols_shelf', 'fields') || []))
+                   .select { |f| f['role'] == 'measure' }
+      shelf_raw = "#{z.dig('rows_shelf', 'raw')} #{z.dig('cols_shelf', 'raw')}"
+      if shelf_meas.any? && shelf_raw =~ /\]\s*\+\s*[(\[]/ && shelf_meas.all? { |f|
+           placeholder_calc?(((meta['columns_by_guid'] || {})[f['guid'].to_s] || {})['formula'])
+         }
+        kind = 'donut-chart'
+        warnings << "'#{cap}' pie mark rides stacked constant-aggregate dummy axes (the Tableau donut idiom) — " \
+                    'emitted as donut-chart'
+      end
     end
 
     # Scatter fast path (bead z1d0, ported from the PBI builder's verified
@@ -3858,6 +5216,53 @@ layout.each do |dash|
           { 'columnId' => extra_meas_col['id'], 'type' => 'line' } :
           extra_meas_col['id'])
       end
+      # v5.4 KPI-adjacent SPARKLINE overlays: a trend tile whose measure shelf
+      # is a multi-instance EXPRESSION ("SUM(base) + SUM(conditional
+      # highlight)") plots the FULL date series with a highlighted current
+      # period. The single-field pick takes only ONE instance (the parser's
+      # expression-field guid is the LAST token — typically the conditional
+      # highlight), so the tile shipped the current period alone. Emit one y
+      # column per ADDITIONAL instance that resolves; an instance that doesn't
+      # translate is a NAMED note — the full trend must never silently reduce
+      # to a point.
+      if %w[line-chart area-chart].include?(kind) && chart_source_eid == opts[:master_id]
+        m_raw = [z.dig('rows_shelf', 'raw'), z.dig('cols_shelf', 'raw')].compact
+                .map(&:to_s).find { |r| r.include?('+') && r =~ /:qk/ }.to_s
+        toks = m_raw.scan(/\[([a-z]+):([^:\[\]]+):qk(?::\d+)?\]/i)
+        if toks.size > 1
+          nrm_sp = ->(x) { x.to_s.downcase.gsub(/[^a-z0-9]/, '') }
+          existing_f = (element['columns'] || []).map { |c| c['formula'].to_s.gsub(/\s+/, '') }
+          toks.each_with_index do |(deriv2, g2), ti|
+            info2 = (meta['columns_by_guid'] || {})[g2] || {}
+            cap2 = info2['caption'].to_s.strip
+            cap2 = g2 if cap2.empty?
+            # skip the instance the standard pick already bound
+            next if nrm_sp.call(cap2) == nrm_sp.call(meas['name']) || nrm_sp.call(cap2) == nrm_sp.call(meas_hdr)
+            f2 =
+              if (mc2 = map_column(cap2, mmap) || scope_map_column(cap2, mmap))
+                render_agg(SHELF_AGG_FOR_PREFIX[deriv2.to_s.downcase] || 'Sum', "[Master/#{mc2['name']}]")
+              elsif info2['formula'].to_s.strip != ''
+                translate_user_agg_formula(info2['formula'], mmap, meta['columns_by_guid'] || {}) ||
+                  (rl = translate_row_level_calc(info2['formula'], mmap, meta['columns_by_guid'] || {})) &&
+                  "Sum((#{rl}))"
+              end
+            if f2.nil? || f2 == false
+              warnings << "'#{cap}' trend overlay instance '#{cap2}' did not translate — the series ships " \
+                          'without this overlay (typically a parameter-bound period highlight); re-author it ' \
+                          'as a conditional measure if needed'
+              next
+            end
+            next if existing_f.include?(f2.gsub(/\s+/, ''))
+            oc = { 'id' => "y#{ti + 2}-#{el_id}", 'name' => cap2, 'formula' => f2 }
+            oc['format'] = meas_col_obj['format'] if meas_col_obj['format']
+            element['columns'] << oc
+            existing_f << f2.gsub(/\s+/, '')
+            y_column_ids << oc['id']
+            warnings << "'#{cap}' multi-instance trend shelf: emitted overlay series '#{cap2}' (#{f2[0, 80]}) — " \
+                        'the tile plots the full series, not just the highlighted period'
+          end
+        end
+      end
       element['yAxis'] = { 'columnIds' => y_column_ids }
 
       # Bar orientation (bead: bar-orientation). Tableau puts the DIMENSION on
@@ -3984,32 +5389,28 @@ layout.each do |dash|
     # (rowCount=N, rankingFunction row-number/rank) + sort the tile by it. An
     # untranslatable LOD operand is surfaced (build the helper measure first),
     # never emitted as a sort-dependent RowNumber.
-    norm_calc = ->(x) { x.to_s.gsub(/^\[|\]$/, '').strip.downcase }
-    topn_filter_plan = lambda do |f|
-      ref = [f['column_caption'], f['raw_param']].compact.map { |x| x.to_s }.join(' ')
-      calc = (z['calculations'] || []).find do |c|
-        cap_n  = norm_calc.call(c['caption'])
-        name_n = norm_calc.call(c['name'])
-        next false if c['formula'].to_s !~ /\bRANK(?:_UNIQUE)?\s*\(/i
-        (!cap_n.empty? && norm_calc.call(f['column_caption']) == cap_n) ||
-          (!name_n.empty? && ref.downcase.include?(name_n))
-      end
-      return nil unless calc
-      plan = translate_window_calc(calc['formula'], mmap, meta['columns_by_guid'] || {})
-      return nil unless plan && plan['operand_raw'] # only the top-N branch sets this
-      # The filter must KEEP the top rows (member 'true'); a keep-false would
-      # invert it. Tableau exports the keep-list in members.
-      kept = (f['members'] || []).map { |v| v.to_s.downcase }
-      plan = plan.merge('keeps_true' => kept.empty? || kept.include?('true'))
-      plan.merge('calc_caption' => calc['caption'] || calc['name'])
-    end
     value_filters.each do |f|
       fcap = f['column_caption'] || f['raw_param']
       # --- Top-N idiom interception (before master-column resolution) ---------
-      if (tp = topn_filter_plan.call(f))
+      # (detection + prefilter emission shared with the pivot fast path via
+      # detect_topn_plan / apply_topn_prefilter! — v5.1.1)
+      if (tp = detect_topn_plan(f, z, mmap, meta))
         label = tp['calc_caption']
         unless tp['keeps_true']
           warnings << "'#{cap}' top-N filter '#{label}' keeps FALSE (anti-top-N) — not auto-emitted; re-create by hand"
+          next
+        end
+        # v5.1: PIVOTS require the PRE-FILTERED SOURCE TABLE — element-level
+        # filters silently do NOT prune a pivot's dimension (round-4
+        # bisect-proven), and RANK(<window share>) operands (topn-prefilter
+        # mode) can't key an element filter at all. Members come from
+        # <tab>/topn-members.json (one probe run) or the zone's rendered CSV
+        # (Tableau already applied the rank — distinct entity values ARE the
+        # exact member set); else emit the probe SQL and stay manual.
+        if tp['top_n'] && (kind == 'pivot-table' || tp['mode'] == 'topn-prefilter')
+          apply_topn_prefilter!(tp, element: element, cap: cap, z: z, meta: meta,
+                                opts: opts, warnings: warnings, data_elements: data_elements,
+                                own_view_id: view_by_name[cap] && view_by_name[cap]['id'])
           next
         end
         unless tp['top_n'] && tp['ranked_measure']
@@ -4287,11 +5688,35 @@ end
 # the content in a background-color span (a pill/chip). Returns nil when nothing
 # visible remains. All colors are hex (var(--…) 400s). Pure/self-contained so
 # test-styled-text-body.rb can extract and eval it.
-def text_body_from_runs(runs, align: nil, bg: nil)
+# default_px (v5.4): a run WITHOUT an explicit fontsize inherits Tableau's
+# zone-sized rendering — for single-line title/banner zones the text is sized
+# to the zone box. Callers derive a px-true default from the zone's pixel
+# height (see the B4 call site) and thread it here; explicit run sizes always
+# win.
+def text_body_from_runs(runs, align: nil, bg: nil, default_px: nil)
   return nil if runs.nil? || runs.empty?
-  # Split into paragraphs on hard-break runs.
+  # Split into paragraphs on hard-break runs. A break run often CARRIES text
+  # (the parser marks any run containing newlines as break:true — "G\nD\nP"
+  # vertical letter stacks, "\nSource: …" credit lines): split that
+  # text on its newlines into successive paragraphs. Discarding it (the old
+  # behavior) silently erased every such zone — a letter-stack zone rendered
+  # as an EMPTY body and the whole element was dropped.
   lines = [[]]
-  runs.each { |r| r['break'] ? (lines << []) : (lines.last << r) }
+  runs.each do |r|
+    unless r['break']
+      lines.last << r
+      next
+    end
+    segs = r['text'].to_s.split("\n", -1)
+    if segs.all? { |s| s.strip.empty? }
+      lines << [] # pure hard-break sentinel — paragraph split only
+    else
+      segs.each_with_index do |seg, i|
+        lines << [] if i.positive?
+        lines.last << r.merge('text' => seg, 'break' => false) unless seg.empty?
+      end
+    end
+  end
   rendered = lines.map do |line|
     line.map do |r|
       raw = r['text'].to_s
@@ -4299,14 +5724,22 @@ def text_body_from_runs(runs, align: nil, bg: nil)
       next '' if raw.empty?
       next raw if raw.strip.empty? # whitespace spacer → literal (keeps run spacing)
       esc = raw.gsub('&', '&amp;').gsub('<', '&lt;').gsub('>', '&gt;')
-      # Bold markers must hug the text — markdown won't bold "** Rank**" (leading
-      # space inside the **). Keep any leading/trailing whitespace OUTSIDE.
-      if r['bold'] && (mm = esc.match(/\A(\s*)(.*?)(\s*)\z/m)) && !mm[2].empty?
-        esc = "#{mm[1]}**#{mm[2]}**#{mm[3]}"
+      # Bold/italic markers must hug the text — markdown won't style "** Rank**"
+      # (leading space inside the markers). Keep leading/trailing whitespace
+      # OUTSIDE. Sigma has no font-style/font-weight span props (whitelist:
+      # color/background-color/font-size/font-family) — bold+italic are
+      # markdown (**/*, combined ***), underline the whitelisted <u> tag.
+      marker = "#{'**' if r['bold']}#{'*' if r['italic']}"
+      if !marker.empty? && (mm = esc.match(/\A(\s*)(.*?)(\s*)\z/m)) && !mm[2].empty?
+        esc = "#{mm[1]}#{marker}#{mm[2]}#{marker.reverse}#{mm[3]}"
       end
+      esc = "<u>#{esc}</u>" if r['underline'] && !esc.strip.empty?
       styles = []
       styles << "color: #{r['color']}" if r['color']
-      styles << "font-size: #{r['font_size']}px" if r['font_size']
+      if (fs = r['font_size'] || default_px)
+        styles << "font-size: #{fs}px"
+      end
+      styles << "font-family: #{r['font']}" if r['font']
       styles.empty? ? esc : %(<span style="#{styles.join('; ')}">#{esc}</span>)
     end.join
   end
@@ -4407,6 +5840,10 @@ unless opts[:pages_mode] == :worksheet
     end
     (dash['zones'] || []).each do |z|
       next unless %w[text title].include?(z['kind']) && z['text_runs']
+      # v5.0-P2: a blank-text DIVIDER zone becomes a native divider in the
+      # layout (plan_node) — emitting its whitespace body here too would leave
+      # an unplaced text element that lands in a stray bottom band.
+      next if ZoneCensus.divider_zone?(z, dash['canvas_px'])
       full_text = z['text_runs'].map { |r| r['text'] }.join
       plain = norm_label.call(full_text)
       is_short_label = full_text.split.length <= 5 && z['text_runs'].none? { |r| r['break'] }
@@ -4415,8 +5852,23 @@ unless opts[:pages_mode] == :worksheet
                     'labels a KPI card — dropped (the Sigma kpi-chart renders its own title)'
         next
       end
+      # v5.4 px-true titles, corrected v5.4.9: a text run with NO explicit
+      # fontsize renders at Tableau's workbook default (~9pt ≈ 12px) REGARDLESS
+      # of zone height — Tableau has no zone-fit text scaling, so the earlier
+      # height-derived size (0.55 × zone px) 4x-oversized any default-size
+      # label stretched by a fit-height layout container. Emit the flat default
+      # so Sigma's larger text default doesn't inflate single-line titles.
+      # Explicit run sizes always win; multi-line zones are left to Sigma
+      # defaults.
+      default_px = nil
+      if z['text_runs'].none? { |r| r['font_size'] } && z['text_runs'].none? { |r| r['break'] }
+        default_px = 12
+        warnings << "dashboard '#{dash['dashboard']}' text zone #{z['id']}: no explicit run sizes — " \
+                    "emitted Tableau's default 12px (~9pt; px-true title)"
+      end
       body = text_body_from_runs(z['text_runs'], align: z['text_align'],
-                                 bg: (z['is_pill'] ? z['fill_color'] : nil))
+                                 bg: (z['is_pill'] ? z['fill_color'] : nil),
+                                 default_px: default_px)
       next if body.nil?
       if z['text_runs'].any? { |r| r['text'].to_s.include?('<[') }
         warnings << "dashboard '#{dash['dashboard']}' text zone #{z['id']}: dynamic Tableau token(s) " \
@@ -4430,6 +5882,156 @@ unless opts[:pages_mode] == :worksheet
     end
   end
 end
+# ---- v5.0: image (bitmap) zones → Sigma image elements ---------------------
+# Tableau image zones ship their bitmap INSIDE the .twbx (`image_path` is the
+# exact zip path, e.g. 'Image/title art.png'). Extract each to <tab>/assets/
+# and emit {kind:"image", url:"data:image/…;base64,…"} (data URIs live-verified
+# — refs/workbook-layout.md). Zones with a web-hosted `image_file_url` use the
+# URL directly. Full-canvas backgrounds (is_background) are page-level design,
+# not grid tiles: extracted + recorded in <tab>/image-assets.json for the
+# background/composite step, never emitted as elements (the layout builder
+# skips them too). Same per-dashboard bucket as styled text so page routing
+# and the final merge treat them identically.
+image_asset_records = []
+unless opts[:pages_mode] == :worksheet
+  twbx = Dir.glob(File.join(opts[:tab], '*.twbx')).first
+  assets_dir = File.join(opts[:tab], 'assets')
+  extract_asset = lambda do |zip_path|
+    return nil unless twbx && zip_path
+    dest = File.join(assets_dir, File.basename(zip_path))
+    unless File.exist?(dest)
+      data, st = Open3.capture2('unzip', '-p', twbx, zip_path)
+      return nil unless st.success? && !data.empty?
+      require 'fileutils'
+      FileUtils.mkdir_p(assets_dir)
+      File.binwrite(dest, data)
+    end
+    dest
+  end
+  mime_for = lambda do |path|
+    case File.extname(path.to_s).downcase
+    when '.jpg', '.jpeg' then 'image/jpeg'
+    when '.gif'          then 'image/gif'
+    when '.svg'          then 'image/svg+xml'
+    else 'image/png'
+    end
+  end
+  layout.each do |dash|
+    (dash['zones'] || []).each do |z|
+      next unless z['kind'] == 'image'
+      asset = extract_asset.call(z['image_path'])
+      record = { 'dashboard' => dash['dashboard'], 'zone_id' => z['id'],
+                 'image_path' => z['image_path'], 'asset' => asset,
+                 'is_background' => !!z['is_background'],
+                 'is_scaled' => z['is_scaled'], 'is_centered' => z['is_centered'] }
+      record['image_file_url'] = z['image_file_url'] if z['image_file_url']
+      # v5.0 pixel classification (lib/png_classify): a bitmap whose pixels
+      # read as a ROUNDED CARD (transparent corners + near-uniform interior)
+      # is Tableau's faked-container idiom — the faithful Sigma target is a
+      # styled container (style.backgroundColor + borderRadius), not a
+      # stretched image. v1 records the verdict + extracted fill/radius and
+      # NOTEs it for the RCF loop; fail-open (decode failure → 'art' → the
+      # data-URI element path, never worse than today).
+      if asset
+        cls = PngClassify.classify(asset, zone_w_pct: z['w_pct'], zone_h_pct: z['h_pct'],
+                                          canvas_w: dash.dig('canvas_px', 'w'),
+                                          canvas_h: dash.dig('canvas_px', 'h'))
+        if cls.is_a?(Hash)
+          record['pixel_kind'] = cls['kind']
+          if cls['kind'] == 'rounded_card'
+            record['card_fill']      = cls['fill']
+            record['card_radius_px'] = cls['radius_px']
+            warnings << "NOTE dashboard '#{dash['dashboard']}' image zone #{z['id']} " \
+                        "(#{File.basename(asset)}) is a ROUNDED-CARD bitmap (fill #{cls['fill']}, " \
+                        "r=#{cls['radius_px']}px) — prefer a styled container " \
+                        "(backgroundColor + borderRadius) over the image element (image-assets.json)"
+          end
+        end
+      end
+      image_asset_records << record
+      if z['is_background']
+        warnings << "dashboard '#{dash['dashboard']}' image zone #{z['id']} is a FULL-CANVAS " \
+                    "background (#{z['image_path']}) — extracted to #{asset || 'UNEXTRACTED'}; " \
+                    'apply as page background / composite, not a grid element (image-assets.json)'
+        next
+      end
+      url = z['image_file_url']
+      if url.nil? && asset
+        url = "data:#{mime_for.call(asset)};base64,#{Base64.strict_encode64(File.binread(asset))}"
+      end
+      if url.nil?
+        warnings << "dashboard '#{dash['dashboard']}' image zone #{z['id']} " \
+                    "(#{z['image_path'].inspect}) — asset not extractable (no .twbx?); NAMED RESIDUE"
+        next
+      end
+      styled_text_by_dash[dash['dashboard']] <<
+        { 'id' => "img-#{z['id']}", 'kind' => 'image', 'url' => url, '_dashboard' => dash['dashboard'] }
+    end
+  end
+  if image_asset_records.any?
+    File.write(File.join(opts[:tab], 'image-assets.json'), JSON.pretty_generate(image_asset_records))
+    warn "image zones: #{image_asset_records.size} found, " \
+         "#{image_asset_records.count { |r| r['is_background'] }} background(s) — image-assets.json written"
+  end
+end
+
+# ---- v5.0-P2: dashboard-object BUTTONS -------------------------------------
+# Corpus census: navigate (dashboard→dashboard, i.e. page→page in Sigma),
+# export-image/pdf (redundant — Sigma has a built-in export menu), toggle
+# (show/hide container — no spec equivalent). NAVIGATE buttons are emitted;
+# the rest become named residue (spec_api_limit_entries).
+#
+# Emission shape: Sigma's native kind:button is spec-valid but WORKSPACE-GATED
+# (live-probed 2026-07-11: verify 200, PUT 400 "`button` elements are not
+# enabled for this workspace") — so the default is the proven text-pill
+# fallback (markdown link + pill background), with real buttons behind
+# SIGMA_BUTTON_ELEMENTS=on for workspaces that have the flag. Both carry the
+# machine-recognizable placeholder URL https://nav.invalid/#page=<name>;
+# put-layout.rb rewrites it to the live workbook page URL post-publish
+# (the workbook URL doesn't exist until the POST returns).
+nav_button_records = []
+unless opts[:pages_mode] == :worksheet
+  layout.each do |dash|
+    (dash['zones'] || []).each do |z|
+      next unless z['kind'] == 'dashboard-object' && z['button_intent'] == 'navigate'
+      unless z['button_nav_target'] && z['button_nav_target_class'] == 'dashboard'
+        warnings << "dashboard '#{dash['dashboard']}' button zone #{z['id']} navigates to a " \
+                    "#{z['button_nav_target_class'] || 'unresolved'} target — no Sigma page equivalent (named residue)"
+        next
+      end
+      label = z['button_caption'] ||
+              z['button_tooltip'].to_s[/\Aclick to (?:navigate to|open) (?:the )?(.+)\z/i, 1] ||
+              z['button_nav_target']
+      url = "https://nav.invalid/#page=#{ERB::Util.url_encode(z['button_nav_target'])}"
+      el =
+        if ENV['SIGMA_BUTTON_ELEMENTS'] == 'on'
+          e = { 'id' => "btn-#{z['id']}", 'kind' => 'button', 'text' => label,
+                'appearance' => 'filled', 'align' => 'center', 'size' => 'small',
+                'actions' => [{ 'trigger' => 'on-click', 'effects' => [{
+                  'effect' => 'open-url', 'openTarget' => '_self', 'url' => url }] }] }
+          e['fillColor'] = z['fill_color'][0, 7] if z['fill_color']
+          e['fontColor'] = z['button_font_color'] if z['button_font_color']
+          e
+        else
+          # Text-pill fallback (proven live): bold markdown link, pill bg.
+          body = "[**#{label}**](#{url})"
+          body = %(<span style="background-color: #{z['fill_color'][0, 7]}">#{body}</span>) if z['fill_color']
+          { 'id' => "btn-#{z['id']}", 'kind' => 'text',
+            'body' => %(<p style="text-align: center">#{body}</p>), 'verticalAlign' => 'middle' }
+        end
+      el['_dashboard'] = dash['dashboard']
+      styled_text_by_dash[dash['dashboard']] << el
+      nav_button_records << { 'element_id' => "btn-#{z['id']}", 'dashboard' => dash['dashboard'],
+                              'target_page_name' => z['button_nav_target'], 'label' => label }
+    end
+  end
+  if nav_button_records.any?
+    side = opts[:out].sub(/\.json$/, '-nav-buttons.json')
+    File.write(side, JSON.pretty_generate(nav_button_records))
+    warn "wrote #{side} (#{nav_button_records.size} navigation button(s) — put-layout.rb rewrites the placeholder URLs post-publish)"
+  end
+end
+
 styled_text_all = styled_text_by_dash.values.flatten(1)
 
 # ---- Control targeting: intended-scope closure ------------------------------
@@ -4514,12 +6116,14 @@ def control_display_for(layout, cap, norm)
   nil
 end
 
-# Map a Tableau control_display to a Sigma controlType for a discrete/list param.
-# compact → list (dropdown); type_in → text; otherwise segmented (button row).
+# Map a Tableau control_display (zone `mode`) to a Sigma controlType for a
+# discrete/list signal. Full Tableau zone-mode vocabulary (v5.0 matrix):
+# compact/checkdropdown → list (dropdown), checklist → list (multi),
+# radiolist → segmented, type_in/pattern → text, otherwise segmented.
 def sigma_control_type(disp)
   case disp
-  when 'compact' then 'list'
-  when 'type_in' then 'text'
+  when 'compact', 'checkdropdown', 'checklist' then 'list'
+  when 'type_in', 'pattern' then 'text'
   else 'segmented'
   end
 end
@@ -4611,14 +6215,25 @@ unless opts[:no_auto_controls]   # default-on: never miss a .twb parameter/filte
       warnings << "parameter '#{cap}' is not referenced by any worksheet calc — emitting it anyway (likely a filter/period picker); complete its filter wiring per controls-coverage.json"
     end
     slug = cap.downcase.gsub(/\W+/, '-').sub(/-$/, '')
+    # Base spec. includeNulls is added PER BRANCH — the OpenAPI carries it on
+    # only 7 controlTypes (text/number/number-range/date/date-range/slider/
+    # range-slider); stray on list/segmented/switch it's out-of-schema.
     spec = {
       'id'        => "el-param-#{slug}",
       'kind'      => 'control',
       'controlId' => "ctl-param-#{slug}",
-      'name'      => cap,
-      'includeNulls' => 'when-no-value-is-selected'
+      'name'      => cap
     }
-    if p['param_domain'] == 'list'
+    if p['param_domain'] == 'list' &&
+       sigma_control_type(control_display_for(layout, cap, norm_cap)) == 'text'
+      # type_in zone mode: a free-text input has NO source/selectionMode in the
+      # schema (mode is REQUIRED); attaching the manual-source block made the
+      # whole element off-schema (live leak class).
+      spec['controlType'] = 'text'
+      spec['mode'] = 'equals'
+      spec['value'] = p['default_value']
+      spec['includeNulls'] = 'when-no-value-is-selected'
+    elsif p['param_domain'] == 'list'
       # E1: dropdown vs segmented from the Tableau control display mode; default
       # segmented (button row) when Tableau declared no explicit mode.
       spec['controlType']   = sigma_control_type(control_display_for(layout, cap, norm_cap))
@@ -4652,42 +6267,55 @@ unless opts[:no_auto_controls]   # default-on: never miss a .twb parameter/filte
       # `value` on readback and (b) makes the translated Switch/If measure-picker
       # compile to type "error" — a scalar case-compare against a multi-select
       # ARRAY. Pin single so the scalar default applies and the Switch resolves.
-      # (Verified live 2026-07-05: without this the picker ships dead.)
-      spec['selectionMode'] = 'single'
+      # (Verified live 2026-07-05: without this the picker ships dead. The
+      # OpenAPI enum says multiple-only — live behavior wins; do not "fix".
+      # segmented is inherently single: no selectionMode in its schema.)
+      spec['selectionMode'] = 'single' if spec['controlType'] == 'list'
       # Canonicalise so the default matches a control option value (0.→0).
       spec['value'] = canonical_switch_value(p['default_value'])
     elsif p['param_domain'] == 'range' && %w[integer real].include?(p['datatype'])
       # Numeric range parameter → Sigma `number-range` control (discovered by
       # gap-scout 2026-05-20, beads-sigma-ebw). Two-handle slider; the single-
       # value Tableau parameter is rendered as a range with handles initially
-      # collapsed to the default. `mode` and `values` don't round-trip on
-      # readback but the workbook renders correctly (known Sigma quirk).
+      # collapsed to the default. Bounds are the schema's flat min/max (the old
+      # mode:'between' + values:[…] pair was out-of-schema and never
+      # round-tripped on readback).
       spec['controlType'] = 'number-range'
-      spec['mode']        = 'between'
       min = p['min'] ? (p['datatype'] == 'real' ? p['min'].to_f : p['min'].to_i) : nil
       max = p['max'] ? (p['datatype'] == 'real' ? p['max'].to_f : p['max'].to_i) : nil
-      spec['values']      = [min, max].compact if min && max
+      spec['min'] = min if min
+      spec['max'] = max if max
+      spec['includeNulls'] = 'when-no-value-is-selected'
       warnings << "parameter '#{cap}' is a numeric range — emitted as number-range control (Sigma 2-handle slider; Tableau's single-handle UX needs manual post-publish tweak)"
     elsif p['param_domain'] == 'range' && %w[date datetime].include?(p['datatype'])
       spec['controlType'] = 'date-range'
       spec['mode'] = 'between'
+      spec['includeNulls'] = 'when-no-value-is-selected'
     elsif p['datatype'] == 'boolean'
-      # Boolean parameter → Sigma switch (on/off toggle). Default from the raw value.
+      # Boolean parameter → Sigma switch (on/off toggle). Default from the raw
+      # value. mode is REQUIRED on switch (True/False vs True/All).
       spec['controlType'] = 'switch'
+      spec['mode']  = 'True/False'
       spec['value'] = %w[true 1].include?(p['default_value'].to_s.downcase.strip)
     elsif %w[date datetime].include?(p['datatype'])
       # Single-value date parameter (not a range) → Sigma `date` control.
+      # mode is REQUIRED on date (=|>=|<=).
       spec['controlType'] = 'date'
+      spec['mode']  = '='
       spec['value'] = p['default_value']
+      spec['includeNulls'] = 'when-no-value-is-selected'
     elsif %w[integer real].include?(p['datatype'])
       # Single-value numeric parameter (not a range) → Sigma `number` control.
       spec['controlType'] = 'number'
       spec['mode']  = '='
       spec['value'] = p['datatype'] == 'real' ? p['default_value'].to_f : p['default_value'].to_i
+      spec['includeNulls'] = 'when-no-value-is-selected'
     else
-      # Generic fallback — text input
+      # Generic fallback — text input. mode is REQUIRED on text.
       spec['controlType'] = 'text'
+      spec['mode']  = 'equals'
       spec['value'] = p['default_value']
+      spec['includeNulls'] = 'when-no-value-is-selected'
     end
     # TASK C (#259): data-scoping wiring. If this parameter drives a boolean
     # filter calc "[Col] = [Param]" whose [Col] resolves to a master column,
@@ -4778,9 +6406,9 @@ $param_switches.each do |sw|
     # Measure-pickers are single-valued (see the param-control path above): a
     # `list` control defaults to multiple, which drops the scalar `value` and
     # errors the Switch (scalar vs array). Pin single. Verified live 2026-07-05.
+    # (No includeNulls — not in the list/segmented schema.)
     'selectionMode' => 'single',
-    'value'       => values.first,
-    'includeNulls' => 'when-no-value-is-selected'
+    'value'       => values.first
   }
   control_scope_records << {
     'controlId' => sw['control_id'], 'name' => pcap, 'mechanism' => 'formula',
@@ -4862,8 +6490,7 @@ unless opts[:no_auto_controls]   # default-on: never miss a .twb parameter/filte
       'id'           => "el-ctl-#{slug}",
       'kind'         => 'control',
       'controlId'    => "ctl-#{slug}",
-      'name'         => cap.strip,
-      'includeNulls' => 'when-no-value-is-selected'
+      'name'         => cap.strip
     }
     # Quick-filter zones apply per-dashboard: place the control only on the
     # dashboard pages whose zone tree shows it (page-per-dashboard mode);
@@ -4879,17 +6506,28 @@ unless opts[:no_auto_controls]   # default-on: never miss a .twb parameter/filte
       'unreachable' => unreachable, 'status' => 'emitted'
     }
     case f['kind']
-    when 'list'
-      spec['controlType']   = 'list'
-      spec['mode']          = 'include'
-      spec['selectionMode'] = 'multiple'
-      spec['values']        = []  # default to all; user adjusts in UI
+    when 'list', 'list+condition'
+      # radiolist zones → segmented (single-select); everything else a
+      # column-backed multi-select list. list+condition keeps the member list
+      # control; the CONDITION itself is not a control — surface it.
+      disp = control_display_for(layout, cap, norm_cap)
+      spec['controlType'] = disp == 'radiolist' ? 'segmented' : 'list'
+      if spec['controlType'] == 'list'
+        spec['mode']          = 'include'
+        spec['selectionMode'] = 'multiple'
+        spec['values']        = []  # default to all; user adjusts in UI
+      end
       spec['source'] = {
         'kind'     => 'source',
         'source'   => { 'kind' => 'table', 'elementId' => opts[:master_id] },
         'columnId' => m['id']
       }
       spec['filters'] = targets
+      if f['kind'] == 'list+condition'
+        warnings << "quick filter '#{cap}' carries a CONDITION beyond its member list " \
+                    "(#{Array(f['condition_expressions']).join('; ')[0, 120]}) — the member control is emitted; " \
+                    'apply the condition as an element filter or accept the wider domain'
+      end
     when 'relative-date'
       # Tableau relative-date → ROLLING Sigma date-range control (same rolling
       # mode vocabulary as an element filter; shapes verified in sigma-workbooks
@@ -4921,8 +6559,39 @@ unless opts[:no_auto_controls]   # default-on: never miss a .twb parameter/filte
         end
       end
     when 'number-range'
-      spec['controlType'] = 'range-slider'
+      if %w[date datetime].include?(f['datatype'].to_s)
+        # Quantitative filter on a DATE column: a range-slider is the wrong
+        # widget (renders epoch numbers) — date-range with the parsed bounds.
+        spec['controlType'] = 'date-range'
+        spec['mode'] = 'between'
+        spec['startDate'] = f['min'] if f['min']
+        spec['endDate']   = f['max'] if f['max']
+      elsif f['min'] && f['max']
+        spec['controlType'] = 'range-slider'
+        # Bounds are load-bearing: a bare range-slider renders 0..0 and filters
+        # everything out. low/high = the slider track, min/max = selected band.
+        spec['low']  = f['min']
+        spec['high'] = f['max']
+        spec['min']  = f['min']
+        spec['max']  = f['max']
+      else
+        # single-bound quantitative filter (at-least / at-most) → one-handle slider
+        spec['controlType'] = 'slider'
+        spec['mode']  = f['min'] ? '>=' : '<='
+        spec['value'] = f['min'] || f['max']
+      end
+      spec['includeNulls'] = 'when-no-value-is-selected'
       spec['filters'] = targets
+    else
+      # Unknown filter kind: NEVER append a controlType-less spec (controlType
+      # is REQUIRED on every schema branch — the old fallthrough shipped an
+      # invalid element that killed the whole POST). Downgrade the scope record
+      # just pushed above and skip emission.
+      rec = control_scope_records.reverse.find { |r| r['controlId'] == spec['controlId'] }
+      rec['status'] = 'needs-wiring' if rec
+      warnings << "shared filter '#{cap}' kind=#{f['kind'].inspect} has no controlType mapping — " \
+                  'NOT emitted (needs-wiring in controls-coverage); wire via --controls'
+      next
     end
     auto_controls << spec
   end
@@ -4990,6 +6659,41 @@ if opts[:controls]
         'kind' => 'manual', 'valueType' => 'text', 'values' => c['values'] || [], 'labels' => []
       }
       spec['value'] = c['value']
+    # v5.0: every remaining schema type gets its REQUIRED fields — the old
+    # passthrough shipped switch/checkbox/text/number/date/slider without
+    # `mode` (required on each) and they 400'd the POST.
+    when 'switch', 'checkbox'
+      spec['mode']  = c['mode'] || 'True/False'
+      spec['value'] = c['value'] unless c['value'].nil?
+    when 'text'
+      spec['mode']  = c['mode'] || 'equals'
+      spec['value'] = c['value'] if c['value']
+    when 'text-area'
+      spec['value'] = c['value'] if c['value']
+    when 'number'
+      spec['mode']  = c['mode'] || '='
+      spec['value'] = c['value'] if c['value']
+    when 'date'
+      spec['mode']  = c['mode'] || '='
+      spec['value'] = c['value'] if c['value']
+    when 'number-range'
+      spec['min'] = c['min'] if c['min']
+      spec['max'] = c['max'] if c['max']
+    when 'slider'
+      spec['mode']  = c['mode'] || '<='
+      %w[low high step value].each { |k| spec[k] = c[k] if c[k] }
+    when 'range-slider'
+      %w[low high step min max].each { |k| spec[k] = c[k] if c[k] }
+    when 'top-n'
+      # no extra spec fields exist in the OpenAPI — wiring (filters) only
+    when 'hierarchy'
+      spec['mode']   = c['mode'] || 'include'
+      spec['values'] = c['values'] || []
+      spec['source'] = c['source'] if c['source']
+    end
+    # includeNulls exists on only 7 types — strip it where out-of-schema.
+    unless %w[text number number-range date date-range slider range-slider].include?(spec['controlType'])
+      spec.delete('includeNulls')
     end
     extras << spec
   end
@@ -5038,6 +6742,360 @@ begin
 rescue => e
   warnings << "control-coverage reconciliation error: #{e.message}"
 end
+
+# ---- v5.1 leaked-ref guard (fail-closed) ------------------------------------
+# A column ref whose inner name contains formula punctuation or a Tableau pill
+# qualifier ([Master/-WINDOW_MAX(…)], [Master/Rank N (copy)_…:ok:9]) is ALWAYS
+# leaked formula text / an internal sort pill — it can never resolve and
+# hard-fails the POST ("Dependency not found"). Never ship one: drop the
+# column loudly (round-4 D3/D4 class, the exit-4 trigger).
+elements.each do |el|
+  bad = (el['columns'] || []).select do |c|
+    c['formula'].to_s.scan(/\[[^\]\/]+\/([^\]]+)\]/).flatten.any? do |inner|
+      # FUNCTION-CALL shapes and pill qualifiers only. Legit captions carry
+      # parens too ('GDP (current US$)', 'Cost (copy)_123' — real resolvable
+      # DM columns in the corpus; review-caught: a blanket paren test dropped
+      # them), so match aggregate/window CALLS, not punctuation. The match is
+      # CASE-SENSITIVE: leaked twb formulas are canonically UPPERCASE, while
+      # captions like 'Total (USD)' / 'Count (copy)' / 'Max (F)' are mixed
+      # case — /i dropped all of those (v5.1.2 review-caught).
+      inner =~ /\b(?:WINDOW_[A-Z]+|RUNNING_[A-Z]+|TOTAL|RANK[A-Z_]*|SUM|AVG|MIN|MAX|MEDIAN|COUNTD?|ZN|LOOKUP|INDEX)\s*\(/ ||
+        # a NESTED bracket inside the inner name is always a leaked formula
+        # ref — Tableau captions cannot legally contain [ or ] — and catches
+        # lowercase author-typed leaks the case-sensitive branch would miss
+        inner =~ /[\[\]]/ ||
+        inner =~ /:(?:ok|qk)\b/
+    end
+  end
+  next if bad.empty?
+  bad.each do |c|
+    el['columns'].delete(c)
+    Array(el.dig('yAxis', 'columnIds')).delete(c['id'])
+    Array(el['values']).delete(c['id'])
+    # Clean every other structure that references the dropped id — a dangling
+    # sort.by / conditionalFormats columnId fails the PUT just as hard.
+    %w[rowsBy columnsBy].each do |ax|
+      Array(el[ax]).each { |e2| e2.delete('sort') if e2.is_a?(Hash) && e2.dig('sort', 'by') == c['id'] }
+      el[ax] = Array(el[ax]).reject { |e2| (e2.is_a?(Hash) ? e2['id'] : e2) == c['id'] } if el[ax]
+    end
+    Array(el['conditionalFormats']).each { |cf| Array(cf['columnIds']).delete(c['id']) }
+    el['conditionalFormats'] = Array(el['conditionalFormats']).reject { |cf| Array(cf['columnIds']).empty? } if el['conditionalFormats']
+    # chart-axis and table-grouping sorts can also point at the dropped id
+    # (the top-N path sets them — v5.1.2 review-caught)
+    el['xAxis'].delete('sort') if el['xAxis'].is_a?(Hash) && el.dig('xAxis', 'sort', 'by') == c['id']
+    Array(el['groupings']).each do |g|
+      next unless g.is_a?(Hash) && g['sort'].is_a?(Array)
+      g['sort'] = g['sort'].reject { |s| s.is_a?(Hash) && s['columnId'] == c['id'] }
+      g.delete('sort') if g['sort'].empty?
+    end
+    warnings << "FAIL-CLOSED '#{el['name']}': column '#{c['name']}' referenced leaked formula text/pill " \
+                "(#{c['formula'].to_s[0, 90]}) — DROPPED (would hard-fail the POST); translate or re-author it"
+  end
+end
+
+# ---- Multi-DS routing (v5.0) ------------------------------------------------
+# Three rounds' #1 recurring gap, mechanized. multi-ds-plan.json (gap-scan)
+# maps each worksheet to its owning federated datasource; every chart used to
+# be hardwired to the ONE master (built from the dominant datasource), so
+# outlier-datasource charts showed the wrong numbers and a WARN wall told a
+# human to re-source them. Now: for each outlier worksheet whose element is
+# MECHANICAL (source == the master, formulas plain [Master/…]), lazily emit a
+# hidden sub-master per outlier datasource ("Master (<caption>)", DM-element
+# placeholder resolved by the orchestrator like the grain helpers) and repoint
+# the element + rewrite its formulas in lock-step. Charts needing window/LOD/
+# two-stage helpers keep the WARN (v1 scope cut: the translators emit literal
+# [Master/…] internally — threading a source through them is the blast-radius
+# trap).
+# Recursively gsub a string pattern across every String in a JSON-shaped
+# structure IN PLACE. Structural (never a JSON-text splice), so captions
+# containing quotes/backslashes can't corrupt anything.
+def deep_gsub!(node, from, to)
+  case node
+  when Hash  then node.each { |k, v| node[k] = deep_gsub!(v, from, to) }
+  when Array then node.map! { |v| deep_gsub!(v, from, to) }
+  when String then node = node.gsub(from, to)
+  end
+  node
+end
+
+def route_multi_ds!(elements, data_elements, plan, master_id, warnings, controls: [], id2name: {}, cbg: {}, mmap: {})
+  routed = {}
+  return routed unless plan && plan['datasources'].is_a?(Array) && plan['datasources'].size > 1
+  norm = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]/, '') }
+  dominant = plan['datasources'].max_by { |d| (d['worksheets'] || []).size }
+  ws_to_ds = {}
+  plan['datasources'].each do |d|
+    next if d == dominant
+    (d['worksheets'] || []).each { |w| ws_to_ds[norm.call(w)] = d }
+  end
+  submasters = {} # ds caption → sub-master element (lazy)
+  # v5.1.1: hidden helpers tagged with _worksheet (top-N prefilter sources)
+  # ride the master DIRECTLY while their chart sources the helper — the chart
+  # fails the mechanical guard below, so the HELPER must be routed in its
+  # place (review-caught: the helper kept [Master/ refs + the wrong master on
+  # outlier-datasource pivots → Dependency-not-found at POST).
+  (elements + data_elements.select { |d| d['_worksheet'] }).each do |el|
+    ds = ws_to_ds[norm.call(el['_worksheet'])]
+    next unless ds
+    # mechanical-only guard: source must be exactly the shared master
+    next unless el['source'] == { 'kind' => 'table', 'elementId' => master_id }
+    caption = ds['caption'].to_s
+    # The caption rides inside Sigma formula refs ([Master (X)/Col]) — strip
+    # the characters that would break the ref grammar ([ ] /) or read as
+    # escapes. The PLACEHOLDER keeps the raw caption (the orchestrator's
+    # resolver matches normalized, so punctuation is irrelevant there).
+    safe_cap = caption.gsub(%r{[\[\]/"\\]}, ' ').squeeze(' ').strip
+    sm = submasters[caption]
+    if sm.nil?
+      base_id = "submaster-#{norm.call(caption)[0, 24]}"
+      # 24-char truncation can collide across long sibling captions — suffix
+      # a counter so ids stay globally unique.
+      sid = base_id
+      n = 1
+      while submasters.values.any? { |s| s['id'] == sid }
+        n += 1
+        sid = "#{base_id}-#{n}"
+      end
+      sm = submasters[caption] = {
+        'id' => sid, 'kind' => 'table',
+        'name' => "Master (#{safe_cap})", 'visibleAsSource' => false,
+        'source' => { 'kind' => 'data-model', 'elementId' => "__DM_ELEMENT__:#{caption}" },
+        'columns' => []
+      }
+    end
+    # v5.4 DERIVED CALCS on the sub-master: a routed chart's [Master/<name>]
+    # ref can name a Tableau CALC (not a physical column of the outlier
+    # datasource) — the old blind passthrough emitted [<caption>/<calc name>],
+    # a ref to a DM column that does not exist, and the POST hard-failed.
+    # Resolve each ref against the workbook calc registry (columns_by_guid —
+    # an entry with a formula IS a calc). Row-level/dim calcs become derived
+    # COLUMNS on the sub-master (translated, source-relative refs); aggregated
+    # calcs (ratio-of-sums) cannot live at row grain — their decomposition is
+    # spliced into the CHART formulas at viz level and the base aggregates'
+    # refs fall through to passthroughs. Untranslatable calcs get NO column
+    # and a loud STAYS-MANUAL (the pre-POST ref gate names the broken ref) —
+    # never a silently broken passthrough.
+    nrmv = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]/, '') }
+    calc_of = lambda do |cn|
+      k = nrmv.call(cn)
+      next nil if k.empty?
+      hits = cbg.values.select do |v|
+        v.is_a?(Hash) && !v['formula'].to_s.strip.empty? && nrmv.call(v['caption']) == k
+      end
+      hits.map { |v| v['formula'] }.uniq.size == 1 ? hits.first : nil
+    end
+    manual_calcs = []
+    splice_strings = lambda do |node, wrap_re, bare, repl|
+      case node
+      when Hash   then node.each { |k, v| node[k] = splice_strings.call(v, wrap_re, bare, repl) }
+      when Array  then node.map! { |v| splice_strings.call(v, wrap_re, bare, repl) }
+      when String then node.gsub(wrap_re, repl).gsub(bare, repl)
+      else node
+      end
+    end
+    JSON.generate(el).scan(%r{\[Master/([^\]/]+)\]}).flatten.uniq.each do |cn|
+      calc = calc_of.call(cn)
+      next unless calc
+      next if sm['columns'].any? { |c| c['name'] == cn }
+      f = calc['formula']
+      agg_t = translate_user_agg_formula(f, mmap, cbg)
+      row_t = agg_t ? nil : (translate_row_level_calc(f, mmap, cbg) || translate_dim_calc(f, mmap, cbg))
+      if agg_t
+        agg_wrap = /(?:Sum|Avg|Min|Max|Median|CountDistinct|Count)\(\[Master\/#{Regexp.escape(cn)}\]\)/
+        if data_elements.include?(el)
+          # el is a row-grain HELPER (top-N prefilter source etc.) — an
+          # aggregate cannot live as one of its base-grain columns. Drop the
+          # calc's passthrough column, expose the decomposition's BASE columns
+          # instead, and splice the aggregate into every CONSUMER formula that
+          # wraps or references the dropped column (consumers reference the
+          # helper by NAME, evaluated per viz cell — the correct grain).
+          el['columns'] = (el['columns'] || []).reject do |c|
+            c['name'] == cn && c['formula'].to_s.include?("[Master/#{cn}]")
+          end
+          agg_t.scan(%r{\[Master/([^\]/]+)\]}).flatten.uniq.each do |b|
+            next if (el['columns'] || []).any? { |c| c['name'] == b }
+            el['columns'] << { 'id' => "#{el['id']}-agg#{el['columns'].size}", 'name' => b,
+                               'formula' => "[Master/#{b}]" }
+          end
+          agg_c = agg_t.gsub('[Master/', "[#{el['name']}/")
+          wrap_c = /(?:Sum|Avg|Min|Max|Median|CountDistinct|Count)\(\[#{Regexp.escape(el['name'])}\/#{Regexp.escape(cn)}\]\)/
+          elements.each do |cons|
+            next unless cons.dig('source', 'elementId') == el['id']
+            splice_strings.call(cons, wrap_c, "[#{el['name']}/#{cn}]", agg_c)
+          end
+          warnings << "NOTE multi-DS: '#{el['_worksheet']}' calc '#{cn}' is an aggregated calc — decomposed " \
+                      "into its consumer chart formulas as #{agg_c[0, 110]} (helper exposes the base columns)"
+        else
+          # el is a CHART: splice the decomposition at viz level; its
+          # [Master/…] base refs are prefix-rewritten with everything below.
+          splice_strings.call(el, agg_wrap, "[Master/#{cn}]", agg_t)
+          warnings << "NOTE multi-DS: '#{el['_worksheet']}' calc '#{cn}' is an aggregated calc — decomposed at " \
+                      "viz level over sub-master columns: #{agg_t.gsub('[Master/', "[#{safe_cap}/")[0, 110]}"
+        end
+      elsif row_t
+        sm['columns'] << { 'id' => "#{sm['id']}-c#{sm['columns'].size}", 'name' => cn,
+                           'formula' => row_t.gsub('[Master/', "[#{safe_cap}/") }
+        warnings << "NOTE multi-DS: '#{el['_worksheet']}' calc '#{cn}' emitted as a DERIVED column on " \
+                    "sub-master '#{sm['name']}': #{sm['columns'].last['formula'][0, 110]}"
+      else
+        manual_calcs << cn
+        warnings << "multi-DS STAYS-MANUAL: '#{el['_worksheet']}' references calc '#{cn}' on datasource " \
+                    "'#{caption}' whose formula could not be auto-translated " \
+                    "(#{f.to_s.gsub(/\s+/, ' ')[0, 90]}) — no sub-master column emitted; the pre-POST ref " \
+                    'gate will name the broken ref; author it on the sub-master by hand (--master-col)'
+      end
+    end
+    # Repoint + rewrite formulas in lock-step (structural, in place); collect
+    # the referenced column names so the sub-master exposes exactly what its
+    # charts consume (formulas [<caption>/<col>] — the orchestrator's
+    # placeholder resolver rewrites the prefix when the live name differs).
+    cols = JSON.generate(el).scan(%r{\[Master/([^\]/]+)\]}).flatten.uniq
+    cols.each do |cn|
+      next if sm['columns'].any? { |c| c['name'] == cn }
+      next if manual_calcs.include?(cn) # loud above — never a broken passthrough
+      sm['columns'] << { 'id' => "#{sm['id']}-c#{sm['columns'].size}", 'name' => cn,
+                         'formula' => "[#{safe_cap}/#{cn}]" }
+    end
+    deep_gsub!(el, '[Master/', "[Master (#{safe_cap})/")
+    el['source'] = { 'kind' => 'table', 'elementId' => sm['id'] }
+    routed[el['_worksheet']] = caption
+    warnings << "NOTE multi-DS: '#{el['_worksheet']}' auto-routed to datasource '#{caption}' " \
+                "(sub-master #{sm['id']}, #{cols.size} column(s))"
+  end
+  # A filter on the master does NOT propagate to sub-master-sourced charts
+  # (propagation follows the source chain). Retarget: every control targeting
+  # a master column ALSO targets each sub-master that exposes the same column
+  # name; sub-masters lacking it are named residue (the outlier datasource may
+  # genuinely not carry the column — never guess).
+  submasters.each_value do |sm|
+    sm_cols = sm['columns'].each_with_object({}) { |c, h| h[c['name']] = c['id'] }
+    controls.each do |ctl|
+      next unless ctl['filters'].is_a?(Array)
+      ctl['filters'].select { |t| t.dig('source', 'elementId') == master_id }.each do |t|
+        cname = id2name[t['columnId']]
+        next unless cname
+        next if ctl['filters'].any? { |x| x.dig('source', 'elementId') == sm['id'] }
+        if sm_cols[cname]
+          ctl['filters'] << { 'source' => { 'kind' => 'table', 'elementId' => sm['id'] },
+                              'columnId' => sm_cols[cname] }
+        else
+          warnings << "multi-DS: control '#{ctl['name']}' targets master column '#{cname}' which " \
+                      "'#{sm['name']}' does not expose — routed charts on that datasource are NOT " \
+                      'filtered by it (named residue; verify the outlier datasource carries the column)'
+        end
+      end
+    end
+  end
+  data_elements.concat(submasters.values)
+  routed
+end
+
+$ds_routed = {}
+begin
+  plan_path = File.join(opts[:tab], 'multi-ds-plan.json')
+  plan = File.exist?(plan_path) ? (JSON.parse(File.read(plan_path)) rescue nil) : nil
+  if ENV['SIGMA_MULTI_DS_ROUTING'] == 'off'
+    warn 'multi-DS routing DISABLED (SIGMA_MULTI_DS_ROUTING=off) — outlier charts stay on the master + WARN wall.'
+  elsif plan
+    id2name = mmap.values.each_with_object({}) { |v, h| h[v['id']] = v['name'] if v['id'] && v['name'] }
+    $ds_routed = route_multi_ds!(elements, data_elements, plan, opts[:master_id], warnings,
+                                 controls: param_controls + auto_controls + extras, id2name: id2name,
+                                 cbg: meta['columns_by_guid'] || {}, mmap: mmap)
+  end
+rescue => e
+  warnings << "multi-DS routing error (charts left on the master + WARN wall): #{e.message}"
+end
+# routing tags on hidden helpers are internal — never emit them in the spec
+data_elements.each { |e| e.delete('_worksheet') }
+
+# v5.1: HIDDEN-TITLES sidecar. The source hides worksheet titles via the zone
+# attr show-title='false' (parser: zone show_title) — three rounds leaked
+# "Sheet 9"/"Bi assets" chrome because nothing carried the signal. The live
+# API rejects name:{text, visibility:'hidden'} ("cannot mix"), and bare
+# {visibility:'hidden'} breaks every name-keyed matcher upstream — so titles
+# are hidden as the FINAL spec mutation in put-layout.rb, driven by this
+# sidecar. kpi-chart excluded (its name IS the rendered KPI label).
+begin
+  st_by_ws = {}
+  layout.each do |dash|
+    (dash['zones'] || []).each do |z|
+      st_by_ws[z['caption']] = z['show_title'] if z['kind'] == 'chart' && !z['caption'].to_s.empty?
+    end
+  end
+  $hidden_title_ids = elements.select do |e|
+    e['kind'] != 'kpi-chart' && st_by_ws.key?(e['_worksheet']) && st_by_ws[e['_worksheet']] == false
+  end.map { |e| e['id'] }
+  # namespaced duplicates (worksheet on a 2nd+ dashboard) get their own ids
+  # appended by the page-per-dashboard emitter; the sidecar is WRITTEN after
+  # the emitters run (review-caught: pre-namespace ids never matched the
+  # copies, leaking title chrome on later pages).
+  $hidden_title_ns_ids = []
+  # Ownership marker for stale-sidecar cleanup: the workbook's .twb sha —
+  # caption-derived element ids ('el-sheet-1') collide across workbooks, so a
+  # bare id-overlap test could delete ANOTHER workbook's sidecar in a shared
+  # directory (review-caught). Legacy array-shaped sidecars fall back to the
+  # id-overlap heuristic.
+  twb_p = File.join(opts[:tab], 'workbook-content.twb')
+  $hidden_title_wb_sha = File.exist?(twb_p) ? Digest::SHA256.file(twb_p).hexdigest[0, 16] : nil
+  ht_path = opts[:out].sub(/\.json$/, '-hidden-titles.json')
+  own_ids = elements.map { |e| e['id'].to_s }
+  Dir.glob(File.join(File.dirname(opts[:out]), '*-hidden-titles.json')).each do |stale|
+    body = JSON.parse(File.read(stale)) rescue []
+    owned =
+      if stale == ht_path
+        true
+      elsif body.is_a?(Hash)
+        # sha match is exact ownership; the id-overlap fallback covers the
+        # SAME workbook whose twb changed between builds (or a null sha from
+        # a missing .twb) — without it those sidecars re-hid titles forever
+        # (review-caught). A cross-workbook slug collision deleting a shared
+        # sidecar is the lesser failure (it regenerates on that build).
+        ($hidden_title_wb_sha && body['workbook'] == $hidden_title_wb_sha) ||
+          (Array(body['ids']).map(&:to_s) & own_ids).any?
+      elsif body.is_a?(Array)
+        (body.map(&:to_s) & own_ids).any? # legacy shape
+      else
+        false
+      end
+    next unless owned
+    File.delete(stale)
+    warn "removed stale #{stale}" unless stale == ht_path
+  end
+rescue => e
+  warnings << "hidden-titles sidecar error (titles stay visible): #{e.message}"
+end
+
+# v5.0-P2: window-calc sidecar for the VDS oracle — enriched from the BUILT
+# elements and written HERE (before the output modes strip the _worksheet
+# tags the enrichment joins on). Always written: empty entries tell the
+# oracle "no window calcs" vs "builder predates the sidecar".
+begin
+  enrich_window_calcs!($window_calc_records, elements, (plan rescue nil))
+  wc_path = File.join(File.dirname(File.expand_path(opts[:out])), 'window-calcs.json')
+  File.write(wc_path, JSON.pretty_generate({ 'version' => 1, 'entries' => $window_calc_records }))
+  warn "wrote #{wc_path} (#{$window_calc_records.size} window-calc translation(s) for the VDS oracle)" if $window_calc_records.any?
+rescue => e
+  warnings << "window-calcs sidecar error (VDS oracle will report nothing-to-verify): #{e.message}"
+end
+
+# v5.4: EVERY generated element filter carries an 'id' — the API rejects
+# filters without one, and in the field the failure surfaces as an opaque 400
+# with a multi-hundred-line union dump. Belt-and-suspenders over the per-site
+# ids so no construction site (present or future) can regress the contract.
+# Control filter-TARGETS ({source:, columnId:} on control elements) are a
+# different shape and are skipped (keyed by 'source').
+stamp_filter_ids = lambda do |els_list|
+  Array(els_list).each do |e|
+    next unless e.is_a?(Hash) && e['filters'].is_a?(Array)
+    e['filters'].each_with_index do |f, i|
+      next unless f.is_a?(Hash) && !f.key?('source')
+      f['id'] = "flt-#{e['id']}-#{i}" if f['id'].to_s.empty?
+    end
+  end
+end
+stamp_filter_ids.call(elements)
+stamp_filter_ids.call(data_elements)
+stamp_filter_ids.call(all_extras) if defined?(all_extras)
 
 # ---- Output mode ----
 #   Default       → flat array of elements (legacy behaviour). Extras first.
@@ -5091,8 +7149,13 @@ if opts[:pages_mode] == :worksheet
       'elements' => page_extras + els
     }
   end
-  File.write(opts[:out], JSON.pretty_generate({ 'pages' => pages }))
-  warn "wrote #{opts[:out]} (page-per-worksheet: #{pages.size} pages, #{auto_controls.size} auto-controls per page)"
+  theme = ThemeDerive.derive(layout)
+  # data_elements must ride EVERY output shape — multi-DS sub-masters (and any
+  # hidden helpers) live there, and a routed chart whose sub-master never
+  # reaches the spec is a dangling source ref (review-caught regression).
+  File.write(opts[:out], JSON.pretty_generate({ 'pages' => pages, 'data_elements' => data_elements, 'theme' => theme }))
+  warn "wrote #{opts[:out]} (page-per-worksheet: #{pages.size} pages, #{auto_controls.size} auto-controls per page" \
+       "#{data_elements.any? ? ", #{data_elements.size} hidden data element(s)" : ''})"
 elsif opts[:pages_mode] == :dashboard
   # One Sigma page per Tableau DASHBOARD (bead ptrt) — the fat-workbook fix:
   # 4 dashboards must become 4 laid-out pages, each with its own title text and
@@ -5181,15 +7244,43 @@ elsif opts[:pages_mode] == :dashboard
       stem = el['id']
       if stem && seen_el_ids[stem]
         ns = "#{stem}-#{d_slug[0..20]}"
-        JSON.parse(el.to_json.gsub(stem, ns))
+        # a namespaced copy of a hidden-title element needs ITS id in the
+        # sidecar too (written post-emitters) — exact-id matching in
+        # put-layout would otherwise leak the copy's title chrome
+        ($hidden_title_ns_ids ||= []) << ns if ($hidden_title_ids || []).include?(stem)
+        src_before = el.dig('source', 'elementId')
+        el2 = JSON.parse(el.to_json.gsub(stem, ns))
+        # v5.1.3: the stem gsub also rewrites a source.elementId that EMBEDS
+        # the stem (top-N prefilter helpers are '<stem>-topn-src'). The helper
+        # is a SHARED data element that keeps its original id — restore the
+        # ref, or the second page's copy points at a helper that doesn't
+        # exist and the POST hard-fails (review-caught, live-reproduced).
+        src_after = el2.dig('source', 'elementId')
+        if src_after != src_before && data_elements.any? { |d| d['id'] == src_before } &&
+           data_elements.none? { |d| d['id'] == src_after }
+          el2['source']['elementId'] = src_before
+        end
+        el2
       else
         seen_el_ids[stem] = true if stem
         el
       end
     end
-    pages << { 'name' => dash_name, 'elements' => page_extras + els }
+    page = { 'name' => dash_name, 'elements' => page_extras + els }
+    # v5.0: full-canvas designed background (the Figma/PPT card-art pattern) →
+    # page-level backgroundImage (data URI live-verified rendering behind the
+    # page's elements). image_asset_records carries the extracted asset.
+    bg = image_asset_records.find { |r| r['dashboard'] == dash_name && r['is_background'] && r['asset'] }
+    if bg
+      url = bg['image_file_url'] ||
+            "data:image/png;base64,#{Base64.strict_encode64(File.binread(bg['asset']))}"
+      page['backgroundImage'] = { 'url' => url, 'style' => { 'fit' => bg['is_scaled'] ? 'stretch' : 'cover' } }
+      warn "page '#{dash_name}': designed background #{File.basename(bg['asset'])} → page backgroundImage"
+    end
+    pages << page
   end
-  File.write(opts[:out], JSON.pretty_generate({ 'pages' => pages, 'data_elements' => data_elements }))
+  theme = ThemeDerive.derive(layout)
+  File.write(opts[:out], JSON.pretty_generate({ 'pages' => pages, 'data_elements' => data_elements, 'theme' => theme }))
   warn "wrote #{opts[:out]} (page-per-dashboard: #{pages.size} page(s), #{data_elements.size} hidden data element(s), #{(param_controls + auto_controls).size} controls per page)"
 else
   elements.each { |e| e.delete('_worksheet'); e.delete('_dashboard') }
@@ -5204,6 +7295,29 @@ else
     File.write(side, JSON.pretty_generate(data_elements))
     warn "wrote #{side} (#{data_elements.size} HIDDEN data-page element(s) — scatter grouped sources; add them to the workbook's Data page)"
   end
+  # Flat-array mode can't carry a top-level theme key — sidecar (mirrors the
+  # -data-elements.json pattern).
+  theme = ThemeDerive.derive(layout)
+  unless theme.empty?
+    tside = opts[:out].sub(/\.json$/, '-theme.json')
+    File.write(tside, JSON.pretty_generate(theme))
+    warn "wrote #{tside} (derived theme — apply via ThemeDerive.apply! / build-workbook-spec)"
+  end
+end
+
+# hidden-titles sidecar WRITE — after the emitters so namespaced duplicate ids
+# (worksheet on 2+ dashboards) are included; shape {workbook:, ids:} so the
+# stale-cleanup ownership check can tell workbooks apart (legacy arrays read
+# fine in put-layout).
+begin
+  ht_ids = (($hidden_title_ids || []) + ($hidden_title_ns_ids || [])).uniq
+  if ht_ids.any?
+    ht_path = opts[:out].sub(/\.json$/, '-hidden-titles.json')
+    File.write(ht_path, JSON.pretty_generate({ 'workbook' => $hidden_title_wb_sha, 'ids' => ht_ids }))
+    warn "wrote #{ht_path} (#{ht_ids.size} element title(s) hidden at put-layout, incl. #{($hidden_title_ns_ids || []).size} namespaced cop(ies))"
+  end
+rescue => e
+  warnings << "hidden-titles sidecar write error (titles stay visible): #{e.message}"
 end
 
 # ---- Intended-scope contract (control-scope.json) ---------------------------
@@ -5275,8 +7389,8 @@ end
 #   :note     — success or a verify nudge (NOT a gap)
 def warning_severity(w)
   s = w.to_s
-  return :dropped  if s =~ /dropped from the grid|—\s*skipping|could not be carried|cannot reconstruct/i
-  return :degraded if s =~ /STAYS MANUAL|could not be auto-decomposed|not composable as agg-of-agg|not auto-emitted|falling (through|back)/i
+  return :dropped  if s =~ /ZONE DROPPED|NOT auto-built|dropped from the grid|—\s*skipping|could not be carried|cannot reconstruct/i
+  return :degraded if s =~ /STAYS[ -]MANUAL|could not be auto-decomposed|not composable as agg-of-agg|not auto-emitted|falling (through|back)/i
   :note
 end
 warnings.each do |w|
@@ -5302,6 +7416,50 @@ if opts[:tab]
   unless vv.empty?
     by_reason = vv.group_by { |t| t['reason'] }.transform_values(&:size)
     warn "wrote #{vv_path} (#{vv.size} tile(s) need IMAGE verification: #{by_reason.map { |r, n| "#{n} #{r}" }.join(', ')})"
+  end
+end
+
+# Multi-datasource routing sentry (see the collection point in the zone loop):
+# charts whose worksheet rides a MINORITY datasource are still sourced from the
+# single master — name each one and the fix, so the pre-POST ref-gate failure
+# that follows (if the master lacks their columns) is diagnosable in one read.
+if $zone_datasource && $zone_datasource.values.uniq.length > 1
+  groups = $zone_datasource.group_by { |_ws, ds| ds }
+  dominant_ds = groups.max_by { |_ds, pairs| pairs.length }.first
+  outliers = $zone_datasource.reject { |_ws, ds| ds == dominant_ds }
+  # v5.0: auto-routed worksheets are handled (sub-master + rewritten formulas)
+  # — the WARN wall is only for what routing could NOT mechanize.
+  routed = outliers.select { |ws, _| $ds_routed && $ds_routed.key?(ws) }
+  outliers = outliers.reject { |ws, _| $ds_routed && $ds_routed.key?(ws) }
+  unless routed.empty?
+    warn "multi-DS: #{routed.size} outlier chart(s) AUTO-ROUTED to their own datasource's DM element " \
+         "(#{routed.map { |ws, _| "'#{ws}'→'#{$ds_routed[ws]}'" }.join(', ')}) — verify in Phase 6 as usual."
+  end
+  unless outliers.empty?
+    # Enrich with the gap-scan's routing plan (multi-ds-plan.json): it names
+    # each federated datasource's CAPTION + owning worksheets, so the fix
+    # instruction can name the exact DM element to re-source from instead of
+    # leaving each agent to reverse-engineer the federated ids.
+    ds_caption = {}
+    if opts[:tab]
+      plan = (JSON.parse(File.read(File.join(opts[:tab], 'multi-ds-plan.json'))) rescue nil)
+      (plan && plan['datasources'] || []).each { |d| ds_caption[d['name']] = d['caption'] }
+    end
+    warn '=== MULTI-DATASOURCE ROUTING WARNING ============================================'
+    warn "The dashboard's worksheets ride #{groups.length} DIFFERENT datasources, but every chart"
+    warn "is sourced from the single master (#{opts[:master_id].inspect}) riding the DOMINANT one " \
+         "(#{ds_caption[dominant_ds] || dominant_ds})."
+    outliers.each do |ws, ds|
+      cap = ds_caption[ds]
+      warn "  • '#{ws}' rides #{cap ? "'#{cap}'" : ds} — re-source it from THAT datasource's DM element" \
+           "#{cap ? " (element named after '#{cap}' in the posted DM)" : ''}; its refs resolve on the" \
+           ' master ONLY if the master fact happens to carry the same columns'
+    end
+    warn 'Routing table: multi-ds-plan.json (per-datasource caption → worksheets). Fix = source'
+    warn "each outlier chart from its own DM element ([<Element Name>/<Column>] refs, or a second"
+    warn 'master per refs/multi-datasource.md). Do NOT point their formulas at the primary master'
+    warn 'by renaming columns — wrong data, silently.'
+    warn '================================================================================='
   end
 end
 
@@ -5343,21 +7501,33 @@ actions = []
     end
   end
 end
-unless actions.empty?
+unless actions.empty? && nav_button_records.empty?
   actions_md_path = opts[:out].sub(/\.json$/, '-actions.md')
   md = String.new
   md << "# Tableau dashboard actions — post-publish setup\n\n"
-  md << "Sigma cross-chart filtering replaces Tableau's filter actions. For each\n"
-  md << "row below, in the published Sigma workbook: select the source element,\n"
-  md << "open Actions → Add filter action, target the listed element on the named\n"
-  md << "column.\n\n"
-  md << "| Source dim | Target chart | Filter column |\n"
-  md << "|---|---|---|\n"
-  actions.uniq.each do |a|
-    md << "| #{a['source']} | #{a['target']} | #{a['column']} |\n"
+  unless actions.empty?
+    md << "Sigma cross-chart filtering replaces Tableau's filter actions. For each\n"
+    md << "row below, in the published Sigma workbook: select the source element,\n"
+    md << "open Actions → Add filter action, target the listed element on the named\n"
+    md << "column.\n\n"
+    md << "| Source dim | Target chart | Filter column |\n"
+    md << "|---|---|---|\n"
+    actions.uniq.each do |a|
+      md << "| #{a['source']} | #{a['target']} | #{a['column']} |\n"
+    end
+  end
+  unless nav_button_records.empty?
+    md << "\n## Navigation buttons (wired automatically)\n\n"
+    md << "Emitted with a placeholder URL; put-layout.rb rewrites each to the live\n"
+    md << "workbook page URL after publish. Verify each link navigates correctly.\n\n"
+    md << "| Source dashboard | Button | Target page |\n"
+    md << "|---|---|---|\n"
+    nav_button_records.each do |b|
+      md << "| #{b['dashboard']} | #{b['label']} | #{b['target_page_name']} |\n"
+    end
   end
   File.write(actions_md_path, md)
-  warn "wrote #{actions_md_path} (#{actions.size} action entries)"
+  warn "wrote #{actions_md_path} (#{actions.size} action + #{nav_button_records.size} nav-button entries)"
 end
 
 # ---- spec-API limits — unsupported source primitives/features (bead ubr5.20) --
@@ -5416,6 +7586,40 @@ def spec_api_limit_entries(layout)
                  'Add the trend/comparison in the Sigma editor after publish (not spec-authorable; memory sigma-kpi-trend-comparison-ui-only).')
         next
       end
+    end
+    # v5.0-P2: dashboard-object BUTTON residue (the ubr5.20 anti-silent-vanish
+    # rule). Navigate buttons are EMITTED (btn- elements); export buttons are
+    # redundant (Sigma has a built-in export menu); toggles have no spec
+    # equivalent. Dedupe toggles per (dashboard, tooltip/image) — the corpus
+    # has one workbook with 88 accordion toggles, and 88 identical ledger rows
+    # is noise, not coverage.
+    btns = (dash['zones'] || []).select { |z| z['kind'] == 'dashboard-object' && z['button_intent'] }
+    # Navigate buttons whose target ISN'T a dashboard (worksheet windows,
+    # unresolved window-id GUIDs) are NOT emitted — they must appear here or
+    # they vanish silently (review-caught: the build warning classifies as
+    # NOTE, which the coverage loop skips).
+    btns.select { |z| z['button_intent'] == 'navigate' &&
+                      !(z['button_nav_target'] && z['button_nav_target_class'] == 'dashboard') }.each do |z|
+      entries << { 'visual' => (z['button_caption'] || z['button_tooltip'] || "button #{z['id']}").to_s,
+                   'source_type' => 'button', 'severity' => 'dropped', 'recoverable' => false,
+                   'detail' => "navigation button targets #{z['button_nav_target_class'] || 'an unresolved window'} " \
+                               '— no Sigma page equivalent',
+                   'action' => 'link the nearest equivalent page by hand post-publish, or omit.' }
+    end
+    btns.select { |z| z['button_intent'].to_s.start_with?('export') }.each do |z|
+      entries << { 'visual' => (z['button_caption'] || z['button_tooltip'] || "button #{z['id']}").to_s,
+                   'source_type' => 'button', 'severity' => 'dropped', 'recoverable' => true,
+                   'detail' => "Tableau #{z['button_intent']} download button — redundant in Sigma (built-in export menu)",
+                   'action' => "none needed; point users at Sigma's export menu." }
+    end
+    toggles = btns.select { |z| z['button_intent'] == 'toggle' }
+    toggles.group_by { |z| [z['button_tooltip'], z['button_image_path']] }.each do |_, grp|
+      z = grp.first
+      entries << { 'visual' => (z['button_caption'] || z['button_tooltip'] || "toggle button #{z['id']}").to_s +
+                               (grp.size > 1 ? " (×#{grp.size})" : ''),
+                   'source_type' => 'button', 'severity' => 'dropped', 'recoverable' => false,
+                   'detail' => 'show/hide container toggle button — Sigma has no spec-authorable container-visibility toggle',
+                   'action' => 'replicate as a separate (hidden) page, or leave the region expanded (post-publish).' }
     end
   end
   entries

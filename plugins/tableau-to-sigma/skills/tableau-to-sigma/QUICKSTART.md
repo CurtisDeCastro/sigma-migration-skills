@@ -146,14 +146,15 @@ git clone https://github.com/twells89/sigma-migration-skills
 #   plugins/tableau-to-sigma/skills/tableau-to-sigma/
 ```
 
-Run the two setup scripts once per machine (from the skill's `scripts/` directory):
+First run the environment doctor (macOS/Linux/Git-Bash — on Windows PowerShell run `scripts\doctor.ps1` instead), then the two setup scripts. **The doctor is fail-closed on credentials** (missing or broken Sigma creds are a ✗, and it live-smokes the token mint), so run it before and after setup:
 
 ```console
-ruby scripts/setup.rb
+bash scripts/doctor.sh          # Windows PowerShell: powershell -ExecutionPolicy Bypass -File scripts\doctor.ps1
+ruby scripts/setup.rb           # THE USER runs these two ONCE per machine
 ruby scripts/setup-tableau.rb
 ```
 
-`setup.rb` writes `SIGMA_BASE_URL`, `SIGMA_CLIENT_ID`, and `SIGMA_CLIENT_SECRET`; `setup-tableau.rb` writes your Tableau site URL + PAT name + token. Both write to **`~/.claude/settings.json`** (Claude Code auto-loads it) **and** a neutral **`~/.sigma-migration/env`** that the scripts auto-source under any agent — so credentials work the same everywhere. Both prompt interactively and only need to run once.
+`setup.rb` writes `SIGMA_BASE_URL`, `SIGMA_CLIENT_ID`, and `SIGMA_CLIENT_SECRET`; `setup-tableau.rb` writes your Tableau site URL + PAT name + token. Both write to **`~/.claude/settings.json`** (Claude Code auto-loads it) **and** a neutral **`~/.sigma-migration/env`** that the scripts auto-source under any agent — so credentials work the same everywhere. Both prompt interactively and only need to run once — **by the user, in a real terminal**. In a harness with no TTY, `setup.rb` never hangs: it prints the exact flag invocation (`--client-id … --client-secret …`) and exits.
 
 <aside class="negative">
 <strong>NOTE:</strong><br> Tokens are 1-hour bearer tokens fetched on demand via <code>scripts/get-token.sh</code>. Never hard-code tokens in scripts — every long-running script in the skill re-fetches on cold start.
@@ -192,20 +193,43 @@ can pick up from an orchestrator STOP — they are a **map, not a menu**. Runnin
 individual scripts à la carte instead of the orchestrator is the most common way
 a conversion drifts (the run-state audit silently no-ops when bypassed).
 
+The whole conversion is ONE path, start to finish (everything else in this doc
+is detail on these steps):
+
+1. `bash scripts/doctor.sh` — environment + credential preflight (fail-closed;
+   Windows PowerShell: `scripts\doctor.ps1`)
+2. `ruby scripts/setup.rb` + `ruby scripts/setup-tableau.rb` — the **user** runs
+   these **once** per machine
+3. `ruby scripts/intake.rb …` — resolve the destination connection/folder into
+   the workdir (the orchestrator honors `<WORK>/connection.json`)
+4. `ruby scripts/migrate-tableau.rb …` — **PASS 1** (discovery → gates → DM →
+   workbook → layout → parity plan; stops at exit 12)
+5. Collect the printed parity actuals (mcp-v2 queries → `parity-actuals.json`)
+6. Re-run the printed `migrate-tableau.rb --finalize --actuals …` command —
+   the hard-gate suite; exit 0 is the only green
+
+All artifacts live in the workdir convention `~/tableau-migration/<slug>` (or
+`--out <dir>`) — never a scratch `/tmp` path that evaporates between sessions.
+
 Two rules that keep a run honest:
 
 - **PASS 1 ends at exit 12 — that is not "done."** It means "collect actuals, then
   run the printed `--finalize` command," which runs the `assert-phase6-ran.rb`
   hard gate. Exit 0 there is the only green.
 - **Confirm completion with one offline check, not by eyeballing HTTP 200s:**
-  `ruby scripts/verify-complete.rb --workdir <WORK>` must print ✅ DONE. Until it
-  does, the migration is not finished.
+  `ruby scripts/verify-complete.rb --workdir <WORK>` must print ✅ DONE (it quotes
+  the run-scoped `phase6-success.json` marker — quote it in your report). Until
+  it does, the migration is not finished.
 
 ![Footer](assets/sigma_footer.png)
 <!-- END OF SECTION -->
 
 ## **Phase 1 — Discovery**
 Duration: 10
+
+> **Recovery & debugging only — the orchestrator runs this (and every phase
+> below) for you.** Run a phase script directly only when an orchestrator STOP
+> message routes you to it.
 
 Hand Claude a Tableau dashboard URL — e.g.:
 

@@ -2,7 +2,7 @@
 
 ## Phase 3 — Build the data model spec
 
-Write the spec to `/tmp/<name>/dm-spec.json`. Full schema is in
+Write the spec to `<WORK>/dm-spec.json`. Full schema is in
 `refs/data-model-spec.md`.
 
 ### Critical rules
@@ -114,7 +114,7 @@ the way Tableau's ELSE does — and parity will diverge.
 ### Validate before posting
 
 ```bash
-ruby scripts/validate-spec.rb --type datamodel /tmp/<name>/dm-spec.json
+ruby scripts/validate-spec.rb --type datamodel <WORK>/dm-spec.json
 ```
 
 Catches: formula prefix mismatches, bare refs not matching a sibling, `kpi`/`pie`/`donut` kind

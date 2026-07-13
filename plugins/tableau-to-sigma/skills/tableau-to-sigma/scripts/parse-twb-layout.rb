@@ -88,7 +88,15 @@ def dashboard_in_scope?(name, page_id)
   name_hit || page_hit
 end
 
-TWB_TEXT = File.read(INP, encoding: 'UTF-8')
+TWB_TEXT = begin
+  raw = File.read(INP, encoding: 'UTF-8')
+  # Defensive FCP normalization for pre-existing workdirs whose .twb was
+  # written before discovery normalized at download time (idempotent; see
+  # lib/fcp_normalize — literal-name XPaths are otherwise blind to native
+  # rounded corners and every other forward-compatibility feature).
+  require_relative 'lib/fcp_normalize'
+  FcpNormalize.needed?(raw) ? FcpNormalize.normalize(raw) : raw
+end
 xml = TwbXml.parse(TWB_TEXT)
 
 # ---- Brand palette (Phase-1 D1, general) ----------------------------------
@@ -117,8 +125,13 @@ def extract_brand_palette(twb_text)
   freq = Hash.new(0)
   # color-encoding buckets
   twb_text.scan(/<map\s+to=(['"])(#[0-9a-fA-F]{6})\1/) { |_q, hex| freq[hex.downcase] += 1 }
-  # user-defined custom palettes
-  twb_text.scan(%r{<color-palette\b[^>]*>(.*?)</color-palette>}m) do |body,|
+  # user-defined custom palettes — CATEGORICAL ONLY. ordered-sequential /
+  # ordered-diverging bodies are RAMPS (heatmap gradients); ingesting them
+  # polluted categoricalScheme with 9-11 near-duplicate ramp steps
+  # (field-caught: a 30-color "brand palette" mixing CB_Paired with the
+  # CB_PuBu ramp). type='regular' is Tableau's categorical marker.
+  twb_text.scan(%r{<color-palette\b([^>]*)>(.*?)</color-palette>}m) do |attrs, body|
+    next unless attrs =~ /type=(['"])regular\1/
     body.to_s.scan(/#[0-9a-fA-F]{6}/) { |hex| freq[hex.downcase] += 1 }
   end
   freq.reject! { |hex, _| color_neutral?(hex) }
@@ -126,6 +139,31 @@ def extract_brand_palette(twb_text)
 end
 
 BRAND_PALETTE = extract_brand_palette(TWB_TEXT)
+
+# ---- Workbook/dashboard style rules (theme channel) ------------------------
+# Tableau's Format▸Workbook + Format▸Dashboard land as <style><style-rule
+# element='all|worksheet|title|dash-title|dash-text|table'> blocks at workbook
+# and dashboard scope. These are the THEME inputs (fonts, dashboard shading) —
+# a separate channel from per-zone <zone-style> (zone_style_fields) and
+# worksheet-level chart chrome. style-rules under <mapsource-defaults> or
+# <datasource> are Mapbox/mark-encoding config, not theme — excluded by
+# walking only the two scopes we want. Consumed by lib/theme_derive.
+def style_rules_for(scope_el)
+  out = {}
+  return out unless scope_el
+  scope_el.elements.each('style/style-rule') do |sr|
+    el = sr.attributes['element'].to_s
+    next if el.empty?
+    sr.elements.each('format') do |f|
+      a = f.attributes['attr']; v = f.attributes['value']
+      next if a.nil? || v.nil?
+      (out[el] ||= {})[a] = v
+    end
+  end
+  out
+end
+
+WORKBOOK_STYLE_RULES = style_rules_for(xml.elements['/workbook'])
 
 def pct(v)
   return nil if v.nil?
@@ -145,6 +183,9 @@ xml.elements.each('//column') do |c|
   raw = c.attributes['name'].to_s
   cap = c.attributes['caption']
   dt  = c.attributes['datatype']
+  # v5.1.1: carry the calc FORMULA — the translator's one-level calc-ref
+  # dereference (RANK([CalcRef])<=N over a window share) resolves through it.
+  cf  = (calc_el = c.elements['calculation']) && calc_el.attributes['formula']
   next if raw.empty?
   # Names look like `[guid]`, `[guid (foo)]`, `[Friendly Name]`,
   # `[Calculation_123]`, or a Tableau group/copy `[Partner Level (group)]`.
@@ -156,7 +197,15 @@ xml.elements.each('//column') do |c|
   # when a caption exists (the GUID itself is not human-readable).
   if body =~ /\A([0-9a-f]{8}-[0-9a-f\-]{20,}|Calculation_\d+)/i
     head = body.split(/\s/, 2).first
-    COL_BY_GUID[head] ||= { caption: cap, datatype: dt } if cap && !cap.empty?
+    if cap && !cap.empty?
+      COL_BY_GUID[head] ||= { caption: cap, datatype: dt }
+      COL_BY_GUID[head][:formula] ||= cf if cf
+    elsif cf
+      # Caption-less calc columns (Calculation_NNN with only a formula) still
+      # need to resolve for the deref — register with the id as caption.
+      COL_BY_GUID[head] ||= { caption: head, datatype: dt }
+      COL_BY_GUID[head][:formula] ||= cf
+    end
   else
     # Friendly / group / copy names are referenced VERBATIM by their full body
     # (e.g. instance ref `[none:Customer Geo:nk]` → "Customer Geo", filter
@@ -167,6 +216,7 @@ xml.elements.each('//column') do |c|
     # back to the body; that is the fix for the ~40 enterprise quick-filters that were
     # silently dropped ("shared filter has no resolvable column_caption").
     COL_BY_GUID[body] ||= { caption: (cap && !cap.empty? ? cap : body), datatype: dt }
+    COL_BY_GUID[body][:formula] ||= cf if cf
   end
 end
 
@@ -249,13 +299,26 @@ def normalize_filter(f)
   case cls
   when 'categorical'
     members = []
+    conditions = []
     f.each_element('.//groupfilter') do |gf|
-      next unless gf.attributes['function'] == 'member'
-      m = unquote_member(gf.attributes['member'])
-      members << m if m
+      if gf.attributes['function'] == 'member'
+        m = unquote_member(gf.attributes['member'])
+        members << m if m
+      end
+      # CONDITION filters (function='filter' with an expression, e.g. a
+      # minimum-sample gate `COUNTD([seed]) > 20` guarding a Top-N ranking)
+      # were silently invisible — the emitted kind:list carried only members,
+      # and two independent field runs had to grep raw XML to discover why
+      # their Top-15 rosters were wrong. Surface every expression verbatim.
+      expr = gf.attributes['expression']
+      conditions << expr if expr && !expr.strip.empty?
     end
     out['kind']    = 'list'
     out['members'] = members
+    unless conditions.empty?
+      out['condition_expressions'] = conditions.uniq
+      out['kind'] = 'list+condition' if members.empty?
+    end
   when 'relative-date'
     out['kind']           = 'relative-date'
     out['first_period']   = f.attributes['first-period']
@@ -293,7 +356,10 @@ end
 #   - OR one shelf has a real dim + the other has Measure Names
 #     plus the worksheet has ≥2 measures                          → pivot-table
 #   - Otherwise (one shelf empty, or both empty)                  → table
-MEASURE_PREFIXES = %w[sum avg min max count countd cntd median stdev stdevp var varp attr usr].freeze
+# v5.1.1: pcto/rtot are Tableau QUICK-CALC measure tokens (percent-of-total /
+# running-total) — without them a pcto pill classified role='dim' and the
+# builder's PercentOfTotal mapping was unreachable (review-caught).
+MEASURE_PREFIXES = %w[sum avg min max count countd cntd median stdev stdevp var varp attr usr pcto rtot].freeze
 DATE_TRUNC_PREFIXES = %w[yr qr mn wk dy hr mi sc mdy md qd ymd y q m d w h s].freeze
 
 # Classify a single shelf-field bracketed spec like "none:GUID:qk" or "sum:GUID:qk"
@@ -714,6 +780,47 @@ xml.elements.each('//worksheet') do |ws|
     calcs << entry
   end
 
+  # v5.1.1: table-calc ADDRESSING ("compute using <dim>") — serialized on the
+  # worksheet's <column-instance> as <table-calc ordering-field='[ds].[dim]'
+  # ordering-type='Field'/>. For RANK-family calcs this names the RANKED
+  # ENTITY dimension, which the top-N prefilter must filter (review round: a
+  # rowsBy-first heuristic picked the pivot's other axis — directions, not
+  # rooms). A column-instance can carry several <table-calc> children: the one
+  # WITHOUT a field= attr is this calc's own addressing (field='[X]' entries
+  # belong to nested calc X).
+  quick_calc_pcto = []
+  ws.elements.each('.//column-instance') do |ci|
+    ci_col = ci.attributes['column'].to_s[/\[([^\]]+)\]/, 1]
+    next if ci_col.nil? || ci_col.empty?
+    tcs = []
+    ci.elements.each('table-calc') { |t| tcs << t }
+    tc = tcs.find { |t| t.attributes['field'].nil? } || tcs.first
+    of = tc && tc.attributes['ordering-field']
+    # v5.1.2: percent-of-total QUICK CALC on the MARKS CARD — the canonical
+    # Tableau crosstab heatmap. The pill never touches rows/cols shelves
+    # (MEASURE_PREFIXES can't see it); it serializes as
+    #   <column-instance column='[seed]' derivation='CountD'
+    #                    name='[pcto:ctd:seed:qk]'>
+    #     <table-calc ordering-field='[..].[summoner_dir]' type='PctTotal'/>
+    # and z['measures'] recorded only the bare CountD — the pivot shipped raw
+    # counts where the source renders percentages (review round). The
+    # PctTotal addressing dim decides the Sigma PercentOfTotal scope.
+    # (?::[a-z0-9]+)* — Tableau appends a NUMERIC instance suffix when the
+    # same quick-calc pill exists twice in the workbook ([pcto:ctd:seed:qk:2],
+    # present in the reference twb itself); [a-z]+ silently missed those and
+    # the second crosstab shipped raw counts (v5.1.3 review-caught).
+    if (qm = ci.attributes['name'].to_s.match(/\A\[pcto:([a-z]+):([^:\]]+)(?::[a-z0-9]+)*\]\z/i))
+      addr = of && of.to_s[/\.\[(?:[a-z]+:)?([^:\]]+)(?::[a-z0-9]+)*\]\z/, 1]
+      quick_calc_pcto << { 'agg' => qm[1].downcase, 'col' => qm[2],
+                           'addressing' => addr, 'token' => ci.attributes['name'].to_s }
+    end
+    next unless of
+    inner = of.to_s[/\.\[(?:[a-z]+:)?([^:\]]+)(?::[a-z0-9]+)*\]\z/, 1]
+    next unless inner
+    c = calcs.find { |x| x['name'].to_s.gsub(/^\[|\]$/, '') == ci_col }
+    c['ordering_field'] = inner if c && !c['ordering_field']
+  end
+
   # Worksheet-level "Show Mark Labels" toggle. Tableau emits this on the
   # worksheet's pane style:
   #   <pane><style><style-rule element='mark'>
@@ -825,6 +932,45 @@ xml.elements.each('//worksheet') do |ws|
     hf.compact
   end
 
+  # v5.1: pivot/shelf sorts live in <shelf-sort-v2> (dimension-to-sort +
+  # measure-to-sort-by + direction + shelf) — a DIFFERENT surface from
+  # <sort>/<computed-sort>, and the reason three rounds of ranked pivots
+  # shipped alphabetical. Resolve the field tokens to captions best-effort
+  # ([fed].[none:Concat_X:nk] → Concat_X; [fed].[ctd:seed:qk] → ctd:seed).
+  shelf_sorts = []
+  ws.elements.each('.//shelf-sort-v2') do |ss|
+    tok = ->(s) { s.to_s[/\[[^\]]+\]\.\[(?:[a-z]+:)?([^:\]]+)(?::[a-z0-9]+)*\]/, 1] || s.to_s }
+    shelf_sorts << {
+      'dimension' => tok.call(ss.attributes['dimension-to-sort']),
+      'measure'   => tok.call(ss.attributes['measure-to-sort-by']),
+      'measure_raw' => ss.attributes['measure-to-sort-by'],
+      'direction' => ss.attributes['direction'].to_s.downcase == 'desc' ? 'descending' : 'ascending',
+      'shelf'     => ss.attributes['shelf']
+    }
+  end
+
+  # v5.1: per-worksheet HEAT RAMP — the color encoding's sequential palette IS
+  # the source heat scale (e.g. #f1f1f1→#52baee). Two serializations:
+  # type='custom-interpolated' carries inline stops; type='interpolated'
+  # references a named <preferences> palette (palette='CB_PuBu'). Emitted so
+  # pivots derive backgroundScale from the source, never a default. NOT
+  # neutral-stripped — a near-white low stop is legitimate.
+  heat_scheme = nil
+  ws.elements.each(".//encoding[@attr='color']") do |enc|
+    case enc.attributes['type']
+    when 'custom-interpolated'
+      cols = []
+      enc.elements.each('color-palette/color') { |c| cols << c.text.to_s.strip.downcase }
+      heat_scheme = cols if cols.size >= 2
+    when 'interpolated'
+      pname = enc.attributes['palette'].to_s
+      next if pname.empty? || heat_scheme
+      body = TWB_TEXT[/<color-palette[^>]*name='#{Regexp.escape(pname)}'[^>]*type='ordered-(?:sequential|diverging)'[^>]*>(.*?)<\/color-palette>/m, 1]
+      cols = body.to_s.scan(/#[0-9a-fA-F]{6}/).map(&:downcase)
+      heat_scheme = cols if cols.size >= 2
+    end
+  end
+
   worksheets[name] = {
     mark_class:       mark_class,
     geo_role:         geo_role,
@@ -832,6 +978,9 @@ xml.elements.each('//worksheet') do |ws|
     has_long:         has_long,
     has_geometry:     has_geometry,
     sort:             sort_info,
+    shelf_sorts:      shelf_sorts,
+    quick_calc_pcto:  quick_calc_pcto,
+    heat_scheme:      heat_scheme,
     filters:          filters_info,
     hidden_filters:   hidden_filters,
     aggregations:     aggregations,
@@ -1031,6 +1180,7 @@ def zone_kind(type_v2, caption)
   when 'paramctrl'                   then 'parameter'
   when 'color'                       then 'legend'
   when 'empty'                       then 'spacer'
+  when 'bitmap'                      then 'image'
   when 'dashboard-object'            then 'dashboard-object'
   when nil
     # No type-v2 + a worksheet name → this is the chart tile
@@ -1057,18 +1207,101 @@ end
 # them verbatim. Returns {} when the zone has no explicit styling (→ plain container,
 # never worse than today's output). Verified against the "Job Loss from Mass
 # Deportations" benchmark (region tints #07b4a2/#e8519a/#827bb8/#f28e2b at alpha).
+# Full zone-style surface (official StyleAttribute-ST enum, twb XSD 2026.2):
+# background, per-side borders, NATIVE rounded corners (Tableau 2026.1+ —
+# reached here via the FCP normalization pass; previously invisible),
+# margins/padding. Emitted keys are consumed by the layout/style compiler
+# (container style.{backgroundColor,borderColor,borderWidth,borderRadius}).
 def zone_style_fields(z)
   out = {}
+  corners = {}
   z.elements.each('zone-style/format') do |f|
     a = f.attributes['attr']; v = f.attributes['value']
     next if v.nil? || v.empty?
     case a
     when 'background-color'
       out['fill_color'] = v unless v.downcase == '#00000000' # skip fully-transparent
+    when 'background-transparency' then out['fill_transparency'] = v
     when 'border-color'  then out['border_color'] = v
     when 'border-style'  then out['border_style'] = v
+    when 'border-width'  then out['border_width'] = v
+    when /\Aborder-(color|style|width)-(top|right|bottom|left)\z/
+      prop, side = Regexp.last_match(1), Regexp.last_match(2)
+      ((out['border_sides'] ||= {})[side] ||= {})[prop] = (prop == 'width' ? v.to_i : v)
+    when 'corner-radius' then out['corner_radius'] = v.to_i
+    when /\Acorner-radius-(top|bottom)-(left|right)\z/
+      corners[a.sub('corner-radius-', '')] = v.to_i
+    when 'rounding' then out['rounding'] = v
+    when /\Amargin(-top|-right|-bottom|-left)?\z/
+      (out['margins'] ||= {})[a == 'margin' ? 'all' : a.sub('margin-', '')] = v.to_i
+    when /\Apadding(-top|-right|-bottom|-left)?\z/
+      (out['paddings'] ||= {})[a == 'padding' ? 'all' : a.sub('padding-', '')] = v.to_i
     end
   end
+  out['corner_radii'] = corners unless corners.empty?
+  # A per-corner-only spec still means "rounded" — surface the max as the
+  # scalar so downstream style mapping needs one lookup.
+  out['corner_radius'] ||= corners.values.max if corners.any?
+  out
+end
+
+# Bitmap (image) zones: the design-compiler input for backgrounds/cards/art.
+# `param` is the exact zip path inside the .twbx (e.g. 'Image/hero.png') →
+# pixel-exact asset recovery; is-scaled/is-centered mirror the product's
+# Fit/Center options; image-file-url carries web-hosted images. Shared by the
+# flat-zone loop and build_zone_tree so the two never diverge.
+# ---- Dashboard-object BUTTONS (v5.0-P2) ------------------------------------
+# A Tableau button zone is <zone type-v2='dashboard-object'><button action=…>
+# with <button-visual-state> children (caption/image-path/tooltip/font).
+# Navigation targets are window-id GUIDs → resolve via //windows/window
+# simple-id (census: all 21 corpus navigate targets are class='dashboard',
+# i.e. 1:1 Sigma pages). Export/toggle buttons have no Sigma spec equivalent
+# and become named residue downstream.
+WINDOW_BY_UUID = {}
+xml.elements.each('//windows/window') do |w|
+  sid = w.elements['simple-id']
+  WINDOW_BY_UUID[sid.attributes['uuid']] = {
+    'name' => w.attributes['name'], 'class' => w.attributes['class']
+  } if sid
+end
+
+def zone_button_fields(z)
+  b = z.elements['button'] or return {}
+  out = {}
+  action = b.attributes['action'].to_s
+  out['button_intent'] =
+    if action =~ /goto-sheet/ then 'navigate'
+    elsif b.elements['.//export-button-action'] || b.attributes['button-click-action-metadata']
+      "export-#{b.attributes['button-click-action-metadata'] || 'image'}"
+    elsif b.elements['.//toggle-action'] || action =~ /toggle/ then 'toggle'
+    else 'unknown'
+    end
+  if out['button_intent'] == 'navigate' &&
+     (g = action[/window-id="?\{([0-9A-Fa-f-]+)\}/, 1]) && (w = WINDOW_BY_UUID["{#{g}}"])
+    out['button_nav_target']       = w['name']
+    out['button_nav_target_class'] = w['class'] # 'dashboard' | 'worksheet'
+  end
+  cap = (c = b.elements['.//caption']) && c.text.to_s.strip
+  # call-center carries the junk caption " ." — punctuation-only falls through
+  out['button_caption'] = cap unless cap.nil? || cap.empty? || cap =~ /\A[.\s]+\z/
+  out['button_tooltip']    = (t = b.elements['.//tooltip-text']) && t.text
+  out['button_image_path'] = (ip = b.elements['.//image-path']) && ip.text
+  out['button_type']       = b.attributes['button-type'] # 'text' | nil (image)
+  if (f = b.elements['.//button-caption-font-style'])
+    out['button_font_color'] = f.attributes['fontcolor']
+    out['button_font_size']  = f.attributes['fontsize'] && f.attributes['fontsize'].to_i
+  end
+  out.reject { |_, v| v.nil? }
+end
+
+def zone_image_fields(z)
+  a = z.attributes
+  out = {
+    'image_path'  => a['param'],
+    'is_scaled'   => %w[1 true].include?(a['is-scaled'].to_s),
+    'is_centered' => %w[1 true].include?(a['is-centered'].to_s)
+  }
+  out['image_file_url'] = a['image-file-url'] if a['image-file-url']
   out
 end
 
@@ -1113,6 +1346,13 @@ def zone_text_fields(z)
       'color'     => (c = a['fontcolor']) && !c.empty? ? c : nil,
       'font_size' => (fs = a['fontsize']) && !fs.empty? ? fs.to_i : nil,
       'bold'      => a['bold'] == 'true',
+      # v5.0 full run surface: family ('Roboto Light'), italic/underline, and
+      # per-run alignment (fontalignment enum PNG-verified: 1=center 2=right;
+      # absent/0=left). nil-compacted so absent attrs don't bloat every run.
+      'font'      => (fn = a['fontname']) && !fn.empty? ? fn : nil,
+      'italic'    => a['italic'] == 'true' || nil,
+      'underline' => a['underline'] == 'true' || nil,
+      'align'     => { '1' => 'center', '2' => 'right' }[a['fontalignment'].to_s],
       'break'     => txt.include?("\n")
     }.compact
   end
@@ -1125,6 +1365,14 @@ def zone_text_fields(z)
       v = f.attributes['value'].to_s
       out['text_align'] = v if %w[center right].include?(v)
     end
+  end
+  # Run-level alignment fallback: a zone whose alignment lives ONLY on its runs
+  # (no zone-style text-align — the diablo credit-line defect) still aligns:
+  # when every visible run agrees, promote to the zone level.
+  if out['text_align'].nil?
+    vis = runs.reject { |r| r['text'].to_s.strip.empty? }
+    aligns = vis.map { |r| r['align'] }.uniq
+    out['text_align'] = aligns.first if vis.any? && aligns.size == 1 && %w[center right].include?(aligns.first)
   end
   # A short single-run zone with a solid fill reads as a pill/chip (e.g. a
   # "Learn More" button) — flag it so the builder can render a background chip.
@@ -1150,12 +1398,29 @@ def build_zone_tree(z)
   # layout-flow's `param` is the stack direction; a vertical flow stacks its
   # children top-to-bottom (the classic left filter-rail), horizontal L→R.
   node['direction'] = (param == 'vert' ? 'vert' : 'horz') if type_v2 == 'layout-flow'
+  # Fixed-pixel geometry: is-fixed zones size one axis in PIXELS (fixed-size),
+  # not canvas-percent — px-fixed rails/dividers must map to exact grid spans.
+  node['is_fixed']   = true if z.attributes['is-fixed'] == 'true'
+  node['fixed_size'] = z.attributes['fixed-size'].to_i if z.attributes['fixed-size']
+  # Bitmap zones: the design-compiler input for background/card/art images.
+  # `param` is the exact zip path inside the .twbx (Image/<name>.png);
+  # is-scaled/is-centered mirror the product's Fit/Center options and
+  # image-file-url carries web-hosted images.
+  if kind == 'image'
+    node.merge!(zone_image_fields(z))
+    # Full-canvas image = the Figma/PPT designed-background pattern (the
+    # rounded "cards" live inside the PNG). Charts paint over it, so it maps
+    # to a page/container backgroundImage, not a grid element.
+    node['is_background'] = true if node['w_pct'] >= 95.0 && node['h_pct'] >= 95.0
+  end
   # Phase-1 style: per-zone fill/border (region-card tints, canvas) + control mode.
   node.merge!(zone_style_fields(z))
   cd = zone_control_display(z)
   node['control_display'] = cd if cd
   # Phase-1 B4: styled static text (run-level formatting) on text/title zones.
   node.merge!(zone_text_fields(z)) if kind == 'text' || kind == 'title'
+  # v5.0-P2: button payload on dashboard-object zones.
+  node.merge!(zone_button_fields(z)) if kind == 'dashboard-object'
   # filter/param zones resolve their target column from `param` (a column GUID).
   if kind == 'filter' || kind == 'parameter'
     g = guid_from_param(param)
@@ -1177,7 +1442,14 @@ xml.elements.each('//dashboard') do |d|
   next unless dashboard_in_scope?(dash_name, zone_root_id)
   zones = []
   seen_ids = {}
-  d.elements.each('.//zone') do |z|
+  # Iterate ONLY the dashboard's default <zones> tree. A bare `.//zone` also
+  # descends into <devicelayouts> (phone/tablet variants carry their OWN zone
+  # trees with different geometry) — contaminating the flat zone list with
+  # duplicate-content zones at device-specific coordinates (official schema:
+  # devicelayouts is a sibling of zones). Device layouts are a per-device
+  # concern the desktop migration must not ingest.
+  default_zones_root = d.elements['zones'] || d
+  default_zones_root.elements.each('.//zone') do |z|
     next if z.attributes['id'].nil?
     next if seen_ids[z.attributes['id']]
     seen_ids[z.attributes['id']] = true
@@ -1211,6 +1483,13 @@ xml.elements.each('//dashboard') do |d|
     zdisp  = zone_control_display(z)
     # Phase-1 B4: styled static text (run-level formatting) on text/title zones.
     ztext  = (kind == 'text' || kind == 'title') ? zone_text_fields(z) : {}
+    # Image zones: asset path + fit options (+ full-canvas background flag).
+    zimg   = kind == 'image' ? zone_image_fields(z) : {}
+    # Button payload (dashboard-object zones).
+    zbtn   = kind == 'dashboard-object' ? zone_button_fields(z) : {}
+    if kind == 'image' && pct(z.attributes['w']) >= 95.0 && pct(z.attributes['h']) >= 95.0
+      zimg['is_background'] = true
+    end
 
     zones << {
       'id'           => z.attributes['id'],
@@ -1229,6 +1508,13 @@ xml.elements.each('//dashboard') do |d|
       'geo_role'     => ws_meta&.dig(:geo_role),
       # New per-worksheet signal fields (nil for non-chart zones)
       'sort'           => (kind == 'chart' ? ws_meta&.dig(:sort)           : nil),
+      'shelf_sorts'    => (kind == 'chart' ? ws_meta&.dig(:shelf_sorts)   : nil),
+      'quick_calc_pcto' => (kind == 'chart' ? ws_meta&.dig(:quick_calc_pcto) : nil),
+      'heat_scheme'    => (kind == 'chart' ? ws_meta&.dig(:heat_scheme)   : nil),
+      # v5.1: zone show-title='false' = the source HIDES the worksheet title
+      # (all 6 Diablo tiles carry it; three rounds leaked "Sheet 9" because
+      # nothing read the attribute). Absent attr = shown (fails safe).
+      'show_title'   => z.attributes['show-title'] != 'false',
       'filters'        => (kind == 'chart' ? ws_meta&.dig(:filters)       : nil),
       'hidden_filters' => (kind == 'chart' ? (ws_meta&.dig(:hidden_filters) || []) : nil),
       'aggregations'   => (kind == 'chart' ? ws_meta&.dig(:aggregations)  : nil),
@@ -1258,7 +1544,28 @@ xml.elements.each('//dashboard') do |d|
       # Phase-1 B4: styled static text signals (nil for non-text zones / unstyled)
       'text_runs'  => ztext['text_runs'],
       'text_align' => ztext['text_align'],
-      'is_pill'    => ztext['is_pill']
+      'is_pill'    => ztext['is_pill'],
+      # v5.0 design-compiler signals (nil when absent — additive)
+      'corner_radius' => zstyle['corner_radius'],
+      'border_width'  => zstyle['border_width'],
+      'is_fixed'      => (z.attributes['is-fixed'] == 'true' || nil),
+      'fixed_size'    => (z.attributes['fixed-size'] ? z.attributes['fixed-size'].to_i : nil),
+      # Image (bitmap) zone signals: .twbx asset path + fit + background flag
+      'image_path'     => zimg['image_path'],
+      'is_scaled'      => (kind == 'image' ? zimg['is_scaled']   : nil),
+      'is_centered'    => (kind == 'image' ? zimg['is_centered'] : nil),
+      'image_file_url' => zimg['image_file_url'],
+      'is_background'  => zimg['is_background'],
+      # Button signals (dashboard-object zones; nil elsewhere)
+      'button_intent'           => zbtn['button_intent'],
+      'button_nav_target'       => zbtn['button_nav_target'],
+      'button_nav_target_class' => zbtn['button_nav_target_class'],
+      'button_caption'          => zbtn['button_caption'],
+      'button_tooltip'          => zbtn['button_tooltip'],
+      'button_image_path'       => zbtn['button_image_path'],
+      'button_type'             => zbtn['button_type'],
+      'button_font_color'       => zbtn['button_font_color'],
+      'button_font_size'        => zbtn['button_font_size']
     }
   end
   # A "storyboard" dashboard is Tableau's story container (sequential story
@@ -1273,9 +1580,27 @@ xml.elements.each('//dashboard') do |d|
     root.elements.each('zone') { |z| next if z.attributes['id'].nil?; zone_tree << build_zone_tree(z) }
   end
 
+  # Authored canvas size in PIXELS (dashboard <size> maxwidth/maxheight;
+  # sizing-mode=fixed means these are exact). The px density is what makes
+  # fixed-size zone spans and row-height math exact downstream.
+  canvas_px = nil
+  if (sz = d.elements['size'])
+    w_px = sz.attributes['maxwidth'].to_i
+    h_px = sz.attributes['maxheight'].to_i
+    if w_px.positive? && h_px.positive?
+      canvas_px = { 'w' => w_px, 'h' => h_px,
+                    'sizing_mode' => sz.attributes['sizing-mode'] }
+    end
+  end
+
   dashboards << {
     'dashboard'     => d.attributes['name'],
     'is_story'      => is_story,
+    'canvas_px'     => canvas_px,
+    # Theme channel: this dashboard's Format▸Dashboard rules + the workbook's
+    # Format▸Workbook rules (lib/theme_derive resolves precedence).
+    'style_rules'   => { 'workbook' => WORKBOOK_STYLE_RULES,
+                         'dashboard' => style_rules_for(d) },
     'zones'         => zones,
     'zone_tree'     => zone_tree,
     # Phase-1 D1 (general): workbook brand palette from color encodings, so
@@ -1299,6 +1624,11 @@ if dashboards.empty? && !worksheets.empty?
     chart_kind = chart_kind_for(ws_meta)
     dashboards << {
       'dashboard' => "[synthetic] #{ws_name}",
+      # Sheet-only workbooks still carry workbook-level Format▸Workbook rules
+      # + encoded brand colors (theme channel); no dashboard scope exists.
+      'style_rules'   => { 'workbook' => WORKBOOK_STYLE_RULES, 'dashboard' => {} },
+      'brand_palette' => BRAND_PALETTE,
+      'canvas_px'     => nil,
       'zones'     => [{
         'id'           => '1',
         'kind'         => 'chart',
@@ -1312,6 +1642,8 @@ if dashboards.empty? && !worksheets.empty?
         'mark_class'     => ws_meta[:mark_class],
         'geo_role'       => ws_meta[:geo_role],
         'sort'           => ws_meta[:sort],
+        'shelf_sorts'    => ws_meta[:shelf_sorts],
+        'quick_calc_pcto' => ws_meta[:quick_calc_pcto],
         'filters'        => ws_meta[:filters],
         'hidden_filters' => ws_meta[:hidden_filters] || [],
         'aggregations'   => ws_meta[:aggregations],
@@ -1573,7 +1905,11 @@ meta = {
   'shared_filters' => scoped_shared_filters,
   'parameters'     => parameters,
   'column_aliases' => column_aliases,
-  'columns_by_guid'=> COL_BY_GUID.transform_values { |v| { 'caption' => v[:caption], 'datatype' => v[:datatype] } }
+  'columns_by_guid'=> COL_BY_GUID.transform_values { |v|
+    h = { 'caption' => v[:caption], 'datatype' => v[:datatype] }
+    h['formula'] = v[:formula] if v[:formula] # calc-ref deref (v5.1.1)
+    h
+  }
 }
 META_OUT = OUT.sub(/\.json$/, '-meta.json')
 File.write(META_OUT, JSON.pretty_generate(meta))

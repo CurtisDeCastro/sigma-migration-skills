@@ -1,5 +1,12 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+
+# Locale-proof the whole run: with LANG unset (fresh machines, CI, some SSH
+# sessions) Ruby defaults external encoding to US-ASCII, and any UTF-8 byte in
+# child-process output or an API error body then raises mid-pipeline. Field
+# names in real workbooks routinely carry non-ASCII ($, ©, accented captions).
+Encoding.default_external = Encoding::UTF_8
+
 # migrate-tableau.rb — ONE-SHOT, single-process orchestrator for the
 # tableau-to-sigma pipeline. Runs the whole phased workflow in one Ruby process
 # to cut agent turns / token cost, WITHOUT turning the migration into a black
@@ -38,7 +45,9 @@
 #     --workbook "<name>" | --workbook-id <luid> \
 #     --connection <SIGMA_CONNECTION_ID> --folder <SIGMA_FOLDER_ID> \
 #     [--db CSA --schema TJ] [--specs <path/to/specs.rb>] \
-#     [--name '<prefix for DM/workbook names>'] [--row-scale 1.5] \
+#     [--name '<prefix for DM/workbook names>'] \
+#     [--row-scale F | --page-rows N]  # row-model OVERRIDES: pass only to override —
+#                             # either flag disables the px-derived canvas rows \
 #     [--force]               # proceed past ❌-unhandled gap-scan features
 #     [--reuse-dm [ID]]       # opt IN to DM reuse (default: build new; bare
 #                             # flag = use find-or-pick-dm's recommendation)
@@ -113,6 +122,7 @@ require_relative 'lib/recipe_multimetric'
 require_relative 'lib/run_state'
 require_relative 'lib/offramp' # structured "where did this run leave the golden path" trail
 require_relative 'lib/fast_path' # FAST-PATH routing + BOM-tolerant JSON reads
+require_relative 'lib/phase_cache' # sha-stamped phase-output reuse on re-entry (refs/performance.md)
 require_relative 'lib/sigma_rest' # in-process Sigma token minting (no bash/eval)
 require_relative 'lib/tableau_rest' # in-process Tableau token minting (Windows-safe; no bash/eval)
 require_relative 'hydrate-custom-sql'
@@ -124,6 +134,10 @@ $LOAD_PATH.unshift File.expand_path('lib', HERE)
 require 'coverage_gate' # build-charts coverage.json → consolidated report (bead beads-sigma-59mk)
 
 require 'rbconfig'
+# Children (post-and-readback.rb, phase6-parity.rb, …) inherit this marker so
+# they can tell an ORCHESTRATED invocation from a cold standalone one — the
+# standalone manual-path gate in post-and-readback.rb keys off it.
+ENV['SIGMA_ORCHESTRATED_RUN'] = '1'
 # Snapshot ARGV before OptionParser consumes it — the reuse self-heal re-invokes
 # this orchestrator verbatim + `--skip-reuse-scan` (see the WorkbookBuildError
 # rescue). :recommended reuse comes from auto-pick, never a CLI arg, so the
@@ -190,7 +204,14 @@ OptionParser.new do |o|
   o.on('--allow-manual-spec REASON', 'deliberately hand-author --dm-spec/--wb-spec COLD (no prior ' \
                                      'orchestrator STOP). Normally the orchestrator authorizes this path; ' \
                                      'this waives that requirement — named in the report.') { |v| opts[:allow_manual_spec] = v }
+  o.on('--force-route-switch REASON', 'override the route-persistence check (a workdir driven via one route ' \
+                                      'must normally be finished the same way) — counted as a quality waiver; ' \
+                                      'name it in your report.') { |v| opts[:force_route_switch] = v }
   o.on('--out DIR')          { |v| opts[:out]     = File.expand_path(v) }
+  # Alias: every sibling script (doctor, intake, verify-complete, assert-*)
+  # takes --workdir; this orchestrator uniquely used --out — a copy-paste trap
+  # that aborted runs at argv parse (field-caught round 2). Both now work.
+  o.on('--workdir DIR', 'alias of --out') { |v| opts[:out] = File.expand_path(v) }
   o.on('--answers JSON')     { |v| opts[:answers] = v }
   o.on('--yes')              {     opts[:yes]     = true }
   o.on('--name PREFIX')      { |v| opts[:name]    = v }
@@ -203,9 +224,13 @@ OptionParser.new do |o|
   o.on('--skip-ref-check REASON', 'waive the pre-POST workbook ref-resolution gate — REQUIRED reason; name it in your report') { |v| opts[:skip_ref_check] = v }
   o.on('--skip-extract-landing REASON', 'proceed although every datasource is an embedded file extract and no ' \
                                         'landing manifest was found (exit 17 otherwise) — you own the DM table paths') { |v| opts[:skip_extract_landing] = v }
+  o.on('--no-auto-land', 'keep the manual extract-landing gate (exit 17) instead of auto-running land-extracts.py ' \
+                         'when the .twbx payload + connection id are already available') { opts[:no_auto_land] = true }
   o.on('--skip-postpublish-guide REASON', 'waive the finalize gate that requires POSTPUBLISH_GUIDE.md when the ' \
                                           'source carries dashboard actions (gate 11) — name it in your report') { |v| opts[:skip_postpublish_guide] = v }
   o.on('--row-scale F', Float) { |v| opts[:row_scale] = v }
+  o.on('--page-rows N', Integer, 'override the layout row model (passed through to build-dashboard-layout.rb; ' \
+                                 'wins over the px-derived canvas rows)') { |v| opts[:page_rows] = v }
   o.on('--master-col PAIR', "'Name=<Sigma formula>' — extra master column (repeatable). The resume path " \
                             'for the exit-4 handoff when a chart dim is a master-level calc the mechanical ' \
                             'map cannot derive (e.g. a binned/categorized dimension).') do |v|
@@ -249,6 +274,43 @@ OptionParser.new do |o|
                               'SAME dashboard rather than orphaning it.') { |v| opts[:reuse_workbook] = v }
 end.parse!
 
+# Share-URL intake (field-caught: three independent runs each rediscovered that
+# the MOST COMMON Tableau link shape — /#/site/<site>/views/<workbookContentUrl>/<view>
+# — resolves through NO existing path: resolve-project.rb is numeric-vizportal-only
+# and --workbook <name> fails because a workbook's display Name routinely diverges
+# from its contentUrl slug). Accept a URL pasted into --workbook, parse the
+# workbookContentUrl segment, and resolve it via the REST contentUrl filter.
+# Numeric /workbooks/<id> and /projects/<id> URLs keep routing to resolve-project.rb.
+if opts[:wb_name].to_s =~ %r{\Ahttps?://} || opts[:wb_name].to_s =~ %r{#/site/}
+  url = opts[:wb_name]
+  if (m = url.match(%r{/views/([^/?#]+)}))
+    content_url = m[1]
+    puts "── share-URL intake: /views/ link → resolving workbook contentUrl #{content_url.inspect}"
+    require_relative 'lib/tableau_rest'
+    # Cold-env order bug (field-caught round 2): with only PAT creds set (no
+    # TABLEAU_SITE_ID/AUTH_TOKEN minted yet) this resolver ran before any token
+    # existed and crashed with "TABLEAU_SITE_ID not set". Mint in-process first.
+    begin
+      Tableau.site_id
+    rescue Tableau::Error
+      puts '   no Tableau session yet — minting one in-process (PAT signin)'
+      Tableau.refresh_token!
+    end
+    hit = Tableau.find_workbook_by_content_url(content_url)
+    abort "FATAL: no workbook with contentUrl #{content_url.inspect} is visible to this PAT — " \
+          'check the site (TABLEAU_SITE_CONTENT_URL) and the PAT user\'s project permissions.' unless hit
+    opts[:wb_id] = hit['id']
+    opts[:wb_name] = nil
+    puts "   resolved: #{hit['name'].inspect} → workbook LUID #{hit['id']}"
+  elsif url =~ %r{/(workbooks|projects)/(\d+)}
+    abort "FATAL: numeric vizportal URL — resolve it first:\n" \
+          "  ruby scripts/resolve-project.rb --vizportal-id #{Regexp.last_match(2)}\n" \
+          'then re-run with --workbook-id <luid>.'
+  else
+    abort 'FATAL: unrecognized Tableau URL shape — pass --workbook-id <luid>, or a /views/… share link.'
+  end
+end
+
 abort 'missing --workbook or --workbook-id' unless opts[:wb_name] || opts[:wb_id]
 # intake.rb (front-door) caches the resolved connection in <out>/connection.json; honor it
 # when --connection is omitted so the agent need not re-pass the id it just resolved.
@@ -265,6 +327,19 @@ slug = (opts[:wb_name] || opts[:wb_id]).gsub(/[^A-Za-z0-9_-]/, '-').squeeze('-')
 WORK = opts[:out] || File.expand_path("~/tableau-migration/#{slug}")
 FileUtils.mkdir_p(File.join(WORK, 'views'))
 
+# ── run_id (run-scoped completion sentinels) ─────────────────────────────────
+# Each PASS-1 invocation mints a fresh uuid (persisted in the run-state ledger,
+# copied into migrate-state.json at the end of pass 1). --finalize RESUMES the
+# run, so it reuses the pass-1 id. The sentinels (parity-pending.json /
+# phase6-success.json) are keyed to it: a success marker from a previous run id
+# can never vouch for the current run.
+RUN_ID = if opts[:finalize]
+           (JSON.parse(File.read(File.join(WORK, 'migrate-state.json')))['run_id'] rescue nil) ||
+             RunState.run_id(WORK)
+         else
+           RunState.new_run_id!(WORK)
+         end
+
 # 🚧 Step-0 environment GATE. The doctor writes a doctor.json fingerprint; this
 # refuses to run on an env that never passed the doctor, instead of letting the
 # pipeline improvise around a missing runtime (the #1 source of cross-user
@@ -274,7 +349,12 @@ _dg_skip = opts[:skip_doctor_gate] || ENV['SIGMA_SKIP_DOCTOR_GATE']
 _dg_cmd = ['ruby', File.join(HERE, 'assert-doctor-ran.rb'), '--workdir', WORK]
 _dg_cmd += ['--skip-doctor-gate', _dg_skip] if _dg_skip && !_dg_skip.to_s.empty?
 unless system(*_dg_cmd)
-  abort 'FATAL: environment gate failed — run the doctor first (see remediation above), ' \
+  # Host-dispatched doctor hint: PowerShell/cmd users get the .ps1 twin, not a
+  # bash script they cannot run (RbConfig::CONFIG['host_os'] — docs-level P1.3).
+  _doc_hint = RbConfig::CONFIG['host_os'] =~ /mswin|mingw|cygwin/ ?
+                'powershell -ExecutionPolicy Bypass -File scripts\\doctor.ps1' :
+                'bash scripts/doctor.sh'
+  abort "FATAL: environment gate failed — run the doctor first (#{_doc_hint}; see remediation above), " \
         'or re-run with --skip-doctor-gate "<reason>".'
 end
 
@@ -370,11 +450,58 @@ rescue StandardError
 end
 
 TOTAL = 6
+
+# ── Total-runtime handoff nudge (refs/orchestration.md O2) ──────────────────
+# Field failure, 2026-07: a single context drove one migration for 6+ hours,
+# compaction-looped by hour 3 (grepping its own transcript to recover
+# commands), and never handed off. The run-state ledger stamps a timestamp at
+# every phase entry, so TOTAL elapsed time — across passes/resumes, because
+# stamps merge by phase key and the FIRST stamp of pass 1 survives — is
+# computable for free. When it crosses the O2 budget, print ONE loud line per
+# run pointing at the handoff protocol. Advisory only — never changes behavior.
+HANDOFF_BUDGET_MIN = 90
+$handoff_nudged = false
+def handoff_nudge
+  return if $handoff_nudged
+  return unless defined?(WORK) && WORK
+  first = RunState.load(WORK)['phases'].values
+                  .map { |p| begin; Time.parse(p['ts'].to_s); rescue StandardError; nil; end }
+                  .compact.min
+  return unless first
+  elapsed_min = ((Time.now - first) / 60).round
+  return unless elapsed_min > HANDOFF_BUDGET_MIN
+  $handoff_nudged = true
+  puts
+  puts "⏰⏰⏰ HANDOFF NUDGE — this context has been driving for #{elapsed_min}m (budget #{HANDOFF_BUDGET_MIN}m)."
+  puts "   Per refs/orchestration.md (O2): write #{File.join(WORK, 'HANDOFF.md')} and hand off to a"
+  puts '   fresh builder agent; resume is cheap (discovery caches + phase stamps skip completed work).'
+rescue StandardError
+  nil # advisory only — a nudge failure must never touch the conversion
+end
+
+# Authorize the manual (hand-authored spec) path — written at every designed
+# judgment STOP (converter-stop, the exit-4 workbook handoff, exit-10 decisions,
+# exit-11 gap stops). The manual-spec gate refuses --dm-spec/--wb-spec (and
+# post-and-readback refuses a standalone run on an orchestrated workdir) unless
+# this token exists: the manual path is entered via an orchestrator STOP, not
+# cold. Best-effort — bookkeeping never sinks a run.
+def authorize_manual_path!(via:, reason:, exit_code:, extra: {})
+  File.write(File.join(WORK, 'manual-path-authorized.json'),
+             JSON.pretty_generate({ 'via' => via, 'reason' => reason,
+                                    'exit_code' => exit_code,
+                                    'run_id' => (defined?(RUN_ID) ? RUN_ID : nil),
+                                    'at' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ') }.merge(extra).compact))
+rescue StandardError
+  nil
+end
+
 def hdr(n, title)
   puts; puts "── Phase #{n}/#{TOTAL} · #{title} ──"
   # Ledger stamp — records that the orchestrator entered this phase (Tier 2
   # run-state chain; assert-run-state.rb audits it). Best-effort; never fatal.
   RunState.stamp(WORK, "phase-#{n}", note: title) if defined?(WORK)
+  # Total-runtime check rides every phase header (prints at most once per run).
+  handoff_nudge
 end
 def line(m) puts "   #{m}"; end
 
@@ -384,16 +511,76 @@ def line(m) puts "   #{m}"; end
 START_T = Time.now
 PHASE_T = {}
 $t_mark = Time.now
+
+# ── Wall-clock budgets (refs/performance.md, workstream S2) ─────────────────
+# EXPECTED seconds per phase for a MEDIUM workbook (~10 views / 1-2 dashboards,
+# warm caches where a cache exists), calibrated from the GREEN reference run
+# (~45-60 min per comparable workbook end-to-end). mark() prints ONE loud
+# advisory line when a phase's cumulative time exceeds ~3x its budget — no
+# behavioral change, just "this should have taken ~Ys; stop and read
+# refs/performance.md#slow-<phase> instead of restarting from scratch".
+# A COLD first run legitimately runs at the top of these ranges; the 3x
+# multiplier keeps cold runs quiet and only flags genuinely-wedged phases.
+PHASE_BUDGET = {
+  'fastpath-route'    => 10,  # pure routing + DM readback (no Tableau work)
+  'phase1-foreground' => 150, # parse-twb-layout + mechanical converter (cold); sha-cached re-entry ~5s
+  'phase1-lane(bg)'   => 240, # Tableau 5-fetch discovery pool, cold 2-4min; stamp-reused <5s
+  'join-wait'         => 240, # foreground wait on the lane (≈ lane time on a cold run, ~0s on reuse)
+  'phase1.6-dm-scan'  => 45,  # DM list + ≤25 spec fetches; signature-cached re-entry <1s
+  'phase2-columns'    => 90,  # ~2-5s per table via the Sigma catalog; cols-*.json reused on re-entry
+  'phase1-join'       => 120, # calc extraction + custom-SQL scan + gap-report parse (sha-cached on re-entry)
+  'decisions'         => 10,  # pure local
+  'folder-resolve'    => 15,  # one whoami + files listing
+  'phase3-dm'         => 90,  # validate + POST + readback (skipped entirely on --reuse-dm)
+  'phase4-workbook'   => 150, # master derive + build-charts + validate + ref-gate + POST
+  'phase5-layout'     => 45,  # layout build + PUT
+  'phase5b-visual-qa' => 120, # ~15s per page render
+  'phase5g-init'      => 10,  # ledger init only
+  'phase6-pass1'      => 240, # structural checks + pooled actuals collection (1-3min)
+  'phase6-finalize'   => 180, # verifier + census over collected actuals
+  'cleanup-orphans'   => 45,
+  'assert-run-state'  => 10,
+  'assert-phase6-ran' => 90,
+  'phaseE'            => 240,
+  'pivot-totals-ship' => 20   # one GET+PUT to re-hide pivot grand totals at ship
+}.freeze
+
+$budget_warned = {}
 def mark(key)
   now = Time.now
   PHASE_T[key] = (PHASE_T[key] || 0.0) + (now - $t_mark)
   $t_mark = now
+  budget = PHASE_BUDGET[key]
+  return unless budget && PHASE_T[key] > 3 * budget && !$budget_warned[key]
+  $budget_warned[key] = true
+  anchor = key.gsub(/[^A-Za-z0-9]+/, '-').gsub(/\A-|-\z/, '').downcase
+  puts "⚠️  PHASE '#{key}' is OVER BUDGET (#{(PHASE_T[key] / 60.0).round(1)}m elapsed > ~#{budget}s expected) — " \
+       "see refs/performance.md#slow-#{anchor} before retrying. Do NOT restart the migration from " \
+       'scratch: the resume machinery skips completed phases; a restart re-pays everything.'
 end
 def phase_summary
   return if PHASE_T.empty?
   puts
   puts "PHASE TIMINGS  #{PHASE_T.map { |k, v| "#{k}=#{v.round(1)}s" }.join('  ')}  " \
        "total=#{(Time.now - START_T).round(1)}s"
+  over = PHASE_T.select { |k, v| PHASE_BUDGET[k] && v > 3 * PHASE_BUDGET[k] }
+  puts "PHASE BUDGET   over-budget: #{over.map { |k, v| "#{k}=#{v.round(0)}s(>#{PHASE_BUDGET[k]}s)" }.join('  ')}  — see refs/performance.md" if over.any?
+end
+
+# Reap the background discovery lane with a HARD bound — an abort/stop path
+# must never hang forever on a wedged child process (poll-bounds audit,
+# refs/performance.md). Returns false when the lane did not exit in time; the
+# caller proceeds anyway (the child is detached and the run is stopping).
+def reap_lane!(lane_done, timeout = 60)
+  t0 = Time.now
+  until lane_done.call
+    if Time.now - t0 > timeout
+      puts "   WARN: discovery lane did not exit within #{timeout}s — proceeding without reaping it"
+      return false
+    end
+    sleep 0.1
+  end
+  true
 end
 
 # Run a child command, indenting its output. token_env: prepend a fresh
@@ -432,7 +619,25 @@ end
 # no PAT creds are available to refresh (parity with a hand-minted token).
 def tableau_env
   begin
-    Tableau.refresh_token! # fresh PAT signin, in-process
+    # v5.2 (speed): PAT signin 401s are routinely TRANSIENT on Tableau Online
+    # (session teardown races, concurrent signins on one PAT) — round 4's run
+    # died on one and the very next re-run succeeded, costing a full
+    # orchestrator round-trip. Retry twice with backoff before giving up.
+    attempts = 0
+    begin
+      Tableau.refresh_token! # fresh PAT signin, in-process
+    rescue Tableau::Error => te
+      attempts += 1
+      # retry only when there is NO hand-minted fallback token — with one
+      # available, fail FAST to it (a permanently-revoked PAT would otherwise
+      # tax every call 9s; review-caught)
+      if attempts <= 2 && te.message =~ /401|Signin/i && ENV['TABLEAU_AUTH_TOKEN'].to_s.empty?
+        warn "Tableau signin failed (#{te.message.lines.first.to_s.strip[0, 80]}) — retry #{attempts}/2 in #{3 * attempts}s"
+        sleep(3 * attempts)
+        retry
+      end
+      raise
+    end
   rescue Tableau::Error
     raise if ENV['TABLEAU_AUTH_TOKEN'].to_s.empty? # nothing to fall back on
   end
@@ -481,14 +686,45 @@ def sigma_run_wb!(cmd)
 end
 
 # Pull likely-offending field/column names out of a failed workbook build/POST log.
+def plausible_field_name?(s)
+  # v5.4: the capture regexes below take "everything to the newline/comma" —
+  # an error body like "Dependency not found. The usual cause is …" captured
+  # ". The usual cause is …" as a FIELD NAME (round-6: exit-4 offramps named
+  # the untranslatable field '. The usual'). A field name never starts with
+  # sentence punctuation — reject prose shapes. v5.4.9 review fix: the word
+  # cap was 7, which culled legitimate long enterprise KPI captions ("Average
+  # Revenue Per Paying User Per Month (USD)" is 8 words) from the exit-4
+  # recovery list; the prose class is already rejected by the leading-
+  # punctuation check plus the mandatory-colon capture, so the cap is only a
+  # backstop — keep it generous.
+  t = s.to_s.strip
+  return false if t.empty? || t.length > 80
+  return false if t.start_with?('.', ',', ';', ':', '-')
+  return false if t.split.length > 12
+  # Prose, not a caption: a clause starting with a lowercase English function
+  # word ("the element you referenced was removed …"). Tableau captions are
+  # Title Case / CONSTANT_CASE; a lowercase-article lead is sentence tail.
+  return false if t =~ /\A(?:the|a|an|this|that|these|those|it|its|you|your|is|are|was|were|be|been|has|have|had|and|or|of|in|on|to|for|with)\s/
+  true
+end
+
 def cull_failed_fields(*logs)
+  # Child output arrives in the LOCALE encoding (US-ASCII when LANG is unset —
+  # common on fresh machines/CI), and Sigma error bodies carry UTF-8 field
+  # names; an un-scrubbed scan then crashes the RESCUE path itself with
+  # "invalid byte sequence in US-ASCII". Never let log mining raise.
   text = logs.join("\n")
+  text = text.force_encoding(Encoding::UTF_8) unless text.encoding == Encoding::UTF_8
+  text = text.scrub('?') unless text.valid_encoding?
   names = []
-  text.scan(/Dependency not found:?\s*([^\n,]+)/i) { |m| names << m[0].strip }
+  # v5.4: the colon is MANDATORY — "Dependency not found. The usual cause…"
+  # (prose after a period) previously captured '. The usual' as a field name.
+  text.scan(/Dependency not found:\s*([^\n,]+)/i) { |m| names << m[0].strip }
   text.scan(/Unknown column\s*"?\[?([^"\]\n]+)\]?"?/i) { |m| names << m[0].strip }
   text.scan(/unmapped (?:derived[- ]dim|measure|field)\s*[:=]?\s*([^\n,]+)/i) { |m| names << m[0].strip }
   text.scan(/Circular column reference[^\n]*\[([^\]]+)\]/i) { |m| names << m[0].strip }
-  names.map { |n| n.gsub(/[\[\]"]/, '').strip }.reject(&:empty?).uniq
+  names.map { |n| n.gsub(/[\[\]"]/, '').strip }
+       .select { |n| plausible_field_name?(n) }.uniq
 end
 
 def yp(s) YAML.safe_load(s, permitted_classes: [Date, Time]) rescue {} end
@@ -609,7 +845,7 @@ if opts[:finalize]
     puts "     side-by-side against the source dashboard PNG in #{WORK} (Phase 1d)."
     puts '     Fix any visual divergence (re-PUT the spec) and re-render until they match.'
     puts '  3. Record the verdict so gate 8b confirms the comparison ran, then re-run --finalize:'
-    puts "       ruby scripts/record-visual-check.rb --workdir #{WORK} --verdict pass --notes \"<what you compared>\""
+    puts "       ruby scripts/record-visual-check.rb --workdir #{WORK} --verdict pass --notes \"<what you compared>\" --checklist \"<layout-visual-qa.md section 1b>\""
     puts '  If the workbook genuinely cannot be rendered (export API unavailable), the gate'
     puts '  can be waived ONLY via assert-phase6-ran.rb --skip-visual-gate "<reason>" —'
     puts '  name the reason in your migration report.'
@@ -625,7 +861,7 @@ if opts[:finalize]
     puts "  1. READ the rendered page (#{File.join(WORK, 'sigma-render.png')}) side-by-side"
     puts "     against the source dashboard PNG in #{WORK} (Phase 1d)."
     puts '  2. Record your verdict (this is what the gate checks):'
-    puts "       ruby scripts/record-visual-check.rb --workdir #{WORK} --verdict pass --notes \"<what matched>\""
+    puts "       ruby scripts/record-visual-check.rb --workdir #{WORK} --verdict pass --notes \"<what matched>\" --checklist \"<layout-visual-qa.md section 1b>\""
     puts '     If they DIVERGE: --verdict divergent --notes "<gap>", fix the spec, re-render, re-read,'
     puts '     then re-record --verdict pass. The gate stays blocked until the verdict is pass.'
     puts '============================================================================='
@@ -741,12 +977,43 @@ if opts[:finalize]
   end
 
   mark('phaseE') if enhance_requested
+
+  # ---- v5.4: pivot grand-totals SHIP step -------------------------------------
+  # A pivot carrying a `totals` key 500s its CSV export (probe-isolated v5.4:
+  # the key's PRESENCE is the sole trigger — value type irrelevant), which
+  # poisons verify-anchors' pivot exports, so verify-anchors STRIPS the key
+  # around its own pivot CSV exports and restores it after (generated pivots
+  # otherwise carry `totals` from build onward). Now that every gate is GREEN,
+  # repair any pivot the bracket left totals-less on the shipped workbook as
+  # the FINAL spec mutation — the same put-layout late-mutation channel
+  # hidden-titles uses. Runs AFTER Phase E (the enhance clone verifies against
+  # totals-free pivots too). Idempotent + non-fatal: a failure only means
+  # visible grand-total rows, a documented cosmetic residual (ROUND6 §2.4).
+  # --workdir (v5.4.9) lets the *-pivot-totals.json sidecar override apply on
+  # this automated path too (incl. the restore sidecar verify-anchors writes).
+  if all_green
+    _, tst = sigma_run!(['ruby', File.join(HERE, 'put-layout.rb'),
+                         '--workbook', wb_id, '--apply-pivot-totals',
+                         '--workdir', WORK], allow_fail: true)
+    line(tst.success? ? 'pivot grand-totals re-hidden on shipped workbook (final mutation)' :
+         'WARN: pivot totals re-apply failed — workbook ships with visible grand-total rows (cosmetic residual)')
+    mark('pivot-totals-ship')
+  end
+
   pf = (JSON.parse(File.read(File.join(WORK, 'parity-final.json'))) rescue {})
   puts
   puts '================ RESULT ================'
   puts "dataModelId : #{state['data_model_id']}"
   puts "workbookId  : #{wb_id}"
-  puts "PARITY      : #{pf['status'] || '?'} (#{pf['charts_pass']}/#{pf['charts_total']} charts#{state['extract_mode'] ? ', extract-mode' : ''})"
+  # An all-embedded workbook has 0 exportable charts — when the hard gate
+  # accepted the anchors oracle instead, say THAT (a "FAIL (0/0)" line next to
+  # STATUS: GREEN reads like a contradiction in the report).
+  _av_sum = (JSON.parse(File.read(File.join(WORK, 'anchors-verdict.json'))) rescue nil)
+  if pf['charts_total'].to_i.zero? && gst.success? && _av_sum && _av_sum['pass']
+    puts "PARITY      : ANCHORS ORACLE (0 exportable view CSVs; #{_av_sum['matched']}/#{_av_sum['checked']} source anchors matched)"
+  else
+    puts "PARITY      : #{pf['status'] || '?'} (#{pf['charts_pass']}/#{pf['charts_total']} charts#{state['extract_mode'] ? ', extract-mode' : ''})"
+  end
   puts "GATES       : phase6=#{p6st.success? ? 'PASS' : 'FAIL'} cleanup=#{clst.success? ? 'PASS' : 'FAIL'} assert-phase6-ran=#{gst.success? ? 'PASS' : "FAIL(#{gst.exitstatus})"}"
   puts "ENHANCE     : #{enhance_line}" if enhance_line
   puts "STATUS      : #{all_green ? 'GREEN' : 'NOT GREEN'}"
@@ -828,6 +1095,50 @@ if opts[:dm_spec] || opts[:wb_spec]
   end)
 end
 MANUAL_JSON_SPECS = !opts[:wb_spec].nil?
+
+# ---------------------------------------------------------------------------
+# 🚧 ROUTE PERSISTENCE (P2). migrate-state.json records HOW this workdir was
+# driven ('orchestrated' | 'manual-authorized'). A re-entry on the OTHER route
+# produces inconsistent state (a mechanical rebuild over hand-authored specs, or
+# vice versa), so it fails closed. Sanctioned exceptions:
+#   * switching TO the manual route through the same admit set as the
+#     manual-spec gate above (STOP token / explicit --reuse-dm id /
+#     --allow-manual-spec) — the designed handoff;
+#   * an explicit --force-route-switch "<reason>" (recorded as an off-ramp and
+#     counted as a quality waiver by assert-phase6-ran).
+# --finalize is route-neutral: it resumes whatever pass 1 recorded.
+# ---------------------------------------------------------------------------
+CURRENT_ROUTE = MANUAL_JSON_SPECS ? 'manual-authorized' : 'orchestrated'
+unless opts[:finalize]
+  _prev_route = (JSON.parse(File.read(File.join(WORK, 'migrate-state.json')))['route'] rescue nil)
+  if _prev_route && _prev_route != CURRENT_ROUTE
+    _switch_ok =
+      if opts[:force_route_switch] && !opts[:force_route_switch].to_s.empty?
+        warn "WARN: route switch FORCED (#{_prev_route} → #{CURRENT_ROUTE}): #{opts[:force_route_switch]} — " \
+             'counted as a quality waiver; name it in your report.'
+        Offramp.log(WORK, kind: 'route-switch-forced',
+                    reason: opts[:force_route_switch].to_s,
+                    detail: "#{_prev_route} → #{CURRENT_ROUTE}")
+        true
+      elsif CURRENT_ROUTE == 'manual-authorized'
+        # same admit set as the manual-spec gate (which already ran above)
+        File.exist?(File.join(WORK, 'manual-path-authorized.json')) ||
+          (opts[:reuse_dm] && opts[:reuse_dm] != :recommended) ||
+          !opts[:allow_manual_spec].to_s.empty?
+      else
+        false
+      end
+    unless _switch_ok
+      abort <<~MSG
+        FATAL: this workdir was driven via the #{_prev_route} route; finish it the same way.
+        (migrate-state.json records route=#{_prev_route}; this invocation is #{CURRENT_ROUTE}.)
+        Re-run the way pass 1 was driven#{_prev_route == 'manual-authorized' ? ' (--reuse-dm <id> --wb-spec <path>)' : ' (the plain orchestrator command, no --wb-spec)'} —
+        or, if the switch is deliberate, add --force-route-switch "<reason>" (a quality
+        waiver: it is counted against the gate's waiver budget and must be in your report).
+      MSG
+    end
+  end
+end
 
 # ---------------------------------------------------------------------------
 # FAST PATH routing (--reuse-dm <id> + --wb-spec). See the header comment +
@@ -920,16 +1231,30 @@ probe_rb << "puts JSON.generate({ 'id' => wb['id'], 'updatedAt' => wb['updatedAt
 probe_out, probe_st = Open3.capture2e(tableau_env, RbConfig.ruby, '-e', probe_rb)
 probe = (JSON.parse(probe_out.lines.last.to_s) rescue nil) if probe_st.success?
 stamp = (JSON.parse(File.read(stamp_path)) rescue nil)
+disc_complete = disc_artifacts.all? { |p| File.exist?(p) } &&
+                Dir[File.join(WORK, 'views', '*.csv')].any?
 reuse_discovery = probe && stamp &&
                   stamp['workbook_id'] == probe['id'] && stamp['updatedAt'] == probe['updatedAt'] &&
-                  disc_artifacts.all? { |p| File.exist?(p) } &&
-                  Dir[File.join(WORK, 'views', '*.csv')].any?
+                  disc_complete
+# Probe-failure resilience (speed hardening): a TRANSIENT probe failure must
+# not nuke a complete, stamped discovery and re-pay the full Tableau fetch —
+# worse, if Tableau is genuinely unreachable the re-fetch dies too, AFTER
+# clearing a perfectly good cache. Reuse the stamped artifacts with a loud
+# WARN instead; delete discovery-stamp.json to force a re-fetch.
+probe_failed_reuse = !probe && stamp && disc_complete
+reuse_discovery ||= probe_failed_reuse
 
 disc_log = File.join(WORK, 'phase1-discover.log')
 if reuse_discovery
   lane = { started: Time.now, ended: Time.now, status: FAKE_OK.new(0), reused: true }
-  line "discovery REUSED (stamp match: workbook #{probe['id']} updatedAt=#{probe['updatedAt']}; " \
-       "#{Dir[File.join(WORK, 'views', '*.csv')].size} view CSVs already on disk) — Tableau fetch skipped"
+  if probe_failed_reuse
+    line "WARN: workbook-revision probe FAILED (#{probe_out.lines.last.to_s.strip[0, 120]})"
+    line "      REUSING stamped discovery from #{stamp['stamped_at']} (workbook #{stamp['workbook_id']}, " \
+         'source revision UNVERIFIED this run) — delete discovery-stamp.json to force a re-fetch.'
+  else
+    line "discovery REUSED (stamp match: workbook #{probe['id']} updatedAt=#{probe['updatedAt']}; " \
+         "#{Dir[File.join(WORK, 'views', '*.csv')].size} view CSVs already on disk) — Tableau fetch skipped"
+  end
 else
   unless probe
     line "WARN: workbook-revision probe failed (#{probe_out.lines.last.to_s.strip[0, 120]}); discovery will re-fetch"
@@ -999,12 +1324,19 @@ print_lane_log = lambda do
   File.read(disc_log, encoding: 'UTF-8').each_line { |l| puts "   │ #{l.rstrip}" } if File.exist?(disc_log)
 end
 # Wait for a lane artifact (tableau-discover writes them atomically). Returns
-# false when the lane exits without producing it.
+# false when the lane exits without producing it. Bounded (hard timeout) with a
+# 30s progress heartbeat so a long fetch never LOOKS wedged (poll-bounds audit).
 lane_wait_for = lambda do |path, what, timeout = 600|
   t0 = Time.now
+  beat = t0
   until File.exist?(path)
     if lane_done.call
       return File.exist?(path)
+    end
+    if Time.now - beat > 30
+      beat = Time.now
+      puts "   … still waiting for #{what} from the discovery lane " \
+           "(#{(Time.now - t0).round}s elapsed, timeout #{timeout}s; tail #{File.basename(disc_log)} for progress)"
     end
     abort "FATAL: timed out (#{timeout}s) waiting for #{what} from the discovery lane" if Time.now - t0 > timeout
     sleep 0.1
@@ -1028,8 +1360,21 @@ views = [views] unless views.is_a?(Array)
 line "workbook '#{wb_name}' (#{wb_luid}): #{views.size} view(s)#{has_extracts ? ', hasExtracts=true' : ''}"
 
 have_twb = lane_wait_for.call(twb, 'workbook-content.twb') # layout_json defined at the FAST PATH routing block
+# .twb content sha — the input key for every phase that is a pure function of
+# the workbook XML (parse-twb-layout, calc extraction, custom-SQL scan). On a
+# re-entry with the same .twb these skip via PhaseCache (refs/performance.md).
+twb_sha = have_twb ? PhaseCache.file_sha(twb) : nil
 if have_twb
-  run!(['ruby', File.join(HERE, 'parse-twb-layout.rb'), twb, layout_json] + DASH_SCOPE)
+  # The key carries the PARSER's own sha too: the output is a function of the
+  # .twb AND the parser code — without it, a resumed workdir kept serving a
+  # stale dashboard-layout.json across parser upgrades (v5.1.1 review-caught).
+  parser_sha = PhaseCache.file_sha(File.join(HERE, 'parse-twb-layout.rb'))
+  parse_st = PhaseCache.cached(WORK, 'parse-twb-layout',
+                               key: PhaseCache.key(twb_sha, parser_sha, DASH_SCOPE.join(' ')),
+                               outputs: [layout_json]) do
+    run!(['ruby', File.join(HERE, 'parse-twb-layout.rb'), twb, layout_json] + DASH_SCOPE)
+  end
+  line 'parse-twb-layout REUSED (.twb sha + scope unchanged) — delete dashboard-layout.json to force a re-parse' if parse_st == :reused
   line "per-dashboard scope: #{(opts[:dashboards] || []) + (opts[:pages] || [])} (single-tab build)" if SCOPED
   dash = JSON.parse(File.read(layout_json))
   zones = dash.is_a?(Array) ? dash.flat_map { |d| d['zones'] || [] } : (dash['zones'] || [])
@@ -1082,7 +1427,7 @@ mechanical = !have_specs
 conv = nil
 if mechanical
   unless have_twb
-    sleep 0.1 until lane_done.call # reap the background lane before aborting
+    reap_lane!(lane_done) # bounded reap of the background lane before aborting
     print_lane_log.call
     abort <<~MSG
       FATAL: mechanical conversion needs the workbook .twb (for the data model +
@@ -1144,18 +1489,12 @@ if mechanical
     line 'converter: HOSTED MCP (sigma-data-model-mcp.onrender.com) — NOTE: the .twb is uploaded'
     line '           to this third-party server (opted in via --converter hosted / SIGMA_CONVERTER_ALLOW_HOSTED).'
   else
-    sleep 0.1 until lane_done.call # reap the background lane before aborting
+    reap_lane!(lane_done) # bounded reap of the background lane before aborting
     print_lane_log.call
     # Authorize the option-2 agent-authored-spec re-entry (the re-run passes
     # --dm-spec/--wb-spec; the manual-spec gate requires this token or refuses a
     # cold hand-author).
-    begin
-      File.write(File.join(WORK, 'manual-path-authorized.json'),
-                 JSON.pretty_generate('via' => 'converter-stop',
-                                      'at' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')))
-    rescue StandardError
-      # best-effort
-    end
+    authorize_manual_path!(via: 'converter-stop', reason: 'no converter backend configured', exit_code: 1)
     Offramp.log(WORK, kind: 'converter-stop', reason: 'no converter backend configured')
     abort <<~MSG
       ==================== CONVERTER STOP (no backend) ====================
@@ -1226,6 +1565,96 @@ if mechanical
     end
     if conn_classes.any? && (conn_classes - embedded_classes).empty?
       landing_manifest = Dir[File.join(WORK, '*landing-manifest*.json')].first
+      # A pre-existing EMPTY manifest ([], from a pre-v5.2.1 payload-less run)
+      # must not satisfy the gate either (review-caught) — treat as absent.
+      if landing_manifest
+        lm_body = JSON.parse(File.read(landing_manifest)) rescue nil
+        if lm_body.is_a?(Array) && lm_body.empty?
+          line "WARN: #{File.basename(landing_manifest)} is EMPTY (0 tables) — ignoring it (nothing was landed)"
+          File.delete(landing_manifest)
+          landing_manifest = nil
+        end
+      end
+      # v5.2 (speed): AUTO-LAND when everything the manual step needs is
+      # already on disk — discovery auto-refetched the .twbx WITH the extract
+      # payload (v4.4), the connection id is a required arg, and --db/--schema
+      # default the target. Round 4 burned a full exit-17 → model → re-run
+      # round-trip on a step that was deterministic. Failure falls through to
+      # the original exit-17 instructions; --no-auto-land opts out.
+      twbx_payload = File.join(WORK, 'workbook-content.twbx')
+      # Identity PRECONDITION (v5.2.1 review-caught: without it the AUTO-LANDING
+      # banner printed and then always failed — land-extracts.py hard-requires
+      # account+user). Resolvable = env or the neutral cred file carries them;
+      # land-extracts.py itself resolves the same way.
+      sf_env = {}
+      neutral = File.expand_path('~/.sigma-migration/env')
+      if File.exist?(neutral)
+        File.readlines(neutral).each do |l|
+          # SAME grammar as land-extracts.py's load_neutral_env (KEY=VALUE, no
+          # whitespace around '=') — a laxer Ruby regex would say "resolvable"
+          # for a line Python then can't read (review-caught).
+          m = l.match(/\A\s*(?:export\s+)?(SNOWFLAKE_\w+)=(.+?)\s*\z/)
+          sf_env[m[1]] = m[2].gsub(/\A["']|["']\z/, '') if m
+        end
+      end
+      sf_ok = %w[SNOWFLAKE_ACCOUNT SNOWFLAKE_USER].all? { |k| !ENV[k].to_s.empty? || !sf_env[k].to_s.empty? }
+      # v5.3: the extract re-download lane can still be REPLACING the .twbx
+      # when this gate runs (round 5: auto-land saw the thin pre-refetch file,
+      # found "no .hyper payloads", and fell to exit 17 while the payload
+      # arrived seconds later). A .twbx is a ZIP — the .hyper member names are
+      # visible as plain bytes; wait briefly for them before invoking.
+      # Wait ONLY when auto-land could actually proceed (v5.3.1 review-caught:
+      # the loop stalled 30s on runs that were headed to the manual gate
+      # anyway), and stop as soon as the discovery lane has exited — no
+      # further .twbx replacement is possible after that.
+      if landing_manifest.nil? && !opts[:no_auto_land] && !opts[:skip_extract_landing] &&
+         opts[:conn] && sf_ok && File.exist?(twbx_payload)
+        6.times do
+          break if (File.binread(twbx_payload).include?('.hyper') rescue false)
+          break if (defined?(lane_done) && (lane_done.call rescue true)) # lane exited — file is final
+          line 'auto-land: .twbx has no .hyper payload yet — waiting 5s for the extract re-download lane'
+          sleep 5
+        end
+      end
+      if landing_manifest.nil? && !opts[:no_auto_land] && !opts[:skip_extract_landing] &&
+         File.exist?(twbx_payload) && opts[:conn] && sf_ok
+        # Prefix carries a LUID fragment so two workbooks whose names share the
+        # slug can never clobber each other's landed tables (write_pandas
+        # overwrite=true; review-caught) — and stays stable across re-runs.
+        slug = (opts[:name] || File.basename(WORK)).to_s.upcase.gsub(/[^A-Z0-9]+/, '_')
+                                                    .sub(/\A_+|_+\z/, '')[0, 17]
+        prefix = wb_luid ? "#{slug}_#{wb_luid.to_s.delete('-')[0, 6].upcase}" : slug
+        line "embedded-extract sources (#{conn_classes.join(', ')}) — AUTO-LANDING the frozen extract " \
+             "(prefix #{prefix}; --no-auto-land to keep the manual gate)"
+        _o, lst = run!([*PyResolve.argv, File.join(HERE, 'land-extracts.py'),
+                        '--twbx', twbx_payload,
+                        '--db', (opts[:db] || 'CSA'), '--schema', (opts[:schema] || 'TJ'),
+                        '--prefix', prefix, '--sigma-connection-id', opts[:conn],
+                        '--manifest-out', File.join(WORK, 'landing-manifest.json')],
+                       allow_fail: true)
+        mani_p = File.join(WORK, 'landing-manifest.json')
+        # Parse the manifest INDEPENDENTLY of the exit status — a nonzero exit
+        # AFTER the tables landed (e.g. the catalog /sync step failed) leaves a
+        # POPULATED manifest that must survive (review-caught: the delete-if-
+        # empty guard, keyed off a short-circuited [], destroyed it).
+        mani_body = File.exist?(mani_p) ? (JSON.parse(File.read(mani_p)) rescue nil) : nil
+        if lst.success? && mani_body.is_a?(Array) && mani_body.any?
+          landing_manifest = mani_p
+          Offramp.log(WORK, kind: 'auto-land', detail: "landed #{mani_body.size} table(s), prefix #{prefix}") if defined?(Offramp)
+        elsif mani_body.is_a?(Array) && mani_body.any?
+          line "WARN: auto-landing exited nonzero AFTER landing #{mani_body.size} table(s) (manifest kept) — " \
+               'verify the landing log, then re-run (the manifest satisfies the gate on re-entry)'
+        else
+          # An EMPTY manifest (twbx without .hyper payloads) exits 0 — it must
+          # NOT pass the gate as "landed" (review-caught false pass).
+          File.delete(mani_p) if mani_body.is_a?(Array) && mani_body.empty?
+          line 'WARN: auto-landing landed nothing (failure or payload-less .twbx) — manual landing gate (exit 17)'
+        end
+      elsif landing_manifest.nil? && !opts[:no_auto_land] && !opts[:skip_extract_landing] &&
+            File.exist?(twbx_payload) && opts[:conn] && !sf_ok
+        line 'NOTE: auto-landing available but SNOWFLAKE_ACCOUNT/SNOWFLAKE_USER are not in env or ' \
+             '~/.sigma-migration/env — add them once to skip this manual gate on future runs.'
+      end
       if landing_manifest
         line "embedded-extract sources (#{conn_classes.join(', ')}) — landing manifest found " \
              "(#{File.basename(landing_manifest)}); parity mode is EXACT (frozen extract landed byte-identical)"
@@ -1261,6 +1690,41 @@ if mechanical
   end
 
   conv_twb = twb
+  # v5.3: UNION-OF-ONE collapse. Tableau serializes a single-table datasource
+  # that was once a wildcard union as <relation type='union' all='true'> with
+  # ONE inner table relation — the converter models unions as unsupported and
+  # emits an EMPTY data model (round-5 root cause: Udemy #VOTD forced all
+  # three models onto the manual path). A union of one is semantically its
+  # inner table; collapse it on a COPY (inner relation inherits the union's
+  # name so downstream column refs keep resolving).
+  if have_twb
+    begin
+      require 'rexml/document'
+      raw = File.read(conv_twb, encoding: 'UTF-8')
+      if raw.include?("type='union'") || raw.include?('type="union"')
+        doc = REXML::Document.new(raw)
+        collapsed = 0
+        REXML::XPath.each(doc, "//relation[@type='union']").to_a.each do |u|
+          rels = u.get_elements('relation')
+          next unless rels.size == 1 && rels.first.attributes['type'] == 'table'
+          inner = rels.first
+          inner.remove
+          inner.attributes['name'] = u.attributes['name'] if u.attributes['name']
+          u.parent.replace_child(u, inner)
+          collapsed += 1
+        end
+        if collapsed.positive?
+          uc_twb = File.join(WORK, 'workbook-unioncollapsed.twb')
+          File.open(uc_twb, 'w:UTF-8') { |f| doc.write(f) }
+          conv_twb = uc_twb
+          line "union-of-one collapse: #{collapsed} single-table union relation(s) collapsed to their " \
+               'inner table (converter models unions as unsupported → empty DM; round-5 fix)'
+        end
+      end
+    rescue StandardError => e
+      line "WARN: union-of-one collapse skipped (#{e.class}: #{e.message.to_s[0, 80]}) — converter sees the raw twb"
+    end
+  end
   if have_twb && HydrateCustomSql.twb_has_sqlproxy?(twb)
     line 'published-datasource (sqlproxy) connection detected — chasing the published DS to hydrate before conversion'
     pds_json = File.join(WORK, 'pds.json')
@@ -1276,7 +1740,8 @@ if mechanical
       end
     end
     hyd_twb = File.join(WORK, 'workbook-hydrated.twb')
-    hyd_args = ['ruby', File.join(HERE, 'hydrate-custom-sql.rb'), '--twb', twb,
+    # hydrate from conv_twb (not twb) so a union-of-one collapse survives hydration
+    hyd_args = ['ruby', File.join(HERE, 'hydrate-custom-sql.rb'), '--twb', conv_twb,
                 '--db', (opts[:db] || 'CSA'), '--schema', (opts[:schema] || 'TJ'), '--out', hyd_twb]
     hyd_args += ['--pds', pds_json] if File.exist?(pds_json)
     hyd_args += ['--custom-sql', hcsql] if File.exist?(hcsql)
@@ -1288,7 +1753,7 @@ if mechanical
     # converter fabricate a bogus warehouse table (CSA.TJ.SQLPROXY) that POSTs and
     # then fails at the API. Stop with an actionable message instead.
     if HydrateCustomSql.twb_has_sqlproxy?(conv_twb)
-      sleep 0.1 until lane_done.call rescue nil
+      (reap_lane!(lane_done) rescue nil) # bounded reap before aborting
       print_lane_log.call rescue nil
       abort <<~MSG
         FATAL: workbook is bound to a PUBLISHED data source (sqlproxy) that could not be resolved.
@@ -1332,6 +1797,14 @@ if mechanical
     (conv['warnings'] || []).first(8).each { |w| puts "  - #{w.to_s[0, 160]}" }
     puts ''
     puts 'No Sigma objects were created. Capture the .twb datasource shape for the converter repo.'
+    puts 'The MANUAL-SPEC route is authorized: author dm-spec.json/wb-spec.json against the landed'
+    puts 'tables (see the sigma-workbooks skill) and re-enter with --reuse-dm/--dm-spec/--wb-spec.'
+    # v5.3: stamp the manual-path token (the exit-1 no-backend stop already
+    # does) — round 5 proved the printed route was unreachable without a
+    # waiver flag, costing every empty-DM run an extra round-trip.
+    authorize_manual_path!(via: 'converter-empty-model',
+                           reason: "converter produced 0 elements/columns (unsupported datasource shape)",
+                           exit_code: 15)
     mark('phase1-join')
     phase_summary
     exit 15
@@ -1382,6 +1855,10 @@ if mechanical
       line "extract manifest remap: repointed #{rm[:elements]} element(s) onto landed table(s) " \
            "#{rm[:tables].join(', ')}; threaded #{rm[:colmap].size} column rename(s) into the phantom-filter"
     end
+    if rm[:sql_elements].to_i.positive?
+      line "extract manifest remap: rewrote FROM + column identifiers on #{rm[:sql_elements]} custom-SQL " \
+           'element(s) (single-table statements attributed by column overlap)'
+    end
   end
 
   # Fact hint for a MULTI-embedded-extract workbook: the datasource the dashboard
@@ -1400,6 +1877,20 @@ if mechanical
   fx = MechanicalSpecs.fixup_dm_spec(conv['model'])
   line "DM fixup: rewrote #{fx[:fixed]} formula(s); dropped #{fx[:dropped].size} unresolvable calc col(s)" if fx[:fixed].positive? || fx[:dropped].any?
   dropped_calcs = fx[:dropped]
+  # v5.4: prune orphaned BROKEN leftovers (union-collapse class) AFTER remap +
+  # fixup have had their chance to repair refs — strict double condition
+  # (broken cross-refs AND unreferenced), loud per-element log.
+  # v5.4.9 review fix: pass keep: (a provisional fact pick) so a single-table
+  # model whose FACT carries one stale cross-ref can never be pruned to an
+  # empty model — the docstring's "not the kept fact" invariant was dead code
+  # because no caller passed keep:.
+  begin
+    keep_fact = (MechanicalSpecs.pick_fact(conv['model'], prefer_table: prefer_fact_table) rescue nil)
+    pruned = MechanicalSpecs.prune_broken_orphans!(conv['model'], keep: keep_fact && keep_fact['name'])
+    line "DM prune: removed #{pruned.size} orphaned broken element(s): #{pruned.join(', ')}" if pruned.any?
+  rescue StandardError => e
+    line "WARN: orphan prune failed (#{e.message}) — model left as converted"
+  end
 
   # Pre-derive the master-map now (deterministic; uses the converter element
   # name — Phase 4 re-derives against the authoritative readback name). This lets
@@ -1416,8 +1907,59 @@ if mechanical
     # The real-entity discriminator (png-read point_in_time) also scopes the World
     # per-year SUM to real entities, so it doesn't double-count rollup rows.
     _disc = ((JSON.parse(File.read(DashboardRead.path(WORK)))['point_in_time'] rescue nil) || {})['entity_discriminator']
-    world_lod_map = (MechanicalSpecs.synthesize_fixed_lods!(conv['model'], conv_fact, File.read(twb, encoding: 'UTF-8'), (opts[:column_mapping] || {}), discriminator: _disc) rescue {})
+    # The fact table's REAL columns (landing manifest) — the LOD's base metric is
+    # usually never plotted, so it's absent from the projected DM element and a
+    # projection-only check drops the LOD (the chart ref then dangles).
+    _fact_tbl = (conv_fact.dig('source', 'path') || []).last.to_s.upcase
+    # landing_manifest is a PATH (Dir[] hit above) — parse it here.
+    _real_map = if defined?(landing_manifest) && landing_manifest && !_fact_tbl.empty?
+                  _man = (JSON.parse(File.read(landing_manifest, encoding: 'UTF-8')) rescue nil)
+                  ent = Array(_man).find { |e| e.is_a?(Hash) && e['sf_table'].to_s.upcase.end_with?(".#{_fact_tbl}") }
+                  ent && ent['columns']
+                end
+    world_lod_map = (MechanicalSpecs.synthesize_fixed_lods!(conv['model'], conv_fact, File.read(twb, encoding: 'UTF-8'), (opts[:column_mapping] || {}), discriminator: _disc, real_map: _real_map) rescue {})
     line "FIXED-LOD synthesis: materialized #{world_lod_map.size} per-year world-total column(s) via a grouped Custom SQL helper#{_disc ? " (real-entity scoped by #{_disc})" : ''}" if world_lod_map.any?
+  end
+  # YoY-% helper for the multi-metric recipe (the signed % the source prints
+  # beside each YoY bar — source-anchor values, so approximating them away
+  # fails the anchors gate). Inputs are all deterministic: the bar tiles' dim
+  # and the top tables' entity come from the parsed shelf signals, metrics +
+  # snapshot years from png-read point_in_time.
+  yoy_map = {}
+  if have_twb && conv_fact
+    begin
+      _pngr = (JSON.parse(File.read(DashboardRead.path(WORK))) rescue nil) || {}
+      _pit2 = _pngr['point_in_time'] || {}
+      _hl = Array(_pngr['filter_shelf']).flat_map { |f| Array(f['highlight_tiles']) }.map(&:to_s)
+      _zones = ((JSON.parse(File.read(File.join(WORK, 'dashboard-layout.json'), encoding: 'UTF-8')) rescue nil) || [])
+               .flat_map { |dd| dd['zones'] || [] }
+      _shelf_dim = lambda do |cap|
+        z = _zones.find { |zz| zz['caption'] == cap }
+        f = z && z.dig('rows_shelf', 'fields')
+        f && f.length == 1 && f[0]['role'] == 'dim' ? f[0]['guid'] : nil
+      end
+      _bar_dims = _hl.map { |t| _shelf_dim.call(t) }.compact.uniq
+      _entities = Array(_pngr['tiles']).select { |t| t['kind'].to_s == 'table' }
+                                       .map { |t| _shelf_dim.call(t['title'].to_s) }.compact.uniq
+      if _bar_dims.length == 1 && _entities.length == 1 && _pit2['latest_year'] && _hl.any?
+        require_relative 'lib/recipe_multimetric'
+        _metrics = {}
+        Array(_pngr['tiles']).each do |t|
+          next unless _hl.include?(t['title'].to_s) && t['measure']
+          y = RecipeMultimetric.latest_year_for(_pit2, t['measure'], context: t['title'])
+          _metrics[t['measure']] = y if y
+        end
+        yoy_map = MechanicalSpecs.synthesize_yoy_by_dim!(
+          conv['model'], conv_fact,
+          dim: _bar_dims[0], entity: _entities[0], metrics: _metrics,
+          year: _pit2['year_column'] || 'Year',
+          discriminator: _disc, real_map: _real_map, colmap: (opts[:column_mapping] || {})
+        )
+        line "YoY synthesis: #{yoy_map.size} pairwise-complete YoY column(s) by #{_bar_dims[0]} (helper SQL + FIXED YoY relationship)" if yoy_map.any?
+      end
+    rescue StandardError => e
+      line "WARN: YoY synthesis skipped (#{e.class}: #{e.message})"
+    end
   end
   conv_base = conv_fact ? MechanicalSpecs.base_of(conv['model'], conv_fact) : nil
   pre = conv_fact ? MechanicalSpecs.derive_master(conv_fact, (conv_fact['name'] || 'Order Fact'), conv_base, nil, conv['model']) : { 'untranslated_metrics' => [] }
@@ -1517,11 +2059,23 @@ if wh_tables.empty?
   line 'no warehouse tables resolved from metadata; relying on spec generator'
 else
   wh_tables.each do |t|
+    cols_path = File.join(WORK, "cols-#{t}.json")
+    # Re-entry reuse: a prior run of THIS workdir already probed the catalog for
+    # this table on this connection — the schema doesn't change between loop
+    # re-entries (minutes apart). Reuse only a NON-EMPTY catalog answer (an
+    # empty/failed probe is always re-tried). Delete cols-<T>.json to re-probe.
+    prior = (JSON.parse(File.read(cols_path)) rescue nil) if File.exist?(cols_path)
+    if prior.is_a?(Hash) && prior['columns'].is_a?(Array) && prior['columns'].any? &&
+       prior['connection_id'].to_s == opts[:conn].to_s &&
+       Array(prior['path']).join('.').to_s.casecmp?("#{db}.#{schema}.#{t}")
+      line "#{db}.#{schema}.#{t}: #{prior['columns'].size} columns (REUSED cols-#{t}.json — delete to re-probe)"
+      next
+    end
     _, st = sigma_run!(['ruby', File.join(HERE, 'discover-columns.rb'),
                         '--connection-id', opts[:conn],
                         '--table-path', "#{db}.#{schema}.#{t}",
-                        '--out', File.join(WORK, "cols-#{t}.json")], allow_fail: true)
-    cj = (JSON.parse(File.read(File.join(WORK, "cols-#{t}.json"))) rescue nil)
+                        '--out', cols_path], allow_fail: true)
+    cj = (JSON.parse(File.read(cols_path)) rescue nil)
     n = cj && cj['columns'] ? cj['columns'].size : '?'
     line "#{db}.#{schema}.#{t}: #{n} columns#{st.success? ? '' : ' (not in catalog — Custom SQL fallback may be needed)'}"
   end
@@ -1541,12 +2095,18 @@ puts '── Phase 1 (join) · Tableau discovery lane ──'
 # for large sites; override with TABLEAU_LANE_TIMEOUT (seconds).
 _lane_timeout = (ENV['TABLEAU_LANE_TIMEOUT'] || '1800').to_i
 _lane_t0 = Time.now
+_lane_beat = _lane_t0
 until lane_done.call
   if Time.now - _lane_t0 > _lane_timeout
     print_lane_log.call
     abort "FATAL: Tableau discovery lane did not finish within #{_lane_timeout}s — likely a " \
           "wedged Tableau REST call (see lane log above). Re-run, raise TABLEAU_LANE_TIMEOUT, " \
           "or pass the .twb directly with --twb to skip live discovery."
+  end
+  if Time.now - _lane_beat > 30 # heartbeat: a long fetch must never LOOK wedged
+    _lane_beat = Time.now
+    puts "   … discovery lane still running (#{(Time.now - _lane_t0).round}s elapsed, " \
+         "timeout #{_lane_timeout}s; tail #{File.basename(disc_log)} for per-task progress)"
   end
   sleep 0.1
 end
@@ -1563,15 +2123,28 @@ line "discovery lane: #{(lane[:ended] - lane[:started]).round(1)}s wall" \
 calc_path = File.join(WORK, 'calc-fields.json')
 calcs = []
 if wb_luid
-  cf = ['ruby', File.join(HERE, 'extract-calc-fields.rb'),
-        '--workbook-luid', wb_luid, '--out', calc_path]
-  cf += ['--twb', twb] if have_twb
-  _, st = tableau_run!(cf, allow_fail: true)
+  # sha-stamped reuse (stronger than extract-calc-fields' own 1h TTL): the
+  # extraction is a pure function of the .twb + workbook, so a re-entry with an
+  # unchanged .twb skips it entirely — hours later, not just within the TTL.
+  calc_key = have_twb ? PhaseCache.key('calc-fields', twb_sha, wb_luid,
+                                       PhaseCache.file_sha(File.join(HERE, 'extract-calc-fields.rb'))) : nil
+  if calc_key && PhaseCache.fresh?(WORK, 'calc-fields', key: calc_key, outputs: [calc_path])
+    line 'calc-fields REUSED (.twb sha unchanged) — extract-calc-fields.rb --refresh to force'
+  else
+    cf = ['ruby', File.join(HERE, 'extract-calc-fields.rb'),
+          '--workbook-luid', wb_luid, '--out', calc_path]
+    cf += ['--twb', twb] if have_twb
+    _, st = tableau_run!(cf, allow_fail: true)
+  end
   if File.exist?(calc_path)
     cfj = JSON.parse(File.read(calc_path)) rescue {}
     calcs = cfj['calcs'] || []
     n_csql = calcs.count { |c| c['requires_custom_sql'] }
     line "#{calcs.size} calc field(s); #{n_csql} require Custom SQL (window/LOD)"
+    # Stamp ONLY a non-empty extraction: an empty result with calc nodes in the
+    # .twb is the BROKEN-extraction case (exit 13 below) and must never be
+    # blessed for reuse, or every re-entry would replay the failure.
+    PhaseCache.stamp!(WORK, 'calc-fields', key: calc_key, outputs: [calc_path]) if calc_key && calcs.any?
   end
 end
 
@@ -1606,9 +2179,17 @@ end
 custom_sql = []
 csql_path = File.join(WORK, 'custom-sql.json')
 if wb_luid && have_twb
-  csql_cmd = ['ruby', File.join(HERE, 'extract-custom-sql.rb'),
-              '--workbook-luid', wb_luid, '--twb', twb, '--out', csql_path]
-  tableau_run!(csql_cmd, allow_fail: true)
+  csql_key = PhaseCache.key('custom-sql', twb_sha, wb_luid)
+  if PhaseCache.fresh?(WORK, 'custom-sql', key: csql_key, outputs: [csql_path])
+    line 'custom-SQL scan REUSED (.twb sha unchanged) — delete custom-sql.json to force'
+  else
+    csql_cmd = ['ruby', File.join(HERE, 'extract-custom-sql.rb'),
+                '--workbook-luid', wb_luid, '--twb', twb, '--out', csql_path]
+    _, csql_st = tableau_run!(csql_cmd, allow_fail: true)
+    # Stamp only a SUCCESSFUL scan (an [] from a clean run is a legit "no
+    # custom SQL" answer; an auth/network failure is not, and must re-try).
+    PhaseCache.stamp!(WORK, 'custom-sql', key: csql_key, outputs: [csql_path]) if csql_st.success? && File.exist?(csql_path)
+  end
   custom_sql = (JSON.parse(File.read(csql_path)) rescue []) if File.exist?(csql_path)
   custom_sql = [] unless custom_sql.is_a?(Array)
 end
@@ -1620,6 +2201,17 @@ gaps = []
 gap_report_md = nil
 if have_twb
   gj = Dir[File.join(WORK, '*gaps*report*.json')].first || Dir[File.join(WORK, '*gaps*.json')].first
+  if gj.nil? && lane[:reused]
+    # Discovery was REUSED but no gap report exists (the prior lane's scan
+    # failed, or the stamp predates the report). The gap GATE below must never
+    # run against a silently-empty inventory — re-scan in the foreground: it is
+    # pure-local .twb parsing (<10s), no Tableau call.
+    line 'gap scan: no report on disk from the reused discovery — re-running scan-workbook-gaps.rb (local)'
+    run!(['ruby', File.join(HERE, 'scan-workbook-gaps.rb'), twb], allow_fail: true)
+    gj = Dir[File.join(WORK, '*gaps*report*.json')].first || Dir[File.join(WORK, '*gaps*.json')].first
+  elsif gj && lane[:reused]
+    line 'gap scan REUSED (ran with the stamped discovery; the .twb revision is unchanged)'
+  end
   if gj && File.exist?(gj)
     gap_report_md = gj.sub(/\.json$/, '.md')
     gaps = (JSON.parse(File.read(gj))['detected_features'] || []) rescue []
@@ -1681,6 +2273,8 @@ if unhandled_gaps.any?
     puts 'or re-run with --yes/--force to accept the degradation (features MISSING/flagged).'
     puts '======================================================='
     puts 'No Sigma objects were created.'
+    authorize_manual_path!(via: 'gap-scan-stop', reason: "#{unscouted.size} unscouted ❌-unhandled feature(s)", exit_code: 11)
+    Offramp.log(WORK, kind: 'gap-scan-stop', detail: "#{unscouted.size} unscouted feature(s)")
     mark('phase1-join')
     phase_summary
     exit 11
@@ -1695,6 +2289,8 @@ if unhandled_gaps.any?
     puts 'in the Sigma workbook. (The validated ones still migrate.)'
     puts '======================================================='
     puts 'No Sigma objects were created.'
+    authorize_manual_path!(via: 'gap-scan-stop', reason: "#{escalated.size} scouted-but-escalated feature(s)", exit_code: 11)
+    Offramp.log(WORK, kind: 'gap-scan-stop', detail: "#{escalated.size} escalated feature(s)")
     mark('phase1-join')
     phase_summary
     exit 11
@@ -1909,6 +2505,8 @@ if questions.any? && !opts[:yes] && answers.nil?
   puts '======================================================='
   puts
   puts "#{questions.size} decision(s) need a human. No Sigma objects were created."
+  authorize_manual_path!(via: 'decisions-stop', reason: "#{questions.size} open question(s) need a human", exit_code: 10)
+  Offramp.log(WORK, kind: 'decisions-stop', detail: "#{questions.size} open question(s)")
   phase_summary
   exit 10
 end
@@ -2082,6 +2680,11 @@ elsif mechanical
     if defined?(conv_fact) && conv_fact
       _pit = ((JSON.parse(File.read(DashboardRead.path(WORK)))['point_in_time'] rescue nil) || {})
       want = [_pit['entity_discriminator'], _pit['year_column'] || 'Year'].compact
+      # The world-LOD BASE metrics too: the recipe's dual-axis trend plots the
+      # region-filtered Country line Sum([Master/<metric>]) opposite each
+      # synthesized World line, and an LOD-only metric is typically never
+      # plotted directly — absent from the fact, the country line dangles.
+      want |= world_lod_map.values if defined?(world_lod_map) && world_lod_map.is_a?(Hash)
       kept = MechanicalSpecs.retain_columns!(conv_fact, want, real_cols)
       line "point-in-time retain: added #{kept} recipe column(s) (#{want.join(', ')}) to the fact" if kept.positive?
     end
@@ -2207,6 +2810,15 @@ if mechanical
   (opts[:master_cols] || []).each do |(nm, fx)|
     id = "m-#{nm.downcase.gsub(/[^a-z0-9]+/, '-').gsub(/^-|-$/, '')}"
     master_columns.reject! { |c| c['name'].casecmp?(nm) }
+    # v5.4: slug collision guard — two DIFFERENT names can slug identically
+    # (an alias like "NUM_SUBSCRIBERS" vs the auto-derived "Num Subscribers"),
+    # and duplicate column ids fail the POST. Suffix until unique.
+    base_id = id
+    n = 2
+    while master_columns.any? { |c| c['id'] == id }
+      id = "#{base_id}-#{n}"
+      n += 1
+    end
     master_columns << { 'id' => id, 'name' => nm, 'formula' => fx }
     # Register the override in the header->column regex map too (same pattern
     # shape as derive_master's entries) so chart dim headers AND shared-filter
@@ -2252,10 +2864,107 @@ if mechanical
     next unless ph.start_with?('__DM_ELEMENT__:')
     want = ph.split(':', 2).last
     hit = dm_els.find { |e| e['name'].to_s.strip.casecmp?(want) }
-    abort "FATAL: grain helper '#{de['name']}' needs DM element '#{want}' but the posted data model has no element " \
-          "by that name (have: #{dm_els.map { |e| e['name'] }.join(', ')})" unless hit
+    # v5.0 hardening (multi-DS sub-masters ONLY): DM element names don't
+    # always equal plan captions ("Diablo Sum Dir Bias by Bilevel Preset" vs
+    # plan "Sum Dir Bias by BiLevel Preset" — prefix + case). Fall back to
+    # normalized matching: exact normalized, then UNIQUE containment with a
+    # length floor (the shorter normalized name must be ≥8 chars and ≥50% of
+    # the longer — a short generic element name must never absorb an
+    # unrelated caption). Grain helpers keep the strict exact contract (their
+    # names are converter-derived and DO match; fuzzy there is pure risk).
+    if hit.nil? && de['id'].to_s.start_with?('submaster-')
+      nrm = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]/, '') }
+      wantn = nrm.call(want)
+      cands = dm_els.select { |e| nrm.call(e['name']) == wantn }
+      if cands.empty?
+        cands = dm_els.select do |e|
+          en = nrm.call(e['name'])
+          shorter, longer = [en, wantn].sort_by(&:length)
+          shorter.length >= 8 && shorter.length >= (longer.length * 0.5).ceil && longer.include?(shorter)
+        end
+      end
+      abort "FATAL: sub-master '#{de['name']}' needs DM element '#{want}' but the match is AMBIGUOUS " \
+            "(#{cands.map { |e| e['name'] }.join(' | ')}) — rename to disambiguate" if cands.size > 1
+      hit = cands.first
+    end
+    abort "FATAL: helper '#{de['name']}' needs DM element '#{want}' but the posted data model has no element " \
+          "by that name (have: #{dm_els.map { |e| e['name'] }.join(', ')})." +
+          (de['id'].to_s.start_with?('submaster-') ?
+            ' This sub-master was auto-created by multi-DS routing — either add the datasource to the DM, ' \
+            'or re-run with SIGMA_MULTI_DS_ROUTING=off to restore the warn-and-ship behavior.' : '') unless hit
     de['source'] = { 'kind' => 'data-model', 'dataModelId' => dm_id, 'elementId' => hit['id'] }
-    line "grain helper '#{de['name']}' → DM element '#{want}' (#{hit['id']})"
+    # A fuzzy match means the helper's passthrough formulas were authored with
+    # the REQUESTED name prefix ([<want>/Col]) — rewrite to the live element's
+    # real name in lock-step or every column errors on POST.
+    real = hit['name'].to_s.strip
+    if real != want && de['columns'].is_a?(Array)
+      de['columns'].each do |c|
+        c['formula'] = c['formula'].gsub("[#{want}/", "[#{real}/") if c['formula'].is_a?(String)
+      end
+    end
+    # v5.3: repair COLUMN names against the DM element's live columnLabels.
+    # The builder authors refs from RAW Tableau field names ('summoner_dir');
+    # the DM labels them cased ('Summoner Dir') — round 5 proved this pushed
+    # all three Diablo runs off the mechanical path into exit-4 hand-patching.
+    # Normalized (case/punct-insensitive) match, exact rewrite, loud misses.
+    labels = Array(hit['columnLabels']).map(&:to_s)
+    if labels.any? && de['columns'].is_a?(Array)
+      nrmc = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]/, '') }
+      by_norm = labels.each_with_object({}) { |l, h| h[nrmc.call(l)] ||= l }
+      # ambiguity is a repair hazard, not a silent choice (v5.3.1 review)
+      dup_norms = labels.group_by { |l| nrmc.call(l) }.select { |_k, v| v.size > 1 }
+      dup_norms.each_value do |ls|
+        line "  WARN: DM labels #{ls.map(&:inspect).join(' / ')} normalize identically — " \
+             'column-label repair uses the FIRST; verify refs on this helper'
+      end
+      fixed = 0
+      missed = []
+      de['columns'].each do |c|
+        next unless c['formula'].is_a?(String)
+        c['formula'] = c['formula'].gsub(/\[#{Regexp.escape(real)}\/([^\]]+)\]/) do
+          col = Regexp.last_match(1)
+          exact = labels.include?(col) ? col : by_norm[nrmc.call(col)]
+          if exact
+            fixed += 1 if exact != col
+            "[#{real}/#{exact}]"
+          else
+            missed << col
+            "[#{real}/#{col}]"
+          end
+        end
+      end
+      line "  column-label repair: #{fixed} ref(s) re-cased to live DM labels" if fixed.positive?
+      missed.uniq.each do |col|
+        line "  WARN: '#{de['name']}' references [#{real}/#{col}] — no matching DM column label " \
+             "(have: #{labels.join(', ')[0, 120]}); the pre-POST ref gate will name it if plotted"
+      end
+    end
+    line "grain helper '#{de['name']}' → DM element '#{real}' (#{hit['id']})#{real == want ? '' : " [name-normalized from '#{want}']"}"
+  end
+  # v5.4: GLOBAL ref-label repair — the v5.3 columnLabels repair above only
+  # covered grain helpers' refs to their DM source element. Chart elements
+  # carry the same drift class against WORKBOOK-LOCAL elements: the builder
+  # authors [Master/<raw twb token>] (physical names, twb casing) while the
+  # master columns carry Sigma display labels; cross-element refs to generated
+  # source elements drift the same way. Repair EVERY generated element's
+  # column formulas against the live labels of every workbook-local element
+  # (master + hidden data elements). Normalized match, exact rewrite, loud
+  # misses; ambiguity is reported, never guessed (same contract as v5.3).
+  begin
+    require File.join(HERE, 'lib', 'ref_label_repair')
+    registry = { 'Master' => master_columns.map { |c| c['name'].to_s } }
+    data_elements.each do |de|
+      next unless de['name'].is_a?(String) && de['columns'].is_a?(Array)
+      registry[de['name']] = de['columns'].map { |c| c['name'].to_s }
+    end
+    rep = RefLabelRepair.repair!(chart_elements + data_elements, registry)
+    line "ref-label repair: #{rep[:fixed]} formula ref(s) re-cased to live element labels" if rep[:fixed].positive?
+    rep[:ambiguous].each { |m| line "  WARN: ref-label repair skipped #{m} — disambiguate manually" }
+    rep[:misses].each do |m|
+      line "  WARN: #{m} — no matching live label; the pre-POST ref gate will name it if plotted"
+    end
+  rescue StandardError => e
+    line "WARN: global ref-label repair failed: #{e.message} — formulas left as the builder authored them"
   end
   if chart_elements.empty?
     line 'WARN: build-charts produced 0 elements (no usable view CSVs / zones); emitting an empty dashboard page'
@@ -2296,7 +3005,11 @@ if mechanical
     master_columns: master_columns,
     chart_elements: (chart_pages && chart_pages.any? ? chart_pages : chart_elements),
     data_elements: data_elements,
+    theme: (raw_charts.is_a?(Hash) ? raw_charts['theme'] : nil),
     folder_id: opts[:folder])
+  if spec['themeOverrides']
+    line "theme: #{spec['themeOverrides'].keys.join(', ')} (derived from source style rules)"
+  end
   # Formula-normalize hook (sibling workstream): case-fix converter-derived
   # formulas on the mechanical workbook spec before validate/POST.
   normalize_formulas!(spec, 'wb-spec')
@@ -2308,7 +3021,8 @@ if mechanical
   begin
     _pr = (JSON.parse(File.read(DashboardRead.path(WORK))) rescue nil)
     if _pr && RecipeMultimetric.applicable?(_pr)
-      rsum = RecipeMultimetric.apply!(spec, _pr, world_lod_map: (defined?(world_lod_map) ? world_lod_map : {}))
+      rsum = RecipeMultimetric.apply!(spec, _pr, world_lod_map: (defined?(world_lod_map) ? world_lod_map : {}),
+                                                 yoy_map: (defined?(yoy_map) ? yoy_map : {}))
       if rsum[:applied]
         line "multi-metric recipe: +#{rsum[:masters_added]} masterAll, #{rsum[:highlight_tiles]} highlight tile(s), " \
              "#{rsum[:top_tables]} point-in-time measure(s) rewritten"
@@ -2395,7 +3109,20 @@ if opts[:wb_target]
   line "append: workbook now has #{existing['pages'].size} page(s) after merge (+#{new_pages.size} new content page(s))"
 end
 
-File.write(wb_spec_path, JSON.pretty_generate(spec))
+# NON-DESTRUCTIVE placeholder resolution (field-caught round 2): on the
+# agent-authored path the __DM_ID__/__DM_ELEMENT__ substitution used to
+# OVERWRITE the authored wb-spec.json with resolved live ids — and since every
+# DM PUT mints new element ids, any fix-and-retry loop silently went stale
+# with no placeholder source left to re-resolve. Write the resolved spec to a
+# sibling file and leave the authored source untouched.
+if MANUAL_JSON_SPECS
+  resolved_path = File.join(WORK, 'wb-spec.resolved.json')
+  File.write(resolved_path, JSON.pretty_generate(spec))
+  line "resolved spec → #{File.basename(resolved_path)} (authored wb-spec.json left untouched — placeholders stay re-resolvable)"
+  wb_spec_path = resolved_path
+else
+  File.write(wb_spec_path, JSON.pretty_generate(spec))
+end
 wb_ids_path = File.join(WORK, 'wb-ids.json')
 
 # GRACEFUL AGENT-PATH FALLBACK. The DM is already posted + valid (dm_id above), so
@@ -2423,6 +3150,9 @@ begin
   # path) instead of POSTing a new one — so iterating a fix edits the SAME
   # dashboard rather than orphaning it. --workbook-target (append) takes priority
   # when both are set (it already computed append_update_id + merged the spec).
+  # Even without either flag, post-and-readback itself forces PUT when this
+  # workdir already recorded a workbook id (posted-workbooks.jsonl /
+  # migrate-state.json) — see its same-workbook PUT discipline.
   update_wb = append_update_id || opts[:reuse_workbook]
   line "reuse-workbook: PUT the full spec to existing workbook #{opts[:reuse_workbook]} (no new workbook)" \
     if opts[:reuse_workbook] && !append_update_id
@@ -2486,14 +3216,8 @@ rescue WorkbookBuildError => e
   # Authorize the hand-authoring re-entry: this STOP is the ONLY sanctioned way to
   # reach --wb-spec/--dm-spec. The token lets the re-run's manual-spec gate pass
   # (a COLD hand-author with no prior orchestrator run is refused).
-  begin
-    File.write(File.join(WORK, 'manual-path-authorized.json'),
-               JSON.pretty_generate('via' => 'workbook-handoff', 'dataModelId' => dm_id,
-                                    'fields' => failed,
-                                    'at' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')))
-  rescue StandardError
-    # best-effort
-  end
+  authorize_manual_path!(via: 'workbook-handoff', reason: "untranslatable field(s): #{names}",
+                         exit_code: 4, extra: { 'dataModelId' => dm_id, 'fields' => failed })
   Offramp.log(WORK, kind: 'workbook-handoff', detail: "untranslatable field(s): #{names}")
   mark('phase4-workbook')
   phase_summary
@@ -2538,19 +3262,27 @@ if layout_xml
   # parsed zone tree (best-effort, scratch --out so the shipped layout.xml is
   # untouched) — the placed/zones drop count is layout-source-independent and
   # the grid-fill is a faithful proxy for these dense hand-composed layouts.
+  # Row-model overrides ride through ONLY when the user gave them — an
+  # unconditional --row-scale 1.5 would mark row_scale explicit downstream and
+  # disable the px-derived canvas row model on every orchestrated run
+  # (v5.1.1 review-caught).
+  row_model_args = []
+  row_model_args += ['--row-scale', opts[:row_scale].to_s] if opts[:row_scale]
+  row_model_args += ['--page-rows', opts[:page_rows].to_s] if opts[:page_rows]
   if File.exist?(layout_json)
     run!(['ruby', File.join(HERE, 'build-dashboard-layout.rb'),
           '--layout', layout_json, '--wb-ids', wb_ids_path,
           '--out', File.join(WORK, 'layout-census-scratch.xml'),
-          '--census-out', census_path,
-          '--row-scale', (opts[:row_scale] || 1.5).to_s],
+          '--census-out', census_path] + row_model_args,
          allow_fail: true)
   end
 elsif File.exist?(layout_json)
+  row_model_args = []
+  row_model_args += ['--row-scale', opts[:row_scale].to_s] if opts[:row_scale]
+  row_model_args += ['--page-rows', opts[:page_rows].to_s] if opts[:page_rows]
   _, lst = run!(['ruby', File.join(HERE, 'build-dashboard-layout.rb'),
                  '--layout', layout_json, '--wb-ids', wb_ids_path, '--out', layout_path,
-                 '--census-out', census_path,
-                 '--row-scale', (opts[:row_scale] || 1.5).to_s],
+                 '--census-out', census_path] + row_model_args,
                 allow_fail: true)
   line 'WARN: layout build failed — workbook will render in default stacked order' unless lst.success?
 else
@@ -2580,14 +3312,32 @@ hdr('5b', 'Visual QA')
 vqa = File.join(WORK, 'visual-qa'); FileUtils.mkdir_p(vqa)
 wbspec_local = (JSON.parse(File.read(wb_spec_path)) rescue {})
 content_pages = (wbspec_local['pages'] || []).reject { |p| p['id'].to_s.downcase.include?('data') }
+# v5.2 (speed): pages render CONCURRENTLY (pool 3) — each export is a 30-90s
+# server-side render; multi-page workbooks paid it serially.
 rendered = 0
-content_pages.each do |pg|
-  out = File.join(vqa, "#{pg['id']}.png")
-  _o, st = sigma_run!([*PyResolve.argv, File.join(HERE, 'sigma-export-png.py'),
-                       '--workbook', wb_id, '--page', pg['id'], '--out', out, '--w', '1800', '--h', '1000'],
-                      allow_fail: true)
-  st.success? ? (rendered += 1) : line("WARN: visual-QA render failed for page #{pg['id']}")
-end
+vqa_tok = sigma_token! # mint ONCE, serially (concurrent mints race)
+vqa_mx = Mutex.new
+vqa_q = Queue.new
+content_pages.each { |pg| vqa_q << pg }
+Array.new([3, content_pages.size].min.clamp(1, 3)) do
+  Thread.new do
+    loop do
+      pg = begin
+        vqa_q.pop(true)
+      rescue ThreadError
+        break
+      end
+      out = File.join(vqa, "#{pg['id']}.png")
+      o, st = Open3.capture2e({ 'SIGMA_API_TOKEN' => vqa_tok },
+                              *PyResolve.argv, File.join(HERE, 'sigma-export-png.py'),
+                              '--workbook', wb_id, '--page', pg['id'], '--out', out, '--w', '1800', '--h', '1000')
+      vqa_mx.synchronize do
+        o.each_line { |l| puts "   #{l.rstrip}" } unless o.strip.empty?
+        st.success? ? (rendered += 1) : line("WARN: visual-QA render failed for page #{pg['id']}")
+      end
+    end
+  end
+end.each(&:join)
 line "rendered #{rendered}/#{content_pages.size} full-page PNG(s) → #{vqa}"
 line 'VISUAL QA (review, do not skip): open each PNG; check vs refs/layout-visual-qa.md AND the source Tableau dashboard — titles, right chart kinds, colors, no overlaps/dead zones.' if rendered.positive?
 mark('phase5b-visual-qa')
@@ -2625,11 +3375,14 @@ else
   err_cols.first(8).each { |c| line "  [#{c['elementId']}] #{c['label']}: #{c['formula']}" }
 end
 
-# Persist resume state for --finalize (pass 2) BEFORE stopping.
+# Persist resume state for --finalize (pass 2) BEFORE stopping. run_id scopes
+# the completion sentinels to THIS run; route records how the workdir was driven
+# (the route-persistence check refuses a re-entry on the other route).
 state = { 'workbook_id' => wb_id, 'data_model_id' => dm_id,
           'extract_mode' => !!has_extracts, 'workbook_name' => display_wb_name,
           'reused_dm' => !!reuse_dm_id, 'pass1_at' => Time.now.utc.iso8601,
           'enhance_requested' => !!opts[:enhance],
+          'run_id' => RUN_ID, 'route' => CURRENT_ROUTE,
           'rcf_passes' => (opts[:rcf_passes] || 5) }
 File.write(File.join(WORK, 'migrate-state.json'), JSON.pretty_generate(state))
 
@@ -2702,10 +3455,17 @@ end
 # so they're verified visually instead of silently passing parity.
 vv_sidecar = File.join(WORK, 'visual-verify-tiles.json')
 vv_tiles = File.exist?(vv_sidecar) ? (JSON.parse(File.read(vv_sidecar)) rescue []) : []
+# v5.2 (speed): the per-tile and full-dashboard visual stages are independent
+# (distinct outputs, both read-only against the live workbook) — run them
+# CONCURRENTLY instead of paying two serial render waits.
+vis_tok = sigma_token!
+vis_threads = []
 if vv_tiles.any?
   line "Phase 6f-visual: #{vv_tiles.size} tile(s) had EMPTY data exports / inferred chart kinds — staging per-tile image comparison"
-  sigma_run!(['ruby', File.join(HERE, 'verify-visual-tiles.rb'),
-              '--workbook', wb_id, '--tableau-dir', WORK], allow_fail: true)
+  vis_threads << Thread.new do
+    Open3.capture2e({ 'SIGMA_API_TOKEN' => vis_tok }, 'ruby', File.join(HERE, 'verify-visual-tiles.rb'),
+                    '--workbook', wb_id, '--tableau-dir', WORK)
+  end
 end
 
 # Phase 6f — FULL-DASHBOARD ground truth: stage the source Tableau dashboard
@@ -2713,8 +3473,14 @@ end
 # visual comparison (and the repair loop: diff → fix → re-render) has both sides
 # ready. Writes visual-qa/compare-manifest.json (agent sets visual_match).
 line 'Phase 6f-visual: staging full-dashboard source-vs-Sigma image pairs for the repair loop'
-sigma_run!(['ruby', File.join(HERE, 'verify-dashboard-visual.rb'),
-            '--workbook', wb_id, '--tableau-dir', WORK], allow_fail: true)
+vis_threads << Thread.new do
+  Open3.capture2e({ 'SIGMA_API_TOKEN' => vis_tok }, 'ruby', File.join(HERE, 'verify-dashboard-visual.rb'),
+                  '--workbook', wb_id, '--tableau-dir', WORK)
+end
+vis_threads.each do |th|
+  o, _st = th.value
+  o.each_line { |l| puts "   #{l.rstrip}" } unless o.to_s.strip.empty?
+end
 
 puts
 puts '================ RESULT (pass 1 — parity PENDING) ================'
@@ -2746,6 +3512,18 @@ if rcf_passes.to_i.positive?
   puts '              author a patch from refs/fidelity-recipes.md, fidelity-loop.rb apply-patch --resolves,'
   puts '              and render again. Loop until `fidelity-loop.rb status` is clean (0 unresolved spec-fixable).'
 end
+# v5.0-P2 advisory oracles (never gate; results ride the report):
+wc_side = File.join(WORK, 'window-calcs.json')
+wc_any = File.exist?(wc_side) &&
+         ((JSON.parse(File.read(wc_side))['entries'] || []).any? rescue false)
+if wc_any
+  puts 'VDS ORACLE  : window calcs detected — verify the translations against Tableau itself:'
+  puts "                ruby scripts/vds-oracle.rb --workdir #{WORK}"
+  puts "              (advisory; emits #{File.join(WORK, 'vds-oracle.json')}; published datasources only)"
+end
+puts 'RENDER/INTERACTION (advisory): exact-size Tableau baseline + one-control flip oracle:'
+puts "                ruby scripts/render-baseline.rb --tableau-dir #{WORK}"
+puts "                ruby scripts/verify-interaction.rb --workdir #{WORK} --workbook-id #{wb_id}"
 puts 'INTERACTIVITY: generate the post-publish handoff guide — dashboard actions, nav'
 puts '              buttons, dynamic zones, drills, and tooltips cannot ride the spec;'
 puts '              the guide walks the user through adding each in the Sigma UI'
@@ -2763,14 +3541,17 @@ puts 'PHASE E     : requested (--enhance) — runs at --finalize AFTER all gates
 puts '=================================================================='
 
 # Completion sentinel (run-scoped). PASS 1 is NOT a done state: the gate suite
-# lives in --finalize. Drop a pending marker keyed to this workbook and CLEAR any
-# stale success marker from a prior run, so verify-complete.rb (the sole done-
-# check the SKILL points at) reports NOT DONE until --finalize's hard gate stamps
-# phase6-success.json. This is the structural backstop for the "agent stops at
-# PASS 1 and narrates success" failure mode.
+# lives in --finalize. Drop a pending marker keyed to this workbook AND this
+# run_id, and CLEAR any stale success marker from a prior run, so
+# verify-complete.rb (the sole done-check the SKILL points at) reports NOT DONE
+# until --finalize's hard gate stamps phase6-success.json. This is the
+# structural backstop for the "agent stops at PASS 1 and narrates success"
+# failure mode.
 begin
   File.write(File.join(WORK, 'parity-pending.json'),
              JSON.pretty_generate('workbookId' => wb_id, 'dataModelId' => dm_id,
+                                  'run_id' => RUN_ID,
+                                  'written_at' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ'),
                                   'stage' => 'pass1', 'note' => 'parity + gates NOT run — run --finalize'))
   _succ = File.join(WORK, 'phase6-success.json')
   File.delete(_succ) if File.exist?(_succ)

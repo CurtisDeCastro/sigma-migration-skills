@@ -29,7 +29,8 @@ import sigma_rest  # noqa: E402
 class Base(unittest.TestCase):
     # env keys we mutate — snapshot + restore so cases don't bleed.
     KEYS = ["SIGMA_BASE_URL", "SIGMA_CLIENT_ID", "SIGMA_CLIENT_SECRET",
-            "SIGMA_API_TOKEN", "SIGMA_WORKDIR", "SIGMA_INSECURE_TLS"]
+            "SIGMA_API_TOKEN", "SIGMA_TOKEN_MINTED_AT", "SIGMA_WORKDIR",
+            "SIGMA_INSECURE_TLS"]
 
     def setUp(self):
         self._saved = {k: os.environ.get(k) for k in self.KEYS}
@@ -37,6 +38,7 @@ class Base(unittest.TestCase):
             os.environ.pop(k, None)
         # reset module state
         sigma_rest._token_override = None
+        sigma_rest._minted_at = None
         sigma_rest._refresh_inflight = False
         self._sends = []
         self._queue = []
@@ -157,6 +159,98 @@ class AuthTokenPrecedence(Base):
         os.environ["SIGMA_CLIENT_SECRET"] = "sec"
         self.enqueue(200, {"access_token": "minted"})
         self.assertEqual(sigma_rest.auth_token(), "minted")
+
+
+class TokenFreshness(Base):
+    """Age-aware auth_token(): re-mint automatically at TTL instead of waiting
+    for the mid-phase 401 (field lesson: repeated 401s at +25min-past-expiry
+    because auth_token kept returning the stale env token)."""
+
+    def _creds(self):
+        os.environ["SIGMA_BASE_URL"] = "https://b"
+        os.environ["SIGMA_CLIENT_ID"] = "id"
+        os.environ["SIGMA_CLIENT_SECRET"] = "sec"
+
+    def _stamp(self, age_seconds):
+        os.environ["SIGMA_TOKEN_MINTED_AT"] = sigma_rest._iso_z(
+            __import__("time").time() - age_seconds)
+
+    def test_fresh_stamped_token_returned_without_mint(self):
+        self._creds()
+        os.environ["SIGMA_API_TOKEN"] = "youngtok"
+        self._stamp(5 * 60)
+        self.assertEqual(sigma_rest.auth_token(), "youngtok")
+        self.assertEqual(len(self._sends), 0)
+
+    def test_stale_stamped_token_reminted(self):
+        self._creds()
+        os.environ["SIGMA_API_TOKEN"] = "oldtok"
+        self._stamp(sigma_rest.TOKEN_TTL_SECONDS + 60)
+        self.enqueue(200, {"access_token": "fresh"})
+        self.assertEqual(sigma_rest.auth_token(), "fresh")
+        self.assertEqual(self._sends[0]["url"], "https://b/v2/auth/token")
+
+    def test_stale_stamp_without_creds_returns_token_as_is(self):
+        os.environ["SIGMA_BASE_URL"] = "https://b"
+        os.environ["SIGMA_API_TOKEN"] = "oldtok"  # no client creds → can't mint
+        self._stamp(sigma_rest.TOKEN_TTL_SECONDS + 60)
+        self.assertEqual(sigma_rest.auth_token(), "oldtok")
+        self.assertEqual(len(self._sends), 0)
+
+    def test_age_unknown_env_token_honored(self):
+        self._creds()
+        os.environ["SIGMA_API_TOKEN"] = "unknownage"  # no stamp anywhere
+        self.assertEqual(sigma_rest.auth_token(), "unknownage")
+        self.assertEqual(len(self._sends), 0)
+
+    def test_garbage_stamp_treated_as_age_unknown(self):
+        self._creds()
+        os.environ["SIGMA_API_TOKEN"] = "tok"
+        os.environ["SIGMA_TOKEN_MINTED_AT"] = "not-a-timestamp"
+        self.assertEqual(sigma_rest.auth_token(), "tok")
+        self.assertEqual(len(self._sends), 0)
+
+    def test_stale_in_memory_mint_reminted(self):
+        self._creds()
+        sigma_rest._token_override = "mintedlongago"
+        sigma_rest._minted_at = __import__("time").time() - (sigma_rest.TOKEN_TTL_SECONDS + 60)
+        self.enqueue(200, {"access_token": "fresh2"})
+        self.assertEqual(sigma_rest.auth_token(), "fresh2")
+
+    def test_refresh_stamps_mint_time(self):
+        self._creds()
+        self.enqueue(200, {"access_token": "T"})
+        sigma_rest.refresh_token()
+        self.assertIsNotNone(sigma_rest._minted_at)
+        self.assertIn("SIGMA_TOKEN_MINTED_AT", os.environ)
+        # the surfaced stamp round-trips and reads as FRESH
+        self.assertFalse(sigma_rest._token_stale())
+
+    def test_auth_json_mtime_becomes_mint_stamp(self):
+        import shutil
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
+        p = os.path.join(d, "auth.json")
+        with open(p, "w", encoding="utf-8") as fh:
+            json.dump({"SIGMA_API_TOKEN": "filetok"}, fh)
+        old = __import__("time").time() - (sigma_rest.TOKEN_TTL_SECONDS + 300)
+        os.utime(p, (old, old))
+        sigma_rest._load_auth_json(cwd=d)
+        self.assertEqual(os.environ["SIGMA_API_TOKEN"], "filetok")
+        self.assertIn("SIGMA_TOKEN_MINTED_AT", os.environ)
+        self.assertTrue(sigma_rest._token_stale())
+
+    def test_stale_token_reminted_before_request_no_401_roundtrip(self):
+        self._creds()
+        os.environ["SIGMA_API_TOKEN"] = "oldtok"
+        self._stamp(sigma_rest.TOKEN_TTL_SECONDS + 60)
+        self.enqueue(200, {"access_token": "fresh3"})  # proactive mint FIRST
+        self.enqueue(200, {"ok": True})                # then the actual request
+        out = sigma_rest.request("get", "/v2/x")
+        self.assertEqual(out, {"ok": True})
+        self.assertEqual(len(self._sends), 2)
+        self.assertIn("/v2/auth/token", self._sends[0]["url"])
+        self.assertEqual(self._sends[1]["headers"]["Authorization"], "Bearer fresh3")
 
 
 class RefreshToken(Base):

@@ -9,7 +9,7 @@
 #   C5  selectionMode:"single" control carrying values:[] instead of scalar value
 #   N1  whitespace-only element / column names (break parity header matching)
 #   P1  conditionalFormats includeValues:false (silent no-op)         [WARN]
-#   I1  If()/Switch() over a bare column ref, no comparison operator  [WARN]
+#   I1  If() over a bare column ref, no comparison operator (v5.4: If-only)  [WARN]
 #
 # Each rule: a clean spec passes, each violation is caught with the right rule
 # id + message. WARN rules must never appear in lint() (the FAIL set).
@@ -159,9 +159,12 @@ check(i1.size == 1, 'I1: If() over bare column ref → 1 WARNING', fails)
 check(i1.first.to_s.include?('= 1'), 'I1 message suggests the explicit = 1 comparison', fails)
 check(rule(lint(s), 'I1').empty?, 'I1 is WARN-only — never in the FAIL set', fails)
 
+# v5.4: Switch is MATCH-form in Sigma — a bare [col] first argument is the
+# matched SUBJECT (the builder's own SORT_ORD ordering columns are exactly
+# this shape) and must NOT warn. I1 is If-only now.
 s = valid_spec
 s['pages'][0]['elements'][0]['columns'][2]['formula'] = 'Sum(Switch([Status], "done", 1, 0))'
-check(lint_warnings(s).any? { |x| x.start_with?('I1 ') }, 'I1: Switch() over bare ref (nested in Sum) → WARNING', fails)
+check(lint_warnings(s).none? { |x| x.start_with?('I1 ') }, 'I1: match-form Switch over bare subject → NO warning (v5.4)', fails)
 
 # explicit comparison must NOT warn
 s = valid_spec

@@ -93,6 +93,9 @@ end
 puts '✅ DONE — assert-phase6-ran.rb passed all gates for this run.'
 puts "   workbook : #{sj['workbookId']}"
 puts "   gates    : #{sj['gates']}"
+puts "   run id   : #{sj['run_id']}" if sj['run_id']
+puts "   waivers  : #{sj['waivers'].join(', ')}" if sj['waivers'].is_a?(Array) && sj['waivers'].any?
 puts "   stamped  : #{sj['generatedAt']}"
+puts '   Quote this marker (workbook + run id) in your completion report.'
 print_offramps(wd) # even a GREEN run can carry waivers/degradations — surface them
 exit 0

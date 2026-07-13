@@ -104,6 +104,28 @@ hand-driven calls have `get-tableau-token.sh` (bash) and its shell-neutral twin
 `python scripts/get-tableau-token.py` (Windows-safe — see refs/environment.md). This
 section exists for anyone driving the signin endpoint directly.
 
+## Resolving a numeric `/projects/<N>` or `/workbooks/<N>` URL id (vizportal id) — never guess
+
+A Tableau URL like `.../#/site/<site>/projects/1234567` — or a DIRECT workbook link like
+`.../#/site/<site>/workbooks/4242001/views` — carries a **vizportal URL id**.
+**REST has no numeric project id anywhere**: Query Projects (`GET $TABLEAU_BASE/projects`)
+returns only `id` (the luid), `name`, `description`, `parentProjectId`, `owner`, and
+`contentCounts` (filterable by name/ownerName/parentProjectId) — so no REST call can match
+that number. The Metadata API can: `Workbook.projectVizportalUrlId` is "the ID of the project
+in which the workbook is visible", next to `projectLuid`/`projectName`.
+
+One command — `ruby scripts/resolve-project.rb --url "<url>"` — runs
+`{ workbooks { luid name vizportalUrlId projectVizportalUrlId projectLuid projectName } }`
+(plus the same project fields on `publishedDatasources` when the schema supports them) against
+`POST /api/metadata/graphql`. A project URL groups by `projectVizportalUrlId` and exact-matches
+the URL's number → `{vizportal_id, project_luid, project_name, workbooks}`; a workbook URL
+exact-matches `Workbook.vizportalUrlId` → `{workbook_vizportal_id, workbook_luid, name,
+project_luid, project_name}`. **Exit 2** (empty project, deleted workbook, or Metadata API off
+on self-hosted Server) means the number is UNRESOLVABLE — the script prints the candidates
+table; present it to the user and ask which project/workbook.
+**Never guess from name or recency** — a wrong project aims the entire run at the wrong
+content.
+
 ## Endpoint inventory
 
 All paths assume `$TABLEAU_BASE = $TABLEAU_SERVER_URL/api/$TABLEAU_API_VERSION/sites/$TABLEAU_SITE_ID`.
@@ -117,7 +139,8 @@ All paths assume `$TABLEAU_BASE = $TABLEAU_SERVER_URL/api/$TABLEAU_API_VERSION/s
 | VDS read-metadata (field list + calc formulas) | `POST /api/v1/vizql-data-service/read-metadata` | Body `{"datasource":{"datasourceLuid":"..."}}`. Returns `data[]` with `fieldName`, `fieldCaption`, `dataType`, `columnClass`, `formula` (for `CALCULATION` fields). |
 | Metadata GraphQL (cleaner formulas) | `POST /api/metadata/graphql` | Returns formulas with **display-name field refs** like `SUM([Net Revenue])` instead of GUIDs. |
 | View data (CSV) | `GET $TABLEAU_BASE/views/VID/data` | Cheap. Fire all views in parallel. |
-| View image (PNG) | `GET $TABLEAU_BASE/views/VID/image?vf_width=W&vf_height=H` | Fetch dashboard view only by default. Solo (no concurrent image calls) — VizQL session contention causes 401s otherwise. |
+| View image (PNG) | `GET $TABLEAU_BASE/views/VID/image?resolution=high` | Fetch dashboard view only by default. Solo (no concurrent image calls) — VizQL session contention causes 401s otherwise. The endpoint has NO size params (`vf_*` is the view-FILTER prefix; `vf_width`/`vf_height` were live-verified silent no-ops 2026-07-11) — exact-size renders come from the PDF row below. |
+| View PDF (exact size) | `GET $TABLEAU_BASE/views/VID/pdf?type=Unspecified&vizWidth=W&vizHeight=H` | The ONLY REST path honoring authored canvas dims. Renders the canvas at 0.75pt/px + 36pt margins — rasterize at 4/3 and crop (scripts/render-baseline.rb does this). `vf_<Field>=<value>` applies view filters. |
 | Workbook content download | `GET $TABLEAU_BASE/workbooks/WBID/content[?includeExtract=false]` | Returns raw `.twb` XML for workbooks with published datasources, or `.twbx` zip bytes if there are embedded extracts. Detect by checking the first 4 bytes for the ZIP magic `PK\x03\x04`. |
 | Logout (optional) | `POST $TABLEAU_BASE/auth/signout` | Frees the session token; signin doesn't count against site quotas. |
 
@@ -130,7 +153,7 @@ eval "$(scripts/get-tableau-token.sh)"
 ruby scripts/tableau-discover.rb \
   --workbook-name "Orders Conversion Test" \
   --datasource-name "ORDER_FACT (CSA.ORDER_FACT)+ (New Virtual Connection)" \
-  --out /tmp/orders
+  --out ~/tableau-migration/orders
 ```
 
 Writes:
@@ -191,9 +214,11 @@ return formulas with display-name refs.
 
 ### Image resolution
 
-Default `get-view-image` returns 800x800. Pass `?vf_width=W&vf_height=H&resolution=high`
-to get a usable dashboard screenshot. The MCP defaults to a similar size; this is just an
-FYI for the REST path.
+Default `get-view-image` returns 800x800. Pass `?resolution=high` for a usable dashboard
+screenshot (caps ~1568px wide). The /image endpoint has NO size parameters — the old
+`?vf_width=W&vf_height=H` advice was a silent no-op (`vf_` is the view-FILTER prefix;
+`width`/`height` are not fields — live-verified 2026-07-11). For EXACT authored-size
+renders use the /pdf endpoint (vizWidth/vizHeight) via scripts/render-baseline.rb.
 
 ### Pagination
 

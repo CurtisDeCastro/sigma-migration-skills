@@ -28,7 +28,10 @@ def run(mt, home, work, args, extra_env = {}, timeout: 20)
   env = {
     'HOME' => home, 'SIGMA_SKIP_DOCTOR_GATE' => 'test',
     'SIGMA_CLIENT_ID' => 'id-123', 'SIGMA_CLIENT_SECRET' => 'sec-456',
-    'SIGMA_API_TOKEN' => nil
+    'SIGMA_API_TOKEN' => nil,
+    # Hermetic: the step-0 TABLEAU cred gate sits before the manual-spec gate;
+    # without this the test only passes on machines that export TABLEAU_PAT_*.
+    'SIGMA_TABLEAU_VIA_MCP' => '1'
   }.merge(extra_env)
   cmd = ['ruby', mt, '--workbook', 'WB', '--connection', 'c1', '--out', work] + args
   io = IO.popen(env, cmd, err: %i[child out]); pid = io.pid; out = +''

@@ -120,8 +120,18 @@ master_ids =
     end
     detected.uniq
   end
-abort("auto-parity-plan.rb: no master element(s) detected; pass --master-id explicitly") if master_ids.empty?
-warn "matching charts that source from master element(s): #{master_ids.join(', ')}"
+if master_ids.empty?
+  # A hand-authored spec may have NO intermediate master tables at all — every
+  # chart sources the data model directly. That's a valid documented shape,
+  # not an error (the chart loop below matches DM-sourced charts on its own).
+  has_dm_charts = spec['pages'].any? do |pg|
+    (pg['elements'] || []).any? { |e| e.dig('source', 'kind') == 'data-model' && e['kind'] != 'table' }
+  end
+  abort('auto-parity-plan.rb: no master element(s) detected; pass --master-id explicitly') unless has_dm_charts
+  warn 'no master tables detected — matching data-model-sourced charts directly'
+else
+  warn "matching charts that source from master element(s): #{master_ids.join(', ')}"
+end
 
 master_id_set = master_ids.to_set
 # Transitive: hidden helper tables that THEMSELVES source a master (e.g. the
@@ -138,12 +148,30 @@ sigma_charts = []
 pages.each do |pg|
   pg['elements'].each do |e|
     next if master_id_set.include?(e['id'])
-    next unless e['source'] && master_id_set.include?(e['source']['elementId'])
+    # A chart counts when it sources a detected master — OR sources the data
+    # model DIRECTLY (source.kind=='data-model' on the chart itself, the
+    # documented hand-authored shape). The master-only check silently produced
+    # a "0 CSV tiles" census on every exit-4 workbook, forcing an
+    # --allow-missing-tiles waiver for tiles that were fully verifiable
+    # (field-caught round 2, two independent runs).
+    from_master = e['source'] && master_id_set.include?(e['source']['elementId'])
+    from_dm     = e.dig('source', 'kind') == 'data-model' && !%w[table control text image container].include?(e['kind'].to_s)
+    next unless from_master || from_dm
     sigma_charts << e
   end
 end
 
 # Match Sigma chart → Tableau view
+# Element display name: put-layout replaces `name` with a visibility hash on
+# hidden-title elements — recover text, else the id slug, so Tableau-view
+# matching keeps working (and keys stay unique).
+def el_display_name(el)
+  n = el['name']
+  return n.to_s unless n.is_a?(Hash)
+  t = n['text'].to_s
+  t.empty? ? el['id'].to_s.sub(/\Ael-/, '').tr('-', ' ') : t
+end
+
 def normalize(s)
   s.to_s.downcase.gsub(/[^a-z0-9]/, '')
 end
@@ -174,7 +202,7 @@ rev_renames = opts[:renames].each_with_object({}) { |(k, v), h| h[v] = k }
 
 plan_entries = []
 sigma_charts.each do |el|
-  sigma_name = el['name']
+  sigma_name = el_display_name(el)
   tableau_name = rev_renames[sigma_name] || sigma_name
 
   view = view_by_name[tableau_name]
@@ -324,6 +352,25 @@ puts "        then merge the rows into the parity plan's actual.rows arrays."
 # The dashboard-layout path is looked up next to the --tableau dir as
 # `dashboard-layout.json` (the default parse-twb-layout output location).
 hidden_filters_gate = []
+# v5.2 (speed): carry RESOLUTIONS forward across plan regenerations. The
+# orchestrator re-runs this script on every re-entry, and a hardcoded
+# 'unresolved' default silently WIPED the operator's translated/waived
+# statuses — round-4 runs burned three identical Phase-6 FATALs re-doing the
+# same waive (timeline-proven). Keyed by tile + calc_ref.
+prior_hf = {}
+if File.exist?(opts[:out])
+  begin
+    parsed = JSON.parse(File.read(opts[:out]))
+    if parsed.is_a?(Hash)
+      (parsed['hidden_filters'] || []).each do |hf|
+        next unless hf.is_a?(Hash) && %w[translated waived].include?(hf['status'])
+        prior_hf[[hf['tile'], hf['calc_ref']]] = hf
+      end
+    end
+  rescue JSON::ParserError, TypeError
+    nil
+  end
+end
 dash_layout_path = File.join(opts[:tab], 'dashboard-layout.json')
 if File.exist?(dash_layout_path)
   begin
@@ -340,23 +387,49 @@ if File.exist?(dash_layout_path)
           hf_list = z['hidden_filters']
           next if hf_list.nil? || hf_list.empty?
           hf_list.each do |hf|
-            hidden_filters_gate << {
+            entry = {
               'tile'        => z['caption'],
               'calc_ref'    => hf['calc_ref'],
               'caption'     => hf['caption'],
               'filter_type' => hf['filter_type'],
               'members'     => hf['members'],
+              # quantitative bounds ride along so the carry-forward fingerprint
+              # (and a human reviewing the plan) can SEE a range change —
+              # members-only compared trivially-equal nils (review-caught)
+              'min'         => hf['min'],
+              'max'         => hf['max'],
               # Default status: unresolved. Caller must set "translated" or "waived".
               'status'      => 'unresolved'
             }.compact
+            if (prev = prior_hf[[entry['tile'], entry['calc_ref']]])
+              # A resolution only carries when the filter DEFINITION is
+              # unchanged — a waive granted for members ["2025"] must not
+              # bless the same calc_ref now filtering ["2025","2026"] (the
+              # 248→52-row silent wrong-numbers class this gate exists to
+              # block; review-caught).
+              same_def = prev['filter_type'].to_s == entry['filter_type'].to_s &&
+                         Array(prev['members']).map(&:to_s).sort == Array(entry['members']).map(&:to_s).sort &&
+                         prev['min'].to_s == entry['min'].to_s && prev['max'].to_s == entry['max'].to_s
+              if same_def
+                entry['status'] = prev['status']
+                %w[waive_reason translation translated_to note].each { |k| entry[k] = prev[k] if prev[k] }
+                warn "hidden_filters gate: carried '#{prev['status']}' forward for [#{entry['tile']}] #{entry['calc_ref']} (definition unchanged)"
+              else
+                warn "hidden_filters gate: DROPPED prior '#{prev['status']}' for [#{entry['tile']}] #{entry['calc_ref']} — " \
+                     'the filter definition CHANGED (members/type differ); re-review and re-resolve it'
+              end
+            end
+            hidden_filters_gate << entry
           end
         end
       end
       if hidden_filters_gate.any?
-        warn "hidden_filters gate: #{hidden_filters_gate.size} unresolved calc-filter(s) found — " \
-             "plan will be 'needs_review' until each is translated or waived"
+        open_hf = hidden_filters_gate.count { |hf| !%w[translated waived].include?(hf['status']) }
+        warn "hidden_filters gate: #{open_hf} unresolved calc-filter(s) " \
+             "(#{hidden_filters_gate.size - open_hf} carried resolved)" \
+             "#{open_hf.positive? ? " — plan is 'needs_review' until each is translated or waived" : ''}"
         hidden_filters_gate.each do |hf|
-          warn "  [#{hf['tile']}] #{hf['calc_ref']} (#{hf['caption']}) filter_type=#{hf['filter_type']}"
+          warn "  [#{hf['tile']}] #{hf['calc_ref']} (#{hf['caption']}) filter_type=#{hf['filter_type']} status=#{hf['status']}"
         end
       else
         warn "hidden_filters gate: no hidden calc-filters found in dashboard layout"
@@ -394,7 +467,7 @@ composite_stub = false
 if plan_entries.empty? && csv_mtime.zero?
   composite_stub = true
   plan_entries = sigma_charts.map do |el|
-    { 'id' => el['id'], 'chart' => el['name'], 'name' => el['name'], 'expected' => nil,
+    { 'id' => el['id'], 'chart' => el_display_name(el), 'name' => el_display_name(el), 'expected' => nil,
       'needs_source' => 'composite-dashboard: no per-worksheet CSV oracle — fill `actual` via a live ' \
                         'Sigma MCP query if a value oracle exists; fidelity is otherwise carried by the ' \
                         'visual gate (assert-phase6-ran.rb 8/8b).' }

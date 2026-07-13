@@ -8,11 +8,19 @@
 # Exercises the pure derive_theme(layout) helper directly (no live POST).
 # Usage:  ruby scripts/test-theme-derivation.rb
 require 'json'
+require_relative 'lib/theme_derive'
 
 DIR = __dir__
+# v5.0: derive_theme moved to the shared lib (ThemeDerive.derive) so the
+# standalone and orchestrated paths cannot diverge. Assert the wrapper in
+# build-workbook-spec.rb still delegates there (the old regex-extract+eval
+# approach would silently test dead code once the body moved).
 SRC = File.read(File.join(DIR, 'build-workbook-spec.rb'))
-m = SRC.match(/^def derive_theme\b.*?\n^end$/m) or abort('could not extract derive_theme')
-eval(m[0]) # rubocop:disable Security/Eval — test-only extraction of first-party code
+abort('build-workbook-spec.rb no longer delegates derive_theme to ThemeDerive') unless
+  SRC =~ /^def derive_theme\b.*?ThemeDerive\.derive/m
+def derive_theme(layout)
+  ThemeDerive.derive(layout)
+end
 
 fails = []
 def check(cond, msg, fails)

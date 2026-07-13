@@ -85,7 +85,7 @@ check('generic header title flagged')        { has?(bv, 'generic header title') 
 check('dead zone flagged')                   { has?(bv, 'dead zone') }
 
 # --- 2b. a top-level control ABOVE the first section band is NOT orphaned ----
-# The exemplar "filter over a banded grid" pattern (World Bank Macroeconomics):
+# The exemplar "filter over a banded grid" pattern (Global Macro Series):
 # a bare Region control in the control region above the first tinted band. It is
 # legitimate, not lost among the charts, so it must lint clean.
 ctl_above = {
@@ -100,7 +100,7 @@ ctl_above = {
     </Page>
   XML
   'pages' => [{ 'id' => 'p1', 'name' => 'Macroeconomics', 'elements' => [
-    { 'id' => 'title', 'kind' => 'text', 'body' => '**World Bank Series**' },
+    { 'id' => 'title', 'kind' => 'text', 'body' => '**Global Macro Series**' },
     { 'id' => 'region', 'kind' => 'control', 'name' => 'Region' },
     { 'id' => 'band', 'kind' => 'text', 'body' => 'YEAR ON YEAR' },
     { 'id' => 'chart', 'kind' => 'bar-chart', 'name' => 'GDP YEAR ON YEAR' }

@@ -32,6 +32,7 @@ require 'set'
 require 'json'
 require 'open3'
 require_relative 'lib/py_resolve' # real-Python resolver (Windows Store-stub safe)
+require_relative 'lib/theme_derive' # shared theme derivation/emission (v5.0)
 
 module MechanicalSpecs
   module_function
@@ -157,7 +158,7 @@ module MechanicalSpecs
     # (dominant_fact_table). In a MULTI-embedded-extract workbook the converter
     # projects more columns for an UNUSED secondary datasource than for the one
     # the charts plot, so the max_by(columns.size) default below picks the wrong
-    # fact (the World Bank regression: 14-col unused Table B beat the 9-col used
+    # fact (the Global Macro regression: 14-col unused Table B beat the 9-col used
     # Table A). When a preferred table is named, restrict the pick to elements
     # tied to it; only fall through to the count heuristic if nothing matches.
     if prefer_table
@@ -195,6 +196,8 @@ module MechanicalSpecs
     # the first `dbname='….hyper'` inside it.
     name2cap = {}
     name2hyper = {}
+    name2remote = Hash.new { |h, k| h[k] = Set.new }
+    sanitize = ->(s) { s.to_s.gsub(/[^0-9A-Za-z]+/, '_').gsub(/\A_+|_+\z/, '').upcase }
     twb_text.split(/<datasource\s/).drop(1).each do |chunk|
       attrs = chunk[/\A([^>]*)>/, 1].to_s
       nm = attrs[/\bname='([^']*)'/, 1]
@@ -203,6 +206,8 @@ module MechanicalSpecs
       name2cap[nm] ||= c if c
       db = chunk[/<connection\b[^>]*\bdbname='([^']*\.hyper)'/i, 1]
       name2hyper[nm] ||= File.basename(db) if db
+      # Physical extract column names (metadata-records) — the tie-breaker below.
+      chunk.scan(%r{<remote-name>([^<]+)</remote-name>}) { |r| name2remote[nm] << sanitize.call(r[0]) }
     end
     usage = Hash.new(0)
     twb_text.scan(/<datasource-dependencies\b[^>]*\bdatasource='([^']+)'/) do |m|
@@ -221,6 +226,24 @@ module MechanicalSpecs
     entry = (hyp && entries.find { |e| e['hyper'].to_s == hyp }) ||
             (!cap.empty? && entries.find { |e| e['caption'].to_s.strip == cap }) ||
             entries.find { |e| e['datasource'].to_s == dominant }
+    # Server-downloaded .twb reference their extracts by GUID dbname (no .hyper
+    # basename), and land-extracts GUID-labels the caption when the datasource
+    # caption can't be resolved — so all three matches above can fail on exactly
+    # the workbooks that need the hint most (the count heuristic then picks the
+    # wrong, unused table). Tie-break by PHYSICAL column overlap: the dominant
+    # datasource's <metadata-records> remote names ARE the landed column set
+    # (near-total overlap on the right table, incidental on the wrong one).
+    # Require a strict winner so an ambiguous match never masquerades as a hint.
+    if entry.nil? && name2remote[dominant].any?
+      remote = name2remote[dominant]
+      scored = entries.map do |e|
+        phys = (e['columns'] || {}).values.map { |v| v.to_s.upcase }
+        [e, phys.count { |p| remote.include?(p) }]
+      end.sort_by { |_e, n| -n }
+      best_e, best_n = scored[0]
+      runner_n = scored[1] ? scored[1][1] : 0
+      entry = best_e if best_n.positive? && best_n > runner_n
+    end
     return nil unless entry && entry['sf_table']
     entry['sf_table'].to_s.split('.').last&.upcase
   end
@@ -237,7 +260,14 @@ module MechanicalSpecs
   # Returns the count of LOD measures synthesized. Mutates `model`/`fact`.
   FIXED_YEAR_LOD_RE = /\{\s*FIXED\s+([^:]+?)\s*:\s*(SUM|AVG|MIN|MAX|COUNT|COUNTD)\s*\(\s*\[([^\]]+)\]\s*\)\s*\}/i
 
-  def synthesize_fixed_lods!(model, fact, twb_text, colmap = {}, discriminator: nil)
+  # real_map (optional): the landing manifest's caption→physical map for the
+  # fact's landed table. The custom SQL references PHYSICAL warehouse columns,
+  # so with a manifest the metric/discriminator checks resolve against the
+  # table's REAL columns — the DM element projects only PLOTTED columns, and a
+  # World LOD's base metric is typically never plotted directly (it only
+  # appears inside the LOD), so a projection-only check silently drops the LOD
+  # and the chart ref dangles at the POST.
+  def synthesize_fixed_lods!(model, fact, twb_text, colmap = {}, discriminator: nil, real_map: nil)
     return {} unless model && fact && twb_text
     # Must return the SAME type ({}) as every other exit — the caller does
     # world_lod_map.any?, and `0.any?` is a NoMethodError that crashes the run.
@@ -264,8 +294,22 @@ module MechanicalSpecs
     decode = ->(s) { s.to_s.gsub('&apos;', "'").gsub('&quot;', '"').gsub('&amp;', '&') }
 
     phys = lambda do |cap|
-      dest = colmap[cap] || colmap[cap.to_s.strip.upcase]
+      dest = (real_map && (real_map[cap] || real_map[cap.to_s.strip])) ||
+             colmap[cap] || colmap[cap.to_s.strip.upcase]
       (dest || cap).to_s.gsub(/[^0-9A-Za-z]+/, '_').gsub(/\A_+|_+\z/, '').upcase
+    end
+
+    # A caption is SQL-usable iff its physical column exists on the landed
+    # table (manifest truth). Without a manifest, fall back to the projected
+    # DM columns OR an explicit colmap entry — a threaded caption→physical
+    # rename is itself evidence the column exists on the landed table.
+    real_set = real_map && real_map.values.map { |v| v.to_s.upcase }.to_set
+    sql_usable = lambda do |cap|
+      if real_set
+        real_set.include?(phys.call(cap))
+      else
+        fact_caps.key?(cap.to_s.downcase) || colmap.key?(cap) || colmap.key?(cap.to_s.strip.upcase)
+      end
     end
 
     lods = {}
@@ -275,7 +319,11 @@ module MechanicalSpecs
       next unless m
       dim, agg, metric = m[1], m[2], m[3]
       next unless dim =~ /DATEPART\(\s*'year'|\bYEAR\s*\(|\[Year\]/i     # year-grain only
-      next unless fact_caps.key?(metric.to_s.downcase)                   # metric must be on THIS fact
+      # The metric must resolve to a REAL column on THIS fact's table. A caption
+      # can be defined per-datasource with different base metrics (e.g. "GDP World"
+      # = SUM([GDP Value]) on one datasource, SUM([GDP (current US$)]) on another)
+      # — keep the first definition whose metric this table actually carries.
+      next unless sql_usable.call(metric)
       lods[cap] ||= { 'name' => cap, 'agg' => agg.upcase, 'metric' => metric }
     end
     return {} if lods.empty?
@@ -288,14 +336,28 @@ module MechanicalSpecs
       sel << %(#{l['agg']}("#{phys.call(l['metric'])}") AS "#{l['name']}")
       cols << { 'id' => "wby-#{slug(l['name'])}", 'name' => l['name'], 'formula' => "[Custom SQL/#{l['name']}]" }
     end
-    # Exclude aggregate/rollup rows from the per-year WORLD total. World Bank–style
+    # Exclude aggregate/rollup rows from the per-year WORLD total. Global Macro–style
     # extracts carry region / income-group / "World" rollup rows ALONGSIDE the real
     # countries, so an unfiltered SUM(...) OVER year double-counts them (the World
     # trend line came out ~6-10x too high). The point-in-time discriminator (a
     # column NULL on rollup rows, e.g. IncomeGroup) selects real entities only.
+    #
+    # SCOPE GUARD (live-caught): the discriminator lives on the COUNTRY-grain fact.
+    # When the FIXED-Year metrics resolve to a DIFFERENT table (e.g. an already
+    # world-grain companion extract), that table may not carry the column at all —
+    # emitting the WHERE anyway makes the whole DM POST fail with
+    # `invalid identifier`. Only filter when the discriminator's caption resolves
+    # to a column ON THIS fact; a single-entity/world-grain table needs no
+    # rollup exclusion in the first place.
     where = ''
     if discriminator && !discriminator.to_s.strip.empty?
-      where = %( WHERE "#{phys.call(discriminator)}" IS NOT NULL)
+      if sql_usable.call(discriminator)
+        where = %( WHERE "#{phys.call(discriminator)}" IS NOT NULL)
+      else
+        warn "NOTE world-by-year: discriminator #{discriminator.inspect} is not a column on " \
+             "#{path[2]} — rollup-exclusion WHERE omitted (verify the world totals against " \
+             'the source render in Phase 6; a table without the discriminator usually has no rollup rows).'
+      end
     end
     statement = %(SELECT #{sel.join(', ')} FROM #{fqn}#{where} GROUP BY "#{year_phys}")
 
@@ -316,10 +378,97 @@ module MechanicalSpecs
     lods.each_with_object({}) { |(cap, l), h| h[cap.to_s.downcase] = l['metric'] }
   end
 
+  # Synthesize the "<Metric> YoY" helper for a multi-metric YoY panel: the
+  # source prints a signed % beside each category bar. That change is
+  # PAIRWISE-COMPLETE year-over-year — only entities carrying BOTH years count
+  # (one-sided entities distort the group total: live-calibrated, a naive
+  # region sum gave -22% where the source prints -11%). Emits ONE grouped
+  # Custom SQL element over the fact table (dim + one "<metric> YoY" column
+  # per metric, each at ITS OWN latest year vs the prior year, real entities
+  # only) + a `FIXED YoY` relationship on the fact keyed by the dim —
+  # derive_master's FIXED-helper surfacing then exposes each YoY column onto
+  # the master; the multimetric recipe adds it to the bar tiles (and the
+  # anchors gate can verify the printed percentages).
+  # metrics: {caption => latest_year}. Returns {metric_caption.downcase =>
+  # "<caption> YoY"} (empty when not applicable). Mutates model/fact.
+  def synthesize_yoy_by_dim!(model, fact, dim:, entity:, metrics:, year: 'Year',
+                             discriminator: nil, real_map: nil, colmap: {})
+    return {} unless model && fact && metrics.is_a?(Hash) && !metrics.empty?
+    return {} if dim.to_s.strip.empty? || entity.to_s.strip.empty?
+    return {} unless fact.dig('source', 'kind') == 'warehouse-table'
+    path = fact.dig('source', 'path') || []
+    conn = fact.dig('source', 'connectionId')
+    return {} if path.size < 3 || conn.to_s.empty?
+
+    phys = lambda do |cap|
+      dest = (real_map && (real_map[cap] || real_map[cap.to_s.strip])) ||
+             colmap[cap] || colmap[cap.to_s.strip.upcase]
+      (dest || cap).to_s.gsub(/[^0-9A-Za-z]+/, '_').gsub(/\A_+|_+\z/, '').upcase
+    end
+    real_set = real_map && real_map.values.map { |v| v.to_s.upcase }.to_set
+    usable = ->(cap) { real_set.nil? || real_set.include?(phys.call(cap)) }
+    return {} unless usable.call(dim) && usable.call(entity) && usable.call(year)
+
+    fact_caps = (fact['columns'] || []).each_with_object({}) do |c, h|
+      disp = col_display(c)
+      h[disp.to_s.downcase] = c if disp && !disp.to_s.empty?
+    end
+    dim_col = fact_caps[dim.to_s.downcase]
+    return {} unless dim_col # the relationship key must be projected on the fact
+
+    yp = phys.call(year)
+    agg = []
+    out = []
+    cols = [{ 'id' => 'yoy-dim', 'name' => dim, 'formula' => "[Custom SQL/#{dim}]" }]
+    ymap = {}
+    metrics.each_with_index do |(cap, yr), i|
+      next unless usable.call(cap) && yr.to_s =~ /\A\d{4}\z/
+      mp = phys.call(cap)
+      y = yr.to_i
+      agg << %(SUM(CASE WHEN "#{yp}" = #{y} THEN "#{mp}" END) AS m#{i}a)
+      agg << %(SUM(CASE WHEN "#{yp}" = #{y - 1} THEN "#{mp}" END) AS m#{i}b)
+      name = "#{cap} YoY"
+      out << %(SUM(CASE WHEN m#{i}a IS NOT NULL AND m#{i}b IS NOT NULL THEN m#{i}a END) / ) +
+             %(NULLIF(SUM(CASE WHEN m#{i}a IS NOT NULL AND m#{i}b IS NOT NULL THEN m#{i}b END), 0) - 1 AS "#{name}")
+      cols << { 'id' => "yoy-#{slug(name)}", 'name' => name, 'formula' => "[Custom SQL/#{name}]" }
+      ymap[cap.to_s.downcase] = name
+    end
+    return {} if ymap.empty?
+
+    where = ''
+    if discriminator && !discriminator.to_s.strip.empty? && usable.call(discriminator)
+      where = %( WHERE "#{phys.call(discriminator)}" IS NOT NULL)
+    end
+    fqn = %(#{path[0]}.#{path[1]}."#{path[2]}")
+    statement = <<~SQL.gsub(/\s+/, ' ').strip
+      SELECT "#{phys.call(dim)}" AS "#{dim}", #{out.join(', ')}
+      FROM (
+        SELECT "#{phys.call(dim)}", "#{phys.call(entity)}", #{agg.join(', ')}
+        FROM #{fqn}#{where}
+        GROUP BY "#{phys.call(dim)}", "#{phys.call(entity)}"
+      ) t
+      GROUP BY "#{phys.call(dim)}"
+    SQL
+
+    sql_el = {
+      'id' => 'el-yoy-by-dim', 'kind' => 'table',
+      'source' => { 'connectionId' => conn, 'kind' => 'sql', 'statement' => statement },
+      'columns' => cols, 'order' => cols.map { |c| c['id'] }
+    }
+    page = (model['pages'] || []).find { |p| (p['elements'] || []).any? { |e| e.equal?(fact) } } ||
+           (model['pages'] || []).first
+    (page['elements'] ||= []) << sql_el if page
+    (fact['relationships'] ||= []) << {
+      'id' => 'rel-yoy-by-dim', 'name' => 'FIXED YoY', 'targetElementId' => 'el-yoy-by-dim',
+      'keys' => [{ 'sourceColumnId' => dim_col['id'], 'targetColumnId' => 'yoy-dim' }]
+    }
+    ymap
+  end
+
   # Retain extra base columns on the fact that the recipe needs but the converter
   # dropped (it projects only PLOTTED columns). The multi-metric point-in-time
   # filter references [Master/<discriminator>] + [Master/<year>]; if the source
-  # never plotted the discriminator (e.g. World-Bank "IncomeGroup"), it's absent
+  # never plotted the discriminator (e.g. Global-Macro "IncomeGroup"), it's absent
   # from the DM → the recipe guard skips the real-entity filter. Add each wanted
   # name as a base column [<table>/<Name>] when it's a REAL warehouse column
   # (present in real_cols for the fact's table) and not already exposed. Returns
@@ -405,6 +554,7 @@ module MechanicalSpecs
     tables = []
     claimed_el = {}
     used_entry = {}
+    rename_pairs = [] # [old_last, old_name, new_last, new_name, element]
     scored.each do |_overlap, ei, si, el, entry|
       next if claimed_el[ei] || used_entry[si]
       sf = entry['sf_table'].to_s.split('.')
@@ -413,6 +563,7 @@ module MechanicalSpecs
       claimed_el[ei] = true
       used_entry[si] = true
       old_last = (el.dig('source', 'path') || []).last.to_s
+      old_name = el['name'].to_s
       el['source']['path'] = sf
       el['name'] = display_name(new_last)
       unless old_last.empty? || old_last == new_last
@@ -420,10 +571,148 @@ module MechanicalSpecs
         (el['columns'] || []).each { |c| c['formula'] = c['formula'].to_s.gsub(pfx, "[#{new_last}/") }
         (el['metrics'] || []).each { |m| m['formula'] = m['formula'].to_s.gsub(pfx, "[#{new_last}/") }
       end
+      rename_pairs << [old_last, old_name, new_last, el['name'].to_s, el]
       (entry['columns'] || {}).each { |orig, landed| colmap[orig] = landed }
       tables << new_last
     end
-    { colmap: colmap, elements: claimed_el.size, tables: tables }
+
+    # v5.4: repair DERIVED elements' refs. A converter "View"/calc-table
+    # element references its base by the base's OLD identifier; the per-claim
+    # rewrite above only fixes the claimed element itself, leaving the derived
+    # element broken — the union-collapse orphan class. Rewrite refs on
+    # UNCLAIMED elements only, and only when the old identifier maps to
+    # EXACTLY ONE landed table — shared generic identifiers ("Extract" on
+    # every embedded datasource) are unattributable and stay as NAMED residue,
+    # never a guess.
+    claimed_ids = rename_pairs.map { |r| r[4].object_id }
+    { 0 => 2, 1 => 3 }.each do |old_idx, new_idx|
+      rename_pairs.group_by { |r| r[old_idx] }.each do |old, rs|
+        next if old.to_s.empty?
+        news = rs.map { |r| r[new_idx] }.uniq
+        next if news == [old]
+        if news.size > 1
+          warn "manifest remap: original identifier '#{old}' landed on #{news.size} tables — derived-element " \
+               'refs to it are unattributable and left as-is (repoint by hand / --table-mapping)'
+          next
+        end
+        pfx_old = /\[#{Regexp.escape(old)}\//
+        repl = "[#{news.first}/"
+        all_elements(model).each do |other|
+          next if claimed_ids.include?(other.object_id)
+          (Array(other['columns']) + Array(other['metrics'])).each do |c|
+            c['formula'] = c['formula'].gsub(pfx_old, repl) if c['formula'].is_a?(String)
+          end
+        end
+      end
+    end
+
+    # v5.4 (item: kind:'sql' FROM identifiers): Custom-SQL / FIXED-LOD helper
+    # elements embed the ORIGINAL workbook table identifier in their
+    # source.statement ("FROM ...'UDEMY COURSE$'") — repointing only
+    # warehouse-table elements left them querying a table that does not exist
+    # in the warehouse (field-confirmed twice; sanctioned recovery was a
+    # manual --table-mapping). Attribute each statement to a manifest entry by
+    # column-identifier overlap, then rewrite SINGLE-TABLE statements:
+    #   FROM <orig identifier>  → FROM <landed sf_table>
+    #   "orig col" / [orig col] → landed column name (manifest colmap)
+    # Multi-table SQL (JOINs / several FROMs) is named residue — never guessed.
+    sql_remapped = 0
+    all_elements(model).each do |el|
+      next unless el.dig('source', 'kind') == 'sql' && el.dig('source', 'statement').is_a?(String)
+      stmt = el['source']['statement']
+      # Attribution scan: double-quoted and bracketed tokens only (v5.4.9
+      # review fix). Single-quoted tokens are DATA LITERALS in SQL (WHERE
+      # region = 'West') — counting them toward column overlap could tip the
+      # attribution to a wrong manifest entry and rewrite FROM to the wrong
+      # landed table with no warning. Single-quoted TABLE identifiers
+      # (FROM 'Sheet1$') don't contribute to column overlap anyway, and the
+      # FROM rewrite below still handles them via ident_pat.
+      idents = stmt.scan(/"([^"]+)"|\[([^\]]+)\]/).flatten.compact
+                   .map { |x| norm.call(x) }.reject(&:empty?).to_set
+      best = nil
+      entries.each do |entry|
+        keys = (entry['columns'] || {}).keys.map { |k| norm.call(k) }.to_set
+        ov = (idents & keys).size
+        best = [ov, entry] if ov.positive? && (best.nil? || ov > best[0])
+      end
+      next unless best
+      entry = best[1]
+      # Multi-table guard: >1 FROM/JOIN, or a COMMA JOIN (`FROM a, b` — one
+      # FROM, zero JOINs; v5.4.9 review fix: previously scored single-table and
+      # got a half-rewritten `FROM <landed>, b`). Top-level comma test: take
+      # the FROM clause up to the next clause keyword, drop parenthesized
+      # groups (column lists of an inline subquery — itself caught by the
+      # 2-FROM count), then look for a remaining comma.
+      from_clause = stmt[/\bFROM\b(.*?)(?=\b(?:WHERE|GROUP\s+BY|ORDER\s+BY|HAVING|QUALIFY|LIMIT|UNION)\b|;|\z)/im, 1].to_s
+      comma_join = from_clause.gsub(/\([^()]*\)/, '').include?(',')
+      if stmt.scan(/\bFROM\b/i).size + stmt.scan(/\bJOIN\b/i).size > 1 || comma_join
+        warn "custom-SQL element '#{el['name']}' references multiple tables#{comma_join ? ' (comma join)' : ''} — " \
+             "NOT auto-remapped; repoint it with --table-mapping (landed table: #{entry['sf_table']})"
+        next
+      end
+      ident_pat = %q{(?:"[^"]+"|\[[^\]]+\]|'[^']+'|[A-Za-z0-9_$#]+)}
+      new_stmt = stmt.sub(/\bFROM\s+#{ident_pat}(?:\s*\.\s*#{ident_pat})*/i) { "FROM #{entry['sf_table']}" }
+      (entry['columns'] || {}).each do |orig, landed|
+        next if orig == landed
+        new_stmt = new_stmt.gsub(/"#{Regexp.escape(orig)}"/, landed.to_s)
+                           .gsub(/\[#{Regexp.escape(orig)}\]/, landed.to_s)
+      end
+      next if new_stmt == stmt
+      el['source']['statement'] = new_stmt
+      sql_remapped += 1
+    end
+
+    { colmap: colmap, elements: claimed_el.size, tables: tables, sql_elements: sql_remapped }
+  end
+
+  # v5.4: prune ORPHANED BROKEN elements from the converter model (the
+  # union-collapse leftover class). The union-of-one collapse and other
+  # relation rewrites can leave the converter emitting an element whose
+  # cross-refs name elements that no longer exist, with nothing referencing
+  # it — it compiles to type=error / 400s the POST while contributing
+  # nothing. Prune ONLY when BOTH hold:
+  #   (a) BROKEN: ≥1 formula ref [X/…] where X is neither an existing element
+  #       name nor one of the element's own SOURCE identities (its name, its
+  #       source path last segment, the sql-source 'Custom SQL' alias, or its
+  #       source element's name) — source-relative refs are valid;
+  #   (b) UNREFERENCED: no other element's formulas and no model relationship
+  #       name it (by name or id), and it is not the kept fact.
+  # Loud per-element log; returns the pruned names.
+  def prune_broken_orphans!(model, keep: nil)
+    els = all_elements(model)
+    names = els.map { |e| e['name'].to_s }.reject(&:empty?)
+    by_id = els.each_with_object({}) { |e, h| h[e['id'].to_s] = e }
+    pruned = []
+    els.each do |el|
+      el_name = el['name'].to_s
+      next if keep && el_name == keep.to_s
+      own = [el_name,
+             (el.dig('source', 'path') || []).last.to_s,
+             'Custom SQL',
+             by_id[el.dig('source', 'elementId').to_s] && by_id[el.dig('source', 'elementId').to_s]['name'].to_s]
+            .compact.reject(&:empty?)
+      refs = (Array(el['columns']) + Array(el['metrics']))
+             .flat_map { |c| c['formula'].to_s.scan(/\[([^\[\]\/]+)\/[^\[\]]*\]/).flatten }.uniq
+      broken = refs.reject { |r| names.include?(r) || own.include?(r) }
+      next if broken.empty?
+      referenced = els.any? do |other|
+        next false if other.equal?(el)
+        (Array(other['columns']) + Array(other['metrics'])).any? { |c| c['formula'].to_s.include?("[#{el_name}/") } ||
+          other.dig('source', 'elementId').to_s == el['id'].to_s
+      end
+      referenced ||= Array(model['relationships']).any? do |r|
+        blob = JSON.generate(r)
+        blob.include?(el['id'].to_s) || (!el_name.empty? && blob.include?(el_name))
+      end
+      next if referenced
+      pruned << el
+    end
+    pruned.each do |el|
+      (model['pages'] || []).each { |p| (p['elements'] || []).delete(el) }
+      warn "pruned ORPHANED BROKEN element '#{el['name']}' (#{el['id']}) from the DM spec — " \
+           'unreferenced, with cross-refs to non-existent elements (union-collapse leftover class)'
+    end
+    pruned.map { |e| e['name'].to_s }
   end
 
   # Run the Tableau→Sigma converter. Two backends, same output contract
@@ -1267,17 +1556,44 @@ module MechanicalSpecs
   # (one Sigma page per Tableau dashboard — bead ptrt).
   # data_elements: extra HIDDEN elements for the data page (e.g. the scatter
   # grouped-source tables — bead z1d0).
+  # theme: ThemeDerive.derive output (build-charts 'theme' key) — the
+  # orchestrated path previously dropped it, so every mechanical run shipped
+  # themeless even when the source declared fonts/canvas/palette (v5.0 fix).
   def build_wb_spec(name:, dm_id:, fact_eid:, master_columns:, chart_elements:, folder_id: nil,
-                    data_elements: [])
+                    data_elements: [], theme: nil)
     master = {
       'id' => 'master', 'kind' => 'table', 'name' => 'Master', 'visibleAsSource' => false,
       'source' => { 'kind' => 'data-model', 'dataModelId' => dm_id, 'elementId' => fact_eid },
       'columns' => master_columns, 'order' => master_columns.map { |c| c['id'] }
     }
+    # v5.4: document-order the data page SOURCE-BEFORE-CONSUMER. The API
+    # resolves element refs in document order at POST, so a helper emitted
+    # before the sub-master it sources 400s (round-6 field: TopN Source before
+    # its sub-master). Kahn-style passes: an element is placeable once its
+    # source elementId is not among the still-unplaced data elements (already
+    # placed, the master, or external — data-model refs, placeholders). A
+    # cycle (impossible for generated helpers, but never trust input) falls
+    # back to insertion order for the stuck remainder.
+    remaining = (data_elements || []).dup
+    ordered = []
+    until remaining.empty?
+      batch = remaining.select do |e|
+        src = e.is_a?(Hash) ? e.dig('source', 'elementId').to_s : ''
+        remaining.none? { |o| !o.equal?(e) && o.is_a?(Hash) && o['id'] == src }
+      end
+      batch = [remaining.first] if batch.empty?
+      ordered.concat(batch)
+      remaining -= batch
+    end
     chart_pages =
       if chart_elements.is_a?(Array) && chart_elements.all? { |e| e.is_a?(Hash) && e.key?('elements') && e.key?('name') }
         chart_elements.each_with_index.map do |pg, i|
-          { 'id' => "page-dash-#{i + 1}", 'name' => pg['name'], 'elements' => pg['elements'] }
+          page = { 'id' => "page-dash-#{i + 1}", 'name' => pg['name'], 'elements' => pg['elements'] }
+          # v5.0: designed-background passthrough — build-charts attaches
+          # backgroundImage to its page hashes; dropping it here silently
+          # strips the art.
+          page['backgroundImage'] = pg['backgroundImage'] if pg['backgroundImage']
+          page
         end
       else
         [{ 'id' => 'page-dash', 'name' => name, 'elements' => chart_elements }]
@@ -1288,11 +1604,12 @@ module MechanicalSpecs
       'schemaVersion' => 1,
       'pages' => [
         { 'id' => 'page-data', 'name' => 'Data',
-          'elements' => [master] + (data_elements || []) },
+          'elements' => [master] + ordered },
         *chart_pages
       ]
     }
     spec['folderId'] = folder_id if folder_id
+    ThemeDerive.apply!(spec, theme) if defined?(ThemeDerive)
     spec
   end
 

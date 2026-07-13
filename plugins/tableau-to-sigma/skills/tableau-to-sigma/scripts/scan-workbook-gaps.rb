@@ -27,6 +27,7 @@ require 'csv'
 # Nokogiri-backed REXML drop-in — REXML is O(n^2) on large .twb files. See lib/twb_xml.rb.
 $LOAD_PATH.unshift File.expand_path('lib', __dir__)
 require 'twb_xml'
+require 'calc_coverage' # masked function extraction + official catalog (v5.0)
 
 # --- Feature inventory: what the skill handles today ----------------------
 # Each entry: { pattern: regex_or_lambda, name: "feature", status: :auto |
@@ -87,6 +88,8 @@ INVENTORY = [
   # MANUAL — non-translatable today; needs customer to do post-publish work
   { name: 'Dashboard filter / highlight / nav actions', pat: /command='tsc:tsl-(filter|highlight|navigate|set-action|parameter-action|url)'/,
     status: :manual, blurb: 'tsl-filter → Sigma cross-element filter. FAITHFUL but ~80% automatable (verified 2026-07-10): the CONTROL half is spec-authorable — emit a list control whose filters bind {source:{kind:table,elementId},columnId} to the target element(s); elements sourcing the filtered element inherit it. The click-to-trigger is UI-ONLY (no action/setControlValue node in the workbook spec) — configured post-publish via the element Actions tab. GOTCHA: list-control values are STRINGS, so a NUMERIC filter column (period/year/id) 400s ("Expecting string") then 500s at query time — cast the numeric dim to text (Text([…])) in the control value-source column; text columns work as-is. Skill still writes actions.md for the click bindings. See sigma-workbooks controls.md "Cross-element filters".' },
+  { name: 'Dashboard buttons (navigate / export / show-hide)', pat: /type-v2='dashboard-object'/,
+    status: :hint, blurb: 'v5.0-P2: NAVIGATE buttons auto-emit (dashboard targets = Sigma pages; text-pill link, placeholder URL rewritten to the live page by put-layout.rb; native kind:button is workspace-gated). EXPORT buttons = recoverable residue (Sigma has a built-in export menu). SHOW/HIDE container toggles = named residue (no spec-authorable visibility toggle) — coverage.json dedupes them per (dashboard, tooltip/icon).' },
   { name: 'Forecast / trendline model',                pat: /<forecast\b/,
     status: :manual, blurb: 'No Sigma forecast primitive; agent emits a note + Custom SQL option (beads-sigma-yi0).' },
   { name: 'Story points (sequential narrative)',       pat: /<story\b/,
@@ -494,6 +497,20 @@ def analyze_fields(doc, content)
   end
   calc_kinds = calc_names.each_with_object(Hash.new(0)) { |n, h| h[classify.call(n)] += 1 }
 
+  # 4b. Calc-coverage census (v5.0, tflex-derived): tokenize every calc formula
+  #     with the MASKING tokenizer (comments/strings/field-refs masked first, so
+  #     'IF(' inside a string literal never false-hits) and extract the function
+  #     names actually used. Functions absent from the 185-entry official
+  #     catalog are named up front — a typo'd or extension function becomes a
+  #     scoping fact here instead of a silent formula error after the build.
+  fn_census = Hash.new(0)
+  defs.each_value do |v|
+    next unless v[:is_calc] && v[:formula]
+    CalcCoverage.extract_function_names(v[:formula]).each { |fn| fn_census[fn] += 1 }
+  end
+  catalog_names = CalcCoverage.catalog_index.keys
+  unknown_fns = fn_census.keys.reject { |fn| catalog_names.include?(fn) }.sort
+
   # 5. Orphaned worksheets (defined but on no dashboard).
   dash_region = content[/<dashboards>.*<\/dashboards>/m] || ''
   orphan_ws = doc.elements.to_a('/workbook/worksheets/worksheet')
@@ -540,6 +557,8 @@ def analyze_fields(doc, content)
     'orphan_worksheets'  => orphan_ws,
     'duplicate_captions' => dup_caps,
     'unused_field_names' => unused.map { |n| defs[n][:caption] },
+    'function_census'    => fn_census.sort_by { |fn, n| [-n, fn] }.to_h,
+    'unknown_functions'  => unknown_fns,
     'components'         => components
   }
 end
@@ -560,6 +579,15 @@ def render_md(wb_name, summary, results, fields = nil)
     md << "- **#{fields['pct_used']}% used** (#{fields['used_fields']} used / #{fields['unused_fields']} dead)\n"
     md << "- **Calc dependency:** #{fields['calc_simple']} simple, #{fields['calc_nested']} nested, "
     md << "#{fields['calc_lod']} LOD, #{fields['calc_tablecalc']} table-calc\n"
+    if (census = fields['function_census']) && !census.empty?
+      md << "- **Function usage:** #{census.first(12).map { |fn, n| "#{fn}×#{n}" }.join(', ')}"
+      md << " (+#{census.size - 12} more)" if census.size > 12
+      md << "\n"
+    end
+    unless (fields['unknown_functions'] || []).empty?
+      md << "- ⚠ **#{fields['unknown_functions'].size} function(s) NOT in the official Tableau catalog** "
+      md << "(typo / extension — will not translate): #{fields['unknown_functions'].map { |f| "`#{f}`" }.join(', ')}\n"
+    end
     unless fields['orphan_worksheets'].empty?
       md << "- **#{fields['orphan_worksheets'].size} orphaned worksheet(s)** (on no dashboard): "
       md << fields['orphan_worksheets'].map { |w| "`#{w}`" }.join(', ') << "\n"

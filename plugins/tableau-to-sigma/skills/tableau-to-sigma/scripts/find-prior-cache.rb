@@ -44,7 +44,8 @@ abort 'missing --name' unless opts[:name]
 
 name = opts[:name]
 candidate_dirs = (
-  Dir.glob("/tmp/audit-run-*/#{name}") +
+  [File.expand_path("~/tableau-migration/#{name}")] + # the workdir convention
+  Dir.glob("/tmp/audit-run-*/#{name}") +              # legacy cache locations
   ["/tmp/converter-test/#{name}",
    "/tmp/#{name}"]
 ).select { |d| File.directory?(d) }

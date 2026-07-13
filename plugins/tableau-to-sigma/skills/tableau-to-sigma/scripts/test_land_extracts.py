@@ -219,7 +219,7 @@ TWB = """<?xml version='1.0' encoding='utf-8'?>
       <connection class='hyper' dbname='Data/dataengine_0vr0bc01wliy3712xve51.hyper' schema='Extract'/>
     </named-connection></named-connections></connection>
   </datasource>
-  <datasource caption='1. Macro World Bank Extract' name='federated.wb'>
+  <datasource caption='1. Global Macro Series Extract' name='federated.wb'>
     <connection class='federated'><named-connections><named-connection name='n2'>
       <connection class='hyper' dbname='dataengine_0tb9dex1oka5x010ueapg.hyper'/>
     </named-connection></named-connections></connection>
@@ -232,7 +232,7 @@ try:
     hm = le.ds_hyper_map(twb_path2)
     check(hm.get("dataengine_0vr0bc01wliy3712xve51.hyper") == ("federated.gdp", "GFTGWOnullGDP2005 Extract"),
           "GUID hyper → (name, caption) via dbname")
-    check(hm.get("dataengine_0tb9dex1oka5x010ueapg.hyper") == ("federated.wb", "1. Macro World Bank Extract"),
+    check(hm.get("dataengine_0tb9dex1oka5x010ueapg.hyper") == ("federated.wb", "1. Global Macro Series Extract"),
           "second GUID hyper mapped (dbname without a path prefix)")
     check("Parameters" not in [v[0] for v in hm.values()], "Parameters datasource skipped")
     # The heuristic match_ds would MISS these (no shared tokens) — proving the map

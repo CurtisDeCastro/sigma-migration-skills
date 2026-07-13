@@ -426,9 +426,13 @@ end
 # record-visual-check.rb stamps onto this same parity-final.json (gate 8b), and
 # a gate that had passed starts failing again. Carry the visual fields forward
 # from the prior file so re-running finalize never un-does a recorded verdict.
+# The list must cover EVERY key record-visual-check.rb stamps: gate 8b requires
+# a complete style_checklist alongside a pass verdict, so dropping any stamped
+# key here flips a passing gate to exit 13 on the next finalize.
 if File.exist?(summary_path)
   prev = (JSON.parse(File.read(summary_path)) rescue {})
-  %w[visual_verdict visual_notes visual_checked screenshot_path agent_vision].each do |k|
+  %w[visual_verdict visual_notes visual_checked screenshot_path style_checklist
+     agent_vision].each do |k|
     summary[k] = prev[k] if prev.key?(k)
   end
 end

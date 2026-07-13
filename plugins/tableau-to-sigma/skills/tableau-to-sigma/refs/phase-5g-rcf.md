@@ -19,16 +19,16 @@
 The loop, per pass (~30–90s):
 
 ```
-RENDER    ruby scripts/fidelity-loop.rb render --workdir /tmp/<name>
+RENDER    ruby scripts/fidelity-loop.rb render --workdir <WORK>
           → rcf-pass-N.png (export API), bumps the pass counter, prints the rubric,
             enforces the pass budget (default 5; exit 3 when exhausted)
 COMPARE   Read rcf-pass-N.png against the SOURCE dashboard PNG (Phase 1d / visual-qa/
           <slug>.source.png), score EVERY dimension in refs/fidelity-rubric.md — including
           the two functional dimensions a visual diff misses: controls/parameters + accuracy
-CLASSIFY  ruby scripts/fidelity-loop.rb record --workdir /tmp/<name> --dimension <d> \
+CLASSIFY  ruby scripts/fidelity-loop.rb record --workdir <WORK> --dimension <d> \
             --delta "<what differs>" --class spec-fixable|ui-only|sigma-capability|data
 FIX       author a patch from refs/fidelity-recipes.md (ONLY the delta), then:
-          ruby scripts/fidelity-loop.rb apply-patch --workdir /tmp/<name> \
+          ruby scripts/fidelity-loop.rb apply-patch --workdir <WORK> \
             --patch patch.json --resolves <ledger-ids>
           (single layout-preserving PUT → GET full spec, deep-merge by elementId, PUT back,
            re-run guard + lints — a fix that breaks a column or the layout fails the pass)

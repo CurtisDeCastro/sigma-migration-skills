@@ -23,7 +23,7 @@ the whole thing back — the layout rides through untouched. Arrays of elements 
 ```bash
 # patch.json — ONLY the delta:
 # { "themeOverrides": { "categoricalScheme": ["#0e7c7b","#14b8a6","#f2a900"] } }
-ruby scripts/fidelity-loop.rb apply-patch --workdir /tmp/<name> \
+ruby scripts/fidelity-loop.rb apply-patch --workdir <WORK> \
   --patch patch.json --resolves e2,e3        # marks those ledger entries resolved on success
 ```
 
@@ -57,15 +57,17 @@ Each row: **the visible delta** · the spec path · notes/gotcha.
 - **KPI hero number too small / not the focal point** → `value.fontSize` up + transparent element `style` + widen the tile's `layout.anchor`/grid span.
 - **KPI value in the wrong format** (`$473.0k` vs source `$473.0K`) → emit an **exact-format text-formula column** (e.g. an uppercase-K suffix builder) and point the KPI value at it; don't rely on the number-format enum when the source uses a non-standard suffix. Format basics: money `$,.0f`; compact `$,.2s`.
 - **KPI shows its own title *and* the card label** (duplicated) → set the KPI value-column `name: ' '` (single space; `''` re-derives the title).
-- **KPI title clipped** → the tile is < ~5 grid rows; grow `gridRow`. Sparkline/comparison KPIs need ~8+ rows. NOTE: KPI sparklines + comparison/delta badges are **UI-only** — classify those as `ui-only`, don't loop on them.
+- **KPI title clipped** → the tile is < ~5 grid rows; grow `gridRow`. Sparkline/comparison KPIs need ~8+ rows. NOTE on KPI sparklines + comparison/delta badges (live-probed 2026-07-11): the spec ACCEPTS `comparison`/`trend` FORMATTING blocks (spec/verify 200), but there is **no create-spec property that binds** the comparison column / trend axis, and the PUT rejects formatting-without-binding (`comparison.display: requires a comparison column or period comparison on the KPI`). Classify `ui-only` for creation; once a user binds it in the UI, the styling round-trips.
 
 ### Status, thresholds & tables
 - **Status chip / traffic-light cell** → `conditionalFormats` `type: single` with a **flat** `condition`/`value` (not nested).
-- **Threshold highlight** (a layered-mark reference band in Tableau) → a computed boolean column + a 2-color `scheme` (`conditionalFormats`), the layered-marks fallback.
+- **Reference line / band / trendline** (Tableau analytics-pane marks) → NATIVE `refMarks` + `trendlines` (live-probed 2026-07-11: POST + readback + PNG render all green). Shapes: `refMarks: [{type: 'line'|'band', axis: 'axis'|'series'|'series2', value: {type: 'constant', value: N} | {type: 'column', columnId, func} | {type: 'formula', formula}, endValue: {…} (band only)}]`; `trendlines: [{columnId, model: linear|quadratic|polynomial|exponential|logarithmic|power}]`. Emit from parse-twb-layout's `ref_marks`. The computed-boolean + 2-color `scheme` trick is now only the fallback for layered-mark effects refMarks can't express.
 - **Table too dense vs the source's roomy grid** → `tableStyle.{preset: presentation, cellSpacing, textStyles}`. `presentation` is the default to reach for; keep `spreadsheet` only for a true data grid.
-- **In-cell data bars dropped** → `conditionalFormats: [{type: dataBars, columnIds: [<agg col id>], scheme: ["#a4dfc0","#4caf7d"]}]`.
+- **In-cell data bars dropped** → `conditionalFormats: [{type: dataBars, columnIds: [<agg col id>], scheme: [<tint>, <hue>]}]`. **Scheme comes from the SOURCE, never a literal**: use the worksheet's parsed `heat_scheme` ramp when present, else derive `[mix(dominant, white, 88%), dominant]` from `themeOverrides.categoricalScheme[0]`. The Sigma default royal `#1a70f1` family is the round-4 defect — never fall back to it. dataBars scheme is `[negative, positive]`, NOT a value gradient (probed) — value-shaded bars are a Sigma ceiling; add a parallel `backgroundScale` for the shading.
+- **Ranked pivot (rank order + numbered rank header)** — the 3-round alphabetical-pivot fix. Ranks down ROWS: hidden `SORT_ORD` column (`ROW_NUMBER() OVER (ORDER BY <bias> DESC, <label>)` in the feed) + `rowsBy: [{id: <label col>, sort: {direction: 'ascending', by: <SORT_ORD id>, aggregation: 'min'}}]`; tie-blank labels via `CASE WHEN ROW_NUMBER() OVER (PARTITION BY RNK ...) = 1 THEN TO_VARCHAR(RNK) ELSE '' END`. Ranks across COLUMNS: numeric `RNK` as the OUTER columnsBy level renders the numbered 1..N header AND merges ties into spanning cells (exact Tableau look) — REQUIRES `totals.showSubtotals: 'when-collapsed'` ('hidden' is rejected; without it per-rank "N total" columns appear). **Constant-sort-key guard (the round-4 opus trap)**: never `sort.by` a `PercentOfTotal(…,"row")` column on a rowsBy sort (or `"column"` on columnsBy) — the key is constant across that axis, verify accepts it, and the pivot silently sorts alphabetically; sort by the inner aggregate instead. Top-N pivots need the PRE-FILTERED SOURCE table (element filters don't prune pivots — bisect-proven); build-charts mechanizes this (`-topn-src` helpers + `topn-members.json`).
 - **Table at order-grain but source shows a rollup** → build a hidden grouped rollup element and source the table from it via `groupingId`.
-- **Table sort not honored** → spec `sorts` is **silently dropped**; use a `top-n` rank-filter as the sort fallback (documented ceiling).
+- **Sort** → NATIVE (the old "spec sorts silently dropped" rule is STALE — re-probed 2026-07-11: axis sort POSTs, survives readback, and renders in the sorted order). Charts: `xAxis.sort: {by: <columnId>, direction: ascending|descending, aggregation?}`; tables: `sort: [{columnId, direction, nulls?}]`. Keep the `top-n` rank-filter ONLY for truncation (top-N), not as a sort substitute.
+- **Pivot grand totals / subtotals** → NATIVE `totals: {showGrandTotals: shown|hidden, showSubtotals: always|when-collapsed, totalPosition: first|last, …colors/fontWeight}` (live-probed 2026-07-11: `showGrandTotals: 'hidden'` renders with no grand-total row). Supersedes the earlier failed 2-shape grand-total-hiding attempts. **CSV-EXPORT CEILING (v5.4, probe-isolated):** a pivot carrying a `totals` key **500s its CSV export** — the key's PRESENCE is the sole trigger (value type is irrelevant; plain `Sum`, `PercentOfTotal`, and ratio-of-sums all export fine WITHOUT it; both totals-bearing variants 500). **PNG renders tolerate it.** Pivots CARRY the `totals` key from build onward; `verify-anchors.rb` strips-then-restores it around its pivot CSV exports (the only totals-free window; captured totals persisted to `<workdir>/anchors-restore-pivot-totals.json` until restored), and `put-layout.rb --apply-pivot-totals` repairs any pivot left totals-less as the final PUT (auto-run by `--finalize` with `--workdir`; run by hand on the manual path — an optional `*-pivot-totals.json` sidecar in the workdir/--layout dir/cwd overrides per element id). Full matrix + bisect: `refs/layout-visual-qa.md` → "Render 500 / CSV-export ceiling".
 
 ### Chart kind, marks & axes
 - **Wrong chart kind** (source horizontal bar rendered as a vertical bar, KPI rendered as a 1-row table, heatmap as bars) → set the element `kind` to the source's declared `visualizationType` equivalent; for bar orientation see `refs/window-functions.md`/coverage-matrix and the bar-orientation enum note in memory.
@@ -85,11 +87,12 @@ Each row: **the visible delta** · the spec path · notes/gotcha.
 These are **ceilings**, not spec-fixable — `record` them `ui-only` / `sigma-capability` so the
 ledger flows them to the report instead of blocking the gate:
 
-- KPI sparklines, comparison/delta badges (UI-only).
-- Tooltip beyond `columnNames`; trellis facet-column binding (UI-only).
+- KPI sparklines, comparison/delta badges (binding is UI-only; formatting blocks spec-round-trip — see §KPIs, probed 2026-07-11).
+- Tooltip beyond `columnNames`; trellis facet-column binding (UI-only — schema-confirmed 2026-07-11: the spec `trellis` object is facet STYLING only `{column/row: {border,labels,title}, share, tileSize}`; no property binds a facet column).
 - `useAsFilter` (chart-as-filter), pie percent-labels (`valueFormat:'percent'`) — silently dropped.
 - point-map/region-map title+legend overlap (no position knob).
 - Log-axis PNG export renders linear (render-side, not a spec defect).
+- Pivot **`totals` key 500s the CSV export** (not the render) — do NOT waive a pivot-export/anchors 500 as a service outage; it is this ceiling. The pipeline handles it automatically (strip during verification via `verify-anchors.rb`; re-hide at ship via `put-layout.rb --apply-pivot-totals`). See §"Pivot grand totals / subtotals" and `refs/layout-visual-qa.md`.
 
 ---
 
@@ -186,21 +189,21 @@ in `Text()` when concatenating into strings — `"Q" & 4` compiles but errors at
 
 ### Multi-metric region dashboard — {Year-on-Year bars / Trend / Top-Countries} × N metrics
 
-The proven pattern for a dashboard that repeats the same 3-panel row per metric (the World Bank Macroeconomics shape). Applying it is the difference between the good hand-authored result and the regressed autonomous one (region-aggregate rows shown as countries, all-years sums, bars collapsed to one region). When Phase 1d has recorded a single list control with a mix of `target_tiles` and `highlight_tiles`, this is the shape.
+The proven pattern for a dashboard that repeats the same 3-panel row per metric (the Global Macro Series shape). Applying it is the difference between the good hand-authored result and the regressed autonomous one (region-aggregate rows shown as countries, all-years sums, bars collapsed to one region). When Phase 1d has recorded a single list control with a mix of `target_tiles` and `highlight_tiles`, this is the shape.
 
 1. **Two master tables off the same DM element** — `master` (control-FILTERED) and `masterAll` (UNFILTERED, same columns). The Region control filters `master` only.
    - Panels in the control's `highlight_tiles` (the Year-on-Year bars) source **`masterAll`** → show every region.
    - Panels in `target_tiles` (Trend country line, Top-Countries) source **`master`** → the selected region.
 2. **Point-in-time / "Top" measures must pin the period AND exclude rollup rows.** A raw `Sum([metric])` over an extract that carries region/aggregate rows AND all years yields "North America" (a region) at the top, summed across decades. Use a conditional:
    `Sum(If([Year] = <latestYearWithData> And Not IsNull([<entity-discriminator>]), [metric], null))`
-   - `<entity-discriminator>` = a column that is null on aggregate rows (World Bank: `Income Group`; generally the dimension that only real leaf entities carry).
-   - `<latestYearWithData>` is **per metric** — verify against the landed data (World Bank: GDP/FDI = 2015, TEU = 2014); don't assume the max year has data.
+   - `<entity-discriminator>` = a column that is null on aggregate rows (Global Macro: `Income Group`; generally the dimension that only real leaf entities carry).
+   - `<latestYearWithData>` is **per metric** — verify against the landed data (Global Macro: GDP/FDI = 2015, TEU = 2014); don't assume the max year has data.
 3. **Top-Countries table is GROUPED** — `groupings:[{groupBy:[<entity>], sort:[{<measure> desc}]}]` + a `top-n` filter (`rowCount: 8`). Never emit it ungrouped (ungrouped → hundreds of raw rows).
 4. **Selected-region highlight (not a filter) on the bars** — add a category column `If([New Region] = [ctl-param-region], "Selected region", "Other")` and `color: {by: category, column: <that col>, scheme: ["#c9d1d3", "#027b8e"]}` (grey / brand-teal). Bars `orientation: horizontal`, sorted by value desc.
-5. **Trend = combo, Country vs World on ONE shared axis** — Country line `Sum([metric])` (rides `master`, follows the region filter); World line `Max([metric World])` where `<metric> World` is a per-year global total. Put BOTH lines in a single `yAxis.columnIds` — **NO `yAxis2`** (a second axis auto-scales each line independently and prints raw 15-digit ticks; a shared axis reads the region honestly as a fraction of the world). **Scope the World total to real entities** (`… WHERE <discriminator> IS NOT NULL`) or it double-counts rollup rows and comes out ~10x high. No per-point `dataLabel`; compact SI format (`,.3~s`); integer Year x-axis (not a DateTrunc datetime).
+5. **Trend = combo, Country vs World DUAL-AXIS** — Country line `Sum([metric])` on `yAxis` (rides `master`, follows the region filter); World line `Max([metric World])` on `yAxis2`, where `<metric> World` is a per-year global total. Dual axes match the source design: separate scales make the two lines TRACK each other (one shared axis pins the region line to the floor of the world total — an earlier revision of this recipe collapsed the axes and lost the source's reading). Raw 15-digit ticks are prevented by the SI column formats (`,.3~s`) on BOTH measures, not by collapsing axes. **Scope the World total to real entities** (`… WHERE <discriminator> IS NOT NULL`) or it double-counts rollup rows and comes out ~10x high. **Trim trailing no-data years** — a row-level `IsNotNull([metric])` bool filter (helper column + `list include:[true]`) ends each trend at its metric's last real year instead of a cliff to 0. No per-point `dataLabel`; integer Year x-axis (not a DateTrunc datetime).
 6. **Bars + tables presentation:** bars `orientation: horizontal`, **sort by the VALUE column desc** (not the category name), no `dataLabel`, SI format; Top-N tables drop the passthrough Date column (+ its filter) and use SI format.
 
-Reference implementation: session-1 `gen_wb_spec.py` (World Bank Macroeconomics). This recipe is the acceptance target for that class of dashboard.
+Reference implementation: session-1 `gen_wb_spec.py` (Global Macro Series). This recipe is the acceptance target for that class of dashboard.
 
 ## Layout composition (RCF hand-pass — multi-panel dashboards)
 
@@ -212,3 +215,33 @@ The one-shot layout builder is geometry-derived: it preserves the source's margi
 - **Card each panel** — wrap/style each chart with a surface (`style.{backgroundColor:'#FFFFFF', borderColor, borderWidth, borderRadius:'round'}`); set the chart's own `style.backgroundColor:'#00000000'` if it sits over a tint.
 - **Semantic panel titles** — set each element's `name` to `<Metric> <SECTION>` ("GDP YEAR ON YEAR" / "GDP TREND" / "GDP TOP COUNTRIES"), not the raw worksheet nickname ("GDPPie" / "GDPRegionLine").
 - **In-place PUT (`--reuse-workbook`) carries STALE layout elements** — `layout-preserve` merges the live layout, so a header/band element the *new* spec dropped (e.g. a prior page-name H1) LINGERS. When updating in place, the RCF patch must explicitly DROP the stale layout elements (author the full corrected `layout` XML without them), or the fix won't show. (A fresh POST wouldn't have the residual — this is an in-place-update-only trap.)
+
+## Infographic recipe pack (long-scroll analytical posters — field-derived 2026-07-10)
+
+Three shapes the generic build gets wrong on this dashboard class; all three are
+POST-verified. Use them when the shape-identity gate (9b) fails a tile.
+
+1. **Ranked bar-table** (source: rank + row label + one BAR COLUMN per category, printed %,
+   ranks 1–N) → a `pivot-table`, NOT a grouped bar chart: `rowsBy` the ranked label (pre-sorted
+   by rank), `columnsBy` the category, one measure with `conditionalFormats:
+   [{type: dataBars, columnIds: [<measure>], scheme: [...]}]` + `includeValues: true`. Grouped
+   bars scramble rank order and lose the table reading — a real run shipped that and failed the
+   owner's eye while every value matched.
+
+2. **Rank-limited pivot source** (source shows top-N of a HIGH-CARDINALITY dimension via a
+   Tableau rank≤N table calc): the rank must live in the DATA, not the element — there is NO
+   renderer-honored top-n filter on a pivot's `columnsBy` (two spec shapes verified
+   accepted-then-500), and an unbounded pivot dimension at ~40k+ values kills every PNG export
+   for the whole workbook. Land or derive a rank-limited source (Custom SQL:
+   `QUALIFY RANK() OVER (ORDER BY <bias metric> DESC) <= N` per category) and point the pivot
+   at it. Keep the raw table on the hidden Data page for interactivity/drill.
+
+3. **Per-partition percentage cells** (heatmap cells that sum to 100% per row/column):
+   `PercentOfTotal(agg, "column")` / `"row"` / `"parent_grouping"` — never `grand_total`
+   (see refs/window-functions.md; a grand-total-only mapping mis-normalizes every cell).
+
+Also: title art / stylized typography ship as **data-URI image elements** (see
+refs/workbook-layout.md "Image element" — extraction one-liner included; background layering
+is impossible, composite instead), and element titles that leak worksheet names ("Sheet 9")
+must be renamed to the source's visible caption — the source shows NO inner titles on most
+infographic tiles, so match the element name to the section header or the tile's on-canvas title.

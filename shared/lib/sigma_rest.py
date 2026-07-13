@@ -8,7 +8,21 @@ the repo's "no Gemfile / no pip install" contract.
 Sigma OAuth bearer tokens expire after ~1 hour; long runs outlive a single
 token. This module provides:
   - refresh_token()        — re-do the client_credentials exchange, cache token
+  - auth_token()           — age-aware: re-mints automatically when the token
+                             is older than TOKEN_TTL_SECONDS
   - request(method, path)  — catches 401, refreshes once, retries
+
+Token-freshness semantics (field lesson: sessions repeatedly hit 401s at
+~+25min-past-expiry because auth_token kept returning the stale env token):
+  - A token minted by THIS process carries a minted-at stamp; when it ages past
+    TOKEN_TTL_SECONDS (50 min), auth_token re-mints proactively.
+  - The mint time is also surfaced as SIGMA_TOKEN_MINTED_AT (iso8601) so child
+    processes inherit the token's AGE along with the token itself.
+  - A token loaded from <WORK>/auth.json is aged by the file's mtime
+    (get_token.py writes it at mint time, so mtime == mint time).
+  - A bare env SIGMA_API_TOKEN with no known age is honored as-is
+    (age-unknown) — the request helper's 401 handler re-mints ONCE and
+    retries, then fails loudly.
 
 Required env: SIGMA_BASE_URL, SIGMA_CLIENT_ID, SIGMA_CLIENT_SECRET.
 Optional env: SIGMA_API_TOKEN (initial token; refreshed on demand).
@@ -22,17 +36,24 @@ All methods return parsed dict/list (or raw bytes for binary endpoints).
 """
 
 import base64
+import datetime as _dt
 import json
 import os
 import re
 import ssl
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 
 NEUTRAL_ENV = os.path.expanduser("~/.sigma-migration/env")
 _NEUTRAL_LINE = re.compile(r"\A\s*(?:export\s+)?([A-Z_][A-Z0-9_]*)=(.*)\Z")
+
+# Sigma bearer tokens live ~60 minutes. Any token older than this is treated
+# as stale and re-minted proactively (50 min leaves a safety margin), so long
+# phases stop tripping over mid-run 401s from a token that quietly expired.
+TOKEN_TTL_SECONDS = 50 * 60
 
 
 class SigmaError(Exception):
@@ -46,7 +67,21 @@ class SigmaAuthError(SigmaError):
 # --- module state (mirrors the Ruby class ivars) ---------------------------
 _token_mutex = threading.Lock()
 _token_override = None
+_minted_at = None  # epoch seconds when THIS process minted the current token
 _refresh_inflight = False
+
+
+def _iso_z(epoch):
+    """Epoch seconds -> UTC iso8601 with Z suffix (matches Ruby's utc.iso8601)."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+def _parse_iso_epoch(ts):
+    """iso8601 string -> epoch seconds, or None when unparseable."""
+    try:
+        return _dt.datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
 
 
 def _load_neutral_env(env=None):
@@ -93,6 +128,14 @@ def _load_auth_json(env=None, cwd=None):
             return  # fall through to self-mint
         if auth.get("SIGMA_API_TOKEN"):
             env.setdefault("SIGMA_API_TOKEN", auth["SIGMA_API_TOKEN"])
+            # get_token.py writes auth.json at mint time, so the file's mtime
+            # IS the token's mint time — record it so auth_token can age the
+            # token out proactively instead of discovering staleness via a
+            # mid-phase 401.
+            try:
+                env.setdefault("SIGMA_TOKEN_MINTED_AT", _iso_z(os.path.getmtime(p)))
+            except OSError:
+                pass
         if auth.get("SIGMA_BASE_URL"):
             env.setdefault("SIGMA_BASE_URL", auth["SIGMA_BASE_URL"])
         return
@@ -112,11 +155,43 @@ def base_url():
     return v
 
 
-def auth_token():
+def token_minted_at():
+    """Epoch seconds when the current token was minted, if known. The in-memory
+    stamp (set by refresh_token in this process) wins; else SIGMA_TOKEN_MINTED_AT
+    (iso8601, set by a parent process's mint or by the auth.json bootstrap from
+    mtime). None = age unknown."""
     with _token_mutex:
-        if _token_override:
-            return _token_override
-    return os.environ.get("SIGMA_API_TOKEN") or refresh_token()
+        m = _minted_at
+    if m:
+        return m
+    ts = os.environ.get("SIGMA_TOKEN_MINTED_AT")
+    if not ts:
+        return None
+    return _parse_iso_epoch(ts)
+
+
+def _token_stale():
+    minted = token_minted_at()
+    return minted is not None and (time.time() - minted) > TOKEN_TTL_SECONDS
+
+
+def auth_token():
+    """Return a token that is safe to use RIGHT NOW.
+      - No token anywhere -> mint one.
+      - Known mint time (this process minted it, a parent surfaced
+        SIGMA_TOKEN_MINTED_AT, or auth.json's mtime) and age > TTL -> re-mint
+        (requires SIGMA_CLIENT_ID; without creds the stale token is returned
+        and the 401 path surfaces the failure loudly).
+      - Age unknown (bare env SIGMA_API_TOKEN) -> honored as-is; the request
+        helper's 401 handler re-mints once and retries."""
+    with _token_mutex:
+        tok = _token_override
+    tok = tok or os.environ.get("SIGMA_API_TOKEN")
+    if not tok:
+        return refresh_token()
+    if _token_stale() and os.environ.get("SIGMA_CLIENT_ID"):
+        return refresh_token()
+    return tok
 
 
 class _Resp:
@@ -172,7 +247,7 @@ def refresh_token():
     """Re-do the OAuth client_credentials exchange and cache the new token.
     Single-flight: a re-entrant call while a refresh is in progress returns the
     current override rather than launching a second exchange."""
-    global _refresh_inflight, _token_override
+    global _refresh_inflight, _token_override, _minted_at
     with _token_mutex:
         if _refresh_inflight:
             return _token_override
@@ -200,9 +275,14 @@ def refresh_token():
         tok = (json.loads(resp.body or b"{}") or {}).get("access_token")
         if not tok:
             raise SigmaAuthError(f"token exchange returned no access_token: {resp.body.decode(errors='replace')}")
+        now = time.time()
         with _token_mutex:
             _token_override = tok
-        os.environ["SIGMA_API_TOKEN"] = tok  # surface to child processes
+            _minted_at = now
+        # Surface the refreshed token — and its mint time, so child processes
+        # inherit the token's AGE and re-mint on schedule too.
+        os.environ["SIGMA_API_TOKEN"] = tok
+        os.environ["SIGMA_TOKEN_MINTED_AT"] = _iso_z(now)
         return tok
     finally:
         with _token_mutex:

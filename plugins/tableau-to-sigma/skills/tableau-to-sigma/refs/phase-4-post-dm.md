@@ -5,8 +5,8 @@
 ```bash
 eval "$(scripts/get-token.sh)" && \
 ruby scripts/post-and-readback.rb --type datamodel \
-  --spec /tmp/<name>/dm-spec.json \
-  --out /tmp/<name>/dm-ids.json
+  --spec <WORK>/dm-spec.json \
+  --out <WORK>/dm-ids.json
 ```
 
 The script:

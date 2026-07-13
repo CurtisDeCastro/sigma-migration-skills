@@ -1,9 +1,9 @@
 #!/usr/bin/env ruby
 # test-layout-fill-gate.rb — unit test for gate 8c (layout fill / grid coverage)
-# in assert-phase6-ran.rb (#259 item 1). Reaches gate 8c by waiving every prior
-# gate, then asserts exit codes on a range of layout-census.json inputs.
-# Offline, creds-free (no workbook id / SIGMA env — the waived gates never hit
-# the network). Run: ruby scripts/test-layout-fill-gate.rb
+# in assert-phase6-ran.rb (#259 item 1). Reaches gate 8c by seeding the
+# artifacts every prior gate checks, then asserts exit codes on a range of
+# layout-census.json inputs. Offline, creds-free (no workbook id / SIGMA env —
+# the live gates SKIP on their own). Run: ruby scripts/test-layout-fill-gate.rb
 require 'json'
 require 'tmpdir'
 require 'rbconfig'
@@ -14,17 +14,23 @@ RUBY = RbConfig.ruby
 $fail = 0
 def ok(name, cond); puts((cond ? "  ok  " : "FAIL  ") + name); $fail += 1 unless cond; end
 
-# Every gate before 8c waived so a clean run exits 0 and gate 8c is the only
-# gate that can change the exit code. SIGMA env stripped so nothing dials out.
-WAIVERS = %w[
-  --skip-parity-gate test --skip-column-check test --skip-layout-check test
-  --skip-layout-lint test --skip-control-lint test --skip-visual-gate test
-  --skip-telemetry-gate test
-].freeze
-
+# Every gate before 8c is satisfied by SEEDING the artifacts it checks (the
+# base_workdir pattern from test-assert-phase6-gates.rb) rather than by
+# stacking waivers — the waiver budget (exit 19) caps runs at >2 quality
+# waivers, so a waive-everything harness would trip it. SIGMA env stripped so
+# nothing dials out (the live gates 3/4/6/7 SKIP on their own without creds);
+# gate 8c is the only gate that can change the exit code.
 def gate_code(dir, *extra)
+  unless File.exist?(File.join(dir, 'parity-final.json'))
+    File.write(File.join(dir, 'parity-final.json'), JSON.generate(
+      'workbook_id' => 'wb-test', 'mode' => 'strict', 'status' => 'PASS',
+      'charts_total' => 2, 'charts_pass' => 2, 'charts_fail' => 0,
+      'visual_checked' => true, 'visual_verdict' => 'pass', 'style_checklist' => { 'element_titles_hidden' => 'pass', 'palette_match' => 'pass', 'composition_match' => 'pass', 'chart_shapes_match' => 'pass', 'labels_legible' => 'pass', 'numbers_formatted' => 'pass' }, 'agent_vision' => true))
+    File.binwrite(File.join(dir, 'sigma-render.png'), "\x89PNG\r\n\x1a\n".b + ("\x00".b * 6000))
+    File.write(File.join(dir, 'telemetry-sent.json'), JSON.generate('status' => 'sent', 'tool' => 'test'))
+  end
   env = { 'SIGMA_API_TOKEN' => nil, 'SIGMA_BASE_URL' => nil }
-  system(env, RUBY, GATE, '--workdir', dir, *WAIVERS, *extra, out: File::NULL, err: File::NULL)
+  system(env, RUBY, GATE, '--workdir', dir, *extra, out: File::NULL, err: File::NULL)
   $?.exitstatus
 end
 

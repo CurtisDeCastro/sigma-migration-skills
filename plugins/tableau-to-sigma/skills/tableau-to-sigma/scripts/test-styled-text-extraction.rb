@@ -82,6 +82,13 @@ TWB = <<~XML
                 <run fontcolor='#b4b4b4' fontsize='8'>Data: EPI.org | Design: @DatavizChimdi</run>
               </formatted-text>
             </zone>
+            <zone id='13' type-v2='text' x='50000' y='90000' w='50000' h='4000'>
+              <formatted-text>
+                <run fontalignment='2' fontcolor='#898989' fontname='Roboto Light' fontsize='9'>Seeds by </run>
+                <run bold='true' fontalignment='2' fontname='Roboto Black' fontsize='9'>Squeek</run>
+                <run fontalignment='2' italic='true' underline='true' fontsize='9'> et al.</run>
+              </formatted-text>
+            </zone>
             <zone id='5' name='Sales by Region' x='0' y='20000' w='100000' h='60000' />
           </zone>
         </zones>
@@ -127,6 +134,21 @@ check(z10 && z10['text_runs'].none? { |r| r['text'].include?("Æ") },
 z11 = zones.find { |z| z['id'] == '11' }
 check(z11 && z11['text_align'] == 'center',
       "flat zones: zone-style text-align=center → text_align (got #{z11 && z11['text_align'].inspect})", fails)
+
+# ---- 4b. v5.0 full run surface: font / italic / underline / align ----------
+# Real corpus: 249 fontname runs, right-aligned credit lines whose alignment
+# lives ONLY on the runs (fontalignment 2=right, 1=center) — previously dropped.
+z13 = zones.find { |z| z['id'] == '13' }
+r13 = (z13 && z13['text_runs']) || []
+check(r13[0] && r13[0]['font'] == 'Roboto Light' && r13[0]['align'] == 'right',
+      "v5.0 runs: fontname + fontalignment=2→align right (got #{r13[0].inspect})", fails)
+check(r13[2] && r13[2]['italic'] == true && r13[2]['underline'] == true,
+      "v5.0 runs: italic + underline carried (got #{r13[2].inspect})", fails)
+check(z13 && z13['text_align'] == 'right',
+      "v5.0 runs: uniform run alignment promotes to zone text_align (the credit-line defect; got #{z13 && z13['text_align'].inspect})", fails)
+z12 = zones.find { |z| z['id'] == '12' }
+check(z12 && z12['text_align'].nil? && (z12['text_runs'] || []).none? { |r| r.key?('font') || r.key?('italic') },
+      'v5.0 runs: unstyled runs carry NO new keys (compact) and no align promotion', fails)
 
 # ---- 5. short single-run + fill → is_pill ----------------------------------
 check(z11 && z11['is_pill'] == true,

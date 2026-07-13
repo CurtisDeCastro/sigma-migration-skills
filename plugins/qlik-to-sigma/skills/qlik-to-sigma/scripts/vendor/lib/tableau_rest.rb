@@ -17,7 +17,7 @@ require 'cgi'
 # env always wins.
 _neutral_env = File.expand_path('~/.sigma-migration/env')
 if ENV['TABLEAU_PAT_SECRET'].nil? && File.exist?(_neutral_env)
-  File.foreach(_neutral_env) do |line|
+  File.foreach(_neutral_env, encoding: 'UTF-8') do |line|
     next unless (m = line.chomp.match(/\A\s*(?:export\s+)?([A-Z_][A-Z0-9_]*)=(.*)\z/))
     key, raw = m[1], m[2].strip
     raw = raw[1..-2] if raw.length >= 2 &&
@@ -128,14 +128,40 @@ module Tableau
 
   # ---- workbooks -----------------------------------------------------------
 
-  # Returns the first workbook matching name, or nil. Use search_workbooks for full list.
-  def find_workbook_by_name(name)
-    encoded = CGI.escape("name:eq:#{name}")
-    j = request(:get, "#{base_path}/workbooks?filter=#{encoded}")
-    list = j.dig('workbooks', 'workbook') || []
+# Returns the first workbook matching name, or nil. Use search_workbooks for full list.
+def find_workbook_by_name(name)
+  # A comma is the REST filter predicate DELIMITER - a name containing one
+  # ("Four paths, One choice.") breaks `name:eq:` unrecoverably (round-5
+  # field-caught: 2 lost orchestrator invocations). Fall back to a paged
+  # client-side scan for such names.
+  return scan_workbooks_for_name(name) if name.to_s.include?(",")
+  encoded = CGI.escape("name:eq:#{name}")
+  j = request(:get, "#{base_path}/workbooks?filter=#{encoded}")
+  list = j.dig("workbooks", "workbook") || []
+  list = [list] unless list.is_a?(Array)
+  # not-found stays ONE filtered request (v5.3.1: an unconditional scan
+  # fallback paged the whole site on every legitimate miss)
+  list.first
+end
+
+# Paged client-side name match: exact wins across ALL pages; a
+# case-insensitive hit is only returned after the full scan (v5.3.1: a
+# per-page short-circuit let an early case-variant beat a later exact).
+def scan_workbooks_for_name(name)
+  ci_hit = nil
+  page = 1
+  loop do
+    j = request(:get, "#{base_path}/workbooks?pageSize=100&pageNumber=#{page}")
+    list = j.dig("workbooks", "workbook") || []
     list = [list] unless list.is_a?(Array)
-    list.first
+    exact = list.find { |w| w["name"] == name }
+    return exact if exact
+    ci_hit ||= list.find { |w| w["name"].to_s.strip.casecmp?(name.to_s.strip) }
+    total = j.dig("pagination", "totalAvailable").to_i
+    return ci_hit if list.empty? || page * 100 >= total
+    page += 1
   end
+end
 
   def get_workbook(workbook_id)
     request(:get, "#{base_path}/workbooks/#{workbook_id}")['workbook']
@@ -155,10 +181,48 @@ module Tableau
     request(:get, "#{base_path}/views/#{view_id}/data", accept: '*/*')
   end
 
-  def view_image(view_id, width: 1400, height: 900, resolution: 'high')
+  # NOTE: the /image endpoint has NO size params — `resolution=high` caps at
+  # ~1568px wide and that's it. The old `vf_width/vf_height` pair here were
+  # silent NO-OPS (vf_* is the view-FILTER prefix; 'width'/'height' are not
+  # fields, so Tableau ignored them — review-caught 2026-07-11). Exact-size
+  # renders come from view_pdf below. `filters` applies real vf_ view filters:
+  # {'Region' => 'West'} → &vf_Region=West (field caption, URL-encoded).
+  def view_image(view_id, resolution: 'high', filters: nil)
     qs = "?resolution=#{resolution}&maxAge=1"
-    qs += "&vf_width=#{width}&vf_height=#{height}" if width && height
+    (filters || {}).each { |f, v| qs += "&vf_#{CGI.escape(f.to_s)}=#{CGI.escape(v.to_s)}" }
     request(:get, "#{base_path}/views/#{view_id}/image#{qs}", accept: '*/*', binary: true)
+  end
+
+  # Exact-size render: the /pdf endpoint takes vizWidth/vizHeight (px) —
+  # the ONLY REST path that honors authored canvas dimensions. Rasterize
+  # downstream (or fall back to view_image + resize).
+  def view_pdf(view_id, viz_width:, viz_height:, type: 'Unspecified', orientation: 'Landscape', filters: nil)
+    qs = "?type=#{type}&orientation=#{orientation}&vizWidth=#{viz_width.to_i}&vizHeight=#{viz_height.to_i}&maxAge=1"
+    (filters || {}).each { |f, v| qs += "&vf_#{CGI.escape(f.to_s)}=#{CGI.escape(v.to_s)}" }
+    request(:get, "#{base_path}/views/#{view_id}/pdf#{qs}", accept: '*/*', binary: true)
+  end
+
+  # CSV of a view's summary data, optionally with vf_ view filters applied —
+  # the value channel the interaction oracle diffs (values, not pixels).
+  def view_data_filtered(view_id, filters: nil)
+    qs = '?maxAge=1'
+    (filters || {}).each { |f, v| qs += "&vf_#{CGI.escape(f.to_s)}=#{CGI.escape(v.to_s)}" }
+    request(:get, "#{base_path}/views/#{view_id}/data#{qs}", accept: '*/*')
+  end
+
+  # ---- VizQL Data Service (VDS) ---------------------------------------------
+  # POST /api/v1/vizql-data-service/query-datasource — executes queries
+  # INCLUDING table calcs server-side against a PUBLISHED datasource. The
+  # table-calc oracle: Tableau computes its own WINDOW_*/RUNNING_*/RANK values
+  # (live-verified 2026-07-11: bare calculations 400 with "requires a
+  # tableCalculation specification"; tableCalcType CUSTOM + dimensions =
+  # addressing; unlisted query dims = partition). Same PAT auth; VDS lives
+  # OUTSIDE /api/<ver>/sites, so this bypasses base_path.
+  def query_datasource(datasource_luid, query)
+    body = { 'datasource' => { 'datasourceLuid' => datasource_luid }, 'query' => query }
+    # request() URI.joins against server_url, so the leading /api/v1 path
+    # (outside the site-scoped base_path) resolves correctly as-is.
+    request(:post, '/api/v1/vizql-data-service/query-datasource', body: JSON.generate(body))
   end
 
   # ---- datasources ---------------------------------------------------------
@@ -195,6 +259,33 @@ module Tableau
       return hit if hit
       total = jj.dig('pagination', 'totalAvailable').to_i
       break if ds.empty? || page * 100 >= total
+      page += 1
+    end
+    nil
+  end
+
+  # Resolve a workbook by its contentUrl slug — the identifier carried by the
+  # MOST COMMON Tableau share-link shape, /#/site/<site>/views/<workbookContentUrl>/<view>.
+  # A workbook's display Name routinely diverges from its contentUrl slug
+  # ("Quarterly Revenue Review" vs "QuarterlyRevenueReview_16899..."), so find_workbook_by_name
+  # is the wrong tool for URLs (field-caught: three independent runs each burned
+  # time rediscovering this). Mirrors find_datasource_by_content_url: server-side
+  # filter first, paged scan fallback for sites that don't index contentUrl.
+  def find_workbook_by_content_url(content_url)
+    encoded = CGI.escape("contentUrl:eq:#{content_url}")
+    j = request(:get, "#{base_path}/workbooks?filter=#{encoded}")
+    list = j.dig('workbooks', 'workbook') || []
+    list = [list] unless list.is_a?(Array)
+    return list.first if list.first
+    page = 1
+    loop do
+      jj = request(:get, "#{base_path}/workbooks?pageSize=100&pageNumber=#{page}")
+      wbs = jj.dig('workbooks', 'workbook') || []
+      wbs = [wbs] unless wbs.is_a?(Array)
+      hit = wbs.find { |w| w['contentUrl'].to_s == content_url.to_s }
+      return hit if hit
+      total = jj.dig('pagination', 'totalAvailable').to_i
+      break if wbs.empty? || page * 100 >= total
       page += 1
     end
     nil

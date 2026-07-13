@@ -45,7 +45,7 @@
 "border_style": "none",
 "text_runs": [
 {
-"text": "World Bank Series",
+"text": "Global Macro Series",
 "color": "#027b8e",
 "font_size": 14,
 "bold": true,
@@ -66,7 +66,7 @@
 "break": false
 },
 {
-"text": "\nSource: World Bank",
+"text": "\nSource: Global Macro",
 "color": "#333333",
 "bold": false,
 "break": true
@@ -616,7 +616,7 @@
 "h_pct": 7.7,
 "text_runs": [
 {
-"text": "World Bank Series",
+"text": "Global Macro Series",
 "color": "#027b8e",
 "font_size": 14,
 "bold": true,
@@ -637,7 +637,7 @@
 "break": false
 },
 {
-"text": "\nSource: World Bank",
+"text": "\nSource: Global Macro",
 "color": "#333333",
 "bold": false,
 "break": true

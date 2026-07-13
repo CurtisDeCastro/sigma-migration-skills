@@ -118,7 +118,10 @@ module SigmaFunctions
     /\bIFNULL\s*\(/i     => 'IFNULL(x, y) → Sigma Coalesce(x, y)',
     /\bIS\s+NULL\b/i     => 'x IS NULL → Sigma IsNull(x)',
     /\bIS\s+NOT\s+NULL\b/i => 'x IS NOT NULL → Sigma IsNotNull(x)',
-    /\bDATEPART\s*\(\s*['"]/i => 'DATEPART("part", date) → Sigma DatePart("part", date) — capitalization matters',
+    # case-SENSITIVE: Tableau serializes DATEPART all-caps; the /i version
+    # flagged Sigma's own correct DatePart("year", …) (round-5 field-caught —
+    # a run translated via Year() just to dodge its own lint)
+    /\bDATEPART\s*\(\s*['"]/ => 'DATEPART("part", date) → Sigma DatePart("part", date) — capitalization matters',
     /\bWINDOW_(SUM|AVG|MIN|MAX|COUNT|STDEV)\b(?!P)/i =>
       'WINDOW_*(agg, -n[, m]) → Sigma Moving*(agg, n[, m]); unbounded WINDOW_MAX/MIN/SUM → two-level grouped helper; agg/WINDOW_SUM(agg) → PercentOfTotal(agg, "grand_total") — all as CHART-element viz formulas on the yAxis (refs/window-functions.md), never DM calc columns',
     /\bWINDOW_(MEDIAN|PERCENTILE|CORR|COVARP?|VARP?|STDEVP)\b/i =>

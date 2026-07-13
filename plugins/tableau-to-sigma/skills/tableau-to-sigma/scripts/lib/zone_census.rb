@@ -45,6 +45,35 @@ module ZoneCensus
     Array(zones).select { |z| plots?(z) }
   end
 
+  # ---- Dividers (v5.0-P2) ---------------------------------------------------
+  # Corpus census: filled rules cluster at 1-6px; unfilled gaps at 12-24px+.
+  DIVIDER_MAX_PX = 12
+
+  # A source zone that reads as a RULE, not content or a gap:
+  #  - a spacer (Tableau Blank), a CHILDLESS container, or a text zone whose
+  #    runs are all blank
+  #  - thin: fixed_size <= 12px, or pct-derived min axis <= 12px (canvas known)
+  #  - carries a fill_color (an unfilled thin zone is a true gap — keep dropping)
+  def divider_zone?(z, canvas_px = nil)
+    return false unless z.is_a?(Hash) && z['fill_color']
+    kindish =
+      z['kind'] == 'spacer' ||
+      (z['kind'] == 'container' && Array(z['children']).empty?) ||
+      (z['kind'] == 'text' && Array(z['text_runs']).all? { |r| r['text'].to_s.strip.empty? })
+    return false unless kindish
+    return true if z['fixed_size'].to_i.positive? && z['fixed_size'].to_i <= DIVIDER_MAX_PX
+    return false unless canvas_px.is_a?(Hash)
+    eff = []
+    eff << z['w_pct'].to_f / 100 * canvas_px['w'].to_f if z['w_pct'] && canvas_px['w']
+    eff << z['h_pct'].to_f / 100 * canvas_px['h'].to_f if z['h_pct'] && canvas_px['h']
+    !eff.empty? && eff.min <= DIVIDER_MAX_PX
+  end
+
+  # The thin axis is the STROKE axis: wide+short = horizontal rule.
+  def divider_direction(z)
+    z['w_pct'].to_f >= z['h_pct'].to_f ? 'horizontal' : 'vertical'
+  end
+
   # Fraction of the page grid occupied by placed content tiles. `rects` are
   # [c0, c1, r0, r1] grid-LINE tuples (exclusive end, as in the layout XML), at
   # PAGE-absolute coordinates. Furniture rects (header band, styled-text) must

@@ -52,12 +52,12 @@ DM_WORLD = { 'dataModelId' => 'dm1', 'pages' => [{ 'elements' => [
   { 'id' => 'e1', 'name' => 'Master', 'columnLabels' => ['Net Revenue', 'GDP World'] }
 ] }] }
 rc, = run_gate({ 'pages' => [{ 'elements' => [{ 'columns' => [
-  { 'formula' => '[World Bank/FIXED Year/GDP World]' }
+  { 'formula' => '[Global Macro/FIXED Year/GDP World]' }
 ] }] }] }, DM_WORLD)
 check(rc == 0, '3-part FIXED-relationship ref resolves on its final column segment (exit 0)')
 # but a 3-part ref whose FINAL segment is missing still fails
 rc, out = run_gate({ 'pages' => [{ 'elements' => [{ 'columns' => [
-  { 'formula' => '[World Bank/FIXED Year/Nonexistent World]' }
+  { 'formula' => '[Global Macro/FIXED Year/Nonexistent World]' }
 ] }] }] }, DM_WORLD)
 check(rc == 1 && out.include?('Nonexistent World'), '3-part ref with a missing final column still fails (exit 1)')
 

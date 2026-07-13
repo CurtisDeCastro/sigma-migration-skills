@@ -230,11 +230,37 @@ def _as_list(v):
 # ---- workbooks ------------------------------------------------------------
 
 def find_workbook_by_name(name):
+    # A comma is the REST filter predicate DELIMITER - a name containing one
+    # breaks `name:eq:` unrecoverably (round-5 field-caught). Fall back to a
+    # paged client-side scan for such names.
+    if "," in str(name):
+        return scan_workbooks_for_name(name)
     encoded = urllib.parse.quote_plus(f"name:eq:{name}")
     j = request("get", f"{base_path()}/workbooks?filter={encoded}")
     lst = _as_list(_dig(j, "workbooks", "workbook"))
+    # not-found stays ONE filtered request (v5.3.1: an unconditional scan
+    # fallback paged the whole site on every legitimate miss)
     return lst[0] if lst else None
 
+
+def scan_workbooks_for_name(name):
+    """Paged client-side name match: exact wins across ALL pages; a
+    case-insensitive hit is only returned after the full scan (v5.3.1: a
+    per-page short-circuit let an early case-variant beat a later exact)."""
+    ci_hit = None
+    page = 1
+    while True:
+        j = request("get", f"{base_path()}/workbooks?pageSize=100&pageNumber={page}")
+        lst = _as_list(_dig(j, "workbooks", "workbook"))
+        exact = next((w for w in lst if w.get("name") == name), None)
+        if exact:
+            return exact
+        if ci_hit is None:
+            ci_hit = next((w for w in lst if str(w.get("name", "")).strip().lower() == str(name).strip().lower()), None)
+        total = int((_dig(j, "pagination", "totalAvailable") or 0))
+        if not lst or page * 100 >= total:
+            return ci_hit
+        page += 1
 
 def get_workbook(workbook_id):
     return request("get", f"{base_path()}/workbooks/{workbook_id}")["workbook"]
@@ -252,11 +278,25 @@ def view_data(view_id):
     return request("get", f"{base_path()}/views/{view_id}/data", accept="*/*")
 
 
-def view_image(view_id, width=1400, height=900, resolution="high"):
+def view_image(view_id, resolution="high", filters=None):
+    # NOTE: /image has NO size params — the old vf_width/vf_height pair were
+    # silent NO-OPS (vf_* is the view-FILTER prefix; 'width'/'height' are not
+    # fields — live-verified 2026-07-11, fixed in lock-step with the Ruby
+    # twin). `filters` applies real vf_ view filters: {"Region": "West"}.
     qs = f"?resolution={resolution}&maxAge=1"
-    if width and height:
-        qs += f"&vf_width={width}&vf_height={height}"
+    for f, v in (filters or {}).items():
+        qs += f"&vf_{urllib.parse.quote(str(f))}={urllib.parse.quote(str(v))}"
     return request("get", f"{base_path()}/views/{view_id}/image{qs}", accept="*/*", binary=True)
+
+
+def view_pdf(view_id, viz_width, viz_height, type_="Unspecified", orientation="Landscape", filters=None):
+    # Exact-size render: the ONLY REST path honoring authored canvas dims
+    # (renders at 0.75pt/px + 36pt margins — rasterize at 4/3 and crop).
+    qs = (f"?type={type_}&orientation={orientation}"
+          f"&vizWidth={int(viz_width)}&vizHeight={int(viz_height)}&maxAge=1")
+    for f, v in (filters or {}).items():
+        qs += f"&vf_{urllib.parse.quote(str(f))}={urllib.parse.quote(str(v))}"
+    return request("get", f"{base_path()}/views/{view_id}/pdf{qs}", accept="*/*", binary=True)
 
 
 # ---- datasources ----------------------------------------------------------

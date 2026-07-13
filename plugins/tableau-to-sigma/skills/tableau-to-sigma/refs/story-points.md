@@ -47,9 +47,9 @@ workbook spec:
 
 ```bash
 ruby scripts/build-story-pages.rb \
-  --story-plan /tmp/<name>/story-plan.json \
-  --spec /tmp/<name>/wb-spec.json \
-  --out  /tmp/<name>/wb-spec-with-story.json \
+  --story-plan <WORK>/story-plan.json \
+  --spec <WORK>/wb-spec.json \
+  --out  <WORK>/wb-spec-with-story.json \
   [--story "FY26 Performance"] [--replace-source-pages]
 ```
 
@@ -70,9 +70,9 @@ page: annotation in the dark header band (`lib/layout.rb#banded_page`
 
 ```bash
 ruby scripts/build-story-pages.rb \
-  --story-plan /tmp/<name>/story-plan.json \
-  --wb-ids /tmp/<name>/wb-ids.json \
-  --layout-out /tmp/<name>/story-layout.xml
+  --story-plan <WORK>/story-plan.json \
+  --wb-ids <WORK>/wb-ids.json \
+  --layout-out <WORK>/story-layout.xml
 ```
 
 Writes `story-layout.xml` (only the story `<Page>` blocks — merge with the

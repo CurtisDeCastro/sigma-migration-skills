@@ -29,10 +29,38 @@
 
 require 'json'
 require 'time'
+require 'securerandom'
 
 module RunState
   def self.path(workdir)
     File.join(workdir, 'run-state.json')
+  end
+
+  # ── run_id (run-scoped completion sentinels) ──────────────────────────────
+  # A uuid minted at each PASS-1 start and persisted in the ledger (and copied
+  # into migrate-state.json when pass 1 completes). The completion sentinels
+  # (parity-pending.json / phase6-success.json) carry it so "done" is scoped to
+  # a specific run: a stale success marker from a PREVIOUS run id can never
+  # vouch for the current one (assert-phase6-ran deletes it on failure).
+  def self.run_id(workdir)
+    load(workdir)['run_id']
+  end
+
+  # Mint + persist a FRESH run id (call at pass-1 start). Best-effort like
+  # stamp: a ledger write must never crash the conversion. Returns the id
+  # (even when persisting failed, so callers always have one).
+  def self.new_run_id!(workdir)
+    id = SecureRandom.uuid
+    begin
+      if workdir && File.directory?(workdir)
+        doc = load(workdir)
+        doc['run_id'] = id
+        File.write(path(workdir), JSON.pretty_generate(doc) + "\n")
+      end
+    rescue StandardError
+      nil
+    end
+    id
   end
 
   def self.load(workdir)

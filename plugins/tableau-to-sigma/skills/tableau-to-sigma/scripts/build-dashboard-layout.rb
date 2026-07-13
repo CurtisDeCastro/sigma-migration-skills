@@ -100,8 +100,10 @@ OptionParser.new do |p|
   p.on('--out PATH')           { |v| opts[:out] = v }
   p.on('--census-out PATH', 'per-page fill/coverage census for gate 8c (default: layout-census.json beside --out)') { |v| opts[:census_out] = v }
   p.on('--page-cols N',  Integer) { |v| opts[:page_cols] = v }
-  p.on('--page-rows N',  Integer) { |v| opts[:page_rows] = v }
-  p.on('--row-scale F',  Float, 'row-height multiplier (default 1.5; min label-safe ~1.43)') { |v| opts[:row_scale] = v }
+  # Explicitness recorded (v5.1): an explicit --page-rows always wins over the
+  # px-derived row model (see the per-dashboard derivation in the dash loop).
+  p.on('--page-rows N',  Integer) { |v| opts[:page_rows] = v; opts[:page_rows_explicit] = true }
+  p.on('--row-scale F',  Float, 'row-height multiplier (default 1.5; min label-safe ~1.43)') { |v| opts[:row_scale] = v; opts[:row_scale_explicit] = true }
   p.on('--rename PAIR', 'Tableau-name=Sigma-name (repeat) — matches the parity scripts\' flag') do |v|
     from, to = v.split('=', 2)
     abort("--rename expects 'Tableau name=Sigma name', got #{v.inspect}") if from.nil? || to.nil? || from.empty? || to.empty?
@@ -114,10 +116,12 @@ OptionParser.new do |p|
 end.parse!
 %i[layout wb_ids out].each { |k| abort("missing --#{k.to_s.tr('_','-')}") unless opts[k] }
 
-# Row scaling (bead tkkv): scale the page's row count so each chart band tile
-# gets proportionally more rows. Title (rows 1-3) and controls (rows 3-6) keep
-# their fixed positions; only the chart band [chart_row0..page_rows] stretches.
-opts[:page_rows] = (opts[:page_rows] * opts[:row_scale]).round if opts[:row_scale] != 1.0
+# Row scaling / px-derived page height (v5.1 defect 1): the page row count is
+# now resolved PER DASHBOARD in the dash loop below — a dashboard with a fixed
+# px canvas derives its rows from canvas_h / SIGMA_ROW_PX (row_scale
+# neutralized: the 1.5x scale existed only to compensate the 32-row default's
+# underestimate); dashboards without canvas_px keep the legacy
+# page_rows * row_scale mapping byte-identically (bead tkkv).
 
 dash_layout = JSON.parse(File.read(opts[:layout]))
 wb_ids      = JSON.parse(File.read(opts[:wb_ids]))
@@ -201,7 +205,12 @@ end
 
 # Place a child within its parent container's internal 24-col grid from pct
 # bounds. parent_rows = grid row-lines the parent spans internally.
-def place_in_parent(ch, p, parent_rows)
+# canvas_px ({'w','h'} from the dashboard <size>, sizing-mode=fixed) makes
+# px-FIXED zones exact: a child with `fixed_size` inside a layout-flow parent
+# is sized in PIXELS on the flow axis (verified: zone h_pct == fixed_size /
+# canvas_h to the digit), so its span comes from px density, not from rounding
+# an already-rounded pct — thin fixed rails/headers keep their exact height.
+def place_in_parent(ch, p, parent_rows, canvas_px = nil)
   pw = (p['w_pct'] || 100).to_f; pw = 1.0 if pw <= 0
   ph = (p['h_pct'] || 100).to_f; ph = 1.0 if ph <= 0
   px = (p['x_pct'] || 0).to_f;   py = (p['y_pct'] || 0).to_f
@@ -211,6 +220,16 @@ def place_in_parent(ch, p, parent_rows)
   c1 = clampc(1 + ((cx + cw - px) / pw * 24).round, c0 + 1, 25)
   r0 = [1, 1 + ((cy - py) / ph * parent_rows).round].max
   r1 = [r0 + 1, 1 + ((cy + chh - py) / ph * parent_rows).round].max
+  if canvas_px && ch['fixed_size'].to_i.positive? && p['direction']
+    fixed = ch['fixed_size'].to_f
+    if p['direction'] == 'vert' && canvas_px['h'].to_i.positive?
+      px_per_row = (ph / 100.0 * canvas_px['h']) / parent_rows
+      r1 = r0 + [(fixed / px_per_row).round, 1].max if px_per_row.positive?
+    elsif p['direction'] == 'horz' && canvas_px['w'].to_i.positive?
+      px_per_col = (pw / 100.0 * canvas_px['w']) / 24
+      c1 = clampc(c0 + [(fixed / px_per_col).round, 1].max, c0 + 1, 25) if px_per_col.positive?
+    end
+  end
   [c0, c1, r0, r1]
 end
 
@@ -237,6 +256,19 @@ def resolve_leaf(node, ctx)
       el = ctx[:els_by_id]["text-#{node['id']}"]
       el && el['id']
     end
+  when 'image'
+    # v5.0: bitmap zone → its emitted image element (build-charts id
+    # "img-<zoneid>", data-URI body from the .twbx Image/ asset). Full-canvas
+    # backgrounds (is_background) are page-level, not grid tiles — skip here.
+    return nil if node['is_background']
+    el = ctx[:els_by_id]["img-#{node['id']}"]
+    el && el['id']
+  when 'dashboard-object'
+    # v5.0-P2: navigation buttons → their emitted element (build-charts id
+    # "btn-<zoneid>"). Export/toggle buttons emit nothing (named residue) —
+    # nil drops the zone from the grid, correctly.
+    el = ctx[:els_by_id]["btn-#{node['id']}"]
+    el && el['id']
   end
 end
 
@@ -280,10 +312,33 @@ end
 # needed_rows never shrinks below its original allocation, so source
 # proportions are preserved when no floor kicks in.
 def plan_node(node, c0, c1, r0, r1, ctx)
+  # v5.0-P2 divider synthesis: a thin filled rule (spacer / childless container
+  # / blank-text zone) becomes a NATIVE Sigma divider (live-verified). Checked
+  # FIRST so it catches the childless-container idiom (which the container
+  # branch would drop as plans.empty?) and preempts resolve_leaf's nil for
+  # spacer/blank-text rules. Horizontal rules clamp to 1 row (cmax — the
+  # stroke centers in its cell); vertical rules keep their source row span.
+  if ZoneCensus.divider_zone?(node, ctx[:canvas_px])
+    did = "dv-#{ctx[:page_id]}-#{node['id']}"
+    ctx[:extra] << SigmaLayout.divider_el(did, node)
+    horizontal = node['w_pct'].to_f >= node['h_pct'].to_f
+    return [1, proc { |fc0, fc1, fr0, fr1| le(did, fc0, fc1, fr0, fr1) }, horizontal ? 1 : nil]
+  end
   if node['kind'] == 'container'
     kids = node['children'] || []
+    # Wrapper-chain collapse: Tableau nests single-child pass-through
+    # containers several levels deep (authoring artifacts). Each one used to
+    # become a real GridContainer — 12 no-op containers on the benchmark,
+    # each adding padding + a rounding pass that drifts the geometry. A
+    # single-child container that carries NO visual identity of its own
+    # (no fill/border/corner style) is pure structure: plan the child
+    # directly at the container's cell.
+    if kids.length == 1 && !node['fill_color'] && !node['border_color'] &&
+       !node['corner_radius'] && !node['rounding']
+      return plan_node(kids[0], c0, c1, r0, r1, ctx)
+    end
     my_rows = [r1 - r0, 2].max
-    rects = kids.map { |ch| place_in_parent(ch, node, my_rows) }
+    rects = kids.map { |ch| place_in_parent(ch, node, my_rows, ctx[:canvas_px]) }
     rects = decollide_rects(rects, my_rows)
     plans = []
     kids.each_index do |i|
@@ -357,13 +412,11 @@ def plan_node(node, c0, c1, r0, r1, ctx)
       # `body`. The /columns readback drops `body`, so keying on it left maxr nil
       # and starved the whole band_max clamp (the false-green: the unit test had
       # supplied a body the real readback omits). A short SINGLE-LINE label is a
-      # section/column header → thin band; multi-line or long text keeps its height.
+      # section/column header → thin band; multi-line or long text keeps its
+      # height. (Predicate shared with the header-title detection — v5.1.)
       zone = ctx[:zone_by_id][node['id']] || node
       runs = zone.is_a?(Hash) ? (zone['text_runs'] || []) : []
-      txt = runs.map { |r| r['text'].to_s }.join
-      clean = txt.gsub(/\s+/, ' ').strip
-      multiline = txt.include?("\n") || runs.any? { |r| r['break'] }
-      maxr = SigmaLayout::HEADER_BAND_MAX_ROWS if !clean.empty? && clean.length <= 60 && !multiline
+      maxr = SigmaLayout::HEADER_BAND_MAX_ROWS if SigmaLayout.title_like_runs?(runs)
     end
     [span, proc { |fc0, fc1, fr0, fr1| le(eid, fc0, fc1, fr0, fr1) }, maxr]
   end
@@ -405,10 +458,16 @@ end
 # name, yet must still be placed). The band sits BELOW the placed content
 # (below_row) and is tall enough for its neediest kind (E1 floors). Returns
 # the band's page rect, or nil when everything was placed.
+# CONTRACT (v5.1 defect 3): a FLOATED image zone must never reach this band —
+# the float partition in build_page_from_tree consumes every floating root
+# (header composition, top strip, or an explicit drop + image-assets.json
+# record), marking its element placed either way.
 def safety_net_band(page, placed, extra_els, children, prefix, below_row, page_rows)
   placeable = lambda do |e|
     k = e['kind'].to_s
-    k.end_with?('-chart') || %w[table pivot-table control text].include?(k)
+    # dividers deliberately EXCLUDED: an unplaced divider must never generate
+    # a stray bottom band (it only exists when the tree placed it anyway).
+    k.end_with?('-chart') || %w[table pivot-table control text image button].include?(k)
   end
   unplaced = page['elements'].select { |e| placeable.call(e) && !placed.include?(e['id']) }
   return nil if unplaced.empty?
@@ -449,7 +508,8 @@ def build_page_from_tree(dashboard, page, opts)
 
   ctx = { page_id: page['id'], renames: opts[:renames], els_by_name: els_by_name,
           ctl_by_name: ctl_by_name, els_by_id: els_by_id, title_el: title_el, title_used: false,
-          extra: [], placed: [], zone_to_ctl: {}, zone_by_id: zone_by_id, min_row_expansions: 0 }
+          extra: [], placed: [], zone_to_ctl: {}, zone_by_id: zone_by_id, min_row_expansions: 0,
+          canvas_px: dashboard['canvas_px'] }
 
   # Assign workbook control elements to control zones in document order (see
   # assign_controls) so a rail's controls land INSIDE the rail even when a
@@ -462,16 +522,29 @@ def build_page_from_tree(dashboard, page, opts)
   children  = []
   extra_els = ctx[:extra]
   page_rows = opts[:page_rows]
-  body_rows = [page_rows - HEADER_ROWS, 4].max
   page_pseudo = { 'x_pct' => 0.0, 'y_pct' => 0.0, 'w_pct' => 100.0, 'h_pct' => 100.0 }
+  canvas = dashboard['canvas_px']
+  canvas_fixed = canvas.is_a?(Hash) && canvas['sizing_mode'] == 'fixed' &&
+                 canvas['h'].to_i >= 400 # same gate as the px-derived row model
 
   # Header band derived from the source (colored strip only when the source has
   # one; otherwise transparent — title on the canvas, no fabricated navy).
+  # v5.1 defect 2: three-way, replacing the old extracted-or-fabricated two-way.
   hdr_style, hdr_dark = header_from_source(dashboard)
   hdr_id = "tc-#{page['id']}-hdr"
-  extra_els << container_el(hdr_id, hdr_style)
+  hdr_rows = 0
   if title_el
-    children << header_band_xml(hdr_id, title_el['id'])
+    # 1. Extracted source banner (dedicated title-* element or the guarded
+    # fallback) → band + clip + renormalize. Under the px-derived row model the
+    # band height comes from the title zone's own px (min HEADER_ROWS).
+    tz = zone_by_id[title_el['id'].to_s.sub(/\Atext-/, '')]
+    hdr_rows = HEADER_ROWS
+    if canvas_fixed && tz && tz['h_pct']
+      hdr_rows = [(tz['h_pct'].to_f / 100.0 * canvas['h'].to_i / SigmaLayout::SIGMA_ROW_PX).ceil,
+                  HEADER_ROWS].max
+    end
+    extra_els << container_el(hdr_id, hdr_style)
+    children << header_band_xml(hdr_id, title_el['id'], rows: hdr_rows)
     ctx[:title_used] = true
     # Mark the title element as PLACED so the unplaced-elements safety net below
     # doesn't append it a SECOND time in the bottom band — a duplicate element id
@@ -479,10 +552,84 @@ def build_page_from_tree(dashboard, page, opts)
     # dropping the page to a stacked fallback. (The banded path is immune: its
     # text-band selector only matches ids starting "text-", never "title".)
     ctx[:placed] << title_el['id']
+    # The extracted banner's SOURCE ZONE would otherwise still reserve its
+    # y-extent inside the tree — clip it out and renormalize the page domain to
+    # the title's bottom edge so content shifts UP into the freed rows.
+    tb = clip_extracted_title_zone!(tree, tz)
+    if tb && tb < 50
+      page_pseudo['y_pct'] = tb
+      page_pseudo['h_pct'] = 100.0 - tb
+    end
+  elsif top_banner_content?(zone_by_id.values)
+    # 2. v5.1 — the source's own top band is an IMAGE wordmark or body text the
+    # guarded fallback refused to promote: NO header band at all. The tree
+    # already renders the source order (title art at its own geometry); a
+    # fabricated page-name H1 here would duplicate the wordmark.
+    hdr_rows = 0
   else
+    # 3. Fabricated page-name header — only when the source has no banner-like
+    # content in the top region at all.
+    hdr_rows = HEADER_ROWS
+    extra_els << container_el(hdr_id, hdr_style)
     txt_id = "tc-#{page['id']}-hdrtext"
     extra_els << header_text_el(txt_id, page['name'], hdr_dark ? '#FFFFFF' : nil)
     children << header_band_xml(hdr_id, txt_id)
+  end
+  body_rows = hdr_rows.zero? ? page_rows : [page_rows - hdr_rows, 4].max
+  if canvas_fixed && page_pseudo['y_pct'].to_f.positive?
+    # px-true body budget after a title clip (v5.1 defect 1, insertion pt 4):
+    # the remaining content must keep mapping at SIGMA_ROW_PX per row, so the
+    # budget shrinks in px, not just pct.
+    body_rows = [((100.0 - page_pseudo['y_pct'].to_f) / 100.0 * canvas['h'].to_i /
+                  SigmaLayout::SIGMA_ROW_PX).round, 4].max
+  end
+
+  # v5.1 defect 3 — float partition. Floating root zones (Tableau floats are
+  # root SIBLINGS of the layout root) must never be packed below the main
+  # container by pack_rects (the brush-X-art-at-page-bottom defect):
+  #   - header-region floats join the top-band composition — beside the intro
+  #     text when one overlaps (adjacency degradation of the inexpressible
+  #     z-overlap), else as their own top strip above the body;
+  #   - mid-page floats keep tree placement, but a floating IMAGE that
+  #     pack_rects would displace > 25% of the page below its source row is
+  #     dropped with a WARN + a recoverable image-assets.json record.
+  content_rects = []
+  floats, tree_roots = tree.partition { |n| floating_zone?(n, tree) }
+  host = tree_roots.find { |n| n['kind'] == 'container' }
+  # Descend single-child pass-through wrappers (the same chain plan_node
+  # collapses) to the EFFECTIVE composition container — real trees nest the
+  # header row / intro / sections many wrapper levels deep, and the float must
+  # compose against those siblings, not against a lone wrapper child.
+  while host && Array(host['children']).length == 1 && host['children'][0]['kind'] == 'container'
+    host = host['children'][0]
+  end
+  mid_floats = []
+  floats.each do |f|
+    fy0 = (f['y_pct'] || 0).to_f
+    in_header = fy0 < SigmaLayout::HEADER_MAX_Y_PCT || fy0 < page_pseudo['y_pct'].to_f
+    unless in_header
+      mid_floats << f
+      next
+    end
+    next if host && compose_float_beside_text!(f, host) # now IN the tree, beside the intro
+    # No side-by-side text row in the header composition: the float gets its
+    # own px rows (capped at the header region's extent) as a top strip and the
+    # body shifts below it — NEVER the page-bottom band.
+    eid = resolve_leaf(f, ctx)
+    next unless eid && !ctx[:placed].include?(eid)
+    ctx[:placed] << eid
+    fc0 = clampc(1 + ((f['x_pct'] || 0).to_f / 100.0 * 24).round, 1, 24)
+    fc1 = clampc(1 + (((f['x_pct'] || 0).to_f + (f['w_pct'] || 0).to_f) / 100.0 * 24).round, fc0 + 1, 25)
+    frows = if canvas_fixed
+              ((f['h_pct'] || 0).to_f / 100.0 * canvas['h'].to_i / SigmaLayout::SIGMA_ROW_PX).ceil
+            else
+              ((f['h_pct'] || 0).to_f / 100.0 * body_rows).round
+            end
+    cap = [(page_rows * SigmaLayout::HEADER_MAX_H_PCT / 100.0).ceil, HEADER_ROWS].max
+    frows = [[frows, 2].max, cap].min
+    children << le(eid, fc0, fc1, 1 + hdr_rows, 1 + hdr_rows + frows)
+    content_rects << [fc0, fc1, 1 + hdr_rows, 1 + hdr_rows + frows]
+    hdr_rows += frows
   end
 
   # Top-level zones → page children, shifted below the header band. PLAN every
@@ -491,17 +638,35 @@ def build_page_from_tree(dashboard, page, opts)
   # final cells. Collect the PAGE-absolute footprint of every top-level node
   # that actually placed (gate 8c fill numerator — a top-level container's
   # rect covers its nested tiles).
-  content_rects = []
   plans = []
-  tree.each do |node|
+  float_src = {}
+  tree_roots.each do |node|
     c0, c1, r0, r1 = place_in_parent(node, page_pseudo, body_rows)
-    r0 += HEADER_ROWS; r1 += HEADER_ROWS
+    r0 += hdr_rows; r1 += hdr_rows
     pl = plan_node(node, c0, c1, r0, r1, ctx)
     next unless pl
     plans << [[c0, c1, r0, [r1, r0 + pl[0]].max], pl[1]]
   end
+  mid_floats.each do |node|
+    c0, c1, r0, r1 = place_in_parent(node, page_pseudo, body_rows)
+    r0 += hdr_rows; r1 += hdr_rows
+    pl = plan_node(node, c0, c1, r0, r1, ctx)
+    next unless pl
+    plans << [[c0, c1, r0, [r1, r0 + pl[0]].max], pl[1]]
+    float_src[plans.length - 1] = { r0: r0, node: node }
+  end
   packed = SigmaLayout.pack_rects(plans.map { |rc, _| rc })
   plans.each_with_index do |(_, ep), i|
+    fs = float_src[i]
+    if fs && fs[:node]['kind'] == 'image' && (packed[i][2] - fs[:r0]) > page_rows * 0.25
+      # Hard invariant (v5.1): a decorative float stranded far below its source
+      # y is worse than absent — drop it, keep it recoverable.
+      warn "WARN: floating image zone #{fs[:node]['id']} would be packed " \
+           "#{packed[i][2] - fs[:r0]} rows below its source position — dropped from " \
+           'the grid (placement: manual-composite in image-assets.json)'
+      record_manual_composite(opts[:layout], dashboard['dashboard'], fs[:node]['id'])
+      next
+    end
     children << ep.call(*packed[i])
     content_rects << packed[i]
   end
@@ -578,14 +743,198 @@ def zone_el_name(z, renames)
   dt.empty? ? z['caption'] : dt
 end
 
+# Ancestor-container chain (outermost first) leading to zone id `zid`; [] for a
+# top-level zone, nil when absent from the tree.
+def find_zone_path(nodes, zid, path = [])
+  (nodes || []).each do |n|
+    return path if n['id'] == zid
+    if n['children']
+      found = find_zone_path(n['children'], zid, path + [n])
+      return found if found
+    end
+  end
+  nil
+end
+
+# The source's own top-banner text zone gets EXTRACTED into the page header
+# band — but its zone stays in the tree, so its y-extent is reserved TWICE:
+# header rows up top PLUS an equal dead band inside every top-aligned ancestor
+# container (live-caught: the title cost ~20% of the page instead of the
+# source's 8%, and the page failed the visual-similarity floor on dead space
+# alone). Remove the zone, clip each top-aligned ancestor's y-domain to the
+# title's bottom edge, and return that edge — the caller renormalizes the page
+# pseudo-container to it so the remaining content SHIFTS UP into the freed
+# rows (clipping alone keeps absolute proportions and the gap survives).
+# Returns the title's bottom y_pct, or nil when nothing was clipped.
+def clip_extracted_title_zone!(tree, tz, eps = 1.5)
+  return nil unless tz && tz['id'] && tz['y_pct'] && tz['h_pct']
+  path = find_zone_path(tree, tz['id'])
+  return nil unless path
+  ty = tz['y_pct'].to_f
+  tb = ty + tz['h_pct'].to_f
+  (path.empty? ? tree : (path.last['children'] || [])).reject! { |k| k['id'] == tz['id'] }
+  # Prune ancestors the removal left CONTENT-FREE (spacers only): a dead
+  # title-row container still maps to a rect at its siblings' top edge, and
+  # that phantom collision trips decollide_rects' equal-slicing — which throws
+  # away every sibling's source proportions (live-caught: the whole page
+  # re-flowed into uniform bands, dead space intact).
+  placeable = lambda do |n|
+    next false if n['kind'] == 'spacer'
+    next true unless n['kind'] == 'container'
+    (n['children'] || []).any? { |c| placeable.call(c) }
+  end
+  (path.length - 1).downto(0) do |i|
+    node = path[i]
+    break if placeable.call(node)
+    (i.zero? ? tree : (path[i - 1]['children'] || [])).reject! { |k| k['id'] == node['id'] }
+  end
+  # Clip surviving top-aligned ancestors so children map from the title's
+  # bottom edge.
+  path.each do |a|
+    next unless a['y_pct'] && a['h_pct'] && (a['y_pct'].to_f - ty).abs <= eps
+    shrink = tb - a['y_pct'].to_f
+    next unless shrink.positive?
+    a['y_pct'] = tb
+    a['h_pct'] = [a['h_pct'].to_f - shrink, 1.0].max
+  end
+  tb
+end
+
+# v5.1 defect 2: a zone that counts as CONTENT for the header y-order contract
+# (chart / image / text-with-runs; containers, spacers and full-canvas
+# background images are not content).
+def header_guard_content?(z)
+  case z['kind'].to_s
+  when 'chart' then true
+  when 'image' then !z['is_background']
+  when 'text', 'title'
+    Array(z['text_runs']).any? { |r| !r['text'].to_s.strip.empty? }
+  else false
+  end
+end
+
+# True when another CONTENT zone ends at or above the candidate's top — the
+# topmost-content y-order contract (v5.1 defect 2): extraction must never hoist
+# a zone above content that sits above it in the source. This alone fixes the
+# intro-above-wordmark inversion even where the title heuristic misjudges.
+def header_content_above?(zones, cand)
+  cand_top = cand['y_pct'].to_f
+  Array(zones).any? do |z|
+    next false if z.equal?(cand) || (z['id'] && z['id'] == cand['id'])
+    next false unless header_guard_content?(z)
+    (z['y_pct'].to_f + z['h_pct'].to_f) <= cand_top + 1.5
+  end
+end
+
 def detect_header_title_el(page, zone_by_id)
   title_el = page['elements'].find { |e| e['kind'] == 'text' && e['id'].to_s.start_with?('title') }
   return title_el if title_el
   zid = ->(e) { e['id'].to_s.sub(/\Atext-/, '') }
-  page['elements'].select { |e| e['kind'] == 'text' }
-                  .map { |e| [e, zone_by_id[zid.call(e)]] }
-                  .select { |_e, z| z && z['y_pct'].to_f < 12 && z['w_pct'].to_f >= 40 }
-                  .min_by { |_e, z| z['y_pct'].to_f }&.first
+  zones = zone_by_id.values
+  cands = page['elements'].select { |e| e['kind'] == 'text' }
+                          .map { |e| [e, zone_by_id[zid.call(e)]] }
+                          .select { |_e, z| z && z['y_pct'].to_f < 12 && z['w_pct'].to_f >= 40 }
+  # v5.1 defect 2 guard 1 (title-likeness): a wide multi-line / long-copy zone
+  # near the top is an INTRO paragraph, not the banner — never promote it into
+  # the header band. Zones with no run data keep the geometric behavior.
+  cands = cands.select { |_e, z| !z.key?('text_runs') || SigmaLayout.title_like_runs?(z['text_runs']) }
+  # guard 2 (topmost-content y-order): only extract a banner when no other
+  # content zone sits ABOVE it in the source.
+  cands = cands.reject { |_e, z| header_content_above?(zones, z) }
+  cands.min_by { |_e, z| z['y_pct'].to_f }&.first
+end
+
+# v5.1 defect 2 (case 2 of the header three-way): true when the source's own
+# top band carries a visual banner — an image wordmark, or body text the
+# guarded fallback refused to promote. The tree already renders the source
+# order for these, so the page emits NO header band and the page name is NOT
+# fabricated over the title art. Deliberately narrower than "any content zone"
+# (a chart at y<12 keeps the fabricated page-name header — nothing to
+# duplicate, and prior behavior for chart-at-top sources is preserved).
+def top_banner_content?(zones)
+  Array(zones).any? do |z|
+    next false unless (z['y_pct'] || 100).to_f < SigmaLayout::HEADER_MAX_Y_PCT
+    k = z['kind'].to_s
+    (k == 'image' && !z['is_background']) ||
+      (%w[text title].include?(k) && Array(z['text_runs']).any? { |r| !r['text'].to_s.strip.empty? })
+  end
+end
+
+# ---- v5.1 defect 3: floating root zones ------------------------------------
+# Tableau floats are additional ROOTS of the dashboard <zones> (siblings of the
+# single layout root). Until parse-twb-layout stamps a 'floating' marker,
+# detect them structurally: a non-container root when the FIRST root is a
+# container. Floats must never be pack_rects'ed below the main container (the
+# brush-X-art-at-page-bottom defect) — see the float partition in
+# build_page_from_tree.
+def floating_zone?(node, tree)
+  return false if node['kind'] == 'container'
+  return true if node['floating']
+  first = tree.first
+  !first.nil? && first['kind'] == 'container' && !node.equal?(first)
+end
+
+FLOAT_TEXT_Y_OVERLAP_MIN = 0.30 # float must cover >=30% of a text row's
+#   y-extent before that text shrinks aside (never shrink images/wordmarks)
+
+# Compose a header-region float into the top-band row it overlaps: find the
+# TEXT sibling (host container's direct child) whose y-extent the float covers
+# by >= FLOAT_TEXT_Y_OVERLAP_MIN, shrink that text horizontally away from the
+# float (z-overlap is inexpressible in Sigma's grid — adjacency degradation),
+# snap the float to that row-band's full height, and insert the float into the
+# tree in y-order. Only TEXT siblings shrink — full-width wordmark images keep
+# their width above. Returns true when composed; false → the caller gives the
+# float its own top strip.
+def compose_float_beside_text!(float, host)
+  fy0 = (float['y_pct'] || 0).to_f
+  fy1 = fy0 + (float['h_pct'] || 0).to_f
+  kids = (host['children'] ||= [])
+  cand = kids.select { |k| %w[text title].include?(k['kind'].to_s) }.map do |k|
+    ky0 = (k['y_pct'] || 0).to_f
+    kh  = (k['h_pct'] || 0).to_f
+    ov  = [fy1, ky0 + kh].min - [fy0, ky0].max
+    [kh.positive? && ov.positive? ? ov / kh : 0.0, k]
+  end.select { |frac, _| frac >= FLOAT_TEXT_Y_OVERLAP_MIN }
+     .max_by { |frac, k| [frac, -(k['y_pct'] || 0).to_f, k['id'].to_s] }
+  return false unless cand
+  cand = cand.last
+  fx0 = (float['x_pct'] || 0).to_f
+  fx1 = fx0 + (float['w_pct'] || 0).to_f
+  cx0 = (cand['x_pct'] || 0).to_f
+  cx1 = cx0 + (cand['w_pct'] || 0).to_f
+  if fx0 + fx1 <= cx0 + cx1 # float sits left of the text's center of mass
+    nx0 = [fx1, cx1 - 5.0].min # text keeps >= 5% width
+    cand['w_pct'] = cx1 - nx0
+    cand['x_pct'] = nx0
+  else
+    cand['w_pct'] = [fx0 - cx0, 5.0].max
+  end
+  float['y_pct'] = (cand['y_pct'] || 0).to_f
+  float['h_pct'] = (cand['h_pct'] || 0).to_f
+  idx = kids.index { |k| ([(k['y_pct'] || 0).to_f, (k['x_pct'] || 0).to_f] <=> [float['y_pct'], (float['x_pct'] || 0).to_f]) == 1 }
+  kids.insert(idx || kids.length, float)
+  true
+end
+
+# v5.1 defect 3 (mid-page floats): a floating image pack_rects would strand far
+# below its source y is DROPPED from the grid (a decorative float at the wrong
+# y is worse than absent) and flagged recoverable in the workdir's
+# image-assets.json (written by build-charts-from-signals beside
+# dashboard-layout.json in the orchestrated flow). Best-effort: no file, no-op.
+def record_manual_composite(layout_path, dash_name, zone_id)
+  path = File.join(File.dirname(layout_path.to_s), 'image-assets.json')
+  return unless File.exist?(path)
+  data = JSON.parse(File.read(path))
+  return unless data.is_a?(Array)
+  rec = data.find { |a| a.is_a?(Hash) && a['dashboard'] == dash_name && a['zone_id'].to_s == zone_id.to_s }
+  unless rec
+    rec = { 'dashboard' => dash_name, 'zone_id' => zone_id }
+    data << rec
+  end
+  rec['placement'] = 'manual-composite'
+  File.write(path, JSON.pretty_generate(data) + "\n")
+rescue StandardError => e
+  warn "WARN: could not record manual-composite placement for zone #{zone_id}: #{e.class}: #{e.message}"
 end
 
 def build_page_synthesized(dashboard, page, opts, structure)
@@ -1033,6 +1382,31 @@ min_row_expansions = 0
 dash_layout.each do |d|
   page = page_for_dash[d['dashboard']]
   next unless page
+  # v5.1 defect 1 — px-derived page height, PER DASHBOARD (multi-dashboard
+  # workbooks carry one canvas_px each; the theme's maxPageWidth stays
+  # first-dashboard-global — theme_derive — an accepted caveat). A fixed-size
+  # canvas maps rows at SIGMA_ROW_PX (28px) so zone→row mapping reproduces
+  # source px exactly and the E1 floors become true px floors; row_scale is
+  # NEUTRALIZED (the 1.5x scale existed only to compensate the 32-row default's
+  # underestimate). Explicit --page-rows always wins. No canvas_px → the legacy
+  # page_rows * row_scale mapping, byte-identical.
+  o = opts.dup
+  cpx = d['canvas_px']
+  canvas_rows = nil
+  if cpx.is_a?(Hash) && cpx['sizing_mode'] == 'fixed' && cpx['h'].to_i >= 400
+    canvas_rows = [[(cpx['h'].to_f / SigmaLayout::SIGMA_ROW_PX).round, 24].max, 400].min
+  end
+  # An explicit --page-rows OR --row-scale is an operator override of the row
+  # model — the px derivation would silently neutralize it (review-caught:
+  # row_scale_explicit was recorded but never honored).
+  if !o[:page_rows_explicit] && !o[:row_scale_explicit] && canvas_rows
+    o[:page_rows] = canvas_rows
+    o[:row_scale] = 1.0
+    warn "px-derived rows: #{d['dashboard'].inspect} canvas #{cpx['w']}x#{cpx['h']} → " \
+         "#{o[:page_rows]} rows (row-scale neutralized)"
+  elsif o[:row_scale] != 1.0
+    o[:page_rows] = (o[:page_rows] * o[:row_scale]).round
+  end
   # E2 structure detection runs on every dashboard (pure geometry over the
   # flat zone list) — it picks the synthesized path AND feeds the census's
   # bands_detected telemetry regardless of which path ends up building.
@@ -1040,13 +1414,13 @@ dash_layout.each do |d|
   bands_detected['header'] ||= structure[:header].any?
   bands_detected['kpi_rows'] += structure[:kpi_rows].length
   bands_detected['sidebar'] ||= !structure[:sidebar].nil?
-  use_synth = !opts[:no_containers] && (structure[:sidebar] || structure[:kpi_rows].any?)
-  use_tree  = !opts[:no_containers] &&
+  use_synth = !o[:no_containers] && (structure[:sidebar] || structure[:kpi_rows].any?)
+  use_tree  = !o[:no_containers] &&
               (tree_has_controls?(d['zone_tree']) || tree_has_styled_containers?(d['zone_tree']))
   result = nil
   if use_synth
     begin
-      result = build_page_synthesized(d, page, opts, structure)
+      result = build_page_synthesized(d, page, o, structure)
       warn "synthesized layout: #{d['dashboard'].inspect} → " \
            "#{structure[:kpi_rows].length} KPI row(s), " \
            "#{structure[:sidebar] ? "#{structure[:sidebar][:side]} sidebar rail" : 'no sidebar'}, " \
@@ -1057,14 +1431,20 @@ dash_layout.each do |d|
   end
   if result.nil? && use_tree
     begin
-      result = build_page_from_tree(d, page, opts)
+      result = build_page_from_tree(d, page, o)
       warn "container-tree layout: #{d['dashboard'].inspect} → nested Sigma containers (filters/params placed in their Tableau container)"
     rescue StandardError => e
       warn "WARN: container-tree layout failed for #{d['dashboard'].inspect} (#{e.class}: #{e.message}) — falling back to banded layout"
     end
   end
-  result ||= build_page_for_dashboard(d, page, opts)
+  result ||= build_page_for_dashboard(d, page, o)
   pxml, extra_els, n_charts, n_bands, n_ctls, census, n_minexp = result
+  if census
+    # Telemetry for the page-height budget (v5.1): rows actually built vs the
+    # canvas-implied row count (present only for fixed-px sources).
+    census['rows'] = o[:page_rows]
+    census['canvas_rows'] = canvas_rows if canvas_rows
+  end
   page_xmls << pxml
   sidecar[page['id']] = extra_els
   census_pages << census if census
@@ -1093,8 +1473,13 @@ File.write(census_out, JSON.pretty_generate({
   'min_row_expansions' => min_row_expansions
 }) + "\n")
 
+# Per-page row report (v5.1): rows are resolved per dashboard (px-derived when
+# the source canvas is fixed), so a single global row count no longer exists.
+rows_report = census_pages.map do |c|
+  "#{c['page']}=#{c['rows']}#{c['canvas_rows'] ? " (px-derived #{c['canvas_rows']})" : ''}"
+end.join(', ')
 puts "wrote #{opts[:out]} (#{page_for_dash.size} dashboard page(s): #{totals[:charts]} charts in #{totals[:bands]} band container(s), " \
-     "#{totals[:controls]} controls, header bands, gap-closing applied, row-scale #{opts[:row_scale]}× → #{opts[:page_rows]} rows)"
+     "#{totals[:controls]} controls, header bands, gap-closing applied, rows: #{rows_report})"
 puts "wrote #{opts[:out]}.elements.json (#{sidecar.values.sum(&:length)} container/header spec element(s) — put-layout.rb injects these)"
 puts "wrote #{census_out} (#{census_pages.size} page census record(s): " \
      "#{census_pages.map { |c| "#{c['page']} #{c['placed']}/#{c['zones']} tiles, fill #{(c['grid_fill_pct'] * 100).round}%" }.join('; ')})"

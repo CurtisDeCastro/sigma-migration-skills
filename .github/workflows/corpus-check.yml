@@ -34,8 +34,8 @@ jobs:
     name: windows PowerShell path (doctor.ps1 + offline corpus)
     # Proves the Windows/PowerShell path works BEFORE an event does (P0.4):
     # doctor.ps1 runs, emits a valid + passing doctor.json, and the offline
-    # local-converter corpus converts. Creds-free, network-free. Runtimes are
-    # pinned via setup-* so a runner-image change can't flip doctor's result.
+    # local-converter corpus converts. No real secrets, network-free. Runtimes
+    # are pinned via setup-* so a runner-image change can't flip doctor's result.
     runs-on: windows-2022
     timeout-minutes: 12
     env:
@@ -44,6 +44,16 @@ jobs:
       # rev-list against a grafted origin/main is unreliable. Skip it explicitly
       # (the doctors also auto-skip on a shallow clone).
       SIGMA_SKIP_VERSION_CHECK: "1"
+      # doctor.ps1/.sh are fail-closed on ABSENT Sigma creds (a real run would
+      # die at its first API call — an intentional gate). This job only proves
+      # the Windows/PowerShell path works; it holds no secrets and makes no
+      # network calls. Satisfy the cred-PRESENCE check with placeholders and
+      # skip the live token-mint smoke — no real credential is used and nothing
+      # leaves the runner. (The bash offline jobs don't gate on the doctor.)
+      SIGMA_CLIENT_ID: ci-offline-placeholder
+      SIGMA_CLIENT_SECRET: ci-offline-placeholder
+      SIGMA_BASE_URL: https://aws-api.sigmacomputing.com
+      SIGMA_SKIP_CRED_SMOKE: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: ruby/setup-ruby@v1

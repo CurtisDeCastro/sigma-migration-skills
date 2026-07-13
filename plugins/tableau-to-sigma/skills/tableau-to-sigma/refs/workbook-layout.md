@@ -594,6 +594,7 @@ Key facts:
 - **`{columnId, type}` object in `columnIds` = secondary axis** (right). `type` overrides the mark shape (`line` typical, also `bar`/`area`/`scatter`).
 - The right axis **auto-scales by default** — no explicit `axis: right` field is needed because the object form *is* the signal.
 - `yAxis.format` governs the **left axis only**. How to customize the right-axis scale (log/min/max/zero) via spec is **unverified** — likely either a `secondaryYAxis.format` / `yAxis2.format` field or another nested form. Don't speculate; probe when needed.
+- **Dual-axis contract** (live-verified 2026-07-10): `yAxis.columnIds` lists **ALL** series (typed `{columnId, type}` entries on combo charts); `yAxis2.columnIds` is a **plain-string subset** naming which of those series ride the right axis. A `yAxis2` id absent from `yAxis` → 400 `"'<id>' is not listed on yAxis.columnIds"`; a typed object inside `yAxis2` → 400 `"Invalid string: object"`. Element-level `filters[*]` entries also require an explicit `id` (400 `"filters[N].id: Invalid string: undefined"` without one).
 
 `build-charts-from-signals.rb` already emits the correct dual-axis combo shape when Tableau dual-axis is detected (shipped in `33f1f35`).
 
@@ -1013,7 +1014,28 @@ markdown (`# Heading`) still renders left-aligned — alignment must be expresse
 
 ### Image element
 
-Uses `"kind": "image"`. The `url` field is a public remote image URL. No `source`, `columns`, or axes.
+Uses `"kind": "image"`. No `source`, `columns`, or axes. The `url` field accepts **either** a
+public remote URL **or an inline `data:image/png;base64,…` data URI** — data URIs POST cleanly
+and render in both the app and PNG exports (live-verified 2026-07-10 against three ~100–200 KB
+embedded PNGs; RE-verified 2026-07-11 in the stale-classification probe batch alongside
+page/container `backgroundImage` data URIs; an earlier revision of this file claimed
+hosted-URL-only, and a field run substituted plain text for a source's title art because it
+trusted that claim — the docs still say "external URL only" and the docs are wrong).
+
+**Mechanical path (v5.0):** build-charts-from-signals now does this automatically — every
+Tableau bitmap zone is extracted from the .twbx to `<workdir>/assets/`, emitted as an
+`img-<zoneid>` data-URI element, recorded in `<workdir>/image-assets.json`, and placed by
+build-dashboard-layout at the zone's geometry. Full-canvas backgrounds (`is_background`) are
+withheld from the grid and routed to page/container `backgroundImage`.
+
+**Migrating Tableau image zones (logos, stylized titles, decorative art):** the source's bitmaps
+ship inside the .twbx (`unzip -l workbook-content.twbx | grep -iE 'png|jpe?g'`). Extract each,
+base64 it, and emit an image element:
+
+```bash
+b64=$(base64 < extracted/Image/title-art.png | tr -d '\n')
+# → {"id": "img-title", "kind": "image", "url": "data:image/png;base64,'"$b64"'"}
+```
 
 ```json
 {
@@ -1023,21 +1045,70 @@ Uses `"kind": "image"`. The `url` field is a public remote image URL. No `source
 }
 ```
 
+> **Layering caveat:** Tableau floats images BEHIND other zones (z-stacked); Sigma's grid layout
+> REJECTS overlapping elements, so background art cannot be layered under a chart or text as an
+> image ELEMENT. But **pages and containers accept `backgroundImage`** — live-probed 2026-07-11:
+> `page.backgroundImage = {url: <data URI or external URL>, style: {fit: contain|cover|none|
+> scale-down|stretch, horizontalAlign/verticalAlign, tiling}}` POSTs, survives readback, and
+> RENDERS behind the page's elements (data URI included — the docs' "external URL only" wording
+> is wrong for backgroundImage too). Containers take the same shape alongside `style`. So the
+> Tableau full-canvas designed-background pattern (Figma/PPT card art — parse-twb-layout flags
+> these `is_background: true`, assets in `image-assets.json`) maps DIRECTLY to page/container
+> backgroundImage. Composite art + text into one image only when the art must sit between two
+> specific elements rather than behind a whole page/container.
+
 In layout XML, image elements use a standard `<LayoutElement>`:
 ```xml
 <LayoutElement elementId="img-logo" gridColumn="1 / 9" gridRow="1 / 9"/>
 ```
 
+### Divider element
+
+`{"id": …, "kind": "divider", "direction": "horizontal|vertical", "style": {"color": "#hex6",
+"width": 1-4, "strokeStyle": "solid|dashed|dotted"}}` — live-verified POST + readback
+2026-07-11. The stroke centers in its grid cell, so a 1-row `<LayoutElement>` renders a clean
+hairline. This is the native target for Tableau's thin filled rules (spacers / childless
+containers / blank-text bars ≤12px with a fill — `ZoneCensus.divider_zone?`); the layout
+builder emits them automatically (`dv-<page>-<zone>` ids). Unfilled thin zones are true gaps
+and stay dropped.
+
+### Button element (workspace-gated)
+
+`kind: "button"` ({text, appearance filled|outline|text, fillColor/fontColor, actions:
+[{trigger: "on-click", effects: [{effect: "open-url", openTarget: "_self|_blank|_parent",
+url}]}]}) is in the OpenAPI and passes spec/verify, but the live PUT is FEATURE-FLAGGED per
+workspace (probed 2026-07-11: 400 "`button` elements are not enabled for this workspace").
+Default emission for Tableau navigation buttons is therefore a **text-pill link**
+(`[**Label**](url)` + pill background); set `SIGMA_BUTTON_ELEMENTS=on` to emit real buttons
+on workspaces with the flag. Either way the URL is the placeholder
+`https://nav.invalid/#page=<name>` — put-layout.rb rewrites it to the live workbook page URL
+after publish (the URL doesn't exist until the POST returns). Export/toggle buttons emit
+nothing (named residue in coverage.json).
+
 ### Container element
 
-Uses `"kind": "container"`. The element spec has no extra fields — children are nested inside it via `<GridContainer>` in the layout XML (see GridContainer section above).
+Uses `"kind": "container"`. Children are nested inside it via `<GridContainer>` in the layout
+XML (see GridContainer section above). Style + background image are spec-supported (live-probed
+2026-07-11: pill radius + border + data-URI backgroundImage all render):
 
 ```json
 {
   "id": "kpi-row",
-  "kind": "container"
+  "kind": "container",
+  "style": { "backgroundColor": "#112233", "borderRadius": "pill",
+             "borderWidth": 2, "borderColor": "#52BAEE" },
+  "backgroundImage": { "url": "data:image/png;base64,…", "style": { "fit": "cover" } }
 }
 ```
+
+`style` rules: `borderRadius` enum `square|round|pill`; `borderWidth` 1–3; border fields cannot
+combine with `padding: 'none'` (schema-enforced XOR). This is the native target for Tableau
+zone-style fills, borders, and the FCP `corner-radius` surface (parse-twb-layout emits
+`fill_color`/`border_*`/`corner_radius` per zone; radius/height > 0.3 → `pill`, else `round`).
+
+**Element titles can be hidden via spec**: `"name": { "visibility": "hidden" }` (live-probed,
+survives readback, renders untitled) — use for Tableau tiles with hidden titles instead of
+blank-name hacks.
 
 ### Histogram
 
@@ -1322,3 +1393,22 @@ curl -s -X PUT \
 | Overlapping row ranges | Elements hidden behind each other | Draw row ranges on paper; ensure no two elements share rows on the same column span |
 | Fallback `els.values[N]` when page has fewer elements than expected | `elementId=""` in XML — PUT rejected with `invalid_request` | Guard with `(le(id, ...) if id)` and call `.compact` on the children array before passing to `page_xml` |
 | Using `dimension` on a `line-chart` | Works but is non-canonical | Use `xAxis` for both `bar-chart` and `line-chart` |
+
+### Minimum tile heights (grid rows) — the render-blank floor
+
+Sigma renders a tile BLANK (page and PNG export) below a per-kind grid-row
+minimum, and hand-authored layouts routinely trip the layout lint on this (a
+real run collected 19 violations). The enforced floors
+(`SigmaLayout::KIND_MIN_ROWS`, mirrored in the layout lint):
+
+| element kind | min gridRow span | why |
+|---|---|---|
+| `kpi-chart` | 4 | value + label need ~4 rows to render at all |
+| any `*-chart` | 8 | axis/labels suppressed and the tile blanks below ~8 |
+| `table` / `pivot-table` | 10 | header row + a few data rows |
+| `control` | 2 | one input strip; 2 keeps the label visible |
+| `text` | 2 | |
+
+When authoring `layout` XML by hand, give every element at least its floor —
+the lint (gate 6) fails otherwise, and shrinking a section to match tight
+source geometry must come out of GAPS, not out of tile heights.

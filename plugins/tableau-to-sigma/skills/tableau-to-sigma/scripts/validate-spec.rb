@@ -88,8 +88,37 @@ end
 all_known_prefixes = (all_element_names + external_names).to_set rescue (all_element_names + external_names)
 require 'set' rescue nil
 all_known_set = all_known_prefixes.is_a?(Set) ? all_known_prefixes : Set.new(all_known_prefixes)
+# workbook element name → ALL ids (duplicate names exist across pages), for
+# the cross-source ref guard below
+wb_el_ids_by_name = Hash.new { |h, k| h[k] = [] }
+spec.fetch('pages', []).each do |page|
+  page.fetch('elements', []).each do |el|
+    wb_el_ids_by_name[el['name']] << el['id'] if el['name'].is_a?(String) && el['id']
+  end
+end
 
 errors << 'spec contains rgb(...) color strings (Cloudflare WAF blocks)' if JSON.generate(spec).include?('rgb(')
+
+# ENVELOPE checks (field-caught round 2): a hand-authored spec missing these
+# passed "0 errors" locally and then burned one live 400 per defect, one
+# network round-trip at a time.
+errors << 'missing top-level "schemaVersion" (POST 400s with schemaVersion: Invalid)' unless spec.key?('schemaVersion')
+errors << 'missing top-level "name" (the workbook/DM display name)' if spec['name'].to_s.strip.empty?
+warnings << 'no top-level "folderId" — the POST lands in My Documents (pass the assigned folder)' unless spec.key?('folderId')
+spec.fetch('pages', []).each_with_index do |page, pi|
+  errors << "pages[#{pi}] has no \"id\" — PUT/layout targeting needs stable page ids" unless page['id']
+  page.fetch('elements', []).each do |el|
+    src = el['source']
+    next unless src.is_a?(Hash)
+    kind = src['kind'].to_s
+    if kind == 'table' && src['dataModelId']
+      errors << "element \"#{el['name'] || el['id']}\": source.kind \"table\" carries a dataModelId — " \
+                'a DM-sourced element needs source.kind "data-model" (live 400: Dependency not found)'
+    elsif kind == 'data-model' && !src['dataModelId']
+      errors << "element \"#{el['name'] || el['id']}\": source.kind \"data-model\" without dataModelId"
+    end
+  end
+end
 
 spec.fetch('pages', []).each do |page|
   page.fetch('elements', []).each do |el|
@@ -162,6 +191,22 @@ spec.fetch('pages', []).each do |page|
           unless own_prefixes.include?(prefix) || all_known_set.include?(prefix)
             errors << "#{name}.#{col['name']}: ref [#{ref}] — prefix \"#{prefix}\" unknown " \
                       "(known: #{(own_prefixes + all_known_set).to_a.sort.join(', ')})"
+          end
+          # v5.3 RENDER-500 guard: a formula referencing a workbook element
+          # that is NOT this element's source opaquely 500s EVERY png
+          # render/export in the whole workbook (round-5 field-caught,
+          # canary-bisect-proven). Scoped to ELEMENT-sourced elements only
+          # (v5.3.1 review-caught: data-model/warehouse passthrough prefixes
+          # legitimately collide with element names — own_prefixes/bead-1t6c
+          # whitelists them and the ref resolves inside the DM), and a
+          # duplicate NAME counts as the source when ANY of its ids is the
+          # source id.
+          if src['kind'].to_s == 'table' && src['elementId'] &&
+             wb_el_ids_by_name.key?(prefix) && !own_prefixes.include?(prefix) &&
+             !wb_el_ids_by_name[prefix].include?(src['elementId']) && prefix != el['name']
+            errors << "#{name}.#{col['name']}: ref [#{ref}] targets workbook element \"#{prefix}\" which is " \
+                      'NOT this element\'s source — cross-element refs break EVERY render/export in the ' \
+                      "workbook (opaque 500s); source this element from \"#{prefix}\" or re-derive the column locally"
           end
         else
           is_control = control_ids.include?(ref) || ref.start_with?('ctl-')

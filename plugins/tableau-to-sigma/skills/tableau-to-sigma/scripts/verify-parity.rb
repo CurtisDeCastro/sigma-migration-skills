@@ -257,6 +257,59 @@ def per_column_scores(exp, act, cols)
   end
 end
 
+# ── Trailing-partial-period guard ────────────────────────────────────────────
+# Field bug: a landed dataset's FINAL period was incomplete (a few days of a
+# month), the time-series' last point crashed to ~0, and the chart shipped —
+# extract-mode parity PASSes it (bucket sets match; value drift is notes-only)
+# and even a strict DIVERGE doesn't NAME the cause. This guard is deterministic
+# detection + human decision: WARN only, never a status change.
+#
+# Fires when, for a date-keyed series (unique date-shaped dim keys, ≥4 points):
+#   * the FINAL point of a numeric column drops >90% vs the median of the
+#     prior 3 points, AND
+#   * the source expectation (when present) shows NO such drop — i.e. Tableau
+#     rendered a healthy run-rate where Sigma renders a cliff.
+# Both sides cliffing = real data (a genuine collapse), not a partial period.
+TRAILING_DROP = 0.90
+
+def date_key?(v)
+  v.is_a?(String) && v.match?(/\A\d{4}-\d{2}(-\d{2})?\z/)
+end
+
+# [final_key, drop_fraction] when column `ci`'s last point (by date order)
+# drops below (1 - TRAILING_DROP) × the median of the prior 3 points; else nil.
+def trailing_drop(rows, ci)
+  pts = rows.select { |r| date_key?(r[0]) && r[ci].is_a?(Numeric) }
+  return nil if pts.size < 4
+  return nil if pts.size < rows.size * 0.8            # mostly non-date keys — not a time series
+  keys = pts.map { |r| r[0] }
+  return nil unless keys.uniq.size == keys.size       # duplicate dates = flattened multi-series; final point ambiguous
+  pts = pts.sort_by { |r| r[0] }                      # canonical date keys sort lexicographically
+  final = pts[-1][ci].to_f
+  prior = pts[-4, 3].map { |r| r[ci].to_f }
+  median = prior.sort[1]
+  return nil unless median.positive?
+  drop = 1.0 - (final / median)
+  drop > TRAILING_DROP ? [pts[-1][0], drop] : nil
+end
+
+# WARN notes for a chart (possibly several — one per crashing measure column).
+def trailing_partial_notes(exp, act)
+  notes = []
+  width = act.map(&:size).max || 0
+  (1...width).each do |ci|
+    crash = trailing_drop(act, ci)
+    next unless crash
+    next if exp.any? && trailing_drop(exp, ci)        # the source shows the same cliff — real data
+    src = exp.any? ? 'the Tableau expectation shows no such drop' : 'no source expectation to compare'
+    notes << format('TRAILING-PARTIAL-PERIOD WARN: trailing partial period? final point %s is -%d%% vs the ' \
+                    'prior-3-point median (column #%d); %s — likely an INCOMPLETE final period in the ' \
+                    'landed data. Filter the partial period out (or explain why the cliff is real) before shipping.',
+                    crash[0], (crash[1] * 100).round, ci, src)
+  end
+  notes
+end
+
 raw = JSON.parse(File.read(opts[:plan]))
 default_extract = false
 if raw.is_a?(Hash) && raw['charts']
@@ -305,6 +358,13 @@ results = plan.map do |p|
   act = (p.dig('actual', 'rows') || []).map { |r| round_row(r) }
 
   result = this_extract ? extract_compare(exp, act, tol: opts[:tol]) : strict_compare(exp, act)
+  # Trailing-partial-period guard: WARN only (deterministic detection, human
+  # decision) — appended to the per-chart notes, never a status change.
+  tp = trailing_partial_notes(exp, act)
+  if tp.any?
+    result[:notes] = (result[:notes] || []) + tp
+    result[:trailing_partial_warn] = true
+  end
   result.merge(chart: p['chart'], extract: this_extract,
                columns: per_column_scores(exp, act, p['sigma_columns']))
 end
@@ -356,6 +416,8 @@ if opts[:score_out]
         # PENDING (render-verify) tiles carry score:null — unscored, not zero.
         'score' => (r[:status] == 'PENDING' ? nil : (r[:score] || 0.0)),
         'n_expected' => r[:n_expected], 'n_actual' => r[:n_actual], 'n_matched' => r[:n_matched],
+        # named WARNs (trailing-partial-period guard) — advisory, never a status
+        'warnings' => Array(r[:notes]).grep(/\ATRAILING-PARTIAL-PERIOD/),
         # per-column (per-formula) scores (y9rd.14) — which column carried the divergence
         'columns' => (r[:columns] || []) }
     }

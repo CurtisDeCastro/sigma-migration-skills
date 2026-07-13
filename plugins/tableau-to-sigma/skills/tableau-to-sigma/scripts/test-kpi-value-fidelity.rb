@@ -25,7 +25,7 @@ DIR = __dir__
 SRC = File.read(File.join(DIR, 'build-charts-from-signals.rb'))
 
 USER_AGG_FN = { 'SUM' => 'Sum', 'AVG' => 'Avg', 'MIN' => 'Min', 'MAX' => 'Max', 'MEDIAN' => 'Median' }.freeze
-%w[map_column guid_from_text pick_kpi_measure resolve_shelf_field translate_kpi_measure_formula].each do |fn|
+%w[map_column guid_from_text placeholder_calc? pick_kpi_measure resolve_shelf_field translate_kpi_measure_formula].each do |fn|
   m = SRC.match(/^def #{fn}\b.*?\n^end$/m) or abort("could not extract #{fn} from build-charts-from-signals.rb")
   eval(m[0]) # rubocop:disable Security/Eval — test-only extraction of first-party code
 end
@@ -125,6 +125,35 @@ check(translate_kpi_measure_formula('MAX(If(Contains(Lower([Parameters].[X]),"y"
 # unmappable bare ref → nil (never emits a half-resolved formula)
 check(translate_kpi_measure_formula('[Ghost Col]/[Cost (copy)_30000000003]', RMMAP, {}).nil?,
       'unmappable bare ref → nil (no half-resolved formula)', fails)
+
+# ---- v5.0 exact-format Text() columns for scale-comma + suffix formats ------
+# Tableau '#,##0,,,B' renders "1B"; Sigma's d3 enum can't (,.2s shows SI 'G').
+# The mechanized fidelity recipe: parse the scale/suffix, emit a Text() column.
+%w[parse_scaled_suffix_format scaled_suffix_column pick_tableau_format_raw].each do |fn|
+  m = SRC.match(/^def #{fn}\b.*?\n^end$/m) or abort("could not extract #{fn}")
+  eval(m[0]) # rubocop:disable Security/Eval
+end
+b = parse_scaled_suffix_format('n#,##0,,,B;-#,##0,,,B')
+check(b == { 'scale' => 1_000_000_000, 'decimals' => 0, 'suffix' => 'B' },
+      "',,,B' → /1e9 + literal B (got #{b.inspect})", fails)
+m6 = parse_scaled_suffix_format('n#,##0,,.0M;-#,##0,,.0M')
+check(m6 == { 'scale' => 1_000_000, 'decimals' => 1, 'suffix' => 'M' },
+      "',,.0M' → /1e6, 1 decimal, literal M (got #{m6.inspect})", fails)
+check(parse_scaled_suffix_format('#,##0').nil?, 'no scale-commas → nil (enum path keeps it)', fails)
+check(parse_scaled_suffix_format('p0.0%').nil?, 'percent format → nil (enum path keeps it)', fails)
+# Review-hardened: NUMERIC scaled column + fixed-decimal format + literal
+# `suffix` (spec/verify-confirmed) — trailing zeros and grouping survive,
+# unlike the earlier Text(Round()) concat ('3.0M' stayed '3.0M', not '3M').
+f = scaled_suffix_column('Sum([Master/GDP])', b)
+check(f == { 'formula' => '(Sum([Master/GDP])) / 1000000000',
+             'format' => { 'kind' => 'number', 'formatString' => ',.0f', 'suffix' => 'B' } },
+      "exact-format scaled column (got #{f.inspect})", fails)
+f2 = scaled_suffix_column('Sum([Master/TEU])', m6)
+check(f2['format'] == { 'kind' => 'number', 'formatString' => ',.1f', 'suffix' => 'M' },
+      "zero-padded decimals survive via ,.1f (got #{f2['format'].inspect})", fails)
+raw = pick_tableau_format_raw({ '[federated.x].[sum:GDP (current US$):qk]' => 'n#,##0,,,B;-#,##0,,,B' },
+                              'GDP (current US$)')
+check(raw == 'n#,##0,,,B;-#,##0,,,B', "raw format string resolvable by header (got #{raw.inspect})", fails)
 
 puts
 if fails.empty?

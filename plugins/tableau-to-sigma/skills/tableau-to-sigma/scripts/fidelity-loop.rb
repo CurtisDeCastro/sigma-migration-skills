@@ -26,6 +26,13 @@
 #            --require-fidelity-ledger blocks GREEN while any spec-fixable delta is
 #            unresolved and not named in --accept-residuals.
 #
+# DATA-CLASS deltas are special: `data` means the rendered VALUES diverge from
+# the source — the numbers are wrong. Unresolved data-class entries block the
+# gate whenever the ledger exists (no --require-fidelity-ledger needed), and
+# --accept-residuals does NOT apply to them. Fix the spec/data and `resolve`
+# the entry, or — only after PROVING the values match — re-record it under its
+# true class with the evidence.
+#
 # Recipes for each delta→fix live in refs/fidelity-recipes.md. See SKILL.md Phase 5g.
 #
 # Subcommands
@@ -35,8 +42,9 @@
 #   record      --workdir DIR --dimension D --delta "..." --class C
 #               [--fix "..."] [--resolved]
 #   resolve     --workdir DIR (--entry N | --dimension D)    mark entry(ies) resolved
-#   apply-patch --workdir DIR --patch patch.json             GET→merge→PUT→guard→lint
+#   apply-patch --workdir DIR --patch patch.json             GET→merge→normalize→PUT→guard→lint
 #               [--full-spec spec.json]  replace the whole spec instead of merging
+#               [--skip-style-normalize REASON]  waive the v5.1 style contract (named)
 #               [--resolves 0,2,3]       mark these ledger entries resolved on success
 #               [--dry-run --live-spec f.json --out merged.json]  no network (tests)
 #   status      --workdir DIR [--accept-residuals id,id]     print ledger + gate verdict
@@ -117,6 +125,14 @@ module FidelityLoop
     end.map(&:last)
   end
 
+  # Unresolved data-class entries — the numbers are wrong. These block the
+  # gate UNCONDITIONALLY: no accepted-residual list applies (see file header).
+  def unresolved_data(ledger)
+    (ledger['entries'] || []).each_with_index
+                             .select { |e, _i| e['cls'] == 'data' && !e['resolved'] }
+                             .map(&:last)
+  end
+
   def ledger_ok?(ledger, accepted = [])
     unresolved_specfixable(ledger, accepted).empty?
   end
@@ -170,7 +186,7 @@ def print_rubric
   if File.exist?(rubric)
     puts "───── SCORE THIS PASS against refs/fidelity-rubric.md ─────"
     # Print just the dimension headers so the agent has the checklist inline.
-    File.foreach(rubric) do |l|
+    File.foreach(rubric, encoding: 'UTF-8') do |l|
       puts "  #{l.rstrip}" if l =~ /^\s*[-*]\s*\*\*/ || l =~ /^#{'#'}{2,4}\s/
     end
   else
@@ -205,6 +221,7 @@ parser = OptionParser.new do |p|
   p.on('--dry-run')           { opts[:dry] = true }
   p.on('--live-spec P')       { |v| opts[:live] = v }
   p.on('--out P')             { |v| opts[:out] = v }
+  p.on('--skip-style-normalize REASON', 'skip the v5.1 style contract on apply-patch (quality waiver — name it in your report)') { |v| opts[:skip_style_normalize] = v }
 end
 parser.parse!(ARGV)
 die 'missing --workdir' unless opts[:dir]
@@ -212,12 +229,24 @@ die 'missing --workdir' unless opts[:dir]
 case cmd
 when 'init'
   die '--workbook-id and --page-id required for init' unless opts[:wb] && opts[:page]
-  ledger = FidelityLoop.new_ledger(
-    workbook_id: opts[:wb], page_id: opts[:page],
-    source_image: opts[:src], max_passes: opts[:max] || 5
-  )
-  save_ledger(opts[:dir], ledger)
-  puts "[OK] initialized #{ledger_path(opts[:dir])} (max_passes=#{ledger['max_passes']})"
+  # PRESERVE an existing ledger for the same workbook (field-caught: every
+  # FAST PATH orchestrator re-entry re-ran init and WIPED the recorded deltas
+  # — the natural fix-and-re-run loop destroyed its own audit trail). Only a
+  # DIFFERENT workbook id starts fresh; same-workbook re-init is a no-op.
+  # (direct file check — load_ledger die()s with SystemExit on a missing file,
+  # which `rescue nil` does NOT catch; a fresh init would exit 2)
+  existing = File.exist?(ledger_path(opts[:dir])) ? (JSON.parse(File.read(ledger_path(opts[:dir]))) rescue nil) : nil
+  if existing.is_a?(Hash) && existing['workbook_id'] == opts[:wb]
+    puts "[OK] fidelity ledger already initialized for #{opts[:wb]} " \
+         "(#{(existing['entries'] || []).length} entries, pass #{existing['pass']}/#{existing['max_passes']}) — preserved."
+  else
+    ledger = FidelityLoop.new_ledger(
+      workbook_id: opts[:wb], page_id: opts[:page],
+      source_image: opts[:src], max_passes: opts[:max] || 5
+    )
+    save_ledger(opts[:dir], ledger)
+    puts "[OK] initialized #{ledger_path(opts[:dir])} (max_passes=#{ledger['max_passes']})"
+  end
 
 when 'render'
   ledger = load_ledger(opts[:dir])
@@ -257,6 +286,10 @@ when 'record'
   save_ledger(opts[:dir], ledger)
   puts "[OK] recorded #{e['id']} pass=#{e['pass']} [#{e['cls']}] #{e['dimension']}: #{e['delta']}"
   puts "     (spec-fixable + unresolved → blocks the gate until apply-patch/resolve)" if e['cls'] == 'spec-fixable' && !e['resolved']
+  if e['cls'] == 'data' && !e['resolved']
+    puts '     (data-class = the NUMBERS are wrong → blocks the gate unconditionally; no'
+    puts '      --accept-residuals waiver exists. Fix + resolve, or reclassify with evidence.)'
+  end
 
 when 'resolve'
   ledger = load_ledger(opts[:dir])
@@ -306,6 +339,26 @@ when 'apply-patch'
     end
 
   die 'merged spec has no `pages`', 4 unless merged['pages']
+
+  # v5.1.1: the SAME style contract post-and-readback enforces (pivot totals,
+  # format grammar, scheme defaults) — a fidelity patch PUT was the one write
+  # path that bypassed it (review-caught), so a patch could silently
+  # reintroduce what style-normalize had repaired. --skip-style-normalize
+  # waives (named), matching the post-and-readback flag.
+  if opts[:skip_style_normalize]
+    warn "WARN: style-normalize SKIPPED (--skip-style-normalize: #{opts[:skip_style_normalize]}) — quality waiver."
+  else
+    begin
+      require_relative 'lib/style_normalize'
+      changes = StyleNormalize.normalize!(merged)
+      if changes.any?
+        File.write(File.join(opts[:dir], 'style-normalize.json'), JSON.pretty_generate(changes)) rescue nil
+        puts "style-normalize: #{changes.size} change(s) applied (#{changes.map { |c| c['rule'] }.uniq.join(', ')}) — style-normalize.json"
+      end
+    rescue LoadError
+      warn 'WARN: lib/style_normalize unavailable — patch PUT proceeds un-normalized.'
+    end
+  end
 
   if opts[:dry]
     out = opts[:out] || File.join(opts[:dir], 'rcf-merged-spec.json')
@@ -383,16 +436,28 @@ when 'status'
     puts "  #{c}: #{grp.length} (#{unresolved} unresolved)"
   end
   blocking = FidelityLoop.unresolved_specfixable(ledger, opts[:accept] || [])
-  if blocking.empty?
-    puts '[OK] no unresolved spec-fixable deltas — RCF ledger satisfies the gate.'
+  data_blocking = FidelityLoop.unresolved_data(ledger)
+  if blocking.empty? && data_blocking.empty?
+    puts '[OK] no unresolved spec-fixable or data-class deltas — RCF ledger satisfies the gate.'
     exit 0
   else
-    warn "[BLOCK] #{blocking.length} unresolved spec-fixable delta(s) remain:"
-    blocking.each do |i|
-      e = entries[i]
-      warn "         #{e['id']} [#{e['dimension']}] #{e['delta']}  (fix: #{e['fix'] || 'see refs/fidelity-recipes.md'})"
+    if data_blocking.any?
+      warn "[BLOCK] #{data_blocking.length} unresolved DATA-class delta(s) — the numbers are wrong:"
+      data_blocking.each do |i|
+        e = entries[i]
+        warn "         #{e['id']} [#{e['dimension']}] #{e['delta']}"
+      end
+      warn '       data-class residuals can never be waved through (--accept-residuals does not apply).'
+      warn '       Fix + resolve, or reclassify with evidence.'
     end
-    warn '       apply-patch/resolve them, or waive with --accept-residuals <id,id> and NAME them in the report.'
+    if blocking.any?
+      warn "[BLOCK] #{blocking.length} unresolved spec-fixable delta(s) remain:"
+      blocking.each do |i|
+        e = entries[i]
+        warn "         #{e['id']} [#{e['dimension']}] #{e['delta']}  (fix: #{e['fix'] || 'see refs/fidelity-recipes.md'})"
+      end
+      warn '       apply-patch/resolve them, or waive with --accept-residuals <id,id> and NAME them in the report.'
+    end
     exit 6
   end
 

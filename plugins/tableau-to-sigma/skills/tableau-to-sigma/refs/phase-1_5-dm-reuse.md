@@ -12,8 +12,8 @@ Before running Phase 2 (warehouse column discovery) and Phase 3 (DM build), chec
 #   workbook-signature.json — derived from Phase 1 .twb parse + view CSV headers
 #     { tableau_workbook, warehouse_tables: [FQNs], referenced_columns: [...], measures: [...] }
 ruby scripts/find-or-pick-dm.rb \
-  --workbook-signature /tmp/<name>/workbook-signature.json \
-  --out /tmp/<name>/dm-match.json \
+  --workbook-signature <WORK>/workbook-signature.json \
+  --out <WORK>/dm-match.json \
   --limit 100 \
   [--min-score 0.6]   # default; below: build new
   [--force-new]        # bypass scan entirely
@@ -43,7 +43,7 @@ Run:
 ```bash
 ruby scripts/inspect-dm-shape.rb \
   --dm-id <recommended_dm_id> \
-  --out /tmp/<name>/dm-denorm-plan.json
+  --out <WORK>/dm-denorm-plan.json
 ```
 
 The plan classifies every column on the DM as either:

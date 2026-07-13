@@ -5,7 +5,7 @@
 # A short single-line TEXT LABEL (section/column header) that the source zone
 # geometry maps to a TALL region must render as a THIN banner, not a tall empty
 # colored block. Drives build-dashboard-layout.rb on a VENDORED, trimmed copy of
-# the REAL World Bank Macroeconomics layout (fixtures below) — an earlier version
+# the REAL Global Macro Series layout (fixtures below) — an earlier version
 # of this test was a FALSE GREEN because a hand-built fixture (a) gave the readback
 # text element a `body` the real /columns readback DROPS, and (b) didn't reproduce
 # the multi-column NESTED band (tc-49[ tc-60[ tc-45 + tc-61 ] + tc-50 ]). Both are

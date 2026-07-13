@@ -121,12 +121,64 @@ if ($crlf -eq 'true') {
        "git config --global core.autocrlf input  (then re-clone / re-checkout)."
 } else { Ok "git core.autocrlf=$(if ($crlf) {$crlf} else {'unset'}) (won't CRLF-mangle scripts)" }
 
-# --- Sigma credentials (informational) -------------------------------------
+# --- Sigma credentials (REQUIRED - fail-closed) + live token-mint smoke ----
+# Absent creds = [X] REQUIRED failure (a run would die at its first API call).
+# When creds ARE present and the sibling Ruby lib exists (lib\sigma_rest.rb -
+# the same in-process mint path the orchestrators use), a live token mint
+# (bounded ~20s) proves they WORK: present-but-broken creds are [X] too.
+# SIGMA_SKIP_CRED_SMOKE=1 skips the live probe. Recorded in doctor.json
+# {cred_smoke:{sigma: pass|fail|skipped}}.
+$script:SmokeSigma = "skipped"
 $envFile = Join-Path $env:USERPROFILE ".sigma-migration\env"
-if ((Test-Path $envFile) -or $env:SIGMA_API_TOKEN -or $env:SIGMA_CLIENT_ID) {
-  Ok "Sigma credentials present (env or ~/.sigma-migration/env)"
+$sigmaCreds = (Test-Path $envFile) -or $env:SIGMA_API_TOKEN -or $env:SIGMA_CLIENT_ID
+$sigmaLib = Join-Path $PSScriptRoot "lib\sigma_rest.rb"
+if (-not $sigmaCreds) {
+  Bad "no Sigma credentials found (REQUIRED - the run would die at its first Sigma API call)" `
+      "Run 'ruby scripts/setup.rb' once (writes ~/.sigma-migration/env), or set SIGMA_CLIENT_ID / SIGMA_CLIENT_SECRET (+ SIGMA_BASE_URL)."
+} elseif ($env:SIGMA_SKIP_CRED_SMOKE) {
+  Ok "Sigma credentials present (live token-mint smoke SKIPPED: SIGMA_SKIP_CRED_SMOKE)"
+} elseif ((Test-Path $sigmaLib) -and (Get-Command ruby -ErrorAction SilentlyContinue)) {
+  & ruby -e '$LOAD_PATH.unshift File.join(ARGV[0], "lib"); require "timeout"; require "sigma_rest"; Timeout.timeout(20) { Sigma.refresh_token! }' $PSScriptRoot 2>$null | Out-Null
+  if ($LASTEXITCODE -eq 0) {
+    Ok "Sigma credentials present + live token mint OK"
+    $script:SmokeSigma = "pass"
+  } else {
+    Bad "Sigma credentials present but the live token mint FAILED (bad/stale client id/secret, or wrong SIGMA_BASE_URL)" `
+        "Re-run 'ruby scripts/setup.rb' with fresh values (Sigma: Administration > APIs & Embed Secrets). Genuinely offline? Set SIGMA_SKIP_CRED_SMOKE=1 to skip this probe."
+    $script:SmokeSigma = "fail"
+  }
 } else {
-  Warn "no Sigma credentials found" "Run 'ruby scripts/setup.rb' once, or set SIGMA_CLIENT_ID / SIGMA_CLIENT_SECRET."
+  Ok "Sigma credentials present (mint smoke skipped - no ruby lib next to this doctor)"
+}
+
+# --- Tableau credentials (self-gated: tableau skill only) --------------------
+# Only speaks up where the sibling Tableau scripts exist (setup-tableau.rb +
+# lib\tableau_rest.rb). ABSENT Tableau creds stay a WARN (Sigma-only skills
+# share this doctor); PRESENT-but-broken creds are [X] via a live PAT signin
+# smoke (bounded ~20s). SIGMA_SKIP_CRED_SMOKE=1 skips. Recorded in doctor.json
+# {cred_smoke:{tableau: pass|fail|skipped}}.
+$script:SmokeTableau = "skipped"
+$tabSetup = Join-Path $PSScriptRoot "setup-tableau.rb"
+$tabLib = Join-Path $PSScriptRoot "lib\tableau_rest.rb"
+if ((Test-Path $tabSetup) -and (Test-Path $tabLib)) {
+  $tabCreds = ($env:TABLEAU_PAT_NAME -and $env:TABLEAU_PAT_SECRET) -or `
+              ((Test-Path $envFile) -and ((Get-Content $envFile -Raw -ErrorAction SilentlyContinue) -match 'TABLEAU_PAT_SECRET'))
+  if (-not $tabCreds) {
+    Warn "no Tableau credentials found (needed for Tableau discovery)" `
+         "Run 'ruby scripts/setup-tableau.rb' once (PAT), or set TABLEAU_PAT_NAME / TABLEAU_PAT_SECRET / TABLEAU_SITE_CONTENT_URL (+ TABLEAU_SERVER_URL)."
+  } elseif ($env:SIGMA_SKIP_CRED_SMOKE) {
+    Ok "Tableau credentials present (live PAT signin smoke SKIPPED: SIGMA_SKIP_CRED_SMOKE)"
+  } elseif (Get-Command ruby -ErrorAction SilentlyContinue) {
+    & ruby -e '$LOAD_PATH.unshift File.join(ARGV[0], "lib"); require "timeout"; require "tableau_rest"; Timeout.timeout(20) { Tableau.refresh_token! }' $PSScriptRoot 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+      Ok "Tableau credentials present + live PAT signin OK"
+      $script:SmokeTableau = "pass"
+    } else {
+      Bad "Tableau credentials present but the live PAT signin FAILED (expired/revoked PAT, wrong site or server URL)" `
+          "Re-run 'ruby scripts/setup-tableau.rb' with a fresh PAT. Genuinely offline? Set SIGMA_SKIP_CRED_SMOKE=1 to skip this probe."
+      $script:SmokeTableau = "fail"
+    }
+  }
 }
 
 # --- skill version drift (v3 §2.1) -----------------------------------------
@@ -191,6 +243,7 @@ $doctor = [ordered]@{
   runtimes     = [ordered]@{ ruby = $rubyOk; python = $pyOk; node = $nodeOk; bash = [bool](Get-Command bash -ErrorAction SilentlyContinue) }
   versions     = [ordered]@{ ruby = "$rubyV"; python = "$pyV"; node = "$nodeV" }
   sandbox_hint = $sandbox
+  cred_smoke   = [ordered]@{ sigma = $script:SmokeSigma; tableau = $script:SmokeTableau }
   hyperapi_present = $hyperapiPresent
   skill_sha    = "$skillSha"
   behind_count = $behindCount

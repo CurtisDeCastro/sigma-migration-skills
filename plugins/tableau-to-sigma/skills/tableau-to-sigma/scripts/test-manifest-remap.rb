@@ -27,7 +27,7 @@ require_relative 'mechanical-specs'
 fails = []
 def check(c, m, fails) fails << m unless c; puts "  #{c ? 'PASS' : 'FAIL'}  #{m}" end
 
-# 36-col fact (World Bank) captions and 19-col dim (GDP2005) captions — disjoint
+# 36-col fact (Global Macro) captions and 19-col dim (GDP2005) captions — disjoint
 # enough to force a unique assignment. We only need a representative handful.
 FACT_CAPS = ['New Region', 'GDP (current US$)', 'FDI net inflows', 'Container port traffic (TEU)',
              'Country Name', 'Year', 'Country Code']
@@ -48,13 +48,13 @@ end
 model = { 'pages' => [{ 'elements' => [element('fact', FACT_CAPS), element('dim', DIM_CAPS)] }] }
 
 manifest = [
-  { 'slug' => 'wb', 'datasource' => 'federated.a', 'caption' => '1. Macro World Bank Extract',
+  { 'slug' => 'wb', 'datasource' => 'federated.a', 'caption' => '1. Global Macro Series Extract',
     'hyper' => 'dataengine_a.hyper', 'hyper_table' => 'Extract',
-    'sf_table' => 'TJ.PUBLIC.WORLDBANK_MACRO_WORLD_BANK', 'rows' => 14_991,
+    'sf_table' => 'TJ.PUBLIC.GLOBALMACRO_MACRO_SERIES', 'rows' => 14_991,
     'columns' => FACT_CAPS.each_with_object({}) { |c, h| h[c] = c.gsub(/[^0-9A-Za-z]+/, '_').gsub(/_+$/, '').upcase } },
   { 'slug' => 'wb', 'datasource' => 'federated.b', 'caption' => 'GFTGWOnullGDP2005 Extract',
     'hyper' => 'dataengine_b.hyper', 'hyper_table' => 'Extract',
-    'sf_table' => 'TJ.PUBLIC.WORLDBANK_MACRO_GDP2005', 'rows' => 11_706,
+    'sf_table' => 'TJ.PUBLIC.GLOBALMACRO_GDP2005', 'rows' => 11_706,
     'columns' => DIM_CAPS.each_with_object({}) { |c, h| h[c] = c.gsub(/[^0-9A-Za-z]+/, '_').gsub(/_+$/, '').upcase } }
 ]
 
@@ -71,24 +71,24 @@ dim_el  = els.find { |e| e['id'] == 'el-dim' }
 
 puts 'Part A — disambiguation by column-set overlap (not name)'
 check(rm[:elements] == 2, "both elements remapped (got #{rm[:elements]})", fails)
-check(fact_el.dig('source', 'path') == %w[TJ PUBLIC WORLDBANK_MACRO_WORLD_BANK],
-      "36-col element -> WORLDBANK_MACRO_WORLD_BANK (got #{fact_el.dig('source', 'path').inspect})", fails)
-check(dim_el.dig('source', 'path') == %w[TJ PUBLIC WORLDBANK_MACRO_GDP2005],
-      "19-col element -> WORLDBANK_MACRO_GDP2005 (got #{dim_el.dig('source', 'path').inspect})", fails)
+check(fact_el.dig('source', 'path') == %w[TJ PUBLIC GLOBALMACRO_MACRO_SERIES],
+      "36-col element -> GLOBALMACRO_MACRO_SERIES (got #{fact_el.dig('source', 'path').inspect})", fails)
+check(dim_el.dig('source', 'path') == %w[TJ PUBLIC GLOBALMACRO_GDP2005],
+      "19-col element -> GLOBALMACRO_GDP2005 (got #{dim_el.dig('source', 'path').inspect})", fails)
 check(els.map { |e| e['name'] }.uniq.size == 2, 'element names no longer collide', fails)
 
 puts 'Part B — base-column + metric formula prefixes rewritten'
 fcols = fact_el['columns'].map { |c| c['formula'] }
-check(fcols.all? { |f| f.start_with?('[WORLDBANK_MACRO_WORLD_BANK/') },
+check(fcols.all? { |f| f.start_with?('[GLOBALMACRO_MACRO_SERIES/') },
       'every fact base-column formula prefix repointed off [EXTRACT/…]', fails)
 check(fcols.none? { |f| f.include?('[EXTRACT/') }, 'no [EXTRACT/…] prefix survives', fails)
-check(fact_el['metrics'][0]['formula'].include?('[WORLDBANK_MACRO_WORLD_BANK/'),
+check(fact_el['metrics'][0]['formula'].include?('[GLOBALMACRO_MACRO_SERIES/'),
       'metric formula prefix repointed too', fails)
 check(fact_el['columns'][0]['name'] == 'New Region', 'display captions preserved (fold via phantom-filter)', fails)
 
 puts 'Part C — pick_fact selects the larger element once disambiguated'
 picked = MechanicalSpecs.pick_fact(model)
-check(picked && picked['id'] == 'el-fact', "pick_fact -> 36-col World Bank element (got #{picked && picked['id']})", fails)
+check(picked && picked['id'] == 'el-fact', "pick_fact -> 36-col Global Macro element (got #{picked && picked['id']})", fails)
 
 puts 'Part D — returned colmap + no-manifest no-op'
 check(rm[:colmap]['GDP (current US$)'] == 'GDP_CURRENT_US',
@@ -96,6 +96,94 @@ check(rm[:colmap]['GDP (current US$)'] == 'GDP_CURRENT_US',
 check(rm[:colmap].size == (FACT_CAPS | DIM_CAPS).size, 'colmap merges both entries (dedup shared captions)', fails)
 noop = MechanicalSpecs.remap_from_manifest!({ 'pages' => [] }, '/nonexistent/landing-manifest.json')
 check(noop[:elements].zero?, 'missing manifest is a safe no-op', fails)
+
+puts 'Part E — v5.4: kind:sql FROM + column identifiers remapped'
+# Single embedded Excel datasource: the FIXED-LOD helper's statement embeds the
+# original sheet identifier ('UDEMY COURSE$') and the ORIGINAL column names —
+# both must land on the warehouse names. A multi-table statement stays as-is.
+sql_model = { 'pages' => [{ 'elements' => [
+  element('fact2', ['Subject', 'Published Date', 'Num Subscribers']),
+  { 'id' => 'el-lod', 'kind' => 'table', 'name' => "'UDEMY COURSE$' FIXED PRICE",
+    'source' => { 'connectionId' => 'conn-1', 'kind' => 'sql',
+                  'statement' => %(SELECT "Subject", SUM("Num Subscribers") AS S FROM "EXTRACT".'UDEMY COURSE$' GROUP BY "Subject") },
+    'columns' => [{ 'id' => 'c-l1', 'name' => 'Subject' }, { 'id' => 'c-l2', 'name' => 'S' }] },
+  { 'id' => 'el-join', 'kind' => 'table', 'name' => 'joined helper',
+    'source' => { 'connectionId' => 'conn-1', 'kind' => 'sql',
+                  'statement' => %(SELECT a."Subject" FROM t1 a JOIN t2 b ON a.x = b.x) },
+    'columns' => [{ 'id' => 'c-j1', 'name' => 'Subject' }] }
+] }] }
+sql_manifest = [
+  { 'slug' => 'wb', 'datasource' => 'federated.u', 'caption' => 'Udemy Course',
+    'hyper' => 'u.hyper', 'hyper_table' => 'Extract',
+    'sf_table' => 'TB.SKILLS.UDEMY_COURSE_DATASET', 'rows' => 3673,
+    'columns' => { 'Subject' => 'SUBJECT', 'Published Date' => 'PUBLISHED_DATE',
+                   'Num Subscribers' => 'NUM_SUBSCRIBERS' } }
+]
+rm2 = nil
+Dir.mktmpdir do |dir|
+  mpath = File.join(dir, 'landing-manifest.json')
+  File.write(mpath, JSON.generate(sql_manifest))
+  rm2 = MechanicalSpecs.remap_from_manifest!(sql_model, mpath)
+end
+lod = sql_model['pages'][0]['elements'].find { |e| e['id'] == 'el-lod' }
+join = sql_model['pages'][0]['elements'].find { |e| e['id'] == 'el-join' }
+check(rm2[:sql_elements] == 1, "exactly the single-table sql element remapped (got #{rm2[:sql_elements]})", fails)
+check(lod.dig('source', 'statement').include?('FROM TB.SKILLS.UDEMY_COURSE_DATASET'),
+      "FROM identifier landed (got #{lod.dig('source', 'statement')[0, 90]})", fails)
+check(!lod.dig('source', 'statement').include?("UDEMY COURSE$"),
+      'original sheet identifier gone from the statement', fails)
+check(lod.dig('source', 'statement').include?('SUM(NUM_SUBSCRIBERS)') &&
+      lod.dig('source', 'statement').include?('GROUP BY SUBJECT'),
+      'original column identifiers folded to warehouse names', fails)
+check(join.dig('source', 'statement').include?('FROM t1 a JOIN t2 b'),
+      'multi-table statement left as-is (named residue)', fails)
+
+puts 'Part F — v5.4: derived-element refs repaired when uniquely attributable'
+d_model = { 'pages' => [{ 'elements' => [
+  element('fact3', ['Subject', 'Price']),
+  { 'id' => 'el-view', 'kind' => 'table', 'name' => "'udemy Course$' View",
+    'source' => { 'kind' => 'table', 'elementId' => 'el-fact3' },
+    'columns' => [{ 'id' => 'c-v1', 'name' => 'Subject', 'formula' => '[EXTRACT/Subject]' }] }
+] }] }
+Dir.mktmpdir do |dir|
+  mpath = File.join(dir, 'landing-manifest.json')
+  File.write(mpath, JSON.generate(sql_manifest))
+  MechanicalSpecs.remap_from_manifest!(d_model, mpath)
+end
+view = d_model['pages'][0]['elements'].find { |e| e['id'] == 'el-view' }
+check(view['columns'][0]['formula'] == '[UDEMY_COURSE_DATASET/Subject]',
+      "derived element's stale ref repointed (got #{view['columns'][0]['formula']})", fails)
+# ambiguity guard: the Part A/B model had TWO elements sharing 'EXTRACT' — its
+# dim element must NOT have been rewritten to the fact's table.
+dim_ref = dim_el['columns'][0]['formula']
+check(dim_ref.start_with?('[GLOBALMACRO_GDP2005/'),
+      "shared-identifier claim keeps each element on its OWN table (got #{dim_ref})", fails)
+
+puts 'Part G — v5.4: prune_broken_orphans! (union-collapse leftover class)'
+p_model = { 'pages' => [{ 'elements' => [
+  element('factp', ['Subject', 'Price']),
+  # broken AND unreferenced -> pruned
+  { 'id' => 'el-orphan', 'kind' => 'table', 'name' => 'Ghost View',
+    'source' => { 'kind' => 'table', 'elementId' => 'el-gone' },
+    'columns' => [{ 'id' => 'c-o1', 'name' => 'X', 'formula' => "['UDEMY COURSE$'/X]" }] },
+  # broken cross-ref but REFERENCED by the metric below -> kept
+  { 'id' => 'el-used', 'kind' => 'table', 'name' => 'Used View',
+    'source' => { 'kind' => 'table', 'elementId' => 'el-factp' },
+    'columns' => [{ 'id' => 'c-u1', 'name' => 'Y', 'formula' => '[NoSuchElement/Y]' }] },
+  { 'id' => 'el-consumer', 'kind' => 'table', 'name' => 'Consumer',
+    'source' => { 'kind' => 'table', 'elementId' => 'el-used' },
+    'columns' => [{ 'id' => 'c-c1', 'name' => 'Z', 'formula' => 'Sum([Used View/Y])' }] },
+  # source-relative refs only (valid) -> kept
+  { 'id' => 'el-sql2', 'kind' => 'table', 'name' => 'FIXED thing',
+    'source' => { 'connectionId' => 'c', 'kind' => 'sql', 'statement' => 'SELECT 1' },
+    'columns' => [{ 'id' => 'c-s1', 'name' => 'V', 'formula' => '[Custom SQL/V]' }] }
+] }] }
+pruned = MechanicalSpecs.prune_broken_orphans!(p_model)
+names_left = p_model['pages'][0]['elements'].map { |e| e['id'] }
+check(pruned == ['Ghost View'], "exactly the broken+unreferenced element pruned (got #{pruned.inspect})", fails)
+check(!names_left.include?('el-orphan'), 'orphan removed from the page', fails)
+check(names_left.include?('el-used') && names_left.include?('el-sql2'),
+      'referenced-but-broken and source-relative elements KEPT', fails)
 
 puts
 if fails.empty?

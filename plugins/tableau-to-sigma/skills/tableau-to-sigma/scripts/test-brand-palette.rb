@@ -39,8 +39,11 @@ twb = <<~XML
       <map to='#ececec'></map><map to='#ffffff'></map>
       <map to="#f06719"></map><map to="#f06719"></map>
     </encoding></worksheet>
-    <color-palette name='Custom'>
+    <color-palette custom='true' name='Custom' type='regular'>
       <color>#4e79a7</color>
+    </color-palette>
+    <color-palette custom='true' name='Ramp' type='ordered-sequential'>
+      <color>#023858</color><color>#045a8d</color><color>#0570b0</color>
     </color-palette>
   </workbook>
 XML
@@ -49,6 +52,10 @@ check(pal == %w[#ba2020 #f06719 #4e79a7],
       "freq-ranked, neutrals dropped, deduped (got #{pal.inspect})", fails)
 check(!pal.include?('#ffffff') && !pal.include?('#ececec'),
       "white / grey encoding buckets excluded", fails)
+# v5.0 (S2 fix): sequential/diverging RAMP palettes are heatmap gradients, not
+# a brand palette — their steps must not pollute categoricalScheme.
+check((pal & %w[#023858 #045a8d #0570b0]).empty?,
+      "ordered-sequential ramp members excluded (type='regular' only)", fails)
 
 # Source with no non-neutral colours → empty palette (theme then omitted).
 mono = extract_brand_palette("<x><map to='#ffffff'></map><map to='#eeeeee'></map></x>")

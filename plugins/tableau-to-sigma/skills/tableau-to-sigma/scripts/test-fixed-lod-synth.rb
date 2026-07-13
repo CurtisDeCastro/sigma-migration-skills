@@ -3,7 +3,7 @@
 # Regression test for MechanicalSpecs.synthesize_fixed_lods! (2026-07-08).
 #
 # The converter emits NOTHING for a `{FIXED DATEPART('year',[Date]): SUM([m])}`
-# LOD (the World Bank "GDP World" per-year global totals), so a chart referencing
+# LOD (the Global Macro "GDP World" per-year global totals), so a chart referencing
 # it dangles and blocks the workbook POST. This synthesizes the helper the
 # converter should have — a grouped Custom SQL element + a `FIXED Year`
 # relationship — and derive_master's existing surfacing exposes it onto the
@@ -22,13 +22,13 @@ def check(c, m, fails) fails << m unless c; puts "  #{c ? 'PASS' : 'FAIL'}  #{m}
 # col_display). This shape is what defeated the original name-keyed lookup, so
 # the fixture must mirror it or the test doesn't guard the real path.
 fact = {
-  'id' => 'el-fact', 'kind' => 'table', 'name' => 'World Bank',
-  'source' => { 'connectionId' => 'conn-1', 'kind' => 'warehouse-table', 'path' => %w[TJ PUBLIC WB_WORLD_BANK] },
+  'id' => 'el-fact', 'kind' => 'table', 'name' => 'Global Macro',
+  'source' => { 'connectionId' => 'conn-1', 'kind' => 'warehouse-table', 'path' => %w[TJ PUBLIC GLOBAL_MACRO] },
   'columns' => [
-    { 'id' => 'c-year', 'formula' => '[WB_WORLD_BANK/Year]' },
-    { 'id' => 'c-reg',  'formula' => '[WB_WORLD_BANK/New Region]' },
-    { 'id' => 'c-gdp',  'formula' => '[WB_WORLD_BANK/GDP (current US$)]' },
-    { 'id' => 'c-teu',  'formula' => '[WB_WORLD_BANK/Container port traffic (TEU: 20 foot equivalent units)]' }
+    { 'id' => 'c-year', 'formula' => '[GLOBAL_MACRO/Year]' },
+    { 'id' => 'c-reg',  'formula' => '[GLOBAL_MACRO/New Region]' },
+    { 'id' => 'c-gdp',  'formula' => '[GLOBAL_MACRO/GDP (current US$)]' },
+    { 'id' => 'c-teu',  'formula' => '[GLOBAL_MACRO/Container port traffic (TEU: 20 foot equivalent units)]' }
   ]
 }
 model = { 'pages' => [{ 'elements' => [fact] }] }
@@ -63,7 +63,7 @@ check(sql && !sql.key?('name'), 'SQL element is nameless (spec rule 3)', fails)
 st = sql && sql.dig('source', 'statement')
 check(st&.include?('SUM("GDP_CURRENT_US") AS "GDP World"'), "SELECT sums the landed physical metric (got: #{st})", fails)
 check(st&.include?('GROUP BY "YEAR"'), 'grouped by the physical Year column', fails)
-check(st&.include?('FROM TJ.PUBLIC."WB_WORLD_BANK"'), 'from the landed fact table (quoted)', fails)
+check(st&.include?('FROM TJ.PUBLIC."GLOBAL_MACRO"'), 'from the landed fact table (quoted)', fails)
 check(sql['columns'].map { |c| c['formula'] }.all? { |f| f.start_with?('[Custom SQL/') }, 'columns use the Custom SQL prefix', fails)
 
 puts 'Part B2 — discriminator scopes the World SUM to real entities (no rollup double-count)'
@@ -85,7 +85,7 @@ check(rel && rel['keys'] == [{ 'sourceColumnId' => 'c-year', 'targetColumnId' =>
 puts 'Part D — derive_master surfaces the World columns onto the master'
 mm = MechanicalSpecs.derive_master(fact, fact['name'], nil, nil, model)
 mcols = (mm['master_columns'] || []).map { |c| [c['name'], c['formula']] }
-check(mcols.any? { |nm, f| nm == 'GDP World' && f == '[World Bank/FIXED Year/GDP World]' },
+check(mcols.any? { |nm, f| nm == 'GDP World' && f == '[Global Macro/FIXED Year/GDP World]' },
       "master exposes 'GDP World' as a 3-part FIXED-rel ref (got #{mcols.select { |nm, _| nm =~ /World/ }.inspect})", fails)
 check(mcols.none? { |nm, _| nm == 'Year' && mcols.count { |x, _| x == 'Year' } > 1 }, 'no duplicate Year surfacing', fails)
 

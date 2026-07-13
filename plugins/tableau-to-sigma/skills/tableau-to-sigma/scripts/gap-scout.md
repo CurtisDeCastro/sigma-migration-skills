@@ -57,7 +57,7 @@ PROCEDURE
      --hint '<post-publish caveat, e.g., "non-grouping context only">' \
      --example-from '<which workbook/line>' \
      --gap-id '<the gap-report ROW NAME you are addressing>' \
-     --workdir '<the conversion working dir, e.g. /tmp/<name> — printed in the GAP-SCAN STOP>'
+     --workdir '<the conversion working dir, e.g. <WORK> — printed in the GAP-SCAN STOP>'
    ⚠ `--gap-id` + `--workdir` are REQUIRED for the run-each-time gate (bead
    5l5e). They record this scout to `<workdir>/scout-ledger.jsonl` so
    migrate-tableau can confirm EVERY unhandled gap was scouted before it

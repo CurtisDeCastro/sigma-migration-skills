@@ -37,17 +37,21 @@
 # WARN-level (printed, never fail the lint — `lint_warnings(spec)`):
 #   P1  a `conditionalFormats` entry with includeValues:false — silently
 #       disables the format (live-verified: visual-vocabulary waffle).
-#   I1  heuristic: If()/Switch() whose FIRST argument is a bare column ref with
-#       no comparison operator — integer/bit predicates fail at render with
+#   I1  heuristic: If() whose FIRST argument is a bare column ref with no
+#       comparison operator — integer/bit predicates fail at render with
 #       "Invalid Query"; suggest an explicit `= 1` comparison.
 require 'json'
 
 AGG = /\A\s*(Sum|Avg|Count|CountDistinct|CountIf|SumIf|Min|Max|Median|Percentile|StdDev|Variance|VariancePop|GrandTotal)\s*\(/i
 PLAIN_REF = /\A\s*\[[^\]]+\]\s*\z/   # a bare column reference, e.g. [Table/Region]
 LISTY = %w[list segmented hierarchy].freeze
-# I1: If(/Switch( whose first argument is a bare [ref] immediately followed by
-# `,` or `)` — i.e. no comparison operator. `If([x] = 1, ...)` does NOT match.
-BARE_PREDICATE = /\b(If|Switch)\s*\(\s*(\[[^\]]+\])\s*[,)]/i
+# I1: If( whose first argument is a bare [ref] immediately followed by `,` or
+# `)` — i.e. no comparison operator. `If([x] = 1, ...)` does NOT match.
+# v5.4: If( ONLY — Sigma's Switch(expr, case1, val1, …, default) is MATCH-form,
+# so a bare [col] first argument is the matched SUBJECT, fully legitimate (the
+# builder's own SORT_ORD ordering columns are exactly this shape and I1
+# flagged them as false positives twice in the field).
+BARE_PREDICATE = /\b(If)\s*\(\s*(\[[^\]]+\])\s*[,)]/i
 
 def lint(spec)
   errs = []

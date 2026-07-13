@@ -24,6 +24,7 @@
 require 'json'
 require 'optparse'
 require 'fileutils'
+require 'open3'
 require_relative 'lib/tableau_rest'
 require_relative 'lib/py_resolve' # real-Python resolver (Windows Store-stub safe)
 
@@ -65,7 +66,7 @@ dash_layout.each do |d|
     if cached && File.size?(cached)
       FileUtils.cp(cached, src_png)
     elsif vid
-      File.binwrite(src_png, Tableau.view_image(vid, width: opts[:w], height: opts[:h]))
+      File.binwrite(src_png, Tableau.view_image(vid))
     end
     rec['source_png'] = src_png if File.size?(src_png)
   rescue StandardError => e
@@ -75,10 +76,20 @@ dash_layout.each do |d|
   # 2) Sigma page render
   pid = page_id_by_name[name] || page_id_by_name.reject { |k, _| k == 'Data' }.values.first
   if pid
-    ok = system(*PyResolve.argv, png_script, '--workbook', opts[:wb], '--page', pid,
-                '--out', sig_png, '--w', opts[:w].to_s, '--h', opts[:h].to_s,
-                out: File::NULL, err: File::NULL)
+    render_out, render_st = Open3.capture2e(*PyResolve.argv, png_script, '--workbook', opts[:wb], '--page', pid,
+                                            '--out', sig_png, '--w', opts[:w].to_s, '--h', opts[:h].to_s)
+    ok = render_st.success?
     rec['sigma_png'] = sig_png if ok && File.size?(sig_png)
+    # NAME the ceiling instead of failing opaquely: a full-page render that
+    # 500s is usually a pivot's own content, not a service outage. The known
+    # culprit is a pivot carrying a `totals` key (probe-isolated v5.4: totals
+    # is the sole CSV-500 trigger; on a dense page it can also sink the page
+    # render). Point at the bisect playbook rather than a bare MISSING.
+    if !rec['sigma_png'] && render_out =~ /HTTP 500/i
+      warn "  [PIVOT-TOTALS/RENDER CEILING] page #{name.inspect} render 500'd — if the page has a " \
+           'pivot-table, a `totals` key is the likely cause (verification runs totals-free; put-layout ' \
+           '--apply-pivot-totals re-hides them at ship). Run the render-500 bisect in refs/layout-visual-qa.md.'
+    end
   end
 
   status = (rec['source_png'] && rec['sigma_png']) ? 'READY for side-by-side' : 'INCOMPLETE'

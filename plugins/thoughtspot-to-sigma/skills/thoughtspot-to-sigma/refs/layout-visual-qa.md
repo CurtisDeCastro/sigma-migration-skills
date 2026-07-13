@@ -19,7 +19,7 @@ migration done.
 
 1. **Render the FULL Sigma page** (the whole dashboard, one image — not per-element) at a
    realistic width:
-   `python3 scripts/sigma-export-png.py --workbook <id> --page <pageId> --out /tmp/<page>.png --w 1600`
+   `python3 scripts/sigma-export-png.py --workbook <id> --page <pageId> --out <WORK>/visual-qa/<page>.png --w 1600`
    (Contract: `POST /v2/workbooks/{id}/export` → poll `/v2/query/{q}/download`. Plugins that ship
    their own renderer — `export-chart-png.rb`, `compare.py` — use the same contract.)
 1b. **Render the FULL SOURCE dashboard** as ONE image and compare full-dashboard ↔ full-dashboard:
@@ -60,6 +60,31 @@ sparklines and comparison/delta badges are UI-only (`sigma-workbooks` `kpis.md`)
 chrome (theme toggles, native nav) has no spec equivalent. When the user scopes styling down
 ("layout + metrics, skip branding"), record exactly what was descoped in the final summary — never
 drop it silently.
+
+
+### 1b. STYLE CHECKLIST — required to record a visual PASS (v5.3, gate 8b)
+
+`record-visual-check.rb --verdict pass` now REQUIRES `--checklist` covering six dimensions, each
+judged against the SOURCE image (not your intent, not your memory of the fix). Round 5 proved
+gestalt self-passes ship renders an exacting owner rejects — attest each dimension separately,
+and be harsh: a "mostly" is a `fail`.
+
+- `element_titles_hidden` — no element-title chrome the source hides ("Area Ch…", "Student Bar
+  Chart"); no truncated titles anywhere.
+- `palette_match` — pick 3-5 swatches off the source (series fill, background, accent) and eyeball
+  them against the render; a teal source with navy/lavender output is a `fail`, as is a
+  categorical palette leaking onto a monochrome chart.
+- `composition_match` — same canvas grid and proportions (a wide 2-panel source must not become a
+  portrait stack); section headers sit ADJACENT to their charts; no dead zones or overflow bands.
+- `chart_shapes_match` — every tile keeps its chart family AND encoding (dot strips stay dot
+  strips, pill bars stay pill bars); verified per tile, not per page.
+- `labels_legible` — no truncated/clipped labels, values, or rows/columns; no leaked control stubs
+  or raw data-prep tables on the canvas.
+- `numbers_formatted` — percent decimals, currency, and delta chips print as the source prints
+  them.
+
+Any `fail` ⇒ the verdict is `divergent` (the recorder refuses a pass; the gate re-checks stale or
+hand-edited verdicts). `na` is only for dimensions the page genuinely lacks (e.g. no numbers).
 
 ## 2. Structural rubric (read the PNG against every item)
 
@@ -158,8 +183,10 @@ doesn't dictate otherwise — §3 fidelity caveat):
 present tables and reads better than Sigma's dense `spreadsheet` default). Keep `spreadsheet` only when
 the source is explicitly a dense data grid. This is spec-authorable and round-trips but is **frequently
 dropped** in migrations — set it deliberately. While you're styling the table, carry over any source
-in-cell bars with `conditionalFormats: [{type: dataBars, columnIds: [<aggregate col id>], scheme: ["#a4dfc0","#4caf7d"]}]`
-(also spec-authorable, also commonly dropped). See sigma-workbooks `tables.md` for the full field set.
+in-cell bars with `conditionalFormats: [{type: dataBars, columnIds: [<aggregate col id>], scheme: [<tint>, <hue>]}]`
+(also spec-authorable, also commonly dropped). The scheme must DERIVE from the source — the worksheet's
+`heat_scheme` ramp, else `[mix(dominant, white, 88%), dominant]` from the theme's categoricalScheme;
+never the Sigma default royal `#1a70f1` (round-4 defect). See sigma-workbooks `tables.md` for the full field set.
 
 ## Known render caveats (not fixable via spec — keep titles short, drop redundant legends)
 
@@ -168,6 +195,45 @@ in-cell bars with `conditionalFormats: [{type: dataBars, columnIds: [<aggregate 
 - KPI titles hide below ~5 grid rows. Container style knobs that round-trip: backgroundColor,
   borderRadius, borderColor, borderWidth, padding (`borderColor/Width` incompatible with
   `padding: none`).
+
+## Render 500 / CSV-export ceiling — the pivot `totals` key (bisect)
+
+A pivot-table element that carries a **`totals`** key **500s its CSV export** — a platform
+ceiling, not a data defect. Live probe matrix (v5.4, small landed table, 5 single-pivot pages):
+
+| pivot value | no `totals` | with `totals` |
+|---|---|---|
+| plain `Sum`            | CSV ✅ · PNG ✅ | CSV **500** · PNG ✅ |
+| `PercentOfTotal`       | CSV ✅ · PNG ✅ | CSV **500** · PNG ✅ |
+| ratio-of-sums (`a/b`)  | CSV ✅ · PNG ✅ | — |
+
+**The key's PRESENCE is the sole trigger** — value type is irrelevant (plain sum, PercentOfTotal,
+and ratio/division all export fine WITHOUT `totals`; both totals-bearing variants 500). Ratio /
+`PercentOfTotal` values are **NOT** a trigger. **PNG renders tolerate the `totals` key** (all five
+variants rendered), so a totals-bearing pivot still renders with hidden grand totals — but its CSV
+export (verify-anchors' pivot pooling, `collect-parity-actuals`) is dead.
+
+**Mechanism (v5.4; wording + sidecar reachability corrected v5.4.9):** generated pivots CARRY the
+`totals` key from build onward (the chart builder stamps it; style-normalize re-adds it on
+readback) — the only totals-free window is verify-anchors' strip bracket:
+- `verify-anchors.rb` brackets its live pivot CSV exports — capture + strip each pivot's `totals`
+  (one PUT), export against totals-free pivots, then restore (ensure; network-level PUT failures
+  are rescued too, not just HTTP errors). It persists the captured totals to
+  `<workdir>/anchors-restore-pivot-totals.json` BEFORE stripping and deletes it after a successful
+  restore — a hard kill or failed restore is then repaired at the ship step with full fidelity
+  (incl. `showSubtotals`), not the lossy grand-totals-only default.
+- `put-layout.rb --apply-pivot-totals` is the ship-step REPAIR pass once the gates are green
+  (`migrate-tableau.rb --finalize` runs it automatically and passes `--workdir`; run it by hand on
+  the manual/recovery path): any pivot still lacking a `totals` key gets `showGrandTotals:hidden`.
+  An optional `*-pivot-totals.json` sidecar — globbed from the `--layout` dir, the `--workdir`,
+  and the cwd — overrides per element id (e.g. preserves a source pivot's deliberately SHOWN
+  grand totals).
+- `verify-visual-tiles.rb` / `verify-dashboard-visual.rb` NAME this ceiling on a render 500 instead
+  of an opaque MISSING.
+
+**Bisect a render/export 500:** strip the `totals` key first (or run the totals-free export) — if
+it clears, this ceiling is the cause; do **not** waive the gate. Only if it persists totals-free is
+it a genuine unbounded-dimension / service issue.
 
 _Base patterns verified 2026-06-10 on tj-wells-1989 (workbooks bc24d476, 3e23b761, 9733fcd9)
 against a known-good native layout (Chart Zoo Enhanced v4, 39a8f826)._

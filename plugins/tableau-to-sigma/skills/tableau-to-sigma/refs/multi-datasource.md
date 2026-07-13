@@ -163,8 +163,8 @@ merge mishandles an edge case (e.g. a rename/rewrite you need to control).
 5. **Re-enter the gated spine** with the agent-authored specs:
 
    ```
-   ruby scripts/migrate-tableau.rb ... --dm-spec /tmp/<name>/dm-spec.json \
-        --wb-spec /tmp/<name>/wb-spec.json
+   ruby scripts/migrate-tableau.rb ... --dm-spec <WORK>/dm-spec.json \
+        --wb-spec <WORK>/wb-spec.json
    ```
 
    This routes through the normal gates (POST, parity, reports) instead of

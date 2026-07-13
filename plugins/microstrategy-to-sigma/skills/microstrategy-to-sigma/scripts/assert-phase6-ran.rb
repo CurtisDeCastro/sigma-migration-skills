@@ -137,6 +137,48 @@
 #      --update-id <dmId>), then delete the file. Escape hatch:
 #      --accept-deferred-elements "<reason>" (knowingly shipping a partial DM —
 #      name it AND the dropped elements in your migration report).
+#  18  Source-anchor value verification failed (gate 13) — the MEASURED value
+#      bar. When the workdir carries a source dashboard PNG (the Phase 1d
+#      artifact: png-read.json source_png / views/*.png / dashboards/*.png),
+#      <workdir>/source-anchors.json MUST exist with >= 5 anchors (printed
+#      values transcribed EXACTLY as printed while reading the source image)
+#      AND <workdir>/anchors-verdict.json (written by scripts/verify-anchors.rb)
+#      must show pass with every anchor checked. A printed source value that
+#      appears NOWHERE in the live workbook's element exports means the NUMBERS
+#      are wrong — the failure two field migrations shipped behind passing
+#      visual verdicts ("$1.8T" rendered where the source printed "18,037B").
+#      No source dashboard PNG at all → stated SKIP. Escape hatch:
+#      --skip-anchors-gate "<reason>" (counted against the waiver budget).
+#      ALSO raised when --skip-parity-gate is passed WITHOUT a passing
+#      anchors-verdict.json: waiving parity is now CONDITIONAL — the anchors
+#      oracle replaces parity, never nothing.
+#  19  Waiver budget exceeded — more than 2 QUALITY waiver/escape flags were
+#      passed (--skip-*, --allow-extract, --allow-missing-tiles>0,
+#      --min-pass-rate<1, --accept-*). Each waiver is an attestation that a
+#      verification could not run; stacking them is how an unverified workbook
+#      ships GREEN. GREEN is unavailable on this run regardless of individual
+#      escapes — the highest achievable result is YELLOW. Every run stamps
+#      `waivers` + `waiver_count` (the full census) into parity-final.json so
+#      the report (and any reviewer) sees the count. There is NO escape flag
+#      for this cap. Two POLICY exclusions never consume the budget:
+#        - --skip-telemetry-gate (consent policy, not workbook quality);
+#        - --skip-visual-comparison ONLY under the sanctioned builder→verifier
+#          split (its reason references the verifier, matched /verifier/i —
+#          the verifier session records the verdict); any other reason counts.
+#  20  Visual-similarity floor failed (gate 14) — scripts/visual-similarity.py
+#      is present, a source dashboard PNG + Sigma render both exist, and the
+#      measured comparison (python3 scripts/visual-similarity.py --source <src>
+#      --render <render> --json-out <W>/visual-similarity.json) wrote
+#      pass=false. Script absent → gate is invisible; inputs absent → stated
+#      SKIP. Escape hatch: --skip-visual-similarity "<reason>" (counted against
+#      the waiver budget).
+#
+# DATA-CLASS RCF residuals (part of gate 8d, exit 15, but enforced whenever
+# fidelity-ledger.json EXISTS — even without --require-fidelity-ledger): any
+# UNRESOLVED ledger entry with class `data` hard-fails. Data-class residuals
+# can never be waved through — the numbers are wrong; fix or reclassify with
+# evidence. --accept-residuals does NOT apply to data-class ids and there is
+# no escape flag.
 #
 # Prints a per-gate summary to stdout regardless of exit code.
 
@@ -179,7 +221,9 @@ OptionParser.new do |p|
   p.on('--accept-deferred-elements REASON', 'waive gate 12 (deferred/quarantined DM elements) — REQUIRED reason string. Use ONLY when knowingly shipping a PARTIAL data model; the reason AND the dropped elements MUST be named in your migration report.') { |v| opts[:accept_deferred] = v }
   p.on('--require-fidelity-ledger', 'gate 8d (OPT-IN, off by default): require an RCF fidelity-ledger.json (Phase 5g) with zero UNRESOLVED spec-fixable deltas. Adopters (tableau-to-sigma) pass this; other converters are unaffected until they do.') { opts[:require_fidelity] = true }
   p.on('--fidelity-ledger PATH', 'gate 8d: path to the RCF ledger (default: <workdir>/fidelity-ledger.json)') { |v| opts[:fidelity_ledger] = v }
-  p.on('--accept-residuals LIST', 'gate 8d: comma-separated ledger entry ids/indices to WAIVE as accepted residuals (name them in the report)') { |v| opts[:accept_residuals] = v.split(',').map(&:strip) }
+  p.on('--accept-residuals LIST', 'gate 8d: comma-separated ledger entry ids/indices to WAIVE as accepted residuals (name them in the report). Does NOT apply to data-class entries — those must be fixed or reclassified with evidence.') { |v| opts[:accept_residuals] = v.split(',').map(&:strip) }
+  p.on('--skip-anchors-gate REASON', 'waive gate 13 (source-anchor value verification) — REQUIRED reason string. Use ONLY when the source image values are genuinely untranscribable. Counted against the waiver budget; name it in your migration report.') { |v| opts[:skip_anchors] = v }
+  p.on('--skip-visual-similarity REASON', 'waive gate 14 (measured visual-similarity floor) — REQUIRED reason string. Counted against the waiver budget; name it in your migration report.') { |v| opts[:skip_vsim] = v }
 end.parse!
 abort('--workdir (or --tableau) required') unless opts[:tab]
 
@@ -199,9 +243,178 @@ end
 
 summary_path = File.join(opts[:tab], 'parity-final.json')
 
+# ── Run-scoped completion sentinel (current run id) ─────────────────────────
+# The orchestrator mints a run_id at each PASS-1 start (migrate-state.json /
+# run-state.json). phase6-success.json is only valid FOR that run: on exit 0 we
+# stamp it with the current id; on ANY failure we delete a success marker left
+# by a PREVIOUS run id, so verify-complete.rb can never report DONE off a stale
+# marker. Converters without a run_id concept fall back to nil (the marker is
+# then deleted on every failure — fail-closed).
+current_run_id = begin
+  JSON.parse(File.read(File.join(opts[:tab], 'migrate-state.json')))['run_id']
+rescue StandardError
+  nil
+end
+current_run_id ||= begin
+  JSON.parse(File.read(File.join(opts[:tab], 'run-state.json')))['run_id']
+rescue StandardError
+  nil
+end
+at_exit do
+  st = $!
+  next unless st.is_a?(SystemExit) && !st.success?
+  succ = File.join(opts[:tab], 'phase6-success.json')
+  next unless File.exist?(succ)
+  old_id = (JSON.parse(File.read(succ))['run_id'] rescue nil)
+  # Keep a same-run success (a re-run of an already-green run with a failing
+  # extra flag must not unmint it); delete anything else — it is stale.
+  unless current_run_id && old_id && old_id == current_run_id
+    File.delete(succ) rescue nil
+    warn "[SENTINEL] stale phase6-success.json (run #{old_id || '?'}) deleted — this run (#{current_run_id || '?'}) FAILED the gate."
+  end
+end
+
+# ---------------------------------------------------------------------------
+# Waiver budget (exit 19). EVERY waiver/escape flag is counted — --skip-*,
+# --allow-extract, --allow-missing-tiles>0, --min-pass-rate<1, --accept-* —
+# and the census is stamped into parity-final.json (`waivers` + `waiver_count`)
+# on EVERY run, pass or fail. More than 2 waivers caps the run below GREEN
+# (checked at the end, so individual gate failures still surface first). Waiver
+# stacking is how a field run shipped an unverified workbook: each escape was
+# individually arguable, and together they waived away the whole value bar.
+# ---------------------------------------------------------------------------
+WAIVER_BUDGET = 2
+WAIVER_HIDES = {
+  '--skip-parity-gate'         => 'gate 1: values were never diffed against the source',
+  '--min-pass-rate'            => 'gate 1: charts that DIVERGE from the source were accepted',
+  '--allow-extract'            => 'gate 1: value drift tolerated (extract mode)',
+  '--skip-orphan-check'        => 'gate 2: orphan workbooks may remain in My Documents',
+  '--skip-column-check'        => 'gate 3: live type=error columns not scanned',
+  '--skip-layout-check'        => 'gate 4: layout-applied never verified on the live workbook',
+  '--allow-missing-tiles'      => 'gate 5: source tiles absent from the build were accepted',
+  '--skip-layout-lint'         => 'gate 6: layout quality never linted',
+  '--skip-control-lint'        => 'gate 7: control wiring never linted',
+  '--skip-visual-gate'         => 'gate 8: no rendered PNG was required',
+  '--skip-visual-comparison'   => 'gate 8b: no source-vs-target visual verdict was required',
+  '--skip-layout-fill'         => 'gate 8c: dropped/under-filled pages were accepted',
+  '--accept-residuals'         => 'gate 8d: named RCF deltas shipped unresolved',
+  '--skip-visual-tiles'        => 'gate 9: build-from-signals tiles never image-verified',
+  '--skip-telemetry-gate'      => 'gate 10: telemetry consent never decided',
+  '--skip-postpublish-guide'   => 'gate 11: interactivity handoff guide not required',
+  '--accept-deferred-elements' => 'gate 12: a PARTIAL data model was accepted',
+  '--skip-anchors-gate'        => 'gate 13: source-anchor values never verified (the measured value bar)',
+  '--skip-visual-similarity'   => 'gate 14: visual-similarity floor never measured',
+  # Runtime off-ramps (recorded to <workdir>/offramps.jsonl by the scripts that
+  # honored them; counted here so an escape taken MID-RUN spends budget exactly
+  # like a gate flag):
+  '--force-new-workbook'       => 'run: a prior workbook for this workdir was deliberately orphaned (new POST)',
+  '--force-route-switch'       => 'run: the workdir was re-driven via the OTHER route (orchestrated vs manual)',
+  '--allow-manual-spec'        => 'run: hand-authored specs / standalone POST with no orchestrator STOP on record'
+}.freeze
+waiver_flags = []
+waiver_flags << '--skip-parity-gate'         if opts[:skip_parity]
+waiver_flags << '--min-pass-rate'            if opts[:min_pass_rate] < 1.0
+waiver_flags << '--allow-extract'            if opts[:allow_extract]
+waiver_flags << '--skip-orphan-check'        if opts[:skip_orphan]
+waiver_flags << '--skip-column-check'        if opts[:skip_column]
+waiver_flags << '--skip-layout-check'        if opts[:skip_layout]
+waiver_flags << '--allow-missing-tiles'      if opts[:allow_missing_tiles].to_i.positive?
+waiver_flags << '--skip-layout-lint'         if opts[:skip_lint]
+waiver_flags << '--skip-control-lint'        if opts[:skip_control_lint]
+waiver_flags << '--skip-visual-gate'         if opts[:skip_visual]
+waiver_flags << '--skip-visual-comparison'   if opts[:skip_visual_cmp]
+waiver_flags << '--skip-layout-fill'         if opts[:skip_layout_fill]
+waiver_flags << '--accept-residuals'         if opts[:accept_residuals] && !opts[:accept_residuals].empty?
+waiver_flags << '--skip-visual-tiles'        if opts[:skip_visual_tiles]
+waiver_flags << '--skip-telemetry-gate'      if opts[:skip_telemetry]
+waiver_flags << '--skip-postpublish-guide'   if opts[:skip_postpublish]
+waiver_flags << '--accept-deferred-elements' if opts[:accept_deferred]
+waiver_flags << '--skip-anchors-gate'        if opts[:skip_anchors]
+waiver_flags << '--skip-visual-similarity'   if opts[:skip_vsim]
+
+# Runtime waivers taken MID-RUN (off-ramp trail, offramps.jsonl): a forced new
+# workbook, a forced route switch, or an unauthorized manual-spec run each spend
+# the same budget as a gate flag — otherwise an escape honored by a SCRIPT would
+# be invisible to the cap that exists to stop waiver stacking. Read directly
+# (plain JSONL; no lib dependency — this file is shared across plugins). Counted
+# once per kind.
+begin
+  _or_path = File.join(opts[:tab], 'offramps.jsonl')
+  if File.exist?(_or_path)
+    _or_kinds = File.readlines(_or_path).map { |l| JSON.parse(l) rescue nil }.compact
+    waiver_flags << '--force-new-workbook' if _or_kinds.any? { |r| r['kind'] == 'force-new-workbook' } &&
+                                              !waiver_flags.include?('--force-new-workbook')
+    waiver_flags << '--force-route-switch' if _or_kinds.any? { |r| r['kind'] == 'route-switch-forced' } &&
+                                              !waiver_flags.include?('--force-route-switch')
+    waiver_flags << '--allow-manual-spec'  if _or_kinds.any? { |r| r['kind'] == 'manual-spec' && r['reason'].to_s.start_with?('waiver:') } &&
+                                              !waiver_flags.include?('--allow-manual-spec')
+  end
+rescue StandardError
+  nil # observability only — never sink the gate on trail parsing
+end
+
+# QUALITY waivers consume the budget; POLICY waivers never do:
+#   - --skip-telemetry-gate is a consent-policy decision, not workbook quality;
+#   - --skip-visual-comparison under the sanctioned builder→verifier split
+#     (reason references the verifier, /verifier/i) hands the verdict to the
+#     verifier session instead of waiving it — any OTHER reason counts.
+budget_flags = waiver_flags.reject do |f|
+  (f == '--skip-telemetry-gate') ||
+    (f == '--skip-visual-comparison' && opts[:skip_visual_cmp].to_s =~ /verifier/i)
+end
+
+# Stamp the census into parity-final.json on every run (best-effort — a
+# missing/malformed file is gate 1's problem, not the stamp's).
+if File.exist?(summary_path)
+  begin
+    _pf = JSON.parse(File.read(summary_path))
+    _pf['waivers'] = waiver_flags
+    _pf['waiver_count'] = waiver_flags.length
+    # Off-ramp telemetry fields (P2): where did this run defect? route comes from
+    # the orchestrator's migrate-state.json ('orchestrated' | 'manual-authorized';
+    # null for converters without the concept); manual_path_authorized records an
+    # orchestrator STOP token; success_sentinel is stamped false here and flipped
+    # true ONLY at the green exit below.
+    _pf['route'] = (JSON.parse(File.read(File.join(opts[:tab], 'migrate-state.json')))['route'] rescue nil)
+    _pf['manual_path_authorized'] = File.exist?(File.join(opts[:tab], 'manual-path-authorized.json'))
+    _pf['success_sentinel'] = false
+    File.write(summary_path, JSON.pretty_generate(_pf))
+  rescue JSON::ParserError
+    nil
+  end
+end
+if waiver_flags.any?
+  excluded = waiver_flags - budget_flags
+  puts "[WAIVERS] #{waiver_flags.length} waiver/escape flag(s) on this run: #{waiver_flags.join(', ')} — " \
+       "#{budget_flags.length} count against the budget of #{WAIVER_BUDGET}" \
+       "#{excluded.any? ? " (policy exclusions: #{excluded.join(', ')})" : ''}" \
+       ' (exceeding the budget caps the run below GREEN, exit 19)'
+end
+
 if opts[:skip_parity]
+  # CONDITIONAL waiver: --skip-parity-gate is rejected unless the anchors
+  # oracle stands in. Parity can be genuinely unavailable (no source workspace
+  # access, dashboard-embedded worksheets with no standalone views) — but "no
+  # parity AND no anchors" means the numbers were never measured against the
+  # source at all, which is exactly how a wrong-numbers workbook shipped GREEN.
+  # The anchors oracle replaces parity, never nothing.
+  _av_path = File.join(opts[:tab], 'anchors-verdict.json')
+  _av = File.exist?(_av_path) ? (JSON.parse(File.read(_av_path)) rescue nil) : nil
+  unless _av.is_a?(Hash) && _av['pass'] == true
+    warn '[FAIL] --skip-parity-gate REJECTED — the anchors oracle replaces parity, never nothing.'
+    warn "       #{_av.nil? ? "#{_av_path} does not exist" : 'anchors-verdict.json does not show pass'} —"
+    warn '       waiving source parity requires the MEASURED value bar to stand in:'
+    warn '       1. Transcribe the source dashboard\'s printed values into <workdir>/source-anchors.json'
+    warn '          at Phase 1d (EXACTLY as printed; schema: SKILL.md Phase 1d / refs/source-anchors.md).'
+    warn "       2. Run: ruby scripts/verify-anchors.rb --workdir #{opts[:tab]} --workbook-id <id>"
+    warn '       3. Re-run this gate once anchors-verdict.json shows pass.'
+    warn '       (If parity IS obtainable, drop --skip-parity-gate and run Phase 6 instead.)'
+    exit 18
+  end
   puts "[SKIP] gate 1/7: Phase 6 source-parity WAIVED via --skip-parity-gate (#{opts[:skip_parity]})."
-  puts "       This waiver MUST be named in the migration report — the workbook was NOT numerically verified vs the source."
+  puts "       Accepted because the anchors oracle stands in: anchors-verdict.json pass " \
+       "(#{_av['matched']}/#{_av['checked']} anchors matched)."
+  puts '       This waiver MUST be named in the migration report — the workbook was NOT chart-by-chart verified vs the source.'
 else
   unless File.exist?(summary_path)
     warn "[FAIL] Phase 6 skipped — #{summary_path} does not exist."
@@ -209,7 +422,9 @@ else
     warn "       then collect actuals via mcp__sigma-mcp-v2__query and re-run with --finalize."
     warn "       See SKILL.md Phase 6. This is the hard gate (beads-sigma-4pm)."
     warn "       If source parity is genuinely unavailable (no workspace/dataset/warehouse access), waive"
-    warn "       with --skip-parity-gate \"<reason>\" and name it in the report."
+    warn "       with --skip-parity-gate \"<reason>\" and name it in the report — but note the waiver is"
+    warn "       CONDITIONAL: it is rejected (exit 18) unless anchors-verdict.json exists and passes"
+    warn "       (ruby scripts/verify-anchors.rb). The anchors oracle replaces parity, never nothing."
     exit 1
   end
 
@@ -226,25 +441,50 @@ else
   mode = summary['mode'].to_s
 
   if total <= 0
-    warn "[FAIL] parity-final.json reports charts_total=#{total} — no charts were verified."
-    warn "       This usually means auto-parity-plan.rb matched zero Tableau views."
-    warn "       Phase 6 must verify at least one chart to declare GREEN."
-    exit 2
+    # ORACLE SUBSTITUTION (not a waiver): a workbook whose every worksheet is
+    # dashboard-embedded exports NO standalone view CSVs, so the value-parity
+    # pool is legitimately empty. The numbers are still machine-verified when
+    # BOTH hold: (a) anchors-verdict.json passes with EVERY source anchor
+    # matched against live element exports, and (b) every empty-export tile is
+    # image-verified (visual-verify manifest all true). Then the anchors
+    # oracle IS the parity evidence — same doctrine as the conditional
+    # --skip-parity-gate acceptance, but deterministic, and it burns no waiver
+    # budget because nothing is skipped.
+    _av = (JSON.parse(File.read(File.join(opts[:tab], 'anchors-verdict.json'))) rescue nil)
+    _vv = (JSON.parse(File.read(File.join(opts[:tab], 'visual-verify', 'manifest.json'))) rescue nil)
+    _vv_ok = _vv.is_a?(Array) && _vv.any? && _vv.all? { |t| t['visual_verified'] == true }
+    if _av && _av['pass'] && _av['checked'].to_i >= 5 && _av['matched'] == _av['checked'] && _vv_ok
+      puts "[PASS] gate 2 (value parity): 0 exportable view CSVs (all worksheets dashboard-embedded) — " \
+           "the ANCHORS ORACLE stands in: anchors-verdict.json pass " \
+           "(#{_av['matched']}/#{_av['checked']} anchors matched) + all #{_vv.size} tile(s) image-verified."
+    else
+      warn "[FAIL] parity-final.json reports charts_total=#{total} — no charts were verified."
+      warn "       This usually means auto-parity-plan.rb matched zero Tableau views."
+      warn "       Phase 6 must verify at least one chart to declare GREEN."
+      warn '       If every worksheet is dashboard-embedded (no exportable view CSVs), the'
+      warn '       anchors oracle can stand in — BOTH must hold:'
+      warn "         a) verify-anchors.rb pass with EVERY anchor matched (#{_av ? "currently #{_av['matched']}/#{_av['checked']}" : 'anchors-verdict.json missing'})"
+      warn "         b) every visual-verify tile confirmed (#{_vv_ok ? 'ok' : 'incomplete'})"
+      exit 2
+    end
   end
 
-  if mode == 'extract' && !opts[:allow_extract]
+  if total.positive? && mode == 'extract' && !opts[:allow_extract]
     warn "[FAIL] parity ran in extract-mode but --allow-extract was not passed."
     warn "       Extract-mode permits up to ±#{((summary['extract_tol'] || 0.30) * 100).to_i}% drift —"
     warn "       only acceptable when the source Tableau workbook has hasExtracts=true."
     exit 2
   end
 
-  pass_rate = passed.to_f / total
+  # (total==0 only reaches here through the anchors-oracle substitution above —
+  # there is no rate/status to gate on an empty pool.)
+  pass_rate = total.positive? ? passed.to_f / total : 1.0
   # status=PASS requires 100% — when the caller explicitly accepts a lower
   # pass-rate (--min-pass-rate, for honest NAMED divergences like LOD
   # placeholders / cross-grain semantics), the rate is the gate, not the status.
   rate_gate_only = opts[:min_pass_rate] < 1.0
-  if (rate_gate_only ? pass_rate < opts[:min_pass_rate] : (status != 'PASS' || pass_rate < opts[:min_pass_rate]))
+  if total.positive? &&
+     (rate_gate_only ? pass_rate < opts[:min_pass_rate] : (status != 'PASS' || pass_rate < opts[:min_pass_rate]))
     warn "[FAIL] parity status=#{status} pass-rate=#{(pass_rate * 100).round(1)}% (#{passed}/#{total})"
     warn "       Required: #{rate_gate_only ? '' : 'status=PASS and '}pass-rate >= #{(opts[:min_pass_rate] * 100).to_i}%"
     if (fail_names = summary['fail_names']) && !fail_names.empty?
@@ -374,13 +614,19 @@ unless opts[:skip_column]
     base = ENV['SIGMA_BASE_URL']
     tok  = ENV['SIGMA_API_TOKEN']
     if base.nil? || base.empty? || tok.nil? || tok.empty?
-      warn "[SKIP] gate 3/7: SIGMA_BASE_URL / SIGMA_API_TOKEN not set — cannot fetch /columns"
+      # FAIL CLOSED (field-caught): a hard gate that SKIPS without credentials
+      # "passes" on any machine where the env wasn't sourced — the exact way a
+      # run ships with unverified live columns. The gate needs the live check.
+      warn '[FAIL] gate 3/7: SIGMA_BASE_URL / SIGMA_API_TOKEN not set — the live column-type check CANNOT run.'
+      warn '       Source your env (e.g. `source ~/.sigma-migration/env && eval "$(scripts/get-token.sh)"`)'
+      warn '       and re-run this gate. A credential-less run is NOT a passing run.'
+      exit 5
     else
       uri = URI("#{base}/v2/workbooks/#{wb_id}/columns")
       req = Net::HTTP::Get.new(uri)
       req['Authorization'] = "Bearer #{tok}"
       req['Accept'] = 'application/json'
-      res = Net::HTTP.start(uri.host, uri.port, use_ssl: true, read_timeout: 30) { |h| h.request(req) }
+      res = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https', read_timeout: 30) { |h| h.request(req) }
 
       if res.is_a?(Net::HTTPSuccess)
         cols = (JSON.parse(res.body)['entries'] rescue []) || []
@@ -433,13 +679,17 @@ unless opts[:skip_layout]
     base = ENV['SIGMA_BASE_URL']
     tok  = ENV['SIGMA_API_TOKEN']
     if base.nil? || base.empty? || tok.nil? || tok.empty?
-      warn "[SKIP] gate 4/7: SIGMA_BASE_URL / SIGMA_API_TOKEN not set — cannot fetch spec"
+      # FAIL CLOSED — same doctrine as gate 3/7: no credentials, no live layout
+      # verification, no pass.
+      warn '[FAIL] gate 4/7: SIGMA_BASE_URL / SIGMA_API_TOKEN not set — the live layout check CANNOT run.'
+      warn '       Source your env and re-run this gate. A credential-less run is NOT a passing run.'
+      exit 6
     else
       uri = URI("#{base}/v2/workbooks/#{wb_id}/spec")
       req = Net::HTTP::Get.new(uri)
       req['Authorization'] = "Bearer #{tok}"
       req['Accept'] = 'application/json'
-      res = Net::HTTP.start(uri.host, uri.port, use_ssl: true, read_timeout: 30) { |h| h.request(req) }
+      res = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https', read_timeout: 30) { |h| h.request(req) }
 
       if res.is_a?(Net::HTTPSuccess)
         body = res.body.to_s
@@ -533,6 +783,25 @@ else
   built     = census['charts_built'].to_i
   unmatched = census['zones_unmatched'].to_i
   names     = Array(census['unmatched_zone_names'])
+  # The census keys on the PARITY PLAN's matched charts — empty for a workbook
+  # whose worksheets are all dashboard-embedded (no standalone views), which
+  # flags every zone "unmatched" even though each chart was BUILT and
+  # image-verified. Count a zone as matched when its tile carries a confirmed
+  # visual-verify entry (the per-tile side-by-side oracle) — deterministic,
+  # per-name, and loud below.
+  _vv_ok = begin
+    Array(JSON.parse(File.read(File.join(opts[:tab], 'visual-verify', 'manifest.json'))))
+      .select { |t| t['visual_verified'] == true }.map { |t| t['worksheet'].to_s }
+  rescue StandardError
+    []
+  end
+  oracle_matched = names & _vv_ok
+  if oracle_matched.any?
+    names -= oracle_matched
+    unmatched = names.size
+    puts "[OK] gate 5/7: #{oracle_matched.size} zone(s) matched via the image-verification oracle " \
+         "(no standalone view in the parity plan; visual-verify confirmed): #{oracle_matched.join(', ')}"
+  end
   if unmatched > opts[:allow_missing_tiles]
     warn "[FAIL] gate 5/7: tile census — #{zones} dashboard zone(s), #{built} chart(s) built, #{unmatched} unmatched:"
     names.each { |n| warn "         - #{n}" }
@@ -585,7 +854,7 @@ else
       req = Net::HTTP::Get.new(uri)
       req['Authorization'] = "Bearer #{tok}"
       req['Accept'] = 'application/json'
-      res = Net::HTTP.start(uri.host, uri.port, use_ssl: true, read_timeout: 30) { |h| h.request(req) }
+      res = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https', read_timeout: 30) { |h| h.request(req) }
       if res.is_a?(Net::HTTPSuccess)
         spec =
           begin
@@ -651,7 +920,7 @@ else
       req = Net::HTTP::Get.new(uri)
       req['Authorization'] = "Bearer #{tok}"
       req['Accept'] = 'application/json'
-      res = Net::HTTP.start(uri.host, uri.port, use_ssl: true, read_timeout: 30) { |h| h.request(req) }
+      res = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https', read_timeout: 30) { |h| h.request(req) }
       if res.is_a?(Net::HTTPSuccess)
         spec =
           begin
@@ -700,7 +969,28 @@ end
 # comparison could run. It does not (and cannot) verify the human/agent read it
 # — but you cannot compare a PNG you never produced.
 # ---------------------------------------------------------------------------
+# Validated render PNG from gate 8 — reused by gate 14 (visual-similarity
+# floor). nil when gate 8 was waived or no render resolved.
+render_png = nil
 if opts[:skip_visual]
+  # BISECT-EVIDENCE demand (field-caught, twice): both rounds of a live test
+  # produced a "render outage / persistent 500" waiver that an evaluator's
+  # 6-probe bisect refuted in minutes — the poison was the run's OWN content
+  # (an unbounded pivot column dimension) and the waiver silently absorbed
+  # FOUR visual gates. A 500/timeout reason is only acceptable WITH bisect
+  # evidence: the reason must name the playbook's step-1/step-2 probes.
+  if opts[:skip_visual] =~ /500|timeout|timed?\s*out|hang|render.*(fail|outage|error)/i &&
+     opts[:skip_visual] !~ /bisect|probe/i
+    warn '[FAIL] gate 8: --skip-visual-gate cites a render failure but names NO bisect evidence.'
+    warn '       A render 500/timeout is usually YOUR workbook content, not the service (an'
+    warn '       unbounded pivot dimension has caused this in two independent field runs).'
+    warn '       Run the bisect playbook (refs/layout-visual-qa.md "Render 500 / export-timeout'
+    warn '       bisect") and re-waive ONLY if step 1 (another workbook fails too) or step 2'
+    warn "       (a minimal probe on your DM fails) holds — include e.g. 'bisect: other-workbook"
+    warn "       probe also 500s' or 'bisect: isolated to element <id>, verified product limit'"
+    warn '       in the reason string.'
+    exit 10
+  end
   puts "[SKIP] gate 8: Phase 6f visual render WAIVED via --skip-visual-gate (#{opts[:skip_visual]})."
   puts "       This waiver MUST be named in the migration report — the workbook was NOT visually verified."
 else
@@ -720,7 +1010,17 @@ else
   ok_png = nil
   if valid_png.call(render_path)
     ok_png = render_path
-  elsif opts[:sigma_render].nil? && File.exist?(manifest_path)
+  elsif opts[:sigma_render].nil?
+    # The v4 pipeline's own full-page renders: phase 5b visual QA
+    # (<workdir>/visual-qa/<dash>.sigma.png) and the phase 5g RCF loop
+    # (<workdir>/rcf-pass-N.png). Both ARE live sigma-export-png renders —
+    # this gate predates those paths and used to fail runs that had rendered
+    # (and compared) the page several times over. Newest first.
+    ok_png = (Dir[File.join(opts[:tab], 'visual-qa', '*.sigma.png')] +
+              Dir[File.join(opts[:tab], 'rcf-pass-*.png')])
+             .select { |p| valid_png.call(p) }.max_by { |p| File.mtime(p) }
+  end
+  if ok_png.nil? && opts[:sigma_render].nil? && File.exist?(manifest_path)
     # Fall back to the per-element screenshot manifest (export-chart-png.rb):
     # accept if it lists at least one rendered PNG that validates.
     entries = (JSON.parse(File.read(manifest_path)) rescue nil)
@@ -738,11 +1038,16 @@ else
     warn '       CSV parity passing does NOT mean the workbook renders correctly. Render the full'
     warn '       page and READ it against the source dashboard PNG before declaring done:'
     warn "         python3 scripts/sigma-export-png.py --workbook <id> --page <pageId> --out #{default_render}"
-    warn '       then re-run this gate. See SKILL.md Phase 6f. Escape hatch (genuinely un-renderable'
-    warn '       workbooks only): --skip-visual-gate "<reason>" (name it in your report).'
+    warn '       then re-run this gate. See SKILL.md Phase 6f.'
+    warn '       Export returning HTTP 500 / timing out? That is usually YOUR workbook content'
+    warn '       (e.g. an unbounded pivot dimension from a dropped source rank filter), not the'
+    warn '       service — run the bisect playbook in refs/layout-visual-qa.md ("Render 500 /'
+    warn '       export-timeout bisect") BEFORE reaching for the escape hatch. Escape hatch'
+    warn '       (only with other-workbook probe evidence): --skip-visual-gate "<reason>".'
     exit 10
   end
   size_kb = (File.size(ok_png) / 1024.0).round
+  render_png = ok_png
   puts "[OK] gate 8: Phase 6f visual render present (#{ok_png}, #{size_kb} KB) — " \
        'valid PNG produced for source-vs-target comparison'
   # gate 8b — the comparison itself can't be fully mechanized, but we CAN require
@@ -780,9 +1085,36 @@ else
       exit 13
     end
   elsif recorded
+    # v5.3.1: a PASS verdict must carry the per-dimension STYLE CHECKLIST
+    # (round-5: gestalt self-passes shipped renders an exacting owner
+    # rejected on all six runs). record-visual-check.rb refuses new passes
+    # without one; this catches hand-edited parity-final.json + stale verdicts.
+    cl_keys = %w[element_titles_hidden palette_match composition_match
+                 chart_shapes_match labels_legible numbers_formatted]
+    if s['visual_verdict'].to_s == 'pass' && !opts[:skip_visual_cmp]
+      cl = s['style_checklist']
+      cl_missing = cl.is_a?(Hash) ? (cl_keys - cl.keys) : cl_keys
+      cl_fails = cl.is_a?(Hash) ? cl.select { |k, v2| cl_keys.include?(k) && v2 == 'fail' }.keys : []
+      unless cl_missing.empty? && cl_fails.empty?
+        warn '[FAIL] gate 8b: visual PASS recorded WITHOUT a complete clean style checklist —'
+        warn "       missing: #{cl_missing.join(', ')}" if cl_missing.any?
+        warn "       failing: #{cl_fails.join(', ')}" if cl_fails.any?
+        warn '       Re-judge the render against the SOURCE image per dimension (layout-visual-qa.md section 1b), then:'
+        warn '         ruby scripts/record-visual-check.rb --workdir <dir> --agent-vision true --verdict pass \\'
+        warn "           --checklist \"#{cl_keys.map { |k| "#{k}=pass" }.join(',')}\""
+        warn '       (fail on any dimension means the verdict is divergent — fix it first).'
+        exit 13
+      end
+    end
     v = s['visual_verdict'] ? " (#{s['visual_verdict']})" : ''
     av = s.key?('agent_vision') ? ", agent_vision=#{s['agent_vision']}" : ''
-    puts "[OK] gate 8b: source-vs-target visual comparison recorded#{v}#{av}."
+    cls = if s['style_checklist'].is_a?(Hash)
+            counts = s['style_checklist'].values.each_with_object(Hash.new(0)) { |v2, h| h[v2] += 1 }
+            ", style_checklist=#{counts.map { |k, n| "#{n}x#{k}" }.join('/')}"
+          else
+            ''
+          end
+    puts "[OK] gate 8b: source-vs-target visual comparison recorded#{v}#{av}#{cls}."
   elsif opts[:skip_visual_cmp]
     puts "[SKIP] gate 8b: source-vs-target visual comparison WAIVED via --skip-visual-comparison (#{opts[:skip_visual_cmp]})."
   else
@@ -790,7 +1122,8 @@ else
     warn '       a valid render exists, but nobody confirmed it matches the source dashboard.'
     warn '       Enforced by default: a structurally-clean workbook can still be visually empty/wrong.'
     warn '       Read each rendered page against the source PNG, then run:'
-    warn '         ruby scripts/record-visual-check.rb --workdir <dir> --agent-vision true --verdict pass|divergent --notes "..."'
+    warn '         ruby scripts/record-visual-check.rb --workdir <dir> --agent-vision true --verdict pass|divergent --notes "..." \\'
+    warn '           --checklist "<six style dimensions - layout-visual-qa.md section 1b>"'
     warn '       then re-run. If the source image is genuinely unobtainable, waive with'
     warn '       --skip-visual-comparison "<reason>" and name it in your migration report.'
     exit 13
@@ -884,38 +1217,182 @@ end
 # this gate entirely (soft) until they do. Logic mirrors FidelityLoop
 # .unresolved_specfixable — inlined here so the shared gate has no cross-plugin dep.
 # ---------------------------------------------------------------------------
-if opts[:require_fidelity]
-  fl_path = opts[:fidelity_ledger] || File.join(opts[:tab], 'fidelity-ledger.json')
-  accepted = Array(opts[:accept_residuals]).map(&:to_s)
-  if !File.exist?(fl_path)
-    warn "[FAIL] gate 8d: --require-fidelity-ledger set but #{fl_path} is missing."
-    warn '       Run the Phase 5g render-compare-fix loop (scripts/fidelity-loop.rb init/render/record/'
-    warn '       apply-patch) to convergence, then re-run. See SKILL.md Phase 5g + refs/fidelity-rubric.md.'
-    exit 15
-  end
+fl_path = opts[:fidelity_ledger] || File.join(opts[:tab], 'fidelity-ledger.json')
+accepted = Array(opts[:accept_residuals]).map(&:to_s)
+if opts[:require_fidelity] && !File.exist?(fl_path)
+  warn "[FAIL] gate 8d: --require-fidelity-ledger set but #{fl_path} is missing."
+  warn '       Run the Phase 5g render-compare-fix loop (scripts/fidelity-loop.rb init/render/record/'
+  warn '       apply-patch) to convergence, then re-run. See SKILL.md Phase 5g + refs/fidelity-rubric.md.'
+  exit 15
+end
+ledger = nil
+if File.exist?(fl_path)
   ledger = (JSON.parse(File.read(fl_path)) rescue nil)
   if ledger.nil?
     warn "[FAIL] gate 8d: #{fl_path} is malformed JSON."
     exit 15
   end
+end
+if ledger
   entries = ledger['entries'] || []
-  blocking = entries.each_with_index.select do |e, i|
-    e['cls'] == 'spec-fixable' && !e['resolved'] &&
-      !accepted.include?(i.to_s) && !accepted.include?(e['id'].to_s)
-  end
-  if blocking.any?
-    warn "[FAIL] gate 8d: #{blocking.length} unresolved spec-fixable RCF delta(s) in #{fl_path}:"
-    blocking.each do |e, _i|
-      warn "         #{e['id']} [#{e['dimension']}] #{e['delta']} (fix: #{e['fix'] || 'see refs/fidelity-recipes.md'})"
+  # DATA-CLASS residuals block GREEN whenever a ledger EXISTS — with or
+  # without --require-fidelity-ledger, and --accept-residuals does NOT apply.
+  # A `data` delta means the rendered VALUES diverge from the source; every
+  # other gate can pass while the numbers are wrong (the field failure).
+  data_block = entries.each_with_index.select { |e, _i| e['cls'] == 'data' && !e['resolved'] }
+  if data_block.any?
+    accepted_data = data_block.select { |e, i| accepted.include?(i.to_s) || accepted.include?(e['id'].to_s) }
+    warn "[FAIL] gate 8d: #{data_block.length} unresolved data-class RCF delta(s) in #{fl_path}:"
+    data_block.each { |e, _i| warn "         #{e['id']} [#{e['dimension']}] #{e['delta']}" }
+    if accepted_data.any?
+      warn "       --accept-residuals named #{accepted_data.map { |e, _i| e['id'] }.join(', ')} — REJECTED for data-class ids."
     end
-    warn '       Apply the recipe fix (fidelity-loop.rb apply-patch) and re-render, or waive named'
-    warn '       residuals with --accept-residuals id,id (name them in your migration report).'
+    warn '       data-class residuals can never be waved through — the numbers are wrong; fix or'
+    warn '       reclassify with evidence. Either fix the spec/data and mark the entry resolved'
+    warn '       (fidelity-loop.rb resolve), or — only after PROVING the values actually match the'
+    warn '       source — re-record it under its true class with the evidence in the entry. There is'
+    warn '       no escape flag for data-class.'
     exit 15
   end
-  resid = entries.reject { |e| e['cls'] == 'spec-fixable' && !e['resolved'] }
-                 .select { |e| %w[ui-only sigma-capability data].include?(e['cls']) }
-  puts "[OK] gate 8d: RCF fidelity ledger clean — #{entries.length} delta(s) over #{ledger['pass']} pass(es), " \
-       "0 unresolved spec-fixable#{resid.any? ? " (#{resid.length} recorded residual(s) → report)" : ''}"
+  if opts[:require_fidelity]
+    blocking = entries.each_with_index.select do |e, i|
+      e['cls'] == 'spec-fixable' && !e['resolved'] &&
+        !accepted.include?(i.to_s) && !accepted.include?(e['id'].to_s)
+    end
+    if blocking.any?
+      warn "[FAIL] gate 8d: #{blocking.length} unresolved spec-fixable RCF delta(s) in #{fl_path}:"
+      blocking.each do |e, _i|
+        warn "         #{e['id']} [#{e['dimension']}] #{e['delta']} (fix: #{e['fix'] || 'see refs/fidelity-recipes.md'})"
+      end
+      warn '       Apply the recipe fix (fidelity-loop.rb apply-patch) and re-render, or waive named'
+      warn '       residuals with --accept-residuals id,id (name them in your migration report;'
+      warn '       data-class ids are never accepted).'
+      exit 15
+    end
+    resid = entries.reject { |e| e['cls'] == 'spec-fixable' && !e['resolved'] }
+                   .select { |e| %w[ui-only sigma-capability data].include?(e['cls']) }
+    puts "[OK] gate 8d: RCF fidelity ledger clean — #{entries.length} delta(s) over #{ledger['pass']} pass(es), " \
+         "0 unresolved spec-fixable, 0 unresolved data-class" \
+         "#{resid.any? ? " (#{resid.length} recorded residual(s) → report)" : ''}"
+  end
+end
+
+# ---------------------------------------------------------------------------
+# Gate 13 — source-anchor value verification (exit 18). The MEASURED value bar.
+# A run can pass CSV parity plumbing, render a PNG, and record a visual "pass"
+# while the NUMBERS are wrong (different ranked members, 10x-off magnitudes,
+# collapsed buckets — the two-field-failure class). Judgment gates are
+# attestations; this one is arithmetic: every printed value the agent
+# transcribed from the SOURCE dashboard image at Phase 1d (source-anchors.json,
+# >= 5 anchors, EXACTLY as printed) must appear in the LIVE workbook's element
+# exports at the printed precision (scripts/verify-anchors.rb →
+# anchors-verdict.json). Fires whenever the workdir carries a source dashboard
+# PNG (the 1d artifact); no source PNG at all → stated SKIP.
+# ---------------------------------------------------------------------------
+MIN_ANCHORS = 5
+find_source_png = lambda do
+  cands = []
+  pr = File.join(opts[:tab], 'png-read.json')
+  if File.exist?(pr)
+    sp = (JSON.parse(File.read(pr))['source_png'] rescue nil).to_s
+    unless sp.empty?
+      cands << sp << File.join(opts[:tab], sp) << File.join(opts[:tab], 'views', File.basename(sp))
+    end
+  end
+  if File.exist?(fl_path)
+    si = ((ledger || {})['source_image'] rescue nil).to_s
+    cands << si << File.join(opts[:tab], si) unless si.empty?
+  end
+  cands += Dir.glob(File.join(opts[:tab], 'views', '*.png')).sort
+  cands += Dir.glob(File.join(opts[:tab], 'dashboards', '*.png')).sort
+  cands.find { |p| p.downcase.end_with?('.png') && File.file?(p) }
+end
+source_png = find_source_png.call
+
+if opts[:skip_anchors]
+  record_waiver.call('--skip-anchors-gate', 'gate 13 (source-anchor value verification)', opts[:skip_anchors])
+elsif source_png.nil?
+  puts '[SKIP] gate 13: no source dashboard PNG in the workdir (no Phase 1d image artifact) — anchors gate N/A'
+else
+  sa_path = File.join(opts[:tab], 'source-anchors.json')
+  av_path = File.join(opts[:tab], 'anchors-verdict.json')
+  sa = File.exist?(sa_path) ? (JSON.parse(File.read(sa_path)) rescue nil) : nil
+  n_anchors = sa.is_a?(Hash) ? Array(sa['anchors']).length : 0
+  if n_anchors < MIN_ANCHORS
+    warn "[FAIL] gate 13: source dashboard PNG present (#{source_png}) but " \
+         "#{sa.nil? ? "#{sa_path} is missing/malformed" : "source-anchors.json has only #{n_anchors} anchor(s) (>= #{MIN_ANCHORS} required)"}."
+    warn '       While READING the source image at Phase 1d, transcribe its printed values EXACTLY as'
+    warn '       printed (raw string kept: "18,037B", not 18037) — every KPI value, the top 3 values of'
+    warn '       every ranked list/table, and one representative bucket value per chart. Schema:'
+    warn '       SKILL.md Phase 1d / refs/source-anchors.md. Then verify them against the live workbook:'
+    warn "         ruby scripts/verify-anchors.rb --workdir #{opts[:tab]} --workbook-id #{opts[:wb] || '<id>'}"
+    warn '       Escape hatch (values genuinely untranscribable): --skip-anchors-gate "<reason>".'
+    exit 18
+  end
+  av = File.exist?(av_path) ? (JSON.parse(File.read(av_path)) rescue nil) : nil
+  if av.nil?
+    warn "[FAIL] gate 13: #{n_anchors} anchor(s) transcribed but #{av_path} is missing/malformed —"
+    warn '       the anchors were never verified against the live workbook. Run:'
+    warn "         ruby scripts/verify-anchors.rb --workdir #{opts[:tab]} --workbook-id #{opts[:wb] || '<id>'}"
+    exit 18
+  elsif av['checked'].to_i < n_anchors
+    warn "[FAIL] gate 13: anchors-verdict.json is STALE — it checked #{av['checked'].to_i} anchor(s) but " \
+         "source-anchors.json now has #{n_anchors}. Re-run verify-anchors.rb."
+    exit 18
+  elsif av['pass'] != true
+    misses = Array(av['missing'])
+    warn "[FAIL] gate 13: #{misses.length}/#{av['checked']} source anchor value(s) MISSING from the live workbook exports:"
+    misses.first(10).each do |m|
+      bc = m['best_candidate']
+      warn "         #{m['id']} #{m['label'].inspect} raw=#{m['raw'].inspect}" \
+           "#{bc.is_a?(Hash) ? " — closest candidate #{bc['value']} in #{bc['element'].inspect}" : ''}"
+    end
+    warn '       A printed source value that appears NOWHERE in the workbook exports is the loudest'
+    warn '       possible signal the data is wrong (wrong aggregate, wrong unit/10x, missing filter,'
+    warn '       collapsed buckets). Fix the workbook — or correct a mistranscribed anchor — then'
+    warn '       re-run verify-anchors.rb and this gate. There is no per-anchor waiver.'
+    exit 18
+  else
+    puts "[OK] gate 13: source anchors verified — #{av['matched']}/#{av['checked']} printed source values " \
+         'found in the live workbook exports at printed precision'
+  end
+end
+
+# ---------------------------------------------------------------------------
+# Gate 14 — visual-similarity floor (exit 20). A MEASURED companion to the
+# recorded visual verdict (gate 8b): scripts/visual-similarity.py (ships
+# separately; gate is invisible until the script exists) scores the source
+# dashboard PNG against the Sigma render and writes visual-similarity.json;
+# its `pass` field is the verdict. CLI contract (fixed):
+#   python3 scripts/visual-similarity.py --source <src> --render <render> \
+#     --json-out <workdir>/visual-similarity.json
+# VISUAL_SIMILARITY_SCRIPT env overrides the script path (tests).
+# ---------------------------------------------------------------------------
+vsim_script = ENV['VISUAL_SIMILARITY_SCRIPT'] || File.join(__dir__, 'visual-similarity.py')
+if opts[:skip_vsim]
+  record_waiver.call('--skip-visual-similarity', 'gate 14 (visual-similarity floor)', opts[:skip_vsim])
+elsif File.exist?(vsim_script)
+  if source_png.nil? || render_png.nil?
+    puts "[SKIP] gate 14: visual-similarity floor N/A — #{source_png.nil? ? 'no source dashboard PNG' : 'no validated Sigma render'} to compare"
+  else
+    vs_out = File.join(opts[:tab], 'visual-similarity.json')
+    system('python3', vsim_script, '--source', source_png, '--render', render_png, '--json-out', vs_out)
+    vsim_status = $? ? $?.exitstatus : 'not-run'
+    vs = File.exist?(vs_out) ? (JSON.parse(File.read(vs_out)) rescue nil) : nil
+    if vs.nil?
+      warn "[WARN] gate 14: visual-similarity.py exited #{vsim_status} with no readable #{vs_out} — floor NOT" \
+           ' measured (deps missing / unreadable input; NOT a pass — stated, never silent).'
+    elsif vs['pass'] == true
+      puts "[OK] gate 14: visual-similarity floor passed#{vs['score'] ? " (score=#{vs['score']})" : ''}"
+    else
+      warn "[FAIL] gate 14: measured visual similarity below the floor#{vs['score'] ? " (score=#{vs['score']})" : ''} —"
+      warn "       the render does not look like the source (#{source_png} vs #{render_png})."
+      warn '       Re-enter the Phase 5g RCF loop (fidelity-loop.rb) and fix layout/kind/palette deltas,'
+      warn '       then re-render and re-run. Escape hatch: --skip-visual-similarity "<reason>"'
+      warn '       (counted against the waiver budget; name it in your migration report).'
+      exit 20
+    end
+  end
 end
 
 # Gate 9 — Visual-verify tiles (build-from-signals). Tiles whose Tableau data
@@ -948,7 +1425,28 @@ if File.exist?(vv_sidecar)
       warn '       visual-verify/manifest.json. Escape hatch: --skip-visual-tiles "<reason>" (name it in your report).'
       exit 11
     end
-    puts "[OK] gate 9: #{man.size} build-from-signals tile(s) image-verified (empty data export → visual parity)"
+    # Gate 9b — SHAPE IDENTITY (field-caught: a run marked reshaped tiles
+    # "verified" because their DATA matched — a ranked bar-table shipped as a
+    # wall of grouped bars, annotated strip panels shipped as generic bars, and
+    # the owner immediately judged the result "furthest from desired" while
+    # every gate was green). visual_verified attests values/trends;
+    # shape_match attests the tile is RECOGNIZABLY THE SAME VISUALIZATION.
+    # Manifests written by current verify-visual-tiles.rb always carry the
+    # field; legacy manifests (no shape_match key anywhere) are grandfathered.
+    if man.any? { |m| m.key?('shape_match') }
+      reshaped = man.select { |m| m['shape_match'] != true }
+      if reshaped.any?
+        warn "[FAIL] gate 9b: #{reshaped.size}/#{man.size} tile(s) verified for DATA but not for SHAPE: " \
+             "#{reshaped.map { |m| "#{m['worksheet']}#{m['expected_kind'] ? " (source: #{m['expected_kind']})" : ''}" }.join(', ')}."
+        warn '       Right data rendered as a DIFFERENT visualization is not fidelity — rebuild each'
+        warn '       tile to the source shape (refs/fidelity-recipes.md; e.g. ranked bar-table →'
+        warn '       pivot + dataBars, strip panel → per-panel chart + refMarks), re-render, then set'
+        warn '       "shape_match": true in visual-verify/manifest.json. Escape hatch (only for a'
+        warn '       VERIFIED product limitation, evidence in your report): --skip-visual-tiles "<reason>".'
+        exit 11
+      end
+    end
+    puts "[OK] gate 9: #{man.size} build-from-signals tile(s) image-verified (values + shape identity)"
   end
 end
 
@@ -1073,11 +1571,33 @@ else
   puts '[OK] gate 12: no deferred-elements.json — no DM elements were quarantined'
 end
 
+# ---------------------------------------------------------------------------
+# Waiver budget cap (exit 19) — checked LAST so genuine gate failures surface
+# first. Individually-arguable escapes stack into an unverified workbook (a
+# field run passed one workbook purely by combining --skip-parity-gate with
+# --allow-missing-tiles); more than WAIVER_BUDGET waivers means GREEN is
+# unavailable regardless of what each escape was for. No escape flag exists
+# for this cap — reduce the waiver count by fixing the underlying issues, or
+# report the migration as YELLOW.
+# ---------------------------------------------------------------------------
+if budget_flags.length > WAIVER_BUDGET
+  warn "[FAIL] waiver budget exceeded — #{budget_flags.length} quality waiver/escape flag(s) on this run (budget #{WAIVER_BUDGET})."
+  warn '       GREEN unavailable — too many waivers; the highest achievable result is YELLOW.'
+  warn '       Each waiver hid a verification:'
+  budget_flags.each { |f| warn "         - #{f}: #{WAIVER_HIDES[f] || 'a verification gate did not run'}" }
+  warn '       Waivers are for impossibilities, not obstacles. Fix the underlying issues until'
+  warn "       <= #{WAIVER_BUDGET} remain, or report this migration as YELLOW (never GREEN) and name"
+  warn '       every waiver in the report. There is no escape flag for this cap.'
+  exit 19
+end
+
 # Completion sentinel — stamp a run-scoped success marker keyed to the workbook
 # and clear any PASS-1 pending marker. verify-complete.rb (the offline done-check
 # the SKILL points agents at) reports GREEN only when this file exists for the
 # workbook and no parity-pending.json remains. This makes "done" a token only the
 # gate can mint, closing the "agent narrates success without the gate" hole.
+# run_id scopes the marker to THIS run (see the at_exit stale-deletion above);
+# the waiver census rides along so a report can quote the marker verbatim.
 begin
   _wd = opts[:tab]
   # chartCount from parity-final.json (gate 1 already required charts_total > 0 to
@@ -1088,12 +1608,24 @@ begin
              JSON.pretty_generate('workbookId' => (opts[:wb] || ''),
                                   'chartCount' => _cc,
                                   'gates' => 'all-pass',
+                                  'run_id' => current_run_id,
+                                  'waivers' => waiver_flags,
                                   'generatedAt' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')))
   _pend = File.join(_wd, 'parity-pending.json')
   File.delete(_pend) if File.exist?(_pend)
+  # Flip the off-ramp telemetry field now that success is minted (P2).
+  if File.exist?(File.join(_wd, 'parity-final.json'))
+    begin
+      _pf['success_sentinel'] = true
+      File.write(File.join(_wd, 'parity-final.json'), JSON.pretty_generate(_pf))
+    rescue StandardError
+      nil
+    end
+  end
 rescue StandardError
   # never fail the gate on sentinel bookkeeping
 end
 
-puts "[OK] all gates pass — conversion may declare GREEN"
+puts "[OK] all gates pass — conversion may declare GREEN" \
+     "#{waiver_flags.any? ? " (#{budget_flags.length}/#{waiver_flags.length} waiver(s) within budget — name them in the report: #{waiver_flags.join(', ')})" : ''}"
 exit 0

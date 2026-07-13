@@ -10,15 +10,15 @@ For most workbooks, `build-charts-from-signals.rb` produces a usable starting sp
 
 ```bash
 ruby scripts/build-charts-from-signals.rb \
-  --tableau-dir /tmp/<name> \
-  --layout /tmp/<name>/dashboard-layout.json \
-  --meta /tmp/<name>/dashboard-layout-meta.json \
-  --master-map /tmp/<name>/master-columns.json \
+  --tableau-dir <WORK> \
+  --layout <WORK>/dashboard-layout.json \
+  --meta <WORK>/dashboard-layout-meta.json \
+  --master-map <WORK>/master-columns.json \
   --master-element-id master \
   --auto-controls --page-per-worksheet \
   --title "<Workbook Title>" \
-  --out /tmp/<name>/chart-specs.json \
-  --coverage-out /tmp/<name>/coverage.json
+  --out <WORK>/chart-specs.json \
+  --coverage-out <WORK>/coverage.json
 ```
 
 What the build script auto-handles (no agent action needed):
@@ -207,8 +207,8 @@ See `refs/workbook-layout.md` for chart patterns, multi-series formulas, and map
 
 ```bash
 ruby scripts/validate-spec.rb --type workbook \
-  --dm-context /tmp/<name>/dm-ids.json \
-  /tmp/<name>/wb-spec.json
+  --dm-context <WORK>/dm-ids.json \
+  <WORK>/wb-spec.json
 ```
 
 `--dm-context` lets the validator accept `[Order Fact/...]` cross-source refs (where
@@ -219,8 +219,8 @@ flagged as unknown.
 
 ```bash
 ruby scripts/post-and-readback.rb --type workbook \
-  --spec /tmp/<name>/wb-spec.json \
-  --out /tmp/<name>/wb-ids.json
+  --spec <WORK>/wb-spec.json \
+  --out <WORK>/wb-ids.json
 ```
 
 > **Element IDs may or may not survive POST.** Workbook-spec POST often preserves readable
@@ -238,9 +238,9 @@ ruby scripts/post-and-readback.rb --type workbook \
 
 ```bash
 ruby scripts/build-dashboard-layout.rb \
-  --layout /tmp/<name>/dashboard-layout.json \
-  --wb-ids /tmp/<name>/wb-ids.json \
-  --out /tmp/<name>/layout.xml
+  --layout <WORK>/dashboard-layout.json \
+  --wb-ids <WORK>/wb-ids.json \
+  --out <WORK>/layout.xml
 # If any chart tile was renamed from its Tableau title, pass the same
 # --rename "Tableau name=Sigma name" pairs you give the parity scripts —
 # otherwise the renamed tile silently drops out of the layout (bead ddbq).
@@ -249,7 +249,7 @@ ruby scripts/build-dashboard-layout.rb \
 
 ruby scripts/put-layout.rb \
   --workbook <workbookId> \
-  --layout /tmp/<name>/layout.xml
+  --layout <WORK>/layout.xml
 ```
 
 `build-dashboard-layout.rb` walks the dashboard's zones, converts each
@@ -282,14 +282,14 @@ Never hand-write layout XML directly.
 > pattern up front.
 
 ```ruby
-# /tmp/<name>/build-layout.rb
+# <WORK>/build-layout.rb
 require 'json'
 $LOAD_PATH.unshift File.expand_path('scripts/lib', __dir__)  # or absolute path
 require 'layout'
 include SigmaLayout
 
 # Element IDs from Phase 5c
-ids = JSON.parse(File.read('/tmp/<name>/wb-ids.json'))
+ids = JSON.parse(File.read('<WORK>/wb-ids.json'))
 e = ids['pages'][0]['elements'].each_with_object({}) { |x, h| h[x['id']] = x['id'] }
 
 xml = assemble(
@@ -303,7 +303,7 @@ xml = assemble(
   page_xml('page-data', le('master', 1, 25, 1, 21))
 )
 
-File.write('/tmp/<name>/layout.xml', xml)
+File.write('<WORK>/layout.xml', xml)
 ```
 
 Layout helpers (in `scripts/lib/layout.rb`): `gc(eid, c0, c1, r0, r1, inner)` for
@@ -319,7 +319,7 @@ must match container outer span).
 ```bash
 ruby scripts/put-layout.rb \
   --workbook <workbookId> \
-  --layout /tmp/<name>/layout.xml
+  --layout <WORK>/layout.xml
 ```
 
 The script:
