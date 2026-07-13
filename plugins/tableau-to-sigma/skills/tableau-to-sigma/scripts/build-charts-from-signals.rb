@@ -1475,6 +1475,47 @@ def translate_window_calc(formula, mmap, columns_by_guid = {}, depth: 0)
       return plan && plan.merge('negated_for_sort' => (negated || plan['negated_for_sort'] || false))
     end
   end
+  # v5.4: EMBEDDED calc-ref inlining (one hop). Tableau authors routinely split
+  # a share across two serialized <calculation>s — [Total X] = TOTAL(SUM([X]))
+  # and [% X] = SUM([X]) / [Total X] — so the window construct never appears in
+  # the referring formula's own text and every classifier below is blind to it
+  # (the calc translated as an unresolvable plain ref, or worse, a co-shelf
+  # positional calc was picked instead). Substitute each embedded ref whose
+  # KNOWN formula carries a window construct: verbatim when that formula is a
+  # single closed call (TOTAL(...) — keeps the share regexes matchable), else
+  # parenthesized for precedence safety. Gated to formulas that do NOT already
+  # match WINDOW_TC_RE, so it strictly ADDS translations (previous nil returns)
+  # and never re-routes a formula the classifiers already handled.
+  if depth < 2 && s !~ WINDOW_TC_RE
+    single_call = lambda do |f|
+      return false unless f =~ /\A[A-Za-z_][A-Za-z0-9_]*\s*\(/ && f.end_with?(')')
+      d = 0
+      f.each_char.with_index do |ch, i|
+        d += 1 if ch == '('
+        if ch == ')'
+          d -= 1
+          return false if d.negative?
+          return false if d.zero? && i < f.length - 1
+        end
+      end
+      d.zero?
+    end
+    inlined = false
+    s2 = s.gsub(/\[([^\]]+)\]/) do
+      ref = Regexp.last_match(1)
+      whole = Regexp.last_match(0)
+      info = columns_by_guid[ref] ||
+             columns_by_guid.values.find { |v| v.is_a?(Hash) && v['caption'].to_s.strip == ref }
+      f = info.is_a?(Hash) ? info['formula'].to_s.gsub(/\s+/, ' ').strip : ''
+      if !f.empty? && f =~ WINDOW_TC_RE
+        inlined = true
+        single_call.call(f) ? f : "(#{f})"
+      else
+        whole
+      end
+    end
+    s = s2 if inlined
+  end
   return nil if s.empty? || s !~ WINDOW_TC_RE
   s = s.gsub(/\[([0-9a-f\-]{36})\]/i) do
     info = columns_by_guid[Regexp.last_match(1)]
@@ -2543,20 +2584,42 @@ def build_pivot_element(z, meta, mmap, opts, warnings, data_elements = [])
     elsif plan['mode'] == 'two-stage'
       win_stage << { 'col' => uv['col'], 'plan' => plan }
     elsif plan['mode'] == 'inline-share'
-      # v5.1 Rule W1 emission (pivot): scope from the SHELF the value pill sat
-      # on (recorded by add_col — review-caught: a regex re-derivation matched
-      # everything and always said 'row'). rows shelf → each row sums to 1 →
-      # "row"; cols shelf → "column". PIVOT-ONLY partition modes per round-3.
-      shelf_of = uv['shelf'] == :cols ? 'column' : 'row'
+      # v5.4 Rule W1 emission (pivot): scope from the table-calc ADDRESSING
+      # first. The twb serializes "compute using <dim>" as <table-calc
+      # ordering-field=...> and the parser stamps it on the calc as
+      # ordering_field — the share's denominator is the partition total ACROSS
+      # that dim. Addressing dim on the pivot COLUMNS → each row sums to 100%
+      # → "row"; on ROWS → "column". Only when no addressing resolves to a
+      # pivot axis fall back to the value pill's own shelf (the v5.1
+      # heuristic, which guessed wrong on row-normalized shares whose pill sat
+      # elsewhere) — and name the fallback so a wrong scope is auditable.
+      nqs = ->(x) { x.to_s.downcase.gsub(/[^a-z0-9]/, '') }
+      addr = ws_calc['ordering_field']
+      axis_has_addr = lambda do |entries|
+        entries.any? do |e|
+          c = cols_array.find { |x| x['id'] == e['id'] }
+          c && addr && nqs.call(c['name']) == nqs.call(addr)
+        end
+      end
+      scope, scope_src =
+        if addr && axis_has_addr.call(cols_by)
+          ['row', "table-calc addressing '#{addr}' rides the columns axis"]
+        elsif addr && axis_has_addr.call(rows_by)
+          ['column', "table-calc addressing '#{addr}' rides the rows axis"]
+        else
+          [uv['shelf'] == :cols ? 'column' : 'row',
+           addr ? "addressing '#{addr}' not on either pivot axis — pill-shelf fallback, VERIFY scope" \
+                : 'no table-calc addressing — pill-shelf fallback, VERIFY scope']
+        end
       uv['col']['formula'] =
         if plan['share_kind'] == 'percent_of_total'
-          %(PercentOfTotal(#{plan['inner']}, "#{shelf_of}"))
+          %(PercentOfTotal(#{plan['inner']}, "#{scope}"))
         else
           plan['inner']
         end
       uv['col']['format'] = { 'kind' => 'number', 'formatString' => ',.1%' } if plan['share_kind'] == 'percent_of_total'
       warnings << "'#{cap}' pivot value '#{uv['name']}' → #{plan['wrapper']}(share) emitted as " \
-                  "#{uv['col']['formula'][0..90]} [#{plan['note']}]"
+                  "#{uv['col']['formula'][0..90]} [scope=#{scope}: #{scope_src}] [#{plan['note']}]"
     elsif plan['mode'] == 'inline' && plan['formula']
       # VALIDATED live 2026-06-24 (wb cd9058fe): Sigma accepts window functions
       # (PercentOfTotal(…, "grand_total"), CumulativeSum(…)) as pivot-table value
@@ -3859,6 +3922,55 @@ layout.each do |dash|
                                           meta['columns_by_guid'] || {})
       record_window_calc(z, user_calc, window_plan) if window_plan
       window_calc_name = user_calc && user_calc['name'].to_s.gsub(/^\[|\]$/, '')
+      # v5.4: a POSITIONAL window calc (INDEX()/FIRST() → bare RowNumber()±k,
+      # no comparison) as the VALUE axis is a rank HEADER mis-pick, not a
+      # measure. In the twb grammar the ranked-bar idiom serializes INDEX() as
+      # a DISCRETE instance alongside the category dim while the real
+      # bar-length measure (typically a percent-of-total share) rides a shelf
+      # as a CONTINUOUS (:qk) instance. Bar length = row position is never the
+      # source semantics when such a measure exists — re-target the value to
+      # the first continuous shelf calc that translates, and say so loudly.
+      if window_plan && window_plan['mode'] == 'inline' &&
+         window_plan['formula'].to_s =~ /\A\s*RowNumber\s*\(\s*\)\s*(?:[-+]\s*\d+)?\s*\z/i
+        cur_guid = user_calc['name'].to_s.gsub(/^\[|\]$/, '')
+        cand_guids = []
+        %w[rows_shelf cols_shelf].each do |sh|
+          (z.dig(sh, 'fields') || []).each do |ff|
+            next unless ff['role'] == 'measure' && ff['raw'].to_s =~ /:qk(?::\d+)?\]/
+            g = ff['guid'].to_s
+            cand_guids << g unless g.empty? || g == cur_guid
+          end
+          # A shelf EXPRESSION ("(inst + inst)" — the dual-instance overlay
+          # idiom) parses as one field with guid nil; recover the instance
+          # guids from the raw shelf text ([<deriv>:<guid>:qk[:n]] tokens).
+          z.dig(sh, 'raw').to_s.scan(/\[[a-z]+:([^:\[\]]+):qk(?::\d+)?\]/i) do |(g)|
+            cand_guids << g unless g.to_s.empty? || g == cur_guid
+          end
+        end
+        cand_guids.uniq.each do |g|
+          # Prefer the worksheet-calc entry — it carries ordering_field (the
+          # table-calc addressing) which the share-scope audit below needs.
+          info = (z['calculations'] || []).find { |c| c['name'].to_s.gsub(/^\[|\]$/, '') == g } ||
+                 (meta['columns_by_guid'] || {})[g]
+          cform = info.is_a?(Hash) ? info['formula'].to_s : ''
+          next if cform.strip.empty?
+          plan2 = translate_window_calc(cform, mmap, meta['columns_by_guid'] || {})
+          next unless plan2 && %w[inline inline-share].include?(plan2['mode']) &&
+                      plan2['formula'].to_s !~ /\A\s*RowNumber\s*\(\s*\)\s*(?:[-+]\s*\d+)?\s*\z/i
+          cap2 = (info['caption'] || info['name']).to_s.gsub(/^\[|\]$/, '').strip
+          cap2 = g if cap2.empty?
+          warnings << "'#{cap}' value axis: '#{meas_hdr}' (#{user_calc['formula'].to_s[0..40]}) is a positional " \
+                      "rank header, never a bar value — re-targeted to the continuous shelf measure '#{cap2}'"
+          user_calc = { 'name' => "[#{g}]", 'caption' => cap2, 'formula' => cform,
+                        'ordering_field' => (info.is_a?(Hash) ? info['ordering_field'] : nil) }
+          window_plan = plan2
+          record_window_calc(z, user_calc, window_plan)
+          window_calc_name = g
+          meas_hdr = cap2
+          meas = { 'id' => "m-#{cap2.downcase.gsub(/\W+/, '-')}", 'name' => cap2 }
+          break
+        end
+      end
       case window_plan && window_plan['mode']
       when 'inline'
         user_agg_formula = window_plan['formula']
@@ -3866,13 +3978,37 @@ layout.each do |dash|
                     "viz formula on the yAxis: #{user_agg_formula[0..140]}  [#{window_plan['note']}]"
       when 'inline-share'
         # v5.1 Rule W1 (chart): non-pivot shares stay grand_total (partition
-        # modes are PIVOT-ONLY per round-3 consensus).
+        # modes are PIVOT-ONLY per round-3 consensus + live-probed product
+        # fact: partition scopes collapse to grand-total on chart formulas).
         user_agg_formula =
           if window_plan['share_kind'] == 'percent_of_total'
             %(PercentOfTotal(#{window_plan['inner']}, "grand_total"))
           else
             window_plan['inner']
           end
+        # v5.4 scope AUDIT: the table-calc addressing ("compute using <dim>",
+        # parser ordering_field) names the dim the share normalizes ACROSS;
+        # everything else in the view partitions it. grand_total is only
+        # value-correct when the addressing spans the chart's whole dim set.
+        # A partitioned share can't be expressed as a Sigma chart formula —
+        # ship grand_total but say LOUDLY that the number diverges from the
+        # source and the tile needs a grouped-helper rebuild (STAYS-MANUAL
+        # class), instead of a silently wrong export.
+        if window_plan['share_kind'] == 'percent_of_total'
+          addr = user_calc['ordering_field'].to_s
+          chart_dims = [dim_hdr, color_hdr].map { |x| x.to_s.strip }.reject(&:empty?)
+          nrmw = ->(x) { x.to_s.downcase.gsub(/[^a-z0-9]/, '') }
+          covers_all = chart_dims.size <= 1 &&
+                       (chart_dims.empty? || nrmw.call(addr) == nrmw.call(chart_dims.first))
+          if !addr.empty? && !covers_all
+            part = chart_dims.reject { |dh| nrmw.call(dh) == nrmw.call(addr) }
+            warnings << "'#{cap}' share scope MISMATCH: the source computes this share across " \
+                        "'#{addr}' only (partitioned by #{part.empty? ? 'the remaining view dims' : part.map(&:inspect).join(', ')}); " \
+                        'Sigma chart formulas support grand_total ONLY, so the emitted values will diverge ' \
+                        'from the source — STAYS-MANUAL: rebuild via a grouped helper element that computes ' \
+                        'the partitioned share (refs/fidelity-recipes.md §Ranked pivot)'
+          end
+        end
         # downstream reads window_plan['formula'] (top-N auto-sort, dedup) —
         # carry the emitted share so it is never nil (review-caught).
         window_plan = window_plan.merge('mode' => 'inline', 'formula' => user_agg_formula)
