@@ -35,7 +35,37 @@ args are given.
 """
 import argparse
 import json
+import os
 import re
+import sys
+
+# ── documentation-grounded mapping catalogs (SINGLE SOURCE OF TRUTH) ─────────
+# Every enumerable classifier map below is loaded from refs/catalogs/<dim>.json —
+# cited rows (MicroStrategy source doc + Sigma target + sigma_verified), and a
+# LOUD fallback on anything unmapped. NO inline mapping literal may bypass these
+# catalogs (grep-enforced by tests/test_grounding.py). The human-readable
+# coverage matrix in refs/microstrategy-coverage.md is GENERATED from these files.
+# Loader: shared/lib/coverage_catalog.py (synced to scripts/lib/). Design mirrors
+# the beads-sigma-kvza / -93ps contract: catalog = data, code = thin resolver.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
+import coverage_catalog as _cc  # noqa: E402
+_CAT_DIR = _cc.default_catalog_dir(__file__)
+AGG_CAT = _cc.load(_CAT_DIR, "aggregation")     # MSTR group function -> Sigma/SQL aggregate
+FMT_CAT = _cc.load(_CAT_DIR, "number-format")   # MSTR format category -> Sigma number format
+CTRL_CAT = _cc.load(_CAT_DIR, "control")        # bound-column type    -> Sigma control kind
+# NB: refs/catalogs/viz-kind.json is DOCUMENTATION-ONLY and is deliberately NOT
+# loaded here. convert.py emits exactly one Sigma table per dossier chapter
+# (see Bundle.viz_chapter); there is no visualizationType->element-kind code map
+# to ground yet (chart emission is roadmap — the ACTIVE viz classifier lives in
+# microstrategy-assessment/scripts/assess.py VIZ_MAPPED). Loading it here would
+# fake wiring the converter does not have.
+
+# FN: MSTR metric group function -> warehouse SQL aggregate, DERIVED from the
+# aggregation catalog (formerly an inline dict literal mapping Sum/Count/Avg/
+# Max/Min to their uppercased SQL names). metric_sql() resolves through
+# resolve_or_warn so an unmapped function WARNS loudly (never a silent
+# passthrough), then still emits UPPER() as a documented degraded fallback.
+FN = {r["source"]: r["sql"] for r in AGG_CAT.rows if r.get("sql")}
 
 
 def friendly(col: str) -> str:
@@ -51,6 +81,10 @@ def slug(s: str) -> str:
 class Bundle:
     def __init__(self, raw):
         self.raw = raw
+        # LOUD-fallback sink: catalog resolvers append standardized warnings here
+        # (aggregation / number-format) from deep in the emit recursion; main()
+        # prints the deduped union alongside build_workbook_spec's warnings.
+        self.warnings = []
         self.tables = raw["tables"]          # logical table id -> def
         self.attributes = raw["attributes"]  # attribute id -> def
         self.metrics = raw["metrics"]        # metric id -> def
@@ -179,6 +213,12 @@ class Bundle:
                             distinct = True
                         j += 1
                     i = j  # skip past the parameter block
+                # COMPOSITIONAL (cited: refs/catalogs/aggregation.json Count row) —
+                # MSTR Count<Distinct=True> -> Sigma CountDistinct. Not a flat
+                # catalog row (the Distinct=True is an expression parameter, not a
+                # distinct function token); the plain group functions (Sum/Count/
+                # Avg/Max/Min) share tokens with their Sigma names, so metric_formula
+                # emits the MSTR function name verbatim as the Sigma aggregate.
                 if fname == "Count" and distinct:
                     fname = "CountDistinct"
                 out.append(fname)
@@ -220,8 +260,6 @@ class Bundle:
     def metric_sql(self, mid, fact_alias="ORDER_FACT"):
         m = self.metrics[mid]
         toks = m["expression"]["tokens"]
-        FN = {"Sum": "SUM", "Count": "COUNT", "Avg": "AVG", "Max": "MAX",
-              "Min": "MIN"}
         out = []
         distinct_pending = False
         i = 0
@@ -239,7 +277,18 @@ class Bundle:
                             distinct = True
                         j += 1
                     i = j
-                out.append(FN.get(fname, fname.upper()))
+                # DOCUMENTATION-GROUNDED (refs/catalogs/aggregation.json). An
+                # unmapped MSTR function no longer silently passes through as
+                # fname.upper(): resolve_or_warn appends a LOUD warning, then we
+                # emit UPPER() only as a documented degraded fallback.
+                sql_fn = FN.get(fname)
+                if sql_fn is None:
+                    AGG_CAT.resolve_or_warn(
+                        fname, self.warnings,
+                        context="metric %r AE-emulation SQL"
+                                % m["information"]["name"])
+                    sql_fn = fname.upper()
+                out.append(sql_fn)
                 distinct_pending = distinct
             elif ty == "object_reference":
                 tgt = t.get("target", {})
@@ -357,27 +406,50 @@ class Bundle:
             + f'\nFROM F f\nJOIN F w ON w."{qkey_f}" = f."{qkey_f}"\n  AND ('
             + "\n    OR ".join(conds) + ")")
 
-    # ---- display format for a metric (MSTR bundle format blocks are empty,
-    # so derive from semantics: count/quantity -> integer, ratio/pct -> percent,
-    # money facts -> currency)
-    def metric_display_format(self, mid):
-        m = self.metrics[mid]
-        name = m["information"]["name"]
-        if re.search(r"pct|percent|margin|ratio|rate", name, re.I):
-            return {"kind": "number", "formatString": ",.2%"}
-        toks = m["expression"]["tokens"]
-        funcs = [t["value"] for t in toks if t.get("type") == "function"
-                 and t.get("value") not in ("=",)]
-        fact_cols = [self.fact_col[t["target"]["objectId"]] for t in toks
-                     if t.get("type") == "object_reference"
-                     and t.get("target", {}).get("subType") == "fact"]
-        if any(f.startswith("Count") for f in funcs):
-            return {"kind": "number", "formatString": ",.0f"}
-        if any(re.search(r"REVENUE|PROFIT|COST|AMOUNT|PRICE", c) for c in fact_cols):
-            return {"kind": "number", "formatString": "$,.2f"}
-        if any(re.search(r"QUANTITY|UNITS|COUNT", c) for c in fact_cols):
-            return {"kind": "number", "formatString": ",.0f"}
+    # ---- display format for a metric — DOCUMENTATION-GROUNDED (beads-sigma-kvza)
+    @staticmethod
+    def _mstr_format_category(m):
+        """Return the metric's EXPLICIT MicroStrategy number-format category
+        (lowercased: 'currency' / 'percent' / 'fixed' / 'number' / 'scientific',
+        etc.), or None when the metric carries no explicit format. Compositional
+        cited predicate — the flat category->Sigma-format map lives in
+        refs/catalogs/number-format.json (authoritative_doc). MicroStrategy
+        expresses a metric's format via `metricFormatType` (a named category)
+        and/or a `format.values` property block; a 'reserved'/'general' type with
+        an empty format block means 'inherit the default' = NO explicit format."""
+        ft = str(m.get("metricFormatType") or "").strip().lower()
+        if ft and ft not in ("reserved", "default", "general", "automatic"):
+            return ft
+        fmt = m.get("format") or {}
+        for v in (fmt.get("values") or []):
+            if isinstance(v, dict):
+                c = v.get("category") or v.get("formatCategory") or v.get("name")
+                if c:
+                    return str(c).strip().lower()
         return None
+
+    def metric_display_format(self, mid):
+        """Sigma number format for a metric, GROUNDED in the metric's real
+        MicroStrategy format via refs/catalogs/number-format.json. When there is
+        NO explicit MSTR format we ship the metric UNFORMATTED and record a LOUD
+        note — we do NOT guess a currency/percent/integer format from the metric
+        or fact-column NAME. (The old name/column-substring guessing —
+        pct|percent|margin -> %, REVENUE|PROFIT|COST -> $ — with a silent None
+        fallback was the beads-sigma-kvza disease and is GONE.)"""
+        m = self.metrics[mid]
+        cat = self._mstr_format_category(m)
+        if not cat:
+            self.warnings.append(
+                "⚠ number-format: metric %r has no explicit MicroStrategy number "
+                "format (metricFormatType=%r) — shipping UNFORMATTED; set an "
+                "explicit format in Sigma if needed (no name-substring guess)."
+                % (m["information"]["name"], m.get("metricFormatType")))
+            return None
+        row = FMT_CAT.resolve_or_warn(
+            cat, self.warnings, context="metric %r" % m["information"]["name"])
+        if not row or not row.get("sigma"):
+            return None
+        return {"kind": "number", "formatString": row["sigma"]}
 
     # ---- dossier filter signals (chapter filters + selectors)
     @staticmethod
@@ -607,7 +679,14 @@ def emit_controls(b: "Bundle", pages, page_ctx, warnings):
 
         key_col, desc_col = b.attribute_unit_cols(aid)
         ctl_col = desc_col or key_col   # what MSTR renders in the selector
-        ctl_type = b.attribute_ctl_type(aid)
+        ctl_type = b.attribute_ctl_type(aid)   # 'date' | 'number' | 'text'
+        # DOCUMENTATION-GROUNDED control kind (refs/catalogs/control.json). The
+        # bound-column type resolves to a Sigma control kind; a miss warns loudly
+        # and falls back to the documented default 'list'. The as_text cast below
+        # still keys off ctl_type == 'number' (numeric list targets are silently
+        # stripped by Sigma — see the catalog row note).
+        ctl_kind_row = CTRL_CAT.resolve_or_warn(ctl_type, warnings, context=src)
+        ctl_kind = (ctl_kind_row or {}).get("sigma") or "list"
         filters, wired = [], []
         for ctx in ctxs:
             cid = find_or_add_col(ctx, ctl_col, as_text=(ctl_type == "number"))
@@ -631,7 +710,7 @@ def emit_controls(b: "Bundle", pages, page_ctx, warnings):
                "kind": "control", "controlId": ctl_id_for(label),
                "name": label,
                "filters": filters}
-        if ctl_type == "date":
+        if ctl_kind == "date-range":
             # date-range needs no `source` but DOES require a flat `mode` —
             # without it the POST fails with the misleading "Invalid kind:
             # control" (live-verified cross-plugin; see control-parity.md)
@@ -1152,7 +1231,10 @@ def main():
               f"{[w['elementId'] for w in c['wired']]} scope={c['scope']}")
     for u in control_scope["unbound"]:
         print(f"control UNBOUND [{u['status']}]: {u['sourceName']} — {u['reason']}")
-    for w in warnings:
+    # LOUD fallbacks: the catalog resolvers append to b.warnings (aggregation /
+    # number-format, from build_dm_spec + build_workbook_spec) and to `warnings`
+    # (control, from emit_controls). Print the deduped union.
+    for w in dict.fromkeys(list(b.warnings) + list(warnings)):
         print(f"WARN: {w}")
     print(f"signals: {control_scope['sourceFilterSignals']} filter signal(s), "
           f"{len(control_scope['controls'])} control(s) emitted")
