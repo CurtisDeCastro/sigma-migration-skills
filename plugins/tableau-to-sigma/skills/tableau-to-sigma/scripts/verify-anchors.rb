@@ -318,14 +318,18 @@ else
     next unless el['kind'] == 'pivot-table' && el.is_a?(Hash) && el.key?('totals')
     captured_totals[el['id'].to_s] = el.delete('totals')
   end
+  # v5.4.9 review fix: persist the captured totals to a *-pivot-totals.json
+  # sidecar BEFORE the strip PUT. If this process dies (or the restore PUT
+  # fails) between strip and restore, the finalize ship step (put-layout.rb
+  # --apply-pivot-totals, which globs the workdir) re-applies the FULL captured
+  # totals — including showSubtotals — instead of stamping the lossy
+  # showGrandTotals-only default. Deleted again after a successful restore.
+  totals_sidecar = File.join(opts[:dir], 'anchors-restore-pivot-totals.json')
   if captured_totals.any?
     begin
-      put_spec.call(spec)
-      warn "  [totals-ceiling] stripped grand-total key from #{captured_totals.size} pivot(s) for CSV export (restored after)"
-    rescue Sigma::Error => e
-      warn "  [WARN] could not strip pivot totals (#{e.message.lines.first.to_s.strip[0, 100]}) — " \
-           'totals-bearing pivot exports may 500; those anchors can only be checked via a totals-free export'
-      captured_totals.clear # nothing was stripped; don't attempt a restore
+      File.write(totals_sidecar, JSON.pretty_generate({ 'workbook' => wb, 'totals' => captured_totals }))
+    rescue StandardError => e
+      warn "  [WARN] could not write totals restore sidecar (#{e.class}: #{e.message.to_s[0, 80]})"
     end
   end
 
@@ -358,6 +362,23 @@ else
 
   require 'thread'
   begin
+    # The strip PUT runs INSIDE this begin/ensure (v5.4.9 review fix): a
+    # network-level exception on the PUT (Net::ReadTimeout, Errno::ECONNRESET,
+    # SocketError — raised raw by Sigma.request, which only wraps HTTP-status
+    # failures in Sigma::Error) can fire AFTER the server applied the strip;
+    # previously it propagated before the restore bracket existed and left the
+    # live workbook totals-stripped (grand totals visible). Restoring when the
+    # strip never landed is an idempotent no-op PUT, so the ensure always
+    # attempts it.
+    if captured_totals.any?
+      begin
+        put_spec.call(spec)
+        warn "  [totals-ceiling] stripped grand-total key from #{captured_totals.size} pivot(s) for CSV export (restored after)"
+      rescue StandardError => e
+        warn "  [WARN] could not strip pivot totals (#{e.class}: #{e.message.lines.first.to_s.strip[0, 100]}) — " \
+             'totals-bearing pivot exports may 500; those anchors can only be checked via a totals-free export'
+      end
+    end
     queue = Queue.new
     queryable.each { |el| queue << el }
     mutex = Mutex.new
@@ -376,16 +397,24 @@ else
     end.each(&:join)
   ensure
     # Restore the grand-total keys stripped for the export window so renders
-    # (and the shipped workbook) keep hidden grand totals — even if an export
-    # above raised. Best-effort: the finalize ship step re-guarantees it.
+    # (and the shipped workbook) keep hidden grand totals — even if the strip
+    # PUT or an export above raised (network-level errors included). On
+    # restore failure the sidecar written above survives, and the finalize
+    # ship step re-applies the FULL captured totals (incl. showSubtotals).
     if captured_totals.any?
       begin
         elements.each { |el| (t = captured_totals[el['id'].to_s]) && el['totals'] = t }
         put_spec.call(spec)
         warn "  [totals-ceiling] restored grand-total key on #{captured_totals.size} pivot(s)"
-      rescue Sigma::Error => e
-        warn "  [WARN] pivot totals RESTORE failed (#{e.message.lines.first.to_s.strip[0, 100]}) — " \
-             'the finalize ship step (put-layout.rb --apply-pivot-totals) will re-hide grand totals'
+        begin
+          File.delete(totals_sidecar) if File.exist?(totals_sidecar)
+        rescue StandardError
+          nil # stale sidecar is harmless: it re-applies the same captured totals
+        end
+      rescue StandardError => e
+        warn "  [WARN] pivot totals RESTORE failed (#{e.class}: #{e.message.lines.first.to_s.strip[0, 100]}) — " \
+             "captured totals kept in #{File.basename(totals_sidecar)}; the finalize ship step " \
+             '(put-layout.rb --apply-pivot-totals) re-applies them, incl. showSubtotals'
       end
     end
   end

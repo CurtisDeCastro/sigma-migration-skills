@@ -46,7 +46,10 @@ check(cull_failed_fields(long_prose) == [],
 
 puts 'plausible_field_name?'
 { 'Preset Room Used' => true, 'NUM_SUBSCRIBERS' => true, '% of Total lab' => true,
+  # v5.4.9: long enterprise KPI captions (8+ words) are legitimate field names.
+  'Average Revenue Per Paying User Per Month (USD)' => true,
   '. The usual' => false, '' => false, 'a b c d e f g h' => false,
+  'the element you referenced was removed' => false,
   '- dropped from the grid' => false }.each do |s, want|
   check(plausible_field_name?(s) == want, "plausible_field_name?(#{s.inspect}) == #{want}", fails)
 end

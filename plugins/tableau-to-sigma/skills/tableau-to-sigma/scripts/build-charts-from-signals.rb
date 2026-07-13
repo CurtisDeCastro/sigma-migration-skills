@@ -271,25 +271,56 @@ def synthesize_view_from_signals(z, meta)
   # above returns nil on them, and the zone dropped). Applied ONLY when the
   # zone would otherwise drop, so hex-GUID workbooks' header synthesis is
   # byte-identical to before.
+  #
+  # QUALITY FLOOR (v5.4.9 review fix): every field this block emits must be a
+  # REAL column — its key must carry a <column> definition in columns_by_guid
+  # and must not be a Tableau pseudo-field (the shelf parser mangles a
+  # multi-pill shelf expression into a pseudo-dim whose guid is Tableau's
+  # placeholder caption 'Multiple Values' — no column definition exists for
+  # it). And the recovered MEASURE must actually be measure-shaped: never
+  # promote a role=dimension or non-numeric (boolean/string/date) calc to a
+  # Sum() measure. Without the floor this block emitted [Master/...] refs that
+  # can never resolve, converting the old loud zone-drop into a hard exit-4 at
+  # the pre-POST ref gate. When the floor rejects, headers stay short and the
+  # zone falls back to the pre-v5.4 behavior: dropped with a loud warning.
   if headers.length < 2
-    dims2 = dims.dup
-    if (cc2 = z.dig('channels', 'color', 'column')) && (g2 = name_or_guid_from_text(cc2.to_s))
-      dims2 << { 'guid' => g2, 'role' => 'dim', 'derivation' => 'none' } if dims2.none? { |f| f['guid'] == g2 }
+    real_col = lambda do |key|
+      k = key.to_s
+      info = cbg[k]
+      info.is_a?(Hash) && !TABLEAU_PSEUDO_FIELDS.include?(k) ? info : nil
     end
-    meas2 = meas.dup
+    dims2 = dims.select { |f| real_col.call(f['guid']) }
+    if (cc2 = z.dig('channels', 'color', 'column')) && (g2 = name_or_guid_from_text(cc2.to_s))
+      dims2 << { 'guid' => g2, 'role' => 'dim', 'derivation' => 'none' } if real_col.call(g2) && dims2.none? { |f| f['guid'] == g2 }
+    end
+    meas2 = meas.select { |f| real_col.call(f['guid']) }
     if meas2.empty? && dims2.any?
       dim_keys = dims2.map { |d| d['guid'].to_s.downcase }
       rec = (z['aggregations'] || {}).find do |k, agg|
         %w[sum avg average min max count countd median].include?(agg.to_s.downcase) &&
           !dim_keys.include?(k.to_s.gsub(/\A\[|\]\z/, '').downcase)
       end&.first&.gsub(/\A\[|\]\z/, '')
-      meas2 << { 'guid' => rec, 'role' => 'measure', 'derivation' => 'none' } if rec && !rec.empty?
+      rec_info = rec && real_col.call(rec)
+      if rec_info && rec_info['role'].to_s != 'dimension' &&
+         (rec_info['datatype'].to_s.empty? || %w[integer real].include?(rec_info['datatype'].to_s)) &&
+         !placeholder_calc?(rec_info['formula'])
+        meas2 << { 'guid' => rec, 'role' => 'measure', 'derivation' => 'none' }
+      end
     end
-    h2 = (dims2.map(&field_header) + meas2.map(&field_header)).compact
-    headers = h2 if h2.length >= 2
+    d2 = dims2.map(&field_header).compact
+    m2 = meas2.map(&field_header).compact
+    # The block's own contract (and the caller's): dims first, then measures —
+    # at least one of EACH. Two dims are not a chart; reject and drop loudly.
+    headers = d2 + m2 if d2.any? && m2.any?
   end
   headers.length >= 2 ? { headers: headers } : nil
 end
+
+# Tableau reserved placeholder captions that the shelf parser can surface as
+# field keys but that are NEVER columns. 'Multiple Values' is the caption
+# Tableau renders for a multi-pill shelf expression (grammar-level constant,
+# not workbook-specific).
+TABLEAU_PSEUDO_FIELDS = ['Multiple Values'].freeze
 
 # Tableau relative-date offset window (first-period..last-period, in periods
 # relative to now — e.g. first=-2,last=0 = "last 3 months") → explicit
@@ -3291,17 +3322,26 @@ def translate_kpi_measure_formula(formula, mmap, columns_by_guid = {})
   s
 end
 
-# An axis-anchor PLACEHOLDER: a measure whose entire formula is an aggregate of
-# a numeric literal (min(-1.0), AVG(0), SUM(1)) or a bare literal. This is the
-# standard Tableau dummy-axis idiom — dashboarders pin BAN/scorecard marks to a
-# constant axis so the text sits where they want it. Such a pill carries NO
-# data; binding it as a KPI value reproduces the constant, not the metric
-# (round 6: every headline KPI on one shape bound min(-1.0)).
+# An axis-anchor PLACEHOLDER: a measure whose formula is a ROW-INDEPENDENT
+# constant — MIN/MAX/AVG/MEDIAN/ATTR of any numeric literal (min(-1.0), AVG(0))
+# or a zero/negative literal. This is the standard Tableau dummy-axis idiom —
+# dashboarders pin BAN/scorecard marks to a constant axis so the text sits
+# where they want it. Such a pill carries NO data; binding it as a KPI value
+# reproduces the constant, not the metric (round 6: every headline KPI on one
+# shape bound min(-1.0)).
+#
+# NOT placeholders (v5.4.9 review fix): row-COUNT measures. Bare literal `1`
+# is exactly the formula of Tableau's auto-generated [Number of Records]
+# field (default Sum aggregation → row count), and SUM(<positive literal>) is
+# the ad-hoc row-count idiom — both scale with the data and are real headline
+# values ("Total Orders" BANs). Only row-independent constants are plumbing.
 def placeholder_calc?(formula)
   s = formula.to_s.strip
   return false if s.empty?
-  return true if s =~ /\A-?\d+(?:\.\d+)?\z/
-  !!(s =~ /\A(?:MIN|MAX|AVG|SUM|MEDIAN|ATTR)\s*\(\s*-?\d+(?:\.\d+)?\s*\)\z/i)
+  return s.to_f <= 0 if s =~ /\A-?\d+(?:\.\d+)?\z/
+  m = s.match(/\A(MIN|MAX|AVG|SUM|MEDIAN|ATTR)\s*\(\s*(-?\d+(?:\.\d+)?)\s*\)\z/i)
+  return false unless m
+  m[1].casecmp('SUM').zero? ? m[2].to_f <= 0 : true
 end
 
 # Pick the KPI's VALUE measure from a marks-card measure list (bead: KPI value
@@ -3451,7 +3491,18 @@ def param_current_value(pcap, z, meta)
   case dt.to_s
   when 'integer' then v =~ /\A-?\d+\z/ ? v.to_i : nil
   when 'real'    then v =~ /\A-?(?:\d+\.?\d*|\.\d+)\z/ ? v.to_f : nil
-  else v
+  when 'date', 'datetime'
+    # v5.4.9 review fix: a date/datetime param default serializes as a Tableau
+    # date literal ('#2026-06-30#'); pinning that string in a list filter
+    # matches NO date value — the KPI renders blank while the warning claims
+    # success. Sigma list-filter pin semantics for date values are not
+    # live-verified, so fail CLOSED: nil routes the tile to the recipe's
+    # STAYS-MANUAL contract (a named gap beats a silently blank number).
+    nil
+  else
+    # Same date-literal shape with the datatype missing from the meta — still
+    # a date param; fail closed rather than pin '#...#' verbatim.
+    v =~ /\A#.*#\z/m ? nil : v
   end
 end
 
@@ -4761,17 +4812,22 @@ layout.each do |dash|
     end
     # v5.4 DONUT discriminator: Tableau has no donut mark — a donut is a Pie
     # mark whose rows/cols shelf carries ONLY constant-aggregate placeholder
-    # instances (the dual-AVG(0) dummy-axis hack that stacks two pies to make
-    # the hole). A plain pie has no such shelf. Grammar-level test, no fixture
-    # knowledge: every shelf measure resolves to a placeholder calc.
+    # instances, STACKED on a dual/blended axis (the dual-AVG(0) hack: two pies
+    # share one constant axis, the smaller one making the hole). A plain pie
+    # has no such shelf. Grammar-level test, no fixture knowledge: every shelf
+    # measure resolves to a placeholder calc AND the shelf raw carries the
+    # multi-instance '+' axis marker (`[..] + [..]`) — a SINGLE dummy-axis
+    # instance is just a vertically-positioned pie, not the donut idiom
+    # (v5.4.9 review fix).
     if kind == 'pie-chart'
       shelf_meas = ((z.dig('rows_shelf', 'fields') || []) + (z.dig('cols_shelf', 'fields') || []))
                    .select { |f| f['role'] == 'measure' }
-      if shelf_meas.any? && shelf_meas.all? { |f|
+      shelf_raw = "#{z.dig('rows_shelf', 'raw')} #{z.dig('cols_shelf', 'raw')}"
+      if shelf_meas.any? && shelf_raw =~ /\]\s*\+\s*[(\[]/ && shelf_meas.all? { |f|
            placeholder_calc?(((meta['columns_by_guid'] || {})[f['guid'].to_s] || {})['formula'])
          }
         kind = 'donut-chart'
-        warnings << "'#{cap}' pie mark rides constant-aggregate dummy axes (the Tableau donut idiom) — " \
+        warnings << "'#{cap}' pie mark rides stacked constant-aggregate dummy axes (the Tableau donut idiom) — " \
                     'emitted as donut-chart'
       end
     end
@@ -5796,22 +5852,19 @@ unless opts[:pages_mode] == :worksheet
                     'labels a KPI card — dropped (the Sigma kpi-chart renders its own title)'
         next
       end
-      # v5.4 px-true titles: a single-line title/banner zone whose runs carry
-      # NO explicit fontsize renders zone-sized in Tableau. Derive the px from
-      # the zone's own pixel height: a vertically-centered single text line
-      # occupies ~0.55 of its line box (standard 1.2–1.4em line height + zone
-      # padding — a typographic constant, not a fixture fit). Explicit run
-      # sizes always win; multi-line zones are left to Sigma defaults.
+      # v5.4 px-true titles, corrected v5.4.9: a text run with NO explicit
+      # fontsize renders at Tableau's workbook default (~9pt ≈ 12px) REGARDLESS
+      # of zone height — Tableau has no zone-fit text scaling, so the earlier
+      # height-derived size (0.55 × zone px) 4x-oversized any default-size
+      # label stretched by a fit-height layout container. Emit the flat default
+      # so Sigma's larger text default doesn't inflate single-line titles.
+      # Explicit run sizes always win; multi-line zones are left to Sigma
+      # defaults.
       default_px = nil
-      if z['text_runs'].none? { |r| r['font_size'] } &&
-         z['text_runs'].none? { |r| r['break'] } &&
-         (ch = dash.dig('canvas_px', 'h')).is_a?(Numeric) && z['h_pct'].is_a?(Numeric)
-        zone_px_h = ch * z['h_pct'] / 100.0
-        if zone_px_h >= 18
-          default_px = [[(zone_px_h * 0.55).round, 11].max, 48].min
-          warnings << "dashboard '#{dash['dashboard']}' text zone #{z['id']}: no explicit run sizes — " \
-                      "derived font-size #{default_px}px from the zone's #{zone_px_h.round}px height (px-true title)"
-        end
+      if z['text_runs'].none? { |r| r['font_size'] } && z['text_runs'].none? { |r| r['break'] }
+        default_px = 12
+        warnings << "dashboard '#{dash['dashboard']}' text zone #{z['id']}: no explicit run sizes — " \
+                    "emitted Tableau's default 12px (~9pt; px-true title)"
       end
       body = text_body_from_runs(z['text_runs'], align: z['text_align'],
                                  bg: (z['is_pill'] ? z['fill_color'] : nil),

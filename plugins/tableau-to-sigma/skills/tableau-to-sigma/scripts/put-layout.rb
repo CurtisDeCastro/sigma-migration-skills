@@ -31,13 +31,19 @@ OptionParser.new do |p|
   # v5.4: the pivot grand-totals SHIP step. A pivot carrying a `totals` key
   # 500s its CSV export (probe-isolated v5.4: `totals` is the SOLE trigger —
   # value type is irrelevant; ratio/PercentOfTotal export fine), which poisons
-  # verify-anchors' pivot exports. So the `totals` key is kept OFF the pivots
-  # during verification and re-applied HERE — the final spec mutation — once the
-  # gates are green. --apply-pivot-totals runs a totals-ONLY pass (no --layout
-  # needed): GET spec → set showGrandTotals:hidden on every pivot lacking a
-  # totals key (path-independent, like hidden-titles; an optional sibling
-  # *-pivot-totals.json sidecar overrides per element id) → PUT. Idempotent.
+  # verify-anchors' pivot exports. Generated pivots carry the key from build;
+  # verify-anchors strips it around its own CSV exports (restoring after), and
+  # THIS pass — the final spec mutation, once the gates are green — repairs any
+  # pivot the bracket left totals-less. --apply-pivot-totals runs a totals-ONLY
+  # pass (no --layout needed): GET spec → set showGrandTotals:hidden on every
+  # pivot lacking a totals key (path-independent, like hidden-titles; an
+  # optional *-pivot-totals.json sidecar overrides per element id) → PUT.
+  # Idempotent. The sidecar is globbed from the --layout dir, the --workdir,
+  # and the cwd (v5.4.9 review fix: the finalize ship step passes no --layout,
+  # which made the documented sidecar override unreachable on the automated
+  # path — migrate-tableau.rb now passes --workdir).
   p.on('--apply-pivot-totals', 'ship step: (re)hide pivot grand totals as a final PUT (see header). --layout optional.') { opts[:apply_pivot_totals] = true }
+  p.on('--workdir DIR', 'migration workdir — where sidecars (*-pivot-totals.json) are globbed when --layout is absent') { |v| opts[:workdir] = v }
 end.parse!
 abort('missing --workbook') unless opts[:wb]
 abort('missing --layout') unless opts[:layout] || opts[:apply_pivot_totals]
@@ -207,12 +213,22 @@ end
 # already carries a totals key is left as-is).
 if opts[:apply_pivot_totals]
   overrides = {}
-  side = opts[:layout] ? Dir.glob(File.join(File.dirname(opts[:layout]), '*-pivot-totals.json')).sort : []
+  # v5.4.9 review fix: the sidecar glob was gated on --layout, but the only
+  # automated caller (migrate-tableau.rb --finalize ship step) passes no
+  # --layout — the documented override channel had ZERO live readers. Glob the
+  # layout dir, the --workdir, and the cwd (manual runs are launched from the
+  # workdir). LAST definition per element id wins (deterministic: dirs in that
+  # order, files sorted within each) — so verify-anchors' auto-written
+  # `anchors-restore-pivot-totals.json` (sorts first) yields to an operator-
+  # authored sidecar for the same element id.
+  side_dirs = [opts[:layout] && File.dirname(opts[:layout]), opts[:workdir], Dir.pwd].compact.uniq
+  side = side_dirs.flat_map { |d| Dir.glob(File.join(d, '*-pivot-totals.json')).sort }.uniq
   side.each do |p|
     body = JSON.parse(File.read(p)) rescue nil
     tot = body.is_a?(Hash) ? (body['totals'] || {}) : {}
     tot.each { |k, v| overrides[k.to_s] = v } if tot.is_a?(Hash)
   end
+  puts "pivot totals: sidecar override(s) read from #{side.join(', ')}" if side.any?
   applied = 0
   (spec['pages'] || []).each do |p|
     (p['elements'] || []).each do |el|

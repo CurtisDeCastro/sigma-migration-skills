@@ -620,7 +620,14 @@ module MechanicalSpecs
     all_elements(model).each do |el|
       next unless el.dig('source', 'kind') == 'sql' && el.dig('source', 'statement').is_a?(String)
       stmt = el['source']['statement']
-      idents = stmt.scan(/"([^"]+)"|\[([^\]]+)\]|'([^']+)'/).flatten.compact
+      # Attribution scan: double-quoted and bracketed tokens only (v5.4.9
+      # review fix). Single-quoted tokens are DATA LITERALS in SQL (WHERE
+      # region = 'West') — counting them toward column overlap could tip the
+      # attribution to a wrong manifest entry and rewrite FROM to the wrong
+      # landed table with no warning. Single-quoted TABLE identifiers
+      # (FROM 'Sheet1$') don't contribute to column overlap anyway, and the
+      # FROM rewrite below still handles them via ident_pat.
+      idents = stmt.scan(/"([^"]+)"|\[([^\]]+)\]/).flatten.compact
                    .map { |x| norm.call(x) }.reject(&:empty?).to_set
       best = nil
       entries.each do |entry|
@@ -630,9 +637,17 @@ module MechanicalSpecs
       end
       next unless best
       entry = best[1]
-      if stmt.scan(/\bFROM\b/i).size + stmt.scan(/\bJOIN\b/i).size > 1
-        warn "custom-SQL element '#{el['name']}' references multiple tables — NOT auto-remapped; " \
-             "repoint it with --table-mapping (landed table: #{entry['sf_table']})"
+      # Multi-table guard: >1 FROM/JOIN, or a COMMA JOIN (`FROM a, b` — one
+      # FROM, zero JOINs; v5.4.9 review fix: previously scored single-table and
+      # got a half-rewritten `FROM <landed>, b`). Top-level comma test: take
+      # the FROM clause up to the next clause keyword, drop parenthesized
+      # groups (column lists of an inline subquery — itself caught by the
+      # 2-FROM count), then look for a remaining comma.
+      from_clause = stmt[/\bFROM\b(.*?)(?=\b(?:WHERE|GROUP\s+BY|ORDER\s+BY|HAVING|QUALIFY|LIMIT|UNION)\b|;|\z)/im, 1].to_s
+      comma_join = from_clause.gsub(/\([^()]*\)/, '').include?(',')
+      if stmt.scan(/\bFROM\b/i).size + stmt.scan(/\bJOIN\b/i).size > 1 || comma_join
+        warn "custom-SQL element '#{el['name']}' references multiple tables#{comma_join ? ' (comma join)' : ''} — " \
+             "NOT auto-remapped; repoint it with --table-mapping (landed table: #{entry['sf_table']})"
         next
       end
       ident_pat = %q{(?:"[^"]+"|\[[^\]]+\]|'[^']+'|[A-Za-z0-9_$#]+)}

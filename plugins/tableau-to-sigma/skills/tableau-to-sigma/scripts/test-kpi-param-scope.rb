@@ -3,10 +3,12 @@
 # Regression test for the v5.4 KPI wave: axis-anchor placeholder rejection +
 # the generic period/param-scoped KPI recipe. Grammar patterns locked:
 #
-#   - PLACEHOLDER: a measure whose formula is an aggregate of a numeric
-#     literal (min(-1.0) / AVG(0) / SUM(1)) is the Tableau dummy-axis idiom —
-#     mark plumbing, never the KPI value. The binder must skip it (shelf AND
-#     marks card) and bind the real measure.
+#   - PLACEHOLDER: a measure whose formula is a ROW-INDEPENDENT constant
+#     (min(-1.0) / AVG(0) / SUM(0)) is the Tableau dummy-axis idiom — mark
+#     plumbing, never the KPI value. The binder must skip it (shelf AND marks
+#     card) and bind the real measure. Row COUNTS are NOT placeholders
+#     (v5.4.9): bare literal 1 is exactly [Number of Records]'s formula and
+#     SUM(1) is the ad-hoc row-count idiom — both are real headline values.
 #   - PERIOD/PARAM SCOPE: a KPI whose measure is AGG(IF <expr> =
 #     [Parameters].[P] THEN [col] END) — with <expr> a BARE or bracketed ref,
 #     possibly a calc reducing to DATEPART('year', [datetime]) — and/or whose
@@ -35,8 +37,10 @@ src = File.read(BUILD)
 o = Object.new
 o.instance_eval(src.match(/^def placeholder_calc\?.*?\n^end$/m)[0])
 puts 'placeholder_calc?'
-{ 'min(-1.0)' => true, 'AVG(0)' => true, 'SUM(1)' => true, 'MAX( 2.5 )' => true,
-  '7' => true, '-1.0' => true,
+{ 'min(-1.0)' => true, 'AVG(0)' => true, 'SUM(0)' => true, 'MAX( 2.5 )' => true,
+  '-1.0' => true, '0' => true, 'SUM(-2)' => true,
+  # v5.4.9: row counts are DATA, not plumbing — bare 1 IS [Number of Records].
+  'SUM(1)' => false, '1' => false, '7' => false,
   'SUM([x])' => false, 'MIN([Order Date])' => false, 'AVG([a]) + 0' => false,
   '' => false }.each do |f, want|
   check(o.placeholder_calc?(f) == want, "placeholder_calc?(#{f.inspect}) == #{want}", fails)

@@ -691,11 +691,20 @@ def plausible_field_name?(s)
   # an error body like "Dependency not found. The usual cause is …" captured
   # ". The usual cause is …" as a FIELD NAME (round-6: exit-4 offramps named
   # the untranslatable field '. The usual'). A field name never starts with
-  # sentence punctuation, and Tableau captions are short — reject prose.
+  # sentence punctuation — reject prose shapes. v5.4.9 review fix: the word
+  # cap was 7, which culled legitimate long enterprise KPI captions ("Average
+  # Revenue Per Paying User Per Month (USD)" is 8 words) from the exit-4
+  # recovery list; the prose class is already rejected by the leading-
+  # punctuation check plus the mandatory-colon capture, so the cap is only a
+  # backstop — keep it generous.
   t = s.to_s.strip
   return false if t.empty? || t.length > 80
   return false if t.start_with?('.', ',', ';', ':', '-')
-  return false if t.split.length > 7
+  return false if t.split.length > 12
+  # Prose, not a caption: a clause starting with a lowercase English function
+  # word ("the element you referenced was removed …"). Tableau captions are
+  # Title Case / CONSTANT_CASE; a lowercase-article lead is sentence tail.
+  return false if t =~ /\A(?:the|a|an|this|that|these|those|it|its|you|your|is|are|was|were|be|been|has|have|had|and|or|of|in|on|to|for|with)\s/
   true
 end
 
@@ -972,15 +981,20 @@ if opts[:finalize]
   # ---- v5.4: pivot grand-totals SHIP step -------------------------------------
   # A pivot carrying a `totals` key 500s its CSV export (probe-isolated v5.4:
   # the key's PRESENCE is the sole trigger — value type irrelevant), which
-  # poisons verify-anchors' pivot exports, so verification runs totals-FREE.
-  # Now that every gate is GREEN, re-hide grand totals on the shipped workbook
-  # as the FINAL spec mutation — the same put-layout late-mutation channel
+  # poisons verify-anchors' pivot exports, so verify-anchors STRIPS the key
+  # around its own pivot CSV exports and restores it after (generated pivots
+  # otherwise carry `totals` from build onward). Now that every gate is GREEN,
+  # repair any pivot the bracket left totals-less on the shipped workbook as
+  # the FINAL spec mutation — the same put-layout late-mutation channel
   # hidden-titles uses. Runs AFTER Phase E (the enhance clone verifies against
   # totals-free pivots too). Idempotent + non-fatal: a failure only means
   # visible grand-total rows, a documented cosmetic residual (ROUND6 §2.4).
+  # --workdir (v5.4.9) lets the *-pivot-totals.json sidecar override apply on
+  # this automated path too (incl. the restore sidecar verify-anchors writes).
   if all_green
     _, tst = sigma_run!(['ruby', File.join(HERE, 'put-layout.rb'),
-                         '--workbook', wb_id, '--apply-pivot-totals'], allow_fail: true)
+                         '--workbook', wb_id, '--apply-pivot-totals',
+                         '--workdir', WORK], allow_fail: true)
     line(tst.success? ? 'pivot grand-totals re-hidden on shipped workbook (final mutation)' :
          'WARN: pivot totals re-apply failed — workbook ships with visible grand-total rows (cosmetic residual)')
     mark('pivot-totals-ship')
@@ -1866,8 +1880,13 @@ if mechanical
   # v5.4: prune orphaned BROKEN leftovers (union-collapse class) AFTER remap +
   # fixup have had their chance to repair refs — strict double condition
   # (broken cross-refs AND unreferenced), loud per-element log.
+  # v5.4.9 review fix: pass keep: (a provisional fact pick) so a single-table
+  # model whose FACT carries one stale cross-ref can never be pruned to an
+  # empty model — the docstring's "not the kept fact" invariant was dead code
+  # because no caller passed keep:.
   begin
-    pruned = MechanicalSpecs.prune_broken_orphans!(conv['model'])
+    keep_fact = (MechanicalSpecs.pick_fact(conv['model'], prefer_table: prefer_fact_table) rescue nil)
+    pruned = MechanicalSpecs.prune_broken_orphans!(conv['model'], keep: keep_fact && keep_fact['name'])
     line "DM prune: removed #{pruned.size} orphaned broken element(s): #{pruned.join(', ')}" if pruned.any?
   rescue StandardError => e
     line "WARN: orphan prune failed (#{e.message}) — model left as converted"

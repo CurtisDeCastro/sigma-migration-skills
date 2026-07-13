@@ -213,14 +213,21 @@ and ratio/division all export fine WITHOUT `totals`; both totals-bearing variant
 variants rendered), so a totals-bearing pivot still renders with hidden grand totals — but its CSV
 export (verify-anchors' pivot pooling, `collect-parity-actuals`) is dead.
 
-**Mechanism (v5.4 fix):** the `totals` key is kept OFF the pivots during verification and applied
-only at the **ship step**:
+**Mechanism (v5.4; wording + sidecar reachability corrected v5.4.9):** generated pivots CARRY the
+`totals` key from build onward (the chart builder stamps it; style-normalize re-adds it on
+readback) — the only totals-free window is verify-anchors' strip bracket:
 - `verify-anchors.rb` brackets its live pivot CSV exports — capture + strip each pivot's `totals`
-  (one PUT), export against totals-free pivots, then restore (ensure). Renders keep hidden grand
-  totals before/after; only the brief export window is totals-free.
-- `put-layout.rb --apply-pivot-totals` re-hides grand totals as the FINAL spec mutation once the
-  gates are green (`migrate-tableau.rb --finalize` runs it automatically; run it by hand on the
-  manual/recovery path). Optional sibling `*-pivot-totals.json` sidecar overrides per element id.
+  (one PUT), export against totals-free pivots, then restore (ensure; network-level PUT failures
+  are rescued too, not just HTTP errors). It persists the captured totals to
+  `<workdir>/anchors-restore-pivot-totals.json` BEFORE stripping and deletes it after a successful
+  restore — a hard kill or failed restore is then repaired at the ship step with full fidelity
+  (incl. `showSubtotals`), not the lossy grand-totals-only default.
+- `put-layout.rb --apply-pivot-totals` is the ship-step REPAIR pass once the gates are green
+  (`migrate-tableau.rb --finalize` runs it automatically and passes `--workdir`; run it by hand on
+  the manual/recovery path): any pivot still lacking a `totals` key gets `showGrandTotals:hidden`.
+  An optional `*-pivot-totals.json` sidecar — globbed from the `--layout` dir, the `--workdir`,
+  and the cwd — overrides per element id (e.g. preserves a source pivot's deliberately SHOWN
+  grand totals).
 - `verify-visual-tiles.rb` / `verify-dashboard-visual.rb` NAME this ceiling on a render 500 instead
   of an opaque MISSING.
 
