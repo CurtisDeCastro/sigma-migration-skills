@@ -78,6 +78,18 @@ else
   fi
 fi
 
+# --- visual-similarity deps (gate 14's measured floor) ----------------------
+# visual-similarity.py needs Pillow + numpy; without them the gate exits
+# "SKIPPED: dep missing" instead of measuring (A/B-report field-caught: the
+# deps were undeclared and the floor silently could not run on a fresh box).
+if command -v "${PY_CMD:-python3}" >/dev/null 2>&1; then
+  if "${PY_CMD:-python3}" -c "import PIL, numpy" >/dev/null 2>&1; then
+    ok "python imaging deps (Pillow + numpy) — visual-similarity floor can run"
+  else
+    warn "Pillow/numpy missing — the visual-similarity floor (gate 14) cannot MEASURE and will need a named waiver"          "pip install pillow numpy   (numpy 2.3+ preferred; 2.2.x histogram regression is worked around in-script)"
+  fi
+fi
+
 # --- python TLS trust (P1.4) -----------------------------------------------
 # Python's OpenSSL 3.x is stricter than curl/Ruby and rejects some valid server
 # chains (e.g. Tableau Cloud's intermediate — "Basic Constraints not marked

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# NOTE: reads SIGMA_CLIENT_ID/SECRET from env or ~/.sigma-migration/env; prints a
+# bearer token for hand-driven scripts (the orchestrator mints in-process).
 """get_token.py — shell-neutral Sigma token minting (Python stdlib only).
 
 The cross-shell twin of get-token.sh. Where get-token.sh prints

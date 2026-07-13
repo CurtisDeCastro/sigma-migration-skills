@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# NOTE: requires SIGMA_API_TOKEN (+SIGMA_BASE_URL) in env. The orchestrator injects
+# them; for HAND-DRIVEN runs: set -a; source ~/.sigma-migration/env; set +a; then
+# mint via scripts/get_token.py (A/B-report field note).
 """sigma-export-png.py — render a Sigma workbook page or element to PNG via the
 REST export API, for VISUAL QA of a migrated workbook (Phase 4: side-by-side
 against the source Looker dashboard).

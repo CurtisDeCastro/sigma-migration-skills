@@ -131,7 +131,11 @@ def _load_gray(path):
 
 def _ink_maps(gray):
     """Return (combined ink map, edge-only ink map) as float 0/1 arrays."""
-    hist, edges = np.histogram(gray, bins=16, range=(0, 256))
+    # explicit float64 edges: np.histogram(x, bins=16, range=(0,256)) hits a
+    # broadcast regression on numpy 2.2.x with real image arrays (A/B-report
+    # reproduced; fine on 2.3+). Edges are version-robust on both.
+    hist, edges = np.histogram(np.asarray(gray, dtype=np.float64).ravel(),
+                               bins=np.linspace(0.0, 256.0, 17))
     mode = int(np.argmax(hist))
     background = (edges[mode] + edges[mode + 1]) / 2.0
     deviation = np.abs(gray - background) > LUM_DELTA

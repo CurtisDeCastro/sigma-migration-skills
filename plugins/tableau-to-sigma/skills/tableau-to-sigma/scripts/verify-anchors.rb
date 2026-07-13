@@ -211,7 +211,7 @@ def el_display_name(el)
   t.empty? ? el['id'].to_s.sub(/\Ael-/, '').tr('-', ' ') : t
 end
 
-opts = { pool: 4, timeout: 120 }
+opts = { pool: 8, timeout: 120 } # pool 8: A/B report measured phase6-pass1 +70.5s dominated by anchor export collection
 OptionParser.new do |p|
   p.on('--workdir DIR')        { |v| opts[:dir] = v }
   p.on('--tableau DIR', 'alias of --workdir') { |v| opts[:dir] = v }
