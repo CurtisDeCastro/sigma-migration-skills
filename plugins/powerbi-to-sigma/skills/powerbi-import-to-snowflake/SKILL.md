@@ -72,8 +72,8 @@ for the connect/auth details (same device-code path, no Entra app).
 
 ## Then hand off
 
-1. Convert the model with `powerbi-to-sigma` (or locally:
-   `node scripts/run_converter.mjs <model.bim> <sigma-conn-id> <DB> <SCHEMA> dm.json`).
+1. Convert the model with `powerbi-to-sigma` (or locally, pointing at your converter build:
+   `CONVERTER_PATH=<.../build/powerbi.js> node scripts/run_converter.mjs <model.bim> <sigma-conn-id> <DB> <SCHEMA> dm.json`).
 2. POST the DM — sources resolve against the landed tables (names align).
 3. Verify parity — query the DM and compare to the PBI `executeQueries` golden.
    Validated end-to-end on Microsoft's Retail Analysis Sample: 923,371 SALES rows,
