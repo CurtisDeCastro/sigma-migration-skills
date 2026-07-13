@@ -75,22 +75,60 @@ skills.each do |dir|
   ok += 1
 end
 
+# ---------------------------------------------------------------------------
+# Portability content-lint (bead: windows-portability). The rules above check
+# SKILL.md prose; these scan SCRIPT BODIES for the class of "validated only on
+# macOS" footgun that shipped in #346 — a bug that is LATENT on the BSD/macOS
+# dev box and only bites on Windows/Linux. A regression here fails the PR.
+# ---------------------------------------------------------------------------
+port_fails = []  # [path, lineno, msg]
+
+# #346: a shell `base64` ENCODE must strip newlines. GNU coreutils base64 (Git
+# Bash on Windows, Linux CI) wraps at 76 columns, injecting newlines that
+# corrupt a multi-line Authorization header; BSD/macOS base64 does not wrap, so
+# the bug is invisible on the dev box. Require `tr -d '\n'` (portable) or
+# `-w0`/`--wrap=0` (GNU-only) on the same pipeline.
+Dir.glob('**/*.sh').sort.each do |f|
+  File.readlines(f).each_with_index do |line, i|
+    next if line =~ /\A\s*#/                           # skip comments
+    next unless line =~ /\|\s*base64\b/                # pipes INTO base64 (encode)
+    next if line =~ /base64\s+(-d|-D|--decode)\b/       # decode, not encode
+    next if line =~ /tr\s+-d/ || line =~ /base64\s+(-w\s*0|--wrap[= ]?0)/
+    port_fails << [f, i + 1,
+                   "shell base64 encode without newline strip — add `| tr -d '\\n'` " \
+                   '(GNU base64 wraps at 76 cols and corrupts the auth header; see #346)']
+  end
+end
+
 unless warns.empty?
   puts "Tracked baseline gaps (WARN — fix and remove from #{baseline_path}):"
   warns.each { |n, id, desc, r| puts "  ~ #{n}: #{desc}\n      #{r}" }
   puts
 end
 
-if fails.empty?
-  puts "OK: #{ok} converter SKILL.md files document all mandatory gates (#{warns.size} tracked baseline gaps)."
+if fails.empty? && port_fails.empty?
+  puts "OK: #{ok} converter SKILL.md files document all mandatory gates " \
+       "(#{warns.size} tracked baseline gaps); portability content-lint clean."
   exit 0
 end
 
-puts "SKILL CONFORMANCE FAILURE"
-puts "A converter SKILL.md is missing a mandatory gate (docs/phase-schema.md)."
-puts "Fix the skill, or — if genuinely N/A — add it to #{baseline_path} with a reason."
-puts
-fails.each { |n, id, desc| puts "  FAIL  #{n}: missing #{id} — #{desc}" }
-puts
-puts "failures: #{fails.size}"
+unless fails.empty?
+  puts "SKILL CONFORMANCE FAILURE"
+  puts "A converter SKILL.md is missing a mandatory gate (docs/phase-schema.md)."
+  puts "Fix the skill, or — if genuinely N/A — add it to #{baseline_path} with a reason."
+  puts
+  fails.each { |n, id, desc| puts "  FAIL  #{n}: missing #{id} — #{desc}" }
+  puts
+  puts "conformance failures: #{fails.size}"
+  puts
+end
+
+unless port_fails.empty?
+  puts "PORTABILITY LINT FAILURE"
+  puts "A script has a known cross-platform footgun (latent on macOS; breaks on Windows/Linux)."
+  puts
+  port_fails.each { |f, ln, msg| puts "  FAIL  #{f}:#{ln} — #{msg}" }
+  puts
+  puts "portability failures: #{port_fails.size}"
+end
 exit 1
