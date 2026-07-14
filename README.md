@@ -52,7 +52,7 @@ and the skill drives discovery → translation → build → parity.
 | Plugin | Source tool | Skills it installs |
 |---|---|---|
 | [`tableau-to-sigma`](plugins/tableau-to-sigma/) | Tableau | `tableau-to-sigma`, `tableau-assessment`, `tableau-vds-to-cdw` |
-| [`powerbi-to-sigma`](plugins/powerbi-to-sigma/) | Power BI | `powerbi-to-sigma`, `powerbi-assessment` |
+| [`powerbi-to-sigma`](plugins/powerbi-to-sigma/) | Power BI | `powerbi-to-sigma`, `powerbi-assessment`, `powerbi-import-to-snowflake` |
 | [`qlik-to-sigma`](plugins/qlik-to-sigma/) | Qlik Sense / Cloud | `qlik-to-sigma`, `qlik-assessment` |
 | [`thoughtspot-to-sigma`](plugins/thoughtspot-to-sigma/) | ThoughtSpot | `thoughtspot-to-sigma`, `thoughtspot-assessment` |
 | [`quicksight-to-sigma`](plugins/quicksight-to-sigma/) | Amazon QuickSight | `quicksight-to-sigma`, `quicksight-assessment` |
@@ -70,6 +70,14 @@ published extract / VDS feed) and isn't yet in the warehouse Sigma reads. It pul
 via the VizQL Data Service API and lands it in your cloud warehouse — **Snowflake** or **Databricks**, optionally on a schedule —
 so the converter has a warehouse-native table to build on. `tableau-assessment` flags the
 datasources that need it.
+
+The `powerbi-to-sigma` plugin bundles the equivalent bridge, **`powerbi-import-to-snowflake`** —
+for **Import-mode** Power BI models whose data lives inside the `.pbix` / semantic model
+(Excel, Power Query, flat files) rather than a live warehouse. It reads the model definition
+via Fabric `getDefinition`, extracts the stored table rows through the Power BI
+`executeQueries` API, and lands them as typed tables in **Snowflake** — the data track that
+runs *before* `powerbi-to-sigma` converts the model logic. DirectQuery models already point
+at a warehouse and don't need it.
 
 ## The shared shape
 
