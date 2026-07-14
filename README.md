@@ -113,7 +113,7 @@ corpus/run-corpus.sh --check      # no creds needed; CI-safe
 
 - **A coding agent that runs skills** (Claude Code, Cursor, Cortex Code, …).
 - The **[Sigma MCP server](https://help.sigmacomputing.com/docs/use-sigma-mcp-server)** connected in your agent — how the agent reads/queries your Sigma org and builds + validates the migrated data model and workbook. Follow Sigma's setup guide.
-- The **[Sigma data model converter MCP](https://github.com/twells89/sigma-data-model-mcp)** available (provides the `convert_*_to_sigma` tools that translate the source spec).
+- **No converter to install** — each skill bundles its data-model converter (`convert_*_to_sigma`) and runs it **locally by default** (no network, no data egress). A [hosted converter MCP](https://github.com/twells89/sigma-data-model-mcp) is available as an **optional, opt-in fallback** that sends the source spec off-machine.
 - A **Sigma API token** and a Sigma **connection** pointing at the same warehouse as the source content (needed for the parity gate).
 - Per-tool source access — see each plugin's `refs/connection.md` (e.g. `qlik-cli` for Qlik; device-code / Fabric `getDefinition` for Power BI).
 
