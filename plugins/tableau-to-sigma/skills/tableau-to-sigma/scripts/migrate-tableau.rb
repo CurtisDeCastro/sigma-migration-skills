@@ -222,6 +222,11 @@ OptionParser.new do |o|
   o.on('--skip-dashboard-read REASON', 'waive the Phase 1d source dashboard-read gate — REQUIRED reason; name it in your report') { |v| opts[:skip_dashboard_read] = v }
   o.on('--skip-doctor-gate REASON', 'waive the Step-0 environment gate (doctor.json) — REQUIRED reason; name it in your report') { |v| opts[:skip_doctor_gate] = v }
   o.on('--skip-ref-check REASON', 'waive the pre-POST workbook ref-resolution gate — REQUIRED reason; name it in your report') { |v| opts[:skip_ref_check] = v }
+  o.on('--fast REASON', 'TRUSTED table/pivot-only fast path (opt-in, OFF by default): at --finalize, waive the ' \
+                        'Phase-6f visual render gate (8) + recorded visual comparison (8b) with REASON — for a ' \
+                        'workbook whose elements are detail tables / pivots with no charts, so no PNG render or ' \
+                        'side-by-side is needed. Recorded as a quality waiver (counts toward the >2 budget cap). ' \
+                        'Do NOT use for chart-bearing dashboards.') { |v| opts[:fast] = v }
   o.on('--skip-extract-landing REASON', 'proceed although every datasource is an embedded file extract and no ' \
                                         'landing manifest was found (exit 17 otherwise) — you own the DM table paths') { |v| opts[:skip_extract_landing] = v }
   o.on('--no-auto-land', 'keep the manual extract-landing gate (exit 17) instead of auto-running land-extracts.py ' \
@@ -820,7 +825,11 @@ if opts[:finalize]
   # render that exists. The agent records the verdict with record-visual-check.rb
   # after the Phase 6f side-by-side read (see SKILL.md); without it the gate
   # exits 13. tableau-to-sigma is the reference adopter of this opt-in gate.
-  gate += ['--require-visual-comparison']
+  # --fast (opt-in, trusted table/pivot-only workbooks): waive the two VISUAL gates
+  # (8 render + 8b recorded comparison) with the operator's recorded reason, and do
+  # NOT require the comparison. OFF by default — this trades visual QA and violates
+  # the "never declare done on HTTP 200" contract, so it is never implicit.
+  gate += ['--require-visual-comparison'] unless opts[:fast]
   # Phase 5g — require the RCF fidelity ledger (gate 8d) unless the loop was
   # explicitly disabled at pass 1 (--rcf-passes 0). Legacy state (pre-5g) has no
   # rcf_passes key → default to requiring it, since the ledger is the new bar.
@@ -832,6 +841,9 @@ if opts[:finalize]
   # Gate 11 (post-publish interactivity guide) waiver pass-through — the gate
   # itself decides whether the source's actions require POSTPUBLISH_GUIDE.md.
   gate += ['--skip-postpublish-guide', opts[:skip_postpublish_guide]] if opts[:skip_postpublish_guide]
+  # --fast: stamp the two visual-gate waivers with the operator's reason (recorded
+  # in parity-final.json's waivers[] and counted toward the >2-waiver budget cap).
+  gate += ['--skip-visual-gate', opts[:fast], '--skip-visual-comparison', opts[:fast]] if opts[:fast]
   _, gst = sigma_run!(gate, allow_fail: true)
   mark('assert-phase6-ran')
 
