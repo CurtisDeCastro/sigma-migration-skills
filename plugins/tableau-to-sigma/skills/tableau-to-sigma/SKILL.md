@@ -150,6 +150,8 @@ input mode, which feed the telemetry ping's duration and `mode`). Precedence: ex
 `--connection` → cached → `SIGMA_CONNECTION_ID` env → list once. With no id/name and
 multiple connections it lists them and asks you to pick — it never guesses.
 
+> **When there are many connections, let intake pick by the workbook's warehouse — don't inspect the `.twb` by hand.** Pass the resolved workbook LUID: `ruby scripts/intake.rb --workdir <WORK> --rank-workbook-id <LUID>`. Intake fingerprints the workbook's warehouse (`GET /workbooks/{luid}/connections` → type + host, no `.twb`/`zip` needed) and ranks the Sigma connections; a **unique type+host match auto-resolves** (e.g. a Snowflake workbook on `acct.snowflakecomputing.com` → the matching Snowflake connection), otherwise it writes a **ranked** `connection-candidates.json` with a clear top pick and asks. This replaces the field-caught pattern of downloading the `.twb` and grepping `class=`/`server=` to guess among 26 connections. (`scripts/rank-connections.rb` is the standalone ranker; `--rank-twb <path>` adds a db-name tie-break once the `.twb` is downloaded.)
+
 ## One command (orchestrated path)
 
 ```bash
