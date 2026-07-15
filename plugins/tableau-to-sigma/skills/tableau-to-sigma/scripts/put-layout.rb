@@ -48,18 +48,41 @@ end.parse!
 abort('missing --workbook') unless opts[:wb]
 abort('missing --layout') unless opts[:layout] || opts[:apply_pivot_totals]
 
-BASE = ENV.fetch('SIGMA_BASE_URL')
-TOK  = ENV.fetch('SIGMA_API_TOKEN')
+# Read the Sigma token the shell-neutral way every sibling script uses (post-and-
+# readback.rb etc.): lib/sigma_rest loads <WORK>/auth.json (get_token.py's handoff)
+# at require time — keyed on SIGMA_WORKDIR then cwd — sets SIGMA_BASE_URL from it,
+# and self-mints/refreshes via client_credentials. This replaces the old
+# ENV.fetch('SIGMA_API_TOKEN') that KeyError-crashed at load when the token lived
+# only in auth.json (field-caught: put-layout forced a manual token-export + a
+# Git-Bash /c/ path failure). Honor this script's --workdir / --layout dir as
+# <WORK> so a standalone run finds auth.json even when launched elsewhere; explicit
+# env always wins. MUST set SIGMA_WORKDIR before the require (bootstrap runs then).
+ENV['SIGMA_WORKDIR'] ||= opts[:workdir] ||
+                         (opts[:layout] && File.dirname(File.expand_path(opts[:layout])))
+$LOAD_PATH.unshift File.expand_path('lib', __dir__)
+require 'sigma_rest'
+
+BASE = ENV.fetch('SIGMA_BASE_URL') # sigma_rest fills this from auth.json when unset
 
 def http(method, path, body = nil)
-  uri = URI("#{BASE}#{path}")
-  req = case method
-        when :get then Net::HTTP::Get.new(uri)
-        when :put then r = Net::HTTP::Put.new(uri); r.body = body; r['Content-Type'] = 'application/json'; r
-        end
-  req['Authorization'] = "Bearer #{TOK}"
-  req['Accept']        = 'application/json'
-  Net::HTTP.start(uri.host, uri.port, use_ssl: true) { |h| h.request(req) }
+  attempts = 0
+  loop do
+    attempts += 1
+    uri = URI("#{BASE}#{path}")
+    req = case method
+          when :get then Net::HTTP::Get.new(uri)
+          when :put then r = Net::HTTP::Put.new(uri); r.body = body; r['Content-Type'] = 'application/json'; r
+          end
+    req['Authorization'] = "Bearer #{Sigma.auth_token}"
+    req['Accept']        = 'application/json'
+    res = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https') { |h| h.request(req) }
+    if res.code.to_i == 401 && attempts == 1 && ENV['SIGMA_CLIENT_ID']
+      warn '  [auth] Sigma token expired mid-run — refreshing and retrying...'
+      Sigma.refresh_token!
+      next
+    end
+    return res
+  end
 end
 
 spec = JSON.parse(http(:get, "/v2/workbooks/#{opts[:wb]}/spec").body)
