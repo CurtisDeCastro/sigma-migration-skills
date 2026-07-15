@@ -193,12 +193,26 @@ def _sort_signal(visual):
     Entity.Property fallback) so the builder can map it to a Sigma column id."""
     sd = (visual.get("query") or {}).get("sortDefinition") or {}
     entries = sd.get("sort") or []
+    qs = (visual.get("query") or {}).get("queryState") or {}
     if not entries:
+        # No EXPLICIT sort persisted. Do NOT leave a table/matrix unsorted — Power BI
+        # still applies a default: a table/matrix sorts by its FIRST column ascending.
+        # Reproduce that so the migrated pivot matches the report; otherwise Sigma
+        # applies its own (different) default and the row order silently diverges.
+        # (Charts are excluded — their categorical/axis order is handled elsewhere.)
+        # Caveat recorded downstream: the parity/executeQueries ROW ORDER is the DAX
+        # ORDER BY, NOT this visual sort — never infer the sort from parity output.
+        if str(visual.get("visualType", "")) in ("tableEx", "pivotTable", "matrix"):
+            for role in ("Rows", "Category", "Values"):  # first non-empty = leftmost column
+                for p in (qs.get(role) or {}).get("projections", []):
+                    if isinstance(p, dict):
+                        qr = p.get("queryRef") or p.get("nativeQueryRef")
+                        if qr:
+                            return {"queryRef": qr, "direction": "asc", "default": True}
         return None
     first = entries[0]
     direction = "desc" if str(first.get("direction", "")).lower().startswith("desc") else "asc"
     fld = first.get("field")
-    qs = (visual.get("query") or {}).get("queryState") or {}
     for _role, blk in qs.items():
         for p in blk.get("projections", []):
             if isinstance(p, dict) and p.get("field") == fld:
