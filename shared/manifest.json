@@ -130,6 +130,12 @@
    ]
   },
   {
+   "canonical": "shared/lib/zip_extract.rb",
+   "targets": [
+    "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/lib/zip_extract.rb"
+   ]
+  },
+  {
    "canonical": "shared/lib/sigma_telemetry.py",
    "targets": [
     "plugins/cognos-to-sigma/skills/cognos-to-sigma/scripts/lib/sigma_telemetry.py",

@@ -34,6 +34,31 @@ module PyResolve
     argv.join(' ')
   end
 
+  # Convert a Git-Bash / MSYS / Cygwin POSIX path ("/c/Users/x/f.twbx", "/mnt/c/…")
+  # into a native Windows path ("C:\\Users\\x\\f.twbx") so a NATIVE Windows Python
+  # (py -3 / python.org) can open() it — the field-caught "Windows Python can't open
+  # /c/… paths" failure. Wrap EVERY filesystem-path ARG a Ruby script shells to
+  # Python. Hard no-op on macOS/Linux, on already-native paths (C:\, C:/, UNC), and
+  # on anything not starting with "/" (so flags like --out, ids, and numbers pass
+  # through untouched). Prefers `cygpath -w` (honors the real mount table) and falls
+  # back to a pure-Ruby transform when cygpath is absent (cmd/PowerShell).
+  def winpath(p)
+    s = p.to_s
+    return p unless windows?
+    return p if s.empty?
+    return p if s =~ %r{\A[A-Za-z]:[\\/]} || s.start_with?('\\\\') # already C:\ / C:/ / UNC
+    return p unless s.start_with?('/')                             # only absolute POSIX paths
+    begin
+      require 'open3'
+      out, st = Open3.capture2('cygpath', '-w', s)
+      return out.strip if st.success? && !out.strip.empty?
+    rescue StandardError
+      # cygpath not on PATH — fall through to the pure-Ruby transform.
+    end
+    m = s.match(%r{\A/(?:mnt/)?([A-Za-z])/(.*)\z})                 # /c/… or /mnt/c/…
+    m ? "#{m[1].upcase}:\\#{m[2].tr('/', '\\')}" : p
+  end
+
   def windows?
     # RbConfig is the reliable host check; ENV['OS'] is a cheap secondary signal.
     (RbConfig::CONFIG['host_os'] =~ /mswin|mingw|cygwin/i) || ENV['OS'].to_s =~ /windows/i

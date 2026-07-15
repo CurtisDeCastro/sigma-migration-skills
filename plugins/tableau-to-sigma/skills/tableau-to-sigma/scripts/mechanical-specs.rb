@@ -791,7 +791,7 @@ module MechanicalSpecs
     raw_text  = File.join(workdir, 'conv-hosted-out.json')
     meta_out  = File.join(workdir, 'conv-meta.json')
     File.write(args_file, JSON.pretty_generate(args))
-    o, e, st = Open3.capture3(*PyResolve.argv, client, 'convert_tableau_to_sigma', args_file, raw_text)
+    o, e, st = Open3.capture3(*PyResolve.argv, PyResolve.winpath(client), 'convert_tableau_to_sigma', PyResolve.winpath(args_file), PyResolve.winpath(raw_text))
     raise "hosted converter failed (sigma-data-model-mcp.onrender.com): #{e}#{o}" unless st.success?
     out = JSON.parse(File.read(raw_text))
     bare = out['model'] || out['sigmaDataModel'] || out

@@ -61,19 +61,13 @@ require 'thread'
 
 $LOAD_PATH.unshift File.expand_path('lib', __dir__)
 require 'tableau_rest'
-require 'py_resolve'
-
-# Cross-platform replacement for shelling `unzip` (not present on stock
-# Windows): Ruby has no stdlib zip reader, so this delegates to Python's
-# stdlib `zipfile` via a Store-stub-safe interpreter (see lib/py_resolve.rb).
-# Returns true/false like the old `system('unzip', ...)` call did.
-def unzip_extract(zip_path, dest_dir)
-  require 'open3'
-  code = 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])'
-  _out, err, status = Open3.capture3(*PyResolve.argv, '-c', code, zip_path, dest_dir)
-  warn "  unzip failed for #{zip_path}: #{err.strip[0, 300]}" if !status.success? && !err.to_s.strip.empty?
-  status.success?
-end
+# .twbx is a ZIP (inner .twb + embedded .hyper extract). Read it with the stdlib-
+# only Zlib reader — NOT the rubygems 'zip' (crashes "cannot load such file -- zip"
+# on stock RubyInstaller, field-caught) and NOT a shelled unzip/python (PATH/Store-
+# stub footguns). lib/zip_extract selectively inflates ONE member, so we read the
+# small .twb and derive .hyper presence from the name list without ever inflating
+# the multi-GB extract.
+require 'zip_extract'
 
 opts = { fetch_view_images: 'dashboard-only', pool: 5 }
 OptionParser.new do |o|
@@ -212,31 +206,28 @@ unless opts[:skip_content]
         twbx_path = File.join(opts[:out], 'workbook-content.twbx')
         atomic_write(twbx_path, payload)
         log "wrote workbook-content.twbx  (#{payload.bytesize} bytes)"
-        require 'tmpdir'
-        Dir.mktmpdir do |tmp|
-          unless unzip_extract(twbx_path, tmp)
-            log '.twbx auto-unzip failed; leaving .twbx in place'
-          else
-            hypers = Dir.glob(File.join(tmp, '**', '*.hyper')).any?
-            inner = Dir.glob(File.join(tmp, '**', '*.twb')).first
-            if inner
-              twb_path = File.join(opts[:out], 'workbook-content.twb')
-              # Force UTF-8: a bare File.read uses the locale default (US-ASCII on
-              # many systems) and raises "invalid byte sequence in US-ASCII" on the
-              # first non-ASCII byte (em-dash, @handles, curly quotes). The direct-
-              # download branch below already force_encodes; the .twbx path must too.
-              xml = File.read(inner, encoding: 'UTF-8')
-              if FcpNormalize.needed?(xml)
-                n = xml.scan(/_\.fcp\./).length
-                xml = FcpNormalize.normalize(xml)
-                log "FCP-normalized workbook XML (#{n} forward-compatibility token(s) → canonical names)"
-              end
-              atomic_write(twb_path, xml)
-              log "extracted workbook-content.twb  (#{File.size(twb_path)} bytes) from .twbx"
-            else
-              log '.twbx contained no inner .twb — odd'
+        begin
+          names  = ZipExtract.entries(twbx_path)
+          hypers = names.any? { |n| n.downcase.end_with?('.hyper') } # from names — no inflation
+          inner  = names.find { |n| n.downcase.end_with?('.twb') }
+          if inner
+            twb_path = File.join(opts[:out], 'workbook-content.twb')
+            # Force UTF-8: the raw bytes may hold non-ASCII (em-dash, @handles,
+            # curly quotes); force_encode so FcpNormalize + downstream regex don't
+            # raise "invalid byte sequence in US-ASCII".
+            xml = ZipExtract.read(twbx_path, inner).to_s.force_encoding('UTF-8')
+            if FcpNormalize.needed?(xml)
+              n = xml.scan(/_\.fcp\./).length
+              xml = FcpNormalize.normalize(xml)
+              log "FCP-normalized workbook XML (#{n} forward-compatibility token(s) → canonical names)"
             end
+            atomic_write(twb_path, xml)
+            log "extracted workbook-content.twb  (#{File.size(twb_path)} bytes) from .twbx"
+          else
+            log '.twbx contained no inner .twb — odd'
           end
+        rescue StandardError => e
+          log ".twbx read failed (#{e.message.to_s[0, 200]}); leaving .twbx in place"
         end
       else
         twb_path = File.join(opts[:out], 'workbook-content.twb')
