@@ -3586,6 +3586,14 @@ function unescapeCustomSqlEntities(s) {
   }
   return out;
 }
+function collapseDoubledComparisonOps(sql) {
+  let rewrites = 0;
+  const out = sql.replace(/<{2,}|>{2,}/g, (m) => {
+    rewrites++;
+    return m[0];
+  });
+  return { sql: out, rewrites };
+}
 function collapseCustomSqlBlend(elements, connId, colSqlNameById, colTypeById, warnings) {
   const elById = new Map(elements.map((e) => [e.id, e]));
   const fact = elements.find((e) => e.source?.kind === "sql" && Array.isArray(e.relationships) && e.relationships.some((r) => elById.get(r.targetElementId)?.source?.kind === "sql"));
@@ -4514,7 +4522,15 @@ function convertTableauToSigma(xmlContent, options = {}) {
             }
           }
           const isCustomSql = isCustomSqlRel;
-          const sqlText = isCustomSql ? qualifyTwoPartFqns(unescapeCustomSqlEntities(String(rel["#text"] ?? "")).trim(), dbOverride) : "";
+          let sqlText = "";
+          if (isCustomSql) {
+            const decoded = qualifyTwoPartFqns(unescapeCustomSqlEntities(String(rel["#text"] ?? "")).trim(), dbOverride);
+            const collapsed = collapseDoubledComparisonOps(decoded);
+            sqlText = collapsed.sql;
+            if (collapsed.rewrites > 0) {
+              warnings.push(`\u26A0 Custom SQL relation "${fullName}": collapsed ${collapsed.rewrites} doubled comparison operator(s) (<<\u2192<, >>=\u2192>=) \u2014 a Tableau ObjectModel encapsulation artifact. VERIFY these are comparisons, not bit-shift operators.`);
+            }
+          }
           const source = isCustomSql && sqlText ? { connectionId: connId, kind: "sql", statement: sqlText } : { connectionId: connId, kind: "warehouse-table", path };
           if (isCustomSql && !sqlText) {
             warnings.push(`\u26A0 Custom SQL relation "${fullName}" has no inline SQL text \u2014 emitted as a table path "${path.join(".")}"; verify or replace with the query.`);
@@ -4664,7 +4680,11 @@ function convertTableauToSigma(xmlContent, options = {}) {
         }
       }
     } else if (relType === "text") {
-      const statement = _repointCustomSqlSchema(unescapeCustomSqlEntities((rootRelation["#text"] || "").toString()).trim(), attr(rootConn, "dbname"), attr(rootConn, "schema"), dbOverride, schOverride);
+      const _collapsed = collapseDoubledComparisonOps(unescapeCustomSqlEntities((rootRelation["#text"] || "").toString()).trim());
+      if (_collapsed.rewrites > 0) {
+        warnings.push(`\u26A0 Custom SQL datasource: collapsed ${_collapsed.rewrites} doubled comparison operator(s) (<<\u2192<, >>=\u2192>=) \u2014 a Tableau ObjectModel encapsulation artifact. VERIFY these are comparisons, not bit-shift operators.`);
+      }
+      const statement = _repointCustomSqlSchema(_collapsed.sql, attr(rootConn, "dbname"), attr(rootConn, "schema"), dbOverride, schOverride);
       if (!statement) {
         warnings.push("\u26A0 Custom SQL relation carried no SQL text \u2014 no element emitted.");
       } else {
