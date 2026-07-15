@@ -78,6 +78,29 @@ else
   fi
 fi
 
+# --- Windows Store-stub shim ------------------------------------------------
+# On windows-bash the REAL interpreter is usually `py -3`, but bare `python` /
+# `python3` resolve to the Microsoft Store App-Execution-Alias stub — which
+# silently no-ops and floods every tool call (and any PreToolUse hook that shells
+# `python`) with "Python was not found; run … Microsoft Store" (field-observed:
+# ~15 spurious errors in the first two minutes). The skill's own scripts resolve
+# Python internally, so this only bites bare `python` callers. When `py -3` is
+# real but `python` is the stub, drop a shim in ~/bin (git-bash auto-prepends
+# ~/bin to PATH at login) so `python`/`python3` resolve to `py -3`.
+if [ "$OS" = "windows-bash" ] && py_real py -3 && ! py_real python; then
+  if mkdir -p "$HOME/bin" 2>/dev/null; then
+    printf '#!/usr/bin/env bash\nexec py -3 "$@"\n' > "$HOME/bin/python"  2>/dev/null && chmod +x "$HOME/bin/python"  2>/dev/null
+    printf '#!/usr/bin/env bash\nexec py -3 "$@"\n' > "$HOME/bin/python3" 2>/dev/null && chmod +x "$HOME/bin/python3" 2>/dev/null
+    if [ -x "$HOME/bin/python" ]; then
+      case ":$PATH:" in
+        *":$HOME/bin:"*) ok "python Store-stub shim installed (~/bin/python → py -3; ~/bin already on PATH)" ;;
+        *) warn "python Store-stub shim installed (~/bin/python → py -3)" \
+                "Add ~/bin to PATH for this shell so bare 'python' stops hitting the Store stub: export PATH=\"\$HOME/bin:\$PATH\"  (git-bash auto-adds ~/bin on next login)" ;;
+      esac
+    fi
+  fi
+fi
+
 # --- visual-similarity deps (gate 14's measured floor) ----------------------
 # visual-similarity.py needs Pillow + numpy; without them the gate exits
 # "SKIPPED: dep missing" instead of measuring (A/B-report field-caught: the
