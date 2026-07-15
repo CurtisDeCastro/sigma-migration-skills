@@ -167,6 +167,17 @@ end
     request(:get, "#{base_path}/workbooks/#{workbook_id}")['workbook']
   end
 
+  # A workbook's live datasource connections: [{type, serverAddress, serverPort,
+  # userName, ...}]. This is the cheap warehouse fingerprint (no .twb/.twbx
+  # download, so it dodges the missing `zip` gem) used to auto-rank Sigma
+  # connection candidates. `type` is a Tableau connection class (e.g. 'snowflake',
+  # 'sqlserver', 'redshift', 'databricks'); serverAddress is the warehouse host.
+  def workbook_connections(workbook_id)
+    j = request(:get, "#{base_path}/workbooks/#{workbook_id}/connections")
+    list = j.dig('connections', 'connection') || []
+    list.is_a?(Array) ? list : [list]
+  end
+
   # Returns the raw .twb XML (string) or .twbx bytes for workbooks with embedded extracts.
   # Embedded check: if the response starts with PK\x03\x04 it's a zip (twbx); otherwise raw XML.
   def download_workbook_content(workbook_id, include_extract: false)
