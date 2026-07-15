@@ -23,7 +23,12 @@ def check(c, m, fails) fails << m unless c; puts "  #{c ? 'PASS' : 'FAIL'}  #{m}
 # Run with a hard timeout+kill: cases that PASS the cred gate proceed toward
 # discovery (network) and must not hang the test — we only need the early output
 # to confirm the cred abort did/didn't fire.
-def run_no_creds(mt, home, work, extra_env = {}, timeout: 20)
+# NB: extra_env is a plain trailing positional hash (NOT a keyword param). A `timeout:`
+# keyword here would make Ruby 3 route callers' inline `'KEY' => val` hashes to keywords
+# → "unknown keyword" (green on Ruby 2.6's old coercion, red on CI's Ruby 3). Keep it
+# positional so `run_no_creds(mt, home, work, 'K' => 'v')` works on both.
+def run_no_creds(mt, home, work, extra_env = {})
+  timeout = 20
   env = {
     'HOME' => home, 'SIGMA_SKIP_DOCTOR_GATE' => 'test',
     'SIGMA_API_TOKEN' => nil, 'SIGMA_CLIENT_ID' => nil,
