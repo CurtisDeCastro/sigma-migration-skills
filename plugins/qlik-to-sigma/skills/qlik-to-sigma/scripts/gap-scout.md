@@ -22,7 +22,7 @@ Analysis (`Sum({<F={v}>} X)`→`Sum(If([F]=v,[X]))`, `{1}`, `-=`, multi-value/fl
 | Qlik pattern | Why flagged | Candidate Sigma translation to try |
 |---|---|---|
 | `Aggr(<agg>, <dim>)` | nested-aggregate, no 1:1 | a **grouped/level element** or a pre-aggregated DM element; sometimes `WindowSum`/`WindowAvg` over a partition |
-| `Above/Below/Peek/Previous(...)` | inter-record (running total, MoM) | a workbook-level window fn (`*Over`) on a date-grouped element — NOT a DM calc col (those silently error); escalate to workbook build |
+| `Above/Below/Peek/Previous(...)` | inter-record (running total, MoM) | the converter emits **native** Sigma window fns — Above→`Lag`, Below→`Lead`, Previous/Peek→`Lag`, Rank→`Rank` (running windows expand to `Lag`/`Lead` lists) — in a date-**grouped** workbook element (grouped for the partition + sort that match the Qlik chart; the native fns also resolve fine in a DM calc col). NEVER the `*Over` family — those are Unknown-function in every spec context. |
 | `Rank/HRank(...)` | ranking | `Rank()` is a Sigma **window** fn — build it in a grouping table, not a DM metric |
 | `Class(<field>, <size>, <label>)` w/ 3rd label arg | labeled binning | converter keeps the lower edge; add an `If()`-range label column if the text matters |
 | `GetSelectedCount / GetFieldSelections / GetCurrentSelections` | selection state | no Sigma equivalent — usually a control-driven measure; escalate |
