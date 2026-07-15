@@ -429,6 +429,32 @@ if _tab_needed && !_tab_creds_ok && _tab_skip && !_tab_skip.to_s.empty?
   Offramp.log(WORK, kind: 'tableau-gate-waived', reason: _tab_skip.to_s)
 end
 
+# ── Stale-PAT preflight (single, non-retrying live sign-in) ──────────────────
+# The presence gate above proves creds EXIST; it does not prove the PAT WORKS. A
+# revoked/expired/mistyped PAT otherwise fails deep in discovery after work is
+# done — and Tableau LOCKS a PAT after 4 consecutive FAILED sign-ins. Validate it
+# ONCE here (a SUCCESSFUL sign-in does NOT count toward lockout, so a healthy PAT
+# costs ~1s and warms the token discovery reuses). No retry: on failure we abort
+# clean at Step 0 with the regenerate message rather than hammering toward lockout.
+# Only on the fresh-PAT discovery path, and skippable with SIGMA_SKIP_CRED_SMOKE
+# (the same switch the doctor honors) for offline tests / air-gapped setups.
+if _tab_needed && _tab_creds_ok && !_tab_via_mcp && ENV['SIGMA_SKIP_CRED_SMOKE'].to_s.empty?
+  begin
+    Tableau.refresh_token!   # one live PAT sign-in; raises Tableau::Error on 401 / bad config
+    puts '  [preflight] Tableau PAT sign-in OK — token minted.'
+  rescue Tableau::Error => e
+    Offramp.log(WORK, kind: 'tableau-pat-preflight-failed', reason: e.message.lines.first.to_s.strip) rescue nil
+    abort <<~MSG
+      FATAL: Tableau PAT sign-in failed at preflight — #{e.message.lines.first.to_s.strip}
+      The personal access token is invalid / expired / revoked, or the site is wrong.
+      Regenerate the PAT (Tableau → My Account Settings → Personal Access Tokens),
+      re-run scripts/setup-tableau.rb, or fix TABLEAU_SITE_CONTENT_URL / TABLEAU_SERVER_URL.
+      Validated ONCE on purpose: a bad PAT locks after 4 failed sign-ins, so we do NOT
+      retry. (Waive the preflight: SIGMA_SKIP_CRED_SMOKE="<reason>".)
+    MSG
+  end
+end
+
 # ── Design-consistency advisory readout (doctor.json) ────────────────────────
 # The hard gate above proves the environment passed; these two are the silent
 # DESIGN-variance killers the gate does not block on — surface them at every

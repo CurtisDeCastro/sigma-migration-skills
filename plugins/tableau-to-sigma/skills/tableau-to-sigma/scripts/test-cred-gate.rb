@@ -89,10 +89,20 @@ Dir.mktmpdir do |home|
     check(!out.include?('no Tableau credentials resolvable'), 'reused discovery (stamp present) skips the Tableau gate', fails)
     File.delete(File.join(work, 'discovery-stamp.json'))
 
-    # (7) Tableau PAT present in env => Tableau gate passes.
+    # (7) Tableau PAT present in env => Tableau gate passes. SIGMA_SKIP_CRED_SMOKE
+    #     bypasses the new live sign-in preflight so this stays a pure presence-gate test.
+    code, out = run_no_creds(MT, home, work,
+                             sigma.merge('TABLEAU_PAT_NAME' => 'pat', 'TABLEAU_PAT_SECRET' => 'sec',
+                                         'SIGMA_SKIP_CRED_SMOKE' => 'offline-test'))
+    check(!out.include?('no Tableau credentials resolvable'), 'env Tableau PAT satisfies the gate', fails)
+
+    # (8) PAT present but NO server/site and NO skip => stale-PAT preflight fires and
+    #     aborts. refresh_token! raises 'TABLEAU_SITE_CONTENT_URL not set' before any
+    #     socket, so this is fully offline (no network, no lockout risk).
     code, out = run_no_creds(MT, home, work,
                              sigma.merge('TABLEAU_PAT_NAME' => 'pat', 'TABLEAU_PAT_SECRET' => 'sec'))
-    check(!out.include?('no Tableau credentials resolvable'), 'env Tableau PAT satisfies the gate', fails)
+    check(out.include?('sign-in failed at preflight'),
+          'misconfigured/stale PAT aborts at the single-attempt preflight (no retry)', fails)
   end
 end
 
