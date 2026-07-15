@@ -2114,6 +2114,15 @@ var import_fast_xml_parser = __toESM(require_fxp(), 1);
 // ../sigma-data-model-mcp/build/sigma-ids.js
 var SIGMA_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 var _usedIds = /* @__PURE__ */ new Set();
+var _idCounter = 0;
+function encodeBase62(n, len) {
+  let x = n, s = "";
+  while (x > 0) {
+    s = SIGMA_CHARS[x % 62] + s;
+    x = Math.floor(x / 62);
+  }
+  return s.padStart(len, SIGMA_CHARS[0]);
+}
 var SIGMA_LOWERCASE_WORDS = /* @__PURE__ */ new Set([
   "a",
   "an",
@@ -2139,11 +2148,12 @@ var SIGMA_LOWERCASE_WORDS = /* @__PURE__ */ new Set([
 ]);
 function resetIds() {
   _usedIds.clear();
+  _idCounter = 0;
 }
 function sigmaShortId(len = 10) {
   let id;
   do {
-    id = Array.from({ length: len }, () => SIGMA_CHARS[Math.floor(Math.random() * SIGMA_CHARS.length)]).join("");
+    id = encodeBase62(++_idCounter, len);
   } while (_usedIds.has(id));
   _usedIds.add(id);
   return id;
@@ -2611,6 +2621,19 @@ var TABLEAU_FUNC_MAP = {
   "MOD": "Mod",
   "SIGN": "Sign",
   "PI": "Pi",
+  // trig + angle conversion — same names/arg-order in Sigma (live-verified 2026-07-10, bead tt3z.3)
+  "SIN": "Sin",
+  "COS": "Cos",
+  "TAN": "Tan",
+  "COT": "Cot",
+  "ASIN": "Asin",
+  "ACOS": "Acos",
+  "ATAN": "Atan",
+  "ATAN2": "Atan2",
+  "DEGREES": "Degrees",
+  "RADIANS": "Radians",
+  // PROPER (title-case) — live-verified Sigma Proper() (bead tt3z.3)
+  "PROPER": "Proper",
   "STR": "Text",
   "INT": "Int",
   "FLOAT": "Number",
@@ -2636,7 +2659,8 @@ var TABLEAU_FUNC_MAP = {
   "HOUR": "Hour",
   "MINUTE": "Minute",
   "SECOND": "Second",
-  "WEEK": "Week",
+  // NOTE: no 'WEEK' entry — Sigma has no Week() function; WEEK(date) is rewritten
+  // to DatePart("week", date) below (verified via docs + live query 2026-07-10).
   "QUARTER": "Quarter",
   "DATE": "Date",
   "DATETIME": "Datetime",
@@ -2861,6 +2885,8 @@ function tableauFormulaToSigma(formula, warnings) {
   f = f.replace(/\bIIF\s*\(/gi, "If(");
   f = tableauCaseToSigma(f);
   f = f.replace(/\bDATEPART\s*\(\s*'(\w+)'\s*,\s*([^)]+)\)/gi, (m, part, dateArg) => {
+    if (part.toLowerCase() === "week")
+      return 'DatePart("week", ' + dateArg.trim() + ")";
     const partMap = {
       year: "Year",
       month: "Month",
@@ -2868,7 +2894,6 @@ function tableauFormulaToSigma(formula, warnings) {
       hour: "Hour",
       minute: "Minute",
       second: "Second",
-      week: "Week",
       quarter: "Quarter",
       dayofweek: "DayOfWeek",
       weekday: "DayOfWeek"
@@ -2906,6 +2931,7 @@ function tableauFormulaToSigma(formula, warnings) {
   f = f.replace(/,\s*["'](?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)["']\s*\)/gi, ")");
   f = f.replace(/\bDATEADD\s*\(\s*'([^']+)'\s*,/gi, 'DateAdd("$1",');
   f = f.replace(/\bDATEDIFF\s*\(\s*'([^']+)'\s*,/gi, 'DateDiff("$1",');
+  f = f.replace(/\bWEEK\s*\(\s*([^()]*(?:\([^()]*\)[^()]*)*)\)/gi, 'DatePart("week", $1)');
   f = f.replace(/\bSTDEVP\s*\(([^()]+(?:\([^()]*\)[^()]*)*)\)/gi, "Sqrt(VariancePop($1))");
   f = f.replace(/\bDATEPARSE\s*\(\s*('[^']*'|"[^"]*")\s*,\s*([^()]+(?:\([^()]*\)[^()]*)*)\)/gi, (_m, fmt, str) => {
     const sf = fmt.slice(1, -1).replace(/yyyy/g, "%Y").replace(/yy/g, "%y").replace(/MMMM/g, "%B").replace(/MMM/g, "%b").replace(/MM/g, "%m").replace(/dd/g, "%d").replace(/HH/g, "%H").replace(/hh/g, "%I").replace(/mm/g, "%M").replace(/ss/g, "%S");
@@ -2917,6 +2943,8 @@ function tableauFormulaToSigma(formula, warnings) {
   f = f.replace(/\bISMEMBEROF\s*\(\s*['"]([^'"]+)['"]\s*\)/gi, 'CurrentUserInTeam("$1")');
   f = f.replace(/\bUSERATTRIBUTE\s*\(\s*['"]([^'"]+)['"]\s*\)/gi, 'CurrentUserAttributeText("$1")');
   f = f.replace(/\bISUSERNAME\s*\(\s*['"]([^'"]+)['"]\s*\)/gi, '(CurrentUserEmail() = "$1")');
+  f = f.replace(/\bSQUARE\s*\(\s*([^()]*(?:\([^()]*\)[^()]*)*)\)/gi, "Power($1, 2)");
+  f = f.replace(/\bSPACE\s*\(\s*([^()]*(?:\([^()]*\)[^()]*)*)\)/gi, 'Repeat(" ", $1)');
   for (const [tab, sig] of Object.entries(TABLEAU_FUNC_MAP)) {
     f = f.replace(new RegExp("\\b" + tab + "\\s*\\(", "gi"), sig + "(");
   }
@@ -3546,6 +3574,17 @@ function qualifyTwoPartFqns(sql, db) {
     const parts = ref.match(new RegExp(part, "g")) || [];
     return parts.length === 2 ? `${kw}${qdb}.${ref}` : m;
   });
+}
+function unescapeCustomSqlEntities(s) {
+  const decodeOnce = (t) => t.replace(/&#x([0-9a-fA-F]+);/g, (_m, h) => String.fromCodePoint(parseInt(h, 16))).replace(/&#(\d+);/g, (_m, d) => String.fromCodePoint(parseInt(d, 10))).replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&");
+  let out = s;
+  for (let i = 0; i < 5; i++) {
+    const next = decodeOnce(out);
+    if (next === out)
+      break;
+    out = next;
+  }
+  return out;
 }
 function collapseCustomSqlBlend(elements, connId, colSqlNameById, colTypeById, warnings) {
   const elById = new Map(elements.map((e) => [e.id, e]));
@@ -4475,7 +4514,7 @@ function convertTableauToSigma(xmlContent, options = {}) {
             }
           }
           const isCustomSql = isCustomSqlRel;
-          const sqlText = isCustomSql ? qualifyTwoPartFqns(String(rel["#text"] ?? "").trim(), dbOverride) : "";
+          const sqlText = isCustomSql ? qualifyTwoPartFqns(unescapeCustomSqlEntities(String(rel["#text"] ?? "")).trim(), dbOverride) : "";
           const source = isCustomSql && sqlText ? { connectionId: connId, kind: "sql", statement: sqlText } : { connectionId: connId, kind: "warehouse-table", path };
           if (isCustomSql && !sqlText) {
             warnings.push(`\u26A0 Custom SQL relation "${fullName}" has no inline SQL text \u2014 emitted as a table path "${path.join(".")}"; verify or replace with the query.`);
@@ -4625,8 +4664,7 @@ function convertTableauToSigma(xmlContent, options = {}) {
         }
       }
     } else if (relType === "text") {
-      const decodeNumericEntities = (s) => s.replace(/&#x([0-9a-fA-F]+);/g, (_m, h) => String.fromCodePoint(parseInt(h, 16))).replace(/&#(\d+);/g, (_m, d) => String.fromCodePoint(parseInt(d, 10)));
-      const statement = _repointCustomSqlSchema(decodeNumericEntities((rootRelation["#text"] || "").toString()).trim(), attr(rootConn, "dbname"), attr(rootConn, "schema"), dbOverride, schOverride);
+      const statement = _repointCustomSqlSchema(unescapeCustomSqlEntities((rootRelation["#text"] || "").toString()).trim(), attr(rootConn, "dbname"), attr(rootConn, "schema"), dbOverride, schOverride);
       if (!statement) {
         warnings.push("\u26A0 Custom SQL relation carried no SQL text \u2014 no element emitted.");
       } else {
