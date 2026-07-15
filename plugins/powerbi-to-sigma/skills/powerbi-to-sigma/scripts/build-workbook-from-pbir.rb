@@ -50,6 +50,7 @@ require 'json'
 require 'optparse'
 require_relative 'lib/layout'
 require_relative 'lib/pbi_theme'
+require_relative 'lib/pbi_pivot_sort'
 require_relative 'lib/pbi_style'
 require_relative 'lib/pbi_conditional_formats'
 require_relative 'lib/coverage_catalog'
@@ -581,16 +582,25 @@ end
 #                         grouped table; the sort must nest INSIDE the grouping
 #                         (qlik-to-sigma refs/sigma-build-gotchas.md, verified 2026-06-10)
 #   table (ungrouped)   : sort = [{ columnId, direction }]
+#   pivot-table         : rowsBy[0].sort = { by: <colId>, direction } — the outer
+#                         row grouping is sorted by the resolved column. VERIFIED
+#                         accepted + round-tripped + rendered 2026-07-15; the old
+#                         "pivot-table sort is not spec-expressible, set it in the
+#                         UI" punt was wrong and dropped every matrix/tableEx sort.
+# NOTE: dispatch on el['kind'] (not the caller's `kind`) — a grouped `table` with a
+# Grand Total row is re-expressed as a pivot-table upstream (el['kind'] flips to
+# 'pivot-table' while the caller still passes kind='table'), so its sort must route
+# to the pivot branch, not the grouped-table branch.
 # direction must be the full word "ascending"/"descending" — the API rejects
 # "asc"/"desc" (validate-spec.rb guards this too).
-def apply_sort(el, kind, rec, qr_cids, name)
+def apply_sort(el, kind, rec, qr_cids, name, cols = nil)
   srt = rec['sort']
   return unless srt.is_a?(Hash) && srt['queryRef']
   dir = srt['direction'].to_s.start_with?('desc') ? 'descending' : 'ascending'
   norm = ->(s) { s.to_s.downcase.gsub(/[_\s]+/, ' ').strip }
   pair = qr_cids.find { |qr, _| norm.call(qr) == norm.call(srt['queryRef']) }
   cid = qr_cids[srt['queryRef']] || (pair && pair[1])
-  case kind
+  case (el['kind'] || kind)
   when 'bar-chart', 'line-chart', 'area-chart', 'combo-chart'
     return warn_sort_miss(name, srt) unless cid
     # A visual-level sort BY THE DIM ITSELF must not clobber the model's
@@ -609,10 +619,17 @@ def apply_sort(el, kind, rec, qr_cids, name)
       el['sort'] = [{ 'columnId' => cid, 'direction' => dir }]
     end
   when 'pivot-table'
-    warn "[build-workbook] WARN visual '#{name}': pivot-table sort is not spec-expressible in Sigma — set it in the UI."
-    record_unresolved(visual: name, severity: 'degraded', recoverable: false,
-                      detail: 'pivot-table sort is not spec-expressible in Sigma',
-                      action: 'Set the sort on the pivot in the Sigma UI after migration.')
+    return warn_sort_miss(name, srt) unless cid
+    # rowsBy[0].sort {by,direction}; coalesce-blank-first when sorting the dim
+    # ascending (see lib/pbi_pivot_sort.rb — the old "not spec-expressible" punt
+    # was wrong and dropped every matrix/tableEx sort).
+    applied = PbiPivotSort.apply!(rows_by: el['rowsBy'], cols: cols, cid: cid, dir: dir)
+    unless applied
+      warn "[build-workbook] WARN visual '#{name}': pivot-table has no rowsBy to sort — skipped."
+      record_unresolved(visual: name, severity: 'degraded', recoverable: true,
+                        detail: 'pivot-table sort could not be applied (no rowsBy)',
+                        action: 'Set the sort on the pivot in the Sigma UI after migration.')
+    end
   end
 end
 
@@ -1398,7 +1415,7 @@ def build_element(rec, fields, masters, extra_data = [])
 
   # bead f972: carry the PBI visual's sort onto the built element (runs AFTER the
   # case so a grouped table's sort can nest inside its grouping entry).
-  apply_sort(el, kind, rec, qr_cids, name)
+  apply_sort(el, kind, rec, qr_cids, name, cols)
 
   # Conditional formatting (color scales / data bars) on table + pivot-table.
   # Runs AFTER the case so it sees the final kind (a totals-bearing table is
