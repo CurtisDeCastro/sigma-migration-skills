@@ -5901,8 +5901,9 @@ unless opts[:pages_mode] == :worksheet
     return nil unless twbx && zip_path
     dest = File.join(assets_dir, File.basename(zip_path))
     unless File.exist?(dest)
-      data, st = Open3.capture2('unzip', '-p', twbx, zip_path)
-      return nil unless st.success? && !data.empty?
+      require_relative 'lib/zip_extract' # stdlib Zlib reader — no shelled unzip binary (Windows-safe)
+      data = ZipExtract.read(twbx, zip_path)
+      return nil unless data && !data.empty?
       require 'fileutils'
       FileUtils.mkdir_p(assets_dir)
       File.binwrite(dest, data)

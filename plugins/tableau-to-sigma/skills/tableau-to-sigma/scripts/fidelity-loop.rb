@@ -262,8 +262,8 @@ when 'render'
   out_png = File.join(opts[:dir], "rcf-pass-#{n}.png")
   renderer = File.join(HERE, 'sigma-export-png.py')
   require_relative 'lib/py_resolve' # real-Python resolver (Windows Store-stub safe)
-  cmd_r = [*PyResolve.argv, renderer, '--workbook', ledger['workbook_id'],
-           '--page', ledger['page_id'], '--out', out_png,
+  cmd_r = [*PyResolve.argv, PyResolve.winpath(renderer), '--workbook', ledger['workbook_id'],
+           '--page', ledger['page_id'], '--out', PyResolve.winpath(out_png),
            '--w', opts[:width].to_s, '--h', opts[:height].to_s]
   ok = system(*cmd_r)
   unless ok && File.exist?(out_png) && File.size(out_png) > 5_000

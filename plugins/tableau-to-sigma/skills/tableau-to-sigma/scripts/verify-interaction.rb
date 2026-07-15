@@ -485,9 +485,9 @@ sel['by_dashboard'].each do |dash, cands|
           nil # evidence only — silent
         end
         if rec['page_id']
-          ok = system(*PyResolve.argv, png_script, '--workbook', WB, '--page', rec['page_id'],
+          ok = system(*PyResolve.argv, PyResolve.winpath(png_script), '--workbook', WB, '--page', rec['page_id'],
                       '--param', "#{cid}=#{value}",
-                      '--out', File.join(EVD, "#{slug}.sigma.png"),
+                      '--out', PyResolve.winpath(File.join(EVD, "#{slug}.sigma.png")),
                       out: File::NULL, err: File::NULL)
           renders['sigma'] = "interaction/#{slug}.sigma.png" if ok && File.size?(File.join(EVD, "#{slug}.sigma.png"))
         end

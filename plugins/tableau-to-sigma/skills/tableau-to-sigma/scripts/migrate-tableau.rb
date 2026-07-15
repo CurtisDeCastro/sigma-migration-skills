@@ -1664,11 +1664,11 @@ if mechanical
         prefix = wb_luid ? "#{slug}_#{wb_luid.to_s.delete('-')[0, 6].upcase}" : slug
         line "embedded-extract sources (#{conn_classes.join(', ')}) — AUTO-LANDING the frozen extract " \
              "(prefix #{prefix}; --no-auto-land to keep the manual gate)"
-        _o, lst = run!([*PyResolve.argv, File.join(HERE, 'land-extracts.py'),
-                        '--twbx', twbx_payload,
+        _o, lst = run!([*PyResolve.argv, PyResolve.winpath(File.join(HERE, 'land-extracts.py')),
+                        '--twbx', PyResolve.winpath(twbx_payload),
                         '--db', (opts[:db] || 'CSA'), '--schema', (opts[:schema] || 'TJ'),
                         '--prefix', prefix, '--sigma-connection-id', opts[:conn],
-                        '--manifest-out', File.join(WORK, 'landing-manifest.json')],
+                        '--manifest-out', PyResolve.winpath(File.join(WORK, 'landing-manifest.json'))],
                        allow_fail: true)
         mani_p = File.join(WORK, 'landing-manifest.json')
         # Parse the manifest INDEPENDENTLY of the exit status — a nonzero exit
@@ -3367,8 +3367,8 @@ Array.new([3, content_pages.size].min.clamp(1, 3)) do
       end
       out = File.join(vqa, "#{pg['id']}.png")
       o, st = Open3.capture2e({ 'SIGMA_API_TOKEN' => vqa_tok },
-                              *PyResolve.argv, File.join(HERE, 'sigma-export-png.py'),
-                              '--workbook', wb_id, '--page', pg['id'], '--out', out, '--w', '1800', '--h', '1000')
+                              *PyResolve.argv, PyResolve.winpath(File.join(HERE, 'sigma-export-png.py')),
+                              '--workbook', wb_id, '--page', pg['id'], '--out', PyResolve.winpath(out), '--w', '1800', '--h', '1000')
       vqa_mx.synchronize do
         o.each_line { |l| puts "   #{l.rstrip}" } unless o.strip.empty?
         st.success? ? (rendered += 1) : line("WARN: visual-QA render failed for page #{pg['id']}")

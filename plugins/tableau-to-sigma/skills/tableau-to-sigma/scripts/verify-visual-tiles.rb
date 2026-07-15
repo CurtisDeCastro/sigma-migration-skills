@@ -71,7 +71,7 @@ crop_from_dashboard = lambda do |ws, out_png|
   src = File.join(opts[:dash_dir], "#{dash}.png")
   src = Dir[File.join(opts[:dash_dir], '*.png')].first unless File.exist?(src)
   return false unless src && File.exist?(src)
-  system(*PyResolve.argv, '-c', CROP_PY, src, out_png, *rect.map(&:to_s),
+  system(*PyResolve.argv, '-c', CROP_PY, PyResolve.winpath(src), PyResolve.winpath(out_png), *rect.map(&:to_s),
          out: File::NULL, err: File::NULL) && File.size?(out_png)
 end
 
@@ -176,8 +176,8 @@ Array.new([3, tiles.size].min.clamp(1, 3)) do
   # 2) Sigma element render
   render_out = nil
   if t['element_id']
-    render_out, render_st = Open3.capture2e(*PyResolve.argv, png_script, '--workbook', opts[:wb], '--element', t['element_id'],
-                                            '--out', sigma_png, '--w', opts[:w].to_s, '--h', opts[:h].to_s)
+    render_out, render_st = Open3.capture2e(*PyResolve.argv, PyResolve.winpath(png_script), '--workbook', opts[:wb], '--element', t['element_id'],
+                                            '--out', PyResolve.winpath(sigma_png), '--w', opts[:w].to_s, '--h', opts[:h].to_s)
     rec['sigma_png'] = sigma_png if render_st.success? && File.size?(sigma_png)
   end
 
