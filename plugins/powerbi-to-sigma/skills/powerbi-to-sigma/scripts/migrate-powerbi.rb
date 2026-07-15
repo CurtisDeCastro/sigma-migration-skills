@@ -753,6 +753,35 @@ if modes.include?('import')
                  'default' => "land live on connection #{opts[:conn]} (#{opts[:db]}.#{opts[:schema]})" }
 end
 
+# (c-bis) NON-WAREHOUSE SOURCES — Fabric Dataflow / Lakehouse / OneLake / Dataverse
+# / file. The converter can't derive a queryable warehouse path (the data lives
+# OUTSIDE the semantic model, and any transform logic in the dataflow/query can't
+# be translated) so it emitted placeholder paths that will NOT resolve until the
+# data is landed. Offer the land-then-repoint handoff: run the
+# powerbi-import-to-snowflake skill to land the data, then re-run Build (Phase 3)
+# with convert-model.rb --table-map <manifest.json> (which reads the landing
+# manifest directly — see convert-model.rb). Count comes from the converter's
+# stats.nonWarehouseSourcedTables; per-table detail is in the ⛔ warnings.
+nwt = conv_stats['nonWarehouseSourcedTables'].to_i
+if nwt.positive?
+  affected = conv_warnings.select { |w| w.include?('is sourced from a') }
+                          .map { |w| w[/Table "(.+?)"/, 1] }.compact
+  puts "   ⛔ #{nwt} table(s) sourced from a Fabric Dataflow / Lakehouse / Dataverse / file " \
+       "— NOT warehouse-queryable; data must be landed before these resolve:"
+  affected.each { |t| puts "      - #{t}" }
+  land_opt = 'run the powerbi-import-to-snowflake skill to land the data, then re-run Build with ' \
+             'convert-model.rb --table-map <manifest.json>'
+  questions << {
+    'id' => 'non_warehouse_source', 'severity' => 'required',
+    'detail' => "#{nwt} table(s) (#{affected.join(', ')}) are sourced from a Fabric Dataflow / " \
+                "Lakehouse / OneLake / Dataverse / file — NOT a warehouse Sigma can query, and their " \
+                "transformation logic is not in the semantic model. The converter emitted placeholder " \
+                "warehouse paths that will NOT resolve until the data is landed and the elements repointed.",
+    'options' => [land_opt, 'proceed with placeholder paths (these elements will not resolve until repointed)'],
+    'default' => land_opt
+  }
+end
+
 # (required) connection.
 unless opts[:conn]
   questions << { 'id' => 'connection', 'severity' => 'required',

@@ -172,26 +172,13 @@ warn "   [convert-model] re-prefixed #{reprefixed} base column formula(s) to the
 #      "dependency not found". Element NAMES stay untouched (derived "View"
 #      elements reference base elements BY NAME).
 if opts[:tmap]
-  tmap = JSON.parse(File.read(opts[:tmap]))
-  remapped = 0
-  (dm['pages'] || []).each do |pg|
-    (pg['elements'] || []).each do |el|
-      src = el['source'] || {}
-      next unless src['kind'] == 'warehouse-table' && src['path'].is_a?(Array) && !src['path'].empty?
-      tail = src['path'][-1].to_s
-      hit = tmap.find { |k, _| k.to_s.upcase == tail.upcase }
-      next unless hit && hit[1].to_s.upcase != tail.upcase
-      landed = hit[1].to_s
-      src['path'] = src['path'][0..-2] + [landed]
-      (el['columns'] || []).each do |c|
-        f = c['formula']
-        c['formula'] = f.sub("[#{tail}/", "[#{landed}/") if f.is_a?(String) && f.start_with?("[#{tail}/")
-      end
-      remapped += 1
-      warn "[convert-model] table-map: #{tail} -> #{landed}"
-    end
-  end
-  warn "[convert-model] table-map applied to #{remapped} element(s)"
+  require_relative 'lib/table_map'
+  loaded = TableMap.load(opts[:tmap])
+  warn "[convert-model] table-map: #{loaded[:tmap].size} mapping(s) from " \
+       "#{loaded[:from_manifest] ? 'import-to-snowflake manifest.json' : 'plain map'}"
+  applied = TableMap.apply!(dm, loaded[:tmap])
+  applied.each { |a| warn "[convert-model] table-map: #{a['tail']} -> #{a['path'].join('.')}" }
+  warn "[convert-model] table-map applied to #{applied.size} element(s)"
 end
 
 # ---- bjd: auto-emit (b)-bucket DAX restructure elements --------------------
