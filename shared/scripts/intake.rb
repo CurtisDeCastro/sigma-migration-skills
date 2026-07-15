@@ -159,7 +159,7 @@ if resolved.nil?
           fp = RankConnections.merge_fp(fp, RankConnections.fingerprint_from_wb_connections(Tableau.workbook_connections(opts[:rank_wb])))
         end
         if opts[:rank_twb] && File.exist?(opts[:rank_twb])
-          fp = RankConnections.merge_fp(fp, RankConnections.fingerprint_from_twb(File.read(opts[:rank_twb])))
+          fp = RankConnections.merge_fp(fp, RankConnections.fingerprint_from_twb(File.read(opts[:rank_twb], encoding: 'UTF-8')))
         end
         ranked = RankConnections.rank(fp, conns) unless fp['type'].to_s.empty?
         ranked && (ranked['fingerprint'] = fp)

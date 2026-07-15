@@ -179,7 +179,7 @@ if $PROGRAM_NAME == __FILE__
       fp = RankConnections.merge_fp(fp, RankConnections.fingerprint_from_wb_connections(Tableau.workbook_connections(opts[:wb])))
     end
     if opts[:twb] && File.exist?(opts[:twb])
-      fp = RankConnections.merge_fp(fp, RankConnections.fingerprint_from_twb(File.read(opts[:twb])))
+      fp = RankConnections.merge_fp(fp, RankConnections.fingerprint_from_twb(File.read(opts[:twb], encoding: 'UTF-8')))
     end
   end
   if fp['type'].to_s.empty?
