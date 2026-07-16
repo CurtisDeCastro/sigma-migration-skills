@@ -60,5 +60,61 @@ check('.twb fingerprint database = DWSPORTSBOOK') { fp_twb['database'] == 'DWSPO
 r5 = RankConnections.rank(RankConnections.merge_fp(fp_twb, {}), CANDS)
 check('.twb-derived fingerprint recommends Snowflake Prod') { r5['confident'] && r5['recommended']['connection_id'] == 'c-prod' }
 
+# 6) PDS / Virtual-Connection resolution (bead tt3z #388 follow-up). A duck-typed
+#    REST stub mirrors the live shapes so fingerprint_from_workbook is tested offline.
+class FakeRest
+  def initialize(h) ; @h = h ; end
+  def workbook_connections(_id) ; @h[:wb] || [] ; end
+  def datasource_connections(id) ; (@h[:ds] || {})[id] || [] ; end
+  def virtual_connections ; @h[:vcs] || [] ; end
+  def virtual_connection_connections(id) ; (@h[:vcc] || {})[id] || [] ; end
+end
+DS_NAME = 'ORDER_FACT (CSA.ORDER_FACT)+ (New Virtual Connection)'
+
+# (6a) garbage-fp regression: a publishedConnection stub yields EMPTY (not {type:'publishedConnection'}).
+check('publishedConnection stub → empty direct fingerprint (was the score-0 bug)') do
+  RankConnections.fingerprint_from_wb_connections([{ 'type' => 'publishedConnection', 'serverAddress' => '' }]) == {}
+end
+
+# (6b) VC-backed workbook resolves through the virtual connection to the real warehouse.
+vc_rest = FakeRest.new(
+  wb:  [{ 'type' => 'publishedConnection', 'serverAddress' => '', 'datasource' => { 'id' => 'ds1', 'name' => DS_NAME } }],
+  ds:  { 'ds1' => [{ 'type' => 'publishedConnection', 'serverAddress' => '' }] },        # dead-ends (VC-backed)
+  vcs: [{ 'id' => 'vc1', 'name' => 'New Virtual Connection' }],
+  vcc: { 'vc1' => [{ 'dbClass' => 'snowflake', 'server' => 'https://ymb68310.snowflakecomputing.com/console/login#/' }] })
+vc_fp = RankConnections.fingerprint_from_workbook(vc_rest, 'wb1')
+check('VC-backed → type snowflake') { RankConnections.canon_type(vc_fp['type']) == 'snowflake' }
+check('VC-backed → host cleaned (no scheme/path/port)') { vc_fp['host'] == 'ymb68310.snowflakecomputing.com' }
+
+# (6c) classic published DS resolves at the datasource hop; VC endpoints never consulted.
+pds_rest = FakeRest.new(
+  wb: [{ 'type' => 'publishedConnection', 'serverAddress' => '', 'datasource' => { 'id' => 'ds1', 'name' => 'X' } }],
+  ds: { 'ds1' => [{ 'type' => 'snowflake', 'serverAddress' => 'acme.snowflakecomputing.com' }] })
+pds_fp = RankConnections.fingerprint_from_workbook(pds_rest, 'wb1')
+check('classic PDS → resolves at datasource hop (host=acme)') { pds_fp['host'] == 'acme.snowflakecomputing.com' && RankConnections.canon_type(pds_fp['type']) == 'snowflake' }
+
+# (6d) ambiguity guard: 2 VCs, neither uniquely named in ds_name → EMPTY (never guess).
+amb_rest = FakeRest.new(
+  wb:  [{ 'type' => 'publishedConnection', 'serverAddress' => '', 'datasource' => { 'id' => 'ds1', 'name' => 'unmatched' } }],
+  ds:  { 'ds1' => [{ 'type' => 'publishedConnection', 'serverAddress' => '' }] },
+  vcs: [{ 'id' => 'a', 'name' => 'VC A' }, { 'id' => 'b', 'name' => 'VC B' }])
+check('ambiguous VC (no unique name match) → empty (falls back to ASK, never guesses)') do
+  RankConnections.fingerprint_from_workbook(amb_rest, 'wb1') == {}
+end
+
+# (6e) direct-warehouse workbook ("Test Custom Sql" analog): direct fp, resolution NOT invoked.
+direct_rest = FakeRest.new(wb: [{ 'type' => 'snowflake', 'serverAddress' => 'draftkings.us-east-1.snowflakecomputing.com' }])
+direct_fp = RankConnections.fingerprint_from_workbook(direct_rest, 'wb1')
+check('direct-warehouse workbook fingerprints straight from serverAddress') do
+  RankConnections.canon_type(direct_fp['type']) == 'snowflake' && direct_fp['host'] == 'draftkings.us-east-1.snowflakecomputing.com'
+end
+
+# (6f) VC fingerprint then RANKS the CSA.TJ (ymb68310) candidates to the top.
+CANDS2 = CANDS + [{ 'connection_id' => 'c-ymb', 'name' => 'ymb68310', 'type' => 'snowflake', 'host' => 'ymb68310.snowflakecomputing.com', 'account' => 'ymb68310' }]
+r6 = RankConnections.rank(RankConnections.merge_fp(vc_fp, {}), CANDS2)
+check('VC fingerprint ranks the ymb68310 (CSA.TJ) connection #1 (score>100, was 0)') do
+  r6['ranked'].first['connection_id'] == 'c-ymb' && r6['ranked'].first['match_score'] > 100
+end
+
 puts($fail.zero? ? "\nALL PASS" : "\n#{$fail} FAILED")
 exit($fail.zero? ? 0 : 1)
