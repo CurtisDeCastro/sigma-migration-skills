@@ -75,8 +75,8 @@ converter) and synthesize into the status matrix. Re-run after any builder chang
 | 8 Layout fidelity | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ✅ |
 
 (thoughtspot dim 3 = ⚠️: refMark capture is coded + no-ops safely, but no real Liveboard
-in team2 has a target line so it's unvalidated against real TML; controls/colors/gate are
-live-validated against real Liveboards (PerfTracking/UserAdoption) + the migrated sample.)
+in the trial org has a target line so it's unvalidated against real TML; controls/colors/gate are
+live-validated against two real sample Liveboards + the migrated sample.)
 
 **Progress log:**
 - **2026-06-16 — thoughtspot kitchen-sink feature stress test.** Built TS content
@@ -92,8 +92,8 @@ live-validated against real Liveboards (PerfTracking/UserAdoption) + the migrate
   dynamic-title interpolation remains the only TS ⚠️.
 - **2026-06-15 — thoughtspot #119 MERGED + live-validated.** Fixed a crash in
   `parse_measure_color` (real TML `columnProperties` entries aren't always dicts) that
-  would break migrating any CF Liveboard; verified clean parse on PerfTracking (10 vizzes)
-  + UserAdoption (27). End-to-end proof: extracted the TS-native "(Sample) Retail - Apparel"
+  would break migrating any CF Liveboard; verified clean parse on two sample Liveboards (10 + 27
+  vizzes). End-to-end proof: extracted the TS-native "(Sample) Retail - Apparel"
   worksheet (22,425 rows) via `searchdata` → `CSA.TJ.TS_APPAREL_FACT` → Sigma DM 953cd3c6 +
   workbook 9fd116fe — **exact parity, Total Sales $970,696,156.87**, 2 populated controls,
   renders cleanly (title/KPIs/bars/line). Path for Falcon-only TS data = searchdata→Snowflake.

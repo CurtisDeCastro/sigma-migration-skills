@@ -435,7 +435,7 @@ def parse_measure_color(a, measures):
     # We intentionally do NOT map it to color:{by:scale} or a refMark (that would be
     # semantically wrong); it falls through to None / no-op until a genuine gradient
     # (a list of {color} stops) or reference line is present. Verified against live
-    # team2 Liveboards (Sample Retail, Performance Tracking) 2026-06-15.
+    # trial Liveboards (sample content) 2026-06-15.
     return None
 
 # ── Per-viz series colors (gap D) ─────────────────────────────────────────────
@@ -677,7 +677,7 @@ def _bucket_friendly(name):
     return f"{b[0].title()} of {re.sub(r'[()]', '', b[1]).strip()}" if b else None
 
 # ── ThoughtSpot relative time-intelligence (search-query tokens) ──────────────
-# TS time scopes are anchored to TODAY (verified live team2 2026-06-16: 'this
+# TS time scopes are anchored to TODAY (verified live on a trial org 2026-06-16: 'this
 # year'=2026): `[date].'this year'`/'last year'/'last N quarters|months|...' is a
 # rolling window; a measure can also be period-shifted in answer_columns
 # (`sales(this year)` / `sales(last year)`). We translate a scope to a boolean

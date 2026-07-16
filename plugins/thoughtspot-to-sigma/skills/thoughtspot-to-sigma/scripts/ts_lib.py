@@ -14,7 +14,7 @@ SCALE NOTES (2026-06-11, for 20-40+ liveboard estates):
   - dependents(model_id): server-side dependency lookup (metadata/search with
     include_dependent_objects) — returns ONLY the liveboards/answers that read
     the model, so callers export N candidate TMLs instead of every liveboard
-    in the org. VERIFIED LIVE against team2.thoughtspot.cloud (13 candidates
+    in the org. VERIFIED LIVE against a live trial org (13 candidates
     of 33 org liveboards for the Retail Analytics worksheet).
   - export_tml_many(): ThreadPool(4) parallel TML export with a DISK CACHE
     keyed (metadata_id, modified-epoch-ms) — re-runs and multi-liveboard
@@ -94,7 +94,7 @@ def dependents(model_id, types=("PINBOARD_ANSWER_BOOK",), record_size=200):
     the whole org's TML to find them. Returns [{id, name, modified}] (deduped)
     or None when the API yields nothing usable (caller falls back to the
     export-all-then-grep path and says so).
-    VERIFIED LIVE 2026-06-11 (team2.thoughtspot.cloud, REST v2 metadata/search
+    VERIFIED LIVE 2026-06-11 (a live trial org, REST v2 metadata/search
     + include_dependent_objects on the LOGICAL_TABLE identifier)."""
     try:
         d = _req("metadata/search",

@@ -9,17 +9,17 @@ def check(desc)
   $fail += 1 unless ok
 end
 
-# Realistic org: 26-connection ASK reduced here to the relevant mix (multiple Snowflakes).
+# Realistic org: 26-connection estate reduced here to the relevant mix (multiple Snowflakes).
 CANDS = [
-  { 'connection_id' => 'c-prod', 'name' => 'Snowflake Prod', 'type' => 'snowflake', 'host' => 'draftkings.us-east-1.snowflakecomputing.com', 'account' => 'draftkings' },
-  { 'connection_id' => 'c-ask',  'name' => 'ASK Data - Snowflake', 'type' => 'snowflake', 'host' => 'askdata.snowflakecomputing.com', 'account' => 'askdata' },
-  { 'connection_id' => 'c-bq',   'name' => 'BigQuery- Wells', 'type' => 'bigQuery', 'host' => nil, 'account' => nil },
+  { 'connection_id' => 'c-prod', 'name' => 'Snowflake Prod', 'type' => 'snowflake', 'host' => 'prodco.us-east-1.snowflakecomputing.com', 'account' => 'prodco' },
+  { 'connection_id' => 'c-ask',  'name' => 'Staging - Snowflake', 'type' => 'snowflake', 'host' => 'stagingco.snowflakecomputing.com', 'account' => 'stagingco' },
+  { 'connection_id' => 'c-bq',   'name' => 'BigQuery- Sandbox', 'type' => 'bigQuery', 'host' => nil, 'account' => nil },
   { 'connection_id' => 'c-dbx',  'name' => 'Databricks data-science-dev', 'type' => 'databricks', 'host' => 'adb-123.azuredatabricks.net' },
   { 'connection_id' => 'c-rs',   'name' => 'Redshift Analytics', 'type' => 'redshift', 'host' => 'rs.abc.us-east-1.redshift.amazonaws.com' },
 ]
 
 # 1) Confident auto-pick: type + host token both point at Snowflake Prod.
-fp1 = { 'type' => 'snowflake', 'host' => 'draftkings.us-east-1.snowflakecomputing.com', 'database' => 'DWSPORTSBOOK' }
+fp1 = { 'type' => 'snowflake', 'host' => 'prodco.us-east-1.snowflakecomputing.com', 'database' => 'PROD_DB' }
 r1 = RankConnections.rank(fp1, CANDS)
 check('recommends Snowflake Prod on type+host match') { r1['confident'] && r1['recommended']['connection_id'] == 'c-prod' }
 check('Snowflake Prod outscores the other Snowflake') { r1['ranked'][0]['match_score'] > r1['ranked'][1]['match_score'] }
@@ -39,10 +39,10 @@ check('databricks <-> sparksql normalize equal'){ RankConnections.canon_type('da
 TWB = <<~XML
   <workbook>
    <datasources>
-    <datasource caption='HRB'>
+    <datasource caption='Demo'>
      <connection class='federated'>
       <named-connections>
-       <named-connection caption='SF'><connection class='snowflake' server='draftkings.us-east-1.snowflakecomputing.com' dbname='DWSPORTSBOOK' schema='DBO'/></named-connection>
+       <named-connection caption='SF'><connection class='snowflake' server='prodco.us-east-1.snowflakecomputing.com' dbname='PROD_DB' schema='DBO'/></named-connection>
       </named-connections>
       <relation type='text'>SELECT 1</relation>
      </connection>
@@ -53,8 +53,8 @@ TWB = <<~XML
 XML
 fp_twb = RankConnections.fingerprint_from_twb(TWB)
 check('.twb fingerprint type = snowflake') { RankConnections.canon_type(fp_twb['type']) == 'snowflake' }
-check('.twb fingerprint host = draftkings host') { fp_twb['host'] == 'draftkings.us-east-1.snowflakecomputing.com' }
-check('.twb fingerprint database = DWSPORTSBOOK') { fp_twb['database'] == 'DWSPORTSBOOK' }
+check('.twb fingerprint host = prodco host') { fp_twb['host'] == 'prodco.us-east-1.snowflakecomputing.com' }
+check('.twb fingerprint database = PROD_DB') { fp_twb['database'] == 'PROD_DB' }
 
 # 5) A .twb fingerprint feeds ranking to the same confident pick.
 r5 = RankConnections.rank(RankConnections.merge_fp(fp_twb, {}), CANDS)
@@ -98,15 +98,15 @@ amb_rest = FakeRest.new(
   wb:  [{ 'type' => 'publishedConnection', 'serverAddress' => '', 'datasource' => { 'id' => 'ds1', 'name' => 'unmatched' } }],
   ds:  { 'ds1' => [{ 'type' => 'publishedConnection', 'serverAddress' => '' }] },
   vcs: [{ 'id' => 'a', 'name' => 'VC A' }, { 'id' => 'b', 'name' => 'VC B' }])
-check('ambiguous VC (no unique name match) → empty (falls back to ASK, never guesses)') do
+check('ambiguous VC (no unique name match) → empty (falls back to asking the user, never guesses)') do
   RankConnections.fingerprint_from_workbook(amb_rest, 'wb1') == {}
 end
 
 # (6e) direct-warehouse workbook ("Test Custom Sql" analog): direct fp, resolution NOT invoked.
-direct_rest = FakeRest.new(wb: [{ 'type' => 'snowflake', 'serverAddress' => 'draftkings.us-east-1.snowflakecomputing.com' }])
+direct_rest = FakeRest.new(wb: [{ 'type' => 'snowflake', 'serverAddress' => 'prodco.us-east-1.snowflakecomputing.com' }])
 direct_fp = RankConnections.fingerprint_from_workbook(direct_rest, 'wb1')
 check('direct-warehouse workbook fingerprints straight from serverAddress') do
-  RankConnections.canon_type(direct_fp['type']) == 'snowflake' && direct_fp['host'] == 'draftkings.us-east-1.snowflakecomputing.com'
+  RankConnections.canon_type(direct_fp['type']) == 'snowflake' && direct_fp['host'] == 'prodco.us-east-1.snowflakecomputing.com'
 end
 
 # (6f) VC fingerprint then RANKS the CSA.TJ (ymb68310) candidates to the top.

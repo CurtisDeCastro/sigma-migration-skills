@@ -302,7 +302,7 @@ API.** Note: a deployed LookML dashboard does NOT auto-index for `import_lookml_
 
 > **No live instance?** A GCP free-trial account CANNOT provision Looker (instance quota is
 > `isFixed` = 0, Sales-gated). Build/test from sample LookML + the offline path. The validated
-> end-to-end run used a real `hakkoda1.cloud.looker.com` instance pointed at `CSA.TJ`.
+> end-to-end run used a real `example.cloud.looker.com` instance pointed at `CSA.TJ`.
 
 ### 1d. Scan for row-level security (RLS) — cheap, silent if none
 
@@ -404,7 +404,7 @@ Mapping recap: `access_filter` and user-attribute `sql_always_where` → the
 plain DM/element filter; `access_grant` → the recorded note. (Team mode =
 `CurrentUserInTeam([...])`; user-email mode = `[Email] = CurrentUserEmail()`.)
 
-> **Proof:** this exact scripted flow was validated live end-to-end 2026-06-10 (Looker hakkoda1 →
+> **Proof:** this exact scripted flow was validated live end-to-end 2026-06-10 (a live Looker instance →
 > Sigma tj-wells-1989, `csa_thelook` order_fact, `region`/West) with **exact 3-way parity** —
 > Looker-restricted == Sigma-restricted == warehouse = **$38,906.82 / 220 rows**.
 

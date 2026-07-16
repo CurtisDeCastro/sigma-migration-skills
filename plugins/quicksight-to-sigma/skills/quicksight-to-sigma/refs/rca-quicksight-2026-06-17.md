@@ -1,6 +1,6 @@
-# RCA — Arine "STD Elevate Operational / Task Log" migration (2026-06-17)
+# RCA — QuickSight "Operational / Task Log" migration (2026-06-17)
 
-First **real customer** QuickSight→Sigma run (customer-supplied code-only export; org `arine` on us-a.aws). Reached exact KPI parity vs the customer's screenshot (146,654 / 89,942 / 37 / 51,681 / 4,994) — but only after fixing **12 distinct gaps by hand**. This is the prioritized backlog to fold those fixes back into the skill so the next run is automatic.
+First **real customer** QuickSight→Sigma run (customer-supplied code-only export; org `acme` on us-a.aws). Reached exact KPI parity vs the customer's screenshot (146,654 / 89,942 / 37 / 51,681 / 4,994) — but only after fixing **12 distinct gaps by hand**. This is the prioritized backlog to fold those fixes back into the skill so the next run is automatic.
 
 Severity: **P0** = silently-wrong numbers · **P1** = broken/empty element · **P2** = fidelity/polish · **P3** = process.
 
@@ -86,7 +86,7 @@ Customer org isn't wired to `sigma-mcp-v2`, so the Phase-7 parity gate (which as
 **Fix:** add an export-API parity path to `phase6-parity-quicksight.rb` for orgs lacking MCP. It's the only way we could prove the 5/5 KPI match.
 
 ### 17. Parity needs the customer's control state + a rendered reference
-The customer's screenshot was filtered to `Organization = "Arine Demo Organization"` (a **runtime** selection — 0 occurrences in the definition, empty parameter default). Unfiltered, the dashboard correctly shows all orgs (~11× larger). Without the screenshot we'd have "verified" the wrong baseline.
+The customer's screenshot was filtered to `Organization = "Acme Demo Organization"` (a **runtime** selection — 0 occurrences in the definition, empty parameter default). Unfiltered, the dashboard correctly shows all orgs (~11× larger). Without the screenshot we'd have "verified" the wrong baseline.
 **Fix:** discovery should request (a) a screenshot/`get-dashboard` snapshot and (b) `describe-theme`; parity should record which control values are active in the reference.
 
 ---
@@ -99,4 +99,4 @@ The customer's screenshot was filtered to `Organization = "Arine Demo Organizati
 5. **#15** (FreeForm layout), **#7/#10** (titles/master name), **#12** (Insight→text).
 6. **#13/#14/#16/#17** (SKILL.md doc + orchestrator guardrails + export-API parity).
 
-Each P0/P1 should ship with a regression fixture derived from this Arine export (sanitized).
+Each P0/P1 should ship with a regression fixture derived from this customer export (sanitized).

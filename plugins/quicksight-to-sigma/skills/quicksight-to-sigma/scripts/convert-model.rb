@@ -305,7 +305,7 @@ if opts[:fixup]
     # aggregate-of-aggregate / metric-style calc fields the converter emitted but can't be
     # row-level DM columns (e.g. an "Outreach/Task Rate" dividing two distinct_countIf
     # metrics); they fail POST regardless. Drop + warn rather than emit an unpostable spec
-    # (RCA #9/#10, bead 3goo.9 — matches the manual Arine fix).
+    # (RCA #9/#10, bead 3goo.9 — matches the manual customer fix).
     dropped = []
     el['columns'] = cols.reject do |c|
       next false unless c['formula'].is_a?(String)

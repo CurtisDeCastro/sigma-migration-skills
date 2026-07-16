@@ -184,7 +184,7 @@ dm_el = dm_el_obj['id']
 DMEL = dm_el_obj['name'] || 'Custom SQL'   # DM element name — master refs cols as [DMEL/Col]
 # Master element name (used in [M/Col] refs from charts). Default to the DM element's
 # own name — not the fixture leftover 'Orders', which is wrong for any non-Orders
-# dashboard and confused the Arine healthcare migration (RCA #10, bead 3goo.13).
+# dashboard and confused an early customer migration (RCA #10, bead 3goo.13).
 M = opts[:mname] || DMEL
 
 def nid(p = 'el'); "#{p}-" + SecureRandom.hex(5); end
@@ -686,7 +686,7 @@ qs_insight_text = lambda do |inner|
   return nil unless colname
   dname = disp(colname)
   target = MASTERS.values.find { |mm| mm[:labels].include?(dname) }
-  return nil unless target   # dataset not migrated (e.g. Arine REPORT_RUN_DATES) -> skip
+  return nil unless target   # dataset not migrated (e.g. a REPORT_RUN_DATES aux table) -> skip
   master_ref(colname, {}, target[:cols], target[:dmel])  # land the column on that master
   fmt = qs_datefmt_to_strftime(datefmt)
   val = "#{agg}([#{target[:name]}/#{dname}])"
@@ -888,7 +888,7 @@ end
 # RCA #1 / bead 3goo.1 — PER-VISUAL FilterGroups. A QS FilterGroup whose
 # ScopeConfiguration scopes it to specific VisualIds (SheetVisualScopingConfigurations
 # with Scope==SELECTED_VISUALS) is an ELEMENT-LEVEL filter on exactly those visuals.
-# Dropping these silently produced 5 identical KPIs on the Arine dashboard — each was
+# Dropping these silently produced 5 identical KPIs on the customer dashboard — each was
 # DISTINCT_COUNT(TASK_ID) distinguished ONLY by a TASK_STATUS CategoryFilter. We index
 # VisualId -> [{col, values, mode}] and apply them as Sigma element `filters[]` so each
 # element sees the same rows QuickSight scoped it to.
@@ -1217,7 +1217,7 @@ defn['Sheets'].each_with_index do |sh, sheet_idx|
       el = base.merge('columns' => cols, 'xAxis' => { 'columnId' => did }, 'yAxis' => { 'columnIds' => ycids })
       # A QS ComboChartVisual with NO LineValues (all measures in BarValues) is a clustered
       # BAR chart, not a combo — Sigma renders a combo-chart's extra series as a line, so a
-      # bars-only QS combo (e.g. Arine "Weekly Tasks": Tasks Closed + Generated) would show a
+      # bars-only QS combo (e.g. a "Weekly Tasks" combo: Tasks Closed + Generated) would show a
       # spurious line. Emit bar-chart when there are no line series.
       el['kind'] = 'bar-chart' if lines.empty?
       el['stacking'] = qs_bars_stacking(inner)   # QS BarsArrangement: CLUSTERED -> unstacked
