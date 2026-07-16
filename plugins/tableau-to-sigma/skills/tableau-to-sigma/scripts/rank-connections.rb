@@ -118,13 +118,71 @@ module RankConnections
 
   # ---- fingerprint sources -------------------------------------------------
   # Primary non-extract warehouse connection from a Tableau REST connections list.
-  SKIP_CLASSES = %w[federated sqlproxy excel-direct textscan hyper msaccess
-                    dataengine tableau-server-connection].to_set.freeze
+  SKIP_CLASSES = %w[federated sqlproxy publishedconnection excel-direct textscan hyper
+                    msaccess dataengine tableau-server-connection].to_set.freeze
+  # Indirection layers that POINT AT a warehouse rather than being one. A workbook
+  # backed by these has no warehouse signal in its own /connections (serverAddress
+  # is empty) — the real warehouse must be resolved from the published datasource
+  # or virtual connection (fingerprint_via_published_source). Field-caught on
+  # "Orders Executive Overview" (all Sigma connections scored 0).
+  INDIRECT_CLASSES = %w[publishedconnection sqlproxy].to_set.freeze
+
   def fingerprint_from_wb_connections(list)
     conns = (list || []).map { |c| { 'type' => (c['type'] || c['dbClass']), 'host' => (c['serverAddress'] || c['server']) } }
                         .reject { |c| c['type'].to_s.empty? || SKIP_CLASSES.include?(c['type'].to_s.downcase) }
     warehouse = conns.find { |c| !c['host'].to_s.empty? } || conns.first
     warehouse ? { 'type' => warehouse['type'], 'host' => warehouse['host'] } : {}
+  end
+
+  # Normalize a warehouse host: the VC/Metadata APIs store Snowflake as a console
+  # URL ("https://acct.snowflakecomputing.com/console/login#/") — strip scheme,
+  # path/fragment, and :port to the canonical host ("acct.snowflakecomputing.com").
+  def clean_host(s)
+    h = s.to_s.strip
+    return h if h.empty?
+    h.sub(%r{\Ahttps?://}i, '').sub(%r{[/#?].*\z}, '').sub(/:\d+\z/, '')
+  end
+
+  # Choose the Virtual Connection backing a workbook. The workbook's /connections
+  # carries no VC LUID — only the (munged) published-DS name — so match VC by name.
+  # NEVER guess between candidates: nil ⇒ caller falls back to the ranked ASK.
+  def pick_virtual_connection(vcs, ds_name)
+    vcs = (vcs || []).select { |v| v && v['id'] }
+    return vcs.first if vcs.size == 1
+    dn = ds_name.to_s.downcase
+    hits = vcs.select { |v| !v['name'].to_s.empty? && dn.include?(v['name'].to_s.downcase) }
+    hits.size == 1 ? hits.first : nil
+  end
+
+  # Resolve the real warehouse behind an INDIRECT (publishedConnection/sqlproxy)
+  # workbook connection, via read-only REST: first the pointed-at datasource's own
+  # connections (a CLASSIC published DS names the warehouse there); else resolve the
+  # Virtual Connection by name and read ITS connection. Never raises, never guesses
+  # — {} on any miss so the caller degrades to the ranked ASK.
+  def fingerprint_via_published_source(raw_conns, rest)
+    ptr = (raw_conns || []).find { |c| INDIRECT_CLASSES.include?(c['type'].to_s.downcase) }
+    return {} unless ptr
+    ds = ptr['datasource'] || {}
+    if ds['id'] && !ds['id'].to_s.empty?
+      fp = (fingerprint_from_wb_connections(rest.datasource_connections(ds['id'])) rescue {})
+      return fp unless fp['type'].to_s.empty?   # classic PDS resolved
+    end
+    vc = pick_virtual_connection((rest.virtual_connections rescue []), ds['name'])
+    return {} unless vc
+    fp = (fingerprint_from_wb_connections(rest.virtual_connection_connections(vc['id'])) rescue {})
+    fp['host'] = clean_host(fp['host']) unless fp['host'].to_s.empty?
+    fp
+  end
+
+  # Orchestrator: the workbook's warehouse fingerprint, resolving through a
+  # published-DS / virtual-connection indirection when the direct connection has no
+  # warehouse signal. `rest` is duck-typed (the Tableau module in prod; a stub in tests).
+  def fingerprint_from_workbook(rest, wb_id)
+    raw = (rest.workbook_connections(wb_id) rescue [])
+    fp = fingerprint_from_wb_connections(raw)
+    return fp unless fp['type'].to_s.empty?
+    via = fingerprint_via_published_source(raw, rest)
+    via.empty? ? fp : via
   end
 
   # Fingerprint from a downloaded .twb (regex, no XML/zip deps). Adds dbname/schema.
@@ -176,7 +234,7 @@ if $PROGRAM_NAME == __FILE__
       rescue Tableau::Error
         Tableau.refresh_token!
       end
-      fp = RankConnections.merge_fp(fp, RankConnections.fingerprint_from_wb_connections(Tableau.workbook_connections(opts[:wb])))
+      fp = RankConnections.merge_fp(fp, RankConnections.fingerprint_from_workbook(Tableau, opts[:wb]))
     end
     if opts[:twb] && File.exist?(opts[:twb])
       fp = RankConnections.merge_fp(fp, RankConnections.fingerprint_from_twb(File.read(opts[:twb], encoding: 'UTF-8')))
