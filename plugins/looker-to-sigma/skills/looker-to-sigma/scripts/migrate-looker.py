@@ -474,6 +474,8 @@ def main():
                     "permission on the project; see looker_project.py).")
     ap.add_argument("--dashboard", help="offline: a .dashboard.lookml file")
     ap.add_argument("--dashboard-id", help="live: Looker dashboard id (needs ~/.looker/looker.ini)")
+    ap.add_argument("--look-id", help="live: Looker Look id (a single saved query → a "
+                    "one-tile workbook; needs ~/.looker/looker.ini)")
     ap.add_argument("--explore", help="explore to convert (default: the contract's most-used)")
     ap.add_argument("--name", help="name PREFIX applied to the DM and the workbook")
     ap.add_argument("--workdir")
@@ -507,11 +509,11 @@ def main():
         print(_path or "none")
         print(_desc)
         return 0
-    if not a.dashboard and not a.dashboard_id:
-        ap.error("--dashboard (offline .dashboard.lookml) or --dashboard-id (live) required")
+    if not a.dashboard and not a.dashboard_id and not a.look_id:
+        ap.error("--dashboard (offline .dashboard.lookml) / --dashboard-id / --look-id (live) required")
     if not a.lookml_dir and not a.project:
         ap.error("--lookml-dir (local checkout) or --project (pull via Looker API) required")
-    offline = not a.dashboard_id
+    offline = not a.dashboard_id and not a.look_id
     wd = os.path.abspath(os.path.expanduser(a.workdir or "./looker-migration"))
     os.makedirs(wd, exist_ok=True)
 
@@ -542,7 +544,11 @@ def main():
     # ── Phase 1 — Parse (the normalized dashboard contract) ──────────────────
     hdr(1, TOTAL, "Parse")
     contract_path = os.path.join(wd, "contract.json")
-    if offline:
+    if a.look_id:
+        # A Look is a single saved query → the same normalized contract with one tile.
+        run([sys.executable, os.path.join(HERE, "fetch_looker_look.py"),
+             a.look_id, contract_path])
+    elif offline:
         run([sys.executable, os.path.join(HERE, "parse_lookml_dashboard.py"),
              a.dashboard, "--out", contract_path])
     else:
@@ -1033,6 +1039,53 @@ console.error('stats:', JSON.stringify(res.stats));
         headers, rows = parse_csv(export_csv(wb, c["sigma_element_id"]))
         cidx = {h: i for i, h in enumerate(headers)}
         want = c["sigma_columns"]
+        if c.get("kind") == "table-total":
+            # A table-only Look → grand-total check: SUM the additive column over
+            # every displayed (grouped/pivot) row = the overall total (grain-
+            # invariant). EXPECTED = the same grand total of the tile's first
+            # measure from Looker (live) / the warehouse re-aggregation (offline).
+            def _num(x):
+                v = numify(x)
+                return v if isinstance(v, (int, float)) else None
+            if c.get("source_kind") == "pivot-table":
+                # A pivot CSV is a cross-tab: line 0 is a meta row, `headers` is the
+                # value/pivot-dim names, the first data row is the real column header
+                # (rowDim, pivotVals…, "Total"), and Sigma appends a grand-Total row
+                # (first cell "Total") whose last cell is the grand total. Prefer that;
+                # else sum the body cells excluding the Total row + Total column.
+                colhdr = rows[0] if rows else []
+                tot_cols = {i for i, h in enumerate(colhdr) if str(h).strip().lower() == "total"}
+                trow = next((r for r in rows if r and str(r[0]).strip().lower() == "total"), None)
+                gt = None
+                if trow:
+                    tail = [_num(trow[i]) for i in sorted(tot_cols) if i < len(trow)]
+                    tail = [n for n in tail if n is not None] or [n for n in map(_num, trow) if n is not None]
+                    gt = tail[-1] if tail else None
+                if gt is None:
+                    gt = sum(n for r in rows[1:] if not (r and str(r[0]).strip().lower() == "total")
+                             for i, cc in enumerate(r) if i not in tot_cols
+                             for n in [_num(cc)] if n is not None)
+                act = [[None, gt if gt is not None else 0]]
+            else:
+                # grouped table: a single named value column, no auto-total row → sum it
+                vi = cidx.get(want[0], 0)
+                act = [[None, sum(n for r in rows if vi < len(r)
+                                  for n in [_num(r[vi])] if n is not None)]]
+            el = by_name.get(cname)
+            if el is None:
+                msgs.append(f"   WARN: no source tile named {cname!r} in the contract — will DIVERGE")
+                return cname, act, None, msgs
+            exp = None
+            try:
+                rowsexp = None
+                if not offline:
+                    rowsexp = expected_live(el, measures)
+                if rowsexp is None:
+                    rowsexp = expected_offline(el, ev, mr)
+                exp = [[None, sum(numify(v) for _d, v in rowsexp if v is not None)]]
+            except Exception as ex:
+                msgs.append(f"   WARN: table-total expected fetch failed for {cname!r} ({ex})")
+            return cname, act, exp, msgs
         if len(want) == 1:                      # KPI
             vi = cidx.get(want[0], 0)
             act = [[None, numify(rows[0][vi])]] if rows else []

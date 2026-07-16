@@ -1,8 +1,11 @@
 # Looker Dashboard → normalized JSON contract
 
-The dashboard converter consumes ONE normalized shape, produced by either source:
+The dashboard converter consumes ONE normalized shape, produced by any source:
 - **Live (canonical):** Looker REST `GET /dashboards/{id}` + `GET /dashboards/{id}/dashboard_layouts`
   (+ `dashboard_filters`). Covers user-defined (UDD) **and** LookML dashboards identically.
+- **Live (Looks):** `GET /looks/{id}` → a **one-tile** instance of this contract
+  (`elements:[<tile>]`, `filters:[]`, synthesized full-width `layout`, plus `fieldMeta`), via
+  `fetch_looker_look.py` reusing the same `normalize_element`.
 - **Offline (dev only):** parse a `.dashboard.lookml` file and normalize into this shape.
 
 Keep the converter source-agnostic: it only sees this contract.
@@ -37,11 +40,32 @@ Keep the converter source-agnostic: it only sees this contract.
       "dynamicFields": [],             // table calcs / custom measures (client-side) → workbook formulas
       "noteText": "…", "subtitleText": "…",
       "cellVisualizations": {},        // grid in-cell data bars: {field: {scheme:[hex]|null}} from vis_config.series_cell_visualizations → conditionalFormats dataBars (often absent from the API even when the render shows bars — see SKILL.md Phase 3b)
+      "total": false,                  // (Look-only) query `total` → column grand totals (UI follow-up)
+      "rowTotal": false,               // (Look-only) query `row_total` → pivot row totals (UI follow-up)
+      "columnLimit": 50,               // (Look-only) query `column_limit` (pivot column cap)
       "layout": { "row": 0, "col": 0, "width": 8, "height": 6 }  // newspaper units
     }
-  ]
+  ],
+  "fieldMeta": {                       // (Look-only, ADDITIVE) authoritative field categories
+    "order_fact.total_net_revenue": { "category": "measure", "aggType": "sum",
+                                      "baseColumn": "order_fact.NET_REVENUE", "valueFormat": "usd" },
+    "customer_dim.region": { "category": "dimension" }
+  }
 }
 ```
+
+## `fieldMeta` (Look path only — additive, backward-compatible)
+
+Dashboards do **not** emit `fieldMeta`; when the key is absent `build_workbook.py` classifies
+dim-vs-measure from the view `.lkml` (`is_measure()`) exactly as before. `fetch_looker_look.py`
+adds it from Looker's authoritative source — `GET /lookml_models/{model}/explores/{explore}`
+field categories + `dynamic_fields` `_kind_hint` — so a Look's **ad-hoc/custom measures** (or a
+run with **no local LookML**) classify correctly instead of being dropped or forced into a
+`groupBy`. Per-field: `{category: "measure"|"dimension", aggType?, baseColumn? (fully-qualified
+"view.col"), valueFormat?, sql?}`. The builder consults `category` first, then folds any
+measure absent from the local views into its index (aggType + base column → the right Sigma
+aggregate). `total`/`rowTotal`/`columnLimit` are likewise Look-only and default falsy on
+dashboards.
 
 ## Field provenance (API vs LookML)
 

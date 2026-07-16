@@ -14,6 +14,7 @@ python3 scripts/migrate-looker.py --lookml-dir fixtures/skilltest-orders \
     --dashboard fixtures/skilltest-orders/skilltest_orders.dashboard.lookml \
     [--name PREFIX] [--workdir /tmp/look-run]
 # live: --dashboard-id <id> instead of --dashboard (needs ~/.looker/looker.ini)
+# live Look (single saved query → one-tile workbook): --look-id <id>
 ```
 > **Windows:** launch with the `py` launcher — `py -3 scripts/migrate-looker.py …` —
 > not a bare `python3`. A bare `python`/`python3` on Windows often resolves to the
@@ -57,9 +58,12 @@ export SIGMA_CONNECTION_ID=<full-connection-uuid>   # NOT a short prefix
 ```bash
 python3 scripts/looker_api.py raw GET /lookml_models   # list models/explores
 python3 scripts/looker_api.py raw GET /dashboards      # list dashboards (UDD + LookML)
+python3 scripts/looker_api.py raw GET /looks           # list Looks (single saved queries)
 
 # pull one dashboard into the normalized contract (works for UDD AND LookML)
 python3 scripts/fetch_looker_dashboard.py <dashboard_id> /tmp/look/<dash>.contract.json
+# pull one Look into the SAME contract (one tile + fieldMeta)
+python3 scripts/fetch_looker_look.py <look_id> /tmp/look/<look>.contract.json
 # offline (dev/test only — cannot see UDDs):
 python3 scripts/parse_lookml_dashboard.py <file.dashboard.lookml> --out /tmp/look/<dash>.contract.json
 
