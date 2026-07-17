@@ -176,6 +176,20 @@ The converter output (`sigmaDataModel`) needs 3 fixups before `POST /v2/dataMode
 3. **Element `name`** on each base warehouse-table element (= `source.path[-1]`) — the converter only names joined View elements, but workbook masters reference DM elements by name.
 Then: `tableau-to-sigma/scripts/post-and-readback.rb --type datamodel`. See `refs/spec-fixups.md`.
 
+> **What Phase 4 "validation" catches — and what it does NOT (read before trusting a clean DM).**
+> `validate-spec.rb` is spec-**shape** only (kinds, formula function names, ref prefixes — no
+> warehouse). After the POST, `post-and-readback.rb` fetches `GET /v2/dataModels/{id}/columns` and
+> **halts (exit 2) on any column that resolves to `type "error"`, before the workbook is built** —
+> catching bad refs, missing physical columns, and non-existent functions. It does **NOT** catch a
+> column that resolves to its *declared* type here but fails at actual **query time**: a physical-name
+> **case** mismatch on a case-sensitive-stored warehouse (Databricks stores lower-case — `beads-sigma-lanq.7`),
+> a wrong per-table **schema** (`beads-sigma-lanq.6`), or an **ungranted schema**. Those surface only at
+> Phase 6 — so a model that looks "validated" here can still error *after* the workbook exists (the
+> delete-and-recreate trap). **A clean Phase 4 is not a warehouse-resolution guarantee.** If Phase 6
+> shows `type "error"` columns Phase 4 didn't, suspect warehouse **casing / schema / grants** first,
+> and confirm the connection identity can read every schema the model spans. (Follow-up `beads-sigma-q48b`:
+> an optional pre-workbook query-probe that runs one live query per DM element to surface these early.)
+
 ## Phase 5 — Build the workbook
 - **Data page**: one hidden `table` master per DM element used (`source: {kind:data-model, dataModelId, elementId}`, columns `[ElementName/Col]`).
 - **Chart elements** source from a master (`source:{kind:table, elementId:<master>}`), columns `[dim, meas]`:
