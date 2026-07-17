@@ -127,6 +127,38 @@ named = 0
 end
 dm['name'] = opts[:name] if opts[:name]
 
+# Fixup 3b (beads-sigma-<1b>): reconcile a base warehouse-table column's formula
+# PREFIX to its OWN element name. The converter prefixes base columns with the PBI
+# FRIENDLY table name ("[Sales/Amount]") while Fixup 3 names the element
+# after the PHYSICAL path-tail ("VW_SALES"); when the friendly name != the
+# physical view name (vw_* views / renames — common in enterprise models) the prefix
+# is UNKNOWN and the POST fails ("prefix '…' unknown" / "dependency not found"). This
+# is the customer's manual "proper-case element naming" workaround, automated. Only
+# rewrite a base element's OWN 2-segment ref whose prefix matches NO element name — a
+# valid cross-element ref (prefix IS a known element) is left untouched.
+known_norm = []
+(dm['pages'] || []).each { |pg| (pg['elements'] || []).each { |el| known_norm << el['name'].to_s.downcase.gsub(/[^a-z0-9]/, '') } }
+reprefixed = 0
+(dm['pages'] || []).each do |pg|
+  (pg['elements'] || []).each do |el|
+    next unless (el['source'] || {})['kind'] == 'warehouse-table'
+    name = el['name'].to_s
+    next if name.empty?
+    (el['columns'] || []).each do |c|
+      f = c['formula']
+      next unless f.is_a?(String)
+      m = f.match(%r{\A\[([^\]/]+)/([^\]/]+)\]\z}) # exactly [Prefix/Leaf], a single slash
+      next unless m
+      pfx = m[1]
+      next if pfx == name # already references its own element
+      next if known_norm.include?(pfx.downcase.gsub(/[^a-z0-9]/, '')) # valid ref to a known element
+      c['formula'] = "[#{name}/#{m[2]}]"
+      reprefixed += 1
+    end
+  end
+end
+warn "   [convert-model] re-prefixed #{reprefixed} base column formula(s) to their element name (friendly!=physical table name)" if reprefixed.positive?
+
 # Fixup 4 (bead xe7r): --table-map repoints warehouse-table sources at the
 # tables the customer actually landed the import-mode data in (a JSON map,
 # e.g. {"Store": "RETAIL_STORE"}). Two coupled rewrites, both required:
