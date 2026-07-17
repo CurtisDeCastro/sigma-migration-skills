@@ -226,10 +226,13 @@ $used_control_ids = Hash.new(0)
 #              false -> a genuine Sigma spec limitation (informational only)
 $unresolved = []
 def record_unresolved(visual:, severity:, detail:, pbi_type: nil, sigma_kind: nil,
-                      recoverable: false, action: nil)
+                      recoverable: false, action: nil, entity: nil)
+  # `entity` = the PBI table/entity the dropped ref pointed at (e.g. "Dim Region"),
+  # so migrate-powerbi.rb can attribute the drop to an ungranted schema for the
+  # cause-grouped coverage readout (CoverageGate.classify_causes).
   $unresolved << { 'visual' => visual.to_s, 'pbi_type' => pbi_type, 'sigma_kind' => sigma_kind,
                    'severity' => severity, 'detail' => detail.to_s,
-                   'recoverable' => recoverable, 'action' => action }
+                   'recoverable' => recoverable, 'action' => action, 'entity' => entity }
 end
 
 # TMSL column type for ENTITY.LEAF — date-typed slicers must become date-range
@@ -728,8 +731,11 @@ def drop_unresolved_columns!(el, rec, kind)
   end
   el['values'] = Array(el['values']).reject(&has_bad) if el['values'].is_a?(Array)
   leaves = bad.map { |c| c['name'] }.compact.join(', ')
+  # Entity = the part before the first dot in the unresolved `[Entity.Leaf]` ref
+  # (e.g. "Dim Region"), used to attribute the drop to an ungranted schema.
+  entities = bad.map { |c| c['formula'].to_s[/\A\[([^\]\/.]+)\./, 1] }.compact.uniq.join(', ')
   record_unresolved(visual: (rec['title'] || rec['visual_id']), pbi_type: rec['visual_type'],
-                    sigma_kind: kind, severity: 'dropped', recoverable: true,
+                    sigma_kind: kind, severity: 'dropped', recoverable: true, entity: entities,
                     detail: "field(s) #{leaves} could not be resolved to a master column — dropped " \
                             '(would have shipped as a type=error column)',
                     action: "Map the PBI queryRef(s) for #{leaves} to a master column in master-map.json and re-run.")

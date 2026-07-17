@@ -77,5 +77,41 @@ ok('load(nil) -> nil', CoverageGate.load(nil).nil?)
 ok('load(missing) -> nil', CoverageGate.load('/no/such/coverage.json').nil?)
 ok('questions(nil) -> []', CoverageGate.questions(nil) == [])
 
+# ── classify_causes + report_lines_by_cause (cause grouping, 2026-07-17) ──
+# neutral fixture names (no customer identifiers).
+cov = {
+  'summary' => { 'sourceVisuals' => 4 },
+  'unresolved' => [
+    { 'visual' => 'Region sales', 'severity' => 'dropped', 'recoverable' => true, 'entity' => 'Dim Territory',
+      'detail' => 'field(s) TerritoryName could not be resolved to a master column — dropped' },
+    { 'visual' => 'Margin KPI', 'severity' => 'dropped', 'recoverable' => true, 'entity' => 'Fact Sales',
+      'detail' => 'field(s) Weird Ratio could not be resolved to a master column — dropped' },
+    { 'visual' => 'Rank tile', 'severity' => 'dropped', 'recoverable' => true, 'entity' => 'Fact Sales',
+      'detail' => 'field(s) Sales Rank could not be resolved to a master column — dropped' }
+  ]
+}
+CoverageGate.classify_causes(cov,
+                             ungranted: { 'maincat.gold_dims' => ['Dim Territory', 'Dim Vendor'] },
+                             connection: 'conn-123',
+                             dax_dropped: ['Weird Ratio'],
+                             dax_crosstable: ['Sales Rank'])
+by = cov['unresolved'].each_with_object({}) { |u, h| h[u['visual']] = u }
+ok('classify: ungranted-schema drop matched by entity', by['Region sales']['cause'] == 'ungranted_schema')
+ok('classify: non-translatable DAX flipped to recoverable:false',
+   by['Margin KPI']['cause'] == 'nontranslatable_dax' && by['Margin KPI']['recoverable'] == false)
+ok('classify: cross-table measure stays recoverable',
+   by['Rank tile']['cause'] == 'cross_table_measure' && by['Rank tile']['recoverable'] == true)
+ok('classify: causes_summary carries schema + connection',
+   cov.dig('causes_summary', 'ungranted_schemas').key?('maincat.gold_dims') &&
+   cov.dig('causes_summary', 'connection') == 'conn-123')
+
+cl = CoverageGate.report_lines_by_cause(cov)
+ok('grouped: leads with a GRANT action naming schema + connection',
+   cl.any? { |l| l.include?('UNGRANTED SCHEMA') && l.include?('gold_dims') && l.include?('grant') && l.include?('conn-123') })
+ok('grouped: surfaces non-translatable DAX as its own cause',
+   cl.any? { |l| l.include?('NONTRANSLATABLE DAX') })
+ok('grouped: falls back to flat report when unclassified',
+   CoverageGate.report_lines_by_cause(COVERAGE).size == 2)
+
 puts($fail.zero? ? "\nALL PASS" : "\n#{$fail} FAILED")
 exit($fail.zero? ? 0 : 1)

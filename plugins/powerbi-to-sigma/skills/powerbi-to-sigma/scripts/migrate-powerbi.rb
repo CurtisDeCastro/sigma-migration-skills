@@ -280,6 +280,38 @@ def run_wb!(cmd, env: {})
   out
 end
 
+# A DM POST fails HARD ("Cannot resolve columns … dependency not found" /
+# "Source not found: warehouse table '…'") when a source table lives in a schema
+# the connection CANNOT READ — the single most common enterprise blocker (customer
+# feedback 2026-07-17; the "1,763 → 0 errors" iteration). Map the offending
+# element/table in the POST output back to its source-path schema and return a
+# concrete GRANT action so the user isn't left decoding an opaque 400. Returns nil
+# when the failure isn't an unreadable-table error.
+def explain_unreadable_tables(out, dm_spec_path, conn)
+  spec = (JSON.parse(File.read(dm_spec_path)) rescue nil)
+  return nil unless spec
+  els = (spec['elements'] || []) + (spec['pages'] || []).flat_map { |p| p['elements'] || [] }
+  by_id = {}; by_tail = {}
+  els.each do |e|
+    p = e.dig('source', 'path')
+    next unless p.is_a?(Array) && !p.empty?
+    sch = p.length >= 3 ? "#{p[0]}.#{p[-2]}" : (p[-2] || p[0]).to_s
+    by_id[e['id']] = [sch, p[-1]]
+    by_tail[e['name'].to_s.downcase] = [sch, p[-1]] if e['name']
+    by_tail[p[-1].to_s.downcase] = [sch, p[-1]]
+  end
+  hits = Hash.new { |h, k| h[k] = [] }
+  out.scan(/table '([^']+)'/i) { |m| (s = by_id[m[0]]) && (hits[s[0]] << s[1]) }
+  out.scan(/formula reference '([^'\/]+)\//i) { |m| (s = by_tail[m[0].to_s.downcase]) && (hits[s[0]] << s[1]) }
+  out.scan(/warehouse table '([^']+)'/i) do |m|
+    parts = m[0].split('.'); next if parts.size < 2
+    sch = parts.size >= 3 ? "#{parts[0]}.#{parts[-2]}" : parts[-2]
+    hits[sch] << parts[-1]
+  end
+  return nil if hits.empty?
+  hits.map { |sch, tbls| "   │    • #{sch}  (table(s): #{tbls.uniq.first(6).join(', ')}) — grant to connection #{conn || '<the DM connection>'}" }.join("\n")
+end
+
 # Pull likely-offending field/column names out of a failed workbook build/POST log
 # so the fallback message can name them. Looks for the common rejection shapes:
 #   "Dependency not found: <X>", "Unknown column \"[<X>]\"", "source: {} ... <X>",
@@ -749,8 +781,23 @@ end
 run!(fixup, env: ENV.to_h)
 run!(['ruby', File.join(HERE, 'validate-spec.rb'), '--type', 'datamodel', dm_spec])
 dm_readback = File.join(WORK, 'dm-readback.json')
-run!(['ruby', File.join(HERE, 'post-and-readback.rb'), '--type', 'datamodel',
-      '--spec', dm_spec, '--out', dm_readback, '--workdir', WORK], env: ENV.to_h)
+# DM POST — captured (not run!) so an unreadable-table failure surfaces a concrete
+# GRANT action instead of an opaque 400 (customer feedback 2026-07-17).
+_dm_post = ['ruby', File.join(HERE, 'post-and-readback.rb'), '--type', 'datamodel',
+            '--spec', dm_spec, '--out', dm_readback, '--workdir', WORK]
+_dm_out, _dm_st = Open3.capture2e(ENV.to_h, *_dm_post)
+_dm_out.each_line { |l| puts "   #{l.rstrip}" } unless _dm_out.strip.empty?
+unless _dm_st.success?
+  hint = explain_unreadable_tables(_dm_out, dm_spec, opts[:conn])
+  if hint
+    warn ''
+    warn '   ┌─ UNREADABLE WAREHOUSE TABLE(S): the data-model POST failed because the'
+    warn '   │  connection cannot read one or more source tables — almost always a missing GRANT:'
+    warn hint
+    warn '   └─ grant the schema(s) above to the connection (or drop those tables/visuals), then re-run.'
+  end
+  abort "FATAL: data model POST failed (#{_dm_st.exitstatus})."
+end
 dm_rb = JSON.parse(File.read(dm_readback))
 dm_id = dm_rb['dataModelId']
 puts "   dataModelId = #{dm_id}"
@@ -1259,10 +1306,31 @@ puts "   workbookId = #{wb_id}"
 # ---------------------------------------------------------------------------
 coverage = CoverageGate.load(File.join(WORK, 'coverage.json'))
 if coverage
+  # Cause-grouping (customer feedback 2026-07-17: dim names/measures dropped → empty
+  # tiles with no "why"). Attribute each silent drop to a CAUSE with an action.
+  # UNGRANTED SCHEMA = a warehouse-table element the converter emitted that VANISHED
+  # from the DM readback (POST dropped/error-typed it → the connection can't read
+  # that schema); DAX drops come from the converter's ⛔/⚠ measure warnings.
+  rb_names = dm_elements.map { |e| e['name'] }.compact
+  rb_ids   = dm_elements.map { |e| e['id'] }.compact
+  ungranted = Hash.new { |h, k| h[k] = [] }
+  conv_elements.each do |cel|
+    p = cel.dig('source', 'path')
+    next unless p.is_a?(Array) && !p.empty?                         # warehouse-table element only
+    next if rb_names.include?(cel['name']) || rb_ids.include?(cel['id'])  # survived the readback
+    sch = p.length >= 3 ? "#{p[0]}.#{p[-2]}" : (p[-2] || p[0] || '(unknown)')
+    ungranted[sch] << p[-1] unless ungranted[sch].include?(p[-1])
+  end
+  mname = ->(w) { w.to_s[/["“']([^"”']+)["”']/, 1] }
+  dax_dropped    = conv_warnings.select { |w| w.to_s.include?('⛔') }.map(&mname).compact
+  dax_crosstable = conv_warnings.select { |w| w.to_s =~ /cross-table|different relationship path/i }.map(&mname).compact
+  coverage = CoverageGate.classify_causes(coverage, ungranted: ungranted, connection: opts[:conn],
+                                          dax_dropped: dax_dropped, dax_crosstable: dax_crosstable)
+  File.write(File.join(WORK, 'coverage.json'), JSON.pretty_generate(coverage)) # single channel for assert-visual-compare.rb
   puts
   puts '==================== MIGRATION COVERAGE ===================='
   puts "   #{CoverageGate.headline(coverage)}"
-  rlines = CoverageGate.report_lines(coverage)
+  rlines = CoverageGate.report_lines_by_cause(coverage)
   unless rlines.empty?
     puts
     puts rlines.join("\n")
