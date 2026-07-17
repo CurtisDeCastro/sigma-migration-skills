@@ -20,16 +20,40 @@
 # (they may be authored against elements outside this build; the pre-POST ref
 # gate remains the authority). Ambiguous normalizations are never guessed:
 # they are reported and left untouched.
+#
+# SINGLE-SEGMENT (same-element) re-casing — opt-in via same_element_recase: true.
+# A data-model calc authored from twb tokens carries BARE refs ([Totalggr],
+# [Userid]) that mean "a column on THIS element". Snowflake/Sigma read those
+# columns back UPPERCASE ([TOTALGGR]), so the bare TitleCase ref resolves to
+# type=error. When enabled (DM path only — never the workbook path, where a bare
+# [ctl-id] bracket is a CONTROL reference, see test), each element's bare refs are
+# re-cased against that element's OWN live labels. Two hard guards keep it honest:
+#   (1) a bare token is rewritten ONLY if it matches a real column label on the
+#       element — a non-column bracket (a control id) never matches and is left
+#       verbatim; and
+#   (2) if the same normalized column name also exists on ANOTHER element, the
+#       bare ref is CROSS-ELEMENT-AMBIGUOUS (the classic collapsed-multi-datasource
+#       IFNULL pattern) — it is NOT rewritten (that is a Lookup/relationship fix,
+#       not a casing fix), so this pass never silently turns a should-be-cross-
+#       element ref into a same-element one and masks a real gap.
 module RefLabelRepair
   REF_RE = /\[([^\[\]\/]+)\/([^\[\]]+)\]/.freeze
+  BARE_RE = /\[([^\[\]\/]+)\]/.freeze
 
   def self.norm(s)
     s.to_s.downcase.gsub(/[^a-z0-9]/, '')
   end
 
   # registry: { live_element_name => [live column label, ...], ... }
+  # qualified: run the [Element/Column] pass (default true — the workbook path).
+  #   The DM path passes qualified:false: DM formulas reference their own columns
+  #   through SOURCE aliases ([Custom SQL/COL], [TABLE_ALIAS/COL]) that are NOT the
+  #   element's display name, so rewriting the element segment could break a valid
+  #   self-ref; the DM only needs the bare-column casing fix.
+  # same_element_recase: also re-case BARE [Column] refs against the owning
+  #   element's own live labels (opt-in; DM path only — see module header).
   # Returns { fixed: N, misses: [..], ambiguous: [..] }; mutates elements.
-  def self.repair!(elements, registry)
+  def self.repair!(elements, registry, qualified: true, same_element_recase: false)
     by_norm_el = {}
     ambiguous_els = {}
     registry.each_key do |name|
@@ -56,15 +80,27 @@ module RefLabelRepair
       label_maps[name] = { exact: Array(labels).map(&:to_s), by_norm: by_norm, ambiguous: amb }
     end
 
+    # Cross-element column-ownership index: norm(column) => count of DISTINCT
+    # elements that carry a column with that normalization. Used only by the
+    # bare-ref (same_element_recase) pass to refuse re-casing a column name that
+    # lives on more than one element (the collapsed-multi-datasource ambiguity).
+    owner_count = Hash.new(0)
+    registry.each_value do |labels|
+      Array(labels).map { |l| norm(l) }.uniq.each { |k| owner_count[k] += 1 }
+    end
+
     fixed = 0
     misses = []
     ambiguous = []
     Array(elements).each do |el|
       cols = el.is_a?(Hash) ? el['columns'] : nil
       next unless cols.is_a?(Array)
+      el_name = el.is_a?(Hash) ? el['name'] : nil
+      own_lm = same_element_recase && el_name.is_a?(String) ? label_maps[el_name] : nil
       cols.each do |c|
         next unless c.is_a?(Hash) && c['formula'].is_a?(String)
         c['formula'] = c['formula'].gsub(REF_RE) do
+          next Regexp.last_match(0) unless qualified
           el_seg = Regexp.last_match(1)
           col_seg = Regexp.last_match(2)
           el_key = norm(el_seg)
@@ -95,6 +131,31 @@ module RefLabelRepair
             end
           else
             "[#{el_seg}/#{col_seg}]"
+          end
+        end
+        # Second pass: BARE [Column] refs → this element's own live labels
+        # (opt-in; DM path only). Slash refs are already rewritten above and
+        # BARE_RE (no slash inside) will not re-match them.
+        next unless own_lm
+        c['formula'] = c['formula'].gsub(BARE_RE) do
+          tok = Regexp.last_match(1)
+          key = norm(tok)
+          if own_lm[:exact].include?(tok)
+            "[#{tok}]"                                   # already exact — leave
+          elsif own_lm[:ambiguous][key]
+            ambiguous << "[#{tok}] (label normalizes ambiguously on '#{el_name}')"
+            "[#{tok}]"
+          elsif owner_count[key] > 1
+            # column of this normalization lives on >1 element — a cross-element
+            # (collapsed multi-datasource) ref, NOT a casing fix. Leave it to the
+            # relationship/Lookup path so we never mask a real gap.
+            ambiguous << "[#{tok}] (bare ref matches columns on multiple elements — needs a cross-element Lookup, not re-casing)"
+            "[#{tok}]"
+          elsif (live = own_lm[:by_norm][key])
+            fixed += 1 if live != tok
+            "[#{live}]"
+          else
+            "[#{tok}]"                                   # not a column here (e.g. a control id) — leave verbatim
           end
         end
       end
