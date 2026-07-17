@@ -1,4 +1,4 @@
-// ../wt-pbi-converter/build/sigma-ids.js
+// ../wt-pbi-mparser/build/sigma-ids.js
 var SIGMA_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 var _usedIds = /* @__PURE__ */ new Set();
 var _idCounter = 0;
@@ -264,7 +264,7 @@ function buildDerivedElements(elements) {
   return derived;
 }
 
-// ../wt-pbi-converter/build/powerbi.js
+// ../wt-pbi-mparser/build/powerbi.js
 var PBI_COMMUNITY_LINKS = {
   lod: "community.sigmacomputing.com/t/tableau-level-of-detail-or-lod-calculations-in-sigma/6427",
   groupings: "community.sigmacomputing.com/t/how-to-use-groupings-aggregate-calculations/2003",
@@ -1167,6 +1167,11 @@ function pbiExtractPathFromM(mExpr) {
         tbl = m[1];
     }
     if (tbl) {
+      if (!db && sch) {
+        const bare0 = mExpr.match(/\{\s*\[\s*Name\s*=\s*"([^"]+)"\s*\]\s*\}\s*\[\s*Data\s*\]/i);
+        if (bare0)
+          db = bare0[1];
+      }
       const parts = [db, sch, tbl].filter((s) => !!s);
       if (parts.length >= 2)
         return parts.map((s) => s.toUpperCase());
@@ -1183,9 +1188,34 @@ function pbiExtractPathFromM(mExpr) {
   if (nameNavMatches.length === 2) {
     return [nameNavMatches[0][1].toUpperCase(), nameNavMatches[1][1].toUpperCase()];
   }
-  const tblMatch = mExpr.match(/FROM\s+(?:\[?(\w+)\]?\.)?\[?(\w+)\]?\.\[?(\w+)\]?/i);
-  if (tblMatch) {
-    return [tblMatch[1] || "", tblMatch[2], tblMatch[3]].filter(Boolean).map((s) => s.toUpperCase());
+  const flatRec = mExpr.match(/\{\s*\[([^\]]*\bItem\s*=\s*"[^"]+"[^\]]*)\]\s*\}/i);
+  if (flatRec) {
+    const body = flatRec[1];
+    const key = (k) => (body.match(new RegExp("\\b" + k + '\\s*=\\s*"([^"]+)"', "i")) || [])[1] || null;
+    const item = key("Item");
+    const schema = key("Schema");
+    const recCatalog = key("Catalog");
+    const recDatabase = key("Database");
+    const sqlServerDb = (mExpr.match(/\bSql\.Database\s*\(\s*"[^"]*"\s*,\s*"([^"]+)"/i) || [])[1] || null;
+    const top = recCatalog || recDatabase || sqlServerDb;
+    if (item) {
+      const parts = [top, schema, item].filter((s) => !!s);
+      if (parts.length >= 2)
+        return parts.map((s) => s.toUpperCase());
+    }
+  }
+  const sql = mExpr.replace(/#\(lf\)|#\(tab\)|#\(cr\)/gi, " ");
+  const fromM = sql.match(/\bFROM\s+([`"\[]?[\w$-]+[`"\]]?(?:\s*\.\s*[`"\[]?[\w$-]+[`"\]]?){1,2})/i);
+  if (fromM) {
+    let parts = fromM[1].split(".").map((s) => s.replace(/[`"\[\]\s]/g, "")).filter(Boolean);
+    if (parts.length === 2) {
+      const navDb = (sql.match(/\[\s*Name\s*=\s*"([^"]+)"\s*,\s*Kind\s*=\s*"Database"\s*\]/i) || [])[1] || (sql.match(/\bCatalog\s*=\s*"([^"]+)"/i) || [])[1] || (sql.match(/\bSql\.Database\s*\(\s*"[^"]*"\s*,\s*"([^"]+)"/i) || [])[1] || null;
+      if (navDb && !/\bPostgreSQL\.Database\s*\(|\bAmazonRedshift\.Database\s*\(/i.test(mExpr)) {
+        parts = [navDb, ...parts];
+      }
+    }
+    if (parts.length >= 2)
+      return parts.map((s) => s.toUpperCase());
   }
   return null;
 }
