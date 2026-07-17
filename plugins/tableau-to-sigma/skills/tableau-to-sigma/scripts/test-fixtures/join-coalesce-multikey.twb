@@ -46,7 +46,7 @@
           </relation>
         </relation>
       </connection>
-      <column caption='Unified Segment' datatype='string' name='[Calculation_200]' role='dimension' type='nominal'>
+      <column caption='Merged Segment' datatype='string' name='[Calculation_200]' role='dimension' type='nominal'>
         <calculation class='tableau' formula='IFNULL([SEGMENT], [SEGMENT (DAILY_CONTRA)])' />
       </column>
     </datasource>
@@ -59,7 +59,7 @@
             <datasource caption='Daily Join' name='federated.join02' />
           </datasources>
           <datasource-dependencies datasource='federated.join02'>
-            <column caption='Unified Segment' datatype='string' name='[Calculation_200]' role='dimension' type='nominal' />
+            <column caption='Merged Segment' datatype='string' name='[Calculation_200]' role='dimension' type='nominal' />
           </datasource-dependencies>
         </view>
         <panes><pane><mark class='Bar' /></pane></panes>

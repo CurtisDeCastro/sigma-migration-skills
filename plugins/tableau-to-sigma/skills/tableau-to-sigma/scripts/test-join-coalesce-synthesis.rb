@@ -114,7 +114,7 @@ check(kf && kf['formula'] == expect_key, "composite key on primary is Text()-wra
 check(kt && kt['formula'] == expect_key, 'composite key mirrored on the target element', fails)
 check(fact2 && (fact2['order'] || []).include?(kf && kf['id']), 'primary composite key is in order[]', fails)
 
-c = col(fact2, 'Unified Segment')
+c = col(fact2, 'Merged Segment')
 check(c && c['formula'] == 'Coalesce([Segment], Lookup([Daily Contra/Segment], [Daily Contra Join Key], [Daily Contra/Daily Contra Join Key]))',
       'multi-key IFNULL → Lookup over the synthesized composite key', fails)
 check(res2['warnings'].any? { |w| w.include?('Synthesized composite join key') },

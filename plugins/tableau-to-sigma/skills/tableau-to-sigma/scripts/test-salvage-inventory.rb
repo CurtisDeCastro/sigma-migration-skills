@@ -39,7 +39,7 @@ CALCS = {
       'translation_notes' => ['TOTAL() needs a window partition'] },
     { 'name' => 'Region Avg', 'formula' => '{FIXED [Region] : AVG([Sales])}',
       'is_lod' => true, 'requires_custom_sql' => false, 'translation_notes' => [] },
-    { 'name' => 'Ship Speed Category', 'formula' => "IF [Days] <= 2 THEN 'Fast' ELSE 'Slow' END",
+    { 'name' => 'Delivery Tier', 'formula' => "IF [Days] <= 2 THEN 'Fast' ELSE 'Slow' END",
       'is_lod' => false, 'requires_custom_sql' => false, 'translation_notes' => [] }
   ]
 }.freeze
@@ -47,7 +47,7 @@ CALCS = {
 Dir.mktmpdir do |work|
   File.write(File.join(work, 'calc-fields.json'), JSON.pretty_generate(CALCS))
 
-  inv = salvage_inventory(work, ['Running Share', 'region avg', 'Ship Speed Category', 'TOTALREV'])
+  inv = salvage_inventory(work, ['Running Share', 'region avg', 'Delivery Tier', 'TOTALREV'])
   check(inv.length == 4, 'one inventory row per blocked field')
 
   win = inv[0]
@@ -65,7 +65,7 @@ Dir.mktmpdir do |work|
 
   row = inv[2]
   check(row['class'] == 'row-level calc', 'plain calc classed row-level')
-  check(row['route'].include?("--master-col 'Ship Speed Category="),
+  check(row['route'].include?("--master-col 'Delivery Tier="),
         'row-level route is the --master-col translation naming the field')
 
   unk = inv[3]
