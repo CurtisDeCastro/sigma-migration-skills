@@ -227,6 +227,16 @@ pages next to the Power BI renders. Do this BEFORE Phase 6, every run:
 
 1. Export the SOURCE pages: `"$PY" scripts/export-pbi-pages.py --report <reportId> --out-dir $WORK/visual-qa`
    (PNG is commonly tenant-disabled — the script falls through to PDF; per-page when pypdf is installed).
+   > **`ExportToFile` is the ONLY documented way to render a PBI page programmatically** — and it's
+   > what this script uses (it does its own **Power BI-audience** device sign-in, scope
+   > `analysis.windows.net/powerbi/api/.default`, separate from the Fabric extraction token — don't
+   > reuse the Fabric token or it 404s; see `pbi-export-pages-token-audience`). Preconditions: the
+   > report is in a workspace on **Fabric capacity** (trial/premium), the user completes that export
+   > sign-in, and PNG isn't tenant-disabled (else PDF — the agent Reads PDFs the same way). **There is
+   > no other agent-driven render path:** the Power BI **Modeling MCP is model/DAX-only** (no visuals),
+   > there is **no PBI `get-view-image` MCP tool** (Tableau has one; Power BI does not), and Power BI
+   > **Embedded** screenshotting needs an Entra app + embed token this corporate tenant blocks. So:
+   > run `ExportToFile` whenever you have a live report on capacity; otherwise fall back to the user.
    **No live report / export 404s / all formats tenant-disabled (the file-mode default):** you can't
    auto-pull the source render — fall back to the **user-supplied screenshots** requested at Step 0
    (`<WORK>/dashboards/*.png`). If they weren't provided at intake, `AskUserQuestion` for them now
