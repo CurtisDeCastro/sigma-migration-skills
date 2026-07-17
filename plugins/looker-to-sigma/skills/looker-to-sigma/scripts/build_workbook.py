@@ -349,6 +349,12 @@ def main():
     a = ap.parse_args()
 
     dash = json.load(open(a.contract))
+    # Item 1 — authoritative dim/measure classification. A Look (fetch_looker_look.py)
+    # carries `fieldMeta` = {field: {category, aggType?, baseColumn?, valueFormat?, sql?}}
+    # pulled from Looker's explore metadata + dynamic_fields hints. Dashboards emit no
+    # `fieldMeta`, so this dict is empty for them and every predicate below falls back
+    # to the view-.lkml classification (behavior unchanged; golden diff empty).
+    field_cat = dash.get("fieldMeta") or {}
     # Model files live alongside or one level above the views dir — read their
     # join `from:` aliases so alias-qualified dashboard fields resolve.
     model_files = (glob.glob(os.path.join(a.views, "*.model.lkml"))
@@ -357,6 +363,28 @@ def main():
     warnings = []
     measures, dims, view_pk, formats, yesno_dims, dim_groups, dim_labels = build_field_index(
         sorted(glob.glob(os.path.join(a.views, "*.view.lkml"))), aliases, warnings)
+
+    # Fold Looker's authoritative categories into the local indexes so a Look's
+    # ad-hoc/custom measures (dynamic_fields) — or a run with NO --views — classify
+    # correctly instead of being dropped or forced into groupBy. A measure absent
+    # from the local views gets a synthesized index entry (aggType + base column)
+    # so col_display()/formula_for() produce the right Sigma aggregate.
+    for _fname, _meta in field_cat.items():
+        _cat = _meta.get("category")
+        if _cat == "measure" and _fname not in measures:
+            _base = _meta.get("baseColumn")          # fully-qualified "view.col" (or None)
+            _agg = _meta.get("aggType") or "sum"
+            _sqlx = _meta.get("sql") or (("${TABLE}.%s" % leaf(_base)) if _base else "")
+            # store the base DISPLAY leaf (like a view measure); col_display() derives
+            # the denorm suffix from field_cat[...].baseColumn's view (below).
+            measures[_fname] = (_agg, disp(leaf(_base)) if _base else None, _sqlx, [])
+            _vf = _meta.get("valueFormat")
+            if _vf and _fname not in formats:
+                _fmt = sigma_format_for(_vf, None)
+                if _fmt:
+                    formats[_fname] = _fmt
+        elif _cat == "dimension":
+            dims.add(_fname)
 
     # ── per-explore masters ────────────────────────────────────────────────────
     # A Looker dashboard's tiles can hit SEVERAL explores; one master per explore,
@@ -429,7 +457,13 @@ def main():
         if ff: col["format"] = ff
         return col
 
-    def is_measure(f): return f in measures
+    def is_measure(f):
+        # fieldMeta is AUTHORITATIVE (Looker's own dim/measure category); fall back to
+        # the view-.lkml index only when the field isn't in fieldMeta (dashboard path).
+        c = (field_cat.get(f) or {}).get("category")
+        if c is not None:
+            return c == "measure"
+        return f in measures
     def is_ratio(f):
         """Measure whose sql references other measures or is a type:number arithmetic
         expression (e.g. AOV = revenue/orders) — has no single base column."""
@@ -477,6 +511,12 @@ def main():
             if is_ratio(f): return None           # composite — components needed separately
             base = measures[f][1]                 # base column (None for plain count)
             if not base: return None
+            # fieldMeta (custom/dynamic) measure: its field name is bare (no "view."
+            # prefix), so derive the denorm suffix from the base column's OWN view.
+            _bc = (field_cat.get(f) or {}).get("baseColumn")
+            if _bc:
+                _bview = _bc.split(".")[0] if "." in _bc else view
+                return base + ("" if _bview == explore else f" ({_bview})")
             # A count/count_distinct on a JOINED view keyed on that view's PK
             # references the join key — which the denorm element OMITS (a
             # cross-element passthrough of a join key compiles to type "error").
@@ -667,6 +707,8 @@ def main():
     def field_resolvable(f):
         if not f or "." not in f:
             return True                      # synthetic/unqualified — leave alone
+        if f in field_cat:
+            return True                      # Looker says it exists — trust it (no-checkout path)
         if is_measure(f) or f in dims:
             return True
         if dimgroup_display(f) is not None:
@@ -890,6 +932,15 @@ def main():
         ex = el["explore"]
         ms = [f for f in el["fields"] if is_measure(f)]
         ds = [f for f in el["fields"] if not is_measure(f)]
+
+        # ── pivoted table → real Sigma pivot-table (cross-tab) ────────────────
+        # A Looker grid/table WITH pivots is a cross-tab: row dims on the row shelf,
+        # the pivot field(s) on the column shelf, measures as the aggregated cells.
+        # Requires ≥1 non-pivot row dim AND ≥1 measure; otherwise fall through to the
+        # flat `table` branch (which flattens + warns). Sigma pivot-table REQUIRES
+        # both rowsBy and columnsBy (verified: sigma-workbooks tables.md).
+        if kind == "table" and el.get("pivots") and ds and ms:
+            kind = "pivot-table"
 
         # ── measure-only grid → a row of KPI tiles ────────────────────────────
         # A Looker table/grid with NO dimensions renders one row of totals. A
@@ -1151,6 +1202,27 @@ def main():
                 warnings.append(f"tile '{el['name']}': pivot {el['pivots']} flattened to columns — "
                                 f"rebuild as a Sigma pivot-table for true cross-tab")
 
+        elif kind == "pivot-table":
+            # Cross-tab: row dims → rowsBy, pivot field(s) → columnsBy, measures →
+            # values (the aggregated cells). Same source/columns as `table`; the
+            # shelves replace `groupings`. Shape verified: sigma-workbooks tables.md.
+            cols, row_ids, col_ids, val_ids = [], [], [], []
+            pivset = set(el.get("pivots") or [])
+            for f in el["fields"] + (el.get("pivots") or []):
+                tcol = {"id": sid("c"), "formula": formula_for(f, ex), "name": disp(leaf(f))}
+                if is_measure(f):
+                    apply_fmt(tcol, f); _warn_count(f, el); val_ids.append(tcol["id"])
+                elif f in pivset:
+                    col_ids.append(tcol["id"])
+                else:
+                    row_ids.append(tcol["id"])
+                cols.append(tcol)
+                field2cid[f] = tcol["id"]
+            base["columns"] = cols
+            base["values"] = val_ids
+            base["rowsBy"] = [{"id": i} for i in row_ids]
+            base["columnsBy"] = [{"id": i} for i in col_ids]
+
         # merged-results auto-join (Looker merge_result_id) — adds the secondary
         # explore's measure(s) as Max(Lookup(...)) columns now that base is built.
         attach_merge(el, base, kind, ex)
@@ -1196,11 +1268,66 @@ def main():
                     base["groupings"][0].setdefault("sort", []).append({"columnId": cid, "direction": direction})
                 else:
                     base.setdefault("sort", []).append({"columnId": cid, "direction": direction})
+            elif kind == "pivot-table":
+                # a dimension sort attaches to its row/column shelf item; a measure
+                # sort attaches `by: <value colId>` to the first row shelf item.
+                placed = False
+                for shelf in ("rowsBy", "columnsBy"):
+                    for it in base.get(shelf, []):
+                        if it.get("id") == cid:
+                            it["sort"] = {"direction": direction}; placed = True
+                if not placed and is_measure(sf) and base.get("rowsBy"):
+                    base["rowsBy"][0]["sort"] = {"direction": direction, "by": cid}
+
+        # ── row limit (Looker `limit`) → element top-N filter ─────────────────
+        # A Looker grid's row limit is a "first N after sort"; Sigma's closest
+        # spec-authorable analog is a top-N element filter ranked by a measure
+        # (rowCount is a literal — sigma-workbooks tables.md). Applies to grouped
+        # tables / pivots (an aggregated row set). Needs a measure column to rank by.
+        # Only a DELIBERATE small cap (< 500) is a top-N; Looker's default 500/5000
+        # row cap is a safety limit, not an analytical top-N — don't add a filter for it.
+        lim = el.get("limit")
+        if kind in ("table", "pivot-table") and isinstance(lim, int) and 0 < lim < 500:
+            rank_cid = None
+            # prefer the measure named in the first sort; else the first measure column
+            for s in (el.get("sorts") or []):
+                sf0 = str(s).split()[0]
+                if is_measure(sf0) and field2cid.get(sf0):
+                    rank_cid = field2cid[sf0]; break
+            if not rank_cid:
+                rank_cid = next((field2cid[f] for f in el["fields"] if is_measure(f) and field2cid.get(f)), None)
+            if rank_cid and base.get("groupings" if kind == "table" else "values"):
+                base.setdefault("filters", []).append({
+                    "id": sid("f"), "columnId": rank_cid, "kind": "top-n",
+                    "rankingFunction": "rank", "mode": "top-n", "rowCount": lim,
+                    "includeNulls": "when-no-value-is-selected"})
+                warnings.append(f"tile '{el['name']}': Looker row limit {lim} → Sigma top-{lim} "
+                                "filter ranked by the primary measure (approximates 'first N after sort').")
+            elif kind in ("table", "pivot-table"):
+                warnings.append(f"tile '{el['name']}': Looker row limit {lim} not applied — no measure "
+                                "column to rank a top-N by; add a Top-N in the Sigma UI if needed.")
+
+        # ── totals (Looker `total` / `row_total`) — UI follow-up ──────────────
+        # Column/row grand totals have no reliably-portable spec key on table/
+        # pivot-table (pivot `totals` also 500s CSV export), so surface them as a
+        # loud follow-up instead of emitting an unverified key. Never silent.
+        if el.get("total") or el.get("rowTotal"):
+            which = " + ".join([w for w, on in (("column totals", el.get("total")),
+                                                ("row totals", el.get("rowTotal"))) if on])
+            warnings.append(f"tile '{el['name']}': Looker {which} not ported — enable totals on the "
+                            "Sigma element in the UI (spec totals aren't reliably round-trippable).")
+
         # Looker table calcs (dynamic_fields) → Sigma formula columns
         for dyn in (el.get("dynamicFields") or []):
             if not isinstance(dyn, dict):
                 continue
             expr = dyn.get("expression") or ""
+            if not expr:
+                # A custom measure/dimension (based_on/measure/dimension, no
+                # `expression`) is a regular field — it is classified via fieldMeta
+                # and emitted through the normal field path. Skip here so it doesn't
+                # also append an empty-formula duplicate column.
+                continue
             label = dyn.get("label") or dyn.get("table_calculation") or "Calc"
             def _subfield(m):
                 f = m.group(1)
@@ -1213,7 +1340,15 @@ def main():
                 warnings.append(f"tile '{el['name']}': table calc '{label}' uses an unsupported "
                                 f"window fn — review: {expr}")
                 continue
-            base.setdefault("columns", []).append({"id": sid("tc"), "formula": sig.strip(), "name": label})
+            tcid = sid("tc")
+            base.setdefault("columns", []).append({"id": tcid, "formula": sig.strip(), "name": label})
+            # A table calc on a grouped/pivot table must join the aggregation, or it
+            # renders detached from the roll-up. Wire it into the grouping's
+            # calculations (grouped table) / the pivot's values.
+            if kind == "table" and base.get("groupings"):
+                base["groupings"][0].setdefault("calculations", []).append(tcid)
+            elif kind == "pivot-table":
+                base.setdefault("values", []).append(tcid)
         elements.append(base)
         el.setdefault("_emitted", []).append(base)   # control-targeting (listen:)
 
