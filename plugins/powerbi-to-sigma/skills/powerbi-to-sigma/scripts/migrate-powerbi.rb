@@ -102,6 +102,11 @@ OptionParser.new do |o|
   o.on('--connection ID')   { |v| opts[:conn]   = v }
   o.on('--database DB')     { |v| opts[:db]     = v }
   o.on('--schema S')        { |v| opts[:schema] = v }
+  # Target warehouse dialect for physical-identifier casing (beads-sigma-lanq.7).
+  # Databricks/Spark store identifiers lower-case and bind only against a lower-cased
+  # warehouse path; Snowflake/BigQuery (the default) fold to UPPER. Default is read
+  # from the resolved connection's `type` in connection.json; this flag overrides it.
+  o.on('--warehouse-type T') { |v| opts[:wh_type] = v }
   o.on('--ref-dm ID')       { |v| opts[:ref_dm] = v }
   o.on('--folder ID')       { |v| opts[:folder] = v }
   o.on('--name NAME')       { |v| opts[:name]   = v }
@@ -187,7 +192,11 @@ abort "FATAL: missing --pbir (the Power BI report layout / PBIR bundle).\n#{CONN
 abort "FATAL: --pbir not found: #{opts[:pbir]}\n#{CONNECT_HINT}" unless File.exist?(opts[:pbir])
 # intake.rb (front-door) caches the resolved connection in <out>/connection.json; honor it
 # when --connection is omitted so the agent need not re-pass the id it just resolved.
-opts[:conn] ||= (JSON.parse(File.read(File.join(opts[:out], 'connection.json')))['connection_id'] rescue nil) if opts[:out]
+if opts[:out] && File.exist?(File.join(opts[:out], 'connection.json'))
+  _cj = (JSON.parse(File.read(File.join(opts[:out], 'connection.json'))) rescue {})
+  opts[:conn]    ||= _cj['connection_id']
+  opts[:wh_type] ||= _cj['type']   # warehouse dialect → physical-identifier casing (beads-sigma-lanq.7)
+end
 # bead hjke(a): abort early on a truncated/partial connection id — it survives
 # all the way to the DM POST and fails there opaquely ("Source not found").
 if opts[:conn] && opts[:conn] !~ /\A\h{8}-\h{4}-\h{4}-\h{4}-\h{12}\z/
@@ -396,13 +405,14 @@ elsif CONV_MODULE.nil?
   puts '   vendored converter (converter/powerbi.mjs) missing and no local sigma-data-model-mcp build (--mcp-dir / PBI_MCP_DIR).'
   puts
   puts '   >>> GATE: run the convert_powerbi_to_sigma MCP tool on the TMSL model'
-  puts "       (#{opts[:tmsl]}) with connectionId=#{opts[:conn]} database=#{opts[:db]} schema=#{opts[:schema]},"
+  puts "       (#{opts[:tmsl]}) with connectionId=#{opts[:conn]} database=#{opts[:db]} schema=#{opts[:schema]} warehouseType=#{opts[:wh_type].to_s.empty? ? '(default UPPER)' : opts[:wh_type]},"
   puts '       save the tool result JSON to a file, then re-run this command with'
   puts '       --converter-out <that file>. No Sigma objects were created.'
   exit 10
 end
 unless opts[:cvt_out]
 puts "   converter: #{CONV_MODULE == VENDORED_PBI ? 'vendored bundle (converter/powerbi.mjs)' : CONV_MODULE} (no data leaves this machine)"
+puts "   warehouse dialect: #{opts[:wh_type].to_s.empty? ? 'default (UPPER — Snowflake/BigQuery)' : "#{opts[:wh_type]} → lower-case physical ids"} (beads-sigma-lanq.7)"
 shim = File.join(WORK, '_convert.mjs')
 # Node ESM on Windows rejects a bare drive-letter specifier
 # (`import ... from "C:/path/powerbi.mjs"` → ERR_UNSUPPORTED_ESM_URL_SCHEME,
@@ -423,6 +433,7 @@ File.write(shim, <<~JS)
     connectionId: #{(opts[:conn] || '').to_json},
     database: #{opts[:db].to_json},
     schema: #{opts[:schema].to_json},
+    warehouseType: #{(opts[:wh_type] || '').to_json},
   });
   // Write the UNWRAPPED model to dm-raw.json. convert-model.rb MODE B unwraps
   // only {sigmaDataModel} or a bare spec, NOT this converter's {model,...}

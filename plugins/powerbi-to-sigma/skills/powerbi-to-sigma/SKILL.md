@@ -139,6 +139,17 @@ resume with `--converter-out`. The hosted MCP is a fallback, not the default pat
 
 `convertPowerBIToSigma(model_json, connection_id, database, schema)`.
 
+> **Databricks / lower-case warehouses (beads-sigma-lanq.7):** physical identifiers default to
+> UPPER (Snowflake/BigQuery fold that way). Databricks/Spark store identifiers **lower-case** and
+> bind only against a lower-cased warehouse path, so an UPPER path fails at POST with
+> `Source not found`. `migrate-powerbi.rb` reads the resolved connection's `type` from
+> `connection.json` and passes `warehouseType` to the converter automatically; the flag
+> **`--warehouse-type databricks`** forces it (use this if the connection was passed with
+> `--connection <id>`, since that path doesn't populate the type). The element name and
+> `[Table/Col]` formula refs stay UPPER (Sigma-internal) — only `source.path` + column physical
+> names fold to the warehouse case. A single `--schema` also no longer collapses a multi-schema
+> model (beads-sigma-lanq.6): it's applied as a repoint only on a single-schema model.
+
 > ⚠️ **`--converter-out` takes the converter's output — never a hand-authored spec.**
 > The flag exists so you can run the converter (the fallback `convert_powerbi_to_sigma`
 > MCP tool when the local bundle is unavailable), save its
