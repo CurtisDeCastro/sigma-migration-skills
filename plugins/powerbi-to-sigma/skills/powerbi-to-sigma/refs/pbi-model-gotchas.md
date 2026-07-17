@@ -21,7 +21,7 @@ lowercase, mostly-ungranted multi-schema, 100s of tables, heavy `CALCULATE`.
 | Multi-partition tables + incremental-refresh `refreshPolicy.sourceExpression` + Direct Lake/`entity` partitions (only `partitions[0]` read) | convert | `beads-sigma-lanq.11` (P2) |
 | Relationship fidelity: many-to-many + bidirectional `crossFilteringBehavior` not inspected (fan-out / wrong subtotals) | convert | `beads-sigma-lanq.12` (P2) |
 | Metadata cluster: `sortByColumn` (alpha sort), KPI measure sub-object (target/status/trend), hierarchies `levels[]`, `column.summarizeBy` default agg, nested `displayFolder` | convert | `beads-sigma-lanq.13` (P3) |
-| Report filters (`filterConfig` Where-tree, In/Not/Between/Comparison, ComparisonKind, TopN, RelativeDate, `howCreated` Auto/Drill noise, inverted selection, Passthrough) never extracted | extract-pbir | Track 3 (in progress) |
+| Report filters (`filterConfig` Where-tree, In/Not/Between/Comparison, ComparisonKind, TopN, RelativeDate, `howCreated` Auto/Drill noise, inverted selection, Passthrough) never extracted | extract-pbir + build-workbook | Track 3a (extract) + 3b (apply: list/number-range/top-n → element/master filters; measure/multi-col/date-range → coverage) SHIPPED; date-range-control emission is the fast-follow |
 | Friendly table name ≠ physical view: element-name/formula-prefix reconciliation | build-DM | `beads-sigma-2xap` (SHIPPED #401) |
 | Cross-table measure referencing a dim column dropped (should translate via the relationship) | convert | `beads-sigma-lanq.8` (P2) |
 | Time-intel date grain hardcoded to month (ignores active hierarchy level) | dax/build | `beads-sigma-wpoz` (P3) |

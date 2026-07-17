@@ -235,6 +235,256 @@ def record_unresolved(visual:, severity:, detail:, pbi_type: nil, sigma_kind: ni
                    'recoverable' => recoverable, 'action' => action, 'entity' => entity }
 end
 
+# ---------------------------------------------------------------------------
+# Report/page/visual FILTER APPLICATION (beads-sigma-3tx6, Track 3b).
+# extract-pbir.py (Track 3a) emits normalized filter signals on each visual, each
+# page, and the report (signals[..]['filters']; shape in refs/pbi-filter-spec.md).
+# Here we turn each into a Sigma element-level `filters[]` entry.
+#
+# VERIFIED element-filter shapes (live PUT+GET round-trip 2026-07-17; memory
+# reference_sigma_element_filter_shapes):
+#   list         -> {id, columnId, kind:list, mode:include|exclude, values}
+#   number-range -> {id, columnId, kind:number-range, min?, max?}   NOTE: min/max,
+#                   NOT the control's low/high (those + positional value[] are
+#                   silently dropped on an ELEMENT filter). Needs a NUMERIC target.
+#   top-n        -> {id, columnId, kind:top-n, rankingFunction:rank, mode:top-n, rowCount}
+#
+# PLACEMENT (refs/pbi-filter-spec.md §2 + the 5 open-Q decisions, this PR):
+#   visual filter  -> the built element's own filters[] (verified enforced on
+#                     table/bar/kpi). pivot-table element filters are SILENTLY
+#                     DROPPED by Sigma (memory sigma-pivot-filter-silently-dropped)
+#                     -> route to coverage.
+#   page/report    -> the source MASTER element(s) carrying the column; every
+#                     element sourcing them inherits it (page-filter semantics;
+#                     memory sigma-source-element-filter-propagates). Same pattern
+#                     as build-bookmark-workbooks.py _bake_filters. A page filter
+#                     is applied ONLY to masters used solely by that page (a shared
+#                     master can't be isolated to one page -> coverage); a report
+#                     filter applies to every master carrying the column.
+#
+# COVERAGE (never a broken/inert filter): date-range (Sigma has no static element
+#   date filter — needs a date-range control, the documented fast-follow), measure
+#   (HAVING), multi-column key, text/unmodeled conditions, page/report Top-N (would
+#   cap every element off the shared master), unresolved/non-projected targets, and
+#   pivot element filters. Empty slots (predicate:none) = a faithful no-op (the PBI
+#   filter field carried no selection) — noted, never fabricated.
+# ---------------------------------------------------------------------------
+$used_filter_ids = {}
+def uniq_filter_id(seed)
+  base = "flt-#{seed.to_s.gsub(/[^A-Za-z0-9]/, '')}"[0, 28]
+  base = 'flt' if base == 'flt-'
+  # Register the EMITTED string (not just the base): a later seed whose base
+  # equals a prior suffix (e.g. 'Region2' after 'Region' twice) must not collide.
+  cand = base
+  n = 1
+  while $used_filter_ids[cand]
+    n += 1
+    cand = "#{base}#{n}"
+  end
+  $used_filter_ids[cand] = true
+  cand
+end
+
+# number-range condition [{op,value},...] -> [min, max]. Sigma element bounds are
+# inclusive; an exclusive PBI bound (>, <) is applied inclusively (a boundary-row
+# nuance on a continuous measure, not a category-membership change).
+def number_range_bounds(condition)
+  mn = mx = nil
+  Array(condition).each do |c|
+    num = Float(c['value']) rescue nil
+    next if num.nil?
+    num = num.to_i if num == num.floor
+    case c['op']
+    when '>', '>=' then mn = num
+    when '<', '<=' then mx = num
+    when '=' then mn = mx = num
+    end
+  end
+  [mn, mx]
+end
+
+# Decide how a signal is handled at `scope` (visual|page|report): :apply, or a
+# coverage-reason symbol. Does NOT resolve a target column (the caller does that).
+def filter_route(sig, scope)
+  return :empty_slot if sig['predicate'] == 'none'
+  case sig['type']
+  when 'list'
+    return :multi_column if sig['unsupported']
+    # An include-list with NO values matches zero rows (would blank the element);
+    # an exclude-list with none is a no-op. Either way apply nothing (never blank).
+    Array(sig['values']).empty? ? :empty_slot : :apply
+  when 'number-range'
+    cond = sig['condition']
+    return :unmodeled_condition unless cond.is_a?(Array) && !cond.empty?
+    mn, mx = number_range_bounds(cond)
+    # A comparison whose literal isn't numeric (absolute-date / text advanced
+    # filter the extractor still tags number-range) parses to no bound — that is a
+    # REAL dropped predicate, not an empty slot. Route it to honest coverage.
+    (mn.nil? && mx.nil?) ? :number_range_nonnumeric : :apply
+  when 'top-n'
+    return :top_n_page_scope unless scope == 'visual'  # a shared-master top-n caps everything
+    return :empty_slot unless sig['n'].to_i.positive?
+    # Bottom-N (ascending rank): Sigma's element top-n ranks descending only, so a
+    # PBI Bottom-N must NOT ship as a Top-N (that keeps the WRONG rows) — coverage.
+    sig['direction'].to_s == 'asc' ? :top_n_direction : :apply
+  when 'date-range'    then :date_range
+  when 'measure-filter' then :measure_filter
+  else                      # condition (contains/starts-with), unmodeled trees
+    sig['unsupported'] ? :unsupported_condition : :unmodeled_condition
+  end
+end
+
+# Build the Sigma element-filter hash for an :apply signal + a resolved columnId.
+def build_filter(sig, column_id)
+  fid = uniq_filter_id(qr_leaf(sig['target'], 'f'))
+  case sig['type']
+  when 'list'
+    { 'id' => fid, 'columnId' => column_id, 'kind' => 'list',
+      'mode' => (sig['mode'] == 'exclude' ? 'exclude' : 'include'), 'values' => Array(sig['values']) }
+  when 'number-range'
+    mn, mx = number_range_bounds(sig['condition'])
+    f = { 'id' => fid, 'columnId' => column_id, 'kind' => 'number-range' }
+    f['min'] = mn unless mn.nil?
+    f['max'] = mx unless mx.nil?
+    f
+  when 'top-n'
+    { 'id' => fid, 'columnId' => column_id, 'kind' => 'top-n',
+      'rankingFunction' => 'rank', 'mode' => 'top-n', 'rowCount' => sig['n'].to_i }
+  end
+end
+
+# One coverage entry per un-applied filter — same loud/aggregated discipline as
+# every other drop (customer feedback: never silently drop). `reason` is a
+# filter_route symbol (or :unresolved_target / :not_projected / :pivot_element /
+# :page_shared_master decided by the caller).
+FILTER_COVERAGE_META = {
+  empty_slot:           ['degraded', false, 'empty filter slot (no predicate selected in the source) — nothing applied, a faithful no-op',
+                         'No action — the Power BI filter field carried no selection.'],
+  multi_column:         ['degraded', false, 'multi-column (composite-key) filter — not element-authorable in Sigma',
+                         'Recreate as per-column filters if the AND-of-tuples semantics allow, or accept the wider result.'],
+  date_range:           ['degraded', true,  'relative/absolute date-range filter — Sigma has no static element date filter',
+                         'Add a date-range control (%WINDOW%) on this column, targeting the source table.'],
+  measure_filter:       ['degraded', false, 'measure (post-aggregate / HAVING) filter — not element-authorable',
+                         'Recreate via a calc column + row filter or a data-model metric filter.'],
+  unsupported_condition:['degraded', true,  'text/condition filter (contains / starts-with) — no verified element filter kind',
+                         'Add a text control (contains / starts-with) targeting the source table.'],
+  unmodeled_condition:  ['degraded', false, 'filter condition shape not modeled by the extractor',
+                         'Inspect the source filter and recreate it manually if material.'],
+  number_range_nonnumeric: ['degraded', true, 'numeric-comparison filter on a non-numeric (date/text) column — Sigma number-range needs a numeric target',
+                         'For a date column add a date-range control; for text use a text/list filter. Recreate and re-run.'],
+  top_n_direction:      ['degraded', true,  'Bottom-N filter (ascending rank) — Sigma element top-n ranks descending only; shipping it as Top-N would keep the wrong rows',
+                         'Recreate as a Bottom-N in Sigma (sort ascending, then Top-N), or accept a Top-N.'],
+  top_n_rankby:         ['degraded', true,  'Top-N rank-by measure is not projected on this element, so it cannot rank correctly',
+                         'Add the ranking measure to the visual (or fix the master-map) so the Top-N can rank by it, then re-run.'],
+  top_n_page_scope:     ['degraded', true,  'page/report-scope Top-N — a Top-N on a shared master caps every element sourcing it',
+                         'Apply the Top-N on the specific element(s) it should bound, not the shared source.'],
+  unresolved_target:    ['degraded', true,  'filter target resolves to no master/element column',
+                         'Add the column to the master-map / master element (or fix the queryRef) and re-run.'],
+  not_projected:        ['degraded', true,  'visual filter targets a column the element does not project',
+                         'Add the column to the visual, or apply it as a page filter, and re-run.'],
+  pivot_element:        ['degraded', true,  'element filter on a pivot-table is silently dropped by Sigma',
+                         "Apply the filter to the pivot's source table (a page filter) instead."],
+  page_shared_master:   ['degraded', true,  'page filter targets a master shared by other pages — cannot be isolated to one page',
+                         'Split the master per page, or convert the page filter to a control, then re-run.']
+}.freeze
+def record_filter_coverage(reason, sig, label, scope)
+  meta = FILTER_COVERAGE_META[reason] or return
+  sev, rec, detail, action = meta
+  if reason == :date_range && sig['window'].is_a?(Hash)
+    w = sig['window']
+    win = "#{w['anchor']} #{w['n']} #{w['unit']}#{w['includeToday'] ? ', incl. today' : ''}".strip
+    action = action.sub('%WINDOW%', win)
+  end
+  tgt = sig['target']
+  record_unresolved(visual: "#{label} [#{scope} filter]", pbi_type: "filter:#{sig['type']}",
+                    sigma_kind: 'filter', severity: sev, recoverable: rec,
+                    detail: "#{detail} (target #{tgt.inspect})", action: action,
+                    entity: tgt.to_s.split('.').first)
+end
+
+# Apply a visual's filter signals onto its built element. columnId must resolve to
+# a column the element PROJECTS (element filters reference the element's own
+# columns) — matched via the queryRef->column-id map build_element stashes on
+# `_qr_cids`. pivot-table -> coverage (Sigma silently drops its element filters).
+def apply_visual_filters!(el, sigs, label)
+  return unless sigs.is_a?(Array) && !sigs.empty?
+  return if %w[control text image].include?(el['kind'])
+  col_ids = (el['columns'] || []).map { |c| c['id'] }
+  norm = ->(s) { s.to_s.downcase.gsub(/[_\s]+/, ' ').strip }
+  idx = {}                              # normalized queryRef -> projected column id
+  (el['_qr_cids'] || {}).each { |qr, cid| idx[norm.call(qr)] ||= cid if col_ids.include?(cid) }
+  name_idx = {}                         # normalized column NAME -> id (for top-n rankBy, a bare measure name)
+  (el['columns'] || []).each { |c| name_idx[norm.call(c['name'])] ||= c['id'] if c['name'] }
+  sigs.each do |sig|
+    if el['kind'] == 'pivot-table'
+      record_filter_coverage(:pivot_element, sig, label, 'visual'); next
+    end
+    route = filter_route(sig, 'visual')
+    if route != :apply
+      record_filter_coverage(route, sig, label, 'visual'); next
+    end
+    if sig['type'] == 'top-n'
+      # Sigma top-n ranks BY the filter's columnId (tables.md: columnId=the measure),
+      # NOT the limited dimension — resolve rankBy to a projected measure column so
+      # "top 5 States by Claim Count" ranks by Claim Count, not the State name.
+      rcid = sig['rankBy'] && name_idx[norm.call(qr_leaf(sig['rankBy'], ''))]
+      rcid ||= sig['rankBy'] && idx[norm.call(sig['rankBy'])]
+      unless rcid
+        record_filter_coverage(:top_n_rankby, sig, label, 'visual'); next
+      end
+      (el['filters'] ||= []) << build_filter(sig, rcid); next
+    end
+    cid = sig['target'] && idx[norm.call(sig['target'])]
+    unless cid
+      record_filter_coverage(sig['target'] ? :not_projected : :unresolved_target, sig, label, 'visual'); next
+    end
+    (el['filters'] ||= []) << build_filter(sig, cid)
+  end
+end
+
+# Apply page/report filter signals onto the source master element(s). The target
+# is resolved through field_spec to its AUTHORITATIVE master(s) (primary + alts) —
+# NOT by scanning every master for a same-NAME column, which fail-opens onto an
+# unrelated role-playing entity ("Order Year" landing on a "Ship Date" master) or a
+# name-colliding master (Region on two unrelated facts). `allowed_ids` = nil
+# (report: every authoritative master) or the master ids exclusive to this page
+# (page scope); a target on no allowed master -> coverage, never a wrong column.
+def apply_source_filters!(sigs, scope, label, data_elements, allowed_ids, fields, masters)
+  return 0 unless sigs.is_a?(Array) && !sigs.empty?
+  by_id = data_elements.each_with_object({}) { |de, h| h[de['id']] = de }
+  applied = 0
+  sigs.each do |sig|
+    route = filter_route(sig, scope)
+    if route != :apply
+      record_filter_coverage(route, sig, label, scope); next
+    end
+    tgt = sig['target']
+    unless tgt
+      record_filter_coverage(:unresolved_target, sig, label, scope); next
+    end
+    fs = field_spec(tgt, fields)
+    master_names = ([fs['master']] + Array(fs['alts']).map { |a| a['master'] }).compact.uniq
+    cand_ids = master_names.map { |mn| masters.dig(mn, 'id') }.compact
+    if cand_ids.empty?
+      record_filter_coverage(:unresolved_target, sig, label, scope); next
+    end
+    ids = allowed_ids.nil? ? cand_ids : (cand_ids & allowed_ids)
+    if ids.empty?
+      record_filter_coverage(:page_shared_master, sig, label, scope); next
+    end
+    leaf = qr_leaf(tgt, nil); ent = tgt.to_s.split('.').first
+    hit = false
+    ids.each do |id|
+      de = by_id[id] or next
+      col = match_master_column(de, leaf, ent) or next  # entity-scoped: the right master's column
+      (de['filters'] ||= []) << build_filter(sig, col['id'])
+      applied += 1; hit = true
+    end
+    record_filter_coverage(:unresolved_target, sig, label, scope) unless hit
+  end
+  applied
+end
+
 # TMSL column type for ENTITY.LEAF — date-typed slicers must become date-range
 # controls: a `list` control bound to a datetime column posts fine but Sigma
 # SILENTLY STRIPS its filter targets (known estate-repair gotcha).
@@ -1444,6 +1694,10 @@ def build_element(rec, fields, masters, extra_data = [])
   # bead miu7: never ship an unresolved literal-ref column (type=error). Drop it
   # and prune its references — the tile degrades honestly into coverage instead.
   drop_unresolved_columns!(el, rec, kind) unless el['kind'] == 'control'
+  # Track 3b: queryRef -> built column id, so a visual filter can resolve its
+  # target to a column this element actually projects (element filters reference
+  # the element's own columns). Transient — stripped before the spec is written.
+  el['_qr_cids'] = qr_cids
   el
 end
 
@@ -1470,6 +1724,11 @@ content_pages = signals['pages'].map do |pg|
     list = r.is_a?(Array) ? r : [r] # NB: not Array(r) — that explodes a Hash into pairs
     list = list.compact
     vis_elements[v['visual_id']] = list.map { |e| e['id'] }
+    # Track 3b: apply this visual's own Filters-pane filters onto its element(s).
+    if v['filters'].is_a?(Array) && !v['filters'].empty?
+      vlabel = (v['title'].to_s.strip.empty? ? v['visual_id'] : v['title'])
+      list.each { |el| apply_visual_filters!(el, v['filters'], vlabel) }
+    end
     list
   end
   # Intended-scope contract (workstream B): for each control on this page,
@@ -1534,6 +1793,48 @@ content_pages = signals['pages'].map do |pg|
   { 'id' => "page-#{pg['page_id']}", 'name' => pg['page_title'], 'elements' => els }
 end
 data_elements += extra_data_elements
+
+# ---- Track 3b: page/report filters -> source master element(s) --------------
+# A report filter applies to every master carrying the column; a page filter only
+# to masters used SOLELY by that page (a shared master can't be isolated to one
+# page — that goes to coverage). Elements sourcing a filtered master inherit it
+# (memory sigma-source-element-filter-propagates), which is exactly PBI page/report
+# filter semantics. Report filters are applied FIRST so a page filter on the same
+# shared master doesn't hide the report-level one.
+_de_ids = data_elements.map { |e| e['id'] }
+# element id -> immediate table-source element id (ignore data-model sources: a
+# master's own source is the DM element, not a page element).
+_tbl_src = {}
+(content_pages.flat_map { |p| p['elements'] } + data_elements).each do |e|
+  s = e['source'] || {}
+  sid = (s['kind'] == 'table' ? s['elementId'] : nil) ||
+        (s.dig('source', 'kind') == 'table' ? s.dig('source', 'elementId') : nil)
+  _tbl_src[e['id']] = sid
+end
+_eff_master = lambda do |eid|
+  cur = _tbl_src[eid]
+  cur = _tbl_src[cur] while cur && _tbl_src[cur]
+  cur
+end
+# master element id -> the set of content page ids whose elements source it.
+master_pages = Hash.new { |h, k| h[k] = [] }
+content_pages.each do |p|
+  (p['elements'] || []).each do |e|
+    m = _eff_master.call(e['id'])
+    master_pages[m] << p['id'] if m && _de_ids.include?(m)
+  end
+end
+master_pages.each_value(&:uniq!)
+
+nrep = apply_source_filters!(signals['filters'], 'report', 'report', data_elements, nil, fields, masters)
+npag = signals['pages'].sum do |pg|
+  next 0 unless pg['filters'].is_a?(Array) && !pg['filters'].empty?
+  pid = "page-#{pg['page_id']}"
+  exclusive = data_elements.select { |de| (master_pages[de['id']] - [pid]).empty? && master_pages[de['id']].include?(pid) }
+                           .map { |de| de['id'] }
+  apply_source_filters!(pg['filters'], 'page', "page '#{pg['page_title']}'", data_elements, exclusive, fields, masters)
+end
+warn "[build-workbook] applied #{nrep} report-level + #{npag} page-level filter(s) to master element(s)" if nrep.positive? || npag.positive?
 
 # control-scope.json — the intended-scope contract sidecar (schema: the
 # CONTRACT block in scripts/lib/control_lint.rb + refs/control-parity.md).
@@ -1839,6 +2140,12 @@ pages_xml = signals['pages'].map do |pg|
   xml
 end.compact.join("\n")
 layout_xml = %(<?xml version="1.0" encoding="utf-8"?>\n#{pages_xml}\n)
+
+# Strip transient build-only keys (e.g. Track 3b's `_qr_cids`) from every element
+# before the spec is written — the API rejects unknown `_`-prefixed properties.
+(content_pages + [{ 'elements' => data_elements }]).each do |pg|
+  (pg['elements'] || []).each { |el| el.delete_if { |k, _| k.to_s.start_with?('_') } }
+end
 
 spec = {
   'name' => opts[:name] || opts[:source_title] ||
