@@ -69,6 +69,22 @@ what the source *renders*.
   BOTTOM half of the list: top members often survive a wrong ranking, bottom
   members don't). Top-of-ranked-list anchors are what catch the
   different-members-with-different-values failure.
+- **Coverage rule — anchor EVERY tile (G10, run-2 field failure).** An anchor
+  only vouches for the tile it lands in: a run shipped 11 anchors that all sat
+  in 3 of 9 tiles, and the anchors oracle "passed" while 6 tiles had ZERO
+  anchors watching them. `verify-anchors.rb` measures per-displayed-tile
+  coverage (an anchor covers a tile when it **matched in** it, or its
+  `sigma_element_hint` token-matches the tile name) and writes
+  `anchor_coverage {covered, displayed, uncovered:[names]}` into the verdict
+  (WARN on uncovered). A tile that genuinely prints no anchorable value must be
+  waived **here, at transcription time**:
+  ```json
+  "coverage_waivers": [ { "tile": "<tile display name>", "reason": "<why no anchorable value>" } ]
+  ```
+  (top-level key, next to `anchors`). On the all-embedded (`charts_total==0`)
+  anchors-ORACLE path, `assert-phase6-ran` refuses the substitution unless
+  `covered == displayed` or every uncovered tile is coverage-waived; on the
+  normal parity path it is a WARN.
 
 ### `anchors-verdict.json` — written by `scripts/verify-anchors.rb`
 
@@ -153,6 +169,14 @@ MISSING  a2 "United States" raw="18,037B" — closest candidate 1.8e12 in "Top C
   REJECTED unless `anchors-verdict.json` exists and passes. The anchors oracle
   replaces parity — never nothing. This is the no-standalone-views path's
   contract too: parity oracle = anchors + warehouse (`verify-warehouse.rb`).
+- **Anchors-ORACLE substitution coverage floor (`charts_total==0`, exit 2):**
+  when the oracle stands in for an all-embedded workbook, ALL FOUR must hold —
+  (a) every anchor matched, (b) every visual-verify tile confirmed, (c) every
+  displayed tile exports ≥1 data row, and (d) **anchor coverage**:
+  `anchor_coverage.covered == displayed`, or every uncovered tile named in
+  `coverage_waivers`. A verdict predating the coverage measurement fails closed
+  (re-run `verify-anchors.rb`). On the normal parity path, uncovered tiles are
+  a WARN only (each tile is still chart-by-chart parity-verified there).
 - **Data-class RCF residuals (exit 15):** any unresolved `data`-class entry in
   `fidelity-ledger.json` blocks GREEN whenever the ledger exists —
   `--accept-residuals` does not apply. The numbers are wrong; fix or reclassify

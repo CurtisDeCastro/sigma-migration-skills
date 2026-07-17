@@ -101,6 +101,7 @@ end.parse!
 # source dashboard rendered (the most common Phase 5 escape). Escape hatch:
 # --skip-dashboard-read "<reason>". See scripts/lib/dashboard_read.rb + SKILL.md Phase 1d.
 require_relative 'lib/dashboard_read'
+require_relative 'lib/recipe_multimetric' # rollup_flag validator + caption-variant helpers
 if opts[:skip_dashboard_read]
   warn "[SKIP] dashboard-read gate WAIVED (#{opts[:skip_dashboard_read]}) — name this in your migration report."
 else
@@ -111,6 +112,19 @@ else
     warn '       Read the dashboard PNG (get-view-image, solo) and write png-read.json enumerating'
     warn '       every tile with its Sigma `kind` + text_elements + filter_shelf (SKILL.md Phase 1d),'
     warn '       or waive with --skip-dashboard-read "<reason>" and name it in your report.'
+    exit 1
+  end
+  # png-read schema extension (same gate): the OPTIONAL point_in_time.rollup_flag
+  # block (flag-valued discriminator — rollup rows marked by VALUE, not NULL).
+  # A malformed block would silently no-op the rollup exclusion downstream, so
+  # it fails the read gate here instead.
+  _pr_doc = (JSON.parse(File.read(DashboardRead.path(opts[:tab]))) rescue nil)
+  _rf_errs = RecipeMultimetric.validate_rollup_flag((_pr_doc || {})['point_in_time'] || {})
+  if _rf_errs.any?
+    warn '[FAIL] Phase 1d dashboard-read gate: png-read.json point_in_time.rollup_flag is malformed:'
+    _rf_errs.each { |e| warn "       - #{e}" }
+    warn '       Schema: "rollup_flag": { "column": "<flag col>", "rollup_values": ["Y"], "entity_values": ["N"] }'
+    warn '       (refs/phase-1-discover.md). Fix the block or remove it (IsNull discriminator fallback).'
     exit 1
   end
 end
@@ -7718,3 +7732,107 @@ File.write(coverage_path, JSON.pretty_generate(
 warn "wrote #{coverage_path} (#{built_n} element(s) built; " \
      "#{by_sev['dropped'] || 0} dropped, #{by_sev['degraded'] || 0} degraded, " \
      "#{by_sev['approximated'] || 0} approximated)"
+
+# ---- manual-residues.json — the G6 build-it ledger ---------------------------
+# Phase 1e (extract-calc-fields.rb WINPROBE split) routes the STAYS-MANUAL
+# window/table-calc residues (requires_custom_sql) to the Custom SQL path
+# CORRECTLY — but nothing bound the routed measure to the tile that plots it:
+# the build silently shipped the tile with a magnitude proxy and the divergence
+# surfaced only at Phase 6 (~2h later; the single gap that kept run 2 YELLOW).
+# This ledger names every requires_custom_sql calc that a png-read tile (its
+# `measure` — string or {"manual_residue": "<calc>"} — or its worksheet's
+# measure shelf) declares as its measure:
+#   { calc, formula, tile, suggested_sql (OVER() skeleton), status: "unbuilt" }
+# The orchestrator BLOCKS pass-1 completion on 'unbuilt' entries (exit 16) and
+# assert-phase6-ran refuses GREEN until each is 'built' (or waived via
+# --accept-manual-residues). Statuses are MERGED across re-builds by
+# (calc, tile) so a bound residue never resets to 'unbuilt'.
+begin
+  _mr_nk = ->(s) { s.to_s.upcase.gsub(/[^0-9A-Z]/, '') }
+  _cf = (JSON.parse(File.read(File.join(opts[:tab], 'calc-fields.json'))) rescue nil)
+  _residue_calcs = Array(_cf.is_a?(Hash) ? _cf['calcs'] : nil)
+                   .select { |c| c.is_a?(Hash) && c['requires_custom_sql'] && !c['name'].to_s.strip.empty? }
+  _prd = (JSON.parse(File.read(DashboardRead.path(opts[:tab]))) rescue nil)
+  _mr_tiles = Array(_prd.is_a?(Hash) ? _prd['tiles'] : nil).select { |t| t.is_a?(Hash) }
+  _ledger_path = File.join(opts[:tab], 'manual-residues.json')
+  if _residue_calcs.any? && _mr_tiles.any?
+    # ANSI OVER() hints for the STAYS-MANUAL family (refs/window-functions.md).
+    _ansi = {
+      'FIRST' => 'FIRST_VALUE(<expr>)', 'LAST' => 'LAST_VALUE(<expr>)',
+      'SIZE' => 'COUNT(*)', 'PREVIOUS_VALUE' => 'LAG(<expr>, 1)',
+      'RANK_UNIQUE' => 'ROW_NUMBER()', 'RANK_MODIFIED' => 'RANK()',
+      'WINDOW_MEDIAN' => 'MEDIAN(<expr>)',
+      'WINDOW_PERCENTILE' => 'PERCENTILE_CONT(<p>) WITHIN GROUP (ORDER BY <expr>)',
+      'WINDOW_STDEVP' => 'STDDEV_POP(<expr>)', 'WINDOW_VARP' => 'VAR_POP(<expr>)',
+      'WINDOW_VAR' => 'VAR_SAMP(<expr>)', 'WINDOW_CORR' => 'CORR(<x>, <y>)',
+      'WINDOW_COVARP' => 'COVAR_POP(<x>, <y>)', 'WINDOW_COVAR' => 'COVAR_SAMP(<x>, <y>)',
+      'LOOKUP' => 'LAG/LEAD(<expr>, <n>)' # rides along inside MANUAL chains (e.g. LOOKUP(..., FIRST()))
+    }
+    _suggest = lambda do |calc|
+      fns = _ansi.keys.select { |fn| calc['formula'].to_s =~ /\b#{Regexp.escape(fn)}\s*\(/i }
+      lines = ["-- Custom SQL (OVER()) skeleton for \"#{calc['name']}\" — replace every <...>;",
+               '-- route: refs/phase-3-datamodel.md "Custom SQL data-model element" + refs/window-functions.md']
+      lines += fns.map { |fn| "--   #{fn} -> #{_ansi[fn]} OVER (PARTITION BY <pane dims> ORDER BY <axis dim>)" }
+      lines << %(SELECT <tile dims>, <axis dim>, <window expr for the Tableau formula> AS "#{calc['name']}")
+      lines << 'FROM ( SELECT <tile dims>, <axis dim>, <base aggregates> FROM <landed fact table>'
+      lines << '       GROUP BY <tile dims>, <axis dim> ) t'
+      lines.join("\n")
+    end
+    _entries = []
+    _mr_tiles.each do |t|
+      title = t['title'].to_s
+      cands = []
+      m = t['measure']
+      if m.is_a?(Hash)
+        cands << m['manual_residue'].to_s
+      elsif m
+        cands << m.to_s
+      end
+      cands.concat(Array(t['measures']).map(&:to_s)) if t['measures'].is_a?(Array)
+      # The tile's WORKSHEET measure shelf: a residue plotted as [Calculation_N]
+      # resolves to its caption via the worksheet's calculations list.
+      wsm = meta['worksheets'] || {}
+      wm = wsm[title] || (wsm.find { |k, _| _mr_nk.call(k) == _mr_nk.call(title) } || []).last
+      if wm.is_a?(Hash)
+        calc_caps = {}
+        Array(wm['calculations']).each do |c|
+          next unless c.is_a?(Hash)
+          nm = c['name'].to_s.gsub(/\A\[|\]\z/, '')
+          calc_caps[nm] = c['caption'].to_s.empty? ? nm : c['caption'].to_s
+        end
+        Array(wm['measures']).each do |mm|
+          col = (mm.is_a?(Hash) ? mm['column'] : mm).to_s.gsub(/\A\[|\]\z/, '')
+          cands << (calc_caps[col] || col)
+        end
+      end
+      cand_keys = cands.map { |c| _mr_nk.call(c) }.reject(&:empty?)
+      _residue_calcs.each do |c|
+        next unless cand_keys.include?(_mr_nk.call(c['name']))
+        _entries << { 'calc' => c['name'], 'formula' => c['formula'], 'tile' => title,
+                      'suggested_sql' => _suggest.call(c), 'status' => 'unbuilt' }
+      end
+    end
+    _entries.uniq! { |e| [e['calc'], e['tile']] }
+    # Merge prior statuses (a residue marked 'built' stays built on re-build).
+    _prev = (JSON.parse(File.read(_ledger_path)) rescue nil)
+    _prev_entries = _prev.is_a?(Hash) ? Array(_prev['residues']) : Array(_prev)
+    _prev_by_key = {}
+    _prev_entries.each { |e| _prev_by_key[[e['calc'].to_s, e['tile'].to_s]] = e if e.is_a?(Hash) }
+    _entries.each do |e|
+      old = _prev_by_key[[e['calc'], e['tile']]]
+      next unless old
+      e['status'] = old['status'] unless old['status'].to_s.strip.empty?
+      e['note'] = old['note'] if old['note']
+    end
+    if _entries.any? || File.exist?(_ledger_path)
+      File.write(_ledger_path, JSON.pretty_generate('version' => 1, 'residues' => _entries))
+      if _entries.any?
+        _n_unbuilt = _entries.count { |e| e['status'] == 'unbuilt' }
+        warn "manual-residues: #{_entries.size} window/table-calc residue(s) plotted by dashboard tiles " \
+             "(#{_n_unbuilt} unbuilt — pass-1 BLOCKS until built/waived) -> #{_ledger_path}"
+      end
+    end
+  end
+rescue StandardError => e
+  warn "WARN: manual-residues ledger skipped (#{e.class}: #{e.message})"
+end

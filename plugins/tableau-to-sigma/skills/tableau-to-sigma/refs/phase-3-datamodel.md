@@ -55,6 +55,8 @@ Write the spec to `<WORK>/dm-spec.json`. Full schema is in
 
 Any Tableau calc whose `requires_custom_sql: true` (from Phase 1e) — that is, a **manual window residue** (`WINDOW_MEDIAN/PERCENTILE/CORR/COVAR(P)/VAR(P)/STDEVP`, `PREVIOUS_VALUE`, `SIZE`, `FIRST`, `LAST`, `RANK_UNIQUE/MODIFIED`, or a compute-using/addressing variant beyond Table(Across)/simple partitions) or an `{INCLUDE/EXCLUDE}` LOD (those need the chart-grouping context) — must be implemented as a **Sigma Custom SQL data-model element**. (The mainstream `WINDOW_*`/`RUNNING_*`/`RANK*`/`INDEX`/`LOOKUP`/`TOTAL` family no longer routes here — it is auto-emitted as Sigma-native chart formulas, `refs/window-functions.md`.)
 
+> **Tile binding is gate-enforced (G6).** Routing the calc here is only half the job — the residue must be BOUND to the tile that plots it. `<workdir>/manual-residues.json` (written by build-charts) lists each plotted residue with its Tableau formula + an `OVER()` SQL skeleton. For each entry: (1) add the Custom SQL element to the DM spec and PUT it (`post-and-readback.rb --type datamodel --update-id <dmId>`), (2) repoint the tile's measure column at the new element's output column (wb-spec PUT), (3) set `"status": "built"` on the ledger entry. The orchestrator blocks pass 1 (exit 16) and `assert-phase6-ran` refuses GREEN (gate 15, exit 22) while any entry is `"unbuilt"`.
+
 ```json
 {
   "id": "el-orders-windowed",

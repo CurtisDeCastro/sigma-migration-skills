@@ -18,8 +18,15 @@
 #   2. Retarget each highlight tile to `masterAll` (rewrites [Master/…] refs) and
 #      add a highlight category column + grey/brand color scheme.
 #   3. Rewrite point-in-time "Top-N" + magnitude measures to
-#      Sum(If([Year]=<latest> And Not IsNull([<discriminator>]), m, null)) and
-#      ensure the Top table is GROUPED by its entity (never ungrouped → 456 rows).
+#      Sum(If([Year]=<latest> And <entity scope>, m, null)) and ensure the Top
+#      table is GROUPED by its entity (never ungrouped → 456 rows). The entity
+#      scope is Not IsNull([<entity_discriminator>]) by default, or — when
+#      png-read point_in_time carries a `rollup_flag`
+#      {column, rollup_values[], entity_values[]} (a FLAG-valued discriminator:
+#      every row non-null, rollups marked by value) — equality predicates on the
+#      flag column. All pit field names resolve against the master columns with
+#      caption-variant normalization (upcase + strip non-alphanumerics), so a UI
+#      caption, an extract caption, and the landed physical name all match.
 #
 # Tolerant by design: never raises on an unexpected shape — it skips what it
 # can't match and returns a summary of what changed (the caller logs it). Pure
@@ -44,6 +51,172 @@ module RecipeMultimetric
 
   def norm(s)
     s.to_s.downcase.strip
+  end
+
+  # ---- caption-variant field resolution (G9 run-2 misfire) ------------------
+  # The same field travels under THREE spellings: the Tableau UI caption
+  # ("Income Group"), the extract caption ("IncomeGroup") and the landed
+  # physical column (INCOMEGROUP). Exact-string checks broke every consumer in
+  # the field run: the retain/WHERE/guard paths each compared a different pair
+  # of spellings and each silently skipped. Normalize BOTH sides — upcase +
+  # strip all non-alphanumerics — so any variant matches any other.
+  def norm_key(s)
+    s.to_s.upcase.gsub(/[^0-9A-Z]/, '')
+  end
+
+  # The first candidate naming the same field as `name` (exact case-insensitive
+  # first, then normalized-key). nil when nothing matches.
+  def resolve_field(name, candidates)
+    return nil if name.to_s.strip.empty?
+    cands = Array(candidates).compact.map(&:to_s).reject(&:empty?)
+    exact = cands.find { |c| c.casecmp?(name.to_s) }
+    return exact if exact
+    want = norm_key(name)
+    return nil if want.empty?
+    cands.find { |c| norm_key(c) == want }
+  end
+
+  # Resolve a png-read scoping column (entity_discriminator / rollup_flag.column)
+  # against the LANDED columns so the SQL-side synthesizers (world-by-year, YoY)
+  # accept it. real_map = the landing manifest's caption→physical map for the
+  # fact table; fact_captions = the projected DM fact's column display names
+  # (the no-manifest fallback). Returns
+  #   { 'name' => <form to pass downstream>, 'physical' => <landed col or nil>,
+  #     'resolved' => bool, 'candidates' => [<landed columns to pick from>] }.
+  # A resolved 'name' is either a manifest caption KEY (phys() maps it) or the
+  # physical column itself — both survive the synthesizers' sql_usable check.
+  # resolved=false means the caller MUST be loud (the run-2 rollup-exclusion
+  # WHERE was silently omitted here); never proceed quietly.
+  def resolve_scope_column(name, real_map: nil, fact_captions: [])
+    n = name.to_s.strip
+    return { 'name' => nil, 'physical' => nil, 'resolved' => true, 'candidates' => [] } if n.empty?
+    if real_map.is_a?(Hash) && !real_map.empty?
+      k = resolve_field(n, real_map.keys)
+      return { 'name' => k, 'physical' => real_map[k].to_s, 'resolved' => true, 'candidates' => [] } if k
+      v = resolve_field(n, real_map.values)
+      return { 'name' => v, 'physical' => v, 'resolved' => true, 'candidates' => [] } if v
+      return { 'name' => nil, 'physical' => nil, 'resolved' => false,
+               'candidates' => real_map.values.map(&:to_s).uniq }
+    end
+    caps = Array(fact_captions).compact.map(&:to_s).reject(&:empty?)
+    if caps.any?
+      c = resolve_field(n, caps)
+      return { 'name' => c, 'physical' => nil, 'resolved' => true, 'candidates' => [] } if c
+      return { 'name' => nil, 'physical' => nil, 'resolved' => false, 'candidates' => caps }
+    end
+    # Nothing to check against (no manifest, no projected fact) — pass through;
+    # the synthesizers' own guards still apply.
+    { 'name' => n, 'physical' => nil, 'resolved' => true, 'candidates' => [] }
+  end
+
+  # ---- rollup_flag (flag-valued discriminator; png-read point_in_time) -------
+  # IsNull semantics cannot express a FLAG column ('Y' on rollup rows / 'N' on
+  # entity rows / NULL on neither): every row is non-null, so Not IsNull keeps
+  # the rollups. Optional png-read block:
+  #   "rollup_flag": { "column": "<flag col>",
+  #                    "rollup_values": ["Y"], "entity_values": ["N"] }
+  # entity_values present → keep ONLY those (strict); else rollup_values →
+  # exclude those, keeping NULL-flag rows. Falls back to the IsNull
+  # entity_discriminator semantics when absent.
+  def validate_rollup_flag(pit)
+    return [] unless pit.is_a?(Hash) && !pit['rollup_flag'].nil?
+    rf = pit['rollup_flag']
+    unless rf.is_a?(Hash)
+      return ['point_in_time.rollup_flag must be an object { column, rollup_values[], entity_values[] }']
+    end
+    errs = []
+    errs << 'point_in_time.rollup_flag.column is required (the flag column name)' if rf['column'].to_s.strip.empty?
+    %w[rollup_values entity_values].each do |k|
+      next if rf[k].nil?
+      unless rf[k].is_a?(Array) && rf[k].none? { |v| v.is_a?(Hash) || v.is_a?(Array) }
+        errs << "point_in_time.rollup_flag.#{k} must be an array of scalar values"
+      end
+    end
+    if errs.empty? &&
+       Array(rf['rollup_values']).reject { |v| v.to_s.strip.empty? }.empty? &&
+       Array(rf['entity_values']).reject { |v| v.to_s.strip.empty? }.empty?
+      errs << 'point_in_time.rollup_flag needs rollup_values and/or entity_values (at least one non-empty)'
+    end
+    errs
+  end
+
+  def rollup_flag_active?(pit)
+    pit.is_a?(Hash) && pit['rollup_flag'].is_a?(Hash) &&
+      !pit['rollup_flag']['column'].to_s.strip.empty? && validate_rollup_flag(pit).empty?
+  end
+
+  # Does the point-in-time block carry ANY real-entity scoping (flag or IsNull)?
+  def entity_scope?(pit)
+    rollup_flag_active?(pit) ||
+      (pit.is_a?(Hash) && pit['entity_discriminator'] && !pit['entity_discriminator'].to_s.strip.empty?)
+  end
+
+  # Sigma-formula literal for a flag value.
+  def fmla_lit(v)
+    v.is_a?(Numeric) ? v.to_s : %("#{v.to_s.gsub('"') { '\"' }}")
+  end
+
+  # SQL literal for a flag value (single quotes doubled).
+  def sql_lit(v)
+    v.is_a?(Numeric) ? v.to_s : "'#{v.to_s.gsub("'", "''")}'"
+  end
+
+  # The real-entity condition for the snapshot measures: equality predicates on
+  # the rollup flag when declared, else Not IsNull(discriminator), else nil.
+  def entity_condition(prefix, pit)
+    if rollup_flag_active?(pit)
+      rf = pit['rollup_flag']
+      col = "[#{prefix}/#{rf['column']}]"
+      ev = Array(rf['entity_values']).reject { |v| v.to_s.strip.empty? }
+      rv = Array(rf['rollup_values']).reject { |v| v.to_s.strip.empty? }
+      if ev.any?
+        return "(#{ev.map { |v| "#{col} = #{fmla_lit(v)}" }.join(' Or ')})"
+      elsif rv.any?
+        # keep NULL-flag rows: only the named rollup values are excluded.
+        return "(IsNull(#{col}) Or Not (#{rv.map { |v| "#{col} = #{fmla_lit(v)}" }.join(' Or ')}))"
+      end
+    end
+    discr = pit.is_a?(Hash) && pit['entity_discriminator']
+    return "Not IsNull([#{prefix}/#{discr}])" if discr && !discr.to_s.strip.empty?
+    nil
+  end
+
+  # SQL predicate replacing the synthesizers' `"COL" IS NOT NULL` rollup
+  # exclusion when a flag-valued discriminator is declared.
+  def rollup_where_sql(flag, col)
+    ev = Array(flag['entity_values']).reject { |v| v.to_s.strip.empty? }
+    rv = Array(flag['rollup_values']).reject { |v| v.to_s.strip.empty? }
+    if ev.any?
+      %("#{col}" IN (#{ev.map { |v| sql_lit(v) }.join(', ')}))
+    elsif rv.any?
+      %(("#{col}" NOT IN (#{rv.map { |v| sql_lit(v) }.join(', ')}) OR "#{col}" IS NULL))
+    end
+  end
+
+  # The DM-side twin of entity_condition: rewrite the synthesized helper SQL
+  # elements' rollup-exclusion WHERE ("COL" IS NOT NULL — emitted by
+  # synthesize_fixed_lods!/synthesize_yoy_by_dim! for the discriminator we
+  # passed) into the flag equality predicate. Only the two known synthesized
+  # helpers are touched. Returns the count of statements rewritten.
+  ROLLUP_SQL_HELPER_IDS = %w[el-world-by-year el-yoy-by-dim].freeze
+  def apply_rollup_flag_where!(model, flag)
+    return 0 unless model.is_a?(Hash) && flag.is_a?(Hash)
+    n = 0
+    (model['pages'] || []).each do |p|
+      (p['elements'] || []).each do |el|
+        next unless ROLLUP_SQL_HELPER_IDS.include?(el['id'].to_s)
+        src = el['source']
+        next unless src.is_a?(Hash) && src['kind'] == 'sql'
+        st = src['statement'].to_s
+        new_st = st.gsub(/"([^"]+)"\s+IS\s+NOT\s+NULL/i) do
+          rollup_where_sql(flag, Regexp.last_match(1)) || Regexp.last_match(0)
+        end
+        next if new_st == st
+        src['statement'] = new_st
+        n += 1
+      end
+    end
+    n
   end
 
   def all_elements(spec)
@@ -81,28 +254,76 @@ module RecipeMultimetric
     # png-read tiles[].measure = the metric column the tile plots (agent-recorded
     # in Phase 1d) — the reliable source for rebuilding a bar's obscured measure.
     tile_measure = {}
-    Array(png_read['tiles']).each { |t| tile_measure[norm(t['title'])] = t['measure'] if t.is_a?(Hash) && t['measure'] }
+    Array(png_read['tiles']).each do |t|
+      next unless t.is_a?(Hash) && t['measure']
+      if t['measure'].is_a?(Hash)
+        # {"manual_residue": "<calc>"} — the tile plots a requires_custom_sql
+        # window/table-calc residue. NOT a rebuildable magnitude: leave the
+        # measure alone for the Custom SQL binding (manual-residues.json).
+        mr = t['measure']['manual_residue']
+        summary[:notes] << "tile '#{t['title']}' measure is a MANUAL residue ('#{mr}') — left for the Custom SQL binding (manual-residues.json)" if mr
+        next
+      end
+      tile_measure[norm(t['title'])] = t['measure']
+    end
 
-    # Discriminator/year guard: the point-in-time rewrite refs [Master/<discr>] and
-    # [Master/<year>]. The MECHANICAL data model retains only PLOTTED columns, so a
-    # png-read discriminator that the source never plotted (e.g. Global-Macro
-    # "IncomeGroup") is NOT on the DM fact — fabricating [fact/IncomeGroup] on the
-    # master dangles and fails the workbook POST. Only use fields that are already
-    # resolvable master columns; drop (with a note) the ones that aren't, instead of
-    # inventing a broken ref. (The correct long-term fix is to retain the
-    # discriminator in the DM build; until then this keeps the recipe POST-safe.)
+    # rollup_flag validation FIRST (an invalid block must never half-apply).
+    rf_errs = validate_rollup_flag(pit)
+    if rf_errs.any?
+      rf_errs.each { |e| summary[:notes] << "rollup_flag INVALID: #{e} — rollup_flag IGNORED (IsNull discriminator fallback, if any)" }
+      pit.delete('rollup_flag')
+    end
+
+    # Discriminator/year/flag guard: the point-in-time rewrite refs [Master/<discr>]
+    # and [Master/<year>]. The MECHANICAL data model retains only PLOTTED columns, so
+    # a png-read discriminator that the source never plotted is often surfaced onto
+    # the master under a VARIANT spelling (retain_columns! adds the LANDED physical
+    # name, e.g. INCOMEGROUP for the UI caption "Income Group"). G9 run-2 misfire:
+    # this guard compared exact downcased strings, missed the variant, DELETED the
+    # pit fields, and every snapshot measure silently degraded to a raw Sum().
+    # Now: resolve each pit field against the master columns with caption-variant
+    # normalization (norm_key) and REWRITE the pit field to the master's actual
+    # column name so every generated formula refs a real column. A field that
+    # STILL doesn't resolve is dropped with a note naming the candidate columns —
+    # fabricating [Master/<missing>] would dangle and fail the workbook POST.
     master_probe = find_master(spec, all_elements(spec).find { |e| e['kind'] == 'control' } || {})
-    have_cols = master_probe ? (master_probe['columns'] || []).map { |c| c['name'].to_s.downcase }.to_set : nil
-    if have_cols
+    m_disp = master_probe ? (master_probe['columns'] || []).map { |c| col_disp(c) }.compact : nil
+    if m_disp
+      cand_note = "Master columns: #{m_disp.first(24).join(', ')}"
       d = pit['entity_discriminator']
-      if d && !d.to_s.strip.empty? && !have_cols.include?(d.to_s.downcase)
-        summary[:notes] << "discriminator '#{d}' not on the mechanical DM fact (only plotted columns retained) — point-in-time real-entity filter SKIPPED; Top/bar measures may include aggregate rows"
-        pit.delete('entity_discriminator')
+      if d && !d.to_s.strip.empty?
+        hit = resolve_field(d, m_disp)
+        if hit
+          summary[:notes] << "discriminator '#{d}' resolved to master column '#{hit}' (caption-variant match)" if hit != d
+          pit['entity_discriminator'] = hit
+        else
+          summary[:notes] << "discriminator '#{d}' matches NO master column (case/spacing/punctuation variants checked) — " \
+                             "point-in-time real-entity filter SKIPPED; Top/bar measures may include aggregate rows. #{cand_note}"
+          pit.delete('entity_discriminator')
+        end
+      end
+      if rollup_flag_active?(pit)
+        rc = pit['rollup_flag']['column']
+        hit = resolve_field(rc, m_disp)
+        if hit
+          summary[:notes] << "rollup_flag column '#{rc}' resolved to master column '#{hit}' (caption-variant match)" if hit != rc
+          pit['rollup_flag']['column'] = hit
+        else
+          summary[:notes] << "rollup_flag column '#{rc}' matches NO master column (case/spacing/punctuation variants checked) — " \
+                             "rollup_flag SKIPPED (IsNull discriminator fallback, if any). #{cand_note}"
+          pit.delete('rollup_flag')
+        end
       end
       yc = pit['year_column'] || 'Year'
-      if pit['latest_year'] && !have_cols.include?(yc.to_s.downcase)
-        summary[:notes] << "year column '#{yc}' not on the mechanical DM fact — latest-year point-in-time filter SKIPPED"
-        pit.delete('latest_year')
+      if pit['latest_year']
+        hit = resolve_field(yc, m_disp)
+        if hit
+          pit['year_column'] = hit
+        else
+          summary[:notes] << "year column '#{yc}' matches NO master column (case/spacing/punctuation variants checked) — " \
+                             "latest-year point-in-time filter SKIPPED. #{cand_note}"
+          pit.delete('latest_year')
+        end
       end
     end
 
@@ -126,8 +347,10 @@ module RecipeMultimetric
       # any missing ones from the DM element BEFORE cloning, so masterAll gets them
       # too and no rewrite produces a dangling ref.
       dm_prefix = master_dm_prefix(master)
-      need = [pit['year_column'] || 'Year', pit['entity_discriminator']].compact.reject { |f| f.to_s.strip.empty? }
-      ensure_columns!(master, need, dm_prefix) if dm_prefix && (pit['latest_year'] || pit['entity_discriminator'])
+      need = [pit['year_column'] || 'Year', pit['entity_discriminator'],
+              (rollup_flag_active?(pit) ? pit['rollup_flag']['column'] : nil)]
+             .compact.reject { |f| f.to_s.strip.empty? }
+      ensure_columns!(master, need, dm_prefix) if dm_prefix && (pit['latest_year'] || entity_scope?(pit))
 
       master_all = ensure_master_all!(spec, master)
       summary[:masters_added] += 1 if master_all[:added]
@@ -165,7 +388,7 @@ module RecipeMultimetric
     end
 
     # Point-in-time Top-N / magnitude tables + bars: rewrite measures + group.
-    if pit['entity_discriminator'] || pit['latest_year']
+    if entity_scope?(pit) || pit['latest_year']
       all_elements(spec).each do |el|
         next unless top_table?(el) || bar?(el)
         n = rewrite_point_in_time!(el, pit)
@@ -313,13 +536,15 @@ module RecipeMultimetric
     nil
   end
 
-  # The point-in-time conditional Sum(If([Year]=<ly> And Not IsNull([discr]), base, null)).
+  # The point-in-time conditional Sum(If([Year]=<ly> And <entity scope>, base, null)).
+  # Entity scope = rollup_flag equality predicates when declared, else the
+  # IsNull discriminator (entity_condition).
   def pit_conditional(prefix, base_field, pit, metric, context: nil)
     ly = latest_year_for(pit, metric, context: context)
-    discr = pit['entity_discriminator']
     conds = []
     conds << "[#{prefix}/#{pit['year_column'] || 'Year'}] = #{ly}" if ly
-    conds << "Not IsNull([#{prefix}/#{discr}])" if discr && !discr.to_s.strip.empty?
+    ec = entity_condition(prefix, pit)
+    conds << ec if ec
     base = "[#{prefix}/#{base_field}]"
     conds.empty? ? "Sum(#{base})" : "Sum(If(#{conds.join(' And ')}, #{base}, null))"
   end
@@ -333,8 +558,7 @@ module RecipeMultimetric
     (el['columns'] || []).each do |c|
       inner = base_metric_ref(c['formula'], prefix)
       next unless inner # only aggregated base-metric measures
-      next unless latest_year_for(pit, inner, context: el['name']) ||
-                  (pit['entity_discriminator'] && !pit['entity_discriminator'].to_s.strip.empty?)
+      next unless latest_year_for(pit, inner, context: el['name']) || entity_scope?(pit)
       c['formula'] = pit_conditional(prefix, inner, pit, inner, context: el['name'])
       c['format'] = SI_FMT # compact SI (raw ",.0f" overflows the cell)
       rewritten_ids << c['id']
@@ -415,23 +639,41 @@ module RecipeMultimetric
   # Reshape a trend line/combo tile that carries a synthesized "<M> World" column
   # into a dual-axis Country-vs-World chart: add the region-filtered Country line
   # Sum([<prefix>/<metric>]) (metric recovered from world_lod_map) and put the
-  # World line on yAxis2. Returns 1 if reshaped, else 0.
+  # World line on yAxis2. Returns 1 if reshaped, else 0 (not a candidate, or the
+  # full dual-axis structure is already in place — idempotent).
   def ensure_dual_axis_trend!(el, world_lod_map)
     kind = el['kind'].to_s
     return 0 unless %w[line-chart combo-chart area-chart].include?(kind)
     cols = el['columns'] || []
     # The World column: its display name is a world_lod_map key (e.g. "GDP World").
-    world_col = cols.find { |c| world_lod_map.key?(col_disp(c).to_s.downcase) }
+    # Caption-variant normalized match — a display-name variant ("Gdp World" /
+    # "GDP  World") must not silently exclude one of otherwise-identical trends.
+    wmap = {}
+    world_lod_map.each { |k, v| wmap[norm_key(k)] = v }
+    world_col = cols.find { |c| wmap.key?(norm_key(col_disp(c))) }
     return 0 unless world_col
-    metric = world_lod_map[col_disp(world_col).to_s.downcase]
+    metric = wmap[norm_key(col_disp(world_col))]
     return 0 if metric.to_s.empty?
     prefix = (world_col['formula'].to_s[/\[([^\/\]]+)\//, 1]) || 'Master'
-    return 0 if cols.any? { |c| base_metric_ref(c['formula'], prefix) == metric } # country line already there
+    country_col = cols.find { |c| base_metric_ref(c['formula'], prefix) == metric }
+    # G9 run-2 misfire (dual-axis emitted for ONE of three structurally identical
+    # trends): a tile whose Country line ALREADY existed (build-charts decomposed
+    # the measure on some tiles, not others) EARLY-RETURNED here and never got the
+    # combo/yAxis2/World-Max treatment its siblings got. Only skip when the FULL
+    # dual-axis structure is already in place (idempotent re-run); a pre-existing
+    # Country line otherwise just skips the add-column step.
+    if country_col && el['kind'] == 'combo-chart' &&
+       Array(el.dig('yAxis2', 'columnIds')).include?(world_col['id'])
+      return 0
+    end
 
-    country_id = "trend-country-#{el['id']}"
-    (el['columns'] ||= []) << { 'id' => country_id, 'name' => "Country #{metric}",
-                                'formula' => "Sum([#{prefix}/#{metric}])", 'format' => SI_FMT }
-    el['order'] << country_id if el['order'].is_a?(Array)
+    unless country_col
+      country_col = { 'id' => "trend-country-#{el['id']}", 'name' => "Country #{metric}",
+                      'formula' => "Sum([#{prefix}/#{metric}])", 'format' => SI_FMT }
+      (el['columns'] ||= []) << country_col
+      el['order'] << country_col['id'] if el['order'].is_a?(Array)
+    end
+    country_id = country_col['id']
     # World line: aggregate to one value per x with Max — the per-year global
     # total is constant within a year, so Sum over the (region-filtered) rows the
     # trend rides multiplies it by the row count and inflates the axis. build-charts

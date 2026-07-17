@@ -194,6 +194,27 @@
 #      reachable. Un-probeable control types (date-range / slider) are an
 #      advisory WARN + control-flip-unverified.json marker, not this failure.
 #      Escape hatch: --skip-control-flip "<reason>" (counts against the budget).
+#  22  Manual custom-SQL residues unresolved (gate 15) — <workdir>/manual-residues.json
+#      (written at build time by converters that emit it) still carries entries
+#      with status:"unbuilt": a window/table-calc residue (requires_custom_sql,
+#      the STAYS-MANUAL family) that a dashboard tile PLOTS was never built as a
+#      Custom SQL DM element and bound to the tile — the tile renders a
+#      magnitude proxy, i.e. the NUMBERS are wrong. Build each residue (the
+#      ledger entry carries the Tableau formula + an OVER() SQL skeleton),
+#      repoint the tile measure, set status:"built" in the ledger, re-run.
+#      Escape hatch: --accept-manual-residues "<calc,...>" — waives ONLY the
+#      NAMED residues (budget-counted; name them in your migration report).
+#      No ledger file → stated OK (converter declared no residues; back-compat).
+#
+# ANCHORS-ORACLE substitution (charts_total==0, exit 2): when every worksheet is
+# dashboard-embedded (no exportable view CSVs), the anchors oracle may stand in
+# for value parity — but only when ALL FOUR hold: (a) anchors-verdict.json pass
+# with every anchor matched, (b) every visual-verify tile confirmed, (c) every
+# displayed tile exports >=1 data row, and (d) every displayed tile has ANCHOR
+# COVERAGE (anchors-verdict.json anchor_coverage: covered==displayed) or is
+# named in source-anchors.json coverage_waivers [{tile, reason}] (authored at
+# Phase 1d). (d) closes the run-2 hole where all 11 anchors sat in 3 of 9 tiles
+# and the oracle vouched for 6 tiles nothing was watching.
 #
 # DATA-CLASS RCF residuals (part of gate 8d, exit 15, but enforced whenever
 # fidelity-ledger.json EXISTS — even without --require-fidelity-ledger): any
@@ -250,6 +271,7 @@ OptionParser.new do |p|
   p.on('--skip-anchors-gate REASON', 'waive gate 13 (source-anchor value verification) — REQUIRED reason string. Use ONLY when the source image values are genuinely untranscribable. Counted against the waiver budget; name it in your migration report.') { |v| opts[:skip_anchors] = v }
   p.on('--allow-empty-tiles REASON', 'gate 13: accept displayed dashboard tile(s) that export ZERO data rows — REQUIRED reason string that MUST cite the source PNG showing the chart is genuinely empty on the SOURCE dashboard. Never use this to wave away a broken data path (filter/calc bug). Counted against the waiver budget; name it in your migration report.') { |v| opts[:allow_empty_tiles] = v }
   p.on('--skip-visual-similarity REASON', 'waive gate 14 (measured visual-similarity floor) — REQUIRED reason string. Counted against the waiver budget; name it in your migration report.') { |v| opts[:skip_vsim] = v }
+  p.on('--accept-manual-residues LIST', 'gate 15: comma-separated residue CALC names from <workdir>/manual-residues.json to WAIVE as accepted-unbuilt (their tiles keep the magnitude proxy — name each in your migration report). Counted against the waiver budget. Unnamed unbuilt residues still fail (exit 22).') { |v| opts[:accept_manual_residues] = v.split(',').map(&:strip).reject(&:empty?) }
 end.parse!
 abort('--workdir (or --tableau) required') unless opts[:tab]
 
@@ -332,6 +354,7 @@ WAIVER_HIDES = {
   '--skip-anchors-gate'        => 'gate 13: source-anchor values never verified (the measured value bar)',
   '--allow-empty-tiles'        => 'gate 13: displayed dashboard tile(s) that render no data were accepted',
   '--skip-visual-similarity'   => 'gate 14: visual-similarity floor never measured',
+  '--accept-manual-residues'   => 'gate 15: named custom-SQL residues shipped UNBUILT (their tiles render a magnitude proxy)',
   # Runtime off-ramps (recorded to <workdir>/offramps.jsonl by the scripts that
   # honored them; counted here so an escape taken MID-RUN spends budget exactly
   # like a gate flag):
@@ -361,6 +384,7 @@ waiver_flags << '--accept-deferred-elements' if opts[:accept_deferred]
 waiver_flags << '--skip-anchors-gate'        if opts[:skip_anchors]
 waiver_flags << '--allow-empty-tiles'        if opts[:allow_empty_tiles]
 waiver_flags << '--skip-visual-similarity'   if opts[:skip_vsim]
+waiver_flags << '--accept-manual-residues'   if opts[:accept_manual_residues] && !opts[:accept_manual_residues].empty?
 
 # Runtime waivers taken MID-RUN (off-ramp trail, offramps.jsonl): a forced new
 # workbook, a forced route switch, or an unauthorized manual-spec run each spend
@@ -492,17 +516,43 @@ else
     # verify-anchors) — re-running verify-anchors is cheap and mandatory here.
     _tiles_ok = _av.is_a?(Hash) && _av['tiles_all_nonempty'] == true
     _tiles_field_present = _av.is_a?(Hash) && _av.key?('tiles_all_nonempty')
-    if _av && _av['pass'] && _av['checked'].to_i >= 5 && _av['matched'] == _av['checked'] && _vv_ok && _tiles_ok
+    # G10 condition (d) — per-displayed-tile ANCHOR COVERAGE. The run-2 oracle
+    # passed with all 11 anchors inside 3 of 9 displayed tiles: the other 6
+    # tiles had ZERO anchors watching them, so the oracle vouched for numbers
+    # nobody measured. When the oracle SUBSTITUTES for parity, every displayed
+    # tile must be covered (anchors-verdict.json anchor_coverage, written by
+    # verify-anchors.rb) OR be explicitly waived in source-anchors.json
+    # coverage_waivers [{tile, reason}] (authored at Phase 1d, alongside the
+    # anchors). A verdict predating the measurement fails closed — re-running
+    # verify-anchors is cheap and mandatory here (same doctrine as W1.1).
+    _cov = _av.is_a?(Hash) ? _av['anchor_coverage'] : nil
+    _sa_doc = (JSON.parse(File.read(File.join(opts[:tab], 'source-anchors.json'))) rescue nil)
+    _cov_waived = Array(_sa_doc.is_a?(Hash) ? _sa_doc['coverage_waivers'] : nil)
+                  .map { |w| w.is_a?(Hash) ? w['tile'].to_s.downcase.strip : nil }
+                  .compact.reject(&:empty?)
+    if _cov.is_a?(Hash)
+      _cov_unwaived = Array(_cov['uncovered']).map(&:to_s)
+                      .reject { |t| _cov_waived.include?(t.downcase.strip) }
+      _cov_ok = _cov_unwaived.empty?
+      _n_waived = Array(_cov['uncovered']).length - _cov_unwaived.length
+    else
+      _cov_unwaived = nil
+      _cov_ok = false
+      _n_waived = 0
+    end
+    if _av && _av['pass'] && _av['checked'].to_i >= 5 && _av['matched'] == _av['checked'] && _vv_ok && _tiles_ok && _cov_ok
       puts "[PASS] gate 2 (value parity): 0 exportable view CSVs (all worksheets dashboard-embedded) — " \
            "the ANCHORS ORACLE stands in: anchors-verdict.json pass " \
            "(#{_av['matched']}/#{_av['checked']} anchors matched, #{_av['anchors_matched_in_displayed'] || '?'} in displayed tiles) " \
-           "+ all #{_vv.size} tile(s) image-verified + all displayed tiles return data."
+           "+ all #{_vv.size} tile(s) image-verified + all displayed tiles return data " \
+           "+ anchor coverage #{_cov['covered']}/#{_cov['displayed']} displayed tile(s)" \
+           "#{_n_waived.positive? ? " (#{_n_waived} coverage-waived at Phase 1d)" : ''}."
     else
       warn "[FAIL] parity-final.json reports charts_total=#{total} — no charts were verified."
       warn "       This usually means auto-parity-plan.rb matched zero Tableau views."
       warn "       Phase 6 must verify at least one chart to declare GREEN."
       warn '       If every worksheet is dashboard-embedded (no exportable view CSVs), the'
-      warn '       anchors oracle can stand in — ALL THREE must hold:'
+      warn '       anchors oracle can stand in — ALL FOUR must hold:'
       warn "         a) verify-anchors.rb pass with EVERY anchor matched (#{_av ? "currently #{_av['matched']}/#{_av['checked']}" : 'anchors-verdict.json missing'})"
       warn "         b) every visual-verify tile confirmed (#{_vv_ok ? 'ok' : 'incomplete'})"
       if _tiles_field_present
@@ -511,6 +561,19 @@ else
       else
         warn '         c) every displayed tile returns >=1 data row (UNKNOWN — anchors-verdict.json'
         warn '            predates this gate; re-run scripts/verify-anchors.rb to measure tile emptiness)'
+      end
+      if _cov.is_a?(Hash)
+        warn "         d) every displayed tile has anchor coverage or a Phase 1d coverage waiver " \
+             "(#{_cov_ok ? 'ok' : "#{_cov_unwaived.length} tile(s) UNCOVERED: #{_cov_unwaived.first(6).join(', ')}"})"
+        unless _cov_ok
+          warn '            An anchor only vouches for the tile it lands in. Transcribe anchors for each'
+          warn '            uncovered tile (re-read the source PNG), or — if a tile genuinely prints no'
+          warn '            anchorable value — name it in source-anchors.json coverage_waivers'
+          warn '            [{"tile": "<name>", "reason": "<why>"}], then re-run verify-anchors.rb.'
+        end
+      else
+        warn '         d) per-displayed-tile anchor coverage (UNKNOWN — anchors-verdict.json predates the'
+        warn '            anchor_coverage measurement; re-run scripts/verify-anchors.rb)'
       end
       exit 2
     end
@@ -1539,6 +1602,23 @@ else
     end
     puts "[OK] gate 13: source anchors verified — #{av['matched']}/#{av['checked']} printed source values " \
          "found in the live workbook exports at printed precision#{tnote}"
+    # G10 (general path — ADVISORY ONLY): per-displayed-tile anchor coverage.
+    # With real chart-by-chart parity in force (charts_total > 0), uncovered
+    # tiles are still parity-verified — so this is a WARN, not a failure. The
+    # charts_total==0 anchors-ORACLE substitution above is where coverage is a
+    # hard floor (the oracle is the ONLY value evidence there).
+    _cov13 = av['anchor_coverage']
+    if _cov13.is_a?(Hash)
+      _wv13 = Array((sa.is_a?(Hash) ? sa['coverage_waivers'] : nil))
+              .map { |w| w.is_a?(Hash) ? w['tile'].to_s.downcase.strip : nil }.compact.reject(&:empty?)
+      _unc13 = Array(_cov13['uncovered']).map(&:to_s).reject { |t| _wv13.include?(t.downcase.strip) }
+      if _unc13.any?
+        warn "[WARN] gate 13: #{_unc13.length} displayed tile(s) have ZERO anchor coverage: #{_unc13.first(8).join(', ')} —"
+        warn '       an anchor only vouches for the tile it lands in. Add anchors for these tiles, or name'
+        warn '       each in source-anchors.json coverage_waivers [{tile, reason}] (Phase 1d). Advisory on'
+        warn '       this path; the charts_total==0 anchors-ORACLE substitution REQUIRES full coverage.'
+      end
+    end
   end
 end
 
@@ -1771,6 +1851,54 @@ elsif File.exist?(deferred_path)
   end
 else
   puts '[OK] gate 12: no deferred-elements.json — no DM elements were quarantined'
+end
+
+# ---------------------------------------------------------------------------
+# Gate 15 — manual custom-SQL residues (exit 22; G6). Phase 1e routes the
+# STAYS-MANUAL window/table-calc family (requires_custom_sql) to the Custom SQL
+# path correctly, but nothing used to bind the routed measure to the tile that
+# plots it: the build silently shipped a magnitude proxy and the divergence
+# surfaced only at Phase 6 (~2h later; the single gap that kept run 2 YELLOW).
+# Converters that emit <workdir>/manual-residues.json declare, per residue, the
+# tile that plots it + status: "unbuilt" | "built". Any 'unbuilt' entry blocks
+# GREEN — the tile's numbers are wrong until the Custom SQL element exists and
+# the tile measure is repointed. --accept-manual-residues "<calc,...>" waives
+# ONLY the named residues (budget-counted). No ledger file → stated OK
+# (back-compat: the converter declared no residues).
+# ---------------------------------------------------------------------------
+mr_path = File.join(opts[:tab], 'manual-residues.json')
+if File.exist?(mr_path)
+  mr_doc = JSON.parse(File.read(mr_path)) rescue nil
+  mr_entries = mr_doc.is_a?(Hash) ? mr_doc['residues'] : mr_doc
+  unless mr_entries.is_a?(Array)
+    warn "[FAIL] gate 15: #{mr_path} is malformed (expected {\"residues\":[...]} or a bare array)."
+    warn '       Fix the file (or delete it ONLY if no dashboard tile plots a requires_custom_sql calc).'
+    exit 22
+  end
+  mr_accept = Array(opts[:accept_manual_residues]).map { |s| s.to_s.downcase.strip }
+  mr_unbuilt = mr_entries.select { |e| e.is_a?(Hash) && e['status'].to_s == 'unbuilt' }
+  mr_waived, mr_blocking = mr_unbuilt.partition { |e| mr_accept.include?(e['calc'].to_s.downcase.strip) }
+  if mr_waived.any?
+    record_waiver.call('--accept-manual-residues', 'gate 15 (manual custom-SQL residues)',
+                       "accepted unbuilt: #{mr_waived.map { |e| e['calc'] }.uniq.join(', ')}")
+  end
+  if mr_blocking.any?
+    warn "[FAIL] gate 15: #{mr_blocking.length} manual custom-SQL residue(s) still 'unbuilt' in #{mr_path} —"
+    warn '       each is a window/table-calc a dashboard tile PLOTS; the tile currently renders a'
+    warn '       MAGNITUDE PROXY, i.e. its numbers diverge from the source:'
+    mr_blocking.first(10).each { |e| warn "         - #{e['calc'].inspect} (tile #{e['tile'].inspect})" }
+    warn '       For each: create the Custom SQL DM element (the ledger entry carries the Tableau formula'
+    warn '       + an OVER() SQL skeleton), repoint the tile\'s measure column at it, then set'
+    warn '       "status": "built" on the entry and re-run this gate.'
+    warn '       Escape hatch (knowingly shipping the proxy): --accept-manual-residues "<calc,...>"'
+    warn '       (budget-counted; name each residue in your migration report).'
+    exit 22
+  end
+  mr_built = mr_entries.count { |e| e.is_a?(Hash) && e['status'].to_s == 'built' }
+  puts "[OK] gate 15: manual custom-SQL residues resolved — #{mr_built} built" \
+       "#{mr_waived.any? ? ", #{mr_waived.length} accepted-unbuilt (WAIVED)" : ''} of #{mr_entries.length}"
+else
+  puts '[OK] gate 15: no manual-residues.json — no unbound custom-SQL residues declared by the build'
 end
 
 # ---------------------------------------------------------------------------

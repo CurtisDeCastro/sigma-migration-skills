@@ -603,6 +603,43 @@ verdict['anchors_matched_in_displayed'] = verdict['detail'].count { |d| d['in_di
 verdict['anchors_only_in_feeders'] = verdict['detail'].reject { |d| d['in_displayed_tile'] }.map { |d| d['id'] }
 verdict['anchors_retranscribed'] = anchor_retranscribe if anchor_retranscribe
 
+# --- G10: per-displayed-tile ANCHOR COVERAGE ---------------------------------
+# Run-2 field failure: all 11 anchors sat in 3 of 9 displayed tiles, so the
+# anchors oracle "passed" while 6 tiles had ZERO anchors watching them. A tile
+# is COVERED when an anchor matched IN it (matched_in == the tile's display
+# name) or is AIMED at it (sigma_element_hint token-matches the tile name —
+# the hint asserts where the value must live even when the anchor missed).
+# Advisory here (WARN, exit unchanged); assert-phase6-ran's charts_total==0
+# anchors-ORACLE substitution requires covered == displayed unless each
+# uncovered tile is named in source-anchors.json coverage_waivers
+# [{tile, reason}] (authored at Phase 1d).
+matched_in_names = verdict['detail'].map { |d| d['matched_in'].to_s }.to_set
+hinted = anchors.select { |a| a.is_a?(Hash) && !a['sigma_element_hint'].to_s.strip.empty? }
+disp_tiles = tiles.select { |t| t['displayed'] }
+covered_names = disp_tiles.map { |t| t['name'] }.select do |name|
+  matched_in_names.include?(name) ||
+    hinted.any? { |a| AnchorVerify.element_score(a, name).positive? }
+end.to_set
+uncovered = disp_tiles.map { |t| t['name'] }.reject { |n| covered_names.include?(n) }
+verdict['anchor_coverage'] = { 'covered' => covered_names.size,
+                               'displayed' => disp_tiles.size,
+                               'uncovered' => uncovered }
+if uncovered.any?
+  cov_waived = Array(doc['coverage_waivers'])
+               .map { |w| w.is_a?(Hash) ? w['tile'].to_s.downcase.strip : nil }.compact.reject(&:empty?)
+  unwaived = uncovered.reject { |n| cov_waived.include?(n.to_s.downcase.strip) }
+  warn "[WARN] anchor coverage: #{uncovered.length}/#{disp_tiles.size} displayed tile(s) have ZERO anchor coverage:"
+  uncovered.each do |n|
+    warn "         UNCOVERED  #{n.inspect}#{cov_waived.include?(n.to_s.downcase.strip) ? '  [coverage_waivers: waived at Phase 1d]' : ''}"
+  end
+  if unwaived.any?
+    warn '       An anchor only vouches for the tile it lands in. Transcribe anchors for each uncovered'
+    warn '       tile (re-read the source PNG), or name it in source-anchors.json coverage_waivers'
+    warn '       [{"tile": "<name>", "reason": "<why no anchorable value>"}]. The all-embedded'
+    warn '       (charts_total==0) anchors-ORACLE gate refuses substitution while unwaived tiles remain.'
+  end
+end
+
 File.write(out_path, JSON.pretty_generate(verdict))
 
 # Stamp the summary into parity-final.json when Phase 6 already finalized —

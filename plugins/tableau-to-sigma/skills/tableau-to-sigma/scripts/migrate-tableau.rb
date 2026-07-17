@@ -102,6 +102,14 @@ Encoding.default_external = Encoding::UTF_8
 #      --finalize with --enhance --enhance-accept ...);
 # 15 = converter produced an EMPTY data model (0 elements/columns) — unsupported
 #      datasource shape; NO Sigma objects created (capture the .twb for the converter);
+# 16 = pass 1 built + POSTed, but <workdir>/manual-residues.json carries
+#      'unbuilt' window/table-calc residue(s) a dashboard tile plots
+#      (requires_custom_sql — the STAYS-MANUAL family): the tile currently
+#      renders a magnitude proxy. Build each residue as a Custom SQL DM
+#      element, repoint the tile measure, set status:"built" in the ledger
+#      (the blocking checklist prints the formula + SQL skeleton + bind
+#      steps), then run --finalize. assert-phase6-ran refuses GREEN while any
+#      residue is 'unbuilt' (waiver: --accept-manual-residues, budget-counted);
 # 17 = every datasource is an EMBEDDED file extract and no landing manifest was
 #      found — land the frozen data first (scripts/land-extracts.py, see
 #      refs/extract-landing.md), or re-run with --skip-extract-landing "<reason>";
@@ -1962,10 +1970,10 @@ if mechanical
   # them dangles + blocks the POST. Synthesize the grouped Custom SQL helper +
   # `FIXED Year` relationship on the fact; derive_master surfaces the columns.
   world_lod_map = {}
+  _disc = nil
+  _rollup_flag = nil
+  _real_map = nil
   if have_twb && conv_fact
-    # The real-entity discriminator (png-read point_in_time) also scopes the World
-    # per-year SUM to real entities, so it doesn't double-count rollup rows.
-    _disc = ((JSON.parse(File.read(DashboardRead.path(WORK)))['point_in_time'] rescue nil) || {})['entity_discriminator']
     # The fact table's REAL columns (landing manifest) — the LOD's base metric is
     # usually never plotted, so it's absent from the projected DM element and a
     # projection-only check drops the LOD (the chart ref then dangles).
@@ -1976,6 +1984,41 @@ if mechanical
                   ent = Array(_man).find { |e| e.is_a?(Hash) && e['sf_table'].to_s.upcase.end_with?(".#{_fact_tbl}") }
                   ent && ent['columns']
                 end
+    # The real-entity discriminator (png-read point_in_time) also scopes the World
+    # per-year SUM to real entities, so it doesn't double-count rollup rows. A
+    # `rollup_flag` block (flag-valued discriminator — rollups marked by VALUE, not
+    # NULL) takes over the scoping column; its equality predicate replaces the
+    # synthesizers' IS NOT NULL below (apply_rollup_flag_where!).
+    _pit_png = ((JSON.parse(File.read(DashboardRead.path(WORK)))['point_in_time'] rescue nil) || {})
+    _rf_errs = RecipeMultimetric.validate_rollup_flag(_pit_png)
+    _rf_errs.each { |e| line "WARN: png-read #{e} — rollup_flag IGNORED" }
+    _rollup_flag = _pit_png['rollup_flag'] if _rf_errs.empty? && RecipeMultimetric.rollup_flag_active?(_pit_png)
+    _scope_raw = (_rollup_flag && _rollup_flag['column']) || _pit_png['entity_discriminator']
+    # G9 run-2 root cause: the png-read caption ("Income Group") vs the landed
+    # physical column (INCOMEGROUP) failed the synthesizers' exact/underscore
+    # check and the rollup-exclusion WHERE was SILENTLY omitted (world totals
+    # then double-count rollup rows). Resolve the caption variant HERE, loudly.
+    _fact_caps = (conv_fact['columns'] || []).map { |c| RecipeMultimetric.col_disp(c) }.compact
+    _res = RecipeMultimetric.resolve_scope_column(_scope_raw, real_map: _real_map, fact_captions: _fact_caps)
+    if _scope_raw.to_s.strip.empty?
+      _disc = nil
+    elsif _res['resolved']
+      _disc = _res['name']
+      line "rollup-scope column '#{_scope_raw}' -> '#{_disc}' (caption-variant resolution vs landed columns)" if _disc != _scope_raw
+    else
+      _disc = nil
+      puts
+      puts '========== ROLLUP-EXCLUSION SCOPE COLUMN UNRESOLVED (world/YoY helpers) =========='
+      puts "png-read point_in_time names #{_rollup_flag ? 'rollup_flag.column' : 'entity_discriminator'} = '#{_scope_raw}',"
+      puts "but it matches NO landed column on #{_fact_tbl.empty? ? 'the fact table' : _fact_tbl} (case/spacing/punctuation variants checked)."
+      puts 'Without it the world-by-year / YoY helper SQL would SUM ROLLUP ROWS TOO (double-counted'
+      puts 'totals — the exact run-2 failure). The rollup-exclusion WHERE is being OMITTED — this is'
+      puts 'only correct if the table truly has no rollup rows. Candidate columns:'
+      _res['candidates'].first(30).each { |c| puts "  - #{c}" }
+      puts "Fix png-read.json point_in_time (or the landing manifest captions) and re-run; verify the"
+      puts 'world totals against the source render in Phase 6 if you proceed.'
+      puts '==================================================================================='
+    end
     world_lod_map = (MechanicalSpecs.synthesize_fixed_lods!(conv['model'], conv_fact, File.read(twb, encoding: 'UTF-8'), (opts[:column_mapping] || {}), discriminator: _disc, real_map: _real_map) rescue {})
     line "FIXED-LOD synthesis: materialized #{world_lod_map.size} per-year world-total column(s) via a grouped Custom SQL helper#{_disc ? " (real-entity scoped by #{_disc})" : ''}" if world_lod_map.any?
   end
@@ -2004,7 +2047,9 @@ if mechanical
         require_relative 'lib/recipe_multimetric'
         _metrics = {}
         Array(_pngr['tiles']).each do |t|
-          next unless _hl.include?(t['title'].to_s) && t['measure']
+          # {"manual_residue": ...} measures are custom-SQL residues, not
+          # rebuildable magnitudes — no YoY helper for them.
+          next unless _hl.include?(t['title'].to_s) && t['measure'].is_a?(String)
           y = RecipeMultimetric.latest_year_for(_pit2, t['measure'], context: t['title'])
           _metrics[t['measure']] = y if y
         end
@@ -2019,6 +2064,15 @@ if mechanical
     rescue StandardError => e
       line "WARN: YoY synthesis skipped (#{e.class}: #{e.message})"
     end
+  end
+  # Flag-valued discriminator (png-read point_in_time.rollup_flag): the helper
+  # SQL just synthesized above scopes rollups with `"<flag>" IS NOT NULL`, but a
+  # FLAG column is non-null on EVERY row — rewrite the WHERE into the declared
+  # equality predicate (entity_values IN / rollup_values NOT IN + keep-NULL).
+  if _rollup_flag && _disc
+    _rw = RecipeMultimetric.apply_rollup_flag_where!(conv['model'], _rollup_flag)
+    line "rollup_flag: rewrote the rollup-exclusion WHERE on #{_rw} helper SQL element(s) " \
+         "(#{Array(_rollup_flag['entity_values']).any? ? "entity_values #{Array(_rollup_flag['entity_values']).join(',')}" : "rollup_values #{Array(_rollup_flag['rollup_values']).join(',')}"})" if _rw.positive?
   end
   conv_base = conv_fact ? MechanicalSpecs.base_of(conv['model'], conv_fact) : nil
   pre = conv_fact ? MechanicalSpecs.derive_master(conv_fact, (conv_fact['name'] || 'Order Fact'), conv_base, nil, conv['model']) : { 'untranslated_metrics' => [] }
@@ -2761,16 +2815,40 @@ elsif mechanical
     line "phantom-column filter: dropped #{pf[:phantom]} non-existent base column(s) using #{real_cols.size} live table catalog(s)" if pf[:phantom].to_i.positive?
     line "column-rename remap: rewired #{pf[:remapped]} base column(s) to their warehouse names (--column-mapping)" if pf[:remapped].to_i.positive?
     # Retain the multi-metric recipe's point-in-time columns on the fact (the
-    # discriminator + year the source didn't plot) so the real-entity filter can
-    # run instead of being skipped as a dangling ref. From png-read point_in_time.
+    # discriminator / rollup flag + year the source didn't plot) so the
+    # real-entity filter can run instead of being skipped as a dangling ref.
+    # From png-read point_in_time.
     if defined?(conv_fact) && conv_fact
       _pit = ((JSON.parse(File.read(DashboardRead.path(WORK)))['point_in_time'] rescue nil) || {})
       want = [_pit['entity_discriminator'], _pit['year_column'] || 'Year'].compact
+      want << _pit['rollup_flag']['column'] if RecipeMultimetric.rollup_flag_active?(_pit)
       # The world-LOD BASE metrics too: the recipe's dual-axis trend plots the
       # region-filtered Country line Sum([Master/<metric>]) opposite each
       # synthesized World line, and an LOD-only metric is typically never
       # plotted directly — absent from the fact, the country line dangles.
       want |= world_lod_map.values if defined?(world_lod_map) && world_lod_map.is_a?(Hash)
+      # G9 run-2 root cause: retain_columns! checks the name via an
+      # underscore-inserting normalization ('Income Group' -> INCOME_GROUP), so
+      # a landed column WITHOUT the underscore (INCOMEGROUP) silently failed the
+      # check, the column was never retained, and the recipe guard then gutted
+      # the whole point-in-time rewrite. Resolve each caption variant against
+      # the live table catalog FIRST; a name retain's own check would miss is
+      # passed as the landed physical column. A name matching NOTHING is loud.
+      _tbl = (conv_fact.dig('source', 'path') || []).last.to_s
+      _rc_names = (real_cols[_tbl] || real_cols[_tbl.upcase] || []).map(&:to_s)
+      want = want.map do |nm|
+        direct = nm.to_s.gsub(/[^0-9A-Za-z]+/, '_').gsub(/\A_+|_+\z/, '').upcase
+        next nm if _rc_names.empty? || _rc_names.any? { |c| c.to_s.upcase == direct || c.to_s.casecmp?(nm.to_s) }
+        hit = RecipeMultimetric.resolve_field(nm, _rc_names)
+        if hit
+          line "point-in-time retain: '#{nm}' -> landed column '#{hit}' (caption-variant resolution)"
+          hit
+        else
+          line "WARN: point-in-time column '#{nm}' matches NO landed column on #{_tbl} — NOT retained; " \
+               "the recipe's real-entity/latest-year rewrite will drop it (candidates: #{_rc_names.first(20).join(', ')})"
+          nm
+        end
+      end
       kept = MechanicalSpecs.retain_columns!(conv_fact, want, real_cols)
       line "point-in-time retain: added #{kept} recipe column(s) (#{want.join(', ')}) to the fact" if kept.positive?
     end
@@ -3645,6 +3723,42 @@ rescue StandardError
   # best-effort — never fail the run on sentinel bookkeeping
 end
 Offramp.log(WORK, kind: 'pass1-stop', detail: "workbook #{wb_id} — parity + gates not yet run")
+
+# 🚧 G6 — MANUAL CUSTOM-SQL RESIDUES (exit 16). Phase 1e routed these
+# window/table-calc chains to the Custom SQL path correctly, but the build can
+# only ship the plotting tile with a magnitude proxy until the Custom SQL DM
+# element exists and the tile measure is repointed at it. Run-2 shipped the
+# proxy silently and the divergence surfaced only at Phase 6, ~2h later — so
+# pass 1 now BLOCKS here with the exact build+bind checklist instead of exit 12.
+_mr_doc = (JSON.parse(File.read(File.join(WORK, 'manual-residues.json'))) rescue nil)
+_mr = _mr_doc.is_a?(Hash) ? Array(_mr_doc['residues']) : Array(_mr_doc)
+_mr_unbuilt = _mr.select { |e| e.is_a?(Hash) && e['status'].to_s == 'unbuilt' }
+if _mr_unbuilt.any?
+  puts
+  puts '=========== MANUAL CUSTOM-SQL RESIDUES — BUILD REQUIRED BEFORE --finalize (exit 16) ==========='
+  puts "#{_mr_unbuilt.size} window/table-calc residue(s) are PLOTTED BY DASHBOARD TILES but have no Sigma"
+  puts 'translation (requires_custom_sql — refs/window-functions.md STAYS-MANUAL). Their tiles currently'
+  puts 'render a MAGNITUDE PROXY, not the source measure. For EACH residue below:'
+  puts "  1. Create a Custom SQL DM element from the skeleton (edit + PUT the DM spec:"
+  puts "     ruby scripts/post-and-readback.rb --type datamodel --update-id #{dm_id} --spec #{File.join(WORK, 'dm-spec.json')} ...)"
+  puts '  2. Repoint the tile\'s measure column at the new element\'s output column (wb-spec PUT).'
+  puts "  3. Set \"status\": \"built\" for that entry in #{File.join(WORK, 'manual-residues.json')}."
+  _mr_unbuilt.each_with_index do |e, i|
+    puts
+    puts "  #{i + 1}. #{e['calc'].inspect}  (tile: #{e['tile'].inspect})"
+    puts "     Tableau: #{e['formula'].to_s.gsub(/\s+/, ' ')[0, 220]}"
+    puts '     Suggested Custom SQL:'
+    e['suggested_sql'].to_s.each_line { |l| puts "       #{l.rstrip}" }
+  end
+  puts
+  puts 'Then re-run --finalize. assert-phase6-ran REFUSES GREEN while any residue is "unbuilt"'
+  puts '(waiver: --accept-manual-residues "<calc,...>" — budget-counted; name it in your report).'
+  puts '==============================================================================================='
+  mark('phase6-pass1')
+  phase_summary
+  exit 16
+end
+
 puts
 puts '⛔ NOT DONE — this is PASS 1 of 2. Do NOT report success or hand off yet.'
 puts '   To confirm completion at any point, run (exit 0 == done, nothing else counts):'
