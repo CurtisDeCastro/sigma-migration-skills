@@ -22,9 +22,9 @@
 # they are reported and left untouched.
 #
 # SINGLE-SEGMENT (same-element) re-casing — opt-in via same_element_recase: true.
-# A data-model calc authored from twb tokens carries BARE refs ([Totalggr],
+# A data-model calc authored from twb tokens carries BARE refs ([Totalrev],
 # [Userid]) that mean "a column on THIS element". Snowflake/Sigma read those
-# columns back UPPERCASE ([TOTALGGR]), so the bare TitleCase ref resolves to
+# columns back UPPERCASE ([TOTALREV]), so the bare TitleCase ref resolves to
 # type=error. When enabled (DM path only — never the workbook path, where a bare
 # [ctl-id] bracket is a CONTROL reference, see test), each element's bare refs are
 # re-cased against that element's OWN live labels. Two hard guards keep it honest:
