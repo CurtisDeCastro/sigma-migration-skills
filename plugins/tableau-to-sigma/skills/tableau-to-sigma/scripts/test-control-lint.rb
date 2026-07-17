@@ -74,13 +74,13 @@ SPEC_CTLS = { 'pages' => [{ 'name' => 'P1', 'elements' => [
     'columns' => [{ 'id' => 'c-dim', 'name' => 'Region', 'formula' => '[Region]' }] },
   { 'id' => 'el-c1', 'kind' => 'control', 'controlId' => 'RankFunction', 'name' => 'Rank',
     'filters' => [{ 'source' => { 'kind' => 'table', 'elementId' => 'tbl-1' }, 'columnId' => 'c-dim' }] },
-  { 'id' => 'el-c2', 'kind' => 'control', 'controlId' => 'UnifiedRealPersonID', 'name' => 'User',
+  { 'id' => 'el-c2', 'kind' => 'control', 'controlId' => 'UnifiedPersonkey', 'name' => 'User',
     'filters' => [{ 'source' => { 'kind' => 'table', 'elementId' => 'tbl-1' }, 'columnId' => 'c-dim' }] }
 ] }] }.freeze
 drift_msg = ->(vs) { vs.any? { |v| v.include?('control-scope drift') } }
 drift_scope = { 'sourceFilterSignals' => 2, 'controls' => [
   { 'controlId' => 'ctl-param-rank-function-dashboard-1', 'name' => 'Rank', 'status' => 'emitted' },
-  { 'controlId' => 'ctl-unified-realpersonid-dashboard-1', 'name' => 'User', 'status' => 'emitted' }
+  { 'controlId' => 'ctl-unified-personkey-dashboard-1', 'name' => 'User', 'status' => 'emitted' }
 ] }
 vd = ControlLint.lint(SPEC_CTLS, scope: drift_scope)
 check(drift_msg.call(vd), "wholesale controlId drift → ONE 'control-scope drift' hint (got #{vd.inspect})", fails)
