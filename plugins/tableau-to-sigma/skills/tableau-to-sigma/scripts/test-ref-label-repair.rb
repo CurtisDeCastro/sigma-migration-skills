@@ -70,47 +70,47 @@ check(ctl[0]['columns'][0]['formula'] == 'If([ctl-year] = [Master/Published Date
       'bare control ref untouched, slash ref still repaired in same formula', fails)
 
 # ── BARE [Column] same-element re-casing (opt-in; DM path) ──────────────────
-# DM calc columns author bare TitleCase refs ([Totalggr]) that Snowflake reads
-# back UPPERCASE ([TOTALGGR]) → type=error. same_element_recase re-cases them
+# DM calc columns author bare TitleCase refs ([Totalrev]) that Snowflake reads
+# back UPPERCASE ([TOTALREV]) → type=error. same_element_recase re-cases them
 # against the OWNING element's own live labels, with two honesty guards.
 dm_reg = {
-  'Fact Primary'   => %w[TOTALGGR TOTALHANDLE USERID DKDATE],
-  'Contra Secondary' => %w[USERID BUDGETLINE CONTRA]   # USERID also here → cross-element
+  'Fact Primary'   => %w[TOTALREV TOTALVOL USERID SRCDATE],
+  'Contra Secondary' => %w[USERID PLANLINE CONTRA]   # USERID also here → cross-element
 }
 dm_els = [
   { 'name' => 'Fact Primary', 'columns' => [
-    { 'id' => 'p1', 'formula' => '[Totalggr]' },                          # bare, re-case → TOTALGGR
-    { 'id' => 'p2', 'formula' => 'Sum([Totalggr]) / NullIf(Sum([Totalhandle]), 0)' }, # two bare
-    { 'id' => 'p3', 'formula' => '[TOTALGGR]' },                          # already exact → leave
+    { 'id' => 'p1', 'formula' => '[Totalrev]' },                          # bare, re-case → TOTALREV
+    { 'id' => 'p2', 'formula' => 'Sum([Totalrev]) / NullIf(Sum([Totalvol]), 0)' }, # two bare
+    { 'id' => 'p3', 'formula' => '[TOTALREV]' },                          # already exact → leave
     { 'id' => 'p4', 'formula' => 'Coalesce([Userid], [USERID])' },        # USERID on 2 elements → DON'T re-case
-    { 'id' => 'p5', 'formula' => 'If([ctl-region] = 1, [Totalggr], 0)' }, # control id left, bare col re-cased
-    { 'id' => 'p6', 'formula' => '[Custom SQL/Totalggr]' }                # qualified:false → element-alias ref untouched
+    { 'id' => 'p5', 'formula' => 'If([ctl-region] = 1, [Totalrev], 0)' }, # control id left, bare col re-cased
+    { 'id' => 'p6', 'formula' => '[Custom SQL/Totalrev]' }                # qualified:false → element-alias ref untouched
   ] },
   { 'name' => 'Contra Secondary', 'columns' => [
-    { 'id' => 's1', 'formula' => '[Budgetline]' }                         # bare, re-case → BUDGETLINE
+    { 'id' => 's1', 'formula' => '[Planline]' }                         # bare, re-case → PLANLINE
   ] }
 ]
 
 # Default (workbook path): bare refs are NEVER touched — control refs are bare.
-wb_check = [{ 'name' => 'Fact Primary', 'columns' => [{ 'formula' => '[Totalggr]' }] }]
+wb_check = [{ 'name' => 'Fact Primary', 'columns' => [{ 'formula' => '[Totalrev]' }] }]
 RefLabelRepair.repair!(wb_check, dm_reg)
-check(wb_check[0]['columns'][0]['formula'] == '[Totalggr]',
+check(wb_check[0]['columns'][0]['formula'] == '[Totalrev]',
       'bare ref left verbatim when same_element_recase is OFF (workbook path safe)', fails)
 
 # DM path call signature: qualified:false (don't touch element-alias segments) +
 # same_element_recase:true (fix bare column casing).
 rep3 = RefLabelRepair.repair!(dm_els, dm_reg, qualified: false, same_element_recase: true)
 g = ->(i, j) { dm_els[i]['columns'][j]['formula'] }
-check(g[0, 0] == '[TOTALGGR]', "bare ref re-cased to own live label (got #{g[0, 0]})", fails)
-check(g[0, 1] == 'Sum([TOTALGGR]) / NullIf(Sum([TOTALHANDLE]), 0)', 'two bare refs in a metric re-cased', fails)
-check(g[0, 2] == '[TOTALGGR]', 'already-exact bare ref untouched', fails)
+check(g[0, 0] == '[TOTALREV]', "bare ref re-cased to own live label (got #{g[0, 0]})", fails)
+check(g[0, 1] == 'Sum([TOTALREV]) / NullIf(Sum([TOTALVOL]), 0)', 'two bare refs in a metric re-cased', fails)
+check(g[0, 2] == '[TOTALREV]', 'already-exact bare ref untouched', fails)
 check(g[0, 3] == 'Coalesce([Userid], [USERID])',
       'cross-element bare ref (col on 2 elements) NOT re-cased — left for Lookup', fails)
-check(g[0, 4] == 'If([ctl-region] = 1, [TOTALGGR], 0)',
+check(g[0, 4] == 'If([ctl-region] = 1, [TOTALREV], 0)',
       'non-column bare token (control id) left verbatim; real bare col re-cased', fails)
-check(g[0, 5] == '[Custom SQL/Totalggr]',
+check(g[0, 5] == '[Custom SQL/Totalrev]',
       'qualified:false leaves element-alias (slash) refs untouched on the DM path', fails)
-check(g[1, 0] == '[BUDGETLINE]', 'bare ref re-cased on the secondary element too', fails)
+check(g[1, 0] == '[PLANLINE]', 'bare ref re-cased on the secondary element too', fails)
 check(rep3[:ambiguous].any? { |m| m.include?('multiple elements') },
       'cross-element bare ref is reported as ambiguous', fails)
 

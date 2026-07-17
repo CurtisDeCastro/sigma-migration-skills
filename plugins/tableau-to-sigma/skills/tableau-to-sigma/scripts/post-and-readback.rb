@@ -433,8 +433,8 @@ end
 spec, cols_res, cols_json, labels_by_el = readback.call
 
 # CALC-REF CASING REPAIR (datamodel only, re-PUT-once). The vendored converter
-# emits calc column refs in Tableau TitleCase ([Totalggr], [Userid]); Snowflake
-# reads the real columns back UPPERCASE ([TOTALGGR]) and Sigma formula refs are
+# emits calc column refs in Tableau TitleCase ([Totalrev], [Userid]); Snowflake
+# reads the real columns back UPPERCASE ([TOTALREV]) and Sigma formula refs are
 # case-sensitive, so those calc columns compile to type=error. BEFORE quarantine
 # would drop them, re-case each element's BARE column refs to its OWN live column
 # labels (the authoritative readback casing), PUT the corrected spec back to the
