@@ -109,7 +109,12 @@ def _persist_msal(cache, path):
 
 
 def get_token(scopes=None, interactive=True, tenant=None):
-    """Silent token from the per-tenant cache; device-code fallback when allowed."""
+    """Silent token from the per-tenant cache; device-code fallback when allowed.
+    A pre-acquired bearer in $PBI_ACCESS_TOKEN wins (CI / callers who already
+    authed out-of-band) — audience must match `scopes`."""
+    pre = os.environ.get("PBI_ACCESS_TOKEN")
+    if pre:
+        return pre
     scopes = scopes or FABRIC_SCOPE
     authority = _authority(tenant)
     path = cache_path(tenant)
