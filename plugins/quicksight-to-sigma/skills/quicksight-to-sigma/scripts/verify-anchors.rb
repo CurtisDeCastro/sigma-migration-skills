@@ -227,6 +227,97 @@ def el_display_name(el)
   t.empty? ? el['id'].to_s.sub(/\Ael-/, '').tr('-', ' ') : t
 end
 
+# --- W1.1/W1.2: dashboard-tile emptiness + anchor scoping --------------------
+# The 2026-07 Macroeconomics run went GREEN over a workbook whose every chart
+# rendered "No data": the anchors oracle matched all 15 values inside the raw,
+# UNFILTERED "Master All" feeder table (found-elsewhere counts as matched), so it
+# vouched only that the WAREHOUSE landed — never that any displayed tile shows a
+# value. These helpers separate DISPLAYED tiles (must return >=1 data row) from
+# FEEDER tables (the master/masterAll twins other tiles derive from), so the gate
+# can (a) hard-fail on any empty displayed tile and (b) know whether an anchor
+# matched inside something the dashboard actually displays.
+
+# Non-queryable / non-visualization element kinds (no data export to check).
+VIZ_NONQUERY_KINDS = %w[control text image container divider button
+                        visualization-legend page-control modal].freeze
+
+# Every `elementId` string referenced ANYWHERE inside a node (a chart's
+# source.elementId, a control's filter target, etc.). Walked recursively so the
+# feeder set is spec-shape-agnostic. An element's OWN id lives under `id`, not
+# `elementId`, so self-references are not collected.
+def collect_source_elids(node, acc)
+  case node
+  when Hash
+    node.each do |k, v|
+      acc << v.to_s if k.to_s == 'elementId' && v && !v.to_s.empty?
+      collect_source_elids(v, acc)
+    end
+  when Array
+    node.each { |v| collect_source_elids(v, acc) }
+  end
+  acc
+end
+
+# Authoritative displayed-tile element ids the BUILD declared (parity plan +
+# visual-verify manifests). Empty when no build artifacts are in the workdir
+# (offline/standalone) — callers fall back to the source-graph leaf heuristic.
+def declared_tile_ids(workdir)
+  ids = []
+  begin
+    pp = File.join(workdir, 'parity-plan.json')
+    (JSON.parse(File.read(pp))['charts'] || []).each { |c| ids << c['sigma_element_id'].to_s } if File.exist?(pp)
+  rescue StandardError; end
+  [File.join(workdir, 'visual-verify', 'manifest.json'),
+   File.join(workdir, 'visual-verify-tiles.json')].each do |mf|
+    next unless File.exist?(mf)
+    begin
+      arr = JSON.parse(File.read(mf))
+      Array(arr).each { |t| ids << t['element_id'].to_s if t.is_a?(Hash) && t['element_id'] }
+    rescue StandardError; end
+  end
+  ids.reject { |s| s.to_s.empty? }.uniq
+end
+
+# Per-element emptiness census. `exports` is {display_name => CSV rows incl.
+# header}; a missing key = export never succeeded (failed/HTML/timeout — distinct
+# from an empty result). Returns one record per queryable element.
+def tile_emptiness_census(elements, exports, workdir)
+  # FEEDER detection: an element is a feeder only when another element derives its
+  # DATA from it, i.e. appears in that element's `source` subtree (master/masterAll
+  # twins). Collect ONLY from the `source` of QUERYABLE elements — NOT the whole
+  # element node, and NOT from controls. A control filters the tiles it targets via
+  # `filters:[{source:{elementId:<tile>}}]`; walking that (the original bug, review-
+  # caught) marked every control-filtered DISPLAYED chart as a feeder, so its
+  # emptiness was never gated and the Macroeconomics false-GREEN stayed reachable.
+  referenced = Set.new
+  elements.each do |el|
+    next if VIZ_NONQUERY_KINDS.include?(el['kind'].to_s) # controls/text/etc create no feeders
+    collect_source_elids(el['source'], referenced)
+  end
+  declared = declared_tile_ids(workdir)
+  elements.map do |el|
+    kind = el['kind'].to_s
+    next nil if VIZ_NONQUERY_KINDS.include?(kind)
+    id   = el['id'].to_s
+    rows = exports[el_display_name(el)]
+    # CSV export carries a header row; data_rows = rows-1. nil = export failed.
+    data_rows = rows.is_a?(Array) ? [rows.length - 1, 0].max : nil
+    # A feeder is a raw base DATA TABLE another element derives from (master/
+    # masterAll). Require kind=='table' so a referenced CHART/KPI/pivot (a dual-role
+    # tile that is displayed AND sourced by another tile) is NOT misclassified as a
+    # feeder and un-gated (review-caught false-negative). Genuine base tables stay
+    # feeders, avoiding a false-positive on a legitimately-empty undisplayed base.
+    is_feeder = referenced.include?(id) && kind == 'table'
+    # Displayed tile: named by the build (authoritative) or, lacking artifacts, a
+    # LEAF nothing else sources from (feeders are referenced by their consumers).
+    # (A dual-role displayed TABLE in an artifact-less run remains a residual hole;
+    # any real migration carries a parity-plan/visual-verify manifest → declared.)
+    displayed = declared.empty? ? !is_feeder : declared.include?(id)
+    { 'id' => id, 'name' => el_display_name(el), 'kind' => kind,
+      'data_rows' => data_rows, 'displayed' => displayed, 'is_feeder' => is_feeder }
+  end.compact
+end
+
 opts = { pool: 8, timeout: 120 } # pool 8: A/B report measured phase6-pass1 +70.5s dominated by anchor export collection
 OptionParser.new do |p|
   p.on('--workdir DIR')        { |v| opts[:dir] = v }
@@ -238,6 +329,7 @@ OptionParser.new do |p|
   p.on('--timeout S', Integer) { |v| opts[:timeout] = v }
   p.on('--workbook-spec PATH', 'offline: read element names from this spec instead of the live workbook') { |v| opts[:spec] = v }
   p.on('--exports-dir DIR', 'offline: read <elementId>.csv files instead of exporting live') { |v| opts[:exports] = v }
+  p.on('--retranscribed REASON', 'authorize a CHANGE to source-anchors.json since its first verification — ONLY when you RE-READ the source dashboard PNG and corrected a genuine transcription error. REQUIRED reason string; the old->new diff is logged into the verdict and MUST be named in your report. NEVER use this to reconcile anchors against the live actuals (that defeats the whole measurement).') { |v| opts[:retranscribed] = v }
 end.parse!
 abort('--workdir required') unless opts[:dir]
 
@@ -273,6 +365,55 @@ unless bad.empty?
   warn '       `raw` must be the value EXACTLY as printed on the source image ("18,037B", "-2%",'
   warn '       "$733,215.26") — or, for kind:"text" roster anchors, a non-empty displayed label.'
   exit 2
+end
+
+# --- W1.3: source-anchor immutability ---------------------------------------
+# The anchors are the MEASUREMENT; editing a printed VALUE after seeing the live
+# actuals defeats the entire bar. The 2026-07 run changed a1 "18,037B" ->
+# "18,028B" (the Sigma value) to flip a 14/15 FAIL into a 15/15 PASS. Lock the
+# per-anchor id->raw map on first verification and refuse a later change to an
+# EXISTING anchor's printed value unless --retranscribed authorizes a genuine
+# re-transcription (re-read the SOURCE PNG, not the actuals). The decision is on
+# the VALUE map, not the file bytes — reordering keys, re-indenting, editing a
+# label, or ADDING/removing anchors is NOT tampering and must not false-refuse
+# (review-caught: a byte hash tripped on a pretty-print of identical anchors).
+require 'digest'
+lock_path = File.join(opts[:dir], 'source-anchors.lock.json')
+cur_map = anchors.each_with_object({}) { |a, h| h[a['id'].to_s] = a['raw'].to_s if a.is_a?(Hash) && a['id'] }
+anchor_retranscribe = nil
+if File.exist?(lock_path)
+  lock = (JSON.parse(File.read(lock_path)) rescue {})
+  prev_map = lock['anchors'].is_a?(Hash) ? lock['anchors'] : {}
+  # Tamper signal: an id present in BOTH whose printed value changed.
+  changed = cur_map.select { |id, raw| prev_map.key?(id) && prev_map[id].to_s != raw }
+                   .map { |id, raw| { 'id' => id, 'from' => prev_map[id], 'to' => raw } }
+  if changed.any?
+    if opts[:retranscribed].to_s.strip.empty?
+      warn "FATAL: #{changed.length} source-anchor VALUE(s) changed since first verification:"
+      changed.each { |c| warn "         #{c['id']}: #{c['from'].inspect} -> #{c['to'].inspect}" }
+      warn "       (locked #{lock['stamped_at']}) Editing a transcribed printed value after seeing the"
+      warn '       live actuals defeats the measurement (the 2026-07 run flipped a FAIL to a PASS this'
+      warn '       way). If — and ONLY if — you RE-READ the source dashboard PNG and corrected a genuine'
+      warn '       transcription error, re-run with --retranscribed "<why, referencing the source image>".'
+      warn '       Otherwise revert source-anchors.json and FIX THE WORKBOOK so the printed value appears.'
+      exit 2
+    end
+    anchor_retranscribe = { 'reason' => opts[:retranscribed], 'changed' => changed }
+    warn "[RETRANSCRIBED] #{changed.length} source-anchor value change(s) AUTHORIZED — #{opts[:retranscribed]}"
+    changed.each { |c| warn "                #{c['id']}: #{c['from'].inspect} -> #{c['to'].inspect}" }
+    warn '                This MUST be named in your migration report.'
+  end
+end
+# (Re)stamp the lock every run: first sight, an authorized re-transcription, or a
+# benign additions/reorder/label change all update the baseline id->raw map.
+begin
+  File.write(lock_path, JSON.pretty_generate(
+    'content_sha256' => Digest::SHA256.hexdigest(File.read(anchors_path)), # record only, not the decision
+    'stamped_at' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ'),
+    'anchor_count' => anchors.length,
+    'anchors' => cur_map))
+rescue StandardError => e
+  warn "  [WARN] could not write source-anchors lock (#{e.class}: #{e.message.to_s[0, 60]})"
 end
 
 # --- element names + rows: offline (spec+exports dir) or live (REST) ---------
@@ -445,6 +586,23 @@ end
 verdict = AnchorVerify.verify(anchors, exports)
 verdict['source_anchors'] = anchors_path
 verdict['verified_at'] = Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+# W1.1/W1.2: dashboard-tile emptiness + anchor display scoping. `elements` is in
+# scope from whichever branch (offline spec / live REST) populated `exports`.
+tiles = tile_emptiness_census(elements, exports, opts[:dir])
+displayed_names = tiles.select { |t| t['displayed'] }.map { |t| t['name'] }.to_set
+empty_displayed = tiles.select { |t| t['displayed'] && t['data_rows'] == 0 }
+verdict['tiles'] = tiles
+verdict['dashboard_tiles_empty'] = empty_displayed.map { |t| { 'id' => t['id'], 'name' => t['name'], 'kind' => t['kind'] } }
+verdict['tiles_all_nonempty'] = empty_displayed.empty?
+# Which matches landed in something the dashboard DISPLAYS vs only a raw feeder.
+# The oracle's teeth are tiles_all_nonempty; this explains a landed-not-displayed
+# pass (all anchors matched, every displayed tile empty).
+verdict['detail'].each { |d| d['in_displayed_tile'] = displayed_names.include?(d['matched_in']) }
+verdict['anchors_matched_in_displayed'] = verdict['detail'].count { |d| d['in_displayed_tile'] }
+verdict['anchors_only_in_feeders'] = verdict['detail'].reject { |d| d['in_displayed_tile'] }.map { |d| d['id'] }
+verdict['anchors_retranscribed'] = anchor_retranscribe if anchor_retranscribe
+
 File.write(out_path, JSON.pretty_generate(verdict))
 
 # Stamp the summary into parity-final.json when Phase 6 already finalized —
@@ -455,6 +613,8 @@ if File.exist?(pf)
     s = JSON.parse(File.read(pf))
     s['anchors'] = { 'checked' => verdict['checked'], 'matched' => verdict['matched'],
                      'pass' => verdict['pass'], 'missing' => verdict['missing'].map { |m| m['id'] } }
+    s['dashboard_tiles_empty'] = verdict['dashboard_tiles_empty']
+    s['tiles_all_nonempty'] = verdict['tiles_all_nonempty']
     File.write(pf, JSON.pretty_generate(s))
   rescue JSON::ParserError
     warn "[WARN] #{pf} is malformed — anchors summary not stamped."
@@ -464,10 +624,32 @@ end
 puts "verify-anchors: #{verdict['matched']}/#{verdict['checked']} anchor(s) matched " \
      "across #{exports.length} element export(s) → #{out_path}"
 verdict['detail'].each do |d|
-  puts "  MATCHED  #{d['id']} #{d['raw'].inspect} in #{d['matched_in'].inspect}#{d['note'] ? " (#{d['note']})" : ''}"
+  scope = d['in_displayed_tile'] ? '' : ' [FEEDER-ONLY: value is in a raw source table, not a displayed tile]'
+  puts "  MATCHED  #{d['id']} #{d['raw'].inspect} in #{d['matched_in'].inspect}#{d['note'] ? " (#{d['note']})" : ''}#{scope}"
 end
+
+# W1.1: non-empty dashboard tiles — the hard data-path check. A displayed tile
+# that exports 0 data rows is the exact false-GREEN the Macroeconomics run hid
+# behind a warehouse-only anchors pass. This is loud and fails the script even
+# when every anchor "matched" (they can match in the unfiltered feeder table).
+unless verdict['tiles_all_nonempty']
+  warn ''
+  warn "[FAIL] #{verdict['dashboard_tiles_empty'].length} displayed dashboard tile(s) export ZERO data rows —"
+  warn '       the charts render "No data". Anchor matches in a raw feeder table do NOT count as'
+  warn '       displayed data. Common causes: a control/filter literal that matches no rows (e.g.'
+  warn '       "Americas & Caribbean" vs a calc emitting "Americas and Caribbean"), or a calc'
+  warn '       comparing a NUMBER column to a string literal (renders NULL). Fix, then re-run.'
+  verdict['dashboard_tiles_empty'].each { |t| warn "         EMPTY  #{t['id']} #{t['name'].inspect} [#{t['kind']}]" }
+  if verdict['anchors_matched_in_displayed'].to_i.zero? && verdict['matched'].to_i.positive?
+    warn "       NOTE: all #{verdict['matched']} anchor match(es) landed ONLY in feeder tables — " \
+         'the warehouse landed but nothing is displayed.'
+  end
+  exit 1
+end
+
 if verdict['pass']
-  puts '[OK] every source anchor value is present in the live workbook exports.'
+  puts '[OK] every source anchor value is present in the live workbook exports; ' \
+       "all displayed tiles return data (#{verdict['anchors_matched_in_displayed']}/#{verdict['matched']} anchors in displayed tiles)."
   exit 0
 end
 warn "[FAIL] #{verdict['missing'].length} anchor(s) MISSING from the live workbook exports:"
