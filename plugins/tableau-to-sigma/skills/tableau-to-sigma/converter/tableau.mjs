@@ -3735,6 +3735,22 @@ function extractPath(rel, dbOverride, schOverride) {
   }
   return path;
 }
+function warehouseDbSchemaFromConn(connVal) {
+  const NON_WAREHOUSE = new Set(["sqlproxy", "hyper", "excel-direct", "textscan", "csv", "google-sheets", "virtual-connection", "vconn"]);
+  for (const c of allConnections(connVal)) {
+    const cls = (attr(c, "class") || "").toLowerCase();
+    if (NON_WAREHOUSE.has(cls))
+      continue;
+    const db = attr(c, "dbname") || attr(c, "database") || "";
+    const sch = attr(c, "schema") || "";
+    if (!db || !sch)
+      continue;
+    if (/[\\/]/.test(db) || /\.hyper$/i.test(db))
+      continue;
+    return [db, sch];
+  }
+  return ["", ""];
+}
 function collectTables(rel, tables) {
   const type = attr(rel, "type") || "table";
   if (type === "table") {
@@ -3873,7 +3889,10 @@ function tryBuildBlendModel(parsed, datasources, dbOverride, schOverride, connId
   if (links.length === 0)
     return null;
   const elements = [];
-  const pPath = extractPath(primaryRel, dbOverride, schOverride);
+  // Blends can span datasources on DIFFERENT warehouses — each side falls back
+  // to its own <connection dbname/schema> when no global override was passed.
+  const [pDb, pSch] = warehouseDbSchemaFromConn(primary.ds?.connection);
+  const pPath = extractPath(primaryRel, dbOverride || pDb, schOverride || pSch);
   const pTable = pPath[pPath.length - 1] || "PRIMARY";
   const pCols = blendColumns(primary);
   const pColId = {};
@@ -3897,7 +3916,8 @@ function tryBuildBlendModel(parsed, datasources, dbOverride, schOverride, connId
   const pMeasures = pCols.filter((c) => c.isMeasure);
   const secMeasureDisplay = {};
   for (const link of links) {
-    const sPath = extractPath(connRelations(link.sec.ds.connection)[0], dbOverride, schOverride);
+    const [sDb, sSch] = warehouseDbSchemaFromConn(link.sec.ds?.connection);
+    const sPath = extractPath(connRelations(link.sec.ds.connection)[0], dbOverride || sDb, schOverride || sSch);
     const sTable = sPath[sPath.length - 1] || "SECONDARY";
     const sCols = blendColumns(link.sec);
     const sLinkWh = new Set(link.pairs.map((p) => p.s));
@@ -4273,6 +4293,13 @@ function convertTableauToSigma(xmlContent, options = {}) {
   const dsIdx = Math.min(datasourceIndex, datasources.length - 1);
   const ds = datasources[dsIdx];
   const rootConn = effectiveConnection(ds.connection);
+  // C1 (field-caught in 2 of 3 field runs; E2E-caught as a wall of DM-POST
+  // 404s): live warehouse connections name their own database/schema in the
+  // workbook itself. Honor them when the caller passed no override — there is
+  // NO default database to fall back to, and a fabricated one never resolves.
+  const [connDb, connSchema] = warehouseDbSchemaFromConn(ds.connection);
+  const dbEff = dbOverride || connDb;
+  const schEff = schOverride || connSchema;
   const warnings = [];
   const security = [];
   const workbookPatterns = [];
@@ -4386,7 +4413,7 @@ function convertTableauToSigma(xmlContent, options = {}) {
   if (rootRelation) {
     const relType = attr(rootRelation, "type") || "table";
     if (relType === "table") {
-      const path = extractPath(rootRelation, dbOverride, schOverride);
+      const path = extractPath(rootRelation, dbEff, schEff);
       const tableName = path[path.length - 1] || "";
       const columns = [], order = [];
       for (const col of asArray(rootRelation?.columns?.column || [])) {
@@ -4412,7 +4439,7 @@ function convertTableauToSigma(xmlContent, options = {}) {
       } else {
         const elementMap = {};
         for (const t of tables) {
-          const path = extractPath(t.rel, dbOverride, schOverride);
+          const path = extractPath(t.rel, dbEff, schEff);
           const tableName = path[path.length - 1] || attr(t.rel, "name") || "";
           if (elementMap[tableName])
             continue;
@@ -4444,7 +4471,7 @@ function convertTableauToSigma(xmlContent, options = {}) {
           elementMap[tableName] = { element: el, colIdMap };
           elements.push(el);
         }
-        const primaryTableName = extractPath(tables[0].rel, dbOverride, schOverride).pop() || "";
+        const primaryTableName = extractPath(tables[0].rel, dbEff, schEff).pop() || "";
         const primaryEntry = elementMap[primaryTableName];
         // W (calc-flex item 1): wire EVERY equality key pair (collectTables now
         // carries leftKeys/rightKeys; a multi-key join previously either kept
@@ -4466,7 +4493,7 @@ function convertTableauToSigma(xmlContent, options = {}) {
           const rightRaw = t.rightKeys && t.rightKeys.length ? t.rightKeys : t.rightKey ? [t.rightKey] : [];
           if (!leftRaw.length || leftRaw.length !== rightRaw.length)
             continue;
-          const tgtName = extractPath(t.rel, dbOverride, schOverride).pop() || "";
+          const tgtName = extractPath(t.rel, dbEff, schEff).pop() || "";
           const tgtEntry = elementMap[tgtName];
           if (!primaryEntry || !tgtEntry)
             continue;
@@ -4542,7 +4569,7 @@ function convertTableauToSigma(xmlContent, options = {}) {
         factRelName = factChild ? attr(factChild, "name") || attr(factChild, "table") || null : null;
         for (const rel of childRels) {
           const fullName = attr(rel, "name") || attr(rel, "table") || "TABLE";
-          const path = extractPath(rel, dbOverride, schOverride);
+          const path = extractPath(rel, dbEff, schEff);
           const cleanName = path[path.length - 1] || fullName;
           const columns = [], order = [], colIdMap = {};
           let matchingObjId = Object.keys(metaByObjId).find((k) => k === fullName || k.startsWith(fullName + "_"));
@@ -4595,7 +4622,7 @@ function convertTableauToSigma(xmlContent, options = {}) {
           const isCustomSql = isCustomSqlRel;
           let sqlText = "";
           if (isCustomSql) {
-            const decoded = qualifyTwoPartFqns(unescapeCustomSqlEntities(String(rel["#text"] ?? "")).trim(), dbOverride);
+            const decoded = qualifyTwoPartFqns(unescapeCustomSqlEntities(String(rel["#text"] ?? "")).trim(), dbEff);
             const collapsed = collapseDoubledComparisonOps(decoded);
             sqlText = collapsed.sql;
             if (collapsed.rewrites > 0) {
@@ -4746,7 +4773,7 @@ function convertTableauToSigma(xmlContent, options = {}) {
             }
           }
         }
-        if (!dbOverride || !schOverride) {
+        if (!dbEff || !schEff) {
           warnings.push("\u26A0 Virtual connection: pass database and schema parameters to set the full warehouse path.");
         }
       }
@@ -4755,7 +4782,7 @@ function convertTableauToSigma(xmlContent, options = {}) {
       if (_collapsed.rewrites > 0) {
         warnings.push(`\u26A0 Custom SQL datasource: collapsed ${_collapsed.rewrites} doubled comparison operator(s) (<<\u2192<, >>=\u2192>=) \u2014 a Tableau ObjectModel encapsulation artifact. VERIFY these are comparisons, not bit-shift operators.`);
       }
-      const statement = _repointCustomSqlSchema(_collapsed.sql, attr(rootConn, "dbname"), attr(rootConn, "schema"), dbOverride, schOverride);
+      const statement = _repointCustomSqlSchema(_collapsed.sql, attr(rootConn, "dbname"), attr(rootConn, "schema"), dbEff, schEff);
       if (!statement) {
         warnings.push("\u26A0 Custom SQL relation carried no SQL text \u2014 no element emitted.");
       } else {

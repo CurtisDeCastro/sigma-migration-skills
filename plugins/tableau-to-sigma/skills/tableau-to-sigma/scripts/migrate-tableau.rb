@@ -287,6 +287,12 @@ OptionParser.new do |o|
                               'SAME dashboard rather than orphaning it.') { |v| opts[:reuse_workbook] = v }
 end.parse!
 
+# --db/--schema travel together: a lone half used to be silently completed by a
+# fabricated default, which 404s in every real org (E2E-caught). Fail loudly.
+if opts[:db].nil? ^ opts[:schema].nil?
+  abort 'FATAL: --db and --schema must be passed together (a warehouse table path needs both).'
+end
+
 # Share-URL intake (field-caught: three independent runs each rediscovered that
 # the MOST COMMON Tableau link shape — /#/site/<site>/views/<workbookContentUrl>/<view>
 # — resolves through NO existing path: resolve-project.rb is numeric-vizportal-only
@@ -1534,6 +1540,75 @@ end
 # Mechanical converter run (the default). Requires the .twb (parse-twb-layout
 # already gated on have_twb above) and a converter backend — local build by
 # default, hosted MCP only on explicit consent (see backend resolution below).
+# -------------------------------------------------------------------------
+# WAREHOUSE DB/SCHEMA RESOLUTION — there is NO default database. Every org
+# has its own warehouse (and the workbook itself usually names it), so a
+# fabricated fallback turns "could not derive" into a wall of 404s at DM
+# POST. E2E-caught: a Virtual-Connection workbook derived nothing, shipped a
+# placeholder default, and every table pointed at a nonexistent database —
+# while offline CI stayed green because the fixtures carried the same
+# placeholder. Field-caught twice more (C1): live warehouse workbooks carry
+# dbname/schema on their <connection> elements, but only explicit flags were
+# honored. Precedence: --db/--schema flags → landing manifest (landed
+# extracts are authoritative) → the workbook's own <connection> attributes →
+# hard STOP naming the flags. Never a guess.
+#
+# G7 (run-2 field failure, 2026-07-15): when extracts were landed, the
+# AUTHORITATIVE db/schema is the landing manifest's fully-qualified sf_table
+# paths. A generic default here once returned ZERO real columns for a landed
+# schema, which silently disabled fixup_dm_spec's caption→physical remap AND
+# its phantom-column drop AND the rollup discriminator — one wiring gap
+# defanged three codified mechanisms and cost ~16 min of hand re-derivation.
+manifest_dbschema = lambda do
+  mani = Dir[File.join(WORK, '*landing-manifest*.json')].first
+  return nil unless mani
+  rows = JSON.parse(File.read(mani))
+  rows = rows['tables'] if rows.is_a?(Hash) && rows['tables'].is_a?(Array)
+  fqns = Array(rows).map { |r| r.is_a?(Hash) ? r['sf_table'].to_s : '' }
+                    .select { |s| s.count('.') >= 2 }
+  return nil if fqns.empty?
+  pairs = fqns.map { |s| s.split('.')[0, 2] }.uniq
+  if pairs.length > 1
+    line "WARN: landing manifest spans multiple db.schema pairs (#{pairs.map { |p| p.join('.') }.join(', ')}) — using the first; pass --db/--schema to override"
+  end
+  pairs.first
+rescue StandardError => e
+  line "WARN: could not derive db/schema from landing manifest (#{e.class}) — falling back"
+  nil
+end
+wh_try = lambda do |twb_p|
+  return [opts[:db], opts[:schema], '--db/--schema flags'] if opts[:db] && opts[:schema]
+  mani = manifest_dbschema.call
+  return [mani[0], mani[1], 'landing manifest'] if mani
+  pairs = HydrateCustomSql.twb_dbschema(twb_p)
+  if pairs.length > 1
+    line "NOTE: workbook connections span multiple db.schema pairs (#{pairs.map { |p| p.join('.') }.join(', ')}) — " \
+         'using the first for catalog discovery; each datasource keeps its own connection path; --db/--schema overrides all'
+  end
+  return [pairs[0][0], pairs[0][1], 'workbook <connection> attributes'] if pairs.any?
+  nil
+end
+wh_announced = false
+wh_require = lambda do |twb_p|
+  got = wh_try.call(twb_p)
+  abort <<~MSG unless got
+    FATAL: cannot determine the warehouse database/schema for this workbook — and there
+    is NO default (every org's warehouse is different; a guessed name 404s at DM POST).
+    Searched, in order: --db/--schema flags (absent) → landing manifest (none) → the
+    workbook's own <connection dbname=/schema=> attributes (none usable — published,
+    virtual-connection, and extract-only connections don't carry a warehouse path).
+    Re-run with explicit flags naming where this workbook's tables live in YOUR warehouse:
+      --db <DATABASE> --schema <SCHEMA>
+    Find them in the Tableau datasource's connection details (Data Source tab → connection),
+    or by browsing the Sigma connection's catalog to the tables.
+  MSG
+  unless wh_announced
+    line "warehouse db/schema: #{got[0]}.#{got[1]} (#{got[2]})"
+    wh_announced = true
+  end
+  got
+end
+
 mechanical = !have_specs
 conv = nil
 if mechanical
@@ -1647,7 +1722,7 @@ if mechanical
   # <connection class='sqlproxy'> placeholder — the real relation (a warehouse
   # TABLE or a Custom SQL <relation type='text'>) lives in the PDS object on
   # Tableau Server, not the .twb. Left as-is the converter fabricates a phantom
-  # table (e.g. DEMO_DB.DEMO.SQLPROXY) → POST "Source not found".
+  # table (<db>.<schema>.SQLPROXY) → POST "Source not found".
   #
   # PRIMARY: resolve-published-ds.rb resolves each PDS by contentUrl (== the
   # sqlproxy `dbname`), downloads GET /datasources/{id}/content, and reads the
@@ -1709,6 +1784,13 @@ if mechanical
         end
       end
       sf_ok = %w[SNOWFLAKE_ACCOUNT SNOWFLAKE_USER].all? { |k| !ENV[k].to_s.empty? || !sf_env[k].to_s.empty? }
+      # Landing TARGET db/schema — where the extract tables get written. There is
+      # NO default (E2E-caught: a fabricated one 404s in every real org): explicit
+      # flags win, else the Snowflake env (process env or the neutral cred file)
+      # may name a landing database/schema. Absent both, auto-land steps aside and
+      # the manual exit-17 gate owns the decision.
+      land_db  = opts[:db]     || [ENV['SNOWFLAKE_DATABASE'], sf_env['SNOWFLAKE_DATABASE']].find { |v| !v.to_s.empty? }
+      land_sch = opts[:schema] || [ENV['SNOWFLAKE_SCHEMA'],   sf_env['SNOWFLAKE_SCHEMA']].find { |v| !v.to_s.empty? }
       # v5.3: the extract re-download lane can still be REPLACING the .twbx
       # when this gate runs (round 5: auto-land saw the thin pre-refetch file,
       # found "no .hyper payloads", and fell to exit 17 while the payload
@@ -1719,7 +1801,7 @@ if mechanical
       # anyway), and stop as soon as the discovery lane has exited — no
       # further .twbx replacement is possible after that.
       if landing_manifest.nil? && !opts[:no_auto_land] && !opts[:skip_extract_landing] &&
-         opts[:conn] && sf_ok && File.exist?(twbx_payload)
+         opts[:conn] && sf_ok && land_db && land_sch && File.exist?(twbx_payload)
         6.times do
           break if (File.binread(twbx_payload).include?('.hyper') rescue false)
           break if (defined?(lane_done) && (lane_done.call rescue true)) # lane exited — file is final
@@ -1728,7 +1810,13 @@ if mechanical
         end
       end
       if landing_manifest.nil? && !opts[:no_auto_land] && !opts[:skip_extract_landing] &&
-         File.exist?(twbx_payload) && opts[:conn] && sf_ok
+         File.exist?(twbx_payload) && opts[:conn] && sf_ok && !(land_db && land_sch)
+        line 'auto-land: SKIPPED — landing target unknown, and there is NO default db/schema. ' \
+             'Pass --db/--schema (or set SNOWFLAKE_DATABASE/SNOWFLAKE_SCHEMA in the env / ' \
+             '~/.sigma-migration/env); the manual landing gate (exit 17) follows.'
+      end
+      if landing_manifest.nil? && !opts[:no_auto_land] && !opts[:skip_extract_landing] &&
+         File.exist?(twbx_payload) && opts[:conn] && sf_ok && land_db && land_sch
         # Prefix carries a LUID fragment so two workbooks whose names share the
         # slug can never clobber each other's landed tables (write_pandas
         # overwrite=true; review-caught) — and stays stable across re-runs.
@@ -1739,7 +1827,7 @@ if mechanical
              "(prefix #{prefix}; --no-auto-land to keep the manual gate)"
         _o, lst = run!([*PyResolve.argv, PyResolve.winpath(File.join(HERE, 'land-extracts.py')),
                         '--twbx', PyResolve.winpath(twbx_payload),
-                        '--db', (opts[:db] || 'DEMO_DB'), '--schema', (opts[:schema] || 'PUBLIC'),
+                        '--db', land_db, '--schema', land_sch,
                         '--prefix', prefix, '--sigma-connection-id', opts[:conn],
                         '--manifest-out', PyResolve.winpath(File.join(WORK, 'landing-manifest.json'))],
                        allow_fail: true)
@@ -1852,8 +1940,13 @@ if mechanical
     end
     hyd_twb = File.join(WORK, 'workbook-hydrated.twb')
     # hydrate from conv_twb (not twb) so a union-of-one collapse survives hydration
-    hyd_args = ['ruby', File.join(HERE, 'hydrate-custom-sql.rb'), '--twb', conv_twb,
-                '--db', (opts[:db] || 'DEMO_DB'), '--schema', (opts[:schema] || 'PUBLIC'), '--out', hyd_twb]
+    hyd_args = ['ruby', File.join(HERE, 'hydrate-custom-sql.rb'), '--twb', conv_twb, '--out', hyd_twb]
+    # db/schema are a fallback only — each PDS descriptor carries its own real
+    # pair (resolve-published-ds.rb), which hydrate_pds! prefers. NO default:
+    # when nothing resolves, splice without and let the converter/gates decide.
+    if (hyd_dbsch = wh_try.call(conv_twb))
+      hyd_args += ['--db', hyd_dbsch[0], '--schema', hyd_dbsch[1]]
+    end
     hyd_args += ['--pds', pds_json] if File.exist?(pds_json)
     hyd_args += ['--custom-sql', hcsql] if File.exist?(hcsql)
     if hyd_args.include?('--pds') || hyd_args.include?('--custom-sql')
@@ -1861,7 +1954,7 @@ if mechanical
       conv_twb = hyd_twb if hst.success? && File.exist?(hyd_twb) && File.read(hyd_twb, encoding: 'UTF-8') != File.read(twb, encoding: 'UTF-8')
     end
     # Phantom guard: if any sqlproxy datasource is STILL unresolved, do NOT let the
-    # converter fabricate a bogus warehouse table (DEMO_DB.DEMO.SQLPROXY) that POSTs and
+    # converter fabricate a bogus warehouse table (<db>.<schema>.SQLPROXY) that POSTs and
     # then fails at the API. Stop with an actionable message instead.
     if HydrateCustomSql.twb_has_sqlproxy?(conv_twb)
       (reap_lane!(lane_done) rescue nil) # bounded reap before aborting
@@ -1880,9 +1973,14 @@ if mechanical
     end
   end
 
+  # Resolve-or-STOP before converting: the converter builds a warehouse table
+  # path for every element; a wrong database 404s them all at DM POST. The
+  # hydrated conv_twb is the richest source — PDS splices stamped real
+  # dbname/schema onto it above.
+  wh_db, wh_schema, = wh_require.call(conv_twb)
   conv = MechanicalSpecs.run_converter(
-    twb_path: conv_twb, conn: opts[:conn], db: (opts[:db] || 'DEMO_DB'),
-    schema: (opts[:schema] || 'PUBLIC'), mcp_build: mcp_build, workdir: WORK,
+    twb_path: conv_twb, conn: opts[:conn], db: wh_db,
+    schema: wh_schema, mcp_build: mcp_build, workdir: WORK,
     table_mapping: opts[:table_mapping])
   if opts[:table_mapping]&.any?
     line "table mapping: #{opts[:table_mapping].map { |k, v| "#{k}→#{v}" }.join(', ')}"
@@ -2193,37 +2291,13 @@ mark('phase1.6-dm-scan')
 # Pure Sigma-side — runs CONCURRENTLY with the background discovery lane.
 # ---------------------------------------------------------------------------
 hdr(2, 'Discover warehouse columns (concurrent with discovery)')
-# G7 (run-2 field failure, 2026-07-15): when extracts were landed, the AUTHORITATIVE
-# db/schema is the landing manifest's fully-qualified sf_table paths — NOT the
-# generic demo defaults. The default made this discovery return ZERO real columns
-# for a landed migration-target schema ("? columns (not in catalog)"), which
-# silently disabled fixup_dm_spec's caption→physical remap AND its phantom-column
-# drop AND the world-by-year rollup discriminator (`unless real.empty?`) — one
-# wiring gap defanged three codified mechanisms and cost ~16 min of hand
-# re-derivation. Explicit --db/--schema still wins; the manifest beats the default.
-manifest_dbschema = lambda do
-  mani = Dir[File.join(WORK, '*landing-manifest*.json')].first
-  return nil unless mani
-  rows = JSON.parse(File.read(mani))
-  rows = rows['tables'] if rows.is_a?(Hash) && rows['tables'].is_a?(Array)
-  fqns = Array(rows).map { |r| r.is_a?(Hash) ? r['sf_table'].to_s : '' }
-                    .select { |s| s.count('.') >= 2 }
-  return nil if fqns.empty?
-  pairs = fqns.map { |s| s.split('.')[0, 2] }.uniq
-  if pairs.length > 1
-    line "WARN: landing manifest spans multiple db.schema pairs (#{pairs.map { |p| p.join('.') }.join(', ')}) — using the first; pass --db/--schema to override"
-  end
-  pairs.first
-rescue StandardError => e
-  line "WARN: could not derive db/schema from landing manifest (#{e.class}) — falling back"
-  nil
-end
-derived = (opts[:db] || opts[:schema]) ? nil : manifest_dbschema.call
-db = opts[:db] || (derived && derived[0]) || 'DEMO_DB'
-schema = opts[:schema] || (derived && derived[1]) || 'PUBLIC'
-line "warehouse column discovery target: #{db}.#{schema}#{derived ? ' (derived from landing manifest)' : ''}"
-# Table set: from the generator's DM spec when available, else inferred from the
-# datasource's logical tables.
+# db/schema come from the shared warehouse resolver (flags → landing manifest →
+# workbook <connection> attributes → STOP; defined above `mechanical`) — NEVER a
+# default (G7: a generic pair here returned ZERO real columns for a landed
+# schema and silently defanged fixup_dm_spec's remap, phantom-drop, and rollup
+# discriminator; the E2E showed the same pair 404-ing every table at DM POST).
+# Table set first: with no warehouse tables there is nothing to probe, so the
+# resolver's hard STOP is reserved for runs that actually need the catalog.
 wh_tables =
   if mechanical
     (conv['model']['pages'] || []).flat_map { |p| p['elements'] || [] }
@@ -2241,7 +2315,10 @@ wh_tables =
 wh_tables = [] if wh_tables.nil?
 if wh_tables.empty?
   line 'no warehouse tables resolved from metadata; relying on spec generator'
+  db, schema = (wh_try.call((defined?(conv_twb) && conv_twb) || twb) || [nil, nil])[0, 2]
 else
+  db, schema, db_src = wh_require.call((defined?(conv_twb) && conv_twb) || twb)
+  line "warehouse column discovery target: #{db}.#{schema} (#{db_src})"
   wh_tables.each do |t|
     cols_path = File.join(WORK, "cols-#{t}.json")
     # Re-entry reuse: a prior run of THIS workdir already probed the catalog for
@@ -3015,7 +3092,7 @@ unless reuse_dm_id
       line "DM spec contains Custom SQL element(s) referencing: #{_sql_tables.join(', ')}"
       line 'If the POST fails with a SQL compile error (invalid identifier), preflight the identifiers:'
       _sql_tables.each do |t|
-        line "  ruby #{File.join(HERE, 'discover-columns.rb')} --connection-id #{opts[:conn]} --table-path #{db}.#{schema}.#{t} --out #{File.join(WORK, "columns-#{t}.json")}"
+        line "  ruby #{File.join(HERE, 'discover-columns.rb')} --connection-id #{opts[:conn]} --table-path #{db || '<DB>'}.#{schema || '<SCHEMA>'}.#{t} --out #{File.join(WORK, "columns-#{t}.json")}"
       end
       line "  ruby #{File.join(HERE, 'check-sql-idents.rb')} --dm-spec #{dm_spec_path} " +
            _sql_tables.map { |t| "--columns #{t}=#{File.join(WORK, "columns-#{t}.json")}" }.join(' ')

@@ -216,6 +216,13 @@ ruby scripts/migrate-tableau.rb --workbook "<name>" \
   --finalize --actuals <workdir>/parity-actuals.json [--allow-missing-tiles N]
 ```
 
+> **`--db`/`--schema` (always passed together) — there is NO default database.** Every
+> org has its own warehouse. The orchestrator resolves the pair in this order: your
+> flags → the landing manifest (landed extracts) → the workbook's own
+> `<connection dbname=/schema=>` attributes (live warehouse connections carry them) —
+> and **hard-stops asking for the flags** when none resolve (published / virtual-connection
+> / extract-only workbooks). It never guesses: a fabricated pair 404s every table at DM POST.
+
 > **🚧 Expect PASS 1 to hard-stop once for the Phase 1d dashboard-read.** The orchestrator
 > fetches view CSVs but **cannot read the source dashboard PNG** — that's your job. On the
 > first cold run it aborts **before posting the data model** (so no stray DM) with
