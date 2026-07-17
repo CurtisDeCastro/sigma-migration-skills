@@ -32,6 +32,18 @@ user-invocable: true
 > ```
 > ruby scripts/migrate-tableau.rb --workbook "<name>" --connection <id>
 > ```
+> - **Pass the Tableau `/#/views/…` share URL straight to `--workbook` (quote it).**
+>   The orchestrator resolves the workbook LUID from the URL's `contentUrl` slug in
+>   process (`find_workbook_by_content_url`). A workbook's display name almost always
+>   differs from its slug ("High Risk Bets" vs `HighRiskBets`), so **never** hand-roll
+>   `name:eq:` REST filters or page the workbook list to find the LUID yourself — that
+>   field-cost a full 500-workbook scan on a cold run. Just give it the URL.
+> - **Flag cheatsheet — use the EXACT flags (do not guess or grep `opts.on`).** When a
+>   STOP routes you to a script directly, these are the ones people trip on:
+>   `migrate-tableau.rb --out DIR` (the workdir flag is **`--out`**, not `--workdir`);
+>   `validate-spec.rb <spec.json> --type dm|workbook` (spec is a **positional** arg, no `--spec`);
+>   `put-layout.rb --workbook ID` (**not** `--workbook-id`) and it reads `SIGMA_API_TOKEN`
+>   from the env — `export SIGMA_API_TOKEN=$(ruby -rjson -e 'print JSON.parse(File.read(ENV["WORK"]+"/auth.json"))["SIGMA_API_TOKEN"]')` first.
 > - **Do NOT hand-drive the per-phase scripts, and do NOT hand-author DM/workbook
 >   JSON, UNLESS an orchestrator STOP message explicitly routes you there** (e.g.
 >   "CONVERTER STOP", the exit-4 workbook handoff). The per-phase table further
@@ -149,6 +161,8 @@ omitted — just point `--out` at the same `<WORK>`) and writes `intake.json` (r
 input mode, which feed the telemetry ping's duration and `mode`). Precedence: explicit
 `--connection` → cached → `SIGMA_CONNECTION_ID` env → list once. With no id/name and
 multiple connections it lists them and asks you to pick — it never guesses.
+
+> **When there are many connections, let intake pick by the workbook's warehouse — don't inspect the `.twb` by hand.** Pass the resolved workbook LUID: `ruby scripts/intake.rb --workdir <WORK> --rank-workbook-id <LUID>`. Intake fingerprints the workbook's warehouse (`GET /workbooks/{luid}/connections` → type + host, no `.twb`/`zip` needed) and ranks the Sigma connections; a **unique type+host match auto-resolves** (e.g. a Snowflake workbook on `acct.snowflakecomputing.com` → the matching Snowflake connection), otherwise it writes a **ranked** `connection-candidates.json` with a clear top pick and asks. This replaces the field-caught pattern of downloading the `.twb` and grepping `class=`/`server=` to guess among 26 connections. (`scripts/rank-connections.rb` is the standalone ranker; `--rank-twb <path>` adds a db-name tie-break once the `.twb` is downloaded.)
 
 ## One command (orchestrated path)
 

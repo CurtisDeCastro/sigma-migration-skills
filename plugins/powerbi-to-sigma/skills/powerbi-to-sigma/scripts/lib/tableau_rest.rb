@@ -167,6 +167,52 @@ end
     request(:get, "#{base_path}/workbooks/#{workbook_id}")['workbook']
   end
 
+  # A workbook's live datasource connections: [{type, serverAddress, serverPort,
+  # userName, ...}]. This is the cheap warehouse fingerprint (no .twb/.twbx
+  # download, so it dodges the missing `zip` gem) used to auto-rank Sigma
+  # connection candidates. `type` is a Tableau connection class (e.g. 'snowflake',
+  # 'sqlserver', 'redshift', 'databricks'); serverAddress is the warehouse host.
+  def workbook_connections(workbook_id)
+    j = request(:get, "#{base_path}/workbooks/#{workbook_id}/connections")
+    list = j.dig('connections', 'connection') || []
+    list.is_a?(Array) ? list : [list]
+  end
+
+  # A published/embedded datasource's connections. For a CLASSIC published DS this
+  # names the warehouse directly; for a virtual-connection-backed DS it echoes
+  # publishedConnection (resolve via virtual_connection_connections instead).
+  def datasource_connections(datasource_id)
+    j = request(:get, "#{base_path}/datasources/#{datasource_id}/connections")
+    list = j.dig('connections', 'connection') || []
+    list.is_a?(Array) ? list : [list]
+  end
+
+  # All Tableau Virtual Connections on the site (paged). A workbook backed by a VC
+  # exposes no VC LUID in its own /connections, so callers match by name.
+  def virtual_connections(page_size: 100)
+    out = []
+    page = 1
+    loop do
+      j = request(:get, "#{base_path}/virtualConnections?pageSize=#{page_size}&pageNumber=#{page}")
+      list = j.dig('virtualConnections', 'virtualConnection') || []
+      list = [list] unless list.is_a?(Array)
+      out.concat(list)
+      total = j.dig('pagination', 'totalAvailable').to_i
+      break if list.empty? || page * page_size >= total
+      page += 1
+    end
+    out
+  end
+
+  # A Virtual Connection's underlying warehouse connections: [{dbClass, server, port,
+  # username, ...}]. This is where the real warehouse (snowflake host, etc.) lives
+  # for a VC-backed workbook.
+  def virtual_connection_connections(vc_id)
+    j = request(:get, "#{base_path}/virtualConnections/#{vc_id}/connections")
+    list = j.dig('virtualConnectionConnections', 'connection') || []
+    list.is_a?(Array) ? list : [list]
+  end
+
   # Returns the raw .twb XML (string) or .twbx bytes for workbooks with embedded extracts.
   # Embedded check: if the response starts with PK\x03\x04 it's a zip (twbx); otherwise raw XML.
   def download_workbook_content(workbook_id, include_extract: false)

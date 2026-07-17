@@ -213,6 +213,20 @@ pages next to the Power BI renders. Do this BEFORE Phase 6, every run:
    Phase 5c ledger: every **recoverable** gap must be acknowledged — its visual
    named in a page's `deltas[]` (or an explicit `acceptedGaps` list) — so a
    recoverable drop can never ship unnoticed.
+6. **Measured bars (feed the Phase-6 anchors + visual-similarity gates 13/14).**
+   Steps 3–5 are human judgment; these two are deterministic and MUST also run:
+   - **Source anchors.** While reading each source page, transcribe its printed
+     values into `$WORK/source-anchors.json` — **≥5 anchors, EXACTLY as printed**
+     (every KPI, the top-3 of each ranked list/table, one representative bucket
+     per chart; schema: `refs/source-anchors.md`). Land the source page PNG at a
+     path the gate discovers so the bar arms: set it as `source_png` in
+     `png-read.json`, **or** copy it to `$WORK/dashboards/source.png` (if the
+     source export is a PDF, convert one page first: `sips -s format png in.pdf --out out.png` / `pdftoppm -png`).
+     Then verify against the live workbook:
+     `ruby scripts/verify-anchors.rb --workdir $WORK --workbook-id <wbId>` → `anchors-verdict.json` (must pass).
+   - **Visual-similarity floor.** `"$PY" scripts/visual-similarity.py --source <sourcePagePng> --render $WORK/visual-qa/sigma-<page>.png --json-out $WORK/visual-similarity.json` — a deterministic ink/layout floor beneath the human compare.
+   A genuinely stale or untranscribable source is waived at the Phase-6 gate with
+   `--skip-anchors-gate`/`--skip-visual-similarity "<reason>"` (waiver-budgeted). See `refs/source-anchors.md`, `refs/visual-similarity.md`.
 
 Layout escalation if the compare fails on arrangement: the builder's default
 `--layout clean` preserves the source positions inside a normalized grid; use
@@ -240,7 +254,7 @@ A workbook that POSTs 200 and passes numeric parity can still be visually broken
   - **Online DAX (high-fidelity / import-only models):** PBI `POST /v1.0/myorg/groups/{ws}/datasets/{id}/executeQueries` (DAX) via `--emit-dax`, vs the same Sigma aggregation. DAX-only; breaks under service-principal if RLS; needs the workspace/dataset (auto-wired from `freshness.json`).
     - **XMLA fallback (when `executeQueries` REST is blocked but the model is on capacity):** run the same measure through the Power BI Modeling MCP — `dax_query_operations Execute` on an `Initial Catalog`-bound connection — and diff against the Sigma actuals identically. Recipe in `refs/pbi-modeling-mcp.md`. This also catches **silently mis-modeled source measures** (e.g. time-intel over an inactive date relationship returns a flat total in Power BI) that a SQL oracle wouldn't flag.
 - **Finalize (both paths):** `ruby scripts/phase6-parity-pbi.rb --finalize --plan plan.json --actuals parity-actuals.json --out-dir <dir>` → writes `parity-final.json` (`source` records which oracle was used).
-- Hard gate: `ruby scripts/assert-phase6-ran.rb --workdir <dir> --workbook-id <wb>` — 7 gates incl. layout lint (6) and **control lint (7**: dead controls / ghost targets / partial same-page reach / `control-scope.json` coverage; `--skip-control-lint` escape; see `refs/control-parity.md`**)**.
+- Hard gate: `ruby scripts/assert-phase6-ran.rb --workdir <dir> --workbook-id <wb>` — incl. layout lint (6), **control lint (7**: dead controls / ghost targets / partial same-page reach / `control-scope.json` coverage; `--skip-control-lint` escape; see `refs/control-parity.md`**)**, and the MEASURED bars wired in Phase 5e: **gate 13 (source-anchor values** — arms when a source PNG is on disk; needs `source-anchors.json` ≥5 + a passing `anchors-verdict.json`; `--skip-anchors-gate "<reason>"`**)** and **gate 14 (visual-similarity floor** — `visual-similarity.json`; `--skip-visual-similarity "<reason>"`**)**. No source PNG on disk → both self-SKIP (stated), never a silent pass.
 - Optional flip test when the report has slicers→controls: `ruby scripts/probe-controls.rb --workbook-id <wb> --check-out-of-closure` — runtime proof a control actually filters (in-closure export changes under a non-default `parameters` value, out-of-closure doesn't). MCP query can NOT flip controls (defaults only) — export API `parameters` is the only mechanism.
 
 ## Phase 7 — Bookmarks → per-bookmark workbooks (optional)

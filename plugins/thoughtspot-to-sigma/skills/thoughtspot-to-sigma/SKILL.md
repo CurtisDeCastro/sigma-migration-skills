@@ -43,6 +43,30 @@ POST `username`+`secret_key` to `auth/token/full`. Sigma side uses
 Trials often sit behind corp TLS — the Python helpers use an unverified SSL
 context (curl uses the system store and works).
 
+## Source dashboard PNG + value anchors (Phase 1d — MANDATORY for the measured gates)
+
+Before parity, capture the WHOLE source Liveboard as one image and transcribe its
+printed values. This arms the Phase-6 measured gates (step 6 + `refs/source-anchors.md`):
+
+1. **Render the source dashboard PNG** (whole Liveboard, one image):
+   ```bash
+   python3 scripts/thoughtspot-render-source.py <LIVEBOARD_ID> --workdir <WORK>
+   # → <WORK>/dashboards/source.png
+   #   POST /api/rest/2.0/report/liveboard  {file_format:"PNG", png_options:{...}}  with NO
+   #   visualization_identifiers = the WHOLE Liveboard; the response IS the PNG bytes
+   #   (synchronous — no async task / S3). Reuses TS_HOST/TS_TOKEN (same auth as ts_lib);
+   #   older orgs fall back to whole-Liveboard PDF→PNG. Blank/placeholder renders fail loudly.
+   ```
+   For a multi-Liveboard run, use that Liveboard's parity dir (`<WORK>/parity-<n>`) as
+   `--workdir` so the image lands where its gate runs. `--tab <guid>` renders one tab.
+2. **READ that PNG and transcribe ≥ 5 anchors** into `<WORK>/source-anchors.json`, EXACTLY as
+   printed (keep the raw string: `"18,037B"`, never `18037`): every KPI value, the top 3 values
+   of every ranked list/table, one representative bucket value per chart, and 2–3 `text` roster
+   anchors per ranked tile (include one from the BOTTOM half). Schema + canonicalization rules:
+   `refs/source-anchors.md`.
+
+Skipping either step leaves the migration UNVERIFIED (gates 13/14 SKIP), not "done".
+
 ## ONE COMMAND (preferred): migrate-thoughtspot.py
 
 > ## ⛔ THE ONE PATH (do not improvise a workbook)
@@ -215,6 +239,25 @@ python3 scripts/migrate.py --model-tml fixtures/retail-analytics-model.tml \
    `verify-parity.rb` and writes the `parity-final.json` sentinel. Then run
    `ruby scripts/assert-phase6-ran.rb --workdir <dir> --workbook-id <wb>` —
    it must **exit 0** before declaring the migration GREEN.
+
+   **Measured value + visual gates (13 & 14).** Once the source PNG (see the *Source
+   dashboard PNG + value anchors* section) is on disk, `assert-phase6-ran.rb` arms two
+   measured gates. Verify the transcribed anchors against the LIVE workbook first, then let
+   the hard gate run:
+   ```bash
+   ruby scripts/verify-anchors.rb --workdir <dir> --workbook-id <wb>   # → anchors-verdict.json
+   ruby scripts/assert-phase6-ran.rb --workdir <dir> --workbook-id <wb>
+   ```
+   - **Gate 13 (exit 18) — source-anchor values:** every printed value in `source-anchors.json`
+     (≥ 5) must appear in the live element exports at printed precision (`anchors-verdict.json`
+     `pass:true`, all anchors checked — a stale verdict fails). Catches the 10x / wrong-member /
+     collapsed-bucket failures a visual verdict misses. No source PNG → stated SKIP; genuine
+     escape only via `--skip-anchors-gate "<reason>"`.
+   - **Gate 14 (exit 20) — visual-similarity floor:** `assert-phase6-ran.rb` runs
+     `scripts/visual-similarity.py --source <dir>/dashboards/source.png --render <sigma render>`
+     and requires `visual-similarity.json` `pass:true`. Below the floor → fix layout/kind/palette
+     in the visual-QA loop (step 7) and re-render; escape `--skip-visual-similarity "<reason>"`
+     (counts against the waiver budget). Details: `refs/source-anchors.md`, `refs/visual-similarity.md`.
 7. **Visual QA (HARD GATE)** — **never skip, never declare done on HTTP 200.** A
    workbook that POSTs cleanly and passes parity can still be visually broken
    (overlapping tiles, clipped KPI titles, dead zones, orphaned filters; Sigma's
@@ -293,6 +336,15 @@ driving the picker by hand:
 - `ts_screenshot.py` — per-viz PNG export from ThoughtSpot; detects blank /
   connection-error placeholder renders (near-uniform image or non-PNG error
   body) and reports them as ✗ failures, never ✓
+- `thoughtspot-render-source.py` — **source-side WHOLE-Liveboard PNG** for the
+  measured Phase-6 gates: `POST /api/rest/2.0/report/liveboard` (`file_format PNG`,
+  no `visualization_identifiers`) → synchronous bytes → `<workdir>/dashboards/source.png`
+  (blank-render guarded via `ts_screenshot.png_health`; whole-Liveboard PDF→PNG fallback for
+  older orgs). Reuses `TS_HOST`/`TS_TOKEN`
+- `verify-anchors.rb` — gate 13: checks the ≥ 5 anchors transcribed from the source PNG appear
+  in the live workbook element exports at printed precision → `anchors-verdict.json`
+- `visual-similarity.py` — gate 14: scores `dashboards/source.png` vs the Sigma render →
+  `visual-similarity.json` (invoked by `assert-phase6-ran.rb`)
 - `gap-scout.md` + `scout-validate.py` + `learned-rules.py` — formula gap-scout (validate + persist unhandled-TML translations)
 - `get-token.sh` — Sigma token; `get-ts-token.sh` — ThoughtSpot Trusted-Auth service token
 
@@ -308,7 +360,7 @@ region, quarter all match to the cent). Per-run ids land in `<workdir>/migrate_o
 - `refs/liveboard-to-workbook.md` — workbook spec shapes (KPI `{columnId}` vs
   donut `{id}`, groupings, pivot rowsBy/columnsBy, sorts, layout geometry math,
   rename gotcha)
-- `fixtures/` — real exported TML pair from the team2 trial
+- `fixtures/` — real exported TML pair from a live trial org
   (`retail-analytics-model.tml` 6-table star + `retail-analytics-liveboard.tml`
   5-viz Liveboard with layout.tiles) — drives the offline mode above and the
   converter's regression diet.
@@ -332,7 +384,7 @@ Row/column security is **never silently dropped and never silently ported** — 
 
 **What is detected for ThoughtSpot:** `rls_rules` on the model/worksheet or per table (`ts_username` to `CurrentUserEmail()`, `ts_groups` to `CurrentUserInTeam`), multiple rules OR-combined. The converter emits each as a `result.security[]` entry `{kind:'rls', name, expression, table?}`.
 
-> ⚠️ The `rls_rules` TML shape + the `ts_username`/`ts_groups` mapping are validated against a **synthetic** rule (no Liveboard in the team2 trial uses RLS). Treat the auto-mapping as best-effort and use **Customize** to review each rule against the real source before applying.
+> ⚠️ The `rls_rules` TML shape + the `ts_username`/`ts_groups` mapping are validated against a **synthetic** rule (no Liveboard in the trial org uses RLS). Treat the auto-mapping as best-effort and use **Customize** to review each rule against the real source before applying.
 
 **Flow (only runs when `result.security` is non-empty — zero overhead otherwise):**
 1. **Convert + post** the data model as usual. Capture the `dataModelId` and the converter's `result.security[]` (write it to `security.json`).

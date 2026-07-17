@@ -53,7 +53,15 @@ ap.add_argument("--report-bundle", default=None,
 ap.add_argument("--pool", type=int, default=2,
                 help="concurrent definition fetches (capped at 4 — Fabric per-principal throttling)")
 ap.add_argument("--no-cache", action="store_true", help="bypass the estate-map session cache")
+ap.add_argument("--tenant", default=None,
+                help="target tenant when the report lives in a DIFFERENT tenant than your home "
+                     "tenant (guest/B2B). A raw tenant GUID, or a pasted report URL (ctid=... is "
+                     "extracted). Default: your home tenant.")
 ARGS = ap.parse_args()
+
+# Set PBI_TENANT before the (call-time) authority/cache are resolved in get_token.
+if ARGS.tenant:
+    os.environ["PBI_TENANT"] = fab.normalize_tenant(ARGS.tenant)
 
 
 def main():

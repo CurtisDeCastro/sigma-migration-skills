@@ -57,6 +57,25 @@ donut/pie (per-element `color.scheme` is silently dropped there — the workbook
 `Coalesce([dim], "(Blank)")`, which both matches PBI's label and sorts ahead of
 letters (`(` < `A`) — so every slice gets the color PBI gave it.
 
+### 4b. Pivot row sort (blank-first) — `lib/pbi_pivot_sort.rb`
+A `pivot-table` row sort **is** spec-expressible: `rowsBy[0].sort = { by, direction }`
+(verified accepted + round-tripped + rendered). The builder used to drop it with
+"pivot-table sort is not spec-expressible in Sigma — set it in the UI" and silently
+lost every matrix/tableEx sort — that punt was wrong.
+
+Two rules the emit follows:
+- **Read the VISUAL's sort, never the query's row order.** `extract-pbir.py`'s
+  `_sort_signal` reads `visual.query.sortDefinition`. When that's `null`, PBI still
+  applies its table/matrix default — **first column ascending** — so the extractor
+  emits that (`{ direction: "asc", default: true }`). ⚠️ Do NOT infer the sort from
+  the parity/`executeQueries` row order: that's the DAX `ORDER BY` (typically the
+  first measure, descending), *not* the visual's display sort.
+- **Blank member first.** PBI sorts a blank/null dimension member first; Sigma sorts
+  nulls last and has no nulls-first option. So when sorting **by the row dim itself
+  ascending**, the dim ref is wrapped `Coalesce([dim], "(Blank)")` (same trick as §4)
+  → the blank row lands on top like PBI. A *measure* sort orders the blank by its
+  value, so it is not coalesced. Tests: `test-pbi-pivot-sort.rb`.
+
 ## 5. Number abbreviation ("K"/"M") — now auto-emitted (`lib/pbi_style.rb`)
 PBI cards and charts default to **display units "Auto"**, which abbreviates large
 values (`$126K`, `$1.2M`). PBI *serializes `labelDisplayUnits` only when non-default*,

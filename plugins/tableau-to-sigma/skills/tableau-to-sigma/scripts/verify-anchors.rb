@@ -163,7 +163,23 @@ module AnchorVerify
         end
         next
       end
-      found_in = order.find { |n| numbers[n].any? { |v| AnchorValues.match?(raw, v) } }
+      # A HINTED numeric anchor asserts WHERE its value must live. A match found
+      # only in a hint-UNRELATED element (e.g. a raw detail table that merely
+      # happens to contain the number) is NOT acceptance — that loophole silently
+      # passed 10x-unit and wrong-aggregate defects in field testing (a KPI whose
+      # value coincidentally appears in a big detail element). Restrict a hinted
+      # numeric anchor's search to hint-scored elements; found-only-outside is a
+      # MISS. Hint-less anchors keep the search-everywhere fallback (no asserted
+      # location to enforce); text/roster anchors are unchanged (a member label
+      # appearing anywhere is meaningful on its own).
+      search_order =
+        if a['sigma_element_hint'].to_s.strip.empty?
+          order
+        else
+          scoped = order.select { |n| element_score(a, n).positive? }
+          scoped.empty? ? order : scoped # defensive: hint matched no element name
+        end
+      found_in = search_order.find { |n| numbers[n].any? { |v| AnchorValues.match?(raw, v) } }
       if found_in
         primary = order.first
         detail << { 'id' => a['id'], 'raw' => raw, 'matched_in' => found_in,

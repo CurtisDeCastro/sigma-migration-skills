@@ -138,8 +138,32 @@ check(out.include?('schemaVersion'), 'names the missing schemaVersion', fails)
 check(out =~ /pages\[0\] has no "id"/, 'names the missing page id', fails)
 check(out.include?('needs source.kind "data-model"'), 'catches table-kind-with-dataModelId misbinding', fails)
 
+puts
+puts 'Part G — --dm-context with null element names must NOT false-abort (reused-DM handoff bug)'
+def validate_dm_ctx(wb, ctx)
+  wf = Tempfile.new(['g-wb-', '.json']);  wf.write(JSON.generate(wb));   wf.close
+  cf = Tempfile.new(['g-ctx-', '.json']); cf.write(JSON.generate(ctx)); cf.close
+  out, err, st = Open3.capture3('ruby', VALIDATE, '--type', 'workbook', '--dm-context', cf.path, wf.path)
+  wf.unlink; cf.unlink
+  [out + err, st.exitstatus]
+end
+# A DM-sourced master whose refs use the SQL element's own [Custom SQL/COL] prefix.
+wb = { 'schemaVersion' => 1, 'name' => 'g', 'folderId' => 'f',
+       'pages' => [{ 'id' => 'p1', 'name' => 'P', 'elements' => [
+         { 'id' => 'master', 'kind' => 'table', 'name' => 'Master',
+           'source' => { 'kind' => 'data-model', 'dataModelId' => 'dm-x', 'elementId' => 'J9ADKnuzjR' },
+           'columns' => [{ 'id' => 'c1', 'name' => 'N', 'formula' => '[Custom SQL/N]' }] }] }] }
+# (G1) elements present but every name == null → WARN + continue (exit 0), the field fix.
+out, code = validate_dm_ctx(wb, { 'dataModelId' => 'dm-x',
+  'pages' => [{ 'id' => 'dp', 'elements' => [{ 'id' => 'J9ADKnuzjR', 'kind' => 'table', 'name' => nil }] }] })
+check(code == 0, "null-name DM element does NOT false-abort (got #{code}: #{out.lines.grep(/ERROR|0 element names/).join.strip})", fails)
+check(out.include?('all names were null'), 'emits the null-name WARN (does not silently pass)', fails)
+# (G2) genuinely EMPTY context (zero elements) → still the loud abort.
+out2, code2 = validate_dm_ctx(wb, { 'dataModelId' => 'dm-x', 'pages' => [{ 'id' => 'dp', 'elements' => [] }] })
+check(code2 != 0 && out2.include?('loaded 0 element names'), 'empty dm-context (0 elements) still aborts loudly', fails)
+
 if fails.empty?
-  puts 'OK — validate-spec ID-uniqueness + function-tier + envelope guards all pass'
+  puts 'OK — validate-spec ID-uniqueness + function-tier + envelope + null-name guards all pass'
   exit 0
 else
   warn "FAIL — #{fails.size} check(s) failed:"

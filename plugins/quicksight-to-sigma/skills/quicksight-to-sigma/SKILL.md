@@ -115,6 +115,31 @@ Pulls `describe-analysis-definition` (or `-dashboard-definition`) + `describe-da
 - `signals.json` — normalized: per-sheet visuals (type + VisualId + title + referenced ColumnNames), calc fields, parameters, datasets, sources. Drives the convert + workbook + layout phases.
 - `timings.json` — per-call wall clock + transport; **always written**.
 
+### Phase 1d — Capture the source dashboard PNG + author value anchors (arms Phase-6 gates 13 + 14)
+
+QuickSight has **no server-side PNG render**, so the source image comes from the async
+**Snapshot Export** job (`StartDashboardSnapshotJob` → PDF → poll → presigned S3 → PDF→PNG
+stitch). Capture it into the SAME workdir right after discovery — it reuses
+`quicksight-discover.py`'s boto3/AWS-CLI auth (same `--profile`/`--region`):
+
+```bash
+python3 scripts/quicksight-render-source.py \
+  --account-id <ACCOUNT_ID> --region <REGION> --profile <PROFILE> \
+  --dashboard-id <DASHBOARD_ID> --workdir <WORK>
+# → <WORK>/dashboards/source.png  (the exact path the Phase-6 gate scans to arm gates 13/14)
+```
+
+- Needs a **published DASHBOARD id** (snapshots don't run on analyses), **Enterprise edition + the Pixel Perfect Report add-on** (required for PDF snapshot export), and one PDF→PNG backend (`brew install poppler` / `apt-get install poppler-utils` / `pip install pymupdf`). If the job genuinely can't run (Standard edition, no add-on, anonymous-snapshot capacity not enabled), drop a **customer screenshot** at `<WORK>/dashboards/source.png` instead — the gate accepts any PNG there.
+
+Then **Read `<WORK>/dashboards/source.png`** and, in that same pass, transcribe the printed
+numbers into **`<WORK>/source-anchors.json` — EXACTLY as printed** (keep the raw string:
+`"18,037B"`, never `18037`; `"(12.3%)"`, never `-0.123`). Minimum **≥ 5 anchors**: every KPI
+value, the top 3 values of each ranked list/table, one representative bucket value per chart,
+and 2–3 `text` roster anchors (include at least one from the BOTTOM of any ranked list — top
+members survive a wrong ranking, bottom members don't). Also write `png-read.json`
+(`{"source_png": "dashboards/source.png", ...}`) if you keep a per-tile read. Schema,
+canonicalization rules, and a worked example: `refs/source-anchors.md`.
+
 ### Fast discovery (designed for 20-40 dashboard estates sharing datasets)
 - **In-process boto3 transport.** Each `aws` CLI subprocess pays a 0.4-0.7s interpreter-startup tax (measured ~0.7s wall); a 1-analysis discovery makes 4-5 calls and an estate re-pays it per dashboard. With boto3 importable, ONE session serves every call; the CLI fallback keeps zero-dependency installs working (identical call/response shapes — boto3 responses are normalized: datetimes → ISO strings, `ResponseMetadata` stripped).
 - **Estate-level dataset cache** (`/tmp/qs-estate-cache/<acct>__<region>/`, override `QS_ESTATE_CACHE`): describe responses cached keyed **DataSetArn + LastUpdatedTime** — shared datasets are described ONCE per estate, not per dashboard. Freshness is validated against ONE `list-data-sets` call per process; any LastUpdatedTime mismatch (or a denied/empty listing) re-describes. **Data sources are described once, lazily** and cached without a probe (they change rarely). `--no-cache` bypasses, `--refresh-cache` forces re-describe.
@@ -239,6 +264,11 @@ ruby scripts/phase6-parity-quicksight.rb --workdir /tmp/<name> --workbook-id <WO
 #     writing parity-actuals.json + parity-expected.json into the workdir ...
 # PASS 2 — verify + write the parity-final.json sentinel
 ruby scripts/phase6-parity-quicksight.rb --workdir /tmp/<name> --finalize
+# MEASURED value bar (gate 13) — Phase-1d anchors must appear in the live element exports
+ruby scripts/verify-anchors.rb --workdir /tmp/<name> --workbook-id <WORKBOOK_ID>
+# MEASURED visual floor (gate 14) — the Sigma render must be structurally like the source PNG
+python3 scripts/visual-similarity.py --source /tmp/<name>/dashboards/source.png \
+  --render /tmp/<name>/sigma-render.png --json-out /tmp/<name>/visual-similarity.json
 # hard gate — must exit 0 before declaring GREEN
 ruby scripts/assert-phase6-ran.rb --workdir /tmp/<name> --workbook-id <WORKBOOK_ID>
 ```
@@ -247,6 +277,7 @@ ruby scripts/assert-phase6-ran.rb --workdir /tmp/<name> --workbook-id <WORKBOOK_
 - `sigma-mcp-v2 query` each element → confirm real rows (not blank / not all `error`).
 - True parity: compare each Sigma aggregation against the same aggregation computed from the QuickSight side (or the warehouse). `assert-phase6-ran.rb` is a hard gate — a subagent must run it and it must pass before reporting success.
 - `assert-phase6-ran.rb` runs 7 gates incl. layout lint (gate 6) and **control lint** (gate 7 — dead controls / ghost targets / partial same-page reach / `control-scope.json` coverage; `--skip-control-lint` escape; see `refs/control-parity.md`).
+- **Measured source gates (armed only when `<WORK>/dashboards/source.png` — or `views/*.png` / `png-read.json.source_png` — exists):** **gate 13 (exit 18)** requires `source-anchors.json` with ≥ 5 anchors AND a passing `anchors-verdict.json` (from `verify-anchors.rb`) — every printed source value must appear in the live element exports at its printed precision (catches the 10x/wrong-unit/collapsed-bucket failures a visual verdict misses); it also fires if `--skip-parity-gate` is used without a passing anchors verdict (the anchors oracle replaces parity, never nothing). **Gate 14 (exit 20)** runs the deterministic `visual-similarity.py` floor (source PNG vs Sigma render); exit 2 (missing Pillow/numpy) is a hard stop, never a pass. No source PNG → both gates state a SKIP. Escapes (each counts against the waiver budget, exit 19 at >2): `--skip-anchors-gate "<reason>"`, `--skip-visual-similarity "<reason>"`. See `refs/source-anchors.md` + `refs/visual-similarity.md`.
 - Optional flip test when the dashboard had parameters/filter controls: `ruby scripts/probe-controls.rb --workbook-id <wb> --check-out-of-closure` — runtime proof controls actually filter (export API `parameters` is the only way to set a control programmatically; MCP queries see saved defaults only).
 - **mcp-v2 warehouse-side (EXPECTED) queries can NOT use the raw warehouse FQN**
   (`SELECT … FROM DB.SCHEMA.TABLE` fails): with `type=connection` the table must
@@ -264,17 +295,17 @@ ruby scripts/assert-phase6-ran.rb --workdir /tmp/<name> --workbook-id <WORKBOOK_
 - **Layout grid is 1-based** in QuickSight — offset by 1 before scaling to Sigma's grid.
 - **Window/table-calc functions are a known gap** — they degrade to a `/* TODO */` placeholder; verify the graceful degradation rather than treating it as a failure, and surface it in the migration warning manifest.
 
-### Carried forward from the first live customer run (Arine, RCA `refs/rca-arine-2026-06-17.md`)
+### Carried forward from the first live customer run (RCA `refs/rca-quicksight-2026-06-17.md`)
 - **`PUT /workbooks/{id}/spec` WIPES the applied layout.** Layout is applied separately by `put-layout.rb`, so **always re-run `put-layout` after every spec PUT**. Worse: a **failed** spec PUT (4xx) followed by a layout PUT leaves the workbook referencing layout elements that don't exist in the spec → the whole page renders **N/A / blank**. If metrics show N/A after an edit, check spec/layout consistency first — query the element (it usually still returns data).
 - **Text element `body` rejects a bare `<p>`** — `<p> carries no non-default block style or alignment`. Use `<p class="p-small">`, `<p style="text-align: …">`, or a `#` heading / plain paragraph.
 - **Dynamic text date format = strftime, UNQUOTED**: `{{Max([El/Col]) | %B %-d, %Y}}` → "June 17, 2026". Quoted formats leak the quotes; `DateFormat()` echoes the pattern literally; `Date()` doesn't strip the time.
 - **QS `*_FLAG` columns are often warehouse BOOLEAN even when QS types them INTEGER** — `[flag] = 1` throws `Argument 2 invalid for '='` at query time. Verify via `/v2/connections/tables/{inode}/columns` and emit a boolean-safe predicate.
 - **Database name is usually NOT in the export** (it lives in the DataSource, which `describe-dashboard-definition` omits). Resolve it via `POST /v2/connection/{connectionId}/lookup` (**singular** `connection`) with `{"path":[DB,SCHEMA,TABLE]}`, probing candidate DBs until 200. A schema not granted to the connection's role 404s even when the DB resolves.
-- **Parity needs the customer's runtime control state + a rendered reference.** A customer screenshot is often filtered to a value that is NOT a saved default (e.g. `Organization = "Arine Demo Organization"` — 0 occurrences in the definition). Capture which control values are active before comparing, and request a screenshot + `describe-theme <id>` up front (the theme — hence the categorical color palette — is not in the definition export; **discovery now auto-resolves it** into `signals.json.theme` and the builder applies it — see Phase 5 color fidelity).
+- **Parity needs the customer's runtime control state + a rendered reference.** A customer screenshot is often filtered to a value that is NOT a saved default (e.g. `Organization = "Acme Demo Organization"` — 0 occurrences in the definition). Capture which control values are active before comparing, and request a screenshot + `describe-theme <id>` up front (the theme — hence the categorical color palette — is not in the definition export; **discovery now auto-resolves it** into `signals.json.theme` and the builder applies it — see Phase 5 color fidelity).
 - **Verify without MCP via the Export API**: when the customer org isn't wired to `sigma-mcp-v2`, query an element with `POST /v2/workbooks/{wb}/export {elementId, format:{type:csv}}` → poll `GET /v2/query/{queryId}/download`. This is how you confirm real values (and filtered parity) on any org.
 
 ## Reuse, don't reinvent
-These vendor-agnostic Sigma-side scripts are reused across the migration skills: `get-token.sh`, `lib/sigma_rest.rb`, `post-and-readback.rb`, `put-layout.rb`, `find-or-pick-dm.rb`, `validate-spec.rb`, `verify-parity.rb`, `cleanup-orphan-workbooks.rb`. Only the QuickSight-specific stages (`quicksight-discover.py`, `convert-model.rb`, `build-workbook-from-quicksight.rb`, `build-quicksight-layout.rb`, `phase6-parity-quicksight.rb`, `qs-dm-signature.py`) are new. `scripts/sigma-export-png.py` renders a workbook page to PNG for the mandatory **Visual QA** gate (read each image against `refs/layout-visual-qa.md`).
+These vendor-agnostic Sigma-side scripts are reused across the migration skills: `get-token.sh`, `lib/sigma_rest.rb`, `post-and-readback.rb`, `put-layout.rb`, `find-or-pick-dm.rb`, `validate-spec.rb`, `verify-parity.rb`, `cleanup-orphan-workbooks.rb`. Only the QuickSight-specific stages (`quicksight-discover.py`, `quicksight-render-source.py`, `convert-model.rb`, `build-workbook-from-quicksight.rb`, `build-quicksight-layout.rb`, `phase6-parity-quicksight.rb`, `qs-dm-signature.py`) are new. `scripts/sigma-export-png.py` renders a workbook page to PNG for the mandatory **Visual QA** gate (read each image against `refs/layout-visual-qa.md`); `scripts/quicksight-render-source.py` renders the SOURCE dashboard to `<WORK>/dashboards/source.png` (Snapshot Export PDF→PNG) so the measured Phase-6 gates 13/14 (`verify-anchors.rb` + `visual-similarity.py`) can run.
 
 
 ## Security: Row- & Column-Level Security (RLS/CLS)

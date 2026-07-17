@@ -76,8 +76,8 @@ dash_layout.each do |d|
   # 2) Sigma page render
   pid = page_id_by_name[name] || page_id_by_name.reject { |k, _| k == 'Data' }.values.first
   if pid
-    render_out, render_st = Open3.capture2e(*PyResolve.argv, png_script, '--workbook', opts[:wb], '--page', pid,
-                                            '--out', sig_png, '--w', opts[:w].to_s, '--h', opts[:h].to_s)
+    render_out, render_st = Open3.capture2e(*PyResolve.argv, PyResolve.winpath(png_script), '--workbook', opts[:wb], '--page', pid,
+                                            '--out', PyResolve.winpath(sig_png), '--w', opts[:w].to_s, '--h', opts[:h].to_s)
     ok = render_st.success?
     rec['sigma_png'] = sig_png if ok && File.size?(sig_png)
     # NAME the ceiling instead of failing opaquely: a full-page render that

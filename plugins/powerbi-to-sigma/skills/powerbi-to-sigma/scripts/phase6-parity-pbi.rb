@@ -108,11 +108,12 @@ HARNESS = File.join(HERE, 'pbi_exec.py')
 HARNESS_SRC = <<~PY
   import truststore; truststore.inject_into_ssl()
   import sys, os, json, msal, requests
-  CACHE="/tmp/pbiauth/cache.bin"
+  _T=os.environ.get("PBI_TENANT","organizations")  # #347: guest/B2B tenant via PBI_TENANT
+  CACHE=os.environ.get("PBI_TOKEN_CACHE") or ("/tmp/pbiauth/cache.bin" if _T=="organizations" else "/tmp/pbiauth/cache-"+_T+".bin")
   cache=msal.SerializableTokenCache()
   if os.path.exists(CACHE): cache.deserialize(open(CACHE).read())
   app=msal.PublicClientApplication("ea0616ba-638b-4df5-95b9-636659ae5121",
-      authority="https://login.microsoftonline.com/organizations", token_cache=cache)
+      authority="https://login.microsoftonline.com/"+_T, token_cache=cache)
   SCOPE=["https://analysis.windows.net/powerbi/api/.default"]
   tok=None
   for a in app.get_accounts():
@@ -197,8 +198,10 @@ if opts[:emit]
   # venv, else a real system Python via PyResolve (Windows Store-stub safe; bead
   # 7o01 — see scripts/requirements.txt / run.sh bootstrap). py_argv is an array
   # so a multi-token launcher (`py -3`) survives the splat.
+  # bead 4alk.4: the venv is POSIX bin/python OR Windows Scripts\python.exe —
+  # probe both rather than assuming bin/.
   py = ENV['PBI_PY'] ||
-       (File.exist?('/tmp/pbiauth/bin/python') ? '/tmp/pbiauth/bin/python' : nil)
+       ['/tmp/pbiauth/bin/python', '/tmp/pbiauth/Scripts/python.exe'].find { |p| File.exist?(p) }
   py_argv = py ? [py] : PyResolve.argv
   out, err, st = Open3.capture3(*py_argv, HARNESS, opts[:ws], opts[:ds], stdin_data: JSON.dump(chart_dax))
   warn err unless err.empty?

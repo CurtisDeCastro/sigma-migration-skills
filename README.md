@@ -52,7 +52,7 @@ and the skill drives discovery → translation → build → parity.
 | Plugin | Source tool | Skills it installs |
 |---|---|---|
 | [`tableau-to-sigma`](plugins/tableau-to-sigma/) | Tableau | `tableau-to-sigma`, `tableau-assessment`, `tableau-vds-to-cdw` |
-| [`powerbi-to-sigma`](plugins/powerbi-to-sigma/) | Power BI | `powerbi-to-sigma`, `powerbi-assessment` |
+| [`powerbi-to-sigma`](plugins/powerbi-to-sigma/) | Power BI | `powerbi-to-sigma`, `powerbi-assessment`, `powerbi-import-to-snowflake` |
 | [`qlik-to-sigma`](plugins/qlik-to-sigma/) | Qlik Sense / Cloud | `qlik-to-sigma`, `qlik-assessment` |
 | [`thoughtspot-to-sigma`](plugins/thoughtspot-to-sigma/) | ThoughtSpot | `thoughtspot-to-sigma`, `thoughtspot-assessment` |
 | [`quicksight-to-sigma`](plugins/quicksight-to-sigma/) | Amazon QuickSight | `quicksight-to-sigma`, `quicksight-assessment` |
@@ -70,6 +70,14 @@ published extract / VDS feed) and isn't yet in the warehouse Sigma reads. It pul
 via the VizQL Data Service API and lands it in your cloud warehouse — **Snowflake** or **Databricks**, optionally on a schedule —
 so the converter has a warehouse-native table to build on. `tableau-assessment` flags the
 datasources that need it.
+
+The `powerbi-to-sigma` plugin bundles the equivalent bridge, **`powerbi-import-to-snowflake`** —
+for **Import-mode** Power BI models whose data lives inside the `.pbix` / semantic model
+(Excel, Power Query, flat files) rather than a live warehouse. It reads the model definition
+via Fabric `getDefinition`, extracts the stored table rows through the Power BI
+`executeQueries` API, and lands them as typed tables in **Snowflake** — the data track that
+runs *before* `powerbi-to-sigma` converts the model logic. DirectQuery models already point
+at a warehouse and don't need it.
 
 ## The shared shape
 
@@ -105,7 +113,7 @@ corpus/run-corpus.sh --check      # no creds needed; CI-safe
 
 - **A coding agent that runs skills** (Claude Code, Cursor, Cortex Code, …).
 - The **[Sigma MCP server](https://help.sigmacomputing.com/docs/use-sigma-mcp-server)** connected in your agent — how the agent reads/queries your Sigma org and builds + validates the migrated data model and workbook. Follow Sigma's setup guide.
-- The **[Sigma data model converter MCP](https://github.com/twells89/sigma-data-model-mcp)** available (provides the `convert_*_to_sigma` tools that translate the source spec).
+- **No converter to install** — each skill bundles its data-model converter (`convert_*_to_sigma`) and runs it **locally by default** (no network, no data egress). A [hosted converter MCP](https://github.com/twells89/sigma-data-model-mcp) is available as an **optional, opt-in fallback** that sends the source spec off-machine.
 - A **Sigma API token** and a Sigma **connection** pointing at the same warehouse as the source content (needed for the parity gate).
 - Per-tool source access — see each plugin's `refs/connection.md` (e.g. `qlik-cli` for Qlik; device-code / Fabric `getDefinition` for Power BI).
 

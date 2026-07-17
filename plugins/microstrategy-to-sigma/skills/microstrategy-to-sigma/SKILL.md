@@ -156,6 +156,10 @@ captures:
 ```bash
 # (a) Pixel-faithful PDF of the live dossier — the layout/branding/arrangement reference.
 python3 scripts/export-dossier-pdf.py <dossierId> source_dossier.pdf
+# (a2) Source dashboard PNG at a gate-discovered path — arms the Phase-6 MEASURED gates 13/14:
+python3 scripts/microstrategy-render-source.py <dossierId> --workdir <WORK>   # -> <WORK>/dashboards/source.png (dossier PDF -> page-1 PNG; needs pdftoppm/magick/sips)
+#      Then READ that PNG and transcribe >=5 anchors EXACTLY as printed into <WORK>/source-anchors.json
+#      (every KPI, top-3 of each ranked list/table, one bucket per chart; schema: refs/source-anchors.md).
 ```
 
 **READ `source_dossier.pdf`** before composing anything. Note, per page: the
@@ -375,16 +379,22 @@ top-level layout the workbook renders as a single-column stack).
 ## Phase 6 — Finalize (hard gate before declaring GREEN)
 
 ```bash
+ruby scripts/verify-anchors.rb    --workdir <dir> --workbook-id <workbookId>   # -> anchors-verdict.json (gate 13; Phase 1.1 landed dashboards/source.png + source-anchors.json)
 ruby scripts/assert-phase6-ran.rb --workdir <dir> --workbook-id <workbookId>
 ```
 
-Seven independent gates (shared, vendored byte-identical): parity ran + PASS,
+The shared gates (vendored byte-identical): parity ran + PASS,
 no orphan workbooks, no live `type=error` columns, layout applied, tile
 census (skipped — this converter does not emit one), **layout lint** (gate 6:
 no raw-id titles, no orphan controls, no dead zones, no generic "Page N"
 header, no under-filled bands), and **control lint** (gate 7: no dead
 controls, no ghost targets, full declared reach, `control-scope.json`
-coverage — an interactive dossier converting to zero controls FAILS).
+coverage — an interactive dossier converting to zero controls FAILS), **plus the
+measured bars from Phase 1.1: gate 13 (source-anchor values** — `source-anchors.json`
+≥5 + a passing `anchors-verdict.json`; arms once `dashboards/source.png` is on disk;
+`--skip-anchors-gate "<reason>"`**) and gate 14 (visual-similarity floor** — measured
+vs the source PNG; `--skip-visual-similarity "<reason>"`**)**; no source PNG → both
+self-SKIP (stated), never a silent pass.
 Exit 0 = GREEN. Optional runtime proof after the lint passes:
 
 ```bash

@@ -38,13 +38,12 @@ abort 'usage: --twb PATH --out PATH' unless opts[:twb] && opts[:out]
 # a bare .tds when there's no extract).
 def tds_text_from(bytes)
   if bytes[0, 2] == 'PK' # zip
+    require_relative 'lib/zip_extract' # stdlib Zlib reader — no rubygems 'zip', no shelled unzip binary (Windows-safe)
     Tempfile.create(['pds', '.tdsx']) do |f|
       f.binmode; f.write(bytes); f.flush
-      names, _ = Open3.capture2('unzip', '-Z1', f.path)
-      tds = names.lines.map(&:chomp).find { |n| n.end_with?('.tds') }
+      tds = ZipExtract.entries(f.path).find { |n| n.end_with?('.tds') }
       return nil unless tds
-      out, st = Open3.capture2('unzip', '-p', f.path, tds)
-      return st.success? ? out : nil
+      ZipExtract.read(f.path, tds)&.force_encoding('UTF-8')
     end
   else
     bytes

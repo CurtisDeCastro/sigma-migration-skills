@@ -20,6 +20,8 @@ fi
 fail=0
 ruby tools/check-shared.rb || fail=1
 ruby tools/lint-skills.rb   || fail=1
+[ -f tools/lint-esm-imports.rb ] && { ruby tools/lint-esm-imports.rb || fail=1; }
+[ -f tools/lint-twb-encoding.rb ] && { ruby tools/lint-twb-encoding.rb || fail=1; }
 [ -f tools/check-agent-variants.rb ] && { ruby tools/check-agent-variants.rb || fail=1; }
 if [ "$fail" -ne 0 ]; then
   echo "" >&2

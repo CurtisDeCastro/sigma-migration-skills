@@ -165,7 +165,15 @@ def run(cmd, env=None, cwd=None, check=True):
     return p.returncode, out
 
 
-def ensure_sigma_env():
+def ensure_sigma_env(workdir=None):
+    """Load ~/.sigma-migration/env and mint a bearer when SIGMA_API_TOKEN isn't
+    already exported.
+
+    Shell-neutral (no bash, no `eval`): shells out to the co-located
+    get_token.py with the SAME interpreter already running this script
+    (sys.executable — no PATH/py-launcher guessing needed), which writes
+    <workdir>/auth.json; read the token back from there. Works identically on
+    macOS/Linux/Windows."""
     env_file = os.path.expanduser("~/.sigma-migration/env")
     if os.path.exists(env_file):
         for line in open(env_file):
@@ -173,11 +181,19 @@ def ensure_sigma_env():
             if m and not os.environ.get(m.group(1)):
                 os.environ[m.group(1)] = m.group(2)
     if not os.environ.get("SIGMA_API_TOKEN") and os.environ.get("SIGMA_CLIENT_ID"):
-        p = subprocess.run(["bash", os.path.join(HERE, "get-token.sh")],
-                           capture_output=True, text=True)
-        m = re.search(r"export SIGMA_API_TOKEN=(\S+)", p.stdout or "")
-        if m:
-            os.environ["SIGMA_API_TOKEN"] = m.group(1)
+        wd = workdir or os.getcwd()
+        os.makedirs(wd, exist_ok=True)
+        p = subprocess.run([sys.executable, os.path.join(HERE, "get_token.py"),
+                            "--workdir", wd], capture_output=True, text=True)
+        if p.returncode != 0:
+            print(p.stderr or p.stdout, file=sys.stderr)
+        auth_path = os.path.join(wd, "auth.json")
+        if os.path.exists(auth_path):
+            auth = json.load(open(auth_path))
+            if auth.get("SIGMA_API_TOKEN"):
+                os.environ["SIGMA_API_TOKEN"] = auth["SIGMA_API_TOKEN"]
+            if auth.get("SIGMA_BASE_URL") and not os.environ.get("SIGMA_BASE_URL"):
+                os.environ["SIGMA_BASE_URL"] = auth["SIGMA_BASE_URL"]
 
 
 def sigma(method, path, body=None):
@@ -458,6 +474,8 @@ def main():
                     "permission on the project; see looker_project.py).")
     ap.add_argument("--dashboard", help="offline: a .dashboard.lookml file")
     ap.add_argument("--dashboard-id", help="live: Looker dashboard id (needs ~/.looker/looker.ini)")
+    ap.add_argument("--look-id", help="live: Looker Look id (a single saved query → a "
+                    "one-tile workbook; needs ~/.looker/looker.ini)")
     ap.add_argument("--explore", help="explore to convert (default: the contract's most-used)")
     ap.add_argument("--name", help="name PREFIX applied to the DM and the workbook")
     ap.add_argument("--workdir")
@@ -491,11 +509,11 @@ def main():
         print(_path or "none")
         print(_desc)
         return 0
-    if not a.dashboard and not a.dashboard_id:
-        ap.error("--dashboard (offline .dashboard.lookml) or --dashboard-id (live) required")
+    if not a.dashboard and not a.dashboard_id and not a.look_id:
+        ap.error("--dashboard (offline .dashboard.lookml) / --dashboard-id / --look-id (live) required")
     if not a.lookml_dir and not a.project:
         ap.error("--lookml-dir (local checkout) or --project (pull via Looker API) required")
-    offline = not a.dashboard_id
+    offline = not a.dashboard_id and not a.look_id
     wd = os.path.abspath(os.path.expanduser(a.workdir or "./looker-migration"))
     os.makedirs(wd, exist_ok=True)
 
@@ -514,7 +532,7 @@ def main():
         a.lookml_dir = pulled
     lookml_dir = os.path.abspath(os.path.expanduser(a.lookml_dir))
     prefix = (a.name.strip() + " ") if a.name else ""
-    ensure_sigma_env()
+    ensure_sigma_env(wd)
     if not a.dry_run:
         missing = [v for v in ("SIGMA_BASE_URL", "SIGMA_API_TOKEN") if not os.environ.get(v)]
         if not a.reuse_dm and not os.environ.get("SIGMA_CONNECTION_ID"):
@@ -526,7 +544,11 @@ def main():
     # ── Phase 1 — Parse (the normalized dashboard contract) ──────────────────
     hdr(1, TOTAL, "Parse")
     contract_path = os.path.join(wd, "contract.json")
-    if offline:
+    if a.look_id:
+        # A Look is a single saved query → the same normalized contract with one tile.
+        run([sys.executable, os.path.join(HERE, "fetch_looker_look.py"),
+             a.look_id, contract_path])
+    elif offline:
         run([sys.executable, os.path.join(HERE, "parse_lookml_dashboard.py"),
              a.dashboard, "--out", contract_path])
     else:
@@ -686,9 +708,14 @@ def main():
             files = [{"name": os.path.basename(f), "content": open(f).read()}
                      for f in sorted(glob.glob(os.path.join(lookml_dir, "*.model.lkml"))) + view_files]
             json.dump(files, open(os.path.join(wd, "_lookml-files.json"), "w"))
+            # Node ESM rejects a bare Windows drive-letter path
+            # (ERR_UNSUPPORTED_ESM_URL_SCHEME, protocol 'c:'); a file:// URL
+            # imports on every OS. as_uri() needs an absolute path (build is).
+            import pathlib
+            build_url = pathlib.Path(build).resolve().as_uri()
             open(shim, "w").write(f"""// generated by migrate-looker.py — local converter build path
 import {{ readFileSync, writeFileSync }} from 'node:fs';
-import {{ convertLookMLToSigma }} from {json.dumps(build)};
+import {{ convertLookMLToSigma }} from {json.dumps(build_url)};
 const files = JSON.parse(readFileSync({json.dumps(os.path.join(wd, "_lookml-files.json"))}, 'utf8'));
 const res = convertLookMLToSigma(files, {{ connectionId: {json.dumps(conn)},
   exploreName: {json.dumps(explore)}, joinStrategy: 'relationships' }});
@@ -1012,6 +1039,53 @@ console.error('stats:', JSON.stringify(res.stats));
         headers, rows = parse_csv(export_csv(wb, c["sigma_element_id"]))
         cidx = {h: i for i, h in enumerate(headers)}
         want = c["sigma_columns"]
+        if c.get("kind") == "table-total":
+            # A table-only Look → grand-total check: SUM the additive column over
+            # every displayed (grouped/pivot) row = the overall total (grain-
+            # invariant). EXPECTED = the same grand total of the tile's first
+            # measure from Looker (live) / the warehouse re-aggregation (offline).
+            def _num(x):
+                v = numify(x)
+                return v if isinstance(v, (int, float)) else None
+            if c.get("source_kind") == "pivot-table":
+                # A pivot CSV is a cross-tab: line 0 is a meta row, `headers` is the
+                # value/pivot-dim names, the first data row is the real column header
+                # (rowDim, pivotVals…, "Total"), and Sigma appends a grand-Total row
+                # (first cell "Total") whose last cell is the grand total. Prefer that;
+                # else sum the body cells excluding the Total row + Total column.
+                colhdr = rows[0] if rows else []
+                tot_cols = {i for i, h in enumerate(colhdr) if str(h).strip().lower() == "total"}
+                trow = next((r for r in rows if r and str(r[0]).strip().lower() == "total"), None)
+                gt = None
+                if trow:
+                    tail = [_num(trow[i]) for i in sorted(tot_cols) if i < len(trow)]
+                    tail = [n for n in tail if n is not None] or [n for n in map(_num, trow) if n is not None]
+                    gt = tail[-1] if tail else None
+                if gt is None:
+                    gt = sum(n for r in rows[1:] if not (r and str(r[0]).strip().lower() == "total")
+                             for i, cc in enumerate(r) if i not in tot_cols
+                             for n in [_num(cc)] if n is not None)
+                act = [[None, gt if gt is not None else 0]]
+            else:
+                # grouped table: a single named value column, no auto-total row → sum it
+                vi = cidx.get(want[0], 0)
+                act = [[None, sum(n for r in rows if vi < len(r)
+                                  for n in [_num(r[vi])] if n is not None)]]
+            el = by_name.get(cname)
+            if el is None:
+                msgs.append(f"   WARN: no source tile named {cname!r} in the contract — will DIVERGE")
+                return cname, act, None, msgs
+            exp = None
+            try:
+                rowsexp = None
+                if not offline:
+                    rowsexp = expected_live(el, measures)
+                if rowsexp is None:
+                    rowsexp = expected_offline(el, ev, mr)
+                exp = [[None, sum(numify(v) for _d, v in rowsexp if v is not None)]]
+            except Exception as ex:
+                msgs.append(f"   WARN: table-total expected fetch failed for {cname!r} ({ex})")
+            return cname, act, exp, msgs
         if len(want) == 1:                      # KPI
             vi = cidx.get(want[0], 0)
             act = [[None, numify(rows[0][vi])]] if rows else []
@@ -1057,7 +1131,15 @@ console.error('stats:', JSON.stringify(res.stats));
     rc, _ = run(["ruby", os.path.join(HERE, "phase6-parity-looker.rb"),
                  "--workdir", wd, "--finalize"], check=False)
     gate_cmd = ["ruby", os.path.join(HERE, "assert-phase6-ran.rb"),
-                "--workdir", wd, "--workbook-id", wb]
+                "--workdir", wd, "--workbook-id", wb,
+                # Opt into gate 7b (runtime control flip test). Gate 7's static
+                # control lint checks the spec against a builder-derived
+                # control-scope.json sidecar — it cannot catch a builder-level
+                # listen->column mis-mapping (spec + sidecar agree). Gate 7b
+                # flips each control live (probe-controls.rb) and proves its
+                # targets change. Looker is the first adopter; other converters
+                # are unaffected until they pass this flag too.
+                "--require-control-flip"]
     # Wire the Phase-4c render to gate 8 (visual render). We render to
     # visual-qa/<pageId>.png, but the gate defaults to looking for
     # <workdir>/sigma-render.png — without this the gate never finds the PNG and

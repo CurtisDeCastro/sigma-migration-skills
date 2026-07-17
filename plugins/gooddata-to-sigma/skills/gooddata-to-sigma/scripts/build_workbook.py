@@ -22,7 +22,38 @@ Usage:
 """
 import argparse, json, re, sys, os
 
-AGG = {"SUM": "Sum", "AVG": "Avg", "MIN": "Min", "MAX": "Max", "MEDIAN": "Median"}
+# ── documentation-grounded mapping catalogs (SINGLE SOURCE OF TRUTH) ─────────
+# Every enumerable classifier map below is loaded from refs/catalogs/<dimension>.json
+# — cited rows (GoodData source doc + Sigma target + sigma_verified), complete
+# coverage, and a LOUD fallback (flag) on anything unmapped. NO inline mapping literal
+# may bypass these catalogs (grep-enforced by tests/test_grounding.py). The
+# human-readable coverage matrix in refs/gooddata-coverage.md is GENERATED from these
+# files. Loader: shared/lib/coverage_catalog.py (synced to scripts/lib/). Compositional
+# logic — gd_fmt() mask parser, detect_filter(), the MAQL resolve(), and the
+# BY ALL/WITHIN/FOR hard-MAQL flagging — STAYS as cited code (see each site).
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
+import coverage_catalog as _cc  # noqa: E402
+_CAT_DIR = _cc.default_catalog_dir(__file__)
+VIZ_CAT  = _cc.load(_CAT_DIR, "viz-kind")        # GoodData visualizationUrl -> Sigma element kind
+AGG_CAT  = _cc.load(_CAT_DIR, "aggregation")     # MAQL scalar aggregate fn  -> Sigma aggregate fn
+FMT_CAT  = _cc.load(_CAT_DIR, "number-format")   # GoodData format mask      -> Sigma format (documents gd_fmt)
+CTRL_CAT = _cc.load(_CAT_DIR, "control")         # dashboard filter          -> Sigma control (documents detect_filter)
+
+# MAQL scalar aggregate fn -> Sigma aggregate, DERIVED from the aggregation catalog
+# (same rows maql.py loads, so the two copies can't drift). Keys upper-cased to match
+# the (SUM|AVG|MIN|MAX|MEDIAN) regex; COUNT is carried for coverage but resolved
+# compositionally below (COUNT of an attribute -> CountDistinct).
+AGG = {r["source"].upper(): r["sigma"] for r in AGG_CAT.rows if r.get("sigma")}
+
+# GoodData visualizationUrl -> Sigma element, DERIVED from the viz-kind catalog.
+# The six plain chart types drive CHART; rows with sigma:null are the FLAGGED set
+# (no faithful Sigma equivalent -> flag, never guess). local:headline / local:table
+# carry their Sigma kind in the catalog for coverage but are matched by NAME in the
+# classifier (structural KPI / table-or-pivot build), not through CHART.
+_CHART_KINDS = {"bar-chart", "line-chart", "area-chart", "donut-chart", "pie-chart"}
+CHART = {r["source"]: r["sigma"] for r in VIZ_CAT.rows if r.get("sigma") in _CHART_KINDS}
+FLAGGED = {r["source"] for r in VIZ_CAT.rows if r.get("sigma") is None}
+
 MASTER_ID = "master_detail"
 MASTER_NAME = "Data"            # downstream refs resolve as [Data/Column]
 
@@ -53,7 +84,12 @@ def main():
         metric_fmt[m["id"]] = (m.get("content") or {}).get("format")
     ds_table = {d["id"]: d["dataSourceTableId"]["id"] for d in ldm["datasets"] if d.get("dataSourceTableId")}
 
-    # GoodData number format -> Sigma formatString (kind:number). Best-effort mapping.
+    # GoodData metric format mask -> Sigma formatString (kind:number). COMPOSITIONAL
+    # parser (NOT a flat lookup): decimals from the digits after '.', currency from a
+    # LITERAL '$'/'€' in the mask, percent from a literal '%'. Returns None only when
+    # the mask is absent — never a name-substring currency/percent guess. Grounded &
+    # cited by refs/catalogs/number-format.json (FMT_CAT) + GoodData metric-formatting
+    # + Sigma format-numbers docs; see refs/gooddata-coverage.md.
     def gd_fmt(g):
         if not g:
             return None
@@ -82,6 +118,10 @@ def main():
 
     # a dashboard's relative date filter -> a Sigma date-range control spec.
     # "this month" == {relative, granularity month, from 0, to 0} -> mode current.
+    # COMPOSITIONAL parse (NOT a flat lookup); grounded & cited by
+    # refs/catalogs/control.json (CTRL_CAT) + GoodData date-filters + Sigma
+    # control-types docs. Only relative date filters are emitted this pass; a
+    # relative filter with no resolvable date key is flagged downstream, not dropped.
     def detect_filter(dash):
         ref = (dash["content"].get("filterContextRef") or {}).get("identifier", {}).get("id")
         fc = next((f for f in an.get("filterContexts", []) if f["id"] == ref), None)
@@ -110,7 +150,12 @@ def main():
             needed_xdims.add(attr_id)
         return f"[{MASTER_NAME}/{a_['title']}]"
 
-    # recursively resolve a metric's MAQL to a Sigma aggregate over the DM fact element
+    # recursively resolve a metric's MAQL to a Sigma aggregate over the DM fact element.
+    # Scalar aggregate fn -> Sigma via the AGG map (derived from refs/catalogs/
+    # aggregation.json); COUNT-of-attribute -> CountDistinct compositionally. The hard
+    # MAQL surface (BY ALL / WITHIN / FOR) is NOT flat-mappable -> return None to flag
+    # it (cited code; see refs/maql-mapping.md + GoodData MAQL docs). Callers surface
+    # the flag loudly ("measure uses workbook-level MAQL"), never fake a value.
     def resolve(maql):
         body = re.sub(r"^\s*SELECT\s+", "", " ".join(maql.split()), flags=re.I).strip()
         if re.search(r"BY ALL|WITHIN|\bFOR \b", body, re.I):
@@ -130,10 +175,7 @@ def main():
         return re.sub(rf"\[{re.escape(P)}/(?:[^/\]]+/)?([^\]]+)\]", rf"[{MASTER_NAME}/\1]", formula)
 
     insights = {i["id"]: i for i in an["visualizationObjects"]}
-    CHART = {"local:bar": "bar-chart", "local:column": "bar-chart", "local:line": "line-chart",
-             "local:area": "area-chart", "local:donut": "donut-chart", "local:pie": "pie-chart"}
-    FLAGGED = {"local:funnel", "local:pyramid", "local:sankey", "local:dependencywheel",
-               "local:waterfall", "local:treemap", "local:repeater", "local:bullet"}
+    # CHART / FLAGGED are derived at module scope from refs/catalogs/viz-kind.json.
     SRC_DM = {"kind": "data-model", "dataModelId": a.data_model_id, "elementId": a.fact_element}
     SRC_M = {"kind": "table", "elementId": MASTER_ID}
     page_elements = []; flags = []

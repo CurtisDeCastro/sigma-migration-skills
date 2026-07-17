@@ -270,7 +270,7 @@ puts "master: #{mcols.size} column(s)"
 
 # Enrich the master-map with caption/space/underscore-flexible keys so chart refs
 # that use friendly captions resolve to warehouse-named master columns (n4pi.7).
-run!([*PyResolve.argv, File.join(HERE, 'enrich-master-map.py'), WORK, opts[:twb]])
+run!([*PyResolve.argv, PyResolve.winpath(File.join(HERE, 'enrich-master-map.py')), PyResolve.winpath(WORK), PyResolve.winpath(opts[:twb])])
 
 # ---------------------------------------------------------------------------
 # 4. build-charts. --auto-controls materializes Tableau parameters/shared-view
@@ -356,8 +356,8 @@ if opts[:render]
   page_id = (wbspec['pages'] || []).map { |pg| pg['id'] }.compact.first
   if wb_id && page_id
     puts "\n== 8. render PNG =="
-    run!([*PyResolve.argv, File.join(HERE, 'sigma-export-png.py'), '--workbook', wb_id,
-          '--page', page_id, '--out', File.join(WORK, 'rendered.png')], allow_fail: true)
+    run!([*PyResolve.argv, PyResolve.winpath(File.join(HERE, 'sigma-export-png.py')), '--workbook', wb_id,
+          '--page', page_id, '--out', PyResolve.winpath(File.join(WORK, 'rendered.png'))], allow_fail: true)
   else
     puts '  render skipped (no workbook id / page id)'
   end

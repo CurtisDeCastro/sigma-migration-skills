@@ -48,22 +48,40 @@ _retry = Retry(total=5, connect=5, read=5, backoff_factor=1.5,
 SESS.mount("https://", HTTPAdapter(max_retries=_retry))
 
 CLIENT_ID = "ea0616ba-638b-4df5-95b9-636659ae5121"  # public Power BI Desktop client
-AUTHORITY = "https://login.microsoftonline.com/organizations"
-CACHE = os.environ.get("PBI_TOKEN_CACHE", "/tmp/pbiauth/cache.bin")
 PBI_BASE = "https://api.powerbi.com/v1.0/myorg"
 FABRIC_BASE = "https://api.fabric.microsoft.com/v1"
 BAND_MAX = int(os.environ.get("PBI_BAND_MAX", "45000"))  # under executeQueries' silent truncation ceiling
 
+
 # ---- auth ----------------------------------------------------------------
+# #347: resolve the authority + cache at CALL time so --tenant (set in main()
+# after this module is imported) targets a guest/B2B tenant, with a per-tenant
+# cache file so the guest token doesn't collide with the home token.
+def _tenant():
+    return os.environ.get("PBI_TENANT", "organizations")
+
+
+def _authority():
+    return "https://login.microsoftonline.com/" + _tenant()
+
+
+def _cache_path():
+    if os.environ.get("PBI_TOKEN_CACHE"):
+        return os.environ["PBI_TOKEN_CACHE"]
+    t = _tenant()
+    return "/tmp/pbiauth/cache.bin" if t == "organizations" else f"/tmp/pbiauth/cache-{t}.bin"
+
+
 def _app():
+    path = _cache_path()
     cache = msal.SerializableTokenCache()
-    if os.path.exists(CACHE):
-        cache.deserialize(open(CACHE).read())
-    app = msal.PublicClientApplication(CLIENT_ID, authority=AUTHORITY, token_cache=cache)
-    return app, cache
+    if os.path.exists(path):
+        cache.deserialize(open(path).read())
+    app = msal.PublicClientApplication(CLIENT_ID, authority=_authority(), token_cache=cache)
+    return app, cache, path
 
 def get_tokens():
-    app, cache = _app()
+    app, cache, CACHE = _app()
     accts = app.get_accounts()
     def acq(scope):
         for a in accts:
@@ -344,7 +362,13 @@ def main():
     ap.add_argument("--only", default=None, help="comma-separated PBI table names to include")
     ap.add_argument("--limit-rows", type=int, default=None, help="TOPN per table (cheap testing)")
     ap.add_argument("--dry-run", action="store_true", help="extract + gen SQL, do not execute in Snowflake")
+    ap.add_argument("--tenant", default=None,
+                    help="target tenant when the dataset lives in a DIFFERENT tenant than your home "
+                         "tenant (guest/B2B). A raw tenant GUID, or a report URL with ctid=...")
     args = ap.parse_args()
+    if args.tenant:  # #347: set before get_tokens() — authority/cache resolve at call time
+        m = re.search(r"[?&]ctid=([0-9a-fA-F-]{36})", args.tenant)
+        os.environ["PBI_TENANT"] = m.group(1) if m else args.tenant
 
     only = set(s.strip() for s in args.only.split(",")) if args.only else None
     pbi, fab = get_tokens()

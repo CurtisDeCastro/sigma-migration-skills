@@ -34,8 +34,8 @@ jobs:
     name: windows PowerShell path (doctor.ps1 + offline corpus)
     # Proves the Windows/PowerShell path works BEFORE an event does (P0.4):
     # doctor.ps1 runs, emits a valid + passing doctor.json, and the offline
-    # local-converter corpus converts. Creds-free, network-free. Runtimes are
-    # pinned via setup-* so a runner-image change can't flip doctor's result.
+    # local-converter corpus converts. No real secrets, network-free. Runtimes
+    # are pinned via setup-* so a runner-image change can't flip doctor's result.
     runs-on: windows-2022
     timeout-minutes: 12
     env:
@@ -44,6 +44,16 @@ jobs:
       # rev-list against a grafted origin/main is unreliable. Skip it explicitly
       # (the doctors also auto-skip on a shallow clone).
       SIGMA_SKIP_VERSION_CHECK: "1"
+      # doctor.ps1/.sh are fail-closed on ABSENT Sigma creds (a real run would
+      # die at its first API call — an intentional gate). This job only proves
+      # the Windows/PowerShell path works; it holds no secrets and makes no
+      # network calls. Satisfy the cred-PRESENCE check with placeholders and
+      # skip the live token-mint smoke — no real credential is used and nothing
+      # leaves the runner. (The bash offline jobs don't gate on the doctor.)
+      SIGMA_CLIENT_ID: ci-offline-placeholder
+      SIGMA_CLIENT_SECRET: ci-offline-placeholder
+      SIGMA_BASE_URL: https://aws-api.sigmacomputing.com
+      SIGMA_SKIP_CRED_SMOKE: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: ruby/setup-ruby@v1
@@ -146,6 +156,11 @@ jobs:
         # C8 parity / C9 RLS gates and appear in docs/phase-schema.md. Known
         # gaps are tracked in tools/skill-lint-baseline.json (WARN, not fail).
         run: ruby tools/lint-skills.rb
+      - name: Lint ESM converter imports for the Windows file:// footgun (#348)
+        # A shim importing the converter by bare absolute path throws
+        # ERR_UNSUPPORTED_ESM_URL_SCHEME on Windows (latent on macOS). Require a
+        # pathToFileURL / Gem.win_platform?+file:/// / Path.as_uri() guard.
+        run: ruby tools/lint-esm-imports.rb
       - name: Check agent variants are in sync with SKILL.md
         # The Cursor/Codex/Cline/Continue instruction files are generated from
         # each skill's SKILL.md by tools/gen-agent-variants.rb. Fail if a
@@ -193,6 +208,12 @@ jobs:
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-lod-sql-quoting.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-sql-ident-check.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-dm-quarantine.rb
+            plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-cred-gate.rb
+            plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-validate-spec-guards.rb
+            plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-zip-extract.rb
+            plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-py-resolve-winpath.rb
+            plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-rank-connections.rb
+            plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-fast-flag.rb
             plugins/tableau-to-sigma/skills/tableau-assessment/scripts/test-predicted-parity.rb
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-dax-restructure.rb
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-telemetry-gate.rb
@@ -202,6 +223,7 @@ jobs:
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-pbi-element-match.rb
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-pbi-timeintel-route.rb
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-drop-unresolved-columns.rb
+            plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/test-window-native.rb
           )
           fail=0
           for t in "${tests[@]}"; do
@@ -215,17 +237,7 @@ jobs:
         # runner (US-ASCII) it raises Encoding::CompatibilityError on any non-ASCII
         # .twb/XML — which has silently crashed migrations 3+ times. Any read of a
         # .twb / xml / layout file MUST pass `encoding: 'UTF-8'`.
-        run: |
-          set -uo pipefail
-          hits=$(grep -rnE "File\.read\(([^)]*\b(twb|INP|disc_log)\b[^)]*)\)" \
-                   plugins/tableau-to-sigma/skills/*/scripts/*.rb 2>/dev/null \
-                   | grep -v "encoding:" | grep -viE "JSON\.parse|\.json|\.rb'|File\.write" || true)
-          if [ -n "$hits" ]; then
-            echo "::error::File.read on a .twb without encoding: 'UTF-8' (F5 crash class):"
-            echo "$hits"
-            exit 1
-          fi
-          echo "OK: no unencoded .twb/XML File.read sites."
+        run: ruby tools/lint-twb-encoding.rb   # single source of truth (plugins/ + shared/); also run by .githooks/run-governance-checks.sh
       - name: Run offline test_*.py suites
         # EXPLICIT allow-list — creds-free, network-free Python tests only.
         # PyYAML is needed by the looker offline dashboard parser

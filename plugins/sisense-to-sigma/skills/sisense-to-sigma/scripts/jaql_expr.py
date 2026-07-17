@@ -15,16 +15,27 @@ Unsupported constructs raise Unsupported so the converter FLAGS them instead of
 emitting wrong logic. Column display names are taken verbatim from the JAQL dim
 (the last [Table.Column] segment), which match the Sigma DM column names.
 """
-import re
+import re, os, sys
 
 class Unsupported(Exception):
     pass
 
-AGG = {
-    "sum": "Sum", "count": "Count", "countdistinct": "CountDistinct",
-    "avg": "Avg", "average": "Avg", "min": "Min", "max": "Max",
-    "median": "Median", "stdev": "Stdev", "var": "Var",
-}
+# ── documentation-grounded aggregation catalog (SINGLE SOURCE OF TRUTH) ──────
+# The JAQL `agg` -> Sigma aggregate map is LOADED from
+# refs/catalogs/aggregation.json (cited rows, complete coverage). translate_agg()
+# resolves against it and raises Unsupported (which convert.py turns into a loud
+# FLAG) on any agg not listed — never a silent default. The generated coverage
+# matrix lives in refs/sisense-coverage.md. Loader: shared/lib/coverage_catalog.py
+# (synced to scripts/lib/).
+# NOTE: only the flat `agg` map lives in the catalog. The COMPOSITIONAL JAQL
+# formula-function translator (SAFE_FUNC / FLAG_FUNC below — arithmetic + scalar
+# function-name rewriting, with PREV/PAST/RSUM/GROWTH/QUARTILE/CONTRIBUTION etc.
+# flagged) and the date-level DateTrunc map (LEVEL) stay as cited CODE: they are
+# predicate/expression logic, not a flat 1:1 table.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
+import coverage_catalog as _cc  # noqa: E402
+_AGG_CAT = _cc.load(_cc.default_catalog_dir(__file__), "aggregation")
+AGG = {r["source"]: r["sigma"] for r in _AGG_CAT.rows if r.get("sigma")}
 
 # JAQL date level -> Sigma DateTrunc unit (None = no truncation)
 LEVEL = {

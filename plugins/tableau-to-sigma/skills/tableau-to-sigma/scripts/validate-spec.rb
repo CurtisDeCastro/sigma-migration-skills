@@ -46,9 +46,32 @@ if opts[:type] == 'workbook' && opts[:dm_context]
     external_names.concat(ctx['elements'].map { |e| e['name'] }.compact)
   end
   if external_names.empty?
-    abort "validate-spec.rb: --dm-context loaded 0 element names from #{opts[:dm_context]}. " \
-          "Expected either {pages:[{elements:[...]}]} (post-and-readback output) or {elements:[...]} (flat). " \
-          "Re-run post-and-readback.rb --type datamodel and pass its --out file."
+    # How many elements did the context carry, regardless of name?
+    el_count = if ctx['pages'].is_a?(Array)
+                 ctx['pages'].sum { |p| p.fetch('elements', []).size }
+               elsif ctx['elements'].is_a?(Array)
+                 ctx['elements'].size
+               else
+                 0
+               end
+    if el_count.positive?
+      # Elements ARE present but every name came back null — a known DM-readback
+      # quirk (field-caught: a reused DM's element name:null produced "0 element
+      # names" here → the fast path FALSE-aborted to a manual handoff, even though
+      # running the gated scripts by hand POSTed the workbook fine). These names
+      # are only used as known prefixes for CROSS-element ref validation; a
+      # data-model-sourced master's [Custom SQL/COL] refs resolve via own_prefixes
+      # (below), and the authoritative column-level check is assert-wb-refs-
+      # resolve.rb's job (see this file's header). So WARN and continue instead of
+      # false-aborting the whole workbook build.
+      warn "WARN: validate-spec.rb --dm-context carried #{el_count} element(s) but all names were null " \
+           "(DM readback quirk) — skipping external-name prefix validation; assert-wb-refs-resolve.rb still " \
+           "checks column-level refs."
+    else
+      abort "validate-spec.rb: --dm-context loaded 0 element names from #{opts[:dm_context]}. " \
+            "Expected either {pages:[{elements:[...]}]} (post-and-readback output) or {elements:[...]} (flat). " \
+            "Re-run post-and-readback.rb --type datamodel and pass its --out file."
+    end
   end
 end
 

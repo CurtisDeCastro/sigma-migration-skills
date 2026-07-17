@@ -21,6 +21,7 @@ Stdlib + msal/requests/truststore only (same deps as the scripts it serves).
 import base64
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -30,11 +31,50 @@ import truststore; truststore.inject_into_ssl()  # corp TLS inspection — manda
 import msal
 import requests
 
-CACHE = os.environ.get("PBI_TOKEN_CACHE", "/tmp/pbiauth/cache.bin")
-ESTATE_CACHE = os.environ.get("PBI_ESTATE_CACHE", "/tmp/pbiauth/estate-map.json")
 FAB_BASE = "https://api.fabric.microsoft.com/v1"
 PBI_BASE = "https://api.powerbi.com/v1.0/myorg"
-AUTHORITY = "https://login.microsoftonline.com/organizations"
+
+
+# --- tenant override (#347) -------------------------------------------------
+# The target report may live in a DIFFERENT tenant than the caller's HOME
+# tenant — the normal consultant/partner (guest / B2B) case. The generic
+# `organizations` authority (the default) always authenticates into the home
+# tenant, so a guest report then fails every Fabric call as WorkspaceNotFound.
+# PBI_TENANT (a raw tenant GUID) overrides the authority; entry points expose
+# it as --tenant. Authority AND cache path are resolved at CALL time so a
+# --tenant parsed after this module is imported still takes effect, and the
+# per-tenant cache file keeps a guest token from colliding with the home token.
+def _tenant():
+    return os.environ.get("PBI_TENANT", "organizations")
+
+
+def _authority(tenant=None):
+    return "https://login.microsoftonline.com/" + (tenant or _tenant())
+
+
+def cache_path(tenant=None):
+    if os.environ.get("PBI_TOKEN_CACHE"):
+        return os.environ["PBI_TOKEN_CACHE"]
+    t = tenant or _tenant()
+    return "/tmp/pbiauth/cache.bin" if t == "organizations" else f"/tmp/pbiauth/cache-{t}.bin"
+
+
+def estate_cache_path(tenant=None):
+    if os.environ.get("PBI_ESTATE_CACHE"):
+        return os.environ["PBI_ESTATE_CACHE"]
+    t = tenant or _tenant()
+    return "/tmp/pbiauth/estate-map.json" if t == "organizations" \
+        else f"/tmp/pbiauth/estate-map-{t}.json"
+
+
+def normalize_tenant(value):
+    """Tenant id from a raw GUID, or the `ctid` extracted from a pasted report URL."""
+    if not value:
+        return None
+    m = re.search(r"[?&]ctid=([0-9a-fA-F-]{36})", value)
+    return m.group(1) if m else value
+
+
 FABRIC_SCOPE = ["https://api.fabric.microsoft.com/.default"]
 POWERBI_SCOPE = ["https://analysis.windows.net/powerbi/api/.default"]
 # Well-known public clients — no app registration needed (PBI Desktop first).
@@ -48,27 +88,38 @@ MAX_LRO_POOL = 4
 ENUM_POOL = 8
 
 _cache_lock = threading.Lock()
-_msal_cache = msal.SerializableTokenCache()
-if os.path.exists(CACHE):
-    _msal_cache.deserialize(open(CACHE).read())
+_caches = {}  # cache-file path -> SerializableTokenCache (one per tenant)
 
 
-def _persist_msal():
-    if _msal_cache.has_state_changed:
-        os.makedirs(os.path.dirname(CACHE), exist_ok=True)
+def _load_cache(path):
+    c = _caches.get(path)
+    if c is None:
+        c = msal.SerializableTokenCache()
+        if os.path.exists(path):
+            c.deserialize(open(path).read())
+        _caches[path] = c
+    return c
+
+
+def _persist_msal(cache, path):
+    if cache.has_state_changed:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         with _cache_lock:
-            open(CACHE, "w").write(_msal_cache.serialize())
+            open(path, "w").write(cache.serialize())
 
 
-def get_token(scopes=None, interactive=True):
-    """Silent token from the shared cache; device-code fallback when allowed."""
+def get_token(scopes=None, interactive=True, tenant=None):
+    """Silent token from the per-tenant cache; device-code fallback when allowed."""
     scopes = scopes or FABRIC_SCOPE
+    authority = _authority(tenant)
+    path = cache_path(tenant)
+    cache = _load_cache(path)
     for cid, cname in CLIENT_CANDIDATES:
-        app = msal.PublicClientApplication(cid, authority=AUTHORITY, token_cache=_msal_cache)
+        app = msal.PublicClientApplication(cid, authority=authority, token_cache=cache)
         for acct in app.get_accounts():
             r = app.acquire_token_silent(scopes, account=acct)
             if r and "access_token" in r:
-                _persist_msal()
+                _persist_msal(cache, path)
                 return r["access_token"]
         if not interactive:
             continue
@@ -76,13 +127,14 @@ def get_token(scopes=None, interactive=True):
         if "user_code" not in flow:
             continue
         print("=" * 60, file=sys.stderr)
-        print(f"CLIENT={cname}  SCOPE={scopes[0]}", file=sys.stderr)
+        print(f"CLIENT={cname}  SCOPE={scopes[0]}  TENANT={_tenant() if tenant is None else tenant}",
+              file=sys.stderr)
         print(f">>> Go to: {flow['verification_uri']}", file=sys.stderr)
         print(f">>> Enter code: {flow['user_code']}", file=sys.stderr)
         print("=" * 60, file=sys.stderr)
         res = app.acquire_token_by_device_flow(flow)
         if "access_token" in res:
-            _persist_msal()
+            _persist_msal(cache, path)
             return res["access_token"]
     return None
 
@@ -267,15 +319,16 @@ def enumerate_estate(tok, pool=ENUM_POOL, timings=None):
 
 def load_estate_cache():
     try:
-        return json.load(open(ESTATE_CACHE))
+        return json.load(open(estate_cache_path()))
     except (OSError, ValueError):
         return None
 
 
 def save_estate_cache(estate):
     try:
-        os.makedirs(os.path.dirname(ESTATE_CACHE), exist_ok=True)
-        json.dump(estate, open(ESTATE_CACHE, "w"), indent=2)
+        path = estate_cache_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        json.dump(estate, open(path, "w"), indent=2)
     except OSError:
         pass  # cache is best-effort
 
@@ -352,7 +405,7 @@ def resolve_targets(tok, model_name=None, workspace=None, report=None,
         if cached:
             hit = search(cached)
             if hit:
-                log(f"[estate-cache] hit ({ESTATE_CACHE}) — skipping enumeration")
+                log(f"[estate-cache] hit ({estate_cache_path()}) — skipping enumeration")
                 return hit
             log("[estate-cache] name miss — invalidating + re-enumerating live")
 

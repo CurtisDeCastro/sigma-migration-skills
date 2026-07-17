@@ -222,7 +222,7 @@ rescue StandardError
 end
 
 def run_py(code, *args)
-  out, st = Open3.capture2(*PyResolve.argv, '-c', code, *args.map(&:to_s))
+  out, st = Open3.capture2(*PyResolve.argv, '-c', code, *args.map { |a| PyResolve.winpath(a.to_s) })
   return nil unless st.success?
   JSON.parse(out)
 rescue StandardError

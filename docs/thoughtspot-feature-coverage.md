@@ -2,7 +2,7 @@
 
 A deliberate "kitchen-sink" stress test: build TS content exercising **every** TS
 feature, migrate it through `thoughtspot-to-sigma`, and score each feature. Run
-against live trial `team2.thoughtspot.cloud` over the retail star model
+against a live trial instance over the retail star model
 `d09e27fd` (CSA.TJ). Established + closed 2026-06-16.
 
 **Verdicts:** ✅ faithful (migrates with parity) · 🟡 flagged degrade (no Sigma

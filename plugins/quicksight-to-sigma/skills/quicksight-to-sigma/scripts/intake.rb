@@ -44,6 +44,8 @@ OptionParser.new do |p|
   p.on('--connection ID')    { |v| opts[:conn] = v }
   p.on('--name SUBSTR', 'connection display-name substring to disambiguate') { |v| opts[:name] = v }
   p.on('--source STR', 'source identifier (workbook name / app id) for the audit record') { |v| opts[:source] = v }
+  p.on('--rank-workbook-id LUID', 'when ambiguous, rank candidates by the Tableau workbook\'s warehouse (type+host) and auto-pick a unique match') { |v| opts[:rank_wb] = v }
+  p.on('--rank-twb PATH', 'when ambiguous, rank candidates using a downloaded .twb (adds db-name tie-break)') { |v| opts[:rank_twb] = v }
   p.on('--connections-fixture FILE', 'TEST ONLY: read the connections list from FILE instead of the API') { |v| opts[:fixture] = v }
   p.on('--force', 'ignore a cached connection.json and re-resolve') { opts[:force] = true }
 end.parse!
@@ -64,11 +66,16 @@ def write_json(path, obj)
 end
 
 # Normalize a connection record from /v2/connections (entries[]) into our shape.
+# host/account/warehouse are carried so the connection auto-ranker (rank-connections.rb)
+# can match the workbook's warehouse without a second /v2/connections fetch.
 def norm_conn(c)
   {
     'connection_id' => c['connectionId'] || c['id'],
     'name'          => c['name'] || c['label'],
     'type'          => c['type'] || c['connectionType'] || c.dig('warehouse', 'type'),
+    'host'          => c['host'],
+    'account'       => c['account'],
+    'warehouse'     => c['warehouse'],
   }
 end
 
@@ -134,12 +141,53 @@ if resolved.nil?
     resolved = pick
     resolved_via = (conns.size == 1 ? 'only-connection' : 'name-match')
   else
-    write_json(cand_path, { 'count' => conns.size, 'candidates' => conns })
-    warn "[ASK] intake: #{conns.size} connections available — cannot pick safely."
-    warn "      Candidates written to #{cand_path}. Ask the user which to use, then re-run:"
-    warn "        ruby scripts/intake.rb --workdir #{opts[:dir]} --connection <id>"
-    conns.first(10).each { |c| warn "        - #{c['connection_id']}  #{c['name']} (#{c['type']})" }
-    exit 3
+    # Auto-rank against the Tableau workbook's warehouse (type + host/account) when a
+    # rank source is supplied. A UNIQUE type+host match auto-resolves (the whole point
+    # of the front door — no manual .twb grep, no 26-way guess); otherwise we still ASK
+    # but hand the agent a ranked list with a clear top pick.
+    ranked = nil
+    # rank-connections.rb ships only where a warehouse fingerprint is available
+    # (tableau-to-sigma). In other plugins the ranker is absent, so the flags no-op
+    # and we fall through to the plain ASK — the shared front door stays generic.
+    if (opts[:rank_wb] || opts[:rank_twb]) && File.exist?(File.join(__dir__, 'rank-connections.rb'))
+      begin
+        require_relative 'rank-connections'
+        fp = {}
+        if opts[:rank_wb]
+          require_relative 'lib/tableau_rest'
+          begin; Tableau.site_id; rescue Tableau::Error; Tableau.refresh_token!; end
+          fp = RankConnections.merge_fp(fp, RankConnections.fingerprint_from_workbook(Tableau, opts[:rank_wb]))
+        end
+        if opts[:rank_twb] && File.exist?(opts[:rank_twb])
+          fp = RankConnections.merge_fp(fp, RankConnections.fingerprint_from_twb(File.read(opts[:rank_twb], encoding: 'UTF-8')))
+        end
+        ranked = RankConnections.rank(fp, conns) unless fp['type'].to_s.empty?
+        ranked && (ranked['fingerprint'] = fp)
+      rescue => e
+        warn "      (auto-rank unavailable: #{e.message} — falling back to a plain ASK)"
+      end
+    end
+
+    if ranked && ranked['confident']
+      resolved = ranked['recommended'].slice('connection_id', 'name', 'type')
+      resolved_via = 'auto-rank'
+      warn "[OK] intake: auto-ranked #{conns.size} connections against the workbook's warehouse " \
+           "(type=#{RankConnections.canon_type(ranked['fingerprint']['type'])} host=#{ranked['fingerprint']['host'] || '?'})."
+      warn "     → picked #{resolved['name']} (#{resolved['connection_id']}) — #{ranked['recommended']['match_reasons'].join('; ')}"
+      warn '     (override with --connection <id> --force if this is wrong.)'
+    else
+      out = ranked ? ranked['ranked'] : conns.map { |c| c.merge('match_score' => nil) }
+      write_json(cand_path, { 'count' => conns.size, 'candidates' => out, 'ranked' => !ranked.nil?, 'fingerprint' => (ranked && ranked['fingerprint']) })
+      warn "[ASK] intake: #{conns.size} connections available — cannot pick safely#{ranked ? ' (ranked, but no unique warehouse match)' : ''}."
+      warn "      Candidates written to #{cand_path}. Ask the user which to use, then re-run:"
+      warn "        ruby scripts/intake.rb --workdir #{opts[:dir]} --connection <id>"
+      unless ranked
+        warn '      TIP: pass --rank-workbook-id <LUID> (or --rank-twb <path>) to pre-rank by the'
+        warn '           workbook\'s warehouse and auto-pick a unique match — or run scripts/rank-connections.rb.'
+      end
+      (out).first(10).each { |c| warn "        - #{c['connection_id']}  #{c['name']} (#{c['type']})#{c['match_score'] ? "  [score #{c['match_score']}]" : ''}" }
+      exit 3
+    end
   end
 end
 

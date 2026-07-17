@@ -28,9 +28,26 @@ import sys, os, json, time, base64, argparse, re, atexit
 import requests
 import msal
 
-CACHE = "/tmp/pbiauth/cache.bin"
+def _tenant_from_argv(argv):
+    """#347: pre-read --tenant BEFORE the module-level MSAL app/cache are built.
+    Accepts a raw tenant GUID or a pasted report URL (ctid=... is extracted)."""
+    for i, a in enumerate(argv):
+        v = a.split("=", 1)[1] if a.startswith("--tenant=") else (
+            argv[i + 1] if a == "--tenant" and i + 1 < len(argv) else None)
+        if v:
+            m = re.search(r"[?&]ctid=([0-9a-fA-F-]{36})", v)
+            return m.group(1) if m else v
+    return None
+
+
+_t = _tenant_from_argv(sys.argv)
+if _t:
+    os.environ["PBI_TENANT"] = _t
+_TENANT = os.environ.get("PBI_TENANT", "organizations")  # default = caller's home tenant
+
+CACHE = os.environ.get("PBI_TOKEN_CACHE") or ("/tmp/pbiauth/cache.bin" if _TENANT == "organizations" else f"/tmp/pbiauth/cache-{_TENANT}.bin")
 CLIENT_ID = "ea0616ba-638b-4df5-95b9-636659ae5121"  # well-known PowerBI Desktop public client
-AUTHORITY = "https://login.microsoftonline.com/organizations"
+AUTHORITY = f"https://login.microsoftonline.com/{_TENANT}"
 FABRIC_SCOPE = ["https://api.fabric.microsoft.com/.default"]
 PBI_SCOPE = ["https://analysis.windows.net/powerbi/api/.default"]
 FABRIC_BASE = "https://api.fabric.microsoft.com/v1"
@@ -333,6 +350,9 @@ def main():
                     help="fail rather than launch a device-code flow (headless / CI)")
     ap.add_argument("--workspaces", default=None, help="comma-sep workspace ids to limit to")
     ap.add_argument("--limit-models", type=int, default=0, help="cap models scanned (0=all)")
+    ap.add_argument("--tenant", default=None,
+                    help="target tenant (guest/B2B) — raw GUID or a report URL with ctid=...; "
+                         "pre-parsed at import (default: home tenant)")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
     os.makedirs(os.path.join(args.out, "raw-tmsl"), exist_ok=True)

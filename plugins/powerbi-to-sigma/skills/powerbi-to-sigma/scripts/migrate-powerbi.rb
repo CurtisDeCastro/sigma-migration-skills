@@ -129,6 +129,10 @@ OptionParser.new do |o|
   o.on('--workspace ID')       { |v| opts[:ws] = v }
   o.on('--dataset ID')         { |v| opts[:dataset] = v }
   o.on('--skip-freshness')     {     opts[:skip_fresh] = true }
+  # #347: target a report/model in a DIFFERENT tenant than your HOME tenant
+  # (guest / B2B). A raw tenant GUID, or a pasted report URL (ctid=... parsed).
+  # Threaded to every Power BI child via ENV['PBI_TENANT'] (they inherit env).
+  o.on('--tenant ID')          { |v| opts[:tenant] = v }
   # Phase E (opt-in) — Enhance. NEVER runs without --enhance; with --enhance
   # but no --enhance-accept the run stops at exit 14 with the scan proposals
   # (present them per-item to the human, e.g. AskUserQuestion), then re-run
@@ -143,6 +147,14 @@ OptionParser.new do |o|
   o.on('--reuse-dm ID')        { |v| opts[:reuse_dm] = v }
   o.on('--no-reuse')           {     opts[:no_reuse] = true }
 end.parse!
+
+# #347: publish the target tenant into the env so EVERY Power BI child process
+# (fabric-extract.py, pbi-freshness.py, phase6 harness, …) inherits it and
+# authenticates against the report's tenant instead of the caller's home tenant.
+if opts[:tenant]
+  ctid = opts[:tenant][/[?&]ctid=([0-9a-fA-F-]{36})/, 1]
+  ENV['PBI_TENANT'] = ctid || opts[:tenant]
+end
 
 VENDORED_PBI = File.expand_path('../converter/powerbi.mjs', __dir__)
 if opts[:print_converter]
@@ -159,11 +171,15 @@ end
 CONNECT_HINT = <<~HINT.freeze
   Extract them by CONNECTING to Power BI (device-code login, no Entra app):
       python scripts/fabric-extract.py --report "<report name>" [--workspace "<ws id|name>"] \\
+        [--tenant "<tenant GUID | report URL with ctid=...>"] \\
         --out-dir <WORK> --report-out-dir <WORK> --report-bundle <WORK>/report-bundle.json
   It prints a device code + https://microsoft.com/devicelogin — the USER signs in
   once, then re-run this command with the extracted --tmsl (model.bim) + --pbir
   (report-bundle.json). See refs/connection.md. Do NOT hand-author a workbook spec
   or proceed without the model — if you can't extract it, STOP and tell the user.
+  Cross-tenant (guest/B2B): if the report lives in a client's tenant, pass
+  --tenant <that tenant GUID or the ctid= in the report URL> here AND to
+  fabric-extract.py, or every Fabric call 404s as WorkspaceNotFound.
 HINT
 abort "FATAL: missing --tmsl (the Power BI semantic model, TMSL/model.bim).\n#{CONNECT_HINT}" unless opts[:tmsl]
 abort "FATAL: --tmsl not found: #{opts[:tmsl]}\n#{CONNECT_HINT}" unless File.exist?(opts[:tmsl])
@@ -306,8 +322,11 @@ signals_path = File.join(WORK, 'signals.json')
 # a real system Python via PyResolve (Windows Store-stub safe; the offline PBIR
 # parse is stdlib-only). PY_ARGV is an array so a multi-token launcher (`py -3`)
 # survives the splat below.
+# bead 4alk.4: venvs are POSIX bin/python OR Windows Scripts\python.exe — probe
+# both layouts per venv root rather than assuming bin/.
 py = opts[:python] || ENV['PBI_PY'] ||
-     [File.join(WORK, '.venv', 'bin', 'python'), '/tmp/pbiauth/bin/python']
+     [File.join(WORK, '.venv', 'bin', 'python'), File.join(WORK, '.venv', 'Scripts', 'python.exe'),
+      '/tmp/pbiauth/bin/python', '/tmp/pbiauth/Scripts/python.exe']
        .find { |p| File.exist?(p) }
 PY_ARGV = py ? [py] : PyResolve.argv
 if classic_rj
@@ -385,9 +404,20 @@ end
 unless opts[:cvt_out]
 puts "   converter: #{CONV_MODULE == VENDORED_PBI ? 'vendored bundle (converter/powerbi.mjs)' : CONV_MODULE} (no data leaves this machine)"
 shim = File.join(WORK, '_convert.mjs')
+# Node ESM on Windows rejects a bare drive-letter specifier
+# (`import ... from "C:/path/powerbi.mjs"` → ERR_UNSUPPORTED_ESM_URL_SCHEME,
+# protocol 'c:'). Absolute paths must be file:// URLs there. POSIX absolute
+# paths import fine as-is, so we only rewrite on Windows and leave the
+# (working) macOS/Linux path byte-identical.
+import_specifier =
+  if Gem.win_platform? && CONV_MODULE.to_s.match?(/\A[A-Za-z]:/)
+    'file:///' + CONV_MODULE.gsub('\\', '/')
+  else
+    CONV_MODULE
+  end
 File.write(shim, <<~JS)
   import { readFileSync, writeFileSync } from 'node:fs';
-  import { convertPowerBIToSigma } from #{CONV_MODULE.to_json};
+  import { convertPowerBIToSigma } from #{import_specifier.to_json};
   const model = JSON.parse(readFileSync(#{opts[:tmsl].to_json}, 'utf8'));
   const out = convertPowerBIToSigma(model, {
     connectionId: #{(opts[:conn] || '').to_json},
@@ -1425,12 +1455,19 @@ end
 divergent = fresh_classes.count { |c| c[0] == 'DIVERGENT' }
 
 parity_ok = err_cols.empty? && divergent.zero?
+# NOTE: this is a RESOLUTION check, not value parity. It proves every column
+# resolves (no type "error") and the warehouse matches the PBI snapshot
+# (freshness) — it does NOT diff the built aggregates against the source's
+# DAX/SQL results. Value parity is the assert-phase6-ran.rb / phase6-parity-pbi.rb
+# gate (writes parity-final.json). Labeling this "PARITY: PASS" over-claimed and
+# masked that the value bar was never run in the one-shot path (bead: p5y2 seam).
 if err_cols.empty?
-  puts "   PARITY: #{parity_ok ? 'PASS' : 'FAIL'} — #{total_cols} workbook column(s) resolve (0 error-typed); " \
+  puts "   RESOLUTION: #{parity_ok ? 'PASS' : 'FAIL'} — #{total_cols} workbook column(s) resolve (0 error-typed); " \
        "#{chart_els.size} chart element(s) built across #{chart_pages.size} page(s)"
-  puts "   PARITY: FAIL — #{divergent} DIVERGENT freshness delta(s) above" unless divergent.zero?
+  puts '   NOTE: value parity NOT diffed vs source in this path — run assert-phase6-ran.rb / phase6-parity-pbi.rb to value-verify.'
+  puts "   RESOLUTION: FAIL — #{divergent} DIVERGENT freshness delta(s) above" unless divergent.zero?
 else
-  puts "   PARITY: FAIL — #{err_cols.size}/#{total_cols} column(s) resolved to type 'error':"
+  puts "   RESOLUTION: FAIL — #{err_cols.size}/#{total_cols} column(s) resolved to type 'error':"
   err_cols.first(8).each { |c| puts "     [#{c['elementId']}] #{c['label']}: #{c['formula']}" }
 end
 
@@ -1487,8 +1524,8 @@ puts
 puts '================ RESULT ================'
 puts "dataModelId : #{dm_id}"
 puts "workbookId  : #{wb_id}"
-puts "PARITY      : #{parity_ok ? 'PASS' : 'FAIL'} (#{total_cols} cols resolve, #{err_cols.size} error" \
-     "#{fresh_classes.any? ? format(', freshness: %d match / %d stale-explained / %d divergent', fresh_classes.count { |c| c[0] == 'MATCH' }, fresh_classes.count { |c| c[0] == 'STALE-EXPLAINED' }, divergent) : ''})"
+puts "RESOLUTION  : #{parity_ok ? 'PASS' : 'FAIL'} (#{total_cols} cols resolve, #{err_cols.size} error" \
+     "#{fresh_classes.any? ? format(', freshness: %d match / %d stale-explained / %d divergent', fresh_classes.count { |c| c[0] == 'MATCH' }, fresh_classes.count { |c| c[0] == 'STALE-EXPLAINED' }, divergent) : ''}); value parity NOT run — see assert-phase6-ran.rb"
 if fresh_ok
   puts "freshness   : PBI last refresh #{fresh_ok['endTime']} (#{stale_days} days ago)" \
        "#{freshness['credsSuspect'] ? ' — REFRESH FAILING (creds)' : ''}"
@@ -1510,8 +1547,11 @@ end
 begin
   succ = File.join(WORK, 'phase6-success.json')
   if built_ok
+    # 'resolution-pass' (not 'parity-pass'): this marker records that the build
+    # resolved + freshness-matched, NOT that values were diffed against source.
+    # verify-complete.rb reports value parity separately (parity-final.json).
     File.write(succ, JSON.pretty_generate('workbookId' => wb_id, 'chartCount' => chart_els.size,
-                                          'gates' => 'parity-pass',
+                                          'gates' => 'resolution-pass',
                                           'generatedAt' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')))
   elsif File.exist?(succ)
     File.delete(succ) # a prior success marker is stale if this run isn't green

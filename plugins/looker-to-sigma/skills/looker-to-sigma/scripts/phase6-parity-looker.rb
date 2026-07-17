@@ -92,6 +92,27 @@ def chart_columns(el)
   end
 end
 
+# A single Look often maps to a `table` / `pivot-table` with NO *-chart element,
+# so the chart-only planner above would leave charts empty and abort. Give such an
+# element a grain-invariant GRAND-TOTAL parity target: the SUM of its first ADDITIVE
+# aggregate column (grouped-table calculation / pivot value). SUM of per-group sums
+# == the overall total, so it holds regardless of the row grain — but ONLY for
+# additive measures (summing per-group AVERAGEs is meaningless), so a non-additive-
+# only table returns nil and is handled by a named parity waiver instead.
+ADDITIVE_AGG = /\A\s*(Sum|Count|CountDistinct|SumIf|CountIf|GrandTotal|CumulativeSum)\s*\(/i
+def table_total_column(el)
+  cols = el['columns'] || []
+  by = cols.each_with_object({}) { |c, h| h[c['id']] = c }
+  cand = if el['kind'] == 'pivot-table'
+           Array(el['values'])
+         else
+           g = Array(el['groupings']).first
+           g ? Array(g['calculations']) : []
+         end
+  add = cand.find { |id| by[id] && by[id]['formula'].to_s =~ ADDITIVE_AGG }
+  add && by[add] ? [add, by[add]['name']] : nil
+end
+
 if !opts[:finalize]
   abort('--workbook-id required for pass 1') unless opts[:wb]
   $LOAD_PATH.unshift File.expand_path('lib', __dir__)
@@ -107,14 +128,22 @@ if !opts[:finalize]
   charts = []
   Array(spec['pages']).each do |page|
     Array(page['elements']).each do |el|
-      next unless el['kind'].to_s.end_with?('-chart')
-      pairs = chart_columns(el)
-      next unless pairs
-      charts << { 'chart' => el['name'], 'sigma_element_id' => el['id'],
-                  'kind' => el['kind'],
-                  'sigma_columns' => pairs.compact.map { |id_name| id_name[1] },
-                  'sigma_column_ids' => pairs.compact.map { |id_name| id_name[0] },
-                  'workbook_id' => opts[:wb] }
+      if el['kind'].to_s.end_with?('-chart')
+        pairs = chart_columns(el)
+        next unless pairs
+        charts << { 'chart' => el['name'], 'sigma_element_id' => el['id'],
+                    'kind' => el['kind'],
+                    'sigma_columns' => pairs.compact.map { |id_name| id_name[1] },
+                    'sigma_column_ids' => pairs.compact.map { |id_name| id_name[0] },
+                    'workbook_id' => opts[:wb] }
+      elsif %w[table pivot-table].include?(el['kind'].to_s)
+        tt = table_total_column(el)
+        next unless tt
+        charts << { 'chart' => el['name'], 'sigma_element_id' => el['id'],
+                    'kind' => 'table-total', 'source_kind' => el['kind'],
+                    'sigma_columns' => [tt[1]], 'sigma_column_ids' => [tt[0]],
+                    'workbook_id' => opts[:wb] }
+      end
     end
   end
   abort('no plannable chart elements found in the workbook spec') if charts.empty?
@@ -142,7 +171,10 @@ if !opts[:finalize]
     # queries); the display names ride along in a trailing SQL comment for readability.
     ids = c['sigma_column_ids']
     names = c['sigma_columns']
-    sql = if ids.length >= 2
+    sql = if c['kind'] == 'table-total'
+            # grand total of an additive column over the grouped/pivot element
+            %(SELECT SUM("#{ids[0]}") AS val FROM "workbook"."#{c['sigma_element_id']}" -- grand total of: #{names[0]})
+          elsif ids.length >= 2
             %(SELECT "#{ids[0]}" AS dim, "#{ids[1]}" AS val FROM "workbook"."#{c['sigma_element_id']}" ORDER BY dim NULLS FIRST -- dim: #{names[0]}, val: #{names[1]})
           else
             %(SELECT "#{ids[0]}" AS val FROM "workbook"."#{c['sigma_element_id']}" -- val: #{names[0]})

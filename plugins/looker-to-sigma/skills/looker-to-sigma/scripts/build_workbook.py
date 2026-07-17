@@ -32,40 +32,33 @@ TIMEFRAME_SUFFIX = {"raw": "Raw", "time": "Time", "date": "Date", "week": "Week"
                     "month": "Month", "quarter": "Quarter", "year": "Year"}
 DEFAULT_TIMEFRAMES = ["raw", "time", "date", "week", "month", "quarter", "year"]
 
-TILE_KIND = {
-    "single_value": "kpi-chart", "looker_column": "bar-chart", "looker_bar": "bar-chart",
-    "looker_area": "area-chart", "looker_line": "line-chart", "looker_pie": "pie-chart",
-    "looker_donut_multiples": "donut-chart", "table": "table", "looker_grid": "table",
-    "looker_scatter": "scatter-chart",
-}
-AGG = {"average": "Avg", "sum": "Sum", "min": "Min", "max": "Max", "median": "Median"}
+# ── documentation-grounded mapping catalogs (SINGLE SOURCE OF TRUTH) ─────────
+# Every classifier map below is loaded from refs/catalogs/<dimension>.json —
+# cited rows (source doc + Sigma target + sigma_verified), complete coverage,
+# and a loud fallback on anything unmapped. NO inline mapping literal may bypass
+# these catalogs (grep-enforced by tests/test_grounding.py). The human-readable
+# coverage matrix in refs/looker-coverage.md is GENERATED from these files.
+# Loader: shared/lib/coverage_catalog.py (synced to scripts/lib/). Design mirrors
+# the beads-sigma-93ps contract: catalog = data, code = thin resolver/predicates.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
+import coverage_catalog as _cc  # noqa: E402
+_CAT_DIR = _cc.default_catalog_dir(__file__)
+VIZ_CAT  = _cc.load(_CAT_DIR, "viz-kind")        # Looker vis type   -> Sigma element kind
+FMT_CAT  = _cc.load(_CAT_DIR, "number-format")   # value_format_name -> Sigma number format (D3)
+AGG_CAT  = _cc.load(_CAT_DIR, "aggregation")     # measure type      -> Sigma aggregate fn (+ *If)
+CTRL_CAT = _cc.load(_CAT_DIR, "control")         # dashboard filter  -> Sigma control kind
 
-# ── LookML value_format_name / value_format -> Sigma column format ──────────
-# Sigma columns carry an optional `format` object — for numbers:
-#   {"kind": "number", "formatString": "<d3-format>"}  (see sigma-workbooks
-#   reference/specification/formatting.md). LookML measures declare their display
-#   via a named format (`value_format_name`) or a custom Excel-style mask
-#   (`value_format`). Map the common named formats to d3 format strings; fall
-#   back to a best-effort translation of a custom mask.
-VALUE_FORMAT_NAME_MAP = {
-    "usd":          "$,.2f",
-    "usd_0":        "$,.0f",
-    "gbp":          "£,.2f",
-    "gbp_0":        "£,.0f",
-    "eur":          "€,.2f",
-    "eur_0":        "€,.0f",
-    "percent_0":    ",.0%",
-    "percent_1":    ",.1%",
-    "percent_2":    ",.2%",
-    "percent_3":    ",.3%",
-    "percent_4":    ",.4%",
-    "decimal_0":    ",.0f",
-    "decimal_1":    ",.1f",
-    "decimal_2":    ",.2f",
-    "decimal_3":    ",.3f",
-    "decimal_4":    ",.4f",
-    "id":           "d",            # plain integer, no thousands separator
-}
+# Back-compat dict views derived from the catalogs. These carry the SAME keys and
+# values the old inline literals did (locked by tests/golden/); the loud fallback
+# on a miss lives at each USE site (resolve_or_warn), not here.
+TILE_KIND = {r["source"]: r["sigma"] for r in VIZ_CAT.rows}
+AGG = {r["source"]: r["sigma"] for r in AGG_CAT.rows if r.get("sigma")}
+
+# LookML value_format_name -> Sigma column `format` object ({"kind":"number",
+# "formatString":"<d3>"}, see the Sigma data-types-and-formats ref). Custom
+# `value_format` Excel/TO_CHAR masks are handled by the cited predicates
+# custom_value_format_to_d3() / snowflake_mask_to_format() below.
+VALUE_FORMAT_NAME_MAP = {r["source"]: r["sigma"] for r in FMT_CAT.rows}
 
 def custom_value_format_to_d3(mask):
     """Best-effort translate a LookML custom value_format (Excel-style mask) to a
@@ -206,7 +199,7 @@ def parse_join_aliases(model_files):
     return aliases
 
 
-def build_field_index(view_files, aliases=None):
+def build_field_index(view_files, aliases=None, warnings=None):
     measures = {}   # "view.field" -> (agg_type, base_display_or_None, sql, filters)
     formats = {}    # "view.field" -> Sigma format dict (or None)
     dims = set()    # "view.field"
@@ -283,8 +276,21 @@ def build_field_index(view_files, aliases=None):
             # capture the measure's display format (named or custom mask)
             vfn = re.search(r"value_format_name:\s*(\w+)", block)
             vf = re.search(r'value_format:\s*"([^"]*)"', block)
-            fmt = sigma_format_for(vfn.group(1) if vfn else None, vf.group(1) if vf else None)
-            if fmt: formats[key] = fmt
+            _vfn = vfn.group(1) if vfn else None
+            _vf = vf.group(1) if vf else None
+            fmt = sigma_format_for(_vfn, _vf)
+            if fmt:
+                formats[key] = fmt
+            elif (_vfn or _vf) and warnings is not None:
+                # a display format WAS declared but neither the documented
+                # value_format_name catalog nor the custom-mask parser could map it —
+                # ship the numeric value UNFORMATTED + say so (never a silent None,
+                # never a name-substring currency guess).
+                _decl = ("value_format_name '%s'" % _vfn) if _vfn else ("value_format '%s'" % _vf)
+                warnings.append(
+                    "⚠ number-format: measure '%s' declares %s but it maps to no Sigma "
+                    "format (refs/catalogs/number-format.json) — column shipped UNFORMATTED. "
+                    "Add a cited row if this is a real named format." % (key, _decl))
             # TO_CHAR display-mask measure → numeric aggregate + Sigma format
             # (display-identical to the mask; value stays numeric). Unparseable
             # masks keep mtype=string and stay on the loud-warning path.
@@ -343,14 +349,42 @@ def main():
     a = ap.parse_args()
 
     dash = json.load(open(a.contract))
+    # Item 1 — authoritative dim/measure classification. A Look (fetch_looker_look.py)
+    # carries `fieldMeta` = {field: {category, aggType?, baseColumn?, valueFormat?, sql?}}
+    # pulled from Looker's explore metadata + dynamic_fields hints. Dashboards emit no
+    # `fieldMeta`, so this dict is empty for them and every predicate below falls back
+    # to the view-.lkml classification (behavior unchanged; golden diff empty).
+    field_cat = dash.get("fieldMeta") or {}
     # Model files live alongside or one level above the views dir — read their
     # join `from:` aliases so alias-qualified dashboard fields resolve.
     model_files = (glob.glob(os.path.join(a.views, "*.model.lkml"))
                    + glob.glob(os.path.join(a.views, "..", "*.model.lkml")))
     aliases = parse_join_aliases(model_files)
-    measures, dims, view_pk, formats, yesno_dims, dim_groups, dim_labels = build_field_index(
-        sorted(glob.glob(os.path.join(a.views, "*.view.lkml"))), aliases)
     warnings = []
+    measures, dims, view_pk, formats, yesno_dims, dim_groups, dim_labels = build_field_index(
+        sorted(glob.glob(os.path.join(a.views, "*.view.lkml"))), aliases, warnings)
+
+    # Fold Looker's authoritative categories into the local indexes so a Look's
+    # ad-hoc/custom measures (dynamic_fields) — or a run with NO --views — classify
+    # correctly instead of being dropped or forced into groupBy. A measure absent
+    # from the local views gets a synthesized index entry (aggType + base column)
+    # so col_display()/formula_for() produce the right Sigma aggregate.
+    for _fname, _meta in field_cat.items():
+        _cat = _meta.get("category")
+        if _cat == "measure" and _fname not in measures:
+            _base = _meta.get("baseColumn")          # fully-qualified "view.col" (or None)
+            _agg = _meta.get("aggType") or "sum"
+            _sqlx = _meta.get("sql") or (("${TABLE}.%s" % leaf(_base)) if _base else "")
+            # store the base DISPLAY leaf (like a view measure); col_display() derives
+            # the denorm suffix from field_cat[...].baseColumn's view (below).
+            measures[_fname] = (_agg, disp(leaf(_base)) if _base else None, _sqlx, [])
+            _vf = _meta.get("valueFormat")
+            if _vf and _fname not in formats:
+                _fmt = sigma_format_for(_vf, None)
+                if _fmt:
+                    formats[_fname] = _fmt
+        elif _cat == "dimension":
+            dims.add(_fname)
 
     # ── per-explore masters ────────────────────────────────────────────────────
     # A Looker dashboard's tiles can hit SEVERAL explores; one master per explore,
@@ -423,7 +457,13 @@ def main():
         if ff: col["format"] = ff
         return col
 
-    def is_measure(f): return f in measures
+    def is_measure(f):
+        # fieldMeta is AUTHORITATIVE (Looker's own dim/measure category); fall back to
+        # the view-.lkml index only when the field isn't in fieldMeta (dashboard path).
+        c = (field_cat.get(f) or {}).get("category")
+        if c is not None:
+            return c == "measure"
+        return f in measures
     def is_ratio(f):
         """Measure whose sql references other measures or is a type:number arithmetic
         expression (e.g. AOV = revenue/orders) — has no single base column."""
@@ -471,6 +511,12 @@ def main():
             if is_ratio(f): return None           # composite — components needed separately
             base = measures[f][1]                 # base column (None for plain count)
             if not base: return None
+            # fieldMeta (custom/dynamic) measure: its field name is bare (no "view."
+            # prefix), so derive the denorm suffix from the base column's OWN view.
+            _bc = (field_cat.get(f) or {}).get("baseColumn")
+            if _bc:
+                _bview = _bc.split(".")[0] if "." in _bc else view
+                return base + ("" if _bview == explore else f" ({_bview})")
             # A count/count_distinct on a JOINED view keyed on that view's PK
             # references the join key — which the denorm element OMITS (a
             # cross-element passthrough of a join key compiles to type "error").
@@ -500,8 +546,7 @@ def main():
             return "(" + formula_for(key, explore) + ")" if key in measures else m.group(0)
         e = re.sub(r"\$\{(\w+)\}", sub, measures[f][2])
         return re.sub(r"\bNULLIF\s*\(", "NullIf(", e, flags=re.I).replace("${TABLE}.", "").strip()
-    IF_AGG = {"sum": "SumIf", "count": "CountIf", "count_distinct": "CountDistinctIf",
-              "average": "AvgIf", "max": "MaxIf", "min": "MinIf"}
+    IF_AGG = {r["source"]: r["sigma_if"] for r in AGG_CAT.rows if r.get("sigma_if")}
 
     def measure_filters(f):
         return measures[f][3] if is_measure(f) and len(measures[f]) > 3 else []
@@ -566,10 +611,27 @@ def main():
                 if view != explore:
                     pkd = pk_display(view, explore)
                     if pkd: return f"CountDistinct([{master_of(explore)['name']}/{pkd}])"
+                return "Count()"   # fact-grain row count (documented; aggregation.json 'count')
+            if mtype == "count_distinct":
+                if cd:
+                    return f"CountDistinct([{master_of(explore)['name']}/{cd}])"
+                warnings.append(f"⚠ measure '{f}': count_distinct base column did not resolve to "
+                                f"a master column — emitted Count() (counts ROWS, not distinct "
+                                f"values); parity at risk, add the base column to the explore.")
                 return "Count()"
-            if mtype == "count_distinct": return f"CountDistinct([{master_of(explore)['name']}/{cd}])" if cd else "Count()"
             fn = AGG.get(mtype)
-            return f"{fn}([{master_of(explore)['name']}/{cd}])" if fn and cd else "Count()"
+            if fn and cd:
+                return f"{fn}([{master_of(explore)['name']}/{cd}])"
+            if not fn:
+                # no documented Sigma aggregate for this LookML measure type — DO NOT fake a
+                # number; emit a loud placeholder column (refs/catalogs/aggregation.json).
+                warnings.append(f"⚠ measure '{f}': no documented Sigma aggregate for LookML measure "
+                                f"type '{mtype}' (refs/catalogs/aggregation.json) — emitted a "
+                                f"placeholder column; add a cited row if this is a real type.")
+                return f'"⚠ {leaf(f)}: unmapped measure type {mtype}"'
+            warnings.append(f"⚠ measure '{f}' (type {mtype}): base column did not resolve to a "
+                            f"master column — emitted Count() as a degraded fallback; verify parity.")
+            return "Count()"
         return f"[{master_of(explore)['name']}/{cd}]"
     def _warn_count(f, el):
         if measures.get(f, (None,))[0] == "count":
@@ -645,6 +707,8 @@ def main():
     def field_resolvable(f):
         if not f or "." not in f:
             return True                      # synthetic/unqualified — leave alone
+        if f in field_cat:
+            return True                      # Looker says it exists — trust it (no-checkout path)
         if is_measure(f) or f in dims:
             return True
         if dimgroup_display(f) is not None:
@@ -868,6 +932,15 @@ def main():
         ex = el["explore"]
         ms = [f for f in el["fields"] if is_measure(f)]
         ds = [f for f in el["fields"] if not is_measure(f)]
+
+        # ── pivoted table → real Sigma pivot-table (cross-tab) ────────────────
+        # A Looker grid/table WITH pivots is a cross-tab: row dims on the row shelf,
+        # the pivot field(s) on the column shelf, measures as the aggregated cells.
+        # Requires ≥1 non-pivot row dim AND ≥1 measure; otherwise fall through to the
+        # flat `table` branch (which flattens + warns). Sigma pivot-table REQUIRES
+        # both rowsBy and columnsBy (verified: sigma-workbooks tables.md).
+        if kind == "table" and el.get("pivots") and ds and ms:
+            kind = "pivot-table"
 
         # ── measure-only grid → a row of KPI tiles ────────────────────────────
         # A Looker table/grid with NO dimensions renders one row of totals. A
@@ -1129,6 +1202,27 @@ def main():
                 warnings.append(f"tile '{el['name']}': pivot {el['pivots']} flattened to columns — "
                                 f"rebuild as a Sigma pivot-table for true cross-tab")
 
+        elif kind == "pivot-table":
+            # Cross-tab: row dims → rowsBy, pivot field(s) → columnsBy, measures →
+            # values (the aggregated cells). Same source/columns as `table`; the
+            # shelves replace `groupings`. Shape verified: sigma-workbooks tables.md.
+            cols, row_ids, col_ids, val_ids = [], [], [], []
+            pivset = set(el.get("pivots") or [])
+            for f in el["fields"] + (el.get("pivots") or []):
+                tcol = {"id": sid("c"), "formula": formula_for(f, ex), "name": disp(leaf(f))}
+                if is_measure(f):
+                    apply_fmt(tcol, f); _warn_count(f, el); val_ids.append(tcol["id"])
+                elif f in pivset:
+                    col_ids.append(tcol["id"])
+                else:
+                    row_ids.append(tcol["id"])
+                cols.append(tcol)
+                field2cid[f] = tcol["id"]
+            base["columns"] = cols
+            base["values"] = val_ids
+            base["rowsBy"] = [{"id": i} for i in row_ids]
+            base["columnsBy"] = [{"id": i} for i in col_ids]
+
         # merged-results auto-join (Looker merge_result_id) — adds the secondary
         # explore's measure(s) as Max(Lookup(...)) columns now that base is built.
         attach_merge(el, base, kind, ex)
@@ -1174,11 +1268,66 @@ def main():
                     base["groupings"][0].setdefault("sort", []).append({"columnId": cid, "direction": direction})
                 else:
                     base.setdefault("sort", []).append({"columnId": cid, "direction": direction})
+            elif kind == "pivot-table":
+                # a dimension sort attaches to its row/column shelf item; a measure
+                # sort attaches `by: <value colId>` to the first row shelf item.
+                placed = False
+                for shelf in ("rowsBy", "columnsBy"):
+                    for it in base.get(shelf, []):
+                        if it.get("id") == cid:
+                            it["sort"] = {"direction": direction}; placed = True
+                if not placed and is_measure(sf) and base.get("rowsBy"):
+                    base["rowsBy"][0]["sort"] = {"direction": direction, "by": cid}
+
+        # ── row limit (Looker `limit`) → element top-N filter ─────────────────
+        # A Looker grid's row limit is a "first N after sort"; Sigma's closest
+        # spec-authorable analog is a top-N element filter ranked by a measure
+        # (rowCount is a literal — sigma-workbooks tables.md). Applies to grouped
+        # tables / pivots (an aggregated row set). Needs a measure column to rank by.
+        # Only a DELIBERATE small cap (< 500) is a top-N; Looker's default 500/5000
+        # row cap is a safety limit, not an analytical top-N — don't add a filter for it.
+        lim = el.get("limit")
+        if kind in ("table", "pivot-table") and isinstance(lim, int) and 0 < lim < 500:
+            rank_cid = None
+            # prefer the measure named in the first sort; else the first measure column
+            for s in (el.get("sorts") or []):
+                sf0 = str(s).split()[0]
+                if is_measure(sf0) and field2cid.get(sf0):
+                    rank_cid = field2cid[sf0]; break
+            if not rank_cid:
+                rank_cid = next((field2cid[f] for f in el["fields"] if is_measure(f) and field2cid.get(f)), None)
+            if rank_cid and base.get("groupings" if kind == "table" else "values"):
+                base.setdefault("filters", []).append({
+                    "id": sid("f"), "columnId": rank_cid, "kind": "top-n",
+                    "rankingFunction": "rank", "mode": "top-n", "rowCount": lim,
+                    "includeNulls": "when-no-value-is-selected"})
+                warnings.append(f"tile '{el['name']}': Looker row limit {lim} → Sigma top-{lim} "
+                                "filter ranked by the primary measure (approximates 'first N after sort').")
+            elif kind in ("table", "pivot-table"):
+                warnings.append(f"tile '{el['name']}': Looker row limit {lim} not applied — no measure "
+                                "column to rank a top-N by; add a Top-N in the Sigma UI if needed.")
+
+        # ── totals (Looker `total` / `row_total`) — UI follow-up ──────────────
+        # Column/row grand totals have no reliably-portable spec key on table/
+        # pivot-table (pivot `totals` also 500s CSV export), so surface them as a
+        # loud follow-up instead of emitting an unverified key. Never silent.
+        if el.get("total") or el.get("rowTotal"):
+            which = " + ".join([w for w, on in (("column totals", el.get("total")),
+                                                ("row totals", el.get("rowTotal"))) if on])
+            warnings.append(f"tile '{el['name']}': Looker {which} not ported — enable totals on the "
+                            "Sigma element in the UI (spec totals aren't reliably round-trippable).")
+
         # Looker table calcs (dynamic_fields) → Sigma formula columns
         for dyn in (el.get("dynamicFields") or []):
             if not isinstance(dyn, dict):
                 continue
             expr = dyn.get("expression") or ""
+            if not expr:
+                # A custom measure/dimension (based_on/measure/dimension, no
+                # `expression`) is a regular field — it is classified via fieldMeta
+                # and emitted through the normal field path. Skip here so it doesn't
+                # also append an empty-formula duplicate column.
+                continue
             label = dyn.get("label") or dyn.get("table_calculation") or "Calc"
             def _subfield(m):
                 f = m.group(1)
@@ -1191,7 +1340,15 @@ def main():
                 warnings.append(f"tile '{el['name']}': table calc '{label}' uses an unsupported "
                                 f"window fn — review: {expr}")
                 continue
-            base.setdefault("columns", []).append({"id": sid("tc"), "formula": sig.strip(), "name": label})
+            tcid = sid("tc")
+            base.setdefault("columns", []).append({"id": tcid, "formula": sig.strip(), "name": label})
+            # A table calc on a grouped/pivot table must join the aggregation, or it
+            # renders detached from the roll-up. Wire it into the grouping's
+            # calculations (grouped table) / the pivot's values.
+            if kind == "table" and base.get("groupings"):
+                base["groupings"][0].setdefault("calculations", []).append(tcid)
+            elif kind == "pivot-table":
+                base.setdefault("values", []).append(tcid)
         elements.append(base)
         el.setdefault("_emitted", []).append(base)   # control-targeting (listen:)
 
@@ -1278,7 +1435,12 @@ def main():
         # of the Looker filter `type` (a Looker field_filter on a date renders a
         # list in LookML but must become a date control in Sigma).
         _fld = flt.get("dimension") or flt.get("field") or flt.get("_resolvedField")
-        is_date_field = (flt["type"] == "date_filter"
+        # control kind is documentation-grounded (refs/catalogs/control.json): only
+        # a date_filter maps to date-range; every other type is the documented
+        # `list` default. Compositional override: a filter bound to a date/time
+        # dimension_group must be a date control regardless of the Looker type.
+        _type_is_date = (CTRL_CAT.target(flt["type"]) == "date-range")
+        is_date_field = (_type_is_date
                          or (_fld is not None and dimgroup_display(_fld) is not None))
         ctype = "date-range" if is_date_field else "list"
         cid = flt["name"].lower().replace(" ", "-")

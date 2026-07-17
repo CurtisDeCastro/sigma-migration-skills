@@ -144,7 +144,7 @@ else
     'error_columns' => res['error_columns']
   }.compact
   esc_cmd = [
-    *PyResolve.argv, escalate,
+    *PyResolve.argv, PyResolve.winpath(escalate),
     '--skill',              'tableau-to-sigma',
     '--category',           'converter',
     '--feature',            opts[:feature],

@@ -10,6 +10,7 @@ Usage:
 """
 import json
 import os
+import re
 import sys
 import urllib.parse
 import urllib.request
@@ -175,6 +176,132 @@ def _listen(el):
     return out
 
 
+def normalize_element(el, layout=None):
+    """One dashboard_element (or a synthesized Look tile) -> one contract tile dict,
+    or None to skip. `layout` overrides the per-element layout dict (default {}).
+
+    This is the single source of truth for tile normalization: a Look's synthesized
+    element flows through here and normalizes byte-identically to a dashboard tile.
+    """
+    lay = layout if layout is not None else {}
+    q = _query_of(el)
+    # Text/markdown tiles (headers, notes) have no query/fields — capture them
+    # as text elements so the builder can emit a Sigma text element.
+    if el.get("type") == "text" or (not q and (el.get("title_text") or el.get("body_text"))):
+        return {
+            "name": el.get("title") or el.get("title_text") or f"element_{el.get('id')}",
+            "tileType": "text",
+            "titleText": el.get("title_text"),
+            "bodyText": el.get("body_text"),
+            "subtitleText": el.get("subtitle_text"),
+            "layout": lay,
+        }
+    if not q and el.get("type") in (None, "text") and not el.get("title"):
+        return None
+    # Merged-results tile: a `merge_result_id` joins multiple explore queries.
+    # `q` (result_maker.query) is the PRIMARY source only, so render from it but
+    # attach the full merge so the builder can join (or flag) the others.
+    merge = _merge_of(el)
+    if merge and merge.get("sourceQueries"):
+        prim = next((s for s in merge["sourceQueries"] if s.get("isPrimary")), merge["sourceQueries"][0])
+        if not q:                                   # fall back to the primary source query
+            q = {"model": prim.get("model"), "view": prim.get("explore"),
+                 "fields": prim.get("fields") or [], "pivots": prim.get("pivots") or []}
+    vc = _vis_config(el, q)
+    return {
+        "name": el.get("title") or el.get("title_text") or f"element_{el.get('id')}",
+        "tileType": _vis_type(el, q),
+        "merge": merge,
+        "model": q.get("model"), "explore": q.get("view"),
+        "fields": q.get("fields") or [],
+        "pivots": q.get("pivots") or [],
+        "filters": q.get("filters") or {},
+        "sorts": q.get("sorts") or [],
+        "limit": int(q["limit"]) if str(q.get("limit") or "").isdigit() else q.get("limit"),
+        "listen": _listen(el),
+        "dynamicFields": _dyn(q.get("dynamic_fields")),
+        "noteText": el.get("note_text"), "subtitleText": el.get("subtitle_text"),
+        "bodyText": el.get("body_text"),
+        # chart reference lines + color encoding (vis_config) → Sigma refMarks/color
+        "referenceLines": _reflines(vc),
+        "color": _color(vc),
+        "cellVisualizations": _cell_viz(vc),
+        "layout": lay,
+    }
+
+
+def _explore_field_meta(model, explore):
+    """GET /lookml_models/{model}/explores/{explore} -> {field_name: {category,
+    aggType?, valueFormat?}}. Cached per (model, explore). Empty on any error."""
+    cache = getattr(_explore_field_meta, "_c", None)
+    if cache is None:
+        cache = {}; _explore_field_meta._c = cache
+    key = (model, explore)
+    if key in cache:
+        return cache[key]
+    meta = {}
+    if model and explore:
+        try:
+            ex = get("/lookml_models/%s/explores/%s" % (
+                urllib.parse.quote(str(model), safe=""), urllib.parse.quote(str(explore), safe="")))
+            flds = ex.get("fields") or {}
+            for cat, items in (("dimension", flds.get("dimensions") or []),
+                               ("measure", flds.get("measures") or [])):
+                for fdef in items:
+                    nm = fdef.get("name")
+                    if not nm:
+                        continue
+                    m = {"category": cat}
+                    if cat == "measure":
+                        m["aggType"] = fdef.get("type")
+                        # base column, kept fully-qualified ("view.col") so the
+                        # workbook builder can compute the denorm suffix correctly.
+                        sql = fdef.get("sql")
+                        if sql:
+                            m["sql"] = sql
+                            r = re.search(r"\$\{(?:TABLE\}\.)?([\w.]+)\}?", sql)
+                            if r:
+                                col = r.group(1)
+                                vw = nm.split(".")[0]
+                                m["baseColumn"] = col if "." in col else "%s.%s" % (vw, col)
+                    vf = fdef.get("value_format_name") or fdef.get("value_format")
+                    if vf:
+                        m["valueFormat"] = vf
+                    meta[nm] = m
+        except Exception:
+            pass
+    cache[key] = meta
+    return meta
+
+
+def build_field_meta(elements):
+    """Authoritative dim/measure category per referenced field, from the explore
+    metadata API + dynamic_fields hints. Returns {field: {category, aggType?,
+    baseColumn?, valueFormat?}}. Empty when the API is unreachable (the caller then
+    omits `fieldMeta` and build_workbook falls back to view-.lkml classification)."""
+    out = {}
+    for el in elements:
+        em = _explore_field_meta(el.get("model"), el.get("explore"))
+        for f in (el.get("fields") or []) + (el.get("pivots") or []):
+            if f in em:
+                out[f] = em[f]
+        # dynamic_fields (table calcs / custom measures) — authoritative _kind_hint
+        for dfld in (el.get("dynamicFields") or []):
+            if not isinstance(dfld, dict):
+                continue
+            nm = (dfld.get("table_calculation") or dfld.get("measure")
+                  or dfld.get("dimension") or dfld.get("name"))
+            if not nm:
+                continue
+            kind = dfld.get("_kind_hint")
+            if dfld.get("measure") or kind == "measure":
+                out[nm] = {"category": "measure", "aggType": dfld.get("type") or "sum",
+                           "baseColumn": dfld.get("based_on")}
+            else:
+                out[nm] = {"category": "dimension"}
+    return out
+
+
 def normalize(d):
     # active layout -> element_id -> {row,col,width,height}
     layout_mode, comp_by_el = "newspaper", {}
@@ -198,51 +325,9 @@ def normalize(d):
 
     elements = []
     for el in d.get("dashboard_elements", []):
-        q = _query_of(el)
-        # Text/markdown tiles (headers, notes) have no query/fields — capture them
-        # as text elements so the builder can emit a Sigma text element.
-        if el.get("type") == "text" or (not q and (el.get("title_text") or el.get("body_text"))):
-            elements.append({
-                "name": el.get("title") or el.get("title_text") or f"element_{el.get('id')}",
-                "tileType": "text",
-                "titleText": el.get("title_text"),
-                "bodyText": el.get("body_text"),
-                "subtitleText": el.get("subtitle_text"),
-                "layout": comp_by_el.get(el.get("id"), {}),
-            })
-            continue
-        if not q and el.get("type") in (None, "text") and not el.get("title"):
-            continue
-        # Merged-results tile: a `merge_result_id` joins multiple explore queries.
-        # `q` (result_maker.query) is the PRIMARY source only, so render from it but
-        # attach the full merge so the builder can join (or flag) the others.
-        merge = _merge_of(el)
-        if merge and merge.get("sourceQueries"):
-            prim = next((s for s in merge["sourceQueries"] if s.get("isPrimary")), merge["sourceQueries"][0])
-            if not q:                                   # fall back to the primary source query
-                q = {"model": prim.get("model"), "view": prim.get("explore"),
-                     "fields": prim.get("fields") or [], "pivots": prim.get("pivots") or []}
-        vc = _vis_config(el, q)
-        elements.append({
-            "name": el.get("title") or el.get("title_text") or f"element_{el.get('id')}",
-            "tileType": _vis_type(el, q),
-            "merge": merge,
-            "model": q.get("model"), "explore": q.get("view"),
-            "fields": q.get("fields") or [],
-            "pivots": q.get("pivots") or [],
-            "filters": q.get("filters") or {},
-            "sorts": q.get("sorts") or [],
-            "limit": int(q["limit"]) if str(q.get("limit") or "").isdigit() else q.get("limit"),
-            "listen": _listen(el),
-            "dynamicFields": _dyn(q.get("dynamic_fields")),
-            "noteText": el.get("note_text"), "subtitleText": el.get("subtitle_text"),
-            "bodyText": el.get("body_text"),
-            # chart reference lines + color encoding (vis_config) → Sigma refMarks/color
-            "referenceLines": _reflines(vc),
-            "color": _color(vc),
-            "cellVisualizations": _cell_viz(vc),
-            "layout": comp_by_el.get(el.get("id"), {}),
-        })
+        tile = normalize_element(el, comp_by_el.get(el.get("id"), {}))
+        if tile is not None:
+            elements.append(tile)
 
     return {
         "id": str(d.get("id")),

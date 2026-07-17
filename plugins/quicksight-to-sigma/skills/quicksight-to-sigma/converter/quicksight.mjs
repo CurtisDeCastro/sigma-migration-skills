@@ -1544,10 +1544,52 @@ function buildDerivedView(srcEl, allElements) {
     order: viewOrder
   };
 }
+function qsSafeWindowToNative(rawExpr, warnings) {
+  // SAFE inline mapping for SELF-CONTAINED QuickSight window fns ONLY:
+  // unpartitioned rank / denseRank / percentileRank and unpartitioned
+  // percentOfTotal. These fully specify their own ordering/scope, so they
+  // translate faithfully to a native Sigma window formula in a calc column
+  // (which resolves — live-verified 2026-07-15). Order/partition-DEPENDENT
+  // windows (running*/lag/lead/difference/period*/window*/*Over) are NOT mapped
+  // here: the native fns inherit the element's sort/partition, so an inline map
+  // would silently drop the QuickSight PARTITION BY / ORDER BY. Those fall
+  // through to the loud Null-degrade (or the SQL OVER() helper path). bd 7lw8.
+  warnings = warnings || [];
+  const m = (rawExpr || "").trim().match(/^(rank|denseRank|percentileRank|percentOfTotal)\s*\(([\s\S]*)\)$/i);
+  if (!m) return null;
+  const fn = m[1].toLowerCase();
+  const args = splitTopLevel(m[2], ",");
+  if (args.length === 0 || !args[0].trim()) return null;
+  if (args.length >= 2 && args[1].trim()) return null; // partitioned → not self-contained → bail to loud degrade
+  const toSigma = (qs) => {
+    const r = quicksightFormulaToSigmaEx(qs, []);
+    return r && r.formula && r.formula !== "Null" ? r.formula : null;
+  };
+  if (fn === "percentoftotal") {
+    const agg = toSigma(args[0]);
+    if (!agg) return null;
+    warnings.push(`ℹ QuickSight percentOfTotal → native PercentOfTotal(_, "grand_total") (resolves in a calc column). Verify against the QuickSight total.`);
+    return `PercentOfTotal(${agg}, "grand_total")`;
+  }
+  const sortTok = args[0].trim().replace(/^\[/, "").replace(/\]$/, "").trim();
+  const dm = sortTok.match(/^([\s\S]*?)\s+(ASC|DESC)\s*$/i);
+  const exprPart = dm ? dm[1].trim() : sortTok;
+  const dir = (dm && dm[2] ? dm[2] : (fn === "percentilerank" ? "ASC" : "DESC")).toLowerCase();
+  const sigExpr = toSigma(exprPart);
+  if (!sigExpr) return null;
+  const sigFn = fn === "rank" ? "Rank" : fn === "denserank" ? "RankDense" : "RankPercentile";
+  warnings.push(`ℹ QuickSight ${m[1]} → native ${sigFn}(_, "${dir}") (resolves in a calc column). Verify ranking direction/tie handling.`);
+  return `${sigFn}(${sigExpr}, "${dir}")`;
+}
 function quicksightFormulaToSigmaEx(expr, warnings) {
   if (!expr || typeof expr !== "string")
     return { formula: "" };
   let s = expr.trim();
+  // Self-contained window fns (unpartitioned rank family + percentOfTotal) map
+  // to a faithful native Sigma window formula; order/partition-dependent ones
+  // fall through to the loud degrade below. See qsSafeWindowToNative / bd 7lw8.
+  const _nativeWin = qsSafeWindowToNative(s, warnings);
+  if (_nativeWin) return { formula: _nativeWin };
   const strings = [];
   s = s.replace(/'((?:[^'\\]|\\.)*)'/g, (_, body) => {
     const idx = strings.length;
@@ -1599,8 +1641,8 @@ function quicksightFormulaToSigmaEx(expr, warnings) {
   ];
   const windowRe = new RegExp(`\\b(${windowFns.join("|")})\\s*\\(`, "i");
   if (windowRe.test(s)) {
-    warnings.push(`\u26A0 Formula uses a QuickSight table-calculation function (${s.match(windowRe)[1]}) \u2014 Sigma DM calc columns silently error on window functions. Degraded to a Null calc column with the original expression in its description; re-author as a Custom SQL element or a workbook-layer calculation.`);
-    return { formula: "Null", description: `QuickSight table-calc (re-author in Sigma): ${expr}` };
+    warnings.push(`\u26A0 Formula uses an order/partition-DEPENDENT QuickSight table-calc (${s.match(windowRe)[1]}) \u2014 not auto-mapped inline, because the native Sigma equivalent (CumulativeSum/MovingAvg/Lag/Lead/\u2026) inherits the element's sort+partition and would silently drop the QuickSight PARTITION BY/ORDER BY. Degraded to a Null calc column with the original expression in its description; re-author it in a GROUPED, SORTED workbook element with the native window fn (which resolves there), or as a Custom SQL element with explicit OVER(...). (Self-contained rank/denseRank/percentileRank/percentOfTotal ARE auto-mapped; the *Over family is invalid everywhere.)`);
+    return { formula: "Null", description: `QuickSight order/partition-dependent table-calc \u2014 re-author in a grouped/sorted workbook element with the native window fn (NOT the *Over family): ${expr}` };
   }
   const paramRe = /\$\{([^{}]+)\}/;
   if (paramRe.test(s)) {

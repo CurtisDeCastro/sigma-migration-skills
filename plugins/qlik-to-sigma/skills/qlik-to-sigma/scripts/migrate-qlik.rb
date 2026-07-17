@@ -370,9 +370,20 @@ elsif CONV_MODULE.nil?
 else
   puts "   converter: #{CONV_MODULE == VENDORED_QLIK ? 'vendored bundle (converter/qlik.mjs)' : CONV_MODULE} (no data leaves this machine)"
   shim = File.join(WORK, '_convert.mjs')
+  # Node ESM on Windows rejects a bare drive-letter specifier
+  # (`import ... from "C:/path/qlik.mjs"` → ERR_UNSUPPORTED_ESM_URL_SCHEME,
+  # protocol 'c:'). Absolute paths must be file:// URLs there. POSIX absolute
+  # paths import fine as-is, so we only rewrite on Windows and leave the
+  # (working) macOS/Linux path byte-identical.
+  import_specifier =
+    if Gem.win_platform? && CONV_MODULE.to_s.match?(/\A[A-Za-z]:/)
+      'file:///' + CONV_MODULE.gsub('\\', '/')
+    else
+      CONV_MODULE
+    end
   File.write(shim, <<~JS)
     import { readFileSync, writeFileSync } from 'node:fs';
-    import { convertQlikToSigma } from #{CONV_MODULE.to_json};
+    import { convertQlikToSigma } from #{import_specifier.to_json};
     const model = JSON.parse(readFileSync(#{File.join(WORK, 'converter-input.json').to_json}, 'utf8'));
     const out = convertQlikToSigma(model, {
       connectionId: #{opts[:conn].to_json},
