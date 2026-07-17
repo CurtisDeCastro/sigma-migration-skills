@@ -77,6 +77,16 @@ user-invocable: true
 >   finish line — a DM without its workbook is an incomplete migration. Do not report
 >   done, ask the user to build the workbook, or wait for a human at these STOPs;
 >   the only finish line is `verify-complete.rb` exit 0 (above).
+> - **At the exit-4 workbook handoff, PATCH the auto-built spec — do NOT rewrite it
+>   from scratch.** The orchestrator already wrote a full workbook spec to
+>   `<WORK>/wb-spec.json` before it stopped; it names the few field(s)/tile(s) it
+>   couldn't translate. Edit ONLY those, keeping every other element **and every
+>   controlId** exactly as the builder wrote them, then re-enter with `--reuse-dm
+>   <id> --wb-spec <WORK>/wb-spec.json`. A from-scratch rewrite throws away working
+>   tiles and drifts your controlIds away from `control-scope.json` — which then
+>   fails control-lint with a wholesale "control-scope drift" (the #1 way this
+>   handoff spirals into a multi-run loop). For a master-level calc, prefer
+>   `--master-col` over hand-editing the tile.
 > - **Credentials:** if you are **not** on Claude Code, the orchestrator will stop
 >   at step 0 telling you to run `ruby scripts/setup.rb` once — that is expected;
 >   do it (in a real terminal) rather than working around the auth error.

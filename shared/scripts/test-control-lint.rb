@@ -66,6 +66,36 @@ sig_silent = { 'sourceFilterSignals' => 1, 'controls' => [] }
 check(no_built.call(ControlLint.lint(SPEC, scope: sig_silent)),
       'signals>0 + zero controls + NO scope entries → DOES flag "no controls built" (Qlik silent-miss preserved)', fails)
 
+# --- wholesale controlId DRIFT (from-scratch rewrite) → ONE hint, not N misses -
+# Spec has controls, but NONE of their ids match the sidecar's (kebab auto-build
+# ids vs hand-authored ids) — the exact 14-violation field episode.
+SPEC_CTLS = { 'pages' => [{ 'name' => 'P1', 'elements' => [
+  { 'id' => 'tbl-1', 'kind' => 'table', 'name' => 'T',
+    'columns' => [{ 'id' => 'c-dim', 'name' => 'Region', 'formula' => '[Region]' }] },
+  { 'id' => 'el-c1', 'kind' => 'control', 'controlId' => 'RankFunction', 'name' => 'Rank',
+    'filters' => [{ 'source' => { 'kind' => 'table', 'elementId' => 'tbl-1' }, 'columnId' => 'c-dim' }] },
+  { 'id' => 'el-c2', 'kind' => 'control', 'controlId' => 'UnifiedPersonkey', 'name' => 'User',
+    'filters' => [{ 'source' => { 'kind' => 'table', 'elementId' => 'tbl-1' }, 'columnId' => 'c-dim' }] }
+] }] }.freeze
+drift_msg = ->(vs) { vs.any? { |v| v.include?('control-scope drift') } }
+drift_scope = { 'sourceFilterSignals' => 2, 'controls' => [
+  { 'controlId' => 'ctl-param-rank-function-dashboard-1', 'name' => 'Rank', 'status' => 'emitted' },
+  { 'controlId' => 'ctl-unified-personkey-dashboard-1', 'name' => 'User', 'status' => 'emitted' }
+] }
+vd = ControlLint.lint(SPEC_CTLS, scope: drift_scope)
+check(drift_msg.call(vd), "wholesale controlId drift → ONE 'control-scope drift' hint (got #{vd.inspect})", fails)
+check(vd.count { |v| v.include?('missing control') }.zero?, 'drift case does NOT emit per-entry "missing control"', fails)
+
+# one sidecar id MATCHES a spec control + one genuine drop → per-entry, NOT drift.
+partial_scope = { 'sourceFilterSignals' => 2, 'controls' => [
+  { 'controlId' => 'RankFunction', 'name' => 'Rank', 'status' => 'emitted' },       # matches el-c1
+  { 'controlId' => 'ctl-dropped', 'name' => 'Gone', 'sourceName' => "param 'Gone'", 'status' => 'emitted' }
+] }
+vp = ControlLint.lint(SPEC_CTLS, scope: partial_scope)
+check(!drift_msg.call(vp), 'a matched control present → NOT treated as wholesale drift', fails)
+check(vp.any? { |v| v.include?('missing control') && v.include?('ctl-dropped') },
+      'genuine single dropped filter still flagged per-entry (not swallowed by drift)', fails)
+
 puts
 if fails.empty?
   puts 'ALL PASS — control_lint honors needs-wiring/needs-materialization coverage gaps'
