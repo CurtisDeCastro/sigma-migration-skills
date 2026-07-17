@@ -383,6 +383,27 @@ tmsl = JSON.parse(File.read(opts[:tmsl]))
 model = tmsl['model'] || tmsl
 tables = (model['tables'] || []).reject { |t| t['name'].to_s.start_with?('LocalDateTable_', 'DateTableTemplate_') }
 all_measures = tables.flat_map { |t| (t['measures'] || []).map { |m| [t['name'], m['name'], Array(m['expression']).join] } }
+# measure name -> its ORIGINAL TMSL table = the entity a PBIR visual binds it under.
+# PBI measure names are model-unique (the same assumption ti_orig_table relies on).
+# Used by the master-map loop to alias a re-homed measure back to its source entity
+# so "_Measures.TotalSales" resolves (beads-sigma-<2a>).
+measure_orig_table = {}
+all_measures.each { |tbl, mname, _| measure_orig_table[mname] = tbl }
+
+# PBI friendly table name <-> physical warehouse table (the M-query path-tail). PBIR
+# visuals reference columns under the FRIENDLY entity ("Sales") but the converter
+# names the DM element after the PHYSICAL table ("vw_sales"), so an entity-qualified
+# queryRef misses the master-map and the column silently drops — the customer's missing
+# dim NAME columns (beads-sigma-<1b>). Capture the map so the master-map can alias every
+# key under the friendly entity too.
+_normt = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]/, '') }
+physical_to_pbi = {} # normalized physical path-tail -> PBI friendly table name
+tables.each do |t|
+  _e = ((t['partitions'] || [])[0] || {}).dig('source', 'expression')
+  _e = _e.join("\n") if _e.is_a?(Array)
+  _tail = _e.to_s[/\[\s*Name\s*=\s*"([^"]+)"\s*,\s*Kind\s*=\s*"(?:Table|View)"\s*\]/i, 1]
+  physical_to_pbi[_normt.call(_tail)] = t['name'] if _tail && t['name'] && !t['name'].to_s.empty?
+end
 modes = tables.flat_map { |t| (t['partitions'] || []).map { |p| p['mode'] } }.compact.uniq
 mode_summ = modes.empty? ? 'unknown' : modes.join('/')
 
@@ -945,8 +966,18 @@ conv_elements.each_with_index do |cel, cel_idx|
     # arg compiles the column to type "error" (verified: dropping it fixes).
     # Strip a trailing integer start arg until the converter is fixed.
     rewritten = rewritten.gsub(/\bFind\((\[[^\]]+\]|"[^"]*")\s*,\s*(\[[^\]]+\]|"[^"]*")\s*,\s*\d+\s*\)/, 'Find(\1, \2)')
-    field_map["#{cname}.#{m['name']}"] = { 'master' => mkey, 'ref' => rewritten, 'agg' => nil,
-                                           'format' => (m.dig('format', 'formatString')) }
+    ref = { 'master' => mkey, 'ref' => rewritten, 'agg' => nil,
+            'format' => (m.dig('format', 'formatString')) }
+    field_map["#{cname}.#{m['name']}"] = ref
+    # 2a (beads-sigma-<2a>): a measure re-homed from a measure-only table onto the
+    # fact element (powerbi.ts moveMeasures) is keyed here under the FACT element,
+    # but the PBIR visual still binds it under its ORIGINAL measures-table entity
+    # ("_Measures.TotalSales"). Alias it so the binding resolves — mirrors
+    # ti_orig_table (below) / the calc-table Bug-E alias. Guarded (`||=` + orig !=
+    # cname) so a converter-DROPPED measure is never fabricated, and a fact-native
+    # measure is a no-op.
+    orig = measure_orig_table[m['name']]
+    field_map["#{orig}.#{m['name']}"] ||= ref if orig && orig != cname
   end
 end
 
@@ -1226,6 +1257,26 @@ all_visuals.flat_map { |v| (v['bindings'] || {}).values.flatten }.uniq.each do |
     next unless base && base['ref'].to_s =~ /\A\[[^\]]+\]\z/
     field_map[r] = base.merge('ref' => "DateTrunc(\"#{m[2].downcase}\", #{base['ref']})", 'agg' => nil)
   end
+end
+
+# PBI-friendly-entity aliases (beads-sigma-<1b>): a key "VW_SALES.Amount" is
+# ALSO reachable as "Sales.Amount" — the form PBIR visuals actually use. This
+# is why granted dim NAME columns dropped: the DM element is named after the physical
+# view ("vw_sales") but the visual binds under the friendly entity, and field_spec's
+# normalize-fallback can't bridge a `vw_` prefix. Never overwrites an existing key; only
+# adds when the physical element maps to a DIFFERENT friendly name.
+unless physical_to_pbi.empty?
+  aliases = {}
+  field_map.each do |k, v|
+    ent, dot, leaf = k.rpartition('.')
+    next if dot.empty? || ent.empty? || leaf.empty?
+    pbi = physical_to_pbi[_normt.call(ent)]
+    next unless pbi && _normt.call(pbi) != _normt.call(ent)
+    ak = "#{pbi}.#{leaf}"
+    aliases[ak] = v unless field_map.key?(ak) || aliases.key?(ak)
+  end
+  field_map.merge!(aliases)
+  puts "   master-map: +#{aliases.size} PBI-friendly-entity alias(es) (physical view name -> friendly table name)" unless aliases.empty?
 end
 
 master_map = { 'masters' => masters, 'fields' => field_map }
