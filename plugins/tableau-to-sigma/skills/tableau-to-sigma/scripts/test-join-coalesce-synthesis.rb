@@ -25,6 +25,16 @@ require 'open3'
 require 'tmpdir'
 
 VENDORED = File.expand_path('../converter/tableau.mjs', __dir__)
+# Node ESM on Windows rejects a bare drive-letter specifier
+# (ERR_UNSUPPORTED_ESM_URL_SCHEME) — absolute paths must be file:// URLs there
+# (same idiom as test-converter-fixtures.rb / mechanical-specs.rb run_converter).
+VENDORED_SPEC =
+  if Gem.win_platform? && VENDORED.to_s.match?(/\A[A-Za-z]:/)
+    'file:///' + VENDORED.gsub('\\', '/')
+  else
+    VENDORED
+  end
+
 FIX1 = File.join(__dir__, 'test-fixtures', 'join-coalesce.twb')
 FIX2 = File.join(__dir__, 'test-fixtures', 'join-coalesce-multikey.twb')
 
@@ -41,7 +51,7 @@ end
 
 def convert(twb_path)
   script = <<~MJS
-    import { convertTableauToSigma } from #{VENDORED.to_json};
+    import { convertTableauToSigma } from #{VENDORED_SPEC.to_json};
     import { readFileSync } from 'fs';
     const xml = readFileSync(#{twb_path.to_json}, 'utf8');
     const res = convertTableauToSigma(xml, { connectionId: 'CONN', database: 'ANALYTICS', schema: 'PUBLIC' });
