@@ -89,6 +89,19 @@ point `--out` at the same `<WORK>`) and writes `intake.json` (run-start + mode f
 telemetry ping). Multiple connections + no id/name → it lists them and asks you to pick;
 never guesses. (Power BI input is almost always `--mode file` — TMSL + PBIR exports.)
 
+> **ASK FOR SOURCE DASHBOARD SCREENSHOTS UP FRONT (file mode).** Layout is inferred from the
+> export's `x,y,w,h` **coordinates only** — never from an image — and those free-form/absolute
+> PBI coords lose the arrangement Sigma's grid needs. In `--mode file` there is **no live report
+> to auto-render** (`export-pbi-pages.py` needs a live `reportId` on Fabric capacity + a Power BI-
+> audience token + PNG not tenant-disabled), so the Phase 5e visual-compare, source-anchor (gate 13)
+> and visual-similarity (gate 14) gates have nothing to check against and **self-skip** — layout
+> errors ship unseen (field-caught). `intake.rb` prints an `[ASSIST]` block for this; act on it:
+> **before building, `AskUserQuestion` the user for a screenshot of EACH source dashboard page (one
+> PNG per page) and land them in `<WORK>/dashboards/`.** That path ARMS the visual gates (they
+> discover `<WORK>/dashboards/*.png`). If the user has none, proceed but **waive** the visual gates
+> at Phase 6 with a stated reason (`--skip-anchors-gate`/`--skip-visual-similarity "<reason>"`) —
+> never a silent skip. Headless (`--yes`/`--answers`): skip the prompt and waive with a stated reason.
+
 ## Phase 1 — Connect (no Entra app required)
 The corporate tenant blocks Entra app creation, Git integration, and XMLA (PPU). The working path:
 - `scripts/fabric-extract.py` — device-code via well-known public client **`ea0616ba-638b-4df5-95b9-636659ae5121`** (Power BI Desktop), scope `https://api.fabric.microsoft.com/.default`. User signs in once at the device URL; token cached.
@@ -200,6 +213,10 @@ pages next to the Power BI renders. Do this BEFORE Phase 6, every run:
 
 1. Export the SOURCE pages: `"$PY" scripts/export-pbi-pages.py --report <reportId> --out-dir $WORK/visual-qa`
    (PNG is commonly tenant-disabled — the script falls through to PDF; per-page when pypdf is installed).
+   **No live report / export 404s / all formats tenant-disabled (the file-mode default):** you can't
+   auto-pull the source render — fall back to the **user-supplied screenshots** requested at Step 0
+   (`<WORK>/dashboards/*.png`). If they weren't provided at intake, `AskUserQuestion` for them now
+   before comparing; if genuinely unavailable, waive gates 13/14 at Phase 6 with a stated reason.
 2. Export EVERY Sigma page: `"$PY" scripts/sigma-export-png.py --workbook <wbId> --page <pageId> --out $WORK/visual-qa/sigma-<page>.png`.
 3. **Read both images for each page, side by side.** Check, per page: same
    elements in the same spots; charts show MARKS (not just axes); clustered vs
