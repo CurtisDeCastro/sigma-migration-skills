@@ -106,10 +106,14 @@ fi
 # "SKIPPED: dep missing" instead of measuring (A/B-report field-caught: the
 # deps were undeclared and the floor silently could not run on a fresh box).
 if command -v "${PY_CMD:-python3}" >/dev/null 2>&1; then
-  if "${PY_CMD:-python3}" -c "import PIL, numpy" >/dev/null 2>&1; then
-    ok "python imaging deps (Pillow + numpy) — visual-similarity floor can run"
+  if "${PY_CMD:-python3}" -c "import PIL, numpy, requests" >/dev/null 2>&1; then
+    ok "python render deps (Pillow + numpy + requests) — sigma-export-png + visual-similarity can run"
   else
-    warn "Pillow/numpy missing — the visual-similarity floor (gate 14) cannot MEASURE and will need a named waiver"          "pip install pillow numpy   (numpy 2.3+ preferred; 2.2.x histogram regression is worked around in-script)"
+    # requests: sigma-export-png.py needs it — without it the Phase-5b/6f render
+    # SILENTLY fails on a fresh env (v5.5 e2e field-caught). Pillow/numpy: the
+    # gate-14 visual floor. One check, one fix line.
+    warn "Pillow/numpy/requests missing — sigma-export-png (renders) and the visual-similarity floor (gate 14) cannot run" \
+         "pip install pillow numpy requests   (numpy 2.3+ preferred; 2.2.x histogram regression is worked around in-script)"
   fi
 fi
 

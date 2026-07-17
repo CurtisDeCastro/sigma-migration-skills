@@ -3358,6 +3358,11 @@ rescue WorkbookBuildError => e
   names = failed.empty? ? 'one or more fields' : failed.join(', ')
   n = failed.empty? ? 'some' : failed.size.to_s
   puts
+  puts '╔══════════════════════════════════════════════════════════════════════════╗'
+  puts '║ EXIT 4 IS A WORK ITEM, NOT A FAILURE. Everything up to the workbook layer ║'
+  puts '║ succeeded; ONE targeted fix + one re-run usually completes the migration. ║'
+  puts '║ Do NOT stop here. Do NOT descope, simplify, or propose a "lighter" build. ║'
+  puts '╚══════════════════════════════════════════════════════════════════════════╝'
   puts "── Mechanical path: data model built OK (dataModelId=#{dm_id}). The WORKBOOK " \
        "layer hit #{n} field(s) the mechanical path can't translate (#{names}). " \
        'Two ways forward:'

@@ -1640,7 +1640,12 @@ elsif File.exist?(vsim_script)
     puts "[SKIP] gate 14: visual-similarity floor N/A — #{source_png.nil? ? 'no source dashboard PNG' : 'no validated Sigma render'} to compare"
   else
     vs_out = File.join(opts[:tab], 'visual-similarity.json')
-    system('python3', vsim_script, '--source', source_png, '--render', render_png, '--json-out', vs_out)
+    # SIGMA_PYTHON honors the env's resolved interpreter (venv / py -3 shim) —
+    # bare python3 missed the deps-bearing venv (v5.5 e2e field-caught; the
+    # deferred gap from v5.4.15).
+    _vsim_py = ENV['SIGMA_PYTHON'].to_s.strip
+    _vsim_py = 'python3' if _vsim_py.empty?
+    system(_vsim_py, vsim_script, '--source', source_png, '--render', render_png, '--json-out', vs_out)
     vsim_status = $? ? $?.exitstatus : 'not-run'
     vs = File.exist?(vs_out) ? (JSON.parse(File.read(vs_out)) rescue nil) : nil
     if vs.nil?

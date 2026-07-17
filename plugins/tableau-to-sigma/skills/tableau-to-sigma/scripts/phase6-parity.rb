@@ -135,6 +135,12 @@ if !opts[:finalize]
   end
 
   plan = JSON.parse(File.read(plan_path))
+  # Persist the census/plan dashboard scope so PASS-2/finalize (which may run
+  # without --dashboard flags) scopes the tile census identically (gate-5 fix).
+  if (opts[:dashboards] || []).any? && plan["dashboards_scope"] != opts[:dashboards]
+    plan["dashboards_scope"] = opts[:dashboards]
+    File.write(plan_path, JSON.pretty_generate(plan))
+  end
 
   # ---- Hidden calc-filter gate (Phase 6 enforcement) -----------------------
   # If the parity plan contains unresolved hidden calc-filters, Phase 6 must
@@ -304,29 +310,18 @@ dash_layout_path = opts[:dash_layout] || File.join(opts[:tab], 'dashboard-layout
 if File.exist?(dash_layout_path)
   dash_layout = JSON.parse(File.read(dash_layout_path)) rescue nil
   if dash_layout.is_a?(Array)
-    # A "chart zone" that plots nothing — no measures AND no shelf dims/measures
-    # — is a text/label worksheet (Tableau "Info" / "Filtered Plan" / "Note Box"
-    # disclaimers), NOT a real tile. Counting those inflated `zones_total` and
-    # made coverage read far worse than reality (the ~30 phantom "missing tiles").
-    # Exclude them from the parity denominator. KPI "title" zones DO carry a
-    # measure, so they're correctly kept. The furniture predicate lives in
-    # ZoneCensus (shared with build-dashboard-layout's layout-census, #259).
-    all_chart_zones = dash_layout.flat_map { |d| d['zones'] || [] }
-                                 .select { |zz| ZoneCensus.chart_zone?(zz) }
-    label_zones = all_chart_zones.reject { |zz| ZoneCensus.plots?(zz) }.map { |zz| zz['caption'].strip }.uniq
-    zone_names  = all_chart_zones.select { |zz| ZoneCensus.plots?(zz) }.map { |zz| zz['caption'].strip }.uniq
-    norm = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]/, '') }
-    matched = plan['charts'].flat_map { |c| [c['tableau_view'], c['chart']] }.compact.map(&norm)
-    unmatched = zone_names.reject { |zn| matched.include?(norm.call(zn)) }
-    tile_census = {
-      'zones_total'          => zone_names.size,
-      'charts_built'         => plan['charts'].size,
-      'zones_unmatched'      => unmatched.size,
-      'unmatched_zone_names' => unmatched,
-      'label_zones_excluded' => label_zones
-    }
-    warn "tile census: #{zone_names.size} dashboard zone(s), #{plan['charts'].size} chart(s) in parity plan, #{unmatched.size} unmatched" \
-         "#{unmatched.any? ? " — UNMATCHED: #{unmatched.join(', ')}" : ''}"
+    # Furniture exclusion + DASHBOARD SCOPING both live in ZoneCensus.tile_census
+    # (pure, unit-tested). Scoping (field-caught false RED): the census must
+    # judge exactly the dashboards the plan covers — when --dashboard scoped the
+    # plan to one page of a multi-dashboard workbook, pooling ALL dashboards'
+    # zones made every out-of-scope tile read "unmatched". The plan persists its
+    # own scope so a finalize-only invocation scopes identically.
+    census_scope = opts[:dashboards] || plan['dashboards_scope'] || []
+    tile_census = ZoneCensus.tile_census(dash_layout, plan['charts'], census_scope)
+    warn "tile census: #{tile_census['zones_total']} dashboard zone(s)" \
+         "#{census_scope.any? ? " (scoped: #{Array(tile_census['dashboards_scoped']).join(', ')})" : ''}, " \
+         "#{plan['charts'].size} chart(s) in parity plan, #{tile_census['zones_unmatched']} unmatched" \
+         "#{tile_census['zones_unmatched'].positive? ? " — UNMATCHED: #{tile_census['unmatched_zone_names'].join(', ')}" : ''}"
   else
     warn "tile census skipped: #{dash_layout_path} is not a parse-twb-layout array"
   end

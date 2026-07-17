@@ -37,6 +37,21 @@
 - Escape hatches (skip/allow flags) require a **named reason that goes in the report**.
 - If you've retried the same failing step ~2×, change approach or surface it — never grind.
 
+## Never negotiate fidelity down (field-caught, v5.5 e2e)
+- **NEVER propose reducing scope as a response to difficulty.** "Something lighter for
+  the demo", "a simplified version", "skip the hard tiles for now" are all the same
+  move: converting YOUR struggle into THE USER'S loss, silently. The mission is exact
+  parity; a struggling step does not renegotiate the mission.
+- The only permitted moves when stuck: **(1) fix it; (2) a NAMED stop/handoff** (the
+  exit codes exist for this — exit 4 is a work item with two forward paths, exit 16 is
+  a build-it checklist; follow their printed instructions); **(3) ask the user with the
+  full-fidelity path stated FIRST** and the cost of each option made explicit.
+- Descoping happens only when the USER initiates it, and what was descoped is recorded
+  in the final report — never proposed by you as an escape.
+- A designed STOP (exit 4/10/11/12/16/17) is the skill working, not failing. Read its
+  printed instructions and DO them; giving up at a designed stop is abandoning a
+  migration that is mid-flight and healthy.
+
 ## "No data" and product-limitation discipline (field-proven; 2026-07)
 - **A chart that renders "No data" is YOUR build being broken until proven otherwise.**
   Never conclude it is a platform/render artifact. **PRODUCT FACT:** Sigma's export
