@@ -689,6 +689,8 @@ def extract(pbir_dir):
                 # table/matrix conditional formatting (background/font color-scales,
                 # rules, field-value measures, data bars) -> Sigma conditionalFormats.
                 "conditional_formats": _conditional_formats(visual, vtype),
+                # visual-level Filters-pane filters -> Sigma element filters (beads-sigma-3tx6)
+                "filters": _filter_signals(v, "visual"),
             }
             if rec["sigma_kind"] == "text":
                 rec["text"] = _textbox_body(visual)
@@ -711,11 +713,211 @@ def extract(pbir_dir):
             "page_h": page.get("height", 720),
             "visuals": visuals,
             "interactions": interactions,
+            # page-level Filters-pane filters -> Sigma page/master filters (beads-sigma-3tx6)
+            "filters": _filter_signals(page, "page"),
         })
+    # report-level filters (definition/report.json filterConfig)
+    report_json = {}
+    _rp = os.path.join(defn, "report.json")
+    if os.path.exists(_rp):
+        try:
+            report_json = json.load(open(_rp))
+        except Exception:
+            report_json = {}
     return {"source": "pbir", "pbir_dir": pbir_dir,
             # style fidelity: report base-theme name -> Sigma themeOverrides palette
             "theme": _report_theme(defn),
+            "filters": _filter_signals(report_json, "report"),
             "pages": out_pages}
+
+
+# ── Report/page/visual FILTER extraction (beads-sigma-3tx6) ────────────────────
+# Power BI stores real Filters-pane filters the extractor never read before, so
+# migrated elements shipped UNFILTERED (over-broad data). Parse them here into
+# normalized signals; the builder applies them (page/report -> master filter,
+# visual -> element filter) and degrades unsupported shapes to coverage. Shapes +
+# the verbatim real fixtures they were built from: refs/pbi-filter-spec.md /
+# fixtures/pbir-filters.json.
+_REL_TIMEUNIT = {0: "day", 1: "week", 2: "month", 3: "year"}  # INTERNAL DateSpan/DateAdd enum
+
+
+def _filter_lit(node):
+    """Typed literal decode for the FILTER path (bool/null preserved; text always
+    from single-quotes; numeric type-suffix stripped). Separate from _lit_value so
+    the conditional-formatting callers are unaffected."""
+    v = (node or {}).get("Literal", {}).get("Value")
+    if v is None:
+        return None
+    s = str(v).strip()
+    if s.startswith("'") and s.endswith("'"):
+        return s[1:-1].replace("''", "'")            # text — always
+    low = s.lower()
+    if low in ("true", "false"):
+        return low == "true"
+    if low == "null":
+        return None
+    m = re.fullmatch(r"(-?\d+(?:\.\d+)?)[dlmf]?", s, re.I)
+    return m.group(1) if m else s
+
+
+def _filter_target(entry):
+    """queryRef of the field a filter targets: PBIR `field`, classic `expression`,
+    else the first filterExpressionMetadata expression."""
+    fld = entry.get("field") or entry.get("expression")
+    qr = _expr_queryref(fld) if fld else None
+    if not qr:
+        exprs = (entry.get("filterExpressionMetadata") or {}).get("expressions") or []
+        if exprs:
+            qr = _expr_queryref(exprs[0])
+    return qr
+
+
+def _in_values(in_node):
+    """In.Values rows-of-tuples -> flat value list (single-column filters)."""
+    out = []
+    for row in (in_node or {}).get("Values", []) or []:
+        if isinstance(row, list) and row:
+            out.append(_filter_lit(row[0]))
+    return out
+
+
+def _relative_window(where0):
+    """Decode a RelativeDate Where into {anchor,n,unit,includeToday} or None.
+    Between(DateAdd(-N unit)..Now) = last-N; Comparison(=DateSpan(Now,unit)) = this."""
+    cond = (where0 or {}).get("Condition") or {}
+    btw = cond.get("Between")
+    if isinstance(btw, dict):
+        lb = (((btw.get("LowerBound") or {}).get("DateSpan") or {}).get("Expression") or {})
+        outer = lb.get("DateAdd") or {}
+        amt, unit = outer.get("Amount"), outer.get("TimeUnit")
+        if amt is not None and unit in _REL_TIMEUNIT:
+            inner = ((outer.get("Expression") or {}).get("DateAdd") or {})
+            include_today = inner.get("Amount") == 1 and inner.get("TimeUnit") == 0
+            anchor = "last" if amt < 0 else "next"
+            return {"anchor": anchor, "n": abs(int(amt)), "unit": _REL_TIMEUNIT[unit], "includeToday": include_today}
+    cmp = cond.get("Comparison")
+    if isinstance(cmp, dict) and cmp.get("ComparisonKind") == 0:
+        ds = (cmp.get("Right") or {}).get("DateSpan") or {}
+        if "Now" in (ds.get("Expression") or {}) and ds.get("TimeUnit") in _REL_TIMEUNIT:
+            return {"anchor": "this", "n": 0, "unit": _REL_TIMEUNIT[ds["TimeUnit"]], "includeToday": True}
+    return None
+
+
+def _topn_signal(entry):
+    """TopN: N from the subquery's Query.Top, ranking from its OrderBy. None if the
+    slot was never configured (no subquery)."""
+    for frm in ((entry.get("filter") or {}).get("From") or []):
+        sub = ((frm.get("Expression") or {}).get("Subquery") or {}).get("Query")
+        if isinstance(sub, dict) and sub.get("Top") is not None:
+            ob = (sub.get("OrderBy") or [{}])[0]
+            rank_expr = ob.get("Expression") or {}
+            rank_by = _expr_queryref(rank_expr) or _expr_queryref((rank_expr.get("Aggregation") or {}).get("Expression"))
+            return {"n": int(sub["Top"]),
+                    "direction": "asc" if ob.get("Direction") == 1 else "desc",
+                    "rankBy": rank_by}
+    return None
+
+
+def _is_auto_drill(entry):
+    hc = entry.get("howCreated")
+    if isinstance(hc, str):
+        return hc.lower() in ("auto", "drill")
+    return hc == 2  # int: 2=Drill (3/4=Include/Exclude carry real predicates; 0 ambiguous->keep)
+
+
+def _filter_signal(entry, scope):
+    """One filter entry -> a normalized signal, or None to skip (Auto/Drill)."""
+    if not isinstance(entry, dict) or _is_auto_drill(entry):
+        return None
+    target = _filter_target(entry)
+    ftype = str(entry.get("type", ""))
+    inverted = str((((entry.get("objects") or {}).get("general") or [{}])[0].get("properties", {})
+                    .get("isInvertedSelectionMode", {}).get("expr", {}).get("Literal", {}).get("Value", ""))).strip("'").lower() == "true"
+    sig = {"scope": scope, "target": target, "raw_type": ftype}
+    where = ((entry.get("filter") or {}).get("Where") or [])
+    where0 = where[0] if where else None
+    # no predicate persisted (field-only card / empty TopN / filters:[])
+    if where0 is None:
+        sig.update({"type": "list" if ftype != "TopN" else "top-n", "predicate": "none",
+                    "values": [], "mode": "exclude" if inverted else "include"})
+        return sig
+    cond = (where0.get("Condition") or {})
+    # RelativeDate
+    if ftype == "RelativeDate" or "Between" in cond:
+        win = _relative_window(where0)
+        if win:
+            sig.update({"type": "date-range", "window": win, "mode": "include"})
+            return sig
+    # TopN
+    if ftype == "TopN":
+        tn = _topn_signal(entry)
+        if tn:
+            sig.update({"type": "top-n", **tn, "mode": "include"})
+            return sig
+        sig.update({"type": "top-n", "predicate": "none"})
+        return sig
+    # Not(...) exclude wrapper (Not(In) / Not(Or(In,In)))
+    if "Not" in cond:
+        inner = (cond["Not"].get("Expression") or {})
+        if "In" in inner:
+            exprs = (inner["In"].get("Expressions") or [])
+            if len(exprs) > 1:
+                sig.update({"type": "list", "unsupported": "multi-column-key", "mode": "exclude"})
+                return sig
+            vals = _in_values(inner["In"])
+            sig.update({"type": "list", "mode": "exclude", "values": vals})
+            return sig
+        sig.update({"type": "condition", "unsupported": "not-expression", "mode": "exclude"})
+        return sig
+    # In (include / exclude via inverted flag)
+    if "In" in cond:
+        exprs = (cond["In"].get("Expressions") or [])
+        if len(exprs) > 1:
+            sig.update({"type": "list", "unsupported": "multi-column-key"})
+            return sig
+        vals = _in_values(cond["In"])
+        sig.update({"type": "list", "mode": "exclude" if inverted else "include", "values": vals})
+        return sig
+    # Contains / StartsWith text ops
+    if "Contains" in cond or "StartsWith" in cond:
+        op = "contains" if "Contains" in cond else "starts-with"
+        node = cond.get("Contains") or cond.get("StartsWith")
+        sig.update({"type": "condition", "op": op, "value": _filter_lit((node or {}).get("Right")), "mode": "include"})
+        return sig
+    # Comparison / And range (measure-target -> coverage)
+    left_is_measure = isinstance((entry.get("field") or {}).get("Measure"), dict) or \
+        isinstance((cond.get("Comparison") or {}).get("Left", {}).get("Measure"), dict)
+    parsed = _parse_condition(cond)
+    if parsed:
+        if left_is_measure:
+            sig.update({"type": "measure-filter", "condition": parsed, "unsupported": "post-aggregate"})
+            return sig
+        sig.update({"type": "number-range", "condition": parsed, "mode": "include"})
+        return sig
+    # And with a Not(==null) arm the base walker rejects, or any other tree -> coverage
+    sig.update({"type": "condition", "unsupported": "unmodeled-condition"})
+    return sig
+
+
+def _filter_signals(container, scope):
+    """Normalize a container's filters (PBIR filterConfig.filters[]) into signals.
+    `container` is a page.json / visual.json-visual / report.json dict."""
+    fc = container.get("filterConfig") or {}
+    filters = fc.get("filters")
+    if filters is None:
+        raw = container.get("filters")           # classic (string) or already-list
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except Exception:
+                raw = []
+        filters = raw if isinstance(raw, list) else []
+    out = []
+    for entry in filters:
+        s = _filter_signal(entry, scope)
+        if s:
+            out.append(s)
+    return out
 
 
 def main():
