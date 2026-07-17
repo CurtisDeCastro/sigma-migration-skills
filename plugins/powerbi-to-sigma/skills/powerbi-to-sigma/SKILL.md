@@ -236,14 +236,16 @@ with exact query parity and still looked broken (collapsed KPIs, stacked bars
 that should be clustered, alphabetical months) — caught only by putting full
 pages next to the Power BI renders. Do this BEFORE Phase 6, every run:
 
-1. Export the SOURCE pages: `"$PY" scripts/export-pbi-pages.py --report <reportId> --out-dir $WORK/visual-qa`
-   (PNG is commonly tenant-disabled — the script falls through to PDF; per-page when pypdf is installed).
+1. Export the SOURCE pages: `"$PY" scripts/export-pbi-pages.py --report <reportId> [--workspace <groupId>] [--tenant <guid|url>] --out-dir $WORK/visual-qa`
+   (PNG is commonly tenant-disabled — the script falls through to PDF and **rasterizes it to per-page `powerbi-page{N}.png`** so the downstream `Read` needs no poppler. Guest/B2B report in another tenant? pass `--tenant <guid|report-url>`.)
    > **`ExportToFile` is the ONLY documented way to render a PBI page programmatically** — and it's
-   > what this script uses (it does its own **Power BI-audience** device sign-in, scope
-   > `analysis.windows.net/powerbi/api/.default`, separate from the Fabric extraction token — don't
-   > reuse the Fabric token or it 404s; see `pbi-export-pages-token-audience`). Preconditions: the
-   > report is in a workspace on **Fabric capacity** (trial/premium), the user completes that export
-   > sign-in, and PNG isn't tenant-disabled (else PDF — the agent Reads PDFs the same way). **There is
+   > what this script uses (**Power BI-audience** scope `analysis.windows.net/powerbi/api/.default`,
+   > via the shared `pbi_fabric` per-tenant cache — don't reuse the Fabric-audience token or it 404s;
+   > see `pbi-export-pages-token-audience`). Because the cache is shared, once you've completed the
+   > Fabric extraction sign-in for the same tenant this second audience is usually **silent** (no
+   > extra device-code prompt). If the workspace isn't on **Fabric/PPU/premium capacity** (or export
+   > is tenant-disabled / fails), the script **soft-fails (exit 3)** with a reason + the Phase-6
+   > waiver to use — it does NOT crash the run; the compare falls back to a structural check. **There is
    > no other agent-driven render path:** the Power BI **Modeling MCP is model/DAX-only** (no visuals),
    > there is **no PBI `get-view-image` MCP tool** (Tableau has one; Power BI does not), and Power BI
    > **Embedded** screenshotting needs an Entra app + embed token this corporate tenant blocks. So:
@@ -272,8 +274,8 @@ pages next to the Power BI renders. Do this BEFORE Phase 6, every run:
      (every KPI, the top-3 of each ranked list/table, one representative bucket
      per chart; schema: `refs/source-anchors.md`). Land the source page PNG at a
      path the gate discovers so the bar arms: set it as `source_png` in
-     `png-read.json`, **or** copy it to `$WORK/dashboards/source.png` (if the
-     source export is a PDF, convert one page first: `sips -s format png in.pdf --out out.png` / `pdftoppm -png`).
+     `png-read.json`, **or** copy it to `$WORK/dashboards/source.png` (the export
+     already lands per-page `visual-qa/powerbi-page{N}.png` — copy the matching page).
      Then verify against the live workbook:
      `ruby scripts/verify-anchors.rb --workdir $WORK --workbook-id <wbId>` → `anchors-verdict.json` (must pass).
    - **Visual-similarity floor.** `"$PY" scripts/visual-similarity.py --source <sourcePagePng> --render $WORK/visual-qa/sigma-<page>.png --json-out $WORK/visual-similarity.json` — a deterministic ink/layout floor beneath the human compare.
@@ -439,7 +441,7 @@ The conversion is script-driven (mirrors `tableau-to-sigma/scripts/`). `scripts/
 | `fabric-extract-batch.py` | 1 batch | Fleet extraction: every requested report → 2 artifact tasks (model TMSL + report def) on ONE 4-wide pool; report→model binding via PBI REST `datasetId` (name-match fallback); `manifest.json` + `timings.json`. 3 reports = 7.5s measured. |
 | `extract-pbir.py` | 1 extract | Fetch a report's PBIR (or parse one already on disk) → normalized `signals.json` (per-visual `sigma_kind` + role bindings + x/y/w/h). Live fetch uses the `pbi_fabric` fast LRO path. The PBI analog of `parse-twb-layout.rb`. |
 | `pbi-freshness.py` | 1.5 preflight | SOURCE-FRESHNESS: refresh history (incl. FAILED/creds-expired refreshes) + cheap executeQueries row-count/max-date snapshot (**4-wide parallel per-table probes**) → `freshness.json`. Launched **non-blocking** by run.sh/migrate-powerbi.rb (consumed at parity). Leads the parity output; deltas classify MATCH / STALE-EXPLAINED / DIVERGENT (bead fmte). |
-| `export-pbi-pages.py` | 5e compare | SOURCE page renders via ExportToFile (PNG → PDF fallback; per-page split with pypdf) for the mandatory visual compare. |
+| `export-pbi-pages.py` | 5e compare | SOURCE page renders via ExportToFile (PNG → PDF fallback, **PDF rasterized to per-page PNG** via pypdfium2 so `Read` needs no poppler) for the mandatory visual compare; `--tenant` for guest/B2B; soft-fails (exit 3) with a waiver hint when export is unavailable instead of crashing. |
 | `sigma-export-png.py` | 5e/5f compare | Renders a built Sigma page to PNG (`--workbook <id> --page <pageId> --out … --w 1600`) for the source-vs-target compare AND the Phase 5f Visual QA read (checked against `refs/layout-visual-qa.md`). |
 | `assert-visual-compare.rb` | 5e gate | HARD GATE: blocks Phase 6 unless visual-compare.json has a PASS/ACCEPTED verdict (with explained deltas) for every content page. |
 | `convert-model.rb` | 2–3 convert/post | MODE A prints the exact `convert_powerbi_to_sigma` MCP call for a `model.bim`; MODE B takes the converter output and applies the 3 fixups (schemaVersion + folderId/ownerId via a ref-DM harvest + base-element names) → postable DM spec. |
