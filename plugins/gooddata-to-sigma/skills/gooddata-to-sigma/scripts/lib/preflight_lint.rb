@@ -30,6 +30,11 @@
 #       supermart mini bars). Use container styling instead.
 #   C5  a control with selectionMode:"single" carrying `values` (array) instead
 #       of scalar `value` — the filter AND the default silently drop.
+#   C6  a control with an unknown controlType, or the docs-only `top-n` type that
+#       the live tenant 400s — mirrors Sigma spec/verify offline (canary 2026-07-11).
+#   C7  a control missing a REQUIRED field for its type: `mode` on
+#       switch/checkbox/text/number/date/slider; `low`/`high` on range-slider.
+#   C8  `includeNulls` on a controlType where it is off-schema.
 #   N1  an element or column whose `name` is empty/whitespace-only — breaks
 #       parity header matching and blank-renders axes (title hiding belongs on
 #       the element, not the name).
@@ -45,6 +50,21 @@ require 'json'
 AGG = /\A\s*(Sum|Avg|Count|CountDistinct|CountIf|SumIf|Min|Max|Median|Percentile|StdDev|Variance|VariancePop|GrandTotal)\s*\(/i
 PLAIN_REF = /\A\s*\[[^\]]+\]\s*\z/   # a bare column reference, e.g. [Table/Region]
 LISTY = %w[list segmented hierarchy].freeze
+# C6/C7/C8: controlType shape rules — mirror Sigma's server-side spec/verify
+# OFFLINE, so the control-grammar 400s (each of which otherwise costs a full
+# orchestrator round-trip to discover) are caught pre-POST. Canary-verified
+# server-side 2026-07-11 (see refs/composition-recipe.md).
+CONTROL_TYPES = %w[checkbox switch text text-area number number-range date date-range
+                   list segmented hierarchy slider range-slider].freeze
+# controlTypes that REQUIRE a `mode` operator — absent/empty → Sigma 400s the spec.
+MODE_REQUIRED = %w[switch checkbox text number date slider].freeze
+MODE_HINT = {
+  'switch' => "'True/False' | 'True/All'", 'checkbox' => "'True/False' | 'True/All'",
+  'text' => "an operator, e.g. 'equals'", 'number' => "'=' | '>=' | '<='",
+  'date' => "'=' | '>=' | '<='", 'slider' => "'=' | '>=' | '<='"
+}.freeze
+# `includeNulls` is schema-valid ONLY on these types (stray elsewhere = off-schema).
+INCLUDE_NULLS_OK = %w[text number number-range date date-range slider range-slider].freeze
 # I1: If( whose first argument is a bare [ref] immediately followed by `,` or
 # `)` — i.e. no comparison operator. `If([x] = 1, ...)` does NOT match.
 # v5.4: If( ONLY — Sigma's Switch(expr, case1, val1, …, default) is MATCH-form,
@@ -154,6 +174,28 @@ def lint(spec)
         if el['selectionMode'].to_s == 'single' && el['values'].is_a?(Array)
           scalar = el['values'].first
           errs << "C5 control '#{name}': selectionMode \"single\" carries `values` (array) — the filter and the default silently drop. Use a scalar instead: replace `values: #{el['values'].inspect}` with `value: #{scalar.inspect}`."
+        end
+
+        # C6/C7/C8: controlType grammar — mirrors Sigma spec/verify offline.
+        ct = el['controlType'].to_s
+        unless ct.empty?
+          if ct == 'top-n'
+            errs << "C6 control '#{name}': controlType \"top-n\" is docs-only — the live tenant 400s it (probed 2026-07-11). Use a top-N rank-filter on the ELEMENT, not a control."
+          elsif !CONTROL_TYPES.include?(ct)
+            errs << "C6 control '#{name}': unknown controlType \"#{ct}\". Valid: #{CONTROL_TYPES.join(', ')}."
+          end
+          # C7: operator-bearing controls require a `mode`.
+          if MODE_REQUIRED.include?(ct) && el['mode'].to_s.empty?
+            errs << "C7 control '#{name}': controlType \"#{ct}\" requires a `mode` (#{MODE_HINT[ct]}) — absent, Sigma 400s the spec."
+          end
+          # C7: a range-slider without track bounds silently filters every row out.
+          if ct == 'range-slider' && (el['low'].nil? || el['high'].nil?)
+            errs << "C7 control '#{name}': controlType \"range-slider\" needs flat `low`/`high` track bounds — bare emits a 0..0 slider that filters all rows out."
+          end
+          # C8: includeNulls only valid on a specific subset.
+          if el.key?('includeNulls') && !INCLUDE_NULLS_OK.include?(ct)
+            errs << "C8 control '#{name}': `includeNulls` is off-schema for controlType \"#{ct}\" (valid only on: #{INCLUDE_NULLS_OK.join(', ')})."
+          end
         end
       end
     end
