@@ -274,14 +274,23 @@ if [ -f "$HERE/land-extracts.py" ]; then
   fi
 fi
 
-# --- skill version drift (v3 §2.1) -----------------------------------------
+# --- skill version drift + build-age stamp (v3 §2.1, v5.6 item 4) ----------
 # A plugin install pins a git SHA and never self-updates; running a stale SHA
-# silently ships pre-fidelity-layer output. Record {skill_sha, behind_count};
-# the orchestrator preflight FAILs above a threshold. Bounded, best-effort
-# fetch (stalled network capped ~6s); skip with SIGMA_SKIP_VERSION_CHECK=1.
-SKILL_SHA=""; BEHIND_COUNT="null"
+# silently ships pre-fidelity-layer output. Record {skill_sha, behind_count,
+# days_since_commit}; the orchestrator preflight FAILs above a threshold.
+# Bounded, best-effort fetch (stalled network capped ~6s); skip the drift
+# fetch with SIGMA_SKIP_VERSION_CHECK=1 (the local age stamp still runs — it
+# needs no network). No git at all (a mirror/plugin file-copy install) stamps
+# skill_sha 'unknown (no git — mirror/plugin install)' so downstream tooling
+# and bug reports can always say WHICH build (or that nobody can tell).
+SKILL_SHA=""; BEHIND_COUNT="null"; DAYS_SINCE_COMMIT="null"
 if command -v git >/dev/null 2>&1 && git -C "$HERE" rev-parse --git-dir >/dev/null 2>&1; then
   SKILL_SHA="$(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || true)"
+  _cts="$(git -C "$HERE" log -1 --format=%ct 2>/dev/null || true)"
+  case "$_cts" in
+    ''|*[!0-9]*) : ;;
+    *) DAYS_SINCE_COMMIT=$(( ($(date +%s) - _cts) / 86400 )) ;;
+  esac
   # Skip on a SHALLOW clone (CI checkout, some installs): rev-list against a
   # grafted origin/main returns a bogus count (a false "hundreds behind").
   _shallow="$(git -C "$HERE" rev-parse --is-shallow-repository 2>/dev/null)"
@@ -290,14 +299,27 @@ if command -v git >/dev/null 2>&1 && git -C "$HERE" rev-parse --git-dir >/dev/nu
     _bc="$(git -C "$HERE" rev-list --count HEAD..origin/main 2>/dev/null || true)"
     case "$_bc" in ''|*[!0-9]*) BEHIND_COUNT="null" ;; *) BEHIND_COUNT="$_bc" ;; esac
   fi
+  _age_note=""
+  [ "$DAYS_SINCE_COMMIT" != "null" ] && _age_note=", last commit ${DAYS_SINCE_COMMIT} day(s) ago"
   if [ "$BEHIND_COUNT" = "null" ]; then
-    [ -n "$SKILL_SHA" ] && ok "skill version $SKILL_SHA (drift check skipped/offline)"
+    [ -n "$SKILL_SHA" ] && ok "skill build $SKILL_SHA (drift check skipped/offline$_age_note)"
   elif [ "$BEHIND_COUNT" -gt 0 ] 2>/dev/null; then
-    warn "skill is ${BEHIND_COUNT} commit(s) behind origin/main (installed $SKILL_SHA) — you may be missing fidelity-layer fixes" \
+    warn "skill is ${BEHIND_COUNT} commit(s) behind origin/main (installed $SKILL_SHA$_age_note) — you may be missing fidelity-layer fixes" \
          "Update: 'git -C \"$HERE\" pull' (or reinstall the plugin). SIGMA_SKIP_VERSION_CHECK=1 skips this probe."
   else
-    ok "skill version $SKILL_SHA (current with origin/main)"
+    ok "skill build $SKILL_SHA (current with origin/main$_age_note)"
   fi
+  # Age WARN is independent of the network drift check: a >14-day-old build on
+  # a fast-moving skill is the field failure class where a run re-hits bugs
+  # fixed weeks earlier and nobody realizes the install is stale.
+  if [ "$DAYS_SINCE_COMMIT" != "null" ] && [ "$DAYS_SINCE_COMMIT" -gt 14 ] 2>/dev/null; then
+    warn "skill build $SKILL_SHA is ${DAYS_SINCE_COMMIT} days old — your build may predate current fixes" \
+         "Update your mirror/plugin: 'git -C \"$HERE\" pull' (or reinstall). Re-run doctor after."
+  fi
+else
+  SKILL_SHA="unknown (no git — mirror/plugin install)"
+  warn "skill build SHA unknown (no git — mirror/plugin install)" \
+       "Build age cannot be measured; if behavior looks pre-fix, refresh the mirror / reinstall the plugin and re-run doctor."
 fi
 
 # --- agent capability fingerprint (v3 §2.2) --------------------------------
@@ -370,6 +392,7 @@ write_doctor_json() {
     printf '"hyperapi_present":%s,' "$HYPERAPI"
     printf '"skill_sha":"%s",' "$(jstr "$SKILL_SHA")"
     printf '"behind_count":%s,' "$BEHIND_COUNT"
+    printf '"days_since_commit":%s,' "$DAYS_SINCE_COMMIT"
     printf '"agent_vision":%s,' "$AGENT_VISION"
     printf '"model_hint":"%s",' "$(jstr "$MODEL_HINT")"
     printf '"generated_at":"%s",' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"

@@ -379,6 +379,56 @@ Dir.mktmpdir do |dir|
   check(pf['waivers'].include?('--skip-visual-similarity'), 'similarity waiver counted in the stamp')
 end
 
+# ---- gate 14 --tiles wiring (W1.7): dashboard-layout.json → per-tile detector --
+# A stub that RECORDS whether --tiles was passed, so the wiring (not the
+# detector itself — that's test_visual_similarity_tiles.py) is what's locked.
+def write_vsim_tiles_stub(dir)
+  stub = File.join(dir, 'vsim-tiles-stub.py')
+  File.write(stub, <<~PY)
+    import argparse, json
+    p = argparse.ArgumentParser()
+    p.add_argument('--source'); p.add_argument('--render'); p.add_argument('--json-out')
+    p.add_argument('--tiles', default=None)
+    a = p.parse_args()
+    out = {'pass': True, 'score': 0.9, 'tiles_arg': a.tiles}
+    if a.tiles:
+        out['tiles_measured'] = 3
+        out['tiles_blank'] = []
+    with open(a.json_out, 'w') as f:
+        json.dump(out, f)
+  PY
+  stub
+end
+
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  add_source_png(dir)
+  add_anchors(dir, verdict: PASS_VERDICT)
+  # A built dashboard layout arms the --tiles pass-through (and gate 8c wants
+  # its fill census — provide a passing one so only gate 14 is under test).
+  File.write(File.join(dir, 'dashboard-layout.json'), JSON.generate('zones' => []))
+  File.write(File.join(dir, 'layout-census.json'),
+             JSON.generate('pages' => [{ 'page' => 'Dash', 'zones' => 2, 'placed' => 2, 'grid_fill_pct' => 0.95 }]))
+  stub = write_vsim_tiles_stub(dir)
+  out, _err, st = run_gate(dir, env_extra: { 'VISUAL_SIMILARITY_SCRIPT' => stub })
+  check(st.success?, "tiles wiring run → exit 0 (got #{st.exitstatus})")
+  vs = JSON.parse(File.read(File.join(dir, 'visual-similarity.json')))
+  check(vs['tiles_arg'].to_s.end_with?('dashboard-layout.json'),
+        'gate 14 passes --tiles <workdir>/dashboard-layout.json when it exists')
+  check(out.include?('tile(s) measured'), 'gate 14 OK line surfaces the per-tile census')
+end
+
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  add_source_png(dir)
+  add_anchors(dir, verdict: PASS_VERDICT)
+  stub = write_vsim_tiles_stub(dir)
+  _out, _err, st = run_gate(dir, env_extra: { 'VISUAL_SIMILARITY_SCRIPT' => stub })
+  check(st.success?, "no dashboard-layout.json run → exit 0 (got #{st.exitstatus})")
+  vs = JSON.parse(File.read(File.join(dir, 'visual-similarity.json')))
+  check(vs['tiles_arg'].nil?, 'no dashboard-layout.json → NO --tiles (no-tiles invocation unchanged)')
+end
+
 # ---- runtime off-ramp waivers (offramps.jsonl) consume the budget too ---------
 # v4.2: escapes honored MID-RUN by the scripts (--force-new-workbook,
 # --force-route-switch, an unauthorized --allow-manual-spec) are recorded to

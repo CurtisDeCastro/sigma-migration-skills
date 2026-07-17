@@ -787,6 +787,50 @@ def cull_failed_fields(*logs)
        .select { |n| plausible_field_name?(n) }.uniq
 end
 
+# EXIT-4 SALVAGE INVENTORY (v5.6): a field run burned ~90 min re-deriving, per
+# untranslatable field, exactly what the workdir already knew — the Tableau
+# formula (calc-fields.json), its translation class, and which documented route
+# applies. Print that at the STOP so the fix starts from the answer, not the
+# question. Pure lookup, never raises (a malformed calc-fields.json just yields
+# the 'no entry' route).
+def salvage_inventory(work, failed)
+  calcs = begin
+    doc = JSON.parse(File.read(File.join(work, 'calc-fields.json'), encoding: 'UTF-8'))
+    Array(doc['calcs']).select { |c| c.is_a?(Hash) }
+  rescue StandardError
+    []
+  end
+  norm = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]/, '') }
+  by_norm = {}
+  calcs.each { |c| by_norm[norm.call(c['name'])] ||= c }
+  Array(failed).map do |nm|
+    c = by_norm[norm.call(nm)]
+    if c.nil?
+      { 'field' => nm, 'class' => 'unknown (no calc-fields.json entry under this name)',
+        'route' => 'not a workbook calc — check calc-fields.json captions and the DM column names; ' \
+                   'a BASE column failing here is a column-mapping fix (--column-mapping), not a formula translation' }
+    else
+      klass, route =
+        if c['requires_custom_sql'] && !c['is_lod']
+          ['window/table calc (requires_custom_sql — STAYS-MANUAL family)',
+           'manual-residue SQL: build it as a Custom SQL / grouped helper element ' \
+           '(template: refs/window-functions.md), declare it in <workdir>/manual-residues.json so gate 15 ' \
+           'tracks it, or knowingly ship the magnitude proxy via --accept-manual-residues — ' \
+           'never fold it into a master formula']
+        elsif c['is_lod']
+          ['LOD calc' + (c['requires_custom_sql'] ? ' (requires_custom_sql)' : ''),
+           "translate over master columns and re-run this exact command with --master-col '#{c['name']}=<Sigma formula>' " \
+           '(FIXED → the helper-element recipe in refs/window-functions.md when a plain master formula cannot express it)']
+        else
+          ['row-level calc',
+           "translate the formula to Sigma syntax and re-run this exact command with --master-col '#{c['name']}=<Sigma formula>'"]
+        end
+      { 'field' => c['name'], 'class' => klass, 'formula' => c['formula'],
+        'route' => route, 'notes' => Array(c['translation_notes']) }
+    end
+  end
+end
+
 def yp(s) YAML.safe_load(s, permitted_classes: [Date, Time]) rescue {} end
 
 # Formula-normalize hook (fix-workstream G: scripts/lib/formula_normalize.rb).
@@ -2894,6 +2938,70 @@ unless reuse_dm_id
   _, dvst = run!(['ruby', File.join(HERE, 'validate-spec.rb'), '--type', 'datamodel', dm_spec_path],
                  allow_fail: mechanical)
   line 'DM validate-spec flagged issues (advisory in mechanical mode — live POST is the gate)' if mechanical && !dvst.success?
+  # W2.2 / v5.6-P0.4 wiring: typed-literal lint over the generated DM spec.
+  # The 2026-07-13 field class: a NUMBER column compared to a quoted string
+  # (If([Year] = "2014", …)) compiles clean in Sigma and renders NULL for every
+  # affected measure — 6 of 9 charts blanked with zero errors. The lint
+  # (lib/typed_literal_lint.rb) existed but was wired to NOTHING. It runs here
+  # whenever a warehouse TYPE source exists in the workdir: the cols-<TABLE>.json
+  # catalogs Phase 2 discovered (name+type per column), aliased through the
+  # landing manifest's sf_table FQN + orig→landed caption map when extracts were
+  # landed. ADVISORY (WARN, never fatal): the lint is conservative by design, but
+  # corpus safety says a new lint must not block existing migrations — gate 13's
+  # tile-emptiness measurement remains the hard backstop. Findings also land in
+  # <workdir>/typed-literal-findings.json for the report.
+  begin
+    _tl_types = {}
+    Dir[File.join(WORK, 'cols-*.json')].each do |cf|
+      cj = (JSON.parse(File.read(cf)) rescue nil)
+      next unless cj.is_a?(Hash) && cj['columns'].is_a?(Array)
+      t = File.basename(cf, '.json').sub(/^cols-/, '')
+      _tl_types[t] = cj['columns'].each_with_object({}) do |c, h|
+        h[c['name'].to_s] = c['type'].to_s if c.is_a?(Hash) && c['name']
+      end
+    end
+    _tl_mani = Dir[File.join(WORK, '*landing-manifest*.json')].first
+    if _tl_mani
+      _tl_rows = (JSON.parse(File.read(_tl_mani)) rescue [])
+      _tl_rows = _tl_rows['tables'] if _tl_rows.is_a?(Hash) && _tl_rows['tables'].is_a?(Array)
+      Array(_tl_rows).each do |r|
+        next unless r.is_a?(Hash) && r['sf_table']
+        _tl_last = r['sf_table'].to_s.split('.').last.to_s
+        base = _tl_types[_tl_last] || _tl_types[_tl_last.upcase]
+        next unless base
+        fq = (_tl_types[r['sf_table'].to_s] ||= {})
+        base.each { |k, v| fq[k] = v unless fq.key?(k) }
+        # Alias the ORIGINAL captions onto their landed columns' types so a
+        # formula ref written against the Tableau caption still resolves.
+        (r['columns'].is_a?(Hash) ? r['columns'] : {}).each do |orig, landed|
+          v = base[landed.to_s]
+          fq[orig.to_s] = v if v && !fq.key?(orig.to_s)
+        end
+      end
+    end
+    if _tl_types.empty? || _tl_types.values.all?(&:empty?)
+      line 'typed-literal lint: SKIPPED — no warehouse type source in the workdir (no cols-*.json catalogs)'
+    else
+      _tl_types_path = File.join(WORK, 'typed-literal-types.json')
+      File.write(_tl_types_path, JSON.pretty_generate(_tl_types))
+      _tl_out = File.join(WORK, 'typed-literal-findings.json')
+      _, _tl_st = run!(['ruby', File.join(HERE, 'lint-typed-literals.rb'),
+                        '--spec', dm_spec_path, '--types', _tl_types_path, '--out', _tl_out],
+                       allow_fail: true)
+      if _tl_st.exitstatus == 3
+        _tl_n = ((JSON.parse(File.read(_tl_out)).length rescue nil) || '?')
+        line "WARN: typed-literal lint: #{_tl_n} finding(s) (printed above; #{_tl_out}) — these comparisons"
+        line '      compile clean and render NULL (the 2026-07-13 blanking class). Advisory here; fix the'
+        line '      formulas per the printed suggestions BEFORE gate 13 fails on the empty tiles they cause.'
+      elsif _tl_st.success?
+        line "typed-literal lint: clean (0 findings across #{_tl_types.size} typed table(s))"
+      else
+        line "WARN: typed-literal lint could not run (exit #{_tl_st.exitstatus}) — advisory, continuing"
+      end
+    end
+  rescue StandardError => e
+    line "WARN: typed-literal lint wiring failed (#{e.class}: #{e.message.to_s[0, 80]}) — advisory, continuing"
+  end
   # Custom-SQL identifier preflight (hackathon F2 class): a kind:"sql" element
   # whose statement references CUSTOMER_SFDC_ID unquoted while the live column
   # is "Customer SFDC ID" compiles only at POST time (Snowflake "invalid
@@ -3382,6 +3490,26 @@ rescue WorkbookBuildError => e
   puts '          straight to the workbook layer — see --help.)'
   puts '   The data model is posted and ready to attach either way. A conversion is NOT done'
   puts '   until scripts/assert-phase6-ran.rb exits 0 — that hard gate applies on both paths.'
+  # SALVAGE INVENTORY: everything already known about each blocked field, so the
+  # re-entry starts from the answer (formula + class + route) instead of
+  # re-deriving it from the .twb by hand.
+  begin
+    inv = salvage_inventory(WORK, failed)
+    unless inv.empty?
+      puts
+      puts '── SALVAGE INVENTORY — per blocked field: what it is + its concrete route ──'
+      inv.each do |i|
+        puts "   • #{i['field']}  [#{i['class']}]"
+        puts "       Tableau formula: #{i['formula'].to_s.gsub(/\s+/, ' ').strip[0, 220]}" if i['formula']
+        Array(i['notes']).first(2).each { |nt| puts "       note: #{nt.to_s.strip[0, 200]}" }
+        puts "       ROUTE: #{i['route']}"
+      end
+      File.write(File.join(WORK, 'salvage-inventory.json'), JSON.pretty_generate(inv))
+      puts "   (inventory also written to #{File.join(WORK, 'salvage-inventory.json')})"
+    end
+  rescue StandardError => e
+    puts "   (salvage inventory unavailable: #{e.class}: #{e.message.to_s[0, 80]})"
+  end
   # Authorize the hand-authoring re-entry: this STOP is the ONLY sanctioned way to
   # reach --wb-spec/--dm-spec. The token lets the re-run's manual-spec gate pass
   # (a COLD hand-author with no prior orchestrator run is refused).

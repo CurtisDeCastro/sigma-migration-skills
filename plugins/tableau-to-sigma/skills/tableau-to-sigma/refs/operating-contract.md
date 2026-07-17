@@ -77,6 +77,15 @@
   measures. A genuine re-transcription (you re-read the SOURCE image) uses
   `--retranscribed "<why>"`, which logs the diff into the report. `verify-anchors.rb`
   locks the file hash and refuses a silent edit.
+- **Extract drift is handled by `--extract-tol`, NEVER by editing anchors.** On an
+  extract-based workbook (`hasExtracts=true` / landed extracts) the source PNG shows
+  extract-stale values while the landed warehouse is fresher, so a printed-precision
+  anchor miss can be legitimate drift — the sanctioned response is
+  `verify-anchors.rb --extract-tol <F>` (e.g. `0.02` = ±2% relative). The tolerance
+  only activates when the workdir's own artifacts mark extracts, every
+  tolerance-admitted match is recorded per anchor (`tolerance_used` + `drift`) and
+  surfaced by the gates, and it MUST be named in the migration report. Rewriting
+  `source-anchors.json` to the live actuals remains tampering on every source type.
 
 ## Tooling discipline (don't burn the clock)
 - **Run `--help` before any flag you have not used this session.** Inventing a flag

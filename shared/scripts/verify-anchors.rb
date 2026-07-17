@@ -143,7 +143,22 @@ module AnchorVerify
   #     wrong first-N on screen — that class is caught by gate 9b (shape
   #     identity: the reviewer sees the wrong columns) and by the render-bisect
   #     playbook (unbounded pivots kill the renderer). Use both.
-  def verify(anchors, exports)
+  #
+  # extract_tol (Float, relative, e.g. 0.02 = ±2%) — EXTRACT DRIFT tolerance.
+  #   An extract-based source renders a frozen snapshot in the PNG the anchors
+  #   were transcribed from, while the landed warehouse can be fresher; the
+  #   printed-precision bar then reports a legitimate mismatch, and the field
+  #   temptation is to "fix" source-anchors.json (oracle rewriting — the exact
+  #   tamper W1.3 locks against). Instead the CALLER (CLI) activates a relative
+  #   tolerance ONLY for extract-marked workdirs: a numeric anchor that fails
+  #   the exact printed-precision match is retried with
+  #   relative_distance <= extract_tol, and a tolerance-admitted match RECORDS
+  #   'tolerance_used' (+ measured 'drift') in its detail row so the verdict
+  #   never silently launders drift into an exact pass. Text/roster anchors
+  #   never use tolerance (labels don't drift). Hinted-anchor scoping applies
+  #   identically to the tolerance retry.
+  def verify(anchors, exports, extract_tol: nil)
+    tol = extract_tol.is_a?(Numeric) && extract_tol.positive? ? extract_tol.to_f : nil
     el_names = exports.keys
     numbers = exports.transform_values { |rows| rows_numbers(rows) }
     texts = exports.transform_values { |rows| rows_texts(rows) }
@@ -180,10 +195,23 @@ module AnchorVerify
           scoped.empty? ? order : scoped # defensive: hint matched no element name
         end
       found_in = search_order.find { |n| numbers[n].any? { |v| AnchorValues.match?(raw, v) } }
+      tol_used = nil
+      if found_in.nil? && tol
+        found_in = search_order.find do |n|
+          numbers[n].any? { |v| AnchorValues.relative_distance(raw, v) <= tol }
+        end
+        tol_used = tol if found_in
+      end
       if found_in
         primary = order.first
-        detail << { 'id' => a['id'], 'raw' => raw, 'matched_in' => found_in,
-                    'note' => (found_in == primary ? nil : "found outside best-match element #{primary.inspect}") }.compact
+        d = { 'id' => a['id'], 'raw' => raw, 'matched_in' => found_in,
+              'note' => (found_in == primary ? nil : "found outside best-match element #{primary.inspect}") }.compact
+        if tol_used
+          drift = numbers[found_in].map { |v| AnchorValues.relative_distance(raw, v) }.min
+          d['tolerance_used'] = tol_used
+          d['drift'] = drift.round(6) if drift&.finite?
+        end
+        detail << d
       else
         # Closest candidate WITHIN the best-matching element that carries any
         # numbers (walking down the ranking until one does) — the wrong value
@@ -206,6 +234,7 @@ module AnchorVerify
       'matched' => anchors.length - missing.length,
       'missing' => missing,
       'pass' => missing.empty?,
+      'matched_via_tolerance' => detail.count { |d| d['tolerance_used'] },
       'detail' => detail }
   end
 end
@@ -225,6 +254,31 @@ def el_display_name(el)
   return n.to_s unless n.is_a?(Hash)
   t = n['text'].to_s
   t.empty? ? el['id'].to_s.sub(/\Ael-/, '').tr('-', ' ') : t
+end
+
+# --- extract-drift tolerance gating -----------------------------------------
+# --extract-tol is honored ONLY when the workdir's own intake/landing artifacts
+# mark the source as extract-based:
+#   - a landing manifest (*landing-manifest*.json) — extracts were LANDED, or
+#   - get-workbook.json hasExtracts=true (workbook or datasource level — the
+#     same signals migrate-tableau/auto-parity-plan read).
+# Returns a human-readable marker string, or nil (not extract-marked). Keeping
+# the decision on ARTIFACTS (not a caller-asserted flag) means a live-source
+# run can never borrow the tolerance to paper over a genuinely wrong value.
+def extract_marker(dir)
+  mani = Dir[File.join(dir, '*landing-manifest*.json')].first
+  return "extract-landed (#{File.basename(mani)})" if mani
+  gw_path = File.join(dir, 'get-workbook.json')
+  if File.exist?(gw_path)
+    gw = (JSON.parse(File.read(gw_path)) rescue nil)
+    if gw.is_a?(Hash)
+      has = gw['hasExtracts']
+      return 'hasExtracts=true (get-workbook.json)' if has == true || has.to_s == 'true'
+      ds = gw['datasources']
+      return 'hasExtracts=true (get-workbook.json datasources)' if ds.to_s =~ /"hasExtracts"\s*(=>|:)\s*"?true/
+    end
+  end
+  nil
 end
 
 # --- W1.1/W1.2: dashboard-tile emptiness + anchor scoping --------------------
@@ -327,6 +381,7 @@ OptionParser.new do |p|
   p.on('--out PATH', 'default: <workdir>/anchors-verdict.json')    { |v| opts[:out] = v }
   p.on('--pool N', Integer)    { |v| opts[:pool] = v }
   p.on('--timeout S', Integer) { |v| opts[:timeout] = v }
+  p.on('--extract-tol F', Float, 'relative tolerance (e.g. 0.02 = ±2%) for EXTRACT-based sources: the source PNG renders a frozen extract snapshot while the warehouse is fresher, so printed-precision misses can be legitimate drift. ONLY honored when the workdir is extract-marked (get-workbook.json hasExtracts / a landing manifest); tolerance-admitted matches are RECORDED per anchor (tolerance_used + drift), never silent. This — not editing source-anchors.json — is the sanctioned answer to extract drift.') { |v| opts[:extract_tol] = v }
   p.on('--workbook-spec PATH', 'offline: read element names from this spec instead of the live workbook') { |v| opts[:spec] = v }
   p.on('--exports-dir DIR', 'offline: read <elementId>.csv files instead of exporting live') { |v| opts[:exports] = v }
   p.on('--retranscribed REASON', 'authorize a CHANGE to source-anchors.json since its first verification — ONLY when you RE-READ the source dashboard PNG and corrected a genuine transcription error. REQUIRED reason string; the old->new diff is logged into the verdict and MUST be named in your report. NEVER use this to reconcile anchors against the live actuals (that defeats the whole measurement).') { |v| opts[:retranscribed] = v }
@@ -583,9 +638,36 @@ if exports.empty?
   exit 2
 end
 
-verdict = AnchorVerify.verify(anchors, exports)
+# --- extract-drift tolerance activation --------------------------------------
+# The tolerance NEVER edits anchors; it widens the numeric match ONLY, only for
+# extract-marked workdirs, and every tolerance-admitted match is recorded.
+extract_tol_active = nil
+extract_tol_info = nil
+if opts[:extract_tol]
+  tol = opts[:extract_tol].to_f
+  if tol <= 0 || tol > 0.5
+    warn "FATAL: --extract-tol #{opts[:extract_tol]} out of range (0 < F <= 0.5). A relative tolerance"
+    warn '       above 50% is not a measurement — fix the workbook instead of widening the ruler.'
+    exit 2
+  end
+  marker = extract_marker(opts[:dir])
+  if marker
+    extract_tol_active = tol
+    warn format('[extract-tol] ±%.2f%% relative tolerance ACTIVE — %s. Tolerance-admitted matches are recorded per anchor.', tol * 100, marker)
+  else
+    warn "[extract-tol] REFUSED: --extract-tol #{tol} IGNORED — the workdir carries no extract marker"
+    warn '              (no *landing-manifest*.json, no get-workbook.json hasExtracts=true).'
+    warn '              The tolerance exists for extract-stale sources ONLY; on a live source a'
+    warn '              printed-precision miss means the data is wrong. Fix the workbook.'
+  end
+  extract_tol_info = { 'requested' => tol, 'active' => !extract_tol_active.nil?,
+                       'reason' => marker || 'workdir not extract-marked (hasExtracts/landing manifest absent)' }
+end
+
+verdict = AnchorVerify.verify(anchors, exports, extract_tol: extract_tol_active)
 verdict['source_anchors'] = anchors_path
 verdict['verified_at'] = Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')
+verdict['extract_tolerance'] = extract_tol_info if extract_tol_info
 
 # W1.1/W1.2: dashboard-tile emptiness + anchor display scoping. `elements` is in
 # scope from whichever branch (offline spec / live REST) populated `exports`.
@@ -650,6 +732,8 @@ if File.exist?(pf)
     s = JSON.parse(File.read(pf))
     s['anchors'] = { 'checked' => verdict['checked'], 'matched' => verdict['matched'],
                      'pass' => verdict['pass'], 'missing' => verdict['missing'].map { |m| m['id'] } }
+    s['anchors']['matched_via_tolerance'] = verdict['matched_via_tolerance'] if verdict['matched_via_tolerance'].to_i.positive?
+    s['anchors']['extract_tolerance'] = verdict['extract_tolerance'] if verdict['extract_tolerance']
     s['dashboard_tiles_empty'] = verdict['dashboard_tiles_empty']
     s['tiles_all_nonempty'] = verdict['tiles_all_nonempty']
     File.write(pf, JSON.pretty_generate(s))
@@ -662,7 +746,13 @@ puts "verify-anchors: #{verdict['matched']}/#{verdict['checked']} anchor(s) matc
      "across #{exports.length} element export(s) → #{out_path}"
 verdict['detail'].each do |d|
   scope = d['in_displayed_tile'] ? '' : ' [FEEDER-ONLY: value is in a raw source table, not a displayed tile]'
-  puts "  MATCHED  #{d['id']} #{d['raw'].inspect} in #{d['matched_in'].inspect}#{d['note'] ? " (#{d['note']})" : ''}#{scope}"
+  tolnote = d['tolerance_used'] ? format(' [EXTRACT-TOL: drift %.2f%% within ±%.2f%%]', (d['drift'] || 0) * 100, d['tolerance_used'] * 100) : ''
+  puts "  MATCHED  #{d['id']} #{d['raw'].inspect} in #{d['matched_in'].inspect}#{d['note'] ? " (#{d['note']})" : ''}#{scope}#{tolnote}"
+end
+if verdict['matched_via_tolerance'].to_i.positive?
+  puts "  [extract-tol] #{verdict['matched_via_tolerance']} anchor(s) matched only within the extract drift " \
+       "tolerance (±#{format('%.2f', (extract_tol_active || 0) * 100)}%) — recorded in the verdict; " \
+       'name this in your migration report. Anchors were NOT edited.'
 end
 
 # W1.1: non-empty dashboard tiles — the hard data-path check. A displayed tile

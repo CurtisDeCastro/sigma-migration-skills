@@ -289,6 +289,20 @@ record_waiver = lambda do |flag, gate, reason|
   File.write(File.join(opts[:tab], 'waivers.json'), JSON.pretty_generate(waivers)) rescue nil
 end
 
+# Extract-drift tolerance surfacing: verify-anchors.rb --extract-tol (extract-
+# based sources only) can admit a numeric anchor within a RECORDED relative
+# tolerance instead of at printed precision. Every gate that cites the anchors
+# verdict must SAY so — a tolerance-admitted pass silently presented as a
+# printed-precision pass is exactly the laundering the anchor lock exists to
+# stop. Returns a note string ('' when no tolerance was used).
+anchors_tol_note = lambda do |av|
+  return '' unless av.is_a?(Hash) && av['matched_via_tolerance'].to_i.positive?
+  et = av['extract_tolerance'].is_a?(Hash) ? av['extract_tolerance'] : {}
+  "\n       NOTE: #{av['matched_via_tolerance']} anchor(s) matched only within the extract drift tolerance" \
+    " (--extract-tol #{et['requested'] || '?'}#{et['reason'] ? ", #{et['reason']}" : ''}) — the source PNG shows" \
+    ' extract-stale values; anchors were NOT edited. Name this in your migration report.'
+end
+
 summary_path = File.join(opts[:tab], 'parity-final.json')
 
 # ── Run-scoped completion sentinel (current run id) ─────────────────────────
@@ -467,7 +481,7 @@ if opts[:skip_parity]
   end
   puts "[SKIP] gate 1/7: Phase 6 source-parity WAIVED via --skip-parity-gate (#{opts[:skip_parity]})."
   puts "       Accepted because the anchors oracle stands in: anchors-verdict.json pass " \
-       "(#{_av['matched']}/#{_av['checked']} anchors matched)."
+       "(#{_av['matched']}/#{_av['checked']} anchors matched).#{anchors_tol_note.call(_av)}"
   puts '       This waiver MUST be named in the migration report — the workbook was NOT chart-by-chart verified vs the source.'
 else
   unless File.exist?(summary_path)
@@ -546,7 +560,8 @@ else
            "(#{_av['matched']}/#{_av['checked']} anchors matched, #{_av['anchors_matched_in_displayed'] || '?'} in displayed tiles) " \
            "+ all #{_vv.size} tile(s) image-verified + all displayed tiles return data " \
            "+ anchor coverage #{_cov['covered']}/#{_cov['displayed']} displayed tile(s)" \
-           "#{_n_waived.positive? ? " (#{_n_waived} coverage-waived at Phase 1d)" : ''}."
+           "#{_n_waived.positive? ? " (#{_n_waived} coverage-waived at Phase 1d)" : ''}." \
+           "#{anchors_tol_note.call(_av)}"
     else
       warn "[FAIL] parity-final.json reports charts_total=#{total} — no charts were verified."
       warn "       This usually means auto-parity-plan.rb matched zero Tableau views."
@@ -1600,8 +1615,9 @@ else
       warn '       tiles_all_nonempty field) — re-run verify-anchors.rb to measure displayed-tile'
       warn '       emptiness (a stale verdict cannot confirm the charts render data).'
     end
+    _tol13 = anchors_tol_note.call(av)
     puts "[OK] gate 13: source anchors verified — #{av['matched']}/#{av['checked']} printed source values " \
-         "found in the live workbook exports at printed precision#{tnote}"
+         "found in the live workbook exports#{_tol13.empty? ? ' at printed precision' : ''}#{tnote}#{_tol13}"
     # G10 (general path — ADVISORY ONLY): per-displayed-tile anchor coverage.
     # With real chart-by-chart parity in force (charts_total > 0), uncovered
     # tiles are still parity-verified — so this is a WARN, not a failure. The
@@ -1645,17 +1661,29 @@ elsif File.exist?(vsim_script)
     # deferred gap from v5.4.15).
     _vsim_py = ENV['SIGMA_PYTHON'].to_s.strip
     _vsim_py = 'python3' if _vsim_py.empty?
-    system(_vsim_py, vsim_script, '--source', source_png, '--render', render_png, '--json-out', vs_out)
+    # W1.7 wiring: when the build produced a dashboard layout (zone geometry),
+    # pass it as --tiles so the per-tile blank detector arms — a majority-blank
+    # render then FAILS the floor instead of passing on global similarity alone.
+    # Without the file the invocation is byte-identical to the no-tiles contract.
+    _vsim_cmd = [_vsim_py, vsim_script, '--source', source_png, '--render', render_png, '--json-out', vs_out]
+    _vsim_tiles = File.join(opts[:tab], 'dashboard-layout.json')
+    _vsim_cmd += ['--tiles', _vsim_tiles] if File.exist?(_vsim_tiles)
+    system(*_vsim_cmd)
     vsim_status = $? ? $?.exitstatus : 'not-run'
     vs = File.exist?(vs_out) ? (JSON.parse(File.read(vs_out)) rescue nil) : nil
     if vs.nil?
       warn "[WARN] gate 14: visual-similarity.py exited #{vsim_status} with no readable #{vs_out} — floor NOT" \
            ' measured (deps missing / unreadable input; NOT a pass — stated, never silent).'
     elsif vs['pass'] == true
-      puts "[OK] gate 14: visual-similarity floor passed#{vs['score'] ? " (score=#{vs['score']})" : ''}"
+      _tn = vs['tiles_measured'] ? " — #{vs['tiles_measured']} tile(s) measured, #{Array(vs['tiles_blank']).length} blank" : ''
+      puts "[OK] gate 14: visual-similarity floor passed#{vs['score'] ? " (score=#{vs['score']})" : ''}#{_tn}"
     else
       warn "[FAIL] gate 14: measured visual similarity below the floor#{vs['score'] ? " (score=#{vs['score']})" : ''} —"
       warn "       the render does not look like the source (#{source_png} vs #{render_png})."
+      if Array(vs['tiles_blank']).any?
+        warn "       render-side blank tile detector (--tiles): #{Array(vs['tiles_blank']).length} blank tile(s): " \
+             "#{Array(vs['tiles_blank']).first(8).join(', ')}"
+      end
       warn '       Re-enter the Phase 5g RCF loop (fidelity-loop.rb) and fix layout/kind/palette deltas,'
       warn '       then re-render and re-run. Escape hatch: --skip-visual-similarity "<reason>"'
       warn '       (counted against the waiver budget; name it in your migration report).'
