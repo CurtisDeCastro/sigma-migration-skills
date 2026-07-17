@@ -246,7 +246,17 @@ def guid_from_param(param)
   # those quick-filters entirely). `:` stays excluded — it's the structural
   # `<deriv>:<name>:<qual>` delimiter.
   m = param.match(%r{\.\[(?:[a-z\-]+:)?([0-9a-f\-]{36}|Calculation_\d+|[A-Za-z_][\w. ()/&-]*)(?::[a-z]+)?\]$}i)
-  m && m[1]
+  return m[1] if m
+  # DATASOURCE-LEVEL filters (a <filter> child of <datasource> or its <extract>)
+  # reference their column WITHOUT the `[federated.X].` prefix — a bare
+  # `[Segment]` / `[none:Segment:nk]`. Accept a single bracket group ONLY when
+  # the ref carries no `].[` datasource-qualified segment (so worksheet-level
+  # refs, which always carry the prefix, are byte-identical to before).
+  unless param.include?('].[')
+    m = param.match(%r{\A\[(?:[a-z\-]+:)?([0-9a-f\-]{36}|Calculation_\d+|[A-Za-z_][\w. ()/&-]*)(?::[a-z]+)?\]\z}i)
+    return m[1] if m
+  end
+  nil
 end
 
 # Strip Tableau's quoted-string member encoding (`&quot;CA&quot;` → `CA`).
@@ -255,6 +265,42 @@ def unquote_member(s)
   s = s.to_s.gsub('&quot;', '"').strip
   return nil if s == '%null%'
   s.sub(/^"/, '').sub(/"$/, '')
+end
+
+# WILDCARD tab filters (D5/P0.6): Tableau compiles the pattern box into a
+# `groupfilter function='filter'` whose expression is a string-match call —
+# CONTAINS([Field],"x") / STARTSWITH(...) / ENDSWITH(...), optionally NOT-
+# negated and sometimes STR()-wrapped. Parse it into the Sigma text-control
+# mode vocabulary ({mode, pattern}); return nil when the expression is not a
+# recognizable pattern match (condition-tab expressions stay conditions).
+WILDCARD_MODE = {
+  'CONTAINS'   => 'contains',
+  'STARTSWITH' => 'starts-with',
+  'ENDSWITH'   => 'ends-with'
+}.freeze
+WILDCARD_NEG_MODE = {
+  'contains'    => 'does-not-contain',
+  'starts-with' => 'does-not-start-with',
+  'ends-with'   => 'does-not-end-with'
+}.freeze
+def parse_wildcard_expression(expr)
+  s = expr.to_s.gsub('&quot;', '"').strip
+  neg = false
+  if (m = s.match(/\A\s*NOT\s+(.*)\z/im))
+    neg = true
+    s = m[1].strip
+  end
+  m = s.match(/\A\(?\s*(CONTAINS|STARTSWITH|ENDSWITH)\s*\(\s*(?:STR\s*\(\s*)?\[[^\]]+\]\s*\)?\s*,\s*(['"])(.*)\2\s*\)\s*\)?\z/im)
+  return nil unless m
+  base = WILDCARD_MODE[m[1].upcase]
+  { 'mode' => (neg ? WILDCARD_NEG_MODE[base] : base), 'pattern' => m[3] }
+end
+
+# Does an expression LOOK like a wildcard pattern match (even if it failed the
+# strict parse above)? Used to route unparseable pattern shapes to a loud
+# STAYS-MANUAL instead of silently degrading to "All" / a condition.
+def wildcard_flavored?(expr)
+  expr.to_s =~ /\b(CONTAINS|STARTSWITH|ENDSWITH)\s*\(/i ? true : false
 end
 
 # Read a <filter> element and emit a normalized spec:
@@ -300,24 +346,82 @@ def normalize_filter(f)
   when 'categorical'
     members = []
     conditions = []
+    exclude = false
+    wildcard = nil
+    wildcard_unparsed = nil
+    topn = nil
+    order_expr = nil
+    order_dir  = nil
     f.each_element('.//groupfilter') do |gf|
-      if gf.attributes['function'] == 'member'
+      fn = gf.attributes['function'].to_s
+      # EXCLUDE mode (D1/P0.1): the member tree is wrapped in
+      # `function='except'` (and/or tagged `user:ui-enumeration='exclusive'`).
+      # The member descendants are then the EXCLUDED values — collecting them
+      # without this flag silently inverts the filter into an include list.
+      # (Nokogiri resolves the `user:` prefix, so probe both attribute keys.)
+      enum_attr = gf.attributes['user:ui-enumeration'] || gf.attributes['ui-enumeration']
+      exclude = true if fn == 'except' || enum_attr.to_s == 'exclusive'
+      if fn == 'member'
         m = unquote_member(gf.attributes['member'])
         members << m if m
+      end
+      # Native TOP-N tab (D6/P0.5): `function='end' end='top|bottom' count='N'
+      # units='records'` nesting a `function='order' direction='DESC|ASC'
+      # expression='SUM([Sales])'`. count may reference [Parameters].[X].
+      if fn == 'end'
+        topn ||= {}
+        topn['end']   = (gf.attributes['end'] || 'top').to_s.downcase
+        topn['units'] = gf.attributes['units'] if gf.attributes['units']
+        cnt = gf.attributes['count'].to_s.strip
+        if cnt =~ /\A\d+\z/
+          topn['n'] = cnt.to_i
+        elsif !cnt.empty?
+          topn['count_param'] = cnt
+        end
+      end
+      if fn == 'order'
+        order_dir  = gf.attributes['direction']
+        order_expr = gf.attributes['expression']
+        next # the ORDER expression is the ranking key, not a condition
       end
       # CONDITION filters (function='filter' with an expression, e.g. a
       # minimum-sample gate `COUNTD([seed]) > 20` guarding a Top-N ranking)
       # were silently invisible — the emitted kind:list carried only members,
       # and two independent field runs had to grep raw XML to discover why
       # their Top-15 rosters were wrong. Surface every expression verbatim.
+      # WILDCARD tab patterns also land here (function='filter' whose
+      # expression is a CONTAINS/STARTSWITH/ENDSWITH compile) — peel those
+      # off into a typed wildcard spec instead of a raw condition.
       expr = gf.attributes['expression']
-      conditions << expr if expr && !expr.strip.empty?
+      next unless expr && !expr.strip.empty?
+      if fn == 'filter' && wildcard.nil? && (wc = parse_wildcard_expression(expr))
+        wildcard = wc
+      elsif fn == 'filter' && wildcard_flavored?(expr)
+        wildcard_unparsed ||= expr
+      else
+        conditions << expr
+      end
     end
     out['kind']    = 'list'
     out['members'] = members
+    out['exclude'] = true if exclude
+    if topn
+      topn['direction']  = (order_dir || 'DESC').to_s.upcase
+      topn['order_expr'] = order_expr if order_expr
+      out['topn'] = topn
+    end
+    if wildcard || wildcard_unparsed
+      # A wildcard filter carries no member enumeration — surface it as its
+      # own kind so the builder emits a text control / text-match element
+      # filter (or a loud STAYS-MANUAL for unparseable patterns) instead of
+      # mislabeling the empty member list as Tableau "All".
+      out['kind'] = 'wildcard'
+      out['wildcard'] = wildcard if wildcard
+      out['wildcard_unparsed'] = wildcard_unparsed if wildcard.nil?
+    end
     unless conditions.empty?
       out['condition_expressions'] = conditions.uniq
-      out['kind'] = 'list+condition' if members.empty?
+      out['kind'] = 'list+condition' if members.empty? && out['kind'] == 'list'
     end
   when 'relative-date'
     out['kind']           = 'relative-date'
@@ -1811,6 +1915,30 @@ xml.elements.each('//shared-view') do |sv|
   end
 end
 
+## ---- Datasource-level + extract filters (D2/P0.2) --------------------------
+# Tableau row-scopes a whole datasource with <filter> children of <datasource>
+# (Data Source Filters — users "can't see or modify" them) and of its
+# <extract> (rows removed at extract time). NO other walk sees them — the
+# worksheet walk is worksheet-scoped and shared filters live in <shared-view>
+# — so every sheet silently over-reported. Normalize them with the SAME shapes
+# as worksheet filters and ship them in the meta sidecar; build-charts applies
+# them as element filters on every element sourcing that datasource.
+datasource_filters = []
+xml.elements.each('/workbook/datasources/datasource') do |ds|
+  ds_label = (ds.attributes['caption'] || ds.attributes['name']).to_s
+  ds_name  = ds.attributes['name'].to_s
+  next if ds_label.start_with?('Parameter')
+  { 'filter' => 'datasource', 'extract/filter' => 'extract' }.each do |xpath, scope|
+    ds.elements.each(xpath) do |f|
+      spec = normalize_filter(f)
+      spec['datasource']      = ds_label
+      spec['datasource_name'] = ds_name
+      spec['filter_scope']    = scope
+      datasource_filters << spec
+    end
+  end
+end
+
 ## ---- Tableau stories (story points) ----------------------------------------
 # A Tableau story is a sequential slide deck: each <story-point> captures a
 # dashboard or worksheet plus a navigator caption. XML shapes in the wild:
@@ -1903,6 +2031,9 @@ meta = {
   'worksheets'     => scoped_worksheets.transform_values { |v| v.transform_keys(&:to_s) },
   'stories'        => stories,
   'shared_filters' => scoped_shared_filters,
+  # Datasource/extract filters are workbook-global row scoping — never narrowed
+  # by dashboard scoping (they apply to every sheet on the datasource).
+  'datasource_filters' => datasource_filters,
   'parameters'     => parameters,
   'column_aliases' => column_aliases,
   'columns_by_guid'=> COL_BY_GUID.transform_values { |v|
