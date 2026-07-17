@@ -381,7 +381,7 @@ else
   post_body = ensure_theme!(post_body, opts[:workdir])
   # W2.4 preflight: duplicate element/control ids fail the POST with an opaque
   # API 400 (field: the multi-DS converter minted "AAAAAAAAAB" twice + controlId
-  # "Region" twice — ~8 min of root-causing, both Macroeconomics runs). Name the
+  # "Region" twice — ~8 min of root-causing, both field-workbook runs). Name the
   # duplicates BEFORE the network call and hard-stop: dupes mean the GENERATOR is
   # broken (fix it), not the spec (auto-renaming here would desync references).
   begin

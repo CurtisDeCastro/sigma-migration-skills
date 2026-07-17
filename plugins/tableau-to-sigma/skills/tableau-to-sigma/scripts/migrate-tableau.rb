@@ -44,7 +44,7 @@ Encoding.default_external = Encoding::UTF_8
 #   ruby scripts/migrate-tableau.rb \
 #     --workbook "<name>" | --workbook-id <luid> \
 #     --connection <SIGMA_CONNECTION_ID> --folder <SIGMA_FOLDER_ID> \
-#     [--db CSA --schema TJ] [--specs <path/to/specs.rb>] \
+#     [--db <DB> --schema <SCHEMA>] [--specs <path/to/specs.rb>] \
 #     [--name '<prefix for DM/workbook names>'] \
 #     [--row-scale F | --page-rows N]  # row-model OVERRIDES: pass only to override —
 #                             # either flag disables the px-derived canvas rows \
@@ -302,7 +302,7 @@ if opts[:wb_name].to_s =~ %r{\Ahttps?://} || opts[:wb_name].to_s =~ %r{#/site/}
     require_relative 'lib/tableau_rest'
     # Cold-env order bug (field-caught round 2, re-caught round 3): with only PAT
     # creds set this resolver ran before a session existed and crashed. Round 2
-    # rescued a missing TABLEAU_SITE_ID — but the 2026-07 Macroeconomics run had a
+    # rescued a missing TABLEAU_SITE_ID — but a 2026-07 field-workbook run had a
     # STALE TABLEAU_SITE_ID set in the env file with NO AUTH_TOKEN, so site_id
     # returned fine, the mint was skipped, and find_workbook_by_content_url then
     # crashed on "TABLEAU_AUTH_TOKEN not set" — sending the run down a 4.5-min
@@ -509,7 +509,7 @@ TOTAL = 6
 
 # ── Total-runtime handoff nudge (refs/orchestration.md O2) ──────────────────
 # Field failure, 2026-07: TWO context-runaways in one quarter — a 6+ hour run,
-# and a 131-minute / ~12-pass run (World Bank Macroeconomics) that ended GREEN
+# and a 131-minute / ~12-pass run (the field workbook) that ended GREEN
 # over a dataless workbook. The nudge that should have fired at 90m never did,
 # because RunState.stamp overwrote each phase's `ts` on every pass, resetting
 # min(ts) each re-run (the comment claiming "the FIRST stamp of pass 1 survives"
@@ -1603,7 +1603,7 @@ if mechanical
   # <connection class='sqlproxy'> placeholder — the real relation (a warehouse
   # TABLE or a Custom SQL <relation type='text'>) lives in the PDS object on
   # Tableau Server, not the .twb. Left as-is the converter fabricates a phantom
-  # table (e.g. CSA.TJ.SQLPROXY) → POST "Source not found".
+  # table (e.g. DEMO_DB.DEMO.SQLPROXY) → POST "Source not found".
   #
   # PRIMARY: resolve-published-ds.rb resolves each PDS by contentUrl (== the
   # sqlproxy `dbname`), downloads GET /datasources/{id}/content, and reads the
@@ -1695,7 +1695,7 @@ if mechanical
              "(prefix #{prefix}; --no-auto-land to keep the manual gate)"
         _o, lst = run!([*PyResolve.argv, PyResolve.winpath(File.join(HERE, 'land-extracts.py')),
                         '--twbx', PyResolve.winpath(twbx_payload),
-                        '--db', (opts[:db] || 'CSA'), '--schema', (opts[:schema] || 'TJ'),
+                        '--db', (opts[:db] || 'DEMO_DB'), '--schema', (opts[:schema] || 'PUBLIC'),
                         '--prefix', prefix, '--sigma-connection-id', opts[:conn],
                         '--manifest-out', PyResolve.winpath(File.join(WORK, 'landing-manifest.json'))],
                        allow_fail: true)
@@ -1760,7 +1760,7 @@ if mechanical
   # v5.3: UNION-OF-ONE collapse. Tableau serializes a single-table datasource
   # that was once a wildcard union as <relation type='union' all='true'> with
   # ONE inner table relation — the converter models unions as unsupported and
-  # emits an EMPTY data model (round-5 root cause: Udemy #VOTD forced all
+  # emits an EMPTY data model (round-5 root cause: a course-analysis field workbook forced all
   # three models onto the manual path). A union of one is semantically its
   # inner table; collapse it on a COPY (inner relation inherits the union's
   # name so downstream column refs keep resolving).
@@ -1809,7 +1809,7 @@ if mechanical
     hyd_twb = File.join(WORK, 'workbook-hydrated.twb')
     # hydrate from conv_twb (not twb) so a union-of-one collapse survives hydration
     hyd_args = ['ruby', File.join(HERE, 'hydrate-custom-sql.rb'), '--twb', conv_twb,
-                '--db', (opts[:db] || 'CSA'), '--schema', (opts[:schema] || 'TJ'), '--out', hyd_twb]
+                '--db', (opts[:db] || 'DEMO_DB'), '--schema', (opts[:schema] || 'PUBLIC'), '--out', hyd_twb]
     hyd_args += ['--pds', pds_json] if File.exist?(pds_json)
     hyd_args += ['--custom-sql', hcsql] if File.exist?(hcsql)
     if hyd_args.include?('--pds') || hyd_args.include?('--custom-sql')
@@ -1817,7 +1817,7 @@ if mechanical
       conv_twb = hyd_twb if hst.success? && File.exist?(hyd_twb) && File.read(hyd_twb, encoding: 'UTF-8') != File.read(twb, encoding: 'UTF-8')
     end
     # Phantom guard: if any sqlproxy datasource is STILL unresolved, do NOT let the
-    # converter fabricate a bogus warehouse table (CSA.TJ.SQLPROXY) that POSTs and
+    # converter fabricate a bogus warehouse table (DEMO_DB.DEMO.SQLPROXY) that POSTs and
     # then fails at the API. Stop with an actionable message instead.
     if HydrateCustomSql.twb_has_sqlproxy?(conv_twb)
       (reap_lane!(lane_done) rescue nil) # bounded reap before aborting
@@ -1837,8 +1837,8 @@ if mechanical
   end
 
   conv = MechanicalSpecs.run_converter(
-    twb_path: conv_twb, conn: opts[:conn], db: (opts[:db] || 'CSA'),
-    schema: (opts[:schema] || 'TJ'), mcp_build: mcp_build, workdir: WORK,
+    twb_path: conv_twb, conn: opts[:conn], db: (opts[:db] || 'DEMO_DB'),
+    schema: (opts[:schema] || 'PUBLIC'), mcp_build: mcp_build, workdir: WORK,
     table_mapping: opts[:table_mapping])
   if opts[:table_mapping]&.any?
     line "table mapping: #{opts[:table_mapping].map { |k, v| "#{k}→#{v}" }.join(', ')}"
@@ -1994,8 +1994,8 @@ if mechanical
     _rf_errs.each { |e| line "WARN: png-read #{e} — rollup_flag IGNORED" }
     _rollup_flag = _pit_png['rollup_flag'] if _rf_errs.empty? && RecipeMultimetric.rollup_flag_active?(_pit_png)
     _scope_raw = (_rollup_flag && _rollup_flag['column']) || _pit_png['entity_discriminator']
-    # G9 run-2 root cause: the png-read caption ("Income Group") vs the landed
-    # physical column (INCOMEGROUP) failed the synthesizers' exact/underscore
+    # G9 run-2 root cause: the png-read caption ("Entity Group") vs the landed
+    # physical column (ENTITYGROUP) failed the synthesizers' exact/underscore
     # check and the rollup-exclusion WHERE was SILENTLY omitted (world totals
     # then double-count rollup rows). Resolve the caption variant HERE, loudly.
     _fact_caps = (conv_fact['columns'] || []).map { |c| RecipeMultimetric.col_disp(c) }.compact
@@ -2151,8 +2151,8 @@ mark('phase1.6-dm-scan')
 hdr(2, 'Discover warehouse columns (concurrent with discovery)')
 # G7 (run-2 field failure, 2026-07-15): when extracts were landed, the AUTHORITATIVE
 # db/schema is the landing manifest's fully-qualified sf_table paths — NOT the
-# CSA/TJ demo defaults. The default made this discovery return ZERO real columns
-# for a landed TABLEAU_MIGRATION.* schema ("? columns (not in catalog)"), which
+# generic demo defaults. The default made this discovery return ZERO real columns
+# for a landed migration-target schema ("? columns (not in catalog)"), which
 # silently disabled fixup_dm_spec's caption→physical remap AND its phantom-column
 # drop AND the world-by-year rollup discriminator (`unless real.empty?`) — one
 # wiring gap defanged three codified mechanisms and cost ~16 min of hand
@@ -2175,8 +2175,8 @@ rescue StandardError => e
   nil
 end
 derived = (opts[:db] || opts[:schema]) ? nil : manifest_dbschema.call
-db = opts[:db] || (derived && derived[0]) || 'CSA'
-schema = opts[:schema] || (derived && derived[1]) || 'TJ'
+db = opts[:db] || (derived && derived[0]) || 'DEMO_DB'
+schema = opts[:schema] || (derived && derived[1]) || 'PUBLIC'
 line "warehouse column discovery target: #{db}.#{schema}#{derived ? ' (derived from landing manifest)' : ''}"
 # Table set: from the generator's DM spec when available, else inferred from the
 # datasource's logical tables.
@@ -2828,8 +2828,8 @@ elsif mechanical
       # plotted directly — absent from the fact, the country line dangles.
       want |= world_lod_map.values if defined?(world_lod_map) && world_lod_map.is_a?(Hash)
       # G9 run-2 root cause: retain_columns! checks the name via an
-      # underscore-inserting normalization ('Income Group' -> INCOME_GROUP), so
-      # a landed column WITHOUT the underscore (INCOMEGROUP) silently failed the
+      # underscore-inserting normalization ('Entity Group' -> ENTITY_GROUP), so
+      # a landed column WITHOUT the underscore (ENTITYGROUP) silently failed the
       # check, the column was never retained, and the recipe guard then gutted
       # the whole point-in-time rewrite. Resolve each caption variant against
       # the live table catalog FIRST; a name retain's own check would miss is
@@ -2970,12 +2970,12 @@ if mechanical
   master_columns = derived['master_columns']
   mmap = derived['mmap']
   # Human-supplied master-calc overrides (--master-col): appended verbatim so a
-  # chart ref like [master/Ship Speed Category] resolves on the next run.
+  # chart ref like [master/Delivery Speed Tier] resolves on the next run.
   (opts[:master_cols] || []).each do |(nm, fx)|
     id = "m-#{nm.downcase.gsub(/[^a-z0-9]+/, '-').gsub(/^-|-$/, '')}"
     master_columns.reject! { |c| c['name'].casecmp?(nm) }
     # v5.4: slug collision guard — two DIFFERENT names can slug identically
-    # (an alias like "NUM_SUBSCRIBERS" vs the auto-derived "Num Subscribers"),
+    # (an alias like "NUM_ENROLLED" vs the auto-derived "Num Enrolled"),
     # and duplicate column ids fail the POST. Suffix until unique.
     base_id = id
     n = 2
@@ -3029,7 +3029,7 @@ if mechanical
     want = ph.split(':', 2).last
     hit = dm_els.find { |e| e['name'].to_s.strip.casecmp?(want) }
     # v5.0 hardening (multi-DS sub-masters ONLY): DM element names don't
-    # always equal plan captions ("Diablo Sum Dir Bias by Bilevel Preset" vs
+    # always equal plan captions ("Workbook Sum Dir Bias by Bilevel Preset" vs
     # plan "Sum Dir Bias by BiLevel Preset" — prefix + case). Fall back to
     # normalized matching: exact normalized, then UNIQUE containment with a
     # length floor (the shorter normalized name must be ≥8 chars and ≥50% of
@@ -3067,9 +3067,9 @@ if mechanical
       end
     end
     # v5.3: repair COLUMN names against the DM element's live columnLabels.
-    # The builder authors refs from RAW Tableau field names ('summoner_dir');
-    # the DM labels them cased ('Summoner Dir') — round 5 proved this pushed
-    # all three Diablo runs off the mechanical path into exit-4 hand-patching.
+    # The builder authors refs from RAW Tableau field names ('runner_dir');
+    # the DM labels them cased ('Runner Dir') — round 5 proved this pushed
+    # all three field runs off the mechanical path into exit-4 hand-patching.
     # Normalized (case/punct-insensitive) match, exact rewrite, loud misses.
     labels = Array(hit['columnLabels']).map(&:to_s)
     if labels.any? && de['columns'].is_a?(Array)

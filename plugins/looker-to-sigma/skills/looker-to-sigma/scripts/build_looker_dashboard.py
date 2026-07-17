@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the 'Orders Overview' UDD on csa_thelook via the Looker API:
+"""Build the 'Orders Overview' UDD on demo_thelook via the Looker API:
 KPIs + trend + region/category/channel breakdowns + top-products table,
 with 3 dashboard filters wired to every tile via result_maker.filterables.listen.
 """
@@ -7,7 +7,7 @@ import json
 import sys
 import looker_api as L
 
-MODEL, EXPLORE = "csa_thelook", "order_fact"
+MODEL, EXPLORE = "demo_thelook", "order_fact"
 FILTERS = [
     ("Order Date", "order_date.order_date"),
     ("Region", "customer_dim.region"),

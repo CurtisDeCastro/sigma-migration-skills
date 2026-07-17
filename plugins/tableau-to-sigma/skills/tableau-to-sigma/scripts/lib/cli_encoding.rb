@@ -2,7 +2,7 @@
 #
 # cli_encoding.rb — G3: UTF-8 bootstrap for CLI entry points (system Ruby 2.6).
 #
-# Field failure, BOTH Macroeconomics runs (3 crashes total): under an unset/C
+# Field failure, BOTH field-workbook runs (3 crashes total): under an unset/C
 # locale, Ruby 2.6 tags ARGV strings ASCII-8BIT; the first em-dash ("—", \xE2…)
 # in an agent-authored --notes/--name then raises
 # Encoding::UndefinedConversionError inside JSON.generate (pick-destination.rb

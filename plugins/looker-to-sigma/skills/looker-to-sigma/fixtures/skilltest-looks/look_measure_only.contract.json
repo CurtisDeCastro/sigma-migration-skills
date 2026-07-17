@@ -10,7 +10,7 @@
       "name": "Skilltest Look \u2014 Measure Only",
       "tileType": "looker_grid",
       "merge": null,
-      "model": "csa_thelook",
+      "model": "demo_thelook",
       "explore": "order_fact",
       "fields": [
         "order_fact.total_net_revenue",

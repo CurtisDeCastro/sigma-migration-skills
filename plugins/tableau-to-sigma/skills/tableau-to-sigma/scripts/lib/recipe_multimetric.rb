@@ -55,8 +55,8 @@ module RecipeMultimetric
 
   # ---- caption-variant field resolution (G9 run-2 misfire) ------------------
   # The same field travels under THREE spellings: the Tableau UI caption
-  # ("Income Group"), the extract caption ("IncomeGroup") and the landed
-  # physical column (INCOMEGROUP). Exact-string checks broke every consumer in
+  # ("Entity Group"), the extract caption ("EntityGroup") and the landed
+  # physical column (ENTITYGROUP). Exact-string checks broke every consumer in
   # the field run: the retain/WHERE/guard paths each compared a different pair
   # of spellings and each silently skipped. Normalize BOTH sides — upcase +
   # strip all non-alphanumerics — so any variant matches any other.
@@ -278,7 +278,7 @@ module RecipeMultimetric
     # and [Master/<year>]. The MECHANICAL data model retains only PLOTTED columns, so
     # a png-read discriminator that the source never plotted is often surfaced onto
     # the master under a VARIANT spelling (retain_columns! adds the LANDED physical
-    # name, e.g. INCOMEGROUP for the UI caption "Income Group"). G9 run-2 misfire:
+    # name, e.g. ENTITYGROUP for the UI caption "Entity Group"). G9 run-2 misfire:
     # this guard compared exact downcased strings, missed the variant, DELETED the
     # pit fields, and every snapshot measure silently degraded to a raw Sum().
     # Now: resolve each pit field against the master columns with caption-variant
@@ -404,7 +404,7 @@ module RecipeMultimetric
     # single-axis (the country line is a copy-calc it can't decompose, or the World
     # column won as the sole measure). Uses world_lod_map (world col -> source
     # metric) to recover the correct metric column (name-inference is unreliable:
-    # "GDP World" != the metric column "GDP (current US$)").
+    # "Revenue World" != the metric column "Revenue (current US$)").
     unless world_lod_map.empty?
       all_elements(spec).each { |el| summary[:trends] += ensure_dual_axis_trend!(el, world_lod_map) }
     end
@@ -502,19 +502,19 @@ module RecipeMultimetric
   # conditional, and (tables) ensure a groupBy on the dimension. Returns count of
   # measures rewritten.
   # Resolve the snapshot year for a metric. `latest_year` may be a scalar (one
-  # year for all measures) or a per-measure map {metric => year} — TEU ends 2014
-  # while GDP/FDI end 2015, so a single year blanks TEU.
+  # year for all measures) or a per-measure map {metric => year} — UNITS ends 2014
+  # while REV/NFI end 2015, so a single year blanks UNITS.
   # Resolve the snapshot year for a measure. Phase 1d records shorthand keys
-  # ({"GDP"=>2015, "TEU"=>2014} — the schema's own example) while the measure
+  # ({"REV"=>2015, "UNITS"=>2014} — the schema's own example) while the measure
   # column is the full caption, and some captions never contain the shorthand
-  # at all ("FDI" vs "Foreign direct investment, net inflows (BoP, current
+  # at all ("NFI" vs "Net investor inflows, quarterly (BoP, current
   # US$)" — live-caught: that miss shipped an ALL-YEARS sum as a "top" table).
   # Tiered match, longest key wins per tier:
   #   1. exact caption match (case-insensitive)
-  #   2. key as a whole WORD of the caption ("GDP" ∈ "GDP (current US$)",
-  #      boundary-guarded so "GDP" ∉ "GDPPP Value")
-  #   3. key as a whole word of the TILE TITLE (context — "FDI" ∈ "FDI Top3")
-  #   4. key as a word PREFIX of caption or title ("FDI" ∈ "FDIPie")
+  #   2. key as a whole WORD of the caption ("REV" ∈ "Revenue (current US$)",
+  #      boundary-guarded so "REV" ∉ "REVPP Value")
+  #   3. key as a whole word of the TILE TITLE (context — "NFI" ∈ "NFI Top3")
+  #   4. key as a word PREFIX of caption or title ("NFI" ∈ "NFIPie")
   def latest_year_for(pit, metric, context: nil)
     ly = pit['latest_year']
     return ly unless ly.is_a?(Hash)
@@ -645,9 +645,9 @@ module RecipeMultimetric
     kind = el['kind'].to_s
     return 0 unless %w[line-chart combo-chart area-chart].include?(kind)
     cols = el['columns'] || []
-    # The World column: its display name is a world_lod_map key (e.g. "GDP World").
-    # Caption-variant normalized match — a display-name variant ("Gdp World" /
-    # "GDP  World") must not silently exclude one of otherwise-identical trends.
+    # The World column: its display name is a world_lod_map key (e.g. "Revenue World").
+    # Caption-variant normalized match — a display-name variant ("Revenue world" /
+    # "Revenue  World") must not silently exclude one of otherwise-identical trends.
     wmap = {}
     world_lod_map.each { |k, v| wmap[norm_key(k)] = v }
     world_col = cols.find { |c| wmap.key?(norm_key(col_disp(c))) }
@@ -703,7 +703,7 @@ module RecipeMultimetric
     el['yAxis2'] = { 'columnIds' => [world_col['id']] }
     el.delete('dataLabel') # no per-point value labels smeared across the lines
     # Trim trailing no-data years: the master carries rows for every year ANY
-    # metric covers, so a metric that ends earlier (TEU stops before GDP) plots
+    # metric covers, so a metric that ends earlier (UNITS stops before REV) plots
     # its trailing all-null years as a cliff to 0. Row-level IsNotNull filter
     # (the verified bool-filter shape) ends each trend at ITS metric's last
     # real year — exactly the source's per-tile x-domain.

@@ -1,10 +1,10 @@
 # tableau / orders-overview
 
 The "Orders Conversion Test" (Orders Overview) Tableau workbook — the standard
-Tableau→Sigma demo dashboard on the CSA.TJ Snowflake star schema
+Tableau→Sigma demo dashboard on the DEMO_DB.DEMO Snowflake star schema
 (ORDER_FACT + CUSTOMER_DIM / PRODUCT_DIM / STORE_DIM / DATE_DIM / PROMO_DIM /
 DIM_TIME). Captured 2026-06-10 from a live tableau-to-sigma skill discovery run
-(synthetic demo data, Tableau Cloud `dataflow` trial site).
+(synthetic demo data, a Tableau Cloud trial site).
 
 ## Artifacts
 
@@ -45,7 +45,7 @@ endpoint directly.
 ## Known parity reference (live run 2026-06-10)
 
 Strict chart parity vs Tableau view CSVs: **5/5 PASS** — Revenue by Region,
-Orders by Category, Return Rate by Ship Speed Category, Gross Revenue by Ship
+Orders by Category, Return Rate by Delivery Speed Tier, Gross Revenue by Delivery
 Speed Category, Gross Margin % by Customer Value Tier. (Values drift as new
 ORDER_FACT rows land; verify against the live Tableau datasource, not baked
 numbers.)

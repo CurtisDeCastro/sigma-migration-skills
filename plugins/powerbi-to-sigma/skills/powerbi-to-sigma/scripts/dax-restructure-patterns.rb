@@ -27,7 +27,7 @@
 # Usage (library):
 #   require_relative 'dax-restructure-patterns'
 #   el = DaxRestructure.concatenatex_listagg(
-#          name:"RolesInDept", conn:CONN, db:"CSA", schema:"TJ", table:"EMPLOYEES",
+#          name:"RolesInDept", conn:CONN, db:"DEMO_DB", schema:"DEMO", table:"EMPLOYEES",
 #          group_col:"DEPARTMENT", text_col:"ROLE", sep:", ")
 #
 # Usage (CLI, classify a measure):

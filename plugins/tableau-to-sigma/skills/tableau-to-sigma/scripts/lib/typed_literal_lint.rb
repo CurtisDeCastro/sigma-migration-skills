@@ -4,7 +4,7 @@
 #
 # FIELD FAILURE (2026-07-13 run, never diagnosed in-flight): converter-generated
 # Sigma formulas compared a NUMBER column to a STRING literal —
-#   If([Year] = "2014", [Teu Value])
+#   If([Year] = "2014", [Unit Value])
 # where the landed warehouse column YEAR is NUMBER. The formula COMPILES CLEAN
 # and renders NULL for every measure (blanked 6 of 9 charts). Same class: a
 # date-part filter emitted as a string list (values: ["2015"]) against a
@@ -36,7 +36,7 @@
 #           'datetime'|... } } supplied by the caller from the landing
 #           manifest, a warehouse DESCRIBE, or live /columns. Keys are matched
 #           by NORMALIZED name (upcase, strip non-alphanumerics) so the
-#           caption 'GDP (current US$)' resolves against GDP_CURRENT_US, and
+#           caption 'Revenue (current US$)' resolves against REVENUE_CURRENT_US, and
 #           a dotted table path DB.SCHEMA.T also matches by its last segment.
 #
 #   Each finding (string keys, JSON-ready):
@@ -88,7 +88,7 @@ module TypedLiteralLint
     end
   end
 
-  # 'GDP (current US$)' → 'GDPCURRENTUS'; 'GDP_CURRENT_US' → 'GDPCURRENTUS'.
+  # 'Revenue (current US$)' → 'REVENUECURRENTUS'; 'REVENUE_CURRENT_US' → 'REVENUECURRENTUS'.
   def norm_name(s)
     s.to_s.upcase.gsub(/[^A-Z0-9]/, '')
   end

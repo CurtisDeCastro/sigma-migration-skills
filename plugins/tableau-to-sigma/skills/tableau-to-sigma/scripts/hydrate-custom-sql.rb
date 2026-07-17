@@ -29,7 +29,7 @@
 #     --twb /tmp/<name>/workbook-content.twb \
 #     --custom-sql /tmp/<name>/custom-sql.json \
 #     [--columns /tmp/<name>/probed-columns.json]  # {"<PubDS or caption>": ["col", ...]}
-#     --db CSA --schema TJ \
+#     --db <DB> --schema <SCHEMA> \
 #     --out /tmp/<name>/workbook-hydrated.twb
 #
 # The module (HydrateCustomSql) is pure/offline and unit-tested by

@@ -10,7 +10,7 @@ recorded in the flags file (flag, never fake).
 
 Usage:
   python3 convert.py --workspace gd_workspace.json --connection-id <uuid> \
-      --db CSA --schema TJ --out dm_spec.json --flags flags.json
+      --db DEMO_DB --schema DEMO --out dm_spec.json --flags flags.json
 """
 import argparse, json, re, sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

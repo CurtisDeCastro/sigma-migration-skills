@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """gen-denorm-sql — build the denormalized SQL element from a reconcile map.
 
-    python3 gen-denorm-sql.py --reconcile reconcile.json --database CSA --schema TJ [--out denorm.json]
+    python3 gen-denorm-sql.py --reconcile reconcile.json --database DEMO_DB --schema DEMO [--out denorm.json]
 
 Consumes reconcile-columns.py output and auto-generates the Sigma data-model SQL element:
   - SELECT writes `<realColumn> AS <qlikField>` for every field (preserving Qlik names while

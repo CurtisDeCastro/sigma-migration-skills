@@ -1,13 +1,13 @@
 # QuickSight → Sigma · Honest Gap Ledger (Pass 3 — comprehensive audit)
 
-**Date:** 2026-06-06  ·  **Sigma org:** tj-wells-1989  ·  **QuickSight acct:** 153722385948 (us-east-1)
+**Date:** 2026-06-06  ·  **Sigma org:** the demo org  ·  **QuickSight acct:** <aws-account-id> (us-east-1)
 **Scope:** all 20 migration test dashboards (D1–D20). Every QuickSight Sheet, Visual, and field-well
 was enumerated from `aws quicksight describe-analysis-definition` and compared against the produced
 Sigma workbook spec (`GET /v2/workbooks/{id}/spec`) and live element schemas/queries (sigma-mcp-v2).
 
 This ledger is deliberately blunt. Each row is classified **MATCH**, **FIXED-this-pass**, or
 **DOCUMENTED-SIGMA-LIMITATION ((c)-tail)** with the specific reason. Parity = the headline metric was
-re-computed directly from Snowflake (`CSA.TJ`) and confirmed against the Sigma element via MCP query.
+re-computed directly from Snowflake (`DEMO_DB.DEMO`) and confirmed against the Sigma element via MCP query.
 
 ## The big fix this pass — multi-sheet → multi-page
 
@@ -136,7 +136,7 @@ parity-verified (D13 page 2 "Revenue by Segment": Consumer $56,442.54 = Snowflak
 - **MATCH** — both → Sigma region-map; avg-salary-by-state matches Snowflake ✓. (Point-map vs
   region-map distinction handled by lat/long detection.)
 
-### D18 — Exotic Chart Zoo
+### D18 — Exotic Chart Gallery
 - QS: 1 sheet, 6 visuals: Waterfall, Sankey, BoxPlot, Histogram, WordCloud, Radar.
 - **MATCH (data-migrated)** — all 6 produce a Sigma element: waterfall+histogram→bar, the rest→
   grouped tables. Top incident-type count 48 = Snowflake ✓.
@@ -168,7 +168,7 @@ parity-verified (D13 page 2 "Revenue by Segment": Consumer $56,442.54 = Snowflak
 | Fixed this pass | 4 | D7 (param), D8 (scatter size data), D12 (window cols), D13+D14 (multi-sheet pages) |
 | Documented Sigma limitation present | — | D7 (control), D8 (bubble-size), D12 (window funcs), D13 (cross-sheet filters), D14 (visual actions), D16 (pagination), D18 (chart kinds), D19 (RLS/CLS), D20 (ML/embed) |
 
-**Data parity:** every dashboard's headline metric reproduces the Snowflake `CSA.TJ` source. No parity
+**Data parity:** every dashboard's headline metric reproduces the Snowflake `DEMO_DB.DEMO` source. No parity
 regressions were introduced this pass (re-verified D7, D8, D12, D13, D14 via sigma-mcp-v2 after the
 in-place re-migration).
 

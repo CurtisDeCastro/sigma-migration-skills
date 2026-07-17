@@ -1,6 +1,6 @@
 [
 {
-"dashboard": "Macroeconomics",
+"dashboard": "Indicators",
 "zone_tree": [
 {
 "id": "24",
@@ -45,7 +45,7 @@
 "border_style": "none",
 "text_runs": [
 {
-"text": "Global Macro Series",
+"text": "Metric Series",
 "color": "#027b8e",
 "font_size": 14,
 "bold": true,
@@ -59,14 +59,14 @@
 "break": false
 },
 {
-"text": "- 6. Macroeconomics",
+"text": "- 6. Indicators",
 "color": "#027b8e",
 "font_size": 12,
 "bold": false,
 "break": false
 },
 {
-"text": "\nSource: Global Macro",
+"text": "\nSource: Metric Series",
 "color": "#333333",
 "bold": false,
 "break": true
@@ -282,7 +282,7 @@
 {
 "id": "20",
 "kind": "chart",
-"caption": "GDPPie",
+"caption": "RevPie",
 "x_pct": 3.0,
 "y_pct": 22.5,
 "w_pct": 31.3,
@@ -304,7 +304,7 @@
 {
 "id": "9",
 "kind": "chart",
-"caption": "GDPRegionLine",
+"caption": "RevRegionLine",
 "x_pct": 36.7,
 "y_pct": 22.5,
 "w_pct": 39.5,
@@ -326,7 +326,7 @@
 {
 "id": "8",
 "kind": "chart",
-"caption": "GDP Top3",
+"caption": "Rev Top3",
 "x_pct": 80.1,
 "y_pct": 22.5,
 "w_pct": 19.6,
@@ -393,7 +393,7 @@
 {
 "id": "13",
 "kind": "chart",
-"caption": "FDIPie",
+"caption": "NFIPie",
 "x_pct": 3.0,
 "y_pct": 47.7,
 "w_pct": 31.3,
@@ -415,7 +415,7 @@
 {
 "id": "11",
 "kind": "chart",
-"caption": "FDIRegionLine",
+"caption": "NFIRegionLine",
 "x_pct": 36.7,
 "y_pct": 47.7,
 "w_pct": 39.5,
@@ -437,7 +437,7 @@
 {
 "id": "7",
 "kind": "chart",
-"caption": "FDI Top3",
+"caption": "NFI Top3",
 "x_pct": 80.1,
 "y_pct": 47.7,
 "w_pct": 19.6,
@@ -504,7 +504,7 @@
 {
 "id": "17",
 "kind": "chart",
-"caption": "TEUPie",
+"caption": "UNITSPie",
 "x_pct": 3.1,
 "y_pct": 72.8,
 "w_pct": 31.3,
@@ -526,7 +526,7 @@
 {
 "id": "12",
 "kind": "chart",
-"caption": "TEURegionLine",
+"caption": "UNITSRegionLine",
 "x_pct": 36.8,
 "y_pct": 72.8,
 "w_pct": 39.5,
@@ -548,7 +548,7 @@
 {
 "id": "1",
 "kind": "chart",
-"caption": "TEU Top3",
+"caption": "UNITS Top3",
 "x_pct": 80.1,
 "y_pct": 72.8,
 "w_pct": 19.6,
@@ -616,7 +616,7 @@
 "h_pct": 7.7,
 "text_runs": [
 {
-"text": "Global Macro Series",
+"text": "Metric Series",
 "color": "#027b8e",
 "font_size": 14,
 "bold": true,
@@ -630,14 +630,14 @@
 "break": false
 },
 {
-"text": "- 6. Macroeconomics",
+"text": "- 6. Indicators",
 "color": "#027b8e",
 "font_size": 12,
 "bold": false,
 "break": false
 },
 {
-"text": "\nSource: Global Macro",
+"text": "\nSource: Metric Series",
 "color": "#333333",
 "bold": false,
 "break": true
@@ -878,7 +878,7 @@
 {
 "id": "20",
 "kind": "chart",
-"caption": "GDPPie",
+"caption": "RevPie",
 "x_pct": 3.0,
 "y_pct": 22.5,
 "w_pct": 31.3,
@@ -906,7 +906,7 @@
 {
 "id": "9",
 "kind": "chart",
-"caption": "GDPRegionLine",
+"caption": "RevRegionLine",
 "x_pct": 36.7,
 "y_pct": 22.5,
 "w_pct": 39.5,
@@ -934,7 +934,7 @@
 {
 "id": "8",
 "kind": "chart",
-"caption": "GDP Top3",
+"caption": "Rev Top3",
 "x_pct": 80.1,
 "y_pct": 22.5,
 "w_pct": 19.6,
@@ -1011,7 +1011,7 @@
 {
 "id": "13",
 "kind": "chart",
-"caption": "FDIPie",
+"caption": "NFIPie",
 "x_pct": 3.0,
 "y_pct": 47.7,
 "w_pct": 31.3,
@@ -1039,7 +1039,7 @@
 {
 "id": "11",
 "kind": "chart",
-"caption": "FDIRegionLine",
+"caption": "NFIRegionLine",
 "x_pct": 36.7,
 "y_pct": 47.7,
 "w_pct": 39.5,
@@ -1067,7 +1067,7 @@
 {
 "id": "7",
 "kind": "chart",
-"caption": "FDI Top3",
+"caption": "NFI Top3",
 "x_pct": 80.1,
 "y_pct": 47.7,
 "w_pct": 19.6,
@@ -1144,7 +1144,7 @@
 {
 "id": "17",
 "kind": "chart",
-"caption": "TEUPie",
+"caption": "UNITSPie",
 "x_pct": 3.1,
 "y_pct": 72.8,
 "w_pct": 31.3,
@@ -1172,7 +1172,7 @@
 {
 "id": "12",
 "kind": "chart",
-"caption": "TEURegionLine",
+"caption": "UNITSRegionLine",
 "x_pct": 36.8,
 "y_pct": 72.8,
 "w_pct": 39.5,
@@ -1200,7 +1200,7 @@
 {
 "id": "1",
 "kind": "chart",
-"caption": "TEU Top3",
+"caption": "UNITS Top3",
 "x_pct": 80.1,
 "y_pct": 72.8,
 "w_pct": 19.6,

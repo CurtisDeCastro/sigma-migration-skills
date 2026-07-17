@@ -14,7 +14,7 @@
 #     a chart source SILENTLY DROPS groupingId and would fan the measure ×rows),
 #     rewriting the bucket's refs onto the inner element
 #
-# Live-verified value (CSA.TJ testbed, 2026-06-28): the chain renders the bucket
+# Live-verified value (demo-warehouse testbed, 2026-06-28): the chain renders the bucket
 # at the de-fanned warehouse total (116,557.3); a chart-direct grouped source
 # fanned it to 82,172,896.5 (×705 base rows). See beads-sigma-y9rd.13.
 #

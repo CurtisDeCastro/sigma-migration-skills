@@ -189,23 +189,23 @@ in `Text()` when concatenating into strings — `"Q" & 4` compiles but errors at
 
 ### Multi-metric region dashboard — {Year-on-Year bars / Trend / Top-Countries} × N metrics
 
-The proven pattern for a dashboard that repeats the same 3-panel row per metric (the Global Macro Series shape). Applying it is the difference between the good hand-authored result and the regressed autonomous one (region-aggregate rows shown as countries, all-years sums, bars collapsed to one region). When Phase 1d has recorded a single list control with a mix of `target_tiles` and `highlight_tiles`, this is the shape.
+The proven pattern for a dashboard that repeats the same 3-panel row per metric (the Metric Series shape). Applying it is the difference between the good hand-authored result and the regressed autonomous one (region-aggregate rows shown as countries, all-years sums, bars collapsed to one region). When Phase 1d has recorded a single list control with a mix of `target_tiles` and `highlight_tiles`, this is the shape.
 
 1. **Two master tables off the same DM element** — `master` (control-FILTERED) and `masterAll` (UNFILTERED, same columns). The Region control filters `master` only.
    - Panels in the control's `highlight_tiles` (the Year-on-Year bars) source **`masterAll`** → show every region.
    - Panels in `target_tiles` (Trend country line, Top-Countries) source **`master`** → the selected region.
 2. **Point-in-time / "Top" measures must pin the period AND exclude rollup rows.** A raw `Sum([metric])` over an extract that carries region/aggregate rows AND all years yields "North America" (a region) at the top, summed across decades. Use a conditional:
    `Sum(If([Year] = <latestYearWithData> And Not IsNull([<entity-discriminator>]), [metric], null))`
-   - `<entity-discriminator>` = a column that is null on aggregate rows (Global Macro: `Income Group`; generally the dimension that only real leaf entities carry).
+   - `<entity-discriminator>` = a column that is null on aggregate rows (Metric Series: `Entity Group`; generally the dimension that only real leaf entities carry).
    - **FLAG-valued discriminator** — some extracts mark rollups by VALUE, not NULL (a flag column: `'Y'` rollup / `'N'` entity / sometimes NULL): IsNull can't express that. Declare png-read `point_in_time.rollup_flag {column, rollup_values[], entity_values[]}` and the condition becomes equality predicates instead: `([<flag>] = "N")` (entity_values, strict) or `(IsNull([<flag>]) Or Not ([<flag>] = "Y"))` (rollup_values only — NULL-flag rows kept).
-   - `<latestYearWithData>` is **per metric** — verify against the landed data (Global Macro: GDP/FDI = 2015, TEU = 2014); don't assume the max year has data.
+   - `<latestYearWithData>` is **per metric** — verify against the landed data (Metric Series: REV/NFI = 2015, UNITS = 2014); don't assume the max year has data.
    - Field names here are caption-variant tolerant (UI caption / extract caption / landed physical all resolve); an unresolvable name is dropped LOUDLY with the master-column candidate list — never treat a silently-raw `Sum()` as acceptable.
 3. **Top-Countries table is GROUPED** — `groupings:[{groupBy:[<entity>], sort:[{<measure> desc}]}]` + a `top-n` filter (`rowCount: 8`). Never emit it ungrouped (ungrouped → hundreds of raw rows).
 4. **Selected-region highlight (not a filter) on the bars** — add a category column `If([New Region] = [ctl-param-region], "Selected region", "Other")` and `color: {by: category, column: <that col>, scheme: ["#c9d1d3", "#027b8e"]}` (grey / brand-teal). Bars `orientation: horizontal`, sorted by value desc.
 5. **Trend = combo, Country vs World DUAL-AXIS** — Country line `Sum([metric])` on `yAxis` (rides `master`, follows the region filter); World line `Max([metric World])` on `yAxis2`, where `<metric> World` is a per-year global total. Dual axes match the source design: separate scales make the two lines TRACK each other (one shared axis pins the region line to the floor of the world total — an earlier revision of this recipe collapsed the axes and lost the source's reading). Raw 15-digit ticks are prevented by the SI column formats (`,.3~s`) on BOTH measures, not by collapsing axes. **Scope the World total to real entities** (`… WHERE <discriminator> IS NOT NULL`; with a `rollup_flag` declared, the WHERE becomes `"<FLAG>" IN (<entity_values>)` / `("<FLAG>" NOT IN (<rollup_values>) OR "<FLAG>" IS NULL)`) or it double-counts rollup rows and comes out ~10x high. An unresolvable discriminator/flag column is a LOUD banner with the landed-column candidate list — a silently-omitted WHERE is the run-2 failure mode. **Trim trailing no-data years** — a row-level `IsNotNull([metric])` bool filter (helper column + `list include:[true]`) ends each trend at its metric's last real year instead of a cliff to 0. No per-point `dataLabel`; integer Year x-axis (not a DateTrunc datetime).
 6. **Bars + tables presentation:** bars `orientation: horizontal`, **sort by the VALUE column desc** (not the category name), no `dataLabel`, SI format; Top-N tables drop the passthrough Date column (+ its filter) and use SI format.
 
-Reference implementation: session-1 `gen_wb_spec.py` (Global Macro Series). This recipe is the acceptance target for that class of dashboard.
+Reference implementation: session-1 `gen_wb_spec.py` (Metric Series). This recipe is the acceptance target for that class of dashboard.
 
 ## Layout composition (RCF hand-pass — multi-panel dashboards)
 
@@ -215,7 +215,7 @@ The one-shot layout builder is geometry-derived: it preserves the source's margi
 - **Bands aligned to their chart columns** — each header band's `gridColumn` equals the chart column beneath it (e.g. cols `1/9`, `9/17`, `17/25`), thin (~2 rows), flat tint (`backgroundColor` no border), label middle-aligned. One band must not span two chart columns.
 - **Charts start at column 1** — no left gutter/indent; the grid fills `1/25`.
 - **Card each panel** — wrap/style each chart with a surface (`style.{backgroundColor:'#FFFFFF', borderColor, borderWidth, borderRadius:'round'}`); set the chart's own `style.backgroundColor:'#00000000'` if it sits over a tint.
-- **Semantic panel titles** — set each element's `name` to `<Metric> <SECTION>` ("GDP YEAR ON YEAR" / "GDP TREND" / "GDP TOP COUNTRIES"), not the raw worksheet nickname ("GDPPie" / "GDPRegionLine").
+- **Semantic panel titles** — set each element's `name` to `<Metric> <SECTION>` ("REV YEAR ON YEAR" / "REV TREND" / "REV TOP ACCOUNTS"), not the raw worksheet nickname ("RevPie" / "RevRegionLine").
 - **In-place PUT (`--reuse-workbook`) carries STALE layout elements** — `layout-preserve` merges the live layout, so a header/band element the *new* spec dropped (e.g. a prior page-name H1) LINGERS. When updating in place, the RCF patch must explicitly DROP the stale layout elements (author the full corrected `layout` XML without them), or the fix won't show. (A fresh POST wouldn't have the residual — this is an in-place-update-only trap.)
 
 ## Infographic recipe pack (long-scroll analytical posters — field-derived 2026-07-10)

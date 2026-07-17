@@ -89,7 +89,7 @@ end
 
 luid = opts[:workbook_luid]
 out_path = opts[:out] || File.join('/tmp', "calc-fields-#{luid}.json")
-twb_path = opts[:twb] || "/tmp/assessment-dataflow/twbs/#{luid}.twb"
+twb_path = opts[:twb] || "/tmp/assessment-site/twbs/#{luid}.twb"
 
 FileUtils.mkdir_p(File.dirname(out_path))
 

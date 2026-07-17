@@ -208,18 +208,18 @@ check(entry["hyper"] == "federated_abc.hyper", "hyper is the basename only")
 check(entry["columns"] == {"Date": "DATE_1"}, "columns is the orig->landed map")
 
 print("Part J — ds_hyper_map: dbname→caption recovers GUID-named hypers")
-# GUID-named .hyper whose caption ("GFTGWOnullGDP2005 Extract") shares no tokens
+# GUID-named .hyper whose caption ("ZQXKPnullREV2005 Extract") shares no tokens
 # with the filename — match_ds falls back to the GUID stem, but the federated
 # named-connection's dbname carries the real .hyper name.
 TWB = """<?xml version='1.0' encoding='utf-8'?>
 <workbook><datasources>
   <datasource caption='Parameters' name='Parameters'/>
-  <datasource caption='GFTGWOnullGDP2005 Extract' name='federated.gdp'>
+  <datasource caption='ZQXKPnullREV2005 Extract' name='federated.rev'>
     <connection class='federated'><named-connections><named-connection name='n1'>
       <connection class='hyper' dbname='Data/dataengine_0vr0bc01wliy3712xve51.hyper' schema='Extract'/>
     </named-connection></named-connections></connection>
   </datasource>
-  <datasource caption='1. Global Macro Series Extract' name='federated.wb'>
+  <datasource caption='1. Metric Series Extract' name='federated.wb'>
     <connection class='federated'><named-connections><named-connection name='n2'>
       <connection class='hyper' dbname='dataengine_0tb9dex1oka5x010ueapg.hyper'/>
     </named-connection></named-connections></connection>
@@ -230,16 +230,16 @@ with tempfile.NamedTemporaryFile("w", suffix=".twb", delete=False) as tf:
     twb_path2 = tf.name
 try:
     hm = le.ds_hyper_map(twb_path2)
-    check(hm.get("dataengine_0vr0bc01wliy3712xve51.hyper") == ("federated.gdp", "GFTGWOnullGDP2005 Extract"),
+    check(hm.get("dataengine_0vr0bc01wliy3712xve51.hyper") == ("federated.rev", "ZQXKPnullREV2005 Extract"),
           "GUID hyper → (name, caption) via dbname")
-    check(hm.get("dataengine_0tb9dex1oka5x010ueapg.hyper") == ("federated.wb", "1. Global Macro Series Extract"),
+    check(hm.get("dataengine_0tb9dex1oka5x010ueapg.hyper") == ("federated.wb", "1. Metric Series Extract"),
           "second GUID hyper mapped (dbname without a path prefix)")
     check("Parameters" not in [v[0] for v in hm.values()], "Parameters datasource skipped")
     # The heuristic match_ds would MISS these (no shared tokens) — proving the map
     # is what recovers the clean caption.
     caps = le.ds_captions(twb_path2)
     guessed = le.match_ds("dataengine_0vr0bc01wliy3712xve51.hyper", caps)
-    check(guessed[1] != "GFTGWOnullGDP2005 Extract",
+    check(guessed[1] != "ZQXKPnullREV2005 Extract",
           "match_ds alone falls back to the GUID (confirms the map is load-bearing)")
 finally:
     os.unlink(twb_path2)

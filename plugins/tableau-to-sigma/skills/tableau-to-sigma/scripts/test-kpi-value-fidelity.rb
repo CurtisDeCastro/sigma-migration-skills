@@ -144,15 +144,15 @@ check(parse_scaled_suffix_format('p0.0%').nil?, 'percent format → nil (enum pa
 # Review-hardened: NUMERIC scaled column + fixed-decimal format + literal
 # `suffix` (spec/verify-confirmed) — trailing zeros and grouping survive,
 # unlike the earlier Text(Round()) concat ('3.0M' stayed '3.0M', not '3M').
-f = scaled_suffix_column('Sum([Master/GDP])', b)
-check(f == { 'formula' => '(Sum([Master/GDP])) / 1000000000',
+f = scaled_suffix_column('Sum([Master/REV])', b)
+check(f == { 'formula' => '(Sum([Master/REV])) / 1000000000',
              'format' => { 'kind' => 'number', 'formatString' => ',.0f', 'suffix' => 'B' } },
       "exact-format scaled column (got #{f.inspect})", fails)
-f2 = scaled_suffix_column('Sum([Master/TEU])', m6)
+f2 = scaled_suffix_column('Sum([Master/UNITS])', m6)
 check(f2['format'] == { 'kind' => 'number', 'formatString' => ',.1f', 'suffix' => 'M' },
       "zero-padded decimals survive via ,.1f (got #{f2['format'].inspect})", fails)
-raw = pick_tableau_format_raw({ '[federated.x].[sum:GDP (current US$):qk]' => 'n#,##0,,,B;-#,##0,,,B' },
-                              'GDP (current US$)')
+raw = pick_tableau_format_raw({ '[federated.x].[sum:Revenue (current US$):qk]' => 'n#,##0,,,B;-#,##0,,,B' },
+                              'Revenue (current US$)')
 check(raw == 'n#,##0,,,B;-#,##0,,,B', "raw format string resolvable by header (got #{raw.inspect})", fails)
 
 puts

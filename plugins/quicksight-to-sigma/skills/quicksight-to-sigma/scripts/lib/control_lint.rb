@@ -70,7 +70,7 @@
 # so the SIDECAR is the durable form — builders should emit both when the
 # allowlist must survive a live re-lint of the posted workbook.
 #
-# MCP / export-API note (verified empirically 2026-06-12 on tj-wells-1989):
+# MCP / export-API note (verified empirically 2026-06-12 on a live Sigma org):
 # the Sigma MCP query path (mcp__sigma-mcp-v2__query) evaluates a workbook
 # element WITH the workbook's saved control DEFAULTS applied and exposes NO
 # parameter mechanism to override them. The REST export API

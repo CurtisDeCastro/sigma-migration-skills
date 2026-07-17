@@ -62,7 +62,7 @@
           {"name": "Avg Tenure Days", "expression": "AVERAGE(EMPLOYEES[Tenure Days])", "formatString": "#,0", "lineageTag": "f05-m-avgtenure"}
         ],
         "partitions": [
-          {"name": "EMPLOYEES", "mode": "import", "source": {"expression": ["let", "  Source = Snowflake.Databases(\"ymb68310.snowflakecomputing.com\", \"SIGMA_WH\", [Role = null, CreateNavigationProperties = null, ConnectionTimeout = null, CommandTimeout = null, Implementation = \"2.0\"]),", "  #\"Navigation 1\" = Source{[Name = \"CSA\", Kind = \"Database\"]}[Data],", "  #\"Navigation 2\" = #\"Navigation 1\"{[Name = \"TJ\", Kind = \"Schema\"]}[Data],", "  #\"Navigation 3\" = #\"Navigation 2\"{[Name = \"EMPLOYEES\", Kind = \"Table\"]}[Data]", "in", "  #\"Navigation 3\""], "type": "m"}}
+          {"name": "EMPLOYEES", "mode": "import", "source": {"expression": ["let", "  Source = Snowflake.Databases(\"gxb98765.snowflakecomputing.com\", \"SIGMA_WH\", [Role = null, CreateNavigationProperties = null, ConnectionTimeout = null, CommandTimeout = null, Implementation = \"2.0\"]),", "  #\"Navigation 1\" = Source{[Name = \"DEMO_DB\", Kind = \"Database\"]}[Data],", "  #\"Navigation 2\" = #\"Navigation 1\"{[Name = \"DEMO\", Kind = \"Schema\"]}[Data],", "  #\"Navigation 3\" = #\"Navigation 2\"{[Name = \"EMPLOYEES\", Kind = \"Table\"]}[Data]", "in", "  #\"Navigation 3\""], "type": "m"}}
         ]
       },
       {
@@ -86,7 +86,7 @@
           {"name": "Total Absence Hours", "expression": "SUM(ABSENCE_RECORDS[HOURS])", "formatString": "#,0.0", "lineageTag": "f05-m-abshours"}
         ],
         "partitions": [
-          {"name": "ABSENCE_RECORDS", "mode": "import", "source": {"expression": ["let", "  Source = Snowflake.Databases(\"ymb68310.snowflakecomputing.com\", \"SIGMA_WH\", [Role = null, CreateNavigationProperties = null, ConnectionTimeout = null, CommandTimeout = null, Implementation = \"2.0\"]),", "  #\"Navigation 1\" = Source{[Name = \"CSA\", Kind = \"Database\"]}[Data],", "  #\"Navigation 2\" = #\"Navigation 1\"{[Name = \"TJ\", Kind = \"Schema\"]}[Data],", "  #\"Navigation 3\" = #\"Navigation 2\"{[Name = \"ABSENCE_RECORDS\", Kind = \"Table\"]}[Data]", "in", "  #\"Navigation 3\""], "type": "m"}}
+          {"name": "ABSENCE_RECORDS", "mode": "import", "source": {"expression": ["let", "  Source = Snowflake.Databases(\"gxb98765.snowflakecomputing.com\", \"SIGMA_WH\", [Role = null, CreateNavigationProperties = null, ConnectionTimeout = null, CommandTimeout = null, Implementation = \"2.0\"]),", "  #\"Navigation 1\" = Source{[Name = \"DEMO_DB\", Kind = \"Database\"]}[Data],", "  #\"Navigation 2\" = #\"Navigation 1\"{[Name = \"DEMO\", Kind = \"Schema\"]}[Data],", "  #\"Navigation 3\" = #\"Navigation 2\"{[Name = \"ABSENCE_RECORDS\", Kind = \"Table\"]}[Data]", "in", "  #\"Navigation 3\""], "type": "m"}}
         ]
       },
       {
@@ -111,7 +111,7 @@
           {"name": "Overtime-Related Incidents", "expression": "CALCULATE(DISTINCTCOUNT(SAFETY_INCIDENTS[INCIDENT_ID]), SAFETY_INCIDENTS[OVERTIME_ON_DAY] = TRUE())", "formatString": "0", "lineageTag": "f05-m-otinc"}
         ],
         "partitions": [
-          {"name": "SAFETY_INCIDENTS", "mode": "import", "source": {"expression": ["let", "  Source = Snowflake.Databases(\"ymb68310.snowflakecomputing.com\", \"SIGMA_WH\", [Role = null, CreateNavigationProperties = null, ConnectionTimeout = null, CommandTimeout = null, Implementation = \"2.0\"]),", "  #\"Navigation 1\" = Source{[Name = \"CSA\", Kind = \"Database\"]}[Data],", "  #\"Navigation 2\" = #\"Navigation 1\"{[Name = \"TJ\", Kind = \"Schema\"]}[Data],", "  #\"Navigation 3\" = #\"Navigation 2\"{[Name = \"SAFETY_INCIDENTS\", Kind = \"Table\"]}[Data]", "in", "  #\"Navigation 3\""], "type": "m"}}
+          {"name": "SAFETY_INCIDENTS", "mode": "import", "source": {"expression": ["let", "  Source = Snowflake.Databases(\"gxb98765.snowflakecomputing.com\", \"SIGMA_WH\", [Role = null, CreateNavigationProperties = null, ConnectionTimeout = null, CommandTimeout = null, Implementation = \"2.0\"]),", "  #\"Navigation 1\" = Source{[Name = \"DEMO_DB\", Kind = \"Database\"]}[Data],", "  #\"Navigation 2\" = #\"Navigation 1\"{[Name = \"DEMO\", Kind = \"Schema\"]}[Data],", "  #\"Navigation 3\" = #\"Navigation 2\"{[Name = \"SAFETY_INCIDENTS\", Kind = \"Table\"]}[Data]", "in", "  #\"Navigation 3\""], "type": "m"}}
         ]
       },
       {

@@ -33,11 +33,11 @@ check(cull_failed_fields(prose_log) == [], "prose after a period extracts nothin
 
 real_log = <<~LOG
   POST failed: Dependency not found: Preset Room Used
-  compile: Unknown column "[Summoner Dir]" on element master
+  compile: Unknown column "[Runner Dir]" on element master
   unmapped measure: Net Revenue
 LOG
 got = cull_failed_fields(real_log)
-check(got.include?('Preset Room Used') && got.include?('Summoner Dir') && got.include?('Net Revenue'),
+check(got.include?('Preset Room Used') && got.include?('Runner Dir') && got.include?('Net Revenue'),
       "real field names still extracted (got #{got.inspect})", fails)
 
 long_prose = 'Dependency not found: the element you referenced was removed from the data model during quarantine'
@@ -45,7 +45,7 @@ check(cull_failed_fields(long_prose) == [],
       'sentence-length capture rejected by the plausibility filter', fails)
 
 puts 'plausible_field_name?'
-{ 'Preset Room Used' => true, 'NUM_SUBSCRIBERS' => true, '% of Total lab' => true,
+{ 'Preset Room Used' => true, 'NUM_ENROLLED' => true, '% of Total lab' => true,
   # v5.4.9: long enterprise KPI captions (8+ words) are legitimate field names.
   'Average Revenue Per Paying User Per Month (USD)' => true,
   '. The usual' => false, '' => false, 'a b c d e f g h' => false,

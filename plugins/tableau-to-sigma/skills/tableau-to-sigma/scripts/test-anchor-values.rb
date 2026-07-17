@@ -22,7 +22,7 @@ end
 puts '-- parse: canonical (value, tol, kind) per printed form --'
 {
   # raw            =>  [value,        tol,      kind]
-  '18,037B'        => [1.8037e13,     0.5e9,    'number'],
+  '12,345B'        => [1.2345e13,     0.5e9,    'number'],
   '$1.8T'          => [1.8e12,        0.05e12,  'currency'],
   '46.5M'          => [4.65e7,        0.05e6,   'number'],
   '-2%'            => [-2.0,          0.5,      'percent'],
@@ -55,22 +55,22 @@ puts '-- parse: rejects non-numbers --'
 end
 
 puts '-- match?: the printed-precision rounding rule --'
-# "18,037B": tol ±0.5e9 → anything in [18,036.5B, 18,037.5B]
-ok(AnchorValues.match?('18,037B', 18_037_000_000_000.0),  '18,037B matches 18.037e12 exactly')
-ok(AnchorValues.match?('18,037B', 18_036_500_000_000.0),  '18,037B matches lower rounding bound')
-ok(AnchorValues.match?('18,037B', 18_037_499_000_000.0),  '18,037B matches just under upper bound')
-ok(!AnchorValues.match?('18,037B', 18_038_000_000_000.0), '18,037B rejects 18,038B')
-ok(!AnchorValues.match?('18,037B', 1.8e12), 'THE FIELD FAILURE: 1.8T ($1.8T) does NOT match 18,037B (10x-off)')
-ok(!AnchorValues.match?('18,037B', 1.8037e12), '18,037B rejects a clean 10x-down value')
-ok(AnchorValues.match?('18,037B', 18_037.0), '18,037B matches the unscaled face value (column already in B)')
-ok(!AnchorValues.match?('18,037B', 18_037.6), 'unscaled face value still honors printed precision')
+# "12,345B": tol ±0.5e9 → anything in [12,344.5B, 12,345.5B]
+ok(AnchorValues.match?('12,345B', 12_345_000_000_000.0),  '12,345B matches 12.345e12 exactly')
+ok(AnchorValues.match?('12,345B', 12_344_500_000_000.0),  '12,345B matches lower rounding bound')
+ok(AnchorValues.match?('12,345B', 12_345_499_000_000.0),  '12,345B matches just under upper bound')
+ok(!AnchorValues.match?('12,345B', 12_346_000_000_000.0), '12,345B rejects 12,346B')
+ok(!AnchorValues.match?('12,345B', 1.2e12), 'THE FIELD FAILURE: 1.2T ($1.2T) does NOT match 12,345B (10x-off)')
+ok(!AnchorValues.match?('12,345B', 1.2345e12), '12,345B rejects a clean 10x-down value')
+ok(AnchorValues.match?('12,345B', 12_345.0), '12,345B matches the unscaled face value (column already in B)')
+ok(!AnchorValues.match?('12,345B', 12_345.6), 'unscaled face value still honors printed precision')
 
 # "$1.8T": tol ±0.05e12
 ok(AnchorValues.match?('$1.8T', 1.8e12),   '$1.8T matches 1.8e12')
 ok(AnchorValues.match?('$1.8T', 1.7501e12), '$1.8T matches 1.7501e12 (rounds to 1.8)')
 ok(AnchorValues.match?('$1.8T', 1.849e12),  '$1.8T matches 1.849e12 (rounds to 1.8)')
 ok(!AnchorValues.match?('$1.8T', 1.86e12),  '$1.8T rejects 1.86e12')
-ok(!AnchorValues.match?('$1.8T', 1.8037e13), '$1.8T does NOT match the true 18,037B value')
+ok(!AnchorValues.match?('$1.2T', 1.2345e13), '$1.2T does NOT match the true 12,345B value')
 
 # "46.5M": tol ±0.05e6
 ok(AnchorValues.match?('46.5M', 46_500_000), '46.5M matches 46,500,000')
@@ -106,14 +106,14 @@ ok(AnchorValues.match?('1,687', '1687'),  'numeric STRING actual is coerced and 
 
 puts '-- candidates / kind / relative_distance --'
 ok(AnchorValues.candidates('bogus').empty?, 'unparseable raw yields no candidates')
-ok(AnchorValues.candidates('18,037B').length == 2, 'suffixed form has scaled + unscaled candidates')
+ok(AnchorValues.candidates('12,345B').length == 2, 'suffixed form has scaled + unscaled candidates')
 ok(AnchorValues.candidates('1,687').length == 1, 'plain integer has a single candidate')
 ok(AnchorValues.candidates('-2%').length == 2, 'percent has points + fraction candidates')
 ok(AnchorValues.kind('$5') == 'currency' && AnchorValues.kind('5%') == 'percent' &&
    AnchorValues.kind('5') == 'number', 'kind() maps to the schema enum')
 ok(AnchorValues.kind('junk').nil?, 'kind() nil on unparseable')
-d_near = AnchorValues.relative_distance('18,037B', 1.80e13)
-d_far  = AnchorValues.relative_distance('18,037B', 1.8e12)
+d_near = AnchorValues.relative_distance('12,345B', 1.23e13)
+d_far  = AnchorValues.relative_distance('12,345B', 1.2e12)
 ok(d_near < d_far, 'relative_distance ranks the near value closer than the 10x-off value')
 ok(AnchorValues.relative_distance('junk', 5).infinite?, 'relative_distance infinite on unparseable')
 

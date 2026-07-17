@@ -2,7 +2,7 @@
 
 The validated offline LookML fixture for the looker-to-sigma skill (referenced
 from the plugin's `fixtures/skilltest-orders/`, not duplicated): an `order_fact`
-explore joining `customer_dim` on CSA.TJ, plus a 6-tile newspaper-layout
+explore joining `customer_dim` on DEMO_DB.DEMO, plus a 6-tile newspaper-layout
 `dashboard.lookml`. This is the fixture the skill was built against (GCP trial
 could not provision a live Looker, so this is the canonical offline input).
 

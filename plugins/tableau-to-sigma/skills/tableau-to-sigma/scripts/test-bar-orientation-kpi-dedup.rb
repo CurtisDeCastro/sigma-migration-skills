@@ -1,6 +1,6 @@
 #!/usr/bin/env ruby
 # Regression test for two build-charts fidelity fixes (from a live CoCo run of
-# the Orders Executive Overview dashboard):
+# the orders e2e workbook dashboard):
 #
 #  (A) Bar orientation — a Tableau bar with the DIMENSION on the Rows shelf and
 #      the MEASURE on the Cols shelf is a HORIZONTAL bar; build-charts must emit

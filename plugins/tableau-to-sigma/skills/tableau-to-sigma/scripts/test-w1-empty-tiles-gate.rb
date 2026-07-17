@@ -3,7 +3,7 @@
 #
 # test-w1-empty-tiles-gate.rb — W1.1/W1.2 red-team regression.
 #
-# Reproduces the 2026-07 Macroeconomics false-GREEN OFFLINE and proves it now
+# Reproduces the 2026-07 field-workbook false-GREEN OFFLINE and proves it now
 # goes RED: a workbook whose raw unfiltered feeder table ("Master All") carries
 # every anchor value, but whose 9 DISPLAYED dashboard tiles all export ZERO data
 # rows (the control-filter/typed-literal blanking). Pre-W1.1 the anchors oracle
@@ -31,8 +31,8 @@ end
 
 # --- Build an offline fixture: page-data feeders + page-dash-1 empty tiles ----
 def build_fixture(dir)
-  tiles = %w[el-gdppie el-gdpregionline el-gdp-top3 el-fdipie el-fdiregionline
-             el-fdi-top3 el-teupie el-teuregionline el-teu-top3]
+  tiles = %w[el-revpie el-revregionline el-rev-top3 el-nfipie el-nfiregionline
+             el-nfi-top3 el-unitspie el-unitsregionline el-units-top3]
   spec = {
     'pages' => [
       { 'id' => 'page-data', 'name' => 'Data', 'elements' => [
@@ -47,7 +47,7 @@ def build_fixture(dir)
         # misclassified as feeders, so the empty tiles escaped the gate. Keep the real
         # filter wiring so that regression can never re-hide.
         [{ 'id' => 'el-param-region', 'kind' => 'control', 'name' => 'Region',
-           'selectionMode' => 'single', 'value' => 'Americas & Caribbean',
+           'selectionMode' => 'single', 'value' => 'Region A & B',
            'filters' => tiles.map { |t| { 'source' => { 'elementId' => t }, 'columnId' => "#{t}-region" } } }] +
         tiles.map { |t| { 'id' => t, 'kind' => (t.end_with?('pie') ? 'chart' : 'table'),
                           'name' => t.sub(/\Ael-/, '').tr('-', ' '),
@@ -61,9 +61,9 @@ def build_fixture(dir)
   Dir.mkdir(exdir)
   # Feeder masterAll: has data, carries the anchor values.
   File.write(File.join(exdir, 'masterAll.csv'),
-             "Country,GDP,FDI,TEU\nUnited States,18027.890121,5000,999\nChina,14000.5,4000,888\n")
+             "Country,REV,NFI,UNITS\nUnited Widgets,12337.890121,5000,999\nAcme Holdings,9100.5,4000,888\n")
   # Feeder master (control-filtered to a value that matches nothing): header only.
-  File.write(File.join(exdir, 'master.csv'), "Country,GDP,FDI,TEU\n")
+  File.write(File.join(exdir, 'master.csv'), "Country,REV,NFI,UNITS\n")
   # Every displayed tile: header only = ZERO data rows (renders "No data").
   tiles.each { |t| File.write(File.join(exdir, "#{t}.csv"), "x,y\n") }
 
@@ -72,11 +72,11 @@ def build_fixture(dir)
   anchors = {
     'source_image' => 'views/macro.png',
     'anchors' => [
-      { 'id' => 'a1', 'label' => 'United States GDP', 'raw' => '18,028B', 'kind' => 'currency' },
-      { 'id' => 'a2', 'label' => 'China GDP', 'raw' => '14,001B', 'kind' => 'currency' },
-      { 'id' => 'a3', 'label' => 'US FDI', 'raw' => '5,000', 'kind' => 'number' },
-      { 'id' => 'a4', 'label' => 'China FDI', 'raw' => '4,000', 'kind' => 'number' },
-      { 'id' => 'a5', 'label' => 'US TEU', 'raw' => '999', 'kind' => 'number' }
+      { 'id' => 'a1', 'label' => 'United Widgets REV', 'raw' => '12,338B', 'kind' => 'currency' },
+      { 'id' => 'a2', 'label' => 'Acme Holdings REV', 'raw' => '9,101B', 'kind' => 'currency' },
+      { 'id' => 'a3', 'label' => 'US NFI', 'raw' => '5,000', 'kind' => 'number' },
+      { 'id' => 'a4', 'label' => 'Acme Holdings NFI', 'raw' => '4,000', 'kind' => 'number' },
+      { 'id' => 'a5', 'label' => 'US UNITS', 'raw' => '999', 'kind' => 'number' }
     ]
   }
   File.write(File.join(dir, 'source-anchors.json'), JSON.pretty_generate(anchors))

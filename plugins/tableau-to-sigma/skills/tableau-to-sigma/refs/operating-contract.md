@@ -60,8 +60,8 @@
   returns **zero rows**. "The export doesn't run queries" is false and is the exact
   rationalization that shipped a dataless dashboard GREEN.
 - **The two real causes** (fix these, never wave them): a **control/filter literal that
-  matches no rows** (e.g. control value `"Americas & Caribbean"` vs a calc emitting
-  `"Americas and Caribbean"`), and a **calc comparing a NUMBER column to a string
+  matches no rows** (e.g. control value `"Region A & B"` vs a calc emitting
+  `"Region A and B"`), and a **calc comparing a NUMBER column to a string
   literal** (`If([Year] = "2014", …)` compiles clean, renders NULL; a date-part filter as
   a string list `["2015"]` against a `TIMESTAMP` never matches). `verify-anchors.rb`
   reports empty displayed tiles (`dashboard_tiles_empty`); the gate refuses GREEN.

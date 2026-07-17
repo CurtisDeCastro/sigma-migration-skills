@@ -34,7 +34,7 @@
 #   ruby scripts/migrate-powerbi.rb \
 #     --tmsl /tmp/assessment-pbi-live/raw-tmsl/Test__Superstore_Overview.tmsl \
 #     --pbir /tmp/assessment-pbi-live/raw-pbir/Test__Superstore_Overview.json \
-#     --connection <SIGMA_CONN_UUID> --database TJ --schema PUBLIC \
+#     --connection <SIGMA_CONN_UUID> --database <DB> --schema <SCHEMA> \
 #     --ref-dm <referenceDataModelId> \
 #     [--name "Superstore Overview (from Power BI)"] [--folder <id>] \
 #     [--out DIR] [--answers '<json>'] [--yes] \

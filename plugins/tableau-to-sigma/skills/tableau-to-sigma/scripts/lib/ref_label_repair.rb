@@ -2,9 +2,9 @@
 # Global element-ref label repair (v5.4).
 #
 # The chart builder authors formula refs from RAW Tableau serialization tokens
-# (physical column names like NUM_SUBSCRIBERS, twb caption casing like
-# summoner_dir), while the live workbook elements carry Sigma DISPLAY labels
-# ("Num Subscribers", "Summoner Dir"). The v5.3 repair fixed this for hidden
+# (physical column names like NUM_ENROLLED, twb caption casing like
+# runner_dir), while the live workbook elements carry Sigma DISPLAY labels
+# ("Num Enrolled", "Runner Dir"). The v5.3 repair fixed this for hidden
 # grain-helper elements only; every field run since showed the same drift on
 # CHART elements referencing the master (and sibling generated sources), which
 # the pre-POST ref gate then fails one ref at a time.

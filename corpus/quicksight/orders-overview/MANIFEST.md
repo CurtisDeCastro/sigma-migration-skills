@@ -2,7 +2,7 @@
 
 The QuickSight "Orders Overview" analysis + "Orders Enriched" dataset export
 pair from the quicksight-to-sigma plugin fixtures (referenced, not duplicated).
-Synthetic CSA.TJ retail data; the dataset is a CustomSql physical table joining
+Synthetic DEMO_DB.DEMO retail data; the dataset is a CustomSql physical table joining
 the star schema.
 
 ## Artifacts (in plugin fixtures/)

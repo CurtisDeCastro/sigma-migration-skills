@@ -2,10 +2,10 @@
 
 > **Mode:** PROPOSE-ONLY. No production converter / measure-patterns / library was
 > modified. No Sigma DM or workbook was created (validation used raw
-> `connection`-type SQL against existing CSA.TJ tables — nothing to delete).
+> `connection`-type SQL against existing DEMO_DB.DEMO tables — nothing to delete).
 > READ-ONLY on Power BI throughout.
 >
-> **Generated:** 2026-05-31 · tenant `sigmacomputing.com` · Sigma org `tj-wells-1989`.
+> **Generated:** 2026-05-31 · tenant `sigmacomputing.com` · Sigma the demo Sigma org.
 > **Method:** TMSL `getDefinition` extract of every accessible semantic model →
 > per-item classify (a / b / c-genuine / unknown) against the KNOWN baseline
 > (`measure-patterns.md` + `dax-restructure-patterns.rb` + `dax-to-sigma-coverage.md`
@@ -19,9 +19,9 @@
 
 | Workspace | Model | Type | Items pulled | DAX source |
 |---|---|---|---|---|
-| Test (`269a33d0…`) | Workforce KitchenSink (complex DAX test) `049863fa…` | Fabric semantic model | 25 | full TMSL ✓ |
-| Test (`269a33d0…`) | Workforce Comp & Distribution (untested DAX) `92a0f3a0…` | Fabric semantic model | 23 | full TMSL ✓ |
-| Test (`269a33d0…`) | Safety & Absence Patterns (window DAX) `82786904…` | Fabric semantic model | 22 | full TMSL ✓ |
+| Test (`<workspace-id>`) | Workforce KitchenSink (complex DAX test) `<model-id>` | Fabric semantic model | 25 | full TMSL ✓ |
+| Test (`<workspace-id>`) | Workforce Comp & Distribution (untested DAX) `92a0f3a0…` | Fabric semantic model | 23 | full TMSL ✓ |
+| Test (`<workspace-id>`) | Safety & Absence Patterns (window DAX) `82786904…` | Fabric semantic model | 22 | full TMSL ✓ |
 | My workspace (`f16f69ff…`, Personal) | Report `81705807…` | personal dataset | 3 (names only) | **expressions NOT retrievable** |
 
 **"items"** = measures + calculated columns + calculated tables.
@@ -74,7 +74,7 @@ grouping-aware/PercentOfTotal. They are NOT re-validated here (already verified)
 ## Gap-scout — the 2 true unknowns (validation-gated, propose-only)
 
 Both unknowns turned out to be **translatable (b)**. Validation compared the candidate
-Sigma SQL (run via mcp-v2 `query`, `type:connection`, against the live CSA.TJ tables)
+Sigma SQL (run via mcp-v2 `query`, `type:connection`, against the live DEMO_DB.DEMO tables)
 to the live PBI `executeQueries` value.
 
 ### Unknown 1 — `Comp & Distribution / EMPLOYEES / Top 5 Role Salary` → **(b) VERIFIED**
@@ -84,7 +84,7 @@ to the live PBI `executeQueries` value.
 - **Candidate Sigma element (custom-SQL, group-by-ROLE top-N):**
   ```sql
   WITH role_tot AS (
-    SELECT ROLE, SUM(ANNUAL_SALARY) AS t FROM CSA.TJ.EMPLOYEES GROUP BY ROLE)
+    SELECT ROLE, SUM(ANNUAL_SALARY) AS t FROM DEMO_DB.DEMO.EMPLOYEES GROUP BY ROLE)
   SELECT SUM(t) FROM (SELECT t FROM role_tot ORDER BY t DESC LIMIT 5) x
   ```
   (DM/workbook idiom: a grouped element + `QUALIFY ROW_NUMBER() OVER (ORDER BY total DESC) <= 5`,
@@ -194,6 +194,6 @@ untranslatable to *something* in Sigma; the 4.3% is "needs redesign," not "impos
 ## Provenance / reproducibility
 - Models: `/tmp/gapscout/models/{KitchenSink,CompDistribution,SafetyAbsence}.bim` (TMSL).
 - Classifier: `/tmp/gapscout/classify.py` → `/tmp/gapscout/classified.json` (70 rows).
-- PBI oracle: `executeQueries` on Test WS `269a33d0…` (read-only).
-- Sigma validation: mcp-v2 `query` `type:connection` `cb2f5180-641f-47bd-8efa-da9d590d855a`
-  (CSA.TJ.EMPLOYEES inode `2fd56a36…`). **Zero Sigma items created → nothing to delete.**
+- PBI oracle: `executeQueries` on Test WS `<workspace-id>` (read-only).
+- Sigma validation: mcp-v2 `query` `type:connection` `ab12cd34-5678-40ab-8def-1234567890ab`
+  (DEMO_DB.DEMO.EMPLOYEES inode `2fd56a36…`). **Zero Sigma items created → nothing to delete.**

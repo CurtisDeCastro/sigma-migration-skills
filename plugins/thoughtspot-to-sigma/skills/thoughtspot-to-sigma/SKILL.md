@@ -60,7 +60,7 @@ printed values. This arms the Phase-6 measured gates (step 6 + `refs/source-anch
    For a multi-Liveboard run, use that Liveboard's parity dir (`<WORK>/parity-<n>`) as
    `--workdir` so the image lands where its gate runs. `--tab <guid>` renders one tab.
 2. **READ that PNG and transcribe ≥ 5 anchors** into `<WORK>/source-anchors.json`, EXACTLY as
-   printed (keep the raw string: `"18,037B"`, never `18037`): every KPI value, the top 3 values
+   printed (keep the raw string: `"12,345B"`, never `12345`): every KPI value, the top 3 values
    of every ranked list/table, one representative bucket value per chart, and 2–3 `text` roster
    anchors per ranked tile (include one from the BOTTOM half). Schema + canonicalization rules:
    `refs/source-anchors.md`.
@@ -182,7 +182,7 @@ with `--converted <workdir>/converted.json`.
 **Offline mode** (no live ThoughtSpot needed): `--model-tml <file>` +
 `--liveboard-tml <file>` read exported TML from disk — `fixtures/` ships a real
 exported pair (`retail-analytics-model.tml` + `retail-analytics-liveboard.tml`,
-the CSA.TJ retail star) so the full convert→post→build→layout path can be
+the DEMO_DB.DEMO retail star) so the full convert→post→build→layout path can be
 exercised end-to-end without a TS trial:
 ```
 python3 scripts/migrate.py --model-tml fixtures/retail-analytics-model.tml \
@@ -349,7 +349,7 @@ driving the picker by hand:
 - `get-token.sh` — Sigma token; `get-ts-token.sh` — ThoughtSpot Trusted-Auth service token
 
 ## Worked example
-The CSA.TJ retail star (ORDER_FACT + 5 dims) → ThoughtSpot model "Retail Analytics"
+The DEMO_DB.DEMO retail star (ORDER_FACT + 5 dims) → ThoughtSpot model "Retail Analytics"
 → converted Sigma DM (6-table star + Order Fact View) → 11 themed Liveboards
 migrated to 11 Sigma workbooks, parity exact (Net Revenue 108,797.85; by-category,
 region, quarter all match to the cent). Per-run ids land in `<workdir>/migrate_out.json`.

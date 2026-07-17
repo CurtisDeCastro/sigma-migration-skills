@@ -2,7 +2,7 @@
 
 ## retail-orders/
 A complete Phase-1 discovery output for the **Retail Orders (Qlik)** demo app
-(CSA.TJ star schema, sanitized demo data), captured live 2026-06-10 with
+(DEMO_DB.DEMO star schema, sanitized demo data), captured live 2026-06-10 with
 `scripts/qlik-discover.py`. Includes `converter-out.json` (the
 convert_qlik_to_sigma result) so the offline path needs neither qlik-cli, the
 node converter build, nor network access.

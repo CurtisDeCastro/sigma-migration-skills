@@ -69,7 +69,7 @@ class FakeRest
   def virtual_connections ; @h[:vcs] || [] ; end
   def virtual_connection_connections(id) ; (@h[:vcc] || {})[id] || [] ; end
 end
-DS_NAME = 'ORDER_FACT (CSA.ORDER_FACT)+ (New Virtual Connection)'
+DS_NAME = 'ORDER_FACT (DEMO_DB.ORDER_FACT)+ (New Virtual Connection)'
 
 # (6a) garbage-fp regression: a publishedConnection stub yields EMPTY (not {type:'publishedConnection'}).
 check('publishedConnection stub → empty direct fingerprint (was the score-0 bug)') do
@@ -81,10 +81,10 @@ vc_rest = FakeRest.new(
   wb:  [{ 'type' => 'publishedConnection', 'serverAddress' => '', 'datasource' => { 'id' => 'ds1', 'name' => DS_NAME } }],
   ds:  { 'ds1' => [{ 'type' => 'publishedConnection', 'serverAddress' => '' }] },        # dead-ends (VC-backed)
   vcs: [{ 'id' => 'vc1', 'name' => 'New Virtual Connection' }],
-  vcc: { 'vc1' => [{ 'dbClass' => 'snowflake', 'server' => 'https://ymb68310.snowflakecomputing.com/console/login#/' }] })
+  vcc: { 'vc1' => [{ 'dbClass' => 'snowflake', 'server' => 'https://gxb98765.snowflakecomputing.com/console/login#/' }] })
 vc_fp = RankConnections.fingerprint_from_workbook(vc_rest, 'wb1')
 check('VC-backed → type snowflake') { RankConnections.canon_type(vc_fp['type']) == 'snowflake' }
-check('VC-backed → host cleaned (no scheme/path/port)') { vc_fp['host'] == 'ymb68310.snowflakecomputing.com' }
+check('VC-backed → host cleaned (no scheme/path/port)') { vc_fp['host'] == 'gxb98765.snowflakecomputing.com' }
 
 # (6c) classic published DS resolves at the datasource hop; VC endpoints never consulted.
 pds_rest = FakeRest.new(
@@ -109,10 +109,10 @@ check('direct-warehouse workbook fingerprints straight from serverAddress') do
   RankConnections.canon_type(direct_fp['type']) == 'snowflake' && direct_fp['host'] == 'prodco.us-east-1.snowflakecomputing.com'
 end
 
-# (6f) VC fingerprint then RANKS the CSA.TJ (ymb68310) candidates to the top.
-CANDS2 = CANDS + [{ 'connection_id' => 'c-ymb', 'name' => 'ymb68310', 'type' => 'snowflake', 'host' => 'ymb68310.snowflakecomputing.com', 'account' => 'ymb68310' }]
+# (6f) VC fingerprint then RANKS the DEMO_DB.DEMO (gxb98765) candidates to the top.
+CANDS2 = CANDS + [{ 'connection_id' => 'c-ymb', 'name' => 'gxb98765', 'type' => 'snowflake', 'host' => 'gxb98765.snowflakecomputing.com', 'account' => 'gxb98765' }]
 r6 = RankConnections.rank(RankConnections.merge_fp(vc_fp, {}), CANDS2)
-check('VC fingerprint ranks the ymb68310 (CSA.TJ) connection #1 (score>100, was 0)') do
+check('VC fingerprint ranks the gxb98765 (DEMO_DB.DEMO) connection #1 (score>100, was 0)') do
   r6['ranked'].first['connection_id'] == 'c-ymb' && r6['ranked'].first['match_score'] > 100
 end
 

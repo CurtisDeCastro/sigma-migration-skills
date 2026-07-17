@@ -10,7 +10,7 @@
 # type 6, filter-0 rows, IDAT via Zlib::Deflate) keeps the test hermetic:
 # no network, no dependence on files under ~/tableau-migration.
 #
-# When the real Diablo assets ARE present, Part 4 additionally re-verifies
+# When real field-workbook assets ARE present (PNG_CLASSIFY_ASSETS dir), Part 4 re-verifies
 # the P1 spec's expected verdicts on them (those files exercise row filters
 # 1/2/4 and multi-IDAT streams the synthetic fixtures don't). Skipped with a
 # note when absent so the test stays green on other machines.
@@ -145,12 +145,12 @@ res = PngClassify.classify(banner, zone_w_pct: 20, zone_h_pct: 10)
 check(res['kind'] == 'art', "opaque banner in a small zone -> art (zone info beats pixel fallback, got #{res['kind']})", fails)
 
 puts
-puts 'Part 4 — real Diablo assets (spec expected verdicts; skipped when absent)'
-ASSETS = '/Users/jared/tableau-migration/diablo3-fable/assets'.freeze
+puts 'Part 4 — real field assets (spec expected verdicts; skipped when absent)'
+ASSETS = ENV.fetch('PNG_CLASSIFY_ASSETS', '/nonexistent/png-classify-assets').freeze
 if File.directory?(ASSETS)
   # The three twbx-embedded PNGs are all art (wordmark / icon / tagline) —
   # and their FILENAMES lie, which is why classification is pixel-only.
-  ['Diablo II AS i3.png', 'four paths icon.png', 'title AS D2 i8.png'].each do |f|
+  ['wordmark.png', 'icon.png', 'tagline.png'].each do |f|
     p = File.join(ASSETS, f)
     if File.exist?(p)
       res = PngClassify.classify(p)

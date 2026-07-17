@@ -159,7 +159,7 @@
 #      must show pass with every anchor checked. A printed source value that
 #      appears NOWHERE in the live workbook's element exports means the NUMBERS
 #      are wrong — the failure two field migrations shipped behind passing
-#      visual verdicts ("$1.8T" rendered where the source printed "18,037B").
+#      visual verdicts ("$1.2T" rendered where the source printed "12,345B").
 #      No source dashboard PNG at all → stated SKIP. Escape hatch:
 #      --skip-anchors-gate "<reason>" (counted against the waiver budget).
 #      ALSO raised when --skip-parity-gate is passed WITHOUT a passing
@@ -508,7 +508,7 @@ else
     _vv = (JSON.parse(File.read(File.join(opts[:tab], 'visual-verify', 'manifest.json'))) rescue nil)
     _vv_ok = _vv.is_a?(Array) && _vv.any? && _vv.all? { |t| t['visual_verified'] == true }
     # W1.1: condition (c) — every DISPLAYED dashboard tile must export >=1 data
-    # row. The 2026-07 Macroeconomics run passed (a) + (b) with all 15 anchors
+    # row. A 2026-07 field-workbook run passed (a) + (b) with all 15 anchors
     # matched, yet every chart rendered "No data": the anchors matched only in the
     # raw unfiltered feeder table, and no gate checked that the DISPLAYED tiles
     # carry data. verify-anchors now writes tiles_all_nonempty + dashboard_tiles_empty.
@@ -1536,7 +1536,7 @@ else
     warn "[FAIL] gate 13: source dashboard PNG present (#{source_png}) but " \
          "#{sa.nil? ? "#{sa_path} is missing/malformed" : "source-anchors.json has only #{n_anchors} anchor(s) (>= #{MIN_ANCHORS} required)"}."
     warn '       While READING the source image at Phase 1d, transcribe its printed values EXACTLY as'
-    warn '       printed (raw string kept: "18,037B", not 18037) — every KPI value, the top 3 values of'
+    warn '       printed (raw string kept: "12,345B", not 12345) — every KPI value, the top 3 values of'
     warn '       every ranked list/table, and one representative bucket value per chart. Schema:'
     warn '       SKILL.md Phase 1d / refs/source-anchors.md. Then verify them against the live workbook:'
     warn "         ruby scripts/verify-anchors.rb --workdir #{opts[:tab]} --workbook-id #{opts[:wb] || '<id>'}"
@@ -1569,7 +1569,7 @@ else
   elsif av.key?('tiles_all_nonempty') && av['tiles_all_nonempty'] != true && opts[:allow_empty_tiles].nil?
     # W1.1 general path: anchors matched, but a DISPLAYED tile renders no data.
     # Anchor matches can land entirely in the raw unfiltered feeder table (the
-    # Macroeconomics false-GREEN); a displayed tile that exports 0 data rows is a
+    # field-workbook false-GREEN); a displayed tile that exports 0 data rows is a
     # broken data path regardless of anchor arithmetic. Unwaivable except via the
     # source-PNG-citing --allow-empty-tiles budget waiver.
     empty = Array(av['dashboard_tiles_empty'])
@@ -1577,8 +1577,8 @@ else
     warn '       the charts render "No data". A displayed tile with 0 rows is a broken data path even when'
     warn '       every anchor "matched" (they can match only in the raw, unfiltered feeder table).'
     empty.first(10).each { |t| warn "         EMPTY  #{t['id']} #{t['name'].inspect} [#{t['kind']}]" }
-    warn '       Common causes: a control/filter literal that matches no rows (e.g. "Americas & Caribbean"'
-    warn '       vs a calc emitting "Americas and Caribbean"), or a calc comparing a NUMBER column to a'
+    warn '       Common causes: a control/filter literal that matches no rows (e.g. "Region A & B"'
+    warn '       vs a calc emitting "Region A and B"), or a calc comparing a NUMBER column to a'
     warn '       string literal (compiles clean, renders NULL). Fix the workbook, re-run verify-anchors.rb,'
     warn '       then re-run this gate. If a chart is GENUINELY empty on the SOURCE dashboard, waive with'
     warn '       --allow-empty-tiles "<reason citing the source PNG>".'

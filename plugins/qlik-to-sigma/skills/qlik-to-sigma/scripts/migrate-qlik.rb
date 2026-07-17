@@ -42,7 +42,7 @@
 # Usage:
 #   ruby scripts/migrate-qlik.rb \
 #     --app <qlikAppId> --connection <SIGMA_CONNECTION_ID> \
-#     [--database CSA] [--schema TJ] [--context sigma-migration] \
+#     [--database <DB>] [--schema <SCHEMA>] [--context sigma-migration] \
 #     [--folder <SIGMA_FOLDER_ID>] [--name '<prefix for DM/workbook names>'] \
 #     [--out DIR] [--answers '<json>'] [--yes] \
 #     [--from-discovery DIR]   # reuse an existing discovery dir (e.g. fixtures/) — skips Phase 1
@@ -116,7 +116,7 @@ def print_lane_log(lane)
   File.read(lane[:log]).each_line { |l| puts "   │ #{l.rstrip}" }
 end
 
-opts = { context: 'sigma-migration', database: 'CSA', schema: 'TJ' }
+opts = { context: 'sigma-migration', database: 'DEMO_DB', schema: 'DEMO' }
 OptionParser.new do |o|
   o.on('--app ID')            { |v| opts[:app]      = v }
   o.on('--connection ID')     { |v| opts[:conn]     = v }

@@ -9,7 +9,7 @@ liveboard:
       tables:
       - id: Retail Analytics
         name: Retail Analytics
-        fqn: d09e27fd-414e-4378-a148-c061da79d8e4
+        fqn: dddddddd-1111-4222-8333-444444444444
       search_query: "[Net Revenue]"
       answer_columns:
       - name: Total Net Revenue
@@ -40,7 +40,7 @@ liveboard:
       tables:
       - id: Retail Analytics
         name: Retail Analytics
-        fqn: d09e27fd-414e-4378-a148-c061da79d8e4
+        fqn: dddddddd-1111-4222-8333-444444444444
       search_query: "[Category] [Net Revenue]"
       answer_columns:
       - name: Category
@@ -76,7 +76,7 @@ liveboard:
       tables:
       - id: Retail Analytics
         name: Retail Analytics
-        fqn: d09e27fd-414e-4378-a148-c061da79d8e4
+        fqn: dddddddd-1111-4222-8333-444444444444
       search_query: "[Month Name] [Net Revenue]"
       answer_columns:
       - name: Month Name
@@ -112,7 +112,7 @@ liveboard:
       tables:
       - id: Retail Analytics
         name: Retail Analytics
-        fqn: d09e27fd-414e-4378-a148-c061da79d8e4
+        fqn: dddddddd-1111-4222-8333-444444444444
       search_query: "[Customer Segment] [Net Revenue]"
       answer_columns:
       - name: Customer Segment
@@ -148,7 +148,7 @@ liveboard:
       tables:
       - id: Retail Analytics
         name: Retail Analytics
-        fqn: d09e27fd-414e-4378-a148-c061da79d8e4
+        fqn: dddddddd-1111-4222-8333-444444444444
       search_query: "[Region] [Net Revenue] [Gross Profit]"
       answer_columns:
       - name: Region

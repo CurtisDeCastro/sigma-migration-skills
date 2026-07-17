@@ -4,7 +4,7 @@ Hand-authored minimal .twb exercising the three structural Tableau gaps closed
 2026-06-11 (beads y6b / iq8 / t67b): a 3-point STORY, a cross-source BLEND, and
 a NESTED `{FIXED}` LOD plus the ISOYEAR / FINDNTH / bin calc translations.
 Synthetic XML (no live tenant) modeled on real Tableau 2024.1 .twb shapes; the
-CSA.TJ Snowflake connection block matches the live demo warehouse.
+DEMO_DB.DEMO Snowflake connection block matches the live demo warehouse.
 
 ## Artifacts
 
@@ -55,7 +55,7 @@ regenerable intermediates and are not pinned.
 
 ## Known parity reference (live run 2026-06-11)
 
-Formula patterns verified on org tj-wells-1989 / conn `bc0319f8` / `CSA.TJ`
+Formula patterns verified on the demo Sigma org / conn `<connection-id>` / `DEMO_DB.DEMO`
 (workbook "Gap Workarounds 2026-06-11", folder of the same name), each tied to
 warehouse SQL via sigma-mcp-v2:
 

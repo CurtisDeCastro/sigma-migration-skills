@@ -133,7 +133,7 @@ If `get-view-data` returns 401 for a view, retry that view solo (the contention 
 > }
 > ```
 >
-> **When a control HIGHLIGHTS tiles** (`highlight_tiles` non-empty → the multi-metric recipe): every highlighted tile MUST carry `measure` = the real metric column it plots (e.g. `"GDP (current US$)"`, not `"GDP"`), and a `point_in_time` block is REQUIRED — `year_column`, `entity_discriminator` (a column null on rollup/aggregate rows so Top-N shows real entities; `null` if none), and `latest_year` (a scalar, or a per-metric map `{"<metric col>": <year>}` when metrics end in different years). The seed pre-fills what the `.twb` can supply and leaves the data-dependent fields for you to confirm; the gate blocks until they're set. Skipping them silently ships 0-value bars / all-year-sum Top-N.
+> **When a control HIGHLIGHTS tiles** (`highlight_tiles` non-empty → the multi-metric recipe): every highlighted tile MUST carry `measure` = the real metric column it plots (e.g. `"Revenue (current US$)"`, not `"REV"`), and a `point_in_time` block is REQUIRED — `year_column`, `entity_discriminator` (a column null on rollup/aggregate rows so Top-N shows real entities; `null` if none), and `latest_year` (a scalar, or a per-metric map `{"<metric col>": <year>}` when metrics end in different years). The seed pre-fills what the `.twb` can supply and leaves the data-dependent fields for you to confirm; the gate blocks until they're set. Skipping them silently ships 0-value bars / all-year-sum Top-N.
 >
 > **`point_in_time` extensions (run-2 hardening):**
 > - **`rollup_flag`** (optional) — when the rollup marker is a FLAG column (rollup rows marked by VALUE, not NULL: e.g. `'Y'` on rollup rows, `'N'` on entity rows, sometimes NULL on neither — every row non-null, so the IsNull discriminator semantics cannot express it):
@@ -301,9 +301,9 @@ pulled from a same-named `LOYALTY_TIER` warehouse column.
 
 ### 1e.1. Warehouse-table source rejected? Fall back to Custom SQL
 
-> **Verified 2026-05-24** against the `tj-wells-1989` org during audit-run-1.
+> **Verified 2026-05-24** against a live Sigma org during audit-run-1.
 > Two agents (Superstore, NASA) hit `Source not found: warehouse table
-> 'TJ.PUBLIC.XXX' on connection 'YYY'` POSTing a DM element whose
+> 'DEMO_DB.PUBLIC.XXX' on connection 'YYY'` POSTing a DM element whose
 > `source.kind: "warehouse-table"` pointed at a table that physically existed
 > in the warehouse and was queryable via `mcp__sigma-mcp-v2__query`. This is
 > a **Sigma static-catalog visibility** issue: the `warehouse-table` source
@@ -339,7 +339,7 @@ The fallback is to source the same table via Custom SQL:
   "source": {
     "kind": "sql",
     "connectionId": "<connection-id>",
-    "statement": "SELECT * FROM TJ.PUBLIC.NASA_GISS_LOTI"
+    "statement": "SELECT * FROM DEMO_DB.PUBLIC.NASA_GISS_LOTI"
   },
   "columns": [
     { "id": "c-year", "name": "Year", "formula": "[Custom SQL/YEAR]" },
@@ -367,7 +367,7 @@ trade-offs vs `warehouse-table` are:
 >   --out <WORK>/probe-columns.json
 > ```
 >
-> Validated 2026-05-24 against TJ.PUBLIC.SUPERSTORE_ORDERS — 19 columns
+> Validated 2026-05-24 against DEMO_DB.PUBLIC.SUPERSTORE_ORDERS — 19 columns
 > resolved in 7s. **Saves ~120s on every Custom SQL fallback** vs.
 > POST-fail-cleanup-retrying on column-name permutations (CUSTOMER_ID vs
 > CUST_ID vs ID vs RECORD_ID…). Don't skip this step.

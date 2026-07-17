@@ -51,7 +51,7 @@ and emits a JSON column list:
 
 ```bash
 ruby scripts/discover-columns.rb --connection-id <id> \
-  --table-path TJ.PUBLIC.ORDERS --out <WORK>/orders-cols.json
+  --table-path DEMO_DB.PUBLIC.ORDERS --out <WORK>/orders-cols.json
 # (or any warehouse path: my_project.my_dataset.orders, main.public.orders, etc.)
 ```
 
@@ -134,7 +134,7 @@ Prefer a **workbook-level control filtering the master table** — every chart t
 > **Element-level filters DO work on viz elements — verify them the right way.** A boolean
 > `filters: [{columnId, kind:"list", mode:"include", values:[true]}]` on a `bar-chart` /
 > `kpi-chart` is enforced in the render AND round-trips intact on `GET /v2/workbooks/{id}/spec`
-> (live-verified 2026-06-29 on `tj-wells-1989`: a not-null filter cut 731→397 on both kinds,
+> (live-verified 2026-06-29 on a live Sigma org: a not-null filter cut 731→397 on both kinds,
 > confirmed via element CSV export and rendered PNG). So if a filter *looks* like it "doesn't
 > work," do NOT assume the API silently dropped it — the cause is almost always a `columnId`
 > that doesn't resolve to a real column on that element, which `validate-spec.rb` / `control_lint.rb`

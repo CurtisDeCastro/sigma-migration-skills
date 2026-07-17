@@ -2,7 +2,7 @@
 
 The 8 TMSL `.bim` semantic-model fixtures that live in the powerbi-to-sigma
 plugin (NOT duplicated here — referenced by relative path). All synthetic
-workforce/CSA.TJ demo models; per-fixture DAX → Sigma oracle tables are in the
+workforce/DEMO_DB.DEMO demo models; per-fixture DAX → Sigma oracle tables are in the
 plugin's own
 [`fixtures/MANIFEST.md`](../../../plugins/powerbi-to-sigma/skills/powerbi-to-sigma/fixtures/MANIFEST.md).
 

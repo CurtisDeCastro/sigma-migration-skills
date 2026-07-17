@@ -2,7 +2,7 @@
 
 Real source-tool artifacts + golden converter outputs + a runner, so converter
 and builder changes can be smoke-tested **without live tenants**. Everything
-here is demo/synthetic data (CSA.TJ retail star, synthetic workforce, GO
+here is demo/synthetic data (DEMO_DB.DEMO retail star, synthetic workforce, GO
 Sales) — no tokens, no customer names.
 
 ```

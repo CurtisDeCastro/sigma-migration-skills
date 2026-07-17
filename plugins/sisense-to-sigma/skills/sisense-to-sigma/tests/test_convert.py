@@ -20,7 +20,7 @@ def ok(label, cond):
         print(f"  FAIL {label}")
 
 # --- model -> DM ---
-spec, flags = C.convert_model(model, CONN, "SISENSE_ECOMMERCE", "CSA")
+spec, flags = C.convert_model(model, CONN, "SISENSE_ECOMMERCE", "DEMO_DB")
 els = spec["pages"][0]["elements"]
 ok("model: 4 elements", len(els) == 4)
 ok("model: all warehouse-table (no custom-sql in ecommerce)",
@@ -30,13 +30,13 @@ ok("model: fact element is last (after dims)", els[-1].get("relationships"))
 ok("model: clean star has only direction-heuristic flags (no custom-SQL/errors)",
    all("join direction" in f["reason"] for f in flags))
 # with cardinality directions supplied, no flags at all
-spec2, flags2 = C.convert_model(model, CONN, "SISENSE_ECOMMERCE", "CSA",
+spec2, flags2 = C.convert_model(model, CONN, "SISENSE_ECOMMERCE", "DEMO_DB",
    directions={frozenset({("Commerce","Country ID"),("Country","Country ID")}):"Commerce",
                frozenset({("Commerce","Category ID"),("Category","Category ID")}):"Commerce",
                frozenset({("Commerce","Brand ID"),("Brand","Brand ID")}):"Commerce"})
 ok("model: cardinality-resolved directions -> no flags", flags2 == [])
 ok("model: warehouse path uses db+schema+TABLE",
-   els[0]["source"]["path"][:2] == ["CSA", "SISENSE_ECOMMERCE"])
+   els[0]["source"]["path"][:2] == ["DEMO_DB", "SISENSE_ECOMMERCE"])
 ok("model: column formula prefix is phys table",
    els[-1]["columns"][0]["formula"].startswith("[COMMERCE/"))
 

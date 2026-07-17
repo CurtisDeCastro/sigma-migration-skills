@@ -2,7 +2,7 @@
 # frozen_string_literal: true
 #
 # test-w4-redteam-bypasses.rb — replay every gate-satisfaction move from the
-# 2026-07 Macroeconomics false-GREEN and prove each is now RED. The empty-tile
+# 2026-07 field-workbook false-GREEN and prove each is now RED. The empty-tile
 # gate itself is covered end-to-end in test-w1-empty-tiles-gate.rb; this file
 # covers the remaining bypasses:
 #   (A) editing source-anchors.json after first verify (oracle tampering)
@@ -183,7 +183,7 @@ end
 
 puts
 if FAIL.empty?
-  puts "ALL PASS — #{PASS.length} checks: every Macroeconomics bypass is now RED"
+  puts "ALL PASS — #{PASS.length} checks: every field-workbook bypass is now RED"
   exit 0
 else
   puts "#{FAIL.length} FAILED, #{PASS.length} passed"

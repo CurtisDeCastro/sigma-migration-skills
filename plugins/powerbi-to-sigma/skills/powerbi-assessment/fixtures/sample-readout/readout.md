@@ -75,7 +75,7 @@ Parsed from each model's M (Power Query) expressions:
 
 | Warehouse source (from M) | Models |
 |---|---|
-| Snowflake:ymb68310.snowflakecomputing.com | 2 |
+| Snowflake:gxb98765.snowflakecomputing.com | 2 |
 
 
 Migration signal: models on a cloud warehouse Sigma already supports (Snowflake,

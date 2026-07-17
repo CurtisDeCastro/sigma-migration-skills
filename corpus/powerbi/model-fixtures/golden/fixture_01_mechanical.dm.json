@@ -15,8 +15,8 @@
               "connectionId": "<CONNECTION_ID>",
               "kind": "warehouse-table",
               "path": [
-                "CSA",
-                "TJ",
+                "DEMO_DB",
+                "DEMO",
                 "EMPLOYEES"
               ]
             },
@@ -177,8 +177,8 @@
               "connectionId": "<CONNECTION_ID>",
               "kind": "warehouse-table",
               "path": [
-                "CSA",
-                "TJ",
+                "DEMO_DB",
+                "DEMO",
                 "ABSENCE_RECORDS"
               ]
             },
@@ -287,8 +287,8 @@
               "connectionId": "<CONNECTION_ID>",
               "kind": "warehouse-table",
               "path": [
-                "CSA",
-                "TJ",
+                "DEMO_DB",
+                "DEMO",
                 "SAFETY_INCIDENTS"
               ]
             },

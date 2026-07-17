@@ -2,7 +2,7 @@
 # frozen_string_literal: true
 # v5.1 defects 2 + 3 regression test — header composition order + floating art.
 #
-# Diablo-shaped source ("four paths, one choice.", fixed 1200x2070): the giant
+# Hero-art-shaped source ("four panels, one story.", fixed 1200x2070): the giant
 # title is an IMAGE wordmark (zone 3) over a runic subtitle image (zone 18),
 # followed by an intro text zone (zone 20, two paragraphs), with a floating
 # brush-art image (zone 52, a second ROOT of the zone tree) overlapping the
@@ -39,13 +39,13 @@ def check(cond, msg, fails)
 end
 
 INTRO_RUNS = [
-  { 'text' => 'In the war between the High Heavens and the Burning Hells, mortals choose one of four paths — a long introduction paragraph.' },
+  { 'text' => 'In the contest between four rival guilds, travelers choose one of four panels — a long introduction paragraph.' },
   { 'text' => 'Each path is measured below across bias, speed and survival.', 'break' => true }
 ].freeze
 
-# ---- dashboard 1: diablo shape (image wordmark + intro + floating art) -------
-DIABLO = {
-  'dashboard' => 'four paths', 'is_story' => false,
+# ---- dashboard 1: hero shape (image wordmark + intro + floating art) -------
+HERO = {
+  'dashboard' => 'four panels', 'is_story' => false,
   'canvas_px' => { 'w' => 1200, 'h' => 2070, 'sizing_mode' => 'fixed' },
   'zones' => [
     { 'id' => '3',  'kind' => 'image', 'image_path' => 'Image/title.png',
@@ -147,7 +147,7 @@ ART = {
 
 WB = { 'pages' => [
   { 'name' => 'Data', 'id' => 'page-data', 'elements' => [{ 'id' => 'master', 'kind' => 'table', 'name' => 'M' }] },
-  { 'name' => 'four paths', 'id' => 'page-d1', 'elements' => [
+  { 'name' => 'four panels', 'id' => 'page-d1', 'elements' => [
     { 'id' => 'img-3',   'kind' => 'image', 'name' => nil },
     { 'id' => 'img-18',  'kind' => 'image', 'name' => nil },
     { 'id' => 'text-20', 'kind' => 'text',  'name' => nil },
@@ -174,7 +174,7 @@ log = ''
 census = nil
 assets_after = nil
 Dir.mktmpdir do |d|
-  File.write(File.join(d, 'dl.json'), JSON.generate([DIABLO, EXEC, MID, ART]))
+  File.write(File.join(d, 'dl.json'), JSON.generate([HERO, EXEC, MID, ART]))
   File.write(File.join(d, 'wb.json'), JSON.generate(WB))
   # image-assets.json beside the layout (as build-charts-from-signals writes it)
   # so the dropped mid-page float can be flagged recoverable.
@@ -228,7 +228,7 @@ check(d1['img-3'] && d1['text-20'] && d1['img-3'][2] < d1['text-20'][2],
       "wordmark places ABOVE the intro (img-3 r0=#{d1['img-3'] && d1['img-3'][2]} < text-20 r0=#{d1['text-20'] && d1['text-20'][2]})", fails)
 check(d1['img-18'] && d1['img-3'] && d1['img-18'][2] >= d1['img-3'][2],
       'runic subtitle stays under the wordmark (source order preserved)', fails)
-check(rows_by['four paths'] == 74, "px-derived rows on the diablo page (got #{rows_by['four paths'].inspect})", fails)
+check(rows_by['four panels'] == 74, "px-derived rows on the hero page (got #{rows_by['four panels'].inspect})", fails)
 
 puts
 puts '-- defect 3: floating brush art joins the header composition'

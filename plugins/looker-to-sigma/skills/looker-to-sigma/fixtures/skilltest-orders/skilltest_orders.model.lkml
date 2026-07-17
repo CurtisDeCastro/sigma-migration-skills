@@ -1,4 +1,4 @@
-connection: "snowflake_csa"
+connection: "snowflake_demo"
 
 include: "views/*.view.lkml"
 

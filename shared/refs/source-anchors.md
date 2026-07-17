@@ -6,8 +6,8 @@ Two field migrations shipped dashboards whose **numbers were wrong** while every
 judgment gate recorded "pass":
 
 1. **The 10x/ranking failure.** A "top members" ranked panel showed *different
-   members* with values ~10x off — the migrated dashboard rendered **"$1.8T"**
-   where the source printed **"18,037B"** (≈ $18.0T). A multi-region YoY panel
+   members* with values ~10x off — the migrated dashboard rendered **"$1.2T"**
+   where the source printed **"12,345B"** (≈ $12.3T). A multi-region YoY panel
    collapsed to **one bar where the source showed six**, and a trend line
    crashed to zero on a partial final period. The run followed the pipeline,
    executed a real 3-pass RCF loop *reading* the render PNGs — and still
@@ -41,17 +41,17 @@ what the source *renders*.
   "transcribed_at": "2026-07-08T12:00:00Z",
   "anchors": [
     { "id": "a1",
-      "panel": "TOP COUNTRIES",
-      "label": "United States GDP",
-      "raw": "18,037B",
+      "panel": "TOP ACCOUNTS",
+      "label": "United Widgets revenue",
+      "raw": "12,345B",
       "kind": "currency",
-      "sigma_element_hint": "Top Countries" }
+      "sigma_element_hint": "Top Accounts" }
   ]
 }
 ```
 
-- `raw` — the value **EXACTLY as printed**. Keep the raw string: `"18,037B"`,
-  never `18037`; `"(12.3%)"`, never `-0.123`; `"$733,215.26"` with the `$` and
+- `raw` — the value **EXACTLY as printed**. Keep the raw string: `"12,345B"`,
+  never `12345`; `"(12.3%)"`, never `-0.123`; `"$733,215.26"` with the `$` and
   commas. The printed form *is* the precision contract.
 - `kind` — `currency` | `number` | `percent` | **`text`** (alias `roster`/`member`).
   A `text` anchor's `raw` is a **displayed LABEL** (case-insensitive cell match),
@@ -90,8 +90,8 @@ what the source *renders*.
 
 ```json
 { "checked": 9, "matched": 8,
-  "missing": [ { "id": "a1", "label": "United States GDP", "raw": "18,037B",
-                 "best_candidate": { "value": 1.8e12, "element": "Top Countries" } } ],
+  "missing": [ { "id": "a1", "label": "United Widgets revenue", "raw": "12,345B",
+                 "best_candidate": { "value": 1.2e12, "element": "Top Accounts" } } ],
   "pass": false }
 ```
 
@@ -113,8 +113,8 @@ any suffix.
 
 | Printed | Canonical value | Tolerance | Notes |
 |---|---|---|---|
-| `18,037B` | 1.8037e13 | ±0.5e9 | last digit = units of B |
-| `$1.8T` | 1.8e12 | ±0.05e12 | currency; one decimal of T |
+| `12,345B` | 1.2345e13 | ±0.5e9 | last digit = units of B |
+| `$1.2T` | 1.2e12 | ±0.05e12 | currency; one decimal of T |
 | `46.5M` | 4.65e7 | ±0.05e6 | |
 | `-2%` | −2 points | ±0.5 | also matches the fraction −0.02 ± 0.005 |
 | `1,687` | 1687 | ±0.5 | |
@@ -124,35 +124,35 @@ any suffix.
 
 Extra interpretations checked (they never weaken 10x detection):
 
-- Suffixed forms also match the **unscaled face value** (`18,037B` ↔ a column
-  already denominated in billions storing `18037`).
+- Suffixed forms also match the **unscaled face value** (`12,345B` ↔ a column
+  already denominated in billions storing `12345`).
 - Percents match both **points** (−2) and **fraction** (−0.02) storage.
 
-So `1.8e12` does **not** match `18,037B` under any interpretation — the exact
-field failure — while `18,036,800,000,000` (rounds to 18,037B) does.
+So `1.2e12` does **not** match `12,345B` under any interpretation — the exact
+field failure — while `12,344,800,000,000` (rounds to 12,345B) does.
 
 ## Worked example
 
-Source image shows a KPI `$86.5T`, a TOP COUNTRIES list headed by
-`United States 18,037B`, `China 13,608B`, `Japan 4,971B`, and a YoY panel with
+Source image shows a KPI `$45.6T`, a TOP ACCOUNTS list headed by
+`United Widgets 12,345B`, `Acme Holdings 9,876B`, `Initech 4,321B`, and a YoY panel with
 `-2%` on one bucket:
 
 ```json
 { "source_image": "views/abc123.png", "transcribed_at": "2026-07-08T15:04:00Z",
   "anchors": [
-    { "id": "a1", "panel": "KPI",           "label": "World GDP total", "raw": "$86.5T",  "kind": "currency" },
-    { "id": "a2", "panel": "TOP COUNTRIES", "label": "United States",   "raw": "18,037B", "kind": "number", "sigma_element_hint": "Top Countries" },
-    { "id": "a3", "panel": "TOP COUNTRIES", "label": "China",           "raw": "13,608B", "kind": "number", "sigma_element_hint": "Top Countries" },
-    { "id": "a4", "panel": "TOP COUNTRIES", "label": "Japan",           "raw": "4,971B",  "kind": "number", "sigma_element_hint": "Top Countries" },
+    { "id": "a1", "panel": "KPI",           "label": "Global revenue total", "raw": "$45.6T",  "kind": "currency" },
+    { "id": "a2", "panel": "TOP ACCOUNTS", "label": "United Widgets",   "raw": "12,345B", "kind": "number", "sigma_element_hint": "Top Accounts" },
+    { "id": "a3", "panel": "TOP ACCOUNTS", "label": "Acme Holdings",           "raw": "9,876B", "kind": "number", "sigma_element_hint": "Top Accounts" },
+    { "id": "a4", "panel": "TOP ACCOUNTS", "label": "Initech",           "raw": "4,321B",  "kind": "number", "sigma_element_hint": "Top Accounts" },
     { "id": "a5", "panel": "YOY BY REGION", "label": "largest decline bucket", "raw": "-2%", "kind": "percent" }
   ] }
 ```
 
-If the built workbook's Top Countries element exports `1.8e12` for the top row,
+If the built workbook's Top Accounts element exports `1.2e12` for the top row,
 `verify-anchors.rb` reports:
 
 ```
-MISSING  a2 "United States" raw="18,037B" — closest candidate 1.8e12 in "Top Countries"
+MISSING  a2 "United Widgets" raw="12,345B" — closest candidate 1.2e12 in "Top Accounts"
 ```
 
 — the 10x failure caught mechanically, before any visual verdict is consulted.

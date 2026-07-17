@@ -83,8 +83,8 @@ render pass — a failure means STRUCTURE diverges; re-run the RCF loop.
 #   superstore-perf-overview         0.731   min positive 0.534 (+0.084)
 #   superstore-perf-order-detail     0.834   max negative 0.343 (-0.107)
 #   superstore-viz-extensions        0.629
-#   udemy-course-analysis            0.774   Sub-floors also verified:
-#   visual-vocabulary x10 pages   >= 0.553     min positive cov 0.506
+#   course-analytics (field wb)      0.774   Sub-floors also verified:
+#   chart-gallery wb x10 pages    >= 0.553     min positive cov 0.506
 #                                              (ink floor 0.40, +0.106)
 #                                              min positive bal 0.234
 #                                              (bal floor 0.10, +0.134)

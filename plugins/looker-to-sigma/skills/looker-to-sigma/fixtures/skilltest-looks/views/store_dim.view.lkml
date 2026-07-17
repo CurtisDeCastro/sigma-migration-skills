@@ -1,5 +1,5 @@
 view: store_dim {
-  sql_table_name: CSA.TJ.STORE_DIM ;;
+  sql_table_name: DEMO_DB.DEMO.STORE_DIM ;;
 
   dimension: store_key {
     primary_key: yes

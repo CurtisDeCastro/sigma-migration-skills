@@ -31,7 +31,7 @@ def check(cond, msg, fails)
   puts "  #{cond ? 'PASS' : 'FAIL'}  #{msg}"
 end
 
-# A federated (modern) datasource on CSA.TJ.ORDER_FACT with: a list parameter,
+# A federated (modern) datasource on DEMO_DB.DEMO.ORDER_FACT with: a list parameter,
 # a Switch calc referencing it by internal name, a calc DIMENSION ("Tier"), a
 # crosstab worksheet (dims on rows+cols) whose values include a share-of-total
 # window calc, and a shared-view filter bound to the calc dimension.
@@ -47,12 +47,12 @@ TWB = <<~XML
           </members>
         </column>
       </datasource>
-      <datasource caption='ORDER_FACT (CSA.ORDER_FACT)' name='federated.fact1'>
+      <datasource caption='ORDER_FACT (DEMO_DB.ORDER_FACT)' name='federated.fact1'>
         <connection class='federated'>
           <named-connections>
-            <named-connection name='snow' caption='snow'><connection class='snowflake' dbname='CSA' schema='TJ' /></named-connection>
+            <named-connection name='snow' caption='snow'><connection class='snowflake' dbname='DEMO_DB' schema='DEMO' /></named-connection>
           </named-connections>
-          <relation connection='snow' name='ORDER_FACT' table='[TJ].[ORDER_FACT]' type='table' />
+          <relation connection='snow' name='ORDER_FACT' table='[DEMO].[ORDER_FACT]' type='table' />
         </connection>
         <column caption='Tier' name='[Calculation_900001]' datatype='string' role='dimension' type='nominal'>
           <calculation class='tableau' formula='IF [Net Revenue] &gt;= 1000 THEN &quot;High&quot; ELSE &quot;Low&quot; END' />

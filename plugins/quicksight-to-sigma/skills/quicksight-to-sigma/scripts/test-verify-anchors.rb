@@ -29,9 +29,9 @@ def ok(cond, msg)
 end
 
 puts '-- pure core: element ranking --'
-els = ['Top Countries', 'GDP Trend', 'YoY Growth by Region', 'KPI Row']
-a_label = { 'id' => 'a1', 'panel' => 'TOP COUNTRIES', 'label' => 'United States GDP', 'raw' => '18,037B' }
-ok(AnchorVerify.ranked_elements(a_label, els).first == 'Top Countries',
+els = ['Top Accounts', 'Revenue Trend', 'YoY Growth by Region', 'KPI Row']
+a_label = { 'id' => 'a1', 'panel' => 'TOP ACCOUNTS', 'label' => 'United Widgets revenue', 'raw' => '12,345B' }
+ok(AnchorVerify.ranked_elements(a_label, els).first == 'Top Accounts',
    'panel/label token overlap ranks the right element first')
 ok(AnchorVerify.ranked_elements(a_label, els).length == els.length,
    'zero-score elements are appended (search everywhere)')
@@ -46,35 +46,35 @@ puts '-- pure core: cell parsing --'
 ok(AnchorVerify.cell_numbers('$1,234.50') == [1234.5], 'currency + commas parse')
 ok(AnchorVerify.cell_numbers('(42)') == [-42.0], 'paren negative parses')
 ok(AnchorVerify.cell_numbers('12%') == [12.0, 0.12], 'percent cell keeps points + fraction')
-ok(AnchorVerify.cell_numbers('United States').empty?, 'non-numeric cell yields nothing')
+ok(AnchorVerify.cell_numbers('United Widgets').empty?, 'non-numeric cell yields nothing')
 ok(AnchorVerify.cell_numbers('').empty? && AnchorVerify.cell_numbers(nil).empty?, 'empty/nil cells yield nothing')
 
 puts '-- pure core: verify() verdicts --'
 exports = {
-  'Top Countries' => [['Country', 'GDP'], ['United States', '18037000000000'], ['China', '13608000000000']],
-  'GDP Trend'     => [['Year', 'GDP'], ['2024', '1.75e12'], ['2025', '1.8e12']],
-  'KPI Row'       => [['Total GDP', 'YoY'], ['86500000000000', '-0.02']]
+  'Top Accounts' => [['Account', 'Revenue'], ['United Widgets', '12345000000000'], ['Acme Holdings', '9876000000000']],
+  'Revenue Trend'     => [['Year', 'Revenue'], ['2024', '1.15e12'], ['2025', '1.2e12']],
+  'KPI Row'       => [['Total Revenue', 'YoY'], ['45600000000000', '-0.02']]
 }
 anchors = [
-  { 'id' => 'a1', 'panel' => 'TOP COUNTRIES', 'label' => 'United States GDP', 'raw' => '18,037B' },
+  { 'id' => 'a1', 'panel' => 'TOP ACCOUNTS', 'label' => 'United Widgets revenue', 'raw' => '12,345B' },
   { 'id' => 'a2', 'panel' => 'KPI', 'label' => 'YoY change', 'raw' => '-2%', 'sigma_element_hint' => 'KPI Row' },
-  { 'id' => 'a3', 'panel' => 'KPI', 'label' => 'Total GDP', 'raw' => '86.5T' }
+  { 'id' => 'a3', 'panel' => 'KPI', 'label' => 'Total Revenue', 'raw' => '45.6T' }
 ]
 v = AnchorVerify.verify(anchors, exports)
 ok(v['pass'] == true && v['matched'] == 3 && v['checked'] == 3, 'all-matched verdict passes 3/3')
 ok(v['missing'].empty?, 'no missing entries when all matched')
 
-# The field failure: the workbook renders 1.8T where the source printed 18,037B.
-bad_exports = exports.merge('Top Countries' => [['Country', 'GDP'], ['United Kingdom', '1.8e12']])
+# The field failure: the workbook renders 1.2T where the source printed 12,345B.
+bad_exports = exports.merge('Top Accounts' => [['Account', 'Revenue'], ['Umbrella Corp', '1.2e12']])
 v2 = AnchorVerify.verify(anchors, bad_exports)
 ok(v2['pass'] == false && v2['matched'] == 2, '10x-off value fails the anchor (2/3)')
 miss = v2['missing'].first
-ok(miss['id'] == 'a1' && miss['raw'] == '18,037B', 'missing entry carries id + raw')
-ok(miss['best_candidate'].is_a?(Hash) && miss['best_candidate']['value'] == 1.8e12,
-   'best_candidate reports the closest wrong value (the 1.8T impostor)')
+ok(miss['id'] == 'a1' && miss['raw'] == '12,345B', 'missing entry carries id + raw')
+ok(miss['best_candidate'].is_a?(Hash) && miss['best_candidate']['value'] == 1.2e12,
+   'best_candidate reports the closest wrong value (the 1.2T impostor)')
 
 # found-elsewhere: value lives in a differently-named element → matched + noted
-elsewhere = { 'Some Renamed Tile' => [['GDP'], ['18037000000000']] }
+elsewhere = { 'Some Renamed Tile' => [['Revenue'], ['12345000000000']] }
 v3 = AnchorVerify.verify([anchors[0]], elsewhere)
 ok(v3['pass'] == true, 'value found in a non-best-match element still matches')
 ok(v3['detail'].first['matched_in'] == 'Some Renamed Tile', 'detail names where it was found')
@@ -142,7 +142,7 @@ Dir.mktmpdir do |dir|
   spec, exp = write_fixture(dir, bad_exports, anchors)
   _out, err, st = run_cli(dir, spec, exp)
   ok(st.exitstatus == 1, "missing anchor → exit 1 (got #{st.exitstatus})")
-  ok(err.include?('MISSING') && err.include?('18,037B'), 'per-miss report names the anchor raw value')
+  ok(err.include?('MISSING') && err.include?('12,345B'), 'per-miss report names the anchor raw value')
   ok(err.include?('closest candidate'), 'per-miss report shows the best candidate')
   ok(err.include?('loudest possible signal'), 'failure explains what a total miss means')
   vd = JSON.parse(File.read(File.join(dir, 'anchors-verdict.json')))

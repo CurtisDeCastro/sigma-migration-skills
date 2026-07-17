@@ -4148,7 +4148,7 @@ function buildMultiDatasourceModel(xmlContent, options, datasources) {
   };
 }
 function convertTableauToSigma(xmlContent, options = {}) {
-  // W2.4 (field-caught on BOTH Macroeconomics runs): do NOT reset the module id
+  // W2.4 (field-caught on BOTH field-workbook runs): do NOT reset the module id
   // counter for a multi-datasource CHILD conversion — each child restarting the
   // sequence minted identical element ids ("AAAAAAAAAB" twice) and the merged
   // dm-spec failed DM POST on duplicate ids. Children continue the counter

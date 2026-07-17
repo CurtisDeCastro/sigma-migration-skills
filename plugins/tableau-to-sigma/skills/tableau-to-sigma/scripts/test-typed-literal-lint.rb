@@ -3,7 +3,7 @@
 # Tests for the typed-literal calc lint (v5.5 W2.2, lib/typed_literal_lint.rb).
 #
 # The failure class: converter calcs comparing a NUMBER column to a STRING
-# literal (If([Year] = "2014", [Teu Value]) with warehouse YEAR = NUMBER)
+# literal (If([Year] = "2014", [Unit Value]) with warehouse YEAR = NUMBER)
 # compile clean and render NULL — 2026-07-13 field run blanked 6 of 9 charts.
 # The anti-overfit contract under test: the TYPE MAP is the authority, never
 # the name (a TEXT column named Year must not flag), and anything the lint
@@ -32,8 +32,8 @@ def col_formula_spec(formula)
 end
 
 # --- 1. the field failure: NUMBER column vs "2014" → FLAG ---------------------
-types = { 'TRADE_FACTS' => { 'YEAR' => 'number', 'TEU_VALUE' => 'float' } }
-f = TypedLiteralLint.lint(col_formula_spec('If([Year] = "2014", [Teu Value])'), types)
+types = { 'TRADE_FACTS' => { 'YEAR' => 'number', 'UNIT_VALUE' => 'float' } }
+f = TypedLiteralLint.lint(col_formula_spec('If([Year] = "2014", [Unit Value])'), types)
 check(f.length == 1, "NUMBER col vs \"2014\" → exactly 1 finding (got #{f.length})", fails)
 if f.length == 1
   check(f[0]['literal'] == '2014', "finding carries literal '2014'", fails)
@@ -44,7 +44,7 @@ if f.length == 1
 end
 
 # --- 2. anti-overfit: TEXT column literally named Year → NO flag --------------
-f = TypedLiteralLint.lint(col_formula_spec('If([Year] = "2014", [Teu Value])'),
+f = TypedLiteralLint.lint(col_formula_spec('If([Year] = "2014", [Unit Value])'),
                           'LOOKUP' => { 'YEAR' => 'text' })
 check(f.empty?, "TEXT col named Year vs \"2014\" → no findings (type map beats the name; got #{f.inspect})", fails)
 
@@ -86,7 +86,7 @@ f = TypedLiteralLint.lint(spec, 'A' => { 'YEAR' => 'number' }, 'B' => { 'YEAR' =
 check(f.length == 1, "owner-scoped resolution via source table disambiguates the conflict (got #{f.length})", fails)
 
 # --- 5. numeric col vs NUMERIC literal → no flag ------------------------------
-f = TypedLiteralLint.lint(col_formula_spec('If([Year] = 2014, [Teu Value])'), types)
+f = TypedLiteralLint.lint(col_formula_spec('If([Year] = 2014, [Unit Value])'), types)
 check(f.empty?, 'numeric col vs unquoted 2014 → no findings', fails)
 
 # --- 6. string col vs string literal → no flag --------------------------------
@@ -99,14 +99,14 @@ f = TypedLiteralLint.lint(col_formula_spec('If([Zip] = "02134", 1, 0)'),
 check(f.empty?, 'TEXT zip vs "02134" → no findings (numeric-looking strings on text cols are legit)', fails)
 
 # --- 7. caption-normalized resolution -----------------------------------------
-f = TypedLiteralLint.lint(col_formula_spec('If([GDP (current US$)] > "1000", 1, 0)'),
-                          'WDI' => { 'GDP_CURRENT_US' => 'number' })
-check(f.length == 1, "caption 'GDP (current US$)' resolves against GDP_CURRENT_US (got #{f.length})", fails)
-check(f.length == 1 && f[0]['suggestion'] == '[GDP (current US$)] > 1000',
+f = TypedLiteralLint.lint(col_formula_spec('If([Revenue (current US$)] > "1000", 1, 0)'),
+                          'WDI' => { 'REVENUE_CURRENT_US' => 'number' })
+check(f.length == 1, "caption 'Revenue (current US$)' resolves against REVENUE_CURRENT_US (got #{f.length})", fails)
+check(f.length == 1 && f[0]['suggestion'] == '[Revenue (current US$)] > 1000',
       'caption finding suggests the unquoted comparison', fails)
 
 # --- 8. In-list mixed literals -------------------------------------------------
-f = TypedLiteralLint.lint(col_formula_spec('If(In([Year], "2014", "abc"), [Teu Value], 0)'), types)
+f = TypedLiteralLint.lint(col_formula_spec('If(In([Year], "2014", "abc"), [Unit Value], 0)'), types)
 check(f.length == 1, "In-list mixed literals → only the numeric string flags (got #{f.length})", fails)
 check(f.length == 1 && f[0]['literal'] == '2014', 'In-list finding carries the offending literal', fails)
 check(f.length == 1 && f[0]['suggestion'].include?('In([Year], 2014'),
@@ -150,10 +150,10 @@ f = TypedLiteralLint.lint(col_formula_spec('If([Master/Year] = "2014", 1, 0)'),
 check(f.length == 1, 'qualified [Master/Year] ref resolves via the table qualifier', fails)
 
 # metrics[] formulas are scanned too
-spec = spec_with('metrics' => [{ 'name' => 'Teu 2014',
-                                 'formula' => 'SumIf([Teu Value], [Year] = "2014")' }])
+spec = spec_with('metrics' => [{ 'name' => 'Units 2014',
+                                 'formula' => 'SumIf([Unit Value], [Year] = "2014")' }])
 f = TypedLiteralLint.lint(spec, types)
-check(f.length == 1 && f[0]['formula_owner'] == 'el-1/metrics[Teu 2014]',
+check(f.length == 1 && f[0]['formula_owner'] == 'el-1/metrics[Units 2014]',
       'metrics[] formulas are scanned', fails)
 
 # numeric list filter: values ["2014","2015"] on a NUMBER col → per-literal
@@ -183,7 +183,7 @@ Dir.mktmpdir do |dir|
   spec_p  = File.join(dir, 'dm-spec.json')
   types_p = File.join(dir, 'types.json')
   out_p   = File.join(dir, 'findings.json')
-  File.write(spec_p, JSON.generate(col_formula_spec('If([Year] = "2014", [Teu Value])')))
+  File.write(spec_p, JSON.generate(col_formula_spec('If([Year] = "2014", [Unit Value])')))
   File.write(types_p, JSON.generate('TRADE_FACTS' => { 'YEAR' => 'number' }))
 
   out = `#{ruby} #{cli} --spec #{spec_p} --types #{types_p} --out #{out_p} 2>/dev/null`
@@ -193,7 +193,7 @@ Dir.mktmpdir do |dir|
   written = JSON.parse(File.read(out_p))
   check(written.length == 1 && written[0]['literal'] == '2014', '--out writes the findings JSON', fails)
 
-  File.write(spec_p, JSON.generate(col_formula_spec('If([Year] = 2014, [Teu Value])')))
+  File.write(spec_p, JSON.generate(col_formula_spec('If([Year] = 2014, [Unit Value])')))
   `#{ruby} #{cli} --spec #{spec_p} --types #{types_p} 2>/dev/null`
   check($?.exitstatus.zero?, "CLI exits 0 when clean (got #{$?.exitstatus})", fails)
 

@@ -44,9 +44,9 @@ TWB = <<~XML
       <datasource caption='ORDER_FACT' name='federated.fact'>
         <connection class='federated'>
           <named-connections>
-            <named-connection name='snow'><connection class='snowflake' dbname='CSA' schema='TJ' /></named-connection>
+            <named-connection name='snow'><connection class='snowflake' dbname='DEMO_DB' schema='DEMO' /></named-connection>
           </named-connections>
-          <relation connection='snow' name='ORDER_FACT' table='[TJ].[ORDER_FACT]' type='table' />
+          <relation connection='snow' name='ORDER_FACT' table='[DEMO].[ORDER_FACT]' type='table' />
         </connection>
         <column caption='Gross Revenue' name='[33b6c718-9b55-3dc0-9698-d1d57fac0f90]' datatype='real' role='measure' type='quantitative' />
         <column caption='Order Date ' name='[c2ec6b07-897e-39ab-9422-aa895d35a627]' datatype='date' role='dimension' type='ordinal' />

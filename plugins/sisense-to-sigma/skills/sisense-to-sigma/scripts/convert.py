@@ -143,7 +143,7 @@ def probe_directions(model, schema, database, snow_conn):
     return directions
 
 def convert_model(model, connection_id, schema="SISENSE_ECOMMERCE",
-                  database="CSA", name=None, directions=None):
+                  database="DEMO_DB", name=None, directions=None):
     """Sisense Live/ElastiCube model export -> (Sigma DM spec, flags).
     Plain tables -> warehouse-table elements (source = connectionId + path).
     Tables with an `expression` (ElastiCube custom SQL) -> custom-SQL ('sql')
@@ -625,7 +625,7 @@ if __name__ == "__main__":
         model = json.load(open(sys.argv[2])); connection_id = sys.argv[3]
         args = [a for a in sys.argv[4:] if not a.startswith("--")]
         schema = args[0] if len(args) > 0 else "SISENSE_ECOMMERCE"
-        database = args[1] if len(args) > 1 else "CSA"
+        database = args[1] if len(args) > 1 else "DEMO_DB"
         directions = None
         if "--verify-card" in sys.argv:
             conn = sys.argv[sys.argv.index("--verify-card") + 1]

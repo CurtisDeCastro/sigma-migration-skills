@@ -72,7 +72,7 @@ node scripts/migrate-cognos.mjs \
   --module <module.json> --report <report.xml> \
   --connection <SIGMA_CONNECTION_ID> \
   [--folder <SIGMA_FOLDER_ID>] \
-  [--database CSA --schema TJ] [--name '<prefix>'] \
+  [--database <DB> --schema <SCHEMA>] [--name '<prefix>'] \
   [--reuse-dm [ID]] [--expected expected.json] [--yes]
 ```
 

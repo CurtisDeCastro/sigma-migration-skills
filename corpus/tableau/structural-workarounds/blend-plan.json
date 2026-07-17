@@ -2,13 +2,13 @@
   "datasources": [
     {
       "name": "federated.primary",
-      "caption": "Orders (CSA.TJ)",
+      "caption": "Orders (DEMO_DB.DEMO)",
       "connections": [
         {
           "class": "snowflake",
-          "server": "ymb68310.snowflakecomputing.com",
-          "dbname": "CSA",
-          "schema": "TJ"
+          "server": "gxb98765.snowflakecomputing.com",
+          "dbname": "DEMO_DB",
+          "schema": "DEMO"
         }
       ]
     },
@@ -27,7 +27,7 @@
     {
       "worksheet": "Attainment by Region",
       "primary": "federated.primary",
-      "primary_caption": "Orders (CSA.TJ)",
+      "primary_caption": "Orders (DEMO_DB.DEMO)",
       "secondary": "federated.secondary",
       "secondary_caption": "Region Targets (Sheet)",
       "linking_fields": [

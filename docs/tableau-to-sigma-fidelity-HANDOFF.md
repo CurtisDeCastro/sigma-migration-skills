@@ -10,7 +10,7 @@
 
 The converter gets the **data** right (numbers, chart kinds, parity gate) but historically produced **generic composition** — a flat chart band, default palette, no container tints. This program adds the missing **composition/style layer** so an automated conversion reaches the hand-built replica.
 
-**Reference workbook (the benchmark):** *"Estimated U.S. Job Loss from Mass Deportations"* (Tableau Public, `chimdi.nwosu`). Hand-built Sigma target: `https://app.sigmacomputing.com/dataflow/workbook/5RkbujfxygREnBLCd8d89C`. The full target spec bundle (`workbook-live-spec.yaml` = the authoritative oracle) is in `~/Downloads/sigma-spec.zip`. The source `.twb` is downloadable: `curl -L https://public.tableau.com/workbooks/EstimatedU_S_JobLossfromMassDeportations.twb` (it's a `.twbx`).
+**Reference workbook (the benchmark):** *"Estimated U.S. Job Loss from Mass Deportations"* (Tableau Public, `chimdi.nwosu`). Hand-built Sigma target: `https://app.sigmacomputing.com/<org>/workbook/<workbook-urlId>`. The full target spec bundle (`workbook-live-spec.yaml` = the authoritative oracle) is in `~/Downloads/sigma-spec.zip`. The source `.twb` is downloadable: `curl -L https://public.tableau.com/workbooks/EstimatedU_S_JobLossfromMassDeportations.twb` (it's a `.twbx`).
 
 **Shipped & merged (2026-07-01):** Phase 0 + the color/control slice of Phase 1 (see §2). **Remaining:** the rest of Phase 1 (KPI composites, styled text), the Phase-2 P0s (card-trellis, threshold halo), chart-mark fidelity, transport edge cases, and the Phase-5 visual-diff loop (see §5).
 
@@ -176,9 +176,9 @@ ruby scripts/test-layout-lint.rb              # layout lint
 ```
 When adding a builder helper, make it a **top-level `def`** so tests can extract it via `SRC.match(/^def <fn>\b.*?\n^end$/m)` (see the E1/D1 tests) — in-body lambdas aren't extractable.
 
-**End-to-end** (`synth-twb-e2e.rb`): parse → build-charts → build-dashboard-layout → build-workbook-spec → POST. Now passes `--layout` to build-workbook-spec (theme). Needs a Sigma token + a CSA.TJ-landed fact.
+**End-to-end** (`synth-twb-e2e.rb`): parse → build-charts → build-dashboard-layout → build-workbook-spec → POST. Now passes `--layout` to build-workbook-spec (theme). Needs a Sigma token + a DEMO_DB.DEMO-landed fact.
 
-**Warehouse/API:** test path is **CSA.TJ** (conn `cb2f5180-…`, folder `9ca9bf60-6a33-43dd-967d-1ba6352c54bb`). Token: `bash -c 'eval "$(scripts/get-token.sh)"; …'` (never `TOKEN=$(eval …)`). Data-model queries for verification go through the `sigma-mcp-v2` MCP (`describe`/`query`) — not a pure-REST endpoint.
+**Warehouse/API:** test path is **the demo warehouse** (conn `<connection-id>`, folder `<folder-id>`). Token: `bash -c 'eval "$(scripts/get-token.sh)"; …'` (never `TOKEN=$(eval …)`). Data-model queries for verification go through the `sigma-mcp-v2` MCP (`describe`/`query`) — not a pure-REST endpoint.
 
 **Fleet PNG gate:** the existing Phase-6 visual gate (`verify-dashboard-visual.rb`) must stay green on every composition change.
 
@@ -190,7 +190,7 @@ When adding a builder helper, make it a **top-level `def`** so tests can extract
 - **Answer-key oracle:** `~/Downloads/sigma-spec.zip` → `workbook-live-spec.yaml` (authoritative), `layout.xml`, `datamodel-spec.json`, `README.md`. **Recommend committing this into `docs/benchmarks/job-losses/` as the durable spec-diff oracle.**
 - **Design doc:** `docs/tableau-to-sigma-phase1-composition-style.md`.
 - **Gap report:** `~/Downloads/TABLEAU_TO_SIGMA_SKILL_GAPS.md`.
-- **Live Sigma target:** `https://app.sigmacomputing.com/dataflow/workbook/5RkbujfxygREnBLCd8d89C`.
+- **Live Sigma target:** `https://app.sigmacomputing.com/<org>/workbook/<workbook-urlId>`.
 
 ### Recommended sequence for the next engineer
 1. **B3 + B4** (finish Phase-1 composition — KPI composites + styled text). Reuses the parser/builder patterns already established; oracle has exact `fontSize`/text shapes.

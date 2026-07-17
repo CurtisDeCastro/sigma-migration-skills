@@ -11,18 +11,18 @@
           "kind": "table",
           "name": "Master",
           "columnLabels": [
-            "Container port traffic (TEU: 20 foot equivalent units)",
+            "Container volume (UNITS: gross shipped count)",
             "Country Code",
             "Country Name",
             "Date",
-            "FDI World",
-            "Foreign direct investment, net inflows (BoP, current US$)",
-            "GDP (current US$)",
-            "GDP World",
-            "IncomeGroup",
+            "NFI World",
+            "Net investor inflows, quarterly (BoP, current US$)",
+            "Revenue (current US$)",
+            "Revenue World",
+            "EntityGroup",
             "New Region",
             "Region",
-            "TEU world",
+            "UNITS world",
             "Year"
           ]
         },
@@ -31,18 +31,18 @@
           "kind": "table",
           "name": "Master All",
           "columnLabels": [
-            "Container port traffic (TEU: 20 foot equivalent units)",
+            "Container volume (UNITS: gross shipped count)",
             "Country Code",
             "Country Name",
             "Date",
-            "FDI World",
-            "Foreign direct investment, net inflows (BoP, current US$)",
-            "GDP (current US$)",
-            "GDP World",
-            "IncomeGroup",
+            "NFI World",
+            "Net investor inflows, quarterly (BoP, current US$)",
+            "Revenue (current US$)",
+            "Revenue World",
+            "EntityGroup",
             "New Region",
             "Region",
-            "TEU world",
+            "UNITS world",
             "Year"
           ]
         }
@@ -50,7 +50,7 @@
     },
     {
       "id": "page-dash-1",
-      "name": "Macroeconomics",
+      "name": "Indicators",
       "visibility": null,
       "elements": [
         {
@@ -74,14 +74,14 @@
           "name": null
         },
         {
-          "id": "el-param-region-macroeconomics",
+          "id": "el-param-region-indicators",
           "kind": "control",
           "name": "Region"
         },
         {
-          "id": "el-gdppie",
+          "id": "el-revpie",
           "kind": "bar-chart",
-          "name": "GDPPie",
+          "name": "RevPie",
           "columnLabels": [
             "Selected",
             "New Region Not Null",
@@ -90,30 +90,30 @@
           ]
         },
         {
-          "id": "el-gdpregionline",
+          "id": "el-revregionline",
           "kind": "combo-chart",
-          "name": "GDPRegionLine",
+          "name": "RevRegionLine",
           "columnLabels": [
             "Date Not Null",
-            "Country GDP (current US$)",
+            "Country Revenue (current US$)",
             "Date",
-            "GDP World"
+            "Revenue World"
           ]
         },
         {
-          "id": "el-gdp-top3",
+          "id": "el-rev-top3",
           "kind": "table",
-          "name": "GDP Top3",
+          "name": "Rev Top3",
           "columnLabels": [
             "Date",
             "Country Name",
-            "GDP (current US$)"
+            "Revenue (current US$)"
           ]
         },
         {
-          "id": "el-fdipie",
+          "id": "el-nfipie",
           "kind": "bar-chart",
-          "name": "FDIPie",
+          "name": "NFIPie",
           "columnLabels": [
             "Selected",
             "New Region Not Null",
@@ -122,30 +122,30 @@
           ]
         },
         {
-          "id": "el-fdiregionline",
+          "id": "el-nfiregionline",
           "kind": "combo-chart",
-          "name": "FDIRegionLine",
+          "name": "NFIRegionLine",
           "columnLabels": [
             "Date Not Null",
-            "Country Foreign direct investment, net inflows (BoP, current US$)",
+            "Country Net investor inflows, quarterly (BoP, current US$)",
             "Date",
-            "FDI World"
+            "NFI World"
           ]
         },
         {
-          "id": "el-fdi-top3",
+          "id": "el-nfi-top3",
           "kind": "table",
-          "name": "FDI Top3",
+          "name": "NFI Top3",
           "columnLabels": [
             "Date",
             "Country Name",
-            "Foreign direct investment, net inflows (BoP, current US$)"
+            "Net investor inflows, quarterly (BoP, current US$)"
           ]
         },
         {
-          "id": "el-teupie",
+          "id": "el-unitspie",
           "kind": "bar-chart",
-          "name": "TEUPie",
+          "name": "UNITSPie",
           "columnLabels": [
             "Selected",
             "New Region Not Null",
@@ -154,24 +154,24 @@
           ]
         },
         {
-          "id": "el-teuregionline",
+          "id": "el-unitsregionline",
           "kind": "combo-chart",
-          "name": "TEURegionLine",
+          "name": "UNITSRegionLine",
           "columnLabels": [
             "Date Not Null",
-            "Country Container port traffic (TEU: 20 foot equivalent units)",
+            "Country Container volume (UNITS: gross shipped count)",
             "Date",
-            "TEU world"
+            "UNITS world"
           ]
         },
         {
-          "id": "el-teu-top3",
+          "id": "el-units-top3",
           "kind": "table",
-          "name": "TEU Top3",
+          "name": "UNITS Top3",
           "columnLabels": [
             "Date",
             "Country Name",
-            "Container port traffic (TEU: 20 foot equivalent units)"
+            "Container volume (UNITS: gross shipped count)"
           ]
         }
       ]

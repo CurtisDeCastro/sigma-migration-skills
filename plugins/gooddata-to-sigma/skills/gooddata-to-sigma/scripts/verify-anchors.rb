@@ -5,7 +5,7 @@
 #
 # WHY. Two field migrations recorded passing visual verdicts over dashboards
 # whose NUMBERS were wrong: a ranked list showed different members with 10x-off
-# values ("$1.8T" rendered where the source printed "18,037B"), and a
+# values ("$1.2T" rendered where the source printed "12,345B"), and a
 # multi-bucket panel collapsed to a single bar. Every judgment gate is an
 # attestation, and lenient models attest generously — so this script replaces
 # the judgment with a MEASUREMENT: each printed value the agent transcribed
@@ -19,10 +19,10 @@
 #        while reading the source dashboard PNG (schema: SKILL.md Phase 1d,
 #        refs/source-anchors.md):
 #          { "source_image": "views/<id>.png", "transcribed_at": "...",
-#            "anchors": [ { "id": "a1", "panel": "TOP COUNTRIES",
-#                           "label": "United States GDP", "raw": "18,037B",
+#            "anchors": [ { "id": "a1", "panel": "TOP ACCOUNTS",
+#                           "label": "United Widgets revenue", "raw": "12,345B",
 #                           "kind": "currency",
-#                           "sigma_element_hint": "Top Countries" } ] }
+#                           "sigma_element_hint": "Top Accounts" } ] }
 # OUTPUT <workdir>/anchors-verdict.json:
 #          { "checked": N, "matched": M,
 #            "missing": [ { "id", "label", "raw", "best_candidate" } ],
@@ -188,7 +188,7 @@ module AnchorVerify
         # Closest candidate WITHIN the best-matching element that carries any
         # numbers (walking down the ranking until one does) — the wrong value
         # almost always lives in the anchor's own panel, so this surfaces the
-        # impostor ("$1.8T where the source printed 18,037B") rather than a
+        # impostor ("$1.2T where the source printed 12,345B") rather than a
         # coincidentally-near number from an unrelated tile.
         best = nil
         order.each do |n|
@@ -228,9 +228,9 @@ def el_display_name(el)
 end
 
 # --- W1.1/W1.2: dashboard-tile emptiness + anchor scoping --------------------
-# The 2026-07 Macroeconomics run went GREEN over a workbook whose every chart
+# A 2026-07 field-workbook run went GREEN over a workbook whose every chart
 # rendered "No data": the anchors oracle matched all 15 values inside the raw,
-# UNFILTERED "Master All" feeder table (found-elsewhere counts as matched), so it
+# UNFILTERED master feeder table (found-elsewhere counts as matched), so it
 # vouched only that the WAREHOUSE landed — never that any displayed tile shows a
 # value. These helpers separate DISPLAYED tiles (must return >=1 data row) from
 # FEEDER tables (the master/masterAll twins other tiles derive from), so the gate
@@ -288,7 +288,7 @@ def tile_emptiness_census(elements, exports, workdir)
   # element node, and NOT from controls. A control filters the tiles it targets via
   # `filters:[{source:{elementId:<tile>}}]`; walking that (the original bug, review-
   # caught) marked every control-filtered DISPLAYED chart as a feeder, so its
-  # emptiness was never gated and the Macroeconomics false-GREEN stayed reachable.
+  # emptiness was never gated and the field-workbook false-GREEN stayed reachable.
   referenced = Set.new
   elements.each do |el|
     next if VIZ_NONQUERY_KINDS.include?(el['kind'].to_s) # controls/text/etc create no feeders
@@ -362,15 +362,15 @@ end
 unless bad.empty?
   warn "FATAL: #{bad.length} anchor(s) have an unparseable `raw` printed value:"
   bad.first(10).each { |a| warn "         #{a.is_a?(Hash) ? a['id'] : '(bad entry)'}: raw=#{(a['raw'] rescue nil).inspect}" }
-  warn '       `raw` must be the value EXACTLY as printed on the source image ("18,037B", "-2%",'
+  warn '       `raw` must be the value EXACTLY as printed on the source image ("12,345B", "-2%",'
   warn '       "$733,215.26") — or, for kind:"text" roster anchors, a non-empty displayed label.'
   exit 2
 end
 
 # --- W1.3: source-anchor immutability ---------------------------------------
 # The anchors are the MEASUREMENT; editing a printed VALUE after seeing the live
-# actuals defeats the entire bar. The 2026-07 run changed a1 "18,037B" ->
-# "18,028B" (the Sigma value) to flip a 14/15 FAIL into a 15/15 PASS. Lock the
+# actuals defeats the entire bar. The 2026-07 run changed a1 "12,345B" ->
+# "12,338B" (the Sigma value) to flip a 14/15 FAIL into a 15/15 PASS. Lock the
 # per-anchor id->raw map on first verification and refuse a later change to an
 # EXISTING anchor's printed value unless --retranscribed authorizes a genuine
 # re-transcription (re-read the SOURCE PNG, not the actuals). The decision is on
@@ -666,7 +666,7 @@ verdict['detail'].each do |d|
 end
 
 # W1.1: non-empty dashboard tiles — the hard data-path check. A displayed tile
-# that exports 0 data rows is the exact false-GREEN the Macroeconomics run hid
+# that exports 0 data rows is the exact false-GREEN the field-workbook run hid
 # behind a warehouse-only anchors pass. This is loud and fails the script even
 # when every anchor "matched" (they can match in the unfiltered feeder table).
 unless verdict['tiles_all_nonempty']
@@ -674,7 +674,7 @@ unless verdict['tiles_all_nonempty']
   warn "[FAIL] #{verdict['dashboard_tiles_empty'].length} displayed dashboard tile(s) export ZERO data rows —"
   warn '       the charts render "No data". Anchor matches in a raw feeder table do NOT count as'
   warn '       displayed data. Common causes: a control/filter literal that matches no rows (e.g.'
-  warn '       "Americas & Caribbean" vs a calc emitting "Americas and Caribbean"), or a calc'
+  warn '       "Region A & B" vs a calc emitting "Region A and B"), or a calc'
   warn '       comparing a NUMBER column to a string literal (renders NULL). Fix, then re-run.'
   verdict['dashboard_tiles_empty'].each { |t| warn "         EMPTY  #{t['id']} #{t['name'].inspect} [#{t['kind']}]" }
   if verdict['anchors_matched_in_displayed'].to_i.zero? && verdict['matched'].to_i.positive?

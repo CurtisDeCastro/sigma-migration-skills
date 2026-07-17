@@ -108,7 +108,7 @@ xml = TwbXml.parse(TWB_TEXT)
 # frequency-ranked, with neutrals dropped (near-white/black card & text fills,
 # and low-chroma greys), so downstream theming can reproduce the source's own
 # palette. Neutral test mirrors the prototype validated across the benchmark
-# set (ER reds / Quota blue-teal / History blue+orange / Udemy subject dots).
+# set (ER reds / Quota blue-teal / History blue+orange / course-workbook subject dots).
 def color_neutral?(hex)
   h = hex.delete('#')
   return true unless h.length == 6
@@ -1367,7 +1367,7 @@ def zone_text_fields(z)
     end
   end
   # Run-level alignment fallback: a zone whose alignment lives ONLY on its runs
-  # (no zone-style text-align — the diablo credit-line defect) still aligns:
+  # (no zone-style text-align — the hero-art credit-line defect) still aligns:
   # when every visible run agrees, promote to the zone level.
   if out['text_align'].nil?
     vis = runs.reject { |r| r['text'].to_s.strip.empty? }
@@ -1512,7 +1512,7 @@ xml.elements.each('//dashboard') do |d|
       'quick_calc_pcto' => (kind == 'chart' ? ws_meta&.dig(:quick_calc_pcto) : nil),
       'heat_scheme'    => (kind == 'chart' ? ws_meta&.dig(:heat_scheme)   : nil),
       # v5.1: zone show-title='false' = the source HIDES the worksheet title
-      # (all 6 Diablo tiles carry it; three rounds leaked "Sheet 9" because
+      # (all 6 hero-art workbook tiles carry it; three rounds leaked "Sheet 9" because
       # nothing read the attribute). Absent attr = shown (fails safe).
       'show_title'   => z.attributes['show-title'] != 'false',
       'filters'        => (kind == 'chart' ? ws_meta&.dig(:filters)       : nil),
