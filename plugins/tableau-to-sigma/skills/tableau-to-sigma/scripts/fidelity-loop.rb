@@ -53,6 +53,7 @@
 #             5 post-fix guard/lint failed; 6 status: unresolved spec-fixable remain.
 
 require 'json'
+require_relative 'lib/cli_encoding'
 require 'optparse'
 
 # ---------------------------------------------------------------------------

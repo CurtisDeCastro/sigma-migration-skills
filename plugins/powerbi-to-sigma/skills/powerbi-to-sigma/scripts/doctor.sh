@@ -132,7 +132,26 @@ fi
 if command -v node >/dev/null 2>&1; then
   ok "node — $(node --version 2>/dev/null)"
 else
-  bad "node not found (required — the vendored converters/*.mjs run via node)" "macOS/Linux: install Node 18+ from https://nodejs.org or your package manager. Windows no-admin: 'winget install Schniz.fnm' then 'fnm install --lts && fnm use --lts'. See refs/environment.md #5 — don't auto-download an unpinned Node, ask first."
+  # G1 (field-caught TWICE on the same machine): node was INSTALLED via a version
+  # manager (~/.fnm) the whole time — only PATH activation was missing, because
+  # version managers activate via interactive-shell profile hooks that a non-login
+  # agent shell never sources. Probe the standard version-manager install dirs
+  # BEFORE declaring node missing; found => print the exact PATH prepend
+  # (WARN-activatable) instead of sending the user to install a runtime they have.
+  NODE_VM_BIN=""
+  for cand in "$HOME"/.fnm/node-versions/*/installation/bin/node \
+              "$HOME"/.local/share/fnm/node-versions/*/installation/bin/node \
+              "$HOME"/.nvm/versions/node/*/bin/node \
+              "$HOME"/.asdf/installs/nodejs/*/bin/node \
+              "$HOME"/.local/node/bin/node; do
+    [ -x "$cand" ] && NODE_VM_BIN="$cand"
+  done
+  if [ -n "$NODE_VM_BIN" ]; then
+    warn "node is INSTALLED but not on PATH ($("$NODE_VM_BIN" --version 2>/dev/null) at $NODE_VM_BIN) — a version manager that activates via interactive-shell hooks this shell never ran" \
+         "Prepend it for this session: export PATH=\"$(dirname "$NODE_VM_BIN"):\$PATH\"  — no install needed. (Persist it in the shell profile to stop this recurring.)"
+  else
+    bad "node not found (required — the vendored converters/*.mjs run via node)" "macOS/Linux: install Node 18+ from https://nodejs.org or your package manager. Windows no-admin: 'winget install Schniz.fnm' then 'fnm install --lts && fnm use --lts'. See refs/environment.md #5 — don't auto-download an unpinned Node, ask first."
+  fi
 fi
 
 # --- bash (token minting + *.sh helpers) -----------------------------------

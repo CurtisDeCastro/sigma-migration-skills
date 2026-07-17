@@ -379,6 +379,31 @@ if update_id
 else
   post_body = style_normalize!(File.read(opts[:spec]), opts[:workdir], opts[:skip_style_normalize])
   post_body = ensure_theme!(post_body, opts[:workdir])
+  # W2.4 preflight: duplicate element/control ids fail the POST with an opaque
+  # API 400 (field: the multi-DS converter minted "AAAAAAAAAB" twice + controlId
+  # "Region" twice — ~8 min of root-causing, both Macroeconomics runs). Name the
+  # duplicates BEFORE the network call and hard-stop: dupes mean the GENERATOR is
+  # broken (fix it), not the spec (auto-renaming here would desync references).
+  begin
+    _pf = JSON.parse(post_body)
+    _ids = Hash.new(0)
+    (_pf['pages'] || []).each do |pg|
+      (pg['elements'] || []).each do |el|
+        _ids["element id #{el['id']}"] += 1 if el['id']
+        _ids["controlId #{el['controlId']}"] += 1 if el['controlId']
+      end
+    end
+    _dupes = _ids.select { |_k, n| n > 1 }
+    if _dupes.any?
+      warn "FATAL: duplicate ids in the outgoing #{opts[:type]} spec — the POST would 400. Duplicates:"
+      _dupes.each { |k, n| warn "         #{k} (used #{n}x)" }
+      warn '       This is a GENERATOR bug (multi-datasource converter id collision — see'
+      warn '       converter W2.4 fix). Regenerate the spec; do not hand-rename ids (references desync).'
+      exit 1
+    end
+  rescue JSON::ParserError
+    nil # non-JSON body (YAML spec) — the API remains the validator
+  end
   verify_spec!(post_body, opts[:skip_spec_verify])
   resp = http(:post, POST_PATH, post_body)
   parsed = YAML.safe_load(resp.body, permitted_classes: [Date, Time])

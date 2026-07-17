@@ -4078,7 +4078,11 @@ function buildMultiDatasourceModel(xmlContent, options, datasources) {
     let kept = 0;
     for (const el of els) {
       if (el.kind === "control") {
-        const key = String(el.name ?? el.id);
+        // W2.4: dedupe by controlId first — two children can emit controls with
+        // DIFFERENT display names but the SAME controlId (param-derived), which
+        // the name-only key let through and the DM POST rejected ("duplicate id
+        // 'Region' used 2x").
+        const key = String(el.controlId ?? el.name ?? el.id);
         if (!controlNames.has(key)) {
           controlNames.add(key);
           controls.push(el);
@@ -4144,9 +4148,14 @@ function buildMultiDatasourceModel(xmlContent, options, datasources) {
   };
 }
 function convertTableauToSigma(xmlContent, options = {}) {
-  resetIds();
+  // W2.4 (field-caught on BOTH Macroeconomics runs): do NOT reset the module id
+  // counter for a multi-datasource CHILD conversion — each child restarting the
+  // sequence minted identical element ids ("AAAAAAAAAB" twice) and the merged
+  // dm-spec failed DM POST on duplicate ids. Children continue the counter
+  // (monotonic => unique, still deterministic in forEach order); top-level
+  // single-DS conversions keep the reset (corpus id determinism preserved).
+  if (!options.__multiDsChild) resetIds();
   const { connectionId = "", database = "", schema = "", datasourceIndex = 0, tableMapping = {} } = options;
-  void options.__multiDsChild;
   _tableMapping = tableMapping || {};
   const dbOverride = database || "";
   const schOverride = schema || "";

@@ -33,6 +33,7 @@
 # Back-compat: omitting --agent-vision entirely warns LOUDLY and assumes true
 # (existing callers keep working) — that default is deprecated; pass the flag.
 require 'json'
+require_relative 'lib/cli_encoding'
 require 'optparse'
 
 VERDICTS = %w[pass divergent not-executable].freeze
@@ -143,7 +144,12 @@ if opts[:verdict] == 'pass'
 end
 
 path = File.join(opts[:dir], 'parity-final.json')
-abort "FATAL: #{path} not found — run phase6-parity.rb --finalize first (the visual check records onto the parity result)." unless File.exist?(path)
+unless File.exist?(path)
+  warn "FATAL: #{path} not found — the visual verdict records ONTO the parity result, so finalize must run first:"
+  warn "  ruby scripts/phase6-parity.rb --tableau #{opts[:dir]} --finalize --actuals #{File.join(opts[:dir], 'parity-actuals.json')}"
+  warn '  then re-run this exact record-visual-check command. (Field-caught ordering friction, run 2 ~2 min.)'
+  exit 1
+end
 
 s = JSON.parse(File.read(path))
 s['visual_verdict']  = opts[:verdict]

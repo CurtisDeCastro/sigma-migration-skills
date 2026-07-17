@@ -166,6 +166,12 @@ multiple connections it lists them and asks you to pick — it never guesses.
 
 ## One command (orchestrated path)
 
+> **⏱ Invocation rule (G2, field-caught):** a full orchestrator pass runs **5–20+
+> minutes**. Launch it **in the background** (writing a log you poll) or with a
+> **tool timeout ≥ 20 minutes** — the default 2-minute foreground Bash limit WILL
+> kill the pass mid-flight (exit 143) and waste it. Check exit codes with a
+> portable `$?` (not bash-only `PIPESTATUS`).
+
 ```bash
 # PASS 1 — discover → gap gate → DM-reuse scan → DM → workbook → layout → parity plan
 # (mints its Sigma token in-process — no `eval`/bash token step, works in any shell)

@@ -351,6 +351,17 @@ RUN_ID = if opts[:finalize]
            RunState.new_run_id!(WORK)
          end
 
+# G2 launch banner (run-2 field failure): a full pass runs 5–20+ minutes, and a
+# driving agent that launched it under the DEFAULT 2-minute foreground Bash
+# timeout killed PASS-1 at 120s (exit 143) and wasted the whole pass. Say so
+# IMMEDIATELY at launch, before any long phase, so the kill is prevented rather
+# than diagnosed. STDOUT flushes line-by-line, so a backgrounded run's log shows
+# liveness via the per-phase banners.
+$stdout.sync = true
+puts "── migrate-tableau #{opts[:finalize] ? '--finalize' : 'PASS'} · run #{RUN_ID.to_s[0, 8]} ──"
+puts '   ⏱  a full pass runs 5–20+ minutes. Run me IN BACKGROUND (writing a log) or with a'
+puts '   tool timeout ≥ 20 minutes — the default 2-minute foreground limit WILL kill the pass.'
+
 # 🚧 Step-0 environment GATE. The doctor writes a doctor.json fingerprint; this
 # refuses to run on an env that never passed the doctor, instead of letting the
 # pipeline improvise around a missing runtime (the #1 source of cross-user
@@ -2084,8 +2095,35 @@ mark('phase1.6-dm-scan')
 # Pure Sigma-side — runs CONCURRENTLY with the background discovery lane.
 # ---------------------------------------------------------------------------
 hdr(2, 'Discover warehouse columns (concurrent with discovery)')
-db = opts[:db] || 'CSA'
-schema = opts[:schema] || 'TJ'
+# G7 (run-2 field failure, 2026-07-15): when extracts were landed, the AUTHORITATIVE
+# db/schema is the landing manifest's fully-qualified sf_table paths — NOT the
+# CSA/TJ demo defaults. The default made this discovery return ZERO real columns
+# for a landed TABLEAU_MIGRATION.* schema ("? columns (not in catalog)"), which
+# silently disabled fixup_dm_spec's caption→physical remap AND its phantom-column
+# drop AND the world-by-year rollup discriminator (`unless real.empty?`) — one
+# wiring gap defanged three codified mechanisms and cost ~16 min of hand
+# re-derivation. Explicit --db/--schema still wins; the manifest beats the default.
+manifest_dbschema = lambda do
+  mani = Dir[File.join(WORK, '*landing-manifest*.json')].first
+  return nil unless mani
+  rows = JSON.parse(File.read(mani))
+  rows = rows['tables'] if rows.is_a?(Hash) && rows['tables'].is_a?(Array)
+  fqns = Array(rows).map { |r| r.is_a?(Hash) ? r['sf_table'].to_s : '' }
+                    .select { |s| s.count('.') >= 2 }
+  return nil if fqns.empty?
+  pairs = fqns.map { |s| s.split('.')[0, 2] }.uniq
+  if pairs.length > 1
+    line "WARN: landing manifest spans multiple db.schema pairs (#{pairs.map { |p| p.join('.') }.join(', ')}) — using the first; pass --db/--schema to override"
+  end
+  pairs.first
+rescue StandardError => e
+  line "WARN: could not derive db/schema from landing manifest (#{e.class}) — falling back"
+  nil
+end
+derived = (opts[:db] || opts[:schema]) ? nil : manifest_dbschema.call
+db = opts[:db] || (derived && derived[0]) || 'CSA'
+schema = opts[:schema] || (derived && derived[1]) || 'TJ'
+line "warehouse column discovery target: #{db}.#{schema}#{derived ? ' (derived from landing manifest)' : ''}"
 # Table set: from the generator's DM spec when available, else inferred from the
 # datasource's logical tables.
 wh_tables =

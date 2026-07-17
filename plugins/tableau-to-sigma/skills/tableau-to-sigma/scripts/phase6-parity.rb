@@ -38,6 +38,7 @@ require_relative 'lib/zone_census'
 opts = { extract_mode: false, extract_tol: 0.30, renames: [], finalize: false }
 OptionParser.new do |p|
   p.on('--tableau DIR')          { |v| opts[:tab] = v }
+  p.on('--workdir DIR', 'alias of --tableau') { |v| opts[:tab] = v }
   p.on('--workbook-id ID')       { |v| opts[:wb] = v }
   p.on('--out PATH')             { |v| opts[:out] = v }
   p.on('--extract-mode')         { opts[:extract_mode] = true }
