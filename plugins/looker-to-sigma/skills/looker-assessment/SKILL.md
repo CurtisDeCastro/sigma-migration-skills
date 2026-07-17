@@ -14,7 +14,7 @@ user-invocable: true
 # Looker Assessment
 
 > **STATUS: working inventory (Looker REST API 4.0 driven, live-validated on
-> `hakkoda1.cloud.looker.com`).** Mirrors `tableau-assessment` / `qlik-assessment`:
+> `example.cloud.looker.com`).** Mirrors `tableau-assessment` / `qlik-assessment`:
 > same `value / (1 + cost)` scoring, same
 > `migrate-first / easy-win / moderate / needs-gap-scout / retire` tags, and the
 > byte-identical Sigma-branded HTML readout theme.
@@ -122,7 +122,7 @@ Flags:
 Nothing in this directory is uploaded anywhere — sharing is a deliberate action.
 
 ## Live validation
-Validated end-to-end against `hakkoda1.cloud.looker.com` (Looker 26.8.11) on
+Validated end-to-end against `example.cloud.looker.com` (Looker 26.8.11) on
 2026-06-10: 6 models / 29 explores / 5 projects / 3 Snowflake connections / 1 Look /
 8 dashboards (all UDD) / 13 folders / 3 groups. System Activity over 90 days returned
 real run counts (Snowflake Operations = 22 dashboard runs / 43 queries → top of the

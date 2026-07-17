@@ -94,7 +94,7 @@ td.flag{{color:#b4690e;font-size:12px}}
 code{{background:#eef0f4;padding:1px 5px;border-radius:4px;font-size:12px}}
 </style></head><body>
 <h1>ThoughtSpot → Sigma — Migration Assessment</h1>
-<div class=sub>team2.thoughtspot.cloud · generated {date}</div>
+<div class=sub>{esc(d.get('host') or 'ThoughtSpot instance')} · generated {date}</div>
 <div class=cards>
   <div class=card><div class=v>{len(profs)}</div><div class=l>Liveboards (readable)</div></div>
   <div class=card><div class=v>{n_models}</div><div class=l>models referenced</div></div>

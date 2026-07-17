@@ -1,7 +1,7 @@
 # thoughtspot / retail-analytics
 
 ThoughtSpot "Retail Analytics" model + "Sales Overview" liveboard TML, exported
-2026-06-04 from a ThoughtSpot trial (team2) over the synthetic CSA.TJ retail
+2026-06-04 from a ThoughtSpot trial over the synthetic CSA.TJ retail
 star schema.
 
 ## Artifacts

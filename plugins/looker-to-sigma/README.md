@@ -9,7 +9,7 @@ verification** (Looker vs Sigma vs the source warehouse). The agent supplies the
 (which explore, which join strategy, which tile kind, which layout); the `scripts/*` do the
 mechanical work.
 
-> **Validated end-to-end (2026-06-10)** against a live `hakkoda1.cloud.looker.com` Looker
+> **Validated end-to-end (2026-06-10)** against a live `example.cloud.looker.com` Looker
 > instance pointed at the same `CSA.TJ` Snowflake as Sigma: 2 dashboards (Orders Overview +
 > Orders Deep Dive) migrated clean with **no hand-edits**, DM = 7 elements / 161 cols / 24
 > metrics / 5 relationships, and **3-way parity to the cent** on region revenue and the ratio

@@ -20,7 +20,7 @@ and `feature_usage` / `viz_mix` empty.
 ```json
 {
   "instance": {
-    "name": "<host>",                       // e.g. hakkoda1.cloud.looker.com
+    "name": "<host>",                       // e.g. example.cloud.looker.com
     "url": "https://<host>",
     "generated_at": "YYYY-MM-DD",
     "usage_window_days": <int>,             // --usage-days (default 90)

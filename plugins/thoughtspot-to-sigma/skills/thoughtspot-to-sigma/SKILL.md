@@ -360,7 +360,7 @@ region, quarter all match to the cent). Per-run ids land in `<workdir>/migrate_o
 - `refs/liveboard-to-workbook.md` — workbook spec shapes (KPI `{columnId}` vs
   donut `{id}`, groupings, pivot rowsBy/columnsBy, sorts, layout geometry math,
   rename gotcha)
-- `fixtures/` — real exported TML pair from the team2 trial
+- `fixtures/` — real exported TML pair from a live trial org
   (`retail-analytics-model.tml` 6-table star + `retail-analytics-liveboard.tml`
   5-viz Liveboard with layout.tiles) — drives the offline mode above and the
   converter's regression diet.
@@ -384,7 +384,7 @@ Row/column security is **never silently dropped and never silently ported** — 
 
 **What is detected for ThoughtSpot:** `rls_rules` on the model/worksheet or per table (`ts_username` to `CurrentUserEmail()`, `ts_groups` to `CurrentUserInTeam`), multiple rules OR-combined. The converter emits each as a `result.security[]` entry `{kind:'rls', name, expression, table?}`.
 
-> ⚠️ The `rls_rules` TML shape + the `ts_username`/`ts_groups` mapping are validated against a **synthetic** rule (no Liveboard in the team2 trial uses RLS). Treat the auto-mapping as best-effort and use **Customize** to review each rule against the real source before applying.
+> ⚠️ The `rls_rules` TML shape + the `ts_username`/`ts_groups` mapping are validated against a **synthetic** rule (no Liveboard in the trial org uses RLS). Treat the auto-mapping as best-effort and use **Customize** to review each rule against the real source before applying.
 
 **Flow (only runs when `result.security` is non-empty — zero overhead otherwise):**
 1. **Convert + post** the data model as usual. Capture the `dataModelId` and the converter's `result.security[]` (write it to `security.json`).
