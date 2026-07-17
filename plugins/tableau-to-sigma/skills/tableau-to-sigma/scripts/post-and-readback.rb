@@ -432,6 +432,54 @@ readback = lambda do
 end
 spec, cols_res, cols_json, labels_by_el = readback.call
 
+# CALC-REF CASING REPAIR (datamodel only, re-PUT-once). The vendored converter
+# emits calc column refs in Tableau TitleCase ([Totalggr], [Userid]); Snowflake
+# reads the real columns back UPPERCASE ([TOTALGGR]) and Sigma formula refs are
+# case-sensitive, so those calc columns compile to type=error. BEFORE quarantine
+# would drop them, re-case each element's BARE column refs to its OWN live column
+# labels (the authoritative readback casing), PUT the corrected spec back to the
+# SAME id, and re-read once. $recased enforces the re-PUT-ONCE contract. This runs
+# qualified:false (never rewrites [alias/COL] element segments) and refuses to
+# re-case a bare ref whose column name lives on >1 element (a collapsed multi-
+# datasource ref that needs a Lookup, not a casing fix) — so it never masks a real
+# gap; the type=error guard below still fires on anything it can't safely fix.
+if opts[:type] == 'datamodel' && $recased.nil? && cols_res.is_a?(Net::HTTPSuccess) &&
+   ENV['SIGMA_SKIP_RECASE'].to_s.empty?
+  begin
+    require_relative 'lib/ref_label_repair'
+    name_by_id = {}
+    (spec['pages'] || []).each { |p| (p['elements'] || []).each { |e| name_by_id[e['id']] = e['name'] } }
+    registry = {}
+    labels_by_el.each do |eid, labels|
+      nm = name_by_id[eid]
+      registry[nm] = labels if nm.is_a?(String) && !labels.empty?
+    end
+    if registry.any?
+      spec_doc = JSON.parse(File.read(opts[:spec]))
+      els = (spec_doc['pages'] || []).flat_map { |p| p['elements'] || [] }
+      rep = RefLabelRepair.repair!(els, registry, qualified: false, same_element_recase: true)
+      rep[:ambiguous].each { |m| warn "  RECASE skip: #{m}" }
+      if rep[:fixed].positive?
+        $recased = rep[:fixed]
+        recased_path = File.join(opts[:workdir], 'dm-spec.recased.json')
+        File.write(recased_path, JSON.pretty_generate(spec_doc))
+        warn "RECASE: re-cased #{rep[:fixed]} bare calc ref(s) to live column labels " \
+             "(converter emitted TitleCase; warehouse columns are UPPERCASE) — re-PUTting to " \
+             "#{ID_FIELD}=#{oid} (#{recased_path})"
+        put_res = http(:put, format(GET_PATH, oid), File.read(recased_path))
+        if put_res.is_a?(Net::HTTPSuccess)
+          spec, cols_res, cols_json, labels_by_el = readback.call
+        else
+          warn "WARN: re-PUT after re-casing failed (HTTP #{put_res.code}): " \
+               "#{put_res.body.to_s[0, 300]} — keeping original readback; the type-error guard will report."
+        end
+      end
+    end
+  rescue StandardError => e
+    warn "WARN: calc-ref casing repair skipped (#{e.message}) — the type-error guard below still applies."
+  end
+end
+
 # Rec5 quarantine, census leg (opt-in, datamodel only): the POST succeeded but
 # specific live element(s) resolved columns to type=error. Defer those elements,
 # PUT the cleaned spec back to the SAME DM id (no orphan), and re-read once.
