@@ -211,6 +211,16 @@ case mode
 when 'file'
   puts '     INPUT MODE = file (raw export, no live source connection). The build runs from the'
   puts '     export; parity is verified against the live SIGMA WAREHOUSE, not the source tool.'
+  dash_dir = File.join(opts[:dir], 'dashboards')
+  puts ''
+  puts '     [ASSIST] NO LIVE SOURCE TO AUTO-RENDER — ASK THE USER FOR DASHBOARD SCREENSHOTS.'
+  puts '     Layout is inferred from export COORDINATES only; without a picture of the source the'
+  puts '     visual gates (visual-compare, source-anchor values, visual-similarity) have nothing to'
+  puts '     check against and SELF-SKIP — layout errors then ship unseen. Before building, ask the'
+  puts '     user (AskUserQuestion) for a screenshot of EACH source dashboard page (one PNG per page)'
+  puts "     and drop them here: #{dash_dir}/"
+  puts '     Landing them there ARMS the visual gates. If the user has none, the gates are WAIVED'
+  puts '     with a stated reason at Phase 6 — never a silent skip.'
 when 'both', 'live'
   puts "     INPUT MODE = #{mode}. Live source available — full source-side parity verification applies."
 else

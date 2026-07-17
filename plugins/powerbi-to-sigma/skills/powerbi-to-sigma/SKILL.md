@@ -89,6 +89,19 @@ point `--out` at the same `<WORK>`) and writes `intake.json` (run-start + mode f
 telemetry ping). Multiple connections + no id/name → it lists them and asks you to pick;
 never guesses. (Power BI input is almost always `--mode file` — TMSL + PBIR exports.)
 
+> **ASK FOR SOURCE DASHBOARD SCREENSHOTS UP FRONT (file mode).** Layout is inferred from the
+> export's `x,y,w,h` **coordinates only** — never from an image — and those free-form/absolute
+> PBI coords lose the arrangement Sigma's grid needs. In `--mode file` there is **no live report
+> to auto-render** (`export-pbi-pages.py` needs a live `reportId` on Fabric capacity + a Power BI-
+> audience token + PNG not tenant-disabled), so the Phase 5e visual-compare, source-anchor (gate 13)
+> and visual-similarity (gate 14) gates have nothing to check against and **self-skip** — layout
+> errors ship unseen (field-caught). `intake.rb` prints an `[ASSIST]` block for this; act on it:
+> **before building, `AskUserQuestion` the user for a screenshot of EACH source dashboard page (one
+> PNG per page) and land them in `<WORK>/dashboards/`.** That path ARMS the visual gates (they
+> discover `<WORK>/dashboards/*.png`). If the user has none, proceed but **waive** the visual gates
+> at Phase 6 with a stated reason (`--skip-anchors-gate`/`--skip-visual-similarity "<reason>"`) —
+> never a silent skip. Headless (`--yes`/`--answers`): skip the prompt and waive with a stated reason.
+
 ## Phase 1 — Connect (no Entra app required)
 The corporate tenant blocks Entra app creation, Git integration, and XMLA (PPU). The working path:
 - `scripts/fabric-extract.py` — device-code via well-known public client **`ea0616ba-638b-4df5-95b9-636659ae5121`** (Power BI Desktop), scope `https://api.fabric.microsoft.com/.default`. User signs in once at the device URL; token cached.
@@ -163,6 +176,20 @@ The converter output (`sigmaDataModel`) needs 3 fixups before `POST /v2/dataMode
 3. **Element `name`** on each base warehouse-table element (= `source.path[-1]`) — the converter only names joined View elements, but workbook masters reference DM elements by name.
 Then: `tableau-to-sigma/scripts/post-and-readback.rb --type datamodel`. See `refs/spec-fixups.md`.
 
+> **What Phase 4 "validation" catches — and what it does NOT (read before trusting a clean DM).**
+> `validate-spec.rb` is spec-**shape** only (kinds, formula function names, ref prefixes — no
+> warehouse). After the POST, `post-and-readback.rb` fetches `GET /v2/dataModels/{id}/columns` and
+> **halts (exit 2) on any column that resolves to `type "error"`, before the workbook is built** —
+> catching bad refs, missing physical columns, and non-existent functions. It does **NOT** catch a
+> column that resolves to its *declared* type here but fails at actual **query time**: a physical-name
+> **case** mismatch on a case-sensitive-stored warehouse (Databricks stores lower-case — `beads-sigma-lanq.7`),
+> a wrong per-table **schema** (`beads-sigma-lanq.6`), or an **ungranted schema**. Those surface only at
+> Phase 6 — so a model that looks "validated" here can still error *after* the workbook exists (the
+> delete-and-recreate trap). **A clean Phase 4 is not a warehouse-resolution guarantee.** If Phase 6
+> shows `type "error"` columns Phase 4 didn't, suspect warehouse **casing / schema / grants** first,
+> and confirm the connection identity can read every schema the model spans. (Follow-up `beads-sigma-q48b`:
+> an optional pre-workbook query-probe that runs one live query per DM element to surface these early.)
+
 ## Phase 5 — Build the workbook
 - **Data page**: one hidden `table` master per DM element used (`source: {kind:data-model, dataModelId, elementId}`, columns `[ElementName/Col]`).
 - **Chart elements** source from a master (`source:{kind:table, elementId:<master>}`), columns `[dim, meas]`:
@@ -200,6 +227,20 @@ pages next to the Power BI renders. Do this BEFORE Phase 6, every run:
 
 1. Export the SOURCE pages: `"$PY" scripts/export-pbi-pages.py --report <reportId> --out-dir $WORK/visual-qa`
    (PNG is commonly tenant-disabled — the script falls through to PDF; per-page when pypdf is installed).
+   > **`ExportToFile` is the ONLY documented way to render a PBI page programmatically** — and it's
+   > what this script uses (it does its own **Power BI-audience** device sign-in, scope
+   > `analysis.windows.net/powerbi/api/.default`, separate from the Fabric extraction token — don't
+   > reuse the Fabric token or it 404s; see `pbi-export-pages-token-audience`). Preconditions: the
+   > report is in a workspace on **Fabric capacity** (trial/premium), the user completes that export
+   > sign-in, and PNG isn't tenant-disabled (else PDF — the agent Reads PDFs the same way). **There is
+   > no other agent-driven render path:** the Power BI **Modeling MCP is model/DAX-only** (no visuals),
+   > there is **no PBI `get-view-image` MCP tool** (Tableau has one; Power BI does not), and Power BI
+   > **Embedded** screenshotting needs an Entra app + embed token this corporate tenant blocks. So:
+   > run `ExportToFile` whenever you have a live report on capacity; otherwise fall back to the user.
+   **No live report / export 404s / all formats tenant-disabled (the file-mode default):** you can't
+   auto-pull the source render — fall back to the **user-supplied screenshots** requested at Step 0
+   (`<WORK>/dashboards/*.png`). If they weren't provided at intake, `AskUserQuestion` for them now
+   before comparing; if genuinely unavailable, waive gates 13/14 at Phase 6 with a stated reason.
 2. Export EVERY Sigma page: `"$PY" scripts/sigma-export-png.py --workbook <wbId> --page <pageId> --out $WORK/visual-qa/sigma-<page>.png`.
 3. **Read both images for each page, side by side.** Check, per page: same
    elements in the same spots; charts show MARKS (not just axes); clustered vs
