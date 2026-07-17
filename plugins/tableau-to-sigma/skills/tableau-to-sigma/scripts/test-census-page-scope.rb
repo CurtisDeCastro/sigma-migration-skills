@@ -62,6 +62,30 @@ ok(c_none['zones_total'].zero? && c_none['dashboards_scoped'].empty?,
 ok(!ZoneCensus.tile_census(layout, [], [])['unmatched_zone_names'].include?('About'),
    'text/furniture zones stay excluded from the census')
 
+# 7. PROVENANCE alignment (v5.5): zone captions are Tableau WORKSHEET names
+#    (parse-twb-layout puts the zone's worksheet ref in 'caption'; display_title
+#    rides separately) and the provenance-built plan's tableau_view is the exact
+#    worksheet name — so census matching is exact even when two worksheets on
+#    different dashboards SHARE a display title.
+shared_title = [
+  { 'dashboard' => 'Alpha Overview', 'zones' => [zone('A KPI Revenue').merge('display_title' => 'Net Revenue')] },
+  { 'dashboard' => 'Beta Detail',    'zones' => [zone('Net Revenue')] }
+]
+plan_prov = [{ 'tableau_view' => 'A KPI Revenue', 'chart' => 'Net Revenue' },
+             { 'tableau_view' => 'Net Revenue',   'chart' => 'Net Revenue' }]
+c_prov = ZoneCensus.tile_census(shared_title, plan_prov, [])
+ok(c_prov['zones_unmatched'].zero? && c_prov['zones_total'] == 2,
+   'worksheet-keyed plan (provenance) matches same-display-title zones exactly on full scope=[]')
+
+# 8. The pre-provenance field shape: display-name matching double-mapped both
+#    charts onto ONE view and dropped the other — the census must still CATCH
+#    the dropped worksheet (the plan fix must not mask gate 5's job).
+plan_doublemap = [{ 'tableau_view' => 'A KPI Revenue', 'chart' => 'Total Revenue' },
+                  { 'tableau_view' => 'A KPI Revenue', 'chart' => 'Total Revenue' }]
+c_dm = ZoneCensus.tile_census(shared_title, plan_doublemap, [])
+ok(c_dm['zones_unmatched'] == 1 && c_dm['unmatched_zone_names'] == ['Net Revenue'],
+   'a double-mapped plan still surfaces the dropped worksheet as unmatched (census not masked)')
+
 puts
 if FAIL.empty?
   puts "ALL PASS — tile census is dashboard-scoped; the multi-dashboard false RED is fixed"

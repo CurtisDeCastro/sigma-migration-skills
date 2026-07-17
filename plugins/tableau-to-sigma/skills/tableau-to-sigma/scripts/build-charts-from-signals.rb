@@ -246,7 +246,7 @@ def synthesize_view_from_signals(z, meta)
   # carries its measure on the Label mark, NOT on a shelf — so cols_shelf.fields
   # is empty and the zone would drop with "no dim+measure" even though the value
   # is fully known. Recover the measure from the sort's `using` clause
-  # (`[…].[sum:GDP (current US$):qk]`), then from the aggregations map (first
+  # (`[…].[sum:Revenue (current US$):qk]`), then from the aggregations map (first
   # numeric-agg field that isn't the dim). Without this the 3 Top-Countries
   # tables silently vanish from the dashboard.
   if meas.empty? && dims.any?
@@ -1866,7 +1866,7 @@ end
 # Without it the child reads BASE-grain rows with the grouped aggregate
 # REPEATED per row, so Avg/Median/Count at the outer level silently come out
 # row-weighted (caught live: row-weighted 969.82 vs correct 687.81 per-customer
-# Avg on CSA.TJ.ORDER_FACT). Custom SQL `GROUP BY` subqueries per level are
+# Avg on DEMO_DB.DEMO.ORDER_FACT). Custom SQL `GROUP BY` subqueries per level are
 # the equivalent alternative. decompose_nested_fixed
 # returns nil for non-nested formulas — SINGLE-level FIXED takes the verified
 # two-level helper AUTO path instead (parse_fixed_lod / build_two_stage_helper
@@ -3437,7 +3437,7 @@ def parse_param_if_measure(formula)
 end
 
 # map_column with a NORMALIZED fallback for the scope recipe: formulas
-# reference raw twb serialization tokens (NUM_SUBSCRIBERS, PUBLISHED DATE)
+# reference raw twb serialization tokens (NUM_ENROLLED, PUBLISHED DATE)
 # while the master-map regexes are built from display labels ("Num
 # Subscribers"). Same drift class the global ref-label repair handles —
 # match case/punct-insensitively when the normalized name is UNIQUE among
@@ -6769,7 +6769,7 @@ elements.each do |el|
   bad = (el['columns'] || []).select do |c|
     c['formula'].to_s.scan(/\[[^\]\/]+\/([^\]]+)\]/).flatten.any? do |inner|
       # FUNCTION-CALL shapes and pill qualifiers only. Legit captions carry
-      # parens too ('GDP (current US$)', 'Cost (copy)_123' — real resolvable
+      # parens too ('Revenue (current US$)', 'Cost (copy)_123' — real resolvable
       # DM columns in the corpus; review-caught: a blanket paren test dropped
       # them), so match aggregate/window CALLS, not punctuation. The match is
       # CASE-SENSITIVE: leaked twb formulas are canonically UPPERCASE, while
@@ -7113,6 +7113,28 @@ stamp_filter_ids.call(elements)
 stamp_filter_ids.call(data_elements)
 stamp_filter_ids.call(all_extras) if defined?(all_extras)
 
+# v5.5 CHART PROVENANCE (field-caught wrong-view parity): element id → the
+# Tableau WORKSHEET name that built it (unique per workbook — Tableau enforces
+# it) + dashboard. Sigma tile DISPLAY names are the worksheet display_titles,
+# which are NOT unique across dashboards: auto-parity-plan's display-name
+# back-match double-mapped 5 views and dropped 5 on a 29-chart field workbook,
+# and silently parity-checked tiles against the WRONG same-titled view. This
+# map is the collision-free join auto-parity-plan.rb consumes FIRST (display-
+# name matching stays only as a warned fallback for hand-added charts).
+# Captured HERE while elements still carry _worksheet; the page-per-dashboard
+# emitter adds its namespaced duplicate ids below; written to
+# <tableau-dir>/chart-provenance.json after the emitters run.
+$chart_provenance = {}
+elements.each do |e|
+  ws = e['_worksheet'].to_s
+  next if ws.empty? || e['id'].to_s.empty?
+  $chart_provenance[e['id'].to_s] ||= {
+    'worksheet' => ws,
+    'dashboard' => e['_dashboard'],
+    'name'      => (e['name'].is_a?(String) ? e['name'] : nil)
+  }.compact
+end
+
 # ---- Output mode ----
 #   Default       → flat array of elements (legacy behaviour). Extras first.
 #   --page-per-worksheet → emit { pages: [{name, elements:[]}] }. One page per
@@ -7264,6 +7286,13 @@ elsif opts[:pages_mode] == :dashboard
         # sidecar too (written post-emitters) — exact-id matching in
         # put-layout would otherwise leak the copy's title chrome
         ($hidden_title_ns_ids ||= []) << ns if ($hidden_title_ids || []).include?(stem)
+        # provenance for the namespaced copy: same WORKSHEET, this dashboard —
+        # auto-parity-plan keys the join by element id, so every posted copy
+        # must resolve to its worksheet (both copies verify against the same
+        # view CSV by design).
+        if (pv = $chart_provenance[stem])
+          $chart_provenance[ns] = pv.merge('dashboard' => dash_name)
+        end
         src_before = el.dig('source', 'elementId')
         el2 = JSON.parse(el.to_json.gsub(stem, ns))
         # v5.1.3: the stem gsub also rewrites a source.elementId that EMBEDS
@@ -7334,6 +7363,20 @@ begin
   end
 rescue => e
   warnings << "hidden-titles sidecar write error (titles stay visible): #{e.message}"
+end
+
+# chart-provenance sidecar WRITE — after the emitters so page-per-dashboard's
+# namespaced duplicate ids are included. ALWAYS written (possibly empty) so
+# auto-parity-plan can tell "no charts built" from "builder predates
+# provenance" (an absent file ⇒ warned display-name fallback matching).
+begin
+  if opts[:tab]
+    pv_path = File.join(opts[:tab], 'chart-provenance.json')
+    File.write(pv_path, JSON.pretty_generate({ 'version' => 1, 'elements' => $chart_provenance }))
+    warn "wrote #{pv_path} (#{$chart_provenance.size} element→worksheet provenance entr(y/ies) for auto-parity-plan)"
+  end
+rescue => e
+  warn "  WARN  chart-provenance sidecar write error (parity plan falls back to display-name matching): #{e.message}"
 end
 
 # ---- Intended-scope contract (control-scope.json) ---------------------------

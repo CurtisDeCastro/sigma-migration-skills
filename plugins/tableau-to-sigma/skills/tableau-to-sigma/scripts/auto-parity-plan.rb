@@ -13,8 +13,15 @@
 #                                   (e.g., "Order Channel vs Ship Method=Orders by Category")
 #                                   — repeatable
 #
-# Matching heuristic: Sigma element name == Tableau view name (exact), then loose match
-# (strip punctuation, lowercase). Sigma kinds and Tableau chart_kinds are recorded for context.
+# Matching (v5.5): PROVENANCE FIRST — when <tableau-dir>/chart-provenance.json
+# exists (written by build-charts-from-signals.rb), each Sigma element id maps
+# to its Tableau WORKSHEET name (unique per workbook), an exact collision-free
+# join. Only elements ABSENT from the map (hand-added charts) fall back to the
+# display-name heuristic: Sigma element name == Tableau view name (exact), then
+# loose match (strip punctuation, lowercase) — WITH a warning, because display
+# titles are NOT unique across dashboards (the same-title collision class:
+# double-mapped + dropped views, and tiles parity-checked against the wrong
+# same-named view). Sigma kinds and Tableau chart_kinds are recorded for context.
 #
 # After running this, the agent fetches Sigma actuals via MCP or REST and edits the plan to
 # add an "actual" key per chart, then runs verify-parity.rb.
@@ -198,12 +205,56 @@ end
 
 # Build reverse-rename map: tableau-name → sigma-name was the input;
 # we want sigma-name → tableau-name for lookup.
+# ⚠️ COLLISION-PRONE BY CONSTRUCTION: two worksheets sharing one display_title
+# collapse to a single rev_renames entry, so both Sigma charts back-match the
+# SAME view and the other view drops (field-verified: 29 charts → 24 views,
+# 5 double-mapped + 5 dropped, and 5 tiles value-checked against the WRONG
+# same-titled view). This map is therefore only the FALLBACK — the provenance
+# join below (element id → worksheet, unique) is consumed first.
 rev_renames = opts[:renames].each_with_object({}) { |(k, v), h| h[v] = k }
+
+# ---- Chart provenance (v5.5 — the collision-free join) ----------------------
+# build-charts-from-signals.rb writes <tableau-dir>/chart-provenance.json:
+#   { "version": 1, "elements": { "<sigma element id>":
+#       { "worksheet": "<Tableau worksheet name>", "dashboard": "...", ... } } }
+# Tableau worksheet names are unique within a workbook (Tableau enforces it)
+# and ARE the view names get-workbook.json/views key CSVs by — so an id-keyed
+# lookup matches each chart to its own view exactly, immune to display-title
+# collisions. Element ids are deterministic (el-<worksheet-slug>), so the map
+# survives re-POSTs/readbacks. Charts absent from the map (hand-added) fall
+# back to the display-name heuristic WITH A WARNING.
+prov_path = File.join(opts[:tab], 'chart-provenance.json')
+provenance = {}
+if File.exist?(prov_path)
+  begin
+    pj = JSON.parse(File.read(prov_path))
+    provenance = pj.is_a?(Hash) && pj['elements'].is_a?(Hash) ? pj['elements'] : {}
+  rescue JSON::ParserError => e
+    warn "chart-provenance.json unreadable (#{e.message}) — falling back to display-name matching"
+  end
+end
+if provenance.empty?
+  warn "no chart provenance at #{prov_path} — matching by DISPLAY NAME, which is " \
+       'COLLISION-PRONE when worksheets share display titles; rebuild charts with ' \
+       'build-charts-from-signals.rb to emit it (hand-authored specs: verify every ' \
+       'tableau_view below and use --rename per renamed tile)'
+end
 
 plan_entries = []
 sigma_charts.each do |el|
   sigma_name = el_display_name(el)
-  tableau_name = rev_renames[sigma_name] || sigma_name
+  prov = provenance[el['id'].to_s]
+  if prov && !prov['worksheet'].to_s.strip.empty?
+    tableau_name = prov['worksheet'].to_s
+    matched_via  = 'provenance'
+  else
+    tableau_name = rev_renames[sigma_name] || sigma_name
+    matched_via  = 'name-fallback'
+    unless provenance.empty?
+      warn "provenance MISS for element #{el['id']} (#{sigma_name.inspect}) — falling back to " \
+           'display-name matching (hand-added chart?); verify its tableau_view'
+    end
+  end
 
   view = view_by_name[tableau_name]
   view ||= view_by_name.find { |n, _| normalize(n) == normalize(tableau_name) }&.last
@@ -310,10 +361,11 @@ sigma_charts.each do |el|
 
   entry = {
     'chart'       => sigma_name,
-    'tableau_view' => tableau_name,
+    'tableau_view' => view['name'] || tableau_name,
     'sigma_element_id' => el['id'],
     'sigma_kind'  => el['kind'],
     'sigma_columns' => cols,
+    'matched_via' => matched_via,
     'expected'    => expected_rows
   }
   if opts[:wb_id] && cols.size >= 1
@@ -322,6 +374,43 @@ sigma_charts.each do |el|
     entry['workbookId'] = opts[:wb_id]
   end
   plan_entries << entry
+end
+
+# ---- Integrity guard: same-view double-map (LOUD, not silent) ---------------
+# Two plan charts on the SAME tableau_view is legitimate only when one
+# worksheet is genuinely placed on multiple dashboards (provenance-matched
+# copies verify against the same CSV by design). When any of the duplicates
+# arrived via the display-name FALLBACK and the workbook has ANOTHER view
+# sharing that display title, one chart is being validated against the WRONG
+# view — the silent wrong-numbers class (a repeated-name tile with a
+# page-specific filter would "pass" against the wrong source). Warn naming
+# both sides. The DROPPED view itself is the tile census's job (gate 5) — this
+# guard only flags the double-map, so it cannot mask or double-count that.
+begin
+  # display_title → the worksheet captions that render under it: the rename
+  # bridge's cap→display_title pairs, plus any view literally NAMED the title
+  # (a worksheet whose display title equals its own name never enters renames).
+  title_to_caps = Hash.new { |h, k| h[k] = [] }
+  opts[:renames].each { |cap, dt| title_to_caps[normalize(dt)] << cap }
+  view_by_name.each_key do |vn|
+    key = normalize(vn)
+    title_to_caps[key] << vn if title_to_caps.key?(key) && !title_to_caps[key].include?(vn)
+  end
+  plan_entries.group_by { |e| e['tableau_view'] }.each do |vn, entries|
+    next if entries.size < 2
+    fb = entries.select { |e| e['matched_via'] == 'name-fallback' }
+    next if fb.empty?
+    others = fb.flat_map { |e| title_to_caps[normalize(e['chart'])] }
+               .uniq.reject { |cap| cap == vn }
+    next if others.empty?
+    warn "COLLISION: #{entries.size} chart(s) (#{entries.map { |e| e['sigma_element_id'] }.join(', ')}) " \
+         "all matched Tableau view #{vn.inspect} by DISPLAY NAME, but the workbook has other view(s) " \
+         "with the same display title: #{others.map(&:inspect).join(', ')} — at least one chart is " \
+         'validating against the WRONG view. Rebuild charts with build-charts-from-signals.rb so ' \
+         'chart-provenance.json disambiguates (or hand-fix tableau_view per chart), then regenerate this plan.'
+  end
+rescue StandardError => e
+  warn "collision guard error (non-fatal): #{e.message}"
 end
 
 # NOTE: an earlier version of this script tried to pre-fetch actuals via

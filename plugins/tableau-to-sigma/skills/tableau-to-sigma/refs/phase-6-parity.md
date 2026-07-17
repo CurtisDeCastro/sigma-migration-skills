@@ -116,7 +116,7 @@ sees the reminder right after the spec lands. Don't ignore it.
 
 ### 6a. Auto-build a parity plan
 
-Don't hand-write the plan. Use the auto-builder, which matches Sigma chart-element names to Tableau view CSVs and emits a plan keyed by chart:
+Don't hand-write the plan. Use the auto-builder, which matches each Sigma chart element to its Tableau view CSV and emits a plan keyed by chart:
 
 ```bash
 ruby scripts/auto-parity-plan.rb \
@@ -126,9 +126,13 @@ ruby scripts/auto-parity-plan.rb \
   --out <WORK>/parity-plan.json
 ```
 
-On `--finalize`, `phase6-parity.rb` also writes a `tile_census` field into `parity-final.json` (zones vs charts built vs unmatched, read from `dashboard-layout.json`) — gate 5 of `assert-phase6-ran.rb` fails on unmatched zones.
+**Matching is PROVENANCE-first (v5.5).** `build-charts-from-signals.rb` writes `<WORK>/chart-provenance.json` mapping every built element id → the Tableau **worksheet** name that produced it (worksheet names are unique per workbook — Tableau enforces it — and they are exactly what `get-workbook.json` views and `views/<viewId>.csv` exports key off). The plan builder consumes that map first, so each chart joins its own view **exactly**, immune to display-title collisions; element ids are deterministic (`el-<worksheet-slug>`), so the map survives re-POSTs and readbacks. Only elements absent from the map (hand-added charts, or a spec built before the sidecar existed) fall back to display-name matching — with a loud `provenance MISS` / `no chart provenance` warning.
 
-The output is wrapped as `{ "extract": <bool>, "charts": [...] }` — the `extract` flag is set automatically from `get-workbook.json`'s `hasExtracts` field when the workbook itself is extract-backed. If a Sigma chart was renamed from its Tableau title (e.g., the pie tile renamed from "Order Channel vs Ship Method" → "Orders by Category"), pass `--rename "Order Channel vs Ship Method=Orders by Category"` so the auto-matcher pairs them.
+> **Why provenance, not better fuzzy matching.** Sigma tiles are named by the worksheet *display title*, which is **not unique** across dashboards. Field-verified on a 29-chart multi-dashboard workbook: display-name back-matching produced only 24 distinct views for 29 charts — 5 views matched twice, 5 views dropped (gate-5 FAIL on a *correct* migration), and 5 tiles were value-checked against the WRONG same-titled view (parity "passed" only because both happened to total the same measure; a repeated-name tile with a page-specific filter would validate against the wrong source). On the fallback path the builder now prints a `COLLISION` warning when two plan charts land on the same `tableau_view` while another view shares that display title — never ship a plan that printed one. Two plan entries on the same `tableau_view` **via provenance** is legitimate (one worksheet placed on two dashboards; both copies verify against the same CSV). Each plan entry records `matched_via: provenance|name-fallback`.
+
+On `--finalize`, `phase6-parity.rb` also writes a `tile_census` field into `parity-final.json` (zones vs charts built vs unmatched, read from `dashboard-layout.json`) — gate 5 of `assert-phase6-ran.rb` fails on unmatched zones. The census compares zone `caption`s — which ARE worksheet names — against the plan's `tableau_view`s, so a provenance-built plan censuses exactly, and a genuinely dropped view still surfaces as unmatched (the provenance path cannot mask or double-count gate 5).
+
+The output is wrapped as `{ "extract": <bool>, "charts": [...] }` — the `extract` flag is set automatically from `get-workbook.json`'s `hasExtracts` field when the workbook itself is extract-backed. `--rename "Tableau title=Sigma title"` still exists for the **fallback path only** (e.g. a hand-authored spec whose pie tile was renamed from "Order Channel vs Ship Method" → "Orders by Category"); provenance-matched charts never need it.
 
 > **Extract status is also visible on the workbook's datasource.** `auto-parity-plan.rb` only reads workbook-level `hasExtracts`. If the underlying datasource has an extract but the workbook attribute is `false`, you'll have to flip the `extract` field by hand OR pass `--extract-mode` to verify-parity.rb.
 
