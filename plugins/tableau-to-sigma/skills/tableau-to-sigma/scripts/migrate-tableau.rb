@@ -3246,16 +3246,21 @@ rescue WorkbookBuildError => e
   puts "      Speed Category'), translate its Tableau formula (see calc-fields.json) to"
   puts '      a Sigma formula over master columns and re-run this exact command with:'
   puts "        --master-col '<Name>=<Sigma formula>'   (repeatable)"
-  puts '   2. Otherwise author the workbook spec yourself and RE-ENTER THE GATED SPINE —'
-  puts '      do NOT hand-POST it (that skips control lint + Phase-6 + the hard gate):'
-  puts "        • Author #{WORK}/wb-spec.json against the posted DM (dataModelId=#{dm_id});"
-  puts '          reference elements via "__DM_ID__" / "__DM_ELEMENT__:<Name>"'
-  puts '          (fact = "__DM_ELEMENT__:__FACT__"). See the sigma-workbooks skill.'
-  puts '        • Re-run this exact command adding (REUSE the posted DM — do not rebuild it):'
-  puts "            --reuse-dm #{dm_id} --wb-spec #{WORK}/wb-spec.json"
-  puts '          (attaches to the existing DM; the workbook re-POST is re-gated. This is the'
-  puts '          FAST PATH: the re-run skips discovery + the decisions checkpoint and goes'
-  puts '          straight to the workbook layer — see --help.)'
+  puts "   2. Otherwise: the workbook layer ALREADY auto-built a FULL spec at #{wb_spec_path}"
+  puts '      — PATCH THAT FILE IN PLACE. Do NOT rewrite it from scratch and do NOT hand-POST'
+  puts '      it (hand-POST skips control lint + Phase-6 + the hard gate):'
+  puts "        • Edit ONLY the #{n} failing field(s)/tile(s) named above in that file. Keep"
+  puts '          every other element, control, and controlId EXACTLY as the builder wrote them.'
+  puts '          A from-scratch rewrite throws away working tiles AND drifts your controlIds away'
+  puts '          from control-scope.json — which then fails control-lint with spurious "missing'
+  puts '          control" violations on re-entry (this is the #1 way this handoff spirals).'
+  puts '        • If a failing field is a MASTER-LEVEL calc, prefer option 1 (--master-col) over'
+  puts '          hand-editing the tile. Reference DM elements by their live ids already in the'
+  puts '          file (or "__DM_ID__" / "__DM_ELEMENT__:<Name>" if you add new ones).'
+  puts '        • Re-run this exact command to RE-GATE the patched spec (REUSE the posted DM):'
+  puts "            --reuse-dm #{dm_id} --wb-spec #{wb_spec_path}"
+  puts '          (attaches to the existing DM; the workbook re-POST is re-gated. FAST PATH: the'
+  puts '          re-run skips discovery + the decisions checkpoint — see --help.)'
   puts '   The data model is posted and ready to attach either way. A conversion is NOT done'
   puts '   until scripts/assert-phase6-ran.rb exits 0 — that hard gate applies on both paths.'
   puts '   Reminder: continue now. Shipping only the data model, or a scaled-down "demo" workbook,'
