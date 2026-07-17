@@ -102,6 +102,11 @@ OptionParser.new do |o|
   o.on('--connection ID')   { |v| opts[:conn]   = v }
   o.on('--database DB')     { |v| opts[:db]     = v }
   o.on('--schema S')        { |v| opts[:schema] = v }
+  # Target warehouse dialect for physical-identifier casing (beads-sigma-lanq.7).
+  # Databricks/Spark store identifiers lower-case and bind only against a lower-cased
+  # warehouse path; Snowflake/BigQuery (the default) fold to UPPER. Default is read
+  # from the resolved connection's `type` in connection.json; this flag overrides it.
+  o.on('--warehouse-type T') { |v| opts[:wh_type] = v }
   o.on('--ref-dm ID')       { |v| opts[:ref_dm] = v }
   o.on('--folder ID')       { |v| opts[:folder] = v }
   o.on('--name NAME')       { |v| opts[:name]   = v }
@@ -187,7 +192,11 @@ abort "FATAL: missing --pbir (the Power BI report layout / PBIR bundle).\n#{CONN
 abort "FATAL: --pbir not found: #{opts[:pbir]}\n#{CONNECT_HINT}" unless File.exist?(opts[:pbir])
 # intake.rb (front-door) caches the resolved connection in <out>/connection.json; honor it
 # when --connection is omitted so the agent need not re-pass the id it just resolved.
-opts[:conn] ||= (JSON.parse(File.read(File.join(opts[:out], 'connection.json')))['connection_id'] rescue nil) if opts[:out]
+if opts[:out] && File.exist?(File.join(opts[:out], 'connection.json'))
+  _cj = (JSON.parse(File.read(File.join(opts[:out], 'connection.json'))) rescue {})
+  opts[:conn]    ||= _cj['connection_id']
+  opts[:wh_type] ||= _cj['type']   # warehouse dialect → physical-identifier casing (beads-sigma-lanq.7)
+end
 # bead hjke(a): abort early on a truncated/partial connection id — it survives
 # all the way to the DM POST and fails there opaquely ("Source not found").
 if opts[:conn] && opts[:conn] !~ /\A\h{8}-\h{4}-\h{4}-\h{4}-\h{12}\z/
@@ -271,6 +280,38 @@ def run_wb!(cmd, env: {})
   out
 end
 
+# A DM POST fails HARD ("Cannot resolve columns … dependency not found" /
+# "Source not found: warehouse table '…'") when a source table lives in a schema
+# the connection CANNOT READ — the single most common enterprise blocker (customer
+# feedback 2026-07-17; the "1,763 → 0 errors" iteration). Map the offending
+# element/table in the POST output back to its source-path schema and return a
+# concrete GRANT action so the user isn't left decoding an opaque 400. Returns nil
+# when the failure isn't an unreadable-table error.
+def explain_unreadable_tables(out, dm_spec_path, conn)
+  spec = (JSON.parse(File.read(dm_spec_path)) rescue nil)
+  return nil unless spec
+  els = (spec['elements'] || []) + (spec['pages'] || []).flat_map { |p| p['elements'] || [] }
+  by_id = {}; by_tail = {}
+  els.each do |e|
+    p = e.dig('source', 'path')
+    next unless p.is_a?(Array) && !p.empty?
+    sch = p.length >= 3 ? "#{p[0]}.#{p[-2]}" : (p[-2] || p[0]).to_s
+    by_id[e['id']] = [sch, p[-1]]
+    by_tail[e['name'].to_s.downcase] = [sch, p[-1]] if e['name']
+    by_tail[p[-1].to_s.downcase] = [sch, p[-1]]
+  end
+  hits = Hash.new { |h, k| h[k] = [] }
+  out.scan(/table '([^']+)'/i) { |m| (s = by_id[m[0]]) && (hits[s[0]] << s[1]) }
+  out.scan(/formula reference '([^'\/]+)\//i) { |m| (s = by_tail[m[0].to_s.downcase]) && (hits[s[0]] << s[1]) }
+  out.scan(/warehouse table '([^']+)'/i) do |m|
+    parts = m[0].split('.'); next if parts.size < 2
+    sch = parts.size >= 3 ? "#{parts[0]}.#{parts[-2]}" : parts[-2]
+    hits[sch] << parts[-1]
+  end
+  return nil if hits.empty?
+  hits.map { |sch, tbls| "   │    • #{sch}  (table(s): #{tbls.uniq.first(6).join(', ')}) — grant to connection #{conn || '<the DM connection>'}" }.join("\n")
+end
+
 # Pull likely-offending field/column names out of a failed workbook build/POST log
 # so the fallback message can name them. Looks for the common rejection shapes:
 #   "Dependency not found: <X>", "Unknown column \"[<X>]\"", "source: {} ... <X>",
@@ -342,6 +383,27 @@ tmsl = JSON.parse(File.read(opts[:tmsl]))
 model = tmsl['model'] || tmsl
 tables = (model['tables'] || []).reject { |t| t['name'].to_s.start_with?('LocalDateTable_', 'DateTableTemplate_') }
 all_measures = tables.flat_map { |t| (t['measures'] || []).map { |m| [t['name'], m['name'], Array(m['expression']).join] } }
+# measure name -> its ORIGINAL TMSL table = the entity a PBIR visual binds it under.
+# PBI measure names are model-unique (the same assumption ti_orig_table relies on).
+# Used by the master-map loop to alias a re-homed measure back to its source entity
+# so "_Measures.TotalSales" resolves (beads-sigma-<2a>).
+measure_orig_table = {}
+all_measures.each { |tbl, mname, _| measure_orig_table[mname] = tbl }
+
+# PBI friendly table name <-> physical warehouse table (the M-query path-tail). PBIR
+# visuals reference columns under the FRIENDLY entity ("Sales") but the converter
+# names the DM element after the PHYSICAL table ("vw_sales"), so an entity-qualified
+# queryRef misses the master-map and the column silently drops — the customer's missing
+# dim NAME columns (beads-sigma-<1b>). Capture the map so the master-map can alias every
+# key under the friendly entity too.
+_normt = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]/, '') }
+physical_to_pbi = {} # normalized physical path-tail -> PBI friendly table name
+tables.each do |t|
+  _e = ((t['partitions'] || [])[0] || {}).dig('source', 'expression')
+  _e = _e.join("\n") if _e.is_a?(Array)
+  _tail = _e.to_s[/\[\s*Name\s*=\s*"([^"]+)"\s*,\s*Kind\s*=\s*"(?:Table|View)"\s*\]/i, 1]
+  physical_to_pbi[_normt.call(_tail)] = t['name'] if _tail && t['name'] && !t['name'].to_s.empty?
+end
 modes = tables.flat_map { |t| (t['partitions'] || []).map { |p| p['mode'] } }.compact.uniq
 mode_summ = modes.empty? ? 'unknown' : modes.join('/')
 
@@ -396,13 +458,14 @@ elsif CONV_MODULE.nil?
   puts '   vendored converter (converter/powerbi.mjs) missing and no local sigma-data-model-mcp build (--mcp-dir / PBI_MCP_DIR).'
   puts
   puts '   >>> GATE: run the convert_powerbi_to_sigma MCP tool on the TMSL model'
-  puts "       (#{opts[:tmsl]}) with connectionId=#{opts[:conn]} database=#{opts[:db]} schema=#{opts[:schema]},"
+  puts "       (#{opts[:tmsl]}) with connectionId=#{opts[:conn]} database=#{opts[:db]} schema=#{opts[:schema]} warehouseType=#{opts[:wh_type].to_s.empty? ? '(default UPPER)' : opts[:wh_type]},"
   puts '       save the tool result JSON to a file, then re-run this command with'
   puts '       --converter-out <that file>. No Sigma objects were created.'
   exit 10
 end
 unless opts[:cvt_out]
 puts "   converter: #{CONV_MODULE == VENDORED_PBI ? 'vendored bundle (converter/powerbi.mjs)' : CONV_MODULE} (no data leaves this machine)"
+puts "   warehouse dialect: #{opts[:wh_type].to_s.empty? ? 'default (UPPER — Snowflake/BigQuery)' : "#{opts[:wh_type]} → lower-case physical ids"} (beads-sigma-lanq.7)"
 shim = File.join(WORK, '_convert.mjs')
 # Node ESM on Windows rejects a bare drive-letter specifier
 # (`import ... from "C:/path/powerbi.mjs"` → ERR_UNSUPPORTED_ESM_URL_SCHEME,
@@ -423,6 +486,7 @@ File.write(shim, <<~JS)
     connectionId: #{(opts[:conn] || '').to_json},
     database: #{opts[:db].to_json},
     schema: #{opts[:schema].to_json},
+    warehouseType: #{(opts[:wh_type] || '').to_json},
   });
   // Write the UNWRAPPED model to dm-raw.json. convert-model.rb MODE B unwraps
   // only {sigmaDataModel} or a bare spec, NOT this converter's {model,...}
@@ -738,8 +802,23 @@ end
 run!(fixup, env: ENV.to_h)
 run!(['ruby', File.join(HERE, 'validate-spec.rb'), '--type', 'datamodel', dm_spec])
 dm_readback = File.join(WORK, 'dm-readback.json')
-run!(['ruby', File.join(HERE, 'post-and-readback.rb'), '--type', 'datamodel',
-      '--spec', dm_spec, '--out', dm_readback, '--workdir', WORK], env: ENV.to_h)
+# DM POST — captured (not run!) so an unreadable-table failure surfaces a concrete
+# GRANT action instead of an opaque 400 (customer feedback 2026-07-17).
+_dm_post = ['ruby', File.join(HERE, 'post-and-readback.rb'), '--type', 'datamodel',
+            '--spec', dm_spec, '--out', dm_readback, '--workdir', WORK]
+_dm_out, _dm_st = Open3.capture2e(ENV.to_h, *_dm_post)
+_dm_out.each_line { |l| puts "   #{l.rstrip}" } unless _dm_out.strip.empty?
+unless _dm_st.success?
+  hint = explain_unreadable_tables(_dm_out, dm_spec, opts[:conn])
+  if hint
+    warn ''
+    warn '   ┌─ UNREADABLE WAREHOUSE TABLE(S): the data-model POST failed because the'
+    warn '   │  connection cannot read one or more source tables — almost always a missing GRANT:'
+    warn hint
+    warn '   └─ grant the schema(s) above to the connection (or drop those tables/visuals), then re-run.'
+  end
+  abort "FATAL: data model POST failed (#{_dm_st.exitstatus})."
+end
 dm_rb = JSON.parse(File.read(dm_readback))
 dm_id = dm_rb['dataModelId']
 puts "   dataModelId = #{dm_id}"
@@ -887,8 +966,18 @@ conv_elements.each_with_index do |cel, cel_idx|
     # arg compiles the column to type "error" (verified: dropping it fixes).
     # Strip a trailing integer start arg until the converter is fixed.
     rewritten = rewritten.gsub(/\bFind\((\[[^\]]+\]|"[^"]*")\s*,\s*(\[[^\]]+\]|"[^"]*")\s*,\s*\d+\s*\)/, 'Find(\1, \2)')
-    field_map["#{cname}.#{m['name']}"] = { 'master' => mkey, 'ref' => rewritten, 'agg' => nil,
-                                           'format' => (m.dig('format', 'formatString')) }
+    ref = { 'master' => mkey, 'ref' => rewritten, 'agg' => nil,
+            'format' => (m.dig('format', 'formatString')) }
+    field_map["#{cname}.#{m['name']}"] = ref
+    # 2a (beads-sigma-<2a>): a measure re-homed from a measure-only table onto the
+    # fact element (powerbi.ts moveMeasures) is keyed here under the FACT element,
+    # but the PBIR visual still binds it under its ORIGINAL measures-table entity
+    # ("_Measures.TotalSales"). Alias it so the binding resolves — mirrors
+    # ti_orig_table (below) / the calc-table Bug-E alias. Guarded (`||=` + orig !=
+    # cname) so a converter-DROPPED measure is never fabricated, and a fact-native
+    # measure is a no-op.
+    orig = measure_orig_table[m['name']]
+    field_map["#{orig}.#{m['name']}"] ||= ref if orig && orig != cname
   end
 end
 
@@ -1170,6 +1259,26 @@ all_visuals.flat_map { |v| (v['bindings'] || {}).values.flatten }.uniq.each do |
   end
 end
 
+# PBI-friendly-entity aliases (beads-sigma-<1b>): a key "VW_SALES.Amount" is
+# ALSO reachable as "Sales.Amount" — the form PBIR visuals actually use. This
+# is why granted dim NAME columns dropped: the DM element is named after the physical
+# view ("vw_sales") but the visual binds under the friendly entity, and field_spec's
+# normalize-fallback can't bridge a `vw_` prefix. Never overwrites an existing key; only
+# adds when the physical element maps to a DIFFERENT friendly name.
+unless physical_to_pbi.empty?
+  aliases = {}
+  field_map.each do |k, v|
+    ent, dot, leaf = k.rpartition('.')
+    next if dot.empty? || ent.empty? || leaf.empty?
+    pbi = physical_to_pbi[_normt.call(ent)]
+    next unless pbi && _normt.call(pbi) != _normt.call(ent)
+    ak = "#{pbi}.#{leaf}"
+    aliases[ak] = v unless field_map.key?(ak) || aliases.key?(ak)
+  end
+  field_map.merge!(aliases)
+  puts "   master-map: +#{aliases.size} PBI-friendly-entity alias(es) (physical view name -> friendly table name)" unless aliases.empty?
+end
+
 master_map = { 'masters' => masters, 'fields' => field_map }
 mmap_path = File.join(WORK, 'master-map.json')
 File.write(mmap_path, JSON.pretty_generate(master_map))
@@ -1248,10 +1357,31 @@ puts "   workbookId = #{wb_id}"
 # ---------------------------------------------------------------------------
 coverage = CoverageGate.load(File.join(WORK, 'coverage.json'))
 if coverage
+  # Cause-grouping (customer feedback 2026-07-17: dim names/measures dropped → empty
+  # tiles with no "why"). Attribute each silent drop to a CAUSE with an action.
+  # UNGRANTED SCHEMA = a warehouse-table element the converter emitted that VANISHED
+  # from the DM readback (POST dropped/error-typed it → the connection can't read
+  # that schema); DAX drops come from the converter's ⛔/⚠ measure warnings.
+  rb_names = dm_elements.map { |e| e['name'] }.compact
+  rb_ids   = dm_elements.map { |e| e['id'] }.compact
+  ungranted = Hash.new { |h, k| h[k] = [] }
+  conv_elements.each do |cel|
+    p = cel.dig('source', 'path')
+    next unless p.is_a?(Array) && !p.empty?                         # warehouse-table element only
+    next if rb_names.include?(cel['name']) || rb_ids.include?(cel['id'])  # survived the readback
+    sch = p.length >= 3 ? "#{p[0]}.#{p[-2]}" : (p[-2] || p[0] || '(unknown)')
+    ungranted[sch] << p[-1] unless ungranted[sch].include?(p[-1])
+  end
+  mname = ->(w) { w.to_s[/["“']([^"”']+)["”']/, 1] }
+  dax_dropped    = conv_warnings.select { |w| w.to_s.include?('⛔') }.map(&mname).compact
+  dax_crosstable = conv_warnings.select { |w| w.to_s =~ /cross-table|different relationship path/i }.map(&mname).compact
+  coverage = CoverageGate.classify_causes(coverage, ungranted: ungranted, connection: opts[:conn],
+                                          dax_dropped: dax_dropped, dax_crosstable: dax_crosstable)
+  File.write(File.join(WORK, 'coverage.json'), JSON.pretty_generate(coverage)) # single channel for assert-visual-compare.rb
   puts
   puts '==================== MIGRATION COVERAGE ===================='
   puts "   #{CoverageGate.headline(coverage)}"
-  rlines = CoverageGate.report_lines(coverage)
+  rlines = CoverageGate.report_lines_by_cause(coverage)
   unless rlines.empty?
     puts
     puts rlines.join("\n")

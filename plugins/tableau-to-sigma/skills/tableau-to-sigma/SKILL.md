@@ -58,6 +58,35 @@ user-invocable: true
 >   A clean **PASS 1 (exit 12) is NOT done** — it means "run `--finalize`". Never
 >   report success, hand off, or write a completion summary until
 >   `verify-complete.rb` prints ✅ DONE. Nothing else counts as green.
+> - **This is a PRODUCTION migration, not a demo — regardless of who is watching
+>   or why (hackathon, POC, "just a demo", a `…-demo/` folder in a path).** The bar
+>   is EXACT parity against the same warehouse (see the parity note below), always.
+>   When you hit a wall, you have exactly two moves: **follow the STOP/handoff the
+>   orchestrator printed**, or **surface the blocker plainly and stop.** You may
+>   NEVER take a third path — do **not** propose or build a "lighter", "simplified",
+>   "good-enough-for-the-demo", "quick version", or reduced-scope workbook to get
+>   past a blocker, and do not drop tiles/filters/calcs to make a run look finished.
+>   Cutting fidelity to escape a struggle is a **worse failure than stopping**: it
+>   ships something that looks done but silently isn't. If a lighter scope is
+>   genuinely wanted, the **user** decides that explicitly — you never volunteer it.
+> - **An orchestrator STOP is an instruction to YOU (the agent), not a handoff to a
+>   human — keep going.** A non-zero exit that routes you (e.g. the **exit-4 workbook
+>   handoff**, "CONVERTER STOP") is the sanctioned authorization to do the next step
+>   yourself: author the spec it names and **re-enter the gated spine** (for exit 4:
+>   `--reuse-dm <id> --wb-spec <path>`). "The data model is posted" is **not** a
+>   finish line — a DM without its workbook is an incomplete migration. Do not report
+>   done, ask the user to build the workbook, or wait for a human at these STOPs;
+>   the only finish line is `verify-complete.rb` exit 0 (above).
+> - **At the exit-4 workbook handoff, PATCH the auto-built spec — do NOT rewrite it
+>   from scratch.** The orchestrator already wrote a full workbook spec to
+>   `<WORK>/wb-spec.json` before it stopped; it names the few field(s)/tile(s) it
+>   couldn't translate. Edit ONLY those, keeping every other element **and every
+>   controlId** exactly as the builder wrote them, then re-enter with `--reuse-dm
+>   <id> --wb-spec <WORK>/wb-spec.json`. A from-scratch rewrite throws away working
+>   tiles and drifts your controlIds away from `control-scope.json` — which then
+>   fails control-lint with a wholesale "control-scope drift" (the #1 way this
+>   handoff spirals into a multi-run loop). For a master-level calc, prefer
+>   `--master-col` over hand-editing the tile.
 > - **Credentials:** if you are **not** on Claude Code, the orchestrator will stop
 >   at step 0 telling you to run `ruby scripts/setup.rb` once — that is expected;
 >   do it (in a real terminal) rather than working around the auth error.

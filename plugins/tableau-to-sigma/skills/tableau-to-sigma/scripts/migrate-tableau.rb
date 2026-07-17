@@ -3466,11 +3466,13 @@ rescue WorkbookBuildError => e
   names = failed.empty? ? 'one or more fields' : failed.join(', ')
   n = failed.empty? ? 'some' : failed.size.to_s
   puts
-  puts '╔══════════════════════════════════════════════════════════════════════════╗'
-  puts '║ EXIT 4 IS A WORK ITEM, NOT A FAILURE. Everything up to the workbook layer ║'
-  puts '║ succeeded; ONE targeted fix + one re-run usually completes the migration. ║'
-  puts '║ Do NOT stop here. Do NOT descope, simplify, or propose a "lighter" build. ║'
-  puts '╚══════════════════════════════════════════════════════════════════════════╝'
+  puts '── EXIT 4 — WORKBOOK HANDOFF (this is NOT the finish line, and NOT a handoff to a human).'
+  puts '   This STOP is an instruction to YOU, the agent: the data model is posted; now build the'
+  puts '   workbook and re-enter the gated spine. A data model without its workbook is an INCOMPLETE'
+  puts '   migration — do NOT report success, do NOT ask the user to build the workbook, and do NOT'
+  puts '   substitute a "lighter"/"demo"/reduced-scope workbook. Keep going until verify-complete.rb'
+  puts '   exits 0. Pick ONE of the two paths below and continue in this same run:'
+  puts
   puts "── Mechanical path: data model built OK (dataModelId=#{dm_id}). The WORKBOOK " \
        "layer hit #{n} field(s) the mechanical path can't translate (#{names}). " \
        'Two ways forward:'
@@ -3478,16 +3480,21 @@ rescue WorkbookBuildError => e
   puts "      Speed Category'), translate its Tableau formula (see calc-fields.json) to"
   puts '      a Sigma formula over master columns and re-run this exact command with:'
   puts "        --master-col '<Name>=<Sigma formula>'   (repeatable)"
-  puts '   2. Otherwise author the workbook spec yourself and RE-ENTER THE GATED SPINE —'
-  puts '      do NOT hand-POST it (that skips control lint + Phase-6 + the hard gate):'
-  puts "        • Author #{WORK}/wb-spec.json against the posted DM (dataModelId=#{dm_id});"
-  puts '          reference elements via "__DM_ID__" / "__DM_ELEMENT__:<Name>"'
-  puts '          (fact = "__DM_ELEMENT__:__FACT__"). See the sigma-workbooks skill.'
-  puts '        • Re-run this exact command adding (REUSE the posted DM — do not rebuild it):'
-  puts "            --reuse-dm #{dm_id} --wb-spec #{WORK}/wb-spec.json"
-  puts '          (attaches to the existing DM; the workbook re-POST is re-gated. This is the'
-  puts '          FAST PATH: the re-run skips discovery + the decisions checkpoint and goes'
-  puts '          straight to the workbook layer — see --help.)'
+  puts "   2. Otherwise: the workbook layer ALREADY auto-built a FULL spec at #{wb_spec_path}"
+  puts '      — PATCH THAT FILE IN PLACE. Do NOT rewrite it from scratch and do NOT hand-POST'
+  puts '      it (hand-POST skips control lint + Phase-6 + the hard gate):'
+  puts "        • Edit ONLY the #{n} failing field(s)/tile(s) named above in that file. Keep"
+  puts '          every other element, control, and controlId EXACTLY as the builder wrote them.'
+  puts '          A from-scratch rewrite throws away working tiles AND drifts your controlIds away'
+  puts '          from control-scope.json — which then fails control-lint with spurious "missing'
+  puts '          control" violations on re-entry (this is the #1 way this handoff spirals).'
+  puts '        • If a failing field is a MASTER-LEVEL calc, prefer option 1 (--master-col) over'
+  puts '          hand-editing the tile. Reference DM elements by their live ids already in the'
+  puts '          file (or "__DM_ID__" / "__DM_ELEMENT__:<Name>" if you add new ones).'
+  puts '        • Re-run this exact command to RE-GATE the patched spec (REUSE the posted DM):'
+  puts "            --reuse-dm #{dm_id} --wb-spec #{wb_spec_path}"
+  puts '          (attaches to the existing DM; the workbook re-POST is re-gated. FAST PATH: the'
+  puts '          re-run skips discovery + the decisions checkpoint — see --help.)'
   puts '   The data model is posted and ready to attach either way. A conversion is NOT done'
   puts '   until scripts/assert-phase6-ran.rb exits 0 — that hard gate applies on both paths.'
   # SALVAGE INVENTORY: everything already known about each blocked field, so the
@@ -3510,6 +3517,8 @@ rescue WorkbookBuildError => e
   rescue StandardError => e
     puts "   (salvage inventory unavailable: #{e.class}: #{e.message.to_s[0, 80]})"
   end
+  puts '   Reminder: continue now. Shipping only the data model, or a scaled-down "demo" workbook,'
+  puts '   does NOT satisfy this migration — the next action is yours.'
   # Authorize the hand-authoring re-entry: this STOP is the ONLY sanctioned way to
   # reach --wb-spec/--dm-spec. The token lets the re-run's manual-spec gate pass
   # (a COLD hand-author with no prior orchestrator run is refused).

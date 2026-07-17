@@ -89,4 +89,85 @@ module CoverageGate
         'default' => 'accept the gap (ship without this component)' }
     end
   end
+
+  # ── Cause classification (customer feedback 2026-07-17: dim names / measures /
+  # filters silently dropped → empty tiles with no "why/what-to-do"). Group drops
+  # by WHY and attach ONE concrete action per cause: an empty tile becomes
+  # "grant schema X" or "non-translatable DAX (accepted)" instead of a silent gap.
+  # The orchestrator alone knows the DM readback + converter warnings, so it
+  # gathers the inputs; this stays pure + unit-tested (test-coverage-gate.rb).
+  CAUSE_ORDER = { 'ungranted_schema' => 0, 'cross_table_measure' => 1,
+                  'nontranslatable_dax' => 2, 'empty_tile' => 3, 'unmapped' => 4 }.freeze
+
+  def norm_ident(s)
+    s.to_s.downcase.gsub(/[^a-z0-9]/, '')
+  end
+
+  # Stamp each unresolved entry with a `cause` and (for non-translatable DAX)
+  # flip recoverable:false so the visual-compare gate isn't blocked by a genuine
+  # Sigma/DAX limitation — it is SURFACED, not gated. Mutates + returns coverage.
+  #   ungranted        : { "<catalog>.<schema>" => [table, …] } (warehouse elements
+  #                      absent from the DM readback = schema the connection can't read)
+  #   dax_dropped      : measure names the converter dropped as non-translatable (⛔)
+  #   dax_crosstable   : measure names dropped as cross-table (⚠)
+  def classify_causes(coverage, ungranted: {}, connection: nil, dax_dropped: [], dax_crosstable: [])
+    return coverage unless coverage.is_a?(Hash)
+    ung   = ungranted.values.flatten.map { |t| norm_ident(t) }.reject(&:empty?)
+    drop  = dax_dropped.map { |m| norm_ident(m) }.reject(&:empty?)
+    cross = dax_crosstable.map { |m| norm_ident(m) }.reject(&:empty?)
+    (coverage['unresolved'] || []).each do |u|
+      en  = norm_ident(u['entity'])
+      hay = norm_ident("#{u['detail']} #{u['visual']} #{u['entity']}")
+      u['cause'] =
+        if !en.empty? && ung.any? { |t| t == en || en.include?(t) || t.include?(en) }
+          u['recoverable'] = true
+          'ungranted_schema'
+        elsif !drop.empty? && drop.any? { |m| hay.include?(m) }
+          u['recoverable'] = false
+          'nontranslatable_dax'
+        elsif !cross.empty? && cross.any? { |m| hay.include?(m) }
+          u['recoverable'] = true
+          'cross_table_measure'
+        elsif u['detail'].to_s =~ /no (resolvable|field|bind)/i
+          'empty_tile'
+        else
+          'unmapped'
+        end
+    end
+    coverage['causes_summary'] = { 'ungranted_schemas' => ungranted, 'connection' => connection } unless ungranted.empty?
+    coverage
+  end
+
+  # Grouped, actionable report lines: a schema-level GRANT headline first (the
+  # highest-leverage action — one grant recovers every column/measure on those
+  # tables), then one action line per remaining cause. Falls back to the flat
+  # report_lines when nothing has been classified.
+  def report_lines_by_cause(coverage)
+    return report_lines(coverage) unless coverage.is_a?(Hash)
+    classified = (coverage['unresolved'] || []).any? { |u| u['cause'] } || coverage['causes_summary']
+    return report_lines(coverage) unless classified
+    out = []
+    conn = coverage.dig('causes_summary', 'connection')
+    (coverage.dig('causes_summary', 'ungranted_schemas') || {}).each do |sch, tbls|
+      shown = Array(tbls).uniq
+      out << "  • [UNGRANTED SCHEMA] #{sch} — #{shown.size} table(s) the connection can't read: " \
+             "#{shown.first(6).join(', ')}#{shown.size > 6 ? ', …' : ''}" \
+             "\n      ↳ grant #{sch} to connection #{conn || '<the DM connection>'} and re-run — recovers every column/measure on these tables (e.g. the dimension NAME columns + measures)."
+    end
+    items = (coverage['unresolved'] || []).reject { |u| u['cause'] == 'ungranted_schema' }
+    items.group_by { |u| u['cause'] || 'unmapped' }
+         .sort_by { |c, _| CAUSE_ORDER[c] || 9 }.each do |cause, grp|
+      names = grp.map { |u| u['visual'] }.compact.uniq
+      action =
+        case cause
+        when 'nontranslatable_dax' then 'non-translatable DAX (no Sigma equivalent) — accepted; recreate as a workbook calc if the visual needs it.'
+        when 'cross_table_measure' then 'cross-table measure — recreate at the visual grain in a workbook element.'
+        when 'empty_tile'          then 'no resolvable bindings — supply the missing source (grant the schema / map the queryRef) and re-run.'
+        else                            'map the PBI queryRef to a master column in master-map.json and re-run.'
+        end
+      out << "  • [#{cause.tr('_', ' ').upcase}] #{grp.size} item(s): " \
+             "#{names.first(6).join(', ')}#{names.size > 6 ? ', …' : ''}\n      ↳ #{action}"
+    end
+    out
+  end
 end

@@ -1,6 +1,15 @@
-// ../../../Users/tjwells/sigma-data-model-mcp/build/sigma-ids.js
+// ../wt-pbi-mparser/build/sigma-ids.js
 var SIGMA_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 var _usedIds = /* @__PURE__ */ new Set();
+var _idCounter = 0;
+function encodeBase62(n, len) {
+  let x = n, s = "";
+  while (x > 0) {
+    s = SIGMA_CHARS[x % 62] + s;
+    x = Math.floor(x / 62);
+  }
+  return s.padStart(len, SIGMA_CHARS[0]);
+}
 var SIGMA_LOWERCASE_WORDS = /* @__PURE__ */ new Set([
   "a",
   "an",
@@ -26,28 +35,32 @@ var SIGMA_LOWERCASE_WORDS = /* @__PURE__ */ new Set([
 ]);
 function resetIds() {
   _usedIds.clear();
+  _idCounter = 0;
 }
 function sigmaShortId(len = 10) {
   let id;
   do {
-    id = Array.from({ length: len }, () => SIGMA_CHARS[Math.floor(Math.random() * SIGMA_CHARS.length)]).join("");
+    id = encodeBase62(++_idCounter, len);
   } while (_usedIds.has(id));
   _usedIds.add(id);
   return id;
 }
-function sigmaInodeId(identifier) {
-  return `inode-${sigmaShortId(22)}/${identifier.toUpperCase()}`;
+function sigmaInodeId(identifier, casing = "upper") {
+  const phys = casing === "lower" ? identifier.toLowerCase() : identifier.toUpperCase();
+  return `inode-${sigmaShortId(22)}/${phys}`;
 }
-function sigmaPhysicalName(s) {
+function sigmaPhysicalName(s, casing = "upper") {
   const r = (s || "").trim();
-  if (/^[A-Z0-9_]+$/.test(r))
+  const verbatim = casing === "lower" ? /^[a-z0-9_]+$/ : /^[A-Z0-9_]+$/;
+  if (verbatim.test(r))
     return r;
   const normalized = r.replace(/[^A-Za-z0-9_\s]/g, " ").replace(/([a-z])([A-Z])/g, "$1_$2").replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2").replace(/([A-Za-z])([0-9])/g, "$1_$2").replace(/([0-9])([A-Za-z])/g, "$1_$2");
-  return normalized.toUpperCase().split(/[_\s]+/).filter(Boolean).join("_");
+  const joined = normalized.split(/[_\s]+/).filter(Boolean).join("_");
+  return casing === "lower" ? joined.toLowerCase() : joined.toUpperCase();
 }
 function sigmaDisplayName(s) {
   const normalized = (s || "").replace(/([a-z])([A-Z])/g, "$1_$2").replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2").replace(/([A-Za-z])([0-9])/g, "$1_$2").replace(/([0-9])([A-Za-z])/g, "$1_$2");
-  const words = normalized.toLowerCase().split(/[_\s]+/).filter(Boolean);
+  const words = normalized.toLowerCase().split(/[_\s/-]+/).filter(Boolean);
   return words.map((w, i) => i === 0 || !SIGMA_LOWERCASE_WORDS.has(w) ? w.charAt(0).toUpperCase() + w.slice(1) : w).join(" ");
 }
 function formatFromMask(mask) {
@@ -251,7 +264,7 @@ function buildDerivedElements(elements) {
   return derived;
 }
 
-// ../../../Users/tjwells/sigma-data-model-mcp/build/powerbi.js
+// ../wt-pbi-mparser/build/powerbi.js
 var PBI_COMMUNITY_LINKS = {
   lod: "community.sigmacomputing.com/t/tableau-level-of-detail-or-lod-calculations-in-sigma/6427",
   groupings: "community.sigmacomputing.com/t/how-to-use-groupings-aggregate-calculations/2003",
@@ -1154,6 +1167,11 @@ function pbiExtractPathFromM(mExpr) {
         tbl = m[1];
     }
     if (tbl) {
+      if (!db && sch) {
+        const bare0 = mExpr.match(/\{\s*\[\s*Name\s*=\s*"([^"]+)"\s*\]\s*\}\s*\[\s*Data\s*\]/i);
+        if (bare0)
+          db = bare0[1];
+      }
       const parts = [db, sch, tbl].filter((s) => !!s);
       if (parts.length >= 2)
         return parts.map((s) => s.toUpperCase());
@@ -1170,9 +1188,34 @@ function pbiExtractPathFromM(mExpr) {
   if (nameNavMatches.length === 2) {
     return [nameNavMatches[0][1].toUpperCase(), nameNavMatches[1][1].toUpperCase()];
   }
-  const tblMatch = mExpr.match(/FROM\s+(?:\[?(\w+)\]?\.)?\[?(\w+)\]?\.\[?(\w+)\]?/i);
-  if (tblMatch) {
-    return [tblMatch[1] || "", tblMatch[2], tblMatch[3]].filter(Boolean).map((s) => s.toUpperCase());
+  const flatRec = mExpr.match(/\{\s*\[([^\]]*\bItem\s*=\s*"[^"]+"[^\]]*)\]\s*\}/i);
+  if (flatRec) {
+    const body = flatRec[1];
+    const key = (k) => (body.match(new RegExp("\\b" + k + '\\s*=\\s*"([^"]+)"', "i")) || [])[1] || null;
+    const item = key("Item");
+    const schema = key("Schema");
+    const recCatalog = key("Catalog");
+    const recDatabase = key("Database");
+    const sqlServerDb = (mExpr.match(/\bSql\.Database\s*\(\s*"[^"]*"\s*,\s*"([^"]+)"/i) || [])[1] || null;
+    const top = recCatalog || recDatabase || sqlServerDb;
+    if (item) {
+      const parts = [top, schema, item].filter((s) => !!s);
+      if (parts.length >= 2)
+        return parts.map((s) => s.toUpperCase());
+    }
+  }
+  const sql = mExpr.replace(/#\(lf\)|#\(tab\)|#\(cr\)/gi, " ");
+  const fromM = sql.match(/\bFROM\s+([`"\[]?[\w$-]+[`"\]]?(?:\s*\.\s*[`"\[]?[\w$-]+[`"\]]?){1,2})/i);
+  if (fromM) {
+    let parts = fromM[1].split(".").map((s) => s.replace(/[`"\[\]\s]/g, "")).filter(Boolean);
+    if (parts.length === 2) {
+      const navDb = (sql.match(/\[\s*Name\s*=\s*"([^"]+)"\s*,\s*Kind\s*=\s*"Database"\s*\]/i) || [])[1] || (sql.match(/\bCatalog\s*=\s*"([^"]+)"/i) || [])[1] || (sql.match(/\bSql\.Database\s*\(\s*"[^"]*"\s*,\s*"([^"]+)"/i) || [])[1] || null;
+      if (navDb && !/\bPostgreSQL\.Database\s*\(|\bAmazonRedshift\.Database\s*\(/i.test(mExpr)) {
+        parts = [navDb, ...parts];
+      }
+    }
+    if (parts.length >= 2)
+      return parts.map((s) => s.toUpperCase());
   }
   return null;
 }
@@ -1778,9 +1821,10 @@ function emitTimeIntelElements(model, elements, warnings) {
         continue;
       const agg = AGG[am[1].toUpperCase()];
       const col = am[2];
+      const normCol = (s) => (s || "").toUpperCase().replace(/[\s_]/g, "");
       let parent = null, valDisp = "", dateDisp = "";
       for (const v of views) {
-        const vc = (v.columns || []).find((c) => lastSeg(c.formula).toUpperCase() === col.toUpperCase());
+        const vc = (v.columns || []).find((c) => normCol(lastSeg(c.formula)) === normCol(col));
         const dc = (v.columns || []).find((c) => /full date/i.test(viewColDisplay(c.formula))) || (v.columns || []).find((c) => /date/i.test(lastSeg(c.formula)) && !/key/i.test(lastSeg(c.formula)));
         if (vc && dc) {
           parent = v;
@@ -1793,6 +1837,14 @@ function emitTimeIntelElements(model, elements, warnings) {
         continue;
       const pn = parent.name;
       const b = (m.name || "TI").replace(/[^a-zA-Z0-9]/g, "").slice(0, 14);
+      const refTables = [...dax.matchAll(/([A-Za-z_]\w*)\s*\[/g)].map((x) => x[1]);
+      const dimTable = refTables.length ? refTables[refTables.length - 1] : null;
+      if (dimTable && dimTable !== t.name) {
+        const rel = (model.relationships || []).find((r) => r.fromTable === t.name && r.toTable === dimTable);
+        if (rel && rel.isActive === false) {
+          warnings.push(`\u26A0 "${m.name}": the ${t.name}\u2192${dimTable} relationship is INACTIVE and no measure activates it (USERELATIONSHIP), so the original Power BI measure does not filter by ${dimTable} \u2014 it returns an unfiltered total per ${dimTable} period. The synthesized element groups by ${t.name}'s own date instead, yielding a true per-period prior-year. Confirm this matches intent (the source measure may be silently mis-modeled).`);
+        }
+      }
       if (shape === "prior") {
         const prior = `${valDisp} (Prior Year)`;
         const cols = [
@@ -1842,8 +1894,11 @@ function convertPowerBIToSigma(modelJson, options = {}) {
   if (!model.tables || !Array.isArray(model.tables)) {
     throw new Error('Invalid model \u2014 no "tables" array found');
   }
-  const dbOverride = (database || "").toUpperCase();
-  const schOverride = (schema || "").toUpperCase();
+  const whLower = /\b(databricks|spark|hive|delta)\b/i.test(options.warehouseType || "");
+  const physCasing = whLower ? "lower" : "upper";
+  const physCase = (s) => whLower ? String(s).toLowerCase() : String(s).toUpperCase();
+  const dbOverride = physCase(database || "");
+  const schOverride = physCase(schema || "");
   const warnings = [];
   const security = [];
   const elements = [];
@@ -1918,6 +1973,22 @@ function convertPowerBIToSigma(modelJson, options = {}) {
       }
     }
   }
+  const _schemasSeen = /* @__PURE__ */ new Set();
+  const _catalogsSeen = /* @__PURE__ */ new Set();
+  for (const t of model.tables) {
+    if (measureOnlyTables.has(t.name) || calcGroupTables.has(t.name))
+      continue;
+    if (t.name.startsWith("LocalDateTable_") || t.name.startsWith("DateTableTemplate_"))
+      continue;
+    const _expr = (t.partitions || [])[0]?.source?.expression;
+    const _mp = _expr ? pbiExtractPathFromM(Array.isArray(_expr) ? _expr.join("\n") : String(_expr)) : null;
+    if (_mp && _mp.length >= 3) {
+      _catalogsSeen.add(_mp[0]);
+      _schemasSeen.add(_mp[1]);
+    }
+  }
+  const modelMultiSchema = _schemasSeen.size > 1;
+  const modelMultiCatalog = _catalogsSeen.size > 1;
   for (const t of model.tables) {
     if (measureOnlyTables.has(t.name))
       continue;
@@ -2004,16 +2075,19 @@ SELECT 1 AS _placeholder`;
       }
     }
     if (path) {
-      if (dbOverride && path.length >= 3)
-        path[0] = dbOverride;
-      if (schOverride && path.length >= 3)
-        path[1] = schOverride;
-      else if (schOverride && path.length === 2)
+      if (path.length >= 3) {
+        if (dbOverride && !modelMultiCatalog)
+          path[0] = dbOverride;
+        if (schOverride && !modelMultiSchema)
+          path[1] = schOverride;
+      } else if (schOverride && path.length === 2) {
         path[0] = schOverride;
+      }
     } else {
-      path = [dbOverride || "DATABASE", schOverride || "SCHEMA", tableName.toUpperCase()];
+      path = [dbOverride || physCase("DATABASE"), schOverride || physCase("SCHEMA"), physCase(tableName)];
       warnings.push(`\u26A0 Table "${tableName}": could not extract source path from M expression \u2014 using default.`);
     }
+    const physPath = whLower && path ? path.map((s) => String(s).toLowerCase()) : path;
     const columns = [];
     const order = [];
     const pbiToSigmaName = {};
@@ -2028,7 +2102,7 @@ SELECT 1 AS _placeholder`;
       }
       const sourceCol = c.sourceColumn || c.name;
       const displayName = sigmaDisplayName(sourceCol);
-      const colId = sigmaInodeId(sigmaPhysicalName(sourceCol));
+      const colId = sigmaInodeId(sigmaPhysicalName(sourceCol, physCasing), physCasing);
       tableColMap[tableName][c.name] = colId;
       pbiToSigmaName[c.name] = displayName;
       allPbiToSigmaNames[c.name] = displayName;
@@ -2044,7 +2118,7 @@ SELECT 1 AS _placeholder`;
       id: elementId,
       kind: "table",
       name: path && path.length ? path[path.length - 1] : tableName.toUpperCase(),
-      source: { connectionId: connectionId || "<CONNECTION_ID>", kind: "warehouse-table", path },
+      source: { connectionId: connectionId || "<CONNECTION_ID>", kind: "warehouse-table", path: physPath },
       columns,
       order
     };
@@ -2164,7 +2238,7 @@ SELECT 1 AS _placeholder`;
       id: elementId,
       kind: "table",
       name: baseElementName,
-      source: { connectionId: connectionId || "<CONNECTION_ID>", kind: "warehouse-table", path },
+      source: { connectionId: connectionId || "<CONNECTION_ID>", kind: "warehouse-table", path: physPath },
       columns,
       order
     };

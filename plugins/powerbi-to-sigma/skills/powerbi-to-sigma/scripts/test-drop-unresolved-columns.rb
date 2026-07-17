@@ -100,6 +100,10 @@ Dir.mktmpdir do |d|
   all_drops  = cover.count { |u| u['severity'] == 'dropped' }
   ok('>=4 visuals record the explicit miu7 column drop', miu7_drops >= 4)
   ok('all 5 ghost-bearing visuals surface a dropped entry', all_drops >= 5)
+  # the drop record carries the source ENTITY (part before the dot in [Entity.Leaf])
+  # so CoverageGate.classify_causes can attribute it to an ungranted schema.
+  ok('miu7 drop records the source entity for cause attribution',
+     cover.any? { |u| u['detail'].to_s =~ /could not be resolved/ && !u['entity'].to_s.strip.empty? })
 end
 
 puts $fail.zero? ? "\nall drop-unresolved-columns tests passed" : "\n#{$fail} FAILED"

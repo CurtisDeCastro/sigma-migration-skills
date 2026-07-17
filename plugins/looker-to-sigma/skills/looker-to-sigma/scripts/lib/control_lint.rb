@@ -222,6 +222,11 @@ module ControlLint
       end
     end
 
+    # Snapshot before rows.each consumes scope_by_cid via delete — used to tell a
+    # wholesale controlId DRIFT (a from-scratch rewrite: none of the spec's
+    # controls match ANY sidecar id) from genuine per-filter drops.
+    orig_scope_cids = scope_by_cid.keys.dup
+
     rows.each do |r|
       ann = scope_by_cid.delete(r[:control_id]) || {}
       ann_scope = ann['scope'] || elems[r[:control_element_id]][:el]['controlScope']
@@ -288,11 +293,29 @@ module ControlLint
     # failure. Only a control the builder recorded as EMITTED but that's missing
     # from the spec is a real bug the source filter was lost.
     surfaced_gap = %w[needs-wiring needs-materialization].freeze
-    scope_by_cid.each do |cid, c|
-      next if surfaced_gap.include?(c['status'].to_s)
-      violations << "missing control: control-scope.json expects control #{cid.inspect}" \
-                    "#{c['sourceName'] ? " (source: #{c['sourceName'].inspect})" : ''} but the spec " \
-                    'has no control with that controlId — the source filter was not migrated'
+    unmatched = scope_by_cid.reject { |_cid, c| surfaced_gap.include?(c['status'].to_s) }
+    spec_cids = rows.map { |r| r[:control_id] }.compact
+    # WHOLESALE DRIFT: the sidecar has real unmatched entries AND none of the
+    # spec's controls match ANY original sidecar id. That is the controlId-drift
+    # signature of a from-scratch wb-spec REWRITE (kebab auto-build ids vs. hand-
+    # authored ids) — not N lost filters. Collapse to ONE actionable hint that
+    # names the true cause instead of a violation per orphaned entry (the field
+    # run drew 14 spurious "missing control"s from exactly this). Still FAILS
+    # (exit non-zero) — this never weakens the gate, only its message.
+    drift = unmatched.any? && spec_cids.any? && spec_cids.none? { |cid| orig_scope_cids.include?(cid) }
+    if drift
+      violations << "control-scope drift: NONE of the spec's #{spec_cids.size} control(s) match any of " \
+                    "the #{orig_scope_cids.size} controlId(s) in control-scope.json (unmatched: " \
+                    "#{unmatched.keys.map(&:inspect).join(', ')}). This is the signature of a from-scratch " \
+                    'wb-spec REWRITE, not lost filters. FIX: patch the auto-built wb-spec in place (keep its ' \
+                    'controlIds) rather than re-authoring it; OR if these controls are genuinely renamed/new, ' \
+                    'regenerate control-scope.json so its controlIds match the posted spec.'
+    else
+      unmatched.each do |cid, c|
+        violations << "missing control: control-scope.json expects control #{cid.inspect}" \
+                      "#{c['sourceName'] ? " (source: #{c['sourceName'].inspect})" : ''} but the spec " \
+                      'has no control with that controlId — the source filter was not migrated'
+      end
     end
 
     violations

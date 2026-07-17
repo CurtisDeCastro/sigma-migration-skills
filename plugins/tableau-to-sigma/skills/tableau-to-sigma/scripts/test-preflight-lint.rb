@@ -188,6 +188,40 @@ s = valid_spec
 s['pages'][0]['elements'][4].delete('filters')
 check(rule(lint(s), 'C3').size == 1, 'C3 regression: list control wired to nothing still fails', fails)
 
+# ---- C6: controlType enum + docs-only top-n ---------------------------------
+s = valid_spec
+s['pages'][0]['elements'][4]['controlType'] = 'dropdown'
+c6 = rule(lint(s), 'C6')
+check(c6.size == 1 && c6.first.include?('unknown controlType "dropdown"'), 'C6: unknown controlType flagged', fails)
+s = valid_spec
+s['pages'][0]['elements'][4]['controlType'] = 'top-n'
+s['pages'][0]['elements'][4].delete('selectionMode')   # avoid unrelated C5 noise
+c6b = rule(lint(s), 'C6')
+check(c6b.size == 1 && c6b.first.include?('docs-only'), 'C6: docs-only top-n flagged with the element rank-filter fix', fails)
+
+# ---- C7: required per-type fields -------------------------------------------
+s = valid_spec
+ct = s['pages'][0]['elements'][4]
+ct['controlType'] = 'number'; ct.delete('selectionMode'); ct['value'] = 5
+check(rule(lint(s), 'C7').size == 1, 'C7: number control missing `mode` → 1 violation', fails)
+ct['mode'] = '>='
+check(rule(lint(s), 'C7').empty?, 'C7: number control WITH `mode` → clean', fails)
+s = valid_spec
+rs = s['pages'][0]['elements'][4]
+rs['controlType'] = 'range-slider'; rs.delete('selectionMode'); rs.delete('value')
+check(rule(lint(s), 'C7').any? { |e| e.include?('low`/`high') }, 'C7: range-slider without low/high → violation', fails)
+rs['low'] = 0; rs['high'] = 100
+check(rule(lint(s), 'C7').empty?, 'C7: range-slider with low/high → clean', fails)
+
+# ---- C8: includeNulls placement --------------------------------------------
+s = valid_spec
+s['pages'][0]['elements'][4]['includeNulls'] = true    # on a `list` control (off-schema)
+check(rule(lint(s), 'C8').size == 1, 'C8: includeNulls on a list control → 1 violation', fails)
+s = valid_spec
+n = s['pages'][0]['elements'][4]
+n['controlType'] = 'number'; n['mode'] = '='; n.delete('selectionMode'); n['value'] = 1; n['includeNulls'] = true
+check(rule(lint(s), 'C8').empty?, 'C8: includeNulls on a number control → allowed (no violation)', fails)
+
 puts
 if fails.empty?
   puts 'ALL PASS — preflight_lint K1/S1/C5/N1 fail rules + P1/I1 warnings + T1/C2/C3 regressions'
