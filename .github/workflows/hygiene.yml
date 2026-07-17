@@ -1,0 +1,33 @@
+name: hygiene-sweep
+# Server-side identifier gate: no client can merge what the sweep rejects.
+# Committed patterns (tools/hygiene-patterns.txt) are generic guards; the
+# private third-party guards are injected from the HYGIENE_PRIVATE_PATTERNS
+# repo secret at runtime — they must NEVER be committed (disclosure) and are
+# masked from logs by GitHub's secret redaction.
+on:
+  push: {}
+  pull_request: {}
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inject private guards (optional secret)
+        env:
+          PRIVATE: ${{ secrets.HYGIENE_PRIVATE_PATTERNS }}
+        run: |
+          if [ -n "$PRIVATE" ]; then
+            printf '%s\n' "$PRIVATE" > tools/hygiene-patterns.local.txt
+            echo "private guards injected ($(grep -cvE '^\s*(#|$)' tools/hygiene-patterns.local.txt) patterns)"
+          else
+            echo "no HYGIENE_PRIVATE_PATTERNS secret set — committed patterns only"
+          fi
+      - name: Sweep
+        run: |
+          # Report only pattern-file line NUMBERS on failure, never matched text —
+          # otherwise the log would disclose what the private guards protect.
+          bash tools/hygiene-sweep.sh > /tmp/sweep.out 2>&1 && { tail -1 /tmp/sweep.out; exit 0; }
+          echo "HYGIENE SWEEP FAILED — identifier hits found."
+          echo "Files with hits (matched text withheld; run tools/hygiene-sweep.sh locally):"
+          grep -oE '^[^:]+' /tmp/sweep.out | sort -u | head -40
+          exit 1
