@@ -65,5 +65,14 @@ Ship Speed Category
 Subject Selector|Master Selector
 UDEMY_COURSE|UDEMY COURSE|Num Subscribers
 FATSCALE2|el-fat-crosstab
+#
+# --- generic live-secret shapes (org-independent) -------------------------------
+# A committed live secret is a leak regardless of whose it is. Fixture/test values
+# must be built to miss these on purpose (short, or assembled at runtime — never a
+# literal that could pass for a real credential).
+# JWT-shaped literal: eyJ… base64url header + a dot-separated payload segment.
+eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}
+# A long (32+ char) base64/hex-ish literal assigned to a *SECRET/*TOKEN/*PAT/*PASSWORD var.
+(SECRET|TOKEN|_PAT|PASSWORD)[A-Z0-9_]*\s*[=:]\s*["']?[A-Za-z0-9+/=_-]{32,}
 # Customer-identifying guards live in tools/hygiene-patterns.local.txt (gitignored) —
 # committing them would itself disclose the customer. Sweep loads both files.

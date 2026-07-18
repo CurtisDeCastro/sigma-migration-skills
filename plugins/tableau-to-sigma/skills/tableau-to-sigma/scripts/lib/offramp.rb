@@ -17,6 +17,8 @@
 #   workbook-handoff     workbook build raised (exit 4) — untranslatable fields handed off
 #   degraded-fastpath    --yes fast path proceeded with missing discovery artifacts
 #   gate-waived          an assert-phase6-ran gate waived (mirrored from waivers.json)
+#   stale-skill-waived   SIGMA_ALLOW_STALE used — run proceeded on a stale checkout
+#   loop-stop            the same failure signature recurred a 3rd time — hard STOP
 #
 # Never fatal: bookkeeping must not break a run.
 
@@ -43,5 +45,40 @@ module Offramp
     File.readlines(path).map { |l| JSON.parse(l) rescue nil }.compact
   rescue StandardError
     []
+  end
+
+  # ── Same-failure loop breaker (stop-at-2) ──────────────────────────────────
+  # Append SIGNATURE (caller-supplied; recommended: script name + exit code +
+  # SHA1 of the first error line) to <WORK>/loop-log.jsonl and report how many
+  # times it has now occurred: :first, :second, or :stop (third+ — the caller
+  # must hard-STOP and hand control to the operator instead of grinding the
+  # same failure; verify-complete.rb refuses completion over a 3+-count
+  # signature). Distinct signatures never trip it. Never fatal.
+  def loop_check(work, signature:)
+    return :first unless work && Dir.exist?(work.to_s)
+    rec = { 'signature' => signature.to_s,
+            'at' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ') }
+    File.open(File.join(work, 'loop-log.jsonl'), 'a') { |f| f.puts(JSON.generate(rec)) }
+    case loop_trail(work).count { |r| r['signature'] == signature.to_s }
+    when 0, 1 then :first
+    when 2    then :second
+    else           :stop
+    end
+  rescue StandardError
+    :first # bookkeeping must never break a run
+  end
+
+  # loop-log entries (oldest first). Empty on any error.
+  def loop_trail(work)
+    path = File.join(work.to_s, 'loop-log.jsonl')
+    return [] unless File.exist?(path)
+    File.readlines(path).map { |l| JSON.parse(l) rescue nil }.compact
+  rescue StandardError
+    []
+  end
+
+  # { signature => occurrence count } over the loop-log.
+  def loop_counts(work)
+    loop_trail(work).each_with_object(Hash.new(0)) { |r, h| h[r['signature']] += 1 }
   end
 end

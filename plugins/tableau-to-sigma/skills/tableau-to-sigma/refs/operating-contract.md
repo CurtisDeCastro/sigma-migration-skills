@@ -87,6 +87,13 @@
   surfaced by the gates, and it MUST be named in the migration report. Rewriting
   `source-anchors.json` to the live actuals remains tampering on every source type.
 
+## Credential hygiene
+- **NEVER echo credential values (tokens, secrets, PATs) into output, commands, or
+  files — reference env var names only. When displaying config, mask all but the
+  last 4 characters.** `scripts/lib/redact.rb` (`Redact.mask` / `Redact.scrub`) is
+  the one sanctioned masking path — a secret pasted into a log, a command line, or
+  a report file is a leak even when the run itself is healthy.
+
 ## Tooling discipline (don't burn the clock)
 - **Run `--help` before any flag you have not used this session.** Inventing a flag
   (`--force-new-workbook`, `--dm-spec`, `--workdir` on the wrong script) costs a
