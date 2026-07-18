@@ -36,7 +36,17 @@ if [ "$MODE" = "--check" ]; then
   for c in $(cases); do
     total=$((total + 1))
     echo "== $c"
-    if python3 lib/corpus_check.py check "$c"; then
+    ok=1
+    python3 lib/corpus_check.py check "$c" || ok=0
+    # Executable expectations: a case may ship a checks.sh (offline,
+    # creds-free — e.g. the tableau field-twin cases run the skill's ledger
+    # derivations, fixture-mode probes, and gates). Needs ruby for the
+    # skill-script cases; both CI runners ship it.
+    if [ "$ok" -eq 1 ] && [ -f "$c/checks.sh" ]; then
+      echo "   -- checks.sh"
+      bash "$c/checks.sh" || ok=0
+    fi
+    if [ "$ok" -eq 1 ]; then
       echo "   PASS"
     else
       echo "   FAIL"
