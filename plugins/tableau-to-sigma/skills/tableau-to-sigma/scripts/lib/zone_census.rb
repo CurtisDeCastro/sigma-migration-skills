@@ -45,6 +45,50 @@ module ZoneCensus
     Array(zones).select { |z| plots?(z) }
   end
 
+  # ---- Tile census (gate 5 producer) ----------------------------------------
+  # Field-caught false positive (v5.5 e2e): the census pooled zones from ALL
+  # dashboards while the parity plan may be scoped to ONE (--dashboard), so
+  # every out-of-scope dashboard's tiles read "unmatched" — a false RED on any
+  # multi-dashboard workbook (repeated tile names across dashboards compound
+  # it). The census must judge exactly the dashboards the PLAN covers.
+  #
+  # dash_layout: parse-twb-layout array (records keyed 'dashboard' + 'zones').
+  # plan_charts: parity-plan charts ([{'tableau_view','chart'},...]).
+  # scope: the same --dashboard args the plan was built with ([] = all).
+  # Scope match mirrors auto-parity-plan: case-insensitive exact, else
+  # substring. Returns the census Hash (+ 'dashboards_scoped' for the report).
+  def norm_name(s)
+    s.to_s.downcase.gsub(/[^a-z0-9]/, '')
+  end
+
+  def scope_dashboards(dash_layout, scope)
+    dashes = Array(dash_layout).select { |d| d.is_a?(Hash) }
+    return dashes if Array(scope).empty?
+    Array(scope).flat_map do |want|
+      exact = dashes.select { |d| d['dashboard'].to_s.strip.casecmp?(want.to_s.strip) }
+      exact.any? ? exact : dashes.select { |d| d['dashboard'].to_s.downcase.include?(want.to_s.downcase) }
+    end.uniq
+  end
+
+  def tile_census(dash_layout, plan_charts, scope = [])
+    in_scope = scope_dashboards(dash_layout, scope)
+    chart_zones = in_scope.flat_map { |d| Array(d['zones']) }.select { |z| chart_zone?(z) }
+    label_zones = chart_zones.reject { |z| plots?(z) }.map { |z| z['caption'].strip }.uniq
+    # Captions dedupe WITHIN scope: one worksheet reused on two in-scope
+    # dashboards is one chart; a same-named worksheet on an OUT-of-scope
+    # dashboard no longer pollutes the pool at all.
+    zone_names = chart_zones.select { |z| plots?(z) }.map { |z| z['caption'].strip }.uniq
+    matched = Array(plan_charts).flat_map { |c| [c['tableau_view'], c['chart']] }
+                                .compact.map { |s| norm_name(s) }
+    unmatched = zone_names.reject { |zn| matched.include?(norm_name(zn)) }
+    { 'zones_total'          => zone_names.size,
+      'charts_built'         => Array(plan_charts).size,
+      'zones_unmatched'      => unmatched.size,
+      'unmatched_zone_names' => unmatched,
+      'label_zones_excluded' => label_zones,
+      'dashboards_scoped'    => in_scope.map { |d| d['dashboard'] } }
+  end
+
   # ---- Dividers (v5.0-P2) ---------------------------------------------------
   # Corpus census: filled rules cluster at 1-6px; unfilled gaps at 12-24px+.
   DIVIDER_MAX_PX = 12

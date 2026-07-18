@@ -159,5 +159,5 @@ in place (keeps element/column ids, so existing workbooks stay intact).
 
 ## Verified reference artifacts (first migration)
 - Data model `d44b8ee2-9849-4cea-b5b9-37404ef83ae5` · workbook `34e16b0c-60ab-40db-b6b3-661a64030ef8`
-- Org `tj-wells-1989`, folder `9ca9bf60-6a33-43dd-967d-1ba6352c54bb`, connection `cb2f5180-…` (Snowflake CSA.TJ)
+- Org: the demo Sigma org, folder `<folder-id>`, connection `<connection-id>` (Snowflake DEMO_DB.DEMO)
 - Parity (Sigma == Snowflake == Qlik): Net Revenue 105,108.75 · Orders 613 · Net Profit 65,561.32 · Margin 62.37%.

@@ -46,8 +46,8 @@ z_pill = {
                     'fields' => [{ 'guid' => nil, 'role' => 'measure', 'derivation' => 'usr' },
                                  { 'guid' => 'Multiple Values', 'role' => 'dim', 'derivation' => nil }] },
   'cols_shelf' => {},
-  'channels' => { 'color' => { 'column' => "#{FED}.[none:SUBJECT_SEL:nk]" } },
-  'aggregations' => { '[SUBJECT_SEL]' => 'Sum' }
+  'channels' => { 'color' => { 'column' => "#{FED}.[none:CATEGORY_SEL:nk]" } },
+  'aggregations' => { '[CATEGORY_SEL]' => 'Sum' }
 }
 # Z2: KPI — SUM([Number of Records]) on the shelf + a secondary marks measure.
 z_kpi = {
@@ -110,8 +110,8 @@ meta = {
     'CalcAnchor2' => { 'caption' => 'Pie Anchor 2', 'datatype' => 'real', 'formula' => 'AVG(0)' },
     'CalcShare' => { 'caption' => 'Profit Share', 'datatype' => 'real', 'formula' => 'SUM([PROFIT])/SUM([SALES])' },
     # role=dimension boolean calc — the promotion floor must refuse Sum() over it
-    'SUBJECT_SEL' => { 'caption' => 'Subject Selector', 'datatype' => 'boolean', 'role' => 'dimension',
-                       'formula' => '[SUBJECT] = [Parameters].[Subject Parameter]' }
+    'CATEGORY_SEL' => { 'caption' => 'Category Selector', 'datatype' => 'boolean', 'role' => 'dimension',
+                       'formula' => '[CATEGORY] = [Parameters].[Category Parameter]' }
   }
 }
 pre = '(?i)^(?:(?:sum|avg|average|min|max|median|distinct count|count) of |(?:avg|sum|min|max|med|cnt|ctd)\\.\\s*|(?:second|minute|hour|day|week|month|quarter|year) of )?'
@@ -149,7 +149,7 @@ blob = JSON.generate(raw)
 puts 'last-resort quality floor'
 check(!blob.include?('Master/Multiple Values'),
       "no [Master/Multiple Values] ref anywhere (pseudo-field rejected)", fails)
-check(!blob.include?('Master/Subject Selector'),
+check(!blob.include?('Master/Category Selector'),
       'role=dimension boolean calc never promoted to a measure ref', fails)
 check(els.none? { |e| e['name'].to_s == 'Pill Zone' },
       'floor-rejected zone is DROPPED (old behavior), not emitted broken', fails)

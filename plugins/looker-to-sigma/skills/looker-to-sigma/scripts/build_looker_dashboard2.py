@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Build 'Orders Deep Dive' UDD on csa_thelook via the Looker API — advanced viz:
+"""Build 'Orders Deep Dive' UDD on demo_thelook via the Looker API — advanced viz:
 area, pivot table, table-calcs (running total + % of total), scatter, donut, text tile.
 Exercises the harder dashboard surface for the Looker->Sigma converter.
 """
 import json, sys
 import looker_api as L
 
-MODEL, EXPLORE = "csa_thelook", "order_fact"
+MODEL, EXPLORE = "demo_thelook", "order_fact"
 FILTERS = [("Order Date", "order_date.order_date"), ("Region", "customer_dim.region")]
 LISTEN = [{"dashboard_filter_name": n, "field": f} for n, f in FILTERS]
 

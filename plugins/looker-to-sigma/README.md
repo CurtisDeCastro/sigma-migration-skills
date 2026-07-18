@@ -10,7 +10,7 @@ verification** (Looker vs Sigma vs the source warehouse). The agent supplies the
 mechanical work.
 
 > **Validated end-to-end (2026-06-10)** against a live `example.cloud.looker.com` Looker
-> instance pointed at the same `CSA.TJ` Snowflake as Sigma: 2 dashboards (Orders Overview +
+> instance pointed at the same `DEMO_DB.DEMO` Snowflake as Sigma: 2 dashboards (Orders Overview +
 > Orders Deep Dive) migrated clean with **no hand-edits**, DM = 7 elements / 161 cols / 24
 > metrics / 5 relationships, and **3-way parity to the cent** on region revenue and the ratio
 > metrics (AOV / margin / return). See `skills/looker-to-sigma/refs/` for the coverage matrix.
@@ -57,7 +57,7 @@ Enhance); see `skills/looker-to-sigma/SKILL.md` for the full per-phase reference
 
 `scripts/build_looker_dashboard.py` and `build_looker_dashboard2.py` are **test-fixture
 builders**, not part of a customer migration. They author UDD dashboards on a Looker instance
-via the API ("Orders Overview" and "Orders Deep Dive" on the `csa_thelook` model) so you have
+via the API ("Orders Overview" and "Orders Deep Dive" on the `demo_thelook` model) so you have
 known migration targets to convert and check parity against. Use them to stand up demo content;
 never run them against a customer's Looker.
 

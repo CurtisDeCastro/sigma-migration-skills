@@ -42,7 +42,7 @@
       "import_tables": 8,
       "directquery_tables": 0,
       "warehouse_sources": [
-        "Snowflake:ymb68310.snowflakecomputing.com"
+        "Snowflake:gxb98765.snowflakecomputing.com"
       ],
       "dax_buckets": {
         "a": 33,
@@ -80,7 +80,7 @@
       "refresh_history": null
     },
     {
-      "id": "049863fa-5500-4d45-a541-1478799a760c",
+      "id": "aaaa1111-2222-4333-8444-bbbbcccc0002",
       "name": "Workforce KitchenSink (complex DAX test)",
       "workspace": "Test",
       "workspace_id": "269a33d0-98c4-476f-890d-612ea8072f9a",
@@ -93,7 +93,7 @@
       "import_tables": 4,
       "directquery_tables": 0,
       "warehouse_sources": [
-        "Snowflake:ymb68310.snowflakecomputing.com"
+        "Snowflake:gxb98765.snowflakecomputing.com"
       ],
       "dax_buckets": {
         "a": 17,
@@ -323,11 +323,11 @@
       "custom_visuals": []
     },
     {
-      "id": "0bebf272-45db-466e-ae93-522c6c9c9999",
+      "id": "aaaa1111-2222-4333-8444-bbbbcccc0001",
       "name": "Workforce KitchenSink Report",
       "workspace": "Test",
       "workspace_id": "269a33d0-98c4-476f-890d-612ea8072f9a",
-      "dataset_id": "049863fa-5500-4d45-a541-1478799a760c",
+      "dataset_id": "aaaa1111-2222-4333-8444-bbbbcccc0002",
       "page_count": 1,
       "visual_count": 1,
       "visual_kinds": {

@@ -44,7 +44,7 @@ Encoding.default_external = Encoding::UTF_8
 #   ruby scripts/migrate-tableau.rb \
 #     --workbook "<name>" | --workbook-id <luid> \
 #     --connection <SIGMA_CONNECTION_ID> --folder <SIGMA_FOLDER_ID> \
-#     [--db CSA --schema TJ] [--specs <path/to/specs.rb>] \
+#     [--db <DB> --schema <SCHEMA>] [--specs <path/to/specs.rb>] \
 #     [--name '<prefix for DM/workbook names>'] \
 #     [--row-scale F | --page-rows N]  # row-model OVERRIDES: pass only to override —
 #                             # either flag disables the px-derived canvas rows \
@@ -102,6 +102,14 @@ Encoding.default_external = Encoding::UTF_8
 #      --finalize with --enhance --enhance-accept ...);
 # 15 = converter produced an EMPTY data model (0 elements/columns) — unsupported
 #      datasource shape; NO Sigma objects created (capture the .twb for the converter);
+# 16 = pass 1 built + POSTed, but <workdir>/manual-residues.json carries
+#      'unbuilt' window/table-calc residue(s) a dashboard tile plots
+#      (requires_custom_sql — the STAYS-MANUAL family): the tile currently
+#      renders a magnitude proxy. Build each residue as a Custom SQL DM
+#      element, repoint the tile measure, set status:"built" in the ledger
+#      (the blocking checklist prints the formula + SQL skeleton + bind
+#      steps), then run --finalize. assert-phase6-ran refuses GREEN while any
+#      residue is 'unbuilt' (waiver: --accept-manual-residues, budget-counted);
 # 17 = every datasource is an EMBEDDED file extract and no landing manifest was
 #      found — land the frozen data first (scripts/land-extracts.py, see
 #      refs/extract-landing.md), or re-run with --skip-extract-landing "<reason>";
@@ -279,6 +287,12 @@ OptionParser.new do |o|
                               'SAME dashboard rather than orphaning it.') { |v| opts[:reuse_workbook] = v }
 end.parse!
 
+# --db/--schema travel together: a lone half used to be silently completed by a
+# fabricated default, which 404s in every real org (E2E-caught). Fail loudly.
+if opts[:db].nil? ^ opts[:schema].nil?
+  abort 'FATAL: --db and --schema must be passed together (a warehouse table path needs both).'
+end
+
 # Share-URL intake (field-caught: three independent runs each rediscovered that
 # the MOST COMMON Tableau link shape — /#/site/<site>/views/<workbookContentUrl>/<view>
 # — resolves through NO existing path: resolve-project.rb is numeric-vizportal-only
@@ -292,13 +306,19 @@ if opts[:wb_name].to_s =~ %r{\Ahttps?://} || opts[:wb_name].to_s =~ %r{#/site/}
     content_url = m[1]
     puts "── share-URL intake: /views/ link → resolving workbook contentUrl #{content_url.inspect}"
     require_relative 'lib/tableau_rest'
-    # Cold-env order bug (field-caught round 2): with only PAT creds set (no
-    # TABLEAU_SITE_ID/AUTH_TOKEN minted yet) this resolver ran before any token
-    # existed and crashed with "TABLEAU_SITE_ID not set". Mint in-process first.
+    # Cold-env order bug (field-caught round 2, re-caught round 3): with only PAT
+    # creds set this resolver ran before a session existed and crashed. Round 2
+    # rescued a missing TABLEAU_SITE_ID — but a 2026-07 field-workbook run had a
+    # STALE TABLEAU_SITE_ID set in the env file with NO AUTH_TOKEN, so site_id
+    # returned fine, the mint was skipped, and find_workbook_by_content_url then
+    # crashed on "TABLEAU_AUTH_TOKEN not set" — sending the run down a 4.5-min
+    # token detour (incl. a permission-classifier denial). Mint when EITHER the
+    # site id OR the auth token is unavailable.
     begin
       Tableau.site_id
+      Tableau.auth_token
     rescue Tableau::Error
-      puts '   no Tableau session yet — minting one in-process (PAT signin)'
+      puts '   no Tableau session yet (missing site id or auth token) — minting one in-process (PAT signin)'
       Tableau.refresh_token!
     end
     hit = Tableau.find_workbook_by_content_url(content_url)
@@ -344,6 +364,17 @@ RUN_ID = if opts[:finalize]
          else
            RunState.new_run_id!(WORK)
          end
+
+# G2 launch banner (run-2 field failure): a full pass runs 5–20+ minutes, and a
+# driving agent that launched it under the DEFAULT 2-minute foreground Bash
+# timeout killed PASS-1 at 120s (exit 143) and wasted the whole pass. Say so
+# IMMEDIATELY at launch, before any long phase, so the kill is prevented rather
+# than diagnosed. STDOUT flushes line-by-line, so a backgrounded run's log shows
+# liveness via the per-phase banners.
+$stdout.sync = true
+puts "── migrate-tableau #{opts[:finalize] ? '--finalize' : 'PASS'} · run #{RUN_ID.to_s[0, 8]} ──"
+puts '   ⏱  a full pass runs 5–20+ minutes. Run me IN BACKGROUND (writing a log) or with a'
+puts '   tool timeout ≥ 20 minutes — the default 2-minute foreground limit WILL kill the pass.'
 
 # 🚧 Step-0 environment GATE. The doctor writes a doctor.json fingerprint; this
 # refuses to run on an env that never passed the doctor, instead of letting the
@@ -483,29 +514,33 @@ end
 TOTAL = 6
 
 # ── Total-runtime handoff nudge (refs/orchestration.md O2) ──────────────────
-# Field failure, 2026-07: a single context drove one migration for 6+ hours,
-# compaction-looped by hour 3 (grepping its own transcript to recover
-# commands), and never handed off. The run-state ledger stamps a timestamp at
-# every phase entry, so TOTAL elapsed time — across passes/resumes, because
-# stamps merge by phase key and the FIRST stamp of pass 1 survives — is
-# computable for free. When it crosses the O2 budget, print ONE loud line per
-# run pointing at the handoff protocol. Advisory only — never changes behavior.
-HANDOFF_BUDGET_MIN = 90
-$handoff_nudged = false
+# Field failure, 2026-07: TWO context-runaways in one quarter — a 6+ hour run,
+# and a 131-minute / ~12-pass run (the field workbook) that ended GREEN
+# over a dataless workbook. The nudge that should have fired at 90m never did,
+# because RunState.stamp overwrote each phase's `ts` on every pass, resetting
+# min(ts) each re-run (the comment claiming "the FIRST stamp of pass 1 survives"
+# was false). The ledger now persists run_started_at (stamped ONCE) so TOTAL run
+# age — across passes/resumes — is computable regardless of re-stamping. When it
+# crosses the escalating thresholds, print ONE loud line per threshold pointing
+# at the handoff protocol. Advisory only — never changes behavior.
+HANDOFF_THRESHOLDS_MIN = [60, 90, 120].freeze
+$handoff_nudged_at = []
 def handoff_nudge
-  return if $handoff_nudged
   return unless defined?(WORK) && WORK
-  first = RunState.load(WORK)['phases'].values
-                  .map { |p| begin; Time.parse(p['ts'].to_s); rescue StandardError; nil; end }
-                  .compact.min
+  started = RunState.started_at(WORK)
+  first = begin; Time.parse(started.to_s); rescue StandardError; nil; end
   return unless first
   elapsed_min = ((Time.now - first) / 60).round
-  return unless elapsed_min > HANDOFF_BUDGET_MIN
-  $handoff_nudged = true
+  crossed = HANDOFF_THRESHOLDS_MIN.select { |t| elapsed_min >= t && !$handoff_nudged_at.include?(t) }.max
+  return unless crossed
+  $handoff_nudged_at << crossed
+  budget = HANDOFF_THRESHOLDS_MIN.last
   puts
-  puts "⏰⏰⏰ HANDOFF NUDGE — this context has been driving for #{elapsed_min}m (budget #{HANDOFF_BUDGET_MIN}m)."
+  puts "⏰⏰⏰ HANDOFF NUDGE — this run has been going #{elapsed_min}m (thresholds #{HANDOFF_THRESHOLDS_MIN.join('/')}m; hard budget #{budget}m)."
+  puts "   Long single-context runs compaction-loop and (field-proven) can drift to a FALSE GREEN."
   puts "   Per refs/orchestration.md (O2): write #{File.join(WORK, 'HANDOFF.md')} and hand off to a"
   puts '   fresh builder agent; resume is cheap (discovery caches + phase stamps skip completed work).'
+  puts "   Over #{budget}m: STOP and hand off — do not push a run to GREEN this deep in one context." if elapsed_min >= budget
 rescue StandardError
   nil # advisory only — a nudge failure must never touch the conversion
 end
@@ -756,6 +791,50 @@ def cull_failed_fields(*logs)
   text.scan(/Circular column reference[^\n]*\[([^\]]+)\]/i) { |m| names << m[0].strip }
   names.map { |n| n.gsub(/[\[\]"]/, '').strip }
        .select { |n| plausible_field_name?(n) }.uniq
+end
+
+# EXIT-4 SALVAGE INVENTORY (v5.6): a field run burned ~90 min re-deriving, per
+# untranslatable field, exactly what the workdir already knew — the Tableau
+# formula (calc-fields.json), its translation class, and which documented route
+# applies. Print that at the STOP so the fix starts from the answer, not the
+# question. Pure lookup, never raises (a malformed calc-fields.json just yields
+# the 'no entry' route).
+def salvage_inventory(work, failed)
+  calcs = begin
+    doc = JSON.parse(File.read(File.join(work, 'calc-fields.json'), encoding: 'UTF-8'))
+    Array(doc['calcs']).select { |c| c.is_a?(Hash) }
+  rescue StandardError
+    []
+  end
+  norm = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]/, '') }
+  by_norm = {}
+  calcs.each { |c| by_norm[norm.call(c['name'])] ||= c }
+  Array(failed).map do |nm|
+    c = by_norm[norm.call(nm)]
+    if c.nil?
+      { 'field' => nm, 'class' => 'unknown (no calc-fields.json entry under this name)',
+        'route' => 'not a workbook calc — check calc-fields.json captions and the DM column names; ' \
+                   'a BASE column failing here is a column-mapping fix (--column-mapping), not a formula translation' }
+    else
+      klass, route =
+        if c['requires_custom_sql'] && !c['is_lod']
+          ['window/table calc (requires_custom_sql — STAYS-MANUAL family)',
+           'manual-residue SQL: build it as a Custom SQL / grouped helper element ' \
+           '(template: refs/window-functions.md), declare it in <workdir>/manual-residues.json so gate 15 ' \
+           'tracks it, or knowingly ship the magnitude proxy via --accept-manual-residues — ' \
+           'never fold it into a master formula']
+        elsif c['is_lod']
+          ['LOD calc' + (c['requires_custom_sql'] ? ' (requires_custom_sql)' : ''),
+           "translate over master columns and re-run this exact command with --master-col '#{c['name']}=<Sigma formula>' " \
+           '(FIXED → the helper-element recipe in refs/window-functions.md when a plain master formula cannot express it)']
+        else
+          ['row-level calc',
+           "translate the formula to Sigma syntax and re-run this exact command with --master-col '#{c['name']}=<Sigma formula>'"]
+        end
+      { 'field' => c['name'], 'class' => klass, 'formula' => c['formula'],
+        'route' => route, 'notes' => Array(c['translation_notes']) }
+    end
+  end
 end
 
 def yp(s) YAML.safe_load(s, permitted_classes: [Date, Time]) rescue {} end
@@ -1461,6 +1540,75 @@ end
 # Mechanical converter run (the default). Requires the .twb (parse-twb-layout
 # already gated on have_twb above) and a converter backend — local build by
 # default, hosted MCP only on explicit consent (see backend resolution below).
+# -------------------------------------------------------------------------
+# WAREHOUSE DB/SCHEMA RESOLUTION — there is NO default database. Every org
+# has its own warehouse (and the workbook itself usually names it), so a
+# fabricated fallback turns "could not derive" into a wall of 404s at DM
+# POST. E2E-caught: a Virtual-Connection workbook derived nothing, shipped a
+# placeholder default, and every table pointed at a nonexistent database —
+# while offline CI stayed green because the fixtures carried the same
+# placeholder. Field-caught twice more (C1): live warehouse workbooks carry
+# dbname/schema on their <connection> elements, but only explicit flags were
+# honored. Precedence: --db/--schema flags → landing manifest (landed
+# extracts are authoritative) → the workbook's own <connection> attributes →
+# hard STOP naming the flags. Never a guess.
+#
+# G7 (run-2 field failure, 2026-07-15): when extracts were landed, the
+# AUTHORITATIVE db/schema is the landing manifest's fully-qualified sf_table
+# paths. A generic default here once returned ZERO real columns for a landed
+# schema, which silently disabled fixup_dm_spec's caption→physical remap AND
+# its phantom-column drop AND the rollup discriminator — one wiring gap
+# defanged three codified mechanisms and cost ~16 min of hand re-derivation.
+manifest_dbschema = lambda do
+  mani = Dir[File.join(WORK, '*landing-manifest*.json')].first
+  return nil unless mani
+  rows = JSON.parse(File.read(mani))
+  rows = rows['tables'] if rows.is_a?(Hash) && rows['tables'].is_a?(Array)
+  fqns = Array(rows).map { |r| r.is_a?(Hash) ? r['sf_table'].to_s : '' }
+                    .select { |s| s.count('.') >= 2 }
+  return nil if fqns.empty?
+  pairs = fqns.map { |s| s.split('.')[0, 2] }.uniq
+  if pairs.length > 1
+    line "WARN: landing manifest spans multiple db.schema pairs (#{pairs.map { |p| p.join('.') }.join(', ')}) — using the first; pass --db/--schema to override"
+  end
+  pairs.first
+rescue StandardError => e
+  line "WARN: could not derive db/schema from landing manifest (#{e.class}) — falling back"
+  nil
+end
+wh_try = lambda do |twb_p|
+  return [opts[:db], opts[:schema], '--db/--schema flags'] if opts[:db] && opts[:schema]
+  mani = manifest_dbschema.call
+  return [mani[0], mani[1], 'landing manifest'] if mani
+  pairs = HydrateCustomSql.twb_dbschema(twb_p)
+  if pairs.length > 1
+    line "NOTE: workbook connections span multiple db.schema pairs (#{pairs.map { |p| p.join('.') }.join(', ')}) — " \
+         'using the first for catalog discovery; each datasource keeps its own connection path; --db/--schema overrides all'
+  end
+  return [pairs[0][0], pairs[0][1], 'workbook <connection> attributes'] if pairs.any?
+  nil
+end
+wh_announced = false
+wh_require = lambda do |twb_p|
+  got = wh_try.call(twb_p)
+  abort <<~MSG unless got
+    FATAL: cannot determine the warehouse database/schema for this workbook — and there
+    is NO default (every org's warehouse is different; a guessed name 404s at DM POST).
+    Searched, in order: --db/--schema flags (absent) → landing manifest (none) → the
+    workbook's own <connection dbname=/schema=> attributes (none usable — published,
+    virtual-connection, and extract-only connections don't carry a warehouse path).
+    Re-run with explicit flags naming where this workbook's tables live in YOUR warehouse:
+      --db <DATABASE> --schema <SCHEMA>
+    Find them in the Tableau datasource's connection details (Data Source tab → connection),
+    or by browsing the Sigma connection's catalog to the tables.
+  MSG
+  unless wh_announced
+    line "warehouse db/schema: #{got[0]}.#{got[1]} (#{got[2]})"
+    wh_announced = true
+  end
+  got
+end
+
 mechanical = !have_specs
 conv = nil
 if mechanical
@@ -1574,7 +1722,7 @@ if mechanical
   # <connection class='sqlproxy'> placeholder — the real relation (a warehouse
   # TABLE or a Custom SQL <relation type='text'>) lives in the PDS object on
   # Tableau Server, not the .twb. Left as-is the converter fabricates a phantom
-  # table (e.g. CSA.TJ.SQLPROXY) → POST "Source not found".
+  # table (<db>.<schema>.SQLPROXY) → POST "Source not found".
   #
   # PRIMARY: resolve-published-ds.rb resolves each PDS by contentUrl (== the
   # sqlproxy `dbname`), downloads GET /datasources/{id}/content, and reads the
@@ -1636,6 +1784,13 @@ if mechanical
         end
       end
       sf_ok = %w[SNOWFLAKE_ACCOUNT SNOWFLAKE_USER].all? { |k| !ENV[k].to_s.empty? || !sf_env[k].to_s.empty? }
+      # Landing TARGET db/schema — where the extract tables get written. There is
+      # NO default (E2E-caught: a fabricated one 404s in every real org): explicit
+      # flags win, else the Snowflake env (process env or the neutral cred file)
+      # may name a landing database/schema. Absent both, auto-land steps aside and
+      # the manual exit-17 gate owns the decision.
+      land_db  = opts[:db]     || [ENV['SNOWFLAKE_DATABASE'], sf_env['SNOWFLAKE_DATABASE']].find { |v| !v.to_s.empty? }
+      land_sch = opts[:schema] || [ENV['SNOWFLAKE_SCHEMA'],   sf_env['SNOWFLAKE_SCHEMA']].find { |v| !v.to_s.empty? }
       # v5.3: the extract re-download lane can still be REPLACING the .twbx
       # when this gate runs (round 5: auto-land saw the thin pre-refetch file,
       # found "no .hyper payloads", and fell to exit 17 while the payload
@@ -1646,7 +1801,7 @@ if mechanical
       # anyway), and stop as soon as the discovery lane has exited — no
       # further .twbx replacement is possible after that.
       if landing_manifest.nil? && !opts[:no_auto_land] && !opts[:skip_extract_landing] &&
-         opts[:conn] && sf_ok && File.exist?(twbx_payload)
+         opts[:conn] && sf_ok && land_db && land_sch && File.exist?(twbx_payload)
         6.times do
           break if (File.binread(twbx_payload).include?('.hyper') rescue false)
           break if (defined?(lane_done) && (lane_done.call rescue true)) # lane exited — file is final
@@ -1655,7 +1810,13 @@ if mechanical
         end
       end
       if landing_manifest.nil? && !opts[:no_auto_land] && !opts[:skip_extract_landing] &&
-         File.exist?(twbx_payload) && opts[:conn] && sf_ok
+         File.exist?(twbx_payload) && opts[:conn] && sf_ok && !(land_db && land_sch)
+        line 'auto-land: SKIPPED — landing target unknown, and there is NO default db/schema. ' \
+             'Pass --db/--schema (or set SNOWFLAKE_DATABASE/SNOWFLAKE_SCHEMA in the env / ' \
+             '~/.sigma-migration/env); the manual landing gate (exit 17) follows.'
+      end
+      if landing_manifest.nil? && !opts[:no_auto_land] && !opts[:skip_extract_landing] &&
+         File.exist?(twbx_payload) && opts[:conn] && sf_ok && land_db && land_sch
         # Prefix carries a LUID fragment so two workbooks whose names share the
         # slug can never clobber each other's landed tables (write_pandas
         # overwrite=true; review-caught) — and stays stable across re-runs.
@@ -1666,7 +1827,7 @@ if mechanical
              "(prefix #{prefix}; --no-auto-land to keep the manual gate)"
         _o, lst = run!([*PyResolve.argv, PyResolve.winpath(File.join(HERE, 'land-extracts.py')),
                         '--twbx', PyResolve.winpath(twbx_payload),
-                        '--db', (opts[:db] || 'CSA'), '--schema', (opts[:schema] || 'TJ'),
+                        '--db', land_db, '--schema', land_sch,
                         '--prefix', prefix, '--sigma-connection-id', opts[:conn],
                         '--manifest-out', PyResolve.winpath(File.join(WORK, 'landing-manifest.json'))],
                        allow_fail: true)
@@ -1731,7 +1892,7 @@ if mechanical
   # v5.3: UNION-OF-ONE collapse. Tableau serializes a single-table datasource
   # that was once a wildcard union as <relation type='union' all='true'> with
   # ONE inner table relation — the converter models unions as unsupported and
-  # emits an EMPTY data model (round-5 root cause: Udemy #VOTD forced all
+  # emits an EMPTY data model (round-5 root cause: a course-analysis field workbook forced all
   # three models onto the manual path). A union of one is semantically its
   # inner table; collapse it on a COPY (inner relation inherits the union's
   # name so downstream column refs keep resolving).
@@ -1779,8 +1940,13 @@ if mechanical
     end
     hyd_twb = File.join(WORK, 'workbook-hydrated.twb')
     # hydrate from conv_twb (not twb) so a union-of-one collapse survives hydration
-    hyd_args = ['ruby', File.join(HERE, 'hydrate-custom-sql.rb'), '--twb', conv_twb,
-                '--db', (opts[:db] || 'CSA'), '--schema', (opts[:schema] || 'TJ'), '--out', hyd_twb]
+    hyd_args = ['ruby', File.join(HERE, 'hydrate-custom-sql.rb'), '--twb', conv_twb, '--out', hyd_twb]
+    # db/schema are a fallback only — each PDS descriptor carries its own real
+    # pair (resolve-published-ds.rb), which hydrate_pds! prefers. NO default:
+    # when nothing resolves, splice without and let the converter/gates decide.
+    if (hyd_dbsch = wh_try.call(conv_twb))
+      hyd_args += ['--db', hyd_dbsch[0], '--schema', hyd_dbsch[1]]
+    end
     hyd_args += ['--pds', pds_json] if File.exist?(pds_json)
     hyd_args += ['--custom-sql', hcsql] if File.exist?(hcsql)
     if hyd_args.include?('--pds') || hyd_args.include?('--custom-sql')
@@ -1788,7 +1954,7 @@ if mechanical
       conv_twb = hyd_twb if hst.success? && File.exist?(hyd_twb) && File.read(hyd_twb, encoding: 'UTF-8') != File.read(twb, encoding: 'UTF-8')
     end
     # Phantom guard: if any sqlproxy datasource is STILL unresolved, do NOT let the
-    # converter fabricate a bogus warehouse table (CSA.TJ.SQLPROXY) that POSTs and
+    # converter fabricate a bogus warehouse table (<db>.<schema>.SQLPROXY) that POSTs and
     # then fails at the API. Stop with an actionable message instead.
     if HydrateCustomSql.twb_has_sqlproxy?(conv_twb)
       (reap_lane!(lane_done) rescue nil) # bounded reap before aborting
@@ -1807,9 +1973,14 @@ if mechanical
     end
   end
 
+  # Resolve-or-STOP before converting: the converter builds a warehouse table
+  # path for every element; a wrong database 404s them all at DM POST. The
+  # hydrated conv_twb is the richest source — PDS splices stamped real
+  # dbname/schema onto it above.
+  wh_db, wh_schema, = wh_require.call(conv_twb)
   conv = MechanicalSpecs.run_converter(
-    twb_path: conv_twb, conn: opts[:conn], db: (opts[:db] || 'CSA'),
-    schema: (opts[:schema] || 'TJ'), mcp_build: mcp_build, workdir: WORK,
+    twb_path: conv_twb, conn: opts[:conn], db: wh_db,
+    schema: wh_schema, mcp_build: mcp_build, workdir: WORK,
     table_mapping: opts[:table_mapping])
   if opts[:table_mapping]&.any?
     line "table mapping: #{opts[:table_mapping].map { |k, v| "#{k}→#{v}" }.join(', ')}"
@@ -1941,10 +2112,10 @@ if mechanical
   # them dangles + blocks the POST. Synthesize the grouped Custom SQL helper +
   # `FIXED Year` relationship on the fact; derive_master surfaces the columns.
   world_lod_map = {}
+  _disc = nil
+  _rollup_flag = nil
+  _real_map = nil
   if have_twb && conv_fact
-    # The real-entity discriminator (png-read point_in_time) also scopes the World
-    # per-year SUM to real entities, so it doesn't double-count rollup rows.
-    _disc = ((JSON.parse(File.read(DashboardRead.path(WORK)))['point_in_time'] rescue nil) || {})['entity_discriminator']
     # The fact table's REAL columns (landing manifest) — the LOD's base metric is
     # usually never plotted, so it's absent from the projected DM element and a
     # projection-only check drops the LOD (the chart ref then dangles).
@@ -1955,6 +2126,41 @@ if mechanical
                   ent = Array(_man).find { |e| e.is_a?(Hash) && e['sf_table'].to_s.upcase.end_with?(".#{_fact_tbl}") }
                   ent && ent['columns']
                 end
+    # The real-entity discriminator (png-read point_in_time) also scopes the World
+    # per-year SUM to real entities, so it doesn't double-count rollup rows. A
+    # `rollup_flag` block (flag-valued discriminator — rollups marked by VALUE, not
+    # NULL) takes over the scoping column; its equality predicate replaces the
+    # synthesizers' IS NOT NULL below (apply_rollup_flag_where!).
+    _pit_png = ((JSON.parse(File.read(DashboardRead.path(WORK)))['point_in_time'] rescue nil) || {})
+    _rf_errs = RecipeMultimetric.validate_rollup_flag(_pit_png)
+    _rf_errs.each { |e| line "WARN: png-read #{e} — rollup_flag IGNORED" }
+    _rollup_flag = _pit_png['rollup_flag'] if _rf_errs.empty? && RecipeMultimetric.rollup_flag_active?(_pit_png)
+    _scope_raw = (_rollup_flag && _rollup_flag['column']) || _pit_png['entity_discriminator']
+    # G9 run-2 root cause: the png-read caption ("Entity Group") vs the landed
+    # physical column (ENTITYGROUP) failed the synthesizers' exact/underscore
+    # check and the rollup-exclusion WHERE was SILENTLY omitted (world totals
+    # then double-count rollup rows). Resolve the caption variant HERE, loudly.
+    _fact_caps = (conv_fact['columns'] || []).map { |c| RecipeMultimetric.col_disp(c) }.compact
+    _res = RecipeMultimetric.resolve_scope_column(_scope_raw, real_map: _real_map, fact_captions: _fact_caps)
+    if _scope_raw.to_s.strip.empty?
+      _disc = nil
+    elsif _res['resolved']
+      _disc = _res['name']
+      line "rollup-scope column '#{_scope_raw}' -> '#{_disc}' (caption-variant resolution vs landed columns)" if _disc != _scope_raw
+    else
+      _disc = nil
+      puts
+      puts '========== ROLLUP-EXCLUSION SCOPE COLUMN UNRESOLVED (world/YoY helpers) =========='
+      puts "png-read point_in_time names #{_rollup_flag ? 'rollup_flag.column' : 'entity_discriminator'} = '#{_scope_raw}',"
+      puts "but it matches NO landed column on #{_fact_tbl.empty? ? 'the fact table' : _fact_tbl} (case/spacing/punctuation variants checked)."
+      puts 'Without it the world-by-year / YoY helper SQL would SUM ROLLUP ROWS TOO (double-counted'
+      puts 'totals — the exact run-2 failure). The rollup-exclusion WHERE is being OMITTED — this is'
+      puts 'only correct if the table truly has no rollup rows. Candidate columns:'
+      _res['candidates'].first(30).each { |c| puts "  - #{c}" }
+      puts "Fix png-read.json point_in_time (or the landing manifest captions) and re-run; verify the"
+      puts 'world totals against the source render in Phase 6 if you proceed.'
+      puts '==================================================================================='
+    end
     world_lod_map = (MechanicalSpecs.synthesize_fixed_lods!(conv['model'], conv_fact, File.read(twb, encoding: 'UTF-8'), (opts[:column_mapping] || {}), discriminator: _disc, real_map: _real_map) rescue {})
     line "FIXED-LOD synthesis: materialized #{world_lod_map.size} per-year world-total column(s) via a grouped Custom SQL helper#{_disc ? " (real-entity scoped by #{_disc})" : ''}" if world_lod_map.any?
   end
@@ -1983,7 +2189,9 @@ if mechanical
         require_relative 'lib/recipe_multimetric'
         _metrics = {}
         Array(_pngr['tiles']).each do |t|
-          next unless _hl.include?(t['title'].to_s) && t['measure']
+          # {"manual_residue": ...} measures are custom-SQL residues, not
+          # rebuildable magnitudes — no YoY helper for them.
+          next unless _hl.include?(t['title'].to_s) && t['measure'].is_a?(String)
           y = RecipeMultimetric.latest_year_for(_pit2, t['measure'], context: t['title'])
           _metrics[t['measure']] = y if y
         end
@@ -1998,6 +2206,15 @@ if mechanical
     rescue StandardError => e
       line "WARN: YoY synthesis skipped (#{e.class}: #{e.message})"
     end
+  end
+  # Flag-valued discriminator (png-read point_in_time.rollup_flag): the helper
+  # SQL just synthesized above scopes rollups with `"<flag>" IS NOT NULL`, but a
+  # FLAG column is non-null on EVERY row — rewrite the WHERE into the declared
+  # equality predicate (entity_values IN / rollup_values NOT IN + keep-NULL).
+  if _rollup_flag && _disc
+    _rw = RecipeMultimetric.apply_rollup_flag_where!(conv['model'], _rollup_flag)
+    line "rollup_flag: rewrote the rollup-exclusion WHERE on #{_rw} helper SQL element(s) " \
+         "(#{Array(_rollup_flag['entity_values']).any? ? "entity_values #{Array(_rollup_flag['entity_values']).join(',')}" : "rollup_values #{Array(_rollup_flag['rollup_values']).join(',')}"})" if _rw.positive?
   end
   conv_base = conv_fact ? MechanicalSpecs.base_of(conv['model'], conv_fact) : nil
   pre = conv_fact ? MechanicalSpecs.derive_master(conv_fact, (conv_fact['name'] || 'Order Fact'), conv_base, nil, conv['model']) : { 'untranslated_metrics' => [] }
@@ -2074,10 +2291,13 @@ mark('phase1.6-dm-scan')
 # Pure Sigma-side — runs CONCURRENTLY with the background discovery lane.
 # ---------------------------------------------------------------------------
 hdr(2, 'Discover warehouse columns (concurrent with discovery)')
-db = opts[:db] || 'CSA'
-schema = opts[:schema] || 'TJ'
-# Table set: from the generator's DM spec when available, else inferred from the
-# datasource's logical tables.
+# db/schema come from the shared warehouse resolver (flags → landing manifest →
+# workbook <connection> attributes → STOP; defined above `mechanical`) — NEVER a
+# default (G7: a generic pair here returned ZERO real columns for a landed
+# schema and silently defanged fixup_dm_spec's remap, phantom-drop, and rollup
+# discriminator; the E2E showed the same pair 404-ing every table at DM POST).
+# Table set first: with no warehouse tables there is nothing to probe, so the
+# resolver's hard STOP is reserved for runs that actually need the catalog.
 wh_tables =
   if mechanical
     (conv['model']['pages'] || []).flat_map { |p| p['elements'] || [] }
@@ -2095,7 +2315,10 @@ wh_tables =
 wh_tables = [] if wh_tables.nil?
 if wh_tables.empty?
   line 'no warehouse tables resolved from metadata; relying on spec generator'
+  db, schema = (wh_try.call((defined?(conv_twb) && conv_twb) || twb) || [nil, nil])[0, 2]
 else
+  db, schema, db_src = wh_require.call((defined?(conv_twb) && conv_twb) || twb)
+  line "warehouse column discovery target: #{db}.#{schema} (#{db_src})"
   wh_tables.each do |t|
     cols_path = File.join(WORK, "cols-#{t}.json")
     # Re-entry reuse: a prior run of THIS workdir already probed the catalog for
@@ -2713,16 +2936,40 @@ elsif mechanical
     line "phantom-column filter: dropped #{pf[:phantom]} non-existent base column(s) using #{real_cols.size} live table catalog(s)" if pf[:phantom].to_i.positive?
     line "column-rename remap: rewired #{pf[:remapped]} base column(s) to their warehouse names (--column-mapping)" if pf[:remapped].to_i.positive?
     # Retain the multi-metric recipe's point-in-time columns on the fact (the
-    # discriminator + year the source didn't plot) so the real-entity filter can
-    # run instead of being skipped as a dangling ref. From png-read point_in_time.
+    # discriminator / rollup flag + year the source didn't plot) so the
+    # real-entity filter can run instead of being skipped as a dangling ref.
+    # From png-read point_in_time.
     if defined?(conv_fact) && conv_fact
       _pit = ((JSON.parse(File.read(DashboardRead.path(WORK)))['point_in_time'] rescue nil) || {})
       want = [_pit['entity_discriminator'], _pit['year_column'] || 'Year'].compact
+      want << _pit['rollup_flag']['column'] if RecipeMultimetric.rollup_flag_active?(_pit)
       # The world-LOD BASE metrics too: the recipe's dual-axis trend plots the
       # region-filtered Country line Sum([Master/<metric>]) opposite each
       # synthesized World line, and an LOD-only metric is typically never
       # plotted directly — absent from the fact, the country line dangles.
       want |= world_lod_map.values if defined?(world_lod_map) && world_lod_map.is_a?(Hash)
+      # G9 run-2 root cause: retain_columns! checks the name via an
+      # underscore-inserting normalization ('Entity Group' -> ENTITY_GROUP), so
+      # a landed column WITHOUT the underscore (ENTITYGROUP) silently failed the
+      # check, the column was never retained, and the recipe guard then gutted
+      # the whole point-in-time rewrite. Resolve each caption variant against
+      # the live table catalog FIRST; a name retain's own check would miss is
+      # passed as the landed physical column. A name matching NOTHING is loud.
+      _tbl = (conv_fact.dig('source', 'path') || []).last.to_s
+      _rc_names = (real_cols[_tbl] || real_cols[_tbl.upcase] || []).map(&:to_s)
+      want = want.map do |nm|
+        direct = nm.to_s.gsub(/[^0-9A-Za-z]+/, '_').gsub(/\A_+|_+\z/, '').upcase
+        next nm if _rc_names.empty? || _rc_names.any? { |c| c.to_s.upcase == direct || c.to_s.casecmp?(nm.to_s) }
+        hit = RecipeMultimetric.resolve_field(nm, _rc_names)
+        if hit
+          line "point-in-time retain: '#{nm}' -> landed column '#{hit}' (caption-variant resolution)"
+          hit
+        else
+          line "WARN: point-in-time column '#{nm}' matches NO landed column on #{_tbl} — NOT retained; " \
+               "the recipe's real-entity/latest-year rewrite will drop it (candidates: #{_rc_names.first(20).join(', ')})"
+          nm
+        end
+      end
       kept = MechanicalSpecs.retain_columns!(conv_fact, want, real_cols)
       line "point-in-time retain: added #{kept} recipe column(s) (#{want.join(', ')}) to the fact" if kept.positive?
     end
@@ -2768,6 +3015,70 @@ unless reuse_dm_id
   _, dvst = run!(['ruby', File.join(HERE, 'validate-spec.rb'), '--type', 'datamodel', dm_spec_path],
                  allow_fail: mechanical)
   line 'DM validate-spec flagged issues (advisory in mechanical mode — live POST is the gate)' if mechanical && !dvst.success?
+  # W2.2 / v5.6-P0.4 wiring: typed-literal lint over the generated DM spec.
+  # The 2026-07-13 field class: a NUMBER column compared to a quoted string
+  # (If([Year] = "2014", …)) compiles clean in Sigma and renders NULL for every
+  # affected measure — 6 of 9 charts blanked with zero errors. The lint
+  # (lib/typed_literal_lint.rb) existed but was wired to NOTHING. It runs here
+  # whenever a warehouse TYPE source exists in the workdir: the cols-<TABLE>.json
+  # catalogs Phase 2 discovered (name+type per column), aliased through the
+  # landing manifest's sf_table FQN + orig→landed caption map when extracts were
+  # landed. ADVISORY (WARN, never fatal): the lint is conservative by design, but
+  # corpus safety says a new lint must not block existing migrations — gate 13's
+  # tile-emptiness measurement remains the hard backstop. Findings also land in
+  # <workdir>/typed-literal-findings.json for the report.
+  begin
+    _tl_types = {}
+    Dir[File.join(WORK, 'cols-*.json')].each do |cf|
+      cj = (JSON.parse(File.read(cf)) rescue nil)
+      next unless cj.is_a?(Hash) && cj['columns'].is_a?(Array)
+      t = File.basename(cf, '.json').sub(/^cols-/, '')
+      _tl_types[t] = cj['columns'].each_with_object({}) do |c, h|
+        h[c['name'].to_s] = c['type'].to_s if c.is_a?(Hash) && c['name']
+      end
+    end
+    _tl_mani = Dir[File.join(WORK, '*landing-manifest*.json')].first
+    if _tl_mani
+      _tl_rows = (JSON.parse(File.read(_tl_mani)) rescue [])
+      _tl_rows = _tl_rows['tables'] if _tl_rows.is_a?(Hash) && _tl_rows['tables'].is_a?(Array)
+      Array(_tl_rows).each do |r|
+        next unless r.is_a?(Hash) && r['sf_table']
+        _tl_last = r['sf_table'].to_s.split('.').last.to_s
+        base = _tl_types[_tl_last] || _tl_types[_tl_last.upcase]
+        next unless base
+        fq = (_tl_types[r['sf_table'].to_s] ||= {})
+        base.each { |k, v| fq[k] = v unless fq.key?(k) }
+        # Alias the ORIGINAL captions onto their landed columns' types so a
+        # formula ref written against the Tableau caption still resolves.
+        (r['columns'].is_a?(Hash) ? r['columns'] : {}).each do |orig, landed|
+          v = base[landed.to_s]
+          fq[orig.to_s] = v if v && !fq.key?(orig.to_s)
+        end
+      end
+    end
+    if _tl_types.empty? || _tl_types.values.all?(&:empty?)
+      line 'typed-literal lint: SKIPPED — no warehouse type source in the workdir (no cols-*.json catalogs)'
+    else
+      _tl_types_path = File.join(WORK, 'typed-literal-types.json')
+      File.write(_tl_types_path, JSON.pretty_generate(_tl_types))
+      _tl_out = File.join(WORK, 'typed-literal-findings.json')
+      _, _tl_st = run!(['ruby', File.join(HERE, 'lint-typed-literals.rb'),
+                        '--spec', dm_spec_path, '--types', _tl_types_path, '--out', _tl_out],
+                       allow_fail: true)
+      if _tl_st.exitstatus == 3
+        _tl_n = ((JSON.parse(File.read(_tl_out)).length rescue nil) || '?')
+        line "WARN: typed-literal lint: #{_tl_n} finding(s) (printed above; #{_tl_out}) — these comparisons"
+        line '      compile clean and render NULL (the 2026-07-13 blanking class). Advisory here; fix the'
+        line '      formulas per the printed suggestions BEFORE gate 13 fails on the empty tiles they cause.'
+      elsif _tl_st.success?
+        line "typed-literal lint: clean (0 findings across #{_tl_types.size} typed table(s))"
+      else
+        line "WARN: typed-literal lint could not run (exit #{_tl_st.exitstatus}) — advisory, continuing"
+      end
+    end
+  rescue StandardError => e
+    line "WARN: typed-literal lint wiring failed (#{e.class}: #{e.message.to_s[0, 80]}) — advisory, continuing"
+  end
   # Custom-SQL identifier preflight (hackathon F2 class): a kind:"sql" element
   # whose statement references CUSTOMER_SFDC_ID unquoted while the live column
   # is "Customer SFDC ID" compiles only at POST time (Snowflake "invalid
@@ -2781,7 +3092,7 @@ unless reuse_dm_id
       line "DM spec contains Custom SQL element(s) referencing: #{_sql_tables.join(', ')}"
       line 'If the POST fails with a SQL compile error (invalid identifier), preflight the identifiers:'
       _sql_tables.each do |t|
-        line "  ruby #{File.join(HERE, 'discover-columns.rb')} --connection-id #{opts[:conn]} --table-path #{db}.#{schema}.#{t} --out #{File.join(WORK, "columns-#{t}.json")}"
+        line "  ruby #{File.join(HERE, 'discover-columns.rb')} --connection-id #{opts[:conn]} --table-path #{db || '<DB>'}.#{schema || '<SCHEMA>'}.#{t} --out #{File.join(WORK, "columns-#{t}.json")}"
       end
       line "  ruby #{File.join(HERE, 'check-sql-idents.rb')} --dm-spec #{dm_spec_path} " +
            _sql_tables.map { |t| "--columns #{t}=#{File.join(WORK, "columns-#{t}.json")}" }.join(' ')
@@ -2844,12 +3155,12 @@ if mechanical
   master_columns = derived['master_columns']
   mmap = derived['mmap']
   # Human-supplied master-calc overrides (--master-col): appended verbatim so a
-  # chart ref like [master/Ship Speed Category] resolves on the next run.
+  # chart ref like [master/Delivery Speed Tier] resolves on the next run.
   (opts[:master_cols] || []).each do |(nm, fx)|
     id = "m-#{nm.downcase.gsub(/[^a-z0-9]+/, '-').gsub(/^-|-$/, '')}"
     master_columns.reject! { |c| c['name'].casecmp?(nm) }
     # v5.4: slug collision guard — two DIFFERENT names can slug identically
-    # (an alias like "NUM_SUBSCRIBERS" vs the auto-derived "Num Subscribers"),
+    # (an alias like "NUM_ENROLLED" vs the auto-derived "Num Enrolled"),
     # and duplicate column ids fail the POST. Suffix until unique.
     base_id = id
     n = 2
@@ -2903,7 +3214,7 @@ if mechanical
     want = ph.split(':', 2).last
     hit = dm_els.find { |e| e['name'].to_s.strip.casecmp?(want) }
     # v5.0 hardening (multi-DS sub-masters ONLY): DM element names don't
-    # always equal plan captions ("Diablo Sum Dir Bias by Bilevel Preset" vs
+    # always equal plan captions ("Workbook Sum Dir Bias by Bilevel Preset" vs
     # plan "Sum Dir Bias by BiLevel Preset" — prefix + case). Fall back to
     # normalized matching: exact normalized, then UNIQUE containment with a
     # length floor (the shorter normalized name must be ≥8 chars and ≥50% of
@@ -2941,9 +3252,9 @@ if mechanical
       end
     end
     # v5.3: repair COLUMN names against the DM element's live columnLabels.
-    # The builder authors refs from RAW Tableau field names ('summoner_dir');
-    # the DM labels them cased ('Summoner Dir') — round 5 proved this pushed
-    # all three Diablo runs off the mechanical path into exit-4 hand-patching.
+    # The builder authors refs from RAW Tableau field names ('runner_dir');
+    # the DM labels them cased ('Runner Dir') — round 5 proved this pushed
+    # all three field runs off the mechanical path into exit-4 hand-patching.
     # Normalized (case/punct-insensitive) match, exact rewrite, loud misses.
     labels = Array(hit['columnLabels']).map(&:to_s)
     if labels.any? && de['columns'].is_a?(Array)
@@ -3263,6 +3574,26 @@ rescue WorkbookBuildError => e
   puts '          re-run skips discovery + the decisions checkpoint — see --help.)'
   puts '   The data model is posted and ready to attach either way. A conversion is NOT done'
   puts '   until scripts/assert-phase6-ran.rb exits 0 — that hard gate applies on both paths.'
+  # SALVAGE INVENTORY: everything already known about each blocked field, so the
+  # re-entry starts from the answer (formula + class + route) instead of
+  # re-deriving it from the .twb by hand.
+  begin
+    inv = salvage_inventory(WORK, failed)
+    unless inv.empty?
+      puts
+      puts '── SALVAGE INVENTORY — per blocked field: what it is + its concrete route ──'
+      inv.each do |i|
+        puts "   • #{i['field']}  [#{i['class']}]"
+        puts "       Tableau formula: #{i['formula'].to_s.gsub(/\s+/, ' ').strip[0, 220]}" if i['formula']
+        Array(i['notes']).first(2).each { |nt| puts "       note: #{nt.to_s.strip[0, 200]}" }
+        puts "       ROUTE: #{i['route']}"
+      end
+      File.write(File.join(WORK, 'salvage-inventory.json'), JSON.pretty_generate(inv))
+      puts "   (inventory also written to #{File.join(WORK, 'salvage-inventory.json')})"
+    end
+  rescue StandardError => e
+    puts "   (salvage inventory unavailable: #{e.class}: #{e.message.to_s[0, 80]})"
+  end
   puts '   Reminder: continue now. Shipping only the data model, or a scaled-down "demo" workbook,'
   puts '   does NOT satisfy this migration — the next action is yours.'
   # Authorize the hand-authoring re-entry: this STOP is the ONLY sanctioned way to
@@ -3611,6 +3942,42 @@ rescue StandardError
   # best-effort — never fail the run on sentinel bookkeeping
 end
 Offramp.log(WORK, kind: 'pass1-stop', detail: "workbook #{wb_id} — parity + gates not yet run")
+
+# 🚧 G6 — MANUAL CUSTOM-SQL RESIDUES (exit 16). Phase 1e routed these
+# window/table-calc chains to the Custom SQL path correctly, but the build can
+# only ship the plotting tile with a magnitude proxy until the Custom SQL DM
+# element exists and the tile measure is repointed at it. Run-2 shipped the
+# proxy silently and the divergence surfaced only at Phase 6, ~2h later — so
+# pass 1 now BLOCKS here with the exact build+bind checklist instead of exit 12.
+_mr_doc = (JSON.parse(File.read(File.join(WORK, 'manual-residues.json'))) rescue nil)
+_mr = _mr_doc.is_a?(Hash) ? Array(_mr_doc['residues']) : Array(_mr_doc)
+_mr_unbuilt = _mr.select { |e| e.is_a?(Hash) && e['status'].to_s == 'unbuilt' }
+if _mr_unbuilt.any?
+  puts
+  puts '=========== MANUAL CUSTOM-SQL RESIDUES — BUILD REQUIRED BEFORE --finalize (exit 16) ==========='
+  puts "#{_mr_unbuilt.size} window/table-calc residue(s) are PLOTTED BY DASHBOARD TILES but have no Sigma"
+  puts 'translation (requires_custom_sql — refs/window-functions.md STAYS-MANUAL). Their tiles currently'
+  puts 'render a MAGNITUDE PROXY, not the source measure. For EACH residue below:'
+  puts "  1. Create a Custom SQL DM element from the skeleton (edit + PUT the DM spec:"
+  puts "     ruby scripts/post-and-readback.rb --type datamodel --update-id #{dm_id} --spec #{File.join(WORK, 'dm-spec.json')} ...)"
+  puts '  2. Repoint the tile\'s measure column at the new element\'s output column (wb-spec PUT).'
+  puts "  3. Set \"status\": \"built\" for that entry in #{File.join(WORK, 'manual-residues.json')}."
+  _mr_unbuilt.each_with_index do |e, i|
+    puts
+    puts "  #{i + 1}. #{e['calc'].inspect}  (tile: #{e['tile'].inspect})"
+    puts "     Tableau: #{e['formula'].to_s.gsub(/\s+/, ' ')[0, 220]}"
+    puts '     Suggested Custom SQL:'
+    e['suggested_sql'].to_s.each_line { |l| puts "       #{l.rstrip}" }
+  end
+  puts
+  puts 'Then re-run --finalize. assert-phase6-ran REFUSES GREEN while any residue is "unbuilt"'
+  puts '(waiver: --accept-manual-residues "<calc,...>" — budget-counted; name it in your report).'
+  puts '==============================================================================================='
+  mark('phase6-pass1')
+  phase_summary
+  exit 16
+end
+
 puts
 puts '⛔ NOT DONE — this is PASS 1 of 2. Do NOT report success or hand off yet.'
 puts '   To confirm completion at any point, run (exit 0 == done, nothing else counts):'

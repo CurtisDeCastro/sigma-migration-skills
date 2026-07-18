@@ -77,7 +77,7 @@ module MechanicalSpecs
   GUID_RE = /\A[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}\z/i
 
   # Strip a cross-element calc col's disambiguating suffix:
-  #   "Region (STORE_DIM (CSA.STORE_DIM))" -> "Region".
+  #   "Region (STORE_DIM (DEMO_DB.STORE_DIM))" -> "Region".
   def base_caption(dname)
     b = dname.to_s.sub(/\s*\([A-Z0-9_]+ \([^)]*\)\)\s*\z/, '').strip
     b.empty? ? nil : b
@@ -158,7 +158,7 @@ module MechanicalSpecs
     # (dominant_fact_table). In a MULTI-embedded-extract workbook the converter
     # projects more columns for an UNUSED secondary datasource than for the one
     # the charts plot, so the max_by(columns.size) default below picks the wrong
-    # fact (the Global Macro regression: 14-col unused Table B beat the 9-col used
+    # fact (the Metric Series regression: 14-col unused Table B beat the 9-col used
     # Table A). When a preferred table is named, restrict the pick to elements
     # tied to it; only fall through to the count heuristic if nothing matches.
     if prefer_table
@@ -251,7 +251,7 @@ module MechanicalSpecs
   # Synthesize DM columns for per-year FIXED LODs the converter left unmaterialized
   # — `{FIXED DATEPART('year',[Date]): SUM([metric])}` "World"-style global totals.
   # The converter emits NOTHING for these worksheet/datasource LOD calcs, so a
-  # chart referencing e.g. "GDP World" dangles and blocks the POST. We build the
+  # chart referencing e.g. "Revenue World" dangles and blocks the POST. We build the
   # helper the converter SHOULD have: a nameless grouped Custom SQL element
   # (SUM per year over the landed fact table) + a `FIXED Year` relationship on the
   # fact; derive_master's existing FIXED-helper surfacing (below) then exposes each
@@ -320,8 +320,8 @@ module MechanicalSpecs
       dim, agg, metric = m[1], m[2], m[3]
       next unless dim =~ /DATEPART\(\s*'year'|\bYEAR\s*\(|\[Year\]/i     # year-grain only
       # The metric must resolve to a REAL column on THIS fact's table. A caption
-      # can be defined per-datasource with different base metrics (e.g. "GDP World"
-      # = SUM([GDP Value]) on one datasource, SUM([GDP (current US$)]) on another)
+      # can be defined per-datasource with different base metrics (e.g. "Revenue World"
+      # = SUM([REV Value]) on one datasource, SUM([Revenue (current US$)]) on another)
       # — keep the first definition whose metric this table actually carries.
       next unless sql_usable.call(metric)
       lods[cap] ||= { 'name' => cap, 'agg' => agg.upcase, 'metric' => metric }
@@ -336,11 +336,11 @@ module MechanicalSpecs
       sel << %(#{l['agg']}("#{phys.call(l['metric'])}") AS "#{l['name']}")
       cols << { 'id' => "wby-#{slug(l['name'])}", 'name' => l['name'], 'formula' => "[Custom SQL/#{l['name']}]" }
     end
-    # Exclude aggregate/rollup rows from the per-year WORLD total. Global Macro–style
+    # Exclude aggregate/rollup rows from the per-year WORLD total. Metric Series–style
     # extracts carry region / income-group / "World" rollup rows ALONGSIDE the real
     # countries, so an unfiltered SUM(...) OVER year double-counts them (the World
     # trend line came out ~6-10x too high). The point-in-time discriminator (a
-    # column NULL on rollup rows, e.g. IncomeGroup) selects real entities only.
+    # column NULL on rollup rows, e.g. EntityGroup) selects real entities only.
     #
     # SCOPE GUARD (live-caught): the discriminator lives on the COUNTRY-grain fact.
     # When the FIXED-Year metrics resolve to a DIFFERENT table (e.g. an already
@@ -468,7 +468,7 @@ module MechanicalSpecs
   # Retain extra base columns on the fact that the recipe needs but the converter
   # dropped (it projects only PLOTTED columns). The multi-metric point-in-time
   # filter references [Master/<discriminator>] + [Master/<year>]; if the source
-  # never plotted the discriminator (e.g. Global-Macro "IncomeGroup"), it's absent
+  # never plotted the discriminator (e.g. field-workbook "EntityGroup"), it's absent
   # from the DM → the recipe guard skips the real-entity filter. Add each wanted
   # name as a base column [<table>/<Name>] when it's a REAL warehouse column
   # (present in real_cols for the fact's table) and not already exposed. Returns
@@ -508,7 +508,7 @@ module MechanicalSpecs
   # tables, using the landing-manifest.json produced by land-extracts.py. The
   # converter only sees the generic in-.twbx table name ("Extract") for every
   # embedded datasource, so N datasources collapse onto an IDENTICAL source.path
-  # + element name (TJ.PUBLIC.EXTRACT / "Extract") and their base-column formula
+  # + element name (DEMO_DB.PUBLIC.EXTRACT / "Extract") and their base-column formula
   # prefixes point at a table Sigma cannot resolve. This is the step
   # refs/extract-landing.md promised ("Phase 3 consumes the manifest to remap DM
   # source paths and column refs") but nothing performed — everything the
@@ -526,7 +526,7 @@ module MechanicalSpecs
   # and RETURNS { colmap:, elements:, tables: }. `colmap` is a merged
   # {orig_caption => landed_column} map the caller threads into
   # fixup_dm_spec(column_mapping:) so long/sanitized indicator names
-  # ("GDP (current US$)" -> GDP_CURRENT_US) fold to their real warehouse column
+  # ("Revenue (current US$)" -> REVENUE_CURRENT_US) fold to their real warehouse column
   # instead of phantom-dropping. No manifest / no match => a no-op {elements:0}.
   def remap_from_manifest!(model, manifest_path)
     empty = { colmap: {}, elements: 0, tables: [] }
@@ -608,7 +608,7 @@ module MechanicalSpecs
 
     # v5.4 (item: kind:'sql' FROM identifiers): Custom-SQL / FIXED-LOD helper
     # elements embed the ORIGINAL workbook table identifier in their
-    # source.statement ("FROM ...'UDEMY COURSE$'") — repointing only
+    # source.statement ("FROM ...'COURSE LIST$'") — repointing only
     # warehouse-table elements left them querying a table that does not exist
     # in the warehouse (field-confirmed twice; sanctioned recovery was a
     # manual --table-mapping). Attribute each statement to a manifest entry by
@@ -1092,7 +1092,7 @@ module MechanicalSpecs
   end
 
   # ---- base-calc exposure (bead ovud/3w4d follow-through) ---------------------
-  # The converter keeps single-table calc columns (Ship Speed Category =
+  # The converter keeps single-table calc columns (Delivery Speed Tier =
   # If([Days To Ship] <= 2, ...)) on the BASE fact element, but the workbook
   # master sources the DERIVED "<Fact> View" — a column not re-exposed there is
   # unreachable and its chart dim falls back to an unresolvable raw header.
@@ -1128,7 +1128,7 @@ module MechanicalSpecs
   # discovered live from the warehouse (Phase 2). When supplied, base
   # warehouse-table columns whose physical name is NOT in the real table are
   # DROPPED as phantom (Tableau virtual-connection flattening invents columns
-  # like "REGION (STORE_DIM (CSA.STORE_DIM))" that don't exist in ORDER_FACT).
+  # like "REGION (STORE_DIM (DEMO_DB.STORE_DIM))" that don't exist in ORDER_FACT).
   def fixup_dm_spec(model, real_columns = nil, column_mapping: nil)
     begin
       require 'set'
@@ -1159,7 +1159,7 @@ module MechanicalSpecs
     # duplicate names make joins unreachable and date axes NULL-bucket.
     dedupe_relationship_names!(model)
     # Re-expose base-fact calc columns on the derived view so chart dims like
-    # "Ship Speed Category" resolve through the master.
+    # "Delivery Speed Tier" resolve through the master.
     expose_base_calcs_on_derived!(model)
     els = all_elements(model)
     by_id = els.each_with_object({}) { |e, h| h[e['id']] = e }

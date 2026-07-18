@@ -1,7 +1,7 @@
 # Sample readout — synthetic QuickSight account fixture
 
 A committed end-to-end run of `quicksight-assessment` against a **synthetic**
-`inventory.json` (account `153722385948`), so the skill's output shape is
+`inventory.json` (account `<aws-account-id>`), so the skill's output shape is
 reviewable without an AWS account. The `inventory.json` here is hand-authored to
 exercise the three complexity profiles; the four downstream artifacts
 (`complexity.json`, `shortlist.json`, `migration-plan.json`, `readout.md`) are

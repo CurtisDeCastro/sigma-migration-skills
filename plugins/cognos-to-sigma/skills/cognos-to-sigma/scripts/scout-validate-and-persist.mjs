@@ -13,7 +13,7 @@
 //     --pattern '\brunning-total\s*\(\s*\[([^\]]+)\]\s*\)' \
 //     --template 'CumulativeSum([$1])' \
 //     --test-formula 'CumulativeSum([Net Revenue])' \
-//     --connection <connId> --table-path CSA.TJ.ORDER_FACT \
+//     --connection <connId> --table-path DEMO_DB.DEMO.ORDER_FACT \
 //     --folder <folderId> [--description '...'] [--hint '...'] \
 //     [--gap-id '<expr:... from migrate-cognos.mjs GAP-SCOUT REQUIRED>'] [--workdir <dir>]
 //

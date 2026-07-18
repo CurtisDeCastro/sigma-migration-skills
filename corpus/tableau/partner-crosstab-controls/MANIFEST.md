@@ -3,7 +3,7 @@
 Hand-authored minimal `.twb` reproducing the three EDNA "Partner Landscape"
 regressions a customer reported 2026-06-25 (a 10 MB, 86-worksheet partner
 bookings workbook whose data we don't have, so this fixture mirrors the SHAPES
-on the live CSA.TJ retail star instead):
+on the live DEMO_DB.DEMO retail star instead):
 
 1. **Automatic-mark crosstabs built as flat tables.** The customer's two big
    "Metrics by Partner" tables (Partner Name rows × quarter × Measure-Names
@@ -78,10 +78,10 @@ copy (deterministic — element ids are name-derived, no randomness).
   Sum([Product TCV]), "3", Sum([ACV]))`, and the referenced `controlId` matches
   the emitted segmented control (no dead control).
 
-## Live validation (CSA.TJ, 2026-06-25)
+## Live validation (DEMO_DB.DEMO, 2026-06-25)
 
-The same four shapes were built on the live `CSA.TJ.ORDER_FACT` warehouse
-(org `tj-wells-1989`, conn `bc0319f8`), POSTed as a DM + workbook, and rendered:
+The same four shapes were built on the live `DEMO_DB.DEMO.ORDER_FACT` warehouse
+(the demo Sigma org, conn `<connection-id>`), POSTed as a DM + workbook, and rendered:
 the pivot rendered as a grouped crosstab with a **Grand-total row + column**;
 the segmented control rendered with the alias labels; flipping it from
 "Net Revenue" → "Quantity" changed the measure column (grand total

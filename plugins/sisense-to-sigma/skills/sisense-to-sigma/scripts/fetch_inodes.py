@@ -8,7 +8,7 @@ the reference demo still runs with no flags; override for any other tenant."""
 import os, json, subprocess, sys, argparse
 
 ap = argparse.ArgumentParser(description="Resolve Sigma table inode ids for a schema")
-ap.add_argument("--database", default="CSA", help="warehouse database (default: CSA)")
+ap.add_argument("--database", default="DEMO_DB", help="warehouse database (default: DEMO_DB)")
 ap.add_argument("--schema", default="SISENSE_ECOMMERCE",
                 help="warehouse schema to match (default: SISENSE_ECOMMERCE)")
 ap.add_argument("--out", default=os.path.expanduser("~/sisense-migration/inodes.json"),

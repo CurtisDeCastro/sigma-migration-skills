@@ -10,7 +10,7 @@
       "name": "Skilltest Look \u2014 Bar",
       "tileType": "looker_column",
       "merge": null,
-      "model": "csa_thelook",
+      "model": "demo_thelook",
       "explore": "order_fact",
       "fields": [
         "customer_dim.region",

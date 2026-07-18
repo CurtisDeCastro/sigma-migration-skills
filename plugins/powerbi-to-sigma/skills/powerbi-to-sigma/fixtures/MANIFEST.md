@@ -4,8 +4,8 @@ TMSL `.bim` semantic-model fixtures for testing a Power BI → Sigma converter.
 All share the real workforce model in `/tmp/pbix/model_clean.bim`:
 `compatibilityLevel: 1600`, three Snowflake-backed import tables
 (`EMPLOYEES`, `ABSENCE_RECORDS`, `SAFETY_INCIDENTS`) using the exact
-`Snowflake.Databases("ymb68310.snowflakecomputing.com","SIGMA_WH")` →
-`CSA` db → `TJ` schema → table M source pattern. Fixtures 02/05/06 add a
+`Snowflake.Databases("gxb98765.snowflakecomputing.com","SIGMA_WH")` →
+`DEMO_DB` db → `DEMO` schema → table M source pattern. Fixtures 02/05/06 add a
 `DimDate` calculated date table (and 05 a `DeptSummary` calculated table).
 
 Buckets reference `research/dax-to-sigma-coverage.md`:

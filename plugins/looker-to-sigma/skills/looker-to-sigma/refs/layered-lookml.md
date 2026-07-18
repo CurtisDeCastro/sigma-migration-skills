@@ -45,7 +45,7 @@ its SQL). The converter resolves them three ways, in order of preference:
 
 | Referenced view | Result |
 |---|---|
-| Plain view (`sql_table_name:`) — incl. N-hop alias chains | Literal warehouse path substituted (e.g. `CSA.TJ.ORDER_FACT`) |
+| Plain view (`sql_table_name:`) — incl. N-hop alias chains | Literal warehouse path substituted (e.g. `DEMO_DB.DEMO.ORDER_FACT`) |
 | Derived view **in the parse set** | Inlined as a **named `WITH` CTE** (`WITH other_view AS (…)`), recursively for its own refs, cycle-guarded; the reference becomes the CTE name, so existing SQL aliases (`… t`, `… a/b` self-joins) are preserved |
 | View **NOT in the parse set** | Placeholder table `LOOKER_SCRATCH.<VIEW>` + **🔶 UNRESOLVED VIEW** warning naming the view. The SQL parses but will NOT run — either add `<view>.view.lkml` to the input and re-run, or repoint the placeholder at the real warehouse table (the Looker scratch-schema PDT or its underlying source) |
 

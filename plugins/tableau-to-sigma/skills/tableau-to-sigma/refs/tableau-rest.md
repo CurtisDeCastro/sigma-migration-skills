@@ -51,8 +51,8 @@ Prompts for:
 
 | Value | Where to find it |
 |---|---|
-| Server URL | The hostname only — Cloud `https://10ay.online.tableau.com` or Server `https://tableau.mycompany.com`. No trailing slash needed. |
-| Site contentUrl | The path segment after `/site/` in any Tableau URL — e.g. `dataflow`. **Leave blank** for a Tableau Server "Default" site. |
+| Server URL | The hostname only — Cloud `https://us-west-2b.online.tableau.com` or Server `https://tableau.mycompany.com`. No trailing slash needed. |
+| Site contentUrl | The path segment after `/site/` in any Tableau URL — e.g. `mysite`. **Leave blank** for a Tableau Server "Default" site. |
 | PAT name | The label you typed when creating the token in **Account Settings → Personal Access Tokens**. Case-sensitive. |
 | PAT secret | The string shown at creation time. Copy verbatim — Tableau secrets are formatted as `base64==:base64`, the colon is part of the secret. |
 
@@ -152,7 +152,7 @@ The `scripts/tableau-discover.rb` helper produces all Phase-1 artifacts in one g
 eval "$(scripts/get-tableau-token.sh)"
 ruby scripts/tableau-discover.rb \
   --workbook-name "Orders Conversion Test" \
-  --datasource-name "ORDER_FACT (CSA.ORDER_FACT)+ (New Virtual Connection)" \
+  --datasource-name "ORDER_FACT (DEMO_DB.ORDER_FACT)+ (New Virtual Connection)" \
   --out ~/tableau-migration/orders
 ```
 
@@ -187,7 +187,7 @@ The colon is part of the secret, **not** a name/secret separator. Copy the full 
 
 `read-metadata` returns `fieldName` and `fieldCaption`. For fields belonging to **joined
 logical tables** in a virtual connection, `fieldName` is a GUID like
-`66792cbd-306e-3a9b-882a-f08cd73bb433 (DATE_DIM (CSA.DATE_DIM)1)` — use `fieldCaption` for
+`<field-id> (DATE_DIM (DEMO_DB.DATE_DIM)1)` — use `fieldCaption` for
 the human-readable name. Calculations also have `fieldName == fieldCaption`, no GUID.
 
 GraphQL's `name` field is always the display name — prefer GraphQL for calc-formula

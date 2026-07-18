@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """TEST-FIXTURE BUILDER (not a migration step). Creates a small matrix of Looker
-"Looks" (saved single queries) on csa_thelook/order_fact via the Looker API, to
+"Looks" (saved single queries) on demo_thelook/order_fact via the Looker API, to
 exercise the Look → Sigma grouped-table / pivot-table / KPI / chart converter.
 
 Each Look = POST /queries (model/view/fields/pivots/vis_config[/dynamic_fields])
@@ -16,7 +16,7 @@ import sys
 
 import looker_api as L
 
-MODEL, EXPLORE = "csa_thelook", "order_fact"
+MODEL, EXPLORE = "demo_thelook", "order_fact"
 
 # (title, vis_type, fields, pivots, sorts, limit, dynamic_fields)
 LOOKS = [

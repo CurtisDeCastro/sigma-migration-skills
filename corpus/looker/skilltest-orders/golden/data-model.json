@@ -14,8 +14,8 @@
               "connectionId": "<CONNECTION_ID>",
               "kind": "warehouse-table",
               "path": [
-                "CSA",
-                "TJ",
+                "DEMO_DB",
+                "DEMO",
                 "CUSTOMER_DIM"
               ]
             },
@@ -51,8 +51,8 @@
               "connectionId": "<CONNECTION_ID>",
               "kind": "warehouse-table",
               "path": [
-                "CSA",
-                "TJ",
+                "DEMO_DB",
+                "DEMO",
                 "ORDER_FACT"
               ]
             },

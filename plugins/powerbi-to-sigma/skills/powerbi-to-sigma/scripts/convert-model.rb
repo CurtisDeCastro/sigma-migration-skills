@@ -61,7 +61,7 @@ end.parse!
 UUID_RE = /\A\h{8}-\h{4}-\h{4}-\h{4}-\h{12}\z/
 if opts[:conn] && opts[:conn] !~ UUID_RE
   abort "FATAL: --connection must be a FULL Sigma connection UUID " \
-        "(8-4-4-4-12 hex, e.g. bc0319f8-1234-5678-9abc-def012345678); got #{opts[:conn].inspect}. " \
+        "(8-4-4-4-12 hex, e.g. ab12cd34-1234-5678-9abc-def012345678); got #{opts[:conn].inspect}. " \
         "List connections with GET /v2/connections."
 end
 
@@ -278,7 +278,7 @@ if opts[:rbim] || opts[:rmap]
         next unless m || args['table']
         el = DaxRestructure.concatenatex_listagg(
           name: name, conn: args['conn'] || conn,
-          db: args['db'] || opts[:db] || 'CSA', schema: args['schema'] || opts[:schema] || 'TJ',
+          db: args['db'] || opts[:db] || 'DEMO_DB', schema: args['schema'] || opts[:schema] || 'PUBLIC',
           table: args['table'] || m[1], group_col: args['group_col'] || m[2],
           text_col: args['text_col'] || m[3], sep: args['sep'] || (m && m[4]) || ', ')
         emitted << [name, el]
@@ -287,7 +287,7 @@ if opts[:rbim] || opts[:rmap]
         next if args.empty?
         el = DaxRestructure.treatas_virtual_rel(
           name: name, conn: args['conn'] || conn,
-          db: args['db'] || opts[:db] || 'CSA', schema: args['schema'] || opts[:schema] || 'TJ',
+          db: args['db'] || opts[:db] || 'DEMO_DB', schema: args['schema'] || opts[:schema] || 'PUBLIC',
           fact: args['fact'], fact_key: args['fact_key'], dim: args['dim'], dim_key: args['dim_key'],
           group_col: args['group_col'], agg: args['agg'], agg_alias: args['agg_alias'] || 'VAL')
         emitted << [name, el]
@@ -295,7 +295,7 @@ if opts[:rbim] || opts[:rmap]
         next if args.empty?
         el = DaxRestructure.banded_grouping(
           name: name, conn: args['conn'] || conn,
-          db: args['db'] || opts[:db] || 'CSA', schema: args['schema'] || opts[:schema] || 'TJ',
+          db: args['db'] || opts[:db] || 'DEMO_DB', schema: args['schema'] || opts[:schema] || 'PUBLIC',
           table: args['table'], value_col: args['value_col'], bands: args['bands'])
         emitted << [name, el]
       when :time_prior_period

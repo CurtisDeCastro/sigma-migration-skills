@@ -29,9 +29,9 @@ def ok(cond, msg)
 end
 
 puts '-- pure core: element ranking --'
-els = ['Top Countries', 'GDP Trend', 'YoY Growth by Region', 'KPI Row']
-a_label = { 'id' => 'a1', 'panel' => 'TOP COUNTRIES', 'label' => 'United States GDP', 'raw' => '18,037B' }
-ok(AnchorVerify.ranked_elements(a_label, els).first == 'Top Countries',
+els = ['Top Accounts', 'Revenue Trend', 'YoY Growth by Region', 'KPI Row']
+a_label = { 'id' => 'a1', 'panel' => 'TOP ACCOUNTS', 'label' => 'United Widgets revenue', 'raw' => '12,345B' }
+ok(AnchorVerify.ranked_elements(a_label, els).first == 'Top Accounts',
    'panel/label token overlap ranks the right element first')
 ok(AnchorVerify.ranked_elements(a_label, els).length == els.length,
    'zero-score elements are appended (search everywhere)')
@@ -46,35 +46,35 @@ puts '-- pure core: cell parsing --'
 ok(AnchorVerify.cell_numbers('$1,234.50') == [1234.5], 'currency + commas parse')
 ok(AnchorVerify.cell_numbers('(42)') == [-42.0], 'paren negative parses')
 ok(AnchorVerify.cell_numbers('12%') == [12.0, 0.12], 'percent cell keeps points + fraction')
-ok(AnchorVerify.cell_numbers('United States').empty?, 'non-numeric cell yields nothing')
+ok(AnchorVerify.cell_numbers('United Widgets').empty?, 'non-numeric cell yields nothing')
 ok(AnchorVerify.cell_numbers('').empty? && AnchorVerify.cell_numbers(nil).empty?, 'empty/nil cells yield nothing')
 
 puts '-- pure core: verify() verdicts --'
 exports = {
-  'Top Countries' => [['Country', 'GDP'], ['United States', '18037000000000'], ['China', '13608000000000']],
-  'GDP Trend'     => [['Year', 'GDP'], ['2024', '1.75e12'], ['2025', '1.8e12']],
-  'KPI Row'       => [['Total GDP', 'YoY'], ['86500000000000', '-0.02']]
+  'Top Accounts' => [['Account', 'Revenue'], ['United Widgets', '12345000000000'], ['Acme Holdings', '9876000000000']],
+  'Revenue Trend'     => [['Year', 'Revenue'], ['2024', '1.15e12'], ['2025', '1.2e12']],
+  'KPI Row'       => [['Total Revenue', 'YoY'], ['45600000000000', '-0.02']]
 }
 anchors = [
-  { 'id' => 'a1', 'panel' => 'TOP COUNTRIES', 'label' => 'United States GDP', 'raw' => '18,037B' },
+  { 'id' => 'a1', 'panel' => 'TOP ACCOUNTS', 'label' => 'United Widgets revenue', 'raw' => '12,345B' },
   { 'id' => 'a2', 'panel' => 'KPI', 'label' => 'YoY change', 'raw' => '-2%', 'sigma_element_hint' => 'KPI Row' },
-  { 'id' => 'a3', 'panel' => 'KPI', 'label' => 'Total GDP', 'raw' => '86.5T' }
+  { 'id' => 'a3', 'panel' => 'KPI', 'label' => 'Total Revenue', 'raw' => '45.6T' }
 ]
 v = AnchorVerify.verify(anchors, exports)
 ok(v['pass'] == true && v['matched'] == 3 && v['checked'] == 3, 'all-matched verdict passes 3/3')
 ok(v['missing'].empty?, 'no missing entries when all matched')
 
-# The field failure: the workbook renders 1.8T where the source printed 18,037B.
-bad_exports = exports.merge('Top Countries' => [['Country', 'GDP'], ['United Kingdom', '1.8e12']])
+# The field failure: the workbook renders 1.2T where the source printed 12,345B.
+bad_exports = exports.merge('Top Accounts' => [['Account', 'Revenue'], ['Umbrella Corp', '1.2e12']])
 v2 = AnchorVerify.verify(anchors, bad_exports)
 ok(v2['pass'] == false && v2['matched'] == 2, '10x-off value fails the anchor (2/3)')
 miss = v2['missing'].first
-ok(miss['id'] == 'a1' && miss['raw'] == '18,037B', 'missing entry carries id + raw')
-ok(miss['best_candidate'].is_a?(Hash) && miss['best_candidate']['value'] == 1.8e12,
-   'best_candidate reports the closest wrong value (the 1.8T impostor)')
+ok(miss['id'] == 'a1' && miss['raw'] == '12,345B', 'missing entry carries id + raw')
+ok(miss['best_candidate'].is_a?(Hash) && miss['best_candidate']['value'] == 1.2e12,
+   'best_candidate reports the closest wrong value (the 1.2T impostor)')
 
 # found-elsewhere: value lives in a differently-named element → matched + noted
-elsewhere = { 'Some Renamed Tile' => [['GDP'], ['18037000000000']] }
+elsewhere = { 'Some Renamed Tile' => [['Revenue'], ['12345000000000']] }
 v3 = AnchorVerify.verify([anchors[0]], elsewhere)
 ok(v3['pass'] == true, 'value found in a non-best-match element still matches')
 ok(v3['detail'].first['matched_in'] == 'Some Renamed Tile', 'detail names where it was found')
@@ -142,7 +142,7 @@ Dir.mktmpdir do |dir|
   spec, exp = write_fixture(dir, bad_exports, anchors)
   _out, err, st = run_cli(dir, spec, exp)
   ok(st.exitstatus == 1, "missing anchor → exit 1 (got #{st.exitstatus})")
-  ok(err.include?('MISSING') && err.include?('18,037B'), 'per-miss report names the anchor raw value')
+  ok(err.include?('MISSING') && err.include?('12,345B'), 'per-miss report names the anchor raw value')
   ok(err.include?('closest candidate'), 'per-miss report shows the best candidate')
   ok(err.include?('loudest possible signal'), 'failure explains what a total miss means')
   vd = JSON.parse(File.read(File.join(dir, 'anchors-verdict.json')))
@@ -164,6 +164,75 @@ Dir.mktmpdir do |dir|
   _out, err, st = run_cli(dir, spec, exp)
   ok(st.exitstatus == 2, "unparseable raw → exit 2 (got #{st.exitstatus})")
   ok(err.include?('EXACTLY as printed'), 'unparseable-raw error restates the transcription rule')
+end
+
+puts '-- pure core: extract-drift tolerance --'
+# The source PNG printed "104" off a frozen extract; the fresher warehouse has 106
+# (~1.9% drift). Printed-precision: MISS. With extract_tol 0.03: tolerance-admitted
+# match, RECORDED (tolerance_used + drift) — never a silent exact-looking pass.
+drift_exports = { 'Total Stores' => [['Stores'], ['106']] }
+drift_anchor  = [{ 'id' => 'd1', 'label' => 'Total Stores', 'raw' => '104' }]
+vd0 = AnchorVerify.verify(drift_anchor, drift_exports)
+ok(vd0['pass'] == false, 'drifted value misses at printed precision (no tolerance)')
+vd1 = AnchorVerify.verify(drift_anchor, drift_exports, extract_tol: 0.03)
+ok(vd1['pass'] == true, 'drifted value matches within extract_tol 0.03')
+ok(vd1['detail'].first['tolerance_used'] == 0.03, 'tolerance-admitted match records tolerance_used')
+d_drift = vd1['detail'].first['drift']
+ok(d_drift.is_a?(Numeric) && d_drift > 0.015 && d_drift < 0.025, 'measured drift recorded (~1.9%)')
+ok(vd1['matched_via_tolerance'] == 1, 'verdict counts matched_via_tolerance')
+vd2 = AnchorVerify.verify(drift_anchor, drift_exports, extract_tol: 0.01)
+ok(vd2['pass'] == false, 'drift beyond the tolerance still misses (0.01 < 1.9% drift)')
+# Exact matches never carry tolerance_used, even when a tolerance is active.
+vd3 = AnchorVerify.verify(anchors, exports, extract_tol: 0.05)
+ok(vd3['pass'] == true && vd3['matched_via_tolerance'] == 0 &&
+   vd3['detail'].none? { |d| d.key?('tolerance_used') },
+   'exact printed-precision matches record NO tolerance_used under an active tolerance')
+# Hinted-anchor scoping is enforced identically on the tolerance retry: the
+# drifted value living ONLY outside the hinted element is still a MISS.
+hint_scope_exports = { 'Big Detail Table' => [['V'], ['106']],
+                       'Total Stores' => [['Stores'], ['999']] }
+hint_anchor = [{ 'id' => 'h1', 'label' => 'Total Stores', 'raw' => '104',
+                 'sigma_element_hint' => 'Total Stores' }]
+vh = AnchorVerify.verify(hint_anchor, hint_scope_exports, extract_tol: 0.03)
+ok(vh['pass'] == false, 'hinted anchor: tolerance retry stays scoped to hint-matched elements')
+# Text anchors never use tolerance (labels do not drift numerically).
+vt = AnchorVerify.verify([{ 'id' => 't1', 'label' => 'roster', 'raw' => 'Region A', 'kind' => 'text' }],
+                         { 'Roster' => [['Name'], ['Region B']] }, extract_tol: 0.5)
+ok(vt['pass'] == false, 'text anchor unaffected by extract_tol')
+
+puts '-- CLI: extract-tol activation gating --'
+Dir.mktmpdir do |dir|
+  # NOT extract-marked → tolerance REFUSED, drifted anchor still misses.
+  spec, exp = write_fixture(dir, drift_exports, drift_anchor)
+  _out, err, st = Open3.capture3(RbConfig.ruby, SCRIPT, '--workdir', dir, '--workbook-spec', spec,
+                                 '--exports-dir', exp, '--extract-tol', '0.03')
+  ok(st.exitstatus == 1, "unmarked workdir: --extract-tol refused, miss → exit 1 (got #{st.exitstatus})")
+  ok(err.include?('REFUSED'), 'refusal is stated loudly')
+  vd = JSON.parse(File.read(File.join(dir, 'anchors-verdict.json')))
+  ok(vd['extract_tolerance'].is_a?(Hash) && vd['extract_tolerance']['active'] == false,
+     'verdict records the refused tolerance request')
+end
+Dir.mktmpdir do |dir|
+  # Extract-marked workdir (get-workbook.json hasExtracts=true) → tolerance active.
+  spec, exp = write_fixture(dir, drift_exports, drift_anchor)
+  File.write(File.join(dir, 'get-workbook.json'), JSON.pretty_generate('hasExtracts' => true))
+  out, err, st = Open3.capture3(RbConfig.ruby, SCRIPT, '--workdir', dir, '--workbook-spec', spec,
+                                 '--exports-dir', exp, '--extract-tol', '0.03')
+  ok(st.exitstatus.zero?, "extract-marked workdir: tolerance active → exit 0 (got #{st.exitstatus})")
+  ok(err.include?('ACTIVE'), 'activation names the extract marker')
+  ok(out.include?('EXTRACT-TOL'), 'per-anchor MATCHED line shows the tolerance admission')
+  vd = JSON.parse(File.read(File.join(dir, 'anchors-verdict.json')))
+  ok(vd['pass'] == true && vd['matched_via_tolerance'] == 1 &&
+     vd['extract_tolerance']['active'] == true,
+     'verdict carries matched_via_tolerance + active extract_tolerance')
+end
+Dir.mktmpdir do |dir|
+  # Out-of-range tolerance is a usage error (a huge tolerance is not a measurement).
+  spec, exp = write_fixture(dir, drift_exports, drift_anchor)
+  File.write(File.join(dir, 'get-workbook.json'), JSON.pretty_generate('hasExtracts' => true))
+  _out, _err, st = Open3.capture3(RbConfig.ruby, SCRIPT, '--workdir', dir, '--workbook-spec', spec,
+                                  '--exports-dir', exp, '--extract-tol', '0.9')
+  ok(st.exitstatus == 2, "--extract-tol 0.9 (out of range) → exit 2 (got #{st.exitstatus})")
 end
 
 puts

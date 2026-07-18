@@ -41,16 +41,16 @@ if is_server
   print "Server URL (e.g. https://tableau.mycompany.com): "
   server = $stdin.gets.chomp
 else
-  print "Server URL [https://10ay.online.tableau.com]: "
+  print "Server URL [https://us-west-2b.online.tableau.com]: "
   server = $stdin.gets.chomp
-  server = "https://10ay.online.tableau.com" if server.empty?
+  server = "https://us-west-2b.online.tableau.com" if server.empty?
 end
 server = server.sub(%r{/+$}, '')
 
 if is_server
   print "Site contentUrl (path segment after /site/ in the URL; LEAVE BLANK for the Default site): "
 else
-  print "Site contentUrl (the path segment after /site/ in the Tableau URL, e.g. 'dataflow'): "
+  print "Site contentUrl (the path segment after /site/ in the Tableau URL, e.g. 'mysite'): "
 end
 content_url = $stdin.gets.chomp
 

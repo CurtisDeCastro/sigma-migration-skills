@@ -23,9 +23,9 @@ puts 'Part A — pick_fact never returns a dim, prefers the widest view'
 # the wide flattened "Order Fact View" derived element.
 cols = ->(n) { Array.new(n) { |i| { 'id' => "c#{i}", 'name' => "c#{i}" } } }
 model = { 'pages' => [{ 'elements' => [
-  { 'id' => 'e-dimtime', 'name' => 'Dim Time',        'source' => { 'kind' => 'warehouse-table', 'path' => %w[CSA TJ DIM_TIME] },   'columns' => cols.call(8) },
-  { 'id' => 'e-custdim', 'name' => 'Customer Dim',    'source' => { 'kind' => 'warehouse-table', 'path' => %w[CSA TJ CUSTOMER_DIM] }, 'columns' => cols.call(18) },
-  { 'id' => 'e-ordfact', 'name' => 'Order Fact',      'source' => { 'kind' => 'warehouse-table', 'path' => %w[CSA TJ ORDER_FACT] },   'columns' => cols.call(36) },
+  { 'id' => 'e-dimtime', 'name' => 'Dim Time',        'source' => { 'kind' => 'warehouse-table', 'path' => %w[DEMO_DB DEMO DIM_TIME] },   'columns' => cols.call(8) },
+  { 'id' => 'e-custdim', 'name' => 'Customer Dim',    'source' => { 'kind' => 'warehouse-table', 'path' => %w[DEMO_DB DEMO CUSTOMER_DIM] }, 'columns' => cols.call(18) },
+  { 'id' => 'e-ordfact', 'name' => 'Order Fact',      'source' => { 'kind' => 'warehouse-table', 'path' => %w[DEMO_DB DEMO ORDER_FACT] },   'columns' => cols.call(36) },
   { 'id' => 'e-ofview',  'name' => 'Order Fact View', 'source' => { 'kind' => 'table', 'elementId' => 'e-ordfact' },                  'columns' => cols.call(94) }
 ] }] }
 fact = MechanicalSpecs.pick_fact(model)
@@ -34,8 +34,8 @@ check(fact && fact['name'] != 'Dim Time', "does NOT pick 'Dim Time'", fails)
 
 # Even with NO derived view, a base fact must beat the narrow time dim.
 model2 = { 'pages' => [{ 'elements' => [
-  { 'id' => 'e-dimtime', 'name' => 'Dim Time',   'source' => { 'kind' => 'warehouse-table', 'path' => %w[CSA TJ DIM_TIME] }, 'columns' => cols.call(8) },
-  { 'id' => 'e-ordfact', 'name' => 'Order Fact', 'source' => { 'kind' => 'warehouse-table', 'path' => %w[CSA TJ ORDER_FACT] }, 'columns' => cols.call(36) }
+  { 'id' => 'e-dimtime', 'name' => 'Dim Time',   'source' => { 'kind' => 'warehouse-table', 'path' => %w[DEMO_DB DEMO DIM_TIME] }, 'columns' => cols.call(8) },
+  { 'id' => 'e-ordfact', 'name' => 'Order Fact', 'source' => { 'kind' => 'warehouse-table', 'path' => %w[DEMO_DB DEMO ORDER_FACT] }, 'columns' => cols.call(36) }
 ] }] }
 f2 = MechanicalSpecs.pick_fact(model2)
 check(f2 && f2['name'] == 'Order Fact', "base-only: picks 'Order Fact' over 'Dim Time' (got #{f2 && f2['name'].inspect})", fails)
@@ -49,15 +49,15 @@ check(mig.include?('prefer_table: prefer_fact_table') || mig.include?('prefer_ta
       'both pick_fact call sites thread prefer_fact_table', fails)
 
 puts 'Part C — prefer_table overrides column count (multi-extract regression)'
-# The Global Macro shape: the UNUSED datasource projects MORE columns (14) than the
+# The Metric Series shape: the UNUSED datasource projects MORE columns (14) than the
 # one the charts use (9). Default max_by picks the wide unused one; prefer_table
 # must override to the used table.
 m3 = { 'pages' => [{ 'elements' => [
-  { 'id' => 'e-unused', 'name' => 'Gdp2005',    'source' => { 'kind' => 'warehouse-table', 'path' => %w[TJ PUBLIC WB_GDP2005] },   'columns' => cols.call(14) },
-  { 'id' => 'e-used',   'name' => 'Global Macro', 'source' => { 'kind' => 'warehouse-table', 'path' => %w[TJ PUBLIC GLOBAL_MACRO] }, 'columns' => cols.call(9) }
+  { 'id' => 'e-unused', 'name' => 'Rev2005',    'source' => { 'kind' => 'warehouse-table', 'path' => %w[DEMO_DB PUBLIC MS_REV2005] },   'columns' => cols.call(14) },
+  { 'id' => 'e-used',   'name' => 'Metric Series', 'source' => { 'kind' => 'warehouse-table', 'path' => %w[DEMO_DB PUBLIC METRIC_SERIES] }, 'columns' => cols.call(9) }
 ] }] }
 check(MechanicalSpecs.pick_fact(m3)['id'] == 'e-unused', 'default (no hint): max_by columns picks the WIDE unused table', fails)
-check(MechanicalSpecs.pick_fact(m3, prefer_table: 'GLOBAL_MACRO')['id'] == 'e-used',
+check(MechanicalSpecs.pick_fact(m3, prefer_table: 'METRIC_SERIES')['id'] == 'e-used',
       'prefer_table picks the USED (narrower) table, overriding count', fails)
 check(MechanicalSpecs.pick_fact(m3, prefer_table: 'NOPE_MISSING')['id'] == 'e-unused',
       'unmatched prefer_table falls through to the default heuristic', fails)
@@ -69,12 +69,12 @@ TWB = <<~XML
   <?xml version='1.0'?>
   <workbook><datasources>
     <datasource name='Parameters' caption='Parameters'/>
-    <datasource name='federated.aaa' caption='1. Global Macro Series Extract'>
+    <datasource name='federated.aaa' caption='1. Metric Series Extract'>
       <connection class='federated'><named-connections><named-connection>
         <connection class='hyper' dbname='Data/dataengine_a.hyper'/>
       </named-connection></named-connections></connection>
     </datasource>
-    <datasource name='federated.bbb' caption='GFTGWOnullGDP2005 Extract'>
+    <datasource name='federated.bbb' caption='ZQXKPnullREV2005 Extract'>
       <connection class='federated'><named-connections><named-connection>
         <connection class='hyper' dbname='dataengine_b.hyper'/>
       </named-connection></named-connections></connection>
@@ -85,14 +85,14 @@ TWB = <<~XML
   </worksheets></workbook>
 XML
 MANIFEST = [
-  { 'datasource' => 'federated.aaa', 'caption' => '1. Global Macro Series Extract', 'hyper' => 'dataengine_a.hyper', 'sf_table' => 'TJ.PUBLIC.GLOBAL_MACRO', 'columns' => {} },
-  { 'datasource' => 'federated.bbb', 'caption' => 'GFTGWOnullGDP2005 Extract', 'hyper' => 'dataengine_b.hyper', 'sf_table' => 'TJ.PUBLIC.WB_GDP2005', 'columns' => {} }
+  { 'datasource' => 'federated.aaa', 'caption' => '1. Metric Series Extract', 'hyper' => 'dataengine_a.hyper', 'sf_table' => 'DEMO_DB.PUBLIC.METRIC_SERIES', 'columns' => {} },
+  { 'datasource' => 'federated.bbb', 'caption' => 'ZQXKPnullREV2005 Extract', 'hyper' => 'dataengine_b.hyper', 'sf_table' => 'DEMO_DB.PUBLIC.MS_REV2005', 'columns' => {} }
 ]
 Dir.mktmpdir do |d|
   mp = File.join(d, 'landing-manifest.json')
   File.write(mp, JSON.generate(MANIFEST))
   got = MechanicalSpecs.dominant_fact_table(TWB, mp)
-  check(got == 'GLOBAL_MACRO', "dominant datasource (9 worksheets) → GLOBAL_MACRO (got #{got.inspect})", fails)
+  check(got == 'METRIC_SERIES', "dominant datasource (9 worksheets) → METRIC_SERIES (got #{got.inspect})", fails)
   # MISLABELED-caption manifest: land-extracts couldn't resolve the caption and
   # labeled entries by the GUID hyper stem. Caption-only matching would fail; the
   # .hyper match must still resolve the dominant datasource to the right table.
@@ -101,7 +101,7 @@ Dir.mktmpdir do |d|
   mislabeled[1]['caption'] = 'dataengine_b'
   mp2 = File.join(d, 'mislabeled.json'); File.write(mp2, JSON.generate(mislabeled))
   got2 = MechanicalSpecs.dominant_fact_table(TWB, mp2)
-  check(got2 == 'GLOBAL_MACRO', "mislabeled caption → still resolves via .hyper match (got #{got2.inspect})", fails)
+  check(got2 == 'METRIC_SERIES', "mislabeled caption → still resolves via .hyper match (got #{got2.inspect})", fails)
   # single-source manifest → nil (no ambiguity to resolve)
   sp = File.join(d, 'single.json'); File.write(sp, JSON.generate([MANIFEST[0]]))
   check(MechanicalSpecs.dominant_fact_table(TWB, sp).nil?, 'single-source manifest → nil (no override)', fails)

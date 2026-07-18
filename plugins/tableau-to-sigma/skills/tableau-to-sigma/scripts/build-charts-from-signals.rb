@@ -101,6 +101,7 @@ end.parse!
 # source dashboard rendered (the most common Phase 5 escape). Escape hatch:
 # --skip-dashboard-read "<reason>". See scripts/lib/dashboard_read.rb + SKILL.md Phase 1d.
 require_relative 'lib/dashboard_read'
+require_relative 'lib/recipe_multimetric' # rollup_flag validator + caption-variant helpers
 if opts[:skip_dashboard_read]
   warn "[SKIP] dashboard-read gate WAIVED (#{opts[:skip_dashboard_read]}) — name this in your migration report."
 else
@@ -111,6 +112,19 @@ else
     warn '       Read the dashboard PNG (get-view-image, solo) and write png-read.json enumerating'
     warn '       every tile with its Sigma `kind` + text_elements + filter_shelf (SKILL.md Phase 1d),'
     warn '       or waive with --skip-dashboard-read "<reason>" and name it in your report.'
+    exit 1
+  end
+  # png-read schema extension (same gate): the OPTIONAL point_in_time.rollup_flag
+  # block (flag-valued discriminator — rollup rows marked by VALUE, not NULL).
+  # A malformed block would silently no-op the rollup exclusion downstream, so
+  # it fails the read gate here instead.
+  _pr_doc = (JSON.parse(File.read(DashboardRead.path(opts[:tab]))) rescue nil)
+  _rf_errs = RecipeMultimetric.validate_rollup_flag((_pr_doc || {})['point_in_time'] || {})
+  if _rf_errs.any?
+    warn '[FAIL] Phase 1d dashboard-read gate: png-read.json point_in_time.rollup_flag is malformed:'
+    _rf_errs.each { |e| warn "       - #{e}" }
+    warn '       Schema: "rollup_flag": { "column": "<flag col>", "rollup_values": ["Y"], "entity_values": ["N"] }'
+    warn '       (refs/phase-1-discover.md). Fix the block or remove it (IsNull discriminator fallback).'
     exit 1
   end
 end
@@ -232,7 +246,7 @@ def synthesize_view_from_signals(z, meta)
   # carries its measure on the Label mark, NOT on a shelf — so cols_shelf.fields
   # is empty and the zone would drop with "no dim+measure" even though the value
   # is fully known. Recover the measure from the sort's `using` clause
-  # (`[…].[sum:GDP (current US$):qk]`), then from the aggregations map (first
+  # (`[…].[sum:Revenue (current US$):qk]`), then from the aggregations map (first
   # numeric-agg field that isn't the dim). Without this the 3 Top-Countries
   # tables silently vanish from the dashboard.
   if meas.empty? && dims.any?
@@ -1852,7 +1866,7 @@ end
 # Without it the child reads BASE-grain rows with the grouped aggregate
 # REPEATED per row, so Avg/Median/Count at the outer level silently come out
 # row-weighted (caught live: row-weighted 969.82 vs correct 687.81 per-customer
-# Avg on CSA.TJ.ORDER_FACT). Custom SQL `GROUP BY` subqueries per level are
+# Avg on DEMO_DB.DEMO.ORDER_FACT). Custom SQL `GROUP BY` subqueries per level are
 # the equivalent alternative. decompose_nested_fixed
 # returns nil for non-nested formulas — SINGLE-level FIXED takes the verified
 # two-level helper AUTO path instead (parse_fixed_lod / build_two_stage_helper
@@ -3423,7 +3437,7 @@ def parse_param_if_measure(formula)
 end
 
 # map_column with a NORMALIZED fallback for the scope recipe: formulas
-# reference raw twb serialization tokens (NUM_SUBSCRIBERS, PUBLISHED DATE)
+# reference raw twb serialization tokens (NUM_ENROLLED, PUBLISHED DATE)
 # while the master-map regexes are built from display labels ("Num
 # Subscribers"). Same drift class the global ref-label repair handles —
 # match case/punct-insensitively when the normalized name is UNIQUE among
@@ -3895,6 +3909,13 @@ warn "loaded #{$agg_dims.size} aggregate-derived dimension(s) from #{opts[:wb_pa
 elements = []
 data_elements = [] # hidden helper elements (scatter grouped sources — bead z1d0)
 warnings = []
+# D2/P0.2: datasource-level + extract filters from the parse meta apply to
+# EVERY element sourcing that datasource (Tableau row-scopes the whole source;
+# no worksheet carries them). They ride the normal per-zone value-filter
+# dispatch below, tagged so a loud post-loop summary can list what was applied.
+ds_value_filters = (meta['datasource_filters'] || []).reject { |f| f['is_action'] }
+ds_value_filters.each { |f| f['_ds_scope'] = true }
+ds_filter_applications = Hash.new { |h, k| h[k] = [] } # object_id → [worksheet]
 # topn-probes sidecar is rebuilt from scratch each run — append-only growth
 # left resolved/stale probes lingering across builds (review-caught).
 _stale_probes = opts[:out].sub(/\.json$/, '-topn-probes.json')
@@ -3927,6 +3948,16 @@ layout.each do |dash|
         # for every real pivot). Element filters don't prune a pivot's
         # dimension, so the ONLY correct emission is the pre-filtered source.
         (z['filters'] || []).reject { |f| f['is_action'] }.each do |f|
+          # D6/P0.5: a NATIVE Top-tab quick filter on a pivot — element filters
+          # don't prune a pivot dimension, so the only faithful emission is the
+          # rank-limited pre-filtered source. Surface it, never drop it.
+          if (tn = f['topn'])
+            warnings << "'#{cap}' native Tableau #{tn['end'] || 'top'}-N quick filter " \
+                        "(N=#{tn['n'] || tn['count_param'] || '?'}, ranked by #{tn['order_expr'].to_s[0..80]}) " \
+                        'targets a PIVOT — STAYS-MANUAL: build the rank-limited pre-filtered source ' \
+                        '(refs/fidelity-recipes.md §Ranked pivot)'
+            next
+          end
           tp = detect_topn_plan(f, z, mmap, meta)
           next unless tp
           unless tp['top_n']
@@ -3944,6 +3975,15 @@ layout.each do |dash|
                                 opts: opts, warnings: warnings, data_elements: data_elements,
                                 own_view_id: view_by_name[cap] && view_by_name[cap]['id'])
           break
+        end
+        # D2/P0.2: pivots exit the zone loop before the CSV flow's ds-filter
+        # merge, and element filters don't reliably prune a pivot anyway
+        # (round-4 bisect) — surface the datasource/extract row scoping loudly
+        # instead of silently over-reporting.
+        if ds_value_filters.any?
+          warnings << "'#{cap}' is a PIVOT — #{ds_value_filters.size} datasource/extract filter(s) NOT " \
+                      'auto-applied (element filters do not prune pivots); scope its SOURCE by hand ' \
+                      "(helper prefilter or DM filter): #{ds_value_filters.map { |f| f['column_caption'] || f['raw_param'] }.join(', ')[0..160]}"
         end
         elements << pivot_el
         warnings << "'#{cap}' auto-emitted as Sigma pivot-table from Tableau crosstab (rows/cols shelves) — verify dim placement"
@@ -5358,6 +5398,20 @@ layout.each do |dash|
     # period_type, etc.). We map the caption → master column via the same
     # regex map used for dim/measure.
     value_filters = (z['filters'] || []).reject { |f| f['is_action'] }
+    # D2/P0.2: append datasource-level + extract filters — Tableau applies them
+    # to every sheet on that datasource. Scope by the zone's shelf refs when
+    # the workbook is multi-datasource (`[federated.X]` tokens); a zone with no
+    # federated refs (single-DS shapes) gets them all. Skip a ds filter the
+    # worksheet already carries on the same column/kind (AND-composing an
+    # identical copy adds noise, not data).
+    ds_value_filters.each do |df|
+      dsn = df['datasource_name'].to_s
+      next unless dsn.empty? || _zds.nil? || _zshelves.include?("[#{dsn}]")
+      next if value_filters.any? do |f|
+        f['kind'] == df['kind'] && f['column_caption'] == df['column_caption']
+      end
+      value_filters << df
+    end
     el_filters = null_excl_filters
     # Element filters must reference a column ON THE TARGET ELEMENT (bead 320u)
     # — the master-namespace ids ("m-region") don't exist on the chart and the
@@ -5390,7 +5444,10 @@ layout.each do |dash|
     # (rowCount=N, rankingFunction row-number/rank) + sort the tile by it. An
     # untranslatable LOD operand is surfaced (build the helper measure first),
     # never emitted as a sort-dependent RowNumber.
-    value_filters.each do |f|
+    # Dispatch body extracted to a lambda (`next` still short-circuits one
+    # filter) so the driver loop below can attribute datasource-filter
+    # applications (D2/P0.2) without duplicating any arm.
+    emit_value_filter = lambda do |f|
       fcap = f['column_caption'] || f['raw_param']
       # --- Top-N idiom interception (before master-column resolution) ---------
       # (detection + prefilter emission shared with the pivot fast path via
@@ -5447,6 +5504,107 @@ layout.each do |dash|
                     "(rankingFunction:#{tp['ranking']}) ranked by #{rm[0..80]}#{ranked_col['id'] == "topn-#{el_id}" ? ' (hidden companion measure added)' : ''}"
         next
       end
+      # --- Native TOP-N quick filter (D6/P0.5): the Top tab's groupfilter
+      # `end/count/direction/order` tree, parsed by normalize_filter into
+      # f['topn']. Literal N → the SAME native emission as the RANK-calc path
+      # (kind:top-n element filter keyed on a hidden ranked-measure column;
+      # rowCount is a literal — Sigma rejects control-parametrized rowCount).
+      # Parameter-driven N → the RANK-helper + number-control idiom (Rank()
+      # companion + keep-if formula referencing the param's number control).
+      if (tn = f['topn'])
+        tn_label = fcap || 'top-N quick filter'
+        n_desc = tn['n'] || tn['count_param'] || '?'
+        if kind == 'pivot-table'
+          warnings << "'#{cap}' native Tableau top-N quick filter on '#{tn_label}' targets a PIVOT — " \
+                      'element filters do not prune a pivot dimension; STAYS-MANUAL: build the ' \
+                      "rank-limited pre-filtered source (refs/fidelity-recipes.md §Ranked pivot). N=#{n_desc}, " \
+                      "ranked by: #{tn['order_expr'].to_s[0..100]}"
+          next
+        end
+        if tn['units'].to_s =~ /percent/i
+          warnings << "'#{cap}' native top-N quick filter on '#{tn_label}' STAYS-MANUAL — PERCENT-based " \
+                      "(#{tn['end']} #{n_desc}%); Sigma's top-n filter takes a row count, not a percentile"
+          next
+        end
+        ranked = tn['order_expr'] ? translate_user_agg_formula(tn['order_expr'], mmap, meta['columns_by_guid'] || {}) : nil
+        if ranked.nil?
+          warnings << "'#{cap}' native top-N quick filter on '#{tn_label}' STAYS-MANUAL — order expression " \
+                      "did not translate: #{tn['order_expr'] || '(no order expression in the .twb)'}"
+          next
+        end
+        # end='top' takes the first N of the given ordering; end='bottom' the
+        # last N. DESC+top / ASC+bottom keep the HIGHEST values.
+        asc = tn['direction'].to_s.upcase == 'ASC'
+        keep_high = tn['end'] == 'bottom' ? asc : !asc
+        norm_f = ->(x) { x.to_s.gsub(/\s+/, '').downcase }
+        if tn['n'] # ---- literal N → native Sigma top-n element filter --------
+          # Sigma's top-n filter keeps the HIGHEST-ranked rows; a bottom-N
+          # keeps the lowest — rank by the sign-inverted measure instead.
+          rank_formula = keep_high ? ranked : "-(#{ranked})"
+          ranked_col = (element['columns'] || []).find { |c| norm_f.call(c['formula']) == norm_f.call(rank_formula) }
+          if ranked_col.nil?
+            ranked_col = { 'id' => "topnq-#{el_id}", 'name' => 'Top-N Rank Measure', 'formula' => rank_formula }
+            element['columns'] << ranked_col
+          end
+          el_filters << {
+            'columnId' => ranked_col['id'], 'kind' => 'top-n',
+            'rankingFunction' => 'rank', 'mode' => 'top-n',
+            'rowCount' => tn['n'], 'includeNulls' => 'never'
+          }
+          unless z['sort']
+            if element['xAxis'].is_a?(Hash) && element['xAxis']['sort'].nil?
+              element['xAxis']['sort'] = { 'by' => ranked_col['id'], 'direction' => 'descending' }
+            elsif kind == 'table' && element.dig('groupings', 0) && element['groupings'][0]['sort'].nil?
+              element['groupings'][0]['sort'] = [{ 'columnId' => ranked_col['id'], 'direction' => 'descending' }]
+            end
+          end
+          warnings << "'#{cap}' native Tableau #{keep_high ? 'top' : 'bottom'}-#{tn['n']} quick filter on " \
+                      "'#{tn_label}' → Sigma top-n element filter (rowCount:#{tn['n']}, ranked by " \
+                      "#{tn['order_expr'].to_s[0..80]}#{keep_high ? '' : ', sign-inverted for bottom-N'})"
+          next
+        end
+        # ---- parameter-driven N → RANK helper + number control ---------------
+        token = tn['count_param'].to_s[/\[Parameters?[^\]]*\]\s*\.\s*\[([^\]]+)\]/, 1] ||
+                tn['count_param'].to_s.gsub(/^\[|\]$/, '')
+        pdef = (meta['parameters'] || []).find do |p|
+          p['caption'].to_s == token || p['name'].to_s.gsub(/^\[|\]$/, '') == token
+        end
+        pcap = pdef && pdef['caption'].to_s.strip
+        if pcap.nil? || pcap.empty?
+          warnings << "'#{cap}' native top-N quick filter on '#{tn_label}' STAYS-MANUAL — parameter-driven " \
+                      "count (#{tn['count_param']}) but no matching workbook parameter was found"
+          next
+        end
+        ctl = "ctl-param-#{pcap.downcase.gsub(/\W+/, '-').sub(/-$/, '')}"
+        rank_id = "topnq-rank-#{el_id}"
+        rank_name = "Top-N Rank (#{tn_label})"
+        keep_id = "topnq-keep-#{el_id}"
+        unless (element['columns'] || []).any? { |c| c['id'] == rank_id }
+          element['columns'] << { 'id' => rank_id, 'name' => rank_name,
+                                  'formula' => "Rank(#{ranked}, \"#{keep_high ? 'desc' : 'asc'}\")" }
+          # Text (not boolean) keep flag: live probes reject non-string list
+          # filter values (Text() casting rule, sigma ground truth §E.10).
+          element['columns'] << { 'id' => keep_id, 'name' => "Top-N Keep (#{tn_label})",
+                                  'formula' => "If([#{rank_name}] <= [#{ctl}], \"keep\", \"cut\")" }
+        end
+        el_filters << {
+          'columnId' => keep_id, 'kind' => 'list', 'mode' => 'include',
+          'selectionMode' => 'multiple', 'values' => ['keep'], 'includeNulls' => 'never'
+        }
+        warnings << "'#{cap}' parameter-driven #{keep_high ? 'top' : 'bottom'}-N quick filter on '#{tn_label}' " \
+                    "→ Rank() helper + keep-filter wired to number control [#{ctl}] (param '#{pcap}', " \
+                    "default N=#{pdef['default_value']}) ranked by #{tn['order_expr'].to_s[0..80]}"
+        next
+      end
+      # --- WILDCARD quick filter (D5/P0.6): parsed pattern → a hidden string
+      # match column + keep-filter (worksheet-scoped filters have no card to
+      # bind, so the match is applied as an element filter). Unparseable
+      # pattern → loud STAYS-MANUAL, never a silent "All".
+      if f['kind'] == 'wildcard' && f['wildcard'].nil?
+        warnings << "'#{cap}' WILDCARD quick filter on '#{fcap}' STAYS-MANUAL — pattern expression did not " \
+                    "parse (#{f['wildcard_unparsed'].to_s[0..120]}); NOT treated as 'All', no filter emitted"
+        next
+      end
       m = fcap ? map_column(fcap, mmap) : nil
       if m.nil?
         warnings << "value filter on '#{cap}' targets '#{fcap}' — no master column matched, skipping"
@@ -5458,16 +5616,28 @@ layout.each do |dash|
         # is only materialized for explicit selections). An empty Sigma
         # include-list would filter out EVERY row — skip it (bead 320u).
         if (f['members'] || []).empty?
-          warnings << "'#{cap}' quick filter on '#{fcap}' has no explicit members (Tableau 'All') — no Sigma element filter emitted"
+          warnings << if f['exclude']
+                        "'#{cap}' EXCLUDE quick filter on '#{fcap}' carries no explicit members — nothing to exclude; no Sigma element filter emitted"
+                      else
+                        "'#{cap}' quick filter on '#{fcap}' has no explicit members (Tableau 'All') — no Sigma element filter emitted"
+                      end
           next
         end
         fcol = el_filter_col_for.call(m)
         next if fcol.nil? # helper-sourced chart, column unreachable (warned in el_filter_col_for)
+        # D1/P0.1: an EXCLUDE-mode Tableau filter enumerates the values it
+        # HIDES — emit mode:'exclude' (Sigma list filters support it) instead
+        # of inverting the filter into an include list of the excluded members.
         el_filters << {
           'columnId' => fcol,
-          'kind' => 'list', 'mode' => 'include', 'selectionMode' => 'multiple',
+          'kind' => 'list', 'mode' => (f['exclude'] ? 'exclude' : 'include'),
+          'selectionMode' => 'multiple',
           'values' => f['members'], 'includeNulls' => 'never'
         }
+        if f['exclude']
+          warnings << "'#{cap}' EXCLUDE quick filter on '#{fcap}' → Sigma list filter mode:exclude " \
+                      "(#{f['members'].size} hidden value(s): #{f['members'].join(', ')[0..80]})"
+        end
       when 'relative-date'
         # Tableau relative-date filters → ROLLING Sigma date-range filters:
         #   "this <period>" (first=last=0)      → mode:current unit:<unit>
@@ -5504,7 +5674,51 @@ layout.each do |dash|
           'columnId' => fcol, 'kind' => 'number-range', 'mode' => 'between',
           'min' => f['min'], 'max' => f['max'], 'includeNulls' => 'never'
         }
+      when 'wildcard'
+        # D5/P0.6 (parsed pattern; the unparseable shape was intercepted above).
+        # Worksheet-scoped wildcard → hidden Contains/StartsWith/EndsWith match
+        # column + keep-filter. Text values only (numeric/boolean list values
+        # 400 at runtime — Text() casting rule).
+        fcol = el_filter_col_for.call(m)
+        next if fcol.nil? # helper-sourced chart, column unreachable (warned in el_filter_col_for)
+        wc = f['wildcard']
+        match_fn = {
+          'contains' => 'Contains', 'does-not-contain' => 'Contains',
+          'starts-with' => 'StartsWith', 'does-not-start-with' => 'StartsWith',
+          'ends-with' => 'EndsWith', 'does-not-end-with' => 'EndsWith'
+        }[wc['mode'].to_s]
+        if match_fn.nil?
+          warnings << "'#{cap}' wildcard filter on '#{fcap}' mode #{wc['mode'].inspect} has no match-function mapping — STAYS-MANUAL"
+          next
+        end
+        negated = wc['mode'].to_s.start_with?('does-not-')
+        pat_lit = JSON.generate(wc['pattern'].to_s)
+        wcid = "wc-#{el_id}-#{fcol}"
+        unless (element['columns'] || []).any? { |c| c['id'] == wcid }
+          element['columns'] << {
+            'id' => wcid, 'name' => "Wildcard Match (#{m['name']})",
+            'formula' => "If(#{match_fn}([#{m['name']}], #{pat_lit}), \"match\", \"no-match\")"
+          }
+        end
+        el_filters << {
+          'columnId' => wcid, 'kind' => 'list', 'mode' => 'include',
+          'selectionMode' => 'multiple', 'values' => [negated ? 'no-match' : 'match'],
+          'includeNulls' => 'never'
+        }
+        warnings << "'#{cap}' WILDCARD quick filter on '#{fcap}' → #{match_fn}() match column + " \
+                    "keep-filter (#{wc['mode']} #{pat_lit}; Tableau-style match is case-sensitive here — verify)"
+      when 'list+condition', 'unknown'
+        # No silent skips (the old dispatch had no arm here — condition-only and
+        # unknown filter classes vanished without a trace).
+        warnings << "'#{cap}' quick filter on '#{fcap}' (kind=#{f['kind']}" \
+                    "#{f['condition_expressions'] ? "; conditions: #{Array(f['condition_expressions']).join('; ')[0..120]}" : ''}) " \
+                    'has no element-filter mapping — STAYS-MANUAL, no Sigma element filter emitted'
       end
+    end
+    value_filters.each do |f|
+      applied_before = el_filters.length
+      emit_value_filter.call(f)
+      ds_filter_applications[f.object_id] << cap if f['_ds_scope'] && el_filters.length > applied_before
     end
     # Every element filter needs a unique `id` (the live /v2/workbooks/.../spec
     # readback shows `id: flt-<element>-<n>`); the API rejects filters without it.
@@ -5673,6 +5887,27 @@ layout.each do |dash|
     element['_worksheet'] = cap
     element['_dashboard'] = dash['dashboard']
     elements << element
+  end
+end
+
+# ---- D2/P0.2 loud summary: datasource/extract filter application -----------
+# Every parsed datasource-level (and extract) filter must be visibly accounted
+# for: which elements now carry it, or a NOT-applied warning (unmapped column /
+# unsupported kind) so the over-reporting risk is never silent.
+ds_value_filters.each do |df|
+  label = df['column_caption'] || df['raw_param']
+  scope_word = df['filter_scope'] == 'extract' ? 'EXTRACT filter' : 'DATASOURCE filter'
+  applied = ds_filter_applications[df.object_id].uniq
+  if applied.any?
+    warnings << "#{scope_word} on '#{label}' (#{df['kind']}#{df['exclude'] ? ' exclude' : ''}" \
+                "#{(df['members'] || []).any? ? ": #{df['members'].join(', ')[0..80]}" : ''}) from " \
+                "datasource '#{df['datasource']}' applied as an element filter on #{applied.size} " \
+                "element(s): #{applied.join(', ')[0..200]}" \
+                "#{df['filter_scope'] == 'extract' ? ' [provenance: Tableau EXTRACT filter — rows were pre-filtered at extract time]' : ''}"
+  else
+    warnings << "#{scope_word} on '#{label}' from datasource '#{df['datasource']}' was NOT applied to any " \
+                'element (unmapped column, unsupported kind, or no element on that datasource) — every sheet ' \
+                'on it may OVER-REPORT; wire the filter by hand (element filters or a DM-level filter)'
   end
 end
 
@@ -6433,6 +6668,24 @@ unless opts[:no_auto_controls]   # default-on: never miss a .twb parameter/filte
       warnings << "shared filter ##{i} has no resolvable column_caption (raw_param=#{f['raw_param']}) — skipping auto-control"
       next
     end
+    # D6/P0.5: a SHARED native top-N quick filter has no member list to seed a
+    # control from, and its data effect (rank + N + direction) cannot ride a
+    # list control. Name every parsed fact loudly — the old path mislabeled it
+    # via the generic condition warning with N and direction dropped.
+    if (tn = f['topn'])
+      slug = cap.downcase.gsub(/\W+/, '-').sub(/-$/, '')
+      n_desc = tn['n'] || tn['count_param'] || '?'
+      warnings << "shared quick filter '#{cap}' is a native Tableau #{tn['end'] || 'top'}-N " \
+                  "(N=#{n_desc}, direction=#{tn['direction'] || 'DESC'}#{tn['units'] ? ", units=#{tn['units']}" : ''}) " \
+                  "ranked by: #{tn['order_expr'].to_s[0..100]} — auto-control NOT emitted; wire the per-tile " \
+                  'top-N (kind:top-n element filter / rank helper + number control) by hand — needs-wiring'
+      control_scope_records << {
+        'controlId' => "ctl-#{slug}", 'name' => cap.strip, 'mechanism' => 'filters',
+        'source_signal' => "tableau shared top-N quick filter '#{cap}' (#{tn['end'] || 'top'} #{n_desc} by #{tn['order_expr'].to_s[0..80]})",
+        'status' => 'needs-wiring'
+      }
+      next
+    end
     m = map_column(cap, mmap)
     if m.nil?
       # Calc-bound filter that's ALREADY materialized on the master under its
@@ -6512,12 +6765,18 @@ unless opts[:no_auto_controls]   # default-on: never miss a .twb parameter/filte
       # radiolist zones → segmented (single-select); everything else a
       # column-backed multi-select list. list+condition keeps the member list
       # control; the CONDITION itself is not a control — surface it.
+      # D1/P0.1: an EXCLUDE-mode filter always emits a multi-select LIST in
+      # mode:'exclude' seeded with the excluded members (segmented is a
+      # single-pick include widget — wrong semantics), so the dashboard OPENS
+      # with Tableau's hidden values hidden, not shown.
       disp = control_display_for(layout, cap, norm_cap)
-      spec['controlType'] = disp == 'radiolist' ? 'segmented' : 'list'
+      spec['controlType'] = disp == 'radiolist' && !f['exclude'] ? 'segmented' : 'list'
       if spec['controlType'] == 'list'
-        spec['mode']          = 'include'
+        spec['mode']          = f['exclude'] ? 'exclude' : 'include'
         spec['selectionMode'] = 'multiple'
-        spec['values']        = []  # default to all; user adjusts in UI
+        # include: default to all, user adjusts in UI. exclude: the selection
+        # IS the excluded member set — shipping [] would show the hidden rows.
+        spec['values']        = f['exclude'] ? (f['members'] || []) : []
       end
       spec['source'] = {
         'kind'     => 'source',
@@ -6525,6 +6784,10 @@ unless opts[:no_auto_controls]   # default-on: never miss a .twb parameter/filte
         'columnId' => m['id']
       }
       spec['filters'] = targets
+      if f['exclude']
+        warnings << "quick filter '#{cap}' is EXCLUDE-mode → list control mode:exclude seeded with " \
+                    "#{(f['members'] || []).size} excluded value(s): #{(f['members'] || []).join(', ')[0..80]}"
+      end
       if f['kind'] == 'list+condition'
         warnings << "quick filter '#{cap}' carries a CONDITION beyond its member list " \
                     "(#{Array(f['condition_expressions']).join('; ')[0, 120]}) — the member control is emitted; " \
@@ -6584,6 +6847,24 @@ unless opts[:no_auto_controls]   # default-on: never miss a .twb parameter/filte
       end
       spec['includeNulls'] = 'when-no-value-is-selected'
       spec['filters'] = targets
+    when 'wildcard'
+      # D5/P0.6: wildcard card → Sigma TEXT control (modes contains/starts-with/
+      # ends-with + negations, per the live control spec) targeting the column.
+      # Unparseable pattern → loud STAYS-MANUAL (never a silent select-all).
+      if f['wildcard'].nil?
+        rec = control_scope_records.reverse.find { |r| r['controlId'] == spec['controlId'] }
+        rec['status'] = 'needs-wiring' if rec
+        warnings << "shared WILDCARD filter '#{cap}' STAYS-MANUAL — pattern expression did not parse " \
+                    "(#{f['wildcard_unparsed'].to_s[0..120]}); control NOT emitted, NOT treated as 'All'"
+        next
+      end
+      spec['controlType'] = 'text'
+      spec['mode']  = f['wildcard']['mode']
+      spec['value'] = f['wildcard']['pattern']
+      spec['includeNulls'] = 'when-no-value-is-selected'
+      spec['filters'] = targets
+      warnings << "shared WILDCARD filter '#{cap}' → Sigma text control mode:#{f['wildcard']['mode']} " \
+                  "value:#{f['wildcard']['pattern'].inspect} targeting #{targets.size} root(s)"
     else
       # Unknown filter kind: NEVER append a controlType-less spec (controlType
       # is REQUIRED on every schema branch — the old fallthrough shipped an
@@ -6755,7 +7036,7 @@ elements.each do |el|
   bad = (el['columns'] || []).select do |c|
     c['formula'].to_s.scan(/\[[^\]\/]+\/([^\]]+)\]/).flatten.any? do |inner|
       # FUNCTION-CALL shapes and pill qualifiers only. Legit captions carry
-      # parens too ('GDP (current US$)', 'Cost (copy)_123' — real resolvable
+      # parens too ('Revenue (current US$)', 'Cost (copy)_123' — real resolvable
       # DM columns in the corpus; review-caught: a blanket paren test dropped
       # them), so match aggregate/window CALLS, not punctuation. The match is
       # CASE-SENSITIVE: leaked twb formulas are canonically UPPERCASE, while
@@ -7099,6 +7380,28 @@ stamp_filter_ids.call(elements)
 stamp_filter_ids.call(data_elements)
 stamp_filter_ids.call(all_extras) if defined?(all_extras)
 
+# v5.5 CHART PROVENANCE (field-caught wrong-view parity): element id → the
+# Tableau WORKSHEET name that built it (unique per workbook — Tableau enforces
+# it) + dashboard. Sigma tile DISPLAY names are the worksheet display_titles,
+# which are NOT unique across dashboards: auto-parity-plan's display-name
+# back-match double-mapped 5 views and dropped 5 on a 29-chart field workbook,
+# and silently parity-checked tiles against the WRONG same-titled view. This
+# map is the collision-free join auto-parity-plan.rb consumes FIRST (display-
+# name matching stays only as a warned fallback for hand-added charts).
+# Captured HERE while elements still carry _worksheet; the page-per-dashboard
+# emitter adds its namespaced duplicate ids below; written to
+# <tableau-dir>/chart-provenance.json after the emitters run.
+$chart_provenance = {}
+elements.each do |e|
+  ws = e['_worksheet'].to_s
+  next if ws.empty? || e['id'].to_s.empty?
+  $chart_provenance[e['id'].to_s] ||= {
+    'worksheet' => ws,
+    'dashboard' => e['_dashboard'],
+    'name'      => (e['name'].is_a?(String) ? e['name'] : nil)
+  }.compact
+end
+
 # ---- Output mode ----
 #   Default       → flat array of elements (legacy behaviour). Extras first.
 #   --page-per-worksheet → emit { pages: [{name, elements:[]}] }. One page per
@@ -7250,6 +7553,13 @@ elsif opts[:pages_mode] == :dashboard
         # sidecar too (written post-emitters) — exact-id matching in
         # put-layout would otherwise leak the copy's title chrome
         ($hidden_title_ns_ids ||= []) << ns if ($hidden_title_ids || []).include?(stem)
+        # provenance for the namespaced copy: same WORKSHEET, this dashboard —
+        # auto-parity-plan keys the join by element id, so every posted copy
+        # must resolve to its worksheet (both copies verify against the same
+        # view CSV by design).
+        if (pv = $chart_provenance[stem])
+          $chart_provenance[ns] = pv.merge('dashboard' => dash_name)
+        end
         src_before = el.dig('source', 'elementId')
         el2 = JSON.parse(el.to_json.gsub(stem, ns))
         # v5.1.3: the stem gsub also rewrites a source.elementId that EMBEDS
@@ -7320,6 +7630,20 @@ begin
   end
 rescue => e
   warnings << "hidden-titles sidecar write error (titles stay visible): #{e.message}"
+end
+
+# chart-provenance sidecar WRITE — after the emitters so page-per-dashboard's
+# namespaced duplicate ids are included. ALWAYS written (possibly empty) so
+# auto-parity-plan can tell "no charts built" from "builder predates
+# provenance" (an absent file ⇒ warned display-name fallback matching).
+begin
+  if opts[:tab]
+    pv_path = File.join(opts[:tab], 'chart-provenance.json')
+    File.write(pv_path, JSON.pretty_generate({ 'version' => 1, 'elements' => $chart_provenance }))
+    warn "wrote #{pv_path} (#{$chart_provenance.size} element→worksheet provenance entr(y/ies) for auto-parity-plan)"
+  end
+rescue => e
+  warn "  WARN  chart-provenance sidecar write error (parity plan falls back to display-name matching): #{e.message}"
 end
 
 # ---- Intended-scope contract (control-scope.json) ---------------------------
@@ -7718,3 +8042,113 @@ File.write(coverage_path, JSON.pretty_generate(
 warn "wrote #{coverage_path} (#{built_n} element(s) built; " \
      "#{by_sev['dropped'] || 0} dropped, #{by_sev['degraded'] || 0} degraded, " \
      "#{by_sev['approximated'] || 0} approximated)"
+
+# ---- manual-residues.json — the G6 build-it ledger ---------------------------
+# Phase 1e (extract-calc-fields.rb WINPROBE split) routes the STAYS-MANUAL
+# window/table-calc residues (requires_custom_sql) to the Custom SQL path
+# CORRECTLY — but nothing bound the routed measure to the tile that plots it:
+# the build silently shipped the tile with a magnitude proxy and the divergence
+# surfaced only at Phase 6 (~2h later; the single gap that kept run 2 YELLOW).
+# This ledger names every requires_custom_sql calc that a png-read tile (its
+# `measure` — string or {"manual_residue": "<calc>"} — or its worksheet's
+# measure shelf) declares as its measure:
+#   { calc, formula, tile, suggested_sql (OVER() skeleton), status: "unbuilt" }
+# The orchestrator BLOCKS pass-1 completion on 'unbuilt' entries (exit 16) and
+# assert-phase6-ran refuses GREEN until each is 'built' (or waived via
+# --accept-manual-residues). Statuses are MERGED across re-builds by
+# (calc, tile) so a bound residue never resets to 'unbuilt'.
+begin
+  _mr_nk = ->(s) { s.to_s.upcase.gsub(/[^0-9A-Z]/, '') }
+  _cf = (JSON.parse(File.read(File.join(opts[:tab], 'calc-fields.json'))) rescue nil)
+  _residue_calcs = Array(_cf.is_a?(Hash) ? _cf['calcs'] : nil)
+                   .select { |c| c.is_a?(Hash) && c['requires_custom_sql'] && !c['name'].to_s.strip.empty? }
+  _prd = (JSON.parse(File.read(DashboardRead.path(opts[:tab]))) rescue nil)
+  _mr_tiles = Array(_prd.is_a?(Hash) ? _prd['tiles'] : nil).select { |t| t.is_a?(Hash) }
+  _ledger_path = File.join(opts[:tab], 'manual-residues.json')
+  if _residue_calcs.any? && _mr_tiles.any?
+    # ANSI OVER() hints for the STAYS-MANUAL family (refs/window-functions.md).
+    _ansi = {
+      'FIRST' => 'FIRST_VALUE(<expr>)', 'LAST' => 'LAST_VALUE(<expr>)',
+      'SIZE' => 'COUNT(*)', 'PREVIOUS_VALUE' => 'LAG(<expr>, 1)',
+      'RANK_UNIQUE' => 'ROW_NUMBER()', 'RANK_MODIFIED' => 'RANK()',
+      'WINDOW_MEDIAN' => 'MEDIAN(<expr>)',
+      'WINDOW_PERCENTILE' => 'PERCENTILE_CONT(<p>) WITHIN GROUP (ORDER BY <expr>)',
+      'WINDOW_STDEVP' => 'STDDEV_POP(<expr>)', 'WINDOW_VARP' => 'VAR_POP(<expr>)',
+      'WINDOW_VAR' => 'VAR_SAMP(<expr>)', 'WINDOW_CORR' => 'CORR(<x>, <y>)',
+      'WINDOW_COVARP' => 'COVAR_POP(<x>, <y>)', 'WINDOW_COVAR' => 'COVAR_SAMP(<x>, <y>)',
+      'LOOKUP' => 'LAG/LEAD(<expr>, <n>)' # rides along inside MANUAL chains (e.g. LOOKUP(..., FIRST()))
+    }
+    _suggest = lambda do |calc|
+      # v5.6 (calc-flex item 4): extract-calc-fields emits READY grouped-helper
+      # SQL for named auto-translatable subclasses (manual_subclass:
+      # 'index-to-first', LOOKUP(agg, FIRST())). Prefer it over the generic
+      # skeleton so the build-it checklist carries paste-ready SQL.
+      ready = calc['suggested_sql'].to_s
+      next ready unless ready.strip.empty?
+      fns = _ansi.keys.select { |fn| calc['formula'].to_s =~ /\b#{Regexp.escape(fn)}\s*\(/i }
+      lines = ["-- Custom SQL (OVER()) skeleton for \"#{calc['name']}\" — replace every <...>;",
+               '-- route: refs/phase-3-datamodel.md "Custom SQL data-model element" + refs/window-functions.md']
+      lines += fns.map { |fn| "--   #{fn} -> #{_ansi[fn]} OVER (PARTITION BY <pane dims> ORDER BY <axis dim>)" }
+      lines << %(SELECT <tile dims>, <axis dim>, <window expr for the Tableau formula> AS "#{calc['name']}")
+      lines << 'FROM ( SELECT <tile dims>, <axis dim>, <base aggregates> FROM <landed fact table>'
+      lines << '       GROUP BY <tile dims>, <axis dim> ) t'
+      lines.join("\n")
+    end
+    _entries = []
+    _mr_tiles.each do |t|
+      title = t['title'].to_s
+      cands = []
+      m = t['measure']
+      if m.is_a?(Hash)
+        cands << m['manual_residue'].to_s
+      elsif m
+        cands << m.to_s
+      end
+      cands.concat(Array(t['measures']).map(&:to_s)) if t['measures'].is_a?(Array)
+      # The tile's WORKSHEET measure shelf: a residue plotted as [Calculation_N]
+      # resolves to its caption via the worksheet's calculations list.
+      wsm = meta['worksheets'] || {}
+      wm = wsm[title] || (wsm.find { |k, _| _mr_nk.call(k) == _mr_nk.call(title) } || []).last
+      if wm.is_a?(Hash)
+        calc_caps = {}
+        Array(wm['calculations']).each do |c|
+          next unless c.is_a?(Hash)
+          nm = c['name'].to_s.gsub(/\A\[|\]\z/, '')
+          calc_caps[nm] = c['caption'].to_s.empty? ? nm : c['caption'].to_s
+        end
+        Array(wm['measures']).each do |mm|
+          col = (mm.is_a?(Hash) ? mm['column'] : mm).to_s.gsub(/\A\[|\]\z/, '')
+          cands << (calc_caps[col] || col)
+        end
+      end
+      cand_keys = cands.map { |c| _mr_nk.call(c) }.reject(&:empty?)
+      _residue_calcs.each do |c|
+        next unless cand_keys.include?(_mr_nk.call(c['name']))
+        _entries << { 'calc' => c['name'], 'formula' => c['formula'], 'tile' => title,
+                      'suggested_sql' => _suggest.call(c), 'status' => 'unbuilt' }
+      end
+    end
+    _entries.uniq! { |e| [e['calc'], e['tile']] }
+    # Merge prior statuses (a residue marked 'built' stays built on re-build).
+    _prev = (JSON.parse(File.read(_ledger_path)) rescue nil)
+    _prev_entries = _prev.is_a?(Hash) ? Array(_prev['residues']) : Array(_prev)
+    _prev_by_key = {}
+    _prev_entries.each { |e| _prev_by_key[[e['calc'].to_s, e['tile'].to_s]] = e if e.is_a?(Hash) }
+    _entries.each do |e|
+      old = _prev_by_key[[e['calc'], e['tile']]]
+      next unless old
+      e['status'] = old['status'] unless old['status'].to_s.strip.empty?
+      e['note'] = old['note'] if old['note']
+    end
+    if _entries.any? || File.exist?(_ledger_path)
+      File.write(_ledger_path, JSON.pretty_generate('version' => 1, 'residues' => _entries))
+      if _entries.any?
+        _n_unbuilt = _entries.count { |e| e['status'] == 'unbuilt' }
+        warn "manual-residues: #{_entries.size} window/table-calc residue(s) plotted by dashboard tiles " \
+             "(#{_n_unbuilt} unbuilt — pass-1 BLOCKS until built/waived) -> #{_ledger_path}"
+      end
+    end
+  end
+rescue StandardError => e
+  warn "WARN: manual-residues ledger skipped (#{e.class}: #{e.message})"
+end

@@ -1,7 +1,7 @@
 # thoughtspot / retail-analytics
 
 ThoughtSpot "Retail Analytics" model + "Sales Overview" liveboard TML, exported
-2026-06-04 from a ThoughtSpot trial over the synthetic CSA.TJ retail
+2026-06-04 from a ThoughtSpot trial over the synthetic DEMO_DB.DEMO retail
 star schema.
 
 ## Artifacts
@@ -30,7 +30,7 @@ builder, not this converter — no golden for it.)
 
 Liveboard ground truth: Total Net Revenue KPI = **108,797.85** (see
 `migration_manifest.json` ground_truth in the original
-~/thoughtspot-migration capture; drifts if CSA.TJ data changes).
+~/thoughtspot-migration capture; drifts if DEMO_DB.DEMO data changes).
 
 ## Expectations
 

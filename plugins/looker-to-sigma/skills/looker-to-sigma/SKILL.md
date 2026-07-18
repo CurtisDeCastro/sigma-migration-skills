@@ -131,7 +131,7 @@ python3 scripts/migrate-looker.py --lookml-dir /path/to/lookml \
   `Dependency not found`; that footgun is now opt-in via `--reuse-auto`.) Skip the
   scan entirely with `--skip-dm-reuse-check`. The folder is auto-resolved + printed.
 - **Source repointing:** if the LookML `sql_table_name` points at a DB.SCHEMA the
-  Sigma connection doesn't serve (e.g. dev `CSA.TJ.*` vs the connection's
+  Sigma connection doesn't serve (e.g. dev `DEMO_DB.DEMO.*` vs the connection's
   `QUICKSTARTS.LOOKER_RETAIL_ANALYTICS.*`), pass
   `--source-swap FROM_DB.FROM_SCHEMA=TO_DB.TO_SCHEMA` (repeatable). A not-yet-indexed
   schema (catalog miss) self-heals — `post_dm.py` auto-syncs and retries once.
@@ -192,9 +192,9 @@ python3 scripts/migrate-looker.py --lookml-dir /path/to/lookml \
 | `scripts/looker-render-dashboard.py` | **Phase 4 (visual QA — SOURCE side):** render a LIVE Looker dashboard to PNG via the Looker render API (`POST /render_tasks/dashboards/{id}/png` → poll `GET /render_tasks/{task_id}` until `success` → `GET .../results`). Pairs with `sigma-export-png.py` for source-vs-migrated side-by-side. Reuses `looker_api.py` `~/.looker/looker.ini` auth. `python3 looker-render-dashboard.py <dashboard_id> [out.png] [--w 1200 --h 1600]`. |
 | `scripts/looker-render-look.py` | **Phase 4 (visual QA — SOURCE side, Looks):** render a LIVE Look to PNG via `GET /looks/{id}/run/png` (SYNCHRONOUS — no render-task poll). The Look analog of `looker-render-dashboard.py`; pairs with `sigma-export-png.py`. `python3 looker-render-look.py <look_id> [out.png] [--w 1200 --h 900]`. |
 | `scripts/sigma-export-png.py` | **Phase 4 (visual QA — MIGRATED side):** render a posted workbook page or element to PNG via `POST /v2/workbooks/{id}/export` → poll `GET /v2/query/{queryId}/download`. For side-by-side layout/render checks against the source Looker dashboard render (catches hidden KPI titles, orphaned filters, overlaps, bare-number vs `$`/`%` formats that a numeric parity check can't). **Read each migrated PNG and check it against `refs/layout-visual-qa.md` (mandatory gate — see Phase 4a).** Reads `$SIGMA_BASE_URL`/`$SIGMA_API_TOKEN`. `python3 sigma-export-png.py --workbook <id> --page <pageId> --out /tmp/x.png` (or `--element <id>`). |
-| `scripts/build_looker_dashboard.py` | **TEST-FIXTURE BUILDER (not a migration step).** Builds the "Orders Overview" UDD on `csa_thelook` via the Looker API (4 KPIs + line/column/bar/pie + grid, 3 filters wired via `result_maker.filterables.listen`). |
+| `scripts/build_looker_dashboard.py` | **TEST-FIXTURE BUILDER (not a migration step).** Builds the "Orders Overview" UDD on `demo_thelook` via the Looker API (4 KPIs + line/column/bar/pie + grid, 3 filters wired via `result_maker.filterables.listen`). |
 | `scripts/build_looker_dashboard2.py` | **TEST-FIXTURE BUILDER (not a migration step).** Builds the "Orders Deep Dive" UDD — area, pivot, table-calcs, scatter, donut, text tile — the harder dashboard surface for the converter. |
-| `scripts/build_looker_look.py` | **TEST-FIXTURE BUILDER (not a migration step).** Creates a matrix of test Looks on `csa_thelook`/`order_fact` (grouped table, measure-only, dims-only, bar, pivot, and a `dynamic_fields` custom measure) to exercise the Look → grouped-table / pivot / KPI / chart converter. `POST /queries` then `POST /looks`. `python3 build_looker_look.py [looker_folder_id]`. |
+| `scripts/build_looker_look.py` | **TEST-FIXTURE BUILDER (not a migration step).** Creates a matrix of test Looks on `demo_thelook`/`order_fact` (grouped table, measure-only, dims-only, bar, pivot, and a `dynamic_fields` custom measure) to exercise the Look → grouped-table / pivot / KPI / chart converter. `POST /queries` then `POST /looks`. `python3 build_looker_look.py [looker_folder_id]`. |
 | `scripts/record-visual-check.rb` | **Phase 4a (visual gate):** record the agent's source-vs-target visual verdict into `parity-final.json` so `assert-phase6-ran.rb` gate 8b can confirm the comparison happened (not a prose "I looked"). Shared/vendored byte-identical with the other migration plugins. `ruby record-visual-check.rb --workdir <dir> --agent-vision true --verdict pass --screenshot <png> --checklist "…" --notes "…"`. |
 | `scripts/gap-scout.md` | **Gap scout (converter gaps):** runbook for the main agent — when/how to spawn a scout subagent for a LookML construct the converter can't translate, the LookML→Sigma candidate table, and the opt-in issue-filing flow. Read before spawning. |
 | `scripts/scout-validate.py` | **Gap scout:** validate a candidate Sigma formula against a real DM element (throwaway test workbook → check column type ≠ `error` → delete), persist a win to `~/.looker-to-sigma/learned-rules.yaml`, or return an opt-in `escalation` block on failure. Also a quick "does this formula resolve?" check for Phase-4 validation. Reads `$SIGMA_BASE_URL`/`$SIGMA_API_TOKEN`. |
@@ -324,7 +324,7 @@ API.** Note: a deployed LookML dashboard does NOT auto-index for `import_lookml_
 
 > **No live instance?** A GCP free-trial account CANNOT provision Looker (instance quota is
 > `isFixed` = 0, Sales-gated). Build/test from sample LookML + the offline path. The validated
-> end-to-end run used a real `example.cloud.looker.com` instance pointed at `CSA.TJ`.
+> end-to-end run used a real `example.cloud.looker.com` instance pointed at `DEMO_DB.DEMO`.
 
 ### 1d. Scan for row-level security (RLS) — cheap, silent if none
 
@@ -427,7 +427,7 @@ plain DM/element filter; `access_grant` → the recorded note. (Team mode =
 `CurrentUserInTeam([...])`; user-email mode = `[Email] = CurrentUserEmail()`.)
 
 > **Proof:** this exact scripted flow was validated live end-to-end 2026-06-10 (a live Looker instance →
-> Sigma tj-wells-1989, `csa_thelook` order_fact, `region`/West) with **exact 3-way parity** —
+> Sigma the demo Sigma org, `demo_thelook` order_fact, `region`/West) with **exact 3-way parity** —
 > Looker-restricted == Sigma-restricted == warehouse = **$38,906.82 / 220 rows**.
 
 ---
@@ -581,7 +581,7 @@ bash -c 'eval "$(scripts/get-token.sh)" && \
 ```
 
 - Endpoint is `POST /v2/dataModels/spec` (NOT `/v2/workbooks/spec`).
-- **Use the FULL connection UUID** (e.g. `bc0319f8-9fe0-4315-aea3-6a2d1eef0623`), not a short
+- **Use the FULL connection UUID** (e.g. `ab12cd34-5678-40ab-8def-1234567890ab`), not a short
   prefix — `convert_dm.mjs` writes a placeholder `connectionId`; `post_dm.py` swaps in
   `$SIGMA_CONNECTION_ID`.
 - **`folderId` is required** — `post_dm.py` auto-picks a writable folder (preferring one whose

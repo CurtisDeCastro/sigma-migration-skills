@@ -124,7 +124,7 @@ module RankConnections
   # backed by these has no warehouse signal in its own /connections (serverAddress
   # is empty) — the real warehouse must be resolved from the published datasource
   # or virtual connection (fingerprint_via_published_source). Field-caught on
-  # "Orders Executive Overview" (all Sigma connections scored 0).
+  # "orders e2e workbook" (all Sigma connections scored 0).
   INDIRECT_CLASSES = %w[publishedconnection sqlproxy].to_set.freeze
 
   def fingerprint_from_wb_connections(list)

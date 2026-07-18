@@ -29,7 +29,7 @@
 #     --twb /tmp/<name>/workbook-content.twb \
 #     --custom-sql /tmp/<name>/custom-sql.json \
 #     [--columns /tmp/<name>/probed-columns.json]  # {"<PubDS or caption>": ["col", ...]}
-#     --db CSA --schema TJ \
+#     --db <DB> --schema <SCHEMA> \
 #     --out /tmp/<name>/workbook-hydrated.twb
 #
 # The module (HydrateCustomSql) is pure/offline and unit-tested by
@@ -171,6 +171,37 @@ module HydrateCustomSql
   def sqlproxy_connection?(conn)
     return false unless conn
     (conn.attributes['class'].to_s == 'sqlproxy')
+  end
+
+  # Connection classes whose dbname is NOT a warehouse database: sqlproxy's is a
+  # published-DS contentUrl, hyper/file classes carry a file path, and a virtual
+  # connection's is the VC name. None of them may seed a warehouse table path.
+  NON_WAREHOUSE_CLASSES = %w[sqlproxy hyper excel-direct textscan csv
+                             google-sheets virtual-connection vconn].freeze
+
+  # Distinct [db, schema] pairs the workbook itself declares on its live
+  # warehouse <connection> elements (top-level or inside federated
+  # named-connections). This is the workbook's OWN answer to "where do my
+  # tables live" — there is no default database to fall back to (every org's
+  # warehouse differs), so callers use this before stopping to ask for
+  # --db/--schema. Pairs are returned in document order, deduped; empty when
+  # the workbook only has published/virtual/extract connections.
+  def twb_dbschema(twb_path)
+    return [] unless twb_path && File.exist?(twb_path)
+    doc = REXML::Document.new(File.read(twb_path, encoding: 'UTF-8'))
+    pairs = []
+    REXML::XPath.each(doc, '//connection') do |conn|
+      next if NON_WAREHOUSE_CLASSES.include?(conn.attributes['class'].to_s)
+      db  = conn.attributes['dbname'].to_s
+      sch = conn.attributes['schema'].to_s
+      next if db.empty? || sch.empty?
+      # A path-like dbname is an embedded artifact, never a warehouse database.
+      next if db.include?('/') || db.include?('\\') || db =~ /\.hyper\z/i
+      pairs << [db, sch]
+    end
+    pairs.uniq
+  rescue StandardError
+    []
   end
 
   # Does this datasource already carry embedded Custom SQL or a real base table?

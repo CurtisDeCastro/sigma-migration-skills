@@ -1,8 +1,8 @@
 <?xml version='1.0' encoding='utf-8' ?>
 <workbook source-build='2024.1.0' version='18.1' xmlns:user='http://www.tableausoftware.com/xml/user'>
   <datasources>
-    <datasource caption='Orders (CSA.TJ)' inline='true' name='federated.primary' version='18.1'>
-      <connection class='snowflake' dbname='CSA' schema='TJ' server='ymb68310.snowflakecomputing.com' warehouse='SIGMA_WH' />
+    <datasource caption='Orders (DEMO_DB.DEMO)' inline='true' name='federated.primary' version='18.1'>
+      <connection class='snowflake' dbname='DEMO_DB' schema='DEMO' server='gxb98765.snowflakecomputing.com' warehouse='SIGMA_WH' />
       <column caption='Region' datatype='string' name='[REGION]' role='dimension' type='nominal' />
       <column caption='Customer Id' datatype='string' name='[CUSTOMER_ID]' role='dimension' type='nominal' />
       <column caption='Sales' datatype='real' name='[SALES]' role='measure' type='quantitative' />
@@ -31,7 +31,7 @@
       <table>
         <view>
           <datasources>
-            <datasource caption='Orders (CSA.TJ)' name='federated.primary' />
+            <datasource caption='Orders (DEMO_DB.DEMO)' name='federated.primary' />
             <datasource caption='Region Targets (Sheet)' name='federated.secondary' />
           </datasources>
           <datasource-dependencies datasource='federated.primary'>
@@ -59,7 +59,7 @@
       <table>
         <view>
           <datasources>
-            <datasource caption='Orders (CSA.TJ)' name='federated.primary' />
+            <datasource caption='Orders (DEMO_DB.DEMO)' name='federated.primary' />
           </datasources>
           <datasource-dependencies datasource='federated.primary'>
             <column caption='Order Date' datatype='date' name='[ORDER_DATE]' role='dimension' type='ordinal' />
@@ -87,7 +87,7 @@
       <table>
         <view>
           <datasources>
-            <datasource caption='Orders (CSA.TJ)' name='federated.primary' />
+            <datasource caption='Orders (DEMO_DB.DEMO)' name='federated.primary' />
           </datasources>
           <datasource-dependencies datasource='federated.primary'>
             <column caption='Customer Id' datatype='string' name='[CUSTOMER_ID]' role='dimension' type='nominal' />

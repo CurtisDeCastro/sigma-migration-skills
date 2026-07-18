@@ -59,8 +59,8 @@ OptionParser.new do |p|
   # --ds-override <path-to.json>
   # JSON shape:
   #   { "<cluster_id>": {
-  #       "warehouse_tables": ["TJ.PUBLIC.NASA_GISS_LOTI", ...],
-  #       "table_columns":    { "TJ.PUBLIC.NASA_GISS_LOTI": ["YEAR", ...] },
+  #       "warehouse_tables": ["DEMO_DB.PUBLIC.NASA_GISS_LOTI", ...],
+  #       "table_columns":    { "DEMO_DB.PUBLIC.NASA_GISS_LOTI": ["YEAR", ...] },
   #       "build_4_panel_dashboard": true,
   #       "note": "human-readable why-this-override note for the subagent"
   #     },

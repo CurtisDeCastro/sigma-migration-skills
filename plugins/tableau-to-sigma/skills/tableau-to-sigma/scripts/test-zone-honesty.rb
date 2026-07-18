@@ -48,7 +48,7 @@ base_zone = {
 
 donut = JSON.parse(JSON.generate(base_zone)).merge(
   'id' => '1', 'caption' => 'Paid Split', 'chart_kind' => 'pie', 'mark_class' => 'Pie',
-  'aggregations' => { '[IS_PAID]' => 'None', '[NUM_SUBSCRIBERS]' => 'Sum', '[CalcA]' => 'User' },
+  'aggregations' => { '[IS_PAID]' => 'None', '[NUM_ENROLLED]' => 'Sum', '[CalcA]' => 'User' },
   'channels' => { 'color' => { 'column' => "#{FED}.[none:IS_PAID:nk]", 'field' => nil } },
   'calculations' => [
     { 'name' => '[CalcA]', 'caption' => 'AVG(0)', 'datatype' => 'real', 'role' => 'measure',
@@ -113,7 +113,7 @@ meta = {
   'columns_by_guid' => {
     'CalcA'   => { 'caption' => 'AVG(0)', 'formula' => 'AVG(0)' },
     'IS_PAID' => { 'caption' => 'Is Paid' },
-    'NUM_SUBSCRIBERS' => { 'caption' => 'Num Subscribers' },
+    'NUM_ENROLLED' => { 'caption' => 'Num Enrolled' },
     'Segment' => { 'caption' => 'Segment' }, 'Sales' => { 'caption' => 'Sales' },
     'CalcHL'  => { 'caption' => 'CY Val 4 Area', 'formula' => 'IF [SomeBool] = TRUE Then [VAL] END' },
     'VAL'     => { 'caption' => 'Val' }, 'PUBDATE' => { 'caption' => 'Pub Date' }
@@ -121,7 +121,7 @@ meta = {
 }
 mmap = {
   '(?i)^Is Paid$' => { 'id' => 'm-paid', 'name' => 'Is Paid' },
-  '(?i)^Num Subscribers$' => { 'id' => 'm-subs', 'name' => 'Num Subscribers' },
+  '(?i)^Num Enrolled$' => { 'id' => 'm-subs', 'name' => 'Num Enrolled' },
   '(?i)^Segment$' => { 'id' => 'm-seg', 'name' => 'Segment' },
   '(?i)^Sales$' => { 'id' => 'm-sales', 'name' => 'Sales' },
   '(?i)^Val$' => { 'id' => 'm-val', 'name' => 'Val' },

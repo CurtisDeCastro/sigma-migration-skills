@@ -36,7 +36,7 @@ require 'uri'
 $LOAD_PATH.unshift File.expand_path('lib', __dir__)
 require 'sigma_rest'
 
-DM_ID   = ENV['DM_ID']   || '01d5deb8-de64-485d-a428-e368afc6963b' # WINPROBE Base
+DM_ID   = ENV['DM_ID']   || '11111111-2222-4333-8444-555555555555' # WINPROBE Base
 EL_ID   = ENV['EL_ID']   || 'p13miPuGpa'                           # "Orders Base"
 EL_NAME = ENV['EL_NAME'] || 'Orders Base'
 MEASURE = ENV['MEASURE'] || 'Net Revenue'

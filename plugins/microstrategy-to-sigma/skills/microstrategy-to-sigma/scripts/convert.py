@@ -24,7 +24,7 @@ Everything is derived programmatically from the bundle:
     after the workbook POST via scripts/put-layout.rb.
 
 Usage:
-  python3 convert.py --connection-id <uuid> --database CSA --folder-id <uuid> \
+  python3 convert.py --connection-id <uuid> --database DEMO_DB --folder-id <uuid> \
       [--inode-map inodes.json] [--bundle bundle.json] \
       [--dm-name "..."] [--wb-name "..."] \
       [--data-model-id <uuid>] [--orders-element-id <id>]

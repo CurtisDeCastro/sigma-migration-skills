@@ -4,23 +4,23 @@
 #
 # WHY. Two field migrations shipped dashboards whose NUMBERS were wrong while
 # every judgment gate recorded "pass": a ranked list showed different members
-# with 10x-off values ("$1.8T" where the source printed "18,037B"), and panels
+# with 10x-off values ("$1.2T" where the source printed "12,345B"), and panels
 # collapsed to a fraction of the source's buckets. The fix is a MEASURED value
 # bar: the agent transcribes the source's printed values EXACTLY as printed
 # (Phase 1d, source-anchors.json), and verify-anchors.rb checks each printed
 # value against the live workbook's element CSV exports. This module is the
-# arithmetic core of that check: it parses a printed form ("18,037B", "$1.8T",
+# arithmetic core of that check: it parses a printed form ("12,345B", "$1.2T",
 # "-2%", "(12.3%)", "$733,215.26", "12.3k") into a (value, precision) pair and
 # decides whether a real number could have RENDERED as that printed form.
 #
 # MATCH RULE. A printed value MATCHES a real number when the real number rounds
 # to the printed form at the printed precision — i.e. |actual - printed_value|
 # <= half of the last printed digit's place value (scaled by any K/M/B/T
-# suffix). "18,037B" therefore matches any real in [18,036.5B, 18,037.5B]
-# (tolerance ±0.5e9), and 1.8e12 ("$1.8T") is a loud 10x MISS.
+# suffix). "12,345B" therefore matches any real in [18,036.5B, 12,345.5B]
+# (tolerance ±0.5e9), and 1.2e12 ("$1.2T") is a loud 10x MISS.
 #
 # CANDIDATE INTERPRETATIONS (all checked by match?):
-#   - suffixed values ("18,037B") also match the UNSCALED face value (18037)
+#   - suffixed values ("12,345B") also match the UNSCALED face value (12345)
 #     because some warehouses store the column already in that display unit;
 #   - percents ("-2%") match both percent POINTS (-2) and the FRACTION (-0.02).
 # Neither weakens the 10x/regrouping detection — the wrong values seen in the
@@ -106,7 +106,7 @@ module AnchorValues
       # Fraction form: exports often carry 0.02 where the dashboard prints "2%".
       out << [p[:value] / 100.0, p[:tol] / 100.0]
     else
-      # Unscaled face value for suffixed forms ("18,037B" ↔ a column already
+      # Unscaled face value for suffixed forms ("12,345B" ↔ a column already
       # denominated in billions). Only differs when a suffix was present.
       pr = parse(strip_suffix(raw))
       out << [pr[:value], pr[:tol]] if pr && (pr[:value] - p[:value]).abs > Float::EPSILON

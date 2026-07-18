@@ -28,7 +28,7 @@ Write the spec to `<WORK>/dm-spec.json`. Full schema is in
 3. **Column name special characters** — read `refs/column-gotchas.md`. Rename any column whose `name` contains `/` ("Country/Region" → `"Country"`, "State/Province" → `"State"`).
 4. **Element name = formula prefix**. The `name` field on a DM element (e.g. `"Orders"`) becomes the prefix in all workbook formulas that reference it: `[Orders/Sales]`. Choose clean, stable names.
 5. **Relationships go on the source element**, not the target. See `refs/data-model-spec.md`.
-6. **Column formulas use the warehouse table name as prefix**: path `["CSA", "Tableau Test", "ORDERS"]` → formula `"[ORDERS/Column Name]"`.
+6. **Column formulas use the warehouse table name as prefix**: path `["DEMO_DB", "Tableau Test", "ORDERS"]` → formula `"[ORDERS/Column Name]"`.
 
 ### When to use a Custom SQL element instead of a calc column
 
@@ -54,6 +54,8 @@ Write the spec to `<WORK>/dm-spec.json`. Full schema is in
 > silently error.
 
 Any Tableau calc whose `requires_custom_sql: true` (from Phase 1e) — that is, a **manual window residue** (`WINDOW_MEDIAN/PERCENTILE/CORR/COVAR(P)/VAR(P)/STDEVP`, `PREVIOUS_VALUE`, `SIZE`, `FIRST`, `LAST`, `RANK_UNIQUE/MODIFIED`, or a compute-using/addressing variant beyond Table(Across)/simple partitions) or an `{INCLUDE/EXCLUDE}` LOD (those need the chart-grouping context) — must be implemented as a **Sigma Custom SQL data-model element**. (The mainstream `WINDOW_*`/`RUNNING_*`/`RANK*`/`INDEX`/`LOOKUP`/`TOTAL` family no longer routes here — it is auto-emitted as Sigma-native chart formulas, `refs/window-functions.md`.)
+
+> **Tile binding is gate-enforced (G6).** Routing the calc here is only half the job — the residue must be BOUND to the tile that plots it. `<workdir>/manual-residues.json` (written by build-charts) lists each plotted residue with its Tableau formula + an `OVER()` SQL skeleton. For each entry: (1) add the Custom SQL element to the DM spec and PUT it (`post-and-readback.rb --type datamodel --update-id <dmId>`), (2) repoint the tile's measure column at the new element's output column (wb-spec PUT), (3) set `"status": "built"` on the ledger entry. The orchestrator blocks pass 1 (exit 16) and `assert-phase6-ran` refuses GREEN (gate 15, exit 22) while any entry is `"unbuilt"`.
 
 ```json
 {
@@ -84,7 +86,7 @@ Key points:
 - Translation hints from `extract-calc-fields.rb`:
   - `RUNNING_*` / bounded `WINDOW_*` / `RANK*` / `INDEX` / `LOOKUP` / `TOTAL` — **do NOT route here anymore**: auto-emitted as Sigma-native chart viz formulas (`refs/window-functions.md`). The ANSI `OVER(...)` forms below are the fallback ONLY for the manual residues (`WINDOW_MEDIAN`/`WINDOW_PERCENTILE`/`PREVIOUS_VALUE`/`SIZE`/non-default addressing): e.g. `WINDOW_MEDIAN(SUM([X]))` → `MEDIAN(X) OVER (<partition>)`, `PREVIOUS_VALUE` → recursive logic in SQL.
   - `{FIXED [Dim] : SUM([X])}` → `SUM(X) OVER (PARTITION BY Dim)` or a pre-aggregated subquery joined back — **fallback only**: when the LOD is plotted as a chart/KPI measure it is AUTO-TRANSLATED via the hidden two-level helper element (see the callout above), no Custom SQL needed
-  - **Nested LODs** (`{FIXED A : AVG({FIXED A, B : SUM([X])})}`) → a helper-element CHAIN, not one formula: innermost LOD = helper element 1 (grouped by its dims, aggregate as `Value`), each outer level consumes `[LOD Helper k/Value]` via a relationship on the shared dims. `build-charts-from-signals.rb` decomposes these automatically into `<out>-lod-chains.json` (innermost first) — build one grouped element (or Custom SQL `GROUP BY` subquery) per level. **Each outer level's source MUST carry `groupingId` pointing at the inner element's grouping** — a plain `{kind: table, elementId}` source reads BASE-grain rows with the aggregate repeated per row, so outer Avg/Median/Count silently come out row-weighted (caught live: 969.82 row-weighted vs 687.81 correct on CSA.TJ.ORDER_FACT). Live-verified pattern (exact parity vs warehouse SQL), 2026-06-11.
+  - **Nested LODs** (`{FIXED A : AVG({FIXED A, B : SUM([X])})}`) → a helper-element CHAIN, not one formula: innermost LOD = helper element 1 (grouped by its dims, aggregate as `Value`), each outer level consumes `[LOD Helper k/Value]` via a relationship on the shared dims. `build-charts-from-signals.rb` decomposes these automatically into `<out>-lod-chains.json` (innermost first) — build one grouped element (or Custom SQL `GROUP BY` subquery) per level. **Each outer level's source MUST carry `groupingId` pointing at the inner element's grouping** — a plain `{kind: table, elementId}` source reads BASE-grain rows with the aggregate repeated per row, so outer Avg/Median/Count silently come out row-weighted (caught live: 969.82 row-weighted vs 687.81 correct on the demo ORDER_FACT). Live-verified pattern (exact parity vs warehouse SQL), 2026-06-11.
 
 When a workbook mixes plain calcs with window calcs, you can have BOTH kinds of DM elements in the same data model: one `warehouse-table` element for everything plain, plus one or more `sql` elements for the window/LOD calcs, related by key. Charts source from whichever element has the columns they need.
 

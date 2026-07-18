@@ -34,7 +34,7 @@
       "score": 1.41,
       "views": null,
       "warehouse_sources": [
-        "Snowflake:ymb68310.snowflakecomputing.com"
+        "Snowflake:gxb98765.snowflakecomputing.com"
       ],
       "dax_buckets": {
         "a": 33,
@@ -47,17 +47,17 @@
       "cluster_id": "cluster-02-report"
     },
     {
-      "reportId": "0bebf272-45db-466e-ae93-522c6c9c9999",
+      "reportId": "aaaa1111-2222-4333-8444-bbbbcccc0001",
       "name": "Workforce KitchenSink Report",
       "workspace": "Test",
-      "dataset_id": "049863fa-5500-4d45-a541-1478799a760c",
+      "dataset_id": "aaaa1111-2222-4333-8444-bbbbcccc0002",
       "model_name": "Workforce KitchenSink (complex DAX test)",
       "recommended_path": "blocked",
       "priority_tier": "moderate",
       "score": 0.5,
       "views": null,
       "warehouse_sources": [
-        "Snowflake:ymb68310.snowflakecomputing.com"
+        "Snowflake:gxb98765.snowflakecomputing.com"
       ],
       "dax_buckets": {
         "a": 17,
@@ -96,7 +96,7 @@
         "Employee Dashboard"
       ],
       "shared_warehouse_sources": [
-        "Snowflake:ymb68310.snowflakecomputing.com"
+        "Snowflake:gxb98765.snowflakecomputing.com"
       ],
       "cluster_size": 1
     }

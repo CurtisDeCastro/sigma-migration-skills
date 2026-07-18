@@ -2,7 +2,7 @@
 
 **Status:** Proposed · **Date:** 2026-07-01 · **Owner:** tableau-to-sigma (parser + builder)
 **Root-cause reference:** `TABLEAU_TO_SIGMA_SKILL_GAPS.md` → *"the skill has a data-correctness layer but no composition/style layer."*
-**Benchmark:** hand-built Sigma replica of *"Estimated U.S. Job Loss from Mass Deportations"* — https://app.sigmacomputing.com/dataflow/workbook/5RkbujfxygREnBLCd8d89C
+**Benchmark:** hand-built Sigma replica of *"Estimated U.S. Job Loss from Mass Deportations"* — https://app.sigmacomputing.com/<org>/workbook/<workbook-urlId>
 
 ---
 
@@ -309,7 +309,7 @@ The layout stage places `region-south` as a `<GridContainer>` (via existing `gc`
 
 1. **Unit — parser:** fixture `.twb` (the benchmark workbook) → assert the new sidecar fields are populated: `fill_color` for the 4 region zones, `canvas_color`, `channels.color.palette` with the 4 named region colors, `control_display: compact` for Job Loss Metric and `radio` for Immigrant|U.S.-born. Add alongside the parser's existing spec fixtures (`test-container-layout.rb` / `test-layout-lint.rb`).
 2. **Unit — builder:** feed the enriched sidecar → assert `themeOverrides.categoricalScheme` is emitted in fixed order, KPI has `value.fontSize` + `name:' '` + transparent `style`, `controlType:list` where `control_display=compact`, and the threshold chart carries a 2-color `scheme`. Round-trip the emitted style fields through POST→GET (all §4.2 fields are verified round-trippable per `styling.md`).
-3. **Fleet PNG gate (existing).** The composition emitter must keep the fleet parity gate green. Run the workbook through the existing Phase-6/`verify-dashboard-visual.rb` render and confirm no regressions and that the render now shows tints/palette/labels. Test path is **CSA.TJ** (the standard Tableau→Sigma warehouse path); land the benchmark's fact table there and run the full converter against it as the E2E case.
+3. **Fleet PNG gate (existing).** The composition emitter must keep the fleet parity gate green. Run the workbook through the existing Phase-6/`verify-dashboard-visual.rb` render and confirm no regressions and that the render now shows tints/palette/labels. Test path is **the demo warehouse** (the standard Tableau→Sigma warehouse path); land the benchmark's fact table there and run the full converter against it as the E2E case.
 4. **Phase-5 visual diff (follow-on, out of Phase 1).** Once the loop exists, it diffs the emitted render against the benchmark image; Phase 1's job is to shrink that diff to near-zero on the style axis so the loop converges in 0–1 passes instead of 7.
 
 Respect the existing `assert-phase6-ran.rb` hard gate — the composition emitter runs before layout, so Phase 6 still gates the final render.
@@ -345,7 +345,7 @@ Respect the existing `assert-phase6-ran.rb` hard gate — the composition emitte
 | 11 | Builder: **C2** — threshold 2-color fallback (computed bool + `scheme:[base,hl]`) + WARN | `build-charts-from-signals.rb` (chart path) | **M** |
 | 12 | ~~Builder: **C5** — auto `dataLabel`~~ — **already implemented (L3373-3380)**; verify only | — | **done** |
 | 13 | Layout: **B2 + Pass-7** — read `composition.json`; apply container tints via `container_el(id, style)`; emit header-bar sub-container; set workbook `themeOverrides` + transparent chart `style` over tints | `build-dashboard-layout.rb` (L182-203, bands loop; `--composition`), `lib/layout.rb` | **L** |
-| 14 | Tests: parser-fixture assertions + builder round-trip + CSA.TJ E2E fleet-PNG gate on the benchmark | `test-container-layout.rb`, `test-layout-lint.rb`, new fixtures | **L** |
+| 14 | Tests: parser-fixture assertions + builder round-trip + DEMO_DB.DEMO E2E fleet-PNG gate on the benchmark | `test-container-layout.rb`, `test-layout-lint.rb`, new fixtures | **L** |
 | 15 | Wire the new stage into `migrate-tableau.rb` orchestration (composition sidecar path threading) | `migrate-tableau.rb` | **S** |
 
 **Rough total:** ~7 S/M tasks + 2 L tasks. Tasks 1–5 (parser) are independent and can land as one PR; 6–11 (builder element+theme) as a second; 13–15 (layout + tests + orchestration) as a third. Land in that order so the parser sidecar exists before the builder consumes it and the layout stage consumes it last.

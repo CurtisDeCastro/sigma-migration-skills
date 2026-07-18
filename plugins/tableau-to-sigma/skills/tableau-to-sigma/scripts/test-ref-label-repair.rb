@@ -2,9 +2,9 @@
 # frozen_string_literal: true
 # Unit test for lib/ref_label_repair.rb — the v5.4 GLOBAL ref-label repair.
 # Field failure class (rounds 5+6, every run): the chart builder authors
-# formula refs from raw twb serialization tokens ([Master/NUM_SUBSCRIBERS],
-# [Master/summoner_dir]) while the live workbook elements carry Sigma display
-# labels ("Num Subscribers", "Summoner Dir"); the v5.3 repair fixed helpers
+# formula refs from raw twb serialization tokens ([Master/NUM_ENROLLED],
+# [Master/runner_dir]) while the live workbook elements carry Sigma display
+# labels ("Num Enrolled", "Runner Dir"); the v5.3 repair fixed helpers
 # only, so chart elements failed the pre-POST ref gate one ref at a time.
 # Usage: ruby scripts/test-ref-label-repair.rb
 $LOAD_PATH.unshift File.expand_path('lib', __dir__)
@@ -17,15 +17,15 @@ def check(cond, msg, fails)
 end
 
 registry = {
-  'Master' => ['Num Subscribers', 'Published Date', 'Level Pct', 'Course Title'],
+  'Master' => ['Num Enrolled', 'Published Date', 'Level Pct', 'Course Title'],
   'Trend Source' => ['Year', 'Total Value']
 }
 
 els = [
   { 'kind' => 'bar-chart', 'columns' => [
-    { 'id' => 'c1', 'formula' => 'Sum([Master/NUM_SUBSCRIBERS])' },              # raw physical name
+    { 'id' => 'c1', 'formula' => 'Sum([Master/NUM_ENROLLED])' },              # raw physical name
     { 'id' => 'c2', 'formula' => '[Master/level_pct] * 100' },                   # twb snake_case
-    { 'id' => 'c3', 'formula' => 'Sum([Master/Num Subscribers])' },              # already exact
+    { 'id' => 'c3', 'formula' => 'Sum([Master/Num Enrolled])' },              # already exact
     { 'id' => 'c4', 'formula' => 'CountDistinct([MASTER/COURSE-TITLE])' }        # element seg case + punct drift
   ] },
   { 'kind' => 'line-chart', 'columns' => [
@@ -39,9 +39,9 @@ els = [
 rep = RefLabelRepair.repair!(els, registry)
 
 f = ->(i, j) { els[i]['columns'][j]['formula'] }
-check(f[0, 0] == 'Sum([Master/Num Subscribers])', "raw physical name re-cased (got #{f[0, 0]})", fails)
+check(f[0, 0] == 'Sum([Master/Num Enrolled])', "raw physical name re-cased (got #{f[0, 0]})", fails)
 check(f[0, 1] == '[Master/Level Pct] * 100', 'snake_case token re-cased', fails)
-check(f[0, 2] == 'Sum([Master/Num Subscribers])', 'exact ref untouched', fails)
+check(f[0, 2] == 'Sum([Master/Num Enrolled])', 'exact ref untouched', fails)
 check(f[0, 3] == 'CountDistinct([Master/Course Title])', 'element segment AND punct-drifted column re-cased', fails)
 check(f[1, 0] == 'Sum([Trend Source/Total Value])', 'cross-element ref repaired against sibling labels', fails)
 check(f[1, 1] == 'Sum([Unknown Element/foo])', 'ref to unregistered element left verbatim', fails)

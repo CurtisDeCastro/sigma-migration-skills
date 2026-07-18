@@ -145,7 +145,7 @@ end
 
 # Per-worker persistent connection. Net::HTTP keeps the TCP+TLS socket open
 # across requests when reused, which on small workbooks shaves ~30% off latency
-# (measured against 10ay.online.tableau.com).
+# (measured against a Tableau Cloud production pod).
 def make_http
   uri = URI(Tableau.server_url)
   http = Net::HTTP.new(uri.host, uri.port)

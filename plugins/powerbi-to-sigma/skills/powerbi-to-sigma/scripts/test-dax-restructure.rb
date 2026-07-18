@@ -34,21 +34,21 @@ ok 'ytd two grouping levels',  el['groupings'].size==2 && el['groupings'][0]['ca
 ok 'ytd CumulativeSum',        el['columns'].any? { |c| c['formula']=='CumulativeSum([Net Revenue])' }
 
 # ---- concatenatex_listagg ----
-el = DaxRestructure.concatenatex_listagg(name:'RolesInDept', conn:'C1', db:'CSA', schema:'TJ',
+el = DaxRestructure.concatenatex_listagg(name:'RolesInDept', conn:'C1', db:'DEMO_DB', schema:'DEMO',
        table:'EMPLOYEES', group_col:'DEPARTMENT', text_col:'ROLE', sep:', ')
 ok 'concatenatex kind/source', el['kind']=='table' && el.dig('source','kind')=='sql' && el.dig('source','connectionId')=='C1'
 ok 'concatenatex LISTAGG sql', el.dig('source','statement') =~ /LISTAGG\(DISTINCT ROLE/ && el.dig('source','statement') =~ /GROUP BY DEPARTMENT/
 ok 'concatenatex columns',     el['columns'].size==3 && el['columns'].all? { |c| c['id'] && c['formula'] }
 
 # ---- treatas_virtual_rel ----
-el = DaxRestructure.treatas_virtual_rel(name:'AbsByDept', conn:'C1', db:'CSA', schema:'TJ',
+el = DaxRestructure.treatas_virtual_rel(name:'AbsByDept', conn:'C1', db:'DEMO_DB', schema:'DEMO',
        fact:'ABSENCE_RECORDS', fact_key:'EMPLOYEE_ID', dim:'EMPLOYEES', dim_key:'EMPLOYEE_ID',
        group_col:'DEPARTMENT', agg:'SUM(b.HOURS)', agg_alias:'ABS_HOURS')
-ok 'treatas explicit JOIN', el.dig('source','statement') =~ /JOIN CSA\.TJ\.EMPLOYEES a ON b\.EMPLOYEE_ID = a\.EMPLOYEE_ID/
+ok 'treatas explicit JOIN', el.dig('source','statement') =~ /JOIN DEMO_DB.DEMO.EMPLOYEES a ON b\.EMPLOYEE_ID = a\.EMPLOYEE_ID/
 ok 'treatas group + alias',  el.dig('source','statement') =~ /GROUP BY a\.DEPARTMENT/ && el.dig('source','statement') =~ /AS ABS_HOURS/
 
 # ---- banded_grouping ----
-el = DaxRestructure.banded_grouping(name:'SalaryBands', conn:'C1', db:'CSA', schema:'TJ',
+el = DaxRestructure.banded_grouping(name:'SalaryBands', conn:'C1', db:'DEMO_DB', schema:'DEMO',
        table:'EMPLOYEES', value_col:'ANNUAL_SALARY', bands:[0,50000,100000,150000])
 ok 'banded VALUES spine', el.dig('source','statement') =~ /VALUES \(0\),\(50000\),\(100000\),\(150000\)/
 ok 'banded count per band', el.dig('source','statement') =~ /COUNT\(\*\) AS N/ && el.dig('source','statement') =~ /GROUP BY b\.BANDFLOOR/
@@ -60,7 +60,7 @@ ok 'earlier_rank RankDense', col['formula']=='RankDense([ANNUAL_SALARY], "desc",
 ok 'earlier_rank has id/name', !col['id'].to_s.empty? && col['name']=='Dept Salary Rank'
 
 # ---- topn_sumx ----
-el = DaxRestructure.topn_sumx(name:'Top5RoleSalary', conn:'C1', db:'CSA', schema:'TJ',
+el = DaxRestructure.topn_sumx(name:'Top5RoleSalary', conn:'C1', db:'DEMO_DB', schema:'DEMO',
        table:'EMPLOYEES', group_col:'ROLE', agg:'SUM(ANNUAL_SALARY)', n:5, agg_alias:'ROLE_TOTAL')
 ok 'topn kind/source',  el['kind']=='table' && el.dig('source','kind')=='sql' && el.dig('source','connectionId')=='C1'
 ok 'topn group-by agg', el.dig('source','statement') =~ /SUM\(ANNUAL_SALARY\) AS ROLE_TOTAL/ && el.dig('source','statement') =~ /GROUP BY ROLE/

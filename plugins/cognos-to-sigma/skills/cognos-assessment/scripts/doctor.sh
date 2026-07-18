@@ -106,10 +106,14 @@ fi
 # "SKIPPED: dep missing" instead of measuring (A/B-report field-caught: the
 # deps were undeclared and the floor silently could not run on a fresh box).
 if command -v "${PY_CMD:-python3}" >/dev/null 2>&1; then
-  if "${PY_CMD:-python3}" -c "import PIL, numpy" >/dev/null 2>&1; then
-    ok "python imaging deps (Pillow + numpy) — visual-similarity floor can run"
+  if "${PY_CMD:-python3}" -c "import PIL, numpy, requests" >/dev/null 2>&1; then
+    ok "python render deps (Pillow + numpy + requests) — sigma-export-png + visual-similarity can run"
   else
-    warn "Pillow/numpy missing — the visual-similarity floor (gate 14) cannot MEASURE and will need a named waiver"          "pip install pillow numpy   (numpy 2.3+ preferred; 2.2.x histogram regression is worked around in-script)"
+    # requests: sigma-export-png.py needs it — without it the Phase-5b/6f render
+    # SILENTLY fails on a fresh env (v5.5 e2e field-caught). Pillow/numpy: the
+    # gate-14 visual floor. One check, one fix line.
+    warn "Pillow/numpy/requests missing — sigma-export-png (renders) and the visual-similarity floor (gate 14) cannot run" \
+         "pip install pillow numpy requests   (numpy 2.3+ preferred; 2.2.x histogram regression is worked around in-script)"
   fi
 fi
 
@@ -132,7 +136,26 @@ fi
 if command -v node >/dev/null 2>&1; then
   ok "node — $(node --version 2>/dev/null)"
 else
-  bad "node not found (required — the vendored converters/*.mjs run via node)" "macOS/Linux: install Node 18+ from https://nodejs.org or your package manager. Windows no-admin: 'winget install Schniz.fnm' then 'fnm install --lts && fnm use --lts'. See refs/environment.md #5 — don't auto-download an unpinned Node, ask first."
+  # G1 (field-caught TWICE on the same machine): node was INSTALLED via a version
+  # manager (~/.fnm) the whole time — only PATH activation was missing, because
+  # version managers activate via interactive-shell profile hooks that a non-login
+  # agent shell never sources. Probe the standard version-manager install dirs
+  # BEFORE declaring node missing; found => print the exact PATH prepend
+  # (WARN-activatable) instead of sending the user to install a runtime they have.
+  NODE_VM_BIN=""
+  for cand in "$HOME"/.fnm/node-versions/*/installation/bin/node \
+              "$HOME"/.local/share/fnm/node-versions/*/installation/bin/node \
+              "$HOME"/.nvm/versions/node/*/bin/node \
+              "$HOME"/.asdf/installs/nodejs/*/bin/node \
+              "$HOME"/.local/node/bin/node; do
+    [ -x "$cand" ] && NODE_VM_BIN="$cand"
+  done
+  if [ -n "$NODE_VM_BIN" ]; then
+    warn "node is INSTALLED but not on PATH ($("$NODE_VM_BIN" --version 2>/dev/null) at $NODE_VM_BIN) — a version manager that activates via interactive-shell hooks this shell never ran" \
+         "Prepend it for this session: export PATH=\"$(dirname "$NODE_VM_BIN"):\$PATH\"  — no install needed. (Persist it in the shell profile to stop this recurring.)"
+  else
+    bad "node not found (required — the vendored converters/*.mjs run via node)" "macOS/Linux: install Node 18+ from https://nodejs.org or your package manager. Windows no-admin: 'winget install Schniz.fnm' then 'fnm install --lts && fnm use --lts'. See refs/environment.md #5 — don't auto-download an unpinned Node, ask first."
+  fi
 fi
 
 # --- bash (token minting + *.sh helpers) -----------------------------------
@@ -251,14 +274,23 @@ if [ -f "$HERE/land-extracts.py" ]; then
   fi
 fi
 
-# --- skill version drift (v3 §2.1) -----------------------------------------
+# --- skill version drift + build-age stamp (v3 §2.1, v5.6 item 4) ----------
 # A plugin install pins a git SHA and never self-updates; running a stale SHA
-# silently ships pre-fidelity-layer output. Record {skill_sha, behind_count};
-# the orchestrator preflight FAILs above a threshold. Bounded, best-effort
-# fetch (stalled network capped ~6s); skip with SIGMA_SKIP_VERSION_CHECK=1.
-SKILL_SHA=""; BEHIND_COUNT="null"
+# silently ships pre-fidelity-layer output. Record {skill_sha, behind_count,
+# days_since_commit}; the orchestrator preflight FAILs above a threshold.
+# Bounded, best-effort fetch (stalled network capped ~6s); skip the drift
+# fetch with SIGMA_SKIP_VERSION_CHECK=1 (the local age stamp still runs — it
+# needs no network). No git at all (a mirror/plugin file-copy install) stamps
+# skill_sha 'unknown (no git — mirror/plugin install)' so downstream tooling
+# and bug reports can always say WHICH build (or that nobody can tell).
+SKILL_SHA=""; BEHIND_COUNT="null"; DAYS_SINCE_COMMIT="null"
 if command -v git >/dev/null 2>&1 && git -C "$HERE" rev-parse --git-dir >/dev/null 2>&1; then
   SKILL_SHA="$(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || true)"
+  _cts="$(git -C "$HERE" log -1 --format=%ct 2>/dev/null || true)"
+  case "$_cts" in
+    ''|*[!0-9]*) : ;;
+    *) DAYS_SINCE_COMMIT=$(( ($(date +%s) - _cts) / 86400 )) ;;
+  esac
   # Skip on a SHALLOW clone (CI checkout, some installs): rev-list against a
   # grafted origin/main returns a bogus count (a false "hundreds behind").
   _shallow="$(git -C "$HERE" rev-parse --is-shallow-repository 2>/dev/null)"
@@ -267,14 +299,27 @@ if command -v git >/dev/null 2>&1 && git -C "$HERE" rev-parse --git-dir >/dev/nu
     _bc="$(git -C "$HERE" rev-list --count HEAD..origin/main 2>/dev/null || true)"
     case "$_bc" in ''|*[!0-9]*) BEHIND_COUNT="null" ;; *) BEHIND_COUNT="$_bc" ;; esac
   fi
+  _age_note=""
+  [ "$DAYS_SINCE_COMMIT" != "null" ] && _age_note=", last commit ${DAYS_SINCE_COMMIT} day(s) ago"
   if [ "$BEHIND_COUNT" = "null" ]; then
-    [ -n "$SKILL_SHA" ] && ok "skill version $SKILL_SHA (drift check skipped/offline)"
+    [ -n "$SKILL_SHA" ] && ok "skill build $SKILL_SHA (drift check skipped/offline$_age_note)"
   elif [ "$BEHIND_COUNT" -gt 0 ] 2>/dev/null; then
-    warn "skill is ${BEHIND_COUNT} commit(s) behind origin/main (installed $SKILL_SHA) — you may be missing fidelity-layer fixes" \
+    warn "skill is ${BEHIND_COUNT} commit(s) behind origin/main (installed $SKILL_SHA$_age_note) — you may be missing fidelity-layer fixes" \
          "Update: 'git -C \"$HERE\" pull' (or reinstall the plugin). SIGMA_SKIP_VERSION_CHECK=1 skips this probe."
   else
-    ok "skill version $SKILL_SHA (current with origin/main)"
+    ok "skill build $SKILL_SHA (current with origin/main$_age_note)"
   fi
+  # Age WARN is independent of the network drift check: a >14-day-old build on
+  # a fast-moving skill is the field failure class where a run re-hits bugs
+  # fixed weeks earlier and nobody realizes the install is stale.
+  if [ "$DAYS_SINCE_COMMIT" != "null" ] && [ "$DAYS_SINCE_COMMIT" -gt 14 ] 2>/dev/null; then
+    warn "skill build $SKILL_SHA is ${DAYS_SINCE_COMMIT} days old — your build may predate current fixes" \
+         "Update your mirror/plugin: 'git -C \"$HERE\" pull' (or reinstall). Re-run doctor after."
+  fi
+else
+  SKILL_SHA="unknown (no git — mirror/plugin install)"
+  warn "skill build SHA unknown (no git — mirror/plugin install)" \
+       "Build age cannot be measured; if behavior looks pre-fix, refresh the mirror / reinstall the plugin and re-run doctor."
 fi
 
 # --- agent capability fingerprint (v3 §2.2) --------------------------------
@@ -287,6 +332,16 @@ fi
 # gate (D5) still fails LOUDLY rather than accepting a blind attestation.
 # model_hint is free-form (e.g. "claude-opus-4-8").
 MODEL_HINT="${SIGMA_MODEL_HINT:-}"
+# W1.8 env-var hygiene: the flag is SIGMA_AGENT_VISION (UPPERCASE). A lowercase
+# `sigma_agent_vision` (copied verbatim from a task brief) is a silent no-op — it
+# was exactly why the 2026-07 run's visual gates reported "cannot legitimately
+# pass" and the agent then hand-edited doctor.json to force the flag. Detect the
+# common miscase, warn loudly, and HONOR it so no hand-edit is tempted.
+if [ -z "${SIGMA_AGENT_VISION:-}" ] && [ -n "${sigma_agent_vision:-}" ]; then
+  warn "env var 'sigma_agent_vision' is set (=${sigma_agent_vision}) but IGNORED — the flag is SIGMA_AGENT_VISION (uppercase)" \
+       "The visual gates read only the uppercase name; a lowercase copy is a silent no-op. Honoring it this run — fix your export to: SIGMA_AGENT_VISION=${sigma_agent_vision}"
+  SIGMA_AGENT_VISION="${sigma_agent_vision}"
+fi
 case "${SIGMA_AGENT_VISION:-}" in
   true|1|yes|TRUE|True) AGENT_VISION=true ;;
   '')
@@ -337,6 +392,7 @@ write_doctor_json() {
     printf '"hyperapi_present":%s,' "$HYPERAPI"
     printf '"skill_sha":"%s",' "$(jstr "$SKILL_SHA")"
     printf '"behind_count":%s,' "$BEHIND_COUNT"
+    printf '"days_since_commit":%s,' "$DAYS_SINCE_COMMIT"
     printf '"agent_vision":%s,' "$AGENT_VISION"
     printf '"model_hint":"%s",' "$(jstr "$MODEL_HINT")"
     printf '"generated_at":"%s",' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"

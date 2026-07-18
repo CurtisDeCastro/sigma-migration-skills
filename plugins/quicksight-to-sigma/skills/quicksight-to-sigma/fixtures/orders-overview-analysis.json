@@ -7,7 +7,7 @@
         "DataSetIdentifierDeclarations": [
             {
                 "Identifier": "orders",
-                "DataSetArn": "arn:aws:quicksight:us-east-1:153722385948:dataset/orders-enriched"
+                "DataSetArn": "arn:aws:quicksight:us-east-1:<aws-account-id>:dataset/orders-enriched"
             }
         ],
         "Sheets": [

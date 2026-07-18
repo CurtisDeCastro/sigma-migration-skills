@@ -19,7 +19,7 @@ from each qDef's first aggregation (set-analysis modifiers `{<...>}` are strippe
 they don't change which column/derivation the measure hangs on). Pure (no network).
 
 Usage: python3 scripts/qlik-dm-signature.py --model /tmp/qlik/model.json \
-         [--database CSA --schema TJ] --out /tmp/qlik/dm-signature.json
+         [--database <DB> --schema <SCHEMA>] --out /tmp/qlik/dm-signature.json
 """
 import argparse, json, re, sys
 

@@ -3,7 +3,7 @@
 
 Builds each fixtures/skilltest-looks/look_*.contract.json (exactly what
 fetch_looker_look.py emits, incl. `fieldMeta`) through the REAL build_workbook.py
-against the vendored csa_thelook demo views, and asserts the CONVERTER decisions
+against the vendored demo_thelook demo views, and asserts the CONVERTER decisions
 that a Look migration hinges on — with no live warehouse:
 
   grouped_table  → ONE `table` with groupings{groupBy:[2], calculations:[3]}   (dims+measures grouped)

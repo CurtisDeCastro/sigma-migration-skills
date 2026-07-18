@@ -67,7 +67,7 @@ Dir.mktmpdir do |dir|
   twb_path = File.join(dir, 'extract.twb')
   File.write(twb_path, TWB)
   conv = MechanicalSpecs.run_converter(
-    twb_path: twb_path, conn: 'conn-1', db: 'CSA', schema: 'Tableau Test',
+    twb_path: twb_path, conn: 'conn-1', db: 'DEMO_DB', schema: 'Tableau Test',
     mcp_build: VENDORED, workdir: dir, table_mapping: { 'Orders$' => 'ORDERS' })
   model = conv['model']
 end
@@ -77,8 +77,8 @@ el = (model['pages'] || []).flat_map { |p| p['elements'] || [] }
 abort 'converter produced no warehouse-table element' unless el
 
 puts 'Part A — table mapping + schema case + $-strip'
-check(el.dig('source', 'path') == ['CSA', 'Tableau Test', 'ORDERS'],
-      "path resolves to CSA.'Tableau Test'.ORDERS (got #{el.dig('source', 'path').inspect})", fails)
+check(el.dig('source', 'path') == ['DEMO_DB', 'Tableau Test', 'ORDERS'],
+      "path resolves to DEMO_DB.'Tableau Test'.ORDERS (got #{el.dig('source', 'path').inspect})", fails)
 formulas = (el['columns'] || []).map { |c| c['formula'] }
 check(formulas.all? { |f| f =~ /\A\[ORDERS\// },
       'every base-column formula prefix follows the resolved table name', fails)
@@ -104,7 +104,7 @@ Dir.mktmpdir do |dir|
   twb_path = File.join(dir, 'extract.twb')
   File.write(twb_path, TWB)
   model2 = MechanicalSpecs.run_converter(
-    twb_path: twb_path, conn: 'conn-1', db: 'CSA', schema: 'Tableau Test',
+    twb_path: twb_path, conn: 'conn-1', db: 'DEMO_DB', schema: 'Tableau Test',
     mcp_build: VENDORED, workdir: dir, table_mapping: { 'Orders$' => 'ORDERS' })['model']
 end
 pf2 = MechanicalSpecs.fixup_dm_spec(model2, real_cols, column_mapping: { 'State' => 'STATE_PROVINCE' })

@@ -207,7 +207,7 @@ USE SCHEMA <schema>;
 CREATE OR REPLACE NETWORK RULE tableau_api_rule
   MODE = EGRESS
   TYPE = HOST_PORT
-  VALUE_LIST = ('<tableau_server_host>');   -- e.g. '10ay.online.tableau.com'
+  VALUE_LIST = ('<tableau_server_host>');   -- e.g. 'us-west-2b.online.tableau.com'
 
 CREATE OR REPLACE SECRET tableau_pat_secret
   TYPE = GENERIC_STRING
@@ -365,7 +365,7 @@ FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY(task_name => 'refresh_tableau_data'))
 ORDER BY scheduled_time DESC LIMIT 10;
 ```
 
-### Worked example: Superstore Datasource → TJ.PUBLIC.SUPERSTORE_ORDERS
+### Worked example: Superstore Datasource → DEMO_DB.PUBLIC.SUPERSTORE_ORDERS
 
 ```bash
 snow sql --connection tj -q "
@@ -375,10 +375,10 @@ USE SCHEMA PUBLIC;
 USE WAREHOUSE SIGMA_WH;
 
 CALL QUERY_TABLEAU_VDS(
-  'https://10ay.online.tableau.com',
-  'dataflow',
-  '1bef4413-4d4b-452a-9082-2cae8e94f28d',
-  'TJ.PUBLIC.SUPERSTORE_ORDERS',
+  'https://us-west-2b.online.tableau.com',
+  'mysite',
+  '0f0e0d0c-0b0a-4900-8807-060504030201',
+  'DEMO_DB.PUBLIC.SUPERSTORE_ORDERS',
   '[
     {\"fieldCaption\": \"Order ID\"}, {\"fieldCaption\": \"Order Date\"},
     {\"fieldCaption\": \"Ship Date\"}, {\"fieldCaption\": \"Customer Name\"},
@@ -390,7 +390,7 @@ CALL QUERY_TABLEAU_VDS(
   ]'
 );
 "
-# → Loaded 10192 rows into TJ.PUBLIC.SUPERSTORE_ORDERS
+# → Loaded 10192 rows into DEMO_DB.PUBLIC.SUPERSTORE_ORDERS
 ```
 
 19 columns landed (`Country/Region` → `COUNTRY_REGION`, `Sub-Category` → `SUB_CATEGORY`
@@ -476,8 +476,8 @@ notebook source` first line and `# COMMAND ----------` cell separators matter):
 import requests, re, json
 from datetime import datetime, timezone
 
-server      = dbutils.widgets.get("server")        # https://10ay.online.tableau.com
-site        = dbutils.widgets.get("site")          # contentUrl, e.g. dataflow
+server      = dbutils.widgets.get("server")        # https://us-west-2b.online.tableau.com
+site        = dbutils.widgets.get("site")          # contentUrl, e.g. mysite
 luid        = dbutils.widgets.get("luid")          # datasource LUID
 target      = dbutils.widgets.get("target")        # catalog.schema.table
 fields_json = dbutils.widgets.get("fields")        # VDS fields array (JSON string)
@@ -597,7 +597,7 @@ databricks jobs create --json '{
 ```
 
 ### Worked example (validated 2026-06-10)
-Superstore (LUID `1bef4413-…`, Tableau `10ay`/`dataflow`) → serverless notebook →
+Superstore (a published datasource on a Tableau Cloud site) → serverless notebook →
 `customer_success.tj_vds_spike.superstore_orders` (managed **Delta**): **10,192 rows**,
 13 columns, same sanitization as Snowflake (`Country/Region`→`COUNTRY_REGION`,
 `Sub-Category`→`SUB_CATEGORY`). Sigma read it back via a Databricks connection on the

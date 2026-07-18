@@ -1,6 +1,6 @@
 {
   "sigmaDataModel": {
-    "name": "ORDER_FACT (CSA.ORDER_FACT)+ (New Virtual Connection)",
+    "name": "ORDER_FACT (DEMO_DB.ORDER_FACT)+ (New Virtual Connection)",
     "schemaVersion": 1,
     "pages": [
       {
@@ -189,7 +189,7 @@
                 "name": "Year"
               },
               {
-                "id": "inode-NORM0031/66792CBD-306E-3A9B-882A-F08CD73BB433",
+                "id": "inode-NORM0031/12AB34CD-5678-3ABC-9DEF-0123456789AB",
                 "formula": "[DATE_DIM/Is Weekend]",
                 "name": "Is Weekend"
               },
@@ -214,7 +214,7 @@
               "inode-NORM0028/273F4937-8B99-37C1-AB49-68FA1EFCD376",
               "inode-NORM0029/5C131071-A71A-3710-AAED-5CCA82B7FFC7",
               "inode-NORM0030/F39416DF-A452-37EF-9BDB-25F1314F2D11",
-              "inode-NORM0031/66792CBD-306E-3A9B-882A-F08CD73BB433",
+              "inode-NORM0031/12AB34CD-5678-3ABC-9DEF-0123456789AB",
               "inode-NORM0032/6247D8BC-9486-3D2B-B68B-039E9DD0B178",
               "inode-NORM0033/1646CE10-B14D-3A88-8706-54AF1A627322"
             ]
@@ -277,7 +277,7 @@
                 "name": "Year"
               },
               {
-                "id": "inode-NORM0044/66792CBD-306E-3A9B-882A-F08CD73BB433",
+                "id": "inode-NORM0044/12AB34CD-5678-3ABC-9DEF-0123456789AB",
                 "formula": "[DATE_DIM/Is Weekend]",
                 "name": "Is Weekend"
               },
@@ -302,7 +302,7 @@
               "inode-NORM0041/273F4937-8B99-37C1-AB49-68FA1EFCD376",
               "inode-NORM0042/5C131071-A71A-3710-AAED-5CCA82B7FFC7",
               "inode-NORM0043/F39416DF-A452-37EF-9BDB-25F1314F2D11",
-              "inode-NORM0044/66792CBD-306E-3A9B-882A-F08CD73BB433",
+              "inode-NORM0044/12AB34CD-5678-3ABC-9DEF-0123456789AB",
               "inode-NORM0045/6247D8BC-9486-3D2B-B68B-039E9DD0B178",
               "inode-NORM0046/1646CE10-B14D-3A88-8706-54AF1A627322"
             ]
@@ -833,7 +833,7 @@
               {
                 "id": "id0131",
                 "formula": "If([Days To Ship] <= 2, \"Express (1-2 days)\", If([Days To Ship] <= 5, \"Standard (3-5 days)\", If([Days To Ship] <= 10, \"Economy (6-10 days)\", \"Slow (10+ days)\")))",
-                "name": "Ship Speed Category"
+                "name": "Delivery Speed Tier"
               },
               {
                 "id": "id0132",
@@ -1551,7 +1551,7 @@
     "⚠ Virtual connection: pass database and schema parameters to set the full warehouse path.",
     "ℹ \"Customer Value Tier\" → calculated column. Review: If([Lifetime Revenue] >= 5000, \"Platinum\", If([Lifetime Reve",
     "⚠ Metric \"Promo ROI\" aggregates a dimension-table column [Promo Cost] (cross-element); Sigma metrics can't reference related-element columns — needs manual authoring. Skipped.",
-    "ℹ \"Ship Speed Category\" → calculated column. Review: If([Days To Ship] <= 2, \"Express (1-2 days)\", If([Days To Sh",
+    "ℹ \"Delivery Speed Tier\" → calculated column. Review: If([Days To Ship] <= 2, \"Express (1-2 days)\", If([Days To Sh",
     "⚠ LOD \"YTD Revenue\" (FIXED) groups by a dimension-table column (cross-table grain); not mechanizable as a single-table helper — needs manual Sigma authoring. Skipped.",
     "ℹ \"Year Filter\" → calculated column. Review: 2023",
     "ℹ 1 calc col(s) moved to derived \"Order Fact View\" (cross-element refs)"

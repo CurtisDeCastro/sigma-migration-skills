@@ -36,9 +36,16 @@ import datetime, json, sys
 d = json.load(open(sys.argv[1]))
 rc = int(sys.argv[2])
 req = ["os", "shell", "runtimes", "hyperapi_present", "skill_sha", "behind_count",
-       "agent_vision", "model_hint", "pass", "failures", "generated_at", "cred_smoke"]
+       "days_since_commit", "agent_vision", "model_hint", "pass", "failures",
+       "generated_at", "cred_smoke"]
 missing = [k for k in req if k not in d]
 assert not missing, f"missing keys: {missing}"
+assert d["days_since_commit"] is None or isinstance(d["days_since_commit"], int), d["days_since_commit"]
+# This test runs from the git checkout, so the build stamp must be concrete:
+# a real short SHA and a non-negative integer age.
+import re
+assert re.fullmatch(r"[0-9a-f]{7,}", d["skill_sha"]), d["skill_sha"]
+assert isinstance(d["days_since_commit"], int) and d["days_since_commit"] >= 0, d["days_since_commit"]
 assert d["shell"] == "bash", d["shell"]
 for r in ("ruby", "python", "node", "bash"):
     assert r in d["runtimes"], f"runtimes missing {r}"
@@ -106,6 +113,21 @@ assert not any("Sigma credentials" in f for f in d["failures"]), d["failures"]
 assert d["cred_smoke"]["sigma"] == "skipped", d["cred_smoke"]
 PY
 check $? "no Sigma cred failure when env creds are present; cred_smoke.sigma=skipped"
+
+echo "Part F — no-git install stamps the unknown build SHA (mirror/plugin fallback)"
+mkdir -p "$TMP/nogit"
+cp "$HERE/doctor.sh" "$TMP/nogit/doctor.sh"
+HOME="$TMP/nohome" SIGMA_CLIENT_ID=id-test SIGMA_CLIENT_SECRET=sec-test \
+  bash "$TMP/nogit/doctor.sh" --workdir "$TMP/w5" >"$TMP/w5.out" 2>&1
+grep -q 'unknown (no git — mirror/plugin install)' "$TMP/w5.out"
+check $? "no-git run WARNs with the unknown-build fallback"
+python3 - "$TMP/w5/doctor.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["skill_sha"] == "unknown (no git — mirror/plugin install)", d["skill_sha"]
+assert d["days_since_commit"] is None, d["days_since_commit"]
+PY
+check $? "doctor.json records the unknown skill_sha + null days_since_commit"
 
 echo
 if [ "$fails" -gt 0 ]; then

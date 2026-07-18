@@ -159,14 +159,14 @@ that. A *full* migration with real parity needs **both tools reading the same
 warehouse**. Plan:
 
 1. **Land the source data in Snowflake.** Load the Sisense sample dataset(s)
-   into the shared demo warehouse (Snowflake `CSA.TJ`, the connection the other
-   migration skills use). One schema per cube, e.g. `CSA.TJ.SISENSE_ECOMMERCE_*`.
+   into the shared demo warehouse (Snowflake `DEMO_DB.DEMO`, the connection the other
+   migration skills use). One schema per cube, e.g. `DEMO_DB.DEMO.SISENSE_ECOMMERCE_*`.
 2. **Make Sisense read Snowflake (Live).** Add a Snowflake connection in Sisense
    and build the source dashboard on a **Live** model over those same tables —
    so the Sisense side and the Sigma side query byte-identical data. (Reuses the
    existing sample-schema table structure from the model export.)
 3. **Sigma DM targets the same Snowflake connection.** Phase-2 emits a DM whose
-   sources are the `CSA.TJ.SISENSE_*` tables. Parity is then exact, not
+   sources are the `DEMO_DB.DEMO.SISENSE_*` tables. Parity is then exact, not
    approximate.
 
 Decision pending with the user: which sample cube to use as the first

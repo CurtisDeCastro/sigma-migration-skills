@@ -20,9 +20,13 @@ SETUP = File.join(DIR, 'setup.rb')
 fails = []
 def check(c, m, fails) fails << m unless c; puts "  #{c ? 'PASS' : 'FAIL'}  #{m}" end
 
-def run_setup(home, args, timeout: 15)
+def run_setup(home, args, timeout: 15, env: {})
   out = +''
-  io = IO.popen({ 'HOME' => home }, ['ruby', SETUP] + args, err: %i[child out])
+  # Hermetic: the runner's own SIGMA_* env must not leak into the child — the
+  # no-TTY path now legitimately falls back to env creds when present.
+  base_env = { 'HOME' => home, 'SIGMA_CLIENT_ID' => nil, 'SIGMA_CLIENT_SECRET' => nil,
+               'SIGMA_BASE_URL' => nil, 'SIGMA_CONNECTION_ID' => nil }
+  io = IO.popen(base_env.merge(env), ['ruby', SETUP] + args, err: %i[child out])
   pid = io.pid
   t = Thread.new { out << io.read.to_s }
   hung = t.join(timeout).nil?
@@ -41,6 +45,8 @@ Dir.mktmpdir do |home|
   check(code == 2, "no-TTY without flags exits 2 (got #{code})", fails)
   check(out.include?('--client-id') && out.include?('--client-secret'),
         'refusal prints the exact flag invocation', fails)
+  check(out.include?('--from-env') && out.include?('SIGMA_CLIENT_SECRET'),
+        'refusal also documents the env-var path (--from-env + var names)', fails)
   check(!File.exist?(File.join(home, '.sigma-migration', 'env')),
         'nothing was written on the refusal path', fails)
 
@@ -76,6 +82,32 @@ Dir.mktmpdir do |home|
   check(body.include?("export TABLEAU_PAT_SECRET='tab-1'"), 'unrelated (Tableau) vars preserved', fails)
   check(body.include?("export SIGMA_BASE_URL='#{'https://aws-api.sigmacomputing.com'}'"),
         'omitted --base-url falls back to the default', fails)
+end
+
+Dir.mktmpdir do |home|
+  # (4) no TTY + env creds => proceeds FROM ENV (v5.6 item 5): no hang, no
+  # echo, sources named. The secret must never appear in the output.
+  secret = 'supersecret-abcdef-123456'
+  code, out, hung = run_setup(home, [], env: { 'SIGMA_CLIENT_ID' => 'id-env',
+                                               'SIGMA_CLIENT_SECRET' => secret,
+                                               'SIGMA_BASE_URL' => 'https://api.example-sigma.test' })
+  check(!hung, 'no-TTY env path does not hang', fails)
+  check(code == 0, "no-TTY with env creds exits 0 (got #{code})", fails)
+  check(out.include?('env SIGMA_CLIENT_ID') && out.include?('env SIGMA_CLIENT_SECRET'),
+        'output names the env source per value', fails)
+  check(!out.include?(secret), 'the secret is never echoed to the output', fails)
+  body = File.read(File.join(home, '.sigma-migration', 'env'))
+  check(body.include?("export SIGMA_CLIENT_ID='id-env'") &&
+        body.include?("export SIGMA_CLIENT_SECRET='#{secret}'"),
+        'env-sourced creds persisted to the neutral file', fails)
+end
+
+Dir.mktmpdir do |home|
+  # (5) explicit --from-env without the vars => exit 2 naming them.
+  code, out, hung = run_setup(home, ['--from-env'])
+  check(!hung && code == 2, "--from-env without env vars exits 2 (got #{code})", fails)
+  check(out.include?('SIGMA_CLIENT_ID') && out.include?('SIGMA_CLIENT_SECRET'),
+        '--from-env failure names the required env vars', fails)
 end
 
 puts

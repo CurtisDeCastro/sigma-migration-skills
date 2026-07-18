@@ -1,11 +1,11 @@
 # Tableau window / table calcs → Sigma-native window math
 
 **Status: WINPROBE-validated 2026-06-12 (bead beads-sigma-427).** Every mapping
-below was proven live against org `tj-wells-1989` / `CSA.TJ` with **930/930
+below was proven live against a live Sigma org with **930/930
 cells exact** vs warehouse SQL ground truth, on **ONE data-model base element
 with ZERO Custom SQL elements**. Regression fixture:
 `corpus/tableau/winprobe-window-functions/` (Tableau wb
-`aa126c36-608a-402c-9733-2c83797bc65c` on the 10ay/dataflow site).
+`<workbook-luid>` on a Tableau Cloud site).
 
 ## The family rule (load-bearing) — CORRECTED 2026-07-15
 
@@ -104,7 +104,17 @@ weekly funnel (CountD + Sum + ratio calc per week).
 ## STAYS MANUAL — flag, never guess
 
 No validated mapping; `extract-calc-fields.rb` keeps `requires_custom_sql`
-for these and build-charts emits a STAYS MANUAL warning:
+for these and build-charts emits a STAYS MANUAL warning. **Binding is now
+gate-enforced (G6):** when a png-read tile (its `measure`, a
+`{"manual_residue": "<calc>"}` declaration, or its worksheet's measure shelf)
+plots one of these calcs, build-charts writes it to
+`<workdir>/manual-residues.json` (formula + Custom SQL `OVER()` skeleton,
+`status: "unbuilt"`); pass 1 BLOCKS with the build+bind checklist (exit 16) and
+`assert-phase6-ran` gate 15 refuses GREEN (exit 22) until the Custom SQL DM
+element exists, the tile measure is repointed, and the entry is set
+`status: "built"` (waiver: `--accept-manual-residues`, budget-counted). The old
+behavior — silently shipping the tile as a magnitude proxy and discovering the
+divergence at Phase 6 — is dead.
 
 - `WINDOW_MEDIAN`, `WINDOW_PERCENTILE`, `WINDOW_CORR`, `WINDOW_COVAR(P)`,
   `WINDOW_VAR(P)`, `WINDOW_STDEVP`

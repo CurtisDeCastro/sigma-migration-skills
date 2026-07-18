@@ -89,10 +89,10 @@ end
 # a `measure`, AND a point_in_time block (the multi-metric recipe contract).
 def hl_doc(extra = {})
   { 'tiles' => [{ 'title' => 'Trend', 'kind' => 'line-chart' },
-                { 'title' => 'Bars', 'kind' => 'bar-chart', 'orientation' => 'horizontal', 'measure' => 'GDP (current US$)' }],
+                { 'title' => 'Bars', 'kind' => 'bar-chart', 'orientation' => 'horizontal', 'measure' => 'Revenue (current US$)' }],
     'text_elements' => [],
     'filter_shelf' => [{ 'label' => 'Region', 'target_tiles' => ['Trend'], 'highlight_tiles' => ['Bars'] }],
-    'point_in_time' => { 'year_column' => 'Year', 'entity_discriminator' => 'Income Group', 'latest_year' => 2015 } }.merge(extra)
+    'point_in_time' => { 'year_column' => 'Year', 'entity_discriminator' => 'Entity Group', 'latest_year' => 2015 } }.merge(extra)
 end
 Dir.mktmpdir do |d|
   File.write(DashboardRead.path(d), JSON.dump(hl_doc))

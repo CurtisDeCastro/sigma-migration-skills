@@ -1,6 +1,6 @@
 # qlik / exec-overview-smoke
 
-Qlik Cloud "Exec Overview" smoke-test app discovery output (synthetic CSA
+Qlik Cloud "Exec Overview" smoke-test app discovery output (synthetic demo
 retail star: OrderFact + Customer/Product/Store/Calendar/Promo), captured from
 a live qlik-to-sigma skill run. `converter-input.json` is the assembled
 converter feed — Engine-API tables/fields plus 13 master measures — i.e. the

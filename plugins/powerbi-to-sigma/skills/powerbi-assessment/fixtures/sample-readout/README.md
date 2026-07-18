@@ -19,7 +19,7 @@ ruby scripts/migration-plan.rb    --out /tmp/pbi-assessment-sigmacomputing
 
 - **2 workspaces** (`My workspace`, `Test`), both on Fabric capacity.
 - **2 semantic models**, **3 reports**. Both models source from Snowflake
-  (`ymb68310.snowflakecomputing.com`, parsed from M).
+  (`gxb98765.snowflakecomputing.com`, parsed from M).
 - The `Workforce KitchenSink` model is the complex-DAX fixture: the scan
   correctly classifies **17 mechanical + 7 restructuring + 0 no-equivalent**
   measures (matching `powerbi-to-sigma/fixtures/MANIFEST.md`), and the report on

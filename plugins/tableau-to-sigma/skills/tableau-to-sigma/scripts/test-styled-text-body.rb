@@ -82,8 +82,8 @@ check(b == '<p style="text-align: center"><span style="background-color: #fbe7a8
 # ---- 9. v5.0 full run surface: italic / bold+italic / underline / family -----
 # Sigma span-style whitelist has no font-style/font-weight/text-decoration —
 # italic must be markdown *…*, bold+italic ***…***, underline the <u> tag.
-b = text_body_from_runs([{ 'text' => 'Source: World Bank', 'italic' => true }])
-check(b == '*Source: World Bank*', "italic → markdown * markers (got #{b.inspect})", fails)
+b = text_body_from_runs([{ 'text' => 'Source: Example Data Co', 'italic' => true }])
+check(b == '*Source: Example Data Co*', "italic → markdown * markers (got #{b.inspect})", fails)
 b = text_body_from_runs([{ 'text' => ' Note ', 'bold' => true, 'italic' => true }])
 check(b == ' ***Note*** ', "bold+italic → *** hugging text, whitespace outside (got #{b.inspect})", fails)
 b = text_body_from_runs([{ 'text' => 'terms', 'underline' => true }])

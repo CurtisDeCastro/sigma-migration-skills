@@ -20,7 +20,7 @@ A report is affected when one of its attribute units has a DESC form
 (label column distinct from the grouping key). Reports without such
 attributes are skipped (their grids are clean).
 
-Usage: python3 resolve_ae_winners.py --connection-id <uuid> --database CSA \
+Usage: python3 resolve_ae_winners.py --connection-id <uuid> --database DEMO_DB \
           [--bundle bundle.json] [--folder-id <uuid>] [--out ae_winners.json]
 """
 import argparse
@@ -97,7 +97,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bundle", default="bundle.json")
     ap.add_argument("--connection-id", required=True)
-    ap.add_argument("--database", default="CSA")
+    ap.add_argument("--database", default="DEMO_DB")
     ap.add_argument("--folder-id", required=True)
     ap.add_argument("--out", default="ae_winners.json")
     args = ap.parse_args()

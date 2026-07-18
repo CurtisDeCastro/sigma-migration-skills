@@ -33,7 +33,7 @@
 #   whose value cannot be auto-picked (date ranges, numeric sliders, missing
 #   labels) are SKIPped with a NOTE — pass --value for those.
 #
-# MCP / export-API note (verified empirically 2026-06-12 on tj-wells-1989):
+# MCP / export-API note (verified empirically 2026-06-12 on a live Sigma org):
 # the Sigma MCP query path (mcp__sigma-mcp-v2__query / claude.ai Sigma MCP)
 # evaluates workbook elements WITH the saved control defaults applied and
 # exposes NO parameter mechanism to set a control value. The REST export API

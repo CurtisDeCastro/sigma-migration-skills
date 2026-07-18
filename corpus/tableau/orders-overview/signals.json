@@ -86,12 +86,12 @@
   },
   "2b018d0d-cd3f-402e-a420-0342298f7eb8": {
     "headers": [
-      "Ship Speed Category",
+      "Delivery Speed Tier",
       "Gross Revenue"
     ],
     "row_count": 3,
     "columns": {
-      "Ship Speed Category": {
+      "Delivery Speed Tier": {
         "kind": "dimension",
         "distinct_count": 3,
         "sample": [
@@ -175,12 +175,12 @@
   },
   "78bd59cd-1055-4d9f-9ba0-1b773d191484": {
     "headers": [
-      "Ship Speed Category",
+      "Delivery Speed Tier",
       "Return Rate"
     ],
     "row_count": 3,
     "columns": {
-      "Ship Speed Category": {
+      "Delivery Speed Tier": {
         "kind": "dimension",
         "distinct_count": 3,
         "sample": [
