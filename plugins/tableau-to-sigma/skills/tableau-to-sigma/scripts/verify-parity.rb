@@ -9,14 +9,21 @@
 #      "extract":  true|false   # optional per-chart override
 #   }]
 #
-# Render-verify fallback (known Sigma platform bug — pivot CSV export 500/empty):
-# collect-parity-actuals.rb may mark a chart's actual as
+# Export-marker fallbacks: collect-parity-actuals.rb may mark a chart's actual
+# as a status marker instead of rows —
 #   "actual": { "status": "render-verify-required", "reason": "..." }
-# instead of rows. Such a chart reports PENDING (pending-manual, never DIVERGE)
-# and keeps the run failing until the agent EITHER replaces the marker with real
-# rows (direct SQL / mcp-v2) OR confirms the values via render-read and sets
+#     (known Sigma platform bug — pivot CSV export 500/empty)
+#   "actual": { "status": "too-large-for-export", "reason": "..." }
+#     (bounded export truncated at rowLimit — parity over partial data is
+#      meaningless; issue #416)
+#   "actual": { "status": "timeout", "reason": "..." }
+#     (the collector's total --timeout deadline expired)
+# Such a chart reports PENDING (pending-manual, never DIVERGE) and keeps the
+# run failing until the agent EITHER replaces the marker with real rows
+# (direct SQL / mcp-v2 — for too-large tiles, an AGGREGATE query or the
+# warehouse oracle) OR confirms the values via render-read and sets
 #   "render_verified": true            # + optional "render_verified_notes"
-# on the chart in the plan — which then PASSes with a named render-verified note.
+# on the chart in the plan — which then PASSes with a named verified note.
 #
 # A top-level wrapper is also accepted:
 #   { "extract": true, "charts": [ ... ] }
@@ -333,11 +340,21 @@ results = plan.map do |p|
                    default_extract
                  end
 
-  # Render-verify fallback (see header): a status marker instead of rows means
-  # the CSV export hit the known pivot 500/empty platform bug — the chart is
-  # PENDING manual verification, never DIVERGE-against-empty. Once the plan
-  # chart carries render_verified:true it PASSes with a named note.
-  if p.dig('actual', 'status') == 'render-verify-required'
+  # Export-marker fallback (see header): a status marker instead of rows means
+  # the CSV export could not serve this chart (pivot 500/empty platform bug,
+  # bounded export truncated on a too-large detail grid, or collector total
+  # timeout) — the chart is PENDING manual verification, never DIVERGE-
+  # against-empty. Once the plan chart carries render_verified:true it PASSes
+  # with a named note.
+  marker_guidance = {
+    'render-verify-required' => 'verify via render-read or direct SQL',
+    'too-large-for-export'   => 'element exceeds the bounded CSV export — supply rows via an ' \
+                                'agent-mediated (mcp-v2) AGGREGATE query or the warehouse SQL oracle',
+    'timeout'                => 're-run collect-parity-actuals.rb with a higher --timeout, or ' \
+                                'supply rows via mcp-v2/warehouse SQL'
+  }
+  marker = p.dig('actual', 'status')
+  if marker_guidance.key?(marker)
     reason = p.dig('actual', 'reason') || 'CSV export unavailable'
     result =
       if p['render_verified']
@@ -346,9 +363,9 @@ results = plan.map do |p|
           notes: ["render-verified: #{reason}; values confirmed via render-read/SQL" \
                   "#{p['render_verified_notes'] ? " — #{p['render_verified_notes']}" : ''}"] }
       else
-        { status: 'PENDING', score: nil, only_in_tableau: [], only_in_sigma: [],
+        { status: 'PENDING', score: nil, only_in_tableau: [], only_in_sigma: [], marker: marker,
           n_expected: exp.size, n_actual: nil, n_matched: nil,
-          notes: ["render-verify-required: #{reason} — verify via render-read or direct SQL, " \
+          notes: ["#{marker}: #{reason} — #{marker_guidance[marker]}, " \
                   'then set "render_verified": true on this chart in the plan ' \
                   '(or replace the marker with actual rows) and re-run'] }
       end
@@ -372,7 +389,7 @@ end
 results.each do |r|
   tag = r[:extract] ? '[extract]' : '[strict] '
   if r[:status] == 'PENDING'
-    printf "%-7s  %s  %s  (render-verify-required)\n", r[:status], tag, r[:chart]
+    printf "%-7s  %s  %s  (%s)\n", r[:status], tag, r[:chart], r[:marker] || 'render-verify-required'
   else
     printf "%-7s  %s  %s  (score %.0f%%)\n", r[:status], tag, r[:chart], (r[:score] || 0) * 100
   end

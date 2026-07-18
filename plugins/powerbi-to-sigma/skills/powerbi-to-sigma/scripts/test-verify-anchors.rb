@@ -102,6 +102,55 @@ v5 = AnchorVerify.verify(
 )
 ok(v5['pass'] == true, 'hinted numeric present IN the hinted element still matches')
 
+puts '-- pure core: truncated-export inconclusiveness (issue #416) --'
+# A bounded (row-capped) export that came back FULL may be missing rows: an
+# anchor that fails to match over it canNOT be declared MISSING — the value may
+# live below the cap. It reports 'inconclusive-truncated' instead (never a hard
+# MISS), and inconclusive anchors still fail `pass` (unverified != vouched-for).
+trunc_exports = {
+  'Big Detail'   => [['V'], ['1'], ['2'], ['3']],
+  'Total Stores' => [['Stores'], ['104']]
+}
+vt1 = AnchorVerify.verify(
+  [{ 'id' => 'tr1', 'label' => 'Detail total', 'raw' => '999', 'sigma_element_hint' => 'Big Detail' }],
+  trunc_exports, truncated: ['Big Detail']
+)
+ok(vt1['missing'].empty? && vt1['inconclusive'].length == 1,
+   'miss over a truncated in-scope export → inconclusive, NOT missing')
+ok(vt1['inconclusive'].first['status'] == 'inconclusive-truncated' &&
+   vt1['inconclusive'].first['truncated_elements'] == ['Big Detail'],
+   'inconclusive entry carries the status + the truncated element(s)')
+ok(vt1['pass'] == false && vt1['matched'] == 0,
+   'inconclusive anchors still fail pass and do not count as matched')
+vt2 = AnchorVerify.verify(
+  [{ 'id' => 'tr2', 'label' => 'Total Stores', 'raw' => '999', 'sigma_element_hint' => 'Total Stores' }],
+  trunc_exports, truncated: ['Big Detail']
+)
+ok(vt2['missing'].length == 1 && vt2['inconclusive'].empty?,
+   'truncation OUTSIDE a hinted anchor\'s scope does not soften a genuine MISS')
+vt3 = AnchorVerify.verify(
+  [{ 'id' => 'tr3', 'label' => 'Nowhere Number', 'raw' => '999' }],
+  trunc_exports, truncated: ['Big Detail']
+)
+ok(vt3['missing'].empty? && vt3['inconclusive'].length == 1,
+   'hint-less miss (search-everywhere) with ANY truncated export → inconclusive')
+vt4 = AnchorVerify.verify(
+  [{ 'id' => 'tr4', 'label' => 'Total Stores', 'raw' => '104' }],
+  trunc_exports, truncated: ['Big Detail']
+)
+ok(vt4['pass'] == true && vt4['matched'] == 1 && vt4['inconclusive'].empty?,
+   'a matched anchor is unaffected by truncation elsewhere')
+vt5 = AnchorVerify.verify(
+  [{ 'id' => 'tr5', 'label' => 'roster', 'raw' => 'Region Z', 'kind' => 'text' }],
+  trunc_exports, truncated: ['Big Detail']
+)
+ok(vt5['missing'].empty? && vt5['inconclusive'].length == 1,
+   'text-anchor miss over a truncated export → inconclusive too')
+# No kwarg = legacy behavior: same misses stay hard MISSes.
+vt6 = AnchorVerify.verify([{ 'id' => 'tr6', 'label' => 'Nowhere Number', 'raw' => '999' }], trunc_exports)
+ok(vt6['missing'].length == 1 && vt6['inconclusive'].empty?,
+   'without a truncated set the legacy hard-MISS behavior is unchanged')
+
 puts '-- CLI offline mode --'
 def write_fixture(dir, exports_rows, anchors)
   spec = { 'pages' => [{ 'id' => 'pg1', 'elements' =>
