@@ -347,6 +347,7 @@ def normalize_filter(f)
     members = []
     conditions = []
     exclude = false
+    null_member = false
     wildcard = nil
     wildcard_unparsed = nil
     topn = nil
@@ -362,6 +363,12 @@ def normalize_filter(f)
       enum_attr = gf.attributes['user:ui-enumeration'] || gf.attributes['ui-enumeration']
       exclude = true if fn == 'except' || enum_attr.to_s == 'exclusive'
       if fn == 'member'
+        # `%null%` is Tableau's Null member sentinel. unquote_member drops it
+        # (a Sigma list value can't carry null), but REMEMBER we saw it: in an
+        # exclude filter it means "Tableau hides the null bucket" — the signal
+        # the builder needs for the #417 option-source IsNotNull workaround
+        # (Sigma's `showNullOption:false` is accepted then silently dropped).
+        null_member = true if gf.attributes['member'].to_s.strip == '%null%'
         m = unquote_member(gf.attributes['member'])
         members << m if m
       end
@@ -405,6 +412,11 @@ def normalize_filter(f)
     out['kind']    = 'list'
     out['members'] = members
     out['exclude'] = true if exclude
+    # An exclude filter whose excluded members include Null: the view hides
+    # the null bucket. Surfaced so the builder can filter nulls at the list
+    # control's option source (#417 workaround) instead of emitting the
+    # silently-dropped `showNullOption:false`.
+    out['excludes_null'] = true if exclude && null_member
     if topn
       topn['direction']  = (order_dir || 'DESC').to_s.upcase
       topn['order_expr'] = order_expr if order_expr

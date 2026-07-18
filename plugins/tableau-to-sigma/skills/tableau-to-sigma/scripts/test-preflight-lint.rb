@@ -10,6 +10,8 @@
 #   N1  whitespace-only element / column names (break parity header matching)
 #   P1  conditionalFormats includeValues:false (silent no-op)         [WARN]
 #   I1  If() over a bare column ref, no comparison operator (v5.4: If-only)  [WARN]
+#   A1  DROPPED_BY_API control fields (accepted-then-silently-ignored, #417) [WARN]
+#   A2  date-range bare-date startDate/endDate default (silently dropped, #415) [WARN]
 #
 # Each rule: a clean spec passes, each violation is caught with the right rule
 # id + message. WARN rules must never appear in lint() (the FAIL set).
@@ -171,6 +173,83 @@ s = valid_spec
 s['pages'][0]['elements'][0]['columns'][2]['formula'] = 'If([Src/Flag] = 1, [Src/Revenue], 0)'
 check(lint_warnings(s).none? { |x| x.start_with?('I1 ') }, 'I1: If() with explicit comparison → no warning', fails)
 
+# ---- A1 (WARN): DROPPED_BY_API fields — accepted then silently ignored (#417) --
+# One warning PER field, naming the field, the silent-drop behavior, and the
+# workaround — and phrased as "silently ignored", never as a will-400.
+DROPPED_BY_API.each_key do |field|
+  s = valid_spec
+  s['pages'][0]['elements'][4][field] = false
+  warns = lint_warnings(s)
+  a1 = warns.select { |x| x.start_with?('A1 ') }
+  check(a1.size == 1, "A1: `#{field}` on a control → exactly 1 WARNING (got #{a1.inspect})", fails)
+  check(a1.first.to_s.include?("`#{field}`") && a1.first.to_s.include?('SILENTLY DROPPED'),
+        "A1 message names `#{field}` + the silent drop", fails)
+  check(a1.first.to_s.include?('NOT a 400') && a1.first.to_s.include?('Workaround:'),
+        "A1 message (#{field}) distinguishes silently-ignored from will-400 and names a workaround", fails)
+  check(rule(lint(s), 'A1').empty?, "A1 (#{field}) is WARN-only — never in the FAIL set", fails)
+end
+# all eight #417 fields are in the contract table
+%w[showNullOption showClearButton showSearchBox showHistogram allowMultipleSelection
+   excludeValues showExpandedList required].each do |f417|
+  check(DROPPED_BY_API.key?(f417), "DROPPED_BY_API covers #{f417} (#417)", fails)
+end
+# multiple dropped fields on one control → one warning each
+s = valid_spec
+s['pages'][0]['elements'][4]['showNullOption'] = false
+s['pages'][0]['elements'][4]['showSearchBox'] = true
+check(lint_warnings(s).count { |x| x.start_with?('A1 ') } == 2,
+      'A1: two dropped fields on one control → two warnings', fails)
+# the showNullOption workaround is the option-source IsNotNull filter
+s = valid_spec
+s['pages'][0]['elements'][4]['showNullOption'] = false
+a1 = lint_warnings(s).find { |x| x.start_with?('A1 ') }
+check(a1.to_s.include?('IsNotNull'), 'A1 showNullOption workaround names the option-source IsNotNull filter', fails)
+
+# ---- A2 (WARN): date-range bare-date default (#415) ---------------------------
+def date_range_ctl(s, start_d, end_d = nil)
+  ctl = s['pages'][0]['elements'][4]
+  ctl['controlType'] = 'date-range'
+  ctl.delete('selectionMode')
+  ctl.delete('value')
+  ctl['mode'] = 'between'
+  ctl['startDate'] = start_d if start_d
+  ctl['endDate'] = end_d if end_d
+  ctl
+end
+s = valid_spec
+date_range_ctl(s, '2026-01-01')
+warns = lint_warnings(s)
+a2 = warns.select { |x| x.start_with?('A2 ') }
+check(a2.size == 1, "A2: bare-date startDate → 1 WARNING (got #{a2.inspect})", fails)
+check(a2.first.to_s.include?('SILENTLY DROPPED') && a2.first.to_s.include?('2026-01-01T00:00:00Z'),
+      'A2 message says the default silently drops and shows the persisting ISO-UTC form', fails)
+check(a2.first.to_s.include?('POSTPUBLISH_GUIDE'),
+      'A2 message names the UI-default honest floor (postpublish guide)', fails)
+check(rule(lint(s), 'A2').empty?, 'A2 is WARN-only — never in the FAIL set', fails)
+# both bounds bare → one warning per field
+s = valid_spec
+date_range_ctl(s, '2026-01-01', '2026-03-31')
+check(lint_warnings(s).count { |x| x.start_with?('A2 ') } == 2,
+      'A2: bare startDate AND endDate → two warnings', fails)
+# the persisting Z-suffixed form is clean
+s = valid_spec
+date_range_ctl(s, '2026-01-01T00:00:00Z', '2026-03-31T23:59:59Z')
+check(lint_warnings(s).none? { |x| x.start_with?('A2 ') },
+      'A2: full ISO-8601 UTC timestamps → no warning (documented round-trip form)', fails)
+# relative {op,unit,value} hashes (custom mode) are not strings — no warning
+s = valid_spec
+ctl = date_range_ctl(s, nil)
+ctl['mode'] = 'custom'
+ctl['startDate'] = { 'op' => 'now-minus', 'unit' => 'day', 'value' => 30 }
+check(lint_warnings(s).none? { |x| x.start_with?('A2 ') },
+      'A2: relative startDate hash (custom mode) → no warning', fails)
+# A2 is date-range-only: a bare-date scalar on a `date` control is a `value`, not startDate
+s = valid_spec
+ctl = s['pages'][0]['elements'][4]
+ctl['controlType'] = 'date'; ctl['mode'] = '='; ctl.delete('selectionMode'); ctl['value'] = '2026-01-01'
+check(lint_warnings(s).none? { |x| x.start_with?('A2 ') },
+      'A2: date control with scalar value → no warning', fails)
+
 # ---- regression: pre-existing rules untouched ---------------------------------
 # T1: aggregate + dimension table without groupings still fails
 s = valid_spec
@@ -224,7 +303,7 @@ check(rule(lint(s), 'C8').empty?, 'C8: includeNulls on a number control → allo
 
 puts
 if fails.empty?
-  puts 'ALL PASS — preflight_lint K1/S1/C5/N1 fail rules + P1/I1 warnings + T1/C2/C3 regressions'
+  puts 'ALL PASS — preflight_lint K1/S1/C5/N1 fail rules + P1/I1/A1/A2 warnings + T1/C2/C3 regressions'
   exit 0
 else
   puts "FAILURES (#{fails.length}):"

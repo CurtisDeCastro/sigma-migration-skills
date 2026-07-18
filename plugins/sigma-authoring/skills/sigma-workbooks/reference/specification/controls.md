@@ -245,6 +245,27 @@ filters:
 
 `top-n` is a dedicated control type for "show the top N" interactions. Wire it like any other control via `filters`; the cap is a flat top-level field.
 
+## Dropped-by-API fields (accepted-then-ignored) — the DROPPED_BY_API contract
+
+A family of control fields that `POST/PUT /v2/workbooks/spec` **accepts with 200 and no validation error, then silently drops**: the readback (`GET /v2/workbooks/{id}/spec`) omits them entirely and they never take effect on the live control. This is a **Sigma product gap**, distinct from spec-grammar mistakes (those 400 or return `Invalid kind: control`). Field-confirmed by round-tripping live workbooks (tableau-to-sigma issues #415 and #417, 2026-07-17).
+
+Do not emit these naively. The machine-readable version of this table is `DROPPED_BY_API` in the shared preflight lint (`shared/lib/preflight_lint.rb`, vendored into every converter's `scripts/lib/`); the lint WARNs (`A1`/`A2`) on any spec carrying one, and the tableau-to-sigma post-POST control-field audit (`post-and-readback.rb`) diffs every posted control against its readback so *future* members of this family surface automatically.
+
+| Field | controlType | Observed behavior | Sanctioned workaround |
+|---|---|---|---|
+| `showNullOption` | `list` / `segmented` / `hierarchy` | 200 on POST/PUT; absent on readback; the live control **still shows "Null" as a selectable value** (#417) | Filter nulls at the control's **option-source**: point the value-list `source` at a hidden helper element carrying an `IsNotNull(<col>)` filter (field-validated) |
+| `allowMultipleSelection` | `list` | 200; dropped on readback; no effect (#417) | `selectionMode: "single"\|"multiple"` — persists |
+| `excludeValues` | `list` / `segmented` / `hierarchy` | 200; dropped on readback; no effect (#417) | `mode: "exclude"` + `values` = the excluded members — persists |
+| `showClearButton` | `list` (editor toggle) | 200; dropped on readback; no effect (#417) | None in the spec — set in the UI control editor post-publish (record in the post-publish guide) |
+| `showSearchBox` | `list` (editor toggle) | 200; dropped on readback; no effect (#417) | None in the spec — set in the UI post-publish |
+| `showHistogram` | `list` / sliders (editor toggle) | 200; dropped on readback; no effect (#417) | None in the spec — set in the UI post-publish |
+| `showExpandedList` | `list` (editor toggle) | 200; dropped on readback; no effect (#417) | None in the spec — set in the UI post-publish |
+| `required` | any (editor toggle) | 200; dropped on readback; no effect (#417) | None in the spec — set in the UI post-publish |
+| `startDate` / `endDate` as a **bare date** (`"2026-01-01"`) or zoneless timestamp | `date-range` (`mode: between`/`custom`) | 200; absent on readback; the control renders the "Select date range" placeholder with **no default**, so filtered elements open unfiltered (#415) | Emit a **full ISO-8601 UTC timestamp** (`"2026-01-01T00:00:00Z"`) — the only string form observed to round-trip; confirm via post-POST readback, else set the default in the UI |
+| `value: {…}` object (e.g. `{min,max}` / `{low,high}`) | `date-range` and others | 200 (or `Invalid kind: control`); stripped on round-trip; no default | Control value fields are **flat top-level** (`startDate`/`endDate`, `low`/`high`, scalar `value`) — see the field table at the top of this file |
+
+> A `selectionMode: "single"` control carrying a `values` **array** is the same accepted-then-ignored class (both the filter and the default silently drop) — the preflight lint fails it as `C5`; use scalar `value`.
+
 ---
 
 ## Referencing a Control's Value in a Formula

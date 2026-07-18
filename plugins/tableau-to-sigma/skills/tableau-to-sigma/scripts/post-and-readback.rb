@@ -732,6 +732,39 @@ rescue StandardError => e
   warn "WARN: filters census skipped (#{e.class}: #{e.message[0, 80]})"
 end
 
+# CONTROL-FIELD census (workbooks; issues #415/#417) — the Workbook Spec API
+# accepts a family of control fields with 200 and SILENTLY DROPS them on
+# readback (list-control editor toggles like showNullOption, bare-date
+# date-range startDate/endDate defaults). The preflight lint (A1/A2,
+# DROPPED_BY_API in lib/preflight_lint.rb) warns on the KNOWN members
+# pre-POST; this audit diffs EVERY posted control's fields against its
+# readback so future members of the family surface automatically. WARN, not
+# a hard stop: the workbook is live and correct except for the ignored field.
+begin
+  posted_spec ||= (JSON.parse(File.read(opts[:spec])) rescue nil)
+  if opts[:type] == 'workbook' && posted_spec && spec.is_a?(Hash)
+    require_relative 'lib/control_field_census'
+    cf_problems = ControlFieldCensus.census(posted_spec, spec)
+    if cf_problems.any?
+      warn "\n========================================"
+      warn "WARN — CONTROL FIELD(S) silently dropped by the spec API: #{cf_problems.size} control(s) " \
+           'posted field(s) that the readback does not carry (accepted with 200, then ignored — they'
+      warn 'never take effect on the live control; Sigma product gap, NOT a spec 400):'
+      ControlFieldCensus.report_lines(cf_problems).each { |l| warn "  #{l}" }
+      warn 'Known family + sanctioned workarounds: DROPPED_BY_API in scripts/lib/preflight_lint.rb and'
+      warn 'sigma-workbooks reference/specification/controls.md ("Dropped-by-API fields"). A dropped'
+      warn 'DEFAULT (e.g. date-range startDate/endDate) means the control ships with NO default — set it'
+      warn 'in the Sigma UI control editor and record the step in POSTPUBLISH_GUIDE.md.'
+      warn '========================================'
+    else
+      n = ControlFieldCensus.controls(posted_spec).size
+      warn "control-field census: #{n} posted control(s), no silently-dropped fields" if n.positive?
+    end
+  end
+rescue StandardError => e
+  warn "WARN: control-field census skipped (#{e.class}: #{e.message[0, 80]})"
+end
+
 # Rec5 quarantine final report: the (re-)POST succeeded and the census is clean,
 # but only because broken element(s) were REMOVED. The DM is PARTIAL — exit with
 # the distinct code so no caller mistakes this for a full green POST.

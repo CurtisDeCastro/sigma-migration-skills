@@ -373,6 +373,24 @@ def current_period_bounds(period, now = Time.now)
   relative_period_bounds(period, 0, 0, now)
 end
 
+# #415: the Workbook Spec API ACCEPTS a bare-date `startDate`/`endDate` default
+# on a date-range control (200 on POST/PUT) and SILENTLY DROPS it on readback —
+# the live control shows the "Select date range" placeholder and every filtered
+# element opens unfiltered. Full ISO-8601 UTC timestamps ("2026-01-01T00:00:00Z")
+# are the only string form observed to round-trip (refs/workbook-layout.md).
+# Normalize every emitted default to that persisting form. Tableau attribute
+# forms handled: "#2026-01-01#", "2026-01-01", "2026-01-01 00:00:00". Anything
+# unrecognized is returned AS-IS — the preflight lint (A2 WARN) and the
+# post-POST control-field audit surface it rather than a silent mangle.
+def iso_utc_datestamp(v, end_of_day: false)
+  s = v.to_s.strip.sub(/\A#/, '').sub(/#\z/, '')
+  return v if s.empty?
+  return s if s =~ /\A\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})\z/
+  m = s.match(/\A(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}:\d{2}))?\z/)
+  return v unless m
+  "#{m[1]}T#{m[2] || (end_of_day ? '23:59:59' : '00:00:00')}Z"
+end
+
 # Tableau period-type → Sigma date-range `unit` enum. Sigma has no bare "week"
 # (it splits Sunday/Monday anchored) and no "weekday"/other Tableau grains.
 # Returns nil for grains Sigma's rolling modes can't express (caller falls back).
@@ -6784,6 +6802,38 @@ unless opts[:no_auto_controls]   # default-on: never miss a .twb parameter/filte
         'columnId' => m['id']
       }
       spec['filters'] = targets
+      # #417 workaround: the Tableau filter EXCLUDES Null, but Sigma's
+      # `showNullOption:false` is accepted by POST/PUT then SILENTLY DROPPED on
+      # readback — it never suppresses the null option. The field-validated
+      # alternative: filter nulls at the control's OPTION-SOURCE — a hidden
+      # helper element sourcing the master with an IsNotNull(<col>) filter, and
+      # the control's value list pointed at it. (Data-side exclusion still rides
+      # the control's mode/values; only the OPTION LIST changes here.)
+      if f['excludes_null'] && spec['controlType'] == 'list'
+        opt_id = "opt-src-#{slug}"
+        opt_val_col = "#{opt_id}-v"
+        opt_nn_col  = "#{opt_id}-nn"
+        data_elements << {
+          'id' => opt_id, 'kind' => 'table', 'name' => "#{cap.strip} Options",
+          'source' => { 'kind' => 'table', 'elementId' => opts[:master_id] },
+          'columns' => [
+            { 'id' => opt_val_col, 'name' => cap.strip, 'formula' => "[Master/#{m['name']}]" },
+            { 'id' => opt_nn_col, 'name' => "#{cap.strip} Not Null",
+              'formula' => "IsNotNull([Master/#{m['name']}])" }
+          ],
+          'filters' => [{ 'columnId' => opt_nn_col, 'kind' => 'list', 'mode' => 'include',
+                          'selectionMode' => 'multiple', 'values' => [true] }],
+          'visibleAsSource' => false
+        }
+        spec['source'] = {
+          'kind'     => 'source',
+          'source'   => { 'kind' => 'table', 'elementId' => opt_id },
+          'columnId' => opt_val_col
+        }
+        warnings << "quick filter '#{cap}' EXCLUDES Null — `showNullOption:false` is silently dropped by " \
+                    "the spec API (#417), so the control's option list sources hidden helper " \
+                    "'#{cap.strip} Options' with an IsNotNull filter at the option source (sanctioned workaround)"
+      end
       if f['exclude']
         warnings << "quick filter '#{cap}' is EXCLUDE-mode → list control mode:exclude seeded with " \
                     "#{(f['members'] || []).size} excluded value(s): #{(f['members'] || []).join(', ')[0..80]}"
@@ -6827,10 +6877,18 @@ unless opts[:no_auto_controls]   # default-on: never miss a .twb parameter/filte
       if %w[date datetime].include?(f['datatype'].to_s)
         # Quantitative filter on a DATE column: a range-slider is the wrong
         # widget (renders epoch numbers) — date-range with the parsed bounds.
+        # Bounds go through iso_utc_datestamp: a bare-date default is accepted
+        # then SILENTLY DROPPED by the spec API (#415); only full ISO-8601 UTC
+        # timestamps round-trip.
         spec['controlType'] = 'date-range'
         spec['mode'] = 'between'
-        spec['startDate'] = f['min'] if f['min']
-        spec['endDate']   = f['max'] if f['max']
+        spec['startDate'] = iso_utc_datestamp(f['min']) if f['min']
+        spec['endDate']   = iso_utc_datestamp(f['max'], end_of_day: true) if f['max']
+        if (f['min'] && spec['startDate'] != f['min']) || (f['max'] && spec['endDate'] != f['max'])
+          warnings << "shared filter '#{cap}' date-range default normalized to ISO-8601 UTC " \
+                      "(#{spec['startDate']}..#{spec['endDate']}) — bare dates are accepted then " \
+                      'silently dropped by the spec API (#415); only Z-suffixed timestamps persist'
+        end
       elsif f['min'] && f['max']
         spec['controlType'] = 'range-slider'
         # Bounds are load-bearing: a bare range-slider renders 0..0 and filters
@@ -6932,10 +6990,17 @@ if opts[:controls]
       spec['mode'] = c['mode'] || 'between'
       if c['default']
         d = c['default']
-        spec['startDate'] = d['startDate'] if d['startDate']
-        spec['endDate']   = d['endDate']   if d['endDate']
+        # #415: bare-date defaults are accepted then silently dropped by the
+        # spec API — normalize to the persisting ISO-8601 UTC timestamp form.
+        # Relative {op,unit,value} hashes (custom mode) pass through untouched.
+        spec['startDate'] = d['startDate'].is_a?(String) ? iso_utc_datestamp(d['startDate']) : d['startDate'] if d['startDate']
+        spec['endDate']   = d['endDate'].is_a?(String) ? iso_utc_datestamp(d['endDate'], end_of_day: true) : d['endDate'] if d['endDate']
         spec['unit']      = d['unit']      if d['unit']
         spec['mode']      = d['mode']      if d['mode']
+        if spec['startDate'] != d['startDate'] || spec['endDate'] != d['endDate']
+          warnings << "control '#{spec['name']}' date-range default normalized to ISO-8601 UTC — bare dates " \
+                      'are accepted then silently dropped by the spec API (#415); only Z-suffixed timestamps persist'
+        end
       end
     when 'segmented'
       spec['source'] = c['source'] || {
