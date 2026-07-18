@@ -3070,6 +3070,28 @@ end
 unless reuse_dm_id
   dm['folderId'] = opts[:folder] if opts[:folder]
   File.write(dm_spec_path, JSON.pretty_generate(dm))
+  # Join-cardinality ledger (PR-4): one entry per federated .twb join + per
+  # synthesized Coalesce/Lookup in the dm-spec, each carrying the "right unique
+  # on keys" grain assumption at status "unprobed". Sigma's Lookup() returns one
+  # ARBITRARY match per key — an unproven target grain silently undercounts
+  # every aggregate over the looked-up column (zero errors anywhere). The final
+  # gate (assert-phase6-ran.rb gate 16, exit 23) refuses GREEN until every entry
+  # is probed unique or resolved; an EMPTY ledger is still written — its
+  # presence is the gate's evidence the derivation ran.
+  begin
+    require_relative 'lib/join_plan'
+    _jp = JoinPlan.derive(dm, have_twb ? File.read(twb, encoding: 'UTF-8') : nil)
+    JoinPlan.write(File.join(WORK, 'join-plan.json'), _jp)
+    if _jp.any?
+      line "join-plan ledger: #{_jp.size} join/Lookup grain assumption(s) recorded (join-plan.json, status unprobed)"
+      line "  PROVE them before --finalize:  ruby #{File.join(HERE, 'probe-join-keys.rb')} --workdir #{WORK} --connection-id #{opts[:conn]}"
+    else
+      line 'join-plan ledger: empty (no federated joins / Lookup synthesis) — join-plan.json written as gate evidence'
+    end
+  rescue StandardError => e
+    line "WARN: join-plan ledger derivation failed (#{e.class}: #{e.message.to_s[0, 80]}) — " \
+         'gate 16 will fail if the dm-spec carries Lookup() synthesis; derive by hand via lib/join_plan.rb'
+  end
   # In mechanical mode validate-spec.rb is advisory only: it flags cross-element
   # sibling refs that Sigma actually resolves via relationships (documented
   # false-negative class — see project CLAUDE.md). The authoritative gate is the
