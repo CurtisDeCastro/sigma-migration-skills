@@ -10,6 +10,13 @@
 # resolutions + exit 2; --resolve records evidence and clears the failure;
 # missing fixture → status error + exit 3; probe SQL recorded on the entry.
 #
+# Live-path coverage (stubbed sigma_rest, same -I <stub> -r sigma_rest seam as
+# test-parity-render-verify-fallback.rb): no --folder-id → the probe-workbook
+# POST body carries NO folderId key (an explicit null is a live 400, Twin B
+# e2e); --folder-id supplied → stamped; a POST 400 → probe_error records the
+# HTTP status + response-body excerpt and the console prints a --folder-id
+# hint when the error mentions the folder.
+#
 # Run: ruby scripts/test-probe-join-keys.rb
 require 'json'
 require 'open3'
@@ -17,6 +24,58 @@ require 'tmpdir'
 require 'rbconfig'
 
 SCRIPT = File.join(__dir__, 'probe-join-keys.rb')
+REAL_SIGMA_REST = File.expand_path('lib/sigma_rest.rb', __dir__)
+
+# Stub sigma_rest for the live-probe path: records every request to
+# SIGMA_STUB_LOG (JSON lines), then marks the real lib path as already
+# required so the script's own `require 'sigma_rest'` no-ops instead of
+# overriding the stub. SIGMA_STUB_400=1 makes the probe-workbook POST raise
+# the same "<METHOD> <path> -> <code> <message>\n<body>" Sigma::Error shape
+# the real lib raises.
+SIGMA_STUB = <<~'RUBY'
+  require 'json'
+  module Sigma
+    class Error < StandardError; end
+    @spec_posts = 0
+    def self.request(method, path, body: nil, accept: nil, binary: false, content_type: nil, http: nil)
+      if ENV['SIGMA_STUB_LOG']
+        File.open(ENV['SIGMA_STUB_LOG'], 'a') { |f| f.puts JSON.generate('method' => method.to_s, 'path' => path, 'body' => body) }
+      end
+      if method == :post && path == '/v2/workbooks/spec'
+        if ENV['SIGMA_STUB_400']
+          raise Error, "POST /v2/workbooks/spec -> 400 Bad Request\n" \
+                       '{"code":"bad_request","message":"invalid folderId: must be a valid folder UUID"}'
+        end
+        @spec_posts += 1
+        return { 'workbookId' => "wb-#{@spec_posts}" }
+      end
+      return { 'queryId' => "q-#{path[/wb-(\d+)/, 1]}" } if method == :post && path.include?('/export')
+      if method == :get && path.start_with?('/v2/query/')
+        # wb-1/q-1 = the duplicate-sample query (no dup rows), wb-2/q-2 = totals.
+        return path.include?('q-1') ? "ENTITY_ID,C\n" : "TOTAL_ROWS,DISTINCT_KEYS\n100,100\n"
+      end
+      return nil if method == :delete
+      raise Error, "stub: unexpected #{method} #{path}"
+    end
+  end
+  real = ENV['REAL_SIGMA_REST']
+  $LOADED_FEATURES << real if real && !$LOADED_FEATURES.include?(real)
+RUBY
+
+def run_probe_live(dir, env, *args)
+  stub_dir = File.join(dir, 'stub')
+  Dir.mkdir(stub_dir) unless Dir.exist?(stub_dir)
+  File.write(File.join(stub_dir, 'sigma_rest.rb'), SIGMA_STUB)
+  Open3.capture3(
+    { 'REAL_SIGMA_REST' => REAL_SIGMA_REST, 'SIGMA_BASE_URL' => 'https://stub.invalid',
+      'SIGMA_API_TOKEN' => 'stub' }.merge(env),
+    RbConfig.ruby, '-I', stub_dir, '-r', 'sigma_rest', SCRIPT, '--workdir', dir, *args)
+end
+
+def spec_posts(log)
+  File.readlines(log).map { |l| JSON.parse(l) }
+      .select { |r| r['method'] == 'post' && r['path'] == '/v2/workbooks/spec' }
+end
 
 fails = []
 def check(cond, msg, fails)
@@ -164,6 +223,48 @@ Dir.mktmpdir do |dir|
   check(st.exitstatus == 3, "exit 3 (got #{st.exitstatus})", fails)
   check(err.include?('could not be probed'), 'error summary printed', fails)
   check(ledger(dir)[0]['status'] == 'error', 'ledger status error (gate still blocks)', fails)
+end
+
+puts "\n== live probe, no --folder-id → POST body has NO folderId key =="
+Dir.mktmpdir do |dir|
+  workdir_with(dir, [entry])
+  log = File.join(dir, 'stub.log')
+  _out, err, st = run_probe_live(dir, { 'SIGMA_STUB_LOG' => log }, '--connection-id', 'conn-1')
+  check(st.success?, "live-stub unique → exit 0 (got #{st.exitstatus}: #{err.lines.first})", fails)
+  check(ledger(dir)[0]['status'] == 'unique', 'live-stub ledger status unique', fails)
+  posts = spec_posts(log)
+  check(posts.size == 2, "two probe-workbook POSTs (dup sample + totals; got #{posts.size})", fails)
+  bodies = posts.map { |r| JSON.parse(r['body']) }
+  check(bodies.all? { |b| !b.key?('folderId') },
+        'no --folder-id → POST body carries NO folderId key (explicit null is a live 400)', fails)
+  check(bodies.all? { |b| b['schemaVersion'] == 1 && b['pages'] }, 'probe spec envelope otherwise intact', fails)
+end
+
+puts "\n== live probe, --folder-id supplied → folderId stamped on the POST body =="
+Dir.mktmpdir do |dir|
+  workdir_with(dir, [entry])
+  log = File.join(dir, 'stub.log')
+  _out, _err, st = run_probe_live(dir, { 'SIGMA_STUB_LOG' => log }, '--connection-id', 'conn-1', '--folder-id', 'fld-123')
+  check(st.success?, "live-stub with --folder-id → exit 0 (got #{st.exitstatus})", fails)
+  bodies = spec_posts(log).map { |r| JSON.parse(r['body']) }
+  check(!bodies.empty? && bodies.all? { |b| b['folderId'] == 'fld-123' },
+        '--folder-id fld-123 → every POST body carries folderId fld-123', fails)
+end
+
+puts "\n== live probe POST 400 → probe_error carries status + body excerpt + --folder-id hint =="
+Dir.mktmpdir do |dir|
+  workdir_with(dir, [entry])
+  out, _err, st = run_probe_live(dir, { 'SIGMA_STUB_400' => '1' }, '--connection-id', 'conn-1')
+  check(st.exitstatus == 3, "probe error → exit 3 (got #{st.exitstatus})", fails)
+  e = ledger(dir)[0]
+  check(e['status'] == 'error', 'ledger status error (gate still blocks)', fails)
+  check(e['probe_error'].to_s.include?('400 Bad Request'),
+        "probe_error records the HTTP status (got #{e['probe_error'].inspect})", fails)
+  check(e['probe_error'].to_s.include?('must be a valid folder UUID'),
+        'probe_error records the response-body excerpt, not a bare 400', fails)
+  check(out.include?('400 Bad Request') && out.include?('must be a valid folder UUID'),
+        'console ERROR line surfaces status + body excerpt', fails)
+  check(out.include?('--folder-id'), 'console prints the --folder-id hint (error mentions the folder)', fails)
 end
 
 puts "\n== bad invocations =="

@@ -29,7 +29,9 @@
 #
 # Usage:
 #   ruby scripts/probe-join-keys.rb --workdir <WORK> [--plan PATH]
-#     --connection-id <id> [--folder-id <id>]     # live probe via Sigma
+#     --connection-id <id> [--folder-id <id>]     # live probe via Sigma;
+#                            # no --folder-id → folderId omitted from the POST
+#                            # (probe lands in My Documents, the API default)
 #     [--fixture DIR]        # offline: DIR/entry-<index>.json per ledger entry:
 #                            #   {"total": N, "distinct": M,
 #                            #    "duplicates": [{"keys": {"COL": "v", ...}, "count": 3}, ...]}
@@ -147,14 +149,25 @@ end
 def sigma_sql_rows(conn_id, folder_id, sql, columns)
   spec = {
     'name' => "_probe_joinkeys_#{SecureRandom.hex(4)}",
-    'folderId' => folder_id, 'schemaVersion' => 1,
+    'schemaVersion' => 1,
     'pages' => [{ 'id' => 'p1', 'name' => 'p1', 'elements' => [{
       'id' => 'probe', 'kind' => 'table', 'name' => 'Probe',
       'source' => { 'kind' => 'sql', 'connectionId' => conn_id, 'statement' => sql },
       'columns' => columns.map { |c| { 'id' => "c-#{c.downcase.gsub(/[^a-z0-9]+/, '-')}", 'name' => c, 'formula' => "[Custom SQL/#{c}]" } }
     }] }]
   }
-  r = Sigma.request(:post, '/v2/workbooks/spec', body: JSON.generate(spec))
+  # folderId only when the caller supplied one. An explicit `folderId: null`
+  # is a live 400 (Twin B e2e); an OMITTED key lands the probe in My Documents
+  # — the API default validate-spec.rb documents, stamped conditionally the
+  # same way mechanical-specs.rb does.
+  spec['folderId'] = folder_id if folder_id
+  begin
+    r = Sigma.request(:post, '/v2/workbooks/spec', body: JSON.generate(spec))
+  rescue Sigma::Error => e
+    # Keep the HTTP status AND the response-body excerpt on one line so the
+    # recorded probe_error names the real cause, not a bare "400 Bad Request".
+    raise "probe workbook POST failed: #{e.message.to_s.gsub(/\s+/, ' ').strip[0, 240]}"
+  end
   wb_id = r.is_a?(Hash) ? r['workbookId'] : nil
   raise "probe workbook POST failed: #{r.inspect[0, 160]}" unless wb_id
   begin
@@ -194,7 +207,10 @@ def live_result(conn_id, folder_id, entry)
     }
   }
 rescue StandardError => e
-  { 'error' => e.message.to_s.lines.first.to_s.strip[0, 160] }
+  # Flatten to one line but KEEP the whole message — the old lines.first
+  # truncation dropped the HTTP response body (line 2 of Sigma::Error),
+  # leaving a bare "400 Bad Request" with no hint at the real cause.
+  { 'error' => e.message.to_s.gsub(/\s+/, ' ').strip[0, 300] }
 end
 
 # ---------------------------------------------------------------------------
@@ -224,6 +240,9 @@ unless opts[:resolve]
       e['status'] = 'error'
       e['probe_error'] = res['error']
       puts "  ERROR  ##{i} #{e['kind']}: #{e['left']} -> #{e['right']} — #{res['error']}"
+      if res['error'] =~ /folder/i
+        puts '         hint: the API rejected the folder placement — re-run with --folder-id <id> (a folder the token can edit; pick-destination.rb lists candidates)'
+      end
       next
     end
     dups = res['duplicates'] || []
