@@ -3568,6 +3568,44 @@ if MANUAL_JSON_SPECS
 else
   File.write(wb_spec_path, JSON.pretty_generate(spec))
 end
+# LOD translation ledger (#423): one entry per source {FIXED/INCLUDE/EXCLUDE}
+# calc, classified against the emitted dm-spec + wb-spec. The converter/builder
+# path can leave an LOD fuzzy-aliased to a look-alike raw column (silently
+# wrong numbers) or dropped outright (silently missing) — the final gate
+# (assert-phase6-ran.rb gate 17, exit 24) refuses GREEN until every entry is a
+# recognized translation (lod-synth / manual-residue / reference-derived) or
+# carries a recorded resolution. An EMPTY ledger is still written — its
+# presence is the gate's evidence the audit ran.
+begin
+  require_relative 'lib/lod_audit'
+  _la_read = ->(p) { File.exist?(p) ? (JSON.parse(File.read(p, encoding: 'UTF-8')) rescue nil) : nil }
+  _la_cf = _la_read.call(File.join(WORK, 'calc-fields.json'))
+  _la_calcs = if _la_cf
+                LodAudit.lod_calcs(_la_cf)
+              elsif have_twb
+                LodAudit.lod_calcs_from_twb(File.read(twb, encoding: 'UTF-8'))
+              else
+                []
+              end
+  _la_entries = LodAudit.derive(_la_calcs,
+                                dm_spec: _la_read.call(dm_spec_path) || (defined?(dm) ? dm : nil),
+                                wb_spec: spec,
+                                manual_residues: _la_read.call(File.join(WORK, 'manual-residues.json')),
+                                prior: _la_read.call(File.join(WORK, 'lod-audit.json')))
+  LodAudit.write(File.join(WORK, 'lod-audit.json'), _la_entries)
+  _la_block = _la_entries.reject { |e| LodAudit.resolved?(e) }
+  if _la_block.any?
+    line "LOD audit: #{_la_block.size} of #{_la_entries.size} LOD calc(s) UNRESOLVED (#{_la_block.map { |e| "#{e['calc']} [#{e['class']}]" }.join('; ')}) — lod-audit.json"
+    line "  RESOLVE them before --finalize:  ruby #{File.join(HERE, 'audit-lod-calcs.rb')} --workdir #{WORK}"
+  elsif _la_entries.any?
+    line "LOD audit: #{_la_entries.size} LOD calc(s) all resolved (lod-audit.json)"
+  else
+    line 'LOD audit: no {FIXED/INCLUDE/EXCLUDE} calcs — lod-audit.json written as gate evidence'
+  end
+rescue StandardError => e
+  line "WARN: LOD audit derivation failed (#{e.class}: #{e.message.to_s[0, 80]}) — " \
+       'gate 17 will fail if the calc census carries LOD calcs; derive by hand via scripts/audit-lod-calcs.rb'
+end
 wb_ids_path = File.join(WORK, 'wb-ids.json')
 
 # GRACEFUL AGENT-PATH FALLBACK. The DM is already posted + valid (dm_id above), so
