@@ -8,15 +8,20 @@
 #      (emitted formula reads an unrelated raw flag column), "Daily Active
 #      Sales" = silently-dropped → exit 2 + FATAL blocks.
 #   2. assert-phase6-ran.rb gate 17 (exit 24) BLOCKS on the unresolved ledger
-#      and PASSES once resolutions are recorded via --resolve.
-#   3. parse-twb-layout.rb reads the unsynchronized dual-axis combo worksheet
+#      and PASSES once resolutions are recorded via --resolve — then gate 19
+#      (exit 26) takes over: no agg-semantics.json on a workdir with LOD
+#      evidence = the lint never ran.
+#   3. THE PR-7 FLIP (this entry's reason to exist): audit-agg-semantics.rb
+#      fires on the three SUM(preagg)/SUM(preagg) KPIs — the {FIXED day:
+#      COUNTD} calcs consumed additively (class additive-over-preagg) and the
+#      ratio KPIs (class preagg-ratio) — exit 2, entries pinned verbatim in
+#      agg-semantics.entries.json. Gate 19 blocks until every hit records a
+#      resolution (faithful-to-source documents the twin hazard; n/a is the
+#      first-class does-not-apply path), then GREEN unblocks.
+#   4. parse-twb-layout.rb reads the unsynchronized dual-axis combo worksheet
 #      as chart_kind "bar" with dual_axis false — the KNOWN LIMITATION this
 #      entry pins (no synchronized='true' in the twin shape); flipping this
 #      pin is the acceptance signal for a dual-axis detection fix.
-#
-# NOT yet gated (documented known-gap, see MANIFEST): the additive
-# SUM(preagg)/SUM(preagg) KPI hazard has no lint today — PLAN-v3 PR-7's
-# aggregation-semantics lint lands here as its test bed.
 set -uo pipefail
 CASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$CASE_DIR/../../.." && pwd)"
@@ -50,7 +55,7 @@ ruby -rjson -e '
   && note "ok: ledger classification matches the pinned lod-audit.entries.json (honest current-code output)" \
   || { note "FAIL: LOD ledger drifted from the pin"; fail=1; }
 
-# -- 2. gate 17 blocks unresolved, passes resolved ---------------------------
+# -- 2. gate 17 blocks unresolved; once resolved, gate 19 takes over ---------
 cat > "$TMP/parity-final.json" <<'JSON'
 {
   "workbook_id": "wb-corpus-pak", "mode": "strict", "status": "PASS",
@@ -89,13 +94,77 @@ fi
 
 env -u SIGMA_BASE_URL -u SIGMA_API_TOKEN ruby "$SCRIPTS/assert-phase6-ran.rb" --workdir "$TMP" >"$TMP/gate2.out" 2>"$TMP/gate2.err"
 rc=$?
-if [ "$rc" -eq 0 ] && /usr/bin/grep -q '\[OK\] gate 17: LOD translation ledger resolved' "$TMP/gate2.out"; then
-  note "ok: gate 17 passes once both resolutions are in the ledger"
+if [ "$rc" -eq 26 ] && /usr/bin/grep -q 'no agg-semantics.json' "$TMP/gate2.err"; then
+  note "ok: gate 17 resolved -> gate 19 (exit 26) now blocks: LOD evidence present but the agg-semantics lint never ran"
 else
-  note "FAIL: gate 17 expected exit 0 on the resolved ledger (got $rc)"; sed -n '1,12p' "$TMP/gate2.err"; fail=1
+  note "FAIL: expected exit 26 (gate 19 belt-and-braces) after LOD resolutions (got $rc)"; sed -n '1,12p' "$TMP/gate2.err"; fail=1
 fi
 
-# -- 3. dual-axis known-limitation pin ---------------------------------------
+# -- 3. PR-7 flip: the aggregation-semantics lint fires on the KPI trap ------
+# The three SUM(preagg)/SUM(preagg) KPI formulas — the shape that shipped a
+# 103.3% ratio KPI in the field — now fire additive-over-preagg (the {FIXED
+# day: COUNTD} calcs consumed additively) and preagg-ratio (the ratio KPIs),
+# source-side AND on the dm-spec fixture's emitted Sum([preagg]) column.
+ruby "$SCRIPTS/audit-agg-semantics.rb" --workdir "$TMP" >"$TMP/agg.out" 2>"$TMP/agg.err"
+rc=$?
+if [ "$rc" -eq 2 ] \
+   && /usr/bin/grep -q 'AGGREGATION SEMANTICS WARN' "$TMP/agg.err" \
+   && /usr/bin/grep -q 'additive-over-preagg.*Sales per Active' "$TMP/agg.out" \
+   && /usr/bin/grep -q 'preagg-ratio.*Pct Buyers with Earnings' "$TMP/agg.out"; then
+  note "ok: agg-semantics lint blocks (exit 2): SUM over the {FIXED day: COUNTD} pre-aggregates + ratio KPIs"
+else
+  note "FAIL: agg-semantics lint expected exit 2 + both classes (got $rc)"; sed -n '1,15p' "$TMP/agg.err"; fail=1
+fi
+ruby -rjson -e 'puts JSON.pretty_generate(JSON.parse(File.read(File.join(ARGV[0], "agg-semantics.json")))["entries"])' \
+  "$TMP" > "$TMP/agg-derived.json"
+if cmp -s <(tr -d "\r" < "$TMP/agg-derived.json") <(tr -d "\r" < "$CASE_DIR/agg-semantics.entries.json"); then
+  note "ok: lint hits match the pinned agg-semantics.entries.json verbatim"
+else
+  note "FAIL: agg-semantics entries drifted from the pin"
+  diff <(tr -d "\r" < "$CASE_DIR/agg-semantics.entries.json") <(tr -d "\r" < "$TMP/agg-derived.json") | head -20
+  fail=1
+fi
+
+# Resolutions: the twin's story is faithful-to-source (the SOURCE workbook
+# itself consumes the day-grain pre-aggregates additively; the migration
+# reproduces it and the ledger documents the hazard). The dm-spec duplicates
+# of the same source hazard exercise the first-class n/a path.
+n=$(ruby -rjson -e 'puts JSON.parse(File.read(File.join(ARGV[0], "agg-semantics.json")))["entries"].length' "$TMP")
+i=0
+agg_res_fail=0
+while [ "$i" -lt "$n" ]; do
+  ctx=$(ruby -rjson -e 'puts JSON.parse(File.read(File.join(ARGV[0], "agg-semantics.json")))["entries"][ARGV[1].to_i]["context"]' "$TMP" "$i")
+  if [ "$ctx" = "source-calc" ]; then
+    ruby "$SCRIPTS/audit-agg-semantics.rb" --workdir "$TMP" --resolve "$i" --how faithful-to-source \
+      --reason 'source workbook itself sums the day-grain COUNTD pre-aggregates across grains; migrated faithfully — hazard documented (the 103.3%-KPI twin)' \
+      >>"$TMP/agg-resolve.out" 2>&1
+  else
+    ruby "$SCRIPTS/audit-agg-semantics.rb" --workdir "$TMP" --resolve "$i" --how n/a \
+      --reason 'duplicate of the source-calc hit on the same formula; hazard documented on the source entry' \
+      >>"$TMP/agg-resolve.out" 2>&1
+  fi
+  rc=$?
+  if [ "$i" -lt $((n - 1)) ] && [ "$rc" -ne 2 ]; then agg_res_fail=1; fi
+  if [ "$i" -eq $((n - 1)) ] && [ "$rc" -ne 0 ]; then agg_res_fail=1; fi
+  i=$((i + 1))
+done
+if [ "$agg_res_fail" -eq 0 ]; then
+  note "ok: all $n hits resolved (faithful-to-source for the source KPIs, n/a for the emitted duplicates) — exit 2 while any blocks, 0 once done"
+else
+  note "FAIL: agg-semantics --resolve sequence (see $TMP/agg-resolve.out)"; sed -n '1,10p' "$TMP/agg-resolve.out"; fail=1
+fi
+
+env -u SIGMA_BASE_URL -u SIGMA_API_TOKEN ruby "$SCRIPTS/assert-phase6-ran.rb" --workdir "$TMP" >"$TMP/gate3.out" 2>"$TMP/gate3.err"
+rc=$?
+if [ "$rc" -eq 0 ] \
+   && /usr/bin/grep -q '\[OK\] gate 17: LOD translation ledger resolved' "$TMP/gate3.out" \
+   && /usr/bin/grep -q '\[OK\] gate 19: aggregation-semantics ledger resolved' "$TMP/gate3.out"; then
+  note "ok: gates 17 + 19 pass once both ledgers carry their resolutions"
+else
+  note "FAIL: expected exit 0 with gate 17 + gate 19 OK lines (got $rc)"; sed -n '1,12p' "$TMP/gate3.err"; fail=1
+fi
+
+# -- 4. dual-axis known-limitation pin ---------------------------------------
 ruby "$SCRIPTS/parse-twb-layout.rb" "$CASE_DIR/workbook-content.twb" "$TMP/layout.json" >"$TMP/layout.out" 2>&1 || fail=1
 ruby -rjson -e '
   zones = JSON.parse(File.read(ARGV[0])).flat_map { |d| d["zones"] || [] }

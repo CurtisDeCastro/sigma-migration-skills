@@ -3606,6 +3606,46 @@ rescue StandardError => e
   line "WARN: LOD audit derivation failed (#{e.class}: #{e.message.to_s[0, 80]}) — " \
        'gate 17 will fail if the calc census carries LOD calcs; derive by hand via scripts/audit-lod-calcs.rb'
 end
+# Aggregation-semantics ledger (PR-7): one entry per additive-over-preagg /
+# countd-as-sum / preagg-ratio hit, classified against the calc census + the
+# emitted dm-spec/wb-spec (+ landing-manifest grain info when present).
+# Additive aggregation over a pre-aggregated column compiles clean and ships
+# wrong-looking-right numbers (the 103.3%-KPI field twin) — the final gate
+# (assert-phase6-ran.rb gate 19, exit 26) refuses GREEN until every hit
+# records a resolution (reaggregated | n/a | faithful-to-source). An EMPTY
+# ledger is still written — its presence is the gate's evidence the lint ran.
+begin
+  require_relative 'lib/agg_semantics_lint'
+  _as_read = ->(p) { File.exist?(p) ? (JSON.parse(File.read(p, encoding: 'UTF-8')) rescue nil) : nil }
+  _as_cf = _as_read.call(File.join(WORK, 'calc-fields.json'))
+  _as_calcs = if _as_cf
+                AggSemanticsLint.calc_census(_as_cf)
+              elsif have_twb
+                AggSemanticsLint.calc_census_from_twb(File.read(twb, encoding: 'UTF-8'))
+              else
+                []
+              end
+  _as_entries = AggSemanticsLint.derive(_as_calcs,
+                                        dm_spec: _as_read.call(dm_spec_path) || (defined?(dm) ? dm : nil),
+                                        wb_spec: spec,
+                                        landing_manifest: _as_read.call(File.join(WORK, 'landing-manifest.json')),
+                                        prior: _as_read.call(File.join(WORK, 'agg-semantics.json')))
+  AggSemanticsLint.write(File.join(WORK, 'agg-semantics.json'), _as_entries)
+  _as_block = _as_entries.reject { |e| AggSemanticsLint.resolved?(e) }
+  if _as_block.any?
+    line "agg-semantics lint: #{_as_block.size} of #{_as_entries.size} hit(s) UNRESOLVED " \
+         "(#{_as_block.first(4).map { |e| "#{e['consumer']} [#{e['class']}]" }.join('; ')}#{_as_block.size > 4 ? '; …' : ''}) — agg-semantics.json"
+    line "  RESOLVE them before --finalize:  ruby #{File.join(HERE, 'audit-agg-semantics.rb')} --workdir #{WORK}" \
+         ' --resolve <i> --how <reaggregated|n/a|faithful-to-source> --reason "..."'
+  elsif _as_entries.any?
+    line "agg-semantics lint: #{_as_entries.size} hit(s) all resolved (agg-semantics.json)"
+  else
+    line 'agg-semantics lint: no additive-over-preagg/countd-as-sum/preagg-ratio hits — agg-semantics.json written as gate evidence'
+  end
+rescue StandardError => e
+  line "WARN: agg-semantics lint failed (#{e.class}: #{e.message.to_s[0, 80]}) — " \
+       'gate 19 will fail if the workdir carries pre-aggregate evidence; derive by hand via scripts/audit-agg-semantics.rb'
+end
 wb_ids_path = File.join(WORK, 'wb-ids.json')
 
 # GRACEFUL AGENT-PATH FALLBACK. The DM is already posted + valid (dm_id above), so
