@@ -177,6 +177,12 @@ Dir.mktmpdir do |d|
   hdr_ids = hdr_gc ? hdr_gc.elements.to_a('LayoutElement').map { |l| l.attributes['elementId'] } : []
   ok('header band holds the title AND the detected source header text',
      hdr_ids.include?('title-ov') && hdr_ids.include?('text-t1'))
+  ok('synthetic title referenced exactly once (no duplicate beside the source header)',
+     xml.scan(/elementId="title-ov"/).length == 1)
+  ok('census does NOT mark synthetic_header when the source has its own header zone',
+     census && !census['pages'].first.key?('synthetic_header'))
+  ok('census unplaced_elements is present and empty (placement invariant)',
+     census && census['pages'].first['unplaced_elements'] == [])
   ok('no collisions anywhere', collisions(xml).empty?)
   ok('census pages stay exact-compatible (zones/placed/dropped/grid_fill_pct)',
      census && census['pages'].first &&
@@ -312,6 +318,90 @@ Dir.mktmpdir do |d|
   ok('census counts the expansions', census && census['min_row_expansions'] >= 2)
   spec = { 'pages' => WB_MIN['pages'], 'layout' => xml }
   ok('output passes layout lint (no sub-minimum tiles shipped)', LayoutLint.lint(spec).empty?)
+end
+
+# ---- 4. synthetic dashboard title + orphan-element invariant -----------------
+# Live-caught defect (v5.5 e2e, every workbook): the synthetic "# <Dashboard>"
+# title element (id "title-<slug>", emitted by build-charts when the .twb has
+# no top title zone) is NOT a .twb zone — any element the layout bands don't
+# reference is auto-flowed by Sigma as a stray white card, bottom-left. The
+# invariant: NO element in the built page may be absent from the layout; the
+# census records violators in `unplaced_elements` (gate 8c fails on non-empty)
+# and counts a synthesized title header (`synthetic_header: true`).
+puts '-- synthetic title header + orphan invariant'
+DL_TITLE = [{
+  'dashboard' => 'Profitability Watch',
+  'zones' => [
+    { 'id' => 'z1', 'kind' => 'chart', 'caption' => 'Margin Trend', 'chart_kind' => 'bar',
+      'measures' => ['m'], 'x_pct' => 0, 'y_pct' => 5, 'w_pct' => 50, 'h_pct' => 45 },
+    { 'id' => 'z2', 'kind' => 'chart', 'caption' => 'Cost Split', 'chart_kind' => 'line',
+      'measures' => ['m'], 'x_pct' => 50, 'y_pct' => 5, 'w_pct' => 50, 'h_pct' => 45 }
+  ],
+  'zone_tree' => []
+}]
+WB_TITLE = { 'pages' => [
+  { 'name' => 'Data', 'id' => 'page-data', 'elements' => [{ 'id' => 'master', 'kind' => 'table', 'name' => 'M' }] },
+  { 'name' => 'Profitability Watch', 'id' => 'page-pw', 'elements' => [
+    { 'id' => 'title-profitability-watch', 'kind' => 'text', 'name' => nil },
+    { 'id' => 'el-1', 'kind' => 'bar-chart', 'name' => 'Margin Trend' },
+    { 'id' => 'el-2', 'kind' => 'line-chart', 'name' => 'Cost Split' }
+  ] }
+] }
+
+Dir.mktmpdir do |d|
+  xml, census, _log, _els = build(DL_TITLE, WB_TITLE, d)
+  ok('builder produced layout XML (synthetic title, no source header zone)', !xml.nil?)
+  next if xml.nil?
+  doc = doc_for(xml)
+  hdr_gc = doc.elements.to_a('//GridContainer').find { |g| g.attributes['elementId'].to_s.end_with?('-hdr') }
+  hdr_ids = hdr_gc ? hdr_gc.elements.to_a('LayoutElement').map { |l| l.attributes['elementId'] } : []
+  ok('a full-width header band exists and references the synthetic title',
+     hdr_gc && hdr_ids == ['title-profitability-watch'] && rect(hdr_gc)[0] == 1 && rect(hdr_gc)[1] == 25)
+  ok('header band sits at the top of the grid', hdr_gc && rect(hdr_gc)[2] == 1)
+  ok('synthetic title referenced exactly once',
+     xml.scan(/elementId="title-profitability-watch"/).length == 1)
+  pg = census && census['pages'].first
+  ok('census counts the synthesized title (zones/placed include it, synthetic_header noted)',
+     pg && pg['synthetic_header'] == true && pg['zones'] == 3 && pg['placed'] == 3 && pg['dropped'] == 0)
+  ok('census unplaced_elements empty — nothing orphaned', pg && pg['unplaced_elements'] == [])
+  ok('no collisions', collisions(xml).empty?)
+end
+
+# 4b. banded path safety net: an element with NO Tableau zone (here an image)
+# must land in a bottom band, never be left for Sigma to auto-flow.
+Dir.mktmpdir do |d|
+  wb = JSON.parse(JSON.generate(WB_TITLE))
+  wb['pages'][1]['elements'] << { 'id' => 'img-logo', 'kind' => 'image', 'name' => nil }
+  xml, census, _log, _els = build(DL_TITLE, wb, d)
+  ok('builder produced layout XML (zone-less image element)', !xml.nil?)
+  next if xml.nil?
+  ok('zone-less image is placed by the banded-path safety net (referenced in a band)',
+     xml.scan(/elementId="img-logo"/).length == 1 && xml.include?('-extra"'))
+  pg = census && census['pages'].first
+  ok('census unplaced_elements empty — the safety net upheld the invariant',
+     pg && pg['unplaced_elements'] == [])
+  ok('no collisions (safety band below content)', collisions(xml).empty?)
+end
+
+# 4c. provenance-aware zone matching: a tile RENAMED to its display title (so
+# neither the zone caption nor display_title matches the element name) resolves
+# through chart-provenance.json (element id → worksheet) instead of falling
+# into the safety-net band — the stale-container-on-re-PUT source defect.
+Dir.mktmpdir do |d|
+  dl = JSON.parse(JSON.generate(DL_TITLE))
+  wb = JSON.parse(JSON.generate(WB_TITLE))
+  wb['pages'][1]['elements'][1]['name'] = 'Gross Margin Trend (renamed)'
+  File.write(File.join(d, 'chart-provenance.json'), JSON.generate(
+    'el-1' => { 'worksheet' => 'Margin Trend', 'dashboard' => 'Profitability Watch' }))
+  xml, census, log, _els = build(dl, wb, d)
+  ok('builder produced layout XML (renamed tile + provenance)', !xml.nil?)
+  next if xml.nil?
+  ok('renamed tile resolves via provenance — placed as a zone tile, not the safety band',
+     xml.scan(/elementId="el-1"/).length == 1 && !xml.include?('-extra"'))
+  ok('no "no Sigma element matched" WARN for the renamed tile', !log.include?('no Sigma element matched'))
+  pg = census && census['pages'].first
+  ok('census counts the renamed tile as placed (no drop)', pg && pg['dropped'] == 0)
+  ok('census unplaced_elements empty', pg && pg['unplaced_elements'] == [])
 end
 
 puts($fail.zero? ? "\nALL PASS — layout synthesis (bands, rail, KPI containers, min rows, determinism)" : "\n#{$fail} FAILED")

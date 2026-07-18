@@ -126,6 +126,42 @@ end.parse!
 dash_layout = JSON.parse(File.read(opts[:layout]))
 wb_ids      = JSON.parse(File.read(opts[:wb_ids]))
 
+# ---- Chart provenance (orphan-fix, class 2 prevention) ----------------------
+# chart-provenance.json (written by build-charts-from-signals beside
+# dashboard-layout.json) maps element id → the Tableau WORKSHEET that built it.
+# Zone→element matching is name-based (display_title, then caption) while the
+# builder names tiles by display_title — so a tile whose display name drifted
+# from what the zone knows failed the match, fell into the safety-net band
+# ("N element(s) had no Tableau zone"), and left a stale injected container
+# behind on later re-PUTs. Provenance gives the collision-free caption
+# (worksheet) → element join; aliases are ADDED to els_by_name and never
+# overwrite a real display name. Best-effort: no file → no aliases.
+PROV_BY_ID = begin
+  prov_path = File.join(File.dirname(opts[:layout]), 'chart-provenance.json')
+  File.exist?(prov_path) ? JSON.parse(File.read(prov_path)) : {}
+rescue StandardError
+  {}
+end
+
+# Add provenance worksheet-name aliases for this page's elements (see above).
+def augment_els_by_name!(els_by_name, elements)
+  elements.each do |e|
+    rec = PROV_BY_ID[e['id'].to_s]
+    next unless rec.is_a?(Hash)
+    ws = rec['worksheet'].to_s
+    els_by_name[ws] = e unless ws.empty? || els_by_name.key?(ws)
+  end
+  els_by_name
+end
+
+# Resolve a zone's Sigma element: display-title/rename name first
+# (zone_el_name), then the raw caption — the worksheet name, which hits the
+# provenance alias when the tile was renamed. Shared by all three layout paths
+# and their census counts so matching cannot drift between them.
+def find_zone_el(els_by_name, z, renames)
+  els_by_name[zone_el_name(z, renames)] || els_by_name[z['caption'].to_s]
+end
+
 # Page lookups
 data_page  = wb_ids['pages'].find { |p| p['name'] == 'Data' }
 abort('no "Data" page in wb-ids') unless data_page
@@ -492,6 +528,7 @@ end
 def build_page_from_tree(dashboard, page, opts)
   tree        = dashboard['zone_tree'] || []
   els_by_name = page['elements'].each_with_object({}) { |e, h| h[e['name']] = e if e['name'] }
+  augment_els_by_name!(els_by_name, page['elements'])
   ctl_by_name = page['elements'].select { |e| e['kind'] == 'control' && e['name'] }
                     .each_with_object({}) { |e, h| h[e['name'].to_s.downcase] = e }
   els_by_id   = page['elements'].each_with_object({}) { |e, h| h[e['id']] = e if e['id'] }
@@ -685,7 +722,7 @@ def build_page_from_tree(dashboard, page, opts)
   # element made it into ctx[:placed]. Header band excluded from the fill rects.
   content_zones = ZoneCensus.content_zones(dashboard['zones'])
   placed = content_zones.count do |z|
-    e = els_by_name[zone_el_name(z, opts[:renames])]
+    e = find_zone_el(els_by_name, z, opts[:renames])
     e && ctx[:placed].include?(e['id'])
   end
   fill = ZoneCensus.grid_fill_pct(content_rects, opts[:page_cols], page_rows)
@@ -940,6 +977,7 @@ end
 def build_page_synthesized(dashboard, page, opts, structure)
   zones       = dashboard['zones'] || []
   els_by_name = page['elements'].each_with_object({}) { |e, h| h[e['name']] = e if e['name'] }
+  augment_els_by_name!(els_by_name, page['elements'])
   els_by_id   = page['elements'].each_with_object({}) { |e, h| h[e['id']] = e if e['id'] }
   # Header title: dedicated title-* element, else the source's own top banner
   # (shared detector) — NOT a fabricated page-name H1 alongside the source title.
@@ -1029,7 +1067,7 @@ def build_page_synthesized(dashboard, page, opts, structure)
   resolve_zone_el = lambda do |z|
     case z['kind'].to_s
     when 'chart'
-      el = els_by_name[zone_el_name(z, opts[:renames])]
+      el = find_zone_el(els_by_name, z, opts[:renames])
       el && el['id']
     when 'text', 'title'
       el = els_by_id["text-#{z['id']}"]
@@ -1210,7 +1248,7 @@ def build_page_synthesized(dashboard, page, opts, structure)
 
   content_zones = ZoneCensus.content_zones(zones)
   placed_count = content_zones.count do |z|
-    e = els_by_name[zone_el_name(z, opts[:renames])]
+    e = find_zone_el(els_by_name, z, opts[:renames])
     e && placed.include?(e['id'])
   end
   rects = []
@@ -1231,6 +1269,7 @@ end
 def build_page_for_dashboard(dashboard, page, opts)
   chart_zones = dashboard['zones'].select { |z| z['kind'] == 'chart' && z['caption'] }
   els_by_name = page['elements'].each_with_object({}) { |e, h| h[e['name']] = e if e['name'] }
+  augment_els_by_name!(els_by_name, page['elements'])
   # Dedicated title-* element, else the source's own top banner (shared detector,
   # same as the tree + synthesis paths) — no fabricated page-name H1 alongside a
   # source title.
@@ -1256,14 +1295,17 @@ def build_page_for_dashboard(dashboard, page, opts)
     end
   end
 
+  used_el_ids = {} # one zone per element — a duplicate LayoutElement id makes
+  #   Sigma reject the whole layout PUT (same guard as the tree/synth paths)
   chart_layouts = chart_zones.map do |z|
     lookup_name = zone_el_name(z, o[:renames])
-    el = els_by_name[lookup_name]
+    el = find_zone_el(els_by_name, z, o[:renames])
     if el.nil?
       warn "WARN: no Sigma element matched zone caption #{z['caption'].inspect} on page #{page['name'].inspect}" \
            "#{lookup_name == z['caption'] ? " — if the tile was renamed, pass --rename #{z['caption'].inspect}'=<Sigma name>'" : " (renamed to #{lookup_name.inspect})"} — tile DROPPED from layout"
     end
-    next nil unless el
+    next nil unless el && !used_el_ids[el['id']]
+    used_el_ids[el['id']] = true
     c1, c2, r1, r2 = chart_pos(z, o)
     { el_id: el['id'], c1: c1, c2: c2, r1: r1, r2: r2 }
   end.compact
@@ -1281,6 +1323,7 @@ def build_page_for_dashboard(dashboard, page, opts)
 
   children = []
   extra_els = []
+  placed = [] # element ids this path positions — feeds the shared safety net
   ov_prefix = "band-#{page['id']}"
 
   # Header band derived from the source (colored strip only when the source has
@@ -1290,6 +1333,7 @@ def build_page_for_dashboard(dashboard, page, opts)
   extra_els << container_el(hdr_id, hdr_style)
   if title_el
     children << header_band_xml(hdr_id, title_el['id'])
+    placed << title_el['id']
   else
     txt_id = "#{ov_prefix}-hdrtext"
     extra_els << header_text_el(txt_id, page['name'], hdr_dark ? '#FFFFFF' : nil)
@@ -1310,6 +1354,7 @@ def build_page_for_dashboard(dashboard, page, opts)
     ctl_id = "#{ov_prefix}-ctl"
     extra_els << container_el(ctl_id)
     children << gc(ctl_id, 1, o[:page_cols] + 1, 1 + HEADER_ROWS, 1 + HEADER_ROWS + ctl_rows, inner)
+    placed.concat(ctl_els.map { |c| c['id'] })
   end
 
   # Chart bands: cluster the zone-derived positions into row bands and shift
@@ -1327,6 +1372,7 @@ def build_page_for_dashboard(dashboard, page, opts)
     cid = "#{ov_prefix}-#{i + 1}"
     extra_els << container_el(cid)
     children << band_container_xml(cid, band, row_offset: band_offset)
+    placed.concat(band.map { |it| it[0] })
   end
 
   # B4 (gap ubr5.8): the banded fallback places charts by geometry but not text.
@@ -1346,10 +1392,23 @@ def build_page_for_dashboard(dashboard, page, opts)
     tid = "#{ov_prefix}-text"
     extra_els << container_el(tid)
     children << gc(tid, 1, o[:page_cols] + 1, r0, r0 + 4, inner)
+    placed.concat(text_els.map { |e| e['id'] })
     warn "WARN: #{tn} styled-text element(s) placed in a bottom band on banded page #{page['name'].inspect} " \
          "(source position not reproduced — the container-tree layout places them by geometry): " \
          "#{text_els.map { |e| e['id'] }.join(', ')}"
   end
+
+  # Safety net (orphan-element invariant — parity with the tree + synthesized
+  # paths, which already had one): any placeable element the banded path did
+  # not position (an image/button with no band, a stray text) lands in a
+  # bottom band. An element in the built page but absent from the layout is
+  # auto-flowed by Sigma as a stray white card (bottom-left), so NOTHING may
+  # be left unreferenced.
+  content_bottom = 1 + HEADER_ROWS + ctl_rows +
+                   bands.sum { |b| b.map { |i| i[4] }.max - b.map { |i| i[3] }.min } +
+                   (text_els.empty? ? 0 : 4)
+  band_rect = safety_net_band(page, placed, extra_els, children, ov_prefix,
+                              content_bottom, o[:page_rows])
 
   # ---- Layout census (gate 8c, #259) ----------------------------------------
   # zones  = non-furniture source content zones (real plotting tiles).
@@ -1360,11 +1419,12 @@ def build_page_for_dashboard(dashboard, page, opts)
   #          furniture (header band, styled-text band) excluded from the fill
   #          numerator.
   content_zones = ZoneCensus.content_zones(dashboard['zones'])
-  placed = content_zones.count { |z| els_by_name[zone_el_name(z, o[:renames])] }
+  placed_count = content_zones.count { |z| find_zone_el(els_by_name, z, o[:renames]) }
   content_rects = bands.flat_map { |b| b.map { |i| [i[1], i[2], i[3] + band_offset, i[4] + band_offset] } }
   content_rects << [1, o[:page_cols] + 1, 1 + HEADER_ROWS, 1 + HEADER_ROWS + ctl_rows] if ctl_els.length.positive?
+  content_rects << band_rect if band_rect # safety band holds real tiles → counts as filled
   fill = ZoneCensus.grid_fill_pct(content_rects, o[:page_cols], o[:page_rows])
-  census = ZoneCensus.page_record(page['name'], content_zones.size, placed, fill)
+  census = ZoneCensus.page_record(page['name'], content_zones.size, placed_count, fill)
 
   [page_xml(page['id'], *children), extra_els, chart_layouts.length, bands.length, ctl_els.length,
    census, min_exp]
@@ -1444,6 +1504,35 @@ dash_layout.each do |d|
     # canvas-implied row count (present only for fixed-px sources).
     census['rows'] = o[:page_rows]
     census['canvas_rows'] = canvas_rows if canvas_rows
+    # ---- Placement invariant (orphan-element guard) -------------------------
+    # NO element in the built page may be absent from the layout bands: Sigma
+    # auto-flows an unreferenced element as a stray white card (bottom-left;
+    # live-caught on the synthetic dashboard title). Authoritative check —
+    # scan the page XML the chosen path actually emitted rather than trusting
+    # per-path bookkeeping. Gate 8c (assert-phase6-ran.rb) fails on a
+    # non-empty list.
+    refd = pxml.scan(/elementId="([^"]+)"/).flatten
+    unplaced = page['elements'].select do |e|
+      k = e['kind'].to_s
+      (k.end_with?('-chart') || %w[table pivot-table control text image button].include?(k)) &&
+        e['id'] && !refd.include?(e['id'])
+    end.map { |e| e['id'] }
+    census['unplaced_elements'] = unplaced
+    if unplaced.any?
+      warn "WARN: #{unplaced.length} element(s) on page #{page['name'].inspect} are absent from the " \
+           "built layout — Sigma will auto-flow them as stray cards: #{unplaced.join(', ')}"
+    end
+    # Synthetic dashboard-title accounting: when the source .twb declared NO
+    # header text zone, the header band carrying the synthetic "title-*"
+    # element is layout the zones never described — note it and COUNT the
+    # title in zones/placed so the census reflects what the page shows (it
+    # used to be invisible to gate 8c).
+    syn_title = page['elements'].find { |e| e['kind'].to_s == 'text' && e['id'].to_s.start_with?('title') }
+    if syn_title && structure[:header].empty? && refd.include?(syn_title['id'])
+      census['zones'] += 1
+      census['placed'] += 1
+      census['synthetic_header'] = true
+    end
   end
   page_xmls << pxml
   sidecar[page['id']] = extra_els
@@ -1463,7 +1552,14 @@ File.write("#{opts[:out]}.elements.json", JSON.pretty_generate(sidecar))
 
 # ---- layout-census.json (gate 8c producer, #259) --------------------------
 # One record per dashboard page (zones / placed / dropped / grid_fill_pct) —
-# shape kept exactly compatible. Top-level additions (telemetry, E3):
+# shape kept exactly compatible. Per-page additions (orphan invariant):
+#   unplaced_elements  ids in the built page but ABSENT from the layout XML
+#                      (gate 8c fails on non-empty — Sigma auto-flows these
+#                      as stray cards)
+#   synthetic_header   true when the header band carries the synthetic
+#                      "title-*" element with no source header zone (the
+#                      title is then counted in zones/placed)
+# Top-level additions (telemetry, E3):
 #   bands_detected     {header:bool, kpi_rows:N, sidebar:bool} across pages
 #   min_row_expansions N tiles grown to their per-kind minimum row span
 census_out = opts[:census_out] || File.join(File.dirname(opts[:out]), 'layout-census.json')
