@@ -45,6 +45,14 @@
 #   I1  heuristic: If() whose FIRST argument is a bare column ref with no
 #       comparison operator — integer/bit predicates fail at render with
 #       "Invalid Query"; suggest an explicit `= 1` comparison.
+#   A1  a control carrying a DROPPED_BY_API field — the Workbook Spec API
+#       ACCEPTS it (200 on POST/PUT) and SILENTLY DROPS it on readback, so it
+#       never takes effect (Sigma product gap — issues #415/#417). Unlike the
+#       C-class violations, these do NOT 400: they are silently ignored.
+#   A2  a date-range control whose startDate/endDate default is a BARE date
+#       ("2026-01-01") or a zoneless timestamp — accepted then silently
+#       dropped (#415); only full ISO-8601 UTC timestamps
+#       ("2026-01-01T00:00:00Z") round-trip.
 require 'json'
 
 AGG = /\A\s*(Sum|Avg|Count|CountDistinct|CountIf|SumIf|Min|Max|Median|Percentile|StdDev|Variance|VariancePop|GrandTotal)\s*\(/i
@@ -65,6 +73,59 @@ MODE_HINT = {
 }.freeze
 # `includeNulls` is schema-valid ONLY on these types (stray elsewhere = off-schema).
 INCLUDE_NULLS_OK = %w[text number number-range date date-range slider range-slider].freeze
+# A1: the DROPPED_BY_API contract table — control fields the Workbook Spec API
+# accepts with 200 on POST/PUT but SILENTLY DROPS on readback (GET returns the
+# control without them; they never take effect on the live control). This is a
+# Sigma product gap, NOT a spec-grammar error: the C-class checks above catch
+# shapes that 400, this family is silently ignored. Human-readable contract
+# table: sigma-workbooks reference/specification/controls.md ("Dropped-by-API
+# fields"). Sources: issues #415 (date-range startDate/endDate — see A2) and
+# #417 (list-control editor toggles), both round-trip-confirmed in the field.
+# field => { 'types' => affected controlTypes (informational — the drop is
+# observed regardless of type), 'workaround' => the sanctioned alternative }.
+DROPPED_BY_API = {
+  'showNullOption' => {
+    'types' => %w[list segmented hierarchy],
+    'workaround' => "filter nulls at the control's OPTION-SOURCE instead: point the control's " \
+                    'value-list `source` at a hidden helper element that carries an IsNotNull(<col>) ' \
+                    'filter (build-charts-from-signals emits this automatically for null-excluding ' \
+                    'Tableau filters — field-validated)'
+  },
+  'allowMultipleSelection' => {
+    'types' => %w[list],
+    'workaround' => 'use `selectionMode: "single"|"multiple"` — that field DOES persist'
+  },
+  'excludeValues' => {
+    'types' => %w[list segmented hierarchy],
+    'workaround' => 'use `mode: "exclude"` with `values` = the excluded members — that shape DOES persist'
+  },
+  'showClearButton' => {
+    'types' => %w[list segmented hierarchy],
+    'workaround' => 'no spec equivalent — configure in the Sigma UI control editor post-publish (record it in POSTPUBLISH_GUIDE.md)'
+  },
+  'showSearchBox' => {
+    'types' => %w[list],
+    'workaround' => 'no spec equivalent — configure in the Sigma UI control editor post-publish (record it in POSTPUBLISH_GUIDE.md)'
+  },
+  'showHistogram' => {
+    'types' => %w[list slider range-slider],
+    'workaround' => 'no spec equivalent — configure in the Sigma UI control editor post-publish (record it in POSTPUBLISH_GUIDE.md)'
+  },
+  'showExpandedList' => {
+    'types' => %w[list],
+    'workaround' => 'no spec equivalent — configure in the Sigma UI control editor post-publish (record it in POSTPUBLISH_GUIDE.md)'
+  },
+  'required' => {
+    'types' => %w[list text number date date-range],
+    'workaround' => 'no spec equivalent — configure in the Sigma UI control editor post-publish (record it in POSTPUBLISH_GUIDE.md)'
+  }
+}.freeze
+# A2: the ONLY startDate/endDate string form observed to round-trip on a
+# date-range control is a full ISO-8601 timestamp WITH timezone (UTC `Z` is
+# what Sigma echoes back). Bare dates ("2026-01-01") are accepted then
+# silently dropped (#415). Relative {op,unit,value} hashes (custom mode) are
+# fine and not checked here.
+ISO_UTC_DATETIME = /\A\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})\z/.freeze
 # I1: If( whose first argument is a bare [ref] immediately followed by `,` or
 # `)` — i.e. no comparison operator. `If([x] = 1, ...)` does NOT match.
 # v5.4: If( ONLY — Sigma's Switch(expr, case1, val1, …, default) is MATCH-form,
@@ -224,6 +285,32 @@ def lint_warnings(spec)
       (el['columns'] || []).each do |c|
         c['formula'].to_s.scan(BARE_PREDICATE) do |fn, ref|
           warns << "I1 column '#{c['name'] || c['id']}' on element '#{name}': #{fn}(#{ref}, ...) uses a bare column ref as the predicate — integer predicates fail at render ('Invalid Query'). Use an explicit comparison, e.g. #{fn}(#{ref} = 1, ...)."
+        end
+      end
+
+      next unless kind == 'control'
+      ct = el['controlType'].to_s
+
+      # A1: fields the Workbook Spec API accepts then silently drops (#415/#417).
+      DROPPED_BY_API.each do |field, info|
+        next unless el.key?(field)
+        warns << "A1 control '#{name}': `#{field}` (controlType \"#{ct}\") is accepted by POST/PUT (200) " \
+                 'but SILENTLY DROPPED on readback — it will never take effect (silently ignored, NOT a 400 ' \
+                 'like the C-class violations; Sigma product gap, issue #417). ' \
+                 "Workaround: #{info['workaround']}."
+      end
+
+      # A2: date-range default in a non-persisting string form (#415).
+      if ct == 'date-range'
+        %w[startDate endDate].each do |f|
+          v = el[f]
+          next unless v.is_a?(String) && !v.strip.empty? && v !~ ISO_UTC_DATETIME
+          warns << "A2 control '#{name}': date-range `#{f}` #{v.inspect} is a bare/zoneless date — accepted " \
+                   'by POST/PUT (200) but SILENTLY DROPPED on readback; the control ships with NO default ' \
+                   '(silently ignored, not a 400 — Sigma product gap, issue #415). Workaround: emit a full ' \
+                   "ISO-8601 UTC timestamp (e.g. \"#{v[0, 10]}T00:00:00Z\"), the only string form observed to " \
+                   'round-trip; then confirm via the post-POST control-field audit, and if it still drops, set ' \
+                   'the default in the Sigma UI (record it in POSTPUBLISH_GUIDE.md).'
         end
       end
     end
