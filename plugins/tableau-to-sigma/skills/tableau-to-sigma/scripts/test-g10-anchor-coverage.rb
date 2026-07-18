@@ -96,6 +96,23 @@ Dir.mktmpdir do |d|
 end
 
 Dir.mktmpdir do |d|
+  # PR-6 provenance rider: an anchor EXPLICITLY marked png-eyeball earns NO
+  # coverage credit for the tile it matched in (eyeballed values are the weak
+  # reading the field sessions got wrong); legacy provenance-less anchors keep
+  # their credit (back-compat, exercised by the cases above).
+  anchors = BASE_ANCHORS.map(&:dup)
+  anchors[1] = { 'id' => 'a2', 'label' => 'Beta value', 'raw' => '55', 'kind' => 'number',
+                 'provenance' => 'png-eyeball' }
+  spec, exdir = stage_verify_fixture(d, anchors)
+  _out, _err, st = Open3.capture3(RbConfig.ruby, VERIFY, '--workdir', d, '--workbook-spec', spec, '--exports-dir', exdir)
+  v = JSON.parse(File.read(File.join(d, 'anchors-verdict.json')))
+  cov = v['anchor_coverage']
+  check(st.success?, 'png-eyeball anchor still MATCHES (provenance never changes matching)', fails)
+  check(cov && cov['uncovered'].include?('Beta Chart'),
+        "png-eyeball match earns NO coverage credit — Beta stays uncovered (got #{cov.inspect})", fails)
+end
+
+Dir.mktmpdir do |d|
   # coverage_waivers annotate the WARN (the verdict keeps the RAW measurement).
   spec, exdir = stage_verify_fixture(d, BASE_ANCHORS.map(&:dup),
                                      waivers: [{ 'tile' => 'Beta Chart', 'reason' => 'legend-only tile' },

@@ -45,6 +45,7 @@ what the source *renders*.
       "label": "United Widgets revenue",
       "raw": "12,345B",
       "kind": "currency",
+      "provenance": "view-csv",
       "sigma_element_hint": "Top Accounts" }
   ]
 }
@@ -53,6 +54,18 @@ what the source *renders*.
 - `raw` — the value **EXACTLY as printed**. Keep the raw string: `"12,345B"`,
   never `12345`; `"(12.3%)"`, never `-0.123`; `"$733,215.26"` with the `$` and
   commas. The printed form *is* the precision contract.
+- `provenance` — where the transcribed value CAME from (PR-6):
+  `view-csv` (read off a Tableau view CSV export), `vds` (read off a VizQL
+  Data Service query), or `png-eyeball` (eyeball-transcribed from the
+  dashboard PNG). **Prefer `view-csv`/`vds` whenever the value is available
+  there** — the field sessions mis-read rendered `##`/abbreviated values off
+  PNGs. Provenance never changes whether an anchor MATCHES; it changes what
+  the match is worth: a **VALUED** anchor (numeric + provenance
+  `view-csv`|`vds`) can vouch numerically for a tile; `png-eyeball` and
+  name-only (`text`/`roster`) anchors earn **no** tile-coverage credit —
+  neither toward the G10 coverage floor nor toward gate 18's valued-anchors
+  credit (legacy anchors without the field keep G10 credit but are never
+  valued).
 - `kind` — `currency` | `number` | `percent` | **`text`** (alias `roster`/`member`).
   A `text` anchor's `raw` is a **displayed LABEL** (case-insensitive cell match),
   not a value — use it for ranked/top-N tiles so a wrongly-selected or dropped
@@ -97,12 +110,37 @@ what the source *renders*.
 
 `verify-anchors.rb --workdir <W> --workbook-id <id>` pools the live workbook's
 element CSV exports (the same export→poll→download flow
-`collect-parity-actuals.rb` uses), searches each anchor in the element whose
-name best matches its label/panel (token overlap; the hint wins), then searches
-every other export before declaring a miss. Found-elsewhere still matches (the
-value exists; only the label→element mapping was fuzzy) and is noted. It also
-stamps an `anchors` summary into `parity-final.json` when present. Exit 0 all
-matched / 1 with a per-miss report naming each miss and its closest candidate.
+`collect-parity-actuals.rb` uses) and searches each anchor in the element whose
+name best matches its label/panel (token overlap; the hint wins). A **hinted**
+anchor — numeric (#414) or text/roster (PR-6) — searches ONLY hint-matched
+elements: found-only-outside the asserted location is a MISS (the loophole that
+silently passed 10x-unit/wrong-aggregate defects living in big detail tables).
+Hint-less anchors keep the search-everywhere fallback; found-elsewhere still
+matches and is noted. Every detail/missing row carries the anchor's `kind` +
+`provenance` + `valued` so downstream consumers (G10 coverage,
+`verify-ground-truth.rb`, gate 18) apply the credit rules without re-reading
+the anchors file; the verdict also records `valued_matched` and a
+`provenance_census`. It stamps an `anchors` summary into `parity-final.json`
+when present. Exit 0 all matched / 1 with a per-miss report naming each miss
+and its closest candidate.
+
+## Coexistence with the warehouse ground-truth oracle (PR-6)
+
+**Anchors are rendered-source truth; the tile-grain ground-truth oracle
+(`refs/ground-truth-oracle.md` — Tableau today; other converters adopt when
+they emit a `ground-truth-plan.json` ledger) is warehouse truth.** They verify different
+things and neither subsumes the other: the oracle proves the built tile
+computes the right SQL over the warehouse; anchors prove the workbook shows
+what the source *rendered*. When they disagree, `verify-ground-truth.rb` is
+**FATAL-investigate, never auto-resolved**:
+
+- oracle diverges but anchors matched → **data bug** (warehouse drifted/wrong,
+  or a wrong ground-truth derivation);
+- anchors diverge but oracle matches → **translation/source-reading bug**
+  (Sigma faithfully computes the WRONG semantics);
+- both match → verified by two independent oracles.
+
+Both sides' evidence is printed; never edit either oracle to force agreement.
 
 ## Canonicalization rules (`scripts/lib/anchor_values.rb`)
 

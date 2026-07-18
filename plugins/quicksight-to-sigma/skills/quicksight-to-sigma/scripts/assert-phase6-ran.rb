@@ -239,6 +239,22 @@
 #      EXCLUDE} formula) — LODs exist and nothing audited them. No ledger AND
 #      no LOD census evidence → stated OK (back-compat / non-Tableau plugins).
 #      NO escape flag: the ledger resolution IS the sanctioned escape.
+#  25  Ground-truth numeric coverage failed (gate 18; PR-6) — the workdir's
+#      <workdir>/ground-truth-plan.json coverage ledger (derive-ground-truth.rb)
+#      exists, and at least one displayed tile is NOT numeric-verified by ANY
+#      oracle: its `numeric_parity` stamp (written into parity-final.json /
+#      numeric-parity.json by scripts/verify-ground-truth.rb) is not a `match`
+#      from the warehouse-sql or vds ground truth, no VALUED anchors (numeric,
+#      provenance view-csv|vds — never png-eyeball, never a name-only roster
+#      label) matched in the tile, and the tile is not named in the ledger's
+#      `coverage_waivers` [{tile, reason}]. A `diverge` or oracle-vs-anchors
+#      `conflict` stamp is NEVER waivable. ALSO raised when the ledger exists
+#      but the comparison never ran (or is stale vs the plan), and
+#      belt-and-braces when the ledger is ABSENT on a workdir that carries the
+#      derivation inputs (a .twb + parity-plan.json) — the oracle was skipped.
+#      No ledger AND no derivation inputs → stated OK (back-compat /
+#      non-Tableau plugins). NO escape flag: the ledger waiver IS the
+#      sanctioned escape (join-plan/lod-audit pattern).
 #
 # ANCHORS-ORACLE substitution (charts_total==0, exit 2): when every worksheet is
 # dashboard-embedded (no exportable view CSVs), the anchors oracle may stand in
@@ -2129,6 +2145,126 @@ else
     exit 24
   end
   puts '[OK] gate 17: no lod-audit.json and no LOD calcs in the census — no LOD translations to audit'
+end
+
+# ---------------------------------------------------------------------------
+# Gate 18 — ground-truth numeric coverage (exit 25; PR-6). EVERY displayed
+# tile must be numeric-verified by >=1 oracle:
+#   - the warehouse-sql or vds GROUND TRUTH matched (verify-ground-truth.rb
+#     stamped numeric_parity verdict "match" for the tile), OR
+#   - VALUED anchors vouch for it (numeric anchors with provenance
+#     view-csv|vds — never png-eyeball, never name-only roster labels — that
+#     matched IN the tile; verify-ground-truth.rb stamps these as
+#     oracle:"anchors" verdict:"match"), OR
+#   - the tile carries a NAMED waiver in ground-truth-plan.json
+#     coverage_waivers [{tile, reason}].
+# anchor-only / unverifiable classifications WITHOUT valued-anchor coverage
+# fail NAMING the tiles. A "diverge" or oracle-vs-anchors "conflict" stamp is
+# NEVER waivable — the numbers are (or may be) wrong; investigate, don't ship.
+# No skip flag — the ledger waiver is the only sanctioned escape (the same
+# doctrine as gates 16/17: evidence lives in the ledger, not in a CLI flag a
+# re-run forgets).
+# ---------------------------------------------------------------------------
+gt18_path = File.join(opts[:tab], 'ground-truth-plan.json')
+if File.exist?(gt18_path)
+  gt18_doc = JSON.parse(File.read(gt18_path)) rescue nil
+  gt18_entries = gt18_doc.is_a?(Hash) ? gt18_doc['entries'] : nil
+  unless gt18_entries.is_a?(Array)
+    warn "[FAIL] gate 18: #{gt18_path} is malformed (expected {\"entries\":[...]})."
+    warn '       Re-derive the ledger (ruby scripts/derive-ground-truth.rb) — do not hand-edit it into shape.'
+    exit 25
+  end
+  gt18_entries = gt18_entries.select { |e| e.is_a?(Hash) }
+  # numeric_parity stamps: parity-final.json first (verify-ground-truth.rb
+  # extends it), the standalone numeric-parity.json as fallback.
+  np18 = begin
+    _pf18 = File.exist?(summary_path) ? JSON.parse(File.read(summary_path)) : nil
+    _pf18.is_a?(Hash) ? _pf18['numeric_parity'] : nil
+  rescue JSON::ParserError
+    nil
+  end
+  np18 = (JSON.parse(File.read(File.join(opts[:tab], 'numeric-parity.json'))) rescue nil) unless np18.is_a?(Hash)
+  np18_tiles = np18.is_a?(Hash) && np18['tiles'].is_a?(Hash) ? np18['tiles'] : nil
+  if np18_tiles.nil?
+    warn '[FAIL] gate 18: ground-truth-plan.json exists but the numeric comparison never ran — no'
+    warn '       numeric_parity stamps in parity-final.json (and no numeric-parity.json). Run:'
+    warn "         ruby scripts/run-ground-truth.rb --workdir #{opts[:tab]} --connection-id <id>"
+    warn "         ruby scripts/verify-ground-truth.rb --workdir #{opts[:tab]}"
+    exit 25
+  end
+  if np18['plan_generated_at'].to_s != gt18_doc['generated_at'].to_s
+    warn "[FAIL] gate 18: numeric_parity stamps are STALE — compared against plan " \
+         "#{np18['plan_generated_at'].inspect} but ground-truth-plan.json is #{gt18_doc['generated_at'].inspect}."
+    warn '       Re-run scripts/run-ground-truth.rb and scripts/verify-ground-truth.rb.'
+    exit 25
+  end
+  gt18_waived = Array(gt18_doc['coverage_waivers'])
+                .map { |w| w.is_a?(Hash) ? w['tile'].to_s.downcase.strip : nil }.compact.reject(&:empty?)
+  np18_by_key = np18_tiles.each_with_object({}) { |(k, v), h| h[k.to_s.downcase.strip] = v }
+  gt18_diverged = []
+  gt18_conflicted = []
+  gt18_unverified = []
+  gt18_waived_n = 0
+  gt18_verified = Hash.new(0)
+  gt18_entries.each do |e|
+    tile = e['chart'].to_s
+    s = np18_by_key[tile.downcase.strip]
+    if s.is_a?(Hash) && s['verdict'] == 'diverge'
+      gt18_diverged << [tile, s]
+    elsif s.is_a?(Hash) && s['conflict']
+      gt18_conflicted << [tile, s]
+    elsif s.is_a?(Hash) && s['verdict'] == 'match'
+      gt18_verified[s['oracle'].to_s] += 1
+    elsif gt18_waived.include?(tile.downcase.strip)
+      gt18_waived_n += 1
+    else
+      gt18_unverified << [tile, e, s]
+    end
+  end
+  if gt18_diverged.any? || gt18_conflicted.any? || gt18_unverified.any?
+    warn '[FAIL] gate 18: ground-truth numeric coverage — every displayed tile must be numeric-verified'
+    warn '       by >=1 oracle (warehouse-sql/vds ground truth matched, or VALUED anchors) or carry a'
+    warn '       named coverage_waivers entry in ground-truth-plan.json.'
+    gt18_diverged.first(10).each do |tile, s|
+      w = s['worst']
+      warn "         - DIVERGED (#{s['oracle']}): #{tile.inspect} — #{s['reason']}" \
+           "#{w.is_a?(Hash) ? " (#{w['measure'].inspect}: ground truth #{w['ground_truth'].inspect} vs Sigma #{w['sigma'].inspect})" : ''}"
+    end
+    gt18_conflicted.first(10).each do |tile, s|
+      warn "         - CONFLICT (#{s.dig('conflict', 'type')}): #{tile.inspect} — the oracle and the anchors" \
+           ' DISAGREE; FATAL-investigate (see verify-ground-truth.rb output), never auto-resolved'
+    end
+    gt18_unverified.first(10).each do |tile, e, s|
+      warn "         - UNVERIFIED (#{e['classification'] || '?'}): #{tile.inspect} — " \
+           "#{(s.is_a?(Hash) ? s['reason'] : nil) || e['reason'] || 'no numeric_parity stamp for this tile'}"
+    end
+    warn '       Diverged/conflicted tiles are NEVER waivable — the numbers are wrong (or contested):'
+    warn '       fix the workbook / investigate the conflict, then re-run verify-ground-truth.rb.'
+    warn '       For genuinely unverifiable tiles: transcribe VALUED anchors (numeric, provenance'
+    warn '       view-csv|vds — re-read the source view CSV/VDS, not the PNG) so the tile is vouched'
+    warn '       for, or name it in ground-truth-plan.json coverage_waivers [{"tile": "<chart>",'
+    warn '       "reason": "<why no oracle can verify it>"}]. There is no skip flag.'
+    exit 25
+  end
+  gt18_parts = gt18_verified.map { |k, v| "#{v} #{k}" }
+  puts "[OK] gate 18: ground-truth numeric coverage — #{gt18_entries.length} tile(s) all verified" \
+       " (#{gt18_parts.empty? ? 'none' : gt18_parts.join(', ')}" \
+       "#{gt18_waived_n.positive? ? ", #{gt18_waived_n} coverage-waived in the ledger" : ''})"
+else
+  # Belt-and-braces: the workdir carries the derivation inputs (a source .twb +
+  # a parity plan) but the coverage ledger was never derived — the numeric
+  # oracle was skipped, not inapplicable.
+  gt18_twb = Dir.glob(File.join(opts[:tab], '*.twb')).first
+  if gt18_twb && File.exist?(File.join(opts[:tab], 'parity-plan.json'))
+    warn "[FAIL] gate 18: #{File.basename(gt18_twb)} + parity-plan.json present but no ground-truth-plan.json —"
+    warn '       the per-tile ground-truth derivation never ran, so nothing proved the numbers against'
+    warn '       the warehouse. Run:'
+    warn "         ruby scripts/derive-ground-truth.rb --workdir #{opts[:tab]}"
+    warn "         ruby scripts/run-ground-truth.rb --workdir #{opts[:tab]} --connection-id <id>"
+    warn "         ruby scripts/verify-ground-truth.rb --workdir #{opts[:tab]}"
+    exit 25
+  end
+  puts '[OK] gate 18: no ground-truth-plan.json and no .twb derivation inputs — numeric-oracle coverage N/A (non-Tableau / pre-PR-6 workdir)'
 end
 
 # ---------------------------------------------------------------------------

@@ -1,12 +1,12 @@
-# Tile-grain ground-truth oracle — part A: derivation + execution (PR-5)
+# Tile-grain ground-truth oracle — derivation, execution, comparison, gate
 
 The PLAN-v3 centerpiece: an oracle that answers **"are the numbers right?"** by
 deriving, per parity-plan tile, the SQL that computes the tile's value straight
 from the warehouse — from the **source .twb signals**, never from the built
 workbook. A source that renders `##` becomes irrelevant: warehouse SQL doesn't
-render. Part A covers derivation + execution + the coverage ledger; the
-comparison against Sigma exports and the hard gate are **PR-6** (see forward
-pointer below).
+render. Part A (PR-5) covers derivation + execution + the coverage ledger;
+part B (PR-6) compares the actuals against the Sigma element exports, stamps
+`numeric_parity`, and wires the hard coverage gate (gate 18, exit 25).
 
 ## Independence contract
 
@@ -85,11 +85,74 @@ hang) and a `LIMIT`-guarded query per entry — ground truth is aggregated, so
 more than `--row-limit` rows means a missing/exploded GROUP BY and fails loud
 (`row-explosion`, exit 2).
 
-## PR-6 forward pointer
+## Part B — comparison (`scripts/verify-ground-truth.rb`)
 
-Part B compares `ground-truth-actuals.json` against the tile's Sigma element
-export, stamps `numeric_parity` into `parity-final.json`, and adds the hard
-gate: **every displayed tile numeric-verified by ≥1 oracle or named-waived**.
-Contract: anchors = rendered-source truth, oracle = warehouse truth; divergence
-between them is FATAL-investigate, never auto-resolved. Part A intentionally
-wires **no** gate into `assert-phase6-ran.rb`.
+```bash
+# 3. After collect-parity-actuals.rb (Sigma-side exports) and, when present,
+#    verify-anchors.rb / vds-oracle.rb:
+ruby scripts/verify-ground-truth.rb --workdir <WORK> \
+  [--tol 1e-4] [--extract-tol F]   # extract-tol honored ONLY on extract-marked workdirs
+```
+
+Joins `ground-truth-actuals.json` rows against the tile's Sigma element export
+(`parity-actuals.json`, the collect-parity-actuals shapes — status markers like
+`render-verify-required` make the tile `unverified`, never a false diverge) on
+the tile's **dims**, canonicalized by `scripts/lib/dim_canon.rb` — the same
+canonicalizer `verify-parity.rb` uses (incl. the e2e-defect date forms
+`1/4/2026 12:00:00 AM` and `Feb 4, 24`), so "the same bucket" can never mean
+two different things across oracles. Each measure compares by relative diff
+against `--tol` (strict, default `1e-4`); actuals must bind to the exact plan
+(`plan_generated_at`), else the run is refused as stale.
+
+Per tile it stamps — into `parity-final.json` (**extending** its existing
+shape; also written standalone to `numeric-parity.json`):
+
+```json
+"numeric_parity": { "plan_generated_at": "…", "tiles": {
+  "<chart>": { "oracle": "warehouse-sql|vds|anchors",
+               "verdict": "match|diverge|unverified",
+               "max_rel_diff": 0.0, "rows_compared": 12,
+               "reason": null, "conflict": { "…": "only when oracles disagree" } } } }
+```
+
+`vds` tiles read their verdicts from `vds-oracle.json` (match/near = verified);
+`anchor-only`/`unverifiable` tiles are credited **only by VALUED anchors** —
+numeric anchors with `provenance` `view-csv`|`vds` (never `png-eyeball`, never
+name-only roster labels) that matched **in** the tile (`refs/source-anchors.md`).
+
+Exit codes: 0 clean; 1 usage/missing/stale inputs; 2 = any **diverge** or
+**conflict** (FATAL — names tile + measure + both values).
+
+## Anchors coexistence contract
+
+**Anchors are rendered-source truth; this oracle is warehouse truth.** They
+are different oracles and a disagreement is evidence of a real bug — never
+noise to reconcile:
+
+| oracle (warehouse) | anchors (rendered source) | meaning |
+|---|---|---|
+| diverge | matched in the tile | **FATAL-investigate: DATA BUG** — the warehouse disagrees with what the source rendered (drifted/wrong warehouse data, or a wrong ground-truth derivation) |
+| match | missing (hint aimed at the tile) | **FATAL-investigate: TRANSLATION/SOURCE-READING BUG** — Sigma faithfully computes something the source never rendered (wrong tile semantics) |
+| match | matched | verified — two independent oracles agree |
+
+`verify-ground-truth.rb` **never auto-resolves a conflict**: it records
+`conflict` on the stamp, prints BOTH sides' evidence, and exits 2. Never edit
+the ground truth or the anchors to make them agree with the workbook.
+
+## The hard gate — gate 18 (`assert-phase6-ran.rb`, exit 25)
+
+**Every displayed tile must be numeric-verified by ≥1 oracle**: a
+`numeric_parity` `match` (warehouse-sql / vds / valued anchors), or a named
+waiver in `ground-truth-plan.json`:
+
+```json
+"coverage_waivers": [ { "tile": "<chart>", "reason": "<why no oracle can verify it>" } ]
+```
+
+`anchor-only`/`unverifiable` tiles **without** valued-anchor coverage fail the
+gate NAMING each tile. A `diverge` or `conflict` stamp is **never waivable**.
+Missing/stale stamps fail ("the comparison never ran"); a workdir carrying the
+derivation inputs (a `.twb` + `parity-plan.json`) with **no** ledger at all
+also fails, belt-and-braces. There is **no skip flag** — the ledger waiver is
+the only sanctioned escape (the join-plan / lod-audit doctrine: evidence lives
+in the ledger, not in a CLI flag a re-run forgets).
