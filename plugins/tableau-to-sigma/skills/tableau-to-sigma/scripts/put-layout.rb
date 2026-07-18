@@ -95,6 +95,31 @@ if opts[:layout]
   abort "FATAL: empty elementId in layout XML" if xml.match?(/elementId=""/)
   spec['pages'].each { |p| p.delete('layout') }
   spec['layout'] = xml
+
+  # PRUNE stale injected layout chrome (orphan-fix, class 2). A rebuilt layout
+  # (e.g. after --rename fixed zone matching) generates a different container
+  # set, but earlier PUTs already injected the previous set into the spec — and
+  # an injected element no longer referenced by the incoming layout XML is
+  # auto-flowed by Sigma as an empty white card (bottom-left; live-caught on a
+  # stale "tc-<page>-extra" safety-net band surviving every re-PUT). Only OUR
+  # injected id namespaces are candidates — containers "tc-/syn-/band-", their
+  # fabricated "-hdrtext" text, "dv-" dividers (see build-dashboard-layout.rb's
+  # sidecar) — user elements are never touched, and anything the new layout
+  # still references is kept.
+  refd = xml.scan(/elementId="([^"]+)"/).flatten
+  pruned = []
+  spec['pages'].each do |p|
+    (p['elements'] || []).reject! do |el|
+      id = el['id'].to_s
+      injected = (el['kind'] == 'container' && id.match?(/\A(tc|syn|band)-/)) ||
+                 (el['kind'] == 'text' && id.match?(/\A(tc|syn|band)-.*-hdrtext\z/)) ||
+                 (el['kind'] == 'divider' && id.start_with?('dv-'))
+      next false unless injected && !refd.include?(id)
+      pruned << id
+      true
+    end
+  end
+  puts "pruned #{pruned.length} stale injected layout element(s) not referenced by the new layout: #{pruned.join(', ')}" if pruned.any?
 end
 
 # Inject container/header-text spec elements (see header comment).

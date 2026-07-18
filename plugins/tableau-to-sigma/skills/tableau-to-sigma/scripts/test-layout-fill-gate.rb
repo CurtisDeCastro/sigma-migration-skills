@@ -97,5 +97,19 @@ Dir.mktmpdir do |d|
   ok('malformed census fails (exit 14)', gate_code(d) == 14)
 end
 
+# 10. orphan elements (unplaced_elements non-empty) fail even at full fill —
+# an element no layout band references is auto-flowed by Sigma as a stray
+# white card (the live-caught synthetic-title defect).
+Dir.mktmpdir do |d|
+  write_census(d, [FULL.merge('unplaced_elements' => ['title-profitability-watch'])])
+  ok('orphan element fails (exit 14)', gate_code(d) == 14)
+end
+
+# 11. an empty unplaced_elements list (the invariant holds) still passes
+Dir.mktmpdir do |d|
+  write_census(d, [FULL.merge('unplaced_elements' => [])])
+  ok('empty unplaced_elements passes', gate_code(d) == 0)
+end
+
 puts($fail.zero? ? "\nALL PASS" : "\n#{$fail} FAILED")
 exit($fail.zero? ? 0 : 1)

@@ -1379,9 +1379,11 @@ end
 # every structural + visual gate above and still ship a page that is mostly
 # empty: tiles silently dropped, or a sparse default stack. build-dashboard-
 # layout.rb emits <workdir>/layout-census.json (one record per page: zones /
-# placed / dropped / grid_fill_pct). This gate hard-fails when any page dropped
-# a tile (placed < zones) OR its grid is under-filled (grid_fill_pct <
-# --min-grid-fill, default 0.45).
+# placed / dropped / grid_fill_pct / unplaced_elements). This gate hard-fails
+# when any page dropped a tile (placed < zones), its grid is under-filled
+# (grid_fill_pct < --min-grid-fill, default 0.45), OR the builder reported
+# ORPHAN elements (unplaced_elements non-empty: an element in the built page
+# that no layout band references — Sigma auto-flows it as a stray white card).
 #
 # Absent census: CONDITIONAL fail. If a dashboard layout was built
 # (dashboard-layout.json present, or a tile_census landed in parity-final.json)
@@ -1401,7 +1403,10 @@ elsif File.exist?(census_fill_path)
     exit 14
   end
   min_fill = opts[:min_grid_fill]
-  bad = pages.select { |p| p['placed'].to_i < p['zones'].to_i || p['grid_fill_pct'].to_f < min_fill }
+  bad = pages.select do |p|
+    p['placed'].to_i < p['zones'].to_i || p['grid_fill_pct'].to_f < min_fill ||
+      Array(p['unplaced_elements']).any?
+  end
   # Reconcile against the LIVE layout (gate 4 fetched its positioned-element
   # count). A HAND-AUTHORED workbook layout uses element ids the zone-derived
   # census can't match, so build-dashboard-layout.rb reports placed=0/N even
@@ -1426,11 +1431,15 @@ elsif File.exist?(census_fill_path)
         reasons << "#{p['zones'].to_i - p['placed'].to_i} dropped tile(s) (placed #{p['placed']}/#{p['zones']})"
       end
       reasons << "grid fill #{(p['grid_fill_pct'].to_f * 100).round}% < #{(min_fill * 100).round}%" if p['grid_fill_pct'].to_f < min_fill
+      orphans = Array(p['unplaced_elements'])
+      reasons << "#{orphans.length} orphan element(s) no layout band references (auto-flowed as stray cards): #{orphans.join(', ')}" if orphans.any?
       warn "         - #{p['page'].inspect}: #{reasons.join('; ')}"
     end
     warn '       A dropped tile means a source zone never made it into the Sigma layout (empty'
     warn '       view CSV, unhandled rename); an under-filled grid means the page ships mostly'
-    warn '       empty. Check build-dashboard-layout.rb WARN lines for dropped/unmatched zones,'
+    warn '       empty; an orphan element means the built page carries an element the layout'
+    warn '       never places (Sigma auto-flows it as a stray white card, bottom-left).'
+    warn '       Check build-dashboard-layout.rb WARN lines for dropped/unmatched zones,'
     warn '       rebuild the layout, re-PUT, and re-render. Tune with --min-grid-fill F.'
     warn '       Escape hatch (intentionally sparse page): --skip-layout-fill "<reason>" (name it in your report).'
     exit 14
