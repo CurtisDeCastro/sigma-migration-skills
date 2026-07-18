@@ -118,6 +118,19 @@ module RunState
     stamp(workdir, phase, status: 'skip', note: reason)
   end
 
+  # Record TOP-LEVEL run facts (not phases) into the ledger — e.g. the PLAN-v3
+  # PR-3 scope/cost sign-off: record(dir, 'cost_estimate_acknowledged' => true,
+  # 'cost_estimate_provenance' => 'auto-yes'|'stated'). Merges by key like
+  # stamp; best-effort — a ledger write must never crash the conversion.
+  def self.record(workdir, fields)
+    return unless workdir && File.directory?(workdir)
+    doc = load(workdir)
+    fields.each { |k, v| doc[k.to_s] = v }
+    File.write(path(workdir), JSON.pretty_generate(doc) + "\n")
+  rescue StandardError
+    nil
+  end
+
   # Which of the required phase keys have NO entry at all (neither done nor
   # skip). A phase explicitly marked skip is NOT missing — that's a recorded,
   # reasoned decision. Returns [] when everything required is accounted for.
