@@ -60,7 +60,7 @@ readback = {
       ] }
   ] }]
 }
-twb = File.read(File.join(__dir__, 'test-fixtures', 'join-coalesce.twb'))
+twb = File.read(File.join(__dir__, 'test-fixtures', 'join-coalesce.twb'), encoding: 'UTF-8')
 Dir.mktmpdir do |work|
   # Exactly what the orchestrator now does on reuse: readback spec + .twb.
   entries = JoinPlan.derive(readback, twb, db: 'ANALYTICS', schema: 'PUBLIC')
