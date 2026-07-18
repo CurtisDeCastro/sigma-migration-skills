@@ -366,9 +366,126 @@ Dir.mktmpdir do |dir|
   check(st.exitstatus == 24 && err.include?('malformed'), 'gate 17: malformed ledger → exit 24', fails)
 end
 
+# ---- gate 18: ground-truth numeric coverage (exit 25; PR-6) -------------------
+GT18_T0 = '2026-07-18T00:00:00Z'
+def gt18_stage(dir, entries, stamps, waivers: nil, stamp_time: GT18_T0)
+  plan = { 'version' => 1, 'generated_at' => GT18_T0, 'entries' => entries }
+  plan['coverage_waivers'] = waivers if waivers
+  File.write(File.join(dir, 'ground-truth-plan.json'), JSON.pretty_generate(plan))
+  return if stamps.nil?
+  pf = JSON.parse(File.read(File.join(dir, 'parity-final.json')))
+  pf['numeric_parity'] = { 'plan_generated_at' => stamp_time, 'tiles' => stamps }
+  File.write(File.join(dir, 'parity-final.json'), JSON.pretty_generate(pf))
+end
+
+GT18_SQL   = { 'chart' => 'Trend', 'classification' => 'warehouse-sql' }.freeze
+GT18_ANCH  = { 'chart' => 'Blend Tile', 'classification' => 'anchor-only', 'reason' => 'data blend' }.freeze
+
+# all tiles verified (warehouse match + valued-anchors match) → pass
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  gt18_stage(dir, [GT18_SQL.dup, GT18_ANCH.dup],
+             { 'Trend' => { 'oracle' => 'warehouse-sql', 'verdict' => 'match', 'max_rel_diff' => 0.0, 'rows_compared' => 12 },
+               'Blend Tile' => { 'oracle' => 'anchors', 'verdict' => 'match', 'rows_compared' => 2 } })
+  out, err, st = run_gate(dir)
+  check(st.success?, "gate 18: all tiles oracle-verified → exit 0 (got #{st.exitstatus}: #{err.lines.first(2).join(' ').strip})", fails)
+  check(out.include?('gate 18') && out.include?('1 warehouse-sql') && out.include?('1 anchors'),
+        'gate 18 OK line counts the verifying oracles', fails)
+end
+
+# anchor-only tile WITHOUT valued anchors (eyeball-only) → exit 25 naming it
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  gt18_stage(dir, [GT18_SQL.dup, GT18_ANCH.dup],
+             { 'Trend' => { 'oracle' => 'warehouse-sql', 'verdict' => 'match', 'rows_compared' => 12 },
+               'Blend Tile' => { 'oracle' => 'anchors', 'verdict' => 'unverified',
+                                 'reason' => 'anchor-only: data blend — 2 anchor(s) matched but none are VALUED (need numeric + provenance view-csv|vds, not png-eyeball)' } })
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 25, "gate 18: eyeball-only anchor tile → exit 25 (got #{st.exitstatus})", fails)
+  check(err.include?('UNVERIFIED') && err.include?('Blend Tile') && err.include?('VALUED'),
+        'gate 18 failure names the unverified tile and the valued-anchor rule', fails)
+  check(err.include?('coverage_waivers'), 'gate 18 failure points at the ledger waiver escape', fails)
+end
+
+# unverified tile WITH a named ledger waiver → pass, waiver counted
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  gt18_stage(dir, [GT18_SQL.dup, GT18_ANCH.dup],
+             { 'Trend' => { 'oracle' => 'warehouse-sql', 'verdict' => 'match', 'rows_compared' => 12 },
+               'Blend Tile' => { 'oracle' => 'anchors', 'verdict' => 'unverified', 'reason' => 'anchor-only: data blend' } },
+             waivers: [{ 'tile' => 'Blend Tile', 'reason' => 'blend across two datasources; no oracle can join them' }])
+  out, _err, st = run_gate(dir)
+  check(st.success?, "gate 18: ledger-waived tile → exit 0 (got #{st.exitstatus})", fails)
+  check(out.include?('1 coverage-waived in the ledger'), 'gate 18 OK line counts the ledger waiver', fails)
+end
+
+# DIVERGED tile is NEVER waivable
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  gt18_stage(dir, [GT18_SQL.dup],
+             { 'Trend' => { 'oracle' => 'warehouse-sql', 'verdict' => 'diverge',
+                            'reason' => 'measure "Meas1" differs beyond tol 0.0001',
+                            'worst' => { 'measure' => 'Meas1', 'ground_truth' => 500.0, 'sigma' => 5000.0 } } },
+             waivers: [{ 'tile' => 'Trend', 'reason' => 'trying to waive a divergence' }])
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 25, "gate 18: diverged tile waived in ledger → STILL exit 25 (got #{st.exitstatus})", fails)
+  check(err.include?('DIVERGED') && err.include?('500.0') && err.include?('5000.0'),
+        'gate 18 divergence failure carries both values', fails)
+  check(err.include?('NEVER waivable'), 'gate 18 states divergences cannot be waived', fails)
+end
+
+# CONFLICTED tile (oracle vs anchors) is NEVER waivable
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  gt18_stage(dir, [GT18_SQL.dup],
+             { 'Trend' => { 'oracle' => 'warehouse-sql', 'verdict' => 'match', 'rows_compared' => 12,
+                            'conflict' => { 'type' => 'anchors-diverge-oracle-matches' } } },
+             waivers: [{ 'tile' => 'Trend', 'reason' => 'trying to waive a conflict' }])
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 25 && err.include?('CONFLICT') && err.include?('anchors-diverge-oracle-matches'),
+        "gate 18: conflicted tile → exit 25 naming the conflict type (got #{st.exitstatus})", fails)
+end
+
+# ledger present but comparison never ran → exit 25 pointing at the scripts
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  gt18_stage(dir, [GT18_SQL.dup], nil)
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 25 && err.include?('never ran') && err.include?('verify-ground-truth.rb'),
+        "gate 18: no numeric_parity stamps → exit 25 (got #{st.exitstatus})", fails)
+end
+
+# stale stamps (bound to a different plan) → exit 25
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  gt18_stage(dir, [GT18_SQL.dup],
+             { 'Trend' => { 'oracle' => 'warehouse-sql', 'verdict' => 'match', 'rows_compared' => 12 } },
+             stamp_time: '2020-01-01T00:00:00Z')
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 25 && err.include?('STALE'), "gate 18: stale stamps → exit 25 (got #{st.exitstatus})", fails)
+end
+
+# belt-and-braces: no ledger but derivation inputs (.twb + parity-plan) present → exit 25
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'workbook-content.twb'), "<?xml version='1.0'?><workbook/>")
+  File.write(File.join(dir, 'parity-plan.json'), JSON.pretty_generate('charts' => [{ 'chart' => 'Trend' }]))
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 25 && err.include?('no ground-truth-plan.json') && err.include?('derive-ground-truth.rb'),
+        "gate 18: .twb + parity-plan but no ledger → exit 25 (got #{st.exitstatus})", fails)
+end
+
+# no ledger, no derivation inputs → stated OK (back-compat / non-Tableau)
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  out, _err, st = run_gate(dir)
+  check(st.success? && out.include?('gate 18') && out.include?('N/A'),
+        'gate 18: no ledger + no inputs → stated OK (never silent)', fails)
+end
+
 puts
 if fails.empty?
-  puts 'ALL PASS — assert-phase6-ran gate 8b vision precondition + gate 11 post-publish guide + gate 16 join-cardinality ledger + gate 17 LOD translation ledger'
+  puts 'ALL PASS — assert-phase6-ran gate 8b vision precondition + gate 11 post-publish guide + gate 16 join-cardinality ledger + gate 17 LOD translation ledger + gate 18 ground-truth numeric coverage'
   exit 0
 else
   puts "FAILURES (#{fails.length}):"

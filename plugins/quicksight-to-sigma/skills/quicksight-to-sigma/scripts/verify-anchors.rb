@@ -77,10 +77,39 @@ require_relative 'lib/anchor_values'
 module AnchorVerify
   STOPWORDS = %w[the a an of by per and or in on for to vs].freeze
 
+  # --- anchor PROVENANCE (PR-6 rider) ----------------------------------------
+  # Where did the transcribed value COME from?
+  #   view-csv     read off a Tableau view CSV export (strong: machine-rendered)
+  #   vds          read off a VizQL Data Service query (strong: source-computed)
+  #   png-eyeball  eyeball-transcribed from the dashboard PNG (weak: the field
+  #                sessions mis-read rendered "##"/abbreviated values this way)
+  # A VALUED anchor — one that can numerically vouch for a tile — must be a
+  # NUMERIC anchor (not a name-only text/roster/member label) with provenance
+  # view-csv|vds. png-eyeball and name-only anchors still verify (a printed
+  # value/label must appear), but they earn NO tile-coverage credit: not toward
+  # the G10 coverage floor, not toward gate 18's valued-anchors credit.
+  # Anchors WITHOUT a provenance field (pre-PR-6 transcriptions) keep their G10
+  # credit for back-compat but are never `valued`.
+  VALUED_PROVENANCE = %w[view-csv vds].freeze
+  NAME_ONLY_KINDS = %w[text roster member].freeze
+
   module_function
 
   def tokens(s)
     s.to_s.downcase.scan(/[a-z0-9]+/) - STOPWORDS
+  end
+
+  def name_only?(anchor)
+    NAME_ONLY_KINDS.include?(anchor['kind'].to_s)
+  end
+
+  def valued?(anchor)
+    !name_only?(anchor) && VALUED_PROVENANCE.include?(anchor['provenance'].to_s)
+  end
+
+  # G10 coverage-credit eligibility: numeric, and not EXPLICITLY eyeballed.
+  def coverage_eligible?(anchor)
+    !name_only?(anchor) && anchor['provenance'].to_s != 'png-eyeball'
   end
 
   # Overlap score between an anchor and an element name. sigma_element_hint,
@@ -202,37 +231,46 @@ module AnchorVerify
         missing << entry
       end
     end
+    # A HINTED anchor asserts WHERE its value/label must live. A match found
+    # only in a hint-UNRELATED element (e.g. a raw detail table that merely
+    # happens to contain the number) is NOT acceptance — that loophole silently
+    # passed 10x-unit and wrong-aggregate defects in field testing (a KPI whose
+    # value coincidentally appears in a big detail element). PR-414 scoped
+    # hinted NUMERIC anchors; PR-6 extends the same rule to hinted text/roster
+    # anchors (a hinted roster anchor asserts the member appears in THAT ranked
+    # tile — found in an unrelated feeder table is not acceptance). Hint-less
+    # anchors keep the search-everywhere fallback (no asserted location).
+    scope_for = lambda do |a, order|
+      next order if a['sigma_element_hint'].to_s.strip.empty?
+      scoped = order.select { |n| element_score(a, n).positive? }
+      scoped.empty? ? order : scoped # defensive: hint matched no element name
+    end
+    # Every detail/missing row carries the anchor's kind + provenance so
+    # downstream consumers (G10 coverage, verify-ground-truth.rb, gate 18) can
+    # apply the valued-anchor credit rules without re-reading source-anchors.
+    stamp = lambda do |a, h|
+      h['kind'] = a['kind'] if a['kind']
+      h['provenance'] = a['provenance'] if a['provenance']
+      h
+    end
     anchors.each do |a|
       raw = a['raw'].to_s
       order = ranked_elements(a, el_names)
-      if %w[text roster member].include?(a['kind'].to_s)
+      search_order = scope_for.call(a, order)
+      if name_only?(a)
         want = raw.strip.downcase
-        found_in = order.find { |n| texts[n].include?(want) }
+        found_in = search_order.find { |n| texts[n].include?(want) }
         if found_in
-          detail << { 'id' => a['id'], 'raw' => raw, 'matched_in' => found_in }
+          detail << stamp.call(a, { 'id' => a['id'], 'raw' => raw, 'matched_in' => found_in,
+                                    'valued' => false })
         else
-          classify_miss.call(a, raw, order,
-                             { 'id' => a['id'], 'label' => a['label'], 'raw' => raw,
-                               'best_candidate' => { 'note' => 'text anchor: label not present in any element export' } })
+          miss = { 'id' => a['id'], 'label' => a['label'], 'raw' => raw,
+                   'best_candidate' => { 'note' => 'text anchor: label not present in any in-scope element export' } }
+          miss['sigma_element_hint'] = a['sigma_element_hint'] unless a['sigma_element_hint'].to_s.strip.empty?
+          classify_miss.call(a, raw, search_order, stamp.call(a, miss))
         end
         next
       end
-      # A HINTED numeric anchor asserts WHERE its value must live. A match found
-      # only in a hint-UNRELATED element (e.g. a raw detail table that merely
-      # happens to contain the number) is NOT acceptance — that loophole silently
-      # passed 10x-unit and wrong-aggregate defects in field testing (a KPI whose
-      # value coincidentally appears in a big detail element). Restrict a hinted
-      # numeric anchor's search to hint-scored elements; found-only-outside is a
-      # MISS. Hint-less anchors keep the search-everywhere fallback (no asserted
-      # location to enforce); text/roster anchors are unchanged (a member label
-      # appearing anywhere is meaningful on its own).
-      search_order =
-        if a['sigma_element_hint'].to_s.strip.empty?
-          order
-        else
-          scoped = order.select { |n| element_score(a, n).positive? }
-          scoped.empty? ? order : scoped # defensive: hint matched no element name
-        end
       found_in = search_order.find { |n| numbers[n].any? { |v| AnchorValues.match?(raw, v) } }
       tol_used = nil
       if found_in.nil? && tol
@@ -245,12 +283,13 @@ module AnchorVerify
         primary = order.first
         d = { 'id' => a['id'], 'raw' => raw, 'matched_in' => found_in,
               'note' => (found_in == primary ? nil : "found outside best-match element #{primary.inspect}") }.compact
+        d['valued'] = valued?(a)
         if tol_used
           drift = numbers[found_in].map { |v| AnchorValues.relative_distance(raw, v) }.min
           d['tolerance_used'] = tol_used
           d['drift'] = drift.round(6) if drift&.finite?
         end
-        detail << d
+        detail << stamp.call(a, d)
       else
         # Closest candidate WITHIN the best-matching element that carries any
         # numbers (walking down the ranking until one does) — the wrong value
@@ -265,17 +304,24 @@ module AnchorVerify
           end
           break if best
         end
-        classify_miss.call(a, raw, search_order,
-                           { 'id' => a['id'], 'label' => a['label'], 'raw' => raw,
-                             'best_candidate' => best })
+        miss = { 'id' => a['id'], 'label' => a['label'], 'raw' => raw,
+                 'best_candidate' => best }
+        miss['sigma_element_hint'] = a['sigma_element_hint'] unless a['sigma_element_hint'].to_s.strip.empty?
+        classify_miss.call(a, raw, search_order, stamp.call(a, miss))
       end
     end
+    census = Hash.new(0)
+    anchors.each { |a| census[a.is_a?(Hash) && a['provenance'] ? a['provenance'].to_s : 'unspecified'] += 1 }
     { 'checked' => anchors.length,
       'matched' => anchors.length - missing.length - inconclusive.length,
       'missing' => missing,
       'inconclusive' => inconclusive,
       'pass' => missing.empty? && inconclusive.empty?,
       'matched_via_tolerance' => detail.count { |d| d['tolerance_used'] },
+      # PR-6 valued-anchor credit: numeric + provenance view-csv|vds matches
+      # (the only anchors that numerically vouch for a tile downstream).
+      'valued_matched' => detail.count { |d| d['valued'] },
+      'provenance_census' => census,
       'detail' => detail }
   end
 end
@@ -799,12 +845,19 @@ verdict['anchors_retranscribed'] = anchor_retranscribe if anchor_retranscribe
 # is COVERED when an anchor matched IN it (matched_in == the tile's display
 # name) or is AIMED at it (sigma_element_hint token-matches the tile name —
 # the hint asserts where the value must live even when the anchor missed).
+# PR-6 rider: only COVERAGE-ELIGIBLE anchors earn credit — numeric anchors not
+# explicitly provenance:"png-eyeball" (an eyeballed value is the weak reading
+# the field sessions got wrong; a name-only text/roster anchor carries no
+# value). Legacy anchors without a provenance field keep their credit.
 # Advisory here (WARN, exit unchanged); assert-phase6-ran's charts_total==0
 # anchors-ORACLE substitution requires covered == displayed unless each
 # uncovered tile is named in source-anchors.json coverage_waivers
 # [{tile, reason}] (authored at Phase 1d).
-matched_in_names = verdict['detail'].map { |d| d['matched_in'].to_s }.to_set
-hinted = anchors.select { |a| a.is_a?(Hash) && !a['sigma_element_hint'].to_s.strip.empty? }
+matched_in_names = verdict['detail'].select { |d| AnchorVerify.coverage_eligible?(d) }
+                                    .map { |d| d['matched_in'].to_s }.to_set
+hinted = anchors.select do |a|
+  a.is_a?(Hash) && !a['sigma_element_hint'].to_s.strip.empty? && AnchorVerify.coverage_eligible?(a)
+end
 disp_tiles = tiles.select { |t| t['displayed'] }
 covered_names = disp_tiles.map { |t| t['name'] }.select do |name|
   matched_in_names.include?(name) ||
