@@ -6,9 +6,12 @@
 # (invented names, no customer data); the Lookup-synthesis side uses an inline
 # synthetic dm-spec shaped like the converter's output.
 #
-# Covers: federated join detected (single- and multi-key); Lookup synthesis
-# detected + deduped across columns; composite-key unwrap to physical probe
-# keys; right_table FQN derivation; the empty case still writes a ledger.
+# Covers: federated join detected (single- and multi-key); published-VC label
+# ('NAME (X.TABLE)') + GUID-key resolution to a probeable right_table/probe_keys
+# (and the safe fallback when no db/schema is available); Lookup synthesis
+# detected + deduped across columns; Custom-SQL Lookup target recording
+# right_sql; composite-key unwrap to physical probe keys; right_table FQN
+# derivation; the empty case still writes a ledger.
 #
 # Run: ruby scripts/test-join-plan.rb
 require 'json'
@@ -17,6 +20,7 @@ require_relative 'lib/join_plan'
 
 FIX1 = File.join(__dir__, 'test-fixtures', 'join-coalesce.twb')
 FIX2 = File.join(__dir__, 'test-fixtures', 'join-coalesce-multikey.twb')
+FIX3 = File.join(__dir__, 'test-fixtures', 'join-vc.twb')
 
 fails = []
 def check(cond, msg, fails)
@@ -44,6 +48,44 @@ check(e['keys'] == %w[ENTITY_ID ACTIVITY_DATE], "BOTH key columns captured (got 
 check(e['key_pairs'] == [{ 'left' => 'ENTITY_ID', 'right' => 'ENTITY_ID' },
                          { 'left' => 'ACTIVITY_DATE', 'right' => 'ACTIVITY_DATE' }],
       'key pairs carry both sides', fails)
+
+puts "\n== published/virtual-connection .twb: VC labels + GUID keys resolve to probeable targets =="
+vc_xml = File.read(FIX3)
+entries = JoinPlan.derive(nil, vc_xml, db: 'ANALYTICS', schema: 'PUBLIC')
+check(entries.size == 1, "one federated-join entry from the VC .twb (got #{entries.size})", fails)
+e = entries.first || {}
+check(e['right'] == 'REV_OFFSET (LEDGERSRC.REV_OFFSET)', "right keeps the VC relation label (got #{e['right'].inspect})", fails)
+check(e['right_table'] == 'ANALYTICS.LEDGERSRC.REV_OFFSET',
+      "right_table: 'NAME (X.TABLE)' paren path + run db → db.X.TABLE (got #{e['right_table'].inspect})", fails)
+check(e['keys'] == ['9f8e7d6c-5b4a-4392-8171-605f4e3d2c1b'], 'keys keep the raw GUID for provenance', fails)
+check(e['probe_keys'] == ['ENTITY_ID'],
+      "probe_keys: GUID key resolved via caption + upcase/underscore folding (got #{e['probe_keys'].inspect})", fails)
+
+# 'DB.TABLE' variant: paren path's first part IS the run database → db.schema.TABLE.
+entries = JoinPlan.derive(nil, vc_xml.gsub('LEDGERSRC', 'ANALYTICS'), db: 'ANALYTICS', schema: 'PUBLIC')
+e = entries.first || {}
+check(e['right_table'] == 'ANALYTICS.PUBLIC.REV_OFFSET',
+      "right_table: 'NAME (DB.TABLE)' + run schema → DB.schema.TABLE (got #{e['right_table'].inspect})", fails)
+
+# 'DB.SCHEMA.TABLE' variant needs no opts at all.
+entries = JoinPlan.derive(nil, vc_xml.gsub('(LEDGERSRC.REV_OFFSET)', '(ANADB.LEDGERSRC.REV_OFFSET)'))
+e = entries.first || {}
+check(e['right_table'] == 'ANADB.LEDGERSRC.REV_OFFSET',
+      "right_table: 3-part paren path used as-is (got #{e['right_table'].inspect})", fails)
+
+# No db/schema and a 2-part label → old (safe) behavior: the unprobeable VC
+# inode FQN stays, the probe errors, and the gate keeps blocking.
+entries = JoinPlan.derive(nil, vc_xml)
+e = entries.first || {}
+check(e['right_table'].to_s.start_with?('ab12cd34-'),
+      "no resolution possible → VC inode FQN kept (safe: probe errors, gate blocks) (got #{e['right_table'].inspect})", fails)
+
+# Non-VC .twbs are untouched by the new args.
+entries = JoinPlan.derive(nil, File.read(FIX1), db: 'OTHERDB', schema: 'OTHERSCHEMA')
+e = entries.first || {}
+check(e['right_table'] == 'ANALYTICS.PUBLIC.REV_CONTRA',
+      "plain federated .twb ignores db/schema opts (got #{e['right_table'].inspect})", fails)
+check(e['probe_keys'] == ['ENTITY_ID'], 'plain federated probe keys unchanged', fails)
 
 puts "\n== Lookup synthesis in the dm-spec =="
 dm = {
@@ -99,6 +141,31 @@ check(entries.size == 1, 'composite-key Lookup produces one entry', fails)
 check(e['keys'] == ['Daily Contra Join Key'], 'ledger key names the synthesized composite column', fails)
 check(e['probe_keys'] == %w[ENTITY_ID ACTIVITY_DATE],
       "probe keys unwrap the composite calc to the physical base columns (got #{e['probe_keys'].inspect})", fails)
+
+puts "\n== Custom-SQL Lookup target records right_sql (right_table stays null) =="
+sql_stmt = 'SELECT ENTITY_ID, REGION FROM ANALYTICS.PUBLIC.REV_OFFSET WHERE REGION IS NOT NULL'
+dm3 = {
+  'pages' => [{ 'elements' => [
+    { 'id' => 'el-fact', 'name' => 'Rev Primary',
+      'source' => { 'kind' => 'warehouse-table', 'path' => %w[ANALYTICS PUBLIC REV_PRIMARY] },
+      'columns' => [
+        { 'id' => 'c1', 'name' => 'Unified Region',
+          'formula' => 'Coalesce([Region], Lookup([Offset Sql/Region], [Entity Id], [Offset Sql/Entity Id]))' }
+      ] },
+    { 'id' => 'el-sql', 'name' => 'Offset Sql',
+      'source' => { 'kind' => 'sql', 'connectionId' => 'conn-1', 'statement' => sql_stmt },
+      'columns' => [
+        { 'id' => 't1', 'name' => 'Entity Id', 'formula' => '[Custom SQL/ENTITY_ID]' },
+        { 'id' => 't2', 'name' => 'Region', 'formula' => '[Custom SQL/REGION]' }
+      ] }
+  ] }]
+}
+entries = JoinPlan.derive(dm3, nil)
+check(entries.size == 1, "one lookup-synthesis entry for the sql target (got #{entries.size})", fails)
+e = entries.first || {}
+check(e['right_table'].nil?, "right_table stays null for a sql-kind target (got #{e['right_table'].inspect})", fails)
+check(e['right_sql'] == sql_stmt, "right_sql carries the element's statement (got #{e['right_sql'].inspect})", fails)
+check(e['probe_keys'] == ['ENTITY_ID'], 'probe keys still folded to physical', fails)
 
 puts "\n== combined .twb + dm-spec derivation =="
 entries = JoinPlan.derive(dm, File.read(FIX1))

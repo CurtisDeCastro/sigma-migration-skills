@@ -17,6 +17,9 @@
 #     GROUP BY <keys> HAVING COUNT(*) > 1 ORDER BY C DESC LIMIT 5   -- sample dups
 #   SELECT COUNT(*) AS TOTAL_ROWS, COUNT(DISTINCT <keys concat>) AS DISTINCT_KEYS
 #     FROM <right_table>                                            -- totals
+# A lookup-synthesis entry whose target is a Custom SQL element carries no
+# right_table (null) but a right_sql statement — both queries then run against
+# the statement wrapped as a subquery: FROM (<right_sql>) t.
 #
 # Execution reuses the established warehouse-SQL path (probe-custom-sql-columns.rb):
 # a one-shot probe workbook with a Custom SQL element on the Sigma connection,
@@ -115,6 +118,17 @@ def totals_sql(table, keys)
   "SELECT COUNT(*) AS TOTAL_ROWS, COUNT(DISTINCT #{concat}) AS DISTINCT_KEYS FROM #{table}"
 end
 
+# FROM-target for an entry: the physical right_table FQN, or — for a
+# lookup-synthesis whose target element is Custom SQL (right_table null,
+# right_sql recorded by the derivation) — the statement wrapped as a subquery.
+# nil when the entry carries neither (the entry errors; the gate keeps blocking).
+def probe_target(entry)
+  t = entry['right_table'].to_s
+  return t unless t.empty?
+  sql = entry['right_sql'].to_s
+  sql.empty? ? nil : "(#{sql}) t"
+end
+
 # ---------------------------------------------------------------------------
 # Result acquisition: fixture (offline) or the probe-workbook Custom SQL path.
 # Returns {'total'=>N,'distinct'=>M,'duplicates'=>[{'keys'=>{},'count'=>n}]}
@@ -166,9 +180,9 @@ def sigma_sql_rows(conn_id, folder_id, sql, columns)
 end
 
 def live_result(conn_id, folder_id, entry)
-  table = entry['right_table']
+  table = probe_target(entry)
   keys  = entry['probe_keys'] || entry['keys']
-  return { 'error' => 'no right_table FQN on the entry — resolve the warehouse table and re-derive' } if table.to_s.empty?
+  return { 'error' => 'no right_table FQN (or right_sql) on the entry — resolve the warehouse table and re-derive' } unless table
   dup_rows = sigma_sql_rows(conn_id, folder_id, dup_sql(table, keys), keys + ['C'])
   tot_rows = sigma_sql_rows(conn_id, folder_id, totals_sql(table, keys), %w[TOTAL_ROWS DISTINCT_KEYS])
   tot = tot_rows.first
@@ -201,8 +215,9 @@ unless opts[:resolve]
       puts "  ERROR  ##{i} #{e['kind']}: #{e['left']} -> #{e['right']} — no key columns"
       next
     end
-    e['probe_sql'] = { 'duplicates' => dup_sql(e['right_table'] || '<right_table>', keys),
-                       'totals'     => totals_sql(e['right_table'] || '<right_table>', keys) }
+    tgt = probe_target(e) || '<right_table>'
+    e['probe_sql'] = { 'duplicates' => dup_sql(tgt, keys),
+                       'totals'     => totals_sql(tgt, keys) }
     res = opts[:fixture] ? fixture_result(opts[:fixture], i) : live_result(opts[:conn], opts[:folder], e)
     e['probed_at'] = now_utc
     if res['error']

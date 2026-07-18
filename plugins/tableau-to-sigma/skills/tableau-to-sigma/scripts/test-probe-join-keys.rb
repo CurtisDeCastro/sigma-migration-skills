@@ -4,10 +4,11 @@
 # --fixture mode (canned per-entry JSON results, the same offline seam
 # convention as test-verify-warehouse.rb). No warehouse, no network.
 #
-# Covers: unique → status unique + exit 0; non-unique → FATAL block naming the
-# entry + sample duplicate keys + both sanctioned resolutions + exit 2;
-# --resolve records evidence and clears the failure; missing fixture → status
-# error + exit 3; probe SQL recorded on the entry.
+# Covers: unique → status unique + exit 0; a Custom-SQL target (right_table
+# null, right_sql set) probed as a FROM (<right_sql>) t subquery; non-unique →
+# FATAL block naming the entry + sample duplicate keys + both sanctioned
+# resolutions + exit 2; --resolve records evidence and clears the failure;
+# missing fixture → status error + exit 3; probe SQL recorded on the entry.
 #
 # Run: ruby scripts/test-probe-join-keys.rb
 require 'json'
@@ -75,6 +76,24 @@ Dir.mktmpdir do |dir|
   check(sqls['totals'].include?("COALESCE(TO_VARCHAR(ENTITY_ID), '') || '|' || COALESCE(TO_VARCHAR(ACTIVITY_DATE), '')"),
         "totals SQL concatenates multi-key (got #{sqls['totals'].inspect})", fails)
   check(sqls['duplicates'].include?('GROUP BY ENTITY_ID, ACTIVITY_DATE'), 'dup SQL groups by both keys', fails)
+end
+
+puts "\n== Custom-SQL target (right_table null, right_sql set) probes as a subquery =="
+Dir.mktmpdir do |dir|
+  stmt = 'SELECT ENTITY_ID, REGION FROM ANALYTICS.PUBLIC.REV_OFFSET WHERE REGION IS NOT NULL'
+  workdir_with(dir, [entry('right_table' => nil, 'right_sql' => stmt)])
+  fx = File.join(dir, 'fx'); Dir.mkdir(fx)
+  File.write(File.join(fx, 'entry-0.json'), JSON.generate('total' => 42, 'distinct' => 42, 'duplicates' => []))
+  _out, _err, st = run_probe(dir, '--fixture', fx)
+  check(st.success?, "sql-target unique → exit 0 (got #{st.exitstatus})", fails)
+  e = ledger(dir)[0]
+  check(e['status'] == 'unique', 'sql-target ledger status unique', fails)
+  check(e['probe_sql']['duplicates'] ==
+        "SELECT ENTITY_ID, COUNT(*) AS C FROM (#{stmt}) t GROUP BY ENTITY_ID HAVING COUNT(*) > 1 ORDER BY C DESC LIMIT 5",
+        "dup SQL wraps the statement as a subquery (got #{e['probe_sql']['duplicates'].inspect})", fails)
+  check(e['probe_sql']['totals'] ==
+        "SELECT COUNT(*) AS TOTAL_ROWS, COUNT(DISTINCT ENTITY_ID) AS DISTINCT_KEYS FROM (#{stmt}) t",
+        "totals SQL wraps the statement as a subquery (got #{e['probe_sql']['totals'].inspect})", fails)
 end
 
 puts "\n== non-unique fixture → FATAL block + exit 2 =="
