@@ -213,10 +213,18 @@ def check_case(case_dir):
     expect, err = _read_manifest_expectations(case_dir)
     if err:
         return False, ["  FAIL %s" % err]
+    art_paths = [a if isinstance(a, str) else a.get("path")
+                 for a in expect.get("artifacts", [])]
     for art in expect.get("artifacts", []):
         a_ok, msg = _check_artifact(case_dir, art)
         ok = ok and a_ok
         lines.append(("  ok   " if a_ok else "  FAIL ") + msg)
+    # Executable expectations (run by run-corpus.sh, not here — no ruby dep in
+    # this stdlib checker): a case that ships checks.sh must LIST it in the
+    # expectations artifacts, so the manifest stays the single inventory.
+    if os.path.exists(os.path.join(case_dir, "checks.sh")) and "checks.sh" not in art_paths:
+        ok = False
+        lines.append("  FAIL checks.sh exists but is not listed in the expectations artifacts")
     for fname, gexp in (expect.get("goldens") or {}).items():
         g_ok, msgs = _check_golden(case_dir, fname, gexp)
         ok = ok and g_ok
