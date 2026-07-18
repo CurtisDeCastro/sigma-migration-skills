@@ -275,9 +275,100 @@ Dir.mktmpdir do |dir|
   check(st.success?, 'gate 16: empty ledger → exit 0', fails)
 end
 
+# ---- gate 17: LOD translation ledger (exit 24; #423) --------------------------
+LOD_SUSPECT = { 'calc' => 'Active Seats', 'lod_kind' => 'FIXED',
+                'formula' => '{FIXED [Account Name]: COUNTD([Seat Id])}',
+                'reference_set' => ['Account Name', 'Seat Id'],
+                'class' => 'suspect-alias', 'status' => 'unresolved',
+                'evidence' => { 'spec' => 'dm-spec', 'element' => 'Seat Fact',
+                                'column' => 'Active Seats', 'formula' => '[SEAT_FACT/SEAT_FLAG]' },
+                'suspect_refs' => ['SEAT_FLAG'] }.freeze
+LOD_DROPPED = { 'calc' => 'Regional Peak', 'lod_kind' => 'EXCLUDE',
+                'formula' => '{EXCLUDE [Region]: MAX([Seat Id])}',
+                'reference_set' => ['Region', 'Seat Id'],
+                'class' => 'silently-dropped', 'status' => 'unresolved' }.freeze
+
+# unresolved suspect-alias + silently-dropped → exit 24 with both named
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'lod-audit.json'), JSON.pretty_generate('entries' => [LOD_SUSPECT, LOD_DROPPED]))
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 24, "gate 17: unresolved LOD entries → exit 24 (got #{st.exitstatus})", fails)
+  check(err.include?('SUSPECT-ALIAS') && err.include?('SEAT_FLAG'),
+        'gate 17 failure names the aliased raw column', fails)
+  check(err.include?('SILENTLY-DROPPED') && err.include?('Regional Peak'),
+        'gate 17 failure names the dropped calc', fails)
+  check(err.include?('audit-lod-calcs.rb --resolve'), 'gate 17 failure names the sanctioned resolution path', fails)
+end
+
+# resolved classes (lod-synth / manual-residue / reference-derived) → pass
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'lod-audit.json'), JSON.pretty_generate('entries' => [
+    LOD_SUSPECT.merge('class' => 'lod-synth', 'status' => 'resolved'),
+    LOD_DROPPED.merge('class' => 'manual-residue', 'status' => 'resolved'),
+    LOD_DROPPED.merge('calc' => 'Derived Seats', 'class' => 'reference-derived', 'status' => 'resolved')
+  ]))
+  out, _err, st = run_gate(dir)
+  check(st.success?, "gate 17: all-resolved ledger → exit 0 (got #{st.exitstatus})", fails)
+  check(out.include?('gate 17') && out.include?('1 synth') && out.include?('1 manual-residue'),
+        'gate 17 OK line counts the resolved classes', fails)
+end
+
+# unresolved classes with a RECORDED resolution (manual or waived) → pass
+%w[manual waived].each do |how|
+  Dir.mktmpdir do |dir|
+    base_workdir(dir)
+    File.write(File.join(dir, 'lod-audit.json'), JSON.pretty_generate('entries' => [
+      LOD_SUSPECT.merge('resolution' => { 'how' => how, 'reason' => 'recorded in the ledger',
+                                          'recorded_at' => '2026-07-18T00:00:00Z' })
+    ]))
+    out, _err, st = run_gate(dir)
+    check(st.success?, "gate 17: suspect-alias + #{how} resolution → exit 0 (got #{st.exitstatus})", fails)
+    check(out.include?('1 resolved-by-hand'), "gate 17 OK line counts the #{how} resolution", fails)
+  end
+end
+
+# missing ledger + LOD calc in calc-fields.json → exit 24 (belt-and-braces)
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'calc-fields.json'), JSON.pretty_generate('calcs' => [
+    { 'name' => 'Active Seats', 'formula' => '{FIXED [Account Name]: COUNTD([Seat Id])}', 'is_lod' => true }
+  ]))
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 24, "gate 17: LOD census + no ledger → exit 24 (got #{st.exitstatus})", fails)
+  check(err.include?('no lod-audit.json'), 'gate 17 names the missing-ledger degradation', fails)
+  check(err.include?('audit-lod-calcs.rb'), 'gate 17 points at the audit script', fails)
+end
+
+# calc census WITHOUT LODs + no ledger → stated OK (back-compat)
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'calc-fields.json'), JSON.pretty_generate('calcs' => [
+    { 'name' => 'Plain', 'formula' => '[A] + [B]', 'is_lod' => false }
+  ]))
+  out, _err, st = run_gate(dir)
+  check(st.success? && out.include?('gate 17') && out.include?('no LOD calcs'),
+        'gate 17: census without LODs + no ledger → stated OK (never silent)', fails)
+end
+
+# empty ledger (written as evidence) → pass; malformed ledger → exit 24
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'lod-audit.json'), JSON.pretty_generate('entries' => []))
+  _out, _err, st = run_gate(dir)
+  check(st.success?, 'gate 17: empty ledger → exit 0', fails)
+end
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'lod-audit.json'), JSON.pretty_generate('entries' => 'nope'))
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 24 && err.include?('malformed'), 'gate 17: malformed ledger → exit 24', fails)
+end
+
 puts
 if fails.empty?
-  puts 'ALL PASS — assert-phase6-ran gate 8b vision precondition + gate 11 post-publish guide + gate 16 join-cardinality ledger'
+  puts 'ALL PASS — assert-phase6-ran gate 8b vision precondition + gate 11 post-publish guide + gate 16 join-cardinality ledger + gate 17 LOD translation ledger'
   exit 0
 else
   puts "FAILURES (#{fails.length}):"

@@ -220,6 +220,25 @@
 #      the dm-spec → stated OK (back-compat). NO escape flag: the resolution
 #      path (probe → pre-aggregate or operator waiver, recorded in the ledger)
 #      IS the sanctioned escape.
+#  24  LOD translation ledger unresolved (gate 17; #423) — <workdir>/
+#      lod-audit.json (derived post-convert by the source tool's LOD audit,
+#      e.g. tableau audit-lod-calcs.rb / lib/lod_audit.rb) still carries an
+#      entry with class "suspect-alias" (an emitted column carries an LOD
+#      calc's name but its formula reads a base column NOT in the LOD
+#      expression's own reference set — a fuzzy name-alias: the numbers are
+#      silently WRONG) or "silently-dropped" (no emitted translation and no
+#      manual-residues.json declaration) and no recorded resolution
+#      {how: manual|waived, reason}. Field failure: 5 of 12
+#      {FIXED entity: COUNTD(...)} measures aliased to unrelated raw flag
+#      columns, 7 dropped — zero errors anywhere. Build the documented LOD
+#      translation (grouped helper element / grouped Custom SQL) or declare a
+#      manual residue and re-run the audit; hand-authored or operator-accepted
+#      entries record their evidence via the audit script's --resolve. ALSO
+#      raised belt-and-braces when lod-audit.json is ABSENT but the workdir's
+#      calc-fields.json census carries an LOD calc (is_lod / {FIXED-INCLUDE-
+#      EXCLUDE} formula) — LODs exist and nothing audited them. No ledger AND
+#      no LOD census evidence → stated OK (back-compat / non-Tableau plugins).
+#      NO escape flag: the ledger resolution IS the sanctioned escape.
 #
 # ANCHORS-ORACLE substitution (charts_total==0, exit 2): when every worksheet is
 # dashboard-embedded (no exportable view CSVs), the anchors oracle may stand in
@@ -2024,6 +2043,92 @@ else
     exit 23
   end
   puts '[OK] gate 16: no join-plan.json and no Lookup( in the dm-spec — no join grain assumptions to prove'
+end
+
+# ---------------------------------------------------------------------------
+# Gate 17 — LOD translation ledger (exit 24; #423). {FIXED/INCLUDE/EXCLUDE}
+# calcs have no row-level Sigma equivalent; when the documented synthesis
+# (grouped helper element / grouped Custom SQL / FIXED-relationship surfacing)
+# does not fire, the calc's caption can collide with a look-alike RAW column
+# (the emitted measure silently reads an unrelated physical column) or the
+# calc vanishes from the build entirely — zero errors either way. The
+# post-convert audit (tableau: audit-lod-calcs.rb / lib/lod_audit.rb) writes
+# <workdir>/lod-audit.json: one entry per source LOD calc, classes lod-synth /
+# manual-residue / reference-derived (resolved) vs suspect-alias /
+# silently-dropped (UNRESOLVED — blocks until a resolution {how: manual|waived,
+# reason} is recorded via the audit script's --resolve, or the calc is
+# translated / declared in manual-residues.json and the audit re-run).
+# Belt-and-braces: a MISSING ledger on a workdir whose calc-fields.json census
+# carries an LOD calc also fails — LODs exist and nothing audited them. No
+# ledger AND no census evidence → stated OK (back-compat / non-Tableau
+# plugins). No escape flag — the recorded resolution is the only sanctioned
+# waiver (it lives in the ledger as evidence, not in a CLI flag a re-run
+# forgets).
+# ---------------------------------------------------------------------------
+la_path = File.join(opts[:tab], 'lod-audit.json')
+la_unresolved_classes = %w[suspect-alias silently-dropped]
+la_resolved = lambda do |e|
+  return true unless la_unresolved_classes.include?(e['class'].to_s)
+  e['resolution'].is_a?(Hash) && %w[manual waived].include?(e['resolution']['how'].to_s)
+end
+if File.exist?(la_path)
+  la_doc = JSON.parse(File.read(la_path)) rescue nil
+  la_entries = la_doc.is_a?(Hash) ? la_doc['entries'] : la_doc
+  unless la_entries.is_a?(Array)
+    warn "[FAIL] gate 17: #{la_path} is malformed (expected {\"entries\":[...]} or a bare array)."
+    warn '       Re-derive the ledger (the LOD audit emits it) — do not hand-edit it into shape.'
+    exit 24
+  end
+  la_entries = la_entries.select { |e| e.is_a?(Hash) }
+  la_blocking = la_entries.reject { |e| la_resolved.call(e) }
+  if la_blocking.any?
+    warn "[FAIL] gate 17: LOD translation ledger unresolved (#{la_path}) —"
+    la_blocking.first(10).each do |e|
+      if e['class'].to_s == 'suspect-alias'
+        warn "         - SUSPECT-ALIAS: #{e['calc'].inspect} ({#{e['lod_kind']}}) emitted as" \
+             " #{e.dig('evidence', 'formula').inspect} — reads #{Array(e['suspect_refs']).join(', ')}," \
+             " which is NOT in the LOD expression's own reference set (numbers silently WRONG)"
+      else
+        warn "         - SILENTLY-DROPPED: #{e['calc'].inspect} ({#{e['lod_kind']}}) has no emitted" \
+             ' translation and no manual-residues.json declaration'
+      end
+    end
+    warn '       The translator must not guess an LOD. Build the documented translation (grouped'
+    warn '       helper element / grouped Custom SQL + relationship) or declare the calc in'
+    warn '       manual-residues.json, then RE-RUN the LOD audit; hand-authored or operator-accepted'
+    warn '       entries record evidence via: audit-lod-calcs.rb --resolve <i> --how <manual|waived> --reason "..."'
+    exit 24
+  end
+  la_res_n = la_entries.count { |e| e['resolution'].is_a?(Hash) }
+  puts "[OK] gate 17: LOD translation ledger resolved — " \
+       "#{la_entries.count { |e| e['class'].to_s == 'lod-synth' }} synth, " \
+       "#{la_entries.count { |e| e['class'].to_s == 'manual-residue' }} manual-residue, " \
+       "#{la_entries.count { |e| e['class'].to_s == 'reference-derived' }} reference-derived" \
+       "#{la_res_n.positive? ? ", #{la_res_n} resolved-by-hand" : ''} of #{la_entries.length} (lod-audit.json)"
+else
+  # Belt-and-braces: no ledger, but the calc census says LOD calcs exist — the
+  # audit never ran and nothing checked their translations.
+  la_cf = File.join(opts[:tab], 'calc-fields.json')
+  la_has_lod = false
+  if File.exist?(la_cf)
+    begin
+      la_cf_doc = JSON.parse(File.read(la_cf))
+      la_has_lod = Array(la_cf_doc.is_a?(Hash) ? la_cf_doc['calcs'] : la_cf_doc).any? do |c|
+        c.is_a?(Hash) && (c['is_lod'] == true || c['formula'].to_s =~ /\{\s*(?:FIXED|INCLUDE|EXCLUDE)\b/i)
+      end
+    rescue StandardError
+      la_has_lod = false
+    end
+  end
+  if la_has_lod
+    warn "[FAIL] gate 17: #{la_cf} carries LOD ({FIXED/INCLUDE/EXCLUDE}) calc(s) but no lod-audit.json"
+    warn '       ledger exists — the post-convert LOD audit never ran, so nothing verified those calcs'
+    warn '       were translated (vs fuzzy-aliased to a look-alike raw column, or dropped silently).'
+    warn '       Run the audit (tableau: ruby scripts/audit-lod-calcs.rb --workdir <W>), resolve any'
+    warn '       blocking entries, then re-run this gate.'
+    exit 24
+  end
+  puts '[OK] gate 17: no lod-audit.json and no LOD calcs in the census — no LOD translations to audit'
 end
 
 # ---------------------------------------------------------------------------

@@ -53,6 +53,33 @@ Write the spec to `<WORK>/dm-spec.json`. Full schema is in
 > NEVER write these as `SumOver`/`CountOver` master or DM calc columns — they
 > silently error.
 
+### LOD "refuse to guess" contract — gate-enforced (gate 17, exit 24; #423)
+
+An `{FIXED/INCLUDE/EXCLUDE}` calc that the synthesis above does NOT catch
+(cross-table grain, unresolved dims, no view context) must **never** be
+name-matched to a look-alike raw column or dropped quietly — both produce
+silently wrong dashboards (field failure: 5 of 12 `{FIXED entity:
+COUNTD(...)}` measures aliased to unrelated raw flag columns, 7 dropped, zero
+errors anywhere). The post-convert audit enforces this:
+
+- `migrate-tableau.rb` derives `<workdir>/lod-audit.json`
+  (`scripts/lib/lod_audit.rb`) after the wb-spec is built: one entry per
+  source LOD calc, classified **lod-synth** / **manual-residue** /
+  **reference-derived** (resolved) vs **suspect-alias** (an emitted column
+  carries the calc's name but reads a base column NOT in the LOD expression's
+  own reference set) or **silently-dropped** (no translation, no residue
+  declaration). An empty ledger is still written — gate evidence the audit ran.
+- `assert-phase6-ran.rb` **gate 17 (exit 24)** refuses GREEN while any entry
+  is unresolved — and also when the ledger is missing but `calc-fields.json`
+  censuses an LOD calc. No skip flag.
+- Sanctioned resolutions: build the documented translation (helper element /
+  grouped Custom SQL above) or declare the calc in `manual-residues.json`,
+  then re-run `ruby scripts/audit-lod-calcs.rb --workdir <W>` (it
+  re-classifies); a hand-authored or operator-accepted entry records its
+  evidence in the ledger via
+  `audit-lod-calcs.rb --resolve <i> --how <manual|waived> --reason "..."`
+  (same pattern as `probe-join-keys.rb` / gate 16).
+
 Any Tableau calc whose `requires_custom_sql: true` (from Phase 1e) — that is, a **manual window residue** (`WINDOW_MEDIAN/PERCENTILE/CORR/COVAR(P)/VAR(P)/STDEVP`, `PREVIOUS_VALUE`, `SIZE`, `FIRST`, `LAST`, `RANK_UNIQUE/MODIFIED`, or a compute-using/addressing variant beyond Table(Across)/simple partitions) or an `{INCLUDE/EXCLUDE}` LOD (those need the chart-grouping context) — must be implemented as a **Sigma Custom SQL data-model element**. (The mainstream `WINDOW_*`/`RUNNING_*`/`RANK*`/`INDEX`/`LOOKUP`/`TOTAL` family no longer routes here — it is auto-emitted as Sigma-native chart formulas, `refs/window-functions.md`.)
 
 > **Tile binding is gate-enforced (G6).** Routing the calc here is only half the job — the residue must be BOUND to the tile that plots it. `<workdir>/manual-residues.json` (written by build-charts) lists each plotted residue with its Tableau formula + an `OVER()` SQL skeleton. For each entry: (1) add the Custom SQL element to the DM spec and PUT it (`post-and-readback.rb --type datamodel --update-id <dmId>`), (2) repoint the tile's measure column at the new element's output column (wb-spec PUT), (3) set `"status": "built"` on the ledger entry. The orchestrator blocks pass 1 (exit 16) and `assert-phase6-ran` refuses GREEN (gate 15, exit 22) while any entry is `"unbuilt"`.
