@@ -633,6 +633,7 @@ PHASE_BUDGET = {
   'phase1.6-dm-scan'  => 45,  # DM list + ≤25 spec fetches; signature-cached re-entry <1s
   'phase2-columns'    => 90,  # ~2-5s per table via the Sigma catalog; cols-*.json reused on re-entry
   'phase1-join'       => 120, # calc extraction + custom-SQL scan + gap-report parse (sha-cached on re-entry)
+  'phase0c-cost'      => 15,  # estimate-cost.rb over workdir artifacts (pure local) + sign-off print
   'decisions'         => 10,  # pure local
   'folder-resolve'    => 15,  # one whoami + files listing
   'phase3-dm'         => 90,  # validate + POST + readback (skipped entirely on --reuse-dm)
@@ -2649,6 +2650,57 @@ end
 mark('phase1-join')
 
 # ---------------------------------------------------------------------------
+# Phase 0c — scope/cost estimate + SIGN-OFF (PLAN-v3 PR-3). This is the first
+# point where BOTH discovery metadata (get-workbook / dashboard-layout /
+# calc-fields / custom-sql) and the gap-scan artifacts exist, and it runs
+# BEFORE the decisions checkpoint and any DM build/POST — the human signs off
+# on scope (tiles, calc classes, untranslatable gap classes) and rough token
+# cost while aborting is still free. estimate-cost.rb runs allow_fail and
+# degrades gracefully on missing inputs (it NAMES them) — a scoping estimate
+# must never block a migration. The acknowledgment lands in run-state.json:
+#   --yes / --answers (unattended)  → provenance "auto-yes"
+#   interactive                     → provenance "stated" (the operator saw
+#                                     the printed block and continued)
+# A missing ack is WARNed at the Phase 3 seam — WARN-only this release
+# (hard-gating waits for field calibration confidence in the estimator).
+# ---------------------------------------------------------------------------
+cost_est_path = File.join(WORK, 'cost-estimate.json')
+run!(['ruby', File.join(HERE, 'estimate-cost.rb'), '--workdir', WORK, '--out', cost_est_path],
+     allow_fail: true)
+cost_est = (JSON.parse(File.read(cost_est_path)) rescue nil)
+if cost_est
+  ce_est = cost_est['estimate'] || {}
+  ce_scope = cost_est['scope'] || {}
+  ce_calcs = ce_scope['calcs'] || {}
+  ce_unt = ce_scope['untranslatable_classes'] || []
+  puts
+  puts '==================== SCOPE / COST SIGN-OFF ===================='
+  puts "  workbook:        #{cost_est['workbook'] || wb_name}"
+  puts "  tiles:           #{ce_scope['tiles'] || '? (dashboard-layout.json missing)'}"
+  puts "  calc fields:     #{ce_calcs['total'] || 0} " \
+       "(#{ce_calcs['simple'] || 0} simple, #{ce_calcs['complex'] || 0} complex, " \
+       "#{ce_calcs['requires_custom_sql'] || 0} custom-SQL residue)"
+  puts "  gap classes:     #{(ce_scope['gap_classes'] || {}).map { |k, v| "#{v} #{k}" }.join(', ')}"
+  puts "  untranslatable:  #{ce_unt.any? ? ce_unt.join(', ') : '(none)'}"
+  puts "  estimate:        ~#{ce_est['agent_turns']} agent turns ≈ #{ce_est['input_tokens']} in / " \
+       "#{ce_est['output_tokens']} out tokens, ~#{ce_est['estimated_minutes']} min " \
+       "(#{ce_est['complexity']}; confidence: #{cost_est['confidence'] || 'rough'})"
+  (cost_est.dig('inputs', 'missing') || []).each do |m|
+    puts "  degraded:        missing #{m['artifact']} — #{m['provides']}"
+  end
+  puts "  full breakdown:  #{cost_est_path}"
+  puts '=============================================================='
+  ack_prov = (opts[:yes] || opts[:answers]) ? 'auto-yes' : 'stated'
+  RunState.record(WORK, 'cost_estimate_acknowledged' => true,
+                        'cost_estimate_provenance'   => ack_prov)
+  line "scope/cost sign-off recorded in run-state (cost_estimate_acknowledged: true, provenance: #{ack_prov})"
+else
+  line "WARN: cost estimate unavailable (no readable #{File.basename(cost_est_path)}) — " \
+       'proceeding without a scope/cost sign-off; Phase 3 will WARN.'
+end
+mark('phase0c-cost')
+
+# ---------------------------------------------------------------------------
 # DECISIONS CHECKPOINT — surface the genuine human questions ONLY. Mechanical
 # fixup / POST / layout / parity are never asked about.
 # ---------------------------------------------------------------------------
@@ -2932,6 +2984,15 @@ end
 # Phase 3 — Build + POST the data model.
 # ---------------------------------------------------------------------------
 hdr(3, 'Build data model')
+# PLAN-v3 PR-3: the DM build is the first Sigma WRITE — a scope/cost sign-off
+# (Phase 0c) should be on record by now. WARN-only this release: hard-gating
+# waits for field calibration confidence in the estimator. (The FAST PATH and
+# hand-driven re-entries reuse the workdir, so an earlier run's ack carries.)
+unless RunState.load(WORK)['cost_estimate_acknowledged']
+  line 'WARN: no scope/cost sign-off in run-state (cost_estimate_acknowledged missing) — ' \
+       'estimate-cost.rb never ran or was not acknowledged (PLAN-v3 PR-3). WARN-only this ' \
+       'release; this becomes a gate once the estimator is field-calibrated.'
+end
 dm_spec_path = File.join(WORK, 'dm-spec.json')
 dm_ids_path = File.join(WORK, 'dm-ids.json')
 if reuse_dm_id

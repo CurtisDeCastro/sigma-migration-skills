@@ -165,6 +165,12 @@ Calc extraction + custom-SQL scan + gap parse, after the lane joins.
 - The custom-SQL GraphQL call can be slow on large sites — it's sha-cached
   after one success.
 
+### slow-phase0c-cost
+`estimate-cost.rb --workdir` is a pure-local read of the workdir scoping
+artifacts plus one JSON write — seconds at most. Slow = a wedged filesystem or
+an enormous workdir glob; the estimator runs `allow_fail`, so worst case the
+run proceeds without a sign-off (Phase 3 WARNs).
+
 ### slow-decisions
 Pure-local checkpoint assembly. If this blows its (tiny) budget, the machine
 itself is unhealthy — check load/RAM before anything else.

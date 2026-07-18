@@ -1,117 +1,312 @@
 #!/usr/bin/env ruby
-# Estimate the agent token cost of converting a Tableau workbook to Sigma,
-# given pre-fetched workbook + datasource metadata.
+# frozen_string_literal: true
 #
-# In production this script would itself call:
-#   - mcp__tableau__get-workbook       (views/sheets/dashboards count)
-#   - mcp__tableau__get-datasource-metadata  (calc fields, custom SQL)
-# and emit the estimate. For this demo it takes pre-fetched JSON.
+# estimate-cost.rb — scope + agent-cost estimate for a Tableau→Sigma conversion
+# (PLAN-v3 PR-3: the scope/cost SIGN-OFF artifact).
 #
-# Cost model (calibrate against your real measurements):
+# Two modes:
 #
-#   base                              = 25,000 input tokens
-#   per dashboard view                = 4,000 input tokens
-#   per worksheet (sheet) view        = 2,500 input tokens
-#   per datasource                    = 5,000 input tokens
-#   per calc field (simple)           = 3,000 input tokens
-#   per calc field (LOD or chained)   = 8,000 input tokens
-#   per 1KB of custom SQL             = 1,200 input tokens
+#   WORKDIR MODE (the orchestrator seam — migrate-tableau.rb runs this right
+#   after the Phase-1 join, i.e. once discovery metadata + the gap scan exist
+#   and BEFORE any DM build/POST):
+#     ruby scripts/estimate-cost.rb --workdir <WORK> [--out <path>]
+#   Reads whatever scoping artifacts the workdir has (each one optional — a
+#   missing input degrades the estimate and is NAMED in inputs.missing, never
+#   a crash):
+#     get-workbook.json       view inventory            (tableau-discover.rb)
+#     dashboard-layout.json   zone tree → tile count    (parse-twb-layout.rb)
+#     calc-fields.json        calc classes              (extract-calc-fields.rb)
+#     *-gaps-report.json      gap classes / ❌-unhandled (scan-workbook-gaps.rb)
+#     custom-sql.json         custom-SQL blocks         (extract-custom-sql.rb)
+#   Writes <WORK>/cost-estimate.json (default) and prints a one-line summary.
 #
-#   output ≈ input × 0.45
-#   $ ≈ input × $3/1M + output × $15/1M   (Sonnet 4.6 rates — adjust)
+#   LEGACY PRE-SCOPING MODE (Phase 0, before any discovery — refs/phase-0-scope.md):
+#     ruby scripts/estimate-cost.rb --workbook <get-workbook.json> [--datasource <metadata.json>]
+#   Same estimator over the thinner pre-fetch signals (tile count proxied by
+#   the sheet count); JSON to stdout, or to --out when given.
 #
-# After running ~10 calibration workbooks with measured costs, regress the
-# coefficients above against actual usage. The model is intentionally simple
-# (linear regression on features) — sophisticated isn't worth the effort
-# until calibration data exists.
+# ── CALIBRATION (2026-07 · n=3 clean e2e runs + 3 field sessions) ───────────
+# Anchors — three recent clean end-to-end runs (orchestrated spine, manual DM
+# path, measured turn counts):
+#   run A: 7 tiles → ~60 agent turns, ~48 min wall   (0.80 min/turn)
+#   run B: 5 tiles → ~75 agent turns, ~40 min wall   (0.53 min/turn)
+#   run C: 6 tiles → ~80 agent turns, ~71 min wall   (0.89 min/turn)
+#   → mean ≈ 72 turns / ≈ 53 min for a clean 5–7-tile workbook.
+# The three field sessions (2026-07-17, heavy-failure runs — docs/PLAN-v3.md)
+# each ran ~4 h, ≈ 4–5× the clean-run wall clock, dominated by ❌-unhandled
+# features, scout loops, and rework. That multiplier is carried as a LARGE
+# per-unhandled-gap-class turn penalty (PER_UNHANDLED_CLASS_TURNS), not as a
+# fitted coefficient.
+#
+# HONESTY NOTE: with n=3 the tile count does not identify a slope — turns vs
+# tiles is flat-to-negative in the sample (7→60, 5→75, 6→80). So the model
+# deliberately centers on the anchor MEAN: a large BASE_TURNS plus small
+# per-feature increments that are stated PRIORS, not regression fits. Treat
+# every coefficient as ±30% at best; every estimate is emitted with
+# confidence: "rough". The PLAN-v3 PR-3 goal is a recorded sign-off artifact,
+# not precision — re-fit once per-run telemetry accumulates ~10 measured
+# conversions.
+#
+# Tokens-per-turn ASSUMPTION (no per-turn token telemetry exists yet): an
+# orchestrated migration turn replays conversation + tool results in a
+# mid-size context, assumed ≈ 12,000 input tokens and ≈ 900 output tokens per
+# turn on average. Wall clock: measured 0.80 / 0.53 / 0.89 min per turn →
+# 0.75 min/turn assumed.
 #
 # Usage:
-#   ruby estimate-cost.rb --workbook <get-workbook.json> --datasource <metadata.json>
-#   ruby estimate-cost.rb --workbook <get-workbook.json>   (no datasource)
+#   ruby scripts/estimate-cost.rb --workdir <WORK> [--out <path>]
+#   ruby scripts/estimate-cost.rb --workbook <get-workbook.json> [--datasource <metadata.json>]
 
 require 'json'
 require 'optparse'
+require 'time'
 
-opts = { rate_in: 3.0, rate_out: 15.0, model: 'sonnet-4.6' }
-OptionParser.new do |p|
-  p.on('--workbook PATH')   { |v| opts[:wb] = v }
-  p.on('--datasource PATH') { |v| opts[:ds] = v }
-  p.on('--rate-in DOLLAR_PER_1M_INPUT',   Float) { |v| opts[:rate_in]  = v }
-  p.on('--rate-out DOLLAR_PER_1M_OUTPUT', Float) { |v| opts[:rate_out] = v }
-end.parse!
-abort('--workbook required') unless opts[:wb]
+module EstimateCost
+  # Turn-model coefficients — see the CALIBRATION block above for provenance.
+  BASE_TURNS                = 62.0   # anchor-mean centering (clean 5–7-tile run ≈ 72 turns)
+  PER_TILE_TURNS            = 1.6    # prior, NOT a fit — the n=3 sample shows no tile slope
+  PER_CALC_SIMPLE_TURNS     = 0.3    # mechanically translated; near-zero marginal cost
+  PER_CALC_COMPLEX_TURNS    = 1.2    # LOD / multi-branch: verify + occasional rework
+  PER_CUSTOM_SQL_TURNS      = 2.5    # each custom-SQL block / window residue is hand-built
+  PER_UNHANDLED_CLASS_TURNS = 25.0   # per ❌-unhandled gap class (field sessions ≈ 4–5× clean)
+  TOKENS_IN_PER_TURN        = 12_000 # stated assumption — no measured per-turn telemetry yet
+  TOKENS_OUT_PER_TURN       = 900    # stated assumption
+  MINUTES_PER_TURN          = 0.75   # measured 0.80 / 0.53 / 0.89 min per turn
 
-wb = JSON.parse(File.read(opts[:wb]))
-views = wb.dig('views', 'view') || wb['views'] || []
-dashboard_count = views.count { |v| (v['sheetType'] || '').downcase.include?('dashboard') }
-sheet_count     = views.size - dashboard_count
+  # Rough phase split of a clean orchestrated run (fractions of total turns).
+  PHASE_SPLIT = {
+    'phase-0-scope'            => 0.05,
+    'phase-1-discover'         => 0.15,
+    'phase-2-3-data-model'     => 0.20,
+    'phase-4-5-workbook-layout' => 0.35,
+    'phase-6-parity-verify'    => 0.25
+  }.freeze
 
-calc_count_simple = 0
-calc_count_complex = 0
-custom_sql_bytes  = 0
-datasource_count  = 0
+  CALIBRATION_NOTE =
+    'Anchors: 3 clean e2e runs 2026-07 (~60 turns/48 min/7 tiles, ~75/40/5, ~80/71/6; manual DM ' \
+    'path) + 3 field sessions ~4 h heavy-failure (docs/PLAN-v3.md). n=3: coefficients are ' \
+    'anchor-centered priors, not fits. Assumed 12k input / 0.9k output tokens per turn.'
 
-if opts[:ds]
-  meta = JSON.parse(File.read(opts[:ds]))
-  datasource_count = 1
-  # Accept either MCP shape (fieldGroups[].fields[]) or REST VDS shape (data[])
-  fields = if meta['fieldGroups']
-             meta['fieldGroups'].flat_map { |g| g['fields'] || [] }
-           else
-             meta['data'] || []
-           end
-  fields.each do |f|
-    next unless f['columnClass'] == 'CALCULATION'
-    # "Complex" = an LOD, or a multi-branch IF chain (≥2 ELSEIF). The old regex
-    # used two `[\s\S]+` bridges (`IF…ELSEIF…ELSEIF`) which catastrophically
-    # backtracked on real formulas; count ELSEIF directly instead — O(n), same
-    # signal.
-    fml = f['formula'] || ''
-    if fml.match?(/\{\s*(FIXED|INCLUDE|EXCLUDE)/i) ||
-       (fml.match?(/\bIF\b/i) && fml.scan(/\bELSEIF\b/i).length >= 2)
-      calc_count_complex += 1
+  # "Complex" = an LOD, or a multi-branch IF chain (≥2 ELSEIF, counted directly
+  # — O(n); the old two-bridge regex catastrophically backtracked on real formulas).
+  def self.complex_formula?(fml)
+    f = fml.to_s
+    f.match?(/\{\s*(FIXED|INCLUDE|EXCLUDE)/i) ||
+      (f.match?(/\bIF\b/i) && f.scan(/\bELSEIF\b/i).length >= 2)
+  end
+
+  def self.read_json(path)
+    JSON.parse(File.read(path))
+  rescue StandardError
+    nil
+  end
+
+  # ── Scope collection: workdir mode ─────────────────────────────────────────
+  # Returns { 'scope' => {...}, 'present' => [...], 'missing' => [{artifact, provides}] }.
+  # Every input is optional; a missing one is named, and its scope fields stay nil.
+  def self.scope_from_workdir(dir)
+    present = []
+    missing = []
+    scope = {}
+    workbook_name = nil
+
+    gw_path = File.join(dir, 'get-workbook.json')
+    gw = File.exist?(gw_path) ? read_json(gw_path) : nil
+    if gw
+      wb = gw['workbook'] || gw
+      workbook_name = wb['name']
+      views = wb.dig('views', 'view') || wb['views'] || []
+      views = [views] unless views.is_a?(Array)
+      scope['dashboards'] = views.count { |v| (v['sheetType'] || '').to_s.downcase.include?('dashboard') }
+      scope['sheets']     = views.size - scope['dashboards']
+      present << 'get-workbook.json'
     else
-      calc_count_simple += 1
+      missing << { 'artifact' => 'get-workbook.json',
+                   'provides' => 'view inventory (tableau-discover.rb)' }
+    end
+
+    dl_path = File.join(dir, 'dashboard-layout.json')
+    dl = File.exist?(dl_path) ? read_json(dl_path) : nil
+    if dl
+      zones = dl.is_a?(Array) ? dl.flat_map { |d| d['zones'] || [] } : (dl['zones'] || [])
+      scope['tiles']       = zones.count { |z| z['kind'] == 'chart' }
+      scope['zones_total'] = zones.size
+      present << 'dashboard-layout.json'
+    else
+      missing << { 'artifact' => 'dashboard-layout.json',
+                   'provides' => 'zone tree / tile count (parse-twb-layout.rb)' }
+    end
+
+    cf_path = File.join(dir, 'calc-fields.json')
+    cf = File.exist?(cf_path) ? read_json(cf_path) : nil
+    if cf
+      calcs = cf['calcs'] || []
+      residue = calcs.count { |c| c['requires_custom_sql'] }
+      complex = calcs.count { |c| !c['requires_custom_sql'] && (c['is_lod'] || complex_formula?(c['formula'])) }
+      scope['calcs'] = {
+        'total'               => calcs.size,
+        'simple'              => calcs.size - complex - residue,
+        'complex'             => complex,
+        'requires_custom_sql' => residue
+      }
+      present << 'calc-fields.json'
+    else
+      missing << { 'artifact' => 'calc-fields.json',
+                   'provides' => 'calc-field classes (extract-calc-fields.rb)' }
+    end
+
+    gj_path = Dir[File.join(dir, '*gaps*report*.json')].first || Dir[File.join(dir, '*gaps*.json')].first
+    gj = gj_path ? read_json(gj_path) : nil
+    if gj
+      feats = gj['detected_features'] || []
+      scope['gap_classes'] = feats.group_by { |f| f['status'].to_s }
+                                  .each_with_object({}) { |(k, v), h| h[k] = v.size }
+      scope['untranslatable_classes'] = feats.select { |f| f['status'].to_s == 'unhandled' }
+                                             .map { |f| f['name'].to_s }
+      present << File.basename(gj_path)
+    else
+      missing << { 'artifact' => '*-gaps-report.json',
+                   'provides' => 'gap classes / untranslatable features (scan-workbook-gaps.rb)' }
+    end
+
+    cs_path = File.join(dir, 'custom-sql.json')
+    cs = File.exist?(cs_path) ? read_json(cs_path) : nil
+    if cs.is_a?(Array)
+      scope['custom_sql_blocks'] = cs.size
+      present << 'custom-sql.json'
+    else
+      missing << { 'artifact' => 'custom-sql.json',
+                   'provides' => 'custom-SQL block count (extract-custom-sql.rb)' }
+    end
+
+    { 'workbook' => workbook_name, 'scope' => scope,
+      'present' => present, 'missing' => missing }
+  end
+
+  # ── Scope collection: legacy pre-scoping mode ──────────────────────────────
+  def self.scope_from_prefetch(wb_json, ds_json)
+    wb = wb_json['workbook'] || wb_json
+    views = wb.dig('views', 'view') || wb['views'] || []
+    views = [views] unless views.is_a?(Array)
+    dashboards = views.count { |v| (v['sheetType'] || '').to_s.downcase.include?('dashboard') }
+    sheets = views.size - dashboards
+    scope = { 'dashboards' => dashboards, 'sheets' => sheets,
+              # Pre-discovery there is no zone tree — the sheet count is the
+              # best available tile proxy (each worksheet ≈ one plotted tile).
+              'tiles' => sheets, 'tiles_proxied_from' => 'sheet count (no dashboard-layout.json yet)' }
+    if ds_json
+      fields = if ds_json['fieldGroups']
+                 ds_json['fieldGroups'].flat_map { |g| g['fields'] || [] }
+               else
+                 ds_json['data'] || []
+               end
+      calcs = fields.select { |f| f['columnClass'] == 'CALCULATION' }
+      complex = calcs.count { |f| complex_formula?(f['formula']) }
+      scope['calcs'] = { 'total' => calcs.size, 'simple' => calcs.size - complex,
+                         'complex' => complex, 'requires_custom_sql' => 0 }
+      scope['custom_sql_blocks'] = (ds_json['customSql'].to_s.empty? ? 0 : 1)
+    end
+    { 'workbook' => wb['name'], 'scope' => scope, 'present' => [], 'missing' => [] }
+  end
+
+  # ── The estimator: scope → turns → tokens (+ per-phase breakdown) ──────────
+  def self.estimate(scope)
+    calcs = scope['calcs'] || {}
+    turns = BASE_TURNS +
+            (scope['tiles'].to_i * PER_TILE_TURNS) +
+            (calcs['simple'].to_i * PER_CALC_SIMPLE_TURNS) +
+            (calcs['complex'].to_i * PER_CALC_COMPLEX_TURNS) +
+            ((calcs['requires_custom_sql'].to_i + scope['custom_sql_blocks'].to_i) * PER_CUSTOM_SQL_TURNS) +
+            ((scope['untranslatable_classes'] || []).size * PER_UNHANDLED_CLASS_TURNS)
+    turns = turns.round
+    input_tokens  = turns * TOKENS_IN_PER_TURN
+    output_tokens = turns * TOKENS_OUT_PER_TURN
+    per_phase = {}
+    PHASE_SPLIT.each do |phase, frac|
+      per_phase[phase] = {
+        'turns'         => (turns * frac).round,
+        'input_tokens'  => (input_tokens * frac).round,
+        'output_tokens' => (output_tokens * frac).round
+      }
+    end
+    {
+      'agent_turns'       => turns,
+      'input_tokens'      => input_tokens,
+      'output_tokens'     => output_tokens,
+      'total_tokens'      => input_tokens + output_tokens,
+      'estimated_minutes' => (turns * MINUTES_PER_TURN).round,
+      'complexity'        => bucket(turns),
+      'per_phase'         => per_phase
+    }
+  end
+
+  # Buckets feed the model-fit checkpoint (refs/model-fit.md) — keep the names.
+  def self.bucket(turns)
+    if turns < 50 then 'small'
+    elsif turns < 110 then 'medium'
+    elsif turns < 220 then 'large'
+    else 'very-large'
     end
   end
-  # Custom SQL is reported in the metadata for textOfRawSql sources; not always present
-  custom_sql_bytes = (meta['customSql'] || '').to_s.bytesize
+
+  def self.build_report(collected, source)
+    {
+      'workbook'     => collected['workbook'],
+      'generated_at' => Time.now.utc.iso8601,
+      'confidence'   => 'rough',
+      'inputs'       => { 'source' => source,
+                          'present' => collected['present'],
+                          'missing' => collected['missing'] },
+      'scope'        => collected['scope'],
+      'estimate'     => estimate(collected['scope']),
+      'calibration'  => {
+        'anchors'         => 3,
+        'tokens_per_turn' => { 'input' => TOKENS_IN_PER_TURN, 'output' => TOKENS_OUT_PER_TURN },
+        'note'            => CALIBRATION_NOTE
+      },
+      'note' => 'Rough scope/cost sign-off artifact (PLAN-v3 PR-3) — not a quote. ' \
+                'Missing inputs (inputs.missing) degrade the estimate and are named, never fatal.'
+    }
+  end
 end
 
-features = {
-  dashboards: dashboard_count, sheets: sheet_count, datasources: datasource_count,
-  calc_fields_simple: calc_count_simple, calc_fields_complex: calc_count_complex,
-  custom_sql_bytes: custom_sql_bytes
-}
+if $PROGRAM_NAME == __FILE__
+  opts = {}
+  OptionParser.new do |p|
+    p.on('--workdir DIR', 'estimate from a migration workdir (orchestrator seam)') { |v| opts[:dir] = v }
+    p.on('--out PATH', 'write the JSON report here (workdir default: <workdir>/cost-estimate.json)') { |v| opts[:out] = v }
+    p.on('--workbook PATH', 'legacy pre-scoping: get-workbook.json') { |v| opts[:wb] = v }
+    p.on('--datasource PATH', 'legacy pre-scoping: datasource metadata JSON') { |v| opts[:ds] = v }
+  end.parse!
 
-input_tokens = 25_000 +
-               (dashboard_count        * 4_000) +
-               (sheet_count            * 2_500) +
-               (datasource_count       * 5_000) +
-               (calc_count_simple      * 3_000) +
-               (calc_count_complex     * 8_000) +
-               ((custom_sql_bytes / 1024.0) * 1_200).to_i
-output_tokens = (input_tokens * 0.45).to_i
-cost = (input_tokens / 1_000_000.0) * opts[:rate_in] +
-       (output_tokens / 1_000_000.0) * opts[:rate_out]
-
-complexity =
-  if input_tokens < 50_000 then 'small'
-  elsif input_tokens < 150_000 then 'medium'
-  elsif input_tokens < 350_000 then 'large'
-  else                              'very-large'
+  if opts[:dir]
+    abort("[FAIL] estimate-cost: workdir not found: #{opts[:dir]}") unless File.directory?(opts[:dir])
+    collected = EstimateCost.scope_from_workdir(opts[:dir])
+    report = EstimateCost.build_report(collected, opts[:dir])
+    out = opts[:out] || File.join(opts[:dir], 'cost-estimate.json')
+    tmp = "#{out}.tmp"
+    File.write(tmp, JSON.pretty_generate(report) + "\n")
+    File.rename(tmp, out)
+    est = report['estimate']
+    puts "[OK] estimate-cost: ~#{est['agent_turns']} turns ≈ #{est['input_tokens']} in / " \
+         "#{est['output_tokens']} out tokens, ~#{est['estimated_minutes']} min " \
+         "(#{est['complexity']}; confidence: rough) → #{out}"
+    collected['missing'].each do |m|
+      puts "     degraded: missing #{m['artifact']} — #{m['provides']}"
+    end
+  elsif opts[:wb]
+    wb_json = JSON.parse(File.read(opts[:wb]))
+    ds_json = opts[:ds] ? JSON.parse(File.read(opts[:ds])) : nil
+    collected = EstimateCost.scope_from_prefetch(wb_json, ds_json)
+    collected['workbook'] ||= File.basename(opts[:wb], '.json')
+    report = EstimateCost.build_report(collected, opts[:wb])
+    if opts[:out]
+      File.write(opts[:out], JSON.pretty_generate(report) + "\n")
+      puts "[OK] estimate-cost → #{opts[:out]}"
+    else
+      puts JSON.pretty_generate(report)
+    end
+  else
+    abort('usage: estimate-cost.rb --workdir <dir> [--out <path>] | --workbook <get-workbook.json> [--datasource <metadata.json>]')
   end
-
-puts JSON.pretty_generate({
-  workbook: wb['name'] || File.basename(opts[:wb], '.json'),
-  features: features,
-  estimate: {
-    complexity: complexity,
-    input_tokens: input_tokens,
-    output_tokens: output_tokens,
-    total_tokens: input_tokens + output_tokens,
-    estimated_cost_usd: cost.round(2),
-    model: opts[:model],
-    note: 'Cost model is heuristic. Calibrate coefficients against ~10 real conversions to tighten the range.'
-  }
-})
+end
