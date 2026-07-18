@@ -191,11 +191,24 @@ if !opts[:finalize]
     '--out', actuals_path)
   puts coll_out unless coll_out.empty?
   warn coll_err unless coll_err.empty?
-  warn 'collect-parity-actuals failed — ALL charts fall back to agent-mediated MCP queries' unless coll_st.success?
+  if coll_st.exitstatus == 3
+    warn 'collect-parity-actuals hit its --timeout total deadline — partial actuals recorded; ' \
+         'uncollected charts fall back to agent-mediated MCP queries'
+  elsif !coll_st.success?
+    warn 'collect-parity-actuals failed — ALL charts fall back to agent-mediated MCP queries'
+  end
   collected = (JSON.parse(File.read(actuals_path)) rescue {}) if File.exist?(actuals_path)
   collected ||= {}
-  remaining = plan['charts'].reject { |c| collected.key?(c['chart']) && (c['sigma_columns'] || []).length >= 1 }
-                            .select { |c| (c['sigma_columns'] || []).length >= 1 }
+  # A chart counts as collected only when it has real rows OR a render-verify
+  # marker (the known pivot platform bug — resolved via render-read, not
+  # re-query). too-large-for-export / timeout markers (issue #416) stay on the
+  # agent-mediated list: the agent must supply those rows via mcp-v2 aggregate
+  # queries or the warehouse oracle.
+  remaining = plan['charts'].reject do |c|
+    v = collected[c['chart']]
+    usable = v.is_a?(Array) || (v.is_a?(Hash) && v['status'] == 'render-verify-required')
+    usable && (c['sigma_columns'] || []).length >= 1
+  end.select { |c| (c['sigma_columns'] || []).length >= 1 }
   warn format('parity collection: %d/%d chart(s) pooled in %.1fs; %d agent-mediated',
               collected.size, plan['charts'].size, Time.now - t_collect, remaining.size)
 
@@ -296,7 +309,7 @@ total = plan['charts'].size
 # pivot-export render-verify fallback) carry a "(render-verify-required)" suffix.
 passed_chart_names  = out.scan(/^PASS\s+\[[^\]]+\]\s+(.+?)(?:\s+\(score [\d.]+%\))?$/).flatten
 failed_chart_names  = out.scan(/^DIVERGE\s+\[[^\]]+\]\s+(.+?)(?:\s+\(score [\d.]+%\))?$/).flatten
-pending_chart_names = out.scan(/^PENDING\s+\[[^\]]+\]\s+(.+?)(?:\s+\(render-verify-required\))?$/).flatten
+pending_chart_names = out.scan(/^PENDING\s+\[[^\]]+\]\s+(.+?)(?:\s+\((?:render-verify-required|too-large-for-export|timeout)\))?$/).flatten
 
 # ---- Tile census (bead gjhe) ------------------------------------------------
 # Compare the Tableau dashboard's chart-zone count against the charts that made

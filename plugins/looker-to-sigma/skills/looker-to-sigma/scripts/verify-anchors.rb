@@ -38,16 +38,32 @@
 # anchor MISSING — found-elsewhere still counts as matched (the value exists;
 # only the label→element mapping was fuzzy) and is noted in the verdict.
 #
+# BOUNDED EXPORTS (issue #416). Element exports are row-capped (the export
+# POST sends Sigma's `rowLimit`; default anchors×10k, min 50k, --row-limit
+# overrides, 0 = uncapped) and --timeout is the TOTAL wall-clock budget for
+# the whole run — one deadline computed at start, checked by every poll loop
+# and download (lib/export_pool.rb). Previously a multi-million-row
+# unaggregated detail grid hung the pool indefinitely at 100% CPU (unbounded
+# export → unbounded download → unbounded CSV.parse → per-cell scan). A
+# TRUNCATED export can hide an anchor value below the cap, so an anchor that
+# misses while any in-scope export was truncated reports
+# 'inconclusive-truncated' — NEVER a hard MISS (a false MISS would demand a
+# workbook "fix" for correct data). The pool prints one progress line per
+# element start/finish; it is never silent for minutes.
+#
 # Usage (live):
 #   ruby scripts/verify-anchors.rb --workdir <W> --workbook-id <id> \
-#     [--anchors PATH] [--out PATH] [--pool 4] [--timeout 120]
+#     [--anchors PATH] [--out PATH] [--pool 4] [--timeout 600] [--row-limit N]
 # Usage (offline — tests / pre-collected exports):
 #   ruby scripts/verify-anchors.rb --workdir <W> --workbook-spec spec.json \
 #     --exports-dir <dir-with-<elementId>.csv>
 #
 # Exit codes: 0 = every anchor matched; 1 = one or more anchors missing (the
 # per-miss report names each, with its closest candidate); 2 = usage / missing
-# inputs.
+# inputs; 3 = no hard miss but >=1 anchor inconclusive (truncated bounded
+# export — add an element filter, verify via the warehouse SQL oracle, or
+# raise --row-limit); 4 = --timeout total deadline expired (partial results
+# recorded; the report names each element that timed out).
 
 require 'json'
 require 'csv'
@@ -157,13 +173,35 @@ module AnchorVerify
   #   never silently launders drift into an exact pass. Text/roster anchors
   #   never use tolerance (labels don't drift). Hinted-anchor scoping applies
   #   identically to the tolerance retry.
-  def verify(anchors, exports, extract_tol: nil)
+  # truncated (Array/Set of element NAMES, optional) — elements whose bounded
+  #   CSV export came back FULL (>= the row cap), i.e. the export may be
+  #   missing rows. An anchor that fails to match while ANY element in its
+  #   search scope is truncated canNOT be declared MISSING — the value may
+  #   live below the cap — so it is reported 'inconclusive-truncated' in the
+  #   verdict's `inconclusive` list instead of `missing` (issue #416: a
+  #   truncated export must never produce a false hard MISS). Inconclusive
+  #   anchors still fail `pass` — they are unverified, not vouched-for.
+  def verify(anchors, exports, extract_tol: nil, truncated: nil)
     tol = extract_tol.is_a?(Numeric) && extract_tol.positive? ? extract_tol.to_f : nil
+    trunc = Array(truncated)
     el_names = exports.keys
     numbers = exports.transform_values { |rows| rows_numbers(rows) }
     texts = exports.transform_values { |rows| rows_texts(rows) }
     detail = []
     missing = []
+    inconclusive = []
+    # A miss is only a hard MISS when every export the anchor searched was
+    # complete; otherwise it lands in `inconclusive` with the truncated
+    # element(s) named.
+    classify_miss = lambda do |a, raw, scope_names, entry|
+      t_hits = scope_names.select { |n| trunc.include?(n) }
+      if t_hits.any?
+        inconclusive << entry.merge('status' => 'inconclusive-truncated',
+                                    'truncated_elements' => t_hits)
+      else
+        missing << entry
+      end
+    end
     anchors.each do |a|
       raw = a['raw'].to_s
       order = ranked_elements(a, el_names)
@@ -173,8 +211,9 @@ module AnchorVerify
         if found_in
           detail << { 'id' => a['id'], 'raw' => raw, 'matched_in' => found_in }
         else
-          missing << { 'id' => a['id'], 'label' => a['label'], 'raw' => raw,
-                       'best_candidate' => { 'note' => 'text anchor: label not present in any element export' } }
+          classify_miss.call(a, raw, order,
+                             { 'id' => a['id'], 'label' => a['label'], 'raw' => raw,
+                               'best_candidate' => { 'note' => 'text anchor: label not present in any element export' } })
         end
         next
       end
@@ -226,14 +265,16 @@ module AnchorVerify
           end
           break if best
         end
-        missing << { 'id' => a['id'], 'label' => a['label'], 'raw' => raw,
-                     'best_candidate' => best }
+        classify_miss.call(a, raw, search_order,
+                           { 'id' => a['id'], 'label' => a['label'], 'raw' => raw,
+                             'best_candidate' => best })
       end
     end
     { 'checked' => anchors.length,
-      'matched' => anchors.length - missing.length,
+      'matched' => anchors.length - missing.length - inconclusive.length,
       'missing' => missing,
-      'pass' => missing.empty?,
+      'inconclusive' => inconclusive,
+      'pass' => missing.empty? && inconclusive.empty?,
       'matched_via_tolerance' => detail.count { |d| d['tolerance_used'] },
       'detail' => detail }
   end
@@ -372,7 +413,7 @@ def tile_emptiness_census(elements, exports, workdir)
   end.compact
 end
 
-opts = { pool: 8, timeout: 120 } # pool 8: A/B report measured phase6-pass1 +70.5s dominated by anchor export collection
+opts = { pool: 8, timeout: 600 } # pool 8: A/B report measured phase6-pass1 +70.5s dominated by anchor export collection
 OptionParser.new do |p|
   p.on('--workdir DIR')        { |v| opts[:dir] = v }
   p.on('--tableau DIR', 'alias of --workdir') { |v| opts[:dir] = v }
@@ -380,7 +421,8 @@ OptionParser.new do |p|
   p.on('--anchors PATH', 'default: <workdir>/source-anchors.json') { |v| opts[:anchors] = v }
   p.on('--out PATH', 'default: <workdir>/anchors-verdict.json')    { |v| opts[:out] = v }
   p.on('--pool N', Integer)    { |v| opts[:pool] = v }
-  p.on('--timeout S', Integer) { |v| opts[:timeout] = v }
+  p.on('--timeout S', Integer, 'TOTAL wall-clock budget for the whole run (default 600). One deadline is computed at start; every export poll and download checks it. On expiry: per-element "timeout" status, partial results recorded, exit 4.') { |v| opts[:timeout] = v }
+  p.on('--row-limit N', Integer, 'row cap per element CSV export (Sigma export rowLimit). Default: anchors×10,000, min 50,000, capped at Sigma\'s 1M export ceiling. 0 = uncapped (NOT recommended — a multi-million-row detail grid is the issue-#416 hang). A miss over a truncated export reports inconclusive-truncated, never a hard MISS.') { |v| opts[:row_limit] = v }
   p.on('--extract-tol F', Float, 'relative tolerance (e.g. 0.02 = ±2%) for EXTRACT-based sources: the source PNG renders a frozen extract snapshot while the warehouse is fresher, so printed-precision misses can be legitimate drift. ONLY honored when the workdir is extract-marked (get-workbook.json hasExtracts / a landing manifest); tolerance-admitted matches are RECORDED per anchor (tolerance_used + drift), never silent. This — not editing source-anchors.json — is the sanctioned answer to extract drift.') { |v| opts[:extract_tol] = v }
   p.on('--workbook-spec PATH', 'offline: read element names from this spec instead of the live workbook') { |v| opts[:spec] = v }
   p.on('--exports-dir DIR', 'offline: read <elementId>.csv files instead of exporting live') { |v| opts[:exports] = v }
@@ -473,6 +515,10 @@ end
 
 # --- element names + rows: offline (spec+exports dir) or live (REST) ---------
 exports = {} # element name => rows (arrays of cells)
+export_status = {}   # live: element name => 'ok' | 'ok-truncated' | 'timeout' | 'failed'
+truncated_names = [] # live: elements whose bounded export came back FULL (may be missing rows)
+deadline = nil       # live: whole-run wall-clock budget (ExportPool::Deadline)
+row_limit = nil
 
 if opts[:exports]
   spec_path = opts[:spec] || File.join(opts[:dir], 'wb-readback.json')
@@ -499,6 +545,21 @@ else
 
   $LOAD_PATH.unshift File.expand_path('lib', __dir__)
   require 'sigma_rest'
+  require 'export_pool'
+
+  # ONE deadline for the entire run (issue #416: --timeout used to bound only
+  # the per-element poll wait, so total runtime was unbounded). Computed here,
+  # before any export starts; every poll loop and download checks it.
+  deadline = ExportPool::Deadline.new(opts[:timeout])
+  # Bounded exports: anchors need only enough rows to find printed values —
+  # anchors×10k (min 50k) covers every field workbook while keeping a 5M-row
+  # detail grid from hanging the pool. --row-limit overrides; 0 = uncapped.
+  row_limit =
+    if opts.key?(:row_limit)
+      opts[:row_limit].to_i.positive? ? [opts[:row_limit].to_i, ExportPool::SIGMA_EXPORT_HARD_CAP].min : nil
+    else
+      [[anchors.length * 10_000, 50_000].max, ExportPool::SIGMA_EXPORT_HARD_CAP].min
+    end
 
   body = Sigma.request(:get, "/v2/workbooks/#{wb}/spec", accept: 'text/yaml')
   spec = begin
@@ -545,23 +606,32 @@ else
     end
   end
 
+  # Export one element, bounded by row_limit and the shared deadline.
+  # Returns [:ok | :ok_truncated, rows] | [:timeout, nil] | [:failed, nil].
   export_one = lambda do |el|
-    r = Sigma.request(:post, "/v2/workbooks/#{wb}/export",
-                      body: JSON.generate({ elementId: el['id'], format: { type: 'csv' } }))
-    qid = r && r['queryId']
-    return nil unless qid
-    t0 = Time.now
-    loop do
-      return nil if Time.now - t0 > opts[:timeout]
-      sleep 1.0
-      begin
-        b = Sigma.request(:get, "/v2/query/#{qid}/download", accept: 'text/csv', binary: true)
-        next if b.to_s.empty? # still rendering
-        return nil if b.to_s.lstrip.start_with?('<') # HTML behind a 200 = renderer error
-        return CSV.parse(b)
-      rescue Sigma::Error => e
-        raise unless e.message.lines.first.to_s =~ /\b404\b/ # not materialized yet
-      end
+    name = el_display_name(el)
+    t_el = Time.now
+    qid = ExportPool.start_csv_export(wb, el['id'], row_limit)
+    unless qid
+      warn "  [WARN] export POST returned no queryId for element #{name.inspect}"
+      return [:failed, nil]
+    end
+    status, body = ExportPool.poll_csv_download(qid, deadline)
+    case status
+    when :timeout
+      ExportPool.progress(deadline, "TIMEOUT #{name.inspect} after #{(Time.now - t_el).round(1)}s — " \
+                                    "--timeout #{opts[:timeout]}s total deadline reached")
+      [:timeout, nil]
+    when :html # HTML behind a 200 = renderer error
+      warn "  [WARN] export for element #{name.inspect} returned HTML behind a 200 (renderer error)"
+      [:failed, nil]
+    else
+      rows = CSV.parse(body)
+      trunc = ExportPool.truncated?(rows, row_limit)
+      ExportPool.progress(deadline, format('DONE    %s — %d row(s) in %.1fs%s', name.inspect,
+                                           [rows.length - 1, 0].max, Time.now - t_el,
+                                           trunc ? " [TRUNCATED at --row-limit #{row_limit}]" : ''))
+      [trunc ? :ok_truncated : :ok, rows]
     end
   rescue Sigma::Error, CSV::MalformedCSVError => e
     msg = e.message.lines.first.to_s.strip[0, 120]
@@ -569,7 +639,7 @@ else
       ' [PIVOT-TOTALS CEILING: a `totals` key 500s a pivot CSV export — this pivot still carries one; ' \
       'the strip/restore bracket should have removed it. See refs/layout-visual-qa.md]' : ''
     warn "  [WARN] export failed for element #{el_display_name(el).inspect}: #{msg}#{ceiling}"
-    nil
+    [:failed, nil]
   end
 
   require 'thread'
@@ -591,6 +661,9 @@ else
              'totals-bearing pivot exports may 500; those anchors can only be checked via a totals-free export'
       end
     end
+    warn format('  [pool] exporting %d element(s), pool=%d, row limit %s, total budget %ds',
+                queryable.size, [opts[:pool], queryable.size].min.clamp(1, 8),
+                row_limit ? row_limit.to_s : 'UNCAPPED', opts[:timeout])
     queue = Queue.new
     queryable.each { |el| queue << el }
     mutex = Mutex.new
@@ -602,8 +675,32 @@ else
           rescue ThreadError
             break
           end
-          rows = export_one.call(el)
-          mutex.synchronize { exports[el_display_name(el)] = rows } if rows
+          name = el_display_name(el)
+          if deadline.expired?
+            # Deadline already blown: don't even start the export — record a
+            # clean per-element timeout so the report can name it.
+            ExportPool.progress(deadline, "TIMEOUT #{name.inspect} — not started " \
+                                          "(--timeout #{opts[:timeout]}s total deadline reached)")
+            mutex.synchronize { export_status[name] = 'timeout' }
+            next
+          end
+          ExportPool.progress(deadline, "START   #{name.inspect} (#{el['id']})")
+          status, rows = export_one.call(el)
+          mutex.synchronize do
+            case status
+            when :ok
+              exports[name] = rows
+              export_status[name] = 'ok'
+            when :ok_truncated
+              exports[name] = rows
+              truncated_names << name
+              export_status[name] = 'ok-truncated'
+            when :timeout
+              export_status[name] = 'timeout'
+            else
+              export_status[name] = 'failed'
+            end
+          end
         end
       end
     end.each(&:join)
@@ -664,10 +761,21 @@ if opts[:extract_tol]
                        'reason' => marker || 'workdir not extract-marked (hasExtracts/landing manifest absent)' }
 end
 
-verdict = AnchorVerify.verify(anchors, exports, extract_tol: extract_tol_active)
+verdict = AnchorVerify.verify(anchors, exports, extract_tol: extract_tol_active,
+                                                truncated: truncated_names)
 verdict['source_anchors'] = anchors_path
 verdict['verified_at'] = Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')
 verdict['extract_tolerance'] = extract_tol_info if extract_tol_info
+# Bounded-export provenance (live mode): per-element export status, the row cap
+# used, and whether the total --timeout deadline expired mid-run (issue #416).
+timed_out_elements = export_status.select { |_, s| s == 'timeout' }.keys
+unless export_status.empty?
+  verdict['export_status'] = export_status
+  verdict['export_row_limit'] = row_limit
+  verdict['export_timeout_s'] = opts[:timeout]
+  verdict['export_timed_out'] = timed_out_elements
+  verdict['partial'] = timed_out_elements.any?
+end
 
 # W1.1/W1.2: dashboard-tile emptiness + anchor display scoping. `elements` is in
 # scope from whichever branch (offline spec / live REST) populated `exports`.
@@ -732,6 +840,8 @@ if File.exist?(pf)
     s = JSON.parse(File.read(pf))
     s['anchors'] = { 'checked' => verdict['checked'], 'matched' => verdict['matched'],
                      'pass' => verdict['pass'], 'missing' => verdict['missing'].map { |m| m['id'] } }
+    inc_ids = Array(verdict['inconclusive']).map { |m| m['id'] }
+    s['anchors']['inconclusive'] = inc_ids if inc_ids.any?
     s['anchors']['matched_via_tolerance'] = verdict['matched_via_tolerance'] if verdict['matched_via_tolerance'].to_i.positive?
     s['anchors']['extract_tolerance'] = verdict['extract_tolerance'] if verdict['extract_tolerance']
     s['dashboard_tiles_empty'] = verdict['dashboard_tiles_empty']
@@ -753,6 +863,20 @@ if verdict['matched_via_tolerance'].to_i.positive?
   puts "  [extract-tol] #{verdict['matched_via_tolerance']} anchor(s) matched only within the extract drift " \
        "tolerance (±#{format('%.2f', (extract_tol_active || 0) * 100)}%) — recorded in the verdict; " \
        'name this in your migration report. Anchors were NOT edited.'
+end
+
+# Total-deadline expiry (issue #416): the run is PARTIAL — some elements never
+# exported — so no verdict below is final. Name every timed-out element, keep
+# the partial results on disk, and exit with the distinct timeout code.
+if timed_out_elements.any?
+  warn ''
+  warn "[TIMEOUT] --timeout #{opts[:timeout]}s TOTAL deadline reached — #{timed_out_elements.length} element export(s) timed out:"
+  timed_out_elements.each { |n| warn "         TIMEOUT  #{n.inspect}" }
+  warn "       Partial results recorded in #{out_path} (#{verdict['matched']}/#{verdict['checked']} anchors matched over"
+  warn "       the #{exports.length} export(s) that completed; per-element status under \"export_status\")."
+  warn '       Raise --timeout, lower --row-limit (smaller exports render faster), or add element filters to'
+  warn '       shrink the slow tiles, then re-run. No anchor verdict is final on a partial run.'
+  exit 4
 end
 
 # W1.1: non-empty dashboard tiles — the hard data-path check. A displayed tile
@@ -779,14 +903,34 @@ if verdict['pass']
        "all displayed tiles return data (#{verdict['anchors_matched_in_displayed']}/#{verdict['matched']} anchors in displayed tiles)."
   exit 0
 end
-warn "[FAIL] #{verdict['missing'].length} anchor(s) MISSING from the live workbook exports:"
-verdict['missing'].each do |m|
-  bc = m['best_candidate']
-  warn "  MISSING  #{m['id']} #{m['label'].inspect} raw=#{m['raw'].inspect}" \
-       "#{bc ? " — closest candidate #{bc['value']} in #{bc['element'].inspect}" : ' — no numeric candidates at all'}"
+
+# Truncation-inconclusive anchors (issue #416): the anchor missed, but at least
+# one export it searched was TRUNCATED at the row cap — the value may simply
+# live below the cap, so this is NOT a hard MISS and must not demand a workbook
+# "fix" for possibly-correct data.
+inconclusive = Array(verdict['inconclusive'])
+if inconclusive.any?
+  warn "[INCONCLUSIVE] #{inconclusive.length} anchor(s) could not be verified — a bounded export in their search"
+  warn "               scope was TRUNCATED at the #{row_limit || 'requested'}-row cap (the value may live below it):"
+  inconclusive.each do |m|
+    warn "  INCONCLUSIVE  #{m['id']} #{m['label'].inspect} raw=#{m['raw'].inspect} — " \
+         "truncated export(s): #{Array(m['truncated_elements']).map(&:inspect).join(', ')}"
+  end
+  warn '               Options: add an element filter so the tile exports fewer rows; verify the value via the'
+  warn '               warehouse SQL oracle (verify-warehouse.rb / vds-oracle.rb) instead; or raise --row-limit.'
 end
-warn '       A printed source value that appears NOWHERE in the workbook exports is the'
-warn '       loudest possible signal the data is wrong (wrong aggregate, wrong unit/10x,'
-warn '       missing filter, collapsed buckets). Fix the workbook — or, if the SOURCE'
-warn '       transcription was wrong, correct source-anchors.json — then re-run.'
-exit 1
+
+if verdict['missing'].any?
+  warn "[FAIL] #{verdict['missing'].length} anchor(s) MISSING from the live workbook exports:"
+  verdict['missing'].each do |m|
+    bc = m['best_candidate']
+    warn "  MISSING  #{m['id']} #{m['label'].inspect} raw=#{m['raw'].inspect}" \
+         "#{bc ? " — closest candidate #{bc['value']} in #{bc['element'].inspect}" : ' — no numeric candidates at all'}"
+  end
+  warn '       A printed source value that appears NOWHERE in the workbook exports is the'
+  warn '       loudest possible signal the data is wrong (wrong aggregate, wrong unit/10x,'
+  warn '       missing filter, collapsed buckets). Fix the workbook — or, if the SOURCE'
+  warn '       transcription was wrong, correct source-anchors.json — then re-run.'
+  exit 1
+end
+exit 3 # inconclusive-only: unverified, not vouched-for — resolve before shipping
