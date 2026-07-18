@@ -191,9 +191,93 @@ Dir.mktmpdir do |dir|
         'no meta / gaps files → gate 11 stated SKIP (never silent)', fails)
 end
 
+# ---- gate 16: join-cardinality ledger (exit 23) -------------------------------
+JP_ENTRY = { 'kind' => 'lookup-synthesis', 'left' => 'Rev Primary', 'right' => 'Rev Contra',
+             'keys' => ['Entity Id'], 'grain_assumption' => 'right unique on keys' }.freeze
+
+# unprobed entry → exit 23
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'join-plan.json'),
+             JSON.pretty_generate('entries' => [JP_ENTRY.merge('status' => 'unprobed')]))
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 23, "gate 16: unprobed ledger entry → exit 23 (got #{st.exitstatus})", fails)
+  check(err.include?('UNPROVEN') && err.include?('Rev Contra'), 'gate 16 failure names the unproven entry', fails)
+  check(err.include?('probe-join-keys.rb'), 'gate 16 failure points at the probe script', fails)
+end
+
+# all entries unique → pass
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'join-plan.json'),
+             JSON.pretty_generate('entries' => [JP_ENTRY.merge('status' => 'unique', 'counts' => { 'total' => 10, 'distinct' => 10 })]))
+  out, _err, st = run_gate(dir)
+  check(st.success?, "gate 16: all-unique ledger → exit 0 (got #{st.exitstatus})", fails)
+  check(out.include?('gate 16') && out.include?('1 unique'), 'gate 16 OK line counts the proven entries', fails)
+end
+
+# non-unique WITHOUT a resolution → exit 23 with the duplicate evidence
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'join-plan.json'),
+             JSON.pretty_generate('entries' => [JP_ENTRY.merge(
+               'status' => 'non-unique',
+               'duplicates' => [{ 'keys' => { 'ENTITY_ID' => '17' }, 'count' => 3 }])]))
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 23, "gate 16: unresolved non-unique → exit 23 (got #{st.exitstatus})", fails)
+  check(err.include?('NON-UNIQUE') && err.include?('ENTITY_ID=17'), 'gate 16 failure carries the sample duplicate key', fails)
+  check(err.include?('PRE-AGGREGATE') && err.include?('--resolve'), 'gate 16 failure names the sanctioned resolutions', fails)
+end
+
+# non-unique with a RECORDED resolution (preaggregated or waived) → pass
+%w[preaggregated waived].each do |how|
+  Dir.mktmpdir do |dir|
+    base_workdir(dir)
+    File.write(File.join(dir, 'join-plan.json'),
+               JSON.pretty_generate('entries' => [JP_ENTRY.merge(
+                 'status' => 'non-unique',
+                 'duplicates' => [{ 'keys' => { 'ENTITY_ID' => '17' }, 'count' => 3 }],
+                 'resolution' => { 'how' => how, 'reason' => 'recorded in the ledger', 'recorded_at' => '2026-07-18T00:00:00Z' })]))
+    out, _err, st = run_gate(dir)
+    check(st.success?, "gate 16: non-unique + #{how} resolution → exit 0 (got #{st.exitstatus})", fails)
+    check(out.include?('1 resolved'), "gate 16 OK line counts the #{how} resolution", fails)
+  end
+end
+
+# missing ledger + Lookup( in dm-spec → exit 23 (belt-and-braces)
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'dm-spec.json'),
+             JSON.pretty_generate('pages' => [{ 'elements' => [{ 'id' => 'el', 'columns' => [
+               { 'id' => 'c', 'name' => 'Unified Region',
+                 'formula' => 'Coalesce([Region], Lookup([Rev Contra/Region], [Entity Id], [Rev Contra/Entity Id]))' }] }] }]))
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 23, "gate 16: Lookup( in dm-spec + no ledger → exit 23 (got #{st.exitstatus})", fails)
+  check(err.include?('no join-plan.json ledger'), 'gate 16 names the missing-ledger degradation', fails)
+end
+
+# dm-spec without Lookup + no ledger → stated OK (back-compat)
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'dm-spec.json'),
+             JSON.pretty_generate('pages' => [{ 'elements' => [{ 'id' => 'el', 'columns' => [
+               { 'id' => 'c', 'name' => 'X', 'formula' => '[T/X]' }] }] }]))
+  out, _err, st = run_gate(dir)
+  check(st.success? && out.include?('gate 16') && out.include?('no join grain assumptions'),
+        'gate 16: no ledger + no Lookup → stated OK (never silent)', fails)
+end
+
+# empty ledger (written as evidence) → pass
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'join-plan.json'), JSON.pretty_generate('entries' => []))
+  _out, _err, st = run_gate(dir)
+  check(st.success?, 'gate 16: empty ledger → exit 0', fails)
+end
+
 puts
 if fails.empty?
-  puts 'ALL PASS — assert-phase6-ran gate 8b vision precondition + gate 11 post-publish guide'
+  puts 'ALL PASS — assert-phase6-ran gate 8b vision precondition + gate 11 post-publish guide + gate 16 join-cardinality ledger'
   exit 0
 else
   puts "FAILURES (#{fails.length}):"

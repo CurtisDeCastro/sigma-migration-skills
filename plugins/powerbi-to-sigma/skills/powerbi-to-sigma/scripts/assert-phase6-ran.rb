@@ -205,6 +205,21 @@
 #      Escape hatch: --accept-manual-residues "<calc,...>" — waives ONLY the
 #      NAMED residues (budget-counted; name them in your migration report).
 #      No ledger file → stated OK (converter declared no residues; back-compat).
+#  23  Join-cardinality ledger unresolved (gate 16) — <workdir>/join-plan.json
+#      (derived at DM-build time: one entry per federated source join + per
+#      synthesized Lookup()) still carries an entry that is UNPROVEN (status
+#      "unprobed"/"error") or proven "non-unique" with no recorded resolution.
+#      Sigma's Lookup() returns ONE ARBITRARY match per key: a Lookup target
+#      that is not unique at the key grain silently undercounts every aggregate
+#      over the looked-up column — no error anywhere. Run
+#      scripts/probe-join-keys.rb to prove each entry unique, pre-aggregate the
+#      target (or escalate to the operator) for non-unique ones, and record the
+#      evidence with --resolve. ALSO raised belt-and-braces when join-plan.json
+#      is ABSENT but the workdir's dm-spec.json contains `Lookup(` — a Lookup
+#      was synthesized and nothing proved its grain. No ledger AND no Lookup in
+#      the dm-spec → stated OK (back-compat). NO escape flag: the resolution
+#      path (probe → pre-aggregate or operator waiver, recorded in the ledger)
+#      IS the sanctioned escape.
 #
 # ANCHORS-ORACLE substitution (charts_total==0, exit 2): when every worksheet is
 # dashboard-embedded (no exportable view CSVs), the anchors oracle may stand in
@@ -1932,6 +1947,74 @@ if File.exist?(mr_path)
        "#{mr_waived.any? ? ", #{mr_waived.length} accepted-unbuilt (WAIVED)" : ''} of #{mr_entries.length}"
 else
   puts '[OK] gate 15: no manual-residues.json — no unbound custom-SQL residues declared by the build'
+end
+
+# ---------------------------------------------------------------------------
+# Gate 16 — join-cardinality ledger (exit 23; PR-4). Sigma's Lookup() returns
+# ONE ARBITRARY match per key, so a synthesized Coalesce/Lookup (or a federated
+# source join) whose right side is NOT unique at the key grain silently
+# undercounts every aggregate over the looked-up column — zero errors anywhere
+# (field failure: target at user×date×line-item grain, key at user×date).
+# The DM build derives <workdir>/join-plan.json (lib/join_plan.rb): one entry
+# per federated .twb join + per synthesized Lookup, status "unprobed".
+# scripts/probe-join-keys.rb proves each grain assumption against the warehouse
+# and records unique | non-unique (+ sample duplicate keys) | error; a
+# non-unique entry blocks until a resolution {how: preaggregated|waived,
+# reason} is recorded via --resolve. Belt-and-braces: a MISSING ledger on a run
+# whose dm-spec.json contains `Lookup(` also fails — synthesis happened and
+# nothing proved the grain. No escape flag — the recorded resolution is the
+# only sanctioned waiver (it lives in the ledger as evidence, not in a CLI
+# flag a re-run forgets).
+# ---------------------------------------------------------------------------
+jp_path = File.join(opts[:tab], 'join-plan.json')
+jp_resolved = lambda do |e|
+  e['resolution'].is_a?(Hash) && %w[preaggregated waived].include?(e['resolution']['how'].to_s)
+end
+if File.exist?(jp_path)
+  jp_doc = JSON.parse(File.read(jp_path)) rescue nil
+  jp_entries = jp_doc.is_a?(Hash) ? jp_doc['entries'] : jp_doc
+  unless jp_entries.is_a?(Array)
+    warn "[FAIL] gate 16: #{jp_path} is malformed (expected {\"entries\":[...]} or a bare array)."
+    warn '       Re-derive the ledger (the DM build emits it) — do not hand-edit it into shape.'
+    exit 23
+  end
+  jp_entries = jp_entries.select { |e| e.is_a?(Hash) }
+  jp_unproven = jp_entries.reject { |e| e['status'].to_s == 'unique' || e['status'].to_s == 'non-unique' || jp_resolved.call(e) }
+  jp_blocking = jp_entries.select { |e| e['status'].to_s == 'non-unique' && !jp_resolved.call(e) }
+  if jp_unproven.any? || jp_blocking.any?
+    warn "[FAIL] gate 16: join-cardinality ledger unresolved (#{jp_path}) —"
+    jp_unproven.first(10).each do |e|
+      warn "         - UNPROVEN (#{e['status'] || 'unprobed'}): #{e['kind']} #{e['left'].inspect} -> #{e['right'].inspect} on (#{Array(e['keys']).join(', ')})"
+    end
+    jp_blocking.first(10).each do |e|
+      sample = Array(e['duplicates']).first
+      kv = sample.is_a?(Hash) ? (sample['keys'] || {}).map { |k, v| "#{k}=#{v}" }.join('|') : nil
+      warn "         - NON-UNIQUE: #{e['kind']} #{e['left'].inspect} -> #{e['right'].inspect} on (#{Array(e['keys']).join(', ')})" \
+           "#{kv ? " e.g. #{kv} ×#{sample['count']}" : ''}"
+    end
+    warn '       Lookup() returns one ARBITRARY match per key — a non-unique right side silently'
+    warn '       undercounts every aggregate over the looked-up column. Prove each entry with'
+    warn '       scripts/probe-join-keys.rb; for non-unique entries either PRE-AGGREGATE the target'
+    warn '       to the key grain (grouped helper element + repointed Lookup) or escalate to the'
+    warn '       operator, and record the evidence: probe-join-keys.rb --resolve <i> --how <preaggregated|waived> --reason "..."'
+    exit 23
+  end
+  jp_res_n = jp_entries.count { |e| jp_resolved.call(e) }
+  puts "[OK] gate 16: join-cardinality ledger resolved — #{jp_entries.count { |e| e['status'].to_s == 'unique' }} unique" \
+       "#{jp_res_n.positive? ? ", #{jp_res_n} resolved" : ''} of #{jp_entries.length} (join-plan.json)"
+else
+  # Belt-and-braces: no ledger, but the DM spec synthesized a Lookup — the
+  # derivation was skipped and nothing proved the target grain.
+  jp_dm = File.join(opts[:tab], 'dm-spec.json')
+  jp_has_lookup = File.exist?(jp_dm) && (File.read(jp_dm).include?('Lookup(') rescue false)
+  if jp_has_lookup
+    warn "[FAIL] gate 16: #{jp_dm} contains synthesized Lookup() calls but no join-plan.json ledger exists —"
+    warn '       the join-cardinality derivation never ran, so nothing proved the Lookup targets are'
+    warn '       unique at the key grain (the silent-undercount class). Re-run the DM build (it emits'
+    warn '       the ledger), then probe with scripts/probe-join-keys.rb.'
+    exit 23
+  end
+  puts '[OK] gate 16: no join-plan.json and no Lookup( in the dm-spec — no join grain assumptions to prove'
 end
 
 # ---------------------------------------------------------------------------

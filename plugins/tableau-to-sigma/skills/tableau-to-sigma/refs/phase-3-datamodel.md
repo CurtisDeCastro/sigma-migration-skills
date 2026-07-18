@@ -115,6 +115,38 @@ If(Coalesce(Lookup([Customer Dim/Lifetime Revenue], [Customer Key], [Customer Di
 Without `Coalesce(-1)` orphan-joined rows produce a NULL bucket instead of falling into "Bronze"
 the way Tableau's ELSE does — and parity will diverge.
 
+### Join-cardinality ledger + probe (`join-plan.json`, gate 16 / exit 23)
+
+**Sigma's `Lookup()` returns ONE ARBITRARY match per key.** Every `Coalesce(…,
+Lookup([Target/X], [key], [Target/key]))` the converter synthesizes for a federated
+join — and every federated join itself — silently assumes the target/right side is
+**unique at the key grain**. When it isn't (field failure: target at
+user×date×line-item grain, key at user×date), every aggregate over the looked-up
+column undercounts with zero errors anywhere. The mirror risk: never delete a
+"no-op" LEFT JOIN without the same proof — a non-unique right side means the join
+was fanning out rows.
+
+The orchestrator derives `<WORK>/join-plan.json` right after writing `dm-spec.json`
+(`scripts/lib/join_plan.rb`): one entry per federated `.twb` join + per synthesized
+Lookup, each `status: "unprobed"` with `grain_assumption: "right unique on keys"`.
+An empty ledger is still written — its presence is the gate's evidence. Then prove
+each assumption against the warehouse:
+
+```bash
+ruby scripts/probe-join-keys.rb --workdir <WORK> --connection-id <id>   # GROUP BY keys HAVING COUNT(*)>1 + totals
+```
+
+Entries become `unique` (done), `non-unique` (sample duplicate keys + counts
+recorded; FATAL, exit 2), or `error`. A non-unique entry has exactly two sanctioned
+resolutions, recorded as ledger evidence via
+`probe-join-keys.rb --resolve <i> --how <preaggregated|waived> --reason "…"`:
+**(a) pre-aggregate** — add a grouped helper element at the key grain and repoint the
+Lookup at it; **(b) operator escalation** — a named human accepts the arbitrary-match
+risk. The final gate (`assert-phase6-ran.rb` gate 16) exits 23 while any entry is
+unproven or unresolved, and also when `join-plan.json` is missing on a run whose
+`dm-spec.json` contains `Lookup(`. No skip flag — the recorded resolution is the
+only escape.
+
 ### Validate before posting
 
 ```bash

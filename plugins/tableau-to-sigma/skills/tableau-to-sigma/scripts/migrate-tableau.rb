@@ -3067,6 +3067,39 @@ else
   dm = Specs.dm_spec
   dm['name'] = "#{opts[:name]} #{dm['name'] || wb_name}".strip if opts[:name]
 end
+# Join-cardinality ledger (PR-4): one entry per federated .twb join + per
+# synthesized Coalesce/Lookup in the DM spec, each carrying the "right unique
+# on keys" grain assumption at status "unprobed". Sigma's Lookup() returns one
+# ARBITRARY match per key — an unproven target grain silently undercounts
+# every aggregate over the looked-up column (zero errors anywhere). The final
+# gate (assert-phase6-ran.rb gate 16, exit 23) refuses GREEN until every entry
+# is probed unique or resolved; an EMPTY ledger is still written — its
+# presence is the gate's evidence the derivation ran.
+#
+# Runs on BOTH paths (live-e2e defect): --reuse-dm used to skip this block
+# entirely, so join-plan.json was never written — and gate 16's belt-and-braces
+# only greps dm-spec.json for Lookup( (absent on reuse), so a reused DM over a
+# federated source silently bypassed the gate. On reuse the spec scanned is the
+# LIVE DM readback (dm_spec_rb — it carries the synthesized Lookup() formulas);
+# the .twb still supplies the federated joins. Same <workdir>/join-plan.json
+# either way, so the gate sees it unchanged.
+begin
+  require_relative 'lib/join_plan'
+  _jp_spec = reuse_dm_id ? dm_spec_rb : dm
+  _jp = JoinPlan.derive(_jp_spec, have_twb ? File.read(twb, encoding: 'UTF-8') : nil,
+                        db: db, schema: schema)
+  JoinPlan.write(File.join(WORK, 'join-plan.json'), _jp)
+  _jp_src = reuse_dm_id ? 'reuse path: .twb + live DM readback' : 'dm-spec + .twb'
+  if _jp.any?
+    line "join-plan ledger (#{_jp_src}): #{_jp.size} join/Lookup grain assumption(s) recorded (join-plan.json, status unprobed)"
+    line "  PROVE them before --finalize:  ruby #{File.join(HERE, 'probe-join-keys.rb')} --workdir #{WORK} --connection-id #{opts[:conn]}"
+  else
+    line "join-plan ledger (#{_jp_src}): empty (no federated joins / Lookup synthesis) — join-plan.json written as gate evidence"
+  end
+rescue StandardError => e
+  line "WARN: join-plan ledger derivation failed (#{e.class}: #{e.message.to_s[0, 80]}) — " \
+       'gate 16 will fail if the DM carries Lookup() synthesis; derive by hand via lib/join_plan.rb'
+end
 unless reuse_dm_id
   dm['folderId'] = opts[:folder] if opts[:folder]
   File.write(dm_spec_path, JSON.pretty_generate(dm))
