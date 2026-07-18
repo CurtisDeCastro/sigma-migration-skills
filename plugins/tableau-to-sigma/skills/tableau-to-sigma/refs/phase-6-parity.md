@@ -2,6 +2,8 @@
 
 ## Phase 6 — Verify chart data matches Tableau (MANDATORY — hard-gated)
 
+> **Tile-grain warehouse ground truth (PR-5 part A):** `scripts/derive-ground-truth.rb` + `scripts/run-ground-truth.rb` derive and execute per-tile ground-truth SQL from the .twb signals (independent of the builder) — see `refs/ground-truth-oracle.md`; the comparison + hard gate land in PR-6.
+
 > **A conversion is not complete until `scripts/assert-phase6-ran.rb` exits 0.** This is a *hard gate*, not a guideline. `phase6-parity.rb --finalize` writes `<WORK>/parity-final.json` as a sentinel; `assert-phase6-ran.rb` reads it and exits non-zero if Phase 6 was skipped, ran in extract-mode without permission, or failed parity. Subagent flows (cluster followers via `tableau-assessment`) MUST run the assertion as their final step before writing the result line — without it, an agent can silently skip Phase 6 entirely and self-report `charts_pass: 0, charts_total: 0` to slip past the GREEN check. See `beads-sigma-4pm` for the regression that motivated the gate.
 
 > **PUT returning `success: true` is not verification.** It only proves the spec parsed. Two recent customer-visible bugs reached the customer because Phase 6 was skipped: a window-function calc compiling silently as `error` and a pie chart wired to the wrong dimension. Compile-clean from `verify-workbook.rb` is also not parity verification — that only confirms each formula resolves, not that the numbers match.
