@@ -48,11 +48,11 @@ ruby -rjson -I "$SCRIPTS/lib" -r join_plan -e '
   entries = JoinPlan.derive(nil, xml)
   File.write(ARGV[1], JSON.pretty_generate(entries) + "\n")
 ' "$CASE_DIR/workbook-content.twb" "$TMP/derived.json" || fail=1
-if cmp -s "$TMP/derived.json" "$CASE_DIR/join-plan.entries.json"; then
+if cmp -s <(tr -d "\r" < "$TMP/derived.json") <(tr -d "\r" < "$CASE_DIR/join-plan.entries.json"); then
   note "ok: join ledger pins the LEFT JOIN (SALES_FACT -> SEGMENT_DIM on CURRENT_FLAG, join_type left)"
 else
   note "FAIL: join-plan derivation drifted from join-plan.entries.json:"
-  diff "$CASE_DIR/join-plan.entries.json" "$TMP/derived.json" | head -20
+  diff <(tr -d "\r" < "$CASE_DIR/join-plan.entries.json") <(tr -d "\r" < "$TMP/derived.json") | head -20
   fail=1
 fi
 
