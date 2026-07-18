@@ -11,11 +11,11 @@
             "id": "0SUR2a8qGv",
             "kind": "table",
             "source": {
-              "connectionId": "cb2f5180-641f-47bd-8efa-da9d590d855a",
+              "connectionId": "ab12cd34-5678-40ab-8def-1234567890ab",
               "kind": "warehouse-table",
               "path": [
-                "CSA",
-                "TJ",
+                "DEMO_DB",
+                "DEMO",
                 "ORDERFACT"
               ]
             },
@@ -267,11 +267,11 @@
             "id": "ubY8B72lWS",
             "kind": "table",
             "source": {
-              "connectionId": "cb2f5180-641f-47bd-8efa-da9d590d855a",
+              "connectionId": "ab12cd34-5678-40ab-8def-1234567890ab",
               "kind": "warehouse-table",
               "path": [
-                "CSA",
-                "TJ",
+                "DEMO_DB",
+                "DEMO",
                 "CUSTOMER"
               ]
             },
@@ -352,11 +352,11 @@
             "id": "mJDJ3SXneV",
             "kind": "table",
             "source": {
-              "connectionId": "cb2f5180-641f-47bd-8efa-da9d590d855a",
+              "connectionId": "ab12cd34-5678-40ab-8def-1234567890ab",
               "kind": "warehouse-table",
               "path": [
-                "CSA",
-                "TJ",
+                "DEMO_DB",
+                "DEMO",
                 "PRODUCT"
               ]
             },
@@ -422,11 +422,11 @@
             "id": "j1qiXyLGIb",
             "kind": "table",
             "source": {
-              "connectionId": "cb2f5180-641f-47bd-8efa-da9d590d855a",
+              "connectionId": "ab12cd34-5678-40ab-8def-1234567890ab",
               "kind": "warehouse-table",
               "path": [
-                "CSA",
-                "TJ",
+                "DEMO_DB",
+                "DEMO",
                 "STORE"
               ]
             },
@@ -497,11 +497,11 @@
             "id": "r5ZZUVlv9K",
             "kind": "table",
             "source": {
-              "connectionId": "cb2f5180-641f-47bd-8efa-da9d590d855a",
+              "connectionId": "ab12cd34-5678-40ab-8def-1234567890ab",
               "kind": "warehouse-table",
               "path": [
-                "CSA",
-                "TJ",
+                "DEMO_DB",
+                "DEMO",
                 "CALENDAR"
               ]
             },
@@ -572,11 +572,11 @@
             "id": "0bP9DR9yo3",
             "kind": "table",
             "source": {
-              "connectionId": "cb2f5180-641f-47bd-8efa-da9d590d855a",
+              "connectionId": "ab12cd34-5678-40ab-8def-1234567890ab",
               "kind": "warehouse-table",
               "path": [
-                "CSA",
-                "TJ",
+                "DEMO_DB",
+                "DEMO",
                 "PROMO"
               ]
             },

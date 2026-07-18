@@ -49,7 +49,7 @@ mmap = {
   'Region'              => { 'id' => 'm-region', 'name' => 'Region' },
   'Customer Segment'    => { 'id' => 'm-cs', 'name' => 'Customer Segment' },
   'Customer Value Tier' => { 'id' => 'm-cvt', 'name' => 'Customer Value Tier' },
-  'Ship Speed Category' => { 'id' => 'm-ssc', 'name' => 'Ship Speed Category' }
+  'Delivery Speed Tier' => { 'id' => 'm-ssc', 'name' => 'Delivery Speed Tier' }
 }
 cbg = {
   'd73055c0-9ed1-347d-8f8e-05a48ce2c8a8' => { 'caption' => 'Region' },
@@ -59,7 +59,7 @@ formula = 'CASE [Choose Split Table] ' \
           'WHEN 1 THEN [d73055c0-9ed1-347d-8f8e-05a48ce2c8a8] ' \
           'WHEN 2 THEN [49c438c6-924a-38d9-91a5-1c9dca786152] ' \
           'WHEN 3 THEN [Customer Value Tier] ' \
-          'WHEN 4 THEN [Ship Speed Category] END'
+          'WHEN 4 THEN [Delivery Speed Tier] END'
 
 puts 'Part A — CASE-on-parameter translation'
 sw = mod.translate_case_on_param(formula, ['Choose Split Table'], mmap, cbg)

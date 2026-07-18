@@ -37,6 +37,68 @@
 - Escape hatches (skip/allow flags) require a **named reason that goes in the report**.
 - If you've retried the same failing step ~2×, change approach or surface it — never grind.
 
+## Never negotiate fidelity down (field-caught, v5.5 e2e)
+- **NEVER propose reducing scope as a response to difficulty.** "Something lighter for
+  the demo", "a simplified version", "skip the hard tiles for now" are all the same
+  move: converting YOUR struggle into THE USER'S loss, silently. The mission is exact
+  parity; a struggling step does not renegotiate the mission.
+- The only permitted moves when stuck: **(1) fix it; (2) a NAMED stop/handoff** (the
+  exit codes exist for this — exit 4 is a work item with two forward paths, exit 16 is
+  a build-it checklist; follow their printed instructions); **(3) ask the user with the
+  full-fidelity path stated FIRST** and the cost of each option made explicit.
+- Descoping happens only when the USER initiates it, and what was descoped is recorded
+  in the final report — never proposed by you as an escape.
+- A designed STOP (exit 4/10/11/12/16/17) is the skill working, not failing. Read its
+  printed instructions and DO them; giving up at a designed stop is abandoning a
+  migration that is mid-flight and healthy.
+
+## "No data" and product-limitation discipline (field-proven; 2026-07)
+- **A chart that renders "No data" is YOUR build being broken until proven otherwise.**
+  Never conclude it is a platform/render artifact. **PRODUCT FACT:** Sigma's export
+  endpoints (CSV *and* PNG) execute the live warehouse query — a CSV that returns rows
+  proves the query runs, so a blank PNG over that element means the chart's own query
+  returns **zero rows**. "The export doesn't run queries" is false and is the exact
+  rationalization that shipped a dataless dashboard GREEN.
+- **The two real causes** (fix these, never wave them): a **control/filter literal that
+  matches no rows** (e.g. control value `"Region A & B"` vs a calc emitting
+  `"Region A and B"`), and a **calc comparing a NUMBER column to a string
+  literal** (`If([Year] = "2014", …)` compiles clean, renders NULL; a date-part filter as
+  a string list `["2015"]` against a `TIMESTAMP` never matches). `verify-anchors.rb`
+  reports empty displayed tiles (`dashboard_tiles_empty`); the gate refuses GREEN.
+- **Confirm a fix by looking at the RENDER, not the DM.** A correct DM formula is
+  necessary, not sufficient — re-render or re-run `verify-anchors.rb` and confirm the
+  tile shows data (`tiles_all_nonempty`).
+- **Never conclude a product limitation without a probe.** Before recording any
+  `sigma-capability` residual, prove it: run the same operation two ways (e.g. table
+  export vs chart render) and attach the evidence. `fidelity-loop.rb` refuses a
+  "no data / empty" delta classed as `sigma-capability`/`ui-only` without a `--probe`.
+- **The measurement is the anchors, not the actuals.** Never edit `source-anchors.json`
+  to match what the live workbook returns — that reconciles the ruler to the thing it
+  measures. A genuine re-transcription (you re-read the SOURCE image) uses
+  `--retranscribed "<why>"`, which logs the diff into the report. `verify-anchors.rb`
+  locks the file hash and refuses a silent edit.
+- **Extract drift is handled by `--extract-tol`, NEVER by editing anchors.** On an
+  extract-based workbook (`hasExtracts=true` / landed extracts) the source PNG shows
+  extract-stale values while the landed warehouse is fresher, so a printed-precision
+  anchor miss can be legitimate drift — the sanctioned response is
+  `verify-anchors.rb --extract-tol <F>` (e.g. `0.02` = ±2% relative). The tolerance
+  only activates when the workdir's own artifacts mark extracts, every
+  tolerance-admitted match is recorded per anchor (`tolerance_used` + `drift`) and
+  surfaced by the gates, and it MUST be named in the migration report. Rewriting
+  `source-anchors.json` to the live actuals remains tampering on every source type.
+
+## Tooling discipline (don't burn the clock)
+- **Run `--help` before any flag you have not used this session.** Inventing a flag
+  (`--force-new-workbook`, `--dm-spec`, `--workdir` on the wrong script) costs a
+  round-trip each; the scripts print usage on an unknown flag.
+- **Stay on the orchestrated path.** Hand-editing generated specs and driving raw
+  POST/PUTs is where runs fall off the rails (the orchestrator regenerates specs and
+  overwrites hand fixes; a raw DM PUT can re-mint element ids and brick a live
+  workbook). If a STOP asks for one fix, do that one thing and re-run the same command.
+- **Long single-context runs drift.** If the handoff nudge fires (60/90/120m), write
+  `HANDOFF.md` and hand off — resume is cheap. A run pushed to GREEN deep in one
+  compaction-looped context is how a false GREEN happens.
+
 ## Done means
 - 0 error columns; every page rendered and visually matching the source; every KPI's
   number matching the source (or the delta explained); controls present and wired; no

@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # Smoke test for scripts/extract-calc-fields.rb.
 #
-# Runs the script against a known workbook (default: the dataflow site's
+# Runs the script against a known workbook (default: a known Tableau site's
 # "NHL 2022-2023 Season Stats" workbook — 112 calcs, 1 LOD) and asserts:
 #   - exit 0
 #   - n_calcs > 0
@@ -12,7 +12,7 @@
 #   eval "$(scripts/get-tableau-token.sh)"
 #   ruby scripts/test-calc-discovery.rb \
 #     [--workbook-luid <luid>]     # default: NHL workbook
-#     [--twb <path>]               # default: /tmp/assessment-dataflow/twbs/<luid>.twb
+#     [--twb <path>]               # default: /tmp/assessment-site/twbs/<luid>.twb
 #     [--source auto|metadata|twb] # default: auto
 #     [--min-calcs N]              # default: 1
 
@@ -34,7 +34,7 @@ OptionParser.new do |p|
   p.on('--min-calcs N', Integer)    { |v| opts[:min_calcs] = v }
 end.parse!
 
-opts[:twb] ||= "/tmp/assessment-dataflow/twbs/#{opts[:luid]}.twb"
+opts[:twb] ||= "/tmp/assessment-site/twbs/#{opts[:luid]}.twb"
 
 script = File.expand_path('extract-calc-fields.rb', __dir__)
 out_tmp = Tempfile.new(['calc-fields-', '.json'])

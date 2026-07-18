@@ -38,6 +38,7 @@ require_relative 'lib/zone_census'
 opts = { extract_mode: false, extract_tol: 0.30, renames: [], finalize: false }
 OptionParser.new do |p|
   p.on('--tableau DIR')          { |v| opts[:tab] = v }
+  p.on('--workdir DIR', 'alias of --tableau') { |v| opts[:tab] = v }
   p.on('--workbook-id ID')       { |v| opts[:wb] = v }
   p.on('--out PATH')             { |v| opts[:out] = v }
   p.on('--extract-mode')         { opts[:extract_mode] = true }
@@ -134,6 +135,12 @@ if !opts[:finalize]
   end
 
   plan = JSON.parse(File.read(plan_path))
+  # Persist the census/plan dashboard scope so PASS-2/finalize (which may run
+  # without --dashboard flags) scopes the tile census identically (gate-5 fix).
+  if (opts[:dashboards] || []).any? && plan["dashboards_scope"] != opts[:dashboards]
+    plan["dashboards_scope"] = opts[:dashboards]
+    File.write(plan_path, JSON.pretty_generate(plan))
+  end
 
   # ---- Hidden calc-filter gate (Phase 6 enforcement) -----------------------
   # If the parity plan contains unresolved hidden calc-filters, Phase 6 must
@@ -199,8 +206,24 @@ if !opts[:finalize]
   puts "=" * 70
   puts ""
   if remaining.empty?
-    puts "ALL #{collected.size} chart actuals were collected by the pooled exporter —"
-    puts "#{actuals_path} is complete. No MCP queries needed."
+    # remaining == [] means either everything collectible was collected, OR there
+    # was nothing collectible (all plan charts are dashboard-embedded / signal-only,
+    # 0 sigma_columns — the all-embedded case). NB: "collectible charts exist but 0
+    # were collected" does NOT land here (those charts stay in `remaining`, routed to
+    # the agent-query path below); that broken-data-path state is caught downstream
+    # by verify-parity and the verify-anchors non-empty-chart gate.
+    if collected.empty?
+      # No exportable-view actuals at all: parity is legitimately deferred to the
+      # anchors oracle — but chart emptiness is still gated downstream (verify-anchors).
+      # Do NOT phrase this as "complete. No MCP queries needed." (the 2026-07 vacuous
+      # success that helped a dataless workbook read as done).
+      puts "No exportable-view actuals to collect (all charts dashboard-embedded / signal-only)."
+      puts "#{actuals_path} is intentionally empty; value parity is carried by the anchors oracle +"
+      puts "the non-empty-chart gate (verify-anchors), NOT by this pass."
+    else
+      puts "ALL #{collected.size} chart actuals were collected by the pooled exporter —"
+      puts "#{actuals_path} is complete. No MCP queries needed."
+    end
   else
     puts "The pooled exporter filled #{actuals_path} for #{collected.size} chart(s)."
     puts "Agent: run ONE mcp__sigma-mcp-v2__query call per REMAINING chart below and"
@@ -287,29 +310,18 @@ dash_layout_path = opts[:dash_layout] || File.join(opts[:tab], 'dashboard-layout
 if File.exist?(dash_layout_path)
   dash_layout = JSON.parse(File.read(dash_layout_path)) rescue nil
   if dash_layout.is_a?(Array)
-    # A "chart zone" that plots nothing — no measures AND no shelf dims/measures
-    # — is a text/label worksheet (Tableau "Info" / "Filtered Plan" / "Note Box"
-    # disclaimers), NOT a real tile. Counting those inflated `zones_total` and
-    # made coverage read far worse than reality (the ~30 phantom "missing tiles").
-    # Exclude them from the parity denominator. KPI "title" zones DO carry a
-    # measure, so they're correctly kept. The furniture predicate lives in
-    # ZoneCensus (shared with build-dashboard-layout's layout-census, #259).
-    all_chart_zones = dash_layout.flat_map { |d| d['zones'] || [] }
-                                 .select { |zz| ZoneCensus.chart_zone?(zz) }
-    label_zones = all_chart_zones.reject { |zz| ZoneCensus.plots?(zz) }.map { |zz| zz['caption'].strip }.uniq
-    zone_names  = all_chart_zones.select { |zz| ZoneCensus.plots?(zz) }.map { |zz| zz['caption'].strip }.uniq
-    norm = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]/, '') }
-    matched = plan['charts'].flat_map { |c| [c['tableau_view'], c['chart']] }.compact.map(&norm)
-    unmatched = zone_names.reject { |zn| matched.include?(norm.call(zn)) }
-    tile_census = {
-      'zones_total'          => zone_names.size,
-      'charts_built'         => plan['charts'].size,
-      'zones_unmatched'      => unmatched.size,
-      'unmatched_zone_names' => unmatched,
-      'label_zones_excluded' => label_zones
-    }
-    warn "tile census: #{zone_names.size} dashboard zone(s), #{plan['charts'].size} chart(s) in parity plan, #{unmatched.size} unmatched" \
-         "#{unmatched.any? ? " — UNMATCHED: #{unmatched.join(', ')}" : ''}"
+    # Furniture exclusion + DASHBOARD SCOPING both live in ZoneCensus.tile_census
+    # (pure, unit-tested). Scoping (field-caught false RED): the census must
+    # judge exactly the dashboards the plan covers — when --dashboard scoped the
+    # plan to one page of a multi-dashboard workbook, pooling ALL dashboards'
+    # zones made every out-of-scope tile read "unmatched". The plan persists its
+    # own scope so a finalize-only invocation scopes identically.
+    census_scope = opts[:dashboards] || plan['dashboards_scope'] || []
+    tile_census = ZoneCensus.tile_census(dash_layout, plan['charts'], census_scope)
+    warn "tile census: #{tile_census['zones_total']} dashboard zone(s)" \
+         "#{census_scope.any? ? " (scoped: #{Array(tile_census['dashboards_scoped']).join(', ')})" : ''}, " \
+         "#{plan['charts'].size} chart(s) in parity plan, #{tile_census['zones_unmatched']} unmatched" \
+         "#{tile_census['zones_unmatched'].positive? ? " — UNMATCHED: #{tile_census['unmatched_zone_names'].join(', ')}" : ''}"
   else
     warn "tile census skipped: #{dash_layout_path} is not a parse-twb-layout array"
   end

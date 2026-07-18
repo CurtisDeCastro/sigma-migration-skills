@@ -25,7 +25,7 @@ QuickSight's identity region (often us-east-1) is where the resources live — p
 
 Usage (single analysis — unchanged interface):
   python3 scripts/quicksight-discover.py \
-    --account-id 153722385948 --region us-east-1 --profile pivot \
+    --account-id <aws-account-id> --region us-east-1 --profile pivot \
     --analysis-id orders-overview --out-dir ~/quicksight-migration/orders-overview
 
 Batch (estate) mode:

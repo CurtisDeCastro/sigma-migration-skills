@@ -127,7 +127,7 @@ def drop_join_key_passthroughs(spec):
 def apply_source_swap(spec, swaps):
     """POSTMORTEM 2026-06-18 (#3): LookML `sql_table_name` can point at a
     DB.SCHEMA that the target Sigma connection doesn't serve (e.g. dev
-    'CSA.TJ.*' vs the connection's 'QUICKSTARTS.LOOKER_RETAIL_ANALYTICS.*').
+    'DEMO_DB.DEMO.*' vs the connection's 'QUICKSTARTS.LOOKER_RETAIL_ANALYTICS.*').
     The converter faithfully carries the source path through, so the DM POST
     400s. --source-swap FROM_DB.FROM_SCHEMA=TO_DB.TO_SCHEMA rewrites every
     warehouse-table source path (deep-walked: elements AND nested join sources)

@@ -31,15 +31,15 @@
 #     "text_elements": ["Orders Dashboard"],         # page title/section headers ([] if none)
 #     "filter_shelf": [                              # dashboard-level controls ([] if none)
 #       { "label": "Region", "control_type": "list",
-#         "target_tiles":    ["Trend GDP", "Top GDP"],   # tiles this control FILTERS
-#         "highlight_tiles": ["YoY GDP", "YoY FDI"] }     # tiles it only RE-COLORS (not filter)
+#         "target_tiles":    ["Trend REV", "Top REV"],   # tiles this control FILTERS
+#         "highlight_tiles": ["YoY REV", "YoY NFI"] }     # tiles it only RE-COLORS (not filter)
 #     ],
 #     "point_in_time": {                             # OPTIONAL — only for dashboards with
 #       "year_column":          "Year",              #   "latest snapshot" Top-N / magnitude tiles.
 #       "latest_year":          2015,                #   scalar OR a per-metric map, e.g.
-#                                                    #   {"GDP":2015,"TEU":2014} when metrics end in
-#                                                    #   different years (TEU lags GDP/FDI).
-#       "entity_discriminator": "Income Group"       #   Consumed by the multi-metric recipe transform:
+#                                                    #   {"REV":2015,"UNITS":2014} when metrics end in
+#                                                    #   different years (UNITS lags REV/NFI).
+#       "entity_discriminator": "Entity Group"       #   Consumed by the multi-metric recipe transform:
 #     }                                              #   rewrites Top-N/bar measures to
 #   }                                                #   Sum(If([Year]=latest And Not IsNull([discr]),m,null))
 #
@@ -197,7 +197,7 @@ module DashboardRead
         'entity_discriminator' => nil,
         'latest_year'          => nil,
         'note'                 => 'CONFIRM against the landed data: entity_discriminator = a column NULL on ' \
-                                  'rollup/aggregate rows (so Top-N shows real entities, e.g. "Income Group"; ' \
+                                  'rollup/aggregate rows (so Top-N shows real entities, e.g. "Entity Group"; ' \
                                   'null if none). latest_year = the latest year WITH DATA — a per-metric map ' \
                                   '{"<metric col>": <year>} when metrics end in different years.'
       }
@@ -378,7 +378,7 @@ module DashboardRead
           tile = tiles_by_title[t.to_s.downcase.strip]
           if tile && tile['measure'].to_s.strip.empty?
             errs << "highlight tile #{t.inspect} has no `measure` — name the metric column it plots " \
-                    '(the real DM column, e.g. "GDP (current US$)"), or the recipe rebuilds it to 0/a %-calc.'
+                    '(the real DM column, e.g. "Revenue (current US$)"), or the recipe rebuilds it to 0/a %-calc.'
           end
         end
       end

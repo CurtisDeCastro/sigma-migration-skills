@@ -53,6 +53,7 @@
 #             5 post-fix guard/lint failed; 6 status: unresolved spec-fixable remain.
 
 require 'json'
+require_relative 'lib/cli_encoding'
 require 'optparse'
 
 # ---------------------------------------------------------------------------
@@ -137,7 +138,7 @@ module FidelityLoop
     unresolved_specfixable(ledger, accepted).empty?
   end
 
-  def add_entry(ledger, dimension:, delta:, cls:, fix: nil, resolved: false, pass: nil)
+  def add_entry(ledger, dimension:, delta:, cls:, fix: nil, resolved: false, pass: nil, evidence: nil)
     raise ArgumentError, "class must be one of #{CLASSES.join('/')}" unless CLASSES.include?(cls)
     entry = {
       'id'        => "e#{(ledger['entries'] || []).length}",
@@ -148,8 +149,32 @@ module FidelityLoop
       'fix'       => fix,
       'resolved'  => !!resolved
     }
+    entry['evidence'] = evidence if evidence
     (ledger['entries'] ||= []) << entry
     entry
+  end
+
+  # A delta describing a chart that renders no data / is empty. Such a delta means
+  # the ROWS ARE MISSING — a data-class defect — and must NEVER be laundered as
+  # a cosmetic (sigma-capability / ui-only) residual to dodge the data-class hard
+  # block. (2026-07 field failure: exactly this delta was classed sigma-capability
+  # on the FALSE theory "Sigma's export API doesn't run queries," and a dataless
+  # dashboard shipped GREEN.)
+  #
+  # Match the rendered-EMPTY state precisely, NOT any mention of "data"/"blank"
+  # (review-caught false positives: "no data LABELS", "no data-label PADDING",
+  # "no data TICKS", "BLANK CHART BACKGROUND color" are cosmetic, not empty-state).
+  # A viz noun that can carry data (so "legend"/"axis"/"background" don't trigger).
+  _NOUN = '(?:chart|charts|tile|tiles|dashboard|panel|viz|pivot|table|render|element)'
+  NO_DATA_RX = Regexp.new(
+    '\bno[\s-]?data\b(?![\s-]*(?:label|point|tick|marker|mark|pad|value|ink|axis|grid|legend|colou?r|background|border|title))' \
+    "|\\b#{_NOUN}s?\\s+(?:is|are|was|were|came\\s+back|comes?\\s+back|returned?|renders?|shows?|displays?)\\s+(?:empty|blank|no\\s+data)\\b" \
+    '|\bempty\s+(?:data\s+)?(?:export|result)s?\b' \
+    '|\b(?:zero|no)\s+rows?\b' \
+    '|renders?\s+nothing',
+    Regexp::IGNORECASE)
+  def no_data_delta?(delta)
+    delta.to_s =~ NO_DATA_RX ? true : false
   end
 end
 
@@ -211,6 +236,7 @@ parser = OptionParser.new do |p|
   p.on('--dimension D')       { |v| opts[:dim] = v }
   p.on('--delta S')           { |v| opts[:delta] = v }
   p.on('--class C')           { |v| opts[:cls] = v }
+  p.on('--probe PATH', 'a "no data / empty" delta may only be classed sigma-capability/ui-only WITH a probe artifact (JSON) proving the emptiness is a genuine platform-render issue and the element export DOES return rows — never to launder a broken data path') { |v| opts[:probe] = v }
   p.on('--fix S')             { |v| opts[:fix] = v }
   p.on('--resolved')          { opts[:resolved] = true }
   p.on('--entry N', Integer)  { |v| opts[:entry] = v }
@@ -280,9 +306,31 @@ when 'render'
 when 'record'
   die '--dimension, --delta, --class required' unless opts[:dim] && opts[:delta] && opts[:cls]
   die "--class must be one of #{FidelityLoop::CLASSES.join('/')}" unless FidelityLoop::CLASSES.include?(opts[:cls])
+  # W1.5: a "no data / empty" delta is a data-class defect. It may not be recorded
+  # as a cosmetic residual (sigma-capability / ui-only) unless a probe artifact
+  # proves the emptiness is a genuine platform-render issue AND the data is present.
+  if FidelityLoop.no_data_delta?(opts[:delta]) && %w[sigma-capability ui-only].include?(opts[:cls])
+    probe_ok = opts[:probe] && File.exist?(opts[:probe]) && File.size(opts[:probe]).to_i.positive?
+    unless probe_ok
+      die <<~MSG, 6
+        --class #{opts[:cls]} REJECTED for a "no data / empty" delta:
+          #{opts[:delta]}
+        A chart that renders no data means the ROWS ARE MISSING — a data-class defect
+        (the numbers are wrong), not a cosmetic gap. Record it as --class data (which
+        blocks the gate unconditionally) and FIX the data path.
+        PRODUCT FACT: Sigma's export endpoints DO execute live warehouse queries. An
+        empty export is empty DATA — never "the export doesn't run queries." (Field-
+        proven 2026-07: that exact false theory laundered a dataless dashboard to GREEN.)
+        Only if you can PROVE the element export returns rows while the RENDER is blank
+        (a real platform-render artifact) may you keep this class — attach the proof:
+          --probe <workdir>/render-vs-export-<element>.json   (must exist and be non-empty)
+      MSG
+    end
+  end
   ledger = load_ledger(opts[:dir])
   e = FidelityLoop.add_entry(ledger, dimension: opts[:dim], delta: opts[:delta],
-                             cls: opts[:cls], fix: opts[:fix], resolved: !!opts[:resolved])
+                             cls: opts[:cls], fix: opts[:fix], resolved: !!opts[:resolved],
+                             evidence: opts[:probe])
   save_ledger(opts[:dir], ledger)
   puts "[OK] recorded #{e['id']} pass=#{e['pass']} [#{e['cls']}] #{e['dimension']}: #{e['delta']}"
   puts "     (spec-fixable + unresolved → blocks the gate until apply-patch/resolve)" if e['cls'] == 'spec-fixable' && !e['resolved']

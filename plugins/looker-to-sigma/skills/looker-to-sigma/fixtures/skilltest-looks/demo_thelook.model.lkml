@@ -1,8 +1,8 @@
-connection: "csa_tj"
+connection: "demo_wh"
 
 include: "/views/*.view.lkml"
 
-label: "CSA thelook"
+label: "Demo thelook"
 
 # ---- Explore 1: order line fact (star schema, snowflake joins) ----
 explore: order_fact {

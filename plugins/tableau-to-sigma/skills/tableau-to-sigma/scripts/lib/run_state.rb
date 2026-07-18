@@ -55,6 +55,12 @@ module RunState
       if workdir && File.directory?(workdir)
         doc = load(workdir)
         doc['run_id'] = id
+        # run_started_at is stamped ONCE and never overwritten — it is the total
+        # wall-clock anchor the handoff nudge measures against. A fresh run id is
+        # minted at each PASS-1 start, but the FIRST pass-1 of a workdir sets the
+        # clock; resumes/re-passes keep it (that is the point — the nudge tracks
+        # TOTAL run age across passes, not per-context age).
+        doc['run_started_at'] ||= Time.now.utc.iso8601
         File.write(path(workdir), JSON.pretty_generate(doc) + "\n")
       end
     rescue StandardError
@@ -79,10 +85,33 @@ module RunState
   def self.stamp(workdir, phase, status: 'done', note: nil)
     return unless workdir && File.directory?(workdir)
     doc = load(workdir)
-    doc['phases'][phase.to_s] = { 'status' => status, 'note' => note, 'ts' => Time.now.utc.iso8601 }.compact
+    now = Time.now.utc.iso8601
+    # Preserve the FIRST time this phase was entered (`first_ts`) across re-stamps
+    # so a multi-pass run keeps its true earliest timestamps; `ts` tracks the
+    # most-recent entry (freshness). The old code overwrote `ts` every pass, which
+    # reset min(ts) each re-run and left the total-elapsed handoff nudge DEAD on
+    # exactly the multi-pass runaways it exists to catch (2026-07 field failure:
+    # a 131-min, ~12-pass run never nudged). run_started_at is the primary anchor;
+    # first_ts is the belt-and-suspenders fallback for hand-driven stamps that
+    # never minted a run id.
+    existing = doc['phases'][phase.to_s]
+    first_ts = (existing && existing['first_ts']) || now
+    doc['run_started_at'] ||= first_ts
+    doc['phases'][phase.to_s] = { 'status' => status, 'note' => note,
+                                  'ts' => now, 'first_ts' => first_ts }.compact
     File.write(path(workdir), JSON.pretty_generate(doc) + "\n")
   rescue StandardError
     nil
+  end
+
+  # Total run age anchor (UTC ISO8601 string) — run_started_at when present, else
+  # the earliest per-phase first_ts, else the earliest ts (legacy ledgers written
+  # before first_ts existed). Returns nil when nothing is stamped yet.
+  def self.started_at(workdir)
+    doc = load(workdir)
+    return doc['run_started_at'] if doc['run_started_at']
+    phases = doc['phases'].values
+    (phases.map { |p| p['first_ts'] }.compact + phases.map { |p| p['ts'] }.compact).min
   end
 
   def self.skip(workdir, phase, reason)

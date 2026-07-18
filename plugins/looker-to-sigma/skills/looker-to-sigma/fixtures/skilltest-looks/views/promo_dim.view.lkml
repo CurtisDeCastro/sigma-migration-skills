@@ -1,5 +1,5 @@
 view: promo_dim {
-  sql_table_name: CSA.TJ.PROMO_DIM ;;
+  sql_table_name: DEMO_DB.DEMO.PROMO_DIM ;;
   view_label: "Promotion"
 
   dimension: promo_key {

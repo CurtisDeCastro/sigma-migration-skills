@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Extract a Sisense ElastiCube's tables (SQL endpoint, CSV) and load them into
-Snowflake CSA.<schema> via the `snow` CLI (connection `tj`).
+Snowflake DEMO_DB.<schema> via the `snow` CLI (connection `demo`).
 
 Preserves original column names as quoted identifiers so the Sigma DM and the
 Sisense Live model line up 1:1.
@@ -64,8 +64,8 @@ def main():
     a = ap.parse_args()
 
     model = json.load(open(os.path.expanduser(a.model)))
-    snow(f"CREATE SCHEMA IF NOT EXISTS CSA.{a.schema};")
-    snow(f"CREATE STAGE IF NOT EXISTS CSA.{a.schema}.LOAD_STAGE;")
+    snow(f"CREATE SCHEMA IF NOT EXISTS DEMO_DB.{a.schema};")
+    snow(f"CREATE STAGE IF NOT EXISTS DEMO_DB.{a.schema}.LOAD_STAGE;")
 
     tables = []
     for ds in model["datasets"]:
@@ -92,11 +92,11 @@ def main():
         # DDL preserving original column names (quoted)
         coldefs = ", ".join(
             f'"{c["name"]}" {TYPEMAP.get(c["type"], "VARCHAR")}' for c in cols)
-        fq = f'CSA.{a.schema}."{name.upper()}"'
+        fq = f'DEMO_DB.{a.schema}."{name.upper()}"'
         snow(f"CREATE OR REPLACE TABLE {fq} ({coldefs});")
-        snow(f"PUT 'file://{path}' @CSA.{a.schema}.LOAD_STAGE "
+        snow(f"PUT 'file://{path}' @DEMO_DB.{a.schema}.LOAD_STAGE "
              f"OVERWRITE=TRUE AUTO_COMPRESS=TRUE;")
-        snow(f"COPY INTO {fq} FROM @CSA.{a.schema}.LOAD_STAGE/{name}.csv.gz "
+        snow(f"COPY INTO {fq} FROM @DEMO_DB.{a.schema}.LOAD_STAGE/{name}.csv.gz "
              f"FILE_FORMAT=(TYPE=CSV SKIP_HEADER=1 "
              f"FIELD_OPTIONALLY_ENCLOSED_BY='\"' EMPTY_FIELD_AS_NULL=TRUE) "
              f"ON_ERROR=ABORT_STATEMENT;")

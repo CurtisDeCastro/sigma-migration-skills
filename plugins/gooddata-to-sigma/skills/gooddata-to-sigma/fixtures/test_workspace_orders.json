@@ -152,7 +152,7 @@
           }
         ],
         "dataSourceTableId": {
-          "dataSourceId": "csa-tj-snowflake",
+          "dataSourceId": "demo-snowflake",
           "id": "CUSTOMER_DIM",
           "type": "dataSource"
         },
@@ -273,7 +273,7 @@
           }
         ],
         "dataSourceTableId": {
-          "dataSourceId": "csa-tj-snowflake",
+          "dataSourceId": "demo-snowflake",
           "id": "ORDER_FACT",
           "type": "dataSource"
         },

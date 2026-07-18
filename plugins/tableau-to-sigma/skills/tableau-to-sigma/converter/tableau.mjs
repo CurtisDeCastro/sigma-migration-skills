@@ -3735,27 +3735,57 @@ function extractPath(rel, dbOverride, schOverride) {
   }
   return path;
 }
+function warehouseDbSchemaFromConn(connVal) {
+  const NON_WAREHOUSE = new Set(["sqlproxy", "hyper", "excel-direct", "textscan", "csv", "google-sheets", "virtual-connection", "vconn"]);
+  for (const c of allConnections(connVal)) {
+    const cls = (attr(c, "class") || "").toLowerCase();
+    if (NON_WAREHOUSE.has(cls))
+      continue;
+    const db = attr(c, "dbname") || attr(c, "database") || "";
+    const sch = attr(c, "schema") || "";
+    if (!db || !sch)
+      continue;
+    if (/[\\/]/.test(db) || /\.hyper$/i.test(db))
+      continue;
+    return [db, sch];
+  }
+  return ["", ""];
+}
 function collectTables(rel, tables) {
   const type = attr(rel, "type") || "table";
   if (type === "table") {
-    tables.push({ rel, leftKey: "", rightKey: "", joinType: "" });
+    tables.push({ rel, leftKey: "", rightKey: "", joinType: "", leftKeys: [], rightKeys: [] });
     return;
   }
   if (type === "join") {
     const joinType = attr(rel, "join") || "left";
-    let leftKey = "", rightKey = "";
-    const clauses = asArray(rel.clause);
-    if (clauses.length > 0) {
-      const exprs = asArray(clauses[0].expression);
-      const eqExpr = exprs.find((e) => attr(e, "op") === "=");
-      if (eqExpr) {
-        const innerExprs = asArray(eqExpr.expression);
-        if (innerExprs.length >= 2) {
-          leftKey = attr(innerExprs[0], "op") || "";
-          rightKey = attr(innerExprs[1], "op") || "";
+    // W (calc-flex item 1, federated-join coalesce): collect EVERY equality key
+    // pair, descending through AND-wrapped expressions. The old walk kept only
+    // clauses[0]'s first TOP-LEVEL '=' — a multi-key join serializes its pairs
+    // under an AND node, so it yielded NO key at all and the relationship was
+    // silently dropped ("if (!t.leftKey) continue" downstream). leftKey/rightKey
+    // stay the first pair for existing consumers; leftKeys/rightKeys carry all.
+    const leftKeys = [], rightKeys = [];
+    const walkEq = (expr) => {
+      if (!expr || typeof expr !== "object")
+        return;
+      const kids = asArray(expr.expression || []);
+      if (attr(expr, "op") === "=" && kids.length >= 2) {
+        const l = attr(kids[0], "op") || "", r = attr(kids[1], "op") || "";
+        if (l && r) {
+          leftKeys.push(l);
+          rightKeys.push(r);
         }
+        return;
       }
+      for (const k of kids)
+        walkEq(k);
+    };
+    for (const cl of asArray(rel.clause)) {
+      for (const e of asArray(cl.expression))
+        walkEq(e);
     }
+    const leftKey = leftKeys[0] || "", rightKey = rightKeys[0] || "";
     const childRels = asArray(rel.relation);
     if (childRels.length === 2) {
       collectTables(childRels[0], tables);
@@ -3766,6 +3796,8 @@ function collectTables(rel, tables) {
           tables[i].joinType = joinType;
           tables[i].leftKey = leftKey;
           tables[i].rightKey = rightKey;
+          tables[i].leftKeys = leftKeys.slice();
+          tables[i].rightKeys = rightKeys.slice();
         }
       }
     } else {
@@ -3857,7 +3889,10 @@ function tryBuildBlendModel(parsed, datasources, dbOverride, schOverride, connId
   if (links.length === 0)
     return null;
   const elements = [];
-  const pPath = extractPath(primaryRel, dbOverride, schOverride);
+  // Blends can span datasources on DIFFERENT warehouses — each side falls back
+  // to its own <connection dbname/schema> when no global override was passed.
+  const [pDb, pSch] = warehouseDbSchemaFromConn(primary.ds?.connection);
+  const pPath = extractPath(primaryRel, dbOverride || pDb, schOverride || pSch);
   const pTable = pPath[pPath.length - 1] || "PRIMARY";
   const pCols = blendColumns(primary);
   const pColId = {};
@@ -3881,7 +3916,8 @@ function tryBuildBlendModel(parsed, datasources, dbOverride, schOverride, connId
   const pMeasures = pCols.filter((c) => c.isMeasure);
   const secMeasureDisplay = {};
   for (const link of links) {
-    const sPath = extractPath(connRelations(link.sec.ds.connection)[0], dbOverride, schOverride);
+    const [sDb, sSch] = warehouseDbSchemaFromConn(link.sec.ds?.connection);
+    const sPath = extractPath(connRelations(link.sec.ds.connection)[0], dbOverride || sDb, schOverride || sSch);
     const sTable = sPath[sPath.length - 1] || "SECONDARY";
     const sCols = blendColumns(link.sec);
     const sLinkWh = new Set(link.pairs.map((p) => p.s));
@@ -4078,7 +4114,11 @@ function buildMultiDatasourceModel(xmlContent, options, datasources) {
     let kept = 0;
     for (const el of els) {
       if (el.kind === "control") {
-        const key = String(el.name ?? el.id);
+        // W2.4: dedupe by controlId first — two children can emit controls with
+        // DIFFERENT display names but the SAME controlId (param-derived), which
+        // the name-only key let through and the DM POST rejected ("duplicate id
+        // 'Region' used 2x").
+        const key = String(el.controlId ?? el.name ?? el.id);
         if (!controlNames.has(key)) {
           controlNames.add(key);
           controls.push(el);
@@ -4144,9 +4184,14 @@ function buildMultiDatasourceModel(xmlContent, options, datasources) {
   };
 }
 function convertTableauToSigma(xmlContent, options = {}) {
-  resetIds();
+  // W2.4 (field-caught on BOTH field-workbook runs): do NOT reset the module id
+  // counter for a multi-datasource CHILD conversion — each child restarting the
+  // sequence minted identical element ids ("AAAAAAAAAB" twice) and the merged
+  // dm-spec failed DM POST on duplicate ids. Children continue the counter
+  // (monotonic => unique, still deterministic in forEach order); top-level
+  // single-DS conversions keep the reset (corpus id determinism preserved).
+  if (!options.__multiDsChild) resetIds();
   const { connectionId = "", database = "", schema = "", datasourceIndex = 0, tableMapping = {} } = options;
-  void options.__multiDsChild;
   _tableMapping = tableMapping || {};
   const dbOverride = database || "";
   const schOverride = schema || "";
@@ -4176,6 +4221,29 @@ function convertTableauToSigma(xmlContent, options = {}) {
         const domainType = attr(col, "param-domain-type") || "all";
         const unq = (v) => decodeXmlEntities(v).replace(/\\(.)/g, "$1").replace(/^"|"$/g, "");
         const members = asArray(col.members?.member).map((m) => unq(attr(m, "value"))).filter(Boolean);
+        // W (audit P1.5 reconcile, CLOSED): "does parameter member-alias handling
+        // apply display aliases anywhere?" Truth, established by fixture run
+        // (scripts/test-param-member-aliases.rb):
+        //   - build-charts-from-signals.rb DOES apply alias labels (:6262-6283),
+        //     but sourced from parse-twb-layout's <aliases>/<alias> element walk
+        //     (meta.column_aliases), NOT from <member alias="..."> attributes —
+        //     so the [B] ":6256-6291 labels applied" claim and the [G-V missed 1]
+        //     "member alias attr never read" claim were BOTH true.
+        //   - THIS converter read only @value and dropped every alias. Fixed
+        //     below: memberAliases {value -> alias} is captured here and emitted
+        //     as the manual-list source's labels[] (Sigma ground truth: values
+        //     stay the codes any translated Switch compares against; labels only
+        //     change the rendered option text).
+        // Residue (scripts-side, not this file): parse-twb-layout still reads
+        // only the <aliases> shape; params whose aliases exist ONLY as member
+        // attrs get labels through this converter channel.
+        const memberAliases = {};
+        for (const m of asArray(col.members?.member)) {
+          const v = unq(attr(m, "value"));
+          const a = unq(attr(m, "alias") || "");
+          if (v && a && a !== v)
+            memberAliases[v] = a;
+        }
         const calcEl = col.calculation;
         parameters.push({
           name: colName.replace(/^\[|\]$/g, ""),
@@ -4183,6 +4251,7 @@ function convertTableauToSigma(xmlContent, options = {}) {
           type: colType,
           domainType,
           members,
+          ...Object.keys(memberAliases).length ? { memberAliases } : {},
           currentValue: unq(attr(col, "value")),
           defaultVal: calcEl ? attr(calcEl, "formula") : ""
         });
@@ -4224,6 +4293,13 @@ function convertTableauToSigma(xmlContent, options = {}) {
   const dsIdx = Math.min(datasourceIndex, datasources.length - 1);
   const ds = datasources[dsIdx];
   const rootConn = effectiveConnection(ds.connection);
+  // C1 (field-caught in 2 of 3 field runs; E2E-caught as a wall of DM-POST
+  // 404s): live warehouse connections name their own database/schema in the
+  // workbook itself. Honor them when the caller passed no override — there is
+  // NO default database to fall back to, and a fabricated one never resolves.
+  const [connDb, connSchema] = warehouseDbSchemaFromConn(ds.connection);
+  const dbEff = dbOverride || connDb;
+  const schEff = schOverride || connSchema;
   const warnings = [];
   const security = [];
   const workbookPatterns = [];
@@ -4256,6 +4332,9 @@ function convertTableauToSigma(xmlContent, options = {}) {
     return false;
   }
   const elements = [];
+  // W (calc-flex item 1): set by the physical-join branch below; enables the
+  // cross-table coalesce synthesis in the calc loop.
+  let joinTableIndex = null;
   const connId = connectionId || "<CONNECTION_ID>";
   const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const colTypeById = {};
@@ -4334,7 +4413,7 @@ function convertTableauToSigma(xmlContent, options = {}) {
   if (rootRelation) {
     const relType = attr(rootRelation, "type") || "table";
     if (relType === "table") {
-      const path = extractPath(rootRelation, dbOverride, schOverride);
+      const path = extractPath(rootRelation, dbEff, schEff);
       const tableName = path[path.length - 1] || "";
       const columns = [], order = [];
       for (const col of asArray(rootRelation?.columns?.column || [])) {
@@ -4360,7 +4439,7 @@ function convertTableauToSigma(xmlContent, options = {}) {
       } else {
         const elementMap = {};
         for (const t of tables) {
-          const path = extractPath(t.rel, dbOverride, schOverride);
+          const path = extractPath(t.rel, dbEff, schEff);
           const tableName = path[path.length - 1] || attr(t.rel, "name") || "";
           if (elementMap[tableName])
             continue;
@@ -4392,42 +4471,61 @@ function convertTableauToSigma(xmlContent, options = {}) {
           elementMap[tableName] = { element: el, colIdMap };
           elements.push(el);
         }
-        const primaryTableName = extractPath(tables[0].rel, dbOverride, schOverride).pop() || "";
+        const primaryTableName = extractPath(tables[0].rel, dbEff, schEff).pop() || "";
         const primaryEntry = elementMap[primaryTableName];
+        // W (calc-flex item 1): wire EVERY equality key pair (collectTables now
+        // carries leftKeys/rightKeys; a multi-key join previously either kept
+        // only the first pair or \u2014 AND-wrapped \u2014 dropped the relationship).
+        const parseKeyTok = (raw) => raw.replace(/^\[|\]$/g, "").split(/[\.\]]\[?/).pop()?.replace(/\]$/, "").toUpperCase() || "";
+        const ensureJoinCol = (entry, tableName, key) => {
+          let colId = entry.colIdMap[key] || entry.colIdMap[sigmaDisplayName(key).toUpperCase()];
+          if (!colId) {
+            colId = sigmaInodeId(key);
+            entry.element.columns.push({ id: colId, formula: `[${tableName}/${sigmaDisplayName(key)}]` });
+            entry.element.order.push(colId);
+            entry.colIdMap[key] = colId;
+          }
+          return colId;
+        };
         for (let i = 1; i < tables.length; i++) {
           const t = tables[i];
-          if (!t.leftKey || !t.rightKey)
+          const leftRaw = t.leftKeys && t.leftKeys.length ? t.leftKeys : t.leftKey ? [t.leftKey] : [];
+          const rightRaw = t.rightKeys && t.rightKeys.length ? t.rightKeys : t.rightKey ? [t.rightKey] : [];
+          if (!leftRaw.length || leftRaw.length !== rightRaw.length)
             continue;
-          const leftKey = t.leftKey.replace(/^\[|\]$/g, "").split(/[\.\]]\[?/).pop()?.replace(/\]$/, "").toUpperCase() || "";
-          const rightKey = t.rightKey.replace(/^\[|\]$/g, "").split(/[\.\]]\[?/).pop()?.replace(/\]$/, "").toUpperCase() || "";
-          const tgtName = extractPath(t.rel, dbOverride, schOverride).pop() || "";
+          const tgtName = extractPath(t.rel, dbEff, schEff).pop() || "";
           const tgtEntry = elementMap[tgtName];
           if (!primaryEntry || !tgtEntry)
             continue;
-          let srcColId = primaryEntry.colIdMap[leftKey] || primaryEntry.colIdMap[sigmaDisplayName(leftKey).toUpperCase()];
-          if (!srcColId) {
-            srcColId = sigmaInodeId(leftKey);
-            primaryEntry.element.columns.push({ id: srcColId, formula: `[${primaryTableName}/${sigmaDisplayName(leftKey)}]` });
-            primaryEntry.element.order.push(srcColId);
-            primaryEntry.colIdMap[leftKey] = srcColId;
+          const keys = [];
+          const pairDesc = [];
+          for (let k = 0; k < leftRaw.length; k++) {
+            const leftKey = parseKeyTok(leftRaw[k]);
+            const rightKey = parseKeyTok(rightRaw[k]);
+            if (!leftKey || !rightKey)
+              continue;
+            keys.push({
+              sourceColumnId: ensureJoinCol(primaryEntry, primaryTableName, leftKey),
+              targetColumnId: ensureJoinCol(tgtEntry, tgtName, rightKey)
+            });
+            pairDesc.push(`${leftKey} = ${rightKey}`);
           }
-          let tgtColId = tgtEntry.colIdMap[rightKey] || tgtEntry.colIdMap[sigmaDisplayName(rightKey).toUpperCase()];
-          if (!tgtColId) {
-            tgtColId = sigmaInodeId(rightKey);
-            tgtEntry.element.columns.push({ id: tgtColId, formula: `[${tgtName}/${sigmaDisplayName(rightKey)}]` });
-            tgtEntry.element.order.push(tgtColId);
-            tgtEntry.colIdMap[rightKey] = tgtColId;
-          }
+          if (!keys.length)
+            continue;
           if (!primaryEntry.element.relationships)
             primaryEntry.element.relationships = [];
           primaryEntry.element.relationships.push({
             id: sigmaShortId(),
             targetElementId: tgtEntry.element.id,
-            keys: [{ sourceColumnId: srcColId, targetColumnId: tgtColId }],
+            keys,
             name: tgtName
           });
-          warnings.push(`\u2139 Join ${primaryTableName} \u2192 ${tgtName} (${t.joinType || "left"}) on ${leftKey} = ${rightKey}`);
+          warnings.push(`\u2139 Join ${primaryTableName} \u2192 ${tgtName} (${t.joinType || "left"}) on ${pairDesc.join(" AND ")}`);
         }
+        // W (calc-flex item 1): keep the join topology for the cross-table
+        // coalesce synthesis in the calc loop below (federated IFNULL/ZN/
+        // IsNull-If fallback chains over the joined tables).
+        joinTableIndex = { byTable: elementMap, primaryTableName };
         elements.sort((a, b) => {
           const aR = !!a.relationships?.length;
           const bR = !!b.relationships?.length;
@@ -4471,7 +4569,7 @@ function convertTableauToSigma(xmlContent, options = {}) {
         factRelName = factChild ? attr(factChild, "name") || attr(factChild, "table") || null : null;
         for (const rel of childRels) {
           const fullName = attr(rel, "name") || attr(rel, "table") || "TABLE";
-          const path = extractPath(rel, dbOverride, schOverride);
+          const path = extractPath(rel, dbEff, schEff);
           const cleanName = path[path.length - 1] || fullName;
           const columns = [], order = [], colIdMap = {};
           let matchingObjId = Object.keys(metaByObjId).find((k) => k === fullName || k.startsWith(fullName + "_"));
@@ -4524,7 +4622,7 @@ function convertTableauToSigma(xmlContent, options = {}) {
           const isCustomSql = isCustomSqlRel;
           let sqlText = "";
           if (isCustomSql) {
-            const decoded = qualifyTwoPartFqns(unescapeCustomSqlEntities(String(rel["#text"] ?? "")).trim(), dbOverride);
+            const decoded = qualifyTwoPartFqns(unescapeCustomSqlEntities(String(rel["#text"] ?? "")).trim(), dbEff);
             const collapsed = collapseDoubledComparisonOps(decoded);
             sqlText = collapsed.sql;
             if (collapsed.rewrites > 0) {
@@ -4675,7 +4773,7 @@ function convertTableauToSigma(xmlContent, options = {}) {
             }
           }
         }
-        if (!dbOverride || !schOverride) {
+        if (!dbEff || !schEff) {
           warnings.push("\u26A0 Virtual connection: pass database and schema parameters to set the full warehouse path.");
         }
       }
@@ -4684,7 +4782,7 @@ function convertTableauToSigma(xmlContent, options = {}) {
       if (_collapsed.rewrites > 0) {
         warnings.push(`\u26A0 Custom SQL datasource: collapsed ${_collapsed.rewrites} doubled comparison operator(s) (<<\u2192<, >>=\u2192>=) \u2014 a Tableau ObjectModel encapsulation artifact. VERIFY these are comparisons, not bit-shift operators.`);
       }
-      const statement = _repointCustomSqlSchema(_collapsed.sql, attr(rootConn, "dbname"), attr(rootConn, "schema"), dbOverride, schOverride);
+      const statement = _repointCustomSqlSchema(_collapsed.sql, attr(rootConn, "dbname"), attr(rootConn, "schema"), dbEff, schEff);
       if (!statement) {
         warnings.push("\u26A0 Custom SQL relation carried no SQL text \u2014 no element emitted.");
       } else {
@@ -5399,6 +5497,241 @@ ${joinSql}
     const windowHelpers = {};
     const windowUsedAliases = /* @__PURE__ */ new Set();
     const windowChildElements = [];
+    // ---- W (calc-flex item 1): federated-join cross-table coalesce synthesis ----
+    // A Tableau federated JOIN serializes the secondary table's duplicate fields
+    // as "[X (TABLE_B)]" and the canonical null-fallback calc as
+    // IFNULL([X], [X (TABLE_B)]) (variants: ZN over a secondary ref; IF
+    // ISNULL([A]) THEN [B] ELSE [A] END). Sigma ground truth
+    // (refs/data-model-spec.md "Denormalizing dim columns … use Lookup()"): a
+    // bare cross-element ref in a DM calc column compiles but returns NULL on
+    // every row; the correct form is
+    //   Coalesce([local X], Lookup([Target/X], [local key], [Target/key]))
+    // and Sigma's Lookup takes ONE key pair (live-probed in the field), so a
+    // multi-key join needs a synthesized Text()-wrapped composite key column on
+    // BOTH elements. Previously these calcs fell through to the generic
+    // translator and shipped dead refs (self-coalesce / type=error columns —
+    // ~55 min of hand repair per field run). Active only when this datasource
+    // is a physical-join model (joinTableIndex set).
+    const _jcNorm = (s) => String(s || "").toUpperCase().replace(/[^0-9A-Z]/g, "");
+    const _jcColDisplay = (c) => c.name || (typeof c.formula === "string" && (c.formula.match(/\/([^\]]+)\]$/) || [])[1]) || "";
+    let _jcIndex = null;
+    const _jcBuildIndex = () => {
+      const out = [];
+      for (const tn of Object.keys(joinTableIndex.byTable)) {
+        const el = joinTableIndex.byTable[tn].element;
+        const byNorm = {}, dup = {};
+        for (const c of el.columns || []) {
+          const disp = _jcColDisplay(c);
+          if (!disp)
+            continue;
+          const k = _jcNorm(disp);
+          if (byNorm[k] && byNorm[k] !== disp)
+            dup[k] = true;
+          else
+            byNorm[k] = disp;
+        }
+        out.push({ tableName: tn, el, byNorm, dup });
+      }
+      return out;
+    };
+    // The element display name cross-element refs must use. Stamped onto the
+    // element so the post-fixup live name and the authored refs cannot drift.
+    const _jcElName = (entry) => {
+      if (!entry.el.name)
+        entry.el.name = sigmaDisplayName(entry.tableName);
+      return entry.el.name;
+    };
+    const _jcTryOn = (entry, name) => {
+      const k = _jcNorm(name);
+      if (!k || entry.dup[k])
+        return null;
+      const disp = entry.byNorm[k];
+      return disp ? { entry, display: disp } : null;
+    };
+    // Resolve a raw Tableau ref token ("X" or "X (TABLE_B)") to a joined
+    // element's column. Bare tokens prefer the primary; a non-primary match is
+    // taken only when unambiguous.
+    const _jcResolveRef = (token) => {
+      const m = token.match(/^(.*?)\s*\(([^()]+)\)\s*$/);
+      if (m) {
+        const want = _jcNorm(m[2].replace(/_[0-9A-Fa-f]{16,}$/, ""));
+        const entry = _jcIndex.find((e) => _jcNorm(e.tableName.replace(/_[0-9A-Fa-f]{16,}$/, "")) === want);
+        if (entry) {
+          const hit = _jcTryOn(entry, m[1]);
+          if (hit)
+            return hit;
+        }
+      }
+      const primary = _jcIndex.find((e) => e.el === factEl);
+      if (primary) {
+        const hit = _jcTryOn(primary, token);
+        if (hit)
+          return hit;
+      }
+      const hits = [];
+      for (const e of _jcIndex) {
+        if (e.el === factEl)
+          continue;
+        const h = _jcTryOn(e, token);
+        if (h)
+          hits.push(h);
+      }
+      return hits.length === 1 ? hits[0] : null;
+    };
+    const _jcCompositeKeys = {};
+    // Lookup arg for a column on a NON-primary joined element. Single-key
+    // relationship → direct key refs; multi-key → synthesized composite key
+    // (Text()-wrapped, so numeric parts concatenate cleanly) on both elements.
+    const _jcLookupArg = (res) => {
+      const rel = (factEl.relationships || []).find((r) => r.targetElementId === res.entry.el.id);
+      if (!rel || !(rel.keys || []).length)
+        return null;
+      const tgt = _jcElName(res.entry);
+      const dispOf = (el, colId) => {
+        const c = (el.columns || []).find((x) => x.id === colId);
+        return c ? _jcColDisplay(c) || null : null;
+      };
+      let localKeyRef, remoteKeyRef;
+      if (rel.keys.length === 1) {
+        const lk = dispOf(factEl, rel.keys[0].sourceColumnId);
+        const rk = dispOf(res.entry.el, rel.keys[0].targetColumnId);
+        if (!lk || !rk)
+          return null;
+        localKeyRef = `[${lk}]`;
+        remoteKeyRef = `[${tgt}/${rk}]`;
+      } else {
+        let synth = _jcCompositeKeys[rel.id];
+        if (!synth) {
+          const localParts = [], remoteParts = [];
+          for (const k of rel.keys) {
+            const lk = dispOf(factEl, k.sourceColumnId);
+            const rk = dispOf(res.entry.el, k.targetColumnId);
+            if (!lk || !rk)
+              return null;
+            localParts.push(`Text([${lk}])`);
+            remoteParts.push(`Text([${rk}])`);
+          }
+          const keyName = `${sigmaDisplayName(res.entry.tableName)} Join Key`;
+          const lid = sigmaShortId();
+          factEl.columns.push({ id: lid, name: keyName, formula: localParts.join(' & "|" & ') });
+          factEl.order.push(lid);
+          const rid = sigmaShortId();
+          res.entry.el.columns.push({ id: rid, name: keyName, formula: remoteParts.join(' & "|" & ') });
+          res.entry.el.order.push(rid);
+          synth = _jcCompositeKeys[rel.id] = { keyName };
+          warnings.push(`ℹ Synthesized composite join key "${keyName}" on both elements (${rel.keys.length}-key join; Sigma Lookup takes one key pair).`);
+        }
+        localKeyRef = `[${synth.keyName}]`;
+        remoteKeyRef = `[${tgt}/${synth.keyName}]`;
+      }
+      return `Lookup([${tgt}/${res.display}], ${localKeyRef}, ${remoteKeyRef})`;
+    };
+    // Split a formula body on top-level commas (bracket refs and nested parens
+    // are opaque).
+    const _jcSplitTop = (s) => {
+      const parts = [];
+      let depth = 0, cur = "", inBr = false;
+      for (const ch of s) {
+        if (inBr) {
+          cur += ch;
+          if (ch === "]")
+            inBr = false;
+          continue;
+        }
+        if (ch === "[") {
+          inBr = true;
+          cur += ch;
+          continue;
+        }
+        if (ch === "(")
+          depth++;
+        else if (ch === ")")
+          depth--;
+        if (ch === "," && depth === 0) {
+          parts.push(cur);
+          cur = "";
+          continue;
+        }
+        cur += ch;
+      }
+      parts.push(cur);
+      return parts;
+    };
+    // Flatten a null-fallback chain to ordered items ({ref} | {lit}); null when
+    // the formula is not one of the covered shapes.
+    const _jcChain = (fRaw) => {
+      const f = String(fRaw || "").trim();
+      let m = f.match(/^IFNULL\s*\((.*)\)$/is);
+      if (m) {
+        const parts = _jcSplitTop(m[1]);
+        if (parts.length !== 2)
+          return null;
+        const a = _jcChain(parts[0]);
+        const b = _jcChain(parts[1]);
+        return a && b ? a.concat(b) : null;
+      }
+      m = f.match(/^ZN\s*\((.*)\)$/is);
+      if (m) {
+        const inner = _jcChain(m[1]);
+        return inner ? inner.concat([{ lit: "0" }]) : null;
+      }
+      m = f.match(/^IF\s+ISNULL\s*\(\s*\[([^\]]+)\]\s*\)\s*THEN\s*\[([^\]]+)\]\s*ELSE\s*\[([^\]]+)\]\s*(?:END)?$/i);
+      if (m && m[1] === m[3])
+        return [{ ref: m[1] }, { ref: m[2] }];
+      m = f.match(/^\[([^\]]+)\]$/);
+      if (m)
+        return [{ ref: m[1] }];
+      return null;
+    };
+    const _tryJoinCoalesce = (caption, formula) => {
+      if (!joinTableIndex)
+        return false;
+      const chain = _jcChain(formula);
+      if (!chain || !chain.some((it) => it.ref))
+        return false;
+      if (!_jcIndex)
+        _jcIndex = _jcBuildIndex();
+      // Only a real fallback CHAIN (2+ items) warrants a loud miss; a bare
+      // single-ref alias that doesn't resolve (e.g. an alias of another calc)
+      // just falls through to the generic translator silently.
+      const isChain = chain.length >= 2;
+      const args = [];
+      for (const it of chain) {
+        if (it.lit) {
+          args.push(it.lit);
+          continue;
+        }
+        const res = _jcResolveRef(it.ref);
+        if (!res) {
+          if (isChain)
+            warnings.push(`⚠ "${caption}": cross-table coalesce over the federated join could not be auto-wired ([${it.ref}] did not resolve uniquely to a joined table's column) — falling back to the generic translator; expect a Lookup() hand-fix (refs/data-model-spec.md "Denormalizing dim columns").`);
+          return false;
+        }
+        if (res.entry.el === factEl) {
+          args.push(`[${res.display}]`);
+        } else {
+          const lookup = _jcLookupArg(res);
+          if (!lookup) {
+            warnings.push(`⚠ "${caption}": cross-table coalesce over the federated join could not be auto-wired (no usable relationship key from ${factTableName} to ${res.entry.tableName}) — falling back to the generic translator; expect a Lookup() hand-fix (refs/data-model-spec.md "Denormalizing dim columns").`);
+            return false;
+          }
+          args.push(lookup);
+        }
+      }
+      const sigmaFormula = args.length === 1 ? args[0] : `Coalesce(${args.join(", ")})`;
+      const colId = sigmaShortId();
+      const _fmt = inferSigmaFormat(sigmaFormula, caption);
+      const _col = { id: colId, formula: sigmaFormula, name: caption };
+      if (_fmt)
+        _col.format = _fmt;
+      factEl.columns.push(_col);
+      factEl.order.push(colId);
+      displayNameMap[caption.toUpperCase()] = { colId, el: factEl };
+      displayNameMap[caption.replace(/\s+/g, "_").toUpperCase()] = { colId, el: factEl };
+      globalColMap[caption.toUpperCase()] = { elId: factEl.id, displayName: caption };
+      warnings.push(`✅ "${caption}": federated-join coalesce → ${sigmaFormula.slice(0, 140)}`);
+      return true;
+    };
     for (const col of asArray(ds.ds?.column || [])) {
       const rawName = attr(col, "name") || "";
       let caption = attr(col, "caption") || rawName.replace(/^\[|\]$/g, "");
@@ -5513,6 +5846,11 @@ ${joinSql}
         continue;
       }
       {
+        // W (calc-flex item 1): federated-join coalesce first — the shapes are
+        // exact-match (IFNULL/ZN/IsNull-If chains) and never LOD/window, so
+        // this cannot shadow those paths.
+        if (joinTableIndex && _tryJoinCoalesce(caption, formula))
+          continue;
         let lod = tableauParseLOD(formula);
         let lodOuterAgg = null;
         if (!lod) {
@@ -5810,8 +6148,21 @@ ${suggestion}
       const exactNames = /* @__PURE__ */ new Set();
       const normIndex = {};
       for (const c of factEl.columns || []) {
-        if (!c.name)
+        // W (calc-flex item 1 / field S9): a NAMELESS base column ("[TABLE/Region]",
+        // the physical-join branch shape) still renders the display label "Region",
+        // and sibling bare refs resolve against that label. Index the formula
+        // TAIL so caption-cased calc refs ([REGION]) reconcile to the live label
+        // instead of surviving as dead refs (the 16-type=error field class).
+        if (!c.name) {
+          const tail = typeof c.formula === "string" && (c.formula.match(/^\[[^\]]+\/([^\]\/]+)\]$/) || [])[1];
+          if (tail) {
+            exactNames.add(tail.toLowerCase());
+            const tk = normKey(tail);
+            if (tk && !(tk in normIndex))
+              normIndex[tk] = tail;
+          }
           continue;
+        }
         exactNames.add(c.name.toLowerCase());
         const k = normKey(c.name);
         if (k && !(k in normIndex))
@@ -5985,9 +6336,18 @@ ${suggestion}
           warnings.push(`\u2139 "${factEl.name}": ${aggDims} aggregate-derived dimension(s) (bucket an aggregate metric) \u2192 reported in result.workbookPatterns \u2014 CHART/grouped-element context only; group the viz by the binned aggregate (NOT a DM column or metric).`);
       }
       const valid = /* @__PURE__ */ new Set();
-      for (const c of factEl.columns || [])
+      for (const c of factEl.columns || []) {
         if (c.name)
           valid.add(c.name.toLowerCase());
+        else {
+          // W (calc-flex item 1): nameless base columns resolve by their
+          // formula-tail display label — count them valid or every join-branch
+          // calc referencing a base column is falsely dropped here.
+          const tail = typeof c.formula === "string" && (c.formula.match(/^\[[^\]]+\/([^\]\/]+)\]$/) || [])[1];
+          if (tail)
+            valid.add(tail.toLowerCase());
+        }
+      }
       for (const mt of factEl.metrics || [])
         if (mt.name)
           valid.add(mt.name.toLowerCase());
@@ -6110,6 +6470,14 @@ ${suggestion}
       continue;
     }
     if (p.domainType === "list" && p.members.length > 0) {
+      // W (audit P1.5): surface Tableau member ALIASES as manual-list labels[].
+      // Integer-coded parameter members (1 -> "TCV") otherwise render as raw
+      // codes. values stay the codes (what a translated Switch compares
+      // against); labels change only the rendered option text. Omitted when no
+      // member maps (no value-add, matches the scripts-path behavior).
+      const aliasMap = p.memberAliases || {};
+      const labels = p.members.map((v) => aliasMap[v] || v);
+      const hasLabels = p.members.some((v) => aliasMap[v] && aliasMap[v] !== v);
       controls.push({
         kind: "control",
         controlId,
@@ -6118,9 +6486,9 @@ ${suggestion}
         mode: "include",
         selectionMode: "single",
         values: [],
-        source: { kind: "manual", valueType: "text", values: p.members }
+        source: { kind: "manual", valueType: "text", values: p.members, ...hasLabels ? { labels } : {} }
       });
-      warnings.push(`\u2139 Parameter "${p.name}" \u2192 list control`);
+      warnings.push(`\u2139 Parameter "${p.name}" \u2192 list control${hasLabels ? ` (${Object.keys(aliasMap).length} member alias(es) \u2192 labels[])` : ""}`);
     } else if (p.type === "date" || p.type === "datetime") {
       controls.push({
         kind: "control",

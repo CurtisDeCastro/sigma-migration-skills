@@ -20,7 +20,7 @@ Columns come from `columns[].name`; measures from columns whose
 default Sum; col = the physical column behind `column_id`). Pure (no network).
 
 Usage: python3 scripts/ts-dm-signature.py --tml model.tml \
-         [--database CSA --schema TJ] --out dm-signature.json
+         [--database <DB> --schema <SCHEMA>] --out dm-signature.json
 """
 import argparse, json, sys
 

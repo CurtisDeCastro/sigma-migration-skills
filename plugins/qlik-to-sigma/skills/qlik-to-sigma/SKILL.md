@@ -93,7 +93,7 @@ independently runnable script if you need to intervene mid-pipeline.
 **Read ALL of the following before replying or taking any action:**
 - `refs/operating-contract.md` — **READ FIRST**: the fidelity guardrails (render + value-check EVERY page against the source; never ship empty or silently drop a tile; don't spin — surface blockers).
 - `refs/sigma-build-gotchas.md` — the hard-won spec rules (SQL element, workbook master, YAML responses). **This is the difference between a 2xx that errors at query time and a working migration.**
-- The repo `~/Desktop/sigma-data-model-mcp/CLAUDE.md` — Sigma DM spec correctness rules + the verified CSA.TJ test connection.
+- The repo `~/Desktop/sigma-data-model-mcp/CLAUDE.md` — Sigma DM spec correctness rules + the verified DEMO_DB.DEMO test connection.
 - `~/sigma-skills/sigma-workbooks/SKILL.md` + the Sigma OpenAPI — canonical workbook spec.
 
 ---
@@ -135,7 +135,7 @@ qlik-cli context (OAuth M2M or API key). `qlik context use <ctx>`.
 bash -c 'eval "$(scripts/vendor/get-token.sh)"; <cmd>'   # sets SIGMA_BASE_URL + SIGMA_API_TOKEN
 ```
 Need a Sigma connection pointing at the same warehouse as the Qlik app (for parity).
-The verified CSA.TJ connection is `cb2f5180-641f-47bd-8efa-da9d590d855a` (Snowflake ymb68310).
+The verified DEMO_DB.DEMO connection is `ab12cd34-5678-40ab-8def-1234567890ab` (Snowflake gxb98765).
 
 ---
 

@@ -1,5 +1,5 @@
 view: customer_dim {
-  sql_table_name: CSA.TJ.CUSTOMER_DIM ;;
+  sql_table_name: DEMO_DB.DEMO.CUSTOMER_DIM ;;
 
   dimension: customer_key {
     primary_key: yes

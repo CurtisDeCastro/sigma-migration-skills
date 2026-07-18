@@ -235,5 +235,5 @@ readback) — the only totals-free window is verify-anchors' strip bracket:
 it clears, this ceiling is the cause; do **not** waive the gate. Only if it persists totals-free is
 it a genuine unbounded-dimension / service issue.
 
-_Base patterns verified 2026-06-10 on tj-wells-1989 (workbooks bc24d476, 3e23b761, 9733fcd9)
-against a known-good native layout (Chart Zoo Enhanced v4, 39a8f826)._
+_Base patterns verified 2026-06-10 on a live Sigma org (three field workbooks)
+against a known-good native-layout reference workbook._

@@ -1,7 +1,7 @@
 # NEW_FIXTURES — untested-DAX semantic models + styled reports
 
 Created 2026-05-31 in the **Test** workspace (`269a33d0-98c4-476f-890d-612ea8072f9a`).
-Both models live-bound to Snowflake **CSA.TJ** (`ymb68310`, conn `cb2f5180-641f-47bd-8efa-da9d590d855a`)
+Both models live-bound to Snowflake **DEMO_DB.DEMO** (`gxb98765`, conn `ab12cd34-5678-40ab-8def-1234567890ab`)
 via key-pair creds (legacy Update-Datasource PATCH, `encryptionAlgorithm:"NONE"`, `passphrase:""`,
 gateway `e707d522…`, datasource `0890727e…`). Both refreshed to **Completed** and verified via `executeQueries`.
 Source tables used ONLY: `EMPLOYEES`, `ABSENCE_RECORDS`, `SAFETY_INCIDENTS`.
@@ -134,7 +134,7 @@ All 23 visuals across the two reports (11 in Report A, 12 in Report B) round-tri
 
 ## Migration note — Model B end-to-end (2026-05-31, validated)
 
-Migrated Model B ("Safety & Absence Patterns") fully into tj-wells-1989:
+Migrated Model B ("Safety & Absence Patterns") fully into the demo Sigma org:
 - **DM:** `a5242e18-6d60-49b1-b3fc-62c6a5de2875` (3 warehouse-table elements + 1 SQL `Monthly Window Trend` element; 0 error columns)
 - **Workbook:** `bbfa6279-8115-45a1-8b97-49a74d110da4` (12 visuals + 4 hidden masters, 24-col layout applied last, 44 cols clean)
 - **Phase 6:** 11/11 strict PASS vs PBI executeQueries; assert-phase6-ran 4/4 GREEN.

@@ -171,7 +171,7 @@ wb_elements.each_with_index do |el, i|
     # middle segment is a relationship name (existence validated DM-side by the
     # reachability guard), NOT a column. Resolving the whole "RelName/Field" string
     # as a column name was a false-negative on surfaced FIXED-LOD columns
-    # (e.g. [Global Macro/FIXED Year/GDP World]).
+    # (e.g. [Metric Series/FIXED Year/Revenue World]).
     col = col_raw.include?('/') ? col_raw.split('/').last : col_raw
     k = norm(col)
     rec = (refs[k] ||= { display: col.strip, elements: Set.new })

@@ -10,7 +10,7 @@
       "name": "Skilltest Look \u2014 Pivot Table",
       "tileType": "looker_grid",
       "merge": null,
-      "model": "csa_thelook",
+      "model": "demo_thelook",
       "explore": "order_fact",
       "fields": [
         "customer_dim.region",

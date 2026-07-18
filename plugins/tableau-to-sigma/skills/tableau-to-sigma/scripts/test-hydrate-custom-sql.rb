@@ -44,8 +44,8 @@ sqlproxy_twb = <<~XML
       </connection>
     </datasource>
     <datasource caption='Live' name='federated.live'>
-      <connection class='snowflake' dbname='CSA' schema='TJ'>
-        <relation name='ORDERS' table='[CSA].[TJ].[ORDERS]' type='table' />
+      <connection class='snowflake' dbname='DEMO_DB' schema='DEMO'>
+        <relation name='ORDERS' table='[DEMO_DB].[DEMO].[ORDERS]' type='table' />
       </connection>
     </datasource>
   </datasources></workbook>
@@ -85,12 +85,12 @@ check(qn.nil?, 'query_for returns nil when nothing matches', fails)
 
 puts 'Part D — hydrate! end-to-end (XML mutation)'
 doc2 = REXML::Document.new(sqlproxy_twb)
-hydrated = H.hydrate!(doc2, blocks: blocks, db: 'CSA', schema: 'TJ')
+hydrated = H.hydrate!(doc2, blocks: blocks, db: 'DEMO_DB', schema: 'DEMO')
 check(hydrated.size == 1, 'exactly one datasource hydrated (the sqlproxy one)', fails)
 check(hydrated.first['column_source'] == 'cached-metadata', 'columns sourced from cached metadata when no probe', fails)
 new_proxy = doc2.elements["/workbook/datasources/datasource[@caption='Dormant Accounts']/connection"]
 check(new_proxy.attributes['class'] == 'snowflake', 'connection class rewritten to warehouse', fails)
-check(new_proxy.attributes['dbname'] == 'CSA' && new_proxy.attributes['schema'] == 'TJ', 'db/schema set on connection', fails)
+check(new_proxy.attributes['dbname'] == 'DEMO_DB' && new_proxy.attributes['schema'] == 'DEMO', 'db/schema set on connection', fails)
 text_rel = nil
 new_proxy.each_element('.//relation') { |r| text_rel = r if (r.attributes['type'] == 'text') }
 check(!text_rel.nil?, 'a <relation type=text> was spliced in', fails)
@@ -109,7 +109,7 @@ check(live2.attributes['class'] == 'snowflake' && live2.get_elements('.//relatio
 
 puts 'Part E — probe columns override cached metadata'
 doc3 = REXML::Document.new(sqlproxy_twb)
-H.hydrate!(doc3, blocks: blocks, columns_by_key: { 'dormantaccounts' => ['Only One Col'] }, db: 'CSA', schema: 'TJ')
+H.hydrate!(doc3, blocks: blocks, columns_by_key: { 'dormantaccounts' => ['Only One Col'] }, db: 'DEMO_DB', schema: 'DEMO')
 c3 = doc3.elements["/workbook/datasources/datasource[@caption='Dormant Accounts']/connection"]
 rel3 = nil; c3.each_element('.//relation') { |r| rel3 = r if r.attributes['type'] == 'text' }
 check(rel3.text.to_s.include?('"Only One Col" AS ONLY_ONE_COL'), 'probe columns override cached metadata', fails)
@@ -146,7 +146,7 @@ descs = [
   {'contentUrl'=>'PDS_CSQL','relationType'=>'text','sql'=>%q{SELECT "SFDC Oppty ID","Region" FROM RAW.MC},'db'=>'RAW','schema'=>'ING','columns'=>['SFDC Oppty ID','Region']},
   {'contentUrl'=>'PDS_TABLE','relationType'=>'table','table'=>'[JOBLOSSES].[STATE_FACT]','db'=>'RAW','schema'=>'ING','columns'=>[]},
 ]
-ph = H.hydrate_pds!(pdoc, descriptors: descs, db: 'CSA', schema: 'TJ')
+ph = H.hydrate_pds!(pdoc, descriptors: descs, db: 'DEMO_DB', schema: 'DEMO')
 check(ph.size == 2, 'both sqlproxy datasources hydrated via descriptors', fails)
 csql_conn = pdoc.elements["/workbook/datasources/datasource[@caption='CSQL']/connection"]
 csql_rel = nil; csql_conn.each_element('.//relation') { |r| csql_rel = r }
@@ -178,7 +178,7 @@ hdoc = REXML::Document.new(htwb)
 # workbook cached only 1 of 3 output columns; parsed SQL has all 3
 H.hydrate_pds!(hdoc, descriptors: [{'contentUrl'=>'PDS_X','relationType'=>'text',
   'sql'=>%q{SELECT "Sales Region","Amount USD","SFDC Oppty ID" FROM T},'db'=>'RAW','schema'=>'ING',
-  'columns'=>['Sales Region','Amount USD','SFDC Oppty ID']}], db: 'CSA', schema: 'TJ')
+  'columns'=>['Sales Region','Amount USD','SFDC Oppty ID']}], db: 'DEMO_DB', schema: 'DEMO')
 hrecs = {}
 hdoc.each_element("//metadata-record") { |m| hrecs[m.get_text('remote-name').value] = m }
 check(hrecs.keys.sort == %w[AMOUNT_USD SALES_REGION SFDC_OPPTY_ID], 'full 3-column set emitted (not just the 1 cached)', fails)

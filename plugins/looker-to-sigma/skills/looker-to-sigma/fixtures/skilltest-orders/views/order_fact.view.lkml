@@ -1,5 +1,5 @@
 view: order_fact {
-  sql_table_name: CSA.TJ.ORDER_FACT ;;
+  sql_table_name: DEMO_DB.DEMO.ORDER_FACT ;;
 
   dimension: order_id {
     type: string

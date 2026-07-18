@@ -234,7 +234,7 @@ Duration: 10
 Hand Claude a Tableau dashboard URL — e.g.:
 
 ```console
-/tableau-to-sigma https://10ay.online.tableau.com/#/site/yoursite/views/OrdersDashboard/Overview
+/tableau-to-sigma https://us-west-2b.online.tableau.com/#/site/yoursite/views/OrdersDashboard/Overview
 ```
 
 Claude resolves the URL to a workbook LUID and runs `scripts/tableau-discover.rb` in one shot. The script does, in parallel:

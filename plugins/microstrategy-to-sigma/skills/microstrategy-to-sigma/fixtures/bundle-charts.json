@@ -2596,7 +2596,7 @@
             "columnName": "WEIGHT_LBS"
           }
         ],
-        "namespace": "TJ",
+        "namespace": "DEMO",
         "tablePrefix": "TJ.",
         "type": "normal"
       },
@@ -2688,7 +2688,7 @@
       "primaryDataSource": {
         "objectId": "B2ABAAB6EA4FE181C3BF43B09D0930FC",
         "subType": "db_role",
-        "name": "Snowflake CSA"
+        "name": "Snowflake DEMO"
       },
       "secondaryDataSources": []
     },
@@ -2919,7 +2919,7 @@
             "columnName": "YEAR"
           }
         ],
-        "namespace": "TJ",
+        "namespace": "DEMO",
         "tablePrefix": "TJ.",
         "type": "normal"
       },
@@ -3056,7 +3056,7 @@
       "primaryDataSource": {
         "objectId": "B2ABAAB6EA4FE181C3BF43B09D0930FC",
         "subType": "db_role",
-        "name": "Snowflake CSA"
+        "name": "Snowflake DEMO"
       },
       "secondaryDataSources": []
     },
@@ -3372,7 +3372,7 @@
             "columnName": "STORE_TYPE"
           }
         ],
-        "namespace": "TJ",
+        "namespace": "DEMO",
         "tablePrefix": "TJ.",
         "type": "normal"
       },
@@ -3464,7 +3464,7 @@
       "primaryDataSource": {
         "objectId": "B2ABAAB6EA4FE181C3BF43B09D0930FC",
         "subType": "db_role",
-        "name": "Snowflake CSA"
+        "name": "Snowflake DEMO"
       },
       "secondaryDataSources": []
     },
@@ -3967,7 +3967,7 @@
             "columnName": "UNIT_PRICE"
           }
         ],
-        "namespace": "TJ",
+        "namespace": "DEMO",
         "tablePrefix": "TJ.",
         "type": "normal"
       },
@@ -4226,7 +4226,7 @@
       "primaryDataSource": {
         "objectId": "B2ABAAB6EA4FE181C3BF43B09D0930FC",
         "subType": "db_role",
-        "name": "Snowflake CSA"
+        "name": "Snowflake DEMO"
       },
       "secondaryDataSources": []
     }

@@ -208,7 +208,7 @@ check(StyleNormalize.el_name({}) == '' && StyleNormalize.el_name(nil) == '',
 # ---- integration: full mini-spec + idempotence ------------------------------
 puts '-- integration mini-spec + idempotence'
 mini = {
-  'name' => 'Diablo IV Mini',
+  'name' => 'Hero Art Mini',
   'themeOverrides' => { 'categoricalScheme' => ['#52baee', '#c5e8f9', '#f1f1f1'] },
   'pages' => [{ 'name' => 'Dashboard', 'elements' => [
     { 'id' => 'el-room', 'kind' => 'pivot-table', 'name' => 'Room Presets',

@@ -31,7 +31,7 @@ widgets) — never emit confidently-wrong logic.
 > **Status — LIVE-VALIDATED (2026-06-17).** A full end-to-end migration of the
 > Sisense *Sample ECommerce* model + dashboard was run and **verified at exact
 > data parity**: Sisense ElastiCube → Sisense Live-on-Snowflake → Snowflake
-> (`CSA.SISENSE_ECOMMERCE`) → Sigma data model (`de8a93d3`/`fee42fdc`) → Sigma
+> (`DEMO_DB.SISENSE_ECOMMERCE`) → Sigma data model (`<dm-id>`s) → Sigma
 > workbook (`d9312472`). Total Revenue **$39,759,625.515**, Total Quantity
 > **91,206**, and the joined Revenue-by-Category breakdown all match Sisense
 > JAQL exactly. The converter (`jaql_expr.py` + `convert.py`) was exercised

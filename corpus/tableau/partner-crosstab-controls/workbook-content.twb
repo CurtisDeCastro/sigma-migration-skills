@@ -2,7 +2,7 @@
 
 <workbook source-build='2024.1.0' version='18.1' xmlns:user='http://www.tableausoftware.com/xml/user'>
   <datasources>
-    <datasource caption='Partner Bookings (CSA.TJ)' inline='true' name='federated.primary' version='18.1'>
+    <datasource caption='Partner Bookings (DEMO_DB.DEMO)' inline='true' name='federated.primary' version='18.1'>
       <!-- Plain warehouse dimensions referenced by quick filters. These carry NO
            caption attribute (their name IS the display name) and multi-word /
            slash names — the COL_BY_GUID registration + guid_from_param fixes
@@ -48,7 +48,7 @@
       <table>
         <view>
           <datasources>
-            <datasource caption='Partner Bookings (CSA.TJ)' name='federated.primary' />
+            <datasource caption='Partner Bookings (DEMO_DB.DEMO)' name='federated.primary' />
           </datasources>
           <datasource-dependencies datasource='federated.primary'>
             <column datatype='string' name='[Partner Name]' role='dimension' type='nominal' />
@@ -83,7 +83,7 @@
       <table>
         <view>
           <datasources>
-            <datasource caption='Partner Bookings (CSA.TJ)' name='federated.primary' />
+            <datasource caption='Partner Bookings (DEMO_DB.DEMO)' name='federated.primary' />
           </datasources>
           <datasource-dependencies datasource='federated.primary'>
             <column datatype='string' name='[Created FYQQ]' role='dimension' type='nominal' />

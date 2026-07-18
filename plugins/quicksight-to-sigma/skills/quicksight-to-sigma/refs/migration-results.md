@@ -1,6 +1,6 @@
 # QuickSight → Sigma: 20-dashboard validation RESULTS
 
-> Run date: 2026-06-06 · Source account: AWS QuickSight **Enterprise**, acct `153722385948`,
+> Run date: 2026-06-06 · Source account: AWS QuickSight **Enterprise**, acct `<aws-account-id>`,
 > us-east-1, profile `pivot` (20 graduated analyses D1–D20, all `CREATION_SUCCESSFUL`).
 > Sigma target: "QuickSight Migrations" folder (`59804d8b-fe7b-4de5-8f78-8d0cce07caa9`).
 > Companion: `refs/migration-test-slate.md` (the slate + 24-visual build catalog).
@@ -23,7 +23,7 @@ against the converter (1 task), with zero parity regression.
 
 URL form: `https://app.sigmacomputing.com/workbook/<urlId>`. **Every buildable dashboard
 (D1–D17, D19, D20) has a retained workbook in the "QuickSight Migrations" folder** — 19 workbooks
-in all. **D18 is the only entry with no workbook**: it is a reasoned (c)-tail (exotic chart zoo
+in all. **D18 is the only entry with no workbook**: it is a reasoned (c)-tail (exotic chart gallery
 — 6 visuals with no Sigma chart kind, 0 chart elements), so the DM posts clean but no workbook is
 built. Where a D-number had more than one workbook from re-runs, the most-recent (`updatedAt`)
 copy is linked below. All URLs were verified against the live
@@ -48,7 +48,7 @@ copy is linked below. All URLs were verified against the live
 | D15 | D15 Free-Form Overlap | 1 | free-form + text + image | ✅ exact-parity | data exact; pixel overlap collision-resolved to stacked grid | [3AuNiEy2WWoOBxPW3L76sT](https://app.sigmacomputing.com/workbook/3AuNiEy2WWoOBxPW3L76sT) |
 | D16 | D16 Paginated Ticket Report | 1 | section-paginated + table | ⚠️ partial | table exact; sections (header/footer/page-break) flattened | [6vH3tPLylq8HPnMdU22OxD](https://app.sigmacomputing.com/workbook/6vH3tPLylq8HPnMdU22OxD) |
 | D17 | D17 Workforce Maps | 1 | filled choropleth + geo points | ✅ exact-parity | both → region-map; avg-salary-by-state matches Snowflake ✓ | [51HiaeigGh29ORZJbRIrR8](https://app.sigmacomputing.com/workbook/51HiaeigGh29ORZJbRIrR8) |
-| D18 | D18 Exotic Chart Zoo | 1 | waterfall/sankey/boxplot/histogram/wordcloud/radar | (c)-tail | DM posts clean (6 cols); 6 visuals have no Sigma kind → 6 explicit warnings | (c)-tail — no chart elements, no workbook |
+| D18 | D18 Exotic Chart Gallery | 1 | waterfall/sankey/boxplot/histogram/wordcloud/radar | (c)-tail | DM posts clean (6 cols); 6 visuals have no Sigma kind → 6 explicit warnings | (c)-tail — no chart elements, no workbook |
 | D19 | D19 Secured Conditional Table | 1 | table + RLS/CLS + conditional fmt | ⚠️ partial | data exact; RLS/CLS + color rules/data bars dropped (live on dataset, not analysis) | [6yfSJ8sIMWI0Q6d1ac8ESZ](https://app.sigmacomputing.com/workbook/6yfSJ8sIMWI0Q6d1ac8ESZ) |
 | D20 | D20 Kitchen Sink | multi-join + params | bar/line/window + Insight/CustomContent/Plugin | ⚠️ partial | bar/line exact; window → `Null`; Insight/CustomContent/Plugin dropped + warned | [662gb4RxpVNfYQgsPo3GAz](https://app.sigmacomputing.com/workbook/662gb4RxpVNfYQgsPo3GAz) |
 

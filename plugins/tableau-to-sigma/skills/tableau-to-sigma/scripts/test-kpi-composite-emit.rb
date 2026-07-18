@@ -37,9 +37,9 @@ TWB = <<~XML
       <datasource caption='Fact' name='federated.x'>
         <connection class='federated'>
           <named-connections>
-            <named-connection name='snow'><connection class='snowflake' dbname='CSA' schema='TJ' /></named-connection>
+            <named-connection name='snow'><connection class='snowflake' dbname='DEMO_DB' schema='DEMO' /></named-connection>
           </named-connections>
-          <relation connection='snow' name='STATE_FACT' table='[TJ].[STATE_FACT]' type='table' />
+          <relation connection='snow' name='STATE_FACT' table='[DEMO].[STATE_FACT]' type='table' />
         </connection>
         <column caption='Total Job Losses' name='[TJL]' datatype='real' role='measure' type='quantitative' />
       </datasource>

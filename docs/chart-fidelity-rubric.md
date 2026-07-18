@@ -94,7 +94,7 @@ live-validated against two real sample Liveboards + the migrated sample.)
   `parse_measure_color` (real TML `columnProperties` entries aren't always dicts) that
   would break migrating any CF Liveboard; verified clean parse on two sample Liveboards (10 + 27
   vizzes). End-to-end proof: extracted the TS-native "(Sample) Retail - Apparel"
-  worksheet (22,425 rows) via `searchdata` → `CSA.TJ.TS_APPAREL_FACT` → Sigma DM 953cd3c6 +
+  worksheet (22,425 rows) via `searchdata` → `DEMO_DB.DEMO.TS_APPAREL_FACT` → Sigma DM <dm-id> +
   workbook 9fd116fe — **exact parity, Total Sales $970,696,156.87**, 2 populated controls,
   renders cleanly (title/KPIs/bars/line). Path for Falcon-only TS data = searchdata→Snowflake.
 - **2026-06-15 — P2 scatter collapse fixed** in looker/quicksight/thoughtspot/cognos (grouped-source port; **looker live-proven** — 5 distinct points rendered), `+size` on tableau, + `verify-parity` numeric-string coercion so scatters don't false-DIVERGE. Remaining: scatter emission on mstr (roadmap).

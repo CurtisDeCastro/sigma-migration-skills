@@ -1,6 +1,6 @@
-# Amazon QuickSight Assessment — 153722385948
+# Amazon QuickSight Assessment — <aws-account-id>
 
-**Account:** `153722385948` | **Region:** us-east-1 | **Edition:** Enterprise | **Mode:** Complexity-only | **Generated:** 2026-06-06
+**Account:** `<aws-account-id>` | **Region:** us-east-1 | **Edition:** Enterprise | **Mode:** Complexity-only | **Generated:** 2026-06-06
 
 > Lightweight pre-scoping readout produced by the `quicksight-assessment` skill.
 > READ-ONLY — nothing was written to QuickSight or posted to Sigma. The migration

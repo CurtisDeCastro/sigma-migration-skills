@@ -55,22 +55,22 @@ kpi_zone = {
   'is_kpi' => true, 'is_crosstab' => false, 'kpi_label' => nil,
   'sort' => nil, 'shelf_sorts' => [], 'quick_calc_pcto' => [],
   'filters' => [
-    { 'raw_class' => 'categorical', 'raw_param' => "#{FED}.[none:CalcSubjSel:nk]",
-      'column_guid' => 'CalcSubjSel', 'column_caption' => 'Subject Selector',
+    { 'raw_class' => 'categorical', 'raw_param' => "#{FED}.[none:CalcCatSel:nk]",
+      'column_guid' => 'CalcCatSel', 'column_caption' => 'Category Selector',
       'datatype' => 'boolean', 'is_action' => false, 'kind' => 'list', 'members' => ['true'] }
   ],
   'hidden_filters' => [],
-  'aggregations' => { '[CalcAnchor]' => 'User', '[CalcCY]' => 'User', '[CalcSubjSel]' => 'None' },
+  'aggregations' => { '[CalcAnchor]' => 'User', '[CalcCY]' => 'User', '[CalcCatSel]' => 'None' },
   'channels' => { 'text' => { 'column' => "#{FED}.[usr:CalcCY:qk]", 'field' => nil } },
   'formats' => {},
   'calculations' => [
-    { 'name' => '[Subject Parameter]', 'caption' => 'Subject Parameter', 'datatype' => 'string',  'role' => 'measure', 'class' => 'tableau', 'formula' => '"Web Development"' },
+    { 'name' => '[Category Parameter]', 'caption' => 'Category Parameter', 'datatype' => 'string',  'role' => 'measure', 'class' => 'tableau', 'formula' => '"Engineering"' },
     { 'name' => '[Year Parameter]',    'caption' => 'Year Parameter',    'datatype' => 'integer', 'role' => 'measure', 'class' => 'tableau', 'formula' => '2016' },
-    { 'name' => '[CalcSubjSel]', 'caption' => 'Subject Selector', 'datatype' => 'boolean', 'role' => 'dimension', 'class' => 'tableau', 'formula' => '[SUBJECT] = [Parameters].[Subject Parameter]' },
+    { 'name' => '[CalcCatSel]', 'caption' => 'Category Selector', 'datatype' => 'boolean', 'role' => 'dimension', 'class' => 'tableau', 'formula' => '[CATEGORY] = [Parameters].[Category Parameter]' },
     { 'name' => '[CalcAnchor]',  'caption' => 'min(-1.0)', 'datatype' => 'real', 'role' => 'measure', 'class' => 'tableau', 'formula' => 'min(-1.0)' },
     # BARE lhs ref (no brackets) — the Tableau grammar allows it.
     { 'name' => '[CalcCY]', 'caption' => ' CY Students', 'datatype' => 'integer', 'role' => 'measure', 'class' => 'tableau',
-      'formula' => "SUM(IF Year = [Parameters].[Year Parameter] \nTHEN [NUM_SUBSCRIBERS]\nEND\n)" },
+      'formula' => "SUM(IF Year = [Parameters].[Year Parameter] \nTHEN [NUM_ENROLLED]\nEND\n)" },
     { 'name' => '[Year]', 'caption' => nil, 'datatype' => 'integer', 'role' => 'dimension', 'class' => 'tableau', 'formula' => "DATEPART('year', [PUBLISHED DATE])" }
   ],
   'dual_axis' => false,
@@ -102,25 +102,25 @@ layout = [{ 'dashboard' => 'Dash', 'is_story' => false, 'zones' => [kpi_zone, ma
 meta = {
   'worksheets' => {}, 'stories' => [], 'shared_filters' => [], 'column_aliases' => {},
   'parameters' => [
-    { 'name' => '[Subject Parameter]', 'caption' => 'Subject Parameter', 'datatype' => 'string',
-      'param_domain' => 'list', 'default_value' => 'Web Development', 'members' => [] },
+    { 'name' => '[Category Parameter]', 'caption' => 'Category Parameter', 'datatype' => 'string',
+      'param_domain' => 'list', 'default_value' => 'Engineering', 'members' => [] },
     { 'name' => '[Year Parameter]', 'caption' => 'Year Parameter', 'datatype' => 'integer',
       'param_domain' => 'list', 'default_value' => '2016', 'members' => [] }
   ],
   'columns_by_guid' => {
     'CalcAnchor'  => { 'caption' => 'min(-1.0)', 'formula' => 'min(-1.0)' },
-    'CalcCY'      => { 'caption' => ' CY Students', 'formula' => 'SUM(IF Year = [Parameters].[Year Parameter] THEN [NUM_SUBSCRIBERS] END)' },
-    'CalcSubjSel' => { 'caption' => 'Subject Selector', 'formula' => '[SUBJECT] = [Parameters].[Subject Parameter]' },
-    'SUBJECT'     => { 'caption' => 'Subject' },
-    'NUM_SUBSCRIBERS' => { 'caption' => 'Num Subscribers' },
+    'CalcCY'      => { 'caption' => ' CY Students', 'formula' => 'SUM(IF Year = [Parameters].[Year Parameter] THEN [NUM_ENROLLED] END)' },
+    'CalcCatSel' => { 'caption' => 'Category Selector', 'formula' => '[CATEGORY] = [Parameters].[Category Parameter]' },
+    'CATEGORY'     => { 'caption' => 'Category' },
+    'NUM_ENROLLED' => { 'caption' => 'Num Enrolled' },
     'PUBLISHED DATE'  => { 'caption' => 'Published Date' }
   }
 }
-# Display-label regexes only — the raw NUM_SUBSCRIBERS/PUBLISHED DATE tokens in
+# Display-label regexes only — the raw NUM_ENROLLED/PUBLISHED DATE tokens in
 # the formulas must resolve through the NORMALIZED fallback.
 mmap = {
-  '(?i)^Subject$'         => { 'id' => 'm-subj', 'name' => 'Subject' },
-  '(?i)^Num Subscribers$' => { 'id' => 'm-subs', 'name' => 'Num Subscribers' },
+  '(?i)^Category$'         => { 'id' => 'm-cat', 'name' => 'Category' },
+  '(?i)^Num Enrolled$' => { 'id' => 'm-subs', 'name' => 'Num Enrolled' },
   '(?i)^Published Date$'  => { 'id' => 'm-pub',  'name' => 'Published Date' }
 }
 
@@ -155,18 +155,18 @@ check(kcol && !kcol['formula'].to_s.include?('min(-1.0)'),
       "KPI value never binds the axis-anchor placeholder (got #{kcol && kcol['formula']})", fails)
 check(log.include?('axis-anchor placeholder'), 'placeholder skip is disclosed', fails)
 
-helper = data_els.find { |e| e['id'].to_s.include?('scoped-src') && e['name'].to_s =~ /Subscribers/ }
+helper = data_els.find { |e| e['id'].to_s.include?('scoped-src') && e['name'].to_s =~ /Enrolled/ }
 check(!helper.nil?, 'hidden filtered helper emitted into data_elements', fails)
 check(kpi && helper && kpi.dig('source', 'elementId') == helper['id'],
       'KPI sources the scoped helper', fails)
-check(kcol && kcol['formula'].to_s =~ /\ASum\(\[[^\]]+\/Num Subscribers\]\)\z/,
+check(kcol && kcol['formula'].to_s =~ /\ASum\(\[[^\]]+\/Num Enrolled\]\)\z/,
       "KPI formula aggregates the helper's value column (got #{kcol && kcol['formula']})", fails)
 hf = helper ? (helper['filters'] || []) : []
 check(hf.size == 2, "helper carries BOTH scope filters (got #{hf.size})", fails)
 check(hf.all? { |f| f['id'].to_s != '' }, 'every helper filter carries an id', fails)
 yearf = hf.find { |f| f['values'] == [2016] }
 check(!yearf.nil?, 'year filter pinned to the integer param value 2016', fails)
-subjf = hf.find { |f| f['values'] == ['Web Development'] }
+subjf = hf.find { |f| f['values'] == ['Engineering'] }
 check(!subjf.nil?, "subject filter pinned to the param's current string value", fails)
 ycol = helper && (helper['columns'] || []).find { |c| c['id'] == (yearf || {})['columnId'] }
 check(ycol && ycol['formula'] == 'DatePart("year", [Master/Published Date])',

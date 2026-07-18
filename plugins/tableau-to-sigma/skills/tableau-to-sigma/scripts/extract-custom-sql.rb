@@ -39,7 +39,7 @@ results = []
 # --- GraphQL path ---
 # NB: do NOT add `isUnique` (or other newer CustomSQLTable fields) to these
 # queries. `isUnique` is undefined on `CustomSQLTable` in some Tableau Metadata
-# API versions (verified 2026-07-06 on 10ay.online.tableau.com): its presence
+# API versions (verified 2026-07-06 on Tableau Cloud): its presence
 # fails the ENTIRE query with a FieldUndefined ValidationError, `Tableau.graphql`
 # rescues it, and the extractor silently returns 0 custom-SQL blocks — which
 # then breaks published-datasource (sqlproxy) hydration downstream. Keep the

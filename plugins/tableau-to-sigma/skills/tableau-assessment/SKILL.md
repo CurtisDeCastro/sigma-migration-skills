@@ -394,7 +394,7 @@ ruby scripts/fetch-all-twbs.rb --out /tmp/assessment-<site> \
   --limit 50          # for a sanity pass before fetching the whole site
 ```
 
-Expected throughput on Tableau Cloud `10ay.online.tableau.com`: ~300 wb/min
+Expected throughput on Tableau Cloud (measured on a production pod): ~300 wb/min
 on small workbooks, ~60-120 wb/min on a mixed corpus with several 5MB+
 `.twbx` files. **If you measure < 30 wb/min on a customer's site**, suspect
 network latency or large embedded extracts; lower threads to avoid 429s
@@ -736,7 +736,7 @@ unchanged.
 
 ### Snowflake-flavored examples
 
-Every worked example in this SKILL.md (the `TJ.PUBLIC.*` fixture tables,
+Every worked example in this SKILL.md (the `DEMO_DB.PUBLIC.*` fixture tables,
 the `snow sql` reconciliation, the `--snowflake-conn` flag, the
 `tableau-vds-to-cdw` sibling skill) uses Snowflake because that's
 where the development corpus and audit-run fixtures live. The Sigma-side

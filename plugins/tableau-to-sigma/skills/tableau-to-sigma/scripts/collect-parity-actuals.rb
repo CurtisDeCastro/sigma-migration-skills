@@ -9,8 +9,8 @@
 # returns exactly the plotted channels of a chart element with column display
 # names as headers, so it can fill the parity plan's actuals for every chart
 # kind EXCEPT pivot-tables (their CSV export is the WIDE pivot grid, not the
-# long row/col/value tuples the plan compares — verified on FATSCALE2
-# el-fat-crosstab-region-category 2026-06-12). Grouped "level" tables export in
+# long row/col/value tuples the plan compares — verified on a wide field
+# crosstab element 2026-06-12). Grouped "level" tables export in
 # long form and ARE poolable (verified on el-fat-status-table).
 #
 # Pooled N-wide (default 5 — the discovery pool's measured sweet spot) with the

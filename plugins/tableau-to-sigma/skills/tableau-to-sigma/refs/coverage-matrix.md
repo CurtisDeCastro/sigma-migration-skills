@@ -6,7 +6,7 @@ Sourced from the translator code, not aspiration. Last reconciled 2026-07-10.
 
 > **Phase A reconciliation (2026-07-10, corpus gap-closure epic `beads-sigma-tt3z`).** A machine-readable enumeration of all **145 Tableau functions** with per-function status now lives in [`coverage-manifest.json`](./coverage-manifest.json) (71 spec · 18 chart-only · 4 RLS · 2 verify · 21 flagged · 29 unmapped). Two changes since the last reconcile:
 > - **⛔ "Silent gap" is being retired.** A catch-all in `tableauFormulaToSigma` now emits a **loud warning** for any unmapped Tableau function instead of passing it through verbatim (`FINDNTH`, `CHAR`, `MAKEDATETIME`, `MODEL_QUANTILE`, trig, …) — these no longer fail silently at query time.
-> - **`WEEK` / `DATEPART('week', …)` fixed.** Sigma has no `Week()` function; both now emit `DatePart("week", date)` (caught by a live warehouse probe — `regression-corpus/tableau/formula_coverage`). The DM-probeable mappings are live-verified against `CSA.TJ.ORDER_FACT` (0 error columns).
+> - **`WEEK` / `DATEPART('week', …)` fixed.** Sigma has no `Week()` function; both now emit `DatePart("week", date)` (caught by a live warehouse probe — `regression-corpus/tableau/formula_coverage`). The DM-probeable mappings are live-verified against the demo `ORDER_FACT` table (0 error columns).
 
 ## Status legend
 

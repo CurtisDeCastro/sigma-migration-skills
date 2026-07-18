@@ -43,5 +43,5 @@ An API-created import model has **no credentials and has never refreshed** → e
 Note: a successful refresh means the model's `rsa_key.pub` is already registered on the Snowflake user (`ALTER USER … SET RSA_PUBLIC_KEY=…`); if refresh fails auth, register it first.
 
 ## Validated artifacts (Test ws `269a33d0-98c4-476f-890d-612ea8072f9a`)
-- Semantic model `049863fa-5500-4d45-a541-1478799a760c` — 20/20 measures, DimDate calc table, 5 relationships intact (RANKX/TOTALYTD/SAMEPERIODLASTYEAR confirmed).
-- Report `0bebf272-45db-466e-ae93-522c6c9c9999` — bound to the model.
+- Semantic model `<model-id>` — 20/20 measures, DimDate calc table, 5 relationships intact (RANKX/TOTALYTD/SAMEPERIODLASTYEAR confirmed).
+- Report `<report-id>` — bound to the model.

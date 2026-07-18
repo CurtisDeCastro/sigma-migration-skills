@@ -176,7 +176,7 @@ ok(c['status'] == 'match', 'a match on a filtered chart is not downgraded')
 
 # ---------------------------------------------------------------------------
 puts '-- CLI offline mode --'
-LUID = '1bef4413-4d4b-452a-9082-2cae8e94f28d'
+LUID = '0f0e0d0c-0b0a-4900-8807-060504030201'
 
 def entry(id, el, name, calc, formula, extra = {})
   { 'id' => id, 'worksheet' => name, 'dashboard' => 'Dash', 'element_id' => el,

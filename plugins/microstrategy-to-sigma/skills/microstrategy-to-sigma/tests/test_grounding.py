@@ -195,7 +195,7 @@ def test_e2e_offline_fixture():
     with tempfile.TemporaryDirectory() as d:
         r = subprocess.run(
             [sys.executable, CONV, "--bundle", BUNDLE,
-             "--connection-id", "conn-x", "--database", "CSA",
+             "--connection-id", "conn-x", "--database", "DEMO_DB",
              "--folder-id", "fld-x", "--ae-winners", AE_WINNERS,
              "--out-dm", os.path.join(d, "dm.json"),
              "--out-wb", os.path.join(d, "wb.json"),
@@ -224,7 +224,7 @@ def test_chart_emission():
         # a follow-up, same as chart+control. This matches the LIVE-verified run.
         r = subprocess.run(
             [sys.executable, CONV, "--bundle", BUNDLE_CHARTS,
-             "--connection-id", "conn-x", "--database", "CSA", "--folder-id", "fld-x",
+             "--connection-id", "conn-x", "--database", "DEMO_DB", "--folder-id", "fld-x",
              "--out-wb", os.path.join(d, "wb.json")],
             capture_output=True, text=True, cwd=d)
         assert r.returncode == 0, r.stderr

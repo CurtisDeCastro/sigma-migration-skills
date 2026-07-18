@@ -8,7 +8,7 @@
 # TRUSTED — they surface only as free-text WARN lines, and the CSV parity path
 # can't see them when the view export is empty/missing. Tableau's VizQL Data
 # Service executes the ORIGINAL formula server-side when the field carries a
-# tableCalculation spec (live-verified 2026-07-11 against 10ay/dataflow:
+# tableCalculation spec (live-verified 2026-07-11 against a Tableau Cloud site:
 #   - a bare `calculation` with a table calc is REJECTED (400000 "Table
 #     calculation functions require a tableCalculation specification");
 #   - `tableCalculation: {"tableCalcType": "CUSTOM", "dimensions": [...]}`

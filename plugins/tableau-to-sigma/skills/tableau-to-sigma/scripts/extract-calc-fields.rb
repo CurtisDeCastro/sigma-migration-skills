@@ -89,7 +89,7 @@ end
 
 luid = opts[:workbook_luid]
 out_path = opts[:out] || File.join('/tmp', "calc-fields-#{luid}.json")
-twb_path = opts[:twb] || "/tmp/assessment-dataflow/twbs/#{luid}.twb"
+twb_path = opts[:twb] || "/tmp/assessment-site/twbs/#{luid}.twb"
 
 FileUtils.mkdir_p(File.dirname(out_path))
 
@@ -128,7 +128,7 @@ end
 module CalcCache
   HOME_OVERRIDE = ENV['TABLEAU_TO_SIGMA_HOME']
   DEFAULT_HOME  = File.expand_path('~/.tableau-to-sigma')
-  CACHE_VERSION = 2 # bump when gotchas()/requires_custom_sql? logic changes
+  CACHE_VERSION = 3 # bump when gotchas()/requires_custom_sql?/subclass logic changes (v3: index-to-first)
 
   def self.home
     HOME_OVERRIDE || DEFAULT_HOME
@@ -262,15 +262,77 @@ def requires_custom_sql?(formula)
   detect_manual_window_fns(formula).any? || !!(formula =~ /\{\s*(INCLUDE|EXCLUDE)\b/i)
 end
 
+# ---- named auto-translatable manual subclasses ---------------------------
+#
+# 'index-to-first' (v5.6, calc-flex item 4): LOOKUP(<agg>, FIRST()) is the
+# canonical "value at the pane's first row" idiom (percent-of-first-month,
+# growth-since-baseline). FIRST() keeps it in the STAYS-MANUAL bucket
+# (requires_custom_sql), but the SQL translation is fully mechanical:
+# aggregate to the pane grain, then FIRST_VALUE over the axis order — the
+# same grouped-helper shape the AUTO window family uses. The detector emits
+# the ready SQL into `suggested_sql`; build-charts-from-signals.rb carries it
+# into the manual-residues (G6) ledger verbatim, so the build-it checklist
+# holds paste-ready SQL instead of a generic OVER() skeleton.
+#
+# Inner-expr grammar: an aggregate expression whose args may contain bracket
+# refs and up to TWO levels of nested parens (SUM([X]), ZN(SUM([X])),
+# AVG(ZN([X])), SUM([A])/SUM([B])) — covers the field's growth-since-baseline
+# chains without a full parser.
+INDEX_TO_FIRST_RE = /
+  \bLOOKUP\s*\(\s*
+    (                                   # inner aggregate expression
+      (?: [^()\[\],]
+        | \[[^\]]*\]
+        | \( (?: [^()\[\]] | \[[^\]]*\] | \( (?: [^()\[\]] | \[[^\]]*\] )* \) )* \)
+      )+?
+    )
+  \s*,\s*FIRST\s*\(\s*\)\s*\)
+/xi
+
+def index_to_first(formula)
+  m = formula.to_s.match(INDEX_TO_FIRST_RE)
+  m && m[1].strip
+end
+
+# Grouped-helper SQL template for the index-to-first subclass. Pure function
+# of the formula (memoization-safe): the calc's display name is left as the
+# <calc name> placeholder; pane/axis/table placeholders match the G6 skeleton
+# vocabulary so the build-it instructions read the same.
+def index_to_first_sql(inner)
+  sql_inner = inner.gsub(/\[([^\]]+)\]/) { Regexp.last_match(1).gsub(/\s+/, '_').upcase }
+  [
+    "-- index-to-first (auto-translatable subclass): LOOKUP(#{inner}, FIRST())",
+    '-- = the pane\'s first-row value of the aggregate. Grouped-helper template —',
+    '-- replace <pane dims>/<axis dim>/<landed fact table>/<calc name>, then build as a',
+    '-- Custom SQL data-model element (kind: "sql") and relate it back on <pane dims>.',
+    'SELECT <pane dims>, <axis dim>,',
+    "       #{sql_inner} AS BASE_AGG,",
+    "       FIRST_VALUE(#{sql_inner}) OVER (PARTITION BY <pane dims> ORDER BY <axis dim>) AS \"<calc name>\"",
+    'FROM <landed fact table>',
+    'GROUP BY <pane dims>, <axis dim>'
+  ].join("\n")
+end
+
 # Derive the translation signals for one formula. Pure function of the formula
 # text → safe to memoize by formula hash. Returns the subset of the calc record
 # that depends ONLY on the formula (not on name/role/datasource metadata).
 def compute_signals(formula)
-  {
+  sig = {
     is_lod: !!lod?(formula),
     requires_custom_sql: requires_custom_sql?(formula),
     translation_notes: gotchas(formula)
   }
+  if (inner = index_to_first(formula))
+    sig[:manual_subclass] = 'index-to-first'
+    sig[:suggested_sql] = index_to_first_sql(inner)
+    sig[:translation_notes] += [
+      'AUTO-SQL-TEMPLATE (index-to-first): LOOKUP(<agg>, FIRST()) is the "value at the pane\'s ' \
+      'first row" idiom — ready grouped-helper Custom SQL emitted in suggested_sql (the ' \
+      'manual-residues/G6 ledger carries it verbatim); fill the <pane dims>/<axis dim>/' \
+      '<landed fact table> placeholders and build as a Custom SQL DM element.'
+    ]
+  end
+  sig
 end
 
 # Memoizing wrapper. $calc_cache is the loaded hash; $calc_cache_stats tracks
@@ -282,21 +344,27 @@ def cached_signals(formula)
   h = CalcCache.key(formula)
   if $calc_cache && (hit = $calc_cache[h])
     $calc_cache_stats[:hits] += 1
-    return {
+    out = {
       is_lod: hit['is_lod'],
       requires_custom_sql: hit['requires_custom_sql'],
       translation_notes: hit['translation_notes'] || [],
       formula_hash: h
     }
+    out[:manual_subclass] = hit['manual_subclass'] if hit['manual_subclass']
+    out[:suggested_sql] = hit['suggested_sql'] if hit['suggested_sql']
+    return out
   end
   $calc_cache_stats[:misses] += 1
   sig = compute_signals(formula)
   if $calc_cache
-    $calc_cache[h] = {
+    entry = {
       'is_lod' => sig[:is_lod],
       'requires_custom_sql' => sig[:requires_custom_sql],
       'translation_notes' => sig[:translation_notes]
     }
+    entry['manual_subclass'] = sig[:manual_subclass] if sig[:manual_subclass]
+    entry['suggested_sql'] = sig[:suggested_sql] if sig[:suggested_sql]
+    $calc_cache[h] = entry
   end
   sig.merge(formula_hash: h)
 end
@@ -354,7 +422,7 @@ def fetch_via_metadata_api(luid)
       formula = f['formula'].to_s
       depends_on = (f['fields'] || []).map { |d| d['name'] }.compact.uniq
       sig = cached_signals(formula)
-      calcs << {
+      rec = {
         name: f['name'],
         internal_name: f['name'],
         datasource: ds_name,
@@ -369,6 +437,9 @@ def fetch_via_metadata_api(luid)
         requires_custom_sql: sig[:requires_custom_sql],
         translation_notes: sig[:translation_notes]
       }
+      rec[:manual_subclass] = sig[:manual_subclass] if sig[:manual_subclass]
+      rec[:suggested_sql] = sig[:suggested_sql] if sig[:suggested_sql]
+      calcs << rec
     end
   end
 
@@ -441,7 +512,7 @@ def fetch_via_twb_xml(twb_path)
       default_agg = col.attributes['default-aggregation']
       sig = cached_signals(formula)
       dep_internal = resolve_deps.call(formula, internal_name)
-      calcs << {
+      rec = {
         name: caption || internal_name,
         # internal_name is the .twb id (e.g. "[Calculation_123]" or
         # "[Field (copy)_456]") that worksheet column-instances reference, used
@@ -466,6 +537,9 @@ def fetch_via_twb_xml(twb_path)
         requires_custom_sql: sig[:requires_custom_sql],
         translation_notes: sig[:translation_notes]
       }
+      rec[:manual_subclass] = sig[:manual_subclass] if sig[:manual_subclass]
+      rec[:suggested_sql] = sig[:suggested_sql] if sig[:suggested_sql]
+      calcs << rec
     end
   end
 

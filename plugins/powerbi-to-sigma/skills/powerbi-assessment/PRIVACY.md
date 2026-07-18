@@ -32,7 +32,7 @@ API) on its way to producing the readout. Anthropic's API data handling:
 | **Names**: model names, report names, workspace names | Power BI / Entra credentials (held in the device-code token cache, not surfaced to the agent) |
 | **Full TMSL** per semantic model — including **DAX measure expressions**, **calculated-column / calculated-table DAX**, and **RLS role definitions** | The actual cell values your reports display |
 | **PBIR** per report — visual configuration, page structure, visual types | `.pbix` binary model blobs (this skill reads the JSON definition, not the binary) |
-| Warehouse **host names** parsed from M (e.g. `ymb68310.snowflakecomputing.com`) — not credentials | The warehouse credentials Power BI uses to connect |
+| Warehouse **host names** parsed from M (e.g. `gxb98765.snowflakecomputing.com`) — not credentials | The warehouse credentials Power BI uses to connect |
 | Refresh job results (status, type, timestamps) | |
 
 > **This is a broader, more sensitive data category than the

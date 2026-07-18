@@ -8,7 +8,7 @@ post-and-readback control lint) and `scripts/probe-controls.rb` (flip test).
 
 A migrated workbook can pass data parity, the column-type guard, and the
 layout lint and still ship **broken interactivity**. The 2026-06 estate audit
-of tj-wells-1989 found 86 controls across 36 kept workbooks: 8 DEAD (no
+of a live Sigma org found 86 controls across 36 kept workbooks: 8 DEAD (no
 filter target, no formula reference — pure furniture), 18 PARTIAL (same-page
 charts outside the control's reach; 8 of them bugs), and the Qlik class
 (source dashboards full of listboxes migrated with zero controls). None of
@@ -43,7 +43,7 @@ their default state.
    must NOT differ. Use it after hand-wiring controls, after estate repairs,
    or when the lint's static reach needs runtime confirmation.
 
-## The MCP question — definitive answer (verified 2026-06-12, tj-wells-1989)
+## The MCP question — definitive answer (verified 2026-06-12, live Sigma org)
 
 Tested by setting a saved default (`values: ["West"]`) on a live workbook's
 Region list control (PHASEE, `64e78398`), then querying/exporting the same

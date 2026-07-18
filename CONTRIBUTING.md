@@ -88,6 +88,18 @@ runs (`tools/check-shared.rb` + `tools/lint-skills.rb`, ~1s) so shared-lib drift
 or a missing gate is caught locally. Bypass with `--no-verify` if you must — CI
 still enforces.
 
+## Hygiene sweep (no test-org identifiers, ever)
+
+Run `bash tools/hygiene-sweep.sh` before every commit, alongside
+`tools/check-shared.rb` (the governance hook runs both). It greps every tracked
+file **and the staged diff** against `tools/hygiene-patterns.txt` and fails
+with named hits if any test-org or customer identifier (connection, workbook,
+customer, datasource, field/value literal, or object id) appears anywhere.
+When new test infrastructure or a customer transcript enters the vocabulary,
+add its stable identifiers to the pattern file first and write code/docs
+against neutral replacements ("the field workbook", `<connection-id>`,
+"Region A & B"-style literals).
+
 ## Regression: the corpus
 
 Changing a converter/builder? Run `./corpus/run-corpus.sh --check` and reconvert
@@ -111,5 +123,5 @@ Sessions can't talk live, so coordinate through shared state:
 
 ## Before opening a PR
 
-`ruby tools/check-shared.rb && ruby tools/lint-skills.rb && ./corpus/run-corpus.sh --check`
+`ruby tools/check-shared.rb && ruby tools/lint-skills.rb && bash tools/hygiene-sweep.sh && ./corpus/run-corpus.sh --check`
 — all green. The PR template (`.github/PULL_REQUEST_TEMPLATE.md`) lists the rest.

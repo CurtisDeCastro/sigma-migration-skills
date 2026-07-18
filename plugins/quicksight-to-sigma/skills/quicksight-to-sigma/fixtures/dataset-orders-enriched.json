@@ -1,7 +1,7 @@
 {
     "Status": 200,
     "DataSet": {
-        "Arn": "arn:aws:quicksight:us-east-1:153722385948:dataset/orders-enriched",
+        "Arn": "arn:aws:quicksight:us-east-1:<aws-account-id>:dataset/orders-enriched",
         "DataSetId": "orders-enriched",
         "Name": "Orders Enriched",
         "CreatedTime": "2026-06-06T07:54:15.422000-04:00",
@@ -9,9 +9,9 @@
         "PhysicalTableMap": {
             "ordersSql": {
                 "CustomSql": {
-                    "DataSourceArn": "arn:aws:quicksight:us-east-1:153722385948:datasource/snowflake-csa-tj",
+                    "DataSourceArn": "arn:aws:quicksight:us-east-1:<aws-account-id>:datasource/snowflake-demo",
                     "Name": "orders_enriched",
-                    "SqlQuery": "select f.ORDER_ID, f.ORDER_CHANNEL, f.ORDER_STATUS, f.QUANTITY_ORDERED, f.NET_REVENUE, f.GROSS_REVENUE, f.NET_PROFIT, f.DISCOUNT_AMOUNT, p.CATEGORY, p.SUBCATEGORY, p.BRAND, c.REGION, c.STATE, c.CUSTOMER_SEGMENT, c.LOYALTY_TIER, d.FULL_DATE, d.YEAR, d.QUARTER, d.MONTH_NUMBER, d.MONTH_NAME from CSA.TJ.ORDER_FACT f left join CSA.TJ.PRODUCT_DIM p on f.PRODUCT_KEY=p.PRODUCT_KEY left join CSA.TJ.CUSTOMER_DIM c on f.CUSTOMER_KEY=c.CUSTOMER_KEY left join CSA.TJ.DATE_DIM d on f.ORDER_DATE_KEY=d.DATE_KEY",
+                    "SqlQuery": "select f.ORDER_ID, f.ORDER_CHANNEL, f.ORDER_STATUS, f.QUANTITY_ORDERED, f.NET_REVENUE, f.GROSS_REVENUE, f.NET_PROFIT, f.DISCOUNT_AMOUNT, p.CATEGORY, p.SUBCATEGORY, p.BRAND, c.REGION, c.STATE, c.CUSTOMER_SEGMENT, c.LOYALTY_TIER, d.FULL_DATE, d.YEAR, d.QUARTER, d.MONTH_NUMBER, d.MONTH_NAME from DEMO_DB.DEMO.ORDER_FACT f left join DEMO_DB.DEMO.PRODUCT_DIM p on f.PRODUCT_KEY=p.PRODUCT_KEY left join DEMO_DB.DEMO.CUSTOMER_DIM c on f.CUSTOMER_KEY=c.CUSTOMER_KEY left join DEMO_DB.DEMO.DATE_DIM d on f.ORDER_DATE_KEY=d.DATE_KEY",
                     "Columns": [
                         {
                             "Name": "ORDER_ID",

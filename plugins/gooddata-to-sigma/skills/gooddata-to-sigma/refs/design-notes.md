@@ -82,7 +82,7 @@ Original findings (for reference):
   plugins/themes elsewhere.
 - **`ORDER_FACT` exposes only INT date keys** (`ORDER_DATE_KEY` YYYYMMDD, no DATE
   column). Two ways to get a DATE: a SQL-backed dataset that casts it, or join
-  `CSA.TJ.DATE_DIM` (has `FULL_DATE` DATE + `DATE_KEY`).
+  `DEMO_DB.DEMO.DATE_DIM` (has `FULL_DATE` DATE + `DATE_KEY`).
 - **Converter work to add:** `dateInstance` → a Sigma date column (parse YYYYMMDD
   via the date DSL, or use the joined `FULL_DATE`); `FOR PREVIOUS` →
   `DateLookback(<measure>, "month", -1)` in a date-grouped workbook element

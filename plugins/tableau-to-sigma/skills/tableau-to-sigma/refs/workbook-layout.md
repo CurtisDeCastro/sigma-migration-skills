@@ -634,7 +634,7 @@ Optional sub-fields documented in upstream `sigma-workbooks/charts.md` (`labelDi
 
 Sigma supports two map kinds via spec: **`region-map`** (choropleth — fills named geographic regions) and **`point-map`** (lat/long bubbles or symbols).
 
-> **Disregard older guidance that said "Sigma spec does not support maps."** Both kinds are real spec elements, persist on round-trip, and render correctly when published. Verified May 2026 against `cb2f5180-...` (`region-map`/`us-state` and `us-zipcode`) with live data parity confirmed via `mcp__sigma-mcp-v2__query`.
+> **Disregard older guidance that said "Sigma spec does not support maps."** Both kinds are real spec elements, persist on round-trip, and render correctly when published. Verified May 2026 against `ab12cd34-...` (`region-map`/`us-state` and `us-zipcode`) with live data parity confirmed via `mcp__sigma-mcp-v2__query`.
 
 #### region-map (choropleth)
 
@@ -862,7 +862,7 @@ Use `rowsBy`, `columnsBy`, and `values`. **Do NOT use `rows` or `columnGroups`**
 
 **`conditionalFormats`** — Conditional formatting on pivot-table / table columns. Two supported types.
 
-> **Verified 2026-05-24 against `tj-wells-1989` org during audit-run-2.** The
+> **Verified 2026-05-24 against a live Sigma org during audit-run-2.** The
 > field that holds the column IDs is **`columnIds`**, NOT `columns`. The first
 > POST in audit-run-1 (NASA agent) failed with HTTP 400 `Invalid request` when
 > using `columns`; the second succeeded with `columnIds` and round-trips

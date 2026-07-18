@@ -1,5 +1,5 @@
 view: date_dim {
-  sql_table_name: CSA.TJ.DATE_DIM ;;
+  sql_table_name: DEMO_DB.DEMO.DATE_DIM ;;
 
   dimension: date_key {
     primary_key: yes

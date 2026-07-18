@@ -39,7 +39,7 @@
 //     [--folder <SIGMA_FOLDER_ID>]     # default: YOUR My Documents, resolved
 //                                      # via whoami (list candidates with
 //                                      # GET /v2/files?typeFilters=folder)
-//     [--database CSA] [--schema TJ] [--name '<prefix for DM/workbook names>'] \
+//     [--database <DB>] [--schema <SCHEMA>] [--name '<prefix for DM/workbook names>'] \
 //     [--out DIR] [--expected expected.json] [--tol 0.01] \
 //     [--reuse-dm [dataModelId]]   # opt IN to DM reuse (default: build new;
 //                                  # bare flag = use the picker's recommendation)
@@ -321,7 +321,7 @@ if (existsSync(cliBundle)) {
 }
 const modulePath = resolve(opt.module);
 const reportPath = resolve(opt.report);
-const db = opt.database || 'CSA';
+const db = opt.database || 'DEMO_DB';
 const schema = opt.schema || 'TJ';
 const securityPath = join(WORK, 'security.json');
 const conv = spawnSync('node', [...cliPre, cliCmd, modulePath,

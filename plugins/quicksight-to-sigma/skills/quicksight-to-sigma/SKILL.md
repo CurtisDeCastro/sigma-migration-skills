@@ -133,7 +133,7 @@ python3 scripts/quicksight-render-source.py \
 
 Then **Read `<WORK>/dashboards/source.png`** and, in that same pass, transcribe the printed
 numbers into **`<WORK>/source-anchors.json` — EXACTLY as printed** (keep the raw string:
-`"18,037B"`, never `18037`; `"(12.3%)"`, never `-0.123`). Minimum **≥ 5 anchors**: every KPI
+`"12,345B"`, never `12345`; `"(12.3%)"`, never `-0.123`). Minimum **≥ 5 anchors**: every KPI
 value, the top 3 values of each ranked list/table, one representative bucket value per chart,
 and 2–3 `text` roster anchors (include at least one from the BOTTOM of any ranked list — top
 members survive a wrong ranking, bottom members don't). Also write `png-read.json`

@@ -6,7 +6,7 @@ Motivation (2026-06-18 postmortem follow-up): migrate-looker.py required
 `--lookml-dir` (a local checkout of the LookML repo). This adds an API path so a
 migration can run from just a project id, and lets the orchestrator AUTO-DERIVE
 the `--source-swap` by asking Looker what DB.SCHEMA the project's connection
-actually targets (the postmortem's #3 was hand-patching CSA.TJ → the Sigma
+actually targets (the postmortem's #3 was hand-patching DEMO_DB.DEMO → the Sigma
 connection's schema).
 
 Uses looker_api.py for auth (reads ~/.looker/looker.ini). Two capabilities:

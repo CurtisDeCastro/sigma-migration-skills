@@ -4,8 +4,8 @@ The WINPROBE regression pair for **Tableau window/table calcs → Sigma-native
 window math** (bead beads-sigma-427, validated 2026-06-12 with **930/930 cells
 exact** vs warehouse ground truth on ONE DM base element, zero Custom SQL).
 Source: live Tableau workbook **"WINPROBE Window Functions"**
-(`aa126c36-608a-402c-9733-2c83797bc65c`, 10ay/dataflow site) over the
-`CSA.TJ.ORDER_FACT` demo warehouse (demo data only). Eight worksheets, one
+(`<workbook-luid>`, a Tableau Cloud site) over the
+`DEMO_DB.DEMO.ORDER_FACT` demo warehouse (demo data only). Eight worksheets, one
 window family each:
 
 | Worksheet | Tableau calc | Validated Sigma form |
@@ -26,7 +26,7 @@ Full mapping + gotchas: the skill's `refs/window-functions.md`.
 A customer reported that `MovingSum` worked in a **table** calc column, which
 contradicted the old "chart yAxis is the ONLY verified context" rule. Re-probed
 live with `scripts/probe-window-contexts.rb` against the `WINPROBE Base` DM
-(`01d5deb8-de64-485d-a428-e368afc6963b`): the Sigma-native window family
+(`11111111-2222-4333-8444-555555555555`): the Sigma-native window family
 (CumulativeSum/MovingSum/MovingAvg/Rank/RankDense/RowNumber/Lag/Lead/
 PercentOfTotal) resolves to real `OVER(...)` in **all three** calc-column
 contexts — grouped workbook table, ungrouped workbook "master" table, and
@@ -40,7 +40,7 @@ Re-run the probe to re-verify on any org — it is the gate for that claim.
 
 | File | What it is |
 |---|---|
-| `workbook-content.twb` | The live WINPROBE workbook XML (8 worksheets; published virtual-connection datasource over CSA.TJ) |
+| `workbook-content.twb` | The live WINPROBE workbook XML (8 worksheets; published virtual-connection datasource over DEMO_DB.DEMO) |
 | `get-workbook.json` | View name → view id map (REST get-workbook shape) so `build-charts-from-signals.rb` runs offline |
 | `views/<viewId>.csv` | Tableau view exports = the parity ground truth (incl. the Measure-Names LONG-format funnel CSV and the quarter-label pivot CSV) |
 | `master-columns.json` | Master-map regexes for the 6 ORDER_FACT columns (Order Id / Order Date / Net Revenue / Is Returned / Region / Category) |
@@ -85,10 +85,10 @@ intermediates and are not pinned.
 
 ## Known parity reference (live run 2026-06-12)
 
-WINPROBE probe workbook (org tj-wells-1989, conn `bc0319f8`, `CSA.TJ`):
+WINPROBE probe workbook (the demo Sigma org, conn `<connection-id>`, `DEMO_DB.DEMO`):
 930/930 cells exact (tol 1e-6) across all 8 families, three-way
 (Tableau CSV == warehouse SQL == Sigma element export). Kept references:
-Tableau wb `aa126c36-608a-402c-9733-2c83797bc65c`, Sigma DM `01d5deb8`.
+Tableau wb `<workbook-luid>`, Sigma DM `<dm-id>`.
 
 ## Expectations
 

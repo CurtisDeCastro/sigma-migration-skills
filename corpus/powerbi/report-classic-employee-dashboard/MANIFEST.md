@@ -1,7 +1,7 @@
 # powerbi / report-classic-employee-dashboard
 
 A LEGACY single-file Power BI report layout ("EMPLOYEE DASHBOARD", synthetic
-CSA.TJ workforce data, extracted 2026-06-07 from a Fabric My-workspace via
+DEMO_DB.DEMO workforce data, extracted 2026-06-07 from a Fabric My-workspace via
 `getDefinition`). This is the **classic `report.json` format** — one file with
 a `sections[]` array — NOT the exploded PBIR folder format. Both formats exist
 in the wild; the powerbi-to-sigma skill's `extract-report-classic.py` handles
