@@ -80,6 +80,8 @@ OptionParser.new do |o|
   o.on('--skip-images')           { opts[:fetch_view_images] = 'none' }
   o.on('--all-view-images')       { opts[:fetch_view_images] = 'all' }
   o.on('--skip-content')          { opts[:skip_content] = true }
+  o.on('--no-extract-refetch', 'skip the includeExtract=true re-download when extract markers are found — ' \
+                               'for routes that never consume the frozen extract bytes (e.g. a live repoint)') { opts[:no_extract_refetch] = true }
   o.on('--pool N', Integer, 'Fetch-pool size (default 5 — measured sweet spot)') { |v| opts[:pool] = v }
 end.parse!
 
@@ -114,7 +116,9 @@ end
 RETRYABLE = /\b(429|408|400|50[234])\b|Too Many Requests|timed? ?out|Timeout/i
 
 # Run one named fetch task with timing + backoff-retry. Returns task result or nil.
-def run_task(name)
+# max_attempts caps the backoff-retry budget (default 4; the heavy extract
+# re-download uses 2 — its 120s×4 worst case dominated failed discoveries).
+def run_task(name, max_attempts: 4)
   t0 = Time.now.to_f
   attempts = 0
   begin
@@ -127,12 +131,12 @@ def run_task(name)
     result
   rescue Tableau::Error, Timeout::Error, Errno::ETIMEDOUT, Net::ReadTimeout, Net::OpenTimeout => e
     msg = e.message.lines.first&.chomp || e.class.name
-    if attempts < 4 && msg =~ RETRYABLE
+    if attempts < max_attempts && msg =~ RETRYABLE
       delay = (1.5 * (2**(attempts - 1))) + rand * 0.5
       log "#{name}: retryable (#{msg[0, 80]}) — backoff #{delay.round(1)}s (attempt #{attempts})"
       sleep delay
       retry
-    elsif attempts < 3 && msg =~ /\b401\b/
+    elsif attempts < [max_attempts, 3].min && msg =~ /\b401\b/
       # lib already retried 401 once with a refreshed token; one more explicit
       # re-mint covers session invalidation racing across threads.
       log "#{name}: 401 escaped lib retry — re-minting token (attempt #{attempts})"
@@ -255,15 +259,21 @@ unless opts[:skip_content]
       # the payload; non-extract workbooks never pay the big download.
       if twb_xml && !had_hypers &&
          (twb_xml.include?('<extract') || twb_xml =~ /class='(?:hyper|textscan)'/)
-        log 'embedded extract detected but no .hyper payload in the download — re-fetching WITH includeExtract=true'
-        with_extract = run_task('twb-download-extract') { Tableau.download_workbook_content(wb['id'], include_extract: true) }
-        if with_extract && with_extract.bytesize > bytes.bytesize
-          twb_xml2, had2 = persist.call(with_extract)
-          twb_xml = twb_xml2 || twb_xml
-          log had2 ? 'extract payload landed in workbook-content.twbx' :
-                     'WARN: re-fetch still contained no .hyper — land-extracts.py will need a manual includeExtract=true download'
+        if opts[:no_extract_refetch]
+          # One clear line, then move on: this route never consumes the frozen
+          # extract bytes, so the heavy includeExtract=true download is waste.
+          log 'embedded extract detected — extract re-fetch SKIPPED (--no-extract-refetch: this route needs no extract bytes)'
         else
-          log 'WARN: includeExtract=true re-fetch returned nothing larger — proceeding with the thin .twb'
+          log 'embedded extract detected but no .hyper payload in the download — re-fetching WITH includeExtract=true'
+          with_extract = run_task('twb-download-extract', max_attempts: 2) { Tableau.download_workbook_content(wb['id'], include_extract: true) }
+          if with_extract && with_extract.bytesize > bytes.bytesize
+            twb_xml2, had2 = persist.call(with_extract)
+            twb_xml = twb_xml2 || twb_xml
+            log had2 ? 'extract payload landed in workbook-content.twbx' :
+                       'WARN: re-fetch still contained no .hyper — land-extracts.py will need a manual includeExtract=true download'
+          else
+            log 'WARN: includeExtract=true re-fetch returned nothing larger — proceeding with the thin .twb'
+          end
         end
       end
     end

@@ -25,6 +25,11 @@ require 'io/console'
 require 'json'
 require 'fileutils'
 require 'optparse'
+begin
+  require_relative 'lib/redact'   # vendored plugin layout (scripts/lib/redact.rb)
+rescue LoadError
+  require_relative '../lib/redact' # canonical layout (shared/scripts + shared/lib)
+end
 
 SETTINGS_PATH = File.expand_path("~/.claude/settings.json")
 NEUTRAL_PATH  = File.expand_path("~/.sigma-migration/env")
@@ -184,7 +189,8 @@ pairs = {
 pairs["SIGMA_CONNECTION_ID"] = conn unless conn.empty?
 upsert_neutral_env(pairs)
 
-redacted_secret = sec.length > 8 ? "#{sec[0..3]}…#{sec[-4..]} (#{sec.length} chars)" : "(#{sec.length} chars)"
+# Contract: never echo credential values — mask all but the last 4 characters.
+redacted_secret = "#{Redact.mask(sec)} (#{sec.length} chars)"
 
 puts
 puts "Credentials saved to:"

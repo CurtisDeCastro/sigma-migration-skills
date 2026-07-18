@@ -124,6 +124,7 @@ require_relative 'lib/py_resolve' # real-Python resolver (Windows Store-stub saf
 require 'date'
 require 'time'
 require 'set'
+require 'digest' # loop-breaker failure signatures (Offramp.loop_check)
 require_relative 'lib/scout_gate'
 require_relative 'lib/dashboard_read'
 require_relative 'lib/recipe_multimetric'
@@ -392,6 +393,43 @@ unless system(*_dg_cmd)
                 'bash scripts/doctor.sh'
   abort "FATAL: environment gate failed — run the doctor first (#{_doc_hint}; see remediation above), " \
         'or re-run with --skip-doctor-gate "<reason>".'
+end
+
+# 🚧 Step-0 STALENESS HARD GATE (escalates the doctor's SHA/build-age WARN).
+# The doctor stamps {behind_count, days_since_commit} into doctor.json; a
+# checkout behind upstream (or >14 days old) silently re-hits bugs fixed weeks
+# earlier, so the WARN is now enforced at run start. Waive with
+# SIGMA_ALLOW_STALE="<reason>" (recorded as an off-ramp). Best-effort read:
+# a missing/unreadable doctor.json is the doctor gate's problem, not this one's.
+begin
+  _st_path = [File.join(WORK, 'doctor.json'),
+              File.expand_path('~/.sigma-migration/doctor.json')].find { |p| File.exist?(p) }
+  _st = _st_path ? JSON.parse(File.read(_st_path, encoding: 'bom|utf-8')) : {}
+  _st_bc = _st['behind_count']
+  _st_days = _st['days_since_commit']
+  _stale_why = if _st_bc.is_a?(Integer) && _st_bc.positive?
+                 "#{_st_bc} commit(s) behind upstream"
+               elsif _st_days.is_a?(Integer) && _st_days > 14
+                 "build is #{_st_days} days old (>14)"
+               end
+  if _stale_why
+    _stale_reason = ENV['SIGMA_ALLOW_STALE']
+    if _stale_reason && !_stale_reason.to_s.empty?
+      warn "WARN: STALE skill checkout (#{_stale_why}) — proceeding on SIGMA_ALLOW_STALE=#{_stale_reason}."
+      Offramp.log(WORK, kind: 'stale-skill-waived', reason: _stale_reason.to_s, detail: _stale_why)
+    else
+      abort <<~MSG
+        FATAL: stale skill checkout — #{_stale_why} (doctor report: #{_st_path}).
+        A stale build silently re-runs bugs already fixed upstream. Update it first:
+            git pull            # in the skill/marketplace clone
+        …or reinstall the plugin, re-run the doctor (bash scripts/doctor.sh), then retry.
+        (Deliberately running a stale build? SIGMA_ALLOW_STALE="<reason>" waives this
+        gate — the waiver is recorded and must be named in your report.)
+      MSG
+    end
+  end
+rescue JSON::ParserError
+  # unreadable doctor.json was already handled (or waived) by the doctor gate
 end
 
 # 🚧 Step-0 CREDENTIAL GATE (fail-closed). The doctor treats missing creds as a
@@ -1136,6 +1174,26 @@ if opts[:finalize]
   puts "STATUS      : #{all_green ? 'GREEN' : 'NOT GREEN'}"
   puts '======================================='
   phase_summary
+  # ── Same-failure loop breaker (stop-at-2) ──────────────────────────────────
+  # A NOT-GREEN finalize records its gate signature; re-running --finalize into
+  # the SAME failing exit codes a third time is grinding, not converging —
+  # hard-STOP and hand control to the operator instead of looping toward a
+  # forced green (refs/operating-contract.md: "don't spin, don't fake").
+  unless all_green
+    _fsig = "migrate-tableau:finalize:phase6=#{p6st.exitstatus}:gate=#{gst.exitstatus}"
+    if Offramp.loop_check(WORK, signature: _fsig) == :stop
+      _prior = Offramp.loop_trail(WORK).select { |r| r['signature'] == _fsig }[0..-2]
+      puts
+      puts '==================== LOOP STOP (operator action required) ==================='
+      puts "This EXACT finalize failure (#{_fsig}) has now occurred #{_prior.size + 1} times:"
+      _prior.each { |r| puts "  • #{r['at']}  #{_fsig}" }
+      puts "  • (now)                #{_fsig}"
+      puts 'Re-running the same --finalize will not converge. STOPPING — hand this to the'
+      puts "operator with the gate output above and the loop log (#{File.join(WORK, 'loop-log.jsonl')})."
+      puts '============================================================================='
+      Offramp.log(WORK, kind: 'loop-stop', reason: _fsig)
+    end
+  end
   exit(all_green ? 0 : 3)
 end
 
@@ -1389,6 +1447,11 @@ else
   end
   disc = ['ruby', File.join(HERE, 'tableau-discover.rb'), '--out', WORK]
   disc += opts[:wb_id] ? ['--workbook-id', opts[:wb_id]] : ['--workbook-name', opts[:wb_name]]
+  # Live repoint (--skip-extract-landing): the operator owns the DM table paths,
+  # so the frozen extract bytes are never consumed on this route — skip
+  # discovery's heavy includeExtract=true re-download instead of paying for an
+  # unused multi-GB payload.
+  disc << '--no-extract-refetch' if opts[:skip_extract_landing]
   disc_sh = disc.map { |a| "'" + a.gsub("'", "'\\''") + "'" }.join(' ')
   scan_sh = ['ruby', File.join(HERE, 'scan-workbook-gaps.rb'), twb]
             .map { |a| "'" + a.gsub("'", "'\\''") + "'" }.join(' ')
@@ -3542,6 +3605,30 @@ rescue WorkbookBuildError => e
   end
   names = failed.empty? ? 'one or more fields' : failed.join(', ')
   n = failed.empty? ? 'some' : failed.size.to_s
+  # ── Same-failure loop breaker (stop-at-2) ──────────────────────────────────
+  # Every exit-4 handoff records a failure signature (script + exit code + SHA1
+  # of the first error line). A re-run that dies on the SAME signature a third
+  # time is grinding, not converging — hard-STOP and hand control to the
+  # operator (refs/operating-contract.md: "don't spin, don't fake").
+  _err_line = e.captured_output.to_s.lines.map(&:strip).reject(&:empty?).first ||
+              e.message.lines.first.to_s.strip
+  _sig = "migrate-tableau:exit4:#{Digest::SHA1.hexdigest(_err_line.to_s)[0, 12]}"
+  if Offramp.loop_check(WORK, signature: _sig) == :stop
+    _prior = Offramp.loop_trail(WORK).select { |r| r['signature'] == _sig }[0..-2]
+    puts
+    puts '==================== LOOP STOP (operator action required) ==================='
+    puts "The SAME workbook-build failure has now occurred #{_prior.size + 1} times:"
+    _prior.each { |r| puts "  • #{r['at']}  #{_err_line.to_s[0, 160]}" }
+    puts "  • (now)                #{_err_line.to_s[0, 160]}"
+    puts 'Re-running the same command will not converge. STOPPING — hand this to the'
+    puts 'operator with the error above, the salvage inventory (if written), and the'
+    puts "loop log (#{File.join(WORK, 'loop-log.jsonl')}). Signature: #{_sig}"
+    puts '============================================================================='
+    Offramp.log(WORK, kind: 'loop-stop', reason: _sig, detail: _err_line.to_s[0, 200])
+    mark('phase4-workbook')
+    phase_summary
+    exit 4
+  end
   puts
   puts '── EXIT 4 — WORKBOOK HANDOFF (this is NOT the finish line, and NOT a handoff to a human).'
   puts '   This STOP is an instruction to YOU, the agent: the data model is posted; now build the'
