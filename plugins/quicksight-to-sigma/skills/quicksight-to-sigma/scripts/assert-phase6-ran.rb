@@ -255,6 +255,29 @@
 #      No ledger AND no derivation inputs → stated OK (back-compat /
 #      non-Tableau plugins). NO escape flag: the ledger waiver IS the
 #      sanctioned escape (join-plan/lod-audit pattern).
+#  26  Aggregation-semantics ledger unresolved (gate 19; PR-7) — <workdir>/
+#      agg-semantics.json (derived post-convert by the source tool's
+#      aggregation lint, e.g. tableau audit-agg-semantics.rb /
+#      lib/agg_semantics_lint.rb) still carries a hit with no recorded
+#      resolution. Classes: "additive-over-preagg" (Sum/Avg over a column that
+#      is itself an LOD pre-aggregate, or over a landed table whose declared
+#      grain is coarser than the tile's group-by), "countd-as-sum" (a COUNTD
+#      measure translated to / consumed via Sum — a distinct count is not
+#      additive), "preagg-ratio" (a pre-aggregate-NAMED column — DISTINCT_*,
+#      *_PCT, *_RATE, AVG_*, *_COUNT — consumed as a KPI numerator/
+#      denominator). All compile clean and ship wrong-looking-right numbers
+#      (field twin: a 103.3% "% entities with value" KPI from SUM over a
+#      {FIXED day: COUNTD} column). Resolutions recorded via the lint script's
+#      --resolve: reaggregated (rebuilt at the correct grain) | n/a(reason)
+#      (the hit does not apply — first-class, never fabricate metadata) |
+#      faithful-to-source(reason) (the source itself mixes grains; the
+#      migration reproduces it and the resolution documents the hazard).
+#      ALSO raised belt-and-braces when agg-semantics.json is ABSENT but the
+#      workdir carries pre-aggregate evidence (a non-empty lod-audit.json, or
+#      a calc-fields.json census with a COUNTD formula) — pre-aggregates exist
+#      and nothing linted their consumption. No ledger AND no evidence →
+#      stated OK (back-compat / non-Tableau plugins). NO escape flag: the
+#      ledger resolution IS the sanctioned escape.
 #
 # ANCHORS-ORACLE substitution (charts_total==0, exit 2): when every worksheet is
 # dashboard-embedded (no exportable view CSVs), the anchors oracle may stand in
@@ -2265,6 +2288,99 @@ else
     exit 25
   end
   puts '[OK] gate 18: no ground-truth-plan.json and no .twb derivation inputs — numeric-oracle coverage N/A (non-Tableau / pre-PR-6 workdir)'
+end
+
+# ---------------------------------------------------------------------------
+# Gate 19 — aggregation-semantics ledger (exit 26; PR-7). Additive aggregation
+# over a PRE-AGGREGATED column compiles clean in every other gate and ships
+# wrong-looking-right numbers: SUM over a {FIXED day: COUNTD} pre-aggregate at
+# any coarser grain double-counts every entity appearing on more than one day
+# (field twin: a 103.3% "% entities with value" KPI — three live runs proved
+# nothing flagged it). The post-convert lint (tableau: audit-agg-semantics.rb /
+# lib/agg_semantics_lint.rb) writes <workdir>/agg-semantics.json: one entry per
+# hit, classes additive-over-preagg / countd-as-sum / preagg-ratio, ALL of
+# severity WARN-WITH-REQUIRED-RESOLUTION — the entry blocks until a resolution
+# {how: reaggregated|n/a|faithful-to-source, reason} is recorded via the lint
+# script's --resolve. The n/a path is FIRST-CLASS (never force fabricated
+# metadata); faithful-to-source is the documented-hazard path (the source
+# itself mixes grains and the migration reproduces it faithfully).
+# Belt-and-braces: a MISSING ledger on a workdir carrying pre-aggregate
+# evidence (non-empty lod-audit.json, or a calc-fields.json census with a
+# COUNTD formula) also fails — pre-aggregates exist and nothing linted their
+# consumption. No ledger AND no evidence → stated OK (back-compat /
+# non-Tableau plugins). No escape flag — the recorded resolution is the only
+# sanctioned waiver (it lives in the ledger as evidence, not in a CLI flag a
+# re-run forgets).
+# ---------------------------------------------------------------------------
+as_path = File.join(opts[:tab], 'agg-semantics.json')
+as_hows = ['reaggregated', 'n/a', 'faithful-to-source']
+as_resolved = lambda do |e|
+  e['resolution'].is_a?(Hash) && as_hows.include?(e['resolution']['how'].to_s)
+end
+if File.exist?(as_path)
+  as_doc = JSON.parse(File.read(as_path)) rescue nil
+  as_entries = as_doc.is_a?(Hash) ? as_doc['entries'] : as_doc
+  unless as_entries.is_a?(Array)
+    warn "[FAIL] gate 19: #{as_path} is malformed (expected {\"entries\":[...]} or a bare array)."
+    warn '       Re-derive the ledger (the aggregation-semantics lint emits it) — do not hand-edit it into shape.'
+    exit 26
+  end
+  as_entries = as_entries.select { |e| e.is_a?(Hash) }
+  as_blocking = as_entries.reject { |e| as_resolved.call(e) }
+  if as_blocking.any?
+    warn "[FAIL] gate 19: aggregation-semantics ledger unresolved (#{as_path}) —"
+    as_blocking.first(10).each do |e|
+      case e['class'].to_s
+      when 'additive-over-preagg'
+        warn "         - ADDITIVE-OVER-PREAGG: #{e['consumer'].inspect} applies Sum/Avg over" \
+             " #{e['preagg'].inspect} (#{e['context']}) — a pre-aggregated column re-summed at a" \
+             ' different grain double-counts (numbers silently WRONG)'
+      when 'countd-as-sum'
+        warn "         - COUNTD-AS-SUM: #{e['consumer'].inspect} (#{e['context']}) — COUNTD translated to /" \
+             " consumed via Sum over #{e['preagg'].inspect}; a distinct count is not additive"
+      else
+        warn "         - PREAGG-RATIO: #{e['consumer'].inspect} (#{e['context']}) consumes the" \
+             " pre-aggregate-named #{e['preagg'].inspect} as a KPI numerator/denominator"
+      end
+    end
+    warn '       These compile clean and ship wrong-looking-right numbers (the 103.3%-KPI class).'
+    warn '       REBUILD the consumer at the correct grain, or record why the hit does not apply, or'
+    warn '       document the faithfully-reproduced source hazard:'
+    warn '         audit-agg-semantics.rb --resolve <i> --how <reaggregated|n/a|faithful-to-source> --reason "..."'
+    warn '       The n/a path is first-class — never fabricate metadata to satisfy the lint.'
+    exit 26
+  end
+  as_by_how = Hash.new(0)
+  as_entries.each { |e| as_by_how[e['resolution']['how'].to_s] += 1 if e['resolution'].is_a?(Hash) }
+  puts "[OK] gate 19: aggregation-semantics ledger resolved — " \
+       "#{as_by_how['reaggregated']} reaggregated, #{as_by_how['n/a']} n/a, " \
+       "#{as_by_how['faithful-to-source']} faithful-to-source of #{as_entries.length} (agg-semantics.json)"
+else
+  # Belt-and-braces: no ledger, but pre-aggregate evidence exists — the lint
+  # never ran and nothing checked how those columns are consumed.
+  as_lod = begin
+    _ld = JSON.parse(File.read(File.join(opts[:tab], 'lod-audit.json')))
+    Array(_ld.is_a?(Hash) ? _ld['entries'] : _ld).any?
+  rescue StandardError
+    false
+  end
+  as_countd = begin
+    _cf = JSON.parse(File.read(File.join(opts[:tab], 'calc-fields.json')))
+    Array(_cf.is_a?(Hash) ? _cf['calcs'] : _cf).any? do |c|
+      c.is_a?(Hash) && c['formula'].to_s =~ /\bCOUNTD\s*\(/i
+    end
+  rescue StandardError
+    false
+  end
+  if as_lod || as_countd
+    warn "[FAIL] gate 19: #{opts[:tab]} carries pre-aggregate evidence (#{as_lod ? 'LOD calcs in lod-audit.json' : 'COUNTD calc(s) in calc-fields.json'})"
+    warn '       but no agg-semantics.json ledger exists — the aggregation-semantics lint never ran, so'
+    warn '       nothing checked whether those pre-aggregates are consumed additively (the wrong-looking-'
+    warn '       right-numbers class). Run the lint (tableau: ruby scripts/audit-agg-semantics.rb'
+    warn '       --workdir <W>), resolve any hits, then re-run this gate.'
+    exit 26
+  end
+  puts '[OK] gate 19: no agg-semantics.json and no pre-aggregate evidence — aggregation semantics N/A (back-compat / non-Tableau plugin)'
 end
 
 # ---------------------------------------------------------------------------

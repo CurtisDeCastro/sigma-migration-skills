@@ -15,7 +15,9 @@ silent drop), plus the dual-axis and integer-coded-dimension LOOKS-BAD traps.
   `SUM([Daily Active Sales]) / SUM([Daily Distinct Buyers])`,
   `SUM(IF ... ) / SUM([Daily Distinct Buyers])` — summing a pre-aggregated
   DISTINCT count over any grain other than day double-counts buyers. This
-  **compiles clean in every existing gate**.
+  compiled clean in every gate until PR-7: the aggregation-semantics lint
+  (`audit-agg-semantics.rb` / `lib/agg_semantics_lint.rb`, gate 19 exit 26)
+  now fires on exactly these formulas — see expectation 3 below.
 - A **dual-axis combo** worksheet (`Amount vs Growth`) built the multi-pane
   way — three `<pane>`s with `y-axis-name`, a `(A + B)` rows shelf, and **no
   `synchronized='true'`** anywhere.
@@ -30,8 +32,9 @@ silent drop), plus the dual-axis and integer-coded-dimension LOOKS-BAD traps.
 | File | What it is |
 |---|---|
 | `workbook-content.twb` | The synthetic workbook XML (5 worksheets + `Wallet Pulse` dashboard) |
-| `dm-spec.fixture.json` | Canned converter-emission fixture (the audit's `--dm-spec` seam): the FIELD shape — `Daily Distinct Buyers` fuzzy-aliased to a raw `ACTIVE_BUYER_FLAG` column, `Daily Active Sales` emitted nowhere |
+| `dm-spec.fixture.json` | Canned converter-emission fixture (the audit's `--dm-spec` seam): the FIELD shape — `Daily Distinct Buyers` fuzzy-aliased to a raw `ACTIVE_BUYER_FLAG` column, `Daily Active Sales` emitted nowhere, plus an emitted `Sum([Daily Distinct Buyers])` ratio column (the PR-7 emitted-side trap) |
 | `lod-audit.entries.json` | PINNED `audit-lod-calcs.rb` ledger: `suspect-alias` + `silently-dropped` — honest CURRENT-code classification (run 2026-07-18) |
+| `agg-semantics.entries.json` | PINNED `audit-agg-semantics.rb` ledger (PR-7): 9 hits — `additive-over-preagg` (SUM over the `{FIXED day: COUNTD}` calcs, source + emitted) and `preagg-ratio` (the ratio KPIs via the "Distinct" name token) |
 | `checks.sh` | Executable expectations, run by `run-corpus.sh --check` |
 
 ## Expected gate behaviors (encoded in checks.sh)
@@ -45,23 +48,31 @@ silent drop), plus the dual-axis and integer-coded-dimension LOOKS-BAD traps.
    path is covered by `scripts/test-lod-audit.rb`.)
 2. **Gate 17** (`assert-phase6-ran.rb`, exit 24): blocks GREEN on the
    unresolved ledger; passes after `--resolve 0 --how manual` +
-   `--resolve 1 --how waived` record evidence.
-3. **Dual-axis known-limitation pin**: `parse-twb-layout.rb` reads
+   `--resolve 1 --how waived` record evidence — after which **gate 19**
+   (exit 26) takes over: LOD evidence with no `agg-semantics.json` = the
+   aggregation lint never ran.
+3. **Aggregation-semantics lint (PR-7 — LANDED; the gap this entry was built
+   to close)**: `audit-agg-semantics.rb` against the .twb census + the
+   dm-spec fixture fires on the three additive KPI formulas — every
+   `SUM([Daily Distinct Buyers])` / `SUM([Daily Active Sales])` is
+   `additive-over-preagg` (the consumed column is a `{FIXED day: COUNTD}`
+   pre-aggregate) and each ratio KPI is `preagg-ratio` (the "Distinct" name
+   token in a numerator/denominator) — exit 2, 9 entries pinned verbatim in
+   `agg-semantics.entries.json`. Gate 19 (exit 26) blocks until every hit
+   records a resolution; the checks resolve the source hits as
+   `faithful-to-source` (the twin's story: the SOURCE mixes grains — the
+   103.3%-KPI hazard is documented, not silently shipped) and the emitted
+   duplicates as `n/a` (first-class — no fabricated metadata), then GREEN
+   unblocks.
+4. **Dual-axis known-limitation pin**: `parse-twb-layout.rb` reads
    `Amount vs Growth` as `chart_kind: "bar"`, `dual_axis: false` — the twin
    shape carries no `synchronized='true'`, and the current conservative
    detection only fires on explicit synchronization. The check FAILS LOUDLY
    if this ever flips, forcing the MANIFEST + pin update — that flip is the
    acceptance signal for a dual-axis detection fix (PR-10/PR-11 territory).
 
-## Known gaps (documented, NOT yet gated — this entry is the future test bed)
+## Known gaps (documented, NOT yet gated)
 
-- **Aggregation semantics (→ PLAN-v3 PR-7)**: nothing today flags
-  `SUM()` over the pre-aggregated `Daily Distinct Buyers` / `Daily Active
-  Sales` columns in KPI positions (`COUNTD`→`Sum`, `DISTINCT_*` heuristics).
-  The three KPI formulas above are the concrete inputs PR-7's
-  aggregation-semantics lint must flag; until it lands, this hazard passes
-  every gate silently. When PR-7 lands, wire its lint into `checks.sh` here
-  as a BLOCK expectation.
 - **Integer-coded dimension filter (→ PLAN-v3 PR-18)**: `SITE_KEY` is an
   integer-typed dimension driving a dashboard filter; no detection/decode
   routing exists yet. PR-18's shelf-role + cardinality probe (via PR-4's
@@ -78,6 +89,8 @@ cp corpus/tableau/preagg-kpi/workbook-content.twb "$W/"
 cp corpus/tableau/preagg-kpi/dm-spec.fixture.json "$W/dm-spec.json"
 ruby plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/audit-lod-calcs.rb --workdir "$W"
 # then copy the "entries" array of $W/lod-audit.json over lod-audit.entries.json
+ruby plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/audit-agg-semantics.rb --workdir "$W"
+# then copy the "entries" array of $W/agg-semantics.json over agg-semantics.entries.json
 ```
 
 ## Expectations
@@ -88,6 +101,7 @@ ruby plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/audit-lod-calcs.rb
     {"path": "workbook-content.twb", "format": "xml"},
     {"path": "dm-spec.fixture.json", "format": "json"},
     {"path": "lod-audit.entries.json", "format": "json"},
+    {"path": "agg-semantics.entries.json", "format": "json"},
     {"path": "checks.sh", "format": "text"}
   ]
 }

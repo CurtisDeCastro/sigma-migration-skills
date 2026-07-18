@@ -302,8 +302,11 @@ Dir.mktmpdir do |dir|
 end
 
 # resolved classes (lod-synth / manual-residue / reference-derived) → pass
+# (an empty agg-semantics.json rides along: gate 19's belt-and-braces treats a
+# non-empty LOD ledger as pre-aggregate evidence — the lint seam writes both.)
 Dir.mktmpdir do |dir|
   base_workdir(dir)
+  File.write(File.join(dir, 'agg-semantics.json'), JSON.pretty_generate('entries' => []))
   File.write(File.join(dir, 'lod-audit.json'), JSON.pretty_generate('entries' => [
     LOD_SUSPECT.merge('class' => 'lod-synth', 'status' => 'resolved'),
     LOD_DROPPED.merge('class' => 'manual-residue', 'status' => 'resolved'),
@@ -319,6 +322,7 @@ end
 %w[manual waived].each do |how|
   Dir.mktmpdir do |dir|
     base_workdir(dir)
+    File.write(File.join(dir, 'agg-semantics.json'), JSON.pretty_generate('entries' => []))
     File.write(File.join(dir, 'lod-audit.json'), JSON.pretty_generate('entries' => [
       LOD_SUSPECT.merge('resolution' => { 'how' => how, 'reason' => 'recorded in the ledger',
                                           'recorded_at' => '2026-07-18T00:00:00Z' })
@@ -483,9 +487,113 @@ Dir.mktmpdir do |dir|
         'gate 18: no ledger + no inputs → stated OK (never silent)', fails)
 end
 
+# ---- gate 19: aggregation-semantics ledger (exit 26; PR-7) --------------------
+AS_ADDITIVE = { 'class' => 'additive-over-preagg', 'context' => 'source-calc',
+                'consumer' => 'Spend per Buyer', 'preagg' => 'Daily Buyers',
+                'formula' => 'SUM([Amount]) / SUM([Daily Buyers])',
+                'detail' => 'SUM over a {FIXED day: COUNTD} pre-aggregate',
+                'status' => 'unresolved' }.freeze
+AS_COUNTD   = { 'class' => 'countd-as-sum', 'context' => 'dm-spec', 'element' => 'Master',
+                'consumer' => 'Unique Sales', 'preagg' => 'Unique Sales',
+                'formula' => 'Sum([FACT/SALE_FLAG])',
+                'detail' => 'COUNTD emitted as Sum', 'status' => 'unresolved' }.freeze
+AS_RATIO    = { 'class' => 'preagg-ratio', 'context' => 'source-calc',
+                'consumer' => 'Take Rate', 'preagg' => 'DISTINCT_ORDERS',
+                'formula' => 'SUM([DISTINCT_ORDERS]) / SUM([TOTAL_ORDERS])',
+                'detail' => 'pre-aggregate-named ratio denominator', 'status' => 'unresolved' }.freeze
+
+# unresolved hits (one per class) → exit 26 naming each class + the resolution path
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'agg-semantics.json'),
+             JSON.pretty_generate('entries' => [AS_ADDITIVE, AS_COUNTD, AS_RATIO]))
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 26, "gate 19: unresolved agg hits → exit 26 (got #{st.exitstatus})", fails)
+  check(err.include?('ADDITIVE-OVER-PREAGG') && err.include?('Daily Buyers'),
+        'gate 19 failure names the additive-over-preagg consumer', fails)
+  check(err.include?('COUNTD-AS-SUM') && err.include?('PREAGG-RATIO'),
+        'gate 19 failure names the countd-as-sum and preagg-ratio classes', fails)
+  check(err.include?('audit-agg-semantics.rb --resolve') && err.include?('reaggregated|n/a|faithful-to-source'),
+        'gate 19 failure names the sanctioned resolution path', fails)
+  check(err.include?('fabricate metadata'), 'gate 19 failure states the first-class n/a doctrine', fails)
+end
+
+# every resolution how (reaggregated / n/a / faithful-to-source) → pass, counted
+['reaggregated', 'n/a', 'faithful-to-source'].each do |how|
+  Dir.mktmpdir do |dir|
+    base_workdir(dir)
+    File.write(File.join(dir, 'agg-semantics.json'), JSON.pretty_generate('entries' => [
+      AS_ADDITIVE.merge('resolution' => { 'how' => how, 'reason' => 'recorded in the ledger',
+                                          'recorded_at' => '2026-07-18T00:00:00Z' })
+    ]))
+    out, _err, st = run_gate(dir)
+    check(st.success?, "gate 19: hit + #{how} resolution → exit 0 (got #{st.exitstatus})", fails)
+    check(out.include?('gate 19') && out.include?("1 #{how}"),
+          "gate 19 OK line counts the #{how} resolution", fails)
+  end
+end
+
+# an unknown resolution how does NOT pass
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'agg-semantics.json'), JSON.pretty_generate('entries' => [
+    AS_ADDITIVE.merge('resolution' => { 'how' => 'skipped', 'reason' => 'nope' })
+  ]))
+  _out, _err, st = run_gate(dir)
+  check(st.exitstatus == 26, "gate 19: unknown resolution how still blocks (got #{st.exitstatus})", fails)
+end
+
+# missing ledger + non-empty lod-audit.json (pre-aggregate evidence) → exit 26
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'lod-audit.json'), JSON.pretty_generate('entries' => [
+    LOD_SUSPECT.merge('class' => 'lod-synth', 'status' => 'resolved')
+  ]))
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 26, "gate 19: LOD evidence + no ledger → exit 26 (got #{st.exitstatus})", fails)
+  check(err.include?('no agg-semantics.json'), 'gate 19 names the missing-ledger degradation', fails)
+  check(err.include?('audit-agg-semantics.rb'), 'gate 19 points at the lint script', fails)
+end
+
+# missing ledger + COUNTD calc in calc-fields.json → exit 26
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'calc-fields.json'), JSON.pretty_generate('calcs' => [
+    { 'name' => 'Unique Sales', 'formula' => 'COUNTD([Sale Id])', 'is_lod' => false }
+  ]))
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 26 && err.include?('COUNTD'),
+        "gate 19: COUNTD census + no ledger → exit 26 (got #{st.exitstatus})", fails)
+end
+
+# missing ledger + NO pre-aggregate evidence → stated OK (back-compat)
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'calc-fields.json'), JSON.pretty_generate('calcs' => [
+    { 'name' => 'Plain', 'formula' => 'SUM([Amount])', 'is_lod' => false }
+  ]))
+  out, _err, st = run_gate(dir)
+  check(st.success? && out.include?('gate 19') && out.include?('no pre-aggregate evidence'),
+        'gate 19: no ledger + no evidence → stated OK (never silent)', fails)
+end
+
+# empty ledger (written as evidence) → pass; malformed ledger → exit 26
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'agg-semantics.json'), JSON.pretty_generate('entries' => []))
+  _out, _err, st = run_gate(dir)
+  check(st.success?, 'gate 19: empty ledger → exit 0', fails)
+end
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'agg-semantics.json'), JSON.pretty_generate('entries' => 'nope'))
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 26 && err.include?('malformed'), 'gate 19: malformed ledger → exit 26', fails)
+end
+
 puts
 if fails.empty?
-  puts 'ALL PASS — assert-phase6-ran gate 8b vision precondition + gate 11 post-publish guide + gate 16 join-cardinality ledger + gate 17 LOD translation ledger + gate 18 ground-truth numeric coverage'
+  puts 'ALL PASS — assert-phase6-ran gate 8b vision precondition + gate 11 post-publish guide + gate 16 join-cardinality ledger + gate 17 LOD translation ledger + gate 18 ground-truth numeric coverage + gate 19 aggregation-semantics ledger'
   exit 0
 else
   puts "FAILURES (#{fails.length}):"
