@@ -123,7 +123,7 @@ INVENTORY = [
   { name: 'Container background tint / colored header band', pat: /<format\s+attr='background-color'\s+value='#(?!(?:fff(?:fff)?|FFF(?:FFF)?)')/,
     status: :hint, blurb: 'Gap B2: a dashboard zone/container has a non-white background fill (region-card tints, colored title bands). NOT yet auto-emitted — parse-twb-layout should surface the fill and build-charts should emit container.style.backgroundColor + borderRadius (+ a header-bar element). Until then, recreate the tint manually.' },
   { name: 'Custom categorical color palette (discrete)', pat: /<encoding[^>]+(?:class|attr)='color'[\s\S]{0,400}?<map>/,
-    status: :hint, blurb: "Gap D1: a color encoding carries an explicit value→color map (custom categorical palette, e.g. per-region teal/pink/purple/orange). NOT yet auto-extracted — build-charts should emit themeOverrides.categoricalScheme + per-chart color.scheme in category sort order. Until then, Sigma defaults apply and per-category color won't match." },
+    status: :auto, blurb: "Gap D1 (auto since PR-12): a color encoding carries an explicit value→color map. parse-twb-layout extracts it (series_colors) and build-charts pins per-chart color.scheme + themeOverrides.categoricalScheme ORDERED ascending by member (Sigma applies schemes positionally in category-sort order). Verify via formats-emitted.json series_color_maps." },
   { name: 'Viz-in-tooltip (embedded chart in tooltip)', pat: /visual-tooltip|show-viz-in-tooltip/i,
     status: :manual, blurb: 'Gap F3: worksheet embeds a viz inside its tooltip. Sigma has no spec-API path for viz-in-tooltip (no persistence) — recreate manually post-publish or drop. Surfaced here so it is not silently lost.' }
 ].freeze

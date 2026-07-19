@@ -22,6 +22,8 @@
 # Contract: returns {} when the source declares nothing (emit neither
 # themeName nor themeOverrides — an unstyled workbook gets pure Sigma
 # defaults, byte-identical to the pre-theme output).
+require_relative 'series_colors'
+
 module ThemeDerive
   module_function
 
@@ -94,10 +96,18 @@ module ThemeDerive
     c[0, 7].downcase
   end
 
-  # S1/S2 (brand palette from color encodings + categorical palettes,
+  # S0 (PR-12): EXPLICIT member→color assignments beat frequency ranking —
+  # themeOverrides.categoricalScheme applies POSITIONALLY in category-sort
+  # order, so when the .twb binds members to colors the scheme must be ordered
+  # ascending by member (the only slice-color path for pie/donut, and the fix
+  # for the series-inversion class). Conservative: only when every assigned
+  # zone colors by the same field (else nil → S1 frequency order unchanged).
+  # Then S1/S2 (brand palette from color encodings + categorical palettes,
   # frequency-ranked — parse-twb-layout) then S3 (container-tint fallback for
   # the region-card idiom), capped at SCHEME_CAP.
   def derive_scheme(d)
+    explicit = SeriesColors.explicit_scheme_for_dashboard(d, SCHEME_CAP)
+    return explicit if explicit
     brand = d['brand_palette']
     return brand.first(SCHEME_CAP) if brand.is_a?(Array) && brand.size >= 2
     palette = []

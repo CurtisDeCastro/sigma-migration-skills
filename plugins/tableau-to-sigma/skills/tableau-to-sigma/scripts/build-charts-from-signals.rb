@@ -59,6 +59,8 @@ require_relative 'learned-rules'
 require_relative 'lib/theme_derive'
 require_relative 'lib/png_classify'
 require_relative 'lib/zone_census'
+require_relative 'lib/format_map'     # PR-12: the ONE Tableau→Sigma format translator
+require_relative 'lib/series_colors'  # PR-12: ordered per-series color schemes
 require 'erb'
 
 opts = { master_id: 'master' }
@@ -1009,37 +1011,39 @@ views  = gw.dig('views', 'view') || []
 views  = [views] unless views.is_a?(Array)
 view_by_name = views.each_with_object({}) { |v, h| h[v['name']] = v }
 
-# Translate a Tableau format-value string (already parsed by the parser's
-# translate_format) into a Sigma format hash. Done here so we don't fork the
-# parser logic — we just call into it via a duplicated minimal translator.
+# Translate a Tableau format-value string into a Sigma format hash. PR-12:
+# delegates to the shared lib/format_map.rb (the parser's translate_format
+# delegates there too — the old duplicated minimal translator had already
+# drifted on date handling). Sigma date-time formats are d3-time strings
+# ('%B %-d, %Y'); moment-style tokens ("MMM D, YYYY") print LITERALLY, so
+# FormatMap returns nil for anything it can't fully tokenize — unmapped
+# formats are RECORDED in formats-emitted.json, never guessed.
 def tableau_format_to_sigma(s)
-  return nil if s.nil? || s.empty?
-  segments = s.split(';')
-  pos = segments[0] || s
-  neg = segments[1]
-  prefix = (neg && neg.include?('(') && neg.include?(')')) ? '(' : ''
-  if (m = pos.match(/^p\d*(?:\.(\d+))?%$/i))
-    decimals = (m[1] || '').length
-    return { 'kind' => 'number', 'formatString' => "#{prefix},.#{decimals}%" }
-  end
-  if (m = pos.match(/^C\d+(?:\.(\d+))?%?$/))
-    decimals = (m[1] || '').length
-    return { 'kind' => 'number', 'formatString' => "#{prefix}$,.#{decimals}f", 'currencySymbol' => '$' }
-  end
-  if pos =~ /^c?["\\]*\$/ || pos.start_with?('$')
-    decimals = (pos.match(/\.(0+)/) || [])[1].to_s.length
-    return { 'kind' => 'number', 'formatString' => "#{prefix}$,.#{decimals}f", 'currencySymbol' => '$' }
-  end
-  if pos =~ /^[#,0]+(?:\.(0+))?$/
-    decimals = ($1 || '').length
-    return { 'kind' => 'number', 'formatString' => "#{prefix},.#{decimals}f" }
-  end
-  if s =~ /yyyy|MMM|MM|dd|HH/
-    f = s.gsub('yyyy','%Y').gsub('yy','%y').gsub('MMMM','%B').gsub('MMM','%b').gsub('MM','%m')
-         .gsub('dd','%d').gsub('HH','%H').gsub('mm','%M').gsub('ss','%S')
-    return { 'kind' => 'datetime', 'formatString' => f }
+  FormatMap.translate(s)
+end
+
+# PR-12: per-column DEFAULT formats from the .twb (<column default-format=…>,
+# parser meta 'column_formats': caption → raw Tableau format string). The
+# display ground truth wherever a sheet doesn't override per-pill — the fix
+# for the field failure where a one-shot KPI printed raw while the source
+# shows $-formatted. Populated after meta load; caption match mirrors
+# pick_tableau_format's normalized containment match.
+COLUMN_DEFAULT_FORMATS = {}
+(meta['column_formats'] || {}).each { |k, v| COLUMN_DEFAULT_FORMATS[k] = v }
+def pick_column_default_format_raw(header)
+  hkey = header.to_s.downcase.gsub(/\W+/, '')
+  return nil if hkey.empty?
+  COLUMN_DEFAULT_FORMATS.each do |capn, val|
+    ckey = capn.to_s.downcase.gsub(/\W+/, '')
+    next if ckey.empty?
+    return val if ckey == hkey || hkey.include?(ckey) || ckey.include?(hkey)
   end
   nil
+end
+
+def pick_column_default_format(header)
+  raw = pick_column_default_format_raw(header)
+  raw && tableau_format_to_sigma(raw)
 end
 
 # Tableau scale-comma + literal-suffix formats ('n#,##0,,,B;-#,##0,,,B'):
@@ -2518,7 +2522,10 @@ def build_pivot_element(z, meta, mmap, opts, warnings, data_elements = [])
     end
     col_obj = { 'id' => col_id, 'name' => display_name, 'formula' => formula }
     if field['role'] == 'measure'
-      tab_fmt = pick_tableau_format(z['formats'], m['name'])
+      # PR-12: fall back to the column's .twb default-format when the sheet
+      # has no per-pill format (still ahead of the master-map/heuristic).
+      tab_fmt = pick_tableau_format(z['formats'], m['name']) ||
+                pick_column_default_format(m['name'])
       col_obj['format'] = tab_fmt if tab_fmt
       col_obj['format'] ||= m['format'] if m['format'].is_a?(Hash)
       col_obj['format'] ||= { 'kind' => 'number', 'formatString' => ',.0f' }
@@ -3823,9 +3830,12 @@ def build_kpi_element(z, meta, mmap, opts, warnings, data_elements = [])
     'formula' => formula
   }
 
-  # Format: prefer Tableau format string for this measure, then master-map
+  # Format: prefer Tableau format string for this measure (worksheet pill
+  # format, then the column's .twb default-format — PR-12, the fix for the
+  # KPI-printed-raw-where-source-shows-$ field failure), then master-map
   # format, then heuristic by name.
-  tab_fmt = pick_tableau_format(z['formats'], master['name'])
+  tab_fmt = pick_tableau_format(z['formats'], master['name']) ||
+            pick_column_default_format(master['name'])
   measure_col['format'] = tab_fmt if tab_fmt
   measure_col['format'] ||= master['format'] if master['format'].is_a?(Hash)
   measure_col['format'] ||=
@@ -3845,7 +3855,9 @@ def build_kpi_element(z, meta, mmap, opts, warnings, data_elements = [])
   # carries the EXACT rendering (trailing zeros + grouping intact) and the
   # KPI value points at it (raw column kept for anything else).
   fmt_columns = []
-  if tab_fmt.nil? && (raw_fmt = pick_tableau_format_raw(z['formats'], master['name'])) &&
+  if tab_fmt.nil? &&
+     (raw_fmt = pick_tableau_format_raw(z['formats'], master['name']) ||
+                pick_column_default_format_raw(master['name'])) &&
      (sspec = parse_scaled_suffix_format(raw_fmt))
     fmt_col_id = "#{measure_col_id}-fmt"
     fmt_columns << { 'id' => fmt_col_id, 'name' => "#{master['name'].to_s.strip} (fmt)" }
@@ -4826,7 +4838,11 @@ layout.each do |dash|
     #   2. explicit `format` on the master-map entry (DM/curated)
     #   3. heuristic by header name
     tab_fmt = pick_tableau_format(z['formats'], meas_hdr) ||
-              pick_tableau_format(z['formats'], meas['name'])
+              pick_tableau_format(z['formats'], meas['name']) ||
+              # PR-12: the column's .twb default-format (still source truth;
+              # outranks the DM-inferred master-map format + the name heuristic)
+              pick_column_default_format(meas_hdr) ||
+              pick_column_default_format(meas['name'])
     meas_col_obj['format'] = tab_fmt
     meas_col_obj['format'] ||= meas['format'] if meas['format'].is_a?(Hash)
     if meas_col_obj['format'].nil?
@@ -4969,6 +4985,12 @@ layout.each do |dash|
         'yAxis' => { 'columnIds' => ["y-#{el_id}"] },
         'color' => { 'by' => 'category', 'column' => "c-#{el_id}" }
       }
+      # PR-12: explicit .twb member→color assignments on the detail/color dim →
+      # ordered scheme (same contract as the bar/line category-color path).
+      if SeriesColors.field_matches?(z['series_color_field'], dim['name']) &&
+         (pinned = SeriesColors.ordered_scheme(z['series_colors']))
+        element['color']['scheme'] = pinned
+      end
       if size_field
         element['columns'] << { 'id' => "sz-#{el_id}", 'name' => size_field['name'],
                                 'formula' => "[#{src_name}/#{size_field['name']}]",
@@ -5004,8 +5026,11 @@ layout.each do |dash|
         'id'      => "y2-#{el_id}",
         'name'    => meas2['name'],
         'formula' => meas2_formula,
-        'format'  => meas2['format'].is_a?(Hash) ? meas2['format'] :
-                     ({ 'kind' => 'number', 'formatString' => ',.0f' })
+        # PR-12: source formats first (pill format, then column default-format)
+        'format'  => pick_tableau_format(z['formats'], meas2_hdr) ||
+                     pick_column_default_format(meas2['name']) ||
+                     (meas2['format'].is_a?(Hash) ? meas2['format'] :
+                      { 'kind' => 'number', 'formatString' => ',.0f' })
       }
       kind = 'combo-chart' unless %w[pie-chart donut-chart].include?(kind)
       # Sigma combo-chart dual-axis IS persisted in the spec — the secondary
@@ -5031,6 +5056,19 @@ layout.each do |dash|
     if color_col_obj && !%w[pie-chart donut-chart table pivot-table].include?(kind)
       element['columns'] << color_col_obj
       element['color'] = { 'by' => 'category', 'column' => color_col_obj['id'] }
+      # PR-12: pin the .twb's explicit member→color assignments as an ORDERED
+      # scheme (ascending member order = Sigma's positional category-sort
+      # application) so the member→color BINDING survives — the Top/Bottom-500
+      # inversion class. No explicit map ⇒ no scheme ⇒ theme palette applies
+      # (current derivation unchanged).
+      if SeriesColors.field_matches?(z['series_color_field'], color_col_obj['name']) &&
+         (pinned = SeriesColors.ordered_scheme(z['series_colors']))
+        element['color']['scheme'] = pinned
+        members = z['series_colors'].map { |p| p['member'] }.sort_by { |m| m.to_s.downcase }
+        warnings << "'#{cap}' series colors PINNED from the .twb member→color map " \
+                    "(ascending member order: #{members.join(' → ')}) — scheme[i] binds to the i-th " \
+                    'category in Sigma sort order'
+      end
     elsif color_scale && %w[bar-chart line-chart area-chart combo-chart].include?(kind)
       # By-measure color ramp: add a DUPLICATE measure column (Sigma forbids a
       # column on both yAxis and color) and point color:{by:scale} at it.
@@ -5196,6 +5234,16 @@ layout.each do |dash|
     elsif kind == 'pie-chart' || kind == 'donut-chart'
       element['color'] = { 'id' => dim_col_obj['id'] }
       element['value'] = { 'id' => meas_col_obj['id'] }
+      # PR-12: per-element color.scheme is SILENTLY DROPPED on pie/donut — the
+      # only slice-color path is themeOverrides.categoricalScheme, applied
+      # positionally in category-sort order. ThemeDerive orders the theme from
+      # this zone's explicit member→color map (SeriesColors
+      # .explicit_scheme_for_dashboard); surface the contract for the RCF pass.
+      if z['series_colors'].is_a?(Array) && z['series_colors'].size >= 2
+        warnings << "'#{cap}' pie/donut slice colors ride themeOverrides.categoricalScheme (per-element " \
+                    'color.scheme is dropped on pie/donut) — theme scheme is ordered ascending by the ' \
+                    ".twb member→color map; verify slice-color alignment in the render"
+      end
       if z['sort']
         dir = z.dig('sort', 'direction').to_s
         element['color']['sort'] = {
@@ -7465,6 +7513,29 @@ elements.each do |e|
     'dashboard' => e['_dashboard'],
     'name'      => (e['name'].is_a?(String) ? e['name'] : nil)
   }.compact
+end
+
+# PR-12: formats-emitted.json — the MECHANICAL counterpart for the blind
+# grader's `numbers_formatted` + `palette_match` dimensions, computed HERE
+# while elements still carry _worksheet (same seam as chart-provenance).
+# Per tile: every applicable source format string → the emitted Sigma format,
+# status mapped|unmapped (unmapped = the translator refused; the source string
+# is RECORDED, never guessed) + per-tile series-color pinning records. Always
+# written (empty entries = "no source formats", vs "builder predates the
+# artifact"). Consumed by the RCF loop and future gates.
+begin
+  fe = {
+    'version'           => 1,
+    'entries'           => FormatMap.emitted_records(elements, meta['worksheets'] || {}, COLUMN_DEFAULT_FORMATS),
+    'series_color_maps' => SeriesColors.records(elements, meta['worksheets'] || {})
+  }
+  fe_path = File.join(File.dirname(File.expand_path(opts[:out])), 'formats-emitted.json')
+  File.write(fe_path, JSON.pretty_generate(fe))
+  unmapped = fe['entries'].count { |r| r['status'] == 'unmapped' }
+  warn "wrote #{fe_path} (#{fe['entries'].size} format assignment(s), #{unmapped} unmapped — recorded, " \
+       "never guessed; #{fe['series_color_maps'].size} series-color map(s))"
+rescue => e
+  warnings << "formats-emitted sidecar error (formats coverage unrecorded): #{e.message}"
 end
 
 # ---- Output mode ----
