@@ -278,6 +278,28 @@
 #      and nothing linted their consumption. No ledger AND no evidence →
 #      stated OK (back-compat / non-Tableau plugins). NO escape flag: the
 #      ledger resolution IS the sanctioned escape.
+#  27  Semantic-edit equivalence ledger unproven (gate 20; PR-8) — <workdir>/
+#      semantic-edits.json declares a structural edit to source semantics
+#      (join drop, table collapse, filter rewrite) whose proof block is
+#      MISSING (declared, never probed) or whose proof says match:false: the
+#      probe measured different COUNT(*) / COUNT(DISTINCT grain) / SUM
+#      checksums on the two sides, so the edit is NOT the no-op it was claimed
+#      to be (field case: a LEFT JOIN on a non-unique flag key deleted as
+#      "provably no-op" with zero verification — fan-out risk). "Provably
+#      no-op" is proven by scripts/probe-equivalence.rb (in the source
+#      plugin), never asserted. A mismatched edit NEVER ships: revert it
+#      (removing the edit removes the entry) or redesign it until the probes
+#      agree — an intentionally-different rewrite is not an equivalence claim
+#      and belongs in the user-initiated scope-change record, not this
+#      ledger. No ledger → stated OK (no structural semantic edits declared).
+#      HONESTY NOTE: only DECLARED edits are policeable here — nothing
+#      mechanical can see an edit nobody recorded. The operating-contract
+#      rule makes the declaration mandatory, and the join-plan (gate 16) +
+#      ground-truth (gate 18) oracles are the mechanical net for undeclared
+#      ones (ground-truth SQL derives from the SOURCE signals independently
+#      of the built spec, so a silently dropped join diverges there). NO
+#      escape flag and NO waiver path: equivalence is measured, not
+#      negotiated.
 #
 # ANCHORS-ORACLE substitution (charts_total==0, exit 2): when every worksheet is
 # dashboard-embedded (no exportable view CSVs), the anchors oracle may stand in
@@ -2381,6 +2403,74 @@ else
     exit 26
   end
   puts '[OK] gate 19: no agg-semantics.json and no pre-aggregate evidence — aggregation semantics N/A (back-compat / non-Tableau plugin)'
+end
+
+# ---------------------------------------------------------------------------
+# Gate 20 — semantic-edit equivalence ledger (exit 27; PR-8). Any structural
+# edit to source semantics (dropping a join, collapsing a table, rewriting a
+# filter) is FORBIDDEN without a recorded equivalence proof: COUNT(*),
+# COUNT(DISTINCT grain) and per-measure SUM checksums measured on BOTH sides
+# through the same warehouse seam the other probes use
+# (scripts/probe-equivalence.rb → <workdir>/semantic-edits.json). Field case:
+# an agent deleted a LEFT JOIN as "provably no-op" on a non-unique flag key
+# with zero verification — the join was fanning out rows, so eliding it
+# changed every count downstream. A declared entry with no proof block
+# (declared, never probed) or a proof with match:false blocks GREEN.
+# HONESTY NOTE: nothing mechanical can detect an edit nobody DECLARED — this
+# gate enforces that declared edits are proven; the operating-contract rule
+# requires the declaration, and the join-plan (gate 16) + ground-truth
+# (gate 18) oracles are the net for undeclared ones (ground-truth SQL derives
+# from the SOURCE signals independently of the built spec, so a silently
+# dropped join shifts the built numbers away from the derived truth). No
+# escape flag and no waiver path: equivalence is measured, not negotiated —
+# a mismatched edit never ships (revert or redesign; an intentionally-
+# different rewrite is a user-initiated scope change, not an equivalence
+# claim, and never belongs in this ledger).
+# ---------------------------------------------------------------------------
+se_path = File.join(opts[:tab], 'semantic-edits.json')
+if File.exist?(se_path)
+  se_doc = JSON.parse(File.read(se_path)) rescue nil
+  se_entries = se_doc.is_a?(Hash) ? se_doc['entries'] : se_doc
+  unless se_entries.is_a?(Array)
+    warn "[FAIL] gate 20: #{se_path} is malformed (expected {\"entries\":[...]} or a bare array)."
+    warn '       Re-record the proofs (scripts/probe-equivalence.rb writes the ledger) — do not hand-edit it into shape.'
+    exit 27
+  end
+  se_entries = se_entries.select { |e| e.is_a?(Hash) }
+  se_blocking = se_entries.reject { |e| e['proof'].is_a?(Hash) && e['proof']['match'] == true }
+  if se_blocking.any?
+    warn "[FAIL] gate 20: semantic-edit equivalence ledger unproven (#{se_path}) —"
+    se_blocking.first(10).each do |e|
+      p20 = e['proof']
+      if p20.is_a?(Hash)
+        b20 = p20['before'].is_a?(Hash) ? p20['before'] : {}
+        a20 = p20['after'].is_a?(Hash) ? p20['after'] : {}
+        warn "         - MISMATCH: #{e['edit_description'].inspect} (claim: #{e['claim']}) — the sides are NOT equivalent:"
+        warn "             TOTAL_ROWS #{b20['total'].inspect} -> #{a20['total'].inspect}; DISTINCT_GRAIN " \
+             "#{b20['distinct_grain'].inspect} -> #{a20['distinct_grain'].inspect} (grain: #{Array(e['grain']).join(', ')})"
+        Array(p20['mismatches']).each do |mm|
+          next unless mm.is_a?(Hash) && mm['metric'].to_s.start_with?('SUM_')
+          warn "             #{mm['metric']} #{mm['before'].inspect} -> #{mm['after'].inspect}"
+        end
+      else
+        warn "         - UNPROVEN: #{e['edit_description'].inspect} (claim: #{e['claim']}) — declared but never probed" \
+             "#{e['probe_error'] ? " (last probe errored: #{e['probe_error'].to_s[0, 120]})" : ''}"
+      end
+    end
+    warn '       "Provably no-op" is proven by measurement, never asserted. Probe both sides:'
+    warn '         ruby scripts/probe-equivalence.rb --workdir <W> --edit "<desc>" --claim "<claim>" --grain <col,col> \\'
+    warn '           (--before-sql ... --after-sql ... | --before-element/--after-element ...) [--measures <col,col>] \\'
+    warn '           (--connection-id <id> | --fixture DIR)'
+    warn '       A MISMATCHED edit never ships: revert it (removing the edit removes the entry) or'
+    warn '       redesign it until the probes agree, then re-probe. An intentionally-different rewrite'
+    warn '       is a user-initiated scope change, not an equivalence claim — it never belongs in this'
+    warn '       ledger. There is no skip flag and no waiver path.'
+    exit 27
+  end
+  puts "[OK] gate 20: semantic-edit equivalence ledger proven — #{se_entries.length} declared edit(s), every proof match:true (semantic-edits.json)"
+else
+  puts '[OK] gate 20: no semantic-edits.json — no structural semantic edits (join drop / table collapse / filter rewrite) declared.'
+  puts '     (Only DECLARED edits are policeable here; the operating contract forbids undeclared ones, and gates 16/18 catch the numeric drift they cause.)'
 end
 
 # ---------------------------------------------------------------------------

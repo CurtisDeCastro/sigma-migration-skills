@@ -591,9 +591,104 @@ Dir.mktmpdir do |dir|
   check(st.exitstatus == 26 && err.include?('malformed'), 'gate 19: malformed ledger → exit 26', fails)
 end
 
+# ---- gate 20: semantic-edit equivalence ledger (exit 27; PR-8) ----------------
+SE_PROOF_OK = { 'mode' => 'fixture',
+                'before' => { 'total' => 8, 'distinct_grain' => 8, 'sums' => { 'AMOUNT' => 2950.0 } },
+                'after'  => { 'total' => 8, 'distinct_grain' => 8, 'sums' => { 'AMOUNT' => 2950.0 } },
+                'match' => true, 'mismatches' => [], 'probed_at' => '2026-07-18T00:00:00Z' }.freeze
+SE_ENTRY = { 'edit_description' => 'drop LEFT JOIN SALES_FACT->SEGMENT_DIM (ACTIVE_FLAG=CURRENT_FLAG)',
+             'claim' => 'joined table contributes no shelf column; elision is a no-op',
+             'grain' => ['ORDER_ID'], 'measures' => ['AMOUNT'] }.freeze
+
+# declared + proven (match:true) → pass, counted
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'semantic-edits.json'),
+             JSON.pretty_generate('entries' => [SE_ENTRY.merge('proof' => SE_PROOF_OK)]))
+  out, _err, st = run_gate(dir)
+  check(st.success?, "gate 20: proven equivalence ledger → exit 0 (got #{st.exitstatus})", fails)
+  check(out.include?('gate 20') && out.include?('1 declared edit(s)') && out.include?('match:true'),
+        'gate 20 OK line counts the proven edits', fails)
+end
+
+# declared + REFUTED (match:false) → exit 27 printing both sides' numbers
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'semantic-edits.json'), JSON.pretty_generate('entries' => [
+    SE_ENTRY.merge('proof' => SE_PROOF_OK.merge(
+      'after' => { 'total' => 26, 'distinct_grain' => 8, 'sums' => { 'AMOUNT' => 9575.0 } },
+      'match' => false,
+      'mismatches' => [{ 'metric' => 'TOTAL_ROWS', 'before' => 8, 'after' => 26 },
+                       { 'metric' => 'SUM_AMOUNT', 'before' => 2950.0, 'after' => 9575.0 }]))
+  ]))
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 27, "gate 20: match:false → exit 27 (got #{st.exitstatus})", fails)
+  check(err.include?('MISMATCH') && err.include?('TOTAL_ROWS 8 -> 26'),
+        'gate 20 failure prints both sides\' row counts', fails)
+  check(err.include?('SUM_AMOUNT 2950.0 -> 9575.0'), 'gate 20 failure prints both sides\' sum checksums', fails)
+  check(err.include?('never ships') && err.include?('no skip flag'),
+        'gate 20 states the no-waive doctrine (revert or redesign, never waive)', fails)
+end
+
+# declared with NO proof block (never probed) → exit 27
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'semantic-edits.json'), JSON.pretty_generate('entries' => [SE_ENTRY.dup]))
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 27, "gate 20: declared edit without a proof → exit 27 (got #{st.exitstatus})", fails)
+  check(err.include?('UNPROVEN') && err.include?('declared but never probed'),
+        'gate 20 failure names the unproven declaration', fails)
+  check(err.include?('probe-equivalence.rb'), 'gate 20 failure points at the probe script', fails)
+end
+
+# a probe error is not a proof → exit 27 naming the error
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'semantic-edits.json'), JSON.pretty_generate('entries' => [
+    SE_ENTRY.merge('probe_error' => 'after: export poll hit the total --timeout deadline')
+  ]))
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 27 && err.include?('last probe errored'),
+        "gate 20: errored probe → exit 27 naming the error (got #{st.exitstatus})", fails)
+end
+
+# a hand-authored proof with match stringly-true does NOT pass
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'semantic-edits.json'), JSON.pretty_generate('entries' => [
+    SE_ENTRY.merge('proof' => SE_PROOF_OK.merge('match' => 'true'))
+  ]))
+  _out, _err, st = run_gate(dir)
+  check(st.exitstatus == 27, "gate 20: proof match:\"true\" (string) still blocks (got #{st.exitstatus})", fails)
+end
+
+# empty ledger → pass; malformed ledger → exit 27
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'semantic-edits.json'), JSON.pretty_generate('entries' => []))
+  _out, _err, st = run_gate(dir)
+  check(st.success?, 'gate 20: empty ledger → exit 0', fails)
+end
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'semantic-edits.json'), JSON.pretty_generate('entries' => 'nope'))
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 27 && err.include?('malformed'), 'gate 20: malformed ledger → exit 27', fails)
+end
+
+# no ledger → stated OK with the declared-edits-only honesty note (never silent)
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  out, _err, st = run_gate(dir)
+  check(st.success? && out.include?('gate 20') && out.include?('no structural semantic edits'),
+        'gate 20: no ledger → stated OK (no semantic edits declared)', fails)
+  check(out.include?('Only DECLARED edits are policeable') && out.include?('gates 16/18'),
+        'gate 20 OK line states the undeclared-edit honesty note (gates 16/18 are the net)', fails)
+end
+
 puts
 if fails.empty?
-  puts 'ALL PASS — assert-phase6-ran gate 8b vision precondition + gate 11 post-publish guide + gate 16 join-cardinality ledger + gate 17 LOD translation ledger + gate 18 ground-truth numeric coverage + gate 19 aggregation-semantics ledger'
+  puts 'ALL PASS — assert-phase6-ran gate 8b vision precondition + gate 11 post-publish guide + gate 16 join-cardinality ledger + gate 17 LOD translation ledger + gate 18 ground-truth numeric coverage + gate 19 aggregation-semantics ledger + gate 20 semantic-edit equivalence ledger'
   exit 0
 else
   puts "FAILURES (#{fails.length}):"
