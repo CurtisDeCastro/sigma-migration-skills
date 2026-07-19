@@ -851,7 +851,48 @@ module GroundTruthSql
   # dashboard-layout.json array; meta = *-meta.json Hash; twb_xml = raw .twb
   # text; calc_fields = calc-fields.json Hash (or nil).
   # ---------------------------------------------------------------------------
-  def derive(charts, dashboards, meta, twb_xml, calc_fields, db: nil, schema: nil)
+  # ---------------------------------------------------------------------------
+  # VDS-oracle fan-out hazard (Twin-B e2e 2026-07-19). VDS queries the
+  # datasource through Tableau's LOGICAL layer: relationship joins are CULLED
+  # per-viz, so VDS returns UN-FANNED data. A tile whose rendered value is fed
+  # by a fan-out join (a .twb join whose right side is NOT proven unique on
+  # the keys) therefore gets a VDS answer that can AGREE with a Sigma build
+  # that silently dropped the join — a false-green oracle for the exact defect
+  # gate 16 exists to catch. When the join-plan ledger carries an entry for
+  # one of the tile's datasource tables that is not status "unique", the vds
+  # classification is demoted to anchor-only with the hazard named; rendered-
+  # source anchors (which DO see the fan-out) carry the value bar instead.
+  # No ledger (nil) → no demotion: old workdirs/tests keep their behavior, and
+  # in a gated run the ledger always exists by the time this derivation runs.
+  def demote_vds_fanout!(entry, twb, join_ledger)
+    return entry unless entry['classification'] == 'vds' && join_ledger.is_a?(Array)
+    unproven = join_ledger.select do |j|
+      j.is_a?(Hash) && j['kind'] == 'federated-join' && j['status'].to_s != 'unique'
+    end
+    return entry if unproven.empty?
+    ds = (twb['datasources'] || {}).values
+                                   .find { |d| d['caption'] == entry.dig('provenance', 'datasource') }
+    return entry unless ds
+    names = Array(ds['tables']).map { |t| t['name'] } +
+            Array(ds['objects']).flat_map { |o| [o['caption'], o['id']] }
+    fqns = (Array(ds['tables']) + Array(ds['objects'])).map { |t| t['fqn'] }.compact
+    hit = unproven.find do |j|
+      names.include?(j['left']) || names.include?(j['right']) ||
+        (j['right_table'] && fqns.include?(j['right_table']))
+    end
+    return entry unless hit
+    entry['classification'] = 'anchor-only'
+    entry['reason'] = "vds-oracle unsafe: tile datasource carries join #{hit['left']} -> #{hit['right']} " \
+                      "(ledger status #{(hit['status'] || 'unprobed').inspect}, not proven unique) — VDS reads " \
+                      'relationship-culled (un-fanned) data and would false-green a dropped/fanned join; ' \
+                      "was vds: #{entry['reason']}"
+    entry
+  end
+
+  # join_ledger: the workdir's join-plan.json entries (lib/join_plan.rb), when
+  # available — used to demote the vds classification on fan-out-fed tiles
+  # (see demote_vds_fanout! above). nil → no demotion (back-compat).
+  def derive(charts, dashboards, meta, twb_xml, calc_fields, db: nil, schema: nil, join_ledger: nil)
     twb = parse_twb(twb_xml, db: db, schema: schema)
     calcs = calc_index(calc_fields, meta)
     params = param_index(meta)
@@ -868,7 +909,9 @@ module GroundTruthSql
     entries = Array(charts).map do |c|
       view = (c['tableau_view'] || c['chart'] || c['name']).to_s
       dash, zone = zones_by_caption[view] || zones_by_caption[view.downcase]
-      derive_tile(c, zone, twb, meta, calcs, params, dash)
+      e = derive_tile(c, zone, twb, meta, calcs, params, dash)
+      demote_vds_fanout!(e, twb, join_ledger)
+      e
     end
 
     counts = Hash.new(0)

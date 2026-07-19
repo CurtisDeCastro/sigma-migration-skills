@@ -39,7 +39,7 @@ nothing silently drops out (`summary.coverage_complete` asserts it):
 | classification | meaning | downstream |
 |---|---|---|
 | `warehouse-sql` | entry carries executable `SELECT <dims>, <AGG(measure)> FROM <.twb-joined tables> WHERE <worksheet + datasource filters> GROUP BY …` | `run-ground-truth.rb` executes it |
-| `vds` | the tile's value is a window/table calc (RUNNING_*, RANK, percent-of-total quick calc, …) — Tableau must compute it | the existing `scripts/vds-oracle.rb` path |
+| `vds` | the tile's value is a window/table calc (RUNNING_*, RANK, percent-of-total quick calc, …) — Tableau must compute it. **Demoted to `anchor-only` when the tile's datasource carries a join-plan ledger join not proven `unique`** (see "VDS is NOT a valid oracle for fan-out-fed tiles" below) | the existing `scripts/vds-oracle.rb` path |
 | `anchor-only` | blends, LOD calcs, relationship models with non-unique related tables, IF/CASE calcs and filter kinds outside the mechanical SQL subset — with the **reason named** | rendered-source anchors carry the value bar |
 | `unverifiable(reason)` | no source zone matched / no measures / no resolvable warehouse table | named in the report; PR-6 will require a waiver |
 
@@ -53,6 +53,28 @@ exact failure class this oracle exists to catch. Relationship-model joins are
 derived only when every related table is unique-keyed (a LEFT JOIN to a unique
 key cannot change the fact grain); otherwise the tile is anchor-only rather
 than replicating Tableau's per-viz join culling.
+
+## ⚠️ VDS is NOT a valid oracle for fan-out-fed tiles
+
+Run-found hazard (Twin-B e2e, 2026-07-19): **VDS queries the datasource
+through Tableau's logical layer, which CULLS relationship joins per-viz — VDS
+returns relationship-culled (un-fanned) data.** A tile whose rendered value is
+fed by a fan-out join (a `.twb` join whose right side is not proven unique on
+the keys) therefore gets a VDS answer that can **agree with a Sigma build that
+silently dropped the join** — a false-green oracle for the exact defect gate
+16 (the join-cardinality ledger) exists to catch. In that live run the DM
+shipped without an embedded-DS LEFT JOIN and every tile diverged 3–23×; a
+VDS-based ground truth would have vouched for the wrong numbers.
+
+Mechanically enforced: `derive-ground-truth.rb` reads the workdir's
+`join-plan.json` (lib/join_plan.rb — gate 16's ledger) and **demotes `vds` to
+`anchor-only`** (reason `vds-oracle unsafe: …` naming the join) for any tile
+whose datasource carries a ledger join entry not at status `unique`. A join
+**proven unique** by `probe-join-keys.rb` cannot fan out, so the tile keeps
+its `vds` classification — probe the ledger *before* deriving ground truth to
+keep VDS coverage. `warehouse-sql` tiles are unaffected: their SQL replicates
+the join explicitly, fan-out and all. Rendered-source anchors also remain
+valid — the rendered source *does* see the fan-out.
 
 ## Artifacts
 

@@ -127,6 +127,44 @@ Dir.mktmpdir do |dir|
   ok(e['reason'].to_s =~ /window|vds/i, 'vds reason routes to the vds-oracle path')
   ok(e['sql'].nil?, 'no SQL emitted for a vds tile (Tableau computes it)')
 
+  puts '-- vds demoted on a fan-out-fed tile (join-plan ledger not proven unique) --'
+  # Twin-B e2e 2026-07-19: VDS queries through Tableau's logical layer, which
+  # CULLS relationship joins per-viz — VDS returns un-fanned data and would
+  # false-green a Sigma build that dropped the join. A vds tile whose
+  # datasource carries a ledger join not proven "unique" must fall back to
+  # anchors (anchor-only) with the hazard named.
+  File.write(File.join(dir, 'join-plan.json'), JSON.pretty_generate(
+    'entries' => [{ 'kind' => 'federated-join', 'join_type' => 'left',
+                    'left' => 'SALES_FACT', 'right' => 'REGION_DIM',
+                    'keys' => ['REGION_ID'], 'grain_assumption' => 'right unique on keys',
+                    'status' => 'unprobed', 'right_table' => 'ANALYTICS.PUBLIC.REGION_DIM',
+                    'probe_keys' => ['REGION_ID'] }]
+  ))
+  _out, err, st = Open3.capture3(RbConfig.ruby, DERIVE, '--workdir', dir, '--twb', FIXTURE, '--out', out_path)
+  ok(st.exitstatus.zero?, "derive re-runs with a join ledger present (got #{st.exitstatus}: #{err.lines.first})")
+  doc2 = JSON.parse(File.read(out_path))
+  e2 = doc2['entries'].find { |x| x['chart'] == 'Running Sales Trend' }
+  ok(e2['classification'] == 'anchor-only',
+     "vds demoted to anchor-only while the join is unproven (got #{e2['classification']})")
+  ok(e2['reason'].to_s =~ /vds-oracle unsafe/ && e2['reason'].to_s =~ /SALES_FACT -> REGION_DIM/,
+     'demotion reason names the hazard AND the unproven join')
+  ok(doc2['entries'].find { |x| x['chart'] == 'Sales by Region' }['classification'] == 'warehouse-sql',
+     'warehouse-sql tiles are untouched by the demotion (SQL replicates the join; VDS does not)')
+  # A join PROVEN unique cannot fan out — vds stays trustworthy.
+  File.write(File.join(dir, 'join-plan.json'), JSON.pretty_generate(
+    'entries' => [{ 'kind' => 'federated-join', 'join_type' => 'left',
+                    'left' => 'SALES_FACT', 'right' => 'REGION_DIM',
+                    'keys' => ['REGION_ID'], 'grain_assumption' => 'right unique on keys',
+                    'status' => 'unique', 'right_table' => 'ANALYTICS.PUBLIC.REGION_DIM',
+                    'probe_keys' => ['REGION_ID'] }]
+  ))
+  _out, _err, st = Open3.capture3(RbConfig.ruby, DERIVE, '--workdir', dir, '--twb', FIXTURE, '--out', out_path)
+  ok(st.exitstatus.zero?, 'derive re-runs with a proven-unique ledger')
+  doc3 = JSON.parse(File.read(out_path))
+  ok(doc3['entries'].find { |x| x['chart'] == 'Running Sales Trend' }['classification'] == 'vds',
+     'a join PROVEN unique keeps the vds classification (no fan-out possible)')
+  File.delete(File.join(dir, 'join-plan.json'))
+
   puts '-- blend → anchor-only --'
   e = by_chart['Quota Attainment Blend']
   ok(e['classification'] == 'anchor-only', "blend tile classified anchor-only (got #{e['classification']})")
