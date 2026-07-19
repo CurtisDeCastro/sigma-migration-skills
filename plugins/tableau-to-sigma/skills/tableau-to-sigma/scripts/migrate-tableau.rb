@@ -397,12 +397,14 @@ _dg_skip = opts[:skip_doctor_gate] || ENV['SIGMA_SKIP_DOCTOR_GATE']
 _dg_cmd = ['ruby', File.join(HERE, 'assert-doctor-ran.rb'), '--workdir', WORK]
 _dg_cmd += ['--skip-doctor-gate', _dg_skip] if _dg_skip && !_dg_skip.to_s.empty?
 unless system(*_dg_cmd)
-  # Host-dispatched doctor hint: PowerShell/cmd users get the .ps1 twin, not a
-  # bash script they cannot run (RbConfig::CONFIG['host_os'] — docs-level P1.3).
+  # Host-dispatched bootstrap hint: PowerShell/cmd users get the .ps1 twin, not
+  # a bash script they cannot run (RbConfig::CONFIG['host_os'] — docs-level P1.3).
+  # PR-15: the remediation is the ONE bootstrap command (idempotent; ends in a
+  # doctor run + sentinel) — never a hand-driven runtime install.
   _doc_hint = RbConfig::CONFIG['host_os'] =~ /mswin|mingw|cygwin/ ?
-                'powershell -ExecutionPolicy Bypass -File scripts\\doctor.ps1' :
-                'bash scripts/doctor.sh'
-  abort "FATAL: environment gate failed — run the doctor first (#{_doc_hint}; see remediation above), " \
+                'powershell -ExecutionPolicy Bypass -File scripts\\bootstrap.ps1' :
+                'bash scripts/bootstrap.sh'
+  abort "FATAL: environment gate failed — run the bootstrap first (#{_doc_hint}; see remediation above), " \
         'or re-run with --skip-doctor-gate "<reason>".'
 end
 

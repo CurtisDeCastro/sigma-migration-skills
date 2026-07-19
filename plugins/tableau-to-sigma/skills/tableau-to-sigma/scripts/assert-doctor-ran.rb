@@ -59,9 +59,10 @@ candidates << home_doctor
 path = candidates.find { |p| File.exist?(p) }
 
 def remediate
-  warn '       Run the environment doctor FIRST, then re-run:'
-  warn '         macOS/Linux/Git-Bash:  bash scripts/doctor.sh'
-  warn '         Windows PowerShell:    powershell -ExecutionPolicy Bypass -File scripts\\doctor.ps1'
+  warn '       Run the ONE bootstrap command FIRST (idempotent, non-interactive, no admin;'
+  warn '       it ends with a doctor run + writes the sentinel), then re-run:'
+  warn '         macOS/Linux/Git-Bash:  bash scripts/bootstrap.sh'
+  warn '         Windows PowerShell:    powershell -ExecutionPolicy Bypass -File scripts\\bootstrap.ps1'
   warn '       Escape hatch (name it in your report): --skip-doctor-gate "<reason>".'
 end
 
@@ -101,7 +102,21 @@ if behind.is_a?(Integer) && behind > threshold
 end
 
 if d['pass']
-  puts "[PASS] environment gate — doctor.json OK (#{env_desc}). Source: #{path}"
+  # PLAN-v3 PR-15: doctor-green alone is no longer enough — the BOOTSTRAP must
+  # have run (it is what makes the green reproducible: runtime activation
+  # persisted, creds flow executed, sentinel written). A hand-run doctor on a
+  # hand-assembled env skips all of that, so the gate asks for the sentinel too.
+  sentinel = []
+  sentinel << File.join(opts[:dir], 'bootstrap.json') if opts[:dir]
+  sentinel << File.expand_path('~/.sigma-migration/bootstrap.json')
+  spath = sentinel.find { |p| File.exist?(p) }
+  unless spath
+    warn '[FAIL] environment gate — doctor.json passes but the BOOTSTRAP SENTINEL is missing'
+    warn '       (bootstrap.json — scripts/bootstrap.sh never ran on this machine/workdir).'
+    remediate
+    exit 1
+  end
+  puts "[PASS] environment gate — doctor.json OK (#{env_desc}); bootstrap sentinel #{spath}. Source: #{path}"
   exit 0
 end
 

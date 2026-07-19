@@ -46,11 +46,7 @@ echo
 if command -v ruby >/dev/null 2>&1; then
   ok "ruby — $(ruby -e 'print RUBY_VERSION' 2>/dev/null)"
 else
-  if [ "$OS" = "windows-bash" ]; then
-    bad "ruby not found" "Install RubyInstaller (https://rubyinstaller.org), tick 'Add Ruby to PATH', reopen the shell."
-  else
-    bad "ruby not found" "macOS: 'brew install ruby'  •  Linux: 'apt-get install ruby' (or your package manager)."
-  fi
+  bad "ruby not found" "Run the bootstrap: 'bash scripts/bootstrap.sh' (idempotent; user-scoped install/activation, never admin)."
 fi
 
 # --- python (real interpreter, NOT the Windows Store alias stub) -----------
@@ -72,9 +68,9 @@ elif py_real python ; then ok "python — $PY_DESC  [python]"
 else
   if [ "$OS" = "windows-bash" ]; then
     bad "no real Python (the 'python'/'python3' you have is likely the Microsoft Store alias stub)" \
-        "Install Python from python.org (tick 'Add to PATH'), then use 'py -3', OR disable the stub: Settings → Apps → Advanced app settings → App execution aliases → turn OFF python.exe/python3.exe. Re-run."
+        "Run the bootstrap: 'powershell -ExecutionPolicy Bypass -File scripts\\bootstrap.ps1' (user-scoped install, never admin; it skips the Store stub)."
   else
-    bad "python3 not found" "macOS: 'brew install python'  •  Linux: 'apt-get install python3'."
+    bad "python3 not found" "Run the bootstrap: 'bash scripts/bootstrap.sh' (idempotent; user-scoped install/activation, never admin)."
   fi
 fi
 
@@ -113,7 +109,7 @@ if command -v "${PY_CMD:-python3}" >/dev/null 2>&1; then
     # SILENTLY fails on a fresh env (v5.5 e2e field-caught). Pillow/numpy: the
     # gate-14 visual floor. One check, one fix line.
     warn "Pillow/numpy/requests missing — sigma-export-png (renders) and the visual-similarity floor (gate 14) cannot run" \
-         "pip install pillow numpy requests   (numpy 2.3+ preferred; 2.2.x histogram regression is worked around in-script)"
+         "Run the bootstrap: 'bash scripts/bootstrap.sh' (pip --user install, no admin; numpy 2.3+ preferred — the 2.2.x histogram regression is worked around in-script)"
   fi
 fi
 
@@ -154,7 +150,7 @@ else
     warn "node is INSTALLED but not on PATH ($("$NODE_VM_BIN" --version 2>/dev/null) at $NODE_VM_BIN) — a version manager that activates via interactive-shell hooks this shell never ran" \
          "Prepend it for this session: export PATH=\"$(dirname "$NODE_VM_BIN"):\$PATH\"  — no install needed. (Persist it in the shell profile to stop this recurring.)"
   else
-    bad "node not found (required — the vendored converters/*.mjs run via node)" "macOS/Linux: install Node 18+ from https://nodejs.org or your package manager. Windows no-admin: 'winget install Schniz.fnm' then 'fnm install --lts && fnm use --lts'. See refs/environment.md #5 — don't auto-download an unpinned Node, ask first."
+    bad "node not found (required — the vendored converters/*.mjs run via node)" "Run the bootstrap: 'bash scripts/bootstrap.sh' (activates version-manager installs, or installs user-scoped via brew/fnm — never admin, never an unpinned download)."
   fi
 fi
 

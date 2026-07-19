@@ -447,6 +447,13 @@
    ]
   },
   {
+   "canonical": "shared/scripts/test-bootstrap.rb",
+   "targets": [
+    "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-bootstrap.rb",
+    "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-bootstrap.rb"
+   ]
+  },
+  {
    "canonical": "shared/scripts/test-verify-warehouse.rb",
    "targets": [
     "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-verify-warehouse.rb",
@@ -488,6 +495,33 @@
    ]
   },
   {
+   "canonical": "shared/scripts/bootstrap.sh",
+   "targets": [
+    "plugins/cognos-to-sigma/skills/cognos-assessment/scripts/bootstrap.sh",
+    "plugins/cognos-to-sigma/skills/cognos-to-sigma/scripts/bootstrap.sh",
+    "plugins/gooddata-to-sigma/skills/gooddata-assessment/scripts/bootstrap.sh",
+    "plugins/gooddata-to-sigma/skills/gooddata-to-sigma/scripts/bootstrap.sh",
+    "plugins/looker-to-sigma/skills/looker-assessment/scripts/bootstrap.sh",
+    "plugins/looker-to-sigma/skills/looker-to-sigma/scripts/bootstrap.sh",
+    "plugins/microstrategy-to-sigma/skills/microstrategy-assessment/scripts/bootstrap.sh",
+    "plugins/microstrategy-to-sigma/skills/microstrategy-to-sigma/scripts/bootstrap.sh",
+    "plugins/powerbi-to-sigma/skills/powerbi-assessment/scripts/bootstrap.sh",
+    "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/bootstrap.sh",
+    "plugins/qlik-to-sigma/skills/qlik-assessment/scripts/bootstrap.sh",
+    "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/bootstrap.sh",
+    "plugins/quicksight-to-sigma/skills/quicksight-assessment/scripts/bootstrap.sh",
+    "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/bootstrap.sh",
+    "plugins/sigma-authoring/skills/custom-sql-to-data-model/scripts/bootstrap.sh",
+    "plugins/sigma-authoring/skills/sigma-workbooks/scripts/bootstrap.sh",
+    "plugins/sisense-to-sigma/skills/sisense-assessment/scripts/bootstrap.sh",
+    "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/bootstrap.sh",
+    "plugins/tableau-to-sigma/skills/tableau-assessment/scripts/bootstrap.sh",
+    "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/bootstrap.sh",
+    "plugins/thoughtspot-to-sigma/skills/thoughtspot-assessment/scripts/bootstrap.sh",
+    "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/bootstrap.sh"
+   ]
+  },
+  {
    "canonical": "shared/scripts/doctor.ps1",
    "targets": [
     "plugins/cognos-to-sigma/skills/cognos-assessment/scripts/doctor.ps1",
@@ -512,6 +546,33 @@
     "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/doctor.ps1",
     "plugins/thoughtspot-to-sigma/skills/thoughtspot-assessment/scripts/doctor.ps1",
     "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/doctor.ps1"
+   ]
+  },
+  {
+   "canonical": "shared/scripts/bootstrap.ps1",
+   "targets": [
+    "plugins/cognos-to-sigma/skills/cognos-assessment/scripts/bootstrap.ps1",
+    "plugins/cognos-to-sigma/skills/cognos-to-sigma/scripts/bootstrap.ps1",
+    "plugins/gooddata-to-sigma/skills/gooddata-assessment/scripts/bootstrap.ps1",
+    "plugins/gooddata-to-sigma/skills/gooddata-to-sigma/scripts/bootstrap.ps1",
+    "plugins/looker-to-sigma/skills/looker-assessment/scripts/bootstrap.ps1",
+    "plugins/looker-to-sigma/skills/looker-to-sigma/scripts/bootstrap.ps1",
+    "plugins/microstrategy-to-sigma/skills/microstrategy-assessment/scripts/bootstrap.ps1",
+    "plugins/microstrategy-to-sigma/skills/microstrategy-to-sigma/scripts/bootstrap.ps1",
+    "plugins/powerbi-to-sigma/skills/powerbi-assessment/scripts/bootstrap.ps1",
+    "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/bootstrap.ps1",
+    "plugins/qlik-to-sigma/skills/qlik-assessment/scripts/bootstrap.ps1",
+    "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/bootstrap.ps1",
+    "plugins/quicksight-to-sigma/skills/quicksight-assessment/scripts/bootstrap.ps1",
+    "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/bootstrap.ps1",
+    "plugins/sigma-authoring/skills/custom-sql-to-data-model/scripts/bootstrap.ps1",
+    "plugins/sigma-authoring/skills/sigma-workbooks/scripts/bootstrap.ps1",
+    "plugins/sisense-to-sigma/skills/sisense-assessment/scripts/bootstrap.ps1",
+    "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/bootstrap.ps1",
+    "plugins/tableau-to-sigma/skills/tableau-assessment/scripts/bootstrap.ps1",
+    "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/bootstrap.ps1",
+    "plugins/thoughtspot-to-sigma/skills/thoughtspot-assessment/scripts/bootstrap.ps1",
+    "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/bootstrap.ps1"
    ]
   },
   {

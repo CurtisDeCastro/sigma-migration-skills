@@ -27,7 +27,7 @@ Write-Host "Environment doctor - host: windows (PowerShell)`n"
 # --- ruby ------------------------------------------------------------------
 $ruby = Get-Command ruby -ErrorAction SilentlyContinue
 if ($ruby) { Ok "ruby - $((& ruby -e 'print RUBY_VERSION' 2>$null))" }
-else { Bad "ruby not found" "Install RubyInstaller (https://rubyinstaller.org), tick 'Add Ruby to PATH', reopen PowerShell." }
+else { Bad "ruby not found" "Run the bootstrap: 'powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1' (user-scoped winget/scoop install, never admin)." }
 
 # --- python (reject the Microsoft Store App-Execution-Alias stub) ----------
 # Detect by PATH first: the stub lives under ...\WindowsApps\. We check py -3,
@@ -57,7 +57,7 @@ else {
   if ($py) { Ok "python - $py" }
   else {
     Bad "no real Python (the 'python'/'python3' on PATH is likely the Microsoft Store alias stub)" `
-        "Install Python from python.org (tick 'Add Python to PATH'), then use 'py -3'. OR disable the stub: Settings > Apps > Advanced app settings > App execution aliases > turn OFF python.exe / python3.exe. Re-run."
+        "Run the bootstrap: 'powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1' (user-scoped install that skips the Store stub, never admin)."
   }
 }
 
@@ -101,7 +101,7 @@ if (Test-Path (Join-Path $PSScriptRoot 'land-extracts.py')) {
 $node = Get-Command node -ErrorAction SilentlyContinue
 if ($node) { Ok "node - $((& node --version 2>$null))" }
 else { Bad "node not found (required - the vendored converters/*.mjs run via node)" `
-           "Admin: install Node LTS from https://nodejs.org or 'winget install OpenJS.NodeJS.LTS'. NO admin: 'winget install Schniz.fnm' then 'fnm install --lts; fnm use --lts' (user-scoped, no admin). See refs/environment.md #5. Don't auto-download an unpinned Node - ask first." }
+           "Run the bootstrap: 'powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1' (activates fnm/scoop installs or installs user-scoped - never admin, never an unpinned download)." }
 
 # --- bash (REQUIRED for get-token.sh / *-auth.sh token minting) ------------
 $bash = Get-Command bash -ErrorAction SilentlyContinue
@@ -111,7 +111,7 @@ if ($bash) {
   $wsl = Get-Command wsl -ErrorAction SilentlyContinue
   if ($wsl) { Warn "no native bash, but WSL is present" "Run the *.sh helpers via WSL, or install Git for Windows (Git Bash) for a native bash." }
   else { Bad "no bash found - get-token.sh / *-auth.sh (Sigma token minting) cannot run" `
-             "Install Git for Windows (https://git-scm.com/download/win) - it ships Git Bash - then run the *.sh helpers from Git Bash." }
+             "Run the bootstrap: 'powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1' (installs Git for Windows user-scoped - it ships Git Bash)." }
 }
 
 # --- git autocrlf (CRLF mangles shebangs + bash scripts) -------------------
