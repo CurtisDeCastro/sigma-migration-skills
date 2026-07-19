@@ -14,6 +14,11 @@
 #      eliding it (or keeping it) without measurement risks fan-out.
 #   4. parse-twb-layout.rb preserves the two trend worksheets as chart_kind
 #      "line" in the layout signals (the field regression shipped bars).
+#   5. probe-equivalence.rb (PR-8) measures the elision itself: before (join
+#      kept, fanned out to 26 rows over 8 grain keys) vs after (join dropped,
+#      8 rows) → match:false, exit 2 FATAL naming BOTH sides' numbers, and a
+#      semantic-edits.json entry that blocks GREEN via gate 20 (exit 27).
+#      The field agent's "provably no-op" claim is mechanically REFUTED.
 set -uo pipefail
 CASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$CASE_DIR/../../.." && pwd)"
@@ -81,5 +86,31 @@ ruby -rjson -e '
   abort "Channel Crosstab not pivot-table: #{kinds.inspect}" unless kinds["Channel Crosstab"] == "pivot-table"
 ' "$TMP/layout.json" && note "ok: layout signals keep both trend worksheets chart_kind=line (crosstab stays pivot-table)" \
   || { note "FAIL: chart kinds not preserved in layout signals"; fail=1; }
+
+# -- 5. equivalence probe: the elision is measurably NOT a no-op -------------
+EQTMP="$TMP/equiv-workdir"
+mkdir -p "$EQTMP"
+ruby "$SCRIPTS/probe-equivalence.rb" --workdir "$EQTMP" \
+  --edit "drop LEFT JOIN SALES_FACT->SEGMENT_DIM (ACTIVE_FLAG=CURRENT_FLAG)" \
+  --claim "joined table contributes no shelf column; elision is a no-op" \
+  --grain ORDER_ID --measures AMOUNT \
+  --before-sql "SELECT f.*, d.SEGMENT_NAME FROM DEMO_DB.ANALYTICS.SALES_FACT f LEFT JOIN DEMO_DB.ANALYTICS.SEGMENT_DIM d ON f.ACTIVE_FLAG = d.CURRENT_FLAG" \
+  --after-sql "SELECT f.* FROM DEMO_DB.ANALYTICS.SALES_FACT f" \
+  --fixture "$CASE_DIR/equiv-fixture" >"$TMP/equiv.out" 2>"$TMP/equiv.err"
+rc=$?
+if [ "$rc" -eq 2 ] \
+   && /usr/bin/grep -q 'SEMANTIC-EDIT EQUIVALENCE FATAL' "$TMP/equiv.err" \
+   && tr -d "\r" < "$TMP/equiv.err" | /usr/bin/grep -q 'TOTAL_ROWS      before 26  vs  after 8' \
+   && tr -d "\r" < "$TMP/equiv.err" | /usr/bin/grep -q 'SUM_AMOUNT  before 9575.0  vs  after 2950.0' \
+   && ruby -rjson -e '
+        e = JSON.parse(File.read(File.join(ARGV[0], "semantic-edits.json")))["entries"].first
+        abort "no match:false proof" unless e && e["proof"] && e["proof"]["match"] == false
+        abort "row-count mismatch not recorded" unless e["proof"]["mismatches"].any? { |m|
+          m["metric"] == "TOTAL_ROWS" && m["before"] == 26 && m["after"] == 8 }
+      ' "$EQTMP"; then
+  note "ok: equivalence probe REFUTES the elision (26 rows with the join vs 8 without) -> exit 2 FATAL; semantic-edits.json blocks GREEN (gate 20)"
+else
+  note "FAIL: equivalence probe expected exit 2 + FATAL naming 26 vs 8 rows (got exit $rc)"; sed -n '1,15p' "$TMP/equiv.err"; fail=1
+fi
 
 exit "$fail"
