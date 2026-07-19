@@ -405,3 +405,31 @@ Output is a JSON array, one entry per Custom SQL block, with `query` (the raw SQ
 
 ---
 
+
+---
+
+## Phase 1a — numeric-URL resolver gate (relocated from SKILL.md — PR-15 diet)
+
+**🚧 GATE — Phase 1a: ANY numeric Tableau URL (project *or* workbook) MUST go
+through the resolver.** When the user hands you a Tableau URL like
+`.../#/site/<site>/projects/1234567` **or**
+`.../#/site/<site>/workbooks/4242001/views`, that number is a **vizportal URL
+id** the REST API cannot resolve (no REST endpoint carries it). Run
+`ruby scripts/resolve-project.rb --url "<url>"` **before anything else**.
+Exit 0 → migrate exactly the workbook(s) it lists (a workbook URL resolves
+straight to `{workbook_luid, name, project_luid, project_name}` — no
+hand-searching). **Exit 2 → STOP and ask the user, presenting the printed
+candidate list — do not proceed.** Guessing from name or recency is a **gate
+violation**: a wrong guess silently points the ENTIRE run (discovery, DM,
+workbook, parity) at the wrong content — one real field session burned 6
+hours migrating the wrong project, another burned 20 minutes hand-hunting a
+workbook it had a DIRECT link to. Query shape + why REST can't do it:
+`refs/tableau-rest.md`.
+
+**`/views/<slug>/<view>` share links (the MOST COMMON shape) are handled by the
+orchestrator directly** — paste the whole URL as `--workbook "<url>"` and
+`migrate-tableau.rb` resolves the workbook via the REST `contentUrl:eq:` filter
+(`Tableau.find_workbook_by_content_url`). Do NOT hand the slug to
+`--workbook <name>`: a workbook's display Name routinely diverges from its
+contentUrl slug, so the name lookup misses (three independent field runs each
+rediscovered this the hard way).

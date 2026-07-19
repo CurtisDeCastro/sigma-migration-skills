@@ -194,3 +194,19 @@ pre-aggregates exist and nothing linted their consumption.
 
 ---
 
+
+---
+
+## Shared relative-date filters → native ROLLING modes (relocated from SKILL.md — PR-15 diet)
+
+- **Shared relative-date filters** — `build-charts-from-signals.rb` now maps
+  these to Sigma's native ROLLING date-range modes directly:
+  `this <period>` → `mode:current`, `last N <period>` → `mode:last`
+  (`value:N`, `unit`, `includeToday`), `next N` → `mode:next`. They roll with the
+  clock — no frozen dates and no manual master-boolean workaround. Only a
+  shifted/spanning window (one that doesn't anchor to now) falls back to a frozen
+  `mode:between`, flagged `FROZEN — re-run to refresh`. If a shared relative-date
+  filter still shows a uniform parity DIVERGE (every Sigma value too big),
+  confirm the date key survived into the DM and the control's `filters` target
+  wiring reached the chart's source. (Rolling emission verified 2026-07-01;
+  shapes per `sigma-authoring` controls.md, live 2026-06-15.)

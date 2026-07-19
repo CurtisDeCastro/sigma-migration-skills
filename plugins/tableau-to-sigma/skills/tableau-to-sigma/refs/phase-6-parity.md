@@ -311,3 +311,58 @@ gate 7 (control lint). Auto-pick needs a list/segmented/switch control; pass
 answer (MCP applies saved control defaults and has NO parameter mechanism;
 only the export API's `parameters` map can flip a control programmatically).
 
+
+---
+
+## Phase 6f — blind visual grade + gate sequence (relocated from SKILL.md — PR-15 diet)
+
+**Phase 6f — BLIND visual grade (PR-9, mandatory for a pass verdict).** Your own
+read is the fix loop, **not** the verdict — a field run self-graded its workbook
+6/6 PASS on visuals the customer rejected. When you believe the render matches,
+spawn a **FRESH context-free subagent** (Agent tool, `general-purpose`) whose
+prompt is `refs/blind-grader-brief.md` with exactly four parameters filled in:
+the source dashboard PNG path, the Sigma render PNG path, the rubric path
+(`refs/fidelity-rubric.md`), and the output path `<WORK>/blind-grade.json`.
+**Pass NOTHING else — no wb-spec, no parity artifacts, no run history, no
+transcript, no "context", no expected outcome.** Any run context anchors the
+grade and voids it. The grader Reads both images and writes `blind-grade.json`
+(sha256-bound, per-dimension verdicts, per-tile chart families). Then record:
+`ruby scripts/record-visual-check.rb --workdir <WORK> --agent-vision true
+--verdict pass --checklist "…" --blind-grade <WORK>/blind-grade.json` — a pass
+without a passing blind grade is REFUSED (and gate 8b re-verifies the grade
+hash-bound). Blind grade FAILS → record `--verdict divergent`, fix its top
+gaps, re-render, re-grade with a fresh grader. Only if the session cannot spawn
+a vision-capable subagent: `--no-vision-waiver "<reason>"` (budget-counted,
+named in the report). Finish with the gate sequence:
+```bash
+ruby scripts/assert-dashboard-read.rb --workdir <WORK>                  # 🚧 Phase 1d belt
+ruby scripts/verify-anchors.rb --workdir <WORK> --workbook-id <wb>      # 🚧 measured value bar → anchors-verdict.json
+ruby scripts/assert-run-state.rb --workdir <WORK>                       # 🚧 phase-chain ledger audit
+ruby scripts/assert-phase6-ran.rb --workdir <WORK> --workbook-id <wb>   # 🚧 hard gate — must exit 0
+```
+**A conversion is NOT done until `assert-phase6-ran.rb` exits 0** (which stamps
+`<WORK>/phase6-success.json`). Confirm it before claiming success with the single
+offline check — `ruby scripts/verify-complete.rb --workdir <WORK>` must print
+✅ DONE / exit 0. The marker is **run-scoped**: a migration may be reported
+complete ONLY when `<WORK>/phase6-success.json` exists **for the current run id**
+(the gate deletes a stale marker from a previous run on any failure) — quote the
+marker's workbook id + run id verbatim in your report. Full detail
+(raw-warehouse mode, triage, visual checklist): `refs/phase-6-parity.md`.
+
+### No-standalone-views path (dashboard-embedded worksheets)
+
+dashboard's worksheets are embedded-only (no standalone views to export CSVs
+from), chart-by-chart CSV parity may be genuinely unavailable. The parity
+oracle is then **anchors + warehouse** — `verify-anchors.rb` (printed source
+values found in the live exports) plus `verify-warehouse.rb` (elements evaluate
+against real warehouse data). **`--skip-parity-gate` alone is no longer a valid
+combination:** the gate **rejects it (exit 18)** unless `anchors-verdict.json`
+exists and passes. The anchors oracle replaces parity — never nothing.
+
+### Visual-similarity floor (measured)
+
+present, the gate runs
+`python3 scripts/visual-similarity.py --source <src> --render <render> --json-out <WORK>/visual-similarity.json`
+and fails (exit 20) when its JSON `pass` field is false — a measured companion
+to the recorded visual verdict (details: `refs/visual-similarity.md`). Escape
+`--skip-visual-similarity "<reason>"` (counted as a waiver).

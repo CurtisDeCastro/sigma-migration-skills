@@ -38,3 +38,15 @@
 | `build-parity-plan.rb` plan has far fewer charts than the workbook (e.g. 17→5) | Plan keys charts by element **name**; blank/duplicate display names collide and overwrite each other | Give every chart element a unique non-blank `name` before building the plan, or uniquify the plan keys by element **id** before `verify-warehouse` (hit live 2026-07-07) |
 
 
+
+---
+
+## Shell footguns (relocated from SKILL.md — PR-15 diet)
+
+> **bash-only alternative:** `eval "$(scripts/get-token.sh)"` still works in
+> bash. But never use `TOKEN=$(eval "$(scripts/get-token.sh)")` — `$()` creates a
+> subshell where the exported var dies immediately; keep eval + curl in the same
+> `bash -c '...'`. PowerShell/cmd cannot run this idiom at all — use
+> `get_token.py` there.
+
+> **Inline Python inside bash — DON'T.** Triple-nested escapes (`f"...{e.get(\\\"name\\\")}..."` inside `python3 -c "..."` inside `bash -c '...'`) silently break. Instead **always write a `.py` file with `Write` and call it via `python3 file.py`.** Same rule for any inline script over ~5 lines: write it to disk, then exec. It's not slower, it's deterministic, and the file becomes a reusable artifact. (Same applies to Ruby — prefer `ruby file.rb` over `ruby -e '...'`.)
