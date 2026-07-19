@@ -53,6 +53,7 @@ require 'json'
 require 'optparse'
 require_relative 'lib/layout'
 require_relative 'lib/zone_census'
+require_relative 'lib/arrangement_lint'
 include SigmaLayout
 
 # ---- Source-derived header chrome -----------------------------------------
@@ -1523,9 +1524,51 @@ end
 data_page_xml = page_xml('page-data',
                          le(master_el['id'], 1, opts[:page_cols] + 1, 1, 21))
 
+# ---- Layout-arrangement parity record (PLAN-v3 PR-11; WARN-level release) ---
+# Compares the SOURCE zone arrangement (normalized bboxes) against the BUILT
+# grid (page XML flattened to page-absolute rects): row-band ordering,
+# within-band left-right ordering, quadrant agreement, and the controls-shelf
+# placement class (top-shelf vs sidebar). Ordering/class only — no pixel IoU,
+# so grid quantization/row scaling never false-fires. Advisory: a lint crash
+# must never sink the layout build.
+def arrangement_record(dashboard, page, pxml, o)
+  els_by_name = page['elements'].each_with_object({}) { |e, h| h[e['name']] = e if e['name'] }
+  augment_els_by_name!(els_by_name, page['elements'])
+  built_rects = ArrangementLint.absolute_rects(pxml, page_cols: o[:page_cols])
+  zrect = lambda do |z|
+    [z['x_pct'].to_f, z['x_pct'].to_f + z['w_pct'].to_f,
+     z['y_pct'].to_f, z['y_pct'].to_f + z['h_pct'].to_f]
+  end
+  source_items = []
+  built_items = []
+  seen_el = {}
+  ZoneCensus.content_zones(dashboard['zones']).each do |z|
+    el = find_zone_el(els_by_name, z, o[:renames])
+    next unless el && built_rects[el['id']] && !seen_el[el['id']]
+    seen_el[el['id']] = true
+    source_items << { name: z['caption'].to_s, role: 'tile', rect: zrect.call(z) }
+    built_items  << { name: z['caption'].to_s, role: 'tile', rect: built_rects[el['id']] }
+  end
+  (dashboard['zones'] || []).each do |z|
+    next unless %w[filter parameter].include?(z['kind'].to_s)
+    source_items << { name: (z['filter_column_caption'] || z['id']).to_s,
+                      role: 'control', rect: zrect.call(z) }
+  end
+  page['elements'].each do |e|
+    next unless e['kind'].to_s == 'control' && built_rects[e['id']]
+    built_items << { name: e['id'].to_s, role: 'control', rect: built_rects[e['id']] }
+  end
+  ArrangementLint.compare_page(page['name'], source_items, built_items)
+rescue StandardError => e
+  warn "WARN: arrangement lint failed for #{dashboard['dashboard'].inspect} " \
+       "(#{e.class}: #{e.message}) — layout-arrangement.json record skipped for this page"
+  nil
+end
+
 page_xmls = [data_page_xml]
 sidecar = {}
 census_pages = []
+arrangement_pages = []
 totals = { charts: 0, bands: 0, controls: 0 }
 bands_detected = { 'header' => false, 'kpi_rows' => 0, 'sidebar' => false }
 min_row_expansions = 0
@@ -1624,6 +1667,10 @@ dash_layout.each do |d|
       census['synthetic_header'] = true
     end
   end
+  if (arr = arrangement_record(d, page, pxml, o))
+    arr['violations'].each { |v| warn "ARRANGEMENT WARN (#{page['name'].inspect}): #{v}" }
+    arrangement_pages << arr
+  end
   page_xmls << pxml
   sidecar[page['id']] = extra_els
   census_pages << census if census
@@ -1659,6 +1706,21 @@ File.write(census_out, JSON.pretty_generate({
   'min_row_expansions' => min_row_expansions
 }) + "\n")
 
+# ---- layout-arrangement.json (gate 8e producer, PLAN-v3 PR-11) ------------
+# One record per dashboard page comparing the SOURCE zone arrangement against
+# the BUILT grid: row-band ordering, within-band left-right ordering, quadrant
+# agreement, controls-shelf placement class. enforcement:"warn" this release —
+# assert-phase6-ran.rb prints the violations as advisory WARNs unless the
+# caller opts into blocking with --require-arrangement (gate 8e, exit 29).
+arr_out = File.join(File.dirname(opts[:out]), 'layout-arrangement.json')
+arr_total = arrangement_pages.sum { |p| p['violations'].length }
+File.write(arr_out, JSON.pretty_generate({
+  'pages' => arrangement_pages,
+  'violations_total' => arr_total,
+  'enforcement' => 'warn',
+  'generated_by' => 'build-dashboard-layout.rb'
+}) + "\n")
+
 # Per-page row report (v5.1): rows are resolved per dashboard (px-derived when
 # the source canvas is fixed), so a single global row count no longer exists.
 rows_report = census_pages.map do |c|
@@ -1669,3 +1731,5 @@ puts "wrote #{opts[:out]} (#{page_for_dash.size} dashboard page(s): #{totals[:ch
 puts "wrote #{opts[:out]}.elements.json (#{sidecar.values.sum(&:length)} container/header spec element(s) — put-layout.rb injects these)"
 puts "wrote #{census_out} (#{census_pages.size} page census record(s): " \
      "#{census_pages.map { |c| "#{c['page']} #{c['placed']}/#{c['zones']} tiles, fill #{(c['grid_fill_pct'] * 100).round}%" }.join('; ')})"
+puts "wrote #{arr_out} (#{arrangement_pages.size} page arrangement record(s), " \
+     "#{arr_total} violation(s)#{arr_total.positive? ? ' — see ARRANGEMENT WARN lines above' : ''})"
