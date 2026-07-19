@@ -9,8 +9,17 @@
 # and flags chart_kind_inferred:true so the builder routes it to image
 # confirmation (it's a guess, not a declared mark).
 #
-# Deterministic + offline: synthesizes a .twb with three Automatic worksheets
-# and runs the ACTUAL parse-twb-layout.rb.
+# Part 2 (PR-10) — KIND PROPAGATION through the ACTUAL builder: a VERIFIED
+# per-tile `kind` in png-read.json OVERRIDES the shelf inference for EVERY
+# kind (line/area/scatter/pivot — not just bar orientation), with one logged
+# line per mismatch; absent png-read (waived read) leaves inference unchanged;
+# a tile named in png-read kind_waivers keeps the shelf kind (a recorded
+# deliberate substitution). Field failure this closes: corrected kinds in a
+# verified png-read.json never reached the built wb-spec — bars shipped where
+# the source shows lines.
+#
+# Deterministic + offline: synthesizes .twb fixtures and runs the ACTUAL
+# parse-twb-layout.rb + build-charts-from-signals.rb.
 #
 # Usage:  ruby scripts/test-automatic-chart-kind.rb
 
@@ -19,6 +28,7 @@ require 'tmpdir'
 
 DIR    = __dir__
 PARSER = File.join(DIR, 'parse-twb-layout.rb')
+BUILD  = File.join(DIR, 'build-charts-from-signals.rb')
 
 fails = []
 def check(cond, msg, fails)
@@ -108,9 +118,174 @@ check(kind(by_name, 'DiscreteMeasTable') == 'table',
 check(kind(by_name, 'DiscreteBAN') == 'kpi',
       "Automatic + zero-dim discrete measure w/ :N instance index → kpi (got #{kind(by_name, 'DiscreteBAN').inspect})", fails)
 
+# ============================================================================
+# Part 2 (PR-10) — png-read verified kinds OVERRIDE shelf inference in the
+# ACTUAL builder (build-charts-from-signals.rb), for ALL kinds.
+# ============================================================================
+puts
+puts 'Part 2 — builder propagation (png-read verified kind > shelf inference):'
+
+def ws2(name, mark, rows, cols)
+  <<~XML
+    <worksheet name='#{name}'>
+      <table>
+        <view>
+          <datasource-dependencies datasource='federated.fact'>
+            <column caption='Gross Revenue' name='#{GR}' datatype='real' role='measure' type='quantitative' />
+            <column caption='Order Date ' name='#{OD}' datatype='date' role='dimension' type='ordinal' />
+            <column caption='Region' name='#{RG}' datatype='string' role='dimension' type='nominal' />
+            <column caption='Category' name='#{CT}' datatype='string' role='dimension' type='nominal' />
+            <column-instance column='#{OD}' derivation='Month-Trunc' name='[tmn:#{OD[1..-2]}:qk]' pivot='key' type='quantitative' />
+            <column-instance column='#{GR}' derivation='Sum' name='[sum:#{GR[1..-2]}:qk]' pivot='key' type='quantitative' />
+            <column-instance column='#{RG}' derivation='None' name='[none:#{RG[1..-2]}:nk]' pivot='key' type='nominal' />
+            <column-instance column='#{CT}' derivation='None' name='[none:#{CT[1..-2]}:nk]' pivot='key' type='nominal' />
+          </datasource-dependencies>
+        </view>
+        <rows>#{rows}</rows>
+        <cols>#{cols}</cols>
+        <pane><mark class='#{mark}' /></pane>
+      </table>
+    </worksheet>
+  XML
+end
+
+# Shelf truth: Rev Trend → line, Region Rev → bar, Cat Rev → bar, Region Pivot → bar.
+TWB2 = <<~XML
+  <?xml version='1.0' encoding='utf-8' ?>
+  <workbook>
+    <datasources>
+      <datasource caption='ORDER_FACT' name='federated.fact'>
+        <connection class='federated'>
+          <named-connections>
+            <named-connection name='snow'><connection class='snowflake' dbname='DEMO_DB' schema='DEMO' /></named-connection>
+          </named-connections>
+          <relation connection='snow' name='ORDER_FACT' table='[DEMO].[ORDER_FACT]' type='table' />
+        </connection>
+        <column caption='Gross Revenue' name='#{GR}' datatype='real' role='measure' type='quantitative' />
+        <column caption='Order Date ' name='#{OD}' datatype='date' role='dimension' type='ordinal' />
+        <column caption='Region' name='#{RG}' datatype='string' role='dimension' type='nominal' />
+        <column caption='Category' name='#{CT}' datatype='string' role='dimension' type='nominal' />
+      </datasource>
+    </datasources>
+    <worksheets>
+      #{ws2('Rev Trend', 'Line', "[federated.fact].[sum:#{GR[1..-2]}:qk]", "[federated.fact].[tmn:#{OD[1..-2]}:qk]")}
+      #{ws2('Region Rev', 'Bar', "[federated.fact].[sum:#{GR[1..-2]}:qk]", "[federated.fact].[none:#{RG[1..-2]}:nk]")}
+      #{ws2('Cat Rev', 'Bar', "[federated.fact].[sum:#{GR[1..-2]}:qk]", "[federated.fact].[none:#{CT[1..-2]}:nk]")}
+      #{ws2('Region Pivot', 'Bar', "[federated.fact].[none:#{RG[1..-2]}:nk]", "[federated.fact].[sum:#{GR[1..-2]}:qk]")}
+    </worksheets>
+    <dashboards>
+      <dashboard name='Dash'><zones>
+        <zone id='1' name='Rev Trend' x='0' y='0' w='25000' h='100000' />
+        <zone id='2' name='Region Rev' x='25000' y='0' w='25000' h='100000' />
+        <zone id='3' name='Cat Rev' x='50000' y='0' w='25000' h='100000' />
+        <zone id='4' name='Region Pivot' x='75000' y='0' w='25000' h='100000' />
+      </zones></dashboard>
+    </dashboards>
+  </workbook>
+XML
+
+MASTER_MAP2 = {
+  '(?i)^Gross Revenue$' => { 'id' => 'm-gr',  'name' => 'Gross Revenue' },
+  '(?i)^Order Date $'   => { 'id' => 'm-od',  'name' => 'Order Date ' },
+  '(?i)^Order Date$'    => { 'id' => 'm-od',  'name' => 'Order Date ' },
+  '(?i)^Region$'        => { 'id' => 'm-reg', 'name' => 'Region' },
+  '(?i)^Category$'      => { 'id' => 'm-cat', 'name' => 'Category' }
+}.freeze
+
+# One builder run; png_read nil ⇒ delete the file and waive the read gate.
+# → [elements(Array), build_log(String)]
+def run_build2(png_read)
+  els = []
+  log = ''
+  Dir.mktmpdir do |d|
+    twb = File.join(d, 'wb.twb')
+    lay = File.join(d, 'layout.json')
+    mm  = File.join(d, 'master-map.json')
+    out = File.join(d, 'specs.json')
+    File.write(twb, TWB2)
+    File.write(mm, JSON.dump(MASTER_MAP2))
+    views = [['v1', 'Rev Trend'], ['v2', 'Region Rev'], ['v3', 'Cat Rev'], ['v4', 'Region Pivot']]
+    File.write(File.join(d, 'get-workbook.json'),
+               JSON.dump('views' => { 'view' => views.map { |id, n| { 'id' => id, 'name' => n } } }))
+    Dir.mkdir(File.join(d, 'views'))
+    views.each { |id, _| File.write(File.join(d, 'views', "#{id}.csv"), '') } # signal-built tiles
+    args = []
+    if png_read
+      File.write(File.join(d, 'png-read.json'), JSON.pretty_generate(png_read))
+    else
+      args = ['--skip-dashboard-read', 'no PNG available (test)']
+    end
+    abort 'parse-twb-layout failed (part 2)' unless system('ruby', PARSER, twb, lay, out: File::NULL, err: File::NULL)
+    log = `ruby #{BUILD} --tableau-dir #{d} --layout #{lay} --meta #{lay.sub(/\.json$/, '-meta.json')} --master-map #{mm} --master-element-id master --out #{out} #{args.map { |a| "'#{a}'" }.join(' ')} 2>&1`
+    if File.exist?(out)
+      doc = JSON.parse(File.read(out))
+      els = doc.is_a?(Array) ? doc : (doc['elements'] || (doc['pages'] || []).flat_map { |p| p['elements'] || [] })
+    end
+  end
+  [els, log]
+end
+
+def el_kind(els, name)
+  e = els.find { |x| x['name'].to_s.casecmp?(name) }
+  e && e['kind']
+end
+
+# --- (a) verified png-read kinds override line/area/scatter/pivot ------------
+PNG_OVERRIDE = {
+  'verified' => true, 'source_png' => 'views/dash.png',
+  'tiles' => [
+    { 'title' => 'Rev Trend',    'kind' => 'area-chart' },    # shelf says line
+    { 'title' => 'Region Rev',   'kind' => 'line-chart' },    # shelf says bar
+    { 'title' => 'Cat Rev',      'kind' => 'scatter-chart' }, # shelf says bar
+    { 'title' => 'Region Pivot', 'kind' => 'pivot-table' }    # shelf says bar
+  ],
+  'text_elements' => [], 'filter_shelf' => []
+}.freeze
+
+els_a, log_a = run_build2(PNG_OVERRIDE)
+check(el_kind(els_a, 'Rev Trend') == 'area-chart',
+      "png-read 'area-chart' overrides shelf-inferred line (got #{el_kind(els_a, 'Rev Trend').inspect})", fails)
+check(el_kind(els_a, 'Region Rev') == 'line-chart',
+      "png-read 'line-chart' overrides shelf-inferred bar (got #{el_kind(els_a, 'Region Rev').inspect})", fails)
+check(el_kind(els_a, 'Cat Rev') == 'scatter-chart',
+      "png-read 'scatter-chart' overrides shelf-inferred bar (got #{el_kind(els_a, 'Cat Rev').inspect})", fails)
+check(el_kind(els_a, 'Region Pivot') == 'pivot-table',
+      "png-read 'pivot-table' overrides shelf-inferred bar → pivot fast path (got #{el_kind(els_a, 'Region Pivot').inspect})", fails)
+check(log_a.scan(/\[png-read\].*OVERRIDES shelf-inferred/).length == 4,
+      "each override is logged one line (got #{log_a.scan(/\[png-read\]/).length} [png-read] line(s))", fails)
+
+# --- (b) absent png-read (waived read) → shelf inference unchanged -----------
+els_b, log_b = run_build2(nil)
+check(el_kind(els_b, 'Rev Trend') == 'line-chart',
+      "no png-read: shelf-inferred line stands (got #{el_kind(els_b, 'Rev Trend').inspect})", fails)
+check(el_kind(els_b, 'Region Rev') == 'bar-chart',
+      "no png-read: shelf-inferred bar stands (got #{el_kind(els_b, 'Region Rev').inspect})", fails)
+check(el_kind(els_b, 'Region Pivot') == 'bar-chart',
+      "no png-read: no phantom pivot promotion (got #{el_kind(els_b, 'Region Pivot').inspect})", fails)
+check(!log_b.include?('[png-read]'), 'no png-read: no override lines logged', fails)
+
+# --- (c) kind_waivers: a named tile keeps the shelf kind (recorded substitution)
+PNG_WAIVED = {
+  'verified' => true, 'source_png' => 'views/dash.png',
+  'tiles' => [
+    { 'title' => 'Rev Trend',    'kind' => 'area-chart' },
+    { 'title' => 'Region Rev',   'kind' => 'line-chart' },
+    { 'title' => 'Cat Rev',      'kind' => 'bar-chart', 'orientation' => 'vertical' },
+    { 'title' => 'Region Pivot', 'kind' => 'bar-chart', 'orientation' => 'vertical' }
+  ],
+  'kind_waivers' => [{ 'tile' => 'Region Rev', 'reason' => 'deliberate substitution recorded at read time (test)' }],
+  'text_elements' => [], 'filter_shelf' => []
+}.freeze
+
+els_c, _log_c = run_build2(PNG_WAIVED)
+check(el_kind(els_c, 'Region Rev') == 'bar-chart',
+      "kind-waived tile keeps the shelf kind (got #{el_kind(els_c, 'Region Rev').inspect})", fails)
+check(el_kind(els_c, 'Rev Trend') == 'area-chart',
+      "non-waived tiles still override (got #{el_kind(els_c, 'Rev Trend').inspect})", fails)
+
 puts
 if fails.empty?
-  puts 'ALL PASS — Automatic worksheets infer line/bar/scatter from shelves (no blind bar default)'
+  puts 'ALL PASS — Automatic worksheets infer line/bar/scatter from shelves (no blind bar default) + verified png-read kinds propagate through the builder (PR-10)'
   exit 0
 else
   puts "FAILURES (#{fails.length}):"

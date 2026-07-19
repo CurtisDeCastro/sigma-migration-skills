@@ -859,6 +859,137 @@ Dir.mktmpdir do |dir|
   check(err.include?('--withdraw'), 'gate 20 failure remedy names the withdraw path', fails)
 end
 
+# ---- gate 21: chart-kind parity (exit 28; PR-10) ------------------------------
+# Verified png-read.json kinds vs the live wb-readback.json, matched by
+# zone-census name normalization; family vocabulary = blind-grader families.
+# NOTE: readback elements are kept kpi+line-shaped where possible so gate 8b's
+# blind-grade census cross-check (fixture per_tile: kpi+line) stays within its
+# 1-tile tolerance and gate 21 is what decides the scenario.
+def kp_png(tiles, extra = {})
+  { 'verified' => true, 'source_png' => 'views/dash.png', 'tiles' => tiles,
+    'text_elements' => [], 'filter_shelf' => [] }.merge(extra)
+end
+
+def kp_rb(els)
+  { 'pages' => [{ 'elements' => els }] }
+end
+
+KP_TILES = [{ 'title' => 'KPI', 'kind' => 'kpi-chart' },
+            { 'title' => 'Trend', 'kind' => 'line-chart' },
+            { 'title' => 'Filters', 'kind' => 'control' }].freeze # non-chart: ignored
+KP_ELS_OK = [{ 'id' => 'e1', 'kind' => 'kpi-chart', 'name' => 'KPI' },
+             { 'id' => 'e2', 'kind' => 'line-chart', 'name' => 'Trend' }].freeze
+
+# match → pass, counted
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'png-read.json'), JSON.pretty_generate(kp_png(KP_TILES)))
+  File.write(File.join(dir, 'wb-readback.json'), JSON.pretty_generate(kp_rb(KP_ELS_OK)))
+  out, err, st = run_gate(dir)
+  check(st.success?, "gate 21: readback families match the verified read → exit 0 (got #{st.exitstatus}: #{err.lines.first(2).join(' ').strip})", fails)
+  check(out.include?('gate 21') && out.include?('2 matched') && out.include?('2 verified tile(s)'),
+        'gate 21 OK line counts the matched tiles (control tile ignored)', fails)
+end
+
+# mismatch → exit 28 naming tile + expected/actual family
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'png-read.json'), JSON.pretty_generate(kp_png(KP_TILES)))
+  File.write(File.join(dir, 'wb-readback.json'), JSON.pretty_generate(kp_rb(
+    [{ 'id' => 'e1', 'kind' => 'kpi-chart', 'name' => 'KPI' },
+     { 'id' => 'e2', 'kind' => 'bar-chart', 'name' => 'Trend' }]))) # source shows a line
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 28, "gate 21: built bar where the read says line → exit 28 (got #{st.exitstatus})", fails)
+  check(err.include?('"Trend"') && err.include?("expected family 'line'") && err.include?("built 'bar'"),
+        'gate 21 failure names the tile + expected/actual families', fails)
+  check(err.include?('kind_waivers') && err.include?('build-charts-from-signals.rb'),
+        'gate 21 failure names the propagation remedy + the read-time waiver ledger', fails)
+end
+
+# tile UNVERIFIED at read time (built element not in png-read) → stated, not failed
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'png-read.json'), JSON.pretty_generate(kp_png(KP_TILES)))
+  File.write(File.join(dir, 'wb-readback.json'), JSON.pretty_generate(kp_rb(
+    KP_ELS_OK + [{ 'id' => 'e3', 'kind' => 'bar-chart', 'name' => 'Extra Breakdown' }])))
+  out, _err, st = run_gate(dir)
+  check(st.success?, "gate 21: built element absent from png-read → stated, exit 0 (got #{st.exitstatus})", fails)
+  check(out.include?('UNVERIFIED at read') && out.include?('stated, not failed'),
+        'gate 21 states the unverified element (never silent, never a fail)', fails)
+end
+
+# ...and a VERIFIED tile with no readback element by name → stated (gate 5 owns drops)
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'png-read.json'),
+             JSON.pretty_generate(kp_png(KP_TILES + [{ 'title' => 'Dropped Tile', 'kind' => 'pie-chart' }])))
+  File.write(File.join(dir, 'wb-readback.json'), JSON.pretty_generate(kp_rb(KP_ELS_OK)))
+  out, _err, st = run_gate(dir)
+  check(st.success? && out.include?('no readback element by name') && out.include?('"Dropped Tile"'),
+        'gate 21: verified tile missing from the readback → stated, not failed here', fails)
+end
+
+# mismatch WAIVED in the png-read ledger → pass, named with its reason
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'png-read.json'), JSON.pretty_generate(kp_png(
+    KP_TILES, 'kind_waivers' => [{ 'tile' => 'Trend', 'reason' => 'capability substitution recorded at read time' }])))
+  File.write(File.join(dir, 'wb-readback.json'), JSON.pretty_generate(kp_rb(
+    [{ 'id' => 'e1', 'kind' => 'kpi-chart', 'name' => 'KPI' },
+     { 'id' => 'e2', 'kind' => 'bar-chart', 'name' => 'Trend' }])))
+  out, _err, st = run_gate(dir)
+  check(st.success?, "gate 21: mismatch named in kind_waivers → exit 0 (got #{st.exitstatus})", fails)
+  check(out.include?('1 kind-waived in the ledger') && out.include?('capability substitution recorded at read time'),
+        'gate 21 waived acceptance is LOUD and carries the recorded reason', fails)
+end
+
+# ...ledger-named, NOT budget-counted: kind waiver + 2 quality waivers still passes
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'png-read.json'), JSON.pretty_generate(kp_png(
+    KP_TILES, 'kind_waivers' => [{ 'tile' => 'Trend', 'reason' => 'capability substitution' }])))
+  File.write(File.join(dir, 'wb-readback.json'), JSON.pretty_generate(kp_rb(
+    [{ 'id' => 'e1', 'kind' => 'kpi-chart', 'name' => 'KPI' },
+     { 'id' => 'e2', 'kind' => 'bar-chart', 'name' => 'Trend' }])))
+  _out, _err, st = run_gate(dir, '--skip-orphan-check', 'r1', '--skip-column-check', 'r2')
+  check(st.success?, "gate 21: kind waiver is ledger-style — NOT budget-counted (2 skips + waiver → exit 0, got #{st.exitstatus})", fails)
+end
+
+# draft read (verified:false) → stated N/A; readback absent → stated N/A
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'png-read.json'),
+             JSON.pretty_generate(kp_png(KP_TILES, 'verified' => false)))
+  File.write(File.join(dir, 'wb-readback.json'), JSON.pretty_generate(kp_rb(KP_ELS_OK)))
+  out, _err, st = run_gate(dir)
+  check(st.success? && out.include?('UNVERIFIED draft'),
+        'gate 21: draft png-read (verified:false) → stated N/A, exit 0', fails)
+end
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'png-read.json'), JSON.pretty_generate(kp_png(KP_TILES)))
+  out, _err, st = run_gate(dir)
+  check(st.success? && out.include?('no wb-readback.json'),
+        'gate 21: no live readback → stated N/A, exit 0', fails)
+end
+
+# no png-read at all → stated N/A (baseline covers exit 0; assert the statement)
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  out, _err, st = run_gate(dir)
+  check(st.success? && out.include?('gate 21') && out.include?('no png-read.json'),
+        'gate 21: no png-read.json → stated N/A (never silent)', fails)
+end
+
+# malformed png-read → exit 28
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'png-read.json'), JSON.pretty_generate('tiles' => 'nope'))
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 28 && err.include?('malformed'),
+        "gate 21: malformed png-read.json → exit 28 (got #{st.exitstatus})", fails)
+end
+
 # ---- gate 8b + budget: RECORDED divergent verdict spends waiver budget (D3) --
 DIVERGENT_PF = { 'visual_checked' => false, 'visual_verdict' => 'divergent',
                  'visual_notes' => 'Region bar truncated vs source',
@@ -1004,13 +1135,13 @@ Dir.mktmpdir do |dir|
   check(out.include?('gate 4b: layout phase entered'), 'gate 4b OK line printed', fails)
 end
 
-# tracked ledger, phase-5 NEVER entered → hard fail exit 28 (the field failure)
+# tracked ledger, phase-5 NEVER entered → hard fail exit 30 (the field failure)
 Dir.mktmpdir do |dir|
   base_workdir(dir)
   ph = RS_PHASES_OK.reject { |k, _| k == 'phase-5' }
   File.write(File.join(dir, 'run-state.json'), JSON.generate(RS_BASE.merge('phases' => ph)))
   _out, err, st = run_gate(dir)
-  check(st.exitstatus == 28, "layout phase never entered → exit 28 (got #{st.exitstatus})", fails)
+  check(st.exitstatus == 30, "layout phase never entered → exit 30 (got #{st.exitstatus})", fails)
   check(err.include?('NEVER ENTERED'), 'gate 4b failure names the silent shortcut', fails)
   check(err.include?('build-dashboard-layout.rb'), 'gate 4b remedy points at the layout builder', fails)
 end
@@ -1127,7 +1258,7 @@ check(mig_src.include?("['--require-fidelity-ledger'] : ['--skip-fidelity-gate',
 
 puts
 if fails.empty?
-  puts 'ALL PASS — assert-phase6-ran gate 8b vision precondition + PR-9 blind-grade binding + divergent-verdict budget injection + gate 11 post-publish guide + gate 16 join-cardinality ledger + gate 17 LOD translation ledger + gate 18 ground-truth numeric coverage + gate 19 aggregation-semantics ledger + gate 20 semantic-edit equivalence ledger (incl. withdrawn entries) + PR-11 gate 8d default-on / gate 4b layout-phase sentinel / gate 8e arrangement parity'
+  puts 'ALL PASS — assert-phase6-ran gate 8b vision precondition + PR-9 blind-grade binding + divergent-verdict budget injection + gate 11 post-publish guide + gate 16 join-cardinality ledger + gate 17 LOD translation ledger + gate 18 ground-truth numeric coverage + gate 19 aggregation-semantics ledger + gate 20 semantic-edit equivalence ledger (incl. withdrawn entries) + gate 21 chart-kind parity (png-read vs readback, kind_waivers ledger) + PR-11 gate 8d default-on / gate 4b layout-phase sentinel (exit 30) / gate 8e arrangement parity (exit 29)'
   exit 0
 else
   puts "FAILURES (#{fails.length}):"
