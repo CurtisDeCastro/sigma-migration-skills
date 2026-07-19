@@ -22,6 +22,8 @@ require 'json'
 require 'open3'
 require 'tmpdir'
 require 'rbconfig'
+require 'digest'
+require_relative 'lib/blind_fixture'
 
 SCRIPT = File.join(__dir__, 'assert-phase6-ran.rb')
 
@@ -32,8 +34,9 @@ def check(cond, msg, fails)
 end
 
 # A workdir that satisfies every default gate: passing parity, a valid render
-# PNG, a recorded vision-capable visual verdict, and a telemetry marker.
-def base_workdir(dir, parity_extra: {})
+# PNG, a recorded vision-capable visual verdict backed by a hash-bound blind
+# grade (PR-9), and a telemetry marker.
+def base_workdir(dir, parity_extra: {}, blind: true)
   parity = { 'workbook_id' => 'wb-test', 'mode' => 'strict', 'status' => 'PASS',
              'charts_total' => 2, 'charts_pass' => 2, 'charts_fail' => 0,
              'pass_names' => ['KPI', 'Trend'], 'fail_names' => [],
@@ -43,6 +46,7 @@ def base_workdir(dir, parity_extra: {})
   # Valid render: PNG magic + >5000 bytes (gate 8 checks magic + size only).
   File.binwrite(File.join(dir, 'sigma-render.png'), "\x89PNG\r\n\x1a\n".b + ("\x00".b * 6000))
   File.write(File.join(dir, 'telemetry-sent.json'), JSON.generate('status' => 'sent', 'tool' => 'test'))
+  BlindFixture.install(dir) if blind
 end
 
 def run_gate(dir, *args)
@@ -124,6 +128,129 @@ Dir.mktmpdir do |dir|
   _out, err, st = run_gate(dir)
   check(st.exitstatus == 13, 'no verdict recorded → still exit 13 (existing gate 8b preserved)', fails)
   check(err.include?('no visual_checked/screenshot_path verdict'), 'generic 8b message preserved', fails)
+end
+
+# ---- gate 8b PR-9: SELF-ATTESTED pass (no blind grade) → exit 13 -------------
+Dir.mktmpdir do |dir|
+  base_workdir(dir, blind: false) # visual pass recorded, but nobody blind-graded it
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 13, "self-attested pass without blind_grade → exit 13 (got #{st.exitstatus})", fails)
+  check(err.include?('NO blind_grade metadata') && err.include?('self-attested'),
+        'failure names the self-attestation', fails)
+  check(err.include?('blind-grader-brief') && err.include?('--blind-grade'),
+        'remedy names the brief + record-visual-check --blind-grade', fails)
+  check(err.include?('--no-vision-waiver'), 'remedy names the no-vision escape', fails)
+end
+
+# ---- gate 8b PR-9: blind grade evidence file deleted after stamping → exit 13
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.delete(File.join(dir, 'blind-grade.json'))
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 13 && err.include?('evidence file is missing'),
+        "stamped blind_grade but blind-grade.json deleted → exit 13 (got #{st.exitstatus})", fails)
+end
+
+# ---- gate 8b PR-9: image swapped AFTER grading (sha recomputed) → exit 13 ----
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.binwrite(File.join(dir, 'sigma-render.png'), "\x89PNG\r\n\x1a\n".b + ("\x07".b * 6000))
+  # keep blind-grade.json + the parity-final stamp in agreement so ONLY the
+  # recomputed-from-disk hash catches the swap
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 13, "render swapped after grading → exit 13 (got #{st.exitstatus})", fails)
+  check(err.include?('RENDER changed since grading'), 'failure names the broken sha binding', fails)
+end
+
+# ---- gate 8b PR-9: stamped metadata drifted from blind-grade.json → exit 13 --
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  pf = JSON.parse(File.read(File.join(dir, 'parity-final.json')))
+  pf['blind_grade']['target_sha256'] = 'b' * 64 # hand-edited stamp
+  File.write(File.join(dir, 'parity-final.json'), JSON.pretty_generate(pf))
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 13 && err.include?('does not match the stamped metadata'),
+        "hand-edited blind_grade stamp → exit 13 (got #{st.exitstatus})", fails)
+end
+
+# ---- gate 8b PR-9: blind grade with a failing dimension → exit 13 ------------
+Dir.mktmpdir do |dir|
+  base_workdir(dir, blind: false)
+  BlindFixture.install(dir, verdict: 'fail')
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 13, "failing blind grade behind a pass verdict → exit 13 (got #{st.exitstatus})", fails)
+  check(err.include?('not passing') || err.include?('verdict must be pass'),
+        'failure names the non-passing grade', fails)
+end
+
+# ---- gate 8b PR-9: anti-gaming — grade contradicts wb-readback on 2 tiles ----
+Dir.mktmpdir do |dir|
+  base_workdir(dir, blind: false)
+  File.write(File.join(dir, 'wb-readback.json'), JSON.pretty_generate(
+               'pages' => [{ 'elements' => [{ 'id' => 'e1', 'kind' => 'kpi-chart' },
+                                            { 'id' => 'e2', 'kind' => 'bar-chart' },
+                                            { 'id' => 'e3', 'kind' => 'bar-chart' }] }]))
+  BlindFixture.install(dir, per_tile: [
+                         { 'position' => 'r1c1', 'source_family' => 'kpi', 'target_family' => 'kpi' },
+                         { 'position' => 'r2c1', 'source_family' => 'line', 'target_family' => 'line' },
+                         { 'position' => 'r3c1', 'source_family' => 'line', 'target_family' => 'line' }
+                       ])
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 13, "blind families contradict the kind census on 2 tiles → exit 13 (got #{st.exitstatus})", fails)
+  check(err.include?('INCONSISTENT') && err.include?('wb-readback.json'),
+        'gate names the census contradiction (fabricated/stale grade)', fails)
+end
+
+# ...1-tile disagreement stays tolerated (census granularity vs visual reading)
+Dir.mktmpdir do |dir|
+  base_workdir(dir, blind: false)
+  File.write(File.join(dir, 'wb-readback.json'), JSON.pretty_generate(
+               'pages' => [{ 'elements' => [{ 'id' => 'e1', 'kind' => 'kpi-chart' },
+                                            { 'id' => 'e2', 'kind' => 'bar-chart' },
+                                            { 'id' => 'e3', 'kind' => 'bar-chart' }] }]))
+  BlindFixture.install(dir, per_tile: [
+                         { 'position' => 'r1c1', 'source_family' => 'kpi', 'target_family' => 'kpi' },
+                         { 'position' => 'r2c1', 'source_family' => 'bar', 'target_family' => 'bar' },
+                         { 'position' => 'r3c1', 'source_family' => 'line', 'target_family' => 'line' }
+                       ])
+  _out, _err, st = run_gate(dir)
+  check(st.success?, "1-tile census disagreement tolerated → exit 0 (got #{st.exitstatus})", fails)
+end
+
+# ---- gate 8b PR-9: valid blind grade → OK line names the sha binding ---------
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  out, _err, st = run_gate(dir)
+  check(st.success?, 'blind-graded baseline → exit 0', fails)
+  check(out.include?('blind grade verified') && out.include?('sha-bound'),
+        'gate 8b OK line names the verified, sha-bound blind grade', fails)
+end
+
+# ---- gate 8b PR-9: recorded no-vision waiver → accepted + budget-counted -----
+Dir.mktmpdir do |dir|
+  base_workdir(dir, blind: false,
+               parity_extra: { 'blind_grade_waiver' => { 'kind' => 'no-vision-grader',
+                                                         'reason' => 'subagents lack image input here',
+                                                         'recorded_at' => '2026-07-18T00:00:00Z' } })
+  out, _err, st = run_gate(dir)
+  check(st.success?, "pass + recorded no-vision waiver → exit 0 (got #{st.exitstatus})", fails)
+  check(out.include?('NO-VISION-GRADER waiver') && out.include?('subagents lack image input here'),
+        'waived acceptance is LOUD and carries the reason', fails)
+  check(out.include?('--no-vision-waiver'), 'the waiver census names --no-vision-waiver', fails)
+  pf = JSON.parse(File.read(File.join(dir, 'parity-final.json')))
+  check(Array(pf['waivers']).include?('--no-vision-waiver'),
+        'no-vision waiver stamped into the parity-final waiver census', fails)
+end
+
+# ...and it spends waiver budget: 2 more quality waivers exceed the cap (exit 19)
+Dir.mktmpdir do |dir|
+  base_workdir(dir, blind: false,
+               parity_extra: { 'blind_grade_waiver' => { 'kind' => 'no-vision-grader',
+                                                         'reason' => 'subagents lack image input here' } })
+  _out, err, st = run_gate(dir, '--skip-orphan-check', 'r1', '--skip-column-check', 'r2')
+  check(st.exitstatus == 19, "no-vision waiver + 2 skips → waiver budget exceeded, exit 19 (got #{st.exitstatus})", fails)
+  check(err.include?('--no-vision-waiver') || _out.include?('--no-vision-waiver'),
+        'budget failure lists the no-vision waiver among the census', fails)
 end
 
 # ---- gate 11: actions in dashboard-layout-meta.json, no guide → exit 16 ------
@@ -688,7 +815,7 @@ end
 
 puts
 if fails.empty?
-  puts 'ALL PASS — assert-phase6-ran gate 8b vision precondition + gate 11 post-publish guide + gate 16 join-cardinality ledger + gate 17 LOD translation ledger + gate 18 ground-truth numeric coverage + gate 19 aggregation-semantics ledger + gate 20 semantic-edit equivalence ledger'
+  puts 'ALL PASS — assert-phase6-ran gate 8b vision precondition + PR-9 blind-grade binding + gate 11 post-publish guide + gate 16 join-cardinality ledger + gate 17 LOD translation ledger + gate 18 ground-truth numeric coverage + gate 19 aggregation-semantics ledger + gate 20 semantic-edit equivalence ledger'
   exit 0
 else
   puts "FAILURES (#{fails.length}):"

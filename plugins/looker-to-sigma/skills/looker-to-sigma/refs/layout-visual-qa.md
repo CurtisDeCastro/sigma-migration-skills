@@ -86,6 +86,12 @@ and be harsh: a "mostly" is a `fail`.
 Any `fail` ⇒ the verdict is `divergent` (the recorder refuses a pass; the gate re-checks stale or
 hand-edited verdicts). `na` is only for dimensions the page genuinely lacks (e.g. no numbers).
 
+**Blind countersignature (PR-9).** Your checklist is necessary but no longer sufficient: a `pass`
+also requires `--blind-grade <workdir>/blind-grade.json` — the verdict of a FRESH context-free
+subagent that received only the two image paths + the rubric (`refs/blind-grader-brief.md`). The
+grade is sha256-bound to the images and its per-tile chart-family readings are cross-checked
+against the mechanical kind census; gate 8b refuses a self-attested pass with the remedy named.
+
 ## 2. Structural rubric (read the PNG against every item)
 
 - [ ] **No overlaps / no stacking.** No two elements occupy the same cell; no filter, legend, or

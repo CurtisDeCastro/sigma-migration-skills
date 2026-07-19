@@ -21,6 +21,7 @@ require 'csv'
 require 'tmpdir'
 require 'open3'
 require 'rbconfig'
+require_relative 'lib/blind_fixture'
 
 Encoding.default_external = Encoding::UTF_8
 
@@ -138,6 +139,7 @@ def oracle_workdir(d, coverage:, waivers: nil, omit_coverage: false)
     'agent_vision' => true))
   File.binwrite(File.join(d, 'sigma-render.png'), "\x89PNG\r\n\x1a\n".b + ("\x00".b * 6000))
   File.write(File.join(d, 'telemetry-sent.json'), JSON.generate('status' => 'sent', 'tool' => 'test'))
+  BlindFixture.install(d) # PR-9: gate 8b refuses a self-attested visual pass
   Dir.mkdir(File.join(d, 'visual-verify')) unless Dir.exist?(File.join(d, 'visual-verify'))
   File.write(File.join(d, 'visual-verify', 'manifest.json'), JSON.pretty_generate(
     (0..2).map { |i| { 'worksheet' => "w#{i}", 'element_id' => "el#{i}", 'visual_verified' => true, 'shape_match' => true } }))
@@ -218,6 +220,7 @@ Dir.mktmpdir do |d|
     'agent_vision' => true))
   File.binwrite(File.join(d, 'sigma-render.png'), "\x89PNG\r\n\x1a\n".b + ("\x00".b * 6000))
   File.write(File.join(d, 'telemetry-sent.json'), JSON.generate('status' => 'sent', 'tool' => 'test'))
+  BlindFixture.install(d) # PR-9: gate 8b refuses a self-attested visual pass
   Dir.mkdir(File.join(d, 'views'))
   File.binwrite(File.join(d, 'views', 'dash.png'), "\x89PNG\r\n\x1a\n".b + ("\x00".b * 100))
   File.write(File.join(d, 'source-anchors.json'), JSON.pretty_generate(

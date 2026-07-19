@@ -114,11 +114,15 @@ The rules:
   re-runs the anchor and similarity checks, and reads the source PNG vs the
   final render itself.
 - **GREEN requires the verifier's countersignature.** The verifier — and only
-  the verifier — records the final pass verdict:
+  the verifier — records the final pass verdict, backed by a context-free
+  blind grade (PR-9: the verifier first spawns a fresh grader subagent per
+  `refs/blind-grader-brief.md`, which writes `<workdir>/blind-grade.json`):
 
   ```bash
   ruby scripts/record-visual-check.rb --workdir <workdir> --agent-vision true \
-    --verdict pass --notes "VERIFIER: <what was compared and matched>"
+    --verdict pass --checklist "<six dimensions>" \
+    --blind-grade <workdir>/blind-grade.json \
+    --notes "VERIFIER: <what was compared and matched>"
   ```
 
   **Convention (load-bearing): the verdict notes MUST start with `VERIFIER:`.**

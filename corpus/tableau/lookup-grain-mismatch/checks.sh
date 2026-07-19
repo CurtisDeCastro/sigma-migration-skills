@@ -79,6 +79,9 @@ cat > "$TMP/parity-final.json" <<'JSON'
 JSON
 { printf '\x89PNG\r\n\x1a\n'; head -c 6000 /dev/zero; } > "$TMP/sigma-render.png"
 printf '{"status":"sent","tool":"corpus-checks"}\n' > "$TMP/telemetry-sent.json"
+# PR-9: gate 8b refuses a self-attested visual pass - install a hash-bound
+# blind-grade fixture (source PNG + blind-grade.json + parity-final stamp).
+ruby -r "$SCRIPTS/lib/blind_fixture" -e 'BlindFixture.install(ARGV[0])' "$TMP"
 
 env -u SIGMA_BASE_URL -u SIGMA_API_TOKEN ruby "$SCRIPTS/assert-phase6-ran.rb" --workdir "$TMP" >"$TMP/gate1.out" 2>"$TMP/gate1.err"
 rc=$?

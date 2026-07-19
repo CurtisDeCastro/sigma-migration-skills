@@ -7,6 +7,7 @@
 require 'json'
 require 'tmpdir'
 require 'rbconfig'
+require_relative 'lib/blind_fixture'
 
 GATE = File.join(__dir__, 'assert-phase6-ran.rb')
 RUBY = RbConfig.ruby
@@ -28,6 +29,7 @@ def gate_code(dir, *extra)
       'visual_checked' => true, 'visual_verdict' => 'pass', 'style_checklist' => { 'element_titles_hidden' => 'pass', 'palette_match' => 'pass', 'composition_match' => 'pass', 'chart_shapes_match' => 'pass', 'labels_legible' => 'pass', 'numbers_formatted' => 'pass' }, 'agent_vision' => true))
     File.binwrite(File.join(dir, 'sigma-render.png'), "\x89PNG\r\n\x1a\n".b + ("\x00".b * 6000))
     File.write(File.join(dir, 'telemetry-sent.json'), JSON.generate('status' => 'sent', 'tool' => 'test'))
+    BlindFixture.install(dir) # PR-9: gate 8b refuses a self-attested visual pass
   end
   env = { 'SIGMA_API_TOKEN' => nil, 'SIGMA_BASE_URL' => nil }
   system(env, RUBY, GATE, '--workdir', dir, *extra, out: File::NULL, err: File::NULL)

@@ -62,6 +62,11 @@ Dir.mktmpdir do |dir|
   s['screenshot_path'] = '/tmp/shot.png'
   s['style_checklist'] = checklist
   s['agent_vision']    = true
+  # PR-9 stamps (mutually exclusive in real runs; both set here so the
+  # carry-forward whitelist is exercised for each)
+  s['blind_grade'] = { 'path' => 'blind-grade.json', 'source_sha256' => 'a' * 64,
+                       'target_sha256' => 'b' * 64, 'verdict' => 'pass' }
+  s['blind_grade_waiver'] = { 'kind' => 'no-vision-grader', 'reason' => 'carry test' }
   File.write(final_path, JSON.pretty_generate(s))
 
   _out, err, st = run_finalize.call
