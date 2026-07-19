@@ -45,14 +45,41 @@
 #      an interactive source = FAIL, the Qlik class) and per-control
 #      scope:[...] allowlists (intentional single-chart switchers like grain
 #      controls). See the lib header CONTRACT.
-#   7b. Runtime control flip test (OPT-IN via --require-control-flip) — gate 7's
-#      control-scope.json sidecar is derived by build_workbook.py from the same
-#      `listen` data it used to wire the spec, so a builder-level mis-mapping
-#      makes spec and sidecar AGREE and gate 7 passes. This gate proves the
-#      wiring INDEPENDENTLY at runtime: scripts/probe-controls.rb flips each
-#      auto-probeable control via the REST export API and requires its targets'
-#      output to actually change (wired-but-inert = FAIL, exit 21). Offline runs
-#      (no creds / no workbook) SKIP. See lib/flip_gate.rb.
+#   7b. Runtime control flip test (DEFAULT-ON for workdirs whose orchestrator
+#      staged it — PLAN-v3 PR-13; --require-control-flip forces it anywhere) —
+#      gate 7's control-scope.json sidecar is derived by build_workbook.py from
+#      the same `listen` data it used to wire the spec, so a builder-level
+#      mis-mapping makes spec and sidecar AGREE and gate 7 passes. This gate
+#      proves the wiring INDEPENDENTLY at runtime: scripts/probe-controls.rb
+#      flips each auto-probeable control via the REST export API and requires
+#      its targets' output to actually change (wired-but-inert = FAIL, exit 21).
+#      Enforcement resolution (the gate-8d/#439 pattern): --require-control-flip
+#      forces it on; otherwise migrate-state.json control_flip_required=true
+#      (stamped by migrate-tableau.rb at pass 1) auto-enables it, so a
+#      standalone gate run cannot silently skip the flip test on an
+#      orchestrated tableau workdir. When ENFORCED but the probe cannot run
+#      here (no creds / no workbook / probe missing), RECORDED evidence is
+#      accepted instead: <workdir>/probe-controls/probe-results.json with >=1
+#      PASS and 0 FAIL (a prior live probe), the control-flip-unverified.json
+#      advisory marker (nothing auto-probeable), or a controls census showing
+#      0 source control signals. No evidence and no --skip-control-flip waiver
+#      (budget-counted) → FAIL exit 21 — the flip test needs the live API, so
+#      the marker OR the recorded waiver is the bar, never silence.
+#      Converters that never stage it and don't pass the flag keep the old
+#      opt-in SKIP. See lib/flip_gate.rb.
+#   7c. Source-vs-built controls CENSUS (exit 31; V5.6 audit V-V3) —
+#      build-charts-from-signals.rb reconciles EVERY source control signal
+#      (.twb parameters + shared quick filters) against what it built and
+#      writes <workdir>/*-controls-coverage.json. Until PR-13 that census was
+#      a WARN + file nothing ever read. This gate makes it load-bearing:
+#      every expected signal must be built (census status 'emitted'),
+#      declared in the control-scope.json sidecar (a dropped / needs-* /
+#      narrow-scope record carrying its evidence — stated per control), or
+#      named in the <workdir>/controls-waivers.json ledger
+#      ([{"control":"filter:Region","reason":"…"}]) with a reason. An
+#      UNEXPLAINED missing control fails BY NAME. NO skip flag — the ledger
+#      waiver IS the sanctioned escape (join-plan/LOD doctrine). No census
+#      file → stated SKIP (back-compat / non-adopting converters).
 #
 # Usage:
 #   ruby scripts/assert-phase6-ran.rb --tableau /tmp/<name> \
@@ -71,9 +98,14 @@
 #                              # in your report
 #     [--control-scope PATH]   # control-scope.json sidecar for gate 7
 #                              # (default: <workdir>/control-scope.json)
-#     [--require-control-flip] # gate 7b (OPT-IN): prove control wiring at runtime
-#                              # via probe-controls.rb (looker-to-sigma opts in)
-#     [--skip-control-flip R]  # waive gate 7b — name the reason in your report
+#     [--require-control-flip] # gate 7b: prove control wiring at runtime via
+#                              # probe-controls.rb. DEFAULT-ON when
+#                              # migrate-state.json carries
+#                              # control_flip_required=true (tableau pass 1);
+#                              # this flag forces it for everyone else
+#                              # (looker-to-sigma passes it)
+#     [--skip-control-flip R]  # waive gate 7b — budget-counted; name the
+#                              # reason in your report
 #     [--flip-check-leaks]     # gate 7b: also assert flips don't leak
 #                              # (probe --check-out-of-closure; doubles exports)
 #     [--min-layout-elements N] default 2 — single-page bare-element layouts
@@ -218,14 +250,19 @@
 #      pass=false. Script absent → gate is invisible; inputs absent → stated
 #      SKIP. Escape hatch: --skip-visual-similarity "<reason>" (counted against
 #      the waiver budget).
-#  21  Runtime control flip test failed (gate 7b; OPT-IN via --require-control-flip)
-#      — a control passed the static wiring lint (gate 7) but does NOT actually
-#      filter its targets at runtime (wired-but-inert / builder-level listen->
-#      column mis-mapping), proven by scripts/probe-controls.rb; OR the probe
-#      could not run at all on an opted-in gate (fail-closed). Fix the listen
-#      mapping in build_workbook.py + re-PUT, or re-run once the export API is
-#      reachable. Un-probeable control types (date-range / slider) are an
-#      advisory WARN + control-flip-unverified.json marker, not this failure.
+#  21  Runtime control flip test failed (gate 7b; DEFAULT-ON via migrate-state
+#      control_flip_required=true — tableau pass 1 stamps it — or forced via
+#      --require-control-flip) — a control passed the static wiring lint
+#      (gate 7) but does NOT actually filter its targets at runtime
+#      (wired-but-inert / builder-level listen->column mis-mapping), proven by
+#      scripts/probe-controls.rb; OR the probe could not run on an ENFORCED
+#      gate and no recorded evidence exists (fail-closed: the gate requires
+#      either the flip-test marker — a prior probe-results.json with >=1 PASS
+#      and 0 FAIL, or the all-unprobeable control-flip-unverified.json
+#      advisory marker — or the recorded waiver). Fix the listen mapping in
+#      build_workbook.py + re-PUT, or re-run once the export API is reachable.
+#      Un-probeable control types (date-range / slider) are an advisory WARN +
+#      control-flip-unverified.json marker, not this failure.
 #      Escape hatch: --skip-control-flip "<reason>" (counts against the budget).
 #  22  Manual custom-SQL residues unresolved (gate 15) — <workdir>/manual-residues.json
 #      (written at build time by converters that emit it) still carries entries
@@ -383,6 +420,21 @@
 #      hand-driven manual path) → stated SKIP; the artifact gates (4 live
 #      layout, 8c fill census) still police the outputs. NO escape flag:
 #      stamp the phase (run it, or record the skip with its reason).
+#  31  Controls census failed (gate 7c; PLAN-v3 PR-13, V5.6 audit V-V3) — the
+#      workdir's <workdir>/*-controls-coverage.json census (written by
+#      build-charts-from-signals.rb --meta: one row per source parameter +
+#      shared quick filter) carries a signal that was never built as a
+#      control, has no declaring record in control-scope.json (dropped /
+#      needs-* / narrow-scope — the drop decision with its evidence), and is
+#      not named in the <workdir>/controls-waivers.json ledger
+#      ([{"control":"filter:Region","reason":"…"}]): a source control the
+#      user had that the migration silently lost. The failure names each
+#      missing signal. Rebuild the controls (build-charts-from-signals.rb
+#      --auto-controls), or record the ledger waiver with its reason. Also
+#      raised when the census file exists but is malformed. NO escape flag:
+#      the ledger waiver IS the sanctioned escape (join-plan/LOD doctrine).
+#      No census file at all → stated SKIP (back-compat: builder predates the
+#      census or ran without --meta; non-adopting converters).
 #
 # ANCHORS-ORACLE substitution (charts_total==0, exit 2): when every worksheet is
 # dashboard-embedded (no exportable view CSVs), the anchors oracle may stand in
@@ -428,8 +480,8 @@ OptionParser.new do |p|
   p.on('--skip-layout-lint [REASON]')   { |v| opts[:skip_lint] = v || true }
   p.on('--skip-control-lint [REASON]')  { |v| opts[:skip_control_lint] = v || true }
   p.on('--control-scope PATH')       { |v| opts[:control_scope] = v }
-  p.on('--require-control-flip', 'gate 7b (OPT-IN, off by default): after control lint, PROVE each auto-probeable control actually filters its targets at runtime via scripts/probe-controls.rb (live REST export flip test). Closes the self-referential-sidecar hole in gate 7. Adopters (looker-to-sigma) pass this; other converters are unaffected until they do.') { opts[:require_control_flip] = true }
-  p.on('--skip-control-flip [REASON]', 'waive gate 7b (runtime control flip test) — the reason MUST be named in your migration report.') { |v| opts[:skip_control_flip] = v || true }
+  p.on('--require-control-flip', 'gate 7b: after control lint, PROVE each auto-probeable control actually filters its targets at runtime via scripts/probe-controls.rb (live REST export flip test). Closes the self-referential-sidecar hole in gate 7. DEFAULT-ON (PR-13) for workdirs whose migrate-state.json carries control_flip_required=true (tableau-to-sigma stamps it at pass 1); this flag forces it for everyone else (looker-to-sigma passes it).') { opts[:require_control_flip] = true }
+  p.on('--skip-control-flip [REASON]', 'waive gate 7b (runtime control flip test) — budget-counted; the reason MUST be named in your migration report.') { |v| opts[:skip_control_flip] = v || true }
   p.on('--flip-check-leaks', 'gate 7b: also run probe --check-out-of-closure (asserts a flip does NOT leak to out-of-closure elements; doubles exports). Off by default.') { opts[:flip_check_leaks] = true }
   p.on('--min-layout-elements N', Integer) { |v| opts[:min_layout_elements] = v }
   p.on('--allow-missing-tiles N', Integer, 'tolerate N unmatched dashboard zones in the tile census') { |v| opts[:allow_missing_tiles] = v }
@@ -545,6 +597,27 @@ rescue StandardError
 end
 
 # ---------------------------------------------------------------------------
+# Gate 7b enforcement resolution (PLAN-v3 PR-13) — DEFAULT-ON for workdirs
+# whose orchestrator staged the runtime flip test. migrate-tableau.rb stamps
+# control_flip_required=true into migrate-state.json at pass 1; that
+# auto-enables --require-control-flip here so a STANDALONE gate run (the
+# finalize path already passes the flag) cannot silently skip the flip test.
+# --skip-control-flip stays the named, budget-counted waiver. States without
+# the key (other converters / legacy workdirs) keep the opt-in behavior.
+# ---------------------------------------------------------------------------
+opts[:flip_auto] = nil
+begin
+  _ms_cf = JSON.parse(File.read(File.join(opts[:tab], 'migrate-state.json')))
+  if _ms_cf.is_a?(Hash) && _ms_cf['control_flip_required'] &&
+     !opts[:require_control_flip] && !opts[:skip_control_flip]
+    opts[:flip_auto] = 'migrate-state.json control_flip_required=true'
+    opts[:require_control_flip] = true
+  end
+rescue StandardError
+  nil # no/unreadable state → opt-in behavior unchanged
+end
+
+# ---------------------------------------------------------------------------
 # Layout-phase sentinel resolution (gate 4b, PLAN-v3 PR-11) — read the phase
 # ledger ONCE up front so a deliberate skip stamp can join the waiver census
 # below (the gate body prints/fails later). Only converters with a registered
@@ -615,7 +688,10 @@ waiver_flags << '--skip-layout-check'        if opts[:skip_layout]
 waiver_flags << '--allow-missing-tiles'      if opts[:allow_missing_tiles].to_i.positive?
 waiver_flags << '--skip-layout-lint'         if opts[:skip_lint]
 waiver_flags << '--skip-control-lint'        if opts[:skip_control_lint]
-waiver_flags << '--skip-control-flip'        if opts[:skip_control_flip] && opts[:require_control_flip]
+# Unconditional (the gate-8d pattern): waiving the flip test is an attestation
+# whether or not enforcement resolved on — PR-13 made the gate default-on for
+# tableau workdirs, so the skip is always a recorded quality degradation.
+waiver_flags << '--skip-control-flip'        if opts[:skip_control_flip]
 waiver_flags << '--skip-visual-gate'         if opts[:skip_visual]
 waiver_flags << '--skip-visual-comparison'   if opts[:skip_visual_cmp]
 waiver_flags << '--skip-layout-fill'         if opts[:skip_layout_fill]
@@ -1340,22 +1416,171 @@ else
 end
 
 # ---------------------------------------------------------------------------
-# Gate 7b — runtime control flip test (exit 21; OPT-IN via --require-control-flip)
+# Gate 7c — source-vs-built controls CENSUS (exit 31; PLAN-v3 PR-13, V5.6
+# audit V-V3). build-charts-from-signals.rb reconciles EVERY source control
+# signal (.twb parameters + shared quick filters) against what it built and
+# writes <workdir>/*-controls-coverage.json — until PR-13 a WARN + file that
+# no gate, script, or doc ever read. This gate makes the census load-bearing:
+# every expected signal must be BUILT (status 'emitted'), DECLARED in the
+# control-scope.json sidecar (a dropped / needs-* / narrow-scope record with
+# its evidence — stated per control, never silent), or NAMED in the
+# <workdir>/controls-waivers.json ledger with a reason. An unexplained missing
+# control — a control the user had in Tableau that the migration silently
+# lost — fails BY NAME. NO skip flag: the ledger waiver IS the sanctioned
+# escape (the join-plan/LOD doctrine). File-based, so it runs offline.
+# ---------------------------------------------------------------------------
+ctl_census_path = Dir[File.join(opts[:tab], '*-controls-coverage.json')].min
+if ctl_census_path.nil?
+  puts '[SKIP] gate 7c: no *-controls-coverage.json in the workdir — controls census not emitted ' \
+       '(build-charts-from-signals.rb --meta writes it; back-compat / non-adopting converter)'
+else
+  ctl_census = (JSON.parse(File.read(ctl_census_path)) rescue nil)
+  ctl_rows = ctl_census.is_a?(Hash) ? ctl_census['detail'] : nil
+  unless ctl_rows.is_a?(Array)
+    warn "[FAIL] gate 7c: #{File.basename(ctl_census_path)} is malformed (no detail rows) — " \
+         're-run build-charts-from-signals.rb (current version) to regenerate the controls census.'
+    exit 31
+  end
+  ctl_norm = ->(s) { s.to_s.strip.downcase }
+  # Sidecar declarations: every control-scope record — emitted (with a page or
+  # narrow scope:[...]), dropped, or needs-* — is a recorded decision that
+  # carries its evidence (unreachable roots, source signal, intent).
+  ctl_scope_path = opts[:control_scope] || File.join(opts[:tab], 'control-scope.json')
+  ctl_declared = {}
+  if File.exist?(ctl_scope_path)
+    _cs = (JSON.parse(File.read(ctl_scope_path)) rescue nil)
+    if _cs.is_a?(Hash)
+      Array(_cs['controls']).each do |c|
+        next unless c.is_a?(Hash)
+        note = c['scope'].is_a?(Array) ? "narrow scope: #{c['scope'].length} element(s)" : "scope=#{c['scope'] || 'page'}"
+        [c['name'], c['sourceName']].each do |n|
+          ctl_declared[ctl_norm.call(n)] ||= note unless n.to_s.strip.empty?
+        end
+      end
+      Array(_cs['dropped']).each do |d|
+        next unless d.is_a?(Hash) || d.is_a?(String)
+        n = d.is_a?(Hash) ? d['name'] : d
+        ctl_declared[ctl_norm.call(n)] ||= 'dropped — recorded in control-scope.json with its evidence' unless n.to_s.strip.empty?
+      end
+    end
+  end
+  # Waiver ledger: [{"control":"filter:Region","reason":"…"}] (or {"waivers":
+  # [...]}; "name" accepted for "control"). Entries without a reason are
+  # IGNORED — a reasonless waiver explains nothing.
+  ctl_ledger_path = File.join(opts[:tab], 'controls-waivers.json')
+  ctl_ledger = []
+  if File.exist?(ctl_ledger_path)
+    _lg = (JSON.parse(File.read(ctl_ledger_path)) rescue nil)
+    _lg = _lg['waivers'] if _lg.is_a?(Hash)
+    ctl_ledger = Array(_lg).select do |w|
+      w.is_a?(Hash) && !(w['control'] || w['name']).to_s.strip.empty? && !w['reason'].to_s.strip.empty?
+    end
+  end
+  ctl_waiver_for = lambda do |kind, name|
+    ctl_ledger.find do |w|
+      key = ctl_norm.call(w['control'] || w['name'])
+      key == ctl_norm.call(name) || key == ctl_norm.call("#{kind}:#{name}")
+    end
+  end
+  ctl_built = []
+  ctl_declared_rows = []
+  ctl_waived_rows = []
+  ctl_unexplained = []
+  ctl_rows.each do |r|
+    next unless r.is_a?(Hash)
+    kind = r['kind'].to_s
+    name = r['name'].to_s
+    status = r['status'].to_s
+    if status == 'emitted'
+      ctl_built << name
+    elsif (note = ctl_declared[ctl_norm.call(name)])
+      ctl_declared_rows << [kind, name, status, note]
+    elsif (w = ctl_waiver_for.call(kind, name))
+      ctl_waived_rows << [kind, name, status, w['reason'].to_s.strip]
+    else
+      ctl_unexplained << [kind, name, status]
+    end
+  end
+  if ctl_unexplained.any?
+    warn "[FAIL] gate 7c: controls census — #{ctl_unexplained.length} source control signal(s) UNEXPLAINED " \
+         '(present in the source, never built, not declared, not waived):'
+    ctl_unexplained.each { |k, n, s| warn "         - #{k}:#{n} (census status: #{s})" }
+    warn "       Census: #{File.basename(ctl_census_path)}. Every source parameter / quick filter must be"
+    warn '       (a) BUILT as a control (build-charts-from-signals.rb --auto-controls), or'
+    warn '       (b) DECLARED in control-scope.json (a dropped/needs-*/narrow-scope record with evidence), or'
+    warn '       (c) NAMED in <workdir>/controls-waivers.json ([{"control":"filter:Region","reason":"…"}]).'
+    warn '       NO skip flag — the ledger waiver IS the sanctioned escape; name it in your report.'
+    exit 31
+  end
+  puts "[OK] gate 7c: controls census — #{ctl_rows.length} source signal(s): #{ctl_built.length} built" +
+       (ctl_declared_rows.any? ? ", #{ctl_declared_rows.length} declared in control-scope.json" : '') +
+       (ctl_waived_rows.any? ? ", #{ctl_waived_rows.length} ledger-waived" : '') +
+       '; 0 unexplained'
+  ctl_declared_rows.each { |k, n, s, note| puts "       - declared #{k}:#{n} (#{s}; #{note})" }
+  ctl_waived_rows.each { |k, n, s, r2| puts "       - WAIVED #{k}:#{n} (#{s}) — #{r2} [controls-waivers.json]" }
+end
+
+# ---------------------------------------------------------------------------
+# Gate 7b — runtime control flip test (exit 21; DEFAULT-ON via migrate-state
+# control_flip_required=true — PLAN-v3 PR-13 — or --require-control-flip).
 # Gate 7 proves control wiring against the LIVE spec + control-scope.json — but
 # that sidecar is derived by build_workbook.py from the SAME `listen` data it
 # used to wire the spec, so a BUILDER-level mis-mapping yields a spec and a
-# sidecar that AGREE and gate 7 passes. The only independent proof is runtime:
+# sidecar that AGREE and gate 7 passes. Gate 7c proves the controls EXIST; only
+# the flip proves they DO something. The only independent proof is runtime:
 # flip a control via the REST export API and confirm its targets' output
 # actually changes. This gate shells out to scripts/probe-controls.rb (which
-# already does exactly that) and turns its verdict into a hard gate. Opt-in so
-# converters adopt it deliberately (looker-to-sigma passes --require-control-flip);
-# offline runs (no creds / no workbook) SKIP, never false-fail. See lib/flip_gate.rb.
+# already does exactly that) and turns its verdict into a hard gate.
+# Enforcement mirrors gate 8d (#439): the tableau orchestrator stamps
+# control_flip_required at pass 1 (and its --finalize passes the flag), so
+# neither the finalize path nor a standalone gate run can silently skip it;
+# looker-to-sigma passes the flag explicitly. ENFORCED runs that cannot reach
+# the live API accept RECORDED evidence (a prior probe-results.json with >=1
+# PASS / 0 FAIL, the all-unprobeable advisory marker, or a controls census
+# showing 0 source signals) — otherwise they fail closed toward the
+# budget-counted --skip-control-flip waiver. Unenforced converters keep the
+# old opt-in SKIP. See lib/flip_gate.rb.
 # ---------------------------------------------------------------------------
-if !opts[:require_control_flip]
-  puts '[SKIP] gate 7b: runtime control flip test not opted in (pass --require-control-flip to enable)'
-elsif opts[:skip_control_flip]
+if opts[:skip_control_flip]
   record_waiver.call('--skip-control-flip', 'gate 7b (runtime control flip test)', opts[:skip_control_flip])
+elsif !opts[:require_control_flip]
+  puts '[SKIP] gate 7b: runtime control flip test not opted in (pass --require-control-flip to enable)'
 else
+  puts "[NOTE] gate 7b enforcement auto-enabled: #{opts[:flip_auto]}" if opts[:flip_auto]
+  # ENFORCED-but-cannot-probe fallback: the flip test needs the live export
+  # API, so a default-on gate must accept RECORDED evidence — or fail toward
+  # the named waiver — instead of silently passing (the pre-PR-13 hole: every
+  # offline path printed [SKIP] and the gate stayed green).
+  flip_fallback = lambda do |why|
+    cov_p = Dir[File.join(opts[:tab], '*-controls-coverage.json')].min
+    cov_rows = cov_p ? (JSON.parse(File.read(cov_p))['detail'] rescue nil) : nil
+    rec = (JSON.parse(File.read(File.join(opts[:tab], 'probe-controls', 'probe-results.json'))) rescue nil)
+    rec = nil unless rec.is_a?(Array) && rec.any?
+    rec_fails  = rec ? rec.select { |r| r.is_a?(Hash) && r['result'].to_s == 'FAIL' } : []
+    rec_passes = rec ? rec.select { |r| r.is_a?(Hash) && r['result'].to_s == 'PASS' } : []
+    if cov_rows.is_a?(Array) && cov_rows.empty?
+      puts "[OK] gate 7b: #{why} — controls census shows 0 source control signals; nothing to flip-test"
+    elsif rec_fails.any?
+      warn "[FAIL] gate 7b: #{why} — and the RECORDED probe-results.json carries #{rec_fails.length} FAILed flip(s):"
+      rec_fails.each { |r| warn "         - #{r['control']}: #{r['note']}" }
+      warn '       A recorded inert control is a real defect: fix the listen mapping, re-PUT, re-probe.'
+      warn '       Escape hatch: --skip-control-flip "<reason>" (counts against the waiver budget).'
+      exit 21
+    elsif rec_passes.any?
+      puts "[OK] gate 7b: #{why} — accepting RECORDED runtime proof: probe-results.json shows " \
+           "#{rec_passes.length} control(s) proven live (0 FAIL)"
+    elsif File.exist?(File.join(opts[:tab], 'control-flip-unverified.json'))
+      warn "[WARN] gate 7b: #{why} — recorded control-flip-unverified.json marker: no control was " \
+           'auto-probeable on the prior probe; runtime wiring UNVERIFIED (advisory, stated).'
+    else
+      warn "[FAIL] gate 7b: the flip test is ENFORCED#{opts[:flip_auto] ? " (#{opts[:flip_auto]})" : ''} " \
+           "but #{why} — and no recorded flip evidence exists."
+      warn '       The gate requires EITHER the flip-test marker — run with live Sigma creds:'
+      warn "         ruby scripts/probe-controls.rb --workbook-id <id> --out #{File.join(opts[:tab], 'probe-controls')}"
+      warn '       — OR the recorded waiver: --skip-control-flip "<reason>" (counts against the budget).'
+      exit 21
+    end
+  end
   flip_wb = opts[:wb]
   if flip_wb.nil?
     _p = File.join(opts[:tab], 'wb-ids.json')
@@ -1365,11 +1590,11 @@ else
   flip_tok  = ENV['SIGMA_API_TOKEN']
   probe = File.join(__dir__, 'probe-controls.rb')
   if flip_wb.nil? || flip_wb.to_s.empty?
-    puts '[SKIP] gate 7b: no workbook ID resolvable for the flip test'
+    flip_fallback.call('no workbook ID is resolvable for the flip test')
   elsif flip_base.nil? || flip_base.empty? || flip_tok.nil? || flip_tok.empty?
-    warn '[SKIP] gate 7b: SIGMA_BASE_URL / SIGMA_API_TOKEN not set — cannot exercise controls'
+    flip_fallback.call('SIGMA_BASE_URL / SIGMA_API_TOKEN are not set (offline gate run)')
   elsif !File.exist?(probe)
-    warn '[SKIP] gate 7b: scripts/probe-controls.rb not vendored alongside this script — re-vendor (SHA-1 discipline)'
+    flip_fallback.call('scripts/probe-controls.rb is not vendored alongside this script (re-vendor; SHA-1 discipline)')
   else
     # Only meaningful when the workbook actually has controls. Reuse gate 7's
     # spec fetch + ControlLint to count them; 0 controls -> nothing to prove.
@@ -1377,7 +1602,7 @@ else
       require_relative 'lib/control_lint'
       require_relative 'lib/flip_gate'
     rescue LoadError => e
-      warn "[SKIP] gate 7b: #{e.message} — re-vendor scripts/lib (SHA-1 discipline)"
+      warn "[WARN] gate 7b: #{e.message} — re-vendor scripts/lib (SHA-1 discipline)"
     end
     n_controls = nil
     if defined?(ControlLint) && defined?(FlipGate)
@@ -1397,12 +1622,18 @@ else
           end
         n_controls = ControlLint.controls_report(spec).length
       else
-        warn "[SKIP] gate 7b: GET /v2/workbooks/#{flip_wb}/spec returned HTTP #{res.code} — cannot count controls"
+        warn "[WARN] gate 7b: GET /v2/workbooks/#{flip_wb}/spec returned HTTP #{res.code} — cannot count controls"
       end
     end
     if n_controls == 0
       puts '[OK] gate 7b: workbook has no controls — nothing to flip-test'
-    elsif !n_controls.nil?
+    elsif n_controls.nil?
+      # Live path could not even count controls (lib not vendored / spec fetch
+      # failed) — same fail-closed fallback as the offline paths: recorded
+      # evidence passes, otherwise the marker-or-waiver demand fires (the
+      # pre-PR-13 behavior silently passed here).
+      flip_fallback.call('the live spec could not be fetched to count controls')
+    else
       out = File.join(opts[:tab], 'probe-controls')
       cmd = [RbConfig.ruby, probe, '--workbook-id', flip_wb, '--out', out]
       cmd << '--check-out-of-closure' if opts[:flip_check_leaks]

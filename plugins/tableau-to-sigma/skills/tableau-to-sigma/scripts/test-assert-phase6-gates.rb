@@ -1251,14 +1251,206 @@ Dir.mktmpdir do |dir|
         'clean report without the flag → advisory OK line', fails)
 end
 
+# =============================================================================
+# PR-13 — gate 7c (controls census, exit 31) + gate 7b default-on plumbing
+# =============================================================================
+
+# Census writer helper: build-charts-from-signals.rb writes
+# <meta-base>-controls-coverage.json; the gate globs *-controls-coverage.json.
+def write_census(dir, rows)
+  File.write(File.join(dir, 'dashboard-layout-controls-coverage.json'), JSON.pretty_generate(
+               'params_total'  => rows.count { |r| r['kind'] == 'parameter' },
+               'filters_total' => rows.count { |r| r['kind'] == 'filter' },
+               'emitted'       => rows.count { |r| r['status'] == 'emitted' },
+               'unaccounted'   => rows.select { |r| r['status'] == 'UNACCOUNTED' }.map { |r| "#{r['kind']}:#{r['name']}" },
+               'detail'        => rows))
+end
+
+# gate 7c: all source signals built → OK
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  write_census(dir, [{ 'kind' => 'parameter', 'name' => 'Metric', 'status' => 'emitted' },
+                     { 'kind' => 'filter', 'name' => 'Region', 'status' => 'emitted' }])
+  out, _err, st = run_gate(dir)
+  check(st.success?, "census all emitted → exit 0 (got #{st.exitstatus})", fails)
+  check(out.include?('gate 7c') && out.include?('2 built') && out.include?('0 unexplained'),
+        'gate 7c OK line censuses built signals', fails)
+end
+
+# gate 7c: no census file → stated SKIP (back-compat), never silent
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  out, _err, st = run_gate(dir)
+  check(st.success? && out.include?('[SKIP] gate 7c'),
+        'no controls-coverage file → gate 7c states the SKIP (back-compat)', fails)
+end
+
+# gate 7c: UNACCOUNTED signal, no declaration, no ledger → exit 31 naming it
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  write_census(dir, [{ 'kind' => 'parameter', 'name' => 'Metric', 'status' => 'emitted' },
+                     { 'kind' => 'filter', 'name' => 'Region', 'status' => 'UNACCOUNTED' }])
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 31, "unexplained missing control → exit 31 (got #{st.exitstatus})", fails)
+  check(err.include?('filter:Region'), 'failure NAMES the missing control', fails)
+  check(err.include?('controls-waivers.json') && err.include?('control-scope.json'),
+        'remedy names the ledger + the sidecar (no skip flag)', fails)
+end
+
+# gate 7c: dropped signal DECLARED in control-scope.json → passes, stated
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  write_census(dir, [{ 'kind' => 'filter', 'name' => 'Region', 'status' => 'dropped' }])
+  File.write(File.join(dir, 'control-scope.json'), JSON.pretty_generate(
+               'version' => 1, 'source' => 'tableau', 'sourceFilterSignals' => 1,
+               'controls' => [],
+               'dropped' => [{ 'controlId' => 'ctl-region', 'name' => 'Region', 'status' => 'dropped',
+                               'source_signal' => "tableau shared-view quick filter 'Region'",
+                               'unreachable' => [{ 'root' => 'master', 'elements' => ['Trend'] }] }]))
+  out, _err, st = run_gate(dir)
+  check(st.success?, "dropped-with-record → exit 0 (got #{st.exitstatus})", fails)
+  check(out.include?('declared filter:Region') || out.include?('1 declared in control-scope.json'),
+        'declared drop is stated per control, never silent', fails)
+end
+
+# gate 7c: UNACCOUNTED signal named in controls-waivers.json WITH reason → passes
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  write_census(dir, [{ 'kind' => 'filter', 'name' => 'Region', 'status' => 'UNACCOUNTED' }])
+  File.write(File.join(dir, 'controls-waivers.json'), JSON.pretty_generate(
+               [{ 'control' => 'filter:Region', 'reason' => 'source quick filter targets a sheet excluded from scope' }]))
+  out, _err, st = run_gate(dir)
+  check(st.success?, "ledger-waived control → exit 0 (got #{st.exitstatus})", fails)
+  check(out.include?('WAIVED filter:Region') && out.include?('excluded from scope'),
+        'ledger waiver is stated WITH its reason', fails)
+end
+
+# gate 7c: a ledger entry with NO reason explains nothing → still exit 31
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  write_census(dir, [{ 'kind' => 'filter', 'name' => 'Region', 'status' => 'UNACCOUNTED' }])
+  File.write(File.join(dir, 'controls-waivers.json'), JSON.pretty_generate([{ 'control' => 'filter:Region' }]))
+  _out, _err, st = run_gate(dir)
+  check(st.exitstatus == 31, "reasonless ledger entry ignored → exit 31 (got #{st.exitstatus})", fails)
+end
+
+# gate 7c: malformed census (no detail) → exit 31, never silent
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'dashboard-layout-controls-coverage.json'), '{"emitted": 3}')
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 31 && err.include?('malformed'),
+        "malformed census → exit 31 (got #{st.exitstatus})", fails)
+end
+
+# ---- gate 7b default-on (PR-13): migrate-state control_flip_required --------
+# Enforced offline, NO recorded evidence, no waiver → fail closed (exit 21).
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'migrate-state.json'), JSON.pretty_generate('control_flip_required' => true))
+  write_census(dir, [{ 'kind' => 'filter', 'name' => 'Region', 'status' => 'emitted' }])
+  out, err, st = run_gate(dir)
+  check(st.exitstatus == 21, "flip default-on + no marker/waiver → exit 21 (got #{st.exitstatus})", fails)
+  check(out.include?('gate 7b enforcement auto-enabled'), 'auto-enable is stated (migrate-state stamp)', fails)
+  check(err.include?('probe-controls.rb') && err.include?('--skip-control-flip'),
+        'failure demands the flip-test marker OR the recorded waiver', fails)
+end
+
+# Enforced offline + recorded probe PASS marker → accepted as RECORDED proof.
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'migrate-state.json'), JSON.pretty_generate('control_flip_required' => true))
+  write_census(dir, [{ 'kind' => 'filter', 'name' => 'Region', 'status' => 'emitted' }])
+  Dir.mkdir(File.join(dir, 'probe-controls'))
+  File.write(File.join(dir, 'probe-controls', 'probe-results.json'), JSON.pretty_generate(
+               [{ 'control' => 'ctl-region', 'result' => 'PASS', 'note' => 'export changed (12 -> 4 rows)' }]))
+  out, _err, st = run_gate(dir)
+  check(st.success?, "flip default-on + recorded PASS marker → exit 0 (got #{st.exitstatus})", fails)
+  check(out.include?('RECORDED runtime proof') && out.include?('1 control(s) proven live'),
+        'recorded proof acceptance is stated', fails)
+end
+
+# Enforced offline + recorded probe FAIL rows → the recorded defect blocks (exit 21).
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'migrate-state.json'), JSON.pretty_generate('control_flip_required' => true))
+  write_census(dir, [{ 'kind' => 'filter', 'name' => 'Region', 'status' => 'emitted' }])
+  Dir.mkdir(File.join(dir, 'probe-controls'))
+  File.write(File.join(dir, 'probe-controls', 'probe-results.json'), JSON.pretty_generate(
+               [{ 'control' => 'ctl-region', 'result' => 'FAIL', 'note' => 'export identical under flip' }]))
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 21 && err.include?('FAILed flip'),
+        "recorded FAILed flip → exit 21 (got #{st.exitstatus})", fails)
+end
+
+# Enforced offline + all-unprobeable advisory marker → advisory WARN, no fail.
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'migrate-state.json'), JSON.pretty_generate('control_flip_required' => true))
+  write_census(dir, [{ 'kind' => 'filter', 'name' => 'As Of Date', 'status' => 'emitted' }])
+  File.write(File.join(dir, 'control-flip-unverified.json'), JSON.pretty_generate(
+               'workbookId' => 'wb-test', 'unprobed' => [{ 'control' => 'ctl-asof', 'note' => 'date-range' }]))
+  _out, err, st = run_gate(dir)
+  check(st.success?, "flip default-on + unprobeable marker → exit 0 advisory (got #{st.exitstatus})", fails)
+  check(err.include?('control-flip-unverified.json') && err.include?('UNVERIFIED'),
+        'advisory marker acceptance is loud, never silent', fails)
+end
+
+# Enforced offline + census shows ZERO source control signals → nothing to flip.
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'migrate-state.json'), JSON.pretty_generate('control_flip_required' => true))
+  write_census(dir, [])
+  out, _err, st = run_gate(dir)
+  check(st.success? && out.include?('nothing to flip-test'),
+        "flip default-on + 0 source signals → exit 0 (got #{st.exitstatus})", fails)
+end
+
+# --skip-control-flip: the named waiver passes AND is budget-counted (census).
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'migrate-state.json'), JSON.pretty_generate('control_flip_required' => true))
+  write_census(dir, [{ 'kind' => 'filter', 'name' => 'Region', 'status' => 'emitted' }])
+  out, _err, st = run_gate(dir, '--skip-control-flip', 'no live export API in CI')
+  check(st.success?, "flip default-on + --skip-control-flip → exit 0 (got #{st.exitstatus})", fails)
+  check(out.include?('WAIVED') && out.include?('no live export API in CI'),
+        'flip waiver is recorded loudly with its reason', fails)
+  pf = JSON.parse(File.read(File.join(dir, 'parity-final.json')))
+  check(Array(pf['waivers']).include?('--skip-control-flip'),
+        '--skip-control-flip stamped into the parity-final waiver census (budget-counted)', fails)
+end
+
+# ...and it spends budget: with 2 more quality waivers the cap fires (exit 19).
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'migrate-state.json'), JSON.pretty_generate('control_flip_required' => true))
+  write_census(dir, [{ 'kind' => 'filter', 'name' => 'Region', 'status' => 'emitted' }])
+  _out, err, st = run_gate(dir, '--skip-control-flip', 'r0', '--skip-orphan-check', 'r1', '--skip-column-check', 'r2')
+  check(st.exitstatus == 19, "flip waiver + 2 skips → budget exceeded, exit 19 (got #{st.exitstatus})", fails)
+  check(err.include?('--skip-control-flip'), 'budget failure lists the flip waiver in the census', fails)
+end
+
+# Back-compat: NO control_flip_required stamp → old opt-in SKIP behavior.
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  write_census(dir, [{ 'kind' => 'filter', 'name' => 'Region', 'status' => 'emitted' }])
+  out, _err, st = run_gate(dir)
+  check(st.success? && out.include?('not opted in'),
+        'no migrate-state stamp → gate 7b keeps the opt-in SKIP (back-compat)', fails)
+end
+
 # ---- source-level pins: the finalize plumbing (migrate-tableau.rb) -----------
 mig_src = File.read(File.join(__dir__, 'migrate-tableau.rb'))
 check(mig_src.include?("['--require-fidelity-ledger'] : ['--skip-fidelity-gate', 'RCF loop disabled at pass 1 via --rcf-passes 0']"),
       'finalize passes --require-fidelity-ledger by default and the NAMED --skip-fidelity-gate waiver on --rcf-passes 0', fails)
+check(mig_src.include?("['--skip-control-flip', opts[:skip_flip_test]] : ['--require-control-flip']"),
+      'finalize passes --require-control-flip by default and the NAMED --skip-control-flip waiver on --skip-flip-test (PR-13)', fails)
+check(mig_src.include?("'control_flip_required' => true"),
+      'pass 1 stamps control_flip_required into migrate-state.json (standalone gate runs stay enforced)', fails)
 
 puts
 if fails.empty?
-  puts 'ALL PASS — assert-phase6-ran gate 8b vision precondition + PR-9 blind-grade binding + divergent-verdict budget injection + gate 11 post-publish guide + gate 16 join-cardinality ledger + gate 17 LOD translation ledger + gate 18 ground-truth numeric coverage + gate 19 aggregation-semantics ledger + gate 20 semantic-edit equivalence ledger (incl. withdrawn entries) + gate 21 chart-kind parity (png-read vs readback, kind_waivers ledger) + PR-11 gate 8d default-on / gate 4b layout-phase sentinel (exit 30) / gate 8e arrangement parity (exit 29)'
+  puts 'ALL PASS — assert-phase6-ran gate 8b vision precondition + PR-9 blind-grade binding + divergent-verdict budget injection + gate 11 post-publish guide + gate 16 join-cardinality ledger + gate 17 LOD translation ledger + gate 18 ground-truth numeric coverage + gate 19 aggregation-semantics ledger + gate 20 semantic-edit equivalence ledger (incl. withdrawn entries) + gate 21 chart-kind parity (png-read vs readback, kind_waivers ledger) + PR-11 gate 8d default-on / gate 4b layout-phase sentinel (exit 30) / gate 8e arrangement parity (exit 29) + PR-13 gate 7c controls census (exit 31, ledger doctrine) / gate 7b flip test default-on (marker-or-waiver, budget-counted)'
   exit 0
 else
   puts "FAILURES (#{fails.length}):"
