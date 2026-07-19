@@ -32,7 +32,10 @@
 # (dim + measure). It then:
 #   - Maps each header to a master column using the regex map.
 #   - Picks the Sigma element `kind` from chart_kind (with `automatic` → bar
-#     fallback + a warning to verify against the PNG).
+#     fallback + a warning to verify against the PNG). A VERIFIED per-tile kind
+#     in png-read.json OVERRIDES the shelf inference for every kind (PR-10;
+#     tiles named in png-read kind_waivers keep the shelf kind — a recorded
+#     deliberate substitution).
 #   - Reads zone.sort: emits xAxis.sort iff Tableau had a <sort>. Otherwise
 #     leaves xAxis unsorted (Sigma renders natural categorical / date order).
 #   - Reads zone.aggregations: applies the right Sigma aggregator. Tableau
@@ -138,6 +141,49 @@ PNG_ORIENTATION = begin
   tiles.each_with_object({}) do |t, h|
     o = t['orientation']
     h[t['title'].to_s.downcase.strip] = o if %w[horizontal vertical].include?(o)
+  end
+rescue StandardError
+  {}
+end
+
+# PR-10 KIND PROPAGATION — the human-verified chart KIND from png-read.json
+# (Phase 1d) OVERRIDES the shelf inference for EVERY kind, not just bar
+# orientation (the override above was the bar-only special case; this
+# generalizes it). Field failure this closes: an operator corrected the kinds
+# in a verified png-read.json and the build ignored them — bars shipped where
+# the source shows lines. Precedence: png-read verified kind > shelf inference.
+#
+# Vocabulary bridge: png-read tiles carry Sigma element kinds (bar-chart /
+# line-chart / …) while the zone loop speaks parser chart_kind (bar / line /
+# …). The bridge is the INVERSE of DashboardRead::DRAFT_KIND — the one
+# existing png-read↔parser mapping (lib/dashboard_read.rb) — never a second
+# divergent table; combo/donut ride SIGMA_KIND's vocabulary ('combo' ⇒
+# combo-chart; a donut is the pie family, same as lib/blind_grade.rb).
+# Non-chart kinds (text/control/image/container) have no entry, so they can
+# never override a chart zone.
+#
+# Tiles named in png-read.json kind_waivers [{tile, reason}] are EXEMPT: the
+# operator recorded a DELIBERATE substitution at read time (e.g. a Sigma
+# capability gap), so the shelf-side kind stands and the final gate (gate 21)
+# accepts the difference by name — ledger-style, like coverage_waivers.
+PNG_KIND_TO_CHART = DashboardRead::DRAFT_KIND
+                    .reject { |ck, _| %w[automatic other].include?(ck) }
+                    .each_with_object({}) { |(ck, sk), h| h[sk] ||= ck }
+                    .merge('combo-chart' => 'combo', 'donut-chart' => 'pie').freeze
+PNG_KIND = begin
+  pr = (JSON.parse(File.read(DashboardRead.path(opts[:tab]))) rescue nil)
+  if pr.is_a?(Hash) && pr['verified'] != false && pr['tiles'].is_a?(Array)
+    kw = Array(pr['kind_waivers']).map { |w| w.is_a?(Hash) ? w['tile'].to_s.downcase.strip : nil }
+                                  .compact.reject(&:empty?)
+    pr['tiles'].each_with_object({}) do |t, h|
+      next unless t.is_a?(Hash)
+      title = t['title'].to_s.downcase.strip
+      next if title.empty? || kw.include?(title)
+      ck = PNG_KIND_TO_CHART[(t['kind'] || t['chart_kind']).to_s.strip.downcase]
+      h[title] = ck if ck
+    end
+  else
+    {} # absent / draft / waived read ⇒ no overrides; shelf inference stands
   end
 rescue StandardError
   {}
@@ -3949,6 +3995,21 @@ layout.each do |dash|
     next unless z['kind'] == 'chart'
     cap = z['caption']
     next if cap.nil? || cap.empty?
+
+    # PR-10 kind propagation: the Phase 1d read VERIFIED this tile's kind
+    # against the source image — it beats every shelf inference below, for ALL
+    # kinds (see the PNG_KIND header above). Mismatches are logged one line
+    # each; a verified kind also clears chart_kind_inferred (it is confirmed,
+    # not a guess, so the image-confirmation routing below is redundant).
+    png_ck = PNG_KIND[cap.to_s.downcase.strip]
+    png_ck ||= PNG_KIND[z['display_title'].to_s.downcase.strip]
+    if png_ck
+      if png_ck != z['chart_kind'].to_s
+        warn "[png-read] '#{cap}': verified kind '#{png_ck}' OVERRIDES shelf-inferred '#{z['chart_kind']}' (png-read.json is the source-image truth)"
+        z['chart_kind'] = png_ck
+      end
+      z['chart_kind_inferred'] = false
+    end
 
     # Pivot-table fast path: Tableau crosstabs (chart_kind=pivot-table from
     # parse-twb-layout) emit a Sigma pivot-table element with rowsBy/columnsBy/
