@@ -5048,9 +5048,15 @@ layout.each do |dash|
       }
       # PR-12: explicit .twb member→color assignments on the detail/color dim →
       # ordered scheme (same contract as the bar/line category-color path).
+      # D2 (PR-13) fallback: a sibling zone's explicit map for the same field
+      # pins the shared category→color dict here too.
       if SeriesColors.field_matches?(z['series_color_field'], dim['name']) &&
          (pinned = SeriesColors.ordered_scheme(z['series_colors']))
         element['color']['scheme'] = pinned
+      elsif (pinned = SeriesColors.scheme_for_field(dash['zones'], dim['name']))
+        element['color']['scheme'] = pinned
+        warnings << "'#{cap}' scatter category colors pinned from a SIBLING chart's explicit .twb map " \
+                    "for '#{dim['name']}' (per-category consistency)"
       end
       if size_field
         element['columns'] << { 'id' => "sz-#{el_id}", 'name' => size_field['name'],
@@ -5129,6 +5135,17 @@ layout.each do |dash|
         warnings << "'#{cap}' series colors PINNED from the .twb member→color map " \
                     "(ascending member order: #{members.join(' → ')}) — scheme[i] binds to the i-th " \
                     'category in Sigma sort order'
+      elsif (pinned = SeriesColors.scheme_for_field(dash['zones'], color_col_obj['name']))
+        # D2 (PR-13): no explicit map on THIS worksheet, but a sibling zone on
+        # the dashboard colors by the same field with explicit assignments —
+        # pin the shared dict so a category keeps ONE color on every chart
+        # (Tableau only serializes the map where the author touched the legend;
+        # unpinned siblings fell to the positional theme palette and the same
+        # region changed color chart-to-chart).
+        element['color']['scheme'] = pinned
+        warnings << "'#{cap}' category colors pinned from a SIBLING chart's explicit .twb map for " \
+                    "'#{color_col_obj['name']}' (per-category consistency: same category, same color " \
+                    'on every chart of the dashboard)'
       end
     elsif color_scale && %w[bar-chart line-chart area-chart combo-chart].include?(kind)
       # By-measure color ramp: add a DUPLICATE measure column (Sigma forbids a

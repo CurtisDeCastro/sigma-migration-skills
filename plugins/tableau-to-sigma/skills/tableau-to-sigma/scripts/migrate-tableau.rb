@@ -270,6 +270,15 @@ OptionParser.new do |o|
   # waiver (budget-counted) instead of requiring the ledger. Batch/headless
   # callers pass 2.
   o.on('--rcf-passes N', Integer, 'Phase 5g render-compare-fix loop budget (default 5; 0 disables it with a loud WARN and records the named gate-8d waiver — budget-counted, never silent).') { |v| opts[:rcf_passes] = v }
+  # Gate 7b (PR-13) — the runtime control flip test is DEFAULT-ON at --finalize
+  # (pass 1 also stamps control_flip_required into migrate-state.json so even a
+  # standalone gate run enforces it). The census (gate 7c) proves the controls
+  # EXIST; only the flip proves they DO something. The probe needs the live
+  # export API — this waiver is the sanctioned out when it genuinely cannot run
+  # (recorded, budget-counted, named in the report). Never silent.
+  o.on('--skip-flip-test REASON', 'waive gate 7b (runtime control flip test, DEFAULT-ON at --finalize) — rides to ' \
+                                  'assert-phase6-ran.rb as the named --skip-control-flip waiver (budget-counted); ' \
+                                  'name it in your report.') { |v| opts[:skip_flip_test] = v }
   o.on('--converter MODE', %w[local hosted], "converter backend: 'local' (default; zero-config, no " \
        'data egress — uses the vendored converter/tableau.mjs unless TABLEAU_MCP_BUILD points at a ' \
        "fresher build) or 'hosted' (sends the .twb to sigma-data-model-mcp.onrender.com — explicit " \
@@ -958,6 +967,15 @@ if opts[:finalize]
   # budget-counted), so a skipped RCF phase is visible in every report.
   rcf_enabled = state.fetch('rcf_passes', 5).to_i.positive?
   gate += rcf_enabled ? ['--require-fidelity-ledger'] : ['--skip-fidelity-gate', 'RCF loop disabled at pass 1 via --rcf-passes 0']
+  # Gate 7b (PR-13): the runtime control flip test is DEFAULT-ON for the
+  # tableau finalize path — gate 7c (controls census) proves the controls
+  # EXIST; only the flip proves they DO something at runtime. The opt-out is
+  # NEVER silent: --skip-flip-test rides to the gate as the named
+  # --skip-control-flip waiver (recorded in waivers.json + the parity-final
+  # census, budget-counted). Offline finalize runs without the waiver rely on
+  # the gate's recorded-evidence fallback (a prior probe-results.json /
+  # control-flip-unverified.json marker) — or fail closed, by design.
+  gate += opts[:skip_flip_test] ? ['--skip-control-flip', opts[:skip_flip_test]] : ['--require-control-flip']
   gate += ['--allow-extract'] if state['extract_mode']
   gate += ['--allow-missing-tiles', opts[:allow_missing_tiles].to_s] if opts[:allow_missing_tiles]
   gate += ['--min-pass-rate', opts[:min_pass_rate].to_s] if opts[:min_pass_rate]
@@ -4048,7 +4066,11 @@ state = { 'workbook_id' => wb_id, 'data_model_id' => dm_id,
           'reused_dm' => !!reuse_dm_id, 'pass1_at' => Time.now.utc.iso8601,
           'enhance_requested' => !!opts[:enhance],
           'run_id' => RUN_ID, 'route' => CURRENT_ROUTE,
-          'rcf_passes' => (opts[:rcf_passes] || 5) }
+          'rcf_passes' => (opts[:rcf_passes] || 5),
+          # PR-13: gate 7b (runtime control flip test) is DEFAULT-ON for the
+          # tableau path — this stamp auto-enables it even on a STANDALONE
+          # assert-phase6-ran run (the 8d/rcf_passes pattern from #439).
+          'control_flip_required' => true }
 File.write(File.join(WORK, 'migrate-state.json'), JSON.pretty_generate(state))
 
 # ---------------------------------------------------------------------------

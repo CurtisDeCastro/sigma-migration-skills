@@ -55,6 +55,37 @@ module SeriesColors
     !c.empty? && (f == c || f.include?(c) || c.include?(f))
   end
 
+  # D2 (PR-13): dashboard-wide member→color dict for ONE color field, merged
+  # across every sibling zone that carries explicit .twb assignments on a
+  # MATCHING field. A chart that colors by the same category but has no
+  # explicit map of its own (Tableau only serializes the map on worksheets
+  # where the author touched the legend) would otherwise fall to the
+  # frequency-ranked theme palette — positional, so "West" can be teal on one
+  # chart and orange on the next. This pins one category→color everywhere:
+  # ordering contract identical to ordered_scheme (ascending member = Sigma's
+  # positional category-sort application), first assignment wins on conflict.
+  # Zones with a BLANK series_color_field are excluded — without a resolved
+  # caption there is no evidence the sibling colors by the same category, and
+  # gluing unrelated fields together would be worse than the theme palette.
+  # nil unless >=2 members merged (a 1-color scheme recolors the whole chart).
+  def scheme_for_field(zones, column_name)
+    return nil if norm(column_name).empty?
+    members = {}
+    Array(zones).each do |z|
+      next unless z.is_a?(Hash) && z['series_colors'].is_a?(Array)
+      next if norm(z['series_color_field']).empty?
+      next unless field_matches?(z['series_color_field'], column_name)
+      z['series_colors'].each do |p|
+        next unless p.is_a?(Hash)
+        m = p['member'].to_s
+        c = p['color'].to_s.downcase
+        members[m] = c if !m.empty? && c =~ HEX && !members.key?(m)
+      end
+    end
+    return nil if members.size < 2
+    members.keys.sort_by(&:downcase).map { |k| members[k] }
+  end
+
   # Dashboard-level ordered scheme for themeOverrides.categoricalScheme — the
   # ONLY color path for pie/donut slices (per-element color.scheme is silently
   # dropped there). Conservative: only when every explicitly-assigned zone
