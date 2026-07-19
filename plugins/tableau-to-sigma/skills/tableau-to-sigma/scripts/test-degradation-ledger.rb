@@ -50,6 +50,32 @@ Dir.mktmpdir do |wd|
   check(DegradationLedger.verdict(entries) == 'PARTIAL', 'coverage drop → PARTIAL', fails)
 end
 
+# ---- scope-cut: distinct degradations under one generic `visual` label -------
+# Field-observed (e2e twin B/B3 coverage.json): several degraded rows carry the
+# same generic visual label ("field/calc") and differ only in their detail —
+# each is a distinct recorded degradation and every one must reach the ledger.
+Dir.mktmpdir do |wd|
+  File.write(File.join(wd, 'coverage.json'), JSON.pretty_generate(
+    'summary' => { 'sourceVisuals' => 3, 'degraded' => 3 },
+    'unresolved' => [
+      { 'visual' => 'field/calc', 'severity' => 'degraded',
+        'detail' => "no master column matched dim header 'Order Date (Level)' for 'Weekly Deposits Trend'" },
+      { 'visual' => 'field/calc', 'severity' => 'degraded',
+        'detail' => "no master column matched dim header 'Order Date (Level)' for 'Risk Score Trend'" },
+      { 'visual' => 'field/calc', 'severity' => 'degraded',
+        'detail' => "no master column matched dim header 'Category' for 'Legend Notes'" }
+    ]))
+  entries = DegradationLedger.derive(wd)
+  cuts = entries.select { |e| e['class'] == 'scope-cut' }
+  check(cuts.length == 3,
+        "3 degraded rows sharing one generic visual label derive 3 scope-cuts (got #{cuts.length})", fails)
+  # True duplicates (same class+item+reason+source) still dedupe to one entry.
+  dup = cuts.first
+  check(DegradationLedger.derive(wd).uniq { |e| e } .length == 3 &&
+        (entries + [dup]).uniq { |e| [e['class'], e['item'], e['reason'], e['source_artifact']] }.length == entries.length,
+        'identical entries still dedupe (reason participates in the key)', fails)
+end
+
 # ---- scope-cut: tile census unmatched zones, minus the visual-verify oracle --
 Dir.mktmpdir do |wd|
   File.write(File.join(wd, 'parity-final.json'), JSON.pretty_generate(

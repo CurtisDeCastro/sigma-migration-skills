@@ -107,6 +107,11 @@ module DegradationLedger
 
   # Derive the full ledger (Array of entry Hashes) from the workdir's
   # artifacts. Deterministic: same files → same entries, same order.
+  # Dedupe is by the FULL entry (class, item, reason, source) — the reason must
+  # participate: coverage.json legitimately records several distinct degraded
+  # rows under one generic `visual` label (field-observed: three "field/calc"
+  # header-fallback rows for three different tiles, distinguishable only by
+  # their detail), and an item-only key silently swallowed all but the first.
   def derive(workdir)
     entries = []
     entries.concat(scope_cuts(workdir))
@@ -114,7 +119,7 @@ module DegradationLedger
     entries.concat(recorded_escapes(workdir))
     entries.concat(fidelity_residuals(workdir))
     entries.concat(resolution_waived(workdir))
-    entries.uniq { |e| [e['class'], e['item'], e['source_artifact']] }
+    entries.uniq { |e| [e['class'], e['item'], e['reason'], e['source_artifact']] }
   end
 
   # Write <workdir>/degradation-ledger.json (entries + per-class counts).
