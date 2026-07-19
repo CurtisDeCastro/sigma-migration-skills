@@ -330,6 +330,25 @@
 #      of the built spec, so a silently dropped join diverges there). NO
 #      escape flag and NO waiver path: equivalence is measured, not
 #      negotiated.
+#  28  Chart-kind parity failed (gate 21; PR-10) — the workdir carries a
+#      VERIFIED Phase 1d dashboard read (<workdir>/png-read.json, not a
+#      verified:false draft) AND a live readback (<workdir>/wb-readback.json),
+#      and at least one tile the operator verified against the source image
+#      was BUILT in a different chart family: the readback element matched by
+#      zone-census name normalization renders e.g. bars where the read says
+#      line. The failure names each tile with its expected family (png-read)
+#      and actual family (readback). Field failure this closes: corrected
+#      kinds in a verified png-read.json never reached the built spec — the
+#      builder propagates them (build-charts-from-signals.rb) and this gate
+#      re-checks the LIVE workbook mechanically. Family vocabulary = the
+#      blind-grader families (bar/line/area/combo/scatter/pie/kpi/map/table;
+#      lib/blind_grade.rb). Sanctioned waiver: png-read.json kind_waivers
+#      [{tile, reason}] — a fidelity decision recorded at read time (e.g. a
+#      Sigma capability substitution), ledger-named like coverage_waivers and
+#      NOT budget-counted. Tiles absent from png-read (unverified at read
+#      time) or with no readback element by name are STATED, never failed
+#      here (the dashboard-read gate / tile census own those). No png-read /
+#      no readback / draft read → stated OK (N/A; never silent).
 #
 # ANCHORS-ORACLE substitution (charts_total==0, exit 2): when every worksheet is
 # dashboard-embedded (no exportable view CSVs), the anchors oracle may stand in
@@ -2656,6 +2675,145 @@ if File.exist?(se_path)
 else
   puts '[OK] gate 20: no semantic-edits.json — no structural semantic edits (join drop / table collapse / filter rewrite) declared.'
   puts '     (Only DECLARED edits are policeable here; the operating contract forbids undeclared ones, and gates 16/18 catch the numeric drift they cause.)'
+end
+
+# ---------------------------------------------------------------------------
+# Gate 21 — chart-kind parity (exit 28; PR-10). The Phase 1d dashboard read
+# (png-read.json) records the VERIFIED chart kind of every source tile, and
+# the builder propagates it over shelf inference. This gate closes the loop
+# MECHANICALLY against the LIVE workbook: each verified tile's readback
+# element (wb-readback.json, matched by zone-census name normalization) must
+# be in the SAME chart family — the blind-grader vocabulary (bar/line/area/
+# combo/scatter/pie/kpi/map/table; kept in lockstep with the plugin's
+# lib/blind_grade.rb FAMILY_SYNONYMS — shared/ cannot require a plugin lib,
+# same doctrine as gate 8b's inline copy). Field failure: an operator
+# corrected the kinds in a verified png-read.json, the build ignored them,
+# and bars shipped where the source shows lines — with nothing mechanical
+# comparing the two ever again. This census is also what the PR-9 blind
+# grade's per_tile family readings are cross-checked against.
+# Sanctioned waiver: png-read.json kind_waivers [{tile, reason}] — a fidelity
+# decision recorded at read time (e.g. a Sigma capability substitution),
+# ledger-named like coverage_waivers, NOT budget-counted. Tiles absent from
+# png-read (unverified) or with no readback element by name are STATED,
+# never failed here — the dashboard-read gate and the tile census (gate 5)
+# own those. No png-read.json → stated OK (non-dashboard / non-Tableau
+# workdir); draft read / no readback → stated OK (nothing verified to
+# enforce / nothing live to compare).
+# ---------------------------------------------------------------------------
+kp21_path = File.join(opts[:tab], 'png-read.json')
+kp21_rb_path = File.join(opts[:tab], 'wb-readback.json')
+if File.exist?(kp21_path)
+  kp21 = JSON.parse(File.read(kp21_path)) rescue nil
+  # Family vocabulary (inline twin of lib/blind_grade.rb FAMILY_SYNONYMS —
+  # keep in lockstep, same as gate 8b's copy).
+  kp21_fam_map = { 'bar' => 'bar', 'bar-chart' => 'bar', 'column' => 'bar', 'column-chart' => 'bar',
+                   'line' => 'line', 'line-chart' => 'line', 'sparkline' => 'line',
+                   'area' => 'area', 'area-chart' => 'area',
+                   'combo' => 'combo', 'combo-chart' => 'combo', 'dual-axis' => 'combo',
+                   'scatter' => 'scatter', 'scatter-chart' => 'scatter', 'bubble' => 'scatter',
+                   'pie' => 'pie', 'pie-chart' => 'pie', 'donut' => 'pie', 'donut-chart' => 'pie',
+                   'kpi' => 'kpi', 'kpi-chart' => 'kpi', 'single-value' => 'kpi', 'big-number' => 'kpi',
+                   'map' => 'map', 'region-map' => 'map', 'point-map' => 'map',
+                   'table' => 'table', 'pivot-table' => 'table', 'pivot' => 'table',
+                   'crosstab' => 'table', 'text-table' => 'table', 'grid' => 'table' }
+  kp21_chartf = %w[bar line area combo scatter pie kpi map table].freeze
+  kp21_fam = lambda do |k|
+    k2 = k.to_s.strip.downcase
+    kp21_fam_map[k2] || (%w[text control image container divider missing].include?(k2) ? k2 : 'other')
+  end
+  # Zone-census name normalization (inline twin of lib/zone_census.rb norm_name).
+  kp21_norm = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]/, '') }
+  if !kp21.is_a?(Hash) || !kp21['tiles'].is_a?(Array)
+    warn "[FAIL] gate 21: #{kp21_path} is malformed (expected {\"tiles\":[{title,kind}...]} — the Phase 1d"
+    warn '       dashboard-read artifact). Re-run the Phase 1d read (assert-dashboard-read.rb validates it);'
+    warn '       do not hand-edit it into shape.'
+    exit 28
+  elsif kp21['verified'] == false
+    puts '[OK] gate 21: png-read.json is an UNVERIFIED draft (verified:false) — no verified kinds to enforce;'
+    puts '     kind parity N/A (the Phase 1d dashboard-read gate polices drafts).'
+  elsif !File.exist?(kp21_rb_path)
+    puts '[OK] gate 21: no wb-readback.json — kind parity N/A (no live readback to census; offline/pre-POST run).'
+  else
+    kp21_rb = JSON.parse(File.read(kp21_rb_path)) rescue nil
+    kp21_els = {}      # normalized element name → [family, ...]
+    kp21_el_kinds = {} # normalized element name → [raw kind, ...] (for the message)
+    Array(kp21_rb.is_a?(Hash) ? kp21_rb['pages'] : nil).each do |pg|
+      Array(pg.is_a?(Hash) ? pg['elements'] : nil).each do |el|
+        next unless el.is_a?(Hash) && el['visibleAsSource'] != false # hidden data-page masters
+        f = kp21_fam.call(el['kind'])
+        next unless kp21_chartf.include?(f) || f == 'other'
+        # `name` can be a visibility hash on hidden-title elements (put-layout).
+        en = el['name'].is_a?(Hash) ? el['name']['text'] : el['name']
+        en = el['title'] || el['id'] if en.to_s.empty?
+        k = kp21_norm.call(en)
+        next if k.empty?
+        (kp21_els[k] ||= []) << f
+        (kp21_el_kinds[k] ||= []) << el['kind'].to_s
+      end
+    end
+    kp21_waivers = {} # normalized tile → reason
+    Array(kp21['kind_waivers']).each do |w|
+      next unless w.is_a?(Hash)
+      k = kp21_norm.call(w['tile'])
+      kp21_waivers[k] = w['reason'].to_s unless k.empty?
+    end
+    kp21_verified_keys = []
+    kp21_matched = 0
+    kp21_mismatch = [] # [title, expected_family, [actual families], [actual kinds]]
+    kp21_waived = []   # [title, reason]
+    kp21_absent = []   # verified png tiles with no readback element by name
+    kp21['tiles'].each do |t|
+      next unless t.is_a?(Hash)
+      exp_f = kp21_fam.call(t['kind'] || t['chart_kind'])
+      next unless kp21_chartf.include?(exp_f) # text/control/image/container zones are not chart tiles
+      title = t['title'].to_s
+      k = kp21_norm.call(title)
+      next if k.empty?
+      kp21_verified_keys << k
+      fams = kp21_els[k]
+      if fams.nil?
+        kp21_waivers.key?(k) ? kp21_waived << [title, kp21_waivers[k]] : kp21_absent << title
+      elsif fams.include?(exp_f)
+        kp21_matched += 1
+      elsif kp21_waivers.key?(k)
+        kp21_waived << [title, kp21_waivers[k]]
+      else
+        kp21_mismatch << [title, exp_f, fams.uniq, Array(kp21_el_kinds[k]).uniq]
+      end
+    end
+    kp21_unread = kp21_els.keys - kp21_verified_keys -
+                  kp21['tiles'].select { |t| t.is_a?(Hash) }.map { |t| kp21_norm.call(t['title']) }
+    if kp21_mismatch.any?
+      warn '[FAIL] gate 21: chart-kind parity — the built workbook contradicts the VERIFIED source read'
+      warn '       (png-read.json, Phase 1d): the operator SAW these tiles in the source image.'
+      kp21_mismatch.first(10).each do |title, exp, act, kinds|
+        warn "         - #{title.inspect}: expected family '#{exp}' (png-read verified kind), " \
+             "built '#{act.join('/')}' (readback kind: #{kinds.join('/')})"
+      end
+      warn '       Rebuild with build-charts-from-signals.rb (it propagates verified png-read kinds over'
+      warn '       shelf inference — PR-10) or fix the element kind and re-POST + re-readback. If the'
+      warn '       difference is a DELIBERATE substitution (a Sigma capability gap), record it AT READ TIME'
+      warn '       in png-read.json:  "kind_waivers": [{ "tile": "<title>", "reason": "<why it differs>" }]'
+      warn '       (ledger-named like coverage_waivers — a recorded fidelity decision, not a budget waiver).'
+      exit 28
+    end
+    kp21_parts = ["#{kp21_matched} matched"]
+    kp21_parts << "#{kp21_waived.length} kind-waived in the ledger" if kp21_waived.any?
+    puts "[OK] gate 21: chart-kind parity — #{kp21_parts.join(', ')} of #{kp21_verified_keys.length} " \
+         'verified tile(s); readback families agree with png-read.json.'
+    kp21_waived.first(10).each { |title, r| puts "     - WAIVED #{title.inspect}: #{r.empty? ? 'NO REASON RECORDED' : r}" }
+    if kp21_absent.any?
+      puts "     NOTE: #{kp21_absent.length} verified tile(s) have no readback element by name " \
+           "(#{kp21_absent.first(6).map(&:inspect).join(', ')}) — kind unverifiable here; the tile census (gate 5) owns drops."
+    end
+    if kp21_unread.any?
+      puts "     NOTE: #{kp21_unread.length} built chart element(s) not in png-read.json — UNVERIFIED at read " \
+           "time (#{kp21_unread.first(6).join(', ')}); stated, not failed."
+    end
+  end
+else
+  puts '[OK] gate 21: no png-read.json — chart-kind parity N/A (non-dashboard / non-Tableau workdir;'
+  puts '     the Phase 1d dashboard-read gate decides when a read is required).'
 end
 
 # ---------------------------------------------------------------------------
