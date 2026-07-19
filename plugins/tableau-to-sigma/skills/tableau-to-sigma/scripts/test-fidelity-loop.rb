@@ -132,6 +132,108 @@ Dir.mktmpdir do |dir|
   ok(st.exitstatus == 4, 'apply-patch refuses a live spec with no pages (exit 4)')
 end
 
+puts 'RCF page picking (#422):'
+helper_pg = { 'id' => 'pg-help', 'name' => 'Data Helpers', 'elements' => [
+  { 'id' => 'h1', 'kind' => 'table', 'visibleAsSource' => false },
+  { 'id' => 'h2', 'kind' => 'table', 'visibleAsSource' => false }
+] }
+content_pg = { 'id' => 'pg-main', 'name' => 'Overview', 'elements' => [
+  { 'id' => 'c1', 'kind' => 'bar-chart' }, { 'id' => 'c2', 'kind' => 'kpi-chart' },
+  { 'id' => 'ctl', 'kind' => 'control' }
+] }
+ok(FidelityLoop.visible_count(helper_pg).zero?, 'visibleAsSource:false helper tables count 0 visible')
+ok(FidelityLoop.visible_count(content_pg) == 3, 'content page counts its rendered elements')
+ok(FidelityLoop.visible_count('elements' => [{ 'id' => 'x', 'hidden' => true }]).zero?,
+   'hidden:true elements count 0 visible')
+pick, top = FidelityLoop.pick_rcf_page([helper_pg, content_pg])
+ok(pick && pick['id'] == 'pg-main' && top.length == 1,
+   'pick_rcf_page prefers the most-visible page over first-by-order')
+_, top2 = FidelityLoop.pick_rcf_page([content_pg, content_pg.merge('id' => 'pg-b', 'name' => 'B')])
+ok(top2.length == 2, 'equal visible counts reported as a tie')
+ok(FidelityLoop.pick_rcf_page([]) == [nil, []], 'no pages → [nil, []]')
+
+Dir.mktmpdir do |dir|
+  # wb-ids carries the LIVE page ids; visibility (visibleAsSource:false) only
+  # lives in wb-spec — the picker joins the two by page name. The hidden-helper
+  # data page comes FIRST: the exact shape that made the old first-by-order
+  # pick render a hidden helper table (#422 live run).
+  File.write(File.join(dir, 'wb-ids.json'), JSON.generate('pages' => [
+    { 'id' => 'live-data', 'name' => 'Data', 'elements' => [{ 'id' => 'master', 'kind' => 'table' }] },
+    { 'id' => 'live-help', 'name' => 'Data Helpers', 'elements' => [
+      { 'id' => 'h1', 'kind' => 'table' }, { 'id' => 'h2', 'kind' => 'table' }] },
+    { 'id' => 'live-main', 'name' => 'Overview', 'elements' => [
+      { 'id' => 'c1', 'kind' => 'bar-chart' }, { 'id' => 'c2', 'kind' => 'kpi-chart' }] }
+  ]))
+  File.write(File.join(dir, 'wb-spec.json'), JSON.generate('pages' => [
+    { 'id' => 'page-data', 'name' => 'Data', 'elements' => [
+      { 'id' => 'master', 'kind' => 'table', 'visibleAsSource' => false }] },
+    { 'id' => 'page-help', 'name' => 'Data Helpers', 'elements' => [
+      { 'id' => 'h1', 'kind' => 'table', 'visibleAsSource' => false },
+      { 'id' => 'h2', 'kind' => 'table', 'visibleAsSource' => false }] },
+    { 'id' => 'page-main', 'name' => 'Overview', 'elements' => [
+      { 'id' => 'c1', 'kind' => 'bar-chart' }, { 'id' => 'c2', 'kind' => 'kpi-chart' }] }
+  ]))
+  out, st = run('init', '--workbook-id', 'WB', dir: dir)
+  led = JSON.parse(File.read(File.join(dir, 'fidelity-ledger.json')))
+  ok(st.exitstatus.zero? && out.include?('auto-picked'), 'init without --page-id auto-picks a page')
+  ok(led['page_id'] == 'live-main',
+     'auto-pick chose the VISIBLE content page (live id), not the first-by-order helper page')
+
+  # --page-id override on the EXISTING ledger (entries preserved) — the old
+  # init had no way to repoint an already-initialized ledger.
+  run('record', '--dimension', 'palette', '--delta', 'x', '--class', 'ui-only', dir: dir)
+  out, st = run('init', '--workbook-id', 'WB', '--page-id', 'live-other', dir: dir)
+  led = JSON.parse(File.read(File.join(dir, 'fidelity-ledger.json')))
+  ok(st.exitstatus.zero? && out.include?('OVERRIDDEN'), 'init --page-id on an existing ledger overrides in place')
+  ok(led['page_id'] == 'live-other' && led['entries'].length == 1, 'override preserves the recorded entries')
+end
+
+Dir.mktmpdir do |dir|
+  _out, st = run('init', '--workbook-id', 'WB', dir: dir)
+  ok(st.exitstatus == 2, 'init dies (usage) with no --page-id and nothing to auto-pick from')
+end
+
+Dir.mktmpdir do |dir|
+  File.write(File.join(dir, 'wb-ids.json'), JSON.generate('pages' => [
+    { 'id' => 'live-a', 'name' => 'A', 'elements' => [{ 'id' => 'c1', 'kind' => 'bar-chart' }] },
+    { 'id' => 'live-b', 'name' => 'B', 'elements' => [{ 'id' => 'c2', 'kind' => 'bar-chart' }] }
+  ]))
+  out, st = run('init', '--workbook-id', 'WB', dir: dir)
+  led = JSON.parse(File.read(File.join(dir, 'fidelity-ledger.json')))
+  ok(st.exitstatus.zero? && out =~ /tie/ && led['page_id'] == 'live-a',
+     'tied visible counts WARN and pick first-by-order (deterministic)')
+end
+
+puts 'apply-patch dual-write (#422):'
+Dir.mktmpdir do |dir|
+  run('init', '--workbook-id', 'WB', '--page-id', 'PG', dir: dir)
+  wb_spec = { 'pages' => [{ 'id' => 'page-ov', 'elements' => [
+    { 'elementId' => 'k1', 'kind' => 'kpi-chart', 'style' => { 'x' => 1 } },
+    { 'elementId' => 'k2', 'kind' => 'bar-chart' }] }], 'themeName' => 'Light' }
+  File.write(File.join(dir, 'wb-spec.json'), JSON.generate(wb_spec))
+  live = { 'pages' => [{ 'id' => 'PG', 'elements' => [{ 'elementId' => 'k1', 'kind' => 'kpi-chart' }] }] }
+  File.write(File.join(dir, 'live.json'), JSON.generate(live))
+  File.write(File.join(dir, 'patch.json'),
+             JSON.generate('themeOverrides' => { 'categoricalScheme' => ['#0e7c7b'] }))
+  out, st = run('apply-patch', '--patch', File.join(dir, 'patch.json'), '--dry-run',
+                '--live-spec', File.join(dir, 'live.json'), '--out', File.join(dir, 'merged.json'), dir: dir)
+  ok(st.exitstatus.zero?, 'apply-patch (dual-write) exits 0')
+  ok(out.include?('persisted into'), 'apply-patch reports the wb-spec.json persistence')
+  ws = JSON.parse(File.read(File.join(dir, 'wb-spec.json')))
+  ok(ws['themeOverrides'] == { 'categoricalScheme' => ['#0e7c7b'] },
+     'patch deep-merged into wb-spec.json (a re-entry full-spec PUT now carries the fix)')
+  ok(ws['pages'][0]['elements'].length == 2 && ws['themeName'] == 'Light',
+     'wb-spec.json untouched keys/elements preserved by the merge')
+
+  # guard: unparseable wb-spec.json → warned, left untouched, apply still succeeds
+  File.write(File.join(dir, 'wb-spec.json'), '{ not json')
+  out, st = run('apply-patch', '--patch', File.join(dir, 'patch.json'), '--dry-run',
+                '--live-spec', File.join(dir, 'live.json'), '--out', File.join(dir, 'merged2.json'), dir: dir)
+  ok(st.exitstatus.zero? && out.include?('NOT persisted'),
+     'unparseable wb-spec.json → warn, apply-patch still succeeds')
+  ok(File.read(File.join(dir, 'wb-spec.json')) == '{ not json', 'unparseable wb-spec.json left untouched')
+end
+
 puts 'render budget:'
 Dir.mktmpdir do |dir|
   run('init', '--workbook-id', 'WB', '--page-id', 'PG', '--max-passes', '1', dir: dir)

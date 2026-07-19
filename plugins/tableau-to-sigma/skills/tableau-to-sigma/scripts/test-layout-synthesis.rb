@@ -35,11 +35,11 @@ def ok(name, cond)
   $fail += 1 unless cond
 end
 
-def build(dl, wb, dir)
+def build(dl, wb, dir, extra = [])
   File.write(File.join(dir, 'dl.json'), JSON.generate(dl))
   File.write(File.join(dir, 'wb.json'), JSON.generate(wb))
   out = File.join(dir, 'layout.xml')
-  log = `#{RUBY} #{BUILD} --layout #{File.join(dir, 'dl.json')} --wb-ids #{File.join(dir, 'wb.json')} --out #{out} 2>&1`
+  log = `#{RUBY} #{BUILD} --layout #{File.join(dir, 'dl.json')} --wb-ids #{File.join(dir, 'wb.json')} --out #{out} #{extra.join(' ')} 2>&1`
   xml = File.exist?(out) ? File.read(out) : nil
   census = File.exist?(File.join(dir, 'layout-census.json')) ? JSON.parse(File.read(File.join(dir, 'layout-census.json'))) : nil
   elements = File.exist?("#{out}.elements.json") ? File.read("#{out}.elements.json") : nil
@@ -391,8 +391,13 @@ Dir.mktmpdir do |d|
   dl = JSON.parse(JSON.generate(DL_TITLE))
   wb = JSON.parse(JSON.generate(WB_TITLE))
   wb['pages'][1]['elements'][1]['name'] = 'Gross Margin Trend (renamed)'
+  # REAL builder shape ({version, elements} envelope — build-charts-from-signals):
+  # the old fixture wrote a FLAT map, a false green that hid the #422 root cause
+  # (the loader read the envelope file flat and provenance never fired live).
   File.write(File.join(d, 'chart-provenance.json'), JSON.generate(
-    'el-1' => { 'worksheet' => 'Margin Trend', 'dashboard' => 'Profitability Watch' }))
+    'version' => 1, 'elements' => {
+      'el-1' => { 'worksheet' => 'Margin Trend', 'dashboard' => 'Profitability Watch' }
+    }))
   xml, census, log, _els = build(dl, wb, d)
   ok('builder produced layout XML (renamed tile + provenance)', !xml.nil?)
   next if xml.nil?
@@ -402,6 +407,123 @@ Dir.mktmpdir do |d|
   pg = census && census['pages'].first
   ok('census counts the renamed tile as placed (no drop)', pg && pg['dropped'] == 0)
   ok('census unplaced_elements empty', pg && pg['unplaced_elements'] == [])
+end
+
+# ---- 5. #422 re-entry repeat-tax regressions ---------------------------------
+puts '-- #422: provenance on re-entry, rename persistence, banner opt-out'
+
+# 5a. provenance matching on RE-ENTRY (the live 1/6 case): after a re-entry
+# readback, 5 of 6 tiles carry operator-renamed display names that match
+# neither the zone caption nor display_title. With the REAL nested
+# chart-provenance.json ({version, elements}) every tile must resolve via its
+# worksheet alias — main@208626b matched only the un-renamed tile because the
+# loader read the envelope file flat and the aliases never materialized.
+DL_SIX = [{
+  'dashboard' => 'Exec Overview',
+  'zones' => (1..6).map do |i|
+    { 'id' => "z#{i}", 'kind' => 'chart', 'caption' => "WS #{i}", 'chart_kind' => 'bar',
+      'measures' => ['m'], 'x_pct' => ((i - 1) % 3) * 33.4, 'y_pct' => 5 + ((i - 1) / 3) * 45,
+      'w_pct' => 33, 'h_pct' => 40 }
+  end,
+  'zone_tree' => []
+}]
+WB_SIX = { 'pages' => [
+  { 'name' => 'Data', 'id' => 'page-data', 'elements' => [{ 'id' => 'master', 'kind' => 'table', 'name' => 'M' }] },
+  { 'name' => 'Exec Overview', 'id' => 'page-ex', 'elements' =>
+    (1..6).map do |i|
+      { 'id' => "el-#{i}", 'kind' => 'bar-chart',
+        'name' => i == 1 ? 'WS 1' : "Operator Renamed #{i}" }
+    end }
+] }
+
+Dir.mktmpdir do |d|
+  File.write(File.join(d, 'chart-provenance.json'), JSON.generate(
+    'version' => 1,
+    'elements' => (1..6).each_with_object({}) do |i, h|
+      h["el-#{i}"] = { 'worksheet' => "WS #{i}", 'dashboard' => 'Exec Overview' }
+    end))
+  xml, census, log, _els = build(DL_SIX, WB_SIX, d)
+  ok('re-entry build produced layout XML (5/6 tiles renamed)', !xml.nil?)
+  unless xml.nil?
+    pg = census && census['pages'].first
+    ok('ALL 6 renamed tiles match via nested provenance (was 1/6 live)',
+       pg && pg['placed'] == 6 && pg['dropped'] == 0)
+    ok('no safety-net band needed for the renamed tiles', !xml.include?('-extra"'))
+    ok('no "no Sigma element matched" WARN', !log.include?('no Sigma element matched'))
+    ok('no collisions', collisions(xml).empty?)
+  end
+end
+
+# 5b. rename persistence round-trip: --rename on pass 1 lands in
+# layout-renames.json; a re-entry rebuild WITHOUT the flag auto-applies it
+# (the operator no longer re-types --rename x4 per re-entry).
+Dir.mktmpdir do |d|
+  dl = JSON.parse(JSON.generate(DL_TITLE))
+  wb = JSON.parse(JSON.generate(WB_TITLE))
+  wb['pages'][1]['elements'][1]['name'] = 'Net Margin Trend'
+  xml, _c, _log, = build(dl, wb, d, ["--rename 'Margin Trend=Net Margin Trend'"])
+  ok('pass 1 (--rename) placed the renamed tile',
+     !xml.nil? && xml.scan(/elementId="el-1"/).length == 1 && !xml.include?('-extra"'))
+  rn = File.join(d, 'layout-renames.json')
+  ok('renames persisted to layout-renames.json',
+     File.exist?(rn) && JSON.parse(File.read(rn)) == { 'Margin Trend' => 'Net Margin Trend' })
+  xml2, census2, log2, = build(dl, wb, d) # re-entry: NO --rename flags
+  pg2 = census2 && census2['pages'].first
+  ok('re-entry (no --rename) still matches via the persisted map',
+     !xml2.nil? && xml2.scan(/elementId="el-1"/).length == 1 && !xml2.include?('-extra"') &&
+     pg2 && pg2['dropped'] == 0)
+  ok('re-entry log notes the persisted renames were loaded', log2.include?('persisted rename mapping'))
+end
+
+# 5c. banner opt-out. Baseline (no title element, no source header zone) emits
+# the fabricated page-name banner; --no-synthetic-title suppresses it.
+WB_NOTITLE = JSON.parse(JSON.generate(WB_TITLE))
+WB_NOTITLE['pages'][1]['elements'] = WB_NOTITLE['pages'][1]['elements'].reject { |e| e['id'].to_s.start_with?('title') }
+
+Dir.mktmpdir do |d|
+  xml, _c, _log, = build(DL_TITLE, WB_NOTITLE, d)
+  ok('baseline: fabricated page-name banner emitted (-hdrtext)', !xml.nil? && xml.include?('-hdrtext"'))
+end
+Dir.mktmpdir do |d|
+  xml, census, _log, = build(DL_TITLE, WB_NOTITLE, d, ['--no-synthetic-title'])
+  ok('--no-synthetic-title: no fabricated banner, no header band',
+     !xml.nil? && !xml.include?('-hdrtext"') && !xml.include?('-hdr"'))
+  pg = census && census['pages'].first
+  ok('suppressed banner: charts still placed, nothing orphaned, no collisions',
+     pg && pg['placed'] == 2 && pg['unplaced_elements'] == [] && collisions(xml).empty?)
+end
+# synthesized path takes the same flag
+Dir.mktmpdir do |d|
+  dl = JSON.parse(JSON.generate(DL_KPI))
+  dl[0]['zones'] = dl[0]['zones'].reject { |z| z['id'] == 't1' }
+  wb = JSON.parse(JSON.generate(WB_KPI))
+  wb['pages'][1]['elements'] = wb['pages'][1]['elements'].reject { |e| %w[title-ov text-t1].include?(e['id']) }
+  xml, census, log, = build(dl, wb, d, ['--no-synthetic-title'])
+  ok('synthesized path honors --no-synthetic-title (no header band at all)',
+     !xml.nil? && log.include?('synthesized layout') && !xml.include?('-hdrtext"') && !xml.include?('-hdr"'))
+  pg = census && census['pages'].first
+  ok('synthesized suppression: nothing orphaned, no collisions',
+     pg && pg['unplaced_elements'] == [] && collisions(xml).empty?)
+end
+
+# 5d. prior-state auto-suppression: a prior layout.xml at --out with NO header
+# band (the operator removed the banner and re-PUT) must suppress re-injection
+# on the next rebuild — respect the operator's last state.
+Dir.mktmpdir do |d|
+  File.write(File.join(d, 'layout.xml'),
+             '<Page type="grid" gridTemplateColumns="repeat(24, 1fr)"><LayoutElement elementId="el-1" gridColumn="1 / 25" gridRow="1 / 9"/></Page>')
+  xml, _c, log, = build(DL_TITLE, WB_NOTITLE, d)
+  ok('prior-state: rebuild auto-suppresses the banner', log.include?('auto-suppressed'))
+  ok('prior-state: no fabricated banner in the rebuilt layout',
+     !xml.nil? && !xml.include?('-hdrtext"'))
+end
+# …but a prior layout WITH the banner keeps it (no false suppression).
+Dir.mktmpdir do |d|
+  xml1, _c1, _l1, = build(DL_TITLE, WB_NOTITLE, d)
+  ok('control: first build emits the banner', !xml1.nil? && xml1.include?('-hdrtext"'))
+  xml2, _c2, log2, = build(DL_TITLE, WB_NOTITLE, d)
+  ok('control: rebuild over a banner-bearing prior layout keeps the banner',
+     !xml2.nil? && xml2.include?('-hdrtext"') && !log2.include?('auto-suppressed'))
 end
 
 puts($fail.zero? ? "\nALL PASS — layout synthesis (bands, rail, KPI containers, min rows, determinism)" : "\n#{$fail} FAILED")

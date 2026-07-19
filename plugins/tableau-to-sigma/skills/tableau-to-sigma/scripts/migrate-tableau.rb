@@ -4047,22 +4047,23 @@ if rcf_passes.to_i <= 0
   line '      structure + data + a single visual verdict only — composition drift (palette, chart'
   line '      kind, KPI format) will NOT be iterated. --finalize will NOT require the fidelity ledger.'
 else
-  # Best-effort resolve the primary (first non-Data) page id + a source image to
-  # compare against, from the artifacts pass 1 already wrote.
-  wb_ids = (JSON.parse(File.read(File.join(WORK, 'wb-ids.json'))) rescue {})
-  primary_page = (wb_ids['pages'] || []).reject { |p| p['name'].to_s.downcase == 'data' }.first ||
-                 (wb_ids['pages'] || []).first
-  page_id = primary_page && primary_page['id']
+  # Best-effort resolve a source image to compare against from the artifacts
+  # pass 1 already wrote. The page is NOT pre-picked here any more (#422: the
+  # old first-non-"Data"-page pick landed on a second data page rendering a
+  # hidden helper table) — fidelity-loop.rb init auto-picks the page with the
+  # most VISIBLE elements from wb-ids.json + wb-spec.json, and an operator
+  # --page-id override now works even on an existing ledger.
   cmani = (JSON.parse(File.read(File.join(WORK, 'visual-qa', 'compare-manifest.json'))) rescue [])
   src_img = (cmani.find { |m| m['source_png'] } || {})['source_png']
-  if page_id
-    _, ist = run!(['ruby', File.join(HERE, 'fidelity-loop.rb'), 'init',
-                   '--workdir', WORK, '--workbook-id', wb_id, '--page-id', page_id,
-                   '--max-passes', rcf_passes.to_s] +
-                  (src_img ? ['--source-image', src_img] : []), allow_fail: true)
-    line "Phase 5g: RCF fidelity ledger initialized (page #{page_id}, budget #{rcf_passes})" if ist.success?
+  _, ist = run!(['ruby', File.join(HERE, 'fidelity-loop.rb'), 'init',
+                 '--workdir', WORK, '--workbook-id', wb_id,
+                 '--max-passes', rcf_passes.to_s] +
+                (src_img ? ['--source-image', src_img] : []), allow_fail: true)
+  if ist.success?
+    led_pg = (JSON.parse(File.read(File.join(WORK, 'fidelity-ledger.json')))['page_id'] rescue '?')
+    line "Phase 5g: RCF fidelity ledger initialized (page #{led_pg}, budget #{rcf_passes})"
   else
-    line 'Phase 5g: could not resolve a page id from wb-ids.json — init the ledger manually (see the prompt below)'
+    line 'Phase 5g: ledger init could not auto-pick a page — init manually with --page-id (see the prompt below)'
   end
   mark('phase5g-init')
 end
