@@ -142,6 +142,11 @@
 #          instead but COUNTS against the waiver budget.
 #      Escape hatch for (a)/(b) (source image genuinely unobtainable / knowingly
 #      accepting an unverified render): --skip-visual-comparison "<reason>".
+#      A recorded `divergent` verdict passes this gate as RECORDED (the
+#      comparison happened; the gaps are acknowledged) but is INJECTED into
+#      the waiver census as `visual-divergent` and SPENDS waiver budget
+#      (exit 19) — GREEN requires the budget to hold; fix the gaps or accept
+#      YELLOW. Full verdict-capping (divergent → PARTIAL) is PLAN-v3 PR-14.
 #  14  Layout fill / grid coverage failed (gate 8c; #259 item 1) — a page in
 #      layout-census.json dropped a tile (placed < zones) or ships under-filled
 #      (grid_fill_pct < --min-grid-fill, default 0.45), OR a dashboard layout was
@@ -184,7 +189,9 @@
 #      oracle replaces parity, never nothing.
 #  19  Waiver budget exceeded — more than 2 QUALITY waiver/escape flags were
 #      passed (--skip-*, --allow-extract, --allow-missing-tiles>0,
-#      --min-pass-rate<1, --accept-*). Each waiver is an attestation that a
+#      --min-pass-rate<1, --accept-*; a recorded `divergent` visual verdict is
+#      injected as `visual-divergent` and counts, like the recorded no-vision
+#      waiver). Each waiver is an attestation that a
 #      verification could not run; stacking them is how an unverified workbook
 #      ships GREEN. GREEN is unavailable on this run regardless of individual
 #      escapes — the highest achievable result is YELLOW. Every run stamps
@@ -309,6 +316,12 @@
 #      agree — an intentionally-different rewrite is not an equivalence claim
 #      and belongs in the user-initiated scope-change record, not this
 #      ledger. No ledger → stated OK (no structural semantic edits declared).
+#      WITHDRAWN entries (the ledger's `withdrawn` array, written by
+#      probe-equivalence.rb --withdraw for a refuted edit that was NOT
+#      applied; the refuted proof rides along verbatim as evidence) do not
+#      block but are reported informationally — a withdrawn edit whose SQL
+#      nonetheless shipped is not mechanically detectable (gates 16/18 are
+#      the net).
 #      HONESTY NOTE: only DECLARED edits are policeable here — nothing
 #      mechanical can see an edit nobody recorded. The operating-contract
 #      rule makes the declaration mandatory, and the join-plan (gate 16) +
@@ -473,6 +486,7 @@ WAIVER_HIDES = {
   '--skip-visual-gate'         => 'gate 8: no rendered PNG was required',
   '--skip-visual-comparison'   => 'gate 8b: no source-vs-target visual verdict was required',
   '--no-vision-waiver'         => 'gate 8b: the visual PASS was SELF-graded — no context-free blind grader ran (recorded by record-visual-check.rb --no-vision-waiver)',
+  'visual-divergent'           => 'gate 8b: the recorded visual verdict is DIVERGENT — acknowledged source-vs-target visual gaps ship in the render (verdict-capping divergent→PARTIAL is PLAN-v3 PR-14)',
   '--skip-layout-fill'         => 'gate 8c: dropped/under-filled pages were accepted',
   '--accept-residuals'         => 'gate 8d: named RCF deltas shipped unresolved',
   '--skip-visual-tiles'        => 'gate 9: build-from-signals tiles never image-verified',
@@ -539,10 +553,20 @@ end
 # --no-vision-waiver stamps blind_grade_waiver into parity-final.json) spends
 # budget exactly like a gate flag — a self-graded visual pass is a quality
 # degradation, never a freebie.
+#
+# A RECORDED divergent visual verdict spends budget the same way: gate 8b
+# accepts it as RECORDED (the comparison happened; the gaps are acknowledged),
+# but acknowledged source-vs-target visual gaps riding to GREEN unqualified is
+# exactly the live-run failure this closes (blind grade FAIL 5/6, verdict
+# recorded divergent, final GREEN). Injected into the census as
+# `visual-divergent` so the budget line names it. Full verdict-capping
+# (divergent → PARTIAL) is PLAN-v3 PR-14 — until then the budget is the cap.
 begin
   _pf_bgw = File.exist?(summary_path) ? JSON.parse(File.read(summary_path)) : nil
   waiver_flags << '--no-vision-waiver' if _pf_bgw.is_a?(Hash) && _pf_bgw['blind_grade_waiver'].is_a?(Hash) &&
                                           !waiver_flags.include?('--no-vision-waiver')
+  waiver_flags << 'visual-divergent' if _pf_bgw.is_a?(Hash) && _pf_bgw['visual_verdict'].to_s == 'divergent' &&
+                                        !waiver_flags.include?('visual-divergent')
 rescue StandardError
   nil
 end
@@ -1419,7 +1443,10 @@ else
   # screenshot_path — is a blind attestation, and the gate fails with a NAMED
   # degradation instead of passing on it.
   s = File.exist?(summary_path) ? (JSON.parse(File.read(summary_path)) rescue {}) : {}
-  recorded = s['visual_checked'] || s['screenshot_path']
+  # A recorded `divergent` verdict IS a recorded comparison — gate 8b accepts
+  # it as RECORDED, but the acknowledged gaps are budget-counted (the
+  # `visual-divergent` census injection above; exit-19 doctrine).
+  recorded = s['visual_checked'] || s['screenshot_path'] || s['visual_verdict'].to_s == 'divergent'
   vision_blocked = (s.key?('agent_vision') && s['agent_vision'] == false) ||
                    s['visual_verdict'].to_s == 'not-executable'
   if vision_blocked
@@ -1569,7 +1596,15 @@ else
           else
             ''
           end
-    puts "[OK] gate 8b: source-vs-target visual comparison recorded#{v}#{av}#{cls}."
+    if s['visual_verdict'].to_s == 'divergent'
+      puts "[OK] gate 8b: source-vs-target visual comparison recorded (divergent)#{av}#{cls} — RECORDED, not clean:"
+      puts '     the acknowledged visual gaps are BUDGET-COUNTED (census: visual-divergent; exit-19 doctrine).'
+      puts '     GREEN requires the budget to hold — fix the gaps, re-render, re-record --verdict pass, or'
+      puts "     accept YELLOW#{s['visual_notes'] ? " (recorded gaps: #{s['visual_notes'].to_s[0, 160]})" : ''}."
+      puts '     (Full verdict-capping — divergent caps the run at PARTIAL — is PLAN-v3 PR-14, not built yet.)'
+    else
+      puts "[OK] gate 8b: source-vs-target visual comparison recorded#{v}#{av}#{cls}."
+    end
   elsif opts[:skip_visual_cmp]
     puts "[SKIP] gate 8b: source-vs-target visual comparison WAIVED via --skip-visual-comparison (#{opts[:skip_visual_cmp]})."
   else
@@ -2568,6 +2603,22 @@ if File.exist?(se_path)
     exit 27
   end
   se_entries = se_entries.select { |e| e.is_a?(Hash) }
+  # WITHDRAWN entries (probe-equivalence.rb --withdraw): refuted edits that
+  # were consequently NOT applied. They no longer block — the refuted proof
+  # stays in the ledger as evidence — but they are reported, never silent.
+  # HONESTY NOTE: a withdrawn edit whose SQL nonetheless shipped is not
+  # detectable mechanically; withdrawal is the operator's attestation, and
+  # gates 16/18 remain the numeric net for an edit that rode along anyway.
+  se_withdrawn = (se_doc.is_a?(Hash) ? Array(se_doc['withdrawn']) : []).select { |e| e.is_a?(Hash) }
+  if se_withdrawn.any?
+    puts "[INFO] gate 20: #{se_withdrawn.length} withdrawn edit(s) — refuted and not applied " \
+         '(refuted proofs preserved as evidence in semantic-edits.json withdrawn[]):'
+    se_withdrawn.first(10).each do |e|
+      puts "         - #{e['edit_description'].inspect} (reason: #{e['withdrawn_reason'] || 'NONE RECORDED'}; withdrawn_at: #{e['withdrawn_at'] || '?'})"
+    end
+    puts '       Withdrawal attests the edit was NOT applied — that attestation is not mechanically'
+    puts '       verifiable; gates 16/18 are the numeric net if the SQL shipped anyway.'
+  end
   se_blocking = se_entries.reject { |e| e['proof'].is_a?(Hash) && e['proof']['match'] == true }
   if se_blocking.any?
     warn "[FAIL] gate 20: semantic-edit equivalence ledger unproven (#{se_path}) —"
@@ -2592,10 +2643,13 @@ if File.exist?(se_path)
     warn '         ruby scripts/probe-equivalence.rb --workdir <W> --edit "<desc>" --claim "<claim>" --grain <col,col> \\'
     warn '           (--before-sql ... --after-sql ... | --before-element/--after-element ...) [--measures <col,col>] \\'
     warn '           (--connection-id <id> | --fixture DIR)'
-    warn '       A MISMATCHED edit never ships: revert it (removing the edit removes the entry) or'
-    warn '       redesign it until the probes agree, then re-probe. An intentionally-different rewrite'
-    warn '       is a user-initiated scope change, not an equivalence claim — it never belongs in this'
-    warn '       ledger. There is no skip flag and no waiver path.'
+    warn '       A MISMATCHED edit never ships: revert it and WITHDRAW the refuted entry'
+    warn '         ruby scripts/probe-equivalence.rb --workdir <W> --withdraw "<edit_description>" --reason "<why>"'
+    warn '       (moves it to the ledger\'s withdrawn[] with the refuted proof preserved as evidence —'
+    warn '       never hand-edit the ledger), or redesign it until the probes agree, then re-probe.'
+    warn '       An intentionally-different rewrite is a user-initiated scope change, not an equivalence'
+    warn '       claim — it never belongs in this ledger. There is no skip flag and no waiver path for'
+    warn '       an edit that SHIPPED; withdrawal only records a refuted edit that was NOT applied.'
     exit 27
   end
   puts "[OK] gate 20: semantic-edit equivalence ledger proven — #{se_entries.length} declared edit(s), every proof match:true (semantic-edits.json)"

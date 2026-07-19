@@ -813,9 +813,92 @@ Dir.mktmpdir do |dir|
         'gate 20 OK line states the undeclared-edit honesty note (gates 16/18 are the net)', fails)
 end
 
+# WITHDRAWN entries (probe-equivalence --withdraw): ignored for blocking, but
+# reported informationally with the attestation honesty note
+SE_WITHDRAWN = SE_ENTRY.merge(
+  'proof' => SE_PROOF_OK.merge(
+    'after' => { 'total' => 26, 'distinct_grain' => 8, 'sums' => { 'AMOUNT' => 9575.0 } },
+    'match' => false,
+    'mismatches' => [{ 'metric' => 'TOTAL_ROWS', 'before' => 8, 'after' => 26 }]),
+  'withdrawn_reason' => 'refuted — the join stays; edit was never applied',
+  'withdrawn_at' => '2026-07-18T00:00:00Z'
+).freeze
+
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'semantic-edits.json'),
+             JSON.pretty_generate('entries' => [], 'withdrawn' => [SE_WITHDRAWN]))
+  out, _err, st = run_gate(dir)
+  check(st.success?, "gate 20: only-withdrawn ledger → exit 0 (got #{st.exitstatus})", fails)
+  check(out.include?('1 withdrawn edit(s) — refuted and not applied'),
+        'gate 20 prints the withdrawn informational line', fails)
+  check(out.include?('refuted — the join stays; edit was never applied'),
+        'gate 20 withdrawn line carries the recorded reason', fails)
+  check(out.include?('not mechanically') || out.include?('gates 16/18'),
+        'gate 20 withdrawn info keeps the attestation honesty note', fails)
+end
+
+# withdrawn rides alongside proven entries; a REFUTED live entry still blocks
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'semantic-edits.json'),
+             JSON.pretty_generate('entries' => [SE_ENTRY.merge('edit_description' => 'proven one',
+                                                               'proof' => SE_PROOF_OK)],
+                                  'withdrawn' => [SE_WITHDRAWN]))
+  out, _err, st = run_gate(dir)
+  check(st.success? && out.include?('1 declared edit(s)') && out.include?('withdrawn'),
+        'gate 20: proven + withdrawn → exit 0, both reported', fails)
+end
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'semantic-edits.json'),
+             JSON.pretty_generate('entries' => [SE_ENTRY.merge('proof' => SE_PROOF_OK.merge('match' => false))],
+                                  'withdrawn' => [SE_WITHDRAWN]))
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 27, 'gate 20: a live refuted entry still blocks even with withdrawn[] present', fails)
+  check(err.include?('--withdraw'), 'gate 20 failure remedy names the withdraw path', fails)
+end
+
+# ---- gate 8b + budget: RECORDED divergent verdict spends waiver budget (D3) --
+DIVERGENT_PF = { 'visual_checked' => false, 'visual_verdict' => 'divergent',
+                 'visual_notes' => 'Region bar truncated vs source',
+                 'agent_vision' => true }.freeze
+
+# divergent alone: gate 8b passes as RECORDED, run completes, census names it
+Dir.mktmpdir do |dir|
+  base_workdir(dir, blind: false, parity_extra: DIVERGENT_PF)
+  out, _err, st = run_gate(dir)
+  check(st.success?, "recorded divergent, no other waivers → exit 0 (got #{st.exitstatus})", fails)
+  check(out.include?('recorded (divergent)') && out.include?('BUDGET-COUNTED'),
+        'gate 8b divergent OK line states RECORDED-not-clean + the budget cost', fails)
+  check(out.include?('visual-divergent'), 'the waiver census names visual-divergent', fails)
+  check(out.include?('PR-14'), 'gate 8b divergent line carries the PR-14 verdict-capping forward pointer', fails)
+  pf = JSON.parse(File.read(File.join(dir, 'parity-final.json')))
+  check(Array(pf['waivers']).include?('visual-divergent'),
+        'visual-divergent stamped into the parity-final waiver census', fails)
+end
+
+# divergent + 1 quality waiver = 2 (within budget) → GREEN still available
+Dir.mktmpdir do |dir|
+  base_workdir(dir, blind: false, parity_extra: DIVERGENT_PF)
+  out, _err, st = run_gate(dir, '--skip-orphan-check', 'r1')
+  check(st.success?, "divergent + 1 prior waiver → within budget, exit 0 (got #{st.exitstatus})", fails)
+  check(out.include?('all gates pass'), 'divergent within budget still reaches the GREEN clearance', fails)
+end
+
+# divergent + 2 quality waivers = 3 → budget exceeded, exit 19 naming it
+Dir.mktmpdir do |dir|
+  base_workdir(dir, blind: false, parity_extra: DIVERGENT_PF)
+  out, err, st = run_gate(dir, '--skip-orphan-check', 'r1', '--skip-column-check', 'r2')
+  check(st.exitstatus == 19, "divergent + 2 prior waivers → budget exceeded, exit 19 (got #{st.exitstatus})", fails)
+  check(err.include?('visual-divergent') || out.include?('visual-divergent'),
+        'budget failure lists visual-divergent among the census', fails)
+  check(err.include?('DIVERGENT'), 'budget failure explains what the divergent verdict hid', fails)
+end
+
 puts
 if fails.empty?
-  puts 'ALL PASS — assert-phase6-ran gate 8b vision precondition + PR-9 blind-grade binding + gate 11 post-publish guide + gate 16 join-cardinality ledger + gate 17 LOD translation ledger + gate 18 ground-truth numeric coverage + gate 19 aggregation-semantics ledger + gate 20 semantic-edit equivalence ledger'
+  puts 'ALL PASS — assert-phase6-ran gate 8b vision precondition + PR-9 blind-grade binding + divergent-verdict budget injection + gate 11 post-publish guide + gate 16 join-cardinality ledger + gate 17 LOD translation ledger + gate 18 ground-truth numeric coverage + gate 19 aggregation-semantics ledger + gate 20 semantic-edit equivalence ledger (incl. withdrawn entries)'
   exit 0
 else
   puts "FAILURES (#{fails.length}):"

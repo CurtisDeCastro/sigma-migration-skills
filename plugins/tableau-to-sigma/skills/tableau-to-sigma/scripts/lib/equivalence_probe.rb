@@ -20,7 +20,11 @@
 #   COUNT(DISTINCT <grain>)      declared-grain cardinality (catches dup keys)
 #   SUM(<measure>) per measure   numeric checksums (catches value drift)
 # assert-phase6-ran.rb gate 20 (exit 27) refuses GREEN while any declared
-# entry lacks a proof block or its proof says match:false.
+# entry lacks a proof block or its proof says match:false. A REFUTED edit that
+# was consequently NOT applied is withdrawn (probe-equivalence.rb --withdraw):
+# the entry moves to the ledger's `withdrawn` array with its refuted proof
+# preserved verbatim as evidence — gate 20 ignores withdrawn entries but
+# reports them informationally. Never hand-edit the ledger.
 #
 # HONESTY NOTE (read before trusting the gate): nothing mechanical can detect
 # an edit nobody DECLARED — this ledger + gate police declared edits only. The
@@ -184,12 +188,17 @@ module EquivalenceProbe
     doc
   end
 
-  def write(path, entries)
-    File.write(path, JSON.pretty_generate(
-                       'generated_at' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ'),
-                       'note'         => NOTE,
-                       'entries'      => entries
-                     ))
+  # Rewrite the ledger. Accepts either the whole doc Hash (round-trip: every
+  # top-level key an operator or a future version added — e.g. a
+  # withdrawal_note — is preserved verbatim) or, back-compat, a bare entries
+  # Array. generated_at/note are always restamped; nothing else is dropped.
+  def write(path, entries_or_doc)
+    doc = entries_or_doc.is_a?(Hash) ? entries_or_doc : { 'entries' => entries_or_doc }
+    out = { 'generated_at' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ'),
+            'note'         => NOTE,
+            'entries'      => doc['entries'] || [] }
+    doc.each { |k, v| out[k] = v unless out.key?(k) }
+    File.write(path, JSON.pretty_generate(out))
     path
   end
 
@@ -203,5 +212,33 @@ module EquivalenceProbe
 
   def proven?(entry)
     entry.is_a?(Hash) && entry['proof'].is_a?(Hash) && entry['proof']['match'] == true
+  end
+
+  def refuted?(entry)
+    entry.is_a?(Hash) && entry['proof'].is_a?(Hash) && entry['proof']['match'] == false
+  end
+
+  # Withdraw a REFUTED-and-NOT-APPLIED edit: move its entry (verbatim — the
+  # refuted proof stays as evidence) from entries to the doc's `withdrawn`
+  # array, stamped with the operator's reason + withdrawn_at. Only a refuted
+  # entry is withdrawable: a proven one doesn't block (nothing to withdraw),
+  # and an unproven one was never measured — re-probe first, never withdraw an
+  # unmeasured claim. Returns [:ok, moved_entry] | [:not_found, nil] |
+  # [:proven, entry] | [:unproven, entry].
+  # HONESTY NOTE: withdrawal ATTESTS the refuted edit was not applied — whether
+  # its SQL nonetheless shipped is not detectable mechanically; gates 16/18
+  # remain the numeric net for an edit that rode along anyway.
+  def withdraw(doc, edit_description, reason, at = Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ'))
+    entries = doc['entries']
+    i = entries.index { |e| e.is_a?(Hash) && e['edit_description'].to_s == edit_description.to_s }
+    return [:not_found, nil] unless i
+    entry = entries[i]
+    return [:proven, entry] if proven?(entry)
+    return [:unproven, entry] unless refuted?(entry)
+    entries.delete_at(i)
+    moved = entry.merge('withdrawn_reason' => reason, 'withdrawn_at' => at)
+    doc['withdrawn'] = [] unless doc['withdrawn'].is_a?(Array)
+    doc['withdrawn'] << moved
+    [:ok, moved]
   end
 end

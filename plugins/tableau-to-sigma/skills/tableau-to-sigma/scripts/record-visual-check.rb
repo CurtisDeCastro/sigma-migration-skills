@@ -17,8 +17,12 @@
 #     --verdict not-executable  --notes "driving agent has no image input"
 #
 # It does NOT judge for you — it records the verdict YOU reached. `pass` stamps
-# visual_checked:true; `divergent` records the gap (visual_checked stays false so
-# the gate still blocks until you fix + re-record `pass`).
+# visual_checked:true; `divergent` records the gap (visual_checked stays false).
+# A recorded divergent verdict passes gate 8b as RECORDED, but the divergence is
+# BUDGET-COUNTED: the gate injects `visual-divergent` into the waiver census
+# (exit-19 doctrine), so GREEN requires the budget to hold — fix the gaps and
+# re-record `pass`, or accept YELLOW. (Verdict-capping divergent → PARTIAL is
+# PLAN-v3 PR-14.)
 #
 # VISION PRECONDITION (SKILL_IMPROVEMENT_PLAN_V3 §D5): a pixel-fidelity verdict
 # requires an agent that actually READ the render. --agent-vision true|false is
@@ -313,8 +317,11 @@ when 'pass'
   puts "     parity-final.json now satisfies assert-phase6-ran.rb gate 8b."
 when 'divergent'
   puts "[RECORDED] visual comparison: DIVERGENT#{opts[:notes] ? " — #{opts[:notes]}" : ''}"
-  warn "     visual_checked stays FALSE — gate 8b (--require-visual-comparison) will still BLOCK."
-  warn '     Fix the divergence, re-render, re-read, then re-run with --verdict pass.'
+  warn '     recorded divergent: gate 8b passes as RECORDED, but the divergence is BUDGET-COUNTED —'
+  warn '     assert-phase6-ran.rb injects it into the waiver census as `visual-divergent` (exit-19'
+  warn '     doctrine): GREEN requires the budget to hold. Fix the gaps, re-render, re-read, then'
+  warn '     re-record --verdict pass — or accept YELLOW with the divergence named in the report.'
+  warn '     (Full verdict-capping — divergent caps the run at PARTIAL — is PLAN-v3 PR-14.)'
 else # not-executable
   puts "[RECORDED] visual comparison: NOT-EXECUTABLE — #{opts[:notes]}"
   warn '     visual_checked stays FALSE, agent_vision=false — gate 8b will fail with'

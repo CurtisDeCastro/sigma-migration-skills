@@ -205,6 +205,23 @@ flag and **no waiver path** — a mismatched edit never ships (revert or redesig
 intentionally-different rewrite is a user-initiated scope change, not an
 equivalence claim).
 
+**Withdrawing a refuted edit that was NOT applied.** When the probe REFUTES the
+claim and you therefore do not ship the edit, clear the blocking entry with
+
+```bash
+ruby scripts/probe-equivalence.rb --workdir <WORK> \
+  --withdraw "<edit_description>" --reason "<why the refuted edit was not applied>"
+```
+
+The entry moves verbatim to the ledger's `withdrawn[]` array — its refuted proof
+is preserved as evidence, plus `withdrawn_reason` + `withdrawn_at` — and gate 20
+ignores it but reports it informationally ("N withdrawn edit(s) — refuted and not
+applied"). Only a *refuted* entry is withdrawable: an unproven one must be
+re-probed first (a claim is measured before it is withdrawn), and a proven one
+doesn't block. Never hand-edit the ledger. Honest limit: withdrawal *attests* the
+edit was not applied — whether its SQL nonetheless shipped is not mechanically
+detectable; gates 16/18 remain the numeric net.
+
 **Honest limit — declared edits only.** Nothing mechanical can see an edit nobody
 recorded, so the gate enforces that *declared* edits are proven; the
 operating-contract rule (`refs/operating-contract.md` §Structural edits) makes the
