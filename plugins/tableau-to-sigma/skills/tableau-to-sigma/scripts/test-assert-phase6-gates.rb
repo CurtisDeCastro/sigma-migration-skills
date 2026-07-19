@@ -1439,6 +1439,106 @@ Dir.mktmpdir do |dir|
         'no migrate-state stamp → gate 7b keeps the opt-in SKIP (back-compat)', fails)
 end
 
+# =============================================================================
+# PR-14 — degradation ledger + verdict model (GREEN / YELLOW / PARTIAL).
+# The gate derives <workdir>/degradation-ledger.json on every run and prints
+# ONE verdict; GREEN requires an EMPTY ledger; any scope cut caps at PARTIAL
+# regardless of the waiver budget; the success marker records the verdict.
+# =============================================================================
+
+# clean baseline → VERDICT: GREEN, empty ledger written, verdict stamped.
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  out, _err, st = run_gate(dir)
+  check(st.success? && out.include?('VERDICT: GREEN'), 'clean run → VERDICT: GREEN on the final line', fails)
+  led = JSON.parse(File.read(File.join(dir, 'degradation-ledger.json')))
+  check(led['entries'] == [], 'clean run writes an EMPTY degradation-ledger.json (presence proves derivation ran)', fails)
+  succ = JSON.parse(File.read(File.join(dir, 'phase6-success.json')))
+  check(succ['verdict'] == 'GREEN', 'the DONE marker records the GREEN verdict string', fails)
+  pf = JSON.parse(File.read(File.join(dir, 'parity-final.json')))
+  check(pf['verdict'] == 'GREEN', 'parity-final.json carries the verdict beside the census', fails)
+end
+
+# 1 within-budget quality waiver → gates pass, but GREEN is forfeited: YELLOW.
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  out, _err, st = run_gate(dir, '--skip-orphan-check', 'multi-workbook estate by design')
+  check(st.success?, "1 waiver still passes the gates (got #{st.exitstatus})", fails)
+  check(out.include?('VERDICT: YELLOW') && out.include?('GREEN requires an EMPTY degradation ledger'),
+        '1 quality waiver → VERDICT: YELLOW (empty-ledger doctrine)', fails)
+  check(out.include?('[quality-waiver] --skip-orphan-check — multi-workbook estate by design'),
+        'the ledger prints inline with the waiver reason', fails)
+  succ = JSON.parse(File.read(File.join(dir, 'phase6-success.json')))
+  check(succ['verdict'] == 'YELLOW', 'the DONE marker records YELLOW', fails)
+  pf = JSON.parse(File.read(File.join(dir, 'parity-final.json')))
+  check(pf['waiver_reasons'].is_a?(Hash) && pf['waiver_reasons']['--skip-orphan-check'] == 'multi-workbook estate by design',
+        'the reasons census is stamped into parity-final.json (offline derivation input)', fails)
+end
+
+# 3 quality waivers → budget exceeded (exit 19, doctrine unchanged), YELLOW.
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  _out, err, st = run_gate(dir, '--skip-orphan-check', 'a', '--skip-column-check', 'b',
+                           '--skip-layout-check', 'c')
+  check(st.exitstatus == 19, "3 quality waivers → exit 19 (got #{st.exitstatus})", fails)
+  check(err.include?('VERDICT: YELLOW'), 'budget-exceeded run prints VERDICT: YELLOW with the ledger', fails)
+  check(File.exist?(File.join(dir, 'degradation-ledger.json')),
+        'the ledger is written even on the budget-fail path', fails)
+end
+
+# 1 dropped tile (coverage.json) + 0 waivers → PARTIAL: a scope cut caps the
+# verdict even on a run that spends NO waiver budget.
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'coverage.json'), JSON.pretty_generate(
+    'summary' => { 'sourceVisuals' => 3, 'dropped' => 1 },
+    'unresolved' => [{ 'visual' => 'Region Map', 'severity' => 'dropped', 'detail' => 'no basemap support' }]))
+  out, _err, st = run_gate(dir)
+  check(st.success?, "dropped tile with 0 waivers still passes the gates (got #{st.exitstatus})", fails)
+  check(out.include?('VERDICT: PARTIAL') && !out.include?('VERDICT: PARTIAL+YELLOW'),
+        '1 dropped tile + 0 waivers → VERDICT: PARTIAL (not YELLOW)', fails)
+  check(out.include?('[scope-cut]') && out.include?('Region Map'),
+        'the scope cut prints inline, named', fails)
+  check(out.include?('SUBSET of the source'), 'PARTIAL explains the scope-cut meaning', fails)
+  succ = JSON.parse(File.read(File.join(dir, 'phase6-success.json')))
+  check(succ['verdict'] == 'PARTIAL', 'the DONE marker records PARTIAL', fails)
+end
+
+# scope cut + within-budget waiver → both co-occur: PARTIAL+YELLOW, exit 0.
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'coverage.json'), JSON.pretty_generate(
+    'unresolved' => [{ 'visual' => 'Trend', 'severity' => 'dropped', 'detail' => 'empty view CSV' }]))
+  out, _err, st = run_gate(dir, '--skip-orphan-check', 'estate')
+  check(st.success? && out.include?('VERDICT: PARTIAL+YELLOW'),
+        'scope cut + quality waiver → VERDICT: PARTIAL+YELLOW (PARTIAL dominant, YELLOW noted)', fails)
+end
+
+# scope cut + budget exceeded → exit 19 still names PARTIAL+YELLOW.
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'coverage.json'), JSON.pretty_generate(
+    'unresolved' => [{ 'visual' => 'Trend', 'severity' => 'dropped', 'detail' => 'x' }]))
+  _out, err, st = run_gate(dir, '--skip-orphan-check', 'a', '--skip-column-check', 'b',
+                           '--skip-layout-check', 'c')
+  check(st.exitstatus == 19 && err.include?('VERDICT: PARTIAL+YELLOW'),
+        'scope cut + budget exceeded → exit 19 names PARTIAL+YELLOW', fails)
+end
+
+# a ledger-waived dropped control (gate 7c passes on the ledger waiver, no
+# budget flags) is still a scope cut → PARTIAL.
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'wb-controls-coverage.json'), JSON.pretty_generate(
+    'detail' => [{ 'kind' => 'filter', 'name' => 'Region', 'status' => 'unbuilt' }]))
+  File.write(File.join(dir, 'controls-waivers.json'), JSON.pretty_generate(
+    [{ 'control' => 'filter:Region', 'reason' => 'single-value in the source data' }]))
+  out, _err, st = run_gate(dir)
+  check(st.success?, "ledger-waived control passes gate 7c (got #{st.exitstatus})", fails)
+  check(out.include?('VERDICT: PARTIAL') && out.include?('dropped control: filter:Region'),
+        'a ledger-waived control is a scope cut → PARTIAL with the control named', fails)
+end
+
 # ---- source-level pins: the finalize plumbing (migrate-tableau.rb) -----------
 mig_src = File.read(File.join(__dir__, 'migrate-tableau.rb'))
 check(mig_src.include?("['--require-fidelity-ledger'] : ['--skip-fidelity-gate', 'RCF loop disabled at pass 1 via --rcf-passes 0']"),
@@ -1450,7 +1550,7 @@ check(mig_src.include?("'control_flip_required' => true"),
 
 puts
 if fails.empty?
-  puts 'ALL PASS — assert-phase6-ran gate 8b vision precondition + PR-9 blind-grade binding + divergent-verdict budget injection + gate 11 post-publish guide + gate 16 join-cardinality ledger + gate 17 LOD translation ledger + gate 18 ground-truth numeric coverage + gate 19 aggregation-semantics ledger + gate 20 semantic-edit equivalence ledger (incl. withdrawn entries) + gate 21 chart-kind parity (png-read vs readback, kind_waivers ledger) + PR-11 gate 8d default-on / gate 4b layout-phase sentinel (exit 30) / gate 8e arrangement parity (exit 29) + PR-13 gate 7c controls census (exit 31, ledger doctrine) / gate 7b flip test default-on (marker-or-waiver, budget-counted)'
+  puts 'ALL PASS — assert-phase6-ran gate 8b vision precondition + PR-9 blind-grade binding + divergent-verdict budget injection + gate 11 post-publish guide + gate 16 join-cardinality ledger + gate 17 LOD translation ledger + gate 18 ground-truth numeric coverage + gate 19 aggregation-semantics ledger + gate 20 semantic-edit equivalence ledger (incl. withdrawn entries) + gate 21 chart-kind parity (png-read vs readback, kind_waivers ledger) + PR-11 gate 8d default-on / gate 4b layout-phase sentinel (exit 30) / gate 8e arrangement parity (exit 29) + PR-13 gate 7c controls census (exit 31, ledger doctrine) / gate 7b flip test default-on (marker-or-waiver, budget-counted) + PR-14 degradation ledger + GREEN/YELLOW/PARTIAL verdict model (empty-ledger GREEN, scope-cut PARTIAL cap, verdict-stamped DONE marker)'
   exit 0
 else
   puts "FAILURES (#{fails.length}):"

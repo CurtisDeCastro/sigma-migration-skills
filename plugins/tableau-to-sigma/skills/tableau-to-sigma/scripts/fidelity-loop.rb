@@ -491,6 +491,14 @@ when 'apply-patch'
   # waives (named), matching the post-and-readback flag.
   if opts[:skip_style_normalize]
     warn "WARN: style-normalize SKIPPED (--skip-style-normalize: #{opts[:skip_style_normalize]}) — quality waiver."
+    # PR-14: every honored --skip-* leaves a record on the off-ramp trail.
+    begin
+      require_relative 'lib/offramp'
+      Offramp.log(opts[:dir], kind: 'skip-flag-waived', reason: opts[:skip_style_normalize],
+                  detail: '--skip-style-normalize')
+    rescue LoadError
+      warn 'WARN: lib/offramp.rb not vendored — the waiver could not be recorded to offramps.jsonl.'
+    end
   else
     begin
       require_relative 'lib/style_normalize'

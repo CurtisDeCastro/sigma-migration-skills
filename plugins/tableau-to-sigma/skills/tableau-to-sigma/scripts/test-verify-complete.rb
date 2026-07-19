@@ -1,11 +1,16 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
-# Regression test for the run-scoped completion sentinel (2026-07-09).
+# Regression test for the run-scoped completion sentinel (2026-07-09) and the
+# PR-14 verdict model + report cross-check.
 #
 # "Done" must be a fact on disk, not a narration. verify-complete.rb reports
-# GREEN only when phase6-success.json is present AND no parity-pending.json
+# DONE only when phase6-success.json is present AND no parity-pending.json
 # remains — the two markers PASS 1 (exit 12) and assert-phase6-ran.rb (exit 0)
-# maintain. This drives verify-complete.rb across the four states. Offline.
+# maintain. This drives verify-complete.rb across the four states, then the
+# PR-14 additions: the degradation ledger is re-derived offline, the verdict
+# (GREEN/YELLOW/PARTIAL) is printed with the ledger inline, and a report whose
+# claims contradict the derivation fails with exit 6 (the anti-"GREEN,
+# 0 waivers" mechanism). Offline.
 #
 # Usage: ruby scripts/test-verify-complete.rb
 
@@ -59,6 +64,101 @@ Dir.mktmpdir do |wd|
   File.delete(File.join(wd, 'phase6-success.json'))
   code, = run_vc(VC, wd)
   check(code == 3, "re-run PASS 1 flips DONE back to NOT DONE (got #{code})", fails)
+end
+
+# ---------------------------------------------------------------------------
+# PR-14 — verdict surfacing + report cross-check (exit 6).
+# ---------------------------------------------------------------------------
+
+def success_marker(wd, extra = {})
+  File.write(File.join(wd, 'phase6-success.json'),
+             JSON.generate({ 'workbookId' => 'wb-1', 'gates' => 'all-pass',
+                             'generatedAt' => '2026-07-19T00:00:00Z' }.merge(extra)))
+end
+
+# Clean workdir → DONE with VERDICT: GREEN and an explicitly-empty ledger.
+Dir.mktmpdir do |wd|
+  success_marker(wd, 'verdict' => 'GREEN')
+  code, out = run_vc(VC, wd)
+  check(code == 0, "clean workdir + GREEN claim => exit 0 (got #{code})", fails)
+  check(out.include?('VERDICT: GREEN'), 'DONE line prints the GREEN verdict', fails)
+  check(out.include?('ledger   : empty'), 'empty ledger is stated explicitly', fails)
+end
+
+# Legacy marker (no verdict/waivers keys) over a clean workdir stays DONE and
+# gets the derived verdict printed — absent claims are never contradictions.
+Dir.mktmpdir do |wd|
+  success_marker(wd)
+  code, out = run_vc(VC, wd)
+  check(code == 0, "legacy marker without verdict key => exit 0 (got #{code})", fails)
+  check(out.include?('VERDICT: GREEN'), 'legacy marker still gets the derived verdict printed', fails)
+end
+
+# Scope cut (coverage.json dropped tile) + consistent PARTIAL claims → DONE,
+# verdict PARTIAL, ledger entry printed inline.
+Dir.mktmpdir do |wd|
+  File.write(File.join(wd, 'coverage.json'), JSON.generate(
+    'unresolved' => [{ 'visual' => 'Region Map', 'severity' => 'dropped', 'detail' => 'no basemap' }]))
+  File.write(File.join(wd, 'parity-final.json'), JSON.generate(
+    'status' => 'PASS', 'waivers' => [], 'waiver_count' => 0, 'verdict' => 'PARTIAL'))
+  success_marker(wd, 'verdict' => 'PARTIAL', 'waivers' => [])
+  code, out = run_vc(VC, wd)
+  check(code == 0, "dropped tile + honest PARTIAL claims => exit 0 (got #{code})", fails)
+  check(out.include?('VERDICT: PARTIAL'), 'verdict PARTIAL surfaces on the DONE line', fails)
+  check(out.include?('[scope-cut]') && out.include?('Region Map'), 'the ledger entry prints inline, one line', fails)
+  check(out.include?('SUBSET of the source'), 'PARTIAL names the scope-cut meaning', fails)
+end
+
+# THE LIE (field case): a report claiming GREEN + 0 waivers over a workdir
+# whose off-ramp trail recorded a --skip-ref-check → exit 6, contradiction.
+Dir.mktmpdir do |wd|
+  File.open(File.join(wd, 'offramps.jsonl'), 'a') do |f|
+    f.puts(JSON.generate('kind' => 'skip-flag-waived', 'reason' => 'refs pre-validated by hand',
+                         'detail' => '--skip-ref-check'))
+  end
+  File.write(File.join(wd, 'parity-final.json'), JSON.generate(
+    'status' => 'PASS', 'waivers' => [], 'waiver_count' => 0, 'verdict' => 'GREEN'))
+  success_marker(wd, 'verdict' => 'GREEN', 'waivers' => [])
+  code, out = run_vc(VC, wd)
+  check(code == 6, "\"GREEN, 0 waivers\" over a recorded --skip-ref-check => exit 6 (got #{code})", fails)
+  check(out.include?('REPORT CONTRADICTS LEDGER'), 'contradiction failure names itself', fails)
+  check(out.include?('claims verdict GREEN') && out.include?('YELLOW'),
+        'failure names the claimed vs derived verdict', fails)
+  check(out.include?('0 waivers but the artifacts record'),
+        'the zero-waiver claim is called out against the recorded escape', fails)
+  check(out.include?('--skip-ref-check'), 'the ledger inline shows the hidden skip flag', fails)
+end
+
+# Census arithmetic: waiver_count must equal the census it counts.
+Dir.mktmpdir do |wd|
+  File.write(File.join(wd, 'parity-final.json'), JSON.generate(
+    'status' => 'PASS', 'waivers' => ['--skip-anchors-gate'], 'waiver_count' => 0))
+  success_marker(wd)
+  code, out = run_vc(VC, wd)
+  check(code == 6, "waiver_count=0 over a 1-entry census => exit 6 (got #{code})", fails)
+  check(out.include?('its own census lists 1'), 'census arithmetic contradiction is named', fails)
+end
+
+# Marker census drift: phase6-success waivers != parity-final waivers → exit 6.
+Dir.mktmpdir do |wd|
+  File.write(File.join(wd, 'parity-final.json'), JSON.generate(
+    'status' => 'PASS', 'waivers' => ['--skip-anchors-gate'], 'waiver_count' => 1))
+  success_marker(wd, 'waivers' => [])
+  code, out = run_vc(VC, wd)
+  check(code == 6, "marker census drifted from parity-final census => exit 6 (got #{code})", fails)
+end
+
+# Tampered ledger: degradation-ledger.json edited to empty while the artifacts
+# still derive an entry → exit 6.
+Dir.mktmpdir do |wd|
+  File.write(File.join(wd, 'coverage.json'), JSON.generate(
+    'unresolved' => [{ 'visual' => 'Trend', 'severity' => 'dropped', 'detail' => 'x' }]))
+  File.write(File.join(wd, 'degradation-ledger.json'), JSON.generate(
+    'version' => 1, 'counts' => {}, 'entries' => []))
+  success_marker(wd)
+  code, out = run_vc(VC, wd)
+  check(code == 6, "hand-emptied degradation-ledger.json => exit 6 (got #{code})", fails)
+  check(out.include?('does not match a fresh derivation'), 'tampered ledger is named', fails)
 end
 
 puts

@@ -389,7 +389,7 @@ ruby scripts/assert-phase6-ran.rb --tableau ~/tableau-migration/<slug>
 
 ![tts_hard_gate](assets/tts_hard_gate.png)
 
-Exit 0 means the conversion may declare GREEN. Any non-zero exit means downgrade to YELLOW or RED with a documented reason.
+Exit 0 means the gates passed — the verdict on the final line is what you report: GREEN only when the degradation ledger is empty; YELLOW for quality waivers/residuals; PARTIAL whenever a scope cut (dropped tile/column/control) shipped. Any non-zero exit means downgrade to YELLOW or RED with a documented reason.
 
 **Phase E (opt-in) — Enhance.** Once everything is GREEN you can opt into the
 enhancement pass: add `--enhance` to the `migrate-tableau.rb --finalize` command to

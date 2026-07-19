@@ -40,10 +40,15 @@
 # Usage:
 #   ruby assert-wb-refs-resolve.rb --wb-spec <spec.json> \
 #     ( --dm-ids <dm-ids.json> | --dm-id <dataModelId> ) \
+#     [--workdir DIR]             # workdir for the off-ramp trail (the
+#                                 # orchestrator passes it; a waived run
+#                                 # records itself to offramps.jsonl)
 #     [--skip-ref-check REASON]   # waive — REQUIRED reason; name it in your report
 #
 # Exit codes:
-#   0  all refs resolve (or waived)
+#   0  all refs resolve (or waived — a waiver with --workdir writes a
+#      skip-flag-waived record to offramps.jsonl: PR-14 closed the escape that
+#      let a --skip-ref-check run report "GREEN, 0 waivers")
 #   1  one or more refs do not resolve against the live DM
 #   2  usage error
 require 'json'
@@ -55,12 +60,27 @@ OptionParser.new do |p|
   p.on('--wb-spec PATH')  { |v| opts[:spec] = v }
   p.on('--dm-ids PATH')   { |v| opts[:dm_ids] = v }
   p.on('--dm-id ID')      { |v| opts[:dm_id] = v }
+  p.on('--workdir DIR', 'workdir for the off-ramp trail (a waiver is recorded there)') { |v| opts[:workdir] = v }
   p.on('--skip-ref-check REASON',
        'waive the ref-resolution gate — REQUIRED reason; name it in your report') { |v| opts[:skip] = v }
 end.parse!
 
 if opts[:skip]
   puts "[SKIP] workbook ref-resolution gate WAIVED (#{opts[:skip]}) — name this in your report."
+  # PR-14: a skipped verification must leave a record — this exact flag once
+  # produced a false "GREEN, 0 waivers" final because nothing wrote one.
+  if opts[:workdir]
+    begin
+      $LOAD_PATH.unshift File.expand_path('lib', __dir__)
+      require 'offramp'
+      Offramp.log(opts[:workdir], kind: 'skip-flag-waived', reason: opts[:skip],
+                  detail: '--skip-ref-check')
+    rescue LoadError
+      warn '       WARN: lib/offramp.rb not vendored — the waiver could not be recorded to offramps.jsonl.'
+    end
+  else
+    warn '       WARN: no --workdir given — the waiver was NOT recorded to offramps.jsonl (pass --workdir).'
+  end
   exit 0
 end
 abort 'usage: --wb-spec PATH and (--dm-ids PATH | --dm-id ID)' unless opts[:spec] && (opts[:dm_ids] || opts[:dm_id])

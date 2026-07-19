@@ -109,6 +109,15 @@ require_relative 'lib/dashboard_read'
 require_relative 'lib/recipe_multimetric' # rollup_flag validator + caption-variant helpers
 if opts[:skip_dashboard_read]
   warn "[SKIP] dashboard-read gate WAIVED (#{opts[:skip_dashboard_read]}) — name this in your migration report."
+  # PR-14: every honored --skip-* leaves a record on the off-ramp trail.
+  begin
+    $LOAD_PATH.unshift File.expand_path('lib', __dir__)
+    require 'offramp'
+    Offramp.log(opts[:tab], kind: 'skip-flag-waived', reason: opts[:skip_dashboard_read],
+                detail: '--skip-dashboard-read')
+  rescue LoadError
+    warn '       WARN: lib/offramp.rb not vendored — the waiver could not be recorded to offramps.jsonl.'
+  end
 else
   dr_ok, dr_errs = DashboardRead.validate(opts[:tab])
   unless dr_ok

@@ -348,7 +348,7 @@ the map of what the orchestrator runs.
 | Script | Purpose |
 |---|---|
 | `scripts/migrate-tableau.rb` | **The one command** — chains the whole scripted spine (gap gate → DM-reuse scan → DM → workbook → layout → two-pass parity → cleanup + census gate) and stops with exact instructions where agent judgment is required. See "One command" above. |
-| `scripts/verify-complete.rb` | **The single offline "are we done?" check** — exit 0 / ✅ DONE only when `phase6-success.json` is present (stamped by `assert-phase6-ran.rb` exit 0) and no `parity-pending.json` remains. A clean PASS 1 (exit 12) reports NOT DONE. Also prints the run's off-ramp trail. Run before claiming success. |
+| `scripts/verify-complete.rb` | **The single offline "are we done?" check** — exit 0 / ✅ DONE only when `phase6-success.json` is present (stamped by `assert-phase6-ran.rb` exit 0) and no `parity-pending.json` remains. A clean PASS 1 (exit 12) reports NOT DONE. PR-14: re-derives the degradation ledger, prints the verdict (GREEN/YELLOW/PARTIAL) with the ledger inline, and **exits 6 when the report's claims (verdict / waiver census) contradict the derivation** — the anti-"GREEN, 0 waivers" cross-check. Also prints the run's off-ramp trail. Run before claiming success. |
 | `scripts/lib/offramp.rb` + `offramps.jsonl` | **Observability trail** — every point a run leaves the golden path (cred/doctor waiver, PASS-1 stop, converter-stop, workbook-handoff, degraded fast path, manual-spec) appends a structured record to `<WORK>/offramps.jsonl`. Read it (or `verify-complete.rb`) to pinpoint *where* a run defected. |
 | `scripts/setup.rb` | One-time Sigma credential setup |
 | `scripts/get-token.sh` | Exchange `SIGMA_CLIENT_ID`/`SIGMA_CLIENT_SECRET` for `SIGMA_API_TOKEN` (~1h TTL) — **bash only** |
@@ -749,6 +749,19 @@ to the recorded visual verdict (details: `refs/visual-similarity.md`). Escape
 > policy exclusions), and **data-class fidelity residuals can never be waived at
 > all** — the numbers are wrong; fix or reclassify with evidence. Reaching for a
 > third waiver means the run is telling you something: stop and fix.
+
+> **Verdict model (PR-14) — GREEN / YELLOW / PARTIAL.** On every gate run,
+> `lib/degradation_ledger.rb` derives `<WORK>/degradation-ledger.json` from the
+> artifacts (scope cuts, quality waivers, recorded `--skip-*` escapes, fidelity
+> residuals, waived resolutions — mechanical, never self-reported) and the gate
+> prints ONE verdict with the ledger inline. **GREEN requires an EMPTY ledger.**
+> Any non-scope-cut entry (or an exceeded budget) → **YELLOW**. **Any scope cut
+> — a dropped tile, column, control, or DM element — caps the verdict at
+> PARTIAL** regardless of the waiver budget (`PARTIAL+YELLOW` when both). The
+> verdict is stamped into `phase6-success.json` + `parity-final.json`, and
+> `verify-complete.rb` re-derives the ledger offline and **fails (exit 6) if
+> your report's claims contradict it** — never report GREEN, a waiver count, or
+> a verdict the ledger doesn't support; quote the ledger verbatim instead.
 
 ### Phase 5g — RCF (render-compare-fix) fidelity loop — `refs/phase-5g-rcf.md`
 After the workbook renders, iterate composition to convergence: `fidelity-loop.rb render`

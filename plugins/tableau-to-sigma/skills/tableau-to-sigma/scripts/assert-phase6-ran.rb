@@ -177,8 +177,9 @@
 #      A recorded `divergent` verdict passes this gate as RECORDED (the
 #      comparison happened; the gaps are acknowledged) but is INJECTED into
 #      the waiver census as `visual-divergent` and SPENDS waiver budget
-#      (exit 19) — GREEN requires the budget to hold; fix the gaps or accept
-#      YELLOW. Full verdict-capping (divergent → PARTIAL) is PLAN-v3 PR-14.
+#      (exit 19) — GREEN requires the budget to hold, and the recorded
+#      divergence joins the degradation ledger as a fidelity-residual, so the
+#      final verdict is at most YELLOW (PR-14 verdict model below).
 #  14  Layout fill / grid coverage failed (gate 8c; #259 item 1) — a page in
 #      layout-census.json dropped a tile (placed < zones) or ships under-filled
 #      (grid_fill_pct < --min-grid-fill, default 0.45), OR a dashboard layout was
@@ -446,6 +447,21 @@
 # Phase 1d). (d) closes the run-2 hole where all 11 anchors sat in 3 of 9 tiles
 # and the oracle vouched for 6 tiles nothing was watching.
 #
+# VERDICT MODEL (PLAN-v3 PR-14 — cumulative-degradation accounting): on every
+# run this gate derives <workdir>/degradation-ledger.json from the workdir's
+# artifacts (lib/degradation_ledger.rb — scope cuts, quality waivers, recorded
+# escapes, fidelity residuals, waived resolutions; deterministic, never
+# self-reported) and prints ONE verdict with the ledger inline:
+#   GREEN   — the ledger is EMPTY (waivers within budget alone is no longer
+#             enough: any recorded degradation forfeits GREEN);
+#   YELLOW  — quality degradations but no scope cut (a budget-exceeded run —
+#             exit 19, doctrine unchanged — is always at least YELLOW);
+#   PARTIAL — ANY scope cut (dropped tile / column / control / DM element)
+#             regardless of the waiver budget; PARTIAL+YELLOW when both.
+# The verdict string is stamped into phase6-success.json and parity-final.json;
+# verify-complete.rb re-derives the ledger offline and FAILS (its exit 6) when
+# a report's claims contradict it — the anti-"GREEN, 0 waivers" mechanism.
+#
 # DATA-CLASS RCF residuals (part of gate 8d, exit 15, but enforced whenever
 # fidelity-ledger.json EXISTS — even without --require-fidelity-ledger): any
 # UNRESOLVED ledger entry with class `data` hard-fails. Data-class residuals
@@ -461,6 +477,21 @@ require 'uri'
 require 'optparse'
 require 'rbconfig'
 require 'digest'
+
+# Degradation ledger (PLAN-v3 PR-14) — vendored at scripts/lib/ in adopting
+# plugins; the canonical checkout resolves it from shared/lib. A checkout
+# without it keeps the legacy final line (stated below, never silent).
+DEG_LEDGER_LOADED = begin
+  require_relative 'lib/degradation_ledger'
+  true
+rescue LoadError
+  begin
+    require_relative '../lib/degradation_ledger'
+    true
+  rescue LoadError
+    false
+  end
+end
 
 opts = { min_pass_rate: 1.0, allow_extract: false, min_layout_elements: 2,
          allow_missing_tiles: 0, min_parity_score: 0.0, min_grid_fill: 0.45 }
@@ -658,7 +689,7 @@ WAIVER_HIDES = {
   '--skip-visual-gate'         => 'gate 8: no rendered PNG was required',
   '--skip-visual-comparison'   => 'gate 8b: no source-vs-target visual verdict was required',
   '--no-vision-waiver'         => 'gate 8b: the visual PASS was SELF-graded — no context-free blind grader ran (recorded by record-visual-check.rb --no-vision-waiver)',
-  'visual-divergent'           => 'gate 8b: the recorded visual verdict is DIVERGENT — acknowledged source-vs-target visual gaps ship in the render (verdict-capping divergent→PARTIAL is PLAN-v3 PR-14)',
+  'visual-divergent'           => 'gate 8b: the recorded visual verdict is DIVERGENT — acknowledged source-vs-target visual gaps ship in the render (joins the degradation ledger as a fidelity-residual; verdict at most YELLOW)',
   '--skip-layout-fill'         => 'gate 8c: dropped/under-filled pages were accepted',
   '--accept-residuals'         => 'gate 8d: named RCF deltas shipped unresolved',
   '--skip-fidelity-gate'       => 'gate 8d: the RCF fidelity loop was never required — compositional deltas (palette, chart kind, KPI format) were never iterated (--rcf-passes 0 records this waiver)',
@@ -741,8 +772,9 @@ end
 # but acknowledged source-vs-target visual gaps riding to GREEN unqualified is
 # exactly the live-run failure this closes (blind grade FAIL 5/6, verdict
 # recorded divergent, final GREEN). Injected into the census as
-# `visual-divergent` so the budget line names it. Full verdict-capping
-# (divergent → PARTIAL) is PLAN-v3 PR-14 — until then the budget is the cap.
+# `visual-divergent` so the budget line names it; the degradation ledger
+# (PR-14) additionally records it as a fidelity-residual, capping the verdict
+# at YELLOW even when the budget holds.
 begin
   _pf_bgw = File.exist?(summary_path) ? JSON.parse(File.read(summary_path)) : nil
   waiver_flags << '--no-vision-waiver' if _pf_bgw.is_a?(Hash) && _pf_bgw['blind_grade_waiver'].is_a?(Hash) &&
@@ -763,6 +795,42 @@ budget_flags = waiver_flags.reject do |f|
     (f == '--skip-visual-comparison' && opts[:skip_visual_cmp].to_s =~ /verifier/i)
 end
 
+# Reasons census (PR-14): the flag → recorded-reason map rides into
+# parity-final.json beside the census, so the degradation ledger (derived
+# OFFLINE here and by verify-complete.rb) can explain each waiver and decide
+# the /verifier/i policy exclusion without re-parsing CLI flags.
+_reason_srcs = {
+  '--skip-parity-gate'         => opts[:skip_parity],
+  '--skip-orphan-check'        => opts[:skip_orphan],
+  '--skip-column-check'        => opts[:skip_column],
+  '--skip-layout-check'        => opts[:skip_layout],
+  '--skip-layout-lint'         => opts[:skip_lint],
+  '--skip-control-lint'        => opts[:skip_control_lint],
+  '--skip-control-flip'        => opts[:skip_control_flip],
+  '--skip-visual-gate'         => opts[:skip_visual],
+  '--skip-visual-comparison'   => opts[:skip_visual_cmp],
+  '--skip-layout-fill'         => opts[:skip_layout_fill],
+  '--skip-fidelity-gate'       => opts[:skip_fidelity],
+  '--skip-visual-tiles'        => opts[:skip_visual_tiles],
+  '--skip-telemetry-gate'      => opts[:skip_telemetry],
+  '--skip-postpublish-guide'   => opts[:skip_postpublish],
+  '--accept-deferred-elements' => opts[:accept_deferred],
+  '--skip-anchors-gate'        => opts[:skip_anchors],
+  '--allow-empty-tiles'        => opts[:allow_empty_tiles],
+  '--skip-visual-similarity'   => opts[:skip_vsim],
+  '--accept-residuals'         => (Array(opts[:accept_residuals]).any? ? "accepted RCF residual(s): #{Array(opts[:accept_residuals]).join(', ')}" : nil),
+  '--accept-manual-residues'   => (Array(opts[:accept_manual_residues]).any? ? "accepted unbuilt residue(s): #{Array(opts[:accept_manual_residues]).join(', ')}" : nil),
+  '--min-pass-rate'            => (opts[:min_pass_rate] < 1.0 ? "accepted pass rate #{opts[:min_pass_rate]}" : nil),
+  '--allow-missing-tiles'      => (opts[:allow_missing_tiles].to_i.positive? ? "tolerated #{opts[:allow_missing_tiles]} unmatched dashboard zone(s)" : nil),
+  '--allow-extract'            => (opts[:allow_extract] ? 'extract mode accepted (value drift tolerated)' : nil),
+  'layout-phase-skip'          => (layout_phase_stamp.is_a?(Hash) ? layout_phase_stamp['reason'] : nil)
+}
+waiver_reasons = {}
+waiver_flags.each do |f|
+  v = _reason_srcs[f]
+  waiver_reasons[f] = v.to_s.strip if v.is_a?(String) && !v.to_s.strip.empty?
+end
+
 # Stamp the census into parity-final.json on every run (best-effort — a
 # missing/malformed file is gate 1's problem, not the stamp's).
 if File.exist?(summary_path)
@@ -770,6 +838,7 @@ if File.exist?(summary_path)
     _pf = JSON.parse(File.read(summary_path))
     _pf['waivers'] = waiver_flags
     _pf['waiver_count'] = waiver_flags.length
+    _pf['waiver_reasons'] = waiver_reasons
     # Off-ramp telemetry fields (P2): where did this run defect? route comes from
     # the orchestrator's migrate-state.json ('orchestrated' | 'manual-authorized';
     # null for converters without the concept); manual_path_authorized records an
@@ -3243,6 +3312,24 @@ end
 # for this cap — reduce the waiver count by fixing the underlying issues, or
 # report the migration as YELLOW.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Degradation ledger + verdict (PLAN-v3 PR-14) — derived ONCE here, from the
+# artifacts on disk (the census stamped above included), and written to
+# <workdir>/degradation-ledger.json on every run that reaches this point, so
+# the budget-fail path below and the success path share one derivation and
+# verify-complete.rb can re-derive + cross-check offline.
+# ---------------------------------------------------------------------------
+deg_entries = nil
+if DEG_LEDGER_LOADED
+  begin
+    deg_entries = DegradationLedger.derive(opts[:tab])
+    DegradationLedger.write(opts[:tab], deg_entries)
+  rescue StandardError => e
+    warn "[WARN] degradation-ledger derivation failed (#{e.class}: #{e.message.lines.first.to_s.strip}) — verdict falls back to legacy print."
+    deg_entries = nil
+  end
+end
+
 if budget_flags.length > WAIVER_BUDGET
   warn "[FAIL] waiver budget exceeded — #{budget_flags.length} quality waiver/escape flag(s) on this run (budget #{WAIVER_BUDGET})."
   warn '       GREEN unavailable — too many waivers; the highest achievable result is YELLOW.'
@@ -3251,6 +3338,11 @@ if budget_flags.length > WAIVER_BUDGET
   warn '       Waivers are for impossibilities, not obstacles. Fix the underlying issues until'
   warn "       <= #{WAIVER_BUDGET} remain, or report this migration as YELLOW (never GREEN) and name"
   warn '       every waiver in the report. There is no escape flag for this cap.'
+  if deg_entries
+    v19 = DegradationLedger.verdict(deg_entries, budget_exceeded: true)
+    warn "       VERDICT: #{v19} — degradation ledger (#{deg_entries.length} entr#{deg_entries.length == 1 ? 'y' : 'ies'}):"
+    DegradationLedger.report_lines(deg_entries).each { |l| warn "       #{l}" }
+  end
   exit 19
 end
 
@@ -3261,25 +3353,34 @@ end
 # gate can mint, closing the "agent narrates success without the gate" hole.
 # run_id scopes the marker to THIS run (see the at_exit stale-deletion above);
 # the waiver census rides along so a report can quote the marker verbatim.
+# The verdict (PR-14): all gates passed and the budget held, but GREEN belongs
+# only to an EMPTY degradation ledger — any scope cut caps the run at PARTIAL,
+# any other recorded degradation at YELLOW. The string rides in the success
+# marker (verify-complete.rb quotes and cross-checks it).
+final_verdict = deg_entries ? DegradationLedger.verdict(deg_entries) : nil
 begin
   _wd = opts[:tab]
   # chartCount from parity-final.json (gate 1 already required charts_total > 0 to
   # reach here) so verify-complete.rb has a uniform element count across plugins.
   _pf = (JSON.parse(File.read(File.join(_wd, 'parity-final.json'))) rescue {})
   _cc = (_pf['charts_total'] || _pf['charts_pass'] || 0).to_i
-  File.write(File.join(_wd, 'phase6-success.json'),
-             JSON.pretty_generate('workbookId' => (opts[:wb] || ''),
-                                  'chartCount' => _cc,
-                                  'gates' => 'all-pass',
-                                  'run_id' => current_run_id,
-                                  'waivers' => waiver_flags,
-                                  'generatedAt' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')))
+  _succ = { 'workbookId' => (opts[:wb] || ''),
+            'chartCount' => _cc,
+            'gates' => 'all-pass',
+            'run_id' => current_run_id,
+            'waivers' => waiver_flags,
+            'generatedAt' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ') }
+  _succ['verdict'] = final_verdict if final_verdict
+  File.write(File.join(_wd, 'phase6-success.json'), JSON.pretty_generate(_succ))
   _pend = File.join(_wd, 'parity-pending.json')
   File.delete(_pend) if File.exist?(_pend)
-  # Flip the off-ramp telemetry field now that success is minted (P2).
+  # Flip the off-ramp telemetry field now that success is minted (P2), and
+  # stamp the derived verdict beside the census so a report that quotes
+  # parity-final.json carries it (verify-complete.rb cross-checks the claim).
   if File.exist?(File.join(_wd, 'parity-final.json'))
     begin
       _pf['success_sentinel'] = true
+      _pf['verdict'] = final_verdict if final_verdict
       File.write(File.join(_wd, 'parity-final.json'), JSON.pretty_generate(_pf))
     rescue StandardError
       nil
@@ -3289,6 +3390,23 @@ rescue StandardError
   # never fail the gate on sentinel bookkeeping
 end
 
-puts "[OK] all gates pass — conversion may declare GREEN" \
-     "#{waiver_flags.any? ? " (#{budget_flags.length}/#{waiver_flags.length} waiver(s) within budget — name them in the report: #{waiver_flags.join(', ')})" : ''}"
+if final_verdict.nil?
+  # Legacy checkout without lib/degradation_ledger.rb — stated, never silent.
+  puts "[OK] all gates pass — conversion may declare GREEN" \
+       "#{waiver_flags.any? ? " (#{budget_flags.length}/#{waiver_flags.length} waiver(s) within budget — name them in the report: #{waiver_flags.join(', ')})" : ''}"
+  puts '     (lib/degradation_ledger.rb not vendored — no PR-14 verdict derived; re-vendor to enable.)'
+elsif final_verdict == 'GREEN'
+  puts "[OK] all gates pass — VERDICT: GREEN (degradation ledger empty — no scope cuts, no waivers, no residuals)"
+else
+  puts "[OK] all gates pass — VERDICT: #{final_verdict}" \
+       "#{waiver_flags.any? ? " (#{budget_flags.length}/#{waiver_flags.length} waiver(s) within budget)" : ''}"
+  puts "     GREEN requires an EMPTY degradation ledger; this run recorded #{deg_entries.length} degradation(s):"
+  DegradationLedger.report_lines(deg_entries).each { |l| puts "     #{l}" }
+  if final_verdict.start_with?('PARTIAL')
+    puts '     PARTIAL: a scope cut shipped — the delivered workbook is a SUBSET of the source.'
+    puts '     Report this migration as PARTIAL (never GREEN) and quote the ledger verbatim.'
+  else
+    puts '     Report this migration as YELLOW (never GREEN) and name every entry in the report.'
+  end
+end
 exit 0
