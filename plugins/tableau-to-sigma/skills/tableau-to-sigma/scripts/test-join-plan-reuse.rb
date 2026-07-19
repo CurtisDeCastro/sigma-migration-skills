@@ -33,8 +33,14 @@ check(!derive_at.nil?, 'ledger derivation present', fails)
 check(src.scan('JoinPlan.derive').size == 1, 'ONE shared derivation call (no build-only twin to drift)', fails)
 check(src.include?('_jp_spec = reuse_dm_id ? dm_spec_rb : dm'),
       'reuse path scans the LIVE DM readback spec (dm_spec_rb) for Lookup( synthesis', fails)
-check(src.match?(/JoinPlan\.derive\(_jp_spec,.*\n?\s*db:\s*db,\s*schema:\s*schema\)/),
-      'derivation receives the resolved --db/--schema (published-VC FQN completion)', fails)
+check(src.match?(/JoinPlan\.derive\(_jp_spec,\s*_jp_twb,\s*\n?\s*db:\s*db \|\| opts\[:db\],\s*schema:\s*schema \|\| opts\[:schema\]\)/),
+      'derivation receives the resolved --db/--schema with a flag fallback (nil on the FAST PATH)', fails)
+# Twin-B live defect (2026-07-19): have_twb is only assigned inside the
+# full-pipeline block, so the FAST PATH derived from a nil .twb — the source
+# LEFT JOIN never landed and gate 16 passed on an EMPTY ledger. The .twb must
+# come from the workdir on every route.
+check(src.include?("_jp_twb = have_twb ? File.read(twb, encoding: 'UTF-8') : JoinPlan.workdir_twb(WORK)"),
+      'the .twb is read from the workdir on EVERY route (FAST PATH included) — never gated on have_twb alone', fails)
 check(src.include?("JoinPlan.write(File.join(WORK, 'join-plan.json')"),
       'ledger lands in <workdir>/join-plan.json (the exact path gate 16 inspects)', fails)
 check(!gate_off.nil? && derive_at < gate_off,

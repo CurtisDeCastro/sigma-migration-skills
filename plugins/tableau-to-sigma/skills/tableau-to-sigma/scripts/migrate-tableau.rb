@@ -2422,9 +2422,11 @@ mark('phase2-columns')
 puts
 puts '── Phase 1 (join) · Tableau discovery lane ──'
 # Bound the join so a wedged discovery lane (e.g. a Tableau REST call that never
-# returns) can't leave the whole migration "stuck" indefinitely. Generous default
-# for large sites; override with TABLEAU_LANE_TIMEOUT (seconds).
-_lane_timeout = (ENV['TABLEAU_LANE_TIMEOUT'] || '1800').to_i
+# returns) can't leave the whole migration "stuck" indefinitely. Default 600s —
+# a healthy discovery finishes in ~2 min, and the prior 1800s default let a
+# transient render wedge silently burn 30 minutes (Twin-B e2e 2026-07-19).
+# Large sites override with TABLEAU_LANE_TIMEOUT (seconds).
+_lane_timeout = (ENV['TABLEAU_LANE_TIMEOUT'] || '600').to_i
 _lane_t0 = Time.now
 _lane_beat = _lane_t0
 until lane_done.call
@@ -3153,8 +3155,17 @@ end
 begin
   require_relative 'lib/join_plan'
   _jp_spec = reuse_dm_id ? dm_spec_rb : dm
-  _jp = JoinPlan.derive(_jp_spec, have_twb ? File.read(twb, encoding: 'UTF-8') : nil,
-                        db: db, schema: schema)
+  # FAST PATH live defect (Twin-B e2e 2026-07-19): have_twb is assigned inside
+  # the full-pipeline block only, so the FAST PATH (--reuse-dm + --wb-spec)
+  # left it nil even though workbook-content.twb sat in the workdir — the .twb
+  # LEFT JOIN never landed in the ledger, gate 16 passed on an EMPTY ledger,
+  # and the DM shipped without the join (every tile diverged 3-23x, fan-out
+  # trap). Read the .twb straight from the workdir on EVERY route; db/schema
+  # fall back to the explicit flags (nil-safe: an uncompleted right_table
+  # keeps the probe erroring and the gate blocking — the safe direction).
+  _jp_twb = have_twb ? File.read(twb, encoding: 'UTF-8') : JoinPlan.workdir_twb(WORK)
+  _jp = JoinPlan.derive(_jp_spec, _jp_twb,
+                        db: db || opts[:db], schema: schema || opts[:schema])
   JoinPlan.write(File.join(WORK, 'join-plan.json'), _jp)
   _jp_src = reuse_dm_id ? 'reuse path: .twb + live DM readback' : 'dm-spec + .twb'
   if _jp.any?

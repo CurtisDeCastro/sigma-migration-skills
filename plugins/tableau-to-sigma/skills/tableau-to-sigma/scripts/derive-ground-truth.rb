@@ -81,6 +81,14 @@ charts = plan.is_a?(Hash) ? Array(plan['charts']) : Array(plan)
 layout = read_json.call(layout_path, true)
 meta = read_json.call(meta_path, false) || {}
 calc_fields = read_json.call(cf_path, false)
+# join-plan.json (lib/join_plan.rb ledger), when present: a tile whose
+# datasource carries a join not proven "unique" must NOT be classified vds —
+# VDS reads relationship-culled (un-fanned) data and would false-green a
+# dropped/fanned join (Twin-B e2e 2026-07-19). Optional input: absent ledger
+# (old workdirs) → no demotion.
+jp_path = dir && File.join(dir, 'join-plan.json')
+jp = read_json.call(jp_path, false)
+join_ledger = jp.is_a?(Hash) ? jp['entries'] : jp
 unless File.exist?(twb_path)
   warn "FATAL: required input missing: #{twb_path} (the raw .twb is the join/table source of truth)"
   exit 2
@@ -88,10 +96,11 @@ end
 twb_xml = File.read(twb_path, encoding: 'UTF-8')
 
 doc = GroundTruthSql.derive(charts, layout, meta, twb_xml, calc_fields,
-                            db: opts[:db], schema: opts[:schema])
+                            db: opts[:db], schema: opts[:schema], join_ledger: join_ledger)
 doc['generated_at'] = Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')
 doc['inputs'] = { 'plan' => plan_path, 'layout' => layout_path, 'meta' => meta_path,
-                  'twb' => twb_path, 'calc_fields' => calc_fields ? cf_path : nil }
+                  'twb' => twb_path, 'calc_fields' => calc_fields ? cf_path : nil,
+                  'join_plan' => join_ledger ? jp_path : nil }
 doc['independence_note'] =
   'Derived from .twb signals only (zones + datasource joins/filters + extracted calc formulas); ' \
   'never from the built wb-spec. Calc-formula dependencies are the documented common-mode ' \
