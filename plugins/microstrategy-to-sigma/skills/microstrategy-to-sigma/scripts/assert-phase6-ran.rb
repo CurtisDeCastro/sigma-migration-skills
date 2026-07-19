@@ -112,7 +112,7 @@
 #      assert-telemetry-ran.rb). Ask the user, then run report-telemetry.py
 #      (--declined if they decline). Escape hatch: --skip-telemetry-gate "<reason>".
 #  13  Visual comparison not recorded OR not executable (gate 8b) — ENFORCED BY
-#      DEFAULT. Two variants, same exit code:
+#      DEFAULT. Three variants, same exit code:
 #      (a) a valid render exists but parity-final.json carries no
 #          visual_checked/screenshot_path verdict. A structurally-clean workbook
 #          can still ship visually empty/wrong, so the source-vs-target
@@ -123,7 +123,24 @@
 #          §D5) — the driving agent could not READ the render, so any verdict is
 #          a blind attestation. Re-run the visual loop from a vision-capable
 #          session (Claude Code with image input).
-#      Escape hatch for both (source image genuinely unobtainable / knowingly
+#      (c) a PASS verdict is SELF-ATTESTED (PLAN-v3 PR-9): parity-final.json
+#          carries no valid `blind_grade` metadata and no recorded
+#          `blind_grade_waiver`. A visual pass must be countersigned by a
+#          CONTEXT-FREE blind grader (a fresh subagent given ONLY the source
+#          PNG + render PNG + the rubric — refs/blind-grader-brief.md); the
+#          field failure this closes: the builder self-graded 6/6 PASS on
+#          visuals the customer rejected. The recorded grade is re-verified
+#          here SHA-BOUND: blind-grade.json must still exist, its sha256s must
+#          match the stamped metadata AND the actual image bytes on disk
+#          (recomputed — an image swapped after grading fails), every checklist
+#          dimension must be present and passing, and its per-tile chart-family
+#          readings must not contradict the mechanical kind census
+#          (wb-readback.json) on more than 1 tile. Remedy: spawn the blind
+#          grader, then record-visual-check.rb --blind-grade. A recorded
+#          no-vision waiver (record-visual-check --no-vision-waiver "<reason>",
+#          for sessions that cannot spawn a vision-capable grader) is accepted
+#          instead but COUNTS against the waiver budget.
+#      Escape hatch for (a)/(b) (source image genuinely unobtainable / knowingly
 #      accepting an unverified render): --skip-visual-comparison "<reason>".
 #  14  Layout fill / grid coverage failed (gate 8c; #259 item 1) — a page in
 #      layout-census.json dropped a tile (placed < zones) or ships under-filled
@@ -303,6 +320,7 @@ require 'net/http'
 require 'uri'
 require 'optparse'
 require 'rbconfig'
+require 'digest'
 
 opts = { min_pass_rate: 1.0, allow_extract: false, min_layout_elements: 2,
          allow_missing_tiles: 0, min_parity_score: 0.0, min_grid_fill: 0.45 }
@@ -432,6 +450,7 @@ WAIVER_HIDES = {
   '--skip-control-flip'        => 'gate 7b: control wiring never proven at runtime',
   '--skip-visual-gate'         => 'gate 8: no rendered PNG was required',
   '--skip-visual-comparison'   => 'gate 8b: no source-vs-target visual verdict was required',
+  '--no-vision-waiver'         => 'gate 8b: the visual PASS was SELF-graded — no context-free blind grader ran (recorded by record-visual-check.rb --no-vision-waiver)',
   '--skip-layout-fill'         => 'gate 8c: dropped/under-filled pages were accepted',
   '--accept-residuals'         => 'gate 8d: named RCF deltas shipped unresolved',
   '--skip-visual-tiles'        => 'gate 9: build-from-signals tiles never image-verified',
@@ -492,6 +511,18 @@ begin
   end
 rescue StandardError
   nil # observability only — never sink the gate on trail parsing
+end
+
+# PR-9: a pass recorded under the no-vision-grader waiver (record-visual-check
+# --no-vision-waiver stamps blind_grade_waiver into parity-final.json) spends
+# budget exactly like a gate flag — a self-graded visual pass is a quality
+# degradation, never a freebie.
+begin
+  _pf_bgw = File.exist?(summary_path) ? JSON.parse(File.read(summary_path)) : nil
+  waiver_flags << '--no-vision-waiver' if _pf_bgw.is_a?(Hash) && _pf_bgw['blind_grade_waiver'].is_a?(Hash) &&
+                                          !waiver_flags.include?('--no-vision-waiver')
+rescue StandardError
+  nil
 end
 
 # QUALITY waivers consume the budget; POLICY waivers never do:
@@ -1406,6 +1437,106 @@ else
         warn "           --checklist \"#{cl_keys.map { |k| "#{k}=pass" }.join(',')}\""
         warn '       (fail on any dimension means the verdict is divergent — fix it first).'
         exit 13
+      end
+      # PR-9: a visual PASS must be countersigned by a CONTEXT-FREE blind grade
+      # (or carry the recorded no-vision waiver). A self-attested pass — the
+      # builder grading its own render — is exactly how a field run shipped
+      # 6/6 PASS on visuals the customer rejected. The stamped metadata is
+      # re-verified SHA-BOUND here so a hand-edited parity-final.json (or an
+      # image swapped after grading) cannot launder a pass.
+      bg = s['blind_grade']
+      bgw = s['blind_grade_waiver']
+      if bgw.is_a?(Hash) && !bgw['reason'].to_s.strip.empty?
+        puts '[OK] gate 8b: visual PASS accepted under the recorded NO-VISION-GRADER waiver ' \
+             "(#{bgw['reason']}) — SELF-graded, no context-free blind grade backs it. Counted against " \
+             'the waiver budget; MUST be named in the migration report.'
+      else
+        bg_fail = lambda do |why|
+          warn "[FAIL] gate 8b: visual PASS is not blind-graded — #{why}"
+          warn '       The verdict must come from a CONTEXT-FREE grader (PLAN-v3 PR-9): spawn a FRESH'
+          warn '       subagent with refs/blind-grader-brief.md as its prompt, giving it ONLY the source'
+          warn '       dashboard PNG path, the Sigma render PNG path, and the rubric — NO wb-spec, NO run'
+          warn '       history, NO builder context. It writes blind-grade.json; then re-record:'
+          warn '         ruby scripts/record-visual-check.rb --workdir <dir> --agent-vision true --verdict pass \\'
+          warn '           --checklist "<six dimensions>" --blind-grade <dir>/blind-grade.json'
+          warn '       Sessions that cannot spawn a vision-capable grader: record-visual-check.rb'
+          warn '       --no-vision-waiver "<reason>" (counted against the waiver budget, never silent).'
+          exit 13
+        end
+        _hex = /\A[0-9a-f]{64}\z/i
+        if !bg.is_a?(Hash)
+          bg_fail.call('parity-final.json carries NO blind_grade metadata (self-attested pass).')
+        elsif bg['verdict'].to_s != 'pass' || bg['source_sha256'].to_s !~ _hex || bg['target_sha256'].to_s !~ _hex
+          bg_fail.call('the stamped blind_grade metadata is invalid (verdict must be pass, sha256s must be 64-hex).')
+        else
+          _bg_file = File.expand_path((bg['path'] || 'blind-grade.json').to_s, opts[:tab])
+          _bg_doc = File.file?(_bg_file) ? (JSON.parse(File.read(_bg_file)) rescue nil) : nil
+          if _bg_doc.nil?
+            bg_fail.call("the blind grade evidence file is missing/unreadable (#{_bg_file}) — the hash-bound grade must stay on disk.")
+          elsif _bg_doc['source_sha256'].to_s.downcase != bg['source_sha256'].to_s.downcase ||
+                _bg_doc['target_sha256'].to_s.downcase != bg['target_sha256'].to_s.downcase ||
+                _bg_doc['verdict'].to_s != 'pass'
+            bg_fail.call('blind-grade.json does not match the stamped metadata (sha/verdict drift — re-run the grader).')
+          else
+            _cl_keys2 = %w[element_titles_hidden palette_match composition_match
+                           chart_shapes_match labels_legible numbers_formatted]
+            _dims = _bg_doc['dimensions'].is_a?(Hash) ? _bg_doc['dimensions'] : {}
+            _bad_dims = _cl_keys2.reject { |k| _dims[k].is_a?(Hash) && _dims[k]['verdict'].to_s == 'pass' }
+            _src_img = _bg_doc['source_png'].to_s.empty? ? nil : File.expand_path(_bg_doc['source_png'].to_s, opts[:tab])
+            _tgt_img = _bg_doc['target_png'].to_s.empty? ? nil : File.expand_path(_bg_doc['target_png'].to_s, opts[:tab])
+            if _bad_dims.any?
+              bg_fail.call("blind grade dimension(s) missing or not passing: #{_bad_dims.join(', ')}.")
+            elsif _src_img.nil? || _tgt_img.nil? || !File.file?(_src_img) || !File.file?(_tgt_img)
+              bg_fail.call('the graded image files are missing from disk (blind-grade.json source_png/target_png) — the sha binding cannot be verified.')
+            elsif Digest::SHA256.file(_src_img).hexdigest != bg['source_sha256'].to_s.downcase
+              bg_fail.call("the SOURCE image changed since grading (sha256 of #{_src_img} no longer matches) — re-run the grader.")
+            elsif Digest::SHA256.file(_tgt_img).hexdigest != bg['target_sha256'].to_s.downcase
+              bg_fail.call("the RENDER changed since grading (sha256 of #{_tgt_img} no longer matches) — re-render, re-grade, re-record.")
+            else
+              # Anti-gaming (belt-and-braces to record-visual-check's check): the
+              # grade's per-tile target families must not contradict the built
+              # workbook's mechanical kind census on more than 1 tile.
+              _fam_map = { 'bar-chart' => 'bar', 'column' => 'bar', 'column-chart' => 'bar',
+                           'line-chart' => 'line', 'sparkline' => 'line', 'area-chart' => 'area',
+                           'combo-chart' => 'combo', 'dual-axis' => 'combo', 'scatter-chart' => 'scatter',
+                           'bubble' => 'scatter', 'pie-chart' => 'pie', 'donut' => 'pie',
+                           'donut-chart' => 'pie', 'kpi-chart' => 'kpi', 'single-value' => 'kpi',
+                           'big-number' => 'kpi', 'region-map' => 'map', 'point-map' => 'map',
+                           'pivot-table' => 'table', 'pivot' => 'table', 'crosstab' => 'table',
+                           'text-table' => 'table', 'grid' => 'table' }
+              _chartf = %w[bar line area combo scatter pie kpi map table other]
+              _fam = lambda do |k|
+                k2 = k.to_s.strip.downcase
+                _fam_map[k2] || (%w[bar line area combo scatter pie kpi map table
+                                    text control image container divider missing].include?(k2) ? k2 : 'other')
+              end
+              _rb = File.join(opts[:tab], 'wb-readback.json')
+              _census = nil
+              if File.file?(_rb)
+                _rb_doc = (JSON.parse(File.read(_rb)) rescue nil)
+                if _rb_doc.is_a?(Hash) && _rb_doc['pages'].is_a?(Array)
+                  _census = _rb_doc['pages'].flat_map { |pg| Array(pg.is_a?(Hash) ? pg['elements'] : nil) }
+                                            .select { |el| el.is_a?(Hash) && el['visibleAsSource'] != false }
+                                            .map { |el| _fam.call(el['kind']) }
+                                            .select { |f| _chartf.include?(f) }
+                end
+              end
+              if _census.is_a?(Array) && _census.any?
+                _blind = Array(_bg_doc['per_tile']).map { |t| _fam.call(t.is_a?(Hash) ? t['target_family'] : nil) }
+                                                   .select { |f| _chartf.include?(f) }
+                _bc = _blind.each_with_object(Hash.new(0)) { |f, h| h[f] += 1 }
+                _cc = _census.each_with_object(Hash.new(0)) { |f, h| h[f] += 1 }
+                _matched = _cc.map { |f, n| [n, _bc[f]].min }.reduce(0, :+)
+                _mm = [_blind.length, _census.length].max - _matched
+                if _mm > 1
+                  bg_fail.call("blind grade INCONSISTENT with the mechanical kind census — target_family readings contradict wb-readback.json on #{_mm} tile(s) (blind: #{_bc.sort.map { |f, n| "#{n}x#{f}" }.join(', ')}; census: #{_cc.sort.map { |f, n| "#{n}x#{f}" }.join(', ')}) — fabricated or stale grade.")
+                end
+              end
+              puts "[OK] gate 8b: blind grade verified — context-free PASS, sha-bound to the images on disk " \
+                   "(src=#{bg['source_sha256'][0, 12]}…, tgt=#{bg['target_sha256'][0, 12]}…)."
+            end
+          end
+        end
       end
     end
     v = s['visual_verdict'] ? " (#{s['visual_verdict']})" : ''

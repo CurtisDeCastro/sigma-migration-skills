@@ -1000,8 +1000,10 @@ if opts[:finalize]
     puts "  2. READ #{File.join(WORK, 'sigma-render.png')} with the Read tool and compare it"
     puts "     side-by-side against the source dashboard PNG in #{WORK} (Phase 1d)."
     puts '     Fix any visual divergence (re-PUT the spec) and re-render until they match.'
-    puts '  3. Record the verdict so gate 8b confirms the comparison ran, then re-run --finalize:'
-    puts "       ruby scripts/record-visual-check.rb --workdir #{WORK} --verdict pass --notes \"<what you compared>\" --checklist \"<layout-visual-qa.md section 1b>\""
+    puts '  3. Spawn the CONTEXT-FREE blind grader (PR-9: refs/blind-grader-brief.md — give it ONLY the'
+    puts "     two image paths + the rubric; it writes #{File.join(WORK, 'blind-grade.json')})."
+    puts '  4. Record the verdict so gate 8b confirms the comparison ran, then re-run --finalize:'
+    puts "       ruby scripts/record-visual-check.rb --workdir #{WORK} --verdict pass --notes \"<what you compared>\" --checklist \"<layout-visual-qa.md section 1b>\" --blind-grade #{File.join(WORK, 'blind-grade.json')}"
     puts '  If the workbook genuinely cannot be rendered (export API unavailable), the gate'
     puts '  can be waived ONLY via assert-phase6-ran.rb --skip-visual-gate "<reason>" —'
     puts '  name the reason in your migration report.'
@@ -1016,10 +1018,14 @@ if opts[:finalize]
     puts 'Do this, then re-run this exact --finalize command:'
     puts "  1. READ the rendered page (#{File.join(WORK, 'sigma-render.png')}) side-by-side"
     puts "     against the source dashboard PNG in #{WORK} (Phase 1d)."
-    puts '  2. Record your verdict (this is what the gate checks):'
-    puts "       ruby scripts/record-visual-check.rb --workdir #{WORK} --verdict pass --notes \"<what matched>\" --checklist \"<layout-visual-qa.md section 1b>\""
-    puts '     If they DIVERGE: --verdict divergent --notes "<gap>", fix the spec, re-render, re-read,'
-    puts '     then re-record --verdict pass. The gate stays blocked until the verdict is pass.'
+    puts '  2. Spawn the CONTEXT-FREE blind grader (PR-9: refs/blind-grader-brief.md — ONLY the two'
+    puts "     image paths + the rubric; it writes #{File.join(WORK, 'blind-grade.json')}). Your own"
+    puts '     read is the fix loop; the blind grade is the verdict.'
+    puts '  3. Record your verdict (this is what the gate checks):'
+    puts "       ruby scripts/record-visual-check.rb --workdir #{WORK} --verdict pass --notes \"<what matched>\" --checklist \"<layout-visual-qa.md section 1b>\" --blind-grade #{File.join(WORK, 'blind-grade.json')}"
+    puts '     If they DIVERGE (your read OR the blind grade): --verdict divergent --notes "<gap>",'
+    puts '     fix the spec, re-render, re-read, re-grade, then re-record --verdict pass. The gate'
+    puts '     stays blocked until a blind-graded pass is recorded.'
     puts '============================================================================='
   end
 

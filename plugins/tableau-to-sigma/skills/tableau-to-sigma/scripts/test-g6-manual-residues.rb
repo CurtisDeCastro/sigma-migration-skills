@@ -21,6 +21,7 @@ require 'json'
 require 'tmpdir'
 require 'open3'
 require 'rbconfig'
+require_relative 'lib/blind_fixture'
 
 # Locale robustness (the gate scripts emit UTF-8 em-dashes).
 Encoding.default_external = Encoding::UTF_8
@@ -186,6 +187,7 @@ def base_workdir(dir)
   File.write(File.join(dir, 'parity-final.json'), JSON.pretty_generate(parity))
   File.binwrite(File.join(dir, 'sigma-render.png'), "\x89PNG\r\n\x1a\n".b + ("\x00".b * 6000))
   File.write(File.join(dir, 'telemetry-sent.json'), JSON.generate('status' => 'sent', 'tool' => 'test'))
+  BlindFixture.install(dir) # PR-9: gate 8b refuses a self-attested visual pass
 end
 
 def run_gate(dir, *args)

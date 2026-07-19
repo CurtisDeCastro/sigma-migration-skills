@@ -12,6 +12,7 @@ require 'tmpdir'
 require 'open3'
 require 'rbconfig'
 require_relative 'lib/dm_quarantine'
+require_relative 'lib/blind_fixture'
 
 fails = []
 def check(c, m, fails) fails << m unless c; puts "  #{c ? 'PASS' : 'FAIL'}  #{m}" end
@@ -99,6 +100,7 @@ def base_workdir(dir)
     'visual_checked' => true, 'visual_verdict' => 'pass', 'style_checklist' => { 'element_titles_hidden' => 'pass', 'palette_match' => 'pass', 'composition_match' => 'pass', 'chart_shapes_match' => 'pass', 'labels_legible' => 'pass', 'numbers_formatted' => 'pass' }, 'agent_vision' => true))
   File.binwrite(File.join(dir, 'sigma-render.png'), "\x89PNG\r\n\x1a\n".b + ("\x00".b * 6000))
   File.write(File.join(dir, 'telemetry-sent.json'), JSON.generate('status' => 'sent', 'tool' => 'test'))
+  BlindFixture.install(dir) # PR-9: gate 8b refuses a self-attested visual pass
 end
 
 def run_gate(dir, *args)

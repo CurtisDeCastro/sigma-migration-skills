@@ -34,6 +34,7 @@ require 'json'
 require 'open3'
 require 'tmpdir'
 require 'rbconfig'
+require_relative 'lib/blind_fixture'
 
 SCRIPT = File.join(__dir__, 'assert-phase6-ran.rb')
 
@@ -53,6 +54,7 @@ def base_workdir(dir, parity_extra: {})
   File.write(File.join(dir, 'parity-final.json'), JSON.pretty_generate(parity))
   File.binwrite(File.join(dir, 'sigma-render.png'), "\x89PNG\r\n\x1a\n".b + ("\x00".b * 6000))
   File.write(File.join(dir, 'telemetry-sent.json'), JSON.generate('status' => 'sent', 'tool' => 'test'))
+  BlindFixture.install(dir) # PR-9: gate 8b refuses a self-attested visual pass
 end
 
 def add_source_png(dir)

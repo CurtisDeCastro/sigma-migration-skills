@@ -457,7 +457,7 @@ end
 if File.exist?(summary_path)
   prev = (JSON.parse(File.read(summary_path)) rescue {})
   %w[visual_verdict visual_notes visual_checked screenshot_path style_checklist
-     agent_vision].each do |k|
+     agent_vision blind_grade blind_grade_waiver].each do |k|
     summary[k] = prev[k] if prev.key?(k)
   end
 end
