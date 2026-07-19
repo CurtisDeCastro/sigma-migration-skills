@@ -54,3 +54,22 @@ Only `spec-fixable` deltas block; classify UI-only / capability ceilings and mov
 
 
 > **Gate 8d — RCF fidelity ledger (exit 15).** The single recorded verdict (8b) proves *someone looked once*; the Phase 5g RCF loop proves the composition was iterated to convergence. `migrate-tableau.rb --finalize` passes `--require-fidelity-ledger` (unless the loop was disabled with `--rcf-passes 0`), so `assert-phase6-ran.rb` exits 15 until `fidelity-ledger.json` has zero unresolved `spec-fixable` deltas. See **Phase 5g** above. This gate is OPT-IN and shared byte-identically across converters — other plugins are unaffected until they pass the flag.
+
+---
+
+## The 5g stanza as stated in the spine (relocated from SKILL.md — PR-15 diet)
+
+### Phase 5g — RCF (render-compare-fix) fidelity loop — `refs/phase-5g-rcf.md`
+After the workbook renders, iterate composition to convergence: `fidelity-loop.rb render`
+exports the page → **Read it against the source dashboard PNG** and score every dimension
+(`refs/fidelity-rubric.md`) → `record` each delta (spec-fixable / ui-only / sigma-capability /
+data) → author a fix from `refs/fidelity-recipes.md` and `apply-patch` (single layout-preserving
+PUT) → loop until `fidelity-loop.rb status` is clean. DEFAULT-ON hard gate (PR-11):
+`migrate-tableau.rb --finalize` passes `--require-fidelity-ledger` (gate 8d, exit 15), and the
+gate also auto-enables itself from `migrate-state.json` `rcf_passes` on standalone runs;
+`--rcf-passes 0` remains the explicit opt-out but records the named `--skip-fidelity-gate`
+waiver (budget-counted) — never silence. The layout build also emits
+`layout-arrangement.json` (source-vs-built ordering/quadrant/controls-shelf parity — gate 8e,
+WARN-level this release, `--require-arrangement` to enforce), and gate 4b fails a run whose
+run-state ledger shows the layout phase was never entered (exit 30). **Full loop, rubric, and
+delta→fix catalog: `refs/phase-5g-rcf.md`, `refs/fidelity-rubric.md`, `refs/fidelity-recipes.md`.**

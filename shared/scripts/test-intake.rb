@@ -6,6 +6,7 @@
 require 'json'
 require 'tmpdir'
 require 'rbconfig'
+require 'fileutils'
 
 INTAKE = File.join(__dir__, 'intake.rb')
 RUBY   = RbConfig.ruby
@@ -17,7 +18,9 @@ def ok(name, cond); puts((cond ? "  ok  " : "FAIL  ") + name); $fail += 1 unless
 
 def run(dir, *args, env: {})
   # returns [exit_status, connection_hash_or_nil]
-  base = { 'SIGMA_CONNECTION_ID' => nil }   # neutralize ambient env by default
+  # SIGMA_SKIP_BOOTSTRAP_GATE: these cases test connection resolution, not the
+  # PR-15 bootstrap gate (which has its own cases below) — waive it by default.
+  base = { 'SIGMA_CONNECTION_ID' => nil, 'SIGMA_SKIP_BOOTSTRAP_GATE' => 'unit-test' }
   system(base.merge(env), RUBY, INTAKE, '--workdir', dir, *args, out: File::NULL, err: File::NULL)
   st = $?.exitstatus
   conn = (JSON.parse(File.read(File.join(dir, 'connection.json'))) rescue nil)
@@ -79,6 +82,56 @@ end
 Dir.mktmpdir do |d|
   st, c = run(d, '--mode', 'both', env: { 'SIGMA_CONNECTION_ID' => UUID })
   ok('env connection used', st == 0 && c['connection_id'] == UUID && c['resolved_via'] == 'env')
+end
+
+# 8. PR-15 bootstrap-sentinel gate: no sentinel → exit 6, nothing resolved.
+# (HOME is pointed at the empty workdir so a real ~/.sigma-migration/bootstrap.json
+# on the dev machine can't satisfy the gate.)
+Dir.mktmpdir do |d|
+  home = File.join(d, 'home'); FileUtils.mkdir_p(home)
+  st, c = run(d, '--connection', UUID,
+              env: { 'SIGMA_SKIP_BOOTSTRAP_GATE' => nil, 'HOME' => home, 'USERPROFILE' => home })
+  ok('no bootstrap sentinel → exit 6', st == 6)
+  ok('no connection.json written when refused', c.nil?)
+end
+
+# 9. sentinel present + doctor_pass → gate opens (workdir sentinel)
+Dir.mktmpdir do |d|
+  home = File.join(d, 'home'); FileUtils.mkdir_p(home)
+  File.write(File.join(d, 'bootstrap.json'),
+             JSON.generate('bootstrap_version' => 1, 'doctor_pass' => true, 'mode' => 'full'))
+  st, c = run(d, '--connection', UUID,
+              env: { 'SIGMA_SKIP_BOOTSTRAP_GATE' => nil, 'HOME' => home, 'USERPROFILE' => home })
+  ok('sentinel present → gate opens', st == 0 && c && c['connection_id'] == UUID)
+end
+
+# 10. sentinel present but doctor_pass:false → still refused (exit 6)
+Dir.mktmpdir do |d|
+  home = File.join(d, 'home'); FileUtils.mkdir_p(home)
+  File.write(File.join(d, 'bootstrap.json'),
+             JSON.generate('bootstrap_version' => 1, 'doctor_pass' => false, 'mode' => 'full'))
+  st, = run(d, '--connection', UUID,
+            env: { 'SIGMA_SKIP_BOOTSTRAP_GATE' => nil, 'HOME' => home, 'USERPROFILE' => home })
+  ok('sentinel with doctor_pass:false → exit 6', st == 6)
+end
+
+# 11. home-dir sentinel (the stable location bootstrap always writes) also opens the gate
+Dir.mktmpdir do |d|
+  home = File.join(d, 'home')
+  FileUtils.mkdir_p(File.join(home, '.sigma-migration'))
+  File.write(File.join(home, '.sigma-migration', 'bootstrap.json'),
+             JSON.generate('bootstrap_version' => 1, 'doctor_pass' => true, 'mode' => 'full'))
+  st, c = run(d, '--connection', UUID,
+              env: { 'SIGMA_SKIP_BOOTSTRAP_GATE' => nil, 'HOME' => home, 'USERPROFILE' => home })
+  ok('home sentinel → gate opens', st == 0 && c && c['connection_id'] == UUID)
+end
+
+# 12. --skip-bootstrap-gate waives with a reason
+Dir.mktmpdir do |d|
+  home = File.join(d, 'home'); FileUtils.mkdir_p(home)
+  st, c = run(d, '--connection', UUID, '--skip-bootstrap-gate', 'sandbox with no bootstrap',
+              env: { 'SIGMA_SKIP_BOOTSTRAP_GATE' => nil, 'HOME' => home, 'USERPROFILE' => home })
+  ok('--skip-bootstrap-gate waives', st == 0 && c && c['connection_id'] == UUID)
 end
 
 puts $fail.zero? ? "\nall intake tests passed" : "\n#{$fail} FAILED"

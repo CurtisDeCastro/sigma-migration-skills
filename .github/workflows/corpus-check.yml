@@ -66,19 +66,27 @@ jobs:
         with:
           node-version: '20'
 
-      - name: doctor.ps1 runs and writes a passing doctor.json
+      - name: bootstrap.ps1 no-ops into doctor-green + sentinel (PR-15)
         shell: pwsh
         run: |
           $wd = Join-Path $env:RUNNER_TEMP 'wd'
           New-Item -ItemType Directory -Force -Path $wd | Out-Null
-          powershell -ExecutionPolicy Bypass -File "$env:TS_SKILL\scripts\doctor.ps1" -WorkDir $wd
-          if ($LASTEXITCODE -ne 0) { throw "doctor.ps1 exited $LASTEXITCODE (a REQUIRED runtime is missing)" }
+          # Full bootstrap on a complete runner: verifies runtimes, pip-installs
+          # the render deps if absent, persists the placeholder creds via
+          # setup.rb --from-env, ends in a doctor run + writes the sentinel.
+          powershell -ExecutionPolicy Bypass -File "$env:TS_SKILL\scripts\bootstrap.ps1" -WorkDir $wd
+          if ($LASTEXITCODE -ne 0) { throw "bootstrap.ps1 exited $LASTEXITCODE" }
           $j = Get-Content (Join-Path $wd 'doctor.json') -Raw | ConvertFrom-Json
           Write-Host "doctor.json -> os=$($j.os) shell=$($j.shell) pass=$($j.pass)"
           if (-not $j.pass) { throw "doctor.json pass=false: $($j.failures -join '; ')" }
           foreach ($r in 'ruby','python','node') {
             if (-not $j.runtimes.$r) { throw "doctor.json runtimes.$r is false" }
           }
+          $s = Get-Content (Join-Path $wd 'bootstrap.json') -Raw | ConvertFrom-Json
+          if (-not $s.doctor_pass) { throw "bootstrap sentinel doctor_pass=false" }
+          # Idempotency + dry-run: a complete env must report nothing to install.
+          powershell -ExecutionPolicy Bypass -File "$env:TS_SKILL\scripts\bootstrap.ps1" -Check
+          if ($LASTEXITCODE -ne 0) { throw "bootstrap.ps1 -Check exited $LASTEXITCODE on a complete env" }
 
       - name: get_token.py imports + parses under Windows Python
         shell: pwsh
@@ -215,6 +223,9 @@ jobs:
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-py-resolve-winpath.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-rank-connections.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-fast-flag.rb
+            plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-bootstrap.rb
+            plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-intake.rb
+            plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-skill-coverage.rb
             plugins/tableau-to-sigma/skills/tableau-assessment/scripts/test-predicted-parity.rb
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-dax-restructure.rb
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-telemetry-gate.rb

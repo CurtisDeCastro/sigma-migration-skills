@@ -236,3 +236,24 @@ The skill prefers MCP when both are available. The discovery CLI is opt-in:
 - If you're in MCP mode and need just one REST-only capability (typically `.twb`
   download), call `Tableau.download_workbook_content` from a small Ruby snippet — no need
   to redo the whole discovery via REST.
+
+---
+
+## How the discovery fetch pool works — and why 5 (relocated from SKILL.md — PR-15 diet)
+
+**How the pool works (and why 5):** every fetch after the initial workbook GET
+(.twb, VDS read-metadata, GraphQL fields, all view CSVs, dashboard PNG) goes
+through ONE shared pool of 5 threads, enqueued longest-job-first — the PNG
+render is the longest single fetch, so it starts at t≈0 and hides behind the
+CSV batch. **5 is the measured sweet spot; 8 risks long-tail stragglers** — at
+8 threads a contended VizQL session parked one CSV fetch for ~40s (56s total
+run vs. 13.7–18.9s at 5). The pool keeps 429/timeout exponential backoff and
+single-flight 401 re-mint machinery as insurance even though neither fired at
+pool 5 in validation. Also note Tableau's **~60s server-side render cache**:
+a view rendered within the last minute returns much faster, so back-to-back
+runs land at the fast end of the range and cold-cache runs at the slow end —
+don't read a 5s spread between runs as a regression.
+
+> **One signin attempt only.** Tableau Cloud invalidates a PAT after 4 consecutive failed
+> signins. `get-tableau-token.sh` runs exactly once; never wrap it in a retry loop.
+
