@@ -40,6 +40,12 @@ EXIT      zero unresolved spec-fixable deltas (ui-only / sigma-capability / data
 
 Convergence pattern: pass 1 fixes **structure** (missing tiles, wrong kinds); passes 2–3 fix
 **composition** (containers, tints, text); pass 4+ fixes **typography / number-format** detail.
+Before hand-fixing a `numbers_formatted` or `palette_match` delta, read the build's
+**`formats-emitted.json`** (next to the chart-spec output — PR-12): per tile it records every
+source format string → the emitted Sigma format (`mapped|unmapped`; unmapped = the translator
+refused, recorded never guessed) plus `series_color_maps` (member→color pinning status). A
+`mapped`/`pinned` entry that still renders wrong is a spec/render finding worth recording; an
+`unmapped` entry is the expected RCF chore.
 Only `spec-fixable` deltas block; classify UI-only / capability ceilings and move on — see the
 "When NOT to loop" list in `refs/fidelity-recipes.md`. Full rubric + classification table:
 `refs/fidelity-rubric.md`. Delta→fix catalog: `refs/fidelity-recipes.md`.

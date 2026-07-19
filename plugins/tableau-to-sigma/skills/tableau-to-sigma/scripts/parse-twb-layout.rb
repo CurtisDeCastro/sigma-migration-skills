@@ -37,6 +37,7 @@ require 'json'
 # parses a 5 MB / 95-worksheet workbook in well under a second. See lib/twb_xml.rb.
 $LOAD_PATH.unshift File.expand_path('lib', __dir__)
 require 'twb_xml'
+require 'format_map' # PR-12: the ONE Tableau→Sigma format translator (lib/format_map.rb)
 
 # ---- Per-dashboard scoping ------------------------------------------------
 # `--dashboard "<name>"` (repeatable) and `--page <id>` let a LARGE workbook
@@ -218,6 +219,33 @@ xml.elements.each('//column') do |c|
     COL_BY_GUID[body] ||= { caption: (cap && !cap.empty? ? cap : body), datatype: dt }
     COL_BY_GUID[body][:formula] ||= cf if cf
   end
+end
+
+# ---- Per-column DEFAULT formats (PR-12) ------------------------------------
+# Tableau stores a column's default number/date format as a `default-format`
+# ATTRIBUTE on <column> (e.g. default-format='p0.00%' / '$#,##0') and, in
+# older serializations, as a column-scoped <format attr='…-format' value='…'/>
+# child (no field= attr — worksheet-level text-format entries DO carry field=
+# and are parsed per worksheet below). These are the display ground truth for
+# any sheet that doesn't override per-pill — the reason a one-shot KPI printed
+# raw where the source shows $-formatted. Keyed by caption; first (richest)
+# declaration wins. Shipped in the meta sidecar as 'column_formats'.
+COLUMN_FORMATS = {}
+xml.elements.each('//column') do |c|
+  cap = c.attributes['caption']
+  cap = c.attributes['name'].to_s.gsub(/^\[|\]$/, '') if cap.nil? || cap.empty?
+  next if cap.to_s.empty?
+  fmt = c.attributes['default-format'].to_s
+  if fmt.empty?
+    c.elements.each('.//format') do |f|
+      next unless f.attributes['field'].nil? && f.attributes['attr'].to_s =~ /-format\z/
+      v = f.attributes['value'].to_s
+      fmt = v unless v.empty?
+      break unless fmt.empty?
+    end
+  end
+  next if fmt.empty?
+  COLUMN_FORMATS[cap] ||= fmt
 end
 
 # Filter columns use a column-instance level reference like
@@ -1087,6 +1115,38 @@ xml.elements.each('//worksheet') do |ws|
     end
   end
 
+  # PR-12: explicit per-series COLOR ASSIGNMENTS — the member→color map Tableau
+  # serializes on the CATEGORICAL color encoding (type='palette'):
+  #   <encoding attr='color' field='[fed].[none:Value Tier:nk]' type='palette'>
+  #     <map to='#f2c037'><bucket>&quot;Top 500&quot;</bucket></map>
+  # Captured in .twb document order, verbatim; ramp encodings (type=
+  # '[custom-]interpolated', already surfaced as heat_scheme) are excluded —
+  # their <map> buckets are numeric breakpoints, not series members. The
+  # builder + theme derivation turn this into ORDERED schemes (ascending
+  # member order = Sigma's positional category-sort application), which is
+  # what kills the Top/Bottom-500 inversion class. No map ⇒ nil ⇒ the
+  # frequency-ranked brand-palette derivation applies unchanged.
+  series_colors = nil
+  series_color_field = nil
+  ws.elements.each(".//encoding[@attr='color']") do |enc|
+    next if enc.attributes['type'].to_s =~ /interpolated/
+    pairs = []
+    enc.elements.each('map') do |mp|
+      hex = mp.attributes['to'].to_s.strip.downcase
+      next unless hex =~ /\A#[0-9a-f]{6}\z/
+      bucket = mp.elements['bucket']
+      member = bucket && unquote_member(bucket.text)
+      next if member.nil? || member.empty?
+      pairs << { 'member' => member, 'color' => hex }
+    end
+    next if pairs.empty?
+    series_colors = pairs
+    g = guid_from_param(enc.attributes['field'].to_s)
+    info = g && COL_BY_GUID[g]
+    series_color_field = (info && info[:caption]) || g
+    break
+  end
+
   worksheets[name] = {
     mark_class:       mark_class,
     geo_role:         geo_role,
@@ -1097,6 +1157,9 @@ xml.elements.each('//worksheet') do |ws|
     shelf_sorts:      shelf_sorts,
     quick_calc_pcto:  quick_calc_pcto,
     heat_scheme:      heat_scheme,
+    # PR-12: explicit member→color assignments + the encoded column's caption
+    series_colors:      series_colors,
+    series_color_field: series_color_field,
     filters:          filters_info,
     hidden_filters:   hidden_filters,
     aggregations:     aggregations,
@@ -1123,62 +1186,17 @@ xml.elements.each('//worksheet') do |ws|
 end
 
 # ---- Tableau format → Sigma format translator -----------------------------
-# Tableau format codes (subset we see in the wild):
-#   p0%      → ,.0%
-#   p0.0%    → ,.1%
-#   p0.00%   → ,.2%
-#   0        → ,.0f
-#   0.0      → ,.1f
-#   #,##0    → ,.0f
-#   $#,##0   → $,.0f (currency)
-#   $#,##0.00→ $,.2f
-#   yyyy-MM-dd → %Y-%m-%d
-#   MMM yyyy   → %b %Y
-#   yyyy       → %Y
+# PR-12: delegates to the shared lib/format_map.rb (the ONE translator — the
+# builder's copy delegates there too, so the two can't drift again). Subset:
+#   p0.0% / #,##0.0% → ,.1%      $#,##0.00 / C1033 → $,.2f (+currencySymbol)
+#   #,##0 → ,.0f                 pos;(neg) → '(' paren-negative prefix
+#   yyyy-MM-dd → %Y-%m-%d        MMM yyyy → %b %Y
+# Date-times are d3-time/strftime strings ('%B %-d, %Y'); moment-style tokens
+# ("MMM D, YYYY") print LITERALLY in Sigma, so FormatMap refuses (nil) any
+# string it can't fully tokenize — unmapped formats are recorded downstream
+# (formats-emitted.json), never guessed.
 def translate_format(tableau_fmt)
-  s = tableau_fmt.to_s
-  return nil if s.empty?
-  # Tableau format strings can have multiple segments split by ';':
-  #   positive;negative;zero;text
-  # The negative segment encodes parens / explicit minus / [Red]. d3-format
-  # supports a `(` sign modifier that wraps negatives in parens. We detect that
-  # case and prepend `(` to the format string.
-  segments = s.split(';')
-  pos = segments[0] || s
-  neg = segments[1]
-  paren_negative = neg && neg.include?('(') && neg.include?(')')
-  prefix = paren_negative ? '(' : ''
-
-  # Percent — p<digits>[.<digits>]%
-  if (m = pos.match(/^p\d*(?:\.(\d+))?%$/i))
-    decimals = (m[1] || '').length
-    return { 'kind' => 'number', 'formatString' => "#{prefix},.#{decimals}%" }
-  end
-  # Tableau locale-currency code — C<locale>[.<digits>]% (e.g., C1033% = $#,##0)
-  if (m = pos.match(/^C\d+(?:\.(\d+))?%?$/))
-    decimals = (m[1] || '').length
-    return { 'kind' => 'number', 'formatString' => "#{prefix}$,.#{decimals}f", 'currencySymbol' => '$' }
-  end
-  # Currency — leading $ or c"$" / c\"$\"
-  if pos =~ /^c?["\\]*\$/ || pos.start_with?('$')
-    # Look for #...0.00 to extract decimals
-    decimals = (pos.match(/\.(0+)/) || [])[1].to_s.length
-    return { 'kind' => 'number', 'formatString' => "#{prefix}$,.#{decimals}f", 'currencySymbol' => '$' }
-  end
-  # Plain number — count decimals after the decimal point
-  if pos =~ /^[#,0]+(?:\.(0+))?$/
-    decimals = ($1 || '').length
-    return { 'kind' => 'number', 'formatString' => "#{prefix},.#{decimals}f" }
-  end
-  # Date formats — translate Tableau tokens to strftime
-  if s =~ /yyyy|MMM|MM|dd|HH/
-    f = s
-      .gsub('yyyy', '%Y').gsub('yy', '%y')
-      .gsub('MMMM','%B').gsub('MMM','%b').gsub('MM','%m')
-      .gsub('dd','%d').gsub('HH','%H').gsub('mm','%M').gsub('ss','%S')
-    return { 'kind' => 'datetime', 'formatString' => f }
-  end
-  nil
+  FormatMap.translate(tableau_fmt)
 end
 
 # Translate Tableau mark class + geo signals into a Sigma-relevant chart-kind label.
@@ -1627,6 +1645,9 @@ xml.elements.each('//dashboard') do |d|
       'shelf_sorts'    => (kind == 'chart' ? ws_meta&.dig(:shelf_sorts)   : nil),
       'quick_calc_pcto' => (kind == 'chart' ? ws_meta&.dig(:quick_calc_pcto) : nil),
       'heat_scheme'    => (kind == 'chart' ? ws_meta&.dig(:heat_scheme)   : nil),
+      # PR-12: explicit member→color map (nil = no assignment; keep palette derivation)
+      'series_colors'      => (kind == 'chart' ? ws_meta&.dig(:series_colors)      : nil),
+      'series_color_field' => (kind == 'chart' ? ws_meta&.dig(:series_color_field) : nil),
       # v5.1: zone show-title='false' = the source HIDES the worksheet title
       # (all 6 hero-art workbook tiles carry it; three rounds leaked "Sheet 9" because
       # nothing read the attribute). Absent attr = shown (fails safe).
@@ -1760,6 +1781,8 @@ if dashboards.empty? && !worksheets.empty?
         'sort'           => ws_meta[:sort],
         'shelf_sorts'    => ws_meta[:shelf_sorts],
         'quick_calc_pcto' => ws_meta[:quick_calc_pcto],
+        'series_colors'      => ws_meta[:series_colors],
+        'series_color_field' => ws_meta[:series_color_field],
         'filters'        => ws_meta[:filters],
         'hidden_filters' => ws_meta[:hidden_filters] || [],
         'aggregations'   => ws_meta[:aggregations],
@@ -2048,6 +2071,10 @@ meta = {
   'datasource_filters' => datasource_filters,
   'parameters'     => parameters,
   'column_aliases' => column_aliases,
+  # PR-12: per-column default number/date formats (caption → raw Tableau
+  # format string). build-charts-from-signals maps them to Sigma column/KPI
+  # formats (lib/format_map) when no worksheet-level pill format overrides.
+  'column_formats' => COLUMN_FORMATS,
   'columns_by_guid'=> COL_BY_GUID.transform_values { |v|
     h = { 'caption' => v[:caption], 'datatype' => v[:datatype] }
     h['formula'] = v[:formula] if v[:formula] # calc-ref deref (v5.1.1)

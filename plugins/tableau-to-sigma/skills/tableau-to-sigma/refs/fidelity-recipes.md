@@ -39,6 +39,7 @@ Each row: **the visible delta** · the spec path · notes/gotcha.
 ### Canvas, theme & palette
 - **Page/canvas background wrong color** → `themeOverrides.colorOverrides.backgroundCanvas: "#RRGGBB"` (top-level workbook theme).
 - **Chart series / donut-pie slice colors are generic** → `themeOverrides.categoricalScheme: [...]` — a **positional** array applied in category-sort order. This is the **only** spec path to donut/pie slice colors (per-element `color.scheme` is silently dropped on donut/pie). Extract the source hexes from the `.twb` (`composition-recipe.md` §"Extract brand colors").
+- **Series colors INVERTED / swapped across members** (Top-500 gold on the Bottom-500 series) → the scheme must be **ordered ascending by member** so `scheme[i]` binds to the i-th category in Sigma's sort order. Where the `.twb` carries an explicit member→color map (`<encoding attr='color' type='palette'><map to='#hex'><bucket>…`), the builder now pins per-chart `color.scheme` AND orders `themeOverrides.categoricalScheme` mechanically (PR-12, `scripts/lib/series_colors.rb`); check `formats-emitted.json` → `series_color_maps` (`pinned|theme|unpinned`) before hand-fixing a `palette_match` delta. Frequency-ranked palettes only apply when no explicit map exists.
 - **Fonts don't match the source** → `themeOverrides.fonts.{textFont, dataFont}`. Map the Tableau family to a web-safe family (Tableau "Tableau Book"/"Benton"→`Inter`/`Helvetica Neue`; a serif → `Georgia`). Only families Sigma ships round-trip.
 - **Accent sprayed on every tile** (AI tell) → pull the tint back to the header band + the hero KPI only; default the rest to the neutral surface. See `layout-visual-qa.md` §3.
 
@@ -55,9 +56,37 @@ Each row: **the visible delta** · the spec path · notes/gotcha.
 
 ### KPIs & hero numbers
 - **KPI hero number too small / not the focal point** → `value.fontSize` up + transparent element `style` + widen the tile's `layout.anchor`/grid span.
-- **KPI value in the wrong format** (`$473.0k` vs source `$473.0K`) → emit an **exact-format text-formula column** (e.g. an uppercase-K suffix builder) and point the KPI value at it; don't rely on the number-format enum when the source uses a non-standard suffix. Format basics: money `$,.0f`; compact `$,.2s`.
+- **KPI value in the wrong format** (`$473.0k` vs source `$473.0K`) → emit an **exact-format text-formula column** (e.g. an uppercase-K suffix builder) and point the KPI value at it; don't rely on the number-format enum when the source uses a non-standard suffix. Format basics: money `$,.0f`; compact `$,.2s`. A KPI printing plain-raw where the source shows `$`/`%` is now a builder bug, not an RCF chore — the build maps the worksheet pill format and the column's `.twb` `default-format` mechanically (see §"Number & date formats" + `formats-emitted.json`).
 - **KPI shows its own title *and* the card label** (duplicated) → set the KPI value-column `name: ' '` (single space; `''` re-derives the title).
 - **KPI title clipped** → the tile is < ~5 grid rows; grow `gridRow`. Sparkline/comparison KPIs need ~8+ rows. NOTE on KPI sparklines + comparison/delta badges (live-probed 2026-07-11): the spec ACCEPTS `comparison`/`trend` FORMATTING blocks (spec/verify 200), but there is **no create-spec property that binds** the comparison column / trend axis, and the PUT rejects formatting-without-binding (`comparison.display: requires a comparison column or period comparison on the KPI`). Classify `ui-only` for creation; once a user binds it in the UI, the styling round-trips.
+
+### Number & date formats (mechanical since PR-12)
+- The one-shot build emits source formats mechanically: the worksheet's own pill `text-format`
+  first, then the column's `.twb` `default-format` (the fix for KPIs printing raw where the
+  source shows `$`), then master-map/name-heuristic. ONE translator: `scripts/lib/format_map.rb`
+  (parser + builder both delegate). Per-tile coverage lands in **`formats-emitted.json`** next to
+  the chart-spec output — `entries[]` (source format string → emitted format, `mapped|unmapped`;
+  an unmapped source string is **recorded, never guessed**) + `series_color_maps[]`. Read it
+  before hand-fixing a `numbers_formatted` delta.
+- Mapping table (Tableau → Sigma d3-format):
+
+  | Tableau source | Sigma format |
+  |---|---|
+  | `p0.0%` / `#,##0.0%` | `,.1%` |
+  | `$#,##0.00` / `€#,##0` / `C1033` | `$,.2f` / `$,.0f` + `currencySymbol` |
+  | `#,##0` / `0.00` | `,.0f` / `,.2f` |
+  | `pos;(neg)` | leading `(` sign modifier (parens on negative) |
+  | `#,##0,,,B` (scale-comma + suffix) | not d3-expressible → exact-format scaled column (KPI recipe above) |
+  | `yyyy-MM-dd` / `MMM yyyy` / `MMMM d, yyyy` | `%Y-%m-%d` / `%b %Y` / `%B %-d, %Y` |
+
+- **Sigma date-time formats are d3-time (strftime) strings** — `%B %-d, %Y`. Moment-style token
+  strings (`"MMM D, YYYY"`) are NOT a format language to Sigma: every non-`%` character prints
+  **literally**, so the tile renders the text `MMM D, YYYY` instead of a date (live-run
+  finding). Never author one; `format_map` refuses (returns nil → recorded unmapped) any string
+  it can't fully tokenize into `%`-directives.
+- **`displayNullAs` exists on number formats** — `{kind: 'number', formatString: ',.0f',
+  displayNullAs: '—'}` renders nulls as the literal. Use it when the source shows a dash/blank
+  for null cells; the translator maps a quoted 4th Tableau format segment (`…;;;"—"`) to it.
 
 ### Status, thresholds & tables
 - **Status chip / traffic-light cell** → `conditionalFormats` `type: single` with a **flat** `condition`/`value` (not nested).
@@ -78,7 +107,7 @@ Each row: **the visible delta** · the spec path · notes/gotcha.
 ### Controls & parameters
 - **Source has parameters/quick-filters but the workbook has 0 controls** → rebuild them (`composition-recipe.md` §"Controls & parameters"): list control, date-range control, wire `filters` to the base tables. This is a **functional** dimension — see the rubric.
 - **Dropdown vs segmented mismatch** → `controlType: list` (dropdown) vs a segmented/`button` control; match the source widget. Number-control refs are safe in `[ControlId]` arithmetic; date/list control refs hit the variant bug.
-- **`d3`/`strftime` format mismatch** → map the source's format token to Sigma's `d3`-format / date-format string (money `$,.0f`, compact `$,.2s`, date `%b %Y`→`MMM YYYY`).
+- **`d3`/`strftime` format mismatch** → map the source's format token to Sigma's `d3`-format / d3-time string (money `$,.0f`, compact `$,.2s`, date `%b %Y`). Date-times take d3-time `%`-directives ONLY — a moment-style `MMM YYYY` prints literally (see §"Number & date formats").
 
 ---
 
