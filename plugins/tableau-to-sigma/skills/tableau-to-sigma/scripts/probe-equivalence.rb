@@ -22,10 +22,21 @@
 #   FROM (<side's whole SQL>) EQ_PROBE
 # and records both sides + the verdict in <workdir>/semantic-edits.json.
 # A mismatch is FATAL (both sides' numbers printed): the edit is NOT a no-op
-# — revert it (removing the edit removes the entry) or redesign it until the
-# probes agree. There is NO waive path: an intentionally-different rewrite is
-# not an equivalence claim and belongs in the user-initiated scope-change
-# record, never in this ledger.
+# — revert it or redesign it until the probes agree. There is NO waive path:
+# an intentionally-different rewrite is not an equivalence claim and belongs
+# in the user-initiated scope-change record, never in this ledger.
+#
+# WITHDRAW (the only sanctioned way to clear a refuted entry — never hand-edit
+# the ledger): a REFUTED edit that was consequently NOT APPLIED is withdrawn
+# with --withdraw "<edit_description>" --reason "<why>". The entry moves to
+# the ledger's `withdrawn` array VERBATIM (its refuted proof stays as
+# evidence) plus withdrawn_reason + withdrawn_at; gate 20 (assert-phase6-
+# ran.rb) ignores withdrawn entries but reports them informationally. Only a
+# refuted entry is withdrawable — an unproven one must be re-probed first (a
+# claim is measured before it is withdrawn). HONESTY NOTE: withdrawal ATTESTS
+# the edit was not applied; whether its SQL nonetheless shipped is not
+# detectable mechanically — gates 16/18 remain the numeric net for an edit
+# that rode along anyway.
 #
 # Usage:
 #   ruby scripts/probe-equivalence.rb --workdir <WORK> \
@@ -46,8 +57,14 @@
 #                                #   bounded-exports convention — never hangs)
 #     [--ledger PATH]            # default <WORK>/semantic-edits.json
 #
-# Exit codes: 0 = every declared edit proven equivalent (match:true);
-#             1 = bad invocation;
+# Withdraw mode (no probe runs; nothing else may be probed in the same call):
+#   ruby scripts/probe-equivalence.rb --workdir <WORK> \
+#     --withdraw "<edit_description>" --reason "<why the refuted edit was not applied>"
+#
+# Exit codes: 0 = every declared edit proven equivalent (match:true), or a
+#                 successful --withdraw;
+#             1 = bad invocation, or --withdraw refused (entry not found /
+#                 proven / unproven);
 #             2 = mismatch — the sides are NOT equivalent (FATAL block printed;
 #                 gate 20 will refuse GREEN, exit 27);
 #             3 = probe error / deadline — entry left without a proof (still
@@ -80,11 +97,14 @@ OptionParser.new do |p|
   p.on('--fixture DIR', 'offline: canned results, DIR/before.json + DIR/after.json') { |v| opts[:fixture] = v }
   p.on('--timeout S', Integer, 'TOTAL deadline for both sides (default 600)') { |v| opts[:timeout] = v }
   p.on('--ledger PATH', 'default <WORK>/semantic-edits.json') { |v| opts[:ledger] = v }
+  p.on('--withdraw DESC', 'withdraw a REFUTED edit that was NOT applied: moves its entry (refuted proof preserved verbatim as evidence) to the ledger\'s withdrawn array; requires --reason') { |v| opts[:withdraw] = v }
+  p.on('--reason TEXT', 'WHY the refuted edit was not applied (required with --withdraw)') { |v| opts[:reason] = v }
 end.parse!
 
 USAGE = 'usage: probe-equivalence.rb --workdir <WORK> --edit "<desc>" --claim "<claim>" --grain COL[,COL] ' \
         '(--before-sql S --after-sql S | --before-element N --after-element N) ' \
-        '(--connection-id <id> | --fixture DIR) [--measures COL,COL] [--timeout S]'
+        '(--connection-id <id> | --fixture DIR) [--measures COL,COL] [--timeout S]' \
+        "\n       probe-equivalence.rb --workdir <WORK> --withdraw \"<edit_description>\" --reason \"<why not applied>\""
 def bad(msg)
   warn "FATAL: #{msg}"
   warn USAGE
@@ -92,12 +112,61 @@ def bad(msg)
 end
 
 bad('--workdir required') unless opts[:dir]
+
+ledger_path = opts[:ledger] || File.join(opts[:dir], 'semantic-edits.json')
+
+# ---------------------------------------------------------------------------
+# Withdraw mode — the ONLY sanctioned way to clear a REFUTED-and-not-applied
+# entry (hand-editing the ledger is forbidden; that was previously the only
+# way out, which is exactly why this path exists). The entry moves VERBATIM
+# (refuted proof preserved as evidence) to the doc's `withdrawn` array with
+# withdrawn_reason + withdrawn_at; gate 20 ignores withdrawn entries but
+# reports them informationally.
+# ---------------------------------------------------------------------------
+if opts[:withdraw]
+  bad('--withdraw takes no probe flags (--edit/--claim/--grain/sides) — it only moves an existing refuted entry') if
+    opts[:edit] || opts[:claim] || opts[:grain] || opts[:before_sql] || opts[:after_sql] || opts[:before_el] || opts[:after_el]
+  bad('--reason required with --withdraw (WHY was the refuted edit not applied?)') if opts[:reason].to_s.strip.empty?
+  bad("no ledger at #{ledger_path} — nothing to withdraw") unless File.exist?(ledger_path)
+  doc = begin
+    EquivalenceProbe.load(ledger_path)
+  rescue JSON::ParserError => e
+    bad("#{ledger_path} unparseable: #{e.message[0, 80]} — fix or remove it (do not hand-edit proofs)")
+  end
+  status, moved = EquivalenceProbe.withdraw(doc, opts[:withdraw], opts[:reason].strip)
+  case status
+  when :not_found
+    warn "FATAL: no declared entry matches --withdraw #{opts[:withdraw].inspect} in #{ledger_path}."
+    known = doc['entries'].select { |e| e.is_a?(Hash) }.map { |e| e['edit_description'] }
+    warn "       Declared edits: #{known.empty? ? '(none)' : known.map(&:inspect).join(', ')}"
+    exit 1
+  when :proven
+    warn "FATAL: #{opts[:withdraw].inspect} is PROVEN equivalent (match:true) — it does not block and there is"
+    warn '       nothing to withdraw. If the edit was later reverted, re-probe the current before/after pair.'
+    exit 1
+  when :unproven
+    warn "FATAL: #{opts[:withdraw].inspect} has no refuted proof — withdrawal requires the measurement as evidence."
+    warn "       #{moved['probe_error'] ? "Last probe errored: #{moved['probe_error'].to_s[0, 120]}" : 'The entry was declared but never probed.'}"
+    warn '       Re-probe first (a claim is measured before it is withdrawn): if the probe REFUTES it and the'
+    warn '       edit is therefore not applied, withdraw then; if it PROVES it, nothing blocks.'
+    exit 1
+  end
+  EquivalenceProbe.write(ledger_path, doc)
+  puts "probe-equivalence: WITHDREW #{moved['edit_description'].inspect} — refuted and not applied " \
+       "(reason: #{moved['withdrawn_reason']})."
+  puts "  The refuted proof is preserved verbatim in the ledger's withdrawn[] as evidence; gate 20 no longer"
+  puts '  blocks on this entry but will report it informationally.'
+  puts '  HONESTY NOTE: withdrawal attests the edit was NOT applied. Whether its SQL nonetheless shipped is'
+  puts '  not detectable mechanically — gates 16/18 remain the numeric net for an edit that rode along anyway.'
+  puts "  Ledger: #{ledger_path}"
+  exit 0
+end
+
+bad('--reason only applies to --withdraw') if opts[:reason]
 bad('--edit required (the ledger key describing the structural edit)') if opts[:edit].to_s.strip.empty?
 bad('--claim required (the equivalence claim the probe is testing)') if opts[:claim].to_s.strip.empty?
 bad('--grain required (the declared grain to COUNT DISTINCT)') if Array(opts[:grain]).empty?
 bad('provide --fixture DIR (offline) or --connection-id <id> (live probe)') unless opts[:fixture] || opts[:conn]
-
-ledger_path = opts[:ledger] || File.join(opts[:dir], 'semantic-edits.json')
 
 # ---------------------------------------------------------------------------
 # Resolve each side's SQL (+ derivable measures) — literal, @file, or DM
@@ -279,7 +348,9 @@ rescue JSON::ParserError => e
 end
 entries = doc['entries']
 EquivalenceProbe.upsert(entries, entry)
-EquivalenceProbe.write(ledger_path, entries)
+# Write the WHOLE doc back — unknown top-level keys (an operator's
+# withdrawal_note, the withdrawn array, future fields) round-trip verbatim.
+EquivalenceProbe.write(ledger_path, doc)
 
 # ---------------------------------------------------------------------------
 # FATAL block on mismatch + whole-ledger summary (the gate reads the same
@@ -301,10 +372,12 @@ if entry['proof'] && !entry['proof']['match']
   end
   warn '  A row-count difference at an unchanged grain means the edit fans out or drops'
   warn '  rows (the deleted-LEFT-JOIN field case); a sum difference means the values'
-  warn '  drifted. The edit does NOT ship: REVERT it (removing the edit removes this'
-  warn '  entry) or redesign it until the probes agree, then re-probe. There is no'
-  warn '  waive path — an intentionally-different rewrite is not an equivalence claim'
-  warn '  and belongs in the user-initiated scope-change record, not this ledger.'
+  warn '  drifted. The edit does NOT ship: REVERT it, then withdraw this refuted entry'
+  warn "  (--withdraw #{entry['edit_description'].inspect} --reason \"<why>\" — the refuted"
+  warn '  proof is preserved as evidence; never hand-edit the ledger), or redesign the'
+  warn '  edit until the probes agree, then re-probe. There is no waive path — an'
+  warn '  intentionally-different rewrite is not an equivalence claim and belongs in'
+  warn '  the user-initiated scope-change record, not this ledger.'
   warn '====================================================================='
 end
 

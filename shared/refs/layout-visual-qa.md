@@ -92,6 +92,15 @@ subagent that received only the two image paths + the rubric (`refs/blind-grader
 grade is sha256-bound to the images and its per-tile chart-family readings are cross-checked
 against the mechanical kind census; gate 8b refuses a self-attested pass with the remedy named.
 
+**Recording `divergent` is not free.** A recorded `divergent` verdict passes gate 8b as RECORDED
+(the comparison happened and the gaps are acknowledged), but the divergence is **budget-counted**:
+`assert-phase6-ran.rb` injects `visual-divergent` into the waiver census, where it spends the same
+exit-19 waiver budget as any quality waiver — so a divergent-visual run can still complete, but it
+cannot ride to GREEN alongside 2 other waivers, and the budget line names it. GREEN requires the
+budget to hold: fix the gaps, re-render, re-record `pass` — or accept YELLOW with the divergence
+named in the report. Full verdict-capping (`divergent` caps the run at PARTIAL) is planned as
+PLAN-v3 PR-14 and is not built yet; until then the budget is the cap.
+
 ## 2. Structural rubric (read the PNG against every item)
 
 - [ ] **No overlaps / no stacking.** No two elements occupy the same cell; no filter, legend, or

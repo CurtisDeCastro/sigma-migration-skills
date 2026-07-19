@@ -119,6 +119,24 @@ _out, _err, st, pf = run_case(['--verdict', 'divergent', '--agent-vision', 'fals
 check(st.success? && pf['visual_checked'] == false && pf['agent_vision'] == false,
       'divergent + vision false → recorded with agent_vision:false (gate 8b blocks)', fails)
 
+# --- divergent message states the REAL gate consequence (D3 doc/behavior fix) --
+# The old message claimed "gate 8b will still BLOCK" — false: a recorded
+# divergent verdict passes 8b as RECORDED and is budget-counted instead.
+_out, err, st, pf = run_case(['--verdict', 'divergent', '--agent-vision', 'true',
+                              '--notes', 'Region bar truncated vs source'])
+check(st.success? && pf['visual_verdict'] == 'divergent' && pf['visual_checked'] == false,
+      'divergent recorded: stamps verdict, visual_checked stays false', fails)
+check(err.include?('passes as RECORDED'),
+      'divergent message states gate 8b passes as RECORDED (never claims it blocks)', fails)
+check(!err.include?('will still BLOCK'),
+      'divergent message no longer makes the false will-still-BLOCK claim', fails)
+check(err.include?('visual-divergent') && err.include?('BUDGET-COUNTED'),
+      'divergent message names the visual-divergent census injection + budget cost', fails)
+check(err.include?('YELLOW') && err.include?('budget to hold'),
+      'divergent message states the choice: fix the gaps or accept YELLOW', fails)
+check(err.include?('PR-14'),
+      'divergent message carries the PR-14 verdict-capping forward pointer', fails)
+
 # --- back-compat: omitted flag → loud WARN + assume true ----------------------
 _out, err, st, pf = run_case(%w[--verdict pass --notes legacy-caller] + ['--checklist', CL], blind: :valid)
 check(st.success?, 'omitted --agent-vision → still exit 0 (back-compat)', fails)
