@@ -71,6 +71,23 @@ rc, = run_gate({ 'pages' => [{ 'elements' => [{ 'columns' => [{ 'formula' => '[M
                DM, '--skip-ref-check', '"known, building manually"')
 check(rc == 0, '--skip-ref-check waives (exit 0)')
 
+# PR-14: a waiver with --workdir writes a skip-flag-waived off-ramp record —
+# the "GREEN, 0 waivers after --skip-ref-check" escape is closed: the skip is
+# visible to the degradation ledger and verify-complete's cross-check.
+Dir.mktmpdir do |wd|
+  rc, = run_gate({ 'pages' => [{ 'elements' => [{ 'columns' => [{ 'formula' => '[Master/Partner Name]' }] }] }] },
+                 DM, '--workdir', wd, '--skip-ref-check', 'known, building manually')
+  check(rc == 0, '--skip-ref-check + --workdir still waives (exit 0)')
+  recs = File.readlines(File.join(wd, 'offramps.jsonl')).map { |l| JSON.parse(l) }
+  rec = recs.find { |r| r['kind'] == 'skip-flag-waived' && r['detail'] == '--skip-ref-check' }
+  check(!rec.nil? && rec['reason'].include?('known'),
+        'waived run records skip-flag-waived (--skip-ref-check) with its reason in offramps.jsonl')
+end
+# without --workdir the waiver still works but WARNS it went unrecorded
+rc, out = run_gate({ 'pages' => [{ 'elements' => [{ 'columns' => [{ 'formula' => '[Master/Partner Name]' }] }] }] },
+                   DM, '--skip-ref-check', 'reason')
+check(rc == 0 && out.include?('NOT recorded'), 'waiver without --workdir warns the skip went unrecorded')
+
 # ---- merged capabilities (from the deleted assert-refs-resolve.rb) ----------
 
 # INTERNAL master ref: a master-level calc column absent from the DM by design

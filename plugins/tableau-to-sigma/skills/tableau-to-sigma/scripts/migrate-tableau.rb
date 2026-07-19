@@ -1954,6 +1954,9 @@ if mechanical
       elsif opts[:skip_extract_landing]
         line "WARN: embedded-extract sources with NO landing manifest — proceeding on --skip-extract-landing " \
              "(#{opts[:skip_extract_landing]}); the DM's table paths are on you (--db/--schema)"
+        # PR-14: every honored --skip-* leaves a record on the off-ramp trail.
+        Offramp.log(WORK, kind: 'skip-flag-waived', reason: opts[:skip_extract_landing],
+                    detail: '--skip-extract-landing')
       else
         puts <<~MSG
 
@@ -2983,6 +2986,9 @@ if FASTPATH
   RunState.skip(WORK, 'phase-1d', 'FAST PATH (--reuse-dm + --wb-spec)')
 elsif opts[:skip_dashboard_read]
   line "dashboard-read gate WAIVED (--skip-dashboard-read: #{opts[:skip_dashboard_read]}) — name this in your report"
+  # PR-14: every honored --skip-* leaves a record on the off-ramp trail.
+  Offramp.log(WORK, kind: 'skip-flag-waived', reason: opts[:skip_dashboard_read],
+              detail: '--skip-dashboard-read')
 elsif DashboardRead.expected?(WORK)
   # Seed a DRAFT png-read.json from the .twb zone tree if none exists yet, so the
   # agent EDITS a starting point instead of writing from scratch (finding #8). The
@@ -3765,7 +3771,8 @@ begin
   # collapse left 550 refs unresolvable). Catch it here with the full list; the
   # WorkbookBuildError this raises routes to the friendly rebuild-against-DM handoff.
   ref_cmd = ['ruby', File.join(HERE, 'assert-wb-refs-resolve.rb'),
-             '--wb-spec', wb_spec_path, '--dm-ids', dm_ids_path]
+             '--wb-spec', wb_spec_path, '--dm-ids', dm_ids_path,
+             '--workdir', WORK] # PR-14: a waived run records itself to offramps.jsonl
   ref_cmd += ['--skip-ref-check', opts[:skip_ref_check]] if opts[:skip_ref_check]
   run_wb!(ref_cmd)
   par_cmd = ['ruby', File.join(HERE, 'post-and-readback.rb'), '--type', 'workbook',

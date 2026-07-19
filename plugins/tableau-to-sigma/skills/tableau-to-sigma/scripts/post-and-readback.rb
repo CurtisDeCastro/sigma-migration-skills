@@ -105,6 +105,19 @@ if !_orchestrated && File.exist?(File.join(opts[:workdir], 'migrate-state.json')
   Offramp.log(opts[:workdir], kind: 'manual-spec', reason: "waiver: #{opts[:allow_manual_spec]}") if defined?(Offramp)
 end
 
+# PR-14: every honored --skip-* leaves a record on the off-ramp trail (they
+# are workbook-path waivers; DM runs never honor them, so nothing is logged).
+if opts[:type] == 'workbook' && defined?(Offramp)
+  { '--skip-spec-verify'     => opts[:skip_spec_verify],
+    '--skip-style-normalize' => opts[:skip_style_normalize],
+    '--skip-layout-lint'     => opts[:skip_lint],
+    '--skip-control-lint'    => opts[:skip_control_lint] }.each do |flag, val|
+    next unless val
+    Offramp.log(opts[:workdir], kind: 'skip-flag-waived',
+                reason: (val.is_a?(String) ? val : nil), detail: flag)
+  end
+end
+
 QUARANTINE = opts[:quarantine] && opts[:type] == 'datamodel'
 DEFERRED_PATH = File.join(opts[:workdir], 'deferred-elements.json')
 warn 'NOTE: --quarantine-on-failure only applies to --type datamodel; ignored.' if opts[:quarantine] && opts[:type] != 'datamodel'
