@@ -547,7 +547,7 @@ everything competed for attention at once. Read the ref when you reach the step.
 | 4 | POST the DM + **read back** | `post-and-readback.rb --type datamodel` | `dm-ids.json` (server ids) | `refs/phase-4-post-dm.md` |
 | 5 | Build the workbook | `build-charts-from-signals.rb` → `post-and-readback` → `build-dashboard-layout.rb` → `put-layout.rb` | `preflight_lint` clean; **layout is the LAST write**; `lod-audit.json` ledger (every `{FIXED/INCLUDE/EXCLUDE}` calc translated or resolved via `audit-lod-calcs.rb` — final gate exit 24); `agg-semantics.json` ledger (every additive-over-preagg / countd-as-sum / preagg-ratio hit resolved via `audit-agg-semantics.rb` `--how <reaggregated\|n/a\|faithful-to-source>` — final gate exit 26; `refs/phase-2-columns-filters.md` §Aggregation semantics) | `refs/phase-5-workbook.md` |
 | 6 | **🚧 Parity + anchors + ground truth + visual** | `phase6-parity.rb`; `verify-anchors.rb`; `derive-ground-truth.rb` → `run-ground-truth.rb` → `verify-ground-truth.rb`; then `assert-dashboard-read.rb` + `assert-run-state.rb` + `assert-phase6-ran.rb` | 🚧 `parity-final.json` PASS + `anchors-verdict.json` pass + every tile `numeric_parity`-verified or ledger-waived (gate 18, exit 25) + recorded visual verdict + full `run-state.json` chain | `refs/phase-6-parity.md`, `refs/source-anchors.md`, `refs/ground-truth-oracle.md` |
-| 5g | **RCF fidelity loop** | `fidelity-loop.rb` render → compare vs source → fix, until clean | 🚧 (opt-in) `fidelity-ledger.json` no unresolved spec-fixable deltas (gate 8d) | `refs/phase-5g-rcf.md` |
+| 5g | **RCF fidelity loop** | `fidelity-loop.rb` render → compare vs source → fix, until clean | 🚧 (default-on, PR-11) `fidelity-ledger.json` no unresolved spec-fixable deltas (gate 8d); `--rcf-passes 0` opt-out records the named `--skip-fidelity-gate` waiver | `refs/phase-5g-rcf.md` |
 | E | Enhance (opt-in) | `enhance-scan.rb` → `enhance-apply.rb` | cloned "— Enhanced" workbook | `refs/phase-e-enhance.md` |
 | — | Security RLS/CLS | detect always; apply opt-in | `apply_sigma_rls.py` | *(spine ↓)* |
 | — | Telemetry (final) | `report-telemetry.py` | `telemetry-sent.json` | *(spine ↓)* |
@@ -755,10 +755,15 @@ After the workbook renders, iterate composition to convergence: `fidelity-loop.r
 exports the page → **Read it against the source dashboard PNG** and score every dimension
 (`refs/fidelity-rubric.md`) → `record` each delta (spec-fixable / ui-only / sigma-capability /
 data) → author a fix from `refs/fidelity-recipes.md` and `apply-patch` (single layout-preserving
-PUT) → loop until `fidelity-loop.rb status` is clean. Opt-in hard gate: `migrate-tableau.rb
---finalize` passes `--require-fidelity-ledger` (gate 8d, exit 15) unless disabled with
-`--rcf-passes 0`. **Full loop, rubric, and delta→fix catalog: `refs/phase-5g-rcf.md`,
-`refs/fidelity-rubric.md`, `refs/fidelity-recipes.md`.**
+PUT) → loop until `fidelity-loop.rb status` is clean. DEFAULT-ON hard gate (PR-11):
+`migrate-tableau.rb --finalize` passes `--require-fidelity-ledger` (gate 8d, exit 15), and the
+gate also auto-enables itself from `migrate-state.json` `rcf_passes` on standalone runs;
+`--rcf-passes 0` remains the explicit opt-out but records the named `--skip-fidelity-gate`
+waiver (budget-counted) — never silence. The layout build also emits
+`layout-arrangement.json` (source-vs-built ordering/quadrant/controls-shelf parity — gate 8e,
+WARN-level this release, `--require-arrangement` to enforce), and gate 4b fails a run whose
+run-state ledger shows the layout phase was never entered (exit 28). **Full loop, rubric, and
+delta→fix catalog: `refs/phase-5g-rcf.md`, `refs/fidelity-rubric.md`, `refs/fidelity-recipes.md`.**
 
 ### Phase E — enhance (opt-in) — `refs/phase-e-enhance.md`
 After all gates are green, `enhance-scan.rb` proposes read-only enhancement

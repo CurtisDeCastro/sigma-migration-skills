@@ -265,9 +265,11 @@ OptionParser.new do |o|
   o.on('--enhance-accept L') { |v| opts[:enhance_accept] = v }
   # Phase 5g — RCF (render-compare-fix) loop budget. Default 5 passes; the loop
   # is agent-driven (staged at pass-1 tail, enforced at --finalize via gate 8d /
-  # --require-fidelity-ledger). --rcf-passes 0 DISABLES it with a loud WARN and
-  # the finalize gate does NOT require the ledger. Batch/headless callers pass 2.
-  o.on('--rcf-passes N', Integer, 'Phase 5g render-compare-fix loop budget (default 5; 0 disables it with a loud WARN and waives gate 8d).') { |v| opts[:rcf_passes] = v }
+  # --require-fidelity-ledger — DEFAULT-ON, PR-11). --rcf-passes 0 DISABLES it
+  # with a loud WARN and the finalize gate records the NAMED --skip-fidelity-gate
+  # waiver (budget-counted) instead of requiring the ledger. Batch/headless
+  # callers pass 2.
+  o.on('--rcf-passes N', Integer, 'Phase 5g render-compare-fix loop budget (default 5; 0 disables it with a loud WARN and records the named gate-8d waiver — budget-counted, never silent).') { |v| opts[:rcf_passes] = v }
   o.on('--converter MODE', %w[local hosted], "converter backend: 'local' (default; zero-config, no " \
        'data egress — uses the vendored converter/tableau.mjs unless TABLEAU_MCP_BUILD points at a ' \
        "fresher build) or 'hosted' (sends the .twb to sigma-data-model-mcp.onrender.com — explicit " \
@@ -951,8 +953,11 @@ if opts[:finalize]
   # Phase 5g — require the RCF fidelity ledger (gate 8d) unless the loop was
   # explicitly disabled at pass 1 (--rcf-passes 0). Legacy state (pre-5g) has no
   # rcf_passes key → default to requiring it, since the ledger is the new bar.
+  # PR-11: the opt-out is NEVER silent — it rides to the gate as the named
+  # --skip-fidelity-gate waiver (recorded in waivers.json + the census,
+  # budget-counted), so a skipped RCF phase is visible in every report.
   rcf_enabled = state.fetch('rcf_passes', 5).to_i.positive?
-  gate += ['--require-fidelity-ledger'] if rcf_enabled
+  gate += rcf_enabled ? ['--require-fidelity-ledger'] : ['--skip-fidelity-gate', 'RCF loop disabled at pass 1 via --rcf-passes 0']
   gate += ['--allow-extract'] if state['extract_mode']
   gate += ['--allow-missing-tiles', opts[:allow_missing_tiles].to_s] if opts[:allow_missing_tiles]
   gate += ['--min-pass-rate', opts[:min_pass_rate].to_s] if opts[:min_pass_rate]
@@ -1081,7 +1086,8 @@ if opts[:finalize]
     puts '     then render again. Loop until `fidelity-loop.rb status` is clean.'
     puts '  4. Genuinely-unclosable residuals: waive them by name via'
     puts '       assert-phase6-ran.rb --accept-residuals id,id  (name them in your report),'
-    puts '     or disable the loop entirely by re-running pass 1 with --rcf-passes 0.'
+    puts '     or disable the loop entirely by re-running pass 1 with --rcf-passes 0 (this records'
+    puts '     the named --skip-fidelity-gate waiver — budget-counted, named in the report).'
     puts '============================================================================='
   end
 
@@ -4056,7 +4062,9 @@ rcf_passes = (opts[:rcf_passes] || 5)
 if rcf_passes.to_i <= 0
   line 'WARN: Phase 5g RCF fidelity loop DISABLED (--rcf-passes 0). The workbook will be gated on'
   line '      structure + data + a single visual verdict only — composition drift (palette, chart'
-  line '      kind, KPI format) will NOT be iterated. --finalize will NOT require the fidelity ledger.'
+  line '      kind, KPI format) will NOT be iterated. --finalize will not require the fidelity ledger'
+  line '      but RECORDS the named --skip-fidelity-gate waiver (budget-counted, PR-11) — name it in'
+  line '      your migration report; it is never silent.'
 else
   # Best-effort resolve a source image to compare against from the artifacts
   # pass 1 already wrote. The page is NOT pre-picked here any more (#422: the

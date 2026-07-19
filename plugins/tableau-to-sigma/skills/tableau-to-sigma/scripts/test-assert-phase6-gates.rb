@@ -896,9 +896,238 @@ Dir.mktmpdir do |dir|
   check(err.include?('DIVERGENT'), 'budget failure explains what the divergent verdict hid', fails)
 end
 
+# =============================================================================
+# PLAN-v3 PR-11 — gate 8d default-on plumbing, gate 4b layout-phase sentinel,
+# gate 8e layout-arrangement parity.
+# =============================================================================
+
+# ---- gate 8d: DEFAULT-ON via migrate-state.json rcf_passes -------------------
+# A tableau workdir whose pass 1 staged the RCF loop (rcf_passes > 0) must FAIL
+# gate 8d without a fidelity ledger even when the caller forgot the flag — the
+# field failure was a standalone gate run that silently skipped the RCF phase.
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'migrate-state.json'),
+             JSON.generate('workbook_id' => 'wb-test', 'run_id' => 'r1', 'rcf_passes' => 5))
+  out, err, st = run_gate(dir)
+  check(st.exitstatus == 15, "gate 8d auto-enabled (rcf_passes=5, no flag) + no ledger → exit 15 (got #{st.exitstatus})", fails)
+  check(err.include?('fidelity-ledger.json is missing'), 'gate 8d failure names the missing ledger', fails)
+  check(out.include?('required by DEFAULT') && out.include?('rcf_passes=5'),
+        'gate 8d states the default-on resolution (migrate-state rcf_passes)', fails)
+end
+
+# auto-enabled + a clean ledger → passes and prints the 8d OK line
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'migrate-state.json'),
+             JSON.generate('workbook_id' => 'wb-test', 'run_id' => 'r1', 'rcf_passes' => 5))
+  File.write(File.join(dir, 'fidelity-ledger.json'),
+             JSON.generate('workbook_id' => 'wb-test', 'page_id' => 'pg', 'pass' => 2,
+                           'entries' => [{ 'id' => 'e0', 'dimension' => 'palette', 'delta' => 'x',
+                                           'cls' => 'spec-fixable', 'resolved' => true }]))
+  out, _err, st = run_gate(dir)
+  check(st.success?, "gate 8d auto-enabled + clean ledger → exit 0 (got #{st.exitstatus})", fails)
+  check(out.include?('gate 8d: RCF fidelity ledger clean'), 'gate 8d OK line printed under auto-enable', fails)
+end
+
+# ---- gate 8d: --rcf-passes 0 opt-out → NAMED waiver, never silence -----------
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'migrate-state.json'),
+             JSON.generate('workbook_id' => 'wb-test', 'run_id' => 'r1', 'rcf_passes' => 0))
+  out, _err, st = run_gate(dir)
+  check(st.success?, "rcf_passes=0 (opt-out) without a ledger → exit 0 (got #{st.exitstatus})", fails)
+  check(out.include?('WAIVED via --skip-fidelity-gate') && out.include?('--rcf-passes 0'),
+        'the opt-out is recorded as the NAMED --skip-fidelity-gate waiver (loud, never silent)', fails)
+  pf = JSON.parse(File.read(File.join(dir, 'parity-final.json')))
+  check(Array(pf['waivers']).include?('--skip-fidelity-gate'),
+        '--skip-fidelity-gate stamped into the parity-final waiver census', fails)
+  wv = JSON.parse(File.read(File.join(dir, 'waivers.json')))
+  check(wv.any? { |w| w['flag'] == '--skip-fidelity-gate' && w['reason'].to_s.include?('rcf-passes 0') },
+        'waivers.json carries the named gate-8d waiver with the --rcf-passes 0 reason', fails)
+end
+
+# the explicit finalize flag (what migrate-tableau.rb passes) behaves the same
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  out, _err, st = run_gate(dir, '--skip-fidelity-gate', 'RCF loop disabled at pass 1 via --rcf-passes 0')
+  check(st.success? && out.include?('WAIVED via --skip-fidelity-gate'),
+        'explicit --skip-fidelity-gate waives gate 8d by name', fails)
+end
+
+# the waiver never covers wrong numbers: data-class residuals still block
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'migrate-state.json'),
+             JSON.generate('workbook_id' => 'wb-test', 'run_id' => 'r1', 'rcf_passes' => 0))
+  File.write(File.join(dir, 'fidelity-ledger.json'),
+             JSON.generate('entries' => [{ 'id' => 'e0', 'dimension' => 'kpi', 'delta' => '10x off',
+                                           'cls' => 'data', 'resolved' => false }]))
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 15, "rcf opt-out + unresolved data-class entry still blocks (got #{st.exitstatus})", fails)
+  check(err.include?('data-class'), 'data-class failure stays named under the waiver', fails)
+end
+
+# the budget counts it: opt-out + 2 quality waivers → exit 19
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'migrate-state.json'),
+             JSON.generate('workbook_id' => 'wb-test', 'run_id' => 'r1', 'rcf_passes' => 0))
+  _out, err, st = run_gate(dir, '--skip-orphan-check', 'r1', '--skip-anchors-gate', 'r2')
+  check(st.exitstatus == 19, "rcf opt-out + 2 quality waivers → budget exceeded, exit 19 (got #{st.exitstatus})", fails)
+  check(err.include?('--skip-fidelity-gate'), 'budget failure lists the gate-8d waiver in the census', fails)
+end
+
+# converters that never staged the loop stay opt-in (no key → no auto-enable)
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'migrate-state.json'),
+             JSON.generate('workbook_id' => 'wb-test', 'run_id' => 'r1'))
+  _out, _err, st = run_gate(dir)
+  check(st.success?, 'migrate-state without rcf_passes key → gate 8d stays opt-in (exit 0)', fails)
+end
+
+# ---- gate 4b: layout-phase sentinel (run-state.json) -------------------------
+RS_BASE = { 'tool' => 'tableau-to-sigma', 'run_id' => 'r1' }.freeze
+RS_PHASES_OK = {
+  'phase-1'  => { 'status' => 'done', 'ts' => 't' }, 'phase-1d' => { 'status' => 'done', 'ts' => 't' },
+  'phase-4'  => { 'status' => 'done', 'ts' => 't' }, 'phase-5'  => { 'status' => 'done', 'ts' => 't' },
+  'phase-6'  => { 'status' => 'done', 'ts' => 't' }
+}.freeze
+
+# tracked ledger with phase-5 stamped done → OK line
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'run-state.json'), JSON.generate(RS_BASE.merge('phases' => RS_PHASES_OK)))
+  out, _err, st = run_gate(dir)
+  check(st.success?, "run-state with phase-5 done → exit 0 (got #{st.exitstatus})", fails)
+  check(out.include?('gate 4b: layout phase entered'), 'gate 4b OK line printed', fails)
+end
+
+# tracked ledger, phase-5 NEVER entered → hard fail exit 28 (the field failure)
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  ph = RS_PHASES_OK.reject { |k, _| k == 'phase-5' }
+  File.write(File.join(dir, 'run-state.json'), JSON.generate(RS_BASE.merge('phases' => ph)))
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 28, "layout phase never entered → exit 28 (got #{st.exitstatus})", fails)
+  check(err.include?('NEVER ENTERED'), 'gate 4b failure names the silent shortcut', fails)
+  check(err.include?('build-dashboard-layout.rb'), 'gate 4b remedy points at the layout builder', fails)
+end
+
+# phase-5 stamped skip WITH a reason → honored as a recorded, budget-counted waiver
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  ph = RS_PHASES_OK.merge('phase-5' => { 'status' => 'skip', 'note' => 'datasource-only migration - no dashboard', 'ts' => 't' })
+  File.write(File.join(dir, 'run-state.json'), JSON.generate(RS_BASE.merge('phases' => ph)))
+  out, _err, st = run_gate(dir)
+  check(st.success?, "phase-5 skip stamp → exit 0 (got #{st.exitstatus})", fails)
+  check(out.include?('layout-phase-skip') && out.include?('WAIVED'),
+        'gate 4b skip stamp recorded as the layout-phase-skip waiver', fails)
+  pf = JSON.parse(File.read(File.join(dir, 'parity-final.json')))
+  check(Array(pf['waivers']).include?('layout-phase-skip'),
+        'layout-phase-skip stamped into the parity-final waiver census', fails)
+end
+
+# layout-phase-skip spends budget like any other waiver
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  ph = RS_PHASES_OK.merge('phase-5' => { 'status' => 'skip', 'note' => 'n', 'ts' => 't' })
+  File.write(File.join(dir, 'run-state.json'), JSON.generate(RS_BASE.merge('phases' => ph)))
+  _out, err, st = run_gate(dir, '--skip-orphan-check', 'r1', '--skip-anchors-gate', 'r2')
+  check(st.exitstatus == 19, "layout-phase-skip + 2 quality waivers → exit 19 (got #{st.exitstatus})", fails)
+  check(err.include?('layout-phase-skip'), 'budget failure lists layout-phase-skip', fails)
+end
+
+# no run-state.json (manual path) → stated SKIP, unchanged behavior
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  out, _err, st = run_gate(dir)
+  check(st.success? && out.include?('gate 4b') && out.include?('no run-state.json'),
+        'no run-state.json → gate 4b states the SKIP (never silent)', fails)
+end
+
+# unregistered tool → stated SKIP (other converters unaffected)
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'run-state.json'),
+             JSON.generate('tool' => 'looker-to-sigma', 'phases' => { 'phase-1' => { 'status' => 'done' } }))
+  out, _err, st = run_gate(dir)
+  check(st.success? && out.include?('no registered'),
+        'unregistered tool → gate 4b states the SKIP', fails)
+end
+
+# ---- gate 8e: layout-arrangement parity (WARN default, --require-arrangement) -
+ARR_CLEAN = { 'pages' => [{ 'page' => 'Overview', 'tiles_compared' => 5, 'violations' => [] }],
+              'violations_total' => 0, 'enforcement' => 'warn' }.freeze
+ARR_BAD = { 'pages' => [{ 'page' => 'Overview', 'tiles_compared' => 5,
+                          'violations' => ['stacking inverted: "Trend" is ABOVE "Detail" in the source but lands BELOW it in the built grid',
+                                           'controls-shelf class mismatch: the source places its controls as a full-width TOP SHELF but the built grid ships them as a SIDEBAR rail — mirror the source shelf'] }],
+            'violations_total' => 2, 'enforcement' => 'warn' }.freeze
+
+# default (no flag): violations are ADVISORY — WARN lines, exit 0
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'layout-arrangement.json'), JSON.generate(ARR_BAD))
+  out, _err, st = run_gate(dir)
+  check(st.success?, "arrangement violations without --require-arrangement → exit 0 (got #{st.exitstatus})", fails)
+  check(out.include?('[WARN] gate 8e') && out.include?('stacking inverted'),
+        'gate 8e advisory WARN lines name the violations', fails)
+  check(out.include?('--require-arrangement'), 'advisory output points at the enforce flag', fails)
+end
+
+# --require-arrangement: violations block with exit 29
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'layout-arrangement.json'), JSON.generate(ARR_BAD))
+  _out, err, st = run_gate(dir, '--require-arrangement')
+  check(st.exitstatus == 29, "arrangement violations under --require-arrangement → exit 29 (got #{st.exitstatus})", fails)
+  check(err.include?('controls-shelf class mismatch') && err.include?('"Overview"'),
+        'gate 8e failure lists the violations with their page', fails)
+end
+
+# --require-arrangement: clean report passes; missing report on a built dashboard fails
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'layout-arrangement.json'), JSON.generate(ARR_CLEAN))
+  out, _err, st = run_gate(dir, '--require-arrangement')
+  check(st.success? && out.include?('gate 8e: layout arrangement matches the source'),
+        'clean arrangement report passes under --require-arrangement', fails)
+end
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'dashboard-layout.json'), '[]')
+  File.write(File.join(dir, 'layout-census.json'),
+             JSON.generate('pages' => [{ 'page' => 'Overview', 'zones' => 2, 'placed' => 2,
+                                         'dropped' => 0, 'grid_fill_pct' => 0.7 }]))
+  _out, err, st = run_gate(dir, '--require-arrangement')
+  check(st.exitstatus == 29, "dashboard built but no arrangement report under the flag → exit 29 (got #{st.exitstatus})", fails)
+  check(err.include?('layout-arrangement.json'), 'missing-report failure names the artifact', fails)
+end
+
+# no report, no flag → stated SKIP; clean report without the flag → advisory OK
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  out, _err, st = run_gate(dir)
+  check(st.success? && out.include?('gate 8e') && out.include?('not measured'),
+        'no arrangement report → gate 8e states the SKIP (advisory)', fails)
+end
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'layout-arrangement.json'), JSON.generate(ARR_CLEAN))
+  out, _err, st = run_gate(dir)
+  check(st.success? && out.include?('gate 8e (advisory)'),
+        'clean report without the flag → advisory OK line', fails)
+end
+
+# ---- source-level pins: the finalize plumbing (migrate-tableau.rb) -----------
+mig_src = File.read(File.join(__dir__, 'migrate-tableau.rb'))
+check(mig_src.include?("['--require-fidelity-ledger'] : ['--skip-fidelity-gate', 'RCF loop disabled at pass 1 via --rcf-passes 0']"),
+      'finalize passes --require-fidelity-ledger by default and the NAMED --skip-fidelity-gate waiver on --rcf-passes 0', fails)
+
 puts
 if fails.empty?
-  puts 'ALL PASS — assert-phase6-ran gate 8b vision precondition + PR-9 blind-grade binding + divergent-verdict budget injection + gate 11 post-publish guide + gate 16 join-cardinality ledger + gate 17 LOD translation ledger + gate 18 ground-truth numeric coverage + gate 19 aggregation-semantics ledger + gate 20 semantic-edit equivalence ledger (incl. withdrawn entries)'
+  puts 'ALL PASS — assert-phase6-ran gate 8b vision precondition + PR-9 blind-grade binding + divergent-verdict budget injection + gate 11 post-publish guide + gate 16 join-cardinality ledger + gate 17 LOD translation ledger + gate 18 ground-truth numeric coverage + gate 19 aggregation-semantics ledger + gate 20 semantic-edit equivalence ledger (incl. withdrawn entries) + PR-11 gate 8d default-on / gate 4b layout-phase sentinel / gate 8e arrangement parity'
   exit 0
 else
   puts "FAILURES (#{fails.length}):"

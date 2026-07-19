@@ -152,11 +152,20 @@
 #      (grid_fill_pct < --min-grid-fill, default 0.45), OR a dashboard layout was
 #      built but no census was emitted. build-dashboard-layout.rb produces the
 #      census. Escape hatch: --skip-layout-fill "<reason>".
-#  15  RCF fidelity ledger unresolved (gate 8d; OPT-IN via --require-fidelity-ledger)
-#      — the Phase 5g render-compare-fix ledger (fidelity-ledger.json) is missing, or
-#      still carries spec-fixable deltas that were never resolved. Run the RCF loop
-#      (scripts/fidelity-loop.rb) to convergence, or waive named residuals with
-#      --accept-residuals id,id. Only enforced for converters that pass the flag.
+#  15  RCF fidelity ledger unresolved (gate 8d; DEFAULT-ON for converters that
+#      stage the loop — PLAN-v3 PR-11) — the Phase 5g render-compare-fix ledger
+#      (fidelity-ledger.json) is missing, or still carries spec-fixable deltas
+#      that were never resolved. Run the RCF loop (scripts/fidelity-loop.rb) to
+#      convergence, or waive named residuals with --accept-residuals id,id.
+#      Enforcement resolution: --require-fidelity-ledger forces it on;
+#      otherwise the gate reads <workdir>/migrate-state.json — a state whose
+#      rcf_passes is positive (tableau-to-sigma stamps it at pass 1; legacy
+#      pre-5g states without the key are the orchestrator's problem, it passes
+#      the flag) auto-enables the gate, so a standalone gate run can no longer
+#      silently skip the RCF phase. rcf_passes == 0 (the --rcf-passes 0
+#      opt-out) is honored but RECORDED as the named waiver
+#      --skip-fidelity-gate (budget-counted), never silence. Converters that
+#      never stage the loop (no flag, no rcf_passes key) are unaffected.
 #  16  Post-publish interactivity guide missing (gate 11) — the source dashboards
 #      carry filter/highlight/nav ACTIONS (dashboard-layout-meta.json worksheets'
 #      is_action filters, or the *-gaps-report.json "Dashboard filter / highlight /
@@ -330,6 +339,31 @@
 #      of the built spec, so a silently dropped join diverges there). NO
 #      escape flag and NO waiver path: equivalence is measured, not
 #      negotiated.
+#  28  Layout phase never entered (gate 4b, the layout-phase SENTINEL;
+#      PLAN-v3 PR-11) — the workdir's run-state.json phase ledger is tracked
+#      but its layout-phase key (tableau-to-sigma: phase-5) has NO stamp at
+#      all: the orchestration took a silent shortcut and the dashboard grid
+#      was never even attempted (field failure: a session skipped the layout
+#      phase entirely and still handed over a workbook URL). A phase stamped
+#      status:"skip" with a reason is honored but INJECTED into the waiver
+#      census as `layout-phase-skip` (budget-counted) — a deliberate skip is
+#      a recorded degradation, never a free pass. No run-state.json (the
+#      hand-driven manual path) → stated SKIP; the artifact gates (4 live
+#      layout, 8c fill census) still police the outputs. NO escape flag:
+#      stamp the phase (run it, or record the skip with its reason).
+#  29  Layout-arrangement parity failed (gate 8e; OPT-IN via
+#      --require-arrangement — WARN-level first release, PLAN-v3 PR-11) —
+#      <workdir>/layout-arrangement.json (emitted by build-dashboard-layout.rb
+#      beside the fill census) records ordering/class disagreements between
+#      the SOURCE zone arrangement and the BUILT grid: row-band stacking
+#      inversions, within-band left-right inversions, quadrant flips, or a
+#      controls-shelf class mismatch (source top-shelf shipped as a sidebar
+#      rail or vice versa — a 2026-07 field failure). Ordering/quadrant only,
+#      no pixel IoU (robust to grid quantization). Without the flag the
+#      violations print as advisory WARNs (stated, never silent); with it the
+#      report must exist and be violation-free. Also raised under the flag
+#      when a dashboard layout was built but the report is missing (rebuild
+#      with a current build-dashboard-layout.rb).
 #
 # ANCHORS-ORACLE substitution (charts_total==0, exit 2): when every worksheet is
 # dashboard-embedded (no exportable view CSVs), the anchors oracle may stand in
@@ -391,8 +425,11 @@ OptionParser.new do |p|
   p.on('--skip-telemetry-gate REASON', 'waive gate 10 (telemetry consent decision) — REQUIRED reason string. Use ONLY when the run genuinely cannot prompt (e.g. unattended CI). The reason MUST be named in your migration report.') { |v| opts[:skip_telemetry] = v }
   p.on('--skip-postpublish-guide REASON', 'waive gate 11 (post-publish interactivity guide) — REQUIRED reason string. Use ONLY when the source dashboard actions are genuinely not worth a handoff guide. The reason MUST be named in your migration report.') { |v| opts[:skip_postpublish] = v }
   p.on('--accept-deferred-elements REASON', 'waive gate 12 (deferred/quarantined DM elements) — REQUIRED reason string. Use ONLY when knowingly shipping a PARTIAL data model; the reason AND the dropped elements MUST be named in your migration report.') { |v| opts[:accept_deferred] = v }
-  p.on('--require-fidelity-ledger', 'gate 8d (OPT-IN, off by default): require an RCF fidelity-ledger.json (Phase 5g) with zero UNRESOLVED spec-fixable deltas. Adopters (tableau-to-sigma) pass this; other converters are unaffected until they do.') { opts[:require_fidelity] = true }
+  p.on('--require-fidelity-ledger', 'gate 8d: require an RCF fidelity-ledger.json (Phase 5g) with zero UNRESOLVED spec-fixable deltas. DEFAULT-ON (PR-11) for workdirs whose migrate-state.json staged the loop (rcf_passes > 0 — tableau-to-sigma); this flag forces it for everyone else.') { opts[:require_fidelity] = true }
   p.on('--fidelity-ledger PATH', 'gate 8d: path to the RCF ledger (default: <workdir>/fidelity-ledger.json)') { |v| opts[:fidelity_ledger] = v }
+  p.on('--skip-fidelity-gate REASON', 'waive gate 8d (RCF fidelity ledger) — REQUIRED reason string; the named waiver migrate-tableau.rb --finalize records for --rcf-passes 0. Counted against the waiver budget; name it in your migration report. (Data-class ledger entries still block whenever the ledger exists.)') { |v| opts[:skip_fidelity] = v }
+  p.on('--require-arrangement', 'gate 8e (OPT-IN, off by default — WARN-level first release, PR-11): require <workdir>/layout-arrangement.json (build-dashboard-layout.rb) to exist and carry ZERO source-vs-built arrangement violations (stacking/ordering inversions, quadrant flips, controls-shelf class mismatch). Without the flag, violations print as advisory WARNs.') { opts[:require_arrangement] = true }
+  p.on('--arrangement-report PATH', 'gate 8e: path to the arrangement report (default: <workdir>/layout-arrangement.json)') { |v| opts[:arrangement_report] = v }
   p.on('--accept-residuals LIST', 'gate 8d: comma-separated ledger entry ids/indices to WAIVE as accepted residuals (name them in the report). Does NOT apply to data-class entries — those must be fixed or reclassified with evidence.') { |v| opts[:accept_residuals] = v.split(',').map(&:strip) }
   p.on('--skip-anchors-gate REASON', 'waive gate 13 (source-anchor value verification) — REQUIRED reason string. Use ONLY when the source image values are genuinely untranscribable. Counted against the waiver budget; name it in your migration report.') { |v| opts[:skip_anchors] = v }
   p.on('--allow-empty-tiles REASON', 'gate 13: accept displayed dashboard tile(s) that export ZERO data rows — REQUIRED reason string that MUST cite the source PNG showing the chart is genuinely empty on the SOURCE dashboard. Never use this to wave away a broken data path (filter/calc bug). Counted against the waiver budget; name it in your migration report.') { |v| opts[:allow_empty_tiles] = v }
@@ -463,6 +500,49 @@ at_exit do
 end
 
 # ---------------------------------------------------------------------------
+# Gate 8d enforcement resolution (PLAN-v3 PR-11) — DEFAULT-ON for converters
+# that stage the RCF loop. migrate-state.json records rcf_passes at pass 1
+# (tableau-to-sigma); a positive value auto-enables --require-fidelity-ledger
+# so a standalone gate run (the finalize path already passes the flag) can no
+# longer reach GREEN with the RCF phase silently skipped. rcf_passes == 0 is
+# the explicit --rcf-passes 0 opt-out: honored, but converted into the NAMED
+# --skip-fidelity-gate waiver (budget-counted, recorded in waivers.json +
+# parity-final.json) instead of silence. States without the key (other
+# converters / non-RCF workdirs) change nothing.
+# ---------------------------------------------------------------------------
+opts[:fidelity_auto] = nil
+begin
+  _ms_rcf = JSON.parse(File.read(File.join(opts[:tab], 'migrate-state.json')))
+  if _ms_rcf.is_a?(Hash) && _ms_rcf.key?('rcf_passes') && !opts[:skip_fidelity]
+    if _ms_rcf['rcf_passes'].to_i.positive?
+      opts[:fidelity_auto] = "migrate-state.json rcf_passes=#{_ms_rcf['rcf_passes']}" unless opts[:require_fidelity]
+      opts[:require_fidelity] = true
+    elsif !opts[:require_fidelity]
+      opts[:skip_fidelity] = 'RCF loop disabled at pass 1 (--rcf-passes 0, recorded in migrate-state.json)'
+    end
+  end
+rescue StandardError
+  nil # no/unreadable state → opt-in behavior unchanged
+end
+
+# ---------------------------------------------------------------------------
+# Layout-phase sentinel resolution (gate 4b, PLAN-v3 PR-11) — read the phase
+# ledger ONCE up front so a deliberate skip stamp can join the waiver census
+# below (the gate body prints/fails later). Only converters with a registered
+# layout-phase key participate; run-state.json absent → not tracked.
+# ---------------------------------------------------------------------------
+LAYOUT_PHASE_BY_TOOL = { 'tableau-to-sigma' => 'phase-5' }.freeze
+run_state_doc = begin
+  _p = File.join(opts[:tab], 'run-state.json')
+  File.exist?(_p) ? JSON.parse(File.read(_p)) : nil
+rescue StandardError
+  nil
+end
+layout_phase_key = run_state_doc.is_a?(Hash) ? LAYOUT_PHASE_BY_TOOL[run_state_doc['tool'].to_s] : nil
+layout_phase_stamp = layout_phase_key &&
+                     (run_state_doc['phases'].is_a?(Hash) ? run_state_doc['phases'][layout_phase_key] : nil)
+
+# ---------------------------------------------------------------------------
 # Waiver budget (exit 19). EVERY waiver/escape flag is counted — --skip-*,
 # --allow-extract, --allow-missing-tiles>0, --min-pass-rate<1, --accept-* —
 # and the census is stamped into parity-final.json (`waivers` + `waiver_count`)
@@ -489,6 +569,8 @@ WAIVER_HIDES = {
   'visual-divergent'           => 'gate 8b: the recorded visual verdict is DIVERGENT — acknowledged source-vs-target visual gaps ship in the render (verdict-capping divergent→PARTIAL is PLAN-v3 PR-14)',
   '--skip-layout-fill'         => 'gate 8c: dropped/under-filled pages were accepted',
   '--accept-residuals'         => 'gate 8d: named RCF deltas shipped unresolved',
+  '--skip-fidelity-gate'       => 'gate 8d: the RCF fidelity loop was never required — compositional deltas (palette, chart kind, KPI format) were never iterated (--rcf-passes 0 records this waiver)',
+  'layout-phase-skip'          => 'gate 4b: the layout phase was deliberately skipped (run-state stamp status:"skip") — the dashboard grid was never built this run',
   '--skip-visual-tiles'        => 'gate 9: build-from-signals tiles never image-verified',
   '--skip-telemetry-gate'      => 'gate 10: telemetry consent never decided',
   '--skip-postpublish-guide'   => 'gate 11: interactivity handoff guide not required',
@@ -519,6 +601,11 @@ waiver_flags << '--skip-visual-gate'         if opts[:skip_visual]
 waiver_flags << '--skip-visual-comparison'   if opts[:skip_visual_cmp]
 waiver_flags << '--skip-layout-fill'         if opts[:skip_layout_fill]
 waiver_flags << '--accept-residuals'         if opts[:accept_residuals] && !opts[:accept_residuals].empty?
+waiver_flags << '--skip-fidelity-gate'       if opts[:skip_fidelity]
+# A deliberate layout-phase skip stamp is an in-run waiver, injected like the
+# off-ramp kinds below: the phase was consciously not run, and that spends
+# budget exactly like a gate flag (gate 4b prints the record).
+waiver_flags << 'layout-phase-skip'          if layout_phase_stamp.is_a?(Hash) && layout_phase_stamp['status'] == 'skip'
 waiver_flags << '--skip-visual-tiles'        if opts[:skip_visual_tiles]
 waiver_flags << '--skip-telemetry-gate'      if opts[:skip_telemetry]
 waiver_flags << '--skip-postpublish-guide'   if opts[:skip_postpublish]
@@ -1621,6 +1708,45 @@ else
 end
 
 # ---------------------------------------------------------------------------
+# Gate 4b — layout-phase SENTINEL (exit 28; PLAN-v3 PR-11). The artifact gates
+# (4 live layout, 8c fill census) prove layout OUTPUTS when they exist; this
+# proves the layout PHASE was ever entered. Field failure: a session's layout
+# phase never ran at all — no census, no dashboard-layout evidence in a shape
+# 8c could condition on — and the run still handed over a workbook URL. The
+# orchestrator stamps every phase it walks into run-state.json (lib/run_state);
+# when that ledger is tracked, the tool's layout-phase key MUST carry a stamp:
+# "done" passes, "skip" is honored as a RECORDED waiver (injected into the
+# census above as layout-phase-skip, budget-counted), and NO stamp is the
+# silent shortcut this gate makes unreachable. Not tracked (manual path) or an
+# unregistered tool → stated SKIP, never a silent pass. No escape flag.
+# ---------------------------------------------------------------------------
+if run_state_doc.nil?
+  puts '[SKIP] gate 4b: no run-state.json — layout-phase sentinel N/A (hand-driven path; ' \
+       'gates 4/8c still police the layout artifacts)'
+elsif layout_phase_key.nil?
+  puts "[SKIP] gate 4b: run-state tool #{run_state_doc['tool'].inspect} has no registered " \
+       'layout-phase key — sentinel N/A'
+elsif layout_phase_stamp.nil?
+  warn "[FAIL] gate 4b: run-state.json is tracked but the layout phase (#{layout_phase_key}) was " \
+       'NEVER ENTERED — the run took a silent shortcut past the layout build.'
+  warn '       A workbook without its layout phase ships as an unarranged stack no matter what the'
+  warn '       other gates say. Re-run the layout phase (the orchestrator stamps it):'
+  warn "         ruby scripts/build-dashboard-layout.rb --layout #{File.join(opts[:tab], 'dashboard-layout.json')} \\"
+  warn "           --wb-ids #{File.join(opts[:tab], 'wb-ids.json')} --out #{File.join(opts[:tab], 'layout.xml')}"
+  warn "         ruby scripts/put-layout.rb --workbook <id> --layout #{File.join(opts[:tab], 'layout.xml')}"
+  warn '       or drive the run through scripts/migrate-tableau.rb. A deliberate no-layout decision'
+  warn '       must be stamped: RunState.skip(workdir, phase, "<reason>") — recorded, budget-counted,'
+  warn '       never silent. There is no escape flag for this sentinel.'
+  exit 28
+elsif layout_phase_stamp['status'] == 'skip'
+  record_waiver.call('layout-phase-skip', "gate 4b (layout phase #{layout_phase_key})",
+                     layout_phase_stamp['note'])
+else
+  puts "[OK] gate 4b: layout phase entered — #{layout_phase_key} stamped " \
+       "#{layout_phase_stamp['status'].inspect} at #{layout_phase_stamp['ts'] || '?'}"
+end
+
+# ---------------------------------------------------------------------------
 # Gate 8c — layout fill / grid coverage (#259 item 1). A workbook can pass
 # every structural + visual gate above and still ship a page that is mostly
 # empty: tiles silently dropped, or a sparse default stack. build-dashboard-
@@ -1706,19 +1832,30 @@ else
 end
 
 # ---------------------------------------------------------------------------
-# Gate 8d — RCF fidelity ledger (OPT-IN via --require-fidelity-ledger; #Phase 5g).
+# Gate 8d — RCF fidelity ledger (#Phase 5g; DEFAULT-ON per PR-11 — see the
+# enforcement-resolution block above: --require-fidelity-ledger, or
+# migrate-state.json rcf_passes > 0, turns it on; --skip-fidelity-gate /
+# rcf_passes == 0 waives it BY NAME).
 # Structural + value + visual-render + recorded-verdict all passing still leaves
 # the composition gap the render-compare-fix loop closes: a workbook can be
 # faithful in data yet visibly off-brand (generic palette, wrong chart kind, KPI
 # format drift). The loop records each delta into fidelity-ledger.json classified
 # spec-fixable | ui-only | sigma-capability | data; only UNRESOLVED spec-fixable
-# entries block. Adopters pass --require-fidelity-ledger; other converters skip
-# this gate entirely (soft) until they do. Logic mirrors FidelityLoop
+# entries block. Converters that never stage the loop skip this gate (soft)
+# until they adopt it. Logic mirrors FidelityLoop
 # .unresolved_specfixable — inlined here so the shared gate has no cross-plugin dep.
 # ---------------------------------------------------------------------------
 fl_path = opts[:fidelity_ledger] || File.join(opts[:tab], 'fidelity-ledger.json')
 accepted = Array(opts[:accept_residuals]).map(&:to_s)
-if opts[:require_fidelity] && !File.exist?(fl_path)
+if opts[:skip_fidelity]
+  record_waiver.call('--skip-fidelity-gate', 'gate 8d (RCF fidelity ledger)', opts[:skip_fidelity])
+  # (data-class residuals below still block whenever a ledger exists — the
+  # waiver covers the LOOP requirement, never wrong numbers.)
+elsif opts[:fidelity_auto]
+  puts "[NOTE] gate 8d required by DEFAULT — #{opts[:fidelity_auto]} (the RCF loop was staged; " \
+       'opt out only via --rcf-passes 0 at pass 1, which records the --skip-fidelity-gate waiver).'
+end
+if opts[:require_fidelity] && !opts[:skip_fidelity] && !File.exist?(fl_path)
   warn "[FAIL] gate 8d: --require-fidelity-ledger set but #{fl_path} is missing."
   warn '       Run the Phase 5g render-compare-fix loop (scripts/fidelity-loop.rb init/render/record/'
   warn '       apply-patch) to convergence, then re-run. See SKILL.md Phase 5g + refs/fidelity-rubric.md.'
@@ -1753,7 +1890,7 @@ if ledger
     warn '       no escape flag for data-class.'
     exit 15
   end
-  if opts[:require_fidelity]
+  if opts[:require_fidelity] && !opts[:skip_fidelity]
     blocking = entries.each_with_index.select do |e, i|
       e['cls'] == 'spec-fixable' && !e['resolved'] &&
         !accepted.include?(i.to_s) && !accepted.include?(e['id'].to_s)
@@ -1774,6 +1911,56 @@ if ledger
          "0 unresolved spec-fixable, 0 unresolved data-class" \
          "#{resid.any? ? " (#{resid.length} recorded residual(s) → report)" : ''}"
   end
+end
+
+# ---------------------------------------------------------------------------
+# Gate 8e — layout-ARRANGEMENT parity (exit 29; PLAN-v3 PR-11). Gate 8c proves
+# every tile is PLACED and the grid is filled; nothing proved the tiles are
+# arranged the way the SOURCE arranges them (field failures: controls shipped
+# in a sidebar where the source had a top shelf; two charts shipped with their
+# stacking inverted). build-dashboard-layout.rb compares normalized source
+# zone bboxes against the built grid (ordering + quadrant + controls-shelf
+# class, NO pixel IoU) and emits <workdir>/layout-arrangement.json. WARN-level
+# first release: violations print as advisory WARNs by default; the gate hook
+# is --require-arrangement (blocking) so the next release can flip it.
+# ---------------------------------------------------------------------------
+arr_path = opts[:arrangement_report] || File.join(opts[:tab], 'layout-arrangement.json')
+arr_doc = File.exist?(arr_path) ? (JSON.parse(File.read(arr_path)) rescue nil) : nil
+arr_viols = arr_doc.is_a?(Hash) ? Array(arr_doc['pages']).flat_map { |p| Array(p['violations']).map { |v| [p['page'], v] } } : []
+if opts[:require_arrangement]
+  if arr_doc.nil?
+    dash_built_8e = File.exist?(File.join(opts[:tab], 'dashboard-layout.json')) || File.exist?(census_fill_path)
+    if dash_built_8e
+      warn "[FAIL] gate 8e: --require-arrangement set but #{arr_path} is missing/malformed while a"
+      warn '       dashboard layout was built — the arrangement comparison never ran. Rebuild the'
+      warn '       layout with a current build-dashboard-layout.rb (it emits layout-arrangement.json'
+      warn '       beside the fill census), re-PUT, then re-run this gate.'
+      exit 29
+    else
+      puts '[SKIP] gate 8e: no dashboard layout built — arrangement parity N/A'
+    end
+  elsif arr_viols.any?
+    warn "[FAIL] gate 8e: #{arr_viols.length} layout-arrangement violation(s) — the built grid does not"
+    warn '       arrange the tiles the way the source dashboard does:'
+    arr_viols.each { |pg, v| warn "         - #{pg.inspect}: #{v}" }
+    warn '       Rebuild the layout to mirror the source arrangement (band order, within-band order,'
+    warn '       controls shelf), re-PUT, re-render, then re-run. No pixel matching is required —'
+    warn '       only ordering/quadrant/shelf-class agreement.'
+    exit 29
+  else
+    puts "[OK] gate 8e: layout arrangement matches the source — #{Array(arr_doc['pages']).length} page(s), 0 violations"
+  end
+elsif arr_viols.any?
+  puts "[WARN] gate 8e (advisory this release): #{arr_viols.length} layout-arrangement violation(s) — " \
+       'the built grid diverges from the source arrangement:'
+  arr_viols.each { |pg, v| puts "         - #{pg.inspect}: #{v}" }
+  puts '       Not blocking yet (WARN-level first release; --require-arrangement makes it a hard gate).'
+  puts '       Fix the arrangement before handoff and name any residual divergence in your report.'
+elsif arr_doc
+  puts "[OK] gate 8e (advisory): layout arrangement matches the source — #{Array(arr_doc['pages']).length} page(s), 0 violations"
+else
+  puts '[SKIP] gate 8e: no layout-arrangement.json — arrangement parity not measured (advisory; ' \
+       'emitted by build-dashboard-layout.rb since PR-11)'
 end
 
 # ---------------------------------------------------------------------------
