@@ -72,6 +72,20 @@ dash_layout.each do |d|
   rescue StandardError => e
     warn "  WARN  source dashboard image failed for #{name.inspect}: #{e.class}: #{e.message}"
   end
+  # #422: the live fetch needs the Tableau env (a re-entry shell often lacks
+  # TABLEAU_SITE_ID/AUTH_TOKEN) — but discovery already saved every dashboard
+  # PNG to <tab>/dashboards/<name>.png (tableau-discover.rb 3b, same filename
+  # convention as render-baseline.rb). Fall back to it instead of failing the
+  # staging.
+  unless rec['source_png']
+    fb_name = name.to_s.strip.gsub(/[^\w.-]+/, '_').gsub(/\A_+|_+\z/, '')
+    fb = File.join(opts[:tab], 'dashboards', "#{fb_name}.png")
+    if File.size?(fb)
+      FileUtils.cp(fb, src_png)
+      rec['source_png'] = src_png
+      puts "  NOTE  source PNG for #{name.inspect} staged from the discovery-saved #{fb} (live Tableau fetch unavailable)"
+    end
+  end
 
   # 2) Sigma page render
   pid = page_id_by_name[name] || page_id_by_name.reject { |k, _| k == 'Data' }.values.first

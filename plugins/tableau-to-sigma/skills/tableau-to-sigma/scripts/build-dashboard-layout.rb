@@ -34,6 +34,17 @@
 #                    parity scripts. A chart tile renamed during conversion
 #                    otherwise fails the zone→element name match and silently
 #                    drops out of the layout (bead ddbq).
+#                    PERSISTED (#422): every --rename is merged into
+#                    <workdir>/layout-renames.json (beside --layout) and every
+#                    later invocation — orchestrator re-entry included — loads
+#                    and applies it automatically, so the operator never re-types
+#                    the mappings after a re-entry rebuild. CLI flags win over
+#                    the persisted file on conflict.
+#   --no-synthetic-title  never fabricate the page-name header band (the
+#                    synthetic title banner). Also AUTO-suppressed when a prior
+#                    layout.xml at --out carries no header band — i.e. the
+#                    operator removed the banner; a re-entry rebuild must
+#                    respect that last state instead of re-injecting it (#422).
 #   --chart-y0 PCT   top of the chart band as Tableau %  (default 29.7)
 #   --chart-y1 PCT   bottom of the chart band as Tableau % (default 100.0)
 #   --chart-row0 N   first grid row of the chart band     (default 6)
@@ -113,8 +124,57 @@ OptionParser.new do |p|
   p.on('--chart-y1 PCT', Float)   { |v| opts[:chart_y1] = v }
   p.on('--chart-row0 N', Integer) { |v| opts[:chart_row0] = v }
   p.on('--no-containers', 'force the geometry-banded layout even when the dashboard nests a filter/parameter rail') { opts[:no_containers] = true }
+  p.on('--no-synthetic-title', 'never fabricate the page-name header band (synthetic title banner)') { opts[:no_synthetic_title] = true }
 end.parse!
 %i[layout wb_ids out].each { |k| abort("missing --#{k.to_s.tr('_','-')}") unless opts[k] }
+
+# ---- Rename persistence (#422 re-entry repeat-tax) --------------------------
+# Operator --rename mappings used to live only in the invocation: every
+# orchestrator re-entry rebuilt the layout WITHOUT them, silently dropping the
+# renamed tiles until the operator re-typed --rename by hand (live-measured 4x
+# per re-entry). Persist the merged map to <workdir>/layout-renames.json
+# (beside --layout, like the other sidecars) and auto-load it on every build.
+# CLI flags win over the file on conflict; the write-back accumulates.
+RENAMES_PATH = File.join(File.dirname(opts[:layout]), 'layout-renames.json')
+cli_renames = opts[:renames].dup
+if File.exist?(RENAMES_PATH)
+  begin
+    prior = JSON.parse(File.read(RENAMES_PATH))
+    if prior.is_a?(Hash) && prior.any?
+      opts[:renames] = prior.merge(cli_renames) # CLI wins
+      warn "loaded #{prior.size} persisted rename mapping(s) from #{RENAMES_PATH}"
+    end
+  rescue JSON::ParserError => e
+    warn "WARN: #{RENAMES_PATH} unreadable (#{e.message}) — persisted renames ignored this run"
+  end
+end
+if cli_renames.any?
+  begin
+    File.write(RENAMES_PATH, JSON.pretty_generate(opts[:renames]) + "\n")
+    warn "persisted #{opts[:renames].size} rename mapping(s) → #{RENAMES_PATH} (auto-applied on every rebuild, re-entry included)"
+  rescue StandardError => e
+    warn "WARN: could not persist renames to #{RENAMES_PATH}: #{e.class}: #{e.message}"
+  end
+end
+
+# ---- Synthetic-title prior-state suppression (#422) -------------------------
+# When a prior layout.xml exists at --out and shows NO header band (neither a
+# fabricated "-hdrtext" banner nor a "-hdr" band container), the operator
+# removed the banner — a rebuild must respect that last state, not re-inject it.
+unless opts[:no_synthetic_title]
+  begin
+    if File.exist?(opts[:out])
+      prior_xml = File.read(opts[:out])
+      if prior_xml.include?('<Page') && !prior_xml.include?('-hdrtext"') && !prior_xml.include?('-hdr"')
+        opts[:no_synthetic_title] = true
+        warn "prior #{opts[:out]} carries no header band — synthetic title banner auto-suppressed " \
+             '(operator last state respected; pass --no-synthetic-title to make it explicit)'
+      end
+    end
+  rescue StandardError
+    # unreadable prior layout → build as usual
+  end
+end
 
 # Row scaling / px-derived page height (v5.1 defect 1): the page row count is
 # now resolved PER DASHBOARD in the dash loop below — a dashboard with a fixed
@@ -138,7 +198,22 @@ wb_ids      = JSON.parse(File.read(opts[:wb_ids]))
 # overwrite a real display name. Best-effort: no file → no aliases.
 PROV_BY_ID = begin
   prov_path = File.join(File.dirname(opts[:layout]), 'chart-provenance.json')
-  File.exist?(prov_path) ? JSON.parse(File.read(prov_path)) : {}
+  if File.exist?(prov_path)
+    pj = JSON.parse(File.read(prov_path))
+    # ROOT CAUSE (#422 re-entry 1/6 match): build-charts-from-signals writes
+    # { "version": 1, "elements": { "<id>": {...} } } — this loader read the
+    # file FLAT, so every id lookup missed the "elements" envelope and #421's
+    # provenance matching silently never fired in the orchestrated flow (the
+    # unit fixture wrote the flat shape: a false green). Unwrap the envelope;
+    # a flat hand-authored map is still accepted.
+    if pj.is_a?(Hash) && pj['elements'].is_a?(Hash)
+      pj['elements']
+    else
+      pj.is_a?(Hash) ? pj : {}
+    end
+  else
+    {}
+  end
 rescue StandardError
   {}
 end
@@ -603,6 +678,10 @@ def build_page_from_tree(dashboard, page, opts)
     # already renders the source order (title art at its own geometry); a
     # fabricated page-name H1 here would duplicate the wordmark.
     hdr_rows = 0
+  elsif opts[:no_synthetic_title]
+    # #422: synthetic banner suppressed (flag or prior-state) — no fabricated
+    # page-name header; the body starts at the top of the grid.
+    hdr_rows = 0
   else
     # 3. Fabricated page-name header — only when the source has no banner-like
     # content in the top region at all.
@@ -997,12 +1076,13 @@ def build_page_synthesized(dashboard, page, opts, structure)
   # --- header band (rows 1..1+HEADER_ROWS) -----------------------------------
   hdr_style, hdr_dark = header_from_source(dashboard)
   hdr_id = "#{prefix}-hdr"
-  extra_els << container_el(hdr_id, hdr_style)
   hdr_ids = []
   if title_el
     placed << title_el['id']
     hdr_ids << title_el['id']
-  else
+  elsif !opts[:no_synthetic_title]
+    # #422: with --no-synthetic-title (or prior-state suppression) no page-name
+    # banner is fabricated; source header-text zones below still get a band.
     txt_id = "#{prefix}-hdrtext"
     extra_els << header_text_el(txt_id, page['name'], hdr_dark ? '#FFFFFF' : nil)
     hdr_ids << txt_id
@@ -1015,13 +1095,17 @@ def build_page_synthesized(dashboard, page, opts, structure)
     placed << el['id']
     hdr_ids << el['id']
   end
-  nh = hdr_ids.length
-  hdr_inner = hdr_ids.each_with_index.map do |eid, i|
-    c0 = 1 + (24 * i / nh.to_f).round
-    c1 = i == nh - 1 ? 25 : [1 + (24 * (i + 1) / nh.to_f).round, c0 + 1].max
-    le(eid, c0, c1, 1, 1 + HEADER_ROWS)
-  end.join("\n")
-  children << gc(hdr_id, 1, 25, 1, 1 + HEADER_ROWS, hdr_inner)
+  hdr_rows = hdr_ids.empty? ? 0 : HEADER_ROWS
+  unless hdr_ids.empty?
+    extra_els << container_el(hdr_id, hdr_style)
+    nh = hdr_ids.length
+    hdr_inner = hdr_ids.each_with_index.map do |eid, i|
+      c0 = 1 + (24 * i / nh.to_f).round
+      c1 = i == nh - 1 ? 25 : [1 + (24 * (i + 1) / nh.to_f).round, c0 + 1].max
+      le(eid, c0, c1, 1, 1 + hdr_rows)
+    end.join("\n")
+    children << gc(hdr_id, 1, 25, 1, 1 + hdr_rows, hdr_inner)
+  end
 
   # --- controls: sidebar rail vs top control band -----------------------------
   control_zones = zones.select { |z| %w[filter parameter].include?(z['kind'].to_s) }
@@ -1031,7 +1115,7 @@ def build_page_synthesized(dashboard, page, opts, structure)
   band_ctls    = page['elements'].select { |e| e['kind'] == 'control' && !rail_ctl_ids.include?(e['id']) }
 
   ctl_rows   = band_ctls.empty? ? 0 : 3
-  content_r0 = 1 + HEADER_ROWS + ctl_rows
+  content_r0 = 1 + hdr_rows + ctl_rows
   content_c0 = 1
   content_c1 = opts[:page_cols] + 1
   rail_cols  = 0
@@ -1052,7 +1136,7 @@ def build_page_synthesized(dashboard, page, opts, structure)
     end.join("\n")
     ctl_id = "#{prefix}-ctl"
     extra_els << container_el(ctl_id)
-    children << gc(ctl_id, content_c0, content_c1, 1 + HEADER_ROWS, 1 + HEADER_ROWS + ctl_rows, ctl_inner)
+    children << gc(ctl_id, content_c0, content_c1, 1 + hdr_rows, 1 + hdr_rows + ctl_rows, ctl_inner)
   end
 
   # --- content mapping ---------------------------------------------------------
@@ -1237,8 +1321,8 @@ def build_page_synthesized(dashboard, page, opts, structure)
       rail_r1 = [content_bottom, page_rows + 1].max
       rc0 = rail[:side] == :left ? 1 : content_c1
       rc1 = rail[:side] == :left ? 1 + rail_cols : opts[:page_cols] + 1
-      rail_rect = [rc0, rc1, 1 + HEADER_ROWS, rail_r1]
-      children << gc(rid, rc0, rc1, 1 + HEADER_ROWS, rail_r1, rail_inner, cols: 1)
+      rail_rect = [rc0, rc1, 1 + hdr_rows, rail_r1]
+      children << gc(rid, rc0, rc1, 1 + hdr_rows, rail_r1, rail_inner, cols: 1)
     end
   end
 
@@ -1253,7 +1337,7 @@ def build_page_synthesized(dashboard, page, opts, structure)
   end
   rects = []
   units.each_with_index { |u, i| rects << urects[i] unless u[:kind] == :text }
-  rects << [content_c0, content_c1, 1 + HEADER_ROWS, 1 + HEADER_ROWS + ctl_rows] unless band_ctls.empty?
+  rects << [content_c0, content_c1, 1 + hdr_rows, 1 + hdr_rows + ctl_rows] unless band_ctls.empty?
   rects << rail_rect if rail_rect
   rects << band_rect if band_rect
   fill = ZoneCensus.grid_fill_pct(rects, opts[:page_cols], page_rows)
@@ -1330,11 +1414,17 @@ def build_page_for_dashboard(dashboard, page, opts)
   # one; otherwise transparent — title on the canvas, no fabricated navy).
   hdr_style, hdr_dark = header_from_source(dashboard)
   hdr_id = "#{ov_prefix}-hdr"
-  extra_els << container_el(hdr_id, hdr_style)
+  hdr_rows = HEADER_ROWS
   if title_el
+    extra_els << container_el(hdr_id, hdr_style)
     children << header_band_xml(hdr_id, title_el['id'])
     placed << title_el['id']
+  elsif o[:no_synthetic_title]
+    # #422: synthetic banner suppressed (flag or prior-state) — no fabricated
+    # page-name header; content starts at the top of the grid.
+    hdr_rows = 0
   else
+    extra_els << container_el(hdr_id, hdr_style)
     txt_id = "#{ov_prefix}-hdrtext"
     extra_els << header_text_el(txt_id, page['name'], hdr_dark ? '#FFFFFF' : nil)
     children << header_band_xml(hdr_id, txt_id)
@@ -1353,7 +1443,7 @@ def build_page_for_dashboard(dashboard, page, opts)
     end.join("\n")
     ctl_id = "#{ov_prefix}-ctl"
     extra_els << container_el(ctl_id)
-    children << gc(ctl_id, 1, o[:page_cols] + 1, 1 + HEADER_ROWS, 1 + HEADER_ROWS + ctl_rows, inner)
+    children << gc(ctl_id, 1, o[:page_cols] + 1, 1 + hdr_rows, 1 + hdr_rows + ctl_rows, inner)
     placed.concat(ctl_els.map { |c| c['id'] })
   end
 
@@ -1366,7 +1456,7 @@ def build_page_for_dashboard(dashboard, page, opts)
   # pushes subsequent bands down; the grid stays collision-free.
   kind_by_id = page['elements'].each_with_object({}) { |e, h| h[e['id']] = e['kind'] }
   bands, min_exp = SigmaLayout.enforce_min_rows(bands, kind_by_id)
-  content_start = 1 + HEADER_ROWS + ctl_rows
+  content_start = 1 + hdr_rows + ctl_rows
   band_offset = bands.empty? ? 0 : content_start - bands.first.map { |i| i[3] }.min
   bands.each_with_index do |band, i|
     cid = "#{ov_prefix}-#{i + 1}"
@@ -1383,7 +1473,7 @@ def build_page_for_dashboard(dashboard, page, opts)
   text_els = page['elements'].select { |e| e['kind'] == 'text' && e['id'].to_s.start_with?('text-') }
   unless text_els.empty?
     tn = text_els.length
-    r0 = 1 + HEADER_ROWS + ctl_rows + bands.sum { |b| b.map { |i| i[4] }.max - b.map { |i| i[3] }.min }
+    r0 = 1 + hdr_rows + ctl_rows + bands.sum { |b| b.map { |i| i[4] }.max - b.map { |i| i[3] }.min }
     inner = text_els.each_with_index.map do |e, i|
       c0 = 1 + (o[:page_cols] * i / tn.to_f).round
       c1 = i == tn - 1 ? o[:page_cols] + 1 : [1 + (o[:page_cols] * (i + 1) / tn.to_f).round, c0 + 1].max
@@ -1404,7 +1494,7 @@ def build_page_for_dashboard(dashboard, page, opts)
   # bottom band. An element in the built page but absent from the layout is
   # auto-flowed by Sigma as a stray white card (bottom-left), so NOTHING may
   # be left unreferenced.
-  content_bottom = 1 + HEADER_ROWS + ctl_rows +
+  content_bottom = 1 + hdr_rows + ctl_rows +
                    bands.sum { |b| b.map { |i| i[4] }.max - b.map { |i| i[3] }.min } +
                    (text_els.empty? ? 0 : 4)
   band_rect = safety_net_band(page, placed, extra_els, children, ov_prefix,
@@ -1421,7 +1511,7 @@ def build_page_for_dashboard(dashboard, page, opts)
   content_zones = ZoneCensus.content_zones(dashboard['zones'])
   placed_count = content_zones.count { |z| find_zone_el(els_by_name, z, o[:renames]) }
   content_rects = bands.flat_map { |b| b.map { |i| [i[1], i[2], i[3] + band_offset, i[4] + band_offset] } }
-  content_rects << [1, o[:page_cols] + 1, 1 + HEADER_ROWS, 1 + HEADER_ROWS + ctl_rows] if ctl_els.length.positive?
+  content_rects << [1, o[:page_cols] + 1, 1 + hdr_rows, 1 + hdr_rows + ctl_rows] if ctl_els.length.positive?
   content_rects << band_rect if band_rect # safety band holds real tiles → counts as filled
   fill = ZoneCensus.grid_fill_pct(content_rects, o[:page_cols], o[:page_rows])
   census = ZoneCensus.page_record(page['name'], content_zones.size, placed_count, fill)
