@@ -31,6 +31,8 @@ propagated (bars shipped where the source shows lines).
 | `workbook-content.twb` | The synthetic workbook XML (5 worksheets + `Activity Monitor` dashboard) |
 | `join-plan.entries.json` | PINNED `lib/join_plan.rb` derivation: ONE left-join entry on `CURRENT_FLAG` |
 | `probe-fixture/entry-0.json` | Canned probe result: 6 rows over 2 distinct flag values (NON-UNIQUE) |
+| `equiv-fixture/before.json` | Canned equivalence-probe result, join KEPT: 26 rows over 8 `ORDER_ID` grain keys, `SUM(AMOUNT)` 9575.0 (the fan-out) |
+| `equiv-fixture/after.json` | Canned equivalence-probe result, join ELIDED: 8 rows over 8 grain keys, `SUM(AMOUNT)` 2950.0 |
 | `checks.sh` | Executable expectations, run by `run-corpus.sh --check` |
 
 ## Expected gate behaviors (encoded in checks.sh)
@@ -44,12 +46,21 @@ propagated (bars shipped where the source shows lines).
    `DEMO_DB.ANALYTICS.SEGMENT_DIM`) — the elision candidate is on record
    before any semantic edit.
 3. **Probe**: the fixture proves the flag key non-unique → exit 2 FATAL.
-   Contract: "provably no-op" must be proven by measurement (PR-8's
-   equivalence probe extends this); an unproven elision blocks GREEN via
-   gate 16.
+   Contract: "provably no-op" must be proven by measurement; an unproven
+   elision blocks GREEN via gate 16.
 4. **Chart kinds**: `parse-twb-layout.rb` signals keep both trend worksheets
    `chart_kind: "line"` (crosstab stays `pivot-table`) — the pin PR-10's
    kind-parity gate builds on.
+5. **Equivalence probe (PR-8, live)**: `probe-equivalence.rb --fixture
+   equiv-fixture` measures the elision itself — before (join kept) 26 rows /
+   `SUM(AMOUNT)` 9575.0 vs after (join dropped) 8 rows / 2950.0 at identical
+   grain cardinality → `match:false`, exit 2 FATAL naming BOTH sides'
+   numbers, and a `semantic-edits.json` entry that blocks GREEN via gate 20
+   (exit 27). The field agent's "provably no-op" claim is mechanically
+   REFUTED — this case's elision is no longer merely *unproven*, it is
+   *disproven*. (Honest limit: the probe polices DECLARED edits; an
+   undeclared elision is caught by the join-plan / ground-truth gates, which
+   is why checks 2–3 stay pinned alongside this one.)
 
 ## Known limitation (recorded, not yet gated)
 
@@ -80,6 +91,8 @@ ruby -rjson -I plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/lib -r j
     {"path": "workbook-content.twb", "format": "xml"},
     {"path": "join-plan.entries.json", "format": "json"},
     {"path": "probe-fixture/entry-0.json", "format": "json"},
+    {"path": "equiv-fixture/before.json", "format": "json"},
+    {"path": "equiv-fixture/after.json", "format": "json"},
     {"path": "checks.sh", "format": "text"}
   ]
 }
