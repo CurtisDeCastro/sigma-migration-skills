@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # PR-18 regression test — integer-coded dimension detection + decode-to-text routing.
 #
-# THE FAILURE CLASS (field: sussman + Twin C): an INTEGER warehouse column
+# THE FAILURE CLASS (field: a multi-page session + Twin C): an INTEGER warehouse column
 # (STORE_KEY) used as a DISCRETE dimension on a Tableau quick filter. A Sigma
 # list/dropdown control sources STRING option values, so a filter target on the
 # raw integer column is accepted then SILENTLY stripped (reads back filters:null
@@ -185,7 +185,7 @@ check(build_log =~ /INTEGER column used as a discrete dimension|auto-decoded via
       'builder loudly announces the integer-dim decode routing', fails)
 
 # ---- 7. Dashboard filter-ZONE promotion (no <shared-view>) --------------------
-# The live "Wallet Health Executive" shape: the integer quick filter is a
+# The live "a live executive dashboard" shape: the integer quick filter is a
 # dashboard filter ZONE, not a <shared-view>. Without promotion the control is
 # SILENTLY DROPPED (Twin C hand-authored it). PR-18 promotes ONLY the integer-dim
 # zone filter (a STRING zone filter stays unemitted — byte-identical).

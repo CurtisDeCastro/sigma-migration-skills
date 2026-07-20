@@ -233,7 +233,7 @@ An INTEGER warehouse column used as a DISCRETE dimension on a quick filter
 STRING option values**, so a filter target on the raw integer column is accepted
 by POST/PUT (200) then **SILENTLY stripped** — the readback carries
 `filters: null` and the control filters nothing (same class as the datetime /
-numeric strip in `control-parity.md`). The field failure (sussman + Twin C): the
+numeric strip in `control-parity.md`). The field failure (a field session + Twin C): the
 dashboard shipped a `STORE_KEY` multi-select that did nothing.
 
 **Fix — a `Text([<col>])` decode column the control binds to** (both its filter

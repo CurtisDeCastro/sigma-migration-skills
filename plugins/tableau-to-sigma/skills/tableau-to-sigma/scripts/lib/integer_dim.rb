@@ -3,7 +3,7 @@
 # integer_dim.rb — PR-18: integer-coded dimension detection + decode-to-text
 # routing helpers (tableau-to-sigma-local; NOT a shared lib).
 #
-# THE FAILURE CLASS (field: sussman + Twin C). An INTEGER warehouse column
+# THE FAILURE CLASS (field: a multi-page session + Twin C). An INTEGER warehouse column
 # (STORE_KEY / PROMO_KEY / SITE_KEY) used in Tableau as a DISCRETE dimension on
 # a quick-filter shelf. Sigma list/dropdown controls source their option values
 # as STRINGS, so a list control whose filter TARGET is the raw integer column is
