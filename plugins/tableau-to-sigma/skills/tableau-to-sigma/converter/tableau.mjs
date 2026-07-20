@@ -2123,6 +2123,16 @@ function encodeBase62(n, len) {
   }
   return s.padStart(len, SIGMA_CHARS[0]);
 }
+function fnv1a32(s) {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+var NS_MODULUS = 62 ** 4;
+var NS_BLOCK = 1e6;
 var SIGMA_LOWERCASE_WORDS = /* @__PURE__ */ new Set([
   "a",
   "an",
@@ -2146,9 +2156,15 @@ var SIGMA_LOWERCASE_WORDS = /* @__PURE__ */ new Set([
   "via",
   "per"
 ]);
-function resetIds() {
+function resetIds(seed) {
   _usedIds.clear();
-  _idCounter = 0;
+  _idCounter = seed == null ? 0 : fnv1a32(seed) % NS_MODULUS * NS_BLOCK;
+}
+function clampId(id, max = 64) {
+  if (id.length <= max)
+    return id;
+  const suffix = "~" + encodeBase62(fnv1a32(id) % 62 ** 6, 6);
+  return id.slice(0, max - suffix.length) + suffix;
 }
 function sigmaShortId(len = 10) {
   let id;
@@ -2160,7 +2176,7 @@ function sigmaShortId(len = 10) {
 }
 function sigmaInodeId(identifier, casing = "upper") {
   const phys = casing === "lower" ? identifier.toLowerCase() : identifier.toUpperCase();
-  return `inode-${sigmaShortId(22)}/${phys}`;
+  return clampId(`inode-${sigmaShortId(22)}/${phys}`);
 }
 function sigmaDisplayName(s) {
   const normalized = (s || "").replace(/([a-z])([A-Z])/g, "$1_$2").replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2").replace(/([A-Za-z])([0-9])/g, "$1_$2").replace(/([0-9])([A-Za-z])/g, "$1_$2");
@@ -2987,7 +3003,7 @@ function tableauFormulaIsRls(formula) {
 
 // ../dm-mcp/build/tableau.js
 function paramControlId(rawName) {
-  return "ctl-" + rawName.replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-|-$/g, "").toLowerCase();
+  return clampId("ctl-" + rawName.replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-|-$/g, "").toLowerCase());
 }
 var xmlParser = new import_fast_xml_parser.XMLParser({
   ignoreAttributes: false,
@@ -4173,8 +4189,9 @@ function buildMultiDatasourceModel(xmlContent, options, datasources) {
   };
 }
 function convertTableauToSigma(xmlContent, options = {}) {
-  if (!options.__multiDsChild)
-    resetIds();
+  if (!options.__multiDsChild) {
+    resetIds(`ds${options.datasourceIndex ?? 0}\0${xmlContent}`);
+  }
   const { connectionId = "", database = "", schema = "", datasourceIndex = 0, tableMapping = {} } = options;
   _tableMapping = tableMapping || {};
   const dbOverride = database || "";
@@ -5104,7 +5121,7 @@ ${joinSql}
       } else if (top.countControl) {
         const param = parameters.find((p) => p.name.toUpperCase() === top.countControl.toUpperCase() || p.rawName?.toUpperCase() === top.countControl.toUpperCase() || sigmaDisplayName(p.name).toUpperCase() === sigmaDisplayName(top.countControl).toUpperCase());
         const ctlSourceName = param?.name || top.countControl;
-        const cidBase = sigmaDisplayName(ctlSourceName).replace(/\s+/g, "-");
+        const cidBase = clampId(sigmaDisplayName(ctlSourceName).replace(/\s+/g, "-"));
         controlId = cidBase;
         const defaultVal = parseInt(param?.defaultVal || "10", 10) || 10;
         if (param)
