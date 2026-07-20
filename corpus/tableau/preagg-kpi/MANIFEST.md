@@ -35,6 +35,7 @@ silent drop), plus the dual-axis and integer-coded-dimension LOOKS-BAD traps.
 | `dm-spec.fixture.json` | Canned converter-emission fixture (the audit's `--dm-spec` seam): the FIELD shape — `Daily Distinct Buyers` fuzzy-aliased to a raw `ACTIVE_BUYER_FLAG` column, `Daily Active Sales` emitted nowhere, plus an emitted `Sum([Daily Distinct Buyers])` ratio column (the PR-7 emitted-side trap) |
 | `lod-audit.entries.json` | PINNED `audit-lod-calcs.rb` ledger: `suspect-alias` + `silently-dropped` — honest CURRENT-code classification (run 2026-07-18) |
 | `agg-semantics.entries.json` | PINNED `audit-agg-semantics.rb` ledger (PR-7): 9 hits — `additive-over-preagg` (SUM over the `{FIXED day: COUNTD}` calcs, source + emitted) and `preagg-ratio` (the ratio KPIs via the "Distinct" name token) |
+| `probe-fixture-intdim/` | Offline fixture for the PR-18 cardinality probe (`entry-0.json` → low `distinct`) |
 | `checks.sh` | Executable expectations, run by `run-corpus.sh --check` |
 
 ## Expected gate behaviors (encoded in checks.sh)
@@ -70,13 +71,16 @@ silent drop), plus the dual-axis and integer-coded-dimension LOOKS-BAD traps.
    detection only fires on explicit synchronization. The check FAILS LOUDLY
    if this ever flips, forcing the MANIFEST + pin update — that flip is the
    acceptance signal for a dual-axis detection fix (PR-10/PR-11 territory).
-
-## Known gaps (documented, NOT yet gated)
-
-- **Integer-coded dimension filter (→ PLAN-v3 PR-18)**: `SITE_KEY` is an
-  integer-typed dimension driving a dashboard filter; no detection/decode
-  routing exists yet. PR-18's shelf-role + cardinality probe (via PR-4's
-  runner) lands here as its fixture.
+5. **Integer-coded dimension detection (PR-18 — LANDED; the gap this SITE_KEY
+   shape was built to close)**: `parse-twb-layout.rb` flags the integer
+   `SITE_KEY` quick filter `integer_dim: true` (shelf role = dimension +
+   datatype = integer); a STRING list filter stays unflagged. The OPTIONAL
+   warehouse-cardinality probe (`probe-int-dim-cardinality.rb`, fixture mode,
+   via PR-4's one-shot-probe runner) confirms the low COUNT(DISTINCT SITE_KEY).
+   Downstream, `build-charts-from-signals.rb` routes such a list control's
+   filter target + value-source through a `Text([SITE_KEY])` decode column so
+   the Sigma control's STRING option values actually filter (a raw numeric
+   list-filter target is silently stripped).
 
 ## Converter
 
