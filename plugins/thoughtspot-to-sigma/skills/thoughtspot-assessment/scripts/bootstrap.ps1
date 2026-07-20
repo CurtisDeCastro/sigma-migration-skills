@@ -1,6 +1,6 @@
-# bootstrap.ps1 — ONE command that takes a fresh Windows machine to
+# bootstrap.ps1 -- ONE command that takes a fresh Windows machine to
 # doctor-green. PLAN-v3 PR-15: environment bootstrap burned ~25-30% of field
-# tokens (hand-driven runtime installs, TTY/creds failures) — this script
+# tokens (hand-driven runtime installs, TTY/creds failures) -- this script
 # replaces every "install X by hand" instruction on Windows.
 #
 #   powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1 [-WorkDir DIR]
@@ -8,14 +8,14 @@
 #
 # Contract (same as bootstrap.sh):
 #   * IDEMPOTENT and NON-INTERACTIVE (no prompts, no-TTY-safe).
-#   * NEVER requires admin: installs are user-scoped only — winget with
+#   * NEVER requires admin: installs are user-scoped only -- winget with
 #     --scope user where the package supports it, scoop (itself a no-admin
 #     user-dir install) as the portable route, fnm for node, pip --user for
 #     python deps. It never elevates.
 #   * Creds flow runs only when SIGMA_CLIENT_ID/SIGMA_CLIENT_SECRET (and
 #     Tableau PAT vars, where the tableau scripts ship) are already set
-#     (ruby scripts/setup.rb --from-env — values never echoed).
-#   * Finishes by running scripts\doctor.ps1 (writes doctor.json — the report
+#     (ruby scripts/setup.rb --from-env -- values never echoed).
+#   * Finishes by running scripts\doctor.ps1 (writes doctor.json -- the report
 #     the orchestrator gates on) and writing the bootstrap SENTINEL
 #     (~/.sigma-migration/bootstrap.json, + <WorkDir>\bootstrap.json).
 #   * -Check = DRY RUN: report what WOULD install, change nothing, skip the
@@ -44,7 +44,7 @@ function Activate-PathDir([string]$dir) {
   if (($env:Path -split ';') -contains $dir) { return }
   $env:Path = "$dir;$env:Path"
   if ($Check) { return }
-  # Persist USER-scope PATH (never machine scope — no admin).
+  # Persist USER-scope PATH (never machine scope -- no admin).
   $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
   if (-not (($userPath -split ';') -contains $dir)) {
     [Environment]::SetEnvironmentVariable('Path', "$dir;$userPath", 'User')
@@ -86,17 +86,17 @@ else {
   } elseif (HaveScoop) {
     Plan "ruby not found" "scoop install ruby (portable, user-dir, no admin)"
     if (-not $Check) {
-      if (ScoopInstall 'ruby') { $script:Actions += 'install: ruby (scoop)'; if (Have 'ruby') { Okay "ruby $((& ruby -e 'print RUBY_VERSION' 2>$null)) (scoop)" } else { $script:InstallFailed = $true; Note 'scoop installed ruby but it is not resolvable — open a new shell and re-run bootstrap' } }
+      if (ScoopInstall 'ruby') { $script:Actions += 'install: ruby (scoop)'; if (Have 'ruby') { Okay "ruby $((& ruby -e 'print RUBY_VERSION' 2>$null)) (scoop)" } else { $script:InstallFailed = $true; Note 'scoop installed ruby but it is not resolvable -- open a new shell and re-run bootstrap' } }
       else { $script:InstallFailed = $true; Note 'scoop install ruby FAILED' }
     }
   } elseif (HaveWinget) {
     Plan "ruby not found" "winget install RubyInstaller.Ruby.3.2 (user scope; no admin)"
     if (-not $Check) {
-      if (WingetUserInstall 'RubyInstaller.Ruby.3.2') { $script:Actions += 'install: ruby (winget)'; if (-not (Have 'ruby')) { Note 'winget installed ruby — a NEW shell may be needed for PATH; re-run bootstrap there' } else { Okay "ruby $((& ruby -e 'print RUBY_VERSION' 2>$null)) (winget)" } }
+      if (WingetUserInstall 'RubyInstaller.Ruby.3.2') { $script:Actions += 'install: ruby (winget)'; if (-not (Have 'ruby')) { Note 'winget installed ruby -- a NEW shell may be needed for PATH; re-run bootstrap there' } else { Okay "ruby $((& ruby -e 'print RUBY_VERSION' 2>$null)) (winget)" } }
       else { $script:InstallFailed = $true; Note 'winget install ruby FAILED' }
     }
   } else {
-    Plan "ruby not found (no scoop, no winget)" "no admin-free install route — the USER should install scoop (https://scoop.sh, no admin) and re-run bootstrap"
+    Plan "ruby not found (no scoop, no winget)" "no admin-free install route -- the USER should install scoop (https://scoop.sh, no admin) and re-run bootstrap"
     if (-not $Check) { $script:InstallFailed = $true }
   }
 }
@@ -124,17 +124,17 @@ if ($script:PyExe) {
   if (HaveScoop) {
     Plan "no real Python (Store stub or none)" "scoop install python (portable, user-dir, no admin)"
     if (-not $Check) {
-      if (ScoopInstall 'python') { $script:Actions += 'install: python (scoop)'; if (Test-RealPython 'python' $null) { $script:PyExe = 'python'; Okay 'python (scoop)' } else { $script:InstallFailed = $true; Note 'scoop installed python but it is not resolvable — open a new shell and re-run bootstrap' } }
+      if (ScoopInstall 'python') { $script:Actions += 'install: python (scoop)'; if (Test-RealPython 'python' $null) { $script:PyExe = 'python'; Okay 'python (scoop)' } else { $script:InstallFailed = $true; Note 'scoop installed python but it is not resolvable -- open a new shell and re-run bootstrap' } }
       else { $script:InstallFailed = $true; Note 'scoop install python FAILED' }
     }
   } elseif (HaveWinget) {
     Plan "no real Python (Store stub or none)" "winget install Python.Python.3.12 (user scope; no admin)"
     if (-not $Check) {
-      if (WingetUserInstall 'Python.Python.3.12') { $script:Actions += 'install: python (winget)'; if (Test-RealPython 'py' '-3') { $script:PyExe = 'py'; $script:PyPre = '-3'; Okay 'python (winget, py -3)' } else { Note 'winget installed python — a NEW shell may be needed for PATH; re-run bootstrap there' } }
+      if (WingetUserInstall 'Python.Python.3.12') { $script:Actions += 'install: python (winget)'; if (Test-RealPython 'py' '-3') { $script:PyExe = 'py'; $script:PyPre = '-3'; Okay 'python (winget, py -3)' } else { Note 'winget installed python -- a NEW shell may be needed for PATH; re-run bootstrap there' } }
       else { $script:InstallFailed = $true; Note 'winget install python FAILED' }
     }
   } else {
-    Plan "no real Python (no scoop, no winget)" "no admin-free install route — the USER should install scoop (https://scoop.sh) and re-run bootstrap"
+    Plan "no real Python (no scoop, no winget)" "no admin-free install route -- the USER should install scoop (https://scoop.sh) and re-run bootstrap"
     if (-not $Check) { $script:InstallFailed = $true }
   }
 }
@@ -150,7 +150,7 @@ if ($script:PyExe) {
       & $script:PyExe @pyArgs -m pip install --user --quiet pillow numpy requests 2>&1 | Out-Null
       & $script:PyExe @pyArgs -c "import PIL, numpy, requests" 2>$null | Out-Null
       if ($LASTEXITCODE -eq 0) { $script:Actions += 'install: pip --user pillow numpy requests'; Okay 'python deps installed (pip --user)' }
-      else { $script:InstallFailed = $true; Note 'pip --user install FAILED (offline? proxy?) — re-run bootstrap when the network allows' }
+      else { $script:InstallFailed = $true; Note 'pip --user install FAILED (offline? proxy?) -- re-run bootstrap when the network allows' }
     }
   }
 }
@@ -180,7 +180,7 @@ else {
   } elseif (HaveScoop) {
     Plan "node not found" "scoop install nodejs-lts (portable, user-dir, no admin)"
     if (-not $Check) {
-      if (ScoopInstall 'nodejs-lts') { $script:Actions += 'install: node (scoop)'; if (Have 'node') { Okay "node $((& node --version 2>$null)) (scoop)" } else { $script:InstallFailed = $true; Note 'scoop installed node but it is not resolvable — open a new shell and re-run bootstrap' } }
+      if (ScoopInstall 'nodejs-lts') { $script:Actions += 'install: node (scoop)'; if (Have 'node') { Okay "node $((& node --version 2>$null)) (scoop)" } else { $script:InstallFailed = $true; Note 'scoop installed node but it is not resolvable -- open a new shell and re-run bootstrap' } }
       else { $script:InstallFailed = $true; Note 'scoop install nodejs-lts FAILED' }
     }
   } elseif (HaveWinget) {
@@ -188,17 +188,17 @@ else {
     if (-not $Check) {
       if (WingetUserInstall 'Schniz.fnm') {
         $script:Actions += 'install: fnm (winget)'
-        Note 'fnm installed — a NEW shell may be needed for PATH; re-run bootstrap there to finish node'
+        Note 'fnm installed -- a NEW shell may be needed for PATH; re-run bootstrap there to finish node'
         if (Have 'fnm') { & fnm install --lts 2>&1 | Out-Null; if (Have 'node') { Okay "node $((& node --version 2>$null)) (fnm)" } }
       } else { $script:InstallFailed = $true; Note 'winget install Schniz.fnm FAILED' }
     }
   } else {
-    Plan "node not found (no fnm, no scoop, no winget)" "no admin-free install route — the USER should install scoop (https://scoop.sh) and re-run bootstrap"
+    Plan "node not found (no fnm, no scoop, no winget)" "no admin-free install route -- the USER should install scoop (https://scoop.sh) and re-run bootstrap"
     if (-not $Check) { $script:InstallFailed = $true }
   }
 }
 
-# --- bash (Git Bash — get-token.sh / *-auth.sh token minting) ---------------
+# --- bash (Git Bash -- get-token.sh / *-auth.sh token minting) ---------------
 if (Have 'bash') { Okay "bash $((Get-Command bash).Source)" }
 else {
   $gitBash = @((Join-Path $env:USERPROFILE 'scoop\apps\git\current\bin'),
@@ -235,8 +235,8 @@ elseif ($env:SIGMA_CLIENT_ID -and $env:SIGMA_CLIENT_SECRET) {
     if ((Have 'ruby') -and (Test-Path (Join-Path $PSScriptRoot 'setup.rb'))) {
       & ruby (Join-Path $PSScriptRoot 'setup.rb') --from-env 2>&1 | Out-Null
       if ($LASTEXITCODE -eq 0) { $script:Actions += 'creds: setup.rb --from-env'; Okay 'Sigma credentials persisted from the environment' }
-      else { $script:InstallFailed = $true; Note 'setup.rb --from-env FAILED — check SIGMA_CLIENT_ID/SIGMA_CLIENT_SECRET' }
-    } else { $script:InstallFailed = $true; Note 'setup.rb (or ruby) unavailable — re-run bootstrap after ruby resolves' }
+      else { $script:InstallFailed = $true; Note 'setup.rb --from-env FAILED -- check SIGMA_CLIENT_ID/SIGMA_CLIENT_SECRET' }
+    } else { $script:InstallFailed = $true; Note 'setup.rb (or ruby) unavailable -- re-run bootstrap after ruby resolves' }
   }
 } else {
   Plan "Sigma credentials MISSING (no $envFile, no SIGMA_CLIENT_ID/SIGMA_CLIENT_SECRET)" "set SIGMA_CLIENT_ID + SIGMA_CLIENT_SECRET (+ SIGMA_BASE_URL) and re-run bootstrap - or the USER runs 'ruby scripts/setup.rb' once in a real terminal"
@@ -249,12 +249,12 @@ if (Test-Path (Join-Path $PSScriptRoot 'setup-tableau.rb')) {
     if (-not $Check) {
       & ruby (Join-Path $PSScriptRoot 'setup-tableau.rb') --from-env 2>&1 | Out-Null
       if ($LASTEXITCODE -eq 0) { $script:Actions += 'creds: setup-tableau.rb --from-env'; Okay 'Tableau credentials persisted from the environment' }
-      else { $script:InstallFailed = $true; Note 'setup-tableau.rb --from-env FAILED — check the TABLEAU_* exports' }
+      else { $script:InstallFailed = $true; Note 'setup-tableau.rb --from-env FAILED -- check the TABLEAU_* exports' }
     }
-  } else { Note '(Tableau PAT not configured — WARN-level; set TABLEAU_PAT_NAME/TABLEAU_PAT_SECRET and re-run bootstrap to persist.)' }
+  } else { Note '(Tableau PAT not configured -- WARN-level; set TABLEAU_PAT_NAME/TABLEAU_PAT_SECRET and re-run bootstrap to persist.)' }
 }
 
-# --- check mode stops here (no doctor, no writes — offline-safe) ------------
+# --- check mode stops here (no doctor, no writes -- offline-safe) ------------
 if ($Check) {
   Write-Host ""
   if ($script:Needed -eq 0) {
@@ -265,7 +265,7 @@ if ($Check) {
   exit 1
 }
 
-# --- doctor (writes doctor.json — the report the orchestrator gates on) -----
+# --- doctor (writes doctor.json -- the report the orchestrator gates on) -----
 Write-Host "`nRunning the environment doctor..."
 $doctorArgs = @('-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'doctor.ps1'))
 if ($WorkDir) { $doctorArgs += @('-WorkDir', $WorkDir) }
@@ -288,7 +288,7 @@ function Write-Sentinel([string]$dest) {
   try {
     $dir = Split-Path -Parent $dest
     if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
-    # BOM-less UTF-8 (Ruby's JSON.parse chokes on a BOM) — same as doctor.ps1.
+    # BOM-less UTF-8 (Ruby's JSON.parse chokes on a BOM) -- same as doctor.ps1.
     [System.IO.File]::WriteAllText($dest, $json, (New-Object System.Text.UTF8Encoding($false)))
   } catch { }
 }
