@@ -39,7 +39,6 @@ $LOAD_PATH.unshift File.expand_path('lib', __dir__)
 require 'twb_xml'
 require 'format_map' # PR-12: the ONE Tableau→Sigma format translator (lib/format_map.rb)
 require 'integer_dim' # PR-18: integer-coded dimension detection (shelf role + datatype)
-require 'series_colors' # B1 (card-trellis): reuse D2 member->color derivation (#441)
 
 # ---- Per-dashboard scoping ------------------------------------------------
 # `--dashboard "<name>"` (repeatable) and `--page <id>` let a LARGE workbook
@@ -1588,12 +1587,15 @@ def build_zone_tree(z)
   node
 end
 
-# ---- B1 card-trellis detection (beads-sigma-ubr5.5) ------------------------
-# A "card trellis" is a Tableau dashboard that repeats the SAME viz across a
-# categorical dimension as a ROW of per-category cards (small multiples authored
-# as N sibling worksheets, each pinned to one member of the same field — the
-# benchmark's 4 region columns). The flat build already emits each as a
-# separately-filtered chart element; B1 groups them into N GridContainer cards.
+# ---- Native trellis detection (fix/native-trellis, SUPERSEDES #451 B1) ------
+# A "trellis" is a Tableau dashboard that repeats the SAME viz across a
+# categorical dimension as small multiples — authored as N sibling worksheets,
+# each pinned to one member of the same field (the benchmark's 4 Ship-Method
+# panels). The CORRECT Sigma shape for this is a SINGLE viz element carrying a
+# native `trellis` property (rowsBy / columnsBy) — NOT N cloned chart elements.
+# This detector identifies the repetition + the facet field + the source
+# ARRANGEMENT; the builder (build-charts-from-signals) then collapses the N
+# worksheets into ONE element and attaches trellis.rowsBy / columnsBy.
 #
 # Detection is deliberately CONSERVATIVE — it must NEVER fire on a non-trellis
 # dashboard (that would change the byte-identical flat output). A group needs:
@@ -1601,10 +1603,11 @@ end
 #   * an identical viz template  (same chart_kind + same measure set),
 #   * each carrying exactly the facet field as a single-member categorical
 #     `list` filter, pinning DISTINCT members, and
-#   * a single-row tiled geometry (same y-band, horizontally disjoint).
+#   * a tiled small-multiples geometry (a horizontal row, a vertical stack, or
+#     a grid) — the arrangement decides rowsBy vs columnsBy.
 # The native single-worksheet Tableau trellis (one sheet, dim on Rows/Cols) is
-# NOT handled here — it stays the existing UI-only WARN (F4); its member list
-# isn't in the .twb, so a faithful card set can't be built offline.
+# NOT handled here — its member list isn't in the .twb, so the panel set can't
+# be built offline (stays the existing UI-only WARN, F4).
 TRELLIS_KINDS = %w[bar line area scatter pie donut map-region map-point].freeze
 
 # [chart_kind, sorted-measure-columns] — two zones are the SAME viz template
@@ -1634,20 +1637,46 @@ def trellis_facets(z)
   out
 end
 
-# Single-row tiled: members share a y-band (spread <= half the median height)
-# and are horizontally disjoint (a left-to-right card row).
-def trellis_tiled?(zs)
+# Small-multiples ARRANGEMENT of the member zones → the Sigma trellis axis.
+#   * same top edge, spread across x  → 'cols' (a horizontal row of panels →
+#     Sigma columnsBy, the common "cards across" look),
+#   * same left edge, stacked down y  → 'rows' (a vertical stack of panels →
+#     Sigma rowsBy, the "4 rows" small-multiples the owner showed),
+#   * both x AND y vary               → 'grid' (a 2-D tile field).
+# Returns nil when the zones aren't a disjoint tiling on either axis (so the
+# group is NOT treated as a trellis — conservative). Heuristic: "aligned" on an
+# axis means the min/max origin spread is within half the median tile size on
+# that axis; the OTHER axis must be disjoint (ordered, non-overlapping tiles).
+def trellis_arrangement(zs)
+  return nil if zs.size < 2
+  xs = zs.map { |z| z['x_pct'].to_f }
   ys = zs.map { |z| z['y_pct'].to_f }
+  ws = zs.map { |z| z['w_pct'].to_f }.sort
   hs = zs.map { |z| z['h_pct'].to_f }.sort
-  return false if ys.empty?
+  w_med = ws[ws.size / 2]
   h_med = hs[hs.size / 2]
-  return false unless h_med.positive? && (ys.max - ys.min) <= 0.5 * h_med
-  xs = zs.map { |z| [z['x_pct'].to_f, z['x_pct'].to_f + z['w_pct'].to_f] }.sort_by(&:first)
-  xs.each_cons(2).all? { |a, b| a[1] <= b[0] + 1.0 }
+  return nil unless w_med.positive? && h_med.positive?
+  x_aligned = (xs.max - xs.min) <= 0.5 * w_med # shared left edge → a vertical stack
+  y_aligned = (ys.max - ys.min) <= 0.5 * h_med # shared top edge  → a horizontal row
+  disjoint = lambda do |spans|
+    spans.sort_by(&:first).each_cons(2).all? { |a, b| a[1] <= b[0] + 1.0 }
+  end
+  x_spans = zs.map { |z| [z['x_pct'].to_f, z['x_pct'].to_f + z['w_pct'].to_f] }
+  y_spans = zs.map { |z| [z['y_pct'].to_f, z['y_pct'].to_f + z['h_pct'].to_f] }
+  if y_aligned && !x_aligned
+    disjoint.call(x_spans) ? 'cols' : nil
+  elsif x_aligned && !y_aligned
+    disjoint.call(y_spans) ? 'rows' : nil
+  elsif !x_aligned && !y_aligned
+    'grid' # a 2-D field of tiles (x and y both vary)
+  end
 end
 
 # Returns [] for a non-trellis dashboard (the common case) so the emitter can
-# omit the key entirely and keep the flat output byte-identical.
+# omit the key entirely and keep the flat output byte-identical. Each detected
+# group carries the facet field, the ordered members / zone_ids / captions (the
+# FIRST is the base worksheet the single trellis element is built from), the
+# base chart_kind, and the source `orientation` (rows|cols|grid) → trellis axis.
 def detect_trellis_groups(zones)
   charts = Array(zones).select { |z| z.is_a?(Hash) && z['kind'] == 'chart' && TRELLIS_KINDS.include?(z['chart_kind'].to_s) }
   return [] if charts.size < 3
@@ -1673,23 +1702,19 @@ def detect_trellis_groups(zones)
         seen[m] ? false : (seen[m] = true) # distinct members only
       end
       next if members.size < 3
-      next unless trellis_tiled?(members.map { |a| a['z'] })
+      orientation = trellis_arrangement(members.map { |a| a['z'] })
+      next if orientation.nil? # not a tiled small-multiples layout
       ordered = members.sort_by { |a| a['facets'][fk]['member'].to_s.downcase }
       ordered.each { |a| used[a['z']['id']] = true }
       field_caption = ordered.first['facets'][fk]['caption']
-      grp = {
-        'field'      => field_caption,
-        'chart_kind' => ordered.first['sig'][0],
-        'members'    => ordered.map { |a| a['facets'][fk]['member'] },
-        'zone_ids'   => ordered.map { |a| a['z']['id'] },
-        'captions'   => ordered.map { |a| a['z']['caption'] }
+      groups << {
+        'field'       => field_caption,
+        'chart_kind'  => ordered.first['sig'][0],
+        'orientation' => orientation,
+        'members'     => ordered.map { |a| a['facets'][fk]['member'] },
+        'zone_ids'    => ordered.map { |a| a['z']['id'] },
+        'captions'    => ordered.map { |a| a['z']['caption'] }
       }
-      # D2 reuse (#441): a per-member color for each card, when the .twb
-      # serialized an explicit member->color map on the facet field.
-      cmap = SeriesColors.color_map_for_field(zones, field_caption)
-      colors = ordered.map { |a| cmap[a['facets'][fk]['member']] }
-      grp['member_colors'] = colors if colors.any?
-      groups << grp
     end
   end
   groups
@@ -1873,9 +1898,11 @@ xml.elements.each('//dashboard') do |d|
     # colors (theme then omitted — Sigma defaults apply, never worse).
     'brand_palette' => BRAND_PALETTE
   }
-  # B1 card-trellis: attach the detected groups ONLY when a trellis is present,
-  # so every non-trellis dashboard's JSON is byte-identical to the flat build
-  # (the layout stage's card path is likewise gated on this key).
+  # Native trellis: attach the detected groups ONLY when a trellis is present,
+  # so every non-trellis dashboard's JSON is byte-identical to the flat build.
+  # The builder collapses each group into ONE element with a native `trellis`
+  # property; the layout stage prunes the absorbed sibling zones (both gated on
+  # this key).
   trellis_groups = detect_trellis_groups(zones)
   dash_h['trellis'] = trellis_groups unless trellis_groups.empty?
   dashboards << dash_h

@@ -205,6 +205,7 @@ jobs:
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-element-id-namespacing.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-fact-pick.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-layout-lint.rb
+            plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-native-trellis.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-hydrate-custom-sql.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-pds-resolve-retry.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-parity-score.rb

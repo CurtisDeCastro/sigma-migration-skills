@@ -117,8 +117,8 @@ INVENTORY = [
 
   # DESIGN / COMPOSITION — surfaced so a design-heavy dashboard no longer reports
   # "0 unhandled" (false comfort). See TABLEAU_TO_SIGMA_SKILL_GAPS.md. These are
-  # regex-tokenizable; the STRUCTURAL design gaps (repeated per-category container
-  # cards / card-trellis B1, 1-D strip/jitter plots C1) are detected in
+  # regex-tokenizable; the STRUCTURAL design gaps (repeated per-category small
+  # multiples → native trellis, 1-D strip/jitter plots C1) are detected in
   # parse-twb-layout.rb (Phase 1) — a raw-text regex can't reliably spot them.
   { name: 'Container background tint / colored header band', pat: /<format\s+attr='background-color'\s+value='#(?!(?:fff(?:fff)?|FFF(?:FFF)?)')/,
     status: :hint, blurb: 'Gap B2: a dashboard zone/container has a non-white background fill (region-card tints, colored title bands). NOT yet auto-emitted — parse-twb-layout should surface the fill and build-charts should emit container.style.backgroundColor + borderRadius (+ a header-bar element). Until then, recreate the tint manually.' },
