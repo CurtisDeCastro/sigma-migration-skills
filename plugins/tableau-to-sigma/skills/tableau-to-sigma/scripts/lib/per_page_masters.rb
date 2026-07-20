@@ -2,7 +2,7 @@
 #
 # per_page_masters.rb — PLAN-v3 PR-17: per-page (per-dashboard) master instances.
 #
-# THE DEFECT (V5.6-CONTROLS-AUDIT D11, sussman Phase-G root cause). The
+# THE DEFECT (V5.6-CONTROLS-AUDIT D11, the multi-page control-bind failure). The
 # mechanical build hardwires ONE hidden master table on the "Data" page; every
 # content page's charts, helpers, and controls reference that single
 # `elementId: master`. Sigma propagates a control's filter along SOURCE CHAINS,
