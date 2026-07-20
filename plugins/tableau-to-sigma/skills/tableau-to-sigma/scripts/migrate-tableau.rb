@@ -3416,6 +3416,17 @@ if mechanical
   chart_pages = raw_charts.is_a?(Hash) ? (raw_charts['pages'] || []) : nil
   data_elements = raw_charts.is_a?(Hash) ? (raw_charts['data_elements'] || []) : []
   chart_elements = chart_pages ? chart_pages.flat_map { |p| p['elements'] || [] } : raw_charts
+  # PR-18: integer-coded dimension DECODE columns build-charts routed onto the
+  # MASTER (a master-rooted list control's Text() decode must live on the master
+  # so the filter propagates to every chart sourcing from it). Inject them into
+  # master_columns now — before the ref-label repair below picks up the registry.
+  # Empty when no integer-dim control was detected (additive / byte-identical).
+  Array(raw_charts.is_a?(Hash) ? raw_charts['master_decode_columns'] : nil).each do |dc|
+    next unless dc.is_a?(Hash) && dc['id'] && dc['formula']
+    next if master_columns.any? { |c| c['id'] == dc['id'] }
+    master_columns << dc
+    line "integer-dim decode: added master column '#{dc['name']}' (#{dc['formula']}) — list control filters STRING values (raw numeric list-filter targets are silently stripped by Sigma)"
+  end
   # Dim-grain helper placeholder resolution: build-charts runs before it knows
   # the live DM element ids, so grain helpers carry source.elementId =
   # "__DM_ELEMENT__:<name>". Resolve against the readback (dm_els) NOW — an

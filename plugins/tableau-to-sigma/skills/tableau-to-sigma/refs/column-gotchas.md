@@ -226,6 +226,42 @@ failure (the chart exports as an empty plot area). Always run Phase 6f when an
 `If()` predicate is an integer column. Verified 2026-05-24 against OCT's
 `Is Returned` column on `DEMO_DB.PUBLIC.SUPERSTORE_ORDERS`.
 
+## Integer-coded dimension list filters are silently stripped (auto-decoded, PR-18)
+
+An INTEGER warehouse column used as a DISCRETE dimension on a quick filter
+(`STORE_KEY`, `PROMO_KEY`, `SITE_KEY`). A Sigma **list/dropdown control sources
+STRING option values**, so a filter target on the raw integer column is accepted
+by POST/PUT (200) then **SILENTLY stripped** — the readback carries
+`filters: null` and the control filters nothing (same class as the datetime /
+numeric strip in `control-parity.md`). The field failure (a field session + Twin C): the
+dashboard shipped a `STORE_KEY` multi-select that did nothing.
+
+**Fix — a `Text([<col>])` decode column the control binds to** (both its filter
+target AND its value-source). This is now AUTOMATIC:
+
+- `parse-twb-layout.rb` flags the filter `integer_dim: true` (datatype integer +
+  discrete/list use or `role='dimension'`).
+- `build-charts-from-signals.rb` routes the decode: for a master-rooted control
+  the `Text([<col>])` column rides `master_decode_columns` (the orchestrator adds
+  it to the master, so the filter propagates to every chart sourcing from it);
+  for a chart/base-table-rooted control the decode column is added to that
+  element directly. Both the control's `filters[].columnId` and its
+  `source.columnId` point at the decoded column. Stamped into `control-scope.json`
+  (`integer_dim` / `decode`) and `integer-dim-decode.json`.
+
+```json
+{"id": "skt-store-key-master", "name": "Store Key (Text)", "formula": "Text([Store Key])"}
+```
+
+Where the decode can't be safely auto-built (e.g. the column lives only on a
+hidden master with a cross-scope issue) the control is routed to
+`POSTPUBLISH_GUIDE.md` — **never silently shipped as a dropped filter**.
+`preflight_lint.rb` A3 WARNs on any `integer_dim` control that ships without a
+decode helper (regression catch); `probe-int-dim-cardinality.rb` optionally
+confirms the low `COUNT(DISTINCT col)` against the warehouse (`--fixture` offline).
+
+`Text()` is the correct Sigma string cast — `ToText()` does not exist.
+
 ## YAML response from spec endpoints
 
 `POST /v2/dataModels/spec` and `POST /v2/workbooks/spec` return **YAML**, not JSON.

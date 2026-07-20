@@ -38,6 +38,7 @@ require 'json'
 $LOAD_PATH.unshift File.expand_path('lib', __dir__)
 require 'twb_xml'
 require 'format_map' # PR-12: the ONE Tableau→Sigma format translator (lib/format_map.rb)
+require 'integer_dim' # PR-18: integer-coded dimension detection (shelf role + datatype)
 
 # ---- Per-dashboard scoping ------------------------------------------------
 # `--dashboard "<name>"` (repeatable) and `--page <id>` let a LARGE workbook
@@ -180,10 +181,17 @@ end
 #
 # We build a single lookup: { "c2ec6b07-..." => { caption:, datatype: } }.
 COL_BY_GUID = {}
+# Column role by GUID/body (PR-18): Tableau tags a `<column>` role='dimension'
+# when the field is used discretely. Captured alongside caption/datatype so the
+# integer-coded-dimension detector can confirm a discrete-dimension shelf role.
+# A role='dimension' declaration anywhere wins (a field used discretely on ANY
+# sheet is a discrete dimension for filter purposes).
+COL_ROLE_BY_KEY = {}
 xml.elements.each('//column') do |c|
   raw = c.attributes['name'].to_s
   cap = c.attributes['caption']
   dt  = c.attributes['datatype']
+  role_attr = c.attributes['role'].to_s
   # v5.1.1: carry the calc FORMULA — the translator's one-level calc-ref
   # dereference (RANK([CalcRef])<=N over a window share) resolves through it.
   cf  = (calc_el = c.elements['calculation']) && calc_el.attributes['formula']
@@ -198,6 +206,7 @@ xml.elements.each('//column') do |c|
   # when a caption exists (the GUID itself is not human-readable).
   if body =~ /\A([0-9a-f]{8}-[0-9a-f\-]{20,}|Calculation_\d+)/i
     head = body.split(/\s/, 2).first
+    COL_ROLE_BY_KEY[head] = 'dimension' if role_attr == 'dimension'
     if cap && !cap.empty?
       COL_BY_GUID[head] ||= { caption: cap, datatype: dt }
       COL_BY_GUID[head][:formula] ||= cf if cf
@@ -208,6 +217,7 @@ xml.elements.each('//column') do |c|
       COL_BY_GUID[head][:formula] ||= cf
     end
   else
+    COL_ROLE_BY_KEY[body] = 'dimension' if role_attr == 'dimension'
     # Friendly / group / copy names are referenced VERBATIM by their full body
     # (e.g. instance ref `[none:Customer Geo:nk]` → "Customer Geo", filter
     # `[Partner Level (group)]` → "Partner Level (group)"). Register under the
@@ -477,6 +487,15 @@ def normalize_filter(f)
   else
     out['kind'] = 'unknown'
   end
+
+  # PR-18: flag an integer-coded column used as a DISCRETE dimension on a filter
+  # shelf. Signals: integer datatype + a discrete (categorical/list) filter, or a
+  # declared `role='dimension'`. Downstream (build-charts) routes a Text() decode
+  # helper so the Sigma list control's STRING option values actually filter the
+  # column instead of being silently stripped. Only stamped when TRUE — a
+  # non-integer/quantitative filter's normalized output is unchanged.
+  role = COL_ROLE_BY_KEY[guid] if guid
+  out['integer_dim'] = true if IntegerDim.integer_dim_filter?(out.merge('role' => role))
   out
 end
 

@@ -264,10 +264,24 @@ def lint(spec)
   errs
 end
 
-# WARN-level findings (P1/I1): printed by the CLI but never fail the lint —
+# A3 (PR-18): a `Text([ref])` decode of a single column reference — the shape
+# the integer-dim decode routing emits and this lint verifies. Deliberately does
+# NOT match `ToText(` (not a Sigma function).
+A3_TEXT_DECODE = /\AText\s*\(\s*\[[^\]]+\]\s*\)\s*\z/i
+A3_LISTY = %w[list segmented hierarchy].freeze
+
+# WARN-level findings (P1/I1/A3): printed by the CLI but never fail the lint —
 # P1 is a live-verified silent no-op, I1 a heuristic with known false positives
-# (a string-matching Switch([Region], "East", ...) is legitimate).
-def lint_warnings(spec)
+# (a string-matching Switch([Region], "East", ...) is legitimate), A3 flags an
+# integer-coded dimension control shipped WITHOUT a Text() decode helper.
+#
+# `scope` (optional) is the parsed control-scope.json sidecar. When a control is
+# marked `integer_dim:true` there (build-charts stamps it from the .twb datatype
+# + shelf role), A3 KNOWS the bound column is integer-coded and can warn even
+# when the raw column's type is invisible in the spec. Without a scope, A3 still
+# catches the precise "decode column exists but the control targets the raw
+# column instead" mis-wire from the spec alone.
+def lint_warnings(spec, scope: nil)
   warns = []
   (spec['pages'] || []).each do |pg|
     (pg['elements'] || []).each do |el|
@@ -315,14 +329,86 @@ def lint_warnings(spec)
       end
     end
   end
+
+  # A3 (PR-18): integer-coded dimension control without a Text() decode helper.
+  # A Sigma list/segmented/hierarchy control sources STRING option values, so a
+  # filter target on a raw INTEGER column is accepted (200) then SILENTLY
+  # stripped — the readback carries filters:null and the control filters nothing
+  # (control-parity.md "list-control targets on NUMERIC columns are silently
+  # stripped"). The fix is a `Text([<col>])` decode column the control binds to.
+  # This catches a REGRESSION of the auto-decode routing. Advisory only.
+  all_els = (spec['pages'] || []).flat_map { |pg| pg['elements'] || [] }
+  els_by_id = all_els.each_with_object({}) { |e, h| (id = e['id'] || e['elementId']) && (h[id] = e) }
+  # controlId -> scope record (integer_dim / decode annotations).
+  scope_by_cid = {}
+  if scope.is_a?(Hash)
+    Array(scope['controls']).each { |c| scope_by_cid[c['controlId']] = c if c.is_a?(Hash) && c['controlId'] }
+  end
+  resolve_target = lambda do |t|
+    return nil unless t.is_a?(Hash)
+    eid = t.dig('source', 'elementId')
+    tgt_el = els_by_id[eid]
+    return nil unless tgt_el
+    (tgt_el['columns'] || []).find { |c| c['id'] == t['columnId'] }
+  end
+  all_els.each do |el|
+    next unless (el['kind'] || el['type']).to_s.include?('control')
+    next unless A3_LISTY.include?(el['controlType'].to_s)
+    name = el['name'] || el['id'] || '(unnamed)'
+    cid  = el['controlId']
+    targets = Array(el['filters'])
+    target_cols = targets.map { |t| resolve_target.call(t) }.compact
+    has_decode = target_cols.any? { |c| c['formula'].to_s =~ A3_TEXT_DECODE }
+    sc = scope_by_cid[cid] || {}
+    decode_status = sc.dig('decode', 'status').to_s
+
+    # Signal 1 — scope marks this control integer_dim but the spec ships no
+    # decode target. manual-required is an ACCOUNTED gap (routed to the
+    # POSTPUBLISH guide) — surface it, but as the softer "add it by hand" note.
+    if sc['integer_dim'] && !has_decode
+      if %w[manual-required partial-manual].include?(decode_status)
+        warns << "A3 control '#{name}': integer-coded dimension control whose decode could NOT be auto-built " \
+                 "(#{decode_status}) — Sigma silently strips a raw numeric list-filter target. Add a `Text([<col>])` " \
+                 'decode column on the target element by hand and bind the control to it (routed to POSTPUBLISH_GUIDE.md).'
+      else
+        warns << "A3 control '#{name}': integer-coded dimension control (control-scope integer_dim:true) with NO " \
+                 '`Text([<col>])` decode helper among its filter targets — Sigma accepts the raw numeric target (200) ' \
+                 'then SILENTLY strips it (readback filters:null); the control filters nothing. Add a Text() decode ' \
+                 'column and repoint the control to it (build-charts-from-signals routes this automatically — a miss ' \
+                 'here is a regression).'
+      end
+      next
+    end
+
+    # Signal 2 — spec-only mis-wire: a decode column EXISTS on the target element
+    # but the control still targets the RAW column. Precise, no false positives:
+    # only fires when a sibling `Text([<target col name>])` is present.
+    next if has_decode
+    targets.each do |t|
+      raw = resolve_target.call(t)
+      next unless raw
+      sibs = (els_by_id[t.dig('source', 'elementId')]['columns'] || [])
+      decode_sib = sibs.find { |c| c['formula'].to_s.strip.casecmp?("Text([#{raw['name']}])") }
+      next unless decode_sib
+      warns << "A3 control '#{name}': a `Text()` decode column (#{decode_sib['name'].inspect}) exists on the target " \
+               "element but the control targets the RAW column #{raw['name'].inspect} — a raw numeric list-filter " \
+               "target is silently stripped by Sigma. Repoint this filter target (and the control's value-source) " \
+               "at #{decode_sib['id'].inspect}."
+    end
+  end
+
   warns
 end
 
 if __FILE__ == $PROGRAM_NAME
-  path = ARGV[0] or abort('usage: preflight_lint.rb <workbook-spec.json>')
+  path = ARGV[0] or abort('usage: preflight_lint.rb <workbook-spec.json> [control-scope.json]')
   spec = JSON.parse(File.read(path))
+  # A control-scope.json next to the spec (or passed as ARGV[1]) lets A3 use the
+  # .twb-derived integer_dim signal; without it A3 still catches decode mis-wires.
+  scope_path = ARGV[1] || File.join(File.dirname(path), 'control-scope.json')
+  scope = (JSON.parse(File.read(scope_path)) if File.exist?(scope_path.to_s)) rescue nil
   errs = lint(spec)
-  warns = lint_warnings(spec)
+  warns = lint_warnings(spec, scope: scope)
   if errs.empty?
     puts "preflight lint: clean#{warns.any? ? " (#{warns.size} warning(s))" : ''}"
     warns.each { |w| warn "  ⚠ #{w}" }

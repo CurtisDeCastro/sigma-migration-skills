@@ -64,6 +64,7 @@ require_relative 'lib/png_classify'
 require_relative 'lib/zone_census'
 require_relative 'lib/format_map'     # PR-12: the ONE Tableau→Sigma format translator
 require_relative 'lib/series_colors'  # PR-12: ordered per-series color schemes
+require_relative 'lib/integer_dim'    # PR-18: integer-coded dimension decode-to-text routing
 require 'erb'
 
 opts = { master_id: 'master' }
@@ -6443,6 +6444,67 @@ styled_text_all = styled_text_by_dash.values.flatten(1)
 control_scope_records = []
 helpers_by_id = data_elements.to_h { |d| [d['id'], d] }
 norm_cap = ->(s) { s.to_s.strip.downcase.gsub(/[^a-z0-9]+/, '') }
+# PR-18: decode columns the ORCHESTRATOR must add to the master element (a
+# master-rooted list control's Text() decode must live ON the master so the
+# filter propagates to every chart sourcing from it). Rides the output JSON as
+# `master_decode_columns` (only when non-empty — additive/byte-identical).
+master_decode_columns = []
+
+# PR-18 — route an integer-coded discrete-dimension LIST control through a
+# Text() decode helper. A Sigma list/dropdown control sources STRING option
+# values; a filter target on the raw INTEGER column is accepted then SILENTLY
+# stripped (reads back filters:null — control-parity.md). The sanctioned fix
+# (proven by hand in Twin C's runs): add `Text([<col>])` on the element the
+# control targets and bind BOTH the filter target AND the value-source to the
+# decoded column. Mutates `targets` in place (rewrites each columnId to its
+# decode column) and returns:
+#   { applied:, source: {elementId:, columnId:} | nil, helpers: [name,...],
+#     manual: [ "<why the target couldn't be decoded>", ... ] }
+# manual entries are NEVER silently dropped: the caller routes them to the
+# POSTPUBLISH guide and the control-scope sidecar.
+route_integer_dim_decode = lambda do |targets, mcol, cap, slug|
+  result = { applied: false, source: nil, helpers: [], manual: [] }
+  targets.each do |t|
+    root = t.dig('source', 'elementId')
+    raw_id = t['columnId']
+    if root == opts[:master_id] && mcol
+      # Master-rooted: the decode column lives on the master (sibling ref by the
+      # master column's friendly name). Injected by the orchestrator.
+      dec_id = IntegerDim.decode_col_id(slug, opts[:master_id])
+      dec_name = IntegerDim.decode_name(mcol['name'])
+      unless master_decode_columns.any? { |c| c['id'] == dec_id }
+        master_decode_columns << { 'id' => dec_id, 'name' => dec_name,
+                                   'formula' => IntegerDim.decode_formula_for("[#{mcol['name']}]") }
+      end
+      t['columnId'] = dec_id
+      result[:helpers] << dec_name
+      result[:applied] = true
+      result[:source] ||= { elementId: opts[:master_id], columnId: dec_id }
+    else
+      el = elements.find { |e| e['id'] == root } || helpers_by_id[root]
+      raw_col = el && (el['columns'] || []).find { |c| c['id'] == raw_id }
+      if el.nil? || raw_col.nil?
+        # Cross-scope / hidden-master case: can't safely author the decode here
+        # (the col isn't a modifiable table column on a reachable element).
+        result[:manual] << "target element #{root.inspect} carries no addressable column for '#{cap}' — " \
+                           'add a Text() decode column there by hand and repoint the control'
+        next
+      end
+      dec_id = IntegerDim.decode_col_id(slug, root)
+      dec_name = IntegerDim.decode_name(raw_col['name'])
+      el['columns'] ||= []
+      unless el['columns'].any? { |c| c['id'] == dec_id }
+        el['columns'] << { 'id' => dec_id, 'name' => dec_name,
+                           'formula' => IntegerDim.decode_formula_for("[#{raw_col['name']}]") }
+      end
+      t['columnId'] = dec_id
+      result[:helpers] << dec_name
+      result[:applied] = true
+      result[:source] ||= { elementId: root, columnId: dec_id }
+    end
+  end
+  result
+end
 # Chart-id/page snapshot for the sidecar's scope decision (taken BEFORE the
 # page-mode emitters strip the _dashboard tags).
 ctl_chart_index = elements.select { |e| e['source'] }
@@ -6812,9 +6874,34 @@ $param_switches.each do |sw|
 end
 
 # ---- Auto-generated controls from shared-view filters (--auto-controls) ----
+# PR-18: a workbook whose quick filters live as dashboard filter ZONES (not a
+# <shared-view>) never reaches this emitter — `shared_filters` is empty and the
+# INTEGER-coded dimension control is SILENTLY DROPPED (Twin C hand-authored it +
+# its Text() helper). Promote ONLY integer-dim zone filters (resolved from their
+# worksheet filter) into the emitter list so they auto-emit AND auto-decode.
+# Gated strictly on integer_dim → every non-integer-dim workbook is untouched
+# (byte-identical); string/date zone filters keep their current behavior.
+promoted_int_dim_filters = []
+unless opts[:no_auto_controls]
+  seen_caps = (meta['shared_filters'] || []).map { |f| norm_cap.call(f['column_caption']) }
+  ws_filters = (meta['worksheets'] || {}).values.flat_map { |w| w['filters'] || [] }
+  (layout || []).each do |d|
+    (d['zones'] || []).each do |z|
+      next unless z['kind'] == 'filter'
+      zc = z['filter_column_caption']
+      next if zc.nil? || seen_caps.include?(norm_cap.call(zc))
+      wf = ws_filters.find { |f| norm_cap.call(f['column_caption']) == norm_cap.call(zc) && f['integer_dim'] }
+      next unless wf
+      seen_caps << norm_cap.call(zc)
+      promoted_int_dim_filters << wf
+      warnings << "integer-coded dimension quick filter '#{zc}' is a dashboard filter ZONE (no <shared-view>) — " \
+                  'promoting it to an auto-control so it is not silently dropped, and auto-decoding it (PR-18)'
+    end
+  end
+end
 auto_controls = []
 unless opts[:no_auto_controls]   # default-on: never miss a .twb parameter/filter
-  (meta['shared_filters'] || []).each_with_index do |f, i|
+  ((meta['shared_filters'] || []) + promoted_int_dim_filters).each_with_index do |f, i|
     next if f['is_action']
     cap = f['column_caption']
     if cap.nil?
@@ -6977,6 +7064,49 @@ unless opts[:no_auto_controls]   # default-on: never miss a .twb parameter/filte
         warnings << "quick filter '#{cap}' carries a CONDITION beyond its member list " \
                     "(#{Array(f['condition_expressions']).join('; ')[0, 120]}) — the member control is emitted; " \
                     'apply the condition as an element filter or accept the wider domain'
+      end
+      # PR-18: integer-coded discrete-dimension DECODE routing. When this list/
+      # segmented control filters an INTEGER column, a raw-column filter target is
+      # accepted then SILENTLY stripped by Sigma (control-parity.md "list-control
+      # targets on NUMERIC columns are silently stripped"). Route each target
+      # through a Text() decode helper and bind the value-source to it — the exact
+      # by-hand pattern Twin C's runs used (gen-wb-spec.rb). Never silently drop:
+      # where the decode can't be auto-built, route a POSTPUBLISH note instead.
+      if f['integer_dim'] && IntegerDim.decode_control_type?(spec['controlType'])
+        dec = route_integer_dim_decode.call(targets, m, cap, slug)
+        rec = control_scope_records.find { |r| r['controlId'] == spec['controlId'] }
+        rec['integer_dim'] = true if rec
+        if dec[:applied]
+          # Bind the value-source (option list) to the decoded column too — unless
+          # the null-option workaround already re-sourced it to a hidden helper.
+          opt_sourced = f['excludes_null'] &&
+                        spec.dig('source', 'source', 'elementId').to_s.start_with?('opt-src-')
+          if dec[:source] && !opt_sourced
+            spec['source'] = { 'kind' => 'source',
+                               'source' => { 'kind' => 'table', 'elementId' => dec[:source][:elementId] },
+                               'columnId' => dec[:source][:columnId] }
+          elsif opt_sourced
+            warnings << "quick filter '#{cap}' both EXCLUDES Null and targets an INTEGER dimension — the data " \
+                        'filter is decoded via Text(), but confirm the null-option suppression in the Sigma UI'
+          end
+          rec['decode'] = { 'status' => (dec[:manual].any? ? 'partial-manual' : 'auto-decoded'),
+                            'helpers' => dec[:helpers].uniq } if rec
+          warnings << "quick filter '#{cap}' targets an INTEGER column used as a discrete dimension — " \
+                      "auto-decoded via Text() helper column(s) #{dec[:helpers].uniq.join(', ')} so the list " \
+                      'control filters STRING values (a raw numeric list-filter target is silently stripped by Sigma)'
+        end
+        if dec[:manual].any?
+          (rec['decode'] ||= {})['status'] ||= 'manual-required' if rec
+          (rec['decode'] ||= {})['manual'] = dec[:manual] if rec
+          $integer_dim_manual ||= []
+          $integer_dim_manual << { 'controlId' => spec['controlId'], 'name' => cap.strip,
+                                   'column' => cap.strip, 'notes' => dec[:manual] }
+          dec[:manual].each do |why|
+            warnings << "quick filter '#{cap}' targets an INTEGER dimension but the decode could not be " \
+                        "auto-built (#{why}) — routed to POSTPUBLISH_GUIDE; add the Text() decode by hand. " \
+                        'NEVER ship the raw numeric filter (Sigma silently strips it).'
+          end
+        end
       end
     when 'relative-date'
       # Tableau relative-date → ROLLING Sigma date-range control (same rolling
@@ -7681,7 +7811,11 @@ if opts[:pages_mode] == :worksheet
   # data_elements must ride EVERY output shape — multi-DS sub-masters (and any
   # hidden helpers) live there, and a routed chart whose sub-master never
   # reaches the spec is a dangling source ref (review-caught regression).
-  File.write(opts[:out], JSON.pretty_generate({ 'pages' => pages, 'data_elements' => data_elements, 'theme' => theme }))
+  _out = { 'pages' => pages, 'data_elements' => data_elements, 'theme' => theme }
+  # PR-18: decode columns the orchestrator injects into the master element (only
+  # when a master-rooted integer-dim control was routed — additive/byte-identical).
+  _out['master_decode_columns'] = master_decode_columns if master_decode_columns.any?
+  File.write(opts[:out], JSON.pretty_generate(_out))
   warn "wrote #{opts[:out]} (page-per-worksheet: #{pages.size} pages, #{auto_controls.size} auto-controls per page" \
        "#{data_elements.any? ? ", #{data_elements.size} hidden data element(s)" : ''})"
 elsif opts[:pages_mode] == :dashboard
@@ -7815,7 +7949,11 @@ elsif opts[:pages_mode] == :dashboard
     pages << page
   end
   theme = ThemeDerive.derive(layout)
-  File.write(opts[:out], JSON.pretty_generate({ 'pages' => pages, 'data_elements' => data_elements, 'theme' => theme }))
+  _out = { 'pages' => pages, 'data_elements' => data_elements, 'theme' => theme }
+  # PR-18: decode columns the orchestrator injects into the master element (only
+  # when a master-rooted integer-dim control was routed — additive/byte-identical).
+  _out['master_decode_columns'] = master_decode_columns if master_decode_columns.any?
+  File.write(opts[:out], JSON.pretty_generate(_out))
   warn "wrote #{opts[:out]} (page-per-dashboard: #{pages.size} page(s), #{data_elements.size} hidden data element(s), #{(param_controls + auto_controls).size} controls per page)"
 else
   elements.each { |e| e.delete('_worksheet'); e.delete('_dashboard') }
@@ -7925,6 +8063,25 @@ unless control_scope_records.empty?
   scope_path = File.join(opts[:tab], 'control-scope.json')
   File.write(scope_path, JSON.pretty_generate(sidecar))
   warn "wrote #{scope_path} (#{contract_controls.size} control scope entr(y/ies), #{dropped_rs.size} dropped)"
+
+  # PR-18: integer-dim decode sidecar — the candidates for the OPTIONAL
+  # warehouse-cardinality confirmation (probe-int-dim-cardinality.rb) and the
+  # source for the POSTPUBLISH manual-decode section. Only written when an
+  # integer-coded dimension control was detected (additive/byte-identical).
+  int_dim_ctls = control_scope_records.select { |r| r['integer_dim'] }
+  if int_dim_ctls.any? || (defined?($integer_dim_manual) && $integer_dim_manual&.any?)
+    id_path = File.join(opts[:tab], 'integer-dim-decode.json')
+    File.write(id_path, JSON.pretty_generate(
+                 'version' => 1, 'source' => 'tableau',
+                 'candidates' => int_dim_ctls.map do |r|
+                   { 'controlId' => r['controlId'], 'name' => r['name'],
+                     'column' => r['name'], 'decode' => r['decode'] }
+                 end,
+                 'manual' => (defined?($integer_dim_manual) ? ($integer_dim_manual || []) : [])
+               ))
+    warn "wrote #{id_path} (#{int_dim_ctls.size} integer-dim control(s); " \
+         "#{(defined?($integer_dim_manual) ? ($integer_dim_manual || []) : []).size} manual-decode note(s))"
+  end
 end
 # Classify each build message so the WARN count reflects ACTUAL gaps, not volume
 # (bead beads-sigma-59mk). The builder historically prefixed every note — including

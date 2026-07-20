@@ -301,9 +301,53 @@ n = s['pages'][0]['elements'][4]
 n['controlType'] = 'number'; n['mode'] = '='; n.delete('selectionMode'); n['value'] = 1; n['includeNulls'] = true
 check(rule(lint(s), 'C8').empty?, 'C8: includeNulls on a number control → allowed (no violation)', fails)
 
+# ---- A3 (PR-18): integer-coded dimension control without a Text() decode -----
+# A master carrying a raw integer STORE_KEY column, optionally with a decode
+# sibling, and a list control targeting one or the other.
+def a3_spec(target_col_id, with_decode: false)
+  master_cols = [{ 'id' => 'm-store', 'name' => 'Store Key', 'formula' => '[Src/STORE_KEY]' }]
+  master_cols << { 'id' => 'skt-store', 'name' => 'Store Key (Text)', 'formula' => 'Text([Store Key])' } if with_decode
+  JSON.parse(JSON.generate(
+    'pages' => [{ 'name' => 'Dash', 'elements' => [
+      { 'id' => 'master', 'kind' => 'table', 'name' => 'Master', 'columns' => master_cols },
+      { 'id' => 'el-ctl-store', 'kind' => 'control', 'controlId' => 'ctl-store',
+        'controlType' => 'list', 'name' => 'Store Key', 'selectionMode' => 'multiple',
+        'filters' => [{ 'source' => { 'kind' => 'table', 'elementId' => 'master' }, 'columnId' => target_col_id }] }
+    ] }]
+  ))
+end
+scope_int = ->(status = nil) { { 'controls' => [{ 'controlId' => 'ctl-store', 'integer_dim' => true }.tap { |h| h['decode'] = { 'status' => status } if status }] } }
+
+# A3-1: scope says integer_dim, spec targets the RAW column, no decode → WARN.
+w = lint_warnings(a3_spec('m-store'), scope: scope_int.call)
+a3 = rule(w, 'A3')
+check(a3.size == 1 && a3.first.include?('SILENTLY strips'),
+      "A3: integer_dim control w/o decode → 1 WARNING (got #{a3.inspect})", fails)
+check(rule(lint(a3_spec('m-store')), 'A3').empty?, 'A3 is WARN-only — never in the FAIL set', fails)
+
+# A3-2: decode present, control bound to it → NO A3.
+ok = lint_warnings(a3_spec('skt-store', with_decode: true), scope: scope_int.call('auto-decoded'))
+check(rule(ok, 'A3').empty?, 'A3: control bound to the Text() decode → no warning', fails)
+
+# A3-3: spec-only mis-wire (decode column EXISTS but control targets the raw
+# column), NO scope → still caught precisely.
+w3 = lint_warnings(a3_spec('m-store', with_decode: true))
+a33 = rule(w3, 'A3')
+check(a33.size == 1 && a33.first.include?('exists on the target element') && a33.first.include?('skt-store'),
+      "A3: spec-only mis-wire (raw target, decode sibling present) → WARNING naming the decode col (got #{a33.inspect})", fails)
+
+# A3-4: manual-required decode → softer WARN pointing at the POSTPUBLISH guide.
+w4 = lint_warnings(a3_spec('m-store'), scope: scope_int.call('manual-required'))
+a34 = rule(w4, 'A3')
+check(a34.size == 1 && a34.first.include?('POSTPUBLISH_GUIDE'),
+      "A3: manual-required decode → WARN routes to POSTPUBLISH_GUIDE (got #{a34.inspect})", fails)
+
+# A3-5: a plain STRING list control (no integer_dim, no decode sibling) → NO A3.
+check(rule(lint_warnings(valid_spec), 'A3').empty?, 'A3: ordinary string list control → no warning', fails)
+
 puts
 if fails.empty?
-  puts 'ALL PASS — preflight_lint K1/S1/C5/N1 fail rules + P1/I1/A1/A2 warnings + T1/C2/C3 regressions'
+  puts 'ALL PASS — preflight_lint K1/S1/C5/N1 fail rules + P1/I1/A1/A2/A3 warnings + T1/C2/C3 regressions'
   exit 0
 else
   puts "FAILURES (#{fails.length}):"

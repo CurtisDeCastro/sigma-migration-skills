@@ -186,4 +186,41 @@ ruby -rjson -e '
   && note "ok: known-limitation pinned — dual-axis combo reads chart_kind=bar / dual_axis=false (3 KPI zones + line detected)" \
   || { note "FAIL: layout known-limitation pin"; fail=1; }
 
+# -- 5. PR-18 integer-coded dimension detection + cardinality confirmation ----
+# THE PR-18 FLIP (this entry's SITE_KEY reason to exist): parse-twb-layout marks
+# the integer SITE_KEY quick filter integer_dim:true (was a documented, ungated
+# gap), and the OPTIONAL warehouse-cardinality probe confirms it offline.
+ruby -rjson -e '
+  m = JSON.parse(File.read(ARGV[0]))
+  fs = (m["worksheets"] || {}).values.flat_map { |w| w["filters"] || [] }
+  sk = fs.find { |f| f["column_caption"] == "SITE_KEY" }
+  abort "SITE_KEY filter missing from meta" unless sk
+  abort "SITE_KEY not flagged integer_dim (got datatype=#{sk["datatype"].inspect} kind=#{sk["kind"].inspect} integer_dim=#{sk["integer_dim"].inspect})" \
+    unless sk["datatype"] == "integer" && sk["integer_dim"] == true
+  # a non-integer discrete filter must NOT be flagged (byte-identical guard)
+  other = fs.find { |f| f["datatype"] == "string" && (f["kind"] || "") =~ /list/ }
+  abort "a STRING list filter was wrongly flagged integer_dim" if other && other["integer_dim"]
+' "$TMP/layout-meta.json" \
+  && note "ok: PR-18 detection — SITE_KEY integer quick filter flagged integer_dim:true (string filters unflagged)" \
+  || { note "FAIL: PR-18 integer_dim detection on SITE_KEY"; fail=1; }
+
+# OPTIONAL cardinality confirmation, fixture (offline) mode — a low
+# COUNT(DISTINCT SITE_KEY) corroborates the integer-coded DIMENSION reading.
+cat > "$TMP/integer-dim-decode.json" <<'JSON'
+{ "version": 1, "source": "tableau",
+  "candidates": [ { "controlId": "ctl-site-key", "name": "SITE_KEY", "column": "SITE_KEY",
+    "table": "DEMO_DB.ANALYTICS.SITE_DIM", "warehouse_column": "SITE_KEY" } ] }
+JSON
+ruby "$SCRIPTS/probe-int-dim-cardinality.rb" --workdir "$TMP" \
+  --fixture "$CASE_DIR/probe-fixture-intdim" --max-cardinality 1000 >"$TMP/intdim.out" 2>&1
+rc=$?
+if [ "$rc" -eq 0 ] && ruby -rjson -e '
+  c = JSON.parse(File.read(ARGV[0]))["candidates"].first
+  abort "not confirmed: #{c.inspect}" unless c["cardinality"] == 12 && c["confirmed"] == true
+' "$TMP/integer-dim-decode.json"; then
+  note "ok: cardinality probe (fixture) confirms SITE_KEY low-cardinality (12) → integer-coded dimension"
+else
+  note "FAIL: PR-18 cardinality probe fixture confirmation (got exit $rc)"; sed -n '1,8p' "$TMP/intdim.out"; fail=1
+fi
+
 exit "$fail"
