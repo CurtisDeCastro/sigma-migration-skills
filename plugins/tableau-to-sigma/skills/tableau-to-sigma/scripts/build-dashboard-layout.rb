@@ -1521,8 +1521,21 @@ def build_page_for_dashboard(dashboard, page, opts)
    census, min_exp]
 end
 
-data_page_xml = page_xml('page-data',
-                         le(master_el['id'], 1, opts[:page_cols] + 1, 1, 21))
+# PR-17: place EVERY hidden master instance on the Data page. Pre-PR-17 there is
+# exactly one master (id 'master'); with --per-page-masters the Data page carries
+# one clone per content page ('master-<page-slug>'). Each is stacked in its own
+# 21-row band so none auto-flows. Single-master output is byte-identical (the
+# lone master keeps rows 1..21). Helpers (submaster-/opt-src-/…) keep auto-flowing
+# on this hidden utility page exactly as before.
+master_page_els = data_page['elements'].select do |e|
+  e.is_a?(Hash) && e['kind'] == 'table' &&
+    (e['id'] == 'master' || e['id'].to_s.start_with?('master-') || e['name'] == 'Master')
+end
+master_page_els = [master_el] if master_page_els.empty?
+master_les = master_page_els.each_with_index.map do |m, i|
+  le(m['id'], 1, opts[:page_cols] + 1, 1 + (i * 21), 21 + (i * 21))
+end
+data_page_xml = page_xml('page-data', *master_les)
 
 # ---- Layout-arrangement parity record (PLAN-v3 PR-11; WARN-level release) ---
 # Compares the SOURCE zone arrangement (normalized bboxes) against the BUILT
