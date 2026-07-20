@@ -87,6 +87,34 @@ check(t.call('MMM Qq, YYYY').nil?, "unmappable token run ('Qq') → nil, never e
 check(t.call('0.0△').nil?, 'non-format garbage → nil', fails)
 check(t.call('').nil? && t.call(nil).nil?, 'empty/nil → nil', fails)
 
+# ---- 5. emitted_records: internal-id ↔ caption bridge -----------------------
+# Worksheet per-pill format keys are keyed by the field's INTERNAL id
+# (`[usr:Calculation_AOV:qk]`); KPI/measure columns are named by CAPTION
+# ("Average Order Value"). The ledger must resolve the id→caption via
+# columns_by_guid, else it false-reports a correctly-formatted column 'unmapped'.
+kpi_el = {
+  'id' => 'el-kpi-aov', '_worksheet' => 'KPI Panel', '_dashboard' => 'Overview',
+  'columns' => [{ 'id' => 'k1', 'name' => 'Average Order Value',
+                  'format' => { 'kind' => 'number', 'formatString' => '$,.2f', 'currencySymbol' => '$' } }]
+}
+ws_meta = { 'KPI Panel' => { 'formats' => {
+  '[federated.demo].[usr:Calculation_AOV:qk]' => 'n"$"#,##0.00'
+} } }
+cbg = { 'Calculation_AOV' => { 'caption' => 'Average Order Value' } }
+
+with_bridge = FormatMap.emitted_records([kpi_el], ws_meta, {}, cbg)
+rec = with_bridge.first
+check(rec && rec['field'] == 'Calculation_AOV' && rec['source_format'] == 'n"$"#,##0.00' &&
+      rec['status'] == 'mapped' && rec.dig('emitted_format', 'formatString') == '$,.2f',
+      "id→caption bridge: caption-named KPI col maps its internal-id-keyed $ format (got #{rec.inspect})", fails)
+
+# Without the bridge (no columns_by_guid) the internal id cannot reach the
+# caption, so the same row falls back to unmapped — this is exactly the
+# false-negative the bridge removes.
+no_bridge = FormatMap.emitted_records([kpi_el], ws_meta, {})
+check(no_bridge.first && no_bridge.first['status'] == 'unmapped',
+      'without columns_by_guid the internal-id key cannot match the caption (pre-fix behavior)', fails)
+
 puts
 if fails.empty?
   puts 'ALL PASS — FormatMap: numbers, dates→d3-time, literal-format hazard refused'

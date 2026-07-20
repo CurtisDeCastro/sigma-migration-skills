@@ -129,7 +129,10 @@ check(translate_kpi_measure_formula('[Ghost Col]/[Cost (copy)_30000000003]', RMM
 # ---- v5.0 exact-format Text() columns for scale-comma + suffix formats ------
 # Tableau '#,##0,,,B' renders "1B"; Sigma's d3 enum can't (,.2s shows SI 'G').
 # The mechanized fidelity recipe: parse the scale/suffix, emit a Text() column.
-%w[parse_scaled_suffix_format scaled_suffix_column pick_tableau_format_raw].each do |fn|
+# FORMAT_KEY_CAPTIONS is normally built from meta['columns_by_guid'] at load;
+# stub it empty so format_key_match_keys resolves format keys on their own token.
+FORMAT_KEY_CAPTIONS = {} unless defined?(FORMAT_KEY_CAPTIONS)
+%w[format_key_match_keys parse_scaled_suffix_format scaled_suffix_column pick_tableau_format_raw].each do |fn|
   m = SRC.match(/^def #{fn}\b.*?\n^end$/m) or abort("could not extract #{fn}")
   eval(m[0]) # rubocop:disable Security/Eval
 end
