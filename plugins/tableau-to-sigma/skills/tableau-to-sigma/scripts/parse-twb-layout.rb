@@ -39,6 +39,7 @@ $LOAD_PATH.unshift File.expand_path('lib', __dir__)
 require 'twb_xml'
 require 'format_map' # PR-12: the ONE Tableau→Sigma format translator (lib/format_map.rb)
 require 'integer_dim' # PR-18: integer-coded dimension detection (shelf role + datatype)
+require 'series_colors' # B1 (card-trellis): reuse D2 member->color derivation (#441)
 
 # ---- Per-dashboard scoping ------------------------------------------------
 # `--dashboard "<name>"` (repeatable) and `--page <id>` let a LARGE workbook
@@ -1587,6 +1588,113 @@ def build_zone_tree(z)
   node
 end
 
+# ---- B1 card-trellis detection (beads-sigma-ubr5.5) ------------------------
+# A "card trellis" is a Tableau dashboard that repeats the SAME viz across a
+# categorical dimension as a ROW of per-category cards (small multiples authored
+# as N sibling worksheets, each pinned to one member of the same field — the
+# benchmark's 4 region columns). The flat build already emits each as a
+# separately-filtered chart element; B1 groups them into N GridContainer cards.
+#
+# Detection is deliberately CONSERVATIVE — it must NEVER fire on a non-trellis
+# dashboard (that would change the byte-identical flat output). A group needs:
+#   * >=3 sibling CHART zones (not KPI/table/pivot — those trellis differently),
+#   * an identical viz template  (same chart_kind + same measure set),
+#   * each carrying exactly the facet field as a single-member categorical
+#     `list` filter, pinning DISTINCT members, and
+#   * a single-row tiled geometry (same y-band, horizontally disjoint).
+# The native single-worksheet Tableau trellis (one sheet, dim on Rows/Cols) is
+# NOT handled here — it stays the existing UI-only WARN (F4); its member list
+# isn't in the .twb, so a faithful card set can't be built offline.
+TRELLIS_KINDS = %w[bar line area scatter pie donut map-region map-point].freeze
+
+# [chart_kind, sorted-measure-columns] — two zones are the SAME viz template
+# only when both match. nil when the zone plots no measure (can't be a facet).
+def trellis_signature(z)
+  ms = Array(z['measures']).map { |m| m['column'].to_s }.reject(&:empty?).sort
+  return nil if ms.empty?
+  [z['chart_kind'].to_s, ms]
+end
+
+# {field_key => {member, caption}} for each NON-action single-member categorical
+# `list` filter on the zone — the candidate facet pins.
+def trellis_facets(z)
+  out = {}
+  Array(z['filters']).each do |f|
+    next unless f.is_a?(Hash)
+    next if f['is_action']
+    next unless f['kind'] == 'list'
+    mems = Array(f['members'])
+    next unless mems.size == 1
+    dt = f['datatype'].to_s
+    next unless dt.empty? || dt == 'string' || dt == 'nominal'
+    key = (f['column_caption'] || f['column_guid'] || f['raw_param']).to_s
+    next if key.empty?
+    out[key] ||= { 'member' => mems.first.to_s, 'caption' => (f['column_caption'] || key).to_s }
+  end
+  out
+end
+
+# Single-row tiled: members share a y-band (spread <= half the median height)
+# and are horizontally disjoint (a left-to-right card row).
+def trellis_tiled?(zs)
+  ys = zs.map { |z| z['y_pct'].to_f }
+  hs = zs.map { |z| z['h_pct'].to_f }.sort
+  return false if ys.empty?
+  h_med = hs[hs.size / 2]
+  return false unless h_med.positive? && (ys.max - ys.min) <= 0.5 * h_med
+  xs = zs.map { |z| [z['x_pct'].to_f, z['x_pct'].to_f + z['w_pct'].to_f] }.sort_by(&:first)
+  xs.each_cons(2).all? { |a, b| a[1] <= b[0] + 1.0 }
+end
+
+# Returns [] for a non-trellis dashboard (the common case) so the emitter can
+# omit the key entirely and keep the flat output byte-identical.
+def detect_trellis_groups(zones)
+  charts = Array(zones).select { |z| z.is_a?(Hash) && z['kind'] == 'chart' && TRELLIS_KINDS.include?(z['chart_kind'].to_s) }
+  return [] if charts.size < 3
+  anno = charts.map do |z|
+    sig = trellis_signature(z)
+    next nil unless sig
+    facets = trellis_facets(z)
+    next nil if facets.empty?
+    { 'z' => z, 'sig' => sig, 'facets' => facets }
+  end.compact
+  return [] if anno.size < 3
+  groups = []
+  used = {}
+  anno.group_by { |a| a['sig'] }.each_value do |cohort|
+    next if cohort.size < 3
+    field_keys = cohort.flat_map { |a| a['facets'].keys }.uniq
+    field_keys.each do |fk|
+      seen = {}
+      members = cohort.select do |a|
+        next false unless a['facets'].key?(fk)
+        next false if used[a['z']['id']]
+        m = a['facets'][fk]['member']
+        seen[m] ? false : (seen[m] = true) # distinct members only
+      end
+      next if members.size < 3
+      next unless trellis_tiled?(members.map { |a| a['z'] })
+      ordered = members.sort_by { |a| a['facets'][fk]['member'].to_s.downcase }
+      ordered.each { |a| used[a['z']['id']] = true }
+      field_caption = ordered.first['facets'][fk]['caption']
+      grp = {
+        'field'      => field_caption,
+        'chart_kind' => ordered.first['sig'][0],
+        'members'    => ordered.map { |a| a['facets'][fk]['member'] },
+        'zone_ids'   => ordered.map { |a| a['z']['id'] },
+        'captions'   => ordered.map { |a| a['z']['caption'] }
+      }
+      # D2 reuse (#441): a per-member color for each card, when the .twb
+      # serialized an explicit member->color map on the facet field.
+      cmap = SeriesColors.color_map_for_field(zones, field_caption)
+      colors = ordered.map { |a| cmap[a['facets'][fk]['member']] }
+      grp['member_colors'] = colors if colors.any?
+      groups << grp
+    end
+  end
+  groups
+end
+
 dashboards = []
 xml.elements.each('//dashboard') do |d|
   dash_name = d.attributes['name']
@@ -1749,7 +1857,7 @@ xml.elements.each('//dashboard') do |d|
     end
   end
 
-  dashboards << {
+  dash_h = {
     'dashboard'     => d.attributes['name'],
     'is_story'      => is_story,
     'canvas_px'     => canvas_px,
@@ -1765,6 +1873,12 @@ xml.elements.each('//dashboard') do |d|
     # colors (theme then omitted — Sigma defaults apply, never worse).
     'brand_palette' => BRAND_PALETTE
   }
+  # B1 card-trellis: attach the detected groups ONLY when a trellis is present,
+  # so every non-trellis dashboard's JSON is byte-identical to the flat build
+  # (the layout stage's card path is likewise gated on this key).
+  trellis_groups = detect_trellis_groups(zones)
+  dash_h['trellis'] = trellis_groups unless trellis_groups.empty?
+  dashboards << dash_h
 end
 
 # Sheet-only workbooks (no <dashboard> blocks — just standalone worksheets)
