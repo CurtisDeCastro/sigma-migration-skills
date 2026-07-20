@@ -1086,6 +1086,34 @@ end
 # pick_tableau_format's normalized containment match.
 COLUMN_DEFAULT_FORMATS = {}
 (meta['column_formats'] || {}).each { |k, v| COLUMN_DEFAULT_FORMATS[k] = v }
+
+# Worksheet per-pill format keys are keyed by the field's INTERNAL id
+# (`[usr:Calculation_AvgBal:qk]`), but measure/KPI columns are named by CAPTION
+# ("Avg Balance per User"). Without this bridge the friendly match compares the
+# internal id to the caption, misses, and the column falls to a name-based
+# heuristic — the field failure where a KPI printed raw (or, worse, got a `$` on
+# a percentage) while the source .twb carried the real format. Map internal id →
+# caption from columns_by_guid so a format key can also match on its caption.
+FORMAT_KEY_CAPTIONS = {}
+(meta['columns_by_guid'] || {}).each do |gid, ci|
+  cap = ci.is_a?(Hash) ? ci['caption'].to_s : ''
+  FORMAT_KEY_CAPTIONS[gid.to_s] = cap unless cap.empty?
+end
+
+# The human name(s) a worksheet format-key can match a column header on: its own
+# friendly token AND — bridged through columns_by_guid — the caption its
+# internal id resolves to. Returns NORMALIZED keys (downcased, \W stripped).
+def format_key_match_keys(field)
+  inner = field.to_s.scan(/\[([^\]]+)\]/).flatten.last.to_s
+  parts = inner.split(':')
+  token = parts.length >= 3 ? parts[1].to_s : ''
+  return [] if token.empty?
+  names = [token]
+  cap = FORMAT_KEY_CAPTIONS[token]
+  names << cap if cap && !cap.empty?
+  names.map { |n| n.downcase.gsub(/\W+/, '') }.reject(&:empty?).uniq
+end
+
 def pick_column_default_format_raw(header)
   hkey = header.to_s.downcase.gsub(/\W+/, '')
   return nil if hkey.empty?
@@ -1100,6 +1128,22 @@ end
 def pick_column_default_format(header)
   raw = pick_column_default_format_raw(header)
   raw && tableau_format_to_sigma(raw)
+end
+
+# Last-resort number format when NO source format resolves (no pill format, no
+# .twb default, no master-map format): guess by header name. Percent detection
+# — a literal '%' in the caption OR a percent/rate/ratio word — WINS over the
+# currency guess, so a percentage NEVER gets a currency symbol (the
+# '% Customers with Profit' matched /profit/ and got a bogus '$' field failure).
+def heuristic_number_format(name)
+  n = name.to_s
+  if n.include?('%') || n.downcase =~ /(rate|margin|pct|percent|ratio)/
+    { 'kind' => 'number', 'formatString' => ',.1%' }
+  elsif n.downcase =~ /(revenue|profit|cost|sales|amount|spend)/
+    { 'kind' => 'number', 'formatString' => '$,.0f', 'currencySymbol' => '$' }
+  else
+    { 'kind' => 'number', 'formatString' => ',.0f' }
+  end
 end
 
 # Tableau scale-comma + literal-suffix formats ('n#,##0,,,B;-#,##0,,,B'):
@@ -2352,14 +2396,13 @@ end
 def pick_tableau_format(formats, header)
   return nil if formats.nil? || formats.empty?
   hkey = header.to_s.downcase.gsub(/\W+/, '')
+  return nil if hkey.empty?
   formats.each do |field, val|
-    body = field.to_s.downcase
-    # Friendly-name match: format key looks like `[usr:Return Rate:qk]`. Pull
-    # the human chunk and compare to header.
-    inner = body.scan(/\[([^\]]+)\]/).flatten.last.to_s
-    parts = inner.split(':')
-    friendly = parts.length >= 3 ? parts[1].to_s.gsub(/\W+/, '') : ''
-    if !friendly.empty? && (friendly == hkey || hkey.include?(friendly) || friendly.include?(hkey))
+    # Friendly-name match: format key looks like `[usr:Return Rate:qk]` OR is
+    # keyed by an internal id (`[usr:Calculation_AvgBal:qk]`) the KPI/measure
+    # column carries under its CAPTION — format_key_match_keys bridges both.
+    format_key_match_keys(field).each do |fkey|
+      next unless fkey == hkey || hkey.include?(fkey) || fkey.include?(hkey)
       sigma = tableau_format_to_sigma(val)
       return sigma if sigma
     end
@@ -2373,11 +2416,11 @@ end
 def pick_tableau_format_raw(formats, header)
   return nil if formats.nil? || formats.empty?
   hkey = header.to_s.downcase.gsub(/\W+/, '')
+  return nil if hkey.empty?
   formats.each do |field, val|
-    inner = field.to_s.downcase.scan(/\[([^\]]+)\]/).flatten.last.to_s
-    parts = inner.split(':')
-    friendly = parts.length >= 3 ? parts[1].to_s.gsub(/\W+/, '') : ''
-    return val if !friendly.empty? && (friendly == hkey || hkey.include?(friendly) || friendly.include?(hkey))
+    format_key_match_keys(field).each do |fkey|
+      return val if fkey == hkey || hkey.include?(fkey) || fkey.include?(hkey)
+    end
   end
   nil
 end
@@ -3894,15 +3937,7 @@ def build_kpi_element(z, meta, mmap, opts, warnings, data_elements = [])
             pick_column_default_format(master['name'])
   measure_col['format'] = tab_fmt if tab_fmt
   measure_col['format'] ||= master['format'] if master['format'].is_a?(Hash)
-  measure_col['format'] ||=
-    case master['name'].downcase
-    when /(revenue|profit|cost|sales|amount|spend)/
-      { 'kind' => 'number', 'formatString' => '$,.0f', 'currencySymbol' => '$' }
-    when /(rate|margin|pct|percent|ratio)/
-      { 'kind' => 'number', 'formatString' => ',.1%' }
-    else
-      { 'kind' => 'number', 'formatString' => ',.0f' }
-    end
+  measure_col['format'] ||= heuristic_number_format(master['name'])
 
   # Scale-comma + literal-suffix source format ('#,##0,,,B' → "1B"): the d3
   # enum can't render it (,.2s shows 'G' for 1e9), so the enum translator
@@ -4916,17 +4951,7 @@ layout.each do |dash|
               pick_column_default_format(meas['name'])
     meas_col_obj['format'] = tab_fmt
     meas_col_obj['format'] ||= meas['format'] if meas['format'].is_a?(Hash)
-    if meas_col_obj['format'].nil?
-      meas_col_obj['format'] =
-        case meas['name'].downcase
-        when /(revenue|profit|cost|sales|amount|spend)/
-          { 'kind' => 'number', 'formatString' => '$,.0f', 'currencySymbol' => '$' }
-        when /(rate|margin|pct|percent|ratio)/
-          { 'kind' => 'number', 'formatString' => ',.1%' }
-        else
-          { 'kind' => 'number', 'formatString' => ',.0f' }
-        end
-    end
+    meas_col_obj['format'] ||= heuristic_number_format(meas['name'])
     # Allow `format` on map entries to be either a Sigma format object OR a
     # bare formatString string for convenience.
     if meas['format'].is_a?(String)
@@ -7743,7 +7768,7 @@ end
 begin
   fe = {
     'version'           => 1,
-    'entries'           => FormatMap.emitted_records(elements, meta['worksheets'] || {}, COLUMN_DEFAULT_FORMATS),
+    'entries'           => FormatMap.emitted_records(elements, meta['worksheets'] || {}, COLUMN_DEFAULT_FORMATS, meta['columns_by_guid'] || {}),
     'series_color_maps' => SeriesColors.records(elements, meta['worksheets'] || {})
   }
   fe_path = File.join(File.dirname(File.expand_path(opts[:out])), 'formats-emitted.json')

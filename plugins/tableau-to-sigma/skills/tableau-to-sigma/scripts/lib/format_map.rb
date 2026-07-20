@@ -171,7 +171,16 @@ module FormatMap
   # elements: built element hashes still carrying '_worksheet'/'_dashboard'.
   # worksheets_meta: parse-twb-layout meta['worksheets'] (string keys).
   # column_formats: meta['column_formats'] (caption → raw default-format).
-  def emitted_records(elements, worksheets_meta, column_formats = {})
+  # columns_by_guid: meta['columns_by_guid'] — bridges a format key's INTERNAL
+  #   id (`Calculation_AvgBal`) to the CAPTION its column is named by, so the
+  #   ledger stops false-reporting caption-named KPI/measure columns as
+  #   'unmapped' (mirrors build-charts pick_tableau_format's id→caption bridge).
+  def emitted_records(elements, worksheets_meta, column_formats = {}, columns_by_guid = {})
+    id2cap = {}
+    (columns_by_guid || {}).each do |gid, ci|
+      cap = ci.is_a?(Hash) ? ci['caption'].to_s : ''
+      id2cap[gid.to_s] = cap unless cap.empty?
+    end
     recs = []
     Array(elements).each do |el|
       next unless el.is_a?(Hash) && !el['_worksheet'].to_s.empty?
@@ -188,7 +197,10 @@ module FormatMap
         sources[capn] = raw
       end
       sources.each do |fname, raw|
-        col = cols.find { |c| keys_match?(c['name'], fname) }
+        # match the column by the format-key's internal id OR the caption it
+        # resolves to through columns_by_guid.
+        names = [fname, id2cap[fname.to_s]].compact
+        col = cols.find { |c| names.any? { |nm| keys_match?(c['name'], nm) } }
         emitted = col && col['format']
         status = translate(raw) && emitted ? 'mapped' : 'unmapped'
         recs << { 'element_id' => el['id'], 'worksheet' => el['_worksheet'],
