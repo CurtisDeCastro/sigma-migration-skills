@@ -292,6 +292,77 @@ check(rule(lint(s), 'C7').any? { |e| e.include?('low`/`high') }, 'C7: range-slid
 rs['low'] = 0; rs['high'] = 100
 check(rule(lint(s), 'C7').empty?, 'C7: range-slider with low/high → clean', fails)
 
+# ---- C7: unbounded number-range {min:null,max:null} → HARD error (#422) ------
+# The recurring #422 defect: an UNRESTRICTED Tableau quantitative
+# quick-filter produced a number-range with min AND max present-and-null, which
+# 400s the whole POST. C7 must HARD-error it (in lint(), the FAIL set), name the
+# fix, and NEVER flag the valid keys-omitted unbounded form.
+def number_range_ctl(s)
+  ctl = s['pages'][0]['elements'][4]
+  ctl['controlType'] = 'number-range'
+  ctl.delete('selectionMode')
+  ctl.delete('value')
+  ctl.delete('mode')
+  ctl
+end
+# min:null AND max:null control → hard C7 violation naming the fix.
+s = valid_spec
+ctl = number_range_ctl(s)
+ctl['min'] = nil
+ctl['max'] = nil
+c7nr = rule(lint(s), 'C7')
+check(c7nr.size == 1, "C7: number-range control with min:null and max:null → 1 HARD violation (got #{lint(s).inspect})", fails)
+check(c7nr.first.to_s.include?('min:null and max:null') && c7nr.first.to_s.include?('#422'),
+      'C7 number-range message names the {min:null,max:null} 400 shape and the issue', fails)
+check(c7nr.first.to_s.include?('valid unbounded number-range') && c7nr.first.to_s.include?('never null bounds'),
+      'C7 number-range message names the remedy (omit the keys / concrete bounds, never null)', fails)
+# non-empty errs → the CLI would exit non-zero: assert it is a FAIL, not a warn.
+check(lint_warnings(s).none? { |x| x.start_with?('C7 ') }, 'C7 number-range null-bounds is a hard error, never a warning', fails)
+
+# a number-range with the min/max keys OMITTED is a VALID unbounded control — no C7.
+s = valid_spec
+number_range_ctl(s) # controlType only, no min/max keys
+check(rule(lint(s), 'C7').empty?, 'C7: number-range with min/max keys OMITTED → valid unbounded, no violation', fails)
+
+# a BOUNDED number-range still passes clean.
+s = valid_spec
+ctl = number_range_ctl(s)
+ctl['min'] = 0
+ctl['max'] = 100000
+check(rule(lint(s), 'C7').empty?, 'C7: bounded number-range (min:0,max:100000) → clean', fails)
+
+# only ONE bound present-and-null (partial) is still the unbounded trap → hard error.
+s = valid_spec
+ctl = number_range_ctl(s)
+ctl['min'] = nil # max key absent
+check(rule(lint(s), 'C7').size == 1, 'C7: number-range with min:null (max absent) → hard violation', fails)
+
+# ---- C7: unbounded number-range ELEMENT FILTER {min:null,max:null} (#422) ----
+# The exact shape the builder used to emit for a worksheet-scoped unrestricted
+# quantitative quick-filter — an ELEMENT filter, not a control. C7 must catch it
+# too (element filters were previously unlinted).
+s = valid_spec
+s['pages'][0]['elements'][1]['filters'] = [
+  { 'columnId' => 'col-kpi-val', 'kind' => 'number-range', 'mode' => 'between',
+    'min' => nil, 'max' => nil, 'includeNulls' => 'never' }
+]
+c7ef = rule(lint(s), 'C7')
+check(c7ef.size == 1 && c7ef.first.include?('filter[0]') && c7ef.first.include?('#422'),
+      "C7: number-range ELEMENT filter with min:null/max:null → 1 HARD violation naming filter[0] (got #{lint(s).inspect})", fails)
+check(c7ef.first.to_s.include?('drop the filter'),
+      'C7 element-filter message names the fix (drop the no-op filter)', fails)
+# a bounded number-range element filter passes; keys-omitted passes.
+s = valid_spec
+s['pages'][0]['elements'][1]['filters'] = [
+  { 'columnId' => 'col-kpi-val', 'kind' => 'number-range', 'mode' => 'between', 'min' => 1, 'max' => 9, 'includeNulls' => 'never' }
+]
+check(rule(lint(s), 'C7').empty?, 'C7: bounded number-range element filter → clean', fails)
+s = valid_spec
+s['pages'][0]['elements'][1]['filters'] = [
+  { 'columnId' => 'col-kpi-val', 'kind' => 'list', 'mode' => 'include', 'values' => %w[a b] }
+]
+check(rule(lint(s), 'C7').empty?, 'C7: non-number-range element filter → clean', fails)
+
 # ---- C8: includeNulls placement --------------------------------------------
 s = valid_spec
 s['pages'][0]['elements'][4]['includeNulls'] = true    # on a `list` control (off-schema)
