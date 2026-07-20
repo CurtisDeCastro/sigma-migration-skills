@@ -41,10 +41,26 @@
 # unmappable columns) are listed on stdout — the agent supplies those via
 # mcp-v2 (phase6-parity prints the exact queries).
 #
+# PIVOT-TOTALS JSON FALLBACK (SPEED — issue #422). Sigma's element CSV export
+# 500s server-side for ANY pivot carrying a `totals` key (probe-isolated live;
+# verify-anchors works around it by PUT-stripping the totals for the export
+# window and restoring after). Here we take the cheaper, non-mutating route: the
+# element's JSON export is UNAFFECTED by the totals key and returns the same
+# long-form rows, so we simply read that instead — no PUT, no restore. Two entry
+# points, both automatic (no agent mediation, no retry loop against the doomed
+# CSV):
+#   * PROACTIVE — the workbook spec shows the element carries a non-empty
+#     `totals` key: skip the CSV round-trip entirely and read JSON straight away.
+#     This is the recurring-time-sink fix: prior runs paid a failed CSV export +
+#     agent-mediated re-collection on every totals pivot.
+#   * REACTIVE — a CSV export that nonetheless 5xx's (a totals key we couldn't
+#     see, control-driven pivots) falls back to the JSON export before giving up.
+# When JSON returns real rows the chart is collected as :ok exactly like any
+# other; only if JSON ALSO fails does the render-verify marker below apply.
+#
 # KNOWN-PLATFORM-BUG FALLBACK (SKILL_IMPROVEMENT_PLAN_V3 §D4): the element CSV
-# export returns HTTP 500 for some pivots (control-driven pivots;
-# totals.showGrandTotals:hidden — probe-isolated live) or an EMPTY/HTML body
-# (large pivots) while the rendered values are CORRECT. That must not fail the
+# export returns an EMPTY/HTML body (large pivots) — or BOTH the CSV and its JSON
+# fallback 500 — while the rendered values are CORRECT. That must not fail the
 # run and must not push agents into ad-hoc --min-pass-rate waivers: such charts
 # are marked in --out as
 #   { "status": "render-verify-required",
@@ -64,7 +80,8 @@ require 'csv'
 require 'optparse'
 require 'thread'
 
-opts = { pool: 5, timeout: 600, row_limit: 100_000 }
+DEFAULT_DRIFT_WARN_MIN = (ENV['PARITY_DRIFT_WARN_MINUTES'] || '30').to_f
+opts = { pool: 5, timeout: 600, row_limit: 100_000, drift_warn_min: DEFAULT_DRIFT_WARN_MIN }
 OptionParser.new do |p|
   p.on('--plan PATH')          { |v| opts[:plan] = v }
   p.on('--workbook-id ID')     { |v| opts[:wb] = v }
@@ -73,6 +90,7 @@ OptionParser.new do |p|
   p.on('--pool N', Integer)    { |v| opts[:pool] = v }
   p.on('--timeout S', Integer, 'TOTAL wall-clock budget for the whole run (default 600). One deadline computed at start; every poll, download, and retry checks it. On expiry: per-chart "timeout" markers, partial actuals written, exit 3.') { |v| opts[:timeout] = v }
   p.on('--row-limit N', Integer, 'row cap per element CSV export (Sigma export rowLimit; default 100000, 0 = uncapped). A chart whose export is TRUNCATED at the cap is marked "too-large-for-export" and routed to the agent-mediated/warehouse path — parity over partial data is meaningless.') { |v| opts[:row_limit] = v }
+  p.on('--drift-warn-minutes N', Float, 'ADVISORY live-drift threshold (default 30, or $PARITY_DRIFT_WARN_MINUTES; 0 = off). If the source captures the parity `expected` was built from are older than N minutes when these Sigma actuals are collected, emit a loud WARN — against a LIVE warehouse the data may have moved, so an expected/=actual gap can be drift, not a translation bug. Never a gate.') { |v| opts[:drift_warn_min] = v }
 end.parse!
 %i[plan wb spec out].each { |k| abort "missing --#{k.to_s.tr('_', '-')}" unless opts[k] }
 
@@ -84,6 +102,46 @@ ROW_LIMIT = opts[:row_limit].to_i.positive? ? [opts[:row_limit].to_i, ExportPool
 
 plan = JSON.parse(File.read(opts[:plan]))
 charts = plan.is_a?(Hash) ? (plan['charts'] || []) : plan
+
+# LIVE-DRIFT ADVISORY (issue #422). The parity `expected` values come from source
+# view CSVs captured earlier (auto-parity-plan stamps the plan with
+# `source_csv_max_mtime` = the newest source-capture time). We are collecting the
+# Sigma actuals NOW. Against a LIVE warehouse the underlying data can move between
+# those two reads, so an expected/=actual gap may be DRIFT, not a translation bug
+# — a class phase-6 keeps rediscovering as if it were one. Warn LOUDLY (advisory,
+# never a gate) when the gap exceeds the threshold, and name the remedy.
+def source_capture_epoch(plan, plan_path)
+  stamped = (plan['source_csv_max_mtime'] if plan.is_a?(Hash))
+  return stamped.to_i if stamped
+  # Fallback: newest source view CSV mtime under the workdir (the plan's dir).
+  csvs = Dir.glob(File.join(File.dirname(plan_path), 'views', '*.csv'))
+  csvs.map { |f| File.mtime(f).to_i }.max
+end
+
+if opts[:drift_warn_min].to_f.positive?
+  src_epoch = source_capture_epoch(plan, opts[:plan])
+  gap_min = src_epoch ? (Time.now.to_i - src_epoch) / 60.0 : nil
+  if gap_min && gap_min > opts[:drift_warn_min]
+    warn ''
+    warn '=' * 70
+    warn format('⚠️  LIVE-DRIFT RISK — source captured %.0f min ago (> %g min threshold)',
+                gap_min, opts[:drift_warn_min])
+    warn '=' * 70
+    warn format('The parity `expected` values were built from source captures at %s,',
+                Time.at(src_epoch).strftime('%Y-%m-%dT%H:%M:%S%z'))
+    warn 'but the Sigma actuals are being collected NOW. If the warehouse is LIVE, its'
+    warn 'data may have changed in between — a resulting expected/=actual gap is DRIFT,'
+    warn 'NOT a translation bug. Do not rabbit-hole on it as one.'
+    warn 'REMEDY (synchronized recapture): re-export the source view CSVs immediately'
+    warn 'before this collection (or snapshot/freeze the warehouse), rebuild the plan'
+    warn 'with phase6-parity --regen-plan so `expected` reflects the same data window,'
+    warn 'then re-collect these actuals.'
+    warn '(advisory only — tune with --drift-warn-minutes / $PARITY_DRIFT_WARN_MINUTES; 0 disables)'
+    warn '=' * 70
+    warn ''
+  end
+end
+
 spec = JSON.parse(File.read(opts[:spec]))
 elements = (spec['pages'] || []).flat_map { |p| p['elements'] || [] }
 el_by_id = elements.each_with_object({}) { |e, h| h[e['id']] = e }
@@ -105,9 +163,54 @@ RETRYABLE = /\b(429|408|50[234])\b|Too Many Requests|timed? ?out|Timeout/i
 SERVER_ERR = /\b5\d\d\b|Internal Server Error/i
 RENDER_VERIFY_REASON = 'pivot CSV export 500/empty (known Sigma limitation)'
 
+# Map a set of long-form export rows (already split into a header row + body
+# rows of cells) onto the plan's wanted columns by DISPLAY NAME, consuming
+# indices so duplicate names (x + color both "Region") bind in order. Shared by
+# the CSV and JSON paths so both produce identical actuals tuples.
+# Returns [:ok, rows] or [:fail, reason].
+def map_columns(headers, body_rows, want_names)
+  used = []
+  idxs = want_names.map do |n|
+    i = headers.each_index.find { |j| !used.include?(j) && headers[j].casecmp?(n) }
+    used << i if i
+    i
+  end
+  return [:fail, "export headers #{headers.inspect[0, 120]} missing column(s) #{want_names.zip(idxs).select { |_, i| i.nil? }.map(&:first).join(', ')}"] if idxs.any?(&:nil?)
+  [:ok, body_rows.map { |r| idxs.map { |i| parse_cell(r[i]) } }]
+end
+
+# Pivot JSON-export fallback (issue #422). Reads the element's JSON export (long-
+# form row objects, unaffected by the totals key that 500s the CSV export) and
+# reshapes to the same actuals tuples the CSV path produces. Same return
+# contract as collect_chart. NEVER retries — a JSON 5xx degrades straight to the
+# render-verify marker (the CSV path already exhausted / skipped its retries).
+def collect_chart_json(element_id, want_names, wb, deadline)
+  return [:timeout, "total --timeout (#{deadline.budget.round}s) deadline reached before JSON export"] if deadline.expired?
+  qid = ExportPool.start_json_export(wb, element_id, ROW_LIMIT)
+  return [:fail, 'JSON export POST returned no queryId'] unless qid
+  status, body = ExportPool.poll_json_download(qid, deadline)
+  return [:timeout, "JSON export poll hit the total --timeout (#{deadline.budget.round}s) deadline"] if status == :timeout
+  return [:manual, RENDER_VERIFY_REASON] if status == :html
+  objs = ExportPool.parse_json_rows(body)
+  return [:manual, RENDER_VERIFY_REASON] if objs.empty?
+  # Truncated at the row cap → a huge flat grid, not a comparable aggregate.
+  if ROW_LIMIT && objs.length >= ROW_LIMIT
+    return [:toolarge, "element JSON export truncated at rowLimit #{ROW_LIMIT} — parity over partial data is meaningless"]
+  end
+  headers = objs.first.keys.map { |h| h.to_s.strip }
+  # Objects are uniform (one shape per export); align each row's values to the
+  # first object's key order so map_columns' by-name index matching applies.
+  body_rows = objs.map { |o| headers.map { |h| o[o.keys.find { |k| k.to_s.strip == h }] } }
+  map_columns(headers, body_rows, want_names)
+rescue Sigma::Error, Timeout::Error, Errno::ETIMEDOUT => e
+  msg = e.message.lines.first.to_s
+  return [:manual, RENDER_VERIFY_REASON] if msg =~ SERVER_ERR
+  [:fail, msg[0, 160]]
+end
+
 # One chart: export → poll → download → map plan columns by display name.
 # Returns [:ok, rows] / [:skip, reason] / [:fail, reason] /
-# [:manual, reason] (export 500/empty/HTML → render-verify fallback) /
+# [:manual, reason] (export empty/HTML, or CSV+JSON both 5xx → render-verify) /
 # [:toolarge, reason] (export truncated at ROW_LIMIT — parity over partial
 # data is meaningless; agent-mediated/warehouse path) /
 # [:timeout, reason] (the shared total deadline expired).
@@ -118,6 +221,14 @@ def collect_chart(c, el_by_id, wb, deadline)
   name_for = (el['columns'] || []).each_with_object({}) { |col, h| h[col['id']] = col['name'].to_s.strip }
   want_names = (c['sigma_columns'] || []).map { |id| name_for[id] }
   return [:fail, "plan column id(s) missing from element: #{(c['sigma_columns'] || []).zip(want_names).select { |_, n| n.nil? }.map(&:first).join(', ')}"] if want_names.any?(&:nil?)
+
+  # PROACTIVE pivot-totals fallback (SPEED — issue #422): a `totals` key 500s
+  # this element's CSV export every time, so skip the doomed round-trip + retry
+  # and read the JSON export straight away.
+  if el.is_a?(Hash) && el.key?('totals') && !el['totals'].nil? &&
+     !(el['totals'].respond_to?(:empty?) && el['totals'].empty?)
+    return collect_chart_json(c['sigma_element_id'], want_names, wb, deadline)
+  end
 
   attempts = 0
   begin
@@ -143,16 +254,9 @@ def collect_chart(c, el_by_id, wb, deadline)
     return [:manual, RENDER_VERIFY_REASON] if rows.empty?
     headers = rows.shift.map { |h| h.to_s.strip }
     return [:manual, RENDER_VERIFY_REASON] if rows.empty?
-    # Map each plan column to a CSV index by display name, consuming indices so
-    # duplicate names (x + color both "Region") bind in order.
-    used = []
-    idxs = want_names.map do |n|
-      i = headers.each_index.find { |j| !used.include?(j) && headers[j].casecmp?(n) }
-      used << i if i
-      i
-    end
-    return [:fail, "export headers #{headers.inspect[0, 120]} missing column(s) #{want_names.zip(idxs).select { |_, i| i.nil? }.map(&:first).join(', ')}"] if idxs.any?(&:nil?)
-    [:ok, rows.map { |r2| idxs.map { |i| parse_cell(r2[i]) } }]
+    # Map each plan column to a CSV index by display name (shared with the JSON
+    # path so both emit identical actuals tuples).
+    map_columns(headers, rows, want_names)
   rescue Sigma::Error, Timeout::Error, Errno::ETIMEDOUT, CSV::MalformedCSVError => e
     msg = e.message.lines.first.to_s
     if attempts < 4 && msg =~ RETRYABLE && !deadline.expired?
@@ -162,8 +266,9 @@ def collect_chart(c, el_by_id, wb, deadline)
       retry
     end
     # A persistent 5xx (500 immediately; 502/503/504 after retries) is the known
-    # pivot-export platform bug — degrade to render-verify, don't fail the run.
-    return [:manual, RENDER_VERIFY_REASON] if msg =~ SERVER_ERR
+    # pivot-export platform bug — try the JSON export (issue #422) before giving
+    # up; only if THAT also fails does the render-verify marker apply.
+    return collect_chart_json(c['sigma_element_id'], want_names, wb, deadline) if msg =~ SERVER_ERR
     [:fail, msg[0, 160]]
   end
 end

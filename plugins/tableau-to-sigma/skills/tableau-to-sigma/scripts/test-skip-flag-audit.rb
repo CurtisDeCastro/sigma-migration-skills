@@ -52,7 +52,8 @@ CLASSIFICATION = {
     '--skip-ref-check'           => :forwards, # → assert-wb-refs-resolve.rb --workdir
     '--skip-extract-landing'     => :offramp,
     '--skip-postpublish-guide'   => :gate,     # → assert-phase6-ran census
-    '--skip-flip-test'           => :gate      # → --skip-control-flip census
+    '--skip-flip-test'           => :gate,     # → --skip-control-flip census
+    '--skip-telemetry-gate'      => :gate      # #422: → assert-phase6-ran (gate 10 consent, policy exclusion)
   },
   'assert-wb-refs-resolve.rb'    => { '--skip-ref-check' => :offramp },
   'assert-dashboard-read.rb'     => { '--skip-dashboard-read' => :offramp },
