@@ -64,6 +64,7 @@ require_relative 'lib/png_classify'
 require_relative 'lib/zone_census'
 require_relative 'lib/format_map'     # PR-12: the ONE Tableau→Sigma format translator
 require_relative 'lib/series_colors'  # PR-12: ordered per-series color schemes
+require_relative 'lib/threshold_halo'  # C2: threshold-halo (computed-boolean color) detection
 require_relative 'lib/integer_dim'    # PR-18: integer-coded dimension decode-to-text routing
 require 'erb'
 
@@ -3700,6 +3701,68 @@ def build_param_scope_helper(el_id:, master_id:, value_name:, value_formula:, sc
   [element, src_name]
 end
 
+# ---- C2 threshold halo (gap ubr5.11) ---------------------------------------
+# A "threshold halo" is a mark whose COLOR flips above/below a constant on the
+# measure (the reference ">100K" yellow halo; the red-below/green-above BAN).
+# Detection is shared (lib/threshold_halo.rb); these two builder helpers resolve
+# the plan against THIS run's meta and turn a mappable one into the verified
+# computed-boolean + 2-color `color.scheme` on a category chart. KPIs/BANs have
+# no spec path for a conditional value color (kpi-chart `value.color` is a static
+# hex; conditional formatting is UI-only) → the caller routes them to
+# POSTPUBLISH_GUIDE + coverage instead of silently dropping the halo.
+$threshold_halo_records = [] # sidecar rows (threshold-halo.json) + coverage feed
+
+# Neutral-color test for the saturation fallback (a near-grey base vs the halo).
+# Mirrors parse-twb-layout's color_neutral? closely enough for a 2-band split.
+def threshold_color_neutral?(hex)
+  h = hex.to_s.downcase.sub(/\A#/, '')
+  return false unless h =~ /\A[0-9a-f]{6}\z/
+  r = h[0, 2].to_i(16); g = h[2, 2].to_i(16); b = h[4, 2].to_i(16)
+  mx = [r, g, b].max; mn = [r, g, b].min
+  (mx - mn) <= 24 # low chroma → grey/neutral base
+end
+
+# Tableau color-shelf aggregate wrapper → Sigma agg template (render_agg form).
+THRESHOLD_AGG = {
+  'SUM' => 'Sum', 'TOTAL' => 'Sum', 'AVG' => 'Avg', 'AVERAGE' => 'Avg',
+  'MIN' => 'Min', 'MAX' => 'Max', 'MEDIAN' => 'Median', 'ATTR' => 'Min',
+  'COUNT' => 'CountIf(IsNotNull(%s))', 'COUNTD' => 'CountDistinct'
+}.freeze
+
+# Resolve a zone's threshold-color plan (or nil / unmappable) for this run.
+def threshold_halo_plan(z, meta)
+  cbg = meta['columns_by_guid'] || {}
+  # Resolve the color channel's field token → columns_by_guid key. Handles hex
+  # GUIDs (guid_from_text) AND name/Calculation_NNN-keyed instance refs.
+  guid_of = lambda do |ref|
+    g = guid_from_text(ref)
+    return g if g && cbg.key?(g)
+    tok = ref.to_s[/\[(?:[a-z]+:)?([^:\]]+?)(?::[a-z0-9]+)?\]\s*\z/i, 1]
+    tok && cbg.key?(tok) ? tok : (g || tok)
+  end
+  ThresholdHalo.plan_for_zone(z, cbg, guid_of, method(:threshold_color_neutral?))
+end
+
+# Build the Sigma computed-boolean color column for a mappable plan. Returns
+# [column_hash, master_name] or [nil, reason]. The boolean is evaluated per the
+# chart's grouping (per bar), so `Sum([Master/m]) > N` colors each mark.
+def threshold_halo_color_column(plan, el_id, meta, mmap)
+  cbg = meta['columns_by_guid'] || {}
+  ref = plan['measure_ref'].to_s
+  tok = strip_brackets(ref).strip
+  cap = (info = cbg[tok] || cbg[guid_from_text(ref).to_s]) && info.is_a?(Hash) ? info['caption'] : nil
+  cap ||= tok
+  master = map_column(cap, mmap)
+  return [nil, "threshold measure '#{cap}' has no master column"] unless master && master['name']
+  agg_tmpl = THRESHOLD_AGG[plan['agg'].to_s] || 'Sum' # bare measure ref → aggregate by Sum
+  mref = "[Master/#{master['name'].to_s.strip}]"
+  lhs  = render_agg(agg_tmpl, mref)
+  const = plan['constant']
+  col = { 'id' => "clr-halo-#{el_id}", 'name' => (plan['field'].to_s.strip.empty? ? "#{cap} #{plan['op']} #{const}" : plan['field'].to_s.strip),
+          'formula' => "#{lhs} #{plan['op']} #{const}" }
+  [col, master['name'].to_s.strip]
+end
+
 # single measure and no dimensions — translate to a Sigma kpi-chart element.
 # Without this, the chart_kind=kpi worksheet would fall through to the
 # CSV-driven flat-table flow and quietly produce nothing usable.
@@ -4011,6 +4074,22 @@ def build_kpi_element(z, meta, mmap, opts, warnings, data_elements = [])
   # If the Tableau worksheet had Show Mark Labels on (typical for KPIs since
   # the number IS the chart), we don't need a separate dataLabel — kpi-chart
   # always renders the value. No-op.
+
+  # C2 threshold halo on a BAN/KPI: the scorecard's value color flips on a
+  # threshold. Sigma's kpi-chart `value.color` is a STATIC hex and its
+  # conditional formatting is UI-only — there is NO create-spec path to a
+  # value color that flips on the measure. Route it to POSTPUBLISH_GUIDE +
+  # coverage (never silently drop); the user finishes it in the editor.
+  thp = threshold_halo_plan(z, meta)
+  if thp
+    reason = thp['mappable'] ? 'kpi-chart conditional value color is UI-only in Sigma (value.color is a static hex)' : thp['reason']
+    $threshold_halo_records << { 'element' => element['id'], 'worksheet' => cap, 'kind' => 'kpi-chart',
+                                 'status' => 'postpublish', 'field' => thp['field'], 'formula' => thp['formula'],
+                                 'op' => thp['op'], 'constant' => thp['constant'], 'reason' => reason }
+    warnings << "'#{cap}' BAN/KPI has a THRESHOLD color (#{thp['formula'].to_s.gsub(/\s+/, ' ')}) — Sigma has no " \
+                'create-spec path for a conditional KPI value color (value.color is static; conditional formatting is ' \
+                'UI-only) — STAYS-MANUAL: set the KPI conditional color in the editor (routed to POSTPUBLISH_GUIDE + coverage)'
+  end
 
   element
 end
@@ -5155,15 +5234,60 @@ layout.each do |dash|
       'columns' => [dim_col_obj, meas_col_obj]
     }
     element['columns'] << extra_meas_col if extra_meas_col
+
+    # C2 THRESHOLD HALO (gap ubr5.11): a color channel driven by a threshold on
+    # the measure ([m] <op> N) is not a CSV/master dim, so color_col_obj is nil
+    # and the halo used to be DROPPED behind the single-series fan-out NOTE.
+    # Synthesize the verified computed-boolean color column + a 2-color scheme
+    # ordered [below, above] on category charts. Purely ADDITIVE: no threshold
+    # color ⇒ threshold_halo_plan returns nil ⇒ identical output.
+    threshold_halo_scheme = nil
+    if color_col_obj.nil? && %w[bar-chart line-chart area-chart combo-chart].include?(kind)
+      thp = threshold_halo_plan(z, meta)
+      if thp && thp['mappable']
+        thcol, why = threshold_halo_color_column(thp, el_id, meta, mmap)
+        if thcol
+          color_col_obj = thcol
+          threshold_halo_scheme = [thp['below'], thp['above']]
+          $threshold_halo_records << { 'element' => el_id, 'worksheet' => cap,
+                                       'dashboard' => dash['dashboard'], 'kind' => kind, 'status' => 'emitted',
+                                       'field' => thp['field'], 'formula' => thp['formula'], 'op' => thp['op'],
+                                       'constant' => thp['constant'], 'scheme' => threshold_halo_scheme, 'basis' => thp['basis'] }
+          warnings << "'#{cap}' THRESHOLD HALO: color is driven by a threshold on the measure " \
+                      "(#{thp['formula'].to_s.gsub(/\s+/, ' ')}) — emitted computed-boolean color column " \
+                      "'#{color_col_obj['name']}' + scheme #{threshold_halo_scheme.inspect} (below→above); the halo is " \
+                      'APPROXIMATED (Sigma has no second marks-layer overlay) — verify the render'
+        else
+          $threshold_halo_records << { 'element' => el_id, 'worksheet' => cap, 'dashboard' => dash['dashboard'],
+                                       'kind' => kind, 'status' => 'unmapped', 'field' => thp['field'],
+                                       'formula' => thp['formula'], 'reason' => why }
+          warnings << "'#{cap}' threshold-halo color NOT auto-emitted (#{why}) — STAYS-MANUAL: map the measure on " \
+                      'the master, then re-run, or set the conditional color in the Sigma editor (routed to coverage)'
+        end
+      elsif thp && !thp['mappable']
+        $threshold_halo_records << { 'element' => el_id, 'worksheet' => cap, 'dashboard' => dash['dashboard'],
+                                     'kind' => kind, 'status' => 'unmapped', 'field' => thp['field'],
+                                     'formula' => thp['formula'], 'reason' => thp['reason'] }
+        warnings << "'#{cap}' threshold-halo color NOT auto-emitted (#{thp['reason']}) — STAYS-MANUAL: set the " \
+                    'conditional color in the Sigma editor (routed to coverage; deferred per C2 tight scope)'
+      end
+    end
+
     if color_col_obj && !%w[pie-chart donut-chart table pivot-table].include?(kind)
       element['columns'] << color_col_obj
       element['color'] = { 'by' => 'category', 'column' => color_col_obj['id'] }
+      # C2: a computed threshold boolean (false<true) binds scheme positionally
+      # [below, above] deterministically — override any member-name pin.
+      element['color']['scheme'] = threshold_halo_scheme if threshold_halo_scheme
       # PR-12: pin the .twb's explicit member→color assignments as an ORDERED
       # scheme (ascending member order = Sigma's positional category-sort
       # application) so the member→color BINDING survives — the Top/Bottom-500
       # inversion class. No explicit map ⇒ no scheme ⇒ theme palette applies
-      # (current derivation unchanged).
-      if SeriesColors.field_matches?(z['series_color_field'], color_col_obj['name']) &&
+      # (current derivation unchanged). Skipped when C2 already pinned the
+      # threshold scheme deterministically above.
+      if threshold_halo_scheme
+        # (scheme already set from the threshold plan)
+      elsif SeriesColors.field_matches?(z['series_color_field'], color_col_obj['name']) &&
          (pinned = SeriesColors.ordered_scheme(z['series_colors']))
         element['color']['scheme'] = pinned
         members = z['series_colors'].map { |p| p['member'] }.sort_by { |m| m.to_s.downcase }
@@ -7780,6 +7904,27 @@ rescue => e
   warnings << "formats-emitted sidecar error (formats coverage unrecorded): #{e.message}"
 end
 
+# ---- C2: threshold-halo.json — the MECHANICAL counterpart for the blind ------
+# grader's palette/threshold dimension. Records every threshold-colored mark the
+# build detected: what it was (measure op constant + source colors), and how it
+# was handled — 'emitted' (category chart: computed-boolean color + [below,above]
+# scheme, the halo approximation), 'postpublish' (BAN/KPI: no create-spec path),
+# or 'unmapped' (deferred: not a 2-band constant threshold). Never a silent drop.
+# Only written when the source actually has a threshold color, so a workbook
+# WITHOUT one stays byte-identical to origin/main (no sidecar, no coverage rows).
+if $threshold_halo_records.any?
+  begin
+    th = { 'version' => 1, 'source' => 'tableau', 'halos' => $threshold_halo_records }
+    th_path = File.join(File.dirname(File.expand_path(opts[:out])), 'threshold-halo.json')
+    File.write(th_path, JSON.pretty_generate(th))
+    by_status = $threshold_halo_records.group_by { |r| r['status'] }.transform_values(&:size)
+    warn "wrote #{th_path} (#{$threshold_halo_records.size} threshold-colored mark(s): " \
+         "#{by_status.map { |s, n| "#{n} #{s}" }.join(', ')})"
+  rescue => e
+    warnings << "threshold-halo sidecar error (halo coverage unrecorded): #{e.message}"
+  end
+end
+
 # ---- Output mode ----
 #   Default       → flat array of elements (legacy behaviour). Extras first.
 #   --page-per-worksheet → emit { pages: [{name, elements:[]}] }. One page per
@@ -8416,6 +8561,21 @@ warnings.each do |w|
     'severity' => sev.to_s, 'recoverable' => recoverable,
     'detail' => ws[0, 300],
     'action' => (recoverable ? 'Resolve the field on the master (map it / add the calc column), then re-run.' : nil)
+  }
+end
+
+# (4.5) C2 threshold halos that WERE emitted — the halo is an APPROXIMATION
+# (Sigma has no second marks-layer overlay), so it belongs in coverage as
+# 'approximated' even though it carried. The 'postpublish'/'unmapped' records
+# already flow through their STAYS-MANUAL warnings in (4); adding only 'emitted'
+# here avoids double-listing.
+$threshold_halo_records.select { |r| r['status'] == 'emitted' }.each do |r|
+  coverage_unresolved << {
+    'visual' => r['worksheet'].to_s, 'source_type' => 'threshold-color',
+    'severity' => 'approximated', 'recoverable' => false,
+    'detail' => "threshold halo emitted as computed-boolean color + scheme #{Array(r['scheme']).inspect} " \
+                "(#{r['formula'].to_s.gsub(/\s+/, ' ')}) — Sigma has no second marks-layer overlay; the halo is approximated",
+    'action' => 'Verify the rendered mark colors flip at the threshold against the Tableau source image.'
   }
 end
 
