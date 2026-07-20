@@ -252,6 +252,13 @@ OptionParser.new do |o|
     abort "--master-col expects 'Name=<Sigma formula>', got #{v.inspect}" if nm.to_s.empty? || fx.to_s.empty?
     (opts[:master_cols] ||= []) << [nm, fx]
   end
+  # PLAN-v3 PR-17 (flag-staged, default OFF). De-share the single hidden master
+  # into per-page (per-dashboard) instances so a page's controls filter only
+  # that page's tiles (a shared cross-page master composes every page's filters
+  # on one master — V5.6-CONTROLS-AUDIT D11). Self-gating: a no-op unless >=2
+  # pages draw on the master, so single-page builds stay byte-identical.
+  o.on('--per-page-masters', 'PR-17: give each dashboard page its own master instance (fixes cross-page control leakage; ' \
+                             'no-op for single-page workbooks)') { opts[:per_page_masters] = true }
   o.on('--finalize')         {     opts[:finalize] = true }
   o.on('--actuals PATH')     { |v| opts[:actuals] = File.expand_path(v) }
   o.on('--allow-missing-tiles N', Integer) { |v| opts[:allow_missing_tiles] = v }
@@ -3600,6 +3607,21 @@ else
   spec['name'] = display_wb_name if opts[:name]
   spec['folderId'] = opts[:folder] if opts[:folder]
   layout_xml = (Specs.respond_to?(:layout_xml) ? Specs.layout_xml : nil)
+end
+# ---- PR-17: per-page master instances (flag-staged, default OFF) ------------
+# Final structural pass over the assembled spec — runs AFTER the multi-metric
+# recipe and formula-normalize so those see the shared-master shape they were
+# written against, then de-shares. Self-gating (no-op unless >=2 pages use the
+# master), so single-page and page-mode-with-one-data-page builds are unchanged.
+if opts[:per_page_masters]
+  require File.join(HERE, 'lib', 'per_page_masters')
+  ppm = PerPageMasters.split!(spec)
+  if ppm[:applied]
+    line "per-page-masters (PR-17): #{ppm[:masters]} master instance(s) across #{ppm[:pages]} page(s) " \
+         "(#{ppm[:clones]} Data-page element(s)); each page's controls now filter only its own tiles"
+  else
+    line 'per-page-masters (PR-17): no split needed (<=1 page draws on the master) — shared master kept'
+  end
 end
 # ---- PUT-APPEND: incremental one-tab-at-a-time into an EXISTING workbook ----
 # When --workbook-target <id> is set with a single-dashboard build, append the
