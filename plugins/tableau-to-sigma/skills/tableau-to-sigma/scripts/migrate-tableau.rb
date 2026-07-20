@@ -261,6 +261,11 @@ OptionParser.new do |o|
                              'no-op for single-page workbooks)') { opts[:per_page_masters] = true }
   o.on('--finalize')         {     opts[:finalize] = true }
   o.on('--actuals PATH')     { |v| opts[:actuals] = File.expand_path(v) }
+  # Finalize ergonomics (issue #422): forward two flags phase6-parity /
+  # assert-phase6-ran already accept but the orchestrator previously swallowed,
+  # blocking operators mid-finalize.
+  o.on('--regen-plan', 'force phase6-parity to REBUILD parity-plan.json from scratch (forwarded to phase6-parity.rb). Use after a workbook re-POST changes element ids, or to discard a stale plan.') { opts[:regen_plan] = true }
+  o.on('--skip-telemetry-gate REASON', 'waive gate 10 (telemetry consent) at --finalize — REQUIRED reason; forwarded to assert-phase6-ran.rb (census-visible policy exclusion, NOT a quality waiver). Use ONLY when the run cannot prompt (e.g. unattended CI); name it in your report.') { |v| opts[:skip_telemetry] = v }
   o.on('--allow-missing-tiles N', Integer) { |v| opts[:allow_missing_tiles] = v }
   o.on('--min-pass-rate F', Float, 'accept a parity pass-rate below 1.0 at the gate — ONLY for honest, ' \
                                    'NAMED divergences (LOD placeholders / cross-grain semantics)') { |v| opts[:min_pass_rate] = v }
@@ -939,6 +944,7 @@ if opts[:finalize]
   p6 = ['ruby', File.join(HERE, 'phase6-parity.rb'), '--tableau', WORK,
         '--finalize', '--actuals', opts[:actuals]]
   p6 += ['--extract-mode', '--extract-tol', '0.30'] if state['extract_mode']
+  p6 += ['--regen-plan'] if opts[:regen_plan]
   _, p6st = sigma_run!(p6, allow_fail: true)
   line "phase6-parity finalize: #{p6st.success? ? 'PASS' : "FAIL (exit #{p6st.exitstatus})"}"
   mark('phase6-finalize')
@@ -991,6 +997,9 @@ if opts[:finalize]
   # Gate 11 (post-publish interactivity guide) waiver pass-through — the gate
   # itself decides whether the source's actions require POSTPUBLISH_GUIDE.md.
   gate += ['--skip-postpublish-guide', opts[:skip_postpublish_guide]] if opts[:skip_postpublish_guide]
+  # Telemetry consent waiver pass-through (issue #422) — census-visible at gate
+  # 10 (policy exclusion, excluded from the quality-waiver budget by doctrine).
+  gate += ['--skip-telemetry-gate', opts[:skip_telemetry]] if opts[:skip_telemetry]
   # --fast: stamp the two visual-gate waivers with the operator's reason (recorded
   # in parity-final.json's waivers[] and counted toward the >2-waiver budget cap).
   gate += ['--skip-visual-gate', opts[:fast], '--skip-visual-comparison', opts[:fast]] if opts[:fast]
@@ -4167,6 +4176,7 @@ end
 p6 = ['ruby', File.join(HERE, 'phase6-parity.rb'),
       '--tableau', WORK, '--workbook-id', wb_id]
 p6 += ['--extract-mode', '--extract-tol', '0.30'] if has_extracts
+p6 += ['--regen-plan'] if opts[:regen_plan]
 if FASTPATH && (FAST[:degraded] || []).any?
   # Degraded fast path (--yes, discovery artifacts missing): the plan may be
   # unbuildable without the view CSVs / layout. Degrade LOUDLY, never re-fetch.
