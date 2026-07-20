@@ -33,7 +33,13 @@
 #   C6  a control with an unknown controlType, or the docs-only `top-n` type that
 #       the live tenant 400s — mirrors Sigma spec/verify offline (canary 2026-07-11).
 #   C7  a control missing a REQUIRED field for its type: `mode` on
-#       switch/checkbox/text/number/date/slider; `low`/`high` on range-slider.
+#       switch/checkbox/text/number/date/slider; `low`/`high` on range-slider;
+#       an unbounded `number-range` (control OR element filter) whose `min` AND
+#       `max` are BOTH present-and-null — the {min:null,max:null} shape an
+#       UNRESTRICTED Tableau quantitative quick-filter used to emit, which 400s
+#       the whole POST (issue #422 — recurred across workbooks). A
+#       number-range with the keys OMITTED is a valid unbounded control
+#       (refs/workbook-layout.md); only null-VALUED bounds are the trap.
 #   C8  `includeNulls` on a controlType where it is off-schema.
 #   N1  an element or column whose `name` is empty/whitespace-only — breaks
 #       parity header matching and blank-renders axes (title hiding belongs on
@@ -196,6 +202,19 @@ def lint(spec)
         end
       end
 
+      # C7 (element filters): a number-range ELEMENT filter with min AND max
+      # BOTH present-and-null is the same {min:null,max:null} 400 shape as the
+      # control case — the exact defect an UNRESTRICTED Tableau quantitative
+      # quick-filter produced (issue #422). The builder now skips
+      # emitting it, but hard-block any that slip through from any code path so
+      # it can never reach POST again. Keys OMITTED = valid unbounded; only
+      # null-VALUED bounds are flagged.
+      (el['filters'] || []).each_with_index do |flt, i|
+        next unless flt.is_a?(Hash) && flt['kind'] == 'number-range'
+        next unless flt['min'].nil? && flt['max'].nil? && (flt.key?('min') || flt.key?('max'))
+        errs << "C7 element '#{name}': number-range filter[#{i}] has min:null and max:null — an unbounded range Sigma 400s at POST (#422). An UNRESTRICTED quantitative filter is 'all values': drop the filter (it hides nothing) instead of shipping null bounds."
+      end
+
       if kind == 'control'
         %w[id controlId controlType].each do |f|
           errs << "C1 control '#{name}': missing required field `#{f}`." if el[f].to_s.empty?
@@ -252,6 +271,15 @@ def lint(spec)
           # C7: a range-slider without track bounds silently filters every row out.
           if ct == 'range-slider' && (el['low'].nil? || el['high'].nil?)
             errs << "C7 control '#{name}': controlType \"range-slider\" needs flat `low`/`high` track bounds — bare emits a 0..0 slider that filters all rows out."
+          end
+          # C7: a number-range control whose min AND max are BOTH present-and-null
+          # is the unbounded {min:null,max:null} shape Sigma 400s at POST (#422 —
+          # an UNRESTRICTED Tableau quantitative quick-filter). Keys OMITTED is a
+          # valid unbounded number-range (refs/workbook-layout.md); only
+          # null-VALUED bounds are the trap, so require at least one bound key be
+          # present-and-null before flagging (never flag the valid keys-omitted form).
+          if ct == 'number-range' && el['min'].nil? && el['max'].nil? && (el.key?('min') || el.key?('max'))
+            errs << "C7 control '#{name}': controlType \"number-range\" with min:null and max:null is an unbounded range Sigma 400s at POST (#422) — an UNRESTRICTED quantitative filter is 'all values': emit NO min/max keys (valid unbounded number-range) or concrete bounds, never null bounds."
           end
           # C8: includeNulls only valid on a specific subset.
           if el.key?('includeNulls') && !INCLUDE_NULLS_OK.include?(ct)

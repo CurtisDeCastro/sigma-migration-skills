@@ -5971,12 +5971,25 @@ layout.each do |dash|
           warnings << "'#{cap}' relative-date window #{f['first_period']}..#{f['last_period']} #{period}s is shifted/spanning — no rolling mode fits → mode:between (#{fields['startDate'][0..9]}..#{fields['endDate'][0..9]}); FROZEN — re-run to refresh"
         end
       when 'number-range'
+        # An UNRESTRICTED Tableau quantitative filter carries no min/max (the
+        # <filter class='quantitative'> has no explicit bounds) → "all values".
+        # Emitting {min:null, max:null} on a mode:between number-range 400s the
+        # whole POST (issue #422 — recurred across workbooks). A range
+        # that filters nothing is a NO-OP, so mirror the categorical "All"
+        # handling above and emit NO element filter; where a bound IS present,
+        # emit only the non-nil key(s) so the shape never carries a null bound.
+        fmin = f['min']
+        fmax = f['max']
+        if fmin.nil? && fmax.nil?
+          warnings << "'#{cap}' quantitative quick filter on '#{fcap}' is UNRESTRICTED (no min/max — Tableau 'All') — no Sigma element filter emitted (an unbounded number-range with null bounds 400s the POST; #422)"
+          next
+        end
         fcol = el_filter_col_for.call(m)
         next if fcol.nil? # helper-sourced chart, column unreachable (warned in el_filter_col_for)
-        el_filters << {
-          'columnId' => fcol, 'kind' => 'number-range', 'mode' => 'between',
-          'min' => f['min'], 'max' => f['max'], 'includeNulls' => 'never'
-        }
+        nr = { 'columnId' => fcol, 'kind' => 'number-range', 'mode' => 'between', 'includeNulls' => 'never' }
+        nr['min'] = fmin unless fmin.nil?
+        nr['max'] = fmax unless fmax.nil?
+        el_filters << nr
       when 'wildcard'
         # D5/P0.6 (parsed pattern; the unparseable shape was intercepted above).
         # Worksheet-scoped wildcard → hidden Contains/StartsWith/EndsWith match
