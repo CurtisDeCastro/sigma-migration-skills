@@ -7938,6 +7938,114 @@ if $threshold_halo_records.any?
   end
 end
 
+# ---- Native trellis collapse (fix/native-trellis, SUPERSEDES #451 B1) --------
+# parse-twb-layout flags a dashboard that repeats one viz across a categorical
+# field as small multiples (N sibling per-member worksheets). The flat build
+# above already emitted each member as its OWN filtered chart element. The
+# CORRECT Sigma shape for small-multiples is ONE viz element carrying a native
+# `trellis` property (rowsBy / columnsBy) — NOT N cloned elements. So here we
+# COLLAPSE each detected group: keep the BASE member's element, reuse the facet
+# field it already carries as its single-member filter column, EMPTY that member
+# filter (so every member renders — one panel each), attach trellis.rowsBy /
+# columnsBy chosen from the source ARRANGEMENT (vertical stack → rowsBy,
+# horizontal row → columnsBy), and DROP the sibling member elements. Gated on
+# `dash['trellis']` → a non-trellis workbook is byte-identical to the flat build.
+(layout || []).each do |dash|
+  next unless dash['trellis'].is_a?(Array) && !dash['trellis'].empty?
+  dash['trellis'].each do |grp|
+    caps = Array(grp['captions'])
+    next if caps.size < 2
+    base_cap = caps.first
+    base_el = elements.find do |e|
+      e['_dashboard'] == dash['dashboard'] && e['_worksheet'] == base_cap && e['source']
+    end
+    unless base_el
+      warnings << "native trellis on '#{dash['dashboard']}': base worksheet #{base_cap.inspect} has no chart " \
+                  'element — trellis NOT collapsed (member charts stay flat)'
+      next
+    end
+    # Native `trellis` survives readback ONLY on these element kinds (empirical
+    # coverage matrix — docs/sigma-trellis-chart-support.md). On pie/kpi/pivot/
+    # table the POST returns 200 but Sigma SILENTLY STRIPS the key and renders
+    # flat, so we must NOT emit it there:
+    #   * pie-chart → convert the base to a DONUT (donut supports trellis) and
+    #     collapse as usual (the faithful faceted-pie shape);
+    #   * kpi-chart → leave the N sibling KPI elements FLAT (fanning out to N
+    #     per-member KPIs IS the correct Sigma shape — do not collapse);
+    #   * pivot-table/table → leave flat (pivot's own rowsBy/columnsBy shelves
+    #     and table→postpublish are the documented follow-up mechanisms).
+    # NOTE: the POST→readback round-trip must still ASSERT the key survived on
+    # supported kinds (silent stripping) — enforced in the live e2e + verify.
+    trellis_supported = %w[bar-chart line-chart area-chart combo-chart scatter-chart donut-chart].freeze
+    if base_el['kind'] == 'pie-chart'
+      base_el['kind'] = 'donut-chart'
+      warnings << "native trellis on '#{dash['dashboard']}': base '#{base_cap}' is a PIE — converted to DONUT " \
+                  '(pie silently strips the trellis key on readback; donut supports it) before faceting'
+    end
+    unless trellis_supported.include?(base_el['kind'].to_s)
+      warnings << "native trellis on '#{dash['dashboard']}': base kind '#{base_el['kind']}' does NOT support a " \
+                  "native trellis (Sigma strips the key on readback) — left the #{caps.size} member " \
+                  "#{base_el['kind']} element(s) FLAT " \
+                  "(#{base_el['kind'] == 'kpi-chart' ? 'N sibling KPIs is the correct faceted shape' : 'pivot→own shelves / table→postpublish is the follow-up'})"
+      next
+    end
+    field = grp['field'].to_s
+    base_el['columns'] ||= []
+    # The facet field is already a column on the base element — the flat build
+    # added it as the single-member filter column `f-<el>-<field>`. Reuse it;
+    # if absent (defensive), add a passthrough master column so the trellis has
+    # a real column to face by.
+    cat_col = base_el['columns'].find { |c| c['name'].to_s.strip.casecmp?(field.strip) }
+    unless cat_col
+      cid = "f-#{base_el['id']}-#{field.downcase.gsub(/\W+/, '-')}".sub(/-$/, '')
+      cid = "f-#{base_el['id']}-trellis" if cid == "f-#{base_el['id']}-" || cid.end_with?('-')
+      cat_col = { 'id' => cid, 'name' => field, 'formula' => "[Master/#{field}]" }
+      base_el['columns'] << cat_col
+    end
+    # Empty the per-member list filter so ALL members render (matches the owner's
+    # native reference: the list filter stays with values:[]; Sigma renders every
+    # member as its own trellis panel).
+    Array(base_el['filters']).each do |f|
+      f['values'] = [] if f.is_a?(Hash) && f['columnId'] == cat_col['id'] && f['kind'] == 'list'
+    end
+    # Source arrangement → Sigma trellis axis. A single facet field faces ONE
+    # axis (rowsBy XOR columnsBy — emitting BOTH on the same column is
+    # degenerate); a 'grid' arrangement of one field maps to columnsBy, which
+    # Sigma wraps into a tile grid on its own.
+    axis_key = grp['orientation'].to_s == 'rows' ? 'rowsBy' : 'columnsBy'
+    base_el['trellis'] = { axis_key => [{ 'columnId' => cat_col['id'] }] }
+    # Round-trip guard record: Sigma SILENTLY strips an unsupported trellis on
+    # readback, so the post-publish verifier re-reads the spec and asserts each
+    # of these survived (verify-trellis-survived.rb).
+    ($native_trellis_records ||= []) << {
+      'element_id' => base_el['id'], 'kind' => base_el['kind'], 'name' => base_el['name'],
+      'axis' => axis_key, 'columnId' => cat_col['id'], 'dashboard' => dash['dashboard']
+    }
+    # Drop the sibling member chart elements — the ONE trellis element replaces
+    # the whole small-multiples set.
+    sib_caps = caps[1..].map(&:to_s)
+    elements.reject! do |e|
+      e['_dashboard'] == dash['dashboard'] && sib_caps.include?(e['_worksheet'].to_s) && e['source']
+    end
+    warnings << "native trellis on '#{dash['dashboard']}': #{caps.size} #{field.inspect} worksheets → ONE " \
+                "#{base_el['kind']} element '#{base_el['id']}' with trellis.#{axis_key} " \
+                "(orientation=#{grp['orientation']}, facet column #{cat_col['id']})"
+  end
+end
+# Round-trip guard sidecar — only written when a native trellis was actually
+# emitted (a non-trellis workbook stays byte-identical: no sidecar). The
+# post-publish verifier asserts each element still carries its `trellis` key on
+# readback (Sigma silently strips unsupported ones).
+if ($native_trellis_records ||= []).any?
+  begin
+    nt_path = File.join(File.dirname(File.expand_path(opts[:out])), 'native-trellis-emitted.json')
+    File.write(nt_path, JSON.pretty_generate('version' => 1, 'elements' => $native_trellis_records))
+    warn "wrote #{nt_path} (#{$native_trellis_records.size} native trellis element(s) — verify survives readback)"
+  rescue => e
+    warnings << "native-trellis sidecar error (round-trip coverage unrecorded): #{e.message}"
+  end
+end
+
 # ---- Output mode ----
 #   Default       → flat array of elements (legacy behaviour). Extras first.
 #   --page-per-worksheet → emit { pages: [{name, elements:[]}] }. One page per

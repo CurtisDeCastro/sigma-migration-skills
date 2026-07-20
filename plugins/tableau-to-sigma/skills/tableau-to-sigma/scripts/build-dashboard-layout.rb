@@ -1351,91 +1351,41 @@ end
 # Build one container-banded page for a single dashboard. Returns
 # [page_xml_string, extra_spec_elements, n_charts, n_bands, n_controls,
 #  census, min_row_expansions].
-# B1 card-trellis (beads-sigma-ubr5.5). The parser (`detect_trellis_groups`)
-# flags a dashboard that repeats one viz across a categorical dimension as a row
-# of per-category cards. The flat builder already emits each member as its own
-# filtered chart element (`[Region]="West"`); this path GROUPS those N elements
-# into N sibling GridContainer cards (the "biggest visual win" — a card grid
-# instead of a flat band), each optionally accented in that member's color (D2,
-# #441). Strategy: delegate the WHOLE non-member remainder to the existing
-# banded builder (so header / controls / other charts / census / safety-net are
-# reused verbatim), then append the card row(s) below. Only ever called when
-# `dashboard['trellis']` is present → zero effect on non-trellis dashboards.
-TRELLIS_CARD_ROWS = 13 # per-card grid-row span (bar/line height; row-sizing guide)
-def build_page_trellis(dashboard, page, opts, groups)
-  els_by_name = page['elements'].each_with_object({}) { |e, h| h[e['name']] = e if e['name'] }
-  augment_els_by_name!(els_by_name, page['elements'])
+# Native trellis (fix/native-trellis, SUPERSEDES #451 B1). The parser flags a
+# dashboard that repeats one viz across a categorical dimension as small
+# multiples; build-charts-from-signals collapses the N member worksheets into
+# ONE viz element carrying a native `trellis` property. On the layout side this
+# means the group is now a SINGLE element, so we prune the absorbed SIBLING
+# member zones (keeping only the base) and EXPAND the base zone to the group's
+# bounding box — the one trellis element then lands full-size via the ordinary
+# banded/synth path (no per-card GridContainers). Mutates `dashboard` in place;
+# only touches a dashboard that carries `trellis`, so non-trellis output is
+# byte-identical to the flat build.
+def prune_trellis_zones!(dashboard)
+  groups = dashboard['trellis']
+  return unless groups.is_a?(Array) && !groups.empty?
   zone_by_id = (dashboard['zones'] || []).each_with_object({}) { |z, h| h[z['id']] = z if z['id'] }
-
-  # Resolve each group's member zones → Sigma elements up front. A group that
-  # can't resolve >=2 members is dropped (falls back to the flat placement of
-  # those zones, which the base builder still handles because we won't prune
-  # unresolved members).
-  resolved = groups.map do |g|
-    cards = Array(g['zone_ids']).each_with_index.map do |zid, i|
-      z = zone_by_id[zid]
-      next nil unless z
-      el = find_zone_el(els_by_name, z, opts[:renames])
-      next nil unless el
-      { 'el_id' => el['id'], 'member' => Array(g['members'])[i].to_s,
-        'color' => Array(g['member_colors'])[i] }
-    end.compact
-    cards.size >= 2 ? cards : nil
-  end.compact
-  raise 'no resolvable trellis group' if resolved.empty?
-
-  member_el_ids = resolved.flat_map { |cards| cards.map { |c| c['el_id'] } }
-  member_el_set = member_el_ids.each_with_object({}) { |id, h| h[id] = true }
-  placed_zone_ids = {}
-  resolved.each_with_index do |cards, gi|
-    Array(groups[gi]['zone_ids']).each { |zid| placed_zone_ids[zid] = true }
+  drop_ids = {}
+  groups.each do |g|
+    zids = Array(g['zone_ids'])
+    next if zids.size < 2
+    base = zone_by_id[zids.first]
+    next unless base
+    members = zids.map { |zid| zone_by_id[zid] }.compact
+    # Expand the base zone to the union bbox of every member panel so the single
+    # trellis element occupies the whole small-multiples area (not just the base
+    # member's slot).
+    x0 = members.map { |z| z['x_pct'].to_f }.min
+    y0 = members.map { |z| z['y_pct'].to_f }.min
+    x1 = members.map { |z| z['x_pct'].to_f + z['w_pct'].to_f }.max
+    y1 = members.map { |z| z['y_pct'].to_f + z['h_pct'].to_f }.max
+    base['x_pct'] = x0
+    base['y_pct'] = y0
+    base['w_pct'] = x1 - x0
+    base['h_pct'] = y1 - y0
+    zids[1..].each { |zid| drop_ids[zid] = true }
   end
-
-  # Base page: everything EXCEPT the trellis member zones AND their elements
-  # (pruning the elements too keeps the base builder's orphan safety-net from
-  # dumping the member elements in a duplicate bottom band).
-  d_rest = dashboard.dup
-  d_rest['zones'] = dashboard['zones'].reject { |z| placed_zone_ids[z['id']] }
-  page_rest = page.dup
-  page_rest['elements'] = page['elements'].reject { |e| member_el_set[e['id']] }
-  base_pxml, extra_els, n_charts, n_bands, n_ctls, census, min_exp =
-    build_page_for_dashboard(d_rest, page_rest, opts)
-
-  # Card rows start below the base page's tallest emitted row.
-  cur = base_pxml.scan(%r{gridRow="\d+ / (\d+)"}).flatten.map(&:to_i).max || 1
-  band_children = []
-  cards_total = 0
-  resolved.each_with_index do |cards, gi|
-    n = cards.size
-    span = TRELLIS_CARD_ROWS
-    r0 = cur + 1
-    r1 = r0 + span
-    cards.each_with_index do |c, j|
-      c0 = 1 + (24 * j / n.to_f).round
-      c1 = j == n - 1 ? 25 : [1 + (24 * (j + 1) / n.to_f).round, c0 + 1].max
-      card_id = "trellis-#{page['id']}-#{gi + 1}-#{j + 1}"
-      cstyle = { 'borderRadius' => 'round' }
-      # D2 accent: a 2px border in the member's own color (#441). The saturated
-      # region color would be garish as a full card fill, so we key just the
-      # border — a faithful, low-risk "shared color map" cue.
-      cstyle['borderColor'] = c['color'].to_s[0, 7] if c['color'].to_s =~ /\A#[0-9a-fA-F]{6}/
-      cstyle['borderWidth'] = 2 if cstyle['borderColor']
-      extra_els << container_el(card_id, cstyle)
-      # The member chart fills its card (container-relative coords restart at 1).
-      band_children << gc(card_id, c0, c1, r0, r1, le(c['el_id'], 1, 25, 1, 1 + span))
-      cards_total += 1
-    end
-    cur = r1 - 1
-  end
-
-  pxml = base_pxml.sub(%r{\n</Page>\z}, "\n#{band_children.join("\n")}\n</Page>")
-  # Census honesty (gate 8c): the base record counted only the pruned zones —
-  # add the placed cards back so zones/placed reflect what the page shows.
-  if census
-    census['zones'] = census['zones'].to_i + cards_total
-    census['placed'] = census['placed'].to_i + cards_total
-  end
-  [pxml, extra_els, n_charts + cards_total, n_bands + resolved.size, n_ctls, census, min_exp]
+  dashboard['zones'] = (dashboard['zones'] || []).reject { |z| drop_ids[z['id']] } unless drop_ids.empty?
 end
 
 def build_page_for_dashboard(dashboard, page, opts)
@@ -1675,6 +1625,13 @@ min_row_expansions = 0
 dash_layout.each do |d|
   page = page_for_dash[d['dashboard']]
   next unless page
+  # Native trellis (SUPERSEDES #451): build-charts collapsed each detected
+  # small-multiples group into ONE element (regardless of layout flags), so prune
+  # the absorbed sibling member zones and expand the base zone to the group bbox
+  # BEFORE any layout path runs (structure detection, banded/synth/tree all read
+  # d['zones']). Gated on `trellis` → non-trellis dashboards are untouched
+  # (byte-identical). Unconditional: the collapse already happened in the spec.
+  prune_trellis_zones!(d)
   # v5.1 defect 1 — px-derived page height, PER DASHBOARD (multi-dashboard
   # workbooks carry one canvas_px each; the theme's maxPageWidth stays
   # first-dashboard-global — theme_derive — an accepted caveat). A fixed-size
@@ -1711,23 +1668,7 @@ dash_layout.each do |d|
   use_tree  = !o[:no_containers] &&
               (tree_has_controls?(d['zone_tree']) || tree_has_styled_containers?(d['zone_tree']))
   result = nil
-  # B1 card-trellis (beads-sigma-ubr5.5): the parser attaches `trellis` ONLY
-  # when a per-category card row was detected, so this whole path is gated —
-  # a non-trellis dashboard never enters here and its layout is byte-identical
-  # to the flat build. --no-containers forces the geometry-banded fallback.
-  trellis_groups = o[:no_containers] ? [] : Array(d['trellis'])
-  if trellis_groups.any?
-    begin
-      result = build_page_trellis(d, page, o, trellis_groups)
-      warn "card-trellis layout: #{d['dashboard'].inspect} → " \
-           "#{trellis_groups.sum { |g| Array(g['zone_ids']).length }} per-category card(s) " \
-           "across #{trellis_groups.length} row(s)"
-    rescue StandardError => e
-      warn "WARN: card-trellis layout failed for #{d['dashboard'].inspect} (#{e.class}: #{e.message}) — falling back"
-      result = nil
-    end
-  end
-  if result.nil? && use_synth
+  if use_synth
     begin
       result = build_page_synthesized(d, page, o, structure)
       warn "synthesized layout: #{d['dashboard'].inspect} → " \

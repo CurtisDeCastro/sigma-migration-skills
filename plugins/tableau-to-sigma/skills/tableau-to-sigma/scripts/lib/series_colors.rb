@@ -86,30 +86,6 @@ module SeriesColors
     members.keys.sort_by(&:downcase).map { |k| members[k] }
   end
 
-  # B1 (card-trellis): the LABELED member->color dict for ONE field, merged
-  # across every sibling zone that carries explicit .twb assignments on a
-  # MATCHING field. Same merge/first-wins/field-match contract as
-  # scheme_for_field, but returns the {member => color} map (not an ordered
-  # array) so a card-trellis emitter can look up the color for a SPECIFIC
-  # pinned member ("West" -> "#e8519a"). Returns {} when nothing matches (the
-  # caller then leaves cards on the theme palette — never worse). Pure.
-  def color_map_for_field(zones, column_name)
-    return {} if norm(column_name).empty?
-    members = {}
-    Array(zones).each do |z|
-      next unless z.is_a?(Hash) && z['series_colors'].is_a?(Array)
-      next if norm(z['series_color_field']).empty?
-      next unless field_matches?(z['series_color_field'], column_name)
-      z['series_colors'].each do |p|
-        next unless p.is_a?(Hash)
-        m = p['member'].to_s
-        c = p['color'].to_s.downcase
-        members[m] = c if !m.empty? && c =~ HEX && !members.key?(m)
-      end
-    end
-    members
-  end
-
   # Dashboard-level ordered scheme for themeOverrides.categoricalScheme — the
   # ONLY color path for pie/donut slices (per-element color.scheme is silently
   # dropped there). Conservative: only when every explicitly-assigned zone
