@@ -66,6 +66,7 @@ require_relative 'lib/format_map'     # PR-12: the ONE Tableau→Sigma format tr
 require_relative 'lib/series_colors'  # PR-12: ordered per-series color schemes
 require_relative 'lib/threshold_halo'  # C2: threshold-halo (computed-boolean color) detection
 require_relative 'lib/integer_dim'    # PR-18: integer-coded dimension decode-to-text routing
+require_relative 'lib/trellis_emit'   # shared native-trellis emitter (supported-kind gate + fallbacks)
 require 'erb'
 
 opts = { master_id: 'master' }
@@ -7964,30 +7965,30 @@ end
                   'element — trellis NOT collapsed (member charts stay flat)'
       next
     end
-    # Native `trellis` survives readback ONLY on these element kinds (empirical
+    # Native `trellis` survives readback ONLY on the readback-safe kinds (empirical
     # coverage matrix — docs/sigma-trellis-chart-support.md). On pie/kpi/pivot/
     # table the POST returns 200 but Sigma SILENTLY STRIPS the key and renders
-    # flat, so we must NOT emit it there:
+    # flat, so we must NOT emit it there. The supported set + fallback rules are
+    # the single source of truth in shared/lib/trellis_emit.rb (TrellisEmit):
     #   * pie-chart → convert the base to a DONUT (donut supports trellis) and
-    #     collapse as usual (the faithful faceted-pie shape);
+    #     collapse as usual (the faithful faceted-pie shape) — TrellisEmit.apply
+    #     does the kind flip below;
     #   * kpi-chart → leave the N sibling KPI elements FLAT (fanning out to N
     #     per-member KPIs IS the correct Sigma shape — do not collapse);
     #   * pivot-table/table → leave flat (pivot's own rowsBy/columnsBy shelves
     #     and table→postpublish are the documented follow-up mechanisms).
     # NOTE: the POST→readback round-trip must still ASSERT the key survived on
     # supported kinds (silent stripping) — enforced in the live e2e + verify.
-    trellis_supported = %w[bar-chart line-chart area-chart combo-chart scatter-chart donut-chart].freeze
-    if base_el['kind'] == 'pie-chart'
-      base_el['kind'] = 'donut-chart'
-      warnings << "native trellis on '#{dash['dashboard']}': base '#{base_cap}' is a PIE — converted to DONUT " \
-                  '(pie silently strips the trellis key on readback; donut supports it) before faceting'
-    end
-    unless trellis_supported.include?(base_el['kind'].to_s)
+    unless TrellisEmit.trellises?(base_el['kind'])
       warnings << "native trellis on '#{dash['dashboard']}': base kind '#{base_el['kind']}' does NOT support a " \
                   "native trellis (Sigma strips the key on readback) — left the #{caps.size} member " \
                   "#{base_el['kind']} element(s) FLAT " \
                   "(#{base_el['kind'] == 'kpi-chart' ? 'N sibling KPIs is the correct faceted shape' : 'pivot→own shelves / table→postpublish is the follow-up'})"
       next
+    end
+    if base_el['kind'] == 'pie-chart'
+      warnings << "native trellis on '#{dash['dashboard']}': base '#{base_cap}' is a PIE — converted to DONUT " \
+                  '(pie silently strips the trellis key on readback; donut supports it) before faceting'
     end
     field = grp['field'].to_s
     base_el['columns'] ||= []
@@ -8008,12 +8009,13 @@ end
     Array(base_el['filters']).each do |f|
       f['values'] = [] if f.is_a?(Hash) && f['columnId'] == cat_col['id'] && f['kind'] == 'list'
     end
-    # Source arrangement → Sigma trellis axis. A single facet field faces ONE
-    # axis (rowsBy XOR columnsBy — emitting BOTH on the same column is
-    # degenerate); a 'grid' arrangement of one field maps to columnsBy, which
-    # Sigma wraps into a tile grid on its own.
-    axis_key = grp['orientation'].to_s == 'rows' ? 'rowsBy' : 'columnsBy'
-    base_el['trellis'] = { axis_key => [{ 'columnId' => cat_col['id'] }] }
+    # Source arrangement → Sigma trellis axis via the shared emitter. A single
+    # facet field faces ONE axis (rowsBy XOR columnsBy — emitting BOTH on the same
+    # column is degenerate); a 'grid' arrangement of one field maps to columnsBy,
+    # which Sigma wraps into a tile grid on its own. TrellisEmit.apply also does
+    # the pie→donut kind flip (a no-op here — already gated/flipped above).
+    TrellisEmit.apply(base_el, facet_column_id: cat_col['id'], orientation: grp['orientation'])
+    axis_key = base_el['trellis'].keys.first
     # Round-trip guard record: Sigma SILENTLY strips an unsupported trellis on
     # readback, so the post-publish verifier re-reads the spec and asserts each
     # of these survived (verify-trellis-survived.rb).
