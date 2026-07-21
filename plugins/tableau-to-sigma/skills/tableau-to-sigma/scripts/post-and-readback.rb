@@ -768,6 +768,10 @@ begin
       warn 'sigma-workbooks reference/specification/controls.md ("Dropped-by-API fields"). A dropped'
       warn 'DEFAULT (e.g. date-range startDate/endDate) means the control ships with NO default — set it'
       warn 'in the Sigma UI control editor and record the step in POSTPUBLISH_GUIDE.md.'
+      warn 'A dropped TARGET BINDING (#456: "filters (TARGET BINDING dropped ...)") means the control'
+      warn 'filters NOTHING: the target column is likely numeric/datetime (cast it with a hidden'
+      warn 'Text([<col>]) decode column and bind the filter target + value-source to the decode) or'
+      warn 'unresolvable (re-point it at a TABLE element, or record it in POSTPUBLISH_GUIDE.md).'
       warn '========================================'
     else
       n = ControlFieldCensus.controls(posted_spec).size

@@ -176,7 +176,9 @@ check(lint_warnings(s).none? { |x| x.start_with?('I1 ') }, 'I1: If() with explic
 # ---- A1 (WARN): DROPPED_BY_API fields — accepted then silently ignored (#417) --
 # One warning PER field, naming the field, the silent-drop behavior, and the
 # workaround — and phrased as "silently ignored", never as a will-400.
-DROPPED_BY_API.each_key do |field|
+# `conditional` members (filters, #456) persist in the normal case and are NOT
+# A1-warned on mere presence — they are asserted separately just below.
+DROPPED_BY_API.reject { |_f, info| info['conditional'] }.each_key do |field|
   s = valid_spec
   s['pages'][0]['elements'][4][field] = false
   warns = lint_warnings(s)
@@ -188,6 +190,16 @@ DROPPED_BY_API.each_key do |field|
         "A1 message (#{field}) distinguishes silently-ignored from will-400 and names a workaround", fails)
   check(rule(lint(s), 'A1').empty?, "A1 (#{field}) is WARN-only — never in the FAIL set", fails)
 end
+# #456: `filters` is a CONDITIONAL DROPPED_BY_API member — documented in the
+# contract but NOT A1-warned on mere presence (every valid control has filters).
+check(DROPPED_BY_API.key?('filters') && DROPPED_BY_API['filters']['conditional'],
+      'DROPPED_BY_API covers the filter TARGET binding as a conditional member (#456)', fails)
+check(DROPPED_BY_API['filters']['workaround'].to_s.include?('Text(') &&
+      DROPPED_BY_API['filters']['workaround'].to_s.include?('never ship a control that filters nothing'),
+      'filters workaround names the Text() decode + the never-ship-a-dead-control floor', fails)
+# valid_spec's control ALREADY carries a filters binding — it must NOT A1-warn.
+check(lint_warnings(valid_spec).none? { |x| x.start_with?('A1 ') && x.include?('`filters`') },
+      'A1: a control carrying a normal filters binding → no A1 warning (conditional member)', fails)
 # all eight #417 fields are in the contract table
 %w[showNullOption showClearButton showSearchBox showHistogram allowMultipleSelection
    excludeValues showExpandedList required].each do |f417|
