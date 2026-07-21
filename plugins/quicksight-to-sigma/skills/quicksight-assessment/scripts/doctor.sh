@@ -123,7 +123,7 @@ fi
 if [ -n "$PY_ARGV" ]; then
   TLS_PROBE="$($PY_ARGV -c "import ssl,importlib.util as iu; print('TRUSTWARN' if ssl.OPENSSL_VERSION.startswith('OpenSSL 3') and iu.find_spec('truststore') is None else '')" 2>/dev/null)"
   if [ "$TLS_PROBE" = "TRUSTWARN" ]; then
-    warn "python uses OpenSSL 3.x without 'truststore' — TLS verification may fail against some servers (e.g. Tableau Cloud) where curl/Ruby succeed" \
+    warn "python uses OpenSSL 3.x without 'truststore' — TLS verification may fail against some servers (e.g. Looker or Tableau Cloud) where curl/Ruby succeed" \
          "Fix: '$PY_ARGV -m pip install truststore' (uses the OS trust store). Do NOT disable TLS verification."
   fi
 fi
@@ -245,6 +245,36 @@ if [ -f "$HERE/setup-tableau.rb" ] && [ -f "$HERE/lib/tableau_rest.rb" ]; then
       bad "Tableau credentials present but the live PAT signin FAILED twice (expired/revoked PAT, wrong site or server URL)" \
           "Re-run 'ruby scripts/setup-tableau.rb' with a fresh PAT. Genuinely offline? SIGMA_SKIP_CRED_SMOKE=1 skips this probe."
       SMOKE_TABLEAU="fail"
+    fi
+  fi
+fi
+
+# --- Looker API reachability (self-gated: looker skills only) ----------------
+# Plugin-aware like the Tableau checks: only speaks up where the sibling Looker
+# client exists (looker_api.py) and a ~/.looker/looker.ini is present. Modern
+# Google-hosted Looker serves the API on 443; the legacy :19999 port is often
+# unreachable. The client self-heals (looker_api falls back to 443), but flag a
+# stale ini so the user can fix it. Uses the UNAUTHENTICATED /api/4.0/versions
+# endpoint via curl (OS trust store — isolates the PORT question from the TLS
+# one above). Recorded in doctor.json {cred_smoke:{looker: pass|fallback|fail|skipped}}.
+LOOKER_PROBE="skipped"
+LK_INI="$HOME/.looker/looker.ini"
+if [ -f "$HERE/looker_api.py" ] && [ -f "$LK_INI" ] && command -v curl >/dev/null 2>&1; then
+  LK_BASE="$(sed -n 's/^[[:space:]]*base_url[[:space:]]*=[[:space:]]*//p' "$LK_INI" | head -1 | tr -d '\r')"
+  LK_BASE="${LK_BASE%/}"
+  if [ -n "$LK_BASE" ]; then
+    LK_NOPORT="$(printf '%s' "$LK_BASE" | sed -E 's#^(https?://[^/:]+)(:[0-9]+)?.*#\1#')"
+    if curl -sS -m 8 -o /dev/null "$LK_BASE/api/4.0/versions" 2>/dev/null; then
+      ok "Looker API reachable at $LK_BASE"
+      LOOKER_PROBE="pass"
+    elif [ "$LK_NOPORT" != "$LK_BASE" ] && curl -sS -m 8 -o /dev/null "$LK_NOPORT/api/4.0/versions" 2>/dev/null; then
+      warn "Looker base_url ($LK_BASE) is unreachable but $LK_NOPORT (443) answers — looker_api will self-heal to 443 at run time" \
+           "Update base_url in ~/.looker/looker.ini to '$LK_NOPORT' (drop the legacy :19999 API port), or set LOOKER_BASE_URL."
+      LOOKER_PROBE="fallback"
+    else
+      warn "Looker API not reachable at $LK_BASE (network / VPN / instance URL?)" \
+           "Confirm the Looker instance URL and that this host can reach its API 4.0 endpoint."
+      LOOKER_PROBE="fail"
     fi
   fi
 fi
@@ -384,7 +414,7 @@ write_doctor_json() {
     printf '"runtimes":{"ruby":%s,"python":%s,"node":%s,"bash":true},' "$RUBY_OK" "$PY_OK" "$NODE_OK"
     printf '"versions":{"ruby":"%s","python":"%s","node":"%s"},' "$(jstr "$RUBY_V")" "$(jstr "$PY_VER")" "$(jstr "$NODE_V")"
     printf '"sandbox_hint":"%s",' "$(jstr "$SANDBOX_HINT")"
-    printf '"cred_smoke":{"sigma":"%s","tableau":"%s"},' "$SMOKE_SIGMA" "$SMOKE_TABLEAU"
+    printf '"cred_smoke":{"sigma":"%s","tableau":"%s","looker":"%s"},' "$SMOKE_SIGMA" "$SMOKE_TABLEAU" "$LOOKER_PROBE"
     printf '"hyperapi_present":%s,' "$HYPERAPI"
     printf '"skill_sha":"%s",' "$(jstr "$SKILL_SHA")"
     printf '"behind_count":%s,' "$BEHIND_COUNT"

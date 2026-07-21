@@ -130,6 +130,19 @@ python3 scripts/migrate-looker.py --lookml-dir /path/to/lookml \
   adopt a DM missing a *column* the workbook needs → the workbook POST then 400s
   `Dependency not found`; that footgun is now opt-in via `--reuse-auto`.) Skip the
   scan entirely with `--skip-dm-reuse-check`. The folder is auto-resolved + printed.
+- **Performance scan (Phase 2b) — don't port slow SQL blind:** the converter turns every
+  `derived_table` into ONE Sigma Custom SQL element with the SQL carried through verbatim
+  (nested derived views inline as stacked CTEs into a single element), so a slow Looker derived
+  table stays slow in Sigma. `detect_derived_perf.py` runs after the RLS gate (scoped to the
+  migrated explore) and prints per-derived-table recommendations — `materialize` /
+  `rebuild-as-element` / `leave-inline` — to `derived-perf.json`. It is **informational, never
+  blocks** (unlike RLS), and is silent when there are no derived tables. `--materialize-derived
+  auto` then triggers a Sigma materialization for the flagged element(s) after the DM is built
+  (`all` = every Custom-SQL element); default `off` = recommend only. The recurring **schedule is
+  UI-only** (Element ⋮ → Materialization), so this triggers/monitors and, when an element isn't
+  materialization-configured yet, prints the exact UI handoff. Post-migration, rank which
+  materializations actually pay off by warehouse credit with the **`sigma-materialization-advisor`**
+  skill.
 - **Source repointing:** if the LookML `sql_table_name` points at a DB.SCHEMA the
   Sigma connection doesn't serve (e.g. dev `DEMO_DB.DEMO.*` vs the connection's
   `QUICKSTARTS.LOOKER_RETAIL_ANALYTICS.*`), pass
@@ -182,6 +195,7 @@ python3 scripts/migrate-looker.py --lookml-dir /path/to/lookml \
 | `scripts/fetch_looker_look.py` | **Phase 1 (live — Looks):** `GET /looks/{id}` → the **same contract** as the dashboard fetch but with ONE tile, `filters:[]`, a full-width layout, and a `fieldMeta` map. Imports+reuses `fetch_looker_dashboard`'s helpers (single source of truth), so a Look tile normalizes identically to a dashboard tile. `python3 fetch_looker_look.py <look_id> [out.json]`. |
 | `scripts/parse_lookml_dashboard.py` | **Phase 1 (offline):** parse a `.dashboard.lookml` (YAML) → the SAME contract. Dev/test only; cannot see UDD dashboards. Requires PyYAML. |
 | `scripts/detect_rls.py` | **Phase 1 (RLS scan):** dependency-free regex scan of a LookML dir/file (and/or model JSON) for row-level-security constructs (`access_filter`, `sql_always_where`, `access_grant`, `user_attribute`). Prints a structured summary + recommended Sigma mapping per finding (or `--json`). **Prints nothing / exits 0 when there's no RLS** (zero-overhead). `python3 detect_rls.py <lookml_dir> [--json]` |
+| `scripts/detect_derived_perf.py` | **Phase 2b (performance scan):** dependency-free regex scan for EXPENSIVE `derived_table`s (nested-on-derived, un-persisted, persisted/incremental PDTs, NDTs, SQL complexity, warehouse hints). Scores each and recommends `materialize` / `rebuild-as-element` / `leave-inline` — the handoff for `--materialize-derived` and, post-migration, `sigma-materialization-advisor`. **Informational (never blocks); silent when there are no derived tables.** `python3 detect_derived_perf.py <lookml_dir> [--scope-explores e1,e2] [--json]` |
 | `scripts/apply_sigma_rls.py` | **Phase 1.5 (apply RLS):** scripted, API-driven RLS port. Reuse-first `GET /v2/user-attributes` (prints a match before creating); `--create` → `POST /v2/user-attributes`; `--assign` (+`--member-id`,`--value`) → `POST /v2/user-attributes/{id}/users`; `--field`/`--element-id` → print the verified RLS calc-col + element-filter snippet, `--apply --dm-id` → PATCH it into the DM element spec. **Read-only / plan-only by default — mutates only on an explicit `--create`/`--assign`/`--apply` flag.** Reads `$SIGMA_BASE_URL`/`$SIGMA_API_TOKEN` like `post_dm.py`. |
 | `scripts/convert_dm.mjs` | **Phase 2:** run `convertLookMLToSigma` against a directory of `.lkml` files for one explore → a Sigma DM spec JSON + `…-warnings.json` sidecar. A `.model.lkml` is optional — with none it converts **view-only** (each view → standalone element; pass the WHOLE directory so cross-view `${view.SQL_TABLE_NAME}` refs resolve — see `refs/layered-lookml.md`). Bypasses the deployed MCP build (see the converter-build gotcha below). Env: `LOOKML_DIR`, `CONVERTER_SRC`; args `<exploreName> <out.json>`. |
 | `scripts/lookml-dm-signature.py` | **Phase 2.5:** LookML view files → DM-reuse signature (`{warehouse_tables, referenced_columns, measures}`) for `find-or-pick-dm.rb`. Pure, no network. |
@@ -215,13 +229,21 @@ python3 scripts/migrate-looker.py --lookml-dir /path/to/lookml \
 
 ```ini
 [Looker]
-base_url=https://<your-instance>.cloud.looker.com:19999
+base_url=https://<your-instance>.cloud.looker.com
 client_id=<API3 client_id>
 client_secret=<API3 client_secret>
 verify_ssl=True
 ```
 
-- **API 4.0**, key-pair-free `client_credentials` (login on `:19999` returns a bearer).
+- **API 4.0**, key-pair-free `client_credentials`. Modern Google-hosted Looker serves the API on
+  the standard **443** at `https://<instance>.cloud.looker.com/api/4.0` — no port needed. Older
+  self-hosted instances used the legacy `:19999`; if your `base_url` still carries it and that
+  port is unreachable, the client **self-heals**: it retries on 443 and warns you to update the
+  ini. You can also override the base without editing the ini via `LOOKER_BASE_URL`
+  (or `LOOKERSDK_BASE_URL`).
+- **TLS:** requests use the OS trust store via `truststore` (installed by `bash scripts/bootstrap.sh`),
+  so Python's stricter OpenSSL 3.x accepts the same certs curl/Ruby do; it falls back to certifi
+  then the stock bundle. Leave `verify_ssl=True` (setting it false disables verification and warns).
 - The credential's user needs **Admin** (or at least: see models, dashboards, run queries, and
   — for the test-fixture builders or Git-deploy flow — develop + deploy).
 - Generate an API3 key in Looker: **Admin → Users → (your user) → Edit Keys → New API3 Key**.

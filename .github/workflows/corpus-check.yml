@@ -278,6 +278,8 @@ jobs:
           python3 -m pip install --quiet pyyaml
           tests=(
             plugins/looker-to-sigma/skills/looker-to-sigma/tests/test_grid_fidelity.py
+            plugins/looker-to-sigma/skills/looker-to-sigma/tests/test_looker_client.py
+            plugins/looker-to-sigma/skills/looker-to-sigma/tests/test_derived_perf.py
             plugins/looker-to-sigma/skills/looker-to-sigma/tests/test_table_column_order.py
             plugins/looker-to-sigma/skills/looker-to-sigma/tests/test_vis_column_order_capture.py
             plugins/looker-to-sigma/skills/looker-to-sigma/tests/test_look_migration.py

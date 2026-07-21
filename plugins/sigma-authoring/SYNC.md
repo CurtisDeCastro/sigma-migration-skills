@@ -7,7 +7,7 @@ hard dependency on `sigma-workbooks` (the canonical Sigma spec reference) ships
 in the **same marketplace** — installing any converter, install this too.
 
 - **Source of truth:** https://github.com/twells89/sigma-skills (edit there)
-- **Vendored at:** sigma-skills `3d4d812`
+- **Vendored at:** sigma-skills `7e40dfa`
 
 ## Refresh
 

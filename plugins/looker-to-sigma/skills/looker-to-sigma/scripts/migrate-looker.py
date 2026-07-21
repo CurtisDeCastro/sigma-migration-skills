@@ -498,6 +498,12 @@ def main():
                          "build-new (reuse only via explicit --reuse-dm).")
     ap.add_argument("--yes", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--materialize-derived", choices=["off", "auto", "all"], default="off",
+                    help="Phase 2b always SCANS for expensive derived tables (informational). "
+                         "'auto' also triggers a Sigma materialization for the DM elements the "
+                         "scan flagged `materialize`; 'all' for every Custom-SQL (derived) element. "
+                         "Default 'off' = recommend only. Creating the recurring schedule is "
+                         "UI-only, so this triggers/monitors and prints the exact UI handoff.")
     ap.add_argument("--print-converter", action="store_true",
                     help="Resolve the converter (CONVERTER_SRC -> CONVERTER_PATH -> "
                          "vendored bundle), print the resolved path + a one-line "
@@ -636,6 +642,36 @@ def main():
             return 10
         print("   --yes: proceeding WITHOUT porting RLS — the migrated model shows ALL rows")
         print("   to everyone until you run apply_sigma_rls.py (recorded in rls-findings.json)")
+
+    # ── Phase 2b — Performance scan (detect_derived_perf.py; informational) ───
+    # The converter ports every derived_table's SQL verbatim (nested derived
+    # views inline as stacked CTEs into ONE Custom SQL element), so slow Looker
+    # SQL stays slow in Sigma. Scan for expensive derived tables and recommend
+    # materializing them. NON-BLOCKING — recommend, never stop (unlike the RLS gate).
+    print("\n── Phase 2b · Performance scan (detect_derived_perf.py) ──")
+    perf_findings = []
+    pp = subprocess.run(
+        [sys.executable, os.path.join(HERE, "detect_derived_perf.py"), lookml_dir, "--json"]
+        + (["--scope-explores", ",".join(dash_explores)] if dash_explores else []),
+        capture_output=True, text=True)
+    try:
+        pparsed = json.loads(pp.stdout) if pp.stdout.strip() else {}
+        perf_findings = pparsed.get("findings", []) if isinstance(pparsed, dict) else []
+    except ValueError:
+        perf_findings = []
+    mat_views = [f for f in perf_findings if f.get("recommendation") == "materialize"]
+    if not perf_findings:
+        print("   no expensive derived tables in scope — nothing to optimize")
+    else:
+        print(f"   {len(perf_findings)} derived table(s) in scope; "
+              f"{len(mat_views)} recommended to MATERIALIZE:")
+        for f in perf_findings[:12]:
+            print(f"     - {f['view']} [{f['severity']}, cost={f['cost']}] → "
+                  f"{f['recommendation']} ({', '.join(f['signals'])})")
+        json.dump(perf_findings, open(os.path.join(wd, "derived-perf.json"), "w"), indent=2)
+        if a.materialize_derived == "off" and mat_views:
+            print("   ℹ pass --materialize-derived auto to materialize the flagged element(s) after "
+                  "the DM is built, or open each element's ⋮ → Materialization in the Sigma UI.")
 
     # ── Phase 3 — Convert (local build / patched source / MCP request) ────────
     hdr(3, TOTAL, "Convert")
@@ -842,6 +878,58 @@ console.error('stats:', JSON.stringify(res.stats));
         or ("Custom SQL" if src.get("kind") == "sql" else denorm["id"])
     print(f"   DM {dm} · denorm '{denorm_name}' ({denorm['id']}, "
           f"{len(denorm.get('columns') or [])} cols) · {len(els)} element(s)")
+
+    # ── Phase 4a.6 — Materialize expensive derived tables (opt-in) ────────────
+    # Custom-SQL elements ARE the ported derived tables. --materialize-derived
+    # triggers a Sigma materialization so runtime queries hit a stored table
+    # instead of re-running the (possibly nested-CTE) SQL. The recurring SCHEDULE
+    # is UI-only; the API only triggers/monitors — so a not-yet-configured element
+    # degrades to a precise UI handoff, never a silent failure. (perf_findings
+    # was gathered in Phase 2b, which runs before this on every path.)
+    if a.materialize_derived != "off":
+        sql_els = [e for e in els if (e.get("source") or {}).get("kind") == "sql"]
+        if a.materialize_derived == "auto" and perf_findings:
+            want = {re.sub(r"[^a-z0-9]", "", (f["view"] or "").lower())
+                    for f in perf_findings if f.get("recommendation") == "materialize"}
+            targets = [e for e in sql_els
+                       if re.sub(r"[^a-z0-9]", "", (e.get("name") or "").lower()) in want] or sql_els
+        else:  # "all"
+            targets = sql_els
+        if not targets:
+            print("   --materialize-derived: no Custom-SQL (derived-table) elements in this DM")
+        else:
+            # Sigma's API only TRIGGERS an already-configured materialization; the
+            # recurring schedule is created in the UI (verified: :materialize on an
+            # unscheduled element returns 400 "Scheduled materialization is not
+            # configured for this element"). So this triggers where a schedule
+            # exists and otherwise emits a precise, per-element UI handoff.
+            print(f"   --materialize-derived {a.materialize_derived}: {len(targets)} derived "
+                  "element(s). Sigma triggers a materialization only where a schedule already "
+                  "exists (schedule creation is UI-only):")
+            actions = []
+            for e in targets:
+                eid = e["id"]; ename = e.get("name") or eid
+                try:
+                    res = json.loads(sigma("POST", f"/v2/dataModels/{dm}:materialize",
+                                           {"sheetId": eid}) or "{}")
+                    mid = res.get("materializationId")
+                    print(f"     ✓ {ename}: triggered (materializationId={mid}) — runs async")
+                    actions.append({"element": ename, "id": eid, "status": "triggered",
+                                    "materializationId": mid})
+                except RuntimeError as ex:
+                    msg = str(ex)
+                    if "not configured" in msg or "not_permitted" in msg:
+                        print(f"     • {ename}: no schedule yet → in Sigma open this element's "
+                              "⋮ → Materialization and set a cadence matching the old Looker "
+                              "datagroup; it then materializes on that schedule.")
+                        status = "needs-ui-schedule"
+                    else:
+                        print(f"     ⚠ {ename}: trigger failed — {msg[:140]}")
+                        status = "error"
+                    actions.append({"element": ename, "id": eid, "status": status, "error": msg[:200]})
+            json.dump(actions, open(os.path.join(wd, "materialization-actions.json"), "w"), indent=2)
+            print("   ↪ then rank which materializations pay off by warehouse credit with the "
+                  "sigma-materialization-advisor skill (post-migration, credit-based).")
 
     # ── Phase 4a.5 — shape preflight (REUSE only) ────────────────────────────
     # Mechanical reuse gate for the failure modes a spec POST won't catch and that

@@ -14,29 +14,26 @@ import re
 import sys
 import urllib.parse
 import urllib.request
-from configparser import ConfigParser
+
+import looker_api  # sibling: single source of truth for base resolution + SSL/truststore
 
 INI = os.path.expanduser("~/.looker/looker.ini")
 
 
 def _client():
-    c = ConfigParser(); c.read(INI); s = c["Looker"]
-    base = s["base_url"].rstrip("/")
-    if not base.endswith("/api/4.0"):
-        base += "/api/4.0"
-    data = urllib.parse.urlencode({"client_id": s["client_id"],
-                                   "client_secret": s["client_secret"]}).encode()
-    tok = json.load(urllib.request.urlopen(
-        urllib.request.Request(base + "/login", data=data, method="POST"), timeout=30))["access_token"]
-    return base, tok
+    # Delegate to looker_api so the port fallback (legacy :19999 → 443), the
+    # LOOKER_BASE_URL override, and the truststore SSL context all apply here too.
+    base, tok, verify = looker_api.login()
+    return base, tok, verify
 
 
 def get(path):
-    base, tok = get._cache if hasattr(get, "_cache") else (None, None)
-    if base is None:
-        base, tok = _client(); get._cache = (base, tok)
+    cache = getattr(get, "_cache", None)
+    if cache is None:
+        cache = get._cache = _client()
+    base, tok, verify = cache
     req = urllib.request.Request(base + path, headers={"Authorization": "Bearer " + tok})
-    with urllib.request.urlopen(req, timeout=60) as r:
+    with urllib.request.urlopen(req, context=looker_api._ctx(verify), timeout=60) as r:
         return json.load(r)
 
 
