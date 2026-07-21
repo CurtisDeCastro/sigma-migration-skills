@@ -158,6 +158,7 @@ GREEN only when all three match (the validated run tied out to the cent) AND
 - **KPI `value.columnId`** vs **donut/pie `value.id`**; **control elements need their own `id`**.
 - **Lossy + warned:** Liquid `{% %}` measures, manifest constants, `link:`/`html:` styling, pivot
   cross-tab (flattened → rebuild as Sigma pivot-table in UI), table-calc window grain, cross-
-  filtering / trellis / tooltips (Sigma UI-only). Wire these in Phase 5 post-publish.
+  filtering / tooltips (Sigma UI-only). Wire these in Phase 5 post-publish. (`looker_donut_multiples`
+  small multiples ARE emitted natively now — one donut-chart + Sigma `trellis` via the shared emitter.)
 - **`build_looker_dashboard.py` / `build_looker_dashboard2.py` are test-fixture builders** — they
   author Looker dashboards (migration targets), not part of a customer migration.

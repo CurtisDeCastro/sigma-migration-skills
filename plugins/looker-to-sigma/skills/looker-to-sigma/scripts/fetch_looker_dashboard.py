@@ -215,6 +215,11 @@ def normalize_element(el, layout=None):
         "model": q.get("model"), "explore": q.get("view"),
         "fields": q.get("fields") or [],
         "pivots": q.get("pivots") or [],
+        # native small-multiples signal (looker_donut_multiples → Sigma trellis).
+        # Mirrors parse_lookml_dashboard.norm_trellis so both source paths feed the
+        # source-agnostic builder the same {shape, orientation} signal.
+        "trellis": ({"shape": "donut_multiples", "orientation": "cols"}
+                    if _vis_type(el, q) == "looker_donut_multiples" else None),
         "filters": q.get("filters") or {},
         "sorts": q.get("sorts") or [],
         "limit": int(q["limit"]) if str(q.get("limit") or "").isdigit() else q.get("limit"),

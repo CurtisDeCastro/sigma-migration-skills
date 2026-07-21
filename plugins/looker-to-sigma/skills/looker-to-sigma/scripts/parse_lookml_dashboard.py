@@ -85,6 +85,31 @@ def norm_cell_viz(el):
     return out
 
 
+def norm_trellis(el):
+    """Detect a Looker small-multiples / trellis shape → a normalized signal the
+    workbook builder turns into Sigma's NATIVE element `trellis` (ONE faceted viz
+    element, not N cloned tiles) via the shared TrellisEmit. Returns None when the
+    tile has no small-multiples shape, so the builder stays byte-identical.
+
+    Shipped: `looker_donut_multiples` — a GRID OF DONUTS. Looker draws one donut
+    per value of the query's row dimension; each donut's slices come from the pivot
+    (or a 2nd dimension) + the measure. That row dimension is the trellis FACET; the
+    pivot stays the slice category. The signal is {shape, orientation}; the builder
+    resolves WHICH field is the facet (it — not the parser — classifies dim vs
+    measure from the view files, and mirrors the donut branch's slice choice).
+
+    Deferred (documented): a pivoted CARTESIAN chart (looker_column/bar/line/area).
+    Looker renders those pivots as color SERIES (already mapped to Sigma's color
+    channel), not a panel grid, and there is no reliable signal that a given pivot
+    is "small multiples" rather than a series — auto-faceting them would collide
+    with the series mapping and change existing (non-multiples) output. See
+    docs/sigma-trellis-chart-support.md and the cross-converter plan."""
+    if el.get("type") == "looker_donut_multiples":
+        # columnsBy → a horizontal strip of donut panels (Looker's donut grid).
+        return {"shape": "donut_multiples", "orientation": "cols"}
+    return None
+
+
 def norm_element(el):
     return {
         "name": el.get("name") or el.get("title"),
@@ -94,6 +119,9 @@ def norm_element(el):
         "explore": el.get("explore"),
         "fields": el.get("fields") or [],
         "pivots": el.get("pivots") or [],
+        # native small-multiples signal (looker_donut_multiples → Sigma trellis);
+        # None for a normal tile so the builder stays byte-identical.
+        "trellis": norm_trellis(el),
         # tile-level hard filters {field: expr}
         "filters": el.get("filters") or {},
         "sorts": el.get("sorts") or [],
