@@ -42,29 +42,85 @@ require 'rexml/document'
 module HydrateCustomSql
   module_function
 
-  # Upper-snake alias for a warehouse output column — mirrors the converter's
+  # Canonicalize a Tableau connection class / Sigma connection type to a warehouse
+  # family key. A tiny local map (hydrate stays offline / self-contained — no
+  # dependency on rank-connections). Only the distinction this module needs:
+  # case-preserving (Databricks family) vs the upper-folding default (Snowflake).
+  def canon_warehouse_class(cls)
+    k = cls.to_s.strip.downcase.gsub(/[^a-z0-9]/, '')
+    return 'databricks' if %w[databricks spark sparksql databrickssql delta].include?(k)
+    return 'snowflake'  if k.empty? # unknown/absent → Snowflake convention (back-compat default)
+    k
+  end
+
+  # Does this warehouse PRESERVE identifier case? Snowflake folds unquoted
+  # identifiers to UPPER, so a table/column spelled `foo` resolves as FOO and
+  # hydration upper-normalizes to match. Databricks (and the Spark/Delta family)
+  # keep identifiers verbatim — uppercasing them yields a name the warehouse
+  # genuinely doesn't have, which 404s at DM POST (#454). Everything else keeps
+  # the historical upper default (zero regression for currently-working paths).
+  def case_preserving_warehouse?(warehouse_class)
+    canon_warehouse_class(warehouse_class) == 'databricks'
+  end
+
+  # Snake alias for a warehouse output column — mirrors the converter's
   # normalizeColumnName so the spliced metadata-record remote-names line up with
-  # the SQL output identifiers the converter expects.
-  def alias_for(name)
-    name.to_s.gsub(/[^A-Za-z0-9]+/, '_').gsub(/\A_+|_+\z/, '').upcase
+  # the SQL output identifiers the converter expects. Upper-cased for case-folding
+  # warehouses (Snowflake); case PRESERVED for case-preserving ones (Databricks,
+  # #454) so a lowercase source identifier isn't mis-cased into a 404.
+  def alias_for(name, warehouse_class = 'snowflake')
+    base = name.to_s.gsub(/[^A-Za-z0-9]+/, '_').gsub(/\A_+|_+\z/, '')
+    case_preserving_warehouse?(warehouse_class) ? base : base.upcase
   end
 
   # Quote a source column reference only when it is NOT already a safe bare
-  # identifier (has spaces / mixed case / punctuation / leading digit). Matches
-  # the "only quote when needed" rule in the converter's identifier fix, so
-  # already-uppercase columns pass through untouched.
-  def quote_ref(name)
-    a = alias_for(name)
+  # identifier (has spaces / punctuation / leading digit, or — on a case-folding
+  # warehouse — mixed case). Matches the "only quote when needed" rule in the
+  # converter's identifier fix, so identifiers already in the warehouse's native
+  # case pass through untouched.
+  def quote_ref(name, warehouse_class = 'snowflake')
+    a = alias_for(name, warehouse_class)
     (name.to_s == a && name.to_s !~ /\A[0-9]/) ? name.to_s : %("#{name}")
   end
 
-  # Wrap the original Custom SQL and project its output columns with upper-snake
+  # Wrap the original Custom SQL and project its output columns with snake
   # aliases. The original query is preserved verbatim inside the subquery, so
   # arbitrarily complex SQL (joins, CTEs, expressions) is untouched.
-  def wrap_sql(query, columns)
+  def wrap_sql(query, columns, warehouse_class = 'snowflake')
     raise ArgumentError, 'no output columns' if columns.nil? || columns.empty?
-    proj = columns.map { |c| "#{quote_ref(c)} AS #{alias_for(c)}" }.join(', ')
+    proj = columns.map { |c| "#{quote_ref(c, warehouse_class)} AS #{alias_for(c, warehouse_class)}" }.join(', ')
     "SELECT #{proj} FROM (\n#{query.to_s.strip}\n) t"
+  end
+
+  # A published-DS Custom SQL body that is nothing more than `SELECT * FROM <table>`
+  # is semantically identical to just reading <table>. parse_sql_columns can't
+  # statically enumerate `*`, which would strand the PDS with 0 columns and hard-
+  # abort the whole migration even though the underlying table is fully resolvable
+  # (#453). When the body is EXACTLY a bare star-select of a SINGLE table/view (no
+  # JOIN / WHERE / GROUP / UNION / subquery / expression), return that table token
+  # so the caller can resolve it as a normal table relation (the warehouse catalog
+  # then supplies the columns). Returns nil for anything more than a plain star-
+  # select — the caller keeps it as Custom SQL / falls back to a probe / aborts,
+  # so we never fabricate a table where the SQL actually did more.
+  def bare_select_star_table(sql)
+    s = sql.to_s.gsub(/\s+/, ' ').strip.sub(/;+\s*\z/, '')
+    m = s.match(/\ASELECT\s+(?:DISTINCT\s+)?\*\s+FROM\s+(.+?)\z/i)
+    return nil unless m
+    rest = m[1].strip
+    # A subquery or a comma-separated table list is not a single-table read.
+    return nil if rest.include?('(') || rest.include?(',')
+    # Any further clause / join / set-op means expansion would change semantics.
+    return nil if rest =~ /\b(?:JOIN|WHERE|GROUP\s+BY|ORDER\s+BY|HAVING|UNION|EXCEPT|INTERSECT|LIMIT|QUALIFY|ON|USING|CROSS|NATURAL|PIVOT|UNPIVOT|TABLESAMPLE)\b/i
+    toks = rest.split(' ')
+    table = case toks.length
+            when 1 then toks[0]                                # <table>
+            when 2 then toks[0]                                # <table> <alias>
+            when 3 then (toks[1] =~ /\AAS\z/i ? toks[0] : nil) # <table> AS <alias>
+            end
+    return nil unless table
+    # Must look like an identifier path (bracketed / quoted / dotted), not an expr.
+    return nil unless table =~ /\A[\[\]"`\w.$]+\z/
+    table
   end
 
   # Derive the OUTPUT column names of a SELECT. A published DS's Custom SQL is the
@@ -270,6 +326,19 @@ module HydrateCustomSql
                   columns: [], warehouse_class: 'snowflake')
     conn = ds.elements['connection']
     return false unless conn
+
+    # VALIDATE BEFORE MUTATING. If the splice can't complete (no table path, or an
+    # empty-column Custom SQL relation we won't fabricate), leave the sqlproxy
+    # placeholder untouched — the migrate phantom guard relies on an unresolved PDS
+    # still LOOKING like sqlproxy to abort loudly, rather than being partially
+    # rewritten into a class='<warehouse>' connection with no relation that slips
+    # past the guard and emits a broken element (#453).
+    if relation_type == 'table'
+      return false if table_path.to_s.strip.empty?
+    elsif sql.to_s.strip.empty? || columns.nil? || columns.empty?
+      return false
+    end
+
     rel_name = conn.elements['.//relation']&.attributes&.[]('name')
     rel_name = nil if rel_name.to_s.empty? || rel_name.to_s.downcase == 'sqlproxy'
     rel_name ||= (ds.attributes['caption'] || 'PublishedDS').to_s
@@ -287,13 +356,11 @@ module HydrateCustomSql
     rel.add_attribute('name', rel_name)
 
     if relation_type == 'table'
-      return false if table_path.to_s.strip.empty?
       rel.add_attribute('type', 'table')
       rel.add_attribute('table', qualify_table(table_path, db, schema))
     else
-      return false if sql.to_s.strip.empty? || columns.nil? || columns.empty?
       rel.add_attribute('type', 'text')
-      rel.text = wrap_sql(sql, columns)
+      rel.text = wrap_sql(sql, columns, warehouse_class)
     end
     conn.add_element(rel)
     mr = conn.elements['metadata-records']
@@ -323,23 +390,23 @@ module HydrateCustomSql
           cap = (m.get_text('caption')&.value || '').strip
           info = { 'ltype' => (m.get_text('local-type')&.value || '').strip,
                    'agg'   => (m.get_text('aggregation')&.value || '').strip }
-          cached[alias_for(rn)] = info unless rn.empty?
+          cached[alias_for(rn, warehouse_class)] = info unless rn.empty?
           cached[cap.downcase] = info unless cap.empty?
         end
         existing&.remove
         mrs = REXML::Element.new('metadata-records')
         columns.each do |c|
-          info = cached[alias_for(c)] || cached[c.to_s.downcase] || {}
+          info = cached[alias_for(c, warehouse_class)] || cached[c.to_s.downcase] || {}
           # ALWAYS class='column': the converter's Custom-SQL column build SKIPS
           # any metadata-record whose class != 'column' (tableau.ts), so a cached
           # class='measure' would silently DROP that column from the DM element —
           # and a Switch measure referencing it then can't resolve (live-caught
           # 2026-07-07: Amount USD/PROFIT vanished). Keep the local-type hint.
           rec = mrs.add_element('metadata-record', 'class' => 'column')
-          rec.add_element('remote-name').text = alias_for(c)
+          rec.add_element('remote-name').text = alias_for(c, warehouse_class)
           rec.add_element('local-name').text = "[#{c}]"
           rec.add_element('parent-name').text = "[#{rel_name}]"
-          rec.add_element('remote-alias').text = alias_for(c)
+          rec.add_element('remote-alias').text = alias_for(c, warehouse_class)
           rec.add_element('local-type').text = (info['ltype'].to_s.empty? ? 'string' : info['ltype'])
           rec.add_element('aggregation').text = info['agg'] unless info['agg'].to_s.empty?
           rec.add_element('caption').text = c
@@ -351,7 +418,7 @@ module HydrateCustomSql
         existing.each_element('metadata-record') do |m|
           rn = m.get_text('remote-name')
           next unless rn
-          m.elements['remote-name'].text = alias_for(rn.value.strip)
+          m.elements['remote-name'].text = alias_for(rn.value.strip, warehouse_class)
         end
       end
     end
@@ -395,12 +462,28 @@ module HydrateCustomSql
       url = pds_content_url(ds).to_s.downcase
       d = by_url[url]
       next unless d
+      # #454: each descriptor carries its OWN warehouse class (read from the PDS
+      # .tds connection); prefer it over the caller default so a Databricks PDS
+      # isn't case-normalized with Snowflake's upper-folding rules.
+      wcls = d['warehouseClass'].to_s.empty? ? warehouse_class : d['warehouseClass']
       rtype = d['relationType'].to_s == 'table' ? 'table' : 'text'
       cols = d['columns'] || (rtype == 'text' ? parse_sql_columns(d['sql']) : [])
+      table_path = d['table']
+      # #453 downstream fallback: a bare `SELECT * FROM <table>` custom-SQL body we
+      # couldn't column-expand is semantically just that table — resolve it as a
+      # table relation (warehouse catalog supplies the columns) rather than handing
+      # splice_pds! an empty-column Custom SQL relation (which it correctly refuses,
+      # stranding the PDS → hard abort). Genuinely-unresolvable SQL (multi-table,
+      # expressions, filters) returns nil here and still aborts loudly.
+      if rtype == 'text' && (cols.nil? || cols.empty?) && (star = bare_select_star_table(d['sql']))
+        rtype = 'table'
+        table_path = star
+        cols = []
+      end
       d_db = d['db'].to_s.empty? ? db : d['db']
       d_schema = d['schema'].to_s.empty? ? schema : d['schema']
-      ok = splice_pds!(ds, relation_type: rtype, sql: d['sql'], table_path: d['table'],
-                       columns: cols, db: d_db, schema: d_schema, warehouse_class: warehouse_class)
+      ok = splice_pds!(ds, relation_type: rtype, sql: d['sql'], table_path: table_path,
+                       columns: cols, db: d_db, schema: d_schema, warehouse_class: wcls)
       next unless ok
       hydrated << { 'caption' => (ds.attributes['caption'] || '').to_s, 'contentUrl' => d['contentUrl'],
                     'relationType' => rtype, 'columns' => cols.size, 'source' => 'rest-content' }
@@ -450,6 +533,9 @@ if __FILE__ == $PROGRAM_NAME
     o.on('--db NAME')          { |v| opts[:db] = v }
     o.on('--schema NAME')      { |v| opts[:schema] = v }
     o.on('--warehouse-class C'){ |v| opts[:wcls] = v }
+    # Alias (#454): callers may name it per-connection. Same meaning — the target
+    # warehouse's identifier-casing family for the PDS splice.
+    o.on('--pds-warehouse-class C'){ |v| opts[:wcls] = v }
     o.on('--out PATH')         { |v| opts[:out] = v }
   end.parse!
   abort 'usage: --twb PATH --out PATH (--pds DESCRIPTORS.json  and/or  --custom-sql BLOCKS.json) [--db DB --schema SCHEMA]' \

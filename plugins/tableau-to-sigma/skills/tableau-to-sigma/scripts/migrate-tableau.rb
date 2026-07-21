@@ -2064,6 +2064,20 @@ if mechanical
     end
     hyd_args += ['--pds', pds_json] if File.exist?(pds_json)
     hyd_args += ['--custom-sql', hcsql] if File.exist?(hcsql)
+    # #454: derive the target warehouse class from the resolved PDS metadata and
+    # pass it as the splice default. Each descriptor also carries its own class
+    # (hydrate_pds! prefers that per-PDS); this default covers the GraphQL-fallback
+    # splice and any classless descriptor, so a case-preserving warehouse
+    # (Databricks) is never normalized with Snowflake's upper-folding rules.
+    if File.exist?(pds_json)
+      pds_wcls = begin
+        ds_list = JSON.parse(File.read(pds_json, encoding: 'UTF-8'))
+        ds_list.is_a?(Array) ? ds_list.map { |d| d['warehouseClass'] }.compact.map(&:to_s).reject(&:empty?).first : nil
+      rescue StandardError
+        nil
+      end
+      hyd_args += ['--warehouse-class', pds_wcls] if pds_wcls
+    end
     if hyd_args.include?('--pds') || hyd_args.include?('--custom-sql')
       _out, hst = run!(hyd_args, allow_fail: true)
       conv_twb = hyd_twb if hst.success? && File.exist?(hyd_twb) && File.read(hyd_twb, encoding: 'UTF-8') != File.read(twb, encoding: 'UTF-8')
