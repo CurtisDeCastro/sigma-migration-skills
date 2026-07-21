@@ -141,6 +141,13 @@ def norm_element(el):
         "color": norm_color(el),
         # grid in-cell data bars (series_cell_visualizations) → Sigma conditionalFormats
         "cellVisualizations": norm_cell_viz(el),
+        # table column order + hidden columns (LookML `column_order:` / `hidden_fields:`),
+        # mirroring fetch_looker_dashboard.normalize_element so the contract is uniform.
+        # Usually absent in LookML dashboards → empty → build_workbook keeps fields order.
+        "columnOrder": [f for f in (el.get("column_order") or []) if isinstance(f, str)],
+        "hiddenFields": [f for f in (el.get("hidden_fields") or []) if isinstance(f, str)],
+        "columnLabels": {k: v for k, v in (el.get("series_labels") or {}).items()
+                         if isinstance(k, str) and isinstance(v, str)},
         # newspaper grid units (LookML uses `col`; API uses `column` — normalize to col)
         "layout": {
             "row": el.get("row", 0), "col": el.get("col", 0),

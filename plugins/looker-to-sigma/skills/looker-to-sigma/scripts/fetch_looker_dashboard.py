@@ -155,6 +155,46 @@ def _cell_viz(vc):
     return out
 
 
+def _column_order(vc):
+    """vis_config.column_order -> the VISUALIZATION column order (a list of Looker
+    "view.field" names). This is the order the user set by dragging columns in a table
+    viz; it differs from query.fields, which is the Data-tab order (Looker forces
+    dimensions before measures there). Empty list when absent -> build_workbook falls
+    back to the fields order, keeping non-reordered tiles byte-identical."""
+    co = vc.get("column_order")
+    return [f for f in co if isinstance(f, str)] if isinstance(co, list) else []
+
+
+def _hidden_fields(vc):
+    """Fields present in the query but HIDDEN from the visualization. Looker keeps a
+    hidden dimension IN the query (so it still sets the GROUP-BY grain) and only hides
+    the displayed column -> build_workbook keeps it in the group-by and marks the Sigma
+    column hidden (never drops it, which would change the grain). Primary key is
+    `hidden_fields` (list); tolerate a `hidden_columns` alias ({field: true} dict or a
+    list). Empty when absent."""
+    hf = vc.get("hidden_fields")
+    if not isinstance(hf, list):
+        hc = vc.get("hidden_columns")
+        if isinstance(hc, dict):
+            hf = [k for k, v in hc.items() if v]
+        elif isinstance(hc, list):
+            hf = hc
+        else:
+            hf = []
+    return [f for f in hf if isinstance(f, str)]
+
+
+def _series_labels(vc):
+    """vis_config.series_labels -> {field: custom column label}. Looker lets you rename a
+    table column in the VISUALIZATION (e.g. "Sales Region"), and that label differs from the
+    Data-tab column name. Only str→str entries kept. Empty when absent -> build_workbook falls
+    back to the humanized field name (byte-identical to before)."""
+    sl = vc.get("series_labels")
+    if not isinstance(sl, dict):
+        return {}
+    return {k: v for k, v in sl.items() if isinstance(k, str) and isinstance(v, str)}
+
+
 def _dyn(df):
     """Looker returns dashboard_element.query.dynamic_fields as a JSON string."""
     if isinstance(df, str):
@@ -231,6 +271,12 @@ def normalize_element(el, layout=None):
         "referenceLines": _reflines(vc),
         "color": _color(vc),
         "cellVisualizations": _cell_viz(vc),
+        # table column order + hidden columns (vis_config) → build_workbook reorders
+        # the displayed columns to the viz order and hides hidden ones (keeping hidden
+        # dims in the group-by). Empty when absent → fields order, byte-identical.
+        "columnOrder": _column_order(vc),
+        "hiddenFields": _hidden_fields(vc),
+        "columnLabels": _series_labels(vc),
         "layout": lay,
     }
 
