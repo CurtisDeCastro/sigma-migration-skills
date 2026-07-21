@@ -45,6 +45,7 @@ require 'net/http'
 require 'uri'
 require 'fileutils'
 require 'time'
+require 'tmpdir'
 
 RESPONSE_ONLY = %w[workbookId url documentVersion latestDocumentVersion ownerId
                    createdBy updatedBy createdAt updatedAt].freeze
@@ -400,40 +401,57 @@ def cmd_summarize(args)
   puts "  sources: #{sources.compact.uniq.join(', ')}" unless sources.compact.empty?
 end
 
-OPENAPI_CACHE = '/tmp/sigma-api.json'.freeze
+OPENAPI_CACHE = File.join(Dir.tmpdir, 'sigma-api.json').freeze
 OPENAPI_URL = 'https://help.sigmacomputing.com/openapi/sigma-computing-public-rest-api.json'.freeze
 
-# Depth-first pre-order walk over every Hash node reachable from `node`
-# (mirrors jq's `.. | objects`): yields the node itself, then recurses into
-# each Hash/Array value it contains, in place, so "first match wins" callers
-# see nodes in the same order jq's `first(...)` would.
-def walk_openapi_objects(node, &blk)
-  return unless node.is_a?(Hash) || node.is_a?(Array)
-  if node.is_a?(Hash)
+# Depth-first walk mirroring jq's `.. | objects`: yields every Hash reachable
+# from `node` (including `node` itself), descending through both Hash values
+# and Array elements.
+def walk_objects(node, &blk)
+  return enum_for(:walk_objects, node) unless blk
+  case node
+  when Hash
     blk.call(node)
-    node.each_value { |v| walk_openapi_objects(v, &blk) }
-  else
-    node.each { |v| walk_openapi_objects(v, &blk) }
+    node.each_value { |v| walk_objects(v, &blk) }
+  when Array
+    node.each { |v| walk_objects(v, &blk) }
   end
 end
 
-# True when `node` is the schema for element/control kind `k` — either
-# directly (properties.kind.enum == [k]) or via an allOf branch. Mirrors the
-# jq selector this replaced:
-#   (.allOf? and any(.allOf[]?; .properties?.kind?.enum==[$k])) or .properties?.kind?.enum==[$k]
-def openapi_kind_match?(node, k)
-  return true if node.dig('properties', 'kind', 'enum') == [k]
-  Array(node['allOf']).any? { |a| a.is_a?(Hash) && a.dig('properties', 'kind', 'enum') == [k] }
+# Mirrors the jq selector used throughout: a schema matches `kind` either via
+# an allOf branch's `properties.kind.enum` or its own.
+def kind_schema_match?(obj, kind)
+  all_of = obj['allOf']
+  allof_match = all_of.is_a?(Array) && all_of.any? { |s| s.is_a?(Hash) && s.dig('properties', 'kind', 'enum') == [kind] }
+  allof_match || obj.dig('properties', 'kind', 'enum') == [kind]
 end
 
-# Plain Net::HTTP::Get.new(uri) + start does not follow redirects (unlike
-# `curl` without `-L`); the docs host serves this URL via a 308, so this is
-# needed for the fetch below to actually land on the JSON.
-def http_get_following_redirects(url, limit = 5)
-  die 'too many HTTP redirects fetching OpenAPI' if limit.zero?
-  uri = URI(url)
-  res = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https', read_timeout: 120) { |h| h.get(uri) }
-  res.is_a?(Net::HTTPRedirection) ? http_get_following_redirects(res['location'], limit - 1) : res
+def find_kind_schema(doc, kind)
+  walk_objects(doc).find { |obj| kind_schema_match?(obj, kind) }
+end
+
+# Mirrors `[.allOf[]?.properties // .properties | keys[]] | unique[]`: merge
+# property keys across allOf branches, falling back to the schema's own
+# properties when there's no allOf (or none of its branches have properties).
+def merged_properties_keys(schema)
+  props_list = []
+  if schema['allOf'].is_a?(Array)
+    props_list = schema['allOf']
+                 .select { |s| s.is_a?(Hash) && s['properties'].is_a?(Hash) }
+                 .map { |s| s['properties'] }
+  end
+  props_list = [schema['properties']].compact if props_list.empty? && schema['properties'].is_a?(Hash)
+  props_list.flat_map(&:keys).uniq.sort
+end
+
+# Mirrors `.. | objects | select(.properties[field]) | .properties[field] | .[0]`:
+# first descendant schema (depth-first) that declares `field`, returning its
+# sub-schema.
+def find_field_schema(kind_schema, field)
+  walk_objects(kind_schema).each do |obj|
+    return obj['properties'][field] if obj['properties'].is_a?(Hash) && obj['properties'].key?(field)
+  end
+  nil
 end
 
 def cmd_capabilities(args)
@@ -441,40 +459,30 @@ def cmd_capabilities(args)
   if (i = args.index('--kind')) then kind = args[i + 1]; args.slice!(i, 2); end
   if (i = args.index('--field')) then field = args[i + 1]; args.slice!(i, 2); end
   unless File.exist?(OPENAPI_CACHE)
-    res = http_get_following_redirects(OPENAPI_URL)
-    die "failed to fetch OpenAPI (HTTP #{res.code})" unless res.code.to_i.between?(200, 299)
+    uri = URI(OPENAPI_URL)
+    res = Net::HTTP.get_response(uri)
+    die 'failed to fetch OpenAPI' unless res.is_a?(Net::HTTPSuccess)
     File.write(OPENAPI_CACHE, res.body)
   end
-  spec = JSON.parse(File.read(OPENAPI_CACHE))
+  doc = JSON.parse(File.read(OPENAPI_CACHE))
 
   if kind.nil?
-    # jq: [.. | objects | select(.properties.kind.enum) | .properties.kind.enum[0]] | unique[]
-    kinds = []
-    walk_openapi_objects(spec) do |n|
-      enum = n.dig('properties', 'kind', 'enum')
-      kinds << enum[0] if enum
+    kinds = walk_objects(doc).each_with_object([]) do |obj, acc|
+      enum = obj.dig('properties', 'kind', 'enum')
+      acc << enum.first if enum.is_a?(Array) && !enum.empty?
     end
-    puts kinds.compact.uniq.sort
+    kinds.uniq.sort.each { |k| puts k }
     return
   end
 
-  match = nil
-  walk_openapi_objects(spec) { |n| match ||= n if openapi_kind_match?(n, kind) }
-  die "no schema found for kind=#{kind}" unless match
+  schema = find_kind_schema(doc, kind)
+  die "no schema found for kind #{kind.inspect}" unless schema
 
   if field.nil?
-    # jq: [.allOf[]?.properties // .properties | keys[]] | unique[]
-    branches = Array(match['allOf']).map { |a| a['properties'] }.compact
-    branches = [match['properties'] || {}] if branches.empty?
-    puts branches.flat_map(&:keys).uniq.sort
+    merged_properties_keys(schema).each { |k| puts k }
   else
-    # jq: [.. | objects | select(.properties["field"]) | .properties["field"]] | .[0]
-    found = nil
-    walk_openapi_objects(match) do |n|
-      next unless found.nil?
-      found = n['properties'][field] if n['properties'].is_a?(Hash) && n['properties'].key?(field)
-    end
-    puts found.nil? ? 'null' : JSON.pretty_generate(found)
+    result = find_field_schema(schema, field)
+    puts result.nil? ? 'null' : JSON.pretty_generate(result)
   end
 end
 
