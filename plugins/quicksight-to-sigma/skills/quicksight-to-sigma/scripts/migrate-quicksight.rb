@@ -344,6 +344,9 @@ end
 # before we accept the Null degradation. --yes does NOT skip this; it only
 # accepts calcs the scout already tried (validated locally, or escalated). The
 # scout records each to <WORK>/scout-ledger.jsonl via scout-validate-and-persist.
+# A 'validated' row is honored only when it carries signed live-probe evidence
+# (ScoutGate integrity, issue #458): a hand-written or forged 'validated' line is
+# treated as unvalidated (→ escalated bucket), so the gate still blocks.
 calc_gaps = questions.select { |q| q['id'] == 'calc_degraded' }
 unless calc_gaps.empty?
   gid = ->(q) { "calc:" + q['detail'].to_s.gsub(/\s+/, ' ').strip[0, 80] }
