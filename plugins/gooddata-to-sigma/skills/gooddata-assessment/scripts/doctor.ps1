@@ -71,7 +71,7 @@ if ($script:PyExe) {
   $probe = (& $script:PyExe @pyArgs -c "import ssl,importlib.util as iu; print('TRUSTWARN' if ssl.OPENSSL_VERSION.startswith('OpenSSL 3') and iu.find_spec('truststore') is None else '')" 2>$null | Out-String).Trim()
   if ($probe -eq 'TRUSTWARN') {
     $fix = "$script:PyExe"; if ($script:PyPre) { $fix = "$script:PyExe $script:PyPre" }
-    Warn "python uses OpenSSL 3.x without 'truststore' - TLS verification may fail against some servers (e.g. Tableau Cloud) where curl/Ruby succeed" `
+    Warn "python uses OpenSSL 3.x without 'truststore' - TLS verification may fail against some servers (e.g. Looker or Tableau Cloud) where curl/Ruby succeed" `
          "Fix: '$fix -m pip install truststore' (uses the OS trust store). Do NOT disable TLS verification."
   }
 }
@@ -181,6 +181,35 @@ if ((Test-Path $tabSetup) -and (Test-Path $tabLib)) {
   }
 }
 
+# --- Looker API reachability (self-gated: looker skills only) ----------------
+# Plugin-aware like the Tableau checks: only where looker_api.py + ~/.looker/
+# looker.ini exist. Modern Google-hosted Looker serves the API on 443; the
+# legacy :19999 is often unreachable. looker_api self-heals to 443, but flag a
+# stale ini. Uses the UNAUTHENTICATED /api/4.0/versions via Invoke-WebRequest
+# (Windows cert store - isolates the PORT question from the TLS one above).
+$script:LookerProbe = "skipped"
+$lkIni = Join-Path $env:USERPROFILE ".looker\looker.ini"
+$lkApi = Join-Path $PSScriptRoot "looker_api.py"
+if ((Test-Path $lkApi) -and (Test-Path $lkIni)) {
+  $lkMatch = Select-String -Path $lkIni -Pattern '^\s*base_url\s*=\s*(.+?)\s*$' -ErrorAction SilentlyContinue | Select-Object -First 1
+  $lkBase = if ($lkMatch) { $lkMatch.Matches.Groups[1].Value.TrimEnd('/') } else { "" }
+  if ($lkBase) {
+    $lkNoPort = ($lkBase -replace '^(https?://[^/:]+)(:\d+)?.*$', '$1')
+    $reach = { param($u) try { Invoke-WebRequest -Uri "$u/api/4.0/versions" -TimeoutSec 8 -UseBasicParsing -ErrorAction Stop | Out-Null; $true } catch { $false } }
+    if (& $reach $lkBase) {
+      Ok "Looker API reachable at $lkBase"; $script:LookerProbe = "pass"
+    } elseif (($lkNoPort -ne $lkBase) -and (& $reach $lkNoPort)) {
+      Warn "Looker base_url ($lkBase) is unreachable but $lkNoPort (443) answers - looker_api will self-heal to 443 at run time" `
+           "Update base_url in ~/.looker/looker.ini to '$lkNoPort' (drop the legacy :19999 API port), or set LOOKER_BASE_URL."
+      $script:LookerProbe = "fallback"
+    } else {
+      Warn "Looker API not reachable at $lkBase (network / VPN / instance URL?)" `
+           "Confirm the Looker instance URL and that this host can reach its API 4.0 endpoint."
+      $script:LookerProbe = "fail"
+    }
+  }
+}
+
 # --- skill version drift (v3 §2.1) -----------------------------------------
 # A pinned plugin install never self-updates; a stale SHA silently ships
 # pre-fidelity-layer output. Record {skill_sha, behind_count}; the orchestrator
@@ -243,7 +272,7 @@ $doctor = [ordered]@{
   runtimes     = [ordered]@{ ruby = $rubyOk; python = $pyOk; node = $nodeOk; bash = [bool](Get-Command bash -ErrorAction SilentlyContinue) }
   versions     = [ordered]@{ ruby = "$rubyV"; python = "$pyV"; node = "$nodeV" }
   sandbox_hint = $sandbox
-  cred_smoke   = [ordered]@{ sigma = $script:SmokeSigma; tableau = $script:SmokeTableau }
+  cred_smoke   = [ordered]@{ sigma = $script:SmokeSigma; tableau = $script:SmokeTableau; looker = $script:LookerProbe }
   hyperapi_present = $hyperapiPresent
   skill_sha    = "$skillSha"
   behind_count = $behindCount

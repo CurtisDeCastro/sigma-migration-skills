@@ -48,7 +48,7 @@ A common failure: the agent sees "Delivery Speed Tier" in the target image (four
 Before drafting, for each dimension you picked, sanity-check two things:
 
 1. **Cardinality.** Count distinct values in the column. If the target image shows 4 bars and your column has 200 distinct values, that's the wrong column — keep looking, or derive a coarser bucketing.
-2. **Semantics.** The column's contents should make sense for what the target's label implies. "Delivery speed" should be values like Express/Standard/Slow, not product names or SKUs.
+2. **Semantics.** The column's contents should make sense for what the target's label implies. "Ship speed" should be values like Express/Standard/Slow, not product names or SKUs.
 
 A two-line probe in your data-discovery step:
 
@@ -63,7 +63,7 @@ If the candidate fails either check, document the gap in your final summary and 
 
 ### Step 0d.2 — Verify each metric is the *right calculation*
 
-The other common failure: agent sees "Return Rate by Delivery Speed" in the target and builds a bar chart showing 0-100% values for every category because they used `Sum([is_return])` instead of a rate calculation.
+The other common failure: agent sees "Return Rate by Ship Speed" in the target and builds a bar chart showing 0-100% values for every category because they used `Sum([is_return])` instead of a rate calculation.
 
 Before drafting, for each measure (the y-axis aggregate) you picked:
 
@@ -84,7 +84,7 @@ From here, follow the standard workflow (Steps 5–8). One additional verificati
 
 - **The toolbar text in BI tool screenshots is misleading.** A Tableau "marks card" labeled "automatic" or a Looker "visualization type: bar" can ship as anything visually — read the actual visual, not the metadata text.
 - **Don't carry source-tool concepts directly.** Tableau "sheets," Looker "looks," PowerBI "visuals" all map onto Sigma's flat `elements[]` list, but they don't translate 1:1. A Tableau dashboard tab is a Sigma `page`; a Tableau sheet is one or more Sigma elements.
-- **Title text isn't the data.** A chart titled "Gross Revenue by Delivery Speed" tells you what the user wants the chart *labeled*; the data fields are inferred from the visual marks, axes, and the user's other instructions — not from the title.
+- **Title text isn't the data.** A chart titled "Gross Revenue by Ship Speed" tells you what the user wants the chart *labeled*; the data fields are inferred from the visual marks, axes, and the user's other instructions — not from the title.
 - **When the data is empty.** If your produced workbook renders "No data" for a panel, the structural interpretation may be right but the data substitution wrong. Re-check: did you pick a column that actually has rows in the selected time range? Did the default filter exclude everything? Fix and re-verify rather than calling it done.
 
 ## What this workflow does NOT cover

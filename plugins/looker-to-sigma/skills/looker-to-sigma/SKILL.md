@@ -229,13 +229,21 @@ python3 scripts/migrate-looker.py --lookml-dir /path/to/lookml \
 
 ```ini
 [Looker]
-base_url=https://<your-instance>.cloud.looker.com:19999
+base_url=https://<your-instance>.cloud.looker.com
 client_id=<API3 client_id>
 client_secret=<API3 client_secret>
 verify_ssl=True
 ```
 
-- **API 4.0**, key-pair-free `client_credentials` (login on `:19999` returns a bearer).
+- **API 4.0**, key-pair-free `client_credentials`. Modern Google-hosted Looker serves the API on
+  the standard **443** at `https://<instance>.cloud.looker.com/api/4.0` — no port needed. Older
+  self-hosted instances used the legacy `:19999`; if your `base_url` still carries it and that
+  port is unreachable, the client **self-heals**: it retries on 443 and warns you to update the
+  ini. You can also override the base without editing the ini via `LOOKER_BASE_URL`
+  (or `LOOKERSDK_BASE_URL`).
+- **TLS:** requests use the OS trust store via `truststore` (installed by `bash scripts/bootstrap.sh`),
+  so Python's stricter OpenSSL 3.x accepts the same certs curl/Ruby do; it falls back to certifi
+  then the stock bundle. Leave `verify_ssl=True` (setting it false disables verification and warns).
 - The credential's user needs **Admin** (or at least: see models, dashboards, run queries, and
   — for the test-fixture builders or Git-deploy flow — develop + deploy).
 - Generate an API3 key in Looker: **Admin → Users → (your user) → Edit Keys → New API3 Key**.
