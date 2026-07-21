@@ -76,11 +76,28 @@ def descriptor_from_tds(tds_text)
   conn ||= doc.elements['//connection']
   db = conn && conn.attributes['dbname'].to_s
   schema = conn && conn.attributes['schema'].to_s
+  # #454: the PDS's real warehouse class (snowflake / databricks / …) lives on this
+  # connection. Carry it into the descriptor so hydration case-normalizes with the
+  # right rules per-PDS (a case-preserving warehouse must not be upper-folded).
+  wcls = HydrateCustomSql.canon_warehouse_class(conn && conn.attributes['class'])
   if text_rel
-    { 'relationType' => 'text', 'sql' => rel.text.to_s.strip, 'db' => db, 'schema' => schema,
-      'columns' => HydrateCustomSql.parse_sql_columns(rel.text.to_s) }
+    sql = rel.text.to_s.strip
+    cols = HydrateCustomSql.parse_sql_columns(sql)
+    star_table = cols.empty? ? HydrateCustomSql.bare_select_star_table(sql) : nil
+    if star_table
+      # #453: a bare `SELECT * FROM <table>` PDS is semantically just <table>.
+      # parse_sql_columns can't enumerate `*`, so resolve it as a TABLE relation
+      # (the warehouse catalog supplies the columns downstream) instead of emitting
+      # a 0-column Custom SQL relation that would hard-abort the migration.
+      { 'relationType' => 'table', 'table' => star_table, 'db' => db, 'schema' => schema,
+        'columns' => [], 'warehouseClass' => wcls, 'expandedFrom' => 'select-star' }
+    else
+      { 'relationType' => 'text', 'sql' => sql, 'db' => db, 'schema' => schema,
+        'columns' => cols, 'warehouseClass' => wcls }
+    end
   else
-    { 'relationType' => 'table', 'table' => rel.attributes['table'].to_s, 'db' => db, 'schema' => schema, 'columns' => [] }
+    { 'relationType' => 'table', 'table' => rel.attributes['table'].to_s, 'db' => db,
+      'schema' => schema, 'columns' => [], 'warehouseClass' => wcls }
   end
 end
 

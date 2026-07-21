@@ -186,6 +186,84 @@ check(hrecs['AMOUNT_USD'].attributes['class'] == 'column', 'class forced to "col
 check(hrecs['AMOUNT_USD'].get_text('local-type').value == 'real', 'cached local-type=real PRESERVED (not downgraded to string)', fails)
 check(hrecs['SALES_REGION'].get_text('local-type').value == 'string' && hrecs['SALES_REGION'].attributes['class'] == 'column', 'uncached column defaults to string/column', fails)
 
+puts 'Part I — warehouse-class case sensitivity (#454)'
+check(H.canon_warehouse_class('snowflake') == 'snowflake', 'canon snowflake', fails)
+check(H.canon_warehouse_class('Databricks') == 'databricks', 'canon Databricks (case/punct-insensitive)', fails)
+check(H.canon_warehouse_class('spark') == 'databricks', 'canon spark→databricks family', fails)
+check(H.canon_warehouse_class('') == 'snowflake', 'canon empty→snowflake default (back-compat)', fails)
+check(!H.case_preserving_warehouse?('snowflake'), 'snowflake is NOT case-preserving (upper-folds)', fails)
+check(H.case_preserving_warehouse?('databricks'), 'databricks IS case-preserving', fails)
+check(!H.case_preserving_warehouse?('redshift'), 'unknown/other warehouse keeps upper default (no regression)', fails)
+check(H.alias_for('Order Date', 'snowflake') == 'ORDER_DATE', 'alias_for uppercases for snowflake', fails)
+check(H.alias_for('Order Date') == 'ORDER_DATE', 'alias_for defaults to snowflake (upper) when no class', fails)
+check(H.alias_for('order_date', 'databricks') == 'order_date', 'alias_for preserves lowercase for databricks (#454)', fails)
+check(H.alias_for('Region Name', 'databricks') == 'Region_Name', 'alias_for preserves case (snake punctuation) for databricks', fails)
+check(H.quote_ref('order_date', 'databricks') == 'order_date', 'quote_ref leaves databricks-native lowercase bare', fails)
+check(H.quote_ref('order_date', 'snowflake') == '"order_date"', 'quote_ref quotes non-upper for snowflake', fails)
+dbx_wrap = H.wrap_sql('SELECT * FROM reporting.curated.foo', ['customer_id', 'Region Name'], 'databricks')
+check(dbx_wrap.include?('customer_id AS customer_id'), 'databricks wrap: lowercase col stays bare + preserved (not uppercased)', fails)
+check(dbx_wrap.include?('"Region Name" AS Region_Name'), 'databricks wrap: mixed-case preserved (quoted src, case-kept alias)', fails)
+sf_wrap = H.wrap_sql('SELECT * FROM T', ['customer_id'], 'snowflake')
+check(sf_wrap.include?('"customer_id" AS CUSTOMER_ID'), 'snowflake wrap still uppercases (unchanged behavior)', fails)
+
+puts 'Part J — bare SELECT * expansion helper (#453)'
+check(H.bare_select_star_table('SELECT * FROM analytics_db.reporting.foo') == 'analytics_db.reporting.foo', 'bare star → dotted table token', fails)
+check(H.bare_select_star_table('select   *   from   [DB].[SC].[T]') == '[DB].[SC].[T]', 'bare star (bracketed, extra whitespace) → table', fails)
+check(H.bare_select_star_table('SELECT * FROM foo AS f') == 'foo', 'bare star + AS alias → table', fails)
+check(H.bare_select_star_table('SELECT * FROM foo f') == 'foo', 'bare star + bare alias → table', fails)
+check(H.bare_select_star_table('SELECT DISTINCT * FROM foo') == 'foo', 'bare DISTINCT star → table', fails)
+check(H.bare_select_star_table('SELECT * FROM foo;') == 'foo', 'trailing semicolon tolerated', fails)
+check(H.bare_select_star_table('SELECT * FROM a JOIN b ON a.id=b.id').nil?, 'star with JOIN → nil (semantics differ)', fails)
+check(H.bare_select_star_table('SELECT * FROM foo WHERE x=1').nil?, 'star with WHERE → nil (would drop the filter)', fails)
+check(H.bare_select_star_table('SELECT * FROM (SELECT 1) t').nil?, 'star over a subquery → nil', fails)
+check(H.bare_select_star_table('SELECT a, b FROM foo').nil?, 'explicit projection → nil (not a star)', fails)
+check(H.bare_select_star_table('SELECT * FROM a, b').nil?, 'comma table list → nil', fails)
+
+puts 'Part K — hydrate_pds! expands bare SELECT * (no abort) + case-preserving warehouse (#453/#454)'
+star_twb = <<~XML
+  <workbook><datasources>
+    <datasource caption='Bare'>
+      <repository-location id='PDS_BARE'/>
+      <connection class='sqlproxy' dbname='PDS_BARE'><relation name='sqlproxy' table='[sqlproxy]' type='table'/></connection>
+    </datasource>
+    <datasource caption='Unresolvable'>
+      <repository-location id='PDS_BAD'/>
+      <connection class='sqlproxy' dbname='PDS_BAD'><relation name='sqlproxy' table='[sqlproxy]' type='table'/></connection>
+    </datasource>
+  </datasources></workbook>
+XML
+sdoc = REXML::Document.new(star_twb)
+sdescs = [
+  { 'contentUrl' => 'PDS_BARE', 'relationType' => 'text',
+    'sql' => 'SELECT * FROM analytics_db.reporting.order_events',
+    'db' => 'analytics_db', 'schema' => 'reporting', 'columns' => [], 'warehouseClass' => 'databricks' },
+  { 'contentUrl' => 'PDS_BAD', 'relationType' => 'text',
+    'sql' => 'SELECT * FROM a JOIN b ON a.id = b.id', 'db' => 'RAW', 'schema' => 'ING', 'columns' => [] }
+]
+sh = H.hydrate_pds!(sdoc, descriptors: sdescs, db: 'DB', schema: 'SC')
+check(sh.size == 1, 'only the resolvable (bare SELECT*) PDS hydrated; the unresolvable one is dropped', fails)
+check(sh.first['relationType'] == 'table', 'bare SELECT* resolved to a TABLE relation (no abort) (#453)', fails)
+bare_conn = sdoc.elements["/workbook/datasources/datasource[@caption='Bare']/connection"]
+bare_rel = nil; bare_conn.each_element('.//relation') { |r| bare_rel = r }
+check(bare_rel.attributes['type'] == 'table', 'Bare PDS spliced as a table relation', fails)
+check(bare_rel.attributes['table'] == '[analytics_db].[reporting].[order_events]', 'table qualified, lowercase PRESERVED (databricks, #454)', fails)
+check(bare_conn.attributes['class'] == 'databricks', 'connection stamped with the databricks class (#454)', fails)
+bad_conn = sdoc.elements["/workbook/datasources/datasource[@caption='Unresolvable']/connection"]
+check(bad_conn.attributes['class'] == 'sqlproxy' && bad_conn.to_s.include?('[sqlproxy]'),
+      'genuinely-unresolvable PDS left as sqlproxy placeholder → migrate hard-aborts loudly', fails)
+
+# Databricks Custom SQL with explicit columns: aliases + metadata remote-names case-preserved.
+ddoc = REXML::Document.new("<workbook><datasources><datasource caption='DBX'><repository-location id='PDS_DBX'/><connection class='sqlproxy' dbname='PDS_DBX'><relation name='sqlproxy' table='[sqlproxy]' type='table'/></connection></datasource></datasources></workbook>")
+H.hydrate_pds!(ddoc, descriptors: [{ 'contentUrl' => 'PDS_DBX', 'relationType' => 'text',
+  'sql' => 'SELECT customer_id, "Region Name" FROM analytics_db.reporting.t',
+  'columns' => ['customer_id', 'Region Name'], 'warehouseClass' => 'databricks' }], db: 'DB', schema: 'SC')
+dconn = ddoc.elements["/workbook/datasources/datasource[@caption='DBX']/connection"]
+check(dconn.attributes['class'] == 'databricks', 'databricks custom-SQL PDS: connection class=databricks', fails)
+drel = nil; dconn.each_element('.//relation') { |r| drel = r if r.attributes['type'] == 'text' }
+check(drel.text.to_s.include?('customer_id AS customer_id'), 'databricks custom SQL: lowercase col preserved (not uppercased)', fails)
+dremotes = []; dconn.each_element('.//metadata-records/metadata-record') { |m| dremotes << m.get_text('remote-name').value }
+check(dremotes == %w[customer_id Region_Name], 'databricks custom SQL: metadata remote-names case-preserved', fails)
+
 puts
 if fails.empty?
   puts "ALL PASS (#{`grep -c 'check(' #{__FILE__}`.to_i - 1} assertions)"

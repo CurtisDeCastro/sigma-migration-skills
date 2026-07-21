@@ -72,6 +72,26 @@ STUB = <<~'RUBY'
                   '<error><summary>User does not have the Download capability on this datasource</summary></error>')
       when 'download_401_exhaust'
         raise err(401, 'Unauthorized', '<error><summary>persistent signin failure</summary></error>')
+      when 'download_select_star_databricks'
+        # #453/#454: a Databricks PDS whose Custom SQL is a bare `SELECT * FROM
+        # <lowercase table>`. parse can't enumerate `*`, but the table IS resolvable.
+        return <<~TDS
+          <datasource>
+            <connection class='databricks' dbname='analytics_db' schema='reporting'>
+              <relation type='text' name='Custom SQL Query'>SELECT * FROM analytics_db.reporting.account_facts</relation>
+            </connection>
+          </datasource>
+        TDS
+      when 'download_unresolvable_star'
+        # A genuinely-unresolvable Custom SQL (multi-table join under SELECT *) —
+        # expansion would change semantics, so it stays 0-column text → hard abort.
+        return <<~TDS
+          <datasource>
+            <connection class='databricks' dbname='analytics_db' schema='reporting'>
+              <relation type='text' name='Custom SQL Query'>SELECT * FROM reporting.a JOIN reporting.b ON a.id = b.id</relation>
+            </connection>
+          </datasource>
+        TDS
       end
       # bare .tds (no zip) with a real table relation → a valid descriptor.
       <<~TDS
@@ -166,6 +186,28 @@ Dir.mktmpdir do |tmp|
   check(r[:remints] >= 2, "(c) 401-exhaust: re-mint budget was exercised (got #{r[:remints]} re-mints)", fails)
   check(r[:out].include?('401') && r[:out].include?('content download failed'),
         '(c) 401-exhaust: the exhausted 401 is surfaced loudly', fails)
+
+  # (d) bare `SELECT * FROM <table>` (Databricks): resolves — NO abort — to the
+  #     TABLE (expanded), with the lowercase table PRESERVED and the warehouse
+  #     class captured from the PDS metadata (#453 + #454).
+  r = run.call('download_select_star_databricks')
+  d = r[:descriptors]&.first
+  check(r[:code] == 0, "(d) select*: script completes (exit #{r[:code]})", fails)
+  check(r[:descriptors]&.size == 1, "(d) select*: PDS resolved (no abort), got #{r[:descriptors]&.size.inspect}", fails)
+  check(d && d['relationType'] == 'table', "(d) select*: bare SELECT* EXPANDED to a table relation (#453), got #{d && d['relationType']}", fails)
+  check(d && d['table'] == 'analytics_db.reporting.account_facts',
+        "(d) select*: table extracted, lowercase PRESERVED, got #{d && d['table'].inspect}", fails)
+  check(d && d['warehouseClass'] == 'databricks', "(d) select*: warehouse class captured from PDS metadata (#454), got #{d && d['warehouseClass'].inspect}", fails)
+  check(r[:out].include?('table analytics_db.reporting.account_facts'),
+        '(d) select*: resolution logged as a table (not an empty Custom SQL)', fails)
+
+  # (e) genuinely-unresolvable `SELECT *` (multi-table JOIN): NOT expanded — stays
+  #     a 0-column Custom SQL descriptor, so hydration refuses it and migrate
+  #     hard-aborts loudly (never fabricated into a phantom table).
+  r = run.call('download_unresolvable_star')
+  d = r[:descriptors]&.first
+  check(d && d['relationType'] == 'text', "(e) unresolvable star: kept as Custom SQL (not expanded), got #{d && d['relationType']}", fails)
+  check(d && (d['columns'] || []).empty?, "(e) unresolvable star: 0 columns → hydration refuses → hard abort preserved, got #{d && d['columns'].inspect}", fails)
 end
 
 puts
