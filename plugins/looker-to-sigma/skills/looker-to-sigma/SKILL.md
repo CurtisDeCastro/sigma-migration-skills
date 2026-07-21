@@ -684,6 +684,19 @@ Tile-type, filter-type, and layout maps are in `refs/dashboard-contract.md` and
 | `text` | `text` (markdown body) |
 | `looker_map` / geo / funnel / waterfall / boxplot / sankey / custom viz | none — approximate or drop + warn |
 
+**Table column order, labels & hidden columns.** A table's Sigma column order follows the Looker
+**visualization** order (`vis_config.column_order`, captured as contract `columnOrder`), NOT
+`query.fields` — the Data-tab order, which forces dimensions before measures. Fields not listed in
+`column_order` append in `fields` order (Looker appends newly-added fields at the end). Column
+**names** prefer the viz label (`vis_config.series_labels`, captured as `columnLabels`) over the
+humanized field name — a column renamed in the visualization can differ from the Data-tab name. Columns
+**hidden from the visualization** (`vis_config.hidden_fields`, captured as `hiddenFields`) get
+`hidden: true` on the Sigma column — but a hidden **dimension is KEPT in `groupings.groupBy`** so
+the aggregation grain (and therefore every measure value) is unchanged. Never *drop* a hidden
+dimension: Looker keeps it in the query ("Hide from Visualization" doesn't re-run the query), so
+dropping it would silently change the numbers. Both are additive contract keys — absent/empty →
+columns stay in `fields` order, byte-identical to before. Verified: `tests/test_table_column_order.py`.
+
 Newspaper layout math (a single arithmetic transform, no spatial heuristic):
 `gridColumn = (col+1) / (col+1+width)`, `gridRow = (row+1) / (row+1+height)`. `tile` / `static`
 / `grid` modes need a snap heuristic (lossy) — warn + stack; see `refs/looker-dashboard-layout.md` §3.
