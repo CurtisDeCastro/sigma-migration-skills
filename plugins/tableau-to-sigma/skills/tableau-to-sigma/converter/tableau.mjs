@@ -3725,10 +3725,11 @@ function resolveTableName(tbl) {
   }
   return stripped;
 }
-function extractPath(rel, dbOverride, schOverride) {
+function extractPath(rel, dbOverride, schOverride, casing = "upper") {
   const rawTable = attr(rel, "table") || attr(rel, "name") || "";
   const cleaned = rawTable.replace(/[\[\]]/g, "").replace(/\s*\([^)]*\)/g, "");
-  const parts = cleaned.split(".").filter(Boolean).map((s) => s.toUpperCase().trim()).filter((p) => !/^[0-9A-F]{8}-[0-9A-F]{4}-/i.test(p));
+  const fold = (s) => casing === "preserve" ? s : s.toUpperCase();
+  const parts = cleaned.split(".").filter(Boolean).map((s) => fold(s).trim()).filter((p) => !/^[0-9A-F]{8}-[0-9A-F]{4}-/i.test(p));
   const stripHash = (s) => s.replace(/_[0-9A-Fa-f]{16,}$/, "");
   let path;
   if (parts.length >= 2) {
@@ -3736,7 +3737,7 @@ function extractPath(rel, dbOverride, schOverride) {
   } else if (parts.length === 1) {
     path = [schOverride || "SCHEMA", resolveTableName(stripHash(parts[0]))];
   } else {
-    path = [resolveTableName(attr(rel, "name").toUpperCase()) || "UNKNOWN"];
+    path = [resolveTableName(fold(attr(rel, "name"))) || "UNKNOWN"];
   }
   if (dbOverride) {
     if (path.length >= 3)
@@ -3752,11 +3753,11 @@ function extractPath(rel, dbOverride, schOverride) {
   }
   return path;
 }
+var NON_WAREHOUSE_CONN = /* @__PURE__ */ new Set(["sqlproxy", "hyper", "excel-direct", "textscan", "csv", "google-sheets", "virtual-connection", "vconn"]);
 function warehouseDbSchemaFromConn(connVal) {
-  const NON_WAREHOUSE = /* @__PURE__ */ new Set(["sqlproxy", "hyper", "excel-direct", "textscan", "csv", "google-sheets", "virtual-connection", "vconn"]);
   for (const c of allConnections(connVal)) {
     const cls = (attr(c, "class") || "").toLowerCase();
-    if (NON_WAREHOUSE.has(cls))
+    if (NON_WAREHOUSE_CONN.has(cls))
       continue;
     const db = attr(c, "dbname") || attr(c, "database") || "";
     const sch = attr(c, "schema") || "";
@@ -3767,6 +3768,20 @@ function warehouseDbSchemaFromConn(connVal) {
     return [db, sch];
   }
   return ["", ""];
+}
+var CASE_PRESERVING_WH = /\b(databricks|spark|hive|delta)\b/i;
+function warehouseCasing(cls) {
+  return CASE_PRESERVING_WH.test(cls || "") ? "preserve" : "upper";
+}
+var NON_WAREHOUSE_CLASS = /* @__PURE__ */ new Set([...NON_WAREHOUSE_CONN, "federated"]);
+function warehouseClassFromConn(connVal) {
+  for (const c of allConnections(connVal)) {
+    const cls = (attr(c, "class") || "").toLowerCase();
+    if (!cls || NON_WAREHOUSE_CLASS.has(cls))
+      continue;
+    return cls;
+  }
+  return "";
 }
 function collectTables(rel, tables) {
   const type = attr(rel, "type") || "table";
@@ -3856,7 +3871,7 @@ function blendFieldName(qualified) {
     last = seg.slice(1, -1).join(":");
   return last.replace(/[^A-Za-z0-9_]/g, "_").toUpperCase();
 }
-function tryBuildBlendModel(parsed, datasources, dbOverride, schOverride, connId) {
+function tryBuildBlendModel(parsed, datasources, dbOverride, schOverride, connId, warehouseType = "") {
   const wb = parsed.workbook;
   const relsBlock = wb && wb["datasource-relationships"];
   if (!relsBlock)
@@ -3901,7 +3916,8 @@ function tryBuildBlendModel(parsed, datasources, dbOverride, schOverride, connId
     return null;
   const elements = [];
   const [pDb, pSch] = warehouseDbSchemaFromConn(primary.ds?.connection);
-  const pPath = extractPath(primaryRel, dbOverride || pDb, schOverride || pSch);
+  const pCasing = warehouseCasing(warehouseType || warehouseClassFromConn(primary.ds?.connection));
+  const pPath = extractPath(primaryRel, dbOverride || pDb, schOverride || pSch, pCasing);
   const pTable = pPath[pPath.length - 1] || "PRIMARY";
   const pCols = blendColumns(primary);
   const pColId = {};
@@ -3926,7 +3942,8 @@ function tryBuildBlendModel(parsed, datasources, dbOverride, schOverride, connId
   const secMeasureDisplay = {};
   for (const link of links) {
     const [sDb, sSch] = warehouseDbSchemaFromConn(link.sec.ds?.connection);
-    const sPath = extractPath(connRelations(link.sec.ds.connection)[0], dbOverride || sDb, schOverride || sSch);
+    const sCasing = warehouseCasing(warehouseType || warehouseClassFromConn(link.sec.ds?.connection));
+    const sPath = extractPath(connRelations(link.sec.ds.connection)[0], dbOverride || sDb, schOverride || sSch, sCasing);
     const sTable = sPath[sPath.length - 1] || "SECONDARY";
     const sCols = blendColumns(link.sec);
     const sLinkWh = new Set(link.pairs.map((p) => p.s));
@@ -4253,7 +4270,7 @@ function convertTableauToSigma(xmlContent, options = {}) {
   if (datasources.length === 0) {
     throw new Error("No data sources found in the Tableau file");
   }
-  const blendResult = tryBuildBlendModel(parsed, datasources, dbOverride, schOverride, connectionId || "<CONNECTION_ID>");
+  const blendResult = tryBuildBlendModel(parsed, datasources, dbOverride, schOverride, connectionId || "<CONNECTION_ID>", options.warehouseType || "");
   if (blendResult) {
     try {
       const stripped = xmlContent.replace(/<datasource-relationships>[\s\S]*?<\/datasource-relationships>/g, "");
@@ -4281,6 +4298,7 @@ function convertTableauToSigma(xmlContent, options = {}) {
   const [connDb, connSchema] = warehouseDbSchemaFromConn(ds.connection);
   const dbEff = dbOverride || connDb;
   const schEff = schOverride || connSchema;
+  const whCasing = warehouseCasing(options.warehouseType || warehouseClassFromConn(ds.connection));
   const warnings = [];
   const security = [];
   const workbookPatterns = [];
@@ -4399,7 +4417,7 @@ function convertTableauToSigma(xmlContent, options = {}) {
   if (rootRelation) {
     const relType = attr(rootRelation, "type") || "table";
     if (relType === "table") {
-      const path = extractPath(rootRelation, dbEff, schEff);
+      const path = extractPath(rootRelation, dbEff, schEff, whCasing);
       const tableName = path[path.length - 1] || "";
       const columns = [], order = [];
       for (const col of asArray(rootRelation?.columns?.column || [])) {
@@ -4425,7 +4443,7 @@ function convertTableauToSigma(xmlContent, options = {}) {
       } else {
         const elementMap = {};
         for (const t of tables) {
-          const path = extractPath(t.rel, dbEff, schEff);
+          const path = extractPath(t.rel, dbEff, schEff, whCasing);
           const tableName = path[path.length - 1] || attr(t.rel, "name") || "";
           if (elementMap[tableName])
             continue;
@@ -4476,7 +4494,7 @@ function convertTableauToSigma(xmlContent, options = {}) {
           elementMap[tableName] = { element: el, colIdMap };
           elements.push(el);
         }
-        const primaryTableName = extractPath(tables[0].rel, dbEff, schEff).pop() || "";
+        const primaryTableName = extractPath(tables[0].rel, dbEff, schEff, whCasing).pop() || "";
         const primaryEntry = elementMap[primaryTableName];
         const resolveJoinKey = (entry, key, tableName) => {
           let colId = entry.colIdMap[key] || entry.colIdMap[sigmaDisplayName(key).toUpperCase()];
@@ -4514,7 +4532,7 @@ function convertTableauToSigma(xmlContent, options = {}) {
           const rightRaw = t.rightKeys && t.rightKeys.length ? t.rightKeys : t.rightKey ? [t.rightKey] : [];
           if (!leftRaw.length || leftRaw.length !== rightRaw.length)
             continue;
-          const tgtName = extractPath(t.rel, dbEff, schEff).pop() || "";
+          const tgtName = extractPath(t.rel, dbEff, schEff, whCasing).pop() || "";
           const tgtEntry = elementMap[tgtName];
           if (!primaryEntry || !tgtEntry)
             continue;
@@ -4603,7 +4621,7 @@ function convertTableauToSigma(xmlContent, options = {}) {
         factRelName = factChild ? attr(factChild, "name") || attr(factChild, "table") || null : null;
         for (const rel of childRels) {
           const fullName = attr(rel, "name") || attr(rel, "table") || "TABLE";
-          const path = extractPath(rel, dbEff, schEff);
+          const path = extractPath(rel, dbEff, schEff, whCasing);
           const cleanName = path[path.length - 1] || fullName;
           const columns = [], order = [], colIdMap = {};
           let matchingObjId = Object.keys(metaByObjId).find((k) => k === fullName || k.startsWith(fullName + "_"));
