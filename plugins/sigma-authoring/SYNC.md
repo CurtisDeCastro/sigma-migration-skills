@@ -19,8 +19,20 @@ for s in sigma-workbooks sigma-data-models custom-sql-to-data-model; do
   rm -rf "plugins/sigma-authoring/skills/$s"
   cp -R "$SRC/$s" "plugins/sigma-authoring/skills/$s"
 done
+
+# CLOBBER-SAFETY (required): the vendored skill dirs ALSO carry manifest-fanned
+# shared files (scripts/doctor.{sh,ps1}, scripts/bootstrap.{sh,ps1},
+# refs/environment.md, the token scripts, …) that do NOT exist upstream — the
+# rm -rf above deletes them. Re-fan them from shared/manifest.json and verify,
+# or the shared-lib drift gate (tools/check-shared.rb in CI) fails:
+ruby tools/sync-shared.rb        # restore the fanned shared copies the cp -R dropped
+ruby tools/check-shared.rb       # MUST be green before committing
+
 # then update the "Vendored at" SHA above and commit
 ```
 
 Do NOT edit these copies directly — changes belong upstream in `sigma-skills`,
-then re-vendor here.
+then re-vendor here. (Native trellis shapes were back-ported upstream in
+`twells89/sigma-skills` #19; re-vendor `sigma-workbooks` from the SoT once that
+merges to pick them up — the marketplace copy already carries the identical
+recipe, so this is a consistency refresh, not a functional change.)
