@@ -22,9 +22,10 @@ they land in a later wave, one PR each.
   (`:needs_sibling_fanout` / `:needs_pivot_shelves` / `:flat`). A 2-D grid passes
   a two-element `[rowId, colId]` and `orientation: :grid`.
 - **Silent-stripping is the shared risk.** Every converter that emits `trellis`
-  must re-read the spec and assert the key survived (generalize
-  `verify-trellis-survived.rb`, which already reads a converter-neutral
-  `native-trellis-emitted.json` sidecar).
+  must re-read the spec and assert the key survived. `verify-trellis-survived.rb`
+  is now the shared, converter-neutral guard (canonical
+  `shared/scripts/verify-trellis-survived.rb`, synced into tableau + powerbi); it
+  reads the neutral `native-trellis-emitted.json` sidecar each converter writes.
 - **Several converters currently document trellis as "Sigma UI-only"** — a belief
   that predates the native `rowsBy`/`columnsBy` finding (#460/#462). Those notes
   (Looker `SKILL.md`, Power BI `measure-patterns.md`, Looker/QuickSight enhance
@@ -35,7 +36,7 @@ they land in a later wave, one PR each.
 
 | Rank | Converter | Source small-multiples concept | Detection site (parse path) | Difficulty | Emission |
 |------|-----------|--------------------------------|-----------------------------|------------|----------|
-| 1 | **Power BI** | **First-class "Small multiples"** field well on cartesian visuals (bar/column/line); category splits the visual into a panel grid. Also multi-page "by" duplication. | `build-workbook-from-pbir.rb` / `build-charts-from-signals.rb` — read the visual's `smallMultiples` / `SmallMultiples` well from the PBIR `visual.json` at chart-build. | **Low–Med** — explicit property, no geometry inference. | `TrellisEmit.apply` |
+| 1 | **Power BI** ✅ **DONE** | **First-class "Small multiples"** field well on cartesian visuals (bar/column/line); category splits the visual into a panel grid. Also multi-page "by" duplication. | `build-workbook-from-pbir.rb` (`apply_small_multiples!`) — reads the visual's `SmallMultiples` projection role (passed through by `extract-pbir.py` `_role_bindings`) at chart-build. | **Low–Med** — explicit property, no geometry inference. | `TrellisEmit.apply` (single PBI facet → `columnsBy` tile grid; pie→donut; kpi/pivot/table left flat). Round-trip guard: `native-trellis-emitted.json` + shared `verify-trellis-survived.rb`. Tested by `test-pbi-trellis.rb`. |
 | 2 | **Qlik** | **Native "Trellis"** — chart-level trellis (a dimension splits one chart into a grid) plus the **trellis-container** object. Strong, explicit concept. | `build-sigma-workbook.py` — read the chart's trellis dimension / trellis-container children from the app object model (QVF layout JSON). | **Low–Med** — explicit; container variant needs a member→panel mapping. | `TrellisEmit.apply` |
 | 3 | **Looker** | **`looker_donut_multiples`** (donut small multiples) and **row/column `pivots`** that render as repeated panels. | `parse_lookml_dashboard.py` → `build_looker_dashboard*.py` — read `type: looker_donut_multiples` and the `pivots` list on each dashboard element. | **Med** — donut-multiples maps cleanly (donut is supported); pivots-as-facet needs care not to collide with a real pivot table. | `TrellisEmit.apply` (donut path is the sweet spot) |
 | 4 | **QuickSight** | **"Small multiples"** field well (`SmallMultiplesOptions`) on bar/line/combo visuals. | `build-workbook-from-quicksight.rb` / `build-charts-from-signals.rb` — read the visual's small-multiples field from the analysis/definition JSON. | **Low–Med** — explicit property. | `TrellisEmit.apply` |

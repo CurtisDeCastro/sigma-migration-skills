@@ -32,8 +32,16 @@ A chart splits into one series per category **iff** it carries a `color` block:
 "color": { "by": "category", "column": "<colId>" }
 ```
 
-- This is *persisted* in the workbook spec (unlike trellis/tooltip, which are
-  UI-only — see memory `feedback_sigma_trellis_ui_only` / `_tooltip_ui_only`).
+- This is *persisted* in the workbook spec (like the native `trellis` facet —
+  see below — but unlike tooltip, which stays UI-only: `_tooltip_ui_only`).
+- **Small multiples → native `trellis` (NOT UI-only).** The old
+  `feedback_sigma_trellis_ui_only` belief predates the `rowsBy`/`columnsBy` finding
+  (#460/#462): a spec-authored `element.trellis` DOES bind the facet on the
+  readback-safe kinds (bar/line/area/combo/scatter/donut). `build-workbook-from-pbir.rb`
+  detects a visual's PBI **"Small multiples"** field well (`SmallMultiples`
+  projection role) and calls the shared `TrellisEmit.apply` (pie→donut; kpi/pivot/
+  table stay flat). See `docs/sigma-trellis-chart-support.md` +
+  `docs/trellis-cross-converter-plan.md`.
 - Removing the `color` block collapses the chart to a **single series**.
 - **Line builder default = single series** (`beads-sigma-c07`): a line chart
   should NOT emit `color` unless the source PBI visual has a Legend/Series
@@ -369,7 +377,9 @@ verified via `/v2/workbooks/{id}/spec` PUT round-trip 2026-06-02.)
   (DM/workbook post fixups), `connection.md` (Phase 1–2 extract).
 - Memory: `feedback_sigma_cross_element_ref_form` (triple-segment refs),
   `feedback_sigma_window_functions` (window-fn silent failures in calc cols),
-  `feedback_sigma_trellis_ui_only` / `_tooltip_ui_only` (UI-only fields —
-  contrast with `color`, which IS persisted).
+  `_tooltip_ui_only` (UI-only field — contrast with `color` AND the native
+  `trellis` facet, both of which ARE persisted). NOTE
+  `feedback_sigma_trellis_ui_only` is STALE — the `rowsBy`/`columnsBy` trellis is
+  spec-authored now (small multiples → `TrellisEmit.apply`; see above).
 - Beads: `c07` (line default single series), `2tf` (UI-only-referenceable DM
   metric for the cross-element ratio), `tkd` (post fixups).
