@@ -41,6 +41,7 @@ require 'optparse'
 require 'open3'
 require 'shellwords'
 require 'time'
+require 'digest'
 require_relative 'learned-rules'
 require_relative 'lib/scout_gate'
 require_relative 'lib/py_resolve' # real-Python resolver (Windows Store-stub safe)
@@ -70,8 +71,26 @@ end.parse!
 %i[feature pattern template test_formula dm_id el_id].each { |k| abort("missing --#{k.to_s.tr('_','-')}") unless opts[k] }
 
 # Append a row to the per-conversion scout ledger via the shared gate module.
-def record_ledger(opts, status)
-  ScoutGate.record(opts[:workdir], gap_id: opts[:gap_id], feature: opts[:feature], status: status)
+# A 'validated' row MUST carry live-probe evidence (issue #458): the real Sigma
+# workbook id the validation POST created + a hash of the columns-readback the
+# live API returned + the probe timestamp. ScoutGate signs the row so a hand-
+# written 'validated' line — one that never ran this probe — cannot pass the gate.
+def record_ledger(opts, status, evidence = nil)
+  ScoutGate.record(opts[:workdir], gap_id: opts[:gap_id], feature: opts[:feature],
+                                   status: status, evidence: evidence)
+end
+
+# Bind a 'validated' status to the live probe that produced it: the workbook id
+# the POST created and a hash of the exact API readback (validate-sigma-formula's
+# JSON verdict). A caller who only reasoned about a translation, never POSTing it,
+# has neither — so it cannot forge this evidence.
+def probe_evidence(result)
+  {
+    'workbook_id'     => result['workbook_id'].to_s,
+    'response_sha256' => Digest::SHA256.hexdigest(JSON.generate(result)),
+    'phase'           => result['phase'].to_s,
+    'probed_at'       => Time.now.utc.iso8601
+  }
 end
 
 VALIDATE = File.join(__dir__, 'validate-sigma-formula.rb')
@@ -107,7 +126,7 @@ if result['status'] == 'ok'
     'confidence'         => 'validated'
   }
   path = LearnedRules.append(rule)
-  record_ledger(opts, 'validated')
+  record_ledger(opts, 'validated', probe_evidence(result))
   puts JSON.pretty_generate({
     'status'      => 'validated',
     'rule_path'   => path,
