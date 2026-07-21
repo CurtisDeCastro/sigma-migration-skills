@@ -59,6 +59,14 @@ TEMPORAL = re.compile(r"DATE|MONTH|YEAR|QUARTER|WEEK|DAY", re.I)
 # beads-sigma-93ps contract: catalog = data, code = thin resolver/predicates.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 import coverage_catalog as _cc  # noqa: E402
+import trellis_emit as _te      # noqa: E402  shared native-trellis emitter (supported-kind gate + fallbacks)
+
+# Native-trellis round-trip sidecar records (element_id/kind/name/axis/columnId).
+# Populated by emit_trellis; written to native-trellis-emitted.json ONLY when a
+# trellis was actually emitted — a non-trellis app stays byte-identical (no file).
+# Sigma silently STRIPS an unsupported trellis on readback, so verify-trellis-
+# survived.rb re-reads the posted spec and asserts each of these survived.
+_TRELLIS_RECORDS = []
 _CAT_DIR = _cc.default_catalog_dir(__file__)
 VIZ_CAT  = _cc.load(_CAT_DIR, "viz-kind")       # Qlik vizType     -> Sigma element kind
 AGG_CAT  = _cc.load(_CAT_DIR, "aggregation")    # Qlik agg fn      -> Sigma aggregate fn
@@ -346,6 +354,112 @@ def qlik_refmarks(c):
                 rm["label"] = {"visibility": "shown", "text": r["label"]}
             out.append(rm)
     return out
+
+# ---- native trellis (small multiples) — detection + emission ---------------
+# Qlik has TWO trellis shapes, both of which faithfully become Sigma's NATIVE
+# element `trellis` (ONE viz element + rowsBy/columnsBy facet — NOT N cloned
+# charts):
+#   (a) CHART-LEVEL trellis — a chart (bar/line/area/combo/…) whose properties
+#       carry a trellis dimension that splits the one chart into a panel grid.
+#       qlik-discover records this as chart["trellis"].
+#   (b) TRELLIS-CONTAINER object — a native "trellis container"/"grid container"
+#       whose single child chart is repeated per member of a facet dimension.
+#       Recorded as vizType "trellis-container"/"sn-trellis-container" with the
+#       base chart in children[] and the facet in ["trellis"].
+# The discovered signal is converter-neutral:
+#   chart["trellis"] = {"field": <qlik dim def / libId>, "orientation":
+#                       "rows"|"cols"|"grid", "secondary": <optional 2nd dim>,
+#                       "label": <optional axis label>}
+# EMISSION is delegated to the shared TrellisEmit (supported-kind gate + the
+# pie->donut / kpi->siblings / pivot->shelves / table->flat fallbacks) — no
+# per-tool trellis logic. When a chart carries NO trellis signal every function
+# here is a no-op, so a non-trellis app builds BYTE-IDENTICAL to before.
+_TRELLIS_KINDS = ("trellis-container", "sn-trellis-container")
+
+def trellis_child_ids(charts):
+    """Object ids that are the BASE child of some trellis-container — they are
+    emitted THROUGH their container (one faceted element), never standalone."""
+    return {ch for ct in charts.values() if ct.get("vizType") in _TRELLIS_KINDS
+            for ch in (ct.get("children") or [])}
+
+def trellis_base(c, charts, warnings):
+    """A Qlik trellis-CONTAINER -> its base child chart carrying the container's
+    facet signal, so the normal build path emits ONE faceted element. A plain
+    chart (container or not) is returned unchanged. Returns None to skip."""
+    if c.get("vizType") not in _TRELLIS_KINDS:
+        return c
+    base = next((charts.get(k) for k in (c.get("children") or []) if charts.get(k)), None)
+    if base is None:
+        warnings.append(f"trellis-container '{c.get('title') or c['id']}': no base child chart "
+                        "discovered — skipped (nothing to facet)")
+        return None
+    b = json.loads(json.dumps(base))        # don't mutate the shared charts record
+    b["id"] = c["id"]                        # keep the container's layout slot + element id
+    if c.get("title"): b["title"] = c["title"]
+    b["trellis"] = c.get("trellis") or base.get("trellis")   # container facet wins
+    return b
+
+def emit_trellis(el, c, resolve, warnings):
+    """Attach Sigma's native `trellis` to a built element from the Qlik trellis
+    signal, via the shared TrellisEmit. No-op (byte-identical) when the chart has
+    no signal. Records the emit for the readback survival guard."""
+    sig = c.get("trellis")
+    if not isinstance(sig, dict) or not sig:
+        return
+    field = sig.get("field")
+    dn = resolve(field) if field else None
+    if not dn:
+        warnings.append(f"trellis on '{el.get('name')}': facet field {field!r} not on the denorm "
+                        "element — chart left un-trellised (flat), not faceted on a wrong column")
+        return
+    kind = el.get("kind")
+    # Scatter's Qlik shape sources a HIDDEN grouped table (not the master), so a
+    # bare [Master/<facet>] facet column would dangle — defer it loudly.
+    if el.get("source", {}).get("elementId") != MASTER_ID:
+        warnings.append(f"trellis on '{el.get('name')}' ({kind}): base element sources a derived "
+                        "table (e.g. scatter's grouped source) — native trellis DEFERRED (facet the "
+                        "grouped source by hand); chart left flat")
+        return
+    # Supported-kind gate lives ONCE in TrellisEmit. Unsupported kinds strip the
+    # key silently on readback → take the documented fallback (leave flat).
+    if not _te.trellises(kind):
+        follow = ("N sibling KPIs is the correct faceted shape" if kind == "kpi-chart"
+                  else "pivot uses its own rowsBy/columnsBy shelves" if kind == "pivot-table"
+                  else "no native table trellis")
+        warnings.append(f"trellis on '{el.get('name')}': base kind '{kind}' does NOT support a native "
+                        f"trellis (Sigma strips the key on readback) — left FLAT ({follow})")
+        return
+    if kind == "pie-chart":
+        warnings.append(f"trellis on '{el.get('name')}': base is a PIE — converted to DONUT "
+                        "(pie silently strips the trellis key on readback; donut supports it) before faceting")
+    # Add the facet dimension as a column (reuse an existing column of the same
+    # display name if the chart already plots it).
+    el.setdefault("columns", [])
+    facet_col = next((col for col in el["columns"]
+                      if str(col.get("name", "")).strip().casefold() == str(dn).strip().casefold()), None)
+    if facet_col is None:
+        facet_col = {"id": nid("tr"), "name": sig.get("label") or dn, "formula": f"[{MASTER}/{dn}]"}
+        el["columns"].append(facet_col)
+    ids = facet_col["id"]
+    orientation = sig.get("orientation") or "cols"
+    # A secondary facet field -> a true 2-D grid (rowsBy × columnsBy).
+    sec = sig.get("secondary")
+    if sec:
+        sdn = resolve(sec)
+        if sdn:
+            scol = {"id": nid("tr"), "name": sdn, "formula": f"[{MASTER}/{sdn}]"}
+            el["columns"].append(scol)
+            ids = [facet_col["id"], scol["id"]]
+            orientation = "grid"
+        else:
+            warnings.append(f"trellis on '{el.get('name')}': secondary facet {sec!r} not on the "
+                            "denorm element — emitted a single-axis trellis (no 2-D grid)")
+    _te.apply(el, ids, orientation)          # sets el['trellis'] (or flips pie->donut)
+    axis_key = next(iter(el["trellis"].keys()))
+    _TRELLIS_RECORDS.append({"element_id": el["id"], "kind": el["kind"], "name": el.get("name"),
+                             "axis": axis_key, "columnId": facet_col["id"]})
+    warnings.append(f"native trellis: '{el.get('name')}' -> ONE {el['kind']} element with "
+                    f"trellis.{axis_key} (orientation={orientation}, facet column {facet_col['id']})")
 
 def build_element(c, resolve, warnings):
     """One Qlik chart object -> one Sigma element (or None + warning)."""
@@ -737,6 +851,9 @@ def main():
                                             scope, unbound, seen_fields)
                               for lb in lbs) if el]
 
+    # Base children owned by a trellis-container are emitted THROUGH the
+    # container (one faceted element), never standalone.
+    tr_children = trellis_child_ids(charts)
     if sheets:
         for si, sheet in enumerate(sheets):
             pid = f"pg-{si + 1}"
@@ -744,6 +861,7 @@ def main():
             for cell in sorted(sheet["cells"], key=lambda c: (c["row"], c["col"])):
                 c = charts.get(cell["objectId"])
                 if c is None: continue
+                if cell["objectId"] in tr_children: continue   # emitted via its container
                 if c["vizType"] in ("filterpane", "listbox"):
                     n_signals += 1
                     ctls = controls_for(c)
@@ -752,10 +870,15 @@ def main():
                         placed.append((control_subcell(cell, i, len(ctls)), ctl))
                     n_controls += len(ctls)
                     continue
+                # Resolve a trellis-container to its base child chart (carrying
+                # the container's facet); a plain chart passes through unchanged.
+                c = trellis_base(c, charts, warnings)
+                if c is None: continue
                 if c["vizType"] not in CHARTY and not (c.get("measures") or c.get("dimensions")):
                     warnings.append(f"skip '{cell['objectId']}' ({c['vizType']}): not a chart"); continue
                 el = build_element(c, resolve, warnings)
                 if el is None: continue
+                emit_trellis(el, c, resolve, warnings)   # native trellis (no-op if no signal)
                 elems.append(el); placed.append((cell, el))
                 emap.append({"elementId": el["id"], "pageId": pid, "kind": el["kind"],
                              "name": el["name"], "valueColumnName": el["columns"][0].get("name"),
@@ -775,15 +898,19 @@ def main():
         child_ids = {ch for c in charts.values() if c["vizType"] == "filterpane"
                      for ch in (c.get("children") or [])}
         for c in charts.values():
+            if c["id"] in tr_children: continue   # base child emitted via its container
             if c["vizType"] == "filterpane" or (c["vizType"] == "listbox" and c["id"] not in child_ids):
                 n_signals += 1
                 ctls = controls_for(c)
                 elems.extend(ctls)
                 n_controls += len(ctls)
                 continue
+            c = trellis_base(c, charts, warnings)   # container -> its base child chart
+            if c is None: continue
             if not (c.get("measures")): continue
             el = build_element(c, resolve, warnings)
             if el is None: continue
+            emit_trellis(el, c, resolve, warnings)   # native trellis (no-op if no signal)
             elems.append(el)
             emap.append({"elementId": el["id"], "pageId": pid, "kind": el["kind"],
                          "name": el["name"], "valueColumnName": el["columns"][0].get("name"),
@@ -807,6 +934,18 @@ def main():
     json.dump(spec, open(a.spec_out, "w"), indent=2)
     open(a.layout_out, "w").write('<?xml version="1.0" encoding="utf-8"?>\n' + "\n".join(layout_pages))
     json.dump(emap, open(a.element_map, "w"), indent=2)
+    # native-trellis-emitted.json — round-trip guard sidecar. Written ONLY when a
+    # native trellis was actually emitted (a non-trellis app stays byte-identical:
+    # no file). Sigma silently STRIPS an unsupported trellis on readback, and this
+    # build path does NOT re-read the posted spec, so the guard is external:
+    # verify-trellis-survived.rb re-reads GET /v2/workbooks/{id}/spec and asserts
+    # each element below still carries its `trellis.<axis>` key.
+    if _TRELLIS_RECORDS:
+        nt_path = os.path.join(os.path.dirname(os.path.abspath(a.spec_out)), "native-trellis-emitted.json")
+        json.dump({"version": 1, "source": "qlik", "elements": _TRELLIS_RECORDS},
+                  open(nt_path, "w"), indent=2)
+        print(f"wrote {nt_path} ({len(_TRELLIS_RECORDS)} native trellis element(s) — "
+              "verify survives readback with verify-trellis-survived.rb)", file=sys.stderr)
     # control-scope.json — the intended-scope contract sidecar (schema: the
     # CONTRACT block in scripts/lib/control_lint.rb + refs/control-parity.md).
     # Qlik selections are GLOBAL (associative model), so every wired control
@@ -834,6 +973,7 @@ def main():
     result = {"workbookId": None, "pages": len(pages), "elements": n_elem,
               "kpis": sum(1 for e in emap if e["kind"] == "kpi-chart"),
               "controls": n_controls, "controlScope": scope_path,
+              "nativeTrellis": len(_TRELLIS_RECORDS),
               "warnings": warnings, "layoutFile": a.layout_out, "elementMap": a.element_map}
     if a.dry_run:
         print(f"DRY RUN: spec -> {a.spec_out} ({len(pages)} pages, {n_elem} elements)", file=sys.stderr)

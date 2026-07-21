@@ -144,6 +144,80 @@ def _reflines(refline):
     return {"x": conv(refline.get("refLinesX")), "y": conv(refline.get("refLines"))}
 
 
+def _trellis_field(d):
+    """Facet field from a Qlik trellis dimension def (string / qDef / libId)."""
+    if isinstance(d, str):
+        return d
+    qd = (d or {}).get("qDef") or {}
+    return (qd.get("qFieldDefs") or [None])[0] or (d or {}).get("qLibraryId") or (d or {}).get("field")
+
+
+def _trellis_sig(props):
+    """Best-effort: extract a NATIVE Qlik CHART-LEVEL trellis signal from an
+    object's engine properties -> the converter-neutral
+    {field, orientation, secondary?, label?}, or None when the object carries no
+    trellis. The build path (build-sigma-workbook.py: emit_trellis) turns this
+    into Sigma's native element `trellis` (rowsBy/columnsBy) via the shared
+    TrellisEmit. Keys checked are `trellis` / `trellising` (the chart's
+    Appearance>Trellis block). An enabled block names the facet dimension
+    (qFieldDefs / qLibraryId) and, optionally, a 2nd dim + a rows/columns config
+    -> a 2-D grid. Never raises; returns None on anything unrecognized so a
+    non-trellis app's charts.json is byte-identical."""
+    try:
+        t = props.get("trellis") or props.get("trellising")
+        if not isinstance(t, dict) or not t:
+            return None
+        if t.get("enabled") is False or t.get("show") is False:
+            return None
+        dims = t.get("dimensions") or t.get("qDimensions") or []
+        field = _trellis_field(dims[0]) if dims else (t.get("field") or t.get("dimensionField"))
+        if not field:
+            return None
+        sig = {"field": field}
+        if t.get("orientation") in ("rows", "cols", "grid"):
+            sig["orientation"] = t["orientation"]
+        elif t.get("rows") and not t.get("columns"):
+            sig["orientation"] = "rows"   # a fixed single column of stacked panels
+        else:
+            sig["orientation"] = "cols"   # Qlik wraps one trellis dim into a column grid
+        sec = _trellis_field(dims[1]) if len(dims) > 1 else t.get("secondaryField")
+        if sec:
+            sig["secondary"] = sec
+            sig["orientation"] = "grid"
+        if t.get("label"):
+            sig["label"] = t["label"]
+        return sig
+    except Exception:
+        return None
+
+
+def _trellis_container(props, hc):
+    """Best-effort: a native Qlik TRELLIS-CONTAINER ("trellis container"/"grid
+    container", qType sn-trellis-container) -> (child_ids, signal) so the build
+    path emits ONE faceted element from the container's base child chart. The
+    child chart id(s) come from `children` / `cells` / `qChildList`; the facet
+    dimension comes from the container's own first hypercube dimension (or a
+    `trellis`/`dimensions` block). Returns ([], None) when unrecognized."""
+    try:
+        kids = []
+        for k in (props.get("children") or props.get("cells") or []):
+            cid = k.get("name") if isinstance(k, dict) else k
+            if cid:
+                kids.append(cid)
+        if not kids:
+            cl = (props.get("qChildList") or {}).get("qItems") or []
+            kids = [it.get("qInfo", {}).get("qId") for it in cl if it.get("qInfo", {}).get("qId")]
+        sig = _trellis_sig(props)
+        if sig is None:
+            qdims = hc.get("qDimensions") or []
+            field = _trellis_field(qdims[0].get("qDef")) if qdims else None
+            if field:
+                sig = {"field": field, "orientation": "cols"}
+        return kids, sig
+    except Exception:
+        return [], None
+
+
 def awrite(path, obj):
     """Atomic JSON write — orchestrators poll for these files from a
     concurrent lane and must never observe a half-written artifact."""
@@ -584,6 +658,22 @@ def main():
         elif qtype == "filterpane":
             rec["children"] = fp_children.get(oid, [])
             rec["state"] = props.get("qStateName")
+        elif qtype in ("sn-trellis-container", "trellis-container", "grid-container"):
+            # Native trellis container: normalize to vizType "trellis-container"
+            # (the build path's emit_trellis faceting shape) + carry the base
+            # child chart id(s) and the facet signal.
+            kids, tsig = _trellis_container(props, hc)
+            rec["vizType"] = "trellis-container"
+            rec["children"] = kids
+            if tsig:
+                rec["trellis"] = tsig
+        else:
+            # Chart-level native trellis (Appearance>Trellis): faceting one chart
+            # into a panel grid. Only added when present -> byte-identical charts.json
+            # for the (overwhelmingly common) non-trellis object.
+            tsig = _trellis_sig(props)
+            if tsig:
+                rec["trellis"] = tsig
         charts.append(rec)
     # Pane children that `app object ls` did NOT list as standalone objects:
     # synthesize their listbox records from the evaluated layouts so the
