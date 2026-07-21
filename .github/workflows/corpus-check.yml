@@ -218,6 +218,7 @@ jobs:
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-layout-dedup.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-put-layout-prune.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-multi-datasource-gap.rb
+            plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-scout-ledger-integrity.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-wb-refs-resolve.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-lod-sql-quoting.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-lod-audit.rb
