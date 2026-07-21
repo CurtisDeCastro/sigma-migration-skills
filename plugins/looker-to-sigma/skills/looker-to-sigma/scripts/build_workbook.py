@@ -42,6 +42,7 @@ DEFAULT_TIMEFRAMES = ["raw", "time", "date", "week", "month", "quarter", "year"]
 # the beads-sigma-93ps contract: catalog = data, code = thin resolver/predicates.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 import coverage_catalog as _cc  # noqa: E402
+import trellis_emit as _te      # noqa: E402  shared native-trellis emitter (supported-kind gate + fallbacks)
 _CAT_DIR = _cc.default_catalog_dir(__file__)
 VIZ_CAT  = _cc.load(_CAT_DIR, "viz-kind")        # Looker vis type   -> Sigma element kind
 FMT_CAT  = _cc.load(_CAT_DIR, "number-format")   # value_format_name -> Sigma number format (D3)
@@ -361,6 +362,12 @@ def main():
                    + glob.glob(os.path.join(a.views, "..", "*.model.lkml")))
     aliases = parse_join_aliases(model_files)
     warnings = []
+    # Native-trellis round-trip sidecar records (element_id/kind/name/axis/columnId).
+    # Populated by emit_native_trellis; written to native-trellis-emitted.json ONLY
+    # when a trellis was actually emitted — a dashboard with no small-multiples tile
+    # stays byte-identical (no file). Sigma silently STRIPS an unsupported trellis on
+    # readback, so verify-trellis-survived.rb re-reads the posted spec and asserts each.
+    trellis_records = []
     measures, dims, view_pk, formats, yesno_dims, dim_groups, dim_labels = build_field_index(
         sorted(glob.glob(os.path.join(a.views, "*.view.lkml"))), aliases, warnings)
 
@@ -801,6 +808,52 @@ def main():
                             "auto-flowed to a 2-across grid")
         return L
 
+    def emit_native_trellis(base, el, ex, ds, ms):
+        """Attach Sigma's NATIVE `trellis` (small multiples) to a built element
+        from the Looker donut-multiples signal, via the shared TrellisEmit. No-op
+        (byte-identical) when the tile carries no `trellis` signal. Records the
+        emit for the readback-survival guard.
+
+        The donut base already plots the SLICE category (pivots[0] if pivots else
+        ds[0]) + the measure; the trellis FACET is the OTHER dimension that splits
+        the panels — ds[0] when a pivot supplies the slices, else the 2nd dimension.
+        The supported-kind gate + pie→donut fallback live ONCE in TrellisEmit."""
+        sig = el.get("trellis")
+        if not isinstance(sig, dict) or not sig:
+            return
+        kind = base.get("kind")
+        # Supported-kind gate lives ONCE in TrellisEmit. Unsupported kinds strip the
+        # key silently on readback → leave the element flat (documented fallback).
+        if not _te.trellises(kind):
+            warnings.append(f"tile '{el['name']}': donut_multiples base kind '{kind}' does not "
+                            "support a native trellis (Sigma strips the key on readback) — left FLAT")
+            return
+        # Facet = the panel-splitting dimension, distinct from the slice category.
+        pivots = el.get("pivots") or []
+        facet = (ds[0] if ds else None) if pivots else (ds[1] if len(ds) > 1 else None)
+        if not facet:
+            warnings.append(f"tile '{el['name']}': donut_multiples has no distinct facet "
+                            "dimension (needs a row dim + a pivot or 2nd dim) — emitted a single "
+                            "donut sliced by its one category, no trellis")
+            return
+        # Add the facet dimension as a column (reuse an existing column of the same
+        # display name if the donut already plots it).
+        fname = col_display(facet, ex)
+        base.setdefault("columns", [])
+        facet_col = next((c for c in base["columns"]
+                          if str(c.get("name", "")).strip().casefold() == str(fname).strip().casefold()), None)
+        if facet_col is None:
+            facet_col = {"id": sid("tr"), "formula": formula_for(facet, ex), "name": fname}
+            base["columns"].append(facet_col)
+        orientation = sig.get("orientation") or "cols"
+        _te.apply(base, facet_col["id"], orientation)   # sets base['trellis'] (or flips pie→donut)
+        axis_key = next(iter(base["trellis"].keys()))
+        trellis_records.append({"element_id": base["id"], "kind": base["kind"], "name": base.get("name"),
+                                "axis": axis_key, "columnId": facet_col["id"]})
+        warnings.append(f"native trellis: '{base.get('name')}' → ONE {base['kind']} element with "
+                        f"trellis.{axis_key} (donut small-multiples faceted by '{leaf(facet)}', "
+                        f"orientation={orientation})")
+
     def attach_merge(el, base, kind, ex):
         """Auto-join a Looker merged-results tile's SECONDARY sources onto the
         primary tile via the validated Sigma blend pattern: pre-group each
@@ -1122,8 +1175,6 @@ def main():
                     cols.append(dup)
                     base["color"] = {"by": "scale", "column": dupid,
                                      "scheme": looker_color_scheme(el.get("color"))}
-            if el["tileType"] == "looker_donut_multiples":
-                warnings.append(f"tile '{el['name']}': donut_multiples -> single donut-chart (Looker shows N donuts)")
             rm = looker_refmarks(el)
             if rm: base["refMarks"] = rm
         elif kind in ("pie-chart", "donut-chart"):
@@ -1146,9 +1197,8 @@ def main():
             if catf: field2cid[catf] = catid
             if valf: field2cid[valf] = valid
             if valf: _warn_count(valf, el)
-            if el["tileType"] == "looker_donut_multiples":
-                warnings.append(f"tile '{el['name']}': donut_multiples → single donut sliced by "
-                                f"'{leaf(catf) if catf else 'category'}'; the per-multiple dimension is dropped — review in Sigma")
+            # looker_donut_multiples → a native donut trellis is emitted below
+            # (emit_native_trellis), faceted by the panel-splitting dimension.
         elif kind == "table":
             cols, gids, cids = [], [], []
             for f in el["fields"] + (el.get("pivots") or []):
@@ -1349,6 +1399,9 @@ def main():
                 base["groupings"][0].setdefault("calculations", []).append(tcid)
             elif kind == "pivot-table":
                 base.setdefault("values", []).append(tcid)
+        # Native small multiples: a looker_donut_multiples tile → ONE donut element
+        # with Sigma's `trellis` facet (no-op / byte-identical when no signal).
+        emit_native_trellis(base, el, ex, ds, ms)
         elements.append(base)
         el.setdefault("_emitted", []).append(base)   # control-targeting (listen:)
 
@@ -1638,6 +1691,18 @@ def main():
     spec["pages"][0]["elements"] = master_elements + scope_elements + scatter_srcs + merge_srcs
 
     open(a.out, "w").write(json.dumps(spec, indent=2))
+    # native-trellis-emitted.json — round-trip guard sidecar. Written ONLY when a
+    # native trellis was actually emitted (a dashboard with no small-multiples tile
+    # stays byte-identical: no file). Sigma silently STRIPS an unsupported trellis on
+    # readback and renders flat with no error, so after the live POST the shared
+    # verify-trellis-survived.rb re-reads GET /v2/workbooks/{id}/spec and asserts
+    # each element below still carries its `trellis.<axis>` key.
+    if trellis_records:
+        nt_path = os.path.join(os.path.dirname(os.path.abspath(a.out)), "native-trellis-emitted.json")
+        json.dump({"version": 1, "source": "looker", "elements": trellis_records},
+                  open(nt_path, "w"), indent=2)
+        print(f"wrote {nt_path} ({len(trellis_records)} native trellis element(s) — "
+              "verify survives readback with verify-trellis-survived.rb)")
     # intended-scope contract for the control-coverage lint — MUST be the
     # control_lint.rb CONTRACT shape (a Hash; a bare array is silently ignored
     # by the lint and every by-design exclusion would flag PARTIAL):

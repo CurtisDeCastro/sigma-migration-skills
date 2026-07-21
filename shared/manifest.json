@@ -428,7 +428,8 @@
   {
    "canonical": "shared/lib/trellis_emit.py",
    "targets": [
-    "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/lib/trellis_emit.py"
+    "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/lib/trellis_emit.py",
+    "plugins/looker-to-sigma/skills/looker-to-sigma/scripts/lib/trellis_emit.py"
    ]
   },
   {
@@ -442,13 +443,15 @@
    "canonical": "shared/scripts/verify-trellis-survived.rb",
    "targets": [
     "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/verify-trellis-survived.rb",
-    "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/verify-trellis-survived.rb"
+    "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/verify-trellis-survived.rb",
+    "plugins/looker-to-sigma/skills/looker-to-sigma/scripts/verify-trellis-survived.rb"
    ]
   },
   {
    "canonical": "shared/scripts/test_trellis_emit.py",
    "targets": [
-    "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/test_trellis_emit.py"
+    "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/test_trellis_emit.py",
+    "plugins/looker-to-sigma/skills/looker-to-sigma/scripts/test_trellis_emit.py"
    ]
   },
   {
