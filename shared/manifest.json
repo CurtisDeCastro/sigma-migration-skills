@@ -750,7 +750,16 @@
    "canonical": "shared/lib/scout_gate.py",
    "targets": [
     "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/lib/scout_gate.py",
-    "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/lib/scout_gate.py"
+    "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/lib/scout_gate.py",
+    "plugins/looker-to-sigma/skills/looker-to-sigma/scripts/lib/scout_gate.py",
+    "plugins/microstrategy-to-sigma/skills/microstrategy-to-sigma/scripts/lib/scout_gate.py",
+    "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/lib/scout_gate.py"
+   ]
+  },
+  {
+   "canonical": "shared/lib/scout_gate.mjs",
+   "targets": [
+    "plugins/cognos-to-sigma/skills/cognos-to-sigma/scripts/lib/scout_gate.mjs"
    ]
   }
  ]

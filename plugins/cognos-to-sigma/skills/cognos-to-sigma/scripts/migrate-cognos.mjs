@@ -412,6 +412,10 @@ if (securityDetected.length) {
 // which records to <WORK>/scout-ledger.jsonl). --yes does NOT skip this gate; it
 // only accepts gaps the scout already tried (validated locally, or escalated).
 // An unscouted flagged expression always STOPS, before any Sigma object exists.
+// A 'validated' row is honored only when it carries signed live-probe evidence
+// (ScoutGate integrity, issue #458): a hand-written or forged 'validated' line is
+// treated as unvalidated (→ the escalated bucket) by scoutGate.classify, so the
+// gate still blocks / requires genuine scouting.
 // (skipped under --dry-run: it ships nothing to Sigma and the scout needs a live
 // connection to validate — the real build below is what the gate must guard.)
 const exprGaps = opt['dry-run'] ? [] : questions.filter((q) => q.id === 'expression_flagged');
