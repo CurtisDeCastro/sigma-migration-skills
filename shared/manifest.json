@@ -425,9 +425,21 @@
    ]
   },
   {
+   "canonical": "shared/lib/trellis_emit.py",
+   "targets": [
+    "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/lib/trellis_emit.py"
+   ]
+  },
+  {
    "canonical": "shared/scripts/test-trellis-emit.rb",
    "targets": [
     "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-trellis-emit.rb"
+   ]
+  },
+  {
+   "canonical": "shared/scripts/test_trellis_emit.py",
+   "targets": [
+    "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/test_trellis_emit.py"
    ]
   },
   {
