@@ -114,6 +114,70 @@ check(g[1, 0] == '[PLANLINE]', 'bare ref re-cased on the secondary element too',
 check(rep3[:ambiguous].any? { |m| m.include?('multiple elements') },
       'cross-element bare ref is reported as ambiguous', fails)
 
+# ── IDENTITY-ALIAS same-element bare-ref recase (issue #457) ─────────────────
+# A calc that is an identity alias of its own raw column (`[Foo (copy)] = [Foo]`)
+# surfaces the raw column under warehouse-readback casing (UPPERCASE "TOTALREV")
+# AND the alias under Sigma's auto-generated display label — with the "(copy)"
+# decoration stripped, that label collapses onto the raw column name in a different
+# casing ("Totalrev"), so the two collide in normalization on THIS element. The
+# alias's bare ref `[Totalrev]` then exact-matches the mixed-case auto-label and
+# resolves to the alias ITSELF — a circular self-reference / type=error — and
+# pre-#457 the exact-match short-circuit left it there. It must now recase to the
+# raw readback casing (the mono-case candidate), never the mixed-case auto-label.
+ia_reg = {
+  'Rev Fact' => ['TOTALREV', 'Totalrev', 'USERID'] # raw UPPER + identity-alias title-case collide on norm(totalrev)
+}
+ia_els = [
+  { 'name' => 'Rev Fact', 'columns' => [
+    { 'id' => 'ia1', 'name' => 'Totalrev (copy)', 'formula' => '[Totalrev]' },        # bare identity-alias ref
+    { 'id' => 'ia2', 'name' => 'Rev Share', 'formula' => 'Sum([Totalrev]) / 100' }    # same collision inside a metric
+  ] }
+]
+rep4 = RefLabelRepair.repair!(ia_els, ia_reg, qualified: false, same_element_recase: true)
+h = ->(j) { ia_els[0]['columns'][j]['formula'] }
+check(h[0] == '[TOTALREV]',
+      "identity-alias bare ref recased to raw readback casing, not the title-case auto-label (got #{h[0]})", fails)
+check(h[1] == 'Sum([TOTALREV]) / 100',
+      'identity-alias collision recased inside a metric too', fails)
+check(rep4[:fixed] == 2, "both identity-alias refs counted as fixed (got #{rep4[:fixed]})", fails)
+check(rep4[:ambiguous].empty?, "identity-alias recase is not left reported-ambiguous (got #{rep4[:ambiguous].inspect})", fails)
+# Idempotent: re-running on the already-recased spec recases nothing and leaves the
+# now-mono-case ref untouched (the raw candidate matches its own casing → no churn).
+rep4b = RefLabelRepair.repair!(ia_els, ia_reg, qualified: false, same_element_recase: true)
+check(h[0] == '[TOTALREV]' && rep4b[:fixed].zero?,
+      "identity-alias recase is idempotent — second pass is a no-op (got #{h[0]}, fixed=#{rep4b[:fixed]})", fails)
+
+# GUARD A — a GENUINE same-element ambiguity (two DISTINCT columns whose names
+# collapse to one normalization but are NOT pure case variants — they differ by
+# punctuation) is still refused: "Ship Mode" vs "SHIP_MODE" must never be guessed.
+gd_reg = { 'Dim El' => ['Ship Mode', 'SHIP_MODE'] }
+gd_els = [{ 'name' => 'Dim El', 'columns' => [{ 'id' => 'g1', 'formula' => '[ship mode]' }] }]
+rep5 = RefLabelRepair.repair!(gd_els, gd_reg, qualified: false, same_element_recase: true)
+check(gd_els[0]['columns'][0]['formula'] == '[ship mode]',
+      'punct-differing distinct columns are NOT recased (real ambiguity preserved)', fails)
+check(rep5[:ambiguous].any? { |m| m.include?('normalizes ambiguously') },
+      'genuine same-element ambiguity is still reported', fails)
+
+# GUARD B — pure-case collision but NO single mono-case candidate (both a raw-ish
+# UPPER and a lower variant exist): we cannot tell which is authoritative, so refuse.
+mc_reg = { 'Two El' => %w[FOO foo] }
+mc_els = [{ 'name' => 'Two El', 'columns' => [{ 'id' => 'm1', 'formula' => '[Foo]' }] }]
+rep6 = RefLabelRepair.repair!(mc_els, mc_reg, qualified: false, same_element_recase: true)
+check(mc_els[0]['columns'][0]['formula'] == '[Foo]',
+      'pure-case collision with no unique mono-case candidate is left untouched', fails)
+
+# GUARD C — a same-element casing collision that ALSO exists cross-element stays a
+# cross-element refusal (#407 multi-datasource-collapse guard wins over the #457
+# recase): never silently collapse a should-be-Lookup ref into a same-element one.
+xe_reg = {
+  'Fact A' => ['SHARED', 'Shared'],  # pure-case collision on this element …
+  'Fact B' => ['SHARED']             # … but the column also lives on another element
+}
+xe_els = [{ 'name' => 'Fact A', 'columns' => [{ 'id' => 'x1', 'formula' => '[Shared]' }] }]
+rep7 = RefLabelRepair.repair!(xe_els, xe_reg, qualified: false, same_element_recase: true)
+check(xe_els[0]['columns'][0]['formula'] == '[Shared]',
+      'cross-element collision refused even when same-element labels are pure case variants', fails)
+
 if fails.empty?
   puts 'test-ref-label-repair: ALL PASS'
 else
