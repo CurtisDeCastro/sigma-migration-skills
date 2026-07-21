@@ -2639,7 +2639,10 @@ if unhandled_gaps.any?
   # persist.rb records each scouted gap to <WORK>/scout-ledger.jsonl as
   # {gap_id, status: validated|escalated}. --force is NOT a blanket skip: it
   # only accepts gaps the scout actually tried and escalated — never a gap the
-  # scout never ran for.
+  # scout never ran for. A 'validated' row is honored only when it carries
+  # signed live-probe evidence (ScoutGate integrity, issue #458): a hand-written
+  # or forged 'validated' line is treated as unvalidated (→ escalated bucket),
+  # so the gate still blocks / requires real scouting.
   # Gap-id = the gap-report row name; the scout records under --gap-id '<name>'.
   by_name = unhandled_gaps.each_with_object({}) { |g, h| h[g['name'].to_s] = g }
   buckets = ScoutGate.classify(WORK, unhandled_gaps.map { |g| g['name'].to_s })

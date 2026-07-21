@@ -55,6 +55,11 @@
 #       ACCEPTS it (200 on POST/PUT) and SILENTLY DROPS it on readback, so it
 #       never takes effect (Sigma product gap — issues #415/#417). Unlike the
 #       C-class violations, these do NOT 400: they are silently ignored.
+#       DROPPED_BY_API members flagged `conditional` (e.g. `filters`, #456) are
+#       NOT warned here — they persist in the normal case and drop only under a
+#       specific condition, so A1 (a presence check) would false-fire on every
+#       control. Their drop is caught EMPIRICALLY post-POST by the control-field
+#       census (lib/control_field_census.rb).
 #   A2  a date-range control whose startDate/endDate default is a BARE date
 #       ("2026-01-01") or a zoneless timestamp — accepted then silently
 #       dropped (#415); only full ISO-8601 UTC timestamps
@@ -85,10 +90,16 @@ INCLUDE_NULLS_OK = %w[text number number-range date date-range slider range-slid
 # Sigma product gap, NOT a spec-grammar error: the C-class checks above catch
 # shapes that 400, this family is silently ignored. Human-readable contract
 # table: sigma-workbooks reference/specification/controls.md ("Dropped-by-API
-# fields"). Sources: issues #415 (date-range startDate/endDate — see A2) and
-# #417 (list-control editor toggles), both round-trip-confirmed in the field.
+# fields"). Sources: issues #415 (date-range startDate/endDate — see A2), #417
+# (list-control editor toggles), and #456 (list-control filter TARGET binding),
+# all round-trip-confirmed in the field.
 # field => { 'types' => affected controlTypes (informational — the drop is
-# observed regardless of type), 'workaround' => the sanctioned alternative }.
+# observed regardless of type), 'workaround' => the sanctioned alternative,
+# 'conditional' => (optional) true when the field PERSISTS in the normal case
+# and drops only under a specific condition — such members are documented here
+# for the contract but are NOT A1-warned on mere presence (A1 is a presence
+# check; it would false-fire on every control). Their drop is caught
+# empirically post-POST by the control-field census instead. }.
 DROPPED_BY_API = {
   'showNullOption' => {
     'types' => %w[list segmented hierarchy],
@@ -124,6 +135,27 @@ DROPPED_BY_API = {
   'required' => {
     'types' => %w[list text number date date-range],
     'workaround' => 'no spec equivalent — configure in the Sigma UI control editor post-publish (record it in POSTPUBLISH_GUIDE.md)'
+  },
+  # #456: the list-control filter TARGET binding itself (which column(s) the
+  # control filters). UNLIKE the always-drop editor toggles above, `filters`
+  # USUALLY round-trips — it is silently dropped only in a specific condition
+  # (the target column is numeric/datetime, or the target can't resolve), where
+  # the readback keeps the `filters` KEY but strips its columnId/source so the
+  # control filters NOTHING. Hence `conditional: true` — A1 must NOT warn on its
+  # mere presence (every valid control carries filters). Detection is EMPIRICAL:
+  # the post-POST control-field census (lib/control_field_census.rb) flags a
+  # posted target that binds nothing on readback. A raw NUMERIC list target is
+  # already routed through a Text() decode by build-charts-from-signals (see A3
+  # below); a target that still can't bind goes to POSTPUBLISH_GUIDE.md.
+  'filters' => {
+    'types' => %w[list segmented hierarchy],
+    'conditional' => true,
+    'workaround' => 'the target DOES persist when it points at a TABLE element on a STRING column ' \
+                    '(filters:[{source:{kind:table,elementId:<table>}, columnId:<col>}]); a NUMERIC/DATETIME ' \
+                    'target is silently stripped (reads back filters:null) — cast it with a hidden Text([<col>]) ' \
+                    'decode column and bind BOTH the filter target and the value-source to the decode ' \
+                    '(build-charts-from-signals routes integer dims automatically; see A3). If it still ' \
+                    "can't bind, route to POSTPUBLISH_GUIDE.md — never ship a control that filters nothing"
   }
 }.freeze
 # A2: the ONLY startDate/endDate string form observed to round-trip on a
@@ -335,6 +367,10 @@ def lint_warnings(spec, scope: nil)
 
       # A1: fields the Workbook Spec API accepts then silently drops (#415/#417).
       DROPPED_BY_API.each do |field, info|
+        # `conditional` members (e.g. `filters`, #456) persist in the normal case
+        # and drop only under a specific condition — a presence check would
+        # false-fire on every control; the post-POST census catches their drop.
+        next if info['conditional']
         next unless el.key?(field)
         warns << "A1 control '#{name}': `#{field}` (controlType \"#{ct}\") is accepted by POST/PUT (200) " \
                  'but SILENTLY DROPPED on readback — it will never take effect (silently ignored, NOT a 400 ' \

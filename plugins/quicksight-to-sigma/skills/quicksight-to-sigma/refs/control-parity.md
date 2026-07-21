@@ -98,6 +98,20 @@ numeric returns PUT 200 but reads back `filters: null`. Fix: add a hidden
 `Text()` cast column on the target element and point the control at the cast.
 (Found live by gate 7 on the MicroStrategy retrofit, 2026-06-12.)
 
+The general form — a list control's filter **TARGET binding** being silently
+dropped despite a 200 (the `filters` key survives on readback but its
+`columnId`/`source` are stripped, so the control filters nothing) — is
+issue #456, a member of the `DROPPED_BY_API` family (distinct from #415/#417).
+Because the `filters` key survives, a plain posted-vs-readback KEY diff can't
+see it; the post-POST control-field census (where a converter wires one) also
+compares the number of **bound** filter targets and flags any control that
+binds zero targets on readback. The persisting shape is a TABLE-rooted target on
+a STRING column; cast a numeric/datetime target with a hidden `Text([<col>])`
+decode column and bind both the target and the value-source to it; an
+unresolvable target is routed to the post-publish guide — never ship a control
+that filters nothing. Contract row: sigma-workbooks
+`reference/specification/controls.md` → "Dropped-by-API fields".
+
 ## Gotcha: a `[controlId]` formula reference is only "reach" if consumed type-compatibly
 The lint counts a `[<controlId>]` reference in a calc/formula as control **reach**
 — but reach ≠ resolves. A control's value is **typed** (`number`/`slider`→number,

@@ -219,6 +219,7 @@ jobs:
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-put-layout-prune.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-multi-datasource-gap.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-ref-label-repair.rb
+            plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-scout-ledger-integrity.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-wb-refs-resolve.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-lod-sql-quoting.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-lod-audit.rb
@@ -234,6 +235,7 @@ jobs:
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-intake.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-skill-coverage.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-preflight-lint.rb
+            plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-control-field-census.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-number-range-filter-emission.rb
             plugins/tableau-to-sigma/skills/tableau-assessment/scripts/test-predicted-parity.rb
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-dax-restructure.rb
