@@ -963,8 +963,35 @@ console.error('stats:', JSON.stringify(res.stats));
     # Full element catalog (id+name) → one master per explore for multi-explore
     # dashboards (each explore matched to its DM element by normalized name).
     dm_els_path = os.path.join(wd, "dm-elements.json")
+    # Attach each element's REFERENCEABLE DM metrics (name + formula) so build_workbook can
+    # emit a governed [Metrics/<name>] reference instead of re-deriving the aggregation inline
+    # (matched by formula equivalence; falls back to inline when there's no match). Metrics
+    # are inherited through the `source.elementId` chain: a denorm "<X> View" element carries
+    # 0 own metrics but inherits its base fact's — Sigma exposes them and they resolve as
+    # [Metrics/<name>] on the denorm (verified live). So resolve the chain, deduped by name.
+    _by_id = {e["id"]: e for e in els}
+
+    def _avail_metrics(eid, seen=None):
+        seen = seen if seen is not None else set()
+        e = _by_id.get(eid)
+        if not e or eid in seen:
+            return []
+        seen.add(eid)
+        own = [{"name": m.get("name"), "formula": m.get("formula")}
+               for m in (e.get("metrics") or []) if m.get("name") and m.get("formula")]
+        return own + _avail_metrics((e.get("source") or {}).get("elementId"), seen)
+
+    def _dedup(ms):
+        seen, out = set(), []
+        for m in ms:
+            if m["name"] not in seen:
+                seen.add(m["name"])
+                out.append(m)
+        return out
+
     json.dump([{"id": e["id"], "name": e.get("name")
-                or ((e.get("source") or {}).get("path") or [None])[-1]}
+                or ((e.get("source") or {}).get("path") or [None])[-1],
+                "metrics": _dedup(_avail_metrics(e["id"]))}
                for e in els], open(dm_els_path, "w"))
     # Use --flag=value for ids: Sigma-reassigned element ids can start with '-'
     # (e.g. "-BGy34L4Yj"), which argparse otherwise mis-reads as a flag.

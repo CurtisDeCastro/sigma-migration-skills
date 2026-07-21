@@ -448,6 +448,9 @@ def main():
                 # FLAT ('<Field> (<view>)'); the base fact element only reaches
                 # them through a relationship traversal. master_ref keys off this.
                 "denorm": (dme.get("name") or "").endswith(" View"),
+                # DM metrics on this element (name+formula) → build_workbook prefers a
+                # governed [Metrics/<name>] ref over re-deriving the aggregate inline.
+                "metrics": dme.get("metrics") or [],
                 "needed": {},
             }
             if n == 1:
@@ -655,6 +658,28 @@ def main():
                             f"master column — emitted Count() as a degraded fallback; verify parity.")
             return "Count()"
         return f"[{master_of(explore)['name']}/{cd}]"
+    def metric_or_inline(f, explore):
+        """Prefer a governed DM-metric reference `[Metrics/<name>]` over re-deriving the
+        aggregation inline, when the measure's inline aggregate matches a metric defined on
+        the source element. Match is by FORMULA equivalence — strip the master prefix so
+        `Sum([Data/Net Revenue])` equals the metric's `Sum([Net Revenue])` — which is
+        naming-independent and SAFE: any mismatch (ratios, filtered measures, custom/ad-hoc
+        measures, or an absent metric list, e.g. the offline test path) falls back to the
+        inline formula. A metric on the DM element resolves as `[Metrics/<name>]` through the
+        master→DM-element source chain (verified live). Scoped to table/pivot calc columns."""
+        inline = formula_for(f, explore)
+        if not is_measure(f) or not isinstance(inline, str):
+            return inline
+        mst = master_of(explore)
+        mets = mst.get("metrics") or []
+        if not mets:
+            return inline
+        want = re.sub(r"\s+", "", inline.replace(f"[{mst['name']}/", "["))
+        for m in mets:
+            mf, mn = m.get("formula"), m.get("name")
+            if mf and mn and re.sub(r"\s+", "", mf) == want:
+                return f"[Metrics/{mn}]"
+        return inline
     def _warn_count(f, el):
         if measures.get(f, (None,))[0] == "count":
             v = f.split(".")[0]
@@ -1223,7 +1248,7 @@ def main():
             # the humanized field name. Hidden columns get a `hidden` flag, but a hidden
             # DIMENSION still joins the group-by below so the aggregation grain is unchanged.
             for f in ordered_visible_fields(el) + (el.get("pivots") or []):
-                tcol = {"id": sid("c"), "formula": formula_for(f, ex), "name": labels.get(f) or disp(leaf(f))}
+                tcol = {"id": sid("c"), "formula": metric_or_inline(f, ex), "name": labels.get(f) or disp(leaf(f))}
                 if f in hidden:
                     tcol["hidden"] = True
                 if is_measure(f):
@@ -1290,7 +1315,7 @@ def main():
             hidden = set(el.get("hiddenFields") or [])
             labels = el.get("columnLabels") or {}
             for f in ordered_visible_fields(el) + (el.get("pivots") or []):
-                tcol = {"id": sid("c"), "formula": formula_for(f, ex), "name": labels.get(f) or disp(leaf(f))}
+                tcol = {"id": sid("c"), "formula": metric_or_inline(f, ex), "name": labels.get(f) or disp(leaf(f))}
                 if f in hidden:
                     tcol["hidden"] = True
                 if is_measure(f):

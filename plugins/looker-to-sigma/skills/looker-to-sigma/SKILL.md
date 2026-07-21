@@ -697,6 +697,18 @@ dimension: Looker keeps it in the query ("Hide from Visualization" doesn't re-ru
 dropping it would silently change the numbers. Both are additive contract keys — absent/empty →
 columns stay in `fields` order, byte-identical to before. Verified: `tests/test_table_column_order.py`.
 
+**DM metric references (leverage the semantic layer, don't duplicate it).** A table/pivot measure
+column prefers a governed **`[Metrics/<name>]`** reference over re-deriving the aggregation inline,
+when the measure's inline aggregate matches a metric defined on (or inherited by) the source DM
+element. Match is by FORMULA equivalence — strip the master prefix so `Sum([Data/Net Revenue])`
+equals a metric's `Sum([Net Revenue])` — so it's naming-independent and SAFE: ratios, filtered
+measures, custom/ad-hoc measures, and any non-match fall back to the inline formula. migrate-looker
+passes each element's referenceable metrics (name+formula) via `--dm-elements`, resolved through the
+`source.elementId` chain (a denorm "<X> View" element inherits its base fact's metrics — Sigma
+exposes them, and `[Metrics/<name>]` resolves on the denorm through the master→element chain,
+verified live). Absent metrics (the offline test/golden path) → inline, byte-identical. Verified:
+`tests/test_metric_reference.py`.
+
 Newspaper layout math (a single arithmetic transform, no spatial heuristic):
 `gridColumn = (col+1) / (col+1+width)`, `gridRow = (row+1) / (row+1+height)`. `tile` / `static`
 / `grid` modes need a snap heuristic (lossy) — warn + stack; see `refs/looker-dashboard-layout.md` §3.
