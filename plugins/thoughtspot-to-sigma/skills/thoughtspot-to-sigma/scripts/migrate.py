@@ -214,7 +214,10 @@ def error_column_gate(wb, wd, display):
     gap-scout.md → scout-validate.py, which records to <wd>/scout-ledger.jsonl via
     lib/scout_gate.py) before a broken column ships. An UNSCOUTED error column
     always STOPS (exit 11) — there is no --yes/--force escape; once scouted
-    (validated or escalated) the column is accounted for and the build proceeds."""
+    (validated or escalated) the column is accounted for and the build proceeds.
+    A 'validated' row is honored only when it carries signed live-probe evidence
+    (ScoutGate integrity, issue #458): a hand-written or forged 'validated' line is
+    treated as unvalidated (→ the :escalated bucket), so the gate still blocks."""
     cols = json.loads(sigma("GET", f"/v2/workbooks/{wb}/columns"))
     entries = cols.get("entries") or []
     errs = [c for c in entries if (c.get("type") or {}).get("type") == "error"]

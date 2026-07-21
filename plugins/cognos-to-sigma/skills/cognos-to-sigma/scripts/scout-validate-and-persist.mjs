@@ -26,6 +26,7 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { api, extractId, parseArgs } from './lib/sigma-rest.mjs';
 import * as scoutGate from './lib/scout_gate.mjs';
 
@@ -53,9 +54,10 @@ const probe = {
 };
 const post = await api('POST', '/v2/dataModels/spec', probe);
 const id = extractId(post, 'dataModelId');
-let resolved = false, detail = '';
+let resolved = false, detail = '', probeBody = '';
 if (id) {
   const cols = await api('GET', `/v2/dataModels/${id}/columns`);
+  probeBody = cols.text || ''; // raw columns-readback → hashed into the probe evidence
   const list = cols.json?.entries || cols.json?.columns || (Array.isArray(cols.json) ? cols.json : []);
   const cand = (Array.isArray(list) ? list : []).find((c) => (c.name || c.columnName) === 'scout_candidate');
   const type = cand && (cand.type?.type || cand.columnType || cand.type);
@@ -74,8 +76,20 @@ if (resolved) {
   mkdirSync(join(homedir(), '.cognos-to-sigma'), { recursive: true });
   writeFileSync(RULES, JSON.stringify(rules, null, 2));
   // Record to the run-each-time gap-scout ledger (bead beads-sigma-5l5e) so
-  // migrate-cognos.mjs's OPEN-QUESTIONS gate sees this gap as scouted.
-  scoutGate.record(a.workdir, { gapId: a['gap-id'], feature: a.feature, status: 'validated' });
+  // migrate-cognos.mjs's OPEN-QUESTIONS gate sees this gap as scouted. A
+  // 'validated' row MUST carry live-probe evidence (issue #458): the real Sigma
+  // probe data-model id this POST created + a SHA-256 of the live columns-readback
+  // + the probe timestamp. scout_gate signs the row (per-conversion
+  // .scout-ledger.key) so the gate (migrate-cognos.mjs -> scoutGate.classify)
+  // honors ONLY a signed, evidenced 'validated'; a hand-written line cannot forge
+  // this probe.
+  const evidence = {
+    workbook_id: String(id || ''),
+    response_sha256: createHash('sha256').update(probeBody, 'utf8').digest('hex'),
+    phase: 'columns',
+    probed_at: new Date().toISOString(),
+  };
+  scoutGate.record(a.workdir, { gapId: a['gap-id'], feature: a.feature, status: 'validated', evidence });
   console.log(JSON.stringify({ status: 'validated', feature: a.feature, rule_path: RULES, detail }, null, 2));
   process.exit(0);
 }

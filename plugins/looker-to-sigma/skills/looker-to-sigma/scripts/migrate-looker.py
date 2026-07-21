@@ -922,7 +922,10 @@ console.error('stats:', JSON.stringify(res.stats));
     # ATTEMPT a Sigma translation before we accept a broken column. --yes only
     # accepts columns the scout already tried (validated or escalated); an
     # unscouted error column always stops. Recorded to the ledger by
-    # scout-validate.py via lib/scout_gate.py.
+    # scout-validate.py via lib/scout_gate.py. A 'validated' row is honored only
+    # when it carries signed live-probe evidence (ScoutGate integrity, issue #458):
+    # a hand-written or forged 'validated' line is treated as unvalidated (→ the
+    # :escalated bucket), so the gate still blocks / requires genuine scouting.
     if errs:
         gid = lambda c: "errcol:%s/%s" % (c.get("elementId"), c.get("label"))
         gap_ids = list(dict.fromkeys(gid(c) for c in errs))

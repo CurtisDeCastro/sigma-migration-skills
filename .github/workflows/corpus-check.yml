@@ -277,11 +277,30 @@ jobs:
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test_sigma_rest.py
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test_tableau_rest.py
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test_pick_destination.py
+            plugins/looker-to-sigma/skills/looker-to-sigma/scripts/test_scout_ledger_integrity.py
+            plugins/microstrategy-to-sigma/skills/microstrategy-to-sigma/scripts/test_scout_ledger_integrity.py
+            plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/test_scout_ledger_integrity.py
           )
           fail=0
           for t in "${tests[@]}"; do
             echo "::group::$t"
             if python3 "$t"; then echo "OK $t"; else echo "::error file=$t::test failed"; fail=1; fi
+            echo "::endgroup::"
+          done
+          exit $fail
+      - name: Run offline test-*.mjs suites
+        # EXPLICIT allow-list — creds-free, network-free Node tests only.
+        # (ubuntu-24.04 ships Node; the cognos scout gate + writer are Node.)
+        # New offline test-*.mjs → add its path here.
+        run: |
+          set -uo pipefail
+          tests=(
+            plugins/cognos-to-sigma/skills/cognos-to-sigma/scripts/test-scout-ledger-integrity.mjs
+          )
+          fail=0
+          for t in "${tests[@]}"; do
+            echo "::group::$t"
+            if node "$t"; then echo "OK $t"; else echo "::error file=$t::test failed"; fail=1; fi
             echo "::endgroup::"
           done
           exit $fail
