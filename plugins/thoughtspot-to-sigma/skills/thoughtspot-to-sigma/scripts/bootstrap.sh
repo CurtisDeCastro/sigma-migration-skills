@@ -181,6 +181,14 @@ else
   fi
 fi
 
+# pip --user install that survives PEP 668 ("externally-managed-environment",
+# e.g. Homebrew/Debian Python): try plain --user first, then retry allowing the
+# user-site override. Never sudos, never touches system dirs.
+pip_user_install() {
+  $PY_RUN -m pip install --user --quiet "$@" >/dev/null 2>&1 && return 0
+  $PY_RUN -m pip install --user --break-system-packages --quiet "$@" >/dev/null 2>&1
+}
+
 # ── python deps (doctor's render/similarity checks: Pillow + numpy + requests) ─
 if [ -n "$PY_RUN" ] || py_real py -3 || py_real python3 || py_real python; then
   if $PY_RUN -c "import PIL, numpy, requests" >/dev/null 2>&1; then
@@ -189,13 +197,31 @@ if [ -n "$PY_RUN" ] || py_real py -3 || py_real python3 || py_real python; then
     plan "python deps missing (Pillow/numpy/requests — renders + the gate-14 visual floor)" \
          "$PY_RUN -m pip install --user pillow numpy requests (user site-packages; no admin)"
     if [ "$MODE" = full ]; then
-      if $PY_RUN -m pip install --user --quiet pillow numpy requests >/dev/null 2>&1 \
+      if pip_user_install pillow numpy requests \
          && $PY_RUN -c "import PIL, numpy, requests" >/dev/null 2>&1; then
         act "install: pip --user pillow numpy requests"
         okay "python deps installed (pip --user)"
       else
         INSTALL_FAILED=1
-        note "pip --user install of pillow/numpy/requests FAILED (offline? proxy?) — re-run bootstrap when the network allows"
+        note "pip --user install of pillow/numpy/requests FAILED — if the error was 'externally-managed-environment' (PEP 668) the retry with --break-system-packages also failed; otherwise check network/proxy. Re-run bootstrap when resolved"
+      fi
+    fi
+  fi
+  # truststore (best effort): makes Python's TLS use the OS trust store so
+  # OpenSSL 3.x verifies Looker/Tableau certs that curl/Ruby already accept.
+  # Not required — looker_api/tableau_rest fall back to certifi/default — so a
+  # failure here only warns.
+  if $PY_RUN -c "import truststore" >/dev/null 2>&1; then
+    okay "python truststore (OS trust store for TLS)"
+  else
+    plan "python truststore missing (OpenSSL 3.x TLS vs Looker/Tableau Cloud)" \
+         "$PY_RUN -m pip install --user truststore"
+    if [ "$MODE" = full ]; then
+      if pip_user_install truststore && $PY_RUN -c "import truststore" >/dev/null 2>&1; then
+        act "install: pip --user truststore"
+        okay "python truststore installed"
+      else
+        note "pip --user install of truststore FAILED — TLS falls back to certifi/default; install manually if a Looker/Tableau TLS verification error appears"
       fi
     fi
   fi

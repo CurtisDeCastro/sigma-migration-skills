@@ -35,6 +35,24 @@ import urllib.request
 NEUTRAL_ENV = os.path.expanduser("~/.sigma-migration/env")
 
 
+def _ssl_ctx():
+    """Verified SSL context that tolerates OpenSSL 3.x strictness: prefer the OS
+    trust store via truststore (matches curl/Ruby, accepts chains the stock
+    bundle rejects), then certifi, then the stock verified context. Never
+    disables verification."""
+    import ssl
+    try:
+        import truststore
+        return truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    except Exception:
+        pass
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
+
+
 def _load_neutral_env():
     """If Sigma creds aren't already in the environment, load them from the
     neutral cred file written by setup.rb. Existing env always wins — mirrors
@@ -96,7 +114,7 @@ def mint_token():
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=30, context=_ssl_ctx()) as resp:
             payload = json.load(resp)
     except urllib.error.HTTPError as e:
         _die(

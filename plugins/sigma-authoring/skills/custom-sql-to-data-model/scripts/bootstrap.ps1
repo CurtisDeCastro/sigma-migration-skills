@@ -139,6 +139,17 @@ if ($script:PyExe) {
   }
 }
 
+# pip --user install that survives PEP 668 ("externally-managed-environment"):
+# try plain --user, then retry with --break-system-packages. No admin.
+function Invoke-PipUserInstall {
+  param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Pkgs)
+  $a = @(); if ($script:PyPre) { $a += $script:PyPre }
+  & $script:PyExe @a -m pip install --user --quiet @Pkgs 2>&1 | Out-Null
+  if ($LASTEXITCODE -eq 0) { return $true }
+  & $script:PyExe @a -m pip install --user --break-system-packages --quiet @Pkgs 2>&1 | Out-Null
+  return ($LASTEXITCODE -eq 0)
+}
+
 # --- python deps (doctor's render/similarity checks) ------------------------
 if ($script:PyExe) {
   $pyArgs = @(); if ($script:PyPre) { $pyArgs += $script:PyPre }
@@ -147,10 +158,22 @@ if ($script:PyExe) {
   else {
     Plan "python deps missing (Pillow/numpy/requests)" "$script:PyExe $script:PyPre -m pip install --user pillow numpy requests (no admin)"
     if (-not $Check) {
-      & $script:PyExe @pyArgs -m pip install --user --quiet pillow numpy requests 2>&1 | Out-Null
+      $ok = Invoke-PipUserInstall pillow numpy requests
       & $script:PyExe @pyArgs -c "import PIL, numpy, requests" 2>$null | Out-Null
-      if ($LASTEXITCODE -eq 0) { $script:Actions += 'install: pip --user pillow numpy requests'; Okay 'python deps installed (pip --user)' }
-      else { $script:InstallFailed = $true; Note 'pip --user install FAILED (offline? proxy?) -- re-run bootstrap when the network allows' }
+      if ($ok -and $LASTEXITCODE -eq 0) { $script:Actions += 'install: pip --user pillow numpy requests'; Okay 'python deps installed (pip --user)' }
+      else { $script:InstallFailed = $true; Note 'pip --user install FAILED -- if PEP 668 (externally-managed) the --break-system-packages retry also failed; otherwise check network/proxy' }
+    }
+  }
+  # truststore (best effort): OS trust store so OpenSSL 3.x verifies Looker/Tableau certs
+  & $script:PyExe @pyArgs -c "import truststore" 2>$null | Out-Null
+  if ($LASTEXITCODE -eq 0) { Okay 'python truststore (OS trust store for TLS)' }
+  else {
+    Plan "python truststore missing (OpenSSL 3.x TLS vs Looker/Tableau Cloud)" "$script:PyExe $script:PyPre -m pip install --user truststore"
+    if (-not $Check) {
+      $okt = Invoke-PipUserInstall truststore
+      & $script:PyExe @pyArgs -c "import truststore" 2>$null | Out-Null
+      if ($okt -and $LASTEXITCODE -eq 0) { $script:Actions += 'install: pip --user truststore'; Okay 'python truststore installed' }
+      else { Note 'pip --user install of truststore FAILED -- TLS falls back to certifi/default; install manually if a Looker/Tableau TLS error appears' }
     }
   }
 }
