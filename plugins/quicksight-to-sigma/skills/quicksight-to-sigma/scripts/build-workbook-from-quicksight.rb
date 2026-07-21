@@ -30,6 +30,7 @@ require 'optparse'
 require 'securerandom'
 require 'set'
 require_relative 'lib/coverage_catalog'
+require_relative 'lib/trellis_emit' # shared native-trellis emitter (supported-kind gate + fallbacks)
 
 opts = {}
 OptionParser.new do |o|
@@ -938,6 +939,96 @@ def apply_visual_filters(el, vid, calc, master_cols, dmel, m)
   end
 end
 
+# ---- QuickSight "Small multiples" -> Sigma NATIVE element `trellis` ----------
+# QuickSight's small-multiples facet is an EXPLICIT source property, carried two
+# ways on a cartesian/circular visual:
+#   * a `SmallMultiples` field well (a CategoricalDimensionField / DateDimensionField
+#     with the small-multiples role) = the facet DIMENSION, and
+#   * `ChartConfiguration.SmallMultiplesOptions` (MaxVisibleRows / MaxVisibleColumns)
+#     = the panel-grid layout.
+# We map that to Sigma's native `element.trellis` (rowsBy / columnsBy) via the shared,
+# converter-agnostic emitter (shared/lib/trellis_emit.rb) — the same emitter the
+# Tableau/Power BI/Qlik converters use. This SUPERSEDES any "trellis is Sigma UI-only"
+# belief: the rowsBy/columnsBy form binds the facet FROM SPEC on the readback-safe
+# kinds (docs/sigma-trellis-chart-support.md).
+#
+# DETECTION is gated on the `SmallMultiples` well — a visual with NO such well takes an
+# early `return nil` and is built byte-identically to origin/main (no geometry
+# inference). EMISSION emits ONE Sigma element (the base viz) with the facet added as a
+# real column, then TrellisEmit.apply sets element['trellis']. The emitter is the single
+# source of truth for the readback-safe kinds (bar/line/area/combo/scatter/donut) and
+# the fallbacks on the rest — pie->donut (flipped in place), and kpi/pivot/table left
+# flat (Sigma returns 200 then SILENTLY STRIPS the key on those). Every emitted trellis
+# is recorded in $native_trellis_records -> the native-trellis-emitted.json round-trip
+# sidecar, which verify-trellis-survived.rb re-checks against the readback spec.
+def apply_small_multiples!(el, inner, wells, calc, mc, dmel, m, eid, title, warnings)
+  return nil unless el
+  facet = ((wells['SmallMultiples'] || wells['smallMultiples'] || []).map { |f| field_role(f) }.compact).first
+  return nil unless facet # detection-gated: no small-multiples well -> byte-identical build
+
+  kind = el['kind']
+  # Gate to the kinds whose native `trellis` survives readback. On kpi/pivot/table Sigma
+  # accepts the POST (200) then drops the key and renders flat — emitting it there would
+  # be a silent lie, so leave those flat and record the documented fallback.
+  unless TrellisEmit.trellises?(kind)
+    fallback = case TrellisEmit.disposition(kind)
+               when :needs_sibling_fanout then 'fan out to N per-member KPI tiles (no native KPI trellis)'
+               when :needs_pivot_shelves  then "use the pivot's own rowsBy/columnsBy cross-tab shelves"
+               else 'model the facet as an extra grouping/row dimension, or build small multiples post-publish'
+               end
+    STDERR.puts "  ! small-multiples facet '#{facet[1]}' on a #{kind} (#{title}): Sigma strips a #{kind} trellis on readback — facet left off"
+    warnings << { 'visual' => title, 'type' => 'SmallMultiples',
+                  'reason' => "QuickSight small-multiples facet '#{facet[1]}' on a #{kind} — Sigma has no native trellis for that kind (silently stripped on readback); facet left off. #{fallback}." }
+    return nil
+  end
+
+  # Add the facet as a real column (reuse dim_col so a DATE facet is truncated like any
+  # other date dim; master_ref lands the underlying column on the routed master). Stable
+  # id (#{eid}-sm) so the round-trip sidecar can match it on readback.
+  fcid = "#{eid}-sm"
+  dc, _did = dim_col(facet, calc, mc, dmel, m)
+  dc['id'] = fcid
+  (el['columns'] ||= []) << dc
+
+  orientation = sm_orientation((inner['ChartConfiguration'] || {})['SmallMultiplesOptions'])
+  was_pie = (kind == 'pie-chart')
+  result  = TrellisEmit.apply(el, facet_column_id: fcid, orientation: orientation)
+  axis    = el['trellis'].keys.first
+
+  # Round-trip guard record (Sigma silently strips an unsupported trellis; the
+  # post-publish verifier re-reads the spec and asserts each of these survived).
+  ($native_trellis_records ||= []) << {
+    'element_id' => el['id'], 'kind' => el['kind'], 'name' => title,
+    'axis' => axis, 'columnId' => fcid, 'visual_id' => inner['VisualId']
+  }
+  if was_pie
+    warnings << { 'visual' => title, 'type' => 'SmallMultiples',
+                  'reason' => "QuickSight small-multiples PIE -> Sigma DONUT + trellis.#{axis} (pie silently strips the trellis key on readback; donut supports it)" }
+  end
+  STDERR.puts "  + small-multiples '#{facet[1]}' -> ONE #{el['kind']} element with trellis.#{axis} on \"#{title}\" (facet column #{fcid})"
+  result
+end
+
+# QuickSight SmallMultiplesOptions (MaxVisibleRows / MaxVisibleColumns) -> Sigma trellis
+# orientation. A QuickSight small multiple is a SINGLE dimension tiled into a panel grid;
+# MaxVisibleRows / MaxVisibleColumns cap how many panels are visible per axis before
+# scrolling. Map that layout hint to the facet axis:
+#   rows only -> :rows  (vertical small-multiples, rowsBy)
+#   cols only -> :cols  (horizontal small-multiples, columnsBy)
+#   both      -> :grid — but a SINGLE facet field can't fill a true 2-D Sigma grid (that
+#                needs TWO distinct facet columns), so the shared emitter degrades :grid
+#                to columnsBy, the tile grid QuickSight renders for one facet.
+#   neither   -> :cols  (single-axis default; Sigma wraps into a tile grid)
+def sm_orientation(sm_opts)
+  o = sm_opts.is_a?(Hash) ? sm_opts : {}
+  has_rows = !o['MaxVisibleRows'].nil? && o['MaxVisibleRows'].to_i.positive?
+  has_cols = !o['MaxVisibleColumns'].nil? && o['MaxVisibleColumns'].to_i.positive?
+  return :grid if has_rows && has_cols
+  return :rows if has_rows
+
+  :cols
+end
+
 # RCA #18 / bead 3goo.15: a QS sheet-level TextBox carries HTML in `Content`. Sigma text
 # `body` is Markdown + light inline HTML. Strip QS markup to plain paragraphs (the
 # explanatory annotations — x-axis/metric definitions — were silently dropped because the
@@ -1354,6 +1445,11 @@ defn['Sheets'].each_with_index do |sh, sheet_idx|
                         'region' => { 'id' => did, 'regionType' => region_type_for(geo[0][1]) })
       end
     end
+    # QuickSight "Small multiples" field well + SmallMultiplesOptions -> Sigma native
+    # element trellis (detection-gated: no SmallMultiples well -> byte-identical build).
+    # Runs after the case built el+columns and BEFORE sorts/filters, so the facet joins a
+    # real columns[]; a no-op on any visual without a small-multiples facet.
+    apply_small_multiples!(el, inner, w, calc, mc_, dmel_, m_, eid, title, build_warnings) if el
     # carry the visual's QS SortConfiguration (CategorySort/RowSort) when present
     apply_qs_sorts(el, inner, kind, title, build_warnings) if el
     # RCA #1 / bead 3goo.1: apply this visual's scoped QS FilterGroups as element filters
@@ -1492,6 +1588,22 @@ unless THEME_COLORS.empty?
 end
 
 File.write(opts[:out], JSON.pretty_generate(spec))
+
+# Native-trellis round-trip guard sidecar — written ONLY when a small-multiples visual
+# actually emitted a native trellis (a workbook with none stays byte-identical: no
+# sidecar). verify-trellis-survived.rb re-reads the readback spec and asserts each element
+# still carries its `trellis` key (Sigma silently strips unsupported ones). Converter-
+# neutral shape, shared with the Tableau/Power BI/Qlik paths.
+if ($native_trellis_records ||= []).any?
+  begin
+    nt_path = File.join(File.dirname(File.expand_path(opts[:out])), 'native-trellis-emitted.json')
+    File.write(nt_path, JSON.pretty_generate('version' => 1, 'elements' => $native_trellis_records))
+    STDERR.puts "native-trellis: wrote #{nt_path} (#{$native_trellis_records.size} native trellis element(s) — verify survives readback with verify-trellis-survived.rb)"
+  rescue StandardError => e
+    STDERR.puts "WARN native-trellis sidecar not written (round-trip coverage unrecorded): #{e.message}"
+  end
+end
+
 map_out = opts[:out].sub(/\.json$/, '') + '.map.json'
 # Map carries: the legacy single dashPageId (= first sheet's page, for back-compat),
 # the per-sheet page list (sheetIndex -> pageId/name) so the layout step lays out EACH
