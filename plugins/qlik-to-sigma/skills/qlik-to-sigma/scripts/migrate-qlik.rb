@@ -525,7 +525,10 @@ end
 # are scout-eligible — the gap-scout must ATTEMPT a Sigma translation for each
 # before the degradation is accepted. --yes does NOT skip this; it only accepts
 # measures already scouted (validated or escalated). Recorded to the ledger by
-# scout-validate.py via lib/scout_gate.py.
+# scout-validate.py via lib/scout_gate.py. A 'validated' row is honored only when
+# it carries signed live-probe evidence (ScoutGate integrity, issue #458): a hand-
+# written or forged 'validated' line is treated as unvalidated (→ escalated
+# bucket), so the gate still blocks.
 scout_gaps = questions.select { |q| q['id'] == 'measure_no_sigma_equiv' }
 unless scout_gaps.empty?
   gid = ->(q) { 'measure:' + (q['measure'] || q['detail'].to_s.gsub(/\s+/, ' ').strip[0, 80]).to_s }

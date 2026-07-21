@@ -23,7 +23,7 @@ the gap as scouted (validated → ok; error → escalated):
 Env: SIGMA_BASE_URL, SIGMA_API_TOKEN (eval get-token.sh first).
 Prints JSON: {status: validated|error, workbook_id, error, ...}. Cleans up the test workbook.
 """
-import json, os, sys, urllib.request, argparse, datetime, re
+import json, os, sys, urllib.request, argparse, datetime, re, hashlib
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 import scout_gate
 
@@ -159,7 +159,21 @@ def main():
     api("DELETE", f"/v2/files/{wb}")
     # record to the run-each-time gap-scout ledger (bead beads-sigma-5l5e) so the
     # migrate-powerbi.rb OPEN-QUESTIONS gate sees this flagged DAX gap as scouted.
-    scout_gate.record(a.workdir, a.gap_id, a.feature, "validated" if status == "validated" else "escalated")
+    # A 'validated' row MUST carry live-probe evidence (issue #458): the real Sigma
+    # workbook id this POST created + a SHA-256 of the live columns-readback + the
+    # probe timestamp. scout_gate signs the row (per-conversion .scout-ledger.key)
+    # so the Ruby gate (migrate-powerbi.rb -> scout_gate.rb#classify) honors ONLY a
+    # signed, evidenced 'validated'; a hand-written line cannot forge this probe.
+    evidence = None
+    if status == "validated":
+        evidence = {
+            "workbook_id": str(wb or ""),
+            "response_sha256": hashlib.sha256((cbody or "").encode("utf-8")).hexdigest(),
+            "phase": "columns",
+            "probed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }
+    scout_gate.record(a.workdir, a.gap_id, a.feature,
+                      "validated" if status == "validated" else "escalated", evidence)
     print(json.dumps({**result,"status":status}, indent=2))
 
 if __name__ == "__main__":
