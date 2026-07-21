@@ -421,13 +421,22 @@
   {
    "canonical": "shared/lib/trellis_emit.rb",
    "targets": [
-    "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/lib/trellis_emit.rb"
+    "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/lib/trellis_emit.rb",
+    "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/lib/trellis_emit.rb"
    ]
   },
   {
    "canonical": "shared/scripts/test-trellis-emit.rb",
    "targets": [
-    "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-trellis-emit.rb"
+    "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-trellis-emit.rb",
+    "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-trellis-emit.rb"
+   ]
+  },
+  {
+   "canonical": "shared/scripts/verify-trellis-survived.rb",
+   "targets": [
+    "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/verify-trellis-survived.rb",
+    "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/verify-trellis-survived.rb"
    ]
   },
   {

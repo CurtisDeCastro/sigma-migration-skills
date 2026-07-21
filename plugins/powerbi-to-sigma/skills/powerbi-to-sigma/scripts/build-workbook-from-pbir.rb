@@ -54,6 +54,7 @@ require_relative 'lib/pbi_pivot_sort'
 require_relative 'lib/pbi_style'
 require_relative 'lib/pbi_conditional_formats'
 require_relative 'lib/coverage_catalog'
+require_relative 'lib/trellis_emit' # shared native-trellis emitter (supported-kind gate + fallbacks)
 include SigmaLayout
 
 # ---------------------------------------------------------------------------
@@ -991,6 +992,104 @@ def drop_unresolved_columns!(el, rec, kind)
                     action: "Map the PBI queryRef(s) for #{leaves} to a master column in master-map.json and re-run.")
 end
 
+# Power BI "Small multiples" field well -> Sigma NATIVE element `trellis`
+# (rowsBy / columnsBy), via the shared converter-agnostic emitter
+# (shared/lib/trellis_emit.rb). SUPERSEDES the stale "trellis is Sigma UI-only"
+# note (measure-patterns.md): the rowsBy/columnsBy form binds the facet from spec
+# on the readback-safe kinds (docs/sigma-trellis-chart-support.md).
+#
+# DETECTION: a PBIR visual carries its small-multiples facet as a `SmallMultiples`
+# projection role in visual.query.queryState; extract-pbir.py's _role_bindings
+# passes every role through verbatim, so it arrives here as
+# rec['bindings']['SmallMultiples'] -> the facet dimension's queryRef. No geometry
+# inference: it is an explicit source property. Detection-gated — a visual with NO
+# SmallMultiples role takes an early `return nil` and is built byte-identically to
+# origin/main.
+#
+# EMISSION: one Sigma element (the base viz) with the facet added as a column, then
+# TrellisEmit.apply sets element['trellis']. The emitter is the single source of
+# truth for (a) the readback-safe kinds (bar/line/area/combo/scatter/donut), which
+# it trellises, and (b) the fallbacks on the rest — pie->donut (flipped in place),
+# and kpi/pivot/table left flat (Sigma returns 200 then SILENTLY STRIPS the key on
+# those, so we must not emit it). Every emitted trellis is recorded in
+# $native_trellis_records -> the native-trellis-emitted.json round-trip sidecar,
+# which verify-trellis-survived.rb re-checks against the readback spec.
+#
+# ORIENTATION: a Power BI small multiple is a SINGLE dimension tiled into a grid
+# (the grid's row/column counts are a layout detail, not a second facet field).
+# Sigma wraps a single-facet `columnsBy` into exactly that tile grid, so columnsBy
+# is the faithful mapping. A true 2-D Sigma grid (rowsBy AND columnsBy) needs two
+# DISTINCT facet columns, which a PBI small multiple never supplies — so we never
+# emit both. (Deferred: honoring an explicit single-column PBI layout as rowsBy;
+# the grid default is correct for the common case.)
+def apply_small_multiples!(el, rec, fields, master, eid, qr_cids)
+  b = rec['bindings'] || {}
+  facet_qr = (b['SmallMultiples'] || b['smallMultiples'] || []).first
+  return nil unless facet_qr # detection-gated: no small-multiples role -> byte-identical build
+
+  kind = el['kind']
+  name = el['name'].is_a?(Hash) ? el['name']['text'] : el['name'].to_s
+
+  # Gate to the kinds whose native `trellis` survives readback. On kpi/pivot/table
+  # Sigma accepts the POST (200) then drops the key and renders flat — emitting it
+  # there would be a silent lie, so leave those flat and record the documented
+  # fallback (kpi -> N sibling KPIs, pivot -> its own shelves, table -> flat).
+  unless TrellisEmit.trellises?(kind)
+    disp = TrellisEmit.disposition(kind)
+    fallback = case disp
+               when :needs_sibling_fanout then 'fan out to N per-member KPI tiles (no native KPI trellis)'
+               when :needs_pivot_shelves  then "use the pivot's own rowsBy/columnsBy cross-tab shelves"
+               else 'model the facet as an extra grouping/row dimension, or build small multiples post-publish'
+               end
+    warn "[build-workbook] WARN visual '#{name}': PBI Small multiples facet '#{facet_qr}' on a #{kind} — " \
+         "Sigma has no native trellis for that kind (silently stripped on readback); facet left off."
+    record_unresolved(visual: name, pbi_type: rec['visual_type'], sigma_kind: kind,
+                      severity: 'degraded', recoverable: true,
+                      detail: "Small multiples facet '#{facet_qr}' dropped — #{kind} has no native Sigma trellis",
+                      action: "Sigma strips a #{kind} trellis on readback; #{fallback}.")
+    return nil
+  end
+
+  # The facet must resolve on the element's chosen master (a Sigma element sources
+  # exactly one master). If it can't, adding the column would leak an unresolved
+  # literal ref that drop_unresolved_columns! prunes, leaving a dangling trellis.
+  fs = field_spec(facet_qr, fields, master)
+  reachable = master && (fs['master'] == master ||
+                         Array(fs['alts']).any? { |a| a['master'] == master })
+  unless reachable
+    warn "[build-workbook] WARN visual '#{name}': Small multiples facet '#{facet_qr}' does not resolve on " \
+         "master '#{master.inspect}' — trellis NOT emitted (a Sigma element sources one master)."
+    record_unresolved(visual: name, pbi_type: rec['visual_type'], sigma_kind: kind,
+                      severity: 'degraded', recoverable: true,
+                      detail: "Small multiples facet '#{facet_qr}' not reachable on master '#{master}' — trellis dropped",
+                      action: "Add '#{facet_qr}' to master '#{master}' (or a single joined master) so the facet binds, then re-run.")
+    return nil
+  end
+
+  # Add the facet as a real column and face it via the shared emitter. A single
+  # PBI facet -> columnsBy (Sigma tile grid; see ORIENTATION above).
+  fcid = "#{eid}-sm"
+  (el['columns'] ||= []) << { 'id' => fcid, 'formula' => fs['ref'], 'name' => qr_leaf(facet_qr, 'Facet') }
+  qr_cids[facet_qr] = fcid
+  was_pie = (kind == 'pie-chart')
+  result  = TrellisEmit.apply(el, facet_column_id: fcid, orientation: :cols)
+  axis = el['trellis'].keys.first
+
+  # Round-trip guard record (Sigma silently strips an unsupported trellis; the
+  # post-publish verifier re-reads the spec and asserts each of these survived).
+  ($native_trellis_records ||= []) << {
+    'element_id' => el['id'], 'kind' => el['kind'], 'name' => name,
+    'axis' => axis, 'columnId' => fcid, 'visual_id' => rec['visual_id']
+  }
+  if was_pie
+    warn "[build-workbook] visual '#{name}': PBI small-multiples PIE -> Sigma DONUT + trellis.#{axis} " \
+         '(pie silently strips the trellis key on readback; donut supports it).'
+  end
+  warn "[build-workbook] visual '#{name}': PBI Small multiples '#{facet_qr}' -> ONE #{el['kind']} element " \
+       "'#{el['id']}' with trellis.#{axis} (facet column #{fcid})."
+  result
+end
+
 def build_element(rec, fields, masters, extra_data = [])
   # viz-kind resolution (grounded by refs/catalogs/viz-kind.json; SIGMA_KIND is
   # derived from it). An UNMAPPED/blank kind token used to SILENTLY become a
@@ -1683,6 +1782,11 @@ def build_element(rec, fields, masters, extra_data = [])
 
   # Controls reference a master column; they carry no columns array of their own.
   el['columns'] = cols unless el['kind'] == 'control'
+  # Power BI "Small multiples" field well -> Sigma native `trellis` (detection-
+  # gated: no SmallMultiples role -> no-op, byte-identical build). Runs after the
+  # columns are attached so the facet joins a real columns[] and before
+  # drop_unresolved_columns! so the (reachable) facet column is retained.
+  apply_small_multiples!(el, rec, fields, master, eid, qr_cids) unless el['kind'] == 'control'
   # Style fidelity (refs/style-fidelity.md §5-7) — applied AFTER columns are
   # attached so the measure-column formats exist to rewrite:
   #   §5 number abbreviation — KPI/chart measure columns render compact ("$126k")
@@ -2166,6 +2270,22 @@ spec['folderId'] = opts[:folder] if opts[:folder]
 File.write(opts[:out], JSON.pretty_generate(spec))
 warn "[build-workbook] wrote #{opts[:out]} (#{data_elements.size} master(s), " \
      "#{content_pages.sum { |p| p['elements'].size }} chart element(s); layout embedded)"
+
+# Native-trellis round-trip guard sidecar — written ONLY when a small-multiples
+# visual actually emitted a native trellis (a workbook with none stays byte-
+# identical: no sidecar). verify-trellis-survived.rb re-reads the readback spec
+# and asserts each element still carries its `trellis` key (Sigma silently strips
+# unsupported ones). Converter-neutral shape shared with the Tableau path.
+if ($native_trellis_records ||= []).any?
+  begin
+    nt_path = File.join(File.dirname(File.expand_path(opts[:out])), 'native-trellis-emitted.json')
+    File.write(nt_path, JSON.pretty_generate('version' => 1, 'elements' => $native_trellis_records))
+    warn "[build-workbook] wrote #{nt_path} (#{$native_trellis_records.size} native trellis element(s) — " \
+         'verify survives readback with verify-trellis-survived.rb)'
+  rescue => e
+    warn "[build-workbook] WARN native-trellis sidecar not written (round-trip coverage unrecorded): #{e.message}"
+  end
+end
 
 # coverage.json — the aggregated migration-coverage ledger (bead beads-sigma-cov).
 # Written AFTER the final spec so builtElements equals the shipped element count.

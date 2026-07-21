@@ -70,7 +70,9 @@ M families (Excel/CSV/SharePoint/Web/Dataflows/Dataverse/Salesforce/OData/ODBC/K
 SAP) — handled by the sibling land-then-repoint project (`pbi-nonwarehouse-sources`).
 Report layer: field-well→encoding mapping, conditional formatting (MERGED per
 `pbi-conditional-formatting` — confirm), style `objects` (titles/labels/legend/format),
-themes, small multiples, matrix subtotals, buttons/drillthrough/page-nav actions,
+themes, small multiples (DONE — the "Small multiples" field well maps to Sigma's
+native `trellis`; `build-workbook-from-pbir.rb` → `TrellisEmit.apply`), matrix
+subtotals, buttons/drillthrough/page-nav actions,
 slicer mode (dropdown/relative-date/between), Deneb/Vega custom visuals, mobile layout.
 
 ## Public test corpus (real files; warehouse-connected where possible)
