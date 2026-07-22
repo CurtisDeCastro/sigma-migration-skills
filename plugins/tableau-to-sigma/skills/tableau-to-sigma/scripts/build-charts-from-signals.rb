@@ -7120,6 +7120,25 @@ unless opts[:no_auto_controls]   # default-on: never miss a .twb parameter/filte
                     'materialize it on the master, then add a master-columns.json regex so the control binds. ' \
                     "Tableau: #{tab_formula}" +
                     (sigma_formula ? " → Sigma: #{sigma_formula}" : ' (auto-translation unavailable — translate by hand)')
+      elsif f['is_datasource_filter']
+        # #483: an always-on DATA-SOURCE filter whose column is not a charted
+        # dimension (e.g. an `active` flag) has no master-map entry — but it is
+        # NOT optional. Record needs-master-default (a breadcrumb in
+        # control-scope.json / the coverage ledger) instead of a bare warning, so
+        # the operator applies it as a workbook-wide default filter on the master
+        # and the datasource-filter gate (assert-phase6-ran) sees it was surfaced
+        # rather than silently dropped (which silently over-reports every aggregate).
+        slug = cap.downcase.gsub(/\W+/, '-').sub(/-$/, '')
+        control_scope_records << {
+          'controlId' => "ctl-#{slug}", 'name' => cap.strip, 'mechanism' => 'filters',
+          'source_signal' => "tableau DATASOURCE-level filter '#{cap}' (always-on; ui-domain=#{f['ui_domain'].inspect}; not a charted dimension)",
+          'status' => 'needs-master-default', 'datasource_filter' => true,
+          'is_active_flag' => (f['is_active_flag'] == true), 'members' => Array(f['members'])
+        }
+        warnings << "DATASOURCE-level filter '#{cap}' (always-on) has no master-map entry — NOT optional: " \
+                    'apply it as a workbook-wide default filter on the master element (or add a ' \
+                    'master-columns.json regex + a control with its default set). Recorded needs-master-default; ' \
+                    'the datasource-filter gate blocks GREEN until it is applied.'
       else
         warnings << "shared filter on '#{cap}' has no master-map entry — add a regex to master-columns.json"
       end
