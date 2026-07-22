@@ -67,13 +67,19 @@ module DatasourceFilterCheck
     t['columnId'] || t.dig('source', 'columnId') || t.dig('column', 'id') || t['column']
   end
 
-  # Is `caption` applied as an element-level filter anywhere in the spec?
-  # Matches by columnId (a column named for the caption that some element filters
-  # on) OR by the caption text appearing in a serialized element filter.
+  # Is `caption` applied as an always-on element-level filter anywhere in the
+  # spec? Matches by columnId (a column named for the caption that some element
+  # filters on) OR by the caption text appearing in a serialized element filter.
+  # CONTROL elements are EXCLUDED: a control's `filters` are its user-toggleable
+  # target bindings, NOT an always-on default — an always-on data-source filter
+  # (esp. an is_active_flag) is only satisfied by a genuine element-level filter
+  # (e.g. on the master table), never by a control that happens to bind the
+  # column. (Non-flag filters can still be satisfied via surfaced_as_control?.)
   def applied_as_filter?(elems, caption)
     cids = column_ids_for(elems, caption)
     key  = norm(caption)
     elems.any? do |el|
+      next false if el['kind'].to_s == 'control'
       filt = el['filters'] || el['filter']
       next false if filt.nil?
       list = filt.is_a?(Array) ? filt : [filt]

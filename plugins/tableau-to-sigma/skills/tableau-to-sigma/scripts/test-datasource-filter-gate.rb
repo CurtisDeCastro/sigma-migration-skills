@@ -150,6 +150,18 @@ DS_REGION = [{ 'column_caption' => 'Region', 'is_datasource_filter' => true, 'is
 v_region = DatasourceFilterCheck.violations(datasource_filters: DS_REGION, filter_shelf: [{ 'label' => 'Region' }], spec: ctl_spec)
 check(v_region.empty?, "C4: a non-flag datasource filter is satisfied by a control (got #{v_region.inspect})", fails)
 
+# an active flag whose column is bound ONLY by a user CONTROL (the control carries
+# a `filters` binding) is STILL a violation — a control is user-widenable, not an
+# always-on default. (Regression guard for the live-caught refinement: a control's
+# filters entry must NOT satisfy applied_as_filter?.)
+ctl_bound_spec = { 'pages' => [{ 'elements' => [
+  { 'id' => 'master', 'kind' => 'table', 'columns' => MASTER_COLS },
+  { 'id' => 'c1', 'kind' => 'control', 'name' => 'Company Active', 'controlType' => 'list', 'values' => ['true'],
+    'filters' => [{ 'source' => { 'kind' => 'table', 'elementId' => 'master' }, 'columnId' => 'm-active' }] }
+] }] }
+v_ctlbound = DatasourceFilterCheck.violations(datasource_filters: DS, filter_shelf: [{ 'label' => 'Company Active' }], spec: ctl_bound_spec)
+check(v_ctlbound.any?, 'C5: active flag bound ONLY by a control (control.filters) is STILL a violation (must be a master default)', fails)
+
 puts
 if fails.empty?
   puts 'ALL PASS — datasource-filter tagged, recorded needs-master-default, and gated (unapplied FAILS, applied PASSES)'
