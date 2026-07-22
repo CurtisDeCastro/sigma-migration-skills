@@ -62,10 +62,10 @@ Dir.mktmpdir do |d|
   ok('gate FAILS when score below threshold', below == false)
   # gate 1 passes at 0.60; later gates may fail on missing files, so assert the
   # gate-1 score line is printed rather than the overall exit.
-  out = `#{RUBY} #{GATE} --workdir #{d} --min-parity-score 0.60 2>&1`
+  out = IO.popen([RUBY, GATE, '--workdir', d, '--min-parity-score', '0.60'], err: %i[child out], &:read)
   ok('gate 1 OK line when score above threshold', out.include?('value-parity score=70.0% (>= 60.0% required)'))
   # off by default: no score gating, no score line
-  out_off = `#{RUBY} #{GATE} --workdir #{d} 2>&1`
+  out_off = IO.popen([RUBY, GATE, '--workdir', d], err: %i[child out], &:read)
   ok('score gate OFF by default (no false gating)', !out_off.include?('value-parity score='))
 end
 

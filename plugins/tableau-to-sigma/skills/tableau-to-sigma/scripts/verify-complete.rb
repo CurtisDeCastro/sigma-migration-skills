@@ -26,8 +26,9 @@
 #   2  NOT DONE — the hard gate never stamped success (finalize not run / failed)
 #   3  NOT DONE — still at PASS 1 (parity-pending.json present); run --finalize
 #   4  DONE-BUT-MISMATCH — success marker is for a different workbook than asked
-#   5  NOT DONE — loop-log.jsonl records the SAME failure signature 3+ times
-#      (the stop-at-2 loop breaker was breached; an operator must resolve it)
+#   5  NOT DONE — loop-log.jsonl records the SAME failure signature 2+ times
+#      since the last green reset (the stop-at-2 loop breaker tripped/was
+#      breached; an operator must resolve it)
 
 require 'json'
 require 'optparse'
@@ -77,15 +78,19 @@ if File.exist?(pending)
   exit 3
 end
 
-# Loop-log enforcement (stop-at-2): a signature recorded 3+ times means the run
-# ground the same failure in a loop — completion can never be claimed over it,
-# success marker or not. The operator resolves the repeat, then clears the log.
-looped = Offramp.loop_counts(wd).select { |_, n| n >= 3 }
+# Loop-log enforcement (stop-at-2, PLAN E5.1: refusal threshold 2+ in the same
+# PR as the breaker): a signature recorded 2+ times since the last green reset
+# means the run ground the same failure in a loop — completion can never be
+# claimed over it, success marker or not. loop_counts only counts entries
+# after the last {'reset'} record, so a GREEN finalize re-arms this refusal
+# automatically; otherwise the operator resolves the repeat, then clears the log.
+looped = Offramp.loop_counts(wd).select { |_, n| n >= 2 }
 unless looped.empty?
-  warn '⛔ NOT DONE — loop-log.jsonl records the SAME failure signature 3+ times (stop-at-2 breached):'
+  warn '⛔ NOT DONE — loop-log.jsonl records the SAME failure signature 2+ times (stop-at-2 tripped):'
   looped.each { |sig, n| warn "   • #{sig}  × #{n}" }
   warn '   The run was grinding one failure, not converging — an operator must resolve it.'
-  warn "   (After resolving, clear #{File.join(wd, 'loop-log.jsonl')} and re-run the gates.)"
+  warn "   (After resolving, clear #{File.join(wd, 'loop-log.jsonl')} and re-run the gates;"
+  warn '    a GREEN finalize also re-arms the breaker automatically.)'
   print_offramps(wd)
   exit 5
 end

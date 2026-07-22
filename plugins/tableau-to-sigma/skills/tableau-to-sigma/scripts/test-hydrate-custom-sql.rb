@@ -188,7 +188,7 @@ check(hrecs['SALES_REGION'].get_text('local-type').value == 'string' && hrecs['S
 
 puts
 if fails.empty?
-  puts "ALL PASS (#{`grep -c 'check(' #{__FILE__}`.to_i - 1} assertions)"
+  puts "ALL PASS (#{File.foreach(__FILE__).count { |l| l.include?('check(') } - 1} assertions)"
   exit 0
 else
   puts "#{fails.size} FAILED:"

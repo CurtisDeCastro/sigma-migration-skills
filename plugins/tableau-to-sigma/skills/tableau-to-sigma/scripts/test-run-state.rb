@@ -19,14 +19,14 @@ end
 
 Dir.mktmpdir do |d|
   # 1. Absent ledger → auditor is a NO-OP (exit 0, "not tracked").
-  out = `ruby #{ASSERT} --workdir #{d} 2>&1`; st = $?.exitstatus
+  out = IO.popen(['ruby', ASSERT, '--workdir', d], err: %i[child out], &:read); st = $?.exitstatus
   check(st == 0 && out.include?('not tracked'), "absent ledger → NO-OP exit 0 (got #{st})", fails)
 
   # 2. Stamp the full required chain → audit PASS.
   %w[phase-1 phase-1d phase-4 phase-5 phase-6].each { |p| RunState.stamp(d, p, note: 'x') }
   check(RunState.tracked?(d), 'stamping created run-state.json', fails)
   check(File.exist?(RunState.path(d)), 'run-state.json exists', fails)
-  out = `ruby #{ASSERT} --workdir #{d} 2>&1`; st = $?.exitstatus
+  out = IO.popen(['ruby', ASSERT, '--workdir', d], err: %i[child out], &:read); st = $?.exitstatus
   check(st == 0 && out.include?('all required phases present'), "full chain → PASS exit 0 (got #{st})", fails)
 
   # 3. Merge semantics: re-stamp updates, doesn't duplicate.
@@ -39,7 +39,7 @@ end
 Dir.mktmpdir do |d|
   # 4. Missing a required phase (layout dropped) → audit FAIL exit 1, names it.
   %w[phase-1 phase-1d phase-4 phase-6].each { |p| RunState.stamp(d, p) }   # no phase-5
-  out = `ruby #{ASSERT} --workdir #{d} 2>&1`; st = $?.exitstatus
+  out = IO.popen(['ruby', ASSERT, '--workdir', d], err: %i[child out], &:read); st = $?.exitstatus
   check(st == 1 && out.include?('phase-5') && out.downcase.include?('layout'),
         "missing required phase → FAIL exit 1 naming phase-5/layout (got #{st})", fails)
 
@@ -55,7 +55,7 @@ end
 Dir.mktmpdir do |d|
   # 6. Waiver.
   RunState.stamp(d, 'phase-1')   # incomplete chain
-  out = `ruby #{ASSERT} --workdir #{d} --skip-run-state "unit-test" 2>&1`; st = $?.exitstatus
+  out = IO.popen(['ruby', ASSERT, '--workdir', d, '--skip-run-state', 'unit-test'], err: %i[child out], &:read); st = $?.exitstatus
   check(st == 0 && out.include?('WAIVED'), "--skip-run-state waives (exit 0) (got #{st})", fails)
 end
 

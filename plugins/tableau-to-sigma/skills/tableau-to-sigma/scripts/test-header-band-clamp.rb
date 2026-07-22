@@ -33,7 +33,8 @@ maxrows = SigmaLayout::HEADER_BAND_MAX_ROWS
 xml = nil
 Dir.mktmpdir do |d|
   out = File.join(d, 'layout.xml')
-  log = `ruby #{BUILD} --layout #{LAYOUT} --wb-ids #{WBIDS} --out #{out} 2>&1`
+  log = IO.popen(['ruby', BUILD, '--layout', LAYOUT, '--wb-ids', WBIDS, '--out', out],
+                 err: %i[child out], &:read)
   abort "build produced no layout\n#{log}" unless File.exist?(out)
   xml = File.read(out)
 end

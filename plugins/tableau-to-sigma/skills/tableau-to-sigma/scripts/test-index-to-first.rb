@@ -149,7 +149,11 @@ Dir.mktmpdir do |d|
     ]))
   lay = File.join(d, 'layout.json')
   abort 'parse-twb-layout failed' unless system('ruby', PARSER, File.join(d, 'wb.twb'), lay, out: File::NULL, err: File::NULL)
-  `ruby #{BUILD} --tableau-dir #{d} --layout #{lay} --meta #{lay.sub(/\.json$/, '-meta.json')} --master-map #{File.join(d, 'master-map.json')} --master-element-id master --out #{File.join(d, 'specs.json')} 2>&1`
+  IO.popen(['ruby', BUILD, '--tableau-dir', d, '--layout', lay,
+            '--meta', lay.sub(/\.json$/, '-meta.json'),
+            '--master-map', File.join(d, 'master-map.json'),
+            '--master-element-id', 'master',
+            '--out', File.join(d, 'specs.json')], err: %i[child out], &:read)
   ledger_path = File.join(d, 'manual-residues.json')
   check(File.exist?(ledger_path), 'manual-residues.json written', fails)
   entries = File.exist?(ledger_path) ? Array(JSON.parse(File.read(ledger_path))['residues']) : []
