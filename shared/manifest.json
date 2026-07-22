@@ -472,6 +472,13 @@
    ]
   },
   {
+   "canonical": "shared/scripts/test-conflicting-page-defaults.rb",
+   "targets": [
+    "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-conflicting-page-defaults.rb",
+    "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-conflicting-page-defaults.rb"
+   ]
+  },
+  {
    "canonical": "shared/scripts/test-telemetry-gate.rb",
    "targets": [
     "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-telemetry-gate.rb",
