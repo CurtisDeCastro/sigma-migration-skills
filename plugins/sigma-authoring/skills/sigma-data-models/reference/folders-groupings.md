@@ -50,6 +50,36 @@ Groupings define default group-by behavior on the table element.
 
 **Grouping schema:** `id` (required), `groupBy`? (array of column or folder IDs), `calculations`? (array of calculation column IDs)
 
+### Multiple levels — list each level's OWN dimension only (incremental)
+
+Levels nest hierarchically by array order (outer → inner). **Each level's `groupBy`
+lists only the NEW dimension it adds — never repeat the parent level's dimensions.**
+Sigma collapses every level's `groupBy` into a single flat `GROUP BY` at the
+warehouse (it does not run a separate grouping step per level), so it assembles the
+full combined key from all levels automatically. Repeating a parent dimension in a
+child level references that column twice (once implicitly from the outer level, once
+explicitly here) and fails with **`Duplicate column or folder reference`**.
+
+✅ **Correct (incremental — each level adds only its own dimension):**
+
+```json
+"groupings": [
+  { "id": "by-region", "groupBy": ["col-region"], "calculations": ["col-total"] },
+  { "id": "by-flag",   "groupBy": ["col-flag"],   "calculations": ["col-total"] }
+]
+```
+
+Produces a `region, flag` grouping (Sigma combines the levels).
+
+❌ **Wrong (cumulative — inner level repeats the outer dimension) → `Duplicate column or folder reference`:**
+
+```json
+"groupings": [
+  { "id": "by-region", "groupBy": ["col-region"],            "calculations": ["col-total"] },
+  { "id": "by-flag",   "groupBy": ["col-region", "col-flag"], "calculations": ["col-total"] }
+]
+```
+
 ## Column order
 
 The `order` array sets the display sequence of columns and folders. Items not listed appear after the listed ones. Summary columns are excluded from `order`.

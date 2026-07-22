@@ -402,7 +402,14 @@ def cmd_summarize(args)
 end
 
 OPENAPI_CACHE = File.join(Dir.tmpdir, 'sigma-api.json').freeze
-OPENAPI_URL = 'https://help.sigmacomputing.com/openapi/sigma-computing-public-rest-api.json'.freeze
+# Full REST spec (incl. /v2/workbooks/spec element/control/format shapes inlined
+# by `kind`). Content-addressed docs asset — the hash pins one docs build and can
+# rotate on redeploy. If `capabilities` fails to fetch it, grab the current link
+# from the Sigma API reference docs (the public help.sigmacomputing.com/openapi.json
+# index no longer lists the workbook-spec shapes), or read a live workbook spec
+# (`wb-rep.rb pull` / GET /v2/workbooks/{id}/spec) and navigate pages[].elements[]
+# by `kind`. See sigma-workbooks SKILL.md "Sources of truth".
+OPENAPI_URL = 'https://files.buildwithfern.com/sigma.docs.buildwithfern.com/006ce360082503c7b849529b4c183cc4dc63360aff76038ca64669572c662b87/assets/openapi/sigma-computing-public-rest-api.json'.freeze
 
 # Depth-first walk mirroring jq's `.. | objects`: yields every Hash reachable
 # from `node` (including `node` itself), descending through both Hash values

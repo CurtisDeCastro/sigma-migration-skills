@@ -16,8 +16,9 @@ The workbook **spec** — the JSON you POST to `/v2/workbooks/spec` defining pag
 ## Sources of truth
 
 1. **Sigma OpenAPI** — canonical schema for every request/response shape and field.
-   `https://help.sigmacomputing.com/openapi/sigma-computing-public-rest-api.json`
-2. **Existing workbooks on the user's org** — concrete working specs, accessible via `GET /v2/workbooks/{id}/spec`.
+   `https://files.buildwithfern.com/sigma.docs.buildwithfern.com/006ce360082503c7b849529b4c183cc4dc63360aff76038ca64669572c662b87/assets/openapi/sigma-computing-public-rest-api.json`
+   This is the full REST spec including the `/v2/workbooks/spec` request body with every element/control/format shape inlined by `kind`. **It is a content-addressed docs asset** (the hash in the path pins one docs build), so it can rotate when Sigma redeploys docs. If it 404s: the `help.sigmacomputing.com/openapi.json` index now only lists `sigma-rest-api.json` (REST endpoints, NO workbook-spec shapes) and `code-representation.json` (`/v2/dataModels/spec` only) — neither carries the workbook element shapes — so grab the current full-spec asset link from the Sigma API reference docs, and until then use source 2 (a live workbook readback), which is always current for element shapes.
+2. **Existing workbooks on the user's org** — concrete working specs, accessible via `GET /v2/workbooks/{id}/spec`. This is the always-current source for element/control/format shapes; when the OpenAPI asset above is unreachable, read a real workbook and navigate its `pages[].elements[]` by `kind`.
 
 Everything in this skill is commentary, style guidance, and recipes layered on top of those two sources. **When this skill and the OpenAPI disagree, the OpenAPI wins.** When a feature exists in the OpenAPI but isn't covered here, fetch the OpenAPI and use what it documents.
 
@@ -26,7 +27,8 @@ Everything in this skill is commentary, style guidance, and recipes layered on t
 The OpenAPI is the source of truth. **The field lists and examples in this skill are illustrative, not exhaustive** — when you need the complete, current shape of anything, query the spec. Fetch once per session and inspect with `jq`:
 
 ```bash
-curl -sf https://help.sigmacomputing.com/openapi/sigma-computing-public-rest-api.json > /tmp/sigma-api.json
+curl -sf https://files.buildwithfern.com/sigma.docs.buildwithfern.com/006ce360082503c7b849529b4c183cc4dc63360aff76038ca64669572c662b87/assets/openapi/sigma-computing-public-rest-api.json > /tmp/sigma-api.json
+# ^ content-addressed docs asset (see "Sources of truth"); if it 404s, use the current link from the Sigma API reference docs, or read a live workbook spec (GET /v2/workbooks/{id}/spec) and navigate pages[].elements[] by kind.
 
 # The entire workbook spec request body lives under one path (it is not split into named schemas):
 jq '.paths."/v2/workbooks/spec".post.requestBody.content."application/json".schema' /tmp/sigma-api.json
