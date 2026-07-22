@@ -50,33 +50,50 @@ Groupings define default group-by behavior on the table element.
 
 **Grouping schema:** `id` (required), `groupBy`? (array of column or folder IDs), `calculations`? (array of calculation column IDs)
 
-### Multiple levels — list each level's OWN dimension only (incremental)
+### Multiple levels — each id appears at most ONCE across all levels
 
-Levels nest hierarchically by array order (outer → inner). **Each level's `groupBy`
-lists only the NEW dimension it adds — never repeat the parent level's dimensions.**
-Sigma collapses every level's `groupBy` into a single flat `GROUP BY` at the
-warehouse (it does not run a separate grouping step per level), so it assembles the
-full combined key from all levels automatically. Repeating a parent dimension in a
-child level references that column twice (once implicitly from the outer level, once
-explicitly here) and fails with **`Duplicate column or folder reference`**.
+Levels nest hierarchically by array order (outer → inner). Sigma collapses every
+level's `groupBy` into a single flat `GROUP BY` at the warehouse (it does not run a
+separate grouping step per level) and assembles the full combined key automatically.
 
-✅ **Correct (incremental — each level adds only its own dimension):**
+**The hard rule (POST-enforced, live-verified): no column or calculation id may
+appear more than once across the whole `groupings` array — in either `groupBy` OR
+`calculations`.** Repeating any id fails the POST with
+**`Duplicate column or folder reference: '<id>'`**. So:
+
+- Each level's `groupBy` lists only the NEW dimension it adds (never repeat a parent
+  level's dimension).
+- Each aggregate in `calculations` is listed on exactly ONE level — typically the
+  innermost — NOT repeated per level. Sigma still applies it across the collapsed
+  `GROUP BY`.
+
+✅ **Correct** — dimensions incremental, the calculation listed once (inner level):
+
+```json
+"groupings": [
+  { "id": "by-region", "groupBy": ["col-region"] },
+  { "id": "by-flag",   "groupBy": ["col-flag"], "calculations": ["col-total"] }
+]
+```
+
+(Listing `calculations` on the outer level instead, or omitting it, also POSTs clean —
+just don't list the same calc on more than one level.)
+
+❌ **Wrong — inner level repeats the outer dimension** → `Duplicate column or folder reference: 'col-region'`:
+
+```json
+"groupings": [
+  { "id": "by-region", "groupBy": ["col-region"] },
+  { "id": "by-flag",   "groupBy": ["col-region", "col-flag"] }
+]
+```
+
+❌ **Also wrong — the same calculation repeated on every level** → `Duplicate column or folder reference: 'col-total'`:
 
 ```json
 "groupings": [
   { "id": "by-region", "groupBy": ["col-region"], "calculations": ["col-total"] },
   { "id": "by-flag",   "groupBy": ["col-flag"],   "calculations": ["col-total"] }
-]
-```
-
-Produces a `region, flag` grouping (Sigma combines the levels).
-
-❌ **Wrong (cumulative — inner level repeats the outer dimension) → `Duplicate column or folder reference`:**
-
-```json
-"groupings": [
-  { "id": "by-region", "groupBy": ["col-region"],            "calculations": ["col-total"] },
-  { "id": "by-flag",   "groupBy": ["col-region", "col-flag"], "calculations": ["col-total"] }
 ]
 ```
 
