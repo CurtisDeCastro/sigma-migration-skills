@@ -30,9 +30,9 @@ Sigma's public API docs are an index at `https://help.sigmacomputing.com/openapi
 **Workbook element/control/format shapes** (the `bar-chart` / `kpi-chart` / `control` / format `kind`s that go under `/v2/workbooks/spec`) are **not inlined in either split spec** — get them from one of:
 
 - **A live workbook readback** — `GET /v2/workbooks/{id}/spec` on the user's org. The durable, always-current source: read a real workbook and navigate `pages[].elements[]` by `kind`. **Prefer this.**
-- **The full compiled OpenAPI** — one spec that *does* inline every workbook `kind`, currently served as a content-addressed Fern docs asset:
+- **The full compiled OpenAPI** — one spec that *does* inline every workbook `kind`, served as a content-addressed Fern docs asset (the sanctioned reference for now):
   `https://files.buildwithfern.com/sigma.docs.buildwithfern.com/006ce360082503c7b849529b4c183cc4dc63360aff76038ca64669572c662b87/assets/openapi/sigma-computing-public-rest-api.json`
-  Handy for offline `jq` navigation, but **transitional** — the hash pins one docs build (rotates on redeploy), and Sigma is moving this to a dedicated, reliably-hosted asset. If it 404s, rediscover the current link from the Sigma API reference docs or fall back to a live readback. (The retired `help.sigmacomputing.com/openapi/sigma-computing-public-rest-api.json` path now 404s.)
+  Good for offline `jq` navigation. Caveats: it may **lag** the live API slightly (it's refreshed out-of-band — manually today, moving to an automated refresh + a dedicated reliably-hosted asset that will also back the CLI), and the hash pins a build so the path can change on a docs redeploy. So treat a **live workbook readback** (above) as the always-current source, and if this asset 404s, rediscover the current link from the Sigma API reference docs. (The retired `help.sigmacomputing.com/openapi/sigma-computing-public-rest-api.json` path now 404s.)
 
 When this skill and the spec (or a live readback) disagree, the spec wins. When a feature isn't covered here, consult the spec / a live workbook and use what it documents.
 
