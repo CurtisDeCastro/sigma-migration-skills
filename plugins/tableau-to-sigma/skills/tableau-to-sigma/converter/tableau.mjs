@@ -24,9 +24,9 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   mod
 ));
 
-// ../dm-mcp/node_modules/fast-xml-parser/src/util.js
+// ../sigma-data-model-mcp/node_modules/fast-xml-parser/src/util.js
 var require_util = __commonJS({
-  "../dm-mcp/node_modules/fast-xml-parser/src/util.js"(exports) {
+  "../sigma-data-model-mcp/node_modules/fast-xml-parser/src/util.js"(exports) {
     "use strict";
     var nameStartChar = ":A-Za-z_\\u00C0-\\u00D6\\u00D8-\\u00F6\\u00F8-\\u02FF\\u0370-\\u037D\\u037F-\\u1FFF\\u200C-\\u200D\\u2070-\\u218F\\u2C00-\\u2FEF\\u3001-\\uD7FF\\uF900-\\uFDCF\\uFDF0-\\uFFFD";
     var nameChar = nameStartChar + "\\-.\\d\\u00B7\\u0300-\\u036F\\u203F-\\u2040";
@@ -98,9 +98,9 @@ var require_util = __commonJS({
   }
 });
 
-// ../dm-mcp/node_modules/fast-xml-parser/src/validator.js
+// ../sigma-data-model-mcp/node_modules/fast-xml-parser/src/validator.js
 var require_validator = __commonJS({
-  "../dm-mcp/node_modules/fast-xml-parser/src/validator.js"(exports) {
+  "../sigma-data-model-mcp/node_modules/fast-xml-parser/src/validator.js"(exports) {
     "use strict";
     var util = require_util();
     var defaultOptions = {
@@ -410,9 +410,9 @@ var require_validator = __commonJS({
   }
 });
 
-// ../dm-mcp/node_modules/fast-xml-parser/src/xmlparser/OptionsBuilder.js
+// ../sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/OptionsBuilder.js
 var require_OptionsBuilder = __commonJS({
-  "../dm-mcp/node_modules/fast-xml-parser/src/xmlparser/OptionsBuilder.js"(exports) {
+  "../sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/OptionsBuilder.js"(exports) {
     var { DANGEROUS_PROPERTY_NAMES, criticalProperties } = require_util();
     var defaultOnDangerousProperty = (name) => {
       if (DANGEROUS_PROPERTY_NAMES.includes(name)) {
@@ -536,9 +536,9 @@ var require_OptionsBuilder = __commonJS({
   }
 });
 
-// ../dm-mcp/node_modules/fast-xml-parser/src/xmlparser/xmlNode.js
+// ../sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/xmlNode.js
 var require_xmlNode = __commonJS({
-  "../dm-mcp/node_modules/fast-xml-parser/src/xmlparser/xmlNode.js"(exports, module) {
+  "../sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/xmlNode.js"(exports, module) {
     "use strict";
     var XmlNode = class {
       constructor(tagname) {
@@ -563,9 +563,9 @@ var require_xmlNode = __commonJS({
   }
 });
 
-// ../dm-mcp/node_modules/fast-xml-parser/src/xmlparser/DocTypeReader.js
+// ../sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/DocTypeReader.js
 var require_DocTypeReader = __commonJS({
-  "../dm-mcp/node_modules/fast-xml-parser/src/xmlparser/DocTypeReader.js"(exports, module) {
+  "../sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/DocTypeReader.js"(exports, module) {
     var util = require_util();
     var DocTypeReader = class {
       constructor(options) {
@@ -851,9 +851,9 @@ var require_DocTypeReader = __commonJS({
   }
 });
 
-// ../dm-mcp/node_modules/strnum/strnum.js
+// ../sigma-data-model-mcp/node_modules/strnum/strnum.js
 var require_strnum = __commonJS({
-  "../dm-mcp/node_modules/strnum/strnum.js"(exports, module) {
+  "../sigma-data-model-mcp/node_modules/strnum/strnum.js"(exports, module) {
     var hexRegex = /^[-+]?0x[a-fA-F0-9]+$/;
     var numRegex = /^([\-\+])?(0*)([0-9]*(\.[0-9]*)?)$/;
     var consider = {
@@ -939,9 +939,9 @@ var require_strnum = __commonJS({
   }
 });
 
-// ../dm-mcp/node_modules/fast-xml-parser/src/ignoreAttributes.js
+// ../sigma-data-model-mcp/node_modules/fast-xml-parser/src/ignoreAttributes.js
 var require_ignoreAttributes = __commonJS({
-  "../dm-mcp/node_modules/fast-xml-parser/src/ignoreAttributes.js"(exports, module) {
+  "../sigma-data-model-mcp/node_modules/fast-xml-parser/src/ignoreAttributes.js"(exports, module) {
     function getIgnoreAttributesFn(ignoreAttributes) {
       if (typeof ignoreAttributes === "function") {
         return ignoreAttributes;
@@ -964,9 +964,9 @@ var require_ignoreAttributes = __commonJS({
   }
 });
 
-// ../dm-mcp/node_modules/fast-xml-parser/src/xmlparser/OrderedObjParser.js
+// ../sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/OrderedObjParser.js
 var require_OrderedObjParser = __commonJS({
-  "../dm-mcp/node_modules/fast-xml-parser/src/xmlparser/OrderedObjParser.js"(exports, module) {
+  "../sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/OrderedObjParser.js"(exports, module) {
     "use strict";
     var util = require_util();
     var xmlNode = require_xmlNode();
@@ -1569,9 +1569,9 @@ var require_OrderedObjParser = __commonJS({
   }
 });
 
-// ../dm-mcp/node_modules/fast-xml-parser/src/xmlparser/node2json.js
+// ../sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/node2json.js
 var require_node2json = __commonJS({
-  "../dm-mcp/node_modules/fast-xml-parser/src/xmlparser/node2json.js"(exports) {
+  "../sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/node2json.js"(exports) {
     "use strict";
     function prettify(node, options) {
       return compress(node, options);
@@ -1656,9 +1656,9 @@ var require_node2json = __commonJS({
   }
 });
 
-// ../dm-mcp/node_modules/fast-xml-parser/src/xmlparser/XMLParser.js
+// ../sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/XMLParser.js
 var require_XMLParser = __commonJS({
-  "../dm-mcp/node_modules/fast-xml-parser/src/xmlparser/XMLParser.js"(exports, module) {
+  "../sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/XMLParser.js"(exports, module) {
     var { buildOptions } = require_OptionsBuilder();
     var OrderedObjParser = require_OrderedObjParser();
     var { prettify } = require_node2json();
@@ -1714,9 +1714,9 @@ var require_XMLParser = __commonJS({
   }
 });
 
-// ../dm-mcp/node_modules/fast-xml-parser/src/xmlbuilder/orderedJs2Xml.js
+// ../sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlbuilder/orderedJs2Xml.js
 var require_orderedJs2Xml = __commonJS({
-  "../dm-mcp/node_modules/fast-xml-parser/src/xmlbuilder/orderedJs2Xml.js"(exports, module) {
+  "../sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlbuilder/orderedJs2Xml.js"(exports, module) {
     var EOL = "\n";
     function toXml(jArray, options) {
       let indentation = "";
@@ -1847,9 +1847,9 @@ var require_orderedJs2Xml = __commonJS({
   }
 });
 
-// ../dm-mcp/node_modules/fast-xml-parser/src/xmlbuilder/json2xml.js
+// ../sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlbuilder/json2xml.js
 var require_json2xml = __commonJS({
-  "../dm-mcp/node_modules/fast-xml-parser/src/xmlbuilder/json2xml.js"(exports, module) {
+  "../sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlbuilder/json2xml.js"(exports, module) {
     "use strict";
     var buildFromOrderedJs = require_orderedJs2Xml();
     var getIgnoreAttributesFn = require_ignoreAttributes();
@@ -2093,9 +2093,9 @@ var require_json2xml = __commonJS({
   }
 });
 
-// ../dm-mcp/node_modules/fast-xml-parser/src/fxp.js
+// ../sigma-data-model-mcp/node_modules/fast-xml-parser/src/fxp.js
 var require_fxp = __commonJS({
-  "../dm-mcp/node_modules/fast-xml-parser/src/fxp.js"(exports, module) {
+  "../sigma-data-model-mcp/node_modules/fast-xml-parser/src/fxp.js"(exports, module) {
     "use strict";
     var validator = require_validator();
     var XMLParser2 = require_XMLParser();
@@ -2108,10 +2108,10 @@ var require_fxp = __commonJS({
   }
 });
 
-// ../dm-mcp/build/tableau.js
+// ../sigma-data-model-mcp/build/tableau.js
 var import_fast_xml_parser = __toESM(require_fxp(), 1);
 
-// ../dm-mcp/build/sigma-ids.js
+// ../sigma-data-model-mcp/build/sigma-ids.js
 var SIGMA_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 var _usedIds = /* @__PURE__ */ new Set();
 var _idCounter = 0;
@@ -2374,7 +2374,7 @@ function buildDerivedElements(elements) {
   return derived;
 }
 
-// ../dm-mcp/build/formulas.js
+// ../sigma-data-model-mcp/build/formulas.js
 function decodeXmlEntities(s) {
   if (!s || s.indexOf("&") === -1)
     return s;
@@ -3001,7 +3001,7 @@ function tableauFormulaIsRls(formula) {
   return /\b(USERNAME|FULLNAME|USERDOMAIN|ISMEMBEROF|ISUSERNAME|USERATTRIBUTE)\s*\(/i.test(formula || "");
 }
 
-// ../dm-mcp/build/tableau.js
+// ../sigma-data-model-mcp/build/tableau.js
 function paramControlId(rawName) {
   return clampId("ctl-" + rawName.replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-|-$/g, "").toLowerCase());
 }
@@ -4205,6 +4205,23 @@ function buildMultiDatasourceModel(xmlContent, options, datasources) {
     }
   };
 }
+function firstTopLevelSelectIndex(stmt) {
+  let depth = 0;
+  for (let i = 0; i < stmt.length; i++) {
+    const ch = stmt[i];
+    if (ch === "(") {
+      depth++;
+      continue;
+    }
+    if (ch === ")") {
+      depth--;
+      continue;
+    }
+    if (depth === 0 && /^SELECT\b/i.test(stmt.slice(i)))
+      return i;
+  }
+  return -1;
+}
 function convertTableauToSigma(xmlContent, options = {}) {
   if (!options.__multiDsChild) {
     resetIds(`ds${options.datasourceIndex ?? 0}\0${xmlContent}`);
@@ -4912,25 +4929,10 @@ ${statement}
         const stmt = fe.source.statement;
         const upperStmt = stmt.trimStart();
         if (/^WITH\s/i.test(upperStmt)) {
-          let depth = 0;
-          let lastTopSelectIdx = -1;
-          for (let i = 0; i < stmt.length; i++) {
-            const ch = stmt[i];
-            if (ch === "(") {
-              depth++;
-              continue;
-            }
-            if (ch === ")") {
-              depth--;
-              continue;
-            }
-            if (depth === 0 && /^SELECT\b/i.test(stmt.slice(i))) {
-              lastTopSelectIdx = i;
-            }
-          }
-          if (lastTopSelectIdx > 0) {
-            const ctePart = stmt.slice(0, lastTopSelectIdx).replace(/^\s*WITH\s+/i, "").replace(/,?\s*$/, "");
-            const selectPart = stmt.slice(lastTopSelectIdx);
+          const firstTopSelectIdx = firstTopLevelSelectIndex(stmt);
+          if (firstTopSelectIdx > 0) {
+            const ctePart = stmt.slice(0, firstTopSelectIdx).replace(/^\s*WITH\s+/i, "").replace(/,?\s*$/, "");
+            const selectPart = stmt.slice(firstTopSelectIdx);
             return {
               ctePrefix: `${ctePart},
 __lod_base AS (
@@ -6690,5 +6692,6 @@ ${suggestion}
 }
 export {
   collapseCustomSqlBlend,
-  convertTableauToSigma
+  convertTableauToSigma,
+  firstTopLevelSelectIndex
 };
