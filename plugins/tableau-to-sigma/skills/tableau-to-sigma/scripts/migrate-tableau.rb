@@ -124,7 +124,6 @@ require_relative 'lib/py_resolve' # real-Python resolver (Windows Store-stub saf
 require 'date'
 require 'time'
 require 'set'
-require 'digest' # loop-breaker failure signatures (Offramp.loop_check)
 require_relative 'lib/scout_gate'
 require_relative 'lib/dashboard_read'
 require_relative 'lib/recipe_multimetric'
@@ -1176,13 +1175,23 @@ if opts[:finalize]
   phase_summary
   # ── Same-failure loop breaker (stop-at-2) ──────────────────────────────────
   # A NOT-GREEN finalize records its gate signature; re-running --finalize into
-  # the SAME failing exit codes a third time is grinding, not converging —
+  # the SAME failing exit codes a second time is grinding, not converging —
   # hard-STOP and hand control to the operator instead of looping toward a
   # forced green (refs/operating-contract.md: "don't spin, don't fake").
+  # The signature keys ALL THREE gate statuses that decide all_green — phase6,
+  # cleanup, and the census gate. Omitting cleanup used to make every
+  # cleanup-only NOT-GREEN (all_green false purely on clst) record
+  # "phase6=0:gate=0" — a signature naming two PASSING gates, colliding every
+  # cleanup failure regardless of cause into one false "EXACT same failure".
+  # (Note: adding the key changed the finalize signature strings, so 1-counts
+  # recorded by older builds no longer pair with new records — acceptable: the
+  # breaker restarts counting on the more truthful signature.)
   unless all_green
-    _fsig = "migrate-tableau:finalize:phase6=#{p6st.exitstatus}:gate=#{gst.exitstatus}"
+    _fsig = Offramp.failure_signature(script: 'migrate-tableau', context: 'finalize',
+                                      exit_code: { phase6: p6st.exitstatus, gate: gst.exitstatus,
+                                                   cleanup: clst.exitstatus })
     if Offramp.loop_check(WORK, signature: _fsig) == :stop
-      _prior = Offramp.loop_trail(WORK).select { |r| r['signature'] == _fsig }[0..-2]
+      _prior = Offramp.loop_active_trail(WORK).select { |r| r['signature'] == _fsig }[0..-2]
       puts
       puts '==================== LOOP STOP (operator action required) ==================='
       puts "This EXACT finalize failure (#{_fsig}) has now occurred #{_prior.size + 1} times:"
@@ -1190,9 +1199,18 @@ if opts[:finalize]
       puts "  • (now)                #{_fsig}"
       puts 'Re-running the same --finalize will not converge. STOPPING — hand this to the'
       puts "operator with the gate output above and the loop log (#{File.join(WORK, 'loop-log.jsonl')})."
+      puts 'To re-arm the breaker once the cause is actually fixed: a GREEN finalize'
+      puts "re-arms it automatically; otherwise clear #{File.join(WORK, 'loop-log.jsonl')} (operator-only)."
       puts '============================================================================='
       Offramp.log(WORK, kind: 'loop-stop', reason: _fsig)
     end
+  else
+    # GREEN re-arms the breaker: append a reset record (append-only — never
+    # truncate) so signatures counted BEFORE this green cannot convert the
+    # next unrelated same-signature failure, possibly days later on this
+    # long-lived workdir, into a false hard-STOP. A green gate pass has just
+    # disproven that those earlier occurrences were a non-converging loop.
+    Offramp.loop_reset(WORK)
   end
   exit(all_green ? 0 : 3)
 end
@@ -3677,15 +3695,30 @@ rescue WorkbookBuildError => e
   names = failed.empty? ? 'one or more fields' : failed.join(', ')
   n = failed.empty? ? 'some' : failed.size.to_s
   # ── Same-failure loop breaker (stop-at-2) ──────────────────────────────────
-  # Every exit-4 handoff records a failure signature (script + exit code + SHA1
-  # of the first error line). A re-run that dies on the SAME signature a third
-  # time is grinding, not converging — hard-STOP and hand control to the
-  # operator (refs/operating-contract.md: "don't spin, don't fake").
-  _err_line = e.captured_output.to_s.lines.map(&:strip).reject(&:empty?).first ||
+  # Every exit-4 handoff records a failure signature (script + exit codes +
+  # error class + SHA1 of the NORMALIZED first ERROR line — normalized so a
+  # repair patch that merely shuffles which element fails first cannot mint a
+  # "new" failure). A re-run that dies on the SAME signature a second time is
+  # grinding, not converging — hard-STOP and hand control to the operator
+  # (refs/operating-contract.md: "don't spin, don't fake").
+  #
+  # Signature the ERROR, not the first output line: children print NORMALIZE:/
+  # WARN: report lines BEFORE their ERROR: lines (validate-spec.rb), so a
+  # stable leading report line would collide two DIFFERENT root causes into
+  # one false :stop — and removing a warning would mint a fresh signature for
+  # the SAME error (Offramp.first_error_line owns the selection rule). And key
+  # WHICH child failed + its real exit status (run_wb! raises the same
+  # WorkbookBuildError for validate-spec / assert-wb-refs-resolve /
+  # post-and-readback alike; the handoff exit is always 4) so different
+  # children with a similar first line cannot collide either.
+  _err_line = Offramp.first_error_line(e.captured_output) ||
               e.message.lines.first.to_s.strip
-  _sig = "migrate-tableau:exit4:#{Digest::SHA1.hexdigest(_err_line.to_s)[0, 12]}"
+  _child_exit = e.message[/\Acommand failed \((\d+)\)/, 1]
+  _sig = Offramp.failure_signature(script: 'migrate-tableau', context: 'exit4',
+                                   exit_code: _child_exit ? { handoff: 4, child: _child_exit } : 4,
+                                   error_class: e.class, error_line: _err_line)
   if Offramp.loop_check(WORK, signature: _sig) == :stop
-    _prior = Offramp.loop_trail(WORK).select { |r| r['signature'] == _sig }[0..-2]
+    _prior = Offramp.loop_active_trail(WORK).select { |r| r['signature'] == _sig }[0..-2]
     puts
     puts '==================== LOOP STOP (operator action required) ==================='
     puts "The SAME workbook-build failure has now occurred #{_prior.size + 1} times:"
@@ -3694,6 +3727,8 @@ rescue WorkbookBuildError => e
     puts 'Re-running the same command will not converge. STOPPING — hand this to the'
     puts 'operator with the error above, the salvage inventory (if written), and the'
     puts "loop log (#{File.join(WORK, 'loop-log.jsonl')}). Signature: #{_sig}"
+    puts 'To re-arm the breaker once the cause is actually fixed: a GREEN --finalize'
+    puts "re-arms it automatically; otherwise clear #{File.join(WORK, 'loop-log.jsonl')} (operator-only)."
     puts '============================================================================='
     Offramp.log(WORK, kind: 'loop-stop', reason: _sig, detail: _err_line.to_s[0, 200])
     mark('phase4-workbook')
