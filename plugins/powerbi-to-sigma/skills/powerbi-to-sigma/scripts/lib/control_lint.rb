@@ -14,7 +14,7 @@
 # three list controls bound to no element at all) or controls that silently
 # skip same-page charts (the PHASEE "Action(Region) → Monthly Revenue Trend"
 # escape, and the Qlik class: source full of listboxes, spec with zero
-# controls). Three checks:
+# controls). Four checks:
 #
 #   (a) dead control — every kind:control element must have >=1 `filters`
 #       target resolving to a REAL element id in the spec, OR be referenced
@@ -33,6 +33,17 @@
 #       zero controls, if an annotated control is missing from the spec,
 #       or if an annotated mustReach element is not in that control's
 #       closure.
+#   (d) conflicting cross-page control defaults — the severe D11 special
+#       case. Two-or-more controls on DIFFERENT pages whose `filters`
+#       target the SAME source element on the SAME column (or a textual
+#       formula-alias of it) with non-empty, DISJOINT default value sets.
+#       Sigma AND-composes every control that filters a shared source
+#       element, so disjoint defaults form an impossible filter → the
+#       master returns ZERO rows → every element sourced from it reads
+#       EMPTY workbook-wide, silently (no error at build or POST). Fires
+#       only when both defaults are non-empty AND disjoint AND hit the
+#       same in-spec element+column on different pages, so the common
+#       default-all case (values: []) never trips it.
 #
 # CONTRACT — <out>/control-scope.json (emitted by the converter/builder next
 # to the workbook spec; post-and-readback.rb and assert-phase6-ran.rb pick it
@@ -191,6 +202,93 @@ module ControlLint
     n && !n.to_s.empty? ? "#{n.inspect} (#{eid})" : eid
   end
 
+  # --- check (d) helpers: conflicting cross-page control defaults ------------
+  # Default selected values of a control. Sigma control fields are FLAT: a list
+  # control carries its defaults in a `values` ARRAY (default-all builds emit
+  # `values: []`). Tolerate `value`/`defaultValue` scalar/array forms other
+  # converters may use. Empty/absent => no default => the caller skips it (this
+  # is the guard that keeps the common default-all case from ever firing (d)).
+  def default_values(el)
+    return el['values'] if el['values'].is_a?(Array)
+    %w[value defaultValue].each do |k|
+      return Array(el[k]) if el.key?(k) && !el[k].nil?
+    end
+    []
+  end
+
+  # { table_element_id => { normalized_formula => [columnId, ...] } }.
+  # Groups a TABLE element's columns by whitespace-normalized formula so the
+  # id-duplication workaround (one logical column emitted under two ids — e.g.
+  # m-website-type / m-website-type-overview, both formula [Custom SQL/Website
+  # Type]) collapses to ONE alias key. Only kind:table elements carry the
+  # columns[] to alias; chart/other targets fall back to the raw columnId at the
+  # call site.
+  def column_alias_groups(spec)
+    out = {}
+    (spec['pages'] || []).each do |pg|
+      (pg['elements'] || []).each do |el|
+        next unless el.is_a?(Hash) && el['kind'].to_s == 'table' && el['id']
+        by_formula = Hash.new { |h, k| h[k] = [] }
+        (el['columns'] || []).each do |c|
+          next unless c.is_a?(Hash) && c['id'] && c['formula'].is_a?(String)
+          by_formula[c['formula'].strip.gsub(/\s+/, ' ')] << c['id']
+        end
+        out[el['id']] = by_formula
+      end
+    end
+    out
+  end
+
+  # (d) conflicting cross-page control defaults. See the header for the full
+  # rationale. Conservative by construction: an entry is only recorded when the
+  # control has a non-empty default AND a filter target that resolves to a real
+  # in-spec element; a pair only violates when it spans two pages against the
+  # same (element, column-alias) with DISJOINT defaults.
+  def conflicting_default_violations(spec, elems)
+    alias_groups = column_alias_groups(spec)
+    entries = []
+    elems.each do |eid, info|
+      next unless control?(info)
+      el = info[:el]
+      defaults = default_values(el)
+      next if defaults.empty?
+      Array(el['filters']).each do |t|
+        next unless t.is_a?(Hash)
+        target = t.dig('source', 'elementId')
+        cid    = t['columnId']
+        next unless target && cid
+        next unless elems.key?(target) # ghost target — owned by check (a)
+        alias_key = (alias_groups[target] || {}).find { |_f, ids| ids.include?(cid) }&.first || cid
+        entries << { eid: eid, control_id: el['controlId'] || eid, page: info[:page],
+                     target: target, alias_key: alias_key, defaults: defaults.to_set }
+      end
+    end
+
+    violations = []
+    entries.group_by { |e| [e[:target], e[:alias_key]] }.each_value do |group|
+      next if group.map { |e| e[:page] }.uniq.size < 2
+      group.combination(2).each do |a, b|
+        next if a[:page] == b[:page]
+        next if (a[:defaults] & b[:defaults]).any? # overlapping => satisfiable, not impossible
+        ca  = "control #{label(elems, a[:eid])} [#{a[:control_id]}]"
+        cb  = "control #{label(elems, b[:eid])} [#{b[:control_id]}]"
+        col = a[:alias_key] == b[:alias_key] ? a[:alias_key] : "#{a[:alias_key]} / #{b[:alias_key]}"
+        violations << "conflicting cross-page control defaults: #{ca} on page #{a[:page].inspect} " \
+                      "defaults to #{a[:defaults].to_a.inspect} and #{cb} on page #{b[:page].inspect} " \
+                      "defaults to #{b[:defaults].to_a.inspect}, but BOTH filter the SAME shared element " \
+                      "#{label(elems, a[:target])} on the same column (#{col}) with DISJOINT default value " \
+                      'sets. Sigma AND-composes every control that targets a shared source element, so the ' \
+                      'composed filter matches ZERO rows on that source — every element sourced from it reads ' \
+                      'EMPTY workbook-wide, with no error at build or POST. Fix by EITHER (1) giving each page ' \
+                      'its own independently-sourced master element (a distinct filter-target elementId per ' \
+                      'page) so the controls no longer compose against one source, OR (2) making the per-page ' \
+                      'defaults overlap (a non-empty intersection) or default-all (values: []) so the composed ' \
+                      'filter is satisfiable'
+      end
+    end
+    violations.uniq
+  end
+
   def lint(spec, scope: nil)
     violations = []
     elems = elements(spec)
@@ -283,6 +381,10 @@ module ControlLint
                       'scope:[...] — see header CONTRACT)'
       end
     end
+
+    # (d) conflicting cross-page control defaults — shared source + disjoint
+    # per-page defaults = impossible AND-composed filter = workbook-wide zero rows.
+    violations.concat(conflicting_default_violations(spec, elems))
 
     # (c) annotated controls that never made it into the spec ------------------
     # A scope entry flagged as an ALREADY-SURFACED gap (needs-wiring: an orphan/
