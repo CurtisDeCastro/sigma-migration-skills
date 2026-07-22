@@ -45,7 +45,7 @@ INVENTORY = [
   { name: 'Tableau format strings',                    pat: /<format\s[^>]*attr='text-format'/,
     status: :auto, blurb: 'p0.0% / C1033% / $#,##0;(...) etc. translated to Sigma d3-format with paren-negative.' },
   { name: 'Shared-view dashboard filters',             pat: /<shared-view[^>]*>\s*<datasources>/,
-    status: :auto, blurb: 'List/relative-date/quantitative shared filters become Sigma controls per page.' },
+    status: :hint, blurb: 'Dashboard QUICK-filters become Sigma controls per page (auto). But an always-on DATA-SOURCE filter hosted here (user:ui-domain=database, e.g. an `active` flag) renders nothing on any dashboard, so it must be APPLIED as a workbook-wide default filter on the master — NOT left as an open control. parse-twb-layout tags them (is_datasource_filter); the datasource-filter gate (assert-datasource-filters.rb) blocks GREEN until each is applied. See refs/phase-1-discover.md.' },
   { name: 'Per-worksheet sort',                        pat: /<sort\s+[^>]*direction=/,
     status: :auto, blurb: "Tableau's sort direction carries into the chart's xAxis.sort." },
   { name: 'Parameter (list domain) + CASE-on-param',   pat: /param-domain-type='list'/,

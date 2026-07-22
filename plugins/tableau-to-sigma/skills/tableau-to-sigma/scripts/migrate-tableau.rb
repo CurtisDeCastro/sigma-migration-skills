@@ -242,6 +242,8 @@ OptionParser.new do |o|
                          'when the .twbx payload + connection id are already available') { opts[:no_auto_land] = true }
   o.on('--skip-postpublish-guide REASON', 'waive the finalize gate that requires POSTPUBLISH_GUIDE.md when the ' \
                                           'source carries dashboard actions (gate 11) — name it in your report') { |v| opts[:skip_postpublish_guide] = v }
+  o.on('--skip-datasource-filters REASON', 'waive the #483 datasource-filter gate (always-on Tableau data-source ' \
+                                           'filters must be applied as master defaults, not silently dropped) — REQUIRED reason; name it in your report') { |v| opts[:skip_datasource_filters] = v }
   o.on('--row-scale F', Float) { |v| opts[:row_scale] = v }
   o.on('--page-rows N', Integer, 'override the layout row model (passed through to build-dashboard-layout.rb; ' \
                                  'wins over the px-derived canvas rows)') { |v| opts[:page_rows] = v }
@@ -1006,6 +1008,19 @@ if opts[:finalize]
   _, gst = sigma_run!(gate, allow_fail: true)
   mark('assert-phase6-ran')
 
+  # #483 datasource-filter gate — always-on Tableau data-source filters (a
+  # <shared-view> database-domain filter like company_active=true, or a
+  # <datasource>/<extract> filter) render NOTHING on any dashboard, so a visual
+  # check can't catch a miss. This verifies each tagged filter was APPLIED as a
+  # workbook-wide master default (not silently dropped → every aggregate
+  # over-reports). Kept a STANDALONE tableau-local gate (not folded into the
+  # SHARED assert-phase6-ran.rb) so it ships in one plugin PR; blocks GREEN via
+  # all_green below. SKIPs cleanly offline / without a token.
+  dsf_cmd = ['ruby', File.join(HERE, 'assert-datasource-filters.rb'), '--workdir', WORK, '--workbook-id', wb_id]
+  dsf_cmd += ['--skip-datasource-filters', opts[:skip_datasource_filters]] if opts[:skip_datasource_filters]
+  _, dsfst = sigma_run!(dsf_cmd, allow_fail: true)
+  mark('assert-datasource-filters')
+
   if gst.exitstatus == 7
     census = (JSON.parse(File.read(File.join(WORK, 'parity-final.json')))['tile_census'] rescue {}) || {}
     unmatched = census['unmatched_zone_names'] || []
@@ -1130,7 +1145,7 @@ if opts[:finalize]
   # With an explicit --min-pass-rate (honest NAMED divergences), the census-
   # aware gate is the parity authority — phase6's own exit stays strict-100%.
   parity_ok = p6st.success? || (opts[:min_pass_rate] && gst.success?)
-  all_green = parity_ok && clst.success? && gst.success?
+  all_green = parity_ok && clst.success? && gst.success? && dsfst.success?
 
   # ---------------------------------------------------------------------------
   # Phase E (OPT-IN) — Enhance. Runs ONLY when --enhance was passed (here or on
@@ -1218,7 +1233,7 @@ if opts[:finalize]
   else
     puts "PARITY      : #{pf['status'] || '?'} (#{pf['charts_pass']}/#{pf['charts_total']} charts#{state['extract_mode'] ? ', extract-mode' : ''})"
   end
-  puts "GATES       : phase6=#{p6st.success? ? 'PASS' : 'FAIL'} cleanup=#{clst.success? ? 'PASS' : 'FAIL'} assert-phase6-ran=#{gst.success? ? 'PASS' : "FAIL(#{gst.exitstatus})"}"
+  puts "GATES       : phase6=#{p6st.success? ? 'PASS' : 'FAIL'} cleanup=#{clst.success? ? 'PASS' : 'FAIL'} assert-phase6-ran=#{gst.success? ? 'PASS' : "FAIL(#{gst.exitstatus})"} ds-filters=#{dsfst.success? ? 'PASS' : "FAIL(#{dsfst.exitstatus})"}"
   puts "ENHANCE     : #{enhance_line}" if enhance_line
   puts "STATUS      : #{all_green ? 'GREEN' : 'NOT GREEN'}"
   puts '======================================='

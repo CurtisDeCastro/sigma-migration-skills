@@ -391,8 +391,18 @@ def normalize_filter(f)
     topn = nil
     order_expr = nil
     order_dir  = nil
+    ui_domain  = nil
     f.each_element('.//groupfilter') do |gf|
       fn = gf.attributes['function'].to_s
+      # ui-domain (#483): a filter whose enumeration is scoped to the whole
+      # database — `user:ui-domain='database'` on the union/filter node — is a
+      # DATA-SOURCE-level (always-on) filter, not a dashboard quick-filter the
+      # user toggles. Capture it so the shared-view walk can distinguish a
+      # virtual-connection data-source filter (which renders nothing on any
+      # dashboard) from a real quick filter. (Nokogiri resolves `user:`; probe
+      # both keys for the REXML fallback.)
+      dom = gf.attributes['user:ui-domain'] || gf.attributes['ui-domain']
+      ui_domain ||= dom.to_s if dom && !dom.to_s.empty?
       # EXCLUDE mode (D1/P0.1): the member tree is wrapped in
       # `function='except'` (and/or tagged `user:ui-enumeration='exclusive'`).
       # The member descendants are then the EXCLUDED values — collecting them
@@ -450,6 +460,14 @@ def normalize_filter(f)
     out['kind']    = 'list'
     out['members'] = members
     out['exclude'] = true if exclude
+    out['ui_domain'] = ui_domain if ui_domain
+    # A single-member boolean list (e.g. `company_active = true`) is the classic
+    # always-on "active flag" data-source filter shape (#483). Advisory metadata;
+    # the gate keys on is_datasource_filter, this only sharpens its messaging.
+    if !exclude && members.length == 1 &&
+       %w[true false 1 0 yes no].include?(members.first.to_s.downcase)
+      out['is_active_flag'] = true
+    end
     # An exclude filter whose excluded members include Null: the view hides
     # the null bucket. Surfaced so the builder can filter nulls at the list
     # control's option source (#417 workaround) instead of emitting the
@@ -2101,11 +2119,30 @@ end
 # Parsing here means a page-per-worksheet builder can auto-emit Sigma controls
 # for them without the agent supplying any config.
 shared_filters = []
+# Datasource names — a shared-view named after a datasource hosts that
+# datasource's always-on (data-source-level) filters, not dashboard quick
+# filters. Virtual-connection / published-datasource filters live here rather
+# than under a top-level <datasource> (which the D2/P0.2 walk below covers), so
+# without this tag they were misread as toggleable quick-filters and silently
+# widened/dropped (#483).
+ds_names = []
+xml.elements.each('/workbook/datasources/datasource') do |ds|
+  n = ds.attributes['name'].to_s
+  ds_names << n unless n.empty?
+end
 xml.elements.each('//shared-view') do |sv|
   sv_name = sv.attributes['name']
   sv.elements.each('filter') do |f|
     spec = normalize_filter(f)
     spec['shared_view'] = sv_name
+    # #483: a shared-view filter is a DATA-SOURCE (always-on) filter — invisible
+    # on every dashboard surface, so the Phase-1d PNG read can never catch a
+    # miss — when its enumeration is database-domain scoped OR the shared-view is
+    # named after a datasource. Tag it so build-charts records it and the
+    # datasource-filter gate blocks GREEN unless it was applied. Genuine
+    # dashboard quick-filters (no database domain, shared-view not a datasource
+    # name) stay untagged and flow through the normal auto-control path.
+    spec['is_datasource_filter'] = true if spec['ui_domain'] == 'database' || ds_names.include?(sv_name)
     shared_filters << spec
   end
 end
