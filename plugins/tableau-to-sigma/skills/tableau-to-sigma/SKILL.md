@@ -18,12 +18,17 @@ user-invocable: true
 > - Windows PowerShell: `powershell -ExecutionPolicy Bypass -File scripts\doctor.ps1`
 >
 > It checks Ruby/Python/Node/bash and flags the Python "Store stub" + CRLF with exact fixes.
-> **If the doctor reports a missing runtime (exit 1): STOP.** Present its fix to the user
-> and get their OK — **do not** self-install a runtime, download an unpinned binary, or
-> edit the machine's PATH on your own initiative. That is a hard-to-reverse, outward-facing
-> action to confirm first, not improvise mid-run. Node in particular: on locked-down
-> Windows use the no-admin path in `refs/environment.md` (#5), and let the **user** run it.
-> Details: `refs/environment.md`.
+> **If the doctor reports a missing runtime (exit 1): STOP.** Present the bootstrap
+> one-liner to the user and get their OK — it installs only what is missing, pinned and
+> no-admin (user-dir/portable installs; PATH persisted via `~/.sigma-migration/env` on
+> bash hosts and via the USER PATH environment variable on Windows PowerShell),
+> then re-runs the doctor as its exit oracle:
+> - macOS / Linux / Git Bash: `bash scripts/bootstrap.sh`
+> - Windows PowerShell: `powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1`
+>
+> **Do not** self-install a runtime by hand, download an unpinned binary, or edit the
+> machine's PATH on your own initiative — the bootstrap is the sanctioned path, and the
+> **user** runs it. Details: `refs/environment.md`.
 
 > ## ⛔ STEP 1 — THE ONE PATH (there is a single entry point; do not improvise one)
 > After the doctor, **always run the orchestrator** — it chains every phase

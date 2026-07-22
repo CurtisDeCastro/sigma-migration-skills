@@ -30,8 +30,9 @@ Exit 0 = good to go. Exit 1 = a required tool is missing (each ✗/[X] line has 
      (skipping the stub), and Python entrypoints re-spawn via `sys.executable`. The
      stub only blocks the **first** `python ...` launch — so use `py -3 scripts/<x>.py`.
 
-2. **No `bash` (or a flaky Git Bash).** The `*.sh` helpers need a bash; install
-   **Git for Windows** (ships Git Bash) for the scripts that still require it. But
+2. **No `bash` (or a flaky Git Bash).** The `*.sh` helpers need a bash; the bootstrap
+   installs **Git for Windows** (ships Git Bash) user-scoped for the scripts that still
+   require it: `powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1`. But
    **don't fight bash for tokens at all** — the orchestrated path needs no token step
    (minted in-process), and hand-driven calls have shell-neutral Python twins. See
    **"Windows: tokens, JSON files, and env vars"** below.
@@ -40,23 +41,34 @@ Exit 0 = good to go. Exit 1 = a required tool is missing (each ✗/[X] line has 
    the shipped `.sh`/`.rb`/`.py` to CRLF and break shebangs (`\r: command not found`).
    Set `git config --global core.autocrlf input` and re-checkout.
 
-4. **Ruby not on PATH.** Install **RubyInstaller** (https://rubyinstaller.org), tick
-   *Add Ruby to PATH*, reopen the shell.
+4. **Ruby not on PATH.** Run the bootstrap — it installs Ruby user-scoped (winget,
+   with a scoop-portable fallback; no admin) and only what is actually missing:
+   - Git Bash: `bash scripts/bootstrap.sh`
+   - PowerShell: `powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1`
+
+   Reopen the shell if `ruby` still doesn't resolve — winget PATH edits land in
+   new shells.
 
 5. **No `node`, no admin rights.** Node is a hard prerequisite (the converters are
-   ESM run via `node`), but the nodejs.org MSI and `winget install OpenJS.NodeJS.LTS`
-   both want admin — which locked-down corporate machines don't grant. Sanctioned
-   options, in order:
-   - **If you have admin:** install Node LTS from **https://nodejs.org** or
-     `winget install OpenJS.NodeJS.LTS`, reopen the shell.
-   - **No admin — user-scoped version manager (preferred):**
-     `winget install Schniz.fnm` then `fnm install --lts && fnm use --lts`. fnm is a
-     single user-scoped binary; no admin, and it persists across sessions.
-   - **No admin, no winget — portable zip (last resort):** download the **LTS** zip
-     from nodejs.org, extract to `%USERPROFILE%\node`, and add it to PATH. Pin an
-     explicit LTS version (do **not** grab whatever is "latest"), and prefer a build
-     that is at least a few days old. This is a *documented, deliberate* step — not
-     something to improvise mid-run.
+   ESM run via `node`), but the nodejs.org MSI and machine-scope winget installs
+   want admin — which locked-down corporate machines don't grant. The bootstrap
+   handles this without elevation: it first **activates** any version-manager
+   install it finds (fnm — including macOS's default `~/Library/Application
+   Support/fnm` home — / nvm / asdf / `~/.local/node`; the field-recurrent case
+   is Node already installed but not on the agent shell's PATH), and only then
+   installs Node **pinned to the 22 LTS line** (in maintenance until 2027-04;
+   the 20 line reached end-of-life 2026-04-30, so new installs never pin it)
+   via the no-admin route for the host (winget/scoop `fnm` on Windows; brew or
+   the pinned portable tarball into `~/.local/node` elsewhere), persisting
+   PATH so later shells see it:
+   - Git Bash: `bash scripts/bootstrap.sh`
+   - PowerShell: `powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1`
+
+   **Manual fallback (no winget, no bootstrap — last resort):** download the
+   **LTS** zip from nodejs.org, extract to `%USERPROFILE%\node`, and add it to
+   PATH. Pin an explicit LTS version (do **not** grab whatever is "latest"), and
+   prefer a build that is at least a few days old. This is a *documented,
+   deliberate* step — not something to improvise mid-run.
 
 ## Windows: tokens, JSON files, and env vars
 

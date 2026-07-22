@@ -23,7 +23,12 @@ set -u
 WORKDIR="${DOCTOR_WORKDIR:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
-    --workdir) WORKDIR="${2:-}"; shift 2 ;;
+    # Value-taking flags MUST verify $2 exists (bootstrap.sh's parser rule):
+    # with $#=1, `shift 2` shifts nothing in bash and this loop would
+    # reprocess `--workdir` forever — a silent zero-output hang.
+    --workdir)
+      [ $# -ge 2 ] || { echo "doctor.sh: missing value for --workdir" >&2; exit 2; }
+      WORKDIR="$2"; shift 2 ;;
     --workdir=*) WORKDIR="${1#*=}"; shift ;;
     *) shift ;;
   esac
@@ -47,15 +52,17 @@ if command -v ruby >/dev/null 2>&1; then
   ok "ruby — $(ruby -e 'print RUBY_VERSION' 2>/dev/null)"
 else
   if [ "$OS" = "windows-bash" ]; then
-    bad "ruby not found" "Install RubyInstaller (https://rubyinstaller.org), tick 'Add Ruby to PATH', reopen the shell."
+    bad "ruby not found" "Run the bootstrap: bash scripts/bootstrap.sh   — no-admin install (winget, or scoop-portable fallback); it re-runs this doctor when done."
   else
-    bad "ruby not found" "macOS: 'brew install ruby'  •  Linux: 'apt-get install ruby' (or your package manager)."
+    bad "ruby not found" "Run the bootstrap: bash scripts/bootstrap.sh   — installs only what's missing (macOS: brew; Linux: apt-get only when already root — never sudo; otherwise it names the exact admin ask)."
   fi
 fi
 
 # --- python (real interpreter, NOT the Windows Store alias stub) -----------
 # Probe py -3 (Windows launcher) first, then python3/python. Reject any that
 # resolves under WindowsApps — the App-Execution-Alias stub that silently no-ops.
+# bootstrap.sh duplicates this probe — KEEP IN LOCKSTEP (the tableau skill's
+# test-bootstrap-lockstep.sh diffs the two bodies and fails on drift).
 py_real() {
   local exe="$1"; shift
   command -v "$exe" >/dev/null 2>&1 || return 1
@@ -72,9 +79,9 @@ elif py_real python ; then ok "python — $PY_DESC  [python]"
 else
   if [ "$OS" = "windows-bash" ]; then
     bad "no real Python (the 'python'/'python3' you have is likely the Microsoft Store alias stub)" \
-        "Install Python from python.org (tick 'Add to PATH'), then use 'py -3', OR disable the stub: Settings → Apps → Advanced app settings → App execution aliases → turn OFF python.exe/python3.exe. Re-run."
+        "Run the bootstrap: bash scripts/bootstrap.sh   — installs a real Python (winget/scoop, no admin; the stub is rejected by its probe). Manual alternative: disable the stub under Settings → Apps → Advanced app settings → App execution aliases."
   else
-    bad "python3 not found" "macOS: 'brew install python'  •  Linux: 'apt-get install python3'."
+    bad "python3 not found" "Run the bootstrap: bash scripts/bootstrap.sh   — installs python3 (brew, or apt-get when already root — never sudo)."
   fi
 fi
 
@@ -105,15 +112,22 @@ fi
 # visual-similarity.py needs Pillow + numpy; without them the gate exits
 # "SKIPPED: dep missing" instead of measuring (A/B-report field-caught: the
 # deps were undeclared and the floor silently could not run on a fresh box).
-if command -v "${PY_CMD:-python3}" >/dev/null 2>&1; then
-  if "${PY_CMD:-python3}" -c "import PIL, numpy, requests" >/dev/null 2>&1; then
+# Probes the interpreter py_real just RESOLVED ($PY_ARGV — on windows-bash
+# that is `py -3`, while bare `python3` may be the Store stub or absent), and
+# SELF-GATES on the render scripts existing next to this doctor — the same
+# adjacency gate bootstrap's payload step uses, so assessment-skill twins that
+# ship neither script don't warn users into a bootstrap that (correctly)
+# declines to install the payload there.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -n "$PY_ARGV" ] && { [ -f "$HERE/visual-similarity.py" ] || [ -f "$HERE/sigma-export-png.py" ]; }; then
+  if $PY_ARGV -c "import PIL, numpy, requests" >/dev/null 2>&1; then
     ok "python render deps (Pillow + numpy + requests) — sigma-export-png + visual-similarity can run"
   else
     # requests: sigma-export-png.py needs it — without it the Phase-5b/6f render
     # SILENTLY fails on a fresh env (v5.5 e2e field-caught). Pillow/numpy: the
     # gate-14 visual floor. One check, one fix line.
     warn "Pillow/numpy/requests missing — sigma-export-png (renders) and the visual-similarity floor (gate 14) cannot run" \
-         "pip install pillow numpy requests   (numpy 2.3+ preferred; 2.2.x histogram regression is worked around in-script)"
+         "Run the bootstrap: bash scripts/bootstrap.sh   — installs the pinned render payload (pillow, numpy>=2.3, requests) with a TLS-proxy-safe pip."
   fi
 fi
 
@@ -128,7 +142,7 @@ if [ -n "$PY_ARGV" ]; then
   TLS_PROBE="$($PY_ARGV -c "import ssl,importlib.util as iu; print('TRUSTWARN' if ssl.OPENSSL_VERSION.startswith('OpenSSL 3') and iu.find_spec('truststore') is None else '')" 2>/dev/null)"
   if [ "$TLS_PROBE" = "TRUSTWARN" ]; then
     warn "python uses OpenSSL 3.x without 'truststore' — TLS verification may fail against some servers (e.g. Tableau Cloud) where curl/Ruby succeed" \
-         "Fix: '$PY_ARGV -m pip install truststore' (uses the OS trust store). Do NOT disable TLS verification."
+         "Run the bootstrap: bash scripts/bootstrap.sh   — installs 'truststore' and wires pip to the OS trust store. Do NOT disable TLS verification."
   fi
 fi
 
@@ -142,9 +156,12 @@ else
   # agent shell never sources. Probe the standard version-manager install dirs
   # BEFORE declaring node missing; found => print the exact PATH prepend
   # (WARN-activatable) instead of sending the user to install a runtime they have.
+  # bootstrap.sh's find_vm_node duplicates this candidate list — KEEP IN
+  # LOCKSTEP (test-bootstrap-lockstep.sh Part A diffs the two glob lists).
   NODE_VM_BIN=""
   for cand in "$HOME"/.fnm/node-versions/*/installation/bin/node \
               "$HOME"/.local/share/fnm/node-versions/*/installation/bin/node \
+              "$HOME/Library/Application Support/fnm/node-versions"/*/installation/bin/node \
               "$HOME"/.nvm/versions/node/*/bin/node \
               "$HOME"/.asdf/installs/nodejs/*/bin/node \
               "$HOME"/.local/node/bin/node; do
@@ -152,9 +169,9 @@ else
   done
   if [ -n "$NODE_VM_BIN" ]; then
     warn "node is INSTALLED but not on PATH ($("$NODE_VM_BIN" --version 2>/dev/null) at $NODE_VM_BIN) — a version manager that activates via interactive-shell hooks this shell never ran" \
-         "Prepend it for this session: export PATH=\"$(dirname "$NODE_VM_BIN"):\$PATH\"  — no install needed. (Persist it in the shell profile to stop this recurring.)"
+         "Prepend it for this session: export PATH=\"$(dirname "$NODE_VM_BIN"):\$PATH\"  — no install needed. (Or run the bootstrap: bash scripts/bootstrap.sh — it activates this install and persists PATH via ~/.sigma-migration/env.)"
   else
-    bad "node not found (required — the vendored converters/*.mjs run via node)" "macOS/Linux: install Node 18+ from https://nodejs.org or your package manager. Windows no-admin: 'winget install Schniz.fnm' then 'fnm install --lts && fnm use --lts'. See refs/environment.md #5 — don't auto-download an unpinned Node, ask first."
+    bad "node not found (required — the vendored converters/*.mjs run via node)" "Run the bootstrap: bash scripts/bootstrap.sh   — activates a version-manager Node when one exists, else installs Node 22 LTS pinned (brew / portable ~/.local/node / the winget-scoop fnm route — no admin, nothing unpinned). Details: refs/environment.md #5."
   fi
 fi
 
@@ -177,7 +194,6 @@ else
 fi
 
 # --- CRLF actually present in a shipped shell script? ----------------------
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GT="$HERE/get-token.sh"
 if [ -f "$GT" ] && grep -q $'\r' "$GT" 2>/dev/null; then
   bad "get-token.sh has CRLF line endings — bash will fail with '\\r: command not found'" \
@@ -195,7 +211,11 @@ fi
 # {cred_smoke:{sigma: pass|fail|skipped}}.
 SMOKE_SIGMA="skipped"
 _SIGMA_CREDS=false
-if [ -f "$HOME/.sigma-migration/env" ] || [ -n "${SIGMA_API_TOKEN:-}" ] || [ -n "${SIGMA_CLIENT_ID:-}" ]; then
+# Content-based presence (the Tableau twin's pattern below): bootstrap also
+# writes PATH/pip lines into this env file, so bare file-existence would
+# misread a creds-less bootstrapped host as "credentials present".
+if grep -Eq 'SIGMA_(API_TOKEN|CLIENT_ID)' "$HOME/.sigma-migration/env" 2>/dev/null \
+   || [ -n "${SIGMA_API_TOKEN:-}" ] || [ -n "${SIGMA_CLIENT_ID:-}" ]; then
   _SIGMA_CREDS=true
 fi
 if [ "$_SIGMA_CREDS" != true ]; then
@@ -407,5 +427,5 @@ write_doctor_json "$HOME/.sigma-migration/doctor.json"
 echo
 echo "Summary: $PASS ok, $WARN warning(s), $FAIL missing/blocking."
 [ "$FAIL" -eq 0 ] && { echo "Environment looks good — proceed."; exit 0; }
-echo "Fix the ✗ item(s) above, then re-run: bash scripts/doctor.sh"
+echo "Fix the ✗ item(s) above — missing runtimes/payloads are one command: bash scripts/bootstrap.sh — then re-run: bash scripts/doctor.sh"
 exit 1
