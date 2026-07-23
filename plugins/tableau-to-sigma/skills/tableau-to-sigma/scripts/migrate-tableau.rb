@@ -403,32 +403,17 @@ puts "── migrate-tableau #{opts[:finalize] ? '--finalize' : 'PASS'} · run #
 puts '   ⏱  a full pass runs 5–20+ minutes. Run me IN BACKGROUND (writing a log) or with a'
 puts '   tool timeout ≥ 20 minutes — the default 2-minute foreground limit WILL kill the pass.'
 
-# 🚧 Step-0 environment GATE. The doctor writes a doctor.json fingerprint; this
-# refuses to run on an env that never passed the doctor, instead of letting the
-# pipeline improvise around a missing runtime (the #1 source of cross-user
-# inconsistency at multi-user events). Waive with --skip-doctor-gate "<reason>"
-# or SIGMA_SKIP_DOCTOR_GATE=<reason>. Runs before every path (pass-1 + finalize).
-_dg_skip = opts[:skip_doctor_gate] || ENV['SIGMA_SKIP_DOCTOR_GATE']
-_dg_cmd = ['ruby', File.join(HERE, 'assert-doctor-ran.rb'), '--workdir', WORK]
-_dg_cmd += ['--skip-doctor-gate', _dg_skip] if _dg_skip && !_dg_skip.to_s.empty?
-unless system(*_dg_cmd)
-  # Host-dispatched bootstrap hint: PowerShell/cmd users get the .ps1 twin, not
-  # a bash script they cannot run (RbConfig::CONFIG['host_os'] — docs-level P1.3).
-  # PR-15: the remediation is the ONE bootstrap command (idempotent; ends in a
-  # doctor run + sentinel) — never a hand-driven runtime install.
-  _doc_hint = RbConfig::CONFIG['host_os'] =~ /mswin|mingw|cygwin/ ?
-                'powershell -ExecutionPolicy Bypass -File scripts\\bootstrap.ps1' :
-                'bash scripts/bootstrap.sh'
-  abort "FATAL: environment gate failed — run the bootstrap first (#{_doc_hint}; see remediation above), " \
-        'or re-run with --skip-doctor-gate "<reason>".'
-end
-
 # 🚧 Step-0 STALENESS HARD GATE (escalates the doctor's SHA/build-age WARN).
 # The doctor stamps {behind_count, days_since_commit} into doctor.json; a
 # checkout behind upstream (or >14 days old) silently re-hits bugs fixed weeks
 # earlier, so the WARN is now enforced at run start. Waive with
 # SIGMA_ALLOW_STALE="<reason>" (recorded as an off-ramp). Best-effort read:
 # a missing/unreadable doctor.json is the doctor gate's problem, not this one's.
+# ORDER IS DELIBERATE: staleness runs BEFORE the bootstrap-sentinel environment
+# gate below. A stale checkout must refuse with the stale remediation (git pull /
+# reinstall) even when the sentinel is missing — the sentinel gate's remediation
+# is "run the bootstrap", which on a stale checkout would just bootstrap (and
+# bless) a stale build. Pinned by test-stale-gate.rb legs 1-2.
 begin
   _st_path = [File.join(WORK, 'doctor.json'),
               File.expand_path('~/.sigma-migration/doctor.json')].find { |p| File.exist?(p) }
@@ -458,6 +443,28 @@ begin
   end
 rescue JSON::ParserError
   # unreadable doctor.json was already handled (or waived) by the doctor gate
+end
+
+# 🚧 Step-0 environment GATE. The doctor writes a doctor.json fingerprint; this
+# refuses to run on an env that never passed the doctor, instead of letting the
+# pipeline improvise around a missing runtime (the #1 source of cross-user
+# inconsistency at multi-user events). Waive with --skip-doctor-gate "<reason>"
+# or SIGMA_SKIP_DOCTOR_GATE=<reason>. Runs before every path (pass-1 + finalize).
+# Runs AFTER the staleness gate above (see ORDER IS DELIBERATE) — it also
+# enforces main's bootstrap-sentinel semantics (PR-15) for non-stale checkouts.
+_dg_skip = opts[:skip_doctor_gate] || ENV['SIGMA_SKIP_DOCTOR_GATE']
+_dg_cmd = ['ruby', File.join(HERE, 'assert-doctor-ran.rb'), '--workdir', WORK]
+_dg_cmd += ['--skip-doctor-gate', _dg_skip] if _dg_skip && !_dg_skip.to_s.empty?
+unless system(*_dg_cmd)
+  # Host-dispatched bootstrap hint: PowerShell/cmd users get the .ps1 twin, not
+  # a bash script they cannot run (RbConfig::CONFIG['host_os'] — docs-level P1.3).
+  # PR-15: the remediation is the ONE bootstrap command (idempotent; ends in a
+  # doctor run + sentinel) — never a hand-driven runtime install.
+  _doc_hint = RbConfig::CONFIG['host_os'] =~ /mswin|mingw|cygwin/ ?
+                'powershell -ExecutionPolicy Bypass -File scripts\\bootstrap.ps1' :
+                'bash scripts/bootstrap.sh'
+  abort "FATAL: environment gate failed — run the bootstrap first (#{_doc_hint}; see remediation above), " \
+        'or re-run with --skip-doctor-gate "<reason>".'
 end
 
 # 🚧 Step-0 CREDENTIAL GATE (fail-closed). The doctor treats missing creds as a
@@ -674,6 +681,7 @@ PHASE_BUDGET = {
   'cleanup-orphans'   => 45,
   'assert-run-state'  => 10,
   'assert-phase6-ran' => 90,
+  'assert-datasource-filters' => 15, # one GET /v2/workbooks/<id>/spec + local checks (SKIPs offline)
   'phaseE'            => 240,
   'pivot-totals-ship' => 20   # one GET+PUT to re-hide pivot grand totals at ship
 }.freeze

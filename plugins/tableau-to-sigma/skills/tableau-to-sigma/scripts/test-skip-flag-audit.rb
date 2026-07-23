@@ -53,8 +53,11 @@ CLASSIFICATION = {
     '--skip-extract-landing'     => :offramp,
     '--skip-postpublish-guide'   => :gate,     # → assert-phase6-ran census
     '--skip-flip-test'           => :gate,     # → --skip-control-flip census
-    '--skip-telemetry-gate'      => :gate      # #422: → assert-phase6-ran (gate 10 consent, policy exclusion)
+    '--skip-telemetry-gate'      => :gate,     # #422: → assert-phase6-ran (gate 10 consent, policy exclusion)
+    '--skip-datasource-filters'  => :forwards  # → assert-datasource-filters.rb --workdir
   },
+  'assert-datasource-filters.rb' => { '--skip-datasource-filters' => :offramp }, # records kind skip-flag-waived
+  'intake.rb'                    => { '--skip-bootstrap-gate' => :offramp },     # records kind skip-flag-waived
   'assert-wb-refs-resolve.rb'    => { '--skip-ref-check' => :offramp },
   'assert-dashboard-read.rb'     => { '--skip-dashboard-read' => :offramp },
   'assert-doctor-ran.rb'         => { '--skip-doctor-gate' => :offramp },

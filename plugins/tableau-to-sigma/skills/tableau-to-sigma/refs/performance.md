@@ -226,6 +226,11 @@ orphans (a long retry session) legitimately stretch it once.
 Local artifact checks + a few readbacks. Slowness here is API latency; the
 gate logic itself is instant.
 
+### slow-assert-datasource-filters
+One GET of the posted workbook spec + local filter checks (#483 gate). SKIPs
+cleanly offline / without a token, so slowness is pure Sigma API latency on a
+single spec fetch.
+
 ### slow-fastpath-route
 DM readback only. If slow, the Sigma API is slow — everything else will be too.
 

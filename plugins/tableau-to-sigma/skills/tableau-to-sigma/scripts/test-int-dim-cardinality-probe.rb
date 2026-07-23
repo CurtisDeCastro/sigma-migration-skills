@@ -47,7 +47,7 @@ Dir.mktmpdir do |d|
   # anyway, so provide a fixture for it too (a low count).
   File.write(File.join(fx, 'entry-3.json'), JSON.dump('distinct' => 8))
 
-  log = `ruby #{PROBE} --workdir #{d} --fixture #{fx} --max-cardinality 1000 2>&1`.force_encoding('UTF-8')
+  log = IO.popen(['ruby', PROBE, '--workdir', d, '--fixture', fx, '--max-cardinality', '1000'], err: %i[child out], &:read).force_encoding('UTF-8')
   status = $?.exitstatus
   ledger = JSON.parse(File.read(File.join(d, 'integer-dim-decode.json')))
 end
@@ -74,7 +74,7 @@ check(log =~ /CONFIRM.*Store Key/ && log =~ /HICARD.*Txn Id/,
 
 # No-ledger run is a clean no-op (no integer-dim control on the workbook).
 Dir.mktmpdir do |d|
-  o = `ruby #{PROBE} --workdir #{d} --fixture #{d} 2>&1`.force_encoding('UTF-8')
+  o = IO.popen(['ruby', PROBE, '--workdir', d, '--fixture', d], err: %i[child out], &:read).force_encoding('UTF-8')
   check($?.exitstatus.zero? && o =~ /nothing to confirm/i,
         'no ledger → clean no-op exit 0', fails)
 end

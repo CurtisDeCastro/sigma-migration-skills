@@ -206,10 +206,13 @@ extract_text() { # emit EVERY plausible text layer of one candidate on stdout
   # staged-blob report names the mktemp file instead of the real path.
   local f
   f="$1"
-  iconv -f UTF-16LE -t UTF-8 < "$f" 2>/dev/null
-  iconv -f UTF-16BE -t UTF-8 < "$f" 2>/dev/null
-  iconv -f UTF-32LE -t UTF-8 < "$f" 2>/dev/null
-  iconv -f UTF-32BE -t UTF-8 < "$f" 2>/dev/null
+  # printf '\n' between layers: a decode with no trailing newline glues its
+  # last line to the next layer's first — BSD grep in a UTF-8 locale then
+  # skips the merged line as invalid UTF-8 and a real hit goes unreported.
+  iconv -f UTF-16LE -t UTF-8 < "$f" 2>/dev/null; printf '\n'
+  iconv -f UTF-16BE -t UTF-8 < "$f" 2>/dev/null; printf '\n'
+  iconv -f UTF-32LE -t UTF-8 < "$f" 2>/dev/null; printf '\n'
+  iconv -f UTF-32BE -t UTF-8 < "$f" 2>/dev/null; printf '\n'
   if command -v strings >/dev/null 2>&1; then
     strings < "$f" 2>/dev/null
   else

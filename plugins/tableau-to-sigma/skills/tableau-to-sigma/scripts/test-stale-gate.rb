@@ -11,6 +11,15 @@
 # the gate is the deterministic "--actuals required" abort — reaching it
 # proves the gate let the run proceed. Offline.
 #
+# GATE-ORDER contract (post main-merge): the staleness gate runs BEFORE the
+# bootstrap-sentinel environment gate. Cases 1-2 therefore fixture NO
+# bootstrap.json — a stale checkout must refuse with the STALE remediation
+# even on a never-bootstrapped machine (the sentinel gate's "run bootstrap"
+# advice would just bless a stale build). Cases 3-4 fixture a workdir
+# bootstrap.json sentinel (a bootstrapped machine) so the proceed-path also
+# exercises main's PR-15 sentinel semantics in assert-doctor-ran.rb without
+# depending on ~/.sigma-migration state.
+#
 # Usage: ruby scripts/test-stale-gate.rb
 
 require 'json'
@@ -43,6 +52,7 @@ def run_gate(wd, extra_env = {})
 end
 
 # (1) stale (behind upstream) + no waiver => refuses with the fix named.
+# Deliberately NO bootstrap.json: staleness must fire before the sentinel gate.
 Dir.mktmpdir do |wd|
   File.write(File.join(wd, 'doctor.json'), JSON.generate(doctor_json(behind: 3, days: 2)))
   code, out = run_gate(wd)
@@ -63,8 +73,11 @@ Dir.mktmpdir do |wd|
 end
 
 # (3) stale + SIGMA_ALLOW_STALE => proceeds AND records the off-ramp.
+# Workdir sentinel = bootstrapped machine, so the run clears the environment
+# gate after the waiver and reaches the next deterministic stop.
 Dir.mktmpdir do |wd|
   File.write(File.join(wd, 'doctor.json'), JSON.generate(doctor_json(behind: 3, days: 2)))
+  File.write(File.join(wd, 'bootstrap.json'), JSON.generate('doctor_pass' => true))
   code, out = run_gate(wd, 'SIGMA_ALLOW_STALE' => 'test-waiver')
   check(out.include?('--actuals required'), 'waived run proceeds past the gate (reaches the next stop)', fails)
   check(!out.include?('FATAL: stale skill checkout'), 'no stale FATAL when waived', fails)
@@ -75,9 +88,10 @@ Dir.mktmpdir do |wd|
   _ = code
 end
 
-# (4) fresh checkout => proceeds, no off-ramp.
+# (4) fresh checkout (bootstrapped) => proceeds, no off-ramp.
 Dir.mktmpdir do |wd|
   File.write(File.join(wd, 'doctor.json'), JSON.generate(doctor_json(behind: 0, days: 1)))
+  File.write(File.join(wd, 'bootstrap.json'), JSON.generate('doctor_pass' => true))
   _, out = run_gate(wd)
   check(out.include?('--actuals required'), 'fresh checkout proceeds past the gate', fails)
   check(!File.exist?(File.join(wd, 'offramps.jsonl')), 'fresh run records no waiver off-ramp', fails)
