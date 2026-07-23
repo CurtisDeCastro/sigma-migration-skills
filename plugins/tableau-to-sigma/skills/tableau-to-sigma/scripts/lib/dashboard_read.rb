@@ -34,6 +34,13 @@
 #         "target_tiles":    ["Trend REV", "Top REV"],   # tiles this control FILTERS
 #         "highlight_tiles": ["YoY REV", "YoY NFI"] }     # tiles it only RE-COLORS (not filter)
 #     ],
+#     "kind_waivers": [                              # OPTIONAL — deliberate kind substitutions
+#       { "tile": "Region Detail",                   #   (PR-10): the built kind is ALLOWED to
+#         "reason": "non-US region map — Sigma ..." }#   differ from tiles[].kind for this tile.
+#     ],                                             #   Ledger-named like coverage_waivers (a
+#                                                    #   fidelity decision recorded at read time,
+#                                                    #   NOT budget-counted). The builder keeps the
+#                                                    #   shelf kind; final gate 21 accepts by name.
 #     "point_in_time": {                             # OPTIONAL — only for dashboards with
 #       "year_column":          "Year",              #   "latest snapshot" Top-N / magnitude tiles.
 #       "latest_year":          2015,                #   scalar OR a per-metric map, e.g.
@@ -332,6 +339,21 @@ module DashboardRead
                     '`orientation` ("horizontal"|"vertical") — a Tableau bar with the dimension on ' \
                     'Rows is HORIZONTAL; the build defaults to vertical when this is unstated.'
           end
+        end
+      end
+    end
+
+    # kind_waivers (PR-10): OPTIONAL, but when present each entry must name its
+    # tile AND its reason — a malformed entry would silently no-op both the
+    # builder exemption and the gate-21 waiver (same strictness as rollup_flag).
+    if doc.key?('kind_waivers')
+      kw = doc['kind_waivers']
+      if !kw.is_a?(Array)
+        errs << 'kind_waivers must be an array of {tile, reason} — one entry per deliberate kind substitution.'
+      else
+        kw.each_with_index do |w, i|
+          next if w.is_a?(Hash) && !w['tile'].to_s.strip.empty? && !w['reason'].to_s.strip.empty?
+          errs << "kind_waivers[#{i}] must carry a non-empty `tile` and `reason` (the recorded fidelity decision)."
         end
       end
     end

@@ -63,6 +63,7 @@ require 'open3'
 require 'digest'
 require 'set'
 require_relative 'lib/py_resolve' # real-Python resolver (Windows Store-stub safe)
+begin; require_relative 'lib/modeling_advisory'; rescue LoadError; end # shared, vendor-neutral CDW join-cost advisory (optional; synced from shared/)
 
 HERE = __dir__
 $LOAD_PATH.unshift File.expand_path('lib', HERE)
@@ -506,6 +507,8 @@ conv_warnings = conv['warnings'] || []
 conv_stats = conv['stats'] || {}
 puts "   #{conv_stats['elements'] || (dm_model['pages'] || []).flat_map { |p| p['elements'] || [] }.size} element(s), " \
      "#{conv_stats['columns']} column(s), #{conv_stats['metrics']} metric(s); #{conv_warnings.size} converter warning(s)"
+# Vendor-neutral CDW join-cost advisory (informational only; never gates). See refs/modeling-strategy.md.
+ModelingAdvisory.print_if_relevant(conv_stats['relationships']) if defined?(ModelingAdvisory)
 
 # ---------------------------------------------------------------------------
 # DECISIONS CHECKPOINT — surface the genuine human questions
@@ -566,7 +569,10 @@ end
 # the gap-scout must ATTEMPT a Sigma translation for each before we accept the
 # degradation. --yes does NOT skip this; it only accepts gaps the scout already
 # tried (validated locally, or escalated). The scout records each to
-# <WORK>/scout-ledger.jsonl via scout-validate.py + lib/scout_gate.py.
+# <WORK>/scout-ledger.jsonl via scout-validate.py + lib/scout_gate.py. A
+# 'validated' row is honored only when it carries signed live-probe evidence
+# (ScoutGate integrity, issue #458): a hand-written or forged 'validated' line is
+# treated as unvalidated (→ escalated bucket), so the gate still blocks.
 dax_gaps = questions.select { |q| %w[dax_no_equivalent dax_needs_restructure].include?(q['id']) }
 unless dax_gaps.empty?
   gid = ->(q) { 'dax:' + q['detail'].to_s.gsub(/\s+/, ' ').strip[0, 80] }
@@ -930,8 +936,14 @@ conv_elements.each_with_index do |cel, cel_idx|
     field_map["#{cname}.#{c['_leaf']}"] ||= ref
   end
   cols.each { |c| c.delete('_leaf') } # internal-only; keep master columns clean
+  # DM metrics (name + ORIGINAL bare formula, e.g. Sum([Net Revenue])) so the
+  # workbook builder can bind a measure to a governed [Metrics/<name>] ref instead
+  # of re-deriving the aggregation inline: it strips the `mid` prefix off the
+  # emitted formula and matches by formula equivalence (shared binder). Kept bare
+  # (not the [mid/…]-rewritten measure ref) so the strip+match lines up.
+  metrics_for_master = (cel['metrics'] || []).map { |mm| { 'name' => mm['name'], 'formula' => mm['formula'] } }
   masters[mkey] = { 'id' => mid, 'element_id' => dmel['id'], 'data_model' => dm_id,
-                    'columns' => cols }
+                    'columns' => cols, 'metrics' => metrics_for_master }
   # measure field refs: a translated metric "Sum([Sales])" -> rewrite bare col refs
   # to the master, set agg=null and pass the FULL formula as `ref` (build script
   # uses ref verbatim when agg is nil — handles ratios like DIVIDE too).

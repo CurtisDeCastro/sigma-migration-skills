@@ -31,6 +31,7 @@
 require 'set'
 require 'json'
 require 'open3'
+require 'zlib' # CRC32 — a cross-run-STABLE hash for case-disambiguating column ids (#455)
 require_relative 'lib/py_resolve' # real-Python resolver (Windows Store-stub safe)
 require_relative 'lib/theme_derive' # shared theme derivation/emission (v5.0)
 
@@ -58,6 +59,49 @@ module MechanicalSpecs
 
   def slug(s)
     s.to_s.downcase.gsub(/[^a-z0-9]+/, '-').gsub(/^-|-$/, '')
+  end
+
+  # --- case-disambiguating, 64-char-clamped column-id minting (#455) -----------
+  # `slug` deliberately downcases, so two SOURCE columns that differ only in case
+  # ("userId" vs "UserID", "Value" vs "value" — legitimately distinct columns from
+  # a schema that evolved, or a view exposing an original + renamed column) both
+  # slug to ONE base id. Within a single element that is a hard error: the id is
+  # either silently dropped (data loss) or POSTs a "Duplicate id" 400 at the DM /
+  # workbook builder. These helpers keep the plain lowercase slug for the FIRST
+  # name that claims a base id (so already-shipped ids stay STABLE) and hand every
+  # differently-cased sibling a DETERMINISTIC suffix, so distinct columns always
+  # get distinct ids. The final id is clamped to 64 chars so it composes with the
+  # converter's own 64-char clampId (#445/PR-16) — the two id spaces stay valid
+  # independently, and a long name + a disambiguator can never overflow.
+
+  # Cross-run-STABLE short tag of a string's exact bytes. Distinguishes names that
+  # share a base slug but differ in case. CRC32 (deterministic) — NOT String#hash,
+  # which is per-process randomized and would make ids unstable across runs.
+  def case_tag(s)
+    Zlib.crc32(s.to_s).to_s(36)[0, 6]
+  end
+
+  # Deterministic 64-char clamp for workbook-local slug ids. Same shape as the
+  # converter's clampId (readable head + stable hash tail), applied to the Ruby
+  # side so disambiguated ids can never exceed the limit.
+  def clamp_id(id, max = 64)
+    return id if id.length <= max
+    tail = "~#{case_tag(id)}"
+    id[0, max - tail.length] + tail
+  end
+
+  # Mint a case-disambiguated, clamped id "<prefix><slug(name)>" against a per-
+  # build registry (base id -> the first exact-case name that claimed it). The
+  # first claimant keeps the plain slug; a later name that slugs to the same base
+  # but differs in CASE gets "<base>-<case_tag>"; the SAME exact name reuses its
+  # id (true duplicates still collapse — callers dedup those upstream).
+  def mint_id(prefix, name, registry)
+    base = "#{prefix}#{slug(name)}"
+    owner = registry[base]
+    chosen = (owner.nil? || owner == name.to_s) ? base : "#{base}-#{case_tag(name)}"
+    registry[base] ||= name.to_s
+    registry[chosen] ||= name.to_s
+    clamp_id(chosen)
   end
 
   # A header-matching regex for a display name that ALSO tolerates a Tableau CSV
@@ -1411,7 +1455,9 @@ module MechanicalSpecs
     fact_name = 'Custom SQL' if fact_name.to_s.strip.empty?
     master_columns = []
     mmap = {}
-    seen = {}
+    seen = {}          # downcased-name coverage (reuse-union bare check + LOD skip)
+    seen_exact = {}     # EXACT-name dedup: true duplicates collapse, case-variants survive (#455)
+    id_owner = {}       # base id -> first exact name, shared across master/LOD/metric mints (#455)
     used_regex = {}
     untranslated = []
     guid_idx = guid_display_index(fact_el, base_el)
@@ -1444,14 +1490,19 @@ module MechanicalSpecs
     add = lambda do |dname, format, real_label = nil|
       return if dname.nil? || dname.to_s.empty?
       return if dname =~ GUID_RE
-      key = dname.downcase
-      return if seen[key]
-      seen[key] = true
-      id = "m-#{slug(dname)}"
+      # Dedup on the EXACT display name (#455): genuine same-name duplicates still
+      # collapse, but two columns differing only in CASE both survive. `seen` still
+      # tracks the downcased name so the reuse-union bare-coverage check and the
+      # FIXED-LOD skip below keep working unchanged.
+      return if seen_exact[dname]
+      seen_exact[dname] = true
+      dkey = dname.downcase
+      seen[dkey] = true
+      id = mint_id('m-', dname, id_owner)
       master_columns << { 'id' => id, 'name' => dname, 'formula' => real_for.call(dname, real_label) }
       entry = { 'id' => id, 'name' => dname }
       entry['format'] = format if format
-      entry['grain'] = grain_for[key] if grain_for[key]
+      entry['grain'] = grain_for[dkey] if grain_for[dkey]
       rx = header_regex(dname)
       unless used_regex[rx]
         mmap[rx] = entry
@@ -1511,7 +1562,8 @@ module MechanicalSpecs
           key = dn.downcase
           next if seen[key]
           seen[key] = true
-          id = "m-#{slug(dn)}"
+          seen_exact[dn] = true
+          id = mint_id('m-', dn, id_owner)
           master_columns << { 'id' => id, 'name' => dn, 'formula' => "[#{fact_name}/#{rel['name']}/#{dn}]" }
           entry = { 'id' => id, 'name' => dn }
           entry['format'] = hc['format'] if hc['format']
@@ -1539,7 +1591,7 @@ module MechanicalSpecs
           untranslated << nm
           next
         end
-        entry = { 'id' => "m-#{slug(nm)}", 'name' => nm, 'formula' => formula }
+        entry = { 'id' => mint_id('m-', nm, id_owner), 'name' => nm, 'formula' => formula }
         entry['format'] = m['format'] if m['format']
         mmap[rx] = entry
         used_regex[rx] = true

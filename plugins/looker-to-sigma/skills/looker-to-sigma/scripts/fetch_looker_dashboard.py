@@ -14,29 +14,26 @@ import re
 import sys
 import urllib.parse
 import urllib.request
-from configparser import ConfigParser
+
+import looker_api  # sibling: single source of truth for base resolution + SSL/truststore
 
 INI = os.path.expanduser("~/.looker/looker.ini")
 
 
 def _client():
-    c = ConfigParser(); c.read(INI); s = c["Looker"]
-    base = s["base_url"].rstrip("/")
-    if not base.endswith("/api/4.0"):
-        base += "/api/4.0"
-    data = urllib.parse.urlencode({"client_id": s["client_id"],
-                                   "client_secret": s["client_secret"]}).encode()
-    tok = json.load(urllib.request.urlopen(
-        urllib.request.Request(base + "/login", data=data, method="POST"), timeout=30))["access_token"]
-    return base, tok
+    # Delegate to looker_api so the port fallback (legacy :19999 → 443), the
+    # LOOKER_BASE_URL override, and the truststore SSL context all apply here too.
+    base, tok, verify = looker_api.login()
+    return base, tok, verify
 
 
 def get(path):
-    base, tok = get._cache if hasattr(get, "_cache") else (None, None)
-    if base is None:
-        base, tok = _client(); get._cache = (base, tok)
+    cache = getattr(get, "_cache", None)
+    if cache is None:
+        cache = get._cache = _client()
+    base, tok, verify = cache
     req = urllib.request.Request(base + path, headers={"Authorization": "Bearer " + tok})
-    with urllib.request.urlopen(req, timeout=60) as r:
+    with urllib.request.urlopen(req, context=looker_api._ctx(verify), timeout=60) as r:
         return json.load(r)
 
 
@@ -155,6 +152,46 @@ def _cell_viz(vc):
     return out
 
 
+def _column_order(vc):
+    """vis_config.column_order -> the VISUALIZATION column order (a list of Looker
+    "view.field" names). This is the order the user set by dragging columns in a table
+    viz; it differs from query.fields, which is the Data-tab order (Looker forces
+    dimensions before measures there). Empty list when absent -> build_workbook falls
+    back to the fields order, keeping non-reordered tiles byte-identical."""
+    co = vc.get("column_order")
+    return [f for f in co if isinstance(f, str)] if isinstance(co, list) else []
+
+
+def _hidden_fields(vc):
+    """Fields present in the query but HIDDEN from the visualization. Looker keeps a
+    hidden dimension IN the query (so it still sets the GROUP-BY grain) and only hides
+    the displayed column -> build_workbook keeps it in the group-by and marks the Sigma
+    column hidden (never drops it, which would change the grain). Primary key is
+    `hidden_fields` (list); tolerate a `hidden_columns` alias ({field: true} dict or a
+    list). Empty when absent."""
+    hf = vc.get("hidden_fields")
+    if not isinstance(hf, list):
+        hc = vc.get("hidden_columns")
+        if isinstance(hc, dict):
+            hf = [k for k, v in hc.items() if v]
+        elif isinstance(hc, list):
+            hf = hc
+        else:
+            hf = []
+    return [f for f in hf if isinstance(f, str)]
+
+
+def _series_labels(vc):
+    """vis_config.series_labels -> {field: custom column label}. Looker lets you rename a
+    table column in the VISUALIZATION (e.g. "Sales Region"), and that label differs from the
+    Data-tab column name. Only str→str entries kept. Empty when absent -> build_workbook falls
+    back to the humanized field name (byte-identical to before)."""
+    sl = vc.get("series_labels")
+    if not isinstance(sl, dict):
+        return {}
+    return {k: v for k, v in sl.items() if isinstance(k, str) and isinstance(v, str)}
+
+
 def _dyn(df):
     """Looker returns dashboard_element.query.dynamic_fields as a JSON string."""
     if isinstance(df, str):
@@ -215,6 +252,11 @@ def normalize_element(el, layout=None):
         "model": q.get("model"), "explore": q.get("view"),
         "fields": q.get("fields") or [],
         "pivots": q.get("pivots") or [],
+        # native small-multiples signal (looker_donut_multiples → Sigma trellis).
+        # Mirrors parse_lookml_dashboard.norm_trellis so both source paths feed the
+        # source-agnostic builder the same {shape, orientation} signal.
+        "trellis": ({"shape": "donut_multiples", "orientation": "cols"}
+                    if _vis_type(el, q) == "looker_donut_multiples" else None),
         "filters": q.get("filters") or {},
         "sorts": q.get("sorts") or [],
         "limit": int(q["limit"]) if str(q.get("limit") or "").isdigit() else q.get("limit"),
@@ -226,6 +268,12 @@ def normalize_element(el, layout=None):
         "referenceLines": _reflines(vc),
         "color": _color(vc),
         "cellVisualizations": _cell_viz(vc),
+        # table column order + hidden columns (vis_config) → build_workbook reorders
+        # the displayed columns to the viz order and hides hidden ones (keeping hidden
+        # dims in the group-by). Empty when absent → fields order, byte-identical.
+        "columnOrder": _column_order(vc),
+        "hiddenFields": _hidden_fields(vc),
+        "columnLabels": _series_labels(vc),
         "layout": lay,
     }
 

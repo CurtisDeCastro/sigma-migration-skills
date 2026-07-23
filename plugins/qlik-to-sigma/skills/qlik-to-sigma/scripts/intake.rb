@@ -29,6 +29,7 @@
 #   2  --connection given but not a full UUID
 #   3  connection ambiguous — connection-candidates.json written; ask the user
 #   4  no connections found / API error while listing
+#   6  bootstrap sentinel missing/failed — run bootstrap first (PLAN-v3 PR-15)
 #   1  usage error
 
 require 'json'
@@ -48,11 +49,39 @@ OptionParser.new do |p|
   p.on('--rank-twb PATH', 'when ambiguous, rank candidates using a downloaded .twb (adds db-name tie-break)') { |v| opts[:rank_twb] = v }
   p.on('--connections-fixture FILE', 'TEST ONLY: read the connections list from FILE instead of the API') { |v| opts[:fixture] = v }
   p.on('--force', 'ignore a cached connection.json and re-resolve') { opts[:force] = true }
+  p.on('--skip-bootstrap-gate REASON', 'waive the bootstrap-sentinel gate — REQUIRED reason; name it in your report') { |v| opts[:skip_bootstrap] = v }
 end.parse!
 
 abort('[FAIL] intake: --workdir required') unless opts[:dir]
 require 'fileutils'
 FileUtils.mkdir_p(opts[:dir])
+
+# 🚧 BOOTSTRAP SENTINEL GATE (PLAN-v3 PR-15). Environment bootstrap burned
+# ~25–30% of field tokens (hand-driven runtime installs, TTY/creds failures);
+# the fix is ONE idempotent command — so the front door refuses to open until
+# it has run to doctor-green. The sentinel (bootstrap.json) is written by
+# scripts/bootstrap.sh / bootstrap.ps1 after they finish with a doctor run.
+_bs_skip = opts[:skip_bootstrap] || ENV['SIGMA_SKIP_BOOTSTRAP_GATE']
+if _bs_skip && !_bs_skip.to_s.empty?
+  warn "[SKIP] intake: bootstrap gate WAIVED (#{_bs_skip}) — name this in your report."
+else
+  _bs = [File.join(opts[:dir], 'bootstrap.json'),
+         File.expand_path('~/.sigma-migration/bootstrap.json')]
+        .map { |p| (JSON.parse(File.read(p, encoding: 'bom|utf-8')) rescue nil) }
+        .find { |j| j.is_a?(Hash) }
+  unless _bs && _bs['doctor_pass'] == true
+    _bs_why = _bs ? 'bootstrap ran but the doctor did NOT pass' :
+                    'no bootstrap sentinel found (bootstrap never ran on this machine/workdir)'
+    warn "[FAIL] intake: #{_bs_why}."
+    warn '       Run the ONE bootstrap command first (idempotent, non-interactive, no admin):'
+    warn '         macOS/Linux/Git-Bash:  bash scripts/bootstrap.sh'
+    warn '         Windows PowerShell:    powershell -ExecutionPolicy Bypass -File scripts\\bootstrap.ps1'
+    warn '       …then re-run this exact intake command.'
+    warn '       Escape hatch (name it in your report): --skip-bootstrap-gate "<reason>"'
+    warn '       (or SIGMA_SKIP_BOOTSTRAP_GATE="<reason>").'
+    exit 6
+  end
+end
 
 UUID_RE = /\A\h{8}-\h{4}-\h{4}-\h{4}-\h{12}\z/
 conn_path  = File.join(opts[:dir], 'connection.json')

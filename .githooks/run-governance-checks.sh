@@ -32,6 +32,7 @@ fi
 [ -f tools/lint-esm-imports.rb ] && { ruby tools/lint-esm-imports.rb || fail=1; }
 [ -f tools/lint-twb-encoding.rb ] && { ruby tools/lint-twb-encoding.rb || fail=1; }
 [ -f tools/check-agent-variants.rb ] && { ruby tools/check-agent-variants.rb || fail=1; }
+[ -f tools/check-cognos-bundle.rb ] && { ruby tools/check-cognos-bundle.rb || fail=1; }
 # bootstrap<->doctor KEEP-IN-LOCKSTEP guard (E2.1): bootstrap.sh duplicates
 # doctor.sh's probes (py_real, the vm-node candidate globs, Test-RealPython)
 # under KEEP-IN-LOCKSTEP comments that name this test as the mechanical

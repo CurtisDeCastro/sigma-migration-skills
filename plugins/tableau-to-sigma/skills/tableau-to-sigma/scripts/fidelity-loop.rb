@@ -36,13 +36,21 @@
 # Recipes for each delta→fix live in refs/fidelity-recipes.md. See SKILL.md Phase 5g.
 #
 # Subcommands
-#   init        --workdir DIR --workbook-id ID --page-id ID [--source-image PNG]
+#   init        --workdir DIR --workbook-id ID [--page-id ID] [--source-image PNG]
 #               [--max-passes N (default 5)]
+#               --page-id omitted → auto-pick the page with the most VISIBLE
+#               (non-hidden) elements from <workdir>/wb-ids.json + wb-spec.json
+#               (#422: first-by-order picked a helper-table data page); ties
+#               warn. An explicit --page-id also OVERRIDES the page on an
+#               existing same-workbook ledger (entries preserved).
 #   render      --workdir DIR [--width 1920 --height 1500]   (needs a live workbook)
 #   record      --workdir DIR --dimension D --delta "..." --class C
 #               [--fix "..."] [--resolved]
 #   resolve     --workdir DIR (--entry N | --dimension D)    mark entry(ies) resolved
 #   apply-patch --workdir DIR --patch patch.json             GET→merge→normalize→PUT→guard→lint
+#               ALSO deep-merges the patch into <workdir>/wb-spec.json (when it
+#               exists and parses) so a re-entry full-spec PUT carries the fix
+#               instead of reverting it (#422: live-only patches were wiped).
 #               [--full-spec spec.json]  replace the whole spec instead of merging
 #               [--skip-style-normalize REASON]  waive the v5.1 style contract (named)
 #               [--resolves 0,2,3]       mark these ledger entries resolved on success
@@ -176,6 +184,31 @@ module FidelityLoop
   def no_data_delta?(delta)
     delta.to_s =~ NO_DATA_RX ? true : false
   end
+
+  # ---- RCF page picking (#422) ---------------------------------------------
+  # Elements that actually RENDER content on the page: hidden helpers carry
+  # visibleAsSource:false (the master + LOD/window helper tables), and a
+  # hidden:true element/page never renders. Everything else counts.
+  def visible_count(page)
+    (page['elements'] || []).count do |e|
+      e.is_a?(Hash) && e['visibleAsSource'] != false && e['hidden'] != true
+    end
+  end
+
+  # Pick the RCF page from an array of page hashes ({'id','name','elements'}):
+  # the page with the MOST visible elements — not first-by-order, which picked
+  # a second data page carrying only hidden helper tables (#422 live run).
+  # Returns [picked_page_or_nil, tied_pages] — tied_pages has >1 entry when
+  # several pages share the top count (caller warns; pick is first-by-order
+  # among the ties, deterministic).
+  def pick_rcf_page(pages)
+    cands = Array(pages).select { |p| p.is_a?(Hash) && p['id'] }
+    return [nil, []] if cands.empty?
+    scored = cands.map { |p| [visible_count(p), p] }
+    best = scored.map { |s, _| s }.max
+    top = scored.select { |s, _| s == best }.map { |_, p| p }
+    [top.first, top]
+  end
 end
 
 # ---------------------------------------------------------------------------
@@ -205,6 +238,34 @@ def save_ledger(dir, ledger)
   File.write(ledger_path(dir), JSON.pretty_generate(ledger))
 end
 
+# #422: --page-id omitted at init → pick the page with the most VISIBLE
+# (non-hidden) elements. Live page ids come from wb-ids.json (the readback);
+# element visibility (visibleAsSource:false hidden helpers) only lives in
+# wb-spec.json — join the two by page name. Dies (usage) when neither file
+# yields a page.
+def auto_pick_rcf_page(dir)
+  wb_ids  = (JSON.parse(File.read(File.join(dir, 'wb-ids.json'))) rescue nil)
+  wb_spec = (JSON.parse(File.read(File.join(dir, 'wb-spec.json'))) rescue nil)
+  spec_by_name = {}
+  ((wb_spec && wb_spec['pages']) || []).each { |p| spec_by_name[p['name']] = p if p.is_a?(Hash) }
+  pages = (((wb_ids && wb_ids['pages']) || (wb_spec && wb_spec['pages'])) || []).map do |p|
+    next nil unless p.is_a?(Hash) && p['id']
+    sp = spec_by_name[p['name']]
+    { 'id' => p['id'], 'name' => p['name'],
+      'elements' => ((sp && sp['elements']) || p['elements']) || [] }
+  end.compact
+  pick, top = FidelityLoop.pick_rcf_page(pages)
+  die 'no --page-id given and no pages found in <workdir>/wb-ids.json or wb-spec.json to auto-pick from', 2 unless pick
+  if top.length > 1
+    warn "WARN: #{top.length} pages tie at #{FidelityLoop.visible_count(pick)} visible element(s) " \
+         "(#{top.map { |p| p['name'] || p['id'] }.join(', ')}) — picked #{pick['name'] || pick['id']} " \
+         '(first-by-order); pass --page-id to override'
+  end
+  puts "auto-picked RCF page #{(pick['name'] || pick['id']).inspect} (#{pick['id']}) — " \
+       "most visible elements (#{FidelityLoop.visible_count(pick)}); --page-id overrides"
+  pick['id']
+end
+
 def print_rubric
   rubric = File.join(HERE, '..', 'refs', 'fidelity-rubric.md')
   puts
@@ -221,6 +282,29 @@ def print_rubric
        KPI/table-values accuracy].each { |d| puts "  - #{d}" }
   end
   puts '───────────────────────────────────────────────────────────'
+end
+
+# #422: a live-only apply-patch was REVERTED by the next re-entry full-spec
+# PUT (post-and-readback PUTs the workdir wb-spec.json wholesale) — the
+# operator had to hand-persist every RCF fix. Deep-merge the SAME patch into
+# <workdir>/wb-spec.json so re-entry carries prior fixes. Guard: only when
+# wb-spec.json exists and parses; never fails the apply.
+def persist_patch_to_wb_spec(dir, patch)
+  path = File.join(dir, 'wb-spec.json')
+  unless File.exist?(path)
+    puts "     (no #{path} — patch applied live only; a re-entry full-spec PUT will not carry it)"
+    return
+  end
+  begin
+    spec = JSON.parse(File.read(path))
+  rescue JSON::ParserError => e
+    warn "WARN: #{path} does not parse (#{e.message}) — patch NOT persisted; a re-entry full-spec PUT will revert this fix"
+    return
+  end
+  File.write(path, JSON.pretty_generate(FidelityLoop.deep_merge(spec, patch)) + "\n")
+  puts "[OK] patch persisted into #{path} (re-entry full-spec PUTs carry this fix)"
+rescue StandardError => e
+  warn "WARN: could not persist patch into #{path}: #{e.class}: #{e.message}"
 end
 
 cmd = ARGV.shift
@@ -254,24 +338,36 @@ die 'missing --workdir' unless opts[:dir]
 
 case cmd
 when 'init'
-  die '--workbook-id and --page-id required for init' unless opts[:wb] && opts[:page]
+  die '--workbook-id required for init' unless opts[:wb]
   # PRESERVE an existing ledger for the same workbook (field-caught: every
   # FAST PATH orchestrator re-entry re-ran init and WIPED the recorded deltas
   # — the natural fix-and-re-run loop destroyed its own audit trail). Only a
-  # DIFFERENT workbook id starts fresh; same-workbook re-init is a no-op.
-  # (direct file check — load_ledger die()s with SystemExit on a missing file,
-  # which `rescue nil` does NOT catch; a fresh init would exit 2)
+  # DIFFERENT workbook id starts fresh; same-workbook re-init is a no-op —
+  # except an explicit --page-id, which OVERRIDES the recorded page in place
+  # (#422: init used to offer no way to repoint an existing ledger at the
+  # right page). (direct file check — load_ledger die()s with SystemExit on a
+  # missing file, which `rescue nil` does NOT catch; a fresh init would exit 2)
   existing = File.exist?(ledger_path(opts[:dir])) ? (JSON.parse(File.read(ledger_path(opts[:dir]))) rescue nil) : nil
   if existing.is_a?(Hash) && existing['workbook_id'] == opts[:wb]
-    puts "[OK] fidelity ledger already initialized for #{opts[:wb]} " \
-         "(#{(existing['entries'] || []).length} entries, pass #{existing['pass']}/#{existing['max_passes']}) — preserved."
+    if opts[:page] && existing['page_id'] != opts[:page]
+      old = existing['page_id']
+      existing['page_id'] = opts[:page]
+      existing['source_image'] = opts[:src] if opts[:src]
+      save_ledger(opts[:dir], existing)
+      puts "[OK] fidelity ledger page OVERRIDDEN: #{old} → #{opts[:page]} " \
+           "(#{(existing['entries'] || []).length} entries preserved, pass #{existing['pass']}/#{existing['max_passes']})"
+    else
+      puts "[OK] fidelity ledger already initialized for #{opts[:wb]} " \
+           "(#{(existing['entries'] || []).length} entries, pass #{existing['pass']}/#{existing['max_passes']}) — preserved."
+    end
   else
+    page = opts[:page] || auto_pick_rcf_page(opts[:dir])
     ledger = FidelityLoop.new_ledger(
-      workbook_id: opts[:wb], page_id: opts[:page],
+      workbook_id: opts[:wb], page_id: page,
       source_image: opts[:src], max_passes: opts[:max] || 5
     )
     save_ledger(opts[:dir], ledger)
-    puts "[OK] initialized #{ledger_path(opts[:dir])} (max_passes=#{ledger['max_passes']})"
+    puts "[OK] initialized #{ledger_path(opts[:dir])} (page #{page}, max_passes=#{ledger['max_passes']})"
   end
 
 when 'render'
@@ -395,6 +491,14 @@ when 'apply-patch'
   # waives (named), matching the post-and-readback flag.
   if opts[:skip_style_normalize]
     warn "WARN: style-normalize SKIPPED (--skip-style-normalize: #{opts[:skip_style_normalize]}) — quality waiver."
+    # PR-14: every honored --skip-* leaves a record on the off-ramp trail.
+    begin
+      require_relative 'lib/offramp'
+      Offramp.log(opts[:dir], kind: 'skip-flag-waived', reason: opts[:skip_style_normalize],
+                  detail: '--skip-style-normalize')
+    rescue LoadError
+      warn 'WARN: lib/offramp.rb not vendored — the waiver could not be recorded to offramps.jsonl.'
+    end
   else
     begin
       require_relative 'lib/style_normalize'
@@ -412,6 +516,7 @@ when 'apply-patch'
     out = opts[:out] || File.join(opts[:dir], 'rcf-merged-spec.json')
     File.write(out, JSON.pretty_generate(merged))
     puts "[DRY] merged spec → #{out} (no PUT, no lint)"
+    persist_patch_to_wb_spec(opts[:dir], patch) if opts[:patch] && patch
   else
     require_relative 'lib/sigma_rest'
     layout_was = merged['layout'].to_s
@@ -421,6 +526,9 @@ when 'apply-patch'
       die "PUT /v2/workbooks/#{wb}/spec failed (atomic — nothing written): #{e.message}", 4
     end
     puts "[OK] PUT merged spec to #{wb} (layout preserved: #{layout_was.empty? ? 'NONE' : "#{layout_was.scan(/<LayoutElement\b/).length} elements"})"
+    # Persist BEFORE the post-PUT guards: the fix is live either way, and an
+    # exit-5 guard failure must not leave wb-spec.json behind the live state.
+    persist_patch_to_wb_spec(opts[:dir], patch) if opts[:patch] && patch
 
     # Re-run the same guards post-and-readback runs on the initial POST.
     cols = Sigma.request(:get, "/v2/workbooks/#{wb}/columns") rescue nil

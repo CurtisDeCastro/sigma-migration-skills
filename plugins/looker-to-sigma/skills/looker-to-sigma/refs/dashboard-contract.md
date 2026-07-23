@@ -105,4 +105,6 @@ tile/static/grid modes need a snap heuristic — see `refs/looker-dashboard-layo
 Liquid (`{%`/`{{`) → warn/partial; `merged_results` → DM join or custom SQL; table calcs
 (`pct_of_total`/`running_total`/`offset`) → workbook `Sum/GrandTotal`/`RunningSum`/`Lag`;
 field prefix resolution must walk explore `join`s (alias vs `from:` view); cross-filtering
-+ trellis + tooltip are Sigma UI-only (ship without, document post-publish step).
++ tooltip are Sigma UI-only (ship without, document post-publish step). `looker_donut_multiples`
+IS emitted natively (one donut-chart + Sigma element `trellis`, via the shared TrellisEmit); the
+`trellis` normalized-element key carries the `{shape, orientation}` signal.

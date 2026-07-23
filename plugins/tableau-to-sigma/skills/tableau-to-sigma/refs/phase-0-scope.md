@@ -124,26 +124,46 @@ For page-per-worksheet mode, pass `--page-per-worksheet`.
 
 ---
 
-## Phase 0 — Estimate cost up front
+## Phase 0c — Scope/cost estimate + sign-off (PLAN-v3 PR-3)
 
-Before committing to the conversion, predict the agent token cost. Useful for
-quoting and for bucketing workbooks (small/medium/large/very-large) in a
-multi-workbook migration.
+Before any DM build the scope and rough agent cost go on record. **The
+orchestrator (`migrate-tableau.rb`) runs this for you**: right after the
+Phase-1 join (discovery metadata + gap scan on disk, nothing posted to Sigma
+yet) it invokes
 
 ```bash
-# Pre-fetch workbook + datasource metadata
-mcp__tableau__get-workbook  workbookId="<luid>"            > <WORK>/get-workbook.json
-mcp__tableau__get-datasource-metadata  datasourceLuid="..." > <WORK>/ds-metadata.json
-
-ruby scripts/estimate-cost.rb \
-  --workbook <WORK>/get-workbook.json \
-  --datasource <WORK>/ds-metadata.json
+ruby scripts/estimate-cost.rb --workdir <WORK>   # writes <WORK>/cost-estimate.json
 ```
 
-The estimator emits a JSON record with `features` (dashboards, sheets, calc
-fields, custom SQL bytes) and `estimate` (complexity bucket, input/output
-token counts, USD cost). Coefficients are heuristic and should be calibrated
-against ~10 measured conversions before use in customer quotes.
+which reads whatever scoping artifacts exist (`get-workbook.json`,
+`dashboard-layout.json`, `calc-fields.json`, `*-gaps-report.json`,
+`custom-sql.json`) — each optional; missing inputs degrade the estimate and
+are **named** in `inputs.missing`, never fatal. The orchestrator then prints a
+`SCOPE / COST SIGN-OFF` block (tiles, calc count by class, gap classes,
+❌-untranslatable classes, estimated turns/tokens/minutes) and records the
+acknowledgment in `run-state.json`:
+
+- `--yes`/`--answers` (unattended): `{cost_estimate_acknowledged: true, cost_estimate_provenance: "auto-yes"}`
+- interactive: provenance `"stated"` (the operator saw the printed block)
+
+A missing ack at the Phase 3 DM build is a **WARN this release** (hard-gating
+waits for field calibration confidence).
+
+Every estimate carries `confidence: "rough"`: coefficients are anchored on
+three measured clean e2e runs (~60 turns/48 min/7 tiles, ~75/40/5, ~80/71/6)
+plus the ~4 h heavy-failure field sessions (per-❌-unhandled-class penalty),
+with stated tokens-per-turn assumptions — see the CALIBRATION block in
+`scripts/estimate-cost.rb`. n=3: treat buckets (small/medium/large/very-large)
+as directional, not quotes; re-fit at ~10 measured conversions.
+
+Standalone pre-scoping (before any discovery) still works:
+
+```bash
+ruby scripts/estimate-cost.rb --workbook <WORK>/get-workbook.json \
+  [--datasource <WORK>/ds-metadata.json]
+```
+
+(tile count proxied by the sheet count; same rough-marked output).
 
 ---
 

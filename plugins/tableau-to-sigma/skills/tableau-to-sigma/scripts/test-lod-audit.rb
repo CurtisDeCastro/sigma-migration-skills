@@ -145,6 +145,71 @@ e4 = LodAudit.derive(calcs, dm_spec: nil, wb_spec: wb4, manual_residues: nil)
 d4 = e4.find { |x| x['calc'] == 'Dropped Seats' }
 check(d4 && d4['class'] == 'silently-dropped', 'bare passthrough ref alone → still silently-dropped', fails)
 
+puts 'Part B5 — #452: an emitted look-alike of a FILTER-CONDITION column is NOT reference-derived'
+# The common field shape: {FIXED dims: COUNTD(IF <flag> = "X" THEN <key> END)}.
+# The flag column ('Status Flag') is a filter PREDICATE that GATES the count; the
+# counted OUTPUT is the key ('Seat Id'). A raw look-alike column 'STATUS_FLAG'
+# exists in the warehouse, so the calc's caption can collide downstream with a
+# BARE PASSTHROUGH of that flag — which reads the raw flag, not the COUNTD
+# (silently wrong numbers). 'Status Flag' is inside the LOD's reference_set, so
+# pre-#452 classify() wrongly marked this passthrough reference-derived/resolved.
+GATED_FIELDS = {
+  'calcs' => [
+    { 'name' => 'Gated Seats', 'internal_name' => '[Calculation_200]',
+      'formula' => '{FIXED [Account Name]: COUNTD(IF [Status Flag] = "ACTIVE" ' \
+                   'OR [Status Flag] = "PENDING" THEN [Seat Id] END)}', 'is_lod' => true }
+  ]
+}.freeze
+gcalcs = LodAudit.lod_calcs(GATED_FIELDS)
+gated  = gcalcs.first
+check(gated && gated['reference_set'].sort == ['Account Name', 'Seat Id', 'Status Flag'],
+      "reference set includes the filter-predicate column (got #{gated && gated['reference_set'].inspect})", fails)
+
+# (a) the fuzzy filter-alias: a bare passthrough of the FILTER-CONDITION column.
+dm_filter = { 'pages' => [{ 'elements' => [
+  { 'id' => 'el-f', 'kind' => 'table', 'name' => 'Seat Fact',
+    'source' => { 'kind' => 'warehouse-table', 'path' => %w[DEMO_DB PUBLIC SEAT_FACT] },
+    'columns' => [
+      { 'id' => 'g1', 'name' => 'Gated Seats', 'formula' => '[SEAT_FACT/STATUS_FLAG]' }
+    ] }
+] }] }
+ef = LodAudit.derive(gcalcs, dm_spec: JSON.parse(JSON.generate(dm_filter)), wb_spec: nil, manual_residues: nil)
+gf = ef.find { |x| x['calc'] == 'Gated Seats' }
+check(gf && gf['class'] == 'suspect-alias' && gf['status'] == 'unresolved',
+      "(a) passthrough of the LOD's filter-condition column → suspect-alias (gate 17 blocks) (got #{gf && gf['class']})", fails)
+check(gf && Array(gf['suspect_refs']) == ['STATUS_FLAG'],
+      "suspect-alias names the aliased filter column (got #{gf && gf['suspect_refs'].inspect})", fails)
+check(gf && gf['detail'].to_s.include?('FILTER CONDITION'),
+      'detail explains the filter-condition alias (distinct from the plain out-of-refs alias)', fails)
+check(gf && !LodAudit.resolved?(gf), 'the filter-alias entry is unresolved until an operator resolves it', fails)
+
+# (b) a GENUINE reference-derivation of the SAME LOD (re-aggregation of the
+#     OUTPUT field) still passes — the fix must not over-flag the honest case.
+wb_ok = { 'pages' => [{ 'elements' => [
+  { 'id' => 'el-k', 'kind' => 'kpi-chart', 'name' => 'Gated KPI',
+    'columns' => [
+      { 'id' => 'gk', 'name' => 'Gated Seats', 'formula' => 'CountDistinct([Seat Fact/Seat Id])' }
+    ] }
+] }] }
+eo = LodAudit.derive(gcalcs, dm_spec: nil, wb_spec: JSON.parse(JSON.generate(wb_ok)), manual_residues: nil)
+go = eo.find { |x| x['calc'] == 'Gated Seats' }
+check(go && go['class'] == 'reference-derived' && go['status'] == 'resolved',
+      "(b) re-aggregation of the LOD's OUTPUT field still → reference-derived (got #{go && go['class']})", fails)
+
+# (c) a non-aggregating passthrough of the LOD's OUTPUT column (not a filter
+#     column) is NOT the #452 failure — left as-is (still reference-derived),
+#     so the fix stays surgical to the filter-condition blind spot.
+wb_out = { 'pages' => [{ 'elements' => [
+  { 'id' => 'el-o', 'kind' => 'table', 'name' => 'Out',
+    'columns' => [
+      { 'id' => 'oc', 'name' => 'Gated Seats', 'formula' => '[Seat Fact/Seat Id]' }
+    ] }
+] }] }
+ep = LodAudit.derive(gcalcs, dm_spec: nil, wb_spec: JSON.parse(JSON.generate(wb_out)), manual_residues: nil)
+gp = ep.find { |x| x['calc'] == 'Gated Seats' }
+check(gp && gp['class'] == 'reference-derived',
+      "output-column passthrough is not the filter-alias failure (got #{gp && gp['class']})", fails)
+
 puts 'Part C — .twb fallback census'
 TWB = <<~XML
   <workbook>

@@ -144,6 +144,8 @@ If `get-view-data` returns 401 for a view, retry that view solo (the contention 
 > - **`measure: { "manual_residue": "<calc caption>" }`** — a tile whose measure is a `requires_custom_sql` window/table-calc residue (the STAYS-MANUAL family) declares it this way instead of naming a base column. The build then lists it in `<workdir>/manual-residues.json` (formula + Custom SQL `OVER()` skeleton, `status: "unbuilt"`) and pass 1 BLOCKS (exit 16) until you build the Custom SQL DM element, repoint the tile measure, and set `status: "built"` — never a silent magnitude proxy.
 > - **Caption-variant tolerance:** every `point_in_time` field name resolves against the master/landed columns with normalization (upcase + strip non-alphanumerics), so the Tableau UI caption, the extract caption, and the landed physical column name all match. A name that STILL resolves to nothing is dropped LOUDLY with the candidate column list printed — fix the name and re-run; never assume a silently-applied filter.
 >
+> **`tiles[].kind` PROPAGATES (PR-10):** once `verified: true`, each tile's `kind` **overrides** the builder's shelf inference for every kind (not just bar orientation), and final **gate 21** (exit 28) re-checks the LIVE readback: a built element in a different chart family than the verified kind FAILS, naming the tile + expected/actual family. A **deliberate** substitution (e.g. a Sigma capability gap — non-US region map → bar) is recorded at read time in `"kind_waivers": [{ "tile": "<title>", "reason": "<why>" }]` — ledger-named like `coverage_waivers`, not budget-counted; the builder then keeps the shelf-side kind for that tile.
+>
 > `"verified": true` is REQUIRED to pass the gate when the file was seeded as a draft (`verified: false`); a hand-written file may omit the field. `kind` must be a valid Sigma element kind (see the "Sigma spec supports:" list below). Set `text_elements` / `filter_shelf` to `[]` only after confirming from the image that the dashboard genuinely has none. Both build paths enforce this file: `build-charts-from-signals.rb` (Phase 5a) **refuses to build without it**, and the orchestrator (`migrate-tableau.rb`) hard-stops **before posting the data model** if it's missing. The Phase 6 gate sequence re-runs `assert-dashboard-read.rb` as a final belt. Genuinely can't read the PNG? Pass `--skip-dashboard-read "<reason>"` and name the waiver in your report.
 >
 > **Two fields are load-bearing and gate-enforced** (they encode the two most-expensive late-caught fidelity bugs):
@@ -164,6 +166,12 @@ Use the dashboard image to understand:
 - The rough grid layout of each page (columns × rows) — count the rows; this is what your layout XML needs to match
 - **Page titles, section headers, and any free-text annotations on the dashboard surface** — these are real content (not metadata) and need to be recreated as `text` elements in the Sigma spec. The page tab name (`page['name']`) is *not* a substitute; it only appears in the tab bar, not on the canvas. If the Tableau dashboard shows a heading like "Orders Dashboard" at the top of the page, add a `text` element with `body: "## Orders Dashboard"` and reserve a row for it in the layout.
 - **The filter shelf.** Tableau dashboards usually have visible filter controls (a date range slider, a region list, a state list). These appear as `control` elements in the Sigma workbook — never just as Phase 2.5 element-level filters, because that strips the user-facing control surface.
+
+> **⚠️ INVISIBLE data-source filters (the PNG read CANNOT catch these — #483).** A Tableau **data-source filter** row-scopes an entire datasource and renders **nothing** on any dashboard surface: no quick-filter control, no indicator, nothing a screenshot could ever show. So a workbook can pass every visual-comparison gate and still silently omit a filter that changes every KPI — the field signature is a *suspiciously uniform* discrepancy across multiple unrelated aggregates (distinct counts of companies, offices, agents, websites all reading ~20-25% high at once), not an isolated single-metric miss. Two homes: a `<filter>` on a top-level `<datasource>`/`<extract>` (parsed into `datasource_filters` and auto-applied to every sourcing element), OR — for a virtual connection / published datasource — a database-domain `<filter>` inside a `<shared-view>` (the classic `company_active = true` "active flag"). `parse-twb-layout.rb` tags the shared-view kind in the `-meta.json` `shared_filters` with:
+>   - `is_datasource_filter: true` — set when the inner groupfilter carries `user:ui-domain="database"` OR the shared-view is named after a datasource.
+>   - `ui_domain: "database"` and `is_active_flag: true` (a single-member boolean like `true`/`false`).
+>
+> These are **always-on scoping**, not user toggles: apply each as a **workbook-wide default filter on the master element** (not an open `values:[]` control, which widens it back to everything). The **datasource-filter gate** (`scripts/assert-datasource-filters.rb`, run at `migrate-tableau.rb --finalize` and standalone) blocks GREEN until each tagged filter is applied (an `is_active_flag` filter MUST be applied, not merely surfaced as a control). Escape hatch: `--skip-datasource-filters "<reason>"`. Because this class is invisible and consequential, **hand-inspect the `.twb`'s `<shared-views>` / `<datasource>` `<filter>` elements** whenever migrated aggregates read uniformly high.
 
 **Alternative / supplement: parse the `.twb` zone tree.** If you have `workbook-content.twb` from PAT-mode Phase 1, run:
 
@@ -403,3 +411,31 @@ Output is a JSON array, one entry per Custom SQL block, with `query` (the raw SQ
 
 ---
 
+
+---
+
+## Phase 1a — numeric-URL resolver gate (relocated from SKILL.md — PR-15 diet)
+
+**🚧 GATE — Phase 1a: ANY numeric Tableau URL (project *or* workbook) MUST go
+through the resolver.** When the user hands you a Tableau URL like
+`.../#/site/<site>/projects/1234567` **or**
+`.../#/site/<site>/workbooks/4242001/views`, that number is a **vizportal URL
+id** the REST API cannot resolve (no REST endpoint carries it). Run
+`ruby scripts/resolve-project.rb --url "<url>"` **before anything else**.
+Exit 0 → migrate exactly the workbook(s) it lists (a workbook URL resolves
+straight to `{workbook_luid, name, project_luid, project_name}` — no
+hand-searching). **Exit 2 → STOP and ask the user, presenting the printed
+candidate list — do not proceed.** Guessing from name or recency is a **gate
+violation**: a wrong guess silently points the ENTIRE run (discovery, DM,
+workbook, parity) at the wrong content — one real field session burned 6
+hours migrating the wrong project, another burned 20 minutes hand-hunting a
+workbook it had a DIRECT link to. Query shape + why REST can't do it:
+`refs/tableau-rest.md`.
+
+**`/views/<slug>/<view>` share links (the MOST COMMON shape) are handled by the
+orchestrator directly** — paste the whole URL as `--workbook "<url>"` and
+`migrate-tableau.rb` resolves the workbook via the REST `contentUrl:eq:` filter
+(`Tableau.find_workbook_by_content_url`). Do NOT hand the slug to
+`--workbook <name>`: a workbook's display Name routinely diverges from its
+contentUrl slug, so the name lookup misses (three independent field runs each
+rediscovered this the hard way).

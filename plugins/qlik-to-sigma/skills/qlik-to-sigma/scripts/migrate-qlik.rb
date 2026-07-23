@@ -58,6 +58,7 @@ require 'open3'
 require 'time'
 require_relative 'lib/scout_gate'
 require_relative 'lib/py_resolve' # real-Python resolver (Windows Store-stub safe)
+begin; require_relative 'lib/modeling_advisory'; rescue LoadError; end # shared, vendor-neutral CDW join-cost advisory (optional; synced from shared/)
 
 $stdout.sync = true # lane/foreground progress lines interleave correctly
 
@@ -401,6 +402,8 @@ cstats = conv['stats'] || {}
 puts "   #{cstats['elements']} element(s), #{cstats['columns']} column(s), " \
      "#{cstats['metrics']} metric(s), #{cstats['relationships']} relationship(s); " \
      "#{conv_warnings.size} converter warning(s)"
+# Vendor-neutral CDW join-cost advisory (informational only; never gates). See refs/modeling-strategy.md.
+ModelingAdvisory.print_if_relevant(cstats['relationships']) if defined?(ModelingAdvisory)
 mark('phase2-convert')
 
 # ---------------------------------------------------------------------------
@@ -525,7 +528,10 @@ end
 # are scout-eligible — the gap-scout must ATTEMPT a Sigma translation for each
 # before the degradation is accepted. --yes does NOT skip this; it only accepts
 # measures already scouted (validated or escalated). Recorded to the ledger by
-# scout-validate.py via lib/scout_gate.py.
+# scout-validate.py via lib/scout_gate.py. A 'validated' row is honored only when
+# it carries signed live-probe evidence (ScoutGate integrity, issue #458): a hand-
+# written or forged 'validated' line is treated as unvalidated (→ escalated
+# bucket), so the gate still blocks.
 scout_gaps = questions.select { |q| q['id'] == 'measure_no_sigma_equiv' }
 unless scout_gaps.empty?
   gid = ->(q) { 'measure:' + (q['measure'] || q['detail'].to_s.gsub(/\s+/, ' ').strip[0, 80]).to_s }
@@ -683,6 +689,11 @@ wb_cmd = [*PyResolve.argv, File.join(HERE, 'build-sigma-workbook.py'),
           '--out', File.join(WORK, 'wb-result.json'), '--spec-out', File.join(WORK, 'wb-spec.json'),
           '--layout-out', File.join(WORK, 'layout.xml'),
           '--element-map', File.join(WORK, 'element-map.json')]
+# Freshly-built DM only: hand the workbook builder the DM spec so measures whose
+# inline aggregate matches a metric on the denorm element bind to [Metrics/<name>]
+# (governed) instead of re-deriving inline. The reuse path writes no dm-spec.json,
+# so measures stay inline there (unchanged) until a live metric-fetch exists.
+wb_cmd += ['--dm-spec', File.join(WORK, 'dm-spec.json')] unless opts[:reuse_dm]
 wb_cmd += ['--folder', (opts[:folder] || dm_res['folderId'] || prep[:folder_id])] if opts[:folder] || dm_res['folderId'] || prep[:folder_id]
 wb_cmd << '--dry-run' if opts[:dry_run]
 run!(wb_cmd)

@@ -42,6 +42,7 @@ closely as possible — and verify the numbers match Looker AND the warehouse.
 
 **Read ALL of the following before replying or taking any action. Do not make assumptions about skill conventions, prompts, or global instructions — read the files.**
 - `refs/operating-contract.md` — **READ FIRST**: the fidelity guardrails (render + value-check EVERY page against the source; never ship empty or silently drop a tile; don't spin — surface blockers).
+- `refs/modeling-strategy.md` — faithful reproduction is the DEFAULT (parity is the gate); an upstream OBT / Sigma-native materialization is an OPT-IN optimization for hot, join-heavy dashboards, re-verified against the same oracle. The converter never auto-flattens.
 - `refs/dashboard-contract.md` — the normalized Looker Dashboard JSON contract both the live API fetch and the offline LookML parse produce. The dashboard pipeline is source-agnostic; it only sees this contract.
 - `refs/looker-dashboard-layout.md` — the deep desk study: Looker layout modes, newspaper→24-col grid math, tile-type / filter-type maps, and the full translation-hazard catalog (Liquid, `merged_results`, table calcs, view/explore field resolution, cross-filtering). **This is the design backbone of the dashboard pipeline.**
 - `refs/layered-lookml.md` — layered/derived LookML: derived tables on derived tables, cross-view `${view.SQL_TABLE_NAME}` refs (CTE inlining vs `LOOKER_SCRATCH` placeholders), CTE-continuation fragments, incremental/persisted PDTs → the **Sigma materialization handoff**, dimension_group edge cases, and untranslatable formatting measures. **Read before converting any project with `derived_table:` views.**
@@ -130,6 +131,19 @@ python3 scripts/migrate-looker.py --lookml-dir /path/to/lookml \
   adopt a DM missing a *column* the workbook needs → the workbook POST then 400s
   `Dependency not found`; that footgun is now opt-in via `--reuse-auto`.) Skip the
   scan entirely with `--skip-dm-reuse-check`. The folder is auto-resolved + printed.
+- **Performance scan (Phase 2b) — don't port slow SQL blind:** the converter turns every
+  `derived_table` into ONE Sigma Custom SQL element with the SQL carried through verbatim
+  (nested derived views inline as stacked CTEs into a single element), so a slow Looker derived
+  table stays slow in Sigma. `detect_derived_perf.py` runs after the RLS gate (scoped to the
+  migrated explore) and prints per-derived-table recommendations — `materialize` /
+  `rebuild-as-element` / `leave-inline` — to `derived-perf.json`. It is **informational, never
+  blocks** (unlike RLS), and is silent when there are no derived tables. `--materialize-derived
+  auto` then triggers a Sigma materialization for the flagged element(s) after the DM is built
+  (`all` = every Custom-SQL element); default `off` = recommend only. The recurring **schedule is
+  UI-only** (Element ⋮ → Materialization), so this triggers/monitors and, when an element isn't
+  materialization-configured yet, prints the exact UI handoff. Post-migration, rank which
+  materializations actually pay off by warehouse credit with the **`sigma-materialization-advisor`**
+  skill.
 - **Source repointing:** if the LookML `sql_table_name` points at a DB.SCHEMA the
   Sigma connection doesn't serve (e.g. dev `DEMO_DB.DEMO.*` vs the connection's
   `QUICKSTARTS.LOOKER_RETAIL_ANALYTICS.*`), pass
@@ -182,6 +196,7 @@ python3 scripts/migrate-looker.py --lookml-dir /path/to/lookml \
 | `scripts/fetch_looker_look.py` | **Phase 1 (live — Looks):** `GET /looks/{id}` → the **same contract** as the dashboard fetch but with ONE tile, `filters:[]`, a full-width layout, and a `fieldMeta` map. Imports+reuses `fetch_looker_dashboard`'s helpers (single source of truth), so a Look tile normalizes identically to a dashboard tile. `python3 fetch_looker_look.py <look_id> [out.json]`. |
 | `scripts/parse_lookml_dashboard.py` | **Phase 1 (offline):** parse a `.dashboard.lookml` (YAML) → the SAME contract. Dev/test only; cannot see UDD dashboards. Requires PyYAML. |
 | `scripts/detect_rls.py` | **Phase 1 (RLS scan):** dependency-free regex scan of a LookML dir/file (and/or model JSON) for row-level-security constructs (`access_filter`, `sql_always_where`, `access_grant`, `user_attribute`). Prints a structured summary + recommended Sigma mapping per finding (or `--json`). **Prints nothing / exits 0 when there's no RLS** (zero-overhead). `python3 detect_rls.py <lookml_dir> [--json]` |
+| `scripts/detect_derived_perf.py` | **Phase 2b (performance scan):** dependency-free regex scan for EXPENSIVE `derived_table`s (nested-on-derived, un-persisted, persisted/incremental PDTs, NDTs, SQL complexity, warehouse hints). Scores each and recommends `materialize` / `rebuild-as-element` / `leave-inline` — the handoff for `--materialize-derived` and, post-migration, `sigma-materialization-advisor`. **Informational (never blocks); silent when there are no derived tables.** `python3 detect_derived_perf.py <lookml_dir> [--scope-explores e1,e2] [--json]` |
 | `scripts/apply_sigma_rls.py` | **Phase 1.5 (apply RLS):** scripted, API-driven RLS port. Reuse-first `GET /v2/user-attributes` (prints a match before creating); `--create` → `POST /v2/user-attributes`; `--assign` (+`--member-id`,`--value`) → `POST /v2/user-attributes/{id}/users`; `--field`/`--element-id` → print the verified RLS calc-col + element-filter snippet, `--apply --dm-id` → PATCH it into the DM element spec. **Read-only / plan-only by default — mutates only on an explicit `--create`/`--assign`/`--apply` flag.** Reads `$SIGMA_BASE_URL`/`$SIGMA_API_TOKEN` like `post_dm.py`. |
 | `scripts/convert_dm.mjs` | **Phase 2:** run `convertLookMLToSigma` against a directory of `.lkml` files for one explore → a Sigma DM spec JSON + `…-warnings.json` sidecar. A `.model.lkml` is optional — with none it converts **view-only** (each view → standalone element; pass the WHOLE directory so cross-view `${view.SQL_TABLE_NAME}` refs resolve — see `refs/layered-lookml.md`). Bypasses the deployed MCP build (see the converter-build gotcha below). Env: `LOOKML_DIR`, `CONVERTER_SRC`; args `<exploreName> <out.json>`. |
 | `scripts/lookml-dm-signature.py` | **Phase 2.5:** LookML view files → DM-reuse signature (`{warehouse_tables, referenced_columns, measures}`) for `find-or-pick-dm.rb`. Pure, no network. |
@@ -215,13 +230,21 @@ python3 scripts/migrate-looker.py --lookml-dir /path/to/lookml \
 
 ```ini
 [Looker]
-base_url=https://<your-instance>.cloud.looker.com:19999
+base_url=https://<your-instance>.cloud.looker.com
 client_id=<API3 client_id>
 client_secret=<API3 client_secret>
 verify_ssl=True
 ```
 
-- **API 4.0**, key-pair-free `client_credentials` (login on `:19999` returns a bearer).
+- **API 4.0**, key-pair-free `client_credentials`. Modern Google-hosted Looker serves the API on
+  the standard **443** at `https://<instance>.cloud.looker.com/api/4.0` — no port needed. Older
+  self-hosted instances used the legacy `:19999`; if your `base_url` still carries it and that
+  port is unreachable, the client **self-heals**: it retries on 443 and warns you to update the
+  ini. You can also override the base without editing the ini via `LOOKER_BASE_URL`
+  (or `LOOKERSDK_BASE_URL`).
+- **TLS:** requests use the OS trust store via `truststore` (installed by `bash scripts/bootstrap.sh`),
+  so Python's stricter OpenSSL 3.x accepts the same certs curl/Ruby do; it falls back to certifi
+  then the stock bundle. Leave `verify_ssl=True` (setting it false disables verification and warns).
 - The credential's user needs **Admin** (or at least: see models, dashboards, run queries, and
   — for the test-fixture builders or Git-deploy flow — develop + deploy).
 - Generate an API3 key in Looker: **Admin → Users → (your user) → Edit Keys → New API3 Key**.
@@ -662,6 +685,31 @@ Tile-type, filter-type, and layout maps are in `refs/dashboard-contract.md` and
 | `text` | `text` (markdown body) |
 | `looker_map` / geo / funnel / waterfall / boxplot / sankey / custom viz | none — approximate or drop + warn |
 
+**Table column order, labels & hidden columns.** A table's Sigma column order follows the Looker
+**visualization** order (`vis_config.column_order`, captured as contract `columnOrder`), NOT
+`query.fields` — the Data-tab order, which forces dimensions before measures. Fields not listed in
+`column_order` append in `fields` order (Looker appends newly-added fields at the end). Column
+**names** prefer the viz label (`vis_config.series_labels`, captured as `columnLabels`) over the
+humanized field name — a column renamed in the visualization can differ from the Data-tab name. Columns
+**hidden from the visualization** (`vis_config.hidden_fields`, captured as `hiddenFields`) get
+`hidden: true` on the Sigma column — but a hidden **dimension is KEPT in `groupings.groupBy`** so
+the aggregation grain (and therefore every measure value) is unchanged. Never *drop* a hidden
+dimension: Looker keeps it in the query ("Hide from Visualization" doesn't re-run the query), so
+dropping it would silently change the numbers. Both are additive contract keys — absent/empty →
+columns stay in `fields` order, byte-identical to before. Verified: `tests/test_table_column_order.py`.
+
+**DM metric references (leverage the semantic layer, don't duplicate it).** A table/pivot measure
+column prefers a governed **`[Metrics/<name>]`** reference over re-deriving the aggregation inline,
+when the measure's inline aggregate matches a metric defined on (or inherited by) the source DM
+element. Match is by FORMULA equivalence — strip the master prefix so `Sum([Data/Net Revenue])`
+equals a metric's `Sum([Net Revenue])` — so it's naming-independent and SAFE: ratios, filtered
+measures, custom/ad-hoc measures, and any non-match fall back to the inline formula. migrate-looker
+passes each element's referenceable metrics (name+formula) via `--dm-elements`, resolved through the
+`source.elementId` chain (a denorm "<X> View" element inherits its base fact's metrics — Sigma
+exposes them, and `[Metrics/<name>]` resolves on the denorm through the master→element chain,
+verified live). Absent metrics (the offline test/golden path) → inline, byte-identical. Verified:
+`tests/test_metric_reference.py`.
+
 Newspaper layout math (a single arithmetic transform, no spatial heuristic):
 `gridColumn = (col+1) / (col+1+width)`, `gridRow = (row+1) / (row+1+height)`. `tile` / `static`
 / `grid` modes need a snap heuristic (lossy) — warn + stack; see `refs/looker-dashboard-layout.md` §3.
@@ -859,8 +907,13 @@ Set expectations up front (they appear as warnings from `build_workbook.py`):
 
 - **Cross-filtering** (clicking a Looker bar filters siblings) → Sigma "Set as filter" actions —
   UI-only.
-- **Trellis / small multiples** (incl. `looker_donut_multiples`) → Sigma trellis — UI-only; the
-  spec API silently drops trellis fields.
+- **Trellis / small multiples** — `looker_donut_multiples` is now emitted NATIVELY: `build_workbook.py`
+  builds ONE Sigma `donut-chart` with the element `trellis` facet (the row dimension → `columnsBy`,
+  the pivot stays the slice), via the shared `TrellisEmit` (`scripts/lib/trellis_emit.py`). Not UI-only.
+  Sigma silently strips `trellis` only on UNSUPPORTED kinds (donut IS supported), so the round-trip
+  guard `verify-trellis-survived.rb` re-reads the readback and asserts the key survived, keyed off the
+  `native-trellis-emitted.json` sidecar. Pivoted CARTESIAN charts stay color SERIES (Looker renders
+  those pivots as series, not panels) — see `docs/sigma-trellis-chart-support.md`.
 - **Tooltips / `note_text` / `subtitle_text`** → no spec slot; concatenate into the chart title
   or add an adjacent `text` element.
 - **KPI comparison** (`show_comparison`) → add a 2nd KPI tile or a UI delta.

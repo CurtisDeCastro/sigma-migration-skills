@@ -176,7 +176,9 @@ check(lint_warnings(s).none? { |x| x.start_with?('I1 ') }, 'I1: If() with explic
 # ---- A1 (WARN): DROPPED_BY_API fields — accepted then silently ignored (#417) --
 # One warning PER field, naming the field, the silent-drop behavior, and the
 # workaround — and phrased as "silently ignored", never as a will-400.
-DROPPED_BY_API.each_key do |field|
+# `conditional` members (filters, #456) persist in the normal case and are NOT
+# A1-warned on mere presence — they are asserted separately just below.
+DROPPED_BY_API.reject { |_f, info| info['conditional'] }.each_key do |field|
   s = valid_spec
   s['pages'][0]['elements'][4][field] = false
   warns = lint_warnings(s)
@@ -188,6 +190,16 @@ DROPPED_BY_API.each_key do |field|
         "A1 message (#{field}) distinguishes silently-ignored from will-400 and names a workaround", fails)
   check(rule(lint(s), 'A1').empty?, "A1 (#{field}) is WARN-only — never in the FAIL set", fails)
 end
+# #456: `filters` is a CONDITIONAL DROPPED_BY_API member — documented in the
+# contract but NOT A1-warned on mere presence (every valid control has filters).
+check(DROPPED_BY_API.key?('filters') && DROPPED_BY_API['filters']['conditional'],
+      'DROPPED_BY_API covers the filter TARGET binding as a conditional member (#456)', fails)
+check(DROPPED_BY_API['filters']['workaround'].to_s.include?('Text(') &&
+      DROPPED_BY_API['filters']['workaround'].to_s.include?('never ship a control that filters nothing'),
+      'filters workaround names the Text() decode + the never-ship-a-dead-control floor', fails)
+# valid_spec's control ALREADY carries a filters binding — it must NOT A1-warn.
+check(lint_warnings(valid_spec).none? { |x| x.start_with?('A1 ') && x.include?('`filters`') },
+      'A1: a control carrying a normal filters binding → no A1 warning (conditional member)', fails)
 # all eight #417 fields are in the contract table
 %w[showNullOption showClearButton showSearchBox showHistogram allowMultipleSelection
    excludeValues showExpandedList required].each do |f417|
@@ -292,6 +304,77 @@ check(rule(lint(s), 'C7').any? { |e| e.include?('low`/`high') }, 'C7: range-slid
 rs['low'] = 0; rs['high'] = 100
 check(rule(lint(s), 'C7').empty?, 'C7: range-slider with low/high → clean', fails)
 
+# ---- C7: unbounded number-range {min:null,max:null} → HARD error (#422) ------
+# The recurring #422 defect: an UNRESTRICTED Tableau quantitative
+# quick-filter produced a number-range with min AND max present-and-null, which
+# 400s the whole POST. C7 must HARD-error it (in lint(), the FAIL set), name the
+# fix, and NEVER flag the valid keys-omitted unbounded form.
+def number_range_ctl(s)
+  ctl = s['pages'][0]['elements'][4]
+  ctl['controlType'] = 'number-range'
+  ctl.delete('selectionMode')
+  ctl.delete('value')
+  ctl.delete('mode')
+  ctl
+end
+# min:null AND max:null control → hard C7 violation naming the fix.
+s = valid_spec
+ctl = number_range_ctl(s)
+ctl['min'] = nil
+ctl['max'] = nil
+c7nr = rule(lint(s), 'C7')
+check(c7nr.size == 1, "C7: number-range control with min:null and max:null → 1 HARD violation (got #{lint(s).inspect})", fails)
+check(c7nr.first.to_s.include?('min:null and max:null') && c7nr.first.to_s.include?('#422'),
+      'C7 number-range message names the {min:null,max:null} 400 shape and the issue', fails)
+check(c7nr.first.to_s.include?('valid unbounded number-range') && c7nr.first.to_s.include?('never null bounds'),
+      'C7 number-range message names the remedy (omit the keys / concrete bounds, never null)', fails)
+# non-empty errs → the CLI would exit non-zero: assert it is a FAIL, not a warn.
+check(lint_warnings(s).none? { |x| x.start_with?('C7 ') }, 'C7 number-range null-bounds is a hard error, never a warning', fails)
+
+# a number-range with the min/max keys OMITTED is a VALID unbounded control — no C7.
+s = valid_spec
+number_range_ctl(s) # controlType only, no min/max keys
+check(rule(lint(s), 'C7').empty?, 'C7: number-range with min/max keys OMITTED → valid unbounded, no violation', fails)
+
+# a BOUNDED number-range still passes clean.
+s = valid_spec
+ctl = number_range_ctl(s)
+ctl['min'] = 0
+ctl['max'] = 100000
+check(rule(lint(s), 'C7').empty?, 'C7: bounded number-range (min:0,max:100000) → clean', fails)
+
+# only ONE bound present-and-null (partial) is still the unbounded trap → hard error.
+s = valid_spec
+ctl = number_range_ctl(s)
+ctl['min'] = nil # max key absent
+check(rule(lint(s), 'C7').size == 1, 'C7: number-range with min:null (max absent) → hard violation', fails)
+
+# ---- C7: unbounded number-range ELEMENT FILTER {min:null,max:null} (#422) ----
+# The exact shape the builder used to emit for a worksheet-scoped unrestricted
+# quantitative quick-filter — an ELEMENT filter, not a control. C7 must catch it
+# too (element filters were previously unlinted).
+s = valid_spec
+s['pages'][0]['elements'][1]['filters'] = [
+  { 'columnId' => 'col-kpi-val', 'kind' => 'number-range', 'mode' => 'between',
+    'min' => nil, 'max' => nil, 'includeNulls' => 'never' }
+]
+c7ef = rule(lint(s), 'C7')
+check(c7ef.size == 1 && c7ef.first.include?('filter[0]') && c7ef.first.include?('#422'),
+      "C7: number-range ELEMENT filter with min:null/max:null → 1 HARD violation naming filter[0] (got #{lint(s).inspect})", fails)
+check(c7ef.first.to_s.include?('drop the filter'),
+      'C7 element-filter message names the fix (drop the no-op filter)', fails)
+# a bounded number-range element filter passes; keys-omitted passes.
+s = valid_spec
+s['pages'][0]['elements'][1]['filters'] = [
+  { 'columnId' => 'col-kpi-val', 'kind' => 'number-range', 'mode' => 'between', 'min' => 1, 'max' => 9, 'includeNulls' => 'never' }
+]
+check(rule(lint(s), 'C7').empty?, 'C7: bounded number-range element filter → clean', fails)
+s = valid_spec
+s['pages'][0]['elements'][1]['filters'] = [
+  { 'columnId' => 'col-kpi-val', 'kind' => 'list', 'mode' => 'include', 'values' => %w[a b] }
+]
+check(rule(lint(s), 'C7').empty?, 'C7: non-number-range element filter → clean', fails)
+
 # ---- C8: includeNulls placement --------------------------------------------
 s = valid_spec
 s['pages'][0]['elements'][4]['includeNulls'] = true    # on a `list` control (off-schema)
@@ -301,9 +384,53 @@ n = s['pages'][0]['elements'][4]
 n['controlType'] = 'number'; n['mode'] = '='; n.delete('selectionMode'); n['value'] = 1; n['includeNulls'] = true
 check(rule(lint(s), 'C8').empty?, 'C8: includeNulls on a number control → allowed (no violation)', fails)
 
+# ---- A3 (PR-18): integer-coded dimension control without a Text() decode -----
+# A master carrying a raw integer STORE_KEY column, optionally with a decode
+# sibling, and a list control targeting one or the other.
+def a3_spec(target_col_id, with_decode: false)
+  master_cols = [{ 'id' => 'm-store', 'name' => 'Store Key', 'formula' => '[Src/STORE_KEY]' }]
+  master_cols << { 'id' => 'skt-store', 'name' => 'Store Key (Text)', 'formula' => 'Text([Store Key])' } if with_decode
+  JSON.parse(JSON.generate(
+    'pages' => [{ 'name' => 'Dash', 'elements' => [
+      { 'id' => 'master', 'kind' => 'table', 'name' => 'Master', 'columns' => master_cols },
+      { 'id' => 'el-ctl-store', 'kind' => 'control', 'controlId' => 'ctl-store',
+        'controlType' => 'list', 'name' => 'Store Key', 'selectionMode' => 'multiple',
+        'filters' => [{ 'source' => { 'kind' => 'table', 'elementId' => 'master' }, 'columnId' => target_col_id }] }
+    ] }]
+  ))
+end
+scope_int = ->(status = nil) { { 'controls' => [{ 'controlId' => 'ctl-store', 'integer_dim' => true }.tap { |h| h['decode'] = { 'status' => status } if status }] } }
+
+# A3-1: scope says integer_dim, spec targets the RAW column, no decode → WARN.
+w = lint_warnings(a3_spec('m-store'), scope: scope_int.call)
+a3 = rule(w, 'A3')
+check(a3.size == 1 && a3.first.include?('SILENTLY strips'),
+      "A3: integer_dim control w/o decode → 1 WARNING (got #{a3.inspect})", fails)
+check(rule(lint(a3_spec('m-store')), 'A3').empty?, 'A3 is WARN-only — never in the FAIL set', fails)
+
+# A3-2: decode present, control bound to it → NO A3.
+ok = lint_warnings(a3_spec('skt-store', with_decode: true), scope: scope_int.call('auto-decoded'))
+check(rule(ok, 'A3').empty?, 'A3: control bound to the Text() decode → no warning', fails)
+
+# A3-3: spec-only mis-wire (decode column EXISTS but control targets the raw
+# column), NO scope → still caught precisely.
+w3 = lint_warnings(a3_spec('m-store', with_decode: true))
+a33 = rule(w3, 'A3')
+check(a33.size == 1 && a33.first.include?('exists on the target element') && a33.first.include?('skt-store'),
+      "A3: spec-only mis-wire (raw target, decode sibling present) → WARNING naming the decode col (got #{a33.inspect})", fails)
+
+# A3-4: manual-required decode → softer WARN pointing at the POSTPUBLISH guide.
+w4 = lint_warnings(a3_spec('m-store'), scope: scope_int.call('manual-required'))
+a34 = rule(w4, 'A3')
+check(a34.size == 1 && a34.first.include?('POSTPUBLISH_GUIDE'),
+      "A3: manual-required decode → WARN routes to POSTPUBLISH_GUIDE (got #{a34.inspect})", fails)
+
+# A3-5: a plain STRING list control (no integer_dim, no decode sibling) → NO A3.
+check(rule(lint_warnings(valid_spec), 'A3').empty?, 'A3: ordinary string list control → no warning', fails)
+
 puts
 if fails.empty?
-  puts 'ALL PASS — preflight_lint K1/S1/C5/N1 fail rules + P1/I1/A1/A2 warnings + T1/C2/C3 regressions'
+  puts 'ALL PASS — preflight_lint K1/S1/C5/N1 fail rules + P1/I1/A1/A2/A3 warnings + T1/C2/C3 regressions'
   exit 0
 else
   puts "FAILURES (#{fails.length}):"

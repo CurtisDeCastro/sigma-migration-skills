@@ -16,8 +16,9 @@ python3 scripts/visual-similarity.py --source <src.png> --render <render.png> --
 
 Exit codes: `0` = pass, `1` = fail, `2` = dependencies missing or input unreadable.
 **Exit 2 is never a pass** — treat it as a blocked gate: fix the environment
-(`pip install pillow numpy`) or re-export the image, then re-run. The gate wiring must
-propagate 2 as a hard stop, not fall through to the model verdict.
+(`bash scripts/bootstrap.sh` — installs Pillow/numpy `--user`, no admin) or
+re-export the image, then re-run. The gate wiring must propagate 2 as a hard
+stop, not fall through to the model verdict.
 
 JSON written to `--json-out`:
 
@@ -71,8 +72,9 @@ launders a broken render into a recorded visual pass.
 
 ## Dependencies
 
-Pillow + numpy only (no OpenCV/scikit). If either is missing the script prints
-`pip install pillow numpy` and exits 2. Runtime is well under a second per pair.
+Pillow + numpy only (no OpenCV/scikit). If either is missing the script exits 2
+with a remediation line — the fix is the bootstrap (`bash scripts/bootstrap.sh`,
+which pip-installs them `--user`). Runtime is well under a second per pair.
 
 ## Tests
 

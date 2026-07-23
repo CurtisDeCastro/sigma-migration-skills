@@ -32,7 +32,10 @@
 # (dim + measure). It then:
 #   - Maps each header to a master column using the regex map.
 #   - Picks the Sigma element `kind` from chart_kind (with `automatic` → bar
-#     fallback + a warning to verify against the PNG).
+#     fallback + a warning to verify against the PNG). A VERIFIED per-tile kind
+#     in png-read.json OVERRIDES the shelf inference for every kind (PR-10;
+#     tiles named in png-read kind_waivers keep the shelf kind — a recorded
+#     deliberate substitution).
 #   - Reads zone.sort: emits xAxis.sort iff Tableau had a <sort>. Otherwise
 #     leaves xAxis unsorted (Sigma renders natural categorical / date order).
 #   - Reads zone.aggregations: applies the right Sigma aggregator. Tableau
@@ -59,6 +62,12 @@ require_relative 'learned-rules'
 require_relative 'lib/theme_derive'
 require_relative 'lib/png_classify'
 require_relative 'lib/zone_census'
+require_relative 'lib/format_map'     # PR-12: the ONE Tableau→Sigma format translator
+require_relative 'lib/series_colors'  # PR-12: ordered per-series color schemes
+require_relative 'lib/threshold_halo'  # C2: threshold-halo (computed-boolean color) detection
+require_relative 'lib/integer_dim'    # PR-18: integer-coded dimension decode-to-text routing
+require_relative 'lib/trellis_emit'   # shared native-trellis emitter (supported-kind gate + fallbacks)
+require_relative 'lib/metric_binding' # shared DM-metric binder ([Metrics/<name>] over inline re-derive)
 require 'erb'
 
 opts = { master_id: 'master' }
@@ -92,8 +101,18 @@ OptionParser.new do |p|
   # 🚧 GATE escape hatch — waive the Phase 1d dashboard-read requirement. Use ONLY
   # when the source dashboard PNG genuinely cannot be read; name the reason in your report.
   p.on('--skip-dashboard-read REASON', 'waive the Phase 1d dashboard-read gate (REQUIRED reason; name it in your report)') { |v| opts[:skip_dashboard_read] = v }
+  # DM metrics referenceable on the master (name+formula, own + inherited via
+  # source.elementId) — a measure whose inline aggregate matches one binds to a
+  # governed [Metrics/<name>] ref instead of re-deriving inline. Absent → inline.
+  p.on('--metrics PATH', 'JSON array of DM metrics {name,formula} referenceable on the master element') { |v| opts[:metrics_file] = v }
 end.parse!
 %i[tab layout mmap out].each { |k| abort("missing --#{k.to_s.tr('_','-')}") unless opts[k] }
+
+# Load the referenceable DM metrics once; every measure-emission site prefers a
+# governed [Metrics/<name>] ref over its inline aggregate when they match by formula
+# equivalence (strip the literal 'Master' prefix). Empty/absent → inline, byte-identical.
+opts[:metrics] = (opts[:metrics_file] && File.exist?(opts[:metrics_file]) ?
+                  JSON.parse(File.read(opts[:metrics_file], encoding: 'UTF-8')) : [])
 
 # 🚧 GATE (Phase 1d) — refuse to build charts until the SOURCE dashboard PNG has
 # been read and enumerated. png-read.json is the artifact of that read; without it
@@ -104,6 +123,15 @@ require_relative 'lib/dashboard_read'
 require_relative 'lib/recipe_multimetric' # rollup_flag validator + caption-variant helpers
 if opts[:skip_dashboard_read]
   warn "[SKIP] dashboard-read gate WAIVED (#{opts[:skip_dashboard_read]}) — name this in your migration report."
+  # PR-14: every honored --skip-* leaves a record on the off-ramp trail.
+  begin
+    $LOAD_PATH.unshift File.expand_path('lib', __dir__)
+    require 'offramp'
+    Offramp.log(opts[:tab], kind: 'skip-flag-waived', reason: opts[:skip_dashboard_read],
+                detail: '--skip-dashboard-read')
+  rescue LoadError
+    warn '       WARN: lib/offramp.rb not vendored — the waiver could not be recorded to offramps.jsonl.'
+  end
 else
   dr_ok, dr_errs = DashboardRead.validate(opts[:tab])
   unless dr_ok
@@ -138,6 +166,49 @@ PNG_ORIENTATION = begin
   tiles.each_with_object({}) do |t, h|
     o = t['orientation']
     h[t['title'].to_s.downcase.strip] = o if %w[horizontal vertical].include?(o)
+  end
+rescue StandardError
+  {}
+end
+
+# PR-10 KIND PROPAGATION — the human-verified chart KIND from png-read.json
+# (Phase 1d) OVERRIDES the shelf inference for EVERY kind, not just bar
+# orientation (the override above was the bar-only special case; this
+# generalizes it). Field failure this closes: an operator corrected the kinds
+# in a verified png-read.json and the build ignored them — bars shipped where
+# the source shows lines. Precedence: png-read verified kind > shelf inference.
+#
+# Vocabulary bridge: png-read tiles carry Sigma element kinds (bar-chart /
+# line-chart / …) while the zone loop speaks parser chart_kind (bar / line /
+# …). The bridge is the INVERSE of DashboardRead::DRAFT_KIND — the one
+# existing png-read↔parser mapping (lib/dashboard_read.rb) — never a second
+# divergent table; combo/donut ride SIGMA_KIND's vocabulary ('combo' ⇒
+# combo-chart; a donut is the pie family, same as lib/blind_grade.rb).
+# Non-chart kinds (text/control/image/container) have no entry, so they can
+# never override a chart zone.
+#
+# Tiles named in png-read.json kind_waivers [{tile, reason}] are EXEMPT: the
+# operator recorded a DELIBERATE substitution at read time (e.g. a Sigma
+# capability gap), so the shelf-side kind stands and the final gate (gate 21)
+# accepts the difference by name — ledger-style, like coverage_waivers.
+PNG_KIND_TO_CHART = DashboardRead::DRAFT_KIND
+                    .reject { |ck, _| %w[automatic other].include?(ck) }
+                    .each_with_object({}) { |(ck, sk), h| h[sk] ||= ck }
+                    .merge('combo-chart' => 'combo', 'donut-chart' => 'pie').freeze
+PNG_KIND = begin
+  pr = (JSON.parse(File.read(DashboardRead.path(opts[:tab]))) rescue nil)
+  if pr.is_a?(Hash) && pr['verified'] != false && pr['tiles'].is_a?(Array)
+    kw = Array(pr['kind_waivers']).map { |w| w.is_a?(Hash) ? w['tile'].to_s.downcase.strip : nil }
+                                  .compact.reject(&:empty?)
+    pr['tiles'].each_with_object({}) do |t, h|
+      next unless t.is_a?(Hash)
+      title = t['title'].to_s.downcase.strip
+      next if title.empty? || kw.include?(title)
+      ck = PNG_KIND_TO_CHART[(t['kind'] || t['chart_kind']).to_s.strip.downcase]
+      h[title] = ck if ck
+    end
+  else
+    {} # absent / draft / waived read ⇒ no overrides; shelf inference stands
   end
 rescue StandardError
   {}
@@ -1009,37 +1080,83 @@ views  = gw.dig('views', 'view') || []
 views  = [views] unless views.is_a?(Array)
 view_by_name = views.each_with_object({}) { |v, h| h[v['name']] = v }
 
-# Translate a Tableau format-value string (already parsed by the parser's
-# translate_format) into a Sigma format hash. Done here so we don't fork the
-# parser logic — we just call into it via a duplicated minimal translator.
+# Translate a Tableau format-value string into a Sigma format hash. PR-12:
+# delegates to the shared lib/format_map.rb (the parser's translate_format
+# delegates there too — the old duplicated minimal translator had already
+# drifted on date handling). Sigma date-time formats are d3-time strings
+# ('%B %-d, %Y'); moment-style tokens ("MMM D, YYYY") print LITERALLY, so
+# FormatMap returns nil for anything it can't fully tokenize — unmapped
+# formats are RECORDED in formats-emitted.json, never guessed.
 def tableau_format_to_sigma(s)
-  return nil if s.nil? || s.empty?
-  segments = s.split(';')
-  pos = segments[0] || s
-  neg = segments[1]
-  prefix = (neg && neg.include?('(') && neg.include?(')')) ? '(' : ''
-  if (m = pos.match(/^p\d*(?:\.(\d+))?%$/i))
-    decimals = (m[1] || '').length
-    return { 'kind' => 'number', 'formatString' => "#{prefix},.#{decimals}%" }
-  end
-  if (m = pos.match(/^C\d+(?:\.(\d+))?%?$/))
-    decimals = (m[1] || '').length
-    return { 'kind' => 'number', 'formatString' => "#{prefix}$,.#{decimals}f", 'currencySymbol' => '$' }
-  end
-  if pos =~ /^c?["\\]*\$/ || pos.start_with?('$')
-    decimals = (pos.match(/\.(0+)/) || [])[1].to_s.length
-    return { 'kind' => 'number', 'formatString' => "#{prefix}$,.#{decimals}f", 'currencySymbol' => '$' }
-  end
-  if pos =~ /^[#,0]+(?:\.(0+))?$/
-    decimals = ($1 || '').length
-    return { 'kind' => 'number', 'formatString' => "#{prefix},.#{decimals}f" }
-  end
-  if s =~ /yyyy|MMM|MM|dd|HH/
-    f = s.gsub('yyyy','%Y').gsub('yy','%y').gsub('MMMM','%B').gsub('MMM','%b').gsub('MM','%m')
-         .gsub('dd','%d').gsub('HH','%H').gsub('mm','%M').gsub('ss','%S')
-    return { 'kind' => 'datetime', 'formatString' => f }
+  FormatMap.translate(s)
+end
+
+# PR-12: per-column DEFAULT formats from the .twb (<column default-format=…>,
+# parser meta 'column_formats': caption → raw Tableau format string). The
+# display ground truth wherever a sheet doesn't override per-pill — the fix
+# for the field failure where a one-shot KPI printed raw while the source
+# shows $-formatted. Populated after meta load; caption match mirrors
+# pick_tableau_format's normalized containment match.
+COLUMN_DEFAULT_FORMATS = {}
+(meta['column_formats'] || {}).each { |k, v| COLUMN_DEFAULT_FORMATS[k] = v }
+
+# Worksheet per-pill format keys are keyed by the field's INTERNAL id
+# (`[usr:Calculation_AvgBal:qk]`), but measure/KPI columns are named by CAPTION
+# ("Avg Balance per User"). Without this bridge the friendly match compares the
+# internal id to the caption, misses, and the column falls to a name-based
+# heuristic — the field failure where a KPI printed raw (or, worse, got a `$` on
+# a percentage) while the source .twb carried the real format. Map internal id →
+# caption from columns_by_guid so a format key can also match on its caption.
+FORMAT_KEY_CAPTIONS = {}
+(meta['columns_by_guid'] || {}).each do |gid, ci|
+  cap = ci.is_a?(Hash) ? ci['caption'].to_s : ''
+  FORMAT_KEY_CAPTIONS[gid.to_s] = cap unless cap.empty?
+end
+
+# The human name(s) a worksheet format-key can match a column header on: its own
+# friendly token AND — bridged through columns_by_guid — the caption its
+# internal id resolves to. Returns NORMALIZED keys (downcased, \W stripped).
+def format_key_match_keys(field)
+  inner = field.to_s.scan(/\[([^\]]+)\]/).flatten.last.to_s
+  parts = inner.split(':')
+  token = parts.length >= 3 ? parts[1].to_s : ''
+  return [] if token.empty?
+  names = [token]
+  cap = FORMAT_KEY_CAPTIONS[token]
+  names << cap if cap && !cap.empty?
+  names.map { |n| n.downcase.gsub(/\W+/, '') }.reject(&:empty?).uniq
+end
+
+def pick_column_default_format_raw(header)
+  hkey = header.to_s.downcase.gsub(/\W+/, '')
+  return nil if hkey.empty?
+  COLUMN_DEFAULT_FORMATS.each do |capn, val|
+    ckey = capn.to_s.downcase.gsub(/\W+/, '')
+    next if ckey.empty?
+    return val if ckey == hkey || hkey.include?(ckey) || ckey.include?(hkey)
   end
   nil
+end
+
+def pick_column_default_format(header)
+  raw = pick_column_default_format_raw(header)
+  raw && tableau_format_to_sigma(raw)
+end
+
+# Last-resort number format when NO source format resolves (no pill format, no
+# .twb default, no master-map format): guess by header name. Percent detection
+# — a literal '%' in the caption OR a percent/rate/ratio word — WINS over the
+# currency guess, so a percentage NEVER gets a currency symbol (the
+# '% Customers with Profit' matched /profit/ and got a bogus '$' field failure).
+def heuristic_number_format(name)
+  n = name.to_s
+  if n.include?('%') || n.downcase =~ /(rate|margin|pct|percent|ratio)/
+    { 'kind' => 'number', 'formatString' => ',.1%' }
+  elsif n.downcase =~ /(revenue|profit|cost|sales|amount|spend)/
+    { 'kind' => 'number', 'formatString' => '$,.0f', 'currencySymbol' => '$' }
+  else
+    { 'kind' => 'number', 'formatString' => ',.0f' }
+  end
 end
 
 # Tableau scale-comma + literal-suffix formats ('n#,##0,,,B;-#,##0,,,B'):
@@ -2292,14 +2409,13 @@ end
 def pick_tableau_format(formats, header)
   return nil if formats.nil? || formats.empty?
   hkey = header.to_s.downcase.gsub(/\W+/, '')
+  return nil if hkey.empty?
   formats.each do |field, val|
-    body = field.to_s.downcase
-    # Friendly-name match: format key looks like `[usr:Return Rate:qk]`. Pull
-    # the human chunk and compare to header.
-    inner = body.scan(/\[([^\]]+)\]/).flatten.last.to_s
-    parts = inner.split(':')
-    friendly = parts.length >= 3 ? parts[1].to_s.gsub(/\W+/, '') : ''
-    if !friendly.empty? && (friendly == hkey || hkey.include?(friendly) || friendly.include?(hkey))
+    # Friendly-name match: format key looks like `[usr:Return Rate:qk]` OR is
+    # keyed by an internal id (`[usr:Calculation_AvgBal:qk]`) the KPI/measure
+    # column carries under its CAPTION — format_key_match_keys bridges both.
+    format_key_match_keys(field).each do |fkey|
+      next unless fkey == hkey || hkey.include?(fkey) || fkey.include?(hkey)
       sigma = tableau_format_to_sigma(val)
       return sigma if sigma
     end
@@ -2313,11 +2429,11 @@ end
 def pick_tableau_format_raw(formats, header)
   return nil if formats.nil? || formats.empty?
   hkey = header.to_s.downcase.gsub(/\W+/, '')
+  return nil if hkey.empty?
   formats.each do |field, val|
-    inner = field.to_s.downcase.scan(/\[([^\]]+)\]/).flatten.last.to_s
-    parts = inner.split(':')
-    friendly = parts.length >= 3 ? parts[1].to_s.gsub(/\W+/, '') : ''
-    return val if !friendly.empty? && (friendly == hkey || hkey.include?(friendly) || friendly.include?(hkey))
+    format_key_match_keys(field).each do |fkey|
+      return val if fkey == hkey || hkey.include?(fkey) || fkey.include?(hkey)
+    end
   end
   nil
 end
@@ -2518,7 +2634,10 @@ def build_pivot_element(z, meta, mmap, opts, warnings, data_elements = [])
     end
     col_obj = { 'id' => col_id, 'name' => display_name, 'formula' => formula }
     if field['role'] == 'measure'
-      tab_fmt = pick_tableau_format(z['formats'], m['name'])
+      # PR-12: fall back to the column's .twb default-format when the sheet
+      # has no per-pill format (still ahead of the master-map/heuristic).
+      tab_fmt = pick_tableau_format(z['formats'], m['name']) ||
+                pick_column_default_format(m['name'])
       col_obj['format'] = tab_fmt if tab_fmt
       col_obj['format'] ||= m['format'] if m['format'].is_a?(Hash)
       col_obj['format'] ||= { 'kind' => 'number', 'formatString' => ',.0f' }
@@ -3594,6 +3713,68 @@ def build_param_scope_helper(el_id:, master_id:, value_name:, value_formula:, sc
   [element, src_name]
 end
 
+# ---- C2 threshold halo (gap ubr5.11) ---------------------------------------
+# A "threshold halo" is a mark whose COLOR flips above/below a constant on the
+# measure (the reference ">100K" yellow halo; the red-below/green-above BAN).
+# Detection is shared (lib/threshold_halo.rb); these two builder helpers resolve
+# the plan against THIS run's meta and turn a mappable one into the verified
+# computed-boolean + 2-color `color.scheme` on a category chart. KPIs/BANs have
+# no spec path for a conditional value color (kpi-chart `value.color` is a static
+# hex; conditional formatting is UI-only) → the caller routes them to
+# POSTPUBLISH_GUIDE + coverage instead of silently dropping the halo.
+$threshold_halo_records = [] # sidecar rows (threshold-halo.json) + coverage feed
+
+# Neutral-color test for the saturation fallback (a near-grey base vs the halo).
+# Mirrors parse-twb-layout's color_neutral? closely enough for a 2-band split.
+def threshold_color_neutral?(hex)
+  h = hex.to_s.downcase.sub(/\A#/, '')
+  return false unless h =~ /\A[0-9a-f]{6}\z/
+  r = h[0, 2].to_i(16); g = h[2, 2].to_i(16); b = h[4, 2].to_i(16)
+  mx = [r, g, b].max; mn = [r, g, b].min
+  (mx - mn) <= 24 # low chroma → grey/neutral base
+end
+
+# Tableau color-shelf aggregate wrapper → Sigma agg template (render_agg form).
+THRESHOLD_AGG = {
+  'SUM' => 'Sum', 'TOTAL' => 'Sum', 'AVG' => 'Avg', 'AVERAGE' => 'Avg',
+  'MIN' => 'Min', 'MAX' => 'Max', 'MEDIAN' => 'Median', 'ATTR' => 'Min',
+  'COUNT' => 'CountIf(IsNotNull(%s))', 'COUNTD' => 'CountDistinct'
+}.freeze
+
+# Resolve a zone's threshold-color plan (or nil / unmappable) for this run.
+def threshold_halo_plan(z, meta)
+  cbg = meta['columns_by_guid'] || {}
+  # Resolve the color channel's field token → columns_by_guid key. Handles hex
+  # GUIDs (guid_from_text) AND name/Calculation_NNN-keyed instance refs.
+  guid_of = lambda do |ref|
+    g = guid_from_text(ref)
+    return g if g && cbg.key?(g)
+    tok = ref.to_s[/\[(?:[a-z]+:)?([^:\]]+?)(?::[a-z0-9]+)?\]\s*\z/i, 1]
+    tok && cbg.key?(tok) ? tok : (g || tok)
+  end
+  ThresholdHalo.plan_for_zone(z, cbg, guid_of, method(:threshold_color_neutral?))
+end
+
+# Build the Sigma computed-boolean color column for a mappable plan. Returns
+# [column_hash, master_name] or [nil, reason]. The boolean is evaluated per the
+# chart's grouping (per bar), so `Sum([Master/m]) > N` colors each mark.
+def threshold_halo_color_column(plan, el_id, meta, mmap)
+  cbg = meta['columns_by_guid'] || {}
+  ref = plan['measure_ref'].to_s
+  tok = strip_brackets(ref).strip
+  cap = (info = cbg[tok] || cbg[guid_from_text(ref).to_s]) && info.is_a?(Hash) ? info['caption'] : nil
+  cap ||= tok
+  master = map_column(cap, mmap)
+  return [nil, "threshold measure '#{cap}' has no master column"] unless master && master['name']
+  agg_tmpl = THRESHOLD_AGG[plan['agg'].to_s] || 'Sum' # bare measure ref → aggregate by Sum
+  mref = "[Master/#{master['name'].to_s.strip}]"
+  lhs  = render_agg(agg_tmpl, mref)
+  const = plan['constant']
+  col = { 'id' => "clr-halo-#{el_id}", 'name' => (plan['field'].to_s.strip.empty? ? "#{cap} #{plan['op']} #{const}" : plan['field'].to_s.strip),
+          'formula' => "#{lhs} #{plan['op']} #{const}" }
+  [col, master['name'].to_s.strip]
+end
+
 # single measure and no dimensions — translate to a Sigma kpi-chart element.
 # Without this, the chart_kind=kpi worksheet would fall through to the
 # CSV-driven flat-table flow and quietly produce nothing usable.
@@ -3817,26 +3998,24 @@ def build_kpi_element(z, meta, mmap, opts, warnings, data_elements = [])
   end
 
   measure_col_id = "k-#{el_id}"
+  # Prefer a governed [Metrics/<name>] ref when this KPI aggregate matches a DM
+  # metric by formula equivalence; safe no-op (inline) otherwise.
+  formula = MetricBinding.metric_ref_or_inline(formula, 'Master', opts[:metrics])
   measure_col = {
     'id'      => measure_col_id,
     'name'    => master['name'].to_s.strip,
     'formula' => formula
   }
 
-  # Format: prefer Tableau format string for this measure, then master-map
+  # Format: prefer Tableau format string for this measure (worksheet pill
+  # format, then the column's .twb default-format — PR-12, the fix for the
+  # KPI-printed-raw-where-source-shows-$ field failure), then master-map
   # format, then heuristic by name.
-  tab_fmt = pick_tableau_format(z['formats'], master['name'])
+  tab_fmt = pick_tableau_format(z['formats'], master['name']) ||
+            pick_column_default_format(master['name'])
   measure_col['format'] = tab_fmt if tab_fmt
   measure_col['format'] ||= master['format'] if master['format'].is_a?(Hash)
-  measure_col['format'] ||=
-    case master['name'].downcase
-    when /(revenue|profit|cost|sales|amount|spend)/
-      { 'kind' => 'number', 'formatString' => '$,.0f', 'currencySymbol' => '$' }
-    when /(rate|margin|pct|percent|ratio)/
-      { 'kind' => 'number', 'formatString' => ',.1%' }
-    else
-      { 'kind' => 'number', 'formatString' => ',.0f' }
-    end
+  measure_col['format'] ||= heuristic_number_format(master['name'])
 
   # Scale-comma + literal-suffix source format ('#,##0,,,B' → "1B"): the d3
   # enum can't render it (,.2s shows 'G' for 1e9), so the enum translator
@@ -3845,7 +4024,9 @@ def build_kpi_element(z, meta, mmap, opts, warnings, data_elements = [])
   # carries the EXACT rendering (trailing zeros + grouping intact) and the
   # KPI value points at it (raw column kept for anything else).
   fmt_columns = []
-  if tab_fmt.nil? && (raw_fmt = pick_tableau_format_raw(z['formats'], master['name'])) &&
+  if tab_fmt.nil? &&
+     (raw_fmt = pick_tableau_format_raw(z['formats'], master['name']) ||
+                pick_column_default_format_raw(master['name'])) &&
      (sspec = parse_scaled_suffix_format(raw_fmt))
     fmt_col_id = "#{measure_col_id}-fmt"
     fmt_columns << { 'id' => fmt_col_id, 'name' => "#{master['name'].to_s.strip} (fmt)" }
@@ -3909,6 +4090,22 @@ def build_kpi_element(z, meta, mmap, opts, warnings, data_elements = [])
   # the number IS the chart), we don't need a separate dataLabel — kpi-chart
   # always renders the value. No-op.
 
+  # C2 threshold halo on a BAN/KPI: the scorecard's value color flips on a
+  # threshold. Sigma's kpi-chart `value.color` is a STATIC hex and its
+  # conditional formatting is UI-only — there is NO create-spec path to a
+  # value color that flips on the measure. Route it to POSTPUBLISH_GUIDE +
+  # coverage (never silently drop); the user finishes it in the editor.
+  thp = threshold_halo_plan(z, meta)
+  if thp
+    reason = thp['mappable'] ? 'kpi-chart conditional value color is UI-only in Sigma (value.color is a static hex)' : thp['reason']
+    $threshold_halo_records << { 'element' => element['id'], 'worksheet' => cap, 'kind' => 'kpi-chart',
+                                 'status' => 'postpublish', 'field' => thp['field'], 'formula' => thp['formula'],
+                                 'op' => thp['op'], 'constant' => thp['constant'], 'reason' => reason }
+    warnings << "'#{cap}' BAN/KPI has a THRESHOLD color (#{thp['formula'].to_s.gsub(/\s+/, ' ')}) — Sigma has no " \
+                'create-spec path for a conditional KPI value color (value.color is static; conditional formatting is ' \
+                'UI-only) — STAYS-MANUAL: set the KPI conditional color in the editor (routed to POSTPUBLISH_GUIDE + coverage)'
+  end
+
   element
 end
 
@@ -3949,6 +4146,21 @@ layout.each do |dash|
     next unless z['kind'] == 'chart'
     cap = z['caption']
     next if cap.nil? || cap.empty?
+
+    # PR-10 kind propagation: the Phase 1d read VERIFIED this tile's kind
+    # against the source image — it beats every shelf inference below, for ALL
+    # kinds (see the PNG_KIND header above). Mismatches are logged one line
+    # each; a verified kind also clears chart_kind_inferred (it is confirmed,
+    # not a guess, so the image-confirmation routing below is redundant).
+    png_ck = PNG_KIND[cap.to_s.downcase.strip]
+    png_ck ||= PNG_KIND[z['display_title'].to_s.downcase.strip]
+    if png_ck
+      if png_ck != z['chart_kind'].to_s
+        warn "[png-read] '#{cap}': verified kind '#{png_ck}' OVERRIDES shelf-inferred '#{z['chart_kind']}' (png-read.json is the source-image truth)"
+        z['chart_kind'] = png_ck
+      end
+      z['chart_kind_inferred'] = false
+    end
 
     # Pivot-table fast path: Tableau crosstabs (chart_kind=pivot-table from
     # parse-twb-layout) emit a Sigma pivot-table element with rowsBy/columnsBy/
@@ -4208,6 +4420,7 @@ layout.each do |dash|
                 { 'kind' => 'number', 'formatString' => ',.0f' }
         # Column NAME = the Tableau measure-name label verbatim — the parity
         # plan pivots the long CSV and matches Sigma columns by display name.
+        formula = MetricBinding.metric_ref_or_inline(formula, 'Master', opts[:metrics])
         y_cols << { 'id' => "y#{i}-#{el_id}", 'name' => label, 'formula' => formula, 'format' => fmt }
       end
       if y_cols.any?
@@ -4574,6 +4787,9 @@ layout.each do |dash|
                       else
                         render_agg(sigma_agg, "[Master/#{meas['name']}]")
                       end
+    # Prefer a governed [Metrics/<name>] ref when this inline aggregate matches a
+    # DM metric by formula equivalence; safe no-op (inline) otherwise.
+    measure_formula = MetricBinding.metric_ref_or_inline(measure_formula, 'Master', opts[:metrics])
     # v5.4: NUMERIC aggregates over a TEXT column compile to type=error on the
     # live workbook (Sum/Avg/Median are numeric-only). Tableau's CSV header
     # order can hand a string column to the measure slot (the scatter
@@ -4826,20 +5042,14 @@ layout.each do |dash|
     #   2. explicit `format` on the master-map entry (DM/curated)
     #   3. heuristic by header name
     tab_fmt = pick_tableau_format(z['formats'], meas_hdr) ||
-              pick_tableau_format(z['formats'], meas['name'])
+              pick_tableau_format(z['formats'], meas['name']) ||
+              # PR-12: the column's .twb default-format (still source truth;
+              # outranks the DM-inferred master-map format + the name heuristic)
+              pick_column_default_format(meas_hdr) ||
+              pick_column_default_format(meas['name'])
     meas_col_obj['format'] = tab_fmt
     meas_col_obj['format'] ||= meas['format'] if meas['format'].is_a?(Hash)
-    if meas_col_obj['format'].nil?
-      meas_col_obj['format'] =
-        case meas['name'].downcase
-        when /(revenue|profit|cost|sales|amount|spend)/
-          { 'kind' => 'number', 'formatString' => '$,.0f', 'currencySymbol' => '$' }
-        when /(rate|margin|pct|percent|ratio)/
-          { 'kind' => 'number', 'formatString' => ',.1%' }
-        else
-          { 'kind' => 'number', 'formatString' => ',.0f' }
-        end
-    end
+    meas_col_obj['format'] ||= heuristic_number_format(meas['name'])
     # Allow `format` on map entries to be either a Sigma format object OR a
     # bare formatString string for convenience.
     if meas['format'].is_a?(String)
@@ -4969,6 +5179,18 @@ layout.each do |dash|
         'yAxis' => { 'columnIds' => ["y-#{el_id}"] },
         'color' => { 'by' => 'category', 'column' => "c-#{el_id}" }
       }
+      # PR-12: explicit .twb member→color assignments on the detail/color dim →
+      # ordered scheme (same contract as the bar/line category-color path).
+      # D2 (PR-13) fallback: a sibling zone's explicit map for the same field
+      # pins the shared category→color dict here too.
+      if SeriesColors.field_matches?(z['series_color_field'], dim['name']) &&
+         (pinned = SeriesColors.ordered_scheme(z['series_colors']))
+        element['color']['scheme'] = pinned
+      elsif (pinned = SeriesColors.scheme_for_field(dash['zones'], dim['name']))
+        element['color']['scheme'] = pinned
+        warnings << "'#{cap}' scatter category colors pinned from a SIBLING chart's explicit .twb map " \
+                    "for '#{dim['name']}' (per-category consistency)"
+      end
       if size_field
         element['columns'] << { 'id' => "sz-#{el_id}", 'name' => size_field['name'],
                                 'formula' => "[#{src_name}/#{size_field['name']}]",
@@ -5000,12 +5222,16 @@ layout.each do |dash|
       meas2 = map_column(meas2_hdr, mmap) ||
               { 'id' => "m-#{meas2_hdr.downcase.gsub(/\W+/,'-')}", 'name' => meas2_hdr }
       meas2_formula = meas2['formula'] || render_agg(sigma_agg, "[Master/#{meas2['name']}]")
+      meas2_formula = MetricBinding.metric_ref_or_inline(meas2_formula, 'Master', opts[:metrics])
       extra_meas_col = {
         'id'      => "y2-#{el_id}",
         'name'    => meas2['name'],
         'formula' => meas2_formula,
-        'format'  => meas2['format'].is_a?(Hash) ? meas2['format'] :
-                     ({ 'kind' => 'number', 'formatString' => ',.0f' })
+        # PR-12: source formats first (pill format, then column default-format)
+        'format'  => pick_tableau_format(z['formats'], meas2_hdr) ||
+                     pick_column_default_format(meas2['name']) ||
+                     (meas2['format'].is_a?(Hash) ? meas2['format'] :
+                      { 'kind' => 'number', 'formatString' => ',.0f' })
       }
       kind = 'combo-chart' unless %w[pie-chart donut-chart].include?(kind)
       # Sigma combo-chart dual-axis IS persisted in the spec — the secondary
@@ -5028,9 +5254,78 @@ layout.each do |dash|
       'columns' => [dim_col_obj, meas_col_obj]
     }
     element['columns'] << extra_meas_col if extra_meas_col
+
+    # C2 THRESHOLD HALO (gap ubr5.11): a color channel driven by a threshold on
+    # the measure ([m] <op> N) is not a CSV/master dim, so color_col_obj is nil
+    # and the halo used to be DROPPED behind the single-series fan-out NOTE.
+    # Synthesize the verified computed-boolean color column + a 2-color scheme
+    # ordered [below, above] on category charts. Purely ADDITIVE: no threshold
+    # color ⇒ threshold_halo_plan returns nil ⇒ identical output.
+    threshold_halo_scheme = nil
+    if color_col_obj.nil? && %w[bar-chart line-chart area-chart combo-chart].include?(kind)
+      thp = threshold_halo_plan(z, meta)
+      if thp && thp['mappable']
+        thcol, why = threshold_halo_color_column(thp, el_id, meta, mmap)
+        if thcol
+          color_col_obj = thcol
+          threshold_halo_scheme = [thp['below'], thp['above']]
+          $threshold_halo_records << { 'element' => el_id, 'worksheet' => cap,
+                                       'dashboard' => dash['dashboard'], 'kind' => kind, 'status' => 'emitted',
+                                       'field' => thp['field'], 'formula' => thp['formula'], 'op' => thp['op'],
+                                       'constant' => thp['constant'], 'scheme' => threshold_halo_scheme, 'basis' => thp['basis'] }
+          warnings << "'#{cap}' THRESHOLD HALO: color is driven by a threshold on the measure " \
+                      "(#{thp['formula'].to_s.gsub(/\s+/, ' ')}) — emitted computed-boolean color column " \
+                      "'#{color_col_obj['name']}' + scheme #{threshold_halo_scheme.inspect} (below→above); the halo is " \
+                      'APPROXIMATED (Sigma has no second marks-layer overlay) — verify the render'
+        else
+          $threshold_halo_records << { 'element' => el_id, 'worksheet' => cap, 'dashboard' => dash['dashboard'],
+                                       'kind' => kind, 'status' => 'unmapped', 'field' => thp['field'],
+                                       'formula' => thp['formula'], 'reason' => why }
+          warnings << "'#{cap}' threshold-halo color NOT auto-emitted (#{why}) — STAYS-MANUAL: map the measure on " \
+                      'the master, then re-run, or set the conditional color in the Sigma editor (routed to coverage)'
+        end
+      elsif thp && !thp['mappable']
+        $threshold_halo_records << { 'element' => el_id, 'worksheet' => cap, 'dashboard' => dash['dashboard'],
+                                     'kind' => kind, 'status' => 'unmapped', 'field' => thp['field'],
+                                     'formula' => thp['formula'], 'reason' => thp['reason'] }
+        warnings << "'#{cap}' threshold-halo color NOT auto-emitted (#{thp['reason']}) — STAYS-MANUAL: set the " \
+                    'conditional color in the Sigma editor (routed to coverage; deferred per C2 tight scope)'
+      end
+    end
+
     if color_col_obj && !%w[pie-chart donut-chart table pivot-table].include?(kind)
       element['columns'] << color_col_obj
       element['color'] = { 'by' => 'category', 'column' => color_col_obj['id'] }
+      # C2: a computed threshold boolean (false<true) binds scheme positionally
+      # [below, above] deterministically — override any member-name pin.
+      element['color']['scheme'] = threshold_halo_scheme if threshold_halo_scheme
+      # PR-12: pin the .twb's explicit member→color assignments as an ORDERED
+      # scheme (ascending member order = Sigma's positional category-sort
+      # application) so the member→color BINDING survives — the Top/Bottom-500
+      # inversion class. No explicit map ⇒ no scheme ⇒ theme palette applies
+      # (current derivation unchanged). Skipped when C2 already pinned the
+      # threshold scheme deterministically above.
+      if threshold_halo_scheme
+        # (scheme already set from the threshold plan)
+      elsif SeriesColors.field_matches?(z['series_color_field'], color_col_obj['name']) &&
+         (pinned = SeriesColors.ordered_scheme(z['series_colors']))
+        element['color']['scheme'] = pinned
+        members = z['series_colors'].map { |p| p['member'] }.sort_by { |m| m.to_s.downcase }
+        warnings << "'#{cap}' series colors PINNED from the .twb member→color map " \
+                    "(ascending member order: #{members.join(' → ')}) — scheme[i] binds to the i-th " \
+                    'category in Sigma sort order'
+      elsif (pinned = SeriesColors.scheme_for_field(dash['zones'], color_col_obj['name']))
+        # D2 (PR-13): no explicit map on THIS worksheet, but a sibling zone on
+        # the dashboard colors by the same field with explicit assignments —
+        # pin the shared dict so a category keeps ONE color on every chart
+        # (Tableau only serializes the map where the author touched the legend;
+        # unpinned siblings fell to the positional theme palette and the same
+        # region changed color chart-to-chart).
+        element['color']['scheme'] = pinned
+        warnings << "'#{cap}' category colors pinned from a SIBLING chart's explicit .twb map for " \
+                    "'#{color_col_obj['name']}' (per-category consistency: same category, same color " \
+                    'on every chart of the dashboard)'
+      end
     elsif color_scale && %w[bar-chart line-chart area-chart combo-chart].include?(kind)
       # By-measure color ramp: add a DUPLICATE measure column (Sigma forbids a
       # column on both yAxis and color) and point color:{by:scale} at it.
@@ -5196,6 +5491,16 @@ layout.each do |dash|
     elsif kind == 'pie-chart' || kind == 'donut-chart'
       element['color'] = { 'id' => dim_col_obj['id'] }
       element['value'] = { 'id' => meas_col_obj['id'] }
+      # PR-12: per-element color.scheme is SILENTLY DROPPED on pie/donut — the
+      # only slice-color path is themeOverrides.categoricalScheme, applied
+      # positionally in category-sort order. ThemeDerive orders the theme from
+      # this zone's explicit member→color map (SeriesColors
+      # .explicit_scheme_for_dashboard); surface the contract for the RCF pass.
+      if z['series_colors'].is_a?(Array) && z['series_colors'].size >= 2
+        warnings << "'#{cap}' pie/donut slice colors ride themeOverrides.categoricalScheme (per-element " \
+                    'color.scheme is dropped on pie/donut) — theme scheme is ordered ascending by the ' \
+                    ".twb member→color map; verify slice-color alignment in the render"
+      end
       if z['sort']
         dir = z.dig('sort', 'direction').to_s
         element['color']['sort'] = {
@@ -5686,12 +5991,25 @@ layout.each do |dash|
           warnings << "'#{cap}' relative-date window #{f['first_period']}..#{f['last_period']} #{period}s is shifted/spanning — no rolling mode fits → mode:between (#{fields['startDate'][0..9]}..#{fields['endDate'][0..9]}); FROZEN — re-run to refresh"
         end
       when 'number-range'
+        # An UNRESTRICTED Tableau quantitative filter carries no min/max (the
+        # <filter class='quantitative'> has no explicit bounds) → "all values".
+        # Emitting {min:null, max:null} on a mode:between number-range 400s the
+        # whole POST (issue #422 — recurred across workbooks). A range
+        # that filters nothing is a NO-OP, so mirror the categorical "All"
+        # handling above and emit NO element filter; where a bound IS present,
+        # emit only the non-nil key(s) so the shape never carries a null bound.
+        fmin = f['min']
+        fmax = f['max']
+        if fmin.nil? && fmax.nil?
+          warnings << "'#{cap}' quantitative quick filter on '#{fcap}' is UNRESTRICTED (no min/max — Tableau 'All') — no Sigma element filter emitted (an unbounded number-range with null bounds 400s the POST; #422)"
+          next
+        end
         fcol = el_filter_col_for.call(m)
         next if fcol.nil? # helper-sourced chart, column unreachable (warned in el_filter_col_for)
-        el_filters << {
-          'columnId' => fcol, 'kind' => 'number-range', 'mode' => 'between',
-          'min' => f['min'], 'max' => f['max'], 'includeNulls' => 'never'
-        }
+        nr = { 'columnId' => fcol, 'kind' => 'number-range', 'mode' => 'between', 'includeNulls' => 'never' }
+        nr['min'] = fmin unless fmin.nil?
+        nr['max'] = fmax unless fmax.nil?
+        el_filters << nr
       when 'wildcard'
         # D5/P0.6 (parsed pattern; the unparseable shape was intercepted above).
         # Worksheet-scoped wildcard → hidden Contains/StartsWith/EndsWith match
@@ -6308,6 +6626,67 @@ styled_text_all = styled_text_by_dash.values.flatten(1)
 control_scope_records = []
 helpers_by_id = data_elements.to_h { |d| [d['id'], d] }
 norm_cap = ->(s) { s.to_s.strip.downcase.gsub(/[^a-z0-9]+/, '') }
+# PR-18: decode columns the ORCHESTRATOR must add to the master element (a
+# master-rooted list control's Text() decode must live ON the master so the
+# filter propagates to every chart sourcing from it). Rides the output JSON as
+# `master_decode_columns` (only when non-empty — additive/byte-identical).
+master_decode_columns = []
+
+# PR-18 — route an integer-coded discrete-dimension LIST control through a
+# Text() decode helper. A Sigma list/dropdown control sources STRING option
+# values; a filter target on the raw INTEGER column is accepted then SILENTLY
+# stripped (reads back filters:null — control-parity.md). The sanctioned fix
+# (proven by hand in Twin C's runs): add `Text([<col>])` on the element the
+# control targets and bind BOTH the filter target AND the value-source to the
+# decoded column. Mutates `targets` in place (rewrites each columnId to its
+# decode column) and returns:
+#   { applied:, source: {elementId:, columnId:} | nil, helpers: [name,...],
+#     manual: [ "<why the target couldn't be decoded>", ... ] }
+# manual entries are NEVER silently dropped: the caller routes them to the
+# POSTPUBLISH guide and the control-scope sidecar.
+route_integer_dim_decode = lambda do |targets, mcol, cap, slug|
+  result = { applied: false, source: nil, helpers: [], manual: [] }
+  targets.each do |t|
+    root = t.dig('source', 'elementId')
+    raw_id = t['columnId']
+    if root == opts[:master_id] && mcol
+      # Master-rooted: the decode column lives on the master (sibling ref by the
+      # master column's friendly name). Injected by the orchestrator.
+      dec_id = IntegerDim.decode_col_id(slug, opts[:master_id])
+      dec_name = IntegerDim.decode_name(mcol['name'])
+      unless master_decode_columns.any? { |c| c['id'] == dec_id }
+        master_decode_columns << { 'id' => dec_id, 'name' => dec_name,
+                                   'formula' => IntegerDim.decode_formula_for("[#{mcol['name']}]") }
+      end
+      t['columnId'] = dec_id
+      result[:helpers] << dec_name
+      result[:applied] = true
+      result[:source] ||= { elementId: opts[:master_id], columnId: dec_id }
+    else
+      el = elements.find { |e| e['id'] == root } || helpers_by_id[root]
+      raw_col = el && (el['columns'] || []).find { |c| c['id'] == raw_id }
+      if el.nil? || raw_col.nil?
+        # Cross-scope / hidden-master case: can't safely author the decode here
+        # (the col isn't a modifiable table column on a reachable element).
+        result[:manual] << "target element #{root.inspect} carries no addressable column for '#{cap}' — " \
+                           'add a Text() decode column there by hand and repoint the control'
+        next
+      end
+      dec_id = IntegerDim.decode_col_id(slug, root)
+      dec_name = IntegerDim.decode_name(raw_col['name'])
+      el['columns'] ||= []
+      unless el['columns'].any? { |c| c['id'] == dec_id }
+        el['columns'] << { 'id' => dec_id, 'name' => dec_name,
+                           'formula' => IntegerDim.decode_formula_for("[#{raw_col['name']}]") }
+      end
+      t['columnId'] = dec_id
+      result[:helpers] << dec_name
+      result[:applied] = true
+      result[:source] ||= { elementId: root, columnId: dec_id }
+    end
+  end
+  result
+end
 # Chart-id/page snapshot for the sidecar's scope decision (taken BEFORE the
 # page-mode emitters strip the _dashboard tags).
 ctl_chart_index = elements.select { |e| e['source'] }
@@ -6677,9 +7056,34 @@ $param_switches.each do |sw|
 end
 
 # ---- Auto-generated controls from shared-view filters (--auto-controls) ----
+# PR-18: a workbook whose quick filters live as dashboard filter ZONES (not a
+# <shared-view>) never reaches this emitter — `shared_filters` is empty and the
+# INTEGER-coded dimension control is SILENTLY DROPPED (Twin C hand-authored it +
+# its Text() helper). Promote ONLY integer-dim zone filters (resolved from their
+# worksheet filter) into the emitter list so they auto-emit AND auto-decode.
+# Gated strictly on integer_dim → every non-integer-dim workbook is untouched
+# (byte-identical); string/date zone filters keep their current behavior.
+promoted_int_dim_filters = []
+unless opts[:no_auto_controls]
+  seen_caps = (meta['shared_filters'] || []).map { |f| norm_cap.call(f['column_caption']) }
+  ws_filters = (meta['worksheets'] || {}).values.flat_map { |w| w['filters'] || [] }
+  (layout || []).each do |d|
+    (d['zones'] || []).each do |z|
+      next unless z['kind'] == 'filter'
+      zc = z['filter_column_caption']
+      next if zc.nil? || seen_caps.include?(norm_cap.call(zc))
+      wf = ws_filters.find { |f| norm_cap.call(f['column_caption']) == norm_cap.call(zc) && f['integer_dim'] }
+      next unless wf
+      seen_caps << norm_cap.call(zc)
+      promoted_int_dim_filters << wf
+      warnings << "integer-coded dimension quick filter '#{zc}' is a dashboard filter ZONE (no <shared-view>) — " \
+                  'promoting it to an auto-control so it is not silently dropped, and auto-decoding it (PR-18)'
+    end
+  end
+end
 auto_controls = []
 unless opts[:no_auto_controls]   # default-on: never miss a .twb parameter/filter
-  (meta['shared_filters'] || []).each_with_index do |f, i|
+  ((meta['shared_filters'] || []) + promoted_int_dim_filters).each_with_index do |f, i|
     next if f['is_action']
     cap = f['column_caption']
     if cap.nil?
@@ -6735,6 +7139,25 @@ unless opts[:no_auto_controls]   # default-on: never miss a .twb parameter/filte
                     'materialize it on the master, then add a master-columns.json regex so the control binds. ' \
                     "Tableau: #{tab_formula}" +
                     (sigma_formula ? " → Sigma: #{sigma_formula}" : ' (auto-translation unavailable — translate by hand)')
+      elsif f['is_datasource_filter']
+        # #483: an always-on DATA-SOURCE filter whose column is not a charted
+        # dimension (e.g. an `active` flag) has no master-map entry — but it is
+        # NOT optional. Record needs-master-default (a breadcrumb in
+        # control-scope.json / the coverage ledger) instead of a bare warning, so
+        # the operator applies it as a workbook-wide default filter on the master
+        # and the datasource-filter gate (assert-phase6-ran) sees it was surfaced
+        # rather than silently dropped (which silently over-reports every aggregate).
+        slug = cap.downcase.gsub(/\W+/, '-').sub(/-$/, '')
+        control_scope_records << {
+          'controlId' => "ctl-#{slug}", 'name' => cap.strip, 'mechanism' => 'filters',
+          'source_signal' => "tableau DATASOURCE-level filter '#{cap}' (always-on; ui-domain=#{f['ui_domain'].inspect}; not a charted dimension)",
+          'status' => 'needs-master-default', 'datasource_filter' => true,
+          'is_active_flag' => (f['is_active_flag'] == true), 'members' => Array(f['members'])
+        }
+        warnings << "DATASOURCE-level filter '#{cap}' (always-on) has no master-map entry — NOT optional: " \
+                    'apply it as a workbook-wide default filter on the master element (or add a ' \
+                    'master-columns.json regex + a control with its default set). Recorded needs-master-default; ' \
+                    'the datasource-filter gate blocks GREEN until it is applied.'
       else
         warnings << "shared filter on '#{cap}' has no master-map entry — add a regex to master-columns.json"
       end
@@ -6842,6 +7265,49 @@ unless opts[:no_auto_controls]   # default-on: never miss a .twb parameter/filte
         warnings << "quick filter '#{cap}' carries a CONDITION beyond its member list " \
                     "(#{Array(f['condition_expressions']).join('; ')[0, 120]}) — the member control is emitted; " \
                     'apply the condition as an element filter or accept the wider domain'
+      end
+      # PR-18: integer-coded discrete-dimension DECODE routing. When this list/
+      # segmented control filters an INTEGER column, a raw-column filter target is
+      # accepted then SILENTLY stripped by Sigma (control-parity.md "list-control
+      # targets on NUMERIC columns are silently stripped"). Route each target
+      # through a Text() decode helper and bind the value-source to it — the exact
+      # by-hand pattern Twin C's runs used (gen-wb-spec.rb). Never silently drop:
+      # where the decode can't be auto-built, route a POSTPUBLISH note instead.
+      if f['integer_dim'] && IntegerDim.decode_control_type?(spec['controlType'])
+        dec = route_integer_dim_decode.call(targets, m, cap, slug)
+        rec = control_scope_records.find { |r| r['controlId'] == spec['controlId'] }
+        rec['integer_dim'] = true if rec
+        if dec[:applied]
+          # Bind the value-source (option list) to the decoded column too — unless
+          # the null-option workaround already re-sourced it to a hidden helper.
+          opt_sourced = f['excludes_null'] &&
+                        spec.dig('source', 'source', 'elementId').to_s.start_with?('opt-src-')
+          if dec[:source] && !opt_sourced
+            spec['source'] = { 'kind' => 'source',
+                               'source' => { 'kind' => 'table', 'elementId' => dec[:source][:elementId] },
+                               'columnId' => dec[:source][:columnId] }
+          elsif opt_sourced
+            warnings << "quick filter '#{cap}' both EXCLUDES Null and targets an INTEGER dimension — the data " \
+                        'filter is decoded via Text(), but confirm the null-option suppression in the Sigma UI'
+          end
+          rec['decode'] = { 'status' => (dec[:manual].any? ? 'partial-manual' : 'auto-decoded'),
+                            'helpers' => dec[:helpers].uniq } if rec
+          warnings << "quick filter '#{cap}' targets an INTEGER column used as a discrete dimension — " \
+                      "auto-decoded via Text() helper column(s) #{dec[:helpers].uniq.join(', ')} so the list " \
+                      'control filters STRING values (a raw numeric list-filter target is silently stripped by Sigma)'
+        end
+        if dec[:manual].any?
+          (rec['decode'] ||= {})['status'] ||= 'manual-required' if rec
+          (rec['decode'] ||= {})['manual'] = dec[:manual] if rec
+          $integer_dim_manual ||= []
+          $integer_dim_manual << { 'controlId' => spec['controlId'], 'name' => cap.strip,
+                                   'column' => cap.strip, 'notes' => dec[:manual] }
+          dec[:manual].each do |why|
+            warnings << "quick filter '#{cap}' targets an INTEGER dimension but the decode could not be " \
+                        "auto-built (#{why}) — routed to POSTPUBLISH_GUIDE; add the Text() decode by hand. " \
+                        'NEVER ship the raw numeric filter (Sigma silently strips it).'
+          end
+        end
       end
     when 'relative-date'
       # Tableau relative-date → ROLLING Sigma date-range control (same rolling
@@ -7467,6 +7933,159 @@ elements.each do |e|
   }.compact
 end
 
+# PR-12: formats-emitted.json — the MECHANICAL counterpart for the blind
+# grader's `numbers_formatted` + `palette_match` dimensions, computed HERE
+# while elements still carry _worksheet (same seam as chart-provenance).
+# Per tile: every applicable source format string → the emitted Sigma format,
+# status mapped|unmapped (unmapped = the translator refused; the source string
+# is RECORDED, never guessed) + per-tile series-color pinning records. Always
+# written (empty entries = "no source formats", vs "builder predates the
+# artifact"). Consumed by the RCF loop and future gates.
+begin
+  fe = {
+    'version'           => 1,
+    'entries'           => FormatMap.emitted_records(elements, meta['worksheets'] || {}, COLUMN_DEFAULT_FORMATS, meta['columns_by_guid'] || {}),
+    'series_color_maps' => SeriesColors.records(elements, meta['worksheets'] || {})
+  }
+  fe_path = File.join(File.dirname(File.expand_path(opts[:out])), 'formats-emitted.json')
+  File.write(fe_path, JSON.pretty_generate(fe))
+  unmapped = fe['entries'].count { |r| r['status'] == 'unmapped' }
+  warn "wrote #{fe_path} (#{fe['entries'].size} format assignment(s), #{unmapped} unmapped — recorded, " \
+       "never guessed; #{fe['series_color_maps'].size} series-color map(s))"
+rescue => e
+  warnings << "formats-emitted sidecar error (formats coverage unrecorded): #{e.message}"
+end
+
+# ---- C2: threshold-halo.json — the MECHANICAL counterpart for the blind ------
+# grader's palette/threshold dimension. Records every threshold-colored mark the
+# build detected: what it was (measure op constant + source colors), and how it
+# was handled — 'emitted' (category chart: computed-boolean color + [below,above]
+# scheme, the halo approximation), 'postpublish' (BAN/KPI: no create-spec path),
+# or 'unmapped' (deferred: not a 2-band constant threshold). Never a silent drop.
+# Only written when the source actually has a threshold color, so a workbook
+# WITHOUT one stays byte-identical to origin/main (no sidecar, no coverage rows).
+if $threshold_halo_records.any?
+  begin
+    th = { 'version' => 1, 'source' => 'tableau', 'halos' => $threshold_halo_records }
+    th_path = File.join(File.dirname(File.expand_path(opts[:out])), 'threshold-halo.json')
+    File.write(th_path, JSON.pretty_generate(th))
+    by_status = $threshold_halo_records.group_by { |r| r['status'] }.transform_values(&:size)
+    warn "wrote #{th_path} (#{$threshold_halo_records.size} threshold-colored mark(s): " \
+         "#{by_status.map { |s, n| "#{n} #{s}" }.join(', ')})"
+  rescue => e
+    warnings << "threshold-halo sidecar error (halo coverage unrecorded): #{e.message}"
+  end
+end
+
+# ---- Native trellis collapse (fix/native-trellis, SUPERSEDES #451 B1) --------
+# parse-twb-layout flags a dashboard that repeats one viz across a categorical
+# field as small multiples (N sibling per-member worksheets). The flat build
+# above already emitted each member as its OWN filtered chart element. The
+# CORRECT Sigma shape for small-multiples is ONE viz element carrying a native
+# `trellis` property (rowsBy / columnsBy) — NOT N cloned elements. So here we
+# COLLAPSE each detected group: keep the BASE member's element, reuse the facet
+# field it already carries as its single-member filter column, EMPTY that member
+# filter (so every member renders — one panel each), attach trellis.rowsBy /
+# columnsBy chosen from the source ARRANGEMENT (vertical stack → rowsBy,
+# horizontal row → columnsBy), and DROP the sibling member elements. Gated on
+# `dash['trellis']` → a non-trellis workbook is byte-identical to the flat build.
+(layout || []).each do |dash|
+  next unless dash['trellis'].is_a?(Array) && !dash['trellis'].empty?
+  dash['trellis'].each do |grp|
+    caps = Array(grp['captions'])
+    next if caps.size < 2
+    base_cap = caps.first
+    base_el = elements.find do |e|
+      e['_dashboard'] == dash['dashboard'] && e['_worksheet'] == base_cap && e['source']
+    end
+    unless base_el
+      warnings << "native trellis on '#{dash['dashboard']}': base worksheet #{base_cap.inspect} has no chart " \
+                  'element — trellis NOT collapsed (member charts stay flat)'
+      next
+    end
+    # Native `trellis` survives readback ONLY on the readback-safe kinds (empirical
+    # coverage matrix — docs/sigma-trellis-chart-support.md). On pie/kpi/pivot/
+    # table the POST returns 200 but Sigma SILENTLY STRIPS the key and renders
+    # flat, so we must NOT emit it there. The supported set + fallback rules are
+    # the single source of truth in shared/lib/trellis_emit.rb (TrellisEmit):
+    #   * pie-chart → convert the base to a DONUT (donut supports trellis) and
+    #     collapse as usual (the faithful faceted-pie shape) — TrellisEmit.apply
+    #     does the kind flip below;
+    #   * kpi-chart → leave the N sibling KPI elements FLAT (fanning out to N
+    #     per-member KPIs IS the correct Sigma shape — do not collapse);
+    #   * pivot-table/table → leave flat (pivot's own rowsBy/columnsBy shelves
+    #     and table→postpublish are the documented follow-up mechanisms).
+    # NOTE: the POST→readback round-trip must still ASSERT the key survived on
+    # supported kinds (silent stripping) — enforced in the live e2e + verify.
+    unless TrellisEmit.trellises?(base_el['kind'])
+      warnings << "native trellis on '#{dash['dashboard']}': base kind '#{base_el['kind']}' does NOT support a " \
+                  "native trellis (Sigma strips the key on readback) — left the #{caps.size} member " \
+                  "#{base_el['kind']} element(s) FLAT " \
+                  "(#{base_el['kind'] == 'kpi-chart' ? 'N sibling KPIs is the correct faceted shape' : 'pivot→own shelves / table→postpublish is the follow-up'})"
+      next
+    end
+    if base_el['kind'] == 'pie-chart'
+      warnings << "native trellis on '#{dash['dashboard']}': base '#{base_cap}' is a PIE — converted to DONUT " \
+                  '(pie silently strips the trellis key on readback; donut supports it) before faceting'
+    end
+    field = grp['field'].to_s
+    base_el['columns'] ||= []
+    # The facet field is already a column on the base element — the flat build
+    # added it as the single-member filter column `f-<el>-<field>`. Reuse it;
+    # if absent (defensive), add a passthrough master column so the trellis has
+    # a real column to face by.
+    cat_col = base_el['columns'].find { |c| c['name'].to_s.strip.casecmp?(field.strip) }
+    unless cat_col
+      cid = "f-#{base_el['id']}-#{field.downcase.gsub(/\W+/, '-')}".sub(/-$/, '')
+      cid = "f-#{base_el['id']}-trellis" if cid == "f-#{base_el['id']}-" || cid.end_with?('-')
+      cat_col = { 'id' => cid, 'name' => field, 'formula' => "[Master/#{field}]" }
+      base_el['columns'] << cat_col
+    end
+    # Empty the per-member list filter so ALL members render (matches the owner's
+    # native reference: the list filter stays with values:[]; Sigma renders every
+    # member as its own trellis panel).
+    Array(base_el['filters']).each do |f|
+      f['values'] = [] if f.is_a?(Hash) && f['columnId'] == cat_col['id'] && f['kind'] == 'list'
+    end
+    # Source arrangement → Sigma trellis axis via the shared emitter. A single
+    # facet field faces ONE axis (rowsBy XOR columnsBy — emitting BOTH on the same
+    # column is degenerate); a 'grid' arrangement of one field maps to columnsBy,
+    # which Sigma wraps into a tile grid on its own. TrellisEmit.apply also does
+    # the pie→donut kind flip (a no-op here — already gated/flipped above).
+    TrellisEmit.apply(base_el, facet_column_id: cat_col['id'], orientation: grp['orientation'])
+    axis_key = base_el['trellis'].keys.first
+    # Round-trip guard record: Sigma SILENTLY strips an unsupported trellis on
+    # readback, so the post-publish verifier re-reads the spec and asserts each
+    # of these survived (verify-trellis-survived.rb).
+    ($native_trellis_records ||= []) << {
+      'element_id' => base_el['id'], 'kind' => base_el['kind'], 'name' => base_el['name'],
+      'axis' => axis_key, 'columnId' => cat_col['id'], 'dashboard' => dash['dashboard']
+    }
+    # Drop the sibling member chart elements — the ONE trellis element replaces
+    # the whole small-multiples set.
+    sib_caps = caps[1..].map(&:to_s)
+    elements.reject! do |e|
+      e['_dashboard'] == dash['dashboard'] && sib_caps.include?(e['_worksheet'].to_s) && e['source']
+    end
+    warnings << "native trellis on '#{dash['dashboard']}': #{caps.size} #{field.inspect} worksheets → ONE " \
+                "#{base_el['kind']} element '#{base_el['id']}' with trellis.#{axis_key} " \
+                "(orientation=#{grp['orientation']}, facet column #{cat_col['id']})"
+  end
+end
+# Round-trip guard sidecar — only written when a native trellis was actually
+# emitted (a non-trellis workbook stays byte-identical: no sidecar). The
+# post-publish verifier asserts each element still carries its `trellis` key on
+# readback (Sigma silently strips unsupported ones).
+if ($native_trellis_records ||= []).any?
+  begin
+    nt_path = File.join(File.dirname(File.expand_path(opts[:out])), 'native-trellis-emitted.json')
+    File.write(nt_path, JSON.pretty_generate('version' => 1, 'elements' => $native_trellis_records))
+    warn "wrote #{nt_path} (#{$native_trellis_records.size} native trellis element(s) — verify survives readback)"
+  rescue => e
+    warnings << "native-trellis sidecar error (round-trip coverage unrecorded): #{e.message}"
+  end
+end
+
 # ---- Output mode ----
 #   Default       → flat array of elements (legacy behaviour). Extras first.
 #   --page-per-worksheet → emit { pages: [{name, elements:[]}] }. One page per
@@ -7523,7 +8142,11 @@ if opts[:pages_mode] == :worksheet
   # data_elements must ride EVERY output shape — multi-DS sub-masters (and any
   # hidden helpers) live there, and a routed chart whose sub-master never
   # reaches the spec is a dangling source ref (review-caught regression).
-  File.write(opts[:out], JSON.pretty_generate({ 'pages' => pages, 'data_elements' => data_elements, 'theme' => theme }))
+  _out = { 'pages' => pages, 'data_elements' => data_elements, 'theme' => theme }
+  # PR-18: decode columns the orchestrator injects into the master element (only
+  # when a master-rooted integer-dim control was routed — additive/byte-identical).
+  _out['master_decode_columns'] = master_decode_columns if master_decode_columns.any?
+  File.write(opts[:out], JSON.pretty_generate(_out))
   warn "wrote #{opts[:out]} (page-per-worksheet: #{pages.size} pages, #{auto_controls.size} auto-controls per page" \
        "#{data_elements.any? ? ", #{data_elements.size} hidden data element(s)" : ''})"
 elsif opts[:pages_mode] == :dashboard
@@ -7657,7 +8280,11 @@ elsif opts[:pages_mode] == :dashboard
     pages << page
   end
   theme = ThemeDerive.derive(layout)
-  File.write(opts[:out], JSON.pretty_generate({ 'pages' => pages, 'data_elements' => data_elements, 'theme' => theme }))
+  _out = { 'pages' => pages, 'data_elements' => data_elements, 'theme' => theme }
+  # PR-18: decode columns the orchestrator injects into the master element (only
+  # when a master-rooted integer-dim control was routed — additive/byte-identical).
+  _out['master_decode_columns'] = master_decode_columns if master_decode_columns.any?
+  File.write(opts[:out], JSON.pretty_generate(_out))
   warn "wrote #{opts[:out]} (page-per-dashboard: #{pages.size} page(s), #{data_elements.size} hidden data element(s), #{(param_controls + auto_controls).size} controls per page)"
 else
   elements.each { |e| e.delete('_worksheet'); e.delete('_dashboard') }
@@ -7767,6 +8394,25 @@ unless control_scope_records.empty?
   scope_path = File.join(opts[:tab], 'control-scope.json')
   File.write(scope_path, JSON.pretty_generate(sidecar))
   warn "wrote #{scope_path} (#{contract_controls.size} control scope entr(y/ies), #{dropped_rs.size} dropped)"
+
+  # PR-18: integer-dim decode sidecar — the candidates for the OPTIONAL
+  # warehouse-cardinality confirmation (probe-int-dim-cardinality.rb) and the
+  # source for the POSTPUBLISH manual-decode section. Only written when an
+  # integer-coded dimension control was detected (additive/byte-identical).
+  int_dim_ctls = control_scope_records.select { |r| r['integer_dim'] }
+  if int_dim_ctls.any? || (defined?($integer_dim_manual) && $integer_dim_manual&.any?)
+    id_path = File.join(opts[:tab], 'integer-dim-decode.json')
+    File.write(id_path, JSON.pretty_generate(
+                 'version' => 1, 'source' => 'tableau',
+                 'candidates' => int_dim_ctls.map do |r|
+                   { 'controlId' => r['controlId'], 'name' => r['name'],
+                     'column' => r['name'], 'decode' => r['decode'] }
+                 end,
+                 'manual' => (defined?($integer_dim_manual) ? ($integer_dim_manual || []) : [])
+               ))
+    warn "wrote #{id_path} (#{int_dim_ctls.size} integer-dim control(s); " \
+         "#{(defined?($integer_dim_manual) ? ($integer_dim_manual || []) : []).size} manual-decode note(s))"
+  end
 end
 # Classify each build message so the WARN count reflects ACTUAL gaps, not volume
 # (bead beads-sigma-59mk). The builder historically prefixed every note — including
@@ -8076,6 +8722,21 @@ warnings.each do |w|
     'severity' => sev.to_s, 'recoverable' => recoverable,
     'detail' => ws[0, 300],
     'action' => (recoverable ? 'Resolve the field on the master (map it / add the calc column), then re-run.' : nil)
+  }
+end
+
+# (4.5) C2 threshold halos that WERE emitted — the halo is an APPROXIMATION
+# (Sigma has no second marks-layer overlay), so it belongs in coverage as
+# 'approximated' even though it carried. The 'postpublish'/'unmapped' records
+# already flow through their STAYS-MANUAL warnings in (4); adding only 'emitted'
+# here avoids double-listing.
+$threshold_halo_records.select { |r| r['status'] == 'emitted' }.each do |r|
+  coverage_unresolved << {
+    'visual' => r['worksheet'].to_s, 'source_type' => 'threshold-color',
+    'severity' => 'approximated', 'recoverable' => false,
+    'detail' => "threshold halo emitted as computed-boolean color + scheme #{Array(r['scheme']).inspect} " \
+                "(#{r['formula'].to_s.gsub(/\s+/, ' ')}) — Sigma has no second marks-layer overlay; the halo is approximated",
+    'action' => 'Verify the rendered mark colors flip at the threshold against the Tableau source image.'
   }
 end
 

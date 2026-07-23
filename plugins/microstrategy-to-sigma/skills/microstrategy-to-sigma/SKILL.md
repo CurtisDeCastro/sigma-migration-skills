@@ -68,6 +68,7 @@ logic.
 > "Data Model" object are roadmap (`refs/design-notes.md`).
 
 > **READ FIRST — `refs/operating-contract.md`**: the fidelity guardrails (render + value-check EVERY page against the source; never ship empty or silently drop a tile; don't spin — surface blockers).
+> **Modeling strategy — `refs/modeling-strategy.md`**: faithful reproduction of the source model is the DEFAULT (parity is the gate); an upstream OBT or Sigma-native materialization is an OPT-IN optimization for hot, join-heavy dashboards, re-verified against the same parity oracle. The converter never auto-flattens.
 > Read `refs/` before relying on shapes: `mstr-rest-api.md` (every verified
 > REST gotcha — changesets, locks, lowercase response headers, session-bound
 > dossier flows), `ae-row-collapse.md` (the one MSTR behavior no clean SQL
@@ -239,6 +240,17 @@ Conversion patterns to know (details in `refs/`): grids group by the
 attribute's KEY form and label with `Max([DESC])`; dim-keyed groupings get an
 `exclude [null]` filter to mirror MSTR's inner joins; metrics referencing
 metrics are inlined in workbook context, `[Name]`-referenced in DM context.
+
+**DM metric references (leverage the semantic layer, don't duplicate it).** A metric
+column prefers a governed **`[Metrics/<name>]`** reference over re-deriving the
+aggregation inline, when its expanded inline aggregate matches a metric on the join
+element (formula-equivalence match via the shared binder `scripts/lib/metric_binding.py`
+— strip the `--join-element-name` prefix so `Sum([Orders/Net Revenue])` equals a
+metric's `Sum([Net Revenue])`). `build_workbook_spec` receives the just-built DM's
+elements in-process (own metrics live on the join element). SAFE: composite/ratio
+metrics stay inline (the workbook expands them with `expand_metrics=True`, while the DM
+keeps `[MetricName]` refs, so they never match) and any non-match falls back to inline.
+Empty metrics → byte-identical. Verified: `tests/test_metric_reference.py`.
 
 ## Phase 2.5 — AE row-collapse resolution (only when flagged)
 

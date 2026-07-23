@@ -332,6 +332,17 @@ if (conv.status !== 0) die(`module converter failed:\n${conv.stderr}`);
 const dmSpec = JSON.parse(conv.stdout);
 const dmPath = join(WORK, 'dm.json');
 writeFileSync(dmPath, JSON.stringify(dmSpec, null, 2));
+// DM metrics keyed by element display name (= the report converter's [Subject/…]
+// prefix), so a report measure binds to a governed [Metrics/<name>] ref instead of
+// re-deriving the aggregate inline. Deterministic converter output → keys line up
+// on both the build-new and reuse paths. Empty → inline (byte-identical).
+const metricsMap = {};
+for (const el of (dmSpec.pages || []).flatMap((p) => p.elements || [])) {
+  const ms = Array.isArray(el.metrics) ? el.metrics.filter((m) => m && m.name && m.formula) : [];
+  if (el.name && ms.length) metricsMap[el.name] = ms.map((m) => ({ name: m.name, formula: m.formula }));
+}
+const metricsPath = join(WORK, 'report-metrics.json');
+writeFileSync(metricsPath, JSON.stringify(metricsMap, null, 2));
 const convWarnings = conv.stderr.split('\n').filter((l) => l.trim().startsWith('!')).map((l) => l.replace(/^\s*!\s*/, ''));
 const statsLine = (conv.stderr.match(/stats: (\{.*\})/) || [])[1];
 const securityDetected = existsSync(securityPath) ? JSON.parse(readFileSync(securityPath, 'utf8')) : [];
@@ -412,6 +423,10 @@ if (securityDetected.length) {
 // which records to <WORK>/scout-ledger.jsonl). --yes does NOT skip this gate; it
 // only accepts gaps the scout already tried (validated locally, or escalated).
 // An unscouted flagged expression always STOPS, before any Sigma object exists.
+// A 'validated' row is honored only when it carries signed live-probe evidence
+// (ScoutGate integrity, issue #458): a hand-written or forged 'validated' line is
+// treated as unvalidated (→ the escalated bucket) by scoutGate.classify, so the
+// gate still blocks / requires genuine scouting.
 // (skipped under --dry-run: it ships nothing to Sigma and the scout needs a live
 // connection to validate — the real build below is what the gate must guard.)
 const exprGaps = opt['dry-run'] ? [] : questions.filter((q) => q.id === 'expression_flagged');
@@ -479,7 +494,7 @@ if (opt['dry-run']) {
   hdr(3, 'Build data model');
   line(`DRY RUN: DM spec → ${dmPath} (no POST)`);
   hdr(4, 'Convert report');
-  const rconv = spawnSync('node', [...cliPre, cliCmd, reportPath, '--dm', 'DRY-RUN'],
+  const rconv = spawnSync('node', [...cliPre, cliCmd, reportPath, '--dm', 'DRY-RUN', '--metrics', metricsPath],
     { encoding: 'utf8', cwd: CONV, maxBuffer: 64 * 1024 * 1024 });
   if (rconv.status !== 0) die(`report converter failed:\n${rconv.stderr}`);
   writeFileSync(join(WORK, 'wb.json'), rconv.stdout);
@@ -518,7 +533,7 @@ writeFileSync(statePath, JSON.stringify(state, null, 2));
 // Phase 4 — Convert the report → workbook spec, remap to the real DM ids.
 // ---------------------------------------------------------------------------
 hdr(4, 'Convert report + remap');
-const rconv = spawnSync('node', [...cliPre, cliCmd, reportPath, '--dm', dmId],
+const rconv = spawnSync('node', [...cliPre, cliCmd, reportPath, '--dm', dmId, '--metrics', metricsPath],
   { encoding: 'utf8', cwd: CONV, maxBuffer: 64 * 1024 * 1024 });
 if (rconv.status !== 0) die(`report converter failed:\n${rconv.stderr}`);
 const wbSpec = JSON.parse(rconv.stdout);

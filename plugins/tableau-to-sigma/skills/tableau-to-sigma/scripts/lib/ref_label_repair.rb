@@ -36,6 +36,17 @@
 #       IFNULL pattern) — it is NOT rewritten (that is a Lookup/relationship fix,
 #       not a casing fix), so this pass never silently turns a should-be-cross-
 #       element ref into a same-element one and masks a real gap.
+# IDENTITY-ALIAS calcs (#457): a calc that is an identity alias of its own raw
+# column (`[Foo (copy)] = [Foo]`) surfaces the raw column under warehouse-readback
+# casing ("FOO") AND the alias under Sigma's auto-generated title-case display
+# label ("Foo"), so on THIS element two live labels collide in normalization. That
+# collision would trip the "ambiguous label" refusal even though it is not two
+# distinct columns — it is one column name in two casings. When every colliding
+# label is a PURE CASE VARIANT (identical under downcase — differs only by case,
+# never by punctuation/spacing, so "Ship Mode"/"SHIP_MODE" is NOT included), the
+# bare ref is recased to the single mono-case candidate (the raw readback casing —
+# never the mixed-case auto-label, which is the alias itself and would self-refer).
+# Cross-element collisions are still refused (guard 2 stays authoritative).
 module RefLabelRepair
   REF_RE = /\[([^\[\]\/]+)\/([^\[\]]+)\]/.freeze
   BARE_RE = /\[([^\[\]\/]+)\]/.freeze
@@ -140,9 +151,41 @@ module RefLabelRepair
         c['formula'] = c['formula'].gsub(BARE_RE) do
           tok = Regexp.last_match(1)
           key = norm(tok)
+          # IDENTITY-ALIAS same-element casing collision (issue #457) — checked
+          # BEFORE the exact-match leave. A calc that is an identity alias of its
+          # own raw column (`[Foo (copy)] = [Foo]`) surfaces the raw column under
+          # its warehouse-readback casing ("FOO") AND the alias under Sigma's
+          # auto-generated display label — and when the alias's "(copy)" decoration
+          # is stripped, that display label collapses onto the raw column name in a
+          # different casing ("Foo"). So THIS element carries >1 live label that
+          # normalizes to `key`, all PURE CASE VARIANTS of one another (identical
+          # under downcase — the SAME name in two casings, never two distinct
+          # columns like "Ship Mode"/"SHIP_MODE", which differ by punctuation). The
+          # bare ref then either matches nothing exactly OR exact-matches the
+          # mixed-case auto-label — and leaving it there resolves the ref to the
+          # alias itself, a circular self-reference / type=error. Recase it to the
+          # raw column's authoritative readback casing: the single mono-case
+          # candidate (all-UPPER on Snowflake / all-lower on Databricks; the
+          # mixed-case auto-label is never mono-case, so we never pick the alias).
+          # HARD GUARDS kept intact: only a single-element collision qualifies
+          # (owner_count <= 1 — a cross-element collision is the collapsed-multi-
+          # datasource pattern #407 guards, still refused below); every colliding
+          # label must be a pure case variant (a genuinely-distinct ambiguity is
+          # still refused); and there must be exactly ONE mono-case candidate (no
+          # unique raw casing → we don't guess).
+          ia_cands = own_lm[:exact].select { |l| norm(l) == key }
+          ia_mono = ia_cands.select { |l| l == l.upcase || l == l.downcase }
+          if ia_cands.size > 1 && owner_count[key] <= 1 &&
+             ia_cands.map { |l| l.downcase }.uniq.size == 1 && ia_mono.size == 1
+            fixed += 1 if ia_mono.first != tok
+            next "[#{ia_mono.first}]"
+          end
           if own_lm[:exact].include?(tok)
             "[#{tok}]"                                   # already exact — leave
           elsif own_lm[:ambiguous][key]
+            # >1 live label normalizes to `key` and it is NOT the identity-alias
+            # casing shape handled above (genuinely distinct columns, or no unique
+            # raw casing) — a real ambiguity we must never guess.
             ambiguous << "[#{tok}] (label normalizes ambiguously on '#{el_name}')"
             "[#{tok}]"
           elsif owner_count[key] > 1

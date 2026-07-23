@@ -108,8 +108,9 @@ Every polling loop in `scripts/` has a **hard timeout** (audited): the export
 pollers (`sigma-export-png.py` 60×3s, `export-chart-png.rb` 20×3s,
 `collect-parity-actuals.rb` / `verify-warehouse.rb` / `probe-*.rb` /
 `enhance-*.rb` deadline-bounded), the discovery-lane waits
-(`lane_wait_for` 600s, join `TABLEAU_LANE_TIMEOUT` default 1800s, both with
-30s heartbeats), lane reaps (60s), and all REST retry loops (attempt-capped
+(`lane_wait_for` 600s, join `TABLEAU_LANE_TIMEOUT` default 600s — a transient
+render wedge under the old 1800s default silently burned 30 min; large sites
+raise it via the env var — both with 30s heartbeats), lane reaps (60s), and all REST retry loops (attempt-capped
 with exponential backoff). If you ever observe a script spinning past its
 documented bound, that's a bug — capture the command and file an issue.
 
@@ -133,7 +134,7 @@ Cold Tableau fetch is 2–4 min (5-thread pool; per-task breakdown in
 ### slow-join-wait
 This is just the foreground waiting on the lane — diagnose via
 `slow-phase1-lane-bg`. Heartbeats print every 30s; hard stop at
-`TABLEAU_LANE_TIMEOUT` (default 1800s).
+`TABLEAU_LANE_TIMEOUT` (default 600s; raise for large sites).
 
 ### slow-phase1-foreground
 parse-twb-layout + the mechanical converter, both pure-local.
@@ -164,6 +165,12 @@ Calc extraction + custom-SQL scan + gap parse, after the lane joins.
   calc-heavy workbook (100s of calcs) is normal once. `REUSED` thereafter.
 - The custom-SQL GraphQL call can be slow on large sites — it's sha-cached
   after one success.
+
+### slow-phase0c-cost
+`estimate-cost.rb --workdir` is a pure-local read of the workdir scoping
+artifacts plus one JSON write — seconds at most. Slow = a wedged filesystem or
+an enormous workdir glob; the estimator runs `allow_fail`, so worst case the
+run proceeds without a sign-off (Phase 3 WARNs).
 
 ### slow-decisions
 Pure-local checkpoint assembly. If this blows its (tiny) budget, the machine

@@ -121,6 +121,7 @@ require 'optparse'
 require 'fileutils'
 require 'open3'
 require_relative 'lib/py_resolve' # real-Python resolver (Windows Store-stub safe)
+begin; require_relative 'lib/modeling_advisory'; rescue LoadError; end # shared, vendor-neutral CDW join-cost advisory (optional; synced from shared/)
 require 'date'
 require 'time'
 require 'set'
@@ -132,6 +133,7 @@ require_relative 'lib/offramp' # structured "where did this run leave the golden
 require_relative 'lib/fast_path' # FAST-PATH routing + BOM-tolerant JSON reads
 require_relative 'lib/phase_cache' # sha-stamped phase-output reuse on re-entry (refs/performance.md)
 require_relative 'lib/sigma_rest' # in-process Sigma token minting (no bash/eval)
+require_relative 'lib/metric_binding' # shared DM-metric binder ([Metrics/<name>] over inline re-derive)
 require_relative 'lib/tableau_rest' # in-process Tableau token minting (Windows-safe; no bash/eval)
 require_relative 'hydrate-custom-sql'
 
@@ -241,6 +243,8 @@ OptionParser.new do |o|
                          'when the .twbx payload + connection id are already available') { opts[:no_auto_land] = true }
   o.on('--skip-postpublish-guide REASON', 'waive the finalize gate that requires POSTPUBLISH_GUIDE.md when the ' \
                                           'source carries dashboard actions (gate 11) — name it in your report') { |v| opts[:skip_postpublish_guide] = v }
+  o.on('--skip-datasource-filters REASON', 'waive the #483 datasource-filter gate (always-on Tableau data-source ' \
+                                           'filters must be applied as master defaults, not silently dropped) — REQUIRED reason; name it in your report') { |v| opts[:skip_datasource_filters] = v }
   o.on('--row-scale F', Float) { |v| opts[:row_scale] = v }
   o.on('--page-rows N', Integer, 'override the layout row model (passed through to build-dashboard-layout.rb; ' \
                                  'wins over the px-derived canvas rows)') { |v| opts[:page_rows] = v }
@@ -251,8 +255,20 @@ OptionParser.new do |o|
     abort "--master-col expects 'Name=<Sigma formula>', got #{v.inspect}" if nm.to_s.empty? || fx.to_s.empty?
     (opts[:master_cols] ||= []) << [nm, fx]
   end
+  # PLAN-v3 PR-17 (flag-staged, default OFF). De-share the single hidden master
+  # into per-page (per-dashboard) instances so a page's controls filter only
+  # that page's tiles (a shared cross-page master composes every page's filters
+  # on one master — V5.6-CONTROLS-AUDIT D11). Self-gating: a no-op unless >=2
+  # pages draw on the master, so single-page builds stay byte-identical.
+  o.on('--per-page-masters', 'PR-17: give each dashboard page its own master instance (fixes cross-page control leakage; ' \
+                             'no-op for single-page workbooks)') { opts[:per_page_masters] = true }
   o.on('--finalize')         {     opts[:finalize] = true }
   o.on('--actuals PATH')     { |v| opts[:actuals] = File.expand_path(v) }
+  # Finalize ergonomics (issue #422): forward two flags phase6-parity /
+  # assert-phase6-ran already accept but the orchestrator previously swallowed,
+  # blocking operators mid-finalize.
+  o.on('--regen-plan', 'force phase6-parity to REBUILD parity-plan.json from scratch (forwarded to phase6-parity.rb). Use after a workbook re-POST changes element ids, or to discard a stale plan.') { opts[:regen_plan] = true }
+  o.on('--skip-telemetry-gate REASON', 'waive gate 10 (telemetry consent) at --finalize — REQUIRED reason; forwarded to assert-phase6-ran.rb (census-visible policy exclusion, NOT a quality waiver). Use ONLY when the run cannot prompt (e.g. unattended CI); name it in your report.') { |v| opts[:skip_telemetry] = v }
   o.on('--allow-missing-tiles N', Integer) { |v| opts[:allow_missing_tiles] = v }
   o.on('--min-pass-rate F', Float, 'accept a parity pass-rate below 1.0 at the gate — ONLY for honest, ' \
                                    'NAMED divergences (LOD placeholders / cross-grain semantics)') { |v| opts[:min_pass_rate] = v }
@@ -264,9 +280,20 @@ OptionParser.new do |o|
   o.on('--enhance-accept L') { |v| opts[:enhance_accept] = v }
   # Phase 5g — RCF (render-compare-fix) loop budget. Default 5 passes; the loop
   # is agent-driven (staged at pass-1 tail, enforced at --finalize via gate 8d /
-  # --require-fidelity-ledger). --rcf-passes 0 DISABLES it with a loud WARN and
-  # the finalize gate does NOT require the ledger. Batch/headless callers pass 2.
-  o.on('--rcf-passes N', Integer, 'Phase 5g render-compare-fix loop budget (default 5; 0 disables it with a loud WARN and waives gate 8d).') { |v| opts[:rcf_passes] = v }
+  # --require-fidelity-ledger — DEFAULT-ON, PR-11). --rcf-passes 0 DISABLES it
+  # with a loud WARN and the finalize gate records the NAMED --skip-fidelity-gate
+  # waiver (budget-counted) instead of requiring the ledger. Batch/headless
+  # callers pass 2.
+  o.on('--rcf-passes N', Integer, 'Phase 5g render-compare-fix loop budget (default 5; 0 disables it with a loud WARN and records the named gate-8d waiver — budget-counted, never silent).') { |v| opts[:rcf_passes] = v }
+  # Gate 7b (PR-13) — the runtime control flip test is DEFAULT-ON at --finalize
+  # (pass 1 also stamps control_flip_required into migrate-state.json so even a
+  # standalone gate run enforces it). The census (gate 7c) proves the controls
+  # EXIST; only the flip proves they DO something. The probe needs the live
+  # export API — this waiver is the sanctioned out when it genuinely cannot run
+  # (recorded, budget-counted, named in the report). Never silent.
+  o.on('--skip-flip-test REASON', 'waive gate 7b (runtime control flip test, DEFAULT-ON at --finalize) — rides to ' \
+                                  'assert-phase6-ran.rb as the named --skip-control-flip waiver (budget-counted); ' \
+                                  'name it in your report.') { |v| opts[:skip_flip_test] = v }
   o.on('--converter MODE', %w[local hosted], "converter backend: 'local' (default; zero-config, no " \
        'data egress — uses the vendored converter/tableau.mjs unless TABLEAU_MCP_BUILD points at a ' \
        "fresher build) or 'hosted' (sends the .twb to sigma-data-model-mcp.onrender.com — explicit " \
@@ -385,12 +412,14 @@ _dg_skip = opts[:skip_doctor_gate] || ENV['SIGMA_SKIP_DOCTOR_GATE']
 _dg_cmd = ['ruby', File.join(HERE, 'assert-doctor-ran.rb'), '--workdir', WORK]
 _dg_cmd += ['--skip-doctor-gate', _dg_skip] if _dg_skip && !_dg_skip.to_s.empty?
 unless system(*_dg_cmd)
-  # Host-dispatched doctor hint: PowerShell/cmd users get the .ps1 twin, not a
-  # bash script they cannot run (RbConfig::CONFIG['host_os'] — docs-level P1.3).
+  # Host-dispatched bootstrap hint: PowerShell/cmd users get the .ps1 twin, not
+  # a bash script they cannot run (RbConfig::CONFIG['host_os'] — docs-level P1.3).
+  # PR-15: the remediation is the ONE bootstrap command (idempotent; ends in a
+  # doctor run + sentinel) — never a hand-driven runtime install.
   _doc_hint = RbConfig::CONFIG['host_os'] =~ /mswin|mingw|cygwin/ ?
-                'powershell -ExecutionPolicy Bypass -File scripts\\doctor.ps1' :
-                'bash scripts/doctor.sh'
-  abort "FATAL: environment gate failed — run the doctor first (#{_doc_hint}; see remediation above), " \
+                'powershell -ExecutionPolicy Bypass -File scripts\\bootstrap.ps1' :
+                'bash scripts/bootstrap.sh'
+  abort "FATAL: environment gate failed — run the bootstrap first (#{_doc_hint}; see remediation above), " \
         'or re-run with --skip-doctor-gate "<reason>".'
 end
 
@@ -632,6 +661,7 @@ PHASE_BUDGET = {
   'phase1.6-dm-scan'  => 45,  # DM list + ≤25 spec fetches; signature-cached re-entry <1s
   'phase2-columns'    => 90,  # ~2-5s per table via the Sigma catalog; cols-*.json reused on re-entry
   'phase1-join'       => 120, # calc extraction + custom-SQL scan + gap-report parse (sha-cached on re-entry)
+  'phase0c-cost'      => 15,  # estimate-cost.rb over workdir artifacts (pure local) + sign-off print
   'decisions'         => 10,  # pure local
   'folder-resolve'    => 15,  # one whoami + files listing
   'phase3-dm'         => 90,  # validate + POST + readback (skipped entirely on --reuse-dm)
@@ -917,6 +947,7 @@ if opts[:finalize]
   p6 = ['ruby', File.join(HERE, 'phase6-parity.rb'), '--tableau', WORK,
         '--finalize', '--actuals', opts[:actuals]]
   p6 += ['--extract-mode', '--extract-tol', '0.30'] if state['extract_mode']
+  p6 += ['--regen-plan'] if opts[:regen_plan]
   _, p6st = sigma_run!(p6, allow_fail: true)
   line "phase6-parity finalize: #{p6st.success? ? 'PASS' : "FAIL (exit #{p6st.exitstatus})"}"
   mark('phase6-finalize')
@@ -949,19 +980,47 @@ if opts[:finalize]
   # Phase 5g — require the RCF fidelity ledger (gate 8d) unless the loop was
   # explicitly disabled at pass 1 (--rcf-passes 0). Legacy state (pre-5g) has no
   # rcf_passes key → default to requiring it, since the ledger is the new bar.
+  # PR-11: the opt-out is NEVER silent — it rides to the gate as the named
+  # --skip-fidelity-gate waiver (recorded in waivers.json + the census,
+  # budget-counted), so a skipped RCF phase is visible in every report.
   rcf_enabled = state.fetch('rcf_passes', 5).to_i.positive?
-  gate += ['--require-fidelity-ledger'] if rcf_enabled
+  gate += rcf_enabled ? ['--require-fidelity-ledger'] : ['--skip-fidelity-gate', 'RCF loop disabled at pass 1 via --rcf-passes 0']
+  # Gate 7b (PR-13): the runtime control flip test is DEFAULT-ON for the
+  # tableau finalize path — gate 7c (controls census) proves the controls
+  # EXIST; only the flip proves they DO something at runtime. The opt-out is
+  # NEVER silent: --skip-flip-test rides to the gate as the named
+  # --skip-control-flip waiver (recorded in waivers.json + the parity-final
+  # census, budget-counted). Offline finalize runs without the waiver rely on
+  # the gate's recorded-evidence fallback (a prior probe-results.json /
+  # control-flip-unverified.json marker) — or fail closed, by design.
+  gate += opts[:skip_flip_test] ? ['--skip-control-flip', opts[:skip_flip_test]] : ['--require-control-flip']
   gate += ['--allow-extract'] if state['extract_mode']
   gate += ['--allow-missing-tiles', opts[:allow_missing_tiles].to_s] if opts[:allow_missing_tiles]
   gate += ['--min-pass-rate', opts[:min_pass_rate].to_s] if opts[:min_pass_rate]
   # Gate 11 (post-publish interactivity guide) waiver pass-through — the gate
   # itself decides whether the source's actions require POSTPUBLISH_GUIDE.md.
   gate += ['--skip-postpublish-guide', opts[:skip_postpublish_guide]] if opts[:skip_postpublish_guide]
+  # Telemetry consent waiver pass-through (issue #422) — census-visible at gate
+  # 10 (policy exclusion, excluded from the quality-waiver budget by doctrine).
+  gate += ['--skip-telemetry-gate', opts[:skip_telemetry]] if opts[:skip_telemetry]
   # --fast: stamp the two visual-gate waivers with the operator's reason (recorded
   # in parity-final.json's waivers[] and counted toward the >2-waiver budget cap).
   gate += ['--skip-visual-gate', opts[:fast], '--skip-visual-comparison', opts[:fast]] if opts[:fast]
   _, gst = sigma_run!(gate, allow_fail: true)
   mark('assert-phase6-ran')
+
+  # #483 datasource-filter gate — always-on Tableau data-source filters (a
+  # <shared-view> database-domain filter like company_active=true, or a
+  # <datasource>/<extract> filter) render NOTHING on any dashboard, so a visual
+  # check can't catch a miss. This verifies each tagged filter was APPLIED as a
+  # workbook-wide master default (not silently dropped → every aggregate
+  # over-reports). Kept a STANDALONE tableau-local gate (not folded into the
+  # SHARED assert-phase6-ran.rb) so it ships in one plugin PR; blocks GREEN via
+  # all_green below. SKIPs cleanly offline / without a token.
+  dsf_cmd = ['ruby', File.join(HERE, 'assert-datasource-filters.rb'), '--workdir', WORK, '--workbook-id', wb_id]
+  dsf_cmd += ['--skip-datasource-filters', opts[:skip_datasource_filters]] if opts[:skip_datasource_filters]
+  _, dsfst = sigma_run!(dsf_cmd, allow_fail: true)
+  mark('assert-datasource-filters')
 
   if gst.exitstatus == 7
     census = (JSON.parse(File.read(File.join(WORK, 'parity-final.json')))['tile_census'] rescue {}) || {}
@@ -998,8 +1057,10 @@ if opts[:finalize]
     puts "  2. READ #{File.join(WORK, 'sigma-render.png')} with the Read tool and compare it"
     puts "     side-by-side against the source dashboard PNG in #{WORK} (Phase 1d)."
     puts '     Fix any visual divergence (re-PUT the spec) and re-render until they match.'
-    puts '  3. Record the verdict so gate 8b confirms the comparison ran, then re-run --finalize:'
-    puts "       ruby scripts/record-visual-check.rb --workdir #{WORK} --verdict pass --notes \"<what you compared>\" --checklist \"<layout-visual-qa.md section 1b>\""
+    puts '  3. Spawn the CONTEXT-FREE blind grader (PR-9: refs/blind-grader-brief.md — give it ONLY the'
+    puts "     two image paths + the rubric; it writes #{File.join(WORK, 'blind-grade.json')})."
+    puts '  4. Record the verdict so gate 8b confirms the comparison ran, then re-run --finalize:'
+    puts "       ruby scripts/record-visual-check.rb --workdir #{WORK} --verdict pass --notes \"<what you compared>\" --checklist \"<layout-visual-qa.md section 1b>\" --blind-grade #{File.join(WORK, 'blind-grade.json')}"
     puts '  If the workbook genuinely cannot be rendered (export API unavailable), the gate'
     puts '  can be waived ONLY via assert-phase6-ran.rb --skip-visual-gate "<reason>" —'
     puts '  name the reason in your migration report.'
@@ -1014,10 +1075,14 @@ if opts[:finalize]
     puts 'Do this, then re-run this exact --finalize command:'
     puts "  1. READ the rendered page (#{File.join(WORK, 'sigma-render.png')}) side-by-side"
     puts "     against the source dashboard PNG in #{WORK} (Phase 1d)."
-    puts '  2. Record your verdict (this is what the gate checks):'
-    puts "       ruby scripts/record-visual-check.rb --workdir #{WORK} --verdict pass --notes \"<what matched>\" --checklist \"<layout-visual-qa.md section 1b>\""
-    puts '     If they DIVERGE: --verdict divergent --notes "<gap>", fix the spec, re-render, re-read,'
-    puts '     then re-record --verdict pass. The gate stays blocked until the verdict is pass.'
+    puts '  2. Spawn the CONTEXT-FREE blind grader (PR-9: refs/blind-grader-brief.md — ONLY the two'
+    puts "     image paths + the rubric; it writes #{File.join(WORK, 'blind-grade.json')}). Your own"
+    puts '     read is the fix loop; the blind grade is the verdict.'
+    puts '  3. Record your verdict (this is what the gate checks):'
+    puts "       ruby scripts/record-visual-check.rb --workdir #{WORK} --verdict pass --notes \"<what matched>\" --checklist \"<layout-visual-qa.md section 1b>\" --blind-grade #{File.join(WORK, 'blind-grade.json')}"
+    puts '     If they DIVERGE (your read OR the blind grade): --verdict divergent --notes "<gap>",'
+    puts '     fix the spec, re-render, re-read, re-grade, then re-record --verdict pass. The gate'
+    puts '     stays blocked until a blind-graded pass is recorded.'
     puts '============================================================================='
   end
 
@@ -1073,14 +1138,15 @@ if opts[:finalize]
     puts '     then render again. Loop until `fidelity-loop.rb status` is clean.'
     puts '  4. Genuinely-unclosable residuals: waive them by name via'
     puts '       assert-phase6-ran.rb --accept-residuals id,id  (name them in your report),'
-    puts '     or disable the loop entirely by re-running pass 1 with --rcf-passes 0.'
+    puts '     or disable the loop entirely by re-running pass 1 with --rcf-passes 0 (this records'
+    puts '     the named --skip-fidelity-gate waiver — budget-counted, named in the report).'
     puts '============================================================================='
   end
 
   # With an explicit --min-pass-rate (honest NAMED divergences), the census-
   # aware gate is the parity authority — phase6's own exit stays strict-100%.
   parity_ok = p6st.success? || (opts[:min_pass_rate] && gst.success?)
-  all_green = parity_ok && clst.success? && gst.success?
+  all_green = parity_ok && clst.success? && gst.success? && dsfst.success?
 
   # ---------------------------------------------------------------------------
   # Phase E (OPT-IN) — Enhance. Runs ONLY when --enhance was passed (here or on
@@ -1168,7 +1234,7 @@ if opts[:finalize]
   else
     puts "PARITY      : #{pf['status'] || '?'} (#{pf['charts_pass']}/#{pf['charts_total']} charts#{state['extract_mode'] ? ', extract-mode' : ''})"
   end
-  puts "GATES       : phase6=#{p6st.success? ? 'PASS' : 'FAIL'} cleanup=#{clst.success? ? 'PASS' : 'FAIL'} assert-phase6-ran=#{gst.success? ? 'PASS' : "FAIL(#{gst.exitstatus})"}"
+  puts "GATES       : phase6=#{p6st.success? ? 'PASS' : 'FAIL'} cleanup=#{clst.success? ? 'PASS' : 'FAIL'} assert-phase6-ran=#{gst.success? ? 'PASS' : "FAIL(#{gst.exitstatus})"} ds-filters=#{dsfst.success? ? 'PASS' : "FAIL(#{dsfst.exitstatus})"}"
   puts "ENHANCE     : #{enhance_line}" if enhance_line
   puts "STATUS      : #{all_green ? 'GREEN' : 'NOT GREEN'}"
   puts '======================================='
@@ -1278,6 +1344,8 @@ if opts[:dm_spec] || opts[:wb_spec]
     if dm_json && !(dm_json.is_a?(Hash) && dm_json['pages'].is_a?(Array))
   abort 'FATAL: --wb-spec JSON is not a page-bearing workbook spec (no top-level "pages" array)' \
     unless wb_json.is_a?(Hash) && wb_json['pages'].is_a?(Array)
+  # Vendor-neutral CDW join-cost advisory (informational only; never gates). See refs/modeling-strategy.md.
+  ModelingAdvisory.from_dm_spec(dm_json) if dm_json && defined?(ModelingAdvisory) && ModelingAdvisory.respond_to?(:from_dm_spec)
   Object.const_set(:Specs, Module.new do
     # nil on the --reuse-dm path: the DM is read back from the API, never rebuilt
     # from this module (so dm_spec is only consulted on the fresh --dm-spec path).
@@ -1941,6 +2009,9 @@ if mechanical
       elsif opts[:skip_extract_landing]
         line "WARN: embedded-extract sources with NO landing manifest — proceeding on --skip-extract-landing " \
              "(#{opts[:skip_extract_landing]}); the DM's table paths are on you (--db/--schema)"
+        # PR-14: every honored --skip-* leaves a record on the off-ramp trail.
+        Offramp.log(WORK, kind: 'skip-flag-waived', reason: opts[:skip_extract_landing],
+                    detail: '--skip-extract-landing')
       else
         puts <<~MSG
 
@@ -2030,6 +2101,20 @@ if mechanical
     end
     hyd_args += ['--pds', pds_json] if File.exist?(pds_json)
     hyd_args += ['--custom-sql', hcsql] if File.exist?(hcsql)
+    # #454: derive the target warehouse class from the resolved PDS metadata and
+    # pass it as the splice default. Each descriptor also carries its own class
+    # (hydrate_pds! prefers that per-PDS); this default covers the GraphQL-fallback
+    # splice and any classless descriptor, so a case-preserving warehouse
+    # (Databricks) is never normalized with Snowflake's upper-folding rules.
+    if File.exist?(pds_json)
+      pds_wcls = begin
+        ds_list = JSON.parse(File.read(pds_json, encoding: 'UTF-8'))
+        ds_list.is_a?(Array) ? ds_list.map { |d| d['warehouseClass'] }.compact.map(&:to_s).reject(&:empty?).first : nil
+      rescue StandardError
+        nil
+      end
+      hyd_args += ['--warehouse-class', pds_wcls] if pds_wcls
+    end
     if hyd_args.include?('--pds') || hyd_args.include?('--custom-sql')
       _out, hst = run!(hyd_args, allow_fail: true)
       conv_twb = hyd_twb if hst.success? && File.exist?(hyd_twb) && File.read(hyd_twb, encoding: 'UTF-8') != File.read(twb, encoding: 'UTF-8')
@@ -2433,9 +2518,11 @@ mark('phase2-columns')
 puts
 puts '── Phase 1 (join) · Tableau discovery lane ──'
 # Bound the join so a wedged discovery lane (e.g. a Tableau REST call that never
-# returns) can't leave the whole migration "stuck" indefinitely. Generous default
-# for large sites; override with TABLEAU_LANE_TIMEOUT (seconds).
-_lane_timeout = (ENV['TABLEAU_LANE_TIMEOUT'] || '1800').to_i
+# returns) can't leave the whole migration "stuck" indefinitely. Default 600s —
+# a healthy discovery finishes in ~2 min, and the prior 1800s default let a
+# transient render wedge silently burn 30 minutes (Twin-B e2e 2026-07-19).
+# Large sites override with TABLEAU_LANE_TIMEOUT (seconds).
+_lane_timeout = (ENV['TABLEAU_LANE_TIMEOUT'] || '600').to_i
 _lane_t0 = Time.now
 _lane_beat = _lane_t0
 until lane_done.call
@@ -2589,7 +2676,10 @@ if unhandled_gaps.any?
   # persist.rb records each scouted gap to <WORK>/scout-ledger.jsonl as
   # {gap_id, status: validated|escalated}. --force is NOT a blanket skip: it
   # only accepts gaps the scout actually tried and escalated — never a gap the
-  # scout never ran for.
+  # scout never ran for. A 'validated' row is honored only when it carries
+  # signed live-probe evidence (ScoutGate integrity, issue #458): a hand-written
+  # or forged 'validated' line is treated as unvalidated (→ escalated bucket),
+  # so the gate still blocks / requires real scouting.
   # Gap-id = the gap-report row name; the scout records under --gap-id '<name>'.
   by_name = unhandled_gaps.each_with_object({}) { |g, h| h[g['name'].to_s] = g }
   buckets = ScoutGate.classify(WORK, unhandled_gaps.map { |g| g['name'].to_s })
@@ -2665,6 +2755,57 @@ if mechanical
   end
 end
 mark('phase1-join')
+
+# ---------------------------------------------------------------------------
+# Phase 0c — scope/cost estimate + SIGN-OFF (PLAN-v3 PR-3). This is the first
+# point where BOTH discovery metadata (get-workbook / dashboard-layout /
+# calc-fields / custom-sql) and the gap-scan artifacts exist, and it runs
+# BEFORE the decisions checkpoint and any DM build/POST — the human signs off
+# on scope (tiles, calc classes, untranslatable gap classes) and rough token
+# cost while aborting is still free. estimate-cost.rb runs allow_fail and
+# degrades gracefully on missing inputs (it NAMES them) — a scoping estimate
+# must never block a migration. The acknowledgment lands in run-state.json:
+#   --yes / --answers (unattended)  → provenance "auto-yes"
+#   interactive                     → provenance "stated" (the operator saw
+#                                     the printed block and continued)
+# A missing ack is WARNed at the Phase 3 seam — WARN-only this release
+# (hard-gating waits for field calibration confidence in the estimator).
+# ---------------------------------------------------------------------------
+cost_est_path = File.join(WORK, 'cost-estimate.json')
+run!(['ruby', File.join(HERE, 'estimate-cost.rb'), '--workdir', WORK, '--out', cost_est_path],
+     allow_fail: true)
+cost_est = (JSON.parse(File.read(cost_est_path)) rescue nil)
+if cost_est
+  ce_est = cost_est['estimate'] || {}
+  ce_scope = cost_est['scope'] || {}
+  ce_calcs = ce_scope['calcs'] || {}
+  ce_unt = ce_scope['untranslatable_classes'] || []
+  puts
+  puts '==================== SCOPE / COST SIGN-OFF ===================='
+  puts "  workbook:        #{cost_est['workbook'] || wb_name}"
+  puts "  tiles:           #{ce_scope['tiles'] || '? (dashboard-layout.json missing)'}"
+  puts "  calc fields:     #{ce_calcs['total'] || 0} " \
+       "(#{ce_calcs['simple'] || 0} simple, #{ce_calcs['complex'] || 0} complex, " \
+       "#{ce_calcs['requires_custom_sql'] || 0} custom-SQL residue)"
+  puts "  gap classes:     #{(ce_scope['gap_classes'] || {}).map { |k, v| "#{v} #{k}" }.join(', ')}"
+  puts "  untranslatable:  #{ce_unt.any? ? ce_unt.join(', ') : '(none)'}"
+  puts "  estimate:        ~#{ce_est['agent_turns']} agent turns ≈ #{ce_est['input_tokens']} in / " \
+       "#{ce_est['output_tokens']} out tokens, ~#{ce_est['estimated_minutes']} min " \
+       "(#{ce_est['complexity']}; confidence: #{cost_est['confidence'] || 'rough'})"
+  (cost_est.dig('inputs', 'missing') || []).each do |m|
+    puts "  degraded:        missing #{m['artifact']} — #{m['provides']}"
+  end
+  puts "  full breakdown:  #{cost_est_path}"
+  puts '=============================================================='
+  ack_prov = (opts[:yes] || opts[:answers]) ? 'auto-yes' : 'stated'
+  RunState.record(WORK, 'cost_estimate_acknowledged' => true,
+                        'cost_estimate_provenance'   => ack_prov)
+  line "scope/cost sign-off recorded in run-state (cost_estimate_acknowledged: true, provenance: #{ack_prov})"
+else
+  line "WARN: cost estimate unavailable (no readable #{File.basename(cost_est_path)}) — " \
+       'proceeding without a scope/cost sign-off; Phase 3 will WARN.'
+end
+mark('phase0c-cost')
 
 # ---------------------------------------------------------------------------
 # DECISIONS CHECKPOINT — surface the genuine human questions ONLY. Mechanical
@@ -2917,6 +3058,9 @@ if FASTPATH
   RunState.skip(WORK, 'phase-1d', 'FAST PATH (--reuse-dm + --wb-spec)')
 elsif opts[:skip_dashboard_read]
   line "dashboard-read gate WAIVED (--skip-dashboard-read: #{opts[:skip_dashboard_read]}) — name this in your report"
+  # PR-14: every honored --skip-* leaves a record on the off-ramp trail.
+  Offramp.log(WORK, kind: 'skip-flag-waived', reason: opts[:skip_dashboard_read],
+              detail: '--skip-dashboard-read')
 elsif DashboardRead.expected?(WORK)
   # Seed a DRAFT png-read.json from the .twb zone tree if none exists yet, so the
   # agent EDITS a starting point instead of writing from scratch (finding #8). The
@@ -2950,6 +3094,15 @@ end
 # Phase 3 — Build + POST the data model.
 # ---------------------------------------------------------------------------
 hdr(3, 'Build data model')
+# PLAN-v3 PR-3: the DM build is the first Sigma WRITE — a scope/cost sign-off
+# (Phase 0c) should be on record by now. WARN-only this release: hard-gating
+# waits for field calibration confidence in the estimator. (The FAST PATH and
+# hand-driven re-entries reuse the workdir, so an earlier run's ack carries.)
+unless RunState.load(WORK)['cost_estimate_acknowledged']
+  line 'WARN: no scope/cost sign-off in run-state (cost_estimate_acknowledged missing) — ' \
+       'estimate-cost.rb never ran or was not acknowledged (PLAN-v3 PR-3). WARN-only this ' \
+       'release; this becomes a gate once the estimator is field-calibrated.'
+end
 dm_spec_path = File.join(WORK, 'dm-spec.json')
 dm_ids_path = File.join(WORK, 'dm-ids.json')
 if reuse_dm_id
@@ -3104,8 +3257,17 @@ end
 begin
   require_relative 'lib/join_plan'
   _jp_spec = reuse_dm_id ? dm_spec_rb : dm
-  _jp = JoinPlan.derive(_jp_spec, have_twb ? File.read(twb, encoding: 'UTF-8') : nil,
-                        db: db, schema: schema)
+  # FAST PATH live defect (Twin-B e2e 2026-07-19): have_twb is assigned inside
+  # the full-pipeline block only, so the FAST PATH (--reuse-dm + --wb-spec)
+  # left it nil even though workbook-content.twb sat in the workdir — the .twb
+  # LEFT JOIN never landed in the ledger, gate 16 passed on an EMPTY ledger,
+  # and the DM shipped without the join (every tile diverged 3-23x, fan-out
+  # trap). Read the .twb straight from the workdir on EVERY route; db/schema
+  # fall back to the explicit flags (nil-safe: an uncompleted right_table
+  # keeps the probe erroring and the gate blocking — the safe direction).
+  _jp_twb = have_twb ? File.read(twb, encoding: 'UTF-8') : JoinPlan.workdir_twb(WORK)
+  _jp = JoinPlan.derive(_jp_spec, _jp_twb,
+                        db: db || opts[:db], schema: schema || opts[:schema])
   JoinPlan.write(File.join(WORK, 'join-plan.json'), _jp)
   _jp_src = reuse_dm_id ? 'reuse path: .twb + live DM readback' : 'dm-spec + .twb'
   if _jp.any?
@@ -3296,6 +3458,21 @@ if mechanical
   File.write(mmap_path, JSON.pretty_generate(mmap))
   line "master-map: #{master_columns.size} master column(s) (fact element '#{fact['name']}', #{real_labels ? real_labels.size : 0} readback labels)"
 
+  # DM metrics referenceable on the master (own on the fact element + inherited via
+  # source.elementId): a chart/KPI measure whose inline aggregate matches one binds
+  # to a governed [Metrics/<name>] ref instead of re-deriving inline (formula
+  # equivalence; ratios/LODs/table-calcs/no-match stay inline — byte-identical).
+  metrics_path = File.join(WORK, 'metrics.json')
+  begin
+    els_by_id = MechanicalSpecs.all_elements(conv['model']).each_with_object({}) { |e, h| h[e['id']] = e }
+    wb_metrics = MetricBinding.available_metrics(conv_fact['id'], els_by_id)
+  rescue StandardError => e
+    line "metric-binding: could not resolve DM metrics (#{e.class}: #{e.message}) — measures stay inline"
+    wb_metrics = []
+  end
+  File.write(metrics_path, JSON.pretty_generate(wb_metrics))
+  line "metric-binding: #{wb_metrics.size} referenceable DM metric(s) for [Metrics/<name>] refs" if wb_metrics.any?
+
   # 2) Build the chart-element specs from the parsed zones + view CSVs + map.
   #    ONE SIGMA PAGE PER TABLEAU DASHBOARD (bead ptrt) — a fat workbook's 4
   #    dashboards become 4 laid-out pages, each with its own banded layout.
@@ -3303,6 +3480,7 @@ if mechanical
   build_cmd = ['ruby', File.join(HERE, 'build-charts-from-signals.rb'),
                '--tableau-dir', WORK, '--layout', layout_json,
                '--master-map', mmap_path, '--master-element-id', 'master',
+               '--metrics', metrics_path,
                '--page-per-dashboard',
                '--out', charts_path,
                '--coverage-out', File.join(WORK, 'coverage.json')]
@@ -3317,6 +3495,17 @@ if mechanical
   chart_pages = raw_charts.is_a?(Hash) ? (raw_charts['pages'] || []) : nil
   data_elements = raw_charts.is_a?(Hash) ? (raw_charts['data_elements'] || []) : []
   chart_elements = chart_pages ? chart_pages.flat_map { |p| p['elements'] || [] } : raw_charts
+  # PR-18: integer-coded dimension DECODE columns build-charts routed onto the
+  # MASTER (a master-rooted list control's Text() decode must live on the master
+  # so the filter propagates to every chart sourcing from it). Inject them into
+  # master_columns now — before the ref-label repair below picks up the registry.
+  # Empty when no integer-dim control was detected (additive / byte-identical).
+  Array(raw_charts.is_a?(Hash) ? raw_charts['master_decode_columns'] : nil).each do |dc|
+    next unless dc.is_a?(Hash) && dc['id'] && dc['formula']
+    next if master_columns.any? { |c| c['id'] == dc['id'] }
+    master_columns << dc
+    line "integer-dim decode: added master column '#{dc['name']}' (#{dc['formula']}) — list control filters STRING values (raw numeric list-filter targets are silently stripped by Sigma)"
+  end
   # Dim-grain helper placeholder resolution: build-charts runs before it knows
   # the live DM element ids, so grain helpers carry source.elementId =
   # "__DM_ELEMENT__:<name>". Resolve against the readback (dm_els) NOW — an
@@ -3509,6 +3698,21 @@ else
   spec['folderId'] = opts[:folder] if opts[:folder]
   layout_xml = (Specs.respond_to?(:layout_xml) ? Specs.layout_xml : nil)
 end
+# ---- PR-17: per-page master instances (flag-staged, default OFF) ------------
+# Final structural pass over the assembled spec — runs AFTER the multi-metric
+# recipe and formula-normalize so those see the shared-master shape they were
+# written against, then de-shares. Self-gating (no-op unless >=2 pages use the
+# master), so single-page and page-mode-with-one-data-page builds are unchanged.
+if opts[:per_page_masters]
+  require File.join(HERE, 'lib', 'per_page_masters')
+  ppm = PerPageMasters.split!(spec)
+  if ppm[:applied]
+    line "per-page-masters (PR-17): #{ppm[:masters]} master instance(s) across #{ppm[:pages]} page(s) " \
+         "(#{ppm[:clones]} Data-page element(s)); each page's controls now filter only its own tiles"
+  else
+    line 'per-page-masters (PR-17): no split needed (<=1 page draws on the master) — shared master kept'
+  end
+end
 # ---- PUT-APPEND: incremental one-tab-at-a-time into an EXISTING workbook ----
 # When --workbook-target <id> is set with a single-dashboard build, append the
 # newly-built page(s) to the existing workbook's spec instead of POSTing a brand
@@ -3624,6 +3828,46 @@ rescue StandardError => e
   line "WARN: LOD audit derivation failed (#{e.class}: #{e.message.to_s[0, 80]}) — " \
        'gate 17 will fail if the calc census carries LOD calcs; derive by hand via scripts/audit-lod-calcs.rb'
 end
+# Aggregation-semantics ledger (PR-7): one entry per additive-over-preagg /
+# countd-as-sum / preagg-ratio hit, classified against the calc census + the
+# emitted dm-spec/wb-spec (+ landing-manifest grain info when present).
+# Additive aggregation over a pre-aggregated column compiles clean and ships
+# wrong-looking-right numbers (the 103.3%-KPI field twin) — the final gate
+# (assert-phase6-ran.rb gate 19, exit 26) refuses GREEN until every hit
+# records a resolution (reaggregated | n/a | faithful-to-source). An EMPTY
+# ledger is still written — its presence is the gate's evidence the lint ran.
+begin
+  require_relative 'lib/agg_semantics_lint'
+  _as_read = ->(p) { File.exist?(p) ? (JSON.parse(File.read(p, encoding: 'UTF-8')) rescue nil) : nil }
+  _as_cf = _as_read.call(File.join(WORK, 'calc-fields.json'))
+  _as_calcs = if _as_cf
+                AggSemanticsLint.calc_census(_as_cf)
+              elsif have_twb
+                AggSemanticsLint.calc_census_from_twb(File.read(twb, encoding: 'UTF-8'))
+              else
+                []
+              end
+  _as_entries = AggSemanticsLint.derive(_as_calcs,
+                                        dm_spec: _as_read.call(dm_spec_path) || (defined?(dm) ? dm : nil),
+                                        wb_spec: spec,
+                                        landing_manifest: _as_read.call(File.join(WORK, 'landing-manifest.json')),
+                                        prior: _as_read.call(File.join(WORK, 'agg-semantics.json')))
+  AggSemanticsLint.write(File.join(WORK, 'agg-semantics.json'), _as_entries)
+  _as_block = _as_entries.reject { |e| AggSemanticsLint.resolved?(e) }
+  if _as_block.any?
+    line "agg-semantics lint: #{_as_block.size} of #{_as_entries.size} hit(s) UNRESOLVED " \
+         "(#{_as_block.first(4).map { |e| "#{e['consumer']} [#{e['class']}]" }.join('; ')}#{_as_block.size > 4 ? '; …' : ''}) — agg-semantics.json"
+    line "  RESOLVE them before --finalize:  ruby #{File.join(HERE, 'audit-agg-semantics.rb')} --workdir #{WORK}" \
+         ' --resolve <i> --how <reaggregated|n/a|faithful-to-source> --reason "..."'
+  elsif _as_entries.any?
+    line "agg-semantics lint: #{_as_entries.size} hit(s) all resolved (agg-semantics.json)"
+  else
+    line 'agg-semantics lint: no additive-over-preagg/countd-as-sum/preagg-ratio hits — agg-semantics.json written as gate evidence'
+  end
+rescue StandardError => e
+  line "WARN: agg-semantics lint failed (#{e.class}: #{e.message.to_s[0, 80]}) — " \
+       'gate 19 will fail if the workdir carries pre-aggregate evidence; derive by hand via scripts/audit-agg-semantics.rb'
+end
 wb_ids_path = File.join(WORK, 'wb-ids.json')
 
 # GRACEFUL AGENT-PATH FALLBACK. The DM is already posted + valid (dm_id above), so
@@ -3641,7 +3885,8 @@ begin
   # collapse left 550 refs unresolvable). Catch it here with the full list; the
   # WorkbookBuildError this raises routes to the friendly rebuild-against-DM handoff.
   ref_cmd = ['ruby', File.join(HERE, 'assert-wb-refs-resolve.rb'),
-             '--wb-spec', wb_spec_path, '--dm-ids', dm_ids_path]
+             '--wb-spec', wb_spec_path, '--dm-ids', dm_ids_path,
+             '--workdir', WORK] # PR-14: a waived run records itself to offramps.jsonl
   ref_cmd += ['--skip-ref-check', opts[:skip_ref_check]] if opts[:skip_ref_check]
   run_wb!(ref_cmd)
   par_cmd = ['ruby', File.join(HERE, 'post-and-readback.rb'), '--type', 'workbook',
@@ -3959,7 +4204,11 @@ state = { 'workbook_id' => wb_id, 'data_model_id' => dm_id,
           'reused_dm' => !!reuse_dm_id, 'pass1_at' => Time.now.utc.iso8601,
           'enhance_requested' => !!opts[:enhance],
           'run_id' => RUN_ID, 'route' => CURRENT_ROUTE,
-          'rcf_passes' => (opts[:rcf_passes] || 5) }
+          'rcf_passes' => (opts[:rcf_passes] || 5),
+          # PR-13: gate 7b (runtime control flip test) is DEFAULT-ON for the
+          # tableau path — this stamp auto-enables it even on a STANDALONE
+          # assert-phase6-ran run (the 8d/rcf_passes pattern from #439).
+          'control_flip_required' => true }
 File.write(File.join(WORK, 'migrate-state.json'), JSON.pretty_generate(state))
 
 # ---------------------------------------------------------------------------
@@ -3973,24 +4222,27 @@ rcf_passes = (opts[:rcf_passes] || 5)
 if rcf_passes.to_i <= 0
   line 'WARN: Phase 5g RCF fidelity loop DISABLED (--rcf-passes 0). The workbook will be gated on'
   line '      structure + data + a single visual verdict only — composition drift (palette, chart'
-  line '      kind, KPI format) will NOT be iterated. --finalize will NOT require the fidelity ledger.'
+  line '      kind, KPI format) will NOT be iterated. --finalize will not require the fidelity ledger'
+  line '      but RECORDS the named --skip-fidelity-gate waiver (budget-counted, PR-11) — name it in'
+  line '      your migration report; it is never silent.'
 else
-  # Best-effort resolve the primary (first non-Data) page id + a source image to
-  # compare against, from the artifacts pass 1 already wrote.
-  wb_ids = (JSON.parse(File.read(File.join(WORK, 'wb-ids.json'))) rescue {})
-  primary_page = (wb_ids['pages'] || []).reject { |p| p['name'].to_s.downcase == 'data' }.first ||
-                 (wb_ids['pages'] || []).first
-  page_id = primary_page && primary_page['id']
+  # Best-effort resolve a source image to compare against from the artifacts
+  # pass 1 already wrote. The page is NOT pre-picked here any more (#422: the
+  # old first-non-"Data"-page pick landed on a second data page rendering a
+  # hidden helper table) — fidelity-loop.rb init auto-picks the page with the
+  # most VISIBLE elements from wb-ids.json + wb-spec.json, and an operator
+  # --page-id override now works even on an existing ledger.
   cmani = (JSON.parse(File.read(File.join(WORK, 'visual-qa', 'compare-manifest.json'))) rescue [])
   src_img = (cmani.find { |m| m['source_png'] } || {})['source_png']
-  if page_id
-    _, ist = run!(['ruby', File.join(HERE, 'fidelity-loop.rb'), 'init',
-                   '--workdir', WORK, '--workbook-id', wb_id, '--page-id', page_id,
-                   '--max-passes', rcf_passes.to_s] +
-                  (src_img ? ['--source-image', src_img] : []), allow_fail: true)
-    line "Phase 5g: RCF fidelity ledger initialized (page #{page_id}, budget #{rcf_passes})" if ist.success?
+  _, ist = run!(['ruby', File.join(HERE, 'fidelity-loop.rb'), 'init',
+                 '--workdir', WORK, '--workbook-id', wb_id,
+                 '--max-passes', rcf_passes.to_s] +
+                (src_img ? ['--source-image', src_img] : []), allow_fail: true)
+  if ist.success?
+    led_pg = (JSON.parse(File.read(File.join(WORK, 'fidelity-ledger.json')))['page_id'] rescue '?')
+    line "Phase 5g: RCF fidelity ledger initialized (page #{led_pg}, budget #{rcf_passes})"
   else
-    line 'Phase 5g: could not resolve a page id from wb-ids.json — init the ledger manually (see the prompt below)'
+    line 'Phase 5g: ledger init could not auto-pick a page — init manually with --page-id (see the prompt below)'
   end
   mark('phase5g-init')
 end
@@ -4011,6 +4263,7 @@ end
 p6 = ['ruby', File.join(HERE, 'phase6-parity.rb'),
       '--tableau', WORK, '--workbook-id', wb_id]
 p6 += ['--extract-mode', '--extract-tol', '0.30'] if has_extracts
+p6 += ['--regen-plan'] if opts[:regen_plan]
 if FASTPATH && (FAST[:degraded] || []).any?
   # Degraded fast path (--yes, discovery artifacts missing): the plan may be
   # unbuildable without the view CSVs / layout. Degrade LOUDLY, never re-fetch.

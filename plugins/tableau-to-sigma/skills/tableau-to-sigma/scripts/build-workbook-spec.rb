@@ -50,6 +50,11 @@ OptionParser.new do |p|
   p.on('--mode S')              { |v| opts[:mode] = v }
   p.on('--dm-element-name S')   { |v| opts[:dm_el_name] = v }
   p.on('--layout PATH', 'parse-twb-layout output — used to derive workbook theme (canvas + region palette)') { |v| opts[:layout] = v }
+  # PLAN-v3 PR-17 (flag-staged, default OFF). Give each content page that draws
+  # on the master its own master instance so page controls filter only that
+  # page's tiles (a shared cross-page master composes every page's filters on
+  # one master — V5.6-CONTROLS-AUDIT D11). No-op unless >=2 pages use the master.
+  p.on('--per-page-masters', 'PR-17: per-page master instances (no-op for single-page workbooks)') { opts[:ppm] = true }
   p.on('--out PATH')            { |v| opts[:out] = v }
 end.parse!
 %i[specs dm_ids name folder_id out].each { |k| abort("missing --#{k.to_s.tr('_','-')}") unless opts[k] }
@@ -213,6 +218,15 @@ if opts[:layout]
          "pageWidth=#{theme['maxPageWidth'] || '(default)'}, " \
          "categoricalScheme=#{(theme['categoricalScheme'] || []).size} color(s)"
   end
+end
+
+# PR-17: per-page master instances (flag-staged, default OFF). Final structural
+# pass — self-gating, so it only changes multi-page workbooks that actually
+# share a master; single-page output is byte-identical.
+if opts[:ppm]
+  require_relative 'lib/per_page_masters'
+  ppm = PerPageMasters.split!(wb)
+  warn "  per-page-masters (PR-17): #{ppm[:applied] ? "#{ppm[:masters]} master instance(s) across #{ppm[:pages]} page(s), #{ppm[:clones]} Data-page element(s)" : 'no split needed (<=1 page draws on the master)'}"
 end
 
 File.write(opts[:out], JSON.pretty_generate(wb))

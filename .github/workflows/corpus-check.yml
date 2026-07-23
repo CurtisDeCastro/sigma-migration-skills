@@ -66,19 +66,27 @@ jobs:
         with:
           node-version: '20'
 
-      - name: doctor.ps1 runs and writes a passing doctor.json
+      - name: bootstrap.ps1 no-ops into doctor-green + sentinel (PR-15)
         shell: pwsh
         run: |
           $wd = Join-Path $env:RUNNER_TEMP 'wd'
           New-Item -ItemType Directory -Force -Path $wd | Out-Null
-          powershell -ExecutionPolicy Bypass -File "$env:TS_SKILL\scripts\doctor.ps1" -WorkDir $wd
-          if ($LASTEXITCODE -ne 0) { throw "doctor.ps1 exited $LASTEXITCODE (a REQUIRED runtime is missing)" }
+          # Full bootstrap on a complete runner: verifies runtimes, pip-installs
+          # the render deps if absent, persists the placeholder creds via
+          # setup.rb --from-env, ends in a doctor run + writes the sentinel.
+          powershell -ExecutionPolicy Bypass -File "$env:TS_SKILL\scripts\bootstrap.ps1" -WorkDir $wd
+          if ($LASTEXITCODE -ne 0) { throw "bootstrap.ps1 exited $LASTEXITCODE" }
           $j = Get-Content (Join-Path $wd 'doctor.json') -Raw | ConvertFrom-Json
           Write-Host "doctor.json -> os=$($j.os) shell=$($j.shell) pass=$($j.pass)"
           if (-not $j.pass) { throw "doctor.json pass=false: $($j.failures -join '; ')" }
           foreach ($r in 'ruby','python','node') {
             if (-not $j.runtimes.$r) { throw "doctor.json runtimes.$r is false" }
           }
+          $s = Get-Content (Join-Path $wd 'bootstrap.json') -Raw | ConvertFrom-Json
+          if (-not $s.doctor_pass) { throw "bootstrap sentinel doctor_pass=false" }
+          # Idempotency + dry-run: a complete env must report nothing to install.
+          powershell -ExecutionPolicy Bypass -File "$env:TS_SKILL\scripts\bootstrap.ps1" -Check
+          if ($LASTEXITCODE -ne 0) { throw "bootstrap.ps1 -Check exited $LASTEXITCODE on a complete env" }
 
       - name: get_token.py imports + parses under Windows Python
         shell: pwsh
@@ -185,6 +193,12 @@ jobs:
         # each skill's SKILL.md by tools/gen-agent-variants.rb. Fail if a
         # committed variant drifted, so EVERY coding agent reads the same steps.
         run: ruby tools/check-agent-variants.rb
+      - name: Cognos vendored bundle is fresh vs converter/*.ts
+        # cognos ships its converter as in-skill TS bundled into converter/cli.mjs
+        # (production runs the bundle). Fail if a converter/*.ts edit shipped without
+        # re-running tools/vendor-converters.sh — a stale bundle silently ships the OLD
+        # behavior. Source-hash gate (not a flaky byte compare); mirrors check-shared.
+        run: ruby tools/check-cognos-bundle.rb
 
   unit-tests:
     name: offline unit/regression tests (creds-free)
@@ -209,13 +223,18 @@ jobs:
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-styled-text-layout.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-kpi-scorecard-detection.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-kpi-composite-emit.rb
+            plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-threshold-halo.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-theme-derivation.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-brand-palette.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-header-derivation.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-element-id-namespacing.rb
+            plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-column-id-slug-case.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-fact-pick.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-layout-lint.rb
+            plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-native-trellis.rb
+            plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-trellis-emit.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-hydrate-custom-sql.rb
+            plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-pds-resolve-retry.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-parity-score.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-aggregate-dimension.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-param-measure-picker.rb
@@ -224,8 +243,11 @@ jobs:
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-layout-dedup.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-put-layout-prune.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-multi-datasource-gap.rb
+            plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-ref-label-repair.rb
+            plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-scout-ledger-integrity.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-wb-refs-resolve.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-lod-sql-quoting.rb
+            plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-lod-audit.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-sql-ident-check.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-dm-quarantine.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-cred-gate.rb
@@ -234,6 +256,17 @@ jobs:
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-py-resolve-winpath.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-rank-connections.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-fast-flag.rb
+            plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-bootstrap.rb
+            plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-intake.rb
+            plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-skill-coverage.rb
+            plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-preflight-lint.rb
+            plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-control-field-census.rb
+            plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-number-range-filter-emission.rb
+            plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-datasource-filter-emission.rb
+            plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-datasource-filter-gate.rb
+            plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-control-lint.rb
+            plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-conflicting-page-defaults.rb
+            plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-metric-reference.rb
             plugins/tableau-to-sigma/skills/tableau-assessment/scripts/test-predicted-parity.rb
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-dax-restructure.rb
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-telemetry-gate.rb
@@ -243,7 +276,19 @@ jobs:
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-pbi-element-match.rb
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-pbi-timeintel-route.rb
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-drop-unresolved-columns.rb
+            plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-scout-ledger-integrity.rb
+            plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-trellis-emit.rb
+            plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-pbi-trellis.rb
+            plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-control-lint.rb
+            plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-conflicting-page-defaults.rb
+            plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-metric-reference.rb
+            plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/test-scout-ledger-integrity.rb
             plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/test-window-native.rb
+            plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/test-scout-ledger-integrity.rb
+            plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/test-trellis-emit.rb
+            plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/test-qs-trellis.rb
+            plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/test-metric-reference.rb
+            shared/lib/test_metric_binding.rb
           )
           fail=0
           for t in "${tests[@]}"; do
@@ -268,14 +313,47 @@ jobs:
           python3 -m pip install --quiet pyyaml
           tests=(
             plugins/looker-to-sigma/skills/looker-to-sigma/tests/test_grid_fidelity.py
+            plugins/looker-to-sigma/skills/looker-to-sigma/tests/test_looker_client.py
+            plugins/looker-to-sigma/skills/looker-to-sigma/tests/test_derived_perf.py
+            plugins/looker-to-sigma/skills/looker-to-sigma/tests/test_table_column_order.py
+            plugins/looker-to-sigma/skills/looker-to-sigma/tests/test_vis_column_order_capture.py
+            plugins/looker-to-sigma/skills/looker-to-sigma/tests/test_look_migration.py
+            plugins/looker-to-sigma/skills/looker-to-sigma/tests/test_grounding.py
+            plugins/looker-to-sigma/skills/looker-to-sigma/tests/test_metric_reference.py
+            shared/lib/test_metric_binding.py
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test_sigma_rest.py
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test_tableau_rest.py
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test_pick_destination.py
+            plugins/looker-to-sigma/skills/looker-to-sigma/scripts/test_scout_ledger_integrity.py
+            plugins/microstrategy-to-sigma/skills/microstrategy-to-sigma/scripts/test_scout_ledger_integrity.py
+            plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/test_scout_ledger_integrity.py
+            plugins/qlik-to-sigma/skills/qlik-to-sigma/tests/test_metric_reference.py
+            plugins/gooddata-to-sigma/skills/gooddata-to-sigma/tests/test_metric_reference.py
+            plugins/microstrategy-to-sigma/skills/microstrategy-to-sigma/tests/test_metric_reference.py
+            plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/tests/test_metric_reference.py
+            plugins/sisense-to-sigma/skills/sisense-to-sigma/tests/test_metric_reference.py
           )
           fail=0
           for t in "${tests[@]}"; do
             echo "::group::$t"
             if python3 "$t"; then echo "OK $t"; else echo "::error file=$t::test failed"; fail=1; fi
+            echo "::endgroup::"
+          done
+          exit $fail
+      - name: Run offline test-*.mjs suites
+        # EXPLICIT allow-list — creds-free, network-free Node tests only.
+        # (ubuntu-24.04 ships Node; the cognos scout gate + writer are Node.)
+        # New offline test-*.mjs → add its path here.
+        run: |
+          set -uo pipefail
+          tests=(
+            plugins/cognos-to-sigma/skills/cognos-to-sigma/scripts/test-scout-ledger-integrity.mjs
+            plugins/cognos-to-sigma/skills/cognos-to-sigma/scripts/test-metric-reference.mjs
+          )
+          fail=0
+          for t in "${tests[@]}"; do
+            echo "::group::$t"
+            if node "$t"; then echo "OK $t"; else echo "::error file=$t::test failed"; fail=1; fi
             echo "::endgroup::"
           done
           exit $fail

@@ -59,6 +59,7 @@ If the user didn't supply a destination (no `--folder <id>`), ASK before buildin
 If a destination is already supplied, honor it silently — don't ask.
 
 > **READ FIRST — `refs/operating-contract.md`**: the fidelity guardrails (render + value-check EVERY page against the source; never ship empty or silently drop a tile; don't spin — surface blockers).
+> **Modeling strategy — `refs/modeling-strategy.md`**: faithful star reproduction is the DEFAULT (parity is the gate); an upstream OBT or Sigma-native materialization is an OPT-IN optimization for hot, join-heavy dashboards, re-verified against the same parity oracle. The converter never auto-flattens. (Measured: flat beats live-join joins by 1.35–2.5× on join queries, but is neutral/worse join-free.)
 > Status: **foundation** (validated end-to-end 2026-05-31 on the "Employee Dashboard" workforce report).
 > Beads: build = `beads-sigma-cs2`; converter gaps = `j89` (M-Snowflake path), `tkd` (element names / schemaVersion / folderId).
 > Defers to: `sigma-workbooks` (canonical workbook spec), `sigma-data-models` (DM spec), the `convert_powerbi_to_sigma` MCP tool, and `tableau-to-sigma/scripts/*` (reused verbatim for posting + layout + parity).
@@ -185,6 +186,7 @@ The converter output (`sigmaDataModel`) needs 3 fixups before `POST /v2/dataMode
 1. **`schemaVersion: 1`** at top level (else `schemaVersion: Invalid 1: undefined`).
 2. **`folderId` + `ownerId`** at top level — pull from a reference DM (the **tableau-to-sigma reuse logic**, `find-or-pick-dm.rb`).
 3. **Element `name`** on each base warehouse-table element (= `source.path[-1]`) — the converter only names joined View elements, but workbook masters reference DM elements by name.
+   > These joined View elements are query-time joins Sigma runs in the warehouse. For *why* Sigma modeling differs and when to consider an upstream OBT / Sigma-native materialization instead (an opt-in optimization, not something this skill does automatically), see `refs/modeling-strategy.md`. When the converted model has ≥2 joins, the orchestrator prints a one-line MODELING ADVISORY pointing there.
 Then: `tableau-to-sigma/scripts/post-and-readback.rb --type datamodel`. See `refs/spec-fixups.md`.
 
 > **What Phase 4 "validation" catches — and what it does NOT (read before trusting a clean DM).**
@@ -451,6 +453,8 @@ The conversion is script-driven (mirrors `tableau-to-sigma/scripts/`). `scripts/
 | `enhance-apply.rb` | E apply (opt-in) | **Phase E part 2 — APPLY (accept-only, clone-first).** Clones the parity workbook as `"<name> — Enhanced"` (1:1 artifact never written), applies ONLY `--accept`-ed candidates one at a time, each gated by an untouched-element clone-vs-original spot-check (auto-revert on shift). Writes `enhance-report.json`. Byte-identical twin of the tableau copy. |
 
 The agent authors one PBI-specific artifact: `master-map.json` (maps each PBI Entity → a Data-page master element and each `Entity.Field` queryRef → `{ref, agg}`), which encodes the DM element ids + DAX-measure→Sigma-aggregator decisions. Everything else is mechanical.
+
+**DM metric references (leverage the semantic layer, don't duplicate it).** `migrate-powerbi.rb` attaches each master's DM metrics (name + original bare formula) to `master-map.json`, and `build-workbook-from-pbir.rb`'s `measure_formula` prefers a governed **`[Metrics/<name>]`** reference over its inline aggregate when they match by formula equivalence (strip the master `id` prefix so `CountDistinct([master-emp/Headcount])` equals a metric's `CountDistinct([Headcount])`) — via the shared binder `scripts/lib/metric_binding.rb`. SAFE: chained/ratio metrics (migrate inlines them with parens), implicit column aggregations with no matching metric, and any non-match fall back to inline; a master with no metrics is byte-identical. Verified: `scripts/test-metric-reference.rb`.
 
 **Validated unattended end-to-end 2026-05-31** against the KitchenSink (PBI report/model pair on the demo warehouse): `run.sh` drove extract → convert (MCP gate) → post-DM (26 cols, 0 errors) → build → post-WB → **layout** into a throwaway DM + workbook in the demo Sigma org. `assert-phase6-ran.rb` passed all 4 gates: **0 `error` columns** (34 live cols), grouped `Department Summary` table (6 depts, real ranked rows), **single-series** YTD line (2025 Jul–Dec = `3536,7412,10932,14700,18080,21844`, parity-exact vs PBI), pivot with `rowsBy`/`values`, and a 12-element grid layout that **survived the final write** (no single-column wipe). Throwaway items deleted after.
 

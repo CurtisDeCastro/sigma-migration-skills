@@ -22,6 +22,11 @@ Behavior (mirrors the looker / thoughtspot readback gate):
   - every error column scouted (validated or escalated) -> exit 0 (proceed).
   - no error columns -> exit 0.
 
+A 'validated' ledger row is honored only when it carries signed live-probe
+evidence (ScoutGate integrity, issue #458): a hand-written or forged 'validated'
+line is treated as unvalidated (falls to the escalated bucket) by
+scout_gate.classify, so this gate still blocks / requires genuine scouting.
+
 Env: SIGMA_BASE_URL, SIGMA_API_TOKEN (eval get-token.sh first).
 """
 import argparse

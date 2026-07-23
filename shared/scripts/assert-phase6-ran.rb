@@ -45,14 +45,41 @@
 #      an interactive source = FAIL, the Qlik class) and per-control
 #      scope:[...] allowlists (intentional single-chart switchers like grain
 #      controls). See the lib header CONTRACT.
-#   7b. Runtime control flip test (OPT-IN via --require-control-flip) — gate 7's
-#      control-scope.json sidecar is derived by build_workbook.py from the same
-#      `listen` data it used to wire the spec, so a builder-level mis-mapping
-#      makes spec and sidecar AGREE and gate 7 passes. This gate proves the
-#      wiring INDEPENDENTLY at runtime: scripts/probe-controls.rb flips each
-#      auto-probeable control via the REST export API and requires its targets'
-#      output to actually change (wired-but-inert = FAIL, exit 21). Offline runs
-#      (no creds / no workbook) SKIP. See lib/flip_gate.rb.
+#   7b. Runtime control flip test (DEFAULT-ON for workdirs whose orchestrator
+#      staged it — PLAN-v3 PR-13; --require-control-flip forces it anywhere) —
+#      gate 7's control-scope.json sidecar is derived by build_workbook.py from
+#      the same `listen` data it used to wire the spec, so a builder-level
+#      mis-mapping makes spec and sidecar AGREE and gate 7 passes. This gate
+#      proves the wiring INDEPENDENTLY at runtime: scripts/probe-controls.rb
+#      flips each auto-probeable control via the REST export API and requires
+#      its targets' output to actually change (wired-but-inert = FAIL, exit 21).
+#      Enforcement resolution (the gate-8d/#439 pattern): --require-control-flip
+#      forces it on; otherwise migrate-state.json control_flip_required=true
+#      (stamped by migrate-tableau.rb at pass 1) auto-enables it, so a
+#      standalone gate run cannot silently skip the flip test on an
+#      orchestrated tableau workdir. When ENFORCED but the probe cannot run
+#      here (no creds / no workbook / probe missing), RECORDED evidence is
+#      accepted instead: <workdir>/probe-controls/probe-results.json with >=1
+#      PASS and 0 FAIL (a prior live probe), the control-flip-unverified.json
+#      advisory marker (nothing auto-probeable), or a controls census showing
+#      0 source control signals. No evidence and no --skip-control-flip waiver
+#      (budget-counted) → FAIL exit 21 — the flip test needs the live API, so
+#      the marker OR the recorded waiver is the bar, never silence.
+#      Converters that never stage it and don't pass the flag keep the old
+#      opt-in SKIP. See lib/flip_gate.rb.
+#   7c. Source-vs-built controls CENSUS (exit 31; V5.6 audit V-V3) —
+#      build-charts-from-signals.rb reconciles EVERY source control signal
+#      (.twb parameters + shared quick filters) against what it built and
+#      writes <workdir>/*-controls-coverage.json. Until PR-13 that census was
+#      a WARN + file nothing ever read. This gate makes it load-bearing:
+#      every expected signal must be built (census status 'emitted'),
+#      declared in the control-scope.json sidecar (a dropped / needs-* /
+#      narrow-scope record carrying its evidence — stated per control), or
+#      named in the <workdir>/controls-waivers.json ledger
+#      ([{"control":"filter:Region","reason":"…"}]) with a reason. An
+#      UNEXPLAINED missing control fails BY NAME. NO skip flag — the ledger
+#      waiver IS the sanctioned escape (join-plan/LOD doctrine). No census
+#      file → stated SKIP (back-compat / non-adopting converters).
 #
 # Usage:
 #   ruby scripts/assert-phase6-ran.rb --tableau /tmp/<name> \
@@ -71,9 +98,14 @@
 #                              # in your report
 #     [--control-scope PATH]   # control-scope.json sidecar for gate 7
 #                              # (default: <workdir>/control-scope.json)
-#     [--require-control-flip] # gate 7b (OPT-IN): prove control wiring at runtime
-#                              # via probe-controls.rb (looker-to-sigma opts in)
-#     [--skip-control-flip R]  # waive gate 7b — name the reason in your report
+#     [--require-control-flip] # gate 7b: prove control wiring at runtime via
+#                              # probe-controls.rb. DEFAULT-ON when
+#                              # migrate-state.json carries
+#                              # control_flip_required=true (tableau pass 1);
+#                              # this flag forces it for everyone else
+#                              # (looker-to-sigma passes it)
+#     [--skip-control-flip R]  # waive gate 7b — budget-counted; name the
+#                              # reason in your report
 #     [--flip-check-leaks]     # gate 7b: also assert flips don't leak
 #                              # (probe --check-out-of-closure; doubles exports)
 #     [--min-layout-elements N] default 2 — single-page bare-element layouts
@@ -112,7 +144,7 @@
 #      assert-telemetry-ran.rb). Ask the user, then run report-telemetry.py
 #      (--declined if they decline). Escape hatch: --skip-telemetry-gate "<reason>".
 #  13  Visual comparison not recorded OR not executable (gate 8b) — ENFORCED BY
-#      DEFAULT. Two variants, same exit code:
+#      DEFAULT. Three variants, same exit code:
 #      (a) a valid render exists but parity-final.json carries no
 #          visual_checked/screenshot_path verdict. A structurally-clean workbook
 #          can still ship visually empty/wrong, so the source-vs-target
@@ -123,18 +155,50 @@
 #          §D5) — the driving agent could not READ the render, so any verdict is
 #          a blind attestation. Re-run the visual loop from a vision-capable
 #          session (Claude Code with image input).
-#      Escape hatch for both (source image genuinely unobtainable / knowingly
+#      (c) a PASS verdict is SELF-ATTESTED (PLAN-v3 PR-9): parity-final.json
+#          carries no valid `blind_grade` metadata and no recorded
+#          `blind_grade_waiver`. A visual pass must be countersigned by a
+#          CONTEXT-FREE blind grader (a fresh subagent given ONLY the source
+#          PNG + render PNG + the rubric — refs/blind-grader-brief.md); the
+#          field failure this closes: the builder self-graded 6/6 PASS on
+#          visuals the customer rejected. The recorded grade is re-verified
+#          here SHA-BOUND: blind-grade.json must still exist, its sha256s must
+#          match the stamped metadata AND the actual image bytes on disk
+#          (recomputed — an image swapped after grading fails), every checklist
+#          dimension must be present and passing, and its per-tile chart-family
+#          readings must not contradict the mechanical kind census
+#          (wb-readback.json) on more than 1 tile. Remedy: spawn the blind
+#          grader, then record-visual-check.rb --blind-grade. A recorded
+#          no-vision waiver (record-visual-check --no-vision-waiver "<reason>",
+#          for sessions that cannot spawn a vision-capable grader) is accepted
+#          instead but COUNTS against the waiver budget.
+#      Escape hatch for (a)/(b) (source image genuinely unobtainable / knowingly
 #      accepting an unverified render): --skip-visual-comparison "<reason>".
+#      A recorded `divergent` verdict passes this gate as RECORDED (the
+#      comparison happened; the gaps are acknowledged) but is INJECTED into
+#      the waiver census as `visual-divergent` and SPENDS waiver budget
+#      (exit 19) — GREEN requires the budget to hold, and the recorded
+#      divergence joins the degradation ledger as a fidelity-residual, so the
+#      final verdict is at most YELLOW (PR-14 verdict model below).
 #  14  Layout fill / grid coverage failed (gate 8c; #259 item 1) — a page in
 #      layout-census.json dropped a tile (placed < zones) or ships under-filled
 #      (grid_fill_pct < --min-grid-fill, default 0.45), OR a dashboard layout was
 #      built but no census was emitted. build-dashboard-layout.rb produces the
 #      census. Escape hatch: --skip-layout-fill "<reason>".
-#  15  RCF fidelity ledger unresolved (gate 8d; OPT-IN via --require-fidelity-ledger)
-#      — the Phase 5g render-compare-fix ledger (fidelity-ledger.json) is missing, or
-#      still carries spec-fixable deltas that were never resolved. Run the RCF loop
-#      (scripts/fidelity-loop.rb) to convergence, or waive named residuals with
-#      --accept-residuals id,id. Only enforced for converters that pass the flag.
+#  15  RCF fidelity ledger unresolved (gate 8d; DEFAULT-ON for converters that
+#      stage the loop — PLAN-v3 PR-11) — the Phase 5g render-compare-fix ledger
+#      (fidelity-ledger.json) is missing, or still carries spec-fixable deltas
+#      that were never resolved. Run the RCF loop (scripts/fidelity-loop.rb) to
+#      convergence, or waive named residuals with --accept-residuals id,id.
+#      Enforcement resolution: --require-fidelity-ledger forces it on;
+#      otherwise the gate reads <workdir>/migrate-state.json — a state whose
+#      rcf_passes is positive (tableau-to-sigma stamps it at pass 1; legacy
+#      pre-5g states without the key are the orchestrator's problem, it passes
+#      the flag) auto-enables the gate, so a standalone gate run can no longer
+#      silently skip the RCF phase. rcf_passes == 0 (the --rcf-passes 0
+#      opt-out) is honored but RECORDED as the named waiver
+#      --skip-fidelity-gate (budget-counted), never silence. Converters that
+#      never stage the loop (no flag, no rcf_passes key) are unaffected.
 #  16  Post-publish interactivity guide missing (gate 11) — the source dashboards
 #      carry filter/highlight/nav ACTIONS (dashboard-layout-meta.json worksheets'
 #      is_action filters, or the *-gaps-report.json "Dashboard filter / highlight /
@@ -167,7 +231,9 @@
 #      oracle replaces parity, never nothing.
 #  19  Waiver budget exceeded — more than 2 QUALITY waiver/escape flags were
 #      passed (--skip-*, --allow-extract, --allow-missing-tiles>0,
-#      --min-pass-rate<1, --accept-*). Each waiver is an attestation that a
+#      --min-pass-rate<1, --accept-*; a recorded `divergent` visual verdict is
+#      injected as `visual-divergent` and counts, like the recorded no-vision
+#      waiver). Each waiver is an attestation that a
 #      verification could not run; stacking them is how an unverified workbook
 #      ships GREEN. GREEN is unavailable on this run regardless of individual
 #      escapes — the highest achievable result is YELLOW. Every run stamps
@@ -185,14 +251,19 @@
 #      pass=false. Script absent → gate is invisible; inputs absent → stated
 #      SKIP. Escape hatch: --skip-visual-similarity "<reason>" (counted against
 #      the waiver budget).
-#  21  Runtime control flip test failed (gate 7b; OPT-IN via --require-control-flip)
-#      — a control passed the static wiring lint (gate 7) but does NOT actually
-#      filter its targets at runtime (wired-but-inert / builder-level listen->
-#      column mis-mapping), proven by scripts/probe-controls.rb; OR the probe
-#      could not run at all on an opted-in gate (fail-closed). Fix the listen
-#      mapping in build_workbook.py + re-PUT, or re-run once the export API is
-#      reachable. Un-probeable control types (date-range / slider) are an
-#      advisory WARN + control-flip-unverified.json marker, not this failure.
+#  21  Runtime control flip test failed (gate 7b; DEFAULT-ON via migrate-state
+#      control_flip_required=true — tableau pass 1 stamps it — or forced via
+#      --require-control-flip) — a control passed the static wiring lint
+#      (gate 7) but does NOT actually filter its targets at runtime
+#      (wired-but-inert / builder-level listen->column mis-mapping), proven by
+#      scripts/probe-controls.rb; OR the probe could not run on an ENFORCED
+#      gate and no recorded evidence exists (fail-closed: the gate requires
+#      either the flip-test marker — a prior probe-results.json with >=1 PASS
+#      and 0 FAIL, or the all-unprobeable control-flip-unverified.json
+#      advisory marker — or the recorded waiver). Fix the listen mapping in
+#      build_workbook.py + re-PUT, or re-run once the export API is reachable.
+#      Un-probeable control types (date-range / slider) are an advisory WARN +
+#      control-flip-unverified.json marker, not this failure.
 #      Escape hatch: --skip-control-flip "<reason>" (counts against the budget).
 #  22  Manual custom-SQL residues unresolved (gate 15) — <workdir>/manual-residues.json
 #      (written at build time by converters that emit it) still carries entries
@@ -239,6 +310,132 @@
 #      EXCLUDE} formula) — LODs exist and nothing audited them. No ledger AND
 #      no LOD census evidence → stated OK (back-compat / non-Tableau plugins).
 #      NO escape flag: the ledger resolution IS the sanctioned escape.
+#  25  Ground-truth numeric coverage failed (gate 18; PR-6) — the workdir's
+#      <workdir>/ground-truth-plan.json coverage ledger (derive-ground-truth.rb)
+#      exists, and at least one displayed tile is NOT numeric-verified by ANY
+#      oracle: its `numeric_parity` stamp (written into parity-final.json /
+#      numeric-parity.json by scripts/verify-ground-truth.rb) is not a `match`
+#      from the warehouse-sql or vds ground truth, no VALUED anchors (numeric,
+#      provenance view-csv|vds — never png-eyeball, never a name-only roster
+#      label) matched in the tile, and the tile is not named in the ledger's
+#      `coverage_waivers` [{tile, reason}]. A `diverge` or oracle-vs-anchors
+#      `conflict` stamp is NEVER waivable. ALSO raised when the ledger exists
+#      but the comparison never ran (or is stale vs the plan), and
+#      belt-and-braces when the ledger is ABSENT on a workdir that carries the
+#      derivation inputs (a .twb + parity-plan.json) — the oracle was skipped.
+#      No ledger AND no derivation inputs → stated OK (back-compat /
+#      non-Tableau plugins). NO escape flag: the ledger waiver IS the
+#      sanctioned escape (join-plan/lod-audit pattern).
+#  26  Aggregation-semantics ledger unresolved (gate 19; PR-7) — <workdir>/
+#      agg-semantics.json (derived post-convert by the source tool's
+#      aggregation lint, e.g. tableau audit-agg-semantics.rb /
+#      lib/agg_semantics_lint.rb) still carries a hit with no recorded
+#      resolution. Classes: "additive-over-preagg" (Sum/Avg over a column that
+#      is itself an LOD pre-aggregate, or over a landed table whose declared
+#      grain is coarser than the tile's group-by), "countd-as-sum" (a COUNTD
+#      measure translated to / consumed via Sum — a distinct count is not
+#      additive), "preagg-ratio" (a pre-aggregate-NAMED column — DISTINCT_*,
+#      *_PCT, *_RATE, AVG_*, *_COUNT — consumed as a KPI numerator/
+#      denominator). All compile clean and ship wrong-looking-right numbers
+#      (field twin: a 103.3% "% entities with value" KPI from SUM over a
+#      {FIXED day: COUNTD} column). Resolutions recorded via the lint script's
+#      --resolve: reaggregated (rebuilt at the correct grain) | n/a(reason)
+#      (the hit does not apply — first-class, never fabricate metadata) |
+#      faithful-to-source(reason) (the source itself mixes grains; the
+#      migration reproduces it and the resolution documents the hazard).
+#      ALSO raised belt-and-braces when agg-semantics.json is ABSENT but the
+#      workdir carries pre-aggregate evidence (a non-empty lod-audit.json, or
+#      a calc-fields.json census with a COUNTD formula) — pre-aggregates exist
+#      and nothing linted their consumption. No ledger AND no evidence →
+#      stated OK (back-compat / non-Tableau plugins). NO escape flag: the
+#      ledger resolution IS the sanctioned escape.
+#  27  Semantic-edit equivalence ledger unproven (gate 20; PR-8) — <workdir>/
+#      semantic-edits.json declares a structural edit to source semantics
+#      (join drop, table collapse, filter rewrite) whose proof block is
+#      MISSING (declared, never probed) or whose proof says match:false: the
+#      probe measured different COUNT(*) / COUNT(DISTINCT grain) / SUM
+#      checksums on the two sides, so the edit is NOT the no-op it was claimed
+#      to be (field case: a LEFT JOIN on a non-unique flag key deleted as
+#      "provably no-op" with zero verification — fan-out risk). "Provably
+#      no-op" is proven by scripts/probe-equivalence.rb (in the source
+#      plugin), never asserted. A mismatched edit NEVER ships: revert it
+#      (removing the edit removes the entry) or redesign it until the probes
+#      agree — an intentionally-different rewrite is not an equivalence claim
+#      and belongs in the user-initiated scope-change record, not this
+#      ledger. No ledger → stated OK (no structural semantic edits declared).
+#      WITHDRAWN entries (the ledger's `withdrawn` array, written by
+#      probe-equivalence.rb --withdraw for a refuted edit that was NOT
+#      applied; the refuted proof rides along verbatim as evidence) do not
+#      block but are reported informationally — a withdrawn edit whose SQL
+#      nonetheless shipped is not mechanically detectable (gates 16/18 are
+#      the net).
+#      HONESTY NOTE: only DECLARED edits are policeable here — nothing
+#      mechanical can see an edit nobody recorded. The operating-contract
+#      rule makes the declaration mandatory, and the join-plan (gate 16) +
+#      ground-truth (gate 18) oracles are the mechanical net for undeclared
+#      ones (ground-truth SQL derives from the SOURCE signals independently
+#      of the built spec, so a silently dropped join diverges there). NO
+#      escape flag and NO waiver path: equivalence is measured, not
+#      negotiated.
+#  28  Chart-kind parity failed (gate 21; PR-10) — the workdir carries a
+#      VERIFIED Phase 1d dashboard read (<workdir>/png-read.json, not a
+#      verified:false draft) AND a live readback (<workdir>/wb-readback.json),
+#      and at least one tile the operator verified against the source image
+#      was BUILT in a different chart family: the readback element matched by
+#      zone-census name normalization renders e.g. bars where the read says
+#      line. The failure names each tile with its expected family (png-read)
+#      and actual family (readback). Field failure this closes: corrected
+#      kinds in a verified png-read.json never reached the built spec — the
+#      builder propagates them (build-charts-from-signals.rb) and this gate
+#      re-checks the LIVE workbook mechanically. Family vocabulary = the
+#      blind-grader families (bar/line/area/combo/scatter/pie/kpi/map/table;
+#      lib/blind_grade.rb). Sanctioned waiver: png-read.json kind_waivers
+#      [{tile, reason}] — a fidelity decision recorded at read time (e.g. a
+#      Sigma capability substitution), ledger-named like coverage_waivers and
+#      NOT budget-counted. Tiles absent from png-read (unverified at read
+#      time) or with no readback element by name are STATED, never failed
+#      here (the dashboard-read gate / tile census own those). No png-read /
+#      no readback / draft read → stated OK (N/A; never silent).
+#  29  Layout-arrangement parity failed (gate 8e; OPT-IN via
+#      --require-arrangement — WARN-level first release, PLAN-v3 PR-11) —
+#      <workdir>/layout-arrangement.json (emitted by build-dashboard-layout.rb
+#      beside the fill census) records ordering/class disagreements between
+#      the SOURCE zone arrangement and the BUILT grid: row-band stacking
+#      inversions, within-band left-right inversions, quadrant flips, or a
+#      controls-shelf class mismatch (source top-shelf shipped as a sidebar
+#      rail or vice versa — a 2026-07 field failure). Ordering/quadrant only,
+#      no pixel IoU (robust to grid quantization). Without the flag the
+#      violations print as advisory WARNs (stated, never silent); with it the
+#      report must exist and be violation-free. Also raised under the flag
+#      when a dashboard layout was built but the report is missing (rebuild
+#      with a current build-dashboard-layout.rb).
+#  30  Layout phase never entered (gate 4b, the layout-phase SENTINEL;
+#      PLAN-v3 PR-11) — the workdir's run-state.json phase ledger is tracked
+#      but its layout-phase key (tableau-to-sigma: phase-5) has NO stamp at
+#      all: the orchestration took a silent shortcut and the dashboard grid
+#      was never even attempted (field failure: a session skipped the layout
+#      phase entirely and still handed over a workbook URL). A phase stamped
+#      status:"skip" with a reason is honored but INJECTED into the waiver
+#      census as `layout-phase-skip` (budget-counted) — a deliberate skip is
+#      a recorded degradation, never a free pass. No run-state.json (the
+#      hand-driven manual path) → stated SKIP; the artifact gates (4 live
+#      layout, 8c fill census) still police the outputs. NO escape flag:
+#      stamp the phase (run it, or record the skip with its reason).
+#  31  Controls census failed (gate 7c; PLAN-v3 PR-13, V5.6 audit V-V3) — the
+#      workdir's <workdir>/*-controls-coverage.json census (written by
+#      build-charts-from-signals.rb --meta: one row per source parameter +
+#      shared quick filter) carries a signal that was never built as a
+#      control, has no declaring record in control-scope.json (dropped /
+#      needs-* / narrow-scope — the drop decision with its evidence), and is
+#      not named in the <workdir>/controls-waivers.json ledger
+#      ([{"control":"filter:Region","reason":"…"}]): a source control the
+#      user had that the migration silently lost. The failure names each
+#      missing signal. Rebuild the controls (build-charts-from-signals.rb
+#      --auto-controls), or record the ledger waiver with its reason. Also
+#      raised when the census file exists but is malformed. NO escape flag:
+#      the ledger waiver IS the sanctioned escape (join-plan/LOD doctrine).
+#      No census file at all → stated SKIP (back-compat: builder predates the
+#      census or ran without --meta; non-adopting converters).
 #
 # ANCHORS-ORACLE substitution (charts_total==0, exit 2): when every worksheet is
 # dashboard-embedded (no exportable view CSVs), the anchors oracle may stand in
@@ -249,6 +446,21 @@
 # named in source-anchors.json coverage_waivers [{tile, reason}] (authored at
 # Phase 1d). (d) closes the run-2 hole where all 11 anchors sat in 3 of 9 tiles
 # and the oracle vouched for 6 tiles nothing was watching.
+#
+# VERDICT MODEL (PLAN-v3 PR-14 — cumulative-degradation accounting): on every
+# run this gate derives <workdir>/degradation-ledger.json from the workdir's
+# artifacts (lib/degradation_ledger.rb — scope cuts, quality waivers, recorded
+# escapes, fidelity residuals, waived resolutions; deterministic, never
+# self-reported) and prints ONE verdict with the ledger inline:
+#   GREEN   — the ledger is EMPTY (waivers within budget alone is no longer
+#             enough: any recorded degradation forfeits GREEN);
+#   YELLOW  — quality degradations but no scope cut (a budget-exceeded run —
+#             exit 19, doctrine unchanged — is always at least YELLOW);
+#   PARTIAL — ANY scope cut (dropped tile / column / control / DM element)
+#             regardless of the waiver budget; PARTIAL+YELLOW when both.
+# The verdict string is stamped into phase6-success.json and parity-final.json;
+# verify-complete.rb re-derives the ledger offline and FAILS (its exit 6) when
+# a report's claims contradict it — the anti-"GREEN, 0 waivers" mechanism.
 #
 # DATA-CLASS RCF residuals (part of gate 8d, exit 15, but enforced whenever
 # fidelity-ledger.json EXISTS — even without --require-fidelity-ledger): any
@@ -264,6 +476,22 @@ require 'net/http'
 require 'uri'
 require 'optparse'
 require 'rbconfig'
+require 'digest'
+
+# Degradation ledger (PLAN-v3 PR-14) — vendored at scripts/lib/ in adopting
+# plugins; the canonical checkout resolves it from shared/lib. A checkout
+# without it keeps the legacy final line (stated below, never silent).
+DEG_LEDGER_LOADED = begin
+  require_relative 'lib/degradation_ledger'
+  true
+rescue LoadError
+  begin
+    require_relative '../lib/degradation_ledger'
+    true
+  rescue LoadError
+    false
+  end
+end
 
 opts = { min_pass_rate: 1.0, allow_extract: false, min_layout_elements: 2,
          allow_missing_tiles: 0, min_parity_score: 0.0, min_grid_fill: 0.45 }
@@ -283,8 +511,8 @@ OptionParser.new do |p|
   p.on('--skip-layout-lint [REASON]')   { |v| opts[:skip_lint] = v || true }
   p.on('--skip-control-lint [REASON]')  { |v| opts[:skip_control_lint] = v || true }
   p.on('--control-scope PATH')       { |v| opts[:control_scope] = v }
-  p.on('--require-control-flip', 'gate 7b (OPT-IN, off by default): after control lint, PROVE each auto-probeable control actually filters its targets at runtime via scripts/probe-controls.rb (live REST export flip test). Closes the self-referential-sidecar hole in gate 7. Adopters (looker-to-sigma) pass this; other converters are unaffected until they do.') { opts[:require_control_flip] = true }
-  p.on('--skip-control-flip [REASON]', 'waive gate 7b (runtime control flip test) — the reason MUST be named in your migration report.') { |v| opts[:skip_control_flip] = v || true }
+  p.on('--require-control-flip', 'gate 7b: after control lint, PROVE each auto-probeable control actually filters its targets at runtime via scripts/probe-controls.rb (live REST export flip test). Closes the self-referential-sidecar hole in gate 7. DEFAULT-ON (PR-13) for workdirs whose migrate-state.json carries control_flip_required=true (tableau-to-sigma stamps it at pass 1); this flag forces it for everyone else (looker-to-sigma passes it).') { opts[:require_control_flip] = true }
+  p.on('--skip-control-flip [REASON]', 'waive gate 7b (runtime control flip test) — budget-counted; the reason MUST be named in your migration report.') { |v| opts[:skip_control_flip] = v || true }
   p.on('--flip-check-leaks', 'gate 7b: also run probe --check-out-of-closure (asserts a flip does NOT leak to out-of-closure elements; doubles exports). Off by default.') { opts[:flip_check_leaks] = true }
   p.on('--min-layout-elements N', Integer) { |v| opts[:min_layout_elements] = v }
   p.on('--allow-missing-tiles N', Integer, 'tolerate N unmatched dashboard zones in the tile census') { |v| opts[:allow_missing_tiles] = v }
@@ -299,8 +527,11 @@ OptionParser.new do |p|
   p.on('--skip-telemetry-gate REASON', 'waive gate 10 (telemetry consent decision) — REQUIRED reason string. Use ONLY when the run genuinely cannot prompt (e.g. unattended CI). The reason MUST be named in your migration report.') { |v| opts[:skip_telemetry] = v }
   p.on('--skip-postpublish-guide REASON', 'waive gate 11 (post-publish interactivity guide) — REQUIRED reason string. Use ONLY when the source dashboard actions are genuinely not worth a handoff guide. The reason MUST be named in your migration report.') { |v| opts[:skip_postpublish] = v }
   p.on('--accept-deferred-elements REASON', 'waive gate 12 (deferred/quarantined DM elements) — REQUIRED reason string. Use ONLY when knowingly shipping a PARTIAL data model; the reason AND the dropped elements MUST be named in your migration report.') { |v| opts[:accept_deferred] = v }
-  p.on('--require-fidelity-ledger', 'gate 8d (OPT-IN, off by default): require an RCF fidelity-ledger.json (Phase 5g) with zero UNRESOLVED spec-fixable deltas. Adopters (tableau-to-sigma) pass this; other converters are unaffected until they do.') { opts[:require_fidelity] = true }
+  p.on('--require-fidelity-ledger', 'gate 8d: require an RCF fidelity-ledger.json (Phase 5g) with zero UNRESOLVED spec-fixable deltas. DEFAULT-ON (PR-11) for workdirs whose migrate-state.json staged the loop (rcf_passes > 0 — tableau-to-sigma); this flag forces it for everyone else.') { opts[:require_fidelity] = true }
   p.on('--fidelity-ledger PATH', 'gate 8d: path to the RCF ledger (default: <workdir>/fidelity-ledger.json)') { |v| opts[:fidelity_ledger] = v }
+  p.on('--skip-fidelity-gate REASON', 'waive gate 8d (RCF fidelity ledger) — REQUIRED reason string; the named waiver migrate-tableau.rb --finalize records for --rcf-passes 0. Counted against the waiver budget; name it in your migration report. (Data-class ledger entries still block whenever the ledger exists.)') { |v| opts[:skip_fidelity] = v }
+  p.on('--require-arrangement', 'gate 8e (OPT-IN, off by default — WARN-level first release, PR-11): require <workdir>/layout-arrangement.json (build-dashboard-layout.rb) to exist and carry ZERO source-vs-built arrangement violations (stacking/ordering inversions, quadrant flips, controls-shelf class mismatch). Without the flag, violations print as advisory WARNs.') { opts[:require_arrangement] = true }
+  p.on('--arrangement-report PATH', 'gate 8e: path to the arrangement report (default: <workdir>/layout-arrangement.json)') { |v| opts[:arrangement_report] = v }
   p.on('--accept-residuals LIST', 'gate 8d: comma-separated ledger entry ids/indices to WAIVE as accepted residuals (name them in the report). Does NOT apply to data-class entries — those must be fixed or reclassified with evidence.') { |v| opts[:accept_residuals] = v.split(',').map(&:strip) }
   p.on('--skip-anchors-gate REASON', 'waive gate 13 (source-anchor value verification) — REQUIRED reason string. Use ONLY when the source image values are genuinely untranscribable. Counted against the waiver budget; name it in your migration report.') { |v| opts[:skip_anchors] = v }
   p.on('--allow-empty-tiles REASON', 'gate 13: accept displayed dashboard tile(s) that export ZERO data rows — REQUIRED reason string that MUST cite the source PNG showing the chart is genuinely empty on the SOURCE dashboard. Never use this to wave away a broken data path (filter/calc bug). Counted against the waiver budget; name it in your migration report.') { |v| opts[:allow_empty_tiles] = v }
@@ -371,6 +602,70 @@ at_exit do
 end
 
 # ---------------------------------------------------------------------------
+# Gate 8d enforcement resolution (PLAN-v3 PR-11) — DEFAULT-ON for converters
+# that stage the RCF loop. migrate-state.json records rcf_passes at pass 1
+# (tableau-to-sigma); a positive value auto-enables --require-fidelity-ledger
+# so a standalone gate run (the finalize path already passes the flag) can no
+# longer reach GREEN with the RCF phase silently skipped. rcf_passes == 0 is
+# the explicit --rcf-passes 0 opt-out: honored, but converted into the NAMED
+# --skip-fidelity-gate waiver (budget-counted, recorded in waivers.json +
+# parity-final.json) instead of silence. States without the key (other
+# converters / non-RCF workdirs) change nothing.
+# ---------------------------------------------------------------------------
+opts[:fidelity_auto] = nil
+begin
+  _ms_rcf = JSON.parse(File.read(File.join(opts[:tab], 'migrate-state.json')))
+  if _ms_rcf.is_a?(Hash) && _ms_rcf.key?('rcf_passes') && !opts[:skip_fidelity]
+    if _ms_rcf['rcf_passes'].to_i.positive?
+      opts[:fidelity_auto] = "migrate-state.json rcf_passes=#{_ms_rcf['rcf_passes']}" unless opts[:require_fidelity]
+      opts[:require_fidelity] = true
+    elsif !opts[:require_fidelity]
+      opts[:skip_fidelity] = 'RCF loop disabled at pass 1 (--rcf-passes 0, recorded in migrate-state.json)'
+    end
+  end
+rescue StandardError
+  nil # no/unreadable state → opt-in behavior unchanged
+end
+
+# ---------------------------------------------------------------------------
+# Gate 7b enforcement resolution (PLAN-v3 PR-13) — DEFAULT-ON for workdirs
+# whose orchestrator staged the runtime flip test. migrate-tableau.rb stamps
+# control_flip_required=true into migrate-state.json at pass 1; that
+# auto-enables --require-control-flip here so a STANDALONE gate run (the
+# finalize path already passes the flag) cannot silently skip the flip test.
+# --skip-control-flip stays the named, budget-counted waiver. States without
+# the key (other converters / legacy workdirs) keep the opt-in behavior.
+# ---------------------------------------------------------------------------
+opts[:flip_auto] = nil
+begin
+  _ms_cf = JSON.parse(File.read(File.join(opts[:tab], 'migrate-state.json')))
+  if _ms_cf.is_a?(Hash) && _ms_cf['control_flip_required'] &&
+     !opts[:require_control_flip] && !opts[:skip_control_flip]
+    opts[:flip_auto] = 'migrate-state.json control_flip_required=true'
+    opts[:require_control_flip] = true
+  end
+rescue StandardError
+  nil # no/unreadable state → opt-in behavior unchanged
+end
+
+# ---------------------------------------------------------------------------
+# Layout-phase sentinel resolution (gate 4b, PLAN-v3 PR-11) — read the phase
+# ledger ONCE up front so a deliberate skip stamp can join the waiver census
+# below (the gate body prints/fails later). Only converters with a registered
+# layout-phase key participate; run-state.json absent → not tracked.
+# ---------------------------------------------------------------------------
+LAYOUT_PHASE_BY_TOOL = { 'tableau-to-sigma' => 'phase-5' }.freeze
+run_state_doc = begin
+  _p = File.join(opts[:tab], 'run-state.json')
+  File.exist?(_p) ? JSON.parse(File.read(_p)) : nil
+rescue StandardError
+  nil
+end
+layout_phase_key = run_state_doc.is_a?(Hash) ? LAYOUT_PHASE_BY_TOOL[run_state_doc['tool'].to_s] : nil
+layout_phase_stamp = layout_phase_key &&
+                     (run_state_doc['phases'].is_a?(Hash) ? run_state_doc['phases'][layout_phase_key] : nil)
+
+# ---------------------------------------------------------------------------
 # Waiver budget (exit 19). EVERY waiver/escape flag is counted — --skip-*,
 # --allow-extract, --allow-missing-tiles>0, --min-pass-rate<1, --accept-* —
 # and the census is stamped into parity-final.json (`waivers` + `waiver_count`)
@@ -393,8 +688,12 @@ WAIVER_HIDES = {
   '--skip-control-flip'        => 'gate 7b: control wiring never proven at runtime',
   '--skip-visual-gate'         => 'gate 8: no rendered PNG was required',
   '--skip-visual-comparison'   => 'gate 8b: no source-vs-target visual verdict was required',
+  '--no-vision-waiver'         => 'gate 8b: the visual PASS was SELF-graded — no context-free blind grader ran (recorded by record-visual-check.rb --no-vision-waiver)',
+  'visual-divergent'           => 'gate 8b: the recorded visual verdict is DIVERGENT — acknowledged source-vs-target visual gaps ship in the render (joins the degradation ledger as a fidelity-residual; verdict at most YELLOW)',
   '--skip-layout-fill'         => 'gate 8c: dropped/under-filled pages were accepted',
   '--accept-residuals'         => 'gate 8d: named RCF deltas shipped unresolved',
+  '--skip-fidelity-gate'       => 'gate 8d: the RCF fidelity loop was never required — compositional deltas (palette, chart kind, KPI format) were never iterated (--rcf-passes 0 records this waiver)',
+  'layout-phase-skip'          => 'gate 4b: the layout phase was deliberately skipped (run-state stamp status:"skip") — the dashboard grid was never built this run',
   '--skip-visual-tiles'        => 'gate 9: build-from-signals tiles never image-verified',
   '--skip-telemetry-gate'      => 'gate 10: telemetry consent never decided',
   '--skip-postpublish-guide'   => 'gate 11: interactivity handoff guide not required',
@@ -420,11 +719,19 @@ waiver_flags << '--skip-layout-check'        if opts[:skip_layout]
 waiver_flags << '--allow-missing-tiles'      if opts[:allow_missing_tiles].to_i.positive?
 waiver_flags << '--skip-layout-lint'         if opts[:skip_lint]
 waiver_flags << '--skip-control-lint'        if opts[:skip_control_lint]
-waiver_flags << '--skip-control-flip'        if opts[:skip_control_flip] && opts[:require_control_flip]
+# Unconditional (the gate-8d pattern): waiving the flip test is an attestation
+# whether or not enforcement resolved on — PR-13 made the gate default-on for
+# tableau workdirs, so the skip is always a recorded quality degradation.
+waiver_flags << '--skip-control-flip'        if opts[:skip_control_flip]
 waiver_flags << '--skip-visual-gate'         if opts[:skip_visual]
 waiver_flags << '--skip-visual-comparison'   if opts[:skip_visual_cmp]
 waiver_flags << '--skip-layout-fill'         if opts[:skip_layout_fill]
 waiver_flags << '--accept-residuals'         if opts[:accept_residuals] && !opts[:accept_residuals].empty?
+waiver_flags << '--skip-fidelity-gate'       if opts[:skip_fidelity]
+# A deliberate layout-phase skip stamp is an in-run waiver, injected like the
+# off-ramp kinds below: the phase was consciously not run, and that spends
+# budget exactly like a gate flag (gate 4b prints the record).
+waiver_flags << 'layout-phase-skip'          if layout_phase_stamp.is_a?(Hash) && layout_phase_stamp['status'] == 'skip'
 waiver_flags << '--skip-visual-tiles'        if opts[:skip_visual_tiles]
 waiver_flags << '--skip-telemetry-gate'      if opts[:skip_telemetry]
 waiver_flags << '--skip-postpublish-guide'   if opts[:skip_postpublish]
@@ -455,6 +762,29 @@ rescue StandardError
   nil # observability only — never sink the gate on trail parsing
 end
 
+# PR-9: a pass recorded under the no-vision-grader waiver (record-visual-check
+# --no-vision-waiver stamps blind_grade_waiver into parity-final.json) spends
+# budget exactly like a gate flag — a self-graded visual pass is a quality
+# degradation, never a freebie.
+#
+# A RECORDED divergent visual verdict spends budget the same way: gate 8b
+# accepts it as RECORDED (the comparison happened; the gaps are acknowledged),
+# but acknowledged source-vs-target visual gaps riding to GREEN unqualified is
+# exactly the live-run failure this closes (blind grade FAIL 5/6, verdict
+# recorded divergent, final GREEN). Injected into the census as
+# `visual-divergent` so the budget line names it; the degradation ledger
+# (PR-14) additionally records it as a fidelity-residual, capping the verdict
+# at YELLOW even when the budget holds.
+begin
+  _pf_bgw = File.exist?(summary_path) ? JSON.parse(File.read(summary_path)) : nil
+  waiver_flags << '--no-vision-waiver' if _pf_bgw.is_a?(Hash) && _pf_bgw['blind_grade_waiver'].is_a?(Hash) &&
+                                          !waiver_flags.include?('--no-vision-waiver')
+  waiver_flags << 'visual-divergent' if _pf_bgw.is_a?(Hash) && _pf_bgw['visual_verdict'].to_s == 'divergent' &&
+                                        !waiver_flags.include?('visual-divergent')
+rescue StandardError
+  nil
+end
+
 # QUALITY waivers consume the budget; POLICY waivers never do:
 #   - --skip-telemetry-gate is a consent-policy decision, not workbook quality;
 #   - --skip-visual-comparison under the sanctioned builder→verifier split
@@ -465,6 +795,42 @@ budget_flags = waiver_flags.reject do |f|
     (f == '--skip-visual-comparison' && opts[:skip_visual_cmp].to_s =~ /verifier/i)
 end
 
+# Reasons census (PR-14): the flag → recorded-reason map rides into
+# parity-final.json beside the census, so the degradation ledger (derived
+# OFFLINE here and by verify-complete.rb) can explain each waiver and decide
+# the /verifier/i policy exclusion without re-parsing CLI flags.
+_reason_srcs = {
+  '--skip-parity-gate'         => opts[:skip_parity],
+  '--skip-orphan-check'        => opts[:skip_orphan],
+  '--skip-column-check'        => opts[:skip_column],
+  '--skip-layout-check'        => opts[:skip_layout],
+  '--skip-layout-lint'         => opts[:skip_lint],
+  '--skip-control-lint'        => opts[:skip_control_lint],
+  '--skip-control-flip'        => opts[:skip_control_flip],
+  '--skip-visual-gate'         => opts[:skip_visual],
+  '--skip-visual-comparison'   => opts[:skip_visual_cmp],
+  '--skip-layout-fill'         => opts[:skip_layout_fill],
+  '--skip-fidelity-gate'       => opts[:skip_fidelity],
+  '--skip-visual-tiles'        => opts[:skip_visual_tiles],
+  '--skip-telemetry-gate'      => opts[:skip_telemetry],
+  '--skip-postpublish-guide'   => opts[:skip_postpublish],
+  '--accept-deferred-elements' => opts[:accept_deferred],
+  '--skip-anchors-gate'        => opts[:skip_anchors],
+  '--allow-empty-tiles'        => opts[:allow_empty_tiles],
+  '--skip-visual-similarity'   => opts[:skip_vsim],
+  '--accept-residuals'         => (Array(opts[:accept_residuals]).any? ? "accepted RCF residual(s): #{Array(opts[:accept_residuals]).join(', ')}" : nil),
+  '--accept-manual-residues'   => (Array(opts[:accept_manual_residues]).any? ? "accepted unbuilt residue(s): #{Array(opts[:accept_manual_residues]).join(', ')}" : nil),
+  '--min-pass-rate'            => (opts[:min_pass_rate] < 1.0 ? "accepted pass rate #{opts[:min_pass_rate]}" : nil),
+  '--allow-missing-tiles'      => (opts[:allow_missing_tiles].to_i.positive? ? "tolerated #{opts[:allow_missing_tiles]} unmatched dashboard zone(s)" : nil),
+  '--allow-extract'            => (opts[:allow_extract] ? 'extract mode accepted (value drift tolerated)' : nil),
+  'layout-phase-skip'          => (layout_phase_stamp.is_a?(Hash) ? layout_phase_stamp['reason'] : nil)
+}
+waiver_reasons = {}
+waiver_flags.each do |f|
+  v = _reason_srcs[f]
+  waiver_reasons[f] = v.to_s.strip if v.is_a?(String) && !v.to_s.strip.empty?
+end
+
 # Stamp the census into parity-final.json on every run (best-effort — a
 # missing/malformed file is gate 1's problem, not the stamp's).
 if File.exist?(summary_path)
@@ -472,6 +838,7 @@ if File.exist?(summary_path)
     _pf = JSON.parse(File.read(summary_path))
     _pf['waivers'] = waiver_flags
     _pf['waiver_count'] = waiver_flags.length
+    _pf['waiver_reasons'] = waiver_reasons
     # Off-ramp telemetry fields (P2): where did this run defect? route comes from
     # the orchestrator's migrate-state.json ('orchestrated' | 'manual-authorized';
     # null for converters without the concept); manual_path_authorized records an
@@ -1118,22 +1485,171 @@ else
 end
 
 # ---------------------------------------------------------------------------
-# Gate 7b — runtime control flip test (exit 21; OPT-IN via --require-control-flip)
+# Gate 7c — source-vs-built controls CENSUS (exit 31; PLAN-v3 PR-13, V5.6
+# audit V-V3). build-charts-from-signals.rb reconciles EVERY source control
+# signal (.twb parameters + shared quick filters) against what it built and
+# writes <workdir>/*-controls-coverage.json — until PR-13 a WARN + file that
+# no gate, script, or doc ever read. This gate makes the census load-bearing:
+# every expected signal must be BUILT (status 'emitted'), DECLARED in the
+# control-scope.json sidecar (a dropped / needs-* / narrow-scope record with
+# its evidence — stated per control, never silent), or NAMED in the
+# <workdir>/controls-waivers.json ledger with a reason. An unexplained missing
+# control — a control the user had in Tableau that the migration silently
+# lost — fails BY NAME. NO skip flag: the ledger waiver IS the sanctioned
+# escape (the join-plan/LOD doctrine). File-based, so it runs offline.
+# ---------------------------------------------------------------------------
+ctl_census_path = Dir[File.join(opts[:tab], '*-controls-coverage.json')].min
+if ctl_census_path.nil?
+  puts '[SKIP] gate 7c: no *-controls-coverage.json in the workdir — controls census not emitted ' \
+       '(build-charts-from-signals.rb --meta writes it; back-compat / non-adopting converter)'
+else
+  ctl_census = (JSON.parse(File.read(ctl_census_path)) rescue nil)
+  ctl_rows = ctl_census.is_a?(Hash) ? ctl_census['detail'] : nil
+  unless ctl_rows.is_a?(Array)
+    warn "[FAIL] gate 7c: #{File.basename(ctl_census_path)} is malformed (no detail rows) — " \
+         're-run build-charts-from-signals.rb (current version) to regenerate the controls census.'
+    exit 31
+  end
+  ctl_norm = ->(s) { s.to_s.strip.downcase }
+  # Sidecar declarations: every control-scope record — emitted (with a page or
+  # narrow scope:[...]), dropped, or needs-* — is a recorded decision that
+  # carries its evidence (unreachable roots, source signal, intent).
+  ctl_scope_path = opts[:control_scope] || File.join(opts[:tab], 'control-scope.json')
+  ctl_declared = {}
+  if File.exist?(ctl_scope_path)
+    _cs = (JSON.parse(File.read(ctl_scope_path)) rescue nil)
+    if _cs.is_a?(Hash)
+      Array(_cs['controls']).each do |c|
+        next unless c.is_a?(Hash)
+        note = c['scope'].is_a?(Array) ? "narrow scope: #{c['scope'].length} element(s)" : "scope=#{c['scope'] || 'page'}"
+        [c['name'], c['sourceName']].each do |n|
+          ctl_declared[ctl_norm.call(n)] ||= note unless n.to_s.strip.empty?
+        end
+      end
+      Array(_cs['dropped']).each do |d|
+        next unless d.is_a?(Hash) || d.is_a?(String)
+        n = d.is_a?(Hash) ? d['name'] : d
+        ctl_declared[ctl_norm.call(n)] ||= 'dropped — recorded in control-scope.json with its evidence' unless n.to_s.strip.empty?
+      end
+    end
+  end
+  # Waiver ledger: [{"control":"filter:Region","reason":"…"}] (or {"waivers":
+  # [...]}; "name" accepted for "control"). Entries without a reason are
+  # IGNORED — a reasonless waiver explains nothing.
+  ctl_ledger_path = File.join(opts[:tab], 'controls-waivers.json')
+  ctl_ledger = []
+  if File.exist?(ctl_ledger_path)
+    _lg = (JSON.parse(File.read(ctl_ledger_path)) rescue nil)
+    _lg = _lg['waivers'] if _lg.is_a?(Hash)
+    ctl_ledger = Array(_lg).select do |w|
+      w.is_a?(Hash) && !(w['control'] || w['name']).to_s.strip.empty? && !w['reason'].to_s.strip.empty?
+    end
+  end
+  ctl_waiver_for = lambda do |kind, name|
+    ctl_ledger.find do |w|
+      key = ctl_norm.call(w['control'] || w['name'])
+      key == ctl_norm.call(name) || key == ctl_norm.call("#{kind}:#{name}")
+    end
+  end
+  ctl_built = []
+  ctl_declared_rows = []
+  ctl_waived_rows = []
+  ctl_unexplained = []
+  ctl_rows.each do |r|
+    next unless r.is_a?(Hash)
+    kind = r['kind'].to_s
+    name = r['name'].to_s
+    status = r['status'].to_s
+    if status == 'emitted'
+      ctl_built << name
+    elsif (note = ctl_declared[ctl_norm.call(name)])
+      ctl_declared_rows << [kind, name, status, note]
+    elsif (w = ctl_waiver_for.call(kind, name))
+      ctl_waived_rows << [kind, name, status, w['reason'].to_s.strip]
+    else
+      ctl_unexplained << [kind, name, status]
+    end
+  end
+  if ctl_unexplained.any?
+    warn "[FAIL] gate 7c: controls census — #{ctl_unexplained.length} source control signal(s) UNEXPLAINED " \
+         '(present in the source, never built, not declared, not waived):'
+    ctl_unexplained.each { |k, n, s| warn "         - #{k}:#{n} (census status: #{s})" }
+    warn "       Census: #{File.basename(ctl_census_path)}. Every source parameter / quick filter must be"
+    warn '       (a) BUILT as a control (build-charts-from-signals.rb --auto-controls), or'
+    warn '       (b) DECLARED in control-scope.json (a dropped/needs-*/narrow-scope record with evidence), or'
+    warn '       (c) NAMED in <workdir>/controls-waivers.json ([{"control":"filter:Region","reason":"…"}]).'
+    warn '       NO skip flag — the ledger waiver IS the sanctioned escape; name it in your report.'
+    exit 31
+  end
+  puts "[OK] gate 7c: controls census — #{ctl_rows.length} source signal(s): #{ctl_built.length} built" +
+       (ctl_declared_rows.any? ? ", #{ctl_declared_rows.length} declared in control-scope.json" : '') +
+       (ctl_waived_rows.any? ? ", #{ctl_waived_rows.length} ledger-waived" : '') +
+       '; 0 unexplained'
+  ctl_declared_rows.each { |k, n, s, note| puts "       - declared #{k}:#{n} (#{s}; #{note})" }
+  ctl_waived_rows.each { |k, n, s, r2| puts "       - WAIVED #{k}:#{n} (#{s}) — #{r2} [controls-waivers.json]" }
+end
+
+# ---------------------------------------------------------------------------
+# Gate 7b — runtime control flip test (exit 21; DEFAULT-ON via migrate-state
+# control_flip_required=true — PLAN-v3 PR-13 — or --require-control-flip).
 # Gate 7 proves control wiring against the LIVE spec + control-scope.json — but
 # that sidecar is derived by build_workbook.py from the SAME `listen` data it
 # used to wire the spec, so a BUILDER-level mis-mapping yields a spec and a
-# sidecar that AGREE and gate 7 passes. The only independent proof is runtime:
+# sidecar that AGREE and gate 7 passes. Gate 7c proves the controls EXIST; only
+# the flip proves they DO something. The only independent proof is runtime:
 # flip a control via the REST export API and confirm its targets' output
 # actually changes. This gate shells out to scripts/probe-controls.rb (which
-# already does exactly that) and turns its verdict into a hard gate. Opt-in so
-# converters adopt it deliberately (looker-to-sigma passes --require-control-flip);
-# offline runs (no creds / no workbook) SKIP, never false-fail. See lib/flip_gate.rb.
+# already does exactly that) and turns its verdict into a hard gate.
+# Enforcement mirrors gate 8d (#439): the tableau orchestrator stamps
+# control_flip_required at pass 1 (and its --finalize passes the flag), so
+# neither the finalize path nor a standalone gate run can silently skip it;
+# looker-to-sigma passes the flag explicitly. ENFORCED runs that cannot reach
+# the live API accept RECORDED evidence (a prior probe-results.json with >=1
+# PASS / 0 FAIL, the all-unprobeable advisory marker, or a controls census
+# showing 0 source signals) — otherwise they fail closed toward the
+# budget-counted --skip-control-flip waiver. Unenforced converters keep the
+# old opt-in SKIP. See lib/flip_gate.rb.
 # ---------------------------------------------------------------------------
-if !opts[:require_control_flip]
-  puts '[SKIP] gate 7b: runtime control flip test not opted in (pass --require-control-flip to enable)'
-elsif opts[:skip_control_flip]
+if opts[:skip_control_flip]
   record_waiver.call('--skip-control-flip', 'gate 7b (runtime control flip test)', opts[:skip_control_flip])
+elsif !opts[:require_control_flip]
+  puts '[SKIP] gate 7b: runtime control flip test not opted in (pass --require-control-flip to enable)'
 else
+  puts "[NOTE] gate 7b enforcement auto-enabled: #{opts[:flip_auto]}" if opts[:flip_auto]
+  # ENFORCED-but-cannot-probe fallback: the flip test needs the live export
+  # API, so a default-on gate must accept RECORDED evidence — or fail toward
+  # the named waiver — instead of silently passing (the pre-PR-13 hole: every
+  # offline path printed [SKIP] and the gate stayed green).
+  flip_fallback = lambda do |why|
+    cov_p = Dir[File.join(opts[:tab], '*-controls-coverage.json')].min
+    cov_rows = cov_p ? (JSON.parse(File.read(cov_p))['detail'] rescue nil) : nil
+    rec = (JSON.parse(File.read(File.join(opts[:tab], 'probe-controls', 'probe-results.json'))) rescue nil)
+    rec = nil unless rec.is_a?(Array) && rec.any?
+    rec_fails  = rec ? rec.select { |r| r.is_a?(Hash) && r['result'].to_s == 'FAIL' } : []
+    rec_passes = rec ? rec.select { |r| r.is_a?(Hash) && r['result'].to_s == 'PASS' } : []
+    if cov_rows.is_a?(Array) && cov_rows.empty?
+      puts "[OK] gate 7b: #{why} — controls census shows 0 source control signals; nothing to flip-test"
+    elsif rec_fails.any?
+      warn "[FAIL] gate 7b: #{why} — and the RECORDED probe-results.json carries #{rec_fails.length} FAILed flip(s):"
+      rec_fails.each { |r| warn "         - #{r['control']}: #{r['note']}" }
+      warn '       A recorded inert control is a real defect: fix the listen mapping, re-PUT, re-probe.'
+      warn '       Escape hatch: --skip-control-flip "<reason>" (counts against the waiver budget).'
+      exit 21
+    elsif rec_passes.any?
+      puts "[OK] gate 7b: #{why} — accepting RECORDED runtime proof: probe-results.json shows " \
+           "#{rec_passes.length} control(s) proven live (0 FAIL)"
+    elsif File.exist?(File.join(opts[:tab], 'control-flip-unverified.json'))
+      warn "[WARN] gate 7b: #{why} — recorded control-flip-unverified.json marker: no control was " \
+           'auto-probeable on the prior probe; runtime wiring UNVERIFIED (advisory, stated).'
+    else
+      warn "[FAIL] gate 7b: the flip test is ENFORCED#{opts[:flip_auto] ? " (#{opts[:flip_auto]})" : ''} " \
+           "but #{why} — and no recorded flip evidence exists."
+      warn '       The gate requires EITHER the flip-test marker — run with live Sigma creds:'
+      warn "         ruby scripts/probe-controls.rb --workbook-id <id> --out #{File.join(opts[:tab], 'probe-controls')}"
+      warn '       — OR the recorded waiver: --skip-control-flip "<reason>" (counts against the budget).'
+      exit 21
+    end
+  end
   flip_wb = opts[:wb]
   if flip_wb.nil?
     _p = File.join(opts[:tab], 'wb-ids.json')
@@ -1143,11 +1659,11 @@ else
   flip_tok  = ENV['SIGMA_API_TOKEN']
   probe = File.join(__dir__, 'probe-controls.rb')
   if flip_wb.nil? || flip_wb.to_s.empty?
-    puts '[SKIP] gate 7b: no workbook ID resolvable for the flip test'
+    flip_fallback.call('no workbook ID is resolvable for the flip test')
   elsif flip_base.nil? || flip_base.empty? || flip_tok.nil? || flip_tok.empty?
-    warn '[SKIP] gate 7b: SIGMA_BASE_URL / SIGMA_API_TOKEN not set — cannot exercise controls'
+    flip_fallback.call('SIGMA_BASE_URL / SIGMA_API_TOKEN are not set (offline gate run)')
   elsif !File.exist?(probe)
-    warn '[SKIP] gate 7b: scripts/probe-controls.rb not vendored alongside this script — re-vendor (SHA-1 discipline)'
+    flip_fallback.call('scripts/probe-controls.rb is not vendored alongside this script (re-vendor; SHA-1 discipline)')
   else
     # Only meaningful when the workbook actually has controls. Reuse gate 7's
     # spec fetch + ControlLint to count them; 0 controls -> nothing to prove.
@@ -1155,7 +1671,7 @@ else
       require_relative 'lib/control_lint'
       require_relative 'lib/flip_gate'
     rescue LoadError => e
-      warn "[SKIP] gate 7b: #{e.message} — re-vendor scripts/lib (SHA-1 discipline)"
+      warn "[WARN] gate 7b: #{e.message} — re-vendor scripts/lib (SHA-1 discipline)"
     end
     n_controls = nil
     if defined?(ControlLint) && defined?(FlipGate)
@@ -1175,12 +1691,18 @@ else
           end
         n_controls = ControlLint.controls_report(spec).length
       else
-        warn "[SKIP] gate 7b: GET /v2/workbooks/#{flip_wb}/spec returned HTTP #{res.code} — cannot count controls"
+        warn "[WARN] gate 7b: GET /v2/workbooks/#{flip_wb}/spec returned HTTP #{res.code} — cannot count controls"
       end
     end
     if n_controls == 0
       puts '[OK] gate 7b: workbook has no controls — nothing to flip-test'
-    elsif !n_controls.nil?
+    elsif n_controls.nil?
+      # Live path could not even count controls (lib not vendored / spec fetch
+      # failed) — same fail-closed fallback as the offline paths: recorded
+      # evidence passes, otherwise the marker-or-waiver demand fires (the
+      # pre-PR-13 behavior silently passed here).
+      flip_fallback.call('the live spec could not be fetched to count controls')
+    else
       out = File.join(opts[:tab], 'probe-controls')
       cmd = [RbConfig.ruby, probe, '--workbook-id', flip_wb, '--out', out]
       cmd << '--check-out-of-closure' if opts[:flip_check_leaks]
@@ -1327,7 +1849,10 @@ else
   # screenshot_path — is a blind attestation, and the gate fails with a NAMED
   # degradation instead of passing on it.
   s = File.exist?(summary_path) ? (JSON.parse(File.read(summary_path)) rescue {}) : {}
-  recorded = s['visual_checked'] || s['screenshot_path']
+  # A recorded `divergent` verdict IS a recorded comparison — gate 8b accepts
+  # it as RECORDED, but the acknowledged gaps are budget-counted (the
+  # `visual-divergent` census injection above; exit-19 doctrine).
+  recorded = s['visual_checked'] || s['screenshot_path'] || s['visual_verdict'].to_s == 'divergent'
   vision_blocked = (s.key?('agent_vision') && s['agent_vision'] == false) ||
                    s['visual_verdict'].to_s == 'not-executable'
   if vision_blocked
@@ -1368,6 +1893,106 @@ else
         warn '       (fail on any dimension means the verdict is divergent — fix it first).'
         exit 13
       end
+      # PR-9: a visual PASS must be countersigned by a CONTEXT-FREE blind grade
+      # (or carry the recorded no-vision waiver). A self-attested pass — the
+      # builder grading its own render — is exactly how a field run shipped
+      # 6/6 PASS on visuals the customer rejected. The stamped metadata is
+      # re-verified SHA-BOUND here so a hand-edited parity-final.json (or an
+      # image swapped after grading) cannot launder a pass.
+      bg = s['blind_grade']
+      bgw = s['blind_grade_waiver']
+      if bgw.is_a?(Hash) && !bgw['reason'].to_s.strip.empty?
+        puts '[OK] gate 8b: visual PASS accepted under the recorded NO-VISION-GRADER waiver ' \
+             "(#{bgw['reason']}) — SELF-graded, no context-free blind grade backs it. Counted against " \
+             'the waiver budget; MUST be named in the migration report.'
+      else
+        bg_fail = lambda do |why|
+          warn "[FAIL] gate 8b: visual PASS is not blind-graded — #{why}"
+          warn '       The verdict must come from a CONTEXT-FREE grader (PLAN-v3 PR-9): spawn a FRESH'
+          warn '       subagent with refs/blind-grader-brief.md as its prompt, giving it ONLY the source'
+          warn '       dashboard PNG path, the Sigma render PNG path, and the rubric — NO wb-spec, NO run'
+          warn '       history, NO builder context. It writes blind-grade.json; then re-record:'
+          warn '         ruby scripts/record-visual-check.rb --workdir <dir> --agent-vision true --verdict pass \\'
+          warn '           --checklist "<six dimensions>" --blind-grade <dir>/blind-grade.json'
+          warn '       Sessions that cannot spawn a vision-capable grader: record-visual-check.rb'
+          warn '       --no-vision-waiver "<reason>" (counted against the waiver budget, never silent).'
+          exit 13
+        end
+        _hex = /\A[0-9a-f]{64}\z/i
+        if !bg.is_a?(Hash)
+          bg_fail.call('parity-final.json carries NO blind_grade metadata (self-attested pass).')
+        elsif bg['verdict'].to_s != 'pass' || bg['source_sha256'].to_s !~ _hex || bg['target_sha256'].to_s !~ _hex
+          bg_fail.call('the stamped blind_grade metadata is invalid (verdict must be pass, sha256s must be 64-hex).')
+        else
+          _bg_file = File.expand_path((bg['path'] || 'blind-grade.json').to_s, opts[:tab])
+          _bg_doc = File.file?(_bg_file) ? (JSON.parse(File.read(_bg_file)) rescue nil) : nil
+          if _bg_doc.nil?
+            bg_fail.call("the blind grade evidence file is missing/unreadable (#{_bg_file}) — the hash-bound grade must stay on disk.")
+          elsif _bg_doc['source_sha256'].to_s.downcase != bg['source_sha256'].to_s.downcase ||
+                _bg_doc['target_sha256'].to_s.downcase != bg['target_sha256'].to_s.downcase ||
+                _bg_doc['verdict'].to_s != 'pass'
+            bg_fail.call('blind-grade.json does not match the stamped metadata (sha/verdict drift — re-run the grader).')
+          else
+            _cl_keys2 = %w[element_titles_hidden palette_match composition_match
+                           chart_shapes_match labels_legible numbers_formatted]
+            _dims = _bg_doc['dimensions'].is_a?(Hash) ? _bg_doc['dimensions'] : {}
+            _bad_dims = _cl_keys2.reject { |k| _dims[k].is_a?(Hash) && _dims[k]['verdict'].to_s == 'pass' }
+            _src_img = _bg_doc['source_png'].to_s.empty? ? nil : File.expand_path(_bg_doc['source_png'].to_s, opts[:tab])
+            _tgt_img = _bg_doc['target_png'].to_s.empty? ? nil : File.expand_path(_bg_doc['target_png'].to_s, opts[:tab])
+            if _bad_dims.any?
+              bg_fail.call("blind grade dimension(s) missing or not passing: #{_bad_dims.join(', ')}.")
+            elsif _src_img.nil? || _tgt_img.nil? || !File.file?(_src_img) || !File.file?(_tgt_img)
+              bg_fail.call('the graded image files are missing from disk (blind-grade.json source_png/target_png) — the sha binding cannot be verified.')
+            elsif Digest::SHA256.file(_src_img).hexdigest != bg['source_sha256'].to_s.downcase
+              bg_fail.call("the SOURCE image changed since grading (sha256 of #{_src_img} no longer matches) — re-run the grader.")
+            elsif Digest::SHA256.file(_tgt_img).hexdigest != bg['target_sha256'].to_s.downcase
+              bg_fail.call("the RENDER changed since grading (sha256 of #{_tgt_img} no longer matches) — re-render, re-grade, re-record.")
+            else
+              # Anti-gaming (belt-and-braces to record-visual-check's check): the
+              # grade's per-tile target families must not contradict the built
+              # workbook's mechanical kind census on more than 1 tile.
+              _fam_map = { 'bar-chart' => 'bar', 'column' => 'bar', 'column-chart' => 'bar',
+                           'line-chart' => 'line', 'sparkline' => 'line', 'area-chart' => 'area',
+                           'combo-chart' => 'combo', 'dual-axis' => 'combo', 'scatter-chart' => 'scatter',
+                           'bubble' => 'scatter', 'pie-chart' => 'pie', 'donut' => 'pie',
+                           'donut-chart' => 'pie', 'kpi-chart' => 'kpi', 'single-value' => 'kpi',
+                           'big-number' => 'kpi', 'region-map' => 'map', 'point-map' => 'map',
+                           'pivot-table' => 'table', 'pivot' => 'table', 'crosstab' => 'table',
+                           'text-table' => 'table', 'grid' => 'table' }
+              _chartf = %w[bar line area combo scatter pie kpi map table other]
+              _fam = lambda do |k|
+                k2 = k.to_s.strip.downcase
+                _fam_map[k2] || (%w[bar line area combo scatter pie kpi map table
+                                    text control image container divider missing].include?(k2) ? k2 : 'other')
+              end
+              _rb = File.join(opts[:tab], 'wb-readback.json')
+              _census = nil
+              if File.file?(_rb)
+                _rb_doc = (JSON.parse(File.read(_rb)) rescue nil)
+                if _rb_doc.is_a?(Hash) && _rb_doc['pages'].is_a?(Array)
+                  _census = _rb_doc['pages'].flat_map { |pg| Array(pg.is_a?(Hash) ? pg['elements'] : nil) }
+                                            .select { |el| el.is_a?(Hash) && el['visibleAsSource'] != false }
+                                            .map { |el| _fam.call(el['kind']) }
+                                            .select { |f| _chartf.include?(f) }
+                end
+              end
+              if _census.is_a?(Array) && _census.any?
+                _blind = Array(_bg_doc['per_tile']).map { |t| _fam.call(t.is_a?(Hash) ? t['target_family'] : nil) }
+                                                   .select { |f| _chartf.include?(f) }
+                _bc = _blind.each_with_object(Hash.new(0)) { |f, h| h[f] += 1 }
+                _cc = _census.each_with_object(Hash.new(0)) { |f, h| h[f] += 1 }
+                _matched = _cc.map { |f, n| [n, _bc[f]].min }.reduce(0, :+)
+                _mm = [_blind.length, _census.length].max - _matched
+                if _mm > 1
+                  bg_fail.call("blind grade INCONSISTENT with the mechanical kind census — target_family readings contradict wb-readback.json on #{_mm} tile(s) (blind: #{_bc.sort.map { |f, n| "#{n}x#{f}" }.join(', ')}; census: #{_cc.sort.map { |f, n| "#{n}x#{f}" }.join(', ')}) — fabricated or stale grade.")
+                end
+              end
+              puts "[OK] gate 8b: blind grade verified — context-free PASS, sha-bound to the images on disk " \
+                   "(src=#{bg['source_sha256'][0, 12]}…, tgt=#{bg['target_sha256'][0, 12]}…)."
+            end
+          end
+        end
+      end
     end
     v = s['visual_verdict'] ? " (#{s['visual_verdict']})" : ''
     av = s.key?('agent_vision') ? ", agent_vision=#{s['agent_vision']}" : ''
@@ -1377,7 +2002,15 @@ else
           else
             ''
           end
-    puts "[OK] gate 8b: source-vs-target visual comparison recorded#{v}#{av}#{cls}."
+    if s['visual_verdict'].to_s == 'divergent'
+      puts "[OK] gate 8b: source-vs-target visual comparison recorded (divergent)#{av}#{cls} — RECORDED, not clean:"
+      puts '     the acknowledged visual gaps are BUDGET-COUNTED (census: visual-divergent; exit-19 doctrine).'
+      puts '     GREEN requires the budget to hold — fix the gaps, re-render, re-record --verdict pass, or'
+      puts "     accept YELLOW#{s['visual_notes'] ? " (recorded gaps: #{s['visual_notes'].to_s[0, 160]})" : ''}."
+      puts '     (Full verdict-capping — divergent caps the run at PARTIAL — is PLAN-v3 PR-14, not built yet.)'
+    else
+      puts "[OK] gate 8b: source-vs-target visual comparison recorded#{v}#{av}#{cls}."
+    end
   elsif opts[:skip_visual_cmp]
     puts "[SKIP] gate 8b: source-vs-target visual comparison WAIVED via --skip-visual-comparison (#{opts[:skip_visual_cmp]})."
   else
@@ -1391,6 +2024,45 @@ else
     warn '       --skip-visual-comparison "<reason>" and name it in your migration report.'
     exit 13
   end
+end
+
+# ---------------------------------------------------------------------------
+# Gate 4b — layout-phase SENTINEL (exit 30; PLAN-v3 PR-11). The artifact gates
+# (4 live layout, 8c fill census) prove layout OUTPUTS when they exist; this
+# proves the layout PHASE was ever entered. Field failure: a session's layout
+# phase never ran at all — no census, no dashboard-layout evidence in a shape
+# 8c could condition on — and the run still handed over a workbook URL. The
+# orchestrator stamps every phase it walks into run-state.json (lib/run_state);
+# when that ledger is tracked, the tool's layout-phase key MUST carry a stamp:
+# "done" passes, "skip" is honored as a RECORDED waiver (injected into the
+# census above as layout-phase-skip, budget-counted), and NO stamp is the
+# silent shortcut this gate makes unreachable. Not tracked (manual path) or an
+# unregistered tool → stated SKIP, never a silent pass. No escape flag.
+# ---------------------------------------------------------------------------
+if run_state_doc.nil?
+  puts '[SKIP] gate 4b: no run-state.json — layout-phase sentinel N/A (hand-driven path; ' \
+       'gates 4/8c still police the layout artifacts)'
+elsif layout_phase_key.nil?
+  puts "[SKIP] gate 4b: run-state tool #{run_state_doc['tool'].inspect} has no registered " \
+       'layout-phase key — sentinel N/A'
+elsif layout_phase_stamp.nil?
+  warn "[FAIL] gate 4b: run-state.json is tracked but the layout phase (#{layout_phase_key}) was " \
+       'NEVER ENTERED — the run took a silent shortcut past the layout build.'
+  warn '       A workbook without its layout phase ships as an unarranged stack no matter what the'
+  warn '       other gates say. Re-run the layout phase (the orchestrator stamps it):'
+  warn "         ruby scripts/build-dashboard-layout.rb --layout #{File.join(opts[:tab], 'dashboard-layout.json')} \\"
+  warn "           --wb-ids #{File.join(opts[:tab], 'wb-ids.json')} --out #{File.join(opts[:tab], 'layout.xml')}"
+  warn "         ruby scripts/put-layout.rb --workbook <id> --layout #{File.join(opts[:tab], 'layout.xml')}"
+  warn '       or drive the run through scripts/migrate-tableau.rb. A deliberate no-layout decision'
+  warn '       must be stamped: RunState.skip(workdir, phase, "<reason>") — recorded, budget-counted,'
+  warn '       never silent. There is no escape flag for this sentinel.'
+  exit 30
+elsif layout_phase_stamp['status'] == 'skip'
+  record_waiver.call('layout-phase-skip', "gate 4b (layout phase #{layout_phase_key})",
+                     layout_phase_stamp['note'])
+else
+  puts "[OK] gate 4b: layout phase entered — #{layout_phase_key} stamped " \
+       "#{layout_phase_stamp['status'].inspect} at #{layout_phase_stamp['ts'] || '?'}"
 end
 
 # ---------------------------------------------------------------------------
@@ -1479,19 +2151,30 @@ else
 end
 
 # ---------------------------------------------------------------------------
-# Gate 8d — RCF fidelity ledger (OPT-IN via --require-fidelity-ledger; #Phase 5g).
+# Gate 8d — RCF fidelity ledger (#Phase 5g; DEFAULT-ON per PR-11 — see the
+# enforcement-resolution block above: --require-fidelity-ledger, or
+# migrate-state.json rcf_passes > 0, turns it on; --skip-fidelity-gate /
+# rcf_passes == 0 waives it BY NAME).
 # Structural + value + visual-render + recorded-verdict all passing still leaves
 # the composition gap the render-compare-fix loop closes: a workbook can be
 # faithful in data yet visibly off-brand (generic palette, wrong chart kind, KPI
 # format drift). The loop records each delta into fidelity-ledger.json classified
 # spec-fixable | ui-only | sigma-capability | data; only UNRESOLVED spec-fixable
-# entries block. Adopters pass --require-fidelity-ledger; other converters skip
-# this gate entirely (soft) until they do. Logic mirrors FidelityLoop
+# entries block. Converters that never stage the loop skip this gate (soft)
+# until they adopt it. Logic mirrors FidelityLoop
 # .unresolved_specfixable — inlined here so the shared gate has no cross-plugin dep.
 # ---------------------------------------------------------------------------
 fl_path = opts[:fidelity_ledger] || File.join(opts[:tab], 'fidelity-ledger.json')
 accepted = Array(opts[:accept_residuals]).map(&:to_s)
-if opts[:require_fidelity] && !File.exist?(fl_path)
+if opts[:skip_fidelity]
+  record_waiver.call('--skip-fidelity-gate', 'gate 8d (RCF fidelity ledger)', opts[:skip_fidelity])
+  # (data-class residuals below still block whenever a ledger exists — the
+  # waiver covers the LOOP requirement, never wrong numbers.)
+elsif opts[:fidelity_auto]
+  puts "[NOTE] gate 8d required by DEFAULT — #{opts[:fidelity_auto]} (the RCF loop was staged; " \
+       'opt out only via --rcf-passes 0 at pass 1, which records the --skip-fidelity-gate waiver).'
+end
+if opts[:require_fidelity] && !opts[:skip_fidelity] && !File.exist?(fl_path)
   warn "[FAIL] gate 8d: --require-fidelity-ledger set but #{fl_path} is missing."
   warn '       Run the Phase 5g render-compare-fix loop (scripts/fidelity-loop.rb init/render/record/'
   warn '       apply-patch) to convergence, then re-run. See SKILL.md Phase 5g + refs/fidelity-rubric.md.'
@@ -1526,7 +2209,7 @@ if ledger
     warn '       no escape flag for data-class.'
     exit 15
   end
-  if opts[:require_fidelity]
+  if opts[:require_fidelity] && !opts[:skip_fidelity]
     blocking = entries.each_with_index.select do |e, i|
       e['cls'] == 'spec-fixable' && !e['resolved'] &&
         !accepted.include?(i.to_s) && !accepted.include?(e['id'].to_s)
@@ -1547,6 +2230,56 @@ if ledger
          "0 unresolved spec-fixable, 0 unresolved data-class" \
          "#{resid.any? ? " (#{resid.length} recorded residual(s) → report)" : ''}"
   end
+end
+
+# ---------------------------------------------------------------------------
+# Gate 8e — layout-ARRANGEMENT parity (exit 29; PLAN-v3 PR-11). Gate 8c proves
+# every tile is PLACED and the grid is filled; nothing proved the tiles are
+# arranged the way the SOURCE arranges them (field failures: controls shipped
+# in a sidebar where the source had a top shelf; two charts shipped with their
+# stacking inverted). build-dashboard-layout.rb compares normalized source
+# zone bboxes against the built grid (ordering + quadrant + controls-shelf
+# class, NO pixel IoU) and emits <workdir>/layout-arrangement.json. WARN-level
+# first release: violations print as advisory WARNs by default; the gate hook
+# is --require-arrangement (blocking) so the next release can flip it.
+# ---------------------------------------------------------------------------
+arr_path = opts[:arrangement_report] || File.join(opts[:tab], 'layout-arrangement.json')
+arr_doc = File.exist?(arr_path) ? (JSON.parse(File.read(arr_path)) rescue nil) : nil
+arr_viols = arr_doc.is_a?(Hash) ? Array(arr_doc['pages']).flat_map { |p| Array(p['violations']).map { |v| [p['page'], v] } } : []
+if opts[:require_arrangement]
+  if arr_doc.nil?
+    dash_built_8e = File.exist?(File.join(opts[:tab], 'dashboard-layout.json')) || File.exist?(census_fill_path)
+    if dash_built_8e
+      warn "[FAIL] gate 8e: --require-arrangement set but #{arr_path} is missing/malformed while a"
+      warn '       dashboard layout was built — the arrangement comparison never ran. Rebuild the'
+      warn '       layout with a current build-dashboard-layout.rb (it emits layout-arrangement.json'
+      warn '       beside the fill census), re-PUT, then re-run this gate.'
+      exit 29
+    else
+      puts '[SKIP] gate 8e: no dashboard layout built — arrangement parity N/A'
+    end
+  elsif arr_viols.any?
+    warn "[FAIL] gate 8e: #{arr_viols.length} layout-arrangement violation(s) — the built grid does not"
+    warn '       arrange the tiles the way the source dashboard does:'
+    arr_viols.each { |pg, v| warn "         - #{pg.inspect}: #{v}" }
+    warn '       Rebuild the layout to mirror the source arrangement (band order, within-band order,'
+    warn '       controls shelf), re-PUT, re-render, then re-run. No pixel matching is required —'
+    warn '       only ordering/quadrant/shelf-class agreement.'
+    exit 29
+  else
+    puts "[OK] gate 8e: layout arrangement matches the source — #{Array(arr_doc['pages']).length} page(s), 0 violations"
+  end
+elsif arr_viols.any?
+  puts "[WARN] gate 8e (advisory this release): #{arr_viols.length} layout-arrangement violation(s) — " \
+       'the built grid diverges from the source arrangement:'
+  arr_viols.each { |pg, v| puts "         - #{pg.inspect}: #{v}" }
+  puts '       Not blocking yet (WARN-level first release; --require-arrangement makes it a hard gate).'
+  puts '       Fix the arrangement before handoff and name any residual divergence in your report.'
+elsif arr_doc
+  puts "[OK] gate 8e (advisory): layout arrangement matches the source — #{Array(arr_doc['pages']).length} page(s), 0 violations"
+else
+  puts '[SKIP] gate 8e: no layout-arrangement.json — arrangement parity not measured (advisory; ' \
+       'emitted by build-dashboard-layout.rb since PR-11)'
 end
 
 # ---------------------------------------------------------------------------
@@ -2132,6 +2865,445 @@ else
 end
 
 # ---------------------------------------------------------------------------
+# Gate 18 — ground-truth numeric coverage (exit 25; PR-6). EVERY displayed
+# tile must be numeric-verified by >=1 oracle:
+#   - the warehouse-sql or vds GROUND TRUTH matched (verify-ground-truth.rb
+#     stamped numeric_parity verdict "match" for the tile), OR
+#   - VALUED anchors vouch for it (numeric anchors with provenance
+#     view-csv|vds — never png-eyeball, never name-only roster labels — that
+#     matched IN the tile; verify-ground-truth.rb stamps these as
+#     oracle:"anchors" verdict:"match"), OR
+#   - the tile carries a NAMED waiver in ground-truth-plan.json
+#     coverage_waivers [{tile, reason}].
+# anchor-only / unverifiable classifications WITHOUT valued-anchor coverage
+# fail NAMING the tiles. A "diverge" or oracle-vs-anchors "conflict" stamp is
+# NEVER waivable — the numbers are (or may be) wrong; investigate, don't ship.
+# No skip flag — the ledger waiver is the only sanctioned escape (the same
+# doctrine as gates 16/17: evidence lives in the ledger, not in a CLI flag a
+# re-run forgets).
+# ---------------------------------------------------------------------------
+gt18_path = File.join(opts[:tab], 'ground-truth-plan.json')
+if File.exist?(gt18_path)
+  gt18_doc = JSON.parse(File.read(gt18_path)) rescue nil
+  gt18_entries = gt18_doc.is_a?(Hash) ? gt18_doc['entries'] : nil
+  unless gt18_entries.is_a?(Array)
+    warn "[FAIL] gate 18: #{gt18_path} is malformed (expected {\"entries\":[...]})."
+    warn '       Re-derive the ledger (ruby scripts/derive-ground-truth.rb) — do not hand-edit it into shape.'
+    exit 25
+  end
+  gt18_entries = gt18_entries.select { |e| e.is_a?(Hash) }
+  # numeric_parity stamps: parity-final.json first (verify-ground-truth.rb
+  # extends it), the standalone numeric-parity.json as fallback.
+  np18 = begin
+    _pf18 = File.exist?(summary_path) ? JSON.parse(File.read(summary_path)) : nil
+    _pf18.is_a?(Hash) ? _pf18['numeric_parity'] : nil
+  rescue JSON::ParserError
+    nil
+  end
+  np18 = (JSON.parse(File.read(File.join(opts[:tab], 'numeric-parity.json'))) rescue nil) unless np18.is_a?(Hash)
+  np18_tiles = np18.is_a?(Hash) && np18['tiles'].is_a?(Hash) ? np18['tiles'] : nil
+  if np18_tiles.nil?
+    warn '[FAIL] gate 18: ground-truth-plan.json exists but the numeric comparison never ran — no'
+    warn '       numeric_parity stamps in parity-final.json (and no numeric-parity.json). Run:'
+    warn "         ruby scripts/run-ground-truth.rb --workdir #{opts[:tab]} --connection-id <id>"
+    warn "         ruby scripts/verify-ground-truth.rb --workdir #{opts[:tab]}"
+    exit 25
+  end
+  if np18['plan_generated_at'].to_s != gt18_doc['generated_at'].to_s
+    warn "[FAIL] gate 18: numeric_parity stamps are STALE — compared against plan " \
+         "#{np18['plan_generated_at'].inspect} but ground-truth-plan.json is #{gt18_doc['generated_at'].inspect}."
+    warn '       Re-run scripts/run-ground-truth.rb and scripts/verify-ground-truth.rb.'
+    exit 25
+  end
+  gt18_waived = Array(gt18_doc['coverage_waivers'])
+                .map { |w| w.is_a?(Hash) ? w['tile'].to_s.downcase.strip : nil }.compact.reject(&:empty?)
+  np18_by_key = np18_tiles.each_with_object({}) { |(k, v), h| h[k.to_s.downcase.strip] = v }
+  gt18_diverged = []
+  gt18_conflicted = []
+  gt18_unverified = []
+  gt18_waived_n = 0
+  gt18_verified = Hash.new(0)
+  gt18_entries.each do |e|
+    tile = e['chart'].to_s
+    s = np18_by_key[tile.downcase.strip]
+    if s.is_a?(Hash) && s['verdict'] == 'diverge'
+      gt18_diverged << [tile, s]
+    elsif s.is_a?(Hash) && s['conflict']
+      gt18_conflicted << [tile, s]
+    elsif s.is_a?(Hash) && s['verdict'] == 'match'
+      gt18_verified[s['oracle'].to_s] += 1
+    elsif gt18_waived.include?(tile.downcase.strip)
+      gt18_waived_n += 1
+    else
+      gt18_unverified << [tile, e, s]
+    end
+  end
+  if gt18_diverged.any? || gt18_conflicted.any? || gt18_unverified.any?
+    warn '[FAIL] gate 18: ground-truth numeric coverage — every displayed tile must be numeric-verified'
+    warn '       by >=1 oracle (warehouse-sql/vds ground truth matched, or VALUED anchors) or carry a'
+    warn '       named coverage_waivers entry in ground-truth-plan.json.'
+    gt18_diverged.first(10).each do |tile, s|
+      w = s['worst']
+      warn "         - DIVERGED (#{s['oracle']}): #{tile.inspect} — #{s['reason']}" \
+           "#{w.is_a?(Hash) ? " (#{w['measure'].inspect}: ground truth #{w['ground_truth'].inspect} vs Sigma #{w['sigma'].inspect})" : ''}"
+    end
+    gt18_conflicted.first(10).each do |tile, s|
+      warn "         - CONFLICT (#{s.dig('conflict', 'type')}): #{tile.inspect} — the oracle and the anchors" \
+           ' DISAGREE; FATAL-investigate (see verify-ground-truth.rb output), never auto-resolved'
+    end
+    gt18_unverified.first(10).each do |tile, e, s|
+      warn "         - UNVERIFIED (#{e['classification'] || '?'}): #{tile.inspect} — " \
+           "#{(s.is_a?(Hash) ? s['reason'] : nil) || e['reason'] || 'no numeric_parity stamp for this tile'}"
+    end
+    warn '       Diverged/conflicted tiles are NEVER waivable — the numbers are wrong (or contested):'
+    warn '       fix the workbook / investigate the conflict, then re-run verify-ground-truth.rb.'
+    warn '       For genuinely unverifiable tiles: transcribe VALUED anchors (numeric, provenance'
+    warn '       view-csv|vds — re-read the source view CSV/VDS, not the PNG) so the tile is vouched'
+    warn '       for, or name it in ground-truth-plan.json coverage_waivers [{"tile": "<chart>",'
+    warn '       "reason": "<why no oracle can verify it>"}]. There is no skip flag.'
+    exit 25
+  end
+  gt18_parts = gt18_verified.map { |k, v| "#{v} #{k}" }
+  puts "[OK] gate 18: ground-truth numeric coverage — #{gt18_entries.length} tile(s) all verified" \
+       " (#{gt18_parts.empty? ? 'none' : gt18_parts.join(', ')}" \
+       "#{gt18_waived_n.positive? ? ", #{gt18_waived_n} coverage-waived in the ledger" : ''})"
+else
+  # Belt-and-braces: the workdir carries the derivation inputs (a source .twb +
+  # a parity plan) but the coverage ledger was never derived — the numeric
+  # oracle was skipped, not inapplicable.
+  gt18_twb = Dir.glob(File.join(opts[:tab], '*.twb')).first
+  if gt18_twb && File.exist?(File.join(opts[:tab], 'parity-plan.json'))
+    warn "[FAIL] gate 18: #{File.basename(gt18_twb)} + parity-plan.json present but no ground-truth-plan.json —"
+    warn '       the per-tile ground-truth derivation never ran, so nothing proved the numbers against'
+    warn '       the warehouse. Run:'
+    warn "         ruby scripts/derive-ground-truth.rb --workdir #{opts[:tab]}"
+    warn "         ruby scripts/run-ground-truth.rb --workdir #{opts[:tab]} --connection-id <id>"
+    warn "         ruby scripts/verify-ground-truth.rb --workdir #{opts[:tab]}"
+    exit 25
+  end
+  puts '[OK] gate 18: no ground-truth-plan.json and no .twb derivation inputs — numeric-oracle coverage N/A (non-Tableau / pre-PR-6 workdir)'
+end
+
+# ---------------------------------------------------------------------------
+# Gate 19 — aggregation-semantics ledger (exit 26; PR-7). Additive aggregation
+# over a PRE-AGGREGATED column compiles clean in every other gate and ships
+# wrong-looking-right numbers: SUM over a {FIXED day: COUNTD} pre-aggregate at
+# any coarser grain double-counts every entity appearing on more than one day
+# (field twin: a 103.3% "% entities with value" KPI — three live runs proved
+# nothing flagged it). The post-convert lint (tableau: audit-agg-semantics.rb /
+# lib/agg_semantics_lint.rb) writes <workdir>/agg-semantics.json: one entry per
+# hit, classes additive-over-preagg / countd-as-sum / preagg-ratio, ALL of
+# severity WARN-WITH-REQUIRED-RESOLUTION — the entry blocks until a resolution
+# {how: reaggregated|n/a|faithful-to-source, reason} is recorded via the lint
+# script's --resolve. The n/a path is FIRST-CLASS (never force fabricated
+# metadata); faithful-to-source is the documented-hazard path (the source
+# itself mixes grains and the migration reproduces it faithfully).
+# Belt-and-braces: a MISSING ledger on a workdir carrying pre-aggregate
+# evidence (non-empty lod-audit.json, or a calc-fields.json census with a
+# COUNTD formula) also fails — pre-aggregates exist and nothing linted their
+# consumption. No ledger AND no evidence → stated OK (back-compat /
+# non-Tableau plugins). No escape flag — the recorded resolution is the only
+# sanctioned waiver (it lives in the ledger as evidence, not in a CLI flag a
+# re-run forgets).
+# ---------------------------------------------------------------------------
+as_path = File.join(opts[:tab], 'agg-semantics.json')
+as_hows = ['reaggregated', 'n/a', 'faithful-to-source']
+as_resolved = lambda do |e|
+  e['resolution'].is_a?(Hash) && as_hows.include?(e['resolution']['how'].to_s)
+end
+if File.exist?(as_path)
+  as_doc = JSON.parse(File.read(as_path)) rescue nil
+  as_entries = as_doc.is_a?(Hash) ? as_doc['entries'] : as_doc
+  unless as_entries.is_a?(Array)
+    warn "[FAIL] gate 19: #{as_path} is malformed (expected {\"entries\":[...]} or a bare array)."
+    warn '       Re-derive the ledger (the aggregation-semantics lint emits it) — do not hand-edit it into shape.'
+    exit 26
+  end
+  as_entries = as_entries.select { |e| e.is_a?(Hash) }
+  as_blocking = as_entries.reject { |e| as_resolved.call(e) }
+  if as_blocking.any?
+    warn "[FAIL] gate 19: aggregation-semantics ledger unresolved (#{as_path}) —"
+    as_blocking.first(10).each do |e|
+      case e['class'].to_s
+      when 'additive-over-preagg'
+        warn "         - ADDITIVE-OVER-PREAGG: #{e['consumer'].inspect} applies Sum/Avg over" \
+             " #{e['preagg'].inspect} (#{e['context']}) — a pre-aggregated column re-summed at a" \
+             ' different grain double-counts (numbers silently WRONG)'
+      when 'countd-as-sum'
+        warn "         - COUNTD-AS-SUM: #{e['consumer'].inspect} (#{e['context']}) — COUNTD translated to /" \
+             " consumed via Sum over #{e['preagg'].inspect}; a distinct count is not additive"
+      else
+        warn "         - PREAGG-RATIO: #{e['consumer'].inspect} (#{e['context']}) consumes the" \
+             " pre-aggregate-named #{e['preagg'].inspect} as a KPI numerator/denominator"
+      end
+    end
+    warn '       These compile clean and ship wrong-looking-right numbers (the 103.3%-KPI class).'
+    warn '       REBUILD the consumer at the correct grain, or record why the hit does not apply, or'
+    warn '       document the faithfully-reproduced source hazard:'
+    warn '         audit-agg-semantics.rb --resolve <i> --how <reaggregated|n/a|faithful-to-source> --reason "..."'
+    warn '       The n/a path is first-class — never fabricate metadata to satisfy the lint.'
+    exit 26
+  end
+  as_by_how = Hash.new(0)
+  as_entries.each { |e| as_by_how[e['resolution']['how'].to_s] += 1 if e['resolution'].is_a?(Hash) }
+  puts "[OK] gate 19: aggregation-semantics ledger resolved — " \
+       "#{as_by_how['reaggregated']} reaggregated, #{as_by_how['n/a']} n/a, " \
+       "#{as_by_how['faithful-to-source']} faithful-to-source of #{as_entries.length} (agg-semantics.json)"
+else
+  # Belt-and-braces: no ledger, but pre-aggregate evidence exists — the lint
+  # never ran and nothing checked how those columns are consumed.
+  as_lod = begin
+    _ld = JSON.parse(File.read(File.join(opts[:tab], 'lod-audit.json')))
+    Array(_ld.is_a?(Hash) ? _ld['entries'] : _ld).any?
+  rescue StandardError
+    false
+  end
+  as_countd = begin
+    _cf = JSON.parse(File.read(File.join(opts[:tab], 'calc-fields.json')))
+    Array(_cf.is_a?(Hash) ? _cf['calcs'] : _cf).any? do |c|
+      c.is_a?(Hash) && c['formula'].to_s =~ /\bCOUNTD\s*\(/i
+    end
+  rescue StandardError
+    false
+  end
+  if as_lod || as_countd
+    warn "[FAIL] gate 19: #{opts[:tab]} carries pre-aggregate evidence (#{as_lod ? 'LOD calcs in lod-audit.json' : 'COUNTD calc(s) in calc-fields.json'})"
+    warn '       but no agg-semantics.json ledger exists — the aggregation-semantics lint never ran, so'
+    warn '       nothing checked whether those pre-aggregates are consumed additively (the wrong-looking-'
+    warn '       right-numbers class). Run the lint (tableau: ruby scripts/audit-agg-semantics.rb'
+    warn '       --workdir <W>), resolve any hits, then re-run this gate.'
+    exit 26
+  end
+  puts '[OK] gate 19: no agg-semantics.json and no pre-aggregate evidence — aggregation semantics N/A (back-compat / non-Tableau plugin)'
+end
+
+# ---------------------------------------------------------------------------
+# Gate 20 — semantic-edit equivalence ledger (exit 27; PR-8). Any structural
+# edit to source semantics (dropping a join, collapsing a table, rewriting a
+# filter) is FORBIDDEN without a recorded equivalence proof: COUNT(*),
+# COUNT(DISTINCT grain) and per-measure SUM checksums measured on BOTH sides
+# through the same warehouse seam the other probes use
+# (scripts/probe-equivalence.rb → <workdir>/semantic-edits.json). Field case:
+# an agent deleted a LEFT JOIN as "provably no-op" on a non-unique flag key
+# with zero verification — the join was fanning out rows, so eliding it
+# changed every count downstream. A declared entry with no proof block
+# (declared, never probed) or a proof with match:false blocks GREEN.
+# HONESTY NOTE: nothing mechanical can detect an edit nobody DECLARED — this
+# gate enforces that declared edits are proven; the operating-contract rule
+# requires the declaration, and the join-plan (gate 16) + ground-truth
+# (gate 18) oracles are the net for undeclared ones (ground-truth SQL derives
+# from the SOURCE signals independently of the built spec, so a silently
+# dropped join shifts the built numbers away from the derived truth). No
+# escape flag and no waiver path: equivalence is measured, not negotiated —
+# a mismatched edit never ships (revert or redesign; an intentionally-
+# different rewrite is a user-initiated scope change, not an equivalence
+# claim, and never belongs in this ledger).
+# ---------------------------------------------------------------------------
+se_path = File.join(opts[:tab], 'semantic-edits.json')
+if File.exist?(se_path)
+  se_doc = JSON.parse(File.read(se_path)) rescue nil
+  se_entries = se_doc.is_a?(Hash) ? se_doc['entries'] : se_doc
+  unless se_entries.is_a?(Array)
+    warn "[FAIL] gate 20: #{se_path} is malformed (expected {\"entries\":[...]} or a bare array)."
+    warn '       Re-record the proofs (scripts/probe-equivalence.rb writes the ledger) — do not hand-edit it into shape.'
+    exit 27
+  end
+  se_entries = se_entries.select { |e| e.is_a?(Hash) }
+  # WITHDRAWN entries (probe-equivalence.rb --withdraw): refuted edits that
+  # were consequently NOT applied. They no longer block — the refuted proof
+  # stays in the ledger as evidence — but they are reported, never silent.
+  # HONESTY NOTE: a withdrawn edit whose SQL nonetheless shipped is not
+  # detectable mechanically; withdrawal is the operator's attestation, and
+  # gates 16/18 remain the numeric net for an edit that rode along anyway.
+  se_withdrawn = (se_doc.is_a?(Hash) ? Array(se_doc['withdrawn']) : []).select { |e| e.is_a?(Hash) }
+  if se_withdrawn.any?
+    puts "[INFO] gate 20: #{se_withdrawn.length} withdrawn edit(s) — refuted and not applied " \
+         '(refuted proofs preserved as evidence in semantic-edits.json withdrawn[]):'
+    se_withdrawn.first(10).each do |e|
+      puts "         - #{e['edit_description'].inspect} (reason: #{e['withdrawn_reason'] || 'NONE RECORDED'}; withdrawn_at: #{e['withdrawn_at'] || '?'})"
+    end
+    puts '       Withdrawal attests the edit was NOT applied — that attestation is not mechanically'
+    puts '       verifiable; gates 16/18 are the numeric net if the SQL shipped anyway.'
+  end
+  se_blocking = se_entries.reject { |e| e['proof'].is_a?(Hash) && e['proof']['match'] == true }
+  if se_blocking.any?
+    warn "[FAIL] gate 20: semantic-edit equivalence ledger unproven (#{se_path}) —"
+    se_blocking.first(10).each do |e|
+      p20 = e['proof']
+      if p20.is_a?(Hash)
+        b20 = p20['before'].is_a?(Hash) ? p20['before'] : {}
+        a20 = p20['after'].is_a?(Hash) ? p20['after'] : {}
+        warn "         - MISMATCH: #{e['edit_description'].inspect} (claim: #{e['claim']}) — the sides are NOT equivalent:"
+        warn "             TOTAL_ROWS #{b20['total'].inspect} -> #{a20['total'].inspect}; DISTINCT_GRAIN " \
+             "#{b20['distinct_grain'].inspect} -> #{a20['distinct_grain'].inspect} (grain: #{Array(e['grain']).join(', ')})"
+        Array(p20['mismatches']).each do |mm|
+          next unless mm.is_a?(Hash) && mm['metric'].to_s.start_with?('SUM_')
+          warn "             #{mm['metric']} #{mm['before'].inspect} -> #{mm['after'].inspect}"
+        end
+      else
+        warn "         - UNPROVEN: #{e['edit_description'].inspect} (claim: #{e['claim']}) — declared but never probed" \
+             "#{e['probe_error'] ? " (last probe errored: #{e['probe_error'].to_s[0, 120]})" : ''}"
+      end
+    end
+    warn '       "Provably no-op" is proven by measurement, never asserted. Probe both sides:'
+    warn '         ruby scripts/probe-equivalence.rb --workdir <W> --edit "<desc>" --claim "<claim>" --grain <col,col> \\'
+    warn '           (--before-sql ... --after-sql ... | --before-element/--after-element ...) [--measures <col,col>] \\'
+    warn '           (--connection-id <id> | --fixture DIR)'
+    warn '       A MISMATCHED edit never ships: revert it and WITHDRAW the refuted entry'
+    warn '         ruby scripts/probe-equivalence.rb --workdir <W> --withdraw "<edit_description>" --reason "<why>"'
+    warn '       (moves it to the ledger\'s withdrawn[] with the refuted proof preserved as evidence —'
+    warn '       never hand-edit the ledger), or redesign it until the probes agree, then re-probe.'
+    warn '       An intentionally-different rewrite is a user-initiated scope change, not an equivalence'
+    warn '       claim — it never belongs in this ledger. There is no skip flag and no waiver path for'
+    warn '       an edit that SHIPPED; withdrawal only records a refuted edit that was NOT applied.'
+    exit 27
+  end
+  puts "[OK] gate 20: semantic-edit equivalence ledger proven — #{se_entries.length} declared edit(s), every proof match:true (semantic-edits.json)"
+else
+  puts '[OK] gate 20: no semantic-edits.json — no structural semantic edits (join drop / table collapse / filter rewrite) declared.'
+  puts '     (Only DECLARED edits are policeable here; the operating contract forbids undeclared ones, and gates 16/18 catch the numeric drift they cause.)'
+end
+
+# ---------------------------------------------------------------------------
+# Gate 21 — chart-kind parity (exit 28; PR-10). The Phase 1d dashboard read
+# (png-read.json) records the VERIFIED chart kind of every source tile, and
+# the builder propagates it over shelf inference. This gate closes the loop
+# MECHANICALLY against the LIVE workbook: each verified tile's readback
+# element (wb-readback.json, matched by zone-census name normalization) must
+# be in the SAME chart family — the blind-grader vocabulary (bar/line/area/
+# combo/scatter/pie/kpi/map/table; kept in lockstep with the plugin's
+# lib/blind_grade.rb FAMILY_SYNONYMS — shared/ cannot require a plugin lib,
+# same doctrine as gate 8b's inline copy). Field failure: an operator
+# corrected the kinds in a verified png-read.json, the build ignored them,
+# and bars shipped where the source shows lines — with nothing mechanical
+# comparing the two ever again. This census is also what the PR-9 blind
+# grade's per_tile family readings are cross-checked against.
+# Sanctioned waiver: png-read.json kind_waivers [{tile, reason}] — a fidelity
+# decision recorded at read time (e.g. a Sigma capability substitution),
+# ledger-named like coverage_waivers, NOT budget-counted. Tiles absent from
+# png-read (unverified) or with no readback element by name are STATED,
+# never failed here — the dashboard-read gate and the tile census (gate 5)
+# own those. No png-read.json → stated OK (non-dashboard / non-Tableau
+# workdir); draft read / no readback → stated OK (nothing verified to
+# enforce / nothing live to compare).
+# ---------------------------------------------------------------------------
+kp21_path = File.join(opts[:tab], 'png-read.json')
+kp21_rb_path = File.join(opts[:tab], 'wb-readback.json')
+if File.exist?(kp21_path)
+  kp21 = JSON.parse(File.read(kp21_path)) rescue nil
+  # Family vocabulary (inline twin of lib/blind_grade.rb FAMILY_SYNONYMS —
+  # keep in lockstep, same as gate 8b's copy).
+  kp21_fam_map = { 'bar' => 'bar', 'bar-chart' => 'bar', 'column' => 'bar', 'column-chart' => 'bar',
+                   'line' => 'line', 'line-chart' => 'line', 'sparkline' => 'line',
+                   'area' => 'area', 'area-chart' => 'area',
+                   'combo' => 'combo', 'combo-chart' => 'combo', 'dual-axis' => 'combo',
+                   'scatter' => 'scatter', 'scatter-chart' => 'scatter', 'bubble' => 'scatter',
+                   'pie' => 'pie', 'pie-chart' => 'pie', 'donut' => 'pie', 'donut-chart' => 'pie',
+                   'kpi' => 'kpi', 'kpi-chart' => 'kpi', 'single-value' => 'kpi', 'big-number' => 'kpi',
+                   'map' => 'map', 'region-map' => 'map', 'point-map' => 'map',
+                   'table' => 'table', 'pivot-table' => 'table', 'pivot' => 'table',
+                   'crosstab' => 'table', 'text-table' => 'table', 'grid' => 'table' }
+  kp21_chartf = %w[bar line area combo scatter pie kpi map table].freeze
+  kp21_fam = lambda do |k|
+    k2 = k.to_s.strip.downcase
+    kp21_fam_map[k2] || (%w[text control image container divider missing].include?(k2) ? k2 : 'other')
+  end
+  # Zone-census name normalization (inline twin of lib/zone_census.rb norm_name).
+  kp21_norm = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]/, '') }
+  if !kp21.is_a?(Hash) || !kp21['tiles'].is_a?(Array)
+    warn "[FAIL] gate 21: #{kp21_path} is malformed (expected {\"tiles\":[{title,kind}...]} — the Phase 1d"
+    warn '       dashboard-read artifact). Re-run the Phase 1d read (assert-dashboard-read.rb validates it);'
+    warn '       do not hand-edit it into shape.'
+    exit 28
+  elsif kp21['verified'] == false
+    puts '[OK] gate 21: png-read.json is an UNVERIFIED draft (verified:false) — no verified kinds to enforce;'
+    puts '     kind parity N/A (the Phase 1d dashboard-read gate polices drafts).'
+  elsif !File.exist?(kp21_rb_path)
+    puts '[OK] gate 21: no wb-readback.json — kind parity N/A (no live readback to census; offline/pre-POST run).'
+  else
+    kp21_rb = JSON.parse(File.read(kp21_rb_path)) rescue nil
+    kp21_els = {}      # normalized element name → [family, ...]
+    kp21_el_kinds = {} # normalized element name → [raw kind, ...] (for the message)
+    Array(kp21_rb.is_a?(Hash) ? kp21_rb['pages'] : nil).each do |pg|
+      Array(pg.is_a?(Hash) ? pg['elements'] : nil).each do |el|
+        next unless el.is_a?(Hash) && el['visibleAsSource'] != false # hidden data-page masters
+        f = kp21_fam.call(el['kind'])
+        next unless kp21_chartf.include?(f) || f == 'other'
+        # `name` can be a visibility hash on hidden-title elements (put-layout).
+        en = el['name'].is_a?(Hash) ? el['name']['text'] : el['name']
+        en = el['title'] || el['id'] if en.to_s.empty?
+        k = kp21_norm.call(en)
+        next if k.empty?
+        (kp21_els[k] ||= []) << f
+        (kp21_el_kinds[k] ||= []) << el['kind'].to_s
+      end
+    end
+    kp21_waivers = {} # normalized tile → reason
+    Array(kp21['kind_waivers']).each do |w|
+      next unless w.is_a?(Hash)
+      k = kp21_norm.call(w['tile'])
+      kp21_waivers[k] = w['reason'].to_s unless k.empty?
+    end
+    kp21_verified_keys = []
+    kp21_matched = 0
+    kp21_mismatch = [] # [title, expected_family, [actual families], [actual kinds]]
+    kp21_waived = []   # [title, reason]
+    kp21_absent = []   # verified png tiles with no readback element by name
+    kp21['tiles'].each do |t|
+      next unless t.is_a?(Hash)
+      exp_f = kp21_fam.call(t['kind'] || t['chart_kind'])
+      next unless kp21_chartf.include?(exp_f) # text/control/image/container zones are not chart tiles
+      title = t['title'].to_s
+      k = kp21_norm.call(title)
+      next if k.empty?
+      kp21_verified_keys << k
+      fams = kp21_els[k]
+      if fams.nil?
+        kp21_waivers.key?(k) ? kp21_waived << [title, kp21_waivers[k]] : kp21_absent << title
+      elsif fams.include?(exp_f)
+        kp21_matched += 1
+      elsif kp21_waivers.key?(k)
+        kp21_waived << [title, kp21_waivers[k]]
+      else
+        kp21_mismatch << [title, exp_f, fams.uniq, Array(kp21_el_kinds[k]).uniq]
+      end
+    end
+    kp21_unread = kp21_els.keys - kp21_verified_keys -
+                  kp21['tiles'].select { |t| t.is_a?(Hash) }.map { |t| kp21_norm.call(t['title']) }
+    if kp21_mismatch.any?
+      warn '[FAIL] gate 21: chart-kind parity — the built workbook contradicts the VERIFIED source read'
+      warn '       (png-read.json, Phase 1d): the operator SAW these tiles in the source image.'
+      kp21_mismatch.first(10).each do |title, exp, act, kinds|
+        warn "         - #{title.inspect}: expected family '#{exp}' (png-read verified kind), " \
+             "built '#{act.join('/')}' (readback kind: #{kinds.join('/')})"
+      end
+      warn '       Rebuild with build-charts-from-signals.rb (it propagates verified png-read kinds over'
+      warn '       shelf inference — PR-10) or fix the element kind and re-POST + re-readback. If the'
+      warn '       difference is a DELIBERATE substitution (a Sigma capability gap), record it AT READ TIME'
+      warn '       in png-read.json:  "kind_waivers": [{ "tile": "<title>", "reason": "<why it differs>" }]'
+      warn '       (ledger-named like coverage_waivers — a recorded fidelity decision, not a budget waiver).'
+      exit 28
+    end
+    kp21_parts = ["#{kp21_matched} matched"]
+    kp21_parts << "#{kp21_waived.length} kind-waived in the ledger" if kp21_waived.any?
+    puts "[OK] gate 21: chart-kind parity — #{kp21_parts.join(', ')} of #{kp21_verified_keys.length} " \
+         'verified tile(s); readback families agree with png-read.json.'
+    kp21_waived.first(10).each { |title, r| puts "     - WAIVED #{title.inspect}: #{r.empty? ? 'NO REASON RECORDED' : r}" }
+    if kp21_absent.any?
+      puts "     NOTE: #{kp21_absent.length} verified tile(s) have no readback element by name " \
+           "(#{kp21_absent.first(6).map(&:inspect).join(', ')}) — kind unverifiable here; the tile census (gate 5) owns drops."
+    end
+    if kp21_unread.any?
+      puts "     NOTE: #{kp21_unread.length} built chart element(s) not in png-read.json — UNVERIFIED at read " \
+           "time (#{kp21_unread.first(6).join(', ')}); stated, not failed."
+    end
+  end
+else
+  puts '[OK] gate 21: no png-read.json — chart-kind parity N/A (non-dashboard / non-Tableau workdir;'
+  puts '     the Phase 1d dashboard-read gate decides when a read is required).'
+end
+
+# ---------------------------------------------------------------------------
 # Waiver budget cap (exit 19) — checked LAST so genuine gate failures surface
 # first. Individually-arguable escapes stack into an unverified workbook (a
 # field run passed one workbook purely by combining --skip-parity-gate with
@@ -2140,6 +3312,24 @@ end
 # for this cap — reduce the waiver count by fixing the underlying issues, or
 # report the migration as YELLOW.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Degradation ledger + verdict (PLAN-v3 PR-14) — derived ONCE here, from the
+# artifacts on disk (the census stamped above included), and written to
+# <workdir>/degradation-ledger.json on every run that reaches this point, so
+# the budget-fail path below and the success path share one derivation and
+# verify-complete.rb can re-derive + cross-check offline.
+# ---------------------------------------------------------------------------
+deg_entries = nil
+if DEG_LEDGER_LOADED
+  begin
+    deg_entries = DegradationLedger.derive(opts[:tab])
+    DegradationLedger.write(opts[:tab], deg_entries)
+  rescue StandardError => e
+    warn "[WARN] degradation-ledger derivation failed (#{e.class}: #{e.message.lines.first.to_s.strip}) — verdict falls back to legacy print."
+    deg_entries = nil
+  end
+end
+
 if budget_flags.length > WAIVER_BUDGET
   warn "[FAIL] waiver budget exceeded — #{budget_flags.length} quality waiver/escape flag(s) on this run (budget #{WAIVER_BUDGET})."
   warn '       GREEN unavailable — too many waivers; the highest achievable result is YELLOW.'
@@ -2148,6 +3338,11 @@ if budget_flags.length > WAIVER_BUDGET
   warn '       Waivers are for impossibilities, not obstacles. Fix the underlying issues until'
   warn "       <= #{WAIVER_BUDGET} remain, or report this migration as YELLOW (never GREEN) and name"
   warn '       every waiver in the report. There is no escape flag for this cap.'
+  if deg_entries
+    v19 = DegradationLedger.verdict(deg_entries, budget_exceeded: true)
+    warn "       VERDICT: #{v19} — degradation ledger (#{deg_entries.length} entr#{deg_entries.length == 1 ? 'y' : 'ies'}):"
+    DegradationLedger.report_lines(deg_entries).each { |l| warn "       #{l}" }
+  end
   exit 19
 end
 
@@ -2158,25 +3353,34 @@ end
 # gate can mint, closing the "agent narrates success without the gate" hole.
 # run_id scopes the marker to THIS run (see the at_exit stale-deletion above);
 # the waiver census rides along so a report can quote the marker verbatim.
+# The verdict (PR-14): all gates passed and the budget held, but GREEN belongs
+# only to an EMPTY degradation ledger — any scope cut caps the run at PARTIAL,
+# any other recorded degradation at YELLOW. The string rides in the success
+# marker (verify-complete.rb quotes and cross-checks it).
+final_verdict = deg_entries ? DegradationLedger.verdict(deg_entries) : nil
 begin
   _wd = opts[:tab]
   # chartCount from parity-final.json (gate 1 already required charts_total > 0 to
   # reach here) so verify-complete.rb has a uniform element count across plugins.
   _pf = (JSON.parse(File.read(File.join(_wd, 'parity-final.json'))) rescue {})
   _cc = (_pf['charts_total'] || _pf['charts_pass'] || 0).to_i
-  File.write(File.join(_wd, 'phase6-success.json'),
-             JSON.pretty_generate('workbookId' => (opts[:wb] || ''),
-                                  'chartCount' => _cc,
-                                  'gates' => 'all-pass',
-                                  'run_id' => current_run_id,
-                                  'waivers' => waiver_flags,
-                                  'generatedAt' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')))
+  _succ = { 'workbookId' => (opts[:wb] || ''),
+            'chartCount' => _cc,
+            'gates' => 'all-pass',
+            'run_id' => current_run_id,
+            'waivers' => waiver_flags,
+            'generatedAt' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ') }
+  _succ['verdict'] = final_verdict if final_verdict
+  File.write(File.join(_wd, 'phase6-success.json'), JSON.pretty_generate(_succ))
   _pend = File.join(_wd, 'parity-pending.json')
   File.delete(_pend) if File.exist?(_pend)
-  # Flip the off-ramp telemetry field now that success is minted (P2).
+  # Flip the off-ramp telemetry field now that success is minted (P2), and
+  # stamp the derived verdict beside the census so a report that quotes
+  # parity-final.json carries it (verify-complete.rb cross-checks the claim).
   if File.exist?(File.join(_wd, 'parity-final.json'))
     begin
       _pf['success_sentinel'] = true
+      _pf['verdict'] = final_verdict if final_verdict
       File.write(File.join(_wd, 'parity-final.json'), JSON.pretty_generate(_pf))
     rescue StandardError
       nil
@@ -2186,6 +3390,23 @@ rescue StandardError
   # never fail the gate on sentinel bookkeeping
 end
 
-puts "[OK] all gates pass — conversion may declare GREEN" \
-     "#{waiver_flags.any? ? " (#{budget_flags.length}/#{waiver_flags.length} waiver(s) within budget — name them in the report: #{waiver_flags.join(', ')})" : ''}"
+if final_verdict.nil?
+  # Legacy checkout without lib/degradation_ledger.rb — stated, never silent.
+  puts "[OK] all gates pass — conversion may declare GREEN" \
+       "#{waiver_flags.any? ? " (#{budget_flags.length}/#{waiver_flags.length} waiver(s) within budget — name them in the report: #{waiver_flags.join(', ')})" : ''}"
+  puts '     (lib/degradation_ledger.rb not vendored — no PR-14 verdict derived; re-vendor to enable.)'
+elsif final_verdict == 'GREEN'
+  puts "[OK] all gates pass — VERDICT: GREEN (degradation ledger empty — no scope cuts, no waivers, no residuals)"
+else
+  puts "[OK] all gates pass — VERDICT: #{final_verdict}" \
+       "#{waiver_flags.any? ? " (#{budget_flags.length}/#{waiver_flags.length} waiver(s) within budget)" : ''}"
+  puts "     GREEN requires an EMPTY degradation ledger; this run recorded #{deg_entries.length} degradation(s):"
+  DegradationLedger.report_lines(deg_entries).each { |l| puts "     #{l}" }
+  if final_verdict.start_with?('PARTIAL')
+    puts '     PARTIAL: a scope cut shipped — the delivered workbook is a SUBSET of the source.'
+    puts '     Report this migration as PARTIAL (never GREEN) and quote the ledger verbatim.'
+  else
+    puts '     Report this migration as YELLOW (never GREEN) and name every entry in the report.'
+  end
+end
 exit 0

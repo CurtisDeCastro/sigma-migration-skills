@@ -46,7 +46,7 @@ dashboards as the **same** `Dashboard` JSON. So the dashboard converter keys off
 | **2 — Convert semantic model** | LookML views+model → Sigma DM spec; POST + register + verify | `convert_lookml_to_sigma` (MCP) · `convert_dm.mjs`, `post_dm.py` · **Sigma REST** (`/v2/dataModels/spec`) |
 | **3 — Convert dashboards** | Each Looker dashboard's tiles → Sigma elements, filters → controls, newspaper layout → 24-col grid | `fetch_looker_dashboard.py`, `build_workbook.py` · **Sigma REST** (`/v2/workbooks/spec`) |
 | **4 — Parity** | 3-way compare: Looker `run_inline_query` vs Sigma `query` vs warehouse | **Sigma MCP (sigma-mcp-v2)** + Looker API |
-| **5 — Enhance** | Wire UI-only features post-publish (cross-filtering, trellis, tooltips, 2nd-KPI comparisons) | *(judgment)* |
+| **5 — Enhance** | Wire UI-only features post-publish (cross-filtering, tooltips, 2nd-KPI comparisons) | *(judgment)* |
 
 The phase structure mirrors `tableau-to-sigma` (Assess → Discover → Convert → Build → Verify →
 Enhance); see `skills/looker-to-sigma/SKILL.md` for the full per-phase reference and gotchas.

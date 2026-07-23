@@ -53,6 +53,15 @@ end
 
 if opts[:skip]
   puts "[SKIP] run-state chain audit WAIVED (#{opts[:skip]}) — name this in your report."
+  # PR-14: every honored --skip-* leaves a record on the off-ramp trail.
+  begin
+    $LOAD_PATH.unshift File.expand_path('lib', __dir__)
+    require 'offramp'
+    Offramp.log(opts[:dir], kind: 'skip-flag-waived', reason: opts[:skip],
+                detail: '--skip-run-state')
+  rescue LoadError
+    warn '       WARN: lib/offramp.rb not vendored — the waiver could not be recorded to offramps.jsonl.'
+  end
   exit 0
 end
 

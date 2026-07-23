@@ -12,12 +12,30 @@
 # The same grain assumption underlies every federated .twb join (an agent
 # deleting a "no-op" LEFT JOIN without proof risks fan-out the other way).
 #
-# The ledger records one entry per (a) federated <relation type='join'> in the
-# source .twb and (b) synthesized Lookup() in the dm-spec, each carrying the
-# grain assumption ("right unique on keys") and status "unprobed".
-# scripts/probe-join-keys.rb then PROVES or REFUTES each assumption against the
-# warehouse and updates the entry; the final gate (assert-phase6-ran.rb gate 16,
-# exit 23) refuses GREEN while any entry is unproven or unresolved non-unique.
+# The ledger records one entry per (a) .twb source join and (b) synthesized
+# Lookup() in the dm-spec, each carrying the grain assumption ("right unique
+# on keys") and status "unprobed". scripts/probe-join-keys.rb then PROVES or
+# REFUTES each assumption against the warehouse and updates the entry; the
+# final gate (assert-phase6-ran.rb gate 16, exit 23) refuses GREEN while any
+# entry is unproven or unresolved non-unique.
+#
+# .twb JOIN SHAPES COVERED (the canonical list converter/tableau.mjs and
+# parse-twb-layout.rb read — an EMBEDDED datasource serializes joins with the
+# same elements as a published/VC one, but may wrap or relocate them):
+#   1. <relation type='join' join='left'> with a <clause type='join'> of
+#      <expression op='='> pairs whose sides are '[TABLE].[COL]' (multi-key
+#      joins AND-wrap the pairs; a side may be function-wrapped, e.g.
+#      DATE([T].[C]) — the computed-key join mechanical-specs.rb recovers).
+#   2. The same relation tree behind Tableau's forward-compatibility mangling
+#      (_.fcp.ObjectModelEncapsulateLegacy.true...relation — lib/fcp_normalize
+#      is applied BEFORE parsing, exactly as parse-twb-layout.rb does; a
+#      literal-name XPath is otherwise blind to every embedded-DS join Tableau
+#      2020.2+ serializes behind FCP names).
+#   3. The 2020.2+ logical (relationship / object-graph) model:
+#      <object-graph><relationships><relationship> with <expression op='='>
+#      key pairs and first/second-end-point object ids — Tableau culls these
+#      joins per-viz at query time, so a Sigma join/Lookup over the same
+#      tables carries the identical fan-out risk and MUST be on the ledger.
 #
 # An EMPTY ledger is still written — its presence is the gate's evidence that
 # the derivation ran and found nothing.
@@ -41,6 +59,7 @@
 
 require 'json'
 require_relative 'twb_xml'
+require_relative 'fcp_normalize'
 
 module JoinPlan
   GRAIN_ASSUMPTION = 'right unique on keys'
@@ -51,13 +70,31 @@ module JoinPlan
   # db/schema: the run's resolved warehouse database/schema (--db/--schema or the
   # orchestrator's manifest/workbook derivation) — used to complete published-VC
   # physical paths into probeable FQNs (see vc_physical_fqn). Returns the entry
-  # array (possibly empty). Deterministic order: federated joins (document
-  # order) then lookup syntheses (element order).
+  # array (possibly empty). Deterministic order: federated join-clause joins
+  # (document order), then object-graph relationship joins (document order),
+  # then lookup syntheses (element order).
   def derive(dm_spec, twb_xml = nil, db: nil, schema: nil)
     entries = []
     entries.concat(federated_joins(twb_xml, db, schema)) if twb_xml && !twb_xml.to_s.strip.empty?
     entries.concat(lookup_syntheses(dm_spec)) if dm_spec.is_a?(Hash)
     entries
+  end
+
+  # The run's .twb straight from the workdir — for callers whose own .twb
+  # bookkeeping is route-dependent. FASTPATH live defect (Twin-B e2e
+  # 2026-07-19): migrate-tableau's have_twb is assigned inside the
+  # full-pipeline block only, so the FAST PATH (--reuse-dm + --wb-spec) passed
+  # twb_xml=nil even though workbook-content.twb sat in the workdir — the
+  # source LEFT JOIN never landed in the ledger, gate 16 passed on an EMPTY
+  # ledger, and the DM shipped without the join (every tile diverged 3-23x).
+  # Returns the XML String, or nil when no .twb exists (MCP-only datasource).
+  def workdir_twb(workdir)
+    return nil if workdir.to_s.empty?
+    %w[workbook-content.twb workbook-hydrated.twb].each do |name|
+      p = File.join(workdir, name)
+      return File.read(p, encoding: 'UTF-8') if File.exist?(p)
+    end
+    nil
   end
 
   def write(path, entries)
@@ -71,11 +108,14 @@ module JoinPlan
   end
 
   # ---- (a) federated joins in the .twb --------------------------------------
-  # <relation type='join'> with a <clause type='join'> of one or more
-  # <expression op='='> pairs whose sides are '[TABLE].[COL]'. Multi-key joins
-  # AND-wrap the pairs; the descendant scan handles both shapes.
+  # Shapes 1-3 from the header. FCP names are normalized FIRST (same as
+  # parse-twb-layout.rb) so `//relation[@type='join']` and `//object-graph`
+  # also match the _.fcp.ObjectModelEncapsulateLegacy-wrapped trees an
+  # embedded datasource serializes. Multi-key joins AND-wrap the '=' pairs;
+  # the descendant scans handle both shapes.
   def federated_joins(twb_xml, db = nil, schema = nil)
     xml = twb_xml.to_s.encode('UTF-8', 'binary', invalid: :replace, undef: :replace, replace: '')
+    xml = FcpNormalize.normalize(xml) if FcpNormalize.needed?(xml)
     doc = begin
       TwbXml.parse(xml)
     rescue StandardError
@@ -93,7 +133,9 @@ module JoinPlan
       # own <clause> and gets its own ledger entry from the same document scan.
       pairs = [] # [{left table, left col, right table, right col}]
       rel.elements.each("clause[@type='join']//expression[@op='=']") do |eq|
-        sides = eq.elements.to_a('expression').map { |e| parse_side(e.attributes['op']) }.compact
+        # unwrap_fn: a computed-key side (DATE([T].[C]) = [T2].[C2]) still
+        # names its physical column — record it rather than dropping the join.
+        sides = eq.elements.to_a('expression').map { |e| parse_side(unwrap_fn(e.attributes['op'])) }.compact
         pairs << { l: sides[0], r: sides[1] } if sides.size == 2
       end
       next if pairs.empty?
@@ -114,7 +156,75 @@ module JoinPlan
         'probe_keys'       => keys.map { |p| physical_probe_key(p[:r][:column], captions) }
       }
     end
+    out.concat(object_graph_joins(doc, captions, db, schema))
     out
+  end
+
+  # ---- 2020.2+ logical (relationship / object-graph) joins ------------------
+  # <object-graph><relationships><relationship> with <expression op='='> key
+  # pairs (AND-wrapped when multi-key) between <first-end-point object-id=>
+  # and <second-end-point object-id=>. Sides are bare '[COL]' / '[<guid>]'
+  # refs (optionally function-wrapped — converter parseOpRef semantics), NOT
+  # '[TABLE].[COL]'. Tableau culls these joins per-viz at query time; a Sigma
+  # relationship/Lookup over the same tables fans out unless the second
+  # end-point is unique on the keys — same grain assumption, same probe.
+  def object_graph_joins(doc, captions, db = nil, schema = nil)
+    # object-id -> its physical <relation type='table'> (label + node).
+    objects = {}
+    doc.elements.each('//object-graph/objects/object') do |obj|
+      rel = obj.elements[".//relation[@type='table']"]
+      next unless rel
+      objects[obj.attributes['id'].to_s] = {
+        label: (obj.attributes['caption'] || rel.attributes['name']).to_s,
+        name:  rel.attributes['name'].to_s,
+        rel:   rel
+      }
+    end
+    out = []
+    doc.elements.each('//object-graph/relationships/relationship') do |r|
+      first  = r.elements['first-end-point']
+      second = r.elements['second-end-point']
+      next unless first && second
+      lobj = objects[first.attributes['object-id'].to_s]
+      robj = objects[second.attributes['object-id'].to_s]
+      next unless lobj && robj
+      pairs = []
+      r.elements.each(".//expression[@op='=']") do |eq|
+        sides = eq.elements.to_a('expression').map { |e| unwrap_fn(e.attributes['op']) }
+                  .map { |op| op.to_s[/\A\[([^\]]+)\]\z/, 1] }.compact
+        pairs << { l: sides[0], r: sides[1] } if sides.size == 2
+      end
+      next if pairs.empty?
+      out << {
+        'kind'             => 'federated-join',
+        'join_type'        => 'relationship',
+        'shape'            => 'object-graph',
+        'left'             => lobj[:name].empty? ? lobj[:label] : lobj[:name],
+        'right'            => robj[:name].empty? ? robj[:label] : robj[:name],
+        'keys'             => pairs.map { |p| p[:r] },
+        'key_pairs'        => pairs.map { |p| { 'left' => p[:l], 'right' => p[:r] } },
+        'grain_assumption' => GRAIN_ASSUMPTION,
+        'status'           => 'unprobed',
+        'right_table'      => vc_physical_fqn(robj[:name], db, schema) || twb_table_fqn(doc, robj[:rel]),
+        'probe_keys'       => pairs.map { |p| relationship_probe_key(p[:r], captions) }
+      }
+    end
+    out
+  end
+
+  # A relationship key is a bare column ref: a GUID resolves via caption (as
+  # physical_probe_key), anything else folds display -> physical directly
+  # ('Entity Id' -> ENTITY_ID; an already-physical 'ENTITY_ID' is a no-op).
+  def relationship_probe_key(key, captions)
+    guid_like?(key) ? physical_probe_key(key, captions) : physical_name(key)
+  end
+
+  # 'FN([X])' / 'FN([T].[C])' -> the inner bracketed ref (converter
+  # extractOpUuid semantics — a computed-key join side, e.g. DATE([T].[C]));
+  # anything else passes through unchanged.
+  def unwrap_fn(op)
+    m = op.to_s.match(/\A\w+\((\[.+\])\)\z/)
+    m ? m[1] : op
   end
 
   # ---- published/virtual-connection resolution ------------------------------

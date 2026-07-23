@@ -28,12 +28,17 @@
 #                     entry declares the calc a manual translation (gate 15
 #                     polices built/unbuilt; this ledger only requires the
 #                     declaration to be EXPLICIT).
-#   reference-derived resolved — the emitted formula is built strictly from the
-#                     LOD expression's OWN reference set (e.g. a re-aggregation
-#                     of the LOD's base measure at chart grain).
-#   suspect-alias     UNRESOLVED — an emitted column carries the calc's name
-#                     but its formula references a base/physical column that is
-#                     NOT in the LOD expression's own reference set: the
+#   reference-derived resolved — the emitted formula RE-AGGREGATES the LOD
+#                     expression's OWN OUTPUT field (e.g. a re-aggregation of the
+#                     LOD's base measure at chart grain). A non-aggregating
+#                     passthrough of a column that appears ONLY in the LOD's
+#                     filter condition does NOT qualify — that is a fuzzy alias
+#                     (#452), classified suspect-alias below.
+#   suspect-alias     UNRESOLVED — an emitted column carries the calc's name but
+#                     its formula either references a base/physical column that
+#                     is NOT in the LOD expression's own reference set, OR is a
+#                     non-aggregating passthrough of a column that appears only
+#                     in the LOD expression's filter condition (#452): the
 #                     fuzzy-alias case, numbers silently wrong.
 #   silently-dropped  UNRESOLVED — no emitted translation and no manual-residue
 #                     declaration anywhere.
@@ -66,6 +71,17 @@ module LodAudit
   LOD_REL_REF_RE = %r{\[[^\]]+/\s*(?:FIXED|INCLUDE|EXCLUDE)[^/\]]*/[^\]]+\]}i
   WINDOW_FN_RE   = /\b(?:Lag|Lead|Rank|RankDense|RankPercentile|RowNumber|PercentOfTotal|
                        Cumulative\w+|Moving\w+|FirstNonNull|LastNonNull|First|Last)\s*\(/xi
+
+  # Aggregation functions whose presence in an EMITTED formula proves it
+  # RE-AGGREGATES the LOD's measure (a genuine reference-derivation) rather than
+  # merely passing a raw column through. Tableau + Sigma spellings.
+  AGG_FN_RE = /\b(?:COUNTDISTINCT|COUNTD|COUNT|SUM|AVG|AVERAGE|MIN|MAX|
+                    MEDIAN|STDEV\w*|VAR\w*|ATTR|TOTAL)\s*\(/xi
+
+  # Comparison operators that mark a bracket ref as a FILTER PREDICATE (the
+  # IF/CASE/boolean condition that GATES an LOD aggregate — e.g. [flag] = "X").
+  # Multi-char operators are listed first so the alternation matches greedily.
+  COMPARATOR_RE = /(?:<=|>=|<>|!=|==|=|<|>)/.freeze
 
   module_function
 
@@ -204,9 +220,24 @@ module LodAudit
     matches.each do |c|
       next if synth.include?(c)
       terms = terminal_refs(c['formula'])
-      next if terms.empty? || terms.all? { |t| norm(t) == name_n } # passthrough — not evidence
+      next if terms.empty? || terms.all? { |t| norm(t) == name_n } # passthrough of own name — not evidence
       alien = terms.reject { |t| allowed.include?(norm(t)) }
-      alien.empty? ? derived << c : suspect << [c, alien]
+      unless alien.empty?
+        suspect << [c, alien, :alien] # reads a column OUTSIDE the LOD's reference set
+        next
+      end
+      # Every ref is INSIDE the LOD's own reference set — but that alone is not
+      # enough to call the column reference-derived (#452). "reference-derived"
+      # means the emitted formula RE-AGGREGATES the LOD's OUTPUT field; an
+      # emitted formula that merely NAMES a column appearing only in the LOD's
+      # FILTER CONDITION (a non-aggregating passthrough of a filter-predicate
+      # column) is the same silent-alias failure as #423 — flag it, don't
+      # resolve it.
+      if reference_derived?(c, calc, name_n)
+        derived << c
+      else
+        suspect << [c, filter_alias_refs(c, calc, name_n), :filter]
+      end
     end
 
     entry = {
@@ -226,13 +257,12 @@ module LodAudit
       entry['evidence'] = { 'kind' => 'manual-residues.json', 'calc' => residues[name_n]['calc'],
                             'residue_status' => residues[name_n]['status'].to_s }
     elsif suspect.any?
-      col, alien = suspect.first
+      col, refs, kind = suspect.first
       entry['class']  = 'suspect-alias'
       entry['status'] = 'unresolved'
       entry['evidence'] = evidence(col)
-      entry['suspect_refs'] = alien
-      entry['detail'] = "emitted formula reads #{alien.map { |a| a.inspect }.join(', ')} — not in the " \
-                        'LOD expression\'s own reference set (fuzzy name-alias: the numbers are silently wrong)'
+      entry['suspect_refs'] = refs
+      entry['detail'] = suspect_detail(refs, kind)
     elsif derived.any?
       entry['class']  = 'reference-derived'
       entry['status'] = 'resolved'
@@ -246,10 +276,25 @@ module LodAudit
     # A resolved calc can STILL have a mis-aliased twin column somewhere — keep
     # that visible without blocking (the operator verifies it at Phase 6).
     if entry['status'] == 'resolved' && suspect.any?
-      col, alien = suspect.first
-      entry['also_suspect'] = evidence(col).merge('suspect_refs' => alien)
+      col, refs, = suspect.first
+      entry['also_suspect'] = evidence(col).merge('suspect_refs' => refs)
     end
     entry
+  end
+
+  # Human-readable detail for a suspect-alias entry: the two shapes of the same
+  # silent-alias failure — reading a column OUTSIDE the LOD's reference set, or a
+  # non-aggregating passthrough of one of its FILTER-CONDITION columns (#452).
+  def suspect_detail(refs, kind)
+    quoted = Array(refs).map(&:inspect).join(', ')
+    if kind == :filter
+      "emitted formula is a non-aggregating passthrough of #{quoted} — a column named only in the " \
+        "LOD expression's FILTER CONDITION, not its aggregated output (fuzzy filter-alias: the " \
+        'numbers are silently wrong)'
+    else
+      "emitted formula reads #{quoted} — not in the LOD expression's own reference set " \
+        '(fuzzy name-alias: the numbers are silently wrong)'
+    end
   end
 
   def synth_evidence(col)
@@ -267,6 +312,82 @@ module LodAudit
       seg = r.split('/').last.to_s.strip
       seg =~ /\Actl-/ ? nil : seg
     end.compact.reject(&:empty?).uniq
+  end
+
+  # True when the emitted column is a GENUINE re-aggregation of the LOD's own
+  # output: either it applies an aggregation function itself, or (non-aggregating)
+  # every non-name ref it carries is one of the LOD's aggregated-output /
+  # dimension refs — NOT a column that appears ONLY in the LOD's filter condition
+  # (#452: a bare passthrough of a filter-predicate column is a fuzzy alias, not
+  # a translation of the COUNTD/SUM output).
+  def reference_derived?(col, calc, name_n)
+    return true if col['formula'].to_s =~ AGG_FN_RE
+    outputs = agg_output_refs(calc['formula']).map { |r| norm(r) }
+    preds   = filter_predicate_refs(calc['formula']).map { |r| norm(r) }
+    emitted = terminal_refs(col['formula']).map { |t| norm(t) }.reject { |t| t.empty? || t == name_n }
+    # a ref used ONLY as a filter predicate (never as the aggregated output) is
+    # not evidence of derivation.
+    emitted.none? { |r| preds.include?(r) && !outputs.include?(r) }
+  end
+
+  # The emitted formula's terminal refs that name a filter-predicate-ONLY column
+  # of the LOD — the fuzzy filter-alias evidence for #452 (original casing).
+  def filter_alias_refs(col, calc, name_n)
+    outputs = agg_output_refs(calc['formula']).map { |r| norm(r) }
+    preds   = filter_predicate_refs(calc['formula']).map { |r| norm(r) }
+    terminal_refs(col['formula']).select do |t|
+      tn = norm(t)
+      tn != name_n && preds.include?(tn) && !outputs.include?(tn)
+    end
+  end
+
+  # Refs used as a FILTER PREDICATE inside the LOD expression: a bracket ref on
+  # either side of a comparison operator — the IF/CASE/boolean condition that
+  # GATES the aggregate (e.g. [flag] = "X"). These are NOT the aggregated
+  # measure; a bare passthrough of one is a fuzzy alias, not a translation of the
+  # LOD's aggregated output (#452).
+  def filter_predicate_refs(formula)
+    f = formula.to_s
+    refs = []
+    f.scan(/\[([^\]]+)\]\s*#{COMPARATOR_RE}/) { |m| refs << m[0] }
+    f.scan(/#{COMPARATOR_RE}\s*\[([^\]]+)\]/) { |m| refs << m[0] }
+    refs.map { |r| r.split('/').last.to_s.strip }.reject(&:empty?).uniq
+  end
+
+  # Bracket refs that are the AGGREGATED OUTPUT of the LOD: refs appearing inside
+  # an aggregation function's argument, minus any used only as filter predicates.
+  # For {FIXED d: COUNTD(IF [flag] = "X" THEN [key] END)} the output is [key],
+  # not [flag].
+  def agg_output_refs(formula)
+    preds = filter_predicate_refs(formula).map { |r| norm(r) }
+    agg_argument_refs(formula).reject { |r| preds.include?(norm(r)) }
+  end
+
+  # Terminal names of every bracket ref inside any aggregation function call.
+  def agg_argument_refs(formula)
+    f = formula.to_s
+    refs = []
+    f.scan(AGG_FN_RE) do
+      m = Regexp.last_match
+      refs.concat(terminal_refs(balanced_paren_slice(f, m.end(0) - 1)))
+    end
+    refs.uniq
+  end
+
+  # The substring inside the balanced parentheses that OPEN at open_idx (the
+  # index of a '(' in str). Paren-matching is literal (string literals are not
+  # treated specially) — adequate for the LOD shapes we classify.
+  def balanced_paren_slice(str, open_idx)
+    depth = 0
+    i = open_idx
+    while i < str.length
+      c = str[i]
+      depth += 1 if c == '('
+      depth -= 1 if c == ')'
+      return str[(open_idx + 1)...i] if depth.zero?
+      i += 1
+    end
+    str[(open_idx + 1)..-1] || ''
   end
 
   def evidence(col)

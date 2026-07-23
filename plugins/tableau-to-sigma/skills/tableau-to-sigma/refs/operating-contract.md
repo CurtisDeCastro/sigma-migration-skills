@@ -37,6 +37,31 @@
 - Escape hatches (skip/allow flags) require a **named reason that goes in the report**.
 - If you've retried the same failing step ~2×, change approach or surface it — never grind.
 
+## Structural edits to source semantics require a recorded proof (PR-8)
+- **Dropping a join, collapsing a table, or rewriting a filter is FORBIDDEN without a
+  recorded equivalence proof — BEFORE the edit ships.** A field agent deleted a LEFT
+  JOIN as "provably no-op" on fraud data with zero verification; the key was a
+  non-unique flag column, so the join was fanning out rows and the "no-op" changed
+  every count downstream. "Provably no-op" is proven by `scripts/probe-equivalence.rb`
+  — COUNT(\*), COUNT(DISTINCT grain) and per-measure SUM checksums measured on BOTH
+  sides through the warehouse — **never asserted**. The proof lives in
+  `<workdir>/semantic-edits.json`; an edit with no proof entry is UNPROVEN and the
+  final gate (gate 20, exit 27) refuses GREEN for it, exactly as for a proof that
+  came back `match:false`.
+- **A mismatch means the edit does not ship.** Revert it (removing the edit removes
+  the entry) or redesign it until the probes agree. There is no waive path:
+  equivalence is measured, not negotiated. An intentionally-different rewrite is not
+  an equivalence claim — that is a user-initiated scope change and belongs in the
+  migration report's scope record, never in this ledger.
+- **Declare every structural edit — the gate can only police what you declare.** No
+  mechanism can detect an edit nobody recorded; the declaration is this contract's
+  requirement, not the gate's discovery. The mechanical net for an UNDECLARED edit is
+  the join-cardinality ledger (gate 16 — the candidate join is on record before any
+  edit) and the ground-truth oracle (gate 18 — ground-truth SQL derives from the
+  SOURCE signals independently of the built spec, so a silently dropped join shifts
+  the built numbers away from the derived truth and diverges). Relying on that net
+  instead of declaring is itself a contract violation.
+
 ## Never negotiate fidelity down (field-caught, v5.5 e2e)
 - **NEVER propose reducing scope as a response to difficulty.** "Something lighter for
   the demo", "a simplified version", "skip the hard tiles for now" are all the same

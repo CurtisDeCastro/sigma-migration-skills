@@ -108,6 +108,52 @@ rb['pages'][0]['elements'][0].delete('columns') # table shape change is not this
 check(ControlFieldCensus.census(posted, rb) == [],
       'non-control elements are out of scope', fails)
 
+# ---- #456: filter TARGET binding dropped (key survives, binding gutted) ------
+# The list control POSTs filters:[{source,columnId}] but the readback gutted it.
+# The `filters` KEY still exists, so the key-diff above sees nothing — the census
+# must catch it via the bound-target comparison, or a control that filters
+# NOTHING ships silently.
+def target_drop_note?(problem)
+  Array(problem['dropped']).any? { |d| d.to_s.include?('TARGET BINDING') && d.to_s.include?('#456') }
+end
+
+# readback returns filters:null (the numeric/datetime strip shape)
+rb = readback_dropping
+rb['pages'][0]['elements'].find { |el| el['controlId'] == 'ctl-region' }['filters'] = nil
+probs = ControlFieldCensus.census(posted, rb)
+reg = probs.find { |p| p['control'] == 'Region' }
+check(reg && target_drop_note?(reg),
+      "filters:null on readback → target-binding drop flagged (#456) (got #{reg.inspect})", fails)
+check(ControlFieldCensus.report_lines(probs).any? { |l| l.include?('Region') && l.include?('TARGET BINDING') },
+      'report line names the control and the dropped target binding', fails)
+
+# readback returns filters:[] (same class)
+rb = readback_dropping
+rb['pages'][0]['elements'].find { |el| el['controlId'] == 'ctl-region' }['filters'] = []
+reg = ControlFieldCensus.census(posted, rb).find { |p| p['control'] == 'Region' }
+check(reg && target_drop_note?(reg), 'filters:[] on readback → target-binding drop flagged (#456)', fails)
+
+# readback keeps a filter ENTRY but strips its columnId/source (binds nothing)
+rb = readback_dropping
+rb['pages'][0]['elements'].find { |el| el['controlId'] == 'ctl-region' }['filters'] = [{ 'kind' => 'list' }]
+reg = ControlFieldCensus.census(posted, rb).find { |p| p['control'] == 'Region' }
+check(reg && target_drop_note?(reg), 'gutted filter entry (no columnId/source) on readback → flagged (#456)', fails)
+
+# a target that PERSISTS (readback keeps the binding intact) → NOT flagged
+rb = readback_dropping # every posted field kept, filters intact
+check(ControlFieldCensus.census(posted, rb).none? { |p| target_drop_note?(p) },
+      'filter target that round-trips intact → no target-drop false positive (#456)', fails)
+
+# a value-list-only control (source, no filters) never triggers a target drop
+vlist = JSON.parse(JSON.generate(
+  'pages' => [{ 'elements' => [
+    { 'id' => 'el-picker', 'kind' => 'control', 'controlId' => 'ctl-measure', 'name' => 'Measure',
+      'controlType' => 'segmented', 'selectionMode' => 'single', 'value' => 'Revenue',
+      'source' => { 'kind' => 'manual', 'valueType' => 'text', 'values' => %w[Revenue Profit] } }
+  ] }]))
+check(ControlFieldCensus.census(vlist, vlist).none? { |p| target_drop_note?(p) },
+      'a controls-nothing-by-filters value-list picker → no target-drop false positive', fails)
+
 puts
 if fails.empty?
   puts 'ALL PASS — control-field census flags silently-dropped control fields (known + future family members)'

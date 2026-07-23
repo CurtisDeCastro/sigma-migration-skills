@@ -144,8 +144,18 @@ blocking.each do |e, i|
   if e['class'] == 'suspect-alias'
     warn "  emitted as #{e.dig('evidence', 'column').inspect} on #{e.dig('evidence', 'element').inspect}" \
          " (#{e.dig('evidence', 'spec')}): #{e.dig('evidence', 'formula')}"
-    warn "  reads #{Array(e['suspect_refs']).join(', ')} — NOT in the LOD expression's own reference set" \
-         " (#{Array(e['reference_set']).join(', ')}). The numbers are silently WRONG."
+    # Two suspect-alias shapes of the same silent-alias failure: a ref OUTSIDE
+    # the LOD's reference set, or a non-aggregating passthrough of a column that
+    # is inside it but appears ONLY in the LOD's FILTER CONDITION (#452).
+    refs = Array(e['suspect_refs'])
+    ref_set_n = Array(e['reference_set']).map { |r| LodAudit.norm(r) }
+    if refs.any? { |r| ref_set_n.include?(LodAudit.norm(r)) }
+      warn "  reads #{refs.join(', ')} — a column named only in the LOD expression's FILTER CONDITION," \
+           " not its aggregated output (#{Array(e['reference_set']).join(', ')}). The numbers are silently WRONG."
+    else
+      warn "  reads #{refs.join(', ')} — NOT in the LOD expression's own reference set" \
+           " (#{Array(e['reference_set']).join(', ')}). The numbers are silently WRONG."
+    end
   else
     warn '  no emitted dm-spec/wb-spec translation and no manual-residues.json entry — the calc'
     warn '  was DROPPED with no signal; every tile that plotted it is missing or mis-built.'

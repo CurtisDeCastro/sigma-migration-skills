@@ -1,4 +1,4 @@
-<!-- Part of the tableau-to-sigma workflow — spine: ../SKILL.md. Phase 2 — warehouse columns + Phase 2.5 view filters -->
+<!-- Part of the tableau-to-sigma workflow — spine: ../SKILL.md. Phase 2 — warehouse columns + Phase 2.5 view filters + aggregation semantics (PR-7 lint) -->
 
 ## Phase 2 — Discover actual warehouse column names
 
@@ -147,3 +147,66 @@ Prefer a **workbook-level control filtering the master table** — every chart t
 
 ---
 
+## Aggregation semantics — pre-aggregated columns (mandatory lint, gate 19)
+
+**Additive aggregation over a pre-aggregated column compiles clean and ships
+wrong-looking-right numbers.** The live twin: a KPI printed **103.3%**
+"% entities with value" because `SUM()` was applied to a `{FIXED day:
+COUNTD(...)}` column at a coarser grain — every entity appearing on more than
+one day is double-counted. The formula validates, the spec POSTs, parity
+buckets can pass; three live runs proved nothing flagged it. Corpus twin:
+`corpus/tableau/preagg-kpi`.
+
+The build seam runs `scripts/lib/agg_semantics_lint.rb` (standalone:
+`ruby scripts/audit-agg-semantics.rb --workdir <W>`) right after the LOD
+audit, writing `<W>/agg-semantics.json` — an EMPTY ledger is still written as
+gate evidence. One entry per hit:
+
+| Class | Fires when |
+|---|---|
+| `additive-over-preagg` | `Sum()`/`Avg()` over a column that is itself an LOD pre-aggregate (`{FIXED…}` output, cross-referenced against the LOD census) — in a source calc OR an emitted dm-spec/wb-spec formula; also when a `landing-manifest.json` entry declares a `grain` and a tile additively aggregates that table while grouping OUTSIDE the grain |
+| `countd-as-sum` | `COUNTD` translated to / consumed via `Sum()` anywhere — a distinct count is not additive |
+| `preagg-ratio` | a ratio formula (KPI numerator/denominator) consuming a pre-aggregate-NAMED column (`DISTINCT_*`, `*_PCT`, `*_RATE`, `AVG_*`, `*_COUNT` — word-token match, so "Daily Distinct Buyers" counts) |
+
+Severity is **WARN-with-required-resolution**: every hit blocks GREEN
+(`assert-phase6-ran.rb` gate 19, exit 26 — no skip flag) until the run records
+ONE of:
+
+- `--how reaggregated` — the consumer was rebuilt at the correct grain
+  (grouped helper re-aggregation, `Max()` of the pre-aggregate at its own
+  grain, `CountDistinct` over the base column). Name the element/column.
+- `--how n/a` — the hit does not apply (e.g. the tile's group-by IS the
+  pre-aggregate's grain, so the sum is exact). **First-class path — never
+  fabricate metadata to satisfy the lint.**
+- `--how faithful-to-source` — the SOURCE workbook itself mixes grains and the
+  migration reproduces it faithfully; the reason documents the hazard for the
+  migration report (the 103.3%-KPI twin case).
+
+```bash
+ruby scripts/audit-agg-semantics.rb --workdir <W> \
+  --resolve <i> --how <reaggregated|n/a|faithful-to-source> --reason "<evidence>"
+```
+
+Re-derivation preserves recorded resolutions. Belt-and-braces in the gate: a
+missing `agg-semantics.json` on a workdir with pre-aggregate evidence (a
+non-empty `lod-audit.json`, or a `COUNTD` calc in `calc-fields.json`) fails —
+pre-aggregates exist and nothing linted their consumption.
+
+---
+
+
+---
+
+## Shared relative-date filters → native ROLLING modes (relocated from SKILL.md — PR-15 diet)
+
+- **Shared relative-date filters** — `build-charts-from-signals.rb` now maps
+  these to Sigma's native ROLLING date-range modes directly:
+  `this <period>` → `mode:current`, `last N <period>` → `mode:last`
+  (`value:N`, `unit`, `includeToday`), `next N` → `mode:next`. They roll with the
+  clock — no frozen dates and no manual master-boolean workaround. Only a
+  shifted/spanning window (one that doesn't anchor to now) falls back to a frozen
+  `mode:between`, flagged `FROZEN — re-run to refresh`. If a shared relative-date
+  filter still shows a uniform parity DIVERGE (every Sigma value too big),
+  confirm the date key survived into the DM and the control's `filters` target
+  wiring reached the chart's source. (Rolling emission verified 2026-07-01;
+  shapes per `sigma-authoring` controls.md, live 2026-06-15.)

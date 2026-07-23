@@ -114,11 +114,15 @@ The rules:
   re-runs the anchor and similarity checks, and reads the source PNG vs the
   final render itself.
 - **GREEN requires the verifier's countersignature.** The verifier — and only
-  the verifier — records the final pass verdict:
+  the verifier — records the final pass verdict, backed by a context-free
+  blind grade (PR-9: the verifier first spawns a fresh grader subagent per
+  `refs/blind-grader-brief.md`, which writes `<workdir>/blind-grade.json`):
 
   ```bash
   ruby scripts/record-visual-check.rb --workdir <workdir> --agent-vision true \
-    --verdict pass --notes "VERIFIER: <what was compared and matched>"
+    --verdict pass --checklist "<six dimensions>" \
+    --blind-grade <workdir>/blind-grade.json \
+    --notes "VERIFIER: <what was compared and matched>"
   ```
 
   **Convention (load-bearing): the verdict notes MUST start with `VERIFIER:`.**
@@ -164,3 +168,75 @@ Non-negotiables regardless of mechanism: the verifier gets a **fresh context**
 (no builder transcript), and each builder gets **one workbook**. The driving
 session's job is orchestration only — spawn, collect results, spawn verifiers,
 handle telemetry consent once at the end — not conversion work of its own.
+
+---
+
+## Converter backend + manual-spec fallback (relocated from SKILL.md — PR-15 diet)
+
+> **Converter backend — LOCAL by default, zero config, never upload customer data silently.**
+> The mechanical path needs the Tableau→Sigma converter, which is **not a server** — it's a
+> pure function (`.twb` XML → Sigma JSON) run via `node`; nothing leaves the machine. A
+> **prebuilt converter ships inside the skill** at `converter/tableau.mjs` and is auto-discovered
+> as the guaranteed fallback, so the local path works with **no clone, no `npm install`, no
+> network** (only `node` on PATH). A developer's own build still wins when present — set
+> `TABLEAU_MCP_BUILD` to a `build/tableau.js`, `SIGMA_DATA_MODEL_MCP` to a checkout, or run
+> `scripts/dev/fetch-converter.sh`. Refresh the vendored copy after the converter changes with
+> `scripts/dev/vendor-converter.sh` (pinned source in `converter/PROVENANCE.json`). The
+> **hosted** converter (`https://sigma-data-model-mcp.onrender.com/mcp`) uploads the `.twb` to
+> a third-party server and is used **only** with explicit `--converter hosted` (which overrides
+> local auto-discovery) or `SIGMA_CONVERTER_ALLOW_HOSTED=1` — never on its own. See QUICKSTART
+> "the data-model converter backend".
+>
+> **No converter available? Re-enter the GATED spine — do NOT hand-drive raw POSTs.**
+> When no backend is configured, the fallback is *not* "build everything by hand and POST
+> it yourself" (that skips preflight/control lint, Phase-6 parity, and the
+> `assert-phase6-ran` hard gate — the exact way a workbook ships with missing controls and
+> an unverified parity claim). Instead author the specs *once* and let the scripts run them:
+> 1. Get the **DM spec** — normally the vendored local converter (`converter/tableau.mjs`)
+>    produces this automatically; reach here only if even that can't run. In that case call
+>    the hosted `sigma-data-model` MCP's `convert_tableau_to_sigma` on the `.twb` if it's
+>    available to you, else author it by hand (see `sigma-data-models`).
+> 2. Author the **workbook spec** (see the companion `sigma-workbooks` skill). Reference the
+>    data model with placeholders the orchestrator binds to the live readback ids:
+>    `"__DM_ID__"` (top-level `dataModelId`) and `"__DM_ELEMENT__:<ElementName>"` per element
+>    (the fact element is `"__DM_ELEMENT__:__FACT__"`). An unresolved element ref aborts loudly.
+> 3. Write `dm-spec.json` + `wb-spec.json` into the workdir and re-run the orchestrator with
+>    `--dm-spec <path> --wb-spec <path>` (fresh build) — or, when the DM is **already posted**
+>    (exit 4 workbook-layer handoff), `--reuse-dm <dataModelId> --wb-spec <path>`. Either way
+>    the spec runs through validate → post-and-readback (preflight/control lint + column guard)
+>    → layout → parity, and stops at exit 12 to collect actuals + `--finalize`. **A conversion
+>    is not done until `assert-phase6-ran.rb` exits 0**, on this path too.
+
+## Still manual by design (the orchestrator stops and tells you)
+
+**Still manual by design (the orchestrator stops and tells you):**
+- **Parity actuals (pivot grids only)** — pass 1 now collects actuals for every
+  exportable chart itself: `collect-parity-actuals.rb` pools the element CSV
+  exports (`POST /v2/workbooks/{wb}/export` → poll → download, 5-wide, under
+  `sigma_rest`'s auto-refresh) straight into `parity-actuals.json`. Only
+  pivot-tables stay agent-mediated (their CSV export is the WIDE grid, not the
+  long row/col/value tuples the plan compares) — pass 1 prints exactly those
+  `mcp__sigma-mcp-v2__query` calls; merge their rows into the same file.
+- **Empty-view-CSV recovery** — a view that exports an empty CSV produces no
+  chart; surfaced at the OPEN-QUESTIONS checkpoint AND by the tile census at
+  `--finalize` (exit 7 → rebuild the chart manually or explain with
+  `--allow-missing-tiles`, naming the zones in your report).
+- **Master-level calc overrides** — when the workbook layer exits 4 naming a
+  field like `master/delivery speed tier`, translate the Tableau calc (see
+  `calc-fields.json`) and re-run the same command with
+  `--master-col 'Name=<Sigma formula>'`.
+- **Shared relative-date filters** — `build-charts-from-signals.rb` now maps
+  these to Sigma's native ROLLING date-range modes directly:
+  `this <period>` → `mode:current`, `last N <period>` → `mode:last`
+  (`value:N`, `unit`, `includeToday`), `next N` → `mode:next`. They roll with the
+  clock — no frozen dates and no manual master-boolean workaround. Only a
+  shifted/spanning window (one that doesn't anchor to now) falls back to a frozen
+  `mode:between`, flagged `FROZEN — re-run to refresh`. If a shared relative-date
+  filter still shows a uniform parity DIVERGE (every Sigma value too big),
+  confirm the date key survived into the DM and the control's `filters` target
+  wiring reached the chart's source. (Rolling emission verified 2026-07-01;
+  shapes per `sigma-authoring` controls.md, live 2026-06-15.)
+- **❌-unhandled gap features** — gap-scout subagent or `--force` (degraded).
+- **DM-reuse shape preflight** — when `--reuse-dm` hits a differently-shaped DM
+  the workbook gate exits 4; run Phase 1.5b (`inspect-dm-shape.rb`) and the
+  agent path against the reused DM.

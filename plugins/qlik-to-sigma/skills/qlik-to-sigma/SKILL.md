@@ -92,6 +92,7 @@ independently runnable script if you need to intervene mid-pipeline.
 
 **Read ALL of the following before replying or taking any action:**
 - `refs/operating-contract.md` — **READ FIRST**: the fidelity guardrails (render + value-check EVERY page against the source; never ship empty or silently drop a tile; don't spin — surface blockers).
+- `refs/modeling-strategy.md` — faithful reproduction is the DEFAULT (parity is the gate); an upstream OBT / Sigma-native materialization is an OPT-IN optimization for hot, join-heavy dashboards, re-verified against the same oracle. The converter never auto-flattens.
 - `refs/sigma-build-gotchas.md` — the hard-won spec rules (SQL element, workbook master, YAML responses). **This is the difference between a 2xx that errors at query time and a working migration.**
 - The repo `~/Desktop/sigma-data-model-mcp/CLAUDE.md` — Sigma DM spec correctness rules + the verified DEMO_DB.DEMO test connection.
 - `~/sigma-skills/sigma-workbooks/SKILL.md` + the Sigma OpenAPI — canonical workbook spec.
@@ -281,6 +282,18 @@ The Qlik cell grid maps 1:1 onto the 24-col Sigma grid. Element shapes + the
 `source.dataModelId` requirement in `refs/sigma-build-gotchas.md`.
 POST `/v2/workbooks/spec`, then `scripts/vendor/put-layout.rb` applies the layout XML.
 
+**DM metric references (leverage the semantic layer, don't duplicate it).** A measure
+column prefers a governed **`[Metrics/<name>]`** reference over re-deriving the aggregation
+inline, when the measure's translated inline aggregate matches a metric hosted on the denorm
+element the master sources. Match is by FORMULA equivalence — strip the master prefix so
+`Sum([Master/Net Revenue])` equals a metric's `Sum([Net Revenue])` — so it's naming-independent
+and SAFE: ratios with no exact-metric match, measures in a different representation (e.g. the
+inline `CountDistinct(...)` vs a Qlik-form `Count(DISTINCT ...)` metric), and any non-match all
+fall back to inline. `migrate-qlik.rb` hands the freshly-built DM spec to the builder via
+`--dm-spec`; the shared binder (`scripts/lib/metric_binding.py`, resolving own + inherited
+metrics through the `source.elementId` chain) does the matching. No `--dm-spec` / the DM-reuse
+path → inline, byte-identical to before. Verified: `tests/test_metric_reference.py`.
+
 **Filterpanes/listboxes → controls (NOT skipped).** Each filterpane child
 listbox (discovered via `qChildList` + per-listbox layout) and standalone
 listbox becomes a Sigma **list control** — or a **date-range control** when the
@@ -293,6 +306,23 @@ MANUAL. The builder emits the **`control-scope.json` sidecar** (contract:
 `scripts/lib/control_lint.rb` header + `refs/control-parity.md`) with
 `sourceFilterSignals`, per-control `mustReach` over every chart on every page
 (static proof of global reach), and `unbound` entries with reasons.
+
+**Native trellis (small multiples).** A Qlik **chart-level trellis** (a chart
+whose Appearance>Trellis splits it into a panel grid by a dimension) and the
+native **trellis-container** object both collapse to Sigma's **native element
+`trellis`** — ONE viz element + `rowsBy`/`columnsBy` faceting, NOT N cloned
+charts. Discovery records the neutral signal `chart["trellis"] = {field,
+orientation, secondary?, label?}`; `build-sigma-workbook.py`'s `emit_trellis`
+adds the facet dimension as a column and calls the shared **`TrellisEmit`**
+(`scripts/lib/trellis_emit.py`, a byte-identical mirror of the Ruby
+`shared/lib/trellis_emit.rb`) — the single source of truth for the supported
+kinds (`bar/line/area/combo/scatter/donut`) and the fallbacks (pie→donut,
+kpi→N sibling KPIs, pivot→own shelves, table→flat). Sigma **silently strips**
+an unsupported `trellis` on readback, so the build writes the neutral
+`native-trellis-emitted.json` sidecar and the round-trip is asserted by
+`verify-trellis-survived.rb` (converter-neutral) against the readback spec. A
+non-trellis app is byte-identical (no signal → no-op → no sidecar). See
+`docs/sigma-trellis-chart-support.md` + `docs/trellis-cross-converter-plan.md`.
 
 ## Phase 5 — Parity (hard gate)
 Three checks, led by the **freshness banner** (Phase 1.5 — read it before any

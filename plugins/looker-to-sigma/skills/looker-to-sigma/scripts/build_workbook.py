@@ -20,6 +20,21 @@ def sid(p="el"): return p + "-" + "".join(secrets.choice(string.ascii_lowercase 
 def disp(seg):  return " ".join(w.capitalize() for w in str(seg).split("_"))
 def leaf(field): return field.split(".")[-1]            # users.traffic_source -> traffic_source
 
+
+def ordered_visible_fields(el):
+    """The DISPLAY order for a table/pivot tile's dimension+measure fields.
+
+    Looker's query.fields is the Data-tab order (dims forced before measures); the
+    tile's ACTUAL column order lives in vis_config.column_order (contract key
+    `columnOrder`), set by dragging columns in the viz. Honor columnOrder when present;
+    any query field not listed there is appended in fields order (Looker appends
+    newly-added fields at the end). Membership is UNCHANGED — hidden columns are handled
+    by the caller via a per-column `hidden` flag so the GROUP-BY grain is never altered.
+    Empty/absent columnOrder → fields order (non-reordered tiles stay byte-identical)."""
+    fields = el.get("fields") or []
+    order = [f for f in (el.get("columnOrder") or []) if f in fields]
+    return order + [f for f in fields if f not in order]
+
 # dimension_group timeframe expansion — MIRRORS the DM converter (lookml.ts
 # TIMEFRAME_MAP / DEFAULT_TIMEFRAMES): a `dimension_group: order_date` with >1
 # timeframes becomes DM columns "Order Date Raw" / "Order Date Date" /
@@ -42,6 +57,7 @@ DEFAULT_TIMEFRAMES = ["raw", "time", "date", "week", "month", "quarter", "year"]
 # the beads-sigma-93ps contract: catalog = data, code = thin resolver/predicates.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 import coverage_catalog as _cc  # noqa: E402
+import trellis_emit as _te      # noqa: E402  shared native-trellis emitter (supported-kind gate + fallbacks)
 _CAT_DIR = _cc.default_catalog_dir(__file__)
 VIZ_CAT  = _cc.load(_CAT_DIR, "viz-kind")        # Looker vis type   -> Sigma element kind
 FMT_CAT  = _cc.load(_CAT_DIR, "number-format")   # value_format_name -> Sigma number format (D3)
@@ -361,6 +377,12 @@ def main():
                    + glob.glob(os.path.join(a.views, "..", "*.model.lkml")))
     aliases = parse_join_aliases(model_files)
     warnings = []
+    # Native-trellis round-trip sidecar records (element_id/kind/name/axis/columnId).
+    # Populated by emit_native_trellis; written to native-trellis-emitted.json ONLY
+    # when a trellis was actually emitted — a dashboard with no small-multiples tile
+    # stays byte-identical (no file). Sigma silently STRIPS an unsupported trellis on
+    # readback, so verify-trellis-survived.rb re-reads the posted spec and asserts each.
+    trellis_records = []
     measures, dims, view_pk, formats, yesno_dims, dim_groups, dim_labels = build_field_index(
         sorted(glob.glob(os.path.join(a.views, "*.view.lkml"))), aliases, warnings)
 
@@ -426,6 +448,9 @@ def main():
                 # FLAT ('<Field> (<view>)'); the base fact element only reaches
                 # them through a relationship traversal. master_ref keys off this.
                 "denorm": (dme.get("name") or "").endswith(" View"),
+                # DM metrics on this element (name+formula) → build_workbook prefers a
+                # governed [Metrics/<name>] ref over re-deriving the aggregate inline.
+                "metrics": dme.get("metrics") or [],
                 "needed": {},
             }
             if n == 1:
@@ -633,6 +658,28 @@ def main():
                             f"master column — emitted Count() as a degraded fallback; verify parity.")
             return "Count()"
         return f"[{master_of(explore)['name']}/{cd}]"
+    def metric_or_inline(f, explore):
+        """Prefer a governed DM-metric reference `[Metrics/<name>]` over re-deriving the
+        aggregation inline, when the measure's inline aggregate matches a metric defined on
+        the source element. Match is by FORMULA equivalence — strip the master prefix so
+        `Sum([Data/Net Revenue])` equals the metric's `Sum([Net Revenue])` — which is
+        naming-independent and SAFE: any mismatch (ratios, filtered measures, custom/ad-hoc
+        measures, or an absent metric list, e.g. the offline test path) falls back to the
+        inline formula. A metric on the DM element resolves as `[Metrics/<name>]` through the
+        master→DM-element source chain (verified live). Scoped to table/pivot calc columns."""
+        inline = formula_for(f, explore)
+        if not is_measure(f) or not isinstance(inline, str):
+            return inline
+        mst = master_of(explore)
+        mets = mst.get("metrics") or []
+        if not mets:
+            return inline
+        want = re.sub(r"\s+", "", inline.replace(f"[{mst['name']}/", "["))
+        for m in mets:
+            mf, mn = m.get("formula"), m.get("name")
+            if mf and mn and re.sub(r"\s+", "", mf) == want:
+                return f"[Metrics/{mn}]"
+        return inline
     def _warn_count(f, el):
         if measures.get(f, (None,))[0] == "count":
             v = f.split(".")[0]
@@ -800,6 +847,52 @@ def main():
                             "Looker dashboard (API-created, never arranged in the UI) — "
                             "auto-flowed to a 2-across grid")
         return L
+
+    def emit_native_trellis(base, el, ex, ds, ms):
+        """Attach Sigma's NATIVE `trellis` (small multiples) to a built element
+        from the Looker donut-multiples signal, via the shared TrellisEmit. No-op
+        (byte-identical) when the tile carries no `trellis` signal. Records the
+        emit for the readback-survival guard.
+
+        The donut base already plots the SLICE category (pivots[0] if pivots else
+        ds[0]) + the measure; the trellis FACET is the OTHER dimension that splits
+        the panels — ds[0] when a pivot supplies the slices, else the 2nd dimension.
+        The supported-kind gate + pie→donut fallback live ONCE in TrellisEmit."""
+        sig = el.get("trellis")
+        if not isinstance(sig, dict) or not sig:
+            return
+        kind = base.get("kind")
+        # Supported-kind gate lives ONCE in TrellisEmit. Unsupported kinds strip the
+        # key silently on readback → leave the element flat (documented fallback).
+        if not _te.trellises(kind):
+            warnings.append(f"tile '{el['name']}': donut_multiples base kind '{kind}' does not "
+                            "support a native trellis (Sigma strips the key on readback) — left FLAT")
+            return
+        # Facet = the panel-splitting dimension, distinct from the slice category.
+        pivots = el.get("pivots") or []
+        facet = (ds[0] if ds else None) if pivots else (ds[1] if len(ds) > 1 else None)
+        if not facet:
+            warnings.append(f"tile '{el['name']}': donut_multiples has no distinct facet "
+                            "dimension (needs a row dim + a pivot or 2nd dim) — emitted a single "
+                            "donut sliced by its one category, no trellis")
+            return
+        # Add the facet dimension as a column (reuse an existing column of the same
+        # display name if the donut already plots it).
+        fname = col_display(facet, ex)
+        base.setdefault("columns", [])
+        facet_col = next((c for c in base["columns"]
+                          if str(c.get("name", "")).strip().casefold() == str(fname).strip().casefold()), None)
+        if facet_col is None:
+            facet_col = {"id": sid("tr"), "formula": formula_for(facet, ex), "name": fname}
+            base["columns"].append(facet_col)
+        orientation = sig.get("orientation") or "cols"
+        _te.apply(base, facet_col["id"], orientation)   # sets base['trellis'] (or flips pie→donut)
+        axis_key = next(iter(base["trellis"].keys()))
+        trellis_records.append({"element_id": base["id"], "kind": base["kind"], "name": base.get("name"),
+                                "axis": axis_key, "columnId": facet_col["id"]})
+        warnings.append(f"native trellis: '{base.get('name')}' → ONE {base['kind']} element with "
+                        f"trellis.{axis_key} (donut small-multiples faceted by '{leaf(facet)}', "
+                        f"orientation={orientation})")
 
     def attach_merge(el, base, kind, ex):
         """Auto-join a Looker merged-results tile's SECONDARY sources onto the
@@ -1122,8 +1215,6 @@ def main():
                     cols.append(dup)
                     base["color"] = {"by": "scale", "column": dupid,
                                      "scheme": looker_color_scheme(el.get("color"))}
-            if el["tileType"] == "looker_donut_multiples":
-                warnings.append(f"tile '{el['name']}': donut_multiples -> single donut-chart (Looker shows N donuts)")
             rm = looker_refmarks(el)
             if rm: base["refMarks"] = rm
         elif kind in ("pie-chart", "donut-chart"):
@@ -1146,13 +1237,20 @@ def main():
             if catf: field2cid[catf] = catid
             if valf: field2cid[valf] = valid
             if valf: _warn_count(valf, el)
-            if el["tileType"] == "looker_donut_multiples":
-                warnings.append(f"tile '{el['name']}': donut_multiples → single donut sliced by "
-                                f"'{leaf(catf) if catf else 'category'}'; the per-multiple dimension is dropped — review in Sigma")
+            # looker_donut_multiples → a native donut trellis is emitted below
+            # (emit_native_trellis), faceted by the panel-splitting dimension.
         elif kind == "table":
             cols, gids, cids = [], [], []
-            for f in el["fields"] + (el.get("pivots") or []):
-                tcol = {"id": sid("c"), "formula": formula_for(f, ex), "name": disp(leaf(f))}
+            hidden = set(el.get("hiddenFields") or [])
+            labels = el.get("columnLabels") or {}
+            # Column order = the Looker VIZ order (columnOrder), not query.fields (the
+            # Data-tab order). Column NAMES prefer the viz series label (columnLabels) over
+            # the humanized field name. Hidden columns get a `hidden` flag, but a hidden
+            # DIMENSION still joins the group-by below so the aggregation grain is unchanged.
+            for f in ordered_visible_fields(el) + (el.get("pivots") or []):
+                tcol = {"id": sid("c"), "formula": metric_or_inline(f, ex), "name": labels.get(f) or disp(leaf(f))}
+                if f in hidden:
+                    tcol["hidden"] = True
                 if is_measure(f):
                     apply_fmt(tcol, f); _warn_count(f, el); cids.append(tcol["id"])
                 else:
@@ -1167,6 +1265,12 @@ def main():
             # col ids]}].
             if gids and cids:
                 base["groupings"] = [{"id": sid("g"), "groupBy": gids, "calculations": cids}]
+            if hidden:
+                warnings.append(
+                    f"tile '{el['name']}': {len(hidden)} column(s) hidden in the Looker "
+                    f"viz ({', '.join(sorted(leaf(h) for h in hidden))}) → hidden in Sigma "
+                    "but KEPT in the group-by, so the aggregation grain (and every measure "
+                    "value) is preserved; confirm row counts in the visual-QA pass.")
             # Looker grid cell visualizations (vis_config.series_cell_visualizations) →
             # Sigma element-level conditionalFormats on the measure's calc column.
             # KEY (verified live 2026-06-24): Sigma `dataBars` are SIGN-colored — one fill
@@ -1208,8 +1312,12 @@ def main():
             # shelves replace `groupings`. Shape verified: sigma-workbooks tables.md.
             cols, row_ids, col_ids, val_ids = [], [], [], []
             pivset = set(el.get("pivots") or [])
-            for f in el["fields"] + (el.get("pivots") or []):
-                tcol = {"id": sid("c"), "formula": formula_for(f, ex), "name": disp(leaf(f))}
+            hidden = set(el.get("hiddenFields") or [])
+            labels = el.get("columnLabels") or {}
+            for f in ordered_visible_fields(el) + (el.get("pivots") or []):
+                tcol = {"id": sid("c"), "formula": metric_or_inline(f, ex), "name": labels.get(f) or disp(leaf(f))}
+                if f in hidden:
+                    tcol["hidden"] = True
                 if is_measure(f):
                     apply_fmt(tcol, f); _warn_count(f, el); val_ids.append(tcol["id"])
                 elif f in pivset:
@@ -1219,6 +1327,11 @@ def main():
                 cols.append(tcol)
                 field2cid[f] = tcol["id"]
             base["columns"] = cols
+            if hidden:
+                warnings.append(
+                    f"tile '{el['name']}': hidden viz column(s) "
+                    f"({', '.join(sorted(leaf(h) for h in hidden))}) hidden in Sigma but "
+                    "KEPT in the query so the pivot grain is preserved.")
             base["values"] = val_ids
             base["rowsBy"] = [{"id": i} for i in row_ids]
             base["columnsBy"] = [{"id": i} for i in col_ids]
@@ -1349,6 +1462,9 @@ def main():
                 base["groupings"][0].setdefault("calculations", []).append(tcid)
             elif kind == "pivot-table":
                 base.setdefault("values", []).append(tcid)
+        # Native small multiples: a looker_donut_multiples tile → ONE donut element
+        # with Sigma's `trellis` facet (no-op / byte-identical when no signal).
+        emit_native_trellis(base, el, ex, ds, ms)
         elements.append(base)
         el.setdefault("_emitted", []).append(base)   # control-targeting (listen:)
 
@@ -1638,6 +1754,18 @@ def main():
     spec["pages"][0]["elements"] = master_elements + scope_elements + scatter_srcs + merge_srcs
 
     open(a.out, "w").write(json.dumps(spec, indent=2))
+    # native-trellis-emitted.json — round-trip guard sidecar. Written ONLY when a
+    # native trellis was actually emitted (a dashboard with no small-multiples tile
+    # stays byte-identical: no file). Sigma silently STRIPS an unsupported trellis on
+    # readback and renders flat with no error, so after the live POST the shared
+    # verify-trellis-survived.rb re-reads GET /v2/workbooks/{id}/spec and asserts
+    # each element below still carries its `trellis.<axis>` key.
+    if trellis_records:
+        nt_path = os.path.join(os.path.dirname(os.path.abspath(a.out)), "native-trellis-emitted.json")
+        json.dump({"version": 1, "source": "looker", "elements": trellis_records},
+                  open(nt_path, "w"), indent=2)
+        print(f"wrote {nt_path} ({len(trellis_records)} native trellis element(s) — "
+              "verify survives readback with verify-trellis-survived.rb)")
     # intended-scope contract for the control-coverage lint — MUST be the
     # control_lint.rb CONTRACT shape (a Hash; a bare array is silently ignored
     # by the lint and every by-design exclusion would flag PARTIAL):

@@ -21,6 +21,7 @@ require 'csv'
 require 'tmpdir'
 require 'open3'
 require 'rbconfig'
+require_relative 'lib/blind_fixture'
 
 Encoding.default_external = Encoding::UTF_8
 
@@ -96,6 +97,23 @@ Dir.mktmpdir do |d|
 end
 
 Dir.mktmpdir do |d|
+  # PR-6 provenance rider: an anchor EXPLICITLY marked png-eyeball earns NO
+  # coverage credit for the tile it matched in (eyeballed values are the weak
+  # reading the field sessions got wrong); legacy provenance-less anchors keep
+  # their credit (back-compat, exercised by the cases above).
+  anchors = BASE_ANCHORS.map(&:dup)
+  anchors[1] = { 'id' => 'a2', 'label' => 'Beta value', 'raw' => '55', 'kind' => 'number',
+                 'provenance' => 'png-eyeball' }
+  spec, exdir = stage_verify_fixture(d, anchors)
+  _out, _err, st = Open3.capture3(RbConfig.ruby, VERIFY, '--workdir', d, '--workbook-spec', spec, '--exports-dir', exdir)
+  v = JSON.parse(File.read(File.join(d, 'anchors-verdict.json')))
+  cov = v['anchor_coverage']
+  check(st.success?, 'png-eyeball anchor still MATCHES (provenance never changes matching)', fails)
+  check(cov && cov['uncovered'].include?('Beta Chart'),
+        "png-eyeball match earns NO coverage credit — Beta stays uncovered (got #{cov.inspect})", fails)
+end
+
+Dir.mktmpdir do |d|
   # coverage_waivers annotate the WARN (the verdict keeps the RAW measurement).
   spec, exdir = stage_verify_fixture(d, BASE_ANCHORS.map(&:dup),
                                      waivers: [{ 'tile' => 'Beta Chart', 'reason' => 'legend-only tile' },
@@ -121,6 +139,7 @@ def oracle_workdir(d, coverage:, waivers: nil, omit_coverage: false)
     'agent_vision' => true))
   File.binwrite(File.join(d, 'sigma-render.png'), "\x89PNG\r\n\x1a\n".b + ("\x00".b * 6000))
   File.write(File.join(d, 'telemetry-sent.json'), JSON.generate('status' => 'sent', 'tool' => 'test'))
+  BlindFixture.install(d) # PR-9: gate 8b refuses a self-attested visual pass
   Dir.mkdir(File.join(d, 'visual-verify')) unless Dir.exist?(File.join(d, 'visual-verify'))
   File.write(File.join(d, 'visual-verify', 'manifest.json'), JSON.pretty_generate(
     (0..2).map { |i| { 'worksheet' => "w#{i}", 'element_id' => "el#{i}", 'visual_verified' => true, 'shape_match' => true } }))
@@ -201,6 +220,7 @@ Dir.mktmpdir do |d|
     'agent_vision' => true))
   File.binwrite(File.join(d, 'sigma-render.png'), "\x89PNG\r\n\x1a\n".b + ("\x00".b * 6000))
   File.write(File.join(d, 'telemetry-sent.json'), JSON.generate('status' => 'sent', 'tool' => 'test'))
+  BlindFixture.install(d) # PR-9: gate 8b refuses a self-attested visual pass
   Dir.mkdir(File.join(d, 'views'))
   File.binwrite(File.join(d, 'views', 'dash.png'), "\x89PNG\r\n\x1a\n".b + ("\x00".b * 100))
   File.write(File.join(d, 'source-anchors.json'), JSON.pretty_generate(

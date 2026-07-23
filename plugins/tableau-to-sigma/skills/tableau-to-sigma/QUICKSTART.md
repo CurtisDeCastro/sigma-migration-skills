@@ -146,12 +146,12 @@ git clone https://github.com/twells89/sigma-migration-skills
 #   plugins/tableau-to-sigma/skills/tableau-to-sigma/
 ```
 
-First run the environment doctor (macOS/Linux/Git-Bash — on Windows PowerShell run `scripts\doctor.ps1` instead), then the two setup scripts. **The doctor is fail-closed on credentials** (missing or broken Sigma creds are a ✗, and it live-smokes the token mint), so run it before and after setup:
+First run the environment bootstrap (macOS/Linux/Git-Bash — on Windows PowerShell run `scripts\bootstrap.ps1` instead), then the two setup scripts. The bootstrap is idempotent, non-interactive, and never needs admin: it verifies/activates/installs the runtimes, ends with a doctor run (**fail-closed on credentials** — missing or broken Sigma creds are a ✗, and it live-smokes the token mint), and writes the sentinel the orchestrator gates on:
 
 ```console
-bash scripts/doctor.sh          # Windows PowerShell: powershell -ExecutionPolicy Bypass -File scripts\doctor.ps1
+bash scripts/bootstrap.sh       # Windows PowerShell: powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1
 ruby scripts/setup.rb           # THE USER runs these two ONCE per machine
-ruby scripts/setup-tableau.rb
+ruby scripts/setup-tableau.rb   # (then re-run the bootstrap to confirm doctor-green)
 ```
 
 `setup.rb` writes `SIGMA_BASE_URL`, `SIGMA_CLIENT_ID`, and `SIGMA_CLIENT_SECRET`; `setup-tableau.rb` writes your Tableau site URL + PAT name + token. Both write to **`~/.claude/settings.json`** (Claude Code auto-loads it) **and** a neutral **`~/.sigma-migration/env`** that the scripts auto-source under any agent — so credentials work the same everywhere. Both prompt interactively and only need to run once — **by the user, in a real terminal**. In a harness with no TTY, `setup.rb` never hangs: it prints the exact flag invocation (`--client-id … --client-secret …`) and exits.
@@ -196,10 +196,11 @@ a conversion drifts (the run-state audit silently no-ops when bypassed).
 The whole conversion is ONE path, start to finish (everything else in this doc
 is detail on these steps):
 
-1. `bash scripts/doctor.sh` — environment + credential preflight (fail-closed;
-   Windows PowerShell: `scripts\doctor.ps1`)
+1. `bash scripts/bootstrap.sh` — environment bootstrap → doctor-green + sentinel
+   (fail-closed; Windows PowerShell: `scripts\bootstrap.ps1`)
 2. `ruby scripts/setup.rb` + `ruby scripts/setup-tableau.rb` — the **user** runs
-   these **once** per machine
+   these **once** per machine (bootstrap runs them `--from-env` when the vars
+   are exported)
 3. `ruby scripts/intake.rb …` — resolve the destination connection/folder into
    the workdir (the orchestrator honors `<WORK>/connection.json`)
 4. `ruby scripts/migrate-tableau.rb …` — **PASS 1** (discovery → gates → DM →
@@ -389,7 +390,7 @@ ruby scripts/assert-phase6-ran.rb --tableau ~/tableau-migration/<slug>
 
 ![tts_hard_gate](assets/tts_hard_gate.png)
 
-Exit 0 means the conversion may declare GREEN. Any non-zero exit means downgrade to YELLOW or RED with a documented reason.
+Exit 0 means the gates passed — the verdict on the final line is what you report: GREEN only when the degradation ledger is empty; YELLOW for quality waivers/residuals; PARTIAL whenever a scope cut (dropped tile/column/control) shipped. Any non-zero exit means downgrade to YELLOW or RED with a documented reason.
 
 **Phase E (opt-in) — Enhance.** Once everything is GREEN you can opt into the
 enhancement pass: add `--enhance` to the `migrate-tableau.rb --finalize` command to

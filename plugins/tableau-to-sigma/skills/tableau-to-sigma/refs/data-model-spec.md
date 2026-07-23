@@ -178,7 +178,18 @@ Use this pattern whenever the workbook needs to slice the fact by a dim attribut
 {"kind": "number", "formatString": "$,.2f", "currencySymbol": "$"}   // currency
 {"kind": "number", "formatString": ",.0f"}                           // integer
 {"kind": "number", "formatString": ",.2%"}                           // percent
+{"kind": "number", "formatString": ",.0f", "displayNullAs": "—"}     // nulls render as the literal
+{"kind": "datetime", "formatString": "%B %-d, %Y"}                   // date-time: d3-time ONLY
 ```
+
+`formatString` is d3-format grammar for numbers and **d3-time (strftime) for
+date-times**. Moment-style token strings (`"MMM D, YYYY"`) are NOT parsed —
+non-`%` characters print literally, so the column renders the token text
+instead of a date. When emitting DM columns from a Tableau source, map the
+column's `.twb` `default-format` through the skill's shared translator
+(`scripts/lib/format_map.rb`, PR-12): currency/percent/decimals/thousands and
+date tokens translate mechanically; anything the translator refuses is
+recorded (formats-coverage) rather than guessed.
 
 ## Response
 

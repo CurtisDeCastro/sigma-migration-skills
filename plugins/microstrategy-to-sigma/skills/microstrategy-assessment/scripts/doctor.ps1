@@ -27,14 +27,16 @@ Write-Host "Environment doctor - host: windows (PowerShell)`n"
 # --- ruby ------------------------------------------------------------------
 $ruby = Get-Command ruby -ErrorAction SilentlyContinue
 if ($ruby) { Ok "ruby - $((& ruby -e 'print RUBY_VERSION' 2>$null))" }
-else { Bad "ruby not found" "Run the bootstrap: powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1   - no-admin install (winget user scope, or scoop-portable fallback); it re-runs this doctor when done." }
+else { Bad "ruby not found" "Run the bootstrap: 'powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1' (user-scoped winget/scoop install, never admin; it re-runs this doctor when done)." }
 
 # --- python (reject the Microsoft Store App-Execution-Alias stub) ----------
 # Detect by PATH first: the stub lives under ...\WindowsApps\. We check py -3,
 # then python / python3, and accept the first whose interpreter is NOT in
 # WindowsApps. (We avoid invoking a WindowsApps stub, which can pop the Store.)
-# bootstrap.ps1 duplicates Test-RealPython — KEEP IN LOCKSTEP (the tableau
-# skill's test-bootstrap-lockstep.sh Part C diffs the two bodies).
+# KEEP IN LOCKSTEP with bootstrap.ps1's Test-RealPython: same probe body, same
+# WindowsApps rejection, so bootstrap and doctor agree on what counts as "a
+# real Python" (the tableau skill's test-bootstrap-lockstep.sh Part C diffs
+# the two bodies, ignoring comments, and fails on drift).
 function Test-RealPython($exe, $pre) {
   $cmd = Get-Command $exe -ErrorAction SilentlyContinue
   if (-not $cmd) { return $null }
@@ -59,7 +61,7 @@ else {
   if ($py) { Ok "python - $py" }
   else {
     Bad "no real Python (the 'python'/'python3' on PATH is likely the Microsoft Store alias stub)" `
-        "Run the bootstrap: powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1   - installs a real Python (winget/scoop, no admin; the stub is rejected by its probe). Manual alternative: disable the stub under Settings > Apps > Advanced app settings > App execution aliases."
+        "Run the bootstrap: 'powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1' (installs a real user-scoped Python, never admin; the stub is rejected by its probe). Manual alternative: disable the stub under Settings > Apps > Advanced app settings > App execution aliases."
   }
 }
 
@@ -72,8 +74,9 @@ if ($script:PyExe) {
   $pyArgs = @(); if ($script:PyPre) { $pyArgs += $script:PyPre }
   $probe = (& $script:PyExe @pyArgs -c "import ssl,importlib.util as iu; print('TRUSTWARN' if ssl.OPENSSL_VERSION.startswith('OpenSSL 3') and iu.find_spec('truststore') is None else '')" 2>$null | Out-String).Trim()
   if ($probe -eq 'TRUSTWARN') {
-    Warn "python uses OpenSSL 3.x without 'truststore' - TLS verification may fail against some servers (e.g. Tableau Cloud) where curl/Ruby succeed" `
-         "Run the bootstrap: powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1   - installs 'truststore' and wires pip to the OS trust store. Do NOT disable TLS verification."
+    $fix = "$script:PyExe"; if ($script:PyPre) { $fix = "$script:PyExe $script:PyPre" }
+    Warn "python uses OpenSSL 3.x without 'truststore' - TLS verification may fail against some servers (e.g. Looker or Tableau Cloud) where curl/Ruby succeed" `
+         "Run the bootstrap: 'powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1' - installs 'truststore' and wires pip to the OS trust store. Do NOT disable TLS verification."
   }
 }
 
@@ -102,7 +105,7 @@ if (Test-Path (Join-Path $PSScriptRoot 'land-extracts.py')) {
 $node = Get-Command node -ErrorAction SilentlyContinue
 if ($node) { Ok "node - $((& node --version 2>$null))" }
 else { Bad "node not found (required - the vendored converters/*.mjs run via node)" `
-           "Run the bootstrap: powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1   - installs Node 22 LTS pinned via the winget/scoop fnm route (user-scoped, no admin, nothing unpinned). Details: refs/environment.md #5." }
+           "Run the bootstrap: 'powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1' - activates a version-manager Node when one exists (fnm/scoop dirs), else installs Node 22 LTS pinned via the winget-scoop fnm route (no admin, nothing unpinned). Details: refs/environment.md #5." }
 
 # --- bash (REQUIRED for get-token.sh / *-auth.sh token minting) ------------
 $bash = Get-Command bash -ErrorAction SilentlyContinue
@@ -110,9 +113,9 @@ if ($bash) {
   Ok "bash - $($bash.Source) (run the *.sh helpers like get-token.sh from Git Bash, or 'bash scripts/get-token.sh')"
 } else {
   $wsl = Get-Command wsl -ErrorAction SilentlyContinue
-  if ($wsl) { Warn "no native bash, but WSL is present" "Run the *.sh helpers via WSL, or run the bootstrap: powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1   - it installs Git for Windows (ships Git Bash) user-scoped for a native bash." }
+  if ($wsl) { Warn "no native bash, but WSL is present" "Run the *.sh helpers via WSL, or run the bootstrap: 'powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1' (installs Git for Windows user-scoped - it ships Git Bash)." }
   else { Bad "no bash found - get-token.sh / *-auth.sh (Sigma token minting) cannot run" `
-             "Run the bootstrap: powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1   - installs Git for Windows (ships Git Bash) user-scoped via winget/scoop; then run the *.sh helpers from Git Bash." }
+             "Run the bootstrap: 'powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1' (installs Git for Windows user-scoped - it ships Git Bash)." }
 }
 
 # --- git autocrlf (CRLF mangles shebangs + bash scripts) -------------------
@@ -131,11 +134,10 @@ if ($crlf -eq 'true') {
 # {cred_smoke:{sigma: pass|fail|skipped}}.
 $script:SmokeSigma = "skipped"
 $envFile = Join-Path $env:USERPROFILE ".sigma-migration\env"
-# Content-based presence (the Tableau twin's pattern below): bootstrap also
-# writes PATH/pip lines into this env file, so bare file-existence would
-# misread a creds-less bootstrapped host as "credentials present".
-$sigmaCreds = ((Test-Path $envFile) -and ((Get-Content $envFile -Raw -ErrorAction SilentlyContinue) -match 'SIGMA_(API_TOKEN|CLIENT_ID)')) -or `
-              $env:SIGMA_API_TOKEN -or $env:SIGMA_CLIENT_ID
+# Content-based presence (the Tableau check's pattern below): bare
+# file-existence would misread an env file holding only non-credential lines
+# (anything a future writer persists there) as "credentials present".
+$sigmaCreds = ((Test-Path $envFile) -and ((Get-Content $envFile -Raw -ErrorAction SilentlyContinue) -match 'SIGMA_(API_TOKEN|CLIENT_ID)')) -or $env:SIGMA_API_TOKEN -or $env:SIGMA_CLIENT_ID
 $sigmaLib = Join-Path $PSScriptRoot "lib\sigma_rest.rb"
 if (-not $sigmaCreds) {
   Bad "no Sigma credentials found (REQUIRED - the run would die at its first Sigma API call)" `
@@ -182,6 +184,35 @@ if ((Test-Path $tabSetup) -and (Test-Path $tabLib)) {
       Bad "Tableau credentials present but the live PAT signin FAILED (expired/revoked PAT, wrong site or server URL)" `
           "Re-run 'ruby scripts/setup-tableau.rb' with a fresh PAT. Genuinely offline? Set SIGMA_SKIP_CRED_SMOKE=1 to skip this probe."
       $script:SmokeTableau = "fail"
+    }
+  }
+}
+
+# --- Looker API reachability (self-gated: looker skills only) ----------------
+# Plugin-aware like the Tableau checks: only where looker_api.py + ~/.looker/
+# looker.ini exist. Modern Google-hosted Looker serves the API on 443; the
+# legacy :19999 is often unreachable. looker_api self-heals to 443, but flag a
+# stale ini. Uses the UNAUTHENTICATED /api/4.0/versions via Invoke-WebRequest
+# (Windows cert store - isolates the PORT question from the TLS one above).
+$script:LookerProbe = "skipped"
+$lkIni = Join-Path $env:USERPROFILE ".looker\looker.ini"
+$lkApi = Join-Path $PSScriptRoot "looker_api.py"
+if ((Test-Path $lkApi) -and (Test-Path $lkIni)) {
+  $lkMatch = Select-String -Path $lkIni -Pattern '^\s*base_url\s*=\s*(.+?)\s*$' -ErrorAction SilentlyContinue | Select-Object -First 1
+  $lkBase = if ($lkMatch) { $lkMatch.Matches.Groups[1].Value.TrimEnd('/') } else { "" }
+  if ($lkBase) {
+    $lkNoPort = ($lkBase -replace '^(https?://[^/:]+)(:\d+)?.*$', '$1')
+    $reach = { param($u) try { Invoke-WebRequest -Uri "$u/api/4.0/versions" -TimeoutSec 8 -UseBasicParsing -ErrorAction Stop | Out-Null; $true } catch { $false } }
+    if (& $reach $lkBase) {
+      Ok "Looker API reachable at $lkBase"; $script:LookerProbe = "pass"
+    } elseif (($lkNoPort -ne $lkBase) -and (& $reach $lkNoPort)) {
+      Warn "Looker base_url ($lkBase) is unreachable but $lkNoPort (443) answers - looker_api will self-heal to 443 at run time" `
+           "Update base_url in ~/.looker/looker.ini to '$lkNoPort' (drop the legacy :19999 API port), or set LOOKER_BASE_URL."
+      $script:LookerProbe = "fallback"
+    } else {
+      Warn "Looker API not reachable at $lkBase (network / VPN / instance URL?)" `
+           "Confirm the Looker instance URL and that this host can reach its API 4.0 endpoint."
+      $script:LookerProbe = "fail"
     }
   }
 }
@@ -248,7 +279,7 @@ $doctor = [ordered]@{
   runtimes     = [ordered]@{ ruby = $rubyOk; python = $pyOk; node = $nodeOk; bash = [bool](Get-Command bash -ErrorAction SilentlyContinue) }
   versions     = [ordered]@{ ruby = "$rubyV"; python = "$pyV"; node = "$nodeV" }
   sandbox_hint = $sandbox
-  cred_smoke   = [ordered]@{ sigma = $script:SmokeSigma; tableau = $script:SmokeTableau }
+  cred_smoke   = [ordered]@{ sigma = $script:SmokeSigma; tableau = $script:SmokeTableau; looker = $script:LookerProbe }
   hyperapi_present = $hyperapiPresent
   skill_sha    = "$skillSha"
   behind_count = $behindCount

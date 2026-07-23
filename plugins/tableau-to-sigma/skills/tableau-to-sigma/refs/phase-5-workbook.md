@@ -72,6 +72,7 @@ What the remaining message types mean — act on each one:
 - `WARN 'X' has Tableau reference marks (...) not auto-emitted` — add Sigma `referenceMarks` post-publish (beads-sigma-7ak).
 - `'X' has N Tableau action filter(s) — skipped` — read `<out>-actions.md` and wire Sigma cross-element filtering manually.
 - `parameter '...' is a numeric range — skipped auto-control` — add a number control by hand (beads-sigma-ebw).
+- `DATASOURCE-level filter 'X' (always-on) … Recorded needs-master-default` (#483) — an always-on Tableau data-source filter (a virtual-connection `<shared-view>` database-domain filter such as `company_active = true`) whose column is not a charted dimension. It is **NOT optional** and renders nothing on any dashboard, so a visual check can't catch a miss. **Apply it as a workbook-wide default filter on the master element** — an element-level `filters` entry `{columnId, kind:"list", mode:"include", values:[…]}` on the `master` table (so every element sourcing it inherits the scope) — NOT an open `values:[]` control, which widens it back to everything. The **datasource-filter gate** (`scripts/assert-datasource-filters.rb`, run at `migrate-tableau.rb --finalize` and standalone) blocks GREEN until it is applied (an `is_active_flag` filter must be applied, not merely surfaced as a control). Escape hatch: `--skip-datasource-filters "<reason>"`.
 
 ### Multi-metric region dashboard (READ if a control's `png-read.json` mixes `target_tiles` and `highlight_tiles`)
 
@@ -152,9 +153,25 @@ Spec skeleton (two pages, master on `Data`, all charts on `Orders Overview`):
 Rules:
 - Master `kind` is `table`, `visibleAsSource: false`, sourced from the DM element.
 - Master-column formulas use the DM element's `name` as prefix (`[Order Fact/Sales]`, not the element ID).
-- Charts and controls source the master with `"elementId": "master"` regardless of which page they live on — cross-page references are fully supported.
+- Charts and controls source the master with `"elementId": "master"` regardless of which page they live on — cross-page **source** references (chart → master) resolve fine.
 - Chart-column formulas use the master table's `name` as prefix (`[Master/Sales]`).
-- Layout XML must produce **one `<Page>` tag per page**, including a tiny full-width `<LayoutElement elementId="master" .../>` inside the Data page's `<Page>`.
+- Layout XML must produce **one `<Page>` tag per page**, including a tiny full-width `<LayoutElement elementId="master" .../>` inside the Data page's `<Page>` (one entry **per master instance** when per-page masters are on — see below).
+
+> **⚠️ Per-page masters (PLAN-v3 PR-17, flag-staged).** A control filter *propagates
+> along source chains, not page boundaries* — so when **multiple content pages share
+> ONE master**, every page's controls compose on that one master: flipping page A's
+> control silently refilters page B's tiles (V5.6-CONTROLS-AUDIT D11; reproduced live
+> 2026-07-19 — Overview flip dropped BOTH pages 5266→2220 rows). The static control
+> lint (gate 7) can't see it (it walks the global source closure). **Fix:** pass
+> `--per-page-masters` to `migrate-tableau.rb` (or `build-workbook-spec.rb`). Each
+> content page that draws on the master then gets its **own** clone on the Data page
+> (`master-<page-slug>`, `<helper-id>-<page-slug>`; column ids preserved so control
+> `filters[].columnId` still resolves), and that page's charts/controls/helpers are
+> repointed to it — a control now filters only its own page's tiles (live-verified:
+> the other page held at 5266 rows). The transform (`scripts/lib/per_page_masters.rb`)
+> is a **final structural pass, self-gating**: a NO-OP unless ≥2 content pages use the
+> master, so single-page and single-dashboard workbooks stay byte-identical to the
+> shared-master build. **Default OFF** for one release — opt in per migration.
 
 > **Control element skeleton — every field is required.** First POSTs commonly
 > fail with `Invalid kind: "control"` because one of these is missing. The

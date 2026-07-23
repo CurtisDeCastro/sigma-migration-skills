@@ -2,6 +2,10 @@
 
 ## Phase 6 — Verify chart data matches Tableau (MANDATORY — hard-gated)
 
+> **Tile-grain warehouse ground truth (PR-5/PR-6):** `scripts/derive-ground-truth.rb` → `scripts/run-ground-truth.rb` → `scripts/verify-ground-truth.rb` derive, execute, and compare per-tile ground-truth SQL from the .twb signals (independent of the builder), stamping per-tile `numeric_parity` into `parity-final.json`. **Gate 18 (exit 25) requires every displayed tile numeric-verified by ≥1 oracle** — warehouse-sql/vds ground truth matched, or VALUED anchors (numeric, provenance `view-csv`/`vds`) — or a named `coverage_waivers` entry in `ground-truth-plan.json`; a diverge or oracle-vs-anchors conflict is never waivable, and there is no skip flag. See `refs/ground-truth-oracle.md` (incl. the anchors-coexistence conflict matrix).
+
+> ⚠️ **VDS is NOT a valid oracle for tiles fed by fan-out joins** (Twin-B e2e, 2026-07-19). VDS queries through Tableau's logical layer, which culls relationship joins per-viz — it returns **relationship-culled (un-fanned) data**, so a tile fed by a fan-out join gets a VDS answer that can *agree* with a Sigma build that silently dropped the join (false green; that run's tiles diverged 3–23×). `derive-ground-truth.rb` therefore demotes a tile's `vds` classification to `anchor-only` while the workdir's `join-plan.json` (gate 16's ledger) carries a join for that datasource not proven `unique` — run `probe-join-keys.rb` first to keep VDS coverage on proven-safe tiles. Never hand-pick VDS as the value oracle for such a tile. Details: `refs/ground-truth-oracle.md`.
+
 > **A conversion is not complete until `scripts/assert-phase6-ran.rb` exits 0.** This is a *hard gate*, not a guideline. `phase6-parity.rb --finalize` writes `<WORK>/parity-final.json` as a sentinel; `assert-phase6-ran.rb` reads it and exits non-zero if Phase 6 was skipped, ran in extract-mode without permission, or failed parity. Subagent flows (cluster followers via `tableau-assessment`) MUST run the assertion as their final step before writing the result line — without it, an agent can silently skip Phase 6 entirely and self-report `charts_pass: 0, charts_total: 0` to slip past the GREEN check. See `beads-sigma-4pm` for the regression that motivated the gate.
 
 > **PUT returning `success: true` is not verification.** It only proves the spec parsed. Two recent customer-visible bugs reached the customer because Phase 6 was skipped: a window-function calc compiling silently as `error` and a pie chart wired to the wrong dimension. Compile-clean from `verify-workbook.rb` is also not parity verification — that only confirms each formula resolves, not that the numbers match.
@@ -224,7 +228,8 @@ After workbook PUT and before declaring GREEN you MUST:
 1. POST `/v2/workbooks/{wb}/export` with body `{pageId, format: {type: "png", pixelWidth: 1920, pixelHeight: 1500}}`.
 2. Poll `GET /v2/query/{q}/download` until content-type is `image/png` and save to `<WORK>/sigma-render.png`.
 3. Read `sigma-render.png` via the Read tool and visually compare against the source dashboard PNG you read in Phase 1d (and any per-sheet PNGs).
-4. **Record the verdict (now machine-enforced — gate 8b):** run `ruby scripts/record-visual-check.rb --workdir <WORK> --verdict pass --notes "<what you compared>"`. This stamps `visual_checked`/`screenshot_path` into `parity-final.json`; `assert-phase6-ran.rb --require-visual-comparison` (which `migrate-tableau.rb --finalize` passes for you) **exits 13** until it's recorded. If the render DIVERGES from the source, record `--verdict divergent --notes "<gap>"` (the gate stays blocked), fix the spec, re-render, re-read, then re-record `--verdict pass`. Any visual divergence forces YELLOW (or RED if a tile is missing or unreadable).
+4. **Blind grade (PR-9 — required for a pass):** your own read (step 3) drives the fix loop, but the PASS verdict must come from a **context-free blind grader**. Spawn a fresh subagent with `refs/blind-grader-brief.md` as its prompt, passing ONLY the source dashboard PNG path, `<WORK>/sigma-render.png`, the rubric path, and the output path `<WORK>/blind-grade.json` — no wb-spec, no run history, no builder context. It writes a sha256-bound `blind-grade.json` with per-dimension verdicts and per-tile chart-family readings (cross-checked against `wb-readback.json`/`png-read.json` — a fabricated grade is refused as inconsistent).
+5. **Record the verdict (machine-enforced — gate 8b):** run `ruby scripts/record-visual-check.rb --workdir <WORK> --agent-vision true --verdict pass --checklist "<six dimensions>" --blind-grade <WORK>/blind-grade.json --notes "<what you compared>"`. This stamps `visual_checked`/`blind_grade` into `parity-final.json`; `assert-phase6-ran.rb` (which `migrate-tableau.rb --finalize` runs for you) **exits 13** until a blind-graded pass is recorded — a pass without `--blind-grade` is refused by the recorder, and a self-attested/hand-stamped pass is refused by the gate (it re-verifies the grade sha-bound against the images on disk). If the render DIVERGES (your read OR the blind grade fails), record `--verdict divergent --notes "<gap>"` (the gate stays blocked), fix the spec, re-render, re-read, re-grade with a FRESH grader, then re-record `--verdict pass`. Sessions that cannot spawn a vision-capable grader: `--no-vision-waiver "<reason>"` (counted against the waiver budget). Any visual divergence forces YELLOW (or RED if a tile is missing or unreadable).
 
 > **Visual QA is a mandatory gate — never skip, never declare done on HTTP 200.** A workbook that POSTs cleanly and passes CSV parity can still be visually broken (overlapping tiles, clipped titles, dead zones, floating filters; Sigma's grid has no z-order). After `export-chart-png.rb` renders the pages/elements:
 > 1. **Read each PNG** and check it against `refs/layout-visual-qa.md` (no overlaps/stacking, no dead zones, controls placed in-band, no clipped titles, even heights, right chart kind/format). Pair with the Tableau MCP `get-view-image` for source-vs-target.
@@ -306,3 +311,58 @@ gate 7 (control lint). Auto-pick needs a list/segmented/switch control; pass
 answer (MCP applies saved control defaults and has NO parameter mechanism;
 only the export API's `parameters` map can flip a control programmatically).
 
+
+---
+
+## Phase 6f — blind visual grade + gate sequence (relocated from SKILL.md — PR-15 diet)
+
+**Phase 6f — BLIND visual grade (PR-9, mandatory for a pass verdict).** Your own
+read is the fix loop, **not** the verdict — a field run self-graded its workbook
+6/6 PASS on visuals the customer rejected. When you believe the render matches,
+spawn a **FRESH context-free subagent** (Agent tool, `general-purpose`) whose
+prompt is `refs/blind-grader-brief.md` with exactly four parameters filled in:
+the source dashboard PNG path, the Sigma render PNG path, the rubric path
+(`refs/fidelity-rubric.md`), and the output path `<WORK>/blind-grade.json`.
+**Pass NOTHING else — no wb-spec, no parity artifacts, no run history, no
+transcript, no "context", no expected outcome.** Any run context anchors the
+grade and voids it. The grader Reads both images and writes `blind-grade.json`
+(sha256-bound, per-dimension verdicts, per-tile chart families). Then record:
+`ruby scripts/record-visual-check.rb --workdir <WORK> --agent-vision true
+--verdict pass --checklist "…" --blind-grade <WORK>/blind-grade.json` — a pass
+without a passing blind grade is REFUSED (and gate 8b re-verifies the grade
+hash-bound). Blind grade FAILS → record `--verdict divergent`, fix its top
+gaps, re-render, re-grade with a fresh grader. Only if the session cannot spawn
+a vision-capable subagent: `--no-vision-waiver "<reason>"` (budget-counted,
+named in the report). Finish with the gate sequence:
+```bash
+ruby scripts/assert-dashboard-read.rb --workdir <WORK>                  # 🚧 Phase 1d belt
+ruby scripts/verify-anchors.rb --workdir <WORK> --workbook-id <wb>      # 🚧 measured value bar → anchors-verdict.json
+ruby scripts/assert-run-state.rb --workdir <WORK>                       # 🚧 phase-chain ledger audit
+ruby scripts/assert-phase6-ran.rb --workdir <WORK> --workbook-id <wb>   # 🚧 hard gate — must exit 0
+```
+**A conversion is NOT done until `assert-phase6-ran.rb` exits 0** (which stamps
+`<WORK>/phase6-success.json`). Confirm it before claiming success with the single
+offline check — `ruby scripts/verify-complete.rb --workdir <WORK>` must print
+✅ DONE / exit 0. The marker is **run-scoped**: a migration may be reported
+complete ONLY when `<WORK>/phase6-success.json` exists **for the current run id**
+(the gate deletes a stale marker from a previous run on any failure) — quote the
+marker's workbook id + run id verbatim in your report. Full detail
+(raw-warehouse mode, triage, visual checklist): `refs/phase-6-parity.md`.
+
+### No-standalone-views path (dashboard-embedded worksheets)
+
+dashboard's worksheets are embedded-only (no standalone views to export CSVs
+from), chart-by-chart CSV parity may be genuinely unavailable. The parity
+oracle is then **anchors + warehouse** — `verify-anchors.rb` (printed source
+values found in the live exports) plus `verify-warehouse.rb` (elements evaluate
+against real warehouse data). **`--skip-parity-gate` alone is no longer a valid
+combination:** the gate **rejects it (exit 18)** unless `anchors-verdict.json`
+exists and passes. The anchors oracle replaces parity — never nothing.
+
+### Visual-similarity floor (measured)
+
+present, the gate runs
+`python3 scripts/visual-similarity.py --source <src> --render <render> --json-out <WORK>/visual-similarity.json`
+and fails (exit 20) when its JSON `pass` field is false — a measured companion
+to the recorded visual verdict (details: `refs/visual-similarity.md`). Escape
+`--skip-visual-similarity "<reason>"` (counted as a waiver).

@@ -37,6 +37,8 @@ require 'json'
 # parses a 5 MB / 95-worksheet workbook in well under a second. See lib/twb_xml.rb.
 $LOAD_PATH.unshift File.expand_path('lib', __dir__)
 require 'twb_xml'
+require 'format_map' # PR-12: the ONE Tableau→Sigma format translator (lib/format_map.rb)
+require 'integer_dim' # PR-18: integer-coded dimension detection (shelf role + datatype)
 
 # ---- Per-dashboard scoping ------------------------------------------------
 # `--dashboard "<name>"` (repeatable) and `--page <id>` let a LARGE workbook
@@ -179,10 +181,17 @@ end
 #
 # We build a single lookup: { "c2ec6b07-..." => { caption:, datatype: } }.
 COL_BY_GUID = {}
+# Column role by GUID/body (PR-18): Tableau tags a `<column>` role='dimension'
+# when the field is used discretely. Captured alongside caption/datatype so the
+# integer-coded-dimension detector can confirm a discrete-dimension shelf role.
+# A role='dimension' declaration anywhere wins (a field used discretely on ANY
+# sheet is a discrete dimension for filter purposes).
+COL_ROLE_BY_KEY = {}
 xml.elements.each('//column') do |c|
   raw = c.attributes['name'].to_s
   cap = c.attributes['caption']
   dt  = c.attributes['datatype']
+  role_attr = c.attributes['role'].to_s
   # v5.1.1: carry the calc FORMULA — the translator's one-level calc-ref
   # dereference (RANK([CalcRef])<=N over a window share) resolves through it.
   cf  = (calc_el = c.elements['calculation']) && calc_el.attributes['formula']
@@ -197,6 +206,7 @@ xml.elements.each('//column') do |c|
   # when a caption exists (the GUID itself is not human-readable).
   if body =~ /\A([0-9a-f]{8}-[0-9a-f\-]{20,}|Calculation_\d+)/i
     head = body.split(/\s/, 2).first
+    COL_ROLE_BY_KEY[head] = 'dimension' if role_attr == 'dimension'
     if cap && !cap.empty?
       COL_BY_GUID[head] ||= { caption: cap, datatype: dt }
       COL_BY_GUID[head][:formula] ||= cf if cf
@@ -207,6 +217,7 @@ xml.elements.each('//column') do |c|
       COL_BY_GUID[head][:formula] ||= cf
     end
   else
+    COL_ROLE_BY_KEY[body] = 'dimension' if role_attr == 'dimension'
     # Friendly / group / copy names are referenced VERBATIM by their full body
     # (e.g. instance ref `[none:Customer Geo:nk]` → "Customer Geo", filter
     # `[Partner Level (group)]` → "Partner Level (group)"). Register under the
@@ -218,6 +229,33 @@ xml.elements.each('//column') do |c|
     COL_BY_GUID[body] ||= { caption: (cap && !cap.empty? ? cap : body), datatype: dt }
     COL_BY_GUID[body][:formula] ||= cf if cf
   end
+end
+
+# ---- Per-column DEFAULT formats (PR-12) ------------------------------------
+# Tableau stores a column's default number/date format as a `default-format`
+# ATTRIBUTE on <column> (e.g. default-format='p0.00%' / '$#,##0') and, in
+# older serializations, as a column-scoped <format attr='…-format' value='…'/>
+# child (no field= attr — worksheet-level text-format entries DO carry field=
+# and are parsed per worksheet below). These are the display ground truth for
+# any sheet that doesn't override per-pill — the reason a one-shot KPI printed
+# raw where the source shows $-formatted. Keyed by caption; first (richest)
+# declaration wins. Shipped in the meta sidecar as 'column_formats'.
+COLUMN_FORMATS = {}
+xml.elements.each('//column') do |c|
+  cap = c.attributes['caption']
+  cap = c.attributes['name'].to_s.gsub(/^\[|\]$/, '') if cap.nil? || cap.empty?
+  next if cap.to_s.empty?
+  fmt = c.attributes['default-format'].to_s
+  if fmt.empty?
+    c.elements.each('.//format') do |f|
+      next unless f.attributes['field'].nil? && f.attributes['attr'].to_s =~ /-format\z/
+      v = f.attributes['value'].to_s
+      fmt = v unless v.empty?
+      break unless fmt.empty?
+    end
+  end
+  next if fmt.empty?
+  COLUMN_FORMATS[cap] ||= fmt
 end
 
 # Filter columns use a column-instance level reference like
@@ -353,8 +391,18 @@ def normalize_filter(f)
     topn = nil
     order_expr = nil
     order_dir  = nil
+    ui_domain  = nil
     f.each_element('.//groupfilter') do |gf|
       fn = gf.attributes['function'].to_s
+      # ui-domain (#483): a filter whose enumeration is scoped to the whole
+      # database — `user:ui-domain='database'` on the union/filter node — is a
+      # DATA-SOURCE-level (always-on) filter, not a dashboard quick-filter the
+      # user toggles. Capture it so the shared-view walk can distinguish a
+      # virtual-connection data-source filter (which renders nothing on any
+      # dashboard) from a real quick filter. (Nokogiri resolves `user:`; probe
+      # both keys for the REXML fallback.)
+      dom = gf.attributes['user:ui-domain'] || gf.attributes['ui-domain']
+      ui_domain ||= dom.to_s if dom && !dom.to_s.empty?
       # EXCLUDE mode (D1/P0.1): the member tree is wrapped in
       # `function='except'` (and/or tagged `user:ui-enumeration='exclusive'`).
       # The member descendants are then the EXCLUDED values — collecting them
@@ -412,6 +460,14 @@ def normalize_filter(f)
     out['kind']    = 'list'
     out['members'] = members
     out['exclude'] = true if exclude
+    out['ui_domain'] = ui_domain if ui_domain
+    # A single-member boolean list (e.g. `company_active = true`) is the classic
+    # always-on "active flag" data-source filter shape (#483). Advisory metadata;
+    # the gate keys on is_datasource_filter, this only sharpens its messaging.
+    if !exclude && members.length == 1 &&
+       %w[true false 1 0 yes no].include?(members.first.to_s.downcase)
+      out['is_active_flag'] = true
+    end
     # An exclude filter whose excluded members include Null: the view hides
     # the null bucket. Surfaced so the builder can filter nulls at the list
     # control's option source (#417 workaround) instead of emitting the
@@ -449,6 +505,15 @@ def normalize_filter(f)
   else
     out['kind'] = 'unknown'
   end
+
+  # PR-18: flag an integer-coded column used as a DISCRETE dimension on a filter
+  # shelf. Signals: integer datatype + a discrete (categorical/list) filter, or a
+  # declared `role='dimension'`. Downstream (build-charts) routes a Text() decode
+  # helper so the Sigma list control's STRING option values actually filter the
+  # column instead of being silently stripped. Only stamped when TRUE — a
+  # non-integer/quantitative filter's normalized output is unchanged.
+  role = COL_ROLE_BY_KEY[guid] if guid
+  out['integer_dim'] = true if IntegerDim.integer_dim_filter?(out.merge('role' => role))
   out
 end
 
@@ -1087,6 +1152,38 @@ xml.elements.each('//worksheet') do |ws|
     end
   end
 
+  # PR-12: explicit per-series COLOR ASSIGNMENTS — the member→color map Tableau
+  # serializes on the CATEGORICAL color encoding (type='palette'):
+  #   <encoding attr='color' field='[fed].[none:Value Tier:nk]' type='palette'>
+  #     <map to='#f2c037'><bucket>&quot;Top 500&quot;</bucket></map>
+  # Captured in .twb document order, verbatim; ramp encodings (type=
+  # '[custom-]interpolated', already surfaced as heat_scheme) are excluded —
+  # their <map> buckets are numeric breakpoints, not series members. The
+  # builder + theme derivation turn this into ORDERED schemes (ascending
+  # member order = Sigma's positional category-sort application), which is
+  # what kills the Top/Bottom-500 inversion class. No map ⇒ nil ⇒ the
+  # frequency-ranked brand-palette derivation applies unchanged.
+  series_colors = nil
+  series_color_field = nil
+  ws.elements.each(".//encoding[@attr='color']") do |enc|
+    next if enc.attributes['type'].to_s =~ /interpolated/
+    pairs = []
+    enc.elements.each('map') do |mp|
+      hex = mp.attributes['to'].to_s.strip.downcase
+      next unless hex =~ /\A#[0-9a-f]{6}\z/
+      bucket = mp.elements['bucket']
+      member = bucket && unquote_member(bucket.text)
+      next if member.nil? || member.empty?
+      pairs << { 'member' => member, 'color' => hex }
+    end
+    next if pairs.empty?
+    series_colors = pairs
+    g = guid_from_param(enc.attributes['field'].to_s)
+    info = g && COL_BY_GUID[g]
+    series_color_field = (info && info[:caption]) || g
+    break
+  end
+
   worksheets[name] = {
     mark_class:       mark_class,
     geo_role:         geo_role,
@@ -1097,6 +1194,9 @@ xml.elements.each('//worksheet') do |ws|
     shelf_sorts:      shelf_sorts,
     quick_calc_pcto:  quick_calc_pcto,
     heat_scheme:      heat_scheme,
+    # PR-12: explicit member→color assignments + the encoded column's caption
+    series_colors:      series_colors,
+    series_color_field: series_color_field,
     filters:          filters_info,
     hidden_filters:   hidden_filters,
     aggregations:     aggregations,
@@ -1123,62 +1223,17 @@ xml.elements.each('//worksheet') do |ws|
 end
 
 # ---- Tableau format → Sigma format translator -----------------------------
-# Tableau format codes (subset we see in the wild):
-#   p0%      → ,.0%
-#   p0.0%    → ,.1%
-#   p0.00%   → ,.2%
-#   0        → ,.0f
-#   0.0      → ,.1f
-#   #,##0    → ,.0f
-#   $#,##0   → $,.0f (currency)
-#   $#,##0.00→ $,.2f
-#   yyyy-MM-dd → %Y-%m-%d
-#   MMM yyyy   → %b %Y
-#   yyyy       → %Y
+# PR-12: delegates to the shared lib/format_map.rb (the ONE translator — the
+# builder's copy delegates there too, so the two can't drift again). Subset:
+#   p0.0% / #,##0.0% → ,.1%      $#,##0.00 / C1033 → $,.2f (+currencySymbol)
+#   #,##0 → ,.0f                 pos;(neg) → '(' paren-negative prefix
+#   yyyy-MM-dd → %Y-%m-%d        MMM yyyy → %b %Y
+# Date-times are d3-time/strftime strings ('%B %-d, %Y'); moment-style tokens
+# ("MMM D, YYYY") print LITERALLY in Sigma, so FormatMap refuses (nil) any
+# string it can't fully tokenize — unmapped formats are recorded downstream
+# (formats-emitted.json), never guessed.
 def translate_format(tableau_fmt)
-  s = tableau_fmt.to_s
-  return nil if s.empty?
-  # Tableau format strings can have multiple segments split by ';':
-  #   positive;negative;zero;text
-  # The negative segment encodes parens / explicit minus / [Red]. d3-format
-  # supports a `(` sign modifier that wraps negatives in parens. We detect that
-  # case and prepend `(` to the format string.
-  segments = s.split(';')
-  pos = segments[0] || s
-  neg = segments[1]
-  paren_negative = neg && neg.include?('(') && neg.include?(')')
-  prefix = paren_negative ? '(' : ''
-
-  # Percent — p<digits>[.<digits>]%
-  if (m = pos.match(/^p\d*(?:\.(\d+))?%$/i))
-    decimals = (m[1] || '').length
-    return { 'kind' => 'number', 'formatString' => "#{prefix},.#{decimals}%" }
-  end
-  # Tableau locale-currency code — C<locale>[.<digits>]% (e.g., C1033% = $#,##0)
-  if (m = pos.match(/^C\d+(?:\.(\d+))?%?$/))
-    decimals = (m[1] || '').length
-    return { 'kind' => 'number', 'formatString' => "#{prefix}$,.#{decimals}f", 'currencySymbol' => '$' }
-  end
-  # Currency — leading $ or c"$" / c\"$\"
-  if pos =~ /^c?["\\]*\$/ || pos.start_with?('$')
-    # Look for #...0.00 to extract decimals
-    decimals = (pos.match(/\.(0+)/) || [])[1].to_s.length
-    return { 'kind' => 'number', 'formatString' => "#{prefix}$,.#{decimals}f", 'currencySymbol' => '$' }
-  end
-  # Plain number — count decimals after the decimal point
-  if pos =~ /^[#,0]+(?:\.(0+))?$/
-    decimals = ($1 || '').length
-    return { 'kind' => 'number', 'formatString' => "#{prefix},.#{decimals}f" }
-  end
-  # Date formats — translate Tableau tokens to strftime
-  if s =~ /yyyy|MMM|MM|dd|HH/
-    f = s
-      .gsub('yyyy', '%Y').gsub('yy', '%y')
-      .gsub('MMMM','%B').gsub('MMM','%b').gsub('MM','%m')
-      .gsub('dd','%d').gsub('HH','%H').gsub('mm','%M').gsub('ss','%S')
-    return { 'kind' => 'datetime', 'formatString' => f }
-  end
-  nil
+  FormatMap.translate(tableau_fmt)
 end
 
 # Translate Tableau mark class + geo signals into a Sigma-relevant chart-kind label.
@@ -1550,6 +1605,139 @@ def build_zone_tree(z)
   node
 end
 
+# ---- Native trellis detection (fix/native-trellis, SUPERSEDES #451 B1) ------
+# A "trellis" is a Tableau dashboard that repeats the SAME viz across a
+# categorical dimension as small multiples — authored as N sibling worksheets,
+# each pinned to one member of the same field (the benchmark's 4 Ship-Method
+# panels). The CORRECT Sigma shape for this is a SINGLE viz element carrying a
+# native `trellis` property (rowsBy / columnsBy) — NOT N cloned chart elements.
+# This detector identifies the repetition + the facet field + the source
+# ARRANGEMENT; the builder (build-charts-from-signals) then collapses the N
+# worksheets into ONE element and attaches trellis.rowsBy / columnsBy.
+#
+# Detection is deliberately CONSERVATIVE — it must NEVER fire on a non-trellis
+# dashboard (that would change the byte-identical flat output). A group needs:
+#   * >=3 sibling CHART zones (not KPI/table/pivot — those trellis differently),
+#   * an identical viz template  (same chart_kind + same measure set),
+#   * each carrying exactly the facet field as a single-member categorical
+#     `list` filter, pinning DISTINCT members, and
+#   * a tiled small-multiples geometry (a horizontal row, a vertical stack, or
+#     a grid) — the arrangement decides rowsBy vs columnsBy.
+# The native single-worksheet Tableau trellis (one sheet, dim on Rows/Cols) is
+# NOT handled here — its member list isn't in the .twb, so the panel set can't
+# be built offline (stays the existing UI-only WARN, F4).
+TRELLIS_KINDS = %w[bar line area scatter pie donut map-region map-point].freeze
+
+# [chart_kind, sorted-measure-columns] — two zones are the SAME viz template
+# only when both match. nil when the zone plots no measure (can't be a facet).
+def trellis_signature(z)
+  ms = Array(z['measures']).map { |m| m['column'].to_s }.reject(&:empty?).sort
+  return nil if ms.empty?
+  [z['chart_kind'].to_s, ms]
+end
+
+# {field_key => {member, caption}} for each NON-action single-member categorical
+# `list` filter on the zone — the candidate facet pins.
+def trellis_facets(z)
+  out = {}
+  Array(z['filters']).each do |f|
+    next unless f.is_a?(Hash)
+    next if f['is_action']
+    next unless f['kind'] == 'list'
+    mems = Array(f['members'])
+    next unless mems.size == 1
+    dt = f['datatype'].to_s
+    next unless dt.empty? || dt == 'string' || dt == 'nominal'
+    key = (f['column_caption'] || f['column_guid'] || f['raw_param']).to_s
+    next if key.empty?
+    out[key] ||= { 'member' => mems.first.to_s, 'caption' => (f['column_caption'] || key).to_s }
+  end
+  out
+end
+
+# Small-multiples ARRANGEMENT of the member zones → the Sigma trellis axis.
+#   * same top edge, spread across x  → 'cols' (a horizontal row of panels →
+#     Sigma columnsBy, the common "cards across" look),
+#   * same left edge, stacked down y  → 'rows' (a vertical stack of panels →
+#     Sigma rowsBy, the "4 rows" small-multiples the owner showed),
+#   * both x AND y vary               → 'grid' (a 2-D tile field).
+# Returns nil when the zones aren't a disjoint tiling on either axis (so the
+# group is NOT treated as a trellis — conservative). Heuristic: "aligned" on an
+# axis means the min/max origin spread is within half the median tile size on
+# that axis; the OTHER axis must be disjoint (ordered, non-overlapping tiles).
+def trellis_arrangement(zs)
+  return nil if zs.size < 2
+  xs = zs.map { |z| z['x_pct'].to_f }
+  ys = zs.map { |z| z['y_pct'].to_f }
+  ws = zs.map { |z| z['w_pct'].to_f }.sort
+  hs = zs.map { |z| z['h_pct'].to_f }.sort
+  w_med = ws[ws.size / 2]
+  h_med = hs[hs.size / 2]
+  return nil unless w_med.positive? && h_med.positive?
+  x_aligned = (xs.max - xs.min) <= 0.5 * w_med # shared left edge → a vertical stack
+  y_aligned = (ys.max - ys.min) <= 0.5 * h_med # shared top edge  → a horizontal row
+  disjoint = lambda do |spans|
+    spans.sort_by(&:first).each_cons(2).all? { |a, b| a[1] <= b[0] + 1.0 }
+  end
+  x_spans = zs.map { |z| [z['x_pct'].to_f, z['x_pct'].to_f + z['w_pct'].to_f] }
+  y_spans = zs.map { |z| [z['y_pct'].to_f, z['y_pct'].to_f + z['h_pct'].to_f] }
+  if y_aligned && !x_aligned
+    disjoint.call(x_spans) ? 'cols' : nil
+  elsif x_aligned && !y_aligned
+    disjoint.call(y_spans) ? 'rows' : nil
+  elsif !x_aligned && !y_aligned
+    'grid' # a 2-D field of tiles (x and y both vary)
+  end
+end
+
+# Returns [] for a non-trellis dashboard (the common case) so the emitter can
+# omit the key entirely and keep the flat output byte-identical. Each detected
+# group carries the facet field, the ordered members / zone_ids / captions (the
+# FIRST is the base worksheet the single trellis element is built from), the
+# base chart_kind, and the source `orientation` (rows|cols|grid) → trellis axis.
+def detect_trellis_groups(zones)
+  charts = Array(zones).select { |z| z.is_a?(Hash) && z['kind'] == 'chart' && TRELLIS_KINDS.include?(z['chart_kind'].to_s) }
+  return [] if charts.size < 3
+  anno = charts.map do |z|
+    sig = trellis_signature(z)
+    next nil unless sig
+    facets = trellis_facets(z)
+    next nil if facets.empty?
+    { 'z' => z, 'sig' => sig, 'facets' => facets }
+  end.compact
+  return [] if anno.size < 3
+  groups = []
+  used = {}
+  anno.group_by { |a| a['sig'] }.each_value do |cohort|
+    next if cohort.size < 3
+    field_keys = cohort.flat_map { |a| a['facets'].keys }.uniq
+    field_keys.each do |fk|
+      seen = {}
+      members = cohort.select do |a|
+        next false unless a['facets'].key?(fk)
+        next false if used[a['z']['id']]
+        m = a['facets'][fk]['member']
+        seen[m] ? false : (seen[m] = true) # distinct members only
+      end
+      next if members.size < 3
+      orientation = trellis_arrangement(members.map { |a| a['z'] })
+      next if orientation.nil? # not a tiled small-multiples layout
+      ordered = members.sort_by { |a| a['facets'][fk]['member'].to_s.downcase }
+      ordered.each { |a| used[a['z']['id']] = true }
+      field_caption = ordered.first['facets'][fk]['caption']
+      groups << {
+        'field'       => field_caption,
+        'chart_kind'  => ordered.first['sig'][0],
+        'orientation' => orientation,
+        'members'     => ordered.map { |a| a['facets'][fk]['member'] },
+        'zone_ids'    => ordered.map { |a| a['z']['id'] },
+        'captions'    => ordered.map { |a| a['z']['caption'] }
+      }
+    end
+  end
+  groups
+end
+
 dashboards = []
 xml.elements.each('//dashboard') do |d|
   dash_name = d.attributes['name']
@@ -1627,6 +1815,9 @@ xml.elements.each('//dashboard') do |d|
       'shelf_sorts'    => (kind == 'chart' ? ws_meta&.dig(:shelf_sorts)   : nil),
       'quick_calc_pcto' => (kind == 'chart' ? ws_meta&.dig(:quick_calc_pcto) : nil),
       'heat_scheme'    => (kind == 'chart' ? ws_meta&.dig(:heat_scheme)   : nil),
+      # PR-12: explicit member→color map (nil = no assignment; keep palette derivation)
+      'series_colors'      => (kind == 'chart' ? ws_meta&.dig(:series_colors)      : nil),
+      'series_color_field' => (kind == 'chart' ? ws_meta&.dig(:series_color_field) : nil),
       # v5.1: zone show-title='false' = the source HIDES the worksheet title
       # (all 6 hero-art workbook tiles carry it; three rounds leaked "Sheet 9" because
       # nothing read the attribute). Absent attr = shown (fails safe).
@@ -1709,7 +1900,7 @@ xml.elements.each('//dashboard') do |d|
     end
   end
 
-  dashboards << {
+  dash_h = {
     'dashboard'     => d.attributes['name'],
     'is_story'      => is_story,
     'canvas_px'     => canvas_px,
@@ -1725,6 +1916,14 @@ xml.elements.each('//dashboard') do |d|
     # colors (theme then omitted — Sigma defaults apply, never worse).
     'brand_palette' => BRAND_PALETTE
   }
+  # Native trellis: attach the detected groups ONLY when a trellis is present,
+  # so every non-trellis dashboard's JSON is byte-identical to the flat build.
+  # The builder collapses each group into ONE element with a native `trellis`
+  # property; the layout stage prunes the absorbed sibling zones (both gated on
+  # this key).
+  trellis_groups = detect_trellis_groups(zones)
+  dash_h['trellis'] = trellis_groups unless trellis_groups.empty?
+  dashboards << dash_h
 end
 
 # Sheet-only workbooks (no <dashboard> blocks — just standalone worksheets)
@@ -1760,6 +1959,8 @@ if dashboards.empty? && !worksheets.empty?
         'sort'           => ws_meta[:sort],
         'shelf_sorts'    => ws_meta[:shelf_sorts],
         'quick_calc_pcto' => ws_meta[:quick_calc_pcto],
+        'series_colors'      => ws_meta[:series_colors],
+        'series_color_field' => ws_meta[:series_color_field],
         'filters'        => ws_meta[:filters],
         'hidden_filters' => ws_meta[:hidden_filters] || [],
         'aggregations'   => ws_meta[:aggregations],
@@ -1918,11 +2119,30 @@ end
 # Parsing here means a page-per-worksheet builder can auto-emit Sigma controls
 # for them without the agent supplying any config.
 shared_filters = []
+# Datasource names — a shared-view named after a datasource hosts that
+# datasource's always-on (data-source-level) filters, not dashboard quick
+# filters. Virtual-connection / published-datasource filters live here rather
+# than under a top-level <datasource> (which the D2/P0.2 walk below covers), so
+# without this tag they were misread as toggleable quick-filters and silently
+# widened/dropped (#483).
+ds_names = []
+xml.elements.each('/workbook/datasources/datasource') do |ds|
+  n = ds.attributes['name'].to_s
+  ds_names << n unless n.empty?
+end
 xml.elements.each('//shared-view') do |sv|
   sv_name = sv.attributes['name']
   sv.elements.each('filter') do |f|
     spec = normalize_filter(f)
     spec['shared_view'] = sv_name
+    # #483: a shared-view filter is a DATA-SOURCE (always-on) filter — invisible
+    # on every dashboard surface, so the Phase-1d PNG read can never catch a
+    # miss — when its enumeration is database-domain scoped OR the shared-view is
+    # named after a datasource. Tag it so build-charts records it and the
+    # datasource-filter gate blocks GREEN unless it was applied. Genuine
+    # dashboard quick-filters (no database domain, shared-view not a datasource
+    # name) stay untagged and flow through the normal auto-control path.
+    spec['is_datasource_filter'] = true if spec['ui_domain'] == 'database' || ds_names.include?(sv_name)
     shared_filters << spec
   end
 end
@@ -2048,6 +2268,10 @@ meta = {
   'datasource_filters' => datasource_filters,
   'parameters'     => parameters,
   'column_aliases' => column_aliases,
+  # PR-12: per-column default number/date formats (caption → raw Tableau
+  # format string). build-charts-from-signals maps them to Sigma column/KPI
+  # formats (lib/format_map) when no worksheet-level pill format overrides.
+  'column_formats' => COLUMN_FORMATS,
   'columns_by_guid'=> COL_BY_GUID.transform_values { |v|
     h = { 'caption' => v[:caption], 'datatype' => v[:datatype] }
     h['formula'] = v[:formula] if v[:formula] # calc-ref deref (v5.1.1)

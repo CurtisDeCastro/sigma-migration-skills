@@ -18,7 +18,7 @@ A `control` element has exactly these fields:
 |---|---|---|
 | `kind` | yes | Always `control` |
 | `id` | yes | Element ID — must be unique on the page |
-| `controlId` | yes | Formula reference name (e.g., `RegionFilter`) — keep distinct from `id`. This is the human-meaningful handle used when referring to the control's value from formulas (syntax + typed-value rules: see [Referencing a Control's Value in a Formula](#referencing-a-controls-value-in-a-formula)). |
+| `controlId` | yes | Formula reference name (e.g., `RegionFilter`) — keep distinct from `id`. This is the human-meaningful handle used when referring to the control's value from formulas. |
 | `controlType` | yes | Any value the recipe above returns. Determines the widget and filter behavior. |
 | `filters` | — | Array of `{ source, columnId }` — connects the control to the column(s) it filters. `source` is `{ kind: table, elementId: ... }`. |
 | `source` | list/segmented | Where the widget's VALUE LIST comes from. Double-nested: `{ kind: source, source: { kind: table, elementId: ... }, columnId: ... }`. |
@@ -62,6 +62,8 @@ filters:                 # the TARGETS it filters — one entry per element+colu
 ```
 
 > **Verified working shape** (pulled from a live, successfully-POSTed workbook 2026-06-15). A list control carries `source` / `mode` / `selectionMode` / `values` as **flat top-level siblings** — NOT inside a nested "value object." The single most common mistake is omitting `source`/`mode`/`selectionMode`/`values` (or nesting them); Sigma then rejects the element with the opaque catch-all `Invalid kind: control`, which means **the inner fields are wrong, NOT that controls are unsupported** (see `reference/workflows/validate.md`). `segmented` and `hierarchy` are the other list-style widgets — same wiring (value-list `source` + `filters` targets).
+
+> **A control cannot bind to a map element** (`point-map` / `region-map` / `geography-map`). Pointing a list control's `source` (value list) or a `filters[]` target at a map element fails the POST with `Dependency not found: '<mapElementId>'` (live-verified 2026-06-26). Back the control with a real `table` element (e.g. a small dimension/directory table on the same column) for both the value list and the filter target. To also scope the map, filter it indirectly (e.g. drive the map's source element off the same filtered table, or apply the predicate in the data model) rather than targeting the map element directly.
 
 ## Date Range
 
@@ -245,77 +247,6 @@ filters:
 
 `top-n` is a dedicated control type for "show the top N" interactions. Wire it like any other control via `filters`; the cap is a flat top-level field.
 
-## Dropped-by-API fields (accepted-then-ignored) — the DROPPED_BY_API contract
-
-A family of control fields that `POST/PUT /v2/workbooks/spec` **accepts with 200 and no validation error, then silently drops**: the readback (`GET /v2/workbooks/{id}/spec`) omits them entirely and they never take effect on the live control. This is a **Sigma product gap**, distinct from spec-grammar mistakes (those 400 or return `Invalid kind: control`). Field-confirmed by round-tripping live workbooks (tableau-to-sigma issues #415 and #417, 2026-07-17).
-
-Do not emit these naively. The machine-readable version of this table is `DROPPED_BY_API` in the shared preflight lint (`shared/lib/preflight_lint.rb`, vendored into every converter's `scripts/lib/`); the lint WARNs (`A1`/`A2`) on any spec carrying one, and the tableau-to-sigma post-POST control-field audit (`post-and-readback.rb`) diffs every posted control against its readback so *future* members of this family surface automatically.
-
-| Field | controlType | Observed behavior | Sanctioned workaround |
-|---|---|---|---|
-| `showNullOption` | `list` / `segmented` / `hierarchy` | 200 on POST/PUT; absent on readback; the live control **still shows "Null" as a selectable value** (#417) | Filter nulls at the control's **option-source**: point the value-list `source` at a hidden helper element carrying an `IsNotNull(<col>)` filter (field-validated) |
-| `allowMultipleSelection` | `list` | 200; dropped on readback; no effect (#417) | `selectionMode: "single"\|"multiple"` — persists |
-| `excludeValues` | `list` / `segmented` / `hierarchy` | 200; dropped on readback; no effect (#417) | `mode: "exclude"` + `values` = the excluded members — persists |
-| `showClearButton` | `list` (editor toggle) | 200; dropped on readback; no effect (#417) | None in the spec — set in the UI control editor post-publish (record in the post-publish guide) |
-| `showSearchBox` | `list` (editor toggle) | 200; dropped on readback; no effect (#417) | None in the spec — set in the UI post-publish |
-| `showHistogram` | `list` / sliders (editor toggle) | 200; dropped on readback; no effect (#417) | None in the spec — set in the UI post-publish |
-| `showExpandedList` | `list` (editor toggle) | 200; dropped on readback; no effect (#417) | None in the spec — set in the UI post-publish |
-| `required` | any (editor toggle) | 200; dropped on readback; no effect (#417) | None in the spec — set in the UI post-publish |
-| `startDate` / `endDate` as a **bare date** (`"2026-01-01"`) or zoneless timestamp | `date-range` (`mode: between`/`custom`) | 200; absent on readback; the control renders the "Select date range" placeholder with **no default**, so filtered elements open unfiltered (#415) | Emit a **full ISO-8601 UTC timestamp** (`"2026-01-01T00:00:00Z"`) — the only string form observed to round-trip; confirm via post-POST readback, else set the default in the UI |
-| `value: {…}` object (e.g. `{min,max}` / `{low,high}`) | `date-range` and others | 200 (or `Invalid kind: control`); stripped on round-trip; no default | Control value fields are **flat top-level** (`startDate`/`endDate`, `low`/`high`, scalar `value`) — see the field table at the top of this file |
-
-> A `selectionMode: "single"` control carrying a `values` **array** is the same accepted-then-ignored class (both the filter and the default silently drop) — the preflight lint fails it as `C5`; use scalar `value`.
-
----
-
-## Referencing a Control's Value in a Formula
-
-There are **two distinct ways** to wire a control, and mixing them up is the most common way a migrated workbook ends up with visible `#ERROR` cells:
-
-1. **Filtering data** — the `filters` binding above. The control narrows the rows of the target table(s). Use this for "filter the report by region / date / amount." Prefer it for filtering.
-2. **Reading the value in a formula** — a calc column (or other formula) can read the control's *current value* and compute from it. Use this for derived/display logic: a dynamic label, a switch between measures, a threshold flag.
-
-This section is about #2 — the part the OpenAPI and the field table above don't teach.
-
-### Syntax: reference the `controlId`, not the element `id`
-
-Inside a formula, refer to the control by its **`controlId`** (the formula handle) in brackets:
-
-```
-[ReportPeriod]          // ✅ the controlId  → resolves to the control's value
-[ctrl-report-period]    // ❌ the element id → "Unknown column"
-```
-
-`controlId` and `id` are different fields (see the tip at the bottom of this file). Formulas resolve the **`controlId`**; passing the element `id` fails with `Unknown column "..."`. This is verified live (2026-07-01) — a calc column `[<controlId>]` exports the control's value; the same formula with the element id errors.
-
-### The value is TYPED — consume it type-appropriately
-
-A control reference resolves to the control's **native value type**, not always a scalar:
-
-| `controlType` | Resolves to | Consume with |
-|---|---|---|
-| `number`, `slider` | number | arithmetic directly: `[PageSize] + 1` |
-| `date` | date | date functions, comparisons |
-| `date-range` | a `{ start, end }` variant/struct | `[Range].start` / `[Range].end`, date functions, or `Text(...)` — **not** bare arithmetic |
-| `list`, `segmented` | a set / array | membership: `[Col] = [RegionCtl]`, `In(...)` — not scalar math |
-| `checkbox`, `switch` | boolean | `If([ActiveOnly], ..., ...)` |
-| `text`, `text-area` | text | text functions, comparisons |
-
-Using a non-numeric control in a numeric context is the trap. Verified live:
-
-```
-[DateRangeCtl] + 1
-  → Argument 1 invalid for function '+'. Expected number; received variant.
-```
-
-That error is a **type mismatch**, not evidence that "controls can't be referenced in formulas." The reference resolved fine; the `+` rejected the variant. `Text([DateRangeCtl])`, `If([DateRangeCtl] = [DateRangeCtl], 1, 0)`, and `[DateRangeCtl].start` all resolve cleanly against the same control.
-
-### "Dead control" is a lint state, not a broken workbook
-
-A control that nothing references yet is flagged **dead** by the control lint (see the tableau-to-sigma `control-parity.md`). It still **renders and is usable** — dead is a "not wired yet" signal, not an error. Don't strip a control just because it's dead; wire it (a `filters` target, or a `[controlId]` formula reference consumed per its type) and the flag clears. Removing controls to satisfy the lint ships *less* than the source dashboard had.
-
-> The single most common control-in-formula failure, in order: (1) referencing the element `id` instead of the `controlId`; (2) doing arithmetic on a `date-range`/`list` control (`received variant`); (3) concluding from either that formula reference "doesn't work" and deleting the controls. All three are avoidable — the reference works.
-
 ---
 
 ## One Control, Multiple Elements
@@ -379,16 +310,5 @@ Multiple controls on the same target compose with **AND** — selecting region "
 They are not the same and both are required:
 - `id` is the element ID used internally and in `layout.md`.
 - `controlId` is a human-facing handle used when referring to this control's value from formulas or downstream logic. Pick it to be meaningful (e.g., `RegionFilter`, `DateRange`).
-
-## Cross-element filters (click-to-filter) — what IS and ISN'T spec-authorable
-
-Sigma "cross-element filtering" (user interacts with one element, other elements filter) is a **3-part construct**: a *trigger* element + a *control* + a *target*. Only part of it lives in the workbook spec — verified live 2026-07-10.
-
-- **The control half IS spec-authorable** and is the whole filtering mechanism. Author a `control` whose `filters` bind the value to the target element(s) by `elementId` + `columnId` (exactly the shape above). Any element that sources the filtered element inherits the filter. This gives a fully working cross-element filter driven by the control (a dropdown / list / range picker). Proven: setting a list control's value collapsed the target chart to exactly the filtered rows.
-- **The click-to-trigger action is UI-only** — there is **no `action` / `sequence` / `setControlValue` node in the workbook spec**. The "click a bar/cell to set the control value" binding is configured in the UI (element → **Actions** tab → *Set control value*). So a spec can deliver the *filter*, but the *click-to-fire* gesture is a post-publish UI step. (This is why a Tableau `tsl-filter` action auto-converts only ~80%: the control + targets are emittable; the click binding is documented, not generated.)
-
-### Gotcha: list-control values are STRINGS — cast numeric filter columns
-
-A `list` control's parameter/filter **values are strings**. If the target column is **numeric** (e.g. an integer `period`, `year`, `store_id`), the filter throws `400 "Expecting string"` on the value and then a runtime **500 (type mismatch)** when applied. Cast the numeric dimension to text in the control's value-source column (e.g. a `Text([…/period])` column) and bind the control to that. Text columns filter cleanly with no cast. (Verified: a text `Team` control worked; a numeric `Period` control 500'd until cast.)
 </content>
 </invoke>

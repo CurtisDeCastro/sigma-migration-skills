@@ -76,12 +76,67 @@ def descriptor_from_tds(tds_text)
   conn ||= doc.elements['//connection']
   db = conn && conn.attributes['dbname'].to_s
   schema = conn && conn.attributes['schema'].to_s
+  # #454: the PDS's real warehouse class (snowflake / databricks / …) lives on this
+  # connection. Carry it into the descriptor so hydration case-normalizes with the
+  # right rules per-PDS (a case-preserving warehouse must not be upper-folded).
+  wcls = HydrateCustomSql.canon_warehouse_class(conn && conn.attributes['class'])
   if text_rel
-    { 'relationType' => 'text', 'sql' => rel.text.to_s.strip, 'db' => db, 'schema' => schema,
-      'columns' => HydrateCustomSql.parse_sql_columns(rel.text.to_s) }
+    sql = rel.text.to_s.strip
+    cols = HydrateCustomSql.parse_sql_columns(sql)
+    star_table = cols.empty? ? HydrateCustomSql.bare_select_star_table(sql) : nil
+    if star_table
+      # #453: a bare `SELECT * FROM <table>` PDS is semantically just <table>.
+      # parse_sql_columns can't enumerate `*`, so resolve it as a TABLE relation
+      # (the warehouse catalog supplies the columns downstream) instead of emitting
+      # a 0-column Custom SQL relation that would hard-abort the migration.
+      { 'relationType' => 'table', 'table' => star_table, 'db' => db, 'schema' => schema,
+        'columns' => [], 'warehouseClass' => wcls, 'expandedFrom' => 'select-star' }
+    else
+      { 'relationType' => 'text', 'sql' => sql, 'db' => db, 'schema' => schema,
+        'columns' => cols, 'warehouseClass' => wcls }
+    end
   else
-    { 'relationType' => 'table', 'table' => rel.attributes['table'].to_s, 'db' => db, 'schema' => schema, 'columns' => [] }
+    { 'relationType' => 'table', 'table' => rel.attributes['table'].to_s, 'db' => db,
+      'schema' => schema, 'columns' => [], 'warehouseClass' => wcls }
   end
+end
+
+# --- transient-401 survivability -------------------------------------------
+# The PDS-resolve Tableau calls below used to run with ONLY lib/tableau_rest.rb's
+# single inline 401 refresh (request: res.code==401 && attempts==1 → refresh_token!).
+# A 401 that RACES that one retry — a startup / session-signin race, common when a
+# freshly minted token is used before its server-side session is fully live —
+# escaped with no cushion. And because a dropped PDS is (correctly) treated as
+# "abort rather than fabricate a phantom relation" (refs/multi-datasource.md), a
+# single transient 401 on this path took the WHOLE migration down. The discovery
+# path never had this problem: tableau-discover.rb#run_task gives every fetch an
+# outer re-mint budget on a 401 that escapes the lib retry. Give the two PDS
+# calls the SAME budget here. A genuine NON-401 failure (e.g. 403 "no Download
+# capability") is NOT retried — it re-raises at once so the abort-don't-fabricate
+# contract still fails loudly rather than being masked.
+def with_remint_on_401(label, max_attempts: 3)
+  attempts = 0
+  begin
+    attempts += 1
+    yield
+  rescue Tableau::Error => e
+    if attempts < max_attempts && e.message.to_s =~ /\b401\b/
+      warn "  ↻ #{label}: 401 escaped the lib retry — re-minting token (attempt #{attempts}/#{max_attempts})"
+      Tableau.refresh_token! rescue nil
+      sleep 1.0 + rand * 0.5
+      retry
+    end
+    raise
+  end
+end
+
+# Generously-excerpted Tableau error for the log — NOT `e.message.lines.first`,
+# which dropped everything after the status line (the HTTP status detail AND the
+# response body), making a real 403 "no Download capability" indistinguishable
+# from a transient signin-race 401. Tableau error bodies never carry credential
+# values, so the excerpt is safe to log verbatim; the cap just bounds a runaway body.
+def tableau_error_detail(e, limit: 800)
+  e.message.to_s.strip[0, limit]
 end
 
 doc = REXML::Document.new(File.read(opts[:twb], encoding: 'UTF-8'))
@@ -96,9 +151,11 @@ doc.each_element('/workbook/datasources/datasource') do |ds|
   seen[content_url] = true
 
   rec = begin
-    Tableau.find_datasource_by_content_url(content_url)
+    with_remint_on_401("PDS lookup for contentUrl=#{content_url.inspect}") do
+      Tableau.find_datasource_by_content_url(content_url)
+    end
   rescue Tableau::Error => e
-    warn "  ⚠ PDS lookup failed for contentUrl=#{content_url.inspect}: #{e.message.lines.first&.chomp}"
+    warn "  ⚠ PDS lookup failed for contentUrl=#{content_url.inspect}: #{tableau_error_detail(e)}"
     nil
   end
   unless rec && rec['id']
@@ -107,7 +164,9 @@ doc.each_element('/workbook/datasources/datasource') do |ds|
   end
 
   begin
-    bytes = Tableau.download_datasource_content(rec['id'])
+    bytes = with_remint_on_401("content download for PDS #{content_url.inspect}") do
+      Tableau.download_datasource_content(rec['id'])
+    end
     tds = tds_text_from(bytes)
     d = tds && descriptor_from_tds(tds)
     unless d
@@ -122,7 +181,7 @@ doc.each_element('/workbook/datasources/datasource') do |ds|
     detail = d['relationType'] == 'text' ? "Custom SQL, #{d['columns'].size} col(s)" : "table #{d['table']}"
     warn "  resolved PDS #{rec['name'].inspect} (#{content_url}) → #{detail}"
   rescue Tableau::Error => e
-    warn "  ⚠ content download failed for PDS #{content_url.inspect}: #{e.message.lines.first&.chomp}"
+    warn "  ⚠ content download failed for PDS #{content_url.inspect}: #{tableau_error_detail(e)}"
   end
 end
 

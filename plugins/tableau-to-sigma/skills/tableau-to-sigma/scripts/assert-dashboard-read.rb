@@ -46,6 +46,15 @@ if opts[:skip]
   puts "[SKIP] dashboard-read gate WAIVED via --skip-dashboard-read (#{opts[:skip]})."
   puts '       Name this waiver in your migration report — the workbook was built WITHOUT'
   puts '       confirming its tiles/text/filters against the source dashboard PNG.'
+  # PR-14: every honored --skip-* leaves a record on the off-ramp trail.
+  begin
+    $LOAD_PATH.unshift File.expand_path('lib', __dir__)
+    require 'offramp'
+    Offramp.log(opts[:dir], kind: 'skip-flag-waived', reason: opts[:skip],
+                detail: '--skip-dashboard-read')
+  rescue LoadError
+    warn '       WARN: lib/offramp.rb not vendored — the waiver could not be recorded to offramps.jsonl.'
+  end
   exit 0
 end
 

@@ -794,7 +794,7 @@ module PostpublishGuide
   SECTION_ORDER = %w[
     filter-action highlight-action url-action nav-action parameter-action
     set-action zone-visibility drill-hierarchy custom-tooltip
-    show-hide-button nav-button export-button
+    show-hide-button nav-button export-button integer-dim-decode
   ].freeze
 
   SECTION_TITLE = {
@@ -809,7 +809,8 @@ module PostpublishGuide
     'custom-tooltip'   => 'Custom tooltips',
     'show-hide-button' => 'Show/hide container buttons',
     'nav-button'       => 'Navigation buttons',
-    'export-button'    => 'Export buttons'
+    'export-button'    => 'Export buttons',
+    'integer-dim-decode' => 'Integer-coded dimension filters needing a manual Text() decode'
   }.freeze
 
   SECTION_SINGULAR = {
@@ -824,7 +825,8 @@ module PostpublishGuide
     'custom-tooltip'   => 'Custom tooltip',
     'show-hide-button' => 'Show/hide button',
     'nav-button'       => 'Navigation button',
-    'export-button'    => 'Export button'
+    'export-button'    => 'Export button',
+    'integer-dim-decode' => 'Integer-coded dimension filter'
   }.freeze
 
   SECTION_INTRO = {
@@ -839,7 +841,12 @@ module PostpublishGuide
     'custom-tooltip'   => 'These sheets carry customized tooltips (extra fields and/or an embedded viz).',
     'show-hide-button' => 'Dashboard buttons toggled container visibility.',
     'nav-button'       => 'Dashboard button objects.',
-    'export-button'    => 'Dashboard buttons exported the view as a file.'
+    'export-button'    => 'Dashboard buttons exported the view as a file.',
+    'integer-dim-decode' => 'The source filters an INTEGER-coded dimension (e.g. STORE_KEY). ' \
+      "A Sigma list control sources STRING option values, so a filter target on the raw integer column is " \
+      'accepted then SILENTLY stripped (the control filters nothing). The migration auto-decodes most of these ' \
+      'via a Text() helper column; the ones below could NOT be auto-built (e.g. the column lives only on a ' \
+      'hidden master with a cross-scope issue) and need a Text() decode added by hand.'
   }.freeze
 
   def status_badge(s)
@@ -1000,6 +1007,28 @@ module PostpublishGuide
     enrich_with_wb_ids(entries, wbids)
   end
 
+  # PR-18: manual-decode notes for integer-coded dimension filters build-charts
+  # could NOT auto-decode. Read from <workdir>/integer-dim-decode.json (emitted
+  # next to the twb) so a filter that would otherwise ship SILENTLY STRIPPED is
+  # routed here instead of dropped. Auto-decoded controls need no note.
+  def extract_integer_dim_manual(twb_path)
+    dir = File.dirname(File.expand_path(twb_path))
+    path = File.join(dir, 'integer-dim-decode.json')
+    return [] unless File.exist?(path)
+    doc = JSON.parse(File.read(path)) rescue (return [])
+    Array(doc['manual']).map do |m|
+      col = m['column'] || m['name']
+      { 'kind' => 'integer-dim-decode', 'caption' => (m['name'] || col).to_s,
+        'sigma_status' => STATUS_NONE,
+        'source' => { 'description' => "Tableau quick filter on integer-coded dimension #{col.inspect}" },
+        'ui_steps' => "In the Sigma workbook, add a hidden column `Text([#{col}])` on the table the " \
+                      "control targets (the master or the base table the charts source through), then set " \
+                      "the list control's value-source AND its filter target to that decoded column. A raw " \
+                      'numeric list-filter target is accepted then silently stripped by Sigma.',
+        'notes' => Array(m['notes']) }
+    end
+  end
+
   # Workbook display name: the .twb is almost always downloaded as
   # workbook-content.twb inside a per-workbook workdir, so the directory name is
   # the meaningful handle; a differently-named .twb names itself.
@@ -1025,6 +1054,7 @@ module PostpublishGuide
     xml   = TwbXml.parse(File.read(opts[:twb], encoding: 'UTF-8'))
     wbids = load_wb_ids(opts[:wb_ids])
     entries = extract_all(xml, wbids)
+    entries.concat(extract_integer_dim_manual(opts[:twb])) # PR-18 manual-decode notes
 
     opts[:workbook_name] = workbook_name(opts[:twb])
     File.write(opts[:out], render_guide(entries, opts))

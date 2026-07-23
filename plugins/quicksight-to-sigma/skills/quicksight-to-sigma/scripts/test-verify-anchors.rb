@@ -102,6 +102,54 @@ v5 = AnchorVerify.verify(
 )
 ok(v5['pass'] == true, 'hinted numeric present IN the hinted element still matches')
 
+puts '-- pure core: anchor provenance + valued credit (PR-6 rider) --'
+prov_exports = { 'KPI Row' => [['Total'], ['104']], 'Roster' => [['Name'], ['Region A']] }
+prov_anchors = [
+  { 'id' => 'p1', 'label' => 'Total', 'raw' => '104', 'kind' => 'number', 'provenance' => 'view-csv' },
+  { 'id' => 'p2', 'label' => 'Total', 'raw' => '104', 'kind' => 'number', 'provenance' => 'png-eyeball' },
+  { 'id' => 'p3', 'label' => 'Total', 'raw' => '104', 'kind' => 'number' }, # legacy: no provenance
+  { 'id' => 'p4', 'label' => 'roster', 'raw' => 'Region A', 'kind' => 'text', 'provenance' => 'view-csv' }
+]
+vp = AnchorVerify.verify(prov_anchors, prov_exports)
+ok(vp['pass'] == true && vp['matched'] == 4, 'provenance never changes MATCHING — all 4 still match')
+by_id = vp['detail'].each_with_object({}) { |d, h| h[d['id']] = d }
+ok(by_id['p1']['valued'] == true && by_id['p1']['provenance'] == 'view-csv',
+   'view-csv numeric anchor is VALUED; detail carries provenance')
+ok(by_id['p2']['valued'] == false, 'png-eyeball anchor is NOT valued (weak reading)')
+ok(by_id['p3']['valued'] == false, 'legacy anchor without provenance is NOT valued (no laundering)')
+ok(by_id['p4']['valued'] == false && by_id['p4']['kind'] == 'text',
+   'name-only text anchor is NOT valued; detail carries kind')
+ok(vp['valued_matched'] == 1, 'verdict counts valued_matched')
+ok(vp['provenance_census'] == { 'view-csv' => 2, 'png-eyeball' => 1, 'unspecified' => 1 },
+   "provenance census recorded (got #{vp['provenance_census'].inspect})")
+ok(AnchorVerify.coverage_eligible?(prov_anchors[0]) && AnchorVerify.coverage_eligible?(prov_anchors[2]),
+   'coverage credit: view-csv + legacy-unspecified numeric anchors stay eligible (back-compat)')
+ok(!AnchorVerify.coverage_eligible?(prov_anchors[1]) && !AnchorVerify.coverage_eligible?(prov_anchors[3]),
+   'coverage credit: png-eyeball + name-only anchors are NOT eligible')
+# Missing anchors carry kind/provenance/hint so downstream consumers
+# (verify-ground-truth conflict matrix) can attribute the miss to a tile.
+vm = AnchorVerify.verify(
+  [{ 'id' => 'pm1', 'label' => 'Total', 'raw' => '9,999', 'kind' => 'number',
+     'provenance' => 'view-csv', 'sigma_element_hint' => 'KPI Row' }], prov_exports
+)
+m0 = vm['missing'].first
+ok(m0['kind'] == 'number' && m0['provenance'] == 'view-csv' && m0['sigma_element_hint'] == 'KPI Row',
+   'missing entry carries kind + provenance + sigma_element_hint')
+
+puts '-- pure core: hinted TEXT anchors are element-scoped too (PR-6 closes the #414 remainder) --'
+roster_exports = { 'Top 15 Accounts' => [['Name'], ['Acme Holdings']],
+                   'Raw Feeder' => [['Name'], ['United Widgets'], ['Acme Holdings']] }
+vtx = AnchorVerify.verify(
+  [{ 'id' => 't1', 'label' => 'top member', 'raw' => 'United Widgets', 'kind' => 'text',
+     'sigma_element_hint' => 'Top 15 Accounts' }], roster_exports
+)
+ok(vtx['pass'] == false && vtx['missing'].first && vtx['missing'].first['id'] == 't1',
+   'hinted roster label found only OUTSIDE the hinted element is a MISS')
+vtx2 = AnchorVerify.verify(
+  [{ 'id' => 't2', 'label' => 'top member', 'raw' => 'United Widgets', 'kind' => 'text' }], roster_exports
+)
+ok(vtx2['pass'] == true, 'hint-less roster label keeps the search-everywhere fallback')
+
 puts '-- pure core: truncated-export inconclusiveness (issue #416) --'
 # A bounded (row-capped) export that came back FULL may be missing rows: an
 # anchor that fails to match over it canNOT be declared MISSING — the value may

@@ -13,6 +13,25 @@
    ]
   },
   {
+   "canonical": "shared/lib/metric_binding.py",
+   "targets": [
+    "plugins/looker-to-sigma/skills/looker-to-sigma/scripts/lib/metric_binding.py",
+    "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/lib/metric_binding.py",
+    "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/lib/metric_binding.py",
+    "plugins/gooddata-to-sigma/skills/gooddata-to-sigma/scripts/lib/metric_binding.py",
+    "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/lib/metric_binding.py",
+    "plugins/microstrategy-to-sigma/skills/microstrategy-to-sigma/scripts/lib/metric_binding.py"
+   ]
+  },
+  {
+   "canonical": "shared/lib/metric_binding.rb",
+   "targets": [
+    "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/lib/metric_binding.rb",
+    "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/lib/metric_binding.rb",
+    "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/lib/metric_binding.rb"
+   ]
+  },
+  {
    "canonical": "shared/lib/coverage_catalog.rb",
    "targets": [
     "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/lib/coverage_catalog.rb",
@@ -97,6 +116,17 @@
     "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/lib/flip_gate.rb",
     "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/lib/flip_gate.rb",
     "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/lib/flip_gate.rb"
+   ]
+  },
+  {
+   "canonical": "shared/lib/degradation_ledger.rb",
+   "targets": [
+    "plugins/looker-to-sigma/skills/looker-to-sigma/scripts/lib/degradation_ledger.rb",
+    "plugins/microstrategy-to-sigma/skills/microstrategy-to-sigma/scripts/lib/degradation_ledger.rb",
+    "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/lib/degradation_ledger.rb",
+    "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/lib/degradation_ledger.rb",
+    "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/lib/degradation_ledger.rb",
+    "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/lib/degradation_ledger.rb"
    ]
   },
   {
@@ -408,6 +438,45 @@
    ]
   },
   {
+   "canonical": "shared/lib/trellis_emit.rb",
+   "targets": [
+    "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/lib/trellis_emit.rb",
+    "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/lib/trellis_emit.rb",
+    "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/lib/trellis_emit.rb"
+   ]
+  },
+  {
+   "canonical": "shared/lib/trellis_emit.py",
+   "targets": [
+    "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/lib/trellis_emit.py",
+    "plugins/looker-to-sigma/skills/looker-to-sigma/scripts/lib/trellis_emit.py"
+   ]
+  },
+  {
+   "canonical": "shared/scripts/test-trellis-emit.rb",
+   "targets": [
+    "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-trellis-emit.rb",
+    "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-trellis-emit.rb",
+    "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/test-trellis-emit.rb"
+   ]
+  },
+  {
+   "canonical": "shared/scripts/verify-trellis-survived.rb",
+   "targets": [
+    "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/verify-trellis-survived.rb",
+    "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/verify-trellis-survived.rb",
+    "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/verify-trellis-survived.rb",
+    "plugins/looker-to-sigma/skills/looker-to-sigma/scripts/verify-trellis-survived.rb"
+   ]
+  },
+  {
+   "canonical": "shared/scripts/test_trellis_emit.py",
+   "targets": [
+    "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/test_trellis_emit.py",
+    "plugins/looker-to-sigma/skills/looker-to-sigma/scripts/test_trellis_emit.py"
+   ]
+  },
+  {
    "canonical": "shared/scripts/test-coverage-gate.rb",
    "targets": [
     "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-coverage-gate.rb",
@@ -422,6 +491,13 @@
    ]
   },
   {
+   "canonical": "shared/scripts/test-conflicting-page-defaults.rb",
+   "targets": [
+    "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-conflicting-page-defaults.rb",
+    "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-conflicting-page-defaults.rb"
+   ]
+  },
+  {
    "canonical": "shared/scripts/test-telemetry-gate.rb",
    "targets": [
     "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-telemetry-gate.rb",
@@ -433,6 +509,20 @@
    "targets": [
     "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-intake.rb",
     "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-intake.rb"
+   ]
+  },
+  {
+   "canonical": "shared/scripts/test-bootstrap.rb",
+   "targets": [
+    "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-bootstrap.rb",
+    "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-bootstrap.rb"
+   ]
+  },
+  {
+   "canonical": "shared/scripts/test-bootstrap-lockstep.sh",
+   "targets": [
+    "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-bootstrap-lockstep.sh",
+    "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-bootstrap-lockstep.sh"
    ]
   },
   {
@@ -477,33 +567,6 @@
    ]
   },
   {
-   "canonical": "shared/scripts/doctor.ps1",
-   "targets": [
-    "plugins/cognos-to-sigma/skills/cognos-assessment/scripts/doctor.ps1",
-    "plugins/cognos-to-sigma/skills/cognos-to-sigma/scripts/doctor.ps1",
-    "plugins/gooddata-to-sigma/skills/gooddata-assessment/scripts/doctor.ps1",
-    "plugins/gooddata-to-sigma/skills/gooddata-to-sigma/scripts/doctor.ps1",
-    "plugins/looker-to-sigma/skills/looker-assessment/scripts/doctor.ps1",
-    "plugins/looker-to-sigma/skills/looker-to-sigma/scripts/doctor.ps1",
-    "plugins/microstrategy-to-sigma/skills/microstrategy-assessment/scripts/doctor.ps1",
-    "plugins/microstrategy-to-sigma/skills/microstrategy-to-sigma/scripts/doctor.ps1",
-    "plugins/powerbi-to-sigma/skills/powerbi-assessment/scripts/doctor.ps1",
-    "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/doctor.ps1",
-    "plugins/qlik-to-sigma/skills/qlik-assessment/scripts/doctor.ps1",
-    "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/doctor.ps1",
-    "plugins/quicksight-to-sigma/skills/quicksight-assessment/scripts/doctor.ps1",
-    "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/doctor.ps1",
-    "plugins/sigma-authoring/skills/custom-sql-to-data-model/scripts/doctor.ps1",
-    "plugins/sigma-authoring/skills/sigma-workbooks/scripts/doctor.ps1",
-    "plugins/sisense-to-sigma/skills/sisense-assessment/scripts/doctor.ps1",
-    "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/doctor.ps1",
-    "plugins/tableau-to-sigma/skills/tableau-assessment/scripts/doctor.ps1",
-    "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/doctor.ps1",
-    "plugins/thoughtspot-to-sigma/skills/thoughtspot-assessment/scripts/doctor.ps1",
-    "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/doctor.ps1"
-   ]
-  },
-  {
    "canonical": "shared/scripts/bootstrap.sh",
    "targets": [
     "plugins/cognos-to-sigma/skills/cognos-assessment/scripts/bootstrap.sh",
@@ -528,6 +591,33 @@
     "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/bootstrap.sh",
     "plugins/thoughtspot-to-sigma/skills/thoughtspot-assessment/scripts/bootstrap.sh",
     "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/bootstrap.sh"
+   ]
+  },
+  {
+   "canonical": "shared/scripts/doctor.ps1",
+   "targets": [
+    "plugins/cognos-to-sigma/skills/cognos-assessment/scripts/doctor.ps1",
+    "plugins/cognos-to-sigma/skills/cognos-to-sigma/scripts/doctor.ps1",
+    "plugins/gooddata-to-sigma/skills/gooddata-assessment/scripts/doctor.ps1",
+    "plugins/gooddata-to-sigma/skills/gooddata-to-sigma/scripts/doctor.ps1",
+    "plugins/looker-to-sigma/skills/looker-assessment/scripts/doctor.ps1",
+    "plugins/looker-to-sigma/skills/looker-to-sigma/scripts/doctor.ps1",
+    "plugins/microstrategy-to-sigma/skills/microstrategy-assessment/scripts/doctor.ps1",
+    "plugins/microstrategy-to-sigma/skills/microstrategy-to-sigma/scripts/doctor.ps1",
+    "plugins/powerbi-to-sigma/skills/powerbi-assessment/scripts/doctor.ps1",
+    "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/doctor.ps1",
+    "plugins/qlik-to-sigma/skills/qlik-assessment/scripts/doctor.ps1",
+    "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/doctor.ps1",
+    "plugins/quicksight-to-sigma/skills/quicksight-assessment/scripts/doctor.ps1",
+    "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/doctor.ps1",
+    "plugins/sigma-authoring/skills/custom-sql-to-data-model/scripts/doctor.ps1",
+    "plugins/sigma-authoring/skills/sigma-workbooks/scripts/doctor.ps1",
+    "plugins/sisense-to-sigma/skills/sisense-assessment/scripts/doctor.ps1",
+    "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/doctor.ps1",
+    "plugins/tableau-to-sigma/skills/tableau-assessment/scripts/doctor.ps1",
+    "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/doctor.ps1",
+    "plugins/thoughtspot-to-sigma/skills/thoughtspot-assessment/scripts/doctor.ps1",
+    "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/doctor.ps1"
    ]
   },
   {
@@ -705,6 +795,61 @@
     "plugins/cognos-to-sigma/skills/cognos-to-sigma/refs/visual-similarity.md",
     "plugins/gooddata-to-sigma/skills/gooddata-to-sigma/refs/visual-similarity.md",
     "plugins/sisense-to-sigma/skills/sisense-to-sigma/refs/visual-similarity.md"
+   ]
+  },
+  {
+   "canonical": "shared/lib/scout_gate.rb",
+   "targets": [
+    "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/lib/scout_gate.rb",
+    "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/lib/scout_gate.rb",
+    "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/lib/scout_gate.rb",
+    "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/lib/scout_gate.rb"
+   ]
+  },
+  {
+   "canonical": "shared/lib/scout_gate.py",
+   "targets": [
+    "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/lib/scout_gate.py",
+    "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/lib/scout_gate.py",
+    "plugins/looker-to-sigma/skills/looker-to-sigma/scripts/lib/scout_gate.py",
+    "plugins/microstrategy-to-sigma/skills/microstrategy-to-sigma/scripts/lib/scout_gate.py",
+    "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/lib/scout_gate.py"
+   ]
+  },
+  {
+   "canonical": "shared/lib/scout_gate.mjs",
+   "targets": [
+    "plugins/cognos-to-sigma/skills/cognos-to-sigma/scripts/lib/scout_gate.mjs"
+   ]
+  },
+  {
+   "canonical": "shared/refs/modeling-strategy.md",
+   "targets": [
+    "plugins/cognos-to-sigma/skills/cognos-to-sigma/refs/modeling-strategy.md",
+    "plugins/gooddata-to-sigma/skills/gooddata-to-sigma/refs/modeling-strategy.md",
+    "plugins/looker-to-sigma/skills/looker-to-sigma/refs/modeling-strategy.md",
+    "plugins/microstrategy-to-sigma/skills/microstrategy-to-sigma/refs/modeling-strategy.md",
+    "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/refs/modeling-strategy.md",
+    "plugins/qlik-to-sigma/skills/qlik-to-sigma/refs/modeling-strategy.md",
+    "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/refs/modeling-strategy.md",
+    "plugins/sisense-to-sigma/skills/sisense-to-sigma/refs/modeling-strategy.md",
+    "plugins/tableau-to-sigma/skills/tableau-to-sigma/refs/modeling-strategy.md",
+    "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/refs/modeling-strategy.md"
+   ]
+  },
+  {
+   "canonical": "shared/lib/modeling_advisory.rb",
+   "targets": [
+    "plugins/cognos-to-sigma/skills/cognos-to-sigma/scripts/lib/modeling_advisory.rb",
+    "plugins/gooddata-to-sigma/skills/gooddata-to-sigma/scripts/lib/modeling_advisory.rb",
+    "plugins/looker-to-sigma/skills/looker-to-sigma/scripts/lib/modeling_advisory.rb",
+    "plugins/microstrategy-to-sigma/skills/microstrategy-to-sigma/scripts/lib/modeling_advisory.rb",
+    "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/lib/modeling_advisory.rb",
+    "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/lib/modeling_advisory.rb",
+    "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/lib/modeling_advisory.rb",
+    "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/lib/modeling_advisory.rb",
+    "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/lib/modeling_advisory.rb",
+    "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/lib/modeling_advisory.rb"
    ]
   }
  ]

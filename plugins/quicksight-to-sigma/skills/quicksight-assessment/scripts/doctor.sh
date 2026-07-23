@@ -52,7 +52,7 @@ if command -v ruby >/dev/null 2>&1; then
   ok "ruby — $(ruby -e 'print RUBY_VERSION' 2>/dev/null)"
 else
   if [ "$OS" = "windows-bash" ]; then
-    bad "ruby not found" "Run the bootstrap: bash scripts/bootstrap.sh   — no-admin install (winget, or scoop-portable fallback); it re-runs this doctor when done."
+    bad "ruby not found" "Run the bootstrap: bash scripts/bootstrap.sh   — no-admin install/activation; it re-runs this doctor when done."
   else
     bad "ruby not found" "Run the bootstrap: bash scripts/bootstrap.sh   — installs only what's missing (macOS: brew; Linux: apt-get only when already root — never sudo; otherwise it names the exact admin ask)."
   fi
@@ -79,7 +79,7 @@ elif py_real python ; then ok "python — $PY_DESC  [python]"
 else
   if [ "$OS" = "windows-bash" ]; then
     bad "no real Python (the 'python'/'python3' you have is likely the Microsoft Store alias stub)" \
-        "Run the bootstrap: bash scripts/bootstrap.sh   — installs a real Python (winget/scoop, no admin; the stub is rejected by its probe). Manual alternative: disable the stub under Settings → Apps → Advanced app settings → App execution aliases."
+        "Run the bootstrap: 'powershell -ExecutionPolicy Bypass -File scripts\\bootstrap.ps1' (user-scoped install, never admin; the stub is rejected by its probe). Manual alternative: disable the stub under Settings → Apps → Advanced app settings → App execution aliases."
   else
     bad "python3 not found" "Run the bootstrap: bash scripts/bootstrap.sh   — installs python3 (brew, or apt-get when already root — never sudo)."
   fi
@@ -116,8 +116,8 @@ fi
 # that is `py -3`, while bare `python3` may be the Store stub or absent), and
 # SELF-GATES on the render scripts existing next to this doctor — the same
 # adjacency gate bootstrap's payload step uses, so assessment-skill twins that
-# ship neither script don't warn users into a bootstrap that (correctly)
-# declines to install the payload there.
+# ship neither script don't warn users into a payload the bootstrap
+# (correctly) declines to install there.
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -n "$PY_ARGV" ] && { [ -f "$HERE/visual-similarity.py" ] || [ -f "$HERE/sigma-export-png.py" ]; }; then
   if $PY_ARGV -c "import PIL, numpy, requests" >/dev/null 2>&1; then
@@ -127,7 +127,7 @@ if [ -n "$PY_ARGV" ] && { [ -f "$HERE/visual-similarity.py" ] || [ -f "$HERE/sig
     # SILENTLY fails on a fresh env (v5.5 e2e field-caught). Pillow/numpy: the
     # gate-14 visual floor. One check, one fix line.
     warn "Pillow/numpy/requests missing — sigma-export-png (renders) and the visual-similarity floor (gate 14) cannot run" \
-         "Run the bootstrap: bash scripts/bootstrap.sh   — installs the pinned render payload (pillow, numpy>=2.3, requests) with a TLS-proxy-safe pip."
+         "Run the bootstrap: bash scripts/bootstrap.sh   — installs the pinned render payload (pillow, numpy>=2.3, requests) with a TLS-proxy-safe pip (no admin; the 2.2.x histogram regression is also worked around in-script)."
   fi
 fi
 
@@ -141,7 +141,7 @@ fi
 if [ -n "$PY_ARGV" ]; then
   TLS_PROBE="$($PY_ARGV -c "import ssl,importlib.util as iu; print('TRUSTWARN' if ssl.OPENSSL_VERSION.startswith('OpenSSL 3') and iu.find_spec('truststore') is None else '')" 2>/dev/null)"
   if [ "$TLS_PROBE" = "TRUSTWARN" ]; then
-    warn "python uses OpenSSL 3.x without 'truststore' — TLS verification may fail against some servers (e.g. Tableau Cloud) where curl/Ruby succeed" \
+    warn "python uses OpenSSL 3.x without 'truststore' — TLS verification may fail against some servers (e.g. Looker or Tableau Cloud) where curl/Ruby succeed" \
          "Run the bootstrap: bash scripts/bootstrap.sh   — installs 'truststore' and wires pip to the OS trust store. Do NOT disable TLS verification."
   fi
 fi
@@ -156,8 +156,9 @@ else
   # agent shell never sources. Probe the standard version-manager install dirs
   # BEFORE declaring node missing; found => print the exact PATH prepend
   # (WARN-activatable) instead of sending the user to install a runtime they have.
-  # bootstrap.sh's find_vm_node duplicates this candidate list — KEEP IN
-  # LOCKSTEP (test-bootstrap-lockstep.sh Part A diffs the two glob lists).
+  # bootstrap.sh's node activation duplicates this candidate list — KEEP IN
+  # LOCKSTEP (test-bootstrap-lockstep.sh Part A diffs the two glob lists;
+  # bootstrap may activate additional brew opt dirs, never fewer dirs).
   NODE_VM_BIN=""
   for cand in "$HOME"/.fnm/node-versions/*/installation/bin/node \
               "$HOME"/.local/share/fnm/node-versions/*/installation/bin/node \
@@ -169,9 +170,9 @@ else
   done
   if [ -n "$NODE_VM_BIN" ]; then
     warn "node is INSTALLED but not on PATH ($("$NODE_VM_BIN" --version 2>/dev/null) at $NODE_VM_BIN) — a version manager that activates via interactive-shell hooks this shell never ran" \
-         "Prepend it for this session: export PATH=\"$(dirname "$NODE_VM_BIN"):\$PATH\"  — no install needed. (Or run the bootstrap: bash scripts/bootstrap.sh — it activates this install and persists PATH via ~/.sigma-migration/env.)"
+         "Prepend it for this session: export PATH=\"$(dirname "$NODE_VM_BIN"):\$PATH\"  — no install needed. (Or run the bootstrap: bash scripts/bootstrap.sh — it activates this install and persists PATH via ~/.sigma-migration/path.sh.)"
   else
-    bad "node not found (required — the vendored converters/*.mjs run via node)" "Run the bootstrap: bash scripts/bootstrap.sh   — activates a version-manager Node when one exists, else installs Node 22 LTS pinned (brew / portable ~/.local/node / the winget-scoop fnm route — no admin, nothing unpinned). Details: refs/environment.md #5."
+    bad "node not found (required — the vendored converters/*.mjs run via node)" "Run the bootstrap: bash scripts/bootstrap.sh   — activates a version-manager Node when one exists, else installs Node 22 LTS pinned (brew / portable ~/.local/node / the fnm route — no admin, nothing unpinned). Details: refs/environment.md #5."
   fi
 fi
 
@@ -211,9 +212,9 @@ fi
 # {cred_smoke:{sigma: pass|fail|skipped}}.
 SMOKE_SIGMA="skipped"
 _SIGMA_CREDS=false
-# Content-based presence (the Tableau twin's pattern below): bootstrap also
-# writes PATH/pip lines into this env file, so bare file-existence would
-# misread a creds-less bootstrapped host as "credentials present".
+# Content-based presence (the Tableau twin's pattern below): bare
+# file-existence would misread an env file holding only non-credential lines
+# (anything a future writer persists there) as "credentials present".
 if grep -Eq 'SIGMA_(API_TOKEN|CLIENT_ID)' "$HOME/.sigma-migration/env" 2>/dev/null \
    || [ -n "${SIGMA_API_TOKEN:-}" ] || [ -n "${SIGMA_CLIENT_ID:-}" ]; then
   _SIGMA_CREDS=true
@@ -269,6 +270,36 @@ if [ -f "$HERE/setup-tableau.rb" ] && [ -f "$HERE/lib/tableau_rest.rb" ]; then
       bad "Tableau credentials present but the live PAT signin FAILED twice (expired/revoked PAT, wrong site or server URL)" \
           "Re-run 'ruby scripts/setup-tableau.rb' with a fresh PAT. Genuinely offline? SIGMA_SKIP_CRED_SMOKE=1 skips this probe."
       SMOKE_TABLEAU="fail"
+    fi
+  fi
+fi
+
+# --- Looker API reachability (self-gated: looker skills only) ----------------
+# Plugin-aware like the Tableau checks: only speaks up where the sibling Looker
+# client exists (looker_api.py) and a ~/.looker/looker.ini is present. Modern
+# Google-hosted Looker serves the API on 443; the legacy :19999 port is often
+# unreachable. The client self-heals (looker_api falls back to 443), but flag a
+# stale ini so the user can fix it. Uses the UNAUTHENTICATED /api/4.0/versions
+# endpoint via curl (OS trust store — isolates the PORT question from the TLS
+# one above). Recorded in doctor.json {cred_smoke:{looker: pass|fallback|fail|skipped}}.
+LOOKER_PROBE="skipped"
+LK_INI="$HOME/.looker/looker.ini"
+if [ -f "$HERE/looker_api.py" ] && [ -f "$LK_INI" ] && command -v curl >/dev/null 2>&1; then
+  LK_BASE="$(sed -n 's/^[[:space:]]*base_url[[:space:]]*=[[:space:]]*//p' "$LK_INI" | head -1 | tr -d '\r')"
+  LK_BASE="${LK_BASE%/}"
+  if [ -n "$LK_BASE" ]; then
+    LK_NOPORT="$(printf '%s' "$LK_BASE" | sed -E 's#^(https?://[^/:]+)(:[0-9]+)?.*#\1#')"
+    if curl -sS -m 8 -o /dev/null "$LK_BASE/api/4.0/versions" 2>/dev/null; then
+      ok "Looker API reachable at $LK_BASE"
+      LOOKER_PROBE="pass"
+    elif [ "$LK_NOPORT" != "$LK_BASE" ] && curl -sS -m 8 -o /dev/null "$LK_NOPORT/api/4.0/versions" 2>/dev/null; then
+      warn "Looker base_url ($LK_BASE) is unreachable but $LK_NOPORT (443) answers — looker_api will self-heal to 443 at run time" \
+           "Update base_url in ~/.looker/looker.ini to '$LK_NOPORT' (drop the legacy :19999 API port), or set LOOKER_BASE_URL."
+      LOOKER_PROBE="fallback"
+    else
+      warn "Looker API not reachable at $LK_BASE (network / VPN / instance URL?)" \
+           "Confirm the Looker instance URL and that this host can reach its API 4.0 endpoint."
+      LOOKER_PROBE="fail"
     fi
   fi
 fi
@@ -408,7 +439,7 @@ write_doctor_json() {
     printf '"runtimes":{"ruby":%s,"python":%s,"node":%s,"bash":true},' "$RUBY_OK" "$PY_OK" "$NODE_OK"
     printf '"versions":{"ruby":"%s","python":"%s","node":"%s"},' "$(jstr "$RUBY_V")" "$(jstr "$PY_VER")" "$(jstr "$NODE_V")"
     printf '"sandbox_hint":"%s",' "$(jstr "$SANDBOX_HINT")"
-    printf '"cred_smoke":{"sigma":"%s","tableau":"%s"},' "$SMOKE_SIGMA" "$SMOKE_TABLEAU"
+    printf '"cred_smoke":{"sigma":"%s","tableau":"%s","looker":"%s"},' "$SMOKE_SIGMA" "$SMOKE_TABLEAU" "$LOOKER_PROBE"
     printf '"hyperapi_present":%s,' "$HYPERAPI"
     printf '"skill_sha":"%s",' "$(jstr "$SKILL_SHA")"
     printf '"behind_count":%s,' "$BEHIND_COUNT"

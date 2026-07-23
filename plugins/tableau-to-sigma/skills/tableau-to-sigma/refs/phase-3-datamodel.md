@@ -174,6 +174,62 @@ unproven or unresolved, and also when `join-plan.json` is missing on a run whose
 `dm-spec.json` contains `Lookup(`. No skip flag — the recorded resolution is the
 only escape.
 
+### Equivalence probe for semantic edits (`semantic-edits.json`, gate 20 / exit 27)
+
+**Any structural edit to source semantics — dropping a join, collapsing a table,
+rewriting a filter — is forbidden without a recorded equivalence proof, BEFORE the
+edit ships** (PLAN-v3 PR-8; the field case: a LEFT JOIN on a non-unique flag key
+deleted as "provably no-op" with zero verification — the join was fanning out rows,
+so the "no-op" changed every downstream count. Corpus twin:
+`corpus/tableau/join-elision-fanout`). "Provably no-op" is proven by measurement,
+never asserted:
+
+```bash
+ruby scripts/probe-equivalence.rb --workdir <WORK> \
+  --edit "drop LEFT JOIN FACT->DIM (FLAG=FLAG)" \
+  --claim "joined table contributes no shelf column; elision is a no-op" \
+  --grain ORDER_ID --measures AMOUNT \
+  --before-sql "<the statement WITH the join>" --after-sql "<without>" \
+  --connection-id <id>            # or --fixture DIR offline
+```
+
+Both sides run ONE probe statement through the same warehouse seam as
+`probe-join-keys.rb` / `run-ground-truth.rb`: `COUNT(*)` (fan-out/loss),
+`COUNT(DISTINCT grain)` (declared-grain cardinality), and a `SUM` checksum per
+numeric measure (value drift; element mode `--before-element`/`--after-element`
+extracts the SQL and derives the `Sum([X])` measures from the spec). The result is
+recorded in `<WORK>/semantic-edits.json`; a mismatch is FATAL (exit 2) with both
+sides' numbers printed. The final gate (`assert-phase6-ran.rb` gate 20) exits 27
+while any declared entry lacks a proof or its proof says `match:false`. No skip
+flag and **no waiver path** — a mismatched edit never ships (revert or redesign; an
+intentionally-different rewrite is a user-initiated scope change, not an
+equivalence claim).
+
+**Withdrawing a refuted edit that was NOT applied.** When the probe REFUTES the
+claim and you therefore do not ship the edit, clear the blocking entry with
+
+```bash
+ruby scripts/probe-equivalence.rb --workdir <WORK> \
+  --withdraw "<edit_description>" --reason "<why the refuted edit was not applied>"
+```
+
+The entry moves verbatim to the ledger's `withdrawn[]` array — its refuted proof
+is preserved as evidence, plus `withdrawn_reason` + `withdrawn_at` — and gate 20
+ignores it but reports it informationally ("N withdrawn edit(s) — refuted and not
+applied"). Only a *refuted* entry is withdrawable: an unproven one must be
+re-probed first (a claim is measured before it is withdrawn), and a proven one
+doesn't block. Never hand-edit the ledger. Honest limit: withdrawal *attests* the
+edit was not applied — whether its SQL nonetheless shipped is not mechanically
+detectable; gates 16/18 remain the numeric net.
+
+**Honest limit — declared edits only.** Nothing mechanical can see an edit nobody
+recorded, so the gate enforces that *declared* edits are proven; the
+operating-contract rule (`refs/operating-contract.md` §Structural edits) makes the
+declaration itself mandatory. The net for an undeclared edit is gate 16 (the join
+was on the ledger before anyone touched it) plus gate 18 (ground-truth SQL derives
+from the `.twb` signals independently of the built spec — a silently dropped join
+diverges there).
+
 ### Validate before posting
 
 ```bash

@@ -117,18 +117,31 @@ VERDICT RULES (apply in order — first match wins)
   (element + what to change — `refs/fidelity-recipes.md` names the patterns).
   The builder (or a fresh builder) fixes and re-requests verification.
 - **Only near-exact — numbers all match, structure matches, at most trivial
-  cosmetic residue → countersign GREEN:**
+  cosmetic residue → countersign GREEN.** Two steps:
+
+  1. You have read the workdir artifacts, so even you are not context-free
+     (PR-9): spawn a **fresh blind grader** subagent with
+     `refs/blind-grader-brief.md` as its prompt, passing ONLY the source
+     dashboard PNG path, the Sigma render PNG path, the rubric path, and the
+     output path `{{WORKDIR}}/blind-grade.json` — no other context. If it
+     cannot be spawned in your session, write the grade yourself is NOT an
+     option; use `--no-vision-waiver "<reason>"` below (budget-counted).
+  2. Record, attaching the grade:
 
   ```bash
   ruby scripts/record-visual-check.rb --workdir {{WORKDIR}} --agent-vision true \
-    --verdict pass --notes "VERIFIER: <pages compared, anchors checked, residual cosmetics if any>"
+    --verdict pass --checklist "<six dimensions per layout-visual-qa.md 1b>" \
+    --blind-grade {{WORKDIR}}/blind-grade.json \
+    --notes "VERIFIER: <pages compared, anchors checked, residual cosmetics if any>"
   ```
 
-  The notes MUST start with `VERIFIER:` — that prefix is the countersignature
-  convention (`refs/orchestration.md` O3). If your `record-visual-check.rb`
-  supports a `--verifier` flag (`--help` lists it), pass it too; the prefix is
-  required either way. Then re-run the step-3 gate command — it must now
-  exit 0. GREEN is only claimable with that exit 0 in hand.
+  A blind-grade FAIL vetoes the countersignature (verdict YELLOW with its top
+  gaps in your fix list). The notes MUST start with `VERIFIER:` — that prefix
+  is the countersignature convention (`refs/orchestration.md` O3). If your
+  `record-visual-check.rb` supports a `--verifier` flag (`--help` lists it),
+  pass it too; the prefix is required either way. Then re-run the step-3 gate
+  command — it must now exit 0. GREEN is only claimable with that exit 0 in
+  hand.
 
 DELIVERABLE — write `{{WORKDIR}}/verification-result.json`:
 

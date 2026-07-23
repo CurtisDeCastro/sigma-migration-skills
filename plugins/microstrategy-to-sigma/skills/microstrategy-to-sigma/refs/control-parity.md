@@ -19,8 +19,9 @@ their default state.
 
 1. **Control lint** (`scripts/lib/control_lint.rb`) — static spec analysis:
    dead controls, ghost filter targets, source-closure reach vs same-page
-   queryable elements, and source-signal coverage via the
-   `control-scope.json` sidecar. Runs automatically in
+   queryable elements, source-signal coverage via the `control-scope.json`
+   sidecar, and **conflicting cross-page control defaults** (the severe D11
+   case below). Runs automatically in
    `post-and-readback.rb --type workbook` (exit 4) and as
    `assert-phase6-ran.rb` **gate 7** (exit 9, `--skip-control-lint` escape).
 2. **control-scope.json contract** — emitted by the builder next to the
@@ -92,11 +93,56 @@ Consequences:
 After any repair: flip-test the workbook
 (`ruby scripts/probe-controls.rb --workbook-id <id> --check-out-of-closure`).
 
+## Severe D11 case: shared master + disjoint per-page control defaults = workbook-wide zero rows
+
+The documented D11 multi-page control-bind defect is cross-page *leakage*
+(flipping page A's control moves page B's numbers, because both bind the one
+shared hidden master). Its severe special case is a full, silent **data
+outage**: when two pages' controls default to non-empty, **disjoint** values on
+the same logical column, Sigma **AND-composes** every control that filters a
+shared source element — so the composed filter is `col IN [A] AND col IN [B]`
+with `A ∩ B = ∅` → the master matches **zero rows** → every chart/KPI/table on
+every page sourced from it reads EMPTY, with no error at build or POST.
+
+Sigma composes by the shared master **element** in the source chain, not by
+column identity, so duplicating the column under a second id (`m-website-type`
+vs `m-website-type-overview`, both formula `[Custom SQL/Website Type]`) does
+**not** dodge it. Control lint check (d) sees through that by grouping a target
+table's columns by normalized formula.
+
+Check (d) hard-fails this shape (blocks GREEN via gate 7). It fires only when
+two controls on **different** pages target the **same** element+column-alias
+with **non-empty, disjoint** defaults — the common default-all case
+(`values: []`) never trips it. Two fixes, both of which the lint recommends:
+
+- **Independent per-page masters** — give each audience/page its own
+  independently-sourced master element (a distinct filter-target elementId per
+  page), so the controls no longer compose against one source. (This is what
+  the archived pre-regression version of the workbook that surfaced #485 did:
+  `master-agent` / `master-leads` / `master-overview`.)
+- **Overlapping (or default-all) defaults** — make the per-page defaults share a
+  non-empty intersection, or leave them default-all, so the composed filter is
+  satisfiable.
+
 ## Gotcha: list-control targets on NUMERIC columns are silently stripped
 Same class as the datetime strip: a list control whose filter target column is
 numeric returns PUT 200 but reads back `filters: null`. Fix: add a hidden
 `Text()` cast column on the target element and point the control at the cast.
 (Found live by gate 7 on the MicroStrategy retrofit, 2026-06-12.)
+
+The general form — a list control's filter **TARGET binding** being silently
+dropped despite a 200 (the `filters` key survives on readback but its
+`columnId`/`source` are stripped, so the control filters nothing) — is
+issue #456, a member of the `DROPPED_BY_API` family (distinct from #415/#417).
+Because the `filters` key survives, a plain posted-vs-readback KEY diff can't
+see it; the post-POST control-field census (where a converter wires one) also
+compares the number of **bound** filter targets and flags any control that
+binds zero targets on readback. The persisting shape is a TABLE-rooted target on
+a STRING column; cast a numeric/datetime target with a hidden `Text([<col>])`
+decode column and bind both the target and the value-source to it; an
+unresolvable target is routed to the post-publish guide — never ship a control
+that filters nothing. Contract row: sigma-workbooks
+`reference/specification/controls.md` → "Dropped-by-API fields".
 
 ## Gotcha: a `[controlId]` formula reference is only "reach" if consumed type-compatibly
 The lint counts a `[<controlId>]` reference in a calc/formula as control **reach**

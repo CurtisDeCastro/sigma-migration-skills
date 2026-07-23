@@ -45,7 +45,7 @@ INVENTORY = [
   { name: 'Tableau format strings',                    pat: /<format\s[^>]*attr='text-format'/,
     status: :auto, blurb: 'p0.0% / C1033% / $#,##0;(...) etc. translated to Sigma d3-format with paren-negative.' },
   { name: 'Shared-view dashboard filters',             pat: /<shared-view[^>]*>\s*<datasources>/,
-    status: :auto, blurb: 'List/relative-date/quantitative shared filters become Sigma controls per page.' },
+    status: :hint, blurb: 'Dashboard QUICK-filters become Sigma controls per page (auto). But an always-on DATA-SOURCE filter hosted here (user:ui-domain=database, e.g. an `active` flag) renders nothing on any dashboard, so it must be APPLIED as a workbook-wide default filter on the master — NOT left as an open control. parse-twb-layout tags them (is_datasource_filter); the datasource-filter gate (assert-datasource-filters.rb) blocks GREEN until each is applied. See refs/phase-1-discover.md.' },
   { name: 'Per-worksheet sort',                        pat: /<sort\s+[^>]*direction=/,
     status: :auto, blurb: "Tableau's sort direction carries into the chart's xAxis.sort." },
   { name: 'Parameter (list domain) + CASE-on-param',   pat: /param-domain-type='list'/,
@@ -117,13 +117,13 @@ INVENTORY = [
 
   # DESIGN / COMPOSITION — surfaced so a design-heavy dashboard no longer reports
   # "0 unhandled" (false comfort). See TABLEAU_TO_SIGMA_SKILL_GAPS.md. These are
-  # regex-tokenizable; the STRUCTURAL design gaps (repeated per-category container
-  # cards / card-trellis B1, 1-D strip/jitter plots C1) are detected in
+  # regex-tokenizable; the STRUCTURAL design gaps (repeated per-category small
+  # multiples → native trellis, 1-D strip/jitter plots C1) are detected in
   # parse-twb-layout.rb (Phase 1) — a raw-text regex can't reliably spot them.
   { name: 'Container background tint / colored header band', pat: /<format\s+attr='background-color'\s+value='#(?!(?:fff(?:fff)?|FFF(?:FFF)?)')/,
     status: :hint, blurb: 'Gap B2: a dashboard zone/container has a non-white background fill (region-card tints, colored title bands). NOT yet auto-emitted — parse-twb-layout should surface the fill and build-charts should emit container.style.backgroundColor + borderRadius (+ a header-bar element). Until then, recreate the tint manually.' },
   { name: 'Custom categorical color palette (discrete)', pat: /<encoding[^>]+(?:class|attr)='color'[\s\S]{0,400}?<map>/,
-    status: :hint, blurb: "Gap D1: a color encoding carries an explicit value→color map (custom categorical palette, e.g. per-region teal/pink/purple/orange). NOT yet auto-extracted — build-charts should emit themeOverrides.categoricalScheme + per-chart color.scheme in category sort order. Until then, Sigma defaults apply and per-category color won't match." },
+    status: :auto, blurb: "Gap D1 (auto since PR-12): a color encoding carries an explicit value→color map. parse-twb-layout extracts it (series_colors) and build-charts pins per-chart color.scheme + themeOverrides.categoricalScheme ORDERED ascending by member (Sigma applies schemes positionally in category-sort order). Verify via formats-emitted.json series_color_maps." },
   { name: 'Viz-in-tooltip (embedded chart in tooltip)', pat: /visual-tooltip|show-viz-in-tooltip/i,
     status: :manual, blurb: 'Gap F3: worksheet embeds a viz inside its tooltip. Sigma has no spec-API path for viz-in-tooltip (no persistence) — recreate manually post-publish or drop. Surfaced here so it is not silently lost.' }
 ].freeze

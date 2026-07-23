@@ -23,6 +23,9 @@ corpus/
 | Case | Source format | Golden |
 |---|---|---|
 | tableau/orders-overview | .twb workbook + discovery signals | data model (9 elements, LOD child) |
+| tableau/lookup-grain-mismatch | synthetic field-twin .twb (VC self-join on a non-unique compound key + Top-N params) | join-plan pin + probe fixture + gate-16 checks.sh (no golden DM) |
+| tableau/join-elision-fanout | synthetic field-twin .twb (LEFT JOIN on a flag key, no joined column on shelves + 2nd datasource) | join-plan pin + multi-ds/gap-scan/line-kind checks.sh (no golden DM) |
+| tableau/preagg-kpi | synthetic field-twin .twb ({FIXED day: COUNTD} LODs consumed additively + dual-axis combo) | lod-audit pin + gate-17/dual-axis checks.sh (no golden DM) |
 | tableau/structural-workarounds | synthetic .twb (story + blend + nested LOD/ISOYEAR/FINDNTH/bins) | skill-script pins: story-plan / blend-plan / lod-chains (no golden DM) |
 | powerbi/model-fixtures | 8 TMSL .bim (plugin fixtures) | DM for fixture_01 |
 | powerbi/report-classic-employee-dashboard | legacy single report.json | artifact-pin only |
@@ -45,7 +48,14 @@ corpus/
 ```
 
 `--check` needs only python3 stdlib (PyYAML optional) — runnable in plain CI
-with no creds.
+with no creds. A case may additionally ship a `checks.sh` (executable
+expectations — still offline and creds-free): `--check` runs it after the
+structural check passes, and the case FAILs if it exits nonzero. The tableau
+field-twin cases (PLAN-v3 PR-1) use this to run the skill's ledger
+derivations, fixture-mode probes, and final gates against their synthetic
+.twbs — those need ruby on PATH (both CI runners ship it). A shipped
+`checks.sh` must be listed in the MANIFEST expectations artifacts
+(corpus_check enforces this).
 
 ## Goldens are id-normalized
 
@@ -74,7 +84,11 @@ warnings}` — so warning-text regressions are caught too.
    a `## Expectations` ```json block in `MANIFEST.md` (see any existing case):
    `artifacts` (paths relative to the case dir) + `goldens` (per-file counts
    and optional `element_names` / `metric_names` / `relationship_names`).
-5. `./run-corpus.sh --check <tool>` must pass.
+5. Behavioral expectations (script exit codes, ledger contents, gate
+   verdicts) go in an optional `checks.sh` in the case dir — offline and
+   creds-free, listed in the expectations artifacts. See
+   `tableau/lookup-grain-mismatch/checks.sh` for the pattern.
+6. `./run-corpus.sh --check <tool>` must pass.
 
 Large artifacts: the hosted MCP server rejects bodies over ~100 KB (HTTP 413).
 For those (e.g. the Orders .twb), run the converter from a clean
