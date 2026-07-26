@@ -235,6 +235,11 @@ if ($script:PyExe) {
 #      scope: the flag helps only pip 22.2-24.1 with truststore importable --
 #      pip >= 24.2 uses the OS store by default, and a corporate CA absent
 #      from the OS store needs PIP_CERT. NEVER --trusted-host.
+#      The rung is GATED on exactly that scope (Get-PipVersionParts window +
+#      truststore importable -- never while installing truststore itself);
+#      outside it the helper prints the PIP_CERT remediation instead of a
+#      retry that cannot work, and the original TLS error is saved before
+#      the retry so it is never overwritten.
 # On final failure the last 4 pip log lines are shown (the old helper
 # swallowed all output, leaving TLS/proxy failures opaque).
 function Invoke-PipUserInstall {
@@ -254,9 +259,34 @@ function Invoke-PipUserInstall {
     if (($rc -ne 0) -and (Test-Path $log)) { $err = (Get-Content $log -Raw -ErrorAction SilentlyContinue) }
   }
   if (($rc -ne 0) -and ($err -match '(?i)ssl|certificate')) {
-    Note 'pip: TLS failure -- retrying with --use-feature=truststore (OS trust store)'
-    & $script:PyExe @a -m pip install --user @extra --quiet --use-feature=truststore @Pkgs 2>$log | Out-Null
-    $rc = $LASTEXITCODE
+    # Rung 3 is gated TWICE. (a) the [22.2, 24.2) window: below 22.2 pip
+    # rejects --use-feature=truststore AT PARSE TIME, and because the retry
+    # wrote to the same log it ERASED the real TLS error this helper exists
+    # to surface. (b) $script:trustOk: rung 3 asks pip to use a feature
+    # provided by the truststore package, so it is chicken-and-egg on the
+    # very call that installs truststore. When either gate says no, print
+    # the ACTIONABLE remediation instead of a retry that cannot work.
+    $pv = Get-PipVersionParts
+    $inWindow = $false
+    if ($pv) {
+      $ge222 = ($pv[0] -gt 22) -or (($pv[0] -eq 22) -and ($pv[1] -ge 2))
+      $lt242 = ($pv[0] -lt 24) -or (($pv[0] -eq 24) -and ($pv[1] -lt 2))
+      $inWindow = ($ge222 -and $lt242)
+    }
+    if (-not $inWindow) {
+      Note 'pip: TLS failure -- NOT retrying with --use-feature=truststore: this pip is outside the [22.2, 24.2) window where that opt-in exists and is not already the default. Point pip at the corporate CA once instead: set PIP_CERT to the corp CA bundle path (never --trusted-host).'
+    } elseif ($script:trustOk -ne $true) {
+      Note 'pip: TLS failure -- NOT retrying with --use-feature=truststore: the truststore package is not importable yet (this install may BE truststore). Set PIP_CERT to the corp CA bundle path and re-run.'
+    } else {
+      Note 'pip: TLS failure -- retrying with --use-feature=truststore (OS trust store)'
+      $tlsErr = $err   # NEVER clobber the rung-1/2 diagnostic
+      & $script:PyExe @a -m pip install --user @extra --quiet --use-feature=truststore @Pkgs 2>$log | Out-Null
+      $rc = $LASTEXITCODE
+      if ($rc -ne 0) {
+        Note 'pip: the truststore retry also failed; the ORIGINAL TLS error was:'
+        ($tlsErr -split "`r?`n") | Where-Object { $_ } | Select-Object -Last 4 | ForEach-Object { Note "pip: $_" }
+      }
+    }
   }
   if (($rc -ne 0) -and (Test-Path $log)) {
     Get-Content $log -ErrorAction SilentlyContinue | Select-Object -Last 4 | ForEach-Object { Note "pip: $_" }

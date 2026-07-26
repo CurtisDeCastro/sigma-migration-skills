@@ -375,10 +375,16 @@ fi
 #      Honest scope: the flag helps only pip 22.2–24.1 with truststore
 #      importable — pip >= 24.2 uses the OS store by default, and a corporate
 #      CA absent from the OS store needs PIP_CERT. NEVER --trusted-host.
+#      The rung is GATED on exactly that scope (pip_truststore_window +
+#      truststore importable — never while installing truststore itself);
+#      outside it the helper prints the PIP_CERT remediation instead of a
+#      retry that cannot work, and the retry logs to a SEPARATE file so the
+#      original TLS error is never overwritten.
 # On final failure the last 4 pip log lines are shown (the old helper
 # swallowed all output, leaving TLS/proxy failures opaque).
 pip_user_install() {
   _pi_log="$(mktemp)" || return 1
+  _pi_tls="$(mktemp)" || { rm -f "$_pi_log"; return 1; }
   _pi_extra=""
   $PY_RUN -m pip install --user --quiet "$@" >/dev/null 2>"$_pi_log"; _pi_rc=$?
   if [ $_pi_rc -ne 0 ] && grep -qi 'externally.managed' "$_pi_log"; then
@@ -387,11 +393,30 @@ pip_user_install() {
     $PY_RUN -m pip install --user "$_pi_extra" --quiet "$@" >/dev/null 2>"$_pi_log"; _pi_rc=$?
   fi
   if [ $_pi_rc -ne 0 ] && grep -qiE 'ssl|certificate' "$_pi_log"; then
-    note "pip: TLS failure — retrying with --use-feature=truststore (OS trust store)"
-    $PY_RUN -m pip install --user ${_pi_extra:+"$_pi_extra"} --quiet --use-feature=truststore "$@" >/dev/null 2>"$_pi_log"; _pi_rc=$?
+    # Rung 3 is gated TWICE. (a) pip_truststore_window: below 22.2 pip rejects
+    # --use-feature=truststore AT PARSE TIME, and because the retry wrote to
+    # the same log it ERASED the real TLS error this helper exists to surface
+    # (macOS Command Line Tools python ships pip 21.2.4 — common, not exotic).
+    # (b) TRUSTSTORE_OK: rung 3 asks pip to use a feature provided by the
+    # truststore package, so it is chicken-and-egg on the very call that
+    # installs truststore. When either gate says no, print the ACTIONABLE
+    # remediation instead of a retry that cannot work.
+    if ! pip_truststore_window; then
+      note "pip: TLS failure — NOT retrying with --use-feature=truststore: this pip is outside the [22.2, 24.2) window where that opt-in exists and is not already the default. Point pip at the corporate CA once instead: export PIP_CERT=/path/to/corp-ca.pem (never --trusted-host)."
+    elif [ "${TRUSTSTORE_OK:-false}" != true ]; then
+      note "pip: TLS failure — NOT retrying with --use-feature=truststore: the truststore package is not importable yet (this install may BE truststore). Set PIP_CERT=/path/to/corp-ca.pem and re-run."
+    else
+      note "pip: TLS failure — retrying with --use-feature=truststore (OS trust store)"
+      cp "$_pi_log" "$_pi_tls"          # NEVER clobber the rung-1/2 diagnostic
+      $PY_RUN -m pip install --user ${_pi_extra:+"$_pi_extra"} --quiet --use-feature=truststore "$@" >/dev/null 2>"$_pi_log"; _pi_rc=$?
+      if [ $_pi_rc -ne 0 ]; then
+        note "pip: the truststore retry also failed; the ORIGINAL TLS error was:"
+        sed 's/^/    pip: /' "$_pi_tls" | tail -n 4
+      fi
+    fi
   fi
   [ $_pi_rc -ne 0 ] && sed 's/^/    pip: /' "$_pi_log" | tail -n 4
-  rm -f "$_pi_log"
+  rm -f "$_pi_log" "$_pi_tls"
   return $_pi_rc
 }
 
