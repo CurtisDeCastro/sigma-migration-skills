@@ -39,9 +39,11 @@
 #   2  NOT DONE — the hard gate never stamped success (finalize not run / failed)
 #   3  NOT DONE — still at PASS 1 (parity-pending.json present); run --finalize
 #   4  DONE-BUT-MISMATCH — success marker is for a different workbook than asked
-#   5  NOT DONE — loop-log.jsonl records the SAME failure signature 2+ times
-#      since the last green reset (the stop-at-2 loop breaker tripped/was
-#      breached; an operator must resolve it)
+#   5  NOT DONE — loop-log.jsonl shows a tripped loop breaker since the last
+#      green reset: the SAME failure signature 2+ times (stop-at-2 tripped/was
+#      breached) or a record the breaker stamped as a hard stop (same-mode
+#      no-progress / attempt-cap rules stop WITHOUT a signature repeat); an
+#      operator must resolve it
 #   6  REPORT CONTRADICTS LEDGER — a completion claim (phase6-success.json /
 #      parity-final.json / degradation-ledger.json) is inconsistent with the
 #      ledger derived fresh from the artifacts; the report is lying about the
@@ -100,14 +102,21 @@ end
 # Loop-log enforcement (stop-at-2, PLAN E5.1: refusal threshold 2+ in the same
 # PR as the breaker): a signature recorded 2+ times since the last green reset
 # means the run ground the same failure in a loop — completion can never be
-# claimed over it, success marker or not. loop_counts only counts entries
-# after the last {'reset'} record, so a GREEN finalize re-arms this refusal
-# automatically; otherwise the operator resolves the repeat, then clears the log.
+# claimed over it, success marker or not. ALSO refuse over any record the
+# breaker itself stamped as a hard stop: the mode-no-progress and attempt-cap
+# rules stop a run while every signature is still at a 1-count, so the count
+# threshold alone would let a hard-STOPPED run falsely report DONE. Both
+# windows are post-reset (loop_counts / loop_stops only see entries after the
+# last {'reset'} record), so a GREEN finalize re-arms this refusal
+# automatically; otherwise the operator resolves the failure, then clears the log.
 looped = Offramp.loop_counts(wd).select { |_, n| n >= 2 }
-unless looped.empty?
-  warn '⛔ NOT DONE — loop-log.jsonl records the SAME failure signature 2+ times (stop-at-2 tripped):'
+stops  = Offramp.loop_stops(wd)
+unless looped.empty? && stops.empty?
+  warn '⛔ NOT DONE — loop-log.jsonl records a tripped loop breaker (repeat / no-progress / attempt-cap):'
   looped.each { |sig, n| warn "   • #{sig}  × #{n}" }
-  warn '   The run was grinding one failure, not converging — an operator must resolve it.'
+  stops.reject { |r| looped.key?(r['signature']) }
+       .each { |r| warn "   • hard STOP (#{r['stop_rule'] || 'stop'}) at #{r['at']}: #{r['signature']}" }
+  warn '   The run was grinding, not converging — an operator must resolve it.'
   warn "   (After resolving, clear #{File.join(wd, 'loop-log.jsonl')} and re-run the gates;"
   warn '    a GREEN finalize also re-arms the breaker automatically.)'
   print_offramps(wd)
