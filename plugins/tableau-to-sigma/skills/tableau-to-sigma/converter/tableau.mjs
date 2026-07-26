@@ -2495,7 +2495,44 @@ function tableauInToSigma(formula) {
   }
   return f;
 }
-var _TEXT_FN_RE = /(?:Coalesce|Concat|Text|Left|Right|Mid|Substring|Substr|Upper|Lower|Trim|Replace|MonthName|WeekdayName|DateName|Proper)$/i;
+// Coalesce is deliberately NOT in the text set: its type follows its args, and
+// the null-guard idiom Coalesce(x, 0) is numeric — counting it as text turned
+// ZN(a)+ZN(b) addition into silent string concat (live-verified field bug).
+// Instead _isTextOperand recurses into Coalesce's args, so string-guard chains
+// (Coalesce([first], "x") + …) still convert + → & while numeric guards keep +.
+var _TEXT_FN_RE = /(?:Concat|Text|Left|Right|Mid|Substring|Substr|Upper|Lower|Trim|Replace|MonthName|WeekdayName|DateName|Proper)$/i;
+function _splitTopLevelArgs(s) {
+  const args = [];
+  let depth = 0, quote = null, buf = "";
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (quote) {
+      buf += ch;
+      if (ch === quote && s[i - 1] !== "\\")
+        quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'")
+      quote = ch;
+    else if (ch === "(" || ch === "[")
+      depth++;
+    else if (ch === ")" || ch === "]") {
+      depth--;
+      // Depth going negative means s is not a single call's arg list (e.g. an
+      // unwrapped compound like `Coalesce(a, 0) = X`) — report no args.
+      if (depth < 0)
+        return [];
+    } else if (ch === "," && depth === 0) {
+      args.push(buf.trim());
+      buf = "";
+      continue;
+    }
+    buf += ch;
+  }
+  if (buf.trim())
+    args.push(buf.trim());
+  return args;
+}
 function _isTextOperand(op, isTextRef) {
   let s = op.trim();
   while (/^\(.*\)$/s.test(s)) {
@@ -2525,6 +2562,10 @@ function _isTextOperand(op, isTextRef) {
   const fn = s.match(/^([A-Za-z_]+)\s*\(.*\)$/s);
   if (fn && _TEXT_FN_RE.test(fn[1]))
     return true;
+  if (fn && /^Coalesce$/i.test(fn[1])) {
+    const args = _splitTopLevelArgs(s.slice(s.indexOf("(") + 1, -1));
+    return args.some((a) => _isTextOperand(a, isTextRef));
+  }
   return false;
 }
 function tableauTextConcatToSigma(formula, isTextRef) {
@@ -2680,7 +2721,9 @@ var TABLEAU_FUNC_MAP = {
   // to DatePart("week", date) below (verified via docs + live query 2026-07-10).
   "QUARTER": "Quarter",
   "DATE": "Date",
-  "DATETIME": "Datetime",
+  // DATETIME(x) → Date(x): Sigma has no Datetime() (absent from the function
+  // index) — Date() is the documented cast to the datetime type.
+  "DATETIME": "Date",
   "MAKEDATE": "MakeDate",
   // regex (same arg order as Tableau)
   "REGEXP_EXTRACT": "RegexpExtract",
@@ -2693,9 +2736,13 @@ var TABLEAU_FUNC_MAP = {
   "PERCENTILE": "PercentileCont",
   "CORR": "Corr",
   // string split — both 1-indexed, negatives count from the right
-  "SPLIT": "SplitPart"
+  "SPLIT": "SplitPart",
+  // null-guard — native Sigma Zn (docs/zn). Name-map, not an arg regex: the old
+  // single-paren Coalesce($1, 0) rewrite emitted malformed Coalesce(Sum([x], 0))
+  // for the dominant field idiom ZN(AGG(...)).
+  "ZN": "Zn"
 };
-var SIGMA_CHART_ONLY_WINDOW_RE = /\b(?:Cumulative(?:Sum|Avg|Min|Max|Count)|Moving(?:Sum|Avg|Min|Max|Count|StdDev)|RankDense|RankPercentile|Rank|PercentOfTotal|RowNumber|Lag|Lead)\s*\(/;
+var SIGMA_CHART_ONLY_WINDOW_RE = /\b(?:Cumulative(?:Sum|Avg|Min|Max|Count)|Moving(?:Sum|Avg|Min|Max|Count|StdDev|Variance|Corr)|RankDense|RankPercentile|Rank|PercentOfTotal|RowNumber|Lag|Lead)\s*\(/;
 var TABLEAU_TABLE_CALC_TOKEN_RE = /\b(?:WINDOW_[A-Z]+|RUNNING_[A-Z]+|LOOKUP|PREVIOUS_VALUE|RANK(?:_[A-Z]+)?|INDEX|SIZE|TOTAL|FIRST|LAST)\s*\(/;
 var TABLEAU_TABLE_CALC_TOKEN_CI_RE = /\b(?:WINDOW_[A-Za-z]+|RUNNING_[A-Za-z]+|PREVIOUS_VALUE)\s*\(/i;
 var TABLEAU_LOD_LEFTOVER_RE = /\{\s*(?:FIXED|INCLUDE|EXCLUDE)\b/i;
@@ -2735,8 +2782,11 @@ function _tcSameRef(a, b) {
   const norm = (s) => s.replace(/^\[|\]$/g, "").replace(/[^A-Za-z0-9_]/g, "_").toUpperCase();
   return norm(a) === norm(b);
 }
+// WINDOW_CORR / WINDOW_VAR / WINDOW_COUNT are NOT listed — Sigma ships
+// MovingCorr/MovingVariance/MovingCount (function index, verified 2026-07-25),
+// mapped below. The population variants (VARP/COVARP/STDEVP) stay: no Moving*Pop.
 function tableauWindowUntranslatable(formula) {
-  const m = (formula || "").match(/\b(WINDOW_MEDIAN|WINDOW_PERCENTILE|WINDOW_CORR|WINDOW_COVARP?|WINDOW_VARP?|WINDOW_STDEVP|PREVIOUS_VALUE|SIZE)\s*\(/i);
+  const m = (formula || "").match(/\b(WINDOW_MEDIAN|WINDOW_PERCENTILE|WINDOW_COVARP?|WINDOW_VARP|WINDOW_STDEVP|PREVIOUS_VALUE|SIZE)\s*\(/i);
   return m ? m[1].toUpperCase() : null;
 }
 function tableauWindowToSigmaChart(formula) {
@@ -2762,21 +2812,39 @@ function tableauWindowToSigmaChart(formula) {
     const fn = "Cumulative" + m[1].charAt(0).toUpperCase() + m[1].slice(1).toLowerCase();
     return { formula: `${fn}(${_tcAgg(m[1], m[2])})`, kind: "cumulative" };
   }
-  m = f.match(new RegExp(`^WINDOW_(SUM|AVG|MIN|MAX|STDEV)\\s*\\(\\s*${_TC_AGG_EXPR}\\s*,\\s*(-?\\d+)\\s*,\\s*(-?\\d+)\\s*\\)$`, "i"));
+  m = f.match(new RegExp(`^WINDOW_(SUM|AVG|MIN|MAX|STDEV|COUNT|VAR)\\s*\\(\\s*${_TC_AGG_EXPR}\\s*,\\s*(-?\\d+)\\s*,\\s*(-?\\d+)\\s*\\)$`, "i"));
   if (m) {
     const back = parseInt(m[4], 10);
     const fwd = parseInt(m[5], 10);
     if (back <= 0 && fwd >= 0) {
+      // COUNT/VAR → MovingCount/MovingVariance: present in the Sigma function
+      // index (verified 2026-07-25); previously mis-listed as untranslatable.
       const movMap = {
         SUM: "MovingSum",
         AVG: "MovingAvg",
         MIN: "MovingMin",
         MAX: "MovingMax",
-        STDEV: "MovingStdDev"
+        STDEV: "MovingStdDev",
+        COUNT: "MovingCount",
+        VAR: "MovingVariance"
       };
       const fn = movMap[m[1].toUpperCase()];
       const args = fwd === 0 ? `${-back}` : `${-back}, ${fwd}`;
       return { formula: `${fn}(${_tcAgg(m[2], m[3])}, ${args})`, kind: "moving" };
+    }
+    return null;
+  }
+  // WINDOW_CORR(AGG([x]), AGG([y]), -n, m) → MovingCorr(Agg([x]), Agg([y]), n[, m])
+  // (two-expression form; offsets must span the current row, like the other
+  // Moving* mappings). Offset-less WINDOW_CORR is a whole-partition corr with
+  // no validated Sigma window shape — it falls to the loud not-converted flag.
+  m = f.match(new RegExp(`^WINDOW_CORR\\s*\\(\\s*${_TC_AGG_EXPR}\\s*,\\s*${_TC_AGG_EXPR}\\s*,\\s*(-?\\d+)\\s*,\\s*(-?\\d+)\\s*\\)$`, "i"));
+  if (m) {
+    const back = parseInt(m[5], 10);
+    const fwd = parseInt(m[6], 10);
+    if (back <= 0 && fwd >= 0) {
+      const args = fwd === 0 ? `${-back}` : `${-back}, ${fwd}`;
+      return { formula: `MovingCorr(${_tcAgg(m[1], m[2])}, ${_tcAgg(m[3], m[4])}, ${args})`, kind: "moving" };
     }
     return null;
   }
@@ -2891,7 +2959,7 @@ function tableauFormulaToSigma(formula, warnings) {
       warnings.push(`\u26A0 COVAR/COVARP has no Sigma equivalent \u2014 not converted. Fragment: ${f.slice(0, 120)}`);
     return "/* no Sigma equivalent: " + f.replace(/\/\*/g, "").replace(/\*\//g, "") + " */";
   }
-  f = f.replace(/\bZN\s*\(([^)]+)\)/gi, "Coalesce($1, 0)");
+  // (ZN → Zn happens in the TABLEAU_FUNC_MAP pass — nesting-safe name rename.)
   f = f.replace(/\bIFNULL\s*\(/gi, "Coalesce(").replace(/\bIFERROR\s*\(/gi, "Coalesce(");
   f = f.replace(/\bISNULL\s*\(/gi, "IsNull(");
   f = f.replace(/\bCOUNT\s*\(([^)]+)\)/gi, (m, arg) => "CountIf(IsNotNull(" + arg.trim() + "))");
@@ -2902,8 +2970,17 @@ function tableauFormulaToSigma(formula, warnings) {
   f = f.replace(/\bIIF\s*\(/gi, "If(");
   f = tableauCaseToSigma(f);
   f = f.replace(/\bDATEPART\s*\(\s*'(\w+)'\s*,\s*([^)]+)\)/gi, (m, part, dateArg) => {
-    if (part.toLowerCase() === "week")
+    const p = part.toLowerCase();
+    if (p === "week")
       return 'DatePart("week", ' + dateArg.trim() + ")";
+    // 'weekday'/'dayofweek' → Weekday(date) — Sigma has no DayOfWeek() (absent
+    // from the function index). Sigma Weekday anchors Sunday=1..7; Tableau
+    // numbering follows the datasource start-of-week — flag to verify.
+    if (p === "weekday" || p === "dayofweek") {
+      if (warnings)
+        warnings.push(`⚠ DATEPART('${p}') → Weekday() — verify numbering: Sigma anchors Sunday=1..7; Tableau follows the datasource start-of-week.`);
+      return "Weekday(" + dateArg.trim() + ")";
+    }
     const partMap = {
       year: "Year",
       month: "Month",
@@ -2911,11 +2988,9 @@ function tableauFormulaToSigma(formula, warnings) {
       hour: "Hour",
       minute: "Minute",
       second: "Second",
-      quarter: "Quarter",
-      dayofweek: "DayOfWeek",
-      weekday: "DayOfWeek"
+      quarter: "Quarter"
     };
-    const fn = partMap[part.toLowerCase()];
+    const fn = partMap[p];
     return fn ? fn + "(" + dateArg.trim() + ")" : m;
   });
   f = f.replace(/\bDATENAME\s*\(\s*'(\w+)'\s*,\s*([^,)]+)(?:,[^)]*)?\)/gi, (m, part, dateArg) => {
@@ -2933,7 +3008,8 @@ function tableauFormulaToSigma(formula, warnings) {
       case "day":
         return "Text(Day(" + arg + "))";
       case "week":
-        return "Text(Week(" + arg + "))";
+        // via DatePart("week", …) — Sigma has no Week() (see the WEEK note above)
+        return 'Text(DatePart("week", ' + arg + "))";
       case "hour":
         return "Text(Hour(" + arg + "))";
       case "minute":
@@ -2945,7 +3021,33 @@ function tableauFormulaToSigma(formula, warnings) {
     }
   });
   f = f.replace(/\bDATETRUNC\s*\(\s*'([^']+)'\s*,/gi, 'DateTrunc("$1",');
-  f = f.replace(/,\s*["'](?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)["']\s*\)/gi, ")");
+  // Start-of-week literal — DATETRUNC('week', d, 'monday') 3rd arg / 4-arg
+  // DATEDIFF('week', a, b, 'monday'): Sigma DateTrunc/DateDiff have no
+  // start-of-week slot, so the literal is dropped — but never silently (week
+  // boundaries then follow the warehouse week start; silent drift shipped in
+  // the field). Scoped to those two callers via a balanced-paren walk back to
+  // the enclosing call, so e.g. Contains([Day], 'monday') keeps its argument.
+  f = f.replace(/,\s*["'](monday|tuesday|wednesday|thursday|friday|saturday|sunday)["']\s*\)/gi, (m, day, off, whole) => {
+    let fn = "", depth = 0;
+    for (let i = off; i >= 0; i--) {
+      const c = whole[i];
+      if (c === ")")
+        depth++;
+      else if (c === "(") {
+        if (depth === 0) {
+          const h = whole.slice(0, i).match(/([A-Za-z_][A-Za-z0-9_]*)\s*$/);
+          fn = h ? h[1] : "";
+          break;
+        }
+        depth--;
+      }
+    }
+    if (!/^(?:datetrunc|datediff)$/i.test(fn))
+      return m;
+    if (warnings)
+      warnings.push(`⚠ ${fn.toUpperCase()} start-of-week '${day}' dropped — Sigma ${/^datetrunc$/i.test(fn) ? "DateTrunc" : "DateDiff"} has no start-of-week argument; week boundaries follow the warehouse week start. Verify week-grain results.`);
+    return ")";
+  });
   f = f.replace(/\bDATEADD\s*\(\s*'([^']+)'\s*,/gi, 'DateAdd("$1",');
   f = f.replace(/\bDATEDIFF\s*\(\s*'([^']+)'\s*,/gi, 'DateDiff("$1",');
   f = f.replace(/\bWEEK\s*\(\s*([^()]*(?:\([^()]*\)[^()]*)*)\)/gi, 'DatePart("week", $1)');

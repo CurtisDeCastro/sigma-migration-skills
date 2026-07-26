@@ -47,8 +47,8 @@ check(norm.call(nil).nil?, 'nil formula passes through', fails)
 puts
 puts 'Part C — known-list coverage (contract list + refs additions)'
 contract = %w[If Switch Sum Avg Min Max Median Count CountIf CountDistinct Coalesce IsNull IsNotNull
-              Lookup DateTrunc DateAdd DateDiff DatePart Year Month Day Hour Minute Second Week Quarter
-              MonthName WeekdayName Weekday MakeDate Date Datetime DateParse Today Now Text Left Right
+              Lookup DateTrunc DateAdd DateDiff DatePart Year Month Day Hour Minute Second Quarter
+              MonthName WeekdayName Weekday MakeDate Date DateParse Today Now Text Left Right
               Mid Len Find Contains StartsWith EndsWith Replace Trim Ltrim Rtrim Upper Lower SplitPart
               Concat Abs Round Ceiling Floor Power Sqrt Int Number Ln Log Exp Mod Sign Pi StdDev
               Variance VariancePop PercentileCont Rank RankDense RankPercentile RowNumber Lag Lead
@@ -59,8 +59,11 @@ contract = %w[If Switch Sum Avg Min Max Median Count CountIf CountDistinct Coale
               First Last Zn]
 unknown_to_map = contract.reject { |n| FormulaNormalize::CANONICAL_BY_DOWNCASE.key?(n.downcase) }
 check(unknown_to_map.empty?, "every contract-named function is known case-insensitively (missing: #{unknown_to_map.inspect})", fails)
-check(norm.call('WEEK([d])') == 'Week([d])', 'WEEK( -> Week( (refs addition beyond sigma_functions.rb)', fails)
-check(norm.call('datetime([d])') == 'Datetime([d])', 'datetime( -> Datetime( (refs addition)', fails)
+# Week()/Datetime() do NOT exist in Sigma (live probe: "Unknown function:
+# Week") — they must stay UNKNOWN so validate-spec rejects a leak instead of
+# the normalizer blessing it with a case-fix.
+check(norm.call('WEEK([d])') == 'WEEK([d])', 'WEEK( left untouched — no Sigma Week(); validator must catch it', fails)
+check(norm.call('datetime([d])') == 'datetime([d])', 'datetime( left untouched — no Sigma Datetime()', fails)
 check(norm.call('LTRIM([s])') == 'Ltrim([s])', 'LTRIM( -> Ltrim( (converter spelling wins the collision)', fails)
 check(norm.call('LTrim([s])') == 'LTrim([s])', 'LTrim( (whitelist spelling) treated as known — never rewritten', fails)
 check(norm.call('Ltrim([s])') == 'Ltrim([s])', 'Ltrim( (converter spelling) treated as known — never rewritten', fails)

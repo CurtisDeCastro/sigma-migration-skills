@@ -112,11 +112,21 @@ check(out =~ /WARN: .*FluxCapacitor/, 'WARN names the function', fails)
 check(out.include?('--- 1 warnings (non-fatal)'), 'warning count summarized', fails)
 
 puts
-puts 'Part D — refs-documented spellings beyond sigma_functions.rb are clean'
+puts 'Part D — refs-documented spellings beyond sigma_functions.rb'
+# Ltrim/Rtrim (the converter's spellings) stay accepted via EXTRA_FUNCTIONS.
+spec = { 'pages' => [{ 'name' => 'P1', 'elements' => [el('t1', 'T', formula: 'Ltrim(Rtrim([Order Date]))')] }] }
+spec['pages'][0]['elements'][0]['columns'] << { 'id' => 'c-sib', 'name' => 'Order Date', 'formula' => nil }
+out, code = validate(spec)
+check(code == 0 && !out.include?('WARN:'), "Ltrim/Rtrim accepted, no warn (got #{code})", fails)
+# Week/Datetime were dropped from EXTRA_FUNCTIONS (2026-07-25): neither exists
+# in Sigma (live probe "Unknown function: Week"; both absent from the function
+# index) — the stale blessing defeated this validator. They must now surface
+# as unknown-function WARNs, no longer sail through clean.
 spec = { 'pages' => [{ 'name' => 'P1', 'elements' => [el('t1', 'T', formula: 'Week([Order Date]) + Datetime([Order Date])')] }] }
 spec['pages'][0]['elements'][0]['columns'] << { 'id' => 'c-sib', 'name' => 'Order Date', 'formula' => nil }
 out, code = validate(spec)
-check(code == 0 && !out.include?('WARN:'), "Week/Datetime accepted, no warn (got #{code})", fails)
+check(code == 0 && out =~ /WARN: .*Week/ && out =~ /WARN: .*Datetime/,
+      "Week/Datetime no longer blessed — flagged as unknown functions (got #{code})", fails)
 
 puts
 puts 'Part E — Tableau leaks stay hard ERRORS (unchanged behavior)'
