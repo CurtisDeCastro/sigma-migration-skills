@@ -24,9 +24,22 @@
 #            either byte order; UTF-32LE (whose BOM starts with UTF-16LE's)
 #            and BOM-less UTF-16 on NON-fixture extensions (.md) fail too
 #   Part E2 — a `* -diff` .gitattributes line must not excuse a plain-text
-#            tracked file (or a staged-only blob) from the sweep
+#            tracked file (or a staged-only blob) from the sweep; the restore
+#            is then ROUND-TRIPPED (re-plant must fail again) because "clean"
+#            is a negative result a gutted sweep also produces
 #   Part F — gitignored files are NOT swept (--exclude-standard respected)
-#   Part G — restored-clean fixture exits 0 again (idempotence)
+#   Part G — restored-clean fixture exits 0 again (idempotence), and the clean
+#            line attributes a plain-rm'd clean tracked file to the index-blob
+#            pass instead of silently counting it as worktree-scanned
+#   Part H — a tracked file DELETED with plain rm (leak lives only in the
+#            index/HEAD blob) is still swept, named index:<file>, redacted
+#   Part I — symlink TARGET paths are swept: committed mode-120000 blob and
+#            untracked readlink, named symlink:<link>, redacted
+#   Part J — a NUL planted INSIDE an identifier is rejoined by the sweep's
+#            NUL-stripped view instead of splitting past every regex
+# Between parts, part_boundary() asserts the fixture is exactly as clean as
+# the next part assumes — a fixture-mutation command that fails silently must
+# fail THERE, loudly, not corrupt every downstream assertion.
 #
 # Every planted string is assembled at runtime, so this test file itself never
 # contains a blocked literal (the real repo's sweep scans this file too).
@@ -40,6 +53,21 @@ trap 'rm -rf "$TMP"' EXIT
 fails=0
 check() { # rc message
   if [ "$1" -eq 0 ]; then printf '  PASS  %s\n' "$2"; else printf '  FAIL  %s\n' "$2"; fails=$((fails+1)); fi
+}
+
+# Fixture-integrity guard (per-part). A fixture-mutation command that fails
+# SILENTLY corrupts every downstream assertion in this file — that is exactly
+# how Part E2's `git rm --cached` failure came to bake a blocked string into
+# the fixture's HEAD and make four "clean" assertions certify the sweep's
+# blind spot. Assert at each part boundary that (a) nothing unexpected is
+# staged/modified and (b) no part's plant survives in HEAD.
+part_boundary() { # <label>
+  _pb_dirty="$(git status --porcelain | grep -vE 'tools/hygiene-patterns.local.txt|ignored-litter.txt' || true)"
+  [ -z "$_pb_dirty" ]
+  check $? "fixture worktree/index is clean entering $1${_pb_dirty:+ [$_pb_dirty]}"
+  _pb_res="$(git grep -lI -- "$blocked" HEAD -- . ':(exclude)tools/hygiene-patterns.txt' ':(exclude)tools/hygiene-sweep.sh' 2>/dev/null || true)"
+  [ -z "$_pb_res" ]
+  check $? "no planted string survives in HEAD entering $1${_pb_res:+ [$_pb_res]}"
 }
 
 # --- fixture repo ------------------------------------------------------------
@@ -73,6 +101,7 @@ grep -q "0 local" "$TMP/out"; check $? "clean line reports 0 local patterns"
 N1="$(clean_count)"
 [ -n "$N1" ] && [ "$N1" -gt 0 ]; check $? "clean line reports the active pattern count ($N1)"
 
+part_boundary "Part B"
 echo "Part B — synthetic local pattern raises the count and flags a planted hit"
 printf '# synthetic local guard for the test\nzz9synthguard[0-9]+\n' > tools/hygiene-patterns.local.txt
 run_sweep
@@ -93,6 +122,7 @@ grep -q "pattern local line" "$TMP/err"
 check $? "tracked private-guard hit cites the pattern's source + line instead"
 git rm -q data.txt && git commit -q --no-verify -m unplant
 
+part_boundary "Part B2"
 echo "Part B2 — malformed local pattern refuses to run (exit 2, never a false clean)"
 printf 'bad state: %s\n' "$blocked" > bad-state.txt
 git add bad-state.txt && git commit -q --no-verify -m badstate
@@ -107,6 +137,7 @@ check $? "refusal withholds the pattern text"
 printf '# synthetic local guard for the test\nzz9synthguard[0-9]+\n' > tools/hygiene-patterns.local.txt
 git rm -q bad-state.txt && git commit -q --no-verify -m nobadstate
 
+part_boundary "Part C"
 echo "Part C — generic secret shapes (committed patterns)"
 # colon-delimited token: 18-char segments (each below the 32-char single-run rule)
 s="$(printf 'Ab9%.0s' 1 2 3 4 5 6)"
@@ -138,6 +169,7 @@ run_sweep
 [ "$RC" -eq 0 ]; check $? "short / assembled-at-runtime / *_PATH-list values pass (got $RC)"
 git rm -q creds.txt && git commit -q --no-verify -m nocreds
 
+part_boundary "Part D"
 echo "Part D — untracked litter is swept (and reported redacted)"
 printf 'workdir state: %s\n' "$blocked" > untracked-litter.txt
 run_sweep
@@ -148,6 +180,7 @@ grep -q "untracked-litter.txt" "$TMP/err"; check $? "untracked failure names the
 check $? "untracked report withholds the matched text (pattern line numbers only)"
 rm -f untracked-litter.txt
 
+part_boundary "Part D2"
 echo "Part D2 — PATH identifiers: names are scanned even when content is clean"
 # A corpus dir or fixture NAMED after a real workbook/org has perfectly
 # neutral content — only the path pass can see it.
@@ -168,6 +201,7 @@ rm -rf "${blocked}-workdir"
 run_sweep
 [ "$RC" -eq 0 ]; check $? "path pass is clean again after the renames (got $RC)"
 
+part_boundary "Part E"
 echo "Part E — UTF-16LE .twb is swept via the encoding-aware pass"
 { printf '\377\376'; printf '<workbook name="%s"/>\n' "$blocked" | iconv -f UTF-8 -t UTF-16LE; } > fixture-utf16.twb
 git add fixture-utf16.twb && git commit -q --no-verify -m twb
@@ -218,6 +252,7 @@ run_sweep
 grep -q "fixture-nobom.md" "$TMP/err"; check $? "BOM-less .md failure names the file"
 git rm -q fixture-nobom.md && git commit -q --no-verify -m nomdnobom
 
+part_boundary "Part E2"
 echo "Part E2 — a '* -diff' .gitattributes line must not excuse text files"
 # gitattributes that unset `diff` (the `binary` macro / bare `-diff`) make
 # git grep -I skip a plain-text file and `git diff --cached` print only
@@ -237,12 +272,35 @@ printf 'worktree copy is neutral\n' > staged-smuggle.md
 run_sweep
 [ "$RC" -eq 1 ]; check $? "STAGED blob of a diff-unset file is scanned (got $RC)"
 grep -q "staged:staged-smuggle.md" "$TMP/err"; check $? "failure names the staged blob"
-git rm -q --cached staged-smuggle.md
+# `git rm --cached` (no -f) REFUSES here: the staged blob differs from BOTH
+# the worktree copy and HEAD. Unchecked, it left the leak staged, the next
+# commit baked it into the fixture's HEAD, and every downstream "clean"
+# assertion (this one, Part F, both Part G checks) then asserted that the
+# sweep MISSES a committed leak. `-f` with `--cached` does not touch the
+# worktree file, so the `rm -f` below is still required.
+git rm -q -f --cached staged-smuggle.md
+check $? "staged-only plant is unstaged cleanly (git rm --cached -f)"
 rm -f staged-smuggle.md
+# Positive restore assertion: a bare `[ $RC -eq 0 ]` cannot tell "the fixture
+# is clean" from "the sweep is blind". Prove the plant left no trace FIRST.
+[ -z "$(git ls-files -- staged-smuggle.md)" ] && ! git cat-file -e HEAD:staged-smuggle.md 2>/dev/null
+check $? "staged-only plant left no tracked/HEAD trace before the clean-again assertion"
 git rm -q .gitattributes && git commit -q --no-verify -m unattr
 run_sweep
 [ "$RC" -eq 0 ]; check $? "fixture clean again with the attribute gone (got $RC)"
+# Round-trip the restore: "clean" is a NEGATIVE result that a broken sweep
+# also produces, so prove detection SURVIVED the restore by re-planting the
+# same string and requiring the failure back. A gutted sweep passes the
+# clean-again check above and fails this one.
+printf 'replant probe: %s\n' "$blocked" > replant-probe.md
+git add replant-probe.md && git commit -q --no-verify -m replant
+run_sweep
+[ "$RC" -eq 1 ]; check $? "sweep still DETECTS after the restore (re-plant round-trip, got $RC)"
+git rm -q replant-probe.md && git commit -q --no-verify -m unreplant
+run_sweep
+[ "$RC" -eq 0 ]; check $? "fixture clean again after the re-plant round-trip (got $RC)"
 
+part_boundary "Part F"
 echo "Part F — gitignored files are not swept"
 echo "ignored-litter.txt" > .gitignore
 git add .gitignore && git commit -q --no-verify -m ignore
@@ -251,11 +309,65 @@ run_sweep
 [ "$RC" -eq 0 ]; check $? "pattern hit in a gitignored file stays exempt (got $RC)"
 rm -f ignored-litter.txt
 
+part_boundary "Part G"
 echo "Part G — restored fixture is clean again (idempotence)"
 run_sweep
 [ "$RC" -eq 0 ]; check $? "fixture repo sweeps clean after all plants removed (got $RC)"
 grep -q "encoding-scanned" "$TMP/out"
 check $? "clean line reports the encoding-scanned file count"
+grep -q "0 symlink target(s)" "$TMP/out"
+check $? "clean line reports the symlink-target count"
+# Honest accounting: `git ls-files | wc -l` counts INDEX entries, so a
+# plain-rm'd CLEAN tracked file used to be reported as scanned when no pass
+# ever opened it. The clean line must attribute it to the index-blob pass.
+rm -f README.md
+run_sweep
+[ "$RC" -eq 0 ]; check $? "clean tracked file deleted with plain rm still sweeps clean (got $RC)"
+grep -q "(1 via index blob)" "$TMP/out"
+check $? "clean line attributes the worktree-absent file to the index-blob pass"
+git checkout -q -- README.md
+check $? "plain-rm'd clean file is restored for the parts below"
+
+part_boundary "Part H"
+echo "Part H — a tracked file DELETED with plain rm is still swept (index blob)"
+printf 'rm-not-git-rm: %s\n' "$blocked" > vanished.md
+git add vanished.md && git commit -q --no-verify -m vanish
+rm -f vanished.md                               # plain rm, NOT git rm
+run_sweep
+[ "$RC" -eq 1 ]; check $? "tracked-but-missing file is scanned via its index blob (got $RC)"
+grep -q "index:vanished.md" "$TMP/err"; check $? "failure names the index blob and the file"
+! grep -q "$blocked" "$TMP/err"; check $? "index-blob report withholds the matched text"
+git rm -q vanished.md && git commit -q --no-verify -m unvanish
+
+part_boundary "Part I"
+echo "Part I — symlink TARGET paths are swept (committed and untracked)"
+ln -s "/var/data/${blocked}-prod/rep.twb" symref
+git add symref && git commit -q --no-verify -m symplant
+run_sweep
+[ "$RC" -eq 1 ]; check $? "COMMITTED symlink whose target names a blocked string fails (got $RC)"
+grep -q "symlink:symref" "$TMP/err"; check $? "failure names the link (not its target text)"
+! grep -q "$blocked" "$TMP/err"; check $? "symlink report withholds the matched text"
+git rm -q symref && git commit -q --no-verify -m unsymplant
+ln -s "/var/data/${blocked}-prod/rep.twb" symref2
+run_sweep
+[ "$RC" -eq 1 ]; check $? "UNTRACKED symlink target is swept too (got $RC)"
+rm -f symref2
+
+part_boundary "Part J"
+echo "Part J — a NUL planted INSIDE an identifier does not split it past the sweep"
+h="$(printf '%s' "$blocked" | cut -c1-4)"; t="$(printf '%s' "$blocked" | cut -c5-)"
+[ -n "$t" ]; check $? "split point falls INSIDE the planted word (len ${#blocked} > 4, else this part is vacuous)"
+printf 'owner: %s\000%s internal\n' "$h" "$t" > nul-split.txt
+git add nul-split.txt && git commit -q --no-verify -m nulplant
+run_sweep
+[ "$RC" -eq 1 ]; check $? "NUL-split identifier is rejoined and caught (got $RC)"
+git rm -q nul-split.txt && git commit -q --no-verify -m unnulplant
+printf 'owner: %s\000%s internal\n' "$h" "$t" > nul-split.txt
+run_sweep
+[ "$RC" -eq 1 ]; check $? "NUL-split identifier in an UNTRACKED file is caught (got $RC)"
+rm -f nul-split.txt
+
+part_boundary "end of suite"
 
 echo
 if [ "$fails" -gt 0 ]; then

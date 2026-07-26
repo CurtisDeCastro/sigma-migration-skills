@@ -51,25 +51,46 @@ jobs:
           fi
           echo "HYGIENE SWEEP FAILED — identifier hits found."
           echo "Files with hits (matched text withheld; run tools/hygiene-sweep.sh locally):"
-          grep -oE '^[^:]+' /tmp/sweep.out | grep -vE '^(HYGIENE SWEEP|hygiene-sweep)' | sort -u | head -40
+          # Two hit-line shapes. Redacted: "<display>: pattern <src> line <N>",
+          # where <display> may carry an index:/staged:/symlink: locus prefix
+          # containing a colon — a first-colon cut would print a bare "index"/
+          # "symlink" and lose the affected path, so strip the label suffix
+          # instead ($-anchored: never applied mid-line to verbatim text).
+          # Verbatim (committed-pattern): "<file>:<line>:<text>" — keep only
+          # the path, never the text.
+          {
+            sed -nE 's/: pattern (committed|local) line [0-9]+$//p' /tmp/sweep.out
+            grep -oE '^[^:]+:[0-9]+:' /tmp/sweep.out | cut -d: -f1
+          } | grep -vE '^(HYGIENE SWEEP|hygiene-sweep)' | sort -u | head -40
           exit 1
       - name: Resolve push/PR diff range (BASE..HEAD for the range checks below)
         # Single source for the event's diff range — consumed by the
         # commit-message scan and the converter-provenance guard. Empty
-        # RANGE_BASE = "nothing to check" (both consumers skip).
+        # RANGE_BASE = "nothing to check" (both consumers skip) — reachable
+        # on push events only; a PR whose range cannot be resolved FAILS this
+        # step instead of skipping (fail-closed refusal below).
         env:
           EVENT_NAME: ${{ github.event_name }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_COMMITS: ${{ github.event.pull_request.commits }}
           PUSH_BEFORE_SHA: ${{ github.event.before }}
           HEAD_SHA: ${{ github.sha }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           if [ "$EVENT_NAME" = "pull_request" ]; then
-            # github.sha on PRs is the test MERGE commit; its first parent is
-            # the CURRENT base tip, so merge^1..merge is exactly the PR's own
-            # changes. base.sha is frozen at PR creation — diffing from it lets
-            # base-branch drift excuse (or fail) changes not in this PR.
-            BASE="$(git rev-parse "${HEAD_SHA}^1" 2>/dev/null || echo "$PR_BASE_SHA")"
+            # merge-base against the CURRENT base tip — NOT ${HEAD_SHA}^1.
+            # github.sha is the test-merge commit only when the PR is
+            # mergeable; on any event where it is the PR head instead,
+            # `rev-parse <sha>^1` SUCCEEDS (so the || fallback never fires),
+            # BASE becomes the previous PR commit, and the guards below
+            # silently scan ONE commit while printing their normal output.
+            # merge-base is correct in BOTH shapes and, unlike the frozen
+            # base.sha, is immune to base-branch drift.
+            git fetch --quiet --no-tags origin \
+              "+refs/heads/${PR_BASE_REF}:refs/remotes/origin/${PR_BASE_REF}" 2>/dev/null || true
+            BASE="$(git merge-base "refs/remotes/origin/${PR_BASE_REF}" "$HEAD_SHA" 2>/dev/null || true)"
+            [ -n "$BASE" ] || BASE="$(git merge-base "$PR_BASE_SHA" "$HEAD_SHA" 2>/dev/null || echo "$PR_BASE_SHA")"
           else
             BASE="$PUSH_BEFORE_SHA"
           fi
@@ -80,11 +101,33 @@ jobs:
             BASE="$(git merge-base "origin/$DEFAULT_BRANCH" "$HEAD_SHA" 2>/dev/null || true)"
           fi
           if [ -z "$BASE" ] || [ "$BASE" = "$HEAD_SHA" ]; then
+            # A PR always has commits to scan, so landing here means every
+            # resolution fallback above failed — and the coverage assertion
+            # below sits inside [ -n "$BASE" ], so skipping would green-light
+            # a zero-commit scan (the extreme case of the under-scan it
+            # refuses). Fail closed; the silent skip stays push-only (the
+            # all-zero 'before' of a new-branch push with no other base).
+            if [ "$EVENT_NAME" = "pull_request" ]; then
+              echo "::error::could not resolve a PR diff range — refusing to skip the hygiene guards"
+              exit 1
+            fi
             echo "no diff range to check — range checks below will skip"
             BASE=""
           fi
           echo "RANGE_BASE=$BASE" >> "$GITHUB_ENV"
           echo "RANGE_HEAD=$HEAD_SHA" >> "$GITHUB_ENV"
+          # Coverage assertion. The original bug was undetectable because the
+          # guards printed their normal output over a 1-commit range. Say how
+          # many commits are actually covered, and refuse to run a PR scan
+          # that covers fewer commits than the PR has.
+          if [ -n "$BASE" ]; then
+            N="$(git rev-list --count "$BASE..$HEAD_SHA" 2>/dev/null || echo 0)"
+            echo "diff range $BASE..$HEAD_SHA covers $N commit(s)"
+            if [ "$EVENT_NAME" = "pull_request" ] && [ -n "${PR_COMMITS:-}" ] && [ "$N" -lt "$PR_COMMITS" ]; then
+              echo "::error::range covers $N commit(s) but this PR has $PR_COMMITS — the hygiene guards below would UNDER-SCAN"
+              exit 1
+            fi
+          fi
       - name: Commit-message hygiene (push-range %B scan)
         # Messages are inside the hygiene boundary, but .githooks/commit-msg
         # only runs where core.hooksPath is configured, and --no-verify skips
@@ -128,6 +171,13 @@ jobs:
         # customer content (tools/test-hygiene-sweep.sh, hygiene-enablement
         # deliverable; keep wired here).
         run: bash tools/test-hygiene-sweep.sh
+      - name: Range-resolution self-test (fixture repos, creds-free)
+        # Proves the "Resolve push/PR diff range" step's ACTUAL run-block text
+        # (extracted from this file at test runtime, never a forked copy)
+        # covers the full PR range in both event shapes — github.sha as PR
+        # head AND as test-merge commit — and that the coverage assertion
+        # refuses an under-scanning range (tools/test-hygiene-range.sh).
+        run: bash tools/test-hygiene-range.sh
       - name: Converter-provenance guard self-test (fixture repos, creds-free)
         # Proves the diff-pairing guard fails unpaired bundle changes, passes
         # paired ones, and schema-pins local_patches entries — plus the

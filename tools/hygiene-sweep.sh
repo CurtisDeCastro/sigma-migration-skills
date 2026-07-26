@@ -6,28 +6,39 @@
 #   bash tools/hygiene-sweep.sh    # exit 0 clean, exit 1 named hits,
 #                                  # exit 2 unusable setup (bad pattern, no repo)
 #
-# Five passes:
-#   1) every tracked file (grep -I text scan)
+# Six passes:
+#   1) every tracked file (grep -I text scan), plus 1b) the INDEX blobs of
+#      tracked files ABSENT from the worktree — a leak deleted with plain `rm`
+#      instead of `git rm` stays committed while every worktree-shaped scan
+#      goes blind to it
 #   2) the staged diff — including the staged BLOBS of files whose gitattributes
 #      unset `diff` (the `binary` macro / a bare `-diff` makes `git diff` emit
 #      only "Binary files differ", zero greppable +lines)
 #   3) every untracked, not-ignored file (litter is a leak the moment it is
 #      staged — catch it while it is still only sitting in the tree)
-#   4) encoding-aware: fixture binaries (.twb/.twbx/.tds/.tdsx/.hyper),
-#      anything grep classified as binary, AND every diff-unset tracked or
-#      untracked file (gitattributes makes git grep -I skip those as "binary"
-#      even when their bytes are plain text — one `* -diff` line must not
-#      excuse a file from every content pass). Each candidate is scanned as
-#      UTF-16LE + UTF-16BE + UTF-32LE + UTF-32BE + a strings view — never
+#   4) encoding-aware: fixture files (.twb/.tds/.hyper), anything grep
+#      classified as binary, AND every diff-unset tracked or untracked file
+#      (gitattributes makes git grep -I skip those as "binary" even when their
+#      bytes are plain text — one `* -diff` line must not excuse a file from
+#      every content pass). Each candidate is scanned as UTF-16LE + UTF-16BE +
+#      UTF-32LE + UTF-32BE + a NUL-stripped view + a strings view — never
 #      trusting any single decoding or BOM.
+#      NOT covered: members of DEFLATED zip containers (.twbx/.tdsx) — DEFLATE
+#      defeats every text layer above, so a clean exit makes NO claim about
+#      container contents. Keep containers out of the repo until a member
+#      extractor lands here.
 #   5) PATHS: tracked + untracked + staged file/directory NAMES against the
 #      same patterns — a corpus dir or fixture named after a real workbook/org
 #      has perfectly neutral content, which the content passes never see.
+#   6) SYMLINK TARGETS: git stores a symlink as a mode-120000 blob whose
+#      content is the target PATH — `git grep` skips link entries, `[ -f ]`
+#      is false for them, and the path pass sees only the link's own name, so
+#      a target path naming a customer would otherwise survive every pass.
 # Passes 1–2 print committed-pattern hits verbatim (those patterns are public)
 # but report private-guard hits redacted — file + pattern line number, never
-# matched text; passes 3–5 redact to path + pattern line. Same convention as
-# hygiene.yml (a private-guard hit printed verbatim would itself disclose what
-# the guard protects).
+# matched text; passes 1b and 3–6 redact to path + pattern line. Same
+# convention as hygiene.yml (a private-guard hit printed verbatim would itself
+# disclose what the guard protects).
 #
 # Run this before EVERY commit, alongside tools/check-shared.rb (both are wired
 # into .githooks/run-governance-checks.sh). Patterns live in
@@ -53,7 +64,8 @@ localfile="tools/hygiene-patterns.local.txt"
 # hits get different reporting) plus the combined set; keep a numbered manifest
 # ("<source> line <N>" per active pattern) for redacted reporting.
 tmp="$(mktemp)"; tmpc="$(mktemp)"; tmpl="$(mktemp)"; tmpnum="$(mktemp)"; tmptxt="$(mktemp)"
-trap 'rm -f "$tmp" "$tmpc" "$tmpl" "$tmpnum" "$tmptxt"' EXIT
+tmpblob0="$(mktemp)"
+trap 'rm -f "$tmp" "$tmpc" "$tmpl" "$tmpnum" "$tmptxt" "$tmpblob0"' EXIT
 grep -vE '^\s*(#|$)' "$patfile" > "$tmpc"
 committed_n="$(grep -c . "$tmpc" 2>/dev/null || true)"
 awk 'NF && $0 !~ /^[[:space:]]*#/ {printf "committed line %d\t%s\n", FNR, $0}' "$patfile" > "$tmpnum"
@@ -85,6 +97,8 @@ while IFS="$(printf '\t')" read -r label rx; do
 done < "$tmpnum"
 
 fail=0
+missing_n=0
+sym_n=0
 
 # NUL-separated file lists minus the pattern/sweep files themselves (they
 # legitimately contain the patterns). Plain bash loops — avoids grep -z, which
@@ -106,6 +120,19 @@ list_untracked() {
   done
 }
 
+# Tracked files ABSENT from the worktree (deleted with plain `rm`, or never
+# checked out). git grep reads WORKTREE bytes, so pass 1 silently skips them;
+# once index==HEAD the staged diff is empty too, and pass 4's `[ -f "$f" ]`
+# drops them. Their INDEX/HEAD blob still carries whatever was committed.
+list_missing_tracked() {
+  git ls-files -z | while IFS= read -r -d '' f; do
+    case "$f" in
+      tools/hygiene-patterns.txt|tools/hygiene-sweep.sh) continue ;;
+    esac
+    [ -e "$f" ] || [ -L "$f" ] || printf '%s\0' "$f"
+  done
+}
+
 # Report which pattern(s) hit, without the matched text (hygiene.yml redaction
 # convention): "<path>: pattern <source> line <N>".
 report_hits_redacted() { # <display-path> <scannable-text-file>
@@ -113,6 +140,18 @@ report_hits_redacted() { # <display-path> <scannable-text-file>
   while IFS="$(printf '\t')" read -r label rx; do
     grep -qiE -- "$rx" "$scan" 2>/dev/null && echo "$p: pattern $label" >&2
   done < "$tmpnum"
+  return 0
+}
+
+# Minimal text layering for pass 1b (runs before extract_text is defined):
+# raw bytes, NUL-stripped, both UTF-16 orders. Enough to see a committed leak
+# in an index blob without duplicating the full encoding pass.
+extract_text_lite() {
+  local f; f="$1"
+  cat "$f" 2>/dev/null; printf '\n'
+  LC_ALL=C tr -d '\000' < "$f" 2>/dev/null; printf '\n'
+  iconv -f UTF-16LE -t UTF-8 < "$f" 2>/dev/null; printf '\n'
+  iconv -f UTF-16BE -t UTF-8 < "$f" 2>/dev/null; printf '\n'
   return 0
 }
 
@@ -155,6 +194,25 @@ if [ "$local_n" -gt 0 ]; then
   fi
 fi
 
+# 1b) Tracked files ABSENT from the worktree: scan their INDEX blobs. Every
+#     other pass is worktree- or diff-shaped and cannot see these.
+miss_list="$(list_missing_tracked | tr '\0' '\n' | sed '/^$/d')"
+if [ -n "$miss_list" ]; then
+  missing_n="$(printf '%s\n' "$miss_list" | grep -c . || true)"
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    git cat-file blob ":$f" > "$tmpblob0" 2>/dev/null || continue
+    extract_text_lite "$tmpblob0" > "$tmptxt"
+    if grep -qiE -f "$tmp" "$tmptxt" 2>/dev/null; then
+      echo "HYGIENE SWEEP FAILED — identifiers in a TRACKED file MISSING from the worktree (its index/HEAD blob still carries them; use 'git rm', not 'rm'):" >&2
+      report_hits_redacted "index:$f" "$tmptxt"
+      fail=1
+    fi
+  done <<EOF0
+$miss_list
+EOF0
+fi
+
 # 2) The staged diff (catches leaks in files not yet tracked at HEAD, and in
 #    hunks about to be committed) — same committed/private reporting split.
 staged_src="$(git diff --cached -U0 -- . ':(exclude)tools/hygiene-patterns.txt' ':(exclude)tools/hygiene-sweep.sh' \
@@ -190,7 +248,7 @@ fi
 #    below), across tracked AND untracked. Every candidate gets both-endian
 #    UTF-16 + UTF-32 iconv scans plus a strings scan. Redacted output.
 all_list="$(mktemp)"; text_list="$(mktemp)"; path_list="$(mktemp)"; tmpblob="$(mktemp)"
-trap 'rm -f "$tmp" "$tmpc" "$tmpl" "$tmpnum" "$tmptxt" "$all_list" "$text_list" "$path_list" "$tmpblob"' EXIT
+trap 'rm -f "$tmp" "$tmpc" "$tmpl" "$tmpnum" "$tmptxt" "$tmpblob0" "$all_list" "$text_list" "$path_list" "$tmpblob"' EXIT
 { list_tracked; list_untracked; } | tr '\0' '\n' | sed '/^$/d' | sort -u > "$all_list"
 { list_tracked; list_untracked; } | xargs -0 grep -lI -e '' -- 2>/dev/null | sort -u > "$text_list"
 
@@ -213,6 +271,10 @@ extract_text() { # emit EVERY plausible text layer of one candidate on stdout
   iconv -f UTF-16BE -t UTF-8 < "$f" 2>/dev/null; printf '\n'
   iconv -f UTF-32LE -t UTF-8 < "$f" 2>/dev/null; printf '\n'
   iconv -f UTF-32BE -t UTF-8 < "$f" 2>/dev/null; printf '\n'
+  # NUL-stripped view: a NUL planted INSIDE an identifier splits it across two
+  # `strings` lines, so no regex can match either half. Deleting NULs rejoins
+  # the token. (A NUL is never meaningful inside an identifier we guard.)
+  LC_ALL=C tr -d '\000' < "$f" 2>/dev/null; printf '\n'
   if command -v strings >/dev/null 2>&1; then
     strings < "$f" 2>/dev/null
   else
@@ -239,7 +301,12 @@ diff_unset() { # <NUL-separated path producer on stdin> -> newline paths
 
 enc_candidates="$(
   {
-    grep -iE '\.(twb|twbx|tds|tdsx|hyper)$' "$all_list" || true
+    # .twbx/.tdsx (DEFLATED zip containers) are deliberately NOT routed here
+    # by name: no text layer in extract_text can see through DEFLATE, so
+    # listing them would advertise coverage this pass does not have. Committed
+    # containers still arrive via the binary-classification rung below for the
+    # (weak) strings scan — see the header for the explicit non-claim.
+    grep -iE '\.(twb|tds|hyper)$' "$all_list" || true
     comm -23 "$all_list" "$text_list"   # binary-classified (or empty) files
     { list_tracked; list_untracked; } | diff_unset
   } | sort -u
@@ -302,10 +369,43 @@ if [ -n "$p_hits" ]; then
   fail=1
 fi
 
+# 6) SYMLINK TARGETS: git stores a symlink as a mode-120000 blob whose CONTENT
+#    is the target PATH. `git grep` skips those entries in both worktree and
+#    blob mode, pass 4's `[ -f ]` is false for a link, and pass 5 sees the
+#    link's own name — so a link pointing at a customer-named directory is
+#    invisible to every pass above once committed. (Pass 2 catches it only in
+#    the one commit that introduces it.)
+SWTAB="$(printf '\t')"
+sym_txt="$(mktemp)"
+: > "$sym_txt"
+git ls-files -s -z 2>/dev/null | while IFS= read -r -d '' e; do
+  case "$e" in
+    120000\ *) p="${e#*$SWTAB}"
+      case "$p" in tools/hygiene-patterns.txt|tools/hygiene-sweep.sh) continue ;; esac
+      printf '%s\t%s\n' "$p" "$(git cat-file blob ":$p" 2>/dev/null | tr -d '\n')" ;;
+  esac
+done >> "$sym_txt"
+list_untracked | while IFS= read -r -d '' p; do
+  [ -L "$p" ] && printf '%s\t%s\n' "$p" "$(readlink "$p" 2>/dev/null)"
+done >> "$sym_txt"
+sym_n="$(grep -c . "$sym_txt" 2>/dev/null || true)"
+if [ -s "$sym_txt" ] && grep -qiE -f "$tmp" "$sym_txt" 2>/dev/null; then
+  echo "HYGIENE SWEEP FAILED — identifiers in SYMLINK TARGET paths (git stores the target path as the blob; content scans never see it):" >&2
+  grep -iE -f "$tmp" "$sym_txt" 2>/dev/null | cut -f1 | sort -u | while IFS= read -r p; do
+    grep -iE -f "$tmp" "$sym_txt" 2>/dev/null | grep -F "$p$SWTAB" > "$tmptxt"
+    report_hits_redacted "symlink:$p" "$tmptxt"
+  done
+  fail=1
+fi
+rm -f "$sym_txt"
+
 if [ "$fail" -eq 0 ]; then
   total_n=$((committed_n + local_n))
   tracked_n="$(git ls-files | wc -l | tr -d ' ')"
   untracked_n="$(git ls-files --others --exclude-standard | wc -l | tr -d ' ')"
-  echo "hygiene-sweep: clean ($total_n pattern(s) [$committed_n committed + $local_n local] over $tracked_n tracked + $untracked_n untracked + $enc_scanned encoding-scanned file(s) + all paths + staged diff)."
+  # tracked_n counts INDEX entries; missing_n of them are absent from the
+  # worktree and were covered by the index-blob pass, not the worktree pass.
+  # Say so — an unqualified "over N tracked" overstated the scan.
+  echo "hygiene-sweep: clean ($total_n pattern(s) [$committed_n committed + $local_n local] over $tracked_n tracked ($missing_n via index blob) + $untracked_n untracked + $enc_scanned encoding-scanned + $sym_n symlink target(s) + all paths + staged diff)."
 fi
 exit "$fail"
