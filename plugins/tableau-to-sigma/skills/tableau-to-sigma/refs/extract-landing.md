@@ -24,11 +24,14 @@ unpinned `pip install pandas` grabs 3.x and the landing fails on
 
 ## The command
 
-Discovery now **auto-detects** an extract-backed workbook (an `<extract>` block
-or `hyper`/`textscan` connection class in the .twb) and re-downloads
-`workbook-content.twbx` **with** the payload (`includeExtract=true`) — check the
-discovery log for "extract payload landed". If the payload is missing anyway
-(older discovery output, or the re-fetch WARNed), verify with
+Discovery **auto-detects** an extract-backed workbook (an `<extract>` block
+or `hyper`/`textscan` connection class in the .twb), but the payload
+re-download is **opt-in**: pass `--extract-refetch` to `tableau-discover.rb`
+on extract-landing runs to re-download `workbook-content.twbx` **with** the
+payload (`includeExtract=true`) — check the discovery log for "extract payload
+landed". Without the flag, discovery logs "extract re-fetch SKIPPED" and the
+.twbx stays thin (no `.hyper` inside). If the payload is missing (a
+default-skip discovery run, or the re-fetch WARNed), verify with
 `unzip -l <workdir>/workbook-content.twbx | grep -c '\.hyper'` and re-download
 via `Tableau.download_workbook_content(<wb-luid>, include_extract: true)` before
 landing — a 0-hyper .twbx makes `land-extracts.py` a silent no-op. Then:

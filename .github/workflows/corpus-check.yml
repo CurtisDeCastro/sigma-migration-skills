@@ -209,7 +209,9 @@ jobs:
       - name: Run offline test-*.rb suites
         # EXPLICIT allow-list — only tests that need NO Tableau/Sigma creds or
         # network. Do NOT add test-calc-discovery.rb (needs a Tableau token);
-        # keep this workflow creds-free. New offline test-*.rb → add its path here.
+        # keep this workflow creds-free. New offline test-*.rb → add its path
+        # here (tableau-to-sigma scripts/test-*.rb need no entry — the
+        # ruby-full-suite job below globs them all).
         run: |
           set -uo pipefail
           tests=(
@@ -354,6 +356,163 @@ jobs:
           for t in "${tests[@]}"; do
             echo "::group::$t"
             if node "$t"; then echo "OK $t"; else echo "::error file=$t::test failed"; fail=1; fi
+            echo "::endgroup::"
+          done
+          exit $fail
+
+  ruby-full-suite:
+    name: full ruby suite (every tableau-to-sigma scripts/test-*.rb, globbed)
+    # E8.4: the unit-tests allow-list above has drifted behind the scripts/
+    # directory — well over a hundred committed test-*.rb files were in no CI
+    # job at all. This job GLOBS the directory so a new test is in CI the
+    # moment it is committed; the allow-list stays as the curated cross-plugin
+    # picks (the overlap double-runs in ~1 min and buys zero-drift coverage).
+    # Whole suite measured: ~114 s serial, slowest single file ~17 s.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      # UTF-8-heavy fixtures (.twb XML with em-dashes, curly quotes) crash
+      # under a US-ASCII default external encoding (the F5 crash class), so
+      # pin the locale rather than inherit the runner default.
+      LANG: en_US.UTF-8
+      LC_ALL: en_US.UTF-8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run EVERY offline test-*.rb (glob, per-file timeout)
+        run: |
+          set -uo pipefail
+          # Several tests shell out to the vendored node converter — fail
+          # loudly up front if a runner-image change drops node from PATH,
+          # not as N obscure downstream test failures.
+          node --version || { echo "::error::node is not on PATH — converter-backed tests need it"; exit 1; }
+          shopt -s nullglob
+          tests=(plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-*.rb)
+          # A moved/renamed scripts dir must FAIL here, never vacuously pass.
+          [ "${#tests[@]}" -gt 0 ] || { echo "::error::glob matched no tableau-to-sigma test files"; exit 1; }
+          # Plugin-unique suites that run in NO other job ride along (none are
+          # in the unit-tests allow-list either) — each verified offline and
+          # creds-free. The test-verify-complete.rb twins deliberately DIVERGE
+          # per plugin (each checks its own skill's phase completeness), so
+          # unlike the identical twins they need their own runs. After these,
+          # the only tracked test-*.rb not run by any job are byte-identical
+          # twins — enforced by the shared-libs drift gate — of files already
+          # run above.
+          tests+=(
+            plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-conditional-formats.rb
+            plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-dax-gate.rb
+            plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-pbi-style.rb
+            plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-pbi-filter-apply.rb
+            plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-pbi-pivot-sort.rb
+            plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-build-oracle-sql.rb
+            plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-coverage-gate.rb
+            plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-verify-complete.rb
+            plugins/powerbi-to-sigma/skills/powerbi-to-sigma/tests/test-grounding.rb
+            plugins/looker-to-sigma/skills/looker-to-sigma/scripts/test-flip-gate.rb
+            plugins/looker-to-sigma/skills/looker-to-sigma/scripts/test-verify-complete.rb
+            plugins/gooddata-to-sigma/skills/gooddata-to-sigma/scripts/test-verify-guards.rb
+            plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/test-verify-complete.rb
+            plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/test-verify-complete.rb
+            plugins/quicksight-to-sigma/skills/quicksight-to-sigma/tests/test-grounding.rb
+            plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/test-verify-complete.rb
+          )
+          fail=0; ran=0
+          for t in "${tests[@]}"; do
+            case "$(basename "$t")" in
+              # The ONLY exclusion. Do NOT add test-calc-discovery.rb (needs
+              # a Tableau token); keep this workflow creds-free.
+              test-calc-discovery.rb) echo "SKIP $t (needs a Tableau token)"; continue ;;
+            esac
+            echo "::group::$t"
+            # Per-file cap so one hung test cannot eat the whole job budget.
+            if timeout 120 ruby "$t"; then
+              echo "OK $t"
+            else
+              rc=$?
+              msg="test failed (exit $rc)"
+              [ "$rc" -eq 124 ] && msg="test TIMED OUT (per-file 120 s cap)"
+              echo "::error file=$t::$msg"; fail=1
+            fi
+            echo "::endgroup::"
+            ran=$((ran+1))
+          done
+          echo "ran $ran ruby test file(s)"
+          exit $fail
+      - name: Run the tools/*.sh guard harnesses
+        # Self-tests of the repo-level guards (hygiene sweep, commit-msg
+        # guard, converter provenance, tree litter). Hermetic — each builds
+        # its own fixture repo; creds-free, network-free.
+        run: |
+          set -uo pipefail
+          fail=0
+          for h in tools/test-hygiene-sweep.sh tools/test-commit-msg-guard.sh tools/test-converter-provenance.sh tools/test-tree-litter.sh; do
+            echo "::group::$h"
+            if timeout 300 bash "$h"; then echo "OK $h"; else echo "::error file=$h::harness failed"; fail=1; fi
+            echo "::endgroup::"
+          done
+          exit $fail
+
+  macos-smoke:
+    name: BSD userland smoke (macOS — grep/sed/iconv/strings divergence)
+    # The ubuntu jobs run GNU coreutils and CANNOT observe BSD divergence;
+    # windows-smoke runs Git Bash, which is MSYS2/GNU userland. This job
+    # exists because tools/hygiene-sweep.sh ships a BSD-grep-specific
+    # identifier-LEAK fix (newline-separated iconv layers): reverting it
+    # fails test-hygiene-sweep.sh on Darwin and passes on every GNU runner.
+    # Creds-free, network-free, ~30 s of steps.
+    runs-on: macos-latest
+    timeout-minutes: 10
+    env:
+      # NOT optional. Under LC_ALL=C, LC_ALL=UTF-8, or unset, BSD grep does
+      # not exhibit the invalid-UTF-8 line-skip at all and this job would
+      # pass green against a reverted fix (verified: en_US.UTF-8 and C.UTF-8
+      # detect; C, UTF-8 and unset do not). test-bootstrap.rb also crashes
+      # outright under a US-ASCII default external encoding.
+      LANG: en_US.UTF-8
+      LC_ALL: en_US.UTF-8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # the live sweep + litter lint read git state beyond a shallow head
+          fetch-depth: 0
+      - name: Confirm this runner is actually BSD userland
+        # A silent runner-image change to GNU tools would make every
+        # assertion below vacuous. Fail loudly instead.
+        run: |
+          set -e
+          [ "$(uname -s)" = "Darwin" ] || { echo "::error::not Darwin"; exit 1; }
+          /usr/bin/grep --version 2>&1 | head -1 | grep -qi bsd \
+            || { echo "::error::/usr/bin/grep is not BSD grep — this job's premise is gone"; exit 1; }
+          /usr/bin/sed --version >/dev/null 2>&1 \
+            && { echo "::error::/usr/bin/sed accepts --version — that is GNU sed, not BSD"; exit 1; } || true
+          echo "BSD userland confirmed: $(/usr/bin/grep --version 2>&1 | head -1)"
+      - name: hygiene sweep self-test (BSD grep/iconv/strings — THE reason this job exists)
+        run: bash tools/test-hygiene-sweep.sh
+      - name: sweep the checkout itself under BSD grep
+        run: bash tools/hygiene-sweep.sh   # committed patterns only in CI (the local file is gitignored)
+      - name: commit-message guard self-test
+        run: bash tools/test-commit-msg-guard.sh
+      - name: converter-provenance guard self-test
+        run: bash tools/test-converter-provenance.sh
+      - name: tracked-litter lint self-test
+        run: bash tools/test-tree-litter.sh
+      - name: bootstrap/doctor lockstep self-test
+        run: bash plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-bootstrap-lockstep.sh
+      - name: bootstrap harness under /bin/bash 3.2 (hermetic shims)
+        # The only place bash-3.2 `set -u` + array semantics are EXECUTED
+        # rather than parse-checked — every user-facing .sh must stay
+        # macOS-default-bash safe.
+        run: ruby shared/scripts/test-bootstrap.rb
+      - name: encoding-sensitive ruby subset (BSD + UTF-8 locale)
+        # Small on purpose — the FULL ruby suite runs on ubuntu above. These
+        # are the byte/encoding-shaped tests most likely to diverge on
+        # Darwin: binary zip members, and UTF-8-heavy .twb styled-text
+        # extraction.
+        run: |
+          set -uo pipefail
+          fail=0
+          for t in plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-zip-extract.rb plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-styled-text-extraction.rb; do
+            echo "::group::$t"
+            if ruby "$t"; then echo "OK $t"; else echo "::error file=$t::test failed"; fail=1; fi
             echo "::endgroup::"
           done
           exit $fail

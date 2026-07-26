@@ -80,8 +80,12 @@ OptionParser.new do |o|
   o.on('--skip-images')           { opts[:fetch_view_images] = 'none' }
   o.on('--all-view-images')       { opts[:fetch_view_images] = 'all' }
   o.on('--skip-content')          { opts[:skip_content] = true }
-  o.on('--no-extract-refetch', 'skip the includeExtract=true re-download when extract markers are found — ' \
-                               'for routes that never consume the frozen extract bytes (e.g. a live repoint)') { opts[:no_extract_refetch] = true }
+  # --[no-]: existing callers (migrate-tableau.rb's live-repoint route) still
+  # pass the old opt-out spelling; it must stay accepted even though skip is
+  # now the default.
+  o.on('--[no-]extract-refetch', 'opt IN to the includeExtract=true re-download when extract markers are found — ' \
+                                 'default is to SKIP it (most routes never consume the frozen extract bytes); ' \
+                                 'pass --extract-refetch on extract-landing runs') { |v| opts[:extract_refetch] = v }
   o.on('--pool N', Integer, 'Fetch-pool size (default 5 — measured sweet spot)') { |v| opts[:pool] = v }
 end.parse!
 
@@ -252,19 +256,17 @@ unless opts[:skip_content]
       twb_xml, had_hypers = persist.call(bytes)
       # EXTRACT-BACKED workbook, thin download: the default REST download
       # excludes the extract payload (includeExtract=false), so the .twbx has
-      # NO Data/**/*.hyper inside — directly contradicting what the landing
-      # step needs (three independent field runs each hand-rewrote this
-      # re-fetch; refs/extract-landing.md wrongly claimed discovery already
-      # had it). Detect extract markers in the ACTUAL XML and re-download WITH
-      # the payload; non-extract workbooks never pay the big download.
+      # NO Data/**/*.hyper inside — the extract-landing step needs it (three
+      # independent field runs each hand-rewrote this re-fetch;
+      # refs/extract-landing.md wrongly claimed discovery already had it).
+      # Detect extract markers in the ACTUAL XML; the re-download WITH the
+      # payload is OPT-IN (--extract-refetch) — it is the heaviest task in
+      # discovery and only extract-landing routes consume the frozen bytes.
+      # Non-extract workbooks never reach this branch at all.
       if twb_xml && !had_hypers &&
          (twb_xml.include?('<extract') || twb_xml =~ /class='(?:hyper|textscan)'/)
-        if opts[:no_extract_refetch]
-          # One clear line, then move on: this route never consumes the frozen
-          # extract bytes, so the heavy includeExtract=true download is waste.
-          log 'embedded extract detected — extract re-fetch SKIPPED (--no-extract-refetch: this route needs no extract bytes)'
-        else
-          log 'embedded extract detected but no .hyper payload in the download — re-fetching WITH includeExtract=true'
+        if opts[:extract_refetch]
+          log 'embedded extract detected but no .hyper payload in the download — re-fetching WITH includeExtract=true (--extract-refetch)'
           with_extract = run_task('twb-download-extract', max_attempts: 2) { Tableau.download_workbook_content(wb['id'], include_extract: true) }
           if with_extract && with_extract.bytesize > bytes.bytesize
             twb_xml2, had2 = persist.call(with_extract)
@@ -274,6 +276,11 @@ unless opts[:skip_content]
           else
             log 'WARN: includeExtract=true re-fetch returned nothing larger — proceeding with the thin .twb'
           end
+        else
+          # One clear line, then move on. This is the breadcrumb for a landing
+          # run that forgot the flag: without it, "land-extracts.py found no
+          # .hyper" is undebuggable from the discovery log.
+          log 'embedded extract detected — extract re-fetch SKIPPED (default; pass --extract-refetch when the frozen extract bytes must land, e.g. for land-extracts.py)'
         end
       end
     end
