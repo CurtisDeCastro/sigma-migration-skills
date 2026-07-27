@@ -493,6 +493,21 @@ rescue LoadError
   end
 end
 
+# Evidence ledger (PLAN-v4 E3.1) — same vendoring rule as the degradation
+# ledger. A checkout without the lib still appends via the inline fallback in
+# ev_append below (the substrate must exist even on stale vendorings).
+EV_LEDGER_LOADED = begin
+  require_relative 'lib/evidence_ledger'
+  true
+rescue LoadError
+  begin
+    require_relative '../lib/evidence_ledger'
+    true
+  rescue LoadError
+    false
+  end
+end
+
 opts = { min_pass_rate: 1.0, allow_extract: false, min_layout_elements: 2,
          allow_missing_tiles: 0, min_parity_score: 0.0, min_grid_fill: 0.45 }
 OptionParser.new do |p|
@@ -545,6 +560,105 @@ abort('--workdir (or --tableau) required') unless opts[:tab]
 # check) can see every gate that was bypassed and why. A bare skip (no reason)
 # is recorded as "NO REASON GIVEN" — visible, not invisible. (CoCo run wrapped
 # up GREEN after silently skipping checks — this makes that impossible.)
+# ---------------------------------------------------------------------------
+# Evidence ledger (PLAN-v4 E3.1) — append-only <workdir>/evidence-ledger.jsonl.
+# Every gate verdict that terminates or waives this run lands here with the
+# raw-evidence pointer and the strict version-keyed identity, so factory-mode's
+# punch-list (and #7's recorded-evidence acceptance) can consume it:
+#   * every WAIVE  — via the record_waiver hook below;
+#   * every FAIL   — via the at_exit recorder (the documented exit-code
+#                    contract maps 1:1 to gates, EXIT_GATE_MAP);
+#   * the terminal PASS — the success block appends the run-summary verdict;
+#   * evidence-bearing gates (7b, 21) append their detail entries in-line.
+# Reads happen in gate 7b: a prior probe's RAW results are accepted only
+# age-+version-+sha-checked, and its verdict is RECOMPUTED (#7 red line —
+# recorded verdicts are never consumed). ev_append is the inline fallback twin
+# of lib/evidence_ledger.rb#append — keep the line schema in lockstep.
+# ---------------------------------------------------------------------------
+EXIT_GATE_MAP = {
+  1 => '1', 2 => '1', 3 => '1', 4 => '2', 5 => '3', 6 => '4', 7 => '5', 8 => '6',
+  9 => '7', 10 => '8', 11 => '9', 12 => '10', 13 => '8b', 14 => '8c', 15 => '8d',
+  16 => '11', 17 => '12', 18 => '13', 19 => 'waiver-budget', 20 => '14', 21 => '7b',
+  22 => '15', 23 => '16', 24 => '17', 25 => '18', 26 => '19', 27 => '20', 28 => '21',
+  29 => '8e', 30 => '4b', 31 => '7c'
+}.freeze
+# Primary raw-evidence artifact per gate (workdir-relative) — the punch-list
+# pointer; gates without a stable artifact just omit the field.
+GATE_EVIDENCE_PATHS = {
+  '1' => 'parity-final.json', '2' => 'posted-workbooks.jsonl', '4b' => 'run-state.json',
+  '5' => 'parity-final.json', '7b' => 'probe-controls/probe-results.json',
+  '7c' => nil, '8' => 'sigma-render.png', '8b' => 'blind-grade.json',
+  '8c' => 'layout-census.json', '8d' => 'fidelity-ledger.json',
+  '8e' => 'layout-arrangement.json', '9' => 'visual-verify-tiles.json',
+  '10' => 'telemetry-sent.json', '11' => 'POSTPUBLISH_GUIDE.md',
+  '12' => 'deferred-elements.json', '13' => 'anchors-verdict.json',
+  '14' => 'visual-similarity.json', '15' => 'manual-residues.json',
+  '16' => 'join-plan.json', '17' => 'lod-audit.json', '18' => 'ground-truth-plan.json',
+  '19' => 'agg-semantics.json', '20' => 'semantic-edits.json', '21' => 'png-read.json',
+  'waiver-budget' => 'waivers.json'
+}.freeze
+# The version-keyed base identity for this run's evidence: workbook id (flag /
+# wb-ids.json / readback) + latestDocumentVersion (readback; refreshed by the
+# live spec memo below when it fetches). "v?" marks unknown — reuse checks
+# refuse it (fail-closed), recording still names the workbook.
+ev_identity = begin
+  _id = opts[:wb]
+  _id ||= (JSON.parse(File.read(File.join(opts[:tab], 'wb-ids.json')))['workbookId'] rescue nil)
+  _rb = (JSON.parse(File.read(File.join(opts[:tab], 'wb-readback.json'))) rescue nil)
+  _id ||= (_rb.is_a?(Hash) ? _rb['workbookId'] : nil)
+  _vr = _rb.is_a?(Hash) ? (_rb['latestDocumentVersion'] || _rb['latestVersion']) : nil
+  { 'wb' => _id.to_s.empty? ? '?' : _id.to_s, 'ver' => _vr.nil? || _vr.to_s.empty? ? nil : _vr.to_s }
+end
+ev_key = lambda do |element_id = nil|
+  k = "wb:#{ev_identity['wb']}@v#{ev_identity['ver'] || '?'}"
+  element_id ? "#{k}/el:#{element_id}" : k
+end
+ev_append = lambda do |gate, verdict, kind = nil, epath = nil, ekey = nil, esha = nil, detail = nil|
+  if EV_LEDGER_LOADED
+    EvidenceLedger.append(opts[:tab], gate: gate, verdict: verdict, evidence_kind: kind,
+                          evidence_path: epath, evidence_key: ekey || ev_key.call,
+                          evidence_sha256: esha, detail: detail)
+  else
+    e = { 'gate' => gate.to_s, 'verdict' => verdict.to_s }
+    e['evidence_kind'] = kind.to_s if kind
+    e['evidence_path'] = epath.to_s if epath
+    e['evidence_key'] = (ekey || ev_key.call).to_s
+    e['evidence_sha256'] = esha.to_s if esha
+    e['detail'] = detail if detail.is_a?(Hash) && !detail.empty?
+    e['at'] = Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')
+    File.open(File.join(opts[:tab], 'evidence-ledger.jsonl'), 'a') { |f| f.puts(JSON.generate(e)) } rescue nil
+    e
+  end
+end
+# Every failing exit leaves a ledger line naming its gate (the exit-code
+# contract is 1:1). Registered here — after the usage abort above — so bad
+# invocations never mint entries. Success entries are appended by the
+# terminal block (which knows the derived verdict), not here.
+at_exit do
+  _st = $!
+  next unless _st.is_a?(SystemExit) && !_st.success?
+  _g = EXIT_GATE_MAP[_st.status]
+  next unless _g
+  _ep = GATE_EVIDENCE_PATHS[_g]
+  _ep = nil unless _ep && File.exist?(File.join(opts[:tab], _ep))
+  ev_append.call(_g, 'fail', 'gate-exit', _ep, nil, nil, { 'exit' => _st.status })
+end
+
+# Current run id (minted by the orchestrator at each PASS-1 start; nil for
+# converters without the concept). Read here — ABOVE record_waiver — so the
+# E3.1 gate-waived offramp lines below can carry it; the run-scoped completion
+# sentinel and the waivers_history merge further down are the other consumers.
+current_run_id = begin
+  JSON.parse(File.read(File.join(opts[:tab], 'migrate-state.json')))['run_id']
+rescue StandardError
+  nil
+end
+current_run_id ||= begin
+  JSON.parse(File.read(File.join(opts[:tab], 'run-state.json')))['run_id']
+rescue StandardError
+  nil
+end
+
 waivers = []
 record_waiver = lambda do |flag, gate, reason|
   r = (reason.is_a?(String) && !reason.strip.empty?) ? reason.strip : nil
@@ -552,6 +666,28 @@ record_waiver = lambda do |flag, gate, reason|
   puts "[SKIP] #{gate} WAIVED via #{flag}#{r ? " (#{r})" : ' — NO REASON GIVEN'}"
   puts "       MUST be named in the migration report#{r ? '' : ' WITH a reason'}; this gate did NOT verify the workbook."
   File.write(File.join(opts[:tab], 'waivers.json'), JSON.pretty_generate(waivers)) rescue nil
+  # E3.1: a waived gate is a first-class ledger verdict — the punch list must
+  # see what was never verified.
+  _g = gate.to_s[/gate ([0-9]+[a-z]?)/, 1] || gate.to_s
+  ev_append.call(_g, 'waived', 'waiver', 'waivers.json', nil, nil,
+                 { 'flag' => flag, 'reason' => r || 'NO REASON GIVEN' })
+  # E3.1 substrate: the same waiver is APPENDED to <workdir>/offramps.jsonl as
+  # a gate-waived line (stdlib append — preserving this script's deliberate
+  # no-lib-dependency stance). waivers.json and the parity-final `waivers`
+  # census are REWRITTEN per invocation, so a waiver forced mid-run (flaky
+  # render, later retried clean) would otherwise vanish from the final
+  # accounting; the census-stamp block merges these appended records back into
+  # parity-final.json `waivers_history` with status superseded-by-pass —
+  # never deleted, never re-counted as zero.
+  begin
+    _orec = { 'kind' => 'gate-waived', 'gate' => _g, 'flag' => flag,
+              'reason' => r || 'NO REASON GIVEN' }
+    _orec['run_id'] = current_run_id if current_run_id
+    _orec['at'] = Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')
+    File.open(File.join(opts[:tab], 'offramps.jsonl'), 'a') { |f| f.puts(JSON.generate(_orec)) }
+  rescue StandardError
+    nil # bookkeeping only — never fail the gate
+  end
 end
 
 # Extract-drift tolerance surfacing: verify-anchors.rb --extract-tol (extract-
@@ -570,23 +706,12 @@ end
 
 summary_path = File.join(opts[:tab], 'parity-final.json')
 
-# ── Run-scoped completion sentinel (current run id) ─────────────────────────
-# The orchestrator mints a run_id at each PASS-1 start (migrate-state.json /
-# run-state.json). phase6-success.json is only valid FOR that run: on exit 0 we
-# stamp it with the current id; on ANY failure we delete a success marker left
-# by a PREVIOUS run id, so verify-complete.rb can never report DONE off a stale
-# marker. Converters without a run_id concept fall back to nil (the marker is
-# then deleted on every failure — fail-closed).
-current_run_id = begin
-  JSON.parse(File.read(File.join(opts[:tab], 'migrate-state.json')))['run_id']
-rescue StandardError
-  nil
-end
-current_run_id ||= begin
-  JSON.parse(File.read(File.join(opts[:tab], 'run-state.json')))['run_id']
-rescue StandardError
-  nil
-end
+# ── Run-scoped completion sentinel ──────────────────────────────────────────
+# phase6-success.json is only valid FOR the current run id (read above
+# record_waiver): on exit 0 we stamp it with the current id; on ANY failure we
+# delete a success marker left by a PREVIOUS run id, so verify-complete.rb can
+# never report DONE off a stale marker. Converters without a run_id concept
+# fall back to nil (the marker is then deleted on every failure — fail-closed).
 at_exit do
   st = $!
   next unless st.is_a?(SystemExit) && !st.success?
@@ -831,6 +956,29 @@ waiver_flags.each do |f|
   waiver_reasons[f] = v.to_s.strip if v.is_a?(String) && !v.to_s.strip.empty?
 end
 
+# E3.1 waivers_history: merge this run's previously APPENDED gate-waived
+# offramp records (record_waiver writes them) into the stamp. waivers.json and
+# the `waivers` census are rewritten per invocation, so a waiver forced on
+# invocation 1 (flaky render, later retried clean) would otherwise vanish once
+# invocation 2 passes. Same-run records whose flag is absent from the CURRENT
+# census get status superseded-by-pass — never deleted, never re-counted as
+# zero; still-active flags read active. The history is the epic-wide
+# pending-state substrate (E3.2's verifier-pending rides it as an entry kind).
+waivers_history = begin
+  _orp = File.join(opts[:tab], 'offramps.jsonl')
+  _gw = File.exist?(_orp) ? File.readlines(_orp).map { |l| JSON.parse(l) rescue nil }.compact : []
+  _gw.select { |rec| rec['kind'] == 'gate-waived' && rec['run_id'].to_s == current_run_id.to_s }
+     .each_with_object({}) do |rec, h|
+       k = [rec['flag'].to_s, rec['gate'].to_s]
+       h[k] ||= { 'flag' => rec['flag'], 'gate' => rec['gate'], 'reason' => rec['reason'],
+                  'first_waived_at' => rec['at'],
+                  'status' => waiver_flags.include?(rec['flag'].to_s) ? 'active' : 'superseded-by-pass' }
+       h[k]['times_recorded'] = (h[k]['times_recorded'] || 0) + 1
+     end.values
+rescue StandardError
+  [] # observability only — never sink the gate on trail parsing
+end
+
 # Stamp the census into parity-final.json on every run (best-effort — a
 # missing/malformed file is gate 1's problem, not the stamp's).
 if File.exist?(summary_path)
@@ -839,6 +987,8 @@ if File.exist?(summary_path)
     _pf['waivers'] = waiver_flags
     _pf['waiver_count'] = waiver_flags.length
     _pf['waiver_reasons'] = waiver_reasons
+    _pf['waivers_history'] = waivers_history
+    _pf['waivers_history_count'] = waivers_history.length
     # Off-ramp telemetry fields (P2): where did this run defect? route comes from
     # the orchestrator's migrate-state.json ('orchestrated' | 'manual-authorized';
     # null for converters without the concept); manual_path_authorized records an
@@ -858,6 +1008,15 @@ if waiver_flags.any?
        "#{budget_flags.length} count against the budget of #{WAIVER_BUDGET}" \
        "#{excluded.any? ? " (policy exclusions: #{excluded.join(', ')})" : ''}" \
        ' (exceeding the budget caps the run below GREEN, exit 19)'
+end
+# E3.1 headline honesty: prior same-run waivers a later invocation passed are
+# announced whenever they exist — INCLUDING on a zero-current-waiver run, so
+# the headline count never silently drops to a clean-looking zero.
+_superseded = waivers_history.select { |h| h['status'] == 'superseded-by-pass' }
+if _superseded.any?
+  puts "[WAIVERS] history: #{_superseded.length} prior waiver(s) this run superseded by a later pass " \
+       "(#{_superseded.map { |h| h['flag'] }.join(', ')}) — retained in parity-final.json waivers_history; " \
+       'the current census counts THIS invocation only, never a silent zero.'
 end
 
 if opts[:skip_parity]
@@ -1179,6 +1338,55 @@ else
 end
 
 # ---------------------------------------------------------------------------
+# ONE live spec fetch per gate run (#7 dedup — speed review, reconciled
+# program). Gates 4, 6, 7, and 7b all read the live workbook spec; before this
+# memo each paid its own GET /v2/workbooks/{id}/spec — up to four identical
+# round-trips per gate run. The fetch happens ONCE and is shared; every gate
+# still computes its own verdict from the (raw) spec. The memo also refreshes
+# the evidence-key version and names a stale wb-readback.json loudly — a new
+# POST/PUT bumps latestDocumentVersion, so the post-POST readback stops being
+# a valid spec source the moment the live version moves past it (#7b:
+# version-check before reuse; the readback is never silently substituted for
+# the live spec here — live gates verify live state).
+# Returns { 'spec' => Hash|nil, 'code' => nil|HTTP-code }; network-level
+# exceptions propagate exactly as they did from the per-gate fetches.
+# ---------------------------------------------------------------------------
+live_spec_memo = {}
+fetch_live_spec = lambda do |wb_id, base, tok|
+  memo_k = wb_id.to_s
+  return live_spec_memo[memo_k] if live_spec_memo.key?(memo_k)
+  uri = URI("#{base}/v2/workbooks/#{wb_id}/spec")
+  req = Net::HTTP::Get.new(uri)
+  req['Authorization'] = "Bearer #{tok}"
+  req['Accept'] = 'application/json'
+  res = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https', read_timeout: 30) { |h| h.request(req) }
+  live_spec_memo[memo_k] =
+    if res.is_a?(Net::HTTPSuccess)
+      body = res.body.to_s
+      spec =
+        begin
+          JSON.parse(body)
+        rescue JSON::ParserError
+          require 'yaml'
+          require 'date'
+          YAML.safe_load(body, permitted_classes: [Date, Time]) || {}
+        end
+      live_ver = spec.is_a?(Hash) ? (spec['latestDocumentVersion'] || spec['latestVersion']) : nil
+      if live_ver && !live_ver.to_s.empty?
+        if ev_identity['ver'] && ev_identity['ver'] != live_ver.to_s
+          warn "[WARN] wb-readback.json is STALE — readback doc v#{ev_identity['ver']}, live doc v#{live_ver}." \
+               ' A later POST/PUT changed the workbook; artifacts derived from the readback may be outdated.' \
+               ' Re-run phase6-parity.rb PASS 1 to refresh it.'
+        end
+        ev_identity['ver'] = live_ver.to_s # evidence keys bind to LIVE state
+      end
+      { 'spec' => spec, 'code' => nil }
+    else
+      { 'spec' => nil, 'code' => res.code }
+    end
+end
+
+# ---------------------------------------------------------------------------
 # Gate 4 — layout applied (beads-sigma-bw3)
 # Fetches the live workbook spec and confirms a non-empty top-level `layout`
 # XML is set, with at least --min-layout-elements <LayoutElement> tags.
@@ -1211,22 +1419,10 @@ unless opts[:skip_layout]
       warn '       Source your env and re-run this gate. A credential-less run is NOT a passing run.'
       exit 6
     else
-      uri = URI("#{base}/v2/workbooks/#{wb_id}/spec")
-      req = Net::HTTP::Get.new(uri)
-      req['Authorization'] = "Bearer #{tok}"
-      req['Accept'] = 'application/json'
-      res = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https', read_timeout: 30) { |h| h.request(req) }
+      fetched = fetch_live_spec.call(wb_id, base, tok)
 
-      if res.is_a?(Net::HTTPSuccess)
-        body = res.body.to_s
-        spec =
-          begin
-            JSON.parse(body)
-          rescue JSON::ParserError
-            require 'yaml'
-            require 'date'
-            YAML.safe_load(body, permitted_classes: [Date, Time]) || {}
-          end
+      if fetched['spec']
+        spec = fetched['spec']
         layout_xml = spec['layout'].to_s
         elem_count = layout_xml.scan(/<LayoutElement\b/).length
         live_layout_positioned = elem_count
@@ -1285,7 +1481,7 @@ unless opts[:skip_layout]
           puts "[OK] gate 4/7: layout XML applied with #{elem_count} positioned element(s)"
         end
       else
-        warn "[SKIP] gate 4/7: GET /v2/workbooks/#{wb_id}/spec returned HTTP #{res.code} — cannot verify"
+        warn "[SKIP] gate 4/7: GET /v2/workbooks/#{wb_id}/spec returned HTTP #{fetched['code']} — cannot verify"
       end
     end
   end
@@ -1376,20 +1572,9 @@ else
       warn "[SKIP] gate 6/7: scripts/lib/layout_lint.rb not vendored in this plugin — re-vendor (md5 discipline)"
     end
     if defined?(LayoutLint)
-      uri = URI("#{base}/v2/workbooks/#{wb_id}/spec")
-      req = Net::HTTP::Get.new(uri)
-      req['Authorization'] = "Bearer #{tok}"
-      req['Accept'] = 'application/json'
-      res = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https', read_timeout: 30) { |h| h.request(req) }
-      if res.is_a?(Net::HTTPSuccess)
-        spec =
-          begin
-            JSON.parse(res.body)
-          rescue JSON::ParserError
-            require 'yaml'
-            require 'date'
-            YAML.safe_load(res.body, permitted_classes: [Date, Time]) || {}
-          end
+      fetched = fetch_live_spec.call(wb_id, base, tok) # memoized — shared with gates 4/7/7b
+      if fetched['spec']
+        spec = fetched['spec']
         violations = LayoutLint.lint(spec)
         if violations.any?
           warn "[FAIL] gate 6/7: layout lint — #{violations.length} violation(s) on live workbook #{wb_id}:"
@@ -1402,7 +1587,7 @@ else
         puts '[OK] gate 6/7: layout lint clean (no raw-id names, no orphan controls, no dead zones, ' \
              'no generic header title, no under-filled bands)'
       else
-        warn "[SKIP] gate 6/7: GET /v2/workbooks/#{wb_id}/spec returned HTTP #{res.code} — cannot lint"
+        warn "[SKIP] gate 6/7: GET /v2/workbooks/#{wb_id}/spec returned HTTP #{fetched['code']} — cannot lint"
       end
     end
   end
@@ -1442,20 +1627,9 @@ else
       warn "[SKIP] gate 7/7: scripts/lib/control_lint.rb not vendored in this plugin — re-vendor (md5 discipline)"
     end
     if defined?(ControlLint)
-      uri = URI("#{base}/v2/workbooks/#{wb_id}/spec")
-      req = Net::HTTP::Get.new(uri)
-      req['Authorization'] = "Bearer #{tok}"
-      req['Accept'] = 'application/json'
-      res = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https', read_timeout: 30) { |h| h.request(req) }
-      if res.is_a?(Net::HTTPSuccess)
-        spec =
-          begin
-            JSON.parse(res.body)
-          rescue JSON::ParserError
-            require 'yaml'
-            require 'date'
-            YAML.safe_load(res.body, permitted_classes: [Date, Time]) || {}
-          end
+      fetched = fetch_live_spec.call(wb_id, base, tok) # memoized — shared with gates 4/6/7b
+      if fetched['spec']
+        spec = fetched['spec']
         scope_path = opts[:control_scope] || File.join(opts[:tab], 'control-scope.json')
         scope = nil
         if File.exist?(scope_path)
@@ -1478,7 +1652,7 @@ else
         puts "[OK] gate 7/7: control lint clean (#{n_controls} control(s); no dead controls, no ghost " \
              "targets, full same-page reach#{scope ? ', source scope honored' : ''})"
       else
-        warn "[SKIP] gate 7/7: GET /v2/workbooks/#{wb_id}/spec returned HTTP #{res.code} — cannot lint"
+        warn "[SKIP] gate 7/7: GET /v2/workbooks/#{wb_id}/spec returned HTTP #{fetched['code']} — cannot lint"
       end
     end
   end
@@ -1675,23 +1849,11 @@ else
     end
     n_controls = nil
     if defined?(ControlLint) && defined?(FlipGate)
-      uri = URI("#{flip_base}/v2/workbooks/#{flip_wb}/spec")
-      req = Net::HTTP::Get.new(uri)
-      req['Authorization'] = "Bearer #{flip_tok}"
-      req['Accept'] = 'application/json'
-      res = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https', read_timeout: 30) { |h| h.request(req) }
-      if res.is_a?(Net::HTTPSuccess)
-        spec =
-          begin
-            JSON.parse(res.body)
-          rescue JSON::ParserError
-            require 'yaml'
-            require 'date'
-            YAML.safe_load(res.body, permitted_classes: [Date, Time]) || {}
-          end
-        n_controls = ControlLint.controls_report(spec).length
+      fetched = fetch_live_spec.call(flip_wb, flip_base, flip_tok) # memoized — shared with gates 4/6/7
+      if fetched['spec']
+        n_controls = ControlLint.controls_report(fetched['spec']).length
       else
-        warn "[WARN] gate 7b: GET /v2/workbooks/#{flip_wb}/spec returned HTTP #{res.code} — cannot count controls"
+        warn "[WARN] gate 7b: GET /v2/workbooks/#{flip_wb}/spec returned HTTP #{fetched['code']} — cannot count controls"
       end
     end
     if n_controls == 0
@@ -1704,12 +1866,67 @@ else
       flip_fallback.call('the live spec could not be fetched to count controls')
     else
       out = File.join(opts[:tab], 'probe-controls')
-      cmd = [RbConfig.ruby, probe, '--workbook-id', flip_wb, '--out', out]
-      cmd << '--check-out-of-closure' if opts[:flip_check_leaks]
-      system(*cmd) # inherits stdout — the operator sees the per-control PASS/FAIL/SKIP table
-      probe_rc = $?.exitstatus
-      results = (JSON.parse(File.read(File.join(out, 'probe-results.json'))) rescue nil)
+      results_path = File.join(out, 'probe-results.json')
+      # ── #7d recorded-RAW-evidence acceptance ─────────────────────────────
+      # A gate RE-RUN against an UNCHANGED workbook used to re-flip every
+      # control (a full serial export cycle per control, 2–3x per migration:
+      # builder → finalize → verifier). Accept the PRIOR probe's RAW results
+      # instead when — and only when — the ledger-recorded evidence is still
+      # identity-bound: same workbook, same latestDocumentVersion (any control
+      # fix means a PUT means a new version), younger than 30 min, and the
+      # probe-results.json bytes still hash to the recorded sha. The verdict
+      # is then RECOMPUTED from those raw rows through the same FlipGate
+      # decision the live path uses — the reconciled #7 red line: recorded
+      # verdicts are never consumed, recorded raw measurements are. Ambiguous
+      # recorded outcomes (advisory/error) fall through to a live re-probe.
+      probe_rc = nil
+      results = nil
+      recorded_note = nil
+      if EV_LEDGER_LOADED && ev_identity['ver'] && File.exist?(results_path)
+        # Anchor the freshness window on the ORIGINAL collection entry, never
+        # on a reuse re-append: every acceptance run below re-records its
+        # recomputed verdict with recorded_reuse=true and at:=now, so taking
+        # the latest entry unfiltered would let re-runs <30 min apart each
+        # reset the B4 age bound and extend one probe's evidence indefinitely
+        # under an unchanged doc version (live-warehouse drift laundering —
+        # the chaining hole). Reuse entries stay in the ledger as audit
+        # records; they are just never the age anchor.
+        _rec = EvidenceLedger.latest(opts[:tab], gate: '7b', evidence_kind: 'probe-results') do |e|
+          !(e['detail'].is_a?(Hash) && e['detail']['recorded_reuse'])
+        end
+        # A leak-check run demands leak-checked evidence — a plain prior probe
+        # cannot stand in for it (different measurement, not just staler).
+        _rec = nil if _rec && opts[:flip_check_leaks] && !(_rec['detail'].is_a?(Hash) && _rec['detail']['check_leaks'])
+        if _rec && EvidenceLedger.fresh?(_rec, evidence_key: ev_key.call, workdir: opts[:tab])
+          _rec_results = (JSON.parse(File.read(results_path)) rescue nil)
+          _rec_rc = _rec['detail'].is_a?(Hash) ? _rec['detail']['probe_rc'] : nil
+          if _rec_results.is_a?(Array) && _rec_results.any? && _rec_rc.is_a?(Integer)
+            _d, = FlipGate.decide(_rec_rc, _rec_results)
+            if %i[ok fail].include?(_d)
+              probe_rc = _rec_rc
+              results = _rec_results
+              recorded_note = "recorded RAW probe evidence accepted (#{_rec['at']}, doc v#{ev_identity['ver']}, " \
+                              'sha-verified; verdict recomputed — not reused)'
+              puts "[NOTE] gate 7b: #{recorded_note}"
+            end
+          end
+        end
+      end
+      if results.nil?
+        cmd = [RbConfig.ruby, probe, '--workbook-id', flip_wb, '--out', out]
+        cmd << '--check-out-of-closure' if opts[:flip_check_leaks]
+        system(*cmd) # inherits stdout — the operator sees the per-control PASS/FAIL/SKIP table
+        probe_rc = $?.exitstatus
+        results = (JSON.parse(File.read(results_path)) rescue nil)
+      end
       decision, info = FlipGate.decide(probe_rc, results)
+      # E3.1: the flip verdict + its raw-evidence binding land in the ledger —
+      # the record the next re-run's acceptance check above reads.
+      ev_append.call('7b', decision.to_s,
+                     'probe-results', 'probe-controls/probe-results.json', ev_key.call,
+                     (EV_LEDGER_LOADED ? EvidenceLedger.sha256_file(results_path) : nil),
+                     { 'probe_rc' => probe_rc, 'check_leaks' => opts[:flip_check_leaks] ? true : false,
+                       'recorded_reuse' => !recorded_note.nil? })
       case decision
       when :ok
         puts "[OK] gate 7b: #{info[:passes].length} control(s) proven live (in-closure export changes when flipped)" \
@@ -3270,7 +3487,38 @@ if File.exist?(kp21_path)
     end
     kp21_unread = kp21_els.keys - kp21_verified_keys -
                   kp21['tiles'].select { |t| t.is_a?(Hash) }.map { |t| kp21_norm.call(t['title']) }
+    # E5.11: the kind-parity result is CENSUS data — stamp the summary beside
+    # the tile census in parity-final.json (when present) and land every
+    # divergence in the evidence ledger, so the punch list names each tile
+    # without re-deriving kinds (this gate stays the single comparator).
+    kp21_stamp = lambda do |verdict|
+      summary = { 'verdict' => verdict, 'matched' => kp21_matched,
+                  'waived' => kp21_waived.length, 'absent' => kp21_absent.length }
+      unless kp21_mismatch.empty?
+        summary['mismatched'] = kp21_mismatch.map do |title, exp, act, kinds|
+          { 'tile' => title, 'expected_family' => exp, 'built_family' => act, 'readback_kinds' => kinds }
+        end
+      end
+      begin
+        _pf_path = File.join(opts[:tab], 'parity-final.json')
+        if File.exist?(_pf_path)
+          _pf21 = JSON.parse(File.read(_pf_path))
+          _pf21['kind_parity'] = summary
+          File.write(_pf_path, JSON.pretty_generate(_pf21))
+        end
+      rescue StandardError
+        nil # census stamping must never fail the gate
+      end
+      kp21_mismatch.each do |title, exp, act, kinds|
+        ev_append.call('21', 'diverged', 'kind-parity', 'png-read.json', ev_key.call,
+                       nil, { 'tile' => title, 'expected_family' => exp,
+                              'built_family' => act, 'readback_kinds' => kinds })
+      end
+      ev_append.call('21', verdict, 'kind-parity', 'png-read.json', ev_key.call, nil,
+                     summary.reject { |k, _| k == 'mismatched' })
+    end
     if kp21_mismatch.any?
+      kp21_stamp.call('fail')
       warn '[FAIL] gate 21: chart-kind parity — the built workbook contradicts the VERIFIED source read'
       warn '       (png-read.json, Phase 1d): the operator SAW these tiles in the source image.'
       kp21_mismatch.first(10).each do |title, exp, act, kinds|
@@ -3284,6 +3532,7 @@ if File.exist?(kp21_path)
       warn '       (ledger-named like coverage_waivers — a recorded fidelity decision, not a budget waiver).'
       exit 28
     end
+    kp21_stamp.call('pass')
     kp21_parts = ["#{kp21_matched} matched"]
     kp21_parts << "#{kp21_waived.length} kind-waived in the ledger" if kp21_waived.any?
     puts "[OK] gate 21: chart-kind parity — #{kp21_parts.join(', ')} of #{kp21_verified_keys.length} " \
@@ -3389,6 +3638,13 @@ begin
 rescue StandardError
   # never fail the gate on sentinel bookkeeping
 end
+
+# E3.1: the terminal all-gates verdict is the ledger's run-summary line — the
+# punch-list headline (every FAIL/WAIVE above already has its own entry).
+ev_append.call('phase6-gates', final_verdict || 'all-pass', 'gate-summary',
+               'parity-final.json', ev_key.call, nil,
+               { 'waivers' => waiver_flags.length, 'budget_waivers' => budget_flags.length,
+                 'degradations' => (deg_entries ? deg_entries.length : nil) }.compact)
 
 if final_verdict.nil?
   # Legacy checkout without lib/degradation_ledger.rb — stated, never silent.

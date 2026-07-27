@@ -146,6 +146,50 @@ spec = JSON.parse(File.read(opts[:spec]))
 elements = (spec['pages'] || []).flat_map { |p| p['elements'] || [] }
 el_by_id = elements.each_with_object({}) { |e, h| h[e['id']] = e }
 
+# ── RAW export cache (#7a/#7d) + readback version check (#7b) ────────────────
+# The post-POST readback (--workbook-spec, normally <WORK>/wb-readback.json) is
+# THE spec source for this run — but only while its latestDocumentVersion still
+# matches the live workbook (any new POST/PUT bumps it). When the readback
+# carries a version, ONE live version probe validates it; on a match, the
+# version-keyed raw export cache activates, shared with verify-anchors.rb:
+# same (workbookId, latestDocumentVersion, elementId, format, rowLimit) keys,
+# RAW wire bodies only, every mapping/truncation verdict recomputed below
+# (the reconciled #7 red line — never a recorded verdict). A stale readback is
+# named LOUDLY (spec source invalid → element ids may be wrong) and disables
+# the cache; a version-less readback just keeps the old uncached behavior.
+# (A def, not an inline begin/end: begin blocks leak their locals into the
+# top-level scope, where the pool's per-thread `c = queue.pop` would silently
+# become a SHARED variable — a live race, caught by test-parity-export-
+# robustness.rb. Method scope contains them.)
+def build_export_cache(spec, plan_path, wb, spec_path)
+  rb_ver = ExportPool.resolve_doc_version(spec)
+  return nil if rb_ver.nil? # hand-built / legacy readback without a version — nothing to key on
+  live_ver = begin
+    live = Sigma.request(:get, "/v2/workbooks/#{wb}/spec")
+    live = JSON.parse(live) if live.is_a?(String)
+    ExportPool.resolve_doc_version(live)
+  rescue StandardError
+    nil
+  end
+  if live_ver.nil?
+    warn '[cache] raw export cache OFF — live version probe failed (payloads cannot be version-keyed)'
+    nil
+  elsif live_ver != rb_ver
+    warn '=' * 70
+    warn "⚠️  STALE READBACK — #{File.basename(spec_path)} is doc v#{rb_ver} but the live workbook is v#{live_ver}."
+    warn '    The workbook changed since the readback was captured (a later POST/PUT). Element ids and'
+    warn '    columns in the plan may no longer match the live spec. Re-run phase6-parity.rb PASS 1 to'
+    warn '    refresh wb-readback.json. Raw export cache OFF for this run.'
+    warn '=' * 70
+    nil
+  else
+    warn "[cache] raw export cache active (wb #{wb} @ doc v#{live_ver}; " \
+         'strict version keys, verdicts always recomputed)'
+    ExportPool::Cache.new(File.dirname(plan_path), workbook_id: wb.to_s, doc_version: live_ver)
+  end
+end
+CACHE = build_export_cache(spec, opts[:plan], opts[:wb], opts[:spec])
+
 # Tableau-CSV-compatible cell parse — same rules as auto-parity-plan's
 # parse_cell so expected/actual compare on identical representations.
 def parse_cell(v)
@@ -186,11 +230,17 @@ end
 # render-verify marker (the CSV path already exhausted / skipped its retries).
 def collect_chart_json(element_id, want_names, wb, deadline)
   return [:timeout, "total --timeout (#{deadline.budget.round}s) deadline reached before JSON export"] if deadline.expired?
-  qid = ExportPool.start_json_export(wb, element_id, ROW_LIMIT)
-  return [:fail, 'JSON export POST returned no queryId'] unless qid
-  status, body = ExportPool.poll_json_download(qid, deadline)
-  return [:timeout, "JSON export poll hit the total --timeout (#{deadline.budget.round}s) deadline"] if status == :timeout
-  return [:manual, RENDER_VERIFY_REASON] if status == :html
+  # Version-keyed raw-cache hit (#7a): reuse the recorded wire body; the
+  # reshape/mapping below is recomputed either way (never a recorded verdict).
+  body = CACHE && CACHE.fetch(element_id, 'json', ROW_LIMIT)
+  if body.nil?
+    qid = ExportPool.start_json_export(wb, element_id, ROW_LIMIT)
+    return [:fail, 'JSON export POST returned no queryId'] unless qid
+    status, body = ExportPool.poll_json_download(qid, deadline)
+    return [:timeout, "JSON export poll hit the total --timeout (#{deadline.budget.round}s) deadline"] if status == :timeout
+    return [:manual, RENDER_VERIFY_REASON] if status == :html
+    CACHE.store(element_id, 'json', ROW_LIMIT, body) if CACHE
+  end
   objs = ExportPool.parse_json_rows(body)
   return [:manual, RENDER_VERIFY_REASON] if objs.empty?
   # Truncated at the row cap → a huge flat grid, not a comparable aggregate.
@@ -234,13 +284,20 @@ def collect_chart(c, el_by_id, wb, deadline)
   begin
     attempts += 1
     return [:timeout, "total --timeout (#{deadline.budget.round}s) deadline reached before export started"] if deadline.expired?
-    qid = ExportPool.start_csv_export(wb, c['sigma_element_id'], ROW_LIMIT)
-    return [:fail, 'export POST returned no queryId'] unless qid
-    status, body = ExportPool.poll_csv_download(qid, deadline)
-    return [:timeout, "export poll hit the total --timeout (#{deadline.budget.round}s) deadline"] if status == :timeout
-    # HTML instead of CSV = the export renderer errored behind a 200 — same
-    # class as the 500 (seen live on control-driven pivots).
-    return [:manual, RENDER_VERIFY_REASON] if status == :html
+    # Version-keyed raw-cache hit (#7a): reuse the recorded wire body — the
+    # truncation check and column mapping below are recomputed either way
+    # (never a recorded verdict).
+    body = CACHE && CACHE.fetch(c['sigma_element_id'], 'csv', ROW_LIMIT)
+    if body.nil?
+      qid = ExportPool.start_csv_export(wb, c['sigma_element_id'], ROW_LIMIT)
+      return [:fail, 'export POST returned no queryId'] unless qid
+      status, body = ExportPool.poll_csv_download(qid, deadline)
+      return [:timeout, "export poll hit the total --timeout (#{deadline.budget.round}s) deadline"] if status == :timeout
+      # HTML instead of CSV = the export renderer errored behind a 200 — same
+      # class as the 500 (seen live on control-driven pivots).
+      return [:manual, RENDER_VERIFY_REASON] if status == :html
+      CACHE.store(c['sigma_element_id'], 'csv', ROW_LIMIT, body) if CACHE
+    end
     rows = CSV.parse(body)
     # Truncated at the row cap: this "chart" is a huge flat detail grid, not a
     # comparable plotted aggregate. Parity over a partial export would be
