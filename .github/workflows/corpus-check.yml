@@ -444,7 +444,7 @@ jobs:
         run: |
           set -uo pipefail
           fail=0
-          for h in tools/test-hygiene-sweep.sh tools/test-commit-msg-guard.sh tools/test-converter-provenance.sh tools/test-tree-litter.sh; do
+          for h in tools/test-hygiene-sweep.sh tools/test-commit-msg-guard.sh tools/test-converter-provenance.sh tools/test-tree-litter.sh plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-doctor-json.sh; do
             echo "::group::$h"
             if timeout 300 bash "$h"; then echo "OK $h"; else echo "::error file=$h::harness failed"; fail=1; fi
             echo "::endgroup::"
