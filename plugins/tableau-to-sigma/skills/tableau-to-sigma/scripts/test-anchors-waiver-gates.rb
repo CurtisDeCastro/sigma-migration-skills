@@ -26,6 +26,12 @@
 #     tests); verdict read from the JSON `pass` field; --skip-visual-similarity
 #     waives (counted).
 #
+#   E3.1 waivers_history (two-invocation replay): a gate waived on invocation 1
+#     appends a gate-waived line to offramps.jsonl; a clean invocation 2 merges
+#     it into parity-final.json waivers_history as superseded-by-pass and
+#     announces it — the headline count never silently drops to zero. Same-run
+#     scoped: another run_id's records never bleed in.
+#
 # Runs the real script per scenario in a scratch workdir with no SIGMA_* env,
 # so the live gates (3/4/6/7) SKIP and the file-based gates are exercised.
 #
@@ -330,6 +336,66 @@ Dir.mktmpdir do |dir|
   check(err2.include?('values were never diffed against the source'), 'cap explains what skip-parity hid')
 end
 
+# ---- E3.1 waivers_history: two-invocation replay (waive, then pass) ----------
+# The PLAN-v4 E3.1 acceptance: a waiver forced on invocation 1 (flaky render,
+# later retried clean) must never vanish once invocation 2 passes — the
+# gate-waived record is APPENDED to offramps.jsonl and merged into
+# parity-final.json `waivers_history` as superseded-by-pass, and the headline
+# announces it (never a silent zero).
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'migrate-state.json'), JSON.generate('run_id' => 'r-e31'))
+  # Invocation 1: gate 2 waived → gate-waived line appended to offramps.jsonl.
+  _out1, _err1, st1 = run_gate(dir, '--skip-orphan-check', 'flaky render mid-run')
+  check(st1.success?, "invocation 1 (waived) exits 0 (got #{st1.exitstatus})")
+  gw = File.readlines(File.join(dir, 'offramps.jsonl')).map { |l| JSON.parse(l) }
+           .select { |r| r['kind'] == 'gate-waived' }
+  check(gw.length == 1 && gw.first['flag'] == '--skip-orphan-check' &&
+        gw.first['gate'] == '2' && gw.first['run_id'] == 'r-e31',
+        'gate-waived offramp line appended with flag + gate + run_id')
+  check(JSON.parse(File.read(File.join(dir, 'parity-final.json')))['waiver_count'] == 1,
+        'invocation 1 stamps waiver_count=1')
+  # Invocation 2: same run, no flag → gate passes; the prior waiver must ride
+  # into waivers_history as superseded-by-pass, never silently vanish.
+  out2, _err2, st2 = run_gate(dir)
+  check(st2.success?, "invocation 2 (clean) exits 0 (got #{st2.exitstatus})")
+  pf2 = JSON.parse(File.read(File.join(dir, 'parity-final.json')))
+  check(pf2['waivers'] == [] && pf2['waiver_count'] == 0,
+        'current census honestly reports zero ACTIVE waivers on invocation 2')
+  h = pf2['waivers_history']
+  check(h.is_a?(Array) && h.length == 1 && h.first['flag'] == '--skip-orphan-check' &&
+        h.first['status'] == 'superseded-by-pass' && pf2['waivers_history_count'] == 1,
+        "prior waiver retained in waivers_history as superseded-by-pass (got #{h.inspect[0, 140]})")
+  check(out2.include?('waivers_history') && out2.include?('superseded'),
+        'headline announces the superseded history — the count never silently drops')
+  check(File.readlines(File.join(dir, 'offramps.jsonl')).map { |l| JSON.parse(l) }
+            .any? { |r| r['kind'] == 'gate-waived' },
+        'the gate-waived offramp record itself is never deleted')
+  # Invocation 3 re-waives → the history entry reads active again (no false
+  # supersede while the flag is genuinely on).
+  _o3, _e3, st3 = run_gate(dir, '--skip-orphan-check', 'still flaky')
+  h3 = (JSON.parse(File.read(File.join(dir, 'parity-final.json')))['waivers_history'] || [])
+       .find { |x| x['flag'] == '--skip-orphan-check' }
+  check(st3.success? && h3 && h3['status'] == 'active',
+        "a re-waived flag reads active in the history (got #{h3 && h3['status']})")
+end
+
+# A DIFFERENT run's gate-waived records never bleed into this run's history
+# (run_id-scoped merge — a fresh run starts a fresh accounting).
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'migrate-state.json'), JSON.generate('run_id' => 'r-new'))
+  File.open(File.join(dir, 'offramps.jsonl'), 'a') do |f|
+    f.puts(JSON.generate('kind' => 'gate-waived', 'gate' => '2', 'flag' => '--skip-orphan-check',
+                         'reason' => 'old run', 'run_id' => 'r-old', 'at' => '2026-07-01T00:00:00Z'))
+  end
+  _out, _err, st = run_gate(dir)
+  check(st.success?, "clean run with only an OLD run's waiver record exits 0 (got #{st.exitstatus})")
+  pf = JSON.parse(File.read(File.join(dir, 'parity-final.json')))
+  check(pf['waivers_history'] == [] && pf['waivers_history_count'] == 0,
+        "other-run gate-waived records excluded from waivers_history (got #{pf['waivers_history'].inspect[0, 100]})")
+end
+
 # ---- gate 14: visual-similarity floor (via VISUAL_SIMILARITY_SCRIPT stub) -----
 def write_vsim_stub(dir, pass_value)
   stub = File.join(dir, 'vsim-stub.py')
@@ -489,7 +555,7 @@ end
 
 puts
 if $fails.empty?
-  puts 'ALL PASS — anchors gate + conditional skip-parity + data-class block + waiver budget + similarity floor'
+  puts 'ALL PASS — anchors gate + conditional skip-parity + data-class block + waiver budget + similarity floor + E3.1 waivers_history replay'
   exit 0
 else
   puts "FAILURES (#{$fails.length}):"

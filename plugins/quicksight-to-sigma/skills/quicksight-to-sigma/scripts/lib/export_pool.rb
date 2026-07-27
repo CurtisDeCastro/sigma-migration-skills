@@ -26,12 +26,139 @@
 
 require 'json'
 require 'timeout'
+require 'digest'
+require 'time'
+require 'fileutils'
 
 module ExportPool
   # Sigma truncates CSV/JSON/XLSX exports at 1M rows no matter what — a
   # rowLimit above this is meaningless (batch with `offset` if you truly need
   # more; none of these verification flows do).
   SIGMA_EXPORT_HARD_CAP = 1_000_000
+
+  # ---------------------------------------------------------------------------
+  # RAW export cache (#7a/#7d — speed review, reconciled program).
+  #
+  # verify-anchors.rb and collect-parity-actuals.rb run the SAME element export
+  # wire flow, often against the SAME unchanged workbook (builder pass →
+  # finalize → verifier re-run) — the most expensive live operation in a gate
+  # run, paid 2–3x. This cache shares ONE export per element between them and
+  # across re-runs, under the reconciled #7 RED LINE:
+  #
+  #   * RAW ONLY — the cache stores the untouched wire BODY (CSV/JSON bytes).
+  #     Verdicts (truncation, anchor match, parity compare) are ALWAYS
+  #     recomputed by the caller from those bytes. Nothing verdict-shaped is
+  #     ever written here, so nothing verdict-shaped can ever be reused.
+  #   * STRICT VERSION KEYS — every entry is bound to
+  #     (workbookId, latestDocumentVersion, elementId, format, rowLimit).
+  #     Any POST/PUT bumps latestDocumentVersion, so a stale payload can never
+  #     match live state. An UNKNOWN doc version disables the cache entirely
+  #     (fail-closed: no attribution, no reuse, no store).
+  #   * AGE-BOUNDED — entries older than max_age_s (default 30 min, the
+  #     repo-speed B4 acceptance rule) are ignored; live data can move under a
+  #     live warehouse even when the workbook version does not.
+  #   * BYTE-BOUND — each payload's sha256 is recorded at store time and
+  #     re-verified at fetch; a swapped/corrupted payload is a MISS.
+  #
+  # Storage: <workdir>/export-cache/<elementId>.<fmt>[.r<rowLimit>] payload +
+  # a .meta.json sidecar per entry. The workdir is machine-local run state
+  # (never committed) — same hygiene class as the view CSVs beside it.
+  # ---------------------------------------------------------------------------
+  class Cache
+    DIR = 'export-cache'
+    DEFAULT_MAX_AGE_S = 30 * 60
+
+    attr_reader :dir, :workbook_id, :doc_version
+
+    def initialize(workdir, workbook_id:, doc_version:, max_age_s: DEFAULT_MAX_AGE_S)
+      @dir = File.join(workdir, DIR)
+      @workbook_id = workbook_id.to_s
+      @doc_version = doc_version.nil? || doc_version.to_s.empty? ? nil : doc_version.to_s
+      @max_age_s = max_age_s
+      @hits = 0
+      @stores = 0
+    end
+
+    # Enabled only when the payloads can be strictly attributed: a known
+    # workbook AND a known live document version.
+    def enabled?
+      !@workbook_id.empty? && !@doc_version.nil?
+    end
+
+    def stats
+      { 'hits' => @hits, 'stores' => @stores }
+    end
+
+    # → raw body String on a strict hit, else nil. A hit means: same workbook,
+    # same latestDocumentVersion, same element, same format, same rowLimit,
+    # young enough, byte-identical to the recorded sha. NEVER returns verdicts
+    # — callers re-parse and re-decide every time.
+    def fetch(element_id, fmt, row_limit, now: Time.now)
+      return nil unless enabled?
+      meta = read_meta(element_id, fmt, row_limit)
+      return nil unless meta
+      return nil unless meta['workbook_id'] == @workbook_id &&
+                        meta['doc_version'] == @doc_version &&
+                        meta['format'] == fmt.to_s &&
+                        meta['row_limit'].to_s == row_limit.to_s
+      at = (Time.parse(meta['at'].to_s) rescue nil)
+      return nil if at.nil? || (now - at) > @max_age_s || (now - at) < 0
+      body_path = payload_path(element_id, fmt, row_limit)
+      return nil unless File.exist?(body_path)
+      body = File.binread(body_path)
+      return nil unless Digest::SHA256.hexdigest(body) == meta['sha256']
+      @hits += 1
+      body
+    rescue StandardError
+      nil # a broken cache entry is a MISS, never an error
+    end
+
+    # Record one raw payload under the strict key. Best-effort: a failed write
+    # only forfeits the future hit.
+    def store(element_id, fmt, row_limit, body, now: Time.now)
+      return nil unless enabled? && body.is_a?(String) && !body.empty?
+      FileUtils.mkdir_p(@dir)
+      File.binwrite(payload_path(element_id, fmt, row_limit), body)
+      File.write(meta_path(element_id, fmt, row_limit), JSON.pretty_generate(
+                   'workbook_id' => @workbook_id,
+                   'doc_version' => @doc_version,
+                   'element_id' => element_id.to_s,
+                   'format' => fmt.to_s,
+                   'row_limit' => row_limit.to_s,
+                   'sha256' => Digest::SHA256.hexdigest(body),
+                   'at' => now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')))
+      @stores += 1
+      true
+    rescue StandardError
+      nil
+    end
+
+    private
+
+    def entry_base(element_id, fmt, row_limit)
+      # elementId charset is [A-Za-z0-9_-] in practice; scrub defensively so a
+      # hostile id can never escape the cache dir.
+      safe = element_id.to_s.gsub(/[^A-Za-z0-9._-]/, '_')
+      File.join(@dir, "#{safe}.#{fmt}#{row_limit ? ".r#{row_limit}" : ''}")
+    end
+
+    def payload_path(element_id, fmt, row_limit)
+      entry_base(element_id, fmt, row_limit)
+    end
+
+    def meta_path(element_id, fmt, row_limit)
+      "#{entry_base(element_id, fmt, row_limit)}.meta.json"
+    end
+
+    def read_meta(element_id, fmt, row_limit)
+      p = meta_path(element_id, fmt, row_limit)
+      return nil unless File.exist?(p)
+      m = JSON.parse(File.read(p))
+      m.is_a?(Hash) ? m : nil
+    rescue StandardError
+      nil
+    end
+  end
 
   # Whole-run wall-clock budget, created ONCE at the start of a run and shared
   # by every worker: when it expires, everything stops — poll loops, retries,
@@ -152,6 +279,106 @@ module ExportPool
   # inconclusive either way).
   def truncated?(rows, row_limit)
     !row_limit.nil? && rows.is_a?(Array) && (rows.length - 1) >= row_limit
+  end
+
+  # The workbook document version off a spec GET / readback hash — the strict
+  # cache-key half that changes on every POST/PUT. Accepts the documented
+  # spec-level spelling and the workbook-metadata spelling; nil when absent
+  # (callers treat nil as cache-disabling, never as "match anything").
+  def resolve_doc_version(spec)
+    return nil unless spec.is_a?(Hash)
+    v = spec['latestDocumentVersion'] || spec['latestVersion']
+    v.nil? || v.to_s.empty? ? nil : v.to_s
+  end
+
+  # ---------------------------------------------------------------------------
+  # Pooled ground-truth SQL probes (#7c). The established warehouse-SQL seam
+  # (probe-join-keys.rb / run-ground-truth.rb) pays FOUR REST calls per entry —
+  # POST probe workbook, POST export, poll download, DELETE — fully serially.
+  # This helper runs the same seam as ONE workbook: one spec POST carrying one
+  # Custom SQL 'table' element per entry, exports pooled `pool`-wide against
+  # the shared deadline, then ONE DELETE in ensure — ~4T calls become T+2 and
+  # the wall clock divides by the pool width. Wire flow per element is
+  # UNCHANGED (same export → poll → download the singleton path uses), so
+  # per-entry verdicts (row counts, row-explosion, comparisons) stay the
+  # caller's to compute — this is transport, not judgment.
+  #
+  # entries: [{ 'sql' => <statement>, 'columns' => [<alias>, ...] }, ...]
+  # Returns: per-entry [ [:ok, rows] | [:timeout, nil] | [:error, msg] ]
+  # (rows = CSV rows INCLUDING the header row, exactly like poll_csv_download
+  # consumers expect). Raises only when the single probe-workbook POST itself
+  # fails — nothing was created, nothing needs cleanup.
+  # ---------------------------------------------------------------------------
+  def pooled_sql_probe(conn_id, entries, deadline, folder_id: nil, pool: 5,
+                       row_limit: nil, name: nil)
+    require 'csv'
+    require 'securerandom'
+    return [] if entries.empty?
+    elements = entries.each_with_index.map do |e, i|
+      { 'id' => "probe#{i}", 'kind' => 'table', 'name' => "Probe #{i}",
+        'source' => { 'kind' => 'sql', 'connectionId' => conn_id, 'statement' => e['sql'].to_s },
+        'columns' => Array(e['columns']).each_with_index.map do |c, j|
+          { 'id' => "c#{i}_#{j}", 'name' => c.to_s, 'formula' => "[Custom SQL/#{c}]" }
+        end }
+    end
+    spec = { 'name' => name || "_probe_pooled_#{SecureRandom.hex(4)}",
+             'schemaVersion' => 1,
+             'pages' => [{ 'id' => 'p1', 'name' => 'p1', 'elements' => elements }] }
+    spec['folderId'] = folder_id if folder_id # omitted key = My Documents (API default)
+    begin
+      r = Sigma.request(:post, '/v2/workbooks/spec', body: JSON.generate(spec))
+    rescue Sigma::Error => e
+      raise "pooled probe workbook POST failed: #{e.message.to_s.gsub(/\s+/, ' ').strip[0, 240]}"
+    end
+    wb_id = r.is_a?(Hash) ? r['workbookId'] : nil
+    raise "pooled probe workbook POST failed: #{r.inspect[0, 160]}" unless wb_id
+    results = Array.new(entries.length)
+    begin
+      queue = Queue.new
+      entries.each_index { |i| queue << i }
+      mutex = Mutex.new
+      Array.new([pool, entries.length].min.clamp(1, 16)) do
+        Thread.new do
+          loop do
+            i = begin
+              queue.pop(true)
+            rescue ThreadError
+              break
+            end
+            res =
+              begin
+                if deadline.expired?
+                  [:timeout, nil]
+                else
+                  qid = start_csv_export(wb_id, "probe#{i}", row_limit)
+                  if qid.nil?
+                    [:error, 'export POST returned no queryId']
+                  else
+                    status, body = poll_csv_download(qid, deadline)
+                    case status
+                    when :timeout then [:timeout, nil]
+                    when :html    then [:error, 'export returned HTML behind a 200 (renderer error)']
+                    else               [:ok, CSV.parse(body)]
+                    end
+                  end
+                end
+              rescue StandardError => e
+                [:error, e.message.to_s.gsub(/\s+/, ' ').strip[0, 240]]
+              end
+            mutex.synchronize { results[i] = res }
+          end
+        end
+      end.each(&:join)
+    ensure
+      # ONE delete for the whole batch — the probe workbook never outlives the
+      # call, even on timeout/error.
+      begin
+        Sigma.request(:delete, "/v2/files/#{wb_id}")
+      rescue StandardError
+        nil
+      end
+    end
+    results
   end
 
   # One progress line per pool event, stamped with run-elapsed seconds — the

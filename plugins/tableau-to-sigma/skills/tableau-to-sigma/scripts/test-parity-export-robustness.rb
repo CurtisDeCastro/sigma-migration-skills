@@ -55,11 +55,13 @@ STUB = <<~'RUBY'
   require 'json'
   module Sigma
     class Error < StandardError; end
+    @counts = Hash.new(0) # per-process call counters (one collect run = one process)
     def self.request(method, path, body: nil, accept: nil, binary: false, content_type: nil, http: nil)
       if method == :post && path.include?('/export')
         req = JSON.parse(body)
         eid = req['elementId']
         fmt = req.dig('format', 'type')
+        @counts["post:#{eid}:#{fmt}"] += 1
         File.open(ENV['STUB_LOG'], 'a') do |f|
           f.puts(JSON.generate('eid' => eid, 'fmt' => fmt, 'rowLimit' => req['rowLimit']))
         end
@@ -72,12 +74,26 @@ STUB = <<~'RUBY'
         end
       end
       if method == :get && path.start_with?('/v2/query/')
-        case path.split('/')[3]
+        qid = path.split('/')[3]
+        @counts["get:#{qid}"] += 1
+        File.open(ENV['STUB_LOG'], 'a') { |f| f.puts(JSON.generate('download' => qid)) }
+        case qid
         when 'el-ok::csv'      then return "Region,Revenue\nEast,100\nWest,200\n"
         when 'el-piv500::json' then return JSON.generate([{ 'Region' => 'East', 'Revenue' => 100 },
                                                           { 'Region' => 'West', 'Revenue' => 200 }])
         when 'el-totals::json' then return JSON.generate([{ 'Quarter' => 'Q1', 'Net' => 10 },
                                                           { 'Quarter' => 'Q2', 'Net' => 20 }])
+        when 'el-204::csv'
+          # E3.1: a still-rendering export downloads as a 204 / EMPTY body —
+          # the poller must keep polling with backoff, never fail, never retry
+          # the export. Serve two empty bodies, then the real CSV.
+          return '' if @counts['get:el-204::csv'] <= 2
+          return "Region,Revenue\nEast,100\nWest,200\n"
+        when 'el-flaky::csv'
+          # E3.1 contrast case: a RETRYABLE 5xx on the download IS a failure —
+          # it must count toward the bounded retry budget (fresh export POST).
+          raise Error, "GET #{path} -> 503 Service Unavailable\n{}" if @counts['post:el-flaky:csv'] == 1
+          return "Region,Revenue\nEast,100\nWest,200\n"
         end
       end
       raise Error, "stub: unexpected #{method} #{path}"
@@ -153,6 +169,51 @@ Dir.mktmpdir do |dir|
   check(piv500_json.length == 1, 'reactive path: exactly one JSON fallback POST', fails)
   # bounded rowLimit still carried on the JSON export.
   check(piv500_json.first['rowLimit'] == 100_000, 'JSON export carries the bounded rowLimit', fails)
+end
+
+# ============================================================================
+# Part 1b — E3.1 retry honesty: a 204/empty download stream is STILL-RENDERING
+# (poll-with-backoff, NEVER a retry-counter increment / re-export), while a
+# RETRYABLE 5xx IS a failure that counts toward the bounded retry budget.
+# PLAN-v4 E3.1 acceptance (stubbed export seam, offline).
+# ============================================================================
+puts '-- Part 1b: E3.1 — 204 stream never increments the retry counter; a 5xx does --'
+SPEC_204 = { 'pages' => [{ 'elements' => [
+  { 'id' => 'el-204',   'columns' => [{ 'id' => 'c-r', 'name' => 'Region' }, { 'id' => 'c-v', 'name' => 'Revenue' }] },
+  { 'id' => 'el-flaky', 'columns' => [{ 'id' => 'c-r', 'name' => 'Region' }, { 'id' => 'c-v', 'name' => 'Revenue' }] }
+] }] }.freeze
+PLAN_204 = [
+  { 'chart' => 'Slow Render', 'sigma_kind' => 'bar-chart', 'sigma_element_id' => 'el-204',   'sigma_columns' => %w[c-r c-v] },
+  { 'chart' => 'Flaky 503',   'sigma_kind' => 'bar-chart', 'sigma_element_id' => 'el-flaky', 'sigma_columns' => %w[c-r c-v] }
+].freeze
+Dir.mktmpdir do |dir|
+  plan_path = File.join(dir, 'parity-plan.json')
+  spec_path = File.join(dir, 'wb-readback.json')
+  out_path  = File.join(dir, 'parity-actuals.json')
+  log       = File.join(dir, 'stub-log.jsonl')
+  File.write(plan_path, JSON.pretty_generate('charts' => PLAN_204, 'source_csv_max_mtime' => Time.now.to_i))
+  File.write(spec_path, JSON.pretty_generate(SPEC_204))
+
+  _out, err, st = run_collect(dir, { 'STUB_LOG' => log },
+                              '--plan', plan_path, '--workbook-id', 'wb',
+                              '--workbook-spec', spec_path, '--out', out_path)
+  check(st.success?, "collect exits 0 (got #{st.exitstatus}: #{err.lines.grep(/rror/).first})", fails)
+  actuals = JSON.parse(File.read(out_path))
+  check(actuals['Slow Render'] == [['East', 100.0], ['West', 200.0]],
+        '204/empty stream → kept polling → rows collected (never marked failed/empty)', fails)
+  check(actuals['Flaky 503'] == [['East', 100.0], ['West', 200.0]],
+        '503 then success → retried within budget → rows collected', fails)
+
+  lines = File.readlines(log).map { |l| JSON.parse(l) }
+  posts_204   = lines.select { |p| p['eid'] == 'el-204' && p['fmt'] == 'csv' }
+  posts_flaky = lines.select { |p| p['eid'] == 'el-flaky' && p['fmt'] == 'csv' }
+  polls_204   = lines.select { |p| p['download'] == 'el-204::csv' }
+  check(posts_204.length == 1,
+        "204 stream NEVER increments the retry counter — exactly ONE export POST (got #{posts_204.length})", fails)
+  check(polls_204.length >= 3,
+        "the empty bodies were POLLED through, not failed (#{polls_204.length} download attempts >= 3)", fails)
+  check(posts_flaky.length == 2,
+        "a RETRYABLE 5xx DOES count toward the retry budget — fresh export POST on retry (got #{posts_flaky.length})", fails)
 end
 
 # ============================================================================

@@ -161,7 +161,7 @@ All 🧩 forms are **chart-context only** — place in a grouped workbook elemen
 | Warehouse-backed source | warehouse-table element | ✅ | |
 | Extract-only fields / extract filters (`.hyper`) | — | ❌ | converter reads the logical model, not the physical extract |
 | Non-warehouse source (Google Sheets, spatial/OGR, web data, Mapbox) | — | ❌ | can't repoint to a warehouse — should be surfaced in a "skipped sources" note |
-| Worksheets / dashboards / viz layout | (skill build scripts) | — | the **converter** emits the data model; charts, layout, controls and parity are built by the skill's `scripts/*.rb` (see `refs/workbook-layout.md`), not the converter |
+| Worksheets / dashboards / viz layout | (skill build scripts) | — | the **converter** emits the data model; charts, layout, controls and parity are built by the skill's `scripts/*.rb` (see `refs/chart-patterns.md`, `refs/element-kinds.md`, `refs/layout-grid.md`), not the converter |
 
 ---
 

@@ -47,4 +47,5 @@ workdir-*/
 probe-artifacts.jsonl
 posted-workbooks.jsonl
 offramps.jsonl
+phase-metrics.jsonl
 /*.jsonl

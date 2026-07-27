@@ -218,7 +218,7 @@ Rules:
 }
 ```
 
-See `refs/workbook-layout.md` for chart patterns, multi-series formulas, and map shapes.
+See `refs/chart-patterns.md` for chart patterns and multi-series formulas and map shapes; `refs/element-kinds.md` for per-kind field requirements and controls.
 
 ### 5b. Validate the workbook spec
 
@@ -327,7 +327,7 @@ Layout helpers (in `scripts/lib/layout.rb`): `gc(eid, c0, c1, r0, r1, inner)` fo
 `<GridContainer>`, `le(eid, c0, c1, r0, r1)` for `<LayoutElement>`, `page_xml(page_id, *children)`
 to wrap a page, `assemble(*pages)` to add the XML prologue.
 
-See `refs/workbook-layout.md` for typical page layouts (4 KPIs + line chart + 2 bars,
+See `refs/layout-grid.md` for typical page layouts (4 KPIs + line chart + 2 bars,
 multi-row containers, etc.) and rules (`<GridContainer>` for nesting, KPI inner `gridRow`
 must match container outer span).
 

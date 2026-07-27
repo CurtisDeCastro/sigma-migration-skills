@@ -2,11 +2,69 @@
 
 # Script map — per-script detail (what each script does, exactly)
 
-The spine (SKILL.md §Scripts) carries the one-line map; THIS file carries the
-full description of every script — flags, artifacts, exit codes, field
-rationale. Open it when an orchestrator STOP routes you to a script and you
-need its complete contract. The orchestrator composes all of these; you
-invoke one directly only when a STOP message tells you to.
+THIS file carries both the one-line index (below — relocated from SKILL.md
+§Scripts, E9 diet) and the full description of every script — flags,
+artifacts, exit codes, field rationale. Open it when an orchestrator STOP
+routes you to a script and you need its complete contract. The orchestrator
+composes all of these; you invoke one directly only when a STOP message tells
+you to.
+
+## One-line index (relocated from SKILL.md — E9 diet)
+
+| Script | One line |
+|---|---|
+| `migrate-tableau.rb` | The one command — chains the whole gated spine; stops with exact instructions |
+| `verify-complete.rb` | The single offline "are we done?" check — ✅ DONE only on gate-green; re-derives the verdict ledger (exit 6 on contradiction) |
+| `lib/offramp.rb` + `offramps.jsonl` | Observability trail of every golden-path exit |
+| `setup.rb` / `setup-tableau.rb` | One-time Sigma / Tableau credential setup (`--from-env` = non-interactive; bootstrap runs them) |
+| `get-token.sh` / `get_token.py` | Sigma token mint (bash / shell-neutral twin → `<WORK>/auth.json`) |
+| `get-tableau-token.sh` / `get-tableau-token.py` | Tableau PAT signin (bash / shell-neutral twin) |
+| `bootstrap.sh` / `bootstrap.ps1` | Step-0 environment bootstrap → doctor-green + sentinel (`--check` dry run) |
+| `doctor.sh` / `doctor.ps1` | Env check; writes the `doctor.json` fingerprint the orchestrator gates on |
+| `assert-doctor-ran.rb` | 🚧 GATE — refuse to run without passing `doctor.json` + bootstrap sentinel |
+| `assert-wb-refs-resolve.rb` | 🚧 GATE — every workbook `[Element/Column]` ref must exist in the live DM (waive `--skip-ref-check "<reason>"`) |
+| `tableau-discover.rb` | PAT-mode Phase 1 discovery in one pooled CLI (13.7–18.9s on the 7-view reference) |
+| `resolve-project.rb` | Phase 1a numeric-URL resolver (⛔ no guessing; exit 2 = STOP and ask) |
+| `scan-workbook-gaps.rb` | Phase 0a (mandatory) gap scan → `gaps.json` / `gaps-report.md` + `blend-plan.json` |
+| `gap-scout.md` | Phase 0a-scout subagent protocol for ❌ Unhandled gaps |
+| `validate-sigma-formula.rb` / `scout-validate-and-persist.rb` | Scout primitives: probe a candidate formula; persist learned rules / escalations |
+| `sweep-run-artifacts.rb` | E7.1 crash-recovery sweep of probe/scout leftovers — registry (+ opt-in probe-folder) sources, DRY-RUN default, deletes land in Sigma's Trash |
+| `escalate-gap.py` | Opt-in issue filer (dry-run by default; `--yes` to file) |
+| `learned-rules.rb` | Merges `learned/starter-rules.yaml` + `~/.tableau-to-sigma/learned-rules.yaml` |
+| `parse-twb-layout.rb` | `.twb` → per-dashboard zone list + `*-meta.json` (+ `story-plan.json` for stories) |
+| `build-charts-from-signals.rb` | Zones + CSVs + master map → Sigma chart specs; writes `coverage.json`; 🚧 requires `png-read.json` |
+| `extract-custom-sql.rb` / `resolve-published-ds.rb` / `hydrate-custom-sql.rb` | Custom-SQL + published-DS (sqlproxy) resolution/hydration — never a phantom table |
+| `lib/tableau_rest.rb` | Tableau REST wrapper |
+| `estimate-cost.rb` | Phase 0c scope + token-cost estimate → `cost-estimate.json` + run-state ack |
+| `fetch-view-data.rb` | View CSVs → signals manifest |
+| `discover-warehouse-columns.rb` / `probe-custom-sql-columns.rb` | Phase 2 real column ids; 404 → catalog sync, then Custom-SQL probe |
+| `find-prior-cache.rb` | Reuse cached discovery artifacts from prior runs |
+| `remap-wb-spec-to-dm-ids.rb` | Re-point a cached wb-spec at a re-POSTed DM's new ids |
+| `extract-calc-fields.rb` | Phase 1e calc fields (+ formulas) → `calc-fields.json` |
+| `validate-spec.rb` | DM/workbook spec validator (`--type`, `--dm-context`) |
+| `post-and-readback.rb` | POST + GET-back a spec; column-type guard, layout+control lint, same-workbook PUT discipline (exit 7 unless STOP-authorized / `--allow-manual-spec`) |
+| `lib/preflight_lint.rb` | MANDATORY pre-POST lint (T1/T2 grouping, C1–C3 control shapes) |
+| `put-layout.rb` | Apply layout XML to an existing workbook |
+| `auto-parity-plan.rb` / `verify-parity.rb` | Phase 6a plan + 6c diff (`--extract-mode` only for hasExtracts=true) |
+| `probe-equivalence.rb` | MANDATORY proof for any structural edit (join drop / collapse / filter rewrite) → `semantic-edits.json`; mismatch = FATAL; `--withdraw` for unapplied edits |
+| `derive-ground-truth.rb` → `run-ground-truth.rb` → `verify-ground-truth.rb` | Phase 6 tile-grain warehouse oracle → `ground-truth-plan.json` + per-tile `numeric_parity` |
+| `verify-anchors.rb` | Phase 6 measured value bar → `anchors-verdict.json` |
+| `assert-phase6-ran.rb` | **The conversion hard gate** — exit-code table: `refs/gates.md` |
+| `fidelity-loop.rb` | Phase 5g RCF mechanics (init/render/record/apply-patch/resolve/status) → `fidelity-ledger.json` |
+| `assert-run-state.rb` | Phase-chain ledger audit (`run-state.json`; `--skip-run-state "<reason>"`) |
+| `probe-controls.rb` | Runtime control flip test (gate 7b) → `probe-controls/probe-results.json` |
+| `cleanup-orphan-workbooks.rb` | Delete spec-iteration orphans; writes `cleanup-marker.json` |
+| `build-dashboard-layout.rb` | MANDATORY Phase 5d layout XML from zones + `wb-ids.json`; emits `layout-census.json` |
+| `build-story-pages.rb` | Story workbooks: one Sigma page per story point |
+| `export-chart-png.rb` | Phase 6d drill-down only — the primary gate is full-dashboard vs full-dashboard |
+| `pick-destination.rb` | Phase 0b destination list/create |
+| `find-or-pick-dm.rb` / `inspect-dm-shape.rb` | Phase 1.5 reuse scan → `dm-match.json`; 1.5b shape preflight → `dm-denorm-plan.json` |
+| `scan-customer-style.rb` | Phase 0c house-style signals |
+| `dev/phase-timer.sh` | Dev/profiling only — never in customer conversions |
+| `lib/layout.rb` | Layout-XML helpers |
+| `enhance-scan.rb` / `enhance-apply.rb` | Phase E (opt-in) scan + accept-only clone-first apply |
+
+## Full per-script detail
 
 | Script | Purpose |
 |---|---|
@@ -28,6 +86,7 @@ invoke one directly only when a STOP message tells you to.
 | `scripts/gap-scout.md` | **Phase 0a-scout:** subagent prompt + protocol for resolving ❌ Unhandled gaps. Main agent spawns one scout per gap via the Agent tool. |
 | `scripts/validate-sigma-formula.rb` | Scout primitive: POST a tiny test workbook with a candidate formula, read back column types, return JSON `{ status: ok|error }`. Auto-expands the DM element's columns onto the test master so candidate refs to real data resolve. |
 | `scripts/scout-validate-and-persist.rb` | Scout wrapper: call validate-sigma-formula, on success append the rule to `~/.tableau-to-sigma/learned-rules.yaml` (customer's HOME, never the skill repo), on failure write `~/.tableau-to-sigma/escalations/<ts>-<slug>.yaml` AND return an opt-in `escalate-gap.py` command (confirm-before-file). |
+| `scripts/sweep-run-artifacts.rb` | **Crash-recovery sweep (E7.1)** for probe/scout workbooks a crashed or killed run left in the customer org (per-script at_exit/ensure cleanup is the first line of defense; this is the backstop). Sources: the LOCAL probe registry — `<workdir>/probe-artifacts.jsonl` via `--workdir`, plus the `~/.tableau-to-sigma/` home registry (ids our own scripts recorded at creation time, before the first readback) — and, opt-in, `--folder-id <id>`: enumerate ONLY that folder's children, delete ONLY `type=workbook` (folders/workspaces hard-refused). NEVER pages the whole org's `/v2/files` (binding sigma:ops containment amendment). DRY-RUN by default — prints the plan and touches nothing; `--delete` acts; deleted documents land in Sigma's Trash, recoverable by the deleting user. Every outcome appends back to the source registry (`deleted`/`404`/`failed`) so re-runs converge. Exit 1 = ≥1 DELETE failed (re-run to retry). |
 | `scripts/escalate-gap.py` | Shared opt-in issue filer. Dry-run by default (drafts the issue + dedupes against open issues/beads); files only with `--yes`. Routes by gap category: converter→`sigma-data-model-manager`+`sigma-data-model-mcp` (mirrored), builder/skill→`sigma-migration-skills`. |
 | `scripts/learned-rules.rb` | Loader module: merges the repo-shipped starter pack (`learned/starter-rules.yaml` — live-verified rules from real runs, so no machine starts empty) with `~/.tableau-to-sigma/learned-rules.yaml` (user rules override starter rules on key collision). Customer-discovered rules apply BEFORE the built-in translators in `build-charts-from-signals.rb`; starter entries without a rewrite pattern are spec-guidance (surfaced by the CLI dump, mirrored in `refs/fidelity-recipes.md`, never blind-applied). |
 | `scripts/parse-twb-layout.rb` | Parse a `.twb` XML file into a per-dashboard zone list plus a sister `*-meta.json` (worksheets + shared_filters + parameters + column_aliases). Per chart zone surfaces: position (`x/y/w/h%`), `chart_kind`, `mark_class`, `geo_role`, `sort`, `filters` (with resolved column captions + member values + action-vs-value flag), `aggregations`, `channels`, `formats` (Tableau format strings → Sigma d3-format with paren-negative handling), `calculations`, `dual_axis` (synchronized-axes detection), `ref_marks` (reference lines/bands/trendlines), `filter_column_caption`. Detects Tableau **stories** (both `<story>` and storyboard-dashboard shapes): flags storyboard dashboards `is_story: true` and writes `story-plan.json` (story → ordered points with captions + captured sheets) — when present, run `build-story-pages.rb`. Bin calc columns surface `bin_size`/`bin_peg`. |

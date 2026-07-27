@@ -179,9 +179,9 @@ Use the dashboard image to understand:
 ruby scripts/parse-twb-layout.rb <WORK>/workbook-content.twb <WORK>/dashboard-layout.json
 ```
 
-It emits a per-dashboard zone list with `caption`, `view_ref`, `x/y/w/h` in percent, **and `chart_kind` extracted from each worksheet's `<mark>` element + Rows/Cols shelves** (`bar` / `line` / `pie` / `scatter` / `map-region` / `map-point` / `pivot-table` / `table` / `automatic` / `other`). For text-mark worksheets, the parser disambiguates `pivot-table` (dims on both shelves — Tableau crosstab) from flat `table` (dims on one shelf — detail list) via the `rows_shelf` / `cols_shelf` summary; `build-charts-from-signals.rb` honors this and emits `rowsBy` / `columnsBy` / `values` for crosstabs. This is more reliable than inferring chart type from the view CSV — the CSV headers can't distinguish bar-vs-pie or pivot-vs-flat-table. Map every zone in the output to a Sigma element using the tables in `refs/workbook-layout.md` (`Reading the .twb dashboard layout` section).
+It emits a per-dashboard zone list with `caption`, `view_ref`, `x/y/w/h` in percent, **and `chart_kind` extracted from each worksheet's `<mark>` element + Rows/Cols shelves** (`bar` / `line` / `pie` / `scatter` / `map-region` / `map-point` / `pivot-table` / `table` / `automatic` / `other`). For text-mark worksheets, the parser disambiguates `pivot-table` (dims on both shelves — Tableau crosstab) from flat `table` (dims on one shelf — detail list) via the `rows_shelf` / `cols_shelf` summary; `build-charts-from-signals.rb` honors this and emits `rowsBy` / `columnsBy` / `values` for crosstabs. This is more reliable than inferring chart type from the view CSV — the CSV headers can't distinguish bar-vs-pie or pivot-vs-flat-table. Map every zone in the output to a Sigma element using the tables in `refs/twb-zone-mapping.md` (split from workbook-layout.md).
 
-> **Maps:** if `parse-twb-layout.rb` emits `chart_kind: map-region` or `chart_kind: map-point` for any zone, do NOT build a bar chart. Use Sigma's `region-map` / `point-map` element kinds. The Tableau geographic role (`semantic-role` on the column) translates to Sigma's `regionType` via the table in `refs/workbook-layout.md`. Sigma's region types are US-only except for `country` — non-US state/county/ZIP data falls back to a sorted bar chart or, if lat/long is available, a `point-map`.
+> **Maps:** if `parse-twb-layout.rb` emits `chart_kind: map-region` or `chart_kind: map-point` for any zone, do NOT build a bar chart. Use Sigma's `region-map` / `point-map` element kinds. The Tableau geographic role (`semantic-role` on the column) translates to Sigma's `regionType` via the table in `refs/chart-patterns.md`. Sigma's region types are US-only except for `country` — non-US state/county/ZIP data falls back to a sorted bar chart or, if lat/long is available, a `point-map`.
 
 > **`chart_kind: automatic`:** Tableau's "Automatic" mark picks a default for the encodings. It usually renders as a bar but is not deterministic. When you see `automatic`, fetch the dashboard PNG and look at that specific tile to decide the Sigma kind.
 
@@ -196,7 +196,7 @@ Sigma spec supports: `bar-chart`, `line-chart`, `area-chart`, `combo-chart`, `sc
 
 Does **not** support via the spec API: bullet chart, gantt.
 
-**Maps are fully spec-supported.** Use `region-map` for choropleths (US state / county / ZIP / CBSA / country fills) and `point-map` for lat/long bubble or symbol maps. See `refs/workbook-layout.md` "Map elements" for the field shape, the exact set of valid `regionType` values, and the color-channel rules.
+**Maps are fully spec-supported.** Use `region-map` for choropleths (US state / county / ZIP / CBSA / country fills) and `point-map` for lat/long bubble or symbol maps. See `refs/chart-patterns.md` "Map elements" for the field shape, the exact set of valid `regionType` values, and the color-channel rules.
 
 **Trellis (small multiples) is supported in Sigma but configured UI-only.** Build the chart with the right dimensions via spec, then trellis it manually post-publish.
 
@@ -212,7 +212,7 @@ Does **not** support via the spec API: bullet chart, gantt.
 > done.
 
 Control types supported: `list`, `date-range`, `text`, `text-area`, `segmented`, `number`, `number-range`, `slider`, `range-slider`, `top-n`.
-See `refs/workbook-layout.md` for full control element spec patterns.
+See `refs/element-kinds.md` for full control element spec patterns.
 
 ### 1e. Discover calculated fields (Metadata API + .twb fallback)
 
@@ -437,5 +437,5 @@ orchestrator directly** — paste the whole URL as `--workbook "<url>"` and
 `migrate-tableau.rb` resolves the workbook via the REST `contentUrl:eq:` filter
 (`Tableau.find_workbook_by_content_url`). Do NOT hand the slug to
 `--workbook <name>`: a workbook's display Name routinely diverges from its
-contentUrl slug, so the name lookup misses (three independent field runs each
-rediscovered this the hard way).
+contentUrl slug ("High Risk Bets" vs `HighRiskBets`), so the name lookup
+misses (three independent field runs each rediscovered this the hard way).

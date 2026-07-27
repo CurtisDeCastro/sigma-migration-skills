@@ -272,7 +272,7 @@ POST-verified. Use them when the shape-identity gate (9b) fails a tile.
    (see refs/window-functions.md; a grand-total-only mapping mis-normalizes every cell).
 
 Also: title art / stylized typography ship as **data-URI image elements** (see
-refs/workbook-layout.md "Image element" — extraction one-liner included; background layering
+refs/element-kinds.md "Image element" — extraction one-liner included; background layering
 is impossible, composite instead), and element titles that leak worksheet names ("Sheet 9")
 must be renamed to the source's visible caption — the source shows NO inner titles on most
 infographic tiles, so match the element name to the section header or the tile's on-canvas title.

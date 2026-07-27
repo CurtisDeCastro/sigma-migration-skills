@@ -1,5 +1,44 @@
 <!-- Part of the tableau-to-sigma workflow — spine: ../SKILL.md. Phase 0 — scope: gap scan, destination, mode, cost -->
 
+## Step 0.1 — front door: resolve the connection once (relocated from SKILL.md — E9 diet)
+
+Resolve the Sigma warehouse connection a SINGLE time so no phase free-searches
+`/v2/connections` (the token sink):
+
+```bash
+ruby scripts/intake.rb --workdir <WORK> --tool tableau-to-sigma --mode live \
+  --source "<workbook name or LUID>" \
+  [--connection <id>] [--name <connection-name-substring>] \
+  [--plan <assessment>/migration-plan.json] [--triage-override "<who>: <why>"]
+```
+
+It caches `<WORK>/connection.json` (the orchestrator reads it when
+`--connection` is omitted — point `--out` at the same `<WORK>`) and writes
+`intake.json`. Precedence: explicit `--connection` → cached →
+`SIGMA_CONNECTION_ID` env → list once; with multiple connections it asks — it
+never guesses. **Many connections?** Pass `--rank-workbook-id <LUID>`: intake
+fingerprints the workbook's warehouse (type+host, no `.twb` download) and a
+unique match auto-resolves, else it writes ranked `connection-candidates.json`
+and asks (`scripts/rank-connections.rb` standalone; `--rank-twb <path>`
+db-name tie-break). Never grep the `.twb` by hand to guess among connections.
+Credentials for hand-driven calls: `refs/environment.md` §Credentials.
+
+**Front-door triage (always pass `--source` — it keys this).** When an
+assessment `migration-plan.json` is present (`--plan PATH`, or auto-found at
+`<WORK>/migration-plan.json`), intake looks this run's workbook up BEFORE any
+API call burns:
+
+- **retire-tagged** (zero usage) → **REFUSE, exit 7** — the fastest migration
+  is the one you don't do. Convert anyway ONLY with an attributable
+  `--triage-override "<who>: <why>"` (or `SIGMA_TRIAGE_OVERRIDE`); the
+  override is recorded to `<WORK>/offramps.jsonl`, never a silent proceed.
+- **ranked low / blocked / consolidation-member** → WARN with the plan's
+  value/cost evidence, then proceed (no stop).
+- **no plan anywhere** → one offer line, never a block. Malformed plan,
+  missing or ambiguous `--source`, or an unassessed workbook → one note,
+  triage skipped — the only stop in this guard is a matched retire tag
+  (ratified ≤5% false-stop budget). Verdicts land on `intake.json` `triage`.
+
 ## Phase 0a — Scan the workbook for feature gaps (MANDATORY)
 
 Run the gap scanner against the customer's `.twb` *before* anything else. It

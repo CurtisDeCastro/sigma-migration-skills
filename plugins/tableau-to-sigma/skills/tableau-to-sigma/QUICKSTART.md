@@ -314,7 +314,7 @@ Duration: 15
 
 With the DM resolved (reused or freshly built), Claude composes the workbook spec. For a single-dashboard URL the default is **dashboard-fidelity mode** — every Tableau tile maps to a Sigma element, positioned in the same grid.
 
-The spec follows three mandatory rules — surfaced loudly in the skill's SKILL.md and the spec validator:
+The spec follows three mandatory rules — surfaced loudly in the skill's phase-5 reference (`refs/phase-5-workbook.md`) and the spec validator:
 
 <ul>
   <li><strong>Two pages, always.</strong> A hidden <code>Data</code> page holds the master table (sourced from the DM); a content page holds the charts, controls, and text. Co-locating master + charts puts a giant table on the dashboard the customer has to delete.</li>
@@ -400,7 +400,7 @@ and drill switchers, null-label/title/freshness polish). The scan stops with exi
 `--enhance-accept all-low-risk` (or an explicit id list). Accepted items land on a
 **clone** named "<name> — Enhanced" — the parity-verified workbook is never touched —
 and every applied item is gated by an untouched-element spot-check that auto-reverts
-on any shift. See the SKILL.md "Phase E (opt-in) — Enhance" section.
+on any shift. See the skill's `refs/phase-e-enhance.md` (Phase E row in the SKILL.md phase table).
 
 ![Footer](assets/sigma_footer.png)
 <!-- END OF SECTION -->

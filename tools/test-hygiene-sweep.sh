@@ -201,6 +201,37 @@ rm -rf "${blocked}-workdir"
 run_sweep
 [ "$RC" -eq 0 ]; check $? "path pass is clean again after the renames (got $RC)"
 
+part_boundary "Part D3"
+echo "Part D3 — run-state registry litter under corpus/fixture trees (E7.1)"
+# The LOCAL probe registry must never enter a corpus or fixture tree. The
+# planted path is assembled at runtime so this test file never contains the
+# blocked path literal (the real repo's sweep scans this file too); the
+# registry CONTENT is neutral by design — only the path pass can see it.
+regbase="probe-artifacts"
+mkdir -p corpus/wb1
+printf '{"id":"wb-zz9probe1"}\n' > "corpus/wb1/${regbase}.jsonl"
+git add -f "corpus/wb1/${regbase}.jsonl" && git commit -q --no-verify -m regplant
+run_sweep
+[ "$RC" -eq 1 ]; check $? "tracked corpus registry litter fails the sweep (got $RC)"
+grep -q "PATHS" "$TMP/err"; check $? "registry-litter hit comes from the path pass"
+git rm -q "corpus/wb1/${regbase}.jsonl" && git commit -q --no-verify -m unregplant
+rmdir corpus/wb1 corpus 2>/dev/null
+mkdir -p fixtures/case-a
+printf '{"id":"wb-zz9probe2"}\n' > "fixtures/case-a/${regbase}.jsonl"
+run_sweep
+[ "$RC" -eq 1 ]; check $? "untracked fixture-tree registry litter fails too (got $RC)"
+rm -rf fixtures
+# No-false-trip side: a workdir-homed registry OUTSIDE corpus/fixture trees is
+# legitimate local state (gitignored in the real repo) — the path guard must
+# not fire on the filename alone.
+mkdir -p workdir-demo
+printf '{"id":"wb-zz9probe3"}\n' > "workdir-demo/${regbase}.jsonl"
+run_sweep
+[ "$RC" -eq 0 ]; check $? "registry outside corpus/fixture trees does NOT trip (got $RC)"
+rm -rf workdir-demo
+run_sweep
+[ "$RC" -eq 0 ]; check $? "clean again with the planted registries gone (got $RC)"
+
 part_boundary "Part E"
 echo "Part E — UTF-16LE .twb is swept via the encoding-aware pass"
 { printf '\377\376'; printf '<workbook name="%s"/>\n' "$blocked" | iconv -f UTF-8 -t UTF-16LE; } > fixture-utf16.twb

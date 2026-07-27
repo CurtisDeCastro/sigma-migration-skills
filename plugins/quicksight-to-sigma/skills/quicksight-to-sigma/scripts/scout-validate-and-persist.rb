@@ -105,6 +105,10 @@ cmd = ['ruby', VALIDATE,
        '--label',             "scout:#{opts[:feature]}"]
 cmd << '--folder-id'  << opts[:folder_id]  if opts[:folder_id]
 cmd << '--chart-kind' << opts[:chart_kind] if opts[:chart_kind]
+# E7.1: home the probe registry in the conversion workdir so per-run accounting
+# (and a crash-recovery sweep) sees this scout's workbook; workdir-less runs
+# fall back to the home registry — still sweepable.
+cmd << '--workdir'    << opts[:workdir]    if opts[:workdir]
 
 stdout, stderr, status = Open3.capture3(*cmd)
 result = (JSON.parse(stdout) rescue { 'status' => 'error', 'raw' => stdout, 'stderr' => stderr })

@@ -12,7 +12,9 @@ creds from env vars, run the doctor, write the bootstrap sentinel):
 
 It never requires admin (user-scoped winget/scoop on Windows; brew/rbenv/fnm
 version-manager activation elsewhere; `pip --user` for Python deps), never
-prompts (no-TTY-safe), and never echoes credential values. `intake.rb` and
+prompts (no-TTY-safe), and never echoes credential values. Node is pinned to
+22 LTS; the PATH it activates persists to `~/.sigma-migration/path.sh` (bash)
+/ the USER PATH (Windows), so later shells inherit it. `intake.rb` and
 `migrate-tableau.rb` refuse to start until the bootstrap sentinel + a passing
 `doctor.json` exist — run it once per machine, before anything else.
 
@@ -197,3 +199,53 @@ anyway — see the SKILL.md prerequisites rule).
 > Windows the only setup is: a real Python (`py -3`), Ruby on PATH, and Node. Tokens
 > are minted in-process by the orchestrator (bash is only needed for hand-driven
 > `.sh` helpers — and the Python twins cover those on Windows too).
+
+## Credentials (relocated from SKILL.md — E9 diet)
+
+> **⛔ NEVER hand-roll a signin `curl` — for Sigma OR Tableau.** Managed
+> machines' permission classifiers block secret-bearing raw `curl`, and
+> `curl -sf` hides the failure (a field session lost ~15 minutes to it). The
+> scripts are the sanctioned AND classifier-friendly route: `setup.rb` /
+> `setup-tableau.rb` once, in-process token minting everywhere, and
+> `get_token.py` / `get-tableau-token.py` for hand-driven REST.
+
+### Sigma credentials
+
+`ruby scripts/setup.rb` once (bootstrap runs it `--from-env` when the vars are
+exported). Writes `~/.claude/settings.json` (Claude Code auto-loads) and
+`~/.sigma-migration/env` (neutral, auto-sourced by the scripts under any
+agent). Required: `SIGMA_BASE_URL`, `SIGMA_CLIENT_ID`, `SIGMA_CLIENT_SECRET`.
+Tokens live ~1h — scripts auto-refresh; for hand-driven calls,
+`python scripts/get_token.py --workdir <WORK>` (any shell). Shell footguns
+(subshell `eval`, inline-python quoting): `refs/troubleshooting.md` §Shell.
+
+> **Credentials are shell-neutral.** The Ruby/Python scripts mint Sigma tokens
+> themselves from `SIGMA_CLIENT_ID`/`SIGMA_CLIENT_SECRET` (env or
+> `~/.sigma-migration/env`) and auto-refresh — no `eval` step, any shell. For a
+> hand-driven `curl`, mint explicitly: `python scripts/get_token.py --workdir
+> <WORK>` writes `<WORK>/auth.json` (0600), read automatically by the scripts.
+> (`eval "$(scripts/get-token.sh)"` still works in bash.)
+
+### Tableau access — two modes
+
+**Prefer the API/PAT path** — measured 61.8s serial → **13.7–18.9s** pooled on
+the 7-view reference; the MCP is the **no-PAT fallback only** (each MCP fetch
+is a separate agent turn).
+
+| Mode | When | Setup |
+|---|---|---|
+| **PAT (REST)** — preferred | A Tableau PAT is available; only path to `.twb` content | `ruby scripts/setup-tableau.rb` once |
+| **MCP** — fallback | No PAT, `mcp__tableau__*` tools loaded | None — host handles auth |
+
+**PAT mode:** `migrate-tableau.rb` needs no token step (in-process mint, works
+in PowerShell). Hand-driven only: `eval "$(scripts/get-tableau-token.sh)"`
+(bash) or `python scripts/get-tableau-token.py --print-token`, then
+`ruby scripts/tableau-discover.rb --workbook-id <luid> --out <WORK> [--pool N]`
+→ same artifacts as MCP-driven Phase 1 in one run (workbook JSON, `.twb`,
+`ds-metadata.json`, `graphql-fields.json`, `views/*.csv`, dashboard PNG,
+`timings.json`). `--datasource-name`/`--datasource-luid` optional (auto-detect;
+`--no-auto-ds` disables; LUID must be the full UUID). Pool mechanics + why 5:
+`refs/tableau-rest.md` §fetch pool. Endpoint inventory: `refs/tableau-rest.md`.
+
+> **One signin attempt only.** Tableau Cloud invalidates a PAT after 4 failed
+> signins. `get-tableau-token.sh` runs exactly once; never wrap it in a retry loop.
