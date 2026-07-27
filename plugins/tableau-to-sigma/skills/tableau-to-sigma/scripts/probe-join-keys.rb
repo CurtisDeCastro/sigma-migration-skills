@@ -146,7 +146,10 @@ end
 
 # Run one SQL statement through a one-shot probe workbook (the established
 # warehouse-SQL seam — see probe-custom-sql-columns.rb) and return CSV rows.
-def sigma_sql_rows(conn_id, folder_id, sql, columns)
+# The created id is registered in the local probe registry BEFORE the first
+# export (E7.1) and the ensure-DELETE appends the matching cleaned record, so
+# a kill mid-export leaves a sweepable trace instead of silent litter.
+def sigma_sql_rows(conn_id, folder_id, sql, columns, workdir: nil)
   spec = {
     'name' => "_probe_joinkeys_#{SecureRandom.hex(4)}",
     'schemaVersion' => 1,
@@ -170,6 +173,8 @@ def sigma_sql_rows(conn_id, folder_id, sql, columns)
   end
   wb_id = r.is_a?(Hash) ? r['workbookId'] : nil
   raise "probe workbook POST failed: #{r.inspect[0, 160]}" unless wb_id
+  ProbeRegistry.created(wb_id, name: spec['name'], workdir: workdir,
+                        script: 'probe-join-keys.rb')
   begin
     exp = Sigma.request(:post, "/v2/workbooks/#{wb_id}/export",
                         body: JSON.generate('elementId' => 'probe', 'format' => { 'type' => 'csv' }))
@@ -188,16 +193,22 @@ def sigma_sql_rows(conn_id, folder_id, sql, columns)
     raise 'export did not complete in 30s' unless csv
     CSV.parse(csv, headers: true)
   ensure
-    Sigma.request(:delete, "/v2/files/#{wb_id}") rescue nil
+    begin
+      Sigma.request(:delete, "/v2/files/#{wb_id}")
+      ProbeRegistry.cleaned(wb_id, workdir: workdir, via: 'ensure')
+    rescue StandardError => e
+      ProbeRegistry.cleaned(wb_id, workdir: workdir, via: 'ensure',
+                            outcome: e.message.lines.first.to_s =~ /\b404\b/ ? '404' : 'failed')
+    end
   end
 end
 
-def live_result(conn_id, folder_id, entry)
+def live_result(conn_id, folder_id, entry, workdir: nil)
   table = probe_target(entry)
   keys  = entry['probe_keys'] || entry['keys']
   return { 'error' => 'no right_table FQN (or right_sql) on the entry — resolve the warehouse table and re-derive' } unless table
-  dup_rows = sigma_sql_rows(conn_id, folder_id, dup_sql(table, keys), keys + ['C'])
-  tot_rows = sigma_sql_rows(conn_id, folder_id, totals_sql(table, keys), %w[TOTAL_ROWS DISTINCT_KEYS])
+  dup_rows = sigma_sql_rows(conn_id, folder_id, dup_sql(table, keys), keys + ['C'], workdir: workdir)
+  tot_rows = sigma_sql_rows(conn_id, folder_id, totals_sql(table, keys), %w[TOTAL_ROWS DISTINCT_KEYS], workdir: workdir)
   tot = tot_rows.first
   {
     'total'      => tot && tot['TOTAL_ROWS'].to_i,
@@ -221,6 +232,7 @@ unless opts[:resolve]
   if opts[:conn]
     $LOAD_PATH.unshift File.expand_path('lib', __dir__)
     require 'sigma_rest'
+    require 'probe_registry'
   end
   entries.each_with_index do |e, i|
     next unless %w[unprobed error].include?(e['status'].to_s)
@@ -234,7 +246,7 @@ unless opts[:resolve]
     tgt = probe_target(e) || '<right_table>'
     e['probe_sql'] = { 'duplicates' => dup_sql(tgt, keys),
                        'totals'     => totals_sql(tgt, keys) }
-    res = opts[:fixture] ? fixture_result(opts[:fixture], i) : live_result(opts[:conn], opts[:folder], e)
+    res = opts[:fixture] ? fixture_result(opts[:fixture], i) : live_result(opts[:conn], opts[:folder], e, workdir: opts[:workdir])
     e['probed_at'] = now_utc
     if res['error']
       e['status'] = 'error'

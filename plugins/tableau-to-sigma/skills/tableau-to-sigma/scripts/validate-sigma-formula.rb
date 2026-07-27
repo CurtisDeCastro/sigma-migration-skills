@@ -24,15 +24,26 @@
 #          "error_columns": [{ "label": "...", "err": {...} }],
 #          "spec_used": {...} }
 #
-# Env: requires SIGMA_BASE_URL, SIGMA_CLIENT_ID, SIGMA_CLIENT_SECRET
-# (the same as post-and-readback.rb)
+# Env: SIGMA_BASE_URL + SIGMA_CLIENT_ID/SIGMA_CLIENT_SECRET (or a live
+# SIGMA_API_TOKEN) — auth + retry now live in lib/sigma_rest (E7.1 port off
+# raw Net::HTTP so the SIGMA_STUB test seam applies here too).
+#
+# Cleanup contract (PLAN-v4 E7.1): the workbook id is REGISTERED in the local
+# probe registry (<workdir>/probe-artifacts.jsonl via --workdir, else
+# ~/.tableau-to-sigma/probe-artifacts.jsonl) immediately after the POST
+# response parses — BEFORE the first readback — and the DELETE is armed via
+# at_exit at the same point, so a crash anywhere between POST and verdict can
+# no longer orphan the scout workbook (the old shape deleted only on the
+# success path). --keep-workbook still keeps it (and records nothing as
+# cleaned); a process kill is covered by scripts/sweep-run-artifacts.rb
+# reading the registry.
 
-require 'net/http'
-require 'uri'
 require 'json'
-require 'yaml'
-require 'base64'
 require 'optparse'
+
+$LOAD_PATH.unshift File.expand_path('lib', __dir__)
+require 'sigma_rest'
+require 'probe_registry'
 
 opts = {
   chart_kind: 'table',
@@ -45,37 +56,10 @@ OptionParser.new do |p|
   p.on('--folder-id ID')          { |v| opts[:folder_id] = v }
   p.on('--chart-kind K')          { |v| opts[:chart_kind] = v }
   p.on('--label L')               { |v| opts[:label] = v }
+  p.on('--workdir DIR', 'conversion workdir — homes the probe-artifact registry') { |v| opts[:workdir] = v }
   p.on('--keep-workbook')         { opts[:keep] = true }
 end.parse!
 %i[formula dm_id el_id].each { |k| abort("missing --#{k.to_s.tr('_','-')}") unless opts[k] }
-
-BASE = ENV.fetch('SIGMA_BASE_URL')
-CID  = ENV.fetch('SIGMA_CLIENT_ID')
-CSEC = ENV.fetch('SIGMA_CLIENT_SECRET')
-
-# --- Auth -----------------------------------------------------------------
-def get_token
-  uri = URI("#{BASE}/v2/auth/token")
-  req = Net::HTTP::Post.new(uri)
-  req['Authorization'] = "Basic #{Base64.strict_encode64("#{CID}:#{CSEC}")}"
-  req['Content-Type']  = 'application/x-www-form-urlencoded'
-  req.body = 'grant_type=client_credentials'
-  resp = Net::HTTP.start(uri.host, uri.port, use_ssl: true) { |h| h.request(req) }
-  JSON.parse(resp.body).fetch('access_token')
-end
-BASE; TOK = get_token
-
-def http(method, path, body: nil, accept_json: true)
-  uri = URI("#{BASE}#{path}")
-  req = case method
-        when :post   then r = Net::HTTP::Post.new(uri); r.body = body; r['Content-Type'] = 'application/json'; r
-        when :get    then Net::HTTP::Get.new(uri)
-        when :delete then Net::HTTP::Delete.new(uri)
-        end
-  req['Authorization'] = "Bearer #{TOK}"
-  req['Accept']        = 'application/json' if accept_json
-  Net::HTTP.start(uri.host, uri.port, use_ssl: true) { |h| h.request(req) }
-end
 
 # --- Build the test spec ---------------------------------------------------
 formula = opts[:formula]
@@ -91,8 +75,12 @@ label   = opts[:label] || 'scout-test-col'
 # data columns (e.g., `[Master/Gross Revenue]`) resolve cleanly. Without this,
 # the test master only exposes a synthetic PassThrough column and any candidate
 # touching real data fails with a misleading "dependency not found" error.
-dm_spec_resp = http(:get, "/v2/dataModels/#{opts[:dm_id]}/spec")
-dm_spec      = JSON.parse(dm_spec_resp.body) rescue {}
+dm_spec = begin
+  Sigma.request(:get, "/v2/dataModels/#{opts[:dm_id]}/spec")
+rescue StandardError
+  {}
+end
+dm_spec = {} unless dm_spec.is_a?(Hash)
 dm_element   = (dm_spec['pages'] || []).flat_map { |p| p['elements'] || [] }
                                        .find { |e| e['id'] == opts[:el_id] }
 dm_element_name = dm_element && dm_element['name']
@@ -165,9 +153,11 @@ spec = {
 spec['folderId'] = opts[:folder_id] if opts[:folder_id]
 
 # --- POST + readback -------------------------------------------------------
-resp = http(:post, '/v2/workbooks/spec', body: JSON.generate(spec))
-parsed = (YAML.safe_load(resp.body, permitted_classes: [Date, Time]) rescue nil)
-parsed ||= (JSON.parse(resp.body) rescue { 'raw' => resp.body })
+parsed = begin
+  Sigma.request(:post, '/v2/workbooks/spec', body: JSON.generate(spec))
+rescue StandardError => e
+  { 'raw' => e.message }
+end
 
 wb_id = parsed.is_a?(Hash) && parsed['workbookId']
 unless wb_id
@@ -181,9 +171,32 @@ unless wb_id
   exit 1
 end
 
+# The workbook now exists in the customer org: register it BEFORE the first
+# readback and arm the DELETE via at_exit, so ANY exit path from here on —
+# readback raise, non-JSON body, later abort — still cleans up (E7.1). The
+# state hash keeps the delete idempotent (at_exit fires on the success path
+# too, after the explicit cleanup below has already run).
+cleanup = { 'done' => false, 'ok' => false }
+ProbeRegistry.created(wb_id, name: spec['name'], workdir: opts[:workdir],
+                      script: 'validate-sigma-formula.rb')
+delete_probe = lambda do |via|
+  next if cleanup['done']
+  cleanup['done'] = true
+  begin
+    Sigma.request(:delete, "/v2/files/#{wb_id}")
+    cleanup['ok'] = true
+    ProbeRegistry.cleaned(wb_id, workdir: opts[:workdir], via: via)
+  rescue StandardError => e
+    outcome = e.message.lines.first.to_s =~ /\b404\b/ ? '404' : 'failed'
+    cleanup['ok'] = true if outcome == '404' # already gone = cleaned
+    ProbeRegistry.cleaned(wb_id, workdir: opts[:workdir], via: via, outcome: outcome)
+  end
+end
+at_exit { delete_probe.call('at_exit') unless opts[:keep] }
+
 # Walk both elements; we mostly care about the test element
-cols_resp = http(:get, "/v2/workbooks/#{wb_id}/elements/el-scout-test/columns")
-cols_data = JSON.parse(cols_resp.body)
+cols_data = Sigma.request(:get, "/v2/workbooks/#{wb_id}/elements/el-scout-test/columns")
+cols_data = JSON.parse(cols_data) if cols_data.is_a?(String) # tolerate a raw body
 entries = cols_data['entries'] || []
 error_cols = entries.select do |c|
   t = c['type']
@@ -196,11 +209,8 @@ status = error_cols.empty? ? 'ok' : 'error'
 # Clean up the throwaway test workbook (unless --keep-workbook). The scout only
 # needs the column-type verdict; leaving the workbook behind orphans one file per
 # attempt in the customer's folder.
-cleaned = false
-unless opts[:keep]
-  del = http(:delete, "/v2/files/#{wb_id}")
-  cleaned = del.code.to_i.between?(200, 299)
-end
+delete_probe.call('ensure') unless opts[:keep]
+cleaned = cleanup['ok']
 
 puts JSON.pretty_generate({
   'status'        => status,

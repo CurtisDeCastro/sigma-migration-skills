@@ -35,6 +35,7 @@ require 'uri'
 
 $LOAD_PATH.unshift File.expand_path('lib', __dir__)
 require 'sigma_rest'
+require 'probe_registry'
 
 def jget(path); Sigma.request(:get, path); end
 
@@ -155,6 +156,9 @@ resp = Sigma.request(:post, '/v2/workbooks/spec', body: JSON.generate(spec),
                      content_type: 'application/json', accept: 'application/json')
 wb = resp['workbookId'] || resp['id']
 abort "CREATE failed: #{resp.inspect}" unless wb
+# Dev probe: no workdir → the id lands in the ~/.tableau-to-sigma registry
+# (E7.1) before any export, so a kill here is sweepable.
+ProbeRegistry.created(wb, name: spec['name'], script: 'probe-control-formula.rb')
 puts "created throwaway workbook #{wb}"
 
 ok = true
@@ -175,7 +179,13 @@ ensure
   if ENV['KEEP'] == '1'
     puts "\nkept workbook #{wb}"
   else
-    Sigma.request(:delete, "/v2/files/#{wb}", accept: 'application/json') rescue nil
+    begin
+      Sigma.request(:delete, "/v2/files/#{wb}", accept: 'application/json')
+      ProbeRegistry.cleaned(wb, via: 'ensure')
+    rescue StandardError => e
+      ProbeRegistry.cleaned(wb, via: 'ensure',
+                            outcome: e.message.lines.first.to_s =~ /\b404\b/ ? '404' : 'failed')
+    end
     puts "\ndeleted throwaway workbook #{wb}"
   end
 end

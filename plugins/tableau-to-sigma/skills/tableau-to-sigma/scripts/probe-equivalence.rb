@@ -230,7 +230,7 @@ end
 # warehouse-SQL seam — see probe-join-keys.rb / run-ground-truth.rb) and
 # return parsed CSV rows. `deadline` bounds the export poll so a stuck query
 # cannot outlive the run's total budget (bounded-exports convention).
-def sigma_sql_rows(conn_id, folder_id, sql, columns, deadline)
+def sigma_sql_rows(conn_id, folder_id, sql, columns, deadline, workdir: nil)
   spec = {
     'name' => "_probe_equivalence_#{SecureRandom.hex(4)}",
     'schemaVersion' => 1,
@@ -248,6 +248,8 @@ def sigma_sql_rows(conn_id, folder_id, sql, columns, deadline)
   end
   wb_id = r.is_a?(Hash) ? r['workbookId'] : nil
   raise "probe workbook POST failed: #{r.inspect[0, 160]}" unless wb_id
+  ProbeRegistry.created(wb_id, name: spec['name'], workdir: workdir,
+                        script: 'probe-equivalence.rb')
   begin
     exp = Sigma.request(:post, "/v2/workbooks/#{wb_id}/export",
                         body: JSON.generate('elementId' => 'probe', 'format' => { 'type' => 'csv' }))
@@ -266,13 +268,19 @@ def sigma_sql_rows(conn_id, folder_id, sql, columns, deadline)
     end
     CSV.parse(csv, headers: true)
   ensure
-    Sigma.request(:delete, "/v2/files/#{wb_id}") rescue nil
+    begin
+      Sigma.request(:delete, "/v2/files/#{wb_id}")
+      ProbeRegistry.cleaned(wb_id, workdir: workdir, via: 'ensure')
+    rescue StandardError => e
+      ProbeRegistry.cleaned(wb_id, workdir: workdir, via: 'ensure',
+                            outcome: e.message.lines.first.to_s =~ /\b404\b/ ? '404' : 'failed')
+    end
   end
 end
 
-def live_result(conn_id, folder_id, sql, measures, deadline)
+def live_result(conn_id, folder_id, sql, measures, deadline, workdir: nil)
   cols = EquivalenceProbe.probe_columns(measures)
-  rows = sigma_sql_rows(conn_id, folder_id, sql, cols, deadline)
+  rows = sigma_sql_rows(conn_id, folder_id, sql, cols, deadline, workdir: workdir)
   row = rows.first
   raise 'probe returned no rows' unless row
   sums = {}
@@ -285,6 +293,7 @@ end
 if opts[:conn]
   $LOAD_PATH.unshift File.expand_path('lib', __dir__)
   require 'sigma_rest'
+  require 'probe_registry'
 end
 
 t0 = Time.now
@@ -300,7 +309,7 @@ errors = {}
         elsif Time.now > deadline
           { 'error' => "total --timeout #{opts[:timeout]}s expired before the #{side} side ran" }
         else
-          live_result(opts[:conn], opts[:folder], probe[side], measures, deadline)
+          live_result(opts[:conn], opts[:folder], probe[side], measures, deadline, workdir: opts[:dir])
         end
   elapsed = (Time.now - ts).round(1)
   if raw['error']

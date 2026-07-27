@@ -40,6 +40,7 @@ require 'json'
 require 'csv'
 require 'optparse'
 require 'securerandom'
+require_relative 'lib/probe_registry'
 
 opts = { dialect: 'snowflake' }
 OptionParser.new do |p|
@@ -47,6 +48,7 @@ OptionParser.new do |p|
   p.on('--table-path PATH')   { |v| opts[:path]    = v }
   p.on('--dialect D')         { |v| opts[:dialect] = v }
   p.on('--folder-id ID')      { |v| opts[:folder]  = v }
+  p.on('--workdir DIR', 'conversion workdir — homes the probe-artifact registry') { |v| opts[:workdir] = v }
   p.on('--out PATH')          { |v| opts[:out]     = v }
 end.parse!
 abort 'missing --connection-id' unless opts[:conn]
@@ -133,8 +135,19 @@ unless wb_id && res.is_a?(Net::HTTPSuccess)
 end
 warn "probe workbook created: #{wb_id}"
 
+# Register BEFORE the first export/readback (E7.1): a kill between here and
+# the at_exit leaves a registry line sweep-run-artifacts.rb can act on.
+ProbeRegistry.created(wb_id, name: probe_name, workdir: opts[:workdir],
+                      script: 'probe-custom-sql-columns.rb')
+
 cleanup = lambda do
-  http(:delete, "/v2/files/#{wb_id}")
+  res = http(:delete, "/v2/files/#{wb_id}")
+  code = res.respond_to?(:code) ? res.code.to_i : 0
+  outcome = if (200..299).cover?(code) then 'deleted'
+            elsif code == 404 then '404'
+            else 'failed'
+            end
+  ProbeRegistry.cleaned(wb_id, workdir: opts[:workdir], via: 'at_exit', outcome: outcome)
   warn "probe workbook deleted: #{wb_id}"
 end
 
