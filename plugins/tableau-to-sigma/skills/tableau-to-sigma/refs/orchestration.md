@@ -207,6 +207,46 @@ handle telemetry consent once at the end — not conversion work of its own.
 >    → layout → parity, and stops at exit 12 to collect actuals + `--finalize`. **A conversion
 >    is not done until `assert-phase6-ran.rb` exits 0**, on this path too.
 
+## Single-invocation flow (wave 1 — how the stops compose now)
+
+The gates are unchanged; the STOPS batch (speed review #2). One driving
+pattern per run:
+
+1. Launch pass 1 in the background (`--quiet` keeps the poll payload small —
+   refs/performance.md). Phase 1 is interleaved: the Tableau-side and
+   Sigma-side lanes join before anything consumes discovery output.
+2. **ONE pre-build checkpoint** consolidates gap review (exit 11), decisions
+   (exit 10), telemetry consent, and the WARN-only cost advisory into a single
+   stop + a single artifact (`<WORK>/open-questions.json`) + a single re-entry
+   (`--answers '<json>' [--force]` or `--yes`). Tagged entries embed their
+   computed `targeted_key` — copy it verbatim into `--answers` (targeted wins
+   over the bulk class id; unknown keys draw a WARN). Resolved answers are
+   ledgered in `<WORK>/decisions.jsonl`.
+3. **Phase-1d dashboard-read is a WAIT-GATE at the DM-POST barrier**: do the
+   PNG read while the orchestrator waits (`SIGMA_PNG_READ_TIMEOUT_S`, default
+   480s) and the run continues in-process; the deadline is exit 18 naming the
+   missing piece. Headless/CI callers with no driving agent to write the read
+   should set `SIGMA_PNG_READ_TIMEOUT_S=0` — the gate then fails fast (exit
+   18) instead of blocking the full bound; the wait banner's first line names
+   this switch. A `png-read.json` older than this run's discovery fetch is
+   set aside as `.stale` — never silently consumed.
+4. At the pass-1 tail, when the artifacts prove the agent-mediated actuals
+   list is EMPTY (all exportable charts machine-collected, no pivot grids, no
+   markers, no per-tile visual sidecar) AND the agent-side gate obligations
+   are already discharged (visual verdict recorded on `parity-final.json` —
+   gate 8b, waived by `--fast`; staged RCF ledger resolved — gate 8d),
+   `--finalize` chains **in the same invocation**; otherwise exit 12 is
+   unchanged. Cold runs never chain — the verdict only exists on re-entry
+   workdirs, so a cold chain would predictably stop at gate 8b and pre-spend
+   a finalize loop-log attempt. `SIGMA_NO_CHAIN_FINALIZE=1` opts out.
+5. **E9.6 — mission scope threads end-to-end**: a `mission.json` STATED scope
+   (`scope.dashboards`, or a single-view `/#/views/<wb>/<view>` URL in
+   `scope.value`) maps onto `--dashboard` and constrains the parse, the calc
+   working set, the gap/open-questions surface, and build planning. Explicit
+   `--dashboard` flags override (narrowing below the mission is recorded in
+   `decisions.jsonl`); a scoped name matching nothing is a named STOP (exit
+   19) listing the workbook's dashboards; unscoped missions are unchanged.
+
 ## Still manual by design (the orchestrator stops and tells you)
 
 **Still manual by design (the orchestrator stops and tells you):**
@@ -216,11 +256,14 @@ handle telemetry consent once at the end — not conversion work of its own.
   `sigma_rest`'s auto-refresh) straight into `parity-actuals.json`. Only
   pivot-tables stay agent-mediated (their CSV export is the WIDE grid, not the
   long row/col/value tuples the plan compares) — pass 1 prints exactly those
-  `mcp__sigma-mcp-v2__query` calls; merge their rows into the same file.
+  `mcp__sigma-mcp-v2__query` calls; merge their rows into the same file. When
+  NOTHING stays agent-mediated (strict artifact-derived predicate), pass 1
+  chains `--finalize` in-process instead of stopping at exit 12.
 - **Empty-view-CSV recovery** — a view that exports an empty CSV produces no
-  chart; surfaced at the OPEN-QUESTIONS checkpoint AND by the tile census at
-  `--finalize` (exit 7 → rebuild the chart manually or explain with
-  `--allow-missing-tiles`, naming the zones in your report).
+  chart; surfaced at the consolidated pre-build checkpoint AND by the tile
+  census at `--finalize` (exit 7 → rebuild the chart manually or explain with
+  `--allow-missing-tiles`, naming the zones in your report). On a scoped run
+  (E9.6) only in-scope views are surfaced.
 - **Master-level calc overrides** — when the workbook layer exits 4 naming a
   field like `master/delivery speed tier`, translate the Tableau calc (see
   `calc-fields.json`) and re-run the same command with

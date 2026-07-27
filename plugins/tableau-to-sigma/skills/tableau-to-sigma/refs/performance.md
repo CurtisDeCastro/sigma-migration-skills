@@ -44,11 +44,77 @@ are now absorbed:
 > `--out`, or "starting clean" throws all of that away and re-pays the full
 > cold cost — the exact anti-pattern behind multi-hour field runs.
 
-The designed loop is: run → hit a STOP (exit 10/11/12/13/4/17) → do the one
-thing the stop asks → **re-run the same command**. Each re-entry should be
+The designed loop is: run → hit a STOP (exit 10/11/12/13/4/17/18/19) → do the
+one thing the stop asks → **re-run the same command**. Each re-entry should be
 dramatically cheaper than the first run. If a re-entry re-pays a phase listed
 as cached below, that's a bug — check the cache-invalidation notes first
 (did the `.twb` actually change?), then report it.
+
+## Single-invocation wave (speed review #2) — fewer stops, same gates
+
+Three control-flow changes remove the guaranteed re-invocations without
+changing any gate's semantics:
+
+- **Phase-1d is a WAIT-GATE, not an abort.** At the DM-POST barrier the
+  orchestrator now **waits** for a verified `png-read.json` (poll every 2s,
+  30s heartbeats, bound `SIGMA_PNG_READ_TIMEOUT_S`, default 480s; `0` = fail
+  immediately) — do the dashboard-PNG read **while it waits** and the run
+  continues in-process. Deadline passed → **exit 18** with a banner naming
+  exactly what is missing (absent / `verified: false` / stale). **No
+  stale-seed reuse:** a `png-read.json` older than this run's discovery fetch
+  is set aside as `png-read.stale.json` and must be re-verified against the
+  fresh PNG.
+- **ONE consolidated pre-build checkpoint.** Gap-scan review (exit 11),
+  decisions (exit 10), telemetry consent, and the E9.4 cost **advisory**
+  (WARN-only, ratified) batch into a single stop writing ONE artifact —
+  `<WORK>/open-questions.json` — with a single re-entry
+  (`--answers '<json>' [--force] | --yes`). Targeted answers
+  (`"<id>:<slug>"`) win over bulk class-id answers; every tagged entry in
+  `open-questions.json` embeds its computed key as `targeted_key` — copy it
+  verbatim rather than re-deriving the slug (an unrecognized `--answers` key
+  draws a WARN and is ignored, never a silent fallback). Resolved decisions
+  are ledgered append-only in `<WORK>/decisions.jsonl` (E3.6 vocab half).
+- **Empty agent-mediated actuals ⇒ finalize chains in-process.** When the
+  pass-1 tail derives from the artifacts (strict predicate: every exportable
+  plan chart machine-collected, no pivot grids, no render-verify/too-large
+  markers, no per-tile visual sidecar) that there is NOTHING for the agent to
+  collect, **and the agent-side gate obligations are already discharged** — a
+  visual verdict is recorded on `parity-final.json` (gate 8b; `--fast` waives
+  it) and the staged RCF ledger is resolved (gate 8d) — pass 1 execs
+  `--finalize` in the same invocation instead of exit 12. Cold runs therefore
+  never chain (the verdict can only exist on a re-entry workdir): a chain that
+  would predictably stop at 8b/8d only burns the gate battery and pre-spends a
+  `migrate-tableau:finalize` loop-log attempt. A gate can still stop with its
+  usual banner. `SIGMA_NO_CHAIN_FINALIZE=1` restores the unconditional
+  exit-12 stop.
+
+## `--quiet` — machine stdout for background-log poll turns
+
+Polling a background run's log re-ingests every ~60-line banner on every
+read. `--quiet` keeps stdout machine-small; **default output (no flag) is
+byte-identical to before**:
+
+- stdout carries ONLY: one JSON event line per phase entry/completion
+  (`{"ev":"phase"|"mark",...}`), stop/result/wait events
+  (`{"ev":"stop","code":10,...}`, `{"ev":"result","status":"GREEN",...}`,
+  `{"ev":"wait"|"waiting",...}` heartbeats), WARN/FATAL/error-shaped lines,
+  and a terminal `{"ev":"exit","code":N,"full_log":...}` event.
+- the FULL human output (banners, child output, stop instructions) streams to
+  `<WORK>/migrate-full.log` — read it once at a stop instead of on every poll.
+- `warn`/stderr is untouched (capture `2>&1` as usual).
+
+Poll pattern: `tail -5` the stdout log for the latest `ev` lines; on an
+`ev:stop`/`ev:exit`, read `migrate-full.log` (or the named artifact — e.g.
+`open-questions.json`) once for the full instructions.
+
+## Local phase metrics (`<WORK>/phase-metrics.jsonl`)
+
+Every `mark()` boundary appends `{phase, wall_s, at}` via
+`lib/phase_metrics.rb` (shared). Capture is LOCAL and decoupled from
+telemetry consent — the file is gitignored run state, never sent; consent
+gates only the SEND path. Absent lib = silent no-op. Summarize with
+`PhaseMetrics.summarize(<WORK>)`. This is the calibration source for
+`estimate-cost.rb`'s coefficients (ratified: measure before optimizing).
 
 ## Expected durations (budgets)
 
@@ -110,7 +176,9 @@ pollers (`sigma-export-png.py` 60×3s, `export-chart-png.rb` 20×3s,
 `enhance-*.rb` deadline-bounded), the discovery-lane waits
 (`lane_wait_for` 600s, join `TABLEAU_LANE_TIMEOUT` default 600s — a transient
 render wedge under the old 1800s default silently burned 30 min; large sites
-raise it via the env var — both with 30s heartbeats), lane reaps (60s), and all REST retry loops (attempt-capped
+raise it via the env var — both with 30s heartbeats), the Phase-1d
+dashboard-read WAIT-GATE (`SIGMA_PNG_READ_TIMEOUT_S` default 480s, 30s
+heartbeats, exit 18 at the deadline), lane reaps (60s), and all REST retry loops (attempt-capped
 with exponential backoff). If you ever observe a script spinning past its
 documented bound, that's a bug — capture the command and file an issue.
 

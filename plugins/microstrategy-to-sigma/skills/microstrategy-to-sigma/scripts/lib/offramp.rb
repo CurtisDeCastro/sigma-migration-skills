@@ -21,6 +21,15 @@
 #   loop-stop            the loop breaker tripped (verbatim signature repeat, same
 #                        failure MODE with no measured progress, or the attempt
 #                        cap) — hard STOP
+#   mission-scope        mission.json stated scope applied (E9.6 — informational)
+#   scope-mismatch-stop  a scoped dashboard name matched nothing in the workbook (exit 19)
+#   png-read-stale       a png-read.json predating this run's discovery fetch was
+#                        set aside (no stale-seed reuse — wave-1 #2a)
+#   png-wait-timeout     the Phase-1d dashboard-read WAIT-GATE deadline passed (exit 18)
+#   finalize-chained     pass 1 chained --finalize in-process (empty agent-mediated
+#                        actuals list — wave-1 #2b)
+#   triage-retire-override  intake converted a RETIRE-tagged workbook on an
+#                        attributable operator override (front-door triage #6a)
 #
 # Never fatal: bookkeeping must not break a run.
 
@@ -29,6 +38,54 @@ require 'digest' # failure_signature hashes the normalized error line
 
 module Offramp
   module_function
+
+  # ── Authorization-provenance vocabulary (E3.6, vocab half) ─────────────────
+  # The ONE shared constant for the manual-path authorization `via` tokens
+  # (manual-path-authorized.json 'via' — written by the orchestrator at every
+  # designed judgment STOP) and the manual-spec off-ramp `reason` tokens.
+  # Baseline §3 vocabulary. Single vocabulary point by the binding conflict
+  # resolution: E5.7's dm-post-failure re-entry EXTENDS this constant (and the
+  # route-switch admit set) rather than minting strings at its call site — new
+  # stops add their token HERE first, then use it.
+  AUTHORIZATION_VIA = %w[
+    converter-stop converter-empty-model gap-scan-stop decisions-stop
+    workbook-handoff loop-stop
+  ].freeze
+  # manual-spec off-ramp reasons: the record of WHY --dm-spec/--wb-spec was
+  # admitted. 'waiver' is recorded as "waiver: <operator text>" — the constant
+  # names the stable prefix.
+  MANUAL_SPEC_REASON_STOP   = 'authorized-by-stop'  # STOP token on record (E3.6 renames this later — single point)
+  MANUAL_SPEC_REASON_REUSE  = 'reuse-dm-id'         # explicit --reuse-dm <id> (documented exit-4 re-entry)
+  MANUAL_SPEC_REASON_WAIVER = 'waiver'              # --allow-manual-spec "<reason>"
+  MANUAL_SPEC_REASONS = [MANUAL_SPEC_REASON_STOP, MANUAL_SPEC_REASON_REUSE,
+                         MANUAL_SPEC_REASON_WAIVER].freeze
+
+  # ── decisions.jsonl (E3.6, vocab half) ─────────────────────────────────────
+  # Append-only record of operator decisions taken at the consolidated
+  # pre-build checkpoint (and any later decision surface): one JSON line per
+  # decision — {kind, question, answer, decided_by, at}. decided_by is honest
+  # provenance: 'relayed' (an agent relayed --answers text — NOT first-hand
+  # consent), 'unattended-flag' (--yes/--force defaults), or 'user' (reserved
+  # for a first-hand orchestrator stdin read — E3.6's later half). LOCAL
+  # workdir artifact, never sent anywhere. Never fatal.
+  def decision(work, kind:, question: nil, answer: nil, decided_by: nil)
+    return unless work && Dir.exist?(work.to_s)
+    rec = { 'kind' => kind.to_s, 'question' => question, 'answer' => answer,
+            'decided_by' => decided_by,
+            'at' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ') }.reject { |_, v| v.nil? }
+    File.open(File.join(work, 'decisions.jsonl'), 'a') { |f| f.puts(JSON.generate(rec)) }
+  rescue StandardError
+    # bookkeeping only — never fail the run
+  end
+
+  # decisions.jsonl entries (oldest first). Empty on any error.
+  def decisions(work)
+    path = File.join(work.to_s, 'decisions.jsonl')
+    return [] unless File.exist?(path)
+    File.readlines(path).map { |l| JSON.parse(l) rescue nil }.compact
+  rescue StandardError
+    []
+  end
 
   def log(work, kind:, reason: nil, detail: nil)
     return unless work && Dir.exist?(work.to_s)
