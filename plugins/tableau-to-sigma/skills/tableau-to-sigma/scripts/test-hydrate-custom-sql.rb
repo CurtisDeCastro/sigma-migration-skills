@@ -266,7 +266,7 @@ check(dremotes == %w[customer_id Region_Name], 'databricks custom SQL: metadata 
 
 puts
 if fails.empty?
-  puts "ALL PASS (#{`grep -c 'check(' #{__FILE__}`.to_i - 1} assertions)"
+  puts "ALL PASS (#{File.foreach(__FILE__).count { |l| l.include?('check(') } - 1} assertions)"
   exit 0
 else
   puts "#{fails.size} FAILED:"

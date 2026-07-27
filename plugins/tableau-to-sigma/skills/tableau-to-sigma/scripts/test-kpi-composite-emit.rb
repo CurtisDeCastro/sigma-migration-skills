@@ -89,7 +89,10 @@ Dir.mktmpdir do |d|
   File.write(File.join(d, 'views', 'v1.csv'), '')
   abort 'parse-twb-layout failed' unless system('ruby', PARSER, twb, lay, out: File::NULL, err: File::NULL)
   out = File.join(d, 'specs.json')
-  build_log = `ruby #{BUILD} --tableau-dir #{d} --layout #{lay} --meta #{lay.sub(/\.json$/, '-meta.json')} --master-map #{mm} --master-element-id master --skip-dashboard-read unit-test --title D --out #{out} 2>&1`
+  build_log = IO.popen(['ruby', BUILD, '--tableau-dir', d, '--layout', lay,
+                        '--meta', lay.sub(/\.json$/, '-meta.json'), '--master-map', mm,
+                        '--master-element-id', 'master', '--skip-dashboard-read', 'unit-test',
+                        '--title', 'D', '--out', out], err: %i[child out], &:read)
   build_out = JSON.parse(File.read(out)) if File.exist?(out)
 end
 

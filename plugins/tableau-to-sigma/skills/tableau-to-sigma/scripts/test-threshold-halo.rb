@@ -182,7 +182,7 @@ def run_build(twb_text)
     lay = File.join(d, 'layout.json')
     system('ruby', PARSER, File.join(d, 'wb.twb'), lay, out: File::NULL, err: File::NULL) or abort 'parse failed'
     out = File.join(d, 'specs.json')
-    log = `ruby #{BUILD} --tableau-dir #{d} --layout #{lay} --meta #{lay.sub(/\.json$/, '-meta.json')} --master-map #{File.join(d, 'master-map.json')} --master-element-id master --out #{out} 2>&1`
+    log = IO.popen(['ruby', BUILD, '--tableau-dir', d, '--layout', lay, '--meta', lay.sub(/\.json$/, '-meta.json'), '--master-map', File.join(d, 'master-map.json'), '--master-element-id', 'master', '--out', out], err: %i[child out], &:read)
     out_spec = JSON.parse(File.read(out)) if File.exist?(out)
     hp = File.join(d, 'threshold-halo.json')
     halo = JSON.parse(File.read(hp)) if File.exist?(hp)

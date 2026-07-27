@@ -48,6 +48,14 @@ if opts[:skip]
   puts "[WAIVED] datasource-filter gate — --skip-datasource-filters: #{opts[:skip]}"
   puts '         (name this waiver in your migration report; an always-on data-source filter left'
   puts '          unapplied means every aggregate over-reports.)'
+  begin
+    $LOAD_PATH.unshift File.expand_path('lib', __dir__)
+    require 'offramp'
+    Offramp.log(work, kind: 'skip-flag-waived', reason: opts[:skip],
+                detail: '--skip-datasource-filters')
+  rescue LoadError
+    warn '       WARN: lib/offramp.rb not vendored — the waiver could not be recorded to offramps.jsonl.'
+  end
   exit 0
 end
 

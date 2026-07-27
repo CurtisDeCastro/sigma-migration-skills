@@ -81,7 +81,10 @@ Dir.mktmpdir do |d|
   File.write("#{d}/views/vH.csv", "Region,Net Revenue\nWest,100\nEast,50\n")
   File.write("#{d}/views/vV.csv", "Ship,Net Revenue\nAir,100\nGround,50\n")
   o = "#{d}/specs.json"
-  `ruby #{BUILD} --tableau-dir #{d} --layout #{d}/layout.json --meta #{d}/meta.json --master-map #{d}/mm.json --master-element-id master --skip-dashboard-read unit-test --out #{o} 2>&1`
+  IO.popen(['ruby', BUILD, '--tableau-dir', d, '--layout', "#{d}/layout.json",
+            '--meta', "#{d}/meta.json", '--master-map', "#{d}/mm.json",
+            '--master-element-id', 'master', '--skip-dashboard-read', 'unit-test',
+            '--out', o], err: %i[child out], &:read)
   out = JSON.parse(File.read(o)) if File.exist?(o)
 end
 

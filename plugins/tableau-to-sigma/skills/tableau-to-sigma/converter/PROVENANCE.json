@@ -4,5 +4,28 @@
   "source_commit_date": "2026-07-22",
   "bundler": "esbuild --bundle --format=esm --platform=node",
   "vendored_modules": "tableau.mjs",
-  "note": "Self-contained bundled artifacts, not source. Refresh with tools/vendor-converters.sh after the converter repo changes."
+  "note": "Self-contained bundled artifacts, not source. Refresh with tools/vendor-converters.sh after the converter repo changes.",
+  "local_patches": [
+    {
+      "commit": "d8a049a",
+      "summary": "v5.5/v5.6 field fixes (#414) applied to the vendored bundle in place, pending upstreaming — the shipped tableau.mjs is source_commit plus the changes below.",
+      "changes": [
+        "multi-datasource merge: dedupe merged controls by controlId before display name — two child datasources can emit controls with different names but the same param-derived controlId, which the name-only key let through and the DM POST rejected as duplicate ids",
+        "multi-datasource merge: child conversions (options.__multiDsChild) no longer call resetIds() — children continue the monotonic element-id counter so the merged dm-spec stays duplicate-free; top-level single-datasource conversions keep the reset for corpus id determinism",
+        "no default warehouse db/schema: new warehouseDbSchemaFromConn() derives database/schema from the workbook's own warehouse <connection> attrs (non-warehouse classes and file-path/.hyper dbnames skipped) when no --database/--schema override is passed; the root relation and each side of a blend fall back to their own connection instead of a fabricated default",
+        "calc flexibility: federated-join cross-table coalesce synthesis — IFNULL/ZN/IF-ISNULL cross-table fallback calcs are rewritten to Coalesce(local, Lookup(target column, join keys)); join-key collection walks AND-wrapped equality clauses so every key pair is kept (leftKeys/rightKeys), not just the first top-level '='",
+        "calc flexibility: bare-ref case-fold — case- and underscore-normalized display-name indexes so bare column references resolve across tables regardless of casing",
+        "calc flexibility: parameter member aliases captured (memberAliases value->alias) and emitted as the manual-list control's labels[] — values stay the codes translated calcs compare against; labels only change the rendered option text",
+        "comment-only hygiene neutralization of a workbook name in the multi-datasource comment (no behavior change)"
+      ],
+      "upstream_pr": null
+    }
+  ],
+  "_upstream_and_revendor_tasks": [
+    "Standing vendoring rule: patch upstream and re-vendor; never edit the vendored .mjs in place. When an in-place patch is unavoidable, it lands with its own local_patches entry (commit, summary, upstream_pr) in this file — the hygiene.yml converter-provenance guard rejects any plugins/**/converter/*.mjs diff whose range does not also change the sibling PROVENANCE.json.",
+    "TASK 1 — upstream: port each open local_patches entry to source_repo's tableau converter source, one reviewable PR per functional change; set the entry's upstream_pr field when the PR opens.",
+    "TASK 2 — re-vendor: after the upstream PR merges, run tools/vendor-converters.sh <checkout> tableau; the source_commit/source_commit_date bump and regeneration of this file are what retire landed local_patches entries.",
+    "TASK 3 — guard the unlanded: BOTH regenerators rewrite this file wholesale — tools/vendor-converters.sh (the canonical path) AND the skill-local scripts/dev/vendor-converter.sh (whose header still says to re-run it after converter changes, and which writes a stale schema with no local_patches at all) — so regenerating while any local_patches entry is still open silently drops that patch record; either wait, or re-apply the patch and re-record local_patches (and this task block) in the same commit. Refresh only via tools/vendor-converters.sh.",
+    "TASK 4 — prove parity: after any re-vendor, corpus/run-corpus.sh --check and corpus/converter-default-test.sh must stay green before a retirement counts as done."
+  ]
 }

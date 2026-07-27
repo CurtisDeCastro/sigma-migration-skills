@@ -61,9 +61,17 @@ bootstrap one-liner above.
 5. **Node installed but invisible / no admin rights.** Version managers (fnm/nvm) activate
    via interactive-shell profile hooks an agent shell never sources — so node is often
    installed yet "not found" (field-caught twice on one machine). The bootstrap probes the
-   standard version-manager dirs and activates the install (persisting the PATH prepend to
-   `~/.sigma-migration/path.sh`); when node is genuinely absent it installs user-scoped
-   (fnm/scoop/brew) with a pinned LTS — never an unpinned "latest" download, never admin.
+   standard version-manager dirs — including fnm's macOS default home,
+   `~/Library/Application Support/fnm` — and activates the install (persisting the PATH
+   prepend to `~/.sigma-migration/path.sh`); when node is genuinely absent it installs
+   user-scoped, **pinned to the 22 LTS line** (in maintenance until 2027-04-30; the 20
+   line reached end-of-life 2026-04-30, so new installs never land it — and never a
+   floating "latest"): winget/scoop `fnm` on Windows, `brew node@22` or the pinned
+   portable tarball into `~/.local/node` elsewhere. Never admin.
+   **Manual fallback for the USER (no winget, no bootstrap route — last resort):**
+   download the **22 LTS** zip from nodejs.org, extract to `%USERPROFILE%\node`, and add
+   it to PATH — pin the explicit LTS version, never "latest". A documented, deliberate
+   user step, not something an agent improvises mid-run.
 
 > The converters themselves need **no clone, no `npm install`, no network, no MCP** —
 > each skill ships a self-contained `converter/*.mjs` bundle run via `node`. So the

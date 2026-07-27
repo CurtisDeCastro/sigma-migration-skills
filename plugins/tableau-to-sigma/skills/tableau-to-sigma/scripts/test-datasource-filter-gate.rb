@@ -93,7 +93,7 @@ Dir.mktmpdir do |d|
   meta_path = lay.sub(/\.json$/, '-meta.json')
   meta = JSON.parse(File.read(meta_path))
   out = File.join(d, 'specs.json')
-  `ruby #{BUILD} --tableau-dir #{d} --layout #{lay} --meta #{meta_path} --master-map #{mm} --master-element-id master --skip-dashboard-read unit-test --title Ops --out #{out} 2>&1`
+  system('ruby', BUILD, '--tableau-dir', d, '--layout', lay, '--meta', meta_path, '--master-map', mm, '--master-element-id', 'master', '--skip-dashboard-read', 'unit-test', '--title', 'Ops', '--out', out, out: File::NULL, err: %i[child out])
   sp = File.join(d, 'control-scope.json')
   scope_json = JSON.parse(File.read(sp)) if File.exist?(sp)
   cp = meta_path.sub(/(-meta)?\.json$/, '-controls-coverage.json')

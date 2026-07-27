@@ -186,7 +186,12 @@ Dir.mktmpdir do |dir|
   File.write(spec_p, JSON.generate(col_formula_spec('If([Year] = "2014", [Unit Value])')))
   File.write(types_p, JSON.generate('TRADE_FACTS' => { 'YEAR' => 'number' }))
 
-  out = `#{ruby} #{cli} --spec #{spec_p} --types #{types_p} --out #{out_p} 2>/dev/null`
+  # err: File::NULL — the pre-conversion backtick form discarded stderr
+  # (2>/dev/null); keep that so the one-line-per-finding count below stays a
+  # STDOUT assertion (lint-typed-literals.rb warns a findings summary to
+  # stderr on exactly this path — merging would widen the contract and a
+  # future stderr line naming the column would break the ==1 pin falsely).
+  out = IO.popen([ruby, cli, '--spec', spec_p, '--types', types_p, '--out', out_p], err: File::NULL, &:read)
   check($?.exitstatus == 3, "CLI exits 3 when findings exist (got #{$?.exitstatus})", fails)
   check(out.lines.count { |l| l.include?('TRADE_FACTS.YEAR') } == 1,
         'CLI prints one line per finding', fails)
@@ -194,12 +199,12 @@ Dir.mktmpdir do |dir|
   check(written.length == 1 && written[0]['literal'] == '2014', '--out writes the findings JSON', fails)
 
   File.write(spec_p, JSON.generate(col_formula_spec('If([Year] = 2014, [Unit Value])')))
-  `#{ruby} #{cli} --spec #{spec_p} --types #{types_p} 2>/dev/null`
+  IO.popen([ruby, cli, '--spec', spec_p, '--types', types_p], err: %i[child out], &:read)
   check($?.exitstatus.zero?, "CLI exits 0 when clean (got #{$?.exitstatus})", fails)
 
-  `#{ruby} #{cli} --spec #{spec_p} 2>/dev/null`
+  IO.popen([ruby, cli, '--spec', spec_p], err: %i[child out], &:read)
   check($?.exitstatus == 2, "CLI exits 2 on missing --types (got #{$?.exitstatus})", fails)
-  `#{ruby} #{cli} --spec #{spec_p} --types #{File.join(dir, 'nope.json')} 2>/dev/null`
+  IO.popen([ruby, cli, '--spec', spec_p, '--types', File.join(dir, 'nope.json')], err: %i[child out], &:read)
   check($?.exitstatus == 2, "CLI exits 2 on unreadable types file (got #{$?.exitstatus})", fails)
 end
 

@@ -80,9 +80,9 @@ A Tableau converter change lands in **three** places or it doesn't reach users:
 
 ---
 
-## 4. Customer situation (EDNA / `japham`)
+## 4. Customer situation (enterprise field org, anonymized)
 
-**Symptom:** PODVIEW Custom SQL workbook → "empty data model / converter limitation."
+**Symptom:** a Custom SQL workbook → "empty data model / converter limitation."
 **Diagnosis:** **stale clone.** The current `main` vendored `converter/tableau.mjs` handles top-level Custom SQL (verified: 1 element / 4 cols) and has `maxEntityCount: 5000000` baked in. The customer hand-patching the entity limit (`1e3→1e5`) proves their bundle predates the fix.
 **Remediation:** `git pull sigma-migration-skills`; drop the entity-limit patch.
 **Still open (recommended follow-up):** two Windows patches are **not upstreamed**, so Windows users re-apply them every pull —

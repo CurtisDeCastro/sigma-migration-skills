@@ -139,6 +139,25 @@ jobs:
           done < <(git ls-files '*.sh')
           echo "checked: $(git ls-files '*.rb' | wc -l) rb, $(git ls-files '*.py' | wc -l) py, $(git ls-files '*.sh' | wc -l) sh"
           exit $fail
+      - name: Parse every tracked .ps1 file (pwsh AST, parse-only)
+        # The bootstrap.ps1/doctor.ps1 twins ship to every Windows user, but
+        # only the tableau doctor.ps1 is ever RUN in CI (windows-smoke) — a
+        # non-parsing .ps1 twin anywhere else would reach main unnoticed.
+        # Ubuntu runners ship pwsh; nothing is executed, only parsed.
+        shell: pwsh
+        run: |
+          $failed = 0
+          $files = @(git ls-files '*.ps1')
+          foreach ($f in $files) {
+            $tokens = $null; $errs = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD $f), [ref]$tokens, [ref]$errs) | Out-Null
+            if ($errs -and $errs.Count -gt 0) {
+              Write-Output "::error file=$f::powershell parse error: $($errs[0].Message)"
+              $failed = 1
+            }
+          }
+          Write-Output "checked: $($files.Count) ps1"
+          exit $failed
 
   shared-libs:
     name: shared-lib drift gate (canonical == every vendored copy)

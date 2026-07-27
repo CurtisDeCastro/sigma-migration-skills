@@ -361,11 +361,11 @@
       </table>
       <simple-id uuid='{CE300004-0000-4000-8000-000000000004}' />
     </worksheet>
-    <worksheet name='Weekly Outlook'>
+    <worksheet name='Weekly Forecast'>
       <layout-options>
         <title>
           <formatted-text>
-            <run>Weekly Outlook by Week Anchor</run>
+            <run>Weekly Forecast by Week Anchor</run>
           </formatted-text>
         </title>
       </layout-options>
@@ -483,7 +483,7 @@
                   <format attr='margin' value='3' />
                 </zone-style>
               </zone>
-              <zone h='42000' id='45' name='Weekly Outlook' w='80000' x='0' y='58000'>
+              <zone h='42000' id='45' name='Weekly Forecast' w='80000' x='0' y='58000'>
                 <layout-cache minheight='1' minwidth='1' type-h='scalable' type-w='scalable' />
                 <zone-style>
                   <format attr='border-style' value='none' />
@@ -517,7 +517,7 @@
                   <format attr='margin' value='4' />
                 </zone-style>
               </zone>
-              <zone h='16000' id='63' mode='checklist' name='Weekly Outlook' param='[federated.0pak0walletpulse01].[none:Calculation_IsCurWeek:nk]' type-v2='filter' w='20000' x='80000' y='50000'>
+              <zone h='16000' id='63' mode='checklist' name='Weekly Forecast' param='[federated.0pak0walletpulse01].[none:Calculation_IsCurWeek:nk]' type-v2='filter' w='20000' x='80000' y='50000'>
                 <zone-style>
                   <format attr='border-style' value='none' />
                   <format attr='border-width' value='0' />
@@ -556,7 +556,7 @@
         <viewpoint name='Amount vs Growth'>
           <zoom type='entire-view' />
         </viewpoint>
-        <viewpoint name='Weekly Outlook'>
+        <viewpoint name='Weekly Forecast'>
           <zoom type='entire-view' />
         </viewpoint>
       </viewpoints>

@@ -40,7 +40,8 @@ WBIDS = { 'workbookId' => 'wb-x', 'pages' => [
 Dir.mktmpdir do |d|
   lf = File.join(d, 'layout.json'); wf = File.join(d, 'wb-ids.json'); out = File.join(d, 'out.xml')
   File.write(lf, JSON.generate(LAYOUT)); File.write(wf, JSON.generate(WBIDS))
-  log = `ruby #{BUILD} --layout #{lf} --wb-ids #{wf} --out #{out} 2>&1`
+  log = IO.popen(['ruby', BUILD, '--layout', lf, '--wb-ids', wf, '--out', out],
+                 err: %i[child out], &:read)
   xml = File.exist?(out) ? File.read(out) : ''
 
   check(!log.include?('DROPPED'), "no tile DROPPED warning (matcher found both by display_title)\n#{log}", fails)

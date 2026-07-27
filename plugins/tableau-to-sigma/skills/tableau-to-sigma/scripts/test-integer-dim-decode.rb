@@ -118,7 +118,7 @@ Dir.mktmpdir do |d|
   abort 'parse-twb-layout failed' unless system('ruby', PARSER, twb, lay, out: File::NULL, err: File::NULL)
   meta = JSON.parse(File.read(lay.sub(/\.json$/, '-meta.json')))
   out = File.join(d, 'specs.json')
-  build_log = `ruby #{BUILD} --tableau-dir #{d} --layout #{lay} --meta #{lay.sub(/\.json$/, '-meta.json')} --master-map #{mm} --master-element-id master --page-per-dashboard --skip-dashboard-read unit-test --auto-controls --title Dash --out #{out} 2>&1`.to_s.force_encoding('UTF-8')
+  build_log = IO.popen(['ruby', BUILD, '--tableau-dir', d, '--layout', lay, '--meta', lay.sub(/\.json$/, '-meta.json'), '--master-map', mm, '--master-element-id', 'master', '--page-per-dashboard', '--skip-dashboard-read', 'unit-test', '--auto-controls', '--title', 'Dash', '--out', out], err: %i[child out], &:read).to_s.force_encoding('UTF-8')
   build_out = JSON.parse(File.read(out)) if File.exist?(out)
   sp = File.join(d, 'control-scope.json')
   scope = JSON.parse(File.read(sp)) if File.exist?(sp)
@@ -239,7 +239,7 @@ Dir.mktmpdir do |d|
   zmeta = JSON.parse(File.read(lay.sub(/\.json$/, '-meta.json')))
   check((zmeta['shared_filters'] || []).empty?, 'zone case: NO shared-view filters (the promotion path)', fails)
   out = File.join(d, 'specs.json')
-  zlog = `ruby #{BUILD} --tableau-dir #{d} --layout #{lay} --meta #{lay.sub(/\.json$/, '-meta.json')} --master-map #{mm} --master-element-id master --page-per-dashboard --skip-dashboard-read unit-test --auto-controls --title Dash --out #{out} 2>&1`.to_s.force_encoding('UTF-8')
+  zlog = IO.popen(['ruby', BUILD, '--tableau-dir', d, '--layout', lay, '--meta', lay.sub(/\.json$/, '-meta.json'), '--master-map', mm, '--master-element-id', 'master', '--page-per-dashboard', '--skip-dashboard-read', 'unit-test', '--auto-controls', '--title', 'Dash', '--out', out], err: %i[child out], &:read).to_s.force_encoding('UTF-8')
   zbuild = JSON.parse(File.read(out)) if File.exist?(out)
   sp = File.join(d, 'control-scope.json'); zscope = JSON.parse(File.read(sp)) if File.exist?(sp)
 end

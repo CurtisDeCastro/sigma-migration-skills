@@ -18,14 +18,15 @@ user-invocable: true
 > - Windows PowerShell: `powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1 -WorkDir <WORK>`
 >
 > It verifies/activates/installs ruby + python3 (+ Pillow/numpy/requests) + node
-> (user-scoped only — winget/scoop on Windows, brew/rbenv/fnm-aware elsewhere),
-> persists creds from env vars (`setup.rb --from-env`), finishes with a doctor
-> run (`doctor.json`), and writes the **bootstrap sentinel** (`bootstrap.json`).
+> pinned to 22 LTS (user-scoped — winget/scoop on Windows,
+> brew/rbenv/fnm-aware elsewhere; PATH persists to `~/.sigma-migration/path.sh`
+> (bash) / USER PATH (Windows)), persists creds from env
+> vars (`setup.rb --from-env`), ends in a doctor run (`doctor.json`), and
+> writes the **bootstrap sentinel** (`bootstrap.json`).
 > `intake.rb` and `migrate-tableau.rb` REFUSE to start without sentinel +
 > doctor-green. **NEVER hand-install a runtime or edit PATH yourself** — if
 > bootstrap reports no admin-free route, surface its message to the user and
-> stop. Dry run: `--check` / `-Check` (reports what WOULD install, changes
-> nothing). Details: `refs/environment.md`.
+> stop. Dry run: `--check` / `-Check`. Details: `refs/environment.md`.
 
 > ## ⛔ STEP 1 — THE ONE PATH (there is a single entry point; do not improvise one)
 > After the bootstrap, **always run the orchestrator** — it chains every phase

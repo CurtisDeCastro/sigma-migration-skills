@@ -178,9 +178,30 @@ if dup_doc && (dup_doc['summary'] || {})['duplicate_groups'].to_i.positive? && F
   dd_script = File.join(__dir__, 'dup-dashboards.py')
   # --md writes the Markdown block to stderr (alongside a one-line summary, which
   # we drop). Capture stderr; discard stdout (the groups JSON, already on disk).
-  md = `python3 #{dd_script.inspect} --in #{dup_norm_path.inspect} --out #{File.join(opts[:out], 'dup-groups.json').inspect} --md 2>&1 1>/dev/null`
-  md = md.lines.reject { |l| l.start_with?('[dup-dashboards]') }.join
-  out += "\n\n" + md unless md.strip.empty?
+  # Missing/broken python3 degrades gracefully (warn + skip the appendix) — the
+  # dup-groups block is an optional flag-not-fake appendix, and dup-normalized.json
+  # existing does NOT guarantee python3 resolves HERE (workdir copied between
+  # machines, PATH change): Process.spawn raises Errno::ENOENT where the old
+  # backtick form merely captured the shell's "command not found" text.
+  err_r, err_w = IO.pipe
+  begin
+    pid = Process.spawn('python3', dd_script, '--in', dup_norm_path,
+                        '--out', File.join(opts[:out], 'dup-groups.json'), '--md',
+                        out: File::NULL, err: err_w)
+  rescue SystemCallError => e # Errno::ENOENT and kin
+    err_r.close
+    err_w.close
+    warn "[render-readout] duplicate-dashboards appendix skipped — python3 not runnable (#{e.class}); readout ships without it"
+    pid = nil
+  end
+  if pid
+    err_w.close
+    md = err_r.read
+    err_r.close
+    Process.wait(pid)
+    md = md.lines.reject { |l| l.start_with?('[dup-dashboards]') }.join
+    out += "\n\n" + md unless md.strip.empty?
+  end
 end
 
 readout_path = File.join(opts[:out], 'readout.md')

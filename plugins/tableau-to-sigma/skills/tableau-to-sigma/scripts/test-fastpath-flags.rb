@@ -102,7 +102,9 @@ end
 
 puts '— migrate-tableau.rb flag parsing (--help) —'
 
-out = `ruby #{MIGRATE} --help 2>&1`
+# force UTF-8: --help text is UTF-8 prose; with LANG/LC_ALL unset the popen
+# read comes back US-ASCII and the =~ checks below crash on a non-UTF-8 locale
+out = IO.popen(['ruby', MIGRATE, '--help'], err: %i[child out], &:read).force_encoding('UTF-8')
 st = $?.exitstatus
 check(st.zero?, "--help exits 0 (got #{st})", fails)
 check(out.include?('FAST PATH'), '--help documents the FAST PATH semantics', fails)
@@ -117,7 +119,7 @@ check(ok, 'migrate-tableau.rb parses clean (ruby -c)', fails)
 
 puts
 if fails.empty?
-  puts "OK — all #{`grep -c 'check(' #{__FILE__}`.strip.to_i - 1} fast-path checks passed"
+  puts "OK — all #{File.foreach(__FILE__).count { |l| l.include?('check(') } - 1} fast-path checks passed"
   exit 0
 else
   puts "#{fails.size} FAILURE(S):"

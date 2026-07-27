@@ -104,7 +104,10 @@ Dir.mktmpdir do |d|
   abort 'parse-twb-layout failed' unless system('ruby', PARSER, twb, lay, out: File::NULL, err: File::NULL)
 
   out = File.join(d, 'specs.json')
-  charts_log = `ruby #{CHARTS} --tableau-dir #{d} --layout #{lay} --meta #{lay.sub(/\.json$/, '-meta.json')} --master-map #{mm} --master-element-id master --skip-dashboard-read unit-test --title Story --out #{out} 2>&1`
+  charts_log = IO.popen(['ruby', CHARTS, '--tableau-dir', d, '--layout', lay,
+                         '--meta', lay.sub(/\.json$/, '-meta.json'), '--master-map', mm,
+                         '--master-element-id', 'master', '--skip-dashboard-read', 'unit-test',
+                         '--title', 'Story', '--out', out], err: %i[child out], &:read)
   specs = JSON.parse(File.read(out)) if File.exist?(out)
 
   # Synthesize the workbook readback (wb-ids) from the emitted flat element list:
@@ -119,7 +122,8 @@ Dir.mktmpdir do |d|
   wbf = File.join(d, 'wb-ids.json')
   lxml = File.join(d, 'layout.xml')
   File.write(wbf, JSON.dump(wb_ids))
-  build_log = `ruby #{LAYOUT} --layout #{lay} --wb-ids #{wbf} --out #{lxml} 2>&1`
+  build_log = IO.popen(['ruby', LAYOUT, '--layout', lay, '--wb-ids', wbf, '--out', lxml],
+                       err: %i[child out], &:read)
   if File.exist?(lxml)
     body = File.read(lxml).sub(/\A<\?xml[^>]*\?>\s*/, '')
     xml_doc = REXML::Document.new("<Root>#{body}</Root>")

@@ -64,6 +64,14 @@ FileUtils.mkdir_p(opts[:dir])
 _bs_skip = opts[:skip_bootstrap] || ENV['SIGMA_SKIP_BOOTSTRAP_GATE']
 if _bs_skip && !_bs_skip.to_s.empty?
   warn "[SKIP] intake: bootstrap gate WAIVED (#{_bs_skip}) — name this in your report."
+  begin
+    $LOAD_PATH.unshift File.expand_path('lib', __dir__)
+    require 'offramp'
+    Offramp.log(opts[:dir], kind: 'skip-flag-waived', reason: _bs_skip,
+                detail: '--skip-bootstrap-gate')
+  rescue LoadError
+    warn '       WARN: lib/offramp.rb not vendored — the waiver could not be recorded to offramps.jsonl.'
+  end
 else
   _bs = [File.join(opts[:dir], 'bootstrap.json'),
          File.expand_path('~/.sigma-migration/bootstrap.json')]

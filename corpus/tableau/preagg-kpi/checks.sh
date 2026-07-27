@@ -60,7 +60,7 @@ cat > "$TMP/parity-final.json" <<'JSON'
 {
   "workbook_id": "wb-corpus-pak", "mode": "strict", "status": "PASS",
   "charts_total": 5, "charts_pass": 5, "charts_fail": 0,
-  "pass_names": ["KPI Avg Amount", "KPI Sales per Active", "KPI Pct Earnings", "Amount vs Growth", "Weekly Outlook"],
+  "pass_names": ["KPI Avg Amount", "KPI Sales per Active", "KPI Pct Earnings", "Amount vs Growth", "Weekly Forecast"],
   "fail_names": [],
   "visual_checked": true, "visual_verdict": "pass",
   "style_checklist": { "element_titles_hidden": "pass", "palette_match": "pass",
@@ -180,8 +180,8 @@ ruby -rjson -e '
     unless combo["chart_kind"] == "bar" && combo["dual_axis"] == false
   kpis = zones.select { |z| z["is_kpi"] }.map { |z| z["caption"] }.sort
   abort "KPI zones wrong: #{kpis.inspect}" unless kpis == ["KPI Avg Amount", "KPI Pct Earnings", "KPI Sales per Active"]
-  outlook = zones.find { |z| z["caption"] == "Weekly Outlook" }
-  abort "Weekly Outlook not line" unless outlook && outlook["chart_kind"] == "line"
+  forecast = zones.find { |z| z["caption"] == "Weekly Forecast" }
+  abort "Weekly Forecast not line" unless forecast && forecast["chart_kind"] == "line"
 ' "$TMP/layout.json" \
   && note "ok: known-limitation pinned — dual-axis combo reads chart_kind=bar / dual_axis=false (3 KPI zones + line detected)" \
   || { note "FAIL: layout known-limitation pin"; fail=1; }
