@@ -216,12 +216,17 @@ def live_workdir(dir, probe_rows, probe_rc, key_version: '7', recorded_at: Time.
   Dir.mkdir(File.join(dir, 'probe-controls'))
   results_path = File.join(dir, 'probe-controls', 'probe-results.json')
   File.write(results_path, JSON.pretty_generate(probe_rows))
+  # A6 (wave-1 review): probe_rc in the ledger detail is AUDIT metadata only —
+  # the acceptance path derives rc from the sha-verified rows. probe_rc: nil
+  # here means "no recorded rc at all" (must still accept).
+  detail = { 'check_leaks' => false }
+  detail['probe_rc'] = probe_rc unless probe_rc.nil?
   EvidenceLedger.append(dir, gate: '7b', verdict: 'recorded-fixture',
                         evidence_kind: 'probe-results',
                         evidence_path: 'probe-controls/probe-results.json',
                         evidence_key: "wb:wb-7b@v#{key_version}",
                         evidence_sha256: EvidenceLedger.sha256_file(results_path),
-                        detail: { 'probe_rc' => probe_rc, 'check_leaks' => false },
+                        detail: detail,
                         at: recorded_at)
   results_path
 end
@@ -287,6 +292,56 @@ Dir.mktmpdir do |dir|
     thr.kill
   end
 end
+
+# A6 (wave-1 review): the ledger's recorded probe_rc was the ONE datum in the
+# recorded-evidence path not covered by the probe-results.json sha. rc is now
+# DERIVED from the sha-verified rows (FlipGate.derive_rc) — a missing or even
+# LYING recorded rc changes nothing.
+puts '-- gate 7b (A6): recorded rc absent → rows alone accept (rc derived, not consumed) --'
+Dir.mktmpdir do |dir|
+  counters = { spec: 0, other: 0 }
+  server, thr, port = start_stub(counters)
+  begin
+    live_workdir(dir, [{ 'control' => 'ctl-1', 'result' => 'PASS', 'note' => 'export changed' }], nil)
+    out, err, st = run_live(dir, port)
+    check(st.success?, "no recorded probe_rc → rows still accepted → run completes (got #{st.exitstatus}: #{err.lines.first(2).join(' ').strip[0, 120]})")
+    check(out.include?('recorded RAW probe evidence accepted'), 'acceptance NOTE printed without any recorded rc')
+    check(out.include?('1 control(s) proven live'), 'verdict recomputed from the sha-bound rows alone')
+    check(counters[:other].zero?, 'zero export/flip calls — no needless re-probe')
+  ensure
+    server.close
+    thr.kill
+  end
+end
+
+puts '-- gate 7b (A6): recorded rc LIES (says 2/advisory) → sha-bound FAIL rows still fail --'
+Dir.mktmpdir do |dir|
+  counters = { spec: 0, other: 0 }
+  server, thr, port = start_stub(counters)
+  begin
+    # A forged/buggy detail rc claiming "nothing probed" must not soften the
+    # verdict: the FAIL rows are sha-verified — the derived rc (1) wins.
+    live_workdir(dir, [{ 'control' => 'ctl-1', 'result' => 'FAIL', 'note' => 'inert on flip' }], 2)
+    out, err, st = run_live(dir, port)
+    check(st.exitstatus == 21, "derived rc from FAIL rows → exit 21 despite recorded rc=2 (got #{st.exitstatus})")
+    check(out.include?('recorded RAW probe evidence accepted'), 'evidence accepted (sha/version/age all valid)')
+    check(err.include?('INERT'), 'the recomputed failure names the inert control')
+  ensure
+    server.close
+    thr.kill
+  end
+end
+
+# FlipGate.derive_rc unit contract — mirrors probe-controls.rb's exit logic.
+puts '-- FlipGate.derive_rc: rows → rc mapping mirrors the probe exit codes --'
+require_relative 'lib/flip_gate'
+check(FlipGate.derive_rc([{ 'control' => 'c', 'result' => 'PASS' }]) == 0, 'PASS rows → 0')
+check(FlipGate.derive_rc([{ 'control' => 'c', 'result' => 'PASS' },
+                          { 'control' => 'd', 'result' => 'FAIL' }]) == 1, 'any FAIL row → 1')
+check(FlipGate.derive_rc([{ 'control' => 'c', 'result' => 'SKIP' }]) == 2, 'all-SKIP → 2 (nothing probed)')
+check(FlipGate.derive_rc([]) == 2 && FlipGate.derive_rc(nil) == 2, 'empty/nil rows → 2 (ambiguous → advisory → live re-probe)')
+check(FlipGate.decide(FlipGate.derive_rc([{ 'result' => 'SKIP' }]), [{ 'result' => 'SKIP' }]).first == :advisory,
+      'derived rc keeps FlipGate.decide semantics (all-SKIP → :advisory, never a silent pass)')
 
 puts '-- gate 7b: tampered raw evidence → REFUSED (sha) → live re-probe attempted --'
 Dir.mktmpdir do |dir|

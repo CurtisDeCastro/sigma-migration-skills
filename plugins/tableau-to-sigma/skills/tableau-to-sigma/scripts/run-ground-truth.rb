@@ -67,13 +67,18 @@ entries = Array(plan['entries'])
 if opts[:conn]
   $LOAD_PATH.unshift File.expand_path('lib', __dir__)
   require 'sigma_rest'
+  require 'probe_registry' # E7.1/A11: probe workbooks register at POST time
 end
 
 # Run one SQL statement through a one-shot probe workbook (the established
 # warehouse-SQL seam — see probe-join-keys.rb / probe-custom-sql-columns.rb)
 # and return parsed CSV rows. `deadline` bounds the export poll so a stuck
-# query cannot outlive the run's total budget.
-def sigma_sql_rows(conn_id, folder_id, sql, columns, deadline)
+# query cannot outlive the run's total budget. Every probe workbook is
+# REGISTERED in the E7.1 litter registry at POST and marked at DELETE (A11,
+# wave-1 review): a crash between POST and DELETE used to strand an orphan
+# the sweep's registry-first mode could not see — the largest litter source
+# (T workbooks per run).
+def sigma_sql_rows(conn_id, folder_id, sql, columns, deadline, workdir: nil)
   spec = {
     'name' => "_probe_groundtruth_#{SecureRandom.hex(4)}",
     'schemaVersion' => 1,
@@ -91,6 +96,8 @@ def sigma_sql_rows(conn_id, folder_id, sql, columns, deadline)
   end
   wb_id = r.is_a?(Hash) ? r['workbookId'] : nil
   raise "probe workbook POST failed: #{r.inspect[0, 160]}" unless wb_id
+  ProbeRegistry.created(wb_id, name: spec['name'], workdir: workdir,
+                        script: 'run-ground-truth.rb')
   begin
     exp = Sigma.request(:post, "/v2/workbooks/#{wb_id}/export",
                         body: JSON.generate('elementId' => 'probe', 'format' => { 'type' => 'csv' }))
@@ -109,7 +116,13 @@ def sigma_sql_rows(conn_id, folder_id, sql, columns, deadline)
     end
     CSV.parse(csv)
   ensure
-    Sigma.request(:delete, "/v2/files/#{wb_id}") rescue nil
+    begin
+      Sigma.request(:delete, "/v2/files/#{wb_id}")
+      ProbeRegistry.cleaned(wb_id, workdir: workdir, via: 'ensure')
+    rescue StandardError => e
+      ProbeRegistry.cleaned(wb_id, workdir: workdir, via: 'ensure',
+                            outcome: e.message.lines.first.to_s =~ /\b404\b/ ? '404' : 'failed') rescue nil
+    end
   end
 end
 
@@ -155,7 +168,8 @@ entries.each_with_index do |e, i|
       fixture_result(opts[:fixture], i)
     else
       begin
-        rows = sigma_sql_rows(opts[:conn], opts[:folder], guarded_sql, aliases, deadline)
+        rows = sigma_sql_rows(opts[:conn], opts[:folder], guarded_sql, aliases, deadline,
+                              workdir: opts[:dir])
         header = rows.shift || aliases
         { 'columns' => header.map(&:to_s), 'rows' => rows }
       rescue StandardError => err

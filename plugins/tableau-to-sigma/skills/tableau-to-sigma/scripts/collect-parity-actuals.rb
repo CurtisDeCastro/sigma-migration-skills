@@ -81,7 +81,7 @@ require 'optparse'
 require 'thread'
 
 DEFAULT_DRIFT_WARN_MIN = (ENV['PARITY_DRIFT_WARN_MINUTES'] || '30').to_f
-opts = { pool: 5, timeout: 600, row_limit: 100_000, drift_warn_min: DEFAULT_DRIFT_WARN_MIN }
+opts = { pool: 5, timeout: 600, drift_warn_min: DEFAULT_DRIFT_WARN_MIN }
 OptionParser.new do |p|
   p.on('--plan PATH')          { |v| opts[:plan] = v }
   p.on('--workbook-id ID')     { |v| opts[:wb] = v }
@@ -98,7 +98,13 @@ $LOAD_PATH.unshift File.expand_path('lib', __dir__)
 require 'sigma_rest'
 require 'export_pool'
 
-ROW_LIMIT = opts[:row_limit].to_i.positive? ? [opts[:row_limit].to_i, ExportPool::SIGMA_EXPORT_HARD_CAP].min : nil
+# Default = ExportPool::DEFAULT_EXPORT_ROW_LIMIT, the ONE shared default with
+# verify-anchors.rb (A3, wave-1 review: rowLimit is part of the raw-export
+# cache key; a divergent default defeated every cross-script cache hit).
+# Resolved here — after the require — because the opts literal cannot see the
+# constant; --row-limit still overrides (0 = uncapped).
+_rl = opts.key?(:row_limit) ? opts[:row_limit].to_i : ExportPool::DEFAULT_EXPORT_ROW_LIMIT
+ROW_LIMIT = _rl.positive? ? [_rl, ExportPool::SIGMA_EXPORT_HARD_CAP].min : nil
 
 plan = JSON.parse(File.read(opts[:plan]))
 charts = plan.is_a?(Hash) ? (plan['charts'] || []) : plan

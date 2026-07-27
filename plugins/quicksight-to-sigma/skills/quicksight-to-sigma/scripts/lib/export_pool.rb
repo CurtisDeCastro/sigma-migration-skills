@@ -36,6 +36,14 @@ module ExportPool
   # more; none of these verification flows do).
   SIGMA_EXPORT_HARD_CAP = 1_000_000
 
+  # ONE default export row bound shared by every caller (A3, wave-1 review):
+  # verify-anchors.rb and collect-parity-actuals.rb used to default to
+  # different rowLimits (anchors×10k min-50k vs a flat 100k) — and rowLimit is
+  # part of the cache key, so their "shared" cache produced zero cross-script
+  # hits on the typical 5–8-anchor run. Both scripts now floor at this value;
+  # explicit --row-limit still overrides.
+  DEFAULT_EXPORT_ROW_LIMIT = 100_000
+
   # ---------------------------------------------------------------------------
   # RAW export cache (#7a/#7d — speed review, reconciled program).
   #
@@ -90,25 +98,35 @@ module ExportPool
     end
 
     # → raw body String on a strict hit, else nil. A hit means: same workbook,
-    # same latestDocumentVersion, same element, same format, same rowLimit,
-    # young enough, byte-identical to the recorded sha. NEVER returns verdicts
-    # — callers re-parse and re-decide every time.
+    # same latestDocumentVersion, same element, same format, young enough,
+    # byte-identical to the recorded sha — and a rowLimit that SATISFIES the
+    # request: the exact same limit, or (A3, wave-1 review) a cached entry
+    # whose rowLimit ≥ the requested one AND whose body is UN-truncated w.r.t.
+    # its own limit. An un-truncated bounded export is the element's COMPLETE
+    # result set, so it is exactly what the smaller-bounded request would have
+    # returned (callers re-run their own truncated?() over it — verdicts are
+    # unchanged-or-better, never laundered). A cached body that FILLED its
+    # limit stays a MISS for any other limit (it may differ from what the
+    # request would fetch). NEVER returns verdicts — callers re-parse and
+    # re-decide every time.
     def fetch(element_id, fmt, row_limit, now: Time.now)
       return nil unless enabled?
-      meta = read_meta(element_id, fmt, row_limit)
-      return nil unless meta
-      return nil unless meta['workbook_id'] == @workbook_id &&
-                        meta['doc_version'] == @doc_version &&
-                        meta['format'] == fmt.to_s &&
-                        meta['row_limit'].to_s == row_limit.to_s
-      at = (Time.parse(meta['at'].to_s) rescue nil)
-      return nil if at.nil? || (now - at) > @max_age_s || (now - at) < 0
-      body_path = payload_path(element_id, fmt, row_limit)
-      return nil unless File.exist?(body_path)
-      body = File.binread(body_path)
-      return nil unless Digest::SHA256.hexdigest(body) == meta['sha256']
-      @hits += 1
-      body
+      # Exact-key fast path.
+      body = fetch_entry(element_id, fmt, row_limit, row_limit, now)
+      return body if body
+      return nil if row_limit.nil? # an uncapped request accepts only an uncapped entry
+      # ≥-acceptance path: any recorded entry for this element+format whose
+      # limit covers the request (nil = uncapped ≥ everything). Largest first
+      # so the most complete candidate wins.
+      candidate_limits(element_id, fmt)
+        .select { |cl| cl.nil? || cl >= row_limit.to_i }
+        .reject { |cl| cl.to_s == row_limit.to_s }
+        .sort_by { |cl| cl.nil? ? -Float::INFINITY : -cl }
+        .each do |cl|
+          body = fetch_entry(element_id, fmt, cl, row_limit, now)
+          return body if body
+        end
+      nil
     rescue StandardError
       nil # a broken cache entry is a MISS, never an error
     end
@@ -134,6 +152,64 @@ module ExportPool
     end
 
     private
+
+    # One entry's full strict check, shared by the exact and ≥ paths.
+    # entry_limit names the stored entry; requested_limit the caller's bound —
+    # they differ only on the ≥ path, where the body must additionally be
+    # UN-truncated w.r.t. its OWN limit (complete result set) to stand in.
+    def fetch_entry(element_id, fmt, entry_limit, requested_limit, now)
+      meta = read_meta(element_id, fmt, entry_limit)
+      return nil unless meta
+      return nil unless meta['workbook_id'] == @workbook_id &&
+                        meta['doc_version'] == @doc_version &&
+                        # element_id equality (A7): the on-disk name is the
+                        # SCRUBBED id, so two ids differing only in scrubbed
+                        # chars would otherwise cross-serve.
+                        meta['element_id'] == element_id.to_s &&
+                        meta['format'] == fmt.to_s &&
+                        meta['row_limit'].to_s == entry_limit.to_s
+      at = (Time.parse(meta['at'].to_s) rescue nil)
+      return nil if at.nil? || (now - at) > @max_age_s || (now - at) < 0
+      body_path = payload_path(element_id, fmt, entry_limit)
+      return nil unless File.exist?(body_path)
+      body = File.binread(body_path)
+      return nil unless Digest::SHA256.hexdigest(body) == meta['sha256']
+      if entry_limit.to_s != requested_limit.to_s
+        return nil unless complete_body?(body, fmt, entry_limit)
+      end
+      @hits += 1
+      body
+    rescue StandardError
+      nil
+    end
+
+    # Data-row count strictly below the entry's own bound (the API hard cap
+    # for an uncapped entry) = the export was NOT cut off = complete result
+    # set. Counting parses the body (CSV rows can embed newlines) — paid only
+    # on the rare cross-limit path, and still far cheaper than a wire export.
+    def complete_body?(body, fmt, entry_limit)
+      bound = entry_limit.nil? ? SIGMA_EXPORT_HARD_CAP : entry_limit.to_i
+      n_rows =
+        if fmt.to_s == 'json'
+          ExportPool.parse_json_rows(body).length
+        else
+          require 'csv'
+          [CSV.parse(body).length - 1, 0].max # minus the header row
+        end
+      n_rows < bound
+    rescue StandardError
+      false # unparseable body can never prove completeness
+    end
+
+    # Every stored rowLimit for one element+format (nil = the uncapped entry),
+    # read from the meta sidecars.
+    def candidate_limits(element_id, fmt)
+      safe = element_id.to_s.gsub(/[^A-Za-z0-9._-]/, '_')
+      Dir[File.join(@dir, "#{safe}.#{fmt}*.meta.json")].map do |p|
+        m = File.basename(p)[/\.r(\d+)\.meta\.json\z/, 1]
+        m && m.to_i
+      end.uniq
+    end
 
     def entry_base(element_id, fmt, row_limit)
       # elementId charset is [A-Za-z0-9_-] in practice; scrub defensively so a

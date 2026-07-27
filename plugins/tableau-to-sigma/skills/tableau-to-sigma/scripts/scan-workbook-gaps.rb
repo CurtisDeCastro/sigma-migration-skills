@@ -20,6 +20,14 @@
 #
 # The same data is also written as <name>-gaps.json so the gap-scout subagent
 # and other downstream tools can consume it programmatically.
+#
+# SCOPE: the scan itself is WORKBOOK-WIDE (no scope input — expectations are
+# set for the whole file). For SCOPED runs (E9.6), each detected feature
+# carries a best-effort `worksheets` attribution (direct worksheet-section
+# match, or calc-formula match → the worksheets referencing that calc) so the
+# orchestrator's gap STOP can skip gaps belonging entirely to out-of-scope
+# dashboards. A feature with NO attribution has no `worksheets` key —
+# consumers must FAIL OPEN (treat it as potentially in scope).
 
 require 'json'
 require 'set'
@@ -134,6 +142,47 @@ def categorize(content)
     entry.merge(count: matches)
   end
   results.select { |r| r[:count] > 0 }
+end
+
+# --- Worksheet attribution (E9.6/A2, wave-1 review) -------------------------
+# Best-effort per-feature worksheet membership so a SCOPED orchestrator run
+# (migrate-tableau.rb --dashboard) can tell an in-scope ❌ gap from one that
+# belongs entirely to out-of-scope dashboards. Two hops:
+#   1. DIRECT — the feature's pattern matches inside a <worksheet> raw section;
+#   2. CALC   — the pattern matches a datasource-level calc FORMULA; the gap
+#      then belongs to every worksheet whose section references that column's
+#      internal name (formulas live in the datasource block, so hop 1 alone
+#      would miss every calc-borne gap).
+# A feature matching neither hop (dashboard-/datasource-structural — device
+# layouts, multi-datasource collapse, …) gets NO :worksheets key, which
+# consumers MUST read as "unknown — fail open". Mutates `results` in place.
+def attribute_worksheets!(results, content, xml)
+  ws_bodies = content.scan(%r{<worksheet\s[^>]*?name=(?:'([^']*)'|"([^"]*)")[^>]*>(.*?)</worksheet>}m)
+                     .each_with_object({}) { |(sq, dq, body), h| h[(sq || dq).to_s] = body.to_s }
+  return if ws_bodies.empty?
+  calc_defs = {} # internal column name → decoded formula
+  begin
+    xml&.elements&.to_a('/workbook/datasources/datasource')&.each do |ds|
+      ds.elements.each('column') do |col|
+        f = col.elements['calculation']&.attributes&.[]('formula')
+        calc_defs[col.attributes['name'].to_s] = f if f && !col.attributes['name'].to_s.empty?
+      end
+    end
+  rescue StandardError
+    calc_defs = {} # attribution is best-effort — never sink the scan
+  end
+  results.each do |r|
+    pat = r[:pat]
+    next unless pat.is_a?(Regexp)
+    hits = ws_bodies.select { |_, body| body =~ pat }.keys
+    calc_names = calc_defs.select { |_, f| f =~ pat }.keys
+    if calc_names.any?
+      hits |= ws_bodies.select { |_, body| calc_names.any? { |n| body.include?(n) } }.keys
+    end
+    r[:worksheets] = hits.sort if hits.any?
+  end
+rescue StandardError
+  nil # never fatal: an unattributed report is still a valid (fail-open) report
 end
 
 # Detect point-map worksheets that declare geo-role latitude/longitude on a
@@ -286,7 +335,8 @@ def detect_blends(xml)
       name:   "Data blending (#{route})",
       status: route == 'same-warehouse-repoint' ? :hint : :manual,
       count:  rs.length,
-      blurb:  "#{ROUTE_BLURB[route]}. Worksheets: #{rs.map { |b| b['worksheet'] }.uniq.join(', ')}. "               'Full linking-field report in blend-plan.json; decision tree in refs/blending.md (beads-sigma-iq8).'
+      blurb:  "#{ROUTE_BLURB[route]}. Worksheets: #{rs.map { |b| b['worksheet'] }.uniq.join(', ')}. "               'Full linking-field report in blend-plan.json; decision tree in refs/blending.md (beads-sigma-iq8).',
+      worksheets: rs.map { |b| b['worksheet'].to_s }.uniq.sort # E9.6/A2 scope attribution
     }
   end
   [features, { 'datasources' => ds_info.values, 'blends' => blends }]
@@ -674,6 +724,7 @@ def main
   }
 
   results = categorize(content)
+  attribute_worksheets!(results, content, xml) # E9.6/A2: best-effort membership
   results.concat(detect_point_map_geo_role_gaps(content))
   blend_features, blend_plan = detect_blends(xml)
   results.concat(blend_features)

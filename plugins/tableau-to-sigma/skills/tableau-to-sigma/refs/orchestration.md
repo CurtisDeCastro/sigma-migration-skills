@@ -242,10 +242,15 @@ pattern per run:
 5. **E9.6 — mission scope threads end-to-end**: a `mission.json` STATED scope
    (`scope.dashboards`, or a single-view `/#/views/<wb>/<view>` URL in
    `scope.value`) maps onto `--dashboard` and constrains the parse, the calc
-   working set, the gap/open-questions surface, and build planning. Explicit
-   `--dashboard` flags override (narrowing below the mission is recorded in
-   `decisions.jsonl`); a scoped name matching nothing is a named STOP (exit
-   19) listing the workbook's dashboards; unscoped missions are unchanged.
+   working set, the open-questions surface, the ❌-gap STOP surface, and
+   build planning. The gap SCAN itself stays workbook-wide (expectations are
+   set for the whole file); at the checkpoint, an ❌ gap attributed entirely
+   to out-of-scope worksheets is ledgered (`gap-out-of-scope` off-ramp note)
+   instead of stopping, while unattributable gaps FAIL OPEN and still stop.
+   Explicit `--dashboard` flags override (narrowing below the mission is
+   recorded in `decisions.jsonl`); a scoped name matching nothing is a named
+   STOP (exit 19) listing the workbook's dashboards; unscoped missions are
+   unchanged.
 
 ## Still manual by design (the orchestrator stops and tells you)
 

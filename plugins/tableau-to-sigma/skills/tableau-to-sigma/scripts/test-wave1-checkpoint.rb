@@ -75,7 +75,13 @@ Dir.mktmpdir do |d|
         'gap_review folded into open-questions.json', fails)
   check(oq['open_questions'].any? { |q| q['id'] == 'extract_drift' },
         'decisions ride the same artifact (no second stop later)', fails)
-  check(out.include?('--force'), 're-entry instruction names --force for the gap items', fails)
+  check(out.include?('--force/--yes'),
+        'gap acceptance still documents --force for the no-answers path', fails)
+  # A9 (wave-1 review): the copy-paste re-entry hint is answers-only —
+  # --answers alone proceeds through gaps AND records decided_by 'relayed';
+  # appending --force would degrade the provenance to 'unattended-flag'.
+  check(!out.match?(/--answers '<json>' --force/),
+        "A9: the re-entry hint does NOT append --force on gap runs", fails)
   check(JSON.parse(File.read(File.join(d, 'manual-path-authorized.json')))['via'] == 'gap-scan-stop',
         'authorized via gap-scan-stop (exit-code contract unchanged)', fails)
 end

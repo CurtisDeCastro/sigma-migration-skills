@@ -516,7 +516,8 @@ elsif MISSION_SCOPE
     opts[:dashboards] = MISSION_SCOPE['names'].dup if MISSION_SCOPE['names'].any?
     MISSION_VIEW_SEGMENTS.concat(MISSION_SCOPE['view_segments'])
     applied = MISSION_SCOPE['names'] + MISSION_VIEW_SEGMENTS.map { |s| "view-URL:#{s}" }
-    puts "── mission scope (stated): #{applied.join(', ')} — gap scan, open questions, and build planning run scoped"
+    puts "── mission scope (stated): #{applied.join(', ')} — parse, open questions, gap stops, and build planning " \
+         'run scoped (the gap scan itself is workbook-wide; gaps it cannot attribute to a worksheet still stop)'
     Offramp.log(WORK, kind: 'mission-scope', detail: "stated scope applied: #{applied.join(', ')}")
   end
 end
@@ -2985,6 +2986,36 @@ end
 # degradation explicitly via --force. (auto/hint/manual statuses flow into the
 # decisions checkpoint below instead.)
 unhandled_gaps = gaps.select { |g| g['status'].to_s == 'unhandled' }
+# E9.6/A2 (wave-1 review): the gap SCAN is workbook-wide, but on a SCOPED run
+# the gap STOP must not fire for an ❌ feature attributed ENTIRELY to
+# worksheets outside the scoped zone tree — that is another dashboard's
+# migration, and stopping for it is a false stop under the ≤5% budget.
+# Matching reuses the empty-CSV normalize/fail-open pattern below: normalized
+# names against the scoped chart zones; a gap with NO `worksheets`
+# attribution (scan-workbook-gaps.rb couldn't place it) FAILS OPEN and still
+# stops, and an unusable zone tree fails OPEN wholesale. Dropped items are
+# ledgered as out-of-scope notes — the report still lists them.
+if scoped? && unhandled_gaps.any?
+  _gap_norm = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]/, '') }
+  _scoped_ws = (defined?(chart_zones) && chart_zones ? chart_zones : [])
+               .flat_map { |z| [z['caption'], z['view_ref']] }
+               .compact.map { |s| _gap_norm.call(s) }.reject(&:empty?)
+  if _scoped_ws.any?
+    dropped, unhandled_gaps = unhandled_gaps.partition do |g|
+      ws = Array(g['worksheets']).map { |w| _gap_norm.call(w) }.reject(&:empty?)
+      ws.any? && (ws & _scoped_ws).empty?
+    end
+    if dropped.any?
+      line "scope: #{dropped.size} ❌-unhandled gap(s) on out-of-scope worksheets only — not stopped for " \
+           "(#{dropped.map { |g| g['name'] }.join(', ')[0, 120]}); the workbook-wide gap report still lists them"
+      dropped.each do |g|
+        Offramp.log(WORK, kind: 'gap-out-of-scope',
+                    detail: "#{g['name']} (×#{g['count']}) on #{Array(g['worksheets']).join(', ')[0, 120]} — " \
+                            'outside the stated scope; surfaced in the gap report, not stopped for')
+      end
+    end
+  end
+end
 gap_stop = nil # deferred gap-scan stop — resolved at the consolidated checkpoint (#2c)
 if unhandled_gaps.any?
   # RUN-EACH-TIME GATE (bead 5l5e): the gap-scout must have run for EVERY
@@ -3406,7 +3437,12 @@ if (gap_stop || questions.any?) && !opts[:yes] && answers.nil?
   puts
   puts "#{questions.size} decision(s)#{gap_stop ? " + #{gap_items.size} gap review item(s)" : ''} need a human — " \
        'ONE re-entry resolves all of it. No Sigma objects were created.'
-  puts "  re-run this exact command adding:  --answers '<json>'#{gap_stop ? ' --force' : ''}   # or --yes for all defaults"
+  # A9 (wave-1 review): no ` --force` suffix on the gap-run hint — --answers
+  # alone already proceeds through gaps (unattended = yes||answers||force) AND
+  # records the more honest decided_by:'relayed'; adding --force degrades the
+  # provenance to 'unattended-flag'. --force stays documented for the
+  # no-answers path (gap_review resolution lines above).
+  puts "  re-run this exact command adding:  --answers '<json>'   # or --yes for all defaults"
   _cp_via = gap_stop ? 'gap-scan-stop' : 'decisions-stop'
   _cp_reason = "#{questions.size} open question(s)#{gap_stop ? " + #{gap_items.size} #{gap_stop['kind']} gap(s)" : ''} need a human"
   authorize_manual_path!(via: _cp_via, reason: _cp_reason, exit_code: gap_stop ? 11 : 10)
@@ -3608,7 +3644,20 @@ elsif DashboardRead.expected?(WORK)
     warn '       A DRAFT png-read.json was seeded from the .twb parse. The orchestrator cannot read'
     warn '       images — DO THE READ NOW, while this process WAITS at the DM-POST barrier'
     warn "       (up to #{PNG_WAIT_TIMEOUT_S}s; SIGMA_PNG_READ_TIMEOUT_S overrides; no DM was posted):"
-    warn "         1. Fetch the dashboard view PNG with mcp__tableau__get-view-image (solo) into #{WORK}/views/"
+    # A4 (wave-1 review): the discovery lane already downloaded the dashboard
+    # PNG(s) on every PAT run (dashboards/<name>.png at resolution=high, plus
+    # views/<id>.png) — instructing a fresh solo MCP fetch here re-pays a
+    # serialized image call for bytes already on disk. Point at the local file
+    # when it exists; the MCP fetch stays as the no-PAT/no-download fallback.
+    _dr_pngs = Dir[File.join(WORK, 'dashboards', '*.png')] + Dir[File.join(WORK, 'views', '*.png')]
+    if _dr_pngs.any?
+      warn "         1. Read #{_dr_pngs.first} (already downloaded by the discovery lane" \
+           "#{_dr_pngs.size > 1 ? "; #{_dr_pngs.size} PNGs under #{WORK}/dashboards|views" : ''})."
+      warn '            (No PNG for YOUR dashboard there? Fallback: fetch it with'
+      warn "            mcp__tableau__get-view-image (solo) into #{WORK}/views/.)"
+    else
+      warn "         1. Fetch the dashboard view PNG with mcp__tableau__get-view-image (solo) into #{WORK}/views/"
+    end
     warn '         2. Read it, CORRECT the draft tiles/text_elements/filter_shelf (esp. bar-vs-pie, text'
     warn '            annotations, and the filter shelf — the .twb cannot see these), and set "verified": true.'
     warn '         3. Save the file — this run picks it up within seconds and continues (no re-invocation).'

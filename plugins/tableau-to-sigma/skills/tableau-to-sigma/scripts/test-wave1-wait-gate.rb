@@ -51,6 +51,27 @@ Dir.mktmpdir do |d|
   check(File.exist?(File.join(d, 'png-read.json')) &&
         JSON.parse(File.read(File.join(d, 'png-read.json')))['verified'] == false,
         'the seeded DRAFT survives for the operator to edit', fails)
+  # A4 (wave-1 review): with NO downloaded PNG on disk, step 1 stays the MCP
+  # fetch — that is the fallback branch (the preferred branch is T1b below).
+  check(out.include?('1. Fetch the dashboard view PNG with mcp__tableau__get-view-image'),
+        'A4 fallback: no on-disk PNG → step 1 is still the MCP fetch', fails)
+end
+
+puts 'T1b — A4: discovery already downloaded the dashboard PNG → banner points at the FILE'
+Dir.mktmpdir do |d|
+  Wave1Fixture.build(d)
+  FileUtils.mkdir_p(File.join(d, 'dashboards'))
+  File.binwrite(File.join(d, 'dashboards', 'Alpha_Overview.png'), "\x89PNG\r\n\x1a\n".b + ("\x00".b * 200))
+  out, st = Wave1Fixture.run(d, ['--folder', 'fold-x', '--yes'], {}, png_wait: '1')
+  check(st.exitstatus == 18, "gate still trips without a verified read (got #{st.exitstatus})", fails)
+  check(out.include?('already downloaded by the discovery lane'),
+        'A4: step 1 points at the on-disk PNG instead of a fresh MCP fetch', fails)
+  check(out.include?(File.join(d, 'dashboards', 'Alpha_Overview.png')),
+        'A4: the exact local path is named', fails)
+  check(!out.match?(/^\s+1\. Fetch the dashboard view PNG/),
+        'A4: the solo MCP fetch is no longer step 1 when the bytes are local', fails)
+  check(out.include?('Fallback: fetch it with') && out.include?('mcp__tableau__get-view-image'),
+        'A4: the MCP fetch survives as the named fallback', fails)
 end
 
 puts 'T2 — verified read already on disk → gate passes without waiting'

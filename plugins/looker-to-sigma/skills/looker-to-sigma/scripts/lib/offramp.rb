@@ -23,6 +23,8 @@
 #                        cap) — hard STOP
 #   mission-scope        mission.json stated scope applied (E9.6 — informational)
 #   scope-mismatch-stop  a scoped dashboard name matched nothing in the workbook (exit 19)
+#   gap-out-of-scope     an ❌-unhandled gap attributed entirely to out-of-scope
+#                        worksheets was ledgered instead of stopped for (E9.6/A2)
 #   png-read-stale       a png-read.json predating this run's discovery fetch was
 #                        set aside (no stale-seed reuse — wave-1 #2a)
 #   png-wait-timeout     the Phase-1d dashboard-read WAIT-GATE deadline passed (exit 18)

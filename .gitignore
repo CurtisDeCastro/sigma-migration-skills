@@ -30,6 +30,14 @@ probe-artifacts.jsonl
 decisions.jsonl
 consent-answer.json
 migrate-full.log
+# A5 (wave-1 review union): more workdir-local run state — open-questions.json
+# (checkpoint artifact: embeds the workbook name + gap blurbs),
+# png-read.stale.json (set-aside stale dashboard read), offramps.jsonl and
+# loop-log.jsonl (off-ramp/loop trails; carry attributable operator text).
+open-questions.json
+png-read.stale.json
+offramps.jsonl
+loop-log.jsonl
 # evidence-ledger.jsonl is the E3.1 append-only per-run gate-verdict ledger
 # (shared/lib/evidence_ledger.rb); export-cache/ holds #7a's version-keyed raw
 # export payloads (shared/lib/export_pool.rb) — both live in the run workdir

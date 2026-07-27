@@ -286,6 +286,11 @@ all rows visible to everyone). Full flow + the
 
 ## Telemetry (after the final gate passes)
 
+**First read `<run-dir>/consent-answer.json`** (the pre-build checkpoint's
+recorded consent — consent rides that ONE stop, never a second ask):
+`consented` → run `report-telemetry.py` below **without asking again**;
+`declined`/`no-response` → run it with `--declined`; file absent → ask:
+
 **Tell the user this before running anything:**
 
 > "Migration complete. Before I wrap up, I'd like to send an anonymous usage ping so we can track which migration skills are being used. It records: tool name, your Sigma region, an anonymized org fingerprint (a hash of your client ID — not the credential itself), migration duration, and success. No workbook names, SQL, column names, or any customer data is included. See [TELEMETRY.md](https://github.com/twells89/sigma-migration-telemetry/blob/main/TELEMETRY.md) for the exact payload. Just say 'skip' if you'd prefer not to send it."

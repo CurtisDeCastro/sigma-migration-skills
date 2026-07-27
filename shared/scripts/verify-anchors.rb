@@ -615,13 +615,17 @@ else
   # before any export starts; every poll loop and download checks it.
   deadline = ExportPool::Deadline.new(opts[:timeout])
   # Bounded exports: anchors need only enough rows to find printed values —
-  # anchors×10k (min 50k) covers every field workbook while keeping a 5M-row
+  # anchors×10k, floored at the SHARED default (ExportPool::
+  # DEFAULT_EXPORT_ROW_LIMIT = collect-parity-actuals.rb's default; A3, wave-1
+  # review: rowLimit is part of the raw-export cache key, so a divergent
+  # default defeated every cross-script cache hit). Still keeps a 5M-row
   # detail grid from hanging the pool. --row-limit overrides; 0 = uncapped.
   row_limit =
     if opts.key?(:row_limit)
       opts[:row_limit].to_i.positive? ? [opts[:row_limit].to_i, ExportPool::SIGMA_EXPORT_HARD_CAP].min : nil
     else
-      [[anchors.length * 10_000, 50_000].max, ExportPool::SIGMA_EXPORT_HARD_CAP].min
+      [[anchors.length * 10_000, ExportPool::DEFAULT_EXPORT_ROW_LIMIT].max,
+       ExportPool::SIGMA_EXPORT_HARD_CAP].min
     end
 
   body = Sigma.request(:get, "/v2/workbooks/#{wb}/spec", accept: 'text/yaml')

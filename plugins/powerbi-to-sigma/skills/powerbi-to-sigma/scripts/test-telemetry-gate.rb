@@ -59,5 +59,40 @@ Dir.mktmpdir do |d|
   ok('invalid marker status fails', gate(d) == false)
 end
 
+Dir.mktmpdir do |d|
+  # 7. A1 (wave-1 review): consent recorded at the consolidated checkpoint
+  #    (<workdir>/consent-answer.json, written by the orchestrator) ENFORCES at
+  #    the send side — declined/no-response suppress the send even when the
+  #    driver forgets --declined; consented proceeds without a second ask.
+  File.write(File.join(d, 'consent-answer.json'),
+             JSON.generate('answer' => 'no-response', 'decided_by' => 'unattended-flag',
+                           'asked_at_checkpoint' => true))
+  ok('no-response checkpoint answer → send suppressed, marker written', report(d, '--duration', '5'))
+  rec = JSON.parse(File.read(File.join(d, 'telemetry-sent.json')))
+  ok('suppressed marker status declined', rec['status'] == 'declined')
+  ok('marker records the consent + its source',
+     rec['consent'] == 'no-response' && rec['consent_source'] == 'consent-answer.json')
+  ok('checkpoint-declined marker satisfies the gate', gate(d) == true)
+
+  File.write(File.join(d, 'consent-answer.json'), JSON.generate('answer' => 'declined'))
+  ok('declined checkpoint answer runs clean', report(d, '--duration', '5'))
+  rec = JSON.parse(File.read(File.join(d, 'telemetry-sent.json')))
+  ok('declined answer → declined marker', rec['status'] == 'declined' && rec['consent'] == 'declined')
+
+  File.write(File.join(d, 'consent-answer.json'), JSON.generate('answer' => 'consented'))
+  ok('consented checkpoint answer proceeds to the send path', report(d, '--duration', '5'))
+  rec = JSON.parse(File.read(File.join(d, 'telemetry-sent.json')))
+  ok('consented → sent|skipped (send attempted), never suppressed',
+     %w[sent skipped].include?(rec['status']))
+
+  # An unreadable answer file must fail OPEN to the ask-at-wrap-up contract
+  # (send path unchanged) — never crash, never silently decline.
+  File.write(File.join(d, 'consent-answer.json'), '{not json')
+  ok('unparseable consent file falls back to the normal send path', report(d, '--duration', '5'))
+  rec = JSON.parse(File.read(File.join(d, 'telemetry-sent.json')))
+  ok('fallback marker is sent|skipped with no consent fields',
+     %w[sent skipped].include?(rec['status']) && !rec.key?('consent'))
+end
+
 puts $fail.zero? ? "\nall telemetry-gate tests passed" : "\n#{$fail} FAILED"
 exit($fail.zero? ? 0 : 1)

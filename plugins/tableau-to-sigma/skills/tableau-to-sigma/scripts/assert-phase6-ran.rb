@@ -634,9 +634,17 @@ end
 # contract is 1:1). Registered here — after the usage abort above — so bad
 # invocations never mint entries. Success entries are appended by the
 # terminal block (which knows the derived verdict), not here.
+# A10 (wave-1 review): a plain `abort` is exit 1, which the map reads as gate
+# '1' — so a PRE-GATE env abort (creds, workdir, lib load) would mislabel the
+# ledger. gate_context_started flips true where gate-1 evaluation begins;
+# until then the ambiguous statuses (1–3, the gate-'1' band) are not
+# ledgered. A plain abort BETWEEN later gates still lands as gate '1' —
+# accepted, documented noise (the map is deliberately coarse).
+gate_context_started = false
 at_exit do
   _st = $!
   next unless _st.is_a?(SystemExit) && !_st.success?
+  next if _st.status <= 3 && !gate_context_started
   _g = EXIT_GATE_MAP[_st.status]
   next unless _g
   _ep = GATE_EVIDENCE_PATHS[_g]
@@ -1019,6 +1027,10 @@ if _superseded.any?
        'the current census counts THIS invocation only, never a silent zero.'
 end
 
+# Gate evaluation begins HERE — exits 1–3 are gate-1 verdicts from now on
+# (see the at_exit recorder's A10 guard above).
+gate_context_started = true
+
 if opts[:skip_parity]
   # CONDITIONAL waiver: --skip-parity-gate is rejected unless the anchors
   # oracle stands in. Parity can be genuinely unavailable (no source workspace
@@ -1353,7 +1365,9 @@ end
 # ---------------------------------------------------------------------------
 live_spec_memo = {}
 fetch_live_spec = lambda do |wb_id, base, tok|
-  memo_k = wb_id.to_s
+  # Keyed on [workbook, base] (A8, wave-1 review): a divergent per-gate base
+  # URL must never be silently served the OTHER environment's spec.
+  memo_k = [wb_id.to_s, base.to_s]
   return live_spec_memo[memo_k] if live_spec_memo.key?(memo_k)
   uri = URI("#{base}/v2/workbooks/#{wb_id}/spec")
   req = Net::HTTP::Get.new(uri)
@@ -1899,8 +1913,13 @@ else
         _rec = nil if _rec && opts[:flip_check_leaks] && !(_rec['detail'].is_a?(Hash) && _rec['detail']['check_leaks'])
         if _rec && EvidenceLedger.fresh?(_rec, evidence_key: ev_key.call, workdir: opts[:tab])
           _rec_results = (JSON.parse(File.read(results_path)) rescue nil)
-          _rec_rc = _rec['detail'].is_a?(Hash) ? _rec['detail']['probe_rc'] : nil
-          if _rec_results.is_a?(Array) && _rec_results.any? && _rec_rc.is_a?(Integer)
+          # A6 (wave-1 review): rc is DERIVED from the sha-verified raw rows
+          # (FlipGate.derive_rc mirrors probe-controls.rb's exit logic), never
+          # read from the ledger detail — `detail['probe_rc']` was the one
+          # non-sha-bound datum this acceptance consumed. The recorded rc
+          # stays in the ledger as audit metadata only.
+          if _rec_results.is_a?(Array) && _rec_results.any?
+            _rec_rc = FlipGate.derive_rc(_rec_results)
             _d, = FlipGate.decide(_rec_rc, _rec_results)
             if %i[ok fail].include?(_d)
               probe_rc = _rec_rc

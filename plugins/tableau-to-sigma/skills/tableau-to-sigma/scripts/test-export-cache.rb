@@ -219,9 +219,57 @@ Dir.mktmpdir do |dir|
 end
 
 # ============================================================================
-# Part 3 — ExportPool::Cache unit rules: age expiry + strict rowLimit keys.
+# Part 2b — CROSS-SCRIPT hit (A3, wave-1 review): verify-anchors.rb and
+# collect-parity-actuals.rb now share ONE default rowLimit
+# (ExportPool::DEFAULT_EXPORT_ROW_LIMIT), so an element exported by one script
+# is a cache HIT for the other in the same workdir — the wave's original
+# cross-script claim, previously defeated by the 50k-floor vs 100k defaults.
 # ============================================================================
-puts '-- Cache unit: age bound + strict rowLimit keying --'
+puts '-- cross-script: verify-anchors export → collect-parity-actuals ZERO-export hit --'
+Dir.mktmpdir do |dir|
+  stub_dir = File.join(dir, 'stub')
+  Dir.mkdir(stub_dir)
+  File.write(File.join(stub_dir, 'sigma_rest.rb'), STUB)
+  spec_path = File.join(dir, 'stub-spec.json')
+  write_spec(spec_path, 5)
+  File.write(File.join(dir, 'wb-readback.json'), File.read(spec_path))
+  log = File.join(dir, 'stub-log.jsonl')
+  env = { 'STUB_SPEC' => spec_path, 'STUB_LOG' => log }
+
+  # Script 1: verify-anchors exports BOTH elements at the shared default limit.
+  write_anchors(dir, [A1, A3]) # both match → exit 0
+  _o1, _e1, s1 = run_stubbed(stub_dir, env, File.join(SCRIPTS, 'verify-anchors.rb'),
+                             '--workdir', dir, '--workbook-id', 'wb', '--timeout', '60')
+  check(s1.exitstatus.zero?, "verify-anchors run exits 0 (got #{s1.exitstatus})", fails)
+  check(export_posts(log) == 2, "verify-anchors exported both elements (got #{export_posts(log)})", fails)
+  check(Dir[File.join(dir, 'export-cache', 'el-ok.csv.r100000*')].any?,
+        'entries keyed at the SHARED default rowLimit (.r100000)', fails)
+
+  # Script 2: collect-parity-actuals against the SAME workdir + element +
+  # default → ZERO export POSTs (the cross-script hit the review found dead).
+  plan_path = File.join(dir, 'parity-plan.json')
+  out_path = File.join(dir, 'parity-actuals.json')
+  File.write(plan_path, JSON.pretty_generate('charts' => [
+    { 'chart' => 'Region Chart', 'sigma_kind' => 'bar-chart',
+      'sigma_element_id' => 'el-ok', 'sigma_columns' => %w[c-r c-v2] }
+  ]))
+  File.write(log, '')
+  _o2, _e2, s2 = run_stubbed(stub_dir, env, File.join(SCRIPTS, 'collect-parity-actuals.rb'),
+                             '--plan', plan_path, '--workbook-id', 'wb',
+                             '--workbook-spec', File.join(dir, 'wb-readback.json'),
+                             '--out', out_path, '--timeout', '60', '--drift-warn-minutes', '0')
+  check(s2.exitstatus.zero?, "collect-parity-actuals exits 0 (got #{s2.exitstatus})", fails)
+  check(export_posts(log).zero?,
+        "collect-parity-actuals re-used verify-anchors' export — ZERO export POSTs (got #{export_posts(log)})", fails)
+  check(JSON.parse(File.read(out_path))['Region Chart'] == [['East', 100.0], ['West', 200.0]],
+        'actuals recomputed from the cross-script cached raw bytes', fails)
+end
+
+# ============================================================================
+# Part 3 — ExportPool::Cache unit rules: age expiry + rowLimit satisfaction
+# (exact key, plus the A3 ≥-acceptance for COMPLETE bodies) + A7 element_id.
+# ============================================================================
+puts '-- Cache unit: age bound + rowLimit satisfaction + element_id equality --'
 $LOAD_PATH.unshift File.expand_path('lib', SCRIPTS)
 module Sigma # minimal in-process stand-in; Cache itself never calls it
   class Error < StandardError; end
@@ -233,10 +281,38 @@ Dir.mktmpdir do |dir|
   check(c.fetch('el-x', 'csv', 100) == "H\n1\n", 'young same-key fetch hits', fails)
   check(c.fetch('el-x', 'csv', 100, now: Time.now + ExportPool::Cache::DEFAULT_MAX_AGE_S + 60).nil?,
         'entry older than 30 min → MISS (age bound)', fails)
-  check(c.fetch('el-x', 'csv', 50).nil?, 'different rowLimit → MISS (strict key)', fails)
+  # A3 ≥-acceptance: 1 data row < the cached r100 bound → the body is the
+  # COMPLETE result set, so it serves any SMALLER-bounded request too.
+  check(c.fetch('el-x', 'csv', 50) == "H\n1\n",
+        'A3: un-truncated cached r100 (complete) serves the r50 request', fails)
+  check(c.fetch('el-x', 'csv', 50, now: Time.now + ExportPool::Cache::DEFAULT_MAX_AGE_S + 60).nil?,
+        'the ≥-acceptance path still honors the age bound', fails)
+  check(c.fetch('el-x', 'csv', 200).nil?,
+        'a LARGER request is never served by a smaller-bounded entry', fails)
   check(c.fetch('el-x', 'json', 100).nil?, 'different format → MISS (strict key)', fails)
+  # A cached body that FILLED its own bound may be truncated — it can never
+  # stand in for a different limit (verdicts over it could differ).
+  c.store('el-t', 'csv', 2, "H\n1\n2\n")
+  check(c.fetch('el-t', 'csv', 2) == "H\n1\n2\n", 'filled entry still hits its EXACT key', fails)
+  check(c.fetch('el-t', 'csv', 1).nil?,
+        'a filled (possibly truncated) entry is a MISS for any other limit', fails)
+  # An UNCAPPED entry (complete by construction, below the API hard cap)
+  # serves any bounded request; a bounded entry never serves an uncapped one.
+  c.store('el-u', 'csv', nil, "H\n1\n")
+  check(c.fetch('el-u', 'csv', nil) == "H\n1\n", 'uncapped exact key hits', fails)
+  check(c.fetch('el-u', 'csv', 10) == "H\n1\n", 'A3: uncapped complete entry serves a bounded request', fails)
+  check(c.fetch('el-x', 'csv', nil).nil?, 'an uncapped request accepts only an uncapped entry', fails)
+  # A7: two element ids that differ only in scrubbed chars share an on-disk
+  # name — the meta element_id equality must refuse the cross-serve.
+  c.store('el_y', 'csv', 100, "H\nY\n")
+  check(c.fetch('el_y', 'csv', 100) == "H\nY\n", 'scrubbed-name element hits its own entry', fails)
+  check(c.fetch('el y', 'csv', 100).nil?,
+        "A7: 'el y' never cross-serves 'el_y' (meta element_id equality)", fails)
+  check(c.fetch('el y', 'csv', 50).nil?,
+        'A7 equality also guards the ≥-acceptance path', fails)
   c6 = ExportPool::Cache.new(dir, workbook_id: 'wb', doc_version: '6')
   check(c6.fetch('el-x', 'csv', 100).nil?, 'different doc version → MISS (strict key)', fails)
+  check(c6.fetch('el-x', 'csv', 50).nil?, 'different doc version → MISS on the ≥ path too', fails)
   cnil = ExportPool::Cache.new(dir, workbook_id: 'wb', doc_version: nil)
   check(!cnil.enabled? && cnil.fetch('el-x', 'csv', 100).nil? && cnil.store('el-x', 'csv', 100, 'x').nil?,
         'unknown doc version → cache disabled entirely (no reuse, no store)', fails)
@@ -244,6 +320,7 @@ Dir.mktmpdir do |dir|
   payload = Dir[File.join(dir, 'export-cache', 'el-x.csv.r100')].first
   File.write(payload, "H\nTAMPERED\n")
   check(c.fetch('el-x', 'csv', 100).nil?, 'payload bytes changed after store → MISS (sha binding)', fails)
+  check(c.fetch('el-x', 'csv', 50).nil?, 'tampered bytes are refused on the ≥ path too', fails)
 end
 
 # ============================================================================

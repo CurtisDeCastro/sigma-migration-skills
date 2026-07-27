@@ -129,6 +129,107 @@ Dir.mktmpdir do |d|
         'run stays unscoped on inferred provenance', fails)
 end
 
+puts 'T7 — A2: ❌ gap attributed ONLY to out-of-scope worksheets does NOT stop a scoped run'
+Dir.mktmpdir do |d|
+  Wave1Fixture.build(d, gaps: [{ 'name' => 'R scripts', 'count' => 1, 'status' => 'unhandled',
+                                 'blurb' => 'SCRIPT_REAL has no Sigma equivalent',
+                                 'worksheets' => ['Beta Trend'] }]) # Beta Detail only
+  write_mission(d, 'value' => ['Wave1 Fixture'], 'provenance' => 'stated',
+                   'dashboards' => ['Alpha Overview'])
+  out, st = Wave1Fixture.run(d, ['--folder', 'fold-x'])
+  check(st.exitstatus == 10,
+        "no gap stop — plain decisions checkpoint, exit 10 not 11 (got #{st.exitstatus})", fails)
+  check(out.include?('not stopped for'), 'the drop is LOUD, never silent', fails)
+  check(out.include?('workbook-wide gap report still lists them'),
+        'the drop line points back at the full report (scan stays workbook-wide)', fails)
+  oq = JSON.parse(File.read(File.join(d, 'open-questions.json')))
+  check(oq['status'] == 'decisions_needed' && (oq['gap_review'] || []).empty?,
+        'no gap_review folded in (the ❌ gap is out of scope)', fails)
+  offr = File.readlines(File.join(d, 'offramps.jsonl')).map { |l| JSON.parse(l) }
+  gos = offr.find { |r| r['kind'] == 'gap-out-of-scope' }
+  check(gos && gos['detail'].to_s.include?('R scripts') && gos['detail'].to_s.include?('Beta Trend'),
+        'dropped gap ledgered as a gap-out-of-scope off-ramp note', fails)
+  check(out.include?('gap stops, and build planning run scoped') &&
+        out.include?('gap scan itself is workbook-wide'),
+        'scope banner claims exactly what ships (A2 overclaim fix)', fails)
+end
+
+puts 'T8 — A2 fail-open: an UNATTRIBUTED ❌ gap still stops a scoped run (never silently skipped)'
+Dir.mktmpdir do |d|
+  Wave1Fixture.build(d, gaps: [
+                       { 'name' => 'Custom shapes', 'count' => 2, 'status' => 'unhandled',
+                         'blurb' => 'no worksheet attribution — must fail OPEN' },
+                       { 'name' => 'R scripts', 'count' => 1, 'status' => 'unhandled',
+                         'blurb' => 'attributed out of scope', 'worksheets' => ['Beta Trend'] }
+                     ])
+  write_mission(d, 'value' => ['Wave1 Fixture'], 'provenance' => 'stated',
+                   'dashboards' => ['Alpha Overview'])
+  out, st = Wave1Fixture.run(d, ['--folder', 'fold-x'])
+  check(st.exitstatus == 11, "unattributed gap fails OPEN → gap stop, exit 11 (got #{st.exitstatus})", fails)
+  check(out.include?('GAP REVIEW (unscouted): 1'),
+        'exactly ONE gap review item (the unattributed one; the attributed one dropped)', fails)
+  oq = JSON.parse(File.read(File.join(d, 'open-questions.json')))
+  names = (oq['gap_review'] || []).map { |g| g['name'] }
+  check(names == ['Custom shapes'], "gap_review carries only the fail-open item (got #{names.inspect})", fails)
+  # A9: the re-entry hint must NOT append --force (answers-only already
+  # proceeds through gaps AND records decided_by 'relayed').
+  check(out =~ /re-run this exact command adding:  --answers '<json>'   #/,
+        'A9: re-entry hint is answers-only (no --force suffix)', fails)
+  check(!out.match?(/--answers '<json>' --force/), 'A9: no --force appended to the hint', fails)
+  check(out.include?('--force/--yes'), '--force stays documented for the no-answers acceptance path', fails)
+end
+
+puts 'T9 — A2: scan-workbook-gaps.rb attributes worksheets (direct + calc hop; structural stays unattributed)'
+Dir.mktmpdir do |d|
+  twb = File.join(d, 'attr.twb')
+  File.write(twb, <<~XML)
+    <?xml version='1.0' encoding='utf-8' ?>
+    <workbook>
+      <datasources>
+        <datasource caption='F' name='federated.fact1'>
+          <column caption='R Score' datatype='real' name='[Calculation_777]' role='measure'>
+            <calculation class='tableau' formula='SCRIPT_REAL(&quot;library(x)&quot;, SUM([Sales]))' />
+          </column>
+          <column caption='Sales' datatype='real' name='[Sales]' role='measure' />
+        </datasource>
+      </datasources>
+      <worksheets>
+        <worksheet name='Gamma Script'>
+          <table>
+            <view>
+              <datasource-dependencies datasource='federated.fact1'>
+                <column caption='R Score' name='[Calculation_777]' />
+              </datasource-dependencies>
+            </view>
+            <pane><mark class='Bar' /></pane>
+          </table>
+        </worksheet>
+        <worksheet name='Delta Plain'>
+          <table><view><pane><mark class='Bar' /></pane></view></table>
+        </worksheet>
+      </worksheets>
+      <dashboards>
+        <dashboard name='D1'>
+          <device-layouts><device-layout name='Phone' /></device-layouts>
+          <zones><zone name='Gamma Script' /></zones>
+        </dashboard>
+      </dashboards>
+    </workbook>
+  XML
+  out_md = File.join(d, 'attr-gaps-report.md')
+  system(RbConfig.ruby, File.join(Wave1Fixture::SCRIPTS, 'scan-workbook-gaps.rb'), twb, out_md,
+         out: File::NULL, err: File::NULL)
+  doc = JSON.parse(File.read(File.join(d, 'attr-gaps-report.json')))
+  feats = doc['detected_features']
+  script_row = feats.find { |f| f['name'].to_s.include?('SCRIPT_') }
+  phone_row  = feats.find { |f| f['name'].to_s.include?('mobile-specific layout') }
+  check(script_row && script_row['status'] == 'unhandled', 'SCRIPT_* gap detected as unhandled', fails)
+  check(script_row && script_row['worksheets'] == ['Gamma Script'],
+        "calc-hop attribution: SCRIPT_* gap → the referencing worksheet only (got #{script_row && script_row['worksheets'].inspect})", fails)
+  check(phone_row && !phone_row.key?('worksheets'),
+        'dashboard-structural gap carries NO worksheets key (consumers fail OPEN)', fails)
+end
+
 puts
 if fails.empty?
   puts 'test-wave1-scope: ALL PASS'

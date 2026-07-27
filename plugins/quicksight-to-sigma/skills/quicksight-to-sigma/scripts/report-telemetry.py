@@ -110,6 +110,33 @@ if args.declined:
     _write_marker(args.workdir, {'status': 'declined', 'tool': args.tool})
     sys.exit(0)
 
+
+def _checkpoint_consent(workdir):
+    """Enforcing side of the consolidated-checkpoint consent leg (A1, wave-1
+    review): orchestrators that ask consent at the pre-build checkpoint record
+    the answer to <workdir>/consent-answer.json — consent rides that ONE stop,
+    so the wrap-up must not re-ask AND this script must honor the record even
+    if a driver runs it without flags. Returns the recorded answer string, or
+    None when absent/unreadable (→ the wrap-up ask governs, as before)."""
+    if not workdir:
+        return None
+    try:
+        with open(os.path.join(workdir, 'consent-answer.json'), encoding='utf-8-sig') as fh:
+            answer = (json.load(fh).get('answer') or '').strip()
+            return answer or None
+    except Exception:
+        return None
+
+
+_consent = _checkpoint_consent(args.workdir)
+if _consent and _consent != 'consented':
+    # 'declined' / 'no-response' (or anything not an explicit yes): recorded,
+    # nothing sent — same contract as --declined, plus the record's provenance.
+    print(f"\nTelemetry consent recorded at the checkpoint: {_consent} — nothing sent.")
+    _write_marker(args.workdir, {'status': 'declined', 'tool': args.tool,
+                                 'consent': _consent, 'consent_source': 'consent-answer.json'})
+    sys.exit(0)
+
 # Environment fingerprint (P0.3): prefer <workdir>/doctor.json, fall back to the
 # stable ~/.sigma-migration/doctor.json the doctor always writes.
 def _load_doctor(workdir):
