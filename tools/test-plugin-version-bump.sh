@@ -80,6 +80,15 @@ skill_file toolx-to-sigma v2; echo '{ not json' > plugins/toolx-to-sigma/.claude
 H1="$(commit_msg 'broken json')"
 run_guard "$BASE" "$H1"; check 0 "$(failed)" "unparseable plugin.json fails"
 
+new_repo "$TMP/b_nonobject"
+manifest "plugins/toolx-to-sigma" "1.0.0"; skill_file toolx-to-sigma v1
+BASE="$(commit_msg base)"
+skill_file toolx-to-sigma v2; printf '[1,2,3]\n' > plugins/toolx-to-sigma/.claude-plugin/plugin.json
+H1="$(commit_msg 'valid json, not an object')"
+run_guard "$BASE" "$H1"; check 0 "$(failed)" "valid-but-non-object plugin.json fails"
+grep -q "not valid JSON" "$TMP/out"; check 0 "$?" "non-object failure reports not-valid-JSON"
+! grep -q "Traceback" "$TMP/out"; check 0 "$?" "non-object JSON does not leak a Python traceback"
+
 echo "Part C — escape hatch"
 new_repo "$TMP/c_ok"
 manifest "plugins/toolx-to-sigma" "1.0.0"; skill_file toolx-to-sigma v1

@@ -42,17 +42,20 @@ while IFS= read -r sha; do
 done < <(git rev-list "$BASE..$HEAD" 2>/dev/null)
 
 # Print a plugin.json "version" from a ref; empty if the file is absent;
-# __BADJSON__ if unparseable; __NOVER__ if no non-empty string version.
+# __BADJSON__ if unparseable, OR valid JSON that is not an object (a dict is
+# required for .get("version") to be safe — [1,2,3]/null/a bare string must
+# never reach it); __NOVER__ if no non-empty string version.
 read_version() { # ref name
   git show "$1:plugins/$2/.claude-plugin/plugin.json" 2>/dev/null | python3 -c '
 import json, sys
 raw = sys.stdin.read()
 if raw == "": sys.exit(0)
 try: d = json.loads(raw)
-except Exception: print("__BADJSON__"); sys.exit(0)
+except Exception: d = None
+if not isinstance(d, dict): print("__BADJSON__"); sys.exit(0)
 v = d.get("version")
 print(v if isinstance(v, str) and v else "__NOVER__")
-'
+' 2>/dev/null
 }
 
 # strict semver-greater: exit 0 if head>base on (major,minor,patch); 1 if not;
@@ -73,9 +76,10 @@ listed_at_head() { # name — is it in marketplace.json at HEAD?
   git show "$HEAD:.claude-plugin/marketplace.json" 2>/dev/null | python3 -c '
 import json, sys
 try: d = json.load(sys.stdin)
-except Exception: sys.exit(1)
+except Exception: d = None
+if not isinstance(d, dict): sys.exit(1)
 sys.exit(0 if sys.argv[1] in [p.get("name") for p in d.get("plugins", [])] else 1)
-' "$1"
+' "$1" 2>/dev/null
 }
 
 fail=0
