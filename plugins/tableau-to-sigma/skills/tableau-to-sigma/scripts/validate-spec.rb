@@ -8,9 +8,15 @@
 # function names as non-fatal WARNs. Live [X/Y]-vs-DM column resolution is
 # scripts/assert-wb-refs-resolve.rb's job, not this validator's.
 #
+# W2.8: governed-metric refs ([Metrics/<name>] — the metric_binding.rb default
+# emission since #501) resolve against the DM METRICS CENSUS (spec + context
+# metrics arrays, --metrics FILE, or the metrics.json sidecar beside
+# --dm-context); a census miss is a hard ERROR, no census = unchanged error.
+#
 # Usage:
 #   ruby validate-spec.rb --type datamodel <spec.json>
-#   ruby validate-spec.rb --type workbook  --dm-context <dm-id-map.json> <spec.json>
+#   ruby validate-spec.rb --type workbook  --dm-context <dm-id-map.json> \
+#     [--metrics <workdir>/metrics.json] <spec.json>
 #
 #   <dm-id-map.json> is the output of post-and-readback.rb for the DM:
 #     { dataModelId: "...", pages: [{ id, name, elements: [{id, name}] }] }
@@ -26,6 +32,8 @@ opts = { type: nil, dm_context: nil }
 op = OptionParser.new do |p|
   p.on('--type T', %w[datamodel workbook]) { |v| opts[:type] = v }
   p.on('--dm-context PATH')                { |v| opts[:dm_context] = v }
+  p.on('--metrics PATH', 'DM metrics census for [Metrics/<name>] refs (the orchestrator\'s <workdir>/metrics.json, ' \
+                         '[{"name","formula"}]). Default: the metrics.json SIDECAR next to --dm-context, when present.') { |v| opts[:metrics] = v }
 end
 op.parse!
 abort('--type required (datamodel|workbook)') unless opts[:type]
@@ -35,8 +43,10 @@ spec = JSON.parse(File.read(ARGV[0]))
 
 # Known prefixes the validator considers valid for cross-element refs
 external_names = []  # element names that are sources OUTSIDE this spec (e.g., DM elements when validating a workbook)
+dm_ctx = nil         # the parsed --dm-context document (also scanned for the metrics census below)
 if opts[:type] == 'workbook' && opts[:dm_context]
   ctx = JSON.parse(File.read(opts[:dm_context]))
+  dm_ctx = ctx
   # Accept both shapes:
   #   - post-and-readback.rb output: { pages: [{ elements: [...] }] }
   #   - flat element list:           { elements: [...] }   (legacy / hand-written)
@@ -72,6 +82,61 @@ if opts[:type] == 'workbook' && opts[:dm_context]
             "Expected either {pages:[{elements:[...]}]} (post-and-readback output) or {elements:[...]} (flat). " \
             "Re-run post-and-readback.rb --type datamodel and pass its --out file."
     end
+  end
+end
+
+# ---- W2.8: DM metrics census for the [Metrics/<name>] pseudo-namespace -----
+# The governed-metric binder (lib/metric_binding.rb — the DEFAULT emission
+# path since #501) binds matching measures as [Metrics/<Metric Name>], a
+# literal namespace, NOT an element prefix. This validator knew only
+# warehouse-table / 'Custom SQL' / data-model passthrough prefixes, so every
+# governed-metrics workbook hard-errored here ("prefix \"Metrics\" unknown")
+# — a guaranteed exit-4 re-entry. Resolve [Metrics/<name>] against the DM
+# METRICS CENSUS instead. Census sources (union):
+#   - every element `metrics` array in THIS spec (DM specs define them;
+#     workbook elements may carry local ones);
+#   - the --dm-context document: per-element `metrics` arrays and/or a
+#     top-level `metrics` array (post-and-readback id-maps carry neither
+#     today; richer or hand-written contexts may);
+#   - an explicit --metrics FILE, or — automatically — the metrics.json
+#     SIDECAR next to --dm-context (the orchestrator writes
+#     <workdir>/metrics.json right where dm-ids.json lives).
+# Census present → a [Metrics/X] whose X is in the census is VALID; a miss is
+# a hard ERROR (adjudicated: error-when-checkable — a bare "allow the prefix"
+# would reopen a validation blind spot). NO census anywhere → unchanged
+# behavior: the prefix stays unknown and errors exactly as before, with a
+# routing hint. [Bogus/X] errors in every case (near-miss trajectory).
+metrics_census = nil # nil = no metrics array seen anywhere; Set = metric names
+census_add = lambda do |arr|
+  names = arr.map { |m| m.is_a?(Hash) ? m['name'] : m }.compact.map(&:to_s).reject(&:empty?)
+  metrics_census = (metrics_census || Set.new).merge(names)
+end
+census_scan = lambda do |doc|
+  next unless doc.is_a?(Hash)
+  census_add.call(doc['metrics']) if doc['metrics'].is_a?(Array)
+  els = (doc['pages'].is_a?(Array) ? doc['pages'] : []).flat_map { |p| p.is_a?(Hash) ? (p['elements'] || []) : [] }
+  els += doc['elements'] if doc['elements'].is_a?(Array)
+  els.each { |el| census_add.call(el['metrics']) if el.is_a?(Hash) && el['metrics'].is_a?(Array) }
+end
+census_scan.call(spec)
+census_scan.call(dm_ctx)
+metrics_file = opts[:metrics]
+if !metrics_file && opts[:dm_context]
+  sidecar = File.join(File.dirname(File.expand_path(opts[:dm_context])), 'metrics.json')
+  metrics_file = sidecar if File.exist?(sidecar)
+end
+if metrics_file
+  begin
+    mdoc = JSON.parse(File.read(metrics_file))
+    marr = mdoc.is_a?(Hash) ? mdoc['metrics'] : mdoc
+    if marr.is_a?(Array)
+      census_add.call(marr)
+    else
+      warn "WARN: metrics census #{metrics_file} carries no metrics array (expected [{\"name\":...}] or {\"metrics\":[...]}) — ignored"
+    end
+  rescue JSON::ParserError, Errno::ENOENT => e
+    abort "validate-spec.rb: --metrics #{metrics_file} unreadable: #{e.message[0, 120]}" if opts[:metrics]
+    warn "WARN: metrics sidecar #{metrics_file} unreadable (#{e.message[0, 80]}) — governed [Metrics/...] refs can only be census-checked from the spec/context"
   end
 end
 
@@ -209,11 +274,29 @@ spec.fetch('pages', []).each do |page|
 
       f.scan(/\[([^\]]+)\]/).flatten.each do |ref|
         if ref.include?('/')
-          prefix = ref.split('/', 1)[0] # bug-fix: split with limit 2
-          prefix = ref.split('/', 2)[0]
+          prefix = ref.split('/', 2)[0] # split with limit 2: the name half may itself contain '/'
+          # W2.8: governed-metric refs resolve against the METRICS CENSUS, not
+          # element prefixes. A census HIT is valid — and is NOT an element
+          # ref, so the cross-element render-500 guard below must not judge
+          # it. A census MISS is a hard ERROR (error-when-checkable), unless
+          # an element literally named "Metrics" makes the prefix known — then
+          # the pre-census checks judge the ref exactly as before.
+          if prefix == 'Metrics' && metrics_census
+            mname = ref.split('/', 2)[1].to_s
+            next if metrics_census.include?(mname)
+            unless own_prefixes.include?(prefix) || all_known_set.include?(prefix)
+              listed = metrics_census.to_a.sort
+              errors << "#{name}.#{col['name']}: ref [#{ref}] — metric #{mname.empty? ? '(empty name)' : "\"#{mname}\""} is not in the DM metrics census " \
+                        "(#{listed.empty? ? 'the census is EMPTY' : "known metrics: #{listed.join(', ')}"}). " \
+                        'The governed-metric binder emits census names only — if the census is stale, re-run with the run\'s ' \
+                        'metrics.json (--metrics PATH, or the sidecar beside --dm-context).'
+              next
+            end
+          end
           unless own_prefixes.include?(prefix) || all_known_set.include?(prefix)
+            hint = prefix == 'Metrics' && !metrics_census ? ' — governed-metric refs need the DM metrics census: pass --metrics <workdir>/metrics.json (or keep metrics.json beside --dm-context)' : ''
             errors << "#{name}.#{col['name']}: ref [#{ref}] — prefix \"#{prefix}\" unknown " \
-                      "(known: #{(own_prefixes + all_known_set).to_a.sort.join(', ')})"
+                      "(known: #{(own_prefixes + all_known_set).to_a.sort.join(', ')})#{hint}"
           end
           # v5.3 RENDER-500 guard: a formula referencing a workbook element
           # that is NOT this element's source opaquely 500s EVERY png
