@@ -32,6 +32,12 @@
       ]
     },
     {
+      "canonical": "shared/lib/kpi_card.rb",
+      "targets": [
+        "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/lib/kpi_card.rb"
+      ]
+    },
+    {
       "canonical": "shared/lib/coverage_catalog.rb",
       "targets": [
         "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/lib/coverage_catalog.rb",
