@@ -67,7 +67,9 @@ def run_bootstrap(home, path_dirs, *args)
   env = { 'HOME' => home, 'USERPROFILE' => home, 'PATH' => path_dirs.join(':'),
           # keep the doctor's networked probes off — offline test
           'SIGMA_SKIP_CRED_SMOKE' => '1', 'SIGMA_SKIP_VERSION_CHECK' => '1' }
-  out, st = Open3.capture2e(env, '/bin/bash', BOOTSTRAP, *args)
+  # unsetenv_others: the parent's env (SIGMA_* creds on a dev machine) must
+  # not leak into the child — the hash above IS the whole child environment.
+  out, st = Open3.capture2e(env, '/bin/bash', BOOTSTRAP, *args, unsetenv_others: true)
   [st.exitstatus, out]
 end
 

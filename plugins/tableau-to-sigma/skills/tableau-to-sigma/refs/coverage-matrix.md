@@ -43,7 +43,7 @@ Sourced from the translator code, not aspiration. Last reconciled 2026-07-10.
 | `IF/THEN/ELSEIF/ELSE/END` | nested `If(...)` | ✅ | missing ELSE → `null` arm |
 | `IIF(c,t,f)` | `If(c,t,f)` | ✅ | |
 | `CASE WHEN` | nested `If(field = v, r, …)` | ✅ | |
-| `ZN(x)` | `Coalesce(x, 0)` | ✅ | |
+| `ZN(x)` | `Zn(x)` | ✅ | native null-guard, name-mapped 2026-07-25 (nesting-safe for `ZN(SUM(…))`); the chart-path table-calc translator still emits `Coalesce(x, 0)` — same semantics |
 | `IFNULL(x,y)` / `IFERROR(x,y)` | `Coalesce(x, y)` | ✅ | |
 | `ISNULL(x)` | `IsNull(x)` | ✅ | distinct from `= ''` |
 | `ATTR(x)` | `x` (unwrapped) | ✅ | |
@@ -78,9 +78,10 @@ All via the function map (rename only — **no argument transformation**).
 | `DATENAME('month',d)` | `MonthName(d)` | ✅ | weekday→`WeekdayName`; numeric units → `Text(Year(d))` etc. |
 | `DATETRUNC` `DATEADD` `DATEDIFF` | `DateTrunc` `DateAdd` `DateDiff` | ✅ | unit single→double-quoted; arg order preserved |
 | `DATEPARSE('fmt',str)` | `DateParse(str,"%Y…")` | ✅ | resolves to datetime (verified 2026-06-15); **arg order reversed** + Java tokens→strftime — a verify warning is emitted |
-| `MAKEDATE` `DATE` `DATETIME` | `MakeDate` `Date` `Datetime` | ✅ | |
+| `MAKEDATE` `DATE` `DATETIME` | `MakeDate` `Date` `Date` | ✅ | `DATETIME`→`Date` (fixed 2026-07-25): Sigma has no `Datetime()` — `Date()` is the cast to the datetime type |
 | `TODAY` `NOW` | `Today` `Now` | ✅ | |
-| `YEAR/MONTH/DAY/HOUR/MINUTE/SECOND/WEEK/QUARTER` | same-named | ✅ | |
+| `YEAR/MONTH/DAY/HOUR/MINUTE/SECOND/QUARTER` | same-named | ✅ | |
+| `WEEK(d)` | `DatePart("week", d)` | ✅ | Sigma has no `Week()` — rewritten, not same-named (see header note; live-probe verified) |
 
 ## 6. Aggregates
 

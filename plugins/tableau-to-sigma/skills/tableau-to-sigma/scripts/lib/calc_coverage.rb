@@ -186,13 +186,13 @@ module CalcCoverage
 
   # --------------------------------------------------------------- coverage
 
-  # Lazy-loaded catalog wrapper: {"provenance", "functions" => [185 entries],
+  # Lazy-loaded catalog wrapper: {"provenance", "functions" => [187 entries],
   # "keywords" => {"logicals", "lod"}}.
   def catalog
     @catalog ||= JSON.parse(File.read(CATALOG_PATH))
   end
 
-  # {name => entry} over the 185-entry catalog, keyed by uppercase name.
+  # {name => entry} over the 187-entry catalog, keyed by uppercase name.
   def catalog_index
     @catalog_index ||= begin
       idx = {}
@@ -211,7 +211,7 @@ module CalcCoverage
   #
   #   covered    — sorted names seen in formulas AND in `translated`.
   #   uncovered  — [{name:, count:, formulas_sample: [...]}] for names in the
-  #                185-entry catalog but NOT in `translated` (named residue —
+  #                187-entry catalog but NOT in `translated` (named residue —
   #                the whole point of classifying before building). Sorted by
   #                count desc, then name.
   #   unknown    — sorted names not in the catalog at all (typos, extensions,

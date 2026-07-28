@@ -51,10 +51,12 @@ puts 'Part 0 — catalog integrity (lib/tableau_functions.json)'
 cat = CalcCoverage.catalog
 check(cat.is_a?(Hash) && cat['provenance'].to_s.include?('tflex'),
       'catalog wrapper carries tflex provenance', fails)
-check(cat['functions'].is_a?(Array) && cat['functions'].size == 185,
-      "catalog has 185 function entries (got #{cat['functions'] ? cat['functions'].size : 'none'})", fails)
+# 187 = tflex's 185 + REGEXP_REPLACE + MODEL_EXTENSION_STR (added 2026-07-25 —
+# real Tableau functions whose absence bucketed field workbooks as unknown/typo).
+check(cat['functions'].is_a?(Array) && cat['functions'].size == 187,
+      "catalog has 187 function entries (got #{cat['functions'] ? cat['functions'].size : 'none'})", fails)
 names = cat['functions'].map { |e| e['name'] }
-check(names.uniq.size == 185, 'catalog names are unique', fails)
+check(names.uniq.size == 187, 'catalog names are unique', fails)
 check(cat['functions'].all? { |e| e.key?('minArgs') && e.key?('maxArgs') && e.key?('category') && e.key?('sigmaEquivalent') },
       'every entry carries minArgs/maxArgs/category/sigmaEquivalent', fails)
 check(cat['keywords'] == { 'logicals' => CalcCoverage::KEYWORDS, 'lod' => CalcCoverage::LOD_KEYWORDS },
@@ -203,7 +205,7 @@ cov = CalcCoverage.coverage(formulas, translated: translated)
 check(cov[:covered] == %w[DATEDIFF IFNULL],
       "covered = translated-set hits, sorted (got #{cov[:covered].inspect})", fails)
 check(cov[:unknown] == ['FOOBAR'],
-      "unknown = names absent from the 185-entry catalog (got #{cov[:unknown].inspect})", fails)
+      "unknown = names absent from the catalog (got #{cov[:unknown].inspect})", fails)
 check(cov[:uncovered].map { |u| u[:name] } == ['UPPER'],
       'uncovered = in-catalog but untranslated (UPPER, spec F19)', fails)
 upper = cov[:uncovered][0]

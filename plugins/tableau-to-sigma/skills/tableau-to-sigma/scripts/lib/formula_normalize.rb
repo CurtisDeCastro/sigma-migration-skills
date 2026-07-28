@@ -32,15 +32,18 @@ require_relative 'sigma_functions'
 module FormulaNormalize
   # Sigma functions named across the skill's refs that are missing from the
   # canonical whitelist in sigma_functions.rb:
-  #   - Week, Datetime — refs/coverage-matrix.md (`WEEK` -> `Week`,
-  #     `DATETIME` -> `Datetime`, both marked verified).
   #   - Ltrim, Rtrim — the spelling refs/coverage-matrix.md documents and
   #     converter/tableau.mjs emits (`LTRIM` -> `Ltrim`). sigma_functions.rb
   #     lists `LTrim`/`RTrim`; both spellings are treated as KNOWN (neither is
   #     ever rewritten), but pure case-variants (`LTRIM(`, `ltrim(`) normalize
   #     to the converter's spelling so normalized output matches what the
   #     converter path has posted successfully.
-  EXTRA_FUNCTIONS = %w[Week Datetime Ltrim Rtrim].freeze
+  # Week and Datetime were REMOVED (2026-07-25): neither exists in Sigma (absent
+  # from the live function index; converter probe logged "Unknown function:
+  # Week") — the stale coverage-matrix rows that blessed them defeated the
+  # validator. The converter now emits DatePart("week", …) / Date(…) instead;
+  # a WEEK(/DATETIME( leak must surface as unknown, not get case-normalized.
+  EXTRA_FUNCTIONS = %w[Ltrim Rtrim].freeze
 
   KNOWN_FUNCTIONS = (SigmaFunctions::ALL + EXTRA_FUNCTIONS).uniq.freeze
   KNOWN_EXACT = KNOWN_FUNCTIONS.to_set.freeze

@@ -364,7 +364,7 @@
   {
    "fn": "DATETIME",
    "category": "typeconv",
-   "sigma": "Datetime",
+   "sigma": "Date",
    "status": "spec",
    "probe": "DATETIME(\"2024-01-15 10:30:00\")"
   },
@@ -427,7 +427,7 @@
   {
    "fn": "WEEK",
    "category": "date",
-   "sigma": "Week",
+   "sigma": "DatePart(\"week\", d)",
    "status": "spec",
    "probe": "WEEK(MAKEDATE(2024, 1, 15))"
   },
@@ -581,7 +581,7 @@
   {
    "fn": "ZN",
    "category": "logical",
-   "sigma": "Coalesce(x,0)",
+   "sigma": "Zn",
    "status": "spec",
    "probe": "ZN([DISCOUNT_AMOUNT])"
   },

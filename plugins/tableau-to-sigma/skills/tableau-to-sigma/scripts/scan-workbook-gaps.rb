@@ -500,7 +500,7 @@ def analyze_fields(doc, content)
   # 4b. Calc-coverage census (v5.0, tflex-derived): tokenize every calc formula
   #     with the MASKING tokenizer (comments/strings/field-refs masked first, so
   #     'IF(' inside a string literal never false-hits) and extract the function
-  #     names actually used. Functions absent from the 185-entry official
+  #     names actually used. Functions absent from the 187-entry official
   #     catalog are named up front — a typo'd or extension function becomes a
   #     scoping fact here instead of a silent formula error after the build.
   fn_census = Hash.new(0)

@@ -59,8 +59,8 @@ assert isinstance(d["agent_vision"], bool), \
     "agent_vision is caller-asserted via SIGMA_AGENT_VISION (default false)"
 assert isinstance(d["model_hint"], str)
 assert isinstance(d["sandbox_hint"], str)
-assert set(d["cred_smoke"]) == {"sigma", "tableau"}, d["cred_smoke"]
-assert all(v in ("pass", "fail", "skipped") for v in d["cred_smoke"].values()), d["cred_smoke"]
+assert set(d["cred_smoke"]) == {"sigma", "tableau", "looker"}, d["cred_smoke"]
+assert all(v in ("pass", "fallback", "fail", "skipped") for v in d["cred_smoke"].values()), d["cred_smoke"]
 assert isinstance(d["pass"], bool) and isinstance(d["failures"], list)
 assert all(isinstance(f, str) for f in d["failures"])
 assert d["pass"] == (rc == 0), f"pass={d['pass']} but doctor exited {rc}"

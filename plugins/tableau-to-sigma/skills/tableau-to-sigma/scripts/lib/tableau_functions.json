@@ -535,7 +535,7 @@
       "maxArgs": 1,
       "category": "user",
       "sigmaEquivalent": null,
-      "notes": "Sigma: CurrentUserAttribute"
+      "notes": "Sigma: CurrentUserAttributeText (the live function name — no bare CurrentUserAttribute exists; the converter emits CurrentUserAttributeText)"
     },
     {
       "name": "USERATTRIBUTEINCLUDES",
@@ -602,6 +602,14 @@
       "notes": "External model call; not portable"
     },
     {
+      "name": "MODEL_EXTENSION_STR",
+      "minArgs": 2,
+      "maxArgs": null,
+      "category": "table_calc",
+      "sigmaEquivalent": null,
+      "notes": "External model call; not portable. Current Tableau docs spelling — kept alongside legacy MODEL_EXTENSION_STRING so modern .twb files don't bucket as unknown-function (added 2026-07-25 beyond the tflex set)"
+    },
+    {
       "name": "MODEL_EXTENSION_STRING",
       "minArgs": 2,
       "maxArgs": null,
@@ -638,8 +646,8 @@
       "minArgs": 1,
       "maxArgs": 2,
       "category": "table_calc",
-      "sigmaEquivalent": "Rank()",
-      "notes": "tflex window-serialization handler ExpressionToSql.js:224-227/255-258 emits RANK() OVER (...)"
+      "sigmaEquivalent": "Rank({0}, \"desc\")",
+      "notes": "tflex window-serialization handler ExpressionToSql.js:224-227/255-258 emits RANK() OVER (...). Direction is REQUIRED in the template: Sigma Rank([column],[direction]) defaults to \"asc\" while Tableau RANK defaults descending — a bare Rank() inverts every rank (matches the converter's Rank(agg, \"desc\") emission)"
     },
     {
       "name": "RANK_DENSE",
@@ -654,8 +662,8 @@
       "minArgs": 1,
       "maxArgs": 2,
       "category": "table_calc",
-      "sigmaEquivalent": "Rank()",
-      "notes": "tflex ExpressionToSql.js:228-230/259-261 approximates with plain RANK()"
+      "sigmaEquivalent": "Rank({0}, \"desc\")",
+      "notes": "tflex ExpressionToSql.js:228-230/259-261 approximates with plain RANK(). Direction required (Sigma default asc, Tableau default desc). VERIFY tie behavior: modified-competition ranking gives ties the LAST position in the tie block; Sigma Rank gives the first — an approximation, not an equivalent"
     },
     {
       "name": "RANK_PERCENTILE",
@@ -968,6 +976,14 @@
       "category": "additional_passthrough",
       "sigmaEquivalent": null,
       "notes": null
+    },
+    {
+      "name": "REGEXP_REPLACE",
+      "minArgs": 3,
+      "maxArgs": 3,
+      "category": "additional_passthrough",
+      "sigmaEquivalent": "RegexpReplace({0}, {1}, {2})",
+      "notes": "Sigma RegexpReplace, same arg order (string, pattern, replacement); converter maps it. Added 2026-07-25 beyond the tflex set — absence made scan-workbook-gaps bucket a real Tableau function as unknown/typo"
     },
     {
       "name": "GET_JSON_OBJECT",

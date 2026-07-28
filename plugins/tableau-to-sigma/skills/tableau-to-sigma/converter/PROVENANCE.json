@@ -19,6 +19,18 @@
         "comment-only hygiene neutralization of a workbook name in the multi-datasource comment (no behavior change)"
       ],
       "upstream_pr": null
+    },
+    {
+      "commit": "worktree (uncommitted at patch time — becomes the landing commit of the PR #508 calc-hotfix batch)",
+      "summary": "Calc-translation hotfixes (PR #508 speed-program batch, live-verified bugs) applied to the vendored bundle in place AND to the local vendor source tree (scripts/vendor/sigma-data-model-mcp src/formulas.ts + rebuilt build/ + updated src tests), pending upstreaming. Fallback path used deliberately: the local upstream clone does not contain source_commit d769bec (divergent history, dirty src/tableau.ts) and re-bundling from any source tree would drop the unlanded d8a049a bundle-only patches above.",
+      "changes": [
+        "ZN → native Sigma Zn() via TABLEAU_FUNC_MAP name-map; removed the single-paren Coalesce($1, 0) regex that emitted malformed Coalesce(Sum([x], 0)) for ZN(AGG(...)) — the dominant field null-guard idiom",
+        "removed Coalesce from _TEXT_FN_RE: its type follows its args, and counting it as text-producing turned numeric ZN(a)+ZN(b) addition into silent string concat (&); _isTextOperand instead recurses into Coalesce's top-level args, so string-literal guard chains (Coalesce([a], \"x\") + …) still convert + to & while numeric or unknown-type guards keep +",
+        "start-of-week literal handling: DATETRUNC 3rd arg / 4-arg DATEDIFF 'monday' is still dropped (Sigma has no start-of-week slot) but now emits a verify warning instead of silent week-boundary drift; the drop is scoped to DateTrunc/DateDiff via a balanced-paren walk so other calls keeping a weekday string as a real last argument (e.g. CONTAINS(x, 'monday')) are no longer mangled",
+        "stopped emitting non-existent Sigma functions: DATETIME → Date (was Datetime), DATEPART('weekday'/'dayofweek') → Weekday(date) with a numbering-verify warning (was DayOfWeek), DATENAME('week') → Text(DatePart(\"week\", …)) at the source branch (was Text(Week(…)))",
+        "un-staled the window-untranslatable list: WINDOW_CORR/WINDOW_VAR/WINDOW_COUNT now map to MovingCorr/MovingVariance/MovingCount (offset forms spanning the current row; all three present in the Sigma function index, verified 2026-07-25); population variants WINDOW_VARP/COVARP/STDEVP stay untranslatable; SIGMA_CHART_ONLY_WINDOW_RE extended with MovingVariance/MovingCorr so the DM router keeps refusing them"
+      ],
+      "upstream_pr": "twells89/sigma-data-model-mcp#111 (upstream commit 60a0355)"
     }
   ],
   "_upstream_and_revendor_tasks": [
