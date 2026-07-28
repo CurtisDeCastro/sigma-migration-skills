@@ -59,6 +59,10 @@
 #     both (explicit operator budget wins: no ceiling, no pre-abort). A blown
 #     budget abandons the task (never retried) and discovery proceeds thin,
 #     fail-open, exit 0.
+#   * BOUNDED membership probe: the serial pre-pool dashboard-membership
+#     GraphQL call carries its own budget (MEMBERSHIP_BUDGET, 15s/attempt,
+#     2 attempts) so a wedged Metadata API cannot stall pool start; a blown
+#     budget fails open to the .twb pre-parse / all-views path.
 #
 # Usage:
 #   eval "$(scripts/get-tableau-token.sh)"
@@ -155,6 +159,16 @@ DL_BUDGET_EXTRACT = 300 # includeExtract=true re-fetch, floor
 DL_EXTRACT_CEIL   = 900 # derived-budget ceiling; beyond it → pre-abort
 DL_FLOOR_MB_S     = 1.0 # conservative sustained throughput floor (MB/s)
 
+# W2.20 fix (review finding): the dashboard-membership probe runs SERIALLY
+# before the pool starts — under the W2.21 default (max_attempts 4, no budget)
+# a wedged Metadata API could stall the twb download, every CSV, and the PNG
+# worker behind a probe whose only job is to make the run FASTER. So it gets
+# its own small per-attempt budget and a 2-attempt cap. Fail-open: a blown
+# budget abandons the probe (non-retryable message) and scoping falls to the
+# .twb pre-parse / all-views path. TABLEAU_MEMBERSHIP_BUDGET seconds overrides
+# (emergencies + offline tests; healthy probes answer in ~1-2s).
+MEMBERSHIP_BUDGET = [(ENV['TABLEAU_MEMBERSHIP_BUDGET'] || '15').to_i, 1].max
+
 # Seconds the extract re-fetch may plausibly need, from Get Workbook's size
 # attribute (megabytes): size at the throughput floor + 60s grace. Derivation
 # input for both the scaled budget and the before-first-byte pre-abort.
@@ -178,14 +192,18 @@ end
 # re-download uses 2 — its 120s×4 worst case dominated failed discoveries).
 # budget: PER-ATTEMPT wall-clock bound (W2.21). The timeout message avoids
 # every RETRYABLE token ("#{n}s" keeps \b400\b from matching a 400s budget),
-# so a blown budget is abandoned — never retried into a 4× burn.
-def run_task(name, max_attempts: 4, budget: nil)
+# so a blown budget is abandoned — never retried into a 4× burn. budget_msg
+# replaces the default download wording for non-download tasks (the
+# membership probe) — any custom message MUST keep avoiding RETRYABLE tokens,
+# or a blown budget re-enters the retry loop it exists to skip.
+def run_task(name, max_attempts: 4, budget: nil, budget_msg: nil)
   t0 = Time.now.to_f
   attempts = 0
   begin
     attempts += 1
     result = if budget
                Timeout.timeout(budget, nil,
+                               budget_msg ||
                                "download budget #{budget}s exhausted (--download-budget raises it)") { yield }
              else
                yield
@@ -326,7 +344,10 @@ end
 # moment it lands (freshly-published workbooks lag the metadata index —
 # membership may not exist there yet when discovery launches). UNRESOLVABLE
 # membership falls open to ALL view CSVs: scoping is a speed lever, never a
-# correctness gate, and the fallback is always stated, never silent.
+# correctness gate, and the fallback is always stated, never silent. The probe
+# itself is BOUNDED (MEMBERSHIP_BUDGET per attempt, 2 attempts): it runs
+# serially before the pool, so a wedged Metadata API must never delay the very
+# work scoping exists to speed up.
 dash_targets = opts[:dashboards] || []
 scoped_views = nil
 membership_pending = false # true → the twb watcher owns the CSV enqueue
@@ -334,7 +355,10 @@ if dash_targets.any?
   if caps['metadata_api'] == false
     log 'scope: Metadata API is OFF — dashboard membership defers to the .twb pre-parse'
   else
-    dashes = run_task('dashboard-membership') { Tableau.graphql_workbook_dashboards(wb['id']) }
+    dashes = run_task('dashboard-membership', max_attempts: 2, budget: MEMBERSHIP_BUDGET,
+                      budget_msg: "membership budget #{MEMBERSHIP_BUDGET}s exhausted — failing open") do
+      Tableau.graphql_workbook_dashboards(wb['id'])
+    end
     if dashes && !dashes.empty?
       membership = {}
       dashes.each { |d| membership[d['name'].to_s] = (d['sheets'] || []) }
@@ -344,7 +368,8 @@ if dash_targets.any?
       log "scope: #{dash_targets.map(&:inspect).join(', ')} → #{scoped_views.size} member-sheet CSV(s) " \
           "of #{views.size} view(s) (membership: metadata-api)"
     else
-      log 'scope: membership not resolvable from the Metadata API (workbook unindexed or names unmatched)'
+      log 'scope: membership not resolvable from the Metadata API ' \
+          '(workbook unindexed, names unmatched, or probe abandoned)'
     end
   end
   membership_pending = scoped_views.nil? && !opts[:skip_content]

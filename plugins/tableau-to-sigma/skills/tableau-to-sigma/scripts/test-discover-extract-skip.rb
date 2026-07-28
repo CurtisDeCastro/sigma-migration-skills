@@ -58,6 +58,15 @@ STUB = <<~'RUBY'
       wb
     end
     def self.graphql_workbook_dashboards(_luid)
+      if ENV['STUB_MEMBERSHIP_HANG']
+        # Wedged Metadata API: the response never completes and bytes keep
+        # "arriving", so only the membership wall-clock budget can end this.
+        # Sleeps in slices for ~30s; the budget must interrupt long before.
+        150.times { sleep 0.2 }
+        raise Error, 'stub membership hang ran to completion — budget never fired'
+      end
+      # Flaking Metadata API: RETRYABLE (502) failure on every attempt.
+      raise Error, '502 stub: metadata api flaking' if ENV['STUB_MEMBERSHIP_502']
       # Metadata API off/unindexed unless the test provides membership JSON.
       raise Error, 'stub: metadata api unavailable' unless ENV['STUB_MEMBERSHIP']
       JSON.parse(ENV['STUB_MEMBERSHIP'])
@@ -286,6 +295,55 @@ Dir.mktmpdir do |tmp|
   check(csvs_of.call(log11).size == 5,
         "bogus --dashboard target fetches ALL view CSVs (got #{csvs_of.call(log11).size})", fails)
   check(out =~ /UNRESOLVABLE/, 'bogus target is reported unresolvable', fails)
+
+  # (C6) MEMBERSHIP BUDGET TRIP (fix pass): the dashboard-membership probe runs
+  # SERIALLY before the pool, so a wedged Metadata API must be abandoned within
+  # the probe's own wall-clock budget on ONE attempt (non-retryable message),
+  # after which scoping still resolves via the .twb pre-parse and the run
+  # completes. Net read timeouts never fire on a hang that dribbles — only the
+  # budget can end it.
+  retryable = /\b(429|408|400|50[234])\b|Too Many Requests|timed? ?out|Timeout/i # mirrors RETRYABLE
+  log14 = File.join(tmp, 'fetch14.log')
+  File.write(log14, '')
+  t0 = Time.now
+  code, out = run_discover(script, File.join(tmp, 'out14'), log14, '--dashboard', 'Overview',
+                           env: { 'STUB_VIEWS' => stub_views, 'STUB_TWB_DASH' => '1',
+                                  'STUB_MEMBERSHIP_HANG' => '1', 'TABLEAU_MEMBERSHIP_BUDGET' => '2' })
+  wall = Time.now - t0
+  check(code == 0, "membership-hang run exits 0 — fail-open (exit #{code})", fails)
+  check(wall < 20, "wedged membership probe abandoned within budget (wall #{wall.round(1)}s < 20s, budget 2s)", fails)
+  check(csvs_of.call(log14).sort == ['csv v0', 'csv v1'],
+        ".twb pre-parse still scopes after the probe trips (got #{csvs_of.call(log14).sort.inspect})", fails)
+  check(out.include?('membership: twb-preparse'), 'post-trip scope line states the twb-preparse source', fails)
+  tj14 = timings(File.join(tmp, 'out14'))
+  probe = tj14 && (tj14['tasks'] || []).find { |t| t['task'] == 'dashboard-membership' }
+  check(probe && probe['ok'] == false && probe['attempts'] == 1 &&
+        probe['error'].to_s =~ /membership budget/ && probe['error'].to_s !~ retryable,
+        'blown membership budget abandoned on ONE attempt, non-retryable message in timings.json ' \
+        "(got #{probe ? [probe['attempts'], probe['error']].inspect : 'no task'})", fails)
+
+  # (C7) NO FALSE TRIP: the default membership budget never clips a healthy
+  # probe — C1's metadata-api resolution succeeded first try under it.
+  tj7 = timings(File.join(tmp, 'out7'))
+  mp = tj7 && (tj7['tasks'] || []).find { |t| t['task'] == 'dashboard-membership' }
+  check(mp && mp['ok'] == true && mp['attempts'] == 1,
+        'default membership budget: healthy probe untouched (ok, one attempt)', fails)
+
+  # (C8) RETRYABLE CAP: a flaking (502) Metadata API burns at most ONE backoff
+  # before the pool starts — the probe is capped at 2 attempts, then fails
+  # open to the .twb pre-parse.
+  log15 = File.join(tmp, 'fetch15.log')
+  File.write(log15, '')
+  code, out = run_discover(script, File.join(tmp, 'out15'), log15, '--dashboard', 'Overview',
+                           env: { 'STUB_VIEWS' => stub_views, 'STUB_TWB_DASH' => '1',
+                                  'STUB_MEMBERSHIP_502' => '1' })
+  check(code == 0, "membership-flake run exits 0 — fail-open (exit #{code})", fails)
+  check(csvs_of.call(log15).sort == ['csv v0', 'csv v1'],
+        ".twb pre-parse still scopes after the flaking probe (got #{csvs_of.call(log15).sort.inspect})", fails)
+  tj15 = timings(File.join(tmp, 'out15'))
+  fp = tj15 && (tj15['tasks'] || []).find { |t| t['task'] == 'dashboard-membership' }
+  check(fp && fp['ok'] == false && fp['attempts'] == 2,
+        "flaking membership probe capped at 2 attempts (got #{fp ? fp['attempts'].inspect : 'no task'})", fails)
 
   # ---- (D) W2.20 dedicated PNG worker --------------------------------------
 
