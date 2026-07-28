@@ -26,9 +26,11 @@ include DomoSigma   # display_name, rand_id, inode_id — shared with build-work
 
 OUT = ENV['DOMO_DISCOVERY_DIR'] || File.expand_path('../discovery', __dir__)
 
-# C3 reuse-check: consume find-or-pick-dm.rb's decision.
+# C3 reuse-check: consume find-or-pick-dm.rb's real --out file (dm-match.json),
+# shaped {recommended_dm_id, auto_picked, ...} — the same shape the sibling
+# cognos/looker converters key off of.
 def reuse_decision(dir)
-  path = File.join(dir, 'reuse-decision.json')
+  path = File.join(dir, 'dm-match.json')
   return nil unless File.exist?(path)
   JSON.parse(File.read(path))
 rescue JSON::ParserError
@@ -100,12 +102,15 @@ if $PROGRAM_NAME == __FILE__
     abort '  build-dm.rb aborted at the environment gate (see the fix above).' unless system(*gate_cmd)
   end
 
-  # C3 reuse-check: if find-or-pick-dm.rb's decision names a DM to reuse, honor
-  # it and skip fresh DM creation entirely (no dm-spec.json emitted).
-  if (rd = reuse_decision(OUT)) && rd['reuse']
+  # C3 reuse-check: only short-circuit on a CONFIRMED auto-pick (covers all
+  # source tables / column-superset — see find-or-pick-dm.rb's rationale). A
+  # merely-scored-but-not-auto_picked candidate must NOT silently reuse — fall
+  # through to building a fresh DM, same as the cognos/looker converters.
+  m = reuse_decision(OUT)
+  if m && m['auto_picked'] && m['recommended_dm_id']
     FileUtils.mkdir_p(OUT)
-    File.write(File.join(OUT, 'dm-reuse.json'), JSON.generate({ 'reused' => rd['dataModelId'] }))
-    warn "  reuse-check: reusing existing data model #{rd['dataModelId']} (find-or-pick-dm) — skipping DM creation."
+    File.write(File.join(OUT, 'dm-reuse.json'), JSON.generate({ 'reused' => m['recommended_dm_id'] }))
+    warn "  reuse-check: reusing existing data model #{m['recommended_dm_id']} (find-or-pick-dm auto-pick) — skipping DM creation."
     exit 0
   end
 

@@ -211,15 +211,18 @@ Before creating a new data model, score existing Sigma data models against this
 migration's shape and reuse a strong match rather than adding another DM:
 ```bash
 ruby scripts/find-or-pick-dm.rb --workbook-signature discovery/dm-signature.json \
-  --out discovery/reuse-decision.json
+  --out discovery/dm-match.json
 ```
-When the picker recommends reuse (score ≥ threshold), Phase 3 (`build-dm.rb`)
-picks up `discovery/reuse-decision.json` automatically: it writes
-`discovery/dm-reuse.json` recording the reused data-model id and **skips POSTing
-a fresh DM spec** entirely. Below threshold, or no signature supplied, Phase 3
-proceeds to build new as documented below. Never auto-reuse a partial match
-silently — surface the picker's warning about inherited columns/RLS/metrics
-before committing to reuse.
+Phase 3 (`build-dm.rb`) picks up `discovery/dm-match.json` automatically and
+reuses `recommended_dm_id` **only when `auto_picked` is true** — i.e. the top
+candidate covers all source tables (or is a full column-superset), the same
+bar the sibling cognos/looker converters apply. On a confirmed auto-pick it
+writes `discovery/dm-reuse.json` recording the reused data-model id and
+**skips POSTing a fresh DM spec** entirely. When `auto_picked` is false (a
+merely-scored-but-ambiguous candidate, a wide tie, or no signature supplied),
+Phase 3 proceeds to build new as documented below. Never auto-reuse a partial
+match silently — surface the picker's warning about inherited columns/RLS/
+metrics before committing to reuse.
 
 ---
 
