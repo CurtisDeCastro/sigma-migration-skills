@@ -255,6 +255,13 @@ if opts[:probe]
 end
 
 # --- DataSet inventory ------------------------------------------------------
+# TODO(on-access): Domo.list_datasets hits the PUBLIC /v1/datasets endpoint,
+# which does not carry a `permission`/`pdp` block. Once the field-path is
+# confirmed against a live instance, extend this fetch (or fold in the
+# already-defined Domo.dataset_meta, which requests parts=core,permission) so
+# each entry in datasets.json carries its `permission` field — that's what
+# feeds detect_pdp / C9 PDP detection in build-dm.rb (see SKILL.md Phase 6
+# Security's deferred-live note). Left un-wired here; do not guess the shape.
 if opts[:datasets]
   all = []
   offset = 0

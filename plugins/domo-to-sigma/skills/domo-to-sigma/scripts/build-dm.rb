@@ -108,6 +108,10 @@ if $PROGRAM_NAME == __FILE__
   # through to building a fresh DM, same as the cognos/looker converters.
   m = reuse_decision(OUT)
   if m && m['auto_picked'] && m['recommended_dm_id']
+    # NOTE: this short-circuits BEFORE the C9 PDP/RLS scan below — intentional,
+    # not an oversight. Row-level security travels with the reused data model
+    # itself (whatever RLS policy already exists on recommended_dm_id applies),
+    # so there is nothing new for this run to detect or stub on the reuse path.
     FileUtils.mkdir_p(OUT)
     File.write(File.join(OUT, 'dm-reuse.json'), JSON.generate({ 'reused' => m['recommended_dm_id'] }))
     warn "  reuse-check: reusing existing data model #{m['recommended_dm_id']} (find-or-pick-dm auto-pick) — skipping DM creation."

@@ -309,6 +309,11 @@ discovery/rls-todo.json) with a warning — **never silently dropped**. A
 PDP-bearing DataSet with no corresponding Sigma mapping is a fidelity gap, not a
 clean migration.
 
+> NOTE (deferred-live): detection fires only once Phase-1 discovery is extended
+> to request each DataSet's permission block (`?parts=core,permission`); the
+> field-path is unconfirmed against a live instance, so today `rls-todo.json`
+> is populated only when discovery already carries a `permission`/`pdp` field.
+
 **Apply as Sigma row-level security opt-in.** Porting a detected policy to Sigma
 user attributes + DM row filters happens only when asked, never automatically —
 confirm the predicate semantics with the customer's Domo admin before enabling it
