@@ -118,6 +118,17 @@ if $PROGRAM_NAME == __FILE__
   cards    = JSON.parse(File.read(File.join(OUT, 'cards.json')))    rescue []
   formulas = JSON.parse(File.read(File.join(OUT, 'formulas.json'))) rescue []
 
+  # C9: Domo PDP (row-level permission policies) — detect, never silently drop.
+  # Stubbed as opt-in Sigma RLS: written to discovery/rls-todo.json for a human to
+  # translate into a data-model row-level-security policy (SKILL.md Phase 6 Security).
+  pdp = datasets.flat_map { |ds| detect_pdp(ds) }
+  unless pdp.empty?
+    FileUtils.mkdir_p(OUT)
+    File.write(File.join(OUT, 'rls-todo.json'), JSON.generate({ 'policies' => pdp }))
+    warn "  C9/RLS: #{pdp.length} Domo PDP policy(ies) detected — wrote discovery/rls-todo.json. " \
+         'Apply as Sigma row-level security opt-in; NOT auto-applied.'
+  end
+
   # Which datasets does the workbook actually use?
   used = cards.map { |c| c['datasetId'] }.compact.uniq
   used = datasets.map { |d| d['id'] }.compact if used.empty?

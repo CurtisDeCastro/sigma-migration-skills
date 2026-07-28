@@ -61,4 +61,15 @@ module DomoSigma
     n = name.to_s.downcase
     n == 'id' || n =~ /(^|[_ ])id$/ || n =~ /\bkey$/ || n =~ /\buuid\b/
   end
+
+  # C9: extract Domo PDP (personalized data permission) policies from a DataSet
+  # metadata object (fetched with parts=core,permission). Returns [] when none —
+  # the caller (build-dm.rb) must warn + stub, never silently drop row-level security.
+  def detect_pdp(dataset)
+    perm = dataset['permission'] || dataset['pdp'] || {}
+    (perm['policies'] || []).map do |p|
+      { 'id' => p['id'].to_s, 'name' => (p['name'] || p['id']).to_s,
+        'predicates' => Array(p['predicates']) }
+    end
+  end
 end
