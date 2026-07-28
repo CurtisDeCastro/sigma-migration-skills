@@ -90,6 +90,40 @@ els = S.sql_elements(spec)
 check(els.size == 1 && els.first['name'] == 'LOD Helper', 'sql_elements picks only kind:"sql"', fails)
 check(S.referenced_tables(spec) == ['DEAL_FACTS'], "referenced_tables → DEAL_FACTS (got #{S.referenced_tables(spec).inspect})", fails)
 
+puts 'Part J — W2.9 emission-legality oracle (the single authority for live-SQL identifiers)'
+# Admit, byte-identical: a legal bare identifier emits EXACTLY as recorded
+# (the no-false-trip pin — plain ORDER_KEY probes must not change a byte).
+%w[ORDER_KEY ENTITY_ID _private Col$1 ANALYTICS].each do |ok|
+  check(S.legal_bare?(ok), "legal_bare? admits #{ok}", fails)
+  check(S.sql_ident(ok) == ok, "sql_ident(#{ok}) is byte-identical (got #{S.sql_ident(ok).inspect})", fails)
+  check(S.illegal_reason(ok).nil?, "illegal_reason(#{ok}) is nil", fails)
+end
+# Admit, quoted: a spaced/mixed-case PHYSICAL name is legal only in quotes.
+check(S.sql_ident('Order Key') == '"Order Key"', 'spaced name emits double-quoted', fails)
+check(S.sql_ident('order key') == '"order key"', 'lower-case spaced name emits double-quoted', fails)
+check(S.sql_ident('1STARTS_WITH_DIGIT') == '"1STARTS_WITH_DIGIT"', 'digit-leading name emits double-quoted', fails)
+check(S.illegal_reason('Order Key').nil?, 'quoted-legal name has no illegal_reason', fails)
+# Refuse (refuse-don't-guess): parenthesis residue of a role-disambiguation
+# label, GUID-shaped field ids, quotes/control chars, empty — nil, with a
+# named reason; the caller records a clean error, never guesses into SQL.
+{
+  'PRODUCT_KEY_(PRODUCT_DIM)'            => /parenthesis residue/,
+  'PRODUCT_KEY_(PRODUCT_DIM_(EXTRACT))'  => /parenthesis residue/,
+  'AB12CD34-0000-1111-2222-333344445555' => /GUID-shaped/,
+  'ABCDEF0123456789-ABCDEF0123456789'    => /GUID-shaped/,
+  %(BAD"NAME)                            => /double quote/,
+  "TAB\tNAME"                            => /control characters/,
+  ''                                     => /empty identifier/,
+  '   '                                  => /empty identifier/
+}.each do |bad, reason_re|
+  check(S.sql_ident(bad).nil?, "sql_ident refuses #{bad.inspect}", fails)
+  check(S.illegal_reason(bad).to_s =~ reason_re,
+        "illegal_reason(#{bad.inspect}) names the class (got #{S.illegal_reason(bad).inspect})", fails)
+end
+# guid_shaped? is the one copy of the shape (join_plan.guid_like? delegates).
+check(S.guid_shaped?('AB12CD34-0000-1111-2222-333344445555'), 'guid_shaped? canonical 8-4-4-4-12', fails)
+check(!S.guid_shaped?('ENTITY_ID'), 'guid_shaped? rejects a plain identifier', fails)
+
 puts 'Part I — CLI end-to-end (exit codes + fix list)'
 Dir.mktmpdir do |dir|
   spec_path = File.join(dir, 'dm-spec.json')

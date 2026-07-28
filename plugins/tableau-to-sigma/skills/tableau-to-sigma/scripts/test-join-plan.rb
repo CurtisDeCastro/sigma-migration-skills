@@ -242,6 +242,56 @@ check(e['right_table'].nil?, "right_table stays null for a sql-kind target (got 
 check(e['right_sql'] == sql_stmt, "right_sql carries the element's statement (got #{e['right_sql'].inspect})", fails)
 check(e['probe_keys'] == ['ENTITY_ID'], 'probe keys still folded to physical', fails)
 
+puts "\n== W2.9: role-disambiguation parentheticals stripped from probe_keys, display keys verbatim =="
+# The REF-STAR class: Tableau suffixes same-named fields across joined objects
+# with the object name in parens ('Product Key (Product Dim)'); folding that
+# display label emitted PRODUCT_KEY_(PRODUCT_DIM)-shaped SQL → HTTP 400 at
+# every gate-16 probe. Derivation now strips ONE balanced trailing
+# parenthetical BEFORE the display->physical fold — probe_keys only; the
+# ledger's display side (`keys`) stays verbatim.
+check(JoinPlan.strip_role_paren('Product Key (Product Dim)') == 'Product Key',
+      'strip: single trailing parenthetical', fails)
+check(JoinPlan.strip_role_paren('Product Key (Product Dim (Extract))') == 'Product Key',
+      'strip: nested parenthetical stripped as ONE balanced group', fails)
+check(JoinPlan.strip_role_paren('Entity Id') == 'Entity Id', 'no parens → unchanged (no-false-trip)', fails)
+check(JoinPlan.strip_role_paren('ENTITY_ID') == 'ENTITY_ID', 'physical name → unchanged (no-false-trip)', fails)
+check(JoinPlan.strip_role_paren('(Extract)') == '(Extract)',
+      'whole-label parenthetical → unchanged (emission refuses it; never guessed empty)', fails)
+check(JoinPlan.strip_role_paren('Broken Key)') == 'Broken Key)',
+      'unbalanced → unchanged (emission refuses; refuse-don\'t-guess)', fails)
+check(JoinPlan.relationship_probe_key('Product Key (Product Dim)', {}) == 'PRODUCT_KEY',
+      'relationship key: stripped then folded to physical', fails)
+check(JoinPlan.relationship_probe_key('Entity Id', {}) == 'ENTITY_ID',
+      'relationship key without parens folds exactly as before', fails)
+guid = 'ab12cd34-0000-1111-2222-333344445555'
+check(JoinPlan.physical_probe_key(guid.upcase, { guid => 'Product Key (Product Dim (Extract))' }) == 'PRODUCT_KEY',
+      'GUID key: caption resolved, parenthetical stripped, folded', fails)
+check(JoinPlan.physical_probe_key(guid.upcase, {}) == guid.upcase,
+      'unresolvable GUID stays as-is (emission refuses it downstream; gate keeps blocking)', fails)
+
+dm_paren = {
+  'pages' => [{ 'elements' => [
+    { 'id' => 'el-fact', 'name' => 'Sales Fact',
+      'source' => { 'kind' => 'warehouse-table', 'path' => %w[ANALYTICS PUBLIC SALES_FACT] },
+      'columns' => [
+        { 'id' => 'c1', 'name' => 'Unified Product',
+          'formula' => 'Coalesce([Product], Lookup([Product Dim/Product], [Product Key], [Product Dim/Product Key (Product Dim)]))' }
+      ] },
+    { 'id' => 'el-dim', 'name' => 'Product Dim',
+      'source' => { 'kind' => 'warehouse-table', 'path' => %w[ANALYTICS PUBLIC PRODUCT_DIM] },
+      'columns' => [
+        { 'id' => 't1', 'name' => 'Product Key (Product Dim)', 'formula' => '[PRODUCT_DIM/Product Key]' }
+      ] }
+  ] }]
+}
+entries = JoinPlan.derive(dm_paren, nil)
+check(entries.size == 1, 'role-disambiguated Lookup still derives one entry', fails)
+e = entries.first || {}
+check(e['keys'] == ['Product Key (Product Dim)'],
+      "display key keeps the parenthetical verbatim (got #{e['keys'].inspect})", fails)
+check(e['probe_keys'] == ['PRODUCT_KEY'],
+      "probe key stripped + folded to the physical column (got #{e['probe_keys'].inspect})", fails)
+
 puts "\n== combined .twb + dm-spec derivation =="
 entries = JoinPlan.derive(dm, File.read(FIX1))
 check(entries.size == 2, "federated join + lookup synthesis both recorded (got #{entries.size})", fails)

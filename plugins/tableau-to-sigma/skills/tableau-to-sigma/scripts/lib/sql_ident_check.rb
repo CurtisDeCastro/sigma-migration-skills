@@ -26,10 +26,79 @@
 #                   upper-snake key (non-alphanumerics → _), suggest the
 #                   double-quoted exact name.
 #
+# ALSO here (W2.9): the emission-side identifier LEGALITY oracle
+# (legal_bare? / sql_ident / illegal_reason / guid_shaped?) — the single
+# authority on whether a name may be interpolated into live warehouse SQL at
+# all. lib/join_plan.rb (derivation) and scripts/probe-join-keys.rb (emission)
+# call it; no second legality regex may exist anywhere.
+#
 # Pure Ruby, stdlib only, no network. Callers: scripts/check-sql-idents.rb
-# (CLI) and offline tests (scripts/test-sql-ident-check.rb).
+# (CLI), scripts/probe-join-keys.rb, lib/join_plan.rb, and offline tests
+# (scripts/test-sql-ident-check.rb).
 module SqlIdentCheck
   module_function
+
+  # ---- Emission-side identifier legality (W2.9) -----------------------------
+  # THE single legality oracle for interpolating an identifier into LIVE
+  # warehouse SQL (probe-join-keys.rb dup/totals probes; any future emitter
+  # calls here too — no second legality regex may exist elsewhere). Distinct
+  # from `check` below, which validates identifiers against a fetched catalog:
+  # this layer decides whether a name may be SENT at all, catalog unseen.
+  #
+  #   sql_ident(name) → "NAME"          legal bare — emitted byte-identically
+  #                   → %("Some Name")  legal only quoted (spaced/mixed-case)
+  #                   → nil             REFUSED — not a credible physical
+  #                                     identifier; the caller records a clean
+  #                                     'error' and routes to its resolve path,
+  #                                     never guesses into live SQL
+  #
+  # Refusal classes (refuse-don't-guess, the REF-STAR garbled-join class):
+  # empty; control characters; an embedded double quote; parenthesis residue
+  # of a Tableau role-disambiguation label folded into an identifier
+  # ('PRODUCT_KEY_(PRODUCT_DIM)' — quoting it would only trade a clean local
+  # error for a guaranteed live "invalid identifier" 400); a GUID-shaped
+  # Tableau field id (an internal field id, never a physical column).
+  BARE_IDENT_RE = /\A[A-Za-z_][A-Za-z0-9_$]*\z/
+
+  # GUID-shaped Tableau internal field ids: canonical hex 8-4-4-4-12, plus the
+  # looser long hex-hyphen inode-tail shape. lib/join_plan.rb's guid_like?
+  # DELEGATES here — keep this the only copy of the shape.
+  GUID_SHAPE_RE = /\A[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\z/
+
+  def guid_shaped?(name)
+    s = name.to_s
+    return true if s =~ GUID_SHAPE_RE
+    !!(s =~ /\A[0-9A-Fa-f-]{20,}\z/ && s.include?('-'))
+  end
+
+  # Legal to interpolate BARE (also byte-identical: an unquoted legal
+  # identifier is emitted exactly as recorded — the no-false-trip pin).
+  def legal_bare?(name)
+    !!(name.to_s =~ BARE_IDENT_RE)
+  end
+
+  # Why `name` may not be sent to the warehouse, or nil when it is emit-able
+  # (bare or quoted). The caller puts this string in its recorded error.
+  def illegal_reason(name)
+    s = name.to_s
+    return nil if legal_bare?(s)
+    return 'empty identifier' if s.strip.empty?
+    return 'contains control characters' if s =~ /[\x00-\x1F\x7F]/
+    return 'contains a double quote' if s.include?('"')
+    if s =~ /[()]/
+      return 'parenthesis residue — a Tableau role-disambiguation display label folded into the identifier ' \
+             '(re-derive the ledger: join_plan strips the trailing parenthetical)'
+    end
+    return 'GUID-shaped Tableau field id, not a physical column (caption resolution failed)' if guid_shaped?(s)
+    nil
+  end
+
+  # Emission form of `name` for live SQL, or nil when refused (see above).
+  def sql_ident(name)
+    s = name.to_s
+    return s if legal_bare?(s)
+    illegal_reason(s) ? nil : %("#{s}")
+  end
 
   # Words that can appear in identifier position but are never warehouse
   # columns. Function names are excluded structurally (token followed by "(") —

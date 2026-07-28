@@ -60,6 +60,7 @@
 require 'json'
 require_relative 'twb_xml'
 require_relative 'fcp_normalize'
+require_relative 'sql_ident_check' # single identifier-legality oracle (W2.9)
 
 module JoinPlan
   GRAIN_ASSUMPTION = 'right unique on keys'
@@ -215,8 +216,9 @@ module JoinPlan
   # A relationship key is a bare column ref: a GUID resolves via caption (as
   # physical_probe_key), anything else folds display -> physical directly
   # ('Entity Id' -> ENTITY_ID; an already-physical 'ENTITY_ID' is a no-op).
+  # Role parentheticals are stripped BEFORE folding (see strip_role_paren).
   def relationship_probe_key(key, captions)
-    guid_like?(key) ? physical_probe_key(key, captions) : physical_name(key)
+    guid_like?(key) ? physical_probe_key(key, captions) : physical_name(strip_role_paren(key))
   end
 
   # 'FN([X])' / 'FN([T].[C])' -> the inner bracketed ref (converter
@@ -256,13 +258,10 @@ module JoinPlan
 
   # GUID-like Tableau internal field ids: the canonical hex 8-4-4-4-12 shape,
   # plus the looser long hex-hyphen inode-tail shape mechanical-specs.rb's
-  # guid_display_index accepts.
-  GUID_KEY_RE = /\A[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\z/
-
+  # guid_display_index accepts. The shape itself lives in the single legality
+  # oracle (SqlIdentCheck.guid_shaped? — W2.9); this name is kept for callers.
   def guid_like?(s)
-    s = s.to_s
-    return true if s =~ GUID_KEY_RE
-    !!(s =~ /\A[0-9A-Fa-f-]{20,}\z/ && s.include?('-'))
+    SqlIdentCheck.guid_shaped?(s)
   end
 
   # GUID column id -> caption, from every <column caption= name='[<guid>]'> in
@@ -287,11 +286,13 @@ module JoinPlan
   # the .twb caption, then fold caption -> physical with the SAME
   # upcase+underscore folding the phantom-column filter uses
   # (mechanical-specs.rb fixup_dm_spec / physical_name below — do not diverge).
-  # An unresolvable GUID stays as-is: the probe errors, the gate blocks (safe).
+  # The caption's trailing role parenthetical is display-only — stripped before
+  # the fold (W2.9). An unresolvable GUID stays as-is: emission REFUSES it
+  # (SqlIdentCheck — clean 'error', routed to --resolve), the gate blocks (safe).
   def physical_probe_key(key, captions)
     return key unless guid_like?(key)
     cap = captions[key.to_s.downcase]
-    cap ? physical_name(cap) : key
+    cap ? physical_name(strip_role_paren(cap)) : key
   end
 
   # '[TABLE].[COL]' -> {table:, column:}; anything else -> nil.
@@ -390,9 +391,38 @@ module JoinPlan
     f = col && col['formula'].to_s
     if f && f =~ /&|\|\|/ && f.include?('Text(')
       refs = f.scan(/\[([^\]\/]+)\]/).flatten.uniq
-      return refs.map { |r| physical_name(r) } unless refs.empty?
+      return refs.map { |r| physical_name(strip_role_paren(r)) } unless refs.empty?
     end
-    [physical_name(tgt_key)]
+    [physical_name(strip_role_paren(tgt_key))]
+  end
+
+  # Tableau disambiguates same-named fields across joined objects by suffixing
+  # the DISPLAY label with the object name in parens — 'Product Key (Product
+  # Dim)', nested when the object itself is renamed: 'Product Key (Product Dim
+  # (Extract))'. That parenthetical is display-only; folding it into the
+  # physical identifier emitted PRODUCT_KEY_(PRODUCT_DIM)-shaped SQL (REF-STAR
+  # live class: HTTP 400 on every gate-16 probe → re-entry). Strip ONE balanced
+  # trailing parenthetical before display->physical folding. The ledger keeps
+  # the display label verbatim in `keys`; only `probe_keys` (the physical side)
+  # is stripped. Conservative on purpose: a label that is ONLY a parenthetical,
+  # or unbalanced, passes through unchanged — emission then REFUSES anything
+  # still illegal (SqlIdentCheck, refuse-don't-guess), never guessing into SQL.
+  def strip_role_paren(display)
+    s = display.to_s.rstrip
+    return display unless s.end_with?(')')
+    depth = 0
+    i = s.length - 1
+    while i >= 0
+      case s[i]
+      when ')' then depth += 1
+      when '(' then depth -= 1
+      end
+      break if depth.zero?
+      i -= 1
+    end
+    return display if i <= 0 # unbalanced, or the whole label is '(...)'
+    rest = s[0...i].rstrip
+    rest.empty? ? display : rest
   end
 
   def physical_name(display)
