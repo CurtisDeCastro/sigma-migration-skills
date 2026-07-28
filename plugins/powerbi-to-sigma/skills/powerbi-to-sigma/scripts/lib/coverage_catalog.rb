@@ -51,6 +51,19 @@ module Coverage
       r && r['sigma']
     end
 
+    # Return the recreate-as-plugin archetype for source_key, or nil. Honors an
+    # explicit `plugin_archetype` field on the row, or a `sigma` value of the
+    # form "plugin:<archetype>" (returns the part after the prefix). Additive —
+    # does not change resolve/target/resolve_or_warn's existing dispatch.
+    def plugin_archetype(source_key)
+      r = resolve(source_key)
+      return nil unless r
+      a = r['plugin_archetype']
+      return a unless a.to_s.empty?
+      s = r['sigma'].to_s
+      s.start_with?('plugin:') ? s.sub('plugin:', '') : nil
+    end
+
     # Resolve; on a miss append a standardized LOUD warning to `warnings` and
     # return nil. The caller MUST then skip/placeholder — makes the loud
     # fallback mandatory and uniform.

@@ -95,6 +95,29 @@ class CoverageCatalogTest(unittest.TestCase):
         got = cc.default_catalog_dir(fake)
         self.assertTrue(got.endswith(os.path.join("skills", "x", "refs", "catalogs")))
 
+    def test_plugin_archetype(self):
+        _write_catalog(
+            self.dir, "viz-kind-plugin",
+            [
+                {"source": "GaugeChartVisual", "sigma": "kpi-chart", "plugin_archetype": "gauge"},
+                {"source": "HeatMapVisual", "sigma": "plugin:heatmap"},
+                {"source": "BarChartVisual", "sigma": "bar-chart"},
+            ],
+            dimension="viz-kind", source_tool="quicksight",
+        )
+        cat = cc.load(self.dir, "viz-kind-plugin")
+        # explicit plugin_archetype field wins
+        self.assertEqual(cat.plugin_archetype("GaugeChartVisual"), "gauge")
+        # sigma "plugin:<x>" prefix -> archetype
+        self.assertEqual(cat.plugin_archetype("HeatMapVisual"), "heatmap")
+        # plain native row -> None
+        self.assertIsNone(cat.plugin_archetype("BarChartVisual"))
+        # miss -> None
+        self.assertIsNone(cat.plugin_archetype("NopeVisual"))
+        # non-breaking: target/resolve for the gauge row still return "kpi-chart"
+        self.assertEqual(cat.target("GaugeChartVisual"), "kpi-chart")
+        self.assertEqual(cat.resolve("GaugeChartVisual")["sigma"], "kpi-chart")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
