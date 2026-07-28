@@ -187,3 +187,28 @@ Sessions can't talk live, so coordinate through shared state:
 
 `ruby tools/check-shared.rb && ruby tools/lint-skills.rb && bash tools/hygiene-sweep.sh && ./corpus/run-corpus.sh --check`
 — all green. The PR template (`.github/PULL_REQUEST_TEMPLATE.md`) lists the rest.
+
+## Versioning & releases
+
+Each plugin declares its release version in
+`plugins/<name>/.claude-plugin/plugin.json` (`"version"`). Claude Code's
+`claude plugin update` compares that string, so **if it doesn't move, consumers
+never see your fix** — the update reports "already at the latest version" and
+ships nothing (issue #486).
+
+**Rule:** any change under `plugins/<name>/**` must bump that plugin's
+`plugin.json` `version` — a strict [semver](https://semver.org/) increase
+(patch for fixes, minor for features, major for breaking changes). The
+`plugin-version-bump` CI gate enforces this over the PR's diff range.
+
+**Escape hatch:** for a genuinely non-user-facing change (a comment, an internal
+test, a typo that ships no behavior), add a commit trailer:
+
+```
+Skip-Version-Bump: <one-line reason>
+```
+
+The reason is required and is visible in history and review — use it honestly.
+The trailer is global to the PR's whole diff range: a single `Skip-Version-Bump`
+commit anywhere in the range exempts every otherwise-failing plugin in that PR,
+not just the plugin its own commit touched.

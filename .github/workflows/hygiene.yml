@@ -165,6 +165,18 @@ jobs:
         run: |
           if [ -z "${RANGE_BASE:-}" ]; then echo "no diff range to check — skipping"; exit 0; fi
           bash tools/check-converter-provenance.sh "$RANGE_BASE" "$RANGE_HEAD"
+      - name: Plugin-version-bump guard (release-hygiene diff gate)
+        # #486: a change under plugins/<name>/** must move that plugin's
+        # plugin.json "version" (strict semver) so `claude plugin update` sees a
+        # newer version — else fixes ship with no update signal. Escape hatch:
+        # a `Skip-Version-Bump: <reason>` commit trailer. Range comes from the
+        # shared "Resolve push/PR diff range" step; guard logic +
+        # marketplace-listed-but-unversioned check live in
+        # tools/check-plugin-version-bump.sh (offline-tested by
+        # tools/test-plugin-version-bump.sh).
+        run: |
+          if [ -z "${RANGE_BASE:-}" ]; then echo "no diff range to check — skipping"; exit 0; fi
+          bash tools/check-plugin-version-bump.sh "$RANGE_BASE" "$RANGE_HEAD"
       - name: Sweep self-test (fixture repos, creds-free)
         # Proves the sweep tool itself still warns/fails/passes correctly
         # against throwaway fixture git repos — synthetic patterns only, no
@@ -184,6 +196,13 @@ jobs:
         # string-pin on the real tableau PROVENANCE.json (synthetic fixture
         # names only).
         run: bash tools/test-converter-provenance.sh
+      - name: Plugin-version-bump guard self-test (fixture repos, creds-free)
+        # Proves the version-bump gate fails an unbumped plugin change, passes a
+        # bumped one, honors the Skip-Version-Bump trailer, and fails a
+        # marketplace-listed plugin with no versionable manifest — plus a
+        # string-pin that every listed plugin in this repo carries a semver
+        # plugin.json (synthetic fixture names only).
+        run: bash tools/test-plugin-version-bump.sh
       - name: Bootstrap/doctor lockstep self-test (creds-free)
         # bootstrap.sh duplicates doctor.sh's probes (py_real, the vm-node
         # candidate globs, Test-RealPython) under KEEP-IN-LOCKSTEP comments
