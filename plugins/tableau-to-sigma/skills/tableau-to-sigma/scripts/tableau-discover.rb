@@ -41,6 +41,16 @@
 #     (max 4 attempts).
 #   * 401s are re-minted single-flight by lib/tableau_rest.rb (refresh_token!);
 #     if a 401 still escapes that retry, the task wrapper re-mints once more.
+#   * BOUNDED workbook-content downloads (W2.21/E6.4): Net::HTTP's
+#     read_timeout only bounds the gap BETWEEN bytes, so a trickling VizQL
+#     response (field-observed: 800s+, one ~1.5h wedge) never trips it. The
+#     two download tasks carry wall-clock budgets instead — 180s for the thin
+#     .twb, 300s (scaled up by the Get Workbook size attribute, ceiling 900s)
+#     for the includeExtract=true re-fetch — and an over-ceiling extract is
+#     PRE-ABORTED before the first byte. --download-budget SECONDS overrides
+#     both (explicit operator budget wins: no ceiling, no pre-abort). A blown
+#     budget abandons the task (never retried) and discovery proceeds thin,
+#     fail-open, exit 0.
 #
 # Usage:
 #   eval "$(scripts/get-tableau-token.sh)"
@@ -58,6 +68,8 @@ require 'json'
 require 'fileutils'
 require 'optparse'
 require 'thread'
+require 'timeout' # explicit: the offline test stubs tableau_rest, so net/http
+                  # never loads it transitively — the budget wrap needs it
 
 $LOAD_PATH.unshift File.expand_path('lib', __dir__)
 require 'tableau_rest'
@@ -87,6 +99,10 @@ OptionParser.new do |o|
                                  'default is to SKIP it (most routes never consume the frozen extract bytes); ' \
                                  'pass --extract-refetch on extract-landing runs') { |v| opts[:extract_refetch] = v }
   o.on('--pool N', Integer, 'Fetch-pool size (default 5 — measured sweet spot)') { |v| opts[:pool] = v }
+  o.on('--download-budget SECONDS', Integer,
+       'Wall-clock budget override for workbook-content downloads ' \
+       '(default: 180s thin, 300s..900s size-scaled for --extract-refetch; ' \
+       'an explicit override also disables the size pre-abort)') { |v| opts[:download_budget] = v }
 end.parse!
 
 abort 'Missing --out' unless opts[:out]
@@ -119,15 +135,47 @@ end
 # recovers them. A genuinely-bad request just burns the 4 attempts.
 RETRYABLE = /\b(429|408|400|50[234])\b|Too Many Requests|timed? ?out|Timeout/i
 
+# W2.21 (E6.4) — wall-clock budgets for the two workbook-content downloads.
+DL_BUDGET_TWB     = 180 # thin (includeExtract=false) download
+DL_BUDGET_EXTRACT = 300 # includeExtract=true re-fetch, floor
+DL_EXTRACT_CEIL   = 900 # derived-budget ceiling; beyond it → pre-abort
+DL_FLOOR_MB_S     = 1.0 # conservative sustained throughput floor (MB/s)
+
+# Seconds the extract re-fetch may plausibly need, from Get Workbook's size
+# attribute (megabytes): size at the throughput floor + 60s grace. Derivation
+# input for both the scaled budget and the before-first-byte pre-abort.
+def extract_seconds_needed(size_mb)
+  return nil if size_mb.nil? || size_mb <= 0
+  (size_mb / DL_FLOOR_MB_S).ceil + 60
+end
+
+# Budget for the extract re-fetch. An explicit --download-budget wins outright
+# (operator asserted it; no ceiling). Otherwise scale with workbook size so a
+# genuinely large extract on a slow link doesn't false-trip, capped at the
+# ceiling (over-ceiling cases pre-abort before the first byte instead).
+def extract_budget(size_mb, override)
+  return override if override
+  need = extract_seconds_needed(size_mb)
+  need ? [[DL_BUDGET_EXTRACT, need].max, DL_EXTRACT_CEIL].min : DL_BUDGET_EXTRACT
+end
+
 # Run one named fetch task with timing + backoff-retry. Returns task result or nil.
 # max_attempts caps the backoff-retry budget (default 4; the heavy extract
 # re-download uses 2 — its 120s×4 worst case dominated failed discoveries).
-def run_task(name, max_attempts: 4)
+# budget: PER-ATTEMPT wall-clock bound (W2.21). The timeout message avoids
+# every RETRYABLE token ("#{n}s" keeps \b400\b from matching a 400s budget),
+# so a blown budget is abandoned — never retried into a 4× burn.
+def run_task(name, max_attempts: 4, budget: nil)
   t0 = Time.now.to_f
   attempts = 0
   begin
     attempts += 1
-    result = yield
+    result = if budget
+               Timeout.timeout(budget, nil,
+                               "download budget #{budget}s exhausted (--download-budget raises it)") { yield }
+             else
+               yield
+             end
     TIMINGS_MUTEX.synchronize do
       TIMINGS << { 'task' => name, 'start' => (t0 - T0).round(3),
                    'seconds' => (Time.now.to_f - t0).round(3), 'attempts' => attempts, 'ok' => true }
@@ -199,7 +247,9 @@ twb_done = Queue.new # signals twb completion (for auto-ds fallback)
 twb_xml_shared = nil
 unless opts[:skip_content]
   queue << lambda do
-    bytes = run_task('twb-download') { Tableau.download_workbook_content(wb['id']) }
+    bytes = run_task('twb-download', budget: opts[:download_budget] || DL_BUDGET_TWB) do
+      Tableau.download_workbook_content(wb['id'])
+    end
     # Persist the download (zip or bare .twb) and surface the inner XML.
     # The .twb is FCP-NORMALIZED at write time (lib/fcp_normalize) so every
     # downstream parser sees canonical element names — Tableau hides newer
@@ -252,6 +302,7 @@ unless opts[:skip_content]
     end
 
     twb_xml = nil
+    begin
     if bytes
       twb_xml, had_hypers = persist.call(bytes)
       # EXTRACT-BACKED workbook, thin download: the default REST download
@@ -266,15 +317,33 @@ unless opts[:skip_content]
       if twb_xml && !had_hypers &&
          (twb_xml.include?('<extract') || twb_xml =~ /class='(?:hyper|textscan)'/)
         if opts[:extract_refetch]
-          log 'embedded extract detected but no .hyper payload in the download — re-fetching WITH includeExtract=true (--extract-refetch)'
-          with_extract = run_task('twb-download-extract', max_attempts: 2) { Tableau.download_workbook_content(wb['id'], include_extract: true) }
-          if with_extract && with_extract.bytesize > bytes.bytesize
-            twb_xml2, had2 = persist.call(with_extract)
-            twb_xml = twb_xml2 || twb_xml
-            log had2 ? 'extract payload landed in workbook-content.twbx' :
-                       'WARN: re-fetch still contained no .hyper — land-extracts.py will need a manual includeExtract=true download'
+          # W2.21 size pre-abort — the thin-fetch decision is made BEFORE the
+          # first byte: when Get Workbook's size attribute (MB) says the
+          # payload cannot plausibly land within the derived-budget ceiling
+          # even at the throughput floor, don't start a doomed fetch. An
+          # explicit --download-budget disables this (operator asserted it).
+          size_mb = wb['size'].to_f
+          need = extract_seconds_needed(size_mb)
+          if opts[:download_budget].nil? && need && need > DL_EXTRACT_CEIL
+            log "WARN: extract re-fetch PRE-ABORTED before the first byte — Get Workbook reports #{size_mb.round} MB, " \
+                "which needs >#{DL_EXTRACT_CEIL}s even at the #{DL_FLOOR_MB_S} MB/s floor. Proceeding with the thin .twb. " \
+                'Pass --download-budget SECONDS to fetch anyway, or land the extract manually for land-extracts.py.'
           else
-            log 'WARN: includeExtract=true re-fetch returned nothing larger — proceeding with the thin .twb'
+            log 'embedded extract detected but no .hyper payload in the download — re-fetching WITH includeExtract=true (--extract-refetch)'
+            with_extract = run_task('twb-download-extract', max_attempts: 2,
+                                    budget: extract_budget(size_mb, opts[:download_budget])) do
+              Tableau.download_workbook_content(wb['id'], include_extract: true)
+            end
+            if with_extract && with_extract.bytesize > bytes.bytesize
+              twb_xml2, had2 = persist.call(with_extract)
+              twb_xml = twb_xml2 || twb_xml
+              log had2 ? 'extract payload landed in workbook-content.twbx' :
+                         'WARN: re-fetch still contained no .hyper — land-extracts.py will need a manual includeExtract=true download'
+            elsif with_extract
+              log 'WARN: includeExtract=true re-fetch returned nothing larger — proceeding with the thin .twb'
+            else
+              log 'WARN: extract re-fetch abandoned (task failure above) — proceeding with the thin .twb'
+            end
           end
         else
           # One clear line, then move on. This is the breadcrumb for a landing
@@ -284,8 +353,13 @@ unless opts[:skip_content]
         end
       end
     end
-    twb_xml_shared = twb_xml
-    twb_done << twb_xml
+    ensure
+      # Exactly-once, even when persist/normalize raises: the watcher blocks on
+      # twb_done.pop and the pool spin loop waits on the watcher — a lost push
+      # would hang discovery instead of failing it.
+      twb_xml_shared = twb_xml
+      twb_done << twb_xml
+    end
   end
 end
 

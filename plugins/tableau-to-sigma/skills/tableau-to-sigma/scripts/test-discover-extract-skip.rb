@@ -1,19 +1,32 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
-# Regression test for discovery's OPT-IN extract re-fetch (B6 default flip).
+# Regression tests for tableau-discover.rb's fetch contract (offline, stubbed).
 #
-# tableau-discover.rb can re-download workbook content WITH includeExtract=true
-# when extract markers are present but the thin download carried no .hyper —
-# a 120s-timeout task that is the heaviest in discovery, and whose payload only
-# extract-landing routes ever consume. Contract under test: the re-fetch is
-# SKIPPED by default with one clear breadcrumb naming the opt-in flag;
-# --extract-refetch opts in (attempts still capped at 2); the old opt-out
-# spelling --no-extract-refetch stays accepted (migrate-tableau.rb passes it on
-# the --skip-extract-landing live repoint). Proven with a STUBBED Tableau lib
-# (the script + its real zip/fcp libs are copied to a tmpdir whose lib/ carries
-# a stub tableau_rest.rb, so no network is possible): the stub serves a thin
-# .twb with extract markers and fails the extract re-fetch retryably, logging
-# every fetch. Offline.
+# (A) OPT-IN extract re-fetch (B6 default flip). tableau-discover.rb can
+# re-download workbook content WITH includeExtract=true when extract markers
+# are present but the thin download carried no .hyper — the heaviest task in
+# discovery, and whose payload only extract-landing routes ever consume.
+# Contract under test: the re-fetch is SKIPPED by default with one clear
+# breadcrumb naming the opt-in flag; --extract-refetch opts in (attempts still
+# capped at 2); the old opt-out spelling --no-extract-refetch stays accepted
+# (migrate-tableau.rb passes it on the --skip-extract-landing live repoint).
+#
+# (B) BOUNDED downloads (W2.21/E6.4). Net read_timeout never trips on a
+# trickling response (bytes keep arriving), so the download tasks carry
+# wall-clock budgets. Contract: a trickle-wedged extract re-fetch is abandoned
+# within its budget on ONE attempt (never retried into a 4x burn), discovery
+# proceeds thin with a WARN and exits 0; an over-ceiling Get-Workbook size
+# PRE-ABORTS the fetch before the first byte, naming --download-budget; an
+# explicit --download-budget disables the pre-abort; default budgets never
+# false-trip a fast fetch.
+#
+# (C) SCOPED CSVs + dedicated PNG worker (W2.20) — see the checks below.
+#
+# Proven with a STUBBED Tableau lib (the script + its real zip/fcp libs are
+# copied to a tmpdir whose lib/ carries a stub tableau_rest.rb, so no network
+# is possible): the stub serves a thin .twb with extract markers, fails the
+# extract re-fetch retryably (or trickles, or reports a huge size — ENV
+# switches), and logs every fetch. Offline.
 #
 # Usage: ruby scripts/test-discover-extract-skip.rb
 
@@ -36,7 +49,9 @@ STUB = <<~'RUBY'
       File.open(ENV.fetch('STUB_FETCH_LOG'), 'a') { |f| f.puts(line) }
     end
     def self.get_workbook(id)
-      { 'id' => id, 'views' => { 'view' => [] } }
+      wb = { 'id' => id, 'views' => { 'view' => [] } }
+      wb['size'] = ENV['STUB_WB_SIZE'] if ENV['STUB_WB_SIZE'] # MB, per Get Workbook
+      wb
     end
     def self.find_workbook_by_name(_n)
       { 'id' => 'wb-stub' }
@@ -46,9 +61,17 @@ STUB = <<~'RUBY'
     end
     def self.download_workbook_content(_id, include_extract: false)
       rec("download include_extract=#{include_extract}")
-      # thin .twb WITH extract markers => triggers the re-fetch decision;
-      # the extract re-fetch itself fails RETRYABLY (502) every time.
-      raise Error, '502 stub: extract payload unavailable' if include_extract
+      if include_extract
+        if ENV['STUB_TRICKLE']
+          # Trickle wedge: bytes keep dribbling (1 byte/s-shaped), so the
+          # socket read timeout never fires — only a wall-clock budget can end
+          # this. Sleeps in small slices for ~30s; the budget must interrupt.
+          150.times { sleep 0.2 }
+          raise Error, 'stub trickle ran to completion — budget never fired'
+        end
+        # otherwise fail RETRYABLY (502) every time.
+        raise Error, '502 stub: extract payload unavailable'
+      end
       "<workbook><datasources><datasource caption=''><extract count='1'/></datasource></datasources></workbook>"
     end
     def self.view_image(_id, resolution: nil); nil; end
@@ -60,11 +83,19 @@ STUB = <<~'RUBY'
   end
 RUBY
 
-def run_discover(script, out_dir, log_path, *extra)
-  env = { 'STUB_FETCH_LOG' => log_path }
-  cmd = [RbConfig.ruby, script, '--workbook-id', 'wb-stub', '--out', out_dir, '--skip-images', *extra]
-  out = IO.popen(env, cmd, err: %i[child out], &:read)
+def run_discover(script, out_dir, log_path, *extra, env: {}, images: false)
+  base = { 'STUB_FETCH_LOG' => log_path }
+  cmd = [RbConfig.ruby, script, '--workbook-id', 'wb-stub', '--out', out_dir]
+  cmd << '--skip-images' unless images
+  cmd += extra
+  out = IO.popen(base.merge(env), cmd, err: %i[child out], &:read)
   [$?.exitstatus, out]
+end
+
+def timings(out_dir)
+  JSON.parse(File.read(File.join(out_dir, 'timings.json')))
+rescue StandardError
+  nil
 end
 
 Dir.mktmpdir do |tmp|
@@ -110,6 +141,61 @@ Dir.mktmpdir do |tmp|
   check(code == 0, "--no-extract-refetch still accepted (exit #{code})", fails)
   check(fetches.count('download include_extract=true').zero?, 'no extract fetch under --no-extract-refetch', fails)
   check(out.lines.grep(/extract re-fetch SKIPPED/).size == 1, 'skip line still logged under --no-extract-refetch', fails)
+
+  # ---- (B) W2.21 bounded downloads ----------------------------------------
+
+  # (B1) TRICKLE TRIP: a dribbling extract re-fetch is abandoned within the
+  # wall-clock budget, on ONE attempt, thin-.twb WARN, exit 0.
+  log4 = File.join(tmp, 'fetch4.log')
+  File.write(log4, '')
+  t0 = Time.now
+  code, out = run_discover(script, File.join(tmp, 'out4'), log4,
+                           '--extract-refetch', '--download-budget', '2',
+                           env: { 'STUB_TRICKLE' => '1' })
+  wall = Time.now - t0
+  fetches = File.readlines(log4).map(&:strip)
+  check(code == 0, "trickle run still exits 0 — fail-open (exit #{code})", fails)
+  check(wall < 20, "trickle abandoned within budget (wall #{wall.round(1)}s < 20s, budget 2s)", fails)
+  check(fetches.count('download include_extract=true') == 1,
+        'blown budget is NOT retried — exactly one extract attempt', fails)
+  check(out.include?('proceeding with the thin .twb'), 'thin-.twb WARN logged on abandon', fails)
+  tj = timings(File.join(tmp, 'out4'))
+  task = tj && (tj['tasks'] || []).find { |t| t['task'] == 'twb-download-extract' }
+  check(task && task['ok'] == false && task['error'].to_s =~ /budget/,
+        "timings.json records the budget failure (got #{task ? task['error'].inspect : 'no task'})", fails)
+  check(task && task['attempts'] == 1, 'timings.json shows a single attempt', fails)
+
+  # (B2) SIZE PRE-ABORT: an over-ceiling Get Workbook size stops the fetch
+  # BEFORE the first byte and names the override.
+  log5 = File.join(tmp, 'fetch5.log')
+  File.write(log5, '')
+  code, out = run_discover(script, File.join(tmp, 'out5'), log5, '--extract-refetch',
+                           env: { 'STUB_WB_SIZE' => '5000' })
+  fetches = File.readlines(log5).map(&:strip)
+  check(code == 0, "pre-abort run exits 0 (exit #{code})", fails)
+  check(fetches.count('download include_extract=true').zero?,
+        'pre-abort fires BEFORE the first byte (no includeExtract=true fetch)', fails)
+  check(out =~ /PRE-ABORTED/, 'pre-abort is stated, not silent', fails)
+  check(out.include?('--download-budget'), 'pre-abort names the --download-budget override', fails)
+
+  # (B3) EXPLICIT OVERRIDE beats the pre-abort: operator budget is the budget.
+  log6 = File.join(tmp, 'fetch6.log')
+  File.write(log6, '')
+  code, out = run_discover(script, File.join(tmp, 'out6'), log6,
+                           '--extract-refetch', '--download-budget', '9999',
+                           env: { 'STUB_WB_SIZE' => '5000' })
+  fetches = File.readlines(log6).map(&:strip)
+  check(code == 0, "override run exits 0 (exit #{code})", fails)
+  check(out !~ /PRE-ABORTED/, 'no pre-abort under an explicit --download-budget', fails)
+  check(fetches.count('download include_extract=true') == 2,
+        'override fetch attempted (retryable stub failure still capped at 2)', fails)
+
+  # (B4) NO FALSE TRIP: the default budgets never clip a fast fetch — the
+  # default run's thin download succeeded first try under the 180s budget.
+  tj1 = timings(File.join(tmp, 'out1'))
+  dl = tj1 && (tj1['tasks'] || []).find { |t| t['task'] == 'twb-download' }
+  check(dl && dl['ok'] == true && dl['attempts'] == 1,
+        'default budgets: fast thin download untouched (ok, one attempt)', fails)
 
   # (4) migrate-tableau.rb keeps the --skip-extract-landing live repoint on the
   # skip path. TWO spellings are correct under the opt-in default and both are
