@@ -11,7 +11,7 @@ bad_layout = { 'pages' => [ { 'id' => 'pg', 'name' => 'Overview',
   'elements' => [ { 'id' => 'el-abc123', 'kind' => 'kpi-chart', 'name' => 'el-abc123' } ] } ],
   'layout' => '<Page id="pg"><GridContainer gridRow="R0 / R1" gridTemplateColumns="1fr">' \
               '<LayoutElement elementId="el-abc123" gridColumn="C0 / C1" gridRow="R0 / R1"/></GridContainer></Page>' }
-ok(!LayoutLint.lint(bad_layout).empty?, 'raw-id display name flagged')
+ok(LayoutLint.lint(bad_layout).any? { |v| v.include?('raw-id') }, 'raw-id display name flagged')
 
 good_layout = Marshal.load(Marshal.dump(bad_layout))
 good_layout['pages'][0]['elements'][0]['name'] = 'Total Revenue'
@@ -23,7 +23,7 @@ puts '== control_lint =='
 dead = { 'pages' => [ { 'id' => 'pg', 'name' => 'Overview', 'elements' => [
   { 'id' => 'tbl1', 'kind' => 'table', 'name' => 'Orders' },
   { 'id' => 'ctl1', 'kind' => 'control', 'controlId' => 'ctl-region', 'name' => 'Region' } ] } ] }
-ok(!ControlLint.lint(dead).empty?, 'dead control (no target/formula ref) flagged')
+ok(ControlLint.lint(dead).any? { |v| v.include?('dead control') }, 'dead control (no target/formula ref) flagged')
 
 wired = Marshal.load(Marshal.dump(dead))
 wired['pages'][0]['elements'][1]['filters'] = [ { 'source' => { 'elementId' => 'tbl1' } } ]
