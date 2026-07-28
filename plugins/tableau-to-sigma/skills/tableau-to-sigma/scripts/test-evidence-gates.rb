@@ -175,8 +175,27 @@ def start_stub(counters)
       end
       Thread.new(client) do |c|
         begin
-          req = c.gets
-          path = req.to_s.split(' ')[1].to_s
+          # Refuse-fast contract (CI 120s-cap hang, 2026-07). The refusal-path
+          # tests below force a live re-probe: the gate spawns
+          # probe-controls.rb, whose Sigma.request (lib/sigma_rest.rb)
+          # hardcodes use_ssl: true — so that child speaks TLS at this
+          # plaintext stub. A line-oriented gets/drain over the binary
+          # ClientHello happens to terminate on macOS/LibreSSL layouts (a
+          # structural "\x0a\x00\x0a" yields a blank-stripping "line" → 404 →
+          # instant client SSLError) but under Linux/OpenSSL 3 layouts no such
+          # line exists (~0.1% of hellos, random bytes only), so the stub
+          # blocked in gets while the client sat in its handshake until
+          # Net::HTTP's 60 s open_timeout — three refusal tests
+          # (tampered / stale-version / chaining) × 60 s blew the 120 s
+          # per-file CI cap. An HTTP request line always starts with an
+          # uppercase ASCII method byte; anything else (TLS records start
+          # 0x16) is closed on byte one, failing the child's handshake
+          # instantly on every platform — same probe failure, same exit-21
+          # path, no timing dependence.
+          first = c.getbyte
+          next unless first && first.between?(0x41, 0x5A)
+          req = first.chr + c.gets.to_s
+          path = req.split(' ')[1].to_s
           while (h = c.gets) && h.strip != ''; end # drain headers
           body =
             if path.end_with?('/spec')
