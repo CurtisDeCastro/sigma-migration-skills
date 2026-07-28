@@ -219,6 +219,17 @@ rescue StandardError
   {}
 end
 
+# KPI-comparison wave: kpi-chart elements (KpiCard.build, scripts/lib/kpi_card.rb)
+# carry `name` as the house-standard OBJECT form {'text'=>...}, not a plain
+# String — every other element kind still emits a plain String name. Name-based
+# zone matching (els_by_name below) must accept both shapes, or every KPI tile
+# silently misses its els_by_name lookup (String zone name vs Hash element key)
+# and falls into the safety-net band as an "unmatched zone" tile.
+def el_display_name(el)
+  n = el['name']
+  n.is_a?(Hash) ? n['text'] : n
+end
+
 # Add provenance worksheet-name aliases for this page's elements (see above).
 def augment_els_by_name!(els_by_name, elements)
   elements.each do |e|
@@ -414,6 +425,54 @@ def decollide_rects(rects, my_rows)
   end
 end
 
+# A comparative KPI (kpi-chart with a comparisonColumn) renders the ▲/▼ delta
+# badge only above a taller floor than a single-value KPI — 4 grid rows fits
+# value+title but blanks the badge (diagnosed live, see
+# .superpowers/sdd/fix-detector-header-report.md #3). Single-value kpi-charts
+# (no comparisonColumn) are unaffected and keep the shared kind-only floor.
+#
+# This bump is intentionally kept LOCAL to the tableau layout builder rather
+# than in shared `SigmaLayout.min_rows_for` (lib/layout.rb) — that function
+# stays kind-only, used by every el-aware AND kind-only call site across the
+# builder. `kpi_min_rows(el)` is a drop-in replacement wherever a full
+# resolved ELEMENT (not just its kind) is already in scope.
+COMPARATIVE_KPI_MIN_ROWS = 6
+
+def kpi_min_rows(el)
+  el ||= {}
+  base = SigmaLayout.min_rows_for(el['kind'])
+  return base unless el['kind'] == 'kpi-chart' && el['comparisonColumn']
+  [base, COMPARATIVE_KPI_MIN_ROWS].max
+end
+
+# Same push-down/expand algorithm as SigmaLayout.enforce_min_rows (band-level
+# E1 floor enforcement), but keyed on the resolved ELEMENT rather than kind
+# alone, so kpi_min_rows can see comparisonColumn. Mirrors the shared logic
+# locally (via the shared, kind-agnostic expand_min_rows primitive) instead of
+# changing the shared, kind-only SigmaLayout.enforce_min_rows/min_rows_for.
+# Used by the banded-fallback path (build_page_for_dashboard) — the one
+# el-aware site that went through a kind-only id->kind map rather than a
+# direct min_rows_for(el['kind']) call.
+def enforce_min_rows_els(bands, els_by_id)
+  total = 0
+  offset = 0
+  out = bands.map do |band|
+    shifted = band.map { |it| [it[0], it[1], it[2], it[3] + offset, it[4] + offset, *it[5..-1]] }
+    bottom_before = shifted.map { |i| i[4] }.max
+    rects = shifted.map { |it| it[1, 4] }
+    mins  = shifted.map { |it| kpi_min_rows(els_by_id[it[0]]) }
+    rects, n = SigmaLayout.expand_min_rows(rects, mins)
+    total += n
+    grown = shifted.each_with_index.map do |it, i|
+      [it[0], rects[i][0], rects[i][1], rects[i][2], rects[i][3], *it[5..-1]]
+    end
+    bottom_after = grown.map { |i| i[4] }.max
+    offset += [bottom_after - bottom_before, 0].max
+    grown
+  end
+  [out, total]
+end
+
 # Recursively PLAN a zone node. Returns nil (nothing placeable) or
 # [needed_rows, emit_proc] where emit_proc.(c0, c1, r0, r1) yields the node's
 # XML at its FINAL grid cell. Two-phase (plan, then emit) because E1
@@ -503,7 +562,7 @@ def plan_node(node, c0, c1, r0, r1, ctx)
     span = r1 - r0
     el = ctx[:els_by_id][eid]
     min = if el && el['kind']
-            SigmaLayout.min_rows_for(el['kind'])
+            kpi_min_rows(el)
           else
             SigmaLayout.min_rows_for_zone(ctx[:zone_by_id][node['id']] || node)
           end
@@ -584,7 +643,7 @@ def safety_net_band(page, placed, extra_els, children, prefix, below_row, page_r
   unplaced = page['elements'].select { |e| placeable.call(e) && !placed.include?(e['id']) }
   return nil if unplaced.empty?
   n = unplaced.length
-  rows_needed = unplaced.map { |e| SigmaLayout.min_rows_for(e['kind']) }.max
+  rows_needed = unplaced.map { |e| kpi_min_rows(e) }.max
   cw = 24.0 / n
   inner = unplaced.each_with_index.map do |e, i|
     cs = 1 + (cw * i).round
@@ -596,14 +655,14 @@ def safety_net_band(page, placed, extra_els, children, prefix, below_row, page_r
   band_r0 = [[page_rows - 4, HEADER_ROWS + 1].max, below_row].max
   children << gc(bid, 1, 25, band_r0, band_r0 + rows_needed, inner)
   warn "WARN: #{n} element(s) had no Tableau zone — appended in a bottom band: " \
-       "#{unplaced.map { |e| e['name'] || e['id'] }.join(', ')}"
+       "#{unplaced.map { |e| el_display_name(e) || e['id'] }.join(', ')}"
   [1, 25, band_r0, band_r0 + rows_needed]
 end
 
 # Container-tree page builder. Same return shape as build_page_for_dashboard.
 def build_page_from_tree(dashboard, page, opts)
   tree        = dashboard['zone_tree'] || []
-  els_by_name = page['elements'].each_with_object({}) { |e, h| h[e['name']] = e if e['name'] }
+  els_by_name = page['elements'].each_with_object({}) { |e, h| n = el_display_name(e); h[n] = e if n }
   augment_els_by_name!(els_by_name, page['elements'])
   ctl_by_name = page['elements'].select { |e| e['kind'] == 'control' && e['name'] }
                     .each_with_object({}) { |e, h| h[e['name'].to_s.downcase] = e }
@@ -1056,7 +1115,7 @@ end
 
 def build_page_synthesized(dashboard, page, opts, structure)
   zones       = dashboard['zones'] || []
-  els_by_name = page['elements'].each_with_object({}) { |e, h| h[e['name']] = e if e['name'] }
+  els_by_name = page['elements'].each_with_object({}) { |e, h| n = el_display_name(e); h[n] = e if n }
   augment_els_by_name!(els_by_name, page['elements'])
   els_by_id   = page['elements'].each_with_object({}) { |e, h| h[e['id']] = e if e['id'] }
   # Header title: dedicated title-* element, else the source's own top banner
@@ -1193,7 +1252,7 @@ def build_page_synthesized(dashboard, page, opts, structure)
   # layout_lint checks); the zone (chart_kind + plot signals) is the fallback.
   min_for = lambda do |z, eid|
     el = els_by_id[eid]
-    el && el['kind'] ? SigmaLayout.min_rows_for(el['kind']) : SigmaLayout.min_rows_for_zone(z)
+    el && el['kind'] ? kpi_min_rows(el) : SigmaLayout.min_rows_for_zone(z)
   end
 
   # --- units: KPI rows, section text separators, section panels ---------------
@@ -1390,7 +1449,7 @@ end
 
 def build_page_for_dashboard(dashboard, page, opts)
   chart_zones = dashboard['zones'].select { |z| z['kind'] == 'chart' && z['caption'] }
-  els_by_name = page['elements'].each_with_object({}) { |e, h| h[e['name']] = e if e['name'] }
+  els_by_name = page['elements'].each_with_object({}) { |e, h| n = el_display_name(e); h[n] = e if n }
   augment_els_by_name!(els_by_name, page['elements'])
   # Dedicated title-* element, else the source's own top banner (shared detector,
   # same as the tree + synthesis paths) — no fabricated page-name H1 alongside a
@@ -1492,8 +1551,8 @@ def build_page_for_dashboard(dashboard, page, opts)
   # E1: enforce per-kind minimum row spans (KIND_MIN_ROWS) — tiles under ~3-4
   # grid rows render BLANK in Sigma (page render AND PNG exports). Expansion
   # pushes subsequent bands down; the grid stays collision-free.
-  kind_by_id = page['elements'].each_with_object({}) { |e, h| h[e['id']] = e['kind'] }
-  bands, min_exp = SigmaLayout.enforce_min_rows(bands, kind_by_id)
+  els_by_id_full = page['elements'].each_with_object({}) { |e, h| h[e['id']] = e }
+  bands, min_exp = enforce_min_rows_els(bands, els_by_id_full)
   content_start = 1 + hdr_rows + ctl_rows
   band_offset = bands.empty? ? 0 : content_start - bands.first.map { |i| i[3] }.min
   bands.each_with_index do |band, i|
@@ -1582,7 +1641,7 @@ data_page_xml = page_xml('page-data', *master_les)
 # so grid quantization/row scaling never false-fires. Advisory: a lint crash
 # must never sink the layout build.
 def arrangement_record(dashboard, page, pxml, o)
-  els_by_name = page['elements'].each_with_object({}) { |e, h| h[e['name']] = e if e['name'] }
+  els_by_name = page['elements'].each_with_object({}) { |e, h| n = el_display_name(e); h[n] = e if n }
   augment_els_by_name!(els_by_name, page['elements'])
   built_rects = ArrangementLint.absolute_rects(pxml, page_cols: o[:page_cols])
   zrect = lambda do |z|

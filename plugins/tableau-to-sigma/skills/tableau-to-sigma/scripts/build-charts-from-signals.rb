@@ -68,6 +68,8 @@ require_relative 'lib/threshold_halo'  # C2: threshold-halo (computed-boolean co
 require_relative 'lib/integer_dim'    # PR-18: integer-coded dimension decode-to-text routing
 require_relative 'lib/trellis_emit'   # shared native-trellis emitter (supported-kind gate + fallbacks)
 require_relative 'lib/metric_binding' # shared DM-metric binder ([Metrics/<name>] over inline re-derive)
+require_relative 'lib/kpi_card'       # shared KPI-chart emitter (comparative-KPI-ready)
+require_relative 'lib/kpi_comparison_detect' # Task 5: prior/target comparison-measure detector
 require 'erb'
 
 opts = { master_id: 'master' }
@@ -3531,18 +3533,61 @@ def pick_kpi_measure(measures, columns_by_guid = {})
   candidates = list.reject { |m| is_label.call(m) } if candidates.empty?
   candidates = list if candidates.empty?
 
+  # A pre-computed DELTA/CHANGE ratio (`SALES CHANGE POS/NEG`, `YoY Change`,
+  # `% Change`, `vs …`, variance/diff) is the sign-split delta the tile colors
+  # by — NEVER the headline value. The canonical Superstore YTD-vs-PYTD tile
+  # carries `TOTAL YTD Sales` + `Sales Change Pos` + `Sales Change Neg`, and the
+  # old first-wins tie let a CHANGE ratio (≈−0.06) become the displayed number
+  # (cold-migration value-fidelity bug). Penalize delta names hard so a real
+  # total/period measure always wins; still a SCORE (not a reject) so an
+  # all-delta tile isn't lost.
+  is_delta = lambda do |m|
+    "#{cap_of.call(m)} #{m['column']}" =~
+      /\bchange\b|\bpos\b|\bneg\b|\byoy\b|y\/y|%\s*change|\bdelta\b|\bvariance\b|\bdiff\b|vs\.?\s/i
+  end
   score = lambda do |m|
     name = m['column'].to_s
     cap  = cap_of.call(m)
     s = 0
+    s -= 8 if is_delta.call(m)                                     # a delta ratio is never the headline value
     s += 4 if cap =~ /\(validated\)/i || name =~ /\(validated\)/i  # author's trusted calc
+    s += 3 if cap =~ /\btotal\b/i || name =~ /\btotal\b/i          # prefer a TOTAL over a bare/period measure
     s += 2 if name =~ /\(copy\)_/i                                 # a materialized duplicate calc
+    s += 2 if cap =~ /\bytd\b/i || name =~ /\bytd\b/i              # a period total (YTD/CYTD)
     s += 1 if m['derivation'].to_s.downcase == 'user'             # a calc, not a raw aggregate
     s
   end
 
   # Highest score; earliest position breaks ties (stable, reproducible).
   candidates.each_with_index.max_by { |m, i| [score.call(m), -i] }.first
+end
+
+# Candidate measures for comparison-delta detection (Task 5 — KpiComparisonDetect).
+# A KPI tile's Marks card can carry several measures beyond the one
+# pick_kpi_measure selects as the headline value (a raw prior-year column, a
+# "% Change" calc, ...). Only measures that resolve to a REAL, already-existing
+# master column (via map_column, same caption resolution pick_kpi_measure's
+# cap_of uses) are eligible: a comparisonColumn must point at a column that
+# already lives on the KPI's source element, and a calc-only measure with no
+# master mapping can't be safely wired without replicating the full
+# formula-decompose cascade build_kpi_element runs for the headline value —
+# out of scope for this conservative detector. Non-mappable measures are
+# silently excluded (not included with a fabricated id).
+def kpi_tile_measures(z, meta, mmap)
+  cols_by_guid = meta['columns_by_guid'] || {}
+  cap_of = lambda do |m|
+    key = m['column'].to_s.gsub(/^\[|\]$/, '').sub(/^[a-z]+:/i, '').sub(/:[a-z]+$/i, '')
+    info = cols_by_guid[key]
+    ((info && info['caption']) || m['column'].to_s).to_s.strip
+  end
+  (z['measures'] || []).each_with_object([]) do |m, out|
+    cap = cap_of.call(m)
+    mapped = map_column(cap, mmap)
+    # 'name' stays the Tableau caption (what COMPARISON_NAME_RE matches on);
+    # 'master_name' is the resolved master-column name the builder needs to
+    # construct a parallel aggregated comparison column (Sum([Master/<name>])).
+    out << { 'id' => mapped['id'], 'name' => cap, 'master_name' => mapped['name'] } if mapped
+  end
 end
 
 # ---- Generic period/param-scoped KPI recipe (v5.4) --------------------------
@@ -3723,6 +3768,12 @@ end
 # hex; conditional formatting is UI-only) → the caller routes them to
 # POSTPUBLISH_GUIDE + coverage instead of silently dropping the halo.
 $threshold_halo_records = [] # sidecar rows (threshold-halo.json) + coverage feed
+
+# Task 5: KPI tiles (keyed by the same (caption || zone id) spec_api_limit_entries
+# uses) for which detect_comparison_measure resolved a real comparison column.
+# Consumed by spec_api_limit_entries to demote the "comparison indicator is
+# UI-only" coverage warning so it fires ONLY when detection did NOT wire one.
+$kpi_comparison_wired = {}
 
 # Neutral-color test for the saturation fallback (a near-grey base vs the halo).
 # Mirrors parse-twb-layout's color_neutral? closely enough for a 2-band split.
@@ -4035,17 +4086,69 @@ def build_kpi_element(z, meta, mmap, opts, warnings, data_elements = [])
                 'emitted exact-format scaled column (numeric + format suffix) and pointed the KPI value at it'
   end
 
-  element = {
-    'id'      => el_id,
-    'kind'    => 'kpi-chart',
-    'name'    => tile_title(z, cap),
-    'source'  => { 'kind' => 'table', 'elementId' => source_eid },
-    'columns' => [measure_col] + fmt_columns,
-    # value.columnId, NOT value.id — the live API 400s with
-    # "value.columnId: Invalid string: undefined" (bead 3w4d; same fix as
-    # qlik-to-sigma scout-validate + refs/sigma-build-gotchas.md).
-    'value'   => { 'columnId' => fmt_columns.any? ? fmt_columns.first['id'] : measure_col_id }
-  }
+  # Task 5 (the migration payoff): detect an obvious prior-period/target
+  # comparison measure among the tile's OTHER measures and wire it as a real
+  # Sigma delta instead of always leaving the KPI single-value. Only attempted
+  # when the KPI's source is still the plain master (source_eid ==
+  # opts[:master_id]) — the LOD/dim-grain/param-scope branches above swap
+  # source_eid to a hidden helper element that doesn't carry the tile's
+  # sibling master columns, so an mmap-resolved comparison id would point at a
+  # column that doesn't exist on that helper. detect returns nil (ambiguous or
+  # no match) unless exactly one sibling measure's name reads as a comparison.
+  # Candidate pool #2 (the Superstore YTD-vs-PYTD case): the prior VALUE is a
+  # MASTER/DM column, NOT on the tile shelf, so also hand the detector the
+  # master columns (dedup'd by id) + this value's name. When no shelf sibling
+  # qualifies it pairs the value's base metric (Sales) with the prior-value
+  # master column (PYTD Sales). value_name prefers the resolved master column
+  # name, falling back to the Tableau caption.
+  cmp_measure =
+    if source_eid == opts[:master_id]
+      KpiComparisonDetect.detect_measure(
+        kpi_tile_measures(z, meta, mmap), master['id'],
+        master_columns: mmap.values, value_name: (master['name'] || field_cap)
+      )
+    end
+
+  # Build the comparison as a PARALLEL derived aggregate column — the SAME
+  # construction as the value measure_col above (Sum([Master/<name>]), same
+  # shelf-agg template, source-prefixed) — instead of binding the bare master
+  # id. That makes the Sigma delta correct-BY-CONSTRUCTION: Sum(current) -
+  # Sum(prior), both aggregated over the tile's grain. The old bare-id path
+  # pointed comparisonColumn at a raw row-level column while value.columnId was
+  # an aggregate, so the delta rendered blank (unbound) or wrong (row vs
+  # aggregate). Only reachable when source_eid is still the plain master (the
+  # LOD/dim-grain/param-scope helper swaps above disqualify detection), and the
+  # detected measure always resolves to a real master column (kpi_tile_measures
+  # only yields mappable measures), so Sum([Master/<prior>]) is exactly the
+  # value's plain-master fallback (line ~4020) applied to the prior measure.
+  comparison_col       = nil
+  comparison_column_id = nil
+  if cmp_measure
+    cmp_name    = (cmp_measure['master_name'] || cmp_measure['name']).to_s.strip
+    cmp_agg     = SHELF_AGG_FOR_PREFIX[deriv] || 'Sum'
+    cmp_formula = cmp_agg.include?('%s') ? cmp_agg.sub('%s', "[Master/#{cmp_name}]") : "#{cmp_agg}([Master/#{cmp_name}])"
+    cmp_formula = MetricBinding.metric_ref_or_inline(cmp_formula, 'Master', opts[:metrics])
+    comparison_column_id = "kc-#{el_id}"
+    comparison_col = { 'id' => comparison_column_id, 'name' => cmp_name, 'formula' => cmp_formula }
+    cmp_fmt = pick_tableau_format(z['formats'], cmp_name) || pick_column_default_format(cmp_name)
+    comparison_col['format'] = cmp_fmt if cmp_fmt
+    comparison_col['format'] ||= heuristic_number_format(cmp_name)
+    $kpi_comparison_wired[(z['caption'] || z['id']).to_s] = true
+  end
+
+  # value.columnId, NOT value.id — the live API 400s with "value.columnId:
+  # Invalid string: undefined" (bead 3w4d; same fix as qlik-to-sigma
+  # scout-validate + refs/sigma-build-gotchas.md) — KpiCard.build already
+  # follows this contract.
+  element = KpiCard.build(
+    id: el_id,
+    name: tile_title(z, cap),
+    source_element_id: source_eid,
+    columns: [measure_col] + fmt_columns + (comparison_col ? [comparison_col] : []),
+    value_column_id: (fmt_columns.any? ? fmt_columns.first['id'] : measure_col_id),
+    comparison_column_id: comparison_column_id, # Task 5: derived aggregated prior/target column, else nil (single-value)
+    good_direction: :up
+  )
 
   # B3 (gap ubr5.7): a Tableau "big number" BAN scorecard (Shape/Circle mark with
   # a <customized-label>, surfaced by the parser as kpi_value_font_size). Style
@@ -6265,7 +6368,15 @@ end
 # to the zone box. Callers derive a px-true default from the zone's pixel
 # height (see the B4 call site) and thread it here; explicit run sizes always
 # win.
-def text_body_from_runs(runs, align: nil, bg: nil, default_px: nil)
+# force_color (header-contrast fix): when a title text zone lands on a DARK
+# header band (build-dashboard-layout paints the container backgroundColor from
+# the SAME source fill), the source's own dark run colours (e.g. #1b1b1b) render
+# invisible and any white background-color span makes a white box on the black
+# band. force_color overrides every run's colour to a light hex AND suppresses
+# the bg pill wrapper, so the title reads as light-on-dark. Only the caller that
+# detects a dark header band passes it; every other text element is untouched.
+def text_body_from_runs(runs, align: nil, bg: nil, default_px: nil, force_color: nil)
+  bg = nil if force_color # never a background-color span over a dark band
   return nil if runs.nil? || runs.empty?
   # Split into paragraphs on hard-break runs. A break run often CARRIES text
   # (the parser marks any run containing newlines as break:true — "G\nD\nP"
@@ -6307,7 +6418,8 @@ def text_body_from_runs(runs, align: nil, bg: nil, default_px: nil)
       end
       esc = "<u>#{esc}</u>" if r['underline'] && !esc.strip.empty?
       styles = []
-      styles << "color: #{r['color']}" if r['color']
+      run_color = force_color || r['color']
+      styles << "color: #{run_color}" if run_color
       if (fs = r['font_size'] || default_px)
         styles << "font-size: #{fs}px"
       end
@@ -6438,10 +6550,22 @@ unless opts[:pages_mode] == :worksheet
         warnings << "dashboard '#{dash['dashboard']}' text zone #{z['id']}: no explicit run sizes — " \
                     "emitted Tableau's default 12px (~9pt; px-true title)"
       end
+      # Header-contrast fix: a top-of-page title zone (y_pct < 10) that will
+      # land on a DARK header band (build-dashboard-layout derives the band bg
+      # from the SAME source fill via ZoneCensus.dark_header_fill) must render
+      # LIGHT — otherwise the source's dark run colours (and any white pill bg)
+      # produce dark-text/white-box on a black band (unreadable). Force the
+      # title white and drop the pill bg in that one case; all other text
+      # zones keep their source colours and pills.
+      on_dark_header = (z['y_pct'] || 100) < 10 &&
+                       !ZoneCensus.dark_header_fill(dash['zone_tree'] || dash['zones']).nil?
       body = text_body_from_runs(z['text_runs'], align: z['text_align'],
                                  bg: (z['is_pill'] ? z['fill_color'] : nil),
-                                 default_px: default_px)
+                                 default_px: default_px,
+                                 force_color: (on_dark_header ? '#FFFFFF' : nil))
       next if body.nil?
+      warnings << "dashboard '#{dash['dashboard']}' title zone #{z['id']}: sits on a DARK header band — " \
+                  'forced light (white) title text and dropped any white background-color span for contrast' if on_dark_header
       if z['text_runs'].any? { |r| r['text'].to_s.include?('<[') }
         warnings << "dashboard '#{dash['dashboard']}' text zone #{z['id']}: dynamic Tableau token(s) " \
                     '(<[Parameters]…>) dropped from static text — not reproducible as literal text'
@@ -8574,7 +8698,7 @@ end
 # things" failure). Scan the SOURCE dashboard zones and name each unsupported
 # primitive/feature explicitly. Detectors are CONSERVATIVE (fire only on a clear
 # structural signal) to avoid false positives; one entry per zone.
-def spec_api_limit_entries(layout)
+def spec_api_limit_entries(layout, cmp_wired = {})
   entries = []
   add = lambda do |cap, severity, detail, action|
     entries << { 'visual' => cap.to_s, 'source_type' => 'worksheet',
@@ -8614,8 +8738,13 @@ def spec_api_limit_entries(layout)
         next
       end
       # KPI ▲/▼ delta: the big number migrates, but the vs-prior comparison
-      # indicator (arrow + % change) is UI-only, not spec-authorable.
-      if (z['is_kpi'] || ck == 'kpi') &&
+      # indicator (arrow + % change) is UI-only, not spec-authorable — UNLESS
+      # Task 5's detector already resolved a real comparison measure and wired
+      # it as the kpi-chart's comparisonColumn (build_kpi_element records the
+      # tile in $kpi_comparison_wired, keyed the same way as `cap` here). Only
+      # warn when detection did NOT wire one — don't cry "UI-only" about a
+      # delta we actually built.
+      if (z['is_kpi'] || ck == 'kpi') && !cmp_wired[cap] &&
          (calc =~ /(?:up|down)\s*arrow|%\s*change|change from prev|vs\.?\s*prev|prior (?:month|period|year)/i ||
           meas =~ /arrow|%\s*change/i)
         add.call(cap, 'degraded',
@@ -8743,7 +8872,7 @@ end
 # (5) spec-API limits — unsupported source primitives/features (bead ubr5.20).
 # Skip any zone already surfaced by a warning above (avoid double-listing).
 _already = coverage_unresolved.map { |u| u['visual'].to_s.downcase }
-spec_api_limit_entries(layout).each do |e|
+spec_api_limit_entries(layout, $kpi_comparison_wired).each do |e|
   next if _already.include?(e['visual'].to_s.downcase)
   coverage_unresolved << e
 end
