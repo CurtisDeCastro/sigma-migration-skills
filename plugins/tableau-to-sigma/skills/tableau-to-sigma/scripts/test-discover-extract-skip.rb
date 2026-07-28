@@ -49,9 +49,18 @@ STUB = <<~'RUBY'
       File.open(ENV.fetch('STUB_FETCH_LOG'), 'a') { |f| f.puts(line) }
     end
     def self.get_workbook(id)
-      wb = { 'id' => id, 'views' => { 'view' => [] } }
+      # STUB_VIEWS='Sheet A,Sheet B' => views v0..vN in order (W2.20 tests).
+      views = ENV['STUB_VIEWS'].to_s.split(',').each_with_index.map do |n, i|
+        { 'id' => "v#{i}", 'name' => n }
+      end
+      wb = { 'id' => id, 'views' => { 'view' => views } }
       wb['size'] = ENV['STUB_WB_SIZE'] if ENV['STUB_WB_SIZE'] # MB, per Get Workbook
       wb
+    end
+    def self.graphql_workbook_dashboards(_luid)
+      # Metadata API off/unindexed unless the test provides membership JSON.
+      raise Error, 'stub: metadata api unavailable' unless ENV['STUB_MEMBERSHIP']
+      JSON.parse(ENV['STUB_MEMBERSHIP'])
     end
     def self.find_workbook_by_name(_n)
       { 'id' => 'wb-stub' }
@@ -72,10 +81,26 @@ STUB = <<~'RUBY'
         # otherwise fail RETRYABLY (502) every time.
         raise Error, '502 stub: extract payload unavailable'
       end
+      if ENV['STUB_TWB_DASH']
+        # Dashboards + zones + worksheets for the membership pre-parse tests.
+        return "<workbook><worksheets><worksheet name='Sheet A'/>" \
+               "<worksheet name='Sheet B'/><worksheet name='Sheet C'/></worksheets>" \
+               "<dashboards><dashboard name='Overview'><zones>" \
+               "<zone id='1' name='Sheet A'/><zone id='2' name='Sheet B'/>" \
+               "<zone id='3' name='Some Text Zone'/></zones></dashboard>" \
+               "<dashboard name='Detail'><zones><zone id='4' name='Sheet C'/></zones>" \
+               "</dashboard></dashboards></workbook>"
+      end
       "<workbook><datasources><datasource caption=''><extract count='1'/></datasource></datasources></workbook>"
     end
-    def self.view_image(_id, resolution: nil); nil; end
-    def self.view_data(_id); nil; end
+    def self.view_image(id, resolution: nil)
+      rec("png #{id}")
+      'PNGBYTES'
+    end
+    def self.view_data(id)
+      rec("csv #{id}")
+      "h\n1\n"
+    end
     def self.read_metadata(_l); nil; end
     def self.graphql_datasource_fields(_l); nil; end
     def self.find_datasource_by_name(_n); nil; end
@@ -196,6 +221,69 @@ Dir.mktmpdir do |tmp|
   dl = tj1 && (tj1['tasks'] || []).find { |t| t['task'] == 'twb-download' }
   check(dl && dl['ok'] == true && dl['attempts'] == 1,
         'default budgets: fast thin download untouched (ok, one attempt)', fails)
+
+  # ---- (C) W2.20 scoped CSV fetch ------------------------------------------
+
+  stub_views = 'Sheet A,Sheet B,Sheet C,Overview,Detail' # => v0..v4
+  membership = JSON.generate([
+    { 'name' => 'Overview', 'sheets' => [{ 'name' => 'Sheet A', 'luid' => 'v0' },
+                                         { 'name' => 'Sheet B', 'luid' => 'v1' }] },
+    { 'name' => 'Detail',   'sheets' => [{ 'name' => 'Sheet C', 'luid' => 'v2' }] }
+  ])
+  csvs_of = ->(log_file) { File.readlines(log_file).map(&:strip).select { |l| l.start_with?('csv ') } }
+
+  # (C1) SCOPE TRIP via Metadata API at t≈0: only the target dashboard's
+  # member-sheet CSVs are fetched, and the scoping is stated with its source.
+  log7 = File.join(tmp, 'fetch7.log')
+  File.write(log7, '')
+  code, out = run_discover(script, File.join(tmp, 'out7'), log7, '--dashboard', 'Overview',
+                           env: { 'STUB_VIEWS' => stub_views, 'STUB_MEMBERSHIP' => membership })
+  check(code == 0, "scoped (metadata-api) run exits 0 (exit #{code})", fails)
+  check(csvs_of.call(log7).sort == ['csv v0', 'csv v1'],
+        "metadata-api scope fetches ONLY member-sheet CSVs (got #{csvs_of.call(log7).sort.inspect})", fails)
+  check(out.include?('membership: metadata-api'), 'scope line states the metadata-api source', fails)
+
+  # (C2) SCOPE TRIP via .twb pre-parse when the Metadata API has no answer:
+  # membership resolves as soon as the .twb lands; text zones drop out.
+  log8 = File.join(tmp, 'fetch8.log')
+  File.write(log8, '')
+  code, out = run_discover(script, File.join(tmp, 'out8'), log8, '--dashboard', 'Overview',
+                           env: { 'STUB_VIEWS' => stub_views, 'STUB_TWB_DASH' => '1' })
+  check(code == 0, "scoped (twb-preparse) run exits 0 (exit #{code})", fails)
+  check(csvs_of.call(log8).sort == ['csv v0', 'csv v1'],
+        "twb pre-parse scope fetches ONLY member-sheet CSVs (got #{csvs_of.call(log8).sort.inspect})", fails)
+  check(out.include?('membership: twb-preparse'), 'scope line states the twb-preparse source', fails)
+
+  # (C3) FAIL-OPEN: membership unresolvable from BOTH sources → ALL view CSVs,
+  # stated not silent. Scoping may only ever REMOVE fetches when confident.
+  log9 = File.join(tmp, 'fetch9.log')
+  File.write(log9, '')
+  code, out = run_discover(script, File.join(tmp, 'out9'), log9, '--dashboard', 'Overview',
+                           env: { 'STUB_VIEWS' => stub_views })
+  check(code == 0, "fail-open run exits 0 (exit #{code})", fails)
+  check(csvs_of.call(log9).size == 5,
+        "unresolvable membership fetches ALL 5 view CSVs (got #{csvs_of.call(log9).size})", fails)
+  check(out =~ /UNRESOLVABLE/ && out.include?('fail-open'), 'fail-open is stated, not silent', fails)
+
+  # (C4) UNSCOPED runs are untouched: no --dashboard → all views, no scope lines.
+  log10 = File.join(tmp, 'fetch10.log')
+  File.write(log10, '')
+  code, out = run_discover(script, File.join(tmp, 'out10'), log10,
+                           env: { 'STUB_VIEWS' => stub_views, 'STUB_MEMBERSHIP' => membership })
+  check(code == 0, "unscoped run exits 0 (exit #{code})", fails)
+  check(csvs_of.call(log10).size == 5, 'unscoped run still fetches every view CSV', fails)
+  check(!out.include?('scope:'), 'no scope chatter on unscoped runs', fails)
+
+  # (C5) BOGUS TARGET fails open, never silently narrows: an unmatched
+  # --dashboard name (typo) must not drop CSVs on the floor.
+  log11 = File.join(tmp, 'fetch11.log')
+  File.write(log11, '')
+  code, out = run_discover(script, File.join(tmp, 'out11'), log11, '--dashboard', 'No Such Dash',
+                           env: { 'STUB_VIEWS' => stub_views, 'STUB_MEMBERSHIP' => membership, 'STUB_TWB_DASH' => '1' })
+  check(code == 0, "bogus-target run exits 0 (exit #{code})", fails)
+  check(csvs_of.call(log11).size == 5,
+        "bogus --dashboard target fetches ALL view CSVs (got #{csvs_of.call(log11).size})", fails)
+  check(out =~ /UNRESOLVABLE/, 'bogus target is reported unresolvable', fails)
 
   # (4) migrate-tableau.rb keeps the --skip-extract-landing live repoint on the
   # skip path. TWO spellings are correct under the opt-in default and both are

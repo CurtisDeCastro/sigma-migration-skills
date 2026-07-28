@@ -7,7 +7,12 @@
 #   /tmp/<name>/get-workbook.json     — workbook metadata + view list
 #   /tmp/<name>/ds-metadata.json      — VDS read-metadata response (field list + formulas)
 #   /tmp/<name>/graphql-fields.json   — metadata API field list (cleaner formulas)
-#   /tmp/<name>/views/<viewId>.csv    — every view's data CSV
+#   /tmp/<name>/views/<viewId>.csv    — every view's data CSV; on a
+#                                       --dashboard-scoped mission only the
+#                                       target dashboards' MEMBER SHEETS
+#                                       (membership: Metadata API at t≈0, .twb
+#                                       pre-parse fallback; unresolvable →
+#                                       ALL views, fail-open + logged)
 #   /tmp/<name>/views/<viewId>.png    — dashboard view image only (skip other views by default)
 #   /tmp/<name>/dashboards/<name>.png — EVERY dashboard view at resolution=high,
 #                                       keyed by (sanitized) dashboard name. This
@@ -85,6 +90,12 @@ opts = { fetch_view_images: 'dashboard-only', pool: 5 }
 OptionParser.new do |o|
   o.on('--workbook-name NAME')    { |v| opts[:workbook_name] = v }
   o.on('--workbook-id ID')        { |v| opts[:workbook_id] = v }
+  # W2.20 — scoped missions fetch ONLY the target dashboards' member-sheet
+  # CSVs (membership: Metadata API at t≈0, .twb pre-parse fallback;
+  # unresolvable → ALL views, stated not silent). Matching mirrors
+  # parse-twb-layout: exact → case-insensitive → unique substring.
+  o.on('--dashboard NAME', 'Scope view-CSV fetches to this dashboard\'s member sheets (repeatable). ' \
+                           'Fail-open: unresolvable membership fetches all views.') { |v| (opts[:dashboards] ||= []) << v }
   o.on('--datasource-name NAME')  { |v| opts[:datasource_name] = v }
   o.on('--datasource-luid LUID', 'FULL datasource UUID (no prefix matching)') { |v| opts[:datasource_luid] = v }
   o.on('--no-auto-ds', 'Disable .twb-based datasource auto-detect') { opts[:no_auto_ds] = true }
@@ -206,6 +217,74 @@ def run_task(name, max_attempts: 4, budget: nil)
   end
 end
 
+def xml_unescape(s)
+  s.to_s.gsub('&lt;', '<').gsub('&gt;', '>').gsub('&quot;', '"')
+   .gsub('&apos;', "'").gsub('&amp;', '&')
+end
+
+# --- W2.20 membership helpers ------------------------------------------------
+
+# Match one --dashboard token against candidate dashboard names: exact
+# (trimmed) → case-insensitive → unique substring (parse-twb-layout's
+# documented semantics). nil = no unambiguous match.
+def match_dashboard_name(target, names)
+  t = target.to_s.strip
+  return nil if t.empty?
+  exact = names.find { |n| n.to_s.strip == t }
+  return exact if exact
+  ci = names.find { |n| n.to_s.strip.casecmp?(t) }
+  return ci if ci
+  subs = names.select { |n| n.to_s.downcase.include?(t.downcase) }
+  subs.size == 1 ? subs.first : nil
+end
+
+# Resolve --dashboard targets to the member VIEW subset given a membership map
+# {dashboard_name => [{'name' =>, 'luid' =>}, ...]}. Returns the view array,
+# or nil when membership is UNRESOLVABLE (any unmatched target, empty map, or
+# an all-hidden member set) — callers fall open to ALL views on nil, so this
+# can only ever REMOVE fetches when membership is confidently known.
+def scoped_views_for(targets, views, membership)
+  return nil if membership.nil? || membership.empty?
+  names = membership.keys
+  subset = {}
+  targets.each do |t|
+    dn = match_dashboard_name(t, names)
+    return nil unless dn
+    (membership[dn] || []).each do |s|
+      v = (views.find { |vv| vv['id'] == s['luid'] } if s['luid'].to_s != '')
+      v ||= views.find { |vv| (vv['name'] || '').strip == s['name'].to_s.strip } ||
+            views.find { |vv| (vv['name'] || '').strip.casecmp?(s['name'].to_s.strip) }
+      if v
+        subset[v['id']] = v
+      else
+        log "scope: member sheet #{s['name'].inspect} of #{dn.inspect} has no server view (hidden) — no CSV to fetch"
+      end
+    end
+  end
+  subset.empty? ? nil : subset.values
+end
+
+# Membership from the .twb XML (Metadata-API fallback): each <dashboard>'s
+# zone name= attributes, intersected with the workbook's <worksheet> names so
+# text/layout zones drop out naturally. Same regex style as the dashboards/
+# PNG pass below. Returns {dashboard_name => [{'name' =>, 'luid' => nil}]}.
+def twb_dashboard_membership(twb_xml)
+  block = twb_xml[%r{<dashboards>.*?</dashboards>}m]
+  return nil unless block
+  ws_names = twb_xml.scan(/<worksheet\s[^>]*?name=(?:'([^']*)'|"([^"]*)")/)
+                    .map { |sq, dq| xml_unescape(sq || dq) }.uniq
+  membership = {}
+  block.split(/(?=<dashboard[\s>])/).each do |seg|
+    m = seg.match(/\A<dashboard\s[^>]*?name=(?:'([^']*)'|"([^"]*)")/)
+    next unless m
+    dname = xml_unescape(m[1] || m[2])
+    zone_names = seg.scan(/<zone\s[^>]*?name=(?:'([^']*)'|"([^"]*)")/)
+                    .map { |sq, dq| xml_unescape(sq || dq) }
+    membership[dname] = (zone_names & ws_names).map { |n| { 'name' => n, 'luid' => nil } }
+  end
+  membership
+end
+
 # --- 1. Workbook (serial — everything else depends on the view list) --------
 wb = run_task('get-workbook') do
   w = if opts[:workbook_id]
@@ -234,6 +313,42 @@ if caps.any?
   log "capabilities: product=#{caps['product_version'] || '?'} " \
       "REST API=#{caps['rest_api_version'] || '?'}  Metadata API: #{meta_state}"
   log 'note: VDS is probed per-datasource below; on failure discovery falls back to the .twb XML.' unless caps['metadata_api']
+end
+
+# --- 1c. Dashboard→sheet membership at t≈0 (W2.20) ---------------------------
+# A --dashboard-scoped mission fetches ONLY the target dashboards' member-sheet
+# CSVs (the PNG ground-truth set is untouched — RCF needs every dashboard).
+# Membership sources, in order: Metadata API (dashboards{name sheets{name
+# luid}}) NOW — cheapest, one GraphQL round trip; else pre-parse the .twb the
+# moment it lands (freshly-published workbooks lag the metadata index —
+# membership may not exist there yet when discovery launches). UNRESOLVABLE
+# membership falls open to ALL view CSVs: scoping is a speed lever, never a
+# correctness gate, and the fallback is always stated, never silent.
+dash_targets = opts[:dashboards] || []
+scoped_views = nil
+membership_pending = false # true → the twb watcher owns the CSV enqueue
+if dash_targets.any?
+  if caps['metadata_api'] == false
+    log 'scope: Metadata API is OFF — dashboard membership defers to the .twb pre-parse'
+  else
+    dashes = run_task('dashboard-membership') { Tableau.graphql_workbook_dashboards(wb['id']) }
+    if dashes && !dashes.empty?
+      membership = {}
+      dashes.each { |d| membership[d['name'].to_s] = (d['sheets'] || []) }
+      scoped_views = scoped_views_for(dash_targets, views, membership)
+    end
+    if scoped_views
+      log "scope: #{dash_targets.map(&:inspect).join(', ')} → #{scoped_views.size} member-sheet CSV(s) " \
+          "of #{views.size} view(s) (membership: metadata-api)"
+    else
+      log 'scope: membership not resolvable from the Metadata API (workbook unindexed or names unmatched)'
+    end
+  end
+  membership_pending = scoped_views.nil? && !opts[:skip_content]
+  if scoped_views.nil? && !membership_pending
+    log "WARN: --dashboard membership UNRESOLVABLE (and --skip-content leaves no .twb to pre-parse) — " \
+        "fetching ALL #{views.size} view CSVs (fail-open)"
+  end
 end
 
 # --- 2. Build the task queue -------------------------------------------------
@@ -426,8 +541,10 @@ when 'all'
   end
 end
 
-# 2d. view CSV tasks
-views.each do |v|
+# 2d. view CSV tasks — the member-sheet subset on resolved scoped missions;
+# ALL views otherwise (unscoped, or membership unresolvable = fail-open). When
+# membership is PENDING on the .twb, the watcher below enqueues instead.
+enqueue_csv = lambda do |v|
   queue << lambda do
     csv = run_task("csv:#{v['name']}") { Tableau.view_data(v['id']) }
     if csv
@@ -436,40 +553,64 @@ views.each do |v|
     end
   end
 end
+if scoped_views
+  scoped_views.each { |v| enqueue_csv.call(v) }
+elsif membership_pending
+  log 'scope: view-CSV enqueue deferred until the .twb lands (membership pre-parse)'
+else
+  views.each { |v| enqueue_csv.call(v) }
+end
 
 # --- 3. Run the pool ----------------------------------------------------------
-n_threads = [opts[:pool], queue.size + 1].min
+# Sizing counts CSVs still pending on the membership pre-parse — they arrive
+# via the watcher after the .twb lands and must not run on a starved pool.
+n_threads = [opts[:pool], queue.size + 1 + (membership_pending ? views.size : 0)].min
 n_threads = 1 if n_threads < 1
-log "pool: #{n_threads} threads, #{queue.size} queued tasks#{auto_ds_pending ? ' (+VDS/GraphQL after twb auto-detect)' : ''}"
+log "pool: #{n_threads} threads, #{queue.size} queued tasks#{auto_ds_pending ? ' (+VDS/GraphQL after twb auto-detect)' : ''}" \
+    "#{membership_pending ? ' (+scoped view CSVs after twb membership pre-parse)' : ''}"
 
-# Auto-ds chain: a watcher enqueues VDS/GraphQL once the twb lands.
+# Post-.twb watcher: one consumer of twb_done that (a) finishes the W2.20
+# membership fallback — the scoped (or fail-open ALL) CSV enqueue — and then
+# (b) runs the auto-ds chain enqueueing VDS/GraphQL. CSVs first: they feed the
+# pool that is already running.
 watcher = nil
 unless opts[:skip_content]
   watcher = Thread.new do
     twb_xml = twb_done.pop
-    next unless auto_ds_pending
-    unless twb_xml
-      log 'auto-detect skipped — no .twb content; skipping VDS/GraphQL'
-      next
-    end
-    caption = twb_xml.scan(/<datasource\s+caption='([^']+)'/).flatten
-                     .reject { |c| c == 'Parameters' }
-                     .first
-    if caption
-      bare = caption.sub(/\s*\+?\s*\(New Virtual Connection\)\s*$/i, '').strip
-      found = nil
-      %W[#{caption} #{bare}].uniq.each do |cand|
-        hit = run_task("find-datasource:#{cand}") { Tableau.find_datasource_by_name(cand) }
-        if hit
-          found = hit['id']
-          log "auto-detected datasource from .twb: #{cand.inspect} (luid=#{found})"
-          break
-        end
+    if membership_pending
+      sv = twb_xml ? scoped_views_for(dash_targets, views, twb_dashboard_membership(twb_xml)) : nil
+      if sv
+        log "scope: #{dash_targets.map(&:inspect).join(', ')} → #{sv.size} member-sheet CSV(s) " \
+            "of #{views.size} view(s) (membership: twb-preparse)"
+        sv.each { |v| enqueue_csv.call(v) }
+      else
+        log "WARN: --dashboard membership UNRESOLVABLE (Metadata API and .twb pre-parse both came up empty) — " \
+            "fetching ALL #{views.size} view CSVs (fail-open)"
+        views.each { |v| enqueue_csv.call(v) }
       end
-      ds_metadata_tasks.call(found) if found
-      log "could not resolve auto-detected datasource caption #{caption.inspect}; pass --datasource-luid to override" unless found
-    else
-      log 'auto-detect found no datasource caption in the .twb — skipping VDS/GraphQL'
+    end
+    if auto_ds_pending && twb_xml.nil?
+      log 'auto-detect skipped — no .twb content; skipping VDS/GraphQL'
+    elsif auto_ds_pending
+      caption = twb_xml.scan(/<datasource\s+caption='([^']+)'/).flatten
+                       .reject { |c| c == 'Parameters' }
+                       .first
+      if caption
+        bare = caption.sub(/\s*\+?\s*\(New Virtual Connection\)\s*$/i, '').strip
+        found = nil
+        %W[#{caption} #{bare}].uniq.each do |cand|
+          hit = run_task("find-datasource:#{cand}") { Tableau.find_datasource_by_name(cand) }
+          if hit
+            found = hit['id']
+            log "auto-detected datasource from .twb: #{cand.inspect} (luid=#{found})"
+            break
+          end
+        end
+        ds_metadata_tasks.call(found) if found
+        log "could not resolve auto-detected datasource caption #{caption.inspect}; pass --datasource-luid to override" unless found
+      else
+        log 'auto-detect found no datasource caption in the .twb — skipping VDS/GraphQL'
+      end
     end
   end
 end
@@ -505,9 +646,7 @@ unless opts[:fetch_view_images] == 'none' || opts[:skip_content]
   if twb_xml_shared
     block = twb_xml_shared[%r{<dashboards>.*?</dashboards>}m] || ''
     dash_names = block.scan(/<dashboard\s[^>]*?name=(?:'([^']*)'|"([^"]*)")/)
-                      .map { |sq, dq| sq || dq }
-                      .map { |n| n.gsub('&lt;', '<').gsub('&gt;', '>').gsub('&quot;', '"')
-                                  .gsub('&apos;', "'").gsub('&amp;', '&') }
+                      .map { |sq, dq| xml_unescape(sq || dq) }
                       .uniq
   end
   if dash_names.empty?
