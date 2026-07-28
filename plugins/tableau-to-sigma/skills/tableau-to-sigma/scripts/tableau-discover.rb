@@ -25,21 +25,24 @@
 #                                       written — the evidence trail for any
 #                                       future "discovery is slow" report)
 #
-# How it fetches: ONE shared thread pool (default 5, --pool N) covers EVERY
-# network task — .twb download, VDS read-metadata, GraphQL fields, all view
-# CSVs, and the dashboard PNG. Tasks are enqueued longest-job-first (PNG →
-# CSVs → twb/VDS/GraphQL) so the slow PNG render hides behind the CSV batch.
-# Only the initial workbook GET is serial (everything else needs its view
-# list). 5 is the measured sweet spot; 8+ risks long-tail stragglers (a
-# contended VizQL session can park one fetch for 40s+).
+# How it fetches: ONE shared thread pool (default 5, --pool N) covers every
+# NON-IMAGE network task — .twb download, VDS read-metadata, GraphQL fields,
+# all view CSVs. Only the initial workbook GET is serial (everything else
+# needs its view list). 5 is the measured sweet spot; 8+ risks long-tail
+# stragglers (a contended VizQL session can park one fetch for 40s+).
 #
-# EXCEPTION — the dashboards/ PNG set is fetched SERIALLY after the pool
-# drains: image renders are the heaviest per-request VizQL load and must be
-# SOLO (never concurrent with another image fetch). Dashboard names come from
-# the .twb's ./dashboards/dashboard elements, matched to the workbook's views
-# by trimmed name; ~10s each is trivial next to their value as RCF ground
-# truth. (--skip-images skips these too; the legacy views/<viewId>.png
-# heuristic single-dashboard fetch is kept for backward compatibility.)
+# IMAGES — a DEDICATED single worker thread (W2.20) owns EVERY PNG fetch from
+# t≈0: image renders are the heaviest per-request VizQL load and must never
+# run concurrently with ANOTHER IMAGE (the solo constraint is image-with-image
+# only — an image beside the CSV batch is fine, and overlapping them is the
+# point: the slow renders hide behind the CSVs instead of running serially
+# after the pool drains). The dashboards/ set is enqueued the moment the .twb
+# lands — dashboard names come from ./dashboards/dashboard elements, matched
+# to the workbook's views by trimmed name; the single worker preserves FIFO,
+# so a views/<id>.png fetched this run is REUSED for its dashboards/ twin
+# instead of re-rendering. (--skip-images skips all of it; the legacy
+# views/<viewId>.png heuristic single-dashboard fetch is kept for backward
+# compatibility.)
 #
 # Resilience (insurance — none of it fired in validation, keep it anyway):
 #   * 429 / 408 / 5xx / timeouts retry with exponential backoff + jitter
@@ -355,11 +358,19 @@ end
 queue = Queue.new
 twb_done = Queue.new # signals twb completion (for auto-ds fallback)
 
+# Image lane (W2.20): ONE dedicated worker thread drains img_queue from t≈0 —
+# every PNG goes through it, so image-with-image concurrency is impossible by
+# construction while images overlap the CSV pool freely. pooled_pngs records
+# view PNGs fetched THIS RUN (all image tasks run on the one worker thread, so
+# plain hash access is safe); the dashboards/ pass reuses those bytes instead
+# of re-rendering. A nil sentinel closes the queue: the watcher pushes it
+# after enqueueing the dashboards/ set (or immediately below when no .twb
+# task exists to wait for).
+img_queue = Queue.new
+pooled_pngs = {}
+dash_png_stats = { expected: 0, fetched: 0 }
+
 # 2a. twb download task (.twbx auto-extract preserved from the serial version)
-# twb_xml_shared: the downloaded XML, read after the pool drains by the
-# all-dashboards PNG pass (3b) — safe: written once inside the task, read only
-# after pool.each(&:join).
-twb_xml_shared = nil
 unless opts[:skip_content]
   queue << lambda do
     bytes = run_task('twb-download', budget: opts[:download_budget] || DL_BUDGET_TWB) do
@@ -472,7 +483,6 @@ unless opts[:skip_content]
       # Exactly-once, even when persist/normalize raises: the watcher blocks on
       # twb_done.pop and the pool spin loop waits on the watcher — a lost push
       # would hang discovery instead of failing it.
-      twb_xml_shared = twb_xml
       twb_done << twb_xml
     end
   end
@@ -510,9 +520,9 @@ if ds_luid.nil? && !auto_ds_pending
   warn 'no --datasource-luid/--datasource-name supplied (and auto-detect is unavailable); skipping VDS + GraphQL fetches'
 end
 
-# 2c. dashboard PNG task — IN THE POOL, queued BEFORE the CSVs (longest-job-
-#     first: the PNG render is the longest single fetch; starting it at t≈0
-#     hides it entirely behind the CSV batch).
+# 2c. view PNG tasks — ON THE IMAGE WORKER from t≈0 (W2.20): the slow render
+#     starts immediately and hides behind the CSV batch without ever running
+#     beside another image.
 case opts[:fetch_view_images]
 when 'none'
   log 'skipping view images (--skip-images)'
@@ -521,20 +531,22 @@ when 'dashboard-only'
   dash = views.find { |v| v['name'] =~ /\boverview\b|\bdashboard\b/i } ||
          views.max_by { |v| (v['name'] || '').length }
   if dash
-    queue << lambda do
+    img_queue << lambda do
       png = run_task("png:#{dash['name']}") { Tableau.view_image(dash['id']) }
       if png
         atomic_write(File.join(opts[:out], 'views', "#{dash['id']}.png"), png)
+        pooled_pngs[dash['id']] = true
         log "wrote views/#{dash['id']}.png  (dashboard: #{dash['name']}, #{png.bytesize} bytes)"
       end
     end
   end
 when 'all'
   views.each do |v|
-    queue << lambda do
+    img_queue << lambda do
       png = run_task("png:#{v['name']}") { Tableau.view_image(v['id']) }
       if png
         atomic_write(File.join(opts[:out], 'views', "#{v['id']}.png"), png)
+        pooled_pngs[v['id']] = true
         log "wrote views/#{v['id']}.png  (#{v['name']})"
       end
     end
@@ -561,6 +573,63 @@ else
   views.each { |v| enqueue_csv.call(v) }
 end
 
+# 2e. ALL dashboard PNGs at resolution=high (RCF ground truth) — enqueued on
+# the image worker by the watcher the moment the .twb lands. Without these the
+# render-compare-fix visual loop is structurally impossible, so the set is
+# NEVER scoped by --dashboard. run_task wraps each fetch (retry/backoff +
+# timings; task names unchanged: dashboard-png:<name>). A views/<id>.png
+# fetched this run is reused instead of re-rendered — the single image worker
+# is FIFO, so the view PNGs (queued at t≈0) always land first.
+enqueue_dashboard_pngs = lambda do |twb_xml|
+  next if opts[:fetch_view_images] == 'none' || opts[:skip_content]
+  dash_names = []
+  if twb_xml
+    block = twb_xml[%r{<dashboards>.*?</dashboards>}m] || ''
+    dash_names = block.scan(/<dashboard\s[^>]*?name=(?:'([^']*)'|"([^"]*)")/)
+                      .map { |sq, dq| xml_unescape(sq || dq) }
+                      .uniq
+  end
+  if dash_names.empty?
+    log 'no dashboards found in the .twb — skipping dashboards/ PNG set'
+    next
+  end
+  FileUtils.mkdir_p(File.join(opts[:out], 'dashboards'))
+  used_fnames = {}
+  dash_names.each do |dname|
+    v = views.find { |vv| (vv['name'] || '').strip == dname.strip } ||
+        views.find { |vv| (vv['name'] || '').strip.casecmp?(dname.strip) }
+    unless v
+      log "dashboard #{dname.inspect}: no matching view (hidden/renamed on the server) — skipped"
+      next
+    end
+    fname = dname.strip.gsub(/[^\w.-]+/, '_').gsub(/\A_+|_+\z/, '')
+    fname = v['id'] if fname.empty?
+    if (n = used_fnames[fname])
+      used_fnames[fname] = n + 1
+      fname = "#{fname}_#{n + 1}"
+    else
+      used_fnames[fname] = 1
+    end
+    dest = File.join(opts[:out], 'dashboards', "#{fname}.png")
+    dash_png_stats[:expected] += 1
+    img_queue << lambda do
+      pooled = File.join(opts[:out], 'views', "#{v['id']}.png")
+      if pooled_pngs[v['id']] && File.exist?(pooled)
+        atomic_write(dest, File.binread(pooled))
+        log "wrote dashboards/#{fname}.png  (reused views/#{v['id']}.png)"
+        dash_png_stats[:fetched] += 1
+      else
+        png = run_task("dashboard-png:#{dname}") { Tableau.view_image(v['id'], resolution: 'high') }
+        if png
+          atomic_write(dest, png)
+          log "wrote dashboards/#{fname}.png  (#{png.bytesize} bytes)"
+          dash_png_stats[:fetched] += 1
+        end
+      end
+    end
+  end
+end
+
 # --- 3. Run the pool ----------------------------------------------------------
 # Sizing counts CSVs still pending on the membership pre-parse — they arrive
 # via the watcher after the .twb lands and must not run on a starved pool.
@@ -570,13 +639,18 @@ log "pool: #{n_threads} threads, #{queue.size} queued tasks#{auto_ds_pending ? '
     "#{membership_pending ? ' (+scoped view CSVs after twb membership pre-parse)' : ''}"
 
 # Post-.twb watcher: one consumer of twb_done that (a) finishes the W2.20
-# membership fallback — the scoped (or fail-open ALL) CSV enqueue — and then
-# (b) runs the auto-ds chain enqueueing VDS/GraphQL. CSVs first: they feed the
-# pool that is already running.
+# membership fallback — the scoped (or fail-open ALL) CSV enqueue, (b) hands
+# the dashboards/ PNG set to the image worker, and (c) runs the auto-ds chain
+# enqueueing VDS/GraphQL. CSVs first: they feed the pool that is already
+# running. The img_queue close rides an ensure so a raising watcher can never
+# leave the image worker waiting forever.
 watcher = nil
-unless opts[:skip_content]
+if opts[:skip_content]
+  img_queue << nil # no .twb will land — nothing further can join the image lane
+else
   watcher = Thread.new do
     twb_xml = twb_done.pop
+    begin
     if membership_pending
       sv = twb_xml ? scoped_views_for(dash_targets, views, twb_dashboard_membership(twb_xml)) : nil
       if sv
@@ -589,6 +663,7 @@ unless opts[:skip_content]
         views.each { |v| enqueue_csv.call(v) }
       end
     end
+    enqueue_dashboard_pngs.call(twb_xml)
     if auto_ds_pending && twb_xml.nil?
       log 'auto-detect skipped — no .twb content; skipping VDS/GraphQL'
     elsif auto_ds_pending
@@ -612,6 +687,20 @@ unless opts[:skip_content]
         log 'auto-detect found no datasource caption in the .twb — skipping VDS/GraphQL'
       end
     end
+    ensure
+      img_queue << nil
+    end
+  end
+end
+
+# The dedicated image worker (W2.20): starts at t≈0, drains img_queue until
+# the sentinel. ONE thread — the solo image constraint holds by construction.
+img_worker = Thread.new do
+  while (task = img_queue.pop)
+    task.call
+  end
+  if dash_png_stats[:expected] > 0
+    log "dashboards/: #{dash_png_stats[:fetched]}/#{dash_png_stats[:expected]} dashboard PNG(s) at resolution=high"
   end
 end
 
@@ -635,61 +724,7 @@ pool = Array.new(n_threads) do
 end
 watcher&.join
 pool.each(&:join)
-
-# --- 3b. ALL dashboard PNGs at resolution=high (RCF ground truth) -------------
-# Runs SERIALLY after the pool drains — image renders must be SOLO (the skill's
-# own discovery contract: never run image requests concurrently with each
-# other; a VizQL render is the heaviest per-request load and concurrent renders
-# contend). run_task still wraps each fetch, so retry/backoff + timings apply.
-unless opts[:fetch_view_images] == 'none' || opts[:skip_content]
-  dash_names = []
-  if twb_xml_shared
-    block = twb_xml_shared[%r{<dashboards>.*?</dashboards>}m] || ''
-    dash_names = block.scan(/<dashboard\s[^>]*?name=(?:'([^']*)'|"([^"]*)")/)
-                      .map { |sq, dq| xml_unescape(sq || dq) }
-                      .uniq
-  end
-  if dash_names.empty?
-    log 'no dashboards found in the .twb — skipping dashboards/ PNG set'
-  else
-    FileUtils.mkdir_p(File.join(opts[:out], 'dashboards'))
-    used_fnames = {}
-    fetched = 0
-    dash_names.each do |dname|
-      v = views.find { |vv| (vv['name'] || '').strip == dname.strip } ||
-          views.find { |vv| (vv['name'] || '').strip.casecmp?(dname.strip) }
-      unless v
-        log "dashboard #{dname.inspect}: no matching view (hidden/renamed on the server) — skipped"
-        next
-      end
-      fname = dname.strip.gsub(/[^\w.-]+/, '_').gsub(/\A_+|_+\z/, '')
-      fname = v['id'] if fname.empty?
-      if (n = used_fnames[fname])
-        used_fnames[fname] = n + 1
-        fname = "#{fname}_#{n + 1}"
-      else
-        used_fnames[fname] = 1
-      end
-      dest = File.join(opts[:out], 'dashboards', "#{fname}.png")
-      # --all-view-images already fetched this view at resolution=high (the lib
-      # default) into views/<id>.png — reuse the bytes instead of re-rendering.
-      pooled = File.join(opts[:out], 'views', "#{v['id']}.png")
-      if opts[:fetch_view_images] == 'all' && File.exist?(pooled)
-        atomic_write(dest, File.binread(pooled))
-        log "wrote dashboards/#{fname}.png  (reused views/#{v['id']}.png)"
-        fetched += 1
-        next
-      end
-      png = run_task("dashboard-png:#{dname}") { Tableau.view_image(v['id'], resolution: 'high') }
-      if png
-        atomic_write(dest, png)
-        log "wrote dashboards/#{fname}.png  (#{png.bytesize} bytes)"
-        fetched += 1
-      end
-    end
-    log "dashboards/: #{fetched}/#{dash_names.size} dashboard PNG(s) at resolution=high"
-  end
-end
+img_worker.join # dashboards/ PNG set (enqueued by the watcher) drains here
 
 # timings.json is ALWAYS written — it's the evidence trail when someone reports
 # discovery slowness later (per-task start offsets show pool occupancy; attempts

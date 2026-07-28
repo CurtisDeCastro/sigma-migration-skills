@@ -95,10 +95,12 @@ STUB = <<~'RUBY'
     end
     def self.view_image(id, resolution: nil)
       rec("png #{id}")
+      sleep ENV['STUB_SLOW_PNG'].to_f if ENV['STUB_SLOW_PNG'] # render takes a while
       'PNGBYTES'
     end
     def self.view_data(id)
       rec("csv #{id}")
+      sleep ENV['STUB_SLOW_CSV_S'].to_f if ENV['STUB_SLOW_CSV'] == id # one wedged export
       "h\n1\n"
     end
     def self.read_metadata(_l); nil; end
@@ -284,6 +286,60 @@ Dir.mktmpdir do |tmp|
   check(csvs_of.call(log11).size == 5,
         "bogus --dashboard target fetches ALL view CSVs (got #{csvs_of.call(log11).size})", fails)
   check(out =~ /UNRESOLVABLE/, 'bogus target is reported unresolvable', fails)
+
+  # ---- (D) W2.20 dedicated PNG worker --------------------------------------
+
+  span_of = ->(tj, name) { (tj['tasks'] || []).find { |t| t['task'] == name } }
+
+  # (D1) Images run on a dedicated worker from t≈0 and OVERLAP the CSV pool:
+  # with one wedged CSV export (2.5s), the dashboards/ PNG (enqueued when the
+  # .twb lands) must START before that CSV ENDS — the old serial-after-drain
+  # pass could not. The views/<id>.png fetched this run is REUSED for its
+  # dashboards/ twin instead of re-rendering.
+  log12 = File.join(tmp, 'fetch12.log')
+  File.write(log12, '')
+  code, out = run_discover(script, File.join(tmp, 'out12'), log12, images: true,
+                           env: { 'STUB_VIEWS' => stub_views, 'STUB_TWB_DASH' => '1',
+                                  'STUB_SLOW_CSV' => 'v2', 'STUB_SLOW_CSV_S' => '2.5' })
+  check(code == 0, "png-worker run exits 0 (exit #{code})", fails)
+  check(File.exist?(File.join(tmp, 'out12', 'dashboards', 'Overview.png')) &&
+        File.exist?(File.join(tmp, 'out12', 'dashboards', 'Detail.png')),
+        'both dashboards/ PNGs written', fails)
+  check(out.include?('reused views/v3.png'),
+        'heuristic view PNG reused for its dashboards/ twin (no re-render)', fails)
+  tj12 = timings(File.join(tmp, 'out12'))
+  heur = tj12 && span_of.call(tj12, 'png:Overview')
+  check(heur && heur['start'] < 1.0,
+        "heuristic PNG starts at t≈0 on the image worker (start #{heur && heur['start']})", fails)
+  slow = tj12 && span_of.call(tj12, 'csv:Sheet C')
+  dpng = tj12 && span_of.call(tj12, 'dashboard-png:Detail')
+  check(slow && dpng && dpng['start'] < slow['start'] + slow['seconds'],
+        "dashboards/ PNG overlaps the CSV pool (png start #{dpng && dpng['start']} < slow-csv end " \
+        "#{slow && (slow['start'] + slow['seconds']).round(3)})", fails)
+  # timings.json key stability (consumed by migrate-tableau.rb's stamp gate).
+  check(tj12 && (tj12.keys.sort == %w[pool tasks total_seconds]) &&
+        tj12['tasks'].all? { |t| (t.keys - %w[task start seconds attempts ok error]).empty? },
+        'timings.json keys unchanged (total_seconds/pool/tasks; per-task task/start/seconds/attempts/ok[/error])', fails)
+
+  # (D2) SOLO constraint: images are never concurrent with other images —
+  # with 0.3s renders, --all-view-images spans must be strictly serial.
+  log13 = File.join(tmp, 'fetch13.log')
+  File.write(log13, '')
+  code, out = run_discover(script, File.join(tmp, 'out13'), log13, '--all-view-images', images: true,
+                           env: { 'STUB_VIEWS' => stub_views, 'STUB_TWB_DASH' => '1',
+                                  'STUB_SLOW_PNG' => '0.3' })
+  check(code == 0, "--all-view-images run exits 0 (exit #{code})", fails)
+  png_fetches = File.readlines(log13).map(&:strip).select { |l| l.start_with?('png ') }
+  check(png_fetches.size == 5,
+        "all 5 view PNGs fetched once, dashboards/ reuses bytes (got #{png_fetches.size} renders)", fails)
+  check(out.include?('reused views/v3.png') && out.include?('reused views/v4.png'),
+        'both dashboards/ PNGs reused from the pooled view fetches', fails)
+  tj13 = timings(File.join(tmp, 'out13'))
+  spans = tj13 ? (tj13['tasks'] || []).select { |t| t['task'].to_s.start_with?('png:', 'dashboard-png:') } : []
+  sorted = spans.sort_by { |t| t['start'] }
+  overlap = sorted.each_cons(2).find { |a, b| b['start'] < a['start'] + a['seconds'] - 0.05 }
+  check(spans.size == 5 && overlap.nil?,
+        "image fetches never overlap another image (#{spans.size} spans, overlap: #{overlap ? overlap.map { |t| t['task'] }.inspect : 'none'})", fails)
 
   # (4) migrate-tableau.rb keeps the --skip-extract-landing live repoint on the
   # skip path. TWO spellings are correct under the opt-in default and both are
