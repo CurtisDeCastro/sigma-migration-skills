@@ -154,6 +154,12 @@ module Wave1Fixture
   def self.env(png_wait: '1')
     {
       'LANG' => 'en_US.UTF-8', 'LC_ALL' => 'en_US.UTF-8',
+      # Hermetic to branch drift: fixture runs exercise the REAL orchestrator,
+      # whose staleness gate compares the checkout against origin/main — any
+      # in-review branch is legitimately "behind" while main moves (the gate's
+      # job is to protect FIELD runs, not test fixtures). Without this, every
+      # PR goes red the moment main advances (observed live on CI).
+      'SIGMA_SKIP_VERSION_CHECK' => '1',
       'SIGMA_API_TOKEN' => 'dummy-token',
       'SIGMA_TOKEN_MINTED_AT' => Time.now.utc.iso8601,
       # Non-nil dummies: sigma_rest.rb autoloads the WHOLE neutral cred file
@@ -178,7 +184,30 @@ module Wave1Fixture
   # Run the orchestrator against the fixture. Returns [stdout+stderr, status].
   def self.run(dir, extra_args = [], env_over = {}, png_wait: '1')
     cmd = [RbConfig.ruby, ORCH, *BASE_ARGS, '--out', dir, *extra_args]
-    Open3.capture2e(env(png_wait: png_wait).merge(env_over), *cmd)
+    # Hermetic HOME: the real ~/.sigma-migration carries a cached doctor.json
+    # whose behind_count reflects branch-vs-main drift — the stale gate then
+    # fails every in-review branch the moment main moves (observed on CI and
+    # locally). An isolated HOME has no cached report (stale gate skips by its
+    # own best-effort contract) and gets a minimal passing bootstrap sentinel
+    # so intake's exit-6 gate opens the same way it does on a bootstrapped
+    # machine. Fixtures must be immune to machine state and branch drift.
+    Open3.capture2e(hermetic_env(dir, png_wait: png_wait).merge(env_over), *cmd)
+  end
+
+  # The full fixture environment incl. HOME isolation — EVERY orchestrator
+  # spawn in the wave-1 tests must use this (directly or via run); a bare
+  # env() call leaks the parent HOME and re-couples the test to machine state.
+  def self.hermetic_env(dir, png_wait: '1')
+    home = File.join(dir, '.home')
+    sm = File.join(home, '.sigma-migration')
+    FileUtils.mkdir_p(sm)
+    sentinel = File.join(sm, 'bootstrap.json')
+    unless File.exist?(sentinel)
+      File.write(sentinel, JSON.generate(
+                   'doctor_pass' => true, 'mode' => 'full', 'actions' => [],
+                   'completed_at' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')))
+    end
+    env(png_wait: png_wait).merge('HOME' => home, 'USERPROFILE' => home)
   end
 end
 

@@ -29,7 +29,7 @@ end
 # (warn) is deliberately untouched.
 def run_split(dir, extra, png_wait: '1')
   cmd = [RbConfig.ruby, Wave1Fixture::ORCH, *Wave1Fixture::BASE_ARGS, '--out', dir, *extra]
-  Open3.capture3(Wave1Fixture.env(png_wait: png_wait), *cmd)
+  Open3.capture3(Wave1Fixture.hermetic_env(dir, png_wait: png_wait), *cmd)
 end
 
 # Mirrors QUIET_PASS_RE in migrate-tableau.rb: error shapes + the house
