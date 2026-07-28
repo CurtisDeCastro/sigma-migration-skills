@@ -93,5 +93,57 @@ check('summarize on an empty workdir prints the no-records line, returns {}') do
   end
 end
 
+# ── W2.22 turn/invocation capture ──────────────────────────────────────────
+
+check('invocation_token is numbers-only and stable within the process') do
+  t1 = PhaseMetrics.invocation_token
+  t2 = PhaseMetrics.invocation_token
+  t1 == t2 && t1 =~ /\A\d+-\d+\z/
+end
+
+Dir.mktmpdir do |wd|
+  check('record with turn/inv writes both keys; without them the old shape is unchanged') do
+    PhaseMetrics.record(workdir: wd, phase: 'discover', wall_s: 30.0, turn: 1, inv: '11-1000')
+    PhaseMetrics.record(workdir: wd, phase: 'dm-build', wall_s: 30.0, turn: 2, inv: '11-1000',
+                        tokens: 9_000)
+    PhaseMetrics.record(workdir: wd, phase: 'finalize', wall_s: 60.0, turn: 1, inv: '22-2000')
+    PhaseMetrics.record(workdir: wd, phase: 'legacy', wall_s: 5.0) # wave-1 shape
+    recs = File.readlines(File.join(wd, 'phase-metrics.jsonl')).map { |l| JSON.parse(l) }
+    recs[0]['turn'] == 1 && recs[0]['inv'] == '11-1000' &&
+      !recs[3].key?('turn') && !recs[3].key?('inv')
+  end
+
+  check('run_stats derives turn_events / invocations / re_entries / walls / tokens') do
+    s = PhaseMetrics.run_stats(wd)
+    s['records'] == 4 && s['turn_events'] == 3 && s['invocations'] == 2 &&
+      s['re_entries'] == 1 && s['wall_s_total'] == 125.0 && s['tokens_total'] == 9_000 &&
+      s['span_s'].is_a?(Numeric) && s['span_s'] >= 0
+  end
+
+  check('summarize table shape is unchanged by turn/inv keys (no new columns)') do
+    io = StringIO.new
+    PhaseMetrics.summarize(wd, io: io)
+    header = io.string.lines.first.to_s
+    header.split.sort == %w[phase n wall_s mean_s tokens].sort
+  end
+end
+
+check('run_stats on a pre-turn-capture file: turn_events/invocations/re_entries nil, never 0') do
+  Dir.mktmpdir do |wd|
+    PhaseMetrics.record(workdir: wd, phase: 'discover', wall_s: 10.0)
+    PhaseMetrics.record(workdir: wd, phase: 'dm-build', wall_s: 20.0)
+    s = PhaseMetrics.run_stats(wd)
+    s['turn_events'].nil? && s['invocations'].nil? && s['re_entries'].nil? &&
+      s['wall_s_total'] == 30.0 && s['tokens_total'].nil?
+  end
+end
+
+check('run_stats on an empty workdir is all-nil/zero, never raises') do
+  Dir.mktmpdir do |wd|
+    s = PhaseMetrics.run_stats(wd)
+    s['records'].zero? && s['turn_events'].nil? && s['wall_s_total'].zero? && s['span_s'].nil?
+  end
+end
+
 puts $failures.zero? ? "\nall phase_metrics tests passed" : "\n#{$failures} FAILED"
 exit($failures.zero? ? 0 : 1)
