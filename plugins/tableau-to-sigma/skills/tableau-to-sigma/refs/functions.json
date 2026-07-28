@@ -4,7 +4,7 @@
   "note": "BUILD ARTIFACT — regenerate with `node scripts/dev/gen-translation-table.mjs`; never hand-edit. One row per live-catalog function; sigma_template is the translator's real output for the recorded probe.",
   "inputs": {
    "bundle": "converter/tableau.mjs",
-   "bundle_sha256": "e3c9e17c33d86d6f154cef842753550851e98daba28debd1f19f39cff5a69a18",
+   "bundle_sha256": "8a258271c54d8cf06afad25eee23580d6d902471b1a8781094bee128361f87ab",
    "catalog": "scripts/lib/tableau_functions.json",
    "catalog_sha256": "be92f472fae64fe8df5ca5028dd7655adc9fb9a3dc494656541bd7f23f420571"
   },
