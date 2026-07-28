@@ -285,7 +285,9 @@ bc = ['ruby', File.join(HERE, 'build-charts-from-signals.rb'),
       '--tableau-dir', WORK, '--layout', layout_path, '--master-map', master_map_path,
       '--master-element-id', 'master', '--page-per-dashboard',
       '--out', chart_specs_path, '--coverage-out', File.join(WORK, 'coverage.json'),
-      '--meta', meta_path, '--auto-controls']
+      '--meta', meta_path, '--auto-controls',
+      # synthetic .twb has no live source dashboard to read — waive Phase 1d
+      '--skip-dashboard-read', 'synthetic .twb E2E harness (no live source dashboard)']
 if File.exist?(conv_meta_path) &&
    File.read(File.join(HERE, 'build-charts-from-signals.rb')).include?('--workbook-patterns')
   bc += ['--workbook-patterns', conv_meta_path]
@@ -297,12 +299,16 @@ run!(bc, allow_fail: true)
 # ---------------------------------------------------------------------------
 puts "\n== 5. build-workbook-spec =="
 wb_spec_path = File.join(WORK, 'wb-spec.json')
-run!(['ruby', File.join(HERE, 'build-workbook-spec.rb'),
-      '--chart-specs', chart_specs_path, '--dm-ids', dm_ids_path,
-      '--master-cols', master_cols_path, '--workbook-name', NAME,
-      '--folder-id', opts[:folder], '--mode', 'dashboard',
-      '--dm-element-name', fact['name'], '--layout', layout_path,
-      '--out', wb_spec_path], allow_fail: true)
+wbs = ['ruby', File.join(HERE, 'build-workbook-spec.rb'),
+       '--chart-specs', chart_specs_path, '--dm-ids', dm_ids_path,
+       '--master-cols', master_cols_path, '--workbook-name', NAME,
+       '--folder-id', opts[:folder], '--mode', 'dashboard',
+       '--layout', layout_path, '--out', wb_spec_path]
+# Only name the DM element when the fact table actually has a name. A nameless
+# kind:sql element must fall through to build-workbook-spec's "Custom SQL"
+# default — an empty --dm-element-name is rejected.
+wbs += ['--dm-element-name', fact['name']] unless fact['name'].to_s.strip.empty?
+run!(wbs, allow_fail: true)
 
 wbspec = JSON.parse(File.read(wb_spec_path))
 # Sigma page ids must match /^[a-zA-Z0-9_-]{1,64}$/; the slug can contain invalid
