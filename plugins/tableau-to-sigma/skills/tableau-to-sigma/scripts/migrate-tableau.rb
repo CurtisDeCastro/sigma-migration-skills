@@ -884,6 +884,33 @@ def phase_summary
   puts "PHASE BUDGET   over-budget: #{over.map { |k, v| "#{k}=#{v.round(0)}s(>#{PHASE_BUDGET[k]}s)" }.join('  ')}  — see refs/performance.md" if over.any?
 end
 
+# ── Consent FILE-guarantee (PR #509 review R3) ──────────────────────────────
+# Called at chokepoints EVERY terminal route crosses: the post-checkpoint
+# rejoin (full pipeline AND fast path — right after the `unless FASTPATH`
+# block closes) and the --finalize spine before its gate battery. On an
+# UNATTENDED run (--yes / --force / --answers — nobody can be asked at
+# wrap-up) that reaches a chokepoint with no consent-answer.json, write the
+# honest no-response record: decided_by 'relayed-absent' when an --answers
+# set simply omitted the consent key, 'unattended-flag' for flag-driven
+# defaults (both in Offramp's DECIDED_BY vocabulary); asked_at_checkpoint
+# false — no stop ever surfaced the question. report-telemetry.py suppresses
+# the send on anything but an explicit 'consented'. INTERACTIVE runs write
+# NOTHING here: a human is present, so the SKILL.md wrap-up ask governs (and
+# the reader fails closed on an absent file). Idempotent — never overwrites
+# an existing record.
+def ensure_unattended_consent_marker!(work, unattended:, relayed:)
+  return unless unattended
+  path = File.join(work, 'consent-answer.json')
+  return if File.exist?(path)
+  File.write(path,
+             JSON.pretty_generate('answer' => 'no-response',
+                                  'decided_by' => relayed ? 'relayed-absent' : 'unattended-flag',
+                                  'asked_at_checkpoint' => false,
+                                  'at' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')) + "\n")
+rescue StandardError
+  nil # bookkeeping only — never fail the run over the marker
+end
+
 # Reap the background discovery lane with a HARD bound — an abort/stop path
 # must never hang forever on a wedged child process (poll-bounds audit,
 # refs/performance.md). Returns false when the lane did not exit in time; the
@@ -1153,6 +1180,14 @@ if opts[:finalize]
   abort "FATAL: no #{state_path} — run pass 1 first (same --workbook/--out)" unless File.exist?(state_path)
   state = JSON.parse(File.read(state_path))
   wb_id = state['workbook_id'] or abort 'FATAL: state has no workbook_id (pass 1 never completed Phase 4)'
+
+  # R3 chokepoint (finalize spine): an unattended --finalize on a workdir with
+  # no consent record (e.g. one predating the every-path guarantee) must not
+  # reach the wrap-up telemetry step file-less — the reader keys off workdir
+  # records, never agent diligence. No-op when the record exists (the normal
+  # case: pass 1 wrote it) or when a human is present.
+  ensure_unattended_consent_marker!(WORK, unattended: !!(opts[:yes] || opts[:force] || opts[:answers]),
+                                    relayed: !!opts[:answers])
 
   hdr(6, 'Parity (pass 2 — finalize)')
   $t_mark = Time.now
@@ -1927,6 +1962,12 @@ if have_twb
       avail = begin
         # binread + scrub: a Windows UTF-16 .twb read as UTF-8 would list zero
         # dashboards in this banner (error-message-only path, never a gate).
+        # ACCEPTED LIMITATION (PR #509 review R10): BOM-LESS UTF-16 (no FF FE /
+        # FE FF prefix) is not sniffed, so such a .twb still lists zero
+        # dashboards here. Banner-only blast radius — scope MATCHING uses
+        # `emitted` (from layout_json), and the rescue fails open to [] — so
+        # the optional NUL-heavy-window sniff stays a wave-2 nicety, not a fix
+        # this stop depends on.
         raw = File.binread(twb)
         raw = raw.encode('UTF-8', 'UTF-16', invalid: :replace, undef: :replace) if raw[0, 2] == "\xFF\xFE".b || raw[0, 2] == "\xFE\xFF".b
         raw.force_encoding('UTF-8').scrub('?').scan(/<dashboard\s+[^>]*name=['"]([^'"]+)['"]/).flatten.uniq
@@ -3363,8 +3404,15 @@ oq_path = File.join(WORK, 'open-questions.json')
 # consent-answer.json for the telemetry step; no answer → nothing is sent
 # (E3.7 owns the send-side trichotomy — nothing is fabricated here). On the
 # re-entry the question is re-surfaced ONLY when it was actually asked (a
-# prior checkpoint artifact carries it) or explicitly answered — a --yes FIRST
-# run that never stopped writes NO consent marker (it was never asked).
+# prior checkpoint artifact carries it) or explicitly answered. UNATTENDED
+# runs (--yes/--force/--answers) that never surface the question still leave
+# an honest record: ensure_unattended_consent_marker! — the chokepoint fired
+# on EVERY terminal route (post-checkpoint rejoin below, full pipeline AND
+# fast path, plus the --finalize spine) — writes {answer: 'no-response',
+# asked_at_checkpoint: false}, which report-telemetry.py suppresses. Only an
+# INTERACTIVE run that never stopped leaves no marker: a human is present, so
+# the SKILL.md wrap-up ask governs, and the reader FAILS CLOSED (suppress,
+# never send) on an absent or unreadable record.
 consent_q = {
   'id' => 'telemetry_consent', 'severity' => 'review',
   'detail' => 'May anonymous run telemetry (phase timings, gate outcomes — no customer identifiers) ' \
@@ -3508,29 +3556,25 @@ if questions.any?
       abort "FATAL: required decision '#{q['id']}' has no default; re-run with --answers or fix inputs"
     end
     # Consent answer → consent-answer.json (consumed at wrap-up; E3.7 owns the
-    # send-side). Recorded ONLY when the question was actually surfaced —
-    # here it is: either relayed via --answers or defaulted no-response after
-    # a prior checkpoint stop asked it.
+    # send-side). asked_at_checkpoint reflects REALITY (PR #509 review R5):
+    # true ONLY when a checkpoint stop actually surfaced the question (the
+    # stop's open-questions.json artifact carries it) — a FIRST-run --answers
+    # relay that never stopped records false, so the audit record never
+    # claims an ask that didn't happen. The answer itself is still honest
+    # relayed/defaulted provenance either way.
     if q['id'] == 'telemetry_consent'
+      _consent_surfaced = _prior_oq.is_a?(Hash) &&
+                          Array(_prior_oq['open_questions']).any? { |pq| pq.is_a?(Hash) && pq['id'] == 'telemetry_consent' }
       File.write(File.join(WORK, 'consent-answer.json'),
                  JSON.pretty_generate('answer' => chosen.to_s,
                                       'decided_by' => answers ? 'relayed' : 'unattended-flag',
-                                      'asked_at_checkpoint' => true,
+                                      'asked_at_checkpoint' => _consent_surfaced,
                                       'at' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')) + "\n") rescue nil
     end
   end
-  # Consent must be FILE-gated on every path: a --yes run whose question list
-  # never surfaced telemetry_consent would otherwise leave no
-  # consent-answer.json and the wrap-up would fall back to agent diligence.
-  # Absent file + unattended resolution = an honest no-response record, which
-  # report-telemetry's checkpoint reader suppresses.
-  unless File.exist?(File.join(WORK, 'consent-answer.json'))
-    File.write(File.join(WORK, 'consent-answer.json'),
-               JSON.pretty_generate('answer' => 'no-response',
-                                    'decided_by' => answers ? 'relayed-absent' : 'unattended-flag',
-                                    'asked_at_checkpoint' => false,
-                                    'at' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')) + "\n") rescue nil
-  end
+  # (Consent FILE-gating for question lists that never surfaced
+  # telemetry_consent moved to the every-terminal-path chokepoint right after
+  # this `unless FASTPATH` block — see ensure_unattended_consent_marker!.)
   # Mark the checkpoint artifact RESOLVED (answers ledgered above) so later
   # re-entries don't re-surface already-answered questions; the doc survives
   # as history, decisions.jsonl is the append-only record.
@@ -3549,6 +3593,16 @@ else
 end
 mark('decisions')
 end # ═══ unless FASTPATH (full discovery → gates → decisions pipeline) ═══════
+
+# R3 chokepoint (post-checkpoint rejoin — crossed by the full pipeline AND the
+# fast path): consent must be FILE-gated on every path, mechanically. A
+# zero-question unattended run, an unattended run whose question list never
+# surfaced telemetry_consent, and an unattended FASTPATH re-entry into a
+# file-less workdir all land HERE and get the honest no-response record
+# (asked_at_checkpoint false), which report-telemetry.py suppresses.
+# Interactive runs: no-op — a human is present, the wrap-up ask governs.
+ensure_unattended_consent_marker!(WORK, unattended: !!(opts[:yes] || opts[:force] || opts[:answers]),
+                                  relayed: !!opts[:answers])
 
 # ---------------------------------------------------------------------------
 # folderId default (bead epvr). POST /v2/dataModels/spec REQUIRES folderId

@@ -135,3 +135,30 @@ MUST call this gate as their final step.
 > `phase6-success.json` + `parity-final.json`; `verify-complete.rb` re-derives
 > offline and **fails (exit 6) if your report contradicts it** — quote the
 > ledger verbatim, never a verdict it doesn't support.
+
+## Telemetry consent (gate 10) — consent-answer.json schema + fail-closed reader (PR #509 R3/R9)
+
+> **`<run-dir>/consent-answer.json`** — the pre-build checkpoint's recorded
+> consent; consent rides that ONE stop, never a second ask. Schema:
+> `{answer, decided_by, asked_at_checkpoint, at}`.
+> `answer` ∈ `consented | declined | no-response`. `decided_by` comes from the
+> closed `Offramp::DECIDED_BY` vocabulary: `relayed` (an agent relayed
+> `--answers` operator text — not first-hand consent), `relayed-absent` (an
+> `--answers` set omitted the consent key; the chokepoint recorded the honest
+> default), `unattended-flag` (`--yes`/`--force` defaults), reserved `user`.
+> `asked_at_checkpoint` is `true` ONLY when a checkpoint stop actually
+> surfaced the question — a never-stopped `--answers` relay records `false`.
+> **Every-path guarantee** (`ensure_unattended_consent_marker!`): every
+> UNATTENDED run (`--yes`/`--force`/`--answers`) gets a marker on every
+> terminal route — zero-question runs, question lists that never surfaced
+> consent, the FASTPATH span, and the `--finalize` spine. The unattended
+> `no-response` marker is deliberately the ONE consent artifact with **no
+> `decisions.jsonl` companion line**: nothing was decided at a stop; the
+> marker itself is the record. An interactive run that never stopped leaves
+> NO marker — a human is present, the SKILL.md wrap-up ask governs.
+> **Fail-closed reader** (`report-telemetry.py`): sending requires consent
+> EVIDENCE — a readable record saying `consented`, or the explicit
+> `--consent-interactive` attestation after a real wrap-up ask. Record absent
+> or unreadable without that flag → nothing is sent; a distinct suppression
+> marker (`status: declined`, `consent_source: fail-closed`) still satisfies
+> gate 10 (telemetry never blocks a migration).

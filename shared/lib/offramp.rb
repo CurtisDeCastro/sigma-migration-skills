@@ -62,14 +62,26 @@ module Offramp
   MANUAL_SPEC_REASONS = [MANUAL_SPEC_REASON_STOP, MANUAL_SPEC_REASON_REUSE,
                          MANUAL_SPEC_REASON_WAIVER].freeze
 
+  # decided_by provenance vocabulary (E3.6; extended per PR #509 review R4) —
+  # the CLOSED token set for decision() records AND consent-answer.json:
+  #   'relayed'         — an agent relayed --answers operator text (NOT
+  #                       first-hand consent)
+  #   'relayed-absent'  — an --answers set was supplied but OMITTED this key;
+  #                       the honest default was recorded unattended (the
+  #                       consent chokepoint's no-response marker)
+  #   'unattended-flag' — --yes/--force defaults, nobody asked
+  #   'user'            — reserved for a first-hand orchestrator stdin read
+  #                       (E3.6's later half)
+  # New writers add their token HERE first, then use it (same single-point
+  # rule as AUTHORIZATION_VIA).
+  DECIDED_BY = %w[relayed relayed-absent unattended-flag user].freeze
+
   # ── decisions.jsonl (E3.6, vocab half) ─────────────────────────────────────
   # Append-only record of operator decisions taken at the consolidated
   # pre-build checkpoint (and any later decision surface): one JSON line per
-  # decision — {kind, question, answer, decided_by, at}. decided_by is honest
-  # provenance: 'relayed' (an agent relayed --answers text — NOT first-hand
-  # consent), 'unattended-flag' (--yes/--force defaults), or 'user' (reserved
-  # for a first-hand orchestrator stdin read — E3.6's later half). LOCAL
-  # workdir artifact, never sent anywhere. Never fatal.
+  # decision — {kind, question, answer, decided_by, at}. decided_by comes from
+  # the DECIDED_BY vocabulary above. LOCAL workdir artifact, never sent
+  # anywhere. Never fatal.
   def decision(work, kind:, question: nil, answer: nil, decided_by: nil)
     return unless work && Dir.exist?(work.to_s)
     rec = { 'kind' => kind.to_s, 'question' => question, 'answer' => answer,

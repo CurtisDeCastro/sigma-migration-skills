@@ -36,6 +36,12 @@ check(Offramp::MANUAL_SPEC_REASON_STOP == 'authorized-by-stop',
       'MANUAL_SPEC_REASON_STOP is the baseline token (rename is E3.6\'s later half, single point)', fails)
 check(Offramp::MANUAL_SPEC_REASONS == %w[authorized-by-stop reuse-dm-id waiver],
       'MANUAL_SPEC_REASONS carries the three admit tokens', fails)
+# PR #509 review R4: decided_by is a CLOSED vocabulary too — the consent
+# chokepoint's 'relayed-absent' joined it through the constant, not as a
+# call-site-minted string. New provenance tokens land HERE first.
+check(Offramp::DECIDED_BY == %w[relayed relayed-absent unattended-flag user],
+      'DECIDED_BY carries exactly the four provenance tokens (relayed, relayed-absent, unattended-flag, user)', fails)
+check(Offramp::DECIDED_BY.frozen?, 'DECIDED_BY is frozen', fails)
 
 puts 'orchestrator call sites use the shared vocabulary'
 src = File.read(File.join(__dir__, 'migrate-tableau.rb'), encoding: 'UTF-8')
@@ -45,6 +51,19 @@ vias.each do |v|
   check(Offramp::AUTHORIZATION_VIA.include?(v),
         "call-site via #{v.inspect} is in Offramp::AUTHORIZATION_VIA", fails)
 end
+# Every decided_by literal in the orchestrator (ledger writers AND the two
+# consent-marker writers) must come from DECIDED_BY — hyphenated lowercase
+# quoted words on any line mentioning decided_by, comments included, so a
+# drifted token in either code or contract prose fails loudly.
+dby_tokens = src.lines.select { |l| l.include?('decided_by') }
+                 .flat_map { |l| l.scan(/'([a-z][a-z-]*)'/) }.flatten.uniq
+check(dby_tokens.any?, "found #{dby_tokens.size} decided_by-adjacent literal token(s)", fails)
+dby_tokens.each do |t|
+  check(Offramp::DECIDED_BY.include?(t),
+        "decided_by literal #{t.inspect} is in Offramp::DECIDED_BY", fails)
+end
+check(dby_tokens.include?('relayed-absent'),
+      "the consent chokepoint's 'relayed-absent' writer is present and scanned", fails)
 check(src.include?('Offramp::MANUAL_SPEC_REASON_STOP') &&
       src.include?('Offramp::MANUAL_SPEC_REASON_REUSE') &&
       src.include?('Offramp::MANUAL_SPEC_REASON_WAIVER'),

@@ -11,10 +11,22 @@
 #   T1 trip:  questions, interactive        → exit 10, ONE banner, artifact
 #   T2 trip:  unhandled gap, interactive    → exit 11, gap_review folded in
 #   T3 clear: --answers re-entry            → proceeds; decisions.jsonl
-#             (relayed), consent-answer.json, targeted answer precedence
+#             (relayed), consent-answer.json (asked_at_checkpoint TRUE — the
+#             stop really surfaced it), targeted answer precedence
+#   T3b clear: --answers WITH consent, FIRST run (never stopped) → consent
+#             recorded relayed BUT asked_at_checkpoint FALSE (PR #509 R5 —
+#             never hard-coded true)
 #   T4 clear: --yes                         → proceeds; unattended-flag ledger
-#   T5 clear: nothing to ask                → runs straight through (no stop)
+#   T4b clear: --answers omitting consent   → chokepoint marker decided_by
+#             'relayed-absent', asked_at_checkpoint false, no fabricated
+#             ledger line (PR #509 R3/R4/R9b)
+#   T5 clear: nothing to ask                → runs straight through (no stop);
+#             interactive leaves NO consent marker (wrap-up ask governs),
+#             unattended --yes gets the honest no-response marker (R3 zero-
+#             question leg)
 #   T6 contract: cost advisory folded, ack deferred to the proceed pass
+#   T7 FASTPATH: --reuse-dm + --wb-spec + --yes skips the whole checkpoint
+#             span yet still crosses the consent chokepoint (R3 fastpath leg)
 # Usage: ruby scripts/test-wave1-checkpoint.rb   (~15s, spawns real runs)
 
 require 'json'
@@ -124,9 +136,31 @@ Dir.mktmpdir do |d|
   ca = JSON.parse(File.read(File.join(d, 'consent-answer.json')))
   check(ca['answer'] == 'declined' && ca['decided_by'] == 'relayed',
         'consent-answer.json written for the wrap-up telemetry step', fails)
+  check(ca['asked_at_checkpoint'] == true,
+        'asked_at_checkpoint TRUE — derived from the stop that really surfaced it (R5)', fails)
   rs = JSON.parse(File.read(File.join(d, 'run-state.json')))
   check(rs['cost_estimate_acknowledged'] == true || !File.exist?(File.join(d, 'cost-estimate.json')),
         'cost ack recorded on the proceed pass', fails)
+end
+
+puts 'T3b — --answers WITH consent on a FIRST run (never stopped): asked_at_checkpoint honest FALSE (R5)'
+Dir.mktmpdir do |d|
+  Wave1Fixture.build(d)
+  Wave1Fixture.verified_png_read(d)
+  answers = {
+    'extract_drift' => 'proceed (structural parity, value drift expected)',
+    'empty_view_csv' => 'proceed (tile missing; rebuild manually + --allow-missing-tiles at --finalize)',
+    'telemetry_consent' => 'consented'
+  }
+  _, st = Wave1Fixture.run(d, ['--folder', 'fold-x', '--answers', JSON.generate(answers)])
+  check(st.exitstatus != 10 && st.exitstatus != 11,
+        "first-run --answers proceeds with no stop (got #{st.exitstatus})", fails)
+  check(!File.exist?(File.join(d, 'open-questions.json')),
+        'no checkpoint artifact — no stop ever surfaced the question', fails)
+  ca = (JSON.parse(File.read(File.join(d, 'consent-answer.json'))) rescue nil)
+  check(ca.is_a?(Hash) && ca['answer'] == 'consented' && ca['decided_by'] == 'relayed' &&
+        ca['asked_at_checkpoint'] == false,
+        "relayed consent on a never-stopped run records asked_at_checkpoint FALSE (got #{ca.inspect[0, 100]})", fails)
 end
 
 puts 'T4 — --yes: proceeds; unattended-flag ledger; gaps accepted + ledgered'
@@ -152,6 +186,29 @@ Dir.mktmpdir do |d|
         "consent marker on a --yes first run records honest no-response/not-asked (got #{ca.inspect[0, 80]})", fails)
 end
 
+puts 'T4b — --answers omitting the consent key (first run): relayed-absent chokepoint marker'
+Dir.mktmpdir do |d|
+  Wave1Fixture.build(d)
+  Wave1Fixture.verified_png_read(d)
+  answers = {
+    'extract_drift' => 'proceed (structural parity, value drift expected)',
+    'empty_view_csv' => 'proceed (tile missing; rebuild manually + --allow-missing-tiles at --finalize)'
+  }
+  _, st = Wave1Fixture.run(d, ['--folder', 'fold-x', '--answers', JSON.generate(answers)])
+  check(st.exitstatus != 10 && st.exitstatus != 11,
+        "--answers first run proceeds past the checkpoint (got #{st.exitstatus})", fails)
+  # R3+R4: the consent question was never surfaced and the --answers set
+  # omitted its key — the every-path chokepoint still leaves the honest
+  # record, with the vocabulary token that says exactly that.
+  ca = (JSON.parse(File.read(File.join(d, 'consent-answer.json'))) rescue nil)
+  check(ca.is_a?(Hash) && ca['answer'] == 'no-response' && ca['decided_by'] == 'relayed-absent' &&
+        ca['asked_at_checkpoint'] == false,
+        "chokepoint records relayed-absent/no-response/not-asked (got #{ca.inspect[0, 100]})", fails)
+  decs = (File.readlines(File.join(d, 'decisions.jsonl')).map { |l| JSON.parse(l) } rescue [])
+  check(decs.none? { |r| r['kind'] == 'telemetry_consent' },
+        'no fabricated telemetry_consent ledger line (R9b: the unattended marker has no decisions.jsonl companion)', fails)
+end
+
 puts 'T5 — nothing to ask: runs straight through (no false stop)'
 Dir.mktmpdir do |d|
   Wave1Fixture.build(d, empty_views: [], has_extracts: false)
@@ -163,6 +220,26 @@ Dir.mktmpdir do |d|
         'straight-through line printed', fails)
   check(!File.exist?(File.join(d, 'open-questions.json')),
         'no artifact when no checkpoint fired', fails)
+  # R3 boundary: INTERACTIVE zero-question runs leave NO consent marker — a
+  # human is present, so the SKILL.md wrap-up ask governs (and the reader
+  # fails closed on the absent file if a driver skips the ask).
+  check(!File.exist?(File.join(d, 'consent-answer.json')),
+        'interactive zero-question run leaves NO consent marker (wrap-up ask governs)', fails)
+end
+
+puts 'T5b — nothing to ask + --yes: zero-question UNATTENDED run still gets the consent marker (R3)'
+Dir.mktmpdir do |d|
+  Wave1Fixture.build(d, empty_views: [], has_extracts: false)
+  Wave1Fixture.verified_png_read(d)
+  out, st = Wave1Fixture.run(d, ['--folder', 'fold-x', '--yes'])
+  check(st.exitstatus != 10 && st.exitstatus != 11,
+        "no stop when nothing needs a human (got #{st.exitstatus})", fails)
+  check(out.include?('no open questions — running straight through'),
+        'straight-through line printed (zero questions, no checkpoint)', fails)
+  ca = (JSON.parse(File.read(File.join(d, 'consent-answer.json'))) rescue nil)
+  check(ca.is_a?(Hash) && ca['answer'] == 'no-response' && ca['decided_by'] == 'unattended-flag' &&
+        ca['asked_at_checkpoint'] == false,
+        "zero-question --yes run writes the honest no-response marker (got #{ca.inspect[0, 100]})", fails)
 end
 
 puts 'T6 — cost advisory folded on the stop, standalone on proceed'
@@ -183,6 +260,31 @@ Dir.mktmpdir do |d|
     check(out1.include?('cost estimate unavailable'),
           'estimator degraded honestly (no advisory to fold)', fails)
   end
+end
+
+puts 'T7 — FASTPATH (--reuse-dm + --wb-spec) skips the checkpoint span but crosses the consent chokepoint (R3)'
+Dir.mktmpdir do |d|
+  Wave1Fixture.build(d)
+  Wave1Fixture.verified_png_read(d)
+  wb_spec = File.join(d, 'wb-spec.json')
+  File.write(wb_spec, JSON.pretty_generate('pages' => []))
+  # --reuse-dm <explicit id> admits the manual path; --yes makes the fast
+  # path tolerate any missing discovery artifact AND marks the run
+  # unattended. The entire `unless FASTPATH` span (checkpoint included) is
+  # skipped — before R3's chokepoint this was a no-marker terminal route.
+  out, _st = Wave1Fixture.run(d, ['--folder', 'fold-x', '--yes',
+                                  '--reuse-dm', 'dm-fixture', '--wb-spec', wb_spec])
+  check(!out.include?('fast path NOT taken'), 'fast path actually taken', fails)
+  rs = (JSON.parse(File.read(File.join(d, 'run-state.json'))) rescue {})
+  p1 = rs.dig('phases', 'phase-1') || {}
+  check(p1['status'] == 'skip' && p1['note'].to_s.include?('FAST PATH'),
+        "run-state records the phase-1 FAST-PATH skip (got #{p1.inspect[0, 80]})", fails)
+  check(!File.exist?(File.join(d, 'open-questions.json')),
+        'no checkpoint artifact on the fast path (span skipped)', fails)
+  ca = (JSON.parse(File.read(File.join(d, 'consent-answer.json'))) rescue nil)
+  check(ca.is_a?(Hash) && ca['answer'] == 'no-response' && ca['decided_by'] == 'unattended-flag' &&
+        ca['asked_at_checkpoint'] == false,
+        "unattended FASTPATH run still gets the consent marker (got #{ca.inspect[0, 100]})", fails)
 end
 
 puts

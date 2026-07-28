@@ -401,6 +401,12 @@
       ]
     },
     {
+      "canonical": "shared/lib/phase_metrics.rb",
+      "targets": [
+        "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/lib/phase_metrics.rb"
+      ]
+    },
+    {
       "canonical": "shared/lib/offramp.rb",
       "targets": [
         "plugins/cognos-to-sigma/skills/cognos-to-sigma/scripts/lib/offramp.rb",
@@ -538,6 +544,20 @@
       "targets": [
         "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-intake.rb",
         "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-intake.rb"
+      ]
+    },
+    {
+      "canonical": "shared/scripts/test-intake-triage.rb",
+      "targets": [
+        "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-intake-triage.rb",
+        "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-intake-triage.rb"
+      ]
+    },
+    {
+      "canonical": "shared/scripts/test-validate-sigma-formula-cleanup.rb",
+      "targets": [
+        "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/test-validate-sigma-formula-cleanup.rb",
+        "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-validate-sigma-formula-cleanup.rb"
       ]
     },
     {
@@ -747,6 +767,22 @@
       ]
     },
     {
+      "canonical": "shared/lib/evidence_ledger.rb",
+      "targets": [
+        "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/lib/evidence_ledger.rb",
+        "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/lib/evidence_ledger.rb",
+        "plugins/looker-to-sigma/skills/looker-to-sigma/scripts/lib/evidence_ledger.rb",
+        "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/lib/evidence_ledger.rb",
+        "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/lib/evidence_ledger.rb",
+        "plugins/microstrategy-to-sigma/skills/microstrategy-to-sigma/scripts/lib/evidence_ledger.rb",
+        "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/lib/evidence_ledger.rb",
+        "plugins/cognos-to-sigma/skills/cognos-to-sigma/scripts/lib/evidence_ledger.rb",
+        "plugins/gooddata-to-sigma/skills/gooddata-to-sigma/scripts/lib/evidence_ledger.rb",
+        "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/lib/evidence_ledger.rb"
+      ],
+      "note": "domo intentionally NOT a target (wave-2 decision, PR #509 review R7/§3-A4): adding it materializes a new domo lib and activates real ledger writes in domo's gate script — a runtime behavior change to be taken deliberately together with the main-inherited degradation_ledger.rb gap; until then domo's assert-phase6-ran.rb uses its guarded inline ev_append fallback."
+    },
+    {
       "canonical": "shared/lib/export_pool.rb",
       "targets": [
         "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/lib/export_pool.rb",
@@ -892,27 +928,6 @@
         "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/lib/modeling_advisory.rb",
         "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/lib/modeling_advisory.rb",
         "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/lib/modeling_advisory.rb"
-      ]
-    },
-    {
-      "canonical": "shared/lib/phase_metrics.rb",
-      "targets": [
-        "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/lib/phase_metrics.rb"
-      ]
-    },
-    {
-      "canonical": "shared/lib/evidence_ledger.rb",
-      "targets": [
-        "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/lib/evidence_ledger.rb",
-        "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/lib/evidence_ledger.rb",
-        "plugins/looker-to-sigma/skills/looker-to-sigma/scripts/lib/evidence_ledger.rb",
-        "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/lib/evidence_ledger.rb",
-        "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/lib/evidence_ledger.rb",
-        "plugins/microstrategy-to-sigma/skills/microstrategy-to-sigma/scripts/lib/evidence_ledger.rb",
-        "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/lib/evidence_ledger.rb",
-        "plugins/cognos-to-sigma/skills/cognos-to-sigma/scripts/lib/evidence_ledger.rb",
-        "plugins/gooddata-to-sigma/skills/gooddata-to-sigma/scripts/lib/evidence_ledger.rb",
-        "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/lib/evidence_ledger.rb"
       ]
     }
   ]

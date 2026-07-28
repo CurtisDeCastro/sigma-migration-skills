@@ -295,6 +295,9 @@ jobs:
             shared/scripts/test-intake-triage.rb
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-intake-triage.rb
             plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/test-validate-sigma-formula-cleanup.rb
+            # shared/scripts/test-validate-sigma-formula-cleanup.rb is INTENTIONALLY not listed: standalone it
+            # self-SKIPs; its coverage is the shared-manifest drift gate pinning it byte-identical to the
+            # quicksight twin above (PR #509 review R9 — the manifest entry is the coverage mechanism).
             plugins/domo-to-sigma/skills/domo-to-sigma/test/test-build-dm.rb
             plugins/domo-to-sigma/skills/domo-to-sigma/test/test-build-workbook.rb
             plugins/domo-to-sigma/skills/domo-to-sigma/test/test-convert-beast-modes.rb

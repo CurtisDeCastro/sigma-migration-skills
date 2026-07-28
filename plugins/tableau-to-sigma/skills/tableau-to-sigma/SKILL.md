@@ -286,10 +286,13 @@ all rows visible to everyone). Full flow + the
 
 ## Telemetry (after the final gate passes)
 
-**First read `<run-dir>/consent-answer.json`** (the pre-build checkpoint's
-recorded consent — consent rides that ONE stop, never a second ask):
-`consented` → run `report-telemetry.py` below **without asking again**;
-`declined`/`no-response` → run it with `--declined`; file absent → ask:
+**First read `<run-dir>/consent-answer.json`** (the checkpoint's recorded
+consent — one stop, never a second ask; schema/provenance/every-path
+guarantee: `refs/gates.md` §Telemetry consent): `consented` → run
+`report-telemetry.py` below **without asking again**; `declined`/`no-response`
+→ run it with `--declined`; absent (interactive only) → ask, then add
+`--consent-interactive`; reader FAILS CLOSED — absent or unreadable without
+the flag sends nothing:
 
 **Tell the user this before running anything:**
 
@@ -298,7 +301,7 @@ recorded consent — consent rides that ONE stop, never a second ask):
 If the user does not object, run:
 
 ```bash
-python3 scripts/report-telemetry.py --tool tableau-to-sigma --duration <elapsed_seconds> --workdir <run-dir> [--mode live|file|both]
-# failed run: add --failed · user declined: --declined (no --duration needed)
+python3 scripts/report-telemetry.py --tool tableau-to-sigma --duration <elapsed_seconds> --workdir <run-dir> [--mode live|file|both] --consent-interactive
+# --failed on failure · --declined on decline · checkpoint 'consented': no flag needed
 # --workdir writes telemetry-sent.json — required by the GREEN telemetry gate (assert-telemetry-ran.rb)
 ```
