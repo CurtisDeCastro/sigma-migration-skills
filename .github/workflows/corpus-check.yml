@@ -289,6 +289,12 @@ jobs:
             plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/test-qs-trellis.rb
             plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/test-metric-reference.rb
             shared/lib/test_metric_binding.rb
+            plugins/domo-to-sigma/skills/domo-to-sigma/test/test-build-dm.rb
+            plugins/domo-to-sigma/skills/domo-to-sigma/test/test-build-workbook.rb
+            plugins/domo-to-sigma/skills/domo-to-sigma/test/test-convert-beast-modes.rb
+            plugins/domo-to-sigma/skills/domo-to-sigma/test/test-discover.rb
+            plugins/domo-to-sigma/skills/domo-to-sigma/test/test-doctor-gate.rb
+            plugins/domo-to-sigma/skills/domo-to-sigma/test/test-e2e.rb
           )
           fail=0
           for t in "${tests[@]}"; do
