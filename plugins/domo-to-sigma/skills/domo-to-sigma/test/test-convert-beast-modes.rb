@@ -63,5 +63,22 @@ puts "== lint_formula: valid multi-condition If passes =="
 errs, w = lint_formula('If([Status]="Active","Active",[Status]="Pending","Pending","Other")')
 ok(errs.empty?, 'native multi-condition If is clean (no nesting needed)')
 
+puts '== normalize_bm: unsupported + WEEKDAY rewrite =='
+n, w = normalize_bm('WEEKDAY(order_date)')
+ok(n.include?('DAYOFWEEK'), 'WEEKDAY → DAYOFWEEK')
+ok(!w.empty?, 'WEEKDAY rewrite warns')
+_, w2 = normalize_bm('SQRT(x)')
+ok(w2.join.match?(/SQRT/i), 'SQRT flagged unsupported')
+
+puts '== lint_formula: raw IN + And()/Or() function-call =='
+errs, _ = lint_formula('If([x] IN (1,2), "a", "b")')
+ok(!errs.empty?, 'raw IN( is a lint error (Sigma has no IsIn)')
+_, warns = lint_formula('And([a], [b])')
+ok(!warns.empty?, 'And() as a function call warns')
+
+puts '== lint_formula: balanced clean formula passes =='
+errs2, _ = lint_formula('Sum([Sales Amount])')
+ok(errs2.empty?, 'clean aggregate has no lint errors')
+
 puts
 if $failures.zero? then puts "ALL PASS"; exit 0 else puts "#{$failures} FAILURE(S)"; exit 1 end
