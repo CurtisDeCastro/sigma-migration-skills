@@ -218,6 +218,30 @@ def fetch_card_def(card_id)
   Domo.card_definition(card_id) rescue nil
 end
 
+# C9 wiring: merge each dataset's `permission` block — captured below from the
+# ALREADY-FETCHED Domo.dataset_formulas response (parts=core,permission,formulas),
+# no extra HTTP call — onto the matching datasets.json record, so build-dm.rb's
+# DomoSigma.detect_pdp() can actually see it live. Pure/side-effect-free (returns
+# a new array) so this is unit-testable offline without a network stub.
+#
+# Defensive: `permission_cache` values are attached as-is, whatever top-level
+# `permission` the response carried. detect_pdp already tolerantly reads
+# dataset['permission']['policies'] || dataset['pdp'] and returns [] (never
+# raises) if the real nesting differs — this function does not assert or guess
+# any deeper shape.
+def merge_dataset_permissions(datasets, permission_cache)
+  return [0, Array(datasets)] if permission_cache.nil? || permission_cache.empty?
+  merged = 0
+  out = Array(datasets).map do |d|
+    next d unless d.is_a?(Hash)
+    perm = permission_cache[d['id']]
+    next d unless perm
+    merged += 1
+    d.merge('permission' => perm)
+  end
+  [merged, out]
+end
+
 # ---------------------------------------------------------------------------
 
 opts = {}
@@ -255,13 +279,19 @@ if opts[:probe]
 end
 
 # --- DataSet inventory ------------------------------------------------------
-# TODO(on-access): Domo.list_datasets hits the PUBLIC /v1/datasets endpoint,
-# which does not carry a `permission`/`pdp` block. Once the field-path is
-# confirmed against a live instance, extend this fetch (or fold in the
-# already-defined Domo.dataset_meta, which requests parts=core,permission) so
-# each entry in datasets.json carries its `permission` field — that's what
-# feeds detect_pdp / C9 PDP detection in build-dm.rb (see SKILL.md Phase 6
-# Security's deferred-live note). Left un-wired here; do not guess the shape.
+# Domo.list_datasets hits the PUBLIC /v1/datasets endpoint, which does NOT
+# carry a `permission`/`pdp` block by itself. The --pages branch below already
+# fetches each used dataset's `permission` part as a side effect of pulling
+# Beast Mode formulas (Domo.dataset_formulas requests parts=core,permission,
+# formulas) — after that loop we merge the captured permission data onto the
+# matching datasets.json record (see merge_dataset_permissions above). NO
+# extra HTTP call is added. `datasets_snapshot` lets that merge target this
+# run's in-memory list when --datasets and --pages are invoked together in one
+# process; otherwise it falls back to reading discovery/datasets.json off disk
+# (run --datasets first so it exists). TODO(on-access): the exact `permission`
+# nesting is still unconfirmed against a live instance — detect_pdp() in
+# lib/domo_sigma_util.rb tolerates whatever shape actually comes back.
+datasets_snapshot = nil
 if opts[:datasets]
   all = []
   offset = 0
@@ -272,6 +302,7 @@ if opts[:datasets]
     offset += 50
     break if batch.size < 50
   end
+  datasets_snapshot = all
   dump('datasets.json', all)
 end
 
@@ -280,8 +311,9 @@ if opts[:pages]
   pages_out = []
   cards_out = []
   beast_out = []
-  ds_formula_cache = {}   # datasetId → formulas map
-  template_cache   = {}   # templateId → standalone Beast Mode (for classification)
+  ds_formula_cache    = {}   # datasetId → formulas map
+  ds_permission_cache = {}   # datasetId → raw `permission` value (C9 PDP wiring)
+  template_cache      = {}   # templateId → standalone Beast Mode (for classification)
 
   opts[:pages].each do |pid|
     page = Domo.page(pid) # PUBLIC: page hierarchy + card IDs
@@ -302,11 +334,14 @@ if opts[:pages]
         end
         card = normalize_card(raw, cid)
 
-        # Fetch + cache dataset-level Beast Modes for this card's dataset.
+        # Fetch + cache dataset-level Beast Modes for this card's dataset. This
+        # SAME response (parts=core,permission,formulas) also carries the C9
+        # PDP `permission` block — capture it too, no extra HTTP call.
         dsid = card['datasetId']
         if dsid && !ds_formula_cache.key?(dsid)
           det = (Domo.dataset_formulas(dsid) rescue nil)
           ds_formula_cache[dsid] = det&.dig('properties', 'formulas', 'formulas') || {}
+          ds_permission_cache[dsid] = det['permission'] if det.is_a?(Hash) && det['permission']
         end
 
         card['beastModes'] = dig_beast_modes(card, ds_formula_cache[dsid], template_cache)
@@ -321,6 +356,25 @@ if opts[:pages]
 
   # De-dupe Beast Modes by id (a dataset formula shared by many cards appears once).
   beast_out.uniq! { |b| [b['id'], b['scope']] }
+
+  # C9/PDP: merge captured `permission` data onto datasets.json (this run's
+  # in-memory list if --datasets ran too, else re-read the file from a prior
+  # --datasets run) so DomoSigma.detect_pdp can see it in build-dm.rb.
+  if ds_permission_cache.any?
+    ds_path  = File.join(OUT, 'datasets.json')
+    existing = datasets_snapshot || (JSON.parse(File.read(ds_path)) rescue nil)
+    if existing.is_a?(Array)
+      merged, datasets = merge_dataset_permissions(existing, ds_permission_cache)
+      if merged > 0
+        dump('datasets.json', datasets)
+        warn "  C9/PDP: merged permission data into #{merged} datasets.json record(s) (see DomoSigma.detect_pdp)."
+      end
+    else
+      warn "  C9/PDP: fetched permission data for #{ds_permission_cache.size} dataset(s) but " \
+           'discovery/datasets.json is missing/unparseable — run --datasets (before or with ' \
+           '--pages) so the merge has a target.'
+    end
+  end
 
   dump('pages.json', pages_out)
   dump('cards.json', cards_out)

@@ -10,6 +10,8 @@
 
 ARGV.clear                       # ensure domo-discover.rb's main flow is a no-op
 require_relative '../scripts/domo-discover'
+require_relative '../scripts/lib/domo_sigma_util'
+include DomoSigma
 
 $failures = 0
 def eq(actual, expected, msg)
@@ -118,6 +120,45 @@ bms = dig_beast_modes(card, ds_map, {})
 eq(bms.map { |x| x['scope'] }.sort, %w[card dataset], 'both dataset + card beast modes collected')
 eq(bms.find { |x| x['scope'] == 'dataset' }['class'], 'aggregate', 'dataset SUM classified aggregate')
 eq(bms.find { |x| x['scope'] == 'card' }['class'], 'projection', 'card CONCAT classified projection')
+
+puts "== merge_dataset_permissions: C9 wiring (dataset_formulas permission -> datasets.json) =="
+# Synthetic response shaped like Domo.dataset_formulas(dsid) — the SAME call
+# already made per-card for Beast Modes (parts=core,permission,formulas). Only
+# the top-level `permission` key is asserted; its inner shape is whatever a
+# live instance actually returns.
+synthetic_dataset_formulas_response = {
+  'id' => 'ds-1',
+  'properties' => { 'formulas' => { 'formulas' => {} } },
+  'permission' => { 'policies' => [
+    { 'id' => 'p1', 'name' => 'West only', 'predicates' => ['region = "West"'] },
+  ] },
+}
+permission_cache = { 'ds-1' => synthetic_dataset_formulas_response['permission'] }
+datasets = [
+  { 'id' => 'ds-1', 'name' => 'Orders' },       # has a captured permission block
+  { 'id' => 'ds-2', 'name' => 'No PDP here' },  # no entry in permission_cache
+]
+
+merged_count, out = merge_dataset_permissions(datasets, permission_cache)
+eq(merged_count, 1, 'exactly one dataset record merged')
+eq(out.size, 2, 'record count unchanged')
+ds1 = out.find { |d| d['id'] == 'ds-1' }
+ds2 = out.find { |d| d['id'] == 'ds-2' }
+eq(ds1['permission'], synthetic_dataset_formulas_response['permission'], 'permission attached as-is (no reshaping)')
+eq(ds2.key?('permission'), false, 'dataset with no captured permission is left untouched')
+
+# Through the REAL normalize/merge path: detect_pdp (build-dm.rb's C9 reader)
+# must find the policy on the merged record — proving the wiring actually
+# reaches the existing tolerant reader, end to end.
+pols = detect_pdp(ds1)
+eq(pols.length, 1, 'detect_pdp finds the merged policy')
+eq(pols.first['id'], 'p1', 'detect_pdp reads the policy id off the merged record')
+eq(detect_pdp(ds2), [], 'detect_pdp still empty (not nil) for the untouched dataset')
+
+puts "== merge_dataset_permissions: no captured permissions -> no-op =="
+no_op_count, no_op_out = merge_dataset_permissions(datasets, {})
+eq(no_op_count, 0, 'nothing merged when permission_cache is empty')
+eq(no_op_out.none? { |d| d.key?('permission') }, true, 'no dataset gains a permission key')
 
 puts
 if $failures.zero?
