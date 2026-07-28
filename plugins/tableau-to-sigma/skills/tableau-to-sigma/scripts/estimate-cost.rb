@@ -53,13 +53,40 @@
 # turn on average. Wall clock: measured 0.80 / 0.53 / 0.89 min per turn →
 # 0.75 min/turn assumed.
 #
+# ── W2.22: MEASURED REFIT (--from-metrics) ──────────────────────────────────
+# The calibration loop closes here: pass measured-run workdirs (each carrying
+# a <WORK>/phase-metrics.jsonl written by the orchestrator's mark() hook) and
+# the estimator re-fits its rate/phase-split coefficients from data instead of
+# the n=3 priors above. Every output then carries a PROVENANCE header naming
+# which coefficients are measured (with n + range) and which stayed priors.
+# Refit refuses low-n per coefficient (< MIN_FIT_RUNS): a refused refit keeps
+# priors and NAMES the refusal — never a fit from a single flattering run.
+# Runs whose metrics predate turn capture (no `turn` keys) contribute wall
+# clock only; a min/turn rate is never derived from them (nil ≠ 0).
+#
+# Standalone (no --workdir/--workbook): prints + optionally writes the
+# calibration/band report — per-tier bands published ONLY at n ≥ MIN_FIT_RUNS
+# per tier, as {n, range, rate}; below that the band is REFUSED by name.
+# Hygiene: run stats are keyed run-1..run-N; workdir paths are NOT written
+# into the report (numbers + neutral labels only).
+#
 # Usage:
 #   ruby scripts/estimate-cost.rb --workdir <WORK> [--out <path>]
+#     [--from-metrics <dir1,dir2,…>]     # refit coefficients, then estimate
 #   ruby scripts/estimate-cost.rb --workbook <get-workbook.json> [--datasource <metadata.json>]
+#   ruby scripts/estimate-cost.rb --from-metrics <dir1,dir2,…> [--out <path>]
+#     # standalone: fit + per-tier measured bands (repeatable / comma-separated)
 
 require 'json'
 require 'optparse'
 require 'time'
+
+$LOAD_PATH.unshift File.expand_path('lib', __dir__)
+begin
+  require 'phase_metrics'
+rescue LoadError
+  nil # measured refit degrades to priors (named in provenance); estimation unaffected
+end
 
 module EstimateCost
   # Turn-model coefficients — see the CALIBRATION block above for provenance.
@@ -72,6 +99,7 @@ module EstimateCost
   TOKENS_IN_PER_TURN        = 12_000 # stated assumption — no measured per-turn telemetry yet
   TOKENS_OUT_PER_TURN       = 900    # stated assumption
   MINUTES_PER_TURN          = 0.75   # measured 0.80 / 0.53 / 0.89 min per turn
+  MIN_FIT_RUNS              = 3      # W2.22: a coefficient refit / published band needs ≥ this n
 
   # Rough phase split of a clean orchestrated run (fractions of total turns).
   PHASE_SPLIT = {
@@ -86,6 +114,151 @@ module EstimateCost
     'Anchors: 3 clean e2e runs 2026-07 (~60 turns/48 min/7 tiles, ~75/40/5, ~80/71/6; manual DM ' \
     'path) + 3 field sessions ~4 h heavy-failure (docs/PLAN-v3.md). n=3: coefficients are ' \
     'anchor-centered priors, not fits. Assumed 12k input / 0.9k output tokens per turn.'
+
+  # ── W2.22: measured-run ingestion + coefficient refit ──────────────────────
+  # Coarse map from the orchestrator's PHASE_T keys (phase-metrics.jsonl
+  # `phase` values) onto the estimator's PHASE_SPLIT buckets. Coarse on
+  # purpose; unmapped keys land in 'other' rather than being guessed.
+  PHASE_BUCKET_RULES = [
+    [/\Aphase0|\Adecisions\z|\Afolder-resolve\z/, 'phase-0-scope'],
+    [/\Aphase1|\Ajoin-wait\z/,                    'phase-1-discover'],
+    [/\Aphase2|\Aphase3/,                         'phase-2-3-data-model'],
+    [/\Aphase4|\Aphase5/,                         'phase-4-5-workbook-layout'],
+    [/\Aphase6|\Aassert|\Acleanup|\AphaseE\z|\Apivot/, 'phase-6-parity-verify']
+  ].freeze
+
+  def self.bucket_for_phase(key)
+    rule = PHASE_BUCKET_RULES.find { |(re, _)| key.to_s =~ re }
+    rule ? rule[1] : 'other'
+  end
+
+  def self.median(arr)
+    s = arr.sort
+    return nil if s.empty?
+    m = s.size / 2
+    s.size.odd? ? s[m] : ((s[m - 1] + s[m]) / 2.0)
+  end
+
+  # One measured run's mechanical stats (nil where a capture is absent —
+  # never guessed). Returns {'error' => reason} when the dir yields nothing.
+  # Hygiene: the returned hash carries NO paths/names — numbers + tier only.
+  def self.measured_run(dir)
+    return { 'error' => 'workdir not found' } unless File.directory?(dir.to_s)
+    return { 'error' => 'phase_metrics lib unavailable' } unless defined?(PhaseMetrics)
+    stats = PhaseMetrics.run_stats(dir)
+    return { 'error' => 'no phase-metrics.jsonl records' } if stats['records'].to_i.zero?
+    tier = begin
+      JSON.parse(File.read(File.join(dir, 'migrate-state.json')))['tier']
+    rescue StandardError
+      nil
+    end
+    wall_min = (stats['wall_s_total'].to_f / 60.0).round(2)
+    turns = stats['turn_events']
+    phase_wall = Hash.new(0.0)
+    PhaseMetrics.aggregate(dir).each { |k, a| phase_wall[bucket_for_phase(k)] += a['wall_s'].to_f }
+    {
+      'tier'             => (tier || 'untagged').to_s,
+      'wall_minutes'     => wall_min,
+      'turn_events'      => turns,
+      'invocations'      => stats['invocations'],
+      're_entries'       => stats['re_entries'],
+      'tokens_total'     => stats['tokens_total'],
+      'minutes_per_turn' => (turns && turns.positive? ? (wall_min / turns).round(3) : nil),
+      'phase_wall_s'     => phase_wall.transform_values { |v| v.round(1) }
+    }
+  end
+
+  # dirs → [run stats] keyed run-1..run-N in argument order (no paths kept).
+  def self.measured_runs(dirs)
+    Array(dirs).each_with_index.map do |d, i|
+      measured_run(d).merge('run' => "run-#{i + 1}")
+    end
+  end
+
+  # Refit: median rate + mean phase split, each refused by name below
+  # MIN_FIT_RUNS. Returns { 'minutes_per_turn' => {...}, 'phase_split' => {...},
+  # 'tokens_per_turn_total' => {...}|nil, 'refused' => [...] }.
+  def self.fit_from_runs(runs)
+    ok = runs.reject { |r| r['error'] }
+    refused = runs.select { |r| r['error'] }.map { |r| "#{r['run']}: #{r['error']}" }
+    fit = { 'refused' => refused }
+
+    rates = ok.map { |r| r['minutes_per_turn'] }.compact
+    fit['minutes_per_turn'] =
+      if rates.size >= MIN_FIT_RUNS
+        { 'value' => median(rates).round(3), 'n' => rates.size,
+          'min' => rates.min, 'max' => rates.max, 'source' => 'measured' }
+      else
+        refused << "minutes_per_turn: low-n (#{rates.size} turn-capturing run(s) < #{MIN_FIT_RUNS}) — priors retained"
+        { 'value' => MINUTES_PER_TURN, 'n' => rates.size, 'source' => 'priors' }
+      end
+
+    splits = ok.map { |r| r['phase_wall_s'] }.select { |pw| pw.values.sum.positive? }
+    fit['phase_split'] =
+      if splits.size >= MIN_FIT_RUNS
+        buckets = splits.flat_map(&:keys).uniq
+        mean = buckets.to_h do |b|
+          [b, splits.map { |pw| pw[b].to_f / pw.values.sum }.sum / splits.size]
+        end
+        norm = mean.values.sum
+        { 'value' => mean.transform_values { |v| (v / norm).round(3) },
+          'n' => splits.size, 'source' => 'measured' }
+      else
+        refused << "phase_split: low-n (#{splits.size} run(s) with phase walls < #{MIN_FIT_RUNS}) — priors retained"
+        { 'value' => PHASE_SPLIT, 'n' => splits.size, 'source' => 'priors' }
+      end
+
+    # Token totals are captured per-run but not split in/out — reported as
+    # measured INFO, never silently substituted into the in/out assumption.
+    tok = ok.select { |r| r['tokens_total'] && r['turn_events'].to_i.positive? }
+    if tok.size >= MIN_FIT_RUNS
+      per = tok.map { |r| (r['tokens_total'].to_f / r['turn_events']).round(0) }
+      fit['tokens_per_turn_total'] =
+        { 'value' => median(per).round(0), 'n' => per.size, 'min' => per.min, 'max' => per.max,
+          'source' => 'measured', 'note' => 'total per turn — in/out split remains the stated assumption' }
+    end
+    fit
+  end
+
+  # Per-tier measured bands. A band is PUBLISHED only at n ≥ MIN_FIT_RUNS for
+  # that tier; below that it is refused BY NAME (observations stated, never
+  # banded — "a single flattering minute is not a band").
+  def self.tier_bands(runs)
+    runs.reject { |r| r['error'] }.group_by { |r| r['tier'] }.to_h do |tier, rs|
+      walls = rs.map { |r| r['wall_minutes'] }
+      turns = rs.map { |r| r['turn_events'] }.compact
+      rates = rs.map { |r| r['minutes_per_turn'] }.compact
+      band =
+        if rs.size < MIN_FIT_RUNS
+          { 'refused' => "low-n (n=#{rs.size} < #{MIN_FIT_RUNS}) — no band published",
+            'n' => rs.size, 'observed_wall_minutes' => walls.sort }
+        else
+          { 'n' => rs.size,
+            'wall_minutes' => { 'min' => walls.min, 'median' => median(walls).round(2), 'max' => walls.max },
+            'turns' => (turns.size >= MIN_FIT_RUNS ?
+              { 'n' => turns.size, 'min' => turns.min, 'median' => median(turns).round(1), 'max' => turns.max } :
+              { 'refused' => "low-n (#{turns.size} turn-capturing run(s) < #{MIN_FIT_RUNS})" }),
+            'rate_min_per_turn' => (rates.size >= MIN_FIT_RUNS ?
+              { 'n' => rates.size, 'min' => rates.min, 'median' => median(rates).round(3), 'max' => rates.max } :
+              { 'refused' => "low-n (#{rates.size} turn-capturing run(s) < #{MIN_FIT_RUNS})" }) }
+        end
+      [tier, band]
+    end
+  end
+
+  # One-line provenance header for stdout — states measured-vs-priors + n.
+  def self.provenance_line(fit)
+    mpt = fit && fit['minutes_per_turn']
+    if mpt && mpt['source'] == 'measured'
+      "[calibration] coefficients: MEASURED — minutes_per_turn #{mpt['value']} " \
+      "(median, n=#{mpt['n']}, range #{mpt['min']}–#{mpt['max']}) · fitted from phase-metrics.jsonl"
+    else
+      n = mpt ? mpt['n'] : 0
+      "[calibration] coefficients: PRIORS (n=3 anchors, ±30%)" +
+        (fit ? " — measured refit refused: #{n} usable turn-capturing run(s) < #{MIN_FIT_RUNS}" :
+               ' — no measured runs supplied (--from-metrics)')
+    end
+  end
 
   # "Complex" = an LOD, or a multi-branch IF chain (≥2 ELSEIF, counted directly
   # — O(n); the old two-bridge regex catastrophically backtracked on real formulas).
@@ -210,7 +383,9 @@ module EstimateCost
   end
 
   # ── The estimator: scope → turns → tokens (+ per-phase breakdown) ──────────
-  def self.estimate(scope)
+  # minutes_per_turn / phase_split default to the priors; a W2.22 measured
+  # refit passes fitted values in. Callers without a refit are byte-unchanged.
+  def self.estimate(scope, minutes_per_turn: MINUTES_PER_TURN, phase_split: PHASE_SPLIT)
     calcs = scope['calcs'] || {}
     turns = BASE_TURNS +
             (scope['tiles'].to_i * PER_TILE_TURNS) +
@@ -222,7 +397,7 @@ module EstimateCost
     input_tokens  = turns * TOKENS_IN_PER_TURN
     output_tokens = turns * TOKENS_OUT_PER_TURN
     per_phase = {}
-    PHASE_SPLIT.each do |phase, frac|
+    phase_split.each do |phase, frac|
       per_phase[phase] = {
         'turns'         => (turns * frac).round,
         'input_tokens'  => (input_tokens * frac).round,
@@ -234,7 +409,7 @@ module EstimateCost
       'input_tokens'      => input_tokens,
       'output_tokens'     => output_tokens,
       'total_tokens'      => input_tokens + output_tokens,
-      'estimated_minutes' => (turns * MINUTES_PER_TURN).round,
+      'estimated_minutes' => (turns * minutes_per_turn).round,
       'complexity'        => bucket(turns),
       'per_phase'         => per_phase
     }
@@ -249,20 +424,45 @@ module EstimateCost
     end
   end
 
-  def self.build_report(collected, source)
+  # refit: optional {'fit' =>, 'runs' =>} from --from-metrics (W2.22). When a
+  # measured fit is present its coefficients drive the estimate, and the
+  # calibration block carries a provenance record naming what was measured
+  # (n + range per coefficient) and every refusal. Without a refit the report
+  # is the priors artifact plus an explicit priors provenance stanza.
+  def self.build_report(collected, source, refit: nil)
+    fit = refit && refit['fit']
+    est = estimate(collected['scope'],
+                   minutes_per_turn: fit ? fit['minutes_per_turn']['value'] : MINUTES_PER_TURN,
+                   phase_split: fit ? fit['phase_split']['value'] : PHASE_SPLIT)
+    measured = fit && fit['minutes_per_turn']['source'] == 'measured'
+    provenance =
+      if fit
+        {
+          'coefficients' => (measured ? 'measured' : 'priors'),
+          'fitted_from'  => "phase-metrics.jsonl of #{refit['runs'].size} run workdir(s) (paths omitted — hygiene)",
+          'fitted_at'    => Time.now.utc.iso8601,
+          'fit'          => fit.reject { |k, _| k == 'refused' },
+          'runs'         => refit['runs'],
+          'refused'      => fit['refused']
+        }
+      else
+        { 'coefficients' => 'priors',
+          'note' => 'no measured runs supplied (--from-metrics) — anchors-centered priors, see calibration.note' }
+      end
     {
       'workbook'     => collected['workbook'],
       'generated_at' => Time.now.utc.iso8601,
-      'confidence'   => 'rough',
+      'confidence'   => (measured ? 'measured-rate' : 'rough'),
       'inputs'       => { 'source' => source,
                           'present' => collected['present'],
                           'missing' => collected['missing'] },
       'scope'        => collected['scope'],
-      'estimate'     => estimate(collected['scope']),
+      'estimate'     => est,
       'calibration'  => {
         'anchors'         => 3,
         'tokens_per_turn' => { 'input' => TOKENS_IN_PER_TURN, 'output' => TOKENS_OUT_PER_TURN },
-        'note'            => CALIBRATION_NOTE
+        'note'            => CALIBRATION_NOTE,
+        'provenance'      => provenance
       },
       'note' => 'Rough scope/cost sign-off artifact (PLAN-v3 PR-3) — not a quote. ' \
                 'Missing inputs (inputs.missing) degrade the estimate and are named, never fatal.'
@@ -277,20 +477,31 @@ if $PROGRAM_NAME == __FILE__
     p.on('--out PATH', 'write the JSON report here (workdir default: <workdir>/cost-estimate.json)') { |v| opts[:out] = v }
     p.on('--workbook PATH', 'legacy pre-scoping: get-workbook.json') { |v| opts[:wb] = v }
     p.on('--datasource PATH', 'legacy pre-scoping: datasource metadata JSON') { |v| opts[:ds] = v }
+    p.on('--from-metrics DIRS', Array,
+         'measured-run workdirs (comma-separated, repeatable) — W2.22 coefficient refit; ' \
+         'alone: print/write the calibration + per-tier band report') { |v| (opts[:metrics] ||= []).concat(v) }
   end.parse!
+
+  refit = nil
+  if opts[:metrics]
+    runs = EstimateCost.measured_runs(opts[:metrics])
+    refit = { 'fit' => EstimateCost.fit_from_runs(runs), 'runs' => runs }
+  end
 
   if opts[:dir]
     abort("[FAIL] estimate-cost: workdir not found: #{opts[:dir]}") unless File.directory?(opts[:dir])
     collected = EstimateCost.scope_from_workdir(opts[:dir])
-    report = EstimateCost.build_report(collected, opts[:dir])
+    report = EstimateCost.build_report(collected, opts[:dir], refit: refit)
     out = opts[:out] || File.join(opts[:dir], 'cost-estimate.json')
     tmp = "#{out}.tmp"
     File.write(tmp, JSON.pretty_generate(report) + "\n")
     File.rename(tmp, out)
+    puts EstimateCost.provenance_line(refit && refit['fit']) if refit
     est = report['estimate']
     puts "[OK] estimate-cost: ~#{est['agent_turns']} turns ≈ #{est['input_tokens']} in / " \
          "#{est['output_tokens']} out tokens, ~#{est['estimated_minutes']} min " \
-         "(#{est['complexity']}; confidence: rough) → #{out}"
+         "(#{est['complexity']}; confidence: #{report['confidence']}) → #{out}"
+    (refit ? refit['fit']['refused'] : []).each { |r| puts "     refit refused: #{r}" }
     collected['missing'].each do |m|
       puts "     degraded: missing #{m['artifact']} — #{m['provides']}"
     end
@@ -299,14 +510,48 @@ if $PROGRAM_NAME == __FILE__
     ds_json = opts[:ds] ? JSON.parse(File.read(opts[:ds])) : nil
     collected = EstimateCost.scope_from_prefetch(wb_json, ds_json)
     collected['workbook'] ||= File.basename(opts[:wb], '.json')
-    report = EstimateCost.build_report(collected, opts[:wb])
+    report = EstimateCost.build_report(collected, opts[:wb], refit: refit)
     if opts[:out]
       File.write(opts[:out], JSON.pretty_generate(report) + "\n")
       puts "[OK] estimate-cost → #{opts[:out]}"
     else
       puts JSON.pretty_generate(report)
     end
+  elsif opts[:metrics]
+    # ── W2.22 standalone: calibration refit + per-tier measured bands ────────
+    fit  = refit['fit']
+    runs = refit['runs']
+    doc = {
+      'kind'             => 'calibration-refit',
+      'generated_at'     => Time.now.utc.iso8601,
+      'runs'             => runs,
+      'fit'              => fit.reject { |k, _| k == 'refused' },
+      'refused'          => fit['refused'],
+      'bands'            => EstimateCost.tier_bands(runs),
+      'publication_rule' => "a per-tier band is published only from >= #{EstimateCost::MIN_FIT_RUNS} " \
+                            'measured runs of that tier, stated as {n, range, rate} — ' \
+                            'never a single run, never the projection'
+    }
+    puts EstimateCost.provenance_line(fit)
+    doc['bands'].each do |tier, b|
+      if b['refused']
+        puts "  band[#{tier}]: REFUSED — #{b['refused']} (observed wall min: #{b['observed_wall_minutes'].join(', ')})"
+      else
+        w = b['wall_minutes']
+        t = b['turns']
+        puts "  band[#{tier}]: n=#{b['n']} wall #{w['min']}–#{w['max']} min (median #{w['median']})" +
+             (t['refused'] ? " · turns: #{t['refused']}" : " · turns #{t['min']}–#{t['max']} (median #{t['median']})")
+      end
+    end
+    fit['refused'].each { |r| puts "  refit refused: #{r}" }
+    if opts[:out]
+      File.write(opts[:out], JSON.pretty_generate(doc) + "\n")
+      puts "[OK] calibration-refit → #{opts[:out]}"
+    else
+      puts JSON.pretty_generate(doc)
+    end
   else
-    abort('usage: estimate-cost.rb --workdir <dir> [--out <path>] | --workbook <get-workbook.json> [--datasource <metadata.json>]')
+    abort('usage: estimate-cost.rb --workdir <dir> [--out <path>] [--from-metrics <dirs>] | ' \
+          '--workbook <get-workbook.json> [--datasource <metadata.json>] | --from-metrics <dirs> [--out <path>]')
   end
 end
