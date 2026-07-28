@@ -301,8 +301,8 @@ GREEN. Do NOT rely on the private API for parity data.
 
 **Detect Domo PDP (Personalized Data Permissions) policies always.** Every
 DataSet pulled in Phase 1 is scanned for a `permission`/`pdp` policy block
-(`_pdpPolicies` in the discovery output); any policies found are recorded to
-`discovery/rls-todo.json` with a warning — **never silently dropped**. A
+(PDP policies detected from each DataSet's permission metadata, written to
+discovery/rls-todo.json) with a warning — **never silently dropped**. A
 PDP-bearing DataSet with no corresponding Sigma mapping is a fidelity gap, not a
 clean migration.
 

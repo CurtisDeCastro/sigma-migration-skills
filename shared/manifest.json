@@ -432,6 +432,7 @@
       "canonical": "shared/refs/layout-visual-qa.md",
       "targets": [
         "plugins/cognos-to-sigma/skills/cognos-to-sigma/refs/layout-visual-qa.md",
+        "plugins/domo-to-sigma/skills/domo-to-sigma/refs/layout-visual-qa.md",
         "plugins/gooddata-to-sigma/skills/gooddata-to-sigma/refs/layout-visual-qa.md",
         "plugins/looker-to-sigma/skills/looker-to-sigma/refs/layout-visual-qa.md",
         "plugins/microstrategy-to-sigma/skills/microstrategy-to-sigma/refs/layout-visual-qa.md",
@@ -689,6 +690,7 @@
       "targets": [
         "plugins/cognos-to-sigma/skills/cognos-assessment/refs/environment.md",
         "plugins/cognos-to-sigma/skills/cognos-to-sigma/refs/environment.md",
+        "plugins/domo-to-sigma/skills/domo-to-sigma/refs/environment.md",
         "plugins/gooddata-to-sigma/skills/gooddata-assessment/refs/environment.md",
         "plugins/gooddata-to-sigma/skills/gooddata-to-sigma/refs/environment.md",
         "plugins/looker-to-sigma/skills/looker-assessment/refs/environment.md",
@@ -815,6 +817,7 @@
         "plugins/microstrategy-to-sigma/skills/microstrategy-to-sigma/refs/source-anchors.md",
         "plugins/qlik-to-sigma/skills/qlik-to-sigma/refs/source-anchors.md",
         "plugins/cognos-to-sigma/skills/cognos-to-sigma/refs/source-anchors.md",
+        "plugins/domo-to-sigma/skills/domo-to-sigma/refs/source-anchors.md",
         "plugins/gooddata-to-sigma/skills/gooddata-to-sigma/refs/source-anchors.md",
         "plugins/sisense-to-sigma/skills/sisense-to-sigma/refs/source-anchors.md"
       ]
@@ -830,6 +833,7 @@
         "plugins/microstrategy-to-sigma/skills/microstrategy-to-sigma/refs/visual-similarity.md",
         "plugins/qlik-to-sigma/skills/qlik-to-sigma/refs/visual-similarity.md",
         "plugins/cognos-to-sigma/skills/cognos-to-sigma/refs/visual-similarity.md",
+        "plugins/domo-to-sigma/skills/domo-to-sigma/refs/visual-similarity.md",
         "plugins/gooddata-to-sigma/skills/gooddata-to-sigma/refs/visual-similarity.md",
         "plugins/sisense-to-sigma/skills/sisense-to-sigma/refs/visual-similarity.md"
       ]
@@ -863,6 +867,7 @@
       "canonical": "shared/refs/modeling-strategy.md",
       "targets": [
         "plugins/cognos-to-sigma/skills/cognos-to-sigma/refs/modeling-strategy.md",
+        "plugins/domo-to-sigma/skills/domo-to-sigma/refs/modeling-strategy.md",
         "plugins/gooddata-to-sigma/skills/gooddata-to-sigma/refs/modeling-strategy.md",
         "plugins/looker-to-sigma/skills/looker-to-sigma/refs/modeling-strategy.md",
         "plugins/microstrategy-to-sigma/skills/microstrategy-to-sigma/refs/modeling-strategy.md",

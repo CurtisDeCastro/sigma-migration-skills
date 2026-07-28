@@ -126,8 +126,8 @@ Domo uses "Phase" numbering (it joined after the mapping table was set). Its loc
 | C1 Assess | Phase 0 — Assess (domo-assessment skill) + Tier A/B probe (`domo-discover.rb --probe`) |
 | C2 Discover | Phase 1 — Discover (`domo-discover.rb`: DataSets, cards, Beast Modes, summary numbers) |
 | C3 Reuse-check | Phase 2.5 — Reuse check (`find-or-pick-dm.rb`) before POSTing a new DM |
-| C4 Convert | Phase 2 — Data model (`build-dm.rb`; Beast Modes → formulas via `convert-beast-modes.rb` + the shared SQL-formula converter) |
-| C5 Post-DM gate | Phase 3 — POST the DM + read back server ids (`post-and-readback.rb`, hard gate) |
+| C4 Convert | Phase 3 — Data model (`build-dm.rb`; Beast Modes → formulas via `convert-beast-modes.rb` + the shared SQL-formula converter) |
+| C5 Post-DM gate | Phase 4 — POST the DM + read back server ids (`post-and-readback.rb`, hard gate) |
 | C6 Build workbook | Phase 5 — Workbook (`build-workbook.rb`: cards → charts/KPIs/pivots; Summary Number → KPI) |
 | C7 Layout | Phase 5 — apply the dashboard grid layout as the LAST write (`put-layout.rb`) |
 | C8 Parity hard gate | Phase 6 — Parity vs the same warehouse (`verify-parity.rb`, hard-gated by `assert-phase6-ran.rb`) |
