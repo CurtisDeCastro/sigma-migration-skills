@@ -1925,7 +1925,11 @@ if have_twb
     end
     if emitted.empty? || unmatched.any?
       avail = begin
-        File.read(twb, encoding: 'UTF-8').scan(/<dashboard\s+[^>]*name=['"]([^'"]+)['"]/).flatten.uniq
+        # binread + scrub: a Windows UTF-16 .twb read as UTF-8 would list zero
+        # dashboards in this banner (error-message-only path, never a gate).
+        raw = File.binread(twb)
+        raw = raw.encode('UTF-8', 'UTF-16', invalid: :replace, undef: :replace) if raw[0, 2] == "\xFF\xFE".b || raw[0, 2] == "\xFE\xFF".b
+        raw.force_encoding('UTF-8').scrub('?').scan(/<dashboard\s+[^>]*name=['"]([^'"]+)['"]/).flatten.uniq
       rescue StandardError
         []
       end
@@ -3514,6 +3518,18 @@ if questions.any?
                                       'asked_at_checkpoint' => true,
                                       'at' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')) + "\n") rescue nil
     end
+  end
+  # Consent must be FILE-gated on every path: a --yes run whose question list
+  # never surfaced telemetry_consent would otherwise leave no
+  # consent-answer.json and the wrap-up would fall back to agent diligence.
+  # Absent file + unattended resolution = an honest no-response record, which
+  # report-telemetry's checkpoint reader suppresses.
+  unless File.exist?(File.join(WORK, 'consent-answer.json'))
+    File.write(File.join(WORK, 'consent-answer.json'),
+               JSON.pretty_generate('answer' => 'no-response',
+                                    'decided_by' => answers ? 'relayed-absent' : 'unattended-flag',
+                                    'asked_at_checkpoint' => false,
+                                    'at' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')) + "\n") rescue nil
   end
   # Mark the checkpoint artifact RESOLVED (answers ledgered above) so later
   # re-entries don't re-surface already-answered questions; the doc survives

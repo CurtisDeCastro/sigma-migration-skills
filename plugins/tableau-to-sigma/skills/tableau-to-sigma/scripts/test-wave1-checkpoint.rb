@@ -143,8 +143,13 @@ Dir.mktmpdir do |d|
         'gap acceptance ledgered as unattended-flag', fails)
   check(decs.any? { |r| r['kind'] == 'extract_drift' && r['decided_by'] == 'unattended-flag' },
         'question defaults ledgered as unattended-flag', fails)
-  check(!File.exist?(File.join(d, 'consent-answer.json')),
-        'NO consent marker on a --yes first run — the question was never asked (nothing fabricated)', fails)
+  # Consent is FILE-gated on every path (review should-fix): when the question
+  # was never surfaced, the record says so honestly (no-response, not-asked) —
+  # nothing fabricated, and the wrap-up reader suppresses the send on it
+  # instead of falling back to agent diligence.
+  ca = (JSON.parse(File.read(File.join(d, 'consent-answer.json'))) rescue nil)
+  check(ca.is_a?(Hash) && ca['answer'] == 'no-response' && ca['asked_at_checkpoint'] == false,
+        "consent marker on a --yes first run records honest no-response/not-asked (got #{ca.inspect[0, 80]})", fails)
 end
 
 puts 'T5 — nothing to ask: runs straight through (no false stop)'

@@ -29,10 +29,14 @@ user-invocable: true
 > `refs/connection.md` "Compliance note".
 
 **Read ALL of the following before replying or taking any action:**
+<!-- mandatory-pre-read -->
 - `refs/connection.md` — Domo auth (OAuth public API + developer access token for private API)
 - `refs/beast-mode-to-sigma.md` — Beast Mode (MySQL SQL) → Sigma formula mapping
 - `refs/card-to-element.md` — **Domo card → Sigma element map. Read before Phase 5.** Rule 0 (Summary Number → KPI, never a table) is the #1 fidelity fix; also covers filtering + no-liberties discipline.
-- `refs/layout-visual-qa.md` — the Phase 5e visual QA gate
+<!-- /mandatory-pre-read -->
+
+Phase-scoped (read at its phase, not upfront): at **Phase 5e**, read
+`refs/layout-visual-qa.md` — the visual QA gate — before grading the layout.
 
 General workbook-spec and data-model-spec authoring idioms (grid layout
 mechanics, chart/control shapes, DM column/relationship shapes) are deferred to
