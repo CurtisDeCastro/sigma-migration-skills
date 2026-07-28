@@ -136,7 +136,9 @@ never 0 — a rate is refused, not guessed, from pre-capture files.
   operator stops attributed by exit code, metrics read from artifacts, then
   the litter chain (sweep dry-run → `--delete` → cleanup-orphans → probe
   registry MUST read zero-open). `measure-cold-run.rb gate` applies the
-  exit gate: median wall ≤15 min ∧ ≤22 turns ∧ 1 invocation ∧ ≤1 stop ⇒
+  exit gate over TERMINAL runs only (the wall is intake→terminal; a stopped
+  run's partial wall is excluded by name, exactly like a fidelity void):
+  median wall ≤15 min ∧ ≤22 turns ∧ 1 invocation ∧ ≤1 stop ⇒
   band-adjacent-measured (≤10 min ⇒ in-band); a miss publishes the
   MEASURED band — the projection is never publishable. Fidelity is
   non-negotiable: a run whose parity baseline does not hold has its speed

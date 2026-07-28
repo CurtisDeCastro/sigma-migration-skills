@@ -7,6 +7,7 @@
 #
 #   RUN half:
 #     T1 clean run     — metrics/fidelity/litter collected; VALUES redacted
+#                        (equals-form --flag=VALUE truncated to the NAME too)
 #     T2 exit-12 resume — --finalize re-entry counted (launched 2, re_entries 1)
 #     T3 stop attribution — exit 10 → named operator stop, harness exit 3
 #     T4 /tmp-side refusal — repo-side --workdir/--results refused (exit 2)
@@ -25,6 +26,10 @@
 #     T13 fidelity     — proof-run parity FAIL → speed VOID; headline FAIL →
 #                        voided out → refused-fidelity-void
 #     T14 litter gate  — registry_open_after 1 → publishable false, violation named
+#     T15 terminal-only — non-terminal parity-PASS runs excluded BY NAME (trip:
+#                        partial walls would read in-band → refused-non-terminal;
+#                        no-false-trip: a stray partial run neither blocks nor
+#                        drags the median; proof/certified need terminal too)
 #
 # Usage: ruby scripts/test-measure-cold-run.rb   (deterministic, no network)
 
@@ -119,7 +124,8 @@ Dir.mktmpdir do |top|
   wd = File.join(top, 'wd'); Dir.mkdir(wd)
   results = File.join(top, 'results.jsonl')
   out, st = run_harness(stub_args(orch, sweep, cleanup, wd, results,
-                                  ['--', '--db', 'SEKRIT_DB', '--schema', 'SEKRIT_SCHEMA', '--tier', 'auto']),
+                                  ['--', '--db', 'SEKRIT_DB', '--schema', 'SEKRIT_SCHEMA',
+                                   '--folder=SEKRIT_FOLDER', '--tier', 'auto']),
                         { 'STUB_MODE' => 'clean' })
   check(st.zero?, "clean run exits 0 (got #{st}: #{out.lines.first})", fails)
   raw = File.read(results)
@@ -136,6 +142,9 @@ Dir.mktmpdir do |top|
   check(!raw.include?('SEKRIT'), 'HYGIENE: argv VALUES never enter the record', fails)
   check(!raw.include?(wd), 'HYGIENE: workdir path never enters the record', fails)
   check(rec['argv_flags'].include?('--schema'), 'flag NAMES are kept for audit', fails)
+  check(rec['argv_flags'] == ['--db', '--schema', '--folder', '--tier'],
+        "equals-form --flag=VALUE truncated to the NAME (got #{rec['argv_flags'].inspect})", fails)
+  check(!out.include?('SEKRIT'), 'HYGIENE: stdout invocation echo redacts equals-form values too', fails)
   check(rec['wall']['metrics_wall_minutes'] == 5.0, 'metrics wall = 10×30s = 5 min', fails)
   calls = File.readlines(File.join(wd, 'sweep-calls.log')).map(&:strip)
   check(calls == %w[dry-run delete cleanup], "sweep order dry-run → --delete → cleanup (got #{calls.inspect})", fails)
@@ -213,14 +222,14 @@ end
 
 # ── GATE half: synthesized records ──────────────────────────────────────────
 def rec(label:, role:, wall:, turns:, inv: 1, reent: 0, stops: 0, parity: 'PASS',
-        score: 1.0, cpass: 9, ctot: 9, reg: 0)
+        score: 1.0, cpass: 9, ctot: 9, reg: 0, terminal: true)
   { 'v' => 1, 'kind' => 'cold-run', 'label' => label, 'role' => role, 'target' => 'REF-TEST',
     'wall' => { 'operator_minutes' => wall, 'metrics_wall_minutes' => wall },
     'turns' => { 'turn_events' => turns, 'poll_events_observed' => 0 },
     'invocations' => { 'launched' => inv, 're_entries' => reent, 'wait_continuations' => 0,
                        'metrics_invocations' => inv },
     'stops' => Array.new(stops) { { 'code' => 10, 'named' => 'decisions checkpoint / open questions' } },
-    'terminal' => true,
+    'terminal' => terminal,
     'fidelity' => { 'parity_status' => parity, 'value_parity_score' => score,
                     'charts_pass' => cpass, 'charts_total' => ctot, 'tier' => 'S', 'missing' => [] },
     'litter' => { 'swept' => true, 'registry_open_after' => reg } }
@@ -370,6 +379,55 @@ Dir.mktmpdir do |top|
         'litter violation named per run', fails)
   check(doc['publishable'] == false && out.include?('VIOLATIONS'),
         'publication blocked until re-swept', fails)
+end
+
+puts 'T15 — gate terminal-only: partial (non-terminal) walls never enter a published number'
+Dir.mktmpdir do |top|
+  # TRIP: two runs stopped after parity wrote PASS (terminal false, short
+  # PARTIAL walls) + one clean run. Without the terminal filter this set reads
+  # "in-band" off 6/7-minute partial walls — §5's wall is intake→terminal, so
+  # the gate must exclude them BY NAME and refuse on n instead.
+  results = File.join(top, 'r.jsonl')
+  write_results(results, [
+    rec(label: 'R2-1', role: 'tier-s-headline', wall: 6.0, turns: 12, stops: 1, terminal: false),
+    rec(label: 'R2-2', role: 'tier-s-headline', wall: 7.0, turns: 14, stops: 1, terminal: false),
+    rec(label: 'R2-3', role: 'tier-s-headline', wall: 14.8, turns: 21)
+  ])
+  out, st, doc = run_gate(results)
+  check(st == 3, "non-terminal majority → refused, exit 3 (got #{st})", fails)
+  check(doc.dig('headline', 'refused').to_s.include?('refused-non-terminal') &&
+        doc.dig('headline', 'non_terminal') == 2,
+        "refusal named refused-non-terminal with count (got #{doc.dig('headline', 'refused').inspect})", fails)
+  check(doc.dig('headline', 'refused').to_s.include?('R2-1') &&
+        doc.dig('headline', 'refused').to_s.include?('R2-2'),
+        'excluded runs named by label', fails)
+  check(doc['publishable'] == false && out.include?('publishable: false'),
+        'partial walls are never publishable', fails)
+
+  # NO-FALSE-TRIP: three terminal runs still gate normally — a stray partial
+  # run (parity PASS, 2-min wall) neither blocks the verdict nor drags the
+  # median; a non-terminal proof run cannot declare the loop dead; a
+  # non-terminal certified run yields no certified band.
+  results2 = File.join(top, 'r2.jsonl')
+  write_results(results2, [
+    rec(label: 'R2-1', role: 'tier-s-headline', wall: 9.0, turns: 15),
+    rec(label: 'R2-2', role: 'tier-s-headline', wall: 9.5, turns: 16),
+    rec(label: 'R2-3', role: 'tier-s-headline', wall: 10.0, turns: 17),
+    rec(label: 'R2-4', role: 'tier-s-headline', wall: 2.0, turns: 3, stops: 1, terminal: false),
+    rec(label: 'R2-M1', role: 're-entry-proof', wall: 5.0, turns: 8, reent: 0, stops: 1, terminal: false),
+    rec(label: 'R2-C1', role: 'certified', wall: 3.0, turns: 5, stops: 1, terminal: false)
+  ])
+  _out2, st2, doc2 = run_gate(results2)
+  check(st2.zero? && doc2.dig('headline', 'verdict') == 'in-band' &&
+        doc2.dig('headline', 'medians', 'wall_minutes') == 9.5,
+        "terminal trio gates in-band, partial wall out of the median (got #{doc2.dig('headline', 'medians', 'wall_minutes').inspect})", fails)
+  check(doc2.dig('headline', 'non_terminal') == 1, 'stray partial run counted out by name', fails)
+  check(doc2.dig('re_entry_proof', 'status') == 'unproven' &&
+        doc2.dig('re_entry_proof', 'note').include?('none terminal'),
+        "non-terminal proof run proves nothing (got #{doc2.dig('re_entry_proof', 'status').inspect})", fails)
+  check(doc2.dig('certified_band', 'n').zero? &&
+        doc2.dig('certified_band', 'note').include?('none terminal'),
+        'no certified band from a partial wall', fails)
 end
 
 puts

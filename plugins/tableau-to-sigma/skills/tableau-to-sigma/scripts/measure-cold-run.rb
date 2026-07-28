@@ -38,7 +38,9 @@
 # GATE (the §5 exit gate over recorded runs):
 #   ruby scripts/measure-cold-run.rb gate --results FILE [--min-n 3] [--out F]
 #     [--expect-parity PASS] [--expect-score 1.0] [--expect-charts N/M]
-#   Median of the R2 tier-s-headline runs (fidelity-voided runs excluded):
+#   Median of the R2 tier-s-headline runs (fidelity-voided AND non-terminal
+#   runs excluded BY NAME — §5's wall is intake→TERMINAL; a stopped run may
+#   carry parity PASS from --finalize yet its partial wall is not a wall):
 #     wall ≤15 min ∧ turns ≤22 ∧ invocations = 1 ∧ stops ≤1 → band-adjacent-measured
 #     additionally wall ≤10 min                             → in-band
 #     miss → miss-publish-measured-band (the MEASURED band ships, never the
@@ -89,8 +91,10 @@ module MeasureColdRun
 
   # Flag NAMES only — never the values (hygiene: a --schema/--db/--folder
   # value is a customer identifier and must not enter a run record).
+  # Equals-form flags (--db=X) are truncated at the first '=' so the value
+  # side never survives either spelling OptionParser accepts.
   def redact_argv(argv)
-    argv.select { |a| a.start_with?('-') }
+    argv.select { |a| a.start_with?('-') }.map { |a| a.split('=', 2).first }
   end
 
   def run_with_deadline(argv, log_path, deadline_s)
@@ -315,17 +319,31 @@ module MeasureColdRun
                charts: opts[:expect_charts] }
 
     headline_all = recs.select { |r| r['role'] == 'tier-s-headline' && r['label'].to_s.start_with?(opts.fetch(:label_prefix, 'R2')) }
-    voided = headline_all.reject { |r| fidelity_ok?(r, parity: expect[:parity], score: nil, charts: nil) }
-    headline = headline_all - voided
+    # §5's primary metric is wall intake→TERMINAL. parity-final.json is written
+    # during --finalize BEFORE the litter battery, so a run stopped after parity
+    # can read parity-PASS yet be non-terminal — its wall is PARTIAL, and letting
+    # it into the medians flatters the number (the one unavailable outcome).
+    # Non-terminal runs are excluded BY NAME, exactly like fidelity voids
+    # (nil/absent counts as non-terminal: refuse, don't guess).
+    non_terminal = headline_all.reject { |r| r['terminal'] == true }
+    voided = (headline_all - non_terminal).reject { |r| fidelity_ok?(r, parity: expect[:parity], score: nil, charts: nil) }
+    headline = headline_all - non_terminal - voided
 
     out = { 'v' => 1, 'kind' => 'cold-run-gate', 'evaluated_at' => Time.now.utc.iso8601,
             'thresholds' => GATE, 'min_n' => min_n }
 
     verdict = nil
     if headline.size < min_n
-      verdict = voided.any? && headline_all.size >= min_n ? 'refused-fidelity-void' : 'refused-low-n'
-      out['headline'] = { 'n' => headline.size, 'voided' => voided.size,
+      verdict = if headline_all.size < min_n
+                  'refused-low-n'
+                elsif non_terminal.any?
+                  'refused-non-terminal'
+                else
+                  'refused-fidelity-void'
+                end
+      out['headline'] = { 'n' => headline.size, 'voided' => voided.size, 'non_terminal' => non_terminal.size,
                           'refused' => "#{verdict}: #{headline.size} usable tier-s-headline #{opts.fetch(:label_prefix, 'R2')} run(s) < #{min_n}" +
+                                       (non_terminal.any? ? " (#{non_terminal.size} non-terminal: §5 wall is intake→terminal, a partial wall is not a wall — #{non_terminal.map { |r| r['label'] }.join(', ')})" : '') +
                                        (voided.any? ? " (#{voided.size} voided: fidelity not #{expect[:parity]} — speed numbers void)" : '') }
     elsif headline.any? { |r| r.dig('turns', 'turn_events').nil? }
       verdict = 'refused-unmeasured-turns'
@@ -351,7 +369,8 @@ module MeasureColdRun
       walls = headline.map { |r| r.dig('wall', 'operator_minutes') }.compact
       turns = headline.map { |r| r.dig('turns', 'turn_events') }.compact
       out['headline'] = {
-        'n' => headline.size, 'voided' => voided.size, 'medians' => m, 'verdict' => verdict,
+        'n' => headline.size, 'voided' => voided.size, 'non_terminal' => non_terminal.size,
+        'medians' => m, 'verdict' => verdict,
         'measured_band' => {
           'n' => headline.size,
           'wall_minutes' => { 'min' => walls.min, 'median' => med(walls), 'max' => walls.max },
@@ -363,10 +382,16 @@ module MeasureColdRun
       }
     end
 
-    proof = recs.select { |r| r['role'] == 're-entry-proof' }.last
+    # Terminal-only for the proof and certified bands too: a stopped proof run
+    # under-counts re-entries (flattering), a stopped certified run has a
+    # partial wall — neither can back a published claim.
+    proof_all = recs.select { |r| r['role'] == 're-entry-proof' }
+    proof = proof_all.select { |r| r['terminal'] == true }.last
     out['re_entry_proof'] =
       if proof.nil?
-        { 'status' => 'unproven', 'note' => 'no re-entry-proof run recorded' }
+        { 'status' => 'unproven',
+          'note' => proof_all.empty? ? 'no re-entry-proof run recorded' :
+                    "#{proof_all.size} re-entry-proof run(s) recorded, none terminal — a partial run cannot prove the loop dead" }
       elsif !fidelity_ok?(proof, expect)
         { 'status' => 'void-fidelity',
           'note' => "fidelity does not match the baseline (expect parity=#{expect[:parity]}" \
@@ -380,12 +405,15 @@ module MeasureColdRun
           'note' => (re <= 1 ? 're-entry loop declared dead (<=1, was 5)' : "still #{re} re-entries (was 5)") }
       end
 
-    cert = recs.select { |r| r['role'] == 'certified' }
+    cert_all = recs.select { |r| r['role'] == 'certified' }
+    cert = cert_all.select { |r| r['terminal'] == true }
     out['certified_band'] =
       if cert.empty?
-        { 'n' => 0, 'note' => 'no certified run recorded' }
+        { 'n' => 0, 'non_terminal' => cert_all.size,
+          'note' => cert_all.empty? ? 'no certified run recorded' :
+                    "#{cert_all.size} certified run(s) recorded, none terminal — no band from a partial wall" }
       else
-        { 'n' => cert.size,
+        { 'n' => cert.size, 'non_terminal' => cert_all.size - cert.size,
           'wall_minutes_median' => med(cert.map { |r| r.dig('wall', 'operator_minutes') }),
           'turns_median' => med(cert.map { |r| r.dig('turns', 'turn_events') }),
           'note' => 'second published band (certified: loop-to-green + verifier)' }
