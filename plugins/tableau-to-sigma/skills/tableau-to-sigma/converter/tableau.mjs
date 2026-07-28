@@ -6743,10 +6743,36 @@ ${suggestion}
       warnings.push(`\u2139 Parameter "${p.name}" \u2192 number control (Top-N driver, default ${defVal})`);
       continue;
     }
+    const _paramLiteral = (s) => {
+      const t = (s || "").trim();
+      if (!t)
+        return "";
+      let m = t.match(/^"((?:[^"\\]|\\.)*)"$/);
+      if (m)
+        return m[1].replace(/\\(.)/g, "$1");
+      m = t.match(/^#\s*([^#]+?)\s*#$/);
+      if (m)
+        return m[1];
+      if (/^-?\d+(?:\.\d+)?$/.test(t) || /^(?:true|false)$/i.test(t))
+        return t;
+      return "";
+    };
+    const _isoDateValue = (s) => {
+      const m = (s || "").match(/^(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2})(?::(\d{2}))?)?/);
+      if (!m)
+        return "";
+      return m[2] ? `${m[1]}T${m[2]}:${m[3] || "00"}` : m[1];
+    };
+    // True parameter default: the .twb's own current value (value attr, or the
+    // initial-value calc when it is a plain literal). Empty when the workbook
+    // carries neither \u2014 every branch below falls back to its old shape then.
+    const _rawCur = (p.currentValue || "").trim();
+    const paramDefault = (/^#.*#$/.test(_rawCur) ? _paramLiteral(_rawCur) : _rawCur) || _paramLiteral(p.defaultVal);
     if (p.domainType === "list" && p.members.length > 0) {
       const aliasMap = p.memberAliases || {};
       const labels = p.members.map((v) => aliasMap[v] || v);
       const hasLabels = p.members.some((v) => aliasMap[v] && aliasMap[v] !== v);
+      const defSelected = paramDefault && p.members.includes(paramDefault) ? [paramDefault] : [];
       controls.push({
         kind: "control",
         controlId,
@@ -6754,39 +6780,67 @@ ${suggestion}
         controlType: "list",
         mode: "include",
         selectionMode: "single",
-        values: [],
+        values: defSelected,
         source: { kind: "manual", valueType: "text", values: p.members, ...hasLabels ? { labels } : {} }
       });
-      warnings.push(`\u2139 Parameter "${p.name}" \u2192 list control${hasLabels ? ` (${Object.keys(aliasMap).length} member alias(es) \u2192 labels[])` : ""}`);
+      warnings.push(`\u2139 Parameter "${p.name}" \u2192 list control${hasLabels ? ` (${Object.keys(aliasMap).length} member alias(es) \u2192 labels[])` : ""}${defSelected.length ? ` (default "${defSelected[0]}" from the workbook's current value)` : ""}`);
     } else if (p.type === "date" || p.type === "datetime") {
-      controls.push({
-        kind: "control",
-        controlId,
-        id: sigmaShortId() + "con",
-        controlType: "date-range",
-        mode: "last",
-        value: 90,
-        unit: "day",
-        includeToday: true
-      });
-      warnings.push(`\u2139 Parameter "${p.name}" \u2192 date-range control (default: last 90 days \u2014 adjust in Sigma UI)`);
+      const isoDef = _isoDateValue(paramDefault);
+      if (isoDef) {
+        controls.push({
+          kind: "control",
+          controlId,
+          id: sigmaShortId() + "con",
+          controlType: "date",
+          mode: "=",
+          value: isoDef
+        });
+        warnings.push(`\u2139 Parameter "${p.name}" \u2192 date control (default ${isoDef} from the workbook's current value)`);
+      } else {
+        controls.push({
+          kind: "control",
+          controlId,
+          id: sigmaShortId() + "con",
+          controlType: "date-range",
+          mode: "last",
+          value: 90,
+          unit: "day",
+          includeToday: true
+        });
+        warnings.push(`\u2139 Parameter "${p.name}" \u2192 date-range control (default: last 90 days \u2014 adjust in Sigma UI)`);
+      }
     } else if (p.type === "real" || p.type === "integer" || p.domainType === "range") {
-      controls.push({
-        kind: "control",
-        controlId,
-        id: sigmaShortId() + "con",
-        controlType: "number-range"
-      });
-      warnings.push(`\u2139 Parameter "${p.name}" \u2192 number-range control`);
+      const numDef = paramDefault !== "" && Number.isFinite(Number(paramDefault)) ? Number(paramDefault) : null;
+      if (numDef !== null && p.domainType !== "range") {
+        controls.push({
+          kind: "control",
+          controlId,
+          id: sigmaShortId() + "con",
+          controlType: "number",
+          mode: "=",
+          value: numDef,
+          includeNulls: "when-no-value-is-selected"
+        });
+        warnings.push(`\u2139 Parameter "${p.name}" \u2192 number control (default ${numDef} from the workbook's current value)`);
+      } else {
+        controls.push({
+          kind: "control",
+          controlId,
+          id: sigmaShortId() + "con",
+          controlType: "number-range"
+        });
+        warnings.push(`\u2139 Parameter "${p.name}" \u2192 number-range control${numDef !== null ? ` (workbook current value ${numDef} \u2014 range domain, no single-value default applied)` : ""}`);
+      }
     } else {
       controls.push({
         kind: "control",
         controlId,
         id: sigmaShortId() + "con",
         controlType: "text",
-        mode: "contains"
+        mode: "contains",
+        ...paramDefault !== "" ? { value: paramDefault } : {}
       });
-      warnings.push(`\u2139 Parameter "${p.name}" \u2192 text control`);
+      warnings.push(`\u2139 Parameter "${p.name}" \u2192 text control${paramDefault !== "" ? ` (default "${paramDefault}" from the workbook's current value)` : ""}`);
     }
   }
   const derivedEls = buildDerivedElements(elements);

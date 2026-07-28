@@ -42,6 +42,18 @@
         "unsupported datasource root relation types now emit a named 'NOT supported — NO ELEMENTS EMITTED' warning listing the supported set (table, join, collection, text, union) instead of falling through silently"
       ],
       "upstream_pr": null
+    },
+    {
+      "commit": "worktree (uncommitted at patch time — becomes the W2.17 landing commit on wave/2-conv)",
+      "summary": "W2.17 true parameter defaults applied to the vendored bundle in place, pending upstreaming (upstream source anchor: src/tableau.ts:4089-4090 hardcoded control shapes = the bundle's parameter-control emission loop). Every parameter control branch now honors the workbook's own current value; every branch falls back to its exact old shape when the .twb carries none.",
+      "changes": [
+        "parameter default derivation: the .twb's current value attr wins (date literals #...# unwrapped), else the initial-value calc when it is a plain literal (quoted string with escape handling, date literal, bare number/boolean) — never an expression",
+        "list-domain params: the default becomes values:[default] when it is a domain member (labels/aliases preserved); non-member or absent -> values:[] unchanged",
+        "date/datetime params with a literal date default: the date-range last-90 hardcode is replaced by controlType 'date', mode '=', ISO value (datetime keeps HH:MM[:SS] via the T separator); no derivable literal -> the old date-range last-90 shape + 'adjust in Sigma UI' warning, unchanged",
+        "integer/real non-range params with a finite numeric default: the valueless number-range is replaced by controlType 'number', mode '=', numeric value (includeNulls when-no-value-is-selected); range-domain params KEEP number-range (a single-value default cannot express a range) with the current value noted in the warning",
+        "text params: the control gains value:<default> only when present; warnings for every applied default name the source ('from the workbook's current value') so parity readouts show where values came from"
+      ],
+      "upstream_pr": null
     }
   ],
   "_upstream_and_revendor_tasks": [
