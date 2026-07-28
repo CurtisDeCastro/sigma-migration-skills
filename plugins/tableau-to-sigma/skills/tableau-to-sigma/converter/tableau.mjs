@@ -5021,9 +5021,92 @@ ${statement}
           warnings.push(`\u2139 Custom SQL datasource \u2192 Sigma SQL element (source.kind:'sql', ${columns.length} column(s)). The SQL statement is preserved verbatim; verify column display names resolve against the query output.`);
         }
       }
+    } else if (relType === "union") {
+      // W2.16: Tableau union datasource. Emits the documented Sigma union
+      // source (kind:"union" + sources + matches) for the dominant
+      // same-connection wildcard-union shape; anything underivable falls to a
+      // LOUD named refusal \u2014 a unioned datasource previously converted to
+      // NOTHING, silently (the worst defect class under the program's rules).
+      // Shape per sigma-data-models reference/sources.md "Union" (live-verified):
+      //   - sources are elementId-based (direct warehouse-table entries fail on
+      //     special-char columns) \u2192 one intermediate warehouse-table element
+      //     per union member;
+      //   - the union element carries NO name (an explicit name breaks
+      //     self-referential column validation; the API auto-names it
+      //     "Union of N Sources") \u2192 its column formulas use that prefix;
+      //   - sourceColumns entries are bracketed friendly column names resolved
+      //     within each member element's own column set.
+      const unionChildren = asArray(rootRelation.relation || []).filter((r) => (attr(r, "type") || "table") === "table");
+      const unionName = ((attr(rootRelation, "name") || ds.name || "Union").replace(/[\[\]]/g, "")) || "Union";
+      const srcPaths = unionChildren.map((r) => extractPath(r, dbEff, schEff, whCasing)).filter((pp) => pp && pp.length > 0);
+      const capByName = {};
+      for (const col of asArray(ds.ds?.column || [])) {
+        const nm = (attr(col, "name") || "").replace(/^\[|\]$/g, "");
+        const cap = attr(col, "caption");
+        if (nm && cap)
+          capByName[nm.toUpperCase()] = cap;
+      }
+      const outCols = [];
+      const seenUnionCols = /* @__PURE__ */ new Set();
+      for (const mr of asArray(rootConn?.["metadata-records"]?.["metadata-record"] || [])) {
+        if (attr(mr, "class") !== "column")
+          continue;
+        const remote = (mr["remote-name"] || "").trim();
+        if (!remote || seenUnionCols.has(remote.toUpperCase()))
+          continue;
+        if (/^(Sheet|Table Name)$/i.test(remote))
+          continue; // Tableau union-provenance bookkeeping columns, not warehouse columns
+        seenUnionCols.add(remote.toUpperCase());
+        outCols.push(remote);
+      }
+      if (srcPaths.length >= 2 && outCols.length > 0) {
+        // Members FIRST (displayNameMap is last-writer-wins, so the union
+        // element \u2014 built last \u2014 owns every column's resolution), union
+        // element LAST; factEl selection prefers a union source so translated
+        // calcs and auto-metrics attach to the stacked rows, not one member.
+        const memberSources = [];
+        for (const pp of srcPaths) {
+          const memberTable = pp[pp.length - 1] || "MEMBER";
+          const mCols = [], mOrder = [];
+          for (const c of outCols) {
+            const mid = sigmaInodeId(c.replace(/[^A-Za-z0-9_]/g, "_").toUpperCase());
+            mCols.push({ id: mid, formula: `[${memberTable}/${sigmaDisplayName(c)}]`, name: sigmaDisplayName(c) });
+            mOrder.push(mid);
+          }
+          const mEl = {
+            id: sigmaShortId(),
+            kind: "table",
+            source: { connectionId: connId, kind: "warehouse-table", path: pp },
+            columns: mCols,
+            order: mOrder
+          };
+          elements.push(mEl);
+          memberSources.push({ kind: "table", elementId: mEl.id });
+        }
+        const unionPrefix = `Union of ${srcPaths.length} Sources`;
+        const matches = outCols.map((c) => ({ outputColumnName: sigmaDisplayName(c), sourceColumns: srcPaths.map(() => `[${sigmaDisplayName(c)}]`) }));
+        const columns = [], order = [];
+        for (const c of outCols) {
+          const id = sigmaInodeId(c.replace(/[^A-Za-z0-9_]/g, "_").toUpperCase());
+          columns.push({ id, formula: `[${unionPrefix}/${sigmaDisplayName(c)}]`, name: capByName[c.toUpperCase()] || sigmaDisplayName(c) });
+          order.push(id);
+        }
+        elements.push({
+          id: sigmaShortId(),
+          kind: "table",
+          source: { kind: "union", sources: memberSources, matches },
+          columns,
+          order
+        });
+        warnings.push(`\u26a0 Union datasource "${unionName}" \u2192 Sigma union source (${srcPaths.length} member element(s) + 1 union element, ${outCols.length} column(s)), assuming SAME-NAME columns across members (wildcard union). Sigma auto-names the union element "${unionPrefix}" \u2014 rename in the UI if desired (setting a spec name breaks self-referential column validation). VERIFY: a member with renamed/missing columns needs hand-edited matches (null for a member lacking the column).`);
+      } else {
+        warnings.push(`\u26a0 Union datasource "${unionName}" NOT converted \u2014 ${srcPaths.length} derivable member table(s), ${outCols.length} derivable output column(s); emitting a Sigma union source (kind:"union" + sources + matches) needs \u22652 members and \u22651 column. NO ELEMENTS EMITTED for this datasource \u2014 model it as a Custom SQL UNION ALL element, or re-point sources after conversion.`);
+      }
+    } else {
+      warnings.push(`\u26a0 Datasource root relation type "${relType}" is not supported by the converter \u2014 NO ELEMENTS EMITTED for this datasource. Supported: table, join, collection, text (Custom SQL), union.`);
     }
   }
-  const factEl = elements.find((e) => e.relationships?.length > 0) || (elements.length > 0 ? elements.reduce((best, e) => (e.columns?.length || 0) > (best.columns?.length || 0) ? e : best, elements[0]) : null);
+  const factEl = elements.find((e) => e.relationships?.length > 0) || elements.find((e) => e.source?.kind === "union") || (elements.length > 0 ? elements.reduce((best, e) => (e.columns?.length || 0) > (best.columns?.length || 0) ? e : best, elements[0]) : null);
   if (factEl) {
     let _baseFromExpr2 = function() {
       const fe = factEl;

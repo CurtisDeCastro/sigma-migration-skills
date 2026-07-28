@@ -31,6 +31,17 @@
         "un-staled the window-untranslatable list: WINDOW_CORR/WINDOW_VAR/WINDOW_COUNT now map to MovingCorr/MovingVariance/MovingCount (offset forms spanning the current row; all three present in the Sigma function index, verified 2026-07-25); population variants WINDOW_VARP/COVARP/STDEVP stay untranslatable; SIGMA_CHART_ONLY_WINDOW_RE extended with MovingVariance/MovingCorr so the DM router keeps refusing them"
       ],
       "upstream_pr": "twells89/sigma-data-model-mcp#111 (upstream commit 60a0355)"
+    },
+    {
+      "commit": "worktree (uncommitted at patch time — becomes the W2.16 landing commit on wave/2-conv)",
+      "summary": "W2.16 union emission + named-refusal stopgap applied to the vendored bundle in place, pending upstreaming (same fallback path as the entries above: the local upstream clone's history is divergent from source_commit d769bec and re-bundling would drop the unlanded bundle-only patches). Paired Ruby-side change in the same commit: scan-workbook-gaps.rb detect_unions emits the hint/❌ union rows whose derivability test mirrors this emission.",
+      "changes": [
+        "union root relations (relType 'union') now CONVERT instead of silently emitting nothing: root-level same-connection wildcard unions (>=2 derivable member tables + >=1 metadata output column, Sheet/'Table Name' bookkeeping columns excluded) emit one warehouse-table element per member plus an elementId-sourced union element, per sigma-data-models reference/sources.md 'Union' — elementId-based sources (direct warehouse-table union sources fail on special-char columns), NO name on the union element (an explicit name breaks self-referential column validation; the API auto-names it 'Union of N Sources' and column formulas use that prefix), matches[].sourceColumns as bracketed friendly names resolved in each member's own column set (member columns carry explicit name to pin resolution)",
+        "member elements are pushed FIRST and the union element LAST so last-writer-wins display-name resolution lands every column on the union element; factEl selection gains a union preference (relationships > union source > max-columns) so translated calcs and auto-metrics attach to the stacked rows, not one member",
+        "underivable unions (root with <2 derivable members or 0 metadata columns; unions nested in a join tree never reach the branch) fall to a LOUD named refusal warning with the derived counts and the Custom SQL UNION ALL / re-point escalation route — NO elements emitted, silent loss dead",
+        "unsupported datasource root relation types now emit a named 'NOT supported — NO ELEMENTS EMITTED' warning listing the supported set (table, join, collection, text, union) instead of falling through silently"
+      ],
+      "upstream_pr": null
     }
   ],
   "_upstream_and_revendor_tasks": [
