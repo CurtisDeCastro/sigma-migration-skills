@@ -347,17 +347,21 @@ end
 # source for a ROOT-level wildcard union (>=2 derivable member tables + >=1
 # metadata output column): one warehouse-table element per member + an
 # elementId-sourced union element (auto-named "Union of N Sources" by the
-# API). Anything else — a root union missing members/columns, or a union
-# NESTED inside a join tree — the converter REFUSES loudly (named warning,
-# NO elements emitted). Before W2.16 a unioned datasource converted to
-# NOTHING, silently: the worst defect class under the program's rules.
+# API). Anything else — a root union missing members/columns, a union with
+# any NON-TABLE member (custom-SQL text / nested union: emitting only the
+# table members would silently subset the rows), or a union NESTED inside a
+# join tree (the join branch refuses via collectTables rather than flatten
+# it away) — the converter REFUSES loudly (named warning, NO elements
+# emitted). Before W2.16 a unioned datasource converted to NOTHING,
+# silently: the worst defect class under the program's rules.
 # TWO rows so the handled shape never false-trips the ❌ gate:
 #   :hint      — root wildcard union the converter emits (VERIFY matches[])
-#   :unhandled — underivable/nested union (❌ named refusal; drives the
-#                orchestrator's exit-11 gap stop, refuse-don't-guess)
-# Derivability here MIRRORS the converter's own test (members>=2 && cols>=1
-# at the connection root) so scan and emission can't drift apart silently —
-# the union-wildcard-seed corpus checks.sh pins both against the same .twb.
+#   :unhandled — underivable/mixed/nested union (❌ named refusal; drives
+#                the orchestrator's exit-11 gap stop, refuse-don't-guess)
+# Derivability here MIRRORS the converter's own test (every member a plain
+# table && members>=2 && cols>=1 at the connection root) so scan and
+# emission can't drift apart silently — the union-wildcard-seed corpus
+# checks.sh pins both against the same .twb.
 def detect_unions(xml)
   return [] if xml.nil?
   emitted = []
@@ -385,12 +389,21 @@ def detect_unions(xml)
     ds.elements.each('.//relation') do |rel|
       next unless rel.attributes['type'].to_s == 'union'
       root = rel.parent && rel.parent.name == 'connection'
-      members = rel.elements.to_a('relation').count do |r|
+      kids = rel.elements.to_a('relation')
+      members = kids.count do |r|
         r.attributes['type'].to_s == 'table' && !r.attributes['table'].to_s.empty?
       end
+      # Fix-pass: members that are NOT plain tables (custom-SQL text, nested
+      # union, join). The converter refuses the whole union rather than emit
+      # a silent SUBSET of only its table members — mirror that refusal here
+      # (a missing type attr defaults to 'table', like the converter's attr()).
+      non_table = kids.count do |r|
+        t = r.attributes['type'].to_s
+        !t.empty? && t != 'table'
+      end
       entry = { ds: ds_name, sheets: sheets.uniq.sort,
-                nested: !root, members: members, cols: cols }
-      if root && members >= 2 && cols >= 1
+                nested: !root, members: members, cols: cols, non_table: non_table }
+      if root && non_table.zero? && members >= 2 && cols >= 1
         emitted << entry
       else
         refused << entry
@@ -420,10 +433,18 @@ def detect_unions(xml)
       status: :unhandled,
       count:  refused.length,
       blurb:  'Union the converter REFUSES loudly (named warning, NO elements emitted — silent loss is ' \
-              'dead): emission needs a ROOT-level union with ≥2 derivable member tables and ≥1 metadata ' \
-              'column; unions nested inside a join tree are not handled. Route: model as a Custom SQL ' \
-              'UNION ALL element, or convert the member tables and re-point sources post-publish. ' +
-              refused.map { |e| "#{e[:ds]} (#{e[:nested] ? 'nested' : "#{e[:members]} member(s)/#{e[:cols]} column(s)"})" }.join(', ') + '.'
+              'dead): emission needs a ROOT-level union of ≥2 derivable member tables and ≥1 metadata ' \
+              'column with EVERY member a plain table; non-table members (custom SQL / nested union) and ' \
+              'unions nested inside a join tree are refused, never silently subset. Route: model as a ' \
+              'Custom SQL UNION ALL element, or convert the member tables and re-point sources ' \
+              'post-publish. ' +
+              refused.map { |e|
+                reason = if e[:nested] then 'nested'
+                         elsif e[:non_table].to_i > 0 then "#{e[:non_table]} non-table member(s)"
+                         else "#{e[:members]} member(s)/#{e[:cols]} column(s)"
+                         end
+                "#{e[:ds]} (#{reason})"
+              }.join(', ') + '.'
     }
     ws = refused.flat_map { |e| e[:sheets] }.uniq.sort
     f[:worksheets] = ws unless ws.empty?

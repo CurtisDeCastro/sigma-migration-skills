@@ -10,11 +10,16 @@
 #      (factEl preference), not a member.
 #   2. Refusal stopgap (node-guarded): a single-member variant of the same
 #      .twb converts to ZERO elements + the loud named "NOT converted" warning
-#      (silent loss is dead — W2.16's floor).
+#      (silent loss is dead — W2.16's floor). Fix-pass variants join it:
+#      a custom-SQL `text` member inside the root union (previously a SILENT
+#      SUBSET — the union emitted from the table members alone) and the union
+#      nested inside a join tree (previously silently flattened away with
+#      elements still emitted) both refuse: ZERO elements + named warning.
 #   3. Gap-scan class (ruby): the fixture trips the ⚠️-hint
-#      "converter-emitted" row and NOT the ❌ row; the single-member variant
-#      trips the ❌-unhandled row; a no-union workbook (param-default-controls
-#      twin case) trips neither. Trip + no-false-trip, per the wave discipline.
+#      "converter-emitted" row and NOT the ❌ row; the single-member,
+#      text-member, and union-in-join variants trip the ❌-unhandled row;
+#      a no-union workbook (param-default-controls twin case) trips neither.
+#      Trip + no-false-trip, per the wave discipline.
 set -uo pipefail
 CASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$CASE_DIR/../../.." && pwd)"
@@ -35,6 +40,38 @@ ruby -e '
   abort "variant sub failed (fixture drifted?)" if v == twb
   File.write(ARGV[1], v)
 ' "$CASE_DIR/workbook-content.twb" "$TMP/single-member.twb" || fail=1
+
+# Fix-pass variants, shared by checks 2 + 3: a custom-SQL text member inside
+# the root union (silent-SUBSET repro) and the union nested inside a join
+# tree (silent-flatten repro).
+ruby - "$CASE_DIR/workbook-content.twb" "$TMP" <<'RB' || fail=1
+twb = File.read(ARGV[0])
+tmp = ARGV[1]
+
+ins = "          <relation connection='snowflake.1demo9' name='SALES_LEGACY' type='text'>SELECT ORDER_ID, NET_REVENUE, REGION_NAME FROM DEMO.SALES_LEGACY</relation>\n        </relation>"
+a = twb.sub("        </relation>", ins)
+abort "text-member variant sub failed (fixture drifted?)" if a == twb
+File.write(File.join(tmp, "text-member.twb"), a)
+
+join = <<~XML.gsub(/^/, "        ").chomp
+  <relation join='inner' type='join'>
+    <clause type='join'>
+      <expression op='='>
+        <expression op='[REGIONS].[REGION_NAME]' />
+        <expression op='[SALES_2023+ (Union)].[REGION_NAME]' />
+      </expression>
+    </clause>
+    <relation connection='snowflake.1demo9' name='REGIONS' table='[DEMO].[REGIONS]' type='table' />
+    <relation name='SALES_2023+ (Union)' type='union'>
+      <relation connection='snowflake.1demo9' name='SALES_2023' table='[DEMO].[SALES_2023]' type='table' />
+      <relation connection='snowflake.1demo9' name='SALES_2024' table='[DEMO].[SALES_2024]' type='table' />
+    </relation>
+  </relation>
+XML
+b = twb.sub(%r{        <relation name='SALES_2023\+ \(Union\)' type='union'>.*?\n        </relation>}m, join)
+abort "union-in-join variant sub failed (fixture drifted?)" if b == twb
+File.write(File.join(tmp, "union-in-join.twb"), b)
+RB
 
 # -- 1 + 2. converter lockstep + refusal (need node) -------------------------
 if command -v node >/dev/null; then
@@ -81,6 +118,25 @@ PY
   else
     echo "FAIL: single-member conversion crashed"; fail=1
   fi
+  # Fix-pass refusals: previously SILENT partial loss — the text-member union
+  # emitted a subset union, the union-in-join flattened the join and dropped
+  # the union subtree while still emitting elements.
+  for v in text-member union-in-join; do
+    if node "$TMP/convert.mjs" "$BUNDLE" "$TMP/$v.twb" "$TMP/$v.json"; then
+      python3 - "$TMP/$v.json" "$v" <<'PY' && note "OK refusal ($v): 0 elements + loud named warning (silent subset dead)" || { echo "FAIL: $v refusal pins"; fail=1; }
+import json, sys
+d = json.load(open(sys.argv[1]))
+v = sys.argv[2]
+assert d["sigmaDataModel"]["pages"][0]["elements"] == [], f"{v} must emit NO elements"
+if v == "text-member":
+    assert any("Union datasource" in w and "NOT converted" in w and "not plain tables" in w and "SALES_LEGACY" in w for w in d["warnings"]), d["warnings"]
+else:
+    assert any("NOT converted" in w and "nested union" in w and "NO ELEMENTS EMITTED" in w for w in d["warnings"]), d["warnings"]
+PY
+    else
+      echo "FAIL: $v conversion crashed"; fail=1
+    fi
+  done
 else
   note "SKIP converter lockstep + refusal (node not on PATH — structural golden check still ran)"
 fi
@@ -116,6 +172,20 @@ if scan "$TMP/single-member.twb" "$TMP/single-gaps.md"; then
 else
   echo "FAIL: gap-scan crashed on the single-member variant"; fail=1
 fi
+
+# Fix-pass ❌ trips: non-table union member + union nested in a join tree.
+for v in text-member union-in-join; do
+  if scan "$TMP/$v.twb" "$TMP/$v-gaps.md"; then
+    got="$(rows "$TMP/$v-gaps.json")"
+    if [ "$got" = "unhandled" ]; then
+      note "OK gap-scan: $v variant → ❌-unhandled row (never the silent hint)"
+    else
+      echo "FAIL: $v variant gap rows = '$got' (want exactly 'unhandled')"; fail=1
+    fi
+  else
+    echo "FAIL: gap-scan crashed on the $v variant"; fail=1
+  fi
+done
 
 if scan "$CASE_DIR/../param-default-controls/workbook-content.twb" "$TMP/nounion-gaps.md"; then
   got="$(rows "$TMP/nounion-gaps.json")"

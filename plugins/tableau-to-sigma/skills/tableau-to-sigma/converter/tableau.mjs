@@ -3885,10 +3885,18 @@ function warehouseClassFromConn(connVal) {
   }
   return "";
 }
-function collectTables(rel, tables) {
+function collectTables(rel, tables, nestedUnions) {
   const type = attr(rel, "type") || "table";
   if (type === "table") {
     tables.push({ rel, leftKey: "", rightKey: "", joinType: "", leftKeys: [], rightKeys: [] });
+    return;
+  }
+  if (type === "union" && Array.isArray(nestedUnions)) {
+    // W2.16 fix-pass: a union subtree inside a join tree previously vanished
+    // here silently (neither branch matched) — the join flattened to its
+    // table branches and the union members' rows were DROPPED with elements
+    // still emitted. Record it so the join branch can refuse loudly instead.
+    nestedUnions.push(attr(rel, "name") || "(unnamed union)");
     return;
   }
   if (type === "join") {
@@ -3916,9 +3924,9 @@ function collectTables(rel, tables) {
     const leftKey = leftKeys[0] || "", rightKey = rightKeys[0] || "";
     const childRels = asArray(rel.relation);
     if (childRels.length === 2) {
-      collectTables(childRels[0], tables);
+      collectTables(childRels[0], tables, nestedUnions);
       const beforeRight = tables.length;
-      collectTables(childRels[1], tables);
+      collectTables(childRels[1], tables, nestedUnions);
       for (let i = beforeRight; i < tables.length; i++) {
         if (!tables[i].leftKey) {
           tables[i].joinType = joinType;
@@ -3930,7 +3938,7 @@ function collectTables(rel, tables) {
       }
     } else {
       for (const child of childRels) {
-        collectTables(child, tables);
+        collectTables(child, tables, nestedUnions);
       }
     }
   }
@@ -4556,8 +4564,15 @@ function convertTableauToSigma(xmlContent, options = {}) {
       });
     } else if (relType === "join") {
       const tables = [];
-      collectTables(rootRelation, tables);
-      if (tables.length === 0) {
+      const nestedUnions = [];
+      collectTables(rootRelation, tables, nestedUnions);
+      if (nestedUnions.length > 0) {
+        // W2.16 fix-pass: refuse-don't-guess. Flattening a join over a union
+        // subtree previously emitted only the plain-table branches \u2014 the
+        // union members' rows were silently DROPPED (elements still emitted,
+        // no warning): the silent-partial-loss class W2.16 exists to kill.
+        warnings.push(`\u26A0 Datasource join tree contains ${nestedUnions.length} nested union relation(s) (${nestedUnions.join(", ")}) \u2014 NOT converted: flattening the join would silently drop the union members' rows. NO ELEMENTS EMITTED for this datasource \u2014 model it as a Custom SQL element (join over a UNION ALL subquery), or convert the union's member tables and re-point sources after conversion.`);
+      } else if (tables.length === 0) {
         warnings.push("\u26A0 Could not parse join structure");
       } else {
         const elementMap = {};
@@ -5036,7 +5051,14 @@ ${statement}
       //     "Union of N Sources") \u2192 its column formulas use that prefix;
       //   - sourceColumns entries are bracketed friendly column names resolved
       //     within each member element's own column set.
-      const unionChildren = asArray(rootRelation.relation || []).filter((r) => (attr(r, "type") || "table") === "table");
+      const allUnionKids = asArray(rootRelation.relation || []);
+      const unionChildren = allUnionKids.filter((r) => (attr(r, "type") || "table") === "table");
+      // W2.16 fix-pass: members that are NOT plain tables (custom-SQL text,
+      // nested union, join) used to be dropped by the filter above and the
+      // union emitted from the table members alone — a silent SUBSET (the
+      // missing members' rows vanished with no refusal). Any non-table member
+      // now refuses the whole union loudly instead.
+      const nonTableKids = allUnionKids.filter((r) => (attr(r, "type") || "table") !== "table");
       const unionName = ((attr(rootRelation, "name") || ds.name || "Union").replace(/[\[\]]/g, "")) || "Union";
       const srcPaths = unionChildren.map((r) => extractPath(r, dbEff, schEff, whCasing)).filter((pp) => pp && pp.length > 0);
       const capByName = {};
@@ -5059,7 +5081,10 @@ ${statement}
         seenUnionCols.add(remote.toUpperCase());
         outCols.push(remote);
       }
-      if (srcPaths.length >= 2 && outCols.length > 0) {
+      if (nonTableKids.length > 0) {
+        const kidDesc = nonTableKids.map((r) => `${attr(r, "name") || "(unnamed)"}: type '${attr(r, "type")}'`).join("; ");
+        warnings.push(`\u26a0 Union datasource "${unionName}" NOT converted \u2014 ${nonTableKids.length} of ${allUnionKids.length} union member(s) are not plain tables (${kidDesc}); emitting the ${unionChildren.length} table member(s) alone would silently drop the other member(s)' rows. NO ELEMENTS EMITTED for this datasource \u2014 model it as a Custom SQL UNION ALL element, or re-point sources after conversion.`);
+      } else if (srcPaths.length >= 2 && outCols.length > 0) {
         // Members FIRST (displayNameMap is last-writer-wins, so the union
         // element \u2014 built last \u2014 owns every column's resolution), union
         // element LAST; factEl selection prefers a union source so translated

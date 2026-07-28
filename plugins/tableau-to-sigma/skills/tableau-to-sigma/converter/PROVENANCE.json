@@ -54,6 +54,15 @@
         "text params: the control gains value:<default> only when present; warnings for every applied default name the source ('from the workbook's current value') so parity readouts show where values came from"
       ],
       "upstream_pr": null
+    },
+    {
+      "commit": "worktree (uncommitted at patch time — becomes the W2.16 fix-pass landing commit on wave/2-conv, adversarial-review findings 1-2)",
+      "summary": "W2.16 fix-pass: two residual silent-partial-loss shapes now refuse loudly, applied to the vendored bundle in place, pending upstreaming (same fallback path as the entries above). Paired Ruby-side change in the same commit: scan-workbook-gaps.rb detect_unions mirrors the non-table-member refusal so scan and emission stay drift-locked.",
+      "changes": [
+        "root union with any NON-TABLE member (custom-SQL text / nested union / join): the unionChildren type filter previously dropped such members and emitted the union from the table members alone — a silent SUBSET with the missing members' rows gone and no warning; any non-table member now refuses the whole union with a named 'NOT converted' warning listing the offending members (NO elements emitted)",
+        "union nested inside a JOIN tree: collectTables previously ignored union nodes silently, so the join flattened to its plain-table branches and STILL emitted elements (rows from the union subtree gone — the exact shape the scan's ❌ blurb claimed the converter refused); collectTables now records union nodes it meets and the join branch refuses the datasource with a named warning (NO elements emitted), making the scan's ❌-row claim true for direct converter invocations too"
+      ],
+      "upstream_pr": null
     }
   ],
   "_upstream_and_revendor_tasks": [

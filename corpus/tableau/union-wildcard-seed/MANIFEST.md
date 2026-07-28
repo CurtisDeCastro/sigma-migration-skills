@@ -25,14 +25,23 @@ Emission shape per `plugins/sigma-authoring/skills/sigma-data-models/reference/s
   so translated calcs and auto-metrics attach to the stacked rows, not one
   member (pinned here: the `Net Revenue` metric lands on the union element).
 
-Underivable shapes (root union with <2 derivable members or 0 metadata
-columns; unions nested inside a join tree) are **refused loudly**: named ⚠
-warning, NO elements emitted, and `scan-workbook-gaps.rb` reports the
-❌-unhandled `Union datasource (underivable / nested — NOT converted)` row
-(exit-11 stop path). The handled wildcard shape reports the ⚠️-hint
+Underivable shapes are **refused loudly**: named ⚠ warning, NO elements
+emitted, and `scan-workbook-gaps.rb` reports the ❌-unhandled
+`Union datasource (underivable / nested — NOT converted)` row (exit-11 stop
+path). Three refused shapes are pinned here:
+
+- root union with <2 derivable members or 0 metadata columns (W2.16);
+- root union with any **non-table member** — e.g. a custom-SQL `text` member
+  (fix-pass: previously the union emitted from the table members alone, a
+  **silent subset** with the other members' rows gone);
+- union **nested inside a join tree** — refused at the converter's join
+  branch via `collectTables` (fix-pass: previously the join silently
+  flattened to its plain-table branches and still emitted elements).
+
+The handled wildcard shape reports the ⚠️-hint
 `Union datasource (wildcard, converter-emitted)` row instead — never the ❌
-(no false trips). `checks.sh` pins all three directions plus converter↔golden
-byte-identity and the refusal variant.
+(no false trips). `checks.sh` pins all directions plus converter↔golden
+byte-identity and the three refusal variants.
 
 Known seed boundaries (Wave-3): LOD calcs on a union datasource (the LOD
 helper SQL has no single base table); two union datasources in one workbook
