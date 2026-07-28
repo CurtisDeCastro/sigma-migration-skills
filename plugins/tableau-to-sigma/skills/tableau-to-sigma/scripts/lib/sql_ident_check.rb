@@ -52,7 +52,7 @@ module SqlIdentCheck
   #                                     'error' and routes to its resolve path,
   #                                     never guesses into live SQL
   #
-  # Refusal classes (refuse-don't-guess, the REF-STAR garbled-join class):
+  # Refusal classes (refuse-don't-guess, the field-measured garbled-join class):
   # empty; control characters; an embedded double quote; parenthesis residue
   # of a Tableau role-disambiguation label folded into an identifier
   # ('PRODUCT_KEY_(PRODUCT_DIM)' — quoting it would only trade a clean local

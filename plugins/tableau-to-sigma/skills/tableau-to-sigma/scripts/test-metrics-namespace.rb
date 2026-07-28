@@ -6,7 +6,7 @@
 # The field failure: metric_binding.rb (the DEFAULT emission path since #501)
 # binds matching chart/KPI measures as [Metrics/<Metric Name>], but the
 # validator knew only element prefixes — every governed-metrics workbook died
-# with `prefix "Metrics" unknown` (a guaranteed exit-4 re-entry, REF-STAR
+# with `prefix "Metrics" unknown` (a guaranteed exit-4 re-entry, field-
 # measured). BOTH DIRECTIONS are pinned here:
 #   admit  — a census metric name resolves (census from --dm-context element
 #            metrics, the metrics.json sidecar, an explicit --metrics FILE,

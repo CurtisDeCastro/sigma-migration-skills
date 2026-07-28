@@ -400,8 +400,8 @@ module JoinPlan
   # the DISPLAY label with the object name in parens — 'Product Key (Product
   # Dim)', nested when the object itself is renamed: 'Product Key (Product Dim
   # (Extract))'. That parenthetical is display-only; folding it into the
-  # physical identifier emitted PRODUCT_KEY_(PRODUCT_DIM)-shaped SQL (REF-STAR
-  # live class: HTTP 400 on every gate-16 probe → re-entry). Strip ONE balanced
+  # physical identifier emitted PRODUCT_KEY_(PRODUCT_DIM)-shaped SQL (field-
+  # measured: HTTP 400 on every gate-16 probe → re-entry). Strip ONE balanced
   # trailing parenthetical before display->physical folding. The ledger keeps
   # the display label verbatim in `keys`; only `probe_keys` (the physical side)
   # is stripped. Conservative on purpose: a label that is ONLY a parenthetical,

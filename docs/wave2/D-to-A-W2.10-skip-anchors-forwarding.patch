@@ -16,7 +16,7 @@ the deliverable. 6 changed lines (budget: <=10), two hunks:
 Why: verified 0 hits for `skip-anchors-gate` in `migrate-tableau.rb` vs the
 gate defining it at `assert-phase6-ran.rb:551`. A gate-13 block during
 `--finalize` therefore forces a STANDALONE gate re-run to spend the waiver —
-the finalize run is already dead: one guaranteed re-entry (REF-STAR class).
+the finalize run is already dead: one guaranteed re-entry (field-measured).
 
 Base: applies cleanly on `origin/wave/1@308cf07f`
 (`migrate-tableau.rb` blob 2283a7cd). Context lines chosen away from lane A's

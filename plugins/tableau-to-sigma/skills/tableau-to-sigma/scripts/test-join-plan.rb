@@ -243,7 +243,7 @@ check(e['right_sql'] == sql_stmt, "right_sql carries the element's statement (go
 check(e['probe_keys'] == ['ENTITY_ID'], 'probe keys still folded to physical', fails)
 
 puts "\n== W2.9: role-disambiguation parentheticals stripped from probe_keys, display keys verbatim =="
-# The REF-STAR class: Tableau suffixes same-named fields across joined objects
+# The garbled-join class: Tableau suffixes same-named fields across joined objects
 # with the object name in parens ('Product Key (Product Dim)'); folding that
 # display label emitted PRODUCT_KEY_(PRODUCT_DIM)-shaped SQL → HTTP 400 at
 # every gate-16 probe. Derivation now strips ONE balanced trailing
