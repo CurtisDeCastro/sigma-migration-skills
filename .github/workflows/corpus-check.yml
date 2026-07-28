@@ -297,6 +297,7 @@ jobs:
             plugins/domo-to-sigma/skills/domo-to-sigma/test/test-e2e.rb
             plugins/domo-to-sigma/skills/domo-to-sigma/test/test-pdp-detect.rb
             plugins/domo-to-sigma/skills/domo-to-sigma/test/test-reuse-check.rb
+            plugins/domo-to-sigma/skills/domo-to-sigma/test/test-green-gates.rb
           )
           fail=0
           for t in "${tests[@]}"; do
