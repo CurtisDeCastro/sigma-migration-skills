@@ -132,6 +132,65 @@ module ZoneCensus
     [area / denom, 1.0].min
   end
 
+  # ---- Header-band contrast (shared by build-dashboard-layout header
+  # derivation + build-charts title emission) --------------------------------
+  # Perceived luminance (0..255) of a #RRGGBB[AA] hex; nil for a bad string.
+  def hex_luminance(hex)
+    return nil unless hex.is_a?(String) && hex =~ /\A#[0-9a-fA-F]{6}/
+    h = hex[1, 6]
+    0.299 * h[0, 2].to_i(16) + 0.587 * h[2, 2].to_i(16) + 0.114 * h[4, 2].to_i(16)
+  end
+
+  # "Band-like" = a deliberate header strip fill: dark (low luminance, needs
+  # light text) OR saturated (a brand colour). Light-neutral fills blend into
+  # the canvas and are NOT bands. Mirrors build-dashboard-layout#band_like_fill?.
+  def band_like_fill?(hex)
+    lum = hex_luminance(hex)
+    return false if lum.nil?
+    h = hex[1, 6]
+    r, g, b = h[0, 2].to_i(16), h[2, 2].to_i(16), h[4, 2].to_i(16)
+    chroma = [r, g, b].max - [r, g, b].min
+    lum < 200 || chroma >= 40
+  end
+
+  # The FIRST band-like header fill near the top of a nested zone tree (same
+  # region gate + selection order as build-dashboard-layout#header_from_source),
+  # regardless of darkness. Returns the 6-digit hex or nil. `nodes` is a nested
+  # tree (each node may carry 'children'); a flat zone list also works.
+  def header_band_fill(nodes)
+    found = nil
+    walk = lambda do |ns|
+      (ns || []).each do |n|
+        next unless n.is_a?(Hash)
+        if found.nil?
+          y = (n['y_pct'] || 0).to_f
+          w = (n['w_pct'] || 0).to_f
+          hpct = (n['h_pct'] || 0).to_f
+          fc = n['fill_color']
+          found = fc[0, 7] if y < 18 && w >= 50 && hpct < 25 && band_like_fill?(fc)
+        end
+        walk.call(n['children'])
+      end
+    end
+    walk.call(nodes)
+    found
+  end
+
+  # The header band fill ONLY when it reads DARK (needs light title text) —
+  # exactly the fill build-dashboard-layout marks `hdr_dark` and paints the
+  # container backgroundColor with. Returns the hex, or nil when there is no
+  # header band OR the band is light/bright (dark title is fine there). This is
+  # the single source of truth both the layout container bg and the title text
+  # colour derive from, so they can never disagree (the black-band + dark-title
+  # readability bug).
+  DARK_HEADER_LUMINANCE = 140
+  def dark_header_fill(nodes)
+    fill = header_band_fill(nodes)
+    return nil if fill.nil?
+    lum = hex_luminance(fill)
+    lum && lum < DARK_HEADER_LUMINANCE ? fill : nil
+  end
+
   # Assemble one per-page census record. `fill_pct` is rounded to 3 decimals
   # for the emitted artifact; the gate compares the stored value.
   def page_record(name, zones_count, placed_count, fill_pct)

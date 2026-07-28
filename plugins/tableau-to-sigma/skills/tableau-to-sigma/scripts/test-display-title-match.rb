@@ -25,7 +25,13 @@ LAYOUT = [{
     { 'id' => '10', 'kind' => 'chart', 'caption' => 'OV Rev', 'display_title' => 'Net Revenue',
       'x_pct' => 0.0, 'y_pct' => 10.0, 'w_pct' => 50.0, 'h_pct' => 40.0, 'chart_kind' => 'bar' },
     { 'id' => '11', 'kind' => 'chart', 'caption' => 'OV Marg', 'display_title' => 'Gross Margin %',
-      'x_pct' => 50.0, 'y_pct' => 10.0, 'w_pct' => 50.0, 'h_pct' => 40.0, 'chart_kind' => 'bar' }
+      'x_pct' => 50.0, 'y_pct' => 10.0, 'w_pct' => 50.0, 'h_pct' => 40.0, 'chart_kind' => 'bar' },
+    # KPI-comparison wave: a kpi-chart element's `name` is the house-standard
+    # OBJECT form {'text'=>...} (KpiCard.build), not a plain String like every
+    # other kind — the zone→element matcher must still resolve it by
+    # display_title, or every KPI tile silently drops into the safety-net band.
+    { 'id' => '12', 'kind' => 'chart', 'caption' => 'OV KPI Rev', 'display_title' => 'Net Revenue KPI',
+      'x_pct' => 0.0, 'y_pct' => 60.0, 'w_pct' => 50.0, 'h_pct' => 20.0, 'chart_kind' => 'kpi' }
   ]
 }]
 # Elements named by display_title (what the fixed builder emits), NOT the caption.
@@ -33,7 +39,8 @@ WBIDS = { 'workbookId' => 'wb-x', 'pages' => [
   { 'id' => 'page-data', 'name' => 'Data', 'elements' => [{ 'id' => 'master', 'kind' => 'table', 'name' => 'Master' }] },
   { 'id' => 'page-dash-1', 'name' => 'D', 'elements' => [
     { 'id' => 'el-rev',  'kind' => 'bar-chart', 'name' => 'Net Revenue' },
-    { 'id' => 'el-marg', 'kind' => 'bar-chart', 'name' => 'Gross Margin %' }
+    { 'id' => 'el-marg', 'kind' => 'bar-chart', 'name' => 'Gross Margin %' },
+    { 'id' => 'el-kpi',  'kind' => 'kpi-chart', 'name' => { 'text' => 'Net Revenue KPI' } }
   ] }
 ] }
 
@@ -47,6 +54,8 @@ Dir.mktmpdir do |d|
   check(!log.include?('DROPPED'), "no tile DROPPED warning (matcher found both by display_title)\n#{log}", fails)
   check(xml.include?('el-rev'),  'el-rev (name "Net Revenue") placed in the layout', fails)
   check(xml.include?('el-marg'), 'el-marg (name "Gross Margin %") placed in the layout', fails)
+  check(xml.include?('el-kpi'),
+        'el-kpi (Hash-shaped name {"text"=>"Net Revenue KPI"}) placed in the layout, not dropped', fails)
 end
 
 puts

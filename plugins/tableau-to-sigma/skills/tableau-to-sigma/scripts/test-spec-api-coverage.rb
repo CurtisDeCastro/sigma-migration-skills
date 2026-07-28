@@ -27,6 +27,11 @@ layout = [{
       'measures' => [], 'calculations' => [] },
     { 'kind' => 'chart', 'caption' => 'Sales KPI', 'chart_kind' => 'kpi', 'mark_class' => 'Automatic', 'is_kpi' => true,
       'measures' => [], 'calculations' => [{ 'caption' => 'Up Arrow', 'formula' => '' }, { 'caption' => '% Change', 'formula' => '' }] },
+    # Task 5: same UI-only-delta trigger as 'Sales KPI', but this tile's
+    # comparison measure WAS detected + wired (build_kpi_element records it in
+    # $kpi_comparison_wired) — the warning must be demoted (not fire) here.
+    { 'kind' => 'chart', 'caption' => 'Revenue KPI (wired)', 'chart_kind' => 'kpi', 'mark_class' => 'Automatic', 'is_kpi' => true,
+      'measures' => [], 'calculations' => [{ 'caption' => 'Up Arrow', 'formula' => '' }, { 'caption' => '% Change', 'formula' => '' }] },
     { 'kind' => 'chart', 'caption' => 'Filled Map', 'chart_kind' => 'map', 'mark_class' => 'Map',
       'geo_role' => 'state', 'measures' => [], 'calculations' => [] },
     # --- should NOT fire (false-positive guards) ---
@@ -40,7 +45,7 @@ layout = [{
   ]
 }]
 
-e = spec_api_limit_entries(layout)
+e = spec_api_limit_entries(layout, { 'Revenue KPI (wired)' => true })
 by_vis = e.each_with_object({}) { |x, h| h[x['visual']] = x }
 
 # fires
@@ -59,6 +64,11 @@ check(by_vis['Filled Map'] && by_vis['Filled Map']['detail'] =~ /map|choropleth/
 check(!by_vis['Sales by Region'], 'plain bar NOT flagged', fails)
 check(!by_vis['Sales Trend'],     'plain line (no rank) NOT flagged', fails)
 check(!by_vis['Plain KPI'],       'plain KPI (no delta fields) NOT flagged', fails)
+
+# Task 5: demotion — same trigger as 'Sales KPI', but wired via cmp_wired →
+# must NOT fire (default cmp_wired = {} keeps 'Sales KPI' firing above).
+check(!by_vis['Revenue KPI (wired)'],
+      'KPI ▲/▼ delta demoted when cmp_wired marks the tile (Task 5)', fails)
 check(e.size == 5, "exactly 5 entries (got #{e.size})", fails)
 
 puts
