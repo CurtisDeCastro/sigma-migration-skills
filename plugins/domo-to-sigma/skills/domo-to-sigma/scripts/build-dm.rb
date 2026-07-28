@@ -26,6 +26,15 @@ include DomoSigma   # display_name, rand_id, inode_id — shared with build-work
 
 OUT = ENV['DOMO_DISCOVERY_DIR'] || File.expand_path('../discovery', __dir__)
 
+# C3 reuse-check: consume find-or-pick-dm.rb's decision.
+def reuse_decision(dir)
+  path = File.join(dir, 'reuse-decision.json')
+  return nil unless File.exist?(path)
+  JSON.parse(File.read(path))
+rescue JSON::ParserError
+  nil
+end
+
 # Domo type → optional Sigma column format hint.
 def type_format(domo_type)
   case domo_type.to_s.upcase
@@ -89,6 +98,15 @@ if $PROGRAM_NAME == __FILE__
     skip = ENV['SIGMA_SKIP_DOCTOR_GATE'].to_s.strip
     gate_cmd += ['--skip-doctor-gate', skip] unless skip.empty?
     abort '  build-dm.rb aborted at the environment gate (see the fix above).' unless system(*gate_cmd)
+  end
+
+  # C3 reuse-check: if find-or-pick-dm.rb's decision names a DM to reuse, honor
+  # it and skip fresh DM creation entirely (no dm-spec.json emitted).
+  if (rd = reuse_decision(OUT)) && rd['reuse']
+    FileUtils.mkdir_p(OUT)
+    File.write(File.join(OUT, 'dm-reuse.json'), JSON.generate({ 'reused' => rd['dataModelId'] }))
+    warn "  reuse-check: reusing existing data model #{rd['dataModelId']} (find-or-pick-dm) — skipping DM creation."
+    exit 0
   end
 
   datasets = JSON.parse(File.read(File.join(OUT, 'datasets.json'))) rescue []
