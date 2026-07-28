@@ -209,3 +209,6 @@ Skip-Version-Bump: <one-line reason>
 ```
 
 The reason is required and is visible in history and review — use it honestly.
+The trailer is global to the PR's whole diff range: a single `Skip-Version-Bump`
+commit anywhere in the range exempts every otherwise-failing plugin in that PR,
+not just the plugin its own commit touched.

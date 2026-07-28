@@ -116,6 +116,14 @@ manifest "plugins/toolx-to-sigma" "1.0.0"; skill_file toolx-to-sigma v1
 H1="$(commit_msg 'add new plugin')"
 run_guard "$BASE" "$H1"; check 0 "$(passed)" "new plugin (no manifest at BASE) passes"
 
+new_repo "$TMP/d_new_badver"
+echo root > README.md
+BASE="$(commit_msg base)"
+manifest "plugins/toolx-to-sigma" "banana"; skill_file toolx-to-sigma v1
+H1="$(commit_msg 'add new plugin with non-semver version')"
+run_guard "$BASE" "$H1"; check 0 "$(failed)" "new plugin with non-semver version fails"
+grep -q "not valid semver" "$TMP/out"; check 0 "$?" "failure names the non-semver version on a new manifest"
+
 new_repo "$TMP/d_missing"
 mkdir -p .claude-plugin
 printf '{ "plugins": [ { "name": "toolx-to-sigma" } ] }\n' > .claude-plugin/marketplace.json

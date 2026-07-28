@@ -73,6 +73,10 @@ sys.exit(0 if h > b else 1)
 }
 
 listed_at_head() { # name — is it in marketplace.json at HEAD?
+  # An unparseable or non-object marketplace.json is treated as "not listed"
+  # (fail-open by design here — marketplace.json's own integrity is outside
+  # this gate's remit; it only decides whether the missing-manifest check
+  # below applies).
   git show "$HEAD:.claude-plugin/marketplace.json" 2>/dev/null | python3 -c '
 import json, sys
 try: d = json.load(sys.stdin)
@@ -102,6 +106,14 @@ while IFS= read -r name; do
     echo "::error file=plugins/$name/.claude-plugin/plugin.json::plugin.json has no non-empty string \"version\" field"; fail=1; continue
   fi
   if [ -z "$base_v" ] || [ "$base_v" = "__BADJSON__" ] || [ "$base_v" = "__NOVER__" ]; then
+    # New/first manifest: nothing to compare against, but head_v still has to
+    # be valid semver — reuse semver_gt's own regex/idiom (a fixed, always-
+    # parseable "0.0.0" base means rc=2 can only mean head_v itself doesn't
+    # parse) rather than duplicating the semver check.
+    semver_gt "0.0.0" "$head_v"; new_rc=$?
+    if [ "$new_rc" -eq 2 ]; then
+      echo "::error file=plugins/$name/.claude-plugin/plugin.json::version '$head_v' is not valid semver (MAJOR.MINOR.PATCH)"; fail=1; continue
+    fi
     echo "plugin-version-bump: '$name' — new/first versioned manifest ($head_v), OK"; continue
   fi
   semver_gt "$base_v" "$head_v"; rc=$?
