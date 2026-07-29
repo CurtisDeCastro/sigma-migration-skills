@@ -41,6 +41,13 @@
 #     [--mcp-dir <sigma-data-model-mcp clone> | --converter-out <mcp-tool result.json>] \
 #     [--python <interpreter>]
 #
+# FULLY-LOCAL alternative (no Fabric/tenant) — a single .pbix on disk. Phase 0
+# extracts the model (pbixray -> model.bim) and the report (the zip's UTF-16LE
+# Report/Layout -> signals) LOCALLY, then the same convert->build->verify
+# pipeline runs. Needs pbixray for the model half (see refs/local-pbix.md):
+#   ruby scripts/migrate-powerbi.rb --pbix /path/Sales.pbix \
+#     --connection <SIGMA_CONN_UUID> --database <DB> --schema <SCHEMA> --ref-dm <id>
+#
 # Converter route (bead 7o01): with a local sigma-data-model-mcp build (--mcp-dir /
 # PBI_MCP_DIR / ~/Desktop or ~/ clone) the conversion runs in-process via a node
 # shim. WITHOUT one, Phase 2 stops with a gate: run the convert_powerbi_to_sigma
@@ -100,6 +107,11 @@ opts = { db: '', schema: '' }
 OptionParser.new do |o|
   o.on('--tmsl PATH')       { |v| opts[:tmsl]   = File.expand_path(v) }
   o.on('--pbir PATH')       { |v| opts[:pbir]   = File.expand_path(v) }
+  # FULLY-LOCAL front door: a single .pbix on disk, no Fabric/tenant. Phase 0
+  # extracts the model (pbixray -> model.bim) AND the report (the zip's
+  # UTF-16LE Report/Layout -> signals) locally, then the normal pipeline runs.
+  # Mutually exclusive with --tmsl/--pbir (which it derives).
+  o.on('--pbix PATH')       { |v| opts[:pbix]   = File.expand_path(v) }
   o.on('--connection ID')   { |v| opts[:conn]   = v }
   o.on('--database DB')     { |v| opts[:db]     = v }
   o.on('--schema S')        { |v| opts[:schema] = v }
@@ -152,6 +164,12 @@ OptionParser.new do |o|
   # builds a new DM.
   o.on('--reuse-dm ID')        { |v| opts[:reuse_dm] = v }
   o.on('--no-reuse')           {     opts[:no_reuse] = true }
+  # COMPOSITE guard escape hatch. The Fabric --tmsl path GATES (exit 10) when the
+  # extracted model looks like a composite / live-connected-to-remote model,
+  # because getDefinition returns an INCOMPLETE model for those — the complete
+  # model lives in the local .pbix (prefer --pbix). Pass this to proceed anyway
+  # on the (known-incomplete) Fabric model.
+  o.on('--allow-incomplete-model') { opts[:allow_incomplete_model] = true }
 end.parse!
 
 # #347: publish the target tenant into the env so EVERY Power BI child process
@@ -187,10 +205,19 @@ CONNECT_HINT = <<~HINT.freeze
   --tenant <that tenant GUID or the ctid= in the report URL> here AND to
   fabric-extract.py, or every Fabric call 404s as WorkspaceNotFound.
 HINT
-abort "FATAL: missing --tmsl (the Power BI semantic model, TMSL/model.bim).\n#{CONNECT_HINT}" unless opts[:tmsl]
-abort "FATAL: --tmsl not found: #{opts[:tmsl]}\n#{CONNECT_HINT}" unless File.exist?(opts[:tmsl])
-abort "FATAL: missing --pbir (the Power BI report layout / PBIR bundle).\n#{CONNECT_HINT}" unless opts[:pbir]
-abort "FATAL: --pbir not found: #{opts[:pbir]}\n#{CONNECT_HINT}" unless File.exist?(opts[:pbir])
+# --pbix (fully-local) DERIVES --tmsl + --pbir in Phase 0 below, so the
+# require-both checks apply only to the Fabric route. In --pbix mode we just
+# confirm the file exists; Phase 0 produces model.bim + signals locally.
+if opts[:pbix]
+  abort "FATAL: --pbix not found: #{opts[:pbix]}" unless File.exist?(opts[:pbix])
+  warn 'note: --pbix given — the local model (pbixray) + report (Report/Layout) are ' \
+       'extracted in Phase 0; --tmsl/--pbir are ignored.' if opts[:tmsl] || opts[:pbir]
+else
+  abort "FATAL: missing --tmsl (the Power BI semantic model, TMSL/model.bim).\n#{CONNECT_HINT}" unless opts[:tmsl]
+  abort "FATAL: --tmsl not found: #{opts[:tmsl]}\n#{CONNECT_HINT}" unless File.exist?(opts[:tmsl])
+  abort "FATAL: missing --pbir (the Power BI report layout / PBIR bundle).\n#{CONNECT_HINT}" unless opts[:pbir]
+  abort "FATAL: --pbir not found: #{opts[:pbir]}\n#{CONNECT_HINT}" unless File.exist?(opts[:pbir])
+end
 # intake.rb (front-door) caches the resolved connection in <out>/connection.json; honor it
 # when --connection is omitted so the agent need not re-pass the id it just resolved.
 if opts[:out] && File.exist?(File.join(opts[:out], 'connection.json'))
@@ -214,7 +241,9 @@ CONV_MODULE, MCP_DIR, CONVERTER_DESC =
   resolve_converter(opts[:mcp_dir] || ENV['PBI_MCP_DIR'], VENDORED_PBI, 'powerbi.js')
 warn "converter: #{CONVERTER_DESC}"
 
-name_slug = File.basename(opts[:tmsl], '.*').gsub(/[^A-Za-z0-9_-]/, '-')
+# In --pbix mode opts[:tmsl] is not set yet (Phase 0 produces it), so slug from
+# the .pbix basename instead.
+name_slug = File.basename(opts[:tmsl] || opts[:pbix], '.*').gsub(/[^A-Za-z0-9_-]/, '-')
 WORK = opts[:out] || File.expand_path("~/powerbi-migration/#{name_slug}")
 FileUtils.mkdir_p(WORK)
 WB_NAME = opts[:name] || "#{name_slug.gsub(/[_]+/, ' ').strip} (from Power BI)"
@@ -327,61 +356,160 @@ def cull_failed_fields(*logs)
   names.map { |n| n.gsub(/[\[\]"]/, '').strip }.reject(&:empty?).uniq
 end
 
+# COMPOSITE / live-connection detection on the FABRIC-extracted TMSL. A Power BI
+# composite report (or one live-connected to a shared dataset) keeps references
+# to a REMOTE semantic model; getDefinition of the report's bound model then
+# returns an INCOMPLETE model (missing the report-local measures/calc tables, or
+# not resolvable standalone). The COMPLETE model lives in the local .pbix — so
+# we detect the incompleteness here and prompt for --pbix rather than silently
+# building a broken DM. Conservative signals (import-mode happy path never
+# fires): DirectQuery partitions, `entity` partitions bound to a remote model,
+# or an M expression naming the AnalysisServices / Power BI dataset connector.
+# Returns a list of human-readable reason strings ([] when the model is a
+# complete import model). The offline analog is the .pbix Connections
+# RemoteArtifacts tell (extract-model-pbix.py is_composite_connections).
+def detect_incomplete_composite(model)
+  reasons = []
+  (model['tables'] || []).each do |t|
+    name = t['name']
+    next if name.to_s.start_with?('LocalDateTable_', 'DateTableTemplate_')
+    Array(t['partitions']).each do |p|
+      mode = p['mode'].to_s.downcase
+      reasons << "table '#{name}' has a DirectQuery partition" if mode == 'directquery'
+      src = p['source'] || {}
+      reasons << "table '#{name}' is an 'entity' partition bound to a remote model" \
+        if src['type'].to_s.downcase == 'entity'
+      expr = src['expression']
+      expr = expr.join("\n") if expr.is_a?(Array)
+      if expr.is_a?(String) &&
+         expr =~ /AnalysisServices\.Database|PowerBIServiceLive|DirectQueryToAS|pbiazure|PowerBI\.Datasets|Value\.NativeQuery/i
+        reasons << "table '#{name}' M expression references a remote Power BI dataset"
+      end
+    end
+  end
+  reasons.uniq
+end
+
 TOTAL = 6
+
+# Python interpreter resolution (shared by Phase 0 local extract + Phase 1).
+# bead 7o01: --python / PBI_PY, else a bootstrapped venv (<work>/.venv), else
+# the legacy /tmp/pbiauth venv, else a real system Python via PyResolve
+# (Windows Store-stub safe; the offline PBIR parse is stdlib-only). PY_ARGV is
+# an array so a multi-token launcher (`py -3`) survives the splat below.
+# bead 4alk.4: venvs are POSIX bin/python OR Windows Scripts\python.exe.
+py = opts[:python] || ENV['PBI_PY'] ||
+     [File.join(WORK, '.venv', 'bin', 'python'), File.join(WORK, '.venv', 'Scripts', 'python.exe'),
+      '/tmp/pbiauth/bin/python', '/tmp/pbiauth/Scripts/python.exe']
+       .find { |p| File.exist?(p) }
+PY_ARGV = py ? [py] : PyResolve.argv
+
+# ---------------------------------------------------------------------------
+# Phase 0 — LOCAL .pbix extract (only with --pbix; no Fabric/tenant). Reads the
+# .pbix's binary VertiPaq DataModel with pbixray and emits a TMSL model.bim in
+# the SAME shape --tmsl consumes, then wires it in as opts[:tmsl]. The report
+# half (the zip's UTF-16LE Report/Layout) is extracted in Phase 1. If pbixray
+# is absent, extract-model-pbix.py exits with a clear install hint and this
+# run stops here — the Fabric --tmsl/--pbir route and the report front door
+# (extract-report-classic.py --pbix) do NOT need pbixray.
+# ---------------------------------------------------------------------------
+if opts[:pbix]
+  puts
+  puts '── Phase 0/6 · Local .pbix extract (no Fabric) ──'
+  # Cheap stdlib-only probe (no pbixray): is this a composite / live-connected
+  # .pbix? If so, using the LOCAL file (which carries the complete composite
+  # model) is exactly right — note it so the choice is visible.
+  comp_out, comp_st = Open3.capture2e(*PY_ARGV, File.join(HERE, 'extract-model-pbix.py'),
+                                      '--pbix', opts[:pbix], '--detect-composite')
+  if comp_st.success? && (JSON.parse(comp_out)['composite'] rescue false)
+    puts '   composite / live-connected .pbix detected — the local file carries the COMPLETE'
+    puts '   model (a Fabric getDefinition of the bound dataset would be incomplete). Using it.'
+  end
+  model_bim = File.join(WORK, 'model.bim')
+  puts "   VertiPaq model (pbixray) -> #{model_bim}"
+  run!([*PY_ARGV, File.join(HERE, 'extract-model-pbix.py'),
+        '--pbix', opts[:pbix], '--out', model_bim,
+        *(opts[:name] ? ['--name', opts[:name]] : [])])
+  opts[:tmsl] = model_bim
+end
 
 # ---------------------------------------------------------------------------
 # Phase 1 — Discover / Extract (explode the PBIR bundle, parse TMSL + signals)
 # ---------------------------------------------------------------------------
 hdr(1, TOTAL, 'Discover / Extract')
 
-# The raw-pbir/*.json files are a FLAT bundle: { "<part-path>": "<json text>", ... }.
-# extract-pbir.py wants an exploded definition/ folder — so explode it first.
-pbir_dir = File.join(WORK, 'pbir')
-FileUtils.mkdir_p(pbir_dir)
-bundle = JSON.parse(File.read(opts[:pbir]))
-exploded = 0
-bundle.each do |part, payload|
-  next unless part.start_with?('definition/') # the exploded-PBIR parts only
-  fp = File.join(pbir_dir, part)
-  FileUtils.mkdir_p(File.dirname(fp))
-  File.write(fp, payload.is_a?(String) ? payload : JSON.pretty_generate(payload))
-  exploded += 1
-end
-# bead anlb (orchestrator parity with run.sh): a fetched definition may be the
-# CLASSIC single report.json (top-level sections[]) instead of exploded PBIR
-# parts. Branch to extract-report-classic.py — same signals.json schema out.
-classic_rj = nil
-if exploded.zero? && bundle.key?('report.json')
-  classic_rj = File.join(pbir_dir, 'report.json')
-  payload = bundle['report.json']
-  File.write(classic_rj, payload.is_a?(String) ? payload : JSON.pretty_generate(payload))
-end
-abort "FATAL: PBIR bundle has no definition/ parts and no classic report.json — keys=#{bundle.keys.first(3)}" if exploded.zero? && classic_rj.nil?
-
 signals_path = File.join(WORK, 'signals.json')
-# bead 7o01: Python resolution — --python / PBI_PY, else a bootstrapped venv
-# (run.sh creates <work-dir>/.venv), else the legacy /tmp/pbiauth venv, else
-# a real system Python via PyResolve (Windows Store-stub safe; the offline PBIR
-# parse is stdlib-only). PY_ARGV is an array so a multi-token launcher (`py -3`)
-# survives the splat below.
-# bead 4alk.4: venvs are POSIX bin/python OR Windows Scripts\python.exe — probe
-# both layouts per venv root rather than assuming bin/.
-py = opts[:python] || ENV['PBI_PY'] ||
-     [File.join(WORK, '.venv', 'bin', 'python'), File.join(WORK, '.venv', 'Scripts', 'python.exe'),
-      '/tmp/pbiauth/bin/python', '/tmp/pbiauth/Scripts/python.exe']
-       .find { |p| File.exist?(p) }
-PY_ARGV = py ? [py] : PyResolve.argv
-if classic_rj
-  puts '   classic single report.json detected — branching to extract-report-classic.py'
-  run!([*PY_ARGV, File.join(HERE, 'extract-report-classic.py'), '--report-json', classic_rj, '--out', signals_path])
+if opts[:pbix]
+  # FULLY-LOCAL report: the .pbix zip's `Report/Layout` member is a SINGLE
+  # UTF-16LE classic report (top-level sections[]) — extract-report-classic.py
+  # unzips + decodes it and emits the SAME signals.json schema, no bundle.
+  puts '   local .pbix report — unzipping Report/Layout (UTF-16LE) via extract-report-classic.py'
+  run!([*PY_ARGV, File.join(HERE, 'extract-report-classic.py'), '--pbix', opts[:pbix], '--out', signals_path])
 else
-  run!([*PY_ARGV, File.join(HERE, 'extract-pbir.py'), '--pbir-dir', pbir_dir, '--out', signals_path])
+  # The raw-pbir/*.json files are a FLAT bundle: { "<part-path>": "<json text>", ... }.
+  # extract-pbir.py wants an exploded definition/ folder — so explode it first.
+  pbir_dir = File.join(WORK, 'pbir')
+  FileUtils.mkdir_p(pbir_dir)
+  bundle = JSON.parse(File.read(opts[:pbir]))
+  exploded = 0
+  bundle.each do |part, payload|
+    next unless part.start_with?('definition/') # the exploded-PBIR parts only
+    fp = File.join(pbir_dir, part)
+    FileUtils.mkdir_p(File.dirname(fp))
+    File.write(fp, payload.is_a?(String) ? payload : JSON.pretty_generate(payload))
+    exploded += 1
+  end
+  # bead anlb (orchestrator parity with run.sh): a fetched definition may be the
+  # CLASSIC single report.json (top-level sections[]) instead of exploded PBIR
+  # parts. Branch to extract-report-classic.py — same signals.json schema out.
+  classic_rj = nil
+  if exploded.zero? && bundle.key?('report.json')
+    classic_rj = File.join(pbir_dir, 'report.json')
+    payload = bundle['report.json']
+    File.write(classic_rj, payload.is_a?(String) ? payload : JSON.pretty_generate(payload))
+  end
+  abort "FATAL: PBIR bundle has no definition/ parts and no classic report.json — keys=#{bundle.keys.first(3)}" if exploded.zero? && classic_rj.nil?
+  if classic_rj
+    puts '   classic single report.json detected — branching to extract-report-classic.py'
+    run!([*PY_ARGV, File.join(HERE, 'extract-report-classic.py'), '--report-json', classic_rj, '--out', signals_path])
+  else
+    run!([*PY_ARGV, File.join(HERE, 'extract-pbir.py'), '--pbir-dir', pbir_dir, '--out', signals_path])
+  end
 end
 signals = JSON.parse(File.read(signals_path))
 
 # TMSL model summary + import/DirectQuery mode.
 tmsl = JSON.parse(File.read(opts[:tmsl]))
 model = tmsl['model'] || tmsl
+
+# COMPOSITE GATE (Fabric --tmsl path only; --pbix already IS the complete local
+# model). getDefinition returns an INCOMPLETE model for composite / live-
+# connected reports — the full model lives in the local .pbix. Detect it and
+# PROMPT for the .pbix instead of silently building a broken DM. --allow-
+# incomplete-model overrides. This is what MOTIVATES the local front door.
+unless opts[:pbix] || opts[:allow_incomplete_model]
+  composite_reasons = detect_incomplete_composite(model)
+  unless composite_reasons.empty?
+    puts
+    puts '╭─ OPEN QUESTION — composite / live-connected report (incomplete Fabric model) ─'
+    puts '│  The extracted semantic model shows references to a REMOTE Power BI dataset:'
+    composite_reasons.first(6).each { |r| puts "│    • #{r}" }
+    puts '│'
+    puts '│  This is a COMPOSITE (or live-connected) report: Fabric getDefinition returns'
+    puts '│  only the report-BOUND model, which is INCOMPLETE (it misses the report-local'
+    puts '│  measures / calc tables, or is not resolvable standalone). Power BI also BLOCKS'
+    puts '│  export-to-.pbix for live-connected reports, so device-auth cannot download it.'
+    puts '│  The COMPLETE model lives in the local .pbix on the author\'s machine.'
+    puts '│'
+    puts '│  ACTION: ask the user for the local .pbix and re-run through the local front door:'
+    puts "│      ruby scripts/migrate-powerbi.rb --pbix <that file.pbix> \\"
+    puts "│        --connection #{opts[:conn] || '<id>'} --database #{opts[:db].empty? ? '<DB>' : opts[:db]} --schema #{opts[:schema].empty? ? '<SCHEMA>' : opts[:schema]} --out #{WORK}"
+    puts '│  (Deliberately proceeding on the known-incomplete Fabric model? add --allow-incomplete-model.)'
+    puts '╰──────────────────────────────────────────────────────────────────────────────'
+    exit 10
+  end
+end
+
 tables = (model['tables'] || []).reject { |t| t['name'].to_s.start_with?('LocalDateTable_', 'DateTableTemplate_') }
 all_measures = tables.flat_map { |t| (t['measures'] || []).map { |m| [t['name'], m['name'], Array(m['expression']).join] } }
 # measure name -> its ORIGINAL TMSL table = the entity a PBIR visual binds it under.
