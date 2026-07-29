@@ -278,11 +278,15 @@ module ExportPool
   end
 
   # POST /v2/workbooks/{wb}/export for one element in the given format
-  # ('csv' | 'json'), bounded to row_limit rows (nil = unbounded). Returns the
-  # queryId or nil.
-  def start_export(wb, element_id, fmt, row_limit)
+  # ('csv' | 'json'), bounded to row_limit rows (nil = unbounded). `params:`
+  # (optional) carries control values ({controlId => value}) — the REST
+  # export's `parameters` key, the only programmatic way to exercise a
+  # non-default control value (see probe-controls.rb). Returns the queryId or
+  # nil.
+  def start_export(wb, element_id, fmt, row_limit, params: nil)
     body = { elementId: element_id, format: { type: fmt } }
     body[:rowLimit] = row_limit if row_limit
+    body[:parameters] = params if params && !params.empty?
     r = Sigma.request(:post, "/v2/workbooks/#{wb}/export", body: JSON.generate(body))
     r && r['queryId']
   end
@@ -487,6 +491,61 @@ module ExportPool
         end
       end
     end
+    results
+  end
+
+  # ---------------------------------------------------------------------------
+  # Pooled exports of EXISTING workbook elements (W2.12 — flip-export pooling).
+  # probe-controls.rb pays K×2 fully-serial element exports per gate run
+  # (baseline + control-flip per control, plus leak checks); this runs the
+  # same export → poll → download wire flow `pool`-wide. TRANSPORT ONLY: which
+  # elements to export, what a differing/identical CSV means, and every
+  # PASS/FAIL verdict stay the caller's. Each job gets its OWN
+  # Deadline(timeout_per_job) — the exact per-CSV --timeout semantics the
+  # serial path had, parallelized.
+  #
+  # jobs: [{ 'element_id' => <id>, 'params' => nil | {controlId => value},
+  #          'row_limit' => nil | N }, ...]
+  # Returns per-job [ [:ok, body] | [:timeout, nil] | [:error, msg] ] (body =
+  # raw wire CSV bytes; callers parse and judge — never this lib).
+  # ---------------------------------------------------------------------------
+  def pooled_element_exports(wb, jobs, pool: 5, timeout_per_job: 90, poll_interval: 1.0)
+    return [] if jobs.empty?
+    results = Array.new(jobs.length)
+    queue = Queue.new
+    jobs.each_index { |i| queue << i }
+    mutex = Mutex.new
+    Array.new([pool, jobs.length].min.clamp(1, 16)) do
+      Thread.new do
+        loop do
+          i = begin
+            queue.pop(true)
+          rescue ThreadError
+            break
+          end
+          job = jobs[i]
+          res =
+            begin
+              qid = start_export(wb, job['element_id'], 'csv', job['row_limit'],
+                                 params: job['params'])
+              if qid.nil?
+                [:error, 'export POST returned no queryId']
+              else
+                status, body = poll_csv_download(qid, Deadline.new(timeout_per_job),
+                                                 poll_interval: poll_interval)
+                case status
+                when :timeout then [:timeout, nil]
+                when :html    then [:error, 'export returned HTML behind a 200 (renderer error)']
+                else               [:ok, body]
+                end
+              end
+            rescue StandardError => e
+              [:error, e.message.to_s.gsub(/\s+/, ' ').strip[0, 240]]
+            end
+          mutex.synchronize { results[i] = res }
+        end
+      end
+    end.each(&:join)
     results
   end
 

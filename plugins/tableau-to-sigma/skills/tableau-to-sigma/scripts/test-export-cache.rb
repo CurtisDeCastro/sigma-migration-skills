@@ -666,6 +666,144 @@ Dir.mktmpdir do |dir|
         '--no-pool actuals record transport=serial with per-entry timings', fails)
 end
 
+# ============================================================================
+# Part 6 — W2.12 probe-controls.rb FLIP-EXPORT POOLING: baselines + flips run
+# pooled through ExportPool.pooled_element_exports; verdict logic (row-set
+# signatures, PASS/FAIL/SKIP, exit codes) untouched; evidence recorded per the
+# version-keyed raw contract (probe-evidence.json binds CSV sha256s to the
+# workbook doc version); --no-pool = serial transport through the same seam.
+# ============================================================================
+PC_STUB = <<~'RUBY'
+  require 'json'
+  module Sigma
+    class Error < StandardError; end
+    def self.request(method, path, body: nil, accept: nil, binary: false, content_type: nil, http: nil)
+      rec = { 'm' => method.to_s, 'p' => path }
+      rec['body'] = body if body
+      File.open(ENV['PC_LOG'], 'a') { |f| f.puts(JSON.generate(rec)) }
+      return File.read(ENV['PC_SPEC']) if method == :get && path.end_with?('/spec')
+      if method == :get && path.end_with?('/columns')
+        return { 'entries' => [{ 'elementId' => 'el-data', 'columnId' => 'c-reg', 'label' => 'Region' }] }
+      end
+      if method == :post && path.include?('/export')
+        req = JSON.parse(body)
+        return { 'queryId' => "#{req['elementId']}#{req['parameters'] ? '.flip' : '.base'}" }
+      end
+      if method == :get && path.start_with?('/v2/query/')
+        case path.split('/')[3]
+        when 'el-data.base' then return "Region,Sales\nEast,1\nWest,2\n"
+        when 'el-data.flip' then return "Region,Sales\nWest,2\n"
+        when 'el-out.base'  then return "K,V\nx,1\n"
+        when 'el-out.flip'  then return ENV['PC_LEAK'] == '1' ? "K,V\ny,9\n" : "K,V\nx,1\n"
+        end
+      end
+      raise Error, "stub: unexpected #{method} #{path}"
+    end
+  end
+  real = ENV['REAL_SIGMA_REST']
+  $LOADED_FEATURES << real if real && !$LOADED_FEATURES.include?(real)
+RUBY
+
+PC_SCRIPT = File.join(SCRIPTS, 'probe-controls.rb')
+
+def pc_spec(path)
+  File.write(path, JSON.pretty_generate(
+               'workbookId' => 'wb', 'latestDocumentVersion' => 5,
+               'pages' => [{ 'id' => 'p1', 'name' => 'p1', 'elements' => [
+                 { 'id' => 'ctl-el', 'kind' => 'control', 'controlType' => 'list',
+                   'controlId' => 'c-region', 'name' => 'Region Filter', 'values' => ['East'],
+                   'source' => { 'kind' => 'source', 'source' => { 'elementId' => 'el-data' },
+                                 'columnId' => 'c-reg' },
+                   'filters' => [{ 'columnId' => 'c-reg', 'source' => { 'elementId' => 'el-data' } }] },
+                 { 'id' => 'el-data', 'kind' => 'table', 'name' => 'Data' },
+                 { 'id' => 'el-out', 'kind' => 'bar-chart', 'name' => 'Out Chart' }
+               ] }]))
+end
+
+def pc_export_posts(log)
+  read_log(log).select { |r| r['m'] == 'post' && r['p'].include?('/export') }
+end
+
+puts '-- probe-controls pooled: flip verdicts unchanged, evidence version-keyed --'
+Dir.mktmpdir do |dir|
+  stub_dir = File.join(dir, 'stub')
+  Dir.mkdir(stub_dir)
+  File.write(File.join(stub_dir, 'sigma_rest.rb'), PC_STUB)
+  spec_path = File.join(dir, 'pc-spec.json')
+  pc_spec(spec_path)
+  log = File.join(dir, 'pc-log.jsonl')
+  env = { 'PC_SPEC' => spec_path, 'PC_LOG' => log }
+  out1 = File.join(dir, 'probe-out-pooled')
+  o1, _e1, s1 = run_stubbed(stub_dir, env, PC_SCRIPT, '--workbook-id', 'wb', '--out', out1)
+  check(s1.exitstatus.zero?, "pooled probe exits 0 (got #{s1.exitstatus})", fails)
+  check(o1.include?('PASS'), 'per-control table still prints PASS', fails)
+  results = JSON.parse(File.read(File.join(out1, 'probe-results.json')))
+  check(results.is_a?(Array) && results.length == 1 && results[0]['result'] == 'PASS' &&
+        results[0]['value'] == 'West',
+        'probe-results.json keeps its ARRAY shape; flip auto-picked + verdict PASS', fails)
+  require 'flip_gate'
+  decision, info = FlipGate.decide(s1.exitstatus, results)
+  check(decision == :ok && info[:passes] == ['c-region'],
+        'gate 7b consumes the pooled results unchanged (FlipGate.decide → :ok)', fails)
+  posts = pc_export_posts(log)
+  check(posts.length == 2, "pooled run makes exactly the serial exports — 2 (got #{posts.length})", fails)
+  check(posts.any? { |p| p['body'].include?('"parameters"') && p['body'].include?('West') },
+        'flip export POST carries parameters:{controlId: flip value}', fails)
+  ev = JSON.parse(File.read(File.join(out1, 'probe-evidence.json')))
+  check(ev['workbook_id'] == 'wb' && ev['doc_version'] == '5' && ev['transport'] == 'pooled(5)',
+        'evidence sidecar keys the raw CSVs to workbook + doc version + transport', fails)
+  check(ev['exports'].length == 2 && ev['exports'].all? do |fname, sha|
+          require 'digest'
+          Digest::SHA256.hexdigest(File.binread(File.join(out1, fname))) == sha
+        end,
+        'every evidence CSV byte-matches its recorded sha256 (raw, tamper-evident)', fails)
+  base_csv = File.read(File.join(out1, 'c-region--el-data--base.csv'))
+  check(base_csv == "Region,Sales\nEast,1\nWest,2\n",
+        'evidence CSV is the untouched wire body (raw contract)', fails)
+
+  # Serial transport (--no-pool): same seam, same verdicts, same export count.
+  File.write(log, '')
+  out2 = File.join(dir, 'probe-out-serial')
+  _o2, _e2, s2 = run_stubbed(stub_dir, env, PC_SCRIPT, '--workbook-id', 'wb', '--out', out2, '--no-pool')
+  check(s2.exitstatus.zero?, "--no-pool probe exits 0 (got #{s2.exitstatus})", fails)
+  r2 = JSON.parse(File.read(File.join(out2, 'probe-results.json')))
+  check(r2 == results, 'serial and pooled runs produce IDENTICAL verdicts (transport-only)', fails)
+  check(pc_export_posts(log).length == 2, 'serial transport also makes 2 exports (no-waste pin)', fails)
+  check(JSON.parse(File.read(File.join(out2, 'probe-evidence.json')))['transport'] == 'serial',
+        'serial evidence sidecar records transport=serial', fails)
+end
+
+puts '-- probe-controls pooled + --check-out-of-closure: leak FAIL still fires --'
+Dir.mktmpdir do |dir|
+  stub_dir = File.join(dir, 'stub')
+  Dir.mkdir(stub_dir)
+  File.write(File.join(stub_dir, 'sigma_rest.rb'), PC_STUB)
+  spec_path = File.join(dir, 'pc-spec.json')
+  pc_spec(spec_path)
+  log = File.join(dir, 'pc-log.jsonl')
+  out3 = File.join(dir, 'probe-out-leakfree')
+  env = { 'PC_SPEC' => spec_path, 'PC_LOG' => log }
+  _o3, _e3, s3 = run_stubbed(stub_dir, env, PC_SCRIPT, '--workbook-id', 'wb', '--out', out3,
+                             '--check-out-of-closure')
+  check(s3.exitstatus.zero?, "leak-free pooled leak-check exits 0 (got #{s3.exitstatus})", fails)
+  r3 = JSON.parse(File.read(File.join(out3, 'probe-results.json')))
+  check(r3.any? { |r| r['result'] == 'OK' && r['note'].to_s.include?('no leak') },
+        'out-of-closure OK row recorded (flip did not leak)', fails)
+  check(pc_export_posts(log).length == 4, "leak check pools 4 exports (got #{pc_export_posts(log).length})", fails)
+  check(JSON.parse(File.read(File.join(out3, 'probe-evidence.json')))['exports'].length == 4,
+        'all four evidence CSVs recorded in the sidecar', fails)
+
+  # A leaking flip (out-of-closure export CHANGES) must still FAIL loudly —
+  # the pooled transport moved bytes, never the verdict.
+  out4 = File.join(dir, 'probe-out-leaky')
+  _o4, _e4, s4 = run_stubbed(stub_dir, env.merge('PC_LEAK' => '1'), PC_SCRIPT,
+                             '--workbook-id', 'wb', '--out', out4, '--check-out-of-closure')
+  check(s4.exitstatus == 1, "leaking flip → exit 1 (got #{s4.exitstatus})", fails)
+  r4 = JSON.parse(File.read(File.join(out4, 'probe-results.json')))
+  check(r4.any? { |r| r['result'] == 'FAIL' && r['note'].to_s.include?('closure walk missed an edge') },
+        'leak FAIL verdict computed from pooled raw bytes (verdict logic untouched)', fails)
+end
+
 puts
 if fails.empty?
   puts 'ALL PASS — #7 dedup: raw export cache + version checks + pooled probes'
