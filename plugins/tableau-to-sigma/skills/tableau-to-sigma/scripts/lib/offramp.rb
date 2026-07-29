@@ -32,6 +32,10 @@
 #                        actuals list — wave-1 #2b)
 #   triage-retire-override  intake converted a RETIRE-tagged workbook on an
 #                        attributable operator override (front-door triage #6a)
+#   tier-assigned        the wave-2 tier ratchet decision (W2.1) — detail names
+#                        the resolved tier + tier_basis (vocabulary below)
+#   punchlist-emitted    factory mode rendered <WORK>/PUNCHLIST.md +
+#                        punchlist.json from the ledgers (W2.2)
 #
 # Never fatal: bookkeeping must not break a run.
 
@@ -75,6 +79,46 @@ module Offramp
   # New writers add their token HERE first, then use it (same single-point
   # rule as AUTHORIZATION_VIA).
   DECIDED_BY = %w[relayed relayed-absent unattended-flag user].freeze
+
+  # ── Wave-2 tier + factory-attestation vocabulary (W2.1/W2.2/W2.3) ──────────
+  # The ONE vocabulary point for the wave-2 tier ratchet and factory-mode
+  # verdict labeling (merged plan §3 contract 7: every new offramp/decision
+  # token lands HERE first, in one lane-B commit — the 'relayed-absent'
+  # lesson). Consumers use these names VERBATIM:
+  #   migrate-tableau.rb (lane A)   — resolves --tier {auto|S|M|full}, writes
+  #     migrate-state.json 'tier'/'tier_basis', logs the tier-assigned /
+  #     punchlist-emitted off-ramps;
+  #   assert-phase6-ran.rb (lane B) — reads 'tier' for the Tier-S waiver-budget
+  #     scale + the gate-18 valued-anchors acceptance; stamps 'verdict_by' and
+  #     the labeled factory verdict;
+  #   verify-complete.rb            — reconciles labeled verdict claims offline.
+  # The canonical example state lane A writes and lane B reads is pinned in
+  # shared/lib/testdata/wave2-tier-state.json (both lanes' tests load it —
+  # cross-lane contract 4).
+  TIER_VALUES = %w[S M full].freeze # migrate-state.json 'tier' — RESOLVED tier only
+  TIER_AUTO   = 'auto'              # CLI-only sentinel (--tier auto); never written to state
+  # migrate-state.json 'tier_basis' — HOW the tier was decided:
+  #   auto-predicate     mechanical predicate over on-disk artifacts (never an
+  #                      agent-supplied count — the anti-gaming guard)
+  #   operator-override  --tier S|M|full was passed (itself a ledgered decision)
+  #   fail-closed        predicate inputs missing/unreadable → 'full' battery
+  TIER_BASIS = %w[auto-predicate operator-override fail-closed].freeze
+  OFFRAMP_KIND_TIER_ASSIGNED     = 'tier-assigned'     # offramps.jsonl kind at the tier decision
+  OFFRAMP_KIND_PUNCHLIST_EMITTED = 'punchlist-emitted' # offramps.jsonl kind when the punch list renders
+  # Verdict attestation provenance — 'verdict_by' in parity-final.json /
+  # phase6-success.json (W2.3). 'verifier' matches the existing batch-line
+  # vocabulary (refs/orchestration.md O3 artifacts table); the gate stamps
+  # 'builder-self-attested' whenever no verifier countersignature evidence
+  # exists (no VERIFIER:-prefixed pass notes, no verification-result.json).
+  VERDICT_BY_BUILDER  = 'builder-self-attested'
+  VERDICT_BY_VERIFIER = 'verifier'
+  VERDICT_BY = [VERDICT_BY_BUILDER, VERDICT_BY_VERIFIER].freeze
+  # The labeled factory verdict (W2.3): a Tier-S factory run that ends GREEN
+  # without a countersignature must NEVER emit the bare string 'GREEN' — the
+  # suffix is the greppable discriminator a customer-facing report carries in
+  # its headline (orchestration.md O3/O4 tier-S carve-out; base verdict
+  # derivation is unchanged and verify-complete.rb re-checks the label).
+  FACTORY_VERDICT_SUFFIX = ' (factory, self-attested)'
 
   # ── decisions.jsonl (E3.6, vocab half) ─────────────────────────────────────
   # Append-only record of operator decisions taken at the consolidated

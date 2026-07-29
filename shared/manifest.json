@@ -136,7 +136,8 @@
         "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/lib/degradation_ledger.rb",
         "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/lib/degradation_ledger.rb",
         "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/lib/degradation_ledger.rb"
-      ]
+      ],
+      "note": "domo intentionally NOT a target — STANDING EXEMPTION (W2.23 decision, 2026-07-29, sibling of the evidence_ledger.rb note above): domo's gap here is main-inherited; the deliberate fan-out to domo happens for BOTH ledger sibs together (early Wave 3), with domo suites run — never as a sync-tooling accident."
     },
     {
       "canonical": "shared/lib/control_lint.rb",
@@ -786,7 +787,7 @@
         "plugins/gooddata-to-sigma/skills/gooddata-to-sigma/scripts/lib/evidence_ledger.rb",
         "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/lib/evidence_ledger.rb"
       ],
-      "note": "domo intentionally NOT a target (wave-2 decision, PR #509 review R7/§3-A4): adding it materializes a new domo lib and activates real ledger writes in domo's gate script — a runtime behavior change to be taken deliberately together with the main-inherited degradation_ledger.rb gap; until then domo's assert-phase6-ran.rb uses its guarded inline ev_append fallback."
+      "note": "domo intentionally NOT a target — STANDING EXEMPTION (W2.23 decision, 2026-07-29; adjudicated R7/§3-A4): adding it materializes a new domo lib and activates real ledger writes in domo's gate script — a runtime behavior change to be taken deliberately as the scheduled early-Wave-3 two-sibling fan-out (this file + the main-inherited degradation_ledger.rb gap below, domo suites run in the same change); until then domo's assert-phase6-ran.rb uses its guarded inline ev_append fallback."
     },
     {
       "canonical": "shared/lib/export_pool.rb",

@@ -150,6 +150,40 @@ derived_verdict = DegradationLedger.verdict(deg_entries)
 pf = load(File.join(wd, 'parity-final.json'))
 contradictions = []
 
+# W2.3 — the labeled factory verdict. On a Tier-S factory run (migrate-state
+# tier 'S', lane A) that ends GREEN with verdict_by 'builder-self-attested',
+# the ONLY honest verdict string is the labeled one — the gate never mints a
+# bare 'GREEN' there, so a bare claim means the label was stripped after the
+# fact. Conversely the label without that basis is a claim the artifacts do
+# not support. Vocabulary: Offramp::FACTORY_VERDICT_SUFFIX / VERDICT_BY.
+run_tier = begin
+  JSON.parse(File.read(File.join(wd, 'migrate-state.json')))['tier'].to_s
+rescue StandardError
+  nil
+end
+# The countersignature is RE-DERIVED from the evidence on disk, never trusted
+# from the markers — the gate's own two evidence forms (orchestration.md O3):
+# a verifier-recorded final pass in parity-final.json (visual_verdict 'pass' +
+# 'VERIFIER:'-prefixed visual_notes), or a parseable verification-result.json
+# carrying the verifier's final verdict (GREEN/YELLOW/RED — the
+# verifier-brief.md deliverable). A marker claiming verdict_by 'verifier' with
+# neither on disk is attestation laundering: a two-field edit (verdict +
+# verdict_by) would otherwise slip past the label check, which only catches
+# the one-field strip.
+countersign_evidence = pf['visual_verdict'].to_s == 'pass' &&
+                       pf['visual_notes'].to_s.start_with?('VERIFIER:')
+unless countersign_evidence
+  _vr = begin
+    JSON.parse(File.read(File.join(wd, 'verification-result.json')))
+  rescue StandardError
+    nil
+  end
+  countersign_evidence = _vr.is_a?(Hash) && %w[GREEN YELLOW RED].include?(_vr['verdict'].to_s)
+end
+factory_green = derived_verdict == 'GREEN' && run_tier == 'S' &&
+                pf['verdict_by'].to_s == Offramp::VERDICT_BY_BUILDER
+expected_verdict = factory_green ? "GREEN#{Offramp::FACTORY_VERDICT_SUFFIX}" : derived_verdict
+
 # Internal census arithmetic: waiver_count must equal the census it counts.
 if pf.key?('waiver_count') && pf['waivers'].is_a?(Array) &&
    pf['waiver_count'].to_i != pf['waivers'].length
@@ -160,12 +194,32 @@ end
 if sj['waivers'].is_a?(Array) && pf['waivers'].is_a?(Array) && sj['waivers'] != pf['waivers']
   contradictions << "phase6-success.json waiver census (#{sj['waivers'].length}) differs from parity-final.json (#{pf['waivers'].length})"
 end
-# Claimed verdicts must match the derivation.
+# Claimed verdicts must match the derivation — INCLUDING the factory label:
+# a Tier-S self-attested GREEN claim must carry the suffix (the bare string
+# is the exact laundering W2.3 forbids), and the suffix without the factory
+# basis is equally a lie.
 { 'phase6-success.json' => sj['verdict'], 'parity-final.json' => pf['verdict'] }.each do |src, claim|
   next if claim.to_s.empty?
-  if claim.to_s != derived_verdict
-    contradictions << "#{src} claims verdict #{claim} but the artifacts derive #{derived_verdict}"
-  end
+  next if claim.to_s == expected_verdict
+  contradictions << if factory_green && claim.to_s == derived_verdict
+                      "#{src} claims the BARE string #{claim} but this is a Tier-S factory self-attested run — " \
+                      "the labeled verdict #{expected_verdict.inspect} is mandatory (never launder the label off)"
+                    elsif !factory_green && claim.to_s == "#{derived_verdict}#{Offramp::FACTORY_VERDICT_SUFFIX}"
+                      "#{src} claims the factory label #{claim.inspect} without a Tier-S self-attested basis " \
+                      "(tier=#{run_tier.inspect}, verdict_by=#{pf['verdict_by'].inspect})"
+                    else
+                      "#{src} claims verdict #{claim} but the artifacts derive #{expected_verdict}"
+                    end
+end
+# A 'verifier' attestation claim is only as good as the countersignature
+# evidence behind it (re-derived above) — without evidence the claim is the
+# exact laundering the label check alone cannot see.
+{ 'phase6-success.json' => sj['verdict_by'], 'parity-final.json' => pf['verdict_by'] }.each do |src, claim|
+  next unless claim.to_s == Offramp::VERDICT_BY_VERIFIER
+  next if countersign_evidence
+  contradictions << "#{src} claims verdict_by #{Offramp::VERDICT_BY_VERIFIER.inspect} but the workdir holds no " \
+                    'countersignature evidence (no VERIFIER:-prefixed visual pass in parity-final.json, no valid ' \
+                    'verification-result.json) — attestation laundering'
 end
 # A zero-waiver claim over a ledger that records waivers/escapes is the exact
 # field lie this closes ("GREEN, 0 waivers" after --skip-ref-check).
@@ -194,7 +248,13 @@ if contradictions.any?
   exit 6
 end
 
-puts "✅ DONE — assert-phase6-ran.rb passed all gates for this run. VERDICT: #{derived_verdict}"
+puts "✅ DONE — assert-phase6-ran.rb passed all gates for this run. VERDICT: #{expected_verdict}"
+if factory_green
+  puts '   attested : builder-self-attested (Tier-S factory — the label above is part of the verdict'
+  puts '              string; quote it verbatim. A verifier countersignature + gate re-run yields bare GREEN.)'
+elsif !pf['verdict_by'].to_s.empty?
+  puts "   attested : #{pf['verdict_by']}"
+end
 puts "   workbook : #{sj['workbookId']}"
 puts "   gates    : #{sj['gates']}"
 puts "   run id   : #{sj['run_id']}" if sj['run_id']

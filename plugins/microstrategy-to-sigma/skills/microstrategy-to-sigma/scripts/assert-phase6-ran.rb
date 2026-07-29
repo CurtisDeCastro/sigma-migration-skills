@@ -808,6 +808,43 @@ layout_phase_stamp = layout_phase_key &&
 # individually arguable, and together they waived away the whole value bar.
 # ---------------------------------------------------------------------------
 WAIVER_BUDGET = 2
+
+# ---------------------------------------------------------------------------
+# Wave-2 tier ratchet — the GATE half (W2.1). Lane A's orchestrator resolves
+# --tier {auto|S|M|full} at pass 1 and writes the RESOLVED tier to
+# <workdir>/migrate-state.json as 'tier' + 'tier_basis' (closed vocabularies:
+# shared/lib/offramp.rb TIER_VALUES/TIER_BASIS; canonical example pinned in
+# shared/lib/testdata/wave2-tier-state.json — cross-lane contract 4). This
+# gate READS the tier; it never derives one. Doctrine (frozen): a tier NEVER
+# removes a gate — the 25-gate catalog identity is fixed; tiers scale BUDGETS
+# and admit duplicate-oracle substitutions only (gate 18's Tier-S
+# valued-anchors acceptance below). Fail-closed: state missing/unreadable or
+# an unknown tier string → nil → byte-identical full-battery behavior.
+# ---------------------------------------------------------------------------
+run_tier = nil
+run_tier_basis = nil
+begin
+  _ms_tier = JSON.parse(File.read(File.join(opts[:tab], 'migrate-state.json')))
+  if _ms_tier.is_a?(Hash) && %w[S M full].include?(_ms_tier['tier'].to_s)
+    run_tier       = _ms_tier['tier'].to_s
+    # tier_basis is display-only but still closed-vocabulary on READ
+    # (Offramp::TIER_BASIS; literals — non-vendored twins run this gate too):
+    # an unknown string is blanked, never printed raw into the [TIER] banner.
+    _ms_basis      = _ms_tier['tier_basis'].to_s
+    run_tier_basis = %w[auto-predicate operator-override fail-closed].include?(_ms_basis) ? _ms_basis : ''
+  end
+rescue StandardError
+  nil # fail-closed: no readable tier → full battery
+end
+# Tier-scaled waiver budget: a Tier-S workbook is small enough that waiver
+# stacking is a LOUDER signal, so the budget SHRINKS to 1 (a budget change is
+# never a catalog change). M/full keep the shipped budget of 2.
+effective_waiver_budget = run_tier == 'S' ? 1 : WAIVER_BUDGET
+if run_tier
+  puts "[TIER] #{run_tier}#{run_tier_basis.to_s.empty? ? '' : " (#{run_tier_basis})"} — " \
+       "waiver budget #{effective_waiver_budget}; all 25 gates execute (tiers scale budgets, never the catalog)"
+end
+
 WAIVER_HIDES = {
   '--skip-parity-gate'         => 'gate 1: values were never diffed against the source',
   '--min-pass-rate'            => 'gate 1: charts that DIVERGE from the source were accepted',
@@ -1013,7 +1050,8 @@ end
 if waiver_flags.any?
   excluded = waiver_flags - budget_flags
   puts "[WAIVERS] #{waiver_flags.length} waiver/escape flag(s) on this run: #{waiver_flags.join(', ')} — " \
-       "#{budget_flags.length} count against the budget of #{WAIVER_BUDGET}" \
+       "#{budget_flags.length} count against the budget of #{effective_waiver_budget}" \
+       "#{effective_waiver_budget < WAIVER_BUDGET ? " (Tier-#{run_tier} scaled from #{WAIVER_BUDGET})" : ''}" \
        "#{excluded.any? ? " (policy exclusions: #{excluded.join(', ')})" : ''}" \
        ' (exceeding the budget caps the run below GREEN, exit 19)'
 end
@@ -2962,8 +3000,37 @@ end
 # nothing proved the grain. No escape flag — the recorded resolution is the
 # only sanctioned waiver (it lives in the ledger as evidence, not in a CLI
 # flag a re-run forgets).
+#
+# TWO LEDGER SHAPES (wave-2 pre-land for W2.18 — lane B lands this BEFORE the
+# converter emits real joins, so emission can never hit a false-fail window):
+#   shape 1 (shipped)  — Lookup/federated entries proven by probe:
+#                        status unprobed -> unique | non-unique | error, with
+#                        {how: preaggregated|waived} resolutions;
+#   shape 2 (emitted)  — the converter emitted a REAL warehouse join
+#                        (`"kind": "join"` in dm-spec.json) instead of
+#                        synthesizing a Lookup: the derivation records the
+#                        entry with status "emitted" (+ its join_type). A real
+#                        join has no arbitrary-match grain assumption to
+#                        prove, so an emitted entry is terminal — but ONLY
+#                        while the dm-spec actually carries an emitted join: a
+#                        hand-stamped "emitted" status over a Lookup-only spec
+#                        still counts as UNPROVEN (the status is evidence-
+#                        bound, never a skip token). The binding is PER-ENTRY:
+#                        "emitted" is honored only on converter-written
+#                        entries (kind "emitted-join" — the W2.18 emission
+#                        shape, JOIN_ENTRY_EMITTED in the lane tests) and only
+#                        while the count of such entries stays within the
+#                        spec's own `"kind": "join"` occurrence count — one
+#                        genuine emitted join must never become a universal
+#                        skip token for OTHER ledger entries (a federated-join
+#                        or lookup-synthesis entry hand-stamped "emitted"
+#                        stays UNPROVEN whatever the spec carries).
 # ---------------------------------------------------------------------------
 jp_path = File.join(opts[:tab], 'join-plan.json')
+jp_dm = File.join(opts[:tab], 'dm-spec.json')
+jp_dm_src = File.exist?(jp_dm) ? (File.read(jp_dm) rescue '') : ''
+jp_dm_join_n = jp_dm_src.scan(/"kind"\s*:\s*"join"/).length
+jp_dm_has_emitted_join = jp_dm_join_n.positive?
 jp_resolved = lambda do |e|
   e['resolution'].is_a?(Hash) && %w[preaggregated waived].include?(e['resolution']['how'].to_s)
 end
@@ -2976,12 +3043,29 @@ if File.exist?(jp_path)
     exit 23
   end
   jp_entries = jp_entries.select { |e| e.is_a?(Hash) }
-  jp_unproven = jp_entries.reject { |e| e['status'].to_s == 'unique' || e['status'].to_s == 'non-unique' || jp_resolved.call(e) }
+  # Per-entry evidence binding (see the shape-2 doc above): only converter-
+  # written "emitted-join" entries can carry "emitted", and never more of them
+  # than the spec has `"kind": "join"` occurrences.
+  jp_emitted_claims = jp_entries.count { |e| e['kind'].to_s == 'emitted-join' && e['status'].to_s == 'emitted' }
+  jp_emitted_bound = jp_dm_has_emitted_join && jp_emitted_claims <= jp_dm_join_n
+  jp_emitted_ok = lambda do |e|
+    e['kind'].to_s == 'emitted-join' && e['status'].to_s == 'emitted' && jp_emitted_bound
+  end
+  jp_unproven = jp_entries.reject { |e| e['status'].to_s == 'unique' || e['status'].to_s == 'non-unique' || jp_resolved.call(e) || jp_emitted_ok.call(e) }
   jp_blocking = jp_entries.select { |e| e['status'].to_s == 'non-unique' && !jp_resolved.call(e) }
   if jp_unproven.any? || jp_blocking.any?
     warn "[FAIL] gate 16: join-cardinality ledger unresolved (#{jp_path}) —"
     jp_unproven.first(10).each do |e|
-      warn "         - UNPROVEN (#{e['status'] || 'unprobed'}): #{e['kind']} #{e['left'].inspect} -> #{e['right'].inspect} on (#{Array(e['keys']).join(', ')})"
+      note = if e['status'].to_s != 'emitted'
+               ''
+             elsif e['kind'].to_s != 'emitted-join'
+               ' [status "emitted" on a non-emitted entry — only converter-written kind "emitted-join" entries can carry it; evidence-bound, re-derive the ledger]'
+             elsif !jp_dm_has_emitted_join
+               ' [status "emitted" but dm-spec.json carries no "kind": "join" — evidence-bound, re-derive the ledger]'
+             else
+               ' [more "emitted" entries than "kind": "join" occurrences in dm-spec.json — evidence-bound, re-derive the ledger]'
+             end
+      warn "         - UNPROVEN (#{e['status'] || 'unprobed'}): #{e['kind']} #{e['left'].inspect} -> #{e['right'].inspect} on (#{Array(e['keys']).join(', ')})#{note}"
     end
     jp_blocking.first(10).each do |e|
       sample = Array(e['duplicates']).first
@@ -2997,21 +3081,26 @@ if File.exist?(jp_path)
     exit 23
   end
   jp_res_n = jp_entries.count { |e| jp_resolved.call(e) }
+  jp_emit_n = jp_entries.count { |e| jp_emitted_ok.call(e) }
   puts "[OK] gate 16: join-cardinality ledger resolved — #{jp_entries.count { |e| e['status'].to_s == 'unique' }} unique" \
-       "#{jp_res_n.positive? ? ", #{jp_res_n} resolved" : ''} of #{jp_entries.length} (join-plan.json)"
+       "#{jp_res_n.positive? ? ", #{jp_res_n} resolved" : ''}" \
+       "#{jp_emit_n.positive? ? ", #{jp_emit_n} emitted as real join(s) (no Lookup grain assumption)" : ''} of #{jp_entries.length} (join-plan.json)"
 else
-  # Belt-and-braces: no ledger, but the DM spec synthesized a Lookup — the
-  # derivation was skipped and nothing proved the target grain.
-  jp_dm = File.join(opts[:tab], 'dm-spec.json')
-  jp_has_lookup = File.exist?(jp_dm) && (File.read(jp_dm).include?('Lookup(') rescue false)
-  if jp_has_lookup
-    warn "[FAIL] gate 16: #{jp_dm} contains synthesized Lookup() calls but no join-plan.json ledger exists —"
-    warn '       the join-cardinality derivation never ran, so nothing proved the Lookup targets are'
-    warn '       unique at the key grain (the silent-undercount class). Re-run the DM build (it emits'
-    warn '       the ledger), then probe with scripts/probe-join-keys.rb.'
+  # Belt-and-braces: no ledger, but the DM spec synthesized a Lookup OR emitted
+  # a real join — either way the derivation was skipped and nothing recorded
+  # the join surface (shape 2 keeps the same doctrine: emission without a
+  # ledger is a silent join surface, exactly the false-PASS window the W2.18
+  # pre-land closes).
+  jp_has_lookup = jp_dm_src.include?('Lookup(')
+  if jp_has_lookup || jp_dm_has_emitted_join
+    what = jp_has_lookup ? 'contains synthesized Lookup() calls' : 'emits real join(s) ("kind": "join")'
+    warn "[FAIL] gate 16: #{jp_dm} #{what} but no join-plan.json ledger exists —"
+    warn '       the join-cardinality derivation never ran, so nothing recorded the join surface'
+    warn "       #{jp_has_lookup ? '(the silent-undercount class for Lookup grain)' : '(emitted joins must be ledgered with status "emitted")'}. Re-run the DM build (it emits"
+    warn '       the ledger), then probe any Lookup entries with scripts/probe-join-keys.rb.'
     exit 23
   end
-  puts '[OK] gate 16: no join-plan.json and no Lookup( in the dm-spec — no join grain assumptions to prove'
+  puts '[OK] gate 16: no join-plan.json, no Lookup( and no "kind": "join" in the dm-spec — no join grain assumptions (or emitted join surface) to prove'
 end
 
 # ---------------------------------------------------------------------------
@@ -3209,15 +3298,70 @@ else
   # oracle was skipped, not inapplicable.
   gt18_twb = Dir.glob(File.join(opts[:tab], '*.twb')).first
   if gt18_twb && File.exist?(File.join(opts[:tab], 'parity-plan.json'))
-    warn "[FAIL] gate 18: #{File.basename(gt18_twb)} + parity-plan.json present but no ground-truth-plan.json —"
-    warn '       the per-tile ground-truth derivation never ran, so nothing proved the numbers against'
-    warn '       the warehouse. Run:'
-    warn "         ruby scripts/derive-ground-truth.rb --workdir #{opts[:tab]}"
-    warn "         ruby scripts/run-ground-truth.rb --workdir #{opts[:tab]} --connection-id <id>"
-    warn "         ruby scripts/verify-ground-truth.rb --workdir #{opts[:tab]}"
-    exit 25
+    # ── W2.1 (gate half): Tier-S GT-trio skip — rides THIS gate's own oracle
+    # set (the comment block above), never the charts_total==0 ANCHORS-ORACLE
+    # substitution (that doctrine is scoped to all-embedded workbooks and is
+    # untouched). On a Tier-S run (migrate-state.json tier written by lane A;
+    # fail-closed when absent) the orchestrator may skip the ground-truth trio
+    # probe workbooks entirely; the gate then evaluates the VALUED-anchors
+    # oracle DIRECTLY and can still fail: every displayed tile (parity-plan
+    # charts — the same universe derive-ground-truth.rb would have ledgered)
+    # must hold >= 1 VALUED anchor MATCHED IN it (numeric, provenance
+    # view-csv|vds, never png-eyeball — anchors-verdict.json detail rows,
+    # exactly the rows verify-ground-truth.rb stamps oracle:"anchors"
+    # verdict:"match" from). 100% displayed-tile coverage, no waiver credit on
+    # this path; anything less → exit 25 with the trio as the remedy. A
+    # pre-PR-6 anchors-verdict without valued detail rows earns nothing
+    # (fail-closed, same doctrine as verify-ground-truth.rb).
+    if run_tier == 'S'
+      gt18s_av = (JSON.parse(File.read(File.join(opts[:tab], 'anchors-verdict.json'))) rescue nil)
+      gt18s_plan = (JSON.parse(File.read(File.join(opts[:tab], 'parity-plan.json'))) rescue nil)
+      gt18s_charts = (gt18s_plan.is_a?(Hash) ? Array(gt18s_plan['charts']) : Array(gt18s_plan))
+                     .select { |c| c.is_a?(Hash) }
+                     .map { |c| (c['chart'] || c['name']).to_s }.reject(&:empty?)
+      gt18s_av_ok = gt18s_av.is_a?(Hash) && gt18s_av['pass'] == true &&
+                    gt18s_av['checked'].to_i >= 5 && gt18s_av['matched'] == gt18s_av['checked'] &&
+                    gt18s_av['tiles_all_nonempty'] == true
+      gt18s_valued_in = gt18s_av.is_a?(Hash) ? Array(gt18s_av['detail']) : []
+      gt18s_valued_in = gt18s_valued_in.select { |d| d.is_a?(Hash) && d['valued'] == true }
+                                       .map { |d| d['matched_in'].to_s.downcase.strip }.reject(&:empty?)
+      gt18s_uncovered = gt18s_charts.reject { |n| gt18s_valued_in.include?(n.downcase.strip) }
+      if gt18s_av_ok && gt18s_charts.any? && gt18s_uncovered.empty?
+        puts "[OK] gate 18: Tier-S GT-trio skip — VALUED-anchors oracle covers 100% of displayed tiles: " \
+             "#{gt18s_charts.length} tile(s) each vouched by >=1 valued anchor " \
+             "(numeric, provenance view-csv|vds; #{gt18s_av['valued_matched'] || gt18s_valued_in.length} valued match(es), " \
+             'anchors-verdict.json). Ground-truth trio not run — the gate evaluated the anchors oracle itself' \
+             "#{run_tier_basis.to_s.empty? ? '' : " (tier basis: #{run_tier_basis})"}."
+      else
+        warn '[FAIL] gate 18: Tier-S GT-trio skip REFUSED — the VALUED-anchors oracle does not cover'
+        warn '       every displayed tile (the skip needs 100% coverage; no waiver credit on this path):'
+        warn "         - anchors-verdict.json: #{gt18s_av_ok ? 'pass, all matched, tiles non-empty' : 'missing/failing/stale (need pass, >=5 checked, all matched, tiles_all_nonempty — re-run scripts/verify-anchors.rb)'}"
+        if gt18s_charts.empty?
+          warn '         - parity-plan.json lists no charts — nothing to vouch for; derive the trio instead'
+        else
+          gt18s_uncovered.first(10).each do |t|
+            warn "         - UNCOVERED: #{t.inspect} — no VALUED anchor (numeric, provenance view-csv|vds) matched IN this tile"
+          end
+        end
+        warn '       Either transcribe VALUED anchors for each uncovered tile (re-read the source view'
+        warn '       CSV/VDS, not the PNG) and re-run scripts/verify-anchors.rb, or run the full trio:'
+        warn "         ruby scripts/derive-ground-truth.rb --workdir #{opts[:tab]}"
+        warn "         ruby scripts/run-ground-truth.rb --workdir #{opts[:tab]} --connection-id <id>"
+        warn "         ruby scripts/verify-ground-truth.rb --workdir #{opts[:tab]}"
+        exit 25
+      end
+    else
+      warn "[FAIL] gate 18: #{File.basename(gt18_twb)} + parity-plan.json present but no ground-truth-plan.json —"
+      warn '       the per-tile ground-truth derivation never ran, so nothing proved the numbers against'
+      warn '       the warehouse. Run:'
+      warn "         ruby scripts/derive-ground-truth.rb --workdir #{opts[:tab]}"
+      warn "         ruby scripts/run-ground-truth.rb --workdir #{opts[:tab]} --connection-id <id>"
+      warn "         ruby scripts/verify-ground-truth.rb --workdir #{opts[:tab]}"
+      exit 25
+    end
+  else
+    puts '[OK] gate 18: no ground-truth-plan.json and no .twb derivation inputs — numeric-oracle coverage N/A (non-Tableau / pre-PR-6 workdir)'
   end
-  puts '[OK] gate 18: no ground-truth-plan.json and no .twb derivation inputs — numeric-oracle coverage N/A (non-Tableau / pre-PR-6 workdir)'
 end
 
 # ---------------------------------------------------------------------------
@@ -3598,13 +3742,14 @@ if DEG_LEDGER_LOADED
   end
 end
 
-if budget_flags.length > WAIVER_BUDGET
-  warn "[FAIL] waiver budget exceeded — #{budget_flags.length} quality waiver/escape flag(s) on this run (budget #{WAIVER_BUDGET})."
+if budget_flags.length > effective_waiver_budget
+  warn "[FAIL] waiver budget exceeded — #{budget_flags.length} quality waiver/escape flag(s) on this run " \
+       "(budget #{effective_waiver_budget}#{effective_waiver_budget < WAIVER_BUDGET ? ", Tier-#{run_tier} scaled from #{WAIVER_BUDGET}" : ''})."
   warn '       GREEN unavailable — too many waivers; the highest achievable result is YELLOW.'
   warn '       Each waiver hid a verification:'
   budget_flags.each { |f| warn "         - #{f}: #{WAIVER_HIDES[f] || 'a verification gate did not run'}" }
   warn '       Waivers are for impossibilities, not obstacles. Fix the underlying issues until'
-  warn "       <= #{WAIVER_BUDGET} remain, or report this migration as YELLOW (never GREEN) and name"
+  warn "       <= #{effective_waiver_budget} remain, or report this migration as YELLOW (never GREEN) and name"
   warn '       every waiver in the report. There is no escape flag for this cap.'
   if deg_entries
     v19 = DegradationLedger.verdict(deg_entries, budget_exceeded: true)
@@ -3626,6 +3771,43 @@ end
 # any other recorded degradation at YELLOW. The string rides in the success
 # marker (verify-complete.rb quotes and cross-checks it).
 final_verdict = deg_entries ? DegradationLedger.verdict(deg_entries) : nil
+# ── W2.3: verdict attestation + the labeled factory verdict ─────────────────
+# Countersignature evidence (orchestration.md O3): a verifier-recorded final
+# pass (parity-final.json visual_notes prefixed 'VERIFIER:') or a PARSEABLE
+# verification-result.json carrying the verifier's final verdict — a JSON hash
+# whose 'verdict' is GREEN/YELLOW/RED (the verifier-brief.md deliverable; the
+# orchestration.md artifacts row). Bare file EXISTENCE is NOT evidence: a
+# `touch`ed, empty, or malformed file fails the parse and the read stays
+# fail-closed to builder-self-attested — otherwise `touch
+# verification-result.json` would mint the bare GREEN W2.3 forbids. Anything
+# else is a builder
+# self-attestation — stamped 'verdict_by' with the closed vocabulary from
+# shared/lib/offramp.rb VERDICT_BY ('builder-self-attested' | 'verifier';
+# literals here because non-offramp-vendored twins run this gate too — the
+# vocab pin test asserts the strings match the constants). On a Tier-S
+# FACTORY run (migrate-state.json tier 'S' — lane A writes it) a
+# self-attested GREEN is REAL but must never print as the bare string
+# 'GREEN': the ' (factory, self-attested)' suffix rides the verdict
+# everywhere it lands (RESULT line, phase6-success.json, parity-final.json)
+# so any report headline carries the attestation (orchestration.md O3/O4
+# tier-S carve-out). Tier-M+/tierless strings are unchanged — the
+# countersignature MUST stands for them. A verifier that later countersigns
+# and re-runs this gate flips verdict_by to 'verifier' and the label off.
+verdict_by = begin
+  _pf_att = File.exist?(summary_path) ? (JSON.parse(File.read(summary_path)) rescue {}) : {}
+  countersigned = _pf_att.is_a?(Hash) && _pf_att['visual_verdict'].to_s == 'pass' &&
+                  _pf_att['visual_notes'].to_s.start_with?('VERIFIER:')
+  unless countersigned
+    _vr_att = (JSON.parse(File.read(File.join(opts[:tab], 'verification-result.json'))) rescue nil)
+    countersigned = _vr_att.is_a?(Hash) && %w[GREEN YELLOW RED].include?(_vr_att['verdict'].to_s)
+  end
+  countersigned ? 'verifier' : 'builder-self-attested'
+rescue StandardError
+  'builder-self-attested'
+end
+factory_labeled = run_tier == 'S' && verdict_by == 'builder-self-attested' &&
+                  final_verdict == 'GREEN'
+final_verdict = 'GREEN (factory, self-attested)' if factory_labeled
 begin
   _wd = opts[:tab]
   # chartCount from parity-final.json (gate 1 already required charts_total > 0 to
@@ -3639,6 +3821,7 @@ begin
             'waivers' => waiver_flags,
             'generatedAt' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ') }
   _succ['verdict'] = final_verdict if final_verdict
+  _succ['verdict_by'] = verdict_by if final_verdict
   File.write(File.join(_wd, 'phase6-success.json'), JSON.pretty_generate(_succ))
   _pend = File.join(_wd, 'parity-pending.json')
   File.delete(_pend) if File.exist?(_pend)
@@ -3649,6 +3832,7 @@ begin
     begin
       _pf['success_sentinel'] = true
       _pf['verdict'] = final_verdict if final_verdict
+      _pf['verdict_by'] = verdict_by if final_verdict
       File.write(File.join(_wd, 'parity-final.json'), JSON.pretty_generate(_pf))
     rescue StandardError
       nil
@@ -3670,6 +3854,11 @@ if final_verdict.nil?
   puts "[OK] all gates pass — conversion may declare GREEN" \
        "#{waiver_flags.any? ? " (#{budget_flags.length}/#{waiver_flags.length} waiver(s) within budget — name them in the report: #{waiver_flags.join(', ')})" : ''}"
   puts '     (lib/degradation_ledger.rb not vendored — no PR-14 verdict derived; re-vendor to enable.)'
+elsif factory_labeled
+  puts '[OK] all gates pass — VERDICT: GREEN (factory, self-attested) (degradation ledger empty; Tier-S'
+  puts '     factory run with no verifier countersignature — the label is part of the verdict string and'
+  puts '     MUST ride every report headline verbatim (orchestration.md O3/O4 carve-out). Spawn the'
+  puts '     verifier (scripts/verifier-brief.md) and re-run this gate for a countersigned bare GREEN.)'
 elsif final_verdict == 'GREEN'
   puts "[OK] all gates pass — VERDICT: GREEN (degradation ledger empty — no scope cuts, no waivers, no residuals)"
 else
