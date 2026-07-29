@@ -384,11 +384,28 @@ module ExportPool
   # (rows = CSV rows INCLUDING the header row, exactly like poll_csv_download
   # consumers expect). Raises only when the single probe-workbook POST itself
   # fails — nothing was created, nothing needs cleanup.
+  #
+  # REGISTRY-IN-POOL (E7.1 litter red line, wave-1 review): the pooled probe
+  # workbook is REGISTERED in the ProbeRegistry immediately after the POST
+  # parses — BEFORE the first export starts — and its DELETE outcome is marked
+  # in the same ensure that deletes it, so a crash/SIGKILL anywhere between
+  # POST and DELETE can never orphan the workbook untraceably
+  # (sweep-run-artifacts.rb deletes leftovers from the registry). The lib is
+  # soft-required so plugins that don't vendor probe_registry.rb still load;
+  # where it exists, registration is automatic — callers cannot forget it.
+  # `workdir:`/`script:` only feed the registry record (signature extension by
+  # options only — the positional/existing-kwarg contract is FROZEN; lane C's
+  # batched probes are the second consumer).
   # ---------------------------------------------------------------------------
   def pooled_sql_probe(conn_id, entries, deadline, folder_id: nil, pool: 5,
-                       row_limit: nil, name: nil)
+                       row_limit: nil, name: nil, workdir: nil, script: nil)
     require 'csv'
     require 'securerandom'
+    begin
+      require 'probe_registry' # soft: present in plugins that vendor it
+    rescue LoadError
+      nil
+    end
     return [] if entries.empty?
     elements = entries.each_with_index.map do |e, i|
       { 'id' => "probe#{i}", 'kind' => 'table', 'name' => "Probe #{i}",
@@ -408,6 +425,12 @@ module ExportPool
     end
     wb_id = r.is_a?(Hash) ? r['workbookId'] : nil
     raise "pooled probe workbook POST failed: #{r.inspect[0, 160]}" unless wb_id
+    # Register FIRST — before any export can run (or raise). NEVER FATAL by
+    # the registry's own contract, so bookkeeping cannot break the probe.
+    if defined?(ProbeRegistry)
+      ProbeRegistry.created(wb_id, name: spec['name'], workdir: workdir,
+                            script: script || 'pooled_sql_probe')
+    end
     results = Array.new(entries.length)
     begin
       queue = Queue.new
@@ -447,11 +470,21 @@ module ExportPool
       end.each(&:join)
     ensure
       # ONE delete for the whole batch — the probe workbook never outlives the
-      # call, even on timeout/error.
+      # call, even on timeout/error. The outcome is marked in the registry
+      # (deleted | 404 | failed) so the sweep can tell cleaned from
+      # outstanding; a failed delete leaves the entry outstanding for retry.
       begin
         Sigma.request(:delete, "/v2/files/#{wb_id}")
-      rescue StandardError
-        nil
+        ProbeRegistry.cleaned(wb_id, workdir: workdir, via: 'ensure') if defined?(ProbeRegistry)
+      rescue StandardError => e
+        if defined?(ProbeRegistry)
+          begin
+            ProbeRegistry.cleaned(wb_id, workdir: workdir, via: 'ensure',
+                                  outcome: e.message.lines.first.to_s =~ /\b404\b/ ? '404' : 'failed')
+          rescue StandardError
+            nil
+          end
+        end
       end
     end
     results

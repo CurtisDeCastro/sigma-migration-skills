@@ -325,14 +325,33 @@ end
 
 # ============================================================================
 # Part 4 — pooled_sql_probe (#7c): T entries = 1 workbook POST + T exports +
-# 1 DELETE; per-entry errors isolated; the DELETE survives timeouts.
+# 1 DELETE; per-entry errors isolated; the DELETE survives timeouts. Plus the
+# W2.11 REGISTRY-IN-POOL red line (E7.1, wave-1 review): the pooled workbook
+# registers created AT POST TIME (before the first export) and marks its
+# DELETE outcome in ensure — a crash between POST and DELETE can never orphan
+# it untraceably.
 # ============================================================================
 puts '-- pooled_sql_probe: one workbook, pooled exports, one delete --'
+require 'probe_registry'
+# Keep dev-probe registry fallback writes (calls without workdir:) out of the
+# real ~/.tableau-to-sigma.
+POOL_HOME = Dir.mktmpdir
+ENV['TABLEAU_TO_SIGMA_HOME'] = POOL_HOME
 POOL_LOG = []
 def Sigma.request(method, path, body: nil, accept: nil, binary: false, content_type: nil, http: nil)
   POOL_LOG << [method, path]
-  return { 'workbookId' => 'wb-probe' } if method == :post && path == '/v2/workbooks/spec'
+  if method == :post && path == '/v2/workbooks/spec'
+    raise Sigma::Error, 'stub: 502 spec POST refused' if ENV['POOL_SPEC_FAIL'] == '1'
+    return { 'workbookId' => 'wb-probe' }
+  end
   if method == :post && path.include?('/export')
+    # Crash-safety observation point: was the created record ALREADY on disk
+    # when the first export fired? (register-at-creation ordering proof)
+    if ENV['POOL_REG_FILE'].to_s != '' && POOL_LOG.none? { |m, _| m == :reg_seen_at_first_export }
+      seen = File.exist?(ENV['POOL_REG_FILE']) && File.read(ENV['POOL_REG_FILE']).include?('"created_at"')
+      POOL_LOG << [:reg_seen_at_first_export, seen]
+    end
+    raise Sigma::Error, 'stub: 500 export refused' if ENV['POOL_EXPORT_FAIL'] == '1'
     req = JSON.parse(body)
     return { 'queryId' => req['elementId'] }
   end
@@ -341,7 +360,10 @@ def Sigma.request(method, path, body: nil, accept: nil, binary: false, content_t
     return '<html>renderer error' if qid == 'probe1' && ENV['POOL_HTML1'] == '1'
     return "A,B\n#{qid[-1]},#{qid[-1]}\n"
   end
-  return {} if method == :delete
+  if method == :delete
+    raise Sigma::Error, 'stub: 500 delete refused' if ENV['POOL_DELETE_FAIL'] == '1'
+    return {}
+  end
   raise Sigma::Error, "stub: unexpected #{method} #{path}"
 end
 entries = [{ 'sql' => 'SELECT 1', 'columns' => %w[A B] },
@@ -356,6 +378,15 @@ check(POOL_LOG.count { |m, p| m == :post && p == '/v2/workbooks/spec' } == 1,
 check(POOL_LOG.count { |m, p| m == :post && p.include?('/export') } == 3,
       'one export per entry (pooled)', fails)
 check(POOL_LOG.count { |m, _| m == :delete } == 1, 'exactly ONE delete for the whole batch', fails)
+# W2.11 registry-in-pool is SELF-ARMING: even a caller that passes no
+# workdir:/script: (this legacy-signature call is the frozen-signature pin)
+# gets created+cleaned records — in the home registry.
+reg_home = File.join(POOL_HOME, ProbeRegistry::FILE_BASENAME)
+hreg = File.exist?(reg_home) ? File.readlines(reg_home).map { |l| JSON.parse(l) } : []
+check(hreg.any? { |r| r['created_at'] && r['id'] == 'wb-probe' } &&
+      hreg.any? { |r| r['deleted_at'] && r['id'] == 'wb-probe' },
+      'legacy call (no workdir:) still registers created+cleaned in the home registry', fails)
+File.delete(reg_home) if File.exist?(reg_home)
 
 POOL_LOG.clear
 ENV['POOL_HTML1'] = '1'
@@ -370,6 +401,88 @@ POOL_LOG.clear
 res3 = ExportPool.pooled_sql_probe('conn-1', entries, ExportPool::Deadline.new(-1), pool: 2)
 check(res3.all? { |st, _| st == :timeout }, 'expired deadline → per-entry :timeout markers', fails)
 check(POOL_LOG.count { |m, _| m == :delete } == 1, 'the probe workbook is deleted even on timeout', fails)
+
+# ============================================================================
+# Part 4b — W2.11 REGISTRY-IN-POOL (E7.1 litter red line, wave-1 review):
+# created is written AT POST TIME — before the first export fires — and the
+# DELETE outcome lands in the same ensure, so no crash window between POST and
+# DELETE can orphan the pooled probe workbook untraceably.
+# ============================================================================
+puts '-- registry-in-pool: created at POST (pre-export), outcome at DELETE --'
+File.delete(File.join(POOL_HOME, ProbeRegistry::FILE_BASENAME)) if File.exist?(File.join(POOL_HOME, ProbeRegistry::FILE_BASENAME))
+
+# A) ordering proof + workdir/script threading (the run-ground-truth shape).
+Dir.mktmpdir do |wd|
+  POOL_LOG.clear
+  ENV['POOL_REG_FILE'] = File.join(wd, ProbeRegistry::FILE_BASENAME)
+  r = ExportPool.pooled_sql_probe('conn-1', entries, ExportPool::Deadline.new(30), pool: 2,
+                                  name: '_probe_groundtruth_pool', workdir: wd,
+                                  script: 'run-ground-truth.rb')
+  ENV.delete('POOL_REG_FILE')
+  check(r.all? { |st, _| st == :ok }, 'workdir-threaded pooled run still returns rows', fails)
+  reg = File.readlines(File.join(wd, ProbeRegistry::FILE_BASENAME)).map { |l| JSON.parse(l) }
+  created = reg.find { |x| x['created_at'] }
+  cleaned = reg.find { |x| x['deleted_at'] }
+  check(POOL_LOG.include?([:reg_seen_at_first_export, true]),
+        'created record was ALREADY on disk when the first export fired (register-at-creation)', fails)
+  check(created && created['id'] == 'wb-probe' && created['name'] == '_probe_groundtruth_pool' &&
+        created['script'] == 'run-ground-truth.rb',
+        'created record carries id + caller script + probe name into <workdir>/probe-artifacts.jsonl', fails)
+  check(cleaned && cleaned['id'] == 'wb-probe' && cleaned['via'] == 'ensure' && cleaned['outcome'] == 'deleted',
+        'cleaned record: DELETE outcome marked via ensure', fails)
+  check(reg.index(created) < reg.index(cleaned), 'created line precedes cleaned line', fails)
+  check(ProbeRegistry.outstanding(wd).empty?, 'registry shows ZERO open probes after the pooled run', fails)
+end
+
+# B) a FAILED delete leaves the entry OUTSTANDING so the sweep retries it.
+Dir.mktmpdir do |wd|
+  POOL_LOG.clear
+  ENV['POOL_DELETE_FAIL'] = '1'
+  r = ExportPool.pooled_sql_probe('conn-1', entries, ExportPool::Deadline.new(30), pool: 2, workdir: wd)
+  ENV.delete('POOL_DELETE_FAIL')
+  check(r.all? { |st, _| st == :ok }, 'a failed DELETE never breaks the probe results', fails)
+  reg = File.readlines(File.join(wd, ProbeRegistry::FILE_BASENAME)).map { |l| JSON.parse(l) }
+  check(reg.any? { |x| x['deleted_at'] && x['outcome'] == 'failed' },
+        'failed delete marked outcome=failed', fails)
+  out = ProbeRegistry.outstanding(wd)
+  check(out.length == 1 && out.first['id'] == 'wb-probe',
+        'failed-delete probe stays OUTSTANDING for the sweep to retry', fails)
+end
+
+# C) every export raising (the crash shape) still cannot orphan: created was
+# recorded first, DELETE + cleaned still run in ensure.
+Dir.mktmpdir do |wd|
+  POOL_LOG.clear
+  ENV['POOL_EXPORT_FAIL'] = '1'
+  ENV['POOL_REG_FILE'] = File.join(wd, ProbeRegistry::FILE_BASENAME)
+  r = ExportPool.pooled_sql_probe('conn-1', entries, ExportPool::Deadline.new(30), pool: 2, workdir: wd)
+  ENV.delete('POOL_EXPORT_FAIL')
+  ENV.delete('POOL_REG_FILE')
+  check(r.all? { |st, _| st == :error }, 'all-exports-raise → per-entry :error markers', fails)
+  check(POOL_LOG.include?([:reg_seen_at_first_export, true]),
+        'created record predates the exports even when they all raise', fails)
+  check(ProbeRegistry.outstanding(wd).empty?,
+        'export crash-path: workbook still deleted + marked — zero open probes', fails)
+end
+
+# D) spec-POST failure is litter-CLEAN: nothing created → nothing registered,
+# nothing deleted (the raise carries the failure to the caller's fallback).
+Dir.mktmpdir do |wd|
+  POOL_LOG.clear
+  ENV['POOL_SPEC_FAIL'] = '1'
+  err = nil
+  begin
+    ExportPool.pooled_sql_probe('conn-1', entries, ExportPool::Deadline.new(30), pool: 2, workdir: wd)
+  rescue StandardError => e
+    err = e
+  end
+  ENV.delete('POOL_SPEC_FAIL')
+  check(err && err.message.include?('pooled probe workbook POST failed'),
+        'pool POST failure raises to the caller (serial-fallback hook)', fails)
+  check(!File.exist?(File.join(wd, ProbeRegistry::FILE_BASENAME)),
+        'nothing was created → nothing registered (litter-clean failure)', fails)
+  check(POOL_LOG.none? { |m, _| m == :delete }, 'no phantom DELETE on the failed-POST path', fails)
+end
 
 puts
 if fails.empty?
