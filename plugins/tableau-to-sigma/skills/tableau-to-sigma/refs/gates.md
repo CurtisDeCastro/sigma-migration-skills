@@ -90,7 +90,7 @@ Exits 0 only when ALL pass. Full prose per gate: `refs/script-map.md` +
 | 20 | 14 visual similarity | `visual-similarity.py` floor fail / `--skip-visual-similarity "<reason>"` |
 | 21 | 7b control flip | control doesn't filter live (`probe-controls.rb`), or no evidence on an enforced run / `--skip-flip-test "<reason>"` → `--skip-control-flip` (budget-counted) |
 | 22 | 15 manual residues | `manual-residues.json` still `unbuilt` / `--accept-manual-residues "<calc,...>"` (budget-counted) |
-| 23 | 16 join cardinality | `join-plan.json` unprobed / non-unique Lookup target (`probe-join-keys.rb`, `--resolve <i> --how <preaggregated\|waived> --reason`); no skip flag |
+| 23 | 16 join cardinality | `join-plan.json` unprobed / non-unique Lookup target (`probe-join-keys.rb`, `--resolve <i> --how <preaggregated\|waived> --reason`); entries with status `emitted` (a REAL `"kind": "join"` in the dm-spec — wave-2 shape 2) are terminal, evidence-bound to the spec; no skip flag |
 | 24 | 17 LOD ledger | `lod-audit.json` suspect-alias / silently-dropped unresolved (`audit-lod-calcs.rb`); no skip flag |
 | 25 | 18 ground truth | displayed tile with no `numeric_parity` match and no `coverage_waivers` entry; `diverge`/`conflict` NEVER waivable; no skip flag |
 | 26 | 19 agg semantics | `agg-semantics.json` unresolved additive-over-preagg / countd-as-sum / preagg-ratio (`audit-agg-semantics.rb --how <reaggregated\|n/a\|faithful-to-source>`); no skip flag |

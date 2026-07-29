@@ -2962,10 +2962,32 @@ end
 # nothing proved the grain. No escape flag — the recorded resolution is the
 # only sanctioned waiver (it lives in the ledger as evidence, not in a CLI
 # flag a re-run forgets).
+#
+# TWO LEDGER SHAPES (wave-2 pre-land for W2.18 — lane B lands this BEFORE the
+# converter emits real joins, so emission can never hit a false-fail window):
+#   shape 1 (shipped)  — Lookup/federated entries proven by probe:
+#                        status unprobed -> unique | non-unique | error, with
+#                        {how: preaggregated|waived} resolutions;
+#   shape 2 (emitted)  — the converter emitted a REAL warehouse join
+#                        (`"kind": "join"` in dm-spec.json) instead of
+#                        synthesizing a Lookup: the derivation records the
+#                        entry with status "emitted" (+ its join_type). A real
+#                        join has no arbitrary-match grain assumption to
+#                        prove, so an emitted entry is terminal — but ONLY
+#                        while the dm-spec actually carries an emitted join: a
+#                        hand-stamped "emitted" status over a Lookup-only spec
+#                        still counts as UNPROVEN (the status is evidence-
+#                        bound, never a skip token).
 # ---------------------------------------------------------------------------
 jp_path = File.join(opts[:tab], 'join-plan.json')
+jp_dm = File.join(opts[:tab], 'dm-spec.json')
+jp_dm_src = File.exist?(jp_dm) ? (File.read(jp_dm) rescue '') : ''
+jp_dm_has_emitted_join = jp_dm_src =~ /"kind"\s*:\s*"join"/ ? true : false
 jp_resolved = lambda do |e|
   e['resolution'].is_a?(Hash) && %w[preaggregated waived].include?(e['resolution']['how'].to_s)
+end
+jp_emitted_ok = lambda do |e|
+  e['status'].to_s == 'emitted' && jp_dm_has_emitted_join
 end
 if File.exist?(jp_path)
   jp_doc = JSON.parse(File.read(jp_path)) rescue nil
@@ -2976,12 +2998,13 @@ if File.exist?(jp_path)
     exit 23
   end
   jp_entries = jp_entries.select { |e| e.is_a?(Hash) }
-  jp_unproven = jp_entries.reject { |e| e['status'].to_s == 'unique' || e['status'].to_s == 'non-unique' || jp_resolved.call(e) }
+  jp_unproven = jp_entries.reject { |e| e['status'].to_s == 'unique' || e['status'].to_s == 'non-unique' || jp_resolved.call(e) || jp_emitted_ok.call(e) }
   jp_blocking = jp_entries.select { |e| e['status'].to_s == 'non-unique' && !jp_resolved.call(e) }
   if jp_unproven.any? || jp_blocking.any?
     warn "[FAIL] gate 16: join-cardinality ledger unresolved (#{jp_path}) —"
     jp_unproven.first(10).each do |e|
-      warn "         - UNPROVEN (#{e['status'] || 'unprobed'}): #{e['kind']} #{e['left'].inspect} -> #{e['right'].inspect} on (#{Array(e['keys']).join(', ')})"
+      note = e['status'].to_s == 'emitted' ? ' [status "emitted" but dm-spec.json carries no "kind": "join" — evidence-bound, re-derive the ledger]' : ''
+      warn "         - UNPROVEN (#{e['status'] || 'unprobed'}): #{e['kind']} #{e['left'].inspect} -> #{e['right'].inspect} on (#{Array(e['keys']).join(', ')})#{note}"
     end
     jp_blocking.first(10).each do |e|
       sample = Array(e['duplicates']).first
@@ -2997,21 +3020,26 @@ if File.exist?(jp_path)
     exit 23
   end
   jp_res_n = jp_entries.count { |e| jp_resolved.call(e) }
+  jp_emit_n = jp_entries.count { |e| jp_emitted_ok.call(e) }
   puts "[OK] gate 16: join-cardinality ledger resolved — #{jp_entries.count { |e| e['status'].to_s == 'unique' }} unique" \
-       "#{jp_res_n.positive? ? ", #{jp_res_n} resolved" : ''} of #{jp_entries.length} (join-plan.json)"
+       "#{jp_res_n.positive? ? ", #{jp_res_n} resolved" : ''}" \
+       "#{jp_emit_n.positive? ? ", #{jp_emit_n} emitted as real join(s) (no Lookup grain assumption)" : ''} of #{jp_entries.length} (join-plan.json)"
 else
-  # Belt-and-braces: no ledger, but the DM spec synthesized a Lookup — the
-  # derivation was skipped and nothing proved the target grain.
-  jp_dm = File.join(opts[:tab], 'dm-spec.json')
-  jp_has_lookup = File.exist?(jp_dm) && (File.read(jp_dm).include?('Lookup(') rescue false)
-  if jp_has_lookup
-    warn "[FAIL] gate 16: #{jp_dm} contains synthesized Lookup() calls but no join-plan.json ledger exists —"
-    warn '       the join-cardinality derivation never ran, so nothing proved the Lookup targets are'
-    warn '       unique at the key grain (the silent-undercount class). Re-run the DM build (it emits'
-    warn '       the ledger), then probe with scripts/probe-join-keys.rb.'
+  # Belt-and-braces: no ledger, but the DM spec synthesized a Lookup OR emitted
+  # a real join — either way the derivation was skipped and nothing recorded
+  # the join surface (shape 2 keeps the same doctrine: emission without a
+  # ledger is a silent join surface, exactly the false-PASS window the W2.18
+  # pre-land closes).
+  jp_has_lookup = jp_dm_src.include?('Lookup(')
+  if jp_has_lookup || jp_dm_has_emitted_join
+    what = jp_has_lookup ? 'contains synthesized Lookup() calls' : 'emits real join(s) ("kind": "join")'
+    warn "[FAIL] gate 16: #{jp_dm} #{what} but no join-plan.json ledger exists —"
+    warn '       the join-cardinality derivation never ran, so nothing recorded the join surface'
+    warn "       #{jp_has_lookup ? '(the silent-undercount class for Lookup grain)' : '(emitted joins must be ledgered with status "emitted")'}. Re-run the DM build (it emits"
+    warn '       the ledger), then probe any Lookup entries with scripts/probe-join-keys.rb.'
     exit 23
   end
-  puts '[OK] gate 16: no join-plan.json and no Lookup( in the dm-spec — no join grain assumptions to prove'
+  puts '[OK] gate 16: no join-plan.json, no Lookup( and no "kind": "join" in the dm-spec — no join grain assumptions (or emitted join surface) to prove'
 end
 
 # ---------------------------------------------------------------------------
