@@ -135,6 +135,7 @@ OptionParser.new do |o|
   o.on('--no-reuse')          {     opts[:no_reuse] = true }
   o.on('--dry-run')           {     opts[:dry_run]  = true }
   o.on('--skip-layout-lint')  {     opts[:skip_layout_lint] = true }
+  o.on('--skip-control-flip [REASON]') { |v| opts[:skip_control_flip] = v || true } # waive gate 7b (runtime control-flip proof); name the reason in your report
   # Resolve + print which converter would run (vendored vs explicit dev build), then
   # exit 0 — no creds/args needed. Used by the converter-default regression test.
   o.on('--print-converter')   {     opts[:print_converter] = true }
@@ -981,6 +982,48 @@ else
   ctl_violations.each { |v| puts "       - #{v}" }
 end
 control_ok = ctl_violations.empty?
+
+# 7b — runtime control-flip proof (gate 7b). Gate 7 proves control WIRING, but a
+# builder listen->column mis-map can lint clean yet do NOTHING at runtime. Flip
+# each control live via probe-controls.rb and FAIL (RED) if a control is INERT —
+# the only independent proof the wiring works. DEFAULT-ON; --skip-control-flip
+# "<reason>" waives; offline/dry-run/0-controls SKIP (never hard-fail a run that
+# never reached the live API). Mirrors the powerbi Phase 6b + the shared gate 7b.
+puts
+puts '   ── CONTROL FLIP (gate 7b: each control actually FILTERS at runtime) ──'
+require 'flip_gate'
+flip_ok = true
+_flip_tok = (Sigma.auth_token rescue ENV['SIGMA_API_TOKEN'])
+if opts[:skip_control_flip]
+  puts "     [WAIVED] #{opts[:skip_control_flip] == true ? '(no reason given)' : opts[:skip_control_flip]} (name it in your report)"
+elsif ctl_rows.empty?
+  puts '     [OK] no controls — nothing to flip-test'
+elsif ENV['SIGMA_BASE_URL'].to_s.empty? || _flip_tok.to_s.empty?
+  puts '     [SKIP] offline (no SIGMA creds) — runtime flip UNVERIFIED'
+else
+  _probe_out = File.join(WORK, 'probe-controls')
+  system('ruby', File.join(HERE, 'probe-controls.rb'), '--workbook-id', WB_ID, '--out', _probe_out)
+  _probe_rc = $?.exitstatus
+  _results = (JSON.parse(File.read(File.join(_probe_out, 'probe-results.json'))) rescue nil)
+  _decision, _info = FlipGate.decide(_probe_rc, _results)
+  case _decision
+  when :ok
+    puts "     [OK] #{_info[:passes].length} control(s) proven live" \
+         "#{_info[:skips].any? ? "; #{_info[:skips].length} un-probeable skipped" : ''}"
+  when :fail
+    puts "     [FAIL] #{_info[:fails].length} control(s) wired but INERT on workbook #{WB_ID}:"
+    _info[:fails].each { |cid, note| puts "       - #{cid}: #{note}" }
+    puts '       Static lint clean (gate 7) but does not filter — a builder listen->column'
+    puts '       mis-map. Fix the build, or waive with --skip-control-flip "<reason>".'
+    flip_ok = false
+  when :advisory
+    puts "     [WARN] no control auto-probeable (#{_info[:skips].length} date/slider/unlabeled) — runtime wiring UNVERIFIED"
+  when :error
+    puts '     [FAIL] probe-controls.rb could not verify the wiring — an enforced gate must not pass silently.'
+    puts '       Re-run once the export API is reachable, or waive with --skip-control-flip "<reason>".'
+    flip_ok = false
+  end
+end
 mark('phase6-parity')
 
 # ---------------------------------------------------------------------------
@@ -997,6 +1040,7 @@ puts "LAYOUT      : #{layout_ok ? 'GREEN' : 'RED'} — gate 6 layout lint" \
      "#{(defined?(layout_violations) && layout_violations && layout_violations.any?) ? ", #{layout_violations.size} violation(s)" : (opts[:skip_layout_lint] ? ' (skipped)' : '')}"
 puts "CONTROLS    : #{control_ok ? 'GREEN' : 'RED'} — gate 7 control lint, #{ctl_rows.size} control(s) checked" \
      "#{ctl_violations.any? ? ", #{ctl_violations.size} violation(s)" : ''}"
+puts "CONTROL-FLIP: #{flip_ok ? 'GREEN' : 'RED'} — gate 7b runtime flip proof#{opts[:skip_control_flip] ? ' (waived)' : ''}"
 puts "freshness   : Qlik last reload #{app_meta['lastReloadTime'] || '?'} (#{stale_days} days ago)" if stale_days
 puts "warnings    : #{conv_warnings.size} converter, #{(wb_res['warnings'] || []).size} workbook-build" if conv_warnings.any? || (wb_res['warnings'] || []).any?
 # Empty-workbook guard + completion sentinel (parity with tableau/powerbi). A
@@ -1004,13 +1048,13 @@ puts "warnings    : #{conv_warnings.size} converter, #{(wb_res['warnings'] || []
 # stamp a run-scoped success marker only on a genuine green so verify-complete.rb
 # (the done-check the SKILL points at) can't green an empty/hand-built result.
 n_elements = wb_res['elements'].to_i
-built_ok = parity_ok && layout_ok && control_ok && n_elements.positive?
+built_ok = parity_ok && layout_ok && control_ok && flip_ok && n_elements.positive?
 puts 'ELEMENTS    : 0 workbook elements built — EMPTY workbook, NOT done (investigate the build).' if n_elements.zero?
 begin
   succ = File.join(WORK, 'phase6-success.json')
   if built_ok
     File.write(succ, JSON.pretty_generate('workbookId' => WB_ID, 'chartCount' => n_elements,
-                                          'gates' => 'parity+layout+control',
+                                          'gates' => 'parity+layout+control+flip',
                                           'generatedAt' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')))
   elsif File.exist?(succ)
     File.delete(succ)

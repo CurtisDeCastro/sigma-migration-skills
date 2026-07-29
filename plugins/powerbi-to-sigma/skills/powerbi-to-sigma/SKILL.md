@@ -26,6 +26,37 @@ user-invocable: true
 >   It prints a **device code + `https://microsoft.com/devicelogin`** — tell the
 >   user to open that URL and enter the code (one sign-in; token caches). Then run
 >   the orchestrator with the extracted `--tmsl`/`--pbir`. Full recipe: `refs/connection.md`.
+> - **COMPOSITE / live-connected reports → prefer the local `.pbix` (the orchestrator
+>   PROMPTS for it).** Many reports are Power BI **composite** models (local tables +
+>   a reference to a shared/remote dataset) or are thin reports live-connected to a
+>   shared dataset. For these, `getDefinition` of the report's bound model is
+>   **INCOMPLETE** (it misses the report-local measures/calc tables, or isn't a
+>   resolvable standalone model), and Power BI **blocks export-to-`.pbix`** for
+>   live-connected reports, so device-auth can't download it. The COMPLETE model is
+>   in the author's local `.pbix`. The orchestrator DETECTS this (Fabric-path TMSL
+>   shows DirectQuery/`entity`/remote-dataset references) and STOPS with an OPEN
+>   QUESTION (exit 10) asking for the local `.pbix` — do **not** silently build a DM
+>   from the incomplete model. Ask the user for the file and re-run with `--pbix`
+>   (offline tell in a `.pbix`: its `Connections` member's `RemoteArtifacts`). Only
+>   pass `--allow-incomplete-model` if the user knowingly accepts the partial model.
+> - **FULLY-LOCAL `.pbix` (no Fabric / no tenant / not published).** When the user
+>   has only a local `.pbix` on disk, skip the CONNECT/EXTRACT steps entirely — run
+>   the orchestrator with `--pbix` and it extracts BOTH halves locally (Phase 0):
+>   ```
+>   ruby scripts/migrate-powerbi.rb --pbix <file.pbix> --connection <id> --database <DB> --schema <SCHEMA> --out <WORK>
+>   ```
+>   - **Model:** `scripts/extract-model-pbix.py` reads the `.pbix`'s binary VertiPaq
+>     `DataModel` with **pbixray** and emits a TMSL `model.bim` (same shape `--tmsl`
+>     eats). pbixray must be installed — its `xpress9`/`xmhuffman` deps ship broken
+>     sdists and must be **built from source**; one-time setup in `refs/local-pbix.md`.
+>     Without pbixray the model half exits with a clear install hint (the report half
+>     and the Fabric `--tmsl` path are unaffected).
+>   - **Report:** `scripts/extract-report-classic.py --pbix <file>` unzips the
+>     `Report/Layout` member (a single **UTF-16LE** classic `sections[]` doc) — no
+>     Fabric. It also accepts `--report-layout <file>` for an already-extracted Layout.
+>   - Import-mode `.pbix` with no live warehouse to point at? Land the frozen data
+>     first (see the Import-mode → Snowflake data-landing skill), then pass that
+>     connection/db/schema here.
 > - **NEVER hand-author a workbook JSON and `curl`-POST it to `/v2/workbooks`, and
 >   never lay out empty "placeholder" pages.** That bypasses the DAX conversion,
 >   chart build, and parity gate and ships an EMPTY workbook (invented page names,
@@ -116,7 +147,8 @@ The corporate tenant blocks Entra app creation, Git integration, and XMLA (PPU).
 - **Skip estate enumeration when you know the workspace** (you usually do): `--workspace <id|name>`. A workspace ID is 2 cheap GETs; the old serial walk of every workspace was 15-30s at 30-50 workspaces. Without `--workspace`, enumeration fans out **8-wide** (cheap metadata GETs, not LROs) → **~2-3s** for a 30-50 ws estate, and the result is **session-cached** at `/tmp/pbiauth/estate-map.json` (override `PBI_ESTATE_CACHE`), invalidated automatically on any name miss; `--no-cache` bypasses.
 - **Measured (live, 2026-06-11, EMPLOYEE DASHBOARD)**: old serial path (fabric-extract + extract-pbir) = **46.3s**; new concurrent fetch = **5.1s cold / 3.6-3.9s warm-cache** — byte-identical output parts. Every run writes a per-task **`timings.json`** to `--out-dir` (the evidence trail; always emitted).
 - **Batch / fleet extraction** (the assessment path): `fabric-extract-batch.py --reports "A,B,C" [--workspace W] [--all] --out-root DIR --pool 4` flattens each report into two artifact tasks (model TMSL + report definition) and pools them 4-wide; each report's bound model resolves via the Power BI REST `datasetId` (name-match fallback). Measured: 3 reports (6 artifacts) = **7.5s wall** vs ~16s serial-equivalent fast-polling and **~2.3 min** on the old per-report serial path. Output per report: `model/`, `report/`, `report-bundle.json` + a root `manifest.json` and `timings.json`.
-- **Layout**: a `.pbix` is a zip; `Report/Layout` is **UTF-16LE** JSON with per-visual `x,y,w,h` (canvas px, 1280×720 default). The model in a `.pbix` is a *binary* `DataModel` blob — NOT usable; get the model via getDefinition or a `.pbit`'s `DataModelSchema`.
+- **Layout**: a `.pbix` is a zip; `Report/Layout` is **UTF-16LE** JSON with per-visual `x,y,w,h` (canvas px, 1280×720 default). `extract-report-classic.py --pbix <file>` unzips + decodes it locally (or `--report-layout <file>` for an extracted Layout).
+- **Local `.pbix` DataModel is now extractable** (no Fabric): the `.pbix`'s `DataModel` is a *binary* VertiPaq blob — `extract-model-pbix.py --pbix <file>` reads it with **pbixray** (measures/schema/relationships/M) and emits a TMSL `model.bim` the converter eats. See `refs/local-pbix.md` (incl. the pbixray from-source install for its broken `xpress9`/`xmhuffman` deps). getDefinition / a `.pbit`'s `DataModelSchema` remain alternatives when Fabric is reachable.
 - See `refs/powerbi-visual-layout.md` for the Report/Layout & PBIR parsers and the visualType→Sigma-kind table. The shared fetch layer (token, fast LRO, pooled fetch, estate cache, timings) lives in `scripts/pbi_fabric.py`.
 - **Style fidelity — `refs/style-fidelity.md`**: reproducing the PBI report's *look*, not just its data. The extractor captures the report theme name, card value color, and matrix totals; the builder emits a Sigma `themeName`/`themeOverrides` (palette from `lib/pbi_theme.rb` — drives donut/pie + series colors), KPI-card styling (`value.color` + `titleOrient: bottom`), a donut null→`(Blank)` coalesce so the palette maps per-slice like PBI, and re-expresses a totals-bearing tableEx/matrix as a `pivot-table` with a grand-total row. **Table/matrix conditional formatting** (color scales, font-color scales, data bars, and rules/thresholds) is carried onto the Sigma table as element-level `conditionalFormats` (`extract-pbir.py` `_conditional_formats` → `lib/pbi_conditional_formats.rb`): gradient→`backgroundScale`/`fontScale`, dataBars→`dataBars`, rules→one `single` per band (ranges via `condition: formula`). Field-value (DAX-measure-driven) CF and un-mappable rule shapes (cross-column, else-default) are recorded to `coverage.json` (never silently dropped). Also documents the one deliberate non-transform (PBI thousands-K number format).
 
@@ -434,7 +466,7 @@ The Fabric API is symmetric: `POST .../semanticModels` (TMSL parts) + `POST .../
 ## Scripts — the conversion pipeline
 The conversion is script-driven (mirrors `tableau-to-sigma/scripts/`). `scripts/run.sh` orchestrates connect → extract → convert → post-DM → build-workbook → layout → parity; it runs every deterministic stage and STOPS at the two MCP gates (the `convert_powerbi_to_sigma` conversion and the `sigma-mcp-v2` actuals collection) with a clear instruction, then resume any stage with `--from <stage>`. All scripts are idempotent and re-run-safe.
 
-**Python prereq:** the Microsoft-auth scripts (`fabric-extract.py`, `extract-pbir.py` live-fetch, `phase6-parity-pbi.rb`'s DAX harness) need `msal` + `requests` + `truststore` — pinned in `scripts/requirements.txt`. `run.sh` **bootstraps a venv at `<work-dir>/.venv` automatically** when no suitable interpreter is found; override with `$PBI_PY` (or `migrate-powerbi.rb --python`). **Converter — zero-config, local, no MCP.** A self-contained converter bundle ships in the skill at `converter/powerbi.mjs` and is the default: `migrate-powerbi.rb` runs `convertPowerBIToSigma` in-process via a `node` shim with no clone, no `npm install`, no network, no MCP. A dev's own build still wins via `--mcp-dir`/`$PBI_MCP_DIR` (or `~/Desktop/sigma-data-model-mcp`, `~/sigma-data-model-mcp`). Refresh the bundle with `tools/vendor-converters.sh`. Only if the bundle is **also** absent does it gate (exit 10) with instructions to run the `convert_powerbi_to_sigma` MCP **tool** and resume with `--converter-out`.
+**Python prereq:** the Microsoft-auth scripts (`fabric-extract.py`, `extract-pbir.py` live-fetch, `phase6-parity-pbi.rb`'s DAX harness) need `msal` + `requests` + `truststore` — pinned in `scripts/requirements.txt`. The LOCAL `.pbix` model front door (`extract-model-pbix.py` / `migrate-powerbi.rb --pbix`) additionally needs **pbixray** — NOT in `requirements.txt` because its `xpress9`/`xmhuffman` deps ship broken sdists and must be built from source (see `refs/local-pbix.md`; `doctor.sh` reports its presence + the install command). Everything else (including `extract-report-classic.py --pbix`) is stdlib-only. `run.sh` **bootstraps a venv at `<work-dir>/.venv` automatically** when no suitable interpreter is found; override with `$PBI_PY` (or `migrate-powerbi.rb --python`). **Converter — zero-config, local, no MCP.** A self-contained converter bundle ships in the skill at `converter/powerbi.mjs` and is the default: `migrate-powerbi.rb` runs `convertPowerBIToSigma` in-process via a `node` shim with no clone, no `npm install`, no network, no MCP. A dev's own build still wins via `--mcp-dir`/`$PBI_MCP_DIR` (or `~/Desktop/sigma-data-model-mcp`, `~/sigma-data-model-mcp`). Refresh the bundle with `tools/vendor-converters.sh`. Only if the bundle is **also** absent does it gate (exit 10) with instructions to run the `convert_powerbi_to_sigma` MCP **tool** and resume with `--converter-out`.
 
 | Script | Stage | What it does |
 |---|---|---|
@@ -442,6 +474,8 @@ The conversion is script-driven (mirrors `tableau-to-sigma/scripts/`). `scripts/
 | `fabric-extract.py` | 1 extract | Model TMSL **and** (`--report`) the report definition fetched CONCURRENTLY; `--workspace <id\|name>` skips estate enumeration; `--report-bundle` emits the `migrate-powerbi.rb --pbir` flat bundle. Measured 46.3s → 3.6-5.1s. |
 | `fabric-extract-batch.py` | 1 batch | Fleet extraction: every requested report → 2 artifact tasks (model TMSL + report def) on ONE 4-wide pool; report→model binding via PBI REST `datasetId` (name-match fallback); `manifest.json` + `timings.json`. 3 reports = 7.5s measured. |
 | `extract-pbir.py` | 1 extract | Fetch a report's PBIR (or parse one already on disk) → normalized `signals.json` (per-visual `sigma_kind` + role bindings + x/y/w/h). Live fetch uses the `pbi_fabric` fast LRO path. The PBI analog of `parse-twb-layout.rb`. |
+| `extract-report-classic.py` | 0/1 extract | Normalizes a CLASSIC single-file report layout → the same `signals.json` schema. Inputs: `--report-json` (UTF-8, Fabric getDefinition), **`--pbix <file>`** (unzips the zip's UTF-16LE `Report/Layout`), or **`--report-layout <file>`** (an extracted Layout). The dependency-free LOCAL report front door — no Fabric. |
+| `extract-model-pbix.py` | 0 extract | LOCAL model front door: reads a `.pbix`'s binary VertiPaq `DataModel` with **pbixray** and emits a TMSL `model.bim` (schema→columns, dax_measures→measures, dax_columns→calc cols, relationships, power-query M→partitions). Exits with a clear "pbixray required" install hint if it's absent. Setup: `refs/local-pbix.md`. |
 | `pbi-freshness.py` | 1.5 preflight | SOURCE-FRESHNESS: refresh history (incl. FAILED/creds-expired refreshes) + cheap executeQueries row-count/max-date snapshot (**4-wide parallel per-table probes**) → `freshness.json`. Launched **non-blocking** by run.sh/migrate-powerbi.rb (consumed at parity). Leads the parity output; deltas classify MATCH / STALE-EXPLAINED / DIVERGENT (bead fmte). |
 | `export-pbi-pages.py` | 5e compare | SOURCE page renders via ExportToFile (PNG → PDF fallback, **PDF rasterized to per-page PNG** via pypdfium2 so `Read` needs no poppler) for the mandatory visual compare; `--tenant` for guest/B2B; soft-fails (exit 3) with a waiver hint when export is unavailable instead of crashing. |
 | `sigma-export-png.py` | 5e/5f compare | Renders a built Sigma page to PNG (`--workbook <id> --page <pageId> --out … --w 1600`) for the source-vs-target compare AND the Phase 5f Visual QA read (checked against `refs/layout-visual-qa.md`). |
