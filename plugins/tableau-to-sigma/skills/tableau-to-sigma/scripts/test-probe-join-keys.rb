@@ -17,6 +17,21 @@
 # HTTP status + response-body excerpt and the console prints a --folder-id
 # hint when the error mentions the folder.
 #
+# W2.9 identifier-legality gate — six-trajectory matrix (the oracle itself is
+# unit-covered in test-sql-ident-check.rb Part J; derivation stripping in
+# test-join-plan.rb's W2.9 section):
+#   T1 trip:     role-paren residue key → clean status 'error', probe_error
+#                names the class + --resolve route; NO probe_sql, fixture
+#                never consulted
+#   T2 trip:     GUID field-id key / garbled VC FQN → refused, named reasons
+#   T3 no-trip:  plain upper-snake keys + FQN → byte-identical SQL (the
+#                exact-string pins in the sections above)
+#   T4 clear:    spaced physical key + spaced FQN part → QUOTED, probeable
+#   T5 escape:   refused entry takes --resolve --how waived (same path as any
+#                blocked entry)
+#   T6 contract: live path sends ZERO POSTs on refusal (never-live-SQL red
+#                line); mixed ledger still probes the legal sibling, exit 3
+#
 # Run: ruby scripts/test-probe-join-keys.rb
 require 'json'
 require 'open3'
@@ -153,6 +168,86 @@ Dir.mktmpdir do |dir|
   check(e['probe_sql']['totals'] ==
         "SELECT COUNT(*) AS TOTAL_ROWS, COUNT(DISTINCT ENTITY_ID) AS DISTINCT_KEYS FROM (#{stmt}) t",
         "totals SQL wraps the statement as a subquery (got #{e['probe_sql']['totals'].inspect})", fails)
+end
+
+puts "\n== W2.9: spaced physical key + spaced FQN part emit QUOTED (still probeable) =="
+Dir.mktmpdir do |dir|
+  workdir_with(dir, [entry('probe_keys' => ['Order Key'], 'right_table' => 'ANALYTICS.MY SCHEMA.REV_CONTRA')])
+  fx = File.join(dir, 'fx'); Dir.mkdir(fx)
+  File.write(File.join(fx, 'entry-0.json'), JSON.generate('total' => 10, 'distinct' => 10, 'duplicates' => []))
+  _out, _err, st = run_probe(dir, '--fixture', fx)
+  check(st.success?, "quoted-key unique → exit 0 (got #{st.exitstatus})", fails)
+  e = ledger(dir)[0]
+  check(e['status'] == 'unique', 'quoted-key ledger status unique', fails)
+  check(e['probe_sql']['duplicates'] ==
+        'SELECT "Order Key", COUNT(*) AS C FROM ANALYTICS."MY SCHEMA".REV_CONTRA GROUP BY "Order Key" HAVING COUNT(*) > 1 ORDER BY C DESC LIMIT 5',
+        "dup SQL quotes the spaced key + FQN part (got #{e['probe_sql']['duplicates'].inspect})", fails)
+  check(e['probe_sql']['totals'] ==
+        'SELECT COUNT(*) AS TOTAL_ROWS, COUNT(DISTINCT "Order Key") AS DISTINCT_KEYS FROM ANALYTICS."MY SCHEMA".REV_CONTRA',
+        'totals SQL quotes the spaced key', fails)
+end
+
+puts "\n== W2.9: role-paren residue key → clean 'error', fixture NEVER consulted, no probe_sql =="
+Dir.mktmpdir do |dir|
+  workdir_with(dir, [entry('probe_keys' => ['PRODUCT_KEY_(PRODUCT_DIM)'])])
+  fx = File.join(dir, 'fx'); Dir.mkdir(fx)
+  # A fixture with clean results EXISTS — proving refusal preempts acquisition.
+  File.write(File.join(fx, 'entry-0.json'), JSON.generate('total' => 10, 'distinct' => 10, 'duplicates' => []))
+  out, err, st = run_probe(dir, '--fixture', fx)
+  check(st.exitstatus == 3, "refused identifier → exit 3 (got #{st.exitstatus})", fails)
+  check(err.include?('could not be probed'), 'error summary printed (gate keeps blocking)', fails)
+  e = ledger(dir)[0]
+  check(e['status'] == 'error', 'ledger status error', fails)
+  check(e['probe_error'].to_s.include?('not legal to send to the warehouse'), 'probe_error names the refusal', fails)
+  check(e['probe_error'].to_s.include?('parenthesis residue'), 'probe_error names the parenthesis-residue class', fails)
+  check(e['probe_error'].to_s.include?('--resolve 0 --how waived'), 'probe_error routes to the --resolve path', fails)
+  check(!e.key?('probe_sql'), 'NO probe_sql recorded — garbled SQL never built', fails)
+  check(!e.key?('counts'), 'fixture result never consulted (no counts)', fails)
+  check(out.include?('no SQL sent'), 'console states no SQL was sent', fails)
+  # The SAME --resolve path clears it (operator escalation).
+  _out, _err, st = run_probe(dir, '--resolve', '0', '--how', 'waived',
+                             '--reason', 'operator: key is display-only; join probed by hand')
+  check(st.success?, 'refused entry takes a waived resolution → exit 0', fails)
+end
+
+puts "\n== W2.9: GUID field-id key + garbled VC FQN → refused with named reasons =="
+Dir.mktmpdir do |dir|
+  workdir_with(dir, [
+                 entry('probe_keys' => ['AB12CD34-0000-1111-2222-333344445555']),
+                 entry('right_table' => 'abcdef0123456789-abcdef01.ORDERS (X.TABLE)')
+               ])
+  fx = File.join(dir, 'fx'); Dir.mkdir(fx)
+  _out, _err, st = run_probe(dir, '--fixture', fx)
+  check(st.exitstatus == 3, "refused entries → exit 3 (got #{st.exitstatus})", fails)
+  e0, e1 = ledger(dir)
+  check(e0['status'] == 'error' && e0['probe_error'].to_s.include?('GUID-shaped'),
+        'GUID key refused with the GUID reason', fails)
+  check(e1['status'] == 'error' && e1['probe_error'].to_s.include?('not legal'),
+        'garbled VC FQN refused (parts fail the oracle)', fails)
+  check(!e1.key?('probe_sql'), 'garbled FQN: no probe_sql recorded', fails)
+end
+
+puts "\n== W2.9: mixed ledger — legal entry probed, refused entry errored, exit 3 =="
+Dir.mktmpdir do |dir|
+  workdir_with(dir, [entry, entry('probe_keys' => ['PRODUCT_KEY_(PRODUCT_DIM)'])])
+  fx = File.join(dir, 'fx'); Dir.mkdir(fx)
+  File.write(File.join(fx, 'entry-0.json'), JSON.generate('total' => 7, 'distinct' => 7, 'duplicates' => []))
+  _out, _err, st = run_probe(dir, '--fixture', fx)
+  check(st.exitstatus == 3, "mixed → exit 3 (got #{st.exitstatus})", fails)
+  e0, e1 = ledger(dir)
+  check(e0['status'] == 'unique', 'legal sibling entry still probed to unique', fails)
+  check(e1['status'] == 'error', 'refused sibling entry errored', fails)
+end
+
+puts "\n== W2.9: live path — refused identifier sends NOTHING (zero POSTs) =="
+Dir.mktmpdir do |dir|
+  workdir_with(dir, [entry('probe_keys' => ['PRODUCT_KEY_(PRODUCT_DIM)'])])
+  log = File.join(dir, 'stub.log')
+  _out, _err, st = run_probe_live(dir, { 'SIGMA_STUB_LOG' => log }, '--connection-id', 'conn-1')
+  check(st.exitstatus == 3, "live refused → exit 3 (got #{st.exitstatus})", fails)
+  check(!File.exist?(log) || spec_posts(log).empty?,
+        'refused identifier → ZERO probe-workbook POSTs (never live SQL)', fails)
+  check(ledger(dir)[0]['status'] == 'error', 'live refused entry recorded as error', fails)
 end
 
 puts "\n== non-unique fixture → FATAL block + exit 2 =="

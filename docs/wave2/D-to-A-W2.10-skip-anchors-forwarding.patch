@@ -1,0 +1,130 @@
+W2.10 — `--skip-anchors-gate` forwarding (lane D authors -> lane A applies)
+===========================================================================
+
+Contract-X1 handoff. Lane D does not edit `migrate-tableau.rb`; this file IS
+the deliverable. 6 changed lines (budget: <=10), two hunks:
+
+  1. DECLARE beside the sibling gate-waiver flags (the :287/:314/:337
+     pattern) — REASON is a REQUIRED OptionParser argument, so a bare
+     `--skip-anchors-gate` refuses exactly like the siblings.
+  2. FORWARD beside the :1249-1255 pass-throughs — the REASON string rides to
+     `assert-phase6-ran.rb`, which records it in `waivers.json` + the
+     parity-final census and counts it against the waiver budget
+     (gate :551 declare, :834 hides-table, :872/:951 census, :2553-2554 record —
+     `test-anchors-waiver-gates.rb` already pins all of that gate-side).
+
+Why: verified 0 hits for `skip-anchors-gate` in `migrate-tableau.rb` vs the
+gate defining it at `assert-phase6-ran.rb:551`. A gate-13 block during
+`--finalize` therefore forces a STANDALONE gate re-run to spend the waiver —
+the finalize run is already dead: one guaranteed re-entry (field-measured).
+
+Base: applies cleanly on `origin/wave/1@308cf07f`
+(`migrate-tableau.rb` blob 2283a7cd). Context lines chosen away from lane A's
+W2.5/W2.6 regions to keep the rebase trivial.
+
+Apply + verify (from the repo root):
+
+  git apply --check docs/wave2/D-to-A-W2.10-skip-anchors-forwarding.patch
+  git apply         docs/wave2/D-to-A-W2.10-skip-anchors-forwarding.patch
+  ruby -c plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/migrate-tableau.rb
+  grep -c "skip-anchors-gate" \
+    plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/migrate-tableau.rb   # => 2 (declare + forward)
+  ruby plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-anchors-waiver-gates.rb
+
+Suggested pin in lane A's own suite: drive `--finalize --skip-anchors-gate
+"<r>"` through the gate-argv construction and assert the pair lands in the
+gate command (shape of the existing `--skip-telemetry-gate` pin).
+
+---------------------------------------------------------------------------
+AUDIT — every flag the gate ACCEPTS vs what the orchestrator can forward
+(the "while there" half of W2.10; table read at assert-phase6-ran.rb:834+,
+option list :520-600, orchestrator gate argv :1217-1255 @308cf07f)
+---------------------------------------------------------------------------
+
+ALREADY FORWARDED (no action):
+  --skip-control-flip        via --skip-flip-test (:1243)
+  --allow-extract            auto from state.extract_mode (:1244)
+  --allow-missing-tiles      (:1245)      --min-pass-rate            (:1246)
+  --skip-postpublish-guide   (:1249)      --skip-telemetry-gate      (:1252)
+  --skip-visual-gate + --skip-visual-comparison   via --fast (:1255)
+  --skip-fidelity-gate       auto when rcf_passes==0 (:1234)
+
+THIS PATCH: --skip-anchors-gate (gate 13).
+
+ACCEPTED BY THE GATE, NOT FORWARDABLE FROM THE ORCHESTRATOR — disposition:
+
+  --allow-empty-tiles        RECOMMEND FORWARD (rider, lane A's call): gate
+                             13's OTHER waiver; identical re-entry shape to
+                             --skip-anchors-gate (an empty-tile block at
+                             --finalize forces a standalone gate run today).
+                             If taken, mirror this patch (+2 lines, total
+                             still <=10):
+                               declare: o.on('--allow-empty-tiles REASON', ...) { |v| opts[:allow_empty_tiles_gate] = v }
+                               forward: gate += ['--allow-empty-tiles', opts[:allow_empty_tiles_gate]] if opts[:allow_empty_tiles_gate]
+  --skip-parity-gate         GATE-ONLY BY DESIGN. The finalize comment says it:
+                             "The census-aware hard gate. NEVER bypassed." A
+                             front-door parity bypass inverts the value bar;
+                             the escape stays deliberately at the standalone
+                             gate.
+  --accept-deferred-elements GATE-ONLY: accepting a PARTIAL DM is a deep
+                             escalation with its own flow (quarantine exit 6);
+                             must not become one front-door flag.
+  --accept-residuals         GATE-ONLY: takes ledger entry ids knowable only
+                             AFTER a gate run prints them; the gate failure
+                             text already names the exact standalone command.
+  --accept-manual-residues   GATE-ONLY: same shape (names live in
+                             manual-residues.json).
+  --skip-orphan-check        GATE-ONLY: the orchestrator itself runs
+                             cleanup-orphan-workbooks right before the gate;
+                             front-door skipping contradicts its own cleanup.
+  --skip-column-check        GATE-ONLY: waive checks over evidence the
+  --skip-layout-check          orchestrated run produced moments earlier;
+  --skip-layout-lint           they exist for standalone/manual-path gate
+  --skip-control-lint          runs (post-and-readback carries its own lint
+                               skips for the build step).
+  --skip-visual-tiles        GATE-ONLY for now (gate 9): no field-measured
+                             re-entry; named here so a measured one can
+                             promote it.
+  --skip-layout-fill         GATE-ONLY for now (gate 8c): same class.
+  --skip-visual-similarity   GATE-ONLY for now (gate 14): same class — and the
+                             similarity floor is a fidelity red line; keep its
+                             escape deliberately less convenient.
+
+NOT WAIVERS (nothing to forward):
+  config/enforcement toggles the orchestrator already sets where its flow
+  needs them (--require-visual-comparison, --require-control-flip,
+  --require-fidelity-ledger) or that only tune standalone runs
+  (--min-grid-fill, --min-layout-elements, --control-scope, --sigma-render,
+  --fidelity-ledger, --arrangement-report, --require-arrangement,
+  --flip-check-leaks); and RECORD-driven waiver kinds counted from artifacts,
+  not argv (visual-divergent, layout-phase-skip, --no-vision-waiver,
+  --force-new-workbook, --force-route-switch, --allow-manual-spec).
+
+---------------------------------------------------------------------------
+The patch (git apply ignores everything above this line's first diff header)
+---------------------------------------------------------------------------
+
+diff --git a/plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/migrate-tableau.rb b/plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/migrate-tableau.rb
+index 2283a7cd..55fcf6dd 100755
+--- a/plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/migrate-tableau.rb
++++ b/plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/migrate-tableau.rb
+@@ -312,6 +312,9 @@ OptionParser.new do |o|
+   # blocking operators mid-finalize.
+   o.on('--regen-plan', 'force phase6-parity to REBUILD parity-plan.json from scratch (forwarded to phase6-parity.rb). Use after a workbook re-POST changes element ids, or to discard a stale plan.') { opts[:regen_plan] = true }
+   o.on('--skip-telemetry-gate REASON', 'waive gate 10 (telemetry consent) at --finalize — REQUIRED reason; forwarded to assert-phase6-ran.rb (census-visible policy exclusion, NOT a quality waiver). Use ONLY when the run cannot prompt (e.g. unattended CI); name it in your report.') { |v| opts[:skip_telemetry] = v }
++  o.on('--skip-anchors-gate REASON', 'waive gate 13 (source-anchor value verification) at --finalize — REQUIRED reason; ' \
++       'forwarded to assert-phase6-ran.rb (budget-counted waiver). Use ONLY when the source image values are genuinely ' \
++       'untranscribable; name it in your migration report.') { |v| opts[:skip_anchors_gate] = v }
+   o.on('--allow-missing-tiles N', Integer) { |v| opts[:allow_missing_tiles] = v }
+   o.on('--min-pass-rate F', Float, 'accept a parity pass-rate below 1.0 at the gate — ONLY for honest, ' \
+                                    'NAMED divergences (LOD placeholders / cross-grain semantics)') { |v| opts[:min_pass_rate] = v }
+@@ -1250,6 +1253,9 @@ if opts[:finalize]
+   # Telemetry consent waiver pass-through (issue #422) — census-visible at gate
+   # 10 (policy exclusion, excluded from the quality-waiver budget by doctrine).
+   gate += ['--skip-telemetry-gate', opts[:skip_telemetry]] if opts[:skip_telemetry]
++  # Gate 13 (source-anchor values) waiver pass-through (W2.10) — REASON rides to
++  # the gate (recorded in waivers.json + the census, budget-counted).
++  gate += ['--skip-anchors-gate', opts[:skip_anchors_gate]] if opts[:skip_anchors_gate]
+   # --fast: stamp the two visual-gate waivers with the operator's reason (recorded
+   # in parity-final.json's waivers[] and counted toward the >2-waiver budget cap).
+   gate += ['--skip-visual-gate', opts[:fast], '--skip-visual-comparison', opts[:fast]] if opts[:fast]
