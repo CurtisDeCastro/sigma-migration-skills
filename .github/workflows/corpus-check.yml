@@ -269,6 +269,7 @@ jobs:
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-control-lint.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-conflicting-page-defaults.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-metric-reference.rb
+            plugins/sigma-authoring/skills/sigma-plugin-authoring/scripts/test-gauge-plugin-static.rb
             plugins/tableau-to-sigma/skills/tableau-assessment/scripts/test-predicted-parity.rb
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-dax-restructure.rb
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-telemetry-gate.rb
@@ -298,7 +299,13 @@ jobs:
             # shared/scripts/test-validate-sigma-formula-cleanup.rb is INTENTIONALLY not listed: standalone it
             # self-SKIPs; its coverage is the shared-manifest drift gate pinning it byte-identical to the
             # quicksight twin above (PR #509 review R9 — the manifest entry is the coverage mechanism).
+            shared/lib/test_plugin_embed.rb
+            shared/lib/test_composition.rb
+            shared/lib/test_composition_lint.rb
+            shared/lib/test_styling.rb
+            shared/lib/test_coverage_catalog.rb
             shared/lib/test_kpi_card.rb
+            shared/lib/test_richness.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-kpi-comparison-wiring.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-kpi-comparison-emit.rb
             plugins/domo-to-sigma/skills/domo-to-sigma/test/test-build-dm.rb
@@ -343,7 +350,12 @@ jobs:
             plugins/looker-to-sigma/skills/looker-to-sigma/tests/test_grounding.py
             plugins/looker-to-sigma/skills/looker-to-sigma/tests/test_metric_reference.py
             shared/lib/test_metric_binding.py
+            shared/lib/test_plugin_embed.py
+            shared/lib/test_composition.py
+            shared/lib/test_styling.py
+            shared/lib/test_coverage_catalog.py
             shared/lib/test_kpi_card.py
+            shared/lib/test_richness.py
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test_sigma_rest.py
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test_tableau_rest.py
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test_pick_destination.py

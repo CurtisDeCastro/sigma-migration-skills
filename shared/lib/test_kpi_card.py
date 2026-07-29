@@ -13,6 +13,8 @@ class KpiCardTest(unittest.TestCase):
     def setUp(self):
         with open(os.path.join(os.path.dirname(__file__), "testdata", "kpi_card_golden.json")) as f:
             self.golden = json.load(f)
+        with open(os.path.join(os.path.dirname(__file__), "testdata", "kpi_card_value_style_golden.json")) as f:
+            self.value_style_golden = json.load(f)
 
     def test_comparative_matches_golden(self):
         el = kpi_card.build(id="kpi-rev", name="Revenue", source_element_id="tbl-1",
@@ -22,6 +24,26 @@ class KpiCardTest(unittest.TestCase):
                             comparison_column_id="rev_prior",
                             good_direction="up", title_color="#FFFFFF")
         self.assertEqual(json.dumps(_sort(el)), json.dumps(_sort(self.golden)))
+
+    def test_plain_call_no_regression(self):
+        # No value_color/value_font_size => byte-identical to the pre-change golden.
+        el = kpi_card.build(id="kpi-rev", name="Revenue", source_element_id="tbl-1",
+                            columns=[{"id": "rev_cur",
+                                      "format": {"kind": "number", "formatString": "$,.0f"}}],
+                            value_column_id="rev_cur",
+                            comparison_column_id="rev_prior",
+                            good_direction="up", title_color="#FFFFFF")
+        self.assertEqual(json.dumps(_sort(el)), json.dumps(_sort(self.golden)))
+        self.assertNotIn("color", el["value"])
+        self.assertNotIn("fontSize", el["value"])
+
+    def test_value_styling_emitted_when_set(self):
+        el = kpi_card.build(id="k", name="Rev", source_element_id="t",
+                            columns=[{"id": "rev"}], value_column_id="rev",
+                            comparison_column_id="prior",
+                            value_color="#FDE047", value_font_size=44)
+        self.assertEqual(el["value"], {"columnId": "rev", "color": "#FDE047", "fontSize": 44})
+        self.assertEqual(json.dumps(_sort(el)), json.dumps(_sort(self.value_style_golden)))
 
     def test_single_value_omits_comparison(self):
         el = kpi_card.build(id="k", name="X", source_element_id="t",

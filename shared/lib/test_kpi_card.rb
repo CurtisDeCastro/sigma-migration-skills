@@ -20,6 +20,7 @@ def sort_deep(o)
 end
 
 golden = JSON.parse(File.read(File.join(__dir__, 'testdata', 'kpi_card_golden.json')))
+value_style_golden = JSON.parse(File.read(File.join(__dir__, 'testdata', 'kpi_card_value_style_golden.json')))
 
 check('comparative card matches golden (sorted-key identical)') do
   el = KpiCard.build(id: 'kpi-rev', name: 'Revenue', source_element_id: 'tbl-1',
@@ -28,6 +29,25 @@ check('comparative card matches golden (sorted-key identical)') do
                      comparison_column_id: 'rev_prior',
                      good_direction: :up, title_color: '#FFFFFF')
   JSON.generate(sort_deep(el)) == JSON.generate(sort_deep(golden))
+end
+
+check('plain call (no value_color/value_font_size) is byte-identical to pre-change golden (no regression)') do
+  el = KpiCard.build(id: 'kpi-rev', name: 'Revenue', source_element_id: 'tbl-1',
+                     columns: [{ 'id' => 'rev_cur', 'format' => { 'kind' => 'number', 'formatString' => '$,.0f' } }],
+                     value_column_id: 'rev_cur',
+                     comparison_column_id: 'rev_prior',
+                     good_direction: :up, title_color: '#FFFFFF')
+  JSON.generate(sort_deep(el)) == JSON.generate(sort_deep(golden)) &&
+    !el['value'].key?('color') && !el['value'].key?('fontSize')
+end
+
+check('value_color/value_font_size set: emits value:{columnId,color,fontSize} (matches value-style golden)') do
+  el = KpiCard.build(id: 'k', name: 'Rev', source_element_id: 't',
+                     columns: [{ 'id' => 'rev' }], value_column_id: 'rev',
+                     comparison_column_id: 'prior',
+                     value_color: '#FDE047', value_font_size: 44)
+  el['value'] == { 'columnId' => 'rev', 'color' => '#FDE047', 'fontSize' => 44 } &&
+    JSON.generate(sort_deep(el)) == JSON.generate(sort_deep(value_style_golden))
 end
 
 check('single-value card omits comparison keys') do

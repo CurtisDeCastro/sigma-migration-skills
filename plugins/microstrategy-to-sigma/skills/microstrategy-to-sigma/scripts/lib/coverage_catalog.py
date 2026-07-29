@@ -72,6 +72,21 @@ class Catalog:
         row = self.resolve(source_key)
         return row.get("sigma") if row else None
 
+    def plugin_archetype(self, source_key):
+        """Return the recreate-as-plugin archetype for ``source_key``, or
+        ``None``. Honors an explicit ``plugin_archetype`` field on the row, or
+        a ``sigma`` value of the form ``"plugin:<archetype>"`` (returns the
+        part after the prefix). Additive — does not change resolve/target/
+        resolve_or_warn's existing dispatch."""
+        row = self.resolve(source_key)
+        if not row:
+            return None
+        a = row.get("plugin_archetype")
+        if a is not None and str(a) != "":
+            return a
+        s = str(row.get("sigma") or "")
+        return s[len("plugin:"):] if s.startswith("plugin:") else None
+
     def resolve_or_warn(self, source_key, warnings, *, context=""):
         """Resolve ``source_key``; on a miss append a standardized LOUD warning to
         ``warnings`` and return ``None``. The caller must then skip/placeholder —
