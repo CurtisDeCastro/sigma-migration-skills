@@ -227,7 +227,7 @@ phase by hand or need to understand why it stopped.
 | 0a | **Gap scan** (mandatory) | `scan-workbook-gaps.rb` | `gaps.json` — ❌ features → scout or `--force` | `refs/phase-0-scope.md`, `refs/coverage-matrix.md`, `refs/blending.md` (blends) |
 | 0b | Destination + mode (ask) | `pick-destination.rb` | folder id + conversion mode | `refs/phase-0-scope.md` |
 | 0c | Scope/cost sign-off | `estimate-cost.rb --workdir` | `cost-estimate.json` + run-state ack (`cost_estimate_acknowledged`) | `refs/phase-0-scope.md`, `refs/model-fit.md` §3, `refs/performance.md` |
-| 1 | Discover the source | `tableau-discover.rb` (PAT) or MCP | `get-workbook.json`, `views/*.csv`, `.twb` | `refs/phase-1-discover.md`, `refs/tableau-rest.md`, `refs/multi-datasource.md`, `refs/story-points.md` (stories), `refs/extract-landing.md` (extracts) |
+| 1 | Discover the source | `tableau-discover.rb` (PAT) or MCP | `get-workbook.json`, `views/*.csv`, `.twb` | `refs/phase-1-discover.md`, `refs/tableau-rest.md`, `refs/multi-datasource.md`, `refs/object-model.md`, `refs/story-points.md`, `refs/extract-landing.md` |
 | 1d | **🚧 Dashboard read + anchors** | `get-view-image` (solo) → **Read** → write `png-read.json` + `source-anchors.json` | 🚧 `png-read.json` (`assert-dashboard-read.rb`) + ≥5 anchors (final gate exit 18) | `refs/phase-1-discover.md`, `refs/source-anchors.md`, `refs/twb-zone-mapping.md` |
 | 1.5 | Reuse an existing DM | `find-or-pick-dm.rb` | `dm-match.json` (reuse-first) | `refs/phase-1_5-dm-reuse.md`, `refs/modeling-strategy.md` |
 | 2 | Warehouse column names | `discover-warehouse-columns.rb` | real column ids | `refs/phase-2-columns-filters.md`, `refs/column-gotchas.md` |
