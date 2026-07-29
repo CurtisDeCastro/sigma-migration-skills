@@ -312,6 +312,11 @@ OptionParser.new do |o|
   # blocking operators mid-finalize.
   o.on('--regen-plan', 'force phase6-parity to REBUILD parity-plan.json from scratch (forwarded to phase6-parity.rb). Use after a workbook re-POST changes element ids, or to discard a stale plan.') { opts[:regen_plan] = true }
   o.on('--skip-telemetry-gate REASON', 'waive gate 10 (telemetry consent) at --finalize — REQUIRED reason; forwarded to assert-phase6-ran.rb (census-visible policy exclusion, NOT a quality waiver). Use ONLY when the run cannot prompt (e.g. unattended CI); name it in your report.') { |v| opts[:skip_telemetry] = v }
+  o.on('--skip-anchors-gate REASON', 'waive gate 13 (source-anchor value verification) at --finalize — REQUIRED reason; ' \
+       'forwarded to assert-phase6-ran.rb (budget-counted waiver). Use ONLY when the source image values are genuinely ' \
+       'untranscribable; name it in your migration report.') { |v| opts[:skip_anchors_gate] = v }
+  o.on('--allow-empty-tiles REASON', 'accept gate 13\'s empty-tile block at --finalize — REQUIRED reason; forwarded to ' \
+       'assert-phase6-ran.rb (budget-counted waiver; W2.10 audit rider).') { |v| opts[:allow_empty_tiles_gate] = v }
   o.on('--allow-missing-tiles N', Integer) { |v| opts[:allow_missing_tiles] = v }
   o.on('--min-pass-rate F', Float, 'accept a parity pass-rate below 1.0 at the gate — ONLY for honest, ' \
                                    'NAMED divergences (LOD placeholders / cross-grain semantics)') { |v| opts[:min_pass_rate] = v }
@@ -861,7 +866,11 @@ def mark(key)
   # ratified local-capture decision feeds (reconciled program #5 / ADD-6).
   if defined?(PhaseMetrics) && PhaseMetrics.respond_to?(:record) && defined?(WORK)
     begin
-      PhaseMetrics.record(workdir: WORK, phase: key, wall_s: seg, at: now.utc)
+      # W2.22 rider: turn ordinal + invocation token ride each mark record —
+      # turn events countable from state transitions; distinct inv = invocations.
+      PhaseMetrics.record(workdir: WORK, phase: key, wall_s: seg, at: now.utc,
+                          turn: ($pm_turn = $pm_turn.to_i + 1),
+                          inv: (PhaseMetrics.respond_to?(:invocation_token) ? PhaseMetrics.invocation_token : nil))
     rescue StandardError
       nil
     end
@@ -1250,6 +1259,10 @@ if opts[:finalize]
   # Telemetry consent waiver pass-through (issue #422) — census-visible at gate
   # 10 (policy exclusion, excluded from the quality-waiver budget by doctrine).
   gate += ['--skip-telemetry-gate', opts[:skip_telemetry]] if opts[:skip_telemetry]
+  # Gate 13 (source-anchor values) waiver pass-through (W2.10) — REASON rides to
+  # the gate (recorded in waivers.json + the census, budget-counted).
+  gate += ['--skip-anchors-gate', opts[:skip_anchors_gate]] if opts[:skip_anchors_gate]
+  gate += ['--allow-empty-tiles', opts[:allow_empty_tiles_gate]] if opts[:allow_empty_tiles_gate]
   # --fast: stamp the two visual-gate waivers with the operator's reason (recorded
   # in parity-final.json's waivers[] and counted toward the >2-waiver budget cap).
   gate += ['--skip-visual-gate', opts[:fast], '--skip-visual-comparison', opts[:fast]] if opts[:fast]
@@ -1782,7 +1795,9 @@ probe = (JSON.parse(probe_out.lines.last.to_s) rescue nil) if probe_st.success?
 stamp = (JSON.parse(File.read(stamp_path)) rescue nil)
 disc_complete = disc_artifacts.all? { |p| File.exist?(p) } &&
                 Dir[File.join(WORK, 'views', '*.csv')].any?
-reuse_discovery = probe && stamp &&
+disc_scope = (opts[:dashboards] || []).sort # W2.20: scoped runs fetch FEWER view CSVs
+stamp_scope_ok = stamp && ((s = stamp['csv_scope'].to_a) == disc_scope || s.empty?) # []/legacy stamp = unscoped superset, serves any scope
+reuse_discovery = probe && stamp && stamp_scope_ok &&
                   stamp['workbook_id'] == probe['id'] && stamp['updatedAt'] == probe['updatedAt'] &&
                   disc_complete
 # Probe-failure resilience (speed hardening): a TRANSIENT probe failure must
@@ -1790,7 +1805,7 @@ reuse_discovery = probe && stamp &&
 # worse, if Tableau is genuinely unreachable the re-fetch dies too, AFTER
 # clearing a perfectly good cache. Reuse the stamped artifacts with a loud
 # WARN instead; delete discovery-stamp.json to force a re-fetch.
-probe_failed_reuse = !probe && stamp && disc_complete
+probe_failed_reuse = !probe && stamp && stamp_scope_ok && disc_complete
 reuse_discovery ||= probe_failed_reuse
 
 disc_log = File.join(WORK, 'phase1-discover.log')
@@ -1826,6 +1841,9 @@ else
   # discovery's heavy includeExtract=true re-download instead of paying for an
   # unused multi-GB payload.
   disc << '--no-extract-refetch' if opts[:skip_extract_landing]
+  # W2.20 (lane F): thread the dashboard scope into discovery (member-sheet CSVs
+  # only; discovery FAILS OPEN to all views, stated, when membership is unresolvable).
+  (opts[:dashboards] || []).each { |d| disc += ['--dashboard', d] }
   disc_sh = disc.map { |a| "'" + a.gsub("'", "'\\''") + "'" }.join(' ')
   scan_sh = ['ruby', File.join(HERE, 'scan-workbook-gaps.rb'), twb]
             .map { |a| "'" + a.gsub("'", "'\\''") + "'" }.join(' ')
@@ -1862,7 +1880,7 @@ lane_done = lambda do
       if failed.empty?
         File.write(stamp_path, JSON.pretty_generate(
                                  'workbook_id' => probe['id'], 'updatedAt' => probe['updatedAt'],
-                                 'stamped_at' => Time.now.utc.iso8601))
+                                 'csv_scope' => disc_scope, 'stamped_at' => Time.now.utc.iso8601))
       else
         line "discovery NOT stamped for reuse — #{failed.size} fetch task(s) failed " \
              "(#{failed.map { |t| t['task'] }.join(', ')[0, 120]}); a resume will re-fetch"
@@ -2882,6 +2900,9 @@ _lane_beat = _lane_t0
 until lane_done.call
   if Time.now - _lane_t0 > _lane_timeout
     print_lane_log.call
+    `pkill -TERM -P #{lane[:pid]} 2>/dev/null` rescue nil # W2.21 fence: children (the wedged
+    (Process.kill('TERM', lane[:pid]) rescue nil)         # ruby fetch) first, then the lane shell,
+    (reap_lane!(lane_done, 5) rescue nil)                 # bounded reap — no orphan trickler survives the abort
     abort "FATAL: Tableau discovery lane did not finish within #{_lane_timeout}s — likely a " \
           "wedged Tableau REST call (see lane log above). Re-run, raise TABLEAU_LANE_TIMEOUT, " \
           "or pass the .twb directly with --twb to skip live discovery."

@@ -36,6 +36,8 @@ Dir.mktmpdir do |d|
         'every record carries {phase, wall_s, at}', fails)
   check(recs.map { |r| r['phase'] }.include?('phase1-foreground'),
         'records use the PHASE_T keys (phase1-foreground present)', fails)
+  check(recs.all? { |r| r['turn'].is_a?(Integer) } && recs.map { |r| r['inv'] }.compact.uniq.size == 1,
+        'W2.22: every record carries a turn ordinal + one invocation token', fails)
   check(recs.none? { |r| r['phase'].to_s =~ /wave1|fixture/i },
         'no workbook/customer identifiers in phase keys (coarse names only)', fails)
   # The shared lib reads its own file back (integration with lane D's API).
@@ -50,7 +52,7 @@ check(src =~ /begin\s+require 'phase_metrics'\s+rescue LoadError, StandardError\
       'guarded require: an absent lib never breaks the orchestrator', fails)
 check(src.include?("defined?(PhaseMetrics) && PhaseMetrics.respond_to?(:record) && defined?(WORK)"),
       'call site guards on module presence + API shape', fails)
-check(src =~ /PhaseMetrics\.record\(workdir: WORK, phase: key, wall_s: seg, at: now\.utc\)\s+rescue StandardError\s+nil/,
+check(src =~ /PhaseMetrics\.record\(workdir: WORK, phase: key, wall_s: seg, at: now\.utc,\s+turn: \(\$pm_turn = \$pm_turn\.to_i \+ 1\),\s+inv: [^\n]*\)\s+rescue StandardError\s+nil/,
       'a raising lib is swallowed (metrics must never sink a run)', fails)
 
 puts 'T3 — machine-local contract'
