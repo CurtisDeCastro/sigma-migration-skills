@@ -48,7 +48,10 @@
 # exported, the row-set signatures, and every PASS/FAIL/SKIP verdict are
 # computed here exactly as before, from the same raw CSVs. A pooled export
 # that fails is retried serially at its call site (fail-open); --no-pool
-# forces the serial path outright. Evidence lands under --out per the
+# forces the serial path outright, and a twin vendored WITHOUT
+# scripts/lib/export_pool.rb (the probe-controls manifest targets are a
+# superset of export_pool's — e.g. domo) degrades to the serial seam at load
+# instead of dying on the require. Evidence lands under --out per the
 # version-keyed raw contract: the untouched wire CSVs plus
 # probe-evidence.json binding each file's sha256 to the workbook's
 # latestDocumentVersion at probe time — verdicts are recomputed from those
@@ -75,7 +78,16 @@ require 'fileutils'
 $LOAD_PATH.unshift File.expand_path('lib', __dir__)
 require 'sigma_rest'
 require 'control_lint'
-require 'export_pool'
+begin
+  require 'export_pool'
+rescue LoadError
+  # This script's manifest targets are a SUPERSET of export_pool.rb's (e.g.
+  # domo vendors probe-controls.rb but not scripts/lib/export_pool.rb). The
+  # pool is TRANSPORT ONLY (W2.12), so a twin without the lib degrades to the
+  # serial export seam below instead of dying at load: --no-pool is implied
+  # and --pool is a no-op. Verdict logic is identical on both transports.
+end
+HAVE_POOL = defined?(ExportPool) ? true : false
 
 opts = { values: {}, controls: [], timeout: 90, pool: 5 }
 OptionParser.new do |p|
@@ -92,6 +104,7 @@ OptionParser.new do |p|
   p.on('--no-pool', 'serial exports (fallback transport)') { opts[:no_pool] = true }
   p.on('--pool N', Integer, 'pooled export width (default 5)') { |v| opts[:pool] = v }
 end.parse!
+opts[:no_pool] = true unless HAVE_POOL # no export_pool.rb vendored → serial transport
 abort('--workbook-id required') unless opts[:wb]
 WB = opts[:wb]
 OUT = opts[:out] || "/tmp/probe-controls-#{WB}"
@@ -110,10 +123,12 @@ end
 # Export an element as CSV (optionally with control parameters), poll the
 # query download until ready, return the CSV text. Raises on timeout/error.
 # Transport is ExportPool's shared export → poll → download seam (one
-# Deadline per export = the old per-CSV --timeout bound). An HTML body behind
-# a 200 (renderer error) now raises instead of masquerading as comparable
-# CSV.
+# Deadline per export = the old per-CSV --timeout bound); where export_pool.rb
+# is not vendored, the serial seam below walks the same wire flow through
+# Sigma.request. Either way an HTML body behind a 200 (renderer error) raises
+# instead of masquerading as comparable CSV.
 def export_csv(wb, element_id, params, timeout)
+  return serial_export_csv(wb, element_id, params, timeout) unless HAVE_POOL
   qid = ExportPool.start_export(wb, element_id, 'csv', nil, params: params)
   raise "export request failed: no queryId for #{element_id}" unless qid
   status, body = ExportPool.poll_csv_download(qid, ExportPool::Deadline.new(timeout))
@@ -121,6 +136,32 @@ def export_csv(wb, element_id, params, timeout)
   when :timeout then raise "export timed out after #{timeout}s (queryId=#{qid})"
   when :html    then raise "export returned HTML behind a 200 (renderer error, queryId=#{qid})"
   else body
+  end
+end
+
+# Serial fallback transport (no export_pool.rb vendored — see the soft require
+# above): POST the export and poll the download through the shared REST layer,
+# bounded by the same per-CSV --timeout. Same wire flow, same HTML-behind-200
+# guard as the pooled seam.
+def serial_export_csv(wb, element_id, params, timeout)
+  body = { 'elementId' => element_id, 'format' => { 'type' => 'csv' } }
+  body['parameters'] = params if params && !params.empty?
+  res = Sigma.request(:post, "/v2/workbooks/#{wb}/export", body: JSON.generate(body))
+  qid = res.is_a?(Hash) && res['queryId']
+  raise "export request failed: no queryId for #{element_id}" unless qid
+  deadline = Time.now + timeout
+  loop do
+    begin
+      b = Sigma.request(:get, "/v2/query/#{qid}/download", accept: 'text/csv', binary: true)
+      if b && !b.to_s.empty?
+        raise "export returned HTML behind a 200 (renderer error, queryId=#{qid})" if b.to_s.lstrip.start_with?('<')
+        return b
+      end
+    rescue Sigma::Error => e
+      raise unless e.message.lines.first.to_s =~ /\b404\b/ # not materialized yet — keep polling
+    end
+    raise "export timed out after #{timeout}s (queryId=#{qid})" if Time.now > deadline
+    sleep 1
   end
 end
 
@@ -153,7 +194,12 @@ end
 # Every CSV written under --out is the UNTOUCHED wire body; probe-evidence.json
 # binds each file's sha256 to the workbook doc version at probe time. Verdicts
 # are recomputed from these bytes on every run — never reused from a record.
-DOC_VERSION = ExportPool.resolve_doc_version(spec)
+DOC_VERSION = if HAVE_POOL
+                ExportPool.resolve_doc_version(spec)
+              else # same resolution, inlined for twins without export_pool.rb
+                v = spec.is_a?(Hash) ? spec['latestDocumentVersion'] || spec['latestVersion'] : nil
+                v.nil? || v.to_s.empty? ? nil : v.to_s
+              end
 EVIDENCE = {}
 record_evidence = lambda do |fname, text|
   File.write(File.join(OUT, fname), text)
@@ -207,7 +253,9 @@ end
 
 # --- W2.12 pooled prefetch (TRANSPORT ONLY) ----------------------------------
 # Pools exactly the exports the serial path would make — never more. Round 1:
-# value-source baselines for auto-pickable controls + in/out-closure baselines
+# value-source baselines for auto-pickable controls (only where the /columns
+# label resolves — serial pick_value returns SKIP before exporting when it
+# doesn't) + in/out-closure baselines
 # for controls whose flip value is already certain (explicit --value, switch).
 # Round 2 (after value picking): remaining baselines + every flip export. A
 # pooled failure is NOT a verdict — the affected export falls back to the
@@ -224,7 +272,10 @@ unless opts[:no_pool]
       round1 << pick_out_el.call(r) if opts[:check_out]
     elsif %w[list segmented text].include?(el['controlType'].to_s)
       src = value_src.call(r)
-      round1 << src['elementId'] if src
+      # Label check mirrors pick_value: a missing /columns label SKIPs the
+      # control before any export on the serial path — pooling its baseline
+      # here would be an export the serial path never makes (no-waste pin).
+      round1 << src['elementId'] if src && col_label[[src['elementId'], src['columnId']]]
     end
   end
   round1 = round1.compact.uniq.reject { |e| baseline_cache.key?(e) }

@@ -396,7 +396,11 @@ module ExportPool
   # POST and DELETE can never orphan the workbook untraceably
   # (sweep-run-artifacts.rb deletes leftovers from the registry). The lib is
   # soft-required so plugins that don't vendor probe_registry.rb still load;
-  # where it exists, registration is automatic — callers cannot forget it.
+  # where probe_registry.rb IS vendored alongside, registration is automatic —
+  # callers cannot forget it. Where it is NOT (most export_pool twins ship
+  # without it today), pooled probes run UNREGISTERED and the sweep cannot see
+  # them — registration is automatic only where BOTH libs are vendored, not
+  # wherever export_pool.rb alone is.
   # `workdir:`/`script:` only feed the registry record (signature extension by
   # options only — the positional/existing-kwarg contract is FROZEN; lane C's
   # batched probes are the second consumer).

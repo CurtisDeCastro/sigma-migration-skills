@@ -171,7 +171,13 @@ guard = ->(sql) { "SELECT * FROM (\n#{sql}\n) GT_GUARD LIMIT #{row_limit + 1}" }
 # serial per-entry seam and the run still completes.
 pooled = nil # plan-index → [:ok rows]|[:timeout,nil]|[:error,msg]
 pool_meta = nil
-if opts[:conn] && !opts[:no_pool] && n_exec.positive? && Time.now <= deadline
+# !opts[:fixture]: a fixture run is OFFLINE by contract — when both --fixture
+# and --connection-id are given, the fixture branch wins per entry, so firing
+# the live pool here would burn a workbook POST + T exports + DELETE whose
+# results are discarded, and worse, a pooled :timeout would mark entries
+# deadline-skipped BEFORE the fixture branch is consulted (live pool timing
+# corrupting an offline run's statuses/exit).
+if opts[:conn] && !opts[:fixture] && !opts[:no_pool] && n_exec.positive? && Time.now <= deadline
   pool_entries = exec_idx.map do |i|
     { 'sql' => guard.call(entries[i]['sql']),
       'columns' => Array(entries[i]['columns']).map { |c| c['alias'].to_s } }

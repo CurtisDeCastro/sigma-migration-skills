@@ -23,6 +23,7 @@ require 'csv'
 require 'open3'
 require 'tmpdir'
 require 'rbconfig'
+require 'fileutils'
 
 SCRIPTS = __dir__
 REAL_SIGMA_REST = File.expand_path('lib/sigma_rest.rb', SCRIPTS)
@@ -509,6 +510,9 @@ GT_POOL_STUB = <<~'RUBY'
         return { 'queryId' => JSON.parse(body)['elementId'] }
       end
       if method == :get && path.start_with?('/v2/query/')
+        # Download that never materializes: the pooled deadline expires while
+        # polling → per-entry :timeout markers (the deadline-skipped mapping).
+        raise Error, 'stub: HTTP 404 query not yet materialized' if ENV['GTP_NEVER_READY'] == '1'
         qid = path.split('/')[3]
         return '<html>renderer error' if qid == 'probe2' && ENV['GTP_HTML'] == '1'
         if qid == 'probe1' && ENV['GTP_EXPLODE'] == '1'
@@ -666,6 +670,62 @@ Dir.mktmpdir do |dir|
         '--no-pool actuals record transport=serial with per-entry timings', fails)
 end
 
+puts '-- run-ground-truth pooled timeout: deadline-skipped + exit 3 PARTIAL --'
+# The pooled-timeout mapping (pooled[i][0]==:timeout → status deadline-skipped
+# → exit 3): downloads never materialize, the total --timeout expires inside
+# the pool, and every warehouse-sql entry is marked deadline-skipped — the
+# actuals stay PARTIAL and honest, and summary.pool still records the attempt.
+Dir.mktmpdir do |dir|
+  stub_dir = File.join(dir, 'stub')
+  Dir.mkdir(stub_dir)
+  File.write(File.join(stub_dir, 'sigma_rest.rb'), GT_POOL_STUB)
+  gt_plan(dir, 2)
+  env = gtp_env(dir).merge('GTP_NEVER_READY' => '1')
+  _out, err, st = run_stubbed(stub_dir, env, GT_SCRIPT, '--workdir', dir, '--connection-id', 'conn-1',
+                              '--timeout', '2')
+  check(st.exitstatus == 3, "pooled timeout → exit 3 PARTIAL (got #{st.exitstatus})", fails)
+  check(err.include?('[PARTIAL]'), 'PARTIAL warning lands on stderr', fails)
+  doc = JSON.parse(File.read(File.join(dir, 'ground-truth-actuals.json')))
+  skipped = doc['results'].select { |r| r['status'] == 'deadline-skipped' }
+  check(skipped.length == 2 && skipped.all? { |r| r['error'].to_s.include?('pooled') },
+        'both pooled entries marked deadline-skipped with the pooled wording', fails)
+  check(doc['transport'] == 'pooled' && doc['summary']['pool'] &&
+        doc['summary']['pool']['entries'] == 2,
+        'summary.pool still records the attempted pooled transport', fails)
+  check(doc['summary']['deadline_skipped'] == 2 && doc['summary']['complete'] == false,
+        'summary counts the skips; complete=false', fails)
+  log = read_log(env['GTP_LOG'])
+  check(log.count { |r| r['m'] == 'delete' } == 1 && ProbeRegistry.outstanding(dir).empty?,
+        'pooled workbook still deleted + registry zero-open on the timeout path', fails)
+end
+
+puts '-- run-ground-truth --fixture beats --connection-id: zero live calls --'
+# Guard pin: --fixture + --connection-id together must NOT fire the live pool
+# (the fixture branch discards live results per entry, and a pooled :timeout
+# would corrupt the offline run's statuses/exit before the fixture branch is
+# consulted). A fixture run is offline by contract: zero REST calls.
+Dir.mktmpdir do |dir|
+  stub_dir = File.join(dir, 'stub')
+  Dir.mkdir(stub_dir)
+  File.write(File.join(stub_dir, 'sigma_rest.rb'), GT_POOL_STUB)
+  gt_plan(dir, 2)
+  fx = File.join(dir, 'fx')
+  Dir.mkdir(fx)
+  2.times do |i|
+    File.write(File.join(fx, "entry-#{i}.json"),
+               JSON.generate('columns' => ['Region', 'Sales (sum)'], 'rows' => [['East', '100.5']]))
+  end
+  env = gtp_env(dir).merge('GTP_NEVER_READY' => '1') # any live poll would hang toward :timeout — proves none fires
+  _out, _err, st = run_stubbed(stub_dir, env, GT_SCRIPT, '--workdir', dir, '--fixture', fx,
+                               '--connection-id', 'conn-1', '--timeout', '2')
+  check(st.exitstatus.zero?, "fixture + connection-id run exits 0 (got #{st.exitstatus})", fails)
+  check(read_log(env['GTP_LOG']).empty?,
+        'ZERO live REST calls — the pool guard defers to --fixture', fails)
+  doc = JSON.parse(File.read(File.join(dir, 'ground-truth-actuals.json')))
+  check(doc['mode'] == 'fixture' && doc['transport'] == 'fixture' && doc['summary']['ok'] == 2,
+        'fixture verdicts win: mode/transport=fixture, both entries ok', fails)
+end
+
 # ============================================================================
 # Part 6 — W2.12 probe-controls.rb FLIP-EXPORT POOLING: baselines + flips run
 # pooled through ExportPool.pooled_element_exports; verdict logic (row-set
@@ -695,6 +755,10 @@ PC_STUB = <<~'RUBY'
         when 'el-data.flip' then return "Region,Sales\nWest,2\n"
         when 'el-out.base'  then return "K,V\nx,1\n"
         when 'el-out.flip'  then return ENV['PC_LEAK'] == '1' ? "K,V\ny,9\n" : "K,V\nx,1\n"
+        # Served only if the no-waste pin REGRESSES (label-unresolvable
+        # value-source pooled anyway) — keeps the failure a count mismatch,
+        # not an unexpected-path crash.
+        when 'el-data2.base' then return "M,V\n1,2\n"
         end
       end
       raise Error, "stub: unexpected #{method} #{path}"
@@ -706,18 +770,32 @@ RUBY
 
 PC_SCRIPT = File.join(SCRIPTS, 'probe-controls.rb')
 
-def pc_spec(path)
+def pc_spec(path, with_unlabeled: false)
+  elements = [
+    { 'id' => 'ctl-el', 'kind' => 'control', 'controlType' => 'list',
+      'controlId' => 'c-region', 'name' => 'Region Filter', 'values' => ['East'],
+      'source' => { 'kind' => 'source', 'source' => { 'elementId' => 'el-data' },
+                    'columnId' => 'c-reg' },
+      'filters' => [{ 'columnId' => 'c-reg', 'source' => { 'elementId' => 'el-data' } }] },
+    { 'id' => 'el-data', 'kind' => 'table', 'name' => 'Data' },
+    { 'id' => 'el-out', 'kind' => 'bar-chart', 'name' => 'Out Chart' }
+  ]
+  if with_unlabeled
+    # A list control whose value-source column has NO /columns label: serial
+    # pick_value SKIPs it BEFORE any export — the pooled prefetch must not
+    # export its baseline either (no-waste pin, label-unresolvable shape).
+    elements += [
+      { 'id' => 'ctl-mystery', 'kind' => 'control', 'controlType' => 'list',
+        'controlId' => 'c-mystery', 'name' => 'Mystery Filter', 'values' => ['A'],
+        'source' => { 'kind' => 'source', 'source' => { 'elementId' => 'el-data2' },
+                      'columnId' => 'c-unlabeled' },
+        'filters' => [{ 'columnId' => 'c-unlabeled', 'source' => { 'elementId' => 'el-data2' } }] },
+      { 'id' => 'el-data2', 'kind' => 'table', 'name' => 'Data 2' }
+    ]
+  end
   File.write(path, JSON.pretty_generate(
                'workbookId' => 'wb', 'latestDocumentVersion' => 5,
-               'pages' => [{ 'id' => 'p1', 'name' => 'p1', 'elements' => [
-                 { 'id' => 'ctl-el', 'kind' => 'control', 'controlType' => 'list',
-                   'controlId' => 'c-region', 'name' => 'Region Filter', 'values' => ['East'],
-                   'source' => { 'kind' => 'source', 'source' => { 'elementId' => 'el-data' },
-                                 'columnId' => 'c-reg' },
-                   'filters' => [{ 'columnId' => 'c-reg', 'source' => { 'elementId' => 'el-data' } }] },
-                 { 'id' => 'el-data', 'kind' => 'table', 'name' => 'Data' },
-                 { 'id' => 'el-out', 'kind' => 'bar-chart', 'name' => 'Out Chart' }
-               ] }]))
+               'pages' => [{ 'id' => 'p1', 'name' => 'p1', 'elements' => elements }]))
 end
 
 def pc_export_posts(log)
@@ -802,6 +880,75 @@ Dir.mktmpdir do |dir|
   r4 = JSON.parse(File.read(File.join(out4, 'probe-results.json')))
   check(r4.any? { |r| r['result'] == 'FAIL' && r['note'].to_s.include?('closure walk missed an edge') },
         'leak FAIL verdict computed from pooled raw bytes (verdict logic untouched)', fails)
+end
+
+puts '-- probe-controls no-waste pin: label-unresolvable value-source exports NOTHING --'
+# Serial pick_value SKIPs a list control whose value-source column has no
+# /columns label BEFORE exporting; the pooled round-1 prefetch must mirror
+# that check or it pools a baseline the serial path never pays for.
+Dir.mktmpdir do |dir|
+  stub_dir = File.join(dir, 'stub')
+  Dir.mkdir(stub_dir)
+  File.write(File.join(stub_dir, 'sigma_rest.rb'), PC_STUB)
+  spec_path = File.join(dir, 'pc-spec.json')
+  pc_spec(spec_path, with_unlabeled: true)
+  log = File.join(dir, 'pc-log.jsonl')
+  env = { 'PC_SPEC' => spec_path, 'PC_LOG' => log }
+  out5 = File.join(dir, 'probe-out-unlabeled-pooled')
+  _o5, _e5, s5 = run_stubbed(stub_dir, env, PC_SCRIPT, '--workbook-id', 'wb', '--out', out5)
+  check(s5.exitstatus.zero?, "pooled run with unlabeled control exits 0 (got #{s5.exitstatus})", fails)
+  r5 = JSON.parse(File.read(File.join(out5, 'probe-results.json')))
+  by5 = r5.each_with_object({}) { |r, h| h[r['control']] = r }
+  check(by5['c-region'] && by5['c-region']['result'] == 'PASS',
+        'labeled control still probes to PASS', fails)
+  check(by5['c-mystery'] && by5['c-mystery']['result'] == 'SKIP' &&
+        by5['c-mystery']['note'].to_s.include?('no /columns label'),
+        'unlabeled value-source control SKIPs with the label note', fails)
+  posts5 = pc_export_posts(log)
+  check(posts5.length == 2 && posts5.none? { |p| p['body'].include?('el-data2') },
+        "no-waste pin: pooled run exports 2 (no el-data2 baseline; got #{posts5.length})", fails)
+
+  # Serial parity: identical verdicts, identical export count for the shape.
+  File.write(log, '')
+  out6 = File.join(dir, 'probe-out-unlabeled-serial')
+  _o6, _e6, s6 = run_stubbed(stub_dir, env, PC_SCRIPT, '--workbook-id', 'wb', '--out', out6, '--no-pool')
+  check(s6.exitstatus.zero? && JSON.parse(File.read(File.join(out6, 'probe-results.json'))) == r5,
+        'serial run: identical verdicts for the unlabeled shape (transport-only)', fails)
+  check(pc_export_posts(log).length == 2,
+        'serial run also exports exactly 2 (the pin holds on both transports)', fails)
+end
+
+puts '-- probe-controls without export_pool.rb: loads + serial fallback seam --'
+# The probe-controls manifest targets are a SUPERSET of export_pool.rb's (e.g.
+# the domo twin has no scripts/lib/export_pool.rb). A twin in that shape must
+# still LOAD (soft require) and complete the probe on the serial fallback
+# seam — same verdicts, same export count, transport recorded as serial.
+Dir.mktmpdir do |dir|
+  stub_dir = File.join(dir, 'stub')
+  Dir.mkdir(stub_dir)
+  File.write(File.join(stub_dir, 'sigma_rest.rb'), PC_STUB)
+  fb_dir = File.join(dir, 'twin-without-pool')
+  Dir.mkdir(fb_dir)
+  Dir.mkdir(File.join(fb_dir, 'lib'))
+  FileUtils.cp(PC_SCRIPT, File.join(fb_dir, 'probe-controls.rb'))
+  FileUtils.cp(File.join(SCRIPTS, 'lib', 'control_lint.rb'), File.join(fb_dir, 'lib', 'control_lint.rb'))
+  # deliberately NO lib/export_pool.rb — the domo manifest shape
+  spec_path = File.join(dir, 'pc-spec.json')
+  pc_spec(spec_path)
+  log = File.join(dir, 'pc-log.jsonl')
+  env = { 'PC_SPEC' => spec_path, 'PC_LOG' => log }
+  out7 = File.join(dir, 'probe-out-fallback')
+  _o7, e7, s7 = run_stubbed(stub_dir, env, File.join(fb_dir, 'probe-controls.rb'),
+                            '--workbook-id', 'wb', '--out', out7)
+  check(s7.exitstatus.zero?, "no-export_pool twin exits 0 (got #{s7.exitstatus}; stderr: #{e7[0, 200]})", fails)
+  r7 = JSON.parse(File.read(File.join(out7, 'probe-results.json')))
+  check(r7.length == 1 && r7[0]['result'] == 'PASS' && r7[0]['value'] == 'West',
+        'fallback seam still auto-picks the flip and verdicts PASS', fails)
+  check(pc_export_posts(log).length == 2,
+        'fallback transport makes exactly the serial exports (2)', fails)
+  ev7 = JSON.parse(File.read(File.join(out7, 'probe-evidence.json')))
+  check(ev7['transport'] == 'serial' && ev7['doc_version'] == '5',
+        'evidence sidecar records transport=serial + doc version without the pool lib', fails)
 end
 
 puts
