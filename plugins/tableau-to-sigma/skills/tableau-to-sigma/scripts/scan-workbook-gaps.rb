@@ -482,6 +482,118 @@ def detect_multi_datasource(xml, blend_plan = nil)
   [feat, detail, { 'independent' => true, 'datasources' => entries }]
 end
 
+# Detect the SINGLE-datasource multi-table relationship model (2020.2+
+# <object-graph>, the "noodle") — the shape the field failure proved invisible:
+# detect_multi_datasource returns early at ds_info.size < 2, so a 6-table
+# one-datasource workbook printed a reassuring "Datasources: 1" and sailed past
+# Phase 0 while the converter mis-elected a dimension as the fact and baked
+# wrong-FROM helper SQL. ONE detection pass feeds THREE outputs (same contract
+# style as detect_multi_datasource):
+#   - gap-report row(s): ✅-auto when every relationship carries a wire-able
+#     serialized equality key (a fully-wired noodle must NOT stop), ❌-unhandled
+#     when any relationship lacks one (no key / computed-only / range-only /
+#     unresolved endpoint) or any logical table is untouched by relationships —
+#     the DISCONNECTED-TABLES outcome. The ❌ row drives migrate-tableau's
+#     exit-11 stop with the per-relationship punch list in the blurb.
+#   - gaps-JSON `object_model` detail (per-relationship status).
+#   - object-graph-plan.json sidecar next to the report (fact candidate by
+#     relationship degree + the relationship wiring table) — the operator's
+#     manual-wiring punch list, modeled on multi-ds-plan.json.
+# Raw-text based (handles both plain and _.fcp.-wrapped spellings); works on
+# the same content string the INVENTORY scan uses.
+def detect_object_model(content)
+  features = []
+  detail = []
+  plan_entries = []
+  # Split into datasource chunks (same seam dominant_fact_table uses); only
+  # real datasource DEFINITIONS carry <object-graph>/<relation type='collection'>.
+  content.split(/<datasource\s/).drop(1).each do |chunk|
+    attrs = chunk[/\A([^>]*)>/, 1].to_s
+    ds_name = attrs[/\bname='([^']*)'/, 1]
+    next if ds_name.nil? || ds_name == 'Parameters' || ds_name.start_with?('Parameters ')
+    graph_open = chunk[/<((?:[^<>\s]*\.true\.\.\.)?object-graph)[\s>]/, 1]
+    next unless graph_open
+    graph = chunk[%r{<#{Regexp.escape(graph_open)}[\s>].*?</#{Regexp.escape(graph_open)}>}m] || chunk
+    # Logical tables: object-graph <object id=...> entries; fall back to the
+    # physical collection children when <objects> is absent.
+    object_ids = graph.scan(/<object\s[^>]*\bid='([^']+)'/).flatten
+    rel_names = chunk.scan(/<(?:[^<>\s]*\.\.\.)?relation\s[^>]*?\bname='([^']+)'[^>]*?\btype='(?:table|text)'/m).flatten.uniq
+    logical = object_ids.any? ? object_ids.map { |o| o.sub(/_[0-9A-Fa-f]{16,}\z/, '') } : rel_names
+    logical = logical.uniq
+    next if logical.size <= 1 # single object = legacy-migrated join model — flat table, no noodle semantics
+    rel_blocks = graph.scan(%r{<relationship>.*?</relationship>}m)
+    # Per-relationship wiring status (mirrors what the converter will do).
+    rel_rows = rel_blocks.map do |b|
+      eps = b.scan(/<(?:[^<>\s]*\.\.\.)?(first|second)-end-point\b[^>]*\bobject-id='([^']+)'/)
+      first = eps.find { |k, _| k == 'first' }&.last.to_s
+      second = eps.find { |k, _| k == 'second' }&.last.to_s
+      base = ->(oid) { oid.sub(/_[0-9A-Fa-f]{16,}\z/, '') }
+      resolves = ->(oid) { logical.any? { |l| l == base.call(oid) || oid == l || oid.start_with?("#{l}_") } }
+      has_eq = b =~ /<expression\s[^>]*op='='/
+      phys_ops = b.scan(/<expression\s[^>]*op='\[[^\]']+\]'/).size
+      non_eq = b =~ /op='(?:&lt;|&gt;)=?'|op='!='|op='&lt;&gt;'/
+      status =
+        if first.empty? || second.empty? || !resolves.call(first) || !resolves.call(second)
+          'endpoint-unresolved'
+        elsif has_eq && phys_ops >= 2
+          'wired'
+        elsif has_eq
+          'computed-only-key'
+        elsif non_eq
+          'non-equality-key'
+        else
+          'no-serialized-key'
+        end
+      keys = b.scan(/<expression\s[^>]*op='\[([^\]']+)\]'/).flatten.each_slice(2).to_a
+      { 'first' => base.call(first), 'second' => base.call(second), 'status' => status,
+        'keys' => keys }
+    end
+    degree = Hash.new(0)
+    rel_rows.each { |r| degree[r['first']] += 1; degree[r['second']] += 1 }
+    ranked = degree.sort_by { |_k, v| -v }
+    fact_candidate = ranked[0] && (ranked[1].nil? || ranked[0][1] > ranked[1][1]) ? ranked[0][0] : nil
+    untouched = logical.reject { |l| degree.key?(l) }
+    unwired = rel_rows.reject { |r| r['status'] == 'wired' }
+    caption = attrs[/\bcaption='([^']*)'/, 1] || ds_name
+    plan_entries << {
+      'datasource' => ds_name,
+      'caption' => caption,
+      'objects' => logical,
+      'fact_candidate' => fact_candidate,
+      'relationships' => rel_rows,
+      'untouched_objects' => untouched
+    }
+    detail << { 'datasource' => ds_name, 'caption' => caption, 'objects' => logical.size,
+                'relationships' => rel_rows.size, 'unwired' => unwired.size,
+                'untouched_objects' => untouched }
+    if unwired.any? || untouched.any? || rel_rows.empty?
+      punch = []
+      punch.concat(unwired.map { |r| "#{r['first']}↔#{r['second']}: #{r['status']}" })
+      punch.concat(untouched.map { |t| "#{t}: no relationship touches it" })
+      punch = ['ALL: no <relationship> entries serialized'] if rel_rows.empty?
+      blurb = "One datasource, #{logical.size} logical tables (2020.2+ relationship/object-model), but the DM " \
+              "would contain DISCONNECTED tables: #{punch.join('; ')}. The converter refuses to guess join keys " \
+              '(refuse-don\'t-guess) — each listed pair needs MANUAL wiring: add the relationship LEFT from the ' \
+              'fact (many) side to the unique dim side on the correct key column pair, then re-validate. ' \
+              "Fact candidate by relationship degree: #{fact_candidate || 'AMBIGUOUS — verify'}. Full wiring " \
+              'table: object-graph-plan.json (this directory). To proceed after wiring: patch dm-spec.json and ' \
+              're-enter the gated spine via --reuse-dm (never hand-POST).'
+      features << { name: 'Object-model relationships missing serialized join keys (disconnected tables)',
+                    status: :unhandled, count: (unwired.size + untouched.size).clamp(1, 99), blurb: blurb }
+    else
+      blurb = "One datasource, #{logical.size} logical tables joined by #{rel_rows.size} relationship(s), all " \
+              'carrying serialized equality keys — the converter wires them and ELECTS the fact by evidence ' \
+              "(relationship degree → measure columns → naming → width; candidate here: #{fact_candidate || 'ambiguous'}). " \
+              'VERIFY the "Object-model fact election" line in the converter output names the true fact — every ' \
+              'LOD/Top-N/window helper builds FROM it (override: --fact-table). Wiring table: object-graph-plan.json.'
+      features << { name: 'Relationship (object-model / noodle) datasource — keys serialized',
+                    status: :auto, count: logical.size, blurb: blurb }
+    end
+  end
+  return [[], nil, nil] if plan_entries.empty?
+  [features, detail, { 'object_model' => true, 'datasources' => plan_entries }]
+end
+
 # --- Field-usage + calc-dependency analysis --------------------------------
 # Works purely from the .twb — no VDS/metadata graph needed. Produces field
 # statistics (source/calc/param split, used vs dead), calc classification
@@ -730,6 +842,8 @@ def main
   results.concat(blend_features)
   multi_ds_feature, multi_ds_detail, multi_ds_plan = detect_multi_datasource(xml, blend_plan)
   results << multi_ds_feature if multi_ds_feature
+  object_model_features, object_model_detail, object_model_plan = detect_object_model(content)
+  results.concat(object_model_features)
   md_path = out
   json_path = out.sub(/\.md$/, '.json')
 
@@ -748,6 +862,15 @@ def main
          multi_ds_plan['datasources'].map { |d| "#{d['caption']}→#{d['worksheets'].length} worksheet(s)" }.join(', ') + ')'
   end
 
+  if object_model_plan
+    object_model_plan_path = File.join(File.dirname(File.expand_path(out)), 'object-graph-plan.json')
+    File.write(object_model_plan_path, JSON.pretty_generate(object_model_plan))
+    warn "wrote #{object_model_plan_path} (" +
+         object_model_plan['datasources'].map { |d|
+           "#{d['caption']}: #{d['objects'].length} logical table(s), fact candidate #{d['fact_candidate'] || 'AMBIGUOUS'}"
+         }.join('; ') + ')'
+  end
+
   fields = nil
   begin
     fields = analyze_fields(xml, content) if xml
@@ -762,6 +885,7 @@ def main
   }
   json_payload['field_statistics'] = fields.reject { |k, _| k == 'components' } if fields
   json_payload['multi_datasource'] = multi_ds_detail if multi_ds_detail
+  json_payload['object_model'] = object_model_detail if object_model_detail
   File.write(json_path, JSON.pretty_generate(json_payload))
 
   if fields && !fields['components'].empty?
