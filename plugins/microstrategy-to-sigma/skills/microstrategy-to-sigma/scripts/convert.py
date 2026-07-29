@@ -1292,6 +1292,28 @@ def main():
     open(args.out_layout, "w").write(layout_xml)
     json.dump(control_scope, open(args.control_scope_out, "w"), indent=1)
 
+    # gate 7b (runtime control-flip proof) DEFAULT-ON: stamp control_flip_required
+    # into <workdir>/migrate-state.json (next to the workbook spec) so the agent's
+    # `assert-phase6-ran.rb --workdir <dir>` auto-enables the live flip test — a
+    # control that lints clean (gate 7) but is INERT at runtime then FAILS the
+    # gate (exit 21) instead of shipping. Mirrors the tableau pass-1 stamp; merge,
+    # never clobber, any existing state.
+    _state_path = os.path.join(os.path.dirname(os.path.abspath(args.out_wb)),
+                               "migrate-state.json")
+    try:
+        _state = {}
+        if os.path.exists(_state_path):
+            with open(_state_path) as _sf:
+                _loaded = json.load(_sf)
+                if isinstance(_loaded, dict):
+                    _state = _loaded
+        _state["control_flip_required"] = True
+        json.dump(_state, open(_state_path, "w"), indent=1)
+        print(f"gate: stamped control_flip_required=true -> {_state_path} "
+              f"(gate 7b runtime control-flip proof DEFAULT-ON)")
+    except OSError:
+        pass  # state bookkeeping never fails the conversion
+
     print(f"fact table: {b.table_info[b.fact_tid]['name']}")
     for j in b.derive_joins():
         print(f"join: {b.table_info[b.fact_tid]['tableName']}.{j['fact_col']} = "

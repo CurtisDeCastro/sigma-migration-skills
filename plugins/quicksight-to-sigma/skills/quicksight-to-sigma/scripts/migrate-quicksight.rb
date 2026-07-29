@@ -671,9 +671,14 @@ fin_out, fin_st = Open3.capture2e(*fin)
 fin_out.each_line { |l| puts "   #{l.rstrip}" }
 parity_ok = fin_st.success?
 
-# the shared HARD GATE: parity sentinel + orphan + error-column + layout checks.
+# the shared HARD GATE: parity sentinel + orphan + error-column + layout checks,
+# plus gate 7b — the runtime control-flip proof (--require-control-flip): flips
+# each control live via probe-controls.rb and FAILS if a control is wired but
+# INERT (a static-lint-clean spec that does nothing when the user changes it).
+# DEFAULT-ON here, mirroring looker; waive with --skip-control-flip on this gate.
 gate_out, gate_st = Open3.capture2e('ruby', File.join(HERE, 'assert-phase6-ran.rb'),
-                                    '--workdir', WORK, '--workbook-id', wb_id)
+                                    '--workdir', WORK, '--workbook-id', wb_id,
+                                    '--require-control-flip')
 gate_out.each_line { |l| puts "   #{l.rstrip}" }
 gate_ok = gate_st.success?
 
