@@ -408,6 +408,28 @@ end
     request(:post, "/api/metadata/graphql", body: body)
   end
 
+  # Dashboard → member-sheet membership for one workbook (W2.20 scoped
+  # discovery). Returns [{'name' => .., 'sheets' => [{'name' => .., 'luid' =>
+  # ..}, ...]}, ...] — a Sheet's luid is its REST view id (hidden sheets carry
+  # an empty luid and have no REST view to fetch). Returns nil when the
+  # Metadata API has no answer (workbook not indexed yet — freshly-published
+  # content lags the index — or GraphQL-level errors); callers treat nil as
+  # membership-unresolvable and FAIL OPEN. Transport errors raise
+  # Tableau::Error like every other call.
+  def graphql_workbook_dashboards(workbook_luid)
+    query = <<~GQL
+      {
+        workbooks(filter:{luid:"#{workbook_luid}"}) {
+          dashboards { name sheets { name luid } }
+        }
+      }
+    GQL
+    r = graphql(query)
+    return nil if r.nil? || (r['errors'] && !r['errors'].empty?)
+    wbs = r.dig('data', 'workbooks')
+    wbs && wbs.first && wbs.first['dashboards']
+  end
+
   def graphql(query, variables: nil)
     payload = { query: query }
     payload[:variables] = variables if variables
