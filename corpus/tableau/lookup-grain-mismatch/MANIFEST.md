@@ -37,17 +37,22 @@ metric, and nothing in the pipeline errors.
 ## Expected gate behaviors (encoded in checks.sh)
 
 1. **Derivation**: `JoinPlan.derive(nil, twb, db:, schema:)` emits exactly the
-   pinned 3 federated-join entries. Honest current-code warts are pinned on
-   purpose: the dim probe keys fold the disambiguated captions
-   (`Buyer Key (BUYER_DIM)` → `BUYER_KEY_(BUYER_DIM)` — no such physical
-   column), and the self-join `right_table` keeps the unprobeable VC-inode
-   FQN (`eeee….SALES_FACT (ANALYTICS.SALES_FACT)`) because the alias label
-   has no paren path. Later PRs that fix either fold flip this pin.
-2. **Probe**: `probe-join-keys.rb --fixture` → dims `unique`, self-join
-   `non-unique` → **exit 2** with the JOIN-CARDINALITY FATAL block naming
-   the entry, the compound keys, and sample duplicate keys.
+   pinned 3 federated-join entries. W2.9 fixed the caption fold: the dim probe
+   keys now strip the balanced role parenthetical
+   (`Buyer Key (BUYER_DIM)` → `BUYER_KEY`, a real physical column). The
+   remaining honest wart stays pinned on purpose: the self-join `right_table`
+   keeps the unprobeable VC-inode FQN
+   (`eeee….SALES_FACT (ANALYTICS.SALES_FACT)`) because the alias label has no
+   paren path. A later PR that fixes that fold flips this pin.
+2. **Probe**: `probe-join-keys.rb --fixture` → dims `unique`; the self-join is
+   **refused** by the W2.9 identifier legality oracle (`sql_ident_check`) —
+   the inode FQN never reaches SQL, status `error`, **exit 3**.
+   FATAL coverage is kept in-case: re-probing with the `right_table`
+   legalized to `ANALYTICS.SALES_FACT` proves it `non-unique` → **exit 2**
+   with the JOIN-CARDINALITY FATAL block naming the entry, the compound
+   keys, and sample duplicate keys.
 3. **Gate 16** (`assert-phase6-ran.rb`, exit 23): blocks GREEN while the
-   non-unique entry is unresolved; passes after
+   refused entry is unresolved (UNPROVEN); passes after
    `probe-join-keys.rb --resolve 2 --how preaggregated --reason "..."`
    records the evidence.
 

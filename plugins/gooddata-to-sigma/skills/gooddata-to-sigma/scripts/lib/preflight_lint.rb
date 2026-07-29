@@ -362,6 +362,20 @@ def lint_warnings(spec, scope: nil)
         end
       end
 
+      # N2: a column display name containing '/' is ambiguous against the
+      # [Element/Column] path syntax every cross-element formula ref uses —
+      # downstream refs to it split on the slash and resolve a fragment
+      # (Sigma-side 'dependency not found', false PASS/FAIL in ref checks),
+      # and converters DROP such columns from derived elements. WARN, not a
+      # violation: a slash-named column nothing references cross-element is
+      # harmless, so failing the POST for it would be a false stop.
+      ((el['columns'] || []) + (el['metrics'] || [])).each do |c|
+        next unless c.is_a?(Hash) && c['name'].to_s.include?('/')
+        warns << "N2 column '#{c['name']}' on element '#{name}': display name contains '/' — ambiguous against " \
+                 "the [Element/Column] reference path syntax; cross-element refs to it mis-resolve and derived " \
+                 'elements drop it. Rename the column (remove the slash) before wiring anything to it.'
+      end
+
       next unless kind == 'control'
       ct = el['controlType'].to_s
 

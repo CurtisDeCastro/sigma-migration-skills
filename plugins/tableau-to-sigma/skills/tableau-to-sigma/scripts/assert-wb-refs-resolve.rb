@@ -192,7 +192,27 @@ wb_elements.each_with_index do |el, i|
     # reachability guard), NOT a column. Resolving the whole "RelName/Field" string
     # as a column name was a false-negative on surfaced FIXED-LOD columns
     # (e.g. [Metric Series/FIXED Year/Revenue World]).
-    col = col_raw.include?('/') ? col_raw.split('/').last : col_raw
+    #
+    # TWO-SEGMENT ESCAPE (ported from mechanical-specs.rb's derived-rel checker,
+    # the wave-2 slash fix): a COLUMN NAME may itself contain '/' (e.g.
+    # "Date (Month /Year)", "Margin Pct H/L") — an unconditional split resolved
+    # such a ref as its final fragment ("Year)"), a false FAIL, or a false PASS
+    # when a real same-named column existed. If the WHOLE slashed tail names a
+    # real column (in the DM or on the ref's own internal element), it is a
+    # 2-segment [Element/Column] ref — check it as-is; only otherwise is the
+    # tail a relationship path whose final segment is the column.
+    col =
+      if col_raw.include?('/')
+        whole = norm(col_raw)
+        internal_names = (wb_internal[prefix.strip] || {})[:names]
+        if available.include?(whole) || internal_names&.include?(whole)
+          col_raw
+        else
+          col_raw.split('/').last
+        end
+      else
+        col_raw
+      end
     k = norm(col)
     rec = (refs[k] ||= { display: col.strip, elements: Set.new })
     rec[:elements] << prefix.strip

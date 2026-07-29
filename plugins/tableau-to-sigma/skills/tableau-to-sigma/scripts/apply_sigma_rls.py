@@ -267,8 +267,26 @@ def apply_from_security(dm_id, security, do_apply, do_provision):
     if not isinstance(spec, dict):
         sys.exit("DM spec came back non-JSON — cannot auto-apply.")
     applied = 0
+    needs_decision = 0
     def _elname(e): return e.get('name') or ((e.get('source') or {}).get('path') or ['?'])[-1]
     for rule in security:
+        if rule.get("kind") == "rls-entitlement-table":
+            # Structural entitlement-table detection (owner veto: NEVER
+            # auto-applied — the port is a design decision, not a patch).
+            # Until decided, the entitlement relationship in the DM is an
+            # UNCONSTRAINED live join: the source restriction is gone and
+            # multi-entitlement users fan out row counts.
+            needs_decision += 1
+            ent = rule.get("entitlement") or {}
+            print(f"ENTITLEMENT-TABLE RLS → element '{rule.get('elementName')}' "
+                  f"(identity column [{ent.get('identityColumn')}], "
+                  f"keys {[(k.get('entitlementColumn'), k.get('relatedColumn')) for k in (ent.get('keys') or [])]})")
+            print("  ⚠ NOT auto-applied (by design). Choose a port strategy and author it, then re-run the checkpoint:")
+            for s in (ent.get("strategies") or []):
+                print(f"    - {s}")
+            print("  Decision doc: refs/security-rls.md §Entitlement-table pattern. A loud Skip leaves the")
+            print("  relationship as an unconstrained join — confirm explicitly before skipping.")
+            continue
         el = _resolve_element(spec, rule.get("elementId"), rule.get("elementName"))
         if not el:
             print(f"⚠ {rule.get('kind')} on element '{rule.get('elementName')}' — not found in DM {dm_id}; skipped."); continue
@@ -300,6 +318,9 @@ def apply_from_security(dm_id, security, do_apply, do_provision):
         print(f"PUT spec -> applied {applied} rule(s):", (json.dumps(res)[:200] if isinstance(res, dict) else str(res)[:200]))
     elif not do_apply:
         print("\n(plan only — pass --apply --dm-id <id> to PATCH these into the DM spec; --provision to create attributes/teams.)")
+    if needs_decision:
+        print(f"\n⚠ {needs_decision} entitlement-table rule(s) still need a Port/Customize/Skip decision — the model is NOT")
+        print("  safe to share until each is authored (strategy A/B/C) or loudly skipped (refs/security-rls.md).")
     return 0
 
 
@@ -326,9 +347,17 @@ def main():
     if a.from_security and a.print_plan:
         raw = json.load(open(a.from_security))
         security = raw.get("security", raw) if isinstance(raw, dict) else raw
-        attrs, teams, n_email = set(), set(), 0
+        attrs, teams, n_email, n_ent = set(), set(), 0, 0
         print(f"RLS/CLS plan from {a.from_security}: {len(security)} rule(s)")
         for r in security:
+            if r.get("kind") == "rls-entitlement-table":
+                n_ent += 1
+                ent = r.get("entitlement") or {}
+                print(f"  • ENTITLEMENT TABLE '{r.get('elementName')}' (identity [{ent.get('identityColumn')}]) — "
+                      f"needs a Port/Customize/Skip decision; NEVER auto-applied. Strategies:")
+                for s in (ent.get("strategies") or []):
+                    print(f"      - {s[:110]}")
+                continue
             rls = r.get("rls", {})
             for x in (rls.get("userAttributes") or []): attrs.add(x)
             for t in (rls.get("teams") or []): teams.add(t)
@@ -336,6 +365,9 @@ def main():
             print(f"  • {rls.get('name') or r.get('source')} → element '{r.get('elementName')}': {rls.get('formula','')[:90]}")
         print(f"provision: {len(attrs)} user attribute(s) {sorted(attrs)}; {len(teams)} team(s) {sorted(teams)}; "
               f"{n_email} rule(s) use CurrentUserEmail (no provisioning)")
+        if n_ent:
+            print(f"⚠ {n_ent} entitlement-table rule(s) require a strategy decision (A/B/C) before the model is safe "
+                  "to share — an undecided entitlement join is UNCONSTRAINED (fan-out + restriction dropped).")
         return
 
     # Batch mode: ingest a converter's result.security[] and provision + apply all rules.

@@ -168,6 +168,24 @@ module MechanicalSpecs
     e['name'] || display_name((e.dig('source', 'path') || []).last.to_s)
   end
 
+  # Dimension-shaped element name test — shared by pick_fact and the
+  # migrate-tableau fact-resolution fallbacks. Catches:
+  #   - "Dim <X>" / "<X> Dim" (word-form, the date-crosstab regression)
+  #   - CONCATENATED dim names — "Dimsites", "Dimdates View", "Vdimdates View"
+  #     (field failure: /(^Dim\b| Dim$)/i has no word boundary INSIDE
+  #     "DIMSITES", so concatenated dims stayed fact-eligible and the widest
+  #     dim view won the election)
+  # A " View" suffix (the converter's derived elements) is stripped first, so
+  # "Sites Dim View" and "Dimsites View" are both dim-like.
+  def dim_like?(name)
+    n = name.to_s.sub(/\s+view\z/i, '').strip
+    return false if n.empty?
+    n.split(/[\s_]+/).any? do |t|
+      tl = t.downcase.sub(/\A(vw|v)(?=dim)/, '') # vw-/v-prefixed concatenated dim views
+      tl.start_with?('dim')
+    end
+  end
+
   # Pick the CHART-READY fact element. The converter builds a derived "<Fact>
   # View" element (kind:table sourcing the base fact) that DENORMALIZES every
   # cross-element + calc column the dashboards plot — base warehouse-table
@@ -176,12 +194,8 @@ module MechanicalSpecs
   def pick_fact(model, prefer_table: nil)
     els = all_elements(model)
     return nil if els.empty?
-    # A dimension element's name is "<X> Dim" (trailing) OR "Dim <X>" (leading,
-    # e.g. "Dim Time") — exclude BOTH so a narrow date/time dim can never be
-    # chosen as the fact (the date-crosstab regression: "Dim Time" slipped past a
-    # trailing-only / Dim$/ and won max_by, making the workbook master source the
-    # wrong element).
-    dim_re = /(^Dim\b| Dim$)/i
+    # Dimension exclusion via dim_like? — leading "Dim <X>", trailing "<X> Dim",
+    # AND concatenated "Dimsites"/"Vdimdates" forms (see dim_like? above).
     by_id = els.each_with_object({}) { |e, h| h[e['id']] = e }
     # The warehouse table an element resolves to (its own path, or its source
     # element's path for a derived view). Used to honor `prefer_table`.
@@ -193,7 +207,7 @@ module MechanicalSpecs
       last.to_s.upcase
     end
     derived = els.select { |e| e.dig('source', 'kind') == 'table' && e.dig('source', 'elementId') }
-                 .reject { |e| elem_name(e) =~ dim_re }
+                 .reject { |e| dim_like?(elem_name(e)) }
     # Base candidates are warehouse-table elements OR custom-SQL ('sql') elements —
     # the modern Tableau object/relationship model emits one kind:'sql' element per
     # logical object (often the only kind present in a multi-custom-SQL workbook).
@@ -211,7 +225,7 @@ module MechanicalSpecs
       return dpt.max_by { |e| (e['columns'] || []).size } if dpt.any?
       bpt = base.select { |e| el_table.call(e) == pt }
       unless bpt.empty?
-        f = bpt.reject { |e| elem_name(e) =~ dim_re }
+        f = bpt.reject { |e| dim_like?(elem_name(e)) }
         return (f.empty? ? bpt : f).max_by { |e| (e['columns'] || []).size }
       end
     end
@@ -219,8 +233,48 @@ module MechanicalSpecs
     # Without 'sql' here, pick_fact returned nil and the whole mechanical path
     # FATAL-aborted on object-model workbooks (the DDMX empty-DM dead-end).
     return nil if base.empty?
-    facts = base.reject { |e| elem_name(e) =~ dim_re }
+    facts = base.reject { |e| dim_like?(elem_name(e)) }
     (facts.empty? ? base : facts).max_by { |e| (e['columns'] || []).size }
+  end
+
+  # Fact-table hint for a SINGLE-datasource multi-table (object-model /
+  # "noodle") workbook — the shape dominant_fact_table cannot help with (it
+  # needs a landing manifest and >=2 datasources). Derived from the .twb's own
+  # <object-graph>: the logical table touching the most relationships is the
+  # fact/base candidate (mirrors the converter's election tier 1). Regex-based
+  # (FCP-wrapped and plain spellings both matched); returns the UPPER last
+  # path segment of that table's physical relation, or nil when the workbook
+  # has no object graph, a single logical table, no relationships, or a tie
+  # (never guess on ambiguous evidence).
+  def object_model_fact_table(twb_text)
+    return nil unless twb_text
+    text = twb_text.to_s
+    # relation name -> physical table (last [SEG]); collection children only.
+    rel_tables = {}
+    text.scan(/<(?:[^<>\s]*\.\.\.)?relation\s[^>]*?name='([^']+)'[^>]*?table='([^']+)'/m) do |nm, tbl|
+      seg = tbl.scan(/\[([^\]]+)\]/).flatten.last || tbl.gsub(/[\[\]]/, '')
+      rel_tables[nm] ||= seg
+    end
+    # Endpoint object-ids per relationship (plain or _.fcp.-wrapped end-points).
+    degree = Hash.new(0)
+    text.scan(/<(?:[^<>\s]*\.true\.\.\.)?(?:first|second)-end-point\b[^>]*\bobject-id='([^']+)'/) do |(oid)|
+      base = oid.sub(/_[0-9A-Fa-f]{16,}\z/, '')
+      degree[base] += 1
+    end
+    return nil if degree.size < 2
+    ranked = degree.sort_by { |_k, v| -v }
+    return nil if ranked[1] && ranked[0][1] == ranked[1][1] # tie — refuse
+    winner = ranked[0][0]
+    tbl = rel_tables[winner]
+    if tbl.nil?
+      # Object-ids are '<RELATION_NAME>_<hex-suffix>' — match the relation whose
+      # name the id starts with (mirrors the converter's objId matching), then
+      # case-insensitively, before giving up to the raw id.
+      key = rel_tables.keys.find { |k| winner == k || winner.start_with?("#{k}_") } ||
+            rel_tables.keys.find { |k| k.casecmp?(winner) || winner.upcase.start_with?("#{k.upcase}_") }
+      tbl = key ? rel_tables[key] : winner
+    end
+    tbl.to_s.split('.').last&.upcase
   end
 
   # The landed table (UPPER last path segment) of the datasource the DASHBOARD
@@ -232,7 +286,16 @@ module MechanicalSpecs
   def dominant_fact_table(twb_text, manifest_path)
     return nil unless twb_text && manifest_path && File.exist?(manifest_path.to_s)
     entries = (JSON.parse(File.read(manifest_path.to_s)) rescue nil)
-    return nil unless entries.is_a?(Array) && entries.size > 1 # single-source: no ambiguity
+    return nil unless entries.is_a?(Array) && !entries.empty?
+    if entries.size == 1
+      # Single landed datasource: unambiguous — prefer its table outright.
+      # (Previously returned nil here, which disabled prefer_table for every
+      # single-datasource workbook and let the width heuristic elect a dim
+      # view on multi-table models; pick_fact only RESTRICTS when the hinted
+      # table matches an element, so this can never make the pick worse.)
+      sf = entries[0] && entries[0]['sf_table']
+      return sf ? sf.to_s.split('.').last&.upcase : nil
+    end
 
     # Per-datasource: its caption AND its embedded .hyper basename. Split on the
     # datasource OPEN tag (`<datasource ` — a trailing space, so it never matches
@@ -769,10 +832,24 @@ module MechanicalSpecs
   #   - mcp_build nil     → the HOSTED converter MCP over HTTP
   #     (https://sigma-data-model-mcp.onrender.com/mcp via lib/mcp_convert.py),
   #     used ONLY on explicit --converter hosted opt-in (uploads the .twb).
-  def run_converter(twb_path:, conn:, db:, schema:, mcp_build:, workdir:, datasource_index: 0, table_mapping: nil)
-    return run_converter_hosted(twb_path: twb_path, conn: conn, db: db, schema: schema,
-                                workdir: workdir, datasource_index: datasource_index,
-                                table_mapping: table_mapping) if mcp_build.nil?
+  def run_converter(twb_path:, conn:, db:, schema:, mcp_build:, workdir:, datasource_index: 0, table_mapping: nil, fact_table: nil)
+    # fact_table: operator override for the object-model fact election
+    # (--fact-table). Local-build path only — the hosted MCP tool's arg schema
+    # doesn't carry it (the local vendored bundle is the normal path anyway).
+    if mcp_build.nil?
+      if fact_table && !fact_table.to_s.strip.empty?
+        # Loud, not silent: the hosted tool cannot take the override, so the
+        # converter-side election (helper-SQL FROM tables, relationship
+        # orientation) runs unoverridden — only the Ruby-side pick_fact
+        # preference still applies. The wrong-FROM remedy needs a LOCAL build.
+        warn "WARN: --fact-table #{fact_table} does NOT reach the HOSTED converter (its arg schema has no factTable) — " \
+             'the converter-side fact election (helper SQL FROM tables, relationship orientation) runs unoverridden; ' \
+             'only the Ruby-side pick_fact preference applies. For the full override set TABLEAU_MCP_BUILD to a local build.'
+      end
+      return run_converter_hosted(twb_path: twb_path, conn: conn, db: db, schema: schema,
+                                  workdir: workdir, datasource_index: datasource_index,
+                                  table_mapping: table_mapping)
+    end
     shim = File.join(workdir, '_convert_tableau.mjs')
     raw_out = File.join(workdir, 'dm-raw.json')
     meta_out = File.join(workdir, 'conv-meta.json')
@@ -796,6 +873,7 @@ module MechanicalSpecs
         database: #{db.to_json},
         schema: #{schema.to_json},
         tableMapping: #{(table_mapping || {}).to_json},
+        factTable: #{(fact_table || '').to_json},
       });
       const bare = out.model || out.sigmaDataModel || out;
       writeFileSync(#{raw_out.to_json}, JSON.stringify(bare, null, 2));
