@@ -143,6 +143,7 @@ authoritative; use this table to translate once you've read the image.
 | Heatmap | `heatmap` | `pivot-table` w/ conditional format, or `heatmap` if available | confirm element support. |
 | Funnel / Waterfall / Treemap / Sunburst / Sankey | various | closest Sigma kind + **warn** | Sigma may lack an exact match; pick nearest and flag in Phase 5e, don't silently substitute. |
 | Text / Title card | `text`, `title` | text element | |
+| Image / logo / drawing (static asset, no data columns) | `image`, `logo`, `drawing`, `picture` (substring, on `chartType` **only**) | `image` | Inline data-URI: `{id, kind:'image', url:"data:image/png;base64,<b64>"}` from the staged capture (`discovery/png/cards/<cardId>.png`, written by `domo-capture-visuals.rb`'s `capture_card`/`render_card_png`; `card['_pngPath']` overrides). No hosting needed — mirrors the tableau pattern (`build-charts-from-signals.rb:6655`); PNG/JPEG data-URIs POST + render cleanly. **Do not** also key off "no data columns + a staged PNG exists" — capture-visuals renders a PNG for every card on a page (filter widgets, text/title cards included), so that combination silently misroutes non-image cards. `richtext` is excluded (stays a text element — see the Text/Title row above). Tier B / PNG not captured, or chartType doesn't match → falls back to the text-placeholder path + a Phase-5e warning ("export from Domo UI and embed manually") — never ship an empty/broken image element. |
 | Map (geo) | `map`, `choropleth` | Sigma map element if available, else table + warn | |
 
 If a Domo `chartType` substring isn't in this table, **read the PNG, pick the
@@ -242,8 +243,9 @@ redesign. Rules:
   — don't quietly omit it or replace it with something prettier.
 - **Keep the source's numbers, labels, and formats.** Pull the label and number
   format from the card def / PNG; don't relabel or reformat to taste.
-- **Match layout weight from the captured geometry** (`discovery/layout/…`),
-  not an equal-weight auto-grid — the hero viz keeps its size.
+- **Match layout weight from the captured geometry** (`discovery/cards.json`'s
+  x/y/w/h, via `discovery/dashboard-layout.json`), not an equal-weight
+  auto-grid — the hero viz keeps its size.
 - Every deviation from the source (unsupported chart kind, dropped filter,
   UI-only spark) goes in the **Phase 5e warnings list**, surfaced to the user.
   A migration with 6 honest warnings beats one that silently took liberties.

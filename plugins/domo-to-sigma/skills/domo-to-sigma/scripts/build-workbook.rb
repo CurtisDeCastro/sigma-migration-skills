@@ -22,6 +22,7 @@
 
 require 'json'
 require 'fileutils'
+require 'base64'
 require_relative 'lib/domo_sigma_util'
 include DomoSigma
 
@@ -36,6 +37,17 @@ def mref(display) "[Master/#{display}]" end
 
 $warnings = []
 def warn_card(card, msg) $warnings << { 'card' => card['title'] || card['id'], 'warning' => msg } end
+
+# A page whose cards carry no grid geometry (Task 1's merge_geometry 'x'/'y'
+# fields, sourced from domo-discover's --pages capture) has nothing for
+# build-domo-layout.rb/build-dashboard-layout.rb to place — it silently falls
+# back to a single-column stack. Warn loudly instead of shipping that quietly.
+def warn_missing_geometry(pname, pcards)
+  return if pcards.empty?
+  return if pcards.any? { |c| c['x'] || c['y'] }
+  warn_card(pcards.first, "no grid geometry for page '#{pname}' — layout will fall back to a " \
+                          'single-column stack; ensure domo-discover captured x/y/w/h')
+end
 
 # Split a card's columns into dimensions (grouped / non-aggregated) and measures.
 def split_cols(card)
@@ -150,12 +162,57 @@ def build_pivot(card)
   }
 end
 
+# ---- image / logo / drawing cards (tableau build-charts-from-signals.rb:6655 pattern) ----
+# Inline data-URI — no hosting required. PNG/JPEG data-URIs POST + render cleanly
+# (only base64-SVG is WAF-blocked; Domo logos are raster PNG).
+# NOTE: 'richtext' is deliberately excluded — it overlaps the text/title row
+# (refs/card-to-element.md); richtext stays a text element, not an image.
+IMAGE_CHART_TYPE_RE = /image|logo|drawing|picture/i
+
+# The staged capture path capture_card (domo-capture-visuals.rb) writes to, or
+# the card's own override if the caller already resolved one.
+def png_path(card)
+  card['_pngPath'] || File.join(OUT, 'png', 'cards', "#{card['id']}.png")
+end
+
+# True ONLY for a card whose chartType explicitly names it as a static
+# image/logo/drawing asset. Do NOT also key off "no data columns + a staged
+# PNG exists" — domo-capture-visuals.rb's capture_card renders a PNG for
+# EVERY card on a page (filter widgets, text/title cards included), so that
+# combination is not a useful discriminator and silently misroutes cards that
+# belong on the control path (chartType 'filter') or the text path (chartType
+# 'text'/'title') into a flat raster image with no warning. An image-ish card
+# that doesn't match this chartType check falls through to the existing
+# placeholder path + warn_card below — the honest fidelity-discipline default.
+def image_card?(card)
+  card['chartType'].to_s =~ IMAGE_CHART_TYPE_RE ? true : false
+end
+
+# build_image(card) -> {id, kind:'image', url:"data:image/png;base64,<b64>"} or
+# nil when no PNG was captured (Tier B / not captured) — the caller falls back
+# and warns; NEVER emit an image element with an empty/broken url.
+def build_image(card)
+  path = png_path(card)
+  return nil unless path && File.exist?(path.to_s)
+  { 'id' => eid(card), 'kind' => 'image',
+    'url' => "data:image/png;base64,#{Base64.strict_encode64(File.binread(path))}" }
+end
+
 def build_element(card, overrides)
   # Rule 0: a summary-number card with no real grouping → KPI, never a table.
   kind = card['sigmaKindHint']
   is_kpi = kind == 'kpi-chart' ||
            (card['summaryNumber'] && Array(card['groupBy']).empty? && (card['columns'] || []).size <= 1)
   return build_kpi(card, overrides) if is_kpi
+
+  if image_card?(card)
+    img = build_image(card)
+    return img if img
+    # PNG absent (Tier B / not captured) — honest fallback: fall through to the
+    # existing placeholder path below (unchanged) + flag it so it gets fixed by
+    # hand rather than shipping a broken/empty image element.
+    warn_card(card, "image card #{card['id']}: no captured PNG — export from Domo UI and embed manually.")
+  end
 
   case kind
   when 'bar-chart', 'line-chart', 'area-chart', 'combo-chart', 'scatter-chart'
@@ -211,6 +268,7 @@ if $PROGRAM_NAME == __FILE__
     Array(p['cardIds'] || p['cards']).each { |cid| card_page[cid.to_s] = p['title'] || p['name'] || p['id'] }
   end
   cards.each { |c| by_page[card_page[c['id'].to_s] || 'Overview'] << c }
+  by_page.each { |pname, pcards| warn_missing_geometry(pname, pcards) }
 
   out_pages = by_page.map do |pname, pcards|
     els = pcards.map { |c| build_element(c, overrides) }.compact
