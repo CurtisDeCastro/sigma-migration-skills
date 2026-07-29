@@ -31,9 +31,15 @@ module KpiCard
   # Returns a kpi-chart element Hash. comparison_column_id nil/'' ⇒ single-value
   # card (no comparison/comparisonColumn keys). Callers may layer tool-specific
   # decorations (font overrides, extra columns) onto the returned Hash.
+  #
+  # value_color:/value_font_size: are optional accent styling for the value
+  # itself (Task-1 GO shape: value:{columnId,color,fontSize}). Both nil (the
+  # default) ⇒ value is just {'columnId'=>...}, byte-identical to before these
+  # kwargs existed.
   def self.build(id:, name:, source_element_id:, columns:, value_column_id:,
                  comparison_column_id: nil,
-                 good_direction: :up, title_color: nil)
+                 good_direction: :up, title_color: nil,
+                 value_color: nil, value_font_size: nil)
     raise ArgumentError, 'id required' if id.to_s.empty?
     raise ArgumentError, 'value_column_id required' if value_column_id.to_s.empty?
 
@@ -47,6 +53,8 @@ module KpiCard
     name_obj['color'] = title_color if title_color
 
     value = { 'columnId' => value_column_id }
+    value['color'] = value_color unless value_color.nil?
+    value['fontSize'] = value_font_size unless value_font_size.nil?
 
     el = {
       'id'      => id,
