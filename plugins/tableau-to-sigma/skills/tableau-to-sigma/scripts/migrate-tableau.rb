@@ -4082,26 +4082,91 @@ unless reuse_dm_id
   rescue StandardError => e
     line "WARN: typed-literal lint wiring failed (#{e.class}: #{e.message.to_s[0, 80]}) — advisory, continuing"
   end
-  # Custom-SQL identifier preflight (hackathon F2 class): a kind:"sql" element
-  # whose statement references CUSTOMER_SFDC_ID unquoted while the live column
-  # is "Customer SFDC ID" compiles only at POST time (Snowflake "invalid
-  # identifier"). The catalog fetch needs connection context this orchestrator
-  # doesn't have inline, so we print the exact copy-paste preflight instead of
-  # auto-running it — run it if the POST below fails with a SQL compile error.
+  # 🚧 Custom-SQL identifier GATE (wave-2 §6.5 — was a printed hint, and the
+  # hint would have caught the field failure). Two classes it stops BEFORE the
+  # POST: (a) hackathon F2 — CUSTOMER_SFDC_ID unquoted while the live column
+  # is "Customer SFDC ID"; (b) the object-model wrong-FROM class — LOD/Top-N/
+  # window helper SQL built off a mis-elected fact selects columns its FROM
+  # table does not own (mass "invalid identifier"/"Dependency not found" only
+  # at POST). The catalog fetch uses the same creds the POST below needs, so
+  # it runs inline: reuse the Phase-2 cols-<TABLE>.json catalogs when present,
+  # fetch columns-<TABLE>.json via discover-columns.rb otherwise. Bounded by
+  # the false-trip budget: a table whose catalog CANNOT be fetched degrades to
+  # the old printed hint (WARN, identifiers unverified) — only VERIFIED
+  # unknown identifiers stop the run (exit 20). Waive with
+  # --skip-sql-ident-gate REASON (recorded, budget-counted like siblings).
   begin
     require_relative 'lib/sql_ident_check'
     _sql_tables = SqlIdentCheck.referenced_tables(JSON.parse(File.read(dm_spec_path, encoding: 'UTF-8')))
-    if _sql_tables.any?
-      line "DM spec contains Custom SQL element(s) referencing: #{_sql_tables.join(', ')}"
-      line 'If the POST fails with a SQL compile error (invalid identifier), preflight the identifiers:'
-      _sql_tables.each do |t|
-        line "  ruby #{File.join(HERE, 'discover-columns.rb')} --connection-id #{opts[:conn]} --table-path #{db || '<DB>'}.#{schema || '<SCHEMA>'}.#{t} --out #{File.join(WORK, "columns-#{t}.json")}"
-      end
-      line "  ruby #{File.join(HERE, 'check-sql-idents.rb')} --dm-spec #{dm_spec_path} " +
-           _sql_tables.map { |t| "--columns #{t}=#{File.join(WORK, "columns-#{t}.json")}" }.join(' ')
-    end
   rescue StandardError => e
-    line "WARN: sql-ident preflight hint unavailable (#{e.class}: #{e.message})"
+    _sql_tables = []
+    line "WARN: sql-ident gate unavailable (#{e.class}: #{e.message.to_s[0, 100]}) — identifiers unverified"
+  end
+  if _sql_tables.any?
+    line "DM spec contains Custom SQL element(s) referencing: #{_sql_tables.join(', ')}"
+    if opts[:skip_sql_ident_gate]
+      line "[SKIP] Custom-SQL identifier gate WAIVED (#{opts[:skip_sql_ident_gate]}) — name this in your report."
+      # PR-14: every honored --skip-* leaves a record on the off-ramp trail.
+      Offramp.log(WORK, kind: 'skip-flag-waived', reason: opts[:skip_sql_ident_gate],
+                  detail: '--skip-sql-ident-gate')
+    else
+      _si_cols = {}      # TABLE => catalog path (reused or freshly fetched)
+      _si_unfetched = {} # TABLE => why the catalog is unavailable
+      _sql_tables.each do |t|
+        reuse = [File.join(WORK, "columns-#{t}.json"), File.join(WORK, "cols-#{t}.json"),
+                 File.join(WORK, "cols-#{t.upcase}.json")].find { |p| File.exist?(p) }
+        next _si_cols[t] = reuse if reuse
+        unless opts[:conn] && db && schema
+          _si_unfetched[t] = 'no connection/db/schema context to fetch its catalog'
+          next
+        end
+        cpath = File.join(WORK, "columns-#{t}.json")
+        _, _cst = run!(['ruby', File.join(HERE, 'discover-columns.rb'), '--connection-id', opts[:conn].to_s,
+                        '--table-path', "#{db}.#{schema}.#{t}", '--out', cpath], allow_fail: true)
+        if _cst.success? && File.exist?(cpath)
+          _si_cols[t] = cpath
+        else
+          _si_unfetched[t] = "catalog fetch failed (discover-columns exit #{_cst.exitstatus})"
+        end
+      end
+      _si_unfetched.each do |t, why|
+        line "WARN: sql-ident gate cannot verify #{t} — #{why}; its identifiers go to POST unverified."
+        line '      If the POST fails with a SQL compile error, fetch + preflight by hand:'
+        line "        ruby #{File.join(HERE, 'discover-columns.rb')} --connection-id #{opts[:conn] || '<connection-id>'} --table-path #{db || '<DB>'}.#{schema || '<SCHEMA>'}.#{t} --out #{File.join(WORK, "columns-#{t}.json")}"
+        line "        ruby #{File.join(HERE, 'check-sql-idents.rb')} --dm-spec #{dm_spec_path} --columns #{t}=#{File.join(WORK, "columns-#{t}.json")}"
+      end
+      if _si_cols.any?
+        _, _si_st = run!(['ruby', File.join(HERE, 'check-sql-idents.rb'), '--dm-spec', dm_spec_path] +
+                         _si_cols.flat_map { |t, p| ['--columns', "#{t}=#{p}"] }, allow_fail: true)
+        if _si_st.exitstatus == 1
+          puts <<~MSG
+
+            ==================== SQL IDENTIFIER GATE (exit 20) ====================
+            check-sql-idents resolved the Custom-SQL statements against the LIVE
+            warehouse catalog and found identifiers that do not exist on their
+            FROM table (per-element fix list printed above). POSTing now would
+            fail with Snowflake "invalid identifier" / Sigma "Dependency not
+            found" — one opaque error at a time. The usual causes:
+              * wrong-FROM helper SQL from a mis-elected fact/base table — check
+                the announced "Elected fact" warning; if it names the wrong
+                table, re-run with --fact-table NAME (refs/troubleshooting.md,
+                "Dependency not found en masse" row)
+              * an unquoted spaced/mixed-case Snowflake column — double-quote it
+                in the element's source.statement
+            Fix the statements in #{dm_spec_path} (or re-run with the corrected
+            election), then re-run. Escape hatch (recorded as a quality waiver):
+            --skip-sql-ident-gate "<reason>".
+            =======================================================================
+          MSG
+          exit 20
+        elsif _si_st.success?
+          line "sql-ident gate: clean — Custom-SQL identifiers resolve against #{_si_cols.size} catalog(s)" +
+               (_si_unfetched.any? ? " (#{_si_unfetched.size} table(s) unverifiable, see WARNs above)" : '')
+        else
+          line "WARN: check-sql-idents could not run (exit #{_si_st.exitstatus}) — identifiers unverified; continuing"
+        end
+      end
+    end
   end
   sigma_run!(['ruby', File.join(HERE, 'post-and-readback.rb'), '--type', 'datamodel',
               '--spec', dm_spec_path, '--out', dm_ids_path, '--workdir', WORK])
