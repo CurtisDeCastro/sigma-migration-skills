@@ -2298,8 +2298,12 @@ function makeRlsSecurity(opts) {
     note: `Fail-closed RLS (boolean calc + element filter, only True rows). ${provision || "review"}. The skill provisions then applies \u2014 the converter does NOT inject it.`
   };
 }
-function buildDerivedElements(elements) {
+function buildDerivedElements(elements, warnings) {
   const derived = [];
+  const warnSlash = (dispName, where) => {
+    if (warnings)
+      warnings.push(`⚠ Column "${dispName}" contains "/" in its display name — ambiguous against Sigma's [Element/Column] path syntax; DROPPED from the derived ${where}. Rename the column (remove the slash) in Tableau or the DM spec to carry it through.`);
+  };
   for (const srcEl of elements) {
     if (!srcEl.relationships?.length)
       continue;
@@ -2322,8 +2326,10 @@ function buildDerivedElements(elements) {
         dispName = String(col.name);
       if (!dispName)
         continue;
-      if (dispName.includes("/"))
+      if (dispName.includes("/")) {
+        warnSlash(dispName, `"${derivedName}" element (own column)`);
         continue;
+      }
       const cId = sigmaShortId();
       viewCols.push({ id: cId, formula: `[${baseName}/${dispName}]` });
       viewOrder.push(cId);
@@ -2353,8 +2359,10 @@ function buildDerivedElements(elements) {
         }
         if (!dispName)
           continue;
-        if (dispName.includes("/"))
+        if (dispName.includes("/")) {
+          warnSlash(dispName, `"${derivedName}" element (related column via ${rel.name})`);
           continue;
+        }
         const cId = sigmaShortId();
         viewCols.push({ id: cId, formula: `[${baseName}/${rel.name}/${dispName}]` });
         viewOrder.push(cId);
@@ -4328,7 +4336,7 @@ function convertTableauToSigma(xmlContent, options = {}) {
   if (!options.__multiDsChild) {
     resetIds(`ds${options.datasourceIndex ?? 0}\0${xmlContent}`);
   }
-  const { connectionId = "", database = "", schema = "", datasourceIndex = 0, tableMapping = {} } = options;
+  const { connectionId = "", database = "", schema = "", datasourceIndex = 0, tableMapping = {}, factTable = "", tableRowCounts = null } = options;
   _tableMapping = tableMapping || {};
   const dbOverride = database || "";
   const schOverride = schema || "";
@@ -4421,6 +4429,11 @@ function convertTableauToSigma(xmlContent, options = {}) {
   const warnings = [];
   const security = [];
   const workbookPatterns = [];
+  // Object-model (noodle) state: set by the collection branch below. The
+  // elected fact drives factEl (helper FROM anchoring) and the entry/edge
+  // inventory drives the structural entitlement-RLS detector.
+  let electedFactEl = null;
+  let objectModelInfo = null;
   function _reportChartWindowPattern(caption, formula, why) {
     const chartWin = tableauWindowToSigmaChart(formula);
     if (chartWin) {
@@ -4829,6 +4842,56 @@ function convertTableauToSigma(xmlContent, options = {}) {
             return uuidInFn;
           return opAttr.replace(/^\[|\]$/g, "").replace(/\s*\(.*\)$/, "").trim().toUpperCase();
         };
+        const ensureCol = (entry, key) => {
+          let id = entry.colIdMap[key] || entry.colIdMap[key.replace(/-/g, "_")];
+          if (!id) {
+            id = sigmaInodeId(key.replace(/\s+/g, "_"));
+            const isUuid = /^[0-9A-F]{8}-[0-9A-F]{4}-/i.test(key);
+            const cap = isUuid ? guidCaption[key.toLowerCase()] : void 0;
+            const dispName = cap || (isUuid ? key : sigmaDisplayName(key));
+            const colObj = { id, formula: `[${entry.cleanName}/${dispName}]` };
+            if (cap)
+              colObj.name = cap;
+            entry.element.columns.push(colObj);
+            entry.element.order.push(id);
+            entry.colIdMap[key] = id;
+            if (cap) {
+              entry.colIdMap[cap.toUpperCase()] = id;
+              entry.colIdMap[cap.toUpperCase().replace(/\s+/g, "_")] = id;
+            }
+          }
+          return id;
+        };
+        const hasCol = (entry, key) => !!(entry.colIdMap[key] || entry.colIdMap[key.replace(/-/g, "_")]);
+        const collectEqs = (expr, acc) => {
+          const op = nsAttr(expr, "op");
+          const kids = asArray(expr.expression || []);
+          if (op === "=" && kids.length >= 2) {
+            acc.push(expr);
+            return;
+          }
+          for (const k of kids)
+            collectEqs(k, acc);
+        };
+        // Non-equality comparison clauses (range / inequality relationships,
+        // official operators per Tableau "Relate Your Data"): collectEqs walks
+        // PAST them silently, so census them separately \u2014 a rel whose only
+        // clauses are ranges must land in the named-gap path, not vanish.
+        const collectNonEq = (expr, acc) => {
+          const op = nsAttr(expr, "op");
+          if (["<", "<=", ">", ">=", "!=", "<>"].includes(String(op).trim()))
+            acc.push(op);
+          for (const k of asArray(expr.expression || []))
+            collectNonEq(k, acc);
+        };
+        const isPhysical = (op) => /^\[[^\]]+\]$/.test(op.trim());
+        // PASS 1 \u2014 collect every wire-able edge WITHOUT attaching it. Tableau
+        // serializes the already-on-canvas (base) table as first-end-point and
+        // the base is pure authoring order (docs: "the first table that you
+        // drag"), so endpoint order carries NO fact semantics. Attachment is
+        // decided after election, in pass 2.
+        const relEdges = [];
+        const unwiredRels = [];
         for (const rel of relsList) {
           const firstEp = rel["first-end-point"];
           const secondEp = rel["second-end-point"];
@@ -4836,87 +4899,261 @@ function convertTableauToSigma(xmlContent, options = {}) {
             continue;
           const firstEntry = findEntry(attr(firstEp, "object-id"));
           const secondEntry = findEntry(attr(secondEp, "object-id"));
-          if (!firstEntry || !secondEntry || firstEntry === secondEntry)
-            continue;
-          const ensureCol = (entry, key) => {
-            let id = entry.colIdMap[key] || entry.colIdMap[key.replace(/-/g, "_")];
-            if (!id) {
-              id = sigmaInodeId(key.replace(/\s+/g, "_"));
-              const isUuid = /^[0-9A-F]{8}-[0-9A-F]{4}-/i.test(key);
-              const cap = isUuid ? guidCaption[key.toLowerCase()] : void 0;
-              const dispName = cap || (isUuid ? key : sigmaDisplayName(key));
-              const colObj = { id, formula: `[${entry.cleanName}/${dispName}]` };
-              if (cap)
-                colObj.name = cap;
-              entry.element.columns.push(colObj);
-              entry.element.order.push(id);
-              entry.colIdMap[key] = id;
-              if (cap) {
-                entry.colIdMap[cap.toUpperCase()] = id;
-                entry.colIdMap[cap.toUpperCase().replace(/\s+/g, "_")] = id;
-              }
-            }
-            return id;
-          };
-          const collectEqs = (expr, acc) => {
-            const op = nsAttr(expr, "op");
-            const kids = asArray(expr.expression || []);
-            if (op === "=" && kids.length >= 2) {
-              acc.push(expr);
-              return;
-            }
-            for (const k of kids)
-              collectEqs(k, acc);
-          };
-          const eqExprs = [];
-          for (const oe of asArray(rel.expression || []))
-            collectEqs(oe, eqExprs);
-          if (eqExprs.length === 0) {
-            warnings.push(`\u26A0 Relationship ${firstEntry.cleanName} \u2192 ${secondEntry.cleanName} carries no serialized join key \u2014 Tableau auto-matches these at query time; Sigma needs an explicit key. NOT wired: pick a join key and wire manually (LEFT from fact\u2192dim), and verify the dimension is unique on the key to avoid measure fan-out.`);
+          if (!firstEntry || !secondEntry || firstEntry === secondEntry) {
+            const missing = [!firstEntry ? attr(firstEp, "object-id") : null, !secondEntry ? attr(secondEp, "object-id") : null].filter(Boolean).join('", "');
+            warnings.push(`\u26A0 Relationship end-point object-id "${missing}" matches no logical table (renamed object / unsupported shape) \u2014 NOT wired; wire this relationship manually (LEFT from fact\u2192dim).`);
+            unwiredRels.push({ a: firstEntry?.cleanName || attr(firstEp, "object-id"), b: secondEntry?.cleanName || attr(secondEp, "object-id"), why: "endpoint-unresolved" });
             continue;
           }
-          const isPhysical = (op) => /^\[[^\]]+\]$/.test(op.trim());
+          const eqExprs = [];
+          const nonEqOps = [];
+          for (const oe of asArray(rel.expression || [])) {
+            collectEqs(oe, eqExprs);
+            collectNonEq(oe, nonEqOps);
+          }
+          if (eqExprs.length === 0) {
+            warnings.push(nonEqOps.length > 0 ? `\u26A0 Relationship ${firstEntry.cleanName} \u2192 ${secondEntry.cleanName} joins only on non-equality operator(s) (${nonEqOps.join(", ")}) \u2014 a range/inequality relationship has no Sigma relationship equivalent (relationships join on column equality). NOT wired: model as a join element or wire manually.` : `\u26A0 Relationship ${firstEntry.cleanName} \u2192 ${secondEntry.cleanName} carries no serialized join key \u2014 Tableau auto-matches these at query time; Sigma needs an explicit key. NOT wired: pick a join key and wire manually (LEFT from fact\u2192dim), and verify the dimension is unique on the key to avoid measure fan-out.`);
+            unwiredRels.push({ a: firstEntry.cleanName, b: secondEntry.cleanName, why: nonEqOps.length > 0 ? "non-equality-key" : "no-serialized-key" });
+            continue;
+          }
           const keys = [];
           let skippedComputed = 0;
           for (const eq of eqExprs) {
             const inner = asArray(eq.expression || []);
             if (inner.length < 2)
               continue;
-            const srcOpRaw = nsAttr(inner[0], "op") || "";
-            const tgtOpRaw = nsAttr(inner[1], "op") || "";
+            let srcOpRaw = nsAttr(inner[0], "op") || "";
+            let tgtOpRaw = nsAttr(inner[1], "op") || "";
             if (!isPhysical(srcOpRaw) || !isPhysical(tgtOpRaw)) {
               skippedComputed++;
               continue;
             }
-            const srcKey = parseOpRef(srcOpRaw), tgtKey = parseOpRef(tgtOpRaw);
+            let srcKey = parseOpRef(srcOpRaw), tgtKey = parseOpRef(tgtOpRaw);
             if (!srcKey || !tgtKey)
               continue;
-            keys.push({
-              sourceColumnId: ensureCol(firstEntry, srcKey),
-              targetColumnId: ensureCol(secondEntry, tgtKey)
-            });
+            // Operand order parallels end-point order by CONVENTION only \u2014 the
+            // format does not specify side-ownership. Verify by column ownership
+            // and swap when both operands resolve exclusively on the opposite
+            // side; genuinely ambiguous stays serialized-order.
+            if (!hasCol(firstEntry, srcKey) && !hasCol(secondEntry, tgtKey) && hasCol(secondEntry, srcKey) && hasCol(firstEntry, tgtKey)) {
+              const t = srcKey;
+              srcKey = tgtKey;
+              tgtKey = t;
+              warnings.push(`\u2139 Relationship ${firstEntry.cleanName} \u2194 ${secondEntry.cleanName}: operand order did not match end-point order \u2014 swapped by column ownership.`);
+            }
+            keys.push({ aColId: ensureCol(firstEntry, srcKey), bColId: ensureCol(secondEntry, tgtKey) });
           }
           if (keys.length === 0) {
             warnings.push(`\u26A0 Relationship ${firstEntry.cleanName} \u2192 ${secondEntry.cleanName} joins only on computed key(s) (e.g. IF/DATETRUNC expression); Sigma joins on physical columns only \u2014 NOT wired. Needs a computed join column or manual authoring.`);
+            unwiredRels.push({ a: firstEntry.cleanName, b: secondEntry.cleanName, why: "computed-only-key" });
             continue;
           }
           if (skippedComputed > 0) {
             warnings.push(`\u26A0 Relationship ${firstEntry.cleanName} \u2192 ${secondEntry.cleanName}: wired ${keys.length} physical key(s); ${skippedComputed} computed condition(s) dropped \u2014 verify join grain in Sigma.`);
           }
-          if (!firstEntry.element.relationships)
-            firstEntry.element.relationships = [];
-          firstEntry.element.relationships.push({
-            id: sigmaShortId(),
-            targetElementId: secondEntry.element.id,
+          relEdges.push({
+            a: firstEntry,
+            b: secondEntry,
             keys,
-            name: secondEntry.cleanName
+            uniqueA: /^true$/i.test(String(attr(firstEp, "unique-key") || "")),
+            uniqueB: /^true$/i.test(String(attr(secondEp, "unique-key") || "")),
+            relExprText: JSON.stringify(rel.expression || "")
           });
-          warnings.push(`\u2139 Relationship ${firstEntry.cleanName} \u2192 ${secondEntry.cleanName} wired on ${keys.length} physical key(s).`);
         }
+        // ---- evidence-ranked fact election (replaces first-in-document-order).
+        // Rank: relationship degree \u2192 measure-column count (numeric, non-key)
+        // \u2192 not-dim-like name \u2192 widest \u2192 warehouse row count when supplied
+        // (options.tableRowCounts). options.factTable overrides outright.
+        const entryList = Object.keys(elementMap).map((k) => elementMap[k]);
+        let electedEntry = null;
+        if (entryList.length > 1) {
+          const degree = /* @__PURE__ */ new Map();
+          const keyColIds = /* @__PURE__ */ new Set();
+          for (const e of relEdges) {
+            degree.set(e.a, (degree.get(e.a) || 0) + 1);
+            degree.set(e.b, (degree.get(e.b) || 0) + 1);
+            for (const k of e.keys) {
+              keyColIds.add(k.aColId);
+              keyColIds.add(k.bColId);
+            }
+          }
+          const dimLikeName = (n) => /(^|[\s_])(?:vw?_?)?dim/i.test(String(n || ""));
+          const measureCount = (entry) => {
+            let n = 0;
+            for (const c of entry.element.columns || []) {
+              const t = colTypeById[c.id];
+              if ((t === "integer" || t === "real") && !keyColIds.has(c.id))
+                n++;
+            }
+            return n;
+          };
+          const rowsOf = (entry) => {
+            if (!tableRowCounts)
+              return null;
+            const p = entry.element.source?.path || [];
+            for (const k of [p.join("."), p[p.length - 1], entry.cleanName]) {
+              if (!k)
+                continue;
+              if (tableRowCounts[k] != null)
+                return Number(tableRowCounts[k]);
+              if (tableRowCounts[String(k).toUpperCase()] != null)
+                return Number(tableRowCounts[String(k).toUpperCase()]);
+            }
+            return null;
+          };
+          const scoreOf = (entry) => [degree.get(entry) || 0, measureCount(entry), dimLikeName(entry.cleanName) ? 0 : 1, (entry.element.columns || []).length, rowsOf(entry) ?? -1];
+          if (factTable) {
+            const want = String(factTable).toUpperCase();
+            electedEntry = entryList.find((en) => en.cleanName.toUpperCase() === want || (en.element.source?.path || [])[en.element.source?.path?.length - 1]?.toUpperCase?.() === want) || null;
+            if (electedEntry) {
+              warnings.push(`\u2139 Object-model fact election: "${electedEntry.cleanName}" set by factTable override.`);
+            } else {
+              warnings.push(`\u26A0 factTable override "${factTable}" matches no logical table \u2014 falling back to evidence-ranked election.`);
+            }
+          }
+          if (!electedEntry) {
+            const scores = entryList.map((en) => ({ en, s: scoreOf(en) }));
+            const cmp = (x, y) => {
+              for (let i = 0; i < x.length; i++) {
+                if (x[i] !== y[i])
+                  return x[i] > y[i] ? 1 : -1;
+              }
+              return 0;
+            };
+            let best = scores[0];
+            for (const cand of scores.slice(1)) {
+              if (cmp(cand.s, best.s) > 0)
+                best = cand;
+            }
+            const tiedWith = scores.filter((c) => c !== best && cmp(c.s, best.s) === 0).map((c) => c.en.cleanName);
+            electedEntry = best.en;
+            const bs = best.s;
+            const rowsNote = bs[4] >= 0 ? `, rows ${bs[4]}` : "";
+            warnings.push(`\u2139 Object-model fact election: elected "${electedEntry.cleanName}" as the fact/base element (relationships ${bs[0]}, measure columns ${bs[1]}, ${bs[3]} column(s)${rowsNote}). Every LOD/Top-N/window helper builds its SQL FROM this element \u2014 if this is wrong, re-run with the factTable option (--fact-table) or re-point and re-validate the DM.`);
+            if (tiedWith.length > 0) {
+              warnings.push(`\u26A0 Fact election AMBIGUOUS \u2014 "${electedEntry.cleanName}" ties with ${tiedWith.map((n) => `"${n}"`).join(", ")} on every signal (relationships, measure columns, naming, width). Elected by document order; VERIFY, and pass factTable to override.`);
+            }
+          }
+        }
+        // PASS 2 \u2014 orient every collected edge off the elected fact: Sigma
+        // relationships are directional (source = the more granular / many
+        // side), so the carrier is the endpoint NEARER the fact \u2014 dims become
+        // targets and snowflake chains nest (fact reaches sub-dims through
+        // inherited relationships).
+        if (relEdges.length > 0) {
+          const adj = /* @__PURE__ */ new Map();
+          for (const e of relEdges) {
+            if (!adj.has(e.a))
+              adj.set(e.a, []);
+            if (!adj.has(e.b))
+              adj.set(e.b, []);
+            adj.get(e.a).push(e);
+            adj.get(e.b).push(e);
+          }
+          const dist = /* @__PURE__ */ new Map();
+          const visitOrder = /* @__PURE__ */ new Map();
+          let visitSeq = 0;
+          const bfs = (root) => {
+            if (dist.has(root))
+              return;
+            dist.set(root, 0);
+            visitOrder.set(root, visitSeq++);
+            const q = [root];
+            while (q.length) {
+              const cur = q.shift();
+              for (const e of adj.get(cur) || []) {
+                const other = e.a === cur ? e.b : e.a;
+                if (!dist.has(other)) {
+                  dist.set(other, dist.get(cur) + 1);
+                  visitOrder.set(other, visitSeq++);
+                  q.push(other);
+                }
+              }
+            }
+          };
+          if (electedEntry && adj.has(electedEntry))
+            bfs(electedEntry);
+          for (const en of entryList) {
+            if (adj.has(en) && !dist.has(en)) {
+              const hub = [...adj.keys()].filter((x) => !dist.has(x)).sort((x, y) => (adj.get(y)?.length || 0) - (adj.get(x)?.length || 0))[0];
+              if (electedEntry && hub !== electedEntry) {
+                warnings.push(`\u26A0 Object-model: a second relationship tree is NOT connected to the elected fact "${electedEntry.cleanName}" (multi-fact / disconnected forest) \u2014 rooted its edges at "${hub.cleanName}"; VERIFY, and wire the forests together (or split the model) before trusting cross-tree results.`);
+              }
+              bfs(hub);
+            }
+          }
+          const hintContradicted = [];
+          for (const e of relEdges) {
+            const da = dist.get(e.a) ?? 0;
+            const db = dist.get(e.b) ?? 0;
+            let carrier = e.a, target = e.b, carrierUnique = e.uniqueA, targetUnique = e.uniqueB;
+            let keys = e.keys.map((k) => ({ sourceColumnId: k.aColId, targetColumnId: k.bColId }));
+            const flip = db < da || db === da && (visitOrder.get(e.b) ?? 0) < (visitOrder.get(e.a) ?? 0);
+            if (flip) {
+              carrier = e.b;
+              target = e.a;
+              carrierUnique = e.uniqueB;
+              targetUnique = e.uniqueA;
+              keys = e.keys.map((k) => ({ sourceColumnId: k.bColId, targetColumnId: k.aColId }));
+            }
+            if (carrierUnique && !targetUnique)
+              hintContradicted.push(`${carrier.cleanName}\u2192${target.cleanName}`);
+            if (!carrier.element.relationships)
+              carrier.element.relationships = [];
+            carrier.element.relationships.push({
+              id: sigmaShortId(),
+              targetElementId: target.element.id,
+              keys,
+              name: target.cleanName
+            });
+            warnings.push(`\u2139 Relationship ${carrier.cleanName} \u2192 ${target.cleanName} wired on ${keys.length} physical key(s).`);
+          }
+          if (hintContradicted.length > 0) {
+            warnings.push(`\u26A0 Tableau performance-option hints (unique-key) mark the SOURCE side unique on ${hintContradicted.length} oriented edge(s): ${hintContradicted.join(", ")}. As oriented these would be one-to-many, which a Sigma relationship cannot express (many-to-one left join into a unique target) \u2014 the hints are often db-derived or stale, so VERIFY each edge's direction and target uniqueness; model a genuinely one-to-many edge as a join element instead.`);
+          }
+        }
+        electedFactEl = electedEntry ? electedEntry.element : null;
         const joinableEls = elements.filter((e) => e.source?.kind === "warehouse-table" || e.source?.kind === "sql");
         const wiredRelCount = elements.reduce((n, e) => n + (e.relationships?.length || 0), 0);
         if (joinableEls.length > 1 && wiredRelCount === 0) {
           warnings.push(relsList.length === 0 ? `\u26A0 Tableau logical (relationship / noun) datasource: ${joinableEls.length} tables but NO relationships were serialized in <object-graph> \u2014 nothing to derive a join key from (Tableau matches these at query time). The DM is a set of disconnected tables. Pick an explicit join key for each table pair and wire relationships manually (LEFT from fact\u2192dim), and verify each dimension is unique on the key to avoid measure fan-out.` : `\u26A0 Tableau logical (relationship / noun) datasource: ${joinableEls.length} tables and ${relsList.length} relationship(s), but 0 could be wired \u2014 all lacked a physical equality key (auto-matched or computed-only; see per-relationship warnings above). The DM is a set of disconnected tables. Pick an explicit join key per pair and wire manually (LEFT from fact\u2192dim); verify dimension uniqueness on the key.`);
+        }
+        // Refuse-don't-guess: every relationship that could NOT be wired is a
+        // NAMED gap (structured, machine-readable), not just a drive-by WARN \u2014
+        // and a partial wire (some edges up, some down) gets its own summary so
+        // \u22651 wired can never read as all-clear.
+        for (const u of unwiredRels) {
+          workbookPatterns.push({
+            kind: "unsupported",
+            name: `Object-model relationship ${u.a} \u2194 ${u.b} (${u.why})`,
+            source: `<object-graph> relationship ${u.a} \u2194 ${u.b}`,
+            requires: "MANUAL relationship wiring in the Sigma data model: pick the join key column pair, add the relationship LEFT from the many (fact) side to the unique (dim) side, and verify dimension uniqueness on the key.",
+            note: `The serialized relationship carried no usable physical equality key (${u.why}). Until wired, this table pair is DISCONNECTED in the DM \u2014 cross-table results involving it are wrong or unavailable.`
+          });
+        }
+        if (unwiredRels.length > 0 && wiredRelCount > 0) {
+          warnings.push(`\u26A0 Object-model: ${wiredRelCount} of ${relsList.length} relationship(s) wired; ${unwiredRels.length} NOT wired (${unwiredRels.map((u) => `${u.a}\u2194${u.b}: ${u.why}`).join("; ")}). The unwired pairs are DISCONNECTED tables \u2014 wire them manually (LEFT from fact\u2192dim) before trusting cross-table results. Each is reported as a named gap in result.workbookPatterns.`);
+        }
+        if (relEdges.length > 0) {
+          const touched = /* @__PURE__ */ new Set();
+          for (const e of relEdges) {
+            touched.add(e.a);
+            touched.add(e.b);
+          }
+          const isolated = entryList.filter((en) => !touched.has(en) && (en.element.source?.kind === "warehouse-table" || en.element.source?.kind === "sql"));
+          for (const iso of isolated) {
+            warnings.push(`\u26A0 Object-model: logical table "${iso.cleanName}" has NO wired relationship to any other table \u2014 it is DISCONNECTED in the DM. Wire it manually (LEFT from fact\u2192dim) or drop it.`);
+            workbookPatterns.push({
+              kind: "unsupported",
+              name: `Object-model table ${iso.cleanName} disconnected`,
+              source: `<object-graph> logical table ${iso.cleanName}`,
+              requires: "MANUAL relationship wiring (or removal) of the isolated logical table.",
+              note: "No serialized relationship reaches this table \u2014 it is disconnected in the emitted DM."
+            });
+          }
+          objectModelInfo = { entries: entryList, edges: relEdges, elected: electedEntry };
+        } else if (entryList.length > 1) {
+          objectModelInfo = { entries: entryList, edges: [], elected: electedEntry };
         }
         elements.sort((a, b) => {
           const aR = !!a.relationships?.length;
@@ -5023,7 +5260,10 @@ ${statement}
       }
     }
   }
-  const factEl = elements.find((e) => e.relationships?.length > 0) || (elements.length > 0 ? elements.reduce((best, e) => (e.columns?.length || 0) > (best.columns?.length || 0) ? e : best, elements[0]) : null);
+  // Fact resolution: the evidence-ranked object-model election wins when it
+  // ran (and its element survived blend collapse); otherwise keep the legacy
+  // first-relationship-carrier / widest fallback for non-noodle shapes.
+  const factEl = electedFactEl && elements.includes(electedFactEl) ? electedFactEl : elements.find((e) => e.relationships?.length > 0) || (elements.length > 0 ? elements.reduce((best, e) => (e.columns?.length || 0) > (best.columns?.length || 0) ? e : best, elements[0]) : null);
   if (factEl) {
     let _baseFromExpr2 = function() {
       const fe = factEl;
@@ -5115,11 +5355,19 @@ ${stmt}
       if (existing.find((r) => r.targetElementId === rec.element.id))
         return;
       const keys = [];
+      const factColIds = new Set((factEl.columns || []).map((c) => c.id));
       for (let i = 0; i < dimResolved.length; i++) {
         const baseColId = dimResolved[i].baseColId;
         const helperColId = rec.groupDimColIds[i];
         if (!baseColId || !helperColId)
           return;
+        // Ownership guard: a relationship's sourceColumnId MUST be a column of
+        // the carrying (fact) element — a related-table column id here is the
+        // spec-invalid shape that POSTs as "Dependency not found".
+        if (!factColIds.has(baseColId)) {
+          warnings.push(`⚠ Helper relationship "${relName}" skipped: grouping column [${dimResolved[i].displayName}] does not live on the fact element — a cross-element relationship key is spec-invalid. Author the helper join manually (grouped Custom SQL fact→dim).`);
+          return;
+        }
         keys.push({ sourceColumnId: baseColId, targetColumnId: helperColId });
       }
       if (!factEl.relationships)
@@ -5227,11 +5475,23 @@ ${joinSql}
         warnings.push(`\u26A0 Set "${top.caption}": ranking key [${top.dimField}] not found on base; skipped.`);
         return false;
       }
+      // Ownership guard (refuse-don't-guess): the helper's SQL builds FROM the
+      // fact and its surfacing relationship is keyed on the fact \u2014 an off-fact
+      // ranking/partition column would bake a wrong-FROM SELECT and a
+      // cross-element relationship key ("Dependency not found" at POST).
+      if (keyResolved.onFact === false) {
+        warnings.push(`\u26A0 Set "${top.caption}": ranking key [${top.dimField}] lives on related element "${keyResolved.el?.name || (keyResolved.el?.source?.path || []).slice(-1)[0] || "?"}", not the fact \u2014 a single-table Top-N helper would SELECT it FROM the wrong table. Skipped: author the Top-N as a grouped Custom SQL element joining fact\u2192dim on the relationship key, then relate it back to the fact.`);
+        return false;
+      }
       const partResolved = [];
       for (const p of top.partitionBy) {
         const r = _resolveDimDisplayName2(p);
         if (!r || !r.baseColId) {
           warnings.push(`\u26A0 Set "${top.caption}": partition dim [${p}] not found on base; skipped.`);
+          return false;
+        }
+        if (r.onFact === false) {
+          warnings.push(`\u26A0 Set "${top.caption}": partition dim [${p}] lives on related element "${r.el?.name || (r.el?.source?.path || []).slice(-1)[0] || "?"}", not the fact \u2014 refusing a wrong-FROM helper. Author as grouped Custom SQL joining fact\u2192dim.`);
           return false;
         }
         partResolved.push(r);
@@ -5418,7 +5678,16 @@ ${joinSql}
       windowChildElements.push(helperEl);
       const baseRels = factEl.relationships || [];
       const alreadyLinked = baseRels.find((r) => r.targetElementId === helperEl.id);
-      if (!alreadyLinked && partitionDims.length > 0 && partitionDims.every((d) => d.baseColId)) {
+      const _factColIds = new Set((factEl.columns || []).map((c) => c.id));
+      const partitionsOnFact = partitionDims.every((d) => d.baseColId && _factColIds.has(d.baseColId));
+      if (!alreadyLinked && partitionDims.length > 0 && partitionDims.every((d) => d.baseColId) && !partitionsOnFact) {
+        // Ownership guard: a partition dim resolved to a RELATED element's
+        // column would put a cross-element key on the fact relationship
+        // (spec-invalid, "Dependency not found" at POST). Keep the helper,
+        // skip the surfacing relationship, and say so.
+        warnings.push(`⚠ Window helper "${relName}": partition dim(s) live on a related element, not the fact — surfacing relationship skipped (cross-element keys are spec-invalid). Relate the helper manually or re-author as grouped Custom SQL joining fact→dim.`);
+      }
+      if (!alreadyLinked && partitionDims.length > 0 && partitionsOnFact) {
         if (!factEl.relationships)
           factEl.relationships = [];
         const keys = [];
@@ -5590,6 +5859,145 @@ ${joinSql}
       }
     }
     const factTableName = factEl.source?.path?.[factEl.source.path.length - 1] || "FACT";
+    // ---- structural RLS detection: datasource filters + entitlement tables.
+    // Doctrine (owner veto): the checkpoint fires on the DOCUMENTED STRUCTURAL
+    // SHAPE — a related/joined table carrying a user-identity column plus a
+    // user-function datasource filter (or a datasource filter / user-function
+    // relationship term tied to that table). A name regex (/RLS|ENTITLE/) may
+    // only color the report TEXT (low-confidence hint) — it never fires, and
+    // never suppresses, detection on its own. Datasource <filter> elements
+    // were previously NEVER scanned: a formula-regex over calc columns alone
+    // is blind to Tableau's documented entitlement-table best practice.
+    {
+      const _calcNodeOf = (col) => Array.isArray(col.calculation) ? col.calculation[0] : col.calculation;
+      const calcFormulaByName = {};
+      for (const col of asArray(ds.ds?.column || [])) {
+        const nm = (attr(col, "name") || "").replace(/^\[|\]$/g, "");
+        const calcNode = _calcNodeOf(col);
+        const f = calcNode ? nsAttr(calcNode, "formula") : "";
+        if (nm && f)
+          calcFormulaByName[nm.toUpperCase()] = String(f);
+      }
+      const dsFilters = asArray(ds.ds?.filter || []).map((f) => {
+        const rawCol = String(attr(f, "column") || "");
+        const groups = [...rawCol.matchAll(/\[([^\]]+)\]/g)].map((m) => m[1]);
+        let colName = groups.length ? groups[groups.length - 1] : rawCol;
+        colName = colName.replace(/^[a-z]+:/i, "").replace(/:(nk|qk|ok)$/i, "");
+        return {
+          klass: String(attr(f, "class") || ""),
+          colName,
+          exprRaw: String(nsAttr(f, "expression") || ""),
+          calcF: calcFormulaByName[colName.toUpperCase()] || ""
+        };
+      });
+      const ownerOf = (colName) => {
+        const key = String(colName || "").toUpperCase();
+        const found = displayNameMap[key] || displayNameMap[key.replace(/\s+/g, "_")] || displayNameMap[sigmaDisplayName(String(colName || "")).toUpperCase()];
+        return found ? found.el : null;
+      };
+      // (a) datasource filters carrying a user function — fact-local shape.
+      // A filter hosted on a CALC column is left to the calc-column pass
+      // below (which already emits fact-local rules) to avoid double-emits;
+      // this covers the pure `<filter class='expression'>` form.
+      for (const f of dsFilters) {
+        const formulaSrc = f.exprRaw || f.calcF;
+        if (!formulaSrc || !tableauFormulaIsRls(formulaSrc))
+          continue;
+        const refs = [...formulaSrc.matchAll(/\[([^\]]+)\]/g)].map((m) => m[1]);
+        const offFactOwner = refs.map((r) => ownerOf(r)).find((el) => el && el !== factEl);
+        if (offFactOwner)
+          continue;
+        if (f.calcF)
+          continue;
+        const sigmaFormula = tableauFormulaToSigma(formulaSrc, warnings);
+        if (sigmaFormula && !sigmaFormula.startsWith("/*")) {
+          security.push(makeRlsSecurity({ source: `Tableau datasource filter${f.colName ? ` on [${f.colName}]` : ""}`, element: factEl, name: "RLS: datasource filter", formula: sigmaFormula }));
+          warnings.push(`🔐 Datasource filter carries a user function → row-level security DETECTED (reported in result.security, not injected): ${sigmaFormula.slice(0, 80)}`);
+        } else {
+          security.push({
+            kind: "rls",
+            source: "Tableau datasource filter (untranslated)",
+            elementId: factEl.id,
+            elementName: _securityElementName(factEl),
+            rls: { name: "RLS: datasource filter", formula: `/* verify: ${formulaSrc.slice(0, 120)} */` },
+            note: "User-function datasource filter did not auto-translate — re-author fail-closed in Sigma (boolean calc + element filter keeping only True)."
+          });
+          warnings.push(`🔐 Datasource filter carries a user function (${formulaSrc.slice(0, 60)}) that did not fully translate — RLS reported in result.security for manual re-authoring (CurrentUserEmail()/CurrentUserAttributeText/CurrentUserInTeam); NOT silently dropped.`);
+        }
+      }
+      // (b) entitlement-table shape over the object-model graph.
+      if (objectModelInfo && objectModelInfo.entries.length > 1) {
+        const om = objectModelInfo;
+        const identityColRe = /^(?:user[\s_-]?)?e[\s_-]?mail(?:[\s_-]?address)?$|^user(?:[\s_-]?(?:name|id|login|key|principal[\s_-]?name))?$|^login$|^upn$/i;
+        for (const en of om.entries) {
+          if (en.element === factEl)
+            continue;
+          const edge = om.edges.find((e) => e.a === en || e.b === en);
+          if (!edge)
+            continue;
+          let identityCol = null, identityVia = null;
+          for (const f of dsFilters) {
+            const src = [f.exprRaw, f.calcF].filter(Boolean).join(" ");
+            if (!src || !tableauFormulaIsRls(src))
+              continue;
+            for (const rm of src.matchAll(/\[([^\]]+)\]/g)) {
+              if (ownerOf(rm[1]) === en.element) {
+                identityCol = rm[1];
+                identityVia = "a user-function datasource filter references it";
+                break;
+              }
+            }
+            if (identityCol)
+              break;
+          }
+          if (!identityCol && edge.relExprText && tableauFormulaIsRls(edge.relExprText)) {
+            identityCol = "(see relationship expression)";
+            identityVia = "a user-function term inside the relationship expression";
+          }
+          if (!identityCol) {
+            const filterTiedToEntry = dsFilters.some((f) => f.colName && ownerOf(f.colName) === en.element);
+            if (filterTiedToEntry) {
+              for (const c of en.element.columns || []) {
+                const disp = c.name || (typeof c.formula === "string" && (c.formula.match(/\/([^\]]+)\]$/) || [])[1]) || "";
+                if (identityColRe.test(String(disp).trim())) {
+                  identityCol = String(disp);
+                  identityVia = "an identity-shaped column plus a datasource filter on this table";
+                  break;
+                }
+              }
+            }
+          }
+          if (!identityCol)
+            continue;
+          const otherEntry = edge.a === en ? edge.b : edge.a;
+          const colNameOf = (el, id) => {
+            const c = (el.columns || []).find((x) => x.id === id);
+            return c ? c.name || (typeof c.formula === "string" && (c.formula.match(/\/([^\]]+)\]$/) || [])[1]) || c.id : "?";
+          };
+          const keys = edge.keys.map((k) => en === edge.a ? { entitlementColumn: colNameOf(edge.a.element, k.aColId), relatedColumn: colNameOf(edge.b.element, k.bColId) } : { entitlementColumn: colNameOf(edge.b.element, k.bColId), relatedColumn: colNameOf(edge.a.element, k.aColId) });
+          const nameHint = /(rls|entitle|securit)/i.test(en.cleanName) ? " (table name also reads entitlement-like — low-confidence hint only)" : "";
+          security.push({
+            kind: "rls-entitlement-table",
+            source: `object-model related table "${en.cleanName}" — ${identityVia}`,
+            elementId: en.element.id,
+            elementName: en.cleanName,
+            entitlement: {
+              identityColumn: identityCol,
+              relatedElementName: otherEntry.cleanName,
+              factElementName: _securityElementName(factEl) || factTableName,
+              keys,
+              strategies: [
+                "A (materialized gate): fail-closed filter on the entitlement element ([identity] = CurrentUserEmail() + include-True list filter), then INNER-JOIN the fact to the filtered element (join-source element). Probe (identity, key) uniqueness first — a non-unique pair fans out fact rows.",
+                "B (row-preserving gate): on the entitlement element add [Is Me] = ([identity] = CurrentUserEmail()); on the fact add Lookup(Sum(If([Is Me], 1, 0)), [key], [key]) > 0 with an include-True filter. Null-safe fail-closed; no fan-out by construction.",
+                "C (de-entitle): map entitlements onto Sigma user attributes (single-valued only — refuse multi-valued) or teams (group-shaped) and use the documented CurrentUserAttributeText / CurrentUserInTeam filter."
+              ]
+            },
+            note: "Table-based entitlement RLS detected STRUCTURALLY (related table + user-identity column + datasource-filter/user-function signal). NEVER auto-applied — until the RLS checkpoint decision the wired relationship is an UNCONSTRAINED live join: the Tableau restriction is gone and multi-entitlement users fan out row counts. Decide Port (A/B), Customize, or loud Skip (refs/security-rls.md)."
+          });
+          warnings.push(`🔐 Entitlement-table RLS pattern DETECTED: "${en.cleanName}" (identity column [${identityCol}]; ${identityVia})${nameHint} — reported in result.security as kind "rls-entitlement-table"; NOT applied. Until the RLS checkpoint decision the ${en.cleanName} relationship is an UNCONSTRAINED live join (restriction dropped + fan-out risk).`);
+        }
+      }
+    }
     const physToQuotedAlias = {};
     if (factEl?.source?.kind === "sql") {
       for (const col of factEl?.columns || []) {
@@ -6077,6 +6485,11 @@ ${suggestion}
               if (!m) {
                 ok = false;
                 warnings.push(`\u26A0 LOD "${caption}" view dim [${dn}] not found on base`);
+                break;
+              }
+              if (m.onFact === false) {
+                ok = false;
+                warnings.push(`\u26A0 LOD "${caption}" view-context dim [${dn}] lives on related element "${m.el?.name || (m.el?.source?.path || []).slice(-1)[0] || "?"}", not the fact \u2014 refusing a wrong-FROM helper for this view context. Author as grouped Custom SQL joining fact\u2192dim if needed.`);
                 break;
               }
               dimResolved.push(m);
@@ -6706,7 +7119,23 @@ ${suggestion}
       warnings.push(`\u2139 Parameter "${p.name}" \u2192 text control`);
     }
   }
-  const derivedEls = buildDerivedElements(elements);
+  // controlId dedupe (mirror of buildMultiDatasourceModel's merge dedupe):
+  // sigmaDisplayName collapses punctuation/case, so near-identical parameter
+  // names ("Top N Sites" / "Top_N_Sites") mint the SAME controlId \u2014 and
+  // duplicate ids hard-fail the DM POST. First control wins; drops are loud.
+  {
+    const seenControlIds = /* @__PURE__ */ new Set();
+    for (let i = controls.length - 1; i >= 0; i--) {
+      const key = String(controls[i].controlId ?? controls[i].id);
+      if (!seenControlIds.has(key)) {
+        seenControlIds.add(key);
+        continue;
+      }
+      warnings.push(`\u26a0 Duplicate controlId "${key}" \u2014 two parameters normalize to the same control id; kept the first, dropped the duplicate control. Rename one parameter (or hand-author a second control with a distinct id) if both are needed.`);
+      controls.splice(i, 1);
+    }
+  }
+  const derivedEls = buildDerivedElements(elements, warnings);
   for (const de of derivedEls)
     elements.push(de);
   const placedSrcElIds = {};
