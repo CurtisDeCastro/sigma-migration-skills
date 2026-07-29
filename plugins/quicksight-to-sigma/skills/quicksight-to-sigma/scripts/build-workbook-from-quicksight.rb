@@ -406,9 +406,20 @@ end
 def apply_qs_sorts(el, inner, kind, title, warnings)
   cc = inner['ChartConfiguration'] || {}
   sc = cc['SortConfiguration']
-  return unless sc.is_a?(Hash) && !sc.empty?
-  entries = sc.values.find { |v| v.is_a?(Array) && !v.empty? } # CategorySort / RowSort / ...
-  return unless entries
+  entries = (sc.is_a?(Hash) && !sc.empty?) ? sc.values.find { |v| v.is_a?(Array) && !v.empty? } : nil
+  # QuickSight renders pie/donut slices VALUE-DESCENDING by default and needs no explicit
+  # CategorySort to do it; Sigma's default for an unsorted pie is dimension-ASCENDING. So an
+  # unsorted QS pie otherwise migrates to an ALPHABETICAL slice order — and because
+  # themeOverrides.categoricalScheme is applied POSITIONALLY in Sigma's category order, every
+  # member also gets repainted with the wrong palette slot (a 0-value member can take the
+  # primary color). Emit QuickSight's own default explicitly. Bar/line keep Sigma's default:
+  # QuickSight sorts those by the category axis unless a CategorySort says otherwise.
+  if entries.nil?
+    if %w[pie-chart donut-chart].include?(kind) && (mid = el.dig('value', 'id'))
+      (el['color'] ||= {})['sort'] = { 'by' => mid, 'direction' => 'descending' }
+    end
+    return
+  end
   if kind == 'pivot-table'
     warnings << { 'visual' => title, 'type' => 'SortConfiguration',
                   'reason' => 'pivot-table sorts are not spec-expressible in Sigma (columnsBy/rowsBy sort rejected) — set in the UI' }
