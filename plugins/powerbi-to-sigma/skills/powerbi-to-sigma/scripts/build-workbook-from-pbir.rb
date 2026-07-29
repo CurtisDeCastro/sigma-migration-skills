@@ -1541,8 +1541,12 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
     # (PBI card `labels.color`, captured as rec['value_color']; else the palette
     # accent), with the caption in neutral gray BELOW the value (titleOrient).
     el['value']['color'] = rec['value_color'] || $pbi_accent
-    el['name'] = { 'text' => qr_leaf(qr, 'Value'),
-                   'color' => { 'kind' => 'theme', 'ref' => 'colors-textNeutral' } }
+    # BUG 3: an element `name` MUST be a plain String — a {text:, color:} Hash
+    # crashes validate-spec.rb (String vs Hash compare) and is not a valid spec
+    # shape. Emit the caption as a String; the value color above already carries
+    # the styling, so the neutral caption color is dropped (matches the
+    # multiRowCard branch, which also names its KPIs with a plain String).
+    el['name'] = qr_leaf(qr, 'Value')
     # Style fidelity: caption below the value (titleOrient), and CENTER the card
     # contents (anchor) — PBI stat cards center; overridable from a PBI alignment
     # signal. Abbreviation of the value column happens in the shared tail below.
@@ -2386,8 +2390,30 @@ pages_xml = signals['pages'].map do |pg|
     # 2) bands from the SOURCE rows, columns from the SOURCE x-positions
     min_rows = { 'kpi-chart' => 4, 'control' => 2, 'text' => 2, 'image' => 20,
                  'scatter-chart' => 9, 'region-map' => 9, 'point-map' => 9 }
+    # BUG 5: page controls must live INSIDE a GridContainer — a loose top-level
+    # control below the first band fails the layout lint ("orphan control"), which
+    # crashed the POST. Pull every control out of the content bands and place them
+    # in a dedicated filter-strip control band right under the header (the standard
+    # "filters over the grid" pattern); content is shifted down so nothing overlaps.
+    ctrl_items = items.select { |it| kind_of[it[0]] == 'control' }
+    items = items.reject { |it| kind_of[it[0]] == 'control' }
+    ctrl_h = ctrl_items.empty? ? 0 : [ctrl_items.map { |it| it[4] - it[3] }.max, min_rows['control']].max
+    if ctrl_items.any?
+      cw = 24.0 / ctrl_items.length
+      inner_ctrls = ctrl_items.sort_by { |it| it[1] }.each_with_index.map do |it, i|
+        c0 = (i * cw).floor + 1
+        c1 = ((i + 1) * cw).floor + 1
+        c1 = c0 + 1 if c1 <= c0
+        SigmaLayout.le(it[0], c0, c1, 1, 1 + ctrl_h)
+      end.join("\n")
+      ctrl_band_id = "band-#{page_id}-ctrl"
+      extra << SigmaLayout.container_el(ctrl_band_id)
+      children << SigmaLayout.gc(ctrl_band_id, 1, 25,
+                                 1 + SigmaLayout::HEADER_ROWS,
+                                 1 + SigmaLayout::HEADER_ROWS + ctrl_h, inner_ctrls)
+    end
     bands = SigmaLayout.cluster_bands(items)
-    cursor = 1 + SigmaLayout::HEADER_ROWS
+    cursor = 1 + SigmaLayout::HEADER_ROWS + ctrl_h
     les = []
     bands.each do |band|
       # columns: cluster band items by x-overlap, preserving left-to-right order
@@ -2540,8 +2566,16 @@ layout_xml = %(<?xml version="1.0" encoding="utf-8"?>\n#{pages_xml}\n)
 
 # Strip transient build-only keys (e.g. Track 3b's `_qr_cids`) from every element
 # before the spec is written — the API rejects unknown `_`-prefixed properties.
+# BUG 3 invariant: every element `name` MUST be a plain String (a {text:,color:}
+# Hash crashes validate-spec.rb's String compare). Normalize any Hash name down
+# to its text here so no path can leak a Hash name into the spec.
 (content_pages + [{ 'elements' => data_elements }]).each do |pg|
-  (pg['elements'] || []).each { |el| el.delete_if { |k, _| k.to_s.start_with?('_') } }
+  (pg['elements'] || []).each do |el|
+    el.delete_if { |k, _| k.to_s.start_with?('_') }
+    if el['name'].is_a?(Hash)
+      el['name'] = el['name']['text'] || el['name']['label'] || el['id'].to_s
+    end
+  end
 end
 
 spec = {

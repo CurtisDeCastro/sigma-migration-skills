@@ -29,6 +29,7 @@
 require 'json'
 require 'tmpdir'
 require 'rbconfig'
+require_relative 'lib/layout_lint'
 
 BUILD = File.join(__dir__, 'build-workbook-from-pbir.rb')
 RUBY  = RbConfig.ruby
@@ -276,6 +277,24 @@ Dir.mktmpdir do |d|
      cover.any? { |u| u['severity'] == 'dropped' && u['pbi_type'].to_s == 'cross-master' })
   ok('8e) fail-loud: build WARNED about the cross-master reference',
      err.include?('cross-master') || err.include?('DIFFERENT master'))
+
+  # 9. BUG 3 — every element `name` is a plain String (Hash name crashes validate-spec)
+  all_els = spec['pages'].flat_map { |p| p['elements'] }
+  bad_names = all_els.reject { |e| e['name'].nil? || e['name'].is_a?(String) }
+                     .map { |e| "#{e['id']}:#{e['name'].class}" }
+  ok('9a) every emitted element name is a String (no Hash name)',
+     bad_names.empty? || (puts("    non-string names: #{bad_names.inspect}") && false))
+  kpi = p1.find { |e| e['kind'] == 'kpi-chart' }
+  ok('9b) the single-value KPI name is a String (was a {text,color} Hash)',
+     kpi && kpi['name'].is_a?(String) && !kpi['name'].empty?)
+
+  # 10. BUG 5 — controls sit inside a GridContainer (no "orphan control" lint fail)
+  lint_v = LayoutLint.lint(spec)
+  orphan = lint_v.select { |v| v.to_s.include?('orphan control') }
+  ok('10a) layout lint reports NO orphan control',
+     orphan.empty? || (puts("    #{orphan.inspect}") && false))
+  ok('10b) the page emits a control-band GridContainer holding the slicers',
+     spec['layout'].to_s.include?("band-page-p1-ctrl"))
 
   # regression guard: the LEGACY per-visual mode still builds (escape hatch)
   wb2 = File.join(d, 'wb2.json')
