@@ -108,4 +108,31 @@ module PbiReportBuild
   def boolean_domain_values
     [true, false]
   end
+
+  # Cross-element reference token extraction. A `[Element/Column]` ref names its
+  # source element before the first slash; `[Column]` (no slash) is a same-element
+  # column ref and is ignored. Returns the distinct element tokens a formula
+  # references via the two-part `[X/...]` form.
+  def ref_element_tokens(formula)
+    formula.to_s.scan(/\[([^\]\/]+)\/[^\]]*\]/).map { |m| m[0] }.uniq
+  end
+
+  # The MASTER element ids a formula references that are NOT the element's own
+  # source — i.e. a cross-master leak (an element sourcing master A referencing
+  # `[master-B/Col]`, which Sigma compiles to type "error"). `master_ids` is the
+  # set of master element ids; `by_name` maps a master DISPLAY NAME -> its id
+  # (refs may use either the id or the display name). A token equal to the source
+  # (id OR its display name) is the element's own source and is allowed.
+  def foreign_master_refs(formula, source_id, master_ids, by_name = {})
+    ids = master_ids.respond_to?(:include?) ? master_ids : Array(master_ids)
+    src_name = by_name.respond_to?(:key) ? by_name.key(source_id) : nil
+    out = []
+    ref_element_tokens(formula).each do |tok|
+      tid = ids.include?(tok) ? tok : by_name[tok]   # resolve a display-name token to a master id
+      next if tid.nil?                                # not a master ref (self-col, [Metrics/..], scatter src, ...)
+      next if tok == source_id || tok == src_name || tid == source_id
+      out << tid
+    end
+    out.uniq
+  end
 end

@@ -50,7 +50,19 @@ MMAP = {
                    { 'id' => 'mc-oid',    'name' => 'Order Id',       'formula' => '[SALES/Order Id]' },
                    { 'id' => 'mc-units',  'name' => 'Units',          'formula' => '[SALES/Units]' },
                    { 'id' => 'mc-disc',   'name' => 'Discount',       'formula' => '[SALES/Discount]' }
-                 ] }
+                 ] },
+    # multi-grain page: most tiles on ORDER, but a PY series lives on a separate
+    # calc-table master (the real report was ORDER_FACT View + a Net Revenue PY table).
+    'ORDER' => { 'id' => 'master-order', 'element_id' => 'el-order', 'data_model' => 'dm-x',
+                 'columns' => [
+                   { 'id' => 'oc-date', 'name' => 'Order Date',  'formula' => '[ORDER/Order Date]' },
+                   { 'id' => 'oc-rev',  'name' => 'Net Revenue',  'formula' => '[ORDER/Net Revenue]' }
+                 ] },
+    'PY' => { 'id' => 'master-py', 'element_id' => 'el-py', 'data_model' => 'dm-x',
+              'columns' => [
+                { 'id' => 'pc-date',  'name' => 'Order Date',     'formula' => '[PY/Order Date]' },
+                { 'id' => 'pc-pyrev', 'name' => 'Net Revenue PY', 'formula' => '[PY/Net Revenue PY]' }
+              ] }
   },
   'fields' => {
     'SALES_FACT.Region'        => { 'master' => 'SALES', 'ref' => '[master-sales/Region]',        'agg' => nil },
@@ -59,7 +71,17 @@ MMAP = {
     'SALES_FACT.Sales Amount'  => { 'master' => 'SALES', 'ref' => '[master-sales/Sales Amount]',   'agg' => 'Sum' },
     'SALES_FACT.Order Count'   => { 'master' => 'SALES', 'ref' => '[master-sales/Order Id]',       'agg' => 'Count' },
     'SALES_FACT.Units'         => { 'master' => 'SALES', 'ref' => '[master-sales/Units]',          'agg' => 'Sum' },
-    'SALES_FACT.Discount'      => { 'master' => 'SALES', 'ref' => '[master-sales/Discount]',       'agg' => 'Sum' }
+    'SALES_FACT.Discount'      => { 'master' => 'SALES', 'ref' => '[master-sales/Discount]',       'agg' => 'Sum' },
+    # trends page fields (base master = ORDER):
+    'ORDER_FACT.Order Date'    => { 'master' => 'ORDER', 'ref' => '[master-order/Order Date]',     'agg' => nil },
+    'ORDER_FACT.Net Revenue'   => { 'master' => 'ORDER', 'ref' => '[master-order/Net Revenue]',    'agg' => 'Sum' },
+    # declared on the PY master -> field_spec must DROP it on an ORDER-based visual
+    # (never emit a ref to master-py from an element sourcing master-order).
+    'PY_FACT.Net Revenue PY'   => { 'master' => 'PY', 'ref' => '[master-py/Net Revenue PY]',       'agg' => 'Sum' },
+    # declared on ORDER but its FORMULA references master-py -> field_spec can't
+    # catch it (trusts the declared master); the post-assembly HARD GATE must.
+    'ORDER_FACT.YoY Pct'       => { 'master' => 'ORDER', 'agg' => nil,
+                                    'formula' => 'Sum([master-py/Net Revenue PY]) / Sum([master-order/Net Revenue])' }
   }
 }.freeze
 
@@ -117,6 +139,16 @@ SIGNALS = {
     { 'page_id' => 'p3', 'page_title' => 'BROKEN', 'page_w' => 1280, 'page_h' => 720,
       'interactions' => [], 'visuals' => [
         vis('kpi_ghost', 'card', 'kpi', { 'Values' => ['GHOST.Measure'] }, 'Ghost KPI')
+      ] },
+    # Page 4 — genuine MULTI-GRAIN page (base = ORDER). A line chart references a
+    # PY measure that lives ONLY on the PY master (field_spec must drop it) plus a
+    # YoY column declared on ORDER but whose FORMULA references master-py (the
+    # HARD GATE must drop it). NEITHER may ship a cross-master formula.
+    { 'page_id' => 'p4', 'page_title' => 'TRENDS', 'page_w' => 1280, 'page_h' => 720,
+      'interactions' => [], 'visuals' => [
+        vis('line_yoy', 'lineChart', 'line',
+            { 'Category' => ['ORDER_FACT.Order Date'],
+              'Y' => ['ORDER_FACT.Net Revenue', 'PY_FACT.Net Revenue PY', 'ORDER_FACT.YoY Pct'] })
       ] }
   ]
 }.freeze
@@ -212,6 +244,38 @@ Dir.mktmpdir do |d|
   # 6. friendly naming --------------------------------------------------------
   ok('6a) raw slicer label "IS Active IND" -> "Is Active Ind"', active_ctl['name'] == 'Is Active Ind')
   ok('6b) raw page title "SALES OVERVIEW" -> "Sales Overview"', pages['page-p1']['name'] == 'Sales Overview')
+
+  # 8. multi-grain page: NO cross-master column formula survives (BUG 1/2) -----
+  master_ids = (pages['page-data']['elements'] || []).map { |e| e['id'] }
+  # every column formula on a CONTENT element may reference ONLY its own source
+  # master, never another master's id.
+  def elem_source(el)
+    el.dig('source', 'elementId') || el.dig('source', 'source', 'elementId')
+  end
+  leaks = []
+  spec['pages'].reject { |p| p['id'] == 'page-data' }.each do |p|
+    p['elements'].each do |el|
+      s = elem_source(el)
+      (el['columns'] || []).each do |c|
+        (master_ids - [s]).each do |mid|
+          leaks << "#{el['id']}:#{c['id']} -> #{mid}" if c['formula'].to_s.include?("[#{mid}/")
+        end
+      end
+    end
+  end
+  ok('8a) NO cross-master column formula survives on any content element',
+     leaks.empty? || (puts("    leaks: #{leaks.inspect}") && false))
+  # specifically: the master-py ref must not leak onto an ORDER-sourced element
+  p4 = pages['page-p4']['elements']
+  line = p4.find { |e| e['kind'] == 'line-chart' }
+  ok('8b) the PY-master measure was DROPPED, not emitted as a cross-master ref',
+     line && (line['columns'] || []).none? { |c| c['formula'].to_s.include?('[master-py/') })
+  ok('8c) the multi-grain chart still binds its xAxis + surviving measure (degraded, not errored)',
+     line && line.dig('xAxis', 'columnId') && Array(line.dig('yAxis', 'columnIds')).length == 1)
+  ok('8d) the cross-master drop is surfaced in coverage (dropped, matches the warning)',
+     cover.any? { |u| u['severity'] == 'dropped' && u['pbi_type'].to_s == 'cross-master' })
+  ok('8e) fail-loud: build WARNED about the cross-master reference',
+     err.include?('cross-master') || err.include?('DIFFERENT master'))
 
   # regression guard: the LEGACY per-visual mode still builds (escape hatch)
   wb2 = File.join(d, 'wb2.json')

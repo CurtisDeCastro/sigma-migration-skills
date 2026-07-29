@@ -578,6 +578,18 @@ def field_spec(queryref, fields, chosen_master = nil)
       return merged
     end
   end
+  # CROSS-MASTER guard (report-build hardening, BUG 1/2): when a page base master
+  # is forced (chosen_master) but this field resolves ONLY on a DIFFERENT master
+  # (non-nil, and no alt lives on the chosen one), do NOT return the foreign-master
+  # `fs` — its ref/formula points at a master the element does not SOURCE, and
+  # Sigma compiles that cross-master column to type "error", breaking the whole
+  # element. Return an unresolvable marker (dot-bracket) so drop_unresolved_columns!
+  # actually DROPS the column — making the emission match the "will be DROPPED"
+  # warning instead of shipping a broken cross-master formula.
+  if chosen_master && fs['master'] && fs['master'] != chosen_master &&
+     Array(fs['alts']).none? { |a| a['master'] == chosen_master }
+    return { 'master' => nil, 'ref' => "[#{queryref}]", 'agg' => nil }
+  end
   fs
 end
 
@@ -1007,20 +1019,15 @@ end
 # matcher detects exactly that fallback so we can actually drop it.
 UNRESOLVED_REF = %r{\A\[[^\]/]*\.[^\]]*\]\z}.freeze
 
-# GUARANTEE no element ships an unresolved literal-ref column (bead miu7; mirrors
-# the slicer dropout). Drops every such column from `el` AND prunes its id from
-# every role reference build_element emits (value / xAxis / yAxis(2) / groupings /
-# rowsBy / columnsBy / values / sort), then records ONE honest 'dropped' entry.
-# The tile degrades (a role may lose a column) instead of carrying a broken one.
-def drop_unresolved_columns!(el, rec, kind)
-  cols = el['columns']
-  return unless cols.is_a?(Array)
-  bad = cols.select { |c| c['formula'].to_s =~ UNRESOLVED_REF }
-  return if bad.empty?
-  bad_ids = bad.map { |c| c['id'] }
+# Prune a set of column ids from an element: remove them from `columns` AND from
+# every role reference build_element emits (value / xAxis(+sort) / yAxis(2) /
+# groupings / rowsBy / columnsBy / values). Shared by the unresolved-ref drop and
+# the cross-master drop so both prune identically.
+def prune_columns!(el, bad_ids)
+  return if bad_ids.empty?
   has_bad = ->(x) { bad_ids.include?(x.is_a?(Hash) ? (x['columnId'] || x['id']) : x) }
-  el['columns'] = cols.reject { |c| bad_ids.include?(c['id']) }
-  el.delete('value') if bad_ids.include?(el.dig('value', 'columnId'))
+  el['columns'] = Array(el['columns']).reject { |c| bad_ids.include?(c['id']) }
+  el.delete('value') if bad_ids.include?(el.dig('value', 'columnId')) || bad_ids.include?(el.dig('value', 'id'))
   if el['xAxis'].is_a?(Hash)
     el['xAxis'].delete('sort') if bad_ids.include?(el.dig('xAxis', 'sort', 'by'))
     el.delete('xAxis') if bad_ids.include?(el['xAxis']['columnId'])
@@ -1029,6 +1036,9 @@ def drop_unresolved_columns!(el, rec, kind)
     next unless el[ax].is_a?(Hash) && el[ax]['columnIds'].is_a?(Array)
     el[ax]['columnIds'] = el[ax]['columnIds'].reject(&has_bad)
     el.delete(ax) if el[ax]['columnIds'].empty?
+  end
+  if el['color'].is_a?(Hash) && (bad_ids.include?(el['color']['column']) || bad_ids.include?(el['color']['id']))
+    el.delete('color')
   end
   Array(el['groupings']).each do |g|
     g['groupBy'] = Array(g['groupBy']).reject(&has_bad) if g['groupBy']
@@ -1041,6 +1051,19 @@ def drop_unresolved_columns!(el, rec, kind)
     el.delete(k) if el[k].empty?
   end
   el['values'] = Array(el['values']).reject(&has_bad) if el['values'].is_a?(Array)
+end
+
+# GUARANTEE no element ships an unresolved literal-ref column (bead miu7; mirrors
+# the slicer dropout). Drops every such column from `el` AND prunes its id from
+# every role reference, then records ONE honest 'dropped' entry.
+# The tile degrades (a role may lose a column) instead of carrying a broken one.
+def drop_unresolved_columns!(el, rec, kind)
+  cols = el['columns']
+  return unless cols.is_a?(Array)
+  bad = cols.select { |c| c['formula'].to_s =~ UNRESOLVED_REF }
+  return if bad.empty?
+  bad_ids = bad.map { |c| c['id'] }
+  prune_columns!(el, bad_ids)
   leaves = bad.map { |c| c['name'] }.compact.join(', ')
   # Entity = the part before the first dot in the unresolved `[Entity.Leaf]` ref
   # (e.g. "Dim Region"), used to attribute the drop to an ungranted schema.
@@ -1050,6 +1073,43 @@ def drop_unresolved_columns!(el, rec, kind)
                     detail: "field(s) #{leaves} could not be resolved to a master column — dropped " \
                             '(would have shipped as a type=error column)',
                     action: "Map the PBI queryRef(s) for #{leaves} to a master column in master-map.json and re-run.")
+end
+
+# HARD GATE (report-build hardening): no element may ship a column whose formula
+# references a MASTER other than the element's own `source` — a cross-master ref
+# from an element sourcing master A to `[master-B/Col]` compiles to Sigma type
+# "error" and breaks the whole element. Drop every such column (pruning its role
+# references) with a loud warning + coverage entry, so the tile degrades honestly
+# instead of erroring. `master_ids` = the set of Data-page master element ids;
+# `by_name` maps master DISPLAY NAMES -> id (refs can use either). Returns the
+# list of dropped column names (for the per-element re-check). This is the
+# belt-and-suspenders net behind field_spec's cross-master guard: it catches a
+# leak from ANY path (sort-by, measure-color dup, metric binding, a stale ref).
+def drop_cross_master_columns!(el, name, master_ids, by_name)
+  cols = el['columns']
+  return [] unless cols.is_a?(Array) && !cols.empty?
+  src = el.dig('source', 'elementId') || el.dig('source', 'source', 'elementId')
+  # Only elements that SOURCE a master table can leak a cross-master ref; a master
+  # itself (data-model source) and source-less elements are exempt.
+  return [] unless src
+  bad = cols.select do |c|
+    foreign = PbiReportBuild.foreign_master_refs(c['formula'], src, master_ids, by_name)
+    !foreign.empty?
+  end
+  return [] if bad.empty?
+  prune_columns!(el, bad.map { |c| c['id'] })
+  leaves = bad.map { |c| c['name'] }.compact.uniq.join(', ')
+  warn "[build-workbook] WARN visual '#{name}': column(s) #{leaves} referenced a DIFFERENT master than " \
+       "the element's source (#{src}) — cross-master formulas compile to type \"error\" in Sigma, so they " \
+       'were DROPPED (the tile degrades instead of breaking). Bring the field onto this element\'s source ' \
+       'master (a joined base) to keep it.'
+  record_unresolved(visual: name, pbi_type: 'cross-master', sigma_kind: el['kind'],
+                    severity: 'dropped', recoverable: true,
+                    detail: "column(s) #{leaves} referenced a master other than the element's source — " \
+                            'dropped (cross-master formula would compile to type=error)',
+                    action: 'Add the field to this element\'s source master (or build a joined page base ' \
+                            'that carries every measure the page\'s visuals reference), then re-run.')
+  bad.map { |c| c['name'] }
 end
 
 # Power BI "Small multiples" field well -> Sigma NATIVE element `trellis`
@@ -2131,6 +2191,47 @@ npag = signals['pages'].sum do |pg|
   apply_source_filters!(pg['filters'], 'page', "page '#{pg['page_title']}'", data_elements, exclusive, fields, masters)
 end
 warn "[build-workbook] applied #{nrep} report-level + #{npag} page-level filter(s) to master element(s)" if nrep.positive? || npag.positive?
+
+# ---- HARD GATE: no cross-master column leak (report-build hardening) --------
+# After assembly, GUARANTEE no element ships a column whose formula references a
+# master other than the element's own `source` — such a cross-master ref compiles
+# to Sigma type "error" and breaks the whole element (the multi-grain-page bug).
+# Drop every such column (loud warn + coverage); if that empties a data element,
+# drop the element entirely (it would still error) and prune it from control-scope.
+# field_spec's cross-master guard already prevents the common case at build time;
+# this net also catches leaks from an explicit master-map `formula`, a sort-by /
+# measure-color dup, or a metric ref that names another master.
+_gate_master_ids = masters.values.map { |m| m['id'] }.compact
+_gate_master_by_name = data_elements.each_with_object({}) do |de, h|
+  h[de['name']] = de['id'] if _gate_master_ids.include?(de['id']) && de['name']
+end
+_gate_data_kinds = %w[kpi-chart bar-chart line-chart area-chart combo-chart scatter-chart
+                      pie-chart donut-chart region-map point-map table pivot-table].freeze
+content_pages.each do |pg|
+  pg['elements'].each do |el|
+    next if el['kind'] == 'control'
+    nm = el['name'].is_a?(Hash) ? el.dig('name', 'text') : el['name']
+    drop_cross_master_columns!(el, nm, _gate_master_ids, _gate_master_by_name)
+  end
+  removed = []
+  pg['elements'].reject! do |el|
+    next false unless _gate_data_kinds.include?(el['kind']) && Array(el['columns']).empty?
+    warn "[build-workbook] WARN element '#{el['id']}' on page '#{pg['name']}' has NO columns left after " \
+         'cross-master pruning — element DROPPED entirely (it would compile to type=error).'
+    record_unresolved(visual: el['id'], pbi_type: 'cross-master', sigma_kind: el['kind'],
+                      severity: 'dropped', recoverable: true,
+                      detail: 'element had only cross-master column(s) — dropped entirely',
+                      action: 'Build a joined page base carrying every measure this visual references on ' \
+                              'one source, then re-run.')
+    removed << el['id']
+    true
+  end
+  next if removed.empty?
+  $control_scope.each do |sc|
+    sc['scope'] = Array(sc['scope']).reject { |eid| removed.include?(eid) } if sc['scope']
+    sc['excluded'] = Array(sc['excluded']).reject { |e| removed.include?(e.is_a?(Hash) ? e['element'] : e) } if sc['excluded']
+  end
+end
 
 # control-scope.json — the intended-scope contract sidecar (schema: the
 # CONTRACT block in scripts/lib/control_lint.rb + refs/control-parity.md).

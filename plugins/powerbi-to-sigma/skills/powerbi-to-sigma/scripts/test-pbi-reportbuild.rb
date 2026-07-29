@@ -66,5 +66,24 @@ ok('"Order Count" -> NOT boolean',  !B.call('Order Count'))
 
 ok('boolean_domain_values is [true, false]', PbiReportBuild.boolean_domain_values == [true, false])
 
+# ---- foreign_master_refs: cross-master leak detection -----------------------
+MIDS = %w[master-order master-py].freeze
+BYNAME = { 'ORDER' => 'master-order', 'PY' => 'master-py' }.freeze
+G = ->(f, src) { PbiReportBuild.foreign_master_refs(f, src, MIDS, BYNAME) }
+ok('same-source ref is allowed (Sum([master-order/Net Revenue]) sourced from master-order)',
+   G.call('Sum([master-order/Net Revenue])', 'master-order').empty?)
+ok('cross-master ref is flagged (references master-py while sourced from master-order)',
+   G.call('Sum([master-py/Net Revenue PY])', 'master-order') == ['master-py'])
+ok('mixed formula flags only the foreign master',
+   G.call('Sum([master-py/PY]) / Sum([master-order/Cur])', 'master-order') == ['master-py'])
+ok('display-name token resolves to a master id and is flagged',
+   G.call('Sum([PY/Net Revenue PY])', 'master-order') == ['master-py'])
+ok('display-name token equal to the source is allowed',
+   G.call('[ORDER/Region]', 'master-order').empty?)
+ok('same-element column ref [Col] (no slash) is ignored',
+   G.call('[Sales Amount] / [Order Count]', 'master-order').empty?)
+ok('a non-master cross-element ref ([Metrics/..]) is ignored',
+   G.call('[Metrics/Net Revenue]', 'master-order').empty?)
+
 puts($fail.zero? ? "\nall pbi-reportbuild unit tests passed" : "\n#{$fail} FAILED")
 exit($fail.zero? ? 0 : 1)
