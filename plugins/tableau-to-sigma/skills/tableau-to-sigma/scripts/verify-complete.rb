@@ -161,6 +161,25 @@ run_tier = begin
 rescue StandardError
   nil
 end
+# The countersignature is RE-DERIVED from the evidence on disk, never trusted
+# from the markers — the gate's own two evidence forms (orchestration.md O3):
+# a verifier-recorded final pass in parity-final.json (visual_verdict 'pass' +
+# 'VERIFIER:'-prefixed visual_notes), or a parseable verification-result.json
+# carrying the verifier's final verdict (GREEN/YELLOW/RED — the
+# verifier-brief.md deliverable). A marker claiming verdict_by 'verifier' with
+# neither on disk is attestation laundering: a two-field edit (verdict +
+# verdict_by) would otherwise slip past the label check, which only catches
+# the one-field strip.
+countersign_evidence = pf['visual_verdict'].to_s == 'pass' &&
+                       pf['visual_notes'].to_s.start_with?('VERIFIER:')
+unless countersign_evidence
+  _vr = begin
+    JSON.parse(File.read(File.join(wd, 'verification-result.json')))
+  rescue StandardError
+    nil
+  end
+  countersign_evidence = _vr.is_a?(Hash) && %w[GREEN YELLOW RED].include?(_vr['verdict'].to_s)
+end
 factory_green = derived_verdict == 'GREEN' && run_tier == 'S' &&
                 pf['verdict_by'].to_s == Offramp::VERDICT_BY_BUILDER
 expected_verdict = factory_green ? "GREEN#{Offramp::FACTORY_VERDICT_SUFFIX}" : derived_verdict
@@ -191,6 +210,16 @@ end
                     else
                       "#{src} claims verdict #{claim} but the artifacts derive #{expected_verdict}"
                     end
+end
+# A 'verifier' attestation claim is only as good as the countersignature
+# evidence behind it (re-derived above) — without evidence the claim is the
+# exact laundering the label check alone cannot see.
+{ 'phase6-success.json' => sj['verdict_by'], 'parity-final.json' => pf['verdict_by'] }.each do |src, claim|
+  next unless claim.to_s == Offramp::VERDICT_BY_VERIFIER
+  next if countersign_evidence
+  contradictions << "#{src} claims verdict_by #{Offramp::VERDICT_BY_VERIFIER.inspect} but the workdir holds no " \
+                    'countersignature evidence (no VERIFIER:-prefixed visual pass in parity-final.json, no valid ' \
+                    'verification-result.json) — attestation laundering'
 end
 # A zero-waiver claim over a ledger that records waivers/escapes is the exact
 # field lie this closes ("GREEN, 0 waivers" after --skip-ref-check).

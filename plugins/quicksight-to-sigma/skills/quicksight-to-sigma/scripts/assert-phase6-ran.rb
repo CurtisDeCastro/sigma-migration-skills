@@ -827,7 +827,11 @@ begin
   _ms_tier = JSON.parse(File.read(File.join(opts[:tab], 'migrate-state.json')))
   if _ms_tier.is_a?(Hash) && %w[S M full].include?(_ms_tier['tier'].to_s)
     run_tier       = _ms_tier['tier'].to_s
-    run_tier_basis = _ms_tier['tier_basis'].to_s
+    # tier_basis is display-only but still closed-vocabulary on READ
+    # (Offramp::TIER_BASIS; literals — non-vendored twins run this gate too):
+    # an unknown string is blanked, never printed raw into the [TIER] banner.
+    _ms_basis      = _ms_tier['tier_basis'].to_s
+    run_tier_basis = %w[auto-predicate operator-override fail-closed].include?(_ms_basis) ? _ms_basis : ''
   end
 rescue StandardError
   nil # fail-closed: no readable tier → full battery
@@ -3011,17 +3015,24 @@ end
 #                        while the dm-spec actually carries an emitted join: a
 #                        hand-stamped "emitted" status over a Lookup-only spec
 #                        still counts as UNPROVEN (the status is evidence-
-#                        bound, never a skip token).
+#                        bound, never a skip token). The binding is PER-ENTRY:
+#                        "emitted" is honored only on converter-written
+#                        entries (kind "emitted-join" — the W2.18 emission
+#                        shape, JOIN_ENTRY_EMITTED in the lane tests) and only
+#                        while the count of such entries stays within the
+#                        spec's own `"kind": "join"` occurrence count — one
+#                        genuine emitted join must never become a universal
+#                        skip token for OTHER ledger entries (a federated-join
+#                        or lookup-synthesis entry hand-stamped "emitted"
+#                        stays UNPROVEN whatever the spec carries).
 # ---------------------------------------------------------------------------
 jp_path = File.join(opts[:tab], 'join-plan.json')
 jp_dm = File.join(opts[:tab], 'dm-spec.json')
 jp_dm_src = File.exist?(jp_dm) ? (File.read(jp_dm) rescue '') : ''
-jp_dm_has_emitted_join = jp_dm_src =~ /"kind"\s*:\s*"join"/ ? true : false
+jp_dm_join_n = jp_dm_src.scan(/"kind"\s*:\s*"join"/).length
+jp_dm_has_emitted_join = jp_dm_join_n.positive?
 jp_resolved = lambda do |e|
   e['resolution'].is_a?(Hash) && %w[preaggregated waived].include?(e['resolution']['how'].to_s)
-end
-jp_emitted_ok = lambda do |e|
-  e['status'].to_s == 'emitted' && jp_dm_has_emitted_join
 end
 if File.exist?(jp_path)
   jp_doc = JSON.parse(File.read(jp_path)) rescue nil
@@ -3032,12 +3043,28 @@ if File.exist?(jp_path)
     exit 23
   end
   jp_entries = jp_entries.select { |e| e.is_a?(Hash) }
+  # Per-entry evidence binding (see the shape-2 doc above): only converter-
+  # written "emitted-join" entries can carry "emitted", and never more of them
+  # than the spec has `"kind": "join"` occurrences.
+  jp_emitted_claims = jp_entries.count { |e| e['kind'].to_s == 'emitted-join' && e['status'].to_s == 'emitted' }
+  jp_emitted_bound = jp_dm_has_emitted_join && jp_emitted_claims <= jp_dm_join_n
+  jp_emitted_ok = lambda do |e|
+    e['kind'].to_s == 'emitted-join' && e['status'].to_s == 'emitted' && jp_emitted_bound
+  end
   jp_unproven = jp_entries.reject { |e| e['status'].to_s == 'unique' || e['status'].to_s == 'non-unique' || jp_resolved.call(e) || jp_emitted_ok.call(e) }
   jp_blocking = jp_entries.select { |e| e['status'].to_s == 'non-unique' && !jp_resolved.call(e) }
   if jp_unproven.any? || jp_blocking.any?
     warn "[FAIL] gate 16: join-cardinality ledger unresolved (#{jp_path}) —"
     jp_unproven.first(10).each do |e|
-      note = e['status'].to_s == 'emitted' ? ' [status "emitted" but dm-spec.json carries no "kind": "join" — evidence-bound, re-derive the ledger]' : ''
+      note = if e['status'].to_s != 'emitted'
+               ''
+             elsif e['kind'].to_s != 'emitted-join'
+               ' [status "emitted" on a non-emitted entry — only converter-written kind "emitted-join" entries can carry it; evidence-bound, re-derive the ledger]'
+             elsif !jp_dm_has_emitted_join
+               ' [status "emitted" but dm-spec.json carries no "kind": "join" — evidence-bound, re-derive the ledger]'
+             else
+               ' [more "emitted" entries than "kind": "join" occurrences in dm-spec.json — evidence-bound, re-derive the ledger]'
+             end
       warn "         - UNPROVEN (#{e['status'] || 'unprobed'}): #{e['kind']} #{e['left'].inspect} -> #{e['right'].inspect} on (#{Array(e['keys']).join(', ')})#{note}"
     end
     jp_blocking.first(10).each do |e|
@@ -3746,8 +3773,14 @@ end
 final_verdict = deg_entries ? DegradationLedger.verdict(deg_entries) : nil
 # ── W2.3: verdict attestation + the labeled factory verdict ─────────────────
 # Countersignature evidence (orchestration.md O3): a verifier-recorded final
-# pass (parity-final.json visual_notes prefixed 'VERIFIER:') or a
-# verification-result.json in the workdir. Anything else is a builder
+# pass (parity-final.json visual_notes prefixed 'VERIFIER:') or a PARSEABLE
+# verification-result.json carrying the verifier's final verdict — a JSON hash
+# whose 'verdict' is GREEN/YELLOW/RED (the verifier-brief.md deliverable; the
+# orchestration.md artifacts row). Bare file EXISTENCE is NOT evidence: a
+# `touch`ed, empty, or malformed file fails the parse and the read stays
+# fail-closed to builder-self-attested — otherwise `touch
+# verification-result.json` would mint the bare GREEN W2.3 forbids. Anything
+# else is a builder
 # self-attestation — stamped 'verdict_by' with the closed vocabulary from
 # shared/lib/offramp.rb VERDICT_BY ('builder-self-attested' | 'verifier';
 # literals here because non-offramp-vendored twins run this gate too — the
@@ -3764,7 +3797,10 @@ verdict_by = begin
   _pf_att = File.exist?(summary_path) ? (JSON.parse(File.read(summary_path)) rescue {}) : {}
   countersigned = _pf_att.is_a?(Hash) && _pf_att['visual_verdict'].to_s == 'pass' &&
                   _pf_att['visual_notes'].to_s.start_with?('VERIFIER:')
-  countersigned ||= File.exist?(File.join(opts[:tab], 'verification-result.json'))
+  unless countersigned
+    _vr_att = (JSON.parse(File.read(File.join(opts[:tab], 'verification-result.json'))) rescue nil)
+    countersigned = _vr_att.is_a?(Hash) && %w[GREEN YELLOW RED].include?(_vr_att['verdict'].to_s)
+  end
   countersigned ? 'verifier' : 'builder-self-attested'
 rescue StandardError
   'builder-self-attested'

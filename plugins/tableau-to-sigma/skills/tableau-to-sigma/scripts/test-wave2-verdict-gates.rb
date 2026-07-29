@@ -126,6 +126,37 @@ Dir.mktmpdir do |dir|
   check(out.include?('no join grain assumptions (or emitted join surface)'), 'gate 16 states the N/A', fails)
 end
 
+# A7 per-entry binding (fix-pass): ONE genuine emitted join in the spec must
+# never make "emitted" a skip token for OTHER entries — a lookup-synthesis
+# entry hand-stamped "emitted" beside a real emitted-join stays UNPROVEN.
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'dm-spec.json'), JSON.pretty_generate(
+               DM_WITH_JOIN.merge('columns' => [{ 'name' => 'x', 'formula' => 'Lookup([a],[b])' }])))
+  File.write(File.join(dir, 'join-plan.json'), JSON.generate('entries' => [
+               JOIN_ENTRY_EMITTED,
+               { 'kind' => 'lookup-synthesis', 'left' => 'FACT', 'right' => 'DIM2',
+                 'keys' => ['K'], 'status' => 'emitted' }
+             ]))
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 23, "hand-stamped emitted on a non-emitted-join entry → exit 23 (got #{st.exitstatus})", fails)
+  check(err.include?('non-emitted entry') && err.include?('emitted-join'),
+        'failure names the per-entry kind binding', fails)
+end
+
+# A8 count bound (fix-pass): more "emitted" entries than the spec has
+# `"kind": "join"` occurrences → the claims exceed the evidence, exit 23.
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'dm-spec.json'), JSON.pretty_generate(DM_WITH_JOIN))
+  File.write(File.join(dir, 'join-plan.json'), JSON.generate('entries' => [
+               JOIN_ENTRY_EMITTED, JOIN_ENTRY_EMITTED.merge('right' => 'DIM2')
+             ]))
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 23, "2 emitted entries over a 1-join spec → exit 23 (got #{st.exitstatus})", fails)
+  check(err.include?('more "emitted" entries'), 'failure names the count bound', fails)
+end
+
 # ---------------------------------------------------------------------------
 # B. Tier-scaled waiver budgets (W2.1 gate half). The tier is READ from
 # migrate-state.json (lane A writes it — the strings come from the shared
@@ -179,6 +210,18 @@ Dir.mktmpdir do |dir|
   out, _err, st = run_gate(dir, *two_quality_waivers)
   check(st.success?, "unknown tier string → fail-closed to shipped behavior (got #{st.exitstatus})", fails)
   check(!out.include?('[TIER]'), 'unknown tier is never announced as a tier', fails)
+end
+
+# B5 closed-vocabulary read (fix-pass): a junk tier_basis string is BLANKED,
+# never printed raw into the [TIER] banner (Offramp::TIER_BASIS on read).
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'migrate-state.json'),
+             JSON.generate('tier' => 'S', 'tier_basis' => 'INJECTED-junk-basis'))
+  out, _err, st = run_gate(dir)
+  check(st.success?, "valid tier + junk basis → tier still honored (got #{st.exitstatus})", fails)
+  check(out.include?('[TIER] S — ') && !out.include?('INJECTED-junk-basis'),
+        'junk tier_basis blanked from the banner (closed vocabulary on read)', fails)
 end
 
 # ---------------------------------------------------------------------------
@@ -338,6 +381,51 @@ Dir.mktmpdir do |dir|
   _vout, verr, vst = run_verify(dir)
   check(vst.exitstatus == 6, "fabricated factory label → verify-complete exit 6 (got #{vst.exitstatus})", fails)
   check(verr.include?('without a Tier-S self-attested basis'), 'contradiction names the missing basis', fails)
+end
+
+# D9 fix-pass: countersignature is CONTENT, not existence — a `touch`ed or
+# malformed verification-result.json must NOT flip verdict_by to 'verifier'
+# (the bare GREEN stays unmintable); the verifier-brief deliverable (a JSON
+# hash with verdict GREEN/YELLOW/RED) still countersigns.
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'migrate-state.json'), JSON.generate(TIER_S_STATE))
+  File.write(File.join(dir, 'verification-result.json'), '') # zero-byte touch
+  out, _err, st = run_gate(dir)
+  pf = JSON.parse(File.read(File.join(dir, 'parity-final.json')))
+  check(st.success? && pf['verdict'] == FACTORY_LABEL && pf['verdict_by'] == 'builder-self-attested',
+        'zero-byte verification-result.json is not countersignature evidence (label + self-attested kept)', fails)
+  check(out.include?("VERDICT: #{FACTORY_LABEL}"), 'touch-file run still prints the labeled verdict', fails)
+  File.write(File.join(dir, 'verification-result.json'), JSON.generate('note' => 'no verdict field'))
+  _out2, _err2, st2 = run_gate(dir)
+  pf2 = JSON.parse(File.read(File.join(dir, 'parity-final.json')))
+  check(st2.success? && pf2['verdict_by'] == 'builder-self-attested',
+        'verdict-less verification-result.json is not evidence either', fails)
+  File.write(File.join(dir, 'verification-result.json'),
+             JSON.generate('verdict' => 'GREEN', 'notes' => 'VERIFIER: tile-by-tile'))
+  _out3, _err3, st3 = run_gate(dir)
+  pf3 = JSON.parse(File.read(File.join(dir, 'parity-final.json')))
+  check(st3.success? && pf3['verdict'] == 'GREEN' && pf3['verdict_by'] == 'verifier',
+        'a valid verifier deliverable still countersigns (bare GREEN + verifier)', fails)
+end
+
+# D10 fix-pass: the TWO-field launder (verdict → bare GREEN AND verdict_by →
+# 'verifier', no countersignature evidence on disk) is exit 6 — verdict_by is
+# re-derived from evidence, never trusted from the markers.
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'migrate-state.json'), JSON.generate(TIER_S_STATE))
+  run_gate(dir) # stamps the labeled factory verdict
+  %w[parity-final.json phase6-success.json].each do |f|
+    j = JSON.parse(File.read(File.join(dir, f)))
+    j['verdict'] = 'GREEN'
+    j['verdict_by'] = 'verifier'
+    File.write(File.join(dir, f), JSON.pretty_generate(j))
+  end
+  _vout, verr, vst = run_verify(dir)
+  check(vst.exitstatus == 6, "two-field attestation launder → verify-complete exit 6 (got #{vst.exitstatus})", fails)
+  check(verr.include?('no') && verr.include?('countersignature evidence') && verr.include?('laundering'),
+        'contradiction names the missing countersignature evidence', fails)
 end
 
 # D8 vocabulary pin: the gate's literals (it cannot require offramp — the domo
