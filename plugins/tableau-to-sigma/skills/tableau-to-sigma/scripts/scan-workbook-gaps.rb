@@ -342,6 +342,117 @@ def detect_blends(xml)
   [features, { 'datasources' => ds_info.values, 'blends' => blends }]
 end
 
+# --- Union datasources (W2.16) ----------------------------------------------
+# The converter (converter/tableau.mjs) emits the documented Sigma union
+# source for a ROOT-level wildcard union (>=2 derivable member tables + >=1
+# metadata output column): one warehouse-table element per member + an
+# elementId-sourced union element (auto-named "Union of N Sources" by the
+# API). Anything else — a root union missing members/columns, a union with
+# any NON-TABLE member (custom-SQL text / nested union: emitting only the
+# table members would silently subset the rows), or a union NESTED inside a
+# join tree (the join branch refuses via collectTables rather than flatten
+# it away) — the converter REFUSES loudly (named warning, NO elements
+# emitted). Before W2.16 a unioned datasource converted to NOTHING,
+# silently: the worst defect class under the program's rules.
+# TWO rows so the handled shape never false-trips the ❌ gate:
+#   :hint      — root wildcard union the converter emits (VERIFY matches[])
+#   :unhandled — underivable/mixed/nested union (❌ named refusal; drives
+#                the orchestrator's exit-11 gap stop, refuse-don't-guess)
+# Derivability here MIRRORS the converter's own test (every member a plain
+# table && members>=2 && cols>=1 at the connection root) so scan and
+# emission can't drift apart silently — the union-wildcard-seed corpus
+# checks.sh pins both against the same .twb.
+def detect_unions(xml)
+  return [] if xml.nil?
+  emitted = []
+  refused = []
+  xml.elements.each('/workbook/datasources/datasource') do |ds|
+    ds_name = ds.attributes['name'].to_s
+    next if ds_name == 'Parameters' || ds_name.start_with?('Parameters ')
+    sheets = []
+    xml.elements.each('//worksheet') do |ws|
+      used = ws.elements.to_a('.//view/datasources/datasource').map { |d| d.attributes['name'] }
+      sheets << ws.attributes['name'].to_s if used.include?(ds_name) && ws.attributes['name']
+    end
+    # Output columns the converter can derive: unique metadata-record remote
+    # names minus Tableau's union-provenance bookkeeping (Sheet / Table Name).
+    cols = 0
+    seen = Set.new
+    ds.elements.each('.//metadata-record') do |mr|
+      next unless mr.attributes['class'].to_s == 'column'
+      remote = mr.elements['remote-name']&.text.to_s.strip
+      next if remote.empty? || seen.include?(remote.upcase)
+      next if remote =~ /\A(Sheet|Table Name)\z/i
+      seen << remote.upcase
+      cols += 1
+    end
+    ds.elements.each('.//relation') do |rel|
+      next unless rel.attributes['type'].to_s == 'union'
+      root = rel.parent && rel.parent.name == 'connection'
+      kids = rel.elements.to_a('relation')
+      members = kids.count do |r|
+        r.attributes['type'].to_s == 'table' && !r.attributes['table'].to_s.empty?
+      end
+      # Fix-pass: members that are NOT plain tables (custom-SQL text, nested
+      # union, join). The converter refuses the whole union rather than emit
+      # a silent SUBSET of only its table members — mirror that refusal here
+      # (a missing type attr defaults to 'table', like the converter's attr()).
+      non_table = kids.count do |r|
+        t = r.attributes['type'].to_s
+        !t.empty? && t != 'table'
+      end
+      entry = { ds: ds_name, sheets: sheets.uniq.sort,
+                nested: !root, members: members, cols: cols, non_table: non_table }
+      if root && non_table.zero? && members >= 2 && cols >= 1
+        emitted << entry
+      else
+        refused << entry
+      end
+    end
+  end
+  feats = []
+  unless emitted.empty?
+    f = {
+      name:   'Union datasource (wildcard, converter-emitted)',
+      status: :hint,
+      count:  emitted.length,
+      blurb:  'Root-level union → Sigma union source: one warehouse-table element per member + an ' \
+              'elementId-sourced union element (auto-named "Union of N Sources" — a spec-set name breaks ' \
+              'self-referential column validation; rename in the UI). Emission assumes SAME-NAME columns ' \
+              'across members (wildcard union): VERIFY matches[] and hand-edit for renamed/missing member ' \
+              'columns (null for a member lacking the column). Datasources: ' +
+              emitted.map { |e| e[:ds] }.uniq.join(', ') + '.'
+    }
+    ws = emitted.flat_map { |e| e[:sheets] }.uniq.sort
+    f[:worksheets] = ws unless ws.empty? # empty = unknown → omit key, fail open
+    feats << f
+  end
+  unless refused.empty?
+    f = {
+      name:   'Union datasource (underivable / nested — NOT converted)',
+      status: :unhandled,
+      count:  refused.length,
+      blurb:  'Union the converter REFUSES loudly (named warning, NO elements emitted — silent loss is ' \
+              'dead): emission needs a ROOT-level union of ≥2 derivable member tables and ≥1 metadata ' \
+              'column with EVERY member a plain table; non-table members (custom SQL / nested union) and ' \
+              'unions nested inside a join tree are refused, never silently subset. Route: model as a ' \
+              'Custom SQL UNION ALL element, or convert the member tables and re-point sources ' \
+              'post-publish. ' +
+              refused.map { |e|
+                reason = if e[:nested] then 'nested'
+                         elsif e[:non_table].to_i > 0 then "#{e[:non_table]} non-table member(s)"
+                         else "#{e[:members]} member(s)/#{e[:cols]} column(s)"
+                         end
+                "#{e[:ds]} (#{reason})"
+              }.join(', ') + '.'
+    }
+    ws = refused.flat_map { |e| e[:sheets] }.uniq.sort
+    f[:worksheets] = ws unless ws.empty?
+    feats << f
+  end
+  feats
+end
+
 # Detect the "N independent datasources feeding different worksheets" case —
 # DISTINCT from a Tableau blend (2 sources on ONE sheet, handled by
 # detect_blends). Here different sheets have different PRIMARY datasources. The
@@ -728,6 +839,7 @@ def main
   results.concat(detect_point_map_geo_role_gaps(content))
   blend_features, blend_plan = detect_blends(xml)
   results.concat(blend_features)
+  results.concat(detect_unions(xml)) # W2.16: emitted (hint) vs refused (❌)
   multi_ds_feature, multi_ds_detail, multi_ds_plan = detect_multi_datasource(xml, blend_plan)
   results << multi_ds_feature if multi_ds_feature
   md_path = out

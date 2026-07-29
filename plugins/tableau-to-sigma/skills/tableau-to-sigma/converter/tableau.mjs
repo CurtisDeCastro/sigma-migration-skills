@@ -3885,10 +3885,18 @@ function warehouseClassFromConn(connVal) {
   }
   return "";
 }
-function collectTables(rel, tables) {
+function collectTables(rel, tables, nestedUnions) {
   const type = attr(rel, "type") || "table";
   if (type === "table") {
     tables.push({ rel, leftKey: "", rightKey: "", joinType: "", leftKeys: [], rightKeys: [] });
+    return;
+  }
+  if (type === "union" && Array.isArray(nestedUnions)) {
+    // W2.16 fix-pass: a union subtree inside a join tree previously vanished
+    // here silently (neither branch matched) — the join flattened to its
+    // table branches and the union members' rows were DROPPED with elements
+    // still emitted. Record it so the join branch can refuse loudly instead.
+    nestedUnions.push(attr(rel, "name") || "(unnamed union)");
     return;
   }
   if (type === "join") {
@@ -3916,9 +3924,9 @@ function collectTables(rel, tables) {
     const leftKey = leftKeys[0] || "", rightKey = rightKeys[0] || "";
     const childRels = asArray(rel.relation);
     if (childRels.length === 2) {
-      collectTables(childRels[0], tables);
+      collectTables(childRels[0], tables, nestedUnions);
       const beforeRight = tables.length;
-      collectTables(childRels[1], tables);
+      collectTables(childRels[1], tables, nestedUnions);
       for (let i = beforeRight; i < tables.length; i++) {
         if (!tables[i].leftKey) {
           tables[i].joinType = joinType;
@@ -3930,7 +3938,7 @@ function collectTables(rel, tables) {
       }
     } else {
       for (const child of childRels) {
-        collectTables(child, tables);
+        collectTables(child, tables, nestedUnions);
       }
     }
   }
@@ -4556,8 +4564,15 @@ function convertTableauToSigma(xmlContent, options = {}) {
       });
     } else if (relType === "join") {
       const tables = [];
-      collectTables(rootRelation, tables);
-      if (tables.length === 0) {
+      const nestedUnions = [];
+      collectTables(rootRelation, tables, nestedUnions);
+      if (nestedUnions.length > 0) {
+        // W2.16 fix-pass: refuse-don't-guess. Flattening a join over a union
+        // subtree previously emitted only the plain-table branches \u2014 the
+        // union members' rows were silently DROPPED (elements still emitted,
+        // no warning): the silent-partial-loss class W2.16 exists to kill.
+        warnings.push(`\u26A0 Datasource join tree contains ${nestedUnions.length} nested union relation(s) (${nestedUnions.join(", ")}) \u2014 NOT converted: flattening the join would silently drop the union members' rows. NO ELEMENTS EMITTED for this datasource \u2014 model it as a Custom SQL element (join over a UNION ALL subquery), or convert the union's member tables and re-point sources after conversion.`);
+      } else if (tables.length === 0) {
         warnings.push("\u26A0 Could not parse join structure");
       } else {
         const elementMap = {};
@@ -5021,9 +5036,102 @@ ${statement}
           warnings.push(`\u2139 Custom SQL datasource \u2192 Sigma SQL element (source.kind:'sql', ${columns.length} column(s)). The SQL statement is preserved verbatim; verify column display names resolve against the query output.`);
         }
       }
+    } else if (relType === "union") {
+      // W2.16: Tableau union datasource. Emits the documented Sigma union
+      // source (kind:"union" + sources + matches) for the dominant
+      // same-connection wildcard-union shape; anything underivable falls to a
+      // LOUD named refusal \u2014 a unioned datasource previously converted to
+      // NOTHING, silently (the worst defect class under the program's rules).
+      // Shape per sigma-data-models reference/sources.md "Union" (live-verified):
+      //   - sources are elementId-based (direct warehouse-table entries fail on
+      //     special-char columns) \u2192 one intermediate warehouse-table element
+      //     per union member;
+      //   - the union element carries NO name (an explicit name breaks
+      //     self-referential column validation; the API auto-names it
+      //     "Union of N Sources") \u2192 its column formulas use that prefix;
+      //   - sourceColumns entries are bracketed friendly column names resolved
+      //     within each member element's own column set.
+      const allUnionKids = asArray(rootRelation.relation || []);
+      const unionChildren = allUnionKids.filter((r) => (attr(r, "type") || "table") === "table");
+      // W2.16 fix-pass: members that are NOT plain tables (custom-SQL text,
+      // nested union, join) used to be dropped by the filter above and the
+      // union emitted from the table members alone — a silent SUBSET (the
+      // missing members' rows vanished with no refusal). Any non-table member
+      // now refuses the whole union loudly instead.
+      const nonTableKids = allUnionKids.filter((r) => (attr(r, "type") || "table") !== "table");
+      const unionName = ((attr(rootRelation, "name") || ds.name || "Union").replace(/[\[\]]/g, "")) || "Union";
+      const srcPaths = unionChildren.map((r) => extractPath(r, dbEff, schEff, whCasing)).filter((pp) => pp && pp.length > 0);
+      const capByName = {};
+      for (const col of asArray(ds.ds?.column || [])) {
+        const nm = (attr(col, "name") || "").replace(/^\[|\]$/g, "");
+        const cap = attr(col, "caption");
+        if (nm && cap)
+          capByName[nm.toUpperCase()] = cap;
+      }
+      const outCols = [];
+      const seenUnionCols = /* @__PURE__ */ new Set();
+      for (const mr of asArray(rootConn?.["metadata-records"]?.["metadata-record"] || [])) {
+        if (attr(mr, "class") !== "column")
+          continue;
+        const remote = (mr["remote-name"] || "").trim();
+        if (!remote || seenUnionCols.has(remote.toUpperCase()))
+          continue;
+        if (/^(Sheet|Table Name)$/i.test(remote))
+          continue; // Tableau union-provenance bookkeeping columns, not warehouse columns
+        seenUnionCols.add(remote.toUpperCase());
+        outCols.push(remote);
+      }
+      if (nonTableKids.length > 0) {
+        const kidDesc = nonTableKids.map((r) => `${attr(r, "name") || "(unnamed)"}: type '${attr(r, "type")}'`).join("; ");
+        warnings.push(`\u26a0 Union datasource "${unionName}" NOT converted \u2014 ${nonTableKids.length} of ${allUnionKids.length} union member(s) are not plain tables (${kidDesc}); emitting the ${unionChildren.length} table member(s) alone would silently drop the other member(s)' rows. NO ELEMENTS EMITTED for this datasource \u2014 model it as a Custom SQL UNION ALL element, or re-point sources after conversion.`);
+      } else if (srcPaths.length >= 2 && outCols.length > 0) {
+        // Members FIRST (displayNameMap is last-writer-wins, so the union
+        // element \u2014 built last \u2014 owns every column's resolution), union
+        // element LAST; factEl selection prefers a union source so translated
+        // calcs and auto-metrics attach to the stacked rows, not one member.
+        const memberSources = [];
+        for (const pp of srcPaths) {
+          const memberTable = pp[pp.length - 1] || "MEMBER";
+          const mCols = [], mOrder = [];
+          for (const c of outCols) {
+            const mid = sigmaInodeId(c.replace(/[^A-Za-z0-9_]/g, "_").toUpperCase());
+            mCols.push({ id: mid, formula: `[${memberTable}/${sigmaDisplayName(c)}]`, name: sigmaDisplayName(c) });
+            mOrder.push(mid);
+          }
+          const mEl = {
+            id: sigmaShortId(),
+            kind: "table",
+            source: { connectionId: connId, kind: "warehouse-table", path: pp },
+            columns: mCols,
+            order: mOrder
+          };
+          elements.push(mEl);
+          memberSources.push({ kind: "table", elementId: mEl.id });
+        }
+        const unionPrefix = `Union of ${srcPaths.length} Sources`;
+        const matches = outCols.map((c) => ({ outputColumnName: sigmaDisplayName(c), sourceColumns: srcPaths.map(() => `[${sigmaDisplayName(c)}]`) }));
+        const columns = [], order = [];
+        for (const c of outCols) {
+          const id = sigmaInodeId(c.replace(/[^A-Za-z0-9_]/g, "_").toUpperCase());
+          columns.push({ id, formula: `[${unionPrefix}/${sigmaDisplayName(c)}]`, name: capByName[c.toUpperCase()] || sigmaDisplayName(c) });
+          order.push(id);
+        }
+        elements.push({
+          id: sigmaShortId(),
+          kind: "table",
+          source: { kind: "union", sources: memberSources, matches },
+          columns,
+          order
+        });
+        warnings.push(`\u26a0 Union datasource "${unionName}" \u2192 Sigma union source (${srcPaths.length} member element(s) + 1 union element, ${outCols.length} column(s)), assuming SAME-NAME columns across members (wildcard union). Sigma auto-names the union element "${unionPrefix}" \u2014 rename in the UI if desired (setting a spec name breaks self-referential column validation). VERIFY: a member with renamed/missing columns needs hand-edited matches (null for a member lacking the column).`);
+      } else {
+        warnings.push(`\u26a0 Union datasource "${unionName}" NOT converted \u2014 ${srcPaths.length} derivable member table(s), ${outCols.length} derivable output column(s); emitting a Sigma union source (kind:"union" + sources + matches) needs \u22652 members and \u22651 column. NO ELEMENTS EMITTED for this datasource \u2014 model it as a Custom SQL UNION ALL element, or re-point sources after conversion.`);
+      }
+    } else {
+      warnings.push(`\u26a0 Datasource root relation type "${relType}" is not supported by the converter \u2014 NO ELEMENTS EMITTED for this datasource. Supported: table, join, collection, text (Custom SQL), union.`);
     }
   }
-  const factEl = elements.find((e) => e.relationships?.length > 0) || (elements.length > 0 ? elements.reduce((best, e) => (e.columns?.length || 0) > (best.columns?.length || 0) ? e : best, elements[0]) : null);
+  const factEl = elements.find((e) => e.relationships?.length > 0) || elements.find((e) => e.source?.kind === "union") || (elements.length > 0 ? elements.reduce((best, e) => (e.columns?.length || 0) > (best.columns?.length || 0) ? e : best, elements[0]) : null);
   if (factEl) {
     let _baseFromExpr2 = function() {
       const fe = factEl;
@@ -6660,10 +6768,36 @@ ${suggestion}
       warnings.push(`\u2139 Parameter "${p.name}" \u2192 number control (Top-N driver, default ${defVal})`);
       continue;
     }
+    const _paramLiteral = (s) => {
+      const t = (s || "").trim();
+      if (!t)
+        return "";
+      let m = t.match(/^"((?:[^"\\]|\\.)*)"$/);
+      if (m)
+        return m[1].replace(/\\(.)/g, "$1");
+      m = t.match(/^#\s*([^#]+?)\s*#$/);
+      if (m)
+        return m[1];
+      if (/^-?\d+(?:\.\d+)?$/.test(t) || /^(?:true|false)$/i.test(t))
+        return t;
+      return "";
+    };
+    const _isoDateValue = (s) => {
+      const m = (s || "").match(/^(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2})(?::(\d{2}))?)?/);
+      if (!m)
+        return "";
+      return m[2] ? `${m[1]}T${m[2]}:${m[3] || "00"}` : m[1];
+    };
+    // True parameter default: the .twb's own current value (value attr, or the
+    // initial-value calc when it is a plain literal). Empty when the workbook
+    // carries neither \u2014 every branch below falls back to its old shape then.
+    const _rawCur = (p.currentValue || "").trim();
+    const paramDefault = (/^#.*#$/.test(_rawCur) ? _paramLiteral(_rawCur) : _rawCur) || _paramLiteral(p.defaultVal);
     if (p.domainType === "list" && p.members.length > 0) {
       const aliasMap = p.memberAliases || {};
       const labels = p.members.map((v) => aliasMap[v] || v);
       const hasLabels = p.members.some((v) => aliasMap[v] && aliasMap[v] !== v);
+      const defSelected = paramDefault && p.members.includes(paramDefault) ? [paramDefault] : [];
       controls.push({
         kind: "control",
         controlId,
@@ -6671,39 +6805,67 @@ ${suggestion}
         controlType: "list",
         mode: "include",
         selectionMode: "single",
-        values: [],
+        values: defSelected,
         source: { kind: "manual", valueType: "text", values: p.members, ...hasLabels ? { labels } : {} }
       });
-      warnings.push(`\u2139 Parameter "${p.name}" \u2192 list control${hasLabels ? ` (${Object.keys(aliasMap).length} member alias(es) \u2192 labels[])` : ""}`);
+      warnings.push(`\u2139 Parameter "${p.name}" \u2192 list control${hasLabels ? ` (${Object.keys(aliasMap).length} member alias(es) \u2192 labels[])` : ""}${defSelected.length ? ` (default "${defSelected[0]}" from the workbook's current value)` : ""}`);
     } else if (p.type === "date" || p.type === "datetime") {
-      controls.push({
-        kind: "control",
-        controlId,
-        id: sigmaShortId() + "con",
-        controlType: "date-range",
-        mode: "last",
-        value: 90,
-        unit: "day",
-        includeToday: true
-      });
-      warnings.push(`\u2139 Parameter "${p.name}" \u2192 date-range control (default: last 90 days \u2014 adjust in Sigma UI)`);
+      const isoDef = _isoDateValue(paramDefault);
+      if (isoDef) {
+        controls.push({
+          kind: "control",
+          controlId,
+          id: sigmaShortId() + "con",
+          controlType: "date",
+          mode: "=",
+          value: isoDef
+        });
+        warnings.push(`\u2139 Parameter "${p.name}" \u2192 date control (default ${isoDef} from the workbook's current value)`);
+      } else {
+        controls.push({
+          kind: "control",
+          controlId,
+          id: sigmaShortId() + "con",
+          controlType: "date-range",
+          mode: "last",
+          value: 90,
+          unit: "day",
+          includeToday: true
+        });
+        warnings.push(`\u2139 Parameter "${p.name}" \u2192 date-range control (default: last 90 days \u2014 adjust in Sigma UI)`);
+      }
     } else if (p.type === "real" || p.type === "integer" || p.domainType === "range") {
-      controls.push({
-        kind: "control",
-        controlId,
-        id: sigmaShortId() + "con",
-        controlType: "number-range"
-      });
-      warnings.push(`\u2139 Parameter "${p.name}" \u2192 number-range control`);
+      const numDef = paramDefault !== "" && Number.isFinite(Number(paramDefault)) ? Number(paramDefault) : null;
+      if (numDef !== null && p.domainType !== "range") {
+        controls.push({
+          kind: "control",
+          controlId,
+          id: sigmaShortId() + "con",
+          controlType: "number",
+          mode: "=",
+          value: numDef,
+          includeNulls: "when-no-value-is-selected"
+        });
+        warnings.push(`\u2139 Parameter "${p.name}" \u2192 number control (default ${numDef} from the workbook's current value)`);
+      } else {
+        controls.push({
+          kind: "control",
+          controlId,
+          id: sigmaShortId() + "con",
+          controlType: "number-range"
+        });
+        warnings.push(`\u2139 Parameter "${p.name}" \u2192 number-range control${numDef !== null ? ` (workbook current value ${numDef} \u2014 range domain, no single-value default applied)` : ""}`);
+      }
     } else {
       controls.push({
         kind: "control",
         controlId,
         id: sigmaShortId() + "con",
         controlType: "text",
-        mode: "contains"
+        mode: "contains",
+        ...paramDefault !== "" ? { value: paramDefault } : {}
       });
-      warnings.push(`\u2139 Parameter "${p.name}" \u2192 text control`);
+      warnings.push(`\u2139 Parameter "${p.name}" \u2192 text control${paramDefault !== "" ? ` (default "${paramDefault}" from the workbook's current value)` : ""}`);
     }
   }
   const derivedEls = buildDerivedElements(elements);

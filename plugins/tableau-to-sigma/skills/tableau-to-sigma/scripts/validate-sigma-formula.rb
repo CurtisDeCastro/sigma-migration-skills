@@ -37,6 +37,27 @@
 # success path). --keep-workbook still keeps it (and records nothing as
 # cleaned); a process kill is covered by scripts/sweep-run-artifacts.rb
 # reading the registry.
+#
+# BATCH MODE (W2.14): --batch FILE validates N formulas with ONE probe
+# workbook and ONE columns readback — 1 POST + 1 DELETE in the registry
+# regardless of N (pattern proven at regression-corpus/tableau/
+# formula_coverage: 74 formulas / 1 POST). FILE is a JSON array of
+# { "label": ..., "formula": ..., "sql": ..., "sql_columns": [...] } (label,
+# sql, sql_columns optional; or wrap as {"entries": [...]}). The batch test
+# element is ALWAYS kind 'table': chart kinds need wired axes and a per-kind
+# singleton probe (the mandatory-placement rule above), so --batch with a
+# --chart-kind refuses loudly instead of vacuously passing N series.
+# Output: one JSON doc with per-entry results; exit 0 all-ok / 2 any formula
+# error / 3 formulas ok but the SQL ground-truth half incomplete.
+#
+# SQL ground-truth half (optional): entries carrying "sql" also get their
+# statement rows fetched via ExportPool.pooled_sql_probe (FROZEN signature —
+# cross-lane contract with lane E; transport only, comparisons stay the
+# caller's). SEQUENCING GATE (W2.11): the pooled path is refused — loudly,
+# BEFORE anything is created — until the export-pool lib itself carries
+# ProbeRegistry integration (registry-in-pool). The gate reads the required
+# lib's source, so it auto-opens the moment lane E's W2.11 lands; no flag
+# flip, no coordination commit.
 
 require 'json'
 require 'optparse'
@@ -58,8 +79,64 @@ OptionParser.new do |p|
   p.on('--label L')               { |v| opts[:label] = v }
   p.on('--workdir DIR', 'conversion workdir — homes the probe-artifact registry') { |v| opts[:workdir] = v }
   p.on('--keep-workbook')         { opts[:keep] = true }
+  p.on('--batch FILE', 'JSON entries — N formulas, ONE probe workbook, one readback (W2.14)') { |v| opts[:batch] = v }
+  p.on('--connection-id ID', 'warehouse connection for the optional per-entry SQL ground-truth half') { |v| opts[:conn_id] = v }
+  p.on('--pool N', Integer, 'SQL ground-truth export pool width (default 5)') { |v| opts[:pool] = v }
+  p.on('--row-limit N', Integer, 'SQL ground-truth export row cap') { |v| opts[:row_limit] = v }
+  p.on('--timeout S', Integer, 'SQL ground-truth wall-clock budget in seconds (default 300)') { |v| opts[:timeout] = v }
 end.parse!
-%i[formula dm_id el_id].each { |k| abort("missing --#{k.to_s.tr('_','-')}") unless opts[k] }
+if opts[:batch]
+  abort('--batch and --formula are mutually exclusive (batch entries carry their own formulas)') if opts[:formula]
+  # Chart-kind probes need wired axes and stay SINGLETON (see header): a
+  # multi-series batch chart would pass/fail vacuously, not per-formula.
+  if opts[:chart_kind] != 'table'
+    abort("--batch validates on a 'table' element only — chart-kind '#{opts[:chart_kind]}' probes stay " \
+          'singleton (wired-axes mandatory-placement rule); run those without --batch')
+  end
+  %i[dm_id el_id].each { |k| abort("missing --#{k.to_s.tr('_', '-')}") unless opts[k] }
+else
+  %i[formula dm_id el_id].each { |k| abort("missing --#{k.to_s.tr('_', '-')}") unless opts[k] }
+end
+
+# --- Batch entries + the W2.11 sequencing gate (parse-time, pre-POST) -------
+batch_entries = nil
+if opts[:batch]
+  raw = begin
+    JSON.parse(File.read(opts[:batch]))
+  rescue StandardError => e
+    abort("--batch #{opts[:batch]}: unreadable or invalid JSON (#{e.message.lines.first.to_s.strip})")
+  end
+  raw = raw['entries'] if raw.is_a?(Hash) && raw['entries'].is_a?(Array)
+  abort('--batch: expected a JSON array of {"formula": ...} entries (or {"entries": [...]})') unless raw.is_a?(Array)
+  abort('--batch: no entries') if raw.empty?
+  batch_entries = raw.each_with_index.map do |e, i|
+    abort("--batch entry #{i}: not an object") unless e.is_a?(Hash)
+    f = e['formula'].to_s
+    abort("--batch entry #{i}: missing formula") if f.strip.empty?
+    { 'label' => (e['label'].to_s.strip.empty? ? "batch-#{i}" : e['label'].to_s),
+      'formula' => f, 'sql' => e['sql'], 'sql_columns' => e['sql_columns'] }
+  end
+  # Duplicate labels would ambiguate the columns readback — suffix them.
+  seen_labels = Hash.new(0)
+  batch_entries.each do |e|
+    n = (seen_labels[e['label']] += 1)
+    e['label'] = "#{e['label']} (#{n})" if n > 1
+  end
+  if batch_entries.any? { |e| e['sql'] }
+    abort('--batch entries carry "sql" but --connection-id is missing') unless opts[:conn_id]
+    # W2.11 sequencing gate: pooled_sql_probe's signature is frozen for this
+    # consumer, but the pooled workbook must never be created UNREGISTERED
+    # (litter red line). Refuse until the export-pool lib itself integrates
+    # ProbeRegistry (lane E's registry-in-pool) — checked against the required
+    # lib source so the gate auto-opens when W2.11 lands.
+    pool_src = File.expand_path('lib/export_pool.rb', __dir__)
+    unless File.exist?(pool_src) && File.read(pool_src, encoding: 'UTF-8').include?('ProbeRegistry')
+      abort('--batch SQL ground-truth REFUSED: ExportPool.pooled_sql_probe does not yet register its probe ' \
+            "workbook (lane E W2.11 registry-in-pool not landed in #{pool_src}). Validating formulas without " \
+            'the SQL half is available now: drop "sql" from the entries. NOTHING was created.')
+    end
+  end
+end
 
 # --- Build the test spec ---------------------------------------------------
 formula = opts[:formula]
@@ -115,6 +192,133 @@ master_el = {
   'columns'         => master_columns,
   'visibleAsSource' => false
 }
+
+# --- BATCH: N formulas, ONE probe workbook, one readback (W2.14) ------------
+if batch_entries
+  test_el = {
+    'id'   => 'el-scout-test',
+    'kind' => 'table',
+    'name' => 'Scout batch test',
+    'source' => { 'kind' => 'table', 'elementId' => 'master' },
+    'columns' => batch_entries.each_with_index.map do |e, i|
+      { 'id' => "col-b#{i}", 'name' => e['label'], 'formula' => e['formula'] }
+    end
+  }
+  spec = {
+    'name'          => "[scout-test] batch-#{batch_entries.length}-#{Time.now.to_i}",
+    'schemaVersion' => 1,
+    'pages' => [
+      { 'id' => 'page-data', 'name' => 'Data', 'elements' => [master_el] },
+      { 'id' => 'page-test', 'name' => 'Test', 'elements' => [test_el] }
+    ]
+  }
+  spec['folderId'] = opts[:folder_id] if opts[:folder_id]
+
+  parsed = begin
+    Sigma.request(:post, '/v2/workbooks/spec', body: JSON.generate(spec))
+  rescue StandardError => e
+    { 'raw' => e.message }
+  end
+  wb_id = parsed.is_a?(Hash) && parsed['workbookId']
+  unless wb_id
+    puts JSON.pretty_generate('status' => 'error', 'phase' => 'post', 'mode' => 'batch',
+                              'workbook_id' => nil, 'error' => parsed, 'spec_used' => spec)
+    exit 1
+  end
+
+  # Same E7.1 contract as the singleton path below: register BEFORE the first
+  # readback, arm the DELETE via at_exit — ONE workbook, ONE registry created
+  # entry, ONE delete for the whole batch, whatever N is.
+  cleanup = { 'done' => false, 'ok' => false }
+  ProbeRegistry.created(wb_id, name: spec['name'], workdir: opts[:workdir],
+                        script: 'validate-sigma-formula.rb --batch')
+  delete_probe = lambda do |via|
+    next if cleanup['done']
+    cleanup['done'] = true
+    begin
+      Sigma.request(:delete, "/v2/files/#{wb_id}")
+      cleanup['ok'] = true
+      ProbeRegistry.cleaned(wb_id, workdir: opts[:workdir], via: via)
+    rescue StandardError => e
+      outcome = e.message.lines.first.to_s =~ /\b404\b/ ? '404' : 'failed'
+      cleanup['ok'] = true if outcome == '404' # already gone = cleaned
+      ProbeRegistry.cleaned(wb_id, workdir: opts[:workdir], via: via, outcome: outcome)
+    end
+  end
+  at_exit { delete_probe.call('at_exit') unless opts[:keep] }
+
+  cols_data = Sigma.request(:get, "/v2/workbooks/#{wb_id}/elements/el-scout-test/columns")
+  cols_data = JSON.parse(cols_data) if cols_data.is_a?(String) # tolerate a raw body
+  col_entries = cols_data['entries'] || []
+  by_col_id = {}
+  by_label  = {}
+  col_entries.each do |c|
+    cid = c['columnId'] || c['id']
+    by_col_id[cid] ||= c if cid
+    by_label[c['label']] ||= c if c['label']
+  end
+
+  results = batch_entries.each_with_index.map do |e, i|
+    col = by_col_id["col-b#{i}"] || by_label[e['label']]
+    if col.nil?
+      { 'label' => e['label'], 'formula' => e['formula'], 'status' => 'error',
+        'err' => 'column missing from readback' }
+    else
+      t = col['type']
+      tt = t.is_a?(Hash) ? t['type'] : t
+      if tt == 'error'
+        { 'label' => e['label'], 'formula' => e['formula'], 'status' => 'error', 'err' => t }
+      else
+        { 'label' => e['label'], 'formula' => e['formula'], 'status' => 'ok', 'type' => tt }
+      end
+    end
+  end
+
+  # Optional SQL ground-truth half (W2.11 gate passed at parse time): FROZEN
+  # pooled_sql_probe signature; transport only — rows are attached per entry,
+  # comparisons stay the caller's (never-verdict-in-the-pool doctrine).
+  sql_incomplete = false
+  sql_idx = batch_entries.each_index.select { |i| batch_entries[i]['sql'] }
+  unless sql_idx.empty?
+    require 'export_pool'
+    sql_entries = sql_idx.map do |i|
+      { 'sql' => batch_entries[i]['sql'].to_s, 'columns' => Array(batch_entries[i]['sql_columns']) }
+    end
+    deadline = ExportPool::Deadline.new(opts[:timeout] || 300)
+    sql_res = begin
+      ExportPool.pooled_sql_probe(opts[:conn_id], sql_entries, deadline,
+                                  folder_id: opts[:folder_id], pool: opts[:pool] || 5,
+                                  row_limit: opts[:row_limit])
+    rescue StandardError => e
+      e.message.to_s
+    end
+    if sql_res.is_a?(Array)
+      sql_idx.each_with_index do |bi, si|
+        st, rows = sql_res[si]
+        results[bi]['sql_status'] = st.to_s
+        results[bi]['sql_rows'] = rows if st == :ok
+        sql_incomplete = true unless st == :ok
+      end
+    else # pool POST itself failed — nothing was created on the pool side
+      sql_idx.each { |bi| results[bi]['sql_status'] = "pool-post-failed: #{sql_res}" }
+      sql_incomplete = true
+    end
+  end
+
+  formula_errors = results.count { |r| r['status'] == 'error' }
+  status = formula_errors.zero? ? 'ok' : 'error'
+  delete_probe.call('ensure') unless opts[:keep]
+  puts JSON.pretty_generate(
+    'status' => status, 'phase' => 'columns', 'mode' => 'batch',
+    'workbook_id' => wb_id, 'workbook_cleaned' => cleanup['ok'],
+    'counts' => { 'total' => results.length, 'ok' => results.length - formula_errors,
+                  'error' => formula_errors },
+    'sql_incomplete' => sql_incomplete,
+    'results' => results,
+    'spec_used' => spec
+  )
+  exit(status == 'ok' ? (sql_incomplete ? 3 : 0) : 2)
+end
 
 test_el = {
   'id'   => 'el-scout-test',

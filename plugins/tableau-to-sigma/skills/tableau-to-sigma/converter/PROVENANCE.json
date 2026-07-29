@@ -31,6 +31,38 @@
         "un-staled the window-untranslatable list: WINDOW_CORR/WINDOW_VAR/WINDOW_COUNT now map to MovingCorr/MovingVariance/MovingCount (offset forms spanning the current row; all three present in the Sigma function index, verified 2026-07-25); population variants WINDOW_VARP/COVARP/STDEVP stay untranslatable; SIGMA_CHART_ONLY_WINDOW_RE extended with MovingVariance/MovingCorr so the DM router keeps refusing them"
       ],
       "upstream_pr": "twells89/sigma-data-model-mcp#111 (upstream commit 60a0355)"
+    },
+    {
+      "commit": "worktree (uncommitted at patch time — becomes the W2.16 landing commit on wave/2-conv)",
+      "summary": "W2.16 union emission + named-refusal stopgap applied to the vendored bundle in place, pending upstreaming (same fallback path as the entries above: the local upstream clone's history is divergent from source_commit d769bec and re-bundling would drop the unlanded bundle-only patches). Paired Ruby-side change in the same commit: scan-workbook-gaps.rb detect_unions emits the hint/❌ union rows whose derivability test mirrors this emission.",
+      "changes": [
+        "union root relations (relType 'union') now CONVERT instead of silently emitting nothing: root-level same-connection wildcard unions (>=2 derivable member tables + >=1 metadata output column, Sheet/'Table Name' bookkeeping columns excluded) emit one warehouse-table element per member plus an elementId-sourced union element, per sigma-data-models reference/sources.md 'Union' — elementId-based sources (direct warehouse-table union sources fail on special-char columns), NO name on the union element (an explicit name breaks self-referential column validation; the API auto-names it 'Union of N Sources' and column formulas use that prefix), matches[].sourceColumns as bracketed friendly names resolved in each member's own column set (member columns carry explicit name to pin resolution)",
+        "member elements are pushed FIRST and the union element LAST so last-writer-wins display-name resolution lands every column on the union element; factEl selection gains a union preference (relationships > union source > max-columns) so translated calcs and auto-metrics attach to the stacked rows, not one member",
+        "underivable unions (root with <2 derivable members or 0 metadata columns; unions nested in a join tree never reach the branch) fall to a LOUD named refusal warning with the derived counts and the Custom SQL UNION ALL / re-point escalation route — NO elements emitted, silent loss dead",
+        "unsupported datasource root relation types now emit a named 'NOT supported — NO ELEMENTS EMITTED' warning listing the supported set (table, join, collection, text, union) instead of falling through silently"
+      ],
+      "upstream_pr": null
+    },
+    {
+      "commit": "worktree (uncommitted at patch time — becomes the W2.17 landing commit on wave/2-conv)",
+      "summary": "W2.17 true parameter defaults applied to the vendored bundle in place, pending upstreaming (upstream source anchor: src/tableau.ts:4089-4090 hardcoded control shapes = the bundle's parameter-control emission loop). Every parameter control branch now honors the workbook's own current value; every branch falls back to its exact old shape when the .twb carries none.",
+      "changes": [
+        "parameter default derivation: the .twb's current value attr wins (date literals #...# unwrapped), else the initial-value calc when it is a plain literal (quoted string with escape handling, date literal, bare number/boolean) — never an expression",
+        "list-domain params: the default becomes values:[default] when it is a domain member (labels/aliases preserved); non-member or absent -> values:[] unchanged",
+        "date/datetime params with a literal date default: the date-range last-90 hardcode is replaced by controlType 'date', mode '=', ISO value (datetime keeps HH:MM[:SS] via the T separator); no derivable literal -> the old date-range last-90 shape + 'adjust in Sigma UI' warning, unchanged",
+        "integer/real non-range params with a finite numeric default: the valueless number-range is replaced by controlType 'number', mode '=', numeric value (includeNulls when-no-value-is-selected); range-domain params KEEP number-range (a single-value default cannot express a range) with the current value noted in the warning",
+        "text params: the control gains value:<default> only when present; warnings for every applied default name the source ('from the workbook's current value') so parity readouts show where values came from"
+      ],
+      "upstream_pr": null
+    },
+    {
+      "commit": "worktree (uncommitted at patch time — becomes the W2.16 fix-pass landing commit on wave/2-conv, adversarial-review findings 1-2)",
+      "summary": "W2.16 fix-pass: two residual silent-partial-loss shapes now refuse loudly, applied to the vendored bundle in place, pending upstreaming (same fallback path as the entries above). Paired Ruby-side change in the same commit: scan-workbook-gaps.rb detect_unions mirrors the non-table-member refusal so scan and emission stay drift-locked.",
+      "changes": [
+        "root union with any NON-TABLE member (custom-SQL text / nested union / join): the unionChildren type filter previously dropped such members and emitted the union from the table members alone — a silent SUBSET with the missing members' rows gone and no warning; any non-table member now refuses the whole union with a named 'NOT converted' warning listing the offending members (NO elements emitted)",
+        "union nested inside a JOIN tree: collectTables previously ignored union nodes silently, so the join flattened to its plain-table branches and STILL emitted elements (rows from the union subtree gone — the exact shape the scan's ❌ blurb claimed the converter refused); collectTables now records union nodes it meets and the join branch refuses the datasource with a named warning (NO elements emitted), making the scan's ❌-row claim true for direct converter invocations too"
+      ],
+      "upstream_pr": null
     }
   ],
   "_upstream_and_revendor_tasks": [
