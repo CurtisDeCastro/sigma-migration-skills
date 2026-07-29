@@ -272,6 +272,12 @@ OptionParser.new do |o|
   o.on('--reuse-dm [ID]', 'opt IN to DM reuse (default: build new; bare flag = use find-or-pick-dm\'s ' \
                           'recommendation). An EXPLICIT id combined with --wb-spec takes the FAST PATH.') { |v| opts[:reuse_dm] = v || :recommended }
   o.on('--skip-reuse-scan')  {     opts[:skip_reuse] = true }
+  o.on('--fact-table NAME', 'override the object-model fact election: NAME (case-insensitive warehouse table / ' \
+                            'logical-table name) becomes the fact/base element every LOD/Top-N/window helper and ' \
+                            'the master build from. Use when the announced election is wrong.') { |v| opts[:fact_table] = v }
+  o.on('--skip-sql-ident-gate REASON', 'waive the pre-POST Custom-SQL identifier gate (check-sql-idents against the ' \
+                                       'fetched warehouse catalog) — REQUIRED reason; recorded as a quality waiver; ' \
+                                       'name it in your report') { |v| opts[:skip_sql_ident_gate] = v }
   o.on('--skip-dashboard-read REASON', 'waive the Phase 1d source dashboard-read gate — REQUIRED reason; name it in your report') { |v| opts[:skip_dashboard_read] = v }
   o.on('--skip-doctor-gate REASON', 'waive the Step-0 environment gate (doctor.json) — REQUIRED reason; name it in your report') { |v| opts[:skip_doctor_gate] = v }
   o.on('--skip-ref-check REASON', 'waive the pre-POST workbook ref-resolution gate — REQUIRED reason; name it in your report') { |v| opts[:skip_ref_check] = v }
@@ -2501,13 +2507,17 @@ if mechanical
   conv = MechanicalSpecs.run_converter(
     twb_path: conv_twb, conn: opts[:conn], db: wh_db,
     schema: wh_schema, mcp_build: mcp_build, workdir: WORK,
-    table_mapping: opts[:table_mapping])
+    table_mapping: opts[:table_mapping], fact_table: opts[:fact_table])
   if opts[:table_mapping]&.any?
     line "table mapping: #{opts[:table_mapping].map { |k, v| "#{k}→#{v}" }.join(', ')}"
   end
   st = conv['stats'] || {}
   line "mechanical converter: #{st['elements']} element(s), #{st['columns']} column(s), " \
        "#{st['metrics']} metric(s), #{st['relationships']} relationship(s); #{(conv['warnings'] || []).size} warning(s)"
+  # Surface the object-model fact election verbatim — the single line an
+  # operator must sanity-check on a relationship-model workbook (wrong fact =
+  # every LOD/Top-N/window helper FROM the wrong table + a wrong master).
+  (conv['warnings'] || []).grep(/fact election/i).each { |w| line "  #{w[0, 220]}" }
 
   # CONVERTER EMPTY-MODEL GUARD (never silently blank): if the converter parsed
   # the datasource but produced ZERO data-model elements/columns, the mechanical
@@ -2594,10 +2604,19 @@ if mechanical
   # worksheets actually use (column count alone picks the wrong one — an unused
   # secondary can project MORE columns than the plotted table). Computed from the
   # .twb worksheet dependencies + the landing manifest; threaded into pick_fact.
-  prefer_fact_table = nil
-  if have_twb && defined?(landing_manifest) && landing_manifest
+  prefer_fact_table = opts[:fact_table] && opts[:fact_table].to_s.split('.').last&.upcase
+  line "fact hint: --fact-table override → prefer table #{prefer_fact_table}" if prefer_fact_table
+  if prefer_fact_table.nil? && have_twb && defined?(landing_manifest) && landing_manifest
     prefer_fact_table = (MechanicalSpecs.dominant_fact_table(File.read(twb, encoding: 'UTF-8'), landing_manifest) rescue nil)
     line "fact hint: dashboard datasource → prefer table #{prefer_fact_table}" if prefer_fact_table
+  end
+  # Single-datasource multi-table (object-model / noodle) workbooks have no
+  # landing manifest — derive the hint from the .twb's own <object-graph>
+  # relationship degree instead (the converter's election tier 1), so
+  # pick_fact's width heuristic can never elect a wide dim view unchallenged.
+  if prefer_fact_table.nil? && have_twb
+    prefer_fact_table = (MechanicalSpecs.object_model_fact_table(File.read(twb, encoding: 'UTF-8')) rescue nil)
+    line "fact hint: object-model relationship degree → prefer table #{prefer_fact_table}" if prefer_fact_table
   end
 
   # Mechanical DM fixup NOW (so dropped calcs feed the checkpoint): resolve
@@ -4082,14 +4101,12 @@ unless reuse_dm_id
     # element — never a narrow date/time dim. Match pick_fact's dim test (both
     # "<X> Dim" and "Dim <X>") and tie-break by column count, not list order, so
     # "Dim Time" can't win just by appearing first.
-    dim_re = /(^Dim\b| Dim$)/i
     fact = dm_els.find { |e| e['name'] == cf_name } ||
-           dm_els.reject { |e| e['name'] =~ dim_re }.max_by { |e| (e['columnLabels'] || []).size } ||
+           dm_els.reject { |e| MechanicalSpecs.dim_like?(e['name']) }.max_by { |e| (e['columnLabels'] || []).size } ||
            dm_els.max_by { |e| (e['columnLabels'] || []).size } || dm_els.first
   else
-    dim_re = /(^Dim\b| Dim$)/i
-    fact = dm_els.reject { |e| e['name'] =~ dim_re }.max_by { |e| (e['columnLabels'] || []).size } ||
-           dm_els.find { |e| e['name'] !~ dim_re } || dm_els.first
+    fact = dm_els.reject { |e| MechanicalSpecs.dim_like?(e['name']) }.max_by { |e| (e['columnLabels'] || []).size } ||
+           dm_els.find { |e| !MechanicalSpecs.dim_like?(e['name']) } || dm_els.first
   end
   fact_eid = fact['id']
   line "dataModelId = #{dm_id}  (fact element '#{fact['name']}' = #{fact_eid})"

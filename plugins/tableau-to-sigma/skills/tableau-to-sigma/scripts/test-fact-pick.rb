@@ -40,9 +40,29 @@ model2 = { 'pages' => [{ 'elements' => [
 f2 = MechanicalSpecs.pick_fact(model2)
 check(f2 && f2['name'] == 'Order Fact', "base-only: picks 'Order Fact' over 'Dim Time' (got #{f2 && f2['name'].inspect})", fails)
 
+puts 'Part A2 — concatenated dim names (field failure: /(^Dim\\b| Dim$)/i missed DIMSITES)'
+# The concatenated shape: dim tables named DIMSITES/DIMDATES (display "Dimsites"
+# etc.) have NO word boundary after "Dim", so the old regex left them
+# fact-eligible and the widest dim view won. dim_like? must catch them.
+%w[Dimsites Dimdates Vdimdates].each do |n|
+  check(MechanicalSpecs.dim_like?(n), "dim_like?(#{n.inspect}) is true", fails)
+  check(MechanicalSpecs.dim_like?("#{n} View"), "dim_like?(#{"#{n} View".inspect}) is true", fails)
+end
+check(MechanicalSpecs.dim_like?('Dim Time'), "dim_like?('Dim Time') is true", fails)
+check(MechanicalSpecs.dim_like?('Customer Dim'), "dim_like?('Customer Dim') is true", fails)
+check(!MechanicalSpecs.dim_like?('Fact Visits'), "dim_like?('Fact Visits') is false", fails)
+check(!MechanicalSpecs.dim_like?('Order Fact View'), "dim_like?('Order Fact View') is false", fails)
+check(!MechanicalSpecs.dim_like?('Entitlements View'), "dim_like?('Entitlements View') is false (dim test must not eat non-dims)", fails)
+model_cat = { 'pages' => [{ 'elements' => [
+  { 'id' => 'e-dimdates', 'name' => 'Dimdates View',     'source' => { 'kind' => 'table', 'elementId' => 'x1' }, 'columns' => cols.call(16) },
+  { 'id' => 'e-factv',   'name' => 'Fact Visits View', 'source' => { 'kind' => 'table', 'elementId' => 'x2' }, 'columns' => cols.call(12) }
+] }] }
+fc = MechanicalSpecs.pick_fact(model_cat)
+check(fc && fc['name'] == 'Fact Visits View', "concatenated-dim view loses to the fact view despite more columns (got #{fc && fc['name'].inspect})", fails)
+
 puts 'Part B — migrate-tableau fact-resolution guards (both paths)'
 mig = File.read(File.join(__dir__, 'migrate-tableau.rb'))
-check(mig.scan(/\(\^Dim\\b\| Dim\$\)/i).size >= 2, 'both fresh + reuse paths use the leading+trailing dim test', fails)
+check(mig.scan(/MechanicalSpecs\.dim_like\?/).size >= 2, 'both fresh + reuse paths use the shared dim_like? test (leading+trailing+concatenated)', fails)
 check(mig.match?(/max_by \{ \|e\| \(e\['columnLabels'\] \|\| \[\]\)\.size \}/),
       'fact fallback tie-breaks by column count, not list order', fails)
 check(mig.include?('prefer_table: prefer_fact_table') || mig.include?('prefer_table: (defined?(prefer_fact_table)'),
@@ -102,10 +122,47 @@ Dir.mktmpdir do |d|
   mp2 = File.join(d, 'mislabeled.json'); File.write(mp2, JSON.generate(mislabeled))
   got2 = MechanicalSpecs.dominant_fact_table(TWB, mp2)
   check(got2 == 'METRIC_SERIES', "mislabeled caption → still resolves via .hyper match (got #{got2.inspect})", fails)
-  # single-source manifest → nil (no ambiguity to resolve)
+  # single-source manifest → that source's table (re-enabled for single-DS:
+  # previously nil, which disabled prefer_table for every single-datasource
+  # multi-table workbook and let the width heuristic elect a dim view).
   sp = File.join(d, 'single.json'); File.write(sp, JSON.generate([MANIFEST[0]]))
-  check(MechanicalSpecs.dominant_fact_table(TWB, sp).nil?, 'single-source manifest → nil (no override)', fails)
+  got1 = MechanicalSpecs.dominant_fact_table(TWB, sp)
+  check(got1 == 'METRIC_SERIES', "single-source manifest → its sf_table (got #{got1.inspect})", fails)
 end
+
+puts 'Part E — object_model_fact_table (single-DS noodle hint from <object-graph> degree)'
+NOODLE_TWB = <<~XML
+  <?xml version='1.0'?>
+  <workbook><datasources><datasource name='federated.noodle' caption='Star'>
+    <connection class='federated'>
+      <relation type='collection'>
+        <relation connection='c1' name='DIM_DATES' table='[PUBLIC].[DIM_DATES]' type='table' />
+        <relation connection='c1' name='DIM_SITES' table='[PUBLIC].[DIM_SITES]' type='table' />
+        <relation connection='c1' name='FACT_VISITS' table='[PUBLIC].[FACT_VISITS]' type='table' />
+      </relation>
+    </connection>
+    <object-graph>
+      <relationships>
+        <relationship>
+          <expression op='='><expression op='[DATE_KEY]'/><expression op='[DATE_KEY]'/></expression>
+          <first-end-point object-id='DIM_DATES_AA11' />
+          <second-end-point object-id='FACT_VISITS_BB22' />
+        </relationship>
+        <relationship>
+          <expression op='='><expression op='[SITE_KEY]'/><expression op='[SITE_KEY]'/></expression>
+          <first-end-point object-id='DIM_SITES_CC33' />
+          <second-end-point object-id='FACT_VISITS_BB22' />
+        </relationship>
+      </relationships>
+    </object-graph>
+  </datasource></datasources></workbook>
+XML
+gotN = MechanicalSpecs.object_model_fact_table(NOODLE_TWB)
+check(gotN == 'FACT_VISITS', "noodle degree hint elects FACT_VISITS (2 edges vs 1) (got #{gotN.inspect})", fails)
+# Tie (one edge, both endpoints degree 1) → nil, never guess.
+TIE_TWB = NOODLE_TWB.sub(%r{<relationship>\s*<expression op='='><expression op='\[SITE_KEY\]'/><expression op='\[SITE_KEY\]'/></expression>\s*<first-end-point object-id='DIM_SITES_CC33' />\s*<second-end-point object-id='FACT_VISITS_BB22' />\s*</relationship>}m, '')
+check(MechanicalSpecs.object_model_fact_table(TIE_TWB).nil?, 'degree tie → nil (refuse-dont-guess)', fails)
+check(MechanicalSpecs.object_model_fact_table('<workbook/>').nil?, 'no object graph → nil', fails)
 
 puts
 if fails.empty?
