@@ -625,8 +625,13 @@ def main():
         json.dump(actuals, open(os.path.join(pdir, "parity-actuals.json"), "w"), indent=2)
         rc, _ = run(["ruby", os.path.join(HERE, "phase6-parity-thoughtspot.rb"),
                      "--workdir", pdir, "--finalize"], check=False)
+        # --require-control-flip: gate 7b runs the runtime control-flip proof
+        # (probe-controls.rb) by default, so a control that lints clean but is
+        # INERT at runtime FAILS the migration. Mirrors the looker reference;
+        # waive on the gate with --skip-control-flip "<reason>".
         grc, _ = run(["ruby", os.path.join(HERE, "assert-phase6-ran.rb"),
-                      "--workdir", pdir, "--workbook-id", wb], check=False)
+                      "--workdir", pdir, "--workbook-id", wb,
+                      "--require-control-flip"], check=False)
         summary = json.load(open(os.path.join(pdir, "parity-final.json")))
         overall.append((name, wb, summary, grc))
 
