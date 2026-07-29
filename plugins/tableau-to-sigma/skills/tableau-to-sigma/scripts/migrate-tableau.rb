@@ -2565,16 +2565,32 @@ if mechanical
     File.write(sec_path, JSON.pretty_generate(rls_rules))
     line ''
     line '🔐 ROW-LEVEL SECURITY DETECTED — NOT yet applied to the Sigma model'
-    rls_rules.each do |r|
+    ent_rules, plain_rules = rls_rules.partition { |r| r['kind'] == 'rls-entitlement-table' }
+    plain_rules.each do |r|
       nm = r.dig('rls', 'name') || r['source']
       attrs = (r.dig('rls', 'userAttributes') || []).join(', ')
       line "   • #{nm}#{attrs.empty? ? '' : "  (user attribute(s): #{attrs})"}"
     end
+    # Table-based entitlement RLS (structural detection): until the checkpoint
+    # decision the entitlement relationship is an UNCONSTRAINED live join — the
+    # Tableau restriction is gone AND multi-entitlement users fan out row
+    # counts. Port strategies (refs/security-rls.md §entitlement): A filtered
+    # entitlement + inner-join gate, B Lookup boolean gate, C de-entitle to
+    # user attributes/teams. NEVER auto-applied.
+    ent_rules.each do |r|
+      idcol = r.dig('entitlement', 'identityColumn')
+      keys = (r.dig('entitlement', 'keys') || []).map { |k| "#{k['entitlementColumn']}↔#{k['relatedColumn']}" }.join(', ')
+      line "   • ENTITLEMENT TABLE \"#{r['elementName']}\" (identity column [#{idcol}]; keys #{keys})"
+      line '     ⚠ until decided, this relationship is an UNCONSTRAINED live join (restriction dropped + fan-out risk).'
+      line '     Decide Port (strategy A or B) / Customize / loud Skip — refs/security-rls.md §Entitlement-table pattern.'
+    end
     rls_xelem.each { |w| line "   • #{w[0, 150]}" }
-    line "   wrote #{sec_path} (#{rls_rules.size} emit-ready rule(s); #{rls_xelem.size} cross-element rule(s) need manual placement)"
+    line "   wrote #{sec_path} (#{plain_rules.size} emit-ready rule(s); #{ent_rules.size} entitlement-table rule(s) " \
+         "needing a Port/Customize/Skip decision; #{rls_xelem.size} cross-element rule(s) need manual placement)"
     line '   PROVISION + APPLY before this model is safe to share:'
     line "     python3 scripts/apply_sigma_rls.py --from-security #{sec_path} --dm-id <dataModelId>            # plan"
     line "     python3 scripts/apply_sigma_rls.py --from-security #{sec_path} --dm-id <dataModelId> --provision --apply"
+    line '     (entitlement-table rules are PLANNED ONLY by --apply — they are authored per the chosen strategy, never auto-injected)'
     line ''
   end
 
