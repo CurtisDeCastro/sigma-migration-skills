@@ -274,7 +274,9 @@ OptionParser.new do |o|
   o.on('--skip-reuse-scan')  {     opts[:skip_reuse] = true }
   o.on('--fact-table NAME', 'override the object-model fact election: NAME (case-insensitive warehouse table / ' \
                             'logical-table name) becomes the fact/base element every LOD/Top-N/window helper and ' \
-                            'the master build from. Use when the announced election is wrong.') { |v| opts[:fact_table] = v }
+                            'the master build from. Use when the announced election is wrong. LOCAL converter build ' \
+                            'only — the hosted MCP arg schema cannot take it (a hosted run WARNs and keeps only the ' \
+                            'Ruby-side pick_fact preference).') { |v| opts[:fact_table] = v }
   o.on('--skip-sql-ident-gate REASON', 'waive the pre-POST Custom-SQL identifier gate (check-sql-idents against the ' \
                                        'fetched warehouse catalog) — REQUIRED reason; recorded as a quality waiver; ' \
                                        'name it in your report') { |v| opts[:skip_sql_ident_gate] = v }
@@ -2183,6 +2185,11 @@ if mechanical
   elsif allow_hosted
     line 'converter: HOSTED MCP (sigma-data-model-mcp.onrender.com) — NOTE: the .twb is uploaded'
     line '           to this third-party server (opted in via --converter hosted / SIGMA_CONVERTER_ALLOW_HOSTED).'
+    if opts[:fact_table]
+      line "WARN: --fact-table #{opts[:fact_table]} cannot reach the HOSTED converter (no factTable in its arg schema) —"
+      line '      the converter-side fact election (helper SQL FROM tables, relationship orientation) runs unoverridden;'
+      line '      only the Ruby-side pick_fact preference applies. For the full override use a LOCAL build (TABLEAU_MCP_BUILD).'
+    end
   else
     reap_lane!(lane_done) # bounded reap of the background lane before aborting
     print_lane_log.call
@@ -4150,7 +4157,7 @@ unless reuse_dm_id
               * wrong-FROM helper SQL from a mis-elected fact/base table — check
                 the announced "Elected fact" warning; if it names the wrong
                 table, re-run with --fact-table NAME (refs/troubleshooting.md,
-                "Dependency not found en masse" row)
+                "Dependency not found en masse" row)#{(defined?(mcp_build) && mcp_build.nil?) ? "\n    NOTE: this run used the HOSTED converter, which cannot take the\n    --fact-table override — set TABLEAU_MCP_BUILD to a local build\n    first, or the re-run's election is unchanged" : ''}
               * an unquoted spaced/mixed-case Snowflake column — double-quote it
                 in the element's source.statement
             Fix the statements in #{dm_spec_path} (or re-run with the corrected

@@ -836,9 +836,20 @@ module MechanicalSpecs
     # fact_table: operator override for the object-model fact election
     # (--fact-table). Local-build path only — the hosted MCP tool's arg schema
     # doesn't carry it (the local vendored bundle is the normal path anyway).
-    return run_converter_hosted(twb_path: twb_path, conn: conn, db: db, schema: schema,
-                                workdir: workdir, datasource_index: datasource_index,
-                                table_mapping: table_mapping) if mcp_build.nil?
+    if mcp_build.nil?
+      if fact_table && !fact_table.to_s.strip.empty?
+        # Loud, not silent: the hosted tool cannot take the override, so the
+        # converter-side election (helper-SQL FROM tables, relationship
+        # orientation) runs unoverridden — only the Ruby-side pick_fact
+        # preference still applies. The wrong-FROM remedy needs a LOCAL build.
+        warn "WARN: --fact-table #{fact_table} does NOT reach the HOSTED converter (its arg schema has no factTable) — " \
+             'the converter-side fact election (helper SQL FROM tables, relationship orientation) runs unoverridden; ' \
+             'only the Ruby-side pick_fact preference applies. For the full override set TABLEAU_MCP_BUILD to a local build.'
+      end
+      return run_converter_hosted(twb_path: twb_path, conn: conn, db: db, schema: schema,
+                                  workdir: workdir, datasource_index: datasource_index,
+                                  table_mapping: table_mapping)
+    end
     shim = File.join(workdir, '_convert_tableau.mjs')
     raw_out = File.join(workdir, 'dm-raw.json')
     meta_out = File.join(workdir, 'conv-meta.json')

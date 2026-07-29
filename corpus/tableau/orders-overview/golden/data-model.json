@@ -1706,9 +1706,9 @@
     "ℹ \"Delivery Speed Tier\" → calculated column. Review: If([Days To Ship] <= 2, \"Express (1-2 days)\", If([Days To Sh",
     "⚠ LOD \"YTD Revenue\" (FIXED) groups by a dimension-table column (cross-table grain); not mechanizable as a single-table helper — needs manual Sigma authoring. Skipped.",
     "ℹ \"Year Filter\" → calculated column. Review: 2023",
-    "ℹ \"undefined\": 1 aggregate-derived dimension(s) (bucket an aggregate metric) → reported in result.workbookPatterns — CHART/grouped-element context only; group the viz by the binned aggregate (NOT a DM column or metric).",
+    "ℹ \"ORDER_FACT\": 1 aggregate-derived dimension(s) (bucket an aggregate metric) → reported in result.workbookPatterns — CHART/grouped-element context only; group the viz by the binned aggregate (NOT a DM column or metric).",
     "⚠ Dropped calc \"Customer Value Tier\" — references [Lifetime Revenue] which is not a resolvable column in the collapsed model (param-driven or field absent from the SQL). NOT migrated; recreate in the workbook layer if needed.",
-    "ℹ Dropped 1 unresolvable calc column(s)/metric(s) on \"undefined\" after caption↔alias reconciliation (see per-calc warnings above).",
+    "ℹ Dropped 1 unresolvable calc column(s)/metric(s) on \"ORDER_FACT\" after caption↔alias reconciliation (see per-calc warnings above).",
     "⚠ Column \"Product Key/Name\" contains \"/\" in its display name — ambiguous against Sigma's [Element/Column] path syntax; DROPPED from the derived \"Order Fact View\" element (related column via PRODUCT_DIM). Rename the column (remove the slash) in Tableau or the DM spec to carry it through."
   ]
 }

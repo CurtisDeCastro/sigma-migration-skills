@@ -6757,7 +6757,7 @@ ${suggestion}
         m.formula = reconcile(m.formula, m.name);
       }
       if (rewrites > 0) {
-        warnings.push(`\u2139 Reconciled ${rewrites} calc-formula field reference(s) to their SQL-alias column names (caption\u2194alias) on "${factEl.name}".`);
+        warnings.push(`\u2139 Reconciled ${rewrites} calc-formula field reference(s) to their SQL-alias column names (caption\u2194alias) on "${factTableName}".`);
       }
       if (factEl?.source?.kind === "sql") {
         const nkey = (s) => s.replace(/[^a-zA-Z0-9]+/g, "").toLowerCase();
@@ -6827,7 +6827,7 @@ ${suggestion}
         });
         const n = before - factEl.columns.length;
         if (n)
-          warnings.push(`\u2139 Dropped ${n} self-referential rename calc(s) on "${factEl.name}" (redundant \u2014 the physical column is already present).`);
+          warnings.push(`\u2139 Dropped ${n} self-referential rename calc(s) on "${factTableName}" (redundant \u2014 the physical column is already present).`);
       }
       {
         const metricNames = new Set((factEl.metrics || []).map((m) => (m.name || "").toLowerCase()));
@@ -6885,9 +6885,9 @@ ${suggestion}
           }
         }
         if (promoted)
-          warnings.push(`\u2139 Promoted ${promoted} aggregate-ratio calc column(s) to metrics on "${factEl.name}" (they reference aggregate metrics \u2014 invalid as row-level columns).`);
+          warnings.push(`\u2139 Promoted ${promoted} aggregate-ratio calc column(s) to metrics on "${factTableName}" (they reference aggregate metrics \u2014 invalid as row-level columns).`);
         if (aggDims)
-          warnings.push(`\u2139 "${factEl.name}": ${aggDims} aggregate-derived dimension(s) (bucket an aggregate metric) \u2192 reported in result.workbookPatterns \u2014 CHART/grouped-element context only; group the viz by the binned aggregate (NOT a DM column or metric).`);
+          warnings.push(`\u2139 "${factTableName}": ${aggDims} aggregate-derived dimension(s) (bucket an aggregate metric) \u2192 reported in result.workbookPatterns \u2014 CHART/grouped-element context only; group the viz by the binned aggregate (NOT a DM column or metric).`);
       }
       const valid = /* @__PURE__ */ new Set();
       for (const c of factEl.columns || []) {
@@ -6932,7 +6932,7 @@ ${suggestion}
         warnings.push(`\u26A0 Dropped calc "${d.name}" \u2014 references [${d.bad}] which is not a resolvable column in the collapsed model (param-driven or field absent from the SQL). NOT migrated; recreate in the workbook layer if needed.`);
       }
       if (dropped.length) {
-        warnings.push(`\u2139 Dropped ${dropped.length} unresolvable calc column(s)/metric(s) on "${factEl.name}" after caption\u2194alias reconciliation (see per-calc warnings above).`);
+        warnings.push(`\u2139 Dropped ${dropped.length} unresolvable calc column(s)/metric(s) on "${factTableName}" after caption\u2194alias reconciliation (see per-calc warnings above).`);
       }
     }
     _finalizeHelpers2();
