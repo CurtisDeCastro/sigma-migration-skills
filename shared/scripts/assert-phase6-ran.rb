@@ -808,6 +808,39 @@ layout_phase_stamp = layout_phase_key &&
 # individually arguable, and together they waived away the whole value bar.
 # ---------------------------------------------------------------------------
 WAIVER_BUDGET = 2
+
+# ---------------------------------------------------------------------------
+# Wave-2 tier ratchet — the GATE half (W2.1). Lane A's orchestrator resolves
+# --tier {auto|S|M|full} at pass 1 and writes the RESOLVED tier to
+# <workdir>/migrate-state.json as 'tier' + 'tier_basis' (closed vocabularies:
+# shared/lib/offramp.rb TIER_VALUES/TIER_BASIS; canonical example pinned in
+# shared/lib/testdata/wave2-tier-state.json — cross-lane contract 4). This
+# gate READS the tier; it never derives one. Doctrine (frozen): a tier NEVER
+# removes a gate — the 25-gate catalog identity is fixed; tiers scale BUDGETS
+# and admit duplicate-oracle substitutions only (gate 18's Tier-S
+# valued-anchors acceptance below). Fail-closed: state missing/unreadable or
+# an unknown tier string → nil → byte-identical full-battery behavior.
+# ---------------------------------------------------------------------------
+run_tier = nil
+run_tier_basis = nil
+begin
+  _ms_tier = JSON.parse(File.read(File.join(opts[:tab], 'migrate-state.json')))
+  if _ms_tier.is_a?(Hash) && %w[S M full].include?(_ms_tier['tier'].to_s)
+    run_tier       = _ms_tier['tier'].to_s
+    run_tier_basis = _ms_tier['tier_basis'].to_s
+  end
+rescue StandardError
+  nil # fail-closed: no readable tier → full battery
+end
+# Tier-scaled waiver budget: a Tier-S workbook is small enough that waiver
+# stacking is a LOUDER signal, so the budget SHRINKS to 1 (a budget change is
+# never a catalog change). M/full keep the shipped budget of 2.
+effective_waiver_budget = run_tier == 'S' ? 1 : WAIVER_BUDGET
+if run_tier
+  puts "[TIER] #{run_tier}#{run_tier_basis.to_s.empty? ? '' : " (#{run_tier_basis})"} — " \
+       "waiver budget #{effective_waiver_budget}; all 25 gates execute (tiers scale budgets, never the catalog)"
+end
+
 WAIVER_HIDES = {
   '--skip-parity-gate'         => 'gate 1: values were never diffed against the source',
   '--min-pass-rate'            => 'gate 1: charts that DIVERGE from the source were accepted',
@@ -1013,7 +1046,8 @@ end
 if waiver_flags.any?
   excluded = waiver_flags - budget_flags
   puts "[WAIVERS] #{waiver_flags.length} waiver/escape flag(s) on this run: #{waiver_flags.join(', ')} — " \
-       "#{budget_flags.length} count against the budget of #{WAIVER_BUDGET}" \
+       "#{budget_flags.length} count against the budget of #{effective_waiver_budget}" \
+       "#{effective_waiver_budget < WAIVER_BUDGET ? " (Tier-#{run_tier} scaled from #{WAIVER_BUDGET})" : ''}" \
        "#{excluded.any? ? " (policy exclusions: #{excluded.join(', ')})" : ''}" \
        ' (exceeding the budget caps the run below GREEN, exit 19)'
 end
@@ -3237,15 +3271,70 @@ else
   # oracle was skipped, not inapplicable.
   gt18_twb = Dir.glob(File.join(opts[:tab], '*.twb')).first
   if gt18_twb && File.exist?(File.join(opts[:tab], 'parity-plan.json'))
-    warn "[FAIL] gate 18: #{File.basename(gt18_twb)} + parity-plan.json present but no ground-truth-plan.json —"
-    warn '       the per-tile ground-truth derivation never ran, so nothing proved the numbers against'
-    warn '       the warehouse. Run:'
-    warn "         ruby scripts/derive-ground-truth.rb --workdir #{opts[:tab]}"
-    warn "         ruby scripts/run-ground-truth.rb --workdir #{opts[:tab]} --connection-id <id>"
-    warn "         ruby scripts/verify-ground-truth.rb --workdir #{opts[:tab]}"
-    exit 25
+    # ── W2.1 (gate half): Tier-S GT-trio skip — rides THIS gate's own oracle
+    # set (the comment block above), never the charts_total==0 ANCHORS-ORACLE
+    # substitution (that doctrine is scoped to all-embedded workbooks and is
+    # untouched). On a Tier-S run (migrate-state.json tier written by lane A;
+    # fail-closed when absent) the orchestrator may skip the ground-truth trio
+    # probe workbooks entirely; the gate then evaluates the VALUED-anchors
+    # oracle DIRECTLY and can still fail: every displayed tile (parity-plan
+    # charts — the same universe derive-ground-truth.rb would have ledgered)
+    # must hold >= 1 VALUED anchor MATCHED IN it (numeric, provenance
+    # view-csv|vds, never png-eyeball — anchors-verdict.json detail rows,
+    # exactly the rows verify-ground-truth.rb stamps oracle:"anchors"
+    # verdict:"match" from). 100% displayed-tile coverage, no waiver credit on
+    # this path; anything less → exit 25 with the trio as the remedy. A
+    # pre-PR-6 anchors-verdict without valued detail rows earns nothing
+    # (fail-closed, same doctrine as verify-ground-truth.rb).
+    if run_tier == 'S'
+      gt18s_av = (JSON.parse(File.read(File.join(opts[:tab], 'anchors-verdict.json'))) rescue nil)
+      gt18s_plan = (JSON.parse(File.read(File.join(opts[:tab], 'parity-plan.json'))) rescue nil)
+      gt18s_charts = (gt18s_plan.is_a?(Hash) ? Array(gt18s_plan['charts']) : Array(gt18s_plan))
+                     .select { |c| c.is_a?(Hash) }
+                     .map { |c| (c['chart'] || c['name']).to_s }.reject(&:empty?)
+      gt18s_av_ok = gt18s_av.is_a?(Hash) && gt18s_av['pass'] == true &&
+                    gt18s_av['checked'].to_i >= 5 && gt18s_av['matched'] == gt18s_av['checked'] &&
+                    gt18s_av['tiles_all_nonempty'] == true
+      gt18s_valued_in = gt18s_av.is_a?(Hash) ? Array(gt18s_av['detail']) : []
+      gt18s_valued_in = gt18s_valued_in.select { |d| d.is_a?(Hash) && d['valued'] == true }
+                                       .map { |d| d['matched_in'].to_s.downcase.strip }.reject(&:empty?)
+      gt18s_uncovered = gt18s_charts.reject { |n| gt18s_valued_in.include?(n.downcase.strip) }
+      if gt18s_av_ok && gt18s_charts.any? && gt18s_uncovered.empty?
+        puts "[OK] gate 18: Tier-S GT-trio skip — VALUED-anchors oracle covers 100% of displayed tiles: " \
+             "#{gt18s_charts.length} tile(s) each vouched by >=1 valued anchor " \
+             "(numeric, provenance view-csv|vds; #{gt18s_av['valued_matched'] || gt18s_valued_in.length} valued match(es), " \
+             'anchors-verdict.json). Ground-truth trio not run — the gate evaluated the anchors oracle itself' \
+             "#{run_tier_basis.to_s.empty? ? '' : " (tier basis: #{run_tier_basis})"}."
+      else
+        warn '[FAIL] gate 18: Tier-S GT-trio skip REFUSED — the VALUED-anchors oracle does not cover'
+        warn '       every displayed tile (the skip needs 100% coverage; no waiver credit on this path):'
+        warn "         - anchors-verdict.json: #{gt18s_av_ok ? 'pass, all matched, tiles non-empty' : 'missing/failing/stale (need pass, >=5 checked, all matched, tiles_all_nonempty — re-run scripts/verify-anchors.rb)'}"
+        if gt18s_charts.empty?
+          warn '         - parity-plan.json lists no charts — nothing to vouch for; derive the trio instead'
+        else
+          gt18s_uncovered.first(10).each do |t|
+            warn "         - UNCOVERED: #{t.inspect} — no VALUED anchor (numeric, provenance view-csv|vds) matched IN this tile"
+          end
+        end
+        warn '       Either transcribe VALUED anchors for each uncovered tile (re-read the source view'
+        warn '       CSV/VDS, not the PNG) and re-run scripts/verify-anchors.rb, or run the full trio:'
+        warn "         ruby scripts/derive-ground-truth.rb --workdir #{opts[:tab]}"
+        warn "         ruby scripts/run-ground-truth.rb --workdir #{opts[:tab]} --connection-id <id>"
+        warn "         ruby scripts/verify-ground-truth.rb --workdir #{opts[:tab]}"
+        exit 25
+      end
+    else
+      warn "[FAIL] gate 18: #{File.basename(gt18_twb)} + parity-plan.json present but no ground-truth-plan.json —"
+      warn '       the per-tile ground-truth derivation never ran, so nothing proved the numbers against'
+      warn '       the warehouse. Run:'
+      warn "         ruby scripts/derive-ground-truth.rb --workdir #{opts[:tab]}"
+      warn "         ruby scripts/run-ground-truth.rb --workdir #{opts[:tab]} --connection-id <id>"
+      warn "         ruby scripts/verify-ground-truth.rb --workdir #{opts[:tab]}"
+      exit 25
+    end
+  else
+    puts '[OK] gate 18: no ground-truth-plan.json and no .twb derivation inputs — numeric-oracle coverage N/A (non-Tableau / pre-PR-6 workdir)'
   end
-  puts '[OK] gate 18: no ground-truth-plan.json and no .twb derivation inputs — numeric-oracle coverage N/A (non-Tableau / pre-PR-6 workdir)'
 end
 
 # ---------------------------------------------------------------------------
@@ -3626,13 +3715,14 @@ if DEG_LEDGER_LOADED
   end
 end
 
-if budget_flags.length > WAIVER_BUDGET
-  warn "[FAIL] waiver budget exceeded — #{budget_flags.length} quality waiver/escape flag(s) on this run (budget #{WAIVER_BUDGET})."
+if budget_flags.length > effective_waiver_budget
+  warn "[FAIL] waiver budget exceeded — #{budget_flags.length} quality waiver/escape flag(s) on this run " \
+       "(budget #{effective_waiver_budget}#{effective_waiver_budget < WAIVER_BUDGET ? ", Tier-#{run_tier} scaled from #{WAIVER_BUDGET}" : ''})."
   warn '       GREEN unavailable — too many waivers; the highest achievable result is YELLOW.'
   warn '       Each waiver hid a verification:'
   budget_flags.each { |f| warn "         - #{f}: #{WAIVER_HIDES[f] || 'a verification gate did not run'}" }
   warn '       Waivers are for impossibilities, not obstacles. Fix the underlying issues until'
-  warn "       <= #{WAIVER_BUDGET} remain, or report this migration as YELLOW (never GREEN) and name"
+  warn "       <= #{effective_waiver_budget} remain, or report this migration as YELLOW (never GREEN) and name"
   warn '       every waiver in the report. There is no escape flag for this cap.'
   if deg_entries
     v19 = DegradationLedger.verdict(deg_entries, budget_exceeded: true)

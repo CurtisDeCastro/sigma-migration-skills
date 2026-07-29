@@ -126,6 +126,126 @@ Dir.mktmpdir do |dir|
   check(out.include?('no join grain assumptions (or emitted join surface)'), 'gate 16 states the N/A', fails)
 end
 
+# ---------------------------------------------------------------------------
+# B. Tier-scaled waiver budgets (W2.1 gate half). The tier is READ from
+# migrate-state.json (lane A writes it — the strings come from the shared
+# cross-lane fixture, contract 4). Tier-S shrinks the budget 2 → 1; M/full and
+# tierless workdirs keep the shipped 2 (pinned no-false-trip).
+# ---------------------------------------------------------------------------
+puts 'B. tier-scaled waiver budgets'
+
+TIER_FIXTURE = File.expand_path('../../../../../shared/lib/testdata/wave2-tier-state.json', __dir__)
+TIER_S_STATE = JSON.parse(File.read(TIER_FIXTURE)).reject { |k, _| k.start_with?('_') }
+raise 'fixture drift: wave2-tier-state.json must carry tier=S' unless TIER_S_STATE['tier'] == 'S'
+
+# Two budget-counted QUALITY waivers (policy exclusions never count).
+def two_quality_waivers
+  ['--skip-layout-lint', '--skip-control-lint']
+end
+
+# B1 trip: Tier-S + 2 quality waivers → budget 1 exceeded, exit 19.
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'migrate-state.json'), JSON.generate(TIER_S_STATE))
+  out, err, st = run_gate(dir, *two_quality_waivers)
+  check(st.exitstatus == 19, "Tier-S + 2 quality waivers → exit 19 (got #{st.exitstatus})", fails)
+  check(err.include?('budget 1') && err.include?('Tier-S scaled from 2'),
+        'failure names the shrunk Tier-S budget', fails)
+  check(out.include?('[TIER] S (auto-predicate)'), 'gate log announces the tier + basis', fails)
+  check(out.include?('all 25 gates execute'), 'tier banner states the frozen catalog doctrine', fails)
+end
+
+# B2 no-false-trip: tierless workdir + the same 2 waivers → budget 2 holds, exit 0.
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  _out, err, st = run_gate(dir, *two_quality_waivers)
+  check(st.success?, "no tier + 2 quality waivers → exit 0, shipped budget 2 (got #{st.exitstatus}: #{err.lines.first(2).join(' ').strip})", fails)
+end
+
+# B3 no-false-trip: Tier-M keeps the shipped budget.
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'migrate-state.json'),
+             JSON.generate('tier' => 'M', 'tier_basis' => 'auto-predicate'))
+  out, _err, st = run_gate(dir, *two_quality_waivers)
+  check(st.success?, "Tier-M + 2 quality waivers → exit 0 (budget stays 2) (got #{st.exitstatus})", fails)
+  check(out.include?('[TIER] M'), 'Tier-M still announced in the gate log', fails)
+end
+
+# B4 fail-closed: junk tier string → ignored (full battery, budget 2).
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'migrate-state.json'), JSON.generate('tier' => 'turbo'))
+  out, _err, st = run_gate(dir, *two_quality_waivers)
+  check(st.success?, "unknown tier string → fail-closed to shipped behavior (got #{st.exitstatus})", fails)
+  check(!out.include?('[TIER]'), 'unknown tier is never announced as a tier', fails)
+end
+
+# ---------------------------------------------------------------------------
+# C. Gate-18 Tier-S GT-trio skip (W2.1 gate half). On Tier-S the trio may not
+# run; the gate itself evaluates the VALUED-anchors oracle (gate 18's own
+# oracle set — NOT the charts_total==0 doctrine) and still fails when any
+# displayed tile lacks a valued anchor matched in it.
+# ---------------------------------------------------------------------------
+puts 'C. gate-18 Tier-S GT-trio skip (valued-anchors oracle)'
+
+def gt18_fixture(dir, tier: true, uncover: nil, av_extra: {})
+  base_workdir(dir)
+  File.write(File.join(dir, 'migrate-state.json'), JSON.generate(TIER_S_STATE)) if tier
+  File.write(File.join(dir, 'source.twb'), '<workbook/>')
+  File.write(File.join(dir, 'parity-plan.json'),
+             JSON.generate('charts' => [{ 'chart' => 'KPI' }, { 'chart' => 'Trend' }]))
+  detail = [
+    { 'anchor' => 'a1', 'matched_in' => 'KPI',   'valued' => true,  'provenance' => 'view-csv', 'kind' => 'numeric' },
+    { 'anchor' => 'a2', 'matched_in' => 'Trend', 'valued' => true,  'provenance' => 'vds',      'kind' => 'numeric' },
+    { 'anchor' => 'a3', 'matched_in' => 'KPI',   'valued' => true,  'provenance' => 'view-csv', 'kind' => 'numeric' },
+    { 'anchor' => 'a4', 'matched_in' => 'Trend', 'valued' => true,  'provenance' => 'vds',      'kind' => 'numeric' },
+    { 'anchor' => 'a5', 'matched_in' => 'KPI',   'valued' => true,  'provenance' => 'view-csv', 'kind' => 'numeric' }
+  ]
+  detail = detail.map { |d| d['matched_in'] == uncover ? d.merge('valued' => false, 'provenance' => 'png-eyeball') : d } if uncover
+  av = { 'pass' => true, 'checked' => 5, 'matched' => 5, 'tiles_all_nonempty' => true,
+         'valued_matched' => detail.count { |d| d['valued'] }, 'detail' => detail,
+         'anchor_coverage' => { 'covered' => 2, 'displayed' => 2, 'uncovered' => [] } }.merge(av_extra)
+  File.write(File.join(dir, 'anchors-verdict.json'), JSON.pretty_generate(av))
+end
+
+# C1 accept: Tier-S + every displayed tile valued-covered → exit 0, skip stated.
+Dir.mktmpdir do |dir|
+  gt18_fixture(dir)
+  out, err, st = run_gate(dir)
+  check(st.success?, "Tier-S valued-covered → exit 0 (got #{st.exitstatus}: #{err.lines.first(2).join(' ').strip})", fails)
+  check(out.include?('Tier-S GT-trio skip') && out.include?('100% of displayed tiles'),
+        'OK line states the skip + full valued coverage', fails)
+  check(out.include?('view-csv|vds'), 'OK line names the valued-provenance oracle', fails)
+end
+
+# C2 trip: one tile loses its valued coverage → exit 25 naming it.
+Dir.mktmpdir do |dir|
+  gt18_fixture(dir, uncover: 'Trend')
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 25, "Tier-S with an unvouched tile → exit 25 (got #{st.exitstatus})", fails)
+  check(err.include?('UNCOVERED: "trend"') || err.include?('UNCOVERED: "Trend"'),
+        'failure names the uncovered tile', fails)
+  check(err.include?('run the full trio') || err.include?('derive-ground-truth'),
+        'failure routes to the trio as the remedy', fails)
+end
+
+# C3 no-false-trip: NO tier → today's belt-and-braces failure, unchanged.
+Dir.mktmpdir do |dir|
+  gt18_fixture(dir, tier: false)
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 25, "tierless .twb+parity-plan → exit 25 unchanged (got #{st.exitstatus})", fails)
+  check(err.include?('no ground-truth-plan.json'), 'tierless failure keeps the shipped message', fails)
+end
+
+# C4 fail-closed: Tier-S but anchors-verdict is stale (no tiles_all_nonempty) → exit 25.
+Dir.mktmpdir do |dir|
+  gt18_fixture(dir, av_extra: { 'tiles_all_nonempty' => nil })
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 25, "stale anchors-verdict (fail-closed) → exit 25 (got #{st.exitstatus})", fails)
+  check(err.include?('re-run scripts/verify-anchors.rb'), 'stale-verdict failure routes to verify-anchors', fails)
+end
+
 puts
 if fails.empty?
   puts 'test-wave2-verdict-gates: ALL PASS'
