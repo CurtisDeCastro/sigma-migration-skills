@@ -278,11 +278,15 @@ module ExportPool
   end
 
   # POST /v2/workbooks/{wb}/export for one element in the given format
-  # ('csv' | 'json'), bounded to row_limit rows (nil = unbounded). Returns the
-  # queryId or nil.
-  def start_export(wb, element_id, fmt, row_limit)
+  # ('csv' | 'json'), bounded to row_limit rows (nil = unbounded). `params:`
+  # (optional) carries control values ({controlId => value}) — the REST
+  # export's `parameters` key, the only programmatic way to exercise a
+  # non-default control value (see probe-controls.rb). Returns the queryId or
+  # nil.
+  def start_export(wb, element_id, fmt, row_limit, params: nil)
     body = { elementId: element_id, format: { type: fmt } }
     body[:rowLimit] = row_limit if row_limit
+    body[:parameters] = params if params && !params.empty?
     r = Sigma.request(:post, "/v2/workbooks/#{wb}/export", body: JSON.generate(body))
     r && r['queryId']
   end
@@ -384,11 +388,32 @@ module ExportPool
   # (rows = CSV rows INCLUDING the header row, exactly like poll_csv_download
   # consumers expect). Raises only when the single probe-workbook POST itself
   # fails — nothing was created, nothing needs cleanup.
+  #
+  # REGISTRY-IN-POOL (E7.1 litter red line, wave-1 review): the pooled probe
+  # workbook is REGISTERED in the ProbeRegistry immediately after the POST
+  # parses — BEFORE the first export starts — and its DELETE outcome is marked
+  # in the same ensure that deletes it, so a crash/SIGKILL anywhere between
+  # POST and DELETE can never orphan the workbook untraceably
+  # (sweep-run-artifacts.rb deletes leftovers from the registry). The lib is
+  # soft-required so plugins that don't vendor probe_registry.rb still load;
+  # where probe_registry.rb IS vendored alongside, registration is automatic —
+  # callers cannot forget it. Where it is NOT (most export_pool twins ship
+  # without it today), pooled probes run UNREGISTERED and the sweep cannot see
+  # them — registration is automatic only where BOTH libs are vendored, not
+  # wherever export_pool.rb alone is.
+  # `workdir:`/`script:` only feed the registry record (signature extension by
+  # options only — the positional/existing-kwarg contract is FROZEN; lane C's
+  # batched probes are the second consumer).
   # ---------------------------------------------------------------------------
   def pooled_sql_probe(conn_id, entries, deadline, folder_id: nil, pool: 5,
-                       row_limit: nil, name: nil)
+                       row_limit: nil, name: nil, workdir: nil, script: nil)
     require 'csv'
     require 'securerandom'
+    begin
+      require 'probe_registry' # soft: present in plugins that vendor it
+    rescue LoadError
+      nil
+    end
     return [] if entries.empty?
     elements = entries.each_with_index.map do |e, i|
       { 'id' => "probe#{i}", 'kind' => 'table', 'name' => "Probe #{i}",
@@ -408,6 +433,12 @@ module ExportPool
     end
     wb_id = r.is_a?(Hash) ? r['workbookId'] : nil
     raise "pooled probe workbook POST failed: #{r.inspect[0, 160]}" unless wb_id
+    # Register FIRST — before any export can run (or raise). NEVER FATAL by
+    # the registry's own contract, so bookkeeping cannot break the probe.
+    if defined?(ProbeRegistry)
+      ProbeRegistry.created(wb_id, name: spec['name'], workdir: workdir,
+                            script: script || 'pooled_sql_probe')
+    end
     results = Array.new(entries.length)
     begin
       queue = Queue.new
@@ -447,13 +478,78 @@ module ExportPool
       end.each(&:join)
     ensure
       # ONE delete for the whole batch — the probe workbook never outlives the
-      # call, even on timeout/error.
+      # call, even on timeout/error. The outcome is marked in the registry
+      # (deleted | 404 | failed) so the sweep can tell cleaned from
+      # outstanding; a failed delete leaves the entry outstanding for retry.
       begin
         Sigma.request(:delete, "/v2/files/#{wb_id}")
-      rescue StandardError
-        nil
+        ProbeRegistry.cleaned(wb_id, workdir: workdir, via: 'ensure') if defined?(ProbeRegistry)
+      rescue StandardError => e
+        if defined?(ProbeRegistry)
+          begin
+            ProbeRegistry.cleaned(wb_id, workdir: workdir, via: 'ensure',
+                                  outcome: e.message.lines.first.to_s =~ /\b404\b/ ? '404' : 'failed')
+          rescue StandardError
+            nil
+          end
+        end
       end
     end
+    results
+  end
+
+  # ---------------------------------------------------------------------------
+  # Pooled exports of EXISTING workbook elements (W2.12 — flip-export pooling).
+  # probe-controls.rb pays K×2 fully-serial element exports per gate run
+  # (baseline + control-flip per control, plus leak checks); this runs the
+  # same export → poll → download wire flow `pool`-wide. TRANSPORT ONLY: which
+  # elements to export, what a differing/identical CSV means, and every
+  # PASS/FAIL verdict stay the caller's. Each job gets its OWN
+  # Deadline(timeout_per_job) — the exact per-CSV --timeout semantics the
+  # serial path had, parallelized.
+  #
+  # jobs: [{ 'element_id' => <id>, 'params' => nil | {controlId => value},
+  #          'row_limit' => nil | N }, ...]
+  # Returns per-job [ [:ok, body] | [:timeout, nil] | [:error, msg] ] (body =
+  # raw wire CSV bytes; callers parse and judge — never this lib).
+  # ---------------------------------------------------------------------------
+  def pooled_element_exports(wb, jobs, pool: 5, timeout_per_job: 90, poll_interval: 1.0)
+    return [] if jobs.empty?
+    results = Array.new(jobs.length)
+    queue = Queue.new
+    jobs.each_index { |i| queue << i }
+    mutex = Mutex.new
+    Array.new([pool, jobs.length].min.clamp(1, 16)) do
+      Thread.new do
+        loop do
+          i = begin
+            queue.pop(true)
+          rescue ThreadError
+            break
+          end
+          job = jobs[i]
+          res =
+            begin
+              qid = start_export(wb, job['element_id'], 'csv', job['row_limit'],
+                                 params: job['params'])
+              if qid.nil?
+                [:error, 'export POST returned no queryId']
+              else
+                status, body = poll_csv_download(qid, Deadline.new(timeout_per_job),
+                                                 poll_interval: poll_interval)
+                case status
+                when :timeout then [:timeout, nil]
+                when :html    then [:error, 'export returned HTML behind a 200 (renderer error)']
+                else               [:ok, body]
+                end
+              end
+            rescue StandardError => e
+              [:error, e.message.to_s.gsub(/\s+/, ' ').strip[0, 240]]
+            end
+          mutex.synchronize { results[i] = res }
+        end
+      end
+    end.each(&:join)
     results
   end
 
