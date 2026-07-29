@@ -19,10 +19,24 @@
 # should be small; more than --row-limit rows means a missing/exploded GROUP BY
 # and fails LOUD as `row-explosion` instead of dragging a huge export.
 #
+# POOLED PROBES (W2.11): the live path now routes every warehouse-sql entry
+# through ExportPool.pooled_sql_probe — ONE probe workbook carrying one Custom
+# SQL element per entry, exports pooled --pool wide against the total
+# deadline, ONE delete (~4T REST calls → T+2; wall ÷ ~pool). The pool
+# registers the workbook in the E7.1 ProbeRegistry at POST time and marks the
+# delete outcome in its ensure (registry-in-pool — the wave-1 litter red
+# line), so the serial path's :99/:121-123 guarantees hold unchanged. The
+# pool is TRANSPORT ONLY: the LIMIT guard, row-explosion verdicts, and
+# per-entry statuses are all still computed here. If the single pooled POST
+# fails, the run FALLS BACK to the serial per-entry path (fail-open — a
+# failed pool POST created nothing, so nothing can leak); --no-pool forces
+# that serial path outright.
+#
 # Usage:
 #   ruby scripts/run-ground-truth.rb --workdir <WORK> \
 #     (--connection-id <id> [--folder-id <id>] | --fixture DIR) \
-#     [--plan PATH] [--out PATH] [--timeout S] [--row-limit N]
+#     [--plan PATH] [--out PATH] [--timeout S] [--row-limit N] \
+#     [--no-pool] [--pool N]
 #
 #   --fixture DIR   offline: DIR/entry-<index>.json per PLAN entry index:
 #                     {"columns": [...], "rows": [[...], ...]}  or
@@ -38,7 +52,7 @@ require 'csv'
 require 'optparse'
 require 'securerandom'
 
-opts = { timeout: 600, row_limit: 5000 }
+opts = { timeout: 600, row_limit: 5000, pool: 5 }
 OptionParser.new do |p|
   p.on('--workdir DIR')      { |v| opts[:dir] = v }
   p.on('--plan PATH')        { |v| opts[:plan] = v }
@@ -48,6 +62,8 @@ OptionParser.new do |p|
   p.on('--fixture DIR', 'offline: canned results, DIR/entry-<plan-index>.json') { |v| opts[:fixture] = v }
   p.on('--timeout S', Integer, 'TOTAL deadline for the whole run (default 600)') { |v| opts[:timeout] = v }
   p.on('--row-limit N', Integer, 'per-entry row guard (default 5000) — exceeding it = row-explosion FAIL') { |v| opts[:row_limit] = v }
+  p.on('--no-pool', 'serial per-entry probe workbooks (litter-safe fallback path)') { opts[:no_pool] = true }
+  p.on('--pool N', Integer, 'pooled export width (default 5)') { |v| opts[:pool] = v }
 end.parse!
 
 plan_path = opts[:plan] || (opts[:dir] && File.join(opts[:dir], 'ground-truth-plan.json'))
@@ -68,6 +84,7 @@ if opts[:conn]
   $LOAD_PATH.unshift File.expand_path('lib', __dir__)
   require 'sigma_rest'
   require 'probe_registry' # E7.1/A11: probe workbooks register at POST time
+  require 'export_pool'    # W2.11: pooled probes (registry-in-pool)
 end
 
 # Run one SQL statement through a one-shot probe workbook (the established
@@ -143,6 +160,41 @@ exec_idx = entries.each_index.select { |i| entries[i]['classification'] == 'ware
 n_exec = exec_idx.size
 done = 0
 
+# LIMIT guard: aggregated ground truth is SMALL. row_limit+1 rows back means
+# the GROUP BY exploded (or is missing) — fail loud, never drag the export.
+guard = ->(sql) { "SELECT * FROM (\n#{sql}\n) GT_GUARD LIMIT #{row_limit + 1}" }
+
+# ── W2.11 pooled path: ONE probe workbook for every warehouse-sql entry ──────
+# pooled_sql_probe is transport only — it returns per-entry raw CSV rows (or
+# :timeout/:error markers); every verdict below is still computed here. On a
+# pool-POST failure NOTHING was created (litter-safe), so we fall back to the
+# serial per-entry seam and the run still completes.
+pooled = nil # plan-index → [:ok rows]|[:timeout,nil]|[:error,msg]
+pool_meta = nil
+if opts[:conn] && !opts[:no_pool] && n_exec.positive? && Time.now <= deadline
+  pool_entries = exec_idx.map do |i|
+    { 'sql' => guard.call(entries[i]['sql']),
+      'columns' => Array(entries[i]['columns']).map { |c| c['alias'].to_s } }
+  end
+  tp = Time.now
+  begin
+    raw = ExportPool.pooled_sql_probe(
+      opts[:conn], pool_entries, ExportPool::Deadline.new(deadline - Time.now),
+      folder_id: opts[:folder], pool: opts[:pool],
+      name: "_probe_groundtruth_#{SecureRandom.hex(4)}",
+      workdir: opts[:dir], script: 'run-ground-truth.rb'
+    )
+    pooled = {}
+    exec_idx.each_with_index { |plan_i, j| pooled[plan_i] = raw[j] }
+    pool_meta = { 'width' => opts[:pool], 'entries' => n_exec,
+                  'elapsed_s' => (Time.now - tp).round(1) }
+  rescue StandardError => e
+    warn "[WARN] pooled probe unavailable — #{e.message.to_s.gsub(/\s+/, ' ').strip[0, 160]}; " \
+         'falling back to the serial per-entry path (as --no-pool)'
+    pooled = nil
+  end
+end
+
 entries.each_with_index do |e, i|
   base = { 'index' => i, 'chart' => e['chart'], 'sigma_element_id' => e['sigma_element_id'],
            'classification' => e['classification'] }
@@ -151,24 +203,32 @@ entries.each_with_index do |e, i|
     counts['skipped'] += 1
     next
   end
-  if Time.now > deadline
+  pooled_timeout = pooled && pooled[i] && pooled[i][0] == :timeout
+  if pooled_timeout || (pooled.nil? && Time.now > deadline)
     results << base.merge('status' => 'deadline-skipped',
-                          'error' => "total --timeout #{opts[:timeout]}s expired before this entry ran")
+                          'error' => "total --timeout #{opts[:timeout]}s expired before this entry " \
+                                     "#{pooled_timeout ? 'completed (pooled)' : 'ran'}")
     counts['deadline_skipped'] += 1
     next
   end
   done += 1
   te = Time.now
   aliases = Array(e['columns']).map { |c| c['alias'].to_s }
-  # LIMIT guard: aggregated ground truth is SMALL. row_limit+1 rows back means
-  # the GROUP BY exploded (or is missing) — fail loud, never drag the export.
-  guarded_sql = "SELECT * FROM (\n#{e['sql']}\n) GT_GUARD LIMIT #{row_limit + 1}"
   res =
     if opts[:fixture]
       fixture_result(opts[:fixture], i)
+    elsif pooled
+      st, payload = pooled[i]
+      if st == :ok
+        rows = payload.dup
+        header = rows.shift || aliases
+        { 'columns' => header.map(&:to_s), 'rows' => rows }
+      else
+        { 'error' => payload.to_s.gsub(/\s+/, ' ').strip[0, 300] }
+      end
     else
       begin
-        rows = sigma_sql_rows(opts[:conn], opts[:folder], guarded_sql, aliases, deadline,
+        rows = sigma_sql_rows(opts[:conn], opts[:folder], guard.call(e['sql']), aliases, deadline,
                               workdir: opts[:dir])
         header = rows.shift || aliases
         { 'columns' => header.map(&:to_s), 'rows' => rows }
@@ -176,24 +236,26 @@ entries.each_with_index do |e, i|
         { 'error' => err.message.to_s.gsub(/\s+/, ' ').strip[0, 300] }
       end
     end
-  elapsed = (Time.now - te).round(1)
+  # Per-entry wall time is only meaningful on the serial/fixture paths; pooled
+  # entries ran concurrently under one budget (recorded in summary.pool).
+  elapsed = pooled ? nil : (Time.now - te).round(1)
+  stamp = elapsed ? { 'elapsed_s' => elapsed } : {}
+  tsfx = elapsed ? " (#{elapsed}s)" : ''
   if res['error']
-    results << base.merge('status' => 'error', 'error' => res['error'], 'elapsed_s' => elapsed)
+    results << base.merge('status' => 'error', 'error' => res['error']).merge(stamp)
     counts['error'] += 1
-    puts "  [#{done}/#{n_exec}] ERROR      #{e['chart'].to_s.inspect} — #{res['error'][0, 120]} (#{elapsed}s)"
+    puts "  [#{done}/#{n_exec}] ERROR      #{e['chart'].to_s.inspect} — #{res['error'][0, 120]}#{tsfx}"
   elsif Array(res['rows']).length > row_limit
     results << base.merge('status' => 'row-explosion', 'n_rows' => res['rows'].length,
                           'error' => "returned > --row-limit #{row_limit} rows — ground truth must be " \
-                                     'aggregated; a missing/exploded GROUP BY, not a big export',
-                          'elapsed_s' => elapsed)
+                                     'aggregated; a missing/exploded GROUP BY, not a big export').merge(stamp)
     counts['row_explosion'] += 1
-    warn "  [#{done}/#{n_exec}] ROW-EXPLOSION #{e['chart'].to_s.inspect} — >#{row_limit} row(s): missing GROUP BY? (#{elapsed}s)"
+    warn "  [#{done}/#{n_exec}] ROW-EXPLOSION #{e['chart'].to_s.inspect} — >#{row_limit} row(s): missing GROUP BY?#{tsfx}"
   else
     results << base.merge('status' => 'ok', 'columns' => res['columns'] || aliases,
-                          'rows' => res['rows'], 'n_rows' => Array(res['rows']).length,
-                          'elapsed_s' => elapsed)
+                          'rows' => res['rows'], 'n_rows' => Array(res['rows']).length).merge(stamp)
     counts['ok'] += 1
-    puts "  [#{done}/#{n_exec}] ok         #{e['chart'].to_s.inspect} — #{Array(res['rows']).length} row(s) (#{elapsed}s)"
+    puts "  [#{done}/#{n_exec}] ok         #{e['chart'].to_s.inspect} — #{Array(res['rows']).length} row(s)#{tsfx}"
   end
 end
 
@@ -202,6 +264,7 @@ doc = {
   'version' => 1,
   'ran_at' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ'),
   'mode' => opts[:fixture] ? 'fixture' : 'live',
+  'transport' => opts[:fixture] ? 'fixture' : (pool_meta ? 'pooled' : 'serial'),
   'plan' => plan_path,
   # Freshness stamp for the PR-6 comparison: actuals bind to the exact plan run.
   'plan_generated_at' => plan['generated_at'],
@@ -220,6 +283,7 @@ doc = {
   },
   'consumer' => 'PR-6 comparison gate (numeric_parity) — not wired in part A'
 }
+doc['summary']['pool'] = pool_meta if pool_meta
 File.write(out_path, JSON.pretty_generate(doc))
 
 s = doc['summary']
