@@ -81,12 +81,42 @@ changing any gate's semantics:
   collect, **and the agent-side gate obligations are already discharged** — a
   visual verdict is recorded on `parity-final.json` (gate 8b; `--fast` waives
   it) and the staged RCF ledger is resolved (gate 8d) — pass 1 execs
-  `--finalize` in the same invocation instead of exit 12. Cold runs therefore
-  never chain (the verdict can only exist on a re-entry workdir): a chain that
-  would predictably stop at 8b/8d only burns the gate battery and pre-spends a
+  `--finalize` in the same invocation instead of exit 12. A chain that would
+  predictably stop at 8b/8d only burns the gate battery and pre-spends a
   `migrate-tableau:finalize` loop-log attempt. A gate can still stop with its
   usual banner. `SIGMA_NO_CHAIN_FINALIZE=1` restores the unconditional
-  exit-12 stop.
+  exit-12 stop (and disables the tail wait below).
+- **W2.6 — the pass-1 tail WAITS for the visual verdict on cold runs.** The
+  verdict records ONTO `parity-final.json` (written by the finalize leg), so a
+  cold pass 1 could never satisfy the chain predicate — wave 1's chain fired
+  only on re-entry workdirs. Now, when the predicate fails ONLY on
+  agent-dischargeable obligations (no recorded verdict; staged RCF ledger
+  missing/unresolved), the tail prints a banner (first line names
+  `SIGMA_VISUAL_VERDICT_TIMEOUT_S`, default 480s, `0` = don't wait) with the
+  exact discharge commands — `phase6-parity.rb --finalize` → read the staged
+  6f pairs / resolve the RCF ledger → `record-visual-check.rb` — and polls the
+  predicate every 5s. Discharged in time ⇒ the chain fires and a COLD run is
+  single-invocation end-to-end. Deadline (or a recorded `not-executable`
+  verdict — that is an answer, not a pending one) ⇒ the unchanged exit-12
+  two-invocation contract, fail-open.
+- **W2.5 — `--wait[=SECONDS]` is the default driving pattern.** One tool call
+  (tool timeout ≥ 25 min): the run backgrounds itself into
+  `<WORK>/migrate-full.log`, the wrapper returns the inner exit code VERBATIM
+  within the budget (default 1500s), and **exit 26** = budget exhausted with
+  the run STILL ALIVE (pid + log + state named; re-run the same command to
+  re-attach — never treat 26 as a failure). Detached-agent cadence contract:
+  poll the log only on a `migrate-state.json` phase transition, else every
+  ≥90s — never tighter.
+- **W2.1/W2.2/W2.4 — tier ratchet + factory flow.** At 0c the run resolves
+  `tier`/`tier_basis` into `migrate-state.json` (`lib/tier.rb`, mechanical
+  predicate over on-disk artifacts; fail-closed → `full`; `--tier` overrides,
+  ledgered). Tier-S: RCF budget 5→1, clean-run checkpoint questions
+  auto-answer their safe defaults (ledgered as `unattended-tier-default`;
+  required/defaultless questions still stop), and the gate side scales
+  budgets — **no gate is ever removed**. Factory default = one pass +
+  measured parity + `<WORK>/PUNCHLIST.md` (one re-entry command per
+  degradation-ledger line, rendered at every finalize terminal);
+  `--certified` restores loop-to-green (RCF 5 + verifier contract).
 
 ## `--quiet` — machine stdout for background-log poll turns
 
@@ -163,6 +193,7 @@ wedged, not busy: investigate, don't wait.
 | `cols-<TABLE>.json` (discover-columns) | file exists, non-empty, same connection + table path | delete the file |
 | `migrate-state.json` | drives `--finalize` (pass 2) — phases 1–5 are never re-run there | n/a (do not delete mid-run) |
 | `~/.tableau-to-sigma/calc-cache.json` | per-formula translation memo, cross-run/cross-workbook | `--no-cache` on extract-calc-fields |
+| `visual-qa/render-versions.json` + 5b page PNGs (W2.7) | `latestDocumentVersion` UNCHANGED since the 5b render — 6f stages the pairs from disk (0 fresh renders) and RCF pass 1 starts from the staged 6f render | any spec write bumps the doc version → fresh render, always (raw PNGs only; verdicts are never reused) |
 
 Deliberate: phases that create or mutate **live Sigma objects** (DM POST,
 workbook POST, layout PUT, renders, parity collection) are never cached — they
@@ -178,7 +209,10 @@ pollers (`sigma-export-png.py` 60×3s, `export-chart-png.rb` 20×3s,
 render wedge under the old 1800s default silently burned 30 min; large sites
 raise it via the env var — both with 30s heartbeats), the Phase-1d
 dashboard-read WAIT-GATE (`SIGMA_PNG_READ_TIMEOUT_S` default 480s, 30s
-heartbeats, exit 18 at the deadline), lane reaps (60s), and all REST retry loops (attempt-capped
+heartbeats, exit 18 at the deadline), the pass-1-tail visual-verdict wait
+(`SIGMA_VISUAL_VERDICT_TIMEOUT_S` default 480s, fail-open to exit 12 — W2.6),
+the `--wait` wrapper budget (default 1500s, exit 26 with the run still alive —
+W2.5), lane reaps (60s), and all REST retry loops (attempt-capped
 with exponential backoff). If you ever observe a script spinning past its
 documented bound, that's a bug — capture the command and file an issue.
 

@@ -26,6 +26,7 @@ OptionParser.new do |p|
   p.on('--wb-spec PATH')     { |v| opts[:wb] = v }
   p.on('--twb PATH')         { |v| opts[:twb] = v }
   p.on('--out PATH')         { |v| opts[:out] = v }
+  p.on('--punchlist PATH', 'W2.2: PUNCHLIST.md to embed VERBATIM (default: PUNCHLIST.md beside --out)') { |v| opts[:punchlist] = v }
 end.parse!
 %i[meta specs wb out].each { |k| abort("missing --#{k.to_s.tr('_', '-')}") unless opts[k] }
 
@@ -122,6 +123,15 @@ rows.group_by { |r| r[:page] }.each do |pg, list|
   end
   md << "\n"
 end
+# W2.2: the factory punch list rides the report VERBATIM — the same
+# per-ledger-line re-entry commands the finalize terminal printed (rendered
+# from the shipped degradation-ledger.json by build-punchlist.rb).
+pl_path = opts[:punchlist] || File.join(File.dirname(opts[:out]), 'PUNCHLIST.md')
+if File.exist?(pl_path)
+  md << "\n---\n\n"
+  md << File.read(pl_path, encoding: 'utf-8', invalid: :replace, undef: :replace)
+  md << "\n"
+end
 File.write(opts[:out], md)
-warn "migration-notes: #{rows.size} tile(s) categorized -> #{opts[:out]}"
+warn "migration-notes: #{rows.size} tile(s) categorized -> #{opts[:out]}#{File.exist?(pl_path) ? ' (+ punch list embedded verbatim)' : ''}"
 by_cat.sort_by { |_, n| -n }.each { |c, n| warn format('  %3d  %s', n, c) }

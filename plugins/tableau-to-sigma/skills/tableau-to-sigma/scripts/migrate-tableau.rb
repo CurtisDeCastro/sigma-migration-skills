@@ -264,6 +264,12 @@ OptionParser.new do |o|
   o.on('--workdir DIR', 'alias of --out') { |v| opts[:out] = File.expand_path(v) }
   o.on('--answers JSON')     { |v| opts[:answers] = v }
   o.on('--yes')              {     opts[:yes]     = true }
+  # W2.5 — foreground half of the wave-2 poll/wait contract. Optparse consumes
+  # both --wait=900 and a separated bare integer; a bare --wait takes 1500s.
+  o.on('--wait [SECONDS]', Integer, 'W2.5: drive the FULL run as ONE tool call — re-spawns this command in the ' \
+       'background (stdout+stderr → <WORK>/migrate-full.log), waits up to SECONDS (default 1500), then exits with ' \
+       'the INNER exit code verbatim; exit 26 = budget exhausted, run STILL ALIVE (pid + log named — never a failure). ' \
+       'Pair with a tool timeout ≥ 25 min.') { |v| opts[:wait_mode] = true; opts[:wait_budget] = v }
   o.on('--quiet', 'machine stdout for background-log poll turns: one JSON event line per phase ' \
                   'entry/completion + WARN/FATAL/error lines + a terminal state JSON; full ' \
                   'human output goes to <WORK>/migrate-full.log. Default output unchanged.') { opts[:quiet] = true }
@@ -312,6 +318,11 @@ OptionParser.new do |o|
   # blocking operators mid-finalize.
   o.on('--regen-plan', 'force phase6-parity to REBUILD parity-plan.json from scratch (forwarded to phase6-parity.rb). Use after a workbook re-POST changes element ids, or to discard a stale plan.') { opts[:regen_plan] = true }
   o.on('--skip-telemetry-gate REASON', 'waive gate 10 (telemetry consent) at --finalize — REQUIRED reason; forwarded to assert-phase6-ran.rb (census-visible policy exclusion, NOT a quality waiver). Use ONLY when the run cannot prompt (e.g. unattended CI); name it in your report.') { |v| opts[:skip_telemetry] = v }
+  o.on('--skip-anchors-gate REASON', 'waive gate 13 (source-anchor value verification) at --finalize — REQUIRED reason; ' \
+       'forwarded to assert-phase6-ran.rb (budget-counted waiver). Use ONLY when the source image values are genuinely ' \
+       'untranscribable; name it in your migration report.') { |v| opts[:skip_anchors_gate] = v }
+  o.on('--allow-empty-tiles REASON', 'accept gate 13\'s empty-tile block at --finalize — REQUIRED reason; forwarded to ' \
+       'assert-phase6-ran.rb (budget-counted waiver; W2.10 audit rider).') { |v| opts[:allow_empty_tiles_gate] = v }
   o.on('--allow-missing-tiles N', Integer) { |v| opts[:allow_missing_tiles] = v }
   o.on('--min-pass-rate F', Float, 'accept a parity pass-rate below 1.0 at the gate — ONLY for honest, ' \
                                    'NAMED divergences (LOD placeholders / cross-grain semantics)') { |v| opts[:min_pass_rate] = v }
@@ -328,6 +339,18 @@ OptionParser.new do |o|
   # waiver (budget-counted) instead of requiring the ledger. Batch/headless
   # callers pass 2.
   o.on('--rcf-passes N', Integer, 'Phase 5g render-compare-fix loop budget (default 5; 0 disables it with a loud WARN and records the named gate-8d waiver — budget-counted, never silent).') { |v| opts[:rcf_passes] = v }
+  # W2.1 — tier ratchet. 'auto' (default) = the mechanical Tier.detect predicate
+  # over on-disk 0c artifacts; S|M|full override the predicate (a ledgered
+  # decision). Tier never removes a gate — Tier-S shrinks budgets/duplicate
+  # oracles only (rcf 5→1, W2.4 checkpoint auto-defaults, lane B's gate scale).
+  o.on('--tier T', %w[auto S M full], "tier ratchet (W2.1): 'auto' (default) detects from 0c artifacts (fail-closed to " \
+       "'full' on unreadable inputs); S|M|full override the predicate — the override is recorded in decisions.jsonl.") { |v| opts[:tier] = v }
+  # W2.2 — factory default = ONE pass + measured parity + the punch list
+  # (PUNCHLIST.md rendered from the shipped degradation ledger at every
+  # finalize terminal). --certified opts back into loop-to-green.
+  o.on('--certified', 'W2.2: certified loop-to-green — RCF budget restored to 5 (even on Tier-S) and the verifier ' \
+       'countersignature contract applies (refs/orchestration.md). Without it, factory mode ships one pass + ' \
+       'measured parity + <WORK>/PUNCHLIST.md.') { opts[:certified] = true }
   # Gate 7b (PR-13) — the runtime control flip test is DEFAULT-ON at --finalize
   # (pass 1 also stamps control_flip_required into migrate-state.json so even a
   # standalone gate run enforces it). The census (gate 7c) proves the controls
@@ -456,6 +479,72 @@ at_exit do
   code = $!.is_a?(SystemExit) ? $!.status : ($! ? 1 : 0)
   quiet_event('exit', 'code' => code, 'workdir' => WORK, 'full_log' => QUIET_FULL_LOG)
 end if QUIET
+
+# ── W2.5 — --wait[=SECONDS]: the one-tool-call driving contract ──────────────
+# Foreground half of the wave-2 poll/wait contract. The wrapper re-spawns this
+# exact command (minus --wait) in the BACKGROUND, stdout+stderr appended to
+# <WORK>/migrate-full.log, and waits up to the budget (default 1500s):
+#   child exits within budget → the wrapper exits with the INNER exit code,
+#     VERBATIM — 0/3/4/10/11/12/16/18/… keep their documented meanings;
+#   budget exhausted → exit 26 = "wait budget exhausted, run STILL ALIVE":
+#     pid + log + state path are named, the child keeps running, nothing is
+#     killed and no failure is invented. Re-attach with another --wait run of
+#     the same command, or poll per the G2 cadence (a migrate-state.json
+#     phase transition, else every ≥90s — never tighter).
+# Wait-mode stdout is ≤5 lines (plus quiet_event JSON under --quiet): the
+# point is ONE cheap tool call instead of the ~8-12 background poll turns.
+# Exit 26 is free in this script's exit space (the gate's own exit 26 lives in
+# assert-phase6-ran's process; the finalize spine re-maps it to 0/3).
+if opts[:wait_mode]
+  _wb = (opts[:wait_budget] || 1500).to_i
+  _wb = 1500 unless _wb.positive?
+  _child_argv = []
+  _i = 0
+  while _i < ORIGINAL_ARGV.length
+    _a = ORIGINAL_ARGV[_i]
+    if _a == '--wait'
+      _i += 1
+      _i += 1 if ORIGINAL_ARGV[_i].to_s =~ /\A\d+\z/ # optparse consumed the separated value
+      next
+    elsif _a.start_with?('--wait=')
+      _i += 1
+      next
+    end
+    _child_argv << _a
+    _i += 1
+  end
+  _wait_state = File.join(WORK, 'migrate-state.json')
+  _wait_pid = Process.spawn(RbConfig.ruby, __FILE__, *_child_argv, { %i[out err] => [QUIET_FULL_LOG, 'a'] })
+  puts "── --wait: run driving in background (pid #{_wait_pid}; budget #{_wb}s) ──"
+  puts "   log:   #{QUIET_FULL_LOG}"
+  puts "   state: #{_wait_state} (G2 poll cadence if you detach: phase transition, else ≥90s)"
+  quiet_event('wait', 'pid' => _wait_pid, 'log' => QUIET_FULL_LOG, 'state' => _wait_state, 'budget_s' => _wb)
+  _wait_deadline = Time.now + _wb
+  _wait_st = nil
+  loop do
+    _done = begin
+      Process.waitpid2(_wait_pid, Process::WNOHANG)
+    rescue Errno::ECHILD
+      nil
+    end
+    if _done
+      _wait_st = _done[1]
+      break
+    end
+    break if Time.now >= _wait_deadline
+    sleep 2
+  end
+  if _wait_st
+    _code = _wait_st.exitstatus || 1 # signal-killed child → generic failure, still verbatim-shaped
+    puts "   inner exit #{_code} (passed through verbatim)"
+    quiet_event('wait-exit', 'code' => _code)
+    exit(_code)
+  end
+  puts "⚠ WAIT BUDGET EXHAUSTED (#{_wb}s) — the run is STILL ALIVE (pid #{_wait_pid}); exit 26 is NOT a failure."
+  puts "   re-attach: re-run this exact command (same --wait), or tail #{QUIET_FULL_LOG}"
+  quiet_event('wait-timeout', 'code' => 26, 'pid' => _wait_pid, 'log' => QUIET_FULL_LOG)
+  exit 26
+end
 
 # ── E9.6 — thread mission.json STATED scope into the orchestrator ────────────
 # The mission intake (SKILL.md Step −1 / MIGRATION_REQUEST.md) records the
@@ -861,7 +950,11 @@ def mark(key)
   # ratified local-capture decision feeds (reconciled program #5 / ADD-6).
   if defined?(PhaseMetrics) && PhaseMetrics.respond_to?(:record) && defined?(WORK)
     begin
-      PhaseMetrics.record(workdir: WORK, phase: key, wall_s: seg, at: now.utc)
+      # W2.22 rider: turn ordinal + invocation token ride each mark record —
+      # turn events countable from state transitions; distinct inv = invocations.
+      PhaseMetrics.record(workdir: WORK, phase: key, wall_s: seg, at: now.utc,
+                          turn: ($pm_turn = $pm_turn.to_i + 1),
+                          inv: (PhaseMetrics.respond_to?(:invocation_token) ? PhaseMetrics.invocation_token : nil))
     rescue StandardError
       nil
     end
@@ -1250,6 +1343,10 @@ if opts[:finalize]
   # Telemetry consent waiver pass-through (issue #422) — census-visible at gate
   # 10 (policy exclusion, excluded from the quality-waiver budget by doctrine).
   gate += ['--skip-telemetry-gate', opts[:skip_telemetry]] if opts[:skip_telemetry]
+  # Gate 13 (source-anchor values) waiver pass-through (W2.10) — REASON rides to
+  # the gate (recorded in waivers.json + the census, budget-counted).
+  gate += ['--skip-anchors-gate', opts[:skip_anchors_gate]] if opts[:skip_anchors_gate]
+  gate += ['--allow-empty-tiles', opts[:allow_empty_tiles_gate]] if opts[:allow_empty_tiles_gate]
   # --fast: stamp the two visual-gate waivers with the operator's reason (recorded
   # in parity-final.json's waivers[] and counted toward the >2-waiver budget cap).
   gate += ['--skip-visual-gate', opts[:fast], '--skip-visual-comparison', opts[:fast]] if opts[:fast]
@@ -1472,6 +1569,26 @@ if opts[:finalize]
   end
 
   pf = (JSON.parse(File.read(File.join(WORK, 'parity-final.json'))) rescue {})
+  # ── W2.2 — factory punch list at EVERY finalize terminal ───────────────────
+  # The gate battery above just derived + wrote degradation-ledger.json (its
+  # own seam); render it into PUNCHLIST.md/punchlist.json — one re-entry
+  # command per ledger line — whatever the verdict. GREEN ⇒ empty list
+  # (shipped doctrine); a run that shipped LESS than the source now hands the
+  # operator the exact converging commands instead of a prose apology.
+  _pl_note = nil
+  begin
+    _, _plst = run!(['ruby', File.join(HERE, 'build-punchlist.rb'), '--workdir', WORK], allow_fail: true)
+    _pl = (JSON.parse(File.read(File.join(WORK, 'punchlist.json'))) rescue nil)
+    if _plst.success? && _pl.is_a?(Hash)
+      _pl_note = "#{Array(_pl['items']).size} item(s), ledger verdict #{_pl['verdict']} → #{File.join(WORK, 'PUNCHLIST.md')}"
+      Offramp.log(WORK, kind: 'punchlist-emitted', detail: _pl_note) if Array(_pl['items']).any?
+      quiet_event('punchlist', 'items' => Array(_pl['items']).size, 'verdict' => _pl['verdict'])
+    elsif !_plst.success?
+      line "WARN: punch-list render failed (exit #{_plst.exitstatus}) — see build-punchlist.rb output above"
+    end
+  rescue StandardError
+    nil
+  end
   puts
   puts '================ RESULT ================'
   puts "dataModelId : #{state['data_model_id']}"
@@ -1487,6 +1604,7 @@ if opts[:finalize]
   end
   puts "GATES       : phase6=#{p6st.success? ? 'PASS' : 'FAIL'} cleanup=#{clst.success? ? 'PASS' : 'FAIL'} assert-phase6-ran=#{gst.success? ? 'PASS' : "FAIL(#{gst.exitstatus})"} ds-filters=#{dsfst.success? ? 'PASS' : "FAIL(#{dsfst.exitstatus})"}"
   puts "ENHANCE     : #{enhance_line}" if enhance_line
+  puts "PUNCH LIST  : #{_pl_note}" if _pl_note
   puts "STATUS      : #{all_green ? 'GREEN' : 'NOT GREEN'}"
   puts '======================================='
   quiet_event('result', 'stage' => 'finalize', 'status' => all_green ? 'GREEN' : 'NOT GREEN',
@@ -1782,7 +1900,9 @@ probe = (JSON.parse(probe_out.lines.last.to_s) rescue nil) if probe_st.success?
 stamp = (JSON.parse(File.read(stamp_path)) rescue nil)
 disc_complete = disc_artifacts.all? { |p| File.exist?(p) } &&
                 Dir[File.join(WORK, 'views', '*.csv')].any?
-reuse_discovery = probe && stamp &&
+disc_scope = (opts[:dashboards] || []).sort # W2.20: scoped runs fetch FEWER view CSVs
+stamp_scope_ok = stamp && ((s = stamp['csv_scope'].to_a) == disc_scope || s.empty?) # []/legacy stamp = unscoped superset, serves any scope
+reuse_discovery = probe && stamp && stamp_scope_ok &&
                   stamp['workbook_id'] == probe['id'] && stamp['updatedAt'] == probe['updatedAt'] &&
                   disc_complete
 # Probe-failure resilience (speed hardening): a TRANSIENT probe failure must
@@ -1790,7 +1910,7 @@ reuse_discovery = probe && stamp &&
 # worse, if Tableau is genuinely unreachable the re-fetch dies too, AFTER
 # clearing a perfectly good cache. Reuse the stamped artifacts with a loud
 # WARN instead; delete discovery-stamp.json to force a re-fetch.
-probe_failed_reuse = !probe && stamp && disc_complete
+probe_failed_reuse = !probe && stamp && stamp_scope_ok && disc_complete
 reuse_discovery ||= probe_failed_reuse
 
 disc_log = File.join(WORK, 'phase1-discover.log')
@@ -1826,6 +1946,9 @@ else
   # discovery's heavy includeExtract=true re-download instead of paying for an
   # unused multi-GB payload.
   disc << '--no-extract-refetch' if opts[:skip_extract_landing]
+  # W2.20 (lane F): thread the dashboard scope into discovery (member-sheet CSVs
+  # only; discovery FAILS OPEN to all views, stated, when membership is unresolvable).
+  (opts[:dashboards] || []).each { |d| disc += ['--dashboard', d] }
   disc_sh = disc.map { |a| "'" + a.gsub("'", "'\\''") + "'" }.join(' ')
   scan_sh = ['ruby', File.join(HERE, 'scan-workbook-gaps.rb'), twb]
             .map { |a| "'" + a.gsub("'", "'\\''") + "'" }.join(' ')
@@ -1862,7 +1985,7 @@ lane_done = lambda do
       if failed.empty?
         File.write(stamp_path, JSON.pretty_generate(
                                  'workbook_id' => probe['id'], 'updatedAt' => probe['updatedAt'],
-                                 'stamped_at' => Time.now.utc.iso8601))
+                                 'csv_scope' => disc_scope, 'stamped_at' => Time.now.utc.iso8601))
       else
         line "discovery NOT stamped for reuse — #{failed.size} fetch task(s) failed " \
              "(#{failed.map { |t| t['task'] }.join(', ')[0, 120]}); a resume will re-fetch"
@@ -2882,6 +3005,9 @@ _lane_beat = _lane_t0
 until lane_done.call
   if Time.now - _lane_t0 > _lane_timeout
     print_lane_log.call
+    `pkill -TERM -P #{lane[:pid]} 2>/dev/null` rescue nil # W2.21 fence: children (the wedged
+    (Process.kill('TERM', lane[:pid]) rescue nil)         # ruby fetch) first, then the lane shell,
+    (reap_lane!(lane_done, 5) rescue nil)                 # bounded reap — no orphan trickler survives the abort
     abort "FATAL: Tableau discovery lane did not finish within #{_lane_timeout}s — likely a " \
           "wedged Tableau REST call (see lane log above). Re-run, raise TABLEAU_LANE_TIMEOUT, " \
           "or pass the .twb directly with --twb to skip live discovery."
@@ -3209,6 +3335,48 @@ record_cost_ack = lambda do
                         'cost_estimate_provenance'   => ack_prov)
   line "scope/cost sign-off recorded in run-state (cost_estimate_acknowledged: true, provenance: #{ack_prov})"
 end
+# ---------------------------------------------------------------------------
+# W2.1 — TIER RATCHET (orchestrator half). Resolve the run's tier HERE, at the
+# 0c checkpoint: the first point where every predicate input is on disk
+# (discovery metadata + dashboard layout + the gap scan), before the decisions
+# checkpoint and any DM/workbook POST. Detection is Tier.detect — a PURE
+# function over artifacts, never an agent-supplied count (anti-gaming). An
+# operator --tier S|M|full overrides the predicate and is itself a ledgered
+# decision; --tier auto (default) takes the predicate; fail-closed → 'full'.
+# The resolved tier + basis are written to migrate-state.json ('tier'/
+# 'tier_basis' — lane B's gate reads them; strings pinned in
+# shared/lib/testdata/wave2-tier-state.json), logged to the Offramp trail
+# (kind 'tier-assigned'), and stamped into the RESULT block. Tier never
+# removes a gate — Tier-S shrinks budgets and duplicate oracles only
+# (rcf_passes default 5→1 at both sites, W2.4 checkpoint auto-defaults,
+# lane B's gate-side waiver-budget scale + gate-18 GT-trio skip).
+# ---------------------------------------------------------------------------
+require_relative 'lib/tier'
+_tier_det = Tier.detect(WORK)
+if opts[:tier] && opts[:tier] != 'auto'
+  $tier = opts[:tier]
+  $tier_basis = Tier::BASIS_OVERRIDE
+  # The override is a ledgered decision (existing DECIDED_BY tokens only —
+  # the gap-scout acceptance provenance convention).
+  Offramp.decision(WORK, kind: 'tier-override',
+                   question: "--tier #{opts[:tier]} (auto-predicate said #{_tier_det['tier']}#{_tier_det['reasons'].any? ? ": #{_tier_det['reasons'].join('; ')}" : ''})",
+                   answer: $tier,
+                   decided_by: opts[:yes] || opts[:force] ? 'unattended-flag' : 'relayed')
+else
+  $tier = _tier_det['tier']
+  $tier_basis = _tier_det['tier_basis']
+end
+line "tier: #{$tier} (#{$tier_basis}#{_tier_det['reasons'].any? ? " — #{_tier_det['reasons'].join('; ')}" : ''})"
+Offramp.log(WORK, kind: 'tier-assigned',
+            detail: "tier=#{$tier} basis=#{$tier_basis} features=#{_tier_det['features'].to_json}")
+quiet_event('tier', 'tier' => $tier, 'basis' => $tier_basis)
+begin # persist NOW (pass 1's full state write at the Phase-6 seam preserves it)
+  _ms_p = File.join(WORK, 'migrate-state.json')
+  _ms = (JSON.parse(File.read(_ms_p)) rescue {})
+  File.write(_ms_p, JSON.pretty_generate(_ms.merge('tier' => $tier, 'tier_basis' => $tier_basis)))
+rescue StandardError
+  nil
+end
 mark('phase0c-cost')
 
 # ---------------------------------------------------------------------------
@@ -3428,7 +3596,25 @@ _prior_oq = File.exist?(oq_path) ? (JSON.parse(File.read(oq_path)) rescue nil) :
 consent_expected = (answers && answers.key?('telemetry_consent')) ||
                    (_prior_oq.is_a?(Hash) && _prior_oq['status'].to_s != 'resolved' &&
                     Array(_prior_oq['open_questions']).any? { |q| q.is_a?(Hash) && q['id'] == 'telemetry_consent' })
-if (gap_stop || questions.any?) && !opts[:yes] && answers.nil?
+# W2.4 — Tier-S checkpoint AUTO-DEFAULTS. A clean Tier-S run (predicate-clean:
+# no gap stop) whose open questions ALL carry safe defaults (severity 'review',
+# non-nil default — the defaults the checkpoint itself would apply under --yes)
+# pre-derives the answers from the artifacts, prints the one-line notice, and
+# PROCEEDS — no operator stop, no re-entry. Every auto-answer is ledgered to
+# decisions.jsonl under the greppable kind 'unattended-tier-default'; its
+# provenance is decided_by 'unattended-flag' (closed vocabulary; nobody asked).
+# Any unattributable question — severity 'required' or no default — still
+# stops exactly as today (the conservative direction: a stop that could have
+# been skipped costs one turn; a skipped stop that shouldn't have been is a
+# correctness leak). Tier-M/full runs are untouched.
+_tier_autodefault = $tier == 'S' && !gap_stop && questions.any? &&
+                    !opts[:yes] && answers.nil? &&
+                    questions.all? { |q| q['severity'] != 'required' && !q['default'].nil? }
+if _tier_autodefault
+  line "TIER-S auto-defaults: #{questions.size} checkpoint question(s) auto-answered with their safe defaults " \
+       "(recorded as 'unattended-tier-default' in decisions.jsonl) — proceeding without the operator stop."
+end
+if (gap_stop || questions.any?) && !opts[:yes] && answers.nil? && !_tier_autodefault
   questions << consent_q
   gap_items = gap_stop ? gap_stop['items'] : []
   block = {
@@ -3535,7 +3721,7 @@ end
 
 if questions.any?
   puts
-  line "decisions auto-resolved (#{opts[:yes] ? '--yes: defaults' : '--answers supplied'}):"
+  line "decisions auto-resolved (#{opts[:yes] ? '--yes: defaults' : (answers ? '--answers supplied' : 'TIER-S auto-defaults')}):"
   questions.each do |q|
     tag = q['calc'] || q['viz']
     # E5.10 substrate: targeted "<id>:<slug>" answers take precedence over the
@@ -3548,8 +3734,10 @@ if questions.any?
     # E3.6 (vocab half): every resolved checkpoint question is ledgered.
     # decided_by is honest provenance — an --answers value is agent-RELAYED
     # operator text, never first-hand consent; --yes defaults are unattended.
-    Offramp.decision(WORK, kind: q['id'],
-                     question: (q['detail'] || q['id']).to_s[0, 200],
+    # W2.4: a Tier-S auto-default is ledgered under the greppable kind
+    # 'unattended-tier-default' (question text still carries the class id).
+    Offramp.decision(WORK, kind: _tier_autodefault ? 'unattended-tier-default' : q['id'],
+                     question: "#{_tier_autodefault ? "#{q['id']}: " : ''}#{(q['detail'] || q['id']).to_s[0, 200]}",
                      answer: chosen.to_s,
                      decided_by: answers ? 'relayed' : 'unattended-flag')
     if chosen.nil? && q['severity'] == 'required'
@@ -4848,6 +5036,62 @@ end
 mark('phase5-layout')
 
 # ---------------------------------------------------------------------------
+# W2.7 helpers — render-once per latestDocumentVersion (call-site only).
+# Current document version straight from the live workbook (same field
+# ExportPool.resolve_doc_version keys its export cache on); nil on any
+# failure → no reuse anywhere (fail-open to fresh renders).
+def sigma_doc_version(wb_id)
+  spec = Sigma.request(:get, "/v2/workbooks/#{wb_id}")
+  v = spec.is_a?(Hash) ? (spec['latestDocumentVersion'] || spec['latestVersion']) : nil
+  v.nil? || v.to_s.empty? ? nil : v.to_s
+rescue StandardError
+  nil
+end
+
+# PURE reuse decision for the 6f staging: given the 5b render-versions sidecar
+# and the CURRENT doc version, return the complete staging plan iff EVERY
+# dashboard pair can be staged from on-disk artifacts at the SAME version —
+# source side from the discovery PNG cache (views/<viewId>.png, else
+# dashboards/<name>.png — verify-dashboard-visual.rb's own fallback order),
+# sigma side from the version-keyed 5b render. ANY gap → nil (fail-open: the
+# child renderer runs exactly as before). Raw evidence only — this plan copies
+# PNGs; it never touches a verdict or a manifest judgment field.
+def render_reuse_plan(work, doc_version)
+  return nil if doc_version.nil?
+  rv = JSON.parse(File.read(File.join(work, 'visual-qa', 'render-versions.json')))
+  return nil unless rv.is_a?(Hash) && rv['doc_version'] == doc_version && rv['pages'].is_a?(Hash)
+  dash_layout = JSON.parse(File.read(File.join(work, 'dashboard-layout.json')))
+  wb_ids = JSON.parse(File.read(File.join(work, 'wb-ids.json')))
+  gw = begin
+    JSON.parse(File.read(File.join(work, 'get-workbook.json')))
+  rescue StandardError
+    {}
+  end
+  views = gw.dig('workbook', 'views', 'view') || gw.dig('views', 'view') || []
+  views = [views] unless views.is_a?(Array)
+  view_id_by_name = views.each_with_object({}) { |v, h| h[v['name']] = v['id'] if v.is_a?(Hash) && v['name'] }
+  page_id_by_name = (wb_ids['pages'] || []).each_with_object({}) { |p, h| h[p['name']] = p['id'] if p['name'] }
+  slugify = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]+/, '-').gsub(/^-|-$/, '')[0..50] }
+  names = (dash_layout.is_a?(Array) ? dash_layout : []).map { |d| d['dashboard'] }
+                                                       .reject { |n| n.to_s.start_with?('[synthetic]') }
+  return nil if names.empty?
+  names.map do |name|
+    vid = view_id_by_name[name]
+    src = vid && File.join(work, 'views', "#{vid}.png")
+    unless src && File.size?(src)
+      fb = File.join(work, 'dashboards', "#{name.to_s.strip.gsub(/[^\w.-]+/, '_').gsub(/\A_+|_+\z/, '')}.png")
+      src = File.size?(fb) ? fb : nil
+    end
+    pid = page_id_by_name[name] || page_id_by_name.reject { |k, _| k == 'Data' }.values.first
+    sig = pid && rv['pages'][pid]
+    return nil unless src && sig && File.size?(sig.to_s)
+    { 'dashboard' => name, 'slug' => slugify.call(name), 'source_from' => src, 'sigma_from' => sig }
+  end
+rescue StandardError
+  nil
+end
+
+# ---------------------------------------------------------------------------
 # Phase 5b — Visual QA: render each content page to a full-page PNG so the
 # layout can be reviewed against refs/layout-visual-qa.md AND compared to the
 # source Tableau dashboard — the cross-converter visual-QA gate. Page ids come
@@ -4888,6 +5132,20 @@ Array.new([3, content_pages.size].min.clamp(1, 3)) do
 end.each(&:join)
 line "rendered #{rendered}/#{content_pages.size} full-page PNG(s) → #{vqa}"
 line 'VISUAL QA (review, do not skip): open each PNG; check vs refs/layout-visual-qa.md AND the source Tableau dashboard — titles, right chart kinds, colors, no overlaps/dead zones.' if rendered.positive?
+# W2.7 — render-once bookkeeping: key the 5b renders to the CURRENT document
+# version (the ExportPool::Cache keying discipline — raw evidence only, PNGs
+# version-keyed; VERDICTS are never reused). A later stage may reuse these
+# renders only while latestDocumentVersion is UNCHANGED; a version bump
+# always forces a fresh render (red line, pinned by test-render-once.rb).
+begin
+  _rv_pages = content_pages.map { |pg| [pg['id'], File.join(vqa, "#{pg['id']}.png")] }
+                           .select { |_, p| File.size?(p) }.to_h
+  File.write(File.join(vqa, 'render-versions.json'), JSON.pretty_generate(
+               'doc_version' => sigma_doc_version(wb_id), 'pages' => _rv_pages,
+               'rendered_at' => Time.now.utc.iso8601))
+rescue StandardError
+  nil
+end
 mark('phase5b-visual-qa')
 
 # ---------------------------------------------------------------------------
@@ -4929,17 +5187,27 @@ end
 # Persist resume state for --finalize (pass 2) BEFORE stopping. run_id scopes
 # the completion sentinels to THIS run; route records how the workdir was driven
 # (the route-persistence check refuses a re-entry on the other route).
+_prior_state = (JSON.parse(File.read(File.join(WORK, 'migrate-state.json'))) rescue {})
 state = { 'workbook_id' => wb_id, 'data_model_id' => dm_id,
           'extract_mode' => !!has_extracts, 'workbook_name' => display_wb_name,
           'reused_dm' => !!reuse_dm_id, 'pass1_at' => Time.now.utc.iso8601,
           'enhance_requested' => !!opts[:enhance],
           'run_id' => RUN_ID, 'route' => CURRENT_ROUTE,
-          'rcf_passes' => (opts[:rcf_passes] || 5),
+          # W2.1: tier rides the state file (lane B's gate reads 'tier'/'tier_basis';
+          # strings pinned in shared/lib/testdata/wave2-tier-state.json). Preserved
+          # from the 0c write; keys absent on routes that never resolved a tier.
+          'tier' => ($tier || _prior_state['tier']),
+          'tier_basis' => ($tier_basis || _prior_state['tier_basis']),
+          # W2.1: Tier-S shrinks the RCF budget 5→1 (site 1 of 2; `0` is a
+          # DIFFERENT contract that waives gate 8d — never the tier default).
+          # W2.2: --certified restores the loop-to-green budget of 5.
+          'certified' => (opts[:certified] ? true : nil),
+          'rcf_passes' => (opts[:rcf_passes] || (opts[:certified] ? 5 : ($tier == 'S' ? 1 : 5))),
           # PR-13: gate 7b (runtime control flip test) is DEFAULT-ON for the
           # tableau path — this stamp auto-enables it even on a STANDALONE
           # assert-phase6-ran run (the 8d/rcf_passes pattern from #439).
           'control_flip_required' => true }
-File.write(File.join(WORK, 'migrate-state.json'), JSON.pretty_generate(state))
+File.write(File.join(WORK, 'migrate-state.json'), JSON.pretty_generate(state.reject { |_, v| v.nil? }))
 
 # ---------------------------------------------------------------------------
 # Phase 5g — stage the RCF (render-compare-fix) fidelity loop. Agent-driven:
@@ -4948,7 +5216,7 @@ File.write(File.join(WORK, 'migrate-state.json'), JSON.pretty_generate(state))
 # BEFORE --finalize (which enforces the ledger via gate 8d). Skipped, with a
 # loud WARN, when --rcf-passes 0.
 # ---------------------------------------------------------------------------
-rcf_passes = (opts[:rcf_passes] || 5)
+rcf_passes = (opts[:rcf_passes] || (opts[:certified] ? 5 : ($tier == 'S' ? 1 : 5))) # W2.1: Tier-S 5→1 (site 2 of 2); W2.2: --certified restores 5
 if rcf_passes.to_i <= 0
   line 'WARN: Phase 5g RCF fidelity loop DISABLED (--rcf-passes 0). The workbook will be gated on'
   line '      structure + data + a single visual verdict only — composition drift (palette, chart'
@@ -5031,10 +5299,33 @@ end
 # image next to the Sigma page render per dashboard, so the mandatory whole-page
 # visual comparison (and the repair loop: diff → fix → re-render) has both sides
 # ready. Writes visual-qa/compare-manifest.json (agent sets visual_match).
-line 'Phase 6f-visual: staging full-dashboard source-vs-Sigma image pairs for the repair loop'
-vis_threads << Thread.new do
-  Open3.capture2e({ 'SIGMA_API_TOKEN' => vis_tok }, 'ruby', File.join(HERE, 'verify-dashboard-visual.rb'),
-                  '--workbook', wb_id, '--tableau-dir', WORK)
+# W2.7 — render-once: when latestDocumentVersion is UNCHANGED since the 5b
+# renders and every pair stages from disk, copy instead of re-rendering
+# (each server-side page render is 30-90s). Any gap → the child renderer runs
+# exactly as before (fail-open). Version bump → fresh render, always.
+_doc_v6f = sigma_doc_version(wb_id)
+_reuse_plan = render_reuse_plan(WORK, _doc_v6f)
+if _reuse_plan
+  line "Phase 6f-visual: REUSING the 5b renders (documentVersion unchanged: #{_doc_v6f}) — " \
+       "#{_reuse_plan.size} pair(s) staged from disk, 0 fresh renders (W2.7)"
+  _vqa6 = File.join(WORK, 'visual-qa')
+  FileUtils.mkdir_p(_vqa6)
+  _manifest6 = _reuse_plan.map do |r|
+    src_png = File.join(_vqa6, "#{r['slug']}.source.png")
+    sig_png = File.join(_vqa6, "#{r['slug']}.sigma.png")
+    FileUtils.cp(r['source_from'], src_png) unless r['source_from'] == src_png
+    FileUtils.cp(r['sigma_from'], sig_png) unless r['sigma_from'] == sig_png
+    { 'dashboard' => r['dashboard'], 'source_png' => src_png,
+      'sigma_png' => sig_png, 'visual_match' => false }
+  end
+  File.write(File.join(_vqa6, 'compare-manifest.json'), JSON.pretty_generate(_manifest6))
+  quiet_event('render-reuse', 'doc_version' => _doc_v6f, 'pairs' => _manifest6.size)
+else
+  line 'Phase 6f-visual: staging full-dashboard source-vs-Sigma image pairs for the repair loop'
+  vis_threads << Thread.new do
+    Open3.capture2e({ 'SIGMA_API_TOKEN' => vis_tok }, 'ruby', File.join(HERE, 'verify-dashboard-visual.rb'),
+                    '--workbook', wb_id, '--tableau-dir', WORK)
+  end
 end
 vis_threads.each do |th|
   o, _st = th.value
@@ -5048,6 +5339,7 @@ quiet_event('result', 'stage' => 'pass1', 'status' => 'PENDING',
 puts "dataModelId : #{dm_id}#{reuse_dm_id ? '  (REUSED existing DM)' : ''}"
 puts "workbookId  : #{wb_id}"
 puts "structural  : PASS (#{total_cols} cols resolve, #{chart_els.size} charts compile)"
+puts "TIER        : #{$tier} (#{$tier_basis}) — budgets/duplicate-oracles only; all gates still run" if $tier
 if $rls_pending
   puts "RLS         : DETECTED, NOT APPLIED — see #{File.join(WORK, 'security.json')}; provision + apply"
   puts '              via scripts/apply_sigma_rls.py before sharing (the model returns ALL rows until then)'
@@ -5067,6 +5359,11 @@ end
 if rcf_passes.to_i.positive?
   puts "FIDELITY    : Phase 5g RCF loop STAGED (budget #{rcf_passes}). Iterate render→compare→fix to"
   puts '              near-exact parity BEFORE --finalize (which requires the ledger — gate 8d):'
+  if defined?(_reuse_plan) && _reuse_plan
+    puts "              W2.7: documentVersion #{_doc_v6f} is unchanged since 5b — START pass 1 from the"
+    puts '              staged 6f render (visual-qa/<dash>.sigma.png): compare + record deltas against it'
+    puts '              FIRST; call `fidelity-loop.rb render` only for pass 2+ (a render is 30-90s).'
+  end
   puts "                ruby scripts/fidelity-loop.rb render --workdir #{WORK}"
   puts '              READ rcf-pass-N.png vs the source PNG, score against refs/fidelity-rubric.md, then'
   puts '              per delta: fidelity-loop.rb record (classify spec-fixable/ui-only/sigma-capability/data),'
@@ -5250,7 +5547,66 @@ def finalize_chain_predicate(work, fast: false)
          "visual verdict #{fast ? 'waived (--fast)' : 'recorded'}; RCF ledger #{rcf_staged ? 'resolved' : 'unstaged'}"]
 end
 
+# W2.6: classify a failed chain predicate — :wait when the ONLY blockers are
+# agent-DISCHARGEABLE obligations at the pass-1 tail (record the visual
+# verdict; write/resolve the staged RCF ledger), :terminal for everything
+# structural (pivot grids, agent-mediated markers, missing actuals — nothing
+# an agent can discharge in minutes) AND for a recorded 'not-executable'
+# verdict, which is an ANSWER (the agent cannot do vision), not a pending one.
+WAITABLE_CHAIN_RES = [/\Ano recorded visual verdict/,
+                      /\ARCF loop staged \(rcf_passes > 0\) but no fidelity-ledger\.json/,
+                      /unresolved spec-fixable\/data RCF delta/,
+                      /\Aunreadable fidelity-ledger\.json/].freeze
+def chain_wait_class(chain_ok, why)
+  return :chain if chain_ok
+  WAITABLE_CHAIN_RES.any? { |re| re =~ why.to_s } ? :wait : :terminal
+end
+
 _chain_ok, _chain_why = finalize_chain_predicate(WORK, fast: !!opts[:fast])
+# ── W2.6 — 🚧 pass-1-tail visual-verdict WAIT-GATE (mirror of Phase 1d) ──────
+# On a COLD run the chain predicate is structurally unsatisfiable here: the
+# visual verdict records ONTO parity-final.json, which only the finalize leg
+# writes — so wave-1's in-process chain could never fire on the very cold runs
+# it was justified by (wave-1 review R4; both reviewers converged on this
+# gate). While the obligations are merely UNDISCHARGED (not terminal), banner
+# + bounded poll — SIGMA_VISUAL_VERDICT_TIMEOUT_S, default 480s, 0 = don't
+# wait (named on the banner's first line) — re-evaluating the predicate; on
+# satisfied → chain below, one invocation end-to-end. Deadline passes → the
+# unchanged exit-12 two-invocation contract (fail-open, never invents a
+# failure). SIGMA_NO_CHAIN_FINALIZE=1 disables the wait AND the chain.
+if ENV['SIGMA_NO_CHAIN_FINALIZE'].to_s.empty? && chain_wait_class(_chain_ok, _chain_why) == :wait
+  _vv_wait = (ENV['SIGMA_VISUAL_VERDICT_TIMEOUT_S'] || '480').to_i
+  if _vv_wait.positive?
+    puts
+    puts "── 🚧 PASS-1-TAIL WAIT (W2.6) · visual verdict → in-process --finalize · SIGMA_VISUAL_VERDICT_TIMEOUT_S=#{_vv_wait}s (0 = don't wait; exit 12 immediately) ──"
+    line "chain blocked only by agent-dischargeable obligation(s): #{_chain_why}"
+    line 'Discharge them NOW — the 6f render pairs are already staged:'
+    line "  1. write the parity result:  ruby scripts/phase6-parity.rb --tableau #{WORK} --finalize --actuals #{File.join(WORK, 'parity-actuals.json')}"
+    line "  2. READ each pair under #{File.join(WORK, 'visual-qa')}/ (<dash>.source.png vs <dash>.sigma.png); run the staged RCF loop (fidelity-loop.rb) to resolution"
+    line '  3. record the verdict:       ruby scripts/record-visual-check.rb --workdir ' \
+         "#{WORK} --agent-vision true --verdict <pass|divergent> [--blind-grade <blind-grade.json>]"
+    line 'On the recorded verdict this run chains --finalize IN-PROCESS (single invocation, cold).'
+    quiet_event('wait-visual-verdict', 'timeout_s' => _vv_wait, 'why' => _chain_why)
+    _vv_deadline = Time.now + _vv_wait
+    loop do
+      sleep 5
+      _chain_ok, _chain_why = finalize_chain_predicate(WORK, fast: !!opts[:fast])
+      break if _chain_ok
+      if chain_wait_class(_chain_ok, _chain_why) == :terminal
+        line "visual-verdict wait ended: #{_chain_why} — exit 12 (run --finalize separately)"
+        break
+      end
+      if Time.now >= _vv_deadline
+        line "visual-verdict wait deadline passed (#{_vv_wait}s; still: #{_chain_why}) — " \
+             'fail-open to the exit-12 two-invocation contract'
+        quiet_event('wait-visual-verdict-timeout', 'timeout_s' => _vv_wait)
+        break
+      end
+    end
+  else
+    line 'SIGMA_VISUAL_VERDICT_TIMEOUT_S=0 — not waiting for the visual verdict; exit-12 two-invocation contract'
+  end
+end
 if _chain_ok && ENV['SIGMA_NO_CHAIN_FINALIZE'].to_s.empty?
   puts
   puts '── SINGLE-INVOCATION · chaining --finalize in-process ──'

@@ -38,6 +38,13 @@ open-questions.json
 png-read.stale.json
 offramps.jsonl
 loop-log.jsonl
+# W2.7: render-versions.json is the 5b render→documentVersion keying sidecar
+# (workdir-local raw-evidence bookkeeping under visual-qa/).
+render-versions.json
+# W2.2: the factory punch list (rendered from degradation-ledger.json; carries
+# workbook/tile names + re-entry commands with workdir paths) — workdir-local.
+PUNCHLIST.md
+punchlist.json
 # evidence-ledger.jsonl is the E3.1 append-only per-run gate-verdict ledger
 # (shared/lib/evidence_ledger.rb); export-cache/ holds #7a's version-keyed raw
 # export payloads (shared/lib/export_pool.rb) — both live in the run workdir

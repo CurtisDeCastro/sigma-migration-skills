@@ -131,10 +131,11 @@ never a block. Full flags, precedence, ranking, triage:
 
 ## One command (orchestrated path)
 
-> **⏱ Invocation rule (G2, field-caught):** a full pass runs **5–20+ min** —
-> launch in the **background** (poll the log) or with a **tool timeout ≥ 20
-> min**; the default 2-min foreground Bash limit WILL kill it (exit 143).
-> Check exit codes with portable `$?` (not bash-only `PIPESTATUS`).
+> **⏱ Invocation (G2/W2.5):** full pass = 5–20+ min. Default: `--wait` (ONE
+> tool call; tool timeout ≥ 25 min) — inner exit code passes through verbatim;
+> **exit 26** = budget up, run STILL ALIVE (pid+log printed; re-run to
+> re-attach — never a failure). Detached: poll only on a `migrate-state.json`
+> transition, else ≥90s. Bare 2-min Bash kills runs (143); check `$?`.
 
 ```bash
 # PASS 1 — discover → gap gate → DM-reuse scan → DM → workbook → layout → parity plan
@@ -154,12 +155,12 @@ ruby scripts/migrate-tableau.rb --workbook "<name>" \
 > `<connection dbname=/schema=>` attributes — and **hard-stops asking** when
 > none resolve, never guessing: a fabricated pair 404s every table at DM POST.
 
-> **🚧 Expect PASS 1 to WAIT once (Phase 1d dashboard-read — your job):** fetch
-> + Read the dashboard PNG, write `<workdir>/png-read.json` with
-> `"verified": true`; the run picks it up and **continues in-process**.
-> Wait/deadline/stale mechanics (exit 18): `refs/orchestration.md`
-> §Single-invocation flow; schema: `refs/phase-1-discover.md`. PNG genuinely
-> unavailable → `--skip-dashboard-read "<reason>"`.
+> **🚧 PASS 1 WAITS for you twice:** (1d) Read the dashboard PNG, write
+> `<workdir>/png-read.json` `"verified": true` — the run continues (exit 18 on
+> deadline; schema `refs/phase-1-discover.md`; no PNG →
+> `--skip-dashboard-read "<r>"`). (tail, W2.6) discharge the visual verdict
+> per the banner → a cold run chains `--finalize` in-process
+> (`SIGMA_VISUAL_VERDICT_TIMEOUT_S`, 0=skip).
 
 > **Converter backend — LOCAL by default (`converter/tableau.mjs`, no
 > network); the hosted converter uploads the `.twb` and runs ONLY with
@@ -180,11 +181,10 @@ Chains the scripted spine (discover → gap scan → columns → DM reuse/build/
 → workbook → layout → parity → cleanup + final gate), STOPS with exact
 instructions wherever agent judgment is genuinely required, and prints a
 `PHASE TIMINGS` line at every terminal exit; Phase 1 is interleaved. **Exit
-codes (10 / 11 / 12 / 16 / 4 / 3 / 14 / 0 — plus 18 wait-gate deadline, 19
-scope mismatch — DM-reuse-first, `--enhance`, the consolidated 10/11
-pre-build checkpoint, chained finalize, still-manual list): `refs/gates.md` +
-`refs/orchestration.md` §Single-invocation flow.** Most-misread code: **12 =
-pass 1 done, NOT done-done — run `--finalize`**.
+codes (10/11/12/16/4/3/14/0 + 18 wait deadline, 19 scope mismatch, 26
+`--wait` budget w/ run alive): `refs/gates.md` + `refs/orchestration.md`
+§Single-invocation flow.** Most-misread code: **12 = pass 1 done, NOT
+done-done — run `--finalize`**.
 
 ## Scripts
 
