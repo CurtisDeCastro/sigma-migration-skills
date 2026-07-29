@@ -152,6 +152,11 @@ OptionParser.new do |o|
   # builds a new DM.
   o.on('--reuse-dm ID')        { |v| opts[:reuse_dm] = v }
   o.on('--no-reuse')           {     opts[:no_reuse] = true }
+  # Phase 6b (runtime control-flip proof) is DEFAULT-ON: after posting, each
+  # control is flipped live (probe-controls.rb) to prove it actually filters its
+  # targets — a control that lints clean but is INERT fails the migration.
+  # --skip-control-flip waives it (name the reason in your migration report).
+  o.on('--skip-control-flip [REASON]', 'waive Phase 6b (runtime control-flip proof); the reason MUST be named in your migration report') { |v| opts[:skip_control_flip] = v || true }
 end.parse!
 
 # #347: publish the target tenant into the env so EVERY Power BI child process
@@ -1357,6 +1362,20 @@ wb_rb = JSON.parse(File.read(wb_readback))
 wb_id = wb_rb['workbookId']
 puts "   workbookId = #{wb_id}"
 
+# Gate-state stamp (after a live post): control_flip_required=true auto-enables
+# the shared assert-phase6-ran.rb gate 7b on a STANDALONE run too, matching the
+# tableau reference — so neither this one-shot path (Phase 6b below) nor a later
+# standalone gate can silently skip the runtime control-flip proof.
+begin
+  _msf = File.join(WORK, 'migrate-state.json')
+  _st  = (JSON.parse(File.read(_msf)) rescue {})
+  _st  = {} unless _st.is_a?(Hash)
+  _st.merge!('workbook_id' => wb_id, 'control_flip_required' => true)
+  File.write(_msf, JSON.pretty_generate(_st))
+rescue StandardError
+  nil # sentinel bookkeeping never fails the run
+end
+
 # ---------------------------------------------------------------------------
 # MIGRATION COVERAGE REPORT — what carried over, and what didn't (bead beads-sigma-cov).
 # The build warns loudly at each drop site, but on a complex report those warnings
@@ -1614,6 +1633,109 @@ else
 end
 
 # ---------------------------------------------------------------------------
+# Phase 6b — runtime control-flip proof (DEFAULT-ON). Gate 7 (control_lint.rb,
+# run at post-and-readback) proves control WIRING against the live spec, but a
+# builder-level listen->column mis-map yields a spec that lints clean yet does
+# NOTHING when the user changes the control. The only independent proof is
+# runtime: flip each control via the REST export API and confirm its targets'
+# output actually changes (scripts/probe-controls.rb). Mirrors the shared
+# assert-phase6-ran.rb gate 7b so the one-shot migrate enforces it too; the
+# migrate-state.json control_flip_required stamp (above) enforces it on a
+# standalone gate run as well. Escape: --skip-control-flip "<reason>".
+# ---------------------------------------------------------------------------
+require 'rbconfig'
+flip_line = nil
+_flip_libs = true
+begin
+  require_relative 'lib/pbi_flip'
+  require_relative 'lib/control_lint'
+  require_relative 'lib/flip_gate'
+rescue LoadError => e
+  _flip_libs = false
+  warn "   [WARN] Phase 6b: #{e.message} — re-vendor scripts/lib (SHA-1 discipline); control flip UNVERIFIED"
+end
+if opts[:skip_control_flip]
+  reason = opts[:skip_control_flip] == true ? '(no reason given)' : opts[:skip_control_flip]
+  flip_line = "WAIVED — #{reason}"
+  puts "   [WAIVED] Phase 6b: runtime control-flip proof — #{reason} (name it in your migration report)"
+elsif !_flip_libs
+  flip_line = 'UNVERIFIED — flip libs not loadable'
+else
+  # Count controls on the live posted workbook (same source of truth as gate 7b).
+  n_controls = nil
+  begin
+    _spec = Sigma.request(:get, "/v2/workbooks/#{wb_id}/spec")
+    if _spec.is_a?(String)
+      begin
+        _spec = JSON.parse(_spec)
+      rescue JSON::ParserError
+        require 'yaml'; require 'date'
+        _spec = (YAML.safe_load(_spec, permitted_classes: [Date, Time]) rescue nil)
+      end
+    end
+    n_controls = ControlLint.controls_report(_spec).length if _spec.is_a?(Hash)
+  rescue StandardError => e
+    warn "   [WARN] Phase 6b: could not fetch/parse the live spec to count controls (#{e.message})"
+  end
+
+  probe_out = File.join(WORK, 'probe-controls')
+  probe     = File.join(HERE, 'probe-controls.rb')
+  has_creds = !ENV['SIGMA_BASE_URL'].to_s.empty? && !ENV['SIGMA_API_TOKEN'].to_s.empty?
+
+  decision, info =
+    if n_controls == 0
+      [:none, nil]
+    elsif has_creds && File.exist?(probe)
+      system(RbConfig.ruby, probe, '--workbook-id', wb_id, '--out', probe_out)
+      _rc  = $?.exitstatus
+      _res = (JSON.parse(File.read(File.join(probe_out, 'probe-results.json'))) rescue nil)
+      FlipGate.decide(_rc, _res)
+    elsif has_creds
+      warn '   [WARN] Phase 6b: scripts/probe-controls.rb not vendored — control flip UNVERIFIED'
+      [:offline, nil]
+    else
+      # Offline: accept RECORDED evidence, else UNVERIFIED (never hard-fail a run
+      # that never reached the live API).
+      _res = (JSON.parse(File.read(File.join(probe_out, 'probe-results.json'))) rescue nil)
+      PbiFlip.recorded(_res)
+    end
+
+  status, flip_line, exit_code = PbiFlip.outcome(decision, info)
+  case status
+  when :ok, :none
+    extra = (info && Array(info[:skips]).any?) ? " (#{Array(info[:skips]).length} un-probeable type(s) skipped)" : ''
+    puts "   [OK] Phase 6b: #{flip_line}#{extra}"
+  when :advisory
+    warn "   [WARN] Phase 6b: #{flip_line} — date-range/slider/unlabeled control(s) need an explicit flip value; runtime wiring UNVERIFIED"
+    begin
+      FileUtils.mkdir_p(probe_out)
+      File.write(File.join(probe_out, 'control-flip-unverified.json'),
+                 JSON.pretty_generate('workbookId' => wb_id,
+                                      'unprobed' => Array(info && info[:skips]).map { |c, n| { 'control' => c, 'note' => n } }))
+    rescue StandardError
+      nil
+    end
+  when :offline
+    puts "   [SKIP] Phase 6b: #{flip_line}"
+  when :fail
+    puts "   [FAIL] Phase 6b: #{Array(info[:fails]).length} control(s) wired but INERT on workbook #{wb_id}:"
+    Array(info[:fails]).each { |cid, note| puts "     - #{cid}: #{note}" }
+    puts '     The control passed the static lint (gate 7) but does not filter its targets — a'
+    puts '     builder listen->column mis-mapping. Re-check control targeting in the build, or'
+    puts '     waive with --skip-control-flip "<reason>". Reproduce:'
+    puts "       ruby scripts/probe-controls.rb --workbook-id #{wb_id}"
+    exit exit_code
+  when :error
+    puts "   [FAIL] Phase 6b: probe-controls.rb could not verify the wiring on workbook #{wb_id}."
+    puts '     An enforced gate that could not run must not pass silently. Re-run once the export'
+    puts '     API is reachable, or waive with --skip-control-flip "<reason>".'
+    exit exit_code
+  else
+    puts "   [WARN] Phase 6b: #{flip_line}"
+  end
+end
+
+# ---------------------------------------------------------------------------
 # Phase E (OPT-IN) — Enhance. Runs ONLY with --enhance AND a parity PASS:
 # enhancements clone a PARITY-VERIFIED workbook, never an unproven one.
 # Clone-first / scan-then-propose / accept-only / parity-unchanged-gated —
@@ -1673,6 +1795,7 @@ if fresh_ok
        "#{freshness['credsSuspect'] ? ' — REFRESH FAILING (creds)' : ''}"
 end
 puts "ENHANCE     : #{enhance_line}" if enhance_line
+puts "CONTROL-FLIP: #{flip_line}" if flip_line
 # Empty-workbook guard + completion sentinel. parity_ok is VACUOUSLY true when no
 # chart elements were built (0 cols, 0 divergent) — an empty/placeholder workbook
 # would otherwise exit 0 and look "done" (the exact PBI failure: pages, no
