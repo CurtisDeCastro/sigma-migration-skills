@@ -130,6 +130,7 @@ OptionParser.new do |o|
   o.on('--answers JSON')      { |v| opts[:answers]  = v }
   o.on('--yes')               {     opts[:yes]      = true }
   o.on('--from-discovery DIR'){ |v| opts[:from]     = File.expand_path(v) }
+  o.on('--prj DIR')           { |v| opts[:prj]      = File.expand_path(v) }
   o.on('--reuse-dm ID')       { |v| opts[:reuse_dm] = v }
   o.on('--no-reuse')          {     opts[:no_reuse] = true }
   o.on('--dry-run')           {     opts[:dry_run]  = true }
@@ -138,6 +139,25 @@ OptionParser.new do |o|
   # exit 0 — no creds/args needed. Used by the converter-default regression test.
   o.on('--print-converter')   {     opts[:print_converter] = true }
 end.parse!
+
+# QlikView (.qvw) has no Cloud/REST API. A "-prj" project folder is the migration
+# surface: qlik-prj-discover.py parses it into the SAME discovery artifacts the Qlik
+# Sense pipeline consumes (script.qvs, converter-input.json, charts.json, measures.json,
+# layout.json), so the rest of this script (convert -> data model -> workbook) runs
+# UNCHANGED via the --from-discovery path. There is no live engine, so the Qlik-side
+# value snapshot / parity leg simply stays empty (warehouse-only parity downstream).
+if opts[:prj]
+  abort "FATAL: --prj dir not found: #{opts[:prj]}" unless File.directory?(opts[:prj])
+  prj_slug = File.basename(opts[:prj]).sub(/-prj\z/i, '').gsub(/[^A-Za-z0-9_-]/, '-')
+  disc_dir = opts[:out] || File.expand_path("~/qlik-migration/#{prj_slug}-prj")
+  FileUtils.mkdir_p(disc_dir)
+  warn "QlikView -prj → discovery artifacts in #{disc_dir}"
+  ok = system(*PyResolve.argv, File.join(HERE, 'qlik-prj-discover.py'),
+              '--prj', opts[:prj], '--out', disc_dir)
+  abort 'FATAL: qlik-prj-discover.py failed' unless ok
+  opts[:from] = disc_dir           # hand off to the standard --from-discovery pipeline
+  opts[:app]  = nil
+end
 
 # Converter resolution (issue #227). The pinned VENDORED bundle is the DEFAULT so a
 # developer machine and a customer machine produce identical output for the same
