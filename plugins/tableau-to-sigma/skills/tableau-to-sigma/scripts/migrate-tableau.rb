@@ -264,6 +264,12 @@ OptionParser.new do |o|
   o.on('--workdir DIR', 'alias of --out') { |v| opts[:out] = File.expand_path(v) }
   o.on('--answers JSON')     { |v| opts[:answers] = v }
   o.on('--yes')              {     opts[:yes]     = true }
+  # W2.5 — foreground half of the wave-2 poll/wait contract. Optparse consumes
+  # both --wait=900 and a separated bare integer; a bare --wait takes 1500s.
+  o.on('--wait [SECONDS]', Integer, 'W2.5: drive the FULL run as ONE tool call — re-spawns this command in the ' \
+       'background (stdout+stderr → <WORK>/migrate-full.log), waits up to SECONDS (default 1500), then exits with ' \
+       'the INNER exit code verbatim; exit 26 = budget exhausted, run STILL ALIVE (pid + log named — never a failure). ' \
+       'Pair with a tool timeout ≥ 25 min.') { |v| opts[:wait_mode] = true; opts[:wait_budget] = v }
   o.on('--quiet', 'machine stdout for background-log poll turns: one JSON event line per phase ' \
                   'entry/completion + WARN/FATAL/error lines + a terminal state JSON; full ' \
                   'human output goes to <WORK>/migrate-full.log. Default output unchanged.') { opts[:quiet] = true }
@@ -467,6 +473,72 @@ at_exit do
   code = $!.is_a?(SystemExit) ? $!.status : ($! ? 1 : 0)
   quiet_event('exit', 'code' => code, 'workdir' => WORK, 'full_log' => QUIET_FULL_LOG)
 end if QUIET
+
+# ── W2.5 — --wait[=SECONDS]: the one-tool-call driving contract ──────────────
+# Foreground half of the wave-2 poll/wait contract. The wrapper re-spawns this
+# exact command (minus --wait) in the BACKGROUND, stdout+stderr appended to
+# <WORK>/migrate-full.log, and waits up to the budget (default 1500s):
+#   child exits within budget → the wrapper exits with the INNER exit code,
+#     VERBATIM — 0/3/4/10/11/12/16/18/… keep their documented meanings;
+#   budget exhausted → exit 26 = "wait budget exhausted, run STILL ALIVE":
+#     pid + log + state path are named, the child keeps running, nothing is
+#     killed and no failure is invented. Re-attach with another --wait run of
+#     the same command, or poll per the G2 cadence (a migrate-state.json
+#     phase transition, else every ≥90s — never tighter).
+# Wait-mode stdout is ≤5 lines (plus quiet_event JSON under --quiet): the
+# point is ONE cheap tool call instead of the ~8-12 background poll turns.
+# Exit 26 is free in this script's exit space (the gate's own exit 26 lives in
+# assert-phase6-ran's process; the finalize spine re-maps it to 0/3).
+if opts[:wait_mode]
+  _wb = (opts[:wait_budget] || 1500).to_i
+  _wb = 1500 unless _wb.positive?
+  _child_argv = []
+  _i = 0
+  while _i < ORIGINAL_ARGV.length
+    _a = ORIGINAL_ARGV[_i]
+    if _a == '--wait'
+      _i += 1
+      _i += 1 if ORIGINAL_ARGV[_i].to_s =~ /\A\d+\z/ # optparse consumed the separated value
+      next
+    elsif _a.start_with?('--wait=')
+      _i += 1
+      next
+    end
+    _child_argv << _a
+    _i += 1
+  end
+  _wait_state = File.join(WORK, 'migrate-state.json')
+  _wait_pid = Process.spawn(RbConfig.ruby, __FILE__, *_child_argv, { %i[out err] => [QUIET_FULL_LOG, 'a'] })
+  puts "── --wait: run driving in background (pid #{_wait_pid}; budget #{_wb}s) ──"
+  puts "   log:   #{QUIET_FULL_LOG}"
+  puts "   state: #{_wait_state} (G2 poll cadence if you detach: phase transition, else ≥90s)"
+  quiet_event('wait', 'pid' => _wait_pid, 'log' => QUIET_FULL_LOG, 'state' => _wait_state, 'budget_s' => _wb)
+  _wait_deadline = Time.now + _wb
+  _wait_st = nil
+  loop do
+    _done = begin
+      Process.waitpid2(_wait_pid, Process::WNOHANG)
+    rescue Errno::ECHILD
+      nil
+    end
+    if _done
+      _wait_st = _done[1]
+      break
+    end
+    break if Time.now >= _wait_deadline
+    sleep 2
+  end
+  if _wait_st
+    _code = _wait_st.exitstatus || 1 # signal-killed child → generic failure, still verbatim-shaped
+    puts "   inner exit #{_code} (passed through verbatim)"
+    quiet_event('wait-exit', 'code' => _code)
+    exit(_code)
+  end
+  puts "⚠ WAIT BUDGET EXHAUSTED (#{_wb}s) — the run is STILL ALIVE (pid #{_wait_pid}); exit 26 is NOT a failure."
+  puts "   re-attach: re-run this exact command (same --wait), or tail #{QUIET_FULL_LOG}"
+  quiet_event('wait-timeout', 'code' => 26, 'pid' => _wait_pid, 'log' => QUIET_FULL_LOG)
+  exit 26
+end
 
 # ── E9.6 — thread mission.json STATED scope into the orchestrator ────────────
 # The mission intake (SKILL.md Step −1 / MIGRATION_REQUEST.md) records the
@@ -5348,7 +5420,66 @@ def finalize_chain_predicate(work, fast: false)
          "visual verdict #{fast ? 'waived (--fast)' : 'recorded'}; RCF ledger #{rcf_staged ? 'resolved' : 'unstaged'}"]
 end
 
+# W2.6: classify a failed chain predicate — :wait when the ONLY blockers are
+# agent-DISCHARGEABLE obligations at the pass-1 tail (record the visual
+# verdict; write/resolve the staged RCF ledger), :terminal for everything
+# structural (pivot grids, agent-mediated markers, missing actuals — nothing
+# an agent can discharge in minutes) AND for a recorded 'not-executable'
+# verdict, which is an ANSWER (the agent cannot do vision), not a pending one.
+WAITABLE_CHAIN_RES = [/\Ano recorded visual verdict/,
+                      /\ARCF loop staged \(rcf_passes > 0\) but no fidelity-ledger\.json/,
+                      /unresolved spec-fixable\/data RCF delta/,
+                      /\Aunreadable fidelity-ledger\.json/].freeze
+def chain_wait_class(chain_ok, why)
+  return :chain if chain_ok
+  WAITABLE_CHAIN_RES.any? { |re| re =~ why.to_s } ? :wait : :terminal
+end
+
 _chain_ok, _chain_why = finalize_chain_predicate(WORK, fast: !!opts[:fast])
+# ── W2.6 — 🚧 pass-1-tail visual-verdict WAIT-GATE (mirror of Phase 1d) ──────
+# On a COLD run the chain predicate is structurally unsatisfiable here: the
+# visual verdict records ONTO parity-final.json, which only the finalize leg
+# writes — so wave-1's in-process chain could never fire on the very cold runs
+# it was justified by (wave-1 review R4; both reviewers converged on this
+# gate). While the obligations are merely UNDISCHARGED (not terminal), banner
+# + bounded poll — SIGMA_VISUAL_VERDICT_TIMEOUT_S, default 480s, 0 = don't
+# wait (named on the banner's first line) — re-evaluating the predicate; on
+# satisfied → chain below, one invocation end-to-end. Deadline passes → the
+# unchanged exit-12 two-invocation contract (fail-open, never invents a
+# failure). SIGMA_NO_CHAIN_FINALIZE=1 disables the wait AND the chain.
+if ENV['SIGMA_NO_CHAIN_FINALIZE'].to_s.empty? && chain_wait_class(_chain_ok, _chain_why) == :wait
+  _vv_wait = (ENV['SIGMA_VISUAL_VERDICT_TIMEOUT_S'] || '480').to_i
+  if _vv_wait.positive?
+    puts
+    puts "── 🚧 PASS-1-TAIL WAIT (W2.6) · visual verdict → in-process --finalize · SIGMA_VISUAL_VERDICT_TIMEOUT_S=#{_vv_wait}s (0 = don't wait; exit 12 immediately) ──"
+    line "chain blocked only by agent-dischargeable obligation(s): #{_chain_why}"
+    line 'Discharge them NOW — the 6f render pairs are already staged:'
+    line "  1. write the parity result:  ruby scripts/phase6-parity.rb --tableau #{WORK} --finalize --actuals #{File.join(WORK, 'parity-actuals.json')}"
+    line "  2. READ each pair under #{File.join(WORK, 'visual-qa')}/ (<dash>.source.png vs <dash>.sigma.png); run the staged RCF loop (fidelity-loop.rb) to resolution"
+    line '  3. record the verdict:       ruby scripts/record-visual-check.rb --workdir ' \
+         "#{WORK} --agent-vision true --verdict <pass|divergent> [--blind-grade <blind-grade.json>]"
+    line 'On the recorded verdict this run chains --finalize IN-PROCESS (single invocation, cold).'
+    quiet_event('wait-visual-verdict', 'timeout_s' => _vv_wait, 'why' => _chain_why)
+    _vv_deadline = Time.now + _vv_wait
+    loop do
+      sleep 5
+      _chain_ok, _chain_why = finalize_chain_predicate(WORK, fast: !!opts[:fast])
+      break if _chain_ok
+      if chain_wait_class(_chain_ok, _chain_why) == :terminal
+        line "visual-verdict wait ended: #{_chain_why} — exit 12 (run --finalize separately)"
+        break
+      end
+      if Time.now >= _vv_deadline
+        line "visual-verdict wait deadline passed (#{_vv_wait}s; still: #{_chain_why}) — " \
+             'fail-open to the exit-12 two-invocation contract'
+        quiet_event('wait-visual-verdict-timeout', 'timeout_s' => _vv_wait)
+        break
+      end
+    end
+  else
+    line 'SIGMA_VISUAL_VERDICT_TIMEOUT_S=0 — not waiting for the visual verdict; exit-12 two-invocation contract'
+  end
+end
 if _chain_ok && ENV['SIGMA_NO_CHAIN_FINALIZE'].to_s.empty?
   puts
   puts '── SINGLE-INVOCATION · chaining --finalize in-process ──'
