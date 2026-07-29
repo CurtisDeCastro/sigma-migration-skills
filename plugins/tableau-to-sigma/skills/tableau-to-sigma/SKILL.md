@@ -135,7 +135,7 @@ never a block. Full flags, precedence, ranking, triage:
 > tool call; tool timeout ≥ 25 min) — inner exit code passes through verbatim;
 > **exit 26** = budget up, run STILL ALIVE (pid+log printed; re-run to
 > re-attach — never a failure). Detached: poll only on a `migrate-state.json`
-> transition, else ≥90s. Bare 2-min Bash kills runs (143); check `$?`.
+> transition, else ≥90s. Bare 2-min Bash kills runs (exit 143); check `$?`.
 
 ```bash
 # PASS 1 — discover → gap gate → DM-reuse scan → DM → workbook → layout → parity plan
