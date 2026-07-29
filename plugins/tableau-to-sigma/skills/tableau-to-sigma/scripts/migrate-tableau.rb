@@ -345,6 +345,12 @@ OptionParser.new do |o|
   # oracles only (rcf 5→1, W2.4 checkpoint auto-defaults, lane B's gate scale).
   o.on('--tier T', %w[auto S M full], "tier ratchet (W2.1): 'auto' (default) detects from 0c artifacts (fail-closed to " \
        "'full' on unreadable inputs); S|M|full override the predicate — the override is recorded in decisions.jsonl.") { |v| opts[:tier] = v }
+  # W2.2 — factory default = ONE pass + measured parity + the punch list
+  # (PUNCHLIST.md rendered from the shipped degradation ledger at every
+  # finalize terminal). --certified opts back into loop-to-green.
+  o.on('--certified', 'W2.2: certified loop-to-green — RCF budget restored to 5 (even on Tier-S) and the verifier ' \
+       'countersignature contract applies (refs/orchestration.md). Without it, factory mode ships one pass + ' \
+       'measured parity + <WORK>/PUNCHLIST.md.') { opts[:certified] = true }
   # Gate 7b (PR-13) — the runtime control flip test is DEFAULT-ON at --finalize
   # (pass 1 also stamps control_flip_required into migrate-state.json so even a
   # standalone gate run enforces it). The census (gate 7c) proves the controls
@@ -1563,6 +1569,26 @@ if opts[:finalize]
   end
 
   pf = (JSON.parse(File.read(File.join(WORK, 'parity-final.json'))) rescue {})
+  # ── W2.2 — factory punch list at EVERY finalize terminal ───────────────────
+  # The gate battery above just derived + wrote degradation-ledger.json (its
+  # own seam); render it into PUNCHLIST.md/punchlist.json — one re-entry
+  # command per ledger line — whatever the verdict. GREEN ⇒ empty list
+  # (shipped doctrine); a run that shipped LESS than the source now hands the
+  # operator the exact converging commands instead of a prose apology.
+  _pl_note = nil
+  begin
+    _, _plst = run!(['ruby', File.join(HERE, 'build-punchlist.rb'), '--workdir', WORK], allow_fail: true)
+    _pl = (JSON.parse(File.read(File.join(WORK, 'punchlist.json'))) rescue nil)
+    if _plst.success? && _pl.is_a?(Hash)
+      _pl_note = "#{Array(_pl['items']).size} item(s), ledger verdict #{_pl['verdict']} → #{File.join(WORK, 'PUNCHLIST.md')}"
+      Offramp.log(WORK, kind: 'punchlist-emitted', detail: _pl_note) if Array(_pl['items']).any?
+      quiet_event('punchlist', 'items' => Array(_pl['items']).size, 'verdict' => _pl['verdict'])
+    elsif !_plst.success?
+      line "WARN: punch-list render failed (exit #{_plst.exitstatus}) — see build-punchlist.rb output above"
+    end
+  rescue StandardError
+    nil
+  end
   puts
   puts '================ RESULT ================'
   puts "dataModelId : #{state['data_model_id']}"
@@ -1578,6 +1604,7 @@ if opts[:finalize]
   end
   puts "GATES       : phase6=#{p6st.success? ? 'PASS' : 'FAIL'} cleanup=#{clst.success? ? 'PASS' : 'FAIL'} assert-phase6-ran=#{gst.success? ? 'PASS' : "FAIL(#{gst.exitstatus})"} ds-filters=#{dsfst.success? ? 'PASS' : "FAIL(#{dsfst.exitstatus})"}"
   puts "ENHANCE     : #{enhance_line}" if enhance_line
+  puts "PUNCH LIST  : #{_pl_note}" if _pl_note
   puts "STATUS      : #{all_green ? 'GREEN' : 'NOT GREEN'}"
   puts '======================================='
   quiet_event('result', 'stage' => 'finalize', 'status' => all_green ? 'GREEN' : 'NOT GREEN',
@@ -5173,7 +5200,9 @@ state = { 'workbook_id' => wb_id, 'data_model_id' => dm_id,
           'tier_basis' => ($tier_basis || _prior_state['tier_basis']),
           # W2.1: Tier-S shrinks the RCF budget 5→1 (site 1 of 2; `0` is a
           # DIFFERENT contract that waives gate 8d — never the tier default).
-          'rcf_passes' => (opts[:rcf_passes] || ($tier == 'S' ? 1 : 5)),
+          # W2.2: --certified restores the loop-to-green budget of 5.
+          'certified' => (opts[:certified] ? true : nil),
+          'rcf_passes' => (opts[:rcf_passes] || (opts[:certified] ? 5 : ($tier == 'S' ? 1 : 5))),
           # PR-13: gate 7b (runtime control flip test) is DEFAULT-ON for the
           # tableau path — this stamp auto-enables it even on a STANDALONE
           # assert-phase6-ran run (the 8d/rcf_passes pattern from #439).
@@ -5187,7 +5216,7 @@ File.write(File.join(WORK, 'migrate-state.json'), JSON.pretty_generate(state.rej
 # BEFORE --finalize (which enforces the ledger via gate 8d). Skipped, with a
 # loud WARN, when --rcf-passes 0.
 # ---------------------------------------------------------------------------
-rcf_passes = (opts[:rcf_passes] || ($tier == 'S' ? 1 : 5)) # W2.1: Tier-S 5→1 (site 2 of 2)
+rcf_passes = (opts[:rcf_passes] || (opts[:certified] ? 5 : ($tier == 'S' ? 1 : 5))) # W2.1: Tier-S 5→1 (site 2 of 2); W2.2: --certified restores 5
 if rcf_passes.to_i <= 0
   line 'WARN: Phase 5g RCF fidelity loop DISABLED (--rcf-passes 0). The workbook will be gated on'
   line '      structure + data + a single visual verdict only — composition drift (palette, chart'

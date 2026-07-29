@@ -198,8 +198,8 @@ end
 
 puts 'T6 — wiring pins (string-level: rcf flip sites, 0c write, X1 riders)'
 src = File.read(File.join(__dir__, 'migrate-tableau.rb'), encoding: 'UTF-8')
-check(src.scan(/opts\[:rcf_passes\] \|\| \(\$tier == 'S' \? 1 : 5\)/).size == 2,
-      'BOTH rcf_passes default sites carry the Tier-S 5→1 flip (0 stays the 8d-waiver contract)', fails)
+check(src.scan(/opts\[:rcf_passes\] \|\| \(opts\[:certified\] \? 5 : \(\$tier == 'S' \? 1 : 5\)\)/).size == 2,
+      'BOTH rcf_passes default sites carry the Tier-S 5→1 flip with the --certified restore (0 stays the 8d-waiver contract)', fails)
 check(src.include?("_ms.merge('tier' => $tier, 'tier_basis' => $tier_basis)"),
       '0c persists tier/tier_basis into migrate-state.json (merge, not clobber)', fails)
 check(src.include?("puts \"TIER        : \#{$tier}"), 'RESULT block stamps the tier', fails)
