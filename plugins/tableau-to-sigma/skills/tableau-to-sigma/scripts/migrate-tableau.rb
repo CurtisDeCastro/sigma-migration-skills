@@ -333,6 +333,12 @@ OptionParser.new do |o|
   # waiver (budget-counted) instead of requiring the ledger. Batch/headless
   # callers pass 2.
   o.on('--rcf-passes N', Integer, 'Phase 5g render-compare-fix loop budget (default 5; 0 disables it with a loud WARN and records the named gate-8d waiver — budget-counted, never silent).') { |v| opts[:rcf_passes] = v }
+  # W2.1 — tier ratchet. 'auto' (default) = the mechanical Tier.detect predicate
+  # over on-disk 0c artifacts; S|M|full override the predicate (a ledgered
+  # decision). Tier never removes a gate — Tier-S shrinks budgets/duplicate
+  # oracles only (rcf 5→1, W2.4 checkpoint auto-defaults, lane B's gate scale).
+  o.on('--tier T', %w[auto S M full], "tier ratchet (W2.1): 'auto' (default) detects from 0c artifacts (fail-closed to " \
+       "'full' on unreadable inputs); S|M|full override the predicate — the override is recorded in decisions.jsonl.") { |v| opts[:tier] = v }
   # Gate 7b (PR-13) — the runtime control flip test is DEFAULT-ON at --finalize
   # (pass 1 also stamps control_flip_required into migrate-state.json so even a
   # standalone gate run enforces it). The census (gate 7c) proves the controls
@@ -3230,6 +3236,48 @@ record_cost_ack = lambda do
                         'cost_estimate_provenance'   => ack_prov)
   line "scope/cost sign-off recorded in run-state (cost_estimate_acknowledged: true, provenance: #{ack_prov})"
 end
+# ---------------------------------------------------------------------------
+# W2.1 — TIER RATCHET (orchestrator half). Resolve the run's tier HERE, at the
+# 0c checkpoint: the first point where every predicate input is on disk
+# (discovery metadata + dashboard layout + the gap scan), before the decisions
+# checkpoint and any DM/workbook POST. Detection is Tier.detect — a PURE
+# function over artifacts, never an agent-supplied count (anti-gaming). An
+# operator --tier S|M|full overrides the predicate and is itself a ledgered
+# decision; --tier auto (default) takes the predicate; fail-closed → 'full'.
+# The resolved tier + basis are written to migrate-state.json ('tier'/
+# 'tier_basis' — lane B's gate reads them; strings pinned in
+# shared/lib/testdata/wave2-tier-state.json), logged to the Offramp trail
+# (kind 'tier-assigned'), and stamped into the RESULT block. Tier never
+# removes a gate — Tier-S shrinks budgets and duplicate oracles only
+# (rcf_passes default 5→1 at both sites, W2.4 checkpoint auto-defaults,
+# lane B's gate-side waiver-budget scale + gate-18 GT-trio skip).
+# ---------------------------------------------------------------------------
+require_relative 'lib/tier'
+_tier_det = Tier.detect(WORK)
+if opts[:tier] && opts[:tier] != 'auto'
+  $tier = opts[:tier]
+  $tier_basis = Tier::BASIS_OVERRIDE
+  # The override is a ledgered decision (existing DECIDED_BY tokens only —
+  # the gap-scout acceptance provenance convention).
+  Offramp.decision(WORK, kind: 'tier-override',
+                   question: "--tier #{opts[:tier]} (auto-predicate said #{_tier_det['tier']}#{_tier_det['reasons'].any? ? ": #{_tier_det['reasons'].join('; ')}" : ''})",
+                   answer: $tier,
+                   decided_by: opts[:yes] || opts[:force] ? 'unattended-flag' : 'relayed')
+else
+  $tier = _tier_det['tier']
+  $tier_basis = _tier_det['tier_basis']
+end
+line "tier: #{$tier} (#{$tier_basis}#{_tier_det['reasons'].any? ? " — #{_tier_det['reasons'].join('; ')}" : ''})"
+Offramp.log(WORK, kind: 'tier-assigned',
+            detail: "tier=#{$tier} basis=#{$tier_basis} features=#{_tier_det['features'].to_json}")
+quiet_event('tier', 'tier' => $tier, 'basis' => $tier_basis)
+begin # persist NOW (pass 1's full state write at the Phase-6 seam preserves it)
+  _ms_p = File.join(WORK, 'migrate-state.json')
+  _ms = (JSON.parse(File.read(_ms_p)) rescue {})
+  File.write(_ms_p, JSON.pretty_generate(_ms.merge('tier' => $tier, 'tier_basis' => $tier_basis)))
+rescue StandardError
+  nil
+end
 mark('phase0c-cost')
 
 # ---------------------------------------------------------------------------
@@ -3449,7 +3497,25 @@ _prior_oq = File.exist?(oq_path) ? (JSON.parse(File.read(oq_path)) rescue nil) :
 consent_expected = (answers && answers.key?('telemetry_consent')) ||
                    (_prior_oq.is_a?(Hash) && _prior_oq['status'].to_s != 'resolved' &&
                     Array(_prior_oq['open_questions']).any? { |q| q.is_a?(Hash) && q['id'] == 'telemetry_consent' })
-if (gap_stop || questions.any?) && !opts[:yes] && answers.nil?
+# W2.4 — Tier-S checkpoint AUTO-DEFAULTS. A clean Tier-S run (predicate-clean:
+# no gap stop) whose open questions ALL carry safe defaults (severity 'review',
+# non-nil default — the defaults the checkpoint itself would apply under --yes)
+# pre-derives the answers from the artifacts, prints the one-line notice, and
+# PROCEEDS — no operator stop, no re-entry. Every auto-answer is ledgered to
+# decisions.jsonl under the greppable kind 'unattended-tier-default'; its
+# provenance is decided_by 'unattended-flag' (closed vocabulary; nobody asked).
+# Any unattributable question — severity 'required' or no default — still
+# stops exactly as today (the conservative direction: a stop that could have
+# been skipped costs one turn; a skipped stop that shouldn't have been is a
+# correctness leak). Tier-M/full runs are untouched.
+_tier_autodefault = $tier == 'S' && !gap_stop && questions.any? &&
+                    !opts[:yes] && answers.nil? &&
+                    questions.all? { |q| q['severity'] != 'required' && !q['default'].nil? }
+if _tier_autodefault
+  line "TIER-S auto-defaults: #{questions.size} checkpoint question(s) auto-answered with their safe defaults " \
+       "(recorded as 'unattended-tier-default' in decisions.jsonl) — proceeding without the operator stop."
+end
+if (gap_stop || questions.any?) && !opts[:yes] && answers.nil? && !_tier_autodefault
   questions << consent_q
   gap_items = gap_stop ? gap_stop['items'] : []
   block = {
@@ -3556,7 +3622,7 @@ end
 
 if questions.any?
   puts
-  line "decisions auto-resolved (#{opts[:yes] ? '--yes: defaults' : '--answers supplied'}):"
+  line "decisions auto-resolved (#{opts[:yes] ? '--yes: defaults' : (answers ? '--answers supplied' : 'TIER-S auto-defaults')}):"
   questions.each do |q|
     tag = q['calc'] || q['viz']
     # E5.10 substrate: targeted "<id>:<slug>" answers take precedence over the
@@ -3569,8 +3635,10 @@ if questions.any?
     # E3.6 (vocab half): every resolved checkpoint question is ledgered.
     # decided_by is honest provenance — an --answers value is agent-RELAYED
     # operator text, never first-hand consent; --yes defaults are unattended.
-    Offramp.decision(WORK, kind: q['id'],
-                     question: (q['detail'] || q['id']).to_s[0, 200],
+    # W2.4: a Tier-S auto-default is ledgered under the greppable kind
+    # 'unattended-tier-default' (question text still carries the class id).
+    Offramp.decision(WORK, kind: _tier_autodefault ? 'unattended-tier-default' : q['id'],
+                     question: "#{_tier_autodefault ? "#{q['id']}: " : ''}#{(q['detail'] || q['id']).to_s[0, 200]}",
                      answer: chosen.to_s,
                      decided_by: answers ? 'relayed' : 'unattended-flag')
     if chosen.nil? && q['severity'] == 'required'
@@ -4950,17 +5018,25 @@ end
 # Persist resume state for --finalize (pass 2) BEFORE stopping. run_id scopes
 # the completion sentinels to THIS run; route records how the workdir was driven
 # (the route-persistence check refuses a re-entry on the other route).
+_prior_state = (JSON.parse(File.read(File.join(WORK, 'migrate-state.json'))) rescue {})
 state = { 'workbook_id' => wb_id, 'data_model_id' => dm_id,
           'extract_mode' => !!has_extracts, 'workbook_name' => display_wb_name,
           'reused_dm' => !!reuse_dm_id, 'pass1_at' => Time.now.utc.iso8601,
           'enhance_requested' => !!opts[:enhance],
           'run_id' => RUN_ID, 'route' => CURRENT_ROUTE,
-          'rcf_passes' => (opts[:rcf_passes] || 5),
+          # W2.1: tier rides the state file (lane B's gate reads 'tier'/'tier_basis';
+          # strings pinned in shared/lib/testdata/wave2-tier-state.json). Preserved
+          # from the 0c write; keys absent on routes that never resolved a tier.
+          'tier' => ($tier || _prior_state['tier']),
+          'tier_basis' => ($tier_basis || _prior_state['tier_basis']),
+          # W2.1: Tier-S shrinks the RCF budget 5→1 (site 1 of 2; `0` is a
+          # DIFFERENT contract that waives gate 8d — never the tier default).
+          'rcf_passes' => (opts[:rcf_passes] || ($tier == 'S' ? 1 : 5)),
           # PR-13: gate 7b (runtime control flip test) is DEFAULT-ON for the
           # tableau path — this stamp auto-enables it even on a STANDALONE
           # assert-phase6-ran run (the 8d/rcf_passes pattern from #439).
           'control_flip_required' => true }
-File.write(File.join(WORK, 'migrate-state.json'), JSON.pretty_generate(state))
+File.write(File.join(WORK, 'migrate-state.json'), JSON.pretty_generate(state.reject { |_, v| v.nil? }))
 
 # ---------------------------------------------------------------------------
 # Phase 5g — stage the RCF (render-compare-fix) fidelity loop. Agent-driven:
@@ -4969,7 +5045,7 @@ File.write(File.join(WORK, 'migrate-state.json'), JSON.pretty_generate(state))
 # BEFORE --finalize (which enforces the ledger via gate 8d). Skipped, with a
 # loud WARN, when --rcf-passes 0.
 # ---------------------------------------------------------------------------
-rcf_passes = (opts[:rcf_passes] || 5)
+rcf_passes = (opts[:rcf_passes] || ($tier == 'S' ? 1 : 5)) # W2.1: Tier-S 5→1 (site 2 of 2)
 if rcf_passes.to_i <= 0
   line 'WARN: Phase 5g RCF fidelity loop DISABLED (--rcf-passes 0). The workbook will be gated on'
   line '      structure + data + a single visual verdict only — composition drift (palette, chart'
@@ -5069,6 +5145,7 @@ quiet_event('result', 'stage' => 'pass1', 'status' => 'PENDING',
 puts "dataModelId : #{dm_id}#{reuse_dm_id ? '  (REUSED existing DM)' : ''}"
 puts "workbookId  : #{wb_id}"
 puts "structural  : PASS (#{total_cols} cols resolve, #{chart_els.size} charts compile)"
+puts "TIER        : #{$tier} (#{$tier_basis}) — budgets/duplicate-oracles only; all gates still run" if $tier
 if $rls_pending
   puts "RLS         : DETECTED, NOT APPLIED — see #{File.join(WORK, 'security.json')}; provision + apply"
   puts '              via scripts/apply_sigma_rls.py before sharing (the model returns ALL rows until then)'
