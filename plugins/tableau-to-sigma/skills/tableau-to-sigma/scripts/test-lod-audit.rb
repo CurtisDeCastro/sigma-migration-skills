@@ -266,6 +266,103 @@ Dir.mktmpdir do |dir|
         'resolving a resolved entry is refused', fails)
 end
 
+puts 'Part B6 — wave-2 §6.6: wrong-FROM grouped Custom-SQL helper is NOT synth evidence'
+# The object-model field failure: the converter elected a date dim as the fact
+# and baked `SELECT DATE_MONTH, SUM(VISIT_REVENUE) FROM …DIM_DATES` — a fact
+# measure aggregated off the date dimension. The audit marked it
+# lod-synth/resolved on NAME MATCH ALONE (sql_grouped == GROUP BY present) and
+# gate 17 passed. Now: sql_grouped is evidence only when the FROM table exists
+# among the spec's base elements AND owns every identifier the statement reads.
+OM_FIELDS = {
+  'calcs' => [
+    { 'name' => 'Monthly Revenue', 'internal_name' => '[Calculation_300]',
+      'formula' => '{FIXED [Date Month]: SUM([Visit Revenue])}', 'is_lod' => true },
+    { 'name' => 'Site Revenue', 'internal_name' => '[Calculation_301]',
+      'formula' => '{FIXED [Site Key]: SUM([Visit Revenue])}', 'is_lod' => true }
+  ]
+}.freeze
+def om_base_elements
+  [
+    { 'id' => 'el-fact', 'kind' => 'table', 'name' => 'Fact Visits',
+      'source' => { 'kind' => 'warehouse-table', 'path' => %w[ANALYTICS PUBLIC FACT_VISITS] },
+      'columns' => [
+        { 'id' => 'f1', 'name' => 'Site Key',      'formula' => '[FACT_VISITS/Site Key]' },
+        { 'id' => 'f2', 'name' => 'Date Key',      'formula' => '[FACT_VISITS/Date Key]' },
+        { 'id' => 'f3', 'name' => 'Visit Revenue', 'formula' => '[FACT_VISITS/Visit Revenue]' }
+      ] },
+    { 'id' => 'el-dates', 'kind' => 'table', 'name' => 'Dim Dates',
+      'source' => { 'kind' => 'warehouse-table', 'path' => %w[ANALYTICS PUBLIC DIM_DATES] },
+      'columns' => [
+        { 'id' => 'd1', 'name' => 'Date Key',   'formula' => '[DIM_DATES/Date Key]' },
+        { 'id' => 'd2', 'name' => 'Date Month', 'formula' => '[DIM_DATES/Date Month]' }
+      ] }
+  ]
+end
+def om_helper(stmt, name)
+  { 'id' => "el-h-#{name.downcase.gsub(/[^a-z0-9]+/, '-')}", 'kind' => 'table', 'name' => "#{name} Helper",
+    'source' => { 'kind' => 'sql', 'statement' => stmt },
+    'columns' => [{ 'id' => 'h1', 'name' => name, 'formula' => "[Custom SQL/#{name}]" }] }
+end
+om_calcs = LodAudit.lod_calcs(OM_FIELDS)
+
+# (a) the wrong-FROM helper (fact measure off the date dim) → unresolved.
+dm_wrong = { 'pages' => [{ 'elements' => om_base_elements + [
+  om_helper('SELECT DATE_MONTH, SUM(VISIT_REVENUE) AS MONTHLY_REVENUE ' \
+            'FROM ANALYTICS.PUBLIC.DIM_DATES GROUP BY 1', 'Monthly Revenue')
+] }] }
+ew = LodAudit.derive(om_calcs, dm_spec: JSON.parse(JSON.generate(dm_wrong)), wb_spec: nil, manual_residues: nil)
+mw = ew.find { |x| x['calc'] == 'Monthly Revenue' }
+check(mw && mw['class'] == 'suspect-alias' && mw['status'] == 'unresolved',
+      "wrong-FROM helper → suspect-alias/unresolved, NOT lod-synth (got #{mw && mw['class']}/#{mw && mw['status']})", fails)
+check(mw && Array(mw['suspect_refs']).include?('VISIT_REVENUE'),
+      "the off-table identifier is named (got #{mw && mw['suspect_refs'].inspect})", fails)
+check(mw && mw['detail'].to_s.include?('FROM'), 'detail names the wrong-FROM cause', fails)
+
+# (b) the surfacing rel-ref must NOT rescue the broken helper: same spec + a
+# master column [Fact Visits/FIXED Date Month/Monthly Revenue].
+dm_surfaced = JSON.parse(JSON.generate(dm_wrong))
+dm_surfaced['pages'][0]['elements'] << {
+  'id' => 'master', 'kind' => 'table', 'name' => 'Master',
+  'source' => { 'kind' => 'table', 'elementId' => 'el-fact' },
+  'columns' => [{ 'id' => 'm1', 'name' => 'Monthly Revenue',
+                  'formula' => '[Fact Visits/FIXED Date Month/Monthly Revenue]' }]
+}
+es = LodAudit.derive(om_calcs, dm_spec: dm_surfaced, wb_spec: nil, manual_residues: nil)
+ms = es.find { |x| x['calc'] == 'Monthly Revenue' }
+check(ms && ms['status'] == 'unresolved',
+      "a FIXED-relationship surfacing ref onto the wrong-FROM helper does not resolve it (got #{ms && ms['class']})", fails)
+
+# (c) no-false-trip control: a fact-local helper whose FROM owns everything.
+dm_right = { 'pages' => [{ 'elements' => om_base_elements + [
+  om_helper('SELECT SITE_KEY, SUM(VISIT_REVENUE) AS SITE_REVENUE ' \
+            'FROM ANALYTICS.PUBLIC.FACT_VISITS GROUP BY 1', 'Site Revenue')
+] }] }
+er = LodAudit.derive(om_calcs, dm_spec: JSON.parse(JSON.generate(dm_right)), wb_spec: nil, manual_residues: nil)
+mr2 = er.find { |x| x['calc'] == 'Site Revenue' }
+check(mr2 && mr2['class'] == 'lod-synth' && mr2['status'] == 'resolved',
+      "correct-FROM helper stays lod-synth/resolved — no false trip (got #{mr2 && mr2['class']})", fails)
+
+# (d) FROM table absent from the spec's base elements → unresolved, named.
+dm_missing = { 'pages' => [{ 'elements' => om_base_elements + [
+  om_helper('SELECT SITE_KEY, SUM(VISIT_REVENUE) AS SITE_REVENUE ' \
+            'FROM ANALYTICS.PUBLIC.STAGING_ROLLUP GROUP BY 1', 'Site Revenue')
+] }] }
+em = LodAudit.derive(om_calcs, dm_spec: JSON.parse(JSON.generate(dm_missing)), wb_spec: nil, manual_residues: nil)
+mm = em.find { |x| x['calc'] == 'Site Revenue' }
+check(mm && mm['status'] == 'unresolved' && mm['detail'].to_s.include?('not a base element'),
+      "helper FROM a table the spec does not model → unresolved (got #{mm && mm['class']})", fails)
+
+# (e) no ownership oracle (all-Custom-SQL model, zero warehouse-table
+# elements) → legacy behavior, resolved: nothing exists to verify against.
+dm_allsql = { 'pages' => [{ 'elements' => [
+  om_helper('SELECT DATE_MONTH, SUM(VISIT_REVENUE) AS MONTHLY_REVENUE ' \
+            'FROM ANALYTICS.PUBLIC.DIM_DATES GROUP BY 1', 'Monthly Revenue')
+] }] }
+ea = LodAudit.derive(om_calcs, dm_spec: JSON.parse(JSON.generate(dm_allsql)), wb_spec: nil, manual_residues: nil)
+ma = ea.find { |x| x['calc'] == 'Monthly Revenue' }
+check(ma && ma['class'] == 'lod-synth',
+      "no warehouse-table elements → no oracle → legacy resolved (got #{ma && ma['class']})", fails)
+
 puts 'Part E — empty ledger is still written (gate evidence)'
 Dir.mktmpdir do |dir|
   File.write(File.join(dir, 'calc-fields.json'), JSON.pretty_generate('calcs' => [

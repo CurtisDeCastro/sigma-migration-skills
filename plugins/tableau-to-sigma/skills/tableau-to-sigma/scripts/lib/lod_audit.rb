@@ -55,6 +55,7 @@
 
 require 'json'
 require_relative 'calc_coverage'
+require_relative 'sql_ident_check'
 
 module LodAudit
   GRAIN_NOTE = 'A {FIXED/INCLUDE/EXCLUDE} calc must translate to the documented LOD strategy ' \
@@ -180,7 +181,8 @@ module LodAudit
             'name'        => col_display(col),
             'formula'     => col['formula'].to_s,
             'grouped'     => grouped,
-            'sql_grouped' => sql_grouped
+            'sql_grouped' => sql_grouped,
+            'sql_stmt'    => stmt
           }
         end
       end
@@ -203,22 +205,56 @@ module LodAudit
   def derive(calcs, dm_spec: nil, wb_spec: nil, manual_residues: nil, prior: nil)
     cols = emitted_columns(dm_spec, 'dm-spec') + emitted_columns(wb_spec, 'wb-spec')
     residues = residue_index(manual_residues)
-    entries = Array(calcs).map { |c| classify(c, cols, residues) }
+    tindex = spec_table_index(dm_spec, wb_spec)
+    entries = Array(calcs).map { |c| classify(c, cols, residues, tindex) }
     carry_resolutions(entries, prior)
     entries
   end
 
-  def classify(calc, cols, residues)
+  def classify(calc, cols, residues, table_index = {})
     name_n = norm(calc['calc'])
     ref_ns = Array(calc['reference_set']).map { |r| norm(r) }.reject(&:empty?)
     allowed = ref_ns + [name_n]
 
     matches = name_n.empty? ? [] : cols.select { |c| norm(c['name']) == name_n }
-    synth   = matches.select { |c| synth_evidence(c) }
+    # Wave-2 §6.6: a grouped Custom-SQL helper is synth evidence ONLY when its
+    # FROM table exists among the spec's own base elements AND owns every
+    # identifier the statement reads (the field failure: `SELECT DATE_MONTH,
+    # SUM(VISIT_REVENUE) FROM …DIM_DATES` — a fact measure aggregated off the
+    # date dim — was marked lod-synth/resolved on name match alone and sailed
+    # through gate 17). Validation runs only when an ownership oracle exists
+    # (>=1 warehouse-table element in the specs) — an all-Custom-SQL model has
+    # nothing to verify against and keeps the legacy behavior.
+    sql_problems = {}
+    matches.each do |c|
+      next unless c['sql_grouped']
+      prob = sql_from_problem(c['sql_stmt'], table_index)
+      sql_problems[c.object_id] = prob if prob
+    end
+    synth = matches.select do |c|
+      if sql_problems.key?(c.object_id)
+        false
+      elsif sql_problems.any? && !c['grouped'] && !c['sql_grouped'] &&
+            c['formula'].to_s =~ LOD_REL_REF_RE && c['formula'].to_s !~ WINDOW_FN_RE
+        # A FIXED-relationship surfacing ref rides on the helper it surfaces —
+        # when this calc's helper failed FROM/ownership validation, the ref is
+        # a window onto the same wrong-FROM SQL, not independent evidence.
+        false
+      else
+        synth_evidence(c)
+      end
+    end
     suspect = []
     derived = []
+    # A wrong-FROM helper is an INVALID translation, not a missing one — feed
+    # it to the suspect flow so the entry is unresolved with the SQL verdict.
+    matches.each do |c|
+      next unless (prob = sql_problems[c.object_id])
+      suspect << [c, prob[:idents], :sqlfrom, prob[:reason]]
+    end
     matches.each do |c|
       next if synth.include?(c)
+      next if sql_problems.key?(c.object_id) # already queued with the SQL verdict
       terms = terminal_refs(c['formula'])
       next if terms.empty? || terms.all? { |t| norm(t) == name_n } # passthrough of own name — not evidence
       alien = terms.reject { |t| allowed.include?(norm(t)) }
@@ -257,12 +293,12 @@ module LodAudit
       entry['evidence'] = { 'kind' => 'manual-residues.json', 'calc' => residues[name_n]['calc'],
                             'residue_status' => residues[name_n]['status'].to_s }
     elsif suspect.any?
-      col, refs, kind = suspect.first
+      col, refs, kind, why = suspect.first
       entry['class']  = 'suspect-alias'
       entry['status'] = 'unresolved'
       entry['evidence'] = evidence(col)
       entry['suspect_refs'] = refs
-      entry['detail'] = suspect_detail(refs, kind)
+      entry['detail'] = suspect_detail(refs, kind, why)
     elsif derived.any?
       entry['class']  = 'reference-derived'
       entry['status'] = 'resolved'
@@ -282,12 +318,18 @@ module LodAudit
     entry
   end
 
-  # Human-readable detail for a suspect-alias entry: the two shapes of the same
-  # silent-alias failure — reading a column OUTSIDE the LOD's reference set, or a
-  # non-aggregating passthrough of one of its FILTER-CONDITION columns (#452).
-  def suspect_detail(refs, kind)
+  # Human-readable detail for a suspect-alias entry: the three shapes of the
+  # same silent failure — reading a column OUTSIDE the LOD's reference set, a
+  # non-aggregating passthrough of one of its FILTER-CONDITION columns (#452),
+  # or a grouped Custom-SQL helper whose FROM table fails ownership validation
+  # (wave-2 §6.6 — the wrong-FROM class).
+  def suspect_detail(refs, kind, why = nil)
     quoted = Array(refs).map(&:inspect).join(', ')
-    if kind == :filter
+    case kind
+    when :sqlfrom
+      "the grouped Custom-SQL helper is NOT a valid translation: #{why} — re-point the helper's FROM " \
+        '(mis-elected fact? re-run with --fact-table NAME) or record the manual translation'
+    when :filter
       "emitted formula is a non-aggregating passthrough of #{quoted} — a column named only in the " \
         "LOD expression's FILTER CONDITION, not its aggregated output (fuzzy filter-alias: the " \
         'numbers are silently wrong)'
@@ -302,6 +344,73 @@ module LodAudit
     f = col['formula'].to_s
     return true if f =~ LOD_REL_REF_RE
     f =~ WINDOW_FN_RE ? true : false
+  end
+
+  # ---- wrong-FROM validation for grouped Custom-SQL helpers (wave-2 §6.6) ---
+
+  # Ownership index from the emitted specs' own base elements: warehouse table
+  # tail (upcased) => identifiers the table is known to own — each base
+  # column's display name, its formula bracket-tail (the physical ref when the
+  # two differ), and their upper-snake normalizations (the spelling the
+  # converter emits into helper SQL). Role-playing duplicates (two elements
+  # over one physical table) merge into one entry.
+  def spec_table_index(*specs)
+    idx = {}
+    specs.compact.each do |spec|
+      next unless spec.is_a?(Hash)
+      (spec['pages'] || []).each do |pg|
+        (pg['elements'] || []).each do |el|
+          next unless el.is_a?(Hash) && el.dig('source', 'kind') == 'warehouse-table'
+          tail = (el.dig('source', 'path') || []).last.to_s.upcase
+          next if tail.empty?
+          names = (idx[tail] ||= [])
+          (Array(el['columns']) + Array(el['metrics'])).each do |c|
+            next unless c.is_a?(Hash)
+            tailref = c['formula'].to_s[/\A\s*\[([^\]]+)\]\s*\z/, 1].to_s.split('/').last.to_s
+            [c['name'].to_s, tailref].each do |n|
+              n = n.strip
+              next if n.empty?
+              names << n unless names.include?(n)
+              nn = SqlIdentCheck.normalize(n)
+              names << nn unless nn.empty? || names.include?(nn)
+            end
+          end
+        end
+      end
+    end
+    idx
+  end
+
+  # Validate a grouped Custom-SQL helper's FROM/ownership against the spec's
+  # own base elements. Returns nil when the statement verifies — or when no
+  # ownership oracle exists (empty index, or no parsable base table) — else
+  # {reason:, idents:} for the suspect flow. Uses the same identifier oracle
+  # as the pre-POST sql-ident gate (lib/sql_ident_check).
+  def sql_from_problem(stmt, table_index)
+    return nil if stmt.to_s.strip.empty? || !table_index.is_a?(Hash) || table_index.empty?
+    tables = begin
+      SqlIdentCheck.scan(stmt)[:tables].map { |t| t[:name].to_s.upcase }
+                   .reject { |t| t.empty? || t.start_with?('__') }.uniq
+    rescue StandardError
+      []
+    end
+    return nil if tables.empty?
+    missing = tables.reject { |t| table_index.key?(t) }
+    if missing.any?
+      return { reason: "its FROM table #{missing.join(', ')} is not a base element of the emitted " \
+                       'spec — the helper aggregates off a table the model does not own',
+               idents: missing }
+    end
+    res = begin
+      SqlIdentCheck.check(stmt, table_index.select { |t, _| tables.include?(t) })
+    rescue StandardError
+      return nil # oracle failure is never a trip — only verified findings are
+    end
+    return nil if res[:ok]
+    bad = Array(res[:unknown]).map { |u| u[:identifier].to_s }.uniq
+    { reason: "its FROM table (#{tables.join(', ')}) does not own #{bad.map(&:inspect).join(', ')} — " \
+              'wrong-FROM helper SQL: the query fails at run time or silently reads the wrong table',
+      idents: bad }
   end
 
   # Terminal name of every bracket ref in an emitted Sigma formula:
