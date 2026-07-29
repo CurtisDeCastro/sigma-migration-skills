@@ -17,6 +17,11 @@
 # {"id": "rev_cur", "format": {"kind": "number", "formatString": "$,.0f"}} — it
 # rides through the columns passthrough untouched.
 #
+# value_color=/value_font_size= are optional accent styling for the value
+# itself (Task-1 GO shape: value:{columnId,color,fontSize}). Both None (the
+# default) => value is just {"columnId": ...}, byte-identical to before these
+# kwargs existed.
+#
 # Stdlib only (json); Windows-safe.
 
 DELTA_GOOD = "#1a7f37"  # green
@@ -25,7 +30,8 @@ DELTA_BAD = "#cf222e"   # red
 
 def build(id, name, source_element_id, columns, value_column_id,
           comparison_column_id=None,
-          good_direction="up", title_color=None):
+          good_direction="up", title_color=None,
+          value_color=None, value_font_size=None):
     if not id:
         raise ValueError("id required")
     if not value_column_id:
@@ -41,6 +47,10 @@ def build(id, name, source_element_id, columns, value_column_id,
         name_obj["color"] = title_color
 
     value = {"columnId": value_column_id}
+    if value_color is not None:
+        value["color"] = value_color
+    if value_font_size is not None:
+        value["fontSize"] = value_font_size
 
     el = {
         "id": id,
