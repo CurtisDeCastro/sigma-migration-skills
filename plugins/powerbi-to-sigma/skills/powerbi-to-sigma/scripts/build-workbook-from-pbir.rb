@@ -56,6 +56,7 @@ require_relative 'lib/pbi_conditional_formats'
 require_relative 'lib/coverage_catalog'
 require_relative 'lib/trellis_emit' # shared native-trellis emitter (supported-kind gate + fallbacks)
 require_relative 'lib/metric_binding' # shared DM-metric binder ([Metrics/<name>] over inline re-derive)
+require_relative 'lib/pbi_reportbuild' # report-build hardening: one-base-table-per-page, boolean controls, friendly names
 include SigmaLayout
 
 # ---------------------------------------------------------------------------
@@ -102,8 +103,18 @@ OptionParser.new do |p|
   # migrate-powerbi.rb surfaces + assert-visual-compare.rb gates on). Default:
   # coverage.json next to --out.
   p.on('--coverage-out PATH') { |v| opts[:coverage_out] = v }
+  # REPORT-BUILD hardening (default 'page-base'): every visual on a page SOURCES
+  # one base table (the master resolving the most of the page's fields) and each
+  # page control targets THAT base table's column, so the filter propagates to
+  # every visual — the tableau/qlik source-propagation pattern. 'per-visual' is
+  # the legacy escape (each visual picks its own master; controls multi-target).
+  p.on('--source-mode MODE', %w[page-base per-visual],
+       "page-base (default): one base table per page + control-targets-base propagation; " \
+       'per-visual: legacy per-visual master selection') { |v| opts[:source_mode] = v }
 end.parse!
 %i[sig mmap out].each { |k| abort("missing --#{k.to_s.tr('_','-')}") unless opts[k] }
+opts[:source_mode] ||= 'page-base'
+$page_base_mode = (opts[:source_mode] == 'page-base')
 
 signals = JSON.parse(File.read(opts[:sig]))
 # Style fidelity: the PBI report's base theme -> Sigma workbook theme. `signals['theme']`
@@ -502,6 +513,23 @@ def tmsl_date_column?(ent, leaf)
   !!(c && c['dataType'].to_s =~ /date/i)
 end
 
+# TMSL column type for ENTITY.LEAF — boolean-typed slicers need boolean-aware
+# control handling: a `list` + `mode:include` + `values:[]` template (correct
+# for a STRING slicer, where an empty selection = no filter) ZEROES a boolean
+# target — Sigma treats an unset boolean `include` list as "include nothing".
+# Detect real boolean columns from the TMSL model (dataType boolean/bit) so we
+# can seed the control's default with the full boolean domain (= no filter when
+# unset). Falls back to PbiReportBuild.boolean_leaf? (name shape) when no model.
+def tmsl_boolean_column?(ent, leaf)
+  unless MODEL_TABLES.empty?
+    t = MODEL_TABLES_FULL.find { |tb| tb['name'].to_s == ent.to_s }
+    c = t && (t['columns'] || []).find { |col| col['name'].to_s.casecmp(leaf.to_s).zero? }
+    return true if c && c['dataType'].to_s =~ /bool|bit/i
+    return false if c # a modeled non-boolean column is authoritative — do NOT guess from its name
+  end
+  PbiReportBuild.boolean_leaf?(leaf)
+end
+
 # PBI visualTypes that map 1:1 to a native Sigma element kind (no approximation).
 # Anything NOT in this set is rendered as a best-effort Sigma kind and recorded
 # in coverage.json as 'approximated' so the user sees the substitution (e.g.
@@ -843,6 +871,20 @@ def visual_master(rec, fields)
   best && best[0]
 end
 
+# The ONE base master a whole PAGE sources (report-build hardening). Aggregates
+# field coverage across EVERY visual on the page (controls included, so the
+# sliced column counts) and returns the master resolving the most. Every visual
+# is then pointed at this base and each page control targets its column, so a
+# single control target propagates to all visuals — no per-visual targeting, no
+# passthrough columns. Delegates the pure tally to PbiReportBuild.page_base_master.
+def page_base_master(visuals, fields)
+  masters_for = lambda do |qr|
+    fs = field_spec(qr, fields)
+    ([fs['master']] + Array(fs['alts']).map { |a| a['master'] }).compact.uniq
+  end
+  PbiReportBuild.page_base_master(visuals, masters_for)
+end
+
 # bead f972: PBI sort carry. rec['sort'] = {queryRef, direction asc|desc} from the
 # extractors (PBIR query.sortDefinition / classic prototypeQuery.OrderBy). Resolve
 # the sorted queryRef to the element column built for it (qr_cids, recorded as each
@@ -1108,7 +1150,7 @@ def apply_small_multiples!(el, rec, fields, master, eid, qr_cids)
   result
 end
 
-def build_element(rec, fields, masters, extra_data = [])
+def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
   # viz-kind resolution (grounded by refs/catalogs/viz-kind.json; SIGMA_KIND is
   # derived from it). An UNMAPPED/blank kind token used to SILENTLY become a
   # bar-chart via "|| 'bar-chart'". Now the miss WARNS before the explicit
@@ -1139,7 +1181,11 @@ def build_element(rec, fields, masters, extra_data = [])
   # derive one from its projections — NEVER surface the raw visual id as the
   # display name (phase-e layout-quality fix; layout_lint.rb gates this).
   title = rec['title'].to_s.strip
-  name  = title.empty? ? (derived_title(rec, kind) || KIND_LABEL[kind] || 'Chart') : title
+  # Friendly naming: a PBI visual's OWN title wins verbatim (task: "use the PBI
+  # visual's own title when present"). Only a DERIVED title (untitled visual) is
+  # run through friendly_label so a raw projection leaf ("SUBMISSION_KEY by
+  # LEVEL_1_NAME") reads as a human name and never surfaces as a raw column.
+  name  = title.empty? ? (PbiReportBuild.friendly_label(derived_title(rec, kind)) || KIND_LABEL[kind] || 'Chart') : title
 
   if kind == 'text'
     # Size-aware: PBI textboxes are titles OR small decorative labels
@@ -1165,7 +1211,23 @@ def build_element(rec, fields, masters, extra_data = [])
     return { 'id' => eid, 'kind' => 'image', 'url' => url }
   end
 
-  master = visual_master(rec, fields)
+  # Report-build hardening: in page-base mode every visual sources the PAGE's one
+  # base master (forced_master) so a single control target propagates to all —
+  # but only when at least one of the visual's own fields resolves on that base
+  # (else a genuinely different-fact visual would lose all its data; it keeps its
+  # own master and is surfaced as out-of-scope for the page control instead).
+  resolves_on = lambda do |m|
+    (rec['bindings'] || {}).values.flatten.compact.any? do |qr|
+      fs = field_spec(qr, fields)
+      fs['master'] == m || Array(fs['alts']).any? { |a| a['master'] == m }
+    end
+  end
+  master =
+    if forced_master && masters[forced_master] && resolves_on.call(forced_master)
+      forced_master
+    else
+      visual_master(rec, fields)
+    end
   # E-06: a value-driven visual with NO resolvable field binding would emit a
   # source-less element with a "[]" formula column (an empty PBI `kpi {}` or a
   # cardVisual->bar approximation), which the API rejects with
@@ -1280,23 +1342,46 @@ def build_element(rec, fields, masters, extra_data = [])
     reach = MODEL_RELATIONSHIPS.any? || MODEL_TABLES.any? ? reachable_entities(ent) : [ent]
     cov = entity_master_coverage(fields)
     filters, wired, unwired = [], [], []
-    masters.each do |mname, mrec|
-      ents = cov.select { |_e, ms| ms.include?(mname) }.keys
-      real = MODEL_TABLES.any? ? (ents & MODEL_TABLES) : ents
-      pseudo = MODEL_TABLES.any? && real.empty?      # derived/restructured element
-      in_scope = (real & reach).any? || mname == pmaster
-      col = match_master_column(mrec, leaf, ent)
-      # pseudo elements: only when they actually carry the sliced column —
-      # column-name evidence is the best provenance we have for restructured
-      # (Dense Rank / time-intel / calc-table SQL) elements.
-      in_scope ||= pseudo && !col.nil?
-      next unless in_scope
-      if col.nil?
-        unwired << mname
-        next
+    # PAGE-BASE targeting (report-build hardening): the page's ONE base master
+    # (forced_master) is what every visual on the page sources, so the control
+    # targets JUST the base table's column — the filter PROPAGATES to every
+    # visual for free. This replaces per-visual/multi-master targeting (which
+    # left KPIs/charts unfiltered) and the "passthrough column per visual" hack
+    # (which corrupted chart/pivot grouping → "No data"). NEVER add a passthrough
+    # column to a chart/pivot: source propagation carries the filter instead.
+    bbase = ($page_base_mode && forced_master && master == forced_master) ? masters[forced_master] : nil
+    bcol  = bbase && match_master_column(bbase, leaf, ent)
+    src_master, src_col = pm, pcol
+    if bbase && bcol
+      filters << { 'source' => { 'kind' => 'table', 'elementId' => bbase['id'] }, 'columnId' => bcol['id'] }
+      wired << forced_master
+      src_master, src_col = bbase, bcol
+    else
+      # Legacy / fallback: the base doesn't carry the sliced column (or per-visual
+      # mode) — wire every relationship-reachable master that carries it.
+      masters.each do |mname, mrec|
+        ents = cov.select { |_e, ms| ms.include?(mname) }.keys
+        real = MODEL_TABLES.any? ? (ents & MODEL_TABLES) : ents
+        pseudo = MODEL_TABLES.any? && real.empty?      # derived/restructured element
+        in_scope = (real & reach).any? || mname == pmaster
+        col = match_master_column(mrec, leaf, ent)
+        # pseudo elements: only when they actually carry the sliced column —
+        # column-name evidence is the best provenance we have for restructured
+        # (Dense Rank / time-intel / calc-table SQL) elements.
+        in_scope ||= pseudo && !col.nil?
+        next unless in_scope
+        if col.nil?
+          unwired << mname
+          next
+        end
+        filters << { 'source' => { 'kind' => 'table', 'elementId' => mrec['id'] }, 'columnId' => col['id'] }
+        wired << mname
       end
-      filters << { 'source' => { 'kind' => 'table', 'elementId' => mrec['id'] }, 'columnId' => col['id'] }
-      wired << mname
+      if $page_base_mode && bbase.nil?
+        warn "[build-workbook] WARN slicer '#{name}': page base master does not carry sliced column " \
+             "'#{leaf}' — control falls back to multi-master targeting; page-base propagation will not " \
+             'cover visuals whose fields live only on the base. Add the sliced column to the base master.'
+      end
     end
     unless unwired.empty?
       warn "[build-workbook] WARN slicer '#{name}': master(s) #{unwired.join(', ')} are in the " \
@@ -1309,7 +1394,10 @@ def build_element(rec, fields, masters, extra_data = [])
     ctl_id = "#{ctl_id}#{n}" if n > 1     # two slicers on one column: unique ids
     el['kind'] = 'control'
     el['controlId'] = ctl_id
-    el['name'] = name
+    # Friendly naming: a slicer's label is routinely the RAW warehouse column
+    # ("IS Active IND"); Title-Case it ("Is Active Ind"). Explicit human titles
+    # and preserved acronyms (Customer ID) pass through unchanged.
+    el['name'] = PbiReportBuild.friendly_label(name)
     # Control kind is COMPOSITIONAL (list vs date-range depends on the sliced
     # column's TMSL type), so it stays as code — but the two target kinds are
     # grounded in refs/catalogs/control.json (CTL_CAT), cited to the PBI slicer
@@ -1328,8 +1416,22 @@ def build_element(rec, fields, masters, extra_data = [])
       el['controlType'] = CTL_CAT.target('slicer')      # -> 'list' (documented default)
       el['mode'] = 'include'
       el['selectionMode'] = 'multiple'
-      el['values'] = []
-      el['source'] = { 'kind' => 'source', 'source' => { 'kind' => 'table', 'elementId' => pm['id'] }, 'columnId' => pcol['id'] }
+      # BOOLEAN-AWARE default (report-build hardening): a boolean-typed slicer
+      # must NOT ship the string-slicer template `mode:include + values:[]` —
+      # Sigma treats an unset boolean `include` list as "include NOTHING" and
+      # ZEROES every targeted element (verified on live migrations). Seed the
+      # full boolean domain (true/false) so an unset control includes everything
+      # = no filter, matching a PBI boolean slicer with nothing selected. String
+      # slicers keep the empty default (there, empty `include` correctly = all).
+      if tmsl_boolean_column?(ent, leaf)
+        el['values'] = PbiReportBuild.boolean_domain_values
+        warn "[build-workbook] slicer '#{name}': boolean column '#{leaf}' -> list control seeded with " \
+             'the full boolean domain (true/false) so an unset control does NOT zero its targets ' \
+             '(an empty boolean include list means "include nothing" in Sigma).'
+      else
+        el['values'] = []
+      end
+      el['source'] = { 'kind' => 'source', 'source' => { 'kind' => 'table', 'elementId' => src_master['id'] }, 'columnId' => src_col['id'] }
     end
     el['filters'] = filters
     $control_scope << { 'controlId' => ctl_id,
@@ -1816,11 +1918,49 @@ def build_element(rec, fields, masters, extra_data = [])
   # bead miu7: never ship an unresolved literal-ref column (type=error). Drop it
   # and prune its references — the tile degrades honestly into coverage instead.
   drop_unresolved_columns!(el, rec, kind) unless el['kind'] == 'control'
+  # FAIL-LOUD binding guard (report-build hardening): after the drop pass, a
+  # chart/KPI that lost its essential binding (an xAxis-less bar with a yAxis
+  # measure aggregated into one giant bar; a KPI with no value; a chart with no
+  # measures) must not ship SILENTLY. Emit a visible warning + a coverage entry
+  # so the gap surfaces in the per-report summary instead of a mystery empty
+  # tile. This is the safety net behind page-base sourcing (which normally keeps
+  # every raw column on the one base so bindings resolve).
+  check_binding_complete!(el, rec) unless el['kind'] == 'control'
   # Track 3b: queryRef -> built column id, so a visual filter can resolve its
   # target to a column this element actually projects (element filters reference
   # the element's own columns). Transient — stripped before the spec is written.
   el['_qr_cids'] = qr_cids
   el
+end
+
+# Verify a built chart/KPI still carries the binding it needs to render, AFTER
+# unresolved columns were dropped. Warns loudly + records coverage on a miss —
+# the fail-loud counterpart to the silent xAxis-drop / measure-drop defects.
+def check_binding_complete!(el, rec)
+  kind = el['kind']
+  name = el['name'].is_a?(Hash) ? el['name']['text'] : el['name'].to_s
+  miss = nil
+  case kind
+  when 'bar-chart', 'line-chart', 'area-chart', 'combo-chart'
+    ycount = Array(el.dig('yAxis', 'columnIds')).length
+    miss = 'lost its category/dimension (xAxis) — it will aggregate every row into one mark' if el['xAxis'].nil? || el.dig('xAxis', 'columnId').nil?
+    miss = 'has no measure on its yAxis' if ycount.zero?
+  when 'kpi-chart'
+    miss = 'has no value binding' if el.dig('value', 'columnId').nil? && el.dig('value', 'id').nil?
+  when 'pie-chart', 'donut-chart'
+    miss = 'has no value binding' if el.dig('value', 'id').nil? && el.dig('value', 'columnId').nil?
+  when 'table', 'pivot-table'
+    miss = 'has no columns' if Array(el['columns']).empty?
+  end
+  return unless miss
+  warn "[build-workbook] WARN visual '#{name}' (#{kind}) #{miss} after unresolvable fields were dropped — " \
+       'building it anyway but it will not render as intended; check the master-map covers this visual\'s ' \
+       'dimension AND every measure on the page base table.'
+  record_unresolved(visual: name, pbi_type: rec['visual_type'], sigma_kind: kind,
+                    severity: 'degraded', recoverable: true,
+                    detail: "#{kind} #{miss}",
+                    action: 'Ensure the page base master carries this visual\'s dimension and measure columns ' \
+                            '(map the queryRefs in master-map.json), then re-run.')
 end
 
 # ---- assemble pages -------------------------------------------------------
@@ -1841,8 +1981,16 @@ content_pages = signals['pages'].map do |pg|
   # build_element may return one element or an array (multiRowCard -> N KPIs),
   # or nil (unresolvable slicer -> control skipped loudly, never wired wrong).
   vis_elements = {}   # visual_id -> [built element ids] (feeds intended-scope)
+  # ONE base master per page (report-build hardening): the master resolving the
+  # most of THIS page's fields. Every visual is pointed at it (build_element's
+  # forced_master) and each page control targets its column — so a single filter
+  # target propagates to every visual. nil (nothing resolves / per-visual mode)
+  # -> legacy per-visual master selection.
+  page_base = $page_base_mode ? page_base_master(pg['visuals'], fields) : nil
+  warn "[build-workbook] page '#{pg['page_title']}': base table master = #{page_base.inspect} " \
+       '(every visual sources it; controls target it and propagate).' if page_base
   els = pg['visuals'].flat_map do |v|
-    r = build_element(v, fields, masters, extra_data_elements)
+    r = build_element(v, fields, masters, extra_data_elements, page_base)
     list = r.is_a?(Array) ? r : [r] # NB: not Array(r) — that explodes a Hash into pairs
     list = list.compact
     vis_elements[v['visual_id']] = list.map { |e| e['id'] }
@@ -1912,7 +2060,33 @@ content_pages = signals['pages'].map do |pg|
     end
     sc['scope'].uniq!
   end
-  { 'id' => "page-#{pg['page_id']}", 'name' => pg['page_title'], 'elements' => els }
+  # FAIL-LOUD empty page (report-build hardening): if the source page carried
+  # data visuals but NONE built (every measure/formula failed to bind), do not
+  # ship a silently-blank page — warn + drop a visible annotation element so the
+  # gap is obvious in the workbook, and surface it in coverage.
+  data_kinds = %w[kpi-chart bar-chart line-chart area-chart combo-chart scatter-chart
+                  pie-chart donut-chart region-map point-map table pivot-table]
+  built_data = els.count { |e| data_kinds.include?(e['kind']) }
+  src_data = (pg['visuals'] || []).count do |v|
+    data_kinds.include?(SIGMA_KIND[v['sigma_kind']] || v['sigma_kind'])
+  end
+  if built_data.zero? && src_data.positive?
+    warn "[build-workbook] WARN page '#{pg['page_title']}': #{src_data} data visual(s) in the source but " \
+         'NONE could be built (measures/formulas did not bind) — emitting a visible placeholder instead of ' \
+         'a silently-empty page. See coverage.json for the per-visual reasons.'
+    record_unresolved(visual: "page '#{pg['page_title']}'", pbi_type: 'page', sigma_kind: 'page',
+                      severity: 'dropped', recoverable: true,
+                      detail: "#{src_data} data visual(s) could not be built — page came out empty",
+                      action: 'Map this page\'s measures/dimensions to a base master in master-map.json ' \
+                              '(and translate any missing DAX measures), then re-run.')
+    els << { 'id' => "ph-#{pg['page_id']}", 'kind' => 'text',
+             'body' => "## ⚠ #{src_data} visual(s) on this page could not be migrated\n\n" \
+                       'Their measures/fields did not bind to the data model. See the migration ' \
+                       'coverage report for the per-visual reasons.' }
+  end
+  # Friendly page name: a raw warehouse token or ALL-CAPS name is Title-Cased;
+  # an already-human page title passes through unchanged.
+  { 'id' => "page-#{pg['page_id']}", 'name' => PbiReportBuild.friendly_label(pg['page_title']), 'elements' => els }
 end
 data_elements += extra_data_elements
 
