@@ -619,6 +619,10 @@ def run_live!(opts)
 
   hr('assert-phase6-ran')
   args = ['--workdir', OUT, '--workbook-id', workbook_id]
+  # gate 7b (runtime control-flip proof) DEFAULT-ON: flip each control live via
+  # probe-controls.rb and FAIL if a control is wired but INERT. Mirrors the
+  # looker reference; waive with --skip-control-flip "<reason>".
+  args += ['--require-control-flip']
   args += ['--skip-visual-gate', 'Tier B — private render endpoint unavailable'] if tier_b
   args += ['--skip-parity-gate', 'no --parity-plan supplied to migrate-domo.rb'] unless opts[:parity_plan]
   ok, code, _out = run_script!('assert-phase6-ran.rb', *args)
