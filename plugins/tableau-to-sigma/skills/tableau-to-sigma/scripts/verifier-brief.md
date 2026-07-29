@@ -45,8 +45,14 @@ PROCEDURE (from `{{SKILL_DIR}}`)
 
 2. **Check for a self-attested verdict.** In `parity-final.json`, if
    `visual_verdict` is `pass` and `visual_notes` does NOT start with
-   `VERIFIER:`, the builder self-certified in violation of the split. Note it
-   in your result; your own comparison below supersedes it either way.
+   `VERIFIER:`, the builder self-certified. On a Tier-S FACTORY workdir
+   (`migrate-state.json` `tier: "S"` and `verdict_by:
+   "builder-self-attested"` with the labeled verdict `GREEN (factory,
+   self-attested)`) that is the sanctioned wave-2 default, not a violation —
+   you are here to UPGRADE it: your countersignature + the step-3 gate re-run
+   flip the workdir to a bare countersigned GREEN. On Tier-M+ (or
+   `--certified`) it is a violation of the split; note it in your result.
+   Your own comparison below supersedes the builder's verdict either way.
 
 3. **Re-run the hard gate — NO NEW WAIVERS.**
 

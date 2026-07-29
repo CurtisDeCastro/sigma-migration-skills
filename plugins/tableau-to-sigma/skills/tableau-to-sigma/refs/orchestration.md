@@ -77,7 +77,7 @@ blocks a phase — but ignoring it is exactly how the 6-hour single-context
 field failure happened (zero subagents in 6 hours; by hour 3 the agent was
 grepping its own transcript to recover commands it had already run).
 
-## O3. Builder/verifier split (MUST — GREEN requires the countersignature)
+## O3. Builder/verifier split (MUST for Tier-M+ and `--certified` — a bare GREEN requires the countersignature; Tier-S factory runs ship the LABELED verdict instead, see the carve-out below)
 
 **The builder NEVER records the final visual verdict on its own work.** A
 builder that has spent an hour making the render match has every incentive —
@@ -132,8 +132,21 @@ The rules:
   adding one), pass it as well; the `VERIFIER:` notes prefix stays required
   either way.
 - A verdict of `pass` whose notes lack the `VERIFIER:` prefix is a builder
-  self-attestation, **not** a countersignature — the run is at best
-  self-attested YELLOW, never GREEN.
+  self-attestation, **not** a countersignature. On Tier-M+ or any
+  `--certified` run that means at best self-attested YELLOW, never GREEN.
+- **Tier-S factory carve-out (wave 2, W2.3 — the ratified factory default).**
+  On a Tier-S factory run (`migrate-state.json` `tier: "S"`, written by the
+  orchestrator's tier ratchet) the verifier context is **optional**: it is
+  spawned only for `--certified`, Tier-M+, or an explicit operator ask. A
+  self-attested Tier-S GREEN is real and shippable, but it is **labeled, not
+  bare**: the gate stamps `verdict_by: "builder-self-attested"`
+  (`parity-final.json` + `phase6-success.json`; closed vocabulary
+  `Offramp::VERDICT_BY`) and the verdict string everywhere — RESULT line,
+  markers, report headline — is **`GREEN (factory, self-attested)`**, never
+  the bare string `GREEN`. The label is greppable and `verify-complete.rb`
+  fails (exit 6) any report that strips it. A verifier countersignature +
+  gate re-run upgrades the workdir to a bare countersigned GREEN — which
+  remains the only GREEN a `--certified` run may claim.
 
 Result artifacts (who writes what):
 
@@ -142,16 +155,20 @@ Result artifacts (who writes what):
 | `<workdir>/MIGRATION_REPORT.md` + `<workdir>/migration-result.json` | builder | self-assessed outcome, `status: "awaiting-verification"`, every waiver named WITH evidence |
 | `<workdir>/verification-result.json` + the countersigned verdict in `parity-final.json` | verifier | the FINAL verdict (GREEN / YELLOW / RED) |
 | batch result line with `verdict_by: "verifier"` (batch runs) | verifier | the workbook's batch verdict — the builder's line is self-assessed only |
+| `verdict_by: "builder-self-attested"` + labeled `GREEN (factory, self-attested)` in `parity-final.json` / `phase6-success.json` | final gate (Tier-S factory) | the W2.3 self-attested factory verdict — real, labeled, greppable; countersigning + a gate re-run flips it to a bare GREEN |
 
-## O4. Single-workbook flows: same split
+## O4. Single-workbook flows: same split (with the same Tier-S carve-out)
 
-This is not a batch-only rule. In a one-workbook conversion the builder (the
-current session or a spawned agent) finishes pass 1 + the fidelity loop, stops
-short of the pass verdict, and then **the human or the driving session spawns
-the verifier** with `scripts/verifier-brief.md`. A solo session that
-self-records `pass` produces a self-attested result — acceptable when the user
-explicitly accepts it, but it is not a countersigned GREEN and the report must
-say so.
+This is not a batch-only rule. In a one-workbook **Tier-M+ or `--certified`**
+conversion the builder (the current session or a spawned agent) finishes pass
+1 + the fidelity loop, stops short of the pass verdict, and then **the human
+or the driving session spawns the verifier** with `scripts/verifier-brief.md`.
+A solo session that self-records `pass` produces a self-attested result —
+on a **Tier-S factory run** that is the sanctioned default and the result is
+the labeled `GREEN (factory, self-attested)` (quote the label verbatim in the
+report — `verify-complete.rb` fails a bare-GREEN claim); on Tier-M+ it is
+acceptable only when the user explicitly accepts it, it is not a countersigned
+GREEN, and the report must say so.
 
 ## O5. How to spawn (agent-neutral)
 

@@ -134,7 +134,12 @@ MUST call this gate as their final step.
 > exceeded budget) → **YELLOW**. **Any scope cut caps at PARTIAL.** Stamped into
 > `phase6-success.json` + `parity-final.json`; `verify-complete.rb` re-derives
 > offline and **fails (exit 6) if your report contradicts it** — quote the
-> ledger verbatim, never a verdict it doesn't support.
+> ledger verbatim, never a verdict it doesn't support. **Wave-2 label (W2.3):**
+> a Tier-S factory run with no verifier countersignature stamps
+> `verdict_by: "builder-self-attested"` and its GREEN is the labeled string
+> **`GREEN (factory, self-attested)`** — never bare; `verify-complete.rb`
+> fails a claim that strips (or fabricates) the label. Tier-scaled budget
+> (W2.1): Tier-S caps quality waivers at **1** (M/full keep 2).
 
 ## Telemetry consent (gate 10) — consent-answer.json schema + fail-closed reader (PR #509 R3/R9)
 

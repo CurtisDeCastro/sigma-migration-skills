@@ -150,6 +150,21 @@ derived_verdict = DegradationLedger.verdict(deg_entries)
 pf = load(File.join(wd, 'parity-final.json'))
 contradictions = []
 
+# W2.3 — the labeled factory verdict. On a Tier-S factory run (migrate-state
+# tier 'S', lane A) that ends GREEN with verdict_by 'builder-self-attested',
+# the ONLY honest verdict string is the labeled one — the gate never mints a
+# bare 'GREEN' there, so a bare claim means the label was stripped after the
+# fact. Conversely the label without that basis is a claim the artifacts do
+# not support. Vocabulary: Offramp::FACTORY_VERDICT_SUFFIX / VERDICT_BY.
+run_tier = begin
+  JSON.parse(File.read(File.join(wd, 'migrate-state.json')))['tier'].to_s
+rescue StandardError
+  nil
+end
+factory_green = derived_verdict == 'GREEN' && run_tier == 'S' &&
+                pf['verdict_by'].to_s == Offramp::VERDICT_BY_BUILDER
+expected_verdict = factory_green ? "GREEN#{Offramp::FACTORY_VERDICT_SUFFIX}" : derived_verdict
+
 # Internal census arithmetic: waiver_count must equal the census it counts.
 if pf.key?('waiver_count') && pf['waivers'].is_a?(Array) &&
    pf['waiver_count'].to_i != pf['waivers'].length
@@ -160,12 +175,22 @@ end
 if sj['waivers'].is_a?(Array) && pf['waivers'].is_a?(Array) && sj['waivers'] != pf['waivers']
   contradictions << "phase6-success.json waiver census (#{sj['waivers'].length}) differs from parity-final.json (#{pf['waivers'].length})"
 end
-# Claimed verdicts must match the derivation.
+# Claimed verdicts must match the derivation — INCLUDING the factory label:
+# a Tier-S self-attested GREEN claim must carry the suffix (the bare string
+# is the exact laundering W2.3 forbids), and the suffix without the factory
+# basis is equally a lie.
 { 'phase6-success.json' => sj['verdict'], 'parity-final.json' => pf['verdict'] }.each do |src, claim|
   next if claim.to_s.empty?
-  if claim.to_s != derived_verdict
-    contradictions << "#{src} claims verdict #{claim} but the artifacts derive #{derived_verdict}"
-  end
+  next if claim.to_s == expected_verdict
+  contradictions << if factory_green && claim.to_s == derived_verdict
+                      "#{src} claims the BARE string #{claim} but this is a Tier-S factory self-attested run — " \
+                      "the labeled verdict #{expected_verdict.inspect} is mandatory (never launder the label off)"
+                    elsif !factory_green && claim.to_s == "#{derived_verdict}#{Offramp::FACTORY_VERDICT_SUFFIX}"
+                      "#{src} claims the factory label #{claim.inspect} without a Tier-S self-attested basis " \
+                      "(tier=#{run_tier.inspect}, verdict_by=#{pf['verdict_by'].inspect})"
+                    else
+                      "#{src} claims verdict #{claim} but the artifacts derive #{expected_verdict}"
+                    end
 end
 # A zero-waiver claim over a ledger that records waivers/escapes is the exact
 # field lie this closes ("GREEN, 0 waivers" after --skip-ref-check).
@@ -194,7 +219,13 @@ if contradictions.any?
   exit 6
 end
 
-puts "✅ DONE — assert-phase6-ran.rb passed all gates for this run. VERDICT: #{derived_verdict}"
+puts "✅ DONE — assert-phase6-ran.rb passed all gates for this run. VERDICT: #{expected_verdict}"
+if factory_green
+  puts '   attested : builder-self-attested (Tier-S factory — the label above is part of the verdict'
+  puts '              string; quote it verbatim. A verifier countersignature + gate re-run yields bare GREEN.)'
+elsif !pf['verdict_by'].to_s.empty?
+  puts "   attested : #{pf['verdict_by']}"
+end
 puts "   workbook : #{sj['workbookId']}"
 puts "   gates    : #{sj['gates']}"
 puts "   run id   : #{sj['run_id']}" if sj['run_id']

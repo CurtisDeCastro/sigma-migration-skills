@@ -3744,6 +3744,34 @@ end
 # any other recorded degradation at YELLOW. The string rides in the success
 # marker (verify-complete.rb quotes and cross-checks it).
 final_verdict = deg_entries ? DegradationLedger.verdict(deg_entries) : nil
+# ── W2.3: verdict attestation + the labeled factory verdict ─────────────────
+# Countersignature evidence (orchestration.md O3): a verifier-recorded final
+# pass (parity-final.json visual_notes prefixed 'VERIFIER:') or a
+# verification-result.json in the workdir. Anything else is a builder
+# self-attestation — stamped 'verdict_by' with the closed vocabulary from
+# shared/lib/offramp.rb VERDICT_BY ('builder-self-attested' | 'verifier';
+# literals here because non-offramp-vendored twins run this gate too — the
+# vocab pin test asserts the strings match the constants). On a Tier-S
+# FACTORY run (migrate-state.json tier 'S' — lane A writes it) a
+# self-attested GREEN is REAL but must never print as the bare string
+# 'GREEN': the ' (factory, self-attested)' suffix rides the verdict
+# everywhere it lands (RESULT line, phase6-success.json, parity-final.json)
+# so any report headline carries the attestation (orchestration.md O3/O4
+# tier-S carve-out). Tier-M+/tierless strings are unchanged — the
+# countersignature MUST stands for them. A verifier that later countersigns
+# and re-runs this gate flips verdict_by to 'verifier' and the label off.
+verdict_by = begin
+  _pf_att = File.exist?(summary_path) ? (JSON.parse(File.read(summary_path)) rescue {}) : {}
+  countersigned = _pf_att.is_a?(Hash) && _pf_att['visual_verdict'].to_s == 'pass' &&
+                  _pf_att['visual_notes'].to_s.start_with?('VERIFIER:')
+  countersigned ||= File.exist?(File.join(opts[:tab], 'verification-result.json'))
+  countersigned ? 'verifier' : 'builder-self-attested'
+rescue StandardError
+  'builder-self-attested'
+end
+factory_labeled = run_tier == 'S' && verdict_by == 'builder-self-attested' &&
+                  final_verdict == 'GREEN'
+final_verdict = 'GREEN (factory, self-attested)' if factory_labeled
 begin
   _wd = opts[:tab]
   # chartCount from parity-final.json (gate 1 already required charts_total > 0 to
@@ -3757,6 +3785,7 @@ begin
             'waivers' => waiver_flags,
             'generatedAt' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ') }
   _succ['verdict'] = final_verdict if final_verdict
+  _succ['verdict_by'] = verdict_by if final_verdict
   File.write(File.join(_wd, 'phase6-success.json'), JSON.pretty_generate(_succ))
   _pend = File.join(_wd, 'parity-pending.json')
   File.delete(_pend) if File.exist?(_pend)
@@ -3767,6 +3796,7 @@ begin
     begin
       _pf['success_sentinel'] = true
       _pf['verdict'] = final_verdict if final_verdict
+      _pf['verdict_by'] = verdict_by if final_verdict
       File.write(File.join(_wd, 'parity-final.json'), JSON.pretty_generate(_pf))
     rescue StandardError
       nil
@@ -3788,6 +3818,11 @@ if final_verdict.nil?
   puts "[OK] all gates pass — conversion may declare GREEN" \
        "#{waiver_flags.any? ? " (#{budget_flags.length}/#{waiver_flags.length} waiver(s) within budget — name them in the report: #{waiver_flags.join(', ')})" : ''}"
   puts '     (lib/degradation_ledger.rb not vendored — no PR-14 verdict derived; re-vendor to enable.)'
+elsif factory_labeled
+  puts '[OK] all gates pass — VERDICT: GREEN (factory, self-attested) (degradation ledger empty; Tier-S'
+  puts '     factory run with no verifier countersignature — the label is part of the verdict string and'
+  puts '     MUST ride every report headline verbatim (orchestration.md O3/O4 carve-out). Spawn the'
+  puts '     verifier (scripts/verifier-brief.md) and re-run this gate for a countersigned bare GREEN.)'
 elsif final_verdict == 'GREEN'
   puts "[OK] all gates pass — VERDICT: GREEN (degradation ledger empty — no scope cuts, no waivers, no residuals)"
 else

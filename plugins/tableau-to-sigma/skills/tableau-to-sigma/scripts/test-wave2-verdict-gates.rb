@@ -246,6 +246,113 @@ Dir.mktmpdir do |dir|
   check(err.include?('re-run scripts/verify-anchors.rb'), 'stale-verdict failure routes to verify-anchors', fails)
 end
 
+# ---------------------------------------------------------------------------
+# D. W2.3 — verifier optional-and-labeled. A Tier-S factory GREEN with no
+# countersignature is REAL but LABELED ('GREEN (factory, self-attested)',
+# verdict_by 'builder-self-attested'); the bare string GREEN is unmintable on
+# that path, verify-complete.rb enforces the label offline in both
+# directions, and countersigned / Tier-M+ / tierless runs keep today's
+# strings (no-false-trip).
+# ---------------------------------------------------------------------------
+puts 'D. W2.3 factory verdict labeling + verify-complete reconciliation'
+
+FACTORY_LABEL = 'GREEN (factory, self-attested)'
+
+def run_verify(dir, *args)
+  out, err, st = Open3.capture3({}, RbConfig.ruby, VERIFY, '--workdir', dir, *args)
+  [out, err, st]
+end
+
+# D1+D2: Tier-S self-attested GREEN → labeled everywhere; verify-complete DONE.
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'migrate-state.json'), JSON.generate(TIER_S_STATE))
+  out, _err, st = run_gate(dir)
+  check(st.success?, "Tier-S factory green → exit 0 (got #{st.exitstatus})", fails)
+  check(out.include?("VERDICT: #{FACTORY_LABEL}"), 'RESULT line carries the labeled verdict', fails)
+  check(!out.match?(/VERDICT: GREEN \(degradation ledger empty/), 'bare-GREEN result line is unmintable on the factory path', fails)
+  pf = JSON.parse(File.read(File.join(dir, 'parity-final.json')))
+  sj = JSON.parse(File.read(File.join(dir, 'phase6-success.json')))
+  check(pf['verdict'] == FACTORY_LABEL && sj['verdict'] == FACTORY_LABEL,
+        'parity-final + phase6-success stamp the labeled verdict', fails)
+  check(pf['verdict_by'] == 'builder-self-attested' && sj['verdict_by'] == 'builder-self-attested',
+        "verdict_by stamped 'builder-self-attested' in both markers", fails)
+  vout, _verr, vst = run_verify(dir)
+  check(vst.success?, "verify-complete on the labeled workdir → exit 0 (got #{vst.exitstatus})", fails)
+  check(vout.include?("VERDICT: #{FACTORY_LABEL}") && vout.include?('builder-self-attested'),
+        'verify-complete prints the labeled verdict + attestation', fails)
+
+  # D3 trip: stripping the label after the fact is a ledger contradiction (exit 6).
+  pf['verdict'] = 'GREEN'
+  File.write(File.join(dir, 'parity-final.json'), JSON.pretty_generate(pf))
+  _vout2, verr2, vst2 = run_verify(dir)
+  check(vst2.exitstatus == 6, "label stripped to bare GREEN → verify-complete exit 6 (got #{vst2.exitstatus})", fails)
+  check(verr2.include?('labeled verdict') && verr2.include?('never launder the label off'),
+        'contradiction names the mandatory label', fails)
+end
+
+# D4 no-false-trip: Tier-M self-attested keeps the bare GREEN string (the O3
+# countersignature MUST is doctrine there — near-miss trajectory).
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'migrate-state.json'),
+             JSON.generate('tier' => 'M', 'tier_basis' => 'auto-predicate'))
+  out, _err, st = run_gate(dir)
+  check(st.success? && out.include?('VERDICT: GREEN (degradation ledger empty'),
+        'Tier-M self-attested keeps the bare GREEN line (no label)', fails)
+  pf = JSON.parse(File.read(File.join(dir, 'parity-final.json')))
+  check(pf['verdict'] == 'GREEN' && pf['verdict_by'] == 'builder-self-attested',
+        'Tier-M stamps bare verdict + self-attested provenance', fails)
+end
+
+# D5 no-false-trip: Tier-S COUNTERSIGNED run keeps the bare GREEN + verifier provenance.
+Dir.mktmpdir do |dir|
+  base_workdir(dir, parity_extra: { 'visual_notes' => 'VERIFIER: source vs render compared tile-by-tile' })
+  File.write(File.join(dir, 'migrate-state.json'), JSON.generate(TIER_S_STATE))
+  out, _err, st = run_gate(dir)
+  check(st.success? && out.include?('VERDICT: GREEN (degradation ledger empty'),
+        'Tier-S countersigned run keeps the bare GREEN', fails)
+  pf = JSON.parse(File.read(File.join(dir, 'parity-final.json')))
+  check(pf['verdict'] == 'GREEN' && pf['verdict_by'] == 'verifier',
+        "countersigned run stamps verdict_by 'verifier'", fails)
+end
+
+# D6 no-false-trip: tierless workdir → shipped strings byte-identical.
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  out, _err, st = run_gate(dir)
+  check(st.success? && out.include?('VERDICT: GREEN (degradation ledger empty'),
+        'tierless run keeps the shipped GREEN line', fails)
+  vout, _verr, vst = run_verify(dir)
+  check(vst.success? && vout.include?('VERDICT: GREEN'),
+        'verify-complete on a tierless workdir unchanged', fails)
+end
+
+# D7 anti-fabrication: the label WITHOUT a factory basis is equally exit 6.
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  run_gate(dir) # stamps bare GREEN (tierless)
+  pf = JSON.parse(File.read(File.join(dir, 'parity-final.json')))
+  pf['verdict'] = FACTORY_LABEL
+  File.write(File.join(dir, 'parity-final.json'), JSON.pretty_generate(pf))
+  _vout, verr, vst = run_verify(dir)
+  check(vst.exitstatus == 6, "fabricated factory label → verify-complete exit 6 (got #{vst.exitstatus})", fails)
+  check(verr.include?('without a Tier-S self-attested basis'), 'contradiction names the missing basis', fails)
+end
+
+# D8 vocabulary pin: the gate's literals (it cannot require offramp — the domo
+# twin has no offramp vendoring) match the shared constants verbatim.
+require_relative 'lib/offramp'
+gate_src = File.read(SCRIPT, encoding: 'UTF-8')
+check(gate_src.include?("'GREEN (factory, self-attested)'") &&
+      "GREEN#{Offramp::FACTORY_VERDICT_SUFFIX}" == FACTORY_LABEL,
+      'gate label literal == Offramp::FACTORY_VERDICT_SUFFIX (single vocabulary point)', fails)
+check(gate_src.include?("'builder-self-attested'") && gate_src.include?("'verifier'") &&
+      Offramp::VERDICT_BY == %w[builder-self-attested verifier],
+      'gate verdict_by literals == Offramp::VERDICT_BY', fails)
+check(gate_src.include?("%w[S M full]") && Offramp::TIER_VALUES == %w[S M full],
+      'gate tier literals == Offramp::TIER_VALUES', fails)
+
 puts
 if fails.empty?
   puts 'test-wave2-verdict-gates: ALL PASS'
