@@ -146,6 +146,39 @@ gates only the SEND path. Absent lib = silent no-op. Summarize with
 `PhaseMetrics.summarize(<WORK>)`. This is the calibration source for
 `estimate-cost.rb`'s coefficients (ratified: measure before optimizing).
 
+Turn capture (W2.22): records may also carry `turn` (monotone per-invocation
+mark ordinal) and `inv` (per-process token, numbers only);
+`PhaseMetrics.run_stats(<WORK>)` derives `turn_events` / `invocations` /
+`re_entries` / walls / tokens from them. Absence of a capture is `nil`,
+never 0 — a rate is refused, not guessed, from pre-capture files.
+
+## Measured calibration + the cold-run exit gate (W2.22/W2.24)
+
+- `estimate-cost.rb --from-metrics <dir1,dir2,…>` re-fits the rate/phase
+  coefficients from measured runs' `phase-metrics.jsonl`; every output then
+  carries a PROVENANCE header (measured vs priors, n + range, refusals
+  named). Standalone (no `--workdir`) it prints per-tier measured bands. A
+  refit or published band needs **n ≥ 3 per tier** — below that it is
+  refused BY NAME and only observations are stated (a single flattering
+  minute is never a band).
+- `measure-cold-run.rb run … -- <orchestrator args>` drives one protocol
+  cold run: mechanical resume (exit 12 → `--finalize`, 26 → wait-continue),
+  operator stops attributed by exit code, metrics read from artifacts, then
+  the litter chain (sweep dry-run → `--delete` → cleanup-orphans → probe
+  registry MUST read zero-open). `measure-cold-run.rb gate` applies the
+  exit gate over TERMINAL runs only (the wall is intake→terminal; a stopped
+  run's partial wall is excluded by name, exactly like a fidelity void):
+  median wall ≤15 min ∧ ≤22 turns ∧ 1 invocation ∧ ≤1 stop ⇒
+  band-adjacent-measured (≤10 min ⇒ in-band); a miss publishes the
+  MEASURED band — the projection is never publishable. Fidelity is
+  non-negotiable: a run whose parity baseline does not hold has its speed
+  number VOIDED.
+- Protocol state is never repo state: workdirs and results files stay
+  /tmp-side (the harness refuses repo-side paths), run records carry
+  numbers + neutral labels + phase names only (orchestrator argv VALUES are
+  redacted to flag names), and the live runbook lives outside the repo.
+  Sweep + eyeball any diff before a writeup.
+
 ## Expected durations (budgets)
 
 Times for a SMALL workbook (≤5 views, 1 dashboard) and a MEDIUM one (~10
