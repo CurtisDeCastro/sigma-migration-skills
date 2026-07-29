@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""extract-report-classic.py — adapter for the CLASSIC single-file report.json.
+"""extract-report-classic.py — adapter for the CLASSIC single-file report layout.
 
 Some Power BI reports come back from Fabric getDefinition as the legacy
 single `report.json` (top-level `sections[]` with `visualContainers[]`, each
@@ -8,17 +8,28 @@ carrying a `config` JSON string) rather than the new exploded PBIR
 handles the new layout; this adapter normalizes the classic shape into the
 SAME signals.json schema so build-workbook-from-pbir.rb can consume it.
 
-Classic report.json shape:
+The IDENTICAL classic shape also lives INSIDE a local `.pbix` file: a `.pbix`
+is a zip whose `Report/Layout` member is a single JSON document (top-level
+`sections[]`) encoded UTF-16LE — NOT the exploded PBIR. So this adapter is
+also the fully-LOCAL report front door: point it at a `.pbix` (or an already
+extracted `Report/Layout` file) with no Fabric/tenant involved.
+
+Classic report layout shape (report.json == .pbix Report/Layout):
   sections[] : { name, displayName, width, height, visualContainers[] }
     visualContainers[] : { x, y, width, height, z, config(JSON string) }
       config : { name, singleVisual:{ visualType, projections:{Role:[{queryRef}]},
                                       objects:{ title[], general[] (textbox) } } }
 
-Usage:
+Usage (any ONE of the three inputs):
+  # from a Fabric getDefinition report.json (UTF-8) — original behavior
   python3 extract-report-classic.py --report-json /tmp/pbir-orders/report.json \
       --out /tmp/pbir-orders/signals.json
+  # from a fully-local .pbix (unzips the Report/Layout member, UTF-16LE) — no Fabric
+  python3 extract-report-classic.py --pbix /path/Sales.pbix --out signals.json
+  # from an already-extracted Report/Layout file (any of UTF-16LE/utf-8-sig/utf-8)
+  python3 extract-report-classic.py --report-layout /path/Layout --out signals.json
 """
-import argparse, json, re, sys
+import argparse, io, json, re, sys, zipfile
 
 # Same visualType -> Sigma element kind table as extract-pbir.py.
 VISUAL_KIND = {
@@ -278,12 +289,89 @@ def extract(report):
     return {"source": "report.json-classic", "pages": out_pages}
 
 
+# --- input decoding ---------------------------------------------------------
+# The classic layout arrives three ways: (1) a UTF-8 report.json from Fabric
+# getDefinition (original --report-json path); (2) the raw `Report/Layout`
+# member INSIDE a local .pbix zip — a SINGLE JSON doc that Power BI Desktop
+# writes UTF-16LE (usually with a BOM); (3) an already-extracted Layout file
+# on disk. (2)/(3) may be UTF-16LE, UTF-8-with-BOM, or plain UTF-8, so decode
+# defensively: honor a BOM first, then try UTF-16LE (the Desktop default),
+# then UTF-8. json.loads tolerates a leading BOM only for utf-8-sig, so we
+# decode to str ourselves rather than handing bytes to json.
+PBIX_LAYOUT_MEMBER = "Report/Layout"
+
+
+def _decode_layout_bytes(raw):
+    """bytes -> parsed JSON, trying the encodings a classic Report/Layout uses.
+
+    Order: explicit BOM (UTF-16 LE/BE, UTF-8-sig) → UTF-16LE (Desktop default,
+    no BOM) → UTF-8. Raises ValueError with a short diagnostic if none parse."""
+    attempts = []
+    if raw[:2] == b"\xff\xfe":
+        attempts.append("utf-16")       # BOM-driven (LE)
+    elif raw[:2] == b"\xfe\xff":
+        attempts.append("utf-16")       # BOM-driven (BE)
+    elif raw[:3] == b"\xef\xbb\xbf":
+        attempts.append("utf-8-sig")
+    # Desktop writes UTF-16LE (often no BOM); then plain UTF-8 / utf-8-sig.
+    attempts += ["utf-16-le", "utf-8-sig", "utf-8", "utf-16"]
+    last = None
+    seen = set()
+    for enc in attempts:
+        if enc in seen:
+            continue
+        seen.add(enc)
+        try:
+            text = raw.decode(enc)
+        except (UnicodeDecodeError, LookupError) as e:
+            last = e
+            continue
+        text = text.lstrip("﻿")     # strip a decoded BOM char if present
+        try:
+            return json.loads(text)
+        except ValueError as e:
+            last = e
+            continue
+    raise ValueError(f"could not decode Report/Layout as JSON "
+                     f"(tried {', '.join(attempts)}): {last}")
+
+
+def load_report(report_json=None, pbix=None, report_layout=None):
+    """Resolve exactly one input into a parsed classic-report dict."""
+    if pbix:
+        with zipfile.ZipFile(pbix) as z:
+            names = set(z.namelist())
+            member = PBIX_LAYOUT_MEMBER
+            if member not in names:
+                # Some tooling stores it with a backslash separator.
+                alt = next((n for n in names if n.replace("\\", "/") == PBIX_LAYOUT_MEMBER), None)
+                if not alt:
+                    raise SystemExit(
+                        f"FATAL: '{pbix}' has no '{PBIX_LAYOUT_MEMBER}' member — "
+                        f"not a classic .pbix, or a thin/PBIR report. Members: "
+                        f"{sorted(n for n in names if n.startswith('Report'))[:5]}")
+                member = alt
+            raw = z.read(member)
+        return _decode_layout_bytes(raw)
+    if report_layout:
+        with open(report_layout, "rb") as f:
+            return _decode_layout_bytes(f.read())
+    with open(report_json, "rb") as f:
+        # report.json from Fabric is UTF-8, but decode defensively anyway.
+        return _decode_layout_bytes(f.read())
+
+
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--report-json", required=True)
+    ap = argparse.ArgumentParser(
+        description="Normalize a classic Power BI report layout (report.json / "
+                    ".pbix Report/Layout) into signals.json.")
+    src = ap.add_mutually_exclusive_group(required=True)
+    src.add_argument("--report-json", help="UTF-8 classic report.json (Fabric getDefinition)")
+    src.add_argument("--pbix", help="local .pbix file — unzips its Report/Layout (UTF-16LE) member")
+    src.add_argument("--report-layout", help="an already-extracted Report/Layout file (UTF-16LE/utf-8)")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
-    report = json.load(open(a.report_json))
+    report = load_report(report_json=a.report_json, pbix=a.pbix, report_layout=a.report_layout)
     signals = extract(report)
     json.dump(signals, open(a.out, "w"), indent=2)
     nvis = sum(len(p["visuals"]) for p in signals["pages"])
