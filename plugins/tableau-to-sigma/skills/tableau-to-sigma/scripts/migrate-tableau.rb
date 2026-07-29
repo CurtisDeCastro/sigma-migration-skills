@@ -5009,6 +5009,62 @@ end
 mark('phase5-layout')
 
 # ---------------------------------------------------------------------------
+# W2.7 helpers — render-once per latestDocumentVersion (call-site only).
+# Current document version straight from the live workbook (same field
+# ExportPool.resolve_doc_version keys its export cache on); nil on any
+# failure → no reuse anywhere (fail-open to fresh renders).
+def sigma_doc_version(wb_id)
+  spec = Sigma.request(:get, "/v2/workbooks/#{wb_id}")
+  v = spec.is_a?(Hash) ? (spec['latestDocumentVersion'] || spec['latestVersion']) : nil
+  v.nil? || v.to_s.empty? ? nil : v.to_s
+rescue StandardError
+  nil
+end
+
+# PURE reuse decision for the 6f staging: given the 5b render-versions sidecar
+# and the CURRENT doc version, return the complete staging plan iff EVERY
+# dashboard pair can be staged from on-disk artifacts at the SAME version —
+# source side from the discovery PNG cache (views/<viewId>.png, else
+# dashboards/<name>.png — verify-dashboard-visual.rb's own fallback order),
+# sigma side from the version-keyed 5b render. ANY gap → nil (fail-open: the
+# child renderer runs exactly as before). Raw evidence only — this plan copies
+# PNGs; it never touches a verdict or a manifest judgment field.
+def render_reuse_plan(work, doc_version)
+  return nil if doc_version.nil?
+  rv = JSON.parse(File.read(File.join(work, 'visual-qa', 'render-versions.json')))
+  return nil unless rv.is_a?(Hash) && rv['doc_version'] == doc_version && rv['pages'].is_a?(Hash)
+  dash_layout = JSON.parse(File.read(File.join(work, 'dashboard-layout.json')))
+  wb_ids = JSON.parse(File.read(File.join(work, 'wb-ids.json')))
+  gw = begin
+    JSON.parse(File.read(File.join(work, 'get-workbook.json')))
+  rescue StandardError
+    {}
+  end
+  views = gw.dig('workbook', 'views', 'view') || gw.dig('views', 'view') || []
+  views = [views] unless views.is_a?(Array)
+  view_id_by_name = views.each_with_object({}) { |v, h| h[v['name']] = v['id'] if v.is_a?(Hash) && v['name'] }
+  page_id_by_name = (wb_ids['pages'] || []).each_with_object({}) { |p, h| h[p['name']] = p['id'] if p['name'] }
+  slugify = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]+/, '-').gsub(/^-|-$/, '')[0..50] }
+  names = (dash_layout.is_a?(Array) ? dash_layout : []).map { |d| d['dashboard'] }
+                                                       .reject { |n| n.to_s.start_with?('[synthetic]') }
+  return nil if names.empty?
+  names.map do |name|
+    vid = view_id_by_name[name]
+    src = vid && File.join(work, 'views', "#{vid}.png")
+    unless src && File.size?(src)
+      fb = File.join(work, 'dashboards', "#{name.to_s.strip.gsub(/[^\w.-]+/, '_').gsub(/\A_+|_+\z/, '')}.png")
+      src = File.size?(fb) ? fb : nil
+    end
+    pid = page_id_by_name[name] || page_id_by_name.reject { |k, _| k == 'Data' }.values.first
+    sig = pid && rv['pages'][pid]
+    return nil unless src && sig && File.size?(sig.to_s)
+    { 'dashboard' => name, 'slug' => slugify.call(name), 'source_from' => src, 'sigma_from' => sig }
+  end
+rescue StandardError
+  nil
+end
+
+# ---------------------------------------------------------------------------
 # Phase 5b — Visual QA: render each content page to a full-page PNG so the
 # layout can be reviewed against refs/layout-visual-qa.md AND compared to the
 # source Tableau dashboard — the cross-converter visual-QA gate. Page ids come
@@ -5049,6 +5105,20 @@ Array.new([3, content_pages.size].min.clamp(1, 3)) do
 end.each(&:join)
 line "rendered #{rendered}/#{content_pages.size} full-page PNG(s) → #{vqa}"
 line 'VISUAL QA (review, do not skip): open each PNG; check vs refs/layout-visual-qa.md AND the source Tableau dashboard — titles, right chart kinds, colors, no overlaps/dead zones.' if rendered.positive?
+# W2.7 — render-once bookkeeping: key the 5b renders to the CURRENT document
+# version (the ExportPool::Cache keying discipline — raw evidence only, PNGs
+# version-keyed; VERDICTS are never reused). A later stage may reuse these
+# renders only while latestDocumentVersion is UNCHANGED; a version bump
+# always forces a fresh render (red line, pinned by test-render-once.rb).
+begin
+  _rv_pages = content_pages.map { |pg| [pg['id'], File.join(vqa, "#{pg['id']}.png")] }
+                           .select { |_, p| File.size?(p) }.to_h
+  File.write(File.join(vqa, 'render-versions.json'), JSON.pretty_generate(
+               'doc_version' => sigma_doc_version(wb_id), 'pages' => _rv_pages,
+               'rendered_at' => Time.now.utc.iso8601))
+rescue StandardError
+  nil
+end
 mark('phase5b-visual-qa')
 
 # ---------------------------------------------------------------------------
@@ -5200,10 +5270,33 @@ end
 # image next to the Sigma page render per dashboard, so the mandatory whole-page
 # visual comparison (and the repair loop: diff → fix → re-render) has both sides
 # ready. Writes visual-qa/compare-manifest.json (agent sets visual_match).
-line 'Phase 6f-visual: staging full-dashboard source-vs-Sigma image pairs for the repair loop'
-vis_threads << Thread.new do
-  Open3.capture2e({ 'SIGMA_API_TOKEN' => vis_tok }, 'ruby', File.join(HERE, 'verify-dashboard-visual.rb'),
-                  '--workbook', wb_id, '--tableau-dir', WORK)
+# W2.7 — render-once: when latestDocumentVersion is UNCHANGED since the 5b
+# renders and every pair stages from disk, copy instead of re-rendering
+# (each server-side page render is 30-90s). Any gap → the child renderer runs
+# exactly as before (fail-open). Version bump → fresh render, always.
+_doc_v6f = sigma_doc_version(wb_id)
+_reuse_plan = render_reuse_plan(WORK, _doc_v6f)
+if _reuse_plan
+  line "Phase 6f-visual: REUSING the 5b renders (documentVersion unchanged: #{_doc_v6f}) — " \
+       "#{_reuse_plan.size} pair(s) staged from disk, 0 fresh renders (W2.7)"
+  _vqa6 = File.join(WORK, 'visual-qa')
+  FileUtils.mkdir_p(_vqa6)
+  _manifest6 = _reuse_plan.map do |r|
+    src_png = File.join(_vqa6, "#{r['slug']}.source.png")
+    sig_png = File.join(_vqa6, "#{r['slug']}.sigma.png")
+    FileUtils.cp(r['source_from'], src_png) unless r['source_from'] == src_png
+    FileUtils.cp(r['sigma_from'], sig_png) unless r['sigma_from'] == sig_png
+    { 'dashboard' => r['dashboard'], 'source_png' => src_png,
+      'sigma_png' => sig_png, 'visual_match' => false }
+  end
+  File.write(File.join(_vqa6, 'compare-manifest.json'), JSON.pretty_generate(_manifest6))
+  quiet_event('render-reuse', 'doc_version' => _doc_v6f, 'pairs' => _manifest6.size)
+else
+  line 'Phase 6f-visual: staging full-dashboard source-vs-Sigma image pairs for the repair loop'
+  vis_threads << Thread.new do
+    Open3.capture2e({ 'SIGMA_API_TOKEN' => vis_tok }, 'ruby', File.join(HERE, 'verify-dashboard-visual.rb'),
+                    '--workbook', wb_id, '--tableau-dir', WORK)
+  end
 end
 vis_threads.each do |th|
   o, _st = th.value
@@ -5237,6 +5330,11 @@ end
 if rcf_passes.to_i.positive?
   puts "FIDELITY    : Phase 5g RCF loop STAGED (budget #{rcf_passes}). Iterate render→compare→fix to"
   puts '              near-exact parity BEFORE --finalize (which requires the ledger — gate 8d):'
+  if defined?(_reuse_plan) && _reuse_plan
+    puts "              W2.7: documentVersion #{_doc_v6f} is unchanged since 5b — START pass 1 from the"
+    puts '              staged 6f render (visual-qa/<dash>.sigma.png): compare + record deltas against it'
+    puts '              FIRST; call `fidelity-loop.rb render` only for pass 2+ (a render is 30-90s).'
+  end
   puts "                ruby scripts/fidelity-loop.rb render --workdir #{WORK}"
   puts '              READ rcf-pass-N.png vs the source PNG, score against refs/fidelity-rubric.md, then'
   puts '              per delta: fidelity-loop.rb record (classify spec-fixable/ui-only/sigma-capability/data),'
