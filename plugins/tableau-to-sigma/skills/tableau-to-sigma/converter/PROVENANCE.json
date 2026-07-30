@@ -78,6 +78,16 @@
         "warning provenance names (fix-pass): the five per-element advisory warnings (caption↔alias reconcile, self-referential-rename drop, aggregate-ratio promotion, aggregate-derived dimension, unresolvable-calc drop) interpolate the element's warehouse table name (source.path tail, FACT fallback — the factTableName already derived for RLS) instead of element .name, which is never set at that layer and printed \"undefined\""
       ],
       "upstream_pr": null
+    },
+    {
+      "commit": "wave/2-integration (in-place bundle patch; becomes the landing commit of the R3-1 role-play date-dimension batch)",
+      "summary": "Role-played date-dimension instancing (wave-3 R3-1 parity killer, user-ratified): one DM element instance per date role with structural role identity from the .twb object-graph — never name-content guessing, never a second relationship compounded onto another role's element. Applied to the vendored bundle in place (the local upstream clone remains divergent from source_commit d769bec); the equivalent semantics were mirrored into the local clone's src/tableau.ts as an upstreaming aid — pending upstreaming.",
+      "changes": [
+        "role captions captured structurally: <object-graph> objects' caption + properties/relation name identify each instance of a role-played physical table (N <relation> entries sharing one table attr); each instance element gets a deterministic role-suffixed name (\"<TABLE> (<Role>)\") and its relationship a matching role-suffixed name, so every [Base/REL/Field] cross-element ref resolves to its OWN instance instead of round-robin disambiguation downstream",
+        "findEntry refuse-don't-guess: an end-point object-id that only resolves by name FALLBACK onto a multi-instance physical table is role-AMBIGUOUS — the relationship is NOT wired (silent first-match glued every role onto instance 0, the collapse class) and lands as a named workbookPatterns gap (why: role-ambiguous) plus a loud warning",
+        "computed DATE()/DATETIME() join keys: when the wrapped column resolves on its own end-point entry, a deterministic calc key column (\"<Col> Join Key\" = Date([Col])) is synthesized on that side and the equality is wired on it to the end-point-resolved element (announced with an info warning); unknown functions and unresolvable wrapped columns keep the computed-only-key refuse path unchanged"
+      ],
+      "upstream_pr": null
     }
   ],
   "_upstream_and_revendor_tasks": [

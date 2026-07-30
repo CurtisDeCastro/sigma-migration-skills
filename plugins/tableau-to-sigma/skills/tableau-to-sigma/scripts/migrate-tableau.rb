@@ -4136,7 +4136,14 @@ elsif mechanical
   # VDS-only — so date axes resolve instead of NULL-bucketing.
   if have_twb
     MechanicalSpecs.recover_computed_key_joins!(dm, File.read(twb, encoding: 'UTF-8'), real_cols, dim_catalogs)
-                   .each { |m| line m }
+                   .each do |m|
+      line m
+      # Refused (ambiguous role attribution / no safe key) recoveries are
+      # checkpoint items, not drive-by log lines: record each to offramps.jsonl
+      # so the punchlist/gate context surfaces the unwired role join.
+      Offramp.log(WORK, kind: 'computed-key-role-gap', detail: m.sub(/\AGAP:\s*/, '')) \
+        if m.start_with?('GAP:') && defined?(Offramp)
+    end
   end
   # Relationship reachability guard (bead ovud): duplicate relationship names /
   # refs through nonexistent relationships make charts NULL-bucket SILENTLY.

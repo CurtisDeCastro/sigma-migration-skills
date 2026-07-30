@@ -35,8 +35,11 @@ NOTE: this artifact (~204 KB) exceeds the hosted MCP server's request body
 limit (HTTP 413). The golden is generated from the VENDORED bundle the skill
 ships (the shipped truth, including its recorded local patches — see
 `plugins/tableau-to-sigma/skills/tableau-to-sigma/converter/PROVENANCE.json`);
-last regenerated on the wave-2 object-model batch (evidence-ranked fact
-election + edge orientation + named unwired/slash warnings):
+last regenerated on the wave-3 R3-1 role-play batch (role-played DATE_DIM
+instances get deterministic role-suffixed element + relationship names —
+"DATE_DIM (Return Date)" / "DATE_DIM (Ship Date)" — and the derived-view
+[Base/REL/Field] refs resolve per instance instead of round-robin; prior
+regen was the wave-2 object-model batch):
 
 ```
 node -e 'import("file://<repo>/plugins/tableau-to-sigma/skills/tableau-to-sigma/converter/tableau.mjs").then(m => {
@@ -72,7 +75,7 @@ numbers.)
       "metrics": 26,
       "relationships": 6,
       "warnings": 22,
-      "element_names": ["CUSTOMER_DIM", "DATE_DIM", "DATE_DIM", "DIM_TIME", "PRODUCT_DIM", "PROMO_DIM", "STORE_DIM", "ORDER_FACT", "Order Fact View"],
+      "element_names": ["CUSTOMER_DIM", "DATE_DIM (Return Date)", "DATE_DIM (Ship Date)", "DIM_TIME", "PRODUCT_DIM", "PROMO_DIM", "STORE_DIM", "ORDER_FACT", "Order Fact View"],
       "metric_names": ["Shipping Amount", "Net Revenue", "Product Key", "Net Profit", "Unit Price", "Tax Amount", "Gross Revenue", "Ship Store Key", "Is Cancelled", "Unit Cost", "Gross Profit", "Order Store Key", "Order Line", "Quantity Ordered", "Is First Order", "Gross Margin Pct", "Return Rate", "Revenue Per Order", "Customer Key", "Return Date Key", "Days To Ship", "Is Returned", "Quantity Returned", "Promo Key", "Ship Date Key", "Discount Amount"]
     }
   }

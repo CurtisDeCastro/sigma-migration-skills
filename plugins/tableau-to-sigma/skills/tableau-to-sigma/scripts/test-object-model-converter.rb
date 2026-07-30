@@ -219,6 +219,148 @@ DIM_FIRST_RELS = [
 ].freeze
 FACT_FIRST_RELS = DIM_FIRST_RELS.map { |f, s, k| [s, f, k.map(&:reverse)] }.freeze
 
+# ---------------------------------------------------------------------------
+# Role-played date-dimension fixtures (wave-3 R3-1 parity killer): one
+# physical DIM_DATES role-played as Admit/Discharge/Followup Date. Tableau
+# serializes N <relation> entries sharing one physical table attr; the
+# <object-graph> object CAPTION is the role name and the metadata object-ids
+# ("DIM_DATES_<hex>") identify each instance. All names invented.
+# ---------------------------------------------------------------------------
+RP_FACT_OBJ = 'FACT_STAYS_AB12CD34EF56AB78CD90EF12AB34CD56'
+RP_DIM_OBJS = %w[DIM_DATES_AA000000000000000000000000000001
+                 DIM_DATES_BB000000000000000000000000000002
+                 DIM_DATES_CC000000000000000000000000000003].freeze
+RP_ROLES = ['Admit Date', 'Discharge Date', 'Followup Date'].freeze
+RP_STAY_TS_UUID = 'aa11bb22-cc33-4dd5-8ee6-ff6677889900'
+RP_FACT_COLS = [%w[STAY_ID string], %w[ADMIT_DATE_KEY integer], %w[DISCHARGE_DATE_KEY integer],
+                %w[FOLLOWUP_DATE_KEY integer], %w[STAY_REVENUE real]].freeze
+RP_DIM_COLS = [%w[DATE_KEY integer], %w[DATE_DAY date], %w[DATE_MONTH string]].freeze
+
+def rp_meta(parent, objid, cols, with_objids: true)
+  cols.each_with_index.map do |(phys, typ), i|
+    cap = phys.split('_').map(&:capitalize).join(' ')
+    rt = { 'real' => 5, 'integer' => 20, 'date' => 133 }.fetch(typ, 129)
+    oid = with_objids ? "<object-id>[#{objid}]</object-id>" : ''
+    <<~XML
+      <metadata-record class='column'>
+        <remote-name>#{phys}</remote-name>
+        <remote-type>#{rt}</remote-type>
+        <local-name>[#{phys}]</local-name>
+        <parent-name>[#{parent}]</parent-name>
+        <remote-alias>#{phys}</remote-alias>
+        <ordinal>#{i}</ordinal>
+        <caption>#{cap}</caption>
+        <local-type>#{typ}</local-type>
+        #{oid}
+      </metadata-record>
+    XML
+  end.join
+end
+
+def rp_object(caption, objid, rel_name)
+  <<~XML
+    <object caption='#{caption}' id='#{objid}'>
+      <properties context=''>
+        <relation connection='snowflake.conn1' name='#{rel_name}' table='[PUBLIC].[DIM_DATES]' type='table' />
+      </properties>
+    </object>
+  XML
+end
+
+def rp_rel(first_obj, second_obj, left_op, right_op)
+  <<~XML
+    <relationship>
+      <expression op='='><expression op='#{left_op}'/><expression op='#{right_op}'/></expression>
+      <first-end-point object-id='#{first_obj}' />
+      <second-end-point object-id='#{second_obj}' unique-key='true' />
+    </relationship>
+  XML
+end
+
+def roleplay_ds(ds_name, with_objids: true, calckey_only: false)
+  dim_instances = calckey_only ? %w[DIM_DATES] : %w[DIM_DATES DIM_DATES1 DIM_DATES2]
+  fact_meta = rp_meta('FACT_STAYS', RP_FACT_OBJ, RP_FACT_COLS, with_objids: with_objids)
+  if calckey_only
+    # A fact date column referenced only by uuid — the DATE([uuid]) join side.
+    fact_meta += <<~XML
+      <metadata-record class='column'>
+        <remote-name>#{RP_STAY_TS_UUID}</remote-name>
+        <remote-type>133</remote-type>
+        <local-name>[#{RP_STAY_TS_UUID}]</local-name>
+        <parent-name>[FACT_STAYS]</parent-name>
+        <remote-alias>STAY_START</remote-alias>
+        <ordinal>9</ordinal>
+        <caption>Stay Start</caption>
+        <local-type>date</local-type>
+        #{with_objids ? "<object-id>[#{RP_FACT_OBJ}]</object-id>" : ''}
+      </metadata-record>
+    XML
+  end
+  dim_meta = dim_instances.each_with_index.map do |_inst, i|
+    rp_meta('DIM_DATES', RP_DIM_OBJS[i], RP_DIM_COLS, with_objids: with_objids)
+  end.join
+  objects = ["<object caption='FACT_STAYS' id='#{RP_FACT_OBJ}'><properties context=''>" \
+             "<relation connection='snowflake.conn1' name='FACT_STAYS' table='[PUBLIC].[FACT_STAYS]' type='table' />" \
+             '</properties></object>'] +
+            dim_instances.each_with_index.map { |inst, i| rp_object(calckey_only ? 'DIM_DATES' : RP_ROLES[i], RP_DIM_OBJS[i], inst) }
+  rels =
+    if calckey_only
+      [rp_rel(RP_FACT_OBJ, RP_DIM_OBJS[0], "DATE([#{RP_STAY_TS_UUID}])", '[DATE_KEY]')]
+    else
+      %w[ADMIT_DATE_KEY DISCHARGE_DATE_KEY FOLLOWUP_DATE_KEY].each_with_index.map do |fk, i|
+        rp_rel(RP_FACT_OBJ, RP_DIM_OBJS[i], "[#{fk}]", '[DATE_KEY]')
+      end
+    end
+  <<~XML
+    <datasource caption='Stays Model' inline='true' name='#{ds_name}' version='18.1'>
+      <connection class='federated'>
+        <named-connections>
+          <named-connection caption='warehouse' name='snowflake.conn1'>
+            <connection authentication='oauth' class='snowflake' dbname='ANALYTICS' schema='PUBLIC' server='demo.example.com' warehouse='WH_TEST' />
+          </named-connection>
+        </named-connections>
+        <relation type='collection'>
+          <relation connection='snowflake.conn1' name='FACT_STAYS' table='[PUBLIC].[FACT_STAYS]' type='table' />
+          #{dim_instances.map { |inst| "<relation connection='snowflake.conn1' name='#{inst}' table='[PUBLIC].[DIM_DATES]' type='table' />" }.join("\n          ")}
+        </relation>
+        <metadata-records>
+          #{fact_meta}
+          #{dim_meta}
+        </metadata-records>
+      </connection>
+      <object-graph>
+        <objects>
+          #{objects.join("\n          ")}
+        </objects>
+        <relationships>
+          #{rels.join("\n          ")}
+        </relationships>
+      </object-graph>
+    </datasource>
+  XML
+end
+
+def roleplay_wb(ds_name, **kw)
+  <<~XML
+    <?xml version='1.0' encoding='utf-8' ?>
+    <workbook original-version='18.1' source-build='2023.1.0' source-platform='win' version='18.1' xmlns:user='http://www.tableausoftware.com/xml/user'>
+      <preferences />
+      <datasources>
+        #{roleplay_ds(ds_name, **kw)}
+      </datasources>
+      <worksheets>
+        <worksheet name='Stays Sheet'><table><view><datasources><datasource name='#{ds_name}'/></datasources></view><rows>[#{ds_name}].[sum:STAY_REVENUE:qk]</rows><cols>[#{ds_name}].[none:STAY_ID:nk]</cols></table></worksheet>
+      </worksheets>
+    </workbook>
+  XML
+end
+
+ROLEPLAY_FIXTURES = {
+  'roleplay' => { xml: roleplay_wb('federated.1role') },
+  'roleplay-ambiguous' => { xml: roleplay_wb('federated.1roleamb', with_objids: false) },
+  'roleplay-calckey' => { xml: roleplay_wb('federated.1rolekey', calckey_only: true) }
+}.freeze
+
 FIXTURES = {
   'e-worst' => { xml: wb(noodle_ds(
     tables: %w[DIM_DATES FACT_VISITS DIM_SITES DIM_PROVIDERS ENTITLEMENTS], # dim FIRST in doc order
@@ -292,7 +434,7 @@ FIXTURES = {
     </workbook>
   XML
   }
-}.freeze
+}.merge(ROLEPLAY_FIXTURES).freeze
 
 DRIVER = <<~JS
   import { readFileSync, writeFileSync } from 'node:fs';
@@ -320,6 +462,7 @@ DRIVER = <<~JS
         name: nameOf(e),
         kind: e.source && e.source.kind,
         colIds: (e.columns || []).map((c) => c.id),
+        colDefs: (e.columns || []).map((c) => ({ id: c.id, name: c.name || null, formula: c.formula || null })),
         columns: (e.columns || []).length,
         statement: e.source && e.source.kind === 'sql' ? e.source.statement : null,
         relationships: (e.relationships || []).map((r) => ({
@@ -455,6 +598,43 @@ check(names.any? { |n| n.include?('FACT_VISITS') } && names.any? { |n| n.include
       "both independent datasources present as elements (got #{names.inspect})", fails)
 check(md['warnings'].any? { |w| w =~ /multi-element data model|Multi-datasource workbook/i },
       'multi-element build announced (nothing silently dropped)', fails)
+
+puts 'Part 8 — role-played date dimension: one element instance per role (R3-1)'
+rp = results['roleplay']
+insts = rp['elements'].select { |e| e['name'].to_s =~ /\ADIM_DATES \((Admit|Discharge|Followup) Date\)\z/ }
+check(insts.size == 3,
+      "3 role instances with deterministic role names (got #{rp['elements'].map { |e| e['name'] }.inspect})", fails)
+rfact = rp['elements'].find { |e| e['name'].to_s.include?('FACT_STAYS') && e['kind'] == 'warehouse-table' }
+date_rels = (rfact && rfact['relationships'] || []).select { |r| r['target'].to_s.include?('DIM_DATES') }
+check(date_rels.size == 3 && date_rels.map { |r| r['target'] }.uniq.size == 3,
+      "fact carries exactly one relationship per role instance (got #{date_rels.map { |r| r['target'] }.inspect})", fails)
+check(date_rels.all? { |r| (r['keys'] || []).size == 1 } &&
+      date_rels.map { |r| r.dig('keys', 0, 'sourceColumnId') }.uniq.size == 3,
+      'each role relationship keys once, on its OWN fact FK', fails)
+drv = rp['elements'].find { |e| e['kind'] == 'table' && e['name'].to_s =~ /View\z/ }
+drv_refs = (drv && drv['colDefs'] || []).map { |c| c['formula'].to_s }.grep(%r{/DIM_DATES \(})
+check(drv_refs.any? && %w[Admit Discharge Followup].all? { |x| drv_refs.any? { |f| f.include?("(#{x} Date)/") } },
+      '[Base/REL/Field] refs resolve through each role-named relationship (own instance)', fails)
+check(rp['workbookPatterns'].none? { |p| p['name'].to_s =~ /role-ambiguous/ },
+      'roleplay: no false role-ambiguous gap when metadata identifies each instance', fails)
+
+amb = results['roleplay-ambiguous']
+afact = amb['elements'].find { |e| e['name'].to_s.include?('FACT_STAYS') && e['kind'] == 'warehouse-table' }
+check((afact && afact['relationships'] || []).none? { |r| r['target'].to_s.include?('DIM_DATES') },
+      'ambiguous role attribution: NO date relationship wired (no silent instance-0 collapse)', fails)
+check(amb['workbookPatterns'].count { |p| p['name'].to_s =~ /role-ambiguous/ } == 3,
+      "ambiguous: all 3 role joins land as named role-ambiguous gaps (got #{amb['workbookPatterns'].map { |p| p['name'] }.inspect})", fails)
+check(amb['warnings'].any? { |w| w =~ /role attribution AMBIGUOUS/ }, 'ambiguous: loud refuse warning', fails)
+
+ck = results['roleplay-calckey']
+cfact = ck['elements'].find { |e| e['name'].to_s.include?('FACT_STAYS') && e['kind'] == 'warehouse-table' }
+ckcol = (cfact && cfact['colDefs'] || []).find { |c| c['formula'] == 'Date([Stay Start])' }
+ckrel = (cfact && cfact['relationships'] || []).find { |r| r['target'].to_s.include?('DIM_DATES') }
+check(ckcol && ckrel && ckrel.dig('keys', 0, 'sourceColumnId') == ckcol['id'],
+      'computed DATE([col]) key wired via a synthesized calc key column on the fact', fails)
+check(ck['warnings'].any? { |w| w =~ /wired via synthesized calc key/ }, 'calc-key wiring is announced', fails)
+check(ck['workbookPatterns'].none? { |p| p['name'].to_s =~ /computed-only-key/ },
+      'no computed-only-key gap when the wrapped column resolves (wire, not refuse)', fails)
 
 puts
 if fails.empty?

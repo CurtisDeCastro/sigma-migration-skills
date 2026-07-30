@@ -4838,14 +4838,66 @@ function convertTableauToSigma(xmlContent, options = {}) {
         }
         const objGraph = nsChild(ds.ds, "object-graph");
         const relsList = asArray(objGraph?.relationships?.relationship || []);
+        // ---- role-played logical tables (one physical table, N instances) ----
+        // Tableau serializes a role-played dim as N <relation> entries sharing
+        // ONE physical `table` attr; the <object-graph> object carries the ROLE
+        // caption ("Ship Date"). Capture the caption STRUCTURALLY (object ->
+        // properties -> relation name), give each instance element a distinct
+        // deterministic name and role-suffix its relationship name so every
+        // [Base/REL/Field] ref resolves to its OWN instance — no FK-display or
+        // table-name guessing downstream.
+        const physByRelName = {};
+        for (const rel of childRels) {
+          const nm = attr(rel, "name") || attr(rel, "table") || "TABLE";
+          physByRelName[nm] = String(attr(rel, "table") || "").toUpperCase();
+        }
+        const physInstanceCount = {};
+        for (const nm of Object.keys(physByRelName)) {
+          const p = physByRelName[nm];
+          if (p)
+            physInstanceCount[p] = (physInstanceCount[p] || 0) + 1;
+        }
+        for (const ob of asArray(objGraph?.objects?.object || [])) {
+          const cap = String(attr(ob, "caption") || "").trim();
+          if (!cap)
+            continue;
+          let obRelName = "";
+          for (const p of asArray(nsChild(ob, "properties") || ob?.properties || [])) {
+            const r = asArray(p?.relation || [])[0];
+            if (r) {
+              obRelName = attr(r, "name") || attr(r, "table") || "";
+              if (obRelName)
+                break;
+            }
+          }
+          const entry = obRelName ? elementMap[obRelName] : void 0;
+          if (!entry)
+            continue;
+          const phys = physByRelName[obRelName] || "";
+          if (phys && physInstanceCount[phys] >= 2 && cap.toUpperCase() !== entry.cleanName.toUpperCase()) {
+            entry.roleCaption = cap;
+            if (!entry.element.name)
+              entry.element.name = `${entry.cleanName} (${cap})`;
+          }
+        }
         const getCleanSeg = (name) => name.replace(/[\[\]]/g, "").split(".").pop()?.replace(/_[0-9A-Fa-f]{16,}$/, "").toUpperCase() || "";
+        // Role instances of one physical table cannot be told apart by NAME: a
+        // fallback (non-exact-objId) hit on any multi-instance table is
+        // AMBIGUOUS — a silent first-match would glue every role's relationship
+        // onto instance 0 (the role-collapse class). Refuse and report instead.
         const findEntry = (objId) => {
           const exactKey = Object.keys(elementMap).find((k) => elementMap[k].objId === objId);
           if (exactKey)
             return elementMap[exactKey];
           const cleanId = getCleanSeg(objId);
-          const key = Object.keys(elementMap).find((k) => getCleanSeg(k) === cleanId);
-          return key ? elementMap[key] : void 0;
+          const keys = Object.keys(elementMap).filter((k) => getCleanSeg(k) === cleanId);
+          if (keys.length === 0)
+            return void 0;
+          const phys = physByRelName[keys[0]] || "";
+          const instKeys = phys ? Object.keys(elementMap).filter((k) => physByRelName[k] === phys) : keys;
+          if (keys.length > 1 || instKeys.length > 1)
+            return { __roleAmbiguous: true, candidates: instKeys.length > 1 ? instKeys : keys };
+          return elementMap[keys[0]];
         };
         const extractOpUuid = (opAttr) => {
           const fnWrap = opAttr.match(/^\w+\(\[?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\]?\)$/i);
@@ -4914,6 +4966,17 @@ function convertTableauToSigma(xmlContent, options = {}) {
             continue;
           const firstEntry = findEntry(attr(firstEp, "object-id"));
           const secondEntry = findEntry(attr(secondEp, "object-id"));
+          if (firstEntry?.__roleAmbiguous || secondEntry?.__roleAmbiguous) {
+            // Refuse-don't-guess: the end-point matches SEVERAL instances of one
+            // role-played physical table and nothing identifies which role owns
+            // this relationship \u2014 first-match wiring here is exactly the silent
+            // role collapse (two roles keyed onto one element).
+            const amb = firstEntry?.__roleAmbiguous ? firstEntry : secondEntry;
+            const ambId = firstEntry?.__roleAmbiguous ? attr(firstEp, "object-id") : attr(secondEp, "object-id");
+            warnings.push(`\u26A0 Relationship end-point object-id "${ambId}" matches ${amb.candidates.length} role-played instances (${amb.candidates.map((c) => `"${c}"`).join(", ")}) and none exactly \u2014 role attribution AMBIGUOUS; NOT wired. Wire manually: one element instance per role, one relationship on that role's own key.`);
+            unwiredRels.push({ a: firstEntry?.cleanName || attr(firstEp, "object-id"), b: secondEntry?.cleanName || attr(secondEp, "object-id"), why: "role-ambiguous" });
+            continue;
+          }
           if (!firstEntry || !secondEntry || firstEntry === secondEntry) {
             const missing = [!firstEntry ? attr(firstEp, "object-id") : null, !secondEntry ? attr(secondEp, "object-id") : null].filter(Boolean).join('", "');
             warnings.push(`\u26A0 Relationship end-point object-id "${missing}" matches no logical table (renamed object / unsupported shape) \u2014 NOT wired; wire this relationship manually (LEFT from fact\u2192dim).`);
@@ -4940,6 +5003,54 @@ function convertTableauToSigma(xmlContent, options = {}) {
             let srcOpRaw = nsAttr(inner[0], "op") || "";
             let tgtOpRaw = nsAttr(inner[1], "op") || "";
             if (!isPhysical(srcOpRaw) || !isPhysical(tgtOpRaw)) {
+              // DATE()/DATETIME()-wrapped side (role-played date joins): when
+              // the wrapped column resolves on one of THIS relationship's own
+              // end-point entries, synthesize a deterministic calc key column
+              // (Date([Col])) on that side and wire the equality on it — the
+              // role's key stays on its own instance. Unknown functions and
+              // unresolvable wrapped columns keep the refuse path (computed-only
+              // named gap), never a guess.
+              const fnKeySigma = { DATE: "Date", DATETIME: "Date" };
+              const fnWrapOf = (raw) => {
+                const m = String(raw).trim().match(/^([A-Za-z_]+)\(\[?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\]?\)$/i);
+                return m && fnKeySigma[m[1].toUpperCase()] ? { fn: fnKeySigma[m[1].toUpperCase()], raw: m[1].toUpperCase(), uuid: m[2].toUpperCase() } : null;
+              };
+              const ensureCalcKey = (entry, wrap) => {
+                const baseId = entry.colIdMap[wrap.uuid] || entry.colIdMap[wrap.uuid.replace(/-/g, "_")];
+                if (!baseId)
+                  return "";
+                const baseCol = entry.element.columns.find((c) => c.id === baseId);
+                const bm = baseCol && String(baseCol.formula || "").match(/^\[[^/\]]+\/([^\]]+)\]$/);
+                const baseDisp = baseCol && baseCol.name || bm && bm[1] || "";
+                if (!baseDisp || baseDisp.includes("/"))
+                  return "";
+                const calcMapKey = `${wrap.uuid}::${wrap.fn}KEY`;
+                let calcId = entry.colIdMap[calcMapKey];
+                if (!calcId) {
+                  calcId = sigmaInodeId(wrap.uuid.replace(/-/g, "_") + "_KEY");
+                  entry.element.columns.push({ id: calcId, name: `${baseDisp} Join Key`, formula: `${wrap.fn}([${baseDisp}])` });
+                  entry.element.order.push(calcId);
+                  entry.colIdMap[calcMapKey] = calcId;
+                  warnings.push(`ℹ Relationship ${firstEntry.cleanName} → ${secondEntry.cleanName}: computed key ${wrap.raw}([${baseDisp}]) wired via synthesized calc key column "${baseDisp} Join Key".`);
+                }
+                return calcId;
+              };
+              const srcWrap = fnWrapOf(srcOpRaw);
+              const tgtWrap = fnWrapOf(tgtOpRaw);
+              let aId = "", bId = "";
+              if (srcWrap && !tgtWrap && isPhysical(tgtOpRaw)) {
+                aId = ensureCalcKey(firstEntry, srcWrap);
+                if (aId)
+                  bId = ensureCol(secondEntry, parseOpRef(tgtOpRaw));
+              } else if (tgtWrap && !srcWrap && isPhysical(srcOpRaw)) {
+                bId = ensureCalcKey(secondEntry, tgtWrap);
+                if (bId)
+                  aId = ensureCol(firstEntry, parseOpRef(srcOpRaw));
+              }
+              if (aId && bId) {
+                keys.push({ aColId: aId, bColId: bId });
+                continue;
+              }
               skippedComputed++;
               continue;
             }
@@ -5119,7 +5230,9 @@ function convertTableauToSigma(xmlContent, options = {}) {
               id: sigmaShortId(),
               targetElementId: target.element.id,
               keys,
-              name: target.cleanName
+              // Role-played instances get role-suffixed relationship names so
+              // every [Base/REL/Field] ref resolves to its OWN instance.
+              name: target.roleCaption ? `${target.cleanName} (${target.roleCaption})` : target.cleanName
             });
             warnings.push(`\u2139 Relationship ${carrier.cleanName} \u2192 ${target.cleanName} wired on ${keys.length} physical key(s).`);
           }

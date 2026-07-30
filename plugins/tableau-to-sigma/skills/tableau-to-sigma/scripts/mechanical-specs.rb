@@ -1065,6 +1065,18 @@ module MechanicalSpecs
       counts = names.each_with_object(Hash.new(0)) { |n, h| h[n] += 1 }
       dupes = counts.select { |_, v| v > 1 }.keys
       dupes.each { |d| out << "element '#{elem_name(el)}': #{names.count(d)} relationships share the name #{d.inspect} — joins after the first are unreachable" }
+      # Role-collapse guard (R3-1): two relationships from one carrier to the
+      # SAME target element compound BOTH join conditions onto one instance —
+      # rows survive only when every key agrees, silently collapsing the fact
+      # (role-played dates need one element instance per role).
+      (el['relationships'] || []).group_by { |r| r['targetElementId'] }.each do |tid, group|
+        next if tid.nil? || tid.to_s.empty? # untargeted stubs can't compound
+        next if group.size < 2
+        tgt = by_id[tid]
+        out << "element '#{elem_name(el)}': #{group.size} relationships (#{group.map { |r| r['name'].inspect }.join(', ')}) " \
+               "target the SAME element '#{tgt ? elem_name(tgt) : tid}' — Sigma compounds every condition onto one " \
+               'instance and the join collapses to rows where ALL keys match; give each role its own element instance'
+      end
     end
     els.each do |el|
       src_el = el.dig('source', 'elementId') && by_id[el.dig('source', 'elementId')]
@@ -1094,24 +1106,34 @@ module MechanicalSpecs
     out
   end
 
-  # ---- computed-key join recovery (bead ovud) ---------------------------------
+  # ---- computed-key join recovery (bead ovud; role-instanced, R3-1) -----------
   # The converter SKIPS Tableau joins whose key is a computed expression
   # (`DATE([Order Date]) = [Date Key]`) — Sigma relationships join on columns.
+  # Role identity is STRUCTURAL: the join's dim end-point <object caption> is
+  # Tableau's own name for the role-played instance; the target column guid is
+  # matched against the converter's inode column ids. Never guessed from table
+  # names, and never attached to another role's element — Sigma compounds every
+  # relationship condition onto ONE element instance, so a second fact
+  # relationship on the same target element collapses the fact to rows where
+  # ALL the keys agree (the R3-1 strict-parity 0/5 killer).
   # Two mechanical recoveries:
   #   (a) the fact element CARRIES the wrapped column → add a calc key column
-  #       (`Date([Order Date])`) and a relationship keyed on it.
+  #       (`Date([Order Date])`) and a relationship keyed on it, wired to the
+  #       element that OWNS the target key guid (its own role instance).
   #   (b) the wrapped column is VDS-only (not in the converter output / real
   #       warehouse table) but the warehouse fact has "<CAPTION>_KEY"
-  #       (ORDER_DATE → ORDER_DATE_KEY) and the model already joins another
-  #       "* Date Key" FK to a date dim → add the missing base FK column, a
-  #       role-named relationship to that same dim element, AND a derived-view
-  #       date column named after the original caption ("Order Date" =
-  #       [FACT/DATE_DIM (Order Date)/Full Date]) so date-axis headers
-  #       ("Month of Order Date") resolve. Without this every date axis
-  #       NULL-buckets (the FATSCALE rehearsal failure).
+  #       (ORDER_DATE → ORDER_DATE_KEY) and the model already joins other
+  #       "* Date Key" FKs to ONE physical date view → clone that view as a NEW
+  #       per-role element instance, wire the FK to the CLONE's key, AND add a
+  #       derived-view date column named after the original caption so date-axis
+  #       headers ("Month of Order Date") resolve.
+  # AMBIGUOUS role attribution (target guid owned by several instances with no
+  # unique role match; 0 or 2+ candidate date views) is REFUSED: the join is
+  # left unwired and reported as a "GAP:"-prefixed message the orchestrator
+  # surfaces as a checkpoint/offramp item — never silently collapsed.
   # real_cols: { "TABLE" => [physical names] } from Phase 2. dim_catalogs:
   # { "TABLE" => [{'name','type'}] } for picking the dim's date payload column.
-  # Returns an array of human-readable action messages.
+  # Returns an array of human-readable action messages ("GAP: …" = refused).
   def recover_computed_key_joins!(model, twb_xml, real_cols, dim_catalogs = {})
     # Binary / mixed-encoding .twb content (some exports embed non-UTF-8 bytes)
     # makes the raw caption regex .scan below throw "invalid byte sequence in
@@ -1135,71 +1157,55 @@ module MechanicalSpecs
       cap_by_guid[guid.downcase] ||= cap.gsub('&quot;', '"').strip
     end
 
-    # Computed-key join expressions: one side FUNC([guid]), other side [guid].
-    joins = twb_xml.scan(%r{<expression op='='>\s*<expression op='([A-Z_]+)\(\[([0-9a-f-]{36})\][^']*'\s*/>\s*<expression op='\[([0-9a-f-]{36})[^']*\]'\s*/>\s*</expression>}i)
-    joins += twb_xml.scan(%r{<expression op='='>\s*<expression op='\[([0-9a-f-]{36})[^']*\]'\s*/>\s*<expression op='([A-Z_]+)\(\[([0-9a-f-]{36})\][^']*'\s*/>\s*</expression>}i)
-                    .map { |a, fn, b| [fn, b, a] }
+    # object-graph object-id -> ROLE caption (structural role identity).
+    role_by_objid = {}
+    twb_xml.scan(/<object caption='([^']*)' id='([^']*)'/i) do |cap, oid|
+      role_by_objid[oid] = cap.gsub('&quot;', '"').strip
+    end
+
+    # Computed-key relationship blocks WITH their end-points: one leaf op
+    # FUNC([guid]), the other a bare (optionally role-suffixed) [guid].
+    joins = []
+    twb_xml.scan(%r{<relationship>(.*?)</relationship>}m) do |(block)|
+      leaf_ops = block.scan(%r{<expression op='([^']*)'\s*/>}).map(&:first)
+      next unless leaf_ops.size == 2
+      fn_side = leaf_ops.index { |o| o =~ /\A[A-Z_]+\(\[[0-9a-f-]{36}\][^)]*\)\z/i }
+      next unless fn_side
+      phys_side = 1 - fn_side
+      next unless leaf_ops[phys_side] =~ /\A\[([0-9a-f-]{36})/i
+      tgt_guid = Regexp.last_match(1)
+      eps = [block[/<first-end-point[^>]*object-id='([^']*)'/, 1],
+             block[/<second-end-point[^>]*object-id='([^']*)'/, 1]]
+      joins << { fn: leaf_ops[fn_side][/\A([A-Z_]+)\(/i, 1],
+                 src_guid: leaf_ops[fn_side][/\[([0-9a-f-]{36})\]/i, 1],
+                 tgt_guid: tgt_guid, dim_objid: eps[phys_side] }
+    end
     fn_map = { 'DATE' => 'Date', 'DATETIME' => 'Date' }
 
-    joins.each do |fn, src_guid, _tgt_guid|
-      sigma_fn = fn_map[fn.to_s.upcase]
-      next unless sigma_fn
-      caption = cap_by_guid[src_guid.downcase]
-      next if caption.nil? || caption.empty?
-      slug_cap = slug(caption)
-      fact_cols = fact['columns'] || []
-      has_caption_col = fact_cols.any? { |c| col_display(c).to_s.casecmp?(caption) }
-
-      # Pick the date-dim join to mirror: an existing fact relationship whose
-      # source FK display ends in "Date Key" (ship/return date FKs).
-      cols_by_id = fact_cols.each_with_object({}) { |c, h| h[c['id']] = c }
-      mirror = (fact['relationships'] || []).find do |r|
-        sc = cols_by_id[r.dig('keys', 0, 'sourceColumnId')]
-        sc && col_display(sc).to_s =~ /Date Key\z/i
-      end
-
-      if has_caption_col && mirror
-        # (a) calc key column + relationship.
-        key_id = "c-#{slug_cap}-join-key"
-        unless fact_cols.any? { |c| c['id'] == key_id }
-          fact['columns'] << { 'id' => key_id, 'name' => "#{caption} Join Key",
-                               'formula' => "#{sigma_fn}([#{caption}])" }
-          fact['order'] << key_id if fact['order']
+    # guid -> [[element, column], …] via converter inode ids (the id embeds a
+    # clamped prefix of the physical uuid: "inode-XX/<UUID-prefix>~h").
+    owners_of = lambda do |guid|
+      up = guid.to_s.upcase
+      hits = []
+      els.each do |e|
+        next if e['id'] == fact['id'] || (derived && e['id'] == derived['id'])
+        (e['columns'] || []).each do |c|
+          seg = c['id'].to_s.split('/', 2)[1].to_s.split('~').first.to_s.upcase
+          next if seg.length < 8
+          hits << [e, c] if up.start_with?(seg) || seg.start_with?(up)
         end
-        mirror_tgt = els.find { |e| e['id'] == mirror['targetElementId'] }
-        rel_name = "#{(mirror_tgt&.dig('source', 'path') || []).last.to_s.upcase} (#{caption})"
-        fact['relationships'] << { 'id' => "rel-#{slug_cap}", 'name' => rel_name,
-                                   'targetElementId' => mirror['targetElementId'],
-                                   'keys' => [{ 'sourceColumnId' => key_id,
-                                                'targetColumnId' => mirror.dig('keys', 0, 'targetColumnId') }] }
-        msgs << "computed-key join recovered (calc key): #{fact_table} → rel '#{rel_name}' on #{sigma_fn}([#{caption}])"
-        next
       end
-
-      # (b) VDS-only column: recover via the physical "<CAPTION>_KEY" FK.
-      phys_key = "#{caption.gsub(/\s+/, '_').upcase}_KEY"
-      real_fact = (real_cols || {})[fact_table.upcase] || []
-      next unless real_fact.map { |c| c.to_s.upcase }.include?(phys_key) && mirror
-      key_disp = display_name(phys_key) # "Order Date Key"
-      key_col = fact_cols.find { |c| col_display(c).to_s.casecmp?(key_disp) }
-      unless key_col
-        key_col = { 'id' => "c-#{slug(key_disp)}", 'name' => key_disp,
-                    'formula' => "[#{fact_table}/#{key_disp}]" }
-        fact['columns'] << key_col
-        fact['order'] << key_col['id'] if fact['order']
-      end
-      tgt_el = els.find { |e| e['id'] == mirror['targetElementId'] }
-      dim_table = (tgt_el&.dig('source', 'path') || []).last.to_s
-      rel_name = "#{dim_table.upcase} (#{caption})"
-      unless (fact['relationships'] || []).any? { |r| r['name'] == rel_name }
-        fact['relationships'] << { 'id' => "rel-#{slug_cap}", 'name' => rel_name,
-                                   'targetElementId' => mirror['targetElementId'],
-                                   'keys' => [{ 'sourceColumnId' => key_col['id'],
-                                                'targetColumnId' => mirror.dig('keys', 0, 'targetColumnId') }] }
-      end
-      # Date payload column for the derived view, named after the ORIGINAL
-      # caption so chart headers ("Month of Order Date") resolve to it.
-      payload = ((dim_catalogs[dim_table.upcase] || []).find { |c| c['type'].to_s =~ /date/i } || {})['name']
+      hits
+    end
+    phys_of = ->(disp) { disp.to_s.gsub(/[^0-9A-Za-z]+/, '_').gsub(/\A_+|_+\z/, '').upcase }
+    # true / false / nil (view not discovered — cannot verify, trust structure)
+    view_has_col = lambda do |view, disp|
+      cols = (real_cols || {})[view.to_s.upcase]
+      return nil if cols.nil? || cols.empty?
+      cols.any? { |c| c.to_s.upcase == phys_of.call(disp) }
+    end
+    add_payload = lambda do |rel_name, caption, slug_cap, view|
+      payload = ((dim_catalogs[view.to_s.upcase] || []).find { |c| c['type'].to_s =~ /date/i } || {})['name']
       payload_disp = payload ? display_name(payload) : 'Full Date'
       base_seg = (fact['name'] && !fact['name'].to_s.empty?) ? fact['name'] : fact_table
       if derived && !(derived['columns'] || []).any? { |c| col_display(c).to_s.casecmp?(caption) }
@@ -1208,7 +1214,151 @@ module MechanicalSpecs
         derived['columns'] << dcol
         derived['order'] << dcol['id'] if derived['order']
       end
-      msgs << "computed-key join recovered (physical FK): #{fact_table}.#{key_disp} → rel '#{rel_name}'; derived date column '#{caption}' = [#{base_seg}/#{rel_name}/#{payload_disp}]"
+      payload_disp
+    end
+
+    joins.each do |j|
+      sigma_fn = fn_map[j[:fn].to_s.upcase]
+      next unless sigma_fn
+      caption = cap_by_guid[j[:src_guid].to_s.downcase]
+      next if caption.nil? || caption.empty?
+      role = (role_by_objid[j[:dim_objid]] || '').strip
+      role_cap = role.empty? ? caption : role
+      slug_cap = slug(caption)
+      fact['relationships'] ||= []
+      fact_cols = fact['columns'] || []
+      has_caption_col = fact_cols.any? { |c| col_display(c).to_s.casecmp?(caption) }
+
+      # ---- structural target resolution (role identity from the .twb) -------
+      owners = owners_of.call(j[:tgt_guid])
+      owner_ids = owners.map { |e, _| e['id'] }.uniq
+      target_el = target_col = nil
+      if owner_ids.size == 1
+        target_el, target_col = owners.first
+      elsif owner_ids.size > 1
+        by_role = owners.select { |e, _| !role.empty? && e['name'].to_s =~ /\(#{Regexp.escape(role)}\)\s*\z/ }
+        if by_role.map { |e, _| e['id'] }.uniq.size == 1
+          target_el, target_col = by_role.first
+        else
+          msgs << "GAP: computed-key join #{j[:fn]}([#{caption}]) — target key guid resolves to " \
+                  "#{owner_ids.size} role instances and role #{role_cap.inspect} matches none uniquely; " \
+                  'NOT wired (one element instance per date role, one relationship on its own key — wire manually)'
+          next
+        end
+      end
+      # A resolved target whose warehouse view verifiably LACKS the key column
+      # cannot host the join — fall through to the per-role instance path.
+      if target_el && view_has_col.call((target_el.dig('source', 'path') || []).last,
+                                        col_display(target_col)) == false
+        target_el = target_col = nil
+      end
+
+      if target_el && has_caption_col
+        # (a) calc key column + relationship to the guid's OWN element.
+        existing = fact['relationships'].find { |r| r['targetElementId'] == target_el['id'] }
+        if existing
+          if (existing['keys'] || []).any? { |k| k['targetColumnId'] == target_col['id'] }
+            msgs << "computed-key join already wired: #{fact_table} → '#{existing['name']}' (skipped)"
+          else
+            msgs << "GAP: computed-key join #{j[:fn]}([#{caption}]) targets '#{elem_name(target_el)}' which " \
+                    "already carries fact relationship '#{existing['name']}' — a second relationship would " \
+                    'compound both joins onto one instance (row collapse); NOT wired. Give this role its own ' \
+                    'element instance and wire manually.'
+          end
+          next
+        end
+        key_id = "c-#{slug_cap}-join-key"
+        unless fact_cols.any? { |c| c['id'] == key_id }
+          fact['columns'] << { 'id' => key_id, 'name' => "#{caption} Join Key",
+                               'formula' => "#{sigma_fn}([#{caption}])" }
+          fact['order'] << key_id if fact['order']
+        end
+        dim_table = (target_el.dig('source', 'path') || []).last.to_s
+        rel_name = target_el['name'].to_s.empty? ? "#{dim_table.upcase} (#{role_cap})" : target_el['name'].to_s
+        unless fact['relationships'].any? { |r| r['name'] == rel_name }
+          fact['relationships'] << { 'id' => "rel-#{slug_cap}", 'name' => rel_name,
+                                     'targetElementId' => target_el['id'],
+                                     'keys' => [{ 'sourceColumnId' => key_id,
+                                                  'targetColumnId' => target_col['id'] }] }
+        end
+        add_payload.call(rel_name, caption, slug_cap, dim_table)
+        msgs << "computed-key join recovered (calc key, own instance): #{fact_table} → rel '#{rel_name}' on #{sigma_fn}([#{caption}])"
+        next
+      end
+      if target_el && !has_caption_col
+        # The fact carries only a raw "<CAPTION>_KEY" surrogate; the structural
+        # target key is the wrapped-date column — an FK=date join would silently
+        # match nothing. Refuse rather than fake it.
+        msgs << "GAP: computed-key join #{j[:fn]}([#{caption}]) — fact lacks the wrapped column and the " \
+                "target '#{elem_name(target_el)}' keys on the date column itself; NOT wired (needs a calc " \
+                'key on the fact or a surrogate-keyed date view — wire manually)'
+        next
+      end
+
+      # (b) per-role INSTANCE of the physical date view, keyed on the fact's
+      # "<CAPTION>_KEY" surrogate FK.
+      phys_key = "#{phys_of.call(caption)}_KEY"
+      real_fact = (real_cols || {})[fact_table.upcase] || []
+      unless real_fact.map { |c| c.to_s.upcase }.include?(phys_key)
+        msgs << "GAP: computed-key join #{j[:fn]}([#{caption}]) — the wrapped column is not on the fact and " \
+                "#{fact_table} has no physical #{phys_key} FK; NOT wired (wire manually)"
+        next
+      end
+      mirrors = fact['relationships'].select do |r|
+        sc = fact_cols.find { |c| c['id'] == r.dig('keys', 0, 'sourceColumnId') }
+        sc && col_display(sc).to_s =~ /Date Key\z/i
+      end
+      views = mirrors.map { |r| (els.find { |e| e['id'] == r['targetElementId'] }&.dig('source', 'path') || []).last }
+                     .compact.uniq
+      if views.size != 1
+        msgs << "GAP: computed-key join #{j[:fn]}([#{caption}]) (role #{role_cap.inspect}) — " \
+                "#{views.size} candidate physical date view(s)#{views.empty? ? '' : " (#{views.join(', ')})"}; " \
+                'NOT wired: instance the date view for this role and wire manually'
+        next
+      end
+      view = views.first.to_s
+      inst_name = "#{view.upcase} (#{role_cap})"
+      if fact['relationships'].any? { |r| r['name'] == inst_name }
+        msgs << "computed-key join already wired: #{fact_table} → '#{inst_name}' (skipped)"
+        next
+      end
+      mirror = mirrors.first
+      tmpl = els.find { |e| e['id'] == mirror['targetElementId'] }
+      tgt_key_col = (tmpl['columns'] || []).find { |c| c['id'] == mirror.dig('keys', 0, 'targetColumnId') }
+      key_disp = display_name(phys_key) # "Order Date Key"
+      key_col = fact_cols.find { |c| col_display(c).to_s.casecmp?(key_disp) }
+      unless key_col
+        key_col = { 'id' => "c-#{slug(key_disp)}", 'name' => key_disp,
+                    'formula' => "[#{fact_table}/#{key_disp}]" }
+        fact['columns'] << key_col
+        fact['order'] << key_col['id'] if fact['order']
+      end
+      # ONE element instance PER ROLE — never attach this role's key to another
+      # role's element (Sigma compounds relationships onto one instance).
+      inst = { 'id' => "el-role-#{slug(role_cap)}", 'kind' => 'table', 'name' => inst_name,
+               'source' => Marshal.load(Marshal.dump(tmpl['source'])),
+               'columns' => (tmpl['columns'] || []).map do |c|
+                 nc = { 'id' => "c-role-#{slug(role_cap)}-#{slug(col_display(c) || c['id'])}",
+                        'formula' => c['formula'] }
+                 disp = (c['name'] || col_display(c)).to_s
+                 nc['name'] = disp unless disp.empty?
+                 nc
+               end }
+      inst['order'] = inst['columns'].map { |c| c['id'] }
+      page = (model['pages'] || []).find { |p| (p['elements'] || []).any? { |e| e['id'] == fact['id'] } }
+      idx = page ? (page['elements'].index { |e| e['id'] == fact['id'] } || page['elements'].size) : nil
+      page['elements'].insert(idx, inst) if page
+      els = all_elements(model)
+      inst_key = inst['columns'].find { |c| col_display(c).to_s.casecmp?(col_display(tgt_key_col).to_s) } ||
+                 inst['columns'].first
+      fact['relationships'] << { 'id' => "rel-#{slug_cap}", 'name' => inst_name,
+                                 'targetElementId' => inst['id'],
+                                 'keys' => [{ 'sourceColumnId' => key_col['id'],
+                                              'targetColumnId' => inst_key['id'] }] }
+      payload_disp = add_payload.call(inst_name, caption, slug_cap, view)
+      msgs << "computed-key join recovered (physical FK, NEW role instance): #{fact_table}.#{key_disp} → " \
+              "rel '#{inst_name}'; derived date column '#{caption}' = " \
+              "[#{(fact['name'] && !fact['name'].to_s.empty?) ? fact['name'] : fact_table}/#{inst_name}/#{payload_disp}]"
     end
     msgs
   end

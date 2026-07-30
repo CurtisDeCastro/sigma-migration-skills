@@ -217,7 +217,8 @@
               "inode-NORM0031/12AB34CD-5678-3ABC-9DEF-0123~DGeaZI",
               "inode-NORM0032/6247D8BC-9486-3D2B-B68B-039E~BLJYXu",
               "inode-NORM0033/1646CE10-B14D-3A88-8706-54AF~DvvUCZ"
-            ]
+            ],
+            "name": "DATE_DIM (Return Date)"
           },
           {
             "id": "id0034",
@@ -305,7 +306,8 @@
               "inode-NORM0044/12AB34CD-5678-3ABC-9DEF-0123~EiDzaz",
               "inode-NORM0045/6247D8BC-9486-3D2B-B68B-039E~Bc348r",
               "inode-NORM0046/1646CE10-B14D-3A88-8706-54AF~AGB9MA"
-            ]
+            ],
+            "name": "DATE_DIM (Ship Date)"
           },
           {
             "id": "id0047",
@@ -887,7 +889,7 @@
                     "targetColumnId": "inode-NORM0022/737611AE-3A14-349A-8FA8-D92D~ECZxka"
                   }
                 ],
-                "name": "DATE_DIM"
+                "name": "DATE_DIM (Return Date)"
               },
               {
                 "id": "id0134",
@@ -898,7 +900,7 @@
                     "targetColumnId": "inode-NORM0035/737611AE-3A14-349A-8FA8-D92D~BiXlOn"
                   }
                 ],
-                "name": "DATE_DIM"
+                "name": "DATE_DIM (Ship Date)"
               },
               {
                 "id": "id0135",
@@ -1316,91 +1318,91 @@
               },
               {
                 "id": "id0210",
-                "formula": "[ORDER_FACT/DATE_DIM/Full Date]"
+                "formula": "[ORDER_FACT/DATE_DIM (Return Date)/Full Date]"
               },
               {
                 "id": "id0211",
-                "formula": "[ORDER_FACT/DATE_DIM/Day Of Week]"
+                "formula": "[ORDER_FACT/DATE_DIM (Return Date)/Day Of Week]"
               },
               {
                 "id": "id0212",
-                "formula": "[ORDER_FACT/DATE_DIM/Day Of Month]"
+                "formula": "[ORDER_FACT/DATE_DIM (Return Date)/Day Of Month]"
               },
               {
                 "id": "id0213",
-                "formula": "[ORDER_FACT/DATE_DIM/Week Of Year]"
+                "formula": "[ORDER_FACT/DATE_DIM (Return Date)/Week Of Year]"
               },
               {
                 "id": "id0214",
-                "formula": "[ORDER_FACT/DATE_DIM/Month Number]"
+                "formula": "[ORDER_FACT/DATE_DIM (Return Date)/Month Number]"
               },
               {
                 "id": "id0215",
-                "formula": "[ORDER_FACT/DATE_DIM/Month Name]"
+                "formula": "[ORDER_FACT/DATE_DIM (Return Date)/Month Name]"
               },
               {
                 "id": "id0216",
-                "formula": "[ORDER_FACT/DATE_DIM/Quarter]"
+                "formula": "[ORDER_FACT/DATE_DIM (Return Date)/Quarter]"
               },
               {
                 "id": "id0217",
-                "formula": "[ORDER_FACT/DATE_DIM/Year]"
+                "formula": "[ORDER_FACT/DATE_DIM (Return Date)/Year]"
               },
               {
                 "id": "id0218",
-                "formula": "[ORDER_FACT/DATE_DIM/Is Weekend]"
+                "formula": "[ORDER_FACT/DATE_DIM (Return Date)/Is Weekend]"
               },
               {
                 "id": "id0219",
-                "formula": "[ORDER_FACT/DATE_DIM/Is Holiday]"
+                "formula": "[ORDER_FACT/DATE_DIM (Return Date)/Is Holiday]"
               },
               {
                 "id": "id0220",
-                "formula": "[ORDER_FACT/DATE_DIM/Fiscal Period]"
+                "formula": "[ORDER_FACT/DATE_DIM (Return Date)/Fiscal Period]"
               },
               {
                 "id": "id0221",
-                "formula": "[ORDER_FACT/DATE_DIM/Full Date]"
+                "formula": "[ORDER_FACT/DATE_DIM (Ship Date)/Full Date]"
               },
               {
                 "id": "id0222",
-                "formula": "[ORDER_FACT/DATE_DIM/Day Of Week]"
+                "formula": "[ORDER_FACT/DATE_DIM (Ship Date)/Day Of Week]"
               },
               {
                 "id": "id0223",
-                "formula": "[ORDER_FACT/DATE_DIM/Day Of Month]"
+                "formula": "[ORDER_FACT/DATE_DIM (Ship Date)/Day Of Month]"
               },
               {
                 "id": "id0224",
-                "formula": "[ORDER_FACT/DATE_DIM/Week Of Year]"
+                "formula": "[ORDER_FACT/DATE_DIM (Ship Date)/Week Of Year]"
               },
               {
                 "id": "id0225",
-                "formula": "[ORDER_FACT/DATE_DIM/Month Number]"
+                "formula": "[ORDER_FACT/DATE_DIM (Ship Date)/Month Number]"
               },
               {
                 "id": "id0226",
-                "formula": "[ORDER_FACT/DATE_DIM/Month Name]"
+                "formula": "[ORDER_FACT/DATE_DIM (Ship Date)/Month Name]"
               },
               {
                 "id": "id0227",
-                "formula": "[ORDER_FACT/DATE_DIM/Quarter]"
+                "formula": "[ORDER_FACT/DATE_DIM (Ship Date)/Quarter]"
               },
               {
                 "id": "id0228",
-                "formula": "[ORDER_FACT/DATE_DIM/Year]"
+                "formula": "[ORDER_FACT/DATE_DIM (Ship Date)/Year]"
               },
               {
                 "id": "id0229",
-                "formula": "[ORDER_FACT/DATE_DIM/Is Weekend]"
+                "formula": "[ORDER_FACT/DATE_DIM (Ship Date)/Is Weekend]"
               },
               {
                 "id": "id0230",
-                "formula": "[ORDER_FACT/DATE_DIM/Is Holiday]"
+                "formula": "[ORDER_FACT/DATE_DIM (Ship Date)/Is Holiday]"
               },
               {
                 "id": "id0231",
-                "formula": "[ORDER_FACT/DATE_DIM/Fiscal Period]"
+                "formula": "[ORDER_FACT/DATE_DIM (Ship Date)/Fiscal Period]"
               },
               {
                 "id": "id0232",
