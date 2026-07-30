@@ -15,7 +15,7 @@ in as DM calc columns.
 | File | What it is |
 |---|---|
 | `fixtures/datasets.json` | 2 DataSets: `Order Fact` (order_id, order_date, region, sales_amount, customer_id) + `Customer Dim` (customer_id, customer_name, segment) |
-| `fixtures/cards.json` | 3 cards (KPI `badge_singlevalue`, bar `badge_vert_bar`, table `badge_datagrid`) — determine which DataSets are "used" |
+| `fixtures/cards.json` | 3 cards (KPI `badge_singlevalue`, bar `badge_vert_bar`, table `badge_table`) — determine which DataSets are "used" |
 | `fixtures/formulas.json` | 1 PROJECTION Beast Mode (`order_year`, dataset-scoped on Order Fact) → DM calc column |
 | `fixtures/dataset-map.json` | FLAT per-dataset warehouse map: `{connectionId, database, schema, table, name}` (no `path` array) |
 
@@ -25,7 +25,8 @@ in as DM calc columns.
   determines usage)
 - raw snake_case column names → clean Sigma display names in `[TABLE/Col]`
   base-column formulas
-- `DATE` column → `format: {type: date}` hint
+- `DATE` column → `format: {kind: datetime, formatString}` (Sigma keys on
+  **kind**; `{type: date}` is REJECTED — live-validated 2026-07-30)
 - dataset-scoped PROJECTION Beast Mode → DM calc column (`Order Year`)
 - unmapped-dataset placeholder path is NOT exercised here — both DataSets are
   present in `dataset-map.json`

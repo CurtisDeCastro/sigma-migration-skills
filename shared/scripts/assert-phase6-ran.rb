@@ -1148,29 +1148,62 @@ unless opts[:skip_column]
       warn '       and re-run this gate. A credential-less run is NOT a passing run.'
       exit 5
     else
-      uri = URI("#{base}/v2/workbooks/#{wb_id}/columns")
-      req = Net::HTTP::Get.new(uri)
-      req['Authorization'] = "Bearer #{tok}"
-      req['Accept'] = 'application/json'
-      res = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https', read_timeout: 30) { |h| h.request(req) }
-
-      if res.is_a?(Net::HTTPSuccess)
-        cols = (JSON.parse(res.body)['entries'] rescue []) || []
-        error_cols = cols.select { |c| c.dig('type', 'type') == 'error' }
-        if error_cols.any?
-          warn "[FAIL] gate 3/7: live workbook #{wb_id} has #{error_cols.length} column(s) with type=error."
-          warn "       These render as visible errors in the Sigma UI (circular ref, unknown column,"
-          warn "       unsupported function, etc.). Fix the offending formulas and re-PUT before declaring GREEN."
-          error_cols.first(10).each do |c|
-            warn "         element=#{c['elementId']} col=#{c['columnId']} label=#{c['label'].inspect}"
-            warn "           formula: #{c['formula']}"
-          end
-          warn "       See beads-sigma-38a."
-          exit 5
+      # PAGINATED: limit=1000, following nextPage to exhaustion. This is gate 3/7's
+      # error-column audit. A bare first-page GET truncates at the server default of
+      # 50, which would let THIS GATE pass a wide workbook whose type=="error"
+      # columns sat past column 50 — the exact false GREEN the gate exists to
+      # prevent. Local loop rather than Sigma.list_entries: this gate deliberately
+      # carries no sigma_rest dependency.
+      cols = []
+      res  = nil
+      page = nil
+      seen = {}
+      complete = false   # did the scan reach the END of the column list?
+      loop do
+        qs  = 'limit=1000'
+        qs += "&page=#{URI.encode_www_form_component(page)}" if page
+        uri = URI("#{base}/v2/workbooks/#{wb_id}/columns?#{qs}")
+        req = Net::HTTP::Get.new(uri)
+        req['Authorization'] = "Bearer #{tok}"
+        req['Accept'] = 'application/json'
+        res = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https',
+                              read_timeout: 30) { |h| h.request(req) }
+        break unless res.is_a?(Net::HTTPSuccess)
+        doc = (JSON.parse(res.body) rescue nil)
+        break unless doc.is_a?(Hash)
+        cols.concat(doc['entries'] || [])
+        page = doc['nextPage']
+        if page.nil? || page.to_s.empty?
+          complete = true   # exhausted the list — the ONLY way this is a full scan
+          break
         end
-        puts "[OK] gate 3/7: #{cols.length} live columns clean (no type=error)"
+        # A repeated token means the server is misbehaving; stop, but do NOT claim
+        # a complete scan.
+        break if seen[page]
+        seen[page] = true
+      end
+
+      # Error columns are decisive REGARDLESS of whether the scan completed. A column
+      # we DID see with type=error is a real failure, and a transient failure on a
+      # later page must never downgrade it to a SKIP.
+      error_cols = cols.select { |c| c.dig('type', 'type') == 'error' }
+      if error_cols.any?
+        warn "[FAIL] gate 3/7: live workbook #{wb_id} has #{error_cols.length} column(s) with type=error."
+        warn "       These render as visible errors in the Sigma UI (circular ref, unknown column,"
+        warn "       unsupported function, etc.). Fix the offending formulas and re-PUT before declaring GREEN."
+        error_cols.first(10).each do |c|
+          warn "         element=#{c['elementId']} col=#{c['columnId']} label=#{c['label'].inspect}"
+          warn "           formula: #{c['formula']}"
+        end
+        warn "       See beads-sigma-38a."
+        exit 5
+      elsif !complete
+        warn "[SKIP] gate 3/7: the live column scan of #{wb_id} did NOT complete " \
+             "(#{cols.length} column(s) read; HTTP #{res&.code}) — cannot verify."
+        warn '       No type=error column was found in what WAS read, but an incomplete'
+        warn '       scan does not prove the workbook clean. Re-run this gate.'
       else
-        warn "[SKIP] gate 3/7: GET /v2/workbooks/#{wb_id}/columns returned HTTP #{res.code} — cannot verify"
+        puts "[OK] gate 3/7: #{cols.length} live columns clean (no type=error)"
       end
     end
   end

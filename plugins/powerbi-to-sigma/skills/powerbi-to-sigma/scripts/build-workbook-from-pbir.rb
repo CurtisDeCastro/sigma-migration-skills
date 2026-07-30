@@ -234,7 +234,8 @@ $used_control_ids = Hash.new(0)
 # as scattered STDERR warnings the user has to reconstruct by hand (customer
 # feedback, 2026-06-25: "silently drops components it cannot resolve"). The build
 # ALREADY warns loudly at each site — this just AGGREGATES the same facts.
-# Entry schema: {visual, pbi_type, sigma_kind, severity, detail, recoverable, action}.
+# Entry schema: {visual, pbi_type, sigma_kind, severity, detail, recoverable, action,
+#                role_class, field_bindings}.
 #   severity: 'dropped'      — nothing built for this visual/field
 #             'degraded'     — element built, but a role/field/sort was lost
 #             'approximated' — built as a different (best-effort) Sigma kind
@@ -242,14 +243,100 @@ $used_control_ids = Hash.new(0)
 #                       decision in migrate-powerbi.rb + a hard visual-compare gate)
 #              false -> a genuine Sigma spec limitation (informational only)
 $unresolved = []
+# visual_id -> the visual's full field_bindings ledger, computed ONCE (task 4,
+# see compute_field_bindings! below) and consumed by the FIRST record_unresolved
+# call site that fires for that visual — see `visual_id:` below. A visual with
+# nothing wrong never touches this (its bindings are still tallied into
+# $source_bindings_total / $resolved_bindings_total so the summary is complete).
+$pending_field_bindings = {}
 def record_unresolved(visual:, severity:, detail:, pbi_type: nil, sigma_kind: nil,
-                      recoverable: false, action: nil, entity: nil)
+                      recoverable: false, action: nil, entity: nil, role_class: nil,
+                      visual_id: nil)
   # `entity` = the PBI table/entity the dropped ref pointed at (e.g. "Dim Region"),
   # so migrate-powerbi.rb can attribute the drop to an ungranted schema for the
   # cause-grouped coverage readout (CoverageGate.classify_causes).
-  $unresolved << { 'visual' => visual.to_s, 'pbi_type' => pbi_type, 'sigma_kind' => sigma_kind,
-                   'severity' => severity, 'detail' => detail.to_s,
-                   'recoverable' => recoverable, 'action' => action, 'entity' => entity }
+  # `role_class` = the visual's role_class (control|kpi|chart|table|decoration|
+  # unsupported) from the viz-kind/custom-visual catalogs (task 1), so the
+  # coverage gate can weigh a FUNCTIONAL loss (control/kpi/chart/table) against
+  # a cosmetic one (decoration) instead of treating every entry the same.
+  # LOAD-BEARING (task 5 brief): every call site below stamps role_class — a
+  # measured live run showed the two genuinely-dropped functional visuals (a
+  # KPI card + a table) carrying role_class None, which would let
+  # CoverageGate.gate! (keys on role_class ∈ GATE_ROLES) PASS a migration that
+  # silently dropped a KPI and a table. See test-role-class-on-drop.rb.
+  #
+  # `visual_id` = rec['visual_id'], when the call site has one. It is STORED on the
+  # entry and the field_bindings ledger is attached later, when coverage.json is
+  # written — NOT here. Attaching at record time silently missed any entry that
+  # fires BEFORE compute_field_bindings! can run (resolve_map_kind warns while
+  # `master` is still being settled); measured on a real report, an azureMap entry
+  # came out with no field_bindings at all. Deferring makes it order-independent.
+  entry = { 'visual' => visual.to_s, 'pbi_type' => pbi_type, 'sigma_kind' => sigma_kind,
+            'severity' => severity, 'detail' => detail.to_s,
+            'recoverable' => recoverable, 'action' => action, 'entity' => entity,
+            'role_class' => role_class, 'visual_id' => visual_id }
+  $unresolved << entry
+end
+
+# ── Per-visual FIELD-BINDING coverage (task 4). The visual-level headline
+# ("12/12 carried over") hid reports that lost 33-54% of their FIELD bindings —
+# a table shipping 3 of 8 columns is merely 'degraded', and 'degraded' counts as
+# carried over. This tallies, for EVERY visual, the resolution status of EVERY
+# queryRef it bound, so CoverageGate.binding_totals/binding_loss/gate! (already
+# landed in lib/coverage_gate.rb, consumed read-only here) can gate on FIELD
+# loss, not just visual loss.
+#   resolved — the queryRef has a master-map entry reachable from this visual's
+#              chosen element (it ships as a real column)
+#   dropped  — the queryRef has NO master-map entry anywhere (a ghost ref that
+#              would compile to a literal [Entity.Leaf] and get pruned by
+#              drop_unresolved_columns!), or this visual never resolved a
+#              master at all (nothing built for it)
+#   degraded — the queryRef DOES resolve elsewhere in the DM, just not on the
+#              single master this element sources (mirrors the 'not reachable'
+#              warning in build_element) — present in the model, absent here
+$source_bindings_total = 0
+$resolved_bindings_total = 0
+def field_binding_status(qr, fields, master)
+  fs = field_spec(qr, fields)
+  return 'dropped' if fs['master'].nil? || master.nil?
+  return 'resolved' if fs['master'] == master || Array(fs['alts']).any? { |a| a['master'] == master }
+  'degraded'
+end
+
+# Compute + tally a visual's full field-binding ledger and stash it in
+# $pending_field_bindings[vid] for the visual's own coverage entry (whichever
+# one fires, if any — see record_unresolved's `visual_id:`) to pick up. ALWAYS
+# tallies $source_bindings_total / $resolved_bindings_total, even for a visual
+# that resolves 100% and never touches record_unresolved, so the coverage.json
+# summary reflects EVERY bound field, not just the ones with problems.
+# A degradation site that DISCARDS specific queryRefs calls this so the ledger tells
+# the truth. Without it a ref that RESOLVED against the master-map but was then
+# thrown away by the builder still counted as 'resolved' — measured on a real report,
+# a 4-level date hierarchy reduced to 1 level reported 5/5 bindings resolved while its
+# own detail said "deeper levels dropped". A binding ledger that over-reports is the
+# exact failure this whole task exists to remove, so drops must be recorded here.
+def mark_bindings_dropped!(vid, refs)
+  fb = $pending_field_bindings[vid]
+  return if fb.nil? || refs.nil?
+  wanted = Array(refs).map(&:to_s)
+  fb.each do |b|
+    next unless wanted.include?(b['queryRef'])
+    next if b['status'] == 'dropped'                 # idempotent
+    $resolved_bindings_total -= 1 if b['status'] == 'resolved'
+    b['status'] = 'dropped'
+  end
+end
+
+def compute_field_bindings!(vid, rec, fields, master, role_class)
+  refs = (rec['bindings'] || {}).values.flatten.compact
+  return if refs.empty?
+  fb = refs.map do |qr|
+    { 'queryRef' => qr.to_s, 'status' => field_binding_status(qr, fields, master),
+      'role_class' => role_class }
+  end
+  $source_bindings_total += fb.size
+  $resolved_bindings_total += fb.count { |b| b['status'] == 'resolved' }
+  $pending_field_bindings[vid] = fb
 end
 
 # ---------------------------------------------------------------------------
@@ -415,6 +502,7 @@ def record_filter_coverage(reason, sig, label, scope)
   tgt = sig['target']
   record_unresolved(visual: "#{label} [#{scope} filter]", pbi_type: "filter:#{sig['type']}",
                     sigma_kind: 'filter', severity: sev, recoverable: rec,
+                    role_class: role_class_for_kind('filter'),
                     detail: "#{detail} (target #{tgt.inspect})", action: action,
                     entity: tgt.to_s.split('.').first)
 end
@@ -530,10 +618,15 @@ def tmsl_boolean_column?(ent, leaf)
   PbiReportBuild.boolean_leaf?(leaf)
 end
 
-# PBI visualTypes that map 1:1 to a native Sigma element kind (no approximation).
-# Anything NOT in this set is rendered as a best-effort Sigma kind and recorded
-# in coverage.json as 'approximated' so the user sees the substitution (e.g.
-# treemap/funnel/gauge/ribbon/waterfall → bar). Mirrors migrate-powerbi.rb NATIVE.
+# PBI visualTypes that map 1:1 to a native Sigma element kind. `rec['approximate']`
+# from the viz-kind/custom-visual catalogs (task 1) is the AUTHORITATIVE signal
+# for the "approximated" record in build_element and is consulted first; this
+# allowlist is used ONLY as the fallback default for a record that predates task
+# 1 entirely (no 'approximate' key at all — a pre-task-1 extract, or re-running
+# only the build step against an old signals.json), so that legacy path keeps
+# recording an approximation for e.g. a bare `treemap` instead of silently
+# recording none. Anything NOT on this list, for such a legacy record, is
+# treated as approximated — the original behavior. beads-sigma-kvza.
 NATIVE_VISUAL_TYPES = %w[card multiRowCard kpi textbox actionButton lineChart areaChart
                          stackedAreaChart barChart clusteredBarChart stackedBarChart columnChart
                          clusteredColumnChart stackedColumnChart hundredPercentStackedColumnChart
@@ -607,6 +700,43 @@ def qr_leaf(qr, fallback = 'Value')
   # Sanitize at this single chokepoint so names and refs stay in sync.
   leaf = leaf.tr('[]', '').tr('/', '-')
   leaf.empty? ? fallback : leaf
+end
+
+# A control's sliced-column binding role, in preference order. The known PBI
+# roles come first (unchanged behavior — a native slicer's column has always
+# lived under one of these). Custom visuals name their OWN binding roles for
+# the exact same semantic slot: MEASURED fact — 21 third-party Powerviz
+# date-picker slicers across 3 of 4 real customer reports (R1-R4) bind their
+# date column under a custom role (e.g. `categories`), never under
+# Values/Category/Fields.
+# A future custom visual needs NO code change here: control_slice_qr (below)
+# already falls through to every OTHER binding role after this list.
+KNOWN_CONTROL_ROLES = %w[Values Category Fields].freeze
+
+# True when a queryRef is an AGGREGATE-WRAPPED ref ("Avg(T.Flag)", "Sum(...)")
+# rather than a bare column ref. Same leading-"Func(...)" shape qr_leaf already
+# unwraps for display. A custom visual's "preset"/measure role (e.g. Powerviz's
+# `presets`) carries refs shaped exactly like this — it is a MEASURE bound for
+# display, never the column the control filters on.
+def aggregate_wrapper?(qr)
+  !!(qr.to_s.strip =~ /\A[A-Za-z_][A-Za-z0-9_ ]*\(\s*.*\s*\)\z/)
+end
+
+# Find the queryRef a control slices on across ALL its binding roles, not just
+# the known PBI ones. Preference: (1) Values/Category/Fields, in that order,
+# exactly as before; (2) any OTHER role, preferring a BARE column ref over an
+# aggregate-wrapper ref (a preset/measure is never the filtered column). If
+# every remaining candidate is aggregate-wrapped, return nil so the existing
+# loud "column does not resolve" skip fires — never silently wire a measure in
+# place of the sliced column.
+def control_slice_qr(bindings)
+  b = bindings || {}
+  KNOWN_CONTROL_ROLES.each do |role|
+    qr = Array(b[role]).first
+    return qr if qr
+  end
+  other = (b.keys - KNOWN_CONTROL_ROLES).flat_map { |role| Array(b[role]) }.compact
+  other.find { |qr| !aggregate_wrapper?(qr) }
 end
 
 # ---------------------------------------------------------------------------
@@ -842,7 +972,7 @@ def build_conditional_formats(rec, qr_cids, name, kind)
   cfs = rec['conditional_formats']
   return nil unless cfs.is_a?(Array) && !cfs.empty?
   res = PbiConditionalFormats.build(cfs, qr_cids, name, kind)
-  res['coverage'].each { |c| record_unresolved(**c) }
+  res['coverage'].each { |c| record_unresolved(**c, role_class: rec['role_class'], visual_id: rec['visual_id']) }
   res['formats'].empty? ? nil : res['formats']
 end
 
@@ -926,26 +1056,28 @@ def apply_sort(el, kind, rec, qr_cids, name, cols = nil)
   norm = ->(s) { s.to_s.downcase.gsub(/[_\s]+/, ' ').strip }
   pair = qr_cids.find { |qr, _| norm.call(qr) == norm.call(srt['queryRef']) }
   cid = qr_cids[srt['queryRef']] || (pair && pair[1])
+  rc = rec['role_class']
+  vid = rec['visual_id']
   case (el['kind'] || kind)
   when 'bar-chart', 'line-chart', 'area-chart', 'combo-chart'
-    return warn_sort_miss(name, srt) unless cid
+    return warn_sort_miss(name, srt, role_class: rc, visual_id: vid) unless cid
     # A visual-level sort BY THE DIM ITSELF must not clobber the model's
     # sortByColumn axis order (PBI sorts FiscalMonth via Period; re-sorting by
     # the month NAME would go alphabetical).
     return if cid == el.dig('xAxis', 'columnId') && el.dig('xAxis', 'sort', 'by').to_s.end_with?('-sortcol')
     (el['xAxis'] ||= {})['sort'] = { 'by' => cid, 'direction' => dir }
   when 'pie-chart', 'donut-chart'
-    return warn_sort_miss(name, srt) unless cid
+    return warn_sort_miss(name, srt, role_class: rc, visual_id: vid) unless cid
     (el['color'] ||= {})['sort'] = { 'by' => cid, 'direction' => dir }
   when 'table'
-    return warn_sort_miss(name, srt) unless cid
+    return warn_sort_miss(name, srt, role_class: rc, visual_id: vid) unless cid
     if el['groupings'].is_a?(Array) && !el['groupings'].empty?
       el['groupings'][0]['sort'] = [{ 'columnId' => cid, 'direction' => dir }]
     else
       el['sort'] = [{ 'columnId' => cid, 'direction' => dir }]
     end
   when 'pivot-table'
-    return warn_sort_miss(name, srt) unless cid
+    return warn_sort_miss(name, srt, role_class: rc, visual_id: vid) unless cid
     # rowsBy[0].sort {by,direction}; coalesce-blank-first when sorting the dim
     # ascending (see lib/pbi_pivot_sort.rb — the old "not spec-expressible" punt
     # was wrong and dropped every matrix/tableEx sort).
@@ -953,16 +1085,18 @@ def apply_sort(el, kind, rec, qr_cids, name, cols = nil)
     unless applied
       warn "[build-workbook] WARN visual '#{name}': pivot-table has no rowsBy to sort — skipped."
       record_unresolved(visual: name, severity: 'degraded', recoverable: true,
+                        role_class: rc, visual_id: vid,
                         detail: 'pivot-table sort could not be applied (no rowsBy)',
                         action: 'Set the sort on the pivot in the Sigma UI after migration.')
     end
   end
 end
 
-def warn_sort_miss(name, srt)
+def warn_sort_miss(name, srt, role_class: nil, visual_id: nil)
   warn "[build-workbook] WARN visual '#{name}': sort field '#{srt['queryRef']}' is not among " \
        'the built columns — sort skipped.'
   record_unresolved(visual: name, severity: 'degraded', recoverable: true,
+                    role_class: role_class, visual_id: visual_id,
                     detail: "sort field '#{srt['queryRef']}' is not among the built columns — sort skipped",
                     action: "Add '#{srt['queryRef']}' to the visual's fields in master-map.json so the sort can resolve.")
 end
@@ -1003,6 +1137,7 @@ def resolve_map_kind(rec, name)
   warn "[build-workbook] WARN visual '#{name}': PBI map downgraded to bar chart — #{why}. "        'Sigma maps need a region-typed column (country/state/county/zip/place) or lat+long; '        'PBI relied on Bing geocoding which Sigma does not do.'
   record_unresolved(visual: name, pbi_type: 'map', sigma_kind: 'bar-chart',
                     severity: 'approximated', recoverable: true,
+                    role_class: rec['role_class'], visual_id: rec['visual_id'],
                     detail: "PBI map downgraded to bar chart — #{why}",
                     action: 'Supply a region-typed column (country/state/county/zip/place) via --bim dataCategory, ' \
                             'or lat+long bindings, to render a real Sigma map — or accept the bar approximation.')
@@ -1070,9 +1205,31 @@ def drop_unresolved_columns!(el, rec, kind)
   entities = bad.map { |c| c['formula'].to_s[/\A\[([^\]\/.]+)\./, 1] }.compact.uniq.join(', ')
   record_unresolved(visual: (rec['title'] || rec['visual_id']), pbi_type: rec['visual_type'],
                     sigma_kind: kind, severity: 'dropped', recoverable: true, entity: entities,
+                    role_class: rec['role_class'], visual_id: rec['visual_id'],
                     detail: "field(s) #{leaves} could not be resolved to a master column — dropped " \
                             '(would have shipped as a type=error column)',
                     action: "Map the PBI queryRef(s) for #{leaves} to a master column in master-map.json and re-run.")
+end
+
+# Sigma element kind -> role_class, for the (rare) coverage call sites below
+# that only have the BUILT element (not the source PBI visual record) in scope
+# — the cross-master column gate runs on already-assembled elements after every
+# page is built, well past build_element's own `rec`. Kept in lock-step with
+# build_element's role routing: every kind reachable here is value-driven
+# (kpi/chart/table); both callers already skip 'control' before reaching it.
+def role_class_for_kind(kind)
+  return 'kpi' if kind == 'kpi-chart'
+  return 'table' if %w[table pivot-table].include?(kind)
+  return 'control' if kind == 'control'
+  return 'chart' if %w[bar-chart line-chart area-chart combo-chart scatter-chart
+                        pie-chart donut-chart region-map point-map].include?(kind)
+  # Non-visual coverage subjects that still represent FUNCTIONAL loss, so gate! must
+  # fire on them: a dropped FILTER means the report lost filtering (same class as a
+  # lost control), and a 'page' entry means every data visual on that page failed to
+  # build. Mapping them to nil would make the gate silently ignore both.
+  return 'control' if kind == 'filter'
+  return 'chart' if kind == 'page'
+  nil
 end
 
 # HARD GATE (report-build hardening): no element may ship a column whose formula
@@ -1104,7 +1261,7 @@ def drop_cross_master_columns!(el, name, master_ids, by_name)
        'were DROPPED (the tile degrades instead of breaking). Bring the field onto this element\'s source ' \
        'master (a joined base) to keep it.'
   record_unresolved(visual: name, pbi_type: 'cross-master', sigma_kind: el['kind'],
-                    severity: 'dropped', recoverable: true,
+                    severity: 'dropped', recoverable: true, role_class: role_class_for_kind(el['kind']),
                     detail: "column(s) #{leaves} referenced a master other than the element's source — " \
                             'dropped (cross-master formula would compile to type=error)',
                     action: 'Add the field to this element\'s source master (or build a joined page base ' \
@@ -1165,6 +1322,7 @@ def apply_small_multiples!(el, rec, fields, master, eid, qr_cids)
          "Sigma has no native trellis for that kind (silently stripped on readback); facet left off."
     record_unresolved(visual: name, pbi_type: rec['visual_type'], sigma_kind: kind,
                       severity: 'degraded', recoverable: true,
+                      role_class: rec['role_class'], visual_id: rec['visual_id'],
                       detail: "Small multiples facet '#{facet_qr}' dropped — #{kind} has no native Sigma trellis",
                       action: "Sigma strips a #{kind} trellis on readback; #{fallback}.")
     return nil
@@ -1181,6 +1339,7 @@ def apply_small_multiples!(el, rec, fields, master, eid, qr_cids)
          "master '#{master.inspect}' — trellis NOT emitted (a Sigma element sources one master)."
     record_unresolved(visual: name, pbi_type: rec['visual_type'], sigma_kind: kind,
                       severity: 'degraded', recoverable: true,
+                      role_class: rec['role_class'], visual_id: rec['visual_id'],
                       detail: "Small multiples facet '#{facet_qr}' not reachable on master '#{master}' — trellis dropped",
                       action: "Add '#{facet_qr}' to master '#{master}' (or a single joined master) so the facet binds, then re-run.")
     return nil
@@ -1211,20 +1370,62 @@ def apply_small_multiples!(el, rec, fields, master, eid, qr_cids)
 end
 
 def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
+  # role_class (from the viz-kind/custom-visual catalogs via the extractor,
+  # task 1) says what the visual DOES: filter (control), show a number (kpi),
+  # plot a series (chart), list rows (table), decorate (decoration), or
+  # nothing Sigma can render (unsupported). Route on it BEFORE the sigma_kind
+  # switch below so a third-party slicer becomes a real control instead of a
+  # phantom chart, and so a lost control/kpi/chart/table is recorded as a
+  # FUNCTIONAL loss the coverage gate can fail on — never silently folded into
+  # 'approximated', which the coverage headline counts as carried over.
+  # beads-sigma-kvza / role_class.
+  role = rec['role_class'].to_s
+  vt   = rec['visual_type'].to_s
+  shown_vt = vt.empty? ? 'unknown/blank' : vt
+  label = rec['title'].to_s.strip.empty? ? rec['visual_id'] : rec['title']
+  if role == 'decoration'
+    # Cosmetic only — nothing built, and NOT a functional loss. Recorded at
+    # severity 'approximated' (the coverage headline's "carried over" bucket)
+    # purely so every source visual is accounted for; it never trips the
+    # recoverable-loss gate the way 'dropped' does.
+    deco_action = rec['viz_guidance'].to_s.empty? ? 'Cosmetic-only visual; no Sigma element ' \
+                  'is needed and there is nothing to configure.' : rec['viz_guidance'].to_s
+    record_unresolved(visual: label, pbi_type: shown_vt, sigma_kind: nil,
+                      severity: 'approximated', recoverable: false, role_class: role,
+                      detail: "#{shown_vt} is decorative (no data binding) — no Sigma element needed",
+                      action: deco_action)
+    return nil
+  elsif role == 'unsupported'
+    warn "[build-workbook] WARN visual '#{label}': PBI visualType '#{shown_vt}' has no Sigma " \
+         'equivalent — recorded as dropped, element SKIPPED.'
+    unsup_action = rec['viz_guidance'].to_s.empty? ? "Sigma has no equivalent for #{shown_vt}; " \
+                   'hand-build the closest element, or accept the drop.' : rec['viz_guidance'].to_s
+    record_unresolved(visual: label, pbi_type: shown_vt, sigma_kind: nil,
+                      severity: 'dropped', recoverable: true, role_class: role,
+                      detail: "#{shown_vt} has no Sigma equivalent that preserves its semantics",
+                      action: unsup_action)
+    return nil
+  end
+
   # viz-kind resolution (grounded by refs/catalogs/viz-kind.json; SIGMA_KIND is
   # derived from it). An UNMAPPED/blank kind token used to SILENTLY become a
   # bar-chart via "|| 'bar-chart'". Now the miss WARNS before the explicit
   # bar-chart fallback, and the substitution is RECORDED as an honest
-  # 'approximated' coverage entry below (the NATIVE_VISUAL_TYPES block, which
+  # 'approximated' coverage entry below (gated on rec['approximate'], which
   # also fires for the empty/unknown visualType this token would carry). This
   # is the loud counterpart to extract-pbir.py's upstream
   # VISUAL_KIND.get(vtype,'bar') coercion. beads-sigma-kvza.
+  #
+  # No role_class special-casing here: every catalog path that resolves
+  # role_class 'control' (viz-kind's `control` row, every custom-visual row,
+  # and the slicer/filter heuristic) always emits sigma_kind 'control' too,
+  # and SIGMA_KIND['control'] => 'control' — so the plain lookup already
+  # yields the right kind. A `control`-role record with some OTHER sigma_kind
+  # would be a catalog authoring bug, not something to paper over here.
   kind = SIGMA_KIND[rec['sigma_kind']]
   if kind.nil?
-    _vt = rec['visual_type'].to_s
-    _vt = 'unknown/blank' if _vt.empty?
     warn "[build-workbook] WARN visual '#{rec['title'] || rec['visual_id']}': no documented " \
-         "viz-kind mapping for sigma_kind #{rec['sigma_kind'].inspect} (PBI visualType '#{_vt}') " \
+         "viz-kind mapping for sigma_kind #{rec['sigma_kind'].inspect} (PBI visualType '#{shown_vt}') " \
          '— approximated as bar-chart. Add a cited row to refs/catalogs/viz-kind.json if this ' \
          'is a real Power BI visual.'
     kind = 'bar-chart'
@@ -1263,7 +1464,7 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
       warn "[build-workbook] visual '#{rec['visual_id']}': image asset '#{rec['resource']}' " \
            'skipped — supply --image-map {resource: hostedUrl} to embed it (Sigma images are URL-only).'
       record_unresolved(visual: (rec['title'].to_s.strip.empty? ? rec['visual_id'] : rec['title']),
-                        pbi_type: 'image', severity: 'dropped', recoverable: true,
+                        pbi_type: 'image', severity: 'dropped', recoverable: true, role_class: 'image',
                         detail: "image asset '#{rec['resource']}' skipped (Sigma images are URL-only)",
                         action: "Supply --image-map '{\"#{rec['resource']}\": \"<hostedUrl>\"}' and re-run to embed it.")
       return nil
@@ -1288,6 +1489,13 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
     else
       visual_master(rec, fields)
     end
+  # Task 4 (field-binding coverage): tally this visual's FULL field-binding
+  # ledger now that `master` is settled, so the summary's sourceBindings /
+  # resolvedBindings account for every bound queryRef — not just the ones a
+  # later warning happens to mention. Whichever coverage entry fires below (if
+  # any) for THIS visual_id picks up the ledger; a visual that resolves 100%
+  # never touches it beyond the running totals.
+  compute_field_bindings!(vid, rec, fields, master, role.empty? ? nil : role)
   # E-06: a value-driven visual with NO resolvable field binding would emit a
   # source-less element with a "[]" formula column (an empty PBI `kpi {}` or a
   # cardVisual->bar approximation), which the API rejects with
@@ -1305,6 +1513,7 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
            "#{why} — element SKIPPED (would emit a source-less \"[]\" column the API rejects)."
       record_unresolved(visual: (rec['title'] || rec['visual_id']), pbi_type: rec['visual_type'],
                         sigma_kind: kind, severity: 'dropped', recoverable: !all_qrs.empty?,
+                        role_class: (role.empty? ? nil : role), visual_id: vid,
                         detail: "#{kind} has #{why} — element skipped",
                         action: (all_qrs.empty? ? 'Source visual carries no field bindings; nothing to recover.' \
                                                 : 'Add a resolvable master element for this visual in master-map.json and re-run.'))
@@ -1329,29 +1538,41 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
            "sources only one master, so they will be DROPPED — point them at a single joined master element."
       record_unresolved(visual: (rec['title'] || rec['visual_id']), pbi_type: rec['visual_type'],
                         sigma_kind: kind, severity: 'degraded', recoverable: true,
+                        role_class: (role.empty? ? nil : role), visual_id: vid,
                         detail: "field(s) #{unreachable.join(', ')} not reachable on master '#{master}' — dropped",
                         action: "Add a single joined master element covering #{unreachable.join(', ')} " \
                                 'in master-map.json (a Sigma element sources exactly one master).')
     end
   end
-  # Record a non-native APPROXIMATION (e.g. treemap/funnel/gauge/ribbon/waterfall
-  # → bar/kpi). map/image carry their own, more specific coverage entries above,
-  # so they're excluded from NATIVE_VISUAL_TYPES handling here. This is what makes
-  # the coverage report honest about "looks like the source" vs "same numbers".
-  # beads-sigma-kvza: an EMPTY/unknown visualType used to be SILENTLY skipped
-  # here (the old `vt.empty? ||` guard) — but extract-pbir.py coerces an unknown
-  # visualType to the 'bar' token upstream (VISUAL_KIND.get(vtype,'bar')), so a
-  # blank/unknown visual shipped as an UN-ANNOUNCED bar-chart. Now EVERY miss —
-  # including an empty visual_type — warns + is recorded, not just non-empty ones.
-  vt = rec['visual_type'].to_s
-  unless NATIVE_VISUAL_TYPES.include?(vt)
-    shown_vt = vt.empty? ? 'unknown/blank' : vt
+  # Record a non-native APPROXIMATION (e.g. treemap/funnel/gauge/kpiMatrix ->
+  # bar/kpi). `image` has its own dedicated coverage entry above and ALWAYS
+  # returns early (built, or recorded 'dropped') before reaching this point, so
+  # it never falls through to here. This is what makes the coverage report
+  # honest about "looks like the source" vs "same numbers".
+  #
+  # Gated on rec['approximate'] when present (the catalogs' authoritative
+  # signal, task 1) — NOT on visualType membership in an allowlist, which
+  # mis-flagged control-class visuals (a third-party slicer's visualType is
+  # never "native") and modern PBI types the catalog already resolves
+  # losslessly (e.g. cardVisual). A record with NO 'approximate' key at all
+  # predates task 1 (an old signals.json, or the build step re-run standalone)
+  # and falls back to the original NATIVE_VISUAL_TYPES allowlist so it keeps
+  # recording legacy approximations (e.g. a bare `treemap`) instead of silently
+  # recording none. A `control` is NEVER approximated here regardless of either
+  # signal — losing or substituting a filter is a functional loss (see the
+  # 'dropped' skip above), never a cosmetic "looks a little different" one.
+  # beads-sigma-kvza.
+  approximated = rec.key?('approximate') ? rec['approximate'] : !NATIVE_VISUAL_TYPES.include?(vt)
+  if approximated && role != 'control'
     warn "[build-workbook] WARN visual '#{name}': PBI visualType '#{shown_vt}' has no native " \
          "Sigma element kind — approximated as #{kind}."
+    fallback_action = "Sigma has no native #{shown_vt}; the data is preserved as a #{kind}. " \
+                       'Accept or pick a different Sigma chart.'
     record_unresolved(visual: name, pbi_type: shown_vt, sigma_kind: kind,
                       severity: 'approximated', recoverable: false,
+                      role_class: (role.empty? ? nil : role), visual_id: vid,
                       detail: "#{shown_vt} has no native Sigma element kind — approximated as #{kind}",
-                      action: "Sigma has no native #{shown_vt}; the data is preserved as a #{kind}. Accept or pick a different Sigma chart.")
+                      action: (rec['viz_guidance'].to_s.empty? ? fallback_action : rec['viz_guidance'].to_s))
   end
   master_id = master && masters[master] ? masters[master]['id'] : nil
   el = { 'id' => eid, 'kind' => kind, 'name' => name }
@@ -1376,7 +1597,12 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
     # (pseudo entities) that carry the sliced column. A slicer column that
     # cannot be resolved to a real master column SKIPS the control with a LOUD
     # warning — never silently wires the wrong column (the old `|| mcols.first`).
-    qr = (b['Values'] || b['Category'] || b['Fields'] || []).first
+    #
+    # role_class routing (above) means `kind` can be 'control' for a visual
+    # whose visualType is a third-party custom visual — those name their OWN
+    # binding roles for the sliced column (see control_slice_qr / beads-sigma-
+    # kvza), so the lookup is NOT hardcoded to the known PBI roles alone.
+    qr = control_slice_qr(b)
     leaf = qr_leaf(qr, 'Filter')
     ent  = qr.to_s.split('.').first
     fs = qr && field_spec(qr, fields)
@@ -1394,7 +1620,7 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
                                         "(master=#{pmaster.inspect}); dropped loudly rather than " \
                                         'wired to a wrong column or shipped dead' }
       record_unresolved(visual: name, pbi_type: 'slicer', sigma_kind: 'control',
-                        severity: 'dropped', recoverable: true,
+                        severity: 'dropped', recoverable: true, role_class: 'control', visual_id: vid,
                         detail: "slicer column '#{qr}' resolves to no master column — control skipped",
                         action: "Add column '#{qr}' to a master (or fix master-map.json) so the slicer can wire, then re-run.")
       return nil
@@ -1462,7 +1688,17 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
     # column's TMSL type), so it stays as code — but the two target kinds are
     # grounded in refs/catalogs/control.json (CTL_CAT), cited to the PBI slicer
     # + Sigma control docs, so the literals can't drift. beads-sigma-kvza.
-    if tmsl_date_column?(ent, leaf)
+    #
+    # A custom visual's `sigma_target` (viz-kind/custom-visual catalog) can
+    # supply a date-range classification when no --model TMSL is available to
+    # answer from the column's real type. But it can also come from the
+    # generic NAME heuristic (pbi_viz_kind's slicer/date hint regex), which is
+    # deliberately conservative and can mismatch — same rule as
+    # tmsl_boolean_column? above ("a modeled non-boolean column is
+    # authoritative — do NOT guess from its name"): the TMSL model, when
+    # present, is authoritative and checked FIRST; the catalog's classification
+    # is trusted ONLY as a fallback when there is no model to consult at all.
+    if tmsl_date_column?(ent, leaf) || (MODEL_TABLES.empty? && rec['sigma_target'] == 'date-range')
       # date-typed slicer -> date-range control. A `list` control bound to a
       # datetime column gets its filter targets SILENTLY STRIPPED by Sigma
       # (estate-repair gotcha) — the control posts, then filters nothing.
@@ -1572,6 +1808,7 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
       warn "[build-workbook] WARN visual '#{name}': region-map colors by the measure scale — "            "PBI legend '#{srs}' dropped (no categorical legend on a Sigma region map)."
       record_unresolved(visual: name, pbi_type: 'map', sigma_kind: 'region-map',
                         severity: 'degraded', recoverable: false,
+                        role_class: rec['role_class'], visual_id: rec['visual_id'],
                         detail: "categorical legend '#{srs}' dropped — Sigma region maps color by a measure scale only",
                         action: 'Sigma region maps have no categorical legend; the map colors by the measure scale instead.')
     end
@@ -1606,8 +1843,12 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
        dim_role.all? { |q| q.to_s =~ /hierarchy/i || q.to_s =~ /\.(Year|Quarter|Month|Week|Day|Date)\s*\z/i }
       warn "[build-workbook] WARN visual '#{name}': date hierarchy with #{dim_role.length} levels " \
            "reduced to '#{dim}' — deeper drill levels (#{dim_role[1..].join(', ')}) dropped."
+      # the deeper levels are genuinely DISCARDED — tell the binding ledger, or it
+      # reports them 'resolved' and the gate under-counts the loss.
+      mark_bindings_dropped!(rec['visual_id'], dim_role[1..])
       record_unresolved(visual: name, pbi_type: rec['visual_type'], sigma_kind: kind,
                         severity: 'degraded', recoverable: true,
+                        role_class: rec['role_class'], visual_id: rec['visual_id'],
                         detail: "date hierarchy reduced to '#{dim}' — deeper levels (#{dim_role[1..].join(', ')}) dropped",
                         action: "Re-point the axis dim at the intended drill level in master-map.json; " \
                                 'deeper PBI drill-down levels map to Sigma UI drill, not a single chart.')
@@ -1763,6 +2004,7 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
           warn "[build-workbook] WARN scatter '#{name}': Size role '#{sizeqr}' is not a measure — size DROPPED."
           record_unresolved(visual: name, pbi_type: rec['visual_type'], sigma_kind: 'scatter-chart',
                             severity: 'degraded', recoverable: false,
+                            role_class: rec['role_class'], visual_id: rec['visual_id'],
                             detail: "scatter Size role '#{sizeqr}' is not a measure — bubble size dropped",
                             action: 'A Sigma scatter size dimension must be a measure; bind an aggregatable field to Size.')
         end
@@ -1806,6 +2048,7 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
              '(ungrouped scatter path).'
         record_unresolved(visual: name, pbi_type: rec['visual_type'], sigma_kind: 'scatter-chart',
                           severity: 'degraded', recoverable: true,
+                          role_class: rec['role_class'], visual_id: rec['visual_id'],
                           detail: "scatter Size role '#{(b['Size'] || []).first}' dropped (ungrouped scatter path)",
                           action: 'Add a Details/Category dimension in master-map.json so the scatter groups and the Size measure can bind.')
       end
@@ -2022,6 +2265,7 @@ def check_binding_complete!(el, rec)
        'dimension AND every measure on the page base table.'
   record_unresolved(visual: name, pbi_type: rec['visual_type'], sigma_kind: kind,
                     severity: 'degraded', recoverable: true,
+                    role_class: rec['role_class'], visual_id: rec['visual_id'],
                     detail: "#{kind} #{miss}",
                     action: 'Ensure the page base master carries this visual\'s dimension and measure columns ' \
                             '(map the queryRefs in master-map.json), then re-run.')
@@ -2140,6 +2384,7 @@ content_pages = signals['pages'].map do |pg|
          'a silently-empty page. See coverage.json for the per-visual reasons.'
     record_unresolved(visual: "page '#{pg['page_title']}'", pbi_type: 'page', sigma_kind: 'page',
                       severity: 'dropped', recoverable: true,
+                      role_class: role_class_for_kind('page'),
                       detail: "#{src_data} data visual(s) could not be built — page came out empty",
                       action: 'Map this page\'s measures/dimensions to a base master in master-map.json ' \
                               '(and translate any missing DAX measures), then re-run.')
@@ -2224,6 +2469,7 @@ content_pages.each do |pg|
          'cross-master pruning — element DROPPED entirely (it would compile to type=error).'
     record_unresolved(visual: el['id'], pbi_type: 'cross-master', sigma_kind: el['kind'],
                       severity: 'dropped', recoverable: true,
+                      role_class: role_class_for_kind(el['kind']),
                       detail: 'element had only cross-master column(s) — dropped entirely',
                       action: 'Build a joined page base carrying every measure this visual references on ' \
                               'one source, then re-run.')
@@ -2632,12 +2878,35 @@ File.write(coverage_path, JSON.pretty_generate(
                'summary' => {
                  'sourceVisuals' => total_visuals,
                  'builtElements' => built_elements,
+                 # FIELD-BINDING totals (task 4). The visual-level counts above and
+                 # these are DIFFERENT measures and both are kept: a table that
+                 # ships 3 of 8 columns is one 'degraded' visual but five dropped
+                 # bindings, and it was the visual-level view alone that let a
+                 # migration losing 33-54% of its bindings report "12/12 carried
+                 # over; 0 dropped". Tallied in compute_field_bindings! for EVERY
+                 # visual — including fully-resolved ones, which emit no coverage
+                 # entry at all — so the denominator is the whole report, not just
+                 # the visuals that had a gap. CoverageGate.binding_totals reads
+                 # these directly and only falls back to summing per-entry
+                 # field_bindings when they are absent.
+                 'sourceBindings' => $source_bindings_total,
+                 'resolvedBindings' => $resolved_bindings_total,
                  'dropped' => by_sev['dropped'] || 0,
                  'degraded' => by_sev['degraded'] || 0,
                  'approximated' => by_sev['approximated'] || 0,
                  'recoverable' => $unresolved.count { |u| u['recoverable'] }
                },
-               'unresolved' => $unresolved }
+               'unresolved' => $unresolved.each_with_object([]) { |u, acc|
+                 # attach each visual's field_bindings to its FIRST entry (see the
+                 # note in record_unresolved: doing this at record time missed any
+                 # entry that fired before the ledger was computed)
+                 vid = u['visual_id']
+                 if vid && $pending_field_bindings.key?(vid) &&
+                    acc.none? { |a| a['visual_id'] == vid && a['field_bindings'] }
+                   u = u.merge('field_bindings' => $pending_field_bindings[vid])
+                 end
+                 acc << u
+               } }
            ))
 warn "[build-workbook] wrote coverage -> #{coverage_path} " \
      "(#{total_visuals} source visual(s) -> #{built_elements} element(s); " \
