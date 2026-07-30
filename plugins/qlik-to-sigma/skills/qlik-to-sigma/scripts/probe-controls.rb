@@ -54,6 +54,7 @@
 #             1 = at least one FAIL; 2 = no control could be probed at all.
 require 'json'
 require 'csv'
+require 'date'
 require 'optparse'
 require 'net/http'
 require 'uri'
@@ -158,8 +159,39 @@ pick_value = lambda do |r|
     distinct = csv.map { |row| row[label] }.compact.map(&:to_s).reject(&:empty?).uniq
     val = distinct.find { |v| !defaults.include?(v) }
     val ? [val, "auto-picked from #{label.inspect}"] : [nil, 'no non-default value found — pass --value']
+  when 'date-range', 'date'
+    # A Sigma date-range control's value MUST be encoded "min:<date>,max:<date>"
+    # (issue #540). Every other plausible spelling is accepted by the export API
+    # and then silently IGNORED, so the element exports unchanged and the probe
+    # concludes "wired but inert" — a false failure pointing at a control that
+    # works. Measured against a live date-range control:
+    #
+    #   2025-01-01,2025-06-30                          -> FAIL (ignored)
+    #   2025-01-01T00:00:00.000Z,2025-06-30T00:00:00Z  -> FAIL (ignored)
+    #   2025-01-01..2025-06-30                         -> FAIL (ignored)
+    #   min:2025-01-01,max:2025-06-30                   -> PASS (export differs)
+    #
+    # So derive the range here instead of making the operator guess: read the
+    # target column's own values and flip to the EARLIER HALF (min..midpoint),
+    # which is a strict subset and therefore must change the export.
+    src = (el['filters'] || []).map { |f| f.is_a?(Hash) ? (f['source'] || {}).merge('columnId' => f['columnId']) : nil }.compact.first
+    src = el['source'].is_a?(Hash) && el['source']['kind'] == 'source' ? el['source']['source'].merge('columnId' => el['source']['columnId']) : src
+    return [nil, 'date-range: no target column resolvable — pass --value "min:<YYYY-MM-DD>,max:<YYYY-MM-DD>"'] unless src.is_a?(Hash) && src['elementId'] && src['columnId']
+    label = col_label[[src['elementId'], src['columnId']]]
+    return [nil, "date-range: no /columns label for #{src['elementId']}/#{src['columnId']} — pass --value \"min:<YYYY-MM-DD>,max:<YYYY-MM-DD>\""] unless label
+    csv = CSV.parse(get_baseline.call(src['elementId']), headers: true)
+    return [nil, "date-range: column #{label.inspect} not in export — pass --value \"min:<YYYY-MM-DD>,max:<YYYY-MM-DD>\""] unless csv.headers.include?(label)
+    days = csv.map { |row| (Date.parse(row[label].to_s) rescue nil) }.compact.uniq.sort
+    return [nil, "date-range: fewer than 2 distinct dates in #{label.inspect} — nothing to narrow; pass --value"] if days.size < 2
+    lo = days.first
+    mid = days[(days.size - 1) / 2]
+    mid = days[-2] if mid >= days.last   # guarantee a STRICT subset
+    [format('min:%s,max:%s', lo.strftime('%Y-%m-%d'), mid.strftime('%Y-%m-%d')),
+     "auto-picked earlier-half date range from #{label.inspect} (min:…,max:… encoding)"]
   else
-    [nil, "controlType=#{el['controlType'].inspect} has no auto flip value — pass --value"]
+    [nil, "controlType=#{el['controlType'].inspect} has no auto flip value — pass --value " \
+          '(date-range controls require the "min:<YYYY-MM-DD>,max:<YYYY-MM-DD>" encoding; ' \
+          'a bare/ISO/dotted range is accepted and then ignored, which reads as a false "inert" FAIL)']
   end
 end
 
@@ -201,8 +233,20 @@ rows.each do |r|
                  note: "#{note}; in-closure export differs (#{base.lines.count - 1} -> #{flip.lines.count - 1} rows)" }
   else
     failures += 1
+    # A date-range value in ANY spelling other than "min:<date>,max:<date>" is
+    # accepted by the export API and then IGNORED, so it produces this exact
+    # symptom on a control that actually works (issue #540). Say so here rather
+    # than letting an encoding slip read as a real defect.
+    hint = if elems[r[:control_element_id]][:el]['controlType'].to_s.start_with?('date') &&
+              !val.to_s.match?(/\Amin:.*,max:/)
+             ' — NOTE: date-range values MUST be encoded "min:<YYYY-MM-DD>,max:<YYYY-MM-DD>";' \
+             ' this value is not, so it was very likely IGNORED rather than applied. Re-probe' \
+             ' without --value to let the auto-picker derive the encoding.'
+           else
+             ''
+           end
     results << { control: cid, result: 'FAIL', element: in_el, value: val,
-                 note: "#{note}; in-closure export IDENTICAL with #{cid}=#{val.inspect} — control is wired but inert" }
+                 note: "#{note}; in-closure export IDENTICAL with #{cid}=#{val.inspect} — control is wired but inert#{hint}" }
   end
 
   next unless opts[:check_out]
