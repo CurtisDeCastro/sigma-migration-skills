@@ -27,7 +27,7 @@
 #     --folder-id ID --out /tmp/wb-spec.json
 require 'json'
 require 'optparse'
-require 'securerandom'
+require 'digest'
 require 'set'
 require_relative 'lib/coverage_catalog'
 require_relative 'lib/trellis_emit' # shared native-trellis emitter (supported-kind gate + fallbacks)
@@ -196,7 +196,32 @@ M = opts[:mname] || DMEL
 $QS_METRICS = MetricBinding.available_metrics(dm_el, rb_els.each_with_object({}) { |e, h| h[e['id']] = e })
 STDERR.puts "metric-binding: #{$QS_METRICS.size} referenceable DM metric(s) for [Metrics/<name>] refs" if $QS_METRICS.any?
 
-def nid(p = 'el'); "#{p}-" + SecureRandom.hex(5); end
+# ── Deterministic ids (issue #541) ───────────────────────────────────────────
+# Element/column ids used to be SecureRandom, so every build minted a FRESH id
+# space for the same analysis. That made a spec PUT to an existing workbook
+# unsafe: the already-applied layout.xml and the control-scope.json sidecar still
+# referenced the previous build's ids, so control lint reported ghost `mustReach`
+# targets (32 of them, live) and — the dangerous one — a layout referencing
+# elements absent from the spec renders the page N/A / blank (the Arine RCA
+# class). It also quietly contradicted the orchestrator's idempotent-resume
+# promise, since a rebuild could never reproduce the ids it had posted.
+#
+# Every id is now a short digest of the STABLE SOURCE IDENTITY — the QuickSight
+# VisualId, the master element + column name, the QS FilterControlId — so the
+# same analysis always builds the same id space and a re-PUT lines up with the
+# layout and sidecars generated beside it.
+#
+# Uniqueness stays guaranteed WITHOUT randomness: `did` registers every id it
+# returns and appends a stable first-seen ordinal (-2, -3, …) if the same
+# identity is ever requested twice (two charts sharing a dimension, or a genuine
+# digest collision). Build order is a deterministic walk of the analysis JSON, so
+# those ordinals are reproducible too.
+$ID_SEEN = Hash.new(0)
+def did(prefix, *parts)
+  base = "#{prefix}-#{Digest::SHA1.hexdigest([prefix, *parts.map(&:to_s)].join('|'))[0, 10]}"
+  n = ($ID_SEEN[base] += 1)
+  n == 1 ? base : "#{base}-#{n}"
+end
 NUM = ->(fs) { { 'kind' => 'number', 'formatString' => fs } }
 
 # ── documentation-grounded mapping catalogs (SINGLE SOURCE OF TRUTH) ──────────
@@ -548,7 +573,7 @@ def qs_color(inner, wells, el, dim_ids, m_ids, calc, master_cols, dmel, m)
     scheme = stops.size >= 2 ? stops : ['#ffffcc', '#fd8d3c', '#bd0026']
     base = (el['columns'] || []).find { |c| c['id'] == m_ids[0] }
     return nil unless base
-    cid = "clr-#{SecureRandom.hex(4)}"
+    cid = did('clr', el['id'], base['id'])
     dup = { 'id' => cid, 'formula' => base['formula'], 'name' => "#{base['name']} (color)" }
     dup['format'] = base['format'] if base['format']
     (el['columns'] ||= []) << dup
@@ -673,7 +698,7 @@ route_master = lambda do |inner|
                .max_by { |cover, negn, _e| [cover, negn] }
   return PRIMARY_MASTER if cand.nil? || cand[0] <= prim_cover   # nothing covers it better -> stay primary
   e = cand[2]
-  MASTERS[e['id']] ||= { sid: "ms-#{SecureRandom.hex(4)}", name: e['name'] || 'Data',
+  MASTERS[e['id']] ||= { sid: did('ms', e['id']), name: e['name'] || 'Data',
                          dmel: e['name'] || 'Custom SQL', dm_el_id: e['id'],
                          cols: {}, labels: rb_label_set.call(e) }
   MASTERS[e['id']]
@@ -732,9 +757,34 @@ def fmt_for(name)
   unless FMT_WARNED[name]
     FMT_WARNED[name] = true
     CLASSIFIER_WARNINGS << { 'visual' => '(format)', 'type' => 'NumberFormat',
-                             'reason' => "no QuickSight source format found for measure '#{name}' — shipped UNFORMATTED (Sigma type default); apply a Sigma number format if needed (documented D3 targets in refs/catalogs/number-format.json). Name-substring format guessing is intentionally disabled." }
+                             'reason' => "no QuickSight source format found for measure '#{name}' — chart data labels ship UNFORMATTED (Sigma type default, which matches QuickSight's own abbreviated 3.9M labels); KPI big-numbers get a GROUPED default instead (',.2f' / ',.0f' chosen by aggregation — issue #542, because Sigma's unformatted default renders period-grouped '15.045.294.83' where QuickSight renders '15,045,294.83'). Apply a Sigma number format explicitly if a measure needs currency/percent units (documented D3 targets in refs/catalogs/number-format.json). Name-substring format guessing is intentionally disabled." }
   end
   nil
+end
+
+# KPI big-number grouping fallback (issue #542).
+#
+# QuickSight frequently ships NO FormatConfiguration at all (measured: zero
+# occurrences across a whole 8-visual dashboard) while still RENDERING its KPI
+# big-numbers comma-grouped — "15,045,294.83", "800". With no source format to
+# port, fmt_for correctly returns nil and warns, but Sigma's unformatted default
+# then renders period-grouped ("15.045.294.83": three dots in one number), which
+# reads as broken to a customer even though the value is exactly right. Only a
+# visual check catches it, so it shipped once already.
+#
+# Group separators are a DISPLAY convention, not a semantic guess, so defaulting
+# them does not resurrect the banned name-substring guessing: the decimal choice
+# below is derived from the AGGREGATION in the built formula (a Count* is integral,
+# anything else may carry cents), never from the column's name. An explicit source
+# format always wins — this only fills a nil. Scoped to kpi-chart because chart
+# data labels already match QuickSight's own abbreviated form (3.9M / 1.83M) and
+# must stay untouched.
+def kpi_number_format(col)
+  return {} if col['format']                       # a real QuickSight format wins
+  f = col['formula'].to_s
+  return {} if f =~ /\A\s*Null\s*\z/i              # neutralized window calc — nothing to format
+  integral = f =~ /\A\s*Count(Distinct)?\s*\(/i
+  { 'format' => NUM.(integral ? ',.0f' : ',.2f') }
 end
 
 # Infer a Sigma region-map regionType from the geo dimension's (raw) column name.
@@ -767,7 +817,7 @@ def master_ref(colname, calc, master_cols, dmel)
     if qs_window_func?(calc[colname])
       # neutralize: a window/table-calc field can't be a live Sigma calc column.
       formula = 'Null'; nm = colname
-      master_cols[colname] = { 'id' => "m-#{SecureRandom.hex(4)}", 'formula' => formula, 'name' => nm,
+      master_cols[colname] = { 'id' => did('m', 'master', dmel, colname), 'formula' => formula, 'name' => nm,
                                'description' => "QuickSight table-calc (neutralized — re-author in Sigma): #{calc[colname]}",
                                '_window' => true }
       return master_cols[colname]
@@ -776,7 +826,7 @@ def master_ref(colname, calc, master_cols, dmel)
   else
     formula = "[#{dmel}/#{disp(colname)}]"; nm = disp(colname)
   end
-  master_cols[colname] = { 'id' => "m-#{SecureRandom.hex(4)}", 'formula' => formula, 'name' => nm }
+  master_cols[colname] = { 'id' => did('m', 'master', dmel, colname), 'formula' => formula, 'name' => nm }
 end
 
 def dim_col(role, calc, mc, dmel, m)
@@ -784,7 +834,7 @@ def dim_col(role, calc, mc, dmel, m)
   # be truncated — a raw DATETIME on a pivot Columns shelf otherwise explodes into one
   # column per timestamp and the crosstab looks empty (RCA #6, bead 3goo.6).
   return date_dim_col(role, calc, mc, dmel, m) if role[3]
-  ref = master_ref(role[1], calc, mc, dmel); id = nid('d')
+  ref = master_ref(role[1], calc, mc, dmel); id = did('d', m, ref['name'])
   [{ 'id' => id, 'formula' => "[#{m}/#{ref['name']}]", 'name' => ref['name'] }, id]
 end
 
@@ -801,7 +851,7 @@ QS_GRAIN = { 'YEAR' => 'year', 'QUARTER' => 'quarter', 'MONTH' => 'month',
 def date_dim_col(role, calc, mc, dmel, m)
   grain = QS_GRAIN[role[3].to_s.upcase]
   return dim_col(role, calc, mc, dmel, m) unless grain
-  ref = master_ref(role[1], calc, mc, dmel); id = nid('d')
+  ref = master_ref(role[1], calc, mc, dmel); id = did('d', m, ref['name'], grain)
   # Sigma datetime formatStrings are strftime conventions (NOT moment.js MMM/YYYY).
   fmt = case grain
         when 'year' then '%Y'
@@ -829,14 +879,14 @@ def meas_col(role, calc, mc, dmel, m)
       # land each base column the aggregate references on the master, then emit the
       # aggregate itself as the measure (refs resolve to the master via the `m` prefix).
       calc[col].scan(/\{([^}]+)\}/).flatten.each { |bc| master_ref(bc.strip, calc, mc, dmel) }
-      id = nid('m')
+      id = did('m', 'chart', m, col, 'agg')
       # governed [Metrics/<name>] ref when this aggregate calc matches a DM metric
       col_h = { 'id' => id, 'formula' => MetricBinding.metric_ref_or_inline(expr, m, $QS_METRICS || []), 'name' => col }
       (fs = fmt_for(col)) && (col_h['format'] = NUM.(fs))
       return [col_h, id]
     end
   end
-  ref = master_ref(col, calc, mc, dmel); id = nid('m')
+  ref = master_ref(col, calc, mc, dmel); id = did('m', 'chart', m, col)
   # a neutralized window calc field can't be aggregated as a live formula either
   if ref['_window']
     return [{ 'id' => id, 'formula' => 'Null', 'name' => ref['name'],
@@ -956,7 +1006,7 @@ def apply_visual_filters(el, vid, calc, master_cols, dmel, m)
       el['columns'] << dc
       cid = did
     end
-    (el['filters'] ||= []) << { 'id' => nid('flt'), 'columnId' => cid,
+    (el['filters'] ||= []) << { 'id' => did('flt', el['id'], cid), 'columnId' => cid,
                                 'kind' => 'list', 'mode' => f['mode'], 'values' => f['values'] }
   end
 end
@@ -1106,7 +1156,7 @@ def build_qs_control(wrap, master_cols, calc, dmel, scope, unbound, seen_cols, w
     break
   end
   return nil unless body
-  cid_src = body['FilterControlId'] || body['ParameterControlId'] || nid('ctl')
+  cid_src = body['FilterControlId'] || body['ParameterControlId'] || did('ctl', src_kind, raw_col)
   label = body.dig('Title') || body['Title'] || raw_col || cid_src
   sig = "#{src_kind} control #{cid_src.inspect}#{raw_col ? " on #{raw_col}" : ''}"
   if raw_col.nil? || raw_col.to_s.empty?
@@ -1127,7 +1177,7 @@ def build_qs_control(wrap, master_cols, calc, dmel, scope, unbound, seen_cols, w
   col_id = ref['id']
   ctl_id = 'qs-' + raw_col.to_s.gsub(/[^A-Za-z0-9]/, '') + '-filter'
   seen_cols[raw_col] = ctl_id
-  el = { 'id' => nid('ctlel'), 'kind' => 'control', 'controlId' => ctl_id,
+  el = { 'id' => did('ctlel', ctl_id), 'kind' => 'control', 'controlId' => ctl_id,
          'name' => label.to_s }
   # control kind is CATALOG-resolved (refs/catalogs/control.json): DateTimePicker /
   # RelativeDateTime -> date-range, every other wrap type -> list (the documented
@@ -1199,7 +1249,7 @@ defn['Sheets'].each_with_index do |sh, sheet_idx|
       unless fk
         # RCA #11: a simple single-computation Insight narrative -> Sigma text element.
         if vtype == 'InsightVisual' && (ibody = qs_insight_text.call(inner))
-          tid = nid('txt')
+          tid = did('txt', inner['VisualId'])
           elements << { 'id' => tid, 'kind' => 'text', 'name' => 'Insight', 'body' => ibody }
           vis_map[inner['VisualId']] = tid
           build_warnings.pop   # supersede the generic "dropped" warning we just queued
@@ -1213,7 +1263,7 @@ defn['Sheets'].each_with_index do |sh, sheet_idx|
       kind = fk; is_fallback = true
       STDERR.puts "  ~ #{vtype} (#{title}): no native Sigma kind -> migrated as #{fk} (#{reason})"
     end
-    eid = nid
+    eid = did('el', inner['VisualId'])
     vis_map[inner['VisualId']] = eid
     # PieChartVisual → pie-chart by default. Map to donut-chart ONLY when QuickSight
     # is rendering a REAL donut: DonutOptions.ArcOptions.ArcThickness is present AND
@@ -1245,7 +1295,7 @@ defn['Sheets'].each_with_index do |sh, sheet_idx|
       # workbook-level themeOverrides.hasCards below (theme-aware light/dark), not per-element.
       vals = rol.('Values'); (next if vals.empty?)
       c, cid = meas_col(vals[0], calc, mc_, dmel_, m_)
-      el = base.merge('columns' => [c.merge('name' => title)],
+      el = base.merge('columns' => [c.merge('name' => title).merge(kpi_number_format(c))],
                       'value' => { 'columnId' => cid, 'fontSize' => 24 },
                       'layout' => { 'anchor' => 'middle' })
     when 'bar-chart', 'line-chart', 'area-chart'
@@ -1421,7 +1471,7 @@ defn['Sheets'].each_with_index do |sh, sheet_idx|
       vals.each_with_index { |mv, i| c, id = meas_col(mv, calc, mc_, dmel_, m_); cols << c; cids << id; (fi = field_id(raw_vals[i])) && (cf_fieldmap[fi] = id) }
       (next if cols.empty?)
       el = base.merge('columns' => cols)
-      el['groupings'] = [{ 'id' => nid('g'), 'groupBy' => gids, 'calculations' => cids }] unless gids.empty?
+      el['groupings'] = [{ 'id' => did('g', el['id']), 'groupBy' => gids, 'calculations' => cids }] unless gids.empty?
       # D19: migrate QS TableVisual ConditionalFormatting (gradient cell color / data bars)
       # into Sigma `conditionalFormats` on the table element.
       if (cfb = inner['ConditionalFormatting'])
@@ -1497,7 +1547,7 @@ defn['Sheets'].each_with_index do |sh, sheet_idx|
     body = qs_textbox_to_markdown(tb['Content'])
     next if body.empty?
     next if body.casecmp?(sh['Name'].to_s)   # title duplicate -> header band already has it
-    tid = nid('txt')
+    tid = did('txt', 'textbox', tb['TextBoxId'] || body)
     elements << { 'id' => tid, 'kind' => 'text', 'name' => 'Text', 'body' => body }
     vis_map[tb['TextBoxId']] = tid if tb['TextBoxId']
     n_textboxes += 1
@@ -1544,7 +1594,7 @@ if File.exist?(filters_path)
     unless master.fetch('columns').any? { |c| c['id'] == ref['id'] }
       master['columns'] << master_cols[raw_col]
     end
-    applied_filters << { 'id' => "flt-#{SecureRandom.hex(4)}", 'kind' => 'list',
+    applied_filters << { 'id' => did('flt', 'master', ref['id'], val), 'kind' => 'list',
                          'columnId' => ref['id'], 'values' => [val] }
   end
   master['filters'] = applied_filters unless applied_filters.empty?
