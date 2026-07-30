@@ -207,7 +207,15 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task 2: Paginate the three canonical readers
+### Task 2: Paginate the three canonical readers, register, fan out, bump
+
+> **This task is ONE ATOMIC COMMIT.** It was originally split into "fix the canonical files" and
+> "fan them out", which is impossible here: the pre-commit hook runs `tools/check-shared.rb` against
+> **every** canonical/copy pair on **every** commit, not just staged files. A canonical edit without
+> its fan-out is rejected as `SHARED-LIB DRIFT DETECTED` (one line per plugin copy), and a manifest
+> registration without the fan-out is rejected because every declared target reports `MISSING`. So
+> canonical edits + manifest registration + `sync-shared.rb` output + version bumps land together, in
+> a single commit. `--no-verify` is not an option.
 
 **Files:**
 - Modify: `shared/scripts/verify-warehouse.rb:141`
@@ -351,7 +359,10 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task 3: Fan out, bump, and open the PR
+### Task 3: Push and open the PR
+
+> Steps 1-6 below were merged into Task 2 (see the atomicity note there). What remains here is only
+> the push and PR, run after the branch review passes.
 
 **Files:**
 - Modify (generated): `plugins/*/skills/*/scripts/{verify-warehouse,probe-controls,assert-phase6-ran,test-columns-pagination}.rb`
