@@ -543,7 +543,12 @@ def run_live!(opts)
     log 'discovery/dm-spec.json already present — skip (idempotent; pass --force to rebuild)'
     skip_phase!('build-dm', 'already built (idempotent skip)')
   else
-    ok, code, _out = run_script!('build-dm.rb')
+    # --folder-id must reach build-dm too, not just build-workbook-spec: the DM
+    # spec itself needs a folderId or POST /v2/dataModels/spec 400s with
+    # "Expecting UUID at 0.folderId" (live-validated 2026-07-30).
+    dm_args = ['build-dm.rb']
+    dm_args += ['--folder-id', opts[:folder_id]] if opts[:folder_id]
+    ok, code, _out = run_script!(*dm_args)
     if !ok && File.exist?(File.join(DISCOVERY, 'dataset-map.template.json')) && !File.exist?(File.join(DISCOVERY, 'dataset-map.json'))
       fail_phase!('build-dm', 'wrote discovery/dataset-map.template.json — fill in the warehouse mapping for ' \
                               'each DataSet as discovery/dataset-map.json and re-run')
