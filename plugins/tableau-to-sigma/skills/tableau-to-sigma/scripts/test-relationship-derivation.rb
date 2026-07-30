@@ -33,6 +33,7 @@
 require 'json'
 require 'open3'
 require 'tmpdir'
+require 'set'
 
 HERE      = File.expand_path(__dir__)
 FIXTURE   = File.expand_path('../../../../../corpus/tableau/logical-model-objectgraph', HERE)
@@ -61,6 +62,51 @@ def locate_elements(model, fails)
         "(checked ['elements'] and ['pages'][0]['elements']; found #{found})"
   check(false, msg, fails)
   []
+end
+
+# Same normalization the converter's own candidateNames()/colIdMap keys apply
+# (converter/tableau.mjs, PR2a derivation ladder): strip a trailing "(...)"
+# annotation a metadata-record caption may carry (e.g. "Order Date (Order
+# Date)"), collapse whitespace to underscore, uppercase. Applied identically
+# to BOTH sides below (the .twb's declared names and the model's resolved
+# display names) so the two are comparable.
+def normalize_name(n)
+  return nil if n.nil?
+  n.to_s.sub(/\s*\([^)]*\)\s*\z/, '').strip.gsub(/\s+/, '_').upcase
+end
+
+# Finding 1 (review, 2026-07-30): the anti-fabrication check must NOT compare
+# against element.columns, because ensureCol (converter/tableau.mjs) PUSHES
+# whatever name it's given into element.columns as its very mechanism for
+# supplying a serialized-but-not-yet-materialized physical key — a fabricated
+# guess would appear there just as legitimately as a real column and the
+# check would always pass. The .twb itself — its <metadata-record> captions
+# and <column name="..."> attributes — is what Tableau actually declared; a
+# fabricated name cannot appear there. This scans the fixture's raw XML
+# (regex, not the full XML parser tableau.mjs uses) for both column-
+# declaration shapes the converter's collection-branch column build loop
+# reads from (converter/tableau.mjs ~4762-4792): metadata-record class="column"
+# blocks (caption / remote-alias / local-name, in that fallback order — same
+# as the converter) and plain <column name="..."> attributes (the no-
+# metadata-records fallback path).
+def declared_twb_column_names(twb_path)
+  raw = File.read(twb_path, encoding: 'utf-8')
+  names = []
+  raw.scan(/<column\b[^>]*\bname=(["'])(.*?)\1/m) { |_, n| names << n }
+  raw.scan(/<metadata-record\b[^>]*>.*?<\/metadata-record>/m).each do |block|
+    next unless block =~ /\bclass=(["'])column\1/
+    cap = block[/<caption>(.*?)<\/caption>/m, 1] ||
+          block[/<remote-alias>(.*?)<\/remote-alias>/m, 1] ||
+          block[/<local-name>(.*?)<\/local-name>/m, 1]
+    names << cap if cap
+  end
+  names.map { |n| normalize_name(n) }.reject { |n| n.nil? || n.empty? }.to_set
+end
+
+def display_name_for(el, col_id)
+  col = (el['columns'] || []).find { |c| c['id'] == col_id }
+  return nil unless col
+  col['name'] || (col['formula'].is_a?(String) && col['formula'][/\/([^\]]+)\]\z/, 1])
 end
 
 twb_path = ENV['TEST_RELATIONSHIP_DERIVATION_TWB'] || TWB
@@ -140,8 +186,13 @@ check(!date.empty?, 'computed-key FACT_WIDE->DIM_DATE appears in the coverage le
 check(%w[serialized name-inference unwired].include?(date['derivedVia']),
       "computed-key relationship records a known derivedVia (got #{date['derivedVia'].inspect})", fails)
 
-# 4. Every wired relationship's keys must be REAL columns on both elements — an
-#    inferred key must never fabricate a column.
+# 4. Every wired relationship's keys must trace back to a column NAME the
+#    .twb itself declared — not merely one present in element.columns, which
+#    ensureCol will happily contain a fabricated name in (see
+#    declared_twb_column_names above). This is the actual anti-fabrication
+#    check; an inferred key resolving to a name absent from the .twb source
+#    of truth is a fabrication regardless of what element.columns says.
+declared_names = declared_twb_column_names(twb_path)
 els = locate_elements(doc['model'] || {}, fails)
 by_id = els.each_with_object({}) { |e, h| h[e['id']] = e }
 bad = []
@@ -149,14 +200,17 @@ els.each do |el|
   (el['relationships'] || []).each do |rel|
     tgt = by_id[rel['targetElementId']]
     (rel['keys'] || []).each do |k|
-      bad << "#{el['id']}->#{rel['targetElementId']}" unless
-        (el['columns'] || []).any? { |c| c['id'] == k['sourceColumnId'] } &&
-        (tgt&.dig('columns') || []).any? { |c| c['id'] == k['targetColumnId'] }
+      src_name = normalize_name(display_name_for(el, k['sourceColumnId']))
+      tgt_name = tgt && normalize_name(display_name_for(tgt, k['targetColumnId']))
+      ok = src_name && declared_names.include?(src_name) &&
+           tgt_name && declared_names.include?(tgt_name)
+      bad << "#{el['id']}->#{rel['targetElementId']} (src=#{src_name.inspect}, tgt=#{tgt_name.inspect})" unless ok
     end
   end
 end
 check(bad.empty?,
-      "every wired key references columns that EXIST on both sides (offenders: #{bad.uniq.join(', ')})",
+      "every wired key's column name is DECLARED in the .twb itself, not merely present in " \
+      "element.columns post-ensureCol (offenders: #{bad.uniq.join(', ')})",
       fails)
 
 puts ''

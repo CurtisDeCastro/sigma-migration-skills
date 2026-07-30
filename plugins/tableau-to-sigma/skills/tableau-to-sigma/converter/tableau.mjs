@@ -4845,7 +4845,18 @@ function convertTableauToSigma(xmlContent, options = {}) {
         const candidateNames = (entry) => (entry.element.columns || []).map((c) => c.name || (typeof c.formula === "string" && (c.formula.match(/\/([^\]]+)\]$/) || [])[1])).filter(Boolean).map((nm) => String(nm).replace(/\s+/g, "_").toUpperCase());
         const hasCol = (entry, key) => Boolean(entry.colIdMap[key] || entry.colIdMap[key.replace(/-/g, "_")]);
         const entityNameOf = (cleanName) => String(cleanName || "").toUpperCase().replace(/^(DIM|FACT|BRIDGE)_/, "");
-        const isKeyShapedName = (name, entityName) => /(_ID|_KEY|_SK|_CODE)$/.test(name) || !!entityName && (name === entityName || name.includes(entityName));
+        const escapeRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        // Precise, NOT `includes`: a loose substring match on the entity name wires
+        // non-key denormalized columns (a fact's CUSTOMER_NAME shares "CUSTOMER" with
+        // DIM_CUSTOMER and would otherwise become the sole "candidate", getting wired
+        // on a name column a dim is usually unique on — gate 16's probe cannot catch
+        // that) AND discards genuine keys (ORDER_DATE contains "DATE", so a DIM_DATE
+        // pair sharing both DATE_KEY and ORDER_DATE would see 2 "key-shaped" candidates
+        // and refuse to wire the obvious DATE_KEY). A name is key-shaped only if it ends
+        // in an explicit key suffix (entity-agnostic — two unrelated *_ID columns
+        // shared between two tables correctly yields 2 candidates and no guess), IS the
+        // target entity name exactly, or is the target entity name plus a key suffix.
+        const isKeyShapedName = (name, entityName) => /_(ID|KEY|SK|CODE)$/.test(name) || !!entityName && (name === entityName || new RegExp(`^${escapeRe(entityName)}_(ID|KEY|SK|CODE)$`).test(name));
         const inferRelationshipKeyByName = (firstEntry, secondEntry) => {
           const leftNames = candidateNames(firstEntry);
           const rightSet = new Set(candidateNames(secondEntry));
@@ -4864,16 +4875,33 @@ function convertTableauToSigma(xmlContent, options = {}) {
             return { ok: true, name: keyShaped[0], candidates, keyShaped };
           return { ok: false, candidates, keyShaped };
         };
-        const unwiredReason = (inferred) => inferred.candidates.length === 0 ? "no existing column name matches on both sides" : inferred.keyShaped.length === 0 ? "candidate name(s) matched but none look key-shaped (_ID/_KEY/_SK/_CODE, or the target entity name)" : `ambiguous: ${inferred.keyShaped.length} key-shaped candidates \u2014 refusing to guess a composite key`;
+        const unwiredReason = (inferred) => inferred.candidates.length === 0 ? "no existing column name matches on both sides" : inferred.keyShaped.length === 0 ? "candidate name(s) matched but none look key-shaped (a _ID/_KEY/_SK/_CODE suffix, the exact target entity name, or the entity name plus that suffix)" : `ambiguous: ${inferred.keyShaped.length} key-shaped candidates \u2014 refusing to guess a composite key`;
         for (const rel of relsList) {
           const firstEp = rel["first-end-point"];
           const secondEp = rel["second-end-point"];
-          if (!firstEp || !secondEp)
+          const firstObjId = firstEp ? attr(firstEp, "object-id") : "";
+          const secondObjId = secondEp ? attr(secondEp, "object-id") : "";
+          if (!firstEp || !secondEp) {
+            relCoverage.entries.push({
+              left: firstObjId || "(missing first-end-point)",
+              right: secondObjId || "(missing second-end-point)",
+              derivedVia: "unwired",
+              reason: "relationship XML is missing a first-end-point or second-end-point"
+            });
             continue;
-          const firstEntry = findEntry(attr(firstEp, "object-id"));
-          const secondEntry = findEntry(attr(secondEp, "object-id"));
-          if (!firstEntry || !secondEntry || firstEntry === secondEntry)
+          }
+          const firstEntry = findEntry(firstObjId);
+          const secondEntry = findEntry(secondObjId);
+          if (!firstEntry || !secondEntry || firstEntry === secondEntry) {
+            const reason = !firstEntry || !secondEntry ? `endpoint object-id unresolved to a known element (first=${firstObjId || "?"}, second=${secondObjId || "?"})` : "both endpoints resolve to the same element";
+            relCoverage.entries.push({
+              left: firstEntry ? firstEntry.cleanName : firstObjId || "(unresolved)",
+              right: secondEntry ? secondEntry.cleanName : secondObjId || "(unresolved)",
+              derivedVia: "unwired",
+              reason
+            });
             continue;
+          }
           const ensureCol = (entry, key) => {
             let id = entry.colIdMap[key] || entry.colIdMap[key.replace(/-/g, "_")];
             if (!id) {
