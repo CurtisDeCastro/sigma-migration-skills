@@ -45,6 +45,20 @@ codes = fail_block.scan(/\bexit\s+(\d+)/).flatten.uniq
 check(codes == ['10'],
       "the FAIL block introduces no other exit code (found #{codes.inspect})", fails)
 
+# The FLAG must actually reach the GATE. Asserting only that the string
+# "--allow-field-loss" exists somewhere, and then calling CoverageGate.gate! directly
+# with a hand-supplied allow_override, leaves the wiring untested: a regression that
+# hardcodes `allow_override: false` disconnects the flag while every assertion stays
+# green (caught in review, 2026-07-30). Pin the actual argument.
+check(SRC =~ /CoverageGate\.gate!\([^)]*allow_override:\s*opts\[:allow_field_loss\]/m,
+      'the gate call passes opts[:allow_field_loss] as allow_override (not a literal)', fails)
+check(SRC !~ /CoverageGate\.gate!\([^)]*allow_override:\s*(true|false)\b/m,
+      'the gate call does NOT hardcode allow_override', fails)
+# and the flag must set that opt
+check(SRC =~ /--allow-field-loss.*\n?.*opts\[:allow_field_loss\]\s*=\s*true/m ||
+      SRC =~ /opts\[:allow_field_loss\]\s*=\s*true/,
+      'the --allow-field-loss flag sets opts[:allow_field_loss]', fails)
+
 puts "\n2. the gate decision itself, on realistic coverage"
 # 48% resolution, no dropped functional component -> must FAIL on the ratio alone.
 ratio_only = { 'summary' => { 'sourceVisuals' => 12, 'sourceBindings' => 198,

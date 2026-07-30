@@ -122,32 +122,77 @@ puts "\n4b. STATIC invariant: no record_unresolved call site omits role_class"
 # The runtime check above only sees the call sites this fixture happens to reach. The
 # realistic regression is someone ADDING a record_unresolved without role_class — a
 # silent hole in gate!, in a branch no fixture exercises. So check every call site in
-# the source. `record_unresolved(**c, ...)` splats a prepared hash and is exempt only
-# when role_class is passed alongside.
+# the source.
+#
+# This MUST tokenize rather than count raw parens. A naive depth scan is not
+# string-aware: a call whose `detail:`/`action:` string contains an unmatched "(" makes
+# the counter overrun its real closing paren and swallow the rest of the file — and
+# because "role_class" appears somewhere in that swallowed span, a genuinely unstamped
+# call reports as STAMPED. That is a false PASS, the dangerous direction, and it would
+# defeat this guard entirely (caught in review, 2026-07-30). Ripper classifies string
+# bodies as :on_tstring_content and comments as :on_comment, so parens inside them are
+# never counted — which also stops a `record_unresolved(` mentioned in a COMMENT from
+# being treated as a real call site (the old scanner's false-FAIL).
+require 'ripper'
 src = File.read(File.join(HERE, 'build-workbook-from-pbir.rb'))
-# each call: from "record_unresolved(" to the matching close paren (paren-balanced)
+toks = Ripper.lex(src)
 sites = []
-src.to_enum(:scan, /record_unresolved\(/).each do
-  start = Regexp.last_match.begin(0)
-  i = src.index('(', start)
+toks.each_with_index do |(pos, type, val, _st), i|
+  next unless type == :on_ident && val == 'record_unresolved'
+  # the next significant token must be "(" — otherwise it is the `def`, or a mention
+  j = i + 1
+  j += 1 while toks[j] && %i[on_sp on_ignored_nl on_nl].include?(toks[j][1])
+  next unless toks[j] && toks[j][1] == :on_lparen
+  next if i.positive? && toks[i - 1..i - 1].any? { |t| t[1] == :on_kw && t[2] == 'def' }
   depth = 0
-  j = i
-  while j < src.length
-    depth += 1 if src[j] == '('
-    depth -= 1 if src[j] == ')'
+  labels = []
+  k = j
+  while k < toks.length
+    t = toks[k][1]
+    depth += 1 if t == :on_lparen
+    depth -= 1 if t == :on_rparen
+    labels << toks[k][2] if t == :on_label
     break if depth.zero?
-    j += 1
+    k += 1
   end
-  sites << { line: src[0...start].count("\n") + 1, text: src[start..j] }
+  sites << { line: pos[0], labels: labels, closed: depth.zero? }
 end
 check(!sites.empty?, "found record_unresolved call sites to check (#{sites.size})", fails)
-unstamped = sites.reject { |s| s[:text].include?('role_class') }
+check(sites.all? { |x| x[:closed] }, 'every call site parsed to a balanced close', fails)
+unstamped = sites.reject { |x| x[:labels].include?('role_class:') }
 check(unstamped.empty?,
       "every record_unresolved call passes role_class (unstamped at line(s): " \
-      "#{unstamped.map { |s| s[:line] }.join(', ')})", fails)
-# and the definition must actually accept it
+      "#{unstamped.map { |x| x[:line] }.join(', ')})", fails)
 check(src =~ /def record_unresolved\([^)]*role_class:/m,
       'record_unresolved declares a role_class keyword', fails)
+
+# and prove the scanner itself is string-aware — the exact review repro
+probe = <<~RB
+  record_unresolved(visual: n, detail: "value (per the report spec", severity: 'dropped')
+  record_unresolved(visual: n, role_class: 'kpi', severity: 'dropped')
+RB
+ptoks = Ripper.lex(probe)
+psites = []
+ptoks.each_with_index do |(pos, type, val, _st), i|
+  next unless type == :on_ident && val == 'record_unresolved'
+  j = i + 1
+  j += 1 while ptoks[j] && %i[on_sp].include?(ptoks[j][1])
+  next unless ptoks[j] && ptoks[j][1] == :on_lparen
+  depth = 0; labels = []; k = j
+  while k < ptoks.length
+    t = ptoks[k][1]
+    depth += 1 if t == :on_lparen
+    depth -= 1 if t == :on_rparen
+    labels << ptoks[k][2] if t == :on_label
+    break if depth.zero?
+    k += 1
+  end
+  psites << labels
+end
+check(psites.size == 2, "scanner finds both probe call sites (got #{psites.size})", fails)
+check(psites[0] && !psites[0].include?('role_class:'),
+      'an unstamped call with an unmatched "(" inside a string is still detected — no false PASS', fails)
+check(psites[1] && psites[1].include?('role_class:'), 'a stamped call is recognised as stamped', fails)
 
 puts "\n5. and the gate actually fires on this run"
 st, why = CoverageGate.gate!(cov, min_resolved: 0.95, allow_override: false)
