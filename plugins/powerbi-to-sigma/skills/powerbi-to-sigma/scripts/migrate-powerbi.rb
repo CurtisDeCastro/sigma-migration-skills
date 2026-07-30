@@ -71,7 +71,8 @@ require 'digest'
 require 'set'
 require_relative 'lib/py_resolve'
 require_relative 'lib/pbi_field_alts'
-require_relative 'lib/pbi_master_key' # role-playing dim copies must key on PBI table identity # derived field_map entries must wrap their ALTS too (pie/date-grain render bug) # real-Python resolver (Windows Store-stub safe)
+require_relative 'lib/pbi_master_key'
+require_relative 'lib/pbi_offramp_reason' # name the FAILING STAGE, never assert a cause we did not establish # role-playing dim copies must key on PBI table identity # derived field_map entries must wrap their ALTS too (pie/date-grain render bug) # real-Python resolver (Windows Store-stub safe)
 begin; require_relative 'lib/modeling_advisory'; rescue LoadError; end # shared, vendor-neutral CDW join-cost advisory (optional; synced from shared/)
 
 HERE = __dir__
@@ -1518,14 +1519,28 @@ rescue WorkbookBuildError => e
                           .map { |w| w[/[“"]([^”"]+)[”"]/, 1] || w.sub(/^⛔\s*/, '')[0, 60] }
                           .compact.uniq
   end
-  names = failed.empty? ? 'one or more fields' : failed.join(', ')
-  n = failed.empty? ? 'some' : failed.size.to_s
+  # Classify from the output we ACTUALLY captured. The old code asserted a
+  # field-translation failure unconditionally — when no field name could be culled it
+  # still printed "one or more fields" — so a LAYOUT-LINT tile-height violation after a
+  # SUCCESSFUL post was reported as untranslatable fields, sending the operator to rebuild
+  # the whole workbook when the real fix was one tile height. An undetermined cause is now
+  # reported as undetermined, with the captured output shown.
+  info = PbiOfframp.classify(e.captured_output, failed)
   puts
-  puts "── Mechanical path: data model built OK (dataModelId=#{dm_id}). The WORKBOOK " \
-       "layer hit #{n} field(s) the mechanical path can't translate (#{names}). " \
-       "Falling back to the agent path: rebuild the workbook via the skill's " \
-       "agent-authored flow (see SKILL.md) against this DM. The data model is " \
-       "posted and ready to attach."
+  puts "── Mechanical path: data model built OK (dataModelId=#{dm_id})."
+  puts "   FAILING STAGE: #{info['stage']} — #{info['message']}"
+  unless info['salient'].to_s.strip.empty?
+    puts '   captured output:'
+    info['salient'].to_s.lines.each { |l| puts "     #{l.rstrip}" }
+  end
+  if info['posted']
+    puts '   NOTE: the workbook POSTED — fix and re-apply with PUT /v2/workbooks/<id>/spec.'
+    puts '   Do NOT re-POST (it creates an orphan) and do NOT rebuild via the agent path.'
+  else
+    puts "   Falling back to the agent path: rebuild the workbook via the skill's " \
+         'agent-authored flow (see SKILL.md) against this DM. The data model is posted ' \
+         'and ready to attach.'
+  end
   exit 4
 end
 wb_rb = JSON.parse(File.read(wb_readback))
