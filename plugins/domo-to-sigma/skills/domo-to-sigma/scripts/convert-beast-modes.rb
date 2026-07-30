@@ -19,6 +19,52 @@
 #   # → skill calls convert_sql_to_sigma_formula(sql: normalizedSql) per entry,
 #   #   writes the result into `sigmaFormula`, applies preWarning overrides.
 #   ruby scripts/convert-beast-modes.rb --lint   # validate filled pending → discovery/formulas.json
+#
+# HAND-AUTHORED ESCAPE HATCH — discovery/formula-overrides.json
+#
+# The shared `convert_sql_to_sigma_formula` does NOT translate `CASE WHEN`
+# (emits an invalid `CASE When(...) Else(...) END` hybrid — bead jva2) and
+# mis-renders `COUNT(DISTINCT x)` as a column reference (bead qorq is our own
+# double-bracketing bug on top of that; jva2/sqp1 are upstream). Measured live:
+# 74% of real Beast Modes hit one of these and are correctly left with no
+# sigmaFormula by whoever ran Phase 2 — see "⛔ The formula layer is NOT
+# 'nearly free'" in refs/live-validation-2026-07-30.md. Rather than ship bad
+# SQL, `--lint` DROPS those entries (good, honest behaviour) — but until the
+# upstream bugs are fixed, that means real calc columns silently vanish.
+#
+# discovery/formula-overrides.json is an OPERATOR-authored sidecar (same
+# convention as discovery/kpi-overrides.json / dataset-map.json — this script
+# only ever READS it, so re-running normalize or --lint never clobbers it).
+# Keyed by the Beast Mode's stable `id` (`calculation_<uuid>`, survives
+# re-runs) or its human-friendly `name` (accepted alternate key, since ids are
+# opaque). Worked example — a CASE WHEN guard the converter mangles, and a
+# COUNT(DISTINCT) the converter mis-parses as a column ref:
+#
+#   {
+#     "calculation_4cd7e7c8-...": {
+#       "sigmaFormula": "If(Sum([Net Revenue]) = 0, 0, Sum([Gross Profit]) / Sum([Net Revenue]))",
+#       "note": "hand-authored: CASE WHEN unsupported by convert_sql_to_sigma_formula (bead jva2)"
+#     },
+#     "Avg Order Value": {
+#       "sigmaFormula": "Sum([Net Revenue]) / CountDistinct([Order Id])"
+#     }
+#   }
+#
+# `If`, `Sum`, `CountDistinct` verified against
+# plugins/sigma-authoring/skills/sigma-workbooks/reference/specification/formulas.md.
+#
+# Rules (enforced in resolve_entry / unmatched_override_keys below):
+#   - An override only SUPPLIES a MISSING sigmaFormula — it never silently
+#     replaces one convert_sql_to_sigma_formula already filled in.
+#   - Every use is still POST-linted by lint_formula (raw IN(, And()/Or()/
+#     Not() as calls, unbalanced brackets) — a hand-authored typo is a hard
+#     lintError in formulas.json, never a silent pass.
+#   - Every use emits a loud stderr warning naming the Beast Mode and stating
+#     that the AUTOMATED conversion failed — so the upstream bug stays
+#     visible and an override can never look machine-translated. The emitted
+#     entry also carries `"_source": "formula-override"` (+ `note` if given).
+#   - A formula-overrides.json key matching no pending entry's id/name warns
+#     (typo'd key must not silently no-op).
 
 require 'json'
 require 'optparse'
@@ -101,6 +147,65 @@ def lint_formula(sigma, klass = nil)
   [errors, warnings]
 end
 
+# Look up an operator-authored override for one pending entry. Keyed by the
+# Beast Mode's stable `id` (calculation_<uuid>) first, falling back to the
+# human-friendly `name` — ids are opaque, so name is an accepted alternate
+# key. Returns the override Hash or nil.
+def find_override(entry, overrides)
+  ov = overrides[entry['id']] || overrides[entry['name']]
+  ov.is_a?(Hash) ? ov : nil
+end
+
+# Resolve one discovery/formulas.pending.json entry against the operator
+# sidecar, then apply the same POST-lint every entry gets. Returns
+# [resolved_entry_or_nil, warnings]. resolved_entry is nil when there is still
+# no sigmaFormula (no override applied) — the caller drops it, exactly
+# today's honest-drop behaviour (refs/live-validation-2026-07-30.md).
+#
+# An override only SUPPLIES a sigmaFormula that is missing; it never silently
+# clobbers one convert_sql_to_sigma_formula already filled in (if it matches
+# an already-resolved entry, that's a no-op override — warned, not applied).
+def resolve_entry(entry, overrides)
+  warnings = []
+  sigma = entry['sigmaFormula']
+  already_resolved = !(sigma.nil? || sigma.to_s.strip.empty?)
+  override = find_override(entry, overrides)
+  used_override = false
+
+  if override && !override['sigmaFormula'].to_s.strip.empty?
+    if already_resolved
+      warnings << "formula-overrides.json has an entry for " \
+        "#{entry['name'] || entry['id']} but it already has a sigmaFormula — " \
+        "override NOT applied (clear the pending entry's sigmaFormula to force it)."
+    else
+      sigma = override['sigmaFormula']
+      used_override = true
+    end
+  end
+
+  return [nil, warnings] if sigma.nil? || sigma.to_s.strip.empty?
+
+  errs, lint_warns = lint_formula(sigma, entry['class'])
+  resolved = entry.merge('sigmaFormula' => sigma, 'lintErrors' => errs, 'lintWarnings' => lint_warns)
+  if used_override
+    resolved['_source'] = 'formula-override'
+    resolved['note'] = override['note'] if override['note']
+    warnings << "#{entry['name'] || entry['id']}: sigmaFormula supplied by " \
+      "discovery/formula-overrides.json (hand-authored) — automated conversion " \
+      "(convert_sql_to_sigma_formula) did not produce a usable formula for this " \
+      "Beast Mode; verify by hand (refs/live-validation-2026-07-30.md — the " \
+      "formula layer is NOT 'nearly free')."
+  end
+  [resolved, warnings]
+end
+
+# Override keys (id or name) that matched NO pending entry at all. A typo'd
+# id/name in formula-overrides.json must not silently do nothing.
+def unmatched_override_keys(pending, overrides)
+  known = pending.flat_map { |e| [e['id'], e['name']] }.compact
+  overrides.keys.reject { |k| known.include?(k) }
+end
+
 run_main = ($PROGRAM_NAME == __FILE__)
 if run_main
 opts = {}
@@ -108,23 +213,34 @@ OptionParser.new do |o|
   o.on('--lint') { opts[:lint] = true }
   o.on('--in PATH')  { |v| opts[:in] = v }
   o.on('--out PATH') { |v| opts[:out] = v }
+  o.on('--overrides PATH') { |v| opts[:overrides] = v }
 end.parse!(ARGV)
 
 if opts[:lint]
   # ---- Validate a filled pending file → formulas.json --------------------
   path = opts[:in] || File.join(OUT, 'formulas.pending.json')
   pending = JSON.parse(File.read(path))
+  # Operator sidecar (see header) — read-only, never written by this script.
+  overrides_path = opts[:overrides] || File.join(OUT, 'formula-overrides.json')
+  overrides = (JSON.parse(File.read(overrides_path)) rescue {}) || {}
+
   final = []
   unresolved = []
   pending.each do |e|
-    sigma = e['sigmaFormula']
-    if sigma.nil? || sigma.to_s.strip.empty?
-      unresolved << e['name'] || e['id']
-      next
+    resolved, warnings = resolve_entry(e, overrides)
+    warnings.each { |w| warn "  ⚠ #{w}" }
+    if resolved
+      final << resolved
+    else
+      unresolved << (e['name'] || e['id'])
     end
-    errs, warns = lint_formula(sigma, e['class'])
-    final << e.merge('lintErrors' => errs, 'lintWarnings' => warns)
   end
+
+  unmatched_override_keys(pending, overrides).each do |k|
+    warn "  ⚠ discovery/formula-overrides.json key '#{k}' matches no Beast Mode " \
+      "id or name in #{path} — typo'd id/name? (ignored)"
+  end
+
   out = opts[:out] || File.join(OUT, 'formulas.json')
   File.write(out, JSON.pretty_generate(final))
   warn "  wrote #{out} (#{final.size} formulas)"

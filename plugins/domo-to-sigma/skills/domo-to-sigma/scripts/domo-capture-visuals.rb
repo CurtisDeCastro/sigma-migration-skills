@@ -32,16 +32,31 @@
 #   export DOMO_CLIENT_ID=... DOMO_CLIENT_SECRET=...   # for public page() lookup
 #   eval "$(scripts/get-domo-token.sh)"                     # sets DOMO_ACCESS_TOKEN
 #
-# Outputs:
-#   discovery/png/cards/<cardId>.png   per-card visual reference
-#   discovery/png/pages/<pageId>.pdf   full-page source reference (for QA gate)
+# Outputs (all under $DOMO_DISCOVERY_DIR when set — see OUT below):
+#   discovery/png/cards/<cardId>.png   per-card visual reference (CHART/KPI cards)
+#   discovery/png/cards/<cardId>.pdf   per-card visual reference (TABLE cards — see below)
+#   discovery/png/pages/<pageId>.pdf   full-page source reference — ⚠ NOT ALWAYS
+#                                      AVAILABLE. The page-render endpoint is a hard
+#                                      404 on at least some instances (confirmed live
+#                                      2026-07-30). When it is missing this script
+#                                      writes page-visual-unavailable.json and the
+#                                      layout-visual-qa gate must fall back to the
+#                                      per-card visuals. Do not assume the PDF exists.
+#
+# ⚠ TABLE cards cannot be rendered as PNG: parts=image returns 400 for a
+# badge_table card (imageGrid/grid too). They render only with parts=imagePDF,
+# whose payload arrives under `html` as an HTML-wrapped base64 PDF, not under
+# image.data. See refs/live-validation-2026-07-30.md and Domo.decode_render.
 
 require 'json'
 require 'fileutils'
 require 'optparse'
 require_relative 'lib/domo_rest'
 
-OUT       = File.expand_path('../discovery', __dir__)
+# Honor the run workdir like every sibling script (domo-discover.rb's OUT). This
+# used to hardcode the SKILL directory, so a run invoked with --out <workdir>
+# still scattered PNGs into the repo working tree (tripping lint-tree-litter).
+OUT       = ENV['DOMO_DISCOVERY_DIR'] || File.expand_path('../discovery', __dir__)
 CARD_PNG  = File.join(OUT, 'png', 'cards')
 PAGE_PDF  = File.join(OUT, 'png', 'pages')
 [CARD_PNG, PAGE_PDF].each { |d| FileUtils.mkdir_p(d) }
@@ -87,11 +102,52 @@ def write_bytes(path, bytes)
   warn "  wrote #{path} (#{bytes.bytesize} bytes)"
 end
 
+# chartType per card id, read from a prior domo-discover.rb run. Needed because
+# TABLE cards take a different render `parts` (see header). Absent cards.json we
+# simply try PNG first and fall back to PDF on failure.
+def chart_types_by_card
+  path = File.join(OUT, 'cards.json')
+  cards = JSON.parse(File.read(path)) rescue nil
+  return {} unless cards.is_a?(Array)
+  cards.each_with_object({}) do |c, h|
+    next unless c.is_a?(Hash) && c['id']
+    h[c['id'].to_s] = c['chartType'].to_s
+  end
+end
+CHART_TYPES = chart_types_by_card
+
+# A Domo TABLE card. Exact-match the confirmed enum token — badge_datagrid does
+# NOT exist (refs/live-validation-2026-07-30.md), so never substring-match here.
+def table_card?(card_id)
+  CHART_TYPES[card_id.to_s] == 'badge_table'
+end
+
+def capture_card_pdf(card_id)
+  raw = Domo.private_put_raw("/api/content/v1/cards/kpi/#{card_id}/render",
+                             body: { width: WIDTH, height: HEIGHT, queryOverrides: {} },
+                             query: { parts: 'imagePDF' })
+  write_bytes(File.join(CARD_PNG, "#{card_id}.pdf"), raw && Domo.decode_render(raw))
+  true
+rescue => e
+  warn "  render FAIL card #{card_id} (imagePDF): #{e.message}"
+  false
+end
+
 def capture_card(card_id)
+  # Tables: go straight to imagePDF — parts=image is a guaranteed 400 for them.
+  return capture_card_pdf(card_id) if table_card?(card_id)
   png = Domo.render_card_png(card_id, width: WIDTH, height: HEIGHT)
   write_bytes(File.join(CARD_PNG, "#{card_id}.png"), png)
+  true
 rescue => e
+  # An unknown/absent chartType can still turn out to be a table; a 400 here is
+  # the signature of that, so retry once as a PDF before reporting failure.
+  if e.message.include?('400')
+    warn "  card #{card_id}: parts=image 400 — retrying as imagePDF (likely a table card)"
+    return capture_card_pdf(card_id)
+  end
   warn "  render FAIL card #{card_id}: #{e.message}"
+  false
 end
 
 # --- per-page capture -------------------------------------------------------
@@ -106,15 +162,28 @@ if opts[:pages]
 
     if opts[:pdf]
       # Full-page reference for the layout-visual-qa source-fidelity comparison.
-      # Domo renders a page-to-PDF; if the instance lacks a page-level render,
-      # fall back to a per-card PDF of the first card so something exists.
-      # TODO(on-access): confirm the page-PDF endpoint path/params.
+      #
+      # LIVE FINDING (2026-07-30): /api/content/v1/pages/{pageId}/render is a hard
+      # **404** on at least some instances — it 404'd for all three pages tested,
+      # so the QA gate's primary side-by-side input simply does not exist there.
+      # Degrading to per-card visuals is correct, but it must be RECORDED, not
+      # just logged: the gate needs to know its reference is missing rather than
+      # silently comparing against nothing. No alternative page-render path is
+      # known — do not invent one; if you find a working endpoint, document it in
+      # refs/live-validation-2026-07-30.md first.
       begin
         pdf = Domo.private_put_raw("/api/content/v1/pages/#{pid}/render",
                                    body: { width: 1600 }, query: { parts: 'imagePDF' })
         write_bytes(File.join(PAGE_PDF, "#{pid}.pdf"), pdf && Domo.decode_render(pdf))
       rescue => e
-        warn "  page PDF unavailable (#{e.message}) — rely on per-card PNGs for QA"
+        warn "  page PDF unavailable (#{e.message}) — rely on per-card visuals for QA"
+        marker = File.join(OUT, 'page-visual-unavailable.json')
+        prior  = (JSON.parse(File.read(marker)) rescue nil)
+        prior  = [] unless prior.is_a?(Array)
+        prior << { 'pageId' => pid.to_s, 'reason' => e.message.to_s[0, 300],
+                   'fallback' => 'per-card visuals in png/cards/' }
+        File.write(marker, JSON.pretty_generate(prior.uniq { |h| h['pageId'] }))
+        warn "  recorded #{marker} (layout-visual-qa: no page-level reference for this page)"
       end
     end
   end

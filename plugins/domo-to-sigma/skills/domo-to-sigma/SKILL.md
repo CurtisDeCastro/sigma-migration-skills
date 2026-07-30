@@ -14,16 +14,21 @@ user-invocable: true
 
 # Domo → Sigma Conversion
 
-> **Status: offline-complete; live parity not yet claimed.** The private-API
-> shapes (card definitions, Beast Mode text, page layout) are **doc-confirmed**
-> against Domo's OpenAPI, official docs, and independent reference
-> implementations (see `refs/connection.md`), and the skill's offline test
-> suites pass hermetically. The public OAuth path is documented and stable.
-> **What remains live**: a field-path check on first contact with a real
-> instance (private endpoints can vary by Domo version) and a live parity run
-> against a real Sigma workbook. Neither is claimed done here — this skill
-> defers both, consistent with this repo's rule of never calling a conversion
-> validated until it passes live parity for that instance.
+> **Status: private-API shapes LIVE-CONFIRMED (2026-07-30); end-to-end Sigma
+> parity still not claimed.** A first live Tier-A validation ran against a real
+> Domo instance (48 cards / 24 chart types / 81 Beast Modes, plus 15 purpose-built
+> cards). It answered all three former open questions and **disproved several
+> doc-inferred shapes** in `refs/connection.md` — card enumeration, the
+> summary-number path, and page-layout geometry were all wrong.
+> **Read `refs/live-validation-2026-07-30.md` before trusting any private-API
+> shape**; where it and `refs/connection.md` disagree, live-validation wins.
+> The public OAuth path is documented and stable.
+> **What remains live**: a full `migrate-domo.rb` run whose resulting Sigma
+> workbook passes numeric parity and the Phase-5e visual gate for a given
+> instance. That is NOT claimed here — consistent with this repo's rule of never
+> calling a conversion validated until it passes live parity for that instance.
+> Domo's own `query/execute` parity mechanism *was* verified to reconcile exactly
+> against the warehouse.
 > **Compliance:** before a production run, confirm with the customer's Domo
 > account team that programmatic extraction for migration is acceptable — see
 > `refs/connection.md` "Compliance note".
@@ -44,11 +49,24 @@ card→element map.
 
 ## The one big idea
 
-**Beast Mode is MySQL-dialect SQL.** Domo's calc-field language routes straight
-through the existing `mcp__sigma-data-model__convert_sql_to_sigma_formula` tool —
-no bespoke parser like Power BI's DAX. The formula layer is nearly free. The work
-that remains is *extraction* (getting card defs + Beast Mode text + layout out of
-Domo) and *layout/binding* (cards → Sigma elements on a 24-col grid).
+**Beast Mode is MySQL-dialect SQL.** Domo's calc-field language routes through the
+existing `mcp__sigma-data-model__convert_sql_to_sigma_formula` tool — no bespoke
+parser like Power BI's DAX.
+
+> ⛔ **CORRECTED 2026-07-30 — the formula layer is NOT "nearly free."** This
+> section used to claim it was. Measured over 81 real Beast Modes on a live
+> instance, **74% translate to invalid Sigma**: `CASE WHEN` (used by **71%**) is
+> not converted to Sigma's `If()` at all, and `COUNT(DISTINCT x)` renders
+> `DISTINCT` as a column reference. Because `convert-beast-modes.rb` correctly
+> DROPS entries without a `sigmaFormula` rather than shipping bad output, the
+> practical result is that Beast Modes **vanish** from the migration and the DM
+> ships with no calc columns. Budget real time for hand-authoring conditional
+> Beast Modes until the shared converter is fixed. Full evidence and the exact
+> broken outputs: `refs/live-validation-2026-07-30.md`.
+
+The other work is *extraction* (card defs + Beast Mode text + layout out of Domo)
+and *layout/binding* (cards → Sigma elements on a 24-col grid; note Domo's own card
+grid is only 6 wide, so widths scale ×4).
 
 ---
 
@@ -186,13 +204,64 @@ geometry (x/y/w/h) is a separate, earlier capture — see Phase 1a's
 `discovery/cards.json`), the ONE geometry source:
 
 `ruby scripts/domo-capture-visuals.rb --pages <id,...>` →
-- `discovery/png/cards/<cardId>.png` — per-card visual reference
-- `discovery/png/pages/<pageId>.pdf` — full-page source image for the QA gate
+- `discovery/png/cards/<cardId>.png` — per-card visual reference (chart/KPI cards)
+- `discovery/png/cards/<cardId>.pdf` — per-card reference for **table** cards
+  (`parts=image` returns 400 for a table; only `parts=imagePDF` works)
+- `discovery/png/pages/<pageId>.pdf` — full-page source image, **when available**
 
 Tier A (dev token) does this automatically via the card render endpoint. **Tier B:
 export the same PNGs/PDF from the Domo UI into those same paths** — the build and
 QA steps consume them identically (see `refs/connection.md` "Visual capture").
 Either way, **READ these images** before and during Phase 5.
+
+### ⚠️ ASK THE OPERATOR FOR A PAGE SCREENSHOT — layout depends on it
+
+**No page-render endpoint was found.** `/api/content/v1/pages/{pageId}/render` is a
+hard **404**, as is every variant probed (v2/v3, stacks, export, image) — so the
+full-page PDF above often will not exist. Treat this as "not found", not proven
+absent: Domo's private surface is undocumented, and the `brycewc/domo-product-apis`
+Postman collection reportedly carries a **Get Layout** request that has not yet been
+confirmed. If you find a working path, document it here first. the script records
+`discovery/page-visual-unavailable.json` when it can't get one.
+
+That matters more than it sounds, because **Domo's API exposes NO layout geometry
+for a classic page** (live-validated 2026-07-30 — see
+`refs/live-validation-2026-07-30.md`):
+- `preferredFullWidth` / `preferredFullHeight` are accepted on card create but
+  **persist nowhere** — absent from every readback
+- `sizes[].size` comes back `""` for API-created cards (a human resizing a card in
+  the UI is what sets `small`/`medium`/`large`)
+- `collections[]` (sectioning) has no reachable write endpoint
+- even card **creation order does not control page order**
+
+So for a classic Domo page the ONLY route to real layout fidelity is a human-supplied
+image. **Explicitly ask the operator:**
+
+> "Domo's API doesn't expose this page's layout. Can you paste or export a
+> screenshot of the page? I'll read the arrangement from it so the Sigma dashboard
+> matches. Without one I'll compose a clean default layout instead."
+
+Then READ the image and transcribe what you see into
+**`discovery/layout-observed.json`** (schema + preference order documented in
+`scripts/build-domo-layout.rb`). Mark it `_source: "observed-from-screenshot"` —
+it is a model reading an image, and must never be presented as API-derived truth.
+
+**If no screenshot is provided, do NOT fake geometry and do not stack.** The layout
+builder composes a clean default instead, in this house order:
+
+> **controls at the top → KPIs → charts → tables**
+
+i.e. a full-width control band, then a compact KPI row (KPIs are short — never a
+chart-sized band each), then charts 2-up, then tables/pivots full width. This is the
+same composition the `sigma-workbooks` / `branded-dashboard-format` authoring skills
+use; see `refs/layout-visual-qa.md`.
+
+Geometry preference order used by Phase 5d, highest first:
+1. real API x/y/w/h pixel geometry (mason / Domo-App pages only)
+2. `discovery/layout-observed.json` (read from a screenshot)
+3. `collections[]` + a non-empty `size` token
+4. the element-kind default composition above
+5. last-resort ordered stack — always warns LOUDLY, never silent
 
 ---
 
@@ -293,6 +362,18 @@ Phase 1a's `merge_geometry`) + `discovery/pages.json` names into
 `put-layout.rb`: feed that file → 24-col grid, preserving relative position and
 the hero viz's weight.
 
+**Classic Domo pages carry no geometry at all** — so this phase runs the preference
+chain documented in Phase 1b above (API geometry → `layout-observed.json` from a
+screenshot → collections+size tokens → clean default composition → warned stack).
+If you skipped asking for a screenshot in Phase 1b, go back and ask: it is the
+difference between a faithful layout and a reasonable guess.
+
+A `layout-2d.flag` of `"grid"` means the engine produced a 2D grid rather than a
+stack — it does NOT mean the composition is good. Bands must also be well-filled:
+`layout_lint` fails an under-filled band (e.g. a lone element covering 12 of 24
+columns leaves dead space), so a single element in a band should be widened to fill
+it or paired with its neighbour.
+
 ### Phase 5e — Layout visual QA (MANDATORY gate)
 Run the layout-visual-qa loop (`refs/layout-visual-qa.md`): render the full Sigma
 page to PNG and compare it **side-by-side against the Domo full-page PDF**
@@ -343,9 +424,22 @@ Delete orphan test workbooks (`/v2/files/<id>`).
 
 ---
 
-## Open questions — resolve on first instance access
+## Open questions — RESOLVED 2026-07-30
 
-See `refs/connection.md` for the current confidence level on each private
-endpoint. The blockers that most change the skill: (1) does the dev token reach
-`/api/content/v1/cards`? (2) exact card-def JSON shape; (3) page-layout geometry
-units. Until confirmed on a live instance, treat Phases 1/2/5 as unvalidated.
+All three former blockers were answered by live contact. Full evidence in
+`refs/live-validation-2026-07-30.md`:
+
+1. **Does the dev token reach `/api/content/v1/cards`?** — **Yes.** Tier A is
+   reachable. OAuth bearer tokens are 401 on every private path; the two
+   credentials are not interchangeable.
+2. **Exact card-def JSON shape** — there are **three** distinct shapes, and the
+   previously-documented "Shape A" is the public *create body*, not a read
+   response. The summary number lives at `definition.subscriptions.big_number`.
+3. **Page-layout geometry units** — classic pages have **no x/y/w/h at all**.
+   Layout is `collections[]` (titled sections with `cardIndices[]`) plus a
+   per-card T-shirt `size` token, on a **6-column** Domo grid (so Domo→Sigma
+   width scales ×4).
+
+What is still genuinely open: a full end-to-end `migrate-domo.rb` run that
+passes numeric parity and the Phase-5e visual gate against a live Sigma workbook.
+Treat that as the remaining bar for calling an instance's conversion validated.

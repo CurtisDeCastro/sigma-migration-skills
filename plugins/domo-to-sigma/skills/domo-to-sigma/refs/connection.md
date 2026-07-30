@@ -4,9 +4,13 @@ Domo exposes **two** API surfaces. A high-fidelity migration needs both. The
 public one is documented and stable; the private one is undocumented and is the
 risk in this whole skill.
 
-> Status note: only the **public** OAuth path below has been verified against
-> Domo docs. The **private** endpoints are reconstructed from community forums and
-> must be confirmed on first contact with a live instance.
+> **Status note (updated 2026-07-30 — first live Tier-A contact).** The private
+> endpoints below have now been exercised against a real instance. Several claims
+> in this file were doc-inferred and turned out **wrong** — most importantly the
+> card-definition read shape, the card-enumeration route, and page-layout geometry.
+> **Read `refs/live-validation-2026-07-30.md` before trusting any private-API
+> shape here**; where the two disagree, the live-validation file wins. Inline
+> ⚠️ CORRECTED markers below point at the specific findings.
 
 ---
 
@@ -156,15 +160,32 @@ endpoints — independent confirmation they're real and in active use:
 The "route function per API call" pattern (one function per endpoint, swap one on
 a version bump) is still worth adopting in `domo_rest.rb`.
 
-### Endpoints (doc-confirmed — OpenAPI + reference impls; final field-path check on first live contact)
+### Endpoints (⚠️ CORRECTED 2026-07-30 by live contact — see `refs/live-validation-2026-07-30.md`)
+
+⚠️ **Shape A was mis-attributed.** The `chartBody` / `summaryNumber` /
+`calculatedFields` / `conditionalFormats` structure is the **public create/update
+request body** (`POST /v1/cards/chart`), **not** what the private `parts` read
+returns. The private read returns metadata only, with `chartType` at
+`metadata.chartType`. An *extractor* never sees Shape A.
+
+⚠️ **The summary number is at `definition.subscriptions.big_number`**, not
+`subscriptions.main` and not a top-level `summaryNumber`. Rule 0 depends on this.
+
+⚠️ **Enumerate cards via `/api/content/v3/stacks/{pageId}/cards`** — the public
+page object returns `cardIds: []` on live instances.
+
 | Call | Use |
 |---|---|
-| `GET /api/content/v1/cards?urns={ids}&parts=metadata,properties,datasources` | **card definitions — Shape A** ⭐ (OpenAPI `CardDefinition`) |
-| `PUT /api/content/v3/cards/kpi/definition` (body `{dynamicText,variables,urn}`) | **card definitions — Shape B** (internal analyzer def; `definition.subscriptions.main`) |
+| `GET /api/content/v3/stacks/{pageId}/cards?parts=metadata,datasources` | ⭐ **cards + `sizes[]` + `collections[]` + `pageAnalyzerSettings` in one call** — the correct per-page route |
+| `POST /api/content/v2/cards/adminsummary?parts=…&skip=&limit=` | instance-wide card sweep (body `{ascending,orderBy,pageIds[]}` → `cardAdminSummaries[]`) |
+| `GET /v1/cards?limit=&offset=` *(PUBLIC)* | card inventory w/ `pages[]` — **works on Tier B** |
+| `GET /api/content/v1/cards?urns={ids}&parts=<9 values>` | card **metadata** read (returns an ARRAY — index `[0]`) |
+| `PUT /api/content/v3/cards/kpi/definition` (body `{urn}`) | **card bindings** — `definition.subscriptions.{big_number,main}` + inline `definition.formulas[]` |
 | `GET /api/query/v1/functions/template/{id}` | **standalone Beast Mode** — `expression` + `aggregated`/`analytic` flags; `legacyId`=`calculation_<uuid>` |
 | `GET /api/content/v1/datasources/{datasetId}/cards?drill=true` | enumerate cards per DataSet |
 | `GET /api/content/v1/cards/kpi/definition/{cardId}` | full KPI/chart def incl. Beast Mode SQL (alt GET form) |
-| `GET /api/content/v1/pages/{pageId}` | page layout — collections + card geometry |
+| ~~`GET /api/content/v1/pages/{pageId}`~~ | ⚠️ **CORRECTED — does NOT return cards or geometry.** `cardIds` is `[]` even for a 36-card page, and `parts=cards,layout,collections` is ignored. Use the `stacks` route above. |
+| `POST /v1/cards/chart?pageId=` *(PUBLIC, scope `data dashboard`)* | documented card **create** — 500 on the validation instance; unverified |
 | `PUT /api/content/v1/cards/kpi/{cardId}/render?parts=image` | **render card → PNG** ⭐ (visual reference) |
 | `PUT /api/content/v1/cards/kpi/{cardId}/render?parts=imagePDF` | render card → PDF |
 | `GET /api/data/v3/datasources/{datasetId}?parts=core,permission,formulas` | DataSet metadata + **Beast Mode SQL** via `properties.formulas` |
@@ -180,10 +201,20 @@ Tableau flow (read the source image before writing the spec, and feed it to the
 mandatory layout-visual-qa gate — see `shared/refs/layout-visual-qa.md`,
 `feedback_phase1d_dashboard_png`, `batch_converter_png_brief`):
 
-1. **Layout geometry** — `GET /api/content/v1/pages/{pageId}` carries each card's
-   position/size on Domo's page grid. This capture happens in Phase 1a,
+1. **Layout geometry** — ⚠️ **CORRECTED 2026-07-30: classic Domo pages have NO
+   x/y/w/h.** `GET /api/content/v1/pages/{pageId}` carries neither cards nor
+   geometry. The real source is
+   `GET /api/content/v3/stacks/{pageId}/cards`, which returns **`sizes[]`**
+   (`{id, size}` — a T-shirt **token** like `"medium"`, not pixels) and
+   **`collections[]`** (`{id, title, description, minimized, cardIndices[]}` —
+   titled sections grouping cards by index). Faithful mapping:
+   **collection → Sigma section/container, `cardIndices` order → grid order,
+   `size` token → column span.** Free-form pixel geometry exists only on newer
+   mason / Domo-App pages. Because `merge_geometry` looks for x/y/w/h and finds
+   none, `build-domo-layout.rb` degrades to a vertical stack — the #525 failure
+   mode. This capture happens in Phase 1a,
    **`domo-discover.rb --pages <ids>`**: `DomoSigma.merge_geometry`
-   (`lib/domo_sigma_util.rb`) copies each card's x/y/w/h straight onto its
+   (`lib/domo_sigma_util.rb`) copies each card's geometry onto its
    `discovery/cards.json` record. `scripts/build-domo-layout.rb` reads that —
    it is the ONE geometry source; there is no separate layout-geometry capture
    or file. (Earlier revisions had `domo-capture-visuals.rb` ALSO extract
