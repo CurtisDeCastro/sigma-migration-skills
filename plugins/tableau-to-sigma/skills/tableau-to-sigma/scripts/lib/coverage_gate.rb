@@ -183,15 +183,25 @@ module CoverageGate
   # carried over; 0 dropped": a table shipping 3 of 8 columns is merely
   # 'degraded', and 'degraded' counts as carried over. Fields are what the
   # customer actually sees, so they get their own accounting and their own gate.
+  #
+  # nil-safe like every other public method here (load() returns nil when
+  # coverage.json is absent) — nil/absent coverage means "no bindings
+  # recorded", i.e. [0, 0], NOT a crash and NOT a spurious 100% loss.
+  #
+  # `resolved` is clamped to [0, total] so malformed input (e.g. a converter
+  # bug reporting resolvedBindings > sourceBindings) can never push binding_loss
+  # outside its documented 0.0..1.0 range or produce a negative "dropped" count
+  # in binding_headline — both derive from this single clamp.
   def binding_totals(coverage)
     s = (coverage && coverage['summary']) || {}
     total = s['sourceBindings'].to_i
     if total.zero?   # fall back to summing per-entry field_bindings
-      all = (coverage['unresolved'] || []).flat_map { |u| u['field_bindings'] || [] }
+      all = ((coverage && coverage['unresolved']) || []).flat_map { |u| u['field_bindings'] || [] }
       total = all.size
-      return [total, all.count { |b| b['status'] == 'resolved' }]
+      resolved = all.count { |b| b['status'] == 'resolved' }
+      return [total, resolved.clamp(0, total)]
     end
-    [total, s['resolvedBindings'].to_i]
+    [total, s['resolvedBindings'].to_i.clamp(0, total)]
   end
 
   def binding_loss(coverage)
@@ -213,23 +223,30 @@ module CoverageGate
 
   # [:pass|:fail, reason]. Fails on (a) a dropped functional-role visual, or
   # (b) binding resolution below min_resolved. `allow_override` is the explicit
-  # escape hatch for genuinely-degraded sources (USERELATIONSHIP, ISINSCOPE).
+  # escape hatch for genuinely-degraded sources (USERELATIONSHIP, ISINSCOPE) —
+  # it flips :fail to :pass but NEVER hides the reason: both branches build
+  # ONE reason string and reuse it verbatim (prefixed "overridden: ") for the
+  # override return, so the two can never diverge again.
+  # nil-safe: a nil/absent coverage (load() returns nil when coverage.json is
+  # missing) has no recorded bindings/drops, so it passes without crashing —
+  # it must never spuriously FAIL a run that simply has no coverage data.
   def gate!(coverage, min_resolved: 0.95, allow_override: false)
-    lost = (coverage['unresolved'] || []).select do |u|
+    lost = ((coverage && coverage['unresolved']) || []).select do |u|
       u['severity'] == 'dropped' && GATE_ROLES.include?(u['role_class'].to_s)
     end
     unless lost.empty?
       names = lost.map { |u| "#{u['visual']} (#{u['role_class']})" }.uniq
-      return [:pass, "overridden: #{names.size} functional component(s) dropped"] if allow_override
-      return [:fail, "#{names.size} functional component(s) DROPPED — " \
-                     "#{names.first(4).join(', ')}. A lost control means the page lost its filter."]
+      reason = "#{names.size} functional component(s) DROPPED — " \
+               "#{names.first(4).join(', ')}. A lost control means the page lost its filter."
+      return [:pass, "overridden: #{reason}"] if allow_override
+      return [:fail, reason]
     end
     loss = binding_loss(coverage)
     if loss > (1.0 - min_resolved)
-      msg = format('field-binding resolution %.1f%% is below the %.1f%% floor — %s',
-                   100 * (1 - loss), 100 * min_resolved, binding_headline(coverage))
-      return [:pass, "overridden: #{msg}"] if allow_override
-      return [:fail, msg]
+      reason = format('field-binding resolution %.1f%% is below the %.1f%% floor — %s',
+                      100 * (1 - loss), 100 * min_resolved, binding_headline(coverage))
+      return [:pass, "overridden: #{reason}"] if allow_override
+      return [:fail, reason]
     end
     [:pass, binding_headline(coverage)]
   end

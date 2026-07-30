@@ -141,5 +141,44 @@ st3, why3 = CoverageGate.gate!(COV2, min_resolved: 0.95, allow_override: false)
 ok('a DROPPED control fails the gate regardless of ratio', st3 == :fail)
 ok('reason names the lost control', why3.to_s =~ /control/i)
 
+# review finding: the override path for a functional-role drop must NOT hide
+# the reason — the component name and its role must survive into the
+# overridden message (previously they silently vanished).
+st4, why4 = CoverageGate.gate!(COV2, min_resolved: 0.95, allow_override: true)
+ok('override of a dropped control still PASSES', st4 == :pass)
+ok('override of a dropped control still names the component', why4.to_s.include?('Date'))
+ok('override of a dropped control still names its role', why4.to_s.include?('control'))
+ok('override message is tagged overridden', why4.to_s.start_with?('overridden:'))
+
+# review finding: nil coverage (CoverageGate.load returns nil when
+# coverage.json is missing/absent) must be treated as "no bindings recorded" —
+# never crash, never spuriously FAIL a run that has no coverage data at all.
+ok('binding_totals(nil) -> [0, 0], no crash', CoverageGate.binding_totals(nil) == [0, 0])
+ok('binding_loss(nil) -> 0.0, no crash', CoverageGate.binding_loss(nil) == 0.0)
+ok('binding_headline(nil) -> explicit no-data message',
+   CoverageGate.binding_headline(nil) == 'no field-binding data recorded')
+stn, whyn = CoverageGate.gate!(nil, min_resolved: 0.95, allow_override: false)
+ok('gate!(nil) does not crash and does not spuriously fail', stn == :pass)
+
+# review finding: malformed data (resolvedBindings > sourceBindings) must not
+# push binding_loss outside its documented 0.0..1.0 contract, and the headline
+# must stay consistent with whatever clamp is applied (no negative counts).
+BAD = { 'summary' => { 'sourceBindings' => 10, 'resolvedBindings' => 15 } }.freeze
+ok('binding_totals clamps resolved to total when resolved > total',
+   CoverageGate.binding_totals(BAD) == [10, 10])
+ok('binding_loss stays within 0.0..1.0 for malformed (resolved > total) data',
+   CoverageGate.binding_loss(BAD) == 0.0)
+bad_headline = CoverageGate.binding_headline(BAD)
+ok('binding_headline has no negative dropped count for malformed data',
+   !bad_headline.include?('-5') && !bad_headline.include?('150.0%'))
+
+# total == 0 (no bindings recorded anywhere) must not divide-by-zero or
+# report a 100% loss — it is "no data", not "total loss".
+EMPTY = { 'summary' => { 'sourceBindings' => 0, 'resolvedBindings' => 0 } }.freeze
+ok('binding_totals total==0 -> [0, 0]', CoverageGate.binding_totals(EMPTY) == [0, 0])
+ok('binding_loss total==0 -> 0.0 (no data, not total loss)', CoverageGate.binding_loss(EMPTY) == 0.0)
+ok('binding_headline total==0 -> explicit no-data message',
+   CoverageGate.binding_headline(EMPTY) == 'no field-binding data recorded')
+
 puts($fail.zero? ? "\nALL PASS" : "\n#{$fail} FAILED")
 exit($fail.zero? ? 0 : 1)
