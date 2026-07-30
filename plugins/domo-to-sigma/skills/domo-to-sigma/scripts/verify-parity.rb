@@ -124,6 +124,58 @@ def round_row(row)
   end
 end
 
+# ── DOMO-LIVE-VALIDATED FIX (2026-07-30) — NOT yet propagated upstream to the
+# tableau-to-sigma source this file is vendored from (see header); port it
+# back once confirmed useful there too. See refs/live-validation-2026-07-30.md
+# "Parity — validated live".
+#
+# Domo's `POST /v1/datasets/query/execute/{id}` silently returns THE COLUMN'S
+# OWN CASING instead of the alias you requested when the two collide
+# case-insensitively: `ROUND(SUM(GROSS_PROFIT),2) AS gross_profit` on a table
+# that already has a GROSS_PROFIT column came back named "GROSS_PROFIT", not
+# "gross_profit" — verified live, while a non-colliding `AS net_rev` was
+# preserved exactly. Any comparison that looks a result column up by the
+# alias it REQUESTED, using case-sensitive equality, will silently treat that
+# column as absent — which can read as a clean/complete comparison when a
+# measure was never actually compared. `realign_row` resolves each requested
+# column case-insensitively against what the response actually returned, and
+# RAISES — never returns a blank/missing cell — when a requested column truly
+# isn't present under any casing: a silently-missing column must be a loud
+# failure, not a quietly-skipped match.
+def realign_row(requested_columns, returned_columns, row)
+  requested_columns.map do |wanted|
+    idx = returned_columns.index(wanted)
+    idx ||= returned_columns.index { |c| c.to_s.casecmp?(wanted.to_s) }
+    if idx.nil?
+      raise "verify-parity: requested column #{wanted.inspect} is missing from the returned " \
+            "columns #{returned_columns.inspect} (checked case-insensitively too) — refusing to " \
+            'silently treat it as a match. See the Domo alias-case-collision note in ' \
+            'refs/live-validation-2026-07-30.md.'
+    end
+    row[idx]
+  end
+end
+
+# Normalize one side of a chart's plan entry (`expected` or `actual`) to a
+# plain array of row-tuples. Fully backward compatible: the ORIGINAL shapes
+# (`expected`: bare array of arrays; `actual`: {"rows"=>[...]}) pass through
+# unchanged. Opt-in only for the named-column shape
+# ({"columns"=>[...], "rows"=>[...], "requested_columns"=>[...]}) — Domo's
+# (or Sigma's) literal query-response column list plus the aliases you
+# actually asked for — which gets realigned via realign_row above so an
+# alias-case collision can never silently drop a column from the comparison.
+def extract_rows(side)
+  return [] if side.nil?
+  return side if side.is_a?(Array)
+  return [] unless side.is_a?(Hash)
+  rows = Array(side['rows'])
+  if side['columns'] && side['requested_columns']
+    rows.map { |row| realign_row(side['requested_columns'], side['columns'], row) }
+  else
+    rows
+  end
+end
+
 # Per-tile value-parity score in [0,1] (bead y9rd.2): tuple-set Jaccard —
 # matched cells / distinct cells across both sides. 1.0 = exact. Lets us turn
 # "75% parity" into a real, repeatable, gateable number instead of pass/fail only.
@@ -276,7 +328,7 @@ end
 mode_forced = opts[:mode] == :extract
 
 results = plan.map do |p|
-  exp = (p['expected'] || []).map { |r| round_row(r) }
+  exp = extract_rows(p['expected']).map { |r| round_row(r) }
 
   this_extract = if p.key?('extract')
                    p['extract']
@@ -308,7 +360,7 @@ results = plan.map do |p|
     next result.merge(chart: p['chart'], extract: this_extract, columns: [])
   end
 
-  act = (p.dig('actual', 'rows') || []).map { |r| round_row(r) }
+  act = extract_rows(p['actual']).map { |r| round_row(r) }
 
   result = this_extract ? extract_compare(exp, act, tol: opts[:tol]) : strict_compare(exp, act)
   result.merge(chart: p['chart'], extract: this_extract,

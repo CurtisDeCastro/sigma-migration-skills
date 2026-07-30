@@ -3,6 +3,9 @@
   "cognos-to-sigma": {
     "skill-md-bytes": "pre-diet converter (28.8KB) — E9 diet pending; shrink to <=20KB then remove"
   },
+  "domo-to-sigma": {
+    "skill-md-bytes": "crossed budget at 24.7KB when the upstream v0.7.2 live-validation content merged in (#557) — diet the live-run guidance into phase-scoped refs/, then remove"
+  },
   "looker-to-sigma": {
     "skill-md-bytes": "pre-diet converter (77.2KB, largest surface) — first in line for the E9 diet; shrink then remove",
     "pre-read-width": "legacy 'Read ALL of the following' block names 5 refs — phase-scope it during looker's E9 diet, then remove"

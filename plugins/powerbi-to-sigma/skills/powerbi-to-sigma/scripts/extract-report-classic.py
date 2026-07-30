@@ -29,22 +29,32 @@ Usage (any ONE of the three inputs):
   # from an already-extracted Report/Layout file (any of UTF-16LE/utf-8-sig/utf-8)
   python3 extract-report-classic.py --report-layout /path/Layout --out signals.json
 """
-import argparse, io, json, re, sys, zipfile
+import argparse, importlib.util, io, json, os, re, sys, zipfile
 
-# Same visualType -> Sigma element kind table as extract-pbir.py.
-VISUAL_KIND = {
-    "card": "kpi", "multiRowCard": "kpi", "kpi": "kpi", "gauge": "kpi",
-    "textbox": "text", "actionButton": "text",
-    "lineChart": "line", "areaChart": "area", "stackedAreaChart": "area",
-    "barChart": "bar", "clusteredBarChart": "bar", "stackedBarChart": "bar",
-    "columnChart": "bar", "clusteredColumnChart": "bar", "stackedColumnChart": "bar",
-    "hundredPercentStackedColumnChart": "bar",
-    "lineClusteredColumnComboChart": "combo", "lineStackedColumnComboChart": "combo",
-    "pieChart": "pie", "donutChart": "donut", "scatterChart": "scatter",
-    "tableEx": "table", "pivotTable": "pivot-table", "matrix": "pivot-table",
-    "slicer": "control",
-    "map": "map", "filledMap": "map", "shapeMap": "map", "azureMap": "map",
-}
+# visualType -> Sigma kind + ROLE CLASS resolves through the catalogs
+# (refs/catalogs/viz-kind.json + custom-visual.json) via lib/pbi_viz_kind.py — the
+# SAME files the Ruby builder reads, so the two maps cannot drift.
+#
+# Replaces the hand-maintained VISUAL_KIND dict that used to live here (and a
+# duplicate in extract-pbir.py), whose `.get(vtype, "bar")` default silently coerced
+# any unrecognized visual into a bar chart. Measured on 4 real customer .pbix files:
+# that turned 21 third-party Powerviz date-picker SLICERS into bar charts (nearly
+# every page lost its date filter), plus 4 modern cardVisual cards and 5 decorative
+# shapes. Nothing silently becomes a chart any more.
+
+
+def _load_pbi_viz_kind():
+    """Import lib/pbi_viz_kind.py by path (no sys.path mutation — this module is
+    also imported by tests and by extract-pbir.py's sibling flow)."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib", "pbi_viz_kind.py")
+    spec = importlib.util.spec_from_file_location("pbi_viz_kind", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_vk = _load_pbi_viz_kind()
+_VK = _vk.load(_vk.default_catalog_dir(__file__))
 
 # *Bar* = horizontal, *Column* = vertical (Sigma default). Sigma's bar-chart
 # `orientation` accepts only "horizontal"; vertical = omit the field.
@@ -223,6 +233,11 @@ def extract(report):
                     "z": vc.get("z") or ipos.get("z", 0), "parent_group": None, "bindings": {},
                     "sort": None, "formats": {}, "data_labels": None, "legend": None,
                     "resource": m.group(1) if m else None,
+                    # image is a catalog row too, so every visual record carries the
+                    # same role_class/guidance contract the coverage gate reads.
+                    "role_class": _VK.resolve_or_guidance(vt)["role_class"],
+                    "sigma_target": None, "viz_guidance": None,
+                    "viz_catalog": "viz-kind", "approximate": False,
                 }
                 visuals.append((cfg.get("name"), rec))
                 continue
@@ -231,6 +246,12 @@ def extract(report):
             if x is None:
                 pos = (cfg.get("layouts", [{}])[0] or {}).get("position", {})
                 x, y, w, h = pos.get("x", 0), pos.get("y", 0), pos.get("width", 0), pos.get("height", 0)
+            # Catalog resolution. `builder_kind` is the coarse token
+            # build-workbook-from-pbir.rb switches on (unchanged contract);
+            # `role_class` is what the visual DOES (control|kpi|chart|table|text|
+            # decoration|unsupported) so the coverage gate can tell a FUNCTIONAL
+            # loss (a lost slicer = the page lost its filter) from a cosmetic one.
+            vkind = _VK.resolve_or_guidance(vt)
             rec = {
                 # bead npo0: classic config `name`s are NOT unique in pre-2018
                 # files (truncated visualContainer strings collide) and the
@@ -239,7 +260,12 @@ def extract(report):
                 "visual_id": f"p{len(out_pages)}v{len(visuals)}{vt[:8]}",
                 "visual_type": vt,
                 "title": _title(sv),
-                "sigma_kind": VISUAL_KIND.get(vt, "bar"),
+                "sigma_kind": vkind["builder_kind"] or vkind["role_class"],
+                "role_class": vkind["role_class"],
+                "sigma_target": vkind["sigma_target"],
+                "viz_guidance": vkind["guidance"],
+                "viz_catalog": vkind["catalog"],
+                "approximate": vkind["approximate"],
                 "orientation": "horizontal" if vt in HBAR_TYPES else None,
                 "x": x or 0, "y": y or 0, "w": w or 0, "h": h or 0,
                 "z": vc.get("z", 0),
@@ -247,7 +273,7 @@ def extract(report):
                 "bindings": _projections(sv, vt),
                 # bead f972: visual sort ({queryRef, direction asc|desc}) or None
                 "sort": _sort_signal(sv),
-                "stacking": _stacking(vt) if VISUAL_KIND.get(vt) in ("bar", "area") else None,
+                "stacking": _stacking(vt) if vkind["builder_kind"] in ("bar", "area") else None,
                 "formats": {},
                 # bead n9u9: PBI data-label toggle (objects.labels show) — true/false/None
                 "data_labels": _obj_flag(sv, "labels"),

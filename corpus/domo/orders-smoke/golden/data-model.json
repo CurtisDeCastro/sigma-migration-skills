@@ -27,7 +27,8 @@
               "id": "inode-NORM0004/ORDER_DATE",
               "formula": "[ORDER_FACT/Order Date]",
               "format": {
-                "type": "date"
+                "kind": "datetime",
+                "formatString": "%Y-%m-%d"
               }
             },
             {
