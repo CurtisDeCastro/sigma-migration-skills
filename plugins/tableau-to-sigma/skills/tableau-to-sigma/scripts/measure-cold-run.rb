@@ -26,7 +26,14 @@
 #     -- <orchestrator args: --db … --schema … --folder … --answers … --tier auto>
 #   Roles: control | front-door | tier-s-headline | re-entry-proof | certified
 #   Resume contract (mechanical, mirrors the documented exit codes):
-#     exit 0  → terminal;                exit 12 → re-invoke + --finalize
+#     exit 0  → terminal
+#     exit 12 → re-invoke + --finalize --actuals <WORKDIR>/parity-actuals.json
+#               (the orchestrator's own printed pass-2 command — pass 2 hard-
+#               aborts on --finalize without --actuals. Either flag already in
+#               the base argv is kept, never duplicated; the actuals path is
+#               derived from THIS run's workdir, never any other run's. Actuals
+#               file unreadable at resume → the harness REFUSES the re-invoke
+#               with a named stop instead of paying a guaranteed abort)
 #     exit 26 → wait-continue (same argv; counted separately, not a re-entry)
 #     other   → ATTRIBUTED OPERATOR STOP (named by code), harness halts (exit 3)
 #   After terminal/halt: metrics from <WORK>/phase-metrics.jsonl
@@ -95,6 +102,33 @@ module MeasureColdRun
   # side never survives either spelling OptionParser accepts.
   def redact_argv(argv)
     argv.select { |a| a.start_with?('-') }.map { |a| a.split('=', 2).first }
+  end
+
+  # ── exit-12 resume contract (F5) ────────────────────────────────────────────
+  # Pass 2 REQUIRES BOTH flags: migrate-tableau.rb aborts on --finalize without
+  # --actuals, its in-process chain passes both, and the pass-1 tail prints
+  # `--finalize --actuals <WORK>/parity-actuals.json`. <WORK> IS this run's
+  # workdir: the harness appends `--workdir wd` (an alias of --out) LAST, so it
+  # wins any earlier --out/--workdir in the passthrough — deriving the actuals
+  # path from wd can never point at a stale path from a different run. Flags the
+  # base argv already carries (space or equals form) are kept, never duplicated.
+  def argv_flag?(argv, flag)
+    argv.any? { |a| a == flag || a.start_with?("#{flag}=") }
+  end
+
+  def argv_flag_value(argv, flag)
+    argv.each_with_index do |a, i|
+      return a.split('=', 2).last if a.start_with?("#{flag}=")
+      return argv[i + 1] if a == flag
+    end
+    nil
+  end
+
+  def exit12_resume_argv(base_argv, wd)
+    argv = base_argv.dup
+    argv += ['--finalize'] unless argv_flag?(argv, '--finalize')
+    argv += ['--actuals', File.join(wd, 'parity-actuals.json')] unless argv_flag?(argv, '--actuals')
+    argv
   end
 
   def run_with_deadline(argv, log_path, deadline_s)
@@ -209,9 +243,34 @@ module MeasureColdRun
         terminal = true
         break
       elsif code == 12
+        # Recomputed from base_argv every time (a repeat exit 12 never stacks
+        # duplicate flags); the actuals path comes from THIS run's wd.
+        resume = exit12_resume_argv(base_argv, wd)
+        actuals = argv_flag_value(resume, '--actuals')
+        if actuals.to_s.empty? || !File.file?(actuals)
+          # Harness-level refusal: re-invoking without a readable actuals file
+          # is a guaranteed orchestrator abort ('--actuals required with
+          # --finalize'). Record the truth instead of paying a doomed
+          # invocation. NOT counted as a re-entry — nothing re-entered.
+          # Record hygiene: the stop message carries no paths/values.
+          why = if actuals.to_s.empty?
+                  'the base argv carries --actuals without a value'
+                elsif argv_flag?(base_argv, '--actuals')
+                  'the --actuals file named in the base argv does not exist at resume time'
+                else
+                  'pass 1 left no parity-actuals.json in the run workdir'
+                end
+          stops << { 'code' => 12,
+                     'named' => "exit-12 resume REFUSED by harness: #{why} — pass 2 requires " \
+                                '--finalize --actuals <WORKDIR>/parity-actuals.json' }
+          puts "[cold-run #{opts[:label]}] exit 12 but " \
+               "#{actuals.to_s.empty? ? 'no --actuals value is resolvable' : "#{actuals} does not exist"} — " \
+               "NOT re-invoking (a --finalize resume without actuals is a guaranteed abort; see #{log})"
+          break
+        end
         re_entries += 1
-        argv = base_argv.include?('--finalize') ? base_argv : base_argv + ['--finalize']
-        puts "[cold-run #{opts[:label]}] exit 12 → re-entering with --finalize (re-entry #{re_entries})"
+        argv = resume
+        puts "[cold-run #{opts[:label]}] exit 12 → re-entering with --finalize --actuals (re-entry #{re_entries})"
       elsif code == 26
         wait_continuations += 1
         puts "[cold-run #{opts[:label]}] exit 26 → run alive, waiting again (continuation #{wait_continuations})"

@@ -8,7 +8,15 @@
 #   RUN half:
 #     T1 clean run     — metrics/fidelity/litter collected; VALUES redacted
 #                        (equals-form --flag=VALUE truncated to the NAME too)
-#     T2 exit-12 resume — --finalize re-entry counted (launched 2, re_entries 1)
+#     T2 exit-12 resume — re-entry argv is the orchestrator's printed pass-2
+#                        command (--finalize AND --actuals <WORKDIR>/parity-
+#                        actuals.json; pass 2 aborts on --finalize alone);
+#                        counted (launched 2, re_entries 1)
+#     T2b exit-12 dedup — base argv already carries --finalize + --actuals
+#                        (equals form): neither appended twice, path kept
+#     T2c exit-12 missing actuals — parity-actuals.json absent at resume →
+#                        harness-level REFUSAL stop (code 12, named), NO blind
+#                        re-invoke, re_entries stays 0
 #     T3 stop attribution — exit 10 → named operator stop, harness exit 3
 #     T4 /tmp-side refusal — repo-side --workdir/--results refused (exit 2)
 #     T5 wedge kill    — invocation deadline kills a sleeping orchestrator
@@ -73,11 +81,45 @@ def write_stubs(dir)
     when 'clean'
       write_metrics.call('100-1', 10); finish.call; exit 0
     when 'exit12'
+      # Mirrors the real pass-1/pass-2 contract: pass 1's pooled collector
+      # leaves parity-actuals.json in the workdir and exits 12; pass 2 ABORTS
+      # (exit 1) on --finalize without --actuals, exactly like the orchestrator.
       if ARGV.include?('--finalize')
+        ai = ARGV.index('--actuals')
+        actuals = ai ? ARGV[ai + 1] : ARGV.find { |a| a.start_with?('--actuals=') }&.split('=', 2)&.last
+        if actuals.to_s.empty?
+          warn '--actuals required with --finalize (stub mirror of migrate-tableau.rb)'
+          exit 1
+        end
+        File.write(File.join(wd, 'resume-argv.json'), JSON.generate(ARGV))
         write_metrics.call('200-2', 4); finish.call; exit 0
       else
+        File.write(File.join(wd, 'parity-actuals.json'), JSON.generate('charts' => []))
         write_metrics.call('100-1', 8); exit 12
       end
+    when 'exit12-marker'
+      # Pass keyed on a MARKER FILE, not argv — lets a test preload --finalize/
+      # --actuals into the base argv and still exercise the exit-12 resume.
+      marker = File.join(wd, 'pass1-done.marker')
+      if File.exist?(marker)
+        File.write(File.join(wd, 'resume-argv.json'), JSON.generate(ARGV))
+        write_metrics.call('200-2', 4); finish.call; exit 0
+      else
+        File.write(marker, '1')
+        File.write(File.join(wd, 'parity-actuals.json'), JSON.generate('charts' => []))
+        write_metrics.call('100-1', 8); exit 12
+      end
+    when 'exit12-noactuals'
+      # Pass-1 tail reached but the pooled collector never wrote
+      # parity-actuals.json. ANY second invocation is the bug (a blind
+      # re-invoke can only reproduce the orchestrator abort).
+      calls = File.join(wd, 'orch-calls.log')
+      File.open(calls, 'a') { |f| f.puts('invoked') }
+      if File.readlines(calls).size > 1
+        File.write(File.join(wd, 'reinvoked.marker'), '1')
+        exit 1
+      end
+      write_metrics.call('100-1', 8); exit 12
     when 'stop10'
       write_metrics.call('100-1', 2); exit 10
     when 'sleepy'
@@ -150,7 +192,7 @@ Dir.mktmpdir do |top|
   check(calls == %w[dry-run delete cleanup], "sweep order dry-run → --delete → cleanup (got #{calls.inspect})", fails)
 end
 
-puts 'T2 — exit-12 resume: --finalize re-entry counted'
+puts 'T2 — exit-12 resume: --finalize + --actuals re-entry (the printed pass-2 contract)'
 Dir.mktmpdir do |top|
   orch, sweep, cleanup = write_stubs(top)
   wd = File.join(top, 'wd'); Dir.mkdir(wd)
@@ -164,6 +206,54 @@ Dir.mktmpdir do |top|
   check(rec['invocations']['metrics_invocations'] == 2,
         'phase-metrics inv tokens see both invocations', fails)
   check(rec['turns']['turn_events'] == 12, '8 + 4 turn events across the two passes', fails)
+  resume = JSON.parse(File.read(File.join(wd, 'resume-argv.json')))
+  check(resume.include?('--finalize'), 'resume argv carries --finalize', fails)
+  ai = resume.index('--actuals')
+  check(!ai.nil? && resume[ai + 1] == File.join(wd, 'parity-actuals.json'),
+        "resume argv carries --actuals <WORKDIR>/parity-actuals.json (got #{resume.inspect})", fails)
+end
+
+puts 'T2b — exit-12 resume dedup: base argv already carries --finalize + --actuals (equals form)'
+Dir.mktmpdir do |top|
+  orch, sweep, cleanup = write_stubs(top)
+  wd = File.join(top, 'wd'); Dir.mkdir(wd)
+  results = File.join(top, 'results.jsonl')
+  actuals_eq = "--actuals=#{File.join(wd, 'parity-actuals.json')}"
+  _out, st = run_harness(stub_args(orch, sweep, cleanup, wd, results,
+                                   ['--', '--db', 'X', '--finalize', actuals_eq]),
+                         { 'STUB_MODE' => 'exit12-marker' })
+  rec = JSON.parse(File.readlines(results).last)
+  check(st.zero?, "resume run reaches terminal 0 (got #{st})", fails)
+  check(rec['invocations']['launched'] == 2 && rec['invocations']['re_entries'] == 1,
+        "one re-entry, no refusal (got #{rec['invocations'].inspect})", fails)
+  resume = JSON.parse(File.read(File.join(wd, 'resume-argv.json')))
+  check(resume.count { |a| a == '--finalize' } == 1, 'no duplicate --finalize appended', fails)
+  check(resume.count { |a| a == '--actuals' || a.start_with?('--actuals=') } == 1,
+        "no duplicate --actuals (equals form detected; got #{resume.inspect})", fails)
+  check(resume.include?(actuals_eq), 'the operator-supplied actuals path is kept as-is', fails)
+  check(!File.read(results).include?(wd), 'HYGIENE: no workdir path enters the record', fails)
+end
+
+puts 'T2c — exit-12 with parity-actuals.json MISSING: harness refuses, never blind re-invokes'
+Dir.mktmpdir do |top|
+  orch, sweep, cleanup = write_stubs(top)
+  wd = File.join(top, 'wd'); Dir.mkdir(wd)
+  results = File.join(top, 'results.jsonl')
+  out, st = run_harness(stub_args(orch, sweep, cleanup, wd, results, ['--', '--db', 'X']),
+                        { 'STUB_MODE' => 'exit12-noactuals' })
+  rec = JSON.parse(File.readlines(results).last)
+  check(st == 3, "refused resume is a non-terminal harness halt, exit 3 (got #{st})", fails)
+  check(rec['invocations']['launched'] == 1 && rec['invocations']['re_entries'].zero?,
+        "no re-invocation launched, no re-entry counted (got #{rec['invocations'].inspect})", fails)
+  check(!File.exist?(File.join(wd, 'reinvoked.marker')),
+        'orchestrator was NOT blindly re-invoked into its --actuals abort', fails)
+  stop = rec['stops'].first || {}
+  check(stop['code'] == 12 && stop['named'].to_s.include?('REFUSED') &&
+        stop['named'].to_s.include?('parity-actuals.json'),
+        "stop names the harness-level refusal (got #{rec['stops'].inspect})", fails)
+  check(rec['terminal'] == false, 'refused run is recorded non-terminal', fails)
+  check(!File.read(results).include?(wd), 'HYGIENE: refusal stop keeps paths out of the record', fails)
+  check(out.include?('NOT re-invoking'), 'stdout names the refusal before the litter chain', fails)
 end
 
 puts 'T3 — operator stop: exit 10 attributed by name, harness exit 3'
