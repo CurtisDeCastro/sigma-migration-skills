@@ -95,5 +95,70 @@ ok('every fanned-out shared entry-point script LOADS in its plugin (deps travell
   load_errors.empty?
 end
 
-puts($fail.zero? ? "\nALL PASS — fan-out targets exist, gates ship their remedies, and every shared script loads with its deps" : "\n#{$fail} FAILURE(S)")
+# ── 4. RATCHET on unregistered duplicate script names.
+#
+# A script name living in several plugins without a shared-manifest entry is
+# exactly how the record-visual-check divergence happened: nothing forces the
+# copies to agree, so they drift silently until one plugin's copy is missing a
+# flag or a fix another already has. check-shared can't help — it only compares
+# what IS registered.
+#
+# The 24 names below are a REAL PRE-EXISTING BACKLOG, not an endorsement. Most
+# have already diverged, and several diverged HARD (tableau's put-layout.rb is
+# 301 lines against 77-85 elsewhere; build-charts-from-signals.rb is 9009 against
+# 1533). Reconciling those is a per-script judgement about which behaviour is
+# genuinely per-tool and which is a fix the others are missing — it cannot be
+# done safely in bulk, because adopting the larger copy wholesale drags in libs
+# the smaller plugins don't have (precisely the LoadError this file's guard 3
+# exists to catch).
+#
+# So this is a RATCHET, not a pass: every name here is an acknowledged debt, and
+# any NEW duplicate name fails CI. To clear an entry, either register it in
+# shared/manifest.json (canonical = whichever copy carries the fixes, and make
+# sure its deps are registered too) or, if the implementations really are
+# per-tool, delete the line and add the name to PER_TOOL_BY_DESIGN with a reason.
+PER_TOOL_BY_DESIGN = {
+  'convert-model.rb'  => 'each converter parses a different source format end-to-end',
+  'phase6-parity.rb'  => "per-tool parity CLI (--tableau vs --workdir) and per-tool oracles",
+  'learned-rules.rb'  => 'gap-scout rule store is keyed to one tool\'s expression language'
+}.freeze
+
+DUP_BACKLOG = %w[
+  assert-doctor-ran.rb build-charts-from-signals.rb build-dashboard-layout.rb
+  build-shortlist.rb build-workbook-spec.rb column_census.rb dm_quarantine.rb
+  layout.rb migration-plan.rb post-and-readback.rb put-layout.rb
+  render-readout-html.rb render-readout.rb run_state.rb
+  scout-validate-and-persist.rb sigma_functions.rb validate-sigma-formula.rb
+  validate-spec.rb verify-complete.rb verify-parity.rb zone_census.rb
+].to_set
+
+by_name = {}
+Dir.glob('plugins/*/skills/*/scripts/**/*.rb').each do |p|
+  b = File.basename(p)
+  next if b.start_with?('test-', 'test_')
+  (by_name[b] ||= []) << p
+end
+dupes = by_name.select { |n, ps| ps.size >= 2 && !SHARED_BASENAMES.include?(n) }
+new_dupes  = dupes.keys.reject { |n| DUP_BACKLOG.include?(n) || PER_TOOL_BY_DESIGN.key?(n) }
+gone       = (DUP_BACKLOG.to_a - dupes.keys).sort   # cleared or no longer duplicated
+
+ok('no NEW unregistered duplicate script name (ratchet over a known backlog)') do
+  new_dupes.sort.each do |n|
+    ps = dupes[n]
+    ident = ps.map { |p| File.read(p) }.uniq.size == 1
+    warn "    NEW duplicate #{n}: #{ps.size} copies (#{ident ? 'identical' : 'already diverged'}) in " \
+         "#{ps.map { |p| p.split('/')[1] }.join(', ')}"
+    warn '      -> register it in shared/manifest.json, or add it to PER_TOOL_BY_DESIGN with a reason'
+  end
+  new_dupes.empty?
+end
+
+ok('the duplicate backlog list is accurate (no stale entries to tighten)') do
+  gone.each { |n| warn "    #{n} is no longer an unregistered duplicate — remove it from DUP_BACKLOG (ratchet tightens)" }
+  gone.empty?
+end
+
+warn "\nnote: #{DUP_BACKLOG.size} acknowledged duplicate-script debts remain (see DUP_BACKLOG above)." if $fail.zero?
+
+puts($fail.zero? ? "\nALL PASS — fan-out targets exist, gates ship their remedies, every shared script loads with its deps, and no new duplicates crept in" : "\n#{$fail} FAILURE(S)")
 exit($fail.zero? ? 0 : 1)
