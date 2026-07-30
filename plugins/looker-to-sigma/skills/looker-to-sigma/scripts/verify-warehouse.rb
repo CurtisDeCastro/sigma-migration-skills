@@ -133,8 +133,9 @@ def verify_chart(c, el_by_id, error_element_ids, wb, timeout, fixture)
 end
 
 # Belt-and-suspenders: the warehouse-verified stamp must never land on a workbook
-# with type=error columns. Fetch /columns ONCE and collect the owning element ids
-# (the same signal assert-phase6 Gate 3 uses). Skipped in fixture/test mode.
+# with type=error columns. Fetch /columns exhaustively (one paginated scan, not one
+# request) and collect the owning element ids (the same signal assert-phase6 Gate 3
+# uses). Skipped in fixture/test mode.
 error_element_ids = []
 unless opts[:fixture]
   begin

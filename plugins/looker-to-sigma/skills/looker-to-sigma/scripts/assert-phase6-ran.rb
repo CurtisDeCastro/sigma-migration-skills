@@ -1158,6 +1158,7 @@ unless opts[:skip_column]
       res  = nil
       page = nil
       seen = {}
+      complete = false   # did the scan reach the END of the column list?
       loop do
         qs  = 'limit=1000'
         qs += "&page=#{URI.encode_www_form_component(page)}" if page
@@ -1172,27 +1173,37 @@ unless opts[:skip_column]
         break unless doc.is_a?(Hash)
         cols.concat(doc['entries'] || [])
         page = doc['nextPage']
-        # A repeated or empty token ends the loop defensively rather than spinning.
-        break if page.nil? || page.to_s.empty? || seen[page]
+        if page.nil? || page.to_s.empty?
+          complete = true   # exhausted the list — the ONLY way this is a full scan
+          break
+        end
+        # A repeated token means the server is misbehaving; stop, but do NOT claim
+        # a complete scan.
+        break if seen[page]
         seen[page] = true
       end
 
-      if res.is_a?(Net::HTTPSuccess)
-        error_cols = cols.select { |c| c.dig('type', 'type') == 'error' }
-        if error_cols.any?
-          warn "[FAIL] gate 3/7: live workbook #{wb_id} has #{error_cols.length} column(s) with type=error."
-          warn "       These render as visible errors in the Sigma UI (circular ref, unknown column,"
-          warn "       unsupported function, etc.). Fix the offending formulas and re-PUT before declaring GREEN."
-          error_cols.first(10).each do |c|
-            warn "         element=#{c['elementId']} col=#{c['columnId']} label=#{c['label'].inspect}"
-            warn "           formula: #{c['formula']}"
-          end
-          warn "       See beads-sigma-38a."
-          exit 5
+      # Error columns are decisive REGARDLESS of whether the scan completed. A column
+      # we DID see with type=error is a real failure, and a transient failure on a
+      # later page must never downgrade it to a SKIP.
+      error_cols = cols.select { |c| c.dig('type', 'type') == 'error' }
+      if error_cols.any?
+        warn "[FAIL] gate 3/7: live workbook #{wb_id} has #{error_cols.length} column(s) with type=error."
+        warn "       These render as visible errors in the Sigma UI (circular ref, unknown column,"
+        warn "       unsupported function, etc.). Fix the offending formulas and re-PUT before declaring GREEN."
+        error_cols.first(10).each do |c|
+          warn "         element=#{c['elementId']} col=#{c['columnId']} label=#{c['label'].inspect}"
+          warn "           formula: #{c['formula']}"
         end
-        puts "[OK] gate 3/7: #{cols.length} live columns clean (no type=error)"
+        warn "       See beads-sigma-38a."
+        exit 5
+      elsif !complete
+        warn "[SKIP] gate 3/7: the live column scan of #{wb_id} did NOT complete " \
+             "(#{cols.length} column(s) read; HTTP #{res&.code}) — cannot verify."
+        warn '       No type=error column was found in what WAS read, but an incomplete'
+        warn '       scan does not prove the workbook clean. Re-run this gate.'
       else
-        warn "[SKIP] gate 3/7: GET /v2/workbooks/#{wb_id}/columns returned HTTP #{res.code} — cannot verify"
+        puts "[OK] gate 3/7: #{cols.length} live columns clean (no type=error)"
       end
     end
   end
