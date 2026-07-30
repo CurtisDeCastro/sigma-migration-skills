@@ -1,0 +1,27 @@
+{
+  "serialized": 3,
+  "wired": 2,
+  "entries": [
+    {
+      "left": "FACT_WIDE",
+      "right": "DIM_CUSTOMER",
+      "derivedVia": "name-inference",
+      "keyCount": 1
+    },
+    {
+      "left": "FACT_WIDE",
+      "right": "DIM_PRODUCT",
+      "derivedVia": "serialized",
+      "keyCount": 1,
+      "partial": true,
+      "droppedConditions": 1
+    },
+    {
+      "left": "FACT_WIDE",
+      "right": "DIM_DATE",
+      "derivedVia": "unwired",
+      "reason": "no existing column name matches on both sides",
+      "candidates": []
+    }
+  ]
+}
