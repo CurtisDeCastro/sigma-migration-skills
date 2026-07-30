@@ -30,6 +30,38 @@
 - **The Metadata-API rung** — would use `lib/tableau_rest.rb`'s `graphql()`, also SHARED, and needs live Tableau to know whether Tableau even exposes resolved join fields. Deferred to the live pass.
 - **The live-published Tableau fixture.** This PR uses a hand-authored `.twb`. A follow-up replaces it with genuine served Tableau output once the warehouse is free. The hand-authored fixture is explicitly marked as such in its MANIFEST so nobody mistakes it for real Tableau output.
 
+## AMENDMENT after Task 1's spike: the safety argument was overstated
+
+The original design said inference is safe because inferred keys flow into `join-plan.json`, where
+gate 16's probe validates them. **That is only half right, and the design is tightened accordingly.**
+
+What gate 16 actually runs (`scripts/probe-join-keys.rb:115,120`) is
+`SELECT <keys>, COUNT(*) GROUP BY <keys> HAVING COUNT(*) > 1` on the right table, plus a
+total-vs-distinct count. That proves **uniqueness**, not **correctness**:
+
+- ✅ It catches an inferred key that causes **fan-out** — the undercount failure mode.
+- ❌ It does **not** catch a *wrong but unique* key. If `CREATED_AT` exists on both fact and dim and
+  happens to be unique in the dim, the probe passes and a semantically wrong join ships silently.
+- ❌ It does not verify the join **matches any rows**. An inferred key that matches nothing produces
+  a silently empty join, and the probe is blind to it.
+
+Two consequences for the implementation:
+
+1. **Inference is now conservative: unambiguous and key-shaped only.** One surviving key-shaped
+   candidate → wire. Zero or several → do not guess; record unwired with the candidate list so an
+   operator decides. This is strictly safer than the approved "infer by name" behaviour and still
+   fixes the common case (a fact/dim pair sharing exactly one `*_ID`).
+2. **Never build a composite key out of multiple name matches.** The original plan said to take all
+   matches, which is actively harmful: an incidental second match (both sides carrying `CREATED_AT`)
+   over-constrains the join and silently drops rows. Tableau's auto-match does not behave that way.
+
+Every inference is recorded as `derived_via: "name-inference"` precisely because it is a *derivation,
+not a fact* — so PR2b's coverage gate and any operator review can see which relationships rest on a
+guess. Gate 16 remains valuable (it is the fan-out net); it is simply not a correctness oracle, and
+the design no longer claims it is.
+
+Spike findings and the four risks it raised: `docs/superpowers/plans/2026-07-30-pr2a-spike.md`.
+
 ## The defect
 
 `converter/tableau.mjs` can only wire a Tableau 2020.2+ logical (object-graph) relationship when Tableau serialized a **physical equality key**. Three branches fail, all warning-only:
@@ -161,9 +193,16 @@ puts 'test-relationship-derivation.rb — object-graph key derivation'
 cov = doc['relationshipCoverage'] || {}
 check(cov['serialized'].to_i == 3,
       "coverage reports all 3 serialized relationships (got #{cov['serialized'].inspect})", fails)
-check(cov['wired'].to_i == 3,
-      "all 3 relationships are WIRED (got #{cov['wired'].inspect}) — 0 or 1 means the star " \
-      'became disconnected tables', fails)
+entries = cov['entries'] || []
+by_target = entries.each_with_object({}) { |e, h| h[e['right']] = e }
+# The auto-matched and mixed-key relationships MUST wire. The computed-only one may
+# legitimately stay unwired under the conservative rule (no key-shaped name match) —
+# what matters is that it is RECORDED, never silently absent.
+check(cov['wired'].to_i >= 2,
+      "at least the auto-matched and mixed-key relationships are WIRED (got #{cov['wired'].inspect}) " \
+      '— 0 or 1 means the star still becomes disconnected tables', fails)
+check(entries.length == 3,
+      "all 3 relationships appear in the ledger, wired or not (got #{entries.length})", fails)
 
 entries = cov['entries'] || []
 by_target = entries.each_with_object({}) { |e, h| h[e['right']] = e }
@@ -238,7 +277,28 @@ At the object-graph relationship loop (the three failing branches are at roughly
         const relCoverage = { serialized: relsList.length, wired: 0, entries: [] };
 ```
 
-2. Replace the `eqExprs.length === 0` branch (auto-match) so that instead of `continue`, it attempts name inference using the expression Task 1 chose. Match only names that ALREADY exist on both sides — never call `ensureCol` with a guessed name. Prefer an exact case/underscore-normalized match; if more than one candidate matches, take ALL of them as a composite key (that is what Tableau's auto-match does) and record the count.
+2. Replace the `eqExprs.length === 0` branch (auto-match) so that instead of `continue`, it attempts name inference using the expression Task 1's spike chose. **Use the CONSERVATIVE rule below, not a naive name intersection** — see the amendment section for why.
+
+**The inference rule (revised after Task 1's spike):**
+
+```
+candidates = normalized existing column names present on BOTH entries
+             (normalize: String(n).replace(/\s+/g,"_").toUpperCase())
+             (existence tested WITHOUT ensureCol, per the spike's expression)
+
+keyShaped  = candidates filtered to names that look like join keys:
+               - ends with _ID, _KEY, _SK, or _CODE, or
+               - equals/contains the target element's entity name
+                 (DIM_CUSTOMER -> CUSTOMER_ID, CUSTOMER_KEY, CUSTOMER)
+
+if keyShaped.length == 1  -> WIRE it, derivedVia: "name-inference"
+else                      -> DO NOT GUESS. Leave unwired, derivedVia: "unwired",
+                             reason naming why (no key-shaped candidate, or
+                             ambiguous), and list the candidates so an operator
+                             can choose.
+```
+
+Never take multiple candidates as a composite key. Never call `ensureCol` with a guessed name.
 
 3. Keep the computed-only branch's behavior but attempt the same inference before giving up.
 
