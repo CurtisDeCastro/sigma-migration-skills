@@ -111,8 +111,15 @@ Discovered 2026-07-30, after #557 shipped the opposite claim (corrected in #559)
 Domo layout **is** readable and writable via v4, including for a classic page.
 
 - **Read:** `GET /api/content/v3/stacks/{pageId}/cards?includeV4PageLayouts=true` →
-  `pageLayoutV4` with `content[]` (`contentKey` + `cardUrn` join key) and
-  `standard`/`compact` templates of `{x, y, width, height, children[]}`.
+  `pageLayoutV4`. Geometry is at **`standard.template[]`** (`{contentKey, x, y, width,
+  height, type}`), joined to **`content[]`** on **`contentKey`** for the `cardId`.
+  Neither array alone gives card-id + position. Full shape, the three page styles, and
+  the HEADER/section-divider handling: **`refs/page-layout-v4.md`** (corroborated on a
+  second, independent live tenant).
+- **Two defects in our own code, both verified from source** — so Track C is a repair,
+  not just a new rung: `domo_rest.rb:238` omits `includeV4PageLayouts=true`, and
+  `domo_sigma_util.rb:151` digs `pageLayoutV4.cards`, a key that does not exist, so the
+  v4 branch is dead code that silently yields nothing.
 - **Grid is 60 wide** (12 compact) — so Domo→Sigma scales **60 → 24 (×0.4)**, NOT the
   ×4 currently documented from the unrelated `preferredFullWidth` (1..6).
 - Wire it as **preference tier 1** in `build-domo-layout.rb`, above the
