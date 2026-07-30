@@ -265,8 +265,12 @@ check(!src.match?(/JSON\.parse\(body\)\['entries'\]/),
       'discover-columns.rb no longer reads a bare first-page body', fails)
 check(src.include?('SIGMA_HTTP_TIMEOUT'),
       'discover-columns.rb still honors SIGMA_HTTP_TIMEOUT (the stuck-for-hours guard)', fails)
-check(src.include?("/v2/connection/#{'#'}{opts[:conn]}/lookup") || src.include?('/lookup'),
-      'discover-columns.rb still resolves the inode via POST /lookup (404 hint preserved)', fails)
+# Assert the 404 remediation text itself, not merely that the word "lookup"
+# appears somewhere — the hint is the behavior worth protecting.
+check(src.include?("not found in Sigma's catalog") && src.include?('/sync'),
+      'discover-columns.rb still prints the 404 catalog-sync remediation hint', fails)
+check(src.include?('exit 4'),
+      'discover-columns.rb still exits 4 on a catalog miss', fails)
 
 puts ''
 if fails.empty?
@@ -622,12 +626,15 @@ Append before the summary block:
 #    declare a wide workbook clean while error columns sit past column 50.
 #    cols_res must SURVIVE: later guards check its HTTP status.
 src = File.read(File.join(__dir__, 'post-and-readback.rb'))
-check(src.include?('Sigma.list_entries'),
-      'post-and-readback.rb reads the column census via Sigma.list_entries', fails)
+check(src.include?('Sigma.list_entries(columns_path)'),
+      'post-and-readback.rb derives the column census via Sigma.list_entries', fails)
 check(src.include?('cols_res.is_a?(Net::HTTPSuccess)'),
       'post-and-readback.rb still gates on cols_res HTTP status', fails)
-check(!src.match?(/JSON\.parse\(cols_res\.body\)/),
-      'post-and-readback.rb no longer derives the census from a single first page', fails)
+# The first-page parse survives ONLY as a warned degraded fallback. Assert the
+# warning exists, so a pagination failure can never truncate silently — that
+# would re-create the very bug this change removes.
+check(src.include?('column census: exhaustive read failed'),
+      'a degraded first-page census announces itself loudly instead of truncating silently', fails)
 ```
 
 - [ ] **Step 3: Run the test to verify it fails**
@@ -661,10 +668,22 @@ New:
   # cols_json['entries'] read is untouched.
   cols_json =
     if cols_res.is_a?(Net::HTTPSuccess)
-      { 'entries' => (Sigma.list_entries(columns_path) rescue
-                        (JSON.parse(cols_res.body)['entries'] rescue [])) }
+      begin
+        { 'entries' => Sigma.list_entries(columns_path) }
+      rescue StandardError => e
+        # LOUD, not silent. A swallowed pagination failure would fall back to the
+        # first 50 columns and re-create the exact silent truncation this change
+        # exists to remove — so the degraded read announces itself.
+        warn "column census: exhaustive read failed (#{e.class}: #{e.message}) — falling " \
+             'back to the FIRST PAGE ONLY; the error-column census may be incomplete'
+        { 'entries' => (JSON.parse(cols_res.body)['entries'] rescue []) }
+      end
     end
 ```
+
+Note on the bare `rescue` in the fallback line: it mirrors the idiom the original
+line already used for a malformed body, and it is now guarded by a warning, so a
+failure is visible rather than silent.
 
 - [ ] **Step 5: Run the test to verify it passes**
 
