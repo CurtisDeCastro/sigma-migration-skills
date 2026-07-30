@@ -136,6 +136,14 @@ check(src.include?('cols_res.is_a?(Net::HTTPSuccess)'),
 # would re-create the very bug this change removes.
 check(src.include?('column census: exhaustive read failed'),
       'a degraded first-page census announces itself loudly instead of truncating silently', fails)
+# A degraded (first-page-only) census must not let the clean-column claim print
+# unqualified: stderr already warns on the pagination failure, but without this
+# marker the guard below still says "N columns clean" and exits 0 — loud on one
+# stream, silently clean on the other. Same false-clean pattern this PR removes.
+check(src.include?('census_partial'),
+      'post-and-readback.rb marks a degraded census so it cannot claim clean', fails)
+check(src.include?('census INCOMPLETE'),
+      'a degraded census reports INCOMPLETE instead of "columns clean"', fails)
 
 puts ''
 if fails.empty?

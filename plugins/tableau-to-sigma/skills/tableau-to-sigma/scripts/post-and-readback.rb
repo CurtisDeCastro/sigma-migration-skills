@@ -488,7 +488,7 @@ readback = lambda do
         # exists to remove — so the degraded read announces itself.
         warn "column census: exhaustive read failed (#{e.class}: #{e.message}) — falling " \
              'back to the FIRST PAGE ONLY; the error-column census may be incomplete'
-        { 'entries' => (JSON.parse(cols_res.body)['entries'] rescue []) }
+        { 'entries' => (JSON.parse(cols_res.body)['entries'] rescue []), 'census_partial' => true }
       end
     end
   labels_by_el = Hash.new { |h, k| h[k] = [] }
@@ -679,7 +679,12 @@ if res.is_a?(Net::HTTPSuccess)
     exit(2)
   else
     total = (cols_json['entries'] || []).size
-    warn "column-type guard: #{total} columns clean (no `error` types)"
+    if cols_json['census_partial']
+      warn "column-type guard: census INCOMPLETE — #{total} column(s) read; no `error` types among them, " \
+           'but this does NOT confirm the workbook clean (columns past the first page were not read). Re-run.'
+    else
+      warn "column-type guard: #{total} columns clean (no `error` types)"
+    end
   end
 else
   warn "WARN: could not fetch /columns for type guard (got HTTP #{res.code}); skipping"
