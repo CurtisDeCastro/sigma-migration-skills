@@ -243,7 +243,12 @@ end
 def col_label(c) (c['alias'] && !c['alias'].to_s.strip.empty?) ? c['alias'] : display_name(c['column']) end
 
 # A measure element column: <Agg>([Master/<disp>]) with a clean label + format.
-def measure_col(c)
+def measure_col(c, card = nil)
+  # An aggregate/window Beast Mode is inlined un-wrapped — see
+  # inline_beast_mode_measure for why Sum([Master/<BM name>]) would be wrong.
+  inlined = c['_isCalc'] ? inline_beast_mode_measure(card || {}, c) : nil
+  return inlined if inlined
+
   disp = display_name(c['column'])
   { 'id' => "m-#{c['column'].to_s.downcase.gsub(/\W+/, '-')}",
     'name' => col_label(c),
@@ -338,7 +343,7 @@ def build_axis_chart(card, kind)
   ct = card['chartType'].to_s.downcase
   xcol = dims.first
   dcols = dims.map { |d| dim_col(d, card) }
-  mcols = meas.map { |m| measure_col(m) }
+  mcols = meas.map { |m| measure_col(m, card) }
   el = {
     'id' => eid(card), 'kind' => kind, 'name' => card['title'],
     'source' => { 'kind' => 'table', 'elementId' => 'master' },
@@ -370,7 +375,7 @@ def build_axis_chart(card, kind)
     # badge_bubble: bind the BUBBLESIZE-mapped column (if the extraction
     # captured `mapping`) to the scatter's optional size channel.
     bubble = (card['columns'] || []).find { |c| c['mapping'].to_s.upcase == 'BUBBLESIZE' }
-    el['size'] = { 'id' => measure_col(bubble)['id'] } if bubble
+    el['size'] = { 'id' => measure_col(bubble, card)['id'] } if bubble
   end
   el
 end
@@ -388,7 +393,7 @@ def build_pie_or_donut(card, kind)
   warn_card(card, "#{kind}: could not resolve both a dimension (color) and a measure (value) — " \
                   'verify against the card PNG.') if dims.empty? || meas.empty?
   dcol = dims.first ? dim_col(dims.first, card) : nil
-  mcol = meas.first ? measure_col(meas.first) : nil
+  mcol = meas.first ? measure_col(meas.first, card) : nil
   {
     'id' => eid(card), 'kind' => kind, 'name' => card['title'],
     'source' => { 'kind' => 'table', 'elementId' => 'master' },
@@ -414,7 +419,7 @@ def build_combo(card)
                     "#{meas.size} — verify the series assignment against the card PNG.")
   end
   dcols = dims.map { |d| dim_col(d, card) }
-  mcols = meas.map { |m| measure_col(m) }
+  mcols = meas.map { |m| measure_col(m, card) }
   series = mcols.each_with_index.map { |m, i| { 'columnId' => m['id'], 'type' => i.zero? ? 'bar' : secondary } }
   el = {
     'id' => eid(card), 'kind' => 'combo-chart', 'name' => card['title'],
@@ -463,7 +468,7 @@ def build_map(card)
     return build_table(card)
   end
   gcol = dim_col(geo, card)
-  mcol = meas.first ? measure_col(meas.first) : nil
+  mcol = meas.first ? measure_col(meas.first, card) : nil
   {
     'id' => eid(card), 'kind' => 'region-map', 'name' => card['title'],
     'source' => { 'kind' => 'table', 'elementId' => 'master' },
@@ -476,7 +481,7 @@ end
 def build_table(card)
   dims, meas = split_cols(card)
   cols = dims.map { |d| dim_col(d, card).merge('style' => { 'textWrap' => 'wrap' }) } +   # #5 wrap text cols
-         meas.map { |m| measure_col(m) }
+         meas.map { |m| measure_col(m, card) }
   cols = (card['columns'] || []).map { |c| dim_col(c, card).merge('style' => { 'textWrap' => 'wrap' }) } if cols.empty?
   el = {
     'id' => eid(card), 'kind' => 'table', 'name' => card['title'],
@@ -486,7 +491,7 @@ def build_table(card)
   # #7: in-cell data bars belong ONLY to a real Domo table card that declared them.
   bars = Array(card['conditionalFormats']).select { |cf| cf.to_s.downcase.include?('databar') || cf.dig('format', 'dataBar') }
   unless bars.empty?
-    el['conditionalFormats'] = [{ 'type' => 'dataBars', 'columnIds' => meas.map { |m| measure_col(m)['id'] } }]
+    el['conditionalFormats'] = [{ 'type' => 'dataBars', 'columnIds' => meas.map { |m| measure_col(m, card)['id'] } }]
   end
   el
 end
@@ -497,10 +502,10 @@ def build_pivot(card)
   {
     'id' => eid(card), 'kind' => 'pivot-table', 'name' => card['title'],
     'source' => { 'kind' => 'table', 'elementId' => 'master' },
-    'columns' => (dims + meas).map { |c| meas.include?(c) ? measure_col(c) : dim_col(c, card) },
+    'columns' => (dims + meas).map { |c| meas.include?(c) ? measure_col(c, card) : dim_col(c, card) },
     'rowsBy' => dims.first(1).map { |d| dim_col(d, card)['id'] },
     'columnsBy' => dims.drop(1).map { |d| dim_col(d, card)['id'] },   # pivot REQUIRES both (feedback_sigma_pivot_rowsby_columnsby)
-    'values' => meas.map { |m| measure_col(m)['id'] },
+    'values' => meas.map { |m| measure_col(m, card)['id'] },
   }
 end
 
@@ -544,16 +549,58 @@ end
 # EXIST as DM calc columns). convert-beast-modes.rb --lint deliberately DROPS
 # untranslated formulas rather than shipping bad SQL, so a card bound to one is
 # referencing a column the data model does not have.
-def translated_beast_mode_ids
-  return $translated_bm_ids if defined?($translated_bm_ids) && $translated_bm_ids
+def translated_beast_modes
+  return $translated_bms if defined?($translated_bms) && $translated_bms
   path = File.join(OUT, 'formulas.json')
   list = (JSON.parse(File.read(path)) rescue nil)
-  ids = {}
+  by_id = {}
   Array(list).each do |f|
     next unless f.is_a?(Hash)
-    ids[f['id'].to_s] = true unless f['sigmaFormula'].to_s.strip.empty?
+    next if f['sigmaFormula'].to_s.strip.empty?
+    by_id[f['id'].to_s] = f
+    by_id[f['name'].to_s] = f unless f['name'].to_s.empty?
   end
-  $translated_bm_ids = ids
+  $translated_bms = by_id
+end
+
+def translated_beast_mode_ids
+  translated_beast_modes
+end
+
+# Rewrite bare column refs in a Sigma formula to the shared-master namespace.
+# A translated Beast Mode comes back referencing bare columns — [Net Revenue] —
+# but every element here sources the hidden `master` table, so its formulas must
+# read [Master/Net Revenue]. Already-qualified refs (any "<something>/") are left
+# alone so this is idempotent.
+def masterize_formula(formula)
+  formula.to_s.gsub(/\[([^\[\]\/]+)\]/) { "[Master/#{Regexp.last_match(1)}]" }
+end
+
+# An AGGREGATE (or window) Beast Mode cannot be a data-model column — build-dm
+# only promotes PROJECTION (row-level) Beast Modes to DM calc columns, because an
+# aggregate expression has no row-level value. So for an aggregate Beast Mode the
+# correct Sigma shape is to INLINE its translated expression as the element's
+# measure formula, un-wrapped:
+#
+#   Domo  "Margin Pct" = (CASE WHEN (SUM(`NET_REVENUE`) = 0) THEN 0
+#                         ELSE (SUM(`GROSS_PROFIT`) / SUM(`NET_REVENUE`)) END )
+#   Sigma element column formula:
+#         If(Sum([Master/Net Revenue]) = 0, 0,
+#            Sum([Master/Gross Profit]) / Sum([Master/Net Revenue]))
+#
+# NOT Sum([Master/Margin Pct]) — that column does not exist, and wrapping an
+# already-aggregating expression in another aggregate is wrong anyway. Before this
+# existed, an aggregate Beast Mode had NOWHERE to go: build-dm skipped it (not
+# projection) and build-workbook dropped the column, so the card lost its measure.
+def inline_beast_mode_measure(card, c)
+  bm = translated_beast_modes[c['beastModeId'].to_s] ||
+       translated_beast_modes[c['column'].to_s]
+  return nil unless bm.is_a?(Hash)
+  return nil unless %w[aggregate window].include?(bm['class'].to_s)
+  { 'id' => "m-#{c['column'].to_s.downcase.gsub(/\W+/, '-')}",
+    'name' => col_label(c),
+    'formula' => masterize_formula(bm['sigmaFormula']),
+    'format' => sigma_format(c['format'], col_label(c)) }.compact
 end
 
 # Drop columns that CANNOT resolve to a real DM column, loudly.
@@ -581,7 +628,15 @@ def prune_unresolvable_columns!(card)
                       'an empty [Master/] reference that Sigma rejects.')
       next
     end
-    if c['_isCalc'] && c['beastModeId'] && !translated_beast_mode_ids[c['beastModeId'].to_s]
+    # An aggregate/window Beast Mode with a translated formula is legitimately
+    # NOT a data-model column — it gets inlined as the element's measure formula
+    # instead (inline_beast_mode_measure), so do not prune it here.
+    if c['_isCalc'] && inline_beast_mode_measure(card, c)
+      ok << c
+      next
+    end
+    if c['_isCalc'] && c['beastModeId'] && !translated_beast_modes[c['beastModeId'].to_s] &&
+       !translated_beast_modes[c['column'].to_s]
       warn_card(card, "dropped column #{c['column'].inspect}: its Beast Mode did not " \
                       'translate to a Sigma formula, so no such data-model column exists. ' \
                       'Hand-author the formula (see the Beast Mode section of ' \
