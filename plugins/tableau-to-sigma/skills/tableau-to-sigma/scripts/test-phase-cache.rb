@@ -93,6 +93,14 @@ def sig_sha(sig)
   Digest::SHA256.hexdigest(JSON.generate(canon))
 end
 
+# Read RANKING_VERSION out of the picker rather than hardcoding it, so bumping the
+# ranking generation can never silently desync this fixture from the implementation.
+def picker_ranking_version
+  m = File.read(PICKER)[/^RANKING_VERSION\s*=\s*(\d+)/, 1]
+  raise "RANKING_VERSION not found in #{PICKER}" unless m
+  m.to_i
+end
+
 def run_picker(dir, extra = [])
   Open3.capture3(PICKER_ENV, 'ruby', PICKER,
                  '--workbook-signature', File.join(dir, 'workbook-signature.json'),
@@ -101,7 +109,11 @@ end
 
 Dir.mktmpdir do |work|
   File.write(File.join(work, 'workbook-signature.json'), JSON.pretty_generate(SIG))
+  # ranking_version must match the picker's current RANKING_VERSION: the re-entry
+  # cache deliberately refuses to replay a recommendation computed under an older
+  # candidate ranking (a stale recency-ranked result would hide the relevance fix).
   cached = { 'signature_sha256' => sig_sha(SIG), 'scanned_at' => Time.now.utc.iso8601,
+             'ranking_version' => picker_ranking_version,
              'recommended_dm_id' => 'dm-example-1', 'auto_picked' => true, 'score' => 0.9,
              'rationale' => 'AUTO-PICKED (fixture)', 'candidates' => [] }
   File.write(File.join(work, 'dm-match.json'), JSON.pretty_generate(cached))
