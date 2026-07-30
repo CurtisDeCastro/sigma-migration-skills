@@ -356,8 +356,8 @@ def normalize_card(raw, card_id, card_meta: nil)
       'summaryNumber'      => norm_summary_number(raw['summaryNumber'], formulas: raw['calculatedFields'], card_id: card_id),
       'dateGrain'          => body['dateGrain'],
       'dateRangeFilter'    => body['dateRangeFilter'],
-      'groupBy'            => norm_columns('columns' => body['groupBy']).map { |c| c['column'] },
-      'orderBy'            => norm_columns('columns' => body['orderBy']).map { |c| c['column'] },
+      'groupBy'            => norm_columns({ 'columns' => body['groupBy'] }).map { |c| c['column'] },
+      'orderBy'            => norm_columns({ 'columns' => body['orderBy'] }).map { |c| c['column'] },
       'filters'            => filters,
       'conditionalFormats' => Array(raw['conditionalFormats']),
       'cardFormulas'       => Array(raw['calculatedFields']),  # {formula,id,name,saveToDataSet}
