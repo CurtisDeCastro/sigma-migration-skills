@@ -99,5 +99,74 @@ check('missing element and nil id return empty') do
     MetricBinding.available_metrics(nil, { 'a' => {} }) == []
 end
 
+# --- column_metric_collisions / collision_exclusions (F4 collision shape) ---
+check('clean element: no collisions (different names, non-hash input)') do
+  el = { 'columns' => [{ 'name' => 'Carton Count' }],
+         'metrics' => [{ 'name' => 'Total Cartons', 'formula' => 'Sum([Carton Count])' }] }
+  MetricBinding.column_metric_collisions(el) == [] &&
+    MetricBinding.column_metric_collisions(nil) == [] &&
+    MetricBinding.column_metric_collisions('not an element') == []
+end
+
+check('same-element column/metric name pair collides (exact names only)') do
+  el = { 'columns' => [{ 'name' => 'Freight Cost' }, { 'name' => 'Lane' }],
+         'metrics' => [{ 'name' => 'Freight Cost', 'formula' => 'Sum([Freight Cost])' }] }
+  MetricBinding.column_metric_collisions(el) == ['Freight Cost'] &&
+    MetricBinding.column_metric_collisions(
+      'columns' => [{ 'name' => 'freight cost' }],
+      'metrics' => [{ 'name' => 'Freight Cost', 'formula' => 'x' }]
+    ) == []
+end
+
+check('formula-less metric still collides (the POSTed shape is what live drops on)') do
+  el = { 'columns' => [{ 'name' => 'Pallet Count' }], 'metrics' => [{ 'name' => 'Pallet Count' }] }
+  MetricBinding.column_metric_collisions(el) == ['Pallet Count']
+end
+
+check('collision-shaped element contributes NO metrics — even non-colliding names') do
+  els = { 'fact' => {
+    'columns' => [{ 'name' => 'Freight Cost' }, { 'name' => 'Shipment Id' }],
+    'metrics' => [{ 'name' => 'Freight Cost', 'formula' => 'Sum([Freight Cost])' },
+                  { 'name' => 'Fill Rate Pct', 'formula' => 'Sum([Filled Lines]) / Count([Order Lines])' }]
+  } }
+  MetricBinding.available_metrics('fact', els) == []
+end
+
+check('collision_exclusions reports the withheld chain element + names') do
+  els = { 'view' => { 'source' => { 'elementId' => 'fact' } },
+          'fact' => { 'name' => 'Freight Fact',
+                      'columns' => [{ 'name' => 'Freight Cost' }],
+                      'metrics' => [{ 'name' => 'Freight Cost', 'formula' => 'Sum([Freight Cost])' },
+                                    { 'name' => 'Fill Rate Pct', 'formula' => 'Sum([Filled Lines]) / Count([Order Lines])' }] } }
+  ex = MetricBinding.collision_exclusions('view', els)
+  ex.size == 1 && ex[0]['element_id'] == 'fact' && ex[0]['element_name'] == 'Freight Fact' &&
+    ex[0]['collisions'] == ['Freight Cost'] &&
+    ex[0]['excluded_metrics'] == ['Freight Cost', 'Fill Rate Pct'] &&
+    MetricBinding.available_metrics('view', els) == [] &&
+    MetricBinding.collision_exclusions('solo', 'solo' => { 'metrics' => [{ 'name' => 'M', 'formula' => 'f' }] }) == []
+end
+
+check('unnamed collision-shaped element: audit label falls back to the element ID') do
+  # Converter-model BASE elements carry no 'name' key (field-caught: the run
+  # NOTE + decision ledger otherwise render "DM element ''"). Blank '' too.
+  els = { 'view' => { 'source' => { 'elementId' => 'el-77fq02' } },
+          'el-77fq02' => { 'columns' => [{ 'name' => 'Freight Cost' }],
+                           'metrics' => [{ 'name' => 'Freight Cost', 'formula' => 'Sum([Freight Cost])' }] } }
+  ex = MetricBinding.collision_exclusions('view', els)
+  blank = MetricBinding.collision_exclusions(
+    'b1', 'b1' => { 'name' => '', 'columns' => [{ 'name' => 'Lane' }], 'metrics' => [{ 'name' => 'Lane' }] })
+  ex.size == 1 && ex[0]['element_id'] == 'el-77fq02' && ex[0]['element_name'] == 'el-77fq02' &&
+    blank.size == 1 && blank[0]['element_name'] == 'b1'
+end
+
+check('clean chain element still contributes past a collision-shaped one') do
+  els = { 'view' => { 'metrics' => [{ 'name' => 'Depot Count', 'formula' => 'CountDistinct([Depot])' }],
+                      'source' => { 'elementId' => 'fact' } },
+          'fact' => { 'columns' => [{ 'name' => 'Freight Cost' }],
+                      'metrics' => [{ 'name' => 'Freight Cost', 'formula' => 'Sum([Freight Cost])' }] } }
+  MetricBinding.available_metrics('view', els) ==
+    [{ 'name' => 'Depot Count', 'formula' => 'CountDistinct([Depot])' }]
+end
+
 puts($failures.zero? ? 'ALL PASS' : "#{$failures} FAILURE(S)")
 exit($failures.zero? ? 0 : 1)

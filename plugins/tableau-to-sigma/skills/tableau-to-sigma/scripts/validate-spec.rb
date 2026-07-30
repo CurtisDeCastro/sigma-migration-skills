@@ -27,6 +27,7 @@ require 'set'
 $LOAD_PATH.unshift File.expand_path('lib', __dir__)
 require 'sigma_functions'
 require 'formula_normalize'
+require 'metric_binding' # F4: column/metric collision shape — census admissibility
 
 opts = { type: nil, dm_context: nil }
 op = OptionParser.new do |p|
@@ -106,7 +107,31 @@ end
 # would reopen a validation blind spot). NO census anywhere → unchanged
 # behavior: the prefix stays unknown and errors exactly as before, with a
 # routing hint. [Bogus/X] errors in every case (near-miss trajectory).
+#
+# F4 (wave-2 measurement): metrics carried by a COLLISION-SHAPED element — one
+# whose metrics array shares an exact name with one of its own columns
+# (MetricBinding.column_metric_collisions, structural detection only) — are
+# NOT census-admissible: the live readback omits that element's metrics
+# wholesale, so a [Metrics/<name>] ref to any of them deterministically fails
+# the post-POST ref gate. The binder (lib/metric_binding.rb) withholds exactly
+# the same metrics. PRECEDENCE (review-caught): a structural exclusion beats a
+# flat-census hit — every PRE-fix workdir carries a stale machine-written
+# metrics.json sidecar that still lists the withheld names, and honoring
+# census membership first silently re-admitted every one of them. A flat
+# census (--metrics FILE / sidecar) can therefore never re-admit an excluded
+# name; only a CLEAN element carrying the same name clears the exclusion (the
+# binder still offers that element's copy — nearest-wins dedup).
+# SCOPE (honest): structural detection needs columns+metrics hashes, which
+# only spec-shaped documents carry. The ORCHESTRATED flow passes the
+# post-and-readback id-map (dm-ids.json: id/name/kind/columnLabels only) as
+# --dm-context, so the F4 branch cannot trip there — in that flow prevention
+# rides the binder-FILTERED metrics.json sidecar (a withheld name is a census
+# MISS: still a hard error, generic message) plus the fail-closed post-POST
+# ref gate. The F4-specific error is live for spec-shaped contexts:
+# --dm-context <dm-spec>, workbook local elements, --type datamodel.
 metrics_census = nil # nil = no metrics array seen anywhere; Set = metric names
+metrics_excluded = {} # metric name => collision-shaped element it rode on (F4)
+census_warnings = []
 census_add = lambda do |arr|
   names = arr.map { |m| m.is_a?(Hash) ? m['name'] : m }.compact.map(&:to_s).reject(&:empty?)
   metrics_census = (metrics_census || Set.new).merge(names)
@@ -116,10 +141,37 @@ census_scan = lambda do |doc|
   census_add.call(doc['metrics']) if doc['metrics'].is_a?(Array)
   els = (doc['pages'].is_a?(Array) ? doc['pages'] : []).flat_map { |p| p.is_a?(Hash) ? (p['elements'] || []) : [] }
   els += doc['elements'] if doc['elements'].is_a?(Array)
-  els.each { |el| census_add.call(el['metrics']) if el.is_a?(Hash) && el['metrics'].is_a?(Array) }
+  els.each do |el|
+    next unless el.is_a?(Hash) && el['metrics'].is_a?(Array)
+    collisions = MetricBinding.column_metric_collisions(el)
+    if collisions.empty?
+      census_add.call(el['metrics'])
+    else
+      # The element DID declare metrics — the census exists; it just admits
+      # none of this element's names (they cannot survive readback).
+      metrics_census ||= Set.new
+      el_label = (el['name'] || el['id'] || '?').to_s
+      el['metrics'].each do |m|
+        nm = (m.is_a?(Hash) ? m['name'] : m).to_s
+        metrics_excluded[nm] = el_label unless nm.empty?
+      end
+      shown = collisions.first(3).join(', ')
+      shown += ', …' if collisions.size > 3
+      census_warnings << "element \"#{el_label}\": #{collisions.size} column/metric name collision(s) (#{shown}) — " \
+                         "its #{el['metrics'].size} metric(s) are NOT admissible as [Metrics/<name>] refs (F4: the live readback " \
+                         'omits a collision-shaped element\'s metrics wholesale; the binder re-derives those measures inline)'
+    end
+  end
 end
 census_scan.call(spec)
 census_scan.call(dm_ctx)
+# A name stays F4-excluded only while NO clean element carries it. A metric can
+# legitimately ride two elements — collision-shaped on one, clean on another —
+# and the binder still offers the clean element's copy (nearest-wins dedup), so
+# a STRUCTURAL admission clears the exclusion. This runs BEFORE the flat merges
+# below on purpose: a flat census (sidecar / --metrics) can never re-admit a
+# structurally excluded name (see F4 PRECEDENCE above and at the ref check).
+metrics_excluded.reject! { |nm, _| metrics_census&.include?(nm) }
 metrics_file = opts[:metrics]
 if !metrics_file && opts[:dm_context]
   sidecar = File.join(File.dirname(File.expand_path(opts[:dm_context])), 'metrics.json')
@@ -142,6 +194,7 @@ end
 
 errors = []
 warnings = []
+warnings.concat(census_warnings) # F4 census exclusions, surfaced with the report
 all_element_names = []
 # Control-id tokens are legitimate bare refs inside Sigma formulas (a
 # parameter-driven Switch references its control by controlId, not a column).
@@ -283,8 +336,29 @@ spec.fetch('pages', []).each do |page|
           # the pre-census checks judge the ref exactly as before.
           if prefix == 'Metrics' && metrics_census
             mname = ref.split('/', 2)[1].to_s
+            prefix_is_element = own_prefixes.include?(prefix) || all_known_set.include?(prefix)
+            # F4 PRECEDENCE (review-caught): judge the structural exclusion
+            # BEFORE census membership. Every pre-fix workdir carries a stale
+            # machine-written metrics.json sidecar that still lists the
+            # withheld names, and the sidecar merges into this same census —
+            # a membership-first check silently re-admitted every withheld
+            # ref (demonstrated: exit 0 with the stale sidecar present, exit
+            # 1 without). Dual-carrier names were already cleared at the
+            # census build, so anything still excluded rides ONLY a
+            # collision-shaped element and cannot survive readback.
+            if metrics_excluded.key?(mname) && !prefix_is_element
+              # F4: the metric IS defined — on a collision-shaped element, so
+              # the live readback drops it and the ref cannot survive the
+              # post-POST gate. Same admissibility rule as the binder.
+              errors << "#{name}.#{col['name']}: ref [#{ref}] — metric \"#{mname}\" is defined on element " \
+                        "\"#{metrics_excluded[mname]}\", but that element also carries a same-named column/metric pair " \
+                        '(F4 collision shape): the live readback omits its metrics wholesale, so this ref deterministically ' \
+                        'fails the post-POST ref gate. Re-derive the measure INLINE (the binder\'s fallback) or rename the ' \
+                        'DM metric/column apart before POSTing.'
+              next
+            end
             next if metrics_census.include?(mname)
-            unless own_prefixes.include?(prefix) || all_known_set.include?(prefix)
+            unless prefix_is_element
               listed = metrics_census.to_a.sort
               errors << "#{name}.#{col['name']}: ref [#{ref}] — metric #{mname.empty? ? '(empty name)' : "\"#{mname}\""} is not in the DM metrics census " \
                         "(#{listed.empty? ? 'the census is EMPTY' : "known metrics: #{listed.join(', ')}"}). " \

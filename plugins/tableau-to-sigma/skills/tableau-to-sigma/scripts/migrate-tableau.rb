@@ -4451,9 +4451,31 @@ if mechanical
   begin
     els_by_id = MechanicalSpecs.all_elements(conv['model']).each_with_object({}) { |e, h| h[e['id']] = e }
     wb_metrics = MetricBinding.available_metrics(conv_fact['id'], els_by_id)
+    metric_exclusions = MetricBinding.collision_exclusions(conv_fact['id'], els_by_id)
   rescue StandardError => e
     line "metric-binding: could not resolve DM metrics (#{e.class}: #{e.message}) — measures stay inline"
     wb_metrics = []
+    metric_exclusions = []
+  end
+  # F4 (wave-2 measurement, field-caught): a DM element POSTing a governed metric
+  # NAMED like one of its own columns is accepted by the API, but the live
+  # readback then omits that element's metrics WHOLESALE — so every
+  # [Metrics/<name>] ref bound to one deterministically fails the pre-POST
+  # workbook ref gate (exit 4) on a cold run. The binder withholds ALL metrics of
+  # a collision-shaped element (structural same-element exact-name detection);
+  # the affected measures re-derive INLINE — the remedy shape validated live. The
+  # ref gate stays fail-closed; the fallback is surfaced here + ledgered, never
+  # silent.
+  metric_exclusions.each do |x|
+    shown = x['collisions'].first(3).join(', ')
+    shown += ", … +#{x['collisions'].size - 3} more" if x['collisions'].size > 3
+    line "metric-binding: NOTE — DM element '#{x['element_name']}' carries #{x['collisions'].size} column/metric name collision(s) (#{shown}); " \
+         "its #{x['excluded_metrics'].size} metric(s) stay INLINE in the workbook (live readback drops metrics on this shape — F4)"
+    Offramp.decision(WORK, kind: 'metric-collision-inline',
+                     question: "DM element '#{x['element_name']}' POSTs #{x['collisions'].size} column/metric name collision(s) (#{shown}) — " \
+                               'its governed metrics are not provably referenceable after readback (F4 collision shape)',
+                     answer: "#{x['excluded_metrics'].size} metric(s) fall back to inline aggregate formulas (no [Metrics/…] refs to this element)",
+                     decided_by: 'unattended-flag')
   end
   File.write(metrics_path, JSON.pretty_generate(wb_metrics))
   line "metric-binding: #{wb_metrics.size} referenceable DM metric(s) for [Metrics/<name>] refs" if wb_metrics.any?

@@ -167,6 +167,139 @@ Dir.mktmpdir do |dir|
   check(out.include?('WARN') && out.include?('metrics sidecar'), 'bad sidecar surfaced as a WARN', fails)
 end
 
+# ── F4 (wave-2 measurement): same-element column/metric NAME COLLISION ──────
+# A collision-shaped element (a governed metric named identically to one of
+# the element's own columns) POSTs fine, but the live readback omits its
+# metrics WHOLESALE — so NONE of them are census-admissible: the validator
+# must agree with the binder (lib/metric_binding.rb withholds the same set)
+# and reject a [Metrics/<name>] ref to any of them PRE-POST, naming the
+# collision. Structural detection only (exact same-element name equality).
+
+puts 'Part K — F4 REJECT: dm-context element carries a column/metric name collision → its metrics are NOT census-admissible'
+Dir.mktmpdir do |dir|
+  ctx = { 'dataModelId' => 'dm-1', 'pages' => [{ 'id' => 'dp1', 'name' => 'Data', 'elements' => [
+    { 'id' => 'el-fact', 'kind' => 'table', 'name' => 'Freight Fact',
+      'columns' => [{ 'id' => 'fc1', 'name' => 'Linehaul Cost' }, { 'id' => 'fc2', 'name' => 'Depot' }],
+      'metrics' => [{ 'name' => 'Linehaul Cost', 'formula' => 'Sum([Linehaul Cost])' },
+                    { 'name' => 'Blended Fill Rate', 'formula' => 'Sum([Filled Lines]) / Count([Order Lines])' }] }
+  ] }] }
+  # the ratio metric does NOT itself collide — it rides the collision-shaped
+  # element, which is exactly the field-caught F4 casualty shape
+  out, code = run_validate(dir, wb_spec('[Metrics/Blended Fill Rate]'), ctx: ctx)
+  check(code == 1, "ref to a metric riding a collision-shaped element exits 1 (got #{code})", fails)
+  check(out.include?('F4 collision shape'), 'error names the F4 collision shape', fails)
+  check(out.include?('Freight Fact'), 'error names the collision-shaped element', fails)
+  check(out =~ /WARN.*collision/i, 'census exclusion surfaced as a WARN too', fails)
+end
+
+puts 'Part L — F4 REJECT: the workbook\'s OWN local element with a collision → local metrics not admissible'
+Dir.mktmpdir do |dir|
+  el = {
+    'id' => 'tbl-1', 'kind' => 'table', 'name' => 'Damage Tile',
+    'source' => { 'kind' => 'table', 'elementId' => 'master-1' },
+    'columns' => [{ 'id' => 'c0', 'name' => 'Damaged Units' },
+                  { 'id' => 'c1', 'name' => 'Bound Measure', 'formula' => '[Metrics/Damaged Units]' }],
+    'metrics' => [{ 'name' => 'Damaged Units', 'formula' => 'Sum([Damaged Units])' }]
+  }
+  spec = { 'schemaVersion' => 1, 'name' => 'metrics-ns-test', 'folderId' => 'folder-test',
+           'pages' => [{ 'id' => 'pg-1', 'name' => 'P1', 'elements' => [el] }] }
+  out, code = run_validate(dir, spec, ctx: dm_context(with_metrics: GOV))
+  check(code == 1 && out.include?('F4 collision shape'),
+        "local collision-shaped element's metric rejected with the F4 error (exit #{code})", fails)
+end
+
+puts 'Part M — F4 NO-TRIP: disjoint column/metric names on the same element stay admissible'
+Dir.mktmpdir do |dir|
+  ctx = { 'dataModelId' => 'dm-1', 'pages' => [{ 'id' => 'dp1', 'name' => 'Data', 'elements' => [
+    { 'id' => 'el-fact', 'kind' => 'table', 'name' => 'Freight Fact',
+      'columns' => [{ 'id' => 'fc1', 'name' => 'Linehaul Cost' }, { 'id' => 'fc2', 'name' => 'Depot' }],
+      'metrics' => [{ 'name' => 'Total Linehaul', 'formula' => 'Sum([Linehaul Cost])' }] }
+  ] }] }
+  out, code = run_validate(dir, wb_spec('[Metrics/Total Linehaul]'), ctx: ctx)
+  check(code == 0, "clean element (columns present, names disjoint) still admits its metrics (exit #{code})", fails)
+  check(!out.match?(/WARN.*collision/i), 'no collision WARN on a clean element', fails)
+end
+
+puts 'Part N — F4 on --type datamodel: the DM spec\'s own collision shape is surfaced pre-POST'
+Dir.mktmpdir do |dir|
+  dm = { 'schemaVersion' => 1, 'name' => 'dm-metrics-test', 'folderId' => 'folder-test',
+         'pages' => [{ 'id' => 'pg-1', 'name' => 'Data', 'elements' => [
+           { 'id' => 'el-fact', 'kind' => 'table', 'name' => 'Freight Fact',
+             'source' => { 'kind' => 'warehouse-table', 'path' => %w[DB S FREIGHT_FACT] },
+             'columns' => [{ 'id' => 'c1', 'name' => 'Linehaul Cost' }],
+             'metrics' => [{ 'name' => 'Linehaul Cost', 'formula' => 'Sum([Linehaul Cost])' }] }
+         ] }] }
+  out, code = run_validate(dir, dm, type: 'datamodel')
+  check(code == 0, "collision shape alone (nothing references it) is a WARN, not an error (exit #{code})", fails)
+  check(out =~ /WARN.*collision/i, 'DM self-validation WARNs about the collision shape', fails)
+  dm['pages'][0]['elements'][0]['columns'] << { 'id' => 'c2', 'name' => 'LC Ref', 'formula' => '[Metrics/Linehaul Cost]' }
+  out, code = run_validate(dir, dm, type: 'datamodel')
+  check(code == 1 && out.include?('F4 collision shape'),
+        'a DM-internal ref to the collision-shaped metric errors pre-POST', fails)
+end
+
+puts 'Part O — F4 PRECEDENCE: a STALE metrics.json sidecar cannot re-admit a withheld name (structural exclusion wins)'
+Dir.mktmpdir do |dir|
+  ctx = { 'dataModelId' => 'dm-1', 'pages' => [{ 'id' => 'dp1', 'name' => 'Data', 'elements' => [
+    { 'id' => 'el-fact', 'kind' => 'table', 'name' => 'Freight Fact',
+      'columns' => [{ 'id' => 'fc1', 'name' => 'Linehaul Cost' }],
+      'metrics' => [{ 'name' => 'Linehaul Cost', 'formula' => 'Sum([Linehaul Cost])' },
+                    { 'name' => 'Blended Fill Rate', 'formula' => 'Sum([Filled Lines]) / Count([Order Lines])' }] }
+  ] }] }
+  # Every PRE-fix workdir carries exactly this hazard: the binder wrote ALL of
+  # the element's metric names to the sidecar before it learned to withhold
+  # the collision shape. The flat census hit must NOT beat the structural
+  # exclusion (review-demonstrated: it used to — exit 0 with the sidecar
+  # present, exit 1 with it removed).
+  File.write(File.join(dir, 'metrics.json'),
+             JSON.pretty_generate([{ 'name' => 'Linehaul Cost', 'formula' => 'Sum([Linehaul Cost])' },
+                                   { 'name' => 'Blended Fill Rate', 'formula' => 'Sum([Filled Lines]) / Count([Order Lines])' }]))
+  out, code = run_validate(dir, wb_spec('[Metrics/Blended Fill Rate]'), ctx: ctx)
+  check(code == 1, "stale sidecar census does NOT re-admit the withheld ref (exit #{code})", fails)
+  check(out.include?('F4 collision shape'), 'the F4-specific error wins over the flat-census hit', fails)
+end
+
+puts 'Part P — F4 SCOPE (orchestrated shape): dm-ids readback context carries no columns/metrics → prevention rides the binder-FILTERED sidecar (census MISS, not the F4 branch)'
+Dir.mktmpdir do |dir|
+  # The orchestrator passes post-and-readback's id-map as --dm-context; its
+  # elements carry id/name/kind/columnLabels ONLY, so structural collision
+  # detection has nothing to see BY DESIGN. In that flow the fixed binder
+  # writes metrics.json already filtered — a withheld name is simply absent,
+  # and a ref to it is a census MISS (generic message, still a hard error);
+  # the post-POST ref gate stays fail-closed behind it.
+  ctx = { 'dataModelId' => 'dm-1', 'pages' => [{ 'id' => 'dp1', 'name' => 'Data', 'elements' => [
+    { 'id' => 'el-fact', 'kind' => 'table', 'name' => 'Freight Fact',
+      'columnLabels' => ['Linehaul Cost', 'Depot'] }
+  ] }] }
+  File.write(File.join(dir, 'metrics.json'),
+             JSON.pretty_generate([{ 'name' => 'Depot Count', 'formula' => 'CountDistinct([Depot])' }]))
+  out, code = run_validate(dir, wb_spec('[Metrics/Blended Fill Rate]'), ctx: ctx)
+  check(code == 1, "withheld ref against the filtered sidecar is still a hard error (exit #{code})", fails)
+  check(out.include?('not in the DM metrics census') && !out.include?('F4 collision shape'),
+        'errors as a census MISS (the F4 branch cannot see readback-shaped contexts)', fails)
+  out2, code2 = run_validate(dir, wb_spec('[Metrics/Depot Count]'), ctx: ctx)
+  check(code2 == 0 && out2.include?('0 errors'), "binder-admitted name still validates clean (exit #{code2})", fails)
+end
+
+puts 'Part Q — F4 NO-TRIP: a name excluded on one element but carried by a CLEAN element stays admissible (binder parity)'
+Dir.mktmpdir do |dir|
+  ctx = { 'dataModelId' => 'dm-1', 'pages' => [{ 'id' => 'dp1', 'name' => 'Data', 'elements' => [
+    { 'id' => 'el-fact', 'kind' => 'table', 'name' => 'Freight Fact',
+      'columns' => [{ 'id' => 'fc1', 'name' => 'Linehaul Cost' }],
+      'metrics' => [{ 'name' => 'Linehaul Cost', 'formula' => 'Sum([Linehaul Cost])' },
+                    { 'name' => 'Blended Fill Rate', 'formula' => 'Sum([Filled Lines]) / Count([Order Lines])' }] },
+    { 'id' => 'el-view', 'kind' => 'table', 'name' => 'Lane View',
+      'columns' => [{ 'id' => 'vc1', 'name' => 'Depot' }],
+      'metrics' => [{ 'name' => 'Blended Fill Rate', 'formula' => 'Sum([Filled Lines]) / Count([Order Lines])' }] }
+  ] }] }
+  out, code = run_validate(dir, wb_spec('[Metrics/Blended Fill Rate]'), ctx: ctx)
+  check(code == 0, "clean element's same-named metric keeps the ref admissible (exit #{code})", fails)
+  check(out =~ /WARN.*collision/i, 'the collision-shaped element is still WARNed', fails)
+  out2, code2 = run_validate(dir, wb_spec('[Metrics/Linehaul Cost]'), ctx: ctx)
+  check(code2 == 1 && out2.include?('F4 collision shape'),
+        'a name riding ONLY the collision-shaped element still hard-errors', fails)
+end
+
 puts
 if fails.empty?
   puts 'test-metrics-namespace: ALL PASS'

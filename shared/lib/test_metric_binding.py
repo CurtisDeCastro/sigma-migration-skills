@@ -110,5 +110,81 @@ class AvailableMetricsTest(unittest.TestCase):
         self.assertEqual(mb.available_metrics(None, {"a": {}}), [])
 
 
+class CollisionShapeTest(unittest.TestCase):
+    """F4 collision shape: a same-element column/metric name pair makes the
+    element's metrics non-referenceable (live readback omits them wholesale)."""
+
+    def test_clean_element_no_collisions(self):
+        el = {"columns": [{"name": "Carton Count"}],
+              "metrics": [{"name": "Total Cartons", "formula": "Sum([Carton Count])"}]}
+        self.assertEqual(mb.column_metric_collisions(el), [])
+        self.assertEqual(mb.column_metric_collisions(None), [])
+        self.assertEqual(mb.column_metric_collisions("not an element"), [])
+
+    def test_same_element_pair_collides_exact_names_only(self):
+        el = {"columns": [{"name": "Freight Cost"}, {"name": "Lane"}],
+              "metrics": [{"name": "Freight Cost", "formula": "Sum([Freight Cost])"}]}
+        self.assertEqual(mb.column_metric_collisions(el), ["Freight Cost"])
+        self.assertEqual(mb.column_metric_collisions(
+            {"columns": [{"name": "freight cost"}],
+             "metrics": [{"name": "Freight Cost", "formula": "x"}]}), [])
+
+    def test_formula_less_metric_still_collides(self):
+        # the POSTed shape is what live Sigma drops on
+        el = {"columns": [{"name": "Pallet Count"}], "metrics": [{"name": "Pallet Count"}]}
+        self.assertEqual(mb.column_metric_collisions(el), ["Pallet Count"])
+
+    def test_collision_shaped_element_contributes_no_metrics(self):
+        els = {"fact": {
+            "columns": [{"name": "Freight Cost"}, {"name": "Shipment Id"}],
+            "metrics": [{"name": "Freight Cost", "formula": "Sum([Freight Cost])"},
+                        {"name": "Fill Rate Pct",
+                         "formula": "Sum([Filled Lines]) / Count([Order Lines])"}],
+        }}
+        self.assertEqual(mb.available_metrics("fact", els), [])
+
+    def test_collision_exclusions_reports_the_withheld_element(self):
+        els = {"view": {"source": {"elementId": "fact"}},
+               "fact": {"name": "Freight Fact",
+                        "columns": [{"name": "Freight Cost"}],
+                        "metrics": [{"name": "Freight Cost", "formula": "Sum([Freight Cost])"},
+                                    {"name": "Fill Rate Pct",
+                                     "formula": "Sum([Filled Lines]) / Count([Order Lines])"}]}}
+        ex = mb.collision_exclusions("view", els)
+        self.assertEqual(len(ex), 1)
+        self.assertEqual(ex[0]["element_id"], "fact")
+        self.assertEqual(ex[0]["element_name"], "Freight Fact")
+        self.assertEqual(ex[0]["collisions"], ["Freight Cost"])
+        self.assertEqual(ex[0]["excluded_metrics"], ["Freight Cost", "Fill Rate Pct"])
+        self.assertEqual(mb.available_metrics("view", els), [])
+        self.assertEqual(mb.collision_exclusions(
+            "solo", {"solo": {"metrics": [{"name": "M", "formula": "f"}]}}), [])
+
+    def test_unnamed_element_audit_label_falls_back_to_id(self):
+        # Converter-model BASE elements carry no "name" key (field-caught: the
+        # run NOTE + decision ledger otherwise render "DM element ''"). "" too.
+        els = {"view": {"source": {"elementId": "el-77fq02"}},
+               "el-77fq02": {"columns": [{"name": "Freight Cost"}],
+                             "metrics": [{"name": "Freight Cost",
+                                          "formula": "Sum([Freight Cost])"}]}}
+        ex = mb.collision_exclusions("view", els)
+        self.assertEqual(len(ex), 1)
+        self.assertEqual(ex[0]["element_id"], "el-77fq02")
+        self.assertEqual(ex[0]["element_name"], "el-77fq02")
+        blank = mb.collision_exclusions(
+            "b1", {"b1": {"name": "", "columns": [{"name": "Lane"}],
+                          "metrics": [{"name": "Lane"}]}})
+        self.assertEqual(len(blank), 1)
+        self.assertEqual(blank[0]["element_name"], "b1")
+
+    def test_clean_chain_element_contributes_past_a_collision(self):
+        els = {"view": {"metrics": [{"name": "Depot Count", "formula": "CountDistinct([Depot])"}],
+                        "source": {"elementId": "fact"}},
+               "fact": {"columns": [{"name": "Freight Cost"}],
+                        "metrics": [{"name": "Freight Cost", "formula": "Sum([Freight Cost])"}]}}
+        self.assertEqual(mb.available_metrics("view", els),
+                         [{"name": "Depot Count", "formula": "CountDistinct([Depot])"}])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
