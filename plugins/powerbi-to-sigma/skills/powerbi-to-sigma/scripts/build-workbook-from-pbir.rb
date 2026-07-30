@@ -243,13 +243,18 @@ $used_control_ids = Hash.new(0)
 #              false -> a genuine Sigma spec limitation (informational only)
 $unresolved = []
 def record_unresolved(visual:, severity:, detail:, pbi_type: nil, sigma_kind: nil,
-                      recoverable: false, action: nil, entity: nil)
+                      recoverable: false, action: nil, entity: nil, role_class: nil)
   # `entity` = the PBI table/entity the dropped ref pointed at (e.g. "Dim Region"),
   # so migrate-powerbi.rb can attribute the drop to an ungranted schema for the
   # cause-grouped coverage readout (CoverageGate.classify_causes).
+  # `role_class` = the visual's role_class (control|kpi|chart|table|decoration|
+  # unsupported) from the viz-kind/custom-visual catalogs (task 1), so the
+  # coverage gate can weigh a FUNCTIONAL loss (control/kpi/chart/table) against
+  # a cosmetic one (decoration) instead of treating every entry the same.
   $unresolved << { 'visual' => visual.to_s, 'pbi_type' => pbi_type, 'sigma_kind' => sigma_kind,
                    'severity' => severity, 'detail' => detail.to_s,
-                   'recoverable' => recoverable, 'action' => action, 'entity' => entity }
+                   'recoverable' => recoverable, 'action' => action, 'entity' => entity,
+                   'role_class' => role_class }
 end
 
 # ---------------------------------------------------------------------------
@@ -530,16 +535,12 @@ def tmsl_boolean_column?(ent, leaf)
   PbiReportBuild.boolean_leaf?(leaf)
 end
 
-# PBI visualTypes that map 1:1 to a native Sigma element kind (no approximation).
-# Anything NOT in this set is rendered as a best-effort Sigma kind and recorded
-# in coverage.json as 'approximated' so the user sees the substitution (e.g.
-# treemap/funnel/gauge/ribbon/waterfall → bar). Mirrors migrate-powerbi.rb NATIVE.
-NATIVE_VISUAL_TYPES = %w[card multiRowCard kpi textbox actionButton lineChart areaChart
-                         stackedAreaChart barChart clusteredBarChart stackedBarChart columnChart
-                         clusteredColumnChart stackedColumnChart hundredPercentStackedColumnChart
-                         hundredPercentStackedBarChart lineClusteredColumnComboChart
-                         lineStackedColumnComboChart pieChart donutChart scatterChart tableEx
-                         pivotTable matrix slicer map filledMap shapeMap azureMap image].freeze
+# NOTE (role_class / beads-sigma-kvza): a NATIVE_VISUAL_TYPES allowlist used to
+# gate the "approximated" record below — anything not on the list (e.g. every
+# third-party visualType, and modern PBI types like cardVisual) was flagged
+# approximated even when the catalogs resolved it losslessly. `rec['approximate']`
+# from the viz-kind/custom-visual catalogs is now the authoritative signal (see
+# build_element), so that allowlist is gone; this comment is the only trace.
 
 # PBI kind token -> Sigma element kind. DERIVED from refs/catalogs/viz-kind.json
 # (the SIGMA_KIND hash was extracted VERBATIM into that catalog; these are the
@@ -607,6 +608,42 @@ def qr_leaf(qr, fallback = 'Value')
   # Sanitize at this single chokepoint so names and refs stay in sync.
   leaf = leaf.tr('[]', '').tr('/', '-')
   leaf.empty? ? fallback : leaf
+end
+
+# A control's sliced-column binding role, in preference order. The known PBI
+# roles come first (unchanged behavior — a native slicer's column has always
+# lived under one of these). Custom visuals name their OWN binding roles for
+# the exact same semantic slot: MEASURED fact — 21 third-party Powerviz
+# date-picker slicers across 3 real customer reports bind their date column
+# under a custom role (e.g. `categories`), never under Values/Category/Fields.
+# A future custom visual needs NO code change here: control_slice_qr (below)
+# already falls through to every OTHER binding role after this list.
+KNOWN_CONTROL_ROLES = %w[Values Category Fields].freeze
+
+# True when a queryRef is an AGGREGATE-WRAPPED ref ("Avg(T.Flag)", "Sum(...)")
+# rather than a bare column ref. Same leading-"Func(...)" shape qr_leaf already
+# unwraps for display. A custom visual's "preset"/measure role (e.g. Powerviz's
+# `presets`) carries refs shaped exactly like this — it is a MEASURE bound for
+# display, never the column the control filters on.
+def aggregate_wrapper?(qr)
+  !!(qr.to_s.strip =~ /\A[A-Za-z_][A-Za-z0-9_ ]*\(\s*.*\s*\)\z/)
+end
+
+# Find the queryRef a control slices on across ALL its binding roles, not just
+# the known PBI ones. Preference: (1) Values/Category/Fields, in that order,
+# exactly as before; (2) any OTHER role, preferring a BARE column ref over an
+# aggregate-wrapper ref (a preset/measure is never the filtered column). If
+# every remaining candidate is aggregate-wrapped, return nil so the existing
+# loud "column does not resolve" skip fires — never silently wire a measure in
+# place of the sliced column.
+def control_slice_qr(bindings)
+  b = bindings || {}
+  KNOWN_CONTROL_ROLES.each do |role|
+    qr = Array(b[role]).first
+    return qr if qr
+  end
+  other = (b.keys - KNOWN_CONTROL_ROLES).flat_map { |role| Array(b[role]) }.compact
+  other.find { |qr| !aggregate_wrapper?(qr) }
 end
 
 # ---------------------------------------------------------------------------
@@ -1211,15 +1248,53 @@ def apply_small_multiples!(el, rec, fields, master, eid, qr_cids)
 end
 
 def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
+  # role_class (from the viz-kind/custom-visual catalogs via the extractor,
+  # task 1) says what the visual DOES: filter (control), show a number (kpi),
+  # plot a series (chart), list rows (table), decorate (decoration), or
+  # nothing Sigma can render (unsupported). Route on it BEFORE the sigma_kind
+  # switch below so a third-party slicer becomes a real control instead of a
+  # phantom chart, and so a lost control/kpi/chart/table is recorded as a
+  # FUNCTIONAL loss the coverage gate can fail on — never silently folded into
+  # 'approximated', which the coverage headline counts as carried over.
+  # beads-sigma-kvza / role_class.
+  role = rec['role_class'].to_s
+  vt   = rec['visual_type'].to_s
+  shown_vt = vt.empty? ? 'unknown/blank' : vt
+  label = rec['title'].to_s.strip.empty? ? rec['visual_id'] : rec['title']
+  if role == 'decoration'
+    # Cosmetic only — nothing built, and NOT a functional loss. Recorded at
+    # severity 'approximated' (the coverage headline's "carried over" bucket)
+    # purely so every source visual is accounted for; it never trips the
+    # recoverable-loss gate the way 'dropped' does.
+    record_unresolved(visual: label, pbi_type: shown_vt, sigma_kind: nil,
+                      severity: 'approximated', recoverable: false, role_class: role,
+                      detail: "#{shown_vt} is decorative (no data binding) — no Sigma element needed",
+                      action: rec['viz_guidance'].to_s)
+    return nil
+  elsif role == 'unsupported'
+    warn "[build-workbook] WARN visual '#{label}': PBI visualType '#{shown_vt}' has no Sigma " \
+         'equivalent — recorded as dropped, element SKIPPED.'
+    record_unresolved(visual: label, pbi_type: shown_vt, sigma_kind: nil,
+                      severity: 'dropped', recoverable: true, role_class: role,
+                      detail: "#{shown_vt} has no Sigma equivalent that preserves its semantics",
+                      action: rec['viz_guidance'].to_s)
+    return nil
+  end
+
   # viz-kind resolution (grounded by refs/catalogs/viz-kind.json; SIGMA_KIND is
   # derived from it). An UNMAPPED/blank kind token used to SILENTLY become a
   # bar-chart via "|| 'bar-chart'". Now the miss WARNS before the explicit
   # bar-chart fallback, and the substitution is RECORDED as an honest
-  # 'approximated' coverage entry below (the NATIVE_VISUAL_TYPES block, which
+  # 'approximated' coverage entry below (gated on rec['approximate'], which
   # also fires for the empty/unknown visualType this token would carry). This
   # is the loud counterpart to extract-pbir.py's upstream
   # VISUAL_KIND.get(vtype,'bar') coercion. beads-sigma-kvza.
-  kind = SIGMA_KIND[rec['sigma_kind']]
+  #
+  # `control` is FORCED here rather than looked up: the catalogs already
+  # classified this visual as a filter, and a third-party slicer's sigma_kind
+  # is routinely absent from SIGMA_KIND — it must never fall through to the
+  # bar-chart guess below (that was exactly how a slicer became a bar chart).
+  kind = role == 'control' ? 'control' : SIGMA_KIND[rec['sigma_kind']]
   if kind.nil?
     _vt = rec['visual_type'].to_s
     _vt = 'unknown/blank' if _vt.empty?
@@ -1335,23 +1410,28 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
     end
   end
   # Record a non-native APPROXIMATION (e.g. treemap/funnel/gauge/ribbon/waterfall
-  # → bar/kpi). map/image carry their own, more specific coverage entries above,
-  # so they're excluded from NATIVE_VISUAL_TYPES handling here. This is what makes
-  # the coverage report honest about "looks like the source" vs "same numbers".
-  # beads-sigma-kvza: an EMPTY/unknown visualType used to be SILENTLY skipped
-  # here (the old `vt.empty? ||` guard) — but extract-pbir.py coerces an unknown
-  # visualType to the 'bar' token upstream (VISUAL_KIND.get(vtype,'bar')), so a
-  # blank/unknown visual shipped as an UN-ANNOUNCED bar-chart. Now EVERY miss —
-  # including an empty visual_type — warns + is recorded, not just non-empty ones.
-  vt = rec['visual_type'].to_s
-  unless NATIVE_VISUAL_TYPES.include?(vt)
-    shown_vt = vt.empty? ? 'unknown/blank' : vt
+  # → bar/kpi). map/image carry their own, more specific coverage entries above.
+  # This is what makes the coverage report honest about "looks like the
+  # source" vs "same numbers".
+  #
+  # Gated on rec['approximate'] (the catalogs' authoritative signal, task 1) —
+  # NOT on visualType membership in an allowlist. The old allowlist gate fired
+  # on ANY visualType it didn't recognize, which mis-flagged control-class
+  # visuals (a third-party slicer's visualType is never "native") and modern
+  # PBI types the catalog already resolves losslessly (e.g. cardVisual). A
+  # `control` is NEVER approximated here regardless of the signal — losing or
+  # substituting a filter is a functional loss (see the 'dropped' skip above),
+  # never a cosmetic "looks a little different" one. beads-sigma-kvza.
+  if rec['approximate'] && role != 'control'
     warn "[build-workbook] WARN visual '#{name}': PBI visualType '#{shown_vt}' has no native " \
          "Sigma element kind — approximated as #{kind}."
+    fallback_action = "Sigma has no native #{shown_vt}; the data is preserved as a #{kind}. " \
+                       'Accept or pick a different Sigma chart.'
     record_unresolved(visual: name, pbi_type: shown_vt, sigma_kind: kind,
                       severity: 'approximated', recoverable: false,
+                      role_class: (role.empty? ? nil : role),
                       detail: "#{shown_vt} has no native Sigma element kind — approximated as #{kind}",
-                      action: "Sigma has no native #{shown_vt}; the data is preserved as a #{kind}. Accept or pick a different Sigma chart.")
+                      action: (rec['viz_guidance'].to_s.empty? ? fallback_action : rec['viz_guidance'].to_s))
   end
   master_id = master && masters[master] ? masters[master]['id'] : nil
   el = { 'id' => eid, 'kind' => kind, 'name' => name }
@@ -1376,7 +1456,12 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
     # (pseudo entities) that carry the sliced column. A slicer column that
     # cannot be resolved to a real master column SKIPS the control with a LOUD
     # warning — never silently wires the wrong column (the old `|| mcols.first`).
-    qr = (b['Values'] || b['Category'] || b['Fields'] || []).first
+    #
+    # role_class routing (above) means `kind` can be 'control' for a visual
+    # whose visualType is a third-party custom visual — those name their OWN
+    # binding roles for the sliced column (see control_slice_qr / beads-sigma-
+    # kvza), so the lookup is NOT hardcoded to the known PBI roles alone.
+    qr = control_slice_qr(b)
     leaf = qr_leaf(qr, 'Filter')
     ent  = qr.to_s.split('.').first
     fs = qr && field_spec(qr, fields)
@@ -1394,7 +1479,7 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
                                         "(master=#{pmaster.inspect}); dropped loudly rather than " \
                                         'wired to a wrong column or shipped dead' }
       record_unresolved(visual: name, pbi_type: 'slicer', sigma_kind: 'control',
-                        severity: 'dropped', recoverable: true,
+                        severity: 'dropped', recoverable: true, role_class: 'control',
                         detail: "slicer column '#{qr}' resolves to no master column — control skipped",
                         action: "Add column '#{qr}' to a master (or fix master-map.json) so the slicer can wire, then re-run.")
       return nil
@@ -1462,7 +1547,13 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
     # column's TMSL type), so it stays as code — but the two target kinds are
     # grounded in refs/catalogs/control.json (CTL_CAT), cited to the PBI slicer
     # + Sigma control docs, so the literals can't drift. beads-sigma-kvza.
-    if tmsl_date_column?(ent, leaf)
+    #
+    # A custom visual's `sigma_target` (viz-kind/custom-visual catalog) is an
+    # explicit, already-verified date-range classification (e.g. a Powerviz
+    # date-picker) and is checked FIRST — it must not depend on a --model TMSL
+    # file being supplied, which native PBI slicers need for column-type
+    # detection but a third-party visual's catalog entry already answers.
+    if rec['sigma_target'] == 'date-range' || tmsl_date_column?(ent, leaf)
       # date-typed slicer -> date-range control. A `list` control bound to a
       # datetime column gets its filter targets SILENTLY STRIPPED by Sigma
       # (estate-repair gotcha) — the control posts, then filters nothing.
