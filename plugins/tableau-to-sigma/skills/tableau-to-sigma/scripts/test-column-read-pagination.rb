@@ -122,6 +122,21 @@ check(!src.match?(/list_entries\([^)]*http:/),
       'discover-warehouse-columns.rb does NOT inject a shared connection into its thread fan-out',
       fails)
 
+# 6. WIRING PIN — post-and-readback.rb's column census paginates. The census
+#    drives the error-column quarantine decision, so a truncated read can
+#    declare a wide workbook clean while error columns sit past column 50.
+#    cols_res must SURVIVE: later guards check its HTTP status.
+src = File.read(File.join(__dir__, 'post-and-readback.rb'))
+check(src.include?('Sigma.list_entries(columns_path)'),
+      'post-and-readback.rb derives the column census via Sigma.list_entries', fails)
+check(src.include?('cols_res.is_a?(Net::HTTPSuccess)'),
+      'post-and-readback.rb still gates on cols_res HTTP status', fails)
+# The first-page parse survives ONLY as a warned degraded fallback. Assert the
+# warning exists, so a pagination failure can never truncate silently — that
+# would re-create the very bug this change removes.
+check(src.include?('column census: exhaustive read failed'),
+      'a degraded first-page census announces itself loudly instead of truncating silently', fails)
+
 puts ''
 if fails.empty?
   puts "test-column-read-pagination.rb: ALL PASS"
