@@ -110,6 +110,18 @@ check(src.include?("not found in Sigma's catalog") && src.include?('/sync'),
 check(src.include?('exit 4'),
       'discover-columns.rb still exits 4 on a catalog miss', fails)
 
+# 4. WIRING PIN — discover-warehouse-columns.rb paginates, and does NOT inject a
+#    shared connection: it runs one thread per inode, so each thread must get its
+#    own Net::HTTP (the http: nil default) or they race on one socket.
+src = File.read(File.join(__dir__, 'discover-warehouse-columns.rb'))
+check(src.include?('Sigma.list_entries'),
+      'discover-warehouse-columns.rb reads columns via Sigma.list_entries', fails)
+check(!src.match?(/body\['entries'\]/),
+      'discover-warehouse-columns.rb no longer reads a bare first-page body', fails)
+check(!src.match?(/list_entries\([^)]*http:/),
+      'discover-warehouse-columns.rb does NOT inject a shared connection into its thread fan-out',
+      fails)
+
 puts ''
 if fails.empty?
   puts "test-column-read-pagination.rb: ALL PASS"
