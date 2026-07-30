@@ -39,17 +39,31 @@ require 'uri'
 require 'optparse'
 require 'digest'
 require 'time'
+require 'set'
 
-# Default limit 25: perf testing (2026-05-22) showed the picker's top-score
-# saturates by ~25 DMs in this org; the wall-time curve elbows hard after 50
-# (0.065s/DM → 0.25s/DM — Sigma drops off a cached-spec hot path). limit=25
-# finishes in ~2s. Earlier default was 50; dropping to 25 saves ~12s per
-# picker run with no score regression. beads-sigma-3kw.
-opts = { limit: 25, min_score: 0.6 }
+# --limit is the SPEC-FETCH BUDGET, not a cap on how many DMs are considered.
+#
+# Perf testing (2026-05-22) set limit=25 because the top score "saturated by ~25
+# DMs in this org" and wall time elbows hard after 50 (0.065s/DM → 0.25s/DM —
+# Sigma drops off a cached-spec hot path). That held only while the budget was
+# spent on the RIGHT 25: the window used to be the 25 most-recently-UPDATED DMs,
+# and recency is uncorrelated with whether a DM covers the workbook's tables. On
+# an org that has since grown to 500 DMs that meant scoring 5% of them chosen by
+# when they were last touched — a DM covering exactly the target table was never
+# scored, the picker reported "no reusable DM found", and every migration posted
+# yet another near-duplicate model. Reuse-first was effectively inert.
+#
+# Fix: rank the fetch queue by RELEVANCE (name affinity to the signature's own
+# table names) and only use updatedAt as a tiebreak, so the same budget buys the
+# plausible reuse targets. Any DM with non-zero affinity is fetched even past
+# --limit, up to --max-fetch. Truncation is always reported, never silent.
+RANKING_VERSION = 2 # bump to invalidate dm-match caches written by older ranking
+opts = { limit: 25, min_score: 0.6, max_fetch: 120 }
 OptionParser.new do |p|
   p.on('--workbook-signature P') { |v| opts[:sig]      = v }
   p.on('--out P')                { |v| opts[:out]      = v }
   p.on('--limit N', Integer)     { |v| opts[:limit]    = v }
+  p.on('--max-fetch N', Integer, 'Hard ceiling on spec fetches when relevance-ranked candidates exceed --limit (default 120). Name-affine DMs are fetched past --limit up to this cap.') { |v| opts[:max_fetch] = v }
   p.on('--min-score F', Float)   { |v| opts[:min_score]= v }
   p.on('--force-new')            { |_| opts[:force_new]= true }
   p.on('--auto-pick',
@@ -74,7 +88,12 @@ def http_get(path)
     req = Net::HTTP::Get.new(uri)
     req['Authorization'] = "Bearer #{Sigma.auth_token}"
     req['Accept'] = 'application/json'
-    res = Net::HTTP.start(uri.host, uri.port, use_ssl: true, read_timeout: 30) { |h| h.request(req) }
+    # Derive TLS from the URI scheme (same as put-layout.rb) instead of hardcoding
+    # use_ssl: true. Production SIGMA_BASE_URL is https so behaviour is unchanged;
+    # this is what lets the candidate-ranking tests drive the picker against a
+    # loopback WEBrick stub offline (hardcoded TLS made the scan untestable, which
+    # is how the recency-window bug shipped with a green suite).
+    res = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https', read_timeout: 30) { |h| h.request(req) }
     if res.code.to_i == 401 && attempts == 1 && ENV['SIGMA_CLIENT_ID']
       Sigma.refresh_token!
       next
@@ -110,7 +129,12 @@ CACHE_MAX_AGE = 24 * 3600
 if !opts[:refresh] && !opts[:force_new] && File.exist?(opts[:out])
   prev = (JSON.parse(File.read(opts[:out])) rescue nil)
   prev_at = prev && (Time.parse(prev['scanned_at'].to_s) rescue nil)
-  if prev.is_a?(Hash) && prev['signature_sha256'] == SIG_SHA && prev_at && (Time.now - prev_at) < CACHE_MAX_AGE
+  # ranking_version participates in cache validity: a result computed by the old
+  # recency-window ranking must NOT be replayed, or the reuse fix stays invisible
+  # for 24h on exactly the orgs that need it.
+  prev_rv = prev.is_a?(Hash) ? prev['ranking_version'].to_i : 0
+  if prev.is_a?(Hash) && prev['signature_sha256'] == SIG_SHA && prev_at && (Time.now - prev_at) < CACHE_MAX_AGE &&
+     prev_rv == RANKING_VERSION
     warn "dm-match REUSED (signature unchanged; scanned #{prev['scanned_at']}) — pass --refresh to rescan"
     warn "best score: #{prev['score']}  →  #{prev['rationale']}"
     exit(prev['recommended_dm_id'].nil? ? 1 : 0)
@@ -154,16 +178,62 @@ loop do
   break if page.nil? || page.empty?
 end
 
-# Deterministic ranking: updatedAt desc, then name asc.
+# Deterministic ranking: name-affinity desc, then updatedAt desc, then name asc.
 # NOTE: require 'time' MUST come before the sort — without it Time.parse raises,
 # every timestamp rescues to 0, and the sort silently degrades to name-ascending
 # (recently-updated DMs past the --limit window are never scanned).
 require 'time'
-all_dms = all_dms.sort_by do |dm|
-  [-(Time.parse(dm['updatedAt'].to_s).to_i rescue 0), dm['name'].to_s]
+
+# Cheap RELEVANCE signal computable from the list response alone (no spec fetch):
+# how much a DM's NAME overlaps the distinctive tokens of the tables this
+# workbook actually reads. Given a signature over <DB>.<SCHEMA>.PIPELINE_FACT, a DM
+# named "Pipeline Fact (migrated)" scores; an unrelated "Bench Fixture 12" scores 0.
+# This only ORDERS the fetch queue — the real scoring below is still done on the
+# fetched spec's tables/columns, so a name coincidence can never by itself produce
+# a reuse recommendation.
+STOP_TOKENS = %w[DM DATA MODEL FROM THE AND FOR TEST TMP TEMP COPY OF V1 V2 NEW OLD
+                 FACT DIM TABLE VIEW PROD DEV RAW STG PUBLIC].to_set
+def name_tokens(s)
+  s.to_s.upcase.split(/[^A-Z0-9]+/).reject { |t| t.empty? || t.length < 3 || STOP_TOKENS.include?(t) }.to_set
 end
 
-warn "found #{all_dms.size} total DMs; scoring top #{[all_dms.size, opts[:limit]].min} by updatedAt"
+# Signature tokens: the LEAF table name carries the signal (db/schema are shared
+# by everything on the connection and would match every DM equally).
+sig_tokens = (sig['warehouse_tables'] || []).each_with_object(Set.new) do |fqn, acc|
+  leaf = fqn.to_s.split('.').reject(&:empty?).last
+  acc.merge(name_tokens(leaf))
+end
+# The source document's own name is a weaker but real signal (a prior migration of
+# the same dashboard usually named its DM after it).
+sig_tokens.merge(name_tokens(sig['tableau_workbook'])) if sig['tableau_workbook']
+
+def affinity(dm_name, sig_tokens)
+  return 0.0 if sig_tokens.empty?
+  toks = name_tokens(dm_name)
+  return 0.0 if toks.empty?
+  (toks & sig_tokens).size.to_f / sig_tokens.size
+end
+
+all_dms = all_dms.sort_by do |dm|
+  [-affinity(dm['name'], sig_tokens),
+   -(Time.parse(dm['updatedAt'].to_s).to_i rescue 0),
+   dm['name'].to_s]
+end
+
+# Spend the budget on relevance, but never let a plausible reuse target fall off
+# the end just because the budget is small: every name-affine DM is fetched, up
+# to --max-fetch.
+affine_count = all_dms.count { |dm| affinity(dm['name'], sig_tokens) > 0 }
+fetch_n = [[opts[:limit], affine_count].max, opts[:max_fetch], all_dms.size].min
+POOL_TOTAL = all_dms.size
+POOL_FETCHED = fetch_n
+POOL_TRUNCATED = fetch_n < POOL_TOTAL
+warn "found #{POOL_TOTAL} total DMs; scoring #{POOL_FETCHED} ranked by name-affinity to the signature's tables " \
+     "(#{affine_count} name-affine, budget --limit=#{opts[:limit]}, cap --max-fetch=#{opts[:max_fetch]})"
+if POOL_TRUNCATED
+  warn "  NOTE: #{POOL_TOTAL - POOL_FETCHED} DM(s) were NOT scored — a 'no reusable DM' result below means " \
+       "none was found AMONG THE #{POOL_FETCHED} SCORED, not that none exists. Raise --limit/--max-fetch to widen."
+end
 
 # 2. Fetch each DM's spec and extract its signature (tables + columns + metrics).
 def normalize_fqn(s)
@@ -184,7 +254,7 @@ dm_failures = []
 require 'thread'
 mu = Mutex.new
 queue = Queue.new
-all_dms.take(opts[:limit]).each { |dm| queue << dm }
+all_dms.take(POOL_FETCHED).each { |dm| queue << dm }
 threads = 5.times.map do
   Thread.new do
     until queue.empty?
@@ -220,7 +290,10 @@ warn "fetched #{dm_specs.size} DM specs (#{dm_failures.size} failed)"
 dm_failures.first(5).each { |f| warn "  failure: #{f[:code]} #{f[:name]} — #{f[:body_head]}" }
 
 dm_signatures = []
-all_dms.take(opts[:limit]).each do |dm|
+# POOL_FETCHED, not opts[:limit] — the fetch queue above is sized by POOL_FETCHED
+# (which can exceed --limit when name-affine candidates do). Scoring only
+# opts[:limit] here would fetch specs and then silently drop them unscored.
+all_dms.take(POOL_FETCHED).each do |dm|
   dm_id = dm['dataModelId'] || dm['id']
   spec = dm_specs[dm_id]
   next unless spec
@@ -388,7 +461,14 @@ best_is_superset     = best_covers_tables && best['column_match'].to_f >= 1.0
 # caller builds a fresh, correctly-structured DM (and, interactively, surfaces the
 # tie). Narrow ties (<=2) still collapse as before — reuse-first for the common case.
 tie_window_count     = best ? candidates.count { |c| (best['score'] - c['score'].to_f) < auto_pick_tie_window } : 0
-ambiguous_wide_tie   = tie_window_count >= 3 && !best_name_matches && !best_is_superset
+# The tie guard only means something when the tied scores are actually REUSE
+# CANDIDATES. Without the min_score floor, a pile of IRRELEVANT DMs (all scoring
+# ~0.0 because they share no tables or columns) trips it and gets reported as
+# "N near-identical DMs tie — duplicate-DM sprawl", which is both wrong and
+# actively misleading: nothing is duplicated, the picker simply found nothing.
+# Now widened relevance ranking surfaces more zero-score DMs, so this matters.
+ambiguous_wide_tie   = tie_window_count >= 3 && best && best['score'].to_f >= opts[:min_score] &&
+                       !best_name_matches && !best_is_superset
 auto_picked          = !!(opts[:auto_pick] && best && best['score'] >= auto_pick_threshold && best_is_superset && !ambiguous_wide_tie)
 
 # Standard recommend path keeps the old semantics (printed for human opt-in).
@@ -409,16 +489,37 @@ rationale =
   elsif best['score'] >= opts[:min_score]
     'ambiguous match — ASK USER before reusing'
   else
-    'no candidate above min-score; build a new DM'
+    "no candidate above min-score across the #{POOL_FETCHED} DM(s) scored; build a new DM"
   end
+
+# NO SILENT CAPS: whenever we decline to recommend reuse AND the budget stopped us
+# short of the whole org, say so in the rationale itself — the agent/operator reads
+# this string, and "build a new DM" must never imply "the org has nothing reusable"
+# when only part of it was scored. (Appended to whichever branch fired above.)
+if recommended_dm_id.nil? && POOL_TRUNCATED
+  rationale += " [scanned #{POOL_FETCHED} of #{POOL_TOTAL} DM(s) scored, ranked by name-affinity — " \
+               "#{POOL_TOTAL - POOL_FETCHED} NOT scored; raise --limit/--max-fetch to scan wider]"
+end
 
 result = {
   'workbook_signature_path' => opts[:sig],
   # Re-entry cache stamp (see the header block): same signature within 24h ⇒
   # the next invocation reuses this file instead of re-scanning the org.
   'signature_sha256'        => SIG_SHA,
+  # Ranking generation this result was computed under; the cache refuses to replay
+  # a result from an older ranking (see RANKING_VERSION).
+  'ranking_version'         => RANKING_VERSION,
   'scanned_at'              => Time.now.utc.iso8601,
   'scanned_dm_count'        => candidates.size,
+  # NO SILENT CAPS: a "no reusable DM" verdict is only as broad as the pool that
+  # was actually scored. Callers (and the agent reading this file) must be able to
+  # tell "none exists" apart from "none among the N we could afford to score".
+  'candidate_pool'          => {
+    'total_in_org' => POOL_TOTAL,
+    'scored'       => POOL_FETCHED,
+    'truncated'    => POOL_TRUNCATED,
+    'ranked_by'    => 'name-affinity to signature tables, then updatedAt desc, then name asc'
+  },
   'recommended_dm_id'       => recommended_dm_id,
   'auto_picked'             => auto_picked,
   'ambiguous_wide_tie'      => ambiguous_wide_tie,
