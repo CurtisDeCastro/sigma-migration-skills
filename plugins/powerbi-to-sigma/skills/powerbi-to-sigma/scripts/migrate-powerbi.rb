@@ -69,7 +69,8 @@ require 'fileutils'
 require 'open3'
 require 'digest'
 require 'set'
-require_relative 'lib/py_resolve' # real-Python resolver (Windows Store-stub safe)
+require_relative 'lib/py_resolve'
+require_relative 'lib/pbi_field_alts' # derived field_map entries must wrap their ALTS too (pie/date-grain render bug) # real-Python resolver (Windows Store-stub safe)
 begin; require_relative 'lib/modeling_advisory'; rescue LoadError; end # shared, vendor-neutral CDW join-cost advisory (optional; synced from shared/)
 
 HERE = __dir__
@@ -112,6 +113,15 @@ OptionParser.new do |o|
   # UTF-16LE Report/Layout -> signals) locally, then the normal pipeline runs.
   # Mutually exclusive with --tmsl/--pbir (which it derives).
   o.on('--pbix PATH')       { |v| opts[:pbix]   = File.expand_path(v) }
+  # FIELD-LOSS GATE escape hatch (task 5). By default a run that loses field
+  # BINDINGS hard-stops at Phase 5c (exit 10): measured on 4 real reports, runs that
+  # had dropped 33-54% of their bindings still reported "12/12 source visual(s)
+  # carried over; 0 dropped", because coverage was counted per VISUAL and a table
+  # shipping 3 of 8 columns is only 'degraded'. Surfacing that was not enough — an
+  # unattended run shipped it anyway. Pass this when the loss is a KNOWN, accepted
+  # Sigma limit (USERELATIONSHIP / ISINSCOPE and friends); the reason is still
+  # printed, never suppressed.
+  o.on('--allow-field-loss', 'proceed despite field-binding loss (still reports it)') { opts[:allow_field_loss] = true }
   o.on('--connection ID')   { |v| opts[:conn]   = v }
   o.on('--database DB')     { |v| opts[:db]     = v }
   o.on('--schema S')        { |v| opts[:schema] = v }
@@ -1396,11 +1406,14 @@ all_visuals.flat_map { |v| (v['bindings'] || {}).values.flatten }.uniq.each do |
   if (m = r.match(/\A([A-Za-z ]+)\((.+)\)\z/)) && agg_names[m[1].downcase.delete(' ')]
     base = fm_norm[norm_key.call(m[2])]
     next unless base && base['ref'].to_s =~ /\A\[[^\]]+\]\z/
-    field_map[r] = base.merge('ref' => "#{agg_names[m[1].downcase.delete(' ')]}(#{base['ref']})", 'agg' => nil)
+    _fn = agg_names[m[1].downcase.delete(' ')]
+    # wrap the ALTS as well, not just the primary ref — see lib/pbi_field_alts.rb
+    field_map[r] = PbiFieldAlts.wrapped_entry(base) { |ref| "#{_fn}(#{ref})" }
   elsif (m = r.match(/\A(.+?)\.Variation\..*\.(Year|Quarter|Month|Week|Day)\z/i))
     base = fm_norm[norm_key.call(m[1])]
     next unless base && base['ref'].to_s =~ /\A\[[^\]]+\]\z/
-    field_map[r] = base.merge('ref' => "DateTrunc(\"#{m[2].downcase}\", #{base['ref']})", 'agg' => nil)
+    _lvl = m[2].downcase
+    field_map[r] = PbiFieldAlts.wrapped_entry(base) { |ref| "DateTrunc(\"#{_lvl}\", #{ref})" }
   end
 end
 
@@ -1540,6 +1553,11 @@ if coverage
   puts
   puts '==================== MIGRATION COVERAGE ===================='
   puts "   #{CoverageGate.headline(coverage)}"
+  # BOTH headlines, deliberately. The visual-level line above answers "did each tile
+  # come across?"; the binding-level line answers "did each FIELD come across?" — and
+  # only the second would have caught the customer's report, where every visual built
+  # but 33-54% of its field bindings were pruned.
+  puts "   #{CoverageGate.binding_headline(coverage)}"
   rlines = CoverageGate.report_lines_by_cause(coverage)
   unless rlines.empty?
     puts
@@ -1560,6 +1578,37 @@ if coverage
     end
   end
   puts '==========================================================='
+
+  # ---- FIELD-LOSS GATE (task 5) -------------------------------------------
+  # The readout above is INFORMATIONAL and always has been; that is exactly why a
+  # badly degraded migration could ship. This turns FIELD loss into a stop.
+  # Fails when (a) a functional component (control/kpi/chart/table) was DROPPED — a
+  # lost control means the page lost its filter — or (b) binding resolution is below
+  # the floor. --allow-field-loss converts either into a pass that STILL prints the
+  # reason. exit 10 is this orchestrator's established "open question" code, so the
+  # DM + workbook already posted above remain usable and attachable.
+  fl_status, fl_reason = CoverageGate.gate!(coverage, min_resolved: 0.95,
+                                                      allow_override: opts[:allow_field_loss])
+  if fl_status == :fail
+    puts
+    puts '########## FIELD-LOSS GATE: FAIL ##########'
+    # NB: the ratio-branch reason already embeds binding_headline, so print the
+    # headline only when the reason does not (the dropped-functional-component
+    # branch names components instead) — otherwise the block repeats itself.
+    puts "   #{fl_reason}"
+    bh = CoverageGate.binding_headline(coverage)
+    puts "   #{bh}" unless fl_reason.to_s.include?(bh)
+    cause_lines = CoverageGate.report_lines_by_cause(coverage)
+    puts cause_lines.join("\n") unless cause_lines.empty?
+    puts
+    puts '   The workbook and data model DID post and are usable, but the report lost'
+    puts '   FIELDS, not just styling — fix the cause above and re-run, or pass'
+    puts '   --allow-field-loss to accept it explicitly (the reason is still reported).'
+    puts '###########################################'
+    exit 10
+  elsif fl_reason.to_s.start_with?('overridden')
+    puts "   FIELD-LOSS GATE: #{fl_reason}"
+  end
 end
 
 # ---------------------------------------------------------------------------

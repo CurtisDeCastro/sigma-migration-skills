@@ -47,7 +47,10 @@ end
 
 # ---- 1. catalogs load, cited, unique --------------------------------------
 CATS = Coverage.load_all(CATDIR)
-ok('four catalogs load', CATS.keys.sort == %w[aggregation control number-format viz-kind])
+# custom-visual joined the set: third-party/AppSource visuals are matched by REGEX on
+# the vendor package id, not by exact key, so they cannot live in viz-kind.
+ok('five catalogs load',
+   CATS.keys.sort == %w[aggregation control custom-visual number-format viz-kind])
 CATS.each do |name, cat|
   ok("#{name}: has rows", !cat.rows.empty?)
   ok("#{name}: source_tool == powerbi", cat.source_tool == 'powerbi')
@@ -57,11 +60,23 @@ CATS.each do |name, cat|
   ok("#{name}: unique sources", dupes.empty?)
   cited = cat.rows.all? { |r| r['doc_ref'].to_s.start_with?('http') }
   ok("#{name}: every row cites a real doc_ref URL", cited)
-  mapped = cat.rows.all? { |r| !r['sigma'].to_s.empty? }
-  ok("#{name}: every row has a Sigma target", mapped)
+  # A row is allowed NO Sigma target only when its role_class must never render:
+  # 'decoration' (a shape/blank carries no data) and 'unsupported' (no Sigma construct
+  # preserves the semantics). Emitting a target for those is the original bug — a
+  # decomposition tree rendered as a bar chart is not an approximation, it is a wrong
+  # answer. In exchange such a row MUST carry `guidance`, so "no target" can never mean
+  # "no answer": the operator still gets told what to do.
+  no_target_ok = %w[decoration unsupported]
+  mapped = cat.rows.all? do |r|
+    next true unless r['sigma'].to_s.empty?
+    no_target_ok.include?(r['role_class'].to_s) && !r['guidance'].to_s.strip.empty?
+  end
+  ok("#{name}: every row has a Sigma target, or is decoration/unsupported WITH guidance", mapped)
   valid_sv = cat.rows.all? do |r|
     sv = r['sigma_verified'] || {}
-    %w[y n].include?(sv['status']) && (sv['status'] != 'y' || !sv['date'].to_s.empty?)
+    # 'n/a' is legitimate for a row with nothing to verify (decoration carries no data;
+    # unsupported has no Sigma target to render). 'y' still REQUIRES a date.
+    %w[y n n/a].include?(sv['status']) && (sv['status'] != 'y' || !sv['date'].to_s.empty?)
   end
   ok("#{name}: sigma_verified status is y/n and any 'y' carries a date", valid_sv)
 end
@@ -92,7 +107,19 @@ EXPECT_SIGMA_KIND = {
   'map' => 'map', 'image' => 'image'
 }.freeze
 derived_kind = CATS['viz-kind'].rows.each_with_object({}) { |r, h| h[r['source']] = r['sigma'] }
-ok('derived SIGMA_KIND == the original 14 verbatim pairs', derived_kind == EXPECT_SIGMA_KIND)
+# The lock's PURPOSE is that no existing token's Sigma kind changes silently. The catalog
+# may legitimately GROW (decoration/unsupported were added so unknown visuals stop being
+# coerced to bar charts), so assert the original 14 pairs are preserved EXACTLY, and that
+# every additional row is a non-rendering class — i.e. a new row can never introduce a new
+# renderable mapping without editing this test on purpose.
+ok('the original 14 SIGMA_KIND pairs are preserved verbatim',
+   EXPECT_SIGMA_KIND.all? { |k, v| derived_kind[k] == v })
+extra = derived_kind.keys - EXPECT_SIGMA_KIND.keys
+ok("any ADDED viz-kind row is non-rendering (added: #{extra.sort.inspect})",
+   extra.all? do |k|
+     row = CATS['viz-kind'].rows.find { |r| r['source'] == k }
+     row && row['sigma'].to_s.empty? && %w[decoration unsupported].include?(row['role_class'].to_s)
+   end)
 
 EXPECT_FMT = { 'currency' => '$,.0f', 'percent' => '.1%', 'comma' => ',.1f', 'integer' => ',.0f' }.freeze
 derived_fmt = CATS['number-format'].rows.each_with_object({}) { |r, h| h[r['source']] = r['sigma'] }
