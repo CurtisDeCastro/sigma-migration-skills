@@ -184,8 +184,11 @@ end
 # Walk both elements; we mostly care about the test element
 # PAGINATED with a LOCAL loop: this script mints its own token into TOK and uses
 # its own `http` helper, so pulling in sigma_rest would put two independent auth
-# paths in one script. Same semantics as Sigma.list_entries — limit=1000, follow
-# nextPage to exhaustion, defensive stop on a repeated or empty token.
+# paths in one script. Mirrors Sigma.list_entries' paging shape — limit=1000,
+# follow nextPage to exhaustion, defensive stop on a repeated or empty token —
+# but NOT its error semantics: Sigma.request raises Sigma::Error on a non-2xx,
+# while this loop just breaks and returns whatever entries it collected, so a
+# non-2xx mid-pagination silently ends the loop with a possibly-partial list.
 entries = []
 cols_page = nil
 cols_seen = {}
