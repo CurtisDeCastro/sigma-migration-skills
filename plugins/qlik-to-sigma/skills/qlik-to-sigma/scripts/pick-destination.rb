@@ -18,6 +18,7 @@
 #
 # Env: SIGMA_BASE_URL + SIGMA_CLIENT_ID/SIGMA_CLIENT_SECRET (or SIGMA_API_TOKEN).
 require 'json'
+require_relative 'lib/cli_encoding'
 require_relative 'lib/sigma_rest'
 
 def my_documents_id

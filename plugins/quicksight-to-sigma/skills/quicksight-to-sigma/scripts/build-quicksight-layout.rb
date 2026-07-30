@@ -32,6 +32,41 @@ v2e = map['visualToElement']             # QS VisualId -> Sigma element id
 GRID = 36.0                              # QuickSight max grid width (fallback only)
 SIG = 24                                 # Sigma grid width
 
+# --- ROW scaling (columns are scaled 36->24; rows were previously ported 1:1) ----------
+# A QuickSight grid ROW unit is physically TALLER than a Sigma grid row, so porting
+# RowSpan 1:1 compresses EVERY band vertically. Measured on the sales-pipeline source
+# (QS canvas OptimizedViewPortWidth=1600px, KPI RowSpan=4, charts RowSpan=9): the QS KPI
+# card occupies ~9.2% of canvas width in the source render but only ~5.4% when its 4 rows
+# are ported 1:1 — i.e. Sigma needs ~1.6x the row count for the same physical height.
+# Symptom users report: "the KPI height is off" (and the whole page reads squat).
+ROW_SCALE = 1.6
+# Sigma HIDES a kpi element's title below ~5 grid rows, and QuickSight KPIs are prominent
+# big-number tiles. Never let a KPI band land under this floor.
+KPI_MIN_ROWS = 6
+
+# Scale a QS row boundary to Sigma rows. Both the START and END of every band go through
+# the SAME function so adjacent bands stay exactly contiguous (no overlap, no 1-row gap)
+# — Sigma's grid has no z-order, so an overlap silently collapses tiles.
+def row_line(qs_row, scale)
+  (qs_row.to_f * scale).round + 1
+end
+
+# The sheet-wide row scale: ROW_SCALE, raised if that would still leave any KPI band under
+# the title-hiding floor. Raising the scale for the WHOLE sheet keeps the source's
+# relative proportions intact instead of stretching one band out of ratio.
+def sheet_row_scale(els, kpi_eids, v2e)
+  scale = ROW_SCALE
+  els.each do |e|
+    eid = v2e[e['ElementId']]
+    next unless eid && kpi_eids.include?(eid)
+    span = (e['RowSpan'] || 4).to_i
+    next if span <= 0
+    got = row_line(((e['RowIndex'] || 0).to_i + span), scale) - row_line((e['RowIndex'] || 0).to_i, scale)
+    scale = [scale, KPI_MIN_ROWS.to_f / span].max if got < KPI_MIN_ROWS
+  end
+  scale
+end
+
 # QuickSight does NOT use a fixed 36-column grid when indices are EXPLICIT. A sheet's
 # effective grid width is whatever the widest row of tiles adds up to — commonly 12,
 # 18, 24, or 36 depending on how the author sized things. Scaling every layout by a
@@ -81,16 +116,24 @@ end
 def layout_sheet(sheet, v2e, eids_for_sheet)
   cfg = (sheet['Layouts'] || [{}])[0].fetch('Configuration', {})
   placed = []
+  # KPI element ids on THIS sheet (QS KPIVisual.VisualId == the grid element's ElementId),
+  # so the row scale can enforce Sigma's kpi title-height floor.
+  # (map/compact, not filter_map — the skill supports Ruby 2.6, where filter_map is absent.)
+  kpi_eids = (sheet['Visuals'] || []).map { |v| v.dig('KPIVisual', 'VisualId') }.compact
+                                     .map { |vid| v2e[vid] }.compact.to_set
   if (g = cfg['GridLayout'])
     els = g['Elements'] || []
     explicit = els.any? { |e| !e['ColumnIndex'].nil? }
     if explicit
       grid_w = infer_grid_width(els)
+      rscale = sheet_row_scale(els, kpi_eids, v2e)
       els.each do |e|
         eid = v2e[e['ElementId']]; next unless eid && eids_for_sheet.include?(eid)
         c0, c1 = scale_cols(e['ColumnIndex'] || 0, e['ColumnSpan'] || (grid_w / 2), grid_w)
-        r0 = (e['RowIndex'] || 0) + 1
-        r1 = r0 + (e['RowSpan'] || 8)
+        qs_r0 = (e['RowIndex'] || 0).to_i
+        r0 = row_line(qs_r0, rscale)
+        r1 = row_line(qs_r0 + (e['RowSpan'] || 8).to_i, rscale)
+        r1 = r0 + 1 if r1 <= r0
         placed << [eid, c0, c1, r0, r1]
       end
     else
@@ -102,7 +145,11 @@ def layout_sheet(sheet, v2e, eids_for_sheet)
         col = 0 if col + span > grid_w
         row += row_h if col.zero? && row_h.positive?
         c0, c1 = scale_cols(col, span, grid_w)
-        h = (e['RowSpan'] || 12)
+        # Same QS-row -> Sigma-row scaling as the explicit path (see ROW_SCALE), with the
+        # kpi title-height floor applied per tile since auto-flow has no shared row grid.
+        h = ((e['RowSpan'] || 12).to_i * ROW_SCALE).round
+        h = [h, KPI_MIN_ROWS].max if eid && kpi_eids.include?(eid)
+        h = [h, 1].max
         placed << [eid, c0, c1, row, row + h]
         col += span; row_h = [row_h, h].max
         if col >= grid_w

@@ -20,7 +20,7 @@ Usage:
      --data-model-id <uuid> --fact-element <elId> --fact-name ORDER_FACT \
      --rel-name EL_CUSTOMER --fact-dataset order --folder-id <uuid> --out wb_spec.json
 """
-import argparse, json, re, sys, os
+import argparse, json, re, sys, os, subprocess
 
 # ── documentation-grounded mapping catalogs (SINGLE SOURCE OF TRUTH) ─────────
 # Every enumerable classifier map below is loaded from refs/catalogs/<dimension>.json
@@ -421,6 +421,30 @@ def main():
     n_ctl = len(dash_control)
     print(f"workbook -> {a.out}: {len(pages)} page(s), {len(page_elements)} elements, "
           f"{len(mcolumns)} master cols, {n_ctl} date control(s), {len(flags)} flagged")
+
+    # gate 7 (control-wiring lint): FAIL the build if a control does not filter
+    # every same-page KPI/chart (partial reach), is dead (no resolving target),
+    # or points at a ghost element. Runs the shared, proven
+    # scripts/lib/control_lint.rb on the just-built spec — the same hard gate the
+    # other converters ship — so a control that "only filters the table, not the
+    # KPIs/charts" can never ship silently. No live API needed (lints the spec).
+    # (Runtime flip proof / gate 7b needs a live-posted workbook; the agent runs
+    # probe-controls.rb after POST — see SKILL.md.)
+    _cl = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib", "control_lint.rb")
+    if os.path.exists(_cl):
+        _lint = subprocess.run(["ruby", _cl, a.out], capture_output=True, text=True)
+        sys.stdout.write(_lint.stdout)
+        sys.stderr.write(_lint.stderr)
+        if _lint.returncode != 0:
+            sys.stderr.write(
+                "\n[FAIL] gate 7 (control lint): control-wiring violation(s) above. A control "
+                "must target the page's SOURCE element so Sigma propagates the filter to EVERY "
+                "element (KPIs + charts + tables), not just one. Fix the wiring before shipping.\n")
+            sys.exit(9)
+    else:
+        sys.stderr.write(
+            "[WARN] gate 7: scripts/lib/control_lint.rb not vendored — control wiring UNLINTED "
+            "(re-vendor; SHA-1 discipline)\n")
     for p in pages: print(f"   page '{p['name']}': {len(p['elements'])} elements")
     for fl in flags: print("   FLAG", fl)
 

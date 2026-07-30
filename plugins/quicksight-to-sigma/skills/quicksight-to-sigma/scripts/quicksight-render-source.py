@@ -254,7 +254,11 @@ def render(args):
         "SnapshotConfiguration": snap,
     }
     if not args.identity_enhanced:
-        request["UserConfiguration"] = {"AnonymousUsers": [{"RowLevelPermissionTags": []}]}
+        # One anonymous-user object is REQUIRED ("No anonymous user objects were
+        # defined. At least one should even if it is empty") but it must be an
+        # EMPTY object: botocore validates RowLevelPermissionTags as min-length 1,
+        # so sending {"RowLevelPermissionTags": []} fails client-side ParamValidation.
+        request["UserConfiguration"] = {"AnonymousUsers": [{}]}
 
     started = _start_job(api, args.region, args.profile, request)
     print(f"[render] snapshot job {job_id} started (HTTP {started.get('Status')})")

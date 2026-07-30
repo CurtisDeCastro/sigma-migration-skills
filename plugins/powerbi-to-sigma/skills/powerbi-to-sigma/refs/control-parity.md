@@ -78,15 +78,29 @@ Consequences:
 - **partial reach, multi-master page** → add one filter target per master the
   control should govern (the column must exist on each); elements sourcing
   from those masters inherit via the closure.
-- **partial reach, chart bypasses the master** (sources the DM directly) →
-  either re-source the chart from the master or re-root it through a hidden
-  shared BASE TABLE (a `kind: table` element sourcing the same DM element,
-  carrying passthrough columns; the chart re-sourced through it) and target
-  the table. Control filter targets may only point at TABLE elements — a
-  chart/KPI target is rejected at POST/PUT with 400 "Dependency not found"
-  (live-verified 2026-06-12; the looker builder's listen-scope tables and
-  enhance-apply's `ensure_base_table!` are the two automated forms of this
-  pattern).
+- **partial reach, KPIs/charts unfiltered while the detail table filters**
+  (each visual sourced its own narrow master; the control only targeted the
+  table's master) → the fix is **one base table per page + control-targets-base**
+  (build-workbook-from-pbir.rb `--source-mode page-base`, the DEFAULT): every
+  visual on the page SOURCES the one page base master and each page control
+  targets THAT base table's column, so the filter propagates to every visual
+  through the source closure. Control filter targets a TABLE element (the base
+  master) — the always-safe target. **Do NOT add a filter "passthrough" column
+  to a chart or pivot to make it a direct control target**: the extra column
+  corrupts the chart/pivot grouping and it renders "No data" (verified on live
+  migrations). A passthrough column is tolerated only on a KPI (single-value,
+  no grouping) or a plain grouped table; charts/pivots must be reached by
+  PROPAGATION from a shared base table, never by a passthrough column. (This
+  mirrors tableau-to-sigma / qlik-to-sigma, where every chart sources one
+  master; the looker builder's listen-scope tables are the same idea.)
+- **boolean / indicator slicer** → a boolean-typed slicer must NOT ship the
+  string-slicer template (`controlType: list`, `mode: include`, `values: []`):
+  Sigma treats an unset boolean `include` list as "include nothing" and ZEROES
+  every targeted element. Seed the full boolean domain (`values: [true, false]`)
+  so an unset control includes everything (= no filter), matching a PBI boolean
+  slicer with nothing selected. The builder does this automatically for columns
+  the TMSL model types as boolean/bit (else falls back to indicator-name shape:
+  `Is…` / `Has…` / `…Ind` / `…Flag`).
 - **intentional narrow control** (grain switcher driving one chart by
   formula) → annotate `scope: [...]` in control-scope.json; don't fake-wire.
 

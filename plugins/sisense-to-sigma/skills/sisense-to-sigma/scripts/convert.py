@@ -12,7 +12,7 @@ dashboard: dashboard widgets -> Sigma workbook spec; widget type -> element,
            panel JAQL -> column formulas via jaql_expr. Unmapped widgets/JAQL are
            FLAGGED (kind:"flagged") not faked.
 """
-import json, sys, re, os
+import json, sys, re, os, subprocess
 import jaql_expr as J
 
 # ── documentation-grounded mapping catalogs (SINGLE SOURCE OF TRUTH) ─────────
@@ -728,6 +728,28 @@ if __name__ == "__main__":
         json.dump(spec, open("sigma_workbook_spec.json", "w"), indent=2)
         print(f"wrote sigma_workbook_spec.json ({len(spec['pages'][1]['elements'])} viz elements, "
               f"{len(spec['pages'][0]['elements'][0]['columns'])} master cols)")
+        # gate 7 (control-wiring lint): FAIL the build if a control does not
+        # filter every same-page KPI/chart (partial reach), is dead, or points
+        # at a ghost target — the shared, proven scripts/lib/control_lint.rb, on
+        # the just-built spec. Kills the "control only filters the table, not the
+        # KPIs/charts" bug at build time, no live API. (Runtime flip / gate 7b
+        # needs a live POST; the agent runs probe-controls.rb after POST.)
+        _cl = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib", "control_lint.rb")
+        if os.path.exists(_cl):
+            _lint = subprocess.run(["ruby", _cl, "sigma_workbook_spec.json"],
+                                   capture_output=True, text=True)
+            sys.stdout.write(_lint.stdout)
+            sys.stderr.write(_lint.stderr)
+            if _lint.returncode != 0:
+                sys.stderr.write(
+                    "\n[FAIL] gate 7 (control lint): control-wiring violation(s) above. A control "
+                    "must target the page SOURCE element so Sigma propagates the filter to EVERY "
+                    "element (KPIs + charts + tables), not just one. Fix the wiring before shipping.\n")
+                sys.exit(9)
+        else:
+            sys.stderr.write(
+                "[WARN] gate 7: scripts/lib/control_lint.rb not vendored — control wiring UNLINTED "
+                "(re-vendor; SHA-1 discipline)\n")
         if flags:
             print("FLAGS (not faked):")
             for f in flags:
