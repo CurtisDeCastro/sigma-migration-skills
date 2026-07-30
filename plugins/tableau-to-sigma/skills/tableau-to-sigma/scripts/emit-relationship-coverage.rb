@@ -111,7 +111,7 @@ end
 coverage = doc.is_a?(Hash) ? doc['relationshipCoverage'] : nil
 result = coverage ? snakeize(coverage) : { 'serialized' => 0, 'wired' => 0, 'entries' => [] }
 
-File.write(opts[:out], JSON.pretty_generate(result))
+File.write(opts[:out], "#{JSON.pretty_generate(result)}\n")
 note = coverage ? '' : ' (no relationshipCoverage in converter output — no object-graph datasource)'
 puts "emit-relationship-coverage: #{result['serialized']} serialized, #{result['wired']} wired, " \
      "#{Array(result['entries']).size} entr(y/ies) -> #{opts[:out]}#{note}"

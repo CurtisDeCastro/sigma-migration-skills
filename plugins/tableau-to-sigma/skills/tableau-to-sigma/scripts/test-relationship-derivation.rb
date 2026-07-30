@@ -34,6 +34,7 @@ require 'json'
 require 'open3'
 require 'tmpdir'
 require 'set'
+require_relative 'lib/join_plan'
 
 HERE      = File.expand_path(__dir__)
 FIXTURE   = File.expand_path('../../../../../corpus/tableau/logical-model-objectgraph', HERE)
@@ -221,6 +222,23 @@ check(src.include?('derived_via'),
       'join_plan.rb records derived_via on each entry so gate 16 probes inferred keys', fails)
 check(src.include?('partial'),
       'join_plan.rb records partial for a mixed-key relationship (a wider join than Tableau\'s)',
+      fails)
+
+# 6. BEHAVIORAL pin (not a source grep): JoinPlan.derive must actually RECOVER
+#    the name-inferred FACT_WIDE->DIM_CUSTOMER relationship — the .twb alone
+#    carries no <expression> for it, so this only passes if join_plan.rb reads
+#    the converter's dm-spec relationships (dm_object_graph_index), not merely
+#    if it mentions the string "derived_via" somewhere. This is the check that
+#    pins the recovery branch AND the dm-spec/.twb name-matching together.
+jp_entries = JoinPlan.derive(doc['model'], File.read(twb_path, encoding: 'UTF-8'))
+cust_jp = jp_entries.find { |e| e['left'] == 'FACT_WIDE' && e['right'] == 'DIM_CUSTOMER' }
+check(!cust_jp.nil?,
+      'JoinPlan.derive recovers a join-plan.json entry for the name-inferred FACT_WIDE->DIM_CUSTOMER ' \
+      'relationship (absent before this task — nothing for gate 16 to probe)', fails)
+check(cust_jp && cust_jp['derived_via'] == 'name-inference',
+      "recovered entry's derived_via is name-inference (got #{(cust_jp || {})['derived_via'].inspect})", fails)
+check(cust_jp && cust_jp['probe_keys'] == ['CUSTOMER_KEY'],
+      "recovered entry's probe_keys resolve to the physical inferred key (got #{(cust_jp || {})['probe_keys'].inspect})",
       fails)
 
 puts ''

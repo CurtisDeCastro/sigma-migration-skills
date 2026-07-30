@@ -74,7 +74,7 @@ this offline test exercises the paginated reader today.
 | File | What it is |
 |---|---|
 | `workbook-content.twb` | The hand-authored/derived workbook XML (see Provenance above) |
-| `relationship-coverage.expected.json` | PINNED `relationshipCoverage` object emitted by `converter/tableau.mjs` for this fixture (3 serialized, 2 wired, 1 recorded-unwired) |
+| `relationship-coverage.expected.json` | PINNED `relationshipCoverage` object emitted by `converter/tableau.mjs` for this fixture (3 serialized, 2 wired, 1 recorded-unwired). This is the converter's RAW, camelCase JS output (`derivedVia`, `keyCount`, `droppedConditions`), checked by `checks.sh` below — it is a different artifact from, and predates, `scripts/emit-relationship-coverage.rb`'s snake_case `relationship-coverage.json` (`derived_via`, `key_count`, `dropped_conditions`), which that script writes to a run's `<workdir>` for PR2b's gate 22 to consume. Same values, same entries, deliberately different key casing for two different consumers — do not assume this file pins the emitter's output. |
 | `checks.sh` | Executable expectations, run by `run-corpus.sh --check` |
 
 ## Expected behaviors (encoded in checks.sh)
