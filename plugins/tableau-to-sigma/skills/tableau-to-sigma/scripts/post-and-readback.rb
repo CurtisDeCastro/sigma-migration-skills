@@ -471,7 +471,26 @@ columns_path = opts[:type] == 'datamodel' ?
 readback = lambda do
   spec = JSON.parse(http(:get, format(GET_PATH, oid), accept_json: true).body)
   cols_res = http(:get, columns_path, accept_json: true)
-  cols_json = cols_res.is_a?(Net::HTTPSuccess) ? (JSON.parse(cols_res.body) rescue { 'entries' => [] }) : nil
+  # cols_res is the FIRST page and is kept only for its HTTP status, which the
+  # quarantine guards below check. The entries are re-read EXHAUSTIVELY: the
+  # error-column census and the re-POST-once quarantine decision must see every
+  # column, and a first-page-only read truncates at the server default of 50 —
+  # which would declare a wide workbook clean while error columns sat past the cut.
+  # Shape is unchanged ({ 'entries' => [...] } or nil), so every downstream
+  # cols_json['entries'] read is untouched.
+  cols_json =
+    if cols_res.is_a?(Net::HTTPSuccess)
+      begin
+        { 'entries' => Sigma.list_entries(columns_path) }
+      rescue StandardError => e
+        # LOUD, not silent. A swallowed pagination failure would fall back to the
+        # first 50 columns and re-create the exact silent truncation this change
+        # exists to remove — so the degraded read announces itself.
+        warn "column census: exhaustive read failed (#{e.class}: #{e.message}) — falling " \
+             'back to the FIRST PAGE ONLY; the error-column census may be incomplete'
+        { 'entries' => (JSON.parse(cols_res.body)['entries'] rescue []), 'census_partial' => true }
+      end
+    end
   labels_by_el = Hash.new { |h, k| h[k] = [] }
   (cols_json && cols_json['entries'] || []).each do |c|
     labels_by_el[c['elementId']] << c['label'] if c['elementId'] && c['label']
@@ -660,7 +679,12 @@ if res.is_a?(Net::HTTPSuccess)
     exit(2)
   else
     total = (cols_json['entries'] || []).size
-    warn "column-type guard: #{total} columns clean (no `error` types)"
+    if cols_json['census_partial']
+      warn "column-type guard: census INCOMPLETE — #{total} column(s) read; no `error` types among them, " \
+           'but this does NOT confirm the workbook clean (columns past the first page were not read). Re-run.'
+    else
+      warn "column-type guard: #{total} columns clean (no `error` types)"
+    end
   end
 else
   warn "WARN: could not fetch /columns for type guard (got HTTP #{res.code}); skipping"

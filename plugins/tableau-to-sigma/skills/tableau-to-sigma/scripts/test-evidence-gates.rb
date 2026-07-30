@@ -195,7 +195,11 @@ def start_stub(counters)
           first = c.getbyte
           next unless first && first.between?(0x41, 0x5A)
           req = first.chr + c.gets.to_s
-          path = req.split(' ')[1].to_s
+          # Match on the query-stripped path: the gate's columns audit is
+          # paginated (limit=1000 + nextPage), so the request line arrives as
+          # `/columns?limit=1000` — the query string must not defeat the match
+          # and misclassify the read as an unexpected live call.
+          path = req.split(' ')[1].to_s.split('?').first.to_s
           while (h = c.gets) && h.strip != ''; end # drain headers
           body =
             if path.end_with?('/spec')

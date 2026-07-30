@@ -247,9 +247,11 @@ if batch_entries
   end
   at_exit { delete_probe.call('at_exit') unless opts[:keep] }
 
-  cols_data = Sigma.request(:get, "/v2/workbooks/#{wb_id}/elements/el-scout-test/columns")
-  cols_data = JSON.parse(cols_data) if cols_data.is_a?(String) # tolerate a raw body
-  col_entries = cols_data['entries'] || []
+  # PAGINATED (same contract as the singleton path below): a batch of >50
+  # formulas overflows Sigma's default 50-entry page, and a truncated readback
+  # would misreport every formula past the cut as "column missing from
+  # readback". Sigma.list_entries follows nextPage to exhaustion.
+  col_entries = Sigma.list_entries("/v2/workbooks/#{wb_id}/elements/el-scout-test/columns")
   by_col_id = {}
   by_label  = {}
   col_entries.each do |c|
@@ -399,9 +401,17 @@ end
 at_exit { delete_probe.call('at_exit') unless opts[:keep] }
 
 # Walk both elements; we mostly care about the test element
-cols_data = Sigma.request(:get, "/v2/workbooks/#{wb_id}/elements/el-scout-test/columns")
-cols_data = JSON.parse(cols_data) if cols_data.is_a?(String) # tolerate a raw body
-entries = cols_data['entries'] || []
+# PAGINATED via the fleet helper: this script's single auth path is
+# lib/sigma_rest (E7.1 port — Sigma.request already does the POST and the
+# cleanup DELETE above), so the columns readback goes through
+# Sigma.list_entries — limit=1000, follow nextPage to exhaustion, defensive
+# loud stop on a repeated token — instead of a bare first-page GET. Sigma's
+# server default page size is 50; unpaginated single-page reads reached END OF
+# SUPPORT 2026-06-02, and a truncated readback here misgrades every formula
+# past the cut. A non-2xx raises Sigma::Error (same semantics as the other
+# Sigma.request calls in this script); the armed at_exit still deletes the
+# probe workbook on that path.
+entries = Sigma.list_entries("/v2/workbooks/#{wb_id}/elements/el-scout-test/columns")
 error_cols = entries.select do |c|
   t = c['type']
   tt = t.is_a?(Hash) ? t['type'] : t

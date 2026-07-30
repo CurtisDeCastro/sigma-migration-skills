@@ -33,6 +33,8 @@ require 'net/http'
 require 'uri'
 require 'json'
 require 'optparse'
+$LOAD_PATH.unshift File.expand_path('lib', __dir__)
+require 'sigma_rest'
 
 opts = {}
 OptionParser.new do |p|
@@ -113,35 +115,43 @@ end
 
 # 2. List columns at /v2/connections/tables/<inodeId>/columns (per
 #    feedback_sigma_columns_api_endpoint — connectionId NOT in the path).
-#    PAGINATED: Sigma's list endpoints default to 50 entries per page. A single
-#    un-paginated GET silently truncates any table wider than 50 columns — the
-#    field-reported ">50-column table builds a lopsided DM" bug. Ask for a big
-#    page explicitly AND follow nextPage until exhausted.
-cols = []
+#
+#    PAGINATED. Sigma's server default page size is 50, so a bare first-page GET
+#    silently truncates a wide table — unpaginated single-page reads reached END OF
+#    SUPPORT 2026-06-02. Truncation here is not a cosmetic loss: a join key past
+#    ordinal 50 leaves the DM builder no column to point a relationship at, and
+#    fields past the cut read as "not on the table", whose fallback is Custom SQL.
+#    Sigma.list_entries sends limit=1000, follows nextPage (URL-encoded, opaque)
+#    to exhaustion, and stops loudly on a repeated token instead of spinning.
+#
+#    The connection is INJECTED so this read keeps this script's
+#    SIGMA_HTTP_TIMEOUT bound — the "migration stuck for hours" guard above —
+#    instead of the library's fixed 120s read timeout with no open timeout. Every
+#    page also shares the one TLS handshake. The block counts pages so a
+#    multi-page (wide-table) fetch announces itself on stderr.
+cols_path = "/v2/connections/tables/#{inode}/columns"
+timeout   = (ENV['SIGMA_HTTP_TIMEOUT'] || '90').to_i
+cols_uri  = URI("#{BASE}#{cols_path}")
 pages = 0
-page_token = nil
-seen_tokens = {}
-loop do
-  qs = 'limit=500'
-  qs += "&page=#{URI.encode_www_form_component(page_token)}" if page_token
-  status, body = http(:get, "/v2/connections/tables/#{inode}/columns?#{qs}")
-  abort "columns list failed: HTTP #{status}\n#{body}" unless status == 200
-  data = JSON.parse(body)
-  pages += 1
-  cols.concat((data['entries'] || []).map do |c|
-    # type may come back as a nested object { type: <warehouse-type> }; flatten to a string
-    t = c['type']
-    t = t['type'] if t.is_a?(Hash) && t['type']
-    { 'name' => c['name'], 'type' => t.to_s }
-  end)
-  page_token = data['nextPage']
-  break if page_token.nil? || page_token.to_s.empty?
-  # Defensive bound: a server that echoes the same token forever must not spin us.
-  if seen_tokens[page_token]
-    warn "columns list repeated nextPage token #{page_token.inspect} — stopping after #{pages} page(s) to avoid an infinite loop"
-    break
+entries =
+  begin
+    Net::HTTP.start(cols_uri.host, cols_uri.port, use_ssl: cols_uri.scheme == 'https',
+                    open_timeout: [timeout, 30].min, read_timeout: timeout) do |h|
+      Sigma.list_entries(cols_path, http: h) { pages += 1 }
+    end
+  rescue Net::OpenTimeout, Net::ReadTimeout, Timeout::Error => e
+    abort "TIMEOUT after #{timeout}s listing columns for #{opts[:path]} (#{e.class}). " \
+          "Sigma's warehouse catalog lookup did not return — often a cold warehouse or a very " \
+          "wide view. Retry, raise SIGMA_HTTP_TIMEOUT, or source this table via Custom SQL " \
+          "(SKILL.md Phase 1e.1) to skip per-column catalog introspection."
+  rescue Sigma::Error => e
+    abort "columns list failed: #{e.message}"
   end
-  seen_tokens[page_token] = true
+cols = entries.map do |c|
+  # type may come back as a nested object { type: <warehouse-type> }; flatten to a string
+  t = c['type']
+  t = t['type'] if t.is_a?(Hash) && t['type']
+  { 'name' => c['name'], 'type' => t.to_s }
 end
 warn "columns list spanned #{pages} pages (#{cols.size} columns total) — wide table, all pages fetched" if pages > 1
 

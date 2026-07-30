@@ -531,12 +531,21 @@ when 'apply-patch'
     persist_patch_to_wb_spec(opts[:dir], patch) if opts[:patch] && patch
 
     # Re-run the same guards post-and-readback runs on the initial POST.
-    cols = Sigma.request(:get, "/v2/workbooks/#{wb}/columns") rescue nil
-    err = ((cols && cols['entries']) || []).select { |c| c.dig('type', 'type') == 'error' }
+    # PAGINATED: re-runs the same error-column guard post-and-readback runs on the
+    # initial POST, so it needs the same exhaustive read — otherwise a wide
+    # workbook's error columns past 50 pass this guard too.
+    cols = (Sigma.list_entries("/v2/workbooks/#{wb}/columns") rescue nil)
+    # A nil read means the guard never ran. Track it so the success message below
+    # cannot claim "no type=error columns" on a check that did not happen — the
+    # same hardening post-and-readback.rb applies to its census.
+    cols_unread = cols.nil?
+    err = (cols || []).select { |c| c.dig('type', 'type') == 'error' }
     if err.any?
       warn "[FAIL] column-type guard: #{err.length} column(s) compiled to type=error after the patch:"
       err.first(10).each { |c| warn "         element=#{c['elementId']} col=#{c['columnId']} #{c['formula']}" }
       exit 5
+    elsif cols_unread
+      warn '[WARN] column-type guard: live columns could not be read — the type=error check did NOT run.'
     end
     fresh = Sigma.request(:get, "/v2/workbooks/#{wb}/spec", accept: 'text/yaml')
     spec =
@@ -565,7 +574,9 @@ when 'apply-patch'
       end
     rescue LoadError; end
     exit 5 if lint_fail
-    puts '[OK] post-patch guards clean (no type=error columns; layout + control lint pass)'
+    puts(cols_unread ?
+      '[OK] post-patch guards clean (layout + control lint pass; column-type check SKIPPED — live columns unreadable)' :
+      '[OK] post-patch guards clean (no type=error columns; layout + control lint pass)')
   end
 
   # Mark resolved entries (safe in dry-run too, so tests exercise the codepath).

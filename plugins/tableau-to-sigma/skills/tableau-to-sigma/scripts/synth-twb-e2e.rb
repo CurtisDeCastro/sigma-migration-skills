@@ -227,8 +227,12 @@ dm = nil
   dm = (JSON.parse(File.read(dm_ids_path)) rescue nil)
   break if st.success?
   abort 'DM post failed and no dataModelId written — cannot repair' unless dm && dm['dataModelId']
-  cols = Sigma.request(:get, "/v2/dataModels/#{dm['dataModelId']}/columns")
-  errs = (cols['entries'] || []).select { |c| c.dig('type', 'type') == 'error' }.map { |c| c['label'] }
+  # PAGINATED: this is the DM error-column repair loop. A first-page-only read
+  # would report "no error-type columns" on a wide model whose error columns sat
+  # past the server default of 50, and the repair loop would abort as though the
+  # failure were unrelated.
+  cols = Sigma.list_entries("/v2/dataModels/#{dm['dataModelId']}/columns")
+  errs = cols.select { |c| c.dig('type', 'type') == 'error' }.map { |c| c['label'] }
   abort "post-and-readback failed (exit #{st.exitstatus}) but no error-type columns — different failure" if errs.empty?
   puts "  repair attempt #{attempt + 1}: Sigma flagged #{errs.size} error column(s): #{errs.join(', ')}"
   spec = JSON.parse(File.read(dm_spec_path))
