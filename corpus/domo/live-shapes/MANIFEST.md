@@ -19,7 +19,7 @@ Evidence and the full story:
 |---|---|
 | `fixtures/datasets.json` | 2 DataSets carrying a real `schema.columns` array — the PUBLIC LIST endpoint returns `columns` as an Integer COUNT with no schema, which crashed `build-dm` (`29.each`) and would otherwise have posted a column-less DM |
 | `fixtures/cards.json` | 15 cards from the live run: 7 element kinds, `subscriptions.big_number` summary numbers, `datasources[].dataSourceId` bindings, `mapping` roles, `calendar` pseudo-columns + `dateGrain`, a combo whose measures bind via SERIES, a second-dataset card, and a table whose summary number is a COUNT |
-| `fixtures/formulas.json` | 5 Beast Modes, all class `aggregate`, with hand-authored `sigmaFormula`s (the shared converter cannot translate `CASE WHEN` / `COUNT(DISTINCT)` — beads jva2/sqp1) |
+| `fixtures/formulas.json` | 5 Beast Modes, all class `aggregate`, with hand-authored `sigmaFormula`s. Historical reason: the shared converter could not translate `CASE WHEN` / `COUNT(DISTINCT)` (beads jva2/sqp1). **Fixed 2026-07-30 in sigma-data-model-mcp PR #115** — both now convert correctly. These entries are still hand-authored because of a separate, still-open defect: real (ALL-CAPS, backtick-quoted) Domo identifiers come out double-bracketed (`[[Net Revenue]]`) — bead qorq, "Bug 3" in `refs/live-validation-2026-07-30.md` |
 | `fixtures/dataset-map.json` | warehouse map incl. a **`columnOverrides`** entry deriving a Domo-only DATE column from a `YYYYMMDD` integer key via `MakeDate` |
 
 ## Live-only shapes this case pins

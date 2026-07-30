@@ -22,28 +22,40 @@
 #
 # HAND-AUTHORED ESCAPE HATCH — discovery/formula-overrides.json
 #
-# The shared `convert_sql_to_sigma_formula` does NOT translate `CASE WHEN`
-# (emits an invalid `CASE When(...) Else(...) END` hybrid — bead jva2) and
-# mis-renders `COUNT(DISTINCT x)` as a column reference (bead qorq is our own
-# double-bracketing bug on top of that; jva2/sqp1 are upstream). Measured live:
-# 74% of real Beast Modes hit one of these and are correctly left with no
-# sigmaFormula by whoever ran Phase 2 — see "⛔ The formula layer is NOT
-# 'nearly free'" in refs/live-validation-2026-07-30.md. Rather than ship bad
-# SQL, `--lint` DROPS those entries (good, honest behaviour) — but until the
-# upstream bugs are fixed, that means real calc columns silently vanish.
+# UPDATE 2026-07-30: the shared `convert_sql_to_sigma_formula` DOES now
+# translate `CASE WHEN` (→ `If(cond, then, else)`) and `COUNT(DISTINCT x)`
+# (→ `CountDistinct(x)`) — fixed upstream in sigma-data-model-mcp PR #115
+# (squashed as 2ba3ea8). Beads jva2 and sqp1 are closed. That fix resolves the
+# measured historical baseline below (see refs/live-validation-2026-07-30.md,
+# "⛔ The formula layer is NOT 'nearly free'" — now annotated RESOLVED with the
+# corrected re-measurement) — those two constructs are no longer why a Beast
+# Mode ends up in this sidecar.
+#
+# The sidecar mechanism STAYS: it is still the right escape hatch for whatever
+# the shared converter cannot yet do. As of this fix, the live gap is a
+# DIFFERENT, separate defect — bead qorq, "Bug 3" in the live-validation refs:
+# this script's own step 1 (backtick → `[Column]`) hands the converter an
+# ALREADY-bracketed, ALL-CAPS identifier; the converter's own bracket-wrapping
+# pass does not recognize that and wraps it AGAIN, e.g.
+# `SUM(\`NET_REVENUE\`)` → (step 1) → `SUM([NET_REVENUE])` → (converter) →
+# `Sum([[Net Revenue]])` — double-bracketed, invalid Sigma. Verified live
+# 2026-07-30 against PR #115: all four entries below still reproduce this,
+# even though the CASE/COUNT(DISTINCT) structure they exercise is now correct
+# in isolation. Bug 3 is tracked separately (bead qorq) and is NOT fixed here.
 #
 # discovery/formula-overrides.json is an OPERATOR-authored sidecar (same
 # convention as discovery/kpi-overrides.json / dataset-map.json — this script
 # only ever READS it, so re-running normalize or --lint never clobbers it).
 # Keyed by the Beast Mode's stable `id` (`calculation_<uuid>`, survives
 # re-runs) or its human-friendly `name` (accepted alternate key, since ids are
-# opaque). Worked example — a CASE WHEN guard the converter mangles, and a
-# COUNT(DISTINCT) the converter mis-parses as a column ref:
+# opaque). Worked example — a CASE WHEN guard and a COUNT(DISTINCT) ratio that
+# both now convert correctly in isolation, but still need the override because
+# of Bug 3's double-bracketing on real (ALL-CAPS, backtick-quoted) Domo input:
 #
 #   {
 #     "calculation_4cd7e7c8-...": {
 #       "sigmaFormula": "If(Sum([Net Revenue]) = 0, 0, Sum([Gross Profit]) / Sum([Net Revenue]))",
-#       "note": "hand-authored: CASE WHEN unsupported by convert_sql_to_sigma_formula (bead jva2)"
+#       "note": "hand-authored: double-bracketed column refs on real ALL-CAPS input (bead qorq / Bug 3) — CASE WHEN itself now converts fine (jva2 fixed)"
 #     },
 #     "Avg Order Value": {
 #       "sigmaFormula": "Sum([Net Revenue]) / CountDistinct([Order Id])"
@@ -84,6 +96,19 @@ def normalize_bm(sql, klass = nil)
   s = s.gsub(/`([^`]+)`/) { "[#{$1}]" }
 
   # 2. WEEKDAY → DAYOFWEEK (Beast Mode does this itself; replicate for parity).
+  #
+  # ⚠️ MEASURED 2026-07-30 (bead, not fixed here — see progress ledger for
+  # 2026-07-30-track-a-sql-formula-converter, "LIKELY REAL PRODUCTION BUG"):
+  # this rewrite makes the formula WORSE, not better. `WEEKDAY(...)` passed to
+  # the shared converter comes back clean (`Weekday(...)` — Sigma has it), but
+  # this step rewrites it to `DAYOFWEEK(...)` FIRST, and `Dayofweek(...)` is
+  # NOT a real Sigma function — the converter now warns on it
+  # (lookUnknownFunctions) where the untouched WEEKDAY form would not have
+  # warned at all. Do not "fix" this by just deleting the rewrite without
+  # checking Sigma's WEEKDAY offset (1=Sunday) actually matches Beast Mode's —
+  # that offset question is exactly why this was added "for parity" in the
+  # first place, and is unverified either way. Tracked as its own bead; needs
+  # its own investigation, not a silent revert.
   if s =~ /\bWEEKDAY\s*\(/i
     s = s.gsub(/\bWEEKDAY\s*\(/i, 'DAYOFWEEK(')
     warnings << 'WEEKDAY → DAYOFWEEK (1=Sunday base; verify offset).'

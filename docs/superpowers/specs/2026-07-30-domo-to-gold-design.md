@@ -40,10 +40,11 @@ Executed **one at a time**, each as its own spec → plan → subagent-driven
 implementation cycle. This document covers the decomposition; each track gets its own
 plan when it starts.
 
-### Track A — the shared SQL converter (do FIRST)
+### Track A — the shared SQL converter — ✅ DONE (sigma-data-model-mcp PR #115, squashed 2ba3ea8)
 
-`jva2` (P0) and `sqp1`. Both live in the canonical `convertSqlToSigmaFormula`, in
-the **separate `~/sigma-data-model-mcp` repo** (`src/formulas.ts`, `src/tools.ts`).
+`jva2` (P0) and `sqp1`, both closed. Both lived in the canonical
+`convertSqlToSigmaFormula`, in the **separate `~/sigma-data-model-mcp` repo**
+(`src/formulas.ts`, `src/tools.ts`). Merged to `origin/main`.
 
 > **ROOT CAUSE FOUND 2026-07-30 — this is far smaller than first assumed.** `jva2`
 > is NOT "CASE WHEN is unimplemented." `lookConvertCase` ("Convert CASE WHEN … to
@@ -63,24 +64,73 @@ the **separate `~/sigma-data-model-mcp` repo** (`src/formulas.ts`, `src/tools.ts
 > unparenthesized, emitting `Count([Distinct] [X])`; it needs a real
 > `COUNT(DISTINCT x)` → `CountDistinct(x)` mapping.
 >
-> Measured over the 81-formula live corpus: 52/81 (64%) are paren-wrapped; 58 use
-> `CASE WHEN` of which **44 are paren-wrapped** (unblocked by fix 1 alone — the other
-> 14 already convert correctly); **7** use `COUNT(DISTINCT)` (fix 2).
+> **Corrected 2026-07-30 (Task 8).** The 81/52/44 figures directly below were per-card
+> *instances*, not distinct formulas; deduplicated by SQL text the live corpus is
+> **74 distinct** Beast Modes: **47/74 (64%) are paren-wrapped; 37 use `CASE WHEN`, of
+> which ALL 37 (100%) are paren-wrapped** (so the CASE branch was dead code for
+> every real Domo formula, not most of them — stronger than first measured, not
+> weaker); **7** use `COUNT(DISTINCT)` (fix 2).
+>
+> Measured over the 81-formula live corpus (superseded by the 74-distinct recount
+> above; kept for the historical shape of the estimate): 52/81 (64%) are
+> paren-wrapped; 58 use `CASE WHEN` of which **44 are paren-wrapped** (unblocked by
+> fix 1 alone — the other 14 already convert correctly).
 >
 > Both fixes are small and surgical. Neither is a parser rewrite. Guard against
 > over-stripping: only strip when the parens are genuinely balanced and enclose the
 > WHOLE expression — `(a) + (b)` must not become `a) + (b`.
 
-**Why first, despite Track B being the stated goal.** Track B can reach GREEN today
-using the `formula-overrides.json` sidecar — but that GREEN would mean *"this
-dashboard converted"*, not *"the skill converts dashboards"*. A customer running it
-unmodified still hits the 74% wall. Track A is what makes the result general rather
-than bespoke, so doing it first removes a large asterisk from everything after it.
+**Scope grew during implementation: nine defects fixed, not two.** Discovery past
+the two beads in the original spec found seven independently-reviewable defects
+(A1 `jva2` outer-parens anchor; A2 `sqp1` `COUNT(DISTINCT x)`; A3 ALL-CAPS text
+*inside string literals* rewritten as a column ref; A4 SQL keywords before `(`
+treated as functions; A5 zero-arg mapped functions doubling their own parens —
+`Today()()`; A6 single-quoted literals surviving into Sigma output instead of
+Sigma's double-quoted form; A7 unmapped functions silently invented as fake Sigma
+names with no warning), plus two more found mid-implementation: an embedded/nested
+`CASE` inside arithmetic or an aggregate (`100 * (CASE …)`, `SUM((CASE …)) / COUNT(x)`)
+never reaching the CASE branch even after the A1 anchor fix, since the whole
+sub-expression isn't itself `^CASE`-anchored; and a final-whole-branch-review
+Critical finding that the `COUNT(DISTINCT …)` scanner (A2's fix) was not
+bracket-atomic, so an apostrophe inside a bracketed identifier
+(`COUNT(DISTINCT [Manager's Approval])`) could trap it mid-scan. All nine are
+fixed and covered by the shared regression suite.
 
-**Risk:** that repo is dirty on branch `fix/lod-union-first-select`. Needs a clean
-worktree and explicit consent before touching. **If Track A is blocked**, fall
-through to Track B using overrides and label the resulting GREEN precisely — never
-as "the skill translates Beast Modes."
+**The measured result (74-formula live corpus, cross-checked by three independent
+harnesses):**
+
+| metric | before | after |
+|---|---|---|
+| matched a rule | 0 | 37 |
+| leaked `[Distinct]` | 5 | 0 |
+| `And()`/`Or()` call form | 52 | 0 |
+| `Today()()` | 21 | 0 |
+| residual raw `CASE` in output | 16 | 0 |
+| residual untranslated infix | — | 1, honestly reported |
+
+Accurate, not overstated: **37/74 (50%) now match a converter rule exactly**; the
+rest fall through to the generic converter, which no longer *corrupts* them but
+also does not *fully translate* them. Infix `LIKE` still has no Sigma equivalent
+and is correctly reported as unconverted rather than silently shipped.
+
+**Known remaining gap — NOT fixed by this track, tracked separately (bead `qorq`):**
+`convert-beast-modes.rb`'s own backtick→`[Column]` pre-normalizer hands the shared
+converter an already-bracketed, ALL-CAPS identifier; the converter's own
+bracket-wrapping pass re-wraps it, producing `[[Net Revenue]]` instead of
+`[Net Revenue]` — invalid Sigma. This is local to the Domo side, not the shared
+converter, and does not regress anything Track A fixed. See
+`refs/live-validation-2026-07-30.md` "Bug 3" for the measured detail; it is why
+`domo-to-sigma`'s hand-authored `formula-overrides.json` entries built from real
+(ALL-CAPS-column) Domo Beast Modes still needed to stay hand-authored after this
+fix, even though the CASE/COUNT(DISTINCT) shapes they exercise now convert
+correctly in isolation.
+
+**Why this was done first, despite Track B being the stated goal.** Track B could
+reach GREEN using the `formula-overrides.json` sidecar alone — but that GREEN would
+have meant *"this dashboard converted"*, not *"the skill converts dashboards"*. A
+customer running it unmodified still hit the 74% wall. Doing Track A first makes
+the result general rather than bespoke, removing a large asterisk from everything
+after it.
 
 Leverage: also fixes dbt / snowflake / sql / cognos, which share the converter.
 
