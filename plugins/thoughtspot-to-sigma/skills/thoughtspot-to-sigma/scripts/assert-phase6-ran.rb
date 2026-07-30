@@ -1148,14 +1148,36 @@ unless opts[:skip_column]
       warn '       and re-run this gate. A credential-less run is NOT a passing run.'
       exit 5
     else
-      uri = URI("#{base}/v2/workbooks/#{wb_id}/columns")
-      req = Net::HTTP::Get.new(uri)
-      req['Authorization'] = "Bearer #{tok}"
-      req['Accept'] = 'application/json'
-      res = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https', read_timeout: 30) { |h| h.request(req) }
+      # PAGINATED: limit=1000, following nextPage to exhaustion. This is gate 5's
+      # error-column audit. A bare first-page GET truncates at the server default of
+      # 50, which would let THIS GATE pass a wide workbook whose type=="error"
+      # columns sat past column 50 — the exact false GREEN the gate exists to
+      # prevent. Local loop rather than Sigma.list_entries: this gate deliberately
+      # carries no sigma_rest dependency.
+      cols = []
+      res  = nil
+      page = nil
+      seen = {}
+      loop do
+        qs  = 'limit=1000'
+        qs += "&page=#{URI.encode_www_form_component(page)}" if page
+        uri = URI("#{base}/v2/workbooks/#{wb_id}/columns?#{qs}")
+        req = Net::HTTP::Get.new(uri)
+        req['Authorization'] = "Bearer #{tok}"
+        req['Accept'] = 'application/json'
+        res = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https',
+                              read_timeout: 30) { |h| h.request(req) }
+        break unless res.is_a?(Net::HTTPSuccess)
+        doc = (JSON.parse(res.body) rescue nil)
+        break unless doc.is_a?(Hash)
+        cols.concat(doc['entries'] || [])
+        page = doc['nextPage']
+        # A repeated or empty token ends the loop defensively rather than spinning.
+        break if page.nil? || page.to_s.empty? || seen[page]
+        seen[page] = true
+      end
 
       if res.is_a?(Net::HTTPSuccess)
-        cols = (JSON.parse(res.body)['entries'] rescue []) || []
         error_cols = cols.select { |c| c.dig('type', 'type') == 'error' }
         if error_cols.any?
           warn "[FAIL] gate 3/7: live workbook #{wb_id} has #{error_cols.length} column(s) with type=error."
