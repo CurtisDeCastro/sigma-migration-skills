@@ -14,12 +14,19 @@
 #
 # coverage.json schema (written by each converter's build script):
 #   { version, source, summary:{sourceVisuals, builtElements, dropped, degraded,
-#     approximated, recoverable},
+#     approximated, recoverable, sourceBindings, resolvedBindings},
 #     unresolved:[{visual, source_type, sigma_kind, severity, detail,
-#                  recoverable, action}] }
+#                  recoverable, action, role_class,
+#                  field_bindings:[{queryRef, status, role_class}]}] }
 #   (source_type is the per-tool source kind; some converters still emit the
 #    legacy `pbi_type` — both are accepted.)
 #   severity: 'dropped' | 'degraded' | 'approximated'
+#   field_bindings[].status: 'resolved' | 'dropped' | 'degraded'
+#   summary.sourceBindings / resolvedBindings: FIELD-level (binding) totals —
+#   see binding_totals/binding_loss/binding_headline/gate! below. A visual can
+#   be 'degraded' (still counted as carried over by headline/above) while
+#   having lost most of its individual field bindings; that gap is why binding
+#   coverage is tracked and gated separately from visual coverage.
 require 'json'
 
 module CoverageGate
@@ -169,5 +176,61 @@ module CoverageGate
              "#{names.first(6).join(', ')}#{names.size > 6 ? ', …' : ''}\n      ↳ #{action}"
     end
     out
+  end
+
+  # ── Binding-level coverage. The visual-level headline was the reason a
+  # dashboard that lost 51% of its FIELD bindings reported "12/12 source visuals
+  # carried over; 0 dropped": a table shipping 3 of 8 columns is merely
+  # 'degraded', and 'degraded' counts as carried over. Fields are what the
+  # customer actually sees, so they get their own accounting and their own gate.
+  def binding_totals(coverage)
+    s = (coverage && coverage['summary']) || {}
+    total = s['sourceBindings'].to_i
+    if total.zero?   # fall back to summing per-entry field_bindings
+      all = (coverage['unresolved'] || []).flat_map { |u| u['field_bindings'] || [] }
+      total = all.size
+      return [total, all.count { |b| b['status'] == 'resolved' }]
+    end
+    [total, s['resolvedBindings'].to_i]
+  end
+
+  def binding_loss(coverage)
+    total, resolved = binding_totals(coverage)
+    return 0.0 if total.zero?
+    1.0 - (resolved.to_f / total)
+  end
+
+  def binding_headline(coverage)
+    total, resolved = binding_totals(coverage)
+    return 'no field-binding data recorded' if total.zero?
+    pct = (100.0 * resolved / total).round(1)
+    "#{resolved}/#{total} source field binding(s) resolved (#{pct}%); " \
+      "#{total - resolved} dropped or degraded."
+  end
+
+  # Roles whose loss is FUNCTIONAL (see pbi_viz_kind.rb FUNCTIONAL_ROLES).
+  GATE_ROLES = %w[control kpi chart table].freeze
+
+  # [:pass|:fail, reason]. Fails on (a) a dropped functional-role visual, or
+  # (b) binding resolution below min_resolved. `allow_override` is the explicit
+  # escape hatch for genuinely-degraded sources (USERELATIONSHIP, ISINSCOPE).
+  def gate!(coverage, min_resolved: 0.95, allow_override: false)
+    lost = (coverage['unresolved'] || []).select do |u|
+      u['severity'] == 'dropped' && GATE_ROLES.include?(u['role_class'].to_s)
+    end
+    unless lost.empty?
+      names = lost.map { |u| "#{u['visual']} (#{u['role_class']})" }.uniq
+      return [:pass, "overridden: #{names.size} functional component(s) dropped"] if allow_override
+      return [:fail, "#{names.size} functional component(s) DROPPED — " \
+                     "#{names.first(4).join(', ')}. A lost control means the page lost its filter."]
+    end
+    loss = binding_loss(coverage)
+    if loss > (1.0 - min_resolved)
+      msg = format('field-binding resolution %.1f%% is below the %.1f%% floor — %s',
+                   100 * (1 - loss), 100 * min_resolved, binding_headline(coverage))
+      return [:pass, "overridden: #{msg}"] if allow_override
+      return [:fail, msg]
+    end
+    [:pass, binding_headline(coverage)]
   end
 end

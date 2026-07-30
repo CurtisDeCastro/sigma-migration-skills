@@ -113,5 +113,33 @@ ok('grouped: surfaces non-translatable DAX as its own cause',
 ok('grouped: falls back to flat report when unclassified',
    CoverageGate.report_lines_by_cause(COVERAGE).size == 2)
 
+# ── binding-level coverage (the defect this exists to catch): a dashboard
+# where every visual BUILT but half its FIELDS dropped previously reported
+# "12/12 source visuals carried over; 0 dropped" and passed every gate. Fields
+# are what the customer actually sees, so they get their own accounting + gate.
+COV = { 'summary' => { 'sourceVisuals' => 12, 'sourceBindings' => 198,
+                       'resolvedBindings' => 96, 'dropped' => 0 },
+        'unresolved' => [{ 'visual' => 'KPI Card', 'severity' => 'degraded',
+                           'role_class' => 'kpi',
+                           'field_bindings' => [
+                             { 'queryRef' => 'F.Renewals Bound', 'status' => 'dropped' },
+                             { 'queryRef' => 'F.Premium', 'status' => 'resolved' }] }] }.freeze
+ok('binding_loss = 1 - 96/198 = 0.515', (CoverageGate.binding_loss(COV) - 0.5151).abs < 0.001)
+ok('headline reports FIELD bindings, not just visuals',
+   CoverageGate.binding_headline(COV).include?('96/198'))
+st, why = CoverageGate.gate!(COV, min_resolved: 0.95, allow_override: false)
+ok('48% field loss FAILS the gate', st == :fail)
+ok('failure reason names binding loss', why.to_s =~ /binding/i)
+st2, = CoverageGate.gate!(COV, min_resolved: 0.95, allow_override: true)
+ok('explicit override lets a known-degraded migration through', st2 == :pass)
+
+# A functional-role drop fails even when the ratio is fine.
+COV2 = { 'summary' => { 'sourceBindings' => 100, 'resolvedBindings' => 99 },
+         'unresolved' => [{ 'visual' => 'Date', 'severity' => 'dropped',
+                            'role_class' => 'control' }] }.freeze
+st3, why3 = CoverageGate.gate!(COV2, min_resolved: 0.95, allow_override: false)
+ok('a DROPPED control fails the gate regardless of ratio', st3 == :fail)
+ok('reason names the lost control', why3.to_s =~ /control/i)
+
 puts($fail.zero? ? "\nALL PASS" : "\n#{$fail} FAILED")
 exit($fail.zero? ? 0 : 1)
