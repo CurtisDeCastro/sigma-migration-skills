@@ -57,29 +57,21 @@ these three callers.
 
 **Files:**
 - Create: `shared/scripts/test-columns-pagination.rb`
-- Modify: `shared/manifest.json`
 
 **Interfaces:**
 - Consumes: `Sigma.list_entries` from `shared/lib/sigma_rest.rb`.
-- Produces: a test that Task 2 must turn green.
+- Produces: a test that Task 2 must turn green, and that Task 3 registers and fans out.
 
-- [ ] **Step 1: Inspect how manifest.json registers a shared script**
+> **Do NOT touch `shared/manifest.json` in this task.** Registering a new canonical file makes
+> `tools/check-shared.rb` fail instantly — it reports every declared plugin target as MISSING, because
+> those copies do not exist until `tools/sync-shared.rb` runs. The pre-commit governance hook runs
+> `check-shared.rb`, so a commit carrying the registration without the fan-out cannot land, and
+> bypassing the hook with `--no-verify` is not an option. **Registration and fan-out are therefore
+> atomic, and both belong to Task 3.** This task's commit contains exactly one new file.
+>
+> The test runs fine unregistered — invoke it directly at `shared/scripts/test-columns-pagination.rb`.
 
-```bash
-cd /Users/tjwells/sigma-migration-skills
-python3 -c "
-import json
-m = json.load(open('shared/manifest.json'))
-print(json.dumps(m, indent=2)[:1500])
-"
-```
-
-Find the entry for `scripts/probe-controls.rb` and note its exact structure and target list — the new
-test's entry must follow the same shape. Register the new test against **the same plugin list as
-`scripts/probe-controls.rb`**, since that is the narrowest of the three (8 plugins) and every plugin
-in it has all three scripts.
-
-- [ ] **Step 2: Write the shared test**
+- [ ] **Step 1: Write the shared test**
 
 Create `shared/scripts/test-columns-pagination.rb`:
 
@@ -188,25 +180,22 @@ else
 end
 ```
 
-- [ ] **Step 3: Register it in `shared/manifest.json`**
-
-Add `scripts/test-columns-pagination.rb` with the same target-list shape you observed in Step 1 for
-`scripts/probe-controls.rb`. Keep the file's JSON formatting and key ordering consistent with its
-neighbors.
-
-- [ ] **Step 4: Run the test to verify it fails**
+- [ ] **Step 2: Run the test to verify it fails**
 
 ```bash
 ruby shared/scripts/test-columns-pagination.rb
 ```
 
-Expected: case 1 (three behavioral checks) PASSes — it exercises the already-correct library. All
-five wiring pins FAIL. Exit 1. Record the exact output in your report.
+Expected: case 1's three behavioral checks PASS — they exercise the already-correct library. Of the
+**seven** wiring checks, **six FAIL** and one already passes: `assert-phase6-ran.rb stays free of a
+sigma_rest dependency` is true before and after, because that script's fix is a local loop rather than
+a switch to the library. It is a forward-looking regression guard, not a bug detector. Exit 1. Record
+the exact output in your report.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 3: Commit**
 
 ```bash
-git add shared/scripts/test-columns-pagination.rb shared/manifest.json
+git add shared/scripts/test-columns-pagination.rb
 git commit -m "test(shared): failing contract test for columns-read pagination (bf1f)
 
 Proves the gate-5 false-GREEN case behaviorally: an error column at ordinal 101
@@ -368,7 +357,27 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 - Modify (generated): `plugins/*/skills/*/scripts/{verify-warehouse,probe-controls,assert-phase6-ran,test-columns-pagination}.rb`
 - Modify: every affected `plugins/*/.claude-plugin/plugin.json`
 
-- [ ] **Step 1: Dry-run the sync**
+- [ ] **Step 1: Register the new shared test in `shared/manifest.json`**
+
+Inspect the existing shape:
+
+```bash
+python3 -c "
+import json
+m = json.load(open('shared/manifest.json'))
+print(json.dumps(m, indent=2)[:1500])
+"
+```
+
+Add `scripts/test-columns-pagination.rb` with the **same 8-plugin target list as
+`scripts/probe-controls.rb`** — looker, microstrategy, powerbi, qlik, quicksight, tableau,
+thoughtspot, domo. That is the narrowest of the three affected scripts, and every plugin in it has all
+three. Match the file's existing JSON formatting and key ordering.
+
+This step and the sync below MUST land in the same commit: `check-shared.rb` reports a registered
+file's targets as MISSING until the fan-out creates them, and the pre-commit hook runs it.
+
+- [ ] **Step 2: Dry-run the sync**
 
 ```bash
 ruby tools/sync-shared.rb --dry-run
@@ -378,7 +387,7 @@ Expected: lists exactly the four files fanning out to their declared targets, an
 it proposes changing an unrelated file, STOP and report — that means canonical drift predating this
 work.
 
-- [ ] **Step 2: Sync**
+- [ ] **Step 3: Sync**
 
 ```bash
 ruby tools/sync-shared.rb
@@ -387,7 +396,7 @@ ruby tools/check-shared.rb
 
 Expected: `check-shared.rb` reports all shared-file copies matching canonical.
 
-- [ ] **Step 3: Bump every affected plugin**
+- [ ] **Step 4: Bump every affected plugin**
 
 List the plugins whose directories changed:
 
@@ -405,7 +414,7 @@ tools/check-plugin-version-bump.sh
 
 Expected: passes with no plugin reported as changed-without-bump.
 
-- [ ] **Step 4: Run the synced test in one plugin and the repo gates**
+- [ ] **Step 5: Run the synced test in one plugin and the repo gates**
 
 ```bash
 ruby plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-columns-pagination.rb
@@ -417,18 +426,20 @@ tools/check-plugin-version-bump.sh
 Expected: the synced test passes (proving the fan-out carried working code), and all three gates are
 clean.
 
-- [ ] **Step 5: Commit the fan-out and bumps**
+- [ ] **Step 6: Commit the fan-out, registration, and bumps**
 
 ```bash
-git add plugins/
-git commit -m "chore(shared): fan out columns pagination + bump affected plugins (bf1f)
+git add shared/manifest.json plugins/
+git commit -m "chore(shared): register + fan out columns pagination, bump affected plugins (bf1f)
 
-Generated by tools/sync-shared.rb — no hand edits to plugin copies.
+Plugin copies generated by tools/sync-shared.rb — no hand edits. The manifest
+registration rides in THIS commit because check-shared.rb reports a registered
+file's targets as MISSING until the fan-out creates them.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
 
-- [ ] **Step 6: Push and open the PR**
+- [ ] **Step 7: Push and open the PR**
 
 ```bash
 git push -u origin fix/shared-columns-pagination
@@ -490,7 +501,7 @@ BODY
 )"
 ```
 
-- [ ] **Step 7: Update the bead**
+- [ ] **Step 8: Update the bead**
 
 ```bash
 cd ~/.beads-sigma && bd update beads-sigma-bf1f --status in_review
