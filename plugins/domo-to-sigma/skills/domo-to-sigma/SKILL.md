@@ -49,11 +49,24 @@ card→element map.
 
 ## The one big idea
 
-**Beast Mode is MySQL-dialect SQL.** Domo's calc-field language routes straight
-through the existing `mcp__sigma-data-model__convert_sql_to_sigma_formula` tool —
-no bespoke parser like Power BI's DAX. The formula layer is nearly free. The work
-that remains is *extraction* (getting card defs + Beast Mode text + layout out of
-Domo) and *layout/binding* (cards → Sigma elements on a 24-col grid).
+**Beast Mode is MySQL-dialect SQL.** Domo's calc-field language routes through the
+existing `mcp__sigma-data-model__convert_sql_to_sigma_formula` tool — no bespoke
+parser like Power BI's DAX.
+
+> ⛔ **CORRECTED 2026-07-30 — the formula layer is NOT "nearly free."** This
+> section used to claim it was. Measured over 81 real Beast Modes on a live
+> instance, **74% translate to invalid Sigma**: `CASE WHEN` (used by **71%**) is
+> not converted to Sigma's `If()` at all, and `COUNT(DISTINCT x)` renders
+> `DISTINCT` as a column reference. Because `convert-beast-modes.rb` correctly
+> DROPS entries without a `sigmaFormula` rather than shipping bad output, the
+> practical result is that Beast Modes **vanish** from the migration and the DM
+> ships with no calc columns. Budget real time for hand-authoring conditional
+> Beast Modes until the shared converter is fixed. Full evidence and the exact
+> broken outputs: `refs/live-validation-2026-07-30.md`.
+
+The other work is *extraction* (card defs + Beast Mode text + layout out of Domo)
+and *layout/binding* (cards → Sigma elements on a 24-col grid; note Domo's own card
+grid is only 6 wide, so widths scale ×4).
 
 ---
 

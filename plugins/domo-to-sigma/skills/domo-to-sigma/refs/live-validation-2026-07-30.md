@@ -349,6 +349,85 @@ Notes for a real engagement:
 
 ---
 
+## ⛔ The formula layer is NOT "nearly free" — 74% of real Beast Modes fail
+
+`SKILL.md`'s "one big idea" says Beast Mode is MySQL-dialect SQL and therefore
+routes straight through `convert_sql_to_sigma_formula`, so "the formula layer is
+nearly free." **Live testing disproves this.** Measured over the **81 unique Beast
+Modes** on the validation instance:
+
+| Construct | Beast Modes using it | Converter handles it? |
+|---|---|---|
+| `CASE WHEN … THEN … ELSE … END` | **58 / 81 (71%)** | ❌ **no** |
+| `COUNT(DISTINCT …)` | 7 / 81 (8%) | ❌ **no** |
+| Date fns (`DATEDIFF`/`DATE_ADD`/…) | 23 / 81 (28%) | partly |
+| `IFNULL`/`COALESCE` | 1 / 81 | yes |
+| `CONCAT` | 2 / 81 | yes |
+| window (`OVER`/`RANK`/…) | 0 / 81 | n/a |
+
+**60 of 81 (74%) hit at least one of the two confirmed breakages.**
+
+### Bug 1 — `CASE WHEN` is not translated (invalid Sigma emitted)
+Sigma has **no `CASE` syntax**; conditionals are `If(cond, then, else)` (or
+`Switch`). The converter emits a mangled hybrid that is not valid Sigma:
+
+```
+in : (CASE WHEN (SUM(NET_REVENUE) = 0) THEN 0 ELSE (SUM(GROSS_PROFIT) / SUM(NET_REVENUE)) END )
+out: (CASE When(Sum([Net Revenue]) = 0) THEN 0 Else(Sum([Gross Profit]) / Sum([Net Revenue])) END )
+```
+`When(` and `Else(` are rendered as if they were function calls, and `CASE` / `THEN`
+/ `END` are passed through verbatim. Expected shape:
+`If(Sum([Net Revenue]) = 0, 0, Sum([Gross Profit]) / Sum([Net Revenue]))`.
+
+Real Beast Modes nest this heavily — e.g. a `COUNT(CASE WHEN … THEN … END)` inside
+an outer `CASE WHEN … = 0 THEN … ELSE … END` guard — so a naive regex fix is not
+enough; this needs real conditional-expression handling.
+
+### Bug 2 — `COUNT(DISTINCT x)` treats `DISTINCT` as a column
+```
+in : (SUM(NET_REVENUE) / COUNT(DISTINCT ORDER_ID))
+out: (Sum([Net Revenue]) / Count([Distinct] [Order Id]))
+```
+`DISTINCT` becomes a bracketed **column reference**. Sigma's form is
+`CountDistinct([Order Id])`.
+
+### Bug 3 — double-bracketing at OUR interface (this repo's fault, not the converter's)
+`convert-beast-modes.rb`'s pre-normalize step rewrites Domo's backtick-quoted
+columns to Sigma bracket refs *before* calling the converter, but the converter
+expects **bare SNAKE_CASE** identifiers and adds the brackets itself:
+
+```
+bare  NET_REVENUE    -> [Net Revenue]     ✅
+ours  [NET_REVENUE]  -> [[Net Revenue]]   ❌ double-bracketed
+```
+So the normalizer must **stop** converting backticks to brackets (just strip the
+backticks and leave the identifier bare), or the converter must be made
+idempotent for already-bracketed refs.
+
+### Consequence — Beast Modes silently disappear from the migration
+`convert-beast-modes.rb --lint` **drops** entries lacking a `sigmaFormula` rather
+than shipping bad output (good, honest behaviour). But combined with the above,
+the live run produced:
+
+```
+wrote discovery/formulas.json (0 formulas)
+⚠ 4 Beast Mode(s) still lack a sigmaFormula: …
+```
+
+i.e. **every** Beast Mode was dropped, so the data model and workbook carry **no
+calc columns at all**. The warning is loud, but the fidelity loss is total. On a
+real customer dashboard where 71% of Beast Modes are conditional, this is the
+single largest fidelity gap in the skill — larger than the chart-type gap below.
+
+### Where the fix belongs
+Bugs 1 and 2 are in the **canonical shared converter**
+(`convertSqlToSigmaFormula` in the `sigma-data-model` MCP source), which every
+SQL-ish converter in this repo depends on — so fixing it there is high leverage and
+benefits dbt / snowflake / sql / cognos alike. Bug 3 is local to
+`convert-beast-modes.rb`. Until Bugs 1–2 are fixed upstream, **do not describe the
+Domo formula layer as low-risk**, and expect to hand-author Sigma formulas for any
+conditional Beast Mode.
+
 ## Chart-type coverage gap
 
 `refs/card-to-element.md` documents **9** `badge_*` tokens. This instance uses
