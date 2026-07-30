@@ -4,6 +4,22 @@ description: Convert a Power BI report + semantic model into a Sigma data model 
 user-invocable: true
 ---
 
+## Verifying a change locally
+
+Run **both** test directories — this plugin keeps suites in `scripts/` AND `tests/`:
+
+```bash
+cd plugins/powerbi-to-sigma/skills/powerbi-to-sigma
+for t in scripts/test-*.rb tests/*.rb; do ruby "$t" >/dev/null 2>&1 || echo "FAIL $t"; done
+for t in scripts/test-*.py tests/test-*.py; do python3 "$t" >/dev/null 2>&1 || echo "FAIL $t"; done
+```
+
+Globbing only `scripts/test-*.rb` reports an accurate-looking count while skipping
+`tests/test-grounding.rb` — that omission once merged a change that left `main` red on 7
+assertions. `scripts/test-suite-registration.rb` enforces that every suite in both
+directories is also registered in CI, so a new suite cannot be added and silently never run.
+
+
 # Power BI → Sigma
 
 > **Windows / first run — run the environment doctor before anything else:**
