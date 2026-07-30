@@ -1,4 +1,4 @@
-// ../wt-pbi-dax-fidelity/build/sigma-ids.js
+// ../mcp-fresh/build/sigma-ids.js
 var SIGMA_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 var _usedIds = /* @__PURE__ */ new Set();
 var _idCounter = 0;
@@ -280,7 +280,7 @@ function buildDerivedElements(elements) {
   return derived;
 }
 
-// ../wt-pbi-dax-fidelity/build/powerbi.js
+// ../mcp-fresh/build/powerbi.js
 var PBI_COMMUNITY_LINKS = {
   lod: "community.sigmacomputing.com/t/tableau-level-of-detail-or-lod-calculations-in-sigma/6427",
   groupings: "community.sigmacomputing.com/t/how-to-use-groupings-aggregate-calculations/2003",
@@ -1827,6 +1827,81 @@ function extractUseRelationships(dax) {
   }
   return { dax: f, pairs };
 }
+function stripDaxComments(dax) {
+  const src = String(dax ?? "");
+  let out = "";
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    if (c === '"') {
+      out += c;
+      i++;
+      while (i < src.length) {
+        if (src[i] === '"') {
+          if (src[i + 1] === '"') {
+            out += '""';
+            i += 2;
+            continue;
+          }
+          out += '"';
+          i++;
+          break;
+        }
+        out += src[i];
+        i++;
+      }
+      continue;
+    }
+    if (c === "/" && src[i + 1] === "*") {
+      const end = src.indexOf("*/", i + 2);
+      i = end === -1 ? src.length : end + 2;
+      out += " ";
+      continue;
+    }
+    if (c === "/" && src[i + 1] === "/") {
+      while (i < src.length && src[i] !== "\n")
+        i++;
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+function extractCrossFilters(dax) {
+  let f = dax;
+  const pairs = [];
+  const re = /\bCROSSFILTER\s*\(/gi;
+  for (let guard = 0; guard < 20; guard++) {
+    re.lastIndex = 0;
+    const m = re.exec(f);
+    if (!m)
+      break;
+    const { args, endPos } = splitCallArgs(f, m.index + m[0].length);
+    if (args.length >= 2) {
+      const a = _pbiParseQualifiedRef(args[0]);
+      const b = _pbiParseQualifiedRef(args[1]);
+      const dir = (args[2] || "").trim().replace(/^["']|["']$/g, "") || "Both";
+      if (a && b)
+        pairs.push({ a, b, direction: dir });
+    }
+    let start = m.index, end = endPos;
+    let i = start - 1;
+    while (i >= 0 && /\s/.test(f[i]))
+      i--;
+    if (f[i] === ",")
+      start = i;
+    else {
+      let j = end;
+      while (j < f.length && /\s/.test(f[j]))
+        j++;
+      if (f[j] === ",")
+        end = j + 1;
+    }
+    f = f.slice(0, start) + f.slice(end);
+  }
+  return { dax: f, pairs };
+}
 function findModelRelationship(model, p) {
   for (const r of model.relationships || []) {
     const fwd = r.fromTable === p.a.table && r.fromColumn === p.a.column && r.toTable === p.b.table && r.toColumn === p.b.column;
@@ -1983,6 +2058,15 @@ function convertPowerBIToSigma(modelJson, options = {}) {
   };
   const relActivationNames = /* @__PURE__ */ new Map();
   const measureAltPath = {};
+  const processCrossFilters = (measureName, expr) => {
+    if (!/\bCROSSFILTER\s*\(/i.test(expr))
+      return expr;
+    const cf = extractCrossFilters(expr);
+    for (const pair of cf.pairs) {
+      warnings.push(`\u26A0 "${measureName}": CROSSFILTER(${pair.a.table}[${pair.a.column}], ${pair.b.table}[${pair.b.column}], ${pair.direction}) \u2014 Sigma has no cross-filter-direction control, so the modifier is dropped and the relationship keeps its model direction. The aggregate itself is unchanged; if the source measure relied on that direction change to widen or narrow its filter context, verify the number.`);
+    }
+    return cf.dax;
+  };
   const processUseRelationships = (measureName, expr) => {
     if (!/\bUSERELATIONSHIP\s*\(/i.test(expr))
       return expr;
@@ -2228,8 +2312,8 @@ SELECT 1 AS _placeholder`;
     for (const m of t.measures || []) {
       if (m.name)
         measureToElementId[m.name] = elementId;
-      const mExprRaw = Array.isArray(m.expression) ? m.expression.join("\n") : String(m.expression || "");
-      const mExpr = processUseRelationships(m.name, mExprRaw);
+      const mExprRaw = stripDaxComments(Array.isArray(m.expression) ? m.expression.join("\n") : String(m.expression || ""));
+      const mExpr = processUseRelationships(m.name, processCrossFilters(m.name, mExprRaw));
       const mWin = pbiParseRankx(mExpr, measureAggMap);
       if (mWin && lowerPBIWindowCalc(mWin, m.name, srcElProxy, winCtx, warnings)) {
         continue;
@@ -2264,10 +2348,28 @@ SELECT 1 AS _placeholder`;
         ...Object.values(pbiToSigmaName),
         ...Object.keys(pbiToSigmaName)
       ]);
+      const canonicalCol = /* @__PURE__ */ new Map();
+      for (const d of colDisplays) {
+        const k = d.toLowerCase();
+        if (!canonicalCol.has(k))
+          canonicalCol.set(k, d);
+      }
       for (let pass = 0; pass < 5; pass++) {
         const metricNames = new Set(metrics.map((mm) => mm.name));
+        const canonicalMetric = /* @__PURE__ */ new Map();
+        for (const n of metricNames) {
+          const k = String(n).toLowerCase();
+          if (!canonicalMetric.has(k))
+            canonicalMetric.set(k, String(n));
+        }
         const before = metrics.length;
         for (let i = metrics.length - 1; i >= 0; i--) {
+          metrics[i].formula = String(metrics[i].formula).replace(/\[([^\]\/]+)\]/g, (whole, ref) => {
+            if (colDisplays.has(ref) || metricNames.has(ref))
+              return whole;
+            const c = canonicalCol.get(ref.toLowerCase()) || canonicalMetric.get(ref.toLowerCase());
+            return c ? `[${c}]` : whole;
+          });
           const refs = (String(metrics[i].formula).match(/\[([^\]\/]+)\]/g) || []).map((r) => r.slice(1, -1));
           const bad = refs.find((r) => !colDisplays.has(r) && !metricNames.has(r));
           if (bad) {
@@ -2334,7 +2436,7 @@ SELECT 1 AS _placeholder`;
         if (!t)
           continue;
         for (const m of t.measures || []) {
-          const moExpr = processUseRelationships(m.name, Array.isArray(m.expression) ? m.expression.join("\n") : String(m.expression || ""));
+          const moExpr = processUseRelationships(m.name, processCrossFilters(m.name, stripDaxComments(Array.isArray(m.expression) ? m.expression.join("\n") : String(m.expression || ""))));
           const homeEl = homeElFor(moExpr);
           if (m.name)
             measureToElementId[m.name] = homeEl.id;
@@ -2731,9 +2833,11 @@ SELECT 1 AS _placeholder`;
 export {
   convertPowerBIToSigma,
   expandMeasureRefs,
+  extractCrossFilters,
   extractUseRelationships,
   hasBareWindowFn,
   isAggCombination,
   pbiDaxToSigma,
-  pbiParseEarlierWindow
+  pbiParseEarlierWindow,
+  stripDaxComments
 };
