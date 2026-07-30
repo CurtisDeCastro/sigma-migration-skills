@@ -149,18 +149,19 @@ end
 puts 'test-relationship-derivation.rb — object-graph key derivation'
 
 cov = doc['relationshipCoverage'] || {}
-check(cov['serialized'].to_i == 3,
-      "coverage reports all 3 serialized relationships (got #{cov['serialized'].inspect})", fails)
+check(cov['serialized'].to_i == 4,
+      "coverage reports all 4 serialized relationships (got #{cov['serialized'].inspect})", fails)
 entries = cov['entries'] || []
 by_target = entries.each_with_object({}) { |e, h| h[e['right']] = e }
-# The auto-matched and mixed-key relationships MUST wire. The computed-only one may
-# legitimately stay unwired under the conservative rule (no key-shaped name match) —
-# what matters is that it is RECORDED, never silently absent.
-check(cov['wired'].to_i >= 2,
-      "at least the auto-matched and mixed-key relationships are WIRED (got #{cov['wired'].inspect}) " \
-      '— 0 or 1 means the star still becomes disconnected tables', fails)
-check(entries.length == 3,
-      "all 3 relationships appear in the ledger, wired or not (got #{entries.length})", fails)
+# The auto-matched, mixed-key, and computed-only-but-name-inferred relationships
+# MUST wire. The computed-only/no-shared-name one may legitimately stay unwired
+# under the conservative rule (no key-shaped name match) — what matters is that
+# it is RECORDED, never silently absent.
+check(cov['wired'].to_i >= 3,
+      "at least the auto-matched, mixed-key, and computed-only-but-name-inferred relationships are WIRED " \
+      "(got #{cov['wired'].inspect}) — fewer means the star still becomes disconnected tables", fails)
+check(entries.length == 4,
+      "all 4 relationships appear in the ledger, wired or not (got #{entries.length})", fails)
 
 entries = cov['entries'] || []
 by_target = entries.each_with_object({}) { |e, h| h[e['right']] = e }
@@ -180,14 +181,31 @@ check(prod['derivedVia'] == 'serialized',
 check(prod['partial'] == true && prod['droppedConditions'].to_i >= 1,
       'mixed-key relationship is marked partial with a dropped-condition count', fails)
 
-# 3. COMPUTED-ONLY key: no physical column to join on, so inference by name is the
-#    only route. Whatever the outcome, it must be RECORDED, never silently absent.
+# 3. COMPUTED-ONLY key, inference fails (no shared key-shaped name): no physical
+#    column to join on, so inference by name is the only route. Whatever the
+#    outcome, it must be RECORDED, never silently absent.
 date = by_target['DIM_DATE'] || {}
 check(!date.empty?, 'computed-key FACT_WIDE->DIM_DATE appears in the coverage ledger', fails)
 check(%w[serialized name-inference unwired].include?(date['derivedVia']),
       "computed-key relationship records a known derivedVia (got #{date['derivedVia'].inspect})", fails)
 
-# 4. Every wired relationship's keys must trace back to a column NAME the
+# 4. COMPUTED-ONLY key, inference SUCCEEDS (review fix-wave, 2026-07-30,
+#    Important finding 2): FACT_WIDE/DIM_STORE's sole condition
+#    (IFNULL([STORE_KEY],-1) = [STORE_KEY]) is computed on its left operand, so
+#    no physical pair survives — but STORE_KEY is a shared key-shaped column
+#    name on both sides, so name-inference wires it. Before the fix this wired
+#    cleanly with no partial/droppedConditions, hiding that the IFNULL
+#    condition Tableau required was dropped (a WIDER-than-Tableau join). The
+#    ledger entry must now say so explicitly, exactly like the mixed-key case.
+store = by_target['DIM_STORE'] || {}
+check(store['derivedVia'] == 'name-inference',
+      "computed-only-but-name-matched FACT_WIDE->DIM_STORE is derived by name-inference " \
+      "(got #{store['derivedVia'].inspect})", fails)
+check(store['partial'] == true && store['droppedConditions'].to_i >= 1,
+      'computed-only-but-name-inferred relationship is marked partial with a dropped-condition count ' \
+      '(a wider-than-Tableau join must never look clean)', fails)
+
+# 5. Every wired relationship's keys must trace back to a column NAME the
 #    .twb itself declared — not merely one present in element.columns, which
 #    ensureCol will happily contain a fabricated name in (see
 #    declared_twb_column_names above). This is the actual anti-fabrication
@@ -214,7 +232,7 @@ check(bad.empty?,
       "element.columns post-ensureCol (offenders: #{bad.uniq.join(', ')})",
       fails)
 
-# 5. The ledger gate 16 probes must carry the derivation, so an INFERRED key is
+# 6. The ledger gate 16 probes must carry the derivation, so an INFERRED key is
 #    proven against the warehouse rather than trusted. This is the entire safety
 #    argument for inference.
 src = File.read(File.join(HERE, 'lib', 'join_plan.rb'))
@@ -224,7 +242,7 @@ check(src.include?('partial'),
       'join_plan.rb records partial for a mixed-key relationship (a wider join than Tableau\'s)',
       fails)
 
-# 6. BEHAVIORAL pin (not a source grep): JoinPlan.derive must actually RECOVER
+# 7. BEHAVIORAL pin (not a source grep): JoinPlan.derive must actually RECOVER
 #    the name-inferred FACT_WIDE->DIM_CUSTOMER relationship — the .twb alone
 #    carries no <expression> for it, so this only passes if join_plan.rb reads
 #    the converter's dm-spec relationships (dm_object_graph_index), not merely

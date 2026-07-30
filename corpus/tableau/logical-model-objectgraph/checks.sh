@@ -4,10 +4,11 @@
 #
 #   1. converter/tableau.mjs's object-graph relationship-derivation ladder
 #      (PR2a) on this HAND-AUTHORED/DERIVED .twb (see MANIFEST.md) produces
-#      EXACTLY the pinned relationshipCoverage ledger: 3 serialized
-#      relationships, 2 wired (auto-match name-inference + mixed
-#      serialized/partial), 1 recorded-but-unwired (computed-only, no shared
-#      key-shaped name) — never silently dropped from the report.
+#      EXACTLY the pinned relationshipCoverage ledger: 4 serialized
+#      relationships, 3 wired (auto-match name-inference + mixed
+#      serialized/partial + computed-only-but-name-inferred/partial), 1
+#      recorded-but-unwired (computed-only, no shared key-shaped name) —
+#      never silently dropped from the report.
 #   2. The two WIRED join-key columns (CUSTOMER_KEY, PRODUCT_KEY) on
 #      FACT_WIDE sit past metadata-record ordinal 50 (54 and 57 of 62) — see
 #      MANIFEST.md's "Ordinal placement" note for what this does and does not
@@ -42,7 +43,7 @@ JS
 node "$TMP/_convert.mjs" 2>"$TMP/convert.err" || { note "FAIL: converter invocation failed"; sed -n '1,20p' "$TMP/convert.err"; fail=1; }
 
 if [ -f "$TMP/coverage.json" ] && cmp -s <(tr -d "\r" < "$TMP/coverage.json") <(tr -d "\r" < "$CASE_DIR/relationship-coverage.expected.json"); then
-  note "ok: relationshipCoverage matches relationship-coverage.expected.json (3 serialized, 2 wired, DIM_DATE recorded unwired)"
+  note "ok: relationshipCoverage matches relationship-coverage.expected.json (4 serialized, 3 wired, DIM_DATE recorded unwired)"
 else
   note "FAIL: relationshipCoverage drifted from relationship-coverage.expected.json:"
   diff <(tr -d "\r" < "$CASE_DIR/relationship-coverage.expected.json") <(tr -d "\r" < "$TMP/coverage.json") 2>/dev/null | head -40

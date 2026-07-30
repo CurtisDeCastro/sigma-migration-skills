@@ -16,10 +16,11 @@ sibling `<object-graph><objects>/<relationships>` shape, with
 authoring against the XSD from scratch, and not invented. The differences
 from a literal copy are deliberate: this fixture trims the table set to one
 fact and three dimensions, renames everything to plain, obviously-synthetic
-identifiers (`FACT_WIDE`, `DIM_CUSTOMER`, `DIM_PRODUCT`, `DIM_DATE`), and
-widens the fact table to 62 columns so the two wired join keys land past
-metadata-record ordinal 50 (see below). No customer or prospect data,
-identifiers, or names appear anywhere in it.
+identifiers (`FACT_WIDE`, `DIM_CUSTOMER`, `DIM_PRODUCT`, `DIM_DATE`,
+`DIM_STORE`), and widens the fact table to 63 columns so the two
+serialized-physical-key wired join keys land past metadata-record ordinal 50
+(see below). No customer or prospect data, identifiers, or names appear
+anywhere in it.
 
 **A follow-up replaces this fixture with genuine published Tableau output**
 (publish a real logical-model workbook from Tableau Server/Cloud and pull its
@@ -30,7 +31,7 @@ relationship-derivation ladder in `converter/tableau.mjs` (PR2a) and prove
 
 ## The shape (what this fixture exercises)
 
-One fact (`FACT_WIDE`, 62 columns) related to three dimensions, each forcing
+One fact (`FACT_WIDE`, 63 columns) related to four dimensions, each forcing
 a different rung of the derivation ladder:
 
 1. **`FACT_WIDE` → `DIM_CUSTOMER` (auto-matched).** The `<relationship>` has
@@ -47,16 +48,31 @@ a different rung of the derivation ladder:
    (`DATETRUNC('month',[ORDER_TS]) = [EFFECTIVE_MONTH]`). The physical half
    wires; the computed half is dropped. Expected: `derivedVia: "serialized"`,
    `partial: true`, `droppedConditions: 1`.
-3. **`FACT_WIDE` → `DIM_DATE` (computed-only).** The sole condition is
-   `DATETRUNC('day',[ORDER_TS]) = [CALENDAR_KEY]` — no physical column on
-   either side. `FACT_WIDE` and `DIM_DATE` deliberately share **no** column
-   name (the dimension's own key, `CALENDAR_KEY`, is never duplicated on the
-   fact), so the name-inference fallback also fails. Expected: recorded in
-   the ledger, `derivedVia: "unwired"`, never silently dropped from the
-   report.
+3. **`FACT_WIDE` → `DIM_DATE` (computed-only, inference fails).** The sole
+   condition is `DATETRUNC('day',[ORDER_TS]) = [CALENDAR_KEY]` — no physical
+   column on either side. `FACT_WIDE` and `DIM_DATE` deliberately share **no**
+   column name (the dimension's own key, `CALENDAR_KEY`, is never duplicated
+   on the fact), so the name-inference fallback also fails. Expected:
+   recorded in the ledger, `derivedVia: "unwired"`, never silently dropped
+   from the report.
+4. **`FACT_WIDE` → `DIM_STORE` (computed-only, inference SUCCEEDS —
+   regression fixture for the 2026-07-30 fix-wave, Important finding 2).**
+   The sole condition is `IFNULL([STORE_KEY],-1) = [STORE_KEY]` — computed on
+   its left operand, so (like case 3) no physical pair survives. Unlike case
+   3, `FACT_WIDE` and `DIM_STORE` DO share a key-shaped column name
+   (`STORE_KEY`, metadata-record ordinal **62** on `FACT_WIDE`), so
+   name-inference fires and wires it — but a computed condition Tableau
+   required (the `IFNULL` null-coalescing) was dropped, making the wired join
+   WIDER than Tableau's. Before this fix, a successful inference here
+   recorded `derivedVia: "name-inference"` with no `partial` /
+   `droppedConditions` and no dropped-condition warning, so a wider-than-
+   Tableau join looked clean everywhere. Expected now: `derivedVia:
+   "name-inference"`, `partial: true`, `droppedConditions: 1`, plus a
+   dropped-condition warning identical in spirit to the one the
+   fully-serialized/mixed-key case (2, `DIM_PRODUCT`) already got.
 
-**Ordinal placement / pagination coverage.** `FACT_WIDE` carries 62
-metadata-record columns (ordinals 0–61); `CUSTOMER_KEY` sits at ordinal 54
+**Ordinal placement / pagination coverage.** `FACT_WIDE` carries 63
+metadata-record columns (ordinals 0–62); `CUSTOMER_KEY` sits at ordinal 54
 and `PRODUCT_KEY` at ordinal 57 — both past the 50-column boundary that the
 columns-endpoint pagination fix (#565, `fix(tableau): paginate every
 columns-endpoint read`) addressed. `test-relationship-derivation.rb` and
@@ -74,7 +90,7 @@ this offline test exercises the paginated reader today.
 | File | What it is |
 |---|---|
 | `workbook-content.twb` | The hand-authored/derived workbook XML (see Provenance above) |
-| `relationship-coverage.expected.json` | PINNED `relationshipCoverage` object emitted by `converter/tableau.mjs` for this fixture (3 serialized, 2 wired, 1 recorded-unwired). This is the converter's RAW, camelCase JS output (`derivedVia`, `keyCount`, `droppedConditions`), checked by `checks.sh` below — it is a different artifact from, and predates, `scripts/emit-relationship-coverage.rb`'s snake_case `relationship-coverage.json` (`derived_via`, `key_count`, `dropped_conditions`), which that script writes to a run's `<workdir>` for PR2b's gate 22 to consume. Same values, same entries, deliberately different key casing for two different consumers — do not assume this file pins the emitter's output. |
+| `relationship-coverage.expected.json` | PINNED `relationshipCoverage` object emitted by `converter/tableau.mjs` for this fixture (4 serialized, 3 wired, 1 recorded-unwired). This is the converter's RAW, camelCase JS output (`derivedVia`, `keyCount`, `droppedConditions`), checked by `checks.sh` below — it is a different artifact from, and predates, `scripts/emit-relationship-coverage.rb`'s snake_case `relationship-coverage.json` (`derived_via`, `key_count`, `dropped_conditions`), which that script writes to a run's `<workdir>` for PR2b's gate 22 to consume. Same values, same entries, deliberately different key casing for two different consumers — do not assume this file pins the emitter's output. |
 | `checks.sh` | Executable expectations, run by `run-corpus.sh --check` |
 
 ## Expected behaviors (encoded in checks.sh)
@@ -82,9 +98,9 @@ this offline test exercises the paginated reader today.
 1. Running `convertTableauToSigma` over `workbook-content.twb` (connectionId
    `test-conn`, database `TESTDB`, schema `TESTSCHEMA`) produces a
    `relationshipCoverage` object that matches
-   `relationship-coverage.expected.json` byte-for-byte: `serialized: 3`,
-   `wired: 2`, and the three per-relationship entries described above keyed
-   by target (`DIM_CUSTOMER`, `DIM_PRODUCT`, `DIM_DATE`).
+   `relationship-coverage.expected.json` byte-for-byte: `serialized: 4`,
+   `wired: 3`, and the four per-relationship entries described above keyed
+   by target (`DIM_CUSTOMER`, `DIM_PRODUCT`, `DIM_DATE`, `DIM_STORE`).
 2. `CUSTOMER_KEY` and `PRODUCT_KEY` — the two columns actually wired as join
    keys — have metadata-record `<ordinal>` values past 50 on `FACT_WIDE`.
 3. `plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-relationship-derivation.rb`

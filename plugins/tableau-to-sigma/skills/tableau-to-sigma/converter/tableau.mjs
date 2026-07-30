@@ -4922,7 +4922,7 @@ function convertTableauToSigma(xmlContent, options = {}) {
             }
             return id;
           };
-          const wireInferred = (name) => {
+          const wireInferred = (name, { droppedConditions = 0 } = {}) => {
             const inferredKeys = [{
               sourceColumnId: ensureCol(firstEntry, name),
               targetColumnId: ensureCol(secondEntry, name)
@@ -4934,14 +4934,16 @@ function convertTableauToSigma(xmlContent, options = {}) {
               targetElementId: secondEntry.element.id,
               keys: inferredKeys,
               name: secondEntry.cleanName,
-              derivedVia: "name-inference"
+              derivedVia: "name-inference",
+              ...droppedConditions > 0 ? { partial: true, droppedConditions } : {}
             });
             relCoverage.wired += 1;
             relCoverage.entries.push({
               left: firstEntry.cleanName,
               right: secondEntry.cleanName,
               derivedVia: "name-inference",
-              keyCount: inferredKeys.length
+              keyCount: inferredKeys.length,
+              ...droppedConditions > 0 ? { partial: true, droppedConditions } : {}
             });
           };
           const recordUnwired = (inferred) => {
@@ -5001,8 +5003,11 @@ function convertTableauToSigma(xmlContent, options = {}) {
           if (keys.length === 0) {
             const inferred = inferRelationshipKeyByName(firstEntry, secondEntry);
             if (inferred.ok) {
-              wireInferred(inferred.name);
+              wireInferred(inferred.name, { droppedConditions: skippedComputed });
               warnings.push(`\u2139 Relationship ${firstEntry.cleanName} \u2192 ${secondEntry.cleanName}: joins only on computed key(s) with no physical column to wire \u2014 inferred "${inferred.name}" from a column name that exists on both sides instead. VERIFY this is the correct key before relying on it.`);
+              if (skippedComputed > 0) {
+                warnings.push(`\u26A0 Relationship ${firstEntry.cleanName} \u2192 ${secondEntry.cleanName}: name-inference wired "${inferred.name}", but ${skippedComputed} computed condition(s) Tableau also required (e.g. IF/DATETRUNC expression) could not be carried into the join \u2014 this join is WIDER than Tableau's (it will match rows Tableau's computed condition would have excluded). Verify join grain in Sigma.`);
+              }
               continue;
             }
             warnings.push(`\u26A0 Relationship ${firstEntry.cleanName} \u2192 ${secondEntry.cleanName} joins only on computed key(s) (e.g. IF/DATETRUNC expression); Sigma joins on physical columns only \u2014 NOT wired. Needs a computed join column or manual authoring.`);

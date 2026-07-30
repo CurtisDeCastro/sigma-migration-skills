@@ -19,6 +19,7 @@
           <relation connection='snowflake.objgraph01' name='DIM_CUSTOMER' table='[DIM_CUSTOMER]' type='table' />
           <relation connection='snowflake.objgraph01' name='DIM_PRODUCT' table='[DIM_PRODUCT]' type='table' />
           <relation connection='snowflake.objgraph01' name='DIM_DATE' table='[DIM_DATE]' type='table' />
+          <relation connection='snowflake.objgraph01' name='DIM_STORE' table='[DIM_STORE]' type='table' />
         </relation>
         <metadata-records>
 <metadata-record class='column'>
@@ -766,6 +767,18 @@
   <object-id>[FACT_WIDE_A1B2C3D4E5F60718]</object-id>
 </metadata-record>
 <metadata-record class='column'>
+  <remote-name>store_key</remote-name>
+  <remote-type>130</remote-type>
+  <local-name>[store_key]</local-name>
+  <parent-name>[FACT_WIDE]</parent-name>
+  <remote-alias>store_key</remote-alias>
+  <ordinal>62</ordinal>
+  <caption>Store Key</caption>
+  <local-type>integer</local-type>
+  <contains-null>true</contains-null>
+  <object-id>[FACT_WIDE_A1B2C3D4E5F60718]</object-id>
+</metadata-record>
+<metadata-record class='column'>
   <remote-name>customer_key</remote-name>
   <remote-type>130</remote-type>
   <local-name>[customer_key]</local-name>
@@ -897,6 +910,30 @@
   <contains-null>true</contains-null>
   <object-id>[DIM_DATE_D1B2C3D4E5F60718]</object-id>
 </metadata-record>
+<metadata-record class='column'>
+  <remote-name>store_key</remote-name>
+  <remote-type>130</remote-type>
+  <local-name>[store_key]</local-name>
+  <parent-name>[DIM_STORE]</parent-name>
+  <remote-alias>store_key</remote-alias>
+  <ordinal>0</ordinal>
+  <caption>Store Key</caption>
+  <local-type>integer</local-type>
+  <contains-null>true</contains-null>
+  <object-id>[DIM_STORE_E1B2C3D4E5F60718]</object-id>
+</metadata-record>
+<metadata-record class='column'>
+  <remote-name>store_name</remote-name>
+  <remote-type>130</remote-type>
+  <local-name>[store_name]</local-name>
+  <parent-name>[DIM_STORE]</parent-name>
+  <remote-alias>store_name</remote-alias>
+  <ordinal>1</ordinal>
+  <caption>Store Name</caption>
+  <local-type>string</local-type>
+  <contains-null>true</contains-null>
+  <object-id>[DIM_STORE_E1B2C3D4E5F60718]</object-id>
+</metadata-record>
         </metadata-records>
       </connection>
       <object-graph>
@@ -919,6 +956,11 @@
           <object caption='DIM_DATE' id='DIM_DATE_D1B2C3D4E5F60718'>
             <properties context=''>
               <relation connection='snowflake.objgraph01' name='DIM_DATE' table='[DIM_DATE]' type='table' />
+            </properties>
+          </object>
+          <object caption='DIM_STORE' id='DIM_STORE_E1B2C3D4E5F60718'>
+            <properties context=''>
+              <relation connection='snowflake.objgraph01' name='DIM_STORE' table='[DIM_STORE]' type='table' />
             </properties>
           </object>
         </objects>
@@ -964,6 +1006,28 @@
             </expression>
             <first-end-point object-id='FACT_WIDE_A1B2C3D4E5F60718' />
             <second-end-point object-id='DIM_DATE_D1B2C3D4E5F60718' />
+          </relationship>
+          <!-- 4. COMPUTED-ONLY, BUT NAME-INFERENCE SUCCEEDS (review fix-wave,
+               2026-07-30, Important finding 2): unlike case 3 above, FACT_WIDE
+               and DIM_STORE DO share a key-shaped column name (STORE_KEY) on
+               both sides, even though the sole serialized condition is
+               computed on its left operand (IFNULL(...) is not a bare
+               physical [STORE_KEY] ref, so it is dropped exactly like case
+               3's DATETRUNC). Before the fix, a successful inference here
+               recorded derivedVia: "name-inference" with NO partial /
+               droppedConditions and no dropped-condition warning — a join
+               strictly WIDER than Tableau's (IFNULL's null-coalescing no
+               longer narrows matches) that looked clean in both the
+               relationship object and the coverage ledger. Expected now:
+               derivedVia: "name-inference", partial: true,
+               droppedConditions: 1, plus the widening warning. -->
+          <relationship>
+            <expression op='='>
+              <expression op="IFNULL([STORE_KEY],-1)" />
+              <expression op='[STORE_KEY]' />
+            </expression>
+            <first-end-point object-id='FACT_WIDE_A1B2C3D4E5F60718' />
+            <second-end-point object-id='DIM_STORE_E1B2C3D4E5F60718' />
           </relationship>
         </relationships>
       </object-graph>

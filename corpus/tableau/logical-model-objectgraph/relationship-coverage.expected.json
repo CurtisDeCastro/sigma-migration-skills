@@ -1,6 +1,6 @@
 {
-  "serialized": 3,
-  "wired": 2,
+  "serialized": 4,
+  "wired": 3,
   "entries": [
     {
       "left": "FACT_WIDE",
@@ -22,6 +22,14 @@
       "derivedVia": "unwired",
       "reason": "no existing column name matches on both sides",
       "candidates": []
+    },
+    {
+      "left": "FACT_WIDE",
+      "right": "DIM_STORE",
+      "derivedVia": "name-inference",
+      "keyCount": 1,
+      "partial": true,
+      "droppedConditions": 1
     }
   ]
 }
