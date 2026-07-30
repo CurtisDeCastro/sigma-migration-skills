@@ -41,6 +41,13 @@
 #     [--mcp-dir <sigma-data-model-mcp clone> | --converter-out <mcp-tool result.json>] \
 #     [--python <interpreter>]
 #
+# FULLY-LOCAL alternative (no Fabric/tenant) — a single .pbix on disk. Phase 0
+# extracts the model (pbixray -> model.bim) and the report (the zip's UTF-16LE
+# Report/Layout -> signals) LOCALLY, then the same convert->build->verify
+# pipeline runs. Needs pbixray for the model half (see refs/local-pbix.md):
+#   ruby scripts/migrate-powerbi.rb --pbix /path/Sales.pbix \
+#     --connection <SIGMA_CONN_UUID> --database <DB> --schema <SCHEMA> --ref-dm <id>
+#
 # Converter route (bead 7o01): with a local sigma-data-model-mcp build (--mcp-dir /
 # PBI_MCP_DIR / ~/Desktop or ~/ clone) the conversion runs in-process via a node
 # shim. WITHOUT one, Phase 2 stops with a gate: run the convert_powerbi_to_sigma
@@ -100,6 +107,11 @@ opts = { db: '', schema: '' }
 OptionParser.new do |o|
   o.on('--tmsl PATH')       { |v| opts[:tmsl]   = File.expand_path(v) }
   o.on('--pbir PATH')       { |v| opts[:pbir]   = File.expand_path(v) }
+  # FULLY-LOCAL front door: a single .pbix on disk, no Fabric/tenant. Phase 0
+  # extracts the model (pbixray -> model.bim) AND the report (the zip's
+  # UTF-16LE Report/Layout -> signals) locally, then the normal pipeline runs.
+  # Mutually exclusive with --tmsl/--pbir (which it derives).
+  o.on('--pbix PATH')       { |v| opts[:pbix]   = File.expand_path(v) }
   o.on('--connection ID')   { |v| opts[:conn]   = v }
   o.on('--database DB')     { |v| opts[:db]     = v }
   o.on('--schema S')        { |v| opts[:schema] = v }
@@ -152,6 +164,17 @@ OptionParser.new do |o|
   # builds a new DM.
   o.on('--reuse-dm ID')        { |v| opts[:reuse_dm] = v }
   o.on('--no-reuse')           {     opts[:no_reuse] = true }
+  # Phase 6b (runtime control-flip proof) is DEFAULT-ON: after posting, each
+  # control is flipped live (probe-controls.rb) to prove it actually filters its
+  # targets — a control that lints clean but is INERT fails the migration.
+  # --skip-control-flip waives it (name the reason in your migration report).
+  o.on('--skip-control-flip [REASON]', 'waive Phase 6b (runtime control-flip proof); the reason MUST be named in your migration report') { |v| opts[:skip_control_flip] = v || true }
+  # COMPOSITE guard escape hatch. The Fabric --tmsl path GATES (exit 10) when the
+  # extracted model looks like a composite / live-connected-to-remote model,
+  # because getDefinition returns an INCOMPLETE model for those — the complete
+  # model lives in the local .pbix (prefer --pbix). Pass this to proceed anyway
+  # on the (known-incomplete) Fabric model.
+  o.on('--allow-incomplete-model') { opts[:allow_incomplete_model] = true }
 end.parse!
 
 # #347: publish the target tenant into the env so EVERY Power BI child process
@@ -187,10 +210,19 @@ CONNECT_HINT = <<~HINT.freeze
   --tenant <that tenant GUID or the ctid= in the report URL> here AND to
   fabric-extract.py, or every Fabric call 404s as WorkspaceNotFound.
 HINT
-abort "FATAL: missing --tmsl (the Power BI semantic model, TMSL/model.bim).\n#{CONNECT_HINT}" unless opts[:tmsl]
-abort "FATAL: --tmsl not found: #{opts[:tmsl]}\n#{CONNECT_HINT}" unless File.exist?(opts[:tmsl])
-abort "FATAL: missing --pbir (the Power BI report layout / PBIR bundle).\n#{CONNECT_HINT}" unless opts[:pbir]
-abort "FATAL: --pbir not found: #{opts[:pbir]}\n#{CONNECT_HINT}" unless File.exist?(opts[:pbir])
+# --pbix (fully-local) DERIVES --tmsl + --pbir in Phase 0 below, so the
+# require-both checks apply only to the Fabric route. In --pbix mode we just
+# confirm the file exists; Phase 0 produces model.bim + signals locally.
+if opts[:pbix]
+  abort "FATAL: --pbix not found: #{opts[:pbix]}" unless File.exist?(opts[:pbix])
+  warn 'note: --pbix given — the local model (pbixray) + report (Report/Layout) are ' \
+       'extracted in Phase 0; --tmsl/--pbir are ignored.' if opts[:tmsl] || opts[:pbir]
+else
+  abort "FATAL: missing --tmsl (the Power BI semantic model, TMSL/model.bim).\n#{CONNECT_HINT}" unless opts[:tmsl]
+  abort "FATAL: --tmsl not found: #{opts[:tmsl]}\n#{CONNECT_HINT}" unless File.exist?(opts[:tmsl])
+  abort "FATAL: missing --pbir (the Power BI report layout / PBIR bundle).\n#{CONNECT_HINT}" unless opts[:pbir]
+  abort "FATAL: --pbir not found: #{opts[:pbir]}\n#{CONNECT_HINT}" unless File.exist?(opts[:pbir])
+end
 # intake.rb (front-door) caches the resolved connection in <out>/connection.json; honor it
 # when --connection is omitted so the agent need not re-pass the id it just resolved.
 if opts[:out] && File.exist?(File.join(opts[:out], 'connection.json'))
@@ -214,7 +246,9 @@ CONV_MODULE, MCP_DIR, CONVERTER_DESC =
   resolve_converter(opts[:mcp_dir] || ENV['PBI_MCP_DIR'], VENDORED_PBI, 'powerbi.js')
 warn "converter: #{CONVERTER_DESC}"
 
-name_slug = File.basename(opts[:tmsl], '.*').gsub(/[^A-Za-z0-9_-]/, '-')
+# In --pbix mode opts[:tmsl] is not set yet (Phase 0 produces it), so slug from
+# the .pbix basename instead.
+name_slug = File.basename(opts[:tmsl] || opts[:pbix], '.*').gsub(/[^A-Za-z0-9_-]/, '-')
 WORK = opts[:out] || File.expand_path("~/powerbi-migration/#{name_slug}")
 FileUtils.mkdir_p(WORK)
 WB_NAME = opts[:name] || "#{name_slug.gsub(/[_]+/, ' ').strip} (from Power BI)"
@@ -327,61 +361,160 @@ def cull_failed_fields(*logs)
   names.map { |n| n.gsub(/[\[\]"]/, '').strip }.reject(&:empty?).uniq
 end
 
+# COMPOSITE / live-connection detection on the FABRIC-extracted TMSL. A Power BI
+# composite report (or one live-connected to a shared dataset) keeps references
+# to a REMOTE semantic model; getDefinition of the report's bound model then
+# returns an INCOMPLETE model (missing the report-local measures/calc tables, or
+# not resolvable standalone). The COMPLETE model lives in the local .pbix — so
+# we detect the incompleteness here and prompt for --pbix rather than silently
+# building a broken DM. Conservative signals (import-mode happy path never
+# fires): DirectQuery partitions, `entity` partitions bound to a remote model,
+# or an M expression naming the AnalysisServices / Power BI dataset connector.
+# Returns a list of human-readable reason strings ([] when the model is a
+# complete import model). The offline analog is the .pbix Connections
+# RemoteArtifacts tell (extract-model-pbix.py is_composite_connections).
+def detect_incomplete_composite(model)
+  reasons = []
+  (model['tables'] || []).each do |t|
+    name = t['name']
+    next if name.to_s.start_with?('LocalDateTable_', 'DateTableTemplate_')
+    Array(t['partitions']).each do |p|
+      mode = p['mode'].to_s.downcase
+      reasons << "table '#{name}' has a DirectQuery partition" if mode == 'directquery'
+      src = p['source'] || {}
+      reasons << "table '#{name}' is an 'entity' partition bound to a remote model" \
+        if src['type'].to_s.downcase == 'entity'
+      expr = src['expression']
+      expr = expr.join("\n") if expr.is_a?(Array)
+      if expr.is_a?(String) &&
+         expr =~ /AnalysisServices\.Database|PowerBIServiceLive|DirectQueryToAS|pbiazure|PowerBI\.Datasets|Value\.NativeQuery/i
+        reasons << "table '#{name}' M expression references a remote Power BI dataset"
+      end
+    end
+  end
+  reasons.uniq
+end
+
 TOTAL = 6
+
+# Python interpreter resolution (shared by Phase 0 local extract + Phase 1).
+# bead 7o01: --python / PBI_PY, else a bootstrapped venv (<work>/.venv), else
+# the legacy /tmp/pbiauth venv, else a real system Python via PyResolve
+# (Windows Store-stub safe; the offline PBIR parse is stdlib-only). PY_ARGV is
+# an array so a multi-token launcher (`py -3`) survives the splat below.
+# bead 4alk.4: venvs are POSIX bin/python OR Windows Scripts\python.exe.
+py = opts[:python] || ENV['PBI_PY'] ||
+     [File.join(WORK, '.venv', 'bin', 'python'), File.join(WORK, '.venv', 'Scripts', 'python.exe'),
+      '/tmp/pbiauth/bin/python', '/tmp/pbiauth/Scripts/python.exe']
+       .find { |p| File.exist?(p) }
+PY_ARGV = py ? [py] : PyResolve.argv
+
+# ---------------------------------------------------------------------------
+# Phase 0 — LOCAL .pbix extract (only with --pbix; no Fabric/tenant). Reads the
+# .pbix's binary VertiPaq DataModel with pbixray and emits a TMSL model.bim in
+# the SAME shape --tmsl consumes, then wires it in as opts[:tmsl]. The report
+# half (the zip's UTF-16LE Report/Layout) is extracted in Phase 1. If pbixray
+# is absent, extract-model-pbix.py exits with a clear install hint and this
+# run stops here — the Fabric --tmsl/--pbir route and the report front door
+# (extract-report-classic.py --pbix) do NOT need pbixray.
+# ---------------------------------------------------------------------------
+if opts[:pbix]
+  puts
+  puts '── Phase 0/6 · Local .pbix extract (no Fabric) ──'
+  # Cheap stdlib-only probe (no pbixray): is this a composite / live-connected
+  # .pbix? If so, using the LOCAL file (which carries the complete composite
+  # model) is exactly right — note it so the choice is visible.
+  comp_out, comp_st = Open3.capture2e(*PY_ARGV, File.join(HERE, 'extract-model-pbix.py'),
+                                      '--pbix', opts[:pbix], '--detect-composite')
+  if comp_st.success? && (JSON.parse(comp_out)['composite'] rescue false)
+    puts '   composite / live-connected .pbix detected — the local file carries the COMPLETE'
+    puts '   model (a Fabric getDefinition of the bound dataset would be incomplete). Using it.'
+  end
+  model_bim = File.join(WORK, 'model.bim')
+  puts "   VertiPaq model (pbixray) -> #{model_bim}"
+  run!([*PY_ARGV, File.join(HERE, 'extract-model-pbix.py'),
+        '--pbix', opts[:pbix], '--out', model_bim,
+        *(opts[:name] ? ['--name', opts[:name]] : [])])
+  opts[:tmsl] = model_bim
+end
 
 # ---------------------------------------------------------------------------
 # Phase 1 — Discover / Extract (explode the PBIR bundle, parse TMSL + signals)
 # ---------------------------------------------------------------------------
 hdr(1, TOTAL, 'Discover / Extract')
 
-# The raw-pbir/*.json files are a FLAT bundle: { "<part-path>": "<json text>", ... }.
-# extract-pbir.py wants an exploded definition/ folder — so explode it first.
-pbir_dir = File.join(WORK, 'pbir')
-FileUtils.mkdir_p(pbir_dir)
-bundle = JSON.parse(File.read(opts[:pbir]))
-exploded = 0
-bundle.each do |part, payload|
-  next unless part.start_with?('definition/') # the exploded-PBIR parts only
-  fp = File.join(pbir_dir, part)
-  FileUtils.mkdir_p(File.dirname(fp))
-  File.write(fp, payload.is_a?(String) ? payload : JSON.pretty_generate(payload))
-  exploded += 1
-end
-# bead anlb (orchestrator parity with run.sh): a fetched definition may be the
-# CLASSIC single report.json (top-level sections[]) instead of exploded PBIR
-# parts. Branch to extract-report-classic.py — same signals.json schema out.
-classic_rj = nil
-if exploded.zero? && bundle.key?('report.json')
-  classic_rj = File.join(pbir_dir, 'report.json')
-  payload = bundle['report.json']
-  File.write(classic_rj, payload.is_a?(String) ? payload : JSON.pretty_generate(payload))
-end
-abort "FATAL: PBIR bundle has no definition/ parts and no classic report.json — keys=#{bundle.keys.first(3)}" if exploded.zero? && classic_rj.nil?
-
 signals_path = File.join(WORK, 'signals.json')
-# bead 7o01: Python resolution — --python / PBI_PY, else a bootstrapped venv
-# (run.sh creates <work-dir>/.venv), else the legacy /tmp/pbiauth venv, else
-# a real system Python via PyResolve (Windows Store-stub safe; the offline PBIR
-# parse is stdlib-only). PY_ARGV is an array so a multi-token launcher (`py -3`)
-# survives the splat below.
-# bead 4alk.4: venvs are POSIX bin/python OR Windows Scripts\python.exe — probe
-# both layouts per venv root rather than assuming bin/.
-py = opts[:python] || ENV['PBI_PY'] ||
-     [File.join(WORK, '.venv', 'bin', 'python'), File.join(WORK, '.venv', 'Scripts', 'python.exe'),
-      '/tmp/pbiauth/bin/python', '/tmp/pbiauth/Scripts/python.exe']
-       .find { |p| File.exist?(p) }
-PY_ARGV = py ? [py] : PyResolve.argv
-if classic_rj
-  puts '   classic single report.json detected — branching to extract-report-classic.py'
-  run!([*PY_ARGV, File.join(HERE, 'extract-report-classic.py'), '--report-json', classic_rj, '--out', signals_path])
+if opts[:pbix]
+  # FULLY-LOCAL report: the .pbix zip's `Report/Layout` member is a SINGLE
+  # UTF-16LE classic report (top-level sections[]) — extract-report-classic.py
+  # unzips + decodes it and emits the SAME signals.json schema, no bundle.
+  puts '   local .pbix report — unzipping Report/Layout (UTF-16LE) via extract-report-classic.py'
+  run!([*PY_ARGV, File.join(HERE, 'extract-report-classic.py'), '--pbix', opts[:pbix], '--out', signals_path])
 else
-  run!([*PY_ARGV, File.join(HERE, 'extract-pbir.py'), '--pbir-dir', pbir_dir, '--out', signals_path])
+  # The raw-pbir/*.json files are a FLAT bundle: { "<part-path>": "<json text>", ... }.
+  # extract-pbir.py wants an exploded definition/ folder — so explode it first.
+  pbir_dir = File.join(WORK, 'pbir')
+  FileUtils.mkdir_p(pbir_dir)
+  bundle = JSON.parse(File.read(opts[:pbir]))
+  exploded = 0
+  bundle.each do |part, payload|
+    next unless part.start_with?('definition/') # the exploded-PBIR parts only
+    fp = File.join(pbir_dir, part)
+    FileUtils.mkdir_p(File.dirname(fp))
+    File.write(fp, payload.is_a?(String) ? payload : JSON.pretty_generate(payload))
+    exploded += 1
+  end
+  # bead anlb (orchestrator parity with run.sh): a fetched definition may be the
+  # CLASSIC single report.json (top-level sections[]) instead of exploded PBIR
+  # parts. Branch to extract-report-classic.py — same signals.json schema out.
+  classic_rj = nil
+  if exploded.zero? && bundle.key?('report.json')
+    classic_rj = File.join(pbir_dir, 'report.json')
+    payload = bundle['report.json']
+    File.write(classic_rj, payload.is_a?(String) ? payload : JSON.pretty_generate(payload))
+  end
+  abort "FATAL: PBIR bundle has no definition/ parts and no classic report.json — keys=#{bundle.keys.first(3)}" if exploded.zero? && classic_rj.nil?
+  if classic_rj
+    puts '   classic single report.json detected — branching to extract-report-classic.py'
+    run!([*PY_ARGV, File.join(HERE, 'extract-report-classic.py'), '--report-json', classic_rj, '--out', signals_path])
+  else
+    run!([*PY_ARGV, File.join(HERE, 'extract-pbir.py'), '--pbir-dir', pbir_dir, '--out', signals_path])
+  end
 end
 signals = JSON.parse(File.read(signals_path))
 
 # TMSL model summary + import/DirectQuery mode.
 tmsl = JSON.parse(File.read(opts[:tmsl]))
 model = tmsl['model'] || tmsl
+
+# COMPOSITE GATE (Fabric --tmsl path only; --pbix already IS the complete local
+# model). getDefinition returns an INCOMPLETE model for composite / live-
+# connected reports — the full model lives in the local .pbix. Detect it and
+# PROMPT for the .pbix instead of silently building a broken DM. --allow-
+# incomplete-model overrides. This is what MOTIVATES the local front door.
+unless opts[:pbix] || opts[:allow_incomplete_model]
+  composite_reasons = detect_incomplete_composite(model)
+  unless composite_reasons.empty?
+    puts
+    puts '╭─ OPEN QUESTION — composite / live-connected report (incomplete Fabric model) ─'
+    puts '│  The extracted semantic model shows references to a REMOTE Power BI dataset:'
+    composite_reasons.first(6).each { |r| puts "│    • #{r}" }
+    puts '│'
+    puts '│  This is a COMPOSITE (or live-connected) report: Fabric getDefinition returns'
+    puts '│  only the report-BOUND model, which is INCOMPLETE (it misses the report-local'
+    puts '│  measures / calc tables, or is not resolvable standalone). Power BI also BLOCKS'
+    puts '│  export-to-.pbix for live-connected reports, so device-auth cannot download it.'
+    puts '│  The COMPLETE model lives in the local .pbix on the author\'s machine.'
+    puts '│'
+    puts '│  ACTION: ask the user for the local .pbix and re-run through the local front door:'
+    puts "│      ruby scripts/migrate-powerbi.rb --pbix <that file.pbix> \\"
+    puts "│        --connection #{opts[:conn] || '<id>'} --database #{opts[:db].empty? ? '<DB>' : opts[:db]} --schema #{opts[:schema].empty? ? '<SCHEMA>' : opts[:schema]} --out #{WORK}"
+    puts '│  (Deliberately proceeding on the known-incomplete Fabric model? add --allow-incomplete-model.)'
+    puts '╰──────────────────────────────────────────────────────────────────────────────'
+    exit 10
+  end
+end
+
 tables = (model['tables'] || []).reject { |t| t['name'].to_s.start_with?('LocalDateTable_', 'DateTableTemplate_') }
 all_measures = tables.flat_map { |t| (t['measures'] || []).map { |m| [t['name'], m['name'], Array(m['expression']).join] } }
 # measure name -> its ORIGINAL TMSL table = the entity a PBIR visual binds it under.
@@ -1357,6 +1490,20 @@ wb_rb = JSON.parse(File.read(wb_readback))
 wb_id = wb_rb['workbookId']
 puts "   workbookId = #{wb_id}"
 
+# Gate-state stamp (after a live post): control_flip_required=true auto-enables
+# the shared assert-phase6-ran.rb gate 7b on a STANDALONE run too, matching the
+# tableau reference — so neither this one-shot path (Phase 6b below) nor a later
+# standalone gate can silently skip the runtime control-flip proof.
+begin
+  _msf = File.join(WORK, 'migrate-state.json')
+  _st  = (JSON.parse(File.read(_msf)) rescue {})
+  _st  = {} unless _st.is_a?(Hash)
+  _st.merge!('workbook_id' => wb_id, 'control_flip_required' => true)
+  File.write(_msf, JSON.pretty_generate(_st))
+rescue StandardError
+  nil # sentinel bookkeeping never fails the run
+end
+
 # ---------------------------------------------------------------------------
 # MIGRATION COVERAGE REPORT — what carried over, and what didn't (bead beads-sigma-cov).
 # The build warns loudly at each drop site, but on a complex report those warnings
@@ -1614,6 +1761,109 @@ else
 end
 
 # ---------------------------------------------------------------------------
+# Phase 6b — runtime control-flip proof (DEFAULT-ON). Gate 7 (control_lint.rb,
+# run at post-and-readback) proves control WIRING against the live spec, but a
+# builder-level listen->column mis-map yields a spec that lints clean yet does
+# NOTHING when the user changes the control. The only independent proof is
+# runtime: flip each control via the REST export API and confirm its targets'
+# output actually changes (scripts/probe-controls.rb). Mirrors the shared
+# assert-phase6-ran.rb gate 7b so the one-shot migrate enforces it too; the
+# migrate-state.json control_flip_required stamp (above) enforces it on a
+# standalone gate run as well. Escape: --skip-control-flip "<reason>".
+# ---------------------------------------------------------------------------
+require 'rbconfig'
+flip_line = nil
+_flip_libs = true
+begin
+  require_relative 'lib/pbi_flip'
+  require_relative 'lib/control_lint'
+  require_relative 'lib/flip_gate'
+rescue LoadError => e
+  _flip_libs = false
+  warn "   [WARN] Phase 6b: #{e.message} — re-vendor scripts/lib (SHA-1 discipline); control flip UNVERIFIED"
+end
+if opts[:skip_control_flip]
+  reason = opts[:skip_control_flip] == true ? '(no reason given)' : opts[:skip_control_flip]
+  flip_line = "WAIVED — #{reason}"
+  puts "   [WAIVED] Phase 6b: runtime control-flip proof — #{reason} (name it in your migration report)"
+elsif !_flip_libs
+  flip_line = 'UNVERIFIED — flip libs not loadable'
+else
+  # Count controls on the live posted workbook (same source of truth as gate 7b).
+  n_controls = nil
+  begin
+    _spec = Sigma.request(:get, "/v2/workbooks/#{wb_id}/spec")
+    if _spec.is_a?(String)
+      begin
+        _spec = JSON.parse(_spec)
+      rescue JSON::ParserError
+        require 'yaml'; require 'date'
+        _spec = (YAML.safe_load(_spec, permitted_classes: [Date, Time]) rescue nil)
+      end
+    end
+    n_controls = ControlLint.controls_report(_spec).length if _spec.is_a?(Hash)
+  rescue StandardError => e
+    warn "   [WARN] Phase 6b: could not fetch/parse the live spec to count controls (#{e.message})"
+  end
+
+  probe_out = File.join(WORK, 'probe-controls')
+  probe     = File.join(HERE, 'probe-controls.rb')
+  has_creds = !ENV['SIGMA_BASE_URL'].to_s.empty? && !ENV['SIGMA_API_TOKEN'].to_s.empty?
+
+  decision, info =
+    if n_controls == 0
+      [:none, nil]
+    elsif has_creds && File.exist?(probe)
+      system(RbConfig.ruby, probe, '--workbook-id', wb_id, '--out', probe_out)
+      _rc  = $?.exitstatus
+      _res = (JSON.parse(File.read(File.join(probe_out, 'probe-results.json'))) rescue nil)
+      FlipGate.decide(_rc, _res)
+    elsif has_creds
+      warn '   [WARN] Phase 6b: scripts/probe-controls.rb not vendored — control flip UNVERIFIED'
+      [:offline, nil]
+    else
+      # Offline: accept RECORDED evidence, else UNVERIFIED (never hard-fail a run
+      # that never reached the live API).
+      _res = (JSON.parse(File.read(File.join(probe_out, 'probe-results.json'))) rescue nil)
+      PbiFlip.recorded(_res)
+    end
+
+  status, flip_line, exit_code = PbiFlip.outcome(decision, info)
+  case status
+  when :ok, :none
+    extra = (info && Array(info[:skips]).any?) ? " (#{Array(info[:skips]).length} un-probeable type(s) skipped)" : ''
+    puts "   [OK] Phase 6b: #{flip_line}#{extra}"
+  when :advisory
+    warn "   [WARN] Phase 6b: #{flip_line} — date-range/slider/unlabeled control(s) need an explicit flip value; runtime wiring UNVERIFIED"
+    begin
+      FileUtils.mkdir_p(probe_out)
+      File.write(File.join(probe_out, 'control-flip-unverified.json'),
+                 JSON.pretty_generate('workbookId' => wb_id,
+                                      'unprobed' => Array(info && info[:skips]).map { |c, n| { 'control' => c, 'note' => n } }))
+    rescue StandardError
+      nil
+    end
+  when :offline
+    puts "   [SKIP] Phase 6b: #{flip_line}"
+  when :fail
+    puts "   [FAIL] Phase 6b: #{Array(info[:fails]).length} control(s) wired but INERT on workbook #{wb_id}:"
+    Array(info[:fails]).each { |cid, note| puts "     - #{cid}: #{note}" }
+    puts '     The control passed the static lint (gate 7) but does not filter its targets — a'
+    puts '     builder listen->column mis-mapping. Re-check control targeting in the build, or'
+    puts '     waive with --skip-control-flip "<reason>". Reproduce:'
+    puts "       ruby scripts/probe-controls.rb --workbook-id #{wb_id}"
+    exit exit_code
+  when :error
+    puts "   [FAIL] Phase 6b: probe-controls.rb could not verify the wiring on workbook #{wb_id}."
+    puts '     An enforced gate that could not run must not pass silently. Re-run once the export'
+    puts '     API is reachable, or waive with --skip-control-flip "<reason>".'
+    exit exit_code
+  else
+    puts "   [WARN] Phase 6b: #{flip_line}"
+  end
+end
+
+# ---------------------------------------------------------------------------
 # Phase E (OPT-IN) — Enhance. Runs ONLY with --enhance AND a parity PASS:
 # enhancements clone a PARITY-VERIFIED workbook, never an unproven one.
 # Clone-first / scan-then-propose / accept-only / parity-unchanged-gated —
@@ -1673,6 +1923,7 @@ if fresh_ok
        "#{freshness['credsSuspect'] ? ' — REFRESH FAILING (creds)' : ''}"
 end
 puts "ENHANCE     : #{enhance_line}" if enhance_line
+puts "CONTROL-FLIP: #{flip_line}" if flip_line
 # Empty-workbook guard + completion sentinel. parity_ok is VACUOUSLY true when no
 # chart elements were built (0 cols, 0 divergent) — an empty/placeholder workbook
 # would otherwise exit 0 and look "done" (the exact PBI failure: pages, no

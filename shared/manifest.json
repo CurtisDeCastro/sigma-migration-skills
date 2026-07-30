@@ -124,7 +124,9 @@
         "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/lib/flip_gate.rb",
         "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/lib/flip_gate.rb",
         "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/lib/flip_gate.rb",
-        "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/lib/flip_gate.rb"
+        "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/lib/flip_gate.rb",
+        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/lib/flip_gate.rb",
+        "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/lib/flip_gate.rb"
       ]
     },
     {
@@ -148,7 +150,10 @@
         "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/lib/control_lint.rb",
         "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/lib/control_lint.rb",
         "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/lib/control_lint.rb",
-        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/lib/control_lint.rb"
+        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/lib/control_lint.rb",
+        "plugins/gooddata-to-sigma/skills/gooddata-to-sigma/scripts/lib/control_lint.rb",
+        "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/lib/control_lint.rb",
+        "plugins/cognos-to-sigma/skills/cognos-to-sigma/scripts/lib/control_lint.rb"
       ]
     },
     {

@@ -58,8 +58,16 @@ spec.fetch('pages', []).each do |page|
     all_element_names << el['id'] if el['id']
   end
 end
-all_known_prefixes = (all_element_names + external_names).to_set rescue (all_element_names + external_names)
 require 'set' rescue nil
+# RESERVED reference prefixes that are always valid regardless of the spec's own
+# elements. `Metrics` is the governed data-model metric namespace: a column
+# formula may reference a DM metric as [Metrics/<measure name>] (the documented,
+# LIVE-accepted form — confirmed on the E2E). It is NOT an element in the spec,
+# so without this the prefix check false-flags every metric-bound column as an
+# "unknown prefix". Do NOT rewrite [Metrics/X] to a master id — the live API
+# rejects that; the [Metrics/X] form is correct.
+RESERVED_REF_PREFIXES = %w[Metrics].freeze
+all_known_prefixes = (all_element_names + external_names + RESERVED_REF_PREFIXES).to_set rescue (all_element_names + external_names + RESERVED_REF_PREFIXES)
 all_known_set = all_known_prefixes.is_a?(Set) ? all_known_prefixes : Set.new(all_known_prefixes)
 
 errors << 'spec contains rgb(...) color strings (Cloudflare WAF blocks)' if JSON.generate(spec).include?('rgb(')
