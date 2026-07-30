@@ -83,6 +83,27 @@ This needs **no change to `shared/lib/sigma_rest.rb`** — verified: `request` a
 lib default, which sets `read_timeout: 120` and no `open_timeout` at all. A persistent connection
 across pages is a secondary benefit (one TLS handshake instead of N).
 
+### Amendment 2026-07-30: M1 is wider than the two reported scripts
+
+Planning measurement found the same unpaginated columns read in three more places, all in the
+**verification** path, which is worse than in discovery:
+
+- `assert-phase6-ran.rb:1158` — gate 5 audits live columns for `type == "error"`. A first-page-only
+  read makes it blind past column 50, so it can return **GREEN on a wide workbook it exists to
+  reject**.
+- `post-and-readback.rb:474` — the error-column census drives the re-POST-once quarantine decision.
+- `verify-warehouse.rb:141` — the parity verifier audits 50 of N columns. No `limit` at all.
+
+Fixing discovery while leaving these truncated would mean the detector for the problem is itself
+blind, so all five genuine sites land together in PR1. `migrate-tableau.rb` and
+`assert-wb-refs-resolve.rb` were already compliant, which confirms the drift diagnosis: the 2026-06
+`list_entries` fix propagated to some callers only.
+
+A file-level grep reports nine candidates, but it cannot distinguish a columns-endpoint read from an
+unrelated read of a local JSON ledger that also uses an `entries` key (`fidelity-loop.rb` is a
+confirmed false positive — its reads are `fidelity-ledger.json`). Per-file triage is therefore Task 1
+of the PR1 plan, and its output is the source for both the fix list and the lint allowlist.
+
 ### The canary is the durable fix
 
 This bug exists because a library fix did not propagate to every call site. A lint that fails on any
