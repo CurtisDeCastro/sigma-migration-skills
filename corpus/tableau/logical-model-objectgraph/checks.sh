@@ -30,15 +30,48 @@ trap 'rm -rf "$TMP"' EXIT
 fail=0
 note() { printf '     %s\n' "$*"; }
 
+# Any absolute path baked as a literal string into the generated .mjs below
+# is at risk on Windows: under Git Bash, `pwd`/`mktemp -d` (used to build
+# CONVERTER/CASE_DIR/TMP) yield POSIX-looking paths like /d/a/... with no
+# drive letter. Node/Windows treats a leading-slash-no-drive path as
+# "rooted" — relative to the CURRENT drive — so /d/a/foo silently becomes
+# D:\d\a\foo (the exact mangled path in this job's failure) instead of
+# D:\a\foo. That corruption hits both the `import` specifier AND plain
+# fs.readFileSync/writeFileSync arguments, since it's Windows' own path
+# parsing, not something specific to ESM. (Paths passed as CLI arguments,
+# e.g. `node "$TMP/_convert.mjs"` below, are fine — Git Bash auto-translates
+# those before exec'ing the native node.exe; only paths embedded *inside*
+# the file content are exposed.)
+#
+# Node ESM additionally rejects a bare drive-letter specifier
+# (`import ... from "D:/path/tableau.mjs"` → ERR_UNSUPPORTED_ESM_URL_SCHEME,
+# protocol 'd:') — import specifiers must be file:// URLs there, not just
+# drive-qualified. Plain fs calls don't have that extra requirement; they
+# just need a real drive letter.
+#
+# cygpath -m (present in Git Bash, absent on macOS/Linux) gives the mixed
+# Windows form (D:/a/...) both fixes build on. Same guard as
+# mechanical-specs.rb's run_converter and test-relationship-derivation.rb's
+# shim — this is the bash twin of that Ruby fix.
+if command -v cygpath >/dev/null 2>&1; then
+  CONVERTER_URL="file:///$(cygpath -m "$CONVERTER")"
+  CASE_DIR_NODE="$(cygpath -m "$CASE_DIR")"
+  TMP_NODE="$(cygpath -m "$TMP")"
+else
+  CONVERTER_URL="$CONVERTER"
+  CASE_DIR_NODE="$CASE_DIR"
+  TMP_NODE="$TMP"
+fi
+
 # -- 1. relationshipCoverage ledger matches the pin exactly -------------------
 cat > "$TMP/_convert.mjs" <<JS
 import { readFileSync, writeFileSync } from 'node:fs';
-import { convertTableauToSigma } from '$CONVERTER';
-const xml = readFileSync('$CASE_DIR/workbook-content.twb', 'utf8');
+import { convertTableauToSigma } from '$CONVERTER_URL';
+const xml = readFileSync('$CASE_DIR_NODE/workbook-content.twb', 'utf8');
 const out = convertTableauToSigma(xml, {
   connectionId: 'test-conn', database: 'TESTDB', schema: 'TESTSCHEMA', tableMapping: {},
 });
-writeFileSync('$TMP/coverage.json', JSON.stringify(out.relationshipCoverage, null, 2) + '\n');
+writeFileSync('$TMP_NODE/coverage.json', JSON.stringify(out.relationshipCoverage, null, 2) + '\n');
 JS
 node "$TMP/_convert.mjs" 2>"$TMP/convert.err" || { note "FAIL: converter invocation failed"; sed -n '1,20p' "$TMP/convert.err"; fail=1; }
 
