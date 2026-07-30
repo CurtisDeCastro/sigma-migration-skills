@@ -69,7 +69,8 @@ require 'fileutils'
 require 'open3'
 require 'digest'
 require 'set'
-require_relative 'lib/py_resolve' # real-Python resolver (Windows Store-stub safe)
+require_relative 'lib/py_resolve'
+require_relative 'lib/pbi_field_alts' # derived field_map entries must wrap their ALTS too (pie/date-grain render bug) # real-Python resolver (Windows Store-stub safe)
 begin; require_relative 'lib/modeling_advisory'; rescue LoadError; end # shared, vendor-neutral CDW join-cost advisory (optional; synced from shared/)
 
 HERE = __dir__
@@ -1405,11 +1406,14 @@ all_visuals.flat_map { |v| (v['bindings'] || {}).values.flatten }.uniq.each do |
   if (m = r.match(/\A([A-Za-z ]+)\((.+)\)\z/)) && agg_names[m[1].downcase.delete(' ')]
     base = fm_norm[norm_key.call(m[2])]
     next unless base && base['ref'].to_s =~ /\A\[[^\]]+\]\z/
-    field_map[r] = base.merge('ref' => "#{agg_names[m[1].downcase.delete(' ')]}(#{base['ref']})", 'agg' => nil)
+    _fn = agg_names[m[1].downcase.delete(' ')]
+    # wrap the ALTS as well, not just the primary ref — see lib/pbi_field_alts.rb
+    field_map[r] = PbiFieldAlts.wrapped_entry(base) { |ref| "#{_fn}(#{ref})" }
   elsif (m = r.match(/\A(.+?)\.Variation\..*\.(Year|Quarter|Month|Week|Day)\z/i))
     base = fm_norm[norm_key.call(m[1])]
     next unless base && base['ref'].to_s =~ /\A\[[^\]]+\]\z/
-    field_map[r] = base.merge('ref' => "DateTrunc(\"#{m[2].downcase}\", #{base['ref']})", 'agg' => nil)
+    _lvl = m[2].downcase
+    field_map[r] = PbiFieldAlts.wrapped_entry(base) { |ref| "DateTrunc(\"#{_lvl}\", #{ref})" }
   end
 end
 
