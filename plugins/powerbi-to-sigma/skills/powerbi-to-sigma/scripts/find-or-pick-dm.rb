@@ -246,6 +246,25 @@ def normalize_col(s)
   s.to_s.upcase.gsub(/[^A-Z0-9]/, '')
 end
 
+# Does DM fqn `dm` cover workbook fqn `wb`, allowing for a source signature that
+# could not resolve every qualifier? True when the two are equal, or when the
+# SHORTER one's parts are a suffix of the longer's — warehouse names qualify
+# right-to-left (table, schema, database), so a signature over SCHEMA.TABLE is
+# satisfied by a DM on DB.SCHEMA.TABLE, while SCHEMA_A.T vs SCHEMA_B.T stay
+# distinct. A single bare part (just a table name) is deliberately allowed to
+# match too: it is a weaker signal, but the column match (weighted 0.7 vs the
+# table's 0.2) is what actually discriminates, and refusing it would recreate the
+# false-negative this exists to fix. CUSTOM_SQL is a sentinel, never a real path.
+def fqn_covers?(dm, wb)
+  return false if dm.nil? || wb.nil?
+  return dm == wb if dm == 'CUSTOM_SQL' || wb == 'CUSTOM_SQL'
+  d = dm.to_s.split('.')
+  w = wb.to_s.split('.')
+  return false if d.empty? || w.empty?
+  n = [d.size, w.size].min
+  d.last(n) == w.last(n)
+end
+
 # Fetch all DM specs in parallel (10 threads). Some DMs return non-200
 # (archived, permission-restricted, broken refs) — log and continue. Single
 # transient 5xx errors are retried once.
@@ -354,8 +373,28 @@ tableau_col_caption  = tableau_columns.zip(tableau_columns_orig).to_h
 tableau_measure_keys = (sig['measures'] || []).map { |m| "#{normalize_col(m['col'])}/#{m['derivation']}" }
 
 candidates = dm_signatures.map do |dm|
-  # Table match: 1.0 if Tableau tables ⊆ DM tables. 0.5 if partial. 0 if disjoint.
-  shared_tables = (tableau_tables & dm[:tables])
+  # Table match: 1.0 if the workbook's tables ⊆ DM tables. 0.5 if partial. 0 if disjoint.
+  #
+  # Matched by ARITY-AWARE SUFFIX, not string equality. A source signature often
+  # cannot resolve the DATABASE: QuickSight's dataset JSON carries only Schema +
+  # Name (the database lives in the separate DataSource object), so its signature
+  # emits "SCHEMA.TABLE" while every Sigma DM spec stores the full
+  # ["DB","SCHEMA","TABLE"] path. Comparing the joined strings then fails on an
+  # arity mismatch alone — measured live: three data models built FROM
+  # <db>.<schema>.<table> scored table_match 0.0 against a signature over
+  # <schema>.<table>, with column_match 1.0 and zero missing columns.
+  #
+  # That is not cosmetic. table_match 0.0 => covers_tables false => is_superset
+  # false => the wide-tie guard fires and reuse is REFUSED forever, and the score
+  # is capped around 0.7 so it can never clear the auto-pick bar. It is the reason
+  # QuickSight reuse never fired even once the relevance ranking put the right
+  # candidates in front of the scorer, and therefore the reason every migration
+  # posted another duplicate model.
+  #
+  # A shorter FQN matches a longer one when its parts are a SUFFIX of the longer's
+  # (table, then schema, then db — the qualification order), so SCHEMA.TABLE
+  # matches DB.SCHEMA.TABLE while SCHEMA_A.T and SCHEMA_B.T stay distinct.
+  shared_tables = tableau_tables.select { |wt| dm[:tables].any? { |dt| fqn_covers?(dt, wt) } }
   table_match =
     if tableau_tables.empty?
       0.0
@@ -395,7 +434,10 @@ candidates = dm_signatures.map do |dm|
     'column_match'      => col_match.round(2),
     'metric_match'      => metric_match.round(2),
     'shared_tables'     => shared_tables,
-    'missing_tables'    => tableau_tables - dm[:tables],
+    # Same arity-aware rule as shared_tables above — a plain set difference would
+    # report a table as MISSING that the suffix match just resolved, and that
+    # string is what the "MISSING source table(s)" rationale prints to the operator.
+    'missing_tables'    => tableau_tables - shared_tables,
     'shared_columns'    => shared_cols.map(&caption_of),
     'missing_columns'   => (tableau_columns - dm[:columns]).map { |c| tableau_col_caption[c] || c },
     'extra_columns'     => extra_cols_norm.size,
