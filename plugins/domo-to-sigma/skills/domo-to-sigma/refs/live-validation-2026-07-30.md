@@ -315,6 +315,38 @@ Free-form pixel geometry does exist on newer **mason / Domo-App** pages; the abo
 is specifically about classic card pages, which is what the sample content and any
 API-created page are.
 
+### ⭐ `/api/content/v4/pages/layouts/{layoutId}` — the layout endpoint (v4!)
+
+**Correction to the row above:** the original probe swept v1/v2/v3 and concluded
+"no layout endpoint." It missed **v4**, which does exist (surfaced from the
+`brycewc/domo-product-apis` Postman collection):
+
+```
+GET /api/content/v4/pages/layouts/{layoutId}
+GET /api/content/v4/pages/{pageId}/layouts      # also 200
+```
+
+On this instance both return **`200` with `Content-Length: 0`** — an empty body —
+for every page tried, including Domo's own sample page. Why:
+
+- the path takes a **`layoutId`**, not a pageId, and **no `layoutId` field appears
+  anywhere** in the private page surface (`/v1/pages`, `/v3/stacks/{id}/cards`,
+  `?parts=layouts`) for a classic page
+- every page on this instance is `type: "page"` — a **classic card page**
+
+So the working hypothesis, **UNTESTED for lack of a suitable page**: v4 layouts
+serve Domo's newer **Dashboard** page type (mason/DDX), which is exactly the type
+that carries free-form pixel geometry. A classic page has no layout record, hence
+the empty 200.
+
+**If you have a Domo Dashboard-type page, test this first** — it would become
+preference tier 1 in `build-domo-layout.rb` and would beat the screenshot rung
+outright. Document the real payload shape here before wiring it.
+
+Standing lesson: probing v1–v3 and declaring absence was an overclaim. Domo
+versions its private endpoints independently and v4 exists for at least this
+resource.
+
 ## Render endpoint — confirmed, with a correction
 
 ```
