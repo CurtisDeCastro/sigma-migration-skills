@@ -281,7 +281,7 @@ def build_layout_xml(page_id: str, tab: dict, elements_by_cell: dict[str, str]) 
 
 
 def build_workbook(doc: dict, dm_id: str, dm_element_id: str,
-                    columns_by_variable: dict, wb_name: str) -> dict:
+                    columns_by_variable: dict, wb_name: str, folder_id: str | None = None) -> dict:
     cells, cell_warnings = hex_yaml.parse_cells(doc)
     warnings = list(cell_warnings)
     stats = {"metric_cells": 0, "explore_cells": 0, "elements": 0}
@@ -311,7 +311,9 @@ def build_workbook(doc: dict, dm_id: str, dm_element_id: str,
     if layout_xml:
         page["layout"] = layout_xml
 
-    spec = {"name": wb_name, "pages": [page]}
+    spec = {"name": wb_name, "schemaVersion": 1, "pages": [page]}
+    if folder_id:
+        spec["folderId"] = folder_id
     return {"workbook": spec, "warnings": warnings, "stats": stats}
 
 
@@ -325,6 +327,7 @@ def main() -> None:
     ap.add_argument("--columns-map", required=True, help="dm.json's columns_by_variable, or the "
                      "equivalent server-assigned map from readback")
     ap.add_argument("--name", default=None)
+    ap.add_argument("--folder", default=None, help="Sigma folderId to land the workbook in")
     args = ap.parse_args()
 
     doc = hex_yaml.load_project(args.project)
@@ -332,7 +335,7 @@ def main() -> None:
         columns_by_variable = json.load(fh)
 
     wb_name = args.name or f"{hex_yaml.project_title(doc)}"
-    result = build_workbook(doc, args.dm_id, args.dm_element_id, columns_by_variable, wb_name)
+    result = build_workbook(doc, args.dm_id, args.dm_element_id, columns_by_variable, wb_name, args.folder)
 
     for w in result["warnings"]:
         print(f"WARN: {w}", file=sys.stderr)

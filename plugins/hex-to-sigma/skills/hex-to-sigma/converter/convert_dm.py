@@ -30,13 +30,36 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 
 import hex_yaml
 import sigma_ids
 
+_QUOTED_IDENT = re.compile(r'"([^"]+)"')
 
-def build_dm(doc: dict, connection_id: str, dm_name: str) -> dict:
+
+def _select_clause_output_names(statement: str) -> set[str] | None:
+    """Cross-check guard (live-verified 2026-07-30): Hex's cached
+    tableDisplayConfig.columnProperties[] can include STALE entries left over
+    from an earlier version of the SQL — e.g. a join-key column that appears
+    only in a JOIN...ON clause, never in the SELECT list, but still lingers
+    in the cell's preview-grid config. Posting a DM column for a name that
+    isn't genuinely in the query's output 400s at POST ("dependency not
+    found") since Sigma can't resolve [Custom SQL/<name>] against anything.
+
+    Returns the set of quoted identifiers appearing in the SELECT clause
+    (before the first top-level FROM), or None if no FROM was found (caller
+    should skip the cross-check rather than risk dropping everything on a
+    parse failure this heuristic doesn't handle)."""
+    m = re.search(r"\bFROM\b", statement, re.IGNORECASE)
+    if not m:
+        return None
+    select_clause = statement[:m.start()]
+    return set(_QUOTED_IDENT.findall(select_clause))
+
+
+def build_dm(doc: dict, connection_id: str, dm_name: str, folder_id: str | None = None) -> dict:
     """Returns {"dataModel": <spec>, "warnings": [...], "stats": {...},
     "columns_by_variable": {resultVariableName: {colName: clientColumnId}}} —
     the last map is CLIENT-SIDE only, for wiring the workbook spec before
@@ -62,18 +85,34 @@ def build_dm(doc: dict, connection_id: str, dm_name: str) -> dict:
         # applies for the same reason).
         statement = statement.rstrip(";").rstrip()
 
+        select_names = _select_clause_output_names(statement)
+        candidate_columns = cell["columns"]
+        if select_names is not None:
+            stale = [c for c in candidate_columns if c not in select_names]
+            if stale:
+                warnings.append(
+                    f"SQL cell '{cell['label'] or cell['cell_id']}': dropped "
+                    f"{len(stale)} stale column(s) from Hex's cached preview-grid "
+                    f"config that aren't in the SELECT clause's output (e.g. a "
+                    f"join-key referenced only in JOIN...ON, not selected): "
+                    f"{', '.join(stale)}."
+                )
+            candidate_columns = [c for c in candidate_columns if c in select_names]
+
         element_id = sigma_ids.sigma_short_id()
         col_ids: dict[str, str] = {}
         cols = []
-        for col_name in cell["columns"]:
+        for col_name in candidate_columns:
             col_id = sigma_ids.sigma_short_id()
             cols.append({
                 "id": col_id,
                 "name": col_name,
-                # sql-element column refs MUST be [Custom SQL/ALIAS] (the raw SQL
-                # output alias) — a bare [Display Name] ref POSTs 200 but resolves
-                # to type "error" at query time (live-verified in the family; see
-                # metabase design-notes.md "Live-verified contracts").
+                # [Custom SQL/ALIAS] — live-verified 2026-07-30: a bare [ALIAS] ref
+                # here self-references the column's OWN name and compiles to a
+                # "Ref Cycle" error (confirmed via GET .../columns). "Custom SQL" is
+                # Sigma's fixed sentinel for "the raw output of this element's own
+                # SQL statement" — not a cross-element name — matching Metabase's
+                # confirmed finding for the same native-SQL-element shape.
                 "formula": f"[Custom SQL/{col_name}]",
             })
             col_ids[col_name] = col_id
@@ -95,8 +134,11 @@ def build_dm(doc: dict, connection_id: str, dm_name: str) -> dict:
 
     dm = {
         "name": dm_name,
+        "schemaVersion": 1,
         "pages": [{"id": sigma_ids.sigma_short_id(), "name": "Page 1", "elements": elements}],
     }
+    if folder_id:
+        dm["folderId"] = folder_id
 
     return {
         "dataModel": dm,
@@ -112,11 +154,12 @@ def main() -> None:
     ap.add_argument("--connection", required=True, help="Sigma warehouse connectionId "
                      "(full UUID — a short prefix fails with 'Source not found')")
     ap.add_argument("--name", default=None, help="data model name (default: '<project title> DM')")
+    ap.add_argument("--folder", default=None, help="Sigma folderId to land the data model in")
     args = ap.parse_args()
 
     doc = hex_yaml.load_project(args.project)
     dm_name = args.name or f"{hex_yaml.project_title(doc)} DM"
-    result = build_dm(doc, args.connection, dm_name)
+    result = build_dm(doc, args.connection, dm_name, args.folder)
 
     for w in result["warnings"]:
         print(f"WARN: {w}", file=sys.stderr)

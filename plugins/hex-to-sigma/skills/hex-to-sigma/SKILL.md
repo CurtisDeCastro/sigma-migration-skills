@@ -6,12 +6,14 @@ user-invocable: true
 
 # Hex → Sigma
 
-> **Status: converter validated against a real fixture (structural, not yet
-> live-Sigma).** `corpus/hex/commerce/` proves the JSON shape end-to-end
-> (1 DM element / 9 columns, 6 workbook elements, 0 warnings) against a real
-> exported Hex project. The Sigma POST path (`post-and-readback.rb`) has not
-> been run against a live org yet — that's the next gate before this skill
-> is production-validated, same bar as every sibling skill.
+> **Status: live-validated through Phase 5 (2026-07-30).** DM POST + readback,
+> workbook POST + readback, layout lint, and the deeper compiled-SQL check
+> (`sigma-workbooks/scripts/verify-workbook.sh`) all passed clean against
+> Phil's real Sigma org — 8/8 DM columns, 10/10 workbook columns, 6/6
+> elements, zero `type=error`, zero unresolved/circular formula refs. Phase 6
+> (numeric parity vs the known baseline) is pending a visual/query
+> confirmation, not blocked on anything structural. `corpus/hex/commerce/`
+> covers the structural regression test (no live org needed to re-run it).
 
 > Phase numbering is local to this skill; the canonical Assess→Discover→
 > Reuse→Convert→Post-DM→Build→Layout→Parity→Security→Enhance arc and this
@@ -55,6 +57,24 @@ The user exports their target project and hands you the file path.
   same dependency `looker-to-sigma` and `microstrategy-to-sigma` already
   carry for their own YAML-parsing scripts. `Ruby` (any recent) for
   `post-and-readback.rb` and the vendored shared gates.
+
+**Auth gotcha (found 2026-07-30, unresolved — flag before assuming
+`get_token.py`/`get-token.sh` just work):** this family's shared auth
+scripts (`sigma_rest.rb`/`.py`, `get_token.py`, `get-token.sh`) exchange
+client credentials via an HTTP **Basic Auth header**. Against a freshly
+created API client in Phil's org, that got a `400 {"code":"invalid_request",
+"message":"Invalid access/refresh token"}` on every attempt (three separate
+fresh key pairs, all formatted correctly — 64/128-char id/secret, no
+whitespace/encoding issues). Sigma's own official Postman guide
+(`quickstarts.sigmacomputing.com/guide/sigma_api_with_postman`) documents
+`client_id`/`client_secret` as **body form params** with **No Auth**
+instead — switching to that shape got `200` immediately with the exact same
+credentials. Not yet determined whether this is org-specific or affects the
+whole family; **not fixed in the canonical shared scripts** (that's a
+cross-cutting decision beyond this skill — see corpus MANIFEST for the raw
+finding). If `get_token.py --print-token` 400s with that exact message,
+this is almost certainly why — mint by hand with body-form params as a
+workaround rather than assuming the credentials themselves are bad.
 
 ## Phase 0 — Assess (C1)
 
@@ -139,11 +159,34 @@ python3 converter/convert_workbook.py <project>.hex.yaml \
   bar/line/area/scatter/pie (e.g. `histogram`) are skipped with a loud
   warning — never faked.
 
-**One flagged assumption** (verify on the first live POST+readback):
-column formulas from the workbook are qualified `[Custom SQL/<column>]` —
-matching metabase-to-sigma's confirmed live finding that "Sigma does NOT
-honor sql-element names (all read back 'Custom SQL')" for SQL-sourced
-elements. Our own DM element is deliberately unnamed for the same reason.
+**Formula prefix — confirmed, not just assumed (live-verified 2026-07-30):**
+column formulas are qualified `[Custom SQL/<column>]`, matching
+metabase-to-sigma's finding that "Sigma does NOT honor sql-element names
+(all read back 'Custom SQL')" for SQL-sourced elements. This applies even to
+the DM element's OWN columns referencing their OWN SQL source — a bare
+`[<column>]` self-reference was tried first and compiles to a **`Ref Cycle`**
+error (a column named `Brand` with formula `[Brand]` is looking itself up by
+name; confirmed via `GET /v2/dataModels/{id}/columns`). `Custom SQL/` is
+Sigma's fixed sentinel for "this element's own raw SQL output," not a
+cross-element name — don't read `sigma-workbooks`' "bare `[col]` = same
+element's own columns" rule as applying to a sql-source element's own
+output columns.
+
+**Stale-column guard (live-verified 2026-07-30):** Hex's cached
+`tableDisplayConfig.columnProperties[]` can list a column that isn't
+actually in the SQL cell's `SELECT` output — e.g. a join key referenced only
+in a `JOIN ... ON` clause, left over in the cache from an earlier query
+edit. Posting a DM column for it 400s ("dependency not found"). `convert_dm.py`
+now cross-checks `columnProperties` against the SELECT clause's quoted
+identifiers (everything before the first top-level `FROM`) and drops
+anything not genuinely selected, with a loud warning — see
+`_select_clause_output_names()`.
+
+**Both DM and workbook specs require `schemaVersion` and `folderId`**
+(`convert_dm.py --folder <id>`, `convert_workbook.py --folder <id>`) — POST
+400s with `"schemaVersion: Invalid 1: undefined"` without it. `1` is
+accepted for a fresh CREATE; the `sigma-workbooks` docs warn against
+hardcoding it for an UPDATE (re-fetch from the existing spec instead).
 
 ## Phase 3 — Post the data model + read back (C5) ← HARD GATE
 
@@ -188,6 +231,17 @@ the same tables, re-run the SQL cell's query directly against the warehouse
 and diff against each Sigma element's value — same pattern as the rest of
 the family (not via Hex's Runs API, which only triggers/monitors published
 app refreshes, not something this skill needs).
+
+**Before the numeric check**, run the deeper compiled-SQL verify (catches
+what the readback's `type=error` guard can miss — Sigma accepts some bad
+specs at POST and only surfaces the failure as a string literal baked into
+the compiled query, e.g. `select 'Unknown column "[X]"' ...`):
+
+```bash
+bash ../sigma-authoring/skills/sigma-workbooks/scripts/verify-workbook.sh <workbookId>
+```
+
+Then the numeric gate:
 
 ```bash
 ruby scripts/assert-phase6-ran.rb --workdir <workdir> --workbook-id <id>

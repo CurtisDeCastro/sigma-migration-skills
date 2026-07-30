@@ -30,9 +30,23 @@ and microstrategy-to-sigma's YAML-parsing scripts in this repo).
 ## Features exercised
 
 - One `SQL` cell (4-table join, verbatim SQL) → one native-SQL DM element,
-  9 columns, `[Custom SQL/<alias>]` formula refs (Hex aliases are already
+  8 columns, `[Custom SQL/<alias>]` formula refs (Hex aliases are already
   human-readable — no `sigmaDisplayName()` reprocessing, unlike Metabase's
-  machine-generated native-SQL aliases).
+  machine-generated native-SQL aliases). **Live-verified 2026-07-30**: a
+  bare `[<alias>]` self-ref (instead of the `Custom SQL/` prefix) compiles
+  to a `Ref Cycle` error at readback — a column named `X` with formula `[X]`
+  is looking itself up by name. `[Custom SQL/<alias>]` is Sigma's fixed
+  sentinel for "this element's own raw SQL output," not a cross-element name.
+- **Stale-column guard** (live-verified 2026-07-30): this fixture's SQL cell
+  carries a `Brand ID` entry in Hex's cached `tableDisplayConfig.
+  columnProperties[]` that isn't actually in the query's `SELECT` list — it
+  only appears in a `JOIN ... ON` clause. Hex's preview-grid cache didn't
+  clean it up after an earlier query edit. Posting a DM column for it 400s
+  ("dependency not found" — Sigma can't resolve a source-column reference
+  that doesn't exist in the SQL output). `convert_dm.py` now cross-checks
+  `columnProperties` against the SELECT clause and drops anything not
+  genuinely selected, with a loud warning — hence 8 columns and 1 warning
+  below, not 9/0.
 - Two `METRIC` cells → `kpi-chart` elements, `Sum(...)` aggregation,
   Hex `displayFormat` (CURRENCY/NUMBER) → Sigma number format.
 - Four `EXPLORE` cells → `bar-chart` ×3 (two horizontal, one vertical/column)
@@ -42,18 +56,24 @@ and microstrategy-to-sigma's YAML-parsing scripts in this repo).
   correction from this skill's initial design: Sigma has a first-class
   top-n chart filter, confirmed against `sigma-workbooks/reference/
   specification/charts.md`).
-- Zero warnings — this fixture has no Python (CODE) cells, no unsupported
-  chart types, no multi-series/combo charts. Those are the next fixtures to
-  add once a source project exercises them (see SKILL.md "Gaps").
+- No Python (CODE) cells, no unsupported chart types, no multi-series/combo
+  charts in this fixture. Those are the next fixtures to add once a source
+  project exercises them (see SKILL.md "Gaps").
 
 ## Known parity reference
 
 Same Commerce dataset as the Cognos QS bench: Revenue **`$39,759,625.515`**,
 Quantity **`91,206`**, `COMMERCE` row count `613,002` — confirmed live in
 both the Hex source (`developers_migrating_from_hex_made_easy` QuickStart)
-and the underlying Snowflake warehouse. Live Sigma-side parity (POST +
-readback + query) is NOT yet run — this corpus case only proves the
-converter's JSON shape; it does not touch a live Sigma org.
+and the underlying Snowflake warehouse.
+
+**Live Sigma-side test (2026-07-30, Phil's org)**: DM POST + readback
+succeeded after fixing the bare-ref and stale-column issues above — see
+`SKILL.md` for the full live-run log and the auth-method finding (Sigma's
+token endpoint required body-form `client_id`/`client_secret` params, not
+this skill family's usual HTTP Basic Auth header, for Phil's newly-created
+API credentials — unresolved whether that's org-specific or a broader
+family issue; flagged, not fixed in the canonical shared auth scripts).
 
 ## Expectations
 
@@ -66,10 +86,10 @@ converter's JSON shape; it does not touch a live Sigma org.
     "data-model.json": {
       "pages": 1,
       "elements": 1,
-      "columns": 9,
+      "columns": 8,
       "metrics": 0,
       "relationships": 0,
-      "warnings": 0
+      "warnings": 1
     },
     "workbook.json": {
       "pages": 1,
