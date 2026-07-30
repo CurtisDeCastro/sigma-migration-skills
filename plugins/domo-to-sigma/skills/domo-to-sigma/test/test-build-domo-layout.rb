@@ -106,9 +106,13 @@ Dir.mktmpdir('domo-build-layout-classic') do |dir|
   # '_collection'/'_size'/'_pageOrder' (merge_geometry's Bug 5 fields). k1+k2
   # are two 'medium' cards in collection "Team Alpha" -> must land side by
   # side in ONE row. k3 is alone in "Team Beta" with an UNKNOWN size token ->
-  # must warn and default to 'medium'. k4 has no collection and no size at
-  # all -> must still be placed (trailing ungrouped section, default
-  # 'medium'), never silently dropped.
+  # must warn and default to 'medium'. k4 has NO collection and NO size token
+  # at all (the true "Domo gave us nothing" shape, refs/
+  # layout-visual-qa.md's "2a" kind-aware default composition) -> must still
+  # be placed (trailing ungrouped section), never silently dropped, and — as
+  # a table-kind card with no width signal of its own — gets the FULL-WIDTH
+  # table treatment (compose_kind_aware_rows' table_rows_for), not the flat
+  # 'medium' 50% every other kind used to get here too.
   w.call('cards.json', [
     { 'id' => 'k1', 'title' => 'Alpha One', 'chartType' => 'badge_vert_bar', '_size' => 'medium',
       '_collection' => { 'id' => 100, 'title' => 'Team Alpha', 'index' => 0 }, '_pageOrder' => 0 },
@@ -158,7 +162,15 @@ Dir.mktmpdir('domo-build-layout-classic') do |dir|
   ok(zk1['x_pct'] != zk2['x_pct'], 'k1/k2 sit at DISTINCT x_pct on that shared row — a real 2D grid')
   eq(zk1['w_pct'], 50.0, "a 'medium' card is 3 of Domo's 6 native grid cols -> 50% width")
   eq(zk3['w_pct'], 50.0, "k3's UNRECOGNIZED size token defaulted to 'medium' -> still 50% width, not dropped/zero")
-  eq(zk4['w_pct'], 50.0, 'k4 (no collection, no size at all) still got placed at the medium default width')
+  # k4 alone has NO width signal at all (no '_size' key, no preferred*): the
+  # kind-aware default composition applies, and its kind (chartType 'table',
+  # no sigmaKindHint/chart-specs override here) puts it on its OWN full-width
+  # row — the fix this task exists for (a table used to get the same flat
+  # 'medium' 50% as everything else; see git history of this assertion).
+  eq(zk4['w_pct'], 100.0, "k4 (table kind, no width signal at all) gets the FULL-WIDTH table " \
+                          'treatment, not the old flat 50% default')
+  eq(zk4['chart_kind'], 'table', "k4's zone is tagged chart_kind 'table' (resolved via kind_hint(chartType), " \
+                                 'no sigmaKindHint/chart-specs override present in this fixture)')
   ok(zk4['y_pct'] > zk3['y_pct'] && zk3['y_pct'] > zk1['y_pct'],
      'section order preserved end to end: Team Alpha row, then Team Beta row, then the trailing ungrouped card')
 
@@ -176,6 +188,68 @@ Dir.mktmpdir('domo-build-layout-classic') do |dir|
   bby_row = bcontent.group_by { |z| z['y_pct'].to_f.round(1) }
   bgrid = bby_row.values.any? { |zs| zs.map { |z| z['x_pct'].to_f.round(1) }.uniq.size >= 2 }
   ok(!bgrid, "'Totally Blank' correctly classifies as 'stack' (no geometry signal at all was ever provided)")
+end
+
+# ===========================================================================
+# Phase 5e visual-QA fix, CLI/subprocess level (unit coverage of the same
+# fix lives in test-layout-tag.rb, function-level). Fixture SHAPE derived
+# from a real 15-card/3-page no-geometry live discovery run (anonymized) —
+# see test/fixtures/domo-nogeom/: EVERY card carries the live API-created-
+# card shape ('_size' => "", no '_collection'), so the WHOLE run exercises
+# rung 2a (compose_kind_aware_rows), not the per-card token-default path.
+# Also exercises the CLI's chart-specs.json wiring end to end: card 2004's
+# cards.json sigmaKindHint says 'bar-chart', but chart-specs.json (as
+# build-workbook.rb would write it after resolving the real element) says
+# 'combo-chart' for that same card — the resolved zone must reflect the
+# LATTER, proving load_chart_specs_kind_map is actually wired into the real
+# entrypoint, not just reachable in isolation.
+# ===========================================================================
+Dir.mktmpdir('domo-build-layout-nogeom') do |dir|
+  fixture = File.join(__dir__, 'fixtures', 'domo-nogeom')
+  %w[cards.json pages.json chart-specs.json].each do |f|
+    FileUtils.cp(File.join(fixture, f), File.join(dir, f))
+  end
+
+  env = { 'DOMO_DISCOVERY_DIR' => dir }
+  out = IO.popen(env, ['ruby', File.join(SCRIPTS, 'build-domo-layout.rb')], err: [:child, :out], &:read)
+  status = $?.success?
+  ok(status, "build-domo-layout.rb exits 0 on the anonymized no-geometry fixture\n#{out unless status}")
+
+  dashboards = JSON.parse(File.read(File.join(dir, 'dashboard-layout.json')))
+  overview = dashboards.find { |d| d['dashboard'] == 'Overview' }
+  detail   = dashboards.find { |d| d['dashboard'] == 'Detail' }
+  ok(overview && detail, 'both pages produced a dashboard through the real CLI entrypoint')
+
+  # ---- "Overview": 4 interleaved KPIs -> one compact row; 2 charts -> paired --
+  ozones = overview['zones']
+  kpi_ids = %w[1001 1003 1004 1006]
+  kpi_zones = kpi_ids.map { |id| ozones.find { |z| z['id'].to_s == id } }
+  chart_zones = %w[1002 1005].map { |id| ozones.find { |z| z['id'].to_s == id } }
+  ok(kpi_zones.all? && chart_zones.all?, 'every card from the fixture was placed')
+
+  eq(kpi_zones.map { |z| z['y_pct'] }.uniq.length, 1,
+     'all 4 KPIs (interleaved with 2 charts in the source _pageOrder, exactly like the real ' \
+     'live discovery run) share ONE row through the real CLI entrypoint')
+  eq(kpi_zones.map { |z| z['w_pct'] }, [25.0, 25.0, 25.0, 25.0], '4 KPIs sharing a row -> 25% each end to end')
+  eq(chart_zones.map { |z| z['y_pct'] }.uniq.length, 1, 'the 2 charts pair onto their OWN single row')
+  eq(chart_zones.map { |z| z['w_pct'] }, [50.0, 50.0], 'the 2 paired charts are 50% each end to end')
+  ok(chart_zones.first['y_pct'] > kpi_zones.first['y_pct'], 'the chart row sits below the KPI row')
+
+  # ---- "Detail": chart-specs.json's resolved kind wins over sigmaKindHint --
+  dzones = detail['zones']
+  z_combo = dzones.find { |z| z['id'].to_s == '2004' }
+  ok(z_combo, 'card 2004 was placed')
+  eq(z_combo['chart_kind'], 'combo-chart',
+     "card 2004's zone reflects chart-specs.json's resolved 'combo-chart' — NOT cards.json's own " \
+     "sigmaKindHint ('bar-chart') — proving the CLI entrypoint actually loads and prefers " \
+     'discovery/chart-specs.json (load_chart_specs_kind_map), not just in an isolated unit call')
+  eq(z_combo['w_pct'], 100.0,
+     "card 2004 is the ODD one out among 3 charts on 'Detail' (donut+bar pair, then this lone " \
+     'trailing chart) -> full width, exactly as test-layout-tag.rb\'s function-level Page B case')
+
+  ztable = dzones.find { |z| z['id'].to_s == '2003' }
+  eq(ztable['w_pct'], 100.0, "'Detail Table' gets full width")
+  ok(ztable['h_pct'] > z_combo['h_pct'], "the table's row is taller than a chart row end to end")
 end
 
 puts

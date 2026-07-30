@@ -201,5 +201,234 @@ pixel_cards = [{ 'id' => 'p1', 'title' => 'Pix', 'chartType' => 'table', 'x' => 
 pixel_dash = build_dashboard_for_page('Pixel Page', pixel_cards)
 eq(pixel_dash['zones'].first['id'], 'p1', 'a page WITH real x/y/w/h still uses rung 1 (build_dashboard) unchanged')
 
+# ===========================================================================
+# Phase 5e visual-QA fix (refs/layout-visual-qa.md, refs/
+# live-validation-2026-07-30.md): "2a" kind-aware default composition.
+# Real live discovery (a 15-card / 3-page no-geometry run) showed EVERY card
+# with '_size' => "" and no collections at all — the exact rung-2 shape
+# below — yet the OLD build_dashboard_from_collections gave every card the
+# same flat 'medium' width/height regardless of kind, so 4 KPIs each got a
+# full chart-sized band instead of sharing one compact row. These tests
+# exercise the fix at the function level; test-build-domo-layout.rb covers
+# the same fix through the real CLI subprocess with a fixtures/ dataset.
+# ===========================================================================
+
+puts "== composition_class: buckets both the Sigma element-kind vocabulary AND kind_hint's logical vocabulary =="
+eq(composition_class('kpi-chart'), :kpi, "Sigma element kind 'kpi-chart' -> :kpi")
+eq(composition_class('kpi'), :kpi, "kind_hint's logical 'kpi' -> :kpi (same bucket, different vocabulary)")
+eq(composition_class('table'), :table, "'table' -> :table")
+eq(composition_class('pivot-table'), :table, "'pivot-table' -> :table (chart-specs/Sigma-only kind, never emitted by kind_hint)")
+eq(composition_class('bar-chart'), :chart, "'bar-chart' -> :chart")
+eq(composition_class('combo-chart'), :chart, "'combo-chart' -> :chart (a chart-specs-only resolved kind kind_hint never emits)")
+eq(composition_class('donut-chart'), :chart, "'donut-chart' -> :chart")
+eq(composition_class('control'), :control, "'control' (a Sigma filter element) -> :control (its own house-style band)")
+eq(composition_class('filter'), :control, "kind_hint's logical 'filter' -> :control (same bucket, different vocabulary)")
+eq(composition_class('text'), :other, "'text' -> :other (not a named house-style band)")
+eq(composition_class(nil), :other, 'nil -> :other, never raises')
+
+puts "== element_kind_for: chart-specs.json beats sigmaKindHint beats kind_hint(chartType) =="
+kind_map = { 'el-42' => 'combo-chart' }
+card_all_three = { 'id' => 42, 'chartType' => 'badge_horiz_bar', 'sigmaKindHint' => 'bar-chart' }
+eq(element_kind_for(card_all_three, kind_map), 'combo-chart',
+   "chart-specs.json's resolved kind wins even though sigmaKindHint/chartType both say a plain bar — mirrors the " \
+   "real live divergence (a badge_line_bar card whose EARLIER sigmaKindHint guess said 'bar-chart' but " \
+   "build-workbook.rb's own final resolution promoted it to 'combo-chart')")
+card_hint_only = { 'id' => 99, 'chartType' => 'badge_horiz_bar', 'sigmaKindHint' => 'bar-chart' }
+eq(element_kind_for(card_hint_only, {}), 'bar-chart', 'no chart-specs entry -> falls back to sigmaKindHint')
+card_chart_type_only = { 'id' => 100, 'chartType' => 'badge_vert_bar' }
+eq(element_kind_for(card_chart_type_only, {}), 'bar-chart',
+   'no chart-specs entry, no sigmaKindHint -> falls back to kind_hint(chartType)')
+
+puts "== zone_chart_kind_for: normalizes to the ZONE vocabulary (literal 'kpi'/'filter'), passes through the rest =="
+eq(zone_chart_kind_for({ 'id' => 1, 'sigmaKindHint' => 'kpi-chart' }, {}), 'kpi',
+   "resolved 'kpi-chart' -> zone tag 'kpi' (kpi_like_zone? contract, same as build_dashboard's own kind_hint)")
+eq(zone_chart_kind_for({ 'id' => 2, 'sigmaKindHint' => 'control' }, {}), 'filter', "resolved 'control' -> zone tag 'filter'")
+eq(zone_chart_kind_for({ 'id' => 3, 'sigmaKindHint' => 'combo-chart' }, {}), 'combo-chart',
+   'any other resolved kind passes through UNCHANGED (min_rows_for_zone only special-cases kpi/table/pivot-table)')
+
+puts "== has_width_signal?: a REAL signal (non-empty token or numeric preferred*) vs genuinely none =="
+ok(has_width_signal?({ '_size' => 'medium' }), "a known non-empty token IS a real signal")
+ok(has_width_signal?({ '_size' => 'huge-token' }), "an UNRECOGNIZED non-empty token still counts as a real signal " \
+                                                    '(Domo told us something, even if we don\'t know its span)')
+ok(has_width_signal?({ 'preferredFullWidth' => 4 }), 'a numeric preferredFullWidth is a real signal')
+ok(has_width_signal?({ 'preferredFullHeight' => 2 }), 'a numeric preferredFullHeight is a real signal')
+ok(!has_width_signal?({ '_size' => '' }), "the live API-created-card shape ('_size' => \"\") is NOT a real signal")
+ok(!has_width_signal?({ '_size' => '   ' }), 'a blank/whitespace-only token is NOT a real signal')
+ok(!has_width_signal?({}), 'no _size key and no preferred* fields at all is NOT a real signal')
+
+puts "== balanced_chunk_sizes: n items into groups of <= max, sizes differ by <= 1, remainder to the LAST groups =="
+eq(balanced_chunk_sizes(4, 6), [4], 'n=4 <= max -> one row of 4 (the common 4-KPI case)')
+eq(balanced_chunk_sizes(6, 6), [6], 'n=6 == max -> one row of 6')
+eq(balanced_chunk_sizes(7, 6), [3, 4], 'n=7 > max -> [3,4], NOT the greedy [6,1] straggler')
+eq(balanced_chunk_sizes(1, 6), [1], 'n=1 -> a single row of 1 (still handled, see kpi_row_widths for its width)')
+eq(balanced_chunk_sizes(0, 6), [], 'n=0 -> no rows')
+
+puts "== kpi_row_widths: even split of Domo's native 6-col row; a LONE kpi is capped at half, not full width =="
+eq(kpi_row_widths(4), [1.5, 1.5, 1.5, 1.5], "4 KPIs -> 1.5 native units each (25% of 6, i.e. 6-of-24 Sigma cols each)")
+eq(kpi_row_widths(3), [2.0, 2.0, 2.0], '3 KPIs -> 2.0 each (33.3%, i.e. 8-of-24 Sigma cols each)')
+eq(kpi_row_widths(2), [3.0, 3.0], '2 KPIs -> 3.0 each (50%, i.e. 12-of-24 Sigma cols each)')
+eq(kpi_row_widths(6), [1.0] * 6, '6 KPIs -> 1.0 each (16.7%, i.e. 4-of-24 Sigma cols each)')
+eq(kpi_row_widths(1), [3.0], 'a LONE kpi (no peers) is still capped at HALF width (divisor clamped to 2), never full-row')
+
+# ===========================================================================
+# compose_kind_aware_rows / build_dashboard_from_collections, end to end —
+# fixture SHAPE derived from a real 15-card/3-page no-geometry live discovery
+# run (anonymized; see also test/fixtures/domo-nogeom for the CLI-level
+# equivalent). Page A mirrors that run's 6-card page: 4 KPIs interleaved with
+# 2 charts in _pageOrder (KPI, chart, KPI, KPI, chart, KPI) — DELIBERATELY
+# interleaved, not pre-grouped, because that interleaving is exactly what a
+# naive "consecutive runs only" grouping would fail to fix (see this
+# function's own header comment on the file). All cards share the live
+# API-created-card shape: '_size' => "", no '_collection', '_pageOrder' only.
+# ===========================================================================
+puts "== compose_kind_aware_rows / build_dashboard_from_collections: interleaved KPI/chart page -> " \
+     "ONE compact KPI row + ONE paired chart row =="
+page_a = [
+  { 'id' => 'u1', 'title' => 'Metric Units',   'chartType' => 'badge_singlevalue', 'sigmaKindHint' => 'kpi-chart',
+    '_size' => '', '_pageOrder' => 0 },
+  { 'id' => 'c1', 'title' => 'Trend Line',     'chartType' => 'badge_symbolline',  'sigmaKindHint' => 'line-chart',
+    '_size' => '', '_pageOrder' => 1 },
+  { 'id' => 'u2', 'title' => 'Metric Revenue', 'chartType' => 'badge_singlevalue', 'sigmaKindHint' => 'kpi-chart',
+    '_size' => '', '_pageOrder' => 2 },
+  { 'id' => 'u3', 'title' => 'Metric Margin',  'chartType' => 'badge_singlevalue', 'sigmaKindHint' => 'kpi-chart',
+    '_size' => '', '_pageOrder' => 3 },
+  { 'id' => 'c2', 'title' => 'Category Bar',   'chartType' => 'badge_horiz_bar',   'sigmaKindHint' => 'bar-chart',
+    '_size' => '', '_pageOrder' => 4 },
+  { 'id' => 'u4', 'title' => 'Metric Orders',  'chartType' => 'badge_singlevalue', 'sigmaKindHint' => 'kpi-chart',
+    '_size' => '', '_pageOrder' => 5 },
+]
+dash_a = build_dashboard_from_collections('Page A', page_a)
+ok(dash_a, 'a page with NO width signal on any card still produces a dashboard')
+zones_a = dash_a['zones']
+
+kpi_zones = %w[u1 u2 u3 u4].map { |id| zones_a.find { |z| z['id'] == id } }
+chart_zones = %w[c1 c2].map { |id| zones_a.find { |z| z['id'] == id } }
+ok(kpi_zones.all?, 'all 4 KPI zones were placed')
+ok(chart_zones.all?, 'both chart zones were placed')
+
+eq(kpi_zones.map { |z| z['y_pct'] }.uniq.length, 1,
+   'all 4 KPIs share ONE y-band — a single ROW, not one-per-band (the bug this task fixes) — ' \
+   'even though u1/u2/u3/u4 were interleaved with c1/c2 in the source _pageOrder')
+eq(kpi_zones.map { |z| z['chart_kind'] }.uniq, ['kpi'], "every KPI zone is tagged chart_kind 'kpi' (kpi_like_zone? contract)")
+eq(kpi_zones.map { |z| z['w_pct'] }, [25.0, 25.0, 25.0, 25.0],
+   '4 KPIs sharing a row -> exactly 25% each (6-of-24 Sigma cols), per WHAT TO BUILD #1')
+eq(kpi_zones.map { |z| z['x_pct'] }, [0.0, 25.0, 50.0, 75.0],
+   'the 4 KPI zones sit at DISTINCT, sequential x_pct — a real row, not stacked at x=0 — ' \
+   'IN THEIR OWN _pageOrder (u1 < u2 < u3 < u4), i.e. source order preserved WITHIN the KPI grouping (WHAT TO BUILD #4)')
+
+eq(chart_zones.map { |z| z['y_pct'] }.uniq.length, 1, 'both chart zones share ONE y-band — paired on one row')
+ok(chart_zones.first['y_pct'] > kpi_zones.first['y_pct'], 'the chart row sits BELOW the KPI row (house-style band order)')
+eq(chart_zones.map { |z| z['w_pct'] }, [50.0, 50.0], '2 charts pairing -> exactly 50% each (12-of-24 Sigma cols), per WHAT TO BUILD #2')
+eq(chart_zones.map { |z| z['x_pct'] }, [0.0, 50.0],
+   'the 2 chart zones sit side by side in their OWN _pageOrder (c1 before c2), not stacked')
+eq(chart_zones.map { |z| z['chart_kind'] }, %w[line-chart bar-chart],
+   "each chart zone keeps its OWN resolved kind (from sigmaKindHint here) — not flattened to a generic 'chart'")
+
+ok(chart_zones.first['h_pct'] > kpi_zones.first['h_pct'],
+   'the chart row is noticeably TALLER than the KPI row (CHART_ROW_HEIGHT_UNITS > KPI_ROW_HEIGHT_UNITS) — ' \
+   'a KPI must never occupy the same footprint as a full chart (WHAT TO BUILD #1)')
+
+content_a = ZoneCensus.content_zones(zones_a)
+by_row_a = content_a.group_by { |z| z['y_pct'].to_f.round(1) }
+grid_a = by_row_a.values.any? { |zs| zs.map { |z| z['x_pct'].to_f.round(1) }.uniq.size >= 2 }
+ok(grid_a, "the kind-aware composition still classifies as a 'grid' under migrate-domo.rb's own layout-2d.flag rule")
+
+# ---- Page B: chart/chart/table/chart (a run of 3 charts, one lone trailing) --
+puts "== compose_kind_aware_rows: an ODD number of charts pairs 2-up, the trailing lone chart gets FULL width; " \
+     "a table always gets its own full-width row =="
+page_b = [
+  { 'id' => 'd1', 'title' => 'Share Donut',  'chartType' => 'badge_donut',          'sigmaKindHint' => 'donut-chart',
+    '_size' => '', '_pageOrder' => 0 },
+  { 'id' => 'b1', 'title' => 'Compare Bar',  'chartType' => 'badge_vert_stackedbar', 'sigmaKindHint' => 'bar-chart',
+    '_size' => '', '_pageOrder' => 1 },
+  { 'id' => 't1', 'title' => 'Detail Table', 'chartType' => 'badge_table',          'sigmaKindHint' => 'table',
+    '_size' => '', '_pageOrder' => 2 },
+  { 'id' => 'b2', 'title' => 'Margin Bar',   'chartType' => 'badge_vert_bar',       'sigmaKindHint' => 'bar-chart',
+    '_size' => '', '_pageOrder' => 3 },
+]
+dash_b = build_dashboard_from_collections('Page B', page_b)
+zones_b = dash_b['zones']
+zd1 = zones_b.find { |z| z['id'] == 'd1' }
+zb1 = zones_b.find { |z| z['id'] == 'b1' }
+zt1 = zones_b.find { |z| z['id'] == 't1' }
+zb2 = zones_b.find { |z| z['id'] == 'b2' }
+
+eq(zd1['y_pct'], zb1['y_pct'], 'd1 and b1 (first pair, in _pageOrder) share a row')
+eq([zd1['w_pct'], zb1['w_pct']], [50.0, 50.0], 'the first pair is 50%/50% (paired 2-up)')
+eq([zd1['x_pct'], zb1['x_pct']], [0.0, 50.0], 'd1 (pageOrder 0) sits left of b1 (pageOrder 1) — source order preserved')
+
+ok(zb2['y_pct'] != zd1['y_pct'], 'b2 (the odd one out — 3rd chart, no partner) is on its OWN row, not crammed into the first pair')
+eq(zb2['w_pct'], 100.0, 'the trailing UNPAIRED chart gets FULL width, per WHAT TO BUILD #2\'s explicit exception')
+eq(zb2['x_pct'], 0.0, 'the full-width trailing chart starts at x_pct 0')
+
+eq(zt1['w_pct'], 100.0, 'the table gets FULL width, per WHAT TO BUILD #3')
+ok(zt1['h_pct'] > zd1['h_pct'], "the table's row is TALLER than a chart row (TABLE_ROW_HEIGHT_UNITS > CHART_ROW_HEIGHT_UNITS) " \
+                                '— tables need more vertical room, per WHAT TO BUILD #3')
+eq(zt1['chart_kind'], 'table', "the table zone is tagged chart_kind 'table'")
+
+# ===========================================================================
+# Spec refinement (post-brief coordinator note): the default composition
+# order is CONTROLS -> KPIs -> charts -> tables — a full-width control band
+# FIRST, never left loose/interleaved among charts (refs/layout-visual-qa.md's
+# "Building clean in the first place" table: Header -> Control row -> KPI row
+# -> Chart row -> Detail table; also millersigma:branded-dashboard-format's
+# header -> filter-bar -> KPI row -> trend -> detail shape). This confirms
+# control_rows_for is wired FIRST in compose_kind_aware_rows, ahead of every
+# other band, and that a lone control still spans the FULL band width (no
+# half-width floor the way a lone KPI has).
+# ===========================================================================
+puts "== control_rows_for: a full-width band, side by side, ahead of everything else =="
+eq(control_rows_for([]), [], 'no controls -> no band at all (never an empty row)')
+one_ctl = [{ 'id' => 'ctl1' }]
+r1 = control_rows_for(one_ctl)
+eq(r1.length, 1, 'one control -> one row')
+eq(r1.first['row'], [[one_ctl.first, 0.0, 6.0, 'filter', true]],
+   'a SOLE control spans the FULL row width (6-of-6 native units, unlike a lone KPI\'s half-width cap) ' \
+   'and is tagged kind filter/is_filter=true')
+eq(r1.first['height'], CONTROL_ROW_HEIGHT_UNITS, 'the control band uses CONTROL_ROW_HEIGHT_UNITS (short, like a KPI row)')
+two_ctls = [{ 'id' => 'ctlA' }, { 'id' => 'ctlB' }]
+r2 = control_rows_for(two_ctls)
+eq(r2.length, 1, 'two controls still share ONE row (a single control band), not two separate bands')
+eq(r2.first['row'].map { |c, x, w, _k, _f| [c['id'], x, w] }, [['ctlA', 0.0, 3.0], ['ctlB', 3.0, 3.0]],
+   'two controls split the band 50/50, side by side, in order')
+
+puts "== compose_kind_aware_rows / build_dashboard_from_collections: CONTROLS -> KPIs -> charts -> tables, in that order =="
+page_c = [
+  { 'id' => 'ctl1', 'title' => 'Region Filter', 'chartType' => 'filter', 'sigmaKindHint' => 'control',
+    '_size' => '', '_pageOrder' => 0 },
+  { 'id' => 'k1', 'title' => 'Metric One', 'chartType' => 'badge_singlevalue', 'sigmaKindHint' => 'kpi-chart',
+    '_size' => '', '_pageOrder' => 1 },
+  { 'id' => 'ch1', 'title' => 'Trend One', 'chartType' => 'badge_symbolline', 'sigmaKindHint' => 'line-chart',
+    '_size' => '', '_pageOrder' => 2 },
+  { 'id' => 'k2', 'title' => 'Metric Two', 'chartType' => 'badge_singlevalue', 'sigmaKindHint' => 'kpi-chart',
+    '_size' => '', '_pageOrder' => 3 },
+  { 'id' => 'tb1', 'title' => 'Detail', 'chartType' => 'badge_table', 'sigmaKindHint' => 'table',
+    '_size' => '', '_pageOrder' => 4 },
+  { 'id' => 'ch2', 'title' => 'Trend Two', 'chartType' => 'badge_vert_bar', 'sigmaKindHint' => 'bar-chart',
+    '_size' => '', '_pageOrder' => 5 },
+]
+dash_c = build_dashboard_from_collections('Page C', page_c)
+zones_c = dash_c['zones']
+z_ctl = zones_c.find { |z| z['id'] == 'ctl1' }
+z_k1  = zones_c.find { |z| z['id'] == 'k1' }
+z_k2  = zones_c.find { |z| z['id'] == 'k2' }
+z_ch1 = zones_c.find { |z| z['id'] == 'ch1' }
+z_ch2 = zones_c.find { |z| z['id'] == 'ch2' }
+z_tb1 = zones_c.find { |z| z['id'] == 'tb1' }
+
+eq(z_ctl['kind'], 'filter', "the control card becomes a zone of kind 'filter'")
+eq(z_ctl['w_pct'], 100.0, 'a SOLE control on the page spans the full band width')
+eq(z_ctl['x_pct'], 0.0, 'the control band starts at x_pct 0')
+eq(z_ctl['y_pct'], 0.0, 'the control band is the FIRST thing on the page (y_pct 0) — ' \
+                        'even though it was interleaved among KPIs/charts/table in the source _pageOrder')
+
+ok(z_ctl['y_pct'] < z_k1['y_pct'], 'the control band sits ABOVE the KPI row')
+eq(z_k1['y_pct'], z_k2['y_pct'], 'the 2 KPIs still share their own single row (k1/k2 group despite ' \
+                                 'ch1/tb1/ch2 interleaved between them in _pageOrder)')
+ok(z_k1['y_pct'] < z_ch1['y_pct'], 'the KPI row sits ABOVE the chart row')
+eq(z_ch1['y_pct'], z_ch2['y_pct'], 'the 2 charts still pair onto their own single row')
+ok(z_ch1['y_pct'] < z_tb1['y_pct'], 'the chart row sits ABOVE the table row (house-style band order: ' \
+                                    'control -> KPI -> chart -> table, confirmed end to end)')
+
 puts
 if $failures.zero? then puts "ALL PASS"; exit 0 else puts "#{$failures} FAILURE(S)"; exit 1 end

@@ -488,6 +488,31 @@ def build_table(card)
     'source' => { 'kind' => 'table', 'elementId' => 'master' },
     'columns' => cols, 'order' => cols.map { |c| c['id'] },
   }
+
+  # A Sigma `table` with NO `groupings` shows raw DETAIL rows — the
+  # sigma-workbooks spec calls this "the #1 migration bug for aggregated source
+  # vizzes" (reference/specification/tables.md § groupings). A Domo table card
+  # with a dimension + an aggregated measure IS an aggregated query, so it MUST
+  # carry a groupings entry; without one the dimension repeats per warehouse row
+  # and each measure cell shows a ROW value instead of the group total.
+  #
+  # Caught live by the anchors oracle (2026-07-30): the source card printed
+  # 58,494.90 gross profit for Online, and the migrated table's closest value was
+  # 487.96 — a single row — because groupBy was dropped. Charts don't need this
+  # (they aggregate by their axis/value binding); only `table` does.
+  #
+  # `calculations` must be AGGREGATE expressions, which measure_col already emits
+  # (Sum(...)/CountDistinct(...)/an inlined aggregate Beast Mode). A grouped
+  # table's SORT must nest inside the grouping — an element-level sort 400s.
+  unless dims.empty? || meas.empty?
+    grouping = {
+      'id' => "grp-#{eid(card)}",
+      'groupBy' => dims.map { |d| dim_col(d, card)['id'] },
+      'calculations' => meas.map { |m| measure_col(m, card)['id'] },
+    }
+    el['groupings'] = [grouping]
+  end
+
   # #7: in-cell data bars belong ONLY to a real Domo table card that declared them.
   bars = Array(card['conditionalFormats']).select { |cf| cf.to_s.downcase.include?('databar') || cf.dig('format', 'dataBar') }
   unless bars.empty?
@@ -688,6 +713,26 @@ def build_element(card, overrides, master_ds = nil)
   is_kpi = kind == 'kpi-chart' ||
            (card['summaryNumber'] && Array(card['groupBy']).empty? && (card['columns'] || []).size <= 1)
   return build_kpi(card, overrides) if is_kpi
+
+  # Domo prints a Summary Number at the top of EVERY viz card, not just KPI cards.
+  # Sigma's chart/table elements have no summary slot, so that headline number is
+  # dropped. Rule 0 already routes a card that is PRIMARILY a summary to a
+  # kpi-chart; this is the other case — a chart/table that ALSO prints one.
+  #
+  # Caught by the anchors oracle live (2026-07-30): 4 of 13 source anchors matched
+  # NOWHERE in the workbook, every one an overall summary whose per-group values
+  # were present and correct. Silent loss of a headline number is exactly what the
+  # anchors bar exists to surface, so name the card AND the lost value.
+  # Emitting a companion KPI element is tracked as bead 08sf.
+  sn = card['summaryNumber']
+  if sn.is_a?(Hash) && !sn['column'].to_s.empty?
+    agg = sn['aggregation'].to_s.empty? ? '(calc)' : sn['aggregation']
+    warn_card(card, "source Summary Number NOT represented: Domo prints " \
+                    "#{agg}(#{sn['column']}) above this card, but a Sigma " \
+                    "#{kind || 'chart'} element has no summary slot — the headline " \
+                    'value is dropped. Add a companion KPI element by hand if the ' \
+                    'number matters (bead 08sf).')
+  end
 
   if image_card?(card)
     img = build_image(card)

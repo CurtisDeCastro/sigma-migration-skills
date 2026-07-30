@@ -22,11 +22,66 @@
 #      genuinely report pixel geometry. Normalized RELATIVE to each page's own
 #      max extent (x/maxX etc.), so it works whether Domo reports geometry in
 #      grid cells or pixels.
+#
+#      1.5. OPERATOR-OBSERVED geometry (build_dashboard_with_observed,
+#           discovery/layout-observed.json) — a HUMAN-AUTHORED sidecar, not an
+#           API read. Live validation confirmed there is NO API path to real
+#           per-card geometry on a classic page: preferredFullWidth/Height
+#           don't persist anywhere on readback, sizes[].size comes back "" for
+#           API-created cards, collections[] has no write endpoint, and there
+#           is no page-render endpoint (every attempt 404s). The only way to
+#           recover the source page's ACTUAL arrangement is for a human (or an
+#           agent) to read a page screenshot and transcribe it. This sidecar
+#           is that transcription — see its own section below for the schema.
+#           Ranked ABOVE collections/size tokens (rung 2) because a human
+#           reading a real screenshot is more faithful than any token-based
+#           guess, but BELOW real pixel geometry (rung 1) because it's still a
+#           transcription, not a measurement — every zone it produces is
+#           tagged '_source' => 'observed-from-screenshot' so it is never
+#           mistaken for API-derived truth downstream. A PARTIAL sidecar (only
+#           some of a page's cards observed) is expected, not an error: the
+#           unobserved remainder falls through to rung 2/2a below, WARNING by
+#           name which cards weren't covered.
 #   2. collections[] + size tokens (build_dashboard_from_collections) —
 #      classic pages (the common case live). A card's own
 #      preferredFullWidth/preferredFullHeight (present when it was created
 #      via Domo's public card-write API) is preferred over its size token
 #      when both exist (see that method's header comment).
+#
+#      2a. KIND-AWARE DEFAULT COMPOSITION (Phase 5e visual-QA fix,
+#          refs/layout-visual-qa.md) — the sub-case within rung 2 that fires
+#          when a card carries NO width signal at all (blank/empty '_size',
+#          no preferredFullWidth/Height). Live validation (refs/
+#          live-validation-2026-07-30.md) found this is the COMMON case for
+#          API-created Domo pages, not an edge case: sizes[] comes back
+#          {"id":..,"size":""} for every card, and collections: [] gives no
+#          sectioning signal either. The old behavior gave every card the
+#          same flat 'medium' width/height regardless of KIND — a KPI got the
+#          same tall full-width band as a chart. compose_kind_aware_rows
+#          below fixes this by REGROUPING a section's cards BY KIND — in the
+#          house-style band ORDER confirmed against refs/layout-visual-qa.md's
+#          own "Building clean in the first place" table (and, for further
+#          reference, millersigma:branded-dashboard-format's header -> filter-
+#          bar -> KPI row -> trend -> detail shape): a full-width CONTROL band
+#          first (never left loose/interleaved — a loose control is exactly
+#          what layout_lint's orphan-control check flags), then the compact
+#          KPI row, then paired charts, then full-width tables/pivots — each
+#          kind laid out with its own appropriate width+height, while
+#          preserving each kind-group's own internal _pageOrder sequence. See
+#          that method's header comment for the exact rules and why this only
+#          needs to change WIDTH/HEIGHT math here — the downstream (unowned)
+#          build-dashboard-layout.rb already detects a KPI row / paired chart
+#          band purely from zone geometry (SigmaLayout.detect_kpi_rows /
+#          cluster_bands), and already auto-bands any 'control'-kind SPEC
+#          ELEMENT under the header regardless of zone backing (build_page_
+#          for_dashboard's "Control band" / build_page_synthesized's
+#          band_ctls) — so shaping the zones correctly (and, for a control
+#          with NO backing card at all — e.g. a page-level filter
+#          build-workbook.rb synthesizes independently of any card, confirmed
+#          live on a Tier-2 page as "ctl-order_status" — synthesizing a zone
+#          for it too, by NAME, so any downstream sidebar/rail detection that
+#          keys on caption still works) is sufficient; no new rendering logic
+#          is needed on this end of the pipeline.
 #   3. last-resort single-column stack (build_stack_fallback) — WARNS LOUDLY
 #      every time it fires; this is the exact silent-stack fidelity bug a
 #      partner migration hit before, now made loud instead of silent. Should
@@ -130,6 +185,120 @@ def build_dashboard(name, cards)
   { 'dashboard' => name, 'zone_tree' => zones, 'zones' => zones }
 end
 
+# ==== rung 1.5 — operator-observed geometry (file header "1.5") =============
+# discovery/layout-observed.json — OPERATOR input (a human, or an agent
+# reading a page screenshot), never written by this skill itself (same
+# convention as discovery/dataset-map.json — this file must NEVER author it).
+# There is no live API path to a classic page's real per-card geometry (see
+# the file header: preferredFullWidth/Height don't persist, sizes[].size
+# comes back "", collections[] has no write endpoint, there is no page-render
+# endpoint), so a human-transcribed screenshot is the only route to the
+# source page's ACTUAL arrangement rather than a kind-based guess.
+#
+# SCHEMA (this file's own choice, documented here — no other doc owns it): a
+# flat JSON object keyed by the Domo CARD ID as a STRING (JSON object keys
+# are always strings, so "390868622", not 390868622), each value:
+#   { "x": 0.0, "y": 0.0, "w": 0.25, "h": 0.12, "section": "optional label" }
+# x/y/w/h are FRACTIONS OF THE FULL PAGE (0.0..1.0, origin top-left) — chosen
+# over Domo's native 1..6 grid units because a human (or a model) reading a
+# screenshot naturally estimates "this KPI spans about a quarter of the page
+# width," not "1.5 of Domo's 6 grid columns"; mapping onto Sigma's 24-col
+# grid is a bare *100 either way (x_pct = x*100), so nothing is lost by
+# picking the human-friendlier unit. 'section' is OPTIONAL free text — cards
+# sharing the same 'section' value get ONE thin heading zone above them
+# (mirrors '_collection' grouping) but, unlike a collection, are NEVER
+# re-packed — the operator's own x/y/w/h is authoritative, full stop.
+def load_observed_layout(dir)
+  path = File.join(dir, 'layout-observed.json')
+  return {} unless File.exist?(path)
+  data = JSON.parse(File.read(path)) rescue nil
+  return {} unless data.is_a?(Hash)
+  data.each_with_object({}) do |(k, v), out|
+    next unless v.is_a?(Hash) && %w[x y w h].all? { |f| v.key?(f) }
+    out[k.to_s] = v
+  end
+end
+
+# rung 1.5 proper. `observed` is the FULL sidecar map (every observed card on
+# every page) — filtering to THIS page's own cards happens right here, so
+# callers never need to pre-slice it. Returns nil (never partially-applies
+# without a caller check) when NONE of this page's cards are observed, so
+# build_dashboard_for_page falls through to rung 2 untouched.
+#
+# PARTIAL coverage is expected, not an error (file header note): a card on
+# this page with NO observed entry is never dropped — it is laid out via the
+# ordinary kind-aware default composition (build_dashboard_from_collections,
+# extending the SAME machinery rather than a parallel one) and appended BELOW
+# the observed content, never overlapping it. The observed region keeps
+# EXACTLY the vertical extent the operator gave it; the composed remainder is
+# proportionally rescaled into whatever page fraction is left (floored at a
+# 20-point minimum so a near-full-page observed region doesn't squeeze the
+# remainder to nothing).
+def build_dashboard_with_observed(name, cards, observed, kind_map)
+  observed_cards, unobserved_cards = cards.partition { |c| observed.key?(c['id'].to_s) }
+  return nil if observed_cards.empty?
+
+  unless unobserved_cards.empty?
+    warn "  ⚠ discovery/layout-observed.json covers #{observed_cards.length} of #{cards.length} " \
+         "card(s) on page #{name.inspect} — falling back to the default kind-aware composition for " \
+         "the rest: #{unobserved_cards.map { |c| c['title'] || c['id'] }.join(', ')}"
+  end
+
+  obs_zones = observed_cards.map do |c|
+    o = observed[c['id'].to_s]
+    kh = zone_chart_kind_for(c, kind_map)
+    is_filter = kh == 'filter'
+    {
+      'id'         => c['id'],
+      'x_pct'      => (o['x'].to_f * 100.0).round(2),
+      'y_pct'      => (o['y'].to_f * 100.0).round(2),
+      'w_pct'      => (o['w'].to_f * 100.0).round(2),
+      'h_pct'      => (o['h'].to_f * 100.0).round(2),
+      'kind'       => is_filter ? 'filter' : 'chart',
+      'caption'    => c['title'],
+      'chart_kind' => is_filter ? nil : kh,
+      'measures'   => is_filter ? [] : ['value'],
+      'children'   => [],
+      '_source'    => 'observed-from-screenshot',
+    }.compact
+  end
+
+  # Optional 'section' grouping (schema note above): one thin heading zone per
+  # named group, at that group's own topmost observed y — no reflow.
+  sections_seen = []
+  observed_cards.each do |c|
+    s = observed[c['id'].to_s]['section']
+    sections_seen << s if s && !sections_seen.include?(s)
+  end
+  hdr_zones = sections_seen.each_with_index.map do |sec, i|
+    members_y = observed_cards.select { |c| observed[c['id'].to_s]['section'] == sec }
+                               .map { |c| observed[c['id'].to_s]['y'].to_f }
+    {
+      'id' => "observed-section-#{i}", 'kind' => 'text', 'caption' => sec,
+      'x_pct' => 0.0, 'y_pct' => [(members_y.min * 100.0) - 3.0, 0.0].max.round(2),
+      'w_pct' => 100.0, 'h_pct' => 2.5, 'children' => [], '_source' => 'observed-from-screenshot',
+    }
+  end
+
+  zones = obs_zones + hdr_zones
+  observed_max_y_pct = obs_zones.map { |z| z['y_pct'] + z['h_pct'] }.max
+
+  unless unobserved_cards.empty?
+    rest = build_dashboard_from_collections(name, unobserved_cards, kind_map)
+    if rest
+      remaining_budget = [100.0 - observed_max_y_pct, 20.0].max
+      rest['zones'].each do |z|
+        shifted = z.dup
+        shifted['y_pct'] = (observed_max_y_pct + z['y_pct'] / 100.0 * remaining_budget).round(2)
+        shifted['h_pct'] = (z['h_pct'] / 100.0 * remaining_budget).round(2)
+        zones << shifted
+      end
+    end
+  end
+
+  { 'dashboard' => name, 'zone_tree' => zones, 'zones' => zones }
+end
+
 # ==== rung 2 — classic-page fallback: collections[] + size tokens ==========
 # See the file header for the full rationale. Domo's OWN card grid is 6
 # columns wide (verified live: preferredFullWidth/Height are REJECTED outside
@@ -160,6 +329,26 @@ ROW_HEIGHT_UNITS = 4
 # A collection-title heading band's height — thin relative to a content row,
 # matching lib/layout.rb's own "banner, not a block" HEADER_ROWS intent.
 HEADER_ROW_UNITS = 1
+
+# ==== kind-aware default composition constants (see file header "2a") =======
+# Row heights are in the SAME unitless native-row space as ROW_HEIGHT_UNITS
+# above (only ever compared to each other / summed into a total before being
+# converted to a percentage) — there is no absolute "inch" behind any of
+# these numbers, only their RATIO to one another. The ratios below are chosen
+# so a KPI row reads as short, a chart row as a normal tile, and a table row
+# as noticeably roomier — directly answering the measured complaint in
+# refs/layout-visual-qa.md ("a KPI occupies the same footprint as a full
+# chart"; "huge vertical whitespace").
+CONTROL_ROW_HEIGHT_UNITS = 2 # a control strip is short too — same order as a KPI row
+KPI_ROW_HEIGHT_UNITS   = 2 # a KPI needs far less height than a chart (WHAT TO BUILD #1)
+CHART_ROW_HEIGHT_UNITS = 5 # a chart-appropriate height for a paired 12-col tile (#2)
+TABLE_ROW_HEIGHT_UNITS = 8 # tables/pivots need more vertical room than a chart (#3)
+
+# A KPI row wraps to a new row past this many members — chosen so the LAST
+# row of a wrap is never a lone straggler for any n (see balanced_chunk_sizes):
+# Domo's own card grid is 6 native columns, so 6 is also the largest row that
+# can still give every member a whole-number-friendly share of it.
+KPI_MAX_PER_ROW = 6
 
 # Normalize a raw Domo size token to the known small/medium/large family.
 # Unknown/blank tokens fall back to 'medium' — LOUDLY (a warning, not a
@@ -203,6 +392,23 @@ end
 # (Domo's size token carries no height signal to read instead).
 def card_height_units(card)
   numeric_grid_value(card['preferredFullHeight']) || ROW_HEIGHT_UNITS
+end
+
+# True when this card carries a REAL width signal of its own — an explicit
+# NON-EMPTY '_size' token (even an unrecognized one, e.g. 'huge-token': Domo
+# told us *something*, we just don't know its exact span — see
+# normalize_size_token), or a numeric preferredFullWidth/Height. False for the
+# live API-created-card shape ('_size' => "", no preferred* fields at all) —
+# see refs/live-validation-2026-07-30.md ("size is an EMPTY STRING for
+# API-created cards"). This is the gate between the two rung-2 sub-paths:
+# a section where EVERY card fails this check gets the kind-aware default
+# composition (compose_kind_aware_rows); a section with even one real signal
+# keeps the original per-card token-default wrap (wrap_into_rows) so a
+# genuinely-sized card is never second-guessed by a kind guess.
+def has_width_signal?(card)
+  return true if numeric_grid_value(card['preferredFullWidth'])
+  return true if numeric_grid_value(card['preferredFullHeight'])
+  !card['_size'].to_s.strip.empty?
 end
 
 # Partition a page's cards into ordered SECTIONS: one per Domo `collections[]`
@@ -263,13 +469,278 @@ def wrap_into_rows(cards)
   rows
 end
 
+# ==== kind-aware default composition (file header "2a") =====================
+# Fires only for a SECTION where every card fails has_width_signal? — i.e.
+# Domo gave us genuinely nothing to size by. Rather than the flat
+# one-width-fits-all wrap_into_rows path, this REGROUPS the section's cards
+# by element KIND (a control reads differently than a KPI, which reads
+# differently than a chart, which reads differently than a table) and lays
+# out each kind-group with its own appropriate width/height, in the house
+# band ORDER confirmed against refs/layout-visual-qa.md's own "Building clean
+# in the first place" table (Header -> Control row -> KPI row -> Chart row ->
+# Detail table) and, for further reference, millersigma:branded-dashboard-
+# format's header -> filter-bar -> KPI row -> trend -> detail shape:
+#   - filter/control cards share ONE full-width band at CONTROL_ROW_HEIGHT_
+#     UNITS, FIRST — never left loose or interleaved among charts (a loose
+#     control is exactly what layout_lint's orphan-control check flags).
+#   - KPI cards share a compact ROW (2-6 per row; a lone KPI is still capped
+#     at half width rather than stretched full-row) at KPI_ROW_HEIGHT_UNITS.
+#   - plotting chart cards PAIR 2-up at CHART_ROW_HEIGHT_UNITS; an odd
+#     trailing chart with no partner gets the full row width.
+#   - table/pivot cards each get their own FULL-WIDTH row at
+#     TABLE_ROW_HEIGHT_UNITS (they need more room, not less).
+#   - anything else (a text tile, or a kind this file doesn't otherwise
+#     recognize) is OUT OF SCOPE for this regrouping — WHAT TO BUILD #1-3
+#     only names control/KPI/chart/table — and keeps the pre-existing
+#     per-card token-default wrap (wrap_into_rows) untouched, placed LAST.
+# _pageOrder is preserved WITHIN each kind-group (cards arrive already sorted
+# by _pageOrder from group_into_sections, and buckets below only filter, never
+# reorder), so "preserve source order" (WHAT TO BUILD #4) means "the migrated
+# page still reads like the Domo page" AT THE KIND-GROUP level: the 4th KPI
+# on the source page is still the 4th KPI left-to-right in the KPI row, even
+# though it may have sat between two charts on the source page.
+#
+# Element-KIND source priority (report this choice, per the task brief):
+# chart-specs.json's resolved Sigma `kind` (build-workbook.rb's OWN final
+# choice — e.g. it may promote a "bar chart with a secondary line measure" to
+# 'combo-chart', which cards.json's sigmaKindHint predates) beats
+# cards.json's sigmaKindHint (an EARLIER best-guess, made before the data
+# model / chart builder resolved the real element), which beats chartType via
+# the existing kind_hint() (a coarse last resort when neither of the above
+# ran yet, e.g. an offline/unit-test card with no discovery pipeline behind
+# it at all).
+
+# Load discovery/chart-specs.json (written by build-workbook.rb — NOT owned
+# by this file) into a flat { "el-<cardId>" => sigma_kind } map. Absent/
+# unparsable/wrong-shaped file -> {} (never raises); this is a NICE-TO-HAVE
+# refinement of the kind guess, not a hard dependency — build-workbook.rb may
+# not have run yet (e.g. layout built before charts), or this may be a unit
+# test with no discovery/ directory at all.
+def load_chart_specs_kind_map(dir)
+  path = File.join(dir, 'chart-specs.json')
+  return {} unless File.exist?(path)
+  data = JSON.parse(File.read(path)) rescue nil
+  return {} unless data.is_a?(Hash) && data['pages'].is_a?(Array)
+  map = {}
+  data['pages'].each do |p|
+    Array(p['elements']).each do |el|
+      next unless el.is_a?(Hash) && el['id'] && el['kind']
+      map[el['id'].to_s] = el['kind'].to_s
+    end
+  end
+  map
+end
+
+# Load discovery/chart-specs.json's 'control'-kind elements, GROUPED BY PAGE
+# NAME (chart-specs pages are keyed by name, matching pages.json's own
+# title). A Domo page-level filter/quick-filter is synthesized by
+# build-workbook.rb (NOT owned by this file) from something OTHER than a
+# card — confirmed live on a real Tier-2 page: element "ctl-order_status"
+# (kind "control", name "ORDER STATUS") has NO corresponding entry in
+# cards.json at all, so it would never reach this file's normal per-card
+# kind resolution (element_kind_for). The caller (see $PROGRAM_NAME ==
+# __FILE__) uses this to synthesize a pseudo-card for any such control so it
+# still lands in the control band (composition_class :control) — see the
+# "2a" file-header note. Returns { page_name => [{'id'=>, 'name'=>}, ...] };
+# absent/unparsable file -> {} (never raises, same degrade-gracefully
+# contract as load_chart_specs_kind_map).
+def load_chart_specs_controls(dir)
+  path = File.join(dir, 'chart-specs.json')
+  return {} unless File.exist?(path)
+  data = JSON.parse(File.read(path)) rescue nil
+  return {} unless data.is_a?(Hash) && data['pages'].is_a?(Array)
+  out = {}
+  data['pages'].each do |p|
+    pname = p['name']
+    next unless pname
+    ctrls = Array(p['elements']).select { |el| el.is_a?(Hash) && el['kind'] == 'control' && el['id'] && el['name'] }
+    out[pname] = ctrls.map { |el| { 'id' => el['id'].to_s, 'name' => el['name'].to_s } } unless ctrls.empty?
+  end
+  out
+end
+
+# This card's best-known Sigma-ish kind string, per the priority above.
+# `kind_map` keys on "el-<cardId>" — build-workbook.rb's own element-id
+# convention for a card-derived element (confirmed against a live chart-specs
+# capture: card id 390868622 -> element id "el-390868622").
+def element_kind_for(card, kind_map)
+  resolved = kind_map["el-#{card['id']}"].to_s
+  return resolved unless resolved.empty?
+  hint = card['sigmaKindHint'].to_s
+  return hint unless hint.empty?
+  kind_hint(card['chartType'])
+end
+
+# Coarse composition BUCKET for a resolved kind string. Handles both the
+# Sigma ELEMENT kind vocabulary ('kpi-chart', 'pivot-table', 'bar-chart',
+# 'combo-chart', 'control', 'text'...) and kind_hint()'s own LOGICAL vocabulary
+# ('kpi', 'table', 'filter', '*-chart') — element_kind_for's own fallback
+# chain can produce either, and this must classify both without caring which.
+def composition_class(kind)
+  k = kind.to_s
+  return :kpi if k.start_with?('kpi')
+  return :table if k == 'table' || k == 'pivot-table'
+  return :chart if k.end_with?('-chart')
+  return :control if k == 'control' || k == 'filter'
+  :other # text/title/anything else unrecognized — see header note
+end
+
+# The ZONE-level chart_kind tag for a kind-aware row (see build_dashboard's
+# own kind_hint comment on why this must be the LOGICAL 'kpi', never the
+# Sigma element kind 'kpi-chart' — lib/layout.rb's kpi_like_zone? matches on
+# the bare 'kpi'). 'control' is normalized to 'filter' to match kind_hint()'s
+# own vocabulary (only relevant for the :other bucket's callers); every other
+# resolved kind (e.g. 'combo-chart', 'donut-chart', 'pivot-table') passes
+# through UNCHANGED — min_rows_for_zone only special-cases 'kpi'/'table'/
+# 'pivot-table' and floors everything else to the generic chart minimum, so a
+# more specific tag here costs nothing and preserves more information.
+def zone_chart_kind_for(card, kind_map)
+  resolved = element_kind_for(card, kind_map).to_s
+  return 'kpi' if resolved.start_with?('kpi')
+  return 'filter' if resolved == 'control'
+  resolved
+end
+
+# Balanced chunk sizes for splitting `n` items into groups of at most `max`,
+# sizes differing by no more than 1 (remainder to the LAST groups) — the same
+# balancing idea lib/layout.rb's reflow_bands already uses for re-flowing
+# under-filled bands. Chosen over a greedy fixed-size chunk so a count like 7
+# (max 6) never leaves a lone straggler (greedy: [6,1]; balanced: [3,4]).
+def balanced_chunk_sizes(n, max)
+  return [] if n <= 0
+  nb = (n.to_f / max).ceil
+  base = n / nb
+  rem = n % nb
+  Array.new(nb) { |i| base + (i >= nb - rem ? 1 : 0) }
+end
+
+# Even column-width split of Domo's native 6-col row for a KPI row of `n`
+# members. A LONE kpi (n == 1, no peers to share a row with) is still capped
+# at HALF width (divisor clamped to >= 2) rather than stretched full-row —
+# WHAT TO BUILD #1 is explicit that a KPI must never read as a chart-sized
+# band, and a full-width KPI (even at a short height) still reads that way.
+def kpi_row_widths(n)
+  divisor = [n, 2].max
+  Array.new(n) { DOMO_GRID_COLS.to_f / divisor }
+end
+
+# Filter/control cards -> ONE full-width band, side by side, short height —
+# ALWAYS first (see the file header / this section's own header note). Unlike
+# a KPI row, a SOLE control legitimately spans the full band width — there is
+# no "must never look chart-sized" constraint for a control the way there is
+# for a KPI (KPI_ROW_WIDTHS's half-width floor), so a single control is not
+# clamped to a half share.
+def control_rows_for(cards)
+  return [] if cards.empty?
+  n = cards.length
+  w = DOMO_GRID_COLS.to_f / n
+  x = 0.0
+  tagged = cards.map do |c|
+    item = [c, x, w, 'filter', true]
+    x += w
+    item
+  end
+  [{ 'row' => tagged, 'height' => CONTROL_ROW_HEIGHT_UNITS }]
+end
+
+# KPI cards -> ROW(S) of up to KPI_MAX_PER_ROW, evenly split, short height.
+# Returns { 'row' => [[card,x,w,chart_kind,is_filter], ...], 'height' => N }.
+def kpi_rows_for(cards, kind_map)
+  rows = []
+  idx = 0
+  balanced_chunk_sizes(cards.length, KPI_MAX_PER_ROW).each do |size|
+    chunk = cards[idx, size]
+    idx += size
+    widths = kpi_row_widths(chunk.length)
+    x = 0.0
+    tagged = chunk.each_with_index.map do |c, i|
+      w = widths[i]
+      item = [c, x, w, zone_chart_kind_for(c, kind_map), false]
+      x += w
+      item
+    end
+    rows << { 'row' => tagged, 'height' => KPI_ROW_HEIGHT_UNITS }
+  end
+  rows
+end
+
+# Plotting-chart cards -> PAIRS of 2 (half width each); an odd trailing chart
+# with no partner gets the full row width instead of a half-empty row.
+def chart_pair_rows_for(cards, kind_map)
+  cards.each_slice(2).map do |pair|
+    tagged = if pair.length == 2
+               [[pair[0], 0.0, DOMO_GRID_COLS / 2.0, zone_chart_kind_for(pair[0], kind_map), false],
+                [pair[1], DOMO_GRID_COLS / 2.0, DOMO_GRID_COLS / 2.0, zone_chart_kind_for(pair[1], kind_map), false]]
+             else
+               [[pair[0], 0.0, DOMO_GRID_COLS.to_f, zone_chart_kind_for(pair[0], kind_map), false]]
+             end
+    { 'row' => tagged, 'height' => CHART_ROW_HEIGHT_UNITS }
+  end
+end
+
+# Table/pivot cards -> each its OWN full-width row (never paired/batched —
+# they need horizontal room, not a shared row), taller height.
+def table_rows_for(cards, kind_map)
+  cards.map do |c|
+    { 'row' => [[c, 0.0, DOMO_GRID_COLS.to_f, zone_chart_kind_for(c, kind_map), false]],
+      'height' => TABLE_ROW_HEIGHT_UNITS }
+  end
+end
+
+# The :other bucket (filter/control/text/unrecognized) — out of scope for
+# kind-aware composition (see this section's header note); reuses the
+# pre-existing per-card token-default wrap_into_rows + kind_hint tagging
+# UNCHANGED, just wrapped in the same { 'row' =>, 'height' => } shape as the
+# kind-aware rows above so the caller can treat every row uniformly. A nil
+# 'height' tells the caller to fall back to the per-card card_height_units
+# max, exactly as build_dashboard_from_collections always has.
+def other_rows_for(cards)
+  return [] if cards.empty?
+  wrap_into_rows(cards).map do |row|
+    tagged = row.map do |c, x, w|
+      kh = kind_hint(c['chartType'])
+      [c, x, w, kh, kh == 'filter']
+    end
+    { 'row' => tagged, 'height' => nil }
+  end
+end
+
+# Entry point: bucket a no-width-signal section's cards by composition class
+# (order-preserving — Hash-of-arrays insertion order == first-seen order,
+# and each bucket itself keeps the cards' relative _pageOrder since the
+# caller already sorted them), then lay out each bucket with its own rule.
+# Row order is the canonical "house style" band order — CONTROLS, then KPIs,
+# then charts, then tables — confirmed against refs/layout-visual-qa.md's own
+# "Building clean in the first place" table (Header -> Control row -> KPI row
+# -> Chart row -> Detail table) rather than literal whole-page _pageOrder,
+# since the source data itself is interleaved (KPI/chart/KPI/KPI/chart/KPI on
+# a real validated instance page) and re-reading it kind-by-kind is the
+# entire point of this fix (see the "2a" file-header note for why literal
+# interleaving does not combine 4 separate KPIs into one row). Any leftover
+# :other (text/unrecognized — not a named house-style band) trails last.
+def compose_kind_aware_rows(cards, kind_map)
+  buckets = Hash.new { |h, k| h[k] = [] }
+  cards.each { |c| buckets[composition_class(element_kind_for(c, kind_map))] << c }
+  control_rows_for(buckets[:control]) +
+    kpi_rows_for(buckets[:kpi], kind_map) +
+    chart_pair_rows_for(buckets[:chart], kind_map) +
+    table_rows_for(buckets[:table], kind_map) +
+    other_rows_for(buckets[:other])
+end
+
 # Build one dashboard's zone tree for a classic page: NO x/y/w/h anywhere,
 # only `collections[]` (titled sections, cards grouped by index) and a T-shirt
 # `size` token per card (see the file header for the live evidence and the
 # field-name caveat). Every card in `cards` is placed — a card lacking both a
 # collection and a size still lands in the trailing ungrouped section at its
 # token-defaulted ('medium') width, never silently dropped.
-def build_dashboard_from_collections(name, cards)
+#
+# `kind_map` — optional "el-<cardId>" -> Sigma kind lookup (see
+# load_chart_specs_kind_map); defaults to {} so every existing caller/test
+# that predates this parameter keeps working unchanged (element_kind_for
+# degrades gracefully through sigmaKindHint / kind_hint when a card's id has
+# no entry).
+def build_dashboard_from_collections(name, cards, kind_map = {})
   sections = group_into_sections(Array(cards))
 
   y = 0
@@ -283,14 +754,32 @@ def build_dashboard_from_collections(name, cards)
                 'x' => 0, 'y' => y, 'w' => DOMO_GRID_COLS, 'h' => HEADER_ROW_UNITS }
       y += HEADER_ROW_UNITS
     end
-    wrap_into_rows(section['cards']).each do |row|
-      row_h = row.map { |c, _x, _w| card_height_units(c) }.max
-      row.each do |c, x, w|
-        kh = kind_hint(c['chartType'])
-        is_filter = kh == 'filter'
+
+    # rung 2a vs the original rung 2: only regroup-by-kind when NOTHING in
+    # this section carries its own real width signal (see has_width_signal?
+    # and the "2a" file-header note). A section with even one explicitly
+    # sized card keeps the original per-card token-default wrap untouched —
+    # unchanged byte-for-byte from before this fix (the `else` branch below).
+    no_signal = section['cards'].none? { |c| has_width_signal?(c) }
+    row_groups = if no_signal
+                   compose_kind_aware_rows(section['cards'], kind_map)
+                 else
+                   wrap_into_rows(section['cards']).map do |row|
+                     tagged = row.map do |c, x, w|
+                       kh = kind_hint(c['chartType'])
+                       [c, x, w, kh, kh == 'filter']
+                     end
+                     { 'row' => tagged, 'height' => nil }
+                   end
+                 end
+
+    row_groups.each do |rg|
+      row = rg['row']
+      row_h = rg['height'] || row.map { |c, _x, _w, _ck, _f| card_height_units(c) }.max
+      row.each do |c, x, w, chart_kind, is_filter|
         raw << {
           'kind' => is_filter ? 'filter' : 'chart', 'id' => c['id'], 'caption' => c['title'],
-          'chart_kind' => is_filter ? nil : kh, 'x' => x, 'y' => y, 'w' => w, 'h' => row_h,
+          'chart_kind' => is_filter ? nil : chart_kind, 'x' => x, 'y' => y, 'w' => w, 'h' => row_h,
           'measures' => is_filter ? [] : ['value'],
         }
       end
@@ -356,18 +845,28 @@ def build_stack_fallback(name, cards)
 end
 
 # Orchestrates the fallback chain for one page's cards, highest-fidelity rung
-# first. Only returns nil when the page genuinely has zero cards.
-def build_dashboard_for_page(name, cards)
+# first. Only returns nil when the page genuinely has zero cards. `kind_map`
+# threads through to rung 2/1.5's kind-aware composition (see
+# build_dashboard_from_collections); `observed` (the FULL layout-observed.json
+# map, pre-filtered internally to this page's cards) threads through to rung
+# 1.5 (build_dashboard_with_observed). Both default to {} so every caller/test
+# that predates these parameters keeps working unchanged.
+def build_dashboard_for_page(name, cards, kind_map = {}, observed = {})
   cards = Array(cards)
   return nil if cards.empty?
 
   dash = build_dashboard(name, cards) # rung 1: genuine x/y/w/h pixel geometry
   return dash if dash
 
+  unless observed.empty?
+    dash = build_dashboard_with_observed(name, cards, observed, kind_map) # rung 1.5: operator-authored
+    return dash if dash
+  end
+
   has_collection_signal = cards.any? do |c|
     c['_collection'] || c['_size'] || c.key?('_pageOrder') || c['preferredFullWidth'] || c['preferredFullHeight']
   end
-  return build_dashboard_from_collections(name, cards) if has_collection_signal
+  return build_dashboard_from_collections(name, cards, kind_map) if has_collection_signal
 
   build_stack_fallback(name, cards) # rung 3: last resort, warns loudly
 end
@@ -377,6 +876,25 @@ if $PROGRAM_NAME == __FILE__
   pages = JSON.parse(File.read(File.join(OUT, 'pages.json'))) rescue []
 
   cards = cards.reject { |c| c['_error'] || c['_tierB'] }
+
+  # Element-kind lookup for the kind-aware composition (file header "2a") —
+  # discovery/chart-specs.json may not exist yet (e.g. layout built before
+  # build-workbook.rb ran); load_chart_specs_kind_map degrades to {} rather
+  # than raising, and element_kind_for falls back to sigmaKindHint/chartType.
+  kind_map = load_chart_specs_kind_map(OUT)
+
+  # Operator-observed geometry (file header "1.5") — a human-authored sidecar,
+  # never written by this script. Absent file -> {} (rung 1.5 never fires;
+  # every existing offline/live run that has no such sidecar is unaffected).
+  observed_layout = load_observed_layout(OUT)
+  unless observed_layout.empty?
+    known_ids = cards.map { |c| c['id'].to_s }
+    unmatched = observed_layout.keys - known_ids
+    unmatched.each do |bad_id|
+      warn "  ⚠ discovery/layout-observed.json key #{bad_id.inspect} matches NO card id in " \
+           'discovery/cards.json — typo, or a stale sidecar from a re-numbered page? (ignored)'
+    end
+  end
 
   # Group cards by page — same membership resolution build-workbook.rb uses,
   # so a page's layout dashboard and its workbook page carry the SAME cards.
@@ -388,7 +906,25 @@ if $PROGRAM_NAME == __FILE__
   by_page = Hash.new { |h, k| h[k] = [] }
   cards.each { |c| by_page[card_page[c['id'].to_s] || 'Overview'] << c }
 
-  dashboards = by_page.map { |pname, pcards| build_dashboard_for_page(pname, pcards) }.compact
+  # Synthesize a pseudo-card for any chart-specs.json 'control' element that
+  # has NO backing card at all (file header "2a" note — a page-level filter
+  # build-workbook.rb derives independently of any card, e.g. real Tier-2
+  # element "ctl-order_status"). Without this, such a control never reaches
+  # composition_class at all (it isn't in cards.json), so it would never join
+  # the control band — this is the concrete mechanism that gets it there,
+  # keyed by NAME (not id) so downstream zone_el_name/assign_controls
+  # matching still resolves it to the real control element.
+  orphan_controls_by_page = load_chart_specs_controls(OUT)
+  by_page.each do |pname, pcards|
+    card_el_ids = pcards.map { |c| "el-#{c['id']}" }
+    Array(orphan_controls_by_page[pname]).each do |ctl|
+      next if card_el_ids.include?(ctl['id'])
+      pcards << { 'id' => ctl['id'], 'title' => ctl['name'], 'chartType' => 'filter',
+                  'sigmaKindHint' => 'control', '_size' => '', '_pageOrder' => -1 }
+    end
+  end
+
+  dashboards = by_page.map { |pname, pcards| build_dashboard_for_page(pname, pcards, kind_map, observed_layout) }.compact
   abort("  no cards at all in #{File.join(OUT, 'cards.json')} for any page — " \
         'run domo-discover.rb --pages <ids> first (its merge_geometry copies the ' \
         'private-API page layout — or, for classic pages, collections/size tokens — ' \

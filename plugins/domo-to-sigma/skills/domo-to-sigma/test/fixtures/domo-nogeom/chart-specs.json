@@ -1,0 +1,14 @@
+{
+  "pages": [
+    {
+      "name": "Detail",
+      "elements": [
+        {
+          "id": "el-2004",
+          "kind": "combo-chart",
+          "name": "Combo Metric"
+        }
+      ]
+    }
+  ]
+}
