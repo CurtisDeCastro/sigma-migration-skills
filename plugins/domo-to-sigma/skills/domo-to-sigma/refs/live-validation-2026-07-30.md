@@ -177,6 +177,56 @@ datasource schema: &lt;id&gt;"*. Use the `name`; the server assigns its own
 **Filters:** the write field is **`operand`** (not `operator`); `quickFilters` use
 `operator`. On read-back the server adds `filterType: "LEGACY"`.
 
+#### Card-authoring traps that produce SILENTLY BROKEN cards
+
+These four cost real debugging time. Each yields a card that Domo accepts with
+**HTTP 200** but that is wrong or unusable — so a build script cannot trust the
+create status code alone. **Verify every authored card by rendering it.**
+
+1. ⚠️ **`orderBy` MUST be empty.** Any non-empty `chartBody.orderBy` creates a card
+   that saves with 200 and then **fails to render forever** (render endpoint 500).
+   Controlled test: identical cards differing only in `orderBy` — `[]` renders;
+   a bare dimension, an aggregated measure, a `mapping`-bearing entry, and an
+   `ascending:false` entry **all 500**. (`order:"DESC"` is rejected at create with
+   400 — unknown field.) There is no working form. Omit `orderBy` and apply sort
+   in the Domo UI or downstream in Sigma. This silently broke 7 of 15 cards.
+2. ⚠️ **`dateGrain` is inert unless the date column carries `calendar: true`.**
+   With `calendar:false` (or absent) Domo ignores `dateGrain` and groups by raw
+   **day** — a 31-month series rendered as ~500 daily points. Setting
+   `calendar: true` on the date column in BOTH `columns[]` and `groupBy[]` makes
+   `dateTimeElement: "MONTH"` take effect. Measure columns should **omit**
+   `calendar` entirely (live cards have it absent, not `false`).
+3. ⚠️ **`dateGrain` needs a real `DATE` column.** A `YYYYMMDD` integer key (very
+   common in warehouse fact tables, and what `CSA.TJ.ORDER_FACT` uses) is a `LONG`
+   to Domo and cannot drive a date grain. Migrations in the other direction must
+   synthesize a real date; note Sigma can derive one from the integer key with
+   `MakeDate` (see `refs/beast-mode-to-sigma.md`).
+4. ⚠️ **The `mapping` vocabulary is CHART-TYPE DEPENDENT.** For `badge_line_bar`
+   (and the other combo/two-axis types) the measures bind via **`SERIES`**, not
+   `VALUE` — verified against 3 real combo cards on the instance, all of which use
+   `ITEM` + `calendar:true` for the date and `SERIES` for every measure. Using
+   `VALUE` on a combo produces a card that renders **"No data in filtered range"**.
+   A categorical `ITEM` axis on a combo also renders empty: these types apply an
+   implicit date range and need a time axis.
+
+Minor: `goal: 0` draws a literal "Goal 0.0%" reference marker on the card — omit
+`goal` unless you want one.
+
+#### Render endpoint: charts vs tables take DIFFERENT parts AND different payload keys
+
+| Card kind | `parts` | Payload location | Format |
+|---|---|---|---|
+| chart / KPI | `image` | `image.data` | base64 **PNG** |
+| **table** (`badge_table`) | **`imagePDF`** | **`html`** | HTML-wrapped base64 **PDF** |
+
+`parts=image` on a table card returns **400**; `imageGrid` / `grid` also 400. And
+the `imagePDF` payload is NOT under `image.data` — it arrives under **`html`** as
+`<div class="kpi_chart">JVBERi0xLjQ…</div>`, i.e. strip the HTML tags, then
+base64-decode to get a `%PDF-1.4` document. So `lib/domo_rest.rb#decode_render`
+needs a **third** branch (HTML-wrapped base64 PDF) beyond the JSON-base64-PNG and
+raw-bytes cases, and Phase-1b visual capture must branch `parts` on card type or
+it will silently fail to capture every table.
+
 ---
 
 ## Card enumeration — the P0 fix
