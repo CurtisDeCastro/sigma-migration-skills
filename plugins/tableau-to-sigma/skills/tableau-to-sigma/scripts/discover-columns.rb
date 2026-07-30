@@ -66,7 +66,10 @@ def http(method, path, body = nil)
   # needs longer.
   timeout = (ENV['SIGMA_HTTP_TIMEOUT'] || '90').to_i
   begin
-    res = Net::HTTP.start(uri.host, uri.port, use_ssl: true,
+    # use_ssl keyed off the scheme (not hard-coded true) so the hermetic tests can
+    # point SIGMA_BASE_URL at a plain-http loopback stub. Production SIGMA_BASE_URL
+    # is https, so live behaviour is unchanged. Same pattern as find-or-pick-dm.rb.
+    res = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https',
                           open_timeout: [timeout, 30].min, read_timeout: timeout) do |h|
       h.request(req)
     end
@@ -110,14 +113,37 @@ end
 
 # 2. List columns at /v2/connections/tables/<inodeId>/columns (per
 #    feedback_sigma_columns_api_endpoint — connectionId NOT in the path).
-status, body = http(:get, "/v2/connections/tables/#{inode}/columns")
-abort "columns list failed: HTTP #{status}\n#{body}" unless status == 200
-cols = (JSON.parse(body)['entries'] || []).map do |c|
-  # type may come back as a nested object { type: <warehouse-type> }; flatten to a string
-  t = c['type']
-  t = t['type'] if t.is_a?(Hash) && t['type']
-  { 'name' => c['name'], 'type' => t.to_s }
+#    PAGINATED: Sigma's list endpoints default to 50 entries per page. A single
+#    un-paginated GET silently truncates any table wider than 50 columns — the
+#    field-reported ">50-column table builds a lopsided DM" bug. Ask for a big
+#    page explicitly AND follow nextPage until exhausted.
+cols = []
+pages = 0
+page_token = nil
+seen_tokens = {}
+loop do
+  qs = 'limit=500'
+  qs += "&page=#{URI.encode_www_form_component(page_token)}" if page_token
+  status, body = http(:get, "/v2/connections/tables/#{inode}/columns?#{qs}")
+  abort "columns list failed: HTTP #{status}\n#{body}" unless status == 200
+  data = JSON.parse(body)
+  pages += 1
+  cols.concat((data['entries'] || []).map do |c|
+    # type may come back as a nested object { type: <warehouse-type> }; flatten to a string
+    t = c['type']
+    t = t['type'] if t.is_a?(Hash) && t['type']
+    { 'name' => c['name'], 'type' => t.to_s }
+  end)
+  page_token = data['nextPage']
+  break if page_token.nil? || page_token.to_s.empty?
+  # Defensive bound: a server that echoes the same token forever must not spin us.
+  if seen_tokens[page_token]
+    warn "columns list repeated nextPage token #{page_token.inspect} — stopping after #{pages} page(s) to avoid an infinite loop"
+    break
+  end
+  seen_tokens[page_token] = true
 end
+warn "columns list spanned #{pages} pages (#{cols.size} columns total) — wide table, all pages fetched" if pages > 1
 
 result = {
   'connection_id' => opts[:conn],
