@@ -53,7 +53,7 @@ these three callers.
 
 ---
 
-### Task S1: The failing shared test
+### Task 1: The failing shared test
 
 **Files:**
 - Create: `shared/scripts/test-columns-pagination.rb`
@@ -61,7 +61,7 @@ these three callers.
 
 **Interfaces:**
 - Consumes: `Sigma.list_entries` from `shared/lib/sigma_rest.rb`.
-- Produces: a test that Task S2 must turn green.
+- Produces: a test that Task 2 must turn green.
 
 - [ ] **Step 1: Inspect how manifest.json registers a shared script**
 
@@ -218,7 +218,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task S2: Paginate the three canonical readers
+### Task 2: Paginate the three canonical readers
 
 **Files:**
 - Modify: `shared/scripts/verify-warehouse.rb:141`
@@ -229,7 +229,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 - Consumes: `Sigma.list_entries(path, limit: 1000, http: nil)` — returns a flat Array of entry
   Hashes, NOT a Hash with an `entries` key, and raises `Sigma::Error` on a non-2xx response.
   `verify-warehouse.rb` and `probe-controls.rb` already require the library.
-- Produces: green wiring pins for Task S1's test.
+- Produces: green wiring pins for Task 1's test.
 
 - [ ] **Step 1: Fix `shared/scripts/verify-warehouse.rb`**
 
@@ -362,7 +362,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task S3: Fan out, bump, and open the PR
+### Task 3: Fan out, bump, and open the PR
 
 **Files:**
 - Modify (generated): `plugins/*/skills/*/scripts/{verify-warehouse,probe-controls,assert-phase6-ran,test-columns-pagination}.rb`
