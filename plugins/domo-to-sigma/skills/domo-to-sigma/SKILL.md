@@ -204,13 +204,61 @@ geometry (x/y/w/h) is a separate, earlier capture — see Phase 1a's
 `discovery/cards.json`), the ONE geometry source:
 
 `ruby scripts/domo-capture-visuals.rb --pages <id,...>` →
-- `discovery/png/cards/<cardId>.png` — per-card visual reference
-- `discovery/png/pages/<pageId>.pdf` — full-page source image for the QA gate
+- `discovery/png/cards/<cardId>.png` — per-card visual reference (chart/KPI cards)
+- `discovery/png/cards/<cardId>.pdf` — per-card reference for **table** cards
+  (`parts=image` returns 400 for a table; only `parts=imagePDF` works)
+- `discovery/png/pages/<pageId>.pdf` — full-page source image, **when available**
 
 Tier A (dev token) does this automatically via the card render endpoint. **Tier B:
 export the same PNGs/PDF from the Domo UI into those same paths** — the build and
 QA steps consume them identically (see `refs/connection.md` "Visual capture").
 Either way, **READ these images** before and during Phase 5.
+
+### ⚠️ ASK THE OPERATOR FOR A PAGE SCREENSHOT — layout depends on it
+
+**There is no page-render endpoint.** `/api/content/v1/pages/{pageId}/render` is a
+hard **404** (every variant probed: v2/v3, stacks, export, image), so the full-page
+PDF above often will not exist; the script records
+`discovery/page-visual-unavailable.json` when it can't get one.
+
+That matters more than it sounds, because **Domo's API exposes NO layout geometry
+for a classic page** (live-validated 2026-07-30 — see
+`refs/live-validation-2026-07-30.md`):
+- `preferredFullWidth` / `preferredFullHeight` are accepted on card create but
+  **persist nowhere** — absent from every readback
+- `sizes[].size` comes back `""` for API-created cards (a human resizing a card in
+  the UI is what sets `small`/`medium`/`large`)
+- `collections[]` (sectioning) has no reachable write endpoint
+- even card **creation order does not control page order**
+
+So for a classic Domo page the ONLY route to real layout fidelity is a human-supplied
+image. **Explicitly ask the operator:**
+
+> "Domo's API doesn't expose this page's layout. Can you paste or export a
+> screenshot of the page? I'll read the arrangement from it so the Sigma dashboard
+> matches. Without one I'll compose a clean default layout instead."
+
+Then READ the image and transcribe what you see into
+**`discovery/layout-observed.json`** (schema + preference order documented in
+`scripts/build-domo-layout.rb`). Mark it `_source: "observed-from-screenshot"` —
+it is a model reading an image, and must never be presented as API-derived truth.
+
+**If no screenshot is provided, do NOT fake geometry and do not stack.** The layout
+builder composes a clean default instead, in this house order:
+
+> **controls at the top → KPIs → charts → tables**
+
+i.e. a full-width control band, then a compact KPI row (KPIs are short — never a
+chart-sized band each), then charts 2-up, then tables/pivots full width. This is the
+same composition the `sigma-workbooks` / `branded-dashboard-format` authoring skills
+use; see `refs/layout-visual-qa.md`.
+
+Geometry preference order used by Phase 5d, highest first:
+1. real API x/y/w/h pixel geometry (mason / Domo-App pages only)
+2. `discovery/layout-observed.json` (read from a screenshot)
+3. `collections[]` + a non-empty `size` token
+4. the element-kind default composition above
+5. last-resort ordered stack — always warns LOUDLY, never silent
 
 ---
 
@@ -310,6 +358,18 @@ Phase 1a's `merge_geometry`) + `discovery/pages.json` names into
 `discovery/dashboard-layout.json`. Reuse `build-dashboard-layout.rb` +
 `put-layout.rb`: feed that file → 24-col grid, preserving relative position and
 the hero viz's weight.
+
+**Classic Domo pages carry no geometry at all** — so this phase runs the preference
+chain documented in Phase 1b above (API geometry → `layout-observed.json` from a
+screenshot → collections+size tokens → clean default composition → warned stack).
+If you skipped asking for a screenshot in Phase 1b, go back and ask: it is the
+difference between a faithful layout and a reasonable guess.
+
+A `layout-2d.flag` of `"grid"` means the engine produced a 2D grid rather than a
+stack — it does NOT mean the composition is good. Bands must also be well-filled:
+`layout_lint` fails an under-filled band (e.g. a lone element covering 12 of 24
+columns leaves dead space), so a single element in a band should be widened to fill
+it or paired with its neighbour.
 
 ### Phase 5e — Layout visual QA (MANDATORY gate)
 Run the layout-visual-qa loop (`refs/layout-visual-qa.md`): render the full Sigma

@@ -279,6 +279,42 @@ is the fix.
 
 ---
 
+## ⛔ Domo layout is NOT reachable through the API — in either direction
+
+Probed exhaustively on a live instance. For a **classic** Domo page there is no way
+to read OR write layout geometry:
+
+| What | Result |
+|---|---|
+| `preferredFullWidth` / `preferredFullHeight` on card create | accepted (and range-checked to 1..6) but **persist nowhere** — absent from every readback shape |
+| `sizes[].size` from `/stacks/{pageId}/cards` | **`""`** for API-created cards. A human resizing a card in the Domo UI is what sets `small`/`medium`/`large` |
+| `collections[]` (titled sections) | no reachable write endpoint — `POST`/`PUT` on `/collections`, `/pages/{id}/collections` all 404 |
+| card **order** on the page | **not controllable** — cards created 1st and 4th came back at `pageOrder` 2 and 0. Order appears internal/arbitrary |
+| `PUT /api/content/v3/stacks/{pageId}/cards` | 405 |
+| page render (for a screenshot) | **404 on every variant** — `/api/content/v{1,2,3}/pages/{id}/render`, `/stacks/{id}/render`, `/pages/{id}/export`, `/export/v1/pages/{id}`, `/pages/{id}/image` |
+| `PUT /v1/cards/{id}/definition` (documented "Update Chart Card Definition") | **500**, like `GET .../definition` — no update path at all; only CREATE works |
+
+Consequences, and they are structural rather than cosmetic:
+
+1. **You cannot build a nicely-arranged Domo dashboard from code.** Card *content*
+   is fully API-controllable (dataset, chart type, columns, filters, formats,
+   conditional formats); card *size, position and order* are UI-only. If a demo or
+   fixture page needs to look composed in Domo, a human must arrange it.
+2. **A migration gets no layout signal from a classic page**, so a converter that
+   expects x/y/w/h will silently degrade to a vertical stack — exactly the
+   field-reported failure. The only fidelity route is a **human-supplied page
+   screenshot**, read by the model into `discovery/layout-observed.json`
+   (`_source: "observed-from-screenshot"` — never presented as API truth).
+3. Because that is often unavailable, the DEFAULT composition matters more than for
+   any other converter. House order: **controls at the top → KPIs (compact row) →
+   charts 2-up → tables full width**. A `layout-2d.flag` of `"grid"` is necessary
+   but NOT sufficient — `layout_lint` separately fails an under-filled band (a lone
+   element spanning 12 of 24 columns leaves dead space), so bands must be filled.
+
+Free-form pixel geometry does exist on newer **mason / Domo-App** pages; the above
+is specifically about classic card pages, which is what the sample content and any
+API-created page are.
+
 ## Render endpoint — confirmed, with a correction
 
 ```
