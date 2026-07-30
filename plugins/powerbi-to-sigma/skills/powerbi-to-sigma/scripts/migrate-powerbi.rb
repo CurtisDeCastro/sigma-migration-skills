@@ -70,7 +70,8 @@ require 'open3'
 require 'digest'
 require 'set'
 require_relative 'lib/py_resolve'
-require_relative 'lib/pbi_field_alts' # derived field_map entries must wrap their ALTS too (pie/date-grain render bug) # real-Python resolver (Windows Store-stub safe)
+require_relative 'lib/pbi_field_alts'
+require_relative 'lib/pbi_master_key' # role-playing dim copies must key on PBI table identity # derived field_map entries must wrap their ALTS too (pie/date-grain render bug) # real-Python resolver (Windows Store-stub safe)
 begin; require_relative 'lib/modeling_advisory'; rescue LoadError; end # shared, vendor-neutral CDW join-cost advisory (optional; synced from shared/)
 
 HERE = __dir__
@@ -541,13 +542,10 @@ all_measures.each { |tbl, mname, _| measure_orig_table[mname] = tbl }
 # dim NAME columns (beads-sigma-<1b>). Capture the map so the master-map can alias every
 # key under the friendly entity too.
 _normt = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]/, '') }
-physical_to_pbi = {} # normalized physical path-tail -> PBI friendly table name
-tables.each do |t|
-  _e = ((t['partitions'] || [])[0] || {}).dig('source', 'expression')
-  _e = _e.join("\n") if _e.is_a?(Array)
-  _tail = _e.to_s[/\[\s*Name\s*=\s*"([^"]+)"\s*,\s*Kind\s*=\s*"(?:Table|View)"\s*\]/i, 1]
-  physical_to_pbi[_normt.call(_tail)] = t['name'] if _tail && t['name'] && !t['name'].to_s.empty?
-end
+# 1:N, not 1:1. A model can import the SAME warehouse table under several names (six
+# role-playing DATE_DIMs on real report R2); the old 1:1 Hash kept only the LAST, so five
+# of the six copies got no alias at all.
+physical_to_pbi = PbiMasterKey.physical_to_pbi(tables)
 modes = tables.flat_map { |t| (t['partitions'] || []).map { |p| p['mode'] } }.compact.uniq
 mode_summ = modes.empty? ? 'unknown' : modes.join('/')
 
@@ -1025,6 +1023,24 @@ field_map = {}
 # so this is NOT a positional index — see lib/pbi_element_match.rb for the full
 # rationale + the run-2 SAFETY_INCIDENTS overwrite it prevents.
 dmel_for = PbiElementMatch.pair(conv_elements, dm_elements)
+# element index -> {table, confidence}. ORDER is authoritative (the converter emits one
+# element per model table in table order); the column-set overlap is a CONFIDENCE signal
+# only — making it authoritative measured WORSE than the old behaviour on 4 real models.
+_pbi_tbl_for = PbiMasterKey.pbi_table_for_elements(conv_elements, tables)
+_rp_dupes = _pbi_tbl_for.values.map { |v| v['table'] }.compact
+             .group_by { |n| n }.select { |_n, g| g.size > 1 }
+_lowconf = _pbi_tbl_for.values.select { |v| v['table'] && v['confidence'] < 0.8 }
+unless _lowconf.empty?
+  puts "   master-map: #{_lowconf.size} element(s) attributed by ORDER with low column agreement " \
+       "(#{_lowconf.map { |v| "#{v['table']} #{(v['confidence'] * 100).round}%" }.first(4).join(', ')}) — " \
+       'the converter adds columns the model lacks, so this is usually benign; verify if a tile looks wrong.'
+end
+_rp_groups = tables.group_by { |t| PbiMasterKey.norm_table(PbiMasterKey.physical_tail(t).to_s) }
+                   .select { |k, g| !k.empty? && g.size > 1 }
+unless _rp_groups.empty?
+  puts "   master-map: #{_rp_groups.size} role-playing dimension group(s) kept DISTINCT " \
+       "(#{_rp_groups.map { |k, g| "#{g.size}x #{k}" }.join(', ')}) — previously collapsed into one master."
+end
 conv_elements.each_with_index do |cel, cel_idx|
   cname = cel['name']
   dmel = dmel_for[cel_idx]
@@ -1035,8 +1051,16 @@ conv_elements.each_with_index do |cel, cel_idx|
             spec_elements[cel_idx]
   spec_name_for = (spec_el && spec_el['columns'] || [])
                   .each_with_object({}) { |c, h| h[c['formula'].to_s] = c['name'] if c['name'] }
-  mkey = cname
-  mid  = "master-#{Digest::SHA1.hexdigest(cname)[0, 8]}"
+  # ROLE-PLAYING DIMENSIONS. `cname` is the WAREHOUSE table (the converter names every
+  # element after it), so a model importing the same table N times under N names — six
+  # role-playing DATE_DIMs on real report R2 — collapsed into ONE master here:
+  # masters[mkey] overwrote (last copy won) and all N shared one id, while the report's
+  # visuals bind under the PBI name ("DATE_DIM submission date.CALENDAR_DATE"), a key
+  # that never existed. Key on the PBI table instead; fall back to `cname` when the
+  # element cannot be attributed, which is exactly the old behaviour.
+  _pbi_tbl = _pbi_tbl_for[cel_idx] && _pbi_tbl_for[cel_idx]['table']
+  mkey = _pbi_tbl || cname
+  mid  = PbiMasterKey.master_id(mkey)
   # Bug A: key the master-column id on the FULL cross-element path (not the leaf)
   # and use Sigma's disambiguated display name. For a JOIN/View element, base and
   # related columns can share a leaf ("Customer Key"), so leaf-keying collides on
@@ -1428,7 +1452,12 @@ unless physical_to_pbi.empty?
   field_map.each do |k, v|
     ent, dot, leaf = k.rpartition('.')
     next if dot.empty? || ent.empty? || leaf.empty?
-    pbi = physical_to_pbi[_normt.call(ent)]
+    pbis = Array(physical_to_pbi[_normt.call(ent)])
+    # With N>1 copies the physical name is AMBIGUOUS — aliasing it to one of them is how
+    # a control ended up filtering the wrong date dimension. Alias only the unambiguous
+    # 1:1 case; the N-copy case is already keyed correctly under each PBI table name.
+    next unless pbis.size == 1
+    pbi = pbis.first
     next unless pbi && _normt.call(pbi) != _normt.call(ent)
     ak = "#{pbi}.#{leaf}"
     aliases[ak] = v unless field_map.key?(ak) || aliases.key?(ak)
