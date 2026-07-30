@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make the Tableau converter wire object-graph relationships whose join key Tableau did not serialize, and record every derivation so the existing uniqueness probe can validate it — so a modern Tableau star schema stops converting into disconnected tables.
+**Goal:** Make the Tableau converter wire object-graph relationships whose join key Tableau did not serialize, and record every derivation so it is auditable — so a modern Tableau star schema stops converting into disconnected tables.
 
-**Architecture:** A derivation ladder in the vendored converter, tried in order and recorded per relationship. Inferred keys are written into `join-plan.json`, which means gate 16's existing warehouse uniqueness probe validates every inference before GREEN — that is what makes inference safe rather than a guess. A new `relationship-coverage.json` artifact reports serialized-vs-wired counts; the gate that consumes it ships separately (see Scope).
+**Architecture:** A derivation ladder in the vendored converter, tried in order and recorded per relationship. Safety comes from **two** things, neither of which alone is sufficient: inference is deliberately conservative (one unambiguous key-shaped candidate, or no guess at all), and inferred keys are written into `join-plan.json` so gate 16's warehouse probe catches fan-out. That probe proves uniqueness, **not** correctness — see the amendment below; the design does not claim otherwise. Every derivation is recorded as such so an operator can audit which relationships rest on inference. A new `relationship-coverage.json` artifact reports serialized-vs-wired counts; the gate that consumes it ships separately (see Scope).
 
 **Tech Stack:** JavaScript (the vendored esbuild bundle `converter/tableau.mjs`), Ruby (`scripts/lib/join_plan.rb`, tests). No bundler, no gems beyond stdlib.
 
