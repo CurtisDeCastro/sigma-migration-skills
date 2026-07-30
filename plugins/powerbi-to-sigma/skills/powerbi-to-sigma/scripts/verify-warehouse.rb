@@ -133,12 +133,16 @@ def verify_chart(c, el_by_id, error_element_ids, wb, timeout, fixture)
 end
 
 # Belt-and-suspenders: the warehouse-verified stamp must never land on a workbook
-# with type=error columns. Fetch /columns ONCE and collect the owning element ids
-# (the same signal assert-phase6 Gate 3 uses). Skipped in fixture/test mode.
+# with type=error columns. Fetch /columns exhaustively (one paginated scan, not one
+# request) and collect the owning element ids (the same signal assert-phase6 Gate 3
+# uses). Skipped in fixture/test mode.
 error_element_ids = []
 unless opts[:fixture]
   begin
-    cols = (Sigma.request(:get, "/v2/workbooks/#{opts[:wb]}/columns")['entries'] rescue []) || []
+    # PAGINATED: this read had NO limit param, so it truncated at the server default
+    # of 50 and the verifier audited 50 of N columns — reporting clean on a wide
+    # workbook. list_entries returns the flat Array, so there is no ['entries'] unwrap.
+    cols = (Sigma.list_entries("/v2/workbooks/#{opts[:wb]}/columns") rescue []) || []
     error_element_ids = cols.select { |c| c.dig('type', 'type') == 'error' }.map { |c| c['elementId'] }.compact.uniq
     warn "verify-warehouse: #{error_element_ids.size} element(s) own type=error columns — will fail" unless error_element_ids.empty?
   rescue => e

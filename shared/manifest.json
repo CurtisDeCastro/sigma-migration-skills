@@ -982,6 +982,19 @@
         "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/pick-destination.rb",
         "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/pick-destination.rb"
       ]
+    },
+    {
+      "canonical": "shared/scripts/test-columns-pagination.rb",
+      "targets": [
+        "plugins/looker-to-sigma/skills/looker-to-sigma/scripts/test-columns-pagination.rb",
+        "plugins/microstrategy-to-sigma/skills/microstrategy-to-sigma/scripts/test-columns-pagination.rb",
+        "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-columns-pagination.rb",
+        "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/test-columns-pagination.rb",
+        "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/test-columns-pagination.rb",
+        "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-columns-pagination.rb",
+        "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/test-columns-pagination.rb",
+        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/test-columns-pagination.rb"
+      ]
     }
   ]
 }
