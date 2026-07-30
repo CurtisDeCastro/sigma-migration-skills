@@ -216,9 +216,12 @@ Either way, **READ these images** before and during Phase 5.
 
 ### ⚠️ ASK THE OPERATOR FOR A PAGE SCREENSHOT — layout depends on it
 
-**There is no page-render endpoint.** `/api/content/v1/pages/{pageId}/render` is a
-hard **404** (every variant probed: v2/v3, stacks, export, image), so the full-page
-PDF above often will not exist; the script records
+**No page-render endpoint was found.** `/api/content/v1/pages/{pageId}/render` is a
+hard **404**, as is every variant probed (v2/v3, stacks, export, image) — so the
+full-page PDF above often will not exist. Treat this as "not found", not proven
+absent: Domo's private surface is undocumented, and the `brycewc/domo-product-apis`
+Postman collection reportedly carries a **Get Layout** request that has not yet been
+confirmed. If you find a working path, document it here first. the script records
 `discovery/page-visual-unavailable.json` when it can't get one.
 
 That matters more than it sounds, because **Domo's API exposes NO layout geometry

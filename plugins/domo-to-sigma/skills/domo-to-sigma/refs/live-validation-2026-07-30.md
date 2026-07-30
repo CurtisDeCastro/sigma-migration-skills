@@ -291,7 +291,7 @@ to read OR write layout geometry:
 | `collections[]` (titled sections) | no reachable write endpoint — `POST`/`PUT` on `/collections`, `/pages/{id}/collections` all 404 |
 | card **order** on the page | **not controllable** — cards created 1st and 4th came back at `pageOrder` 2 and 0. Order appears internal/arbitrary |
 | `PUT /api/content/v3/stacks/{pageId}/cards` | 405 |
-| page render (for a screenshot) | **404 on every variant** — `/api/content/v{1,2,3}/pages/{id}/render`, `/stacks/{id}/render`, `/pages/{id}/export`, `/export/v1/pages/{id}`, `/pages/{id}/image` |
+| page render (for a screenshot) | **404 on every variant PROBED** — `/api/content/v{1,2,3}/pages/{id}/render`, `/stacks/{id}/render`, `/pages/{id}/export`, `/export/v1/pages/{id}`, `/pages/{id}/image`. ⚠️ This is "not found across the paths listed", NOT proof none exists — Domo's private surface is undocumented and large. Unchecked lead: the `brycewc/domo-product-apis` Postman collection reportedly has a **Get Layout** request; its page is client-rendered so the path could not be extracted programmatically. Confirm it before relying on this row. |
 | `PUT /v1/cards/{id}/definition` (documented "Update Chart Card Definition") | **500**, like `GET .../definition` — no update path at all; only CREATE works |
 
 Consequences, and they are structural rather than cosmetic:
@@ -300,7 +300,7 @@ Consequences, and they are structural rather than cosmetic:
    is fully API-controllable (dataset, chart type, columns, filters, formats,
    conditional formats); card *size, position and order* are UI-only. If a demo or
    fixture page needs to look composed in Domo, a human must arrange it.
-2. **A migration gets no layout signal from a classic page**, so a converter that
+2. **A migration gets no layout signal from a classic page via any endpoint probed here**, so a converter that
    expects x/y/w/h will silently degrade to a vertical stack — exactly the
    field-reported failure. The only fidelity route is a **human-supplied page
    screenshot**, read by the model into `discovery/layout-observed.json`
