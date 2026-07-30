@@ -254,6 +254,62 @@ end
 def opts_type_workbook?; $opts_type == 'workbook'; end
 $opts_type = opts[:type]
 
+# W2.6 (review fix-wave, 2026-07-30, Important finding 3): derivedVia/partial/
+# droppedConditions are object-graph relationship-derivation PROVENANCE
+# (converter/tableau.mjs's PR2a ladder) — they exist purely so two EARLIER
+# pipeline stages can read them off the SAME dm-spec Hash the converter
+# returned: lib/join_plan.rb threads them into join-plan.json so gate 16's
+# warehouse uniqueness probe can single out and validate an INFERRED key
+# rather than trust it, and emit-relationship-coverage.rb reads them into the
+# audit coverage ledger. Both consumers run against the converter's OWN
+# output, upstream of this script entirely — they have already done their job
+# by the time a spec reaches post-and-readback.rb, so stripping the fields
+# here cannot affect either of them (confirmed by
+# test-relationship-derivation.rb, which drives the converter + JoinPlan.derive
+# directly and never touches this file).
+#
+# They are NOT part of the documented dataModels/spec relationship shape, and
+# we have not live-POSTed one to find out whether Sigma's decoder tolerates an
+# unknown relationship field (warehouse-hungry live verification is
+# deliberately deferred — see the standing one-workstream-at-a-time
+# constraint). validate-spec.rb (this skill's own client-side spec linter)
+# tolerates them, but that proves nothing about Sigma's server-side decoder.
+# If that decoder is strict about unknown fields, shipping them would 400
+# EVERY logical-model migration that wired a relationship this way — strictly
+# worse than the status quo of never having sent them. Strip, don't gamble.
+DERIVATION_ONLY_REL_KEYS = %w[derivedVia partial droppedConditions].freeze
+def strip_relationship_derivation_fields!(spec)
+  return 0 unless spec.is_a?(Hash)
+  n = 0
+  (spec['pages'] || []).each do |pg|
+    (pg['elements'] || []).each do |el|
+      (el['relationships'] || []).each do |rel|
+        next unless rel.is_a?(Hash)
+        DERIVATION_ONLY_REL_KEYS.each { |k| n += 1 if rel.delete(k) }
+      end
+    end
+  end
+  n
+end
+
+# String-in/string-out wrapper for the JSON body variables (post_body/put_body)
+# this file threads through style_normalize!/ensure_theme! — datamodel-only
+# (those relationship fields never appear on a workbook spec's elements) and a
+# silent no-op when the body isn't parseable JSON with a 'pages' array (never
+# block the POST/PUT on a stripping concern).
+def strip_relationship_derivation_fields_from_json(body_str)
+  return body_str unless $opts_type == 'datamodel'
+  spec = (JSON.parse(body_str) rescue nil)
+  return body_str unless spec.is_a?(Hash) && spec['pages']
+  n = strip_relationship_derivation_fields!(spec)
+  return body_str if n.zero?
+  warn "post-and-readback: stripped #{n} relationship-derivation-provenance field(s) " \
+       '(derivedVia/partial/droppedConditions) from the outgoing DM spec immediately before POST/PUT — ' \
+       "consumed earlier in the pipeline (lib/join_plan.rb, emit-relationship-coverage.rb); Sigma's tolerance " \
+       'for unknown relationship fields is unverified, so they are not sent.'
+  JSON.generate(spec)
+end
+
 # Orphan-prevention pre-check: workbook POSTs are create-only. If this is a
 # second invocation in the same conversion, the previous workbook is being
 # orphaned in the customer's My Documents. WARN loudly and emit the PUT
@@ -373,6 +429,7 @@ if update_id
   end
   put_body = style_normalize!(put_body, opts[:workdir], opts[:skip_style_normalize])
   put_body = ensure_theme!(put_body, opts[:workdir])
+  put_body = strip_relationship_derivation_fields_from_json(put_body)
   verify_spec!(put_body, opts[:skip_spec_verify], update: true)
   # W2.5: DM PUT id-stability guard. A Sigma dataModel PUT can RE-MINT element ids
   # (field-caught 2026-07: AAAAAAAAAB -> b4pAUi0swJ), which silently bricks any
@@ -392,6 +449,7 @@ if update_id
 else
   post_body = style_normalize!(File.read(opts[:spec]), opts[:workdir], opts[:skip_style_normalize])
   post_body = ensure_theme!(post_body, opts[:workdir])
+  post_body = strip_relationship_derivation_fields_from_json(post_body)
   # W2.4 preflight: duplicate element/control ids fail the POST with an opaque
   # API 400 (field: the multi-DS converter minted "AAAAAAAAAB" twice + controlId
   # "Region" twice — ~8 min of root-causing, both field-workbook runs). Name the
@@ -433,6 +491,11 @@ else
       $quarantined = q[:deferred]
       File.write(DEFERRED_PATH, JSON.pretty_generate(
         DmQuarantine.deferred_doc(q[:deferred], spec_path: File.expand_path(opts[:spec]))))
+      # Same strip as the primary POST body above — this cleaned spec is what
+      # actually goes out on the re-POST below, so it needs it independently
+      # (deferred-elements.json, written just above, is forensics-only and
+      # deliberately keeps the provenance fields).
+      strip_relationship_derivation_fields!(q[:spec])
       cleaned_path = File.join(opts[:workdir], 'dm-spec.quarantined.json')
       File.write(cleaned_path, JSON.pretty_generate(q[:spec]))
       warn "QUARANTINE: POST failed naming #{found[:ids].size} element(s) — deferred to #{DEFERRED_PATH}; re-POSTing ONCE without them (#{cleaned_path})"
@@ -575,6 +638,11 @@ if opts[:type] == 'datamodel' && $recased.nil? && cols_res.is_a?(Net::HTTPSucces
       rep[:ambiguous].each { |m| warn "  RECASE skip: #{m}" }
       if rep[:fixed].positive?
         $recased = rep[:fixed]
+        # Same strip as the primary POST/PUT bodies — spec_doc is a fresh
+        # re-read of opts[:spec] (line 635), so it still carries the
+        # derivation-provenance fields the earlier strip already removed from
+        # post_body/put_body; this re-PUT needs its own strip.
+        strip_relationship_derivation_fields!(spec_doc)
         recased_path = File.join(opts[:workdir], 'dm-spec.recased.json')
         File.write(recased_path, JSON.pretty_generate(spec_doc))
         warn "RECASE: re-cased #{rep[:fixed]} bare calc ref(s) to live column labels " \
@@ -612,6 +680,10 @@ if QUARANTINE && $quarantined.nil? && cols_res.is_a?(Net::HTTPSuccess)
       $quarantined = Array($quarantined) + q[:deferred]
       File.write(DEFERRED_PATH, JSON.pretty_generate(
         DmQuarantine.deferred_doc($quarantined, data_model_id: oid, spec_path: File.expand_path(opts[:spec]))))
+      # Same strip as the primary POST/PUT bodies — this cleaned spec is what
+      # actually goes out on the re-PUT below (deferred-elements.json, written
+      # just above, is forensics-only and deliberately keeps the provenance).
+      strip_relationship_derivation_fields!(q[:spec])
       cleaned_path = File.join(opts[:workdir], 'dm-spec.quarantined.json')
       File.write(cleaned_path, JSON.pretty_generate(q[:spec]))
       warn "QUARANTINE: column census flagged #{found[:ids].size} element(s) — deferred to #{DEFERRED_PATH}; " \
