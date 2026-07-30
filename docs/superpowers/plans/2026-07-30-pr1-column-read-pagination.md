@@ -33,6 +33,34 @@ Fixing discovery alone would leave the detector blind, so all genuine sites land
 `migrate-tableau.rb` and `assert-wb-refs-resolve.rb` already use `list_entries`. That is the drift
 this PR's lint prevents: the library fix landed in 2026-06 and propagated to some callers only.
 
+
+## AMENDMENT 2026-07-30 (b): re-scoped after three targets turned out to be SHARED
+
+`verify-warehouse.rb`, `assert-phase6-ran.rb` and `probe-controls.rb` are canonical shared files
+(10 / 7 / 8 plugins). Under "PR = 1 plugin OR shared" they cannot ship here, so they moved to
+**PR #560** (`beads-sigma-bf1f`), which is open and approved. Found when a pre-commit SHARED-LIB
+DRIFT hook refused Task 4.
+
+Re-scoped tasks:
+
+| Task | Status |
+|---|---|
+| 1 triage | done (`690c10e3`) |
+| 2 `discover-columns.rb` | done (`37c0657f`) |
+| 3 `discover-warehouse-columns.rb` | done (`dd04b352`) |
+| **4 `verify-warehouse.rb`** | **MOVED to PR #560 — do not implement** |
+| 5 `post-and-readback.rb` | to do |
+| **6 `assert-phase6-ran.rb`** | **MOVED to PR #560 — do not implement** |
+| 6b (3 sites, `probe-controls.rb` removed) | to do |
+| **7 lint** | **DEFERRED to a follow-up PR** — it cannot pass until #560 merges and syncs, or it would need three standing exemptions. The fixes do not depend on #560; only the lint does. |
+| 8 version bump + PR | to do, bump to **1.3.5** (not 1.3.4 — #560 claims 1.3.4 for this plugin; 1.3.5 avoids a merge collision) |
+
+Verified before re-dispatching: all four remaining targets (`post-and-readback.rb`,
+`synth-twb-e2e.rb`, `fidelity-loop.rb`, `validate-sigma-formula.rb`) are tableau-only, absent from
+`shared/manifest.json`. This audit is now a precondition for every task, not an assumption.
+
+---
+
 ## File Structure
 
 | File | Responsibility | Action |
@@ -513,7 +541,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task 4: Paginate `verify-warehouse.rb`
+### Task 4: Paginate `verify-warehouse.rb` — MOVED TO PR #560, DO NOT IMPLEMENT
 
 **Files:**
 - Modify: `scripts/verify-warehouse.rb:141`
@@ -719,7 +747,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task 6: Paginate the final gate's error-column audit
+### Task 6: Paginate the final gate's error-column audit — MOVED TO PR #560, DO NOT IMPLEMENT
 
 `assert-phase6-ran.rb` deliberately carries no `sigma_rest` dependency, so this uses a local loop
 mirroring `list_entries` semantics.
@@ -852,7 +880,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task 6b: Paginate the four sites Task 1's triage added
+### Task 6b: Paginate the three remaining sites Task 1's triage added
 
 Task 1's triage found four genuine REST-COLUMNS readers the plan did not originally name. Two are
 **more error-column guards** — the same false-clean class as gate 5. All four were verified by
@@ -860,15 +888,14 @@ reading the assigning line, and all four must be fixed or Task 7's lint cannot p
 
 **Files:**
 - Modify: `scripts/synth-twb-e2e.rb:230-231`
-- Modify: `scripts/probe-controls.rb:130-132`
 - Modify: `scripts/fidelity-loop.rb:534-535`
 - Modify: `scripts/validate-sigma-formula.rb:185-187` (+ no new require — see below)
 - Test: `scripts/test-column-read-pagination.rb` (append wiring pins)
 
 **Interfaces:**
-- Consumes: `Sigma.list_entries` — already available in `synth-twb-e2e.rb` (required at :53),
-  `probe-controls.rb` (:63-64), and `fidelity-loop.rb` (lazily required at :521, which executes
-  before :535).
+- Consumes: `Sigma.list_entries` — already available in `synth-twb-e2e.rb` (required at :53) and
+  `fidelity-loop.rb` (lazily required at :521, which executes before :535). NOTE: `probe-controls.rb`
+  was originally part of this task and has MOVED to PR #560 — it is a shared file.
 - `validate-sigma-formula.rb` deliberately does **not** get `sigma_rest`: it mints its own token via
   `get_token` into `TOK` and uses its own `http` helper. Adding the library would put two independent
   auth paths in one script. It gets a local pagination loop over its existing `http` instead.
@@ -882,7 +909,6 @@ Append to `scripts/test-column-read-pagination.rb` before the summary block:
 #    guards, so a truncated read means the same false-clean risk as gate 5.
 {
   'synth-twb-e2e.rb'        => 'DM error-column repair loop',
-  'probe-controls.rb'       => 'control column-label map',
   'fidelity-loop.rb'        => 'post-PUT error-column guard'
 }.each do |file, why|
   s = File.read(File.join(__dir__, file))
@@ -928,27 +954,7 @@ New:
   errs = cols.select { |c| c.dig('type', 'type') == 'error' }.map { |c| c['label'] }
 ```
 
-- [ ] **Step 4: Fix `probe-controls.rb`**
-
-Lines 130-132. Old:
-
-```ruby
-cols = Sigma.request(:get, "/v2/workbooks/#{WB}/columns")
-col_label = {} # [elementId, columnId] -> display label
-(cols && cols['entries'] || []).each do |c|
-```
-
-New:
-
-```ruby
-# PAGINATED: this map resolves control targets to display labels. Truncation left
-# controls past column 50 unlabeled.
-cols = Sigma.list_entries("/v2/workbooks/#{WB}/columns")
-col_label = {} # [elementId, columnId] -> display label
-cols.each do |c|
-```
-
-- [ ] **Step 5: Fix `fidelity-loop.rb`**
+- [ ] **Step 4: Fix `fidelity-loop.rb`**
 
 Lines 534-535. Old:
 
@@ -1025,7 +1031,6 @@ Expected: same results as on `main`. Baseline first with `git stash` if unsure.
 
 ```bash
 git add plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/synth-twb-e2e.rb \
-        plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/probe-controls.rb \
         plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/fidelity-loop.rb \
         plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/validate-sigma-formula.rb \
         plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-column-read-pagination.rb
@@ -1045,7 +1050,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task 7: Lock the pattern in with a lint
+### Task 7: Lock the pattern in with a lint — DEFERRED to a follow-up PR (needs #560 merged)
 
 The bug exists because the 2026-06 `list_entries` fix propagated to some callers and not others.
 Without a lint, it will drift again.
@@ -1194,7 +1199,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 - [ ] **Step 1: Bump the version**
 
 In `plugins/tableau-to-sigma/.claude-plugin/plugin.json`, change `"version": "1.3.3"` to
-`"version": "1.3.4"`. Patch level: bug fixes, no new capability, no breaking change.
+`"version": "1.3.5"`. Patch level: bug fixes, no new capability, no breaking change.
 
 - [ ] **Step 2: Run the plugin's full offline suite**
 
