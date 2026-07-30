@@ -16,14 +16,28 @@
 #
 # Creds-free and network-free: runs the vendored converter over a static .twb.
 #
+# HOW IT DRIVES THE CONVERTER: converter/tableau.mjs is a library module with no
+# CLI entry point — `node converter/tableau.mjs <path>` does nothing (no argv
+# handling, no stdout). This test instead follows the established pattern in
+# scripts/mechanical-specs.rb's run_converter (see :776-810): write a small ESM
+# shim into a throwaway temp dir that imports convertTableauToSigma by name,
+# calls it, and writes its result to a JSON file this script then reads. The
+# `bare = out.model || out.sigmaDataModel || out` idiom is lifted verbatim from
+# that production path — it is what actually unwraps the model regardless of
+# which key generation the converter returns it under.
+#
 # Usage: ruby scripts/test-relationship-derivation.rb
+# Override the .twb for local sanity-checking the harness itself (never set in
+# CI/production): TEST_RELATIONSHIP_DERIVATION_TWB=/path/to.twb ruby ...
 
 require 'json'
 require 'open3'
+require 'tmpdir'
 
-HERE    = File.expand_path(__dir__)
-FIXTURE = File.expand_path('../../../../../corpus/tableau/logical-model-objectgraph', HERE)
-TWB     = File.join(FIXTURE, 'workbook-content.twb')
+HERE      = File.expand_path(__dir__)
+FIXTURE   = File.expand_path('../../../../../corpus/tableau/logical-model-objectgraph', HERE)
+TWB       = File.join(FIXTURE, 'workbook-content.twb')
+CONVERTER = File.join(HERE, '..', 'converter', 'tableau.mjs')
 
 fails = []
 def check(cond, msg, fails)
@@ -31,13 +45,59 @@ def check(cond, msg, fails)
   puts "  #{cond ? 'PASS' : 'FAIL'}  #{msg}"
 end
 
-abort "fixture missing: #{TWB}" unless File.exist?(TWB)
+# Locate the elements array without assuming one fixed nesting depth: today the
+# converter returns { model: { pages: [{ elements }] }, ... }, but a bare
+# top-level `elements` key is also plausible for a future shape. Rather than
+# crash the whole run on a shape change, record it as a diagnosable FAILURE (so
+# every other assertion still reports) naming exactly what was found instead.
+def locate_elements(model, fails)
+  return model['elements'] if model.is_a?(Hash) && model['elements'].is_a?(Array)
+  if model.is_a?(Hash) && model['pages'].is_a?(Array) &&
+     model['pages'][0].is_a?(Hash) && model['pages'][0]['elements'].is_a?(Array)
+    return model['pages'][0]['elements']
+  end
+  found = model.is_a?(Hash) ? "a Hash with keys #{model.keys.inspect}" : model.class.to_s
+  msg = "cannot locate elements array on converter output model " \
+        "(checked ['elements'] and ['pages'][0]['elements']; found #{found})"
+  check(false, msg, fails)
+  []
+end
 
-# Drive the vendored converter exactly as the skill does.
-out, err, st = Open3.capture3('node', File.join(HERE, '..', 'converter', 'tableau.mjs'), TWB)
-warn err unless err.empty?
-abort "converter failed (exit #{st.exitstatus}):\n#{err}" unless st.success?
-doc = JSON.parse(out)
+twb_path = ENV['TEST_RELATIONSHIP_DERIVATION_TWB'] || TWB
+abort "fixture missing: #{twb_path}" unless File.exist?(twb_path)
+
+doc = nil
+Dir.mktmpdir('relationship-derivation') do |dir|
+  shim = File.join(dir, '_convert_tableau.mjs')
+  out_path = File.join(dir, 'out.json')
+  # Node ESM on Windows rejects a bare drive-letter specifier
+  # (ERR_UNSUPPORTED_ESM_URL_SCHEME, protocol 'c:') — absolute paths must be
+  # file:// URLs there. Same guard as mechanical-specs.rb's run_converter.
+  import_specifier =
+    if Gem.win_platform? && CONVERTER.match?(/\A[A-Za-z]:/)
+      'file:///' + CONVERTER.gsub('\\', '/')
+    else
+      CONVERTER
+    end
+  File.write(shim, <<~JS)
+    import { readFileSync, writeFileSync } from 'node:fs';
+    import { convertTableauToSigma } from #{import_specifier.to_json};
+    const xml = readFileSync(#{twb_path.to_json}, 'utf8');
+    const out = convertTableauToSigma(xml, {
+      connectionId: 'test-conn', database: 'TESTDB', schema: 'TESTSCHEMA', tableMapping: {},
+    });
+    const bare = out.model || out.sigmaDataModel || out;
+    writeFileSync(#{out_path.to_json}, JSON.stringify({
+      model: bare,
+      relationshipCoverage: out.relationshipCoverage || null,
+      warnings: out.warnings || []
+    }, null, 2));
+  JS
+  o, e, st = Open3.capture3('node', shim)
+  warn e unless e.empty?
+  abort "converter failed (exit #{st.exitstatus}):\n#{e}#{o}" unless st.success?
+  doc = JSON.parse(File.read(out_path))
+end
 
 puts 'test-relationship-derivation.rb — object-graph key derivation'
 
@@ -82,7 +142,7 @@ check(%w[serialized name-inference unwired].include?(date['derivedVia']),
 
 # 4. Every wired relationship's keys must be REAL columns on both elements — an
 #    inferred key must never fabricate a column.
-els = (doc['elements'] || [])
+els = locate_elements(doc['model'] || {}, fails)
 by_id = els.each_with_object({}) { |e, h| h[e['id']] = e }
 bad = []
 els.each do |el|
