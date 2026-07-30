@@ -42,9 +42,34 @@ plan when it starts.
 
 ### Track A — the shared SQL converter (do FIRST)
 
-`jva2` (P0, `CASE WHEN` untranslated — 71% of formulas) and `sqp1`
-(`COUNT(DISTINCT)` renders `DISTINCT` as a column). Both live in the canonical
-`convertSqlToSigmaFormula`, in the **separate `~/sigma-data-model-mcp` repo**.
+`jva2` (P0) and `sqp1`. Both live in the canonical `convertSqlToSigmaFormula`, in
+the **separate `~/sigma-data-model-mcp` repo** (`src/formulas.ts`, `src/tools.ts`).
+
+> **ROOT CAUSE FOUND 2026-07-30 — this is far smaller than first assumed.** `jva2`
+> is NOT "CASE WHEN is unimplemented." `lookConvertCase` ("Convert CASE WHEN … to
+> nested If()") already exists and is correct. The tool does:
+> ```ts
+> const result = lookSqlToSigmaRules(sql);      // null → falls through
+> const fallback = lookConvertExpression(sql);  // "general expression converter"
+> ```
+> and `lookSqlToSigmaRules`'s CASE branch tests `/^CASE\b/i`. **Domo wraps every
+> Beast Mode in outer parentheses**, so `(CASE WHEN …)` fails the anchor and silently
+> falls through. Verified: the identical formula WITHOUT outer parens returns
+> `If(Sum([Net Revenue]) = 0, 0, Sum([Gross Profit]) / Sum([Net Revenue]))` —
+> byte-identical to the hand-authored version.
+>
+> So **fix 1** is: strip balanced outer parens (and whitespace) before pattern
+> matching. **Fix 2** (`sqp1`) is genuinely separate — `COUNT(DISTINCT x)` fails even
+> unparenthesized, emitting `Count([Distinct] [X])`; it needs a real
+> `COUNT(DISTINCT x)` → `CountDistinct(x)` mapping.
+>
+> Measured over the 81-formula live corpus: 52/81 (64%) are paren-wrapped; 58 use
+> `CASE WHEN` of which **44 are paren-wrapped** (unblocked by fix 1 alone — the other
+> 14 already convert correctly); **7** use `COUNT(DISTINCT)` (fix 2).
+>
+> Both fixes are small and surgical. Neither is a parser rewrite. Guard against
+> over-stripping: only strip when the parens are genuinely balanced and enclose the
+> WHOLE expression — `(a) + (b)` must not become `a) + (b`.
 
 **Why first, despite Track B being the stated goal.** Track B can reach GREEN today
 using the `formula-overrides.json` sidecar — but that GREEN would mean *"this
