@@ -31,6 +31,19 @@
         "un-staled the window-untranslatable list: WINDOW_CORR/WINDOW_VAR/WINDOW_COUNT now map to MovingCorr/MovingVariance/MovingCount (offset forms spanning the current row; all three present in the Sigma function index, verified 2026-07-25); population variants WINDOW_VARP/COVARP/STDEVP stay untranslatable; SIGMA_CHART_ONLY_WINDOW_RE extended with MovingVariance/MovingCorr so the DM router keeps refusing them"
       ],
       "upstream_pr": "twells89/sigma-data-model-mcp#111 (upstream commit 60a0355)"
+    },
+    {
+      "commit": "worktree (this PR)",
+      "summary": "Object-graph relationship key derivation ladder + coverage ledger (PR2a, bead beads-sigma-ovy4): Tableau's 2020.2+ logical model auto-matches relationships by column name at query time and serializes no join key, so the converter previously saw a modern star schema and emitted disconnected tables — after which a parity gate with no relationships to satisfy it pushed the run into joined/aggregated Custom SQL. Applied in place per the standing PROVENANCE TASK 3 guard: two prior local_patches entries above are still open/unlanded, and re-vendoring would silently drop them.",
+      "changes": [
+        "object-graph relationship loop (relType === \"collection\"): the auto-match branch (previously an unconditional `continue` when the relationship carried zero serialized equality expressions) now first attempts conservative name-match inference — candidate column names are the normalized (whitespace-to-underscore, uppercased) display names already present on BOTH elements' colIdMap (existence tested via ensureCol's own bare lookup, never via a mutating call), filtered to key-shaped names (ends with _ID/_KEY/_SK/_CODE, or equals/contains the target element's entity name). A single key-shaped candidate is wired with derivedVia: \"name-inference\"; ensureCol is only ever called on a name already confirmed to exist on both sides, so inference can fabricate neither a column nor a value. More than one key-shaped candidate, or none, leaves the relationship unwired — never a guessed composite key",
+        "computed-only key branch (all serialized equality expressions resolved to non-physical/computed operands, previously an unconditional `continue`): now attempts the same name-match inference before giving up, so a relationship with no serializable physical key can still be recovered by name when the columns exist on both sides",
+        "mixed-key branch (skippedComputed > 0, some equality expressions computed and dropped alongside a wired physical subset): unchanged wiring behavior, now additionally tags the relationship and its coverage-ledger entry with derivedVia: \"serialized\", partial: true, droppedConditions: <n>",
+        "every relationship object pushed into an element's `relationships` array now carries derivedVia: \"serialized\" | \"name-inference\"",
+        "new relationshipCoverage ledger: a `{ serialized, wired, entries: [] }` collector initialized before the relationship loop, attached to convertTableauToSigma's returned object as `relationshipCoverage` whenever the collection/object-graph branch runs. Every relationship the loop considers — wired or not — pushes exactly one entry (`{ left, right, derivedVia, keyCount }` when wired, or `{ left, right, derivedVia: \"unwired\", reason, candidates }` when not), so a relationship can never be silently absent from coverage the way it previously could be silently `continue`d out of the loop",
+        "all pre-existing warnings.push(...) message text is unchanged and verbatim for every branch where the original condition (still, or now-additionally, unwired) still holds; new ℹ info-level warnings.push messages were added only for the newly-successful name-inference wire paths, explicitly calling out that the key was inferred (not serialized) and should be verified"
+      ],
+      "upstream_pr": null
     }
   ],
   "_upstream_and_revendor_tasks": [

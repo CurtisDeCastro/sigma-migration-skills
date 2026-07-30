@@ -4450,6 +4450,7 @@ function convertTableauToSigma(xmlContent, options = {}) {
     return false;
   }
   const elements = [];
+  let relationshipCoverage = null;
   let joinTableIndex = null;
   const connId = connectionId || "<CONNECTION_ID>";
   const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -4810,6 +4811,7 @@ function convertTableauToSigma(xmlContent, options = {}) {
         }
         const objGraph = nsChild(ds.ds, "object-graph");
         const relsList = asArray(objGraph?.relationships?.relationship || []);
+        const relCoverage = { serialized: relsList.length, wired: 0, entries: [] };
         const getCleanSeg = (name) => name.replace(/[\[\]]/g, "").split(".").pop()?.replace(/_[0-9A-Fa-f]{16,}$/, "").toUpperCase() || "";
         const findEntry = (objId) => {
           const exactKey = Object.keys(elementMap).find((k) => elementMap[k].objId === objId);
@@ -4829,6 +4831,40 @@ function convertTableauToSigma(xmlContent, options = {}) {
             return uuidInFn;
           return opAttr.replace(/^\[|\]$/g, "").replace(/\s*\(.*\)$/, "").trim().toUpperCase();
         };
+        // --- object-graph relationship key derivation ladder (PR2a) ---
+        // Tableau's 2020.2+ logical model AUTO-MATCHES relationships by column name at query
+        // time and serializes NO join key at all \u2014 that is the modern-star-schema common case,
+        // not an edge case. A purely-computed key (IF/DATETRUNC expression) is the other case
+        // Sigma cannot join on directly. Both fall through to this conservative name-match
+        // inference before being recorded as unwired, per docs/superpowers/plans/2026-07-30-pr2a-spike.md:
+        // never fabricate a column via ensureCol for a guessed name (only call it once existence
+        // is confirmed on both sides via colIdMap), and never combine multiple name matches into
+        // a composite key \u2014 an incidental second match (e.g. both sides carrying CREATED_AT)
+        // would over-constrain the join and silently drop rows. A single key-shaped candidate is
+        // wired; anything else (none, or more than one) is left for manual authoring.
+        const candidateNames = (entry) => (entry.element.columns || []).map((c) => c.name || (typeof c.formula === "string" && (c.formula.match(/\/([^\]]+)\]$/) || [])[1])).filter(Boolean).map((nm) => String(nm).replace(/\s+/g, "_").toUpperCase());
+        const hasCol = (entry, key) => Boolean(entry.colIdMap[key] || entry.colIdMap[key.replace(/-/g, "_")]);
+        const entityNameOf = (cleanName) => String(cleanName || "").toUpperCase().replace(/^(DIM|FACT|BRIDGE)_/, "");
+        const isKeyShapedName = (name, entityName) => /(_ID|_KEY|_SK|_CODE)$/.test(name) || !!entityName && (name === entityName || name.includes(entityName));
+        const inferRelationshipKeyByName = (firstEntry, secondEntry) => {
+          const leftNames = candidateNames(firstEntry);
+          const rightSet = new Set(candidateNames(secondEntry));
+          const seen = /* @__PURE__ */ new Set();
+          const candidates = [];
+          for (const n of leftNames) {
+            if (seen.has(n))
+              continue;
+            seen.add(n);
+            if (rightSet.has(n) && hasCol(firstEntry, n) && hasCol(secondEntry, n))
+              candidates.push(n);
+          }
+          const entityName = entityNameOf(secondEntry.cleanName);
+          const keyShaped = candidates.filter((n) => isKeyShapedName(n, entityName));
+          if (keyShaped.length === 1)
+            return { ok: true, name: keyShaped[0], candidates, keyShaped };
+          return { ok: false, candidates, keyShaped };
+        };
+        const unwiredReason = (inferred) => inferred.candidates.length === 0 ? "no existing column name matches on both sides" : inferred.keyShaped.length === 0 ? "candidate name(s) matched but none look key-shaped (_ID/_KEY/_SK/_CODE, or the target entity name)" : `ambiguous: ${inferred.keyShaped.length} key-shaped candidates \u2014 refusing to guess a composite key`;
         for (const rel of relsList) {
           const firstEp = rel["first-end-point"];
           const secondEp = rel["second-end-point"];
@@ -4858,6 +4894,37 @@ function convertTableauToSigma(xmlContent, options = {}) {
             }
             return id;
           };
+          const wireInferred = (name) => {
+            const inferredKeys = [{
+              sourceColumnId: ensureCol(firstEntry, name),
+              targetColumnId: ensureCol(secondEntry, name)
+            }];
+            if (!firstEntry.element.relationships)
+              firstEntry.element.relationships = [];
+            firstEntry.element.relationships.push({
+              id: sigmaShortId(),
+              targetElementId: secondEntry.element.id,
+              keys: inferredKeys,
+              name: secondEntry.cleanName,
+              derivedVia: "name-inference"
+            });
+            relCoverage.wired += 1;
+            relCoverage.entries.push({
+              left: firstEntry.cleanName,
+              right: secondEntry.cleanName,
+              derivedVia: "name-inference",
+              keyCount: inferredKeys.length
+            });
+          };
+          const recordUnwired = (inferred) => {
+            relCoverage.entries.push({
+              left: firstEntry.cleanName,
+              right: secondEntry.cleanName,
+              derivedVia: "unwired",
+              reason: unwiredReason(inferred),
+              candidates: inferred.candidates
+            });
+          };
           const collectEqs = (expr, acc) => {
             const op = nsAttr(expr, "op");
             const kids = asArray(expr.expression || []);
@@ -4872,7 +4939,14 @@ function convertTableauToSigma(xmlContent, options = {}) {
           for (const oe of asArray(rel.expression || []))
             collectEqs(oe, eqExprs);
           if (eqExprs.length === 0) {
+            const inferred = inferRelationshipKeyByName(firstEntry, secondEntry);
+            if (inferred.ok) {
+              wireInferred(inferred.name);
+              warnings.push(`\u2139 Relationship ${firstEntry.cleanName} \u2192 ${secondEntry.cleanName}: no serialized join key (Tableau auto-matches these at query time) \u2014 inferred "${inferred.name}" from a column name that exists on both sides. VERIFY this is the correct key before relying on it.`);
+              continue;
+            }
             warnings.push(`\u26A0 Relationship ${firstEntry.cleanName} \u2192 ${secondEntry.cleanName} carries no serialized join key \u2014 Tableau auto-matches these at query time; Sigma needs an explicit key. NOT wired: pick a join key and wire manually (LEFT from fact\u2192dim), and verify the dimension is unique on the key to avoid measure fan-out.`);
+            recordUnwired(inferred);
             continue;
           }
           const isPhysical = (op) => /^\[[^\]]+\]$/.test(op.trim());
@@ -4897,7 +4971,14 @@ function convertTableauToSigma(xmlContent, options = {}) {
             });
           }
           if (keys.length === 0) {
+            const inferred = inferRelationshipKeyByName(firstEntry, secondEntry);
+            if (inferred.ok) {
+              wireInferred(inferred.name);
+              warnings.push(`\u2139 Relationship ${firstEntry.cleanName} \u2192 ${secondEntry.cleanName}: joins only on computed key(s) with no physical column to wire \u2014 inferred "${inferred.name}" from a column name that exists on both sides instead. VERIFY this is the correct key before relying on it.`);
+              continue;
+            }
             warnings.push(`\u26A0 Relationship ${firstEntry.cleanName} \u2192 ${secondEntry.cleanName} joins only on computed key(s) (e.g. IF/DATETRUNC expression); Sigma joins on physical columns only \u2014 NOT wired. Needs a computed join column or manual authoring.`);
+            recordUnwired(inferred);
             continue;
           }
           if (skippedComputed > 0) {
@@ -4905,14 +4986,26 @@ function convertTableauToSigma(xmlContent, options = {}) {
           }
           if (!firstEntry.element.relationships)
             firstEntry.element.relationships = [];
+          const derivedVia = "serialized";
           firstEntry.element.relationships.push({
             id: sigmaShortId(),
             targetElementId: secondEntry.element.id,
             keys,
-            name: secondEntry.cleanName
+            name: secondEntry.cleanName,
+            derivedVia,
+            ...skippedComputed > 0 ? { partial: true, droppedConditions: skippedComputed } : {}
+          });
+          relCoverage.wired += 1;
+          relCoverage.entries.push({
+            left: firstEntry.cleanName,
+            right: secondEntry.cleanName,
+            derivedVia,
+            keyCount: keys.length,
+            ...skippedComputed > 0 ? { partial: true, droppedConditions: skippedComputed } : {}
           });
           warnings.push(`\u2139 Relationship ${firstEntry.cleanName} \u2192 ${secondEntry.cleanName} wired on ${keys.length} physical key(s).`);
         }
+        relationshipCoverage = relCoverage;
         const joinableEls = elements.filter((e) => e.source?.kind === "warehouse-table" || e.source?.kind === "sql");
         const wiredRelCount = elements.reduce((n, e) => n + (e.relationships?.length || 0), 0);
         if (joinableEls.length > 1 && wiredRelCount === 0) {
@@ -6780,6 +6873,7 @@ ${suggestion}
     ...security.length ? { security } : {},
     ...workbookPatterns.length ? { workbookPatterns } : {},
     ...parameters.length ? { parameters } : {},
+    ...relationshipCoverage ? { relationshipCoverage } : {},
     stats: {
       datasources: datasources.length,
       elements: elements.length,
