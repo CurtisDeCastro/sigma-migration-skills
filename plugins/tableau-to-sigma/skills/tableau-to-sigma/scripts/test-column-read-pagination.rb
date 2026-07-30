@@ -165,6 +165,15 @@ check(s.include?('nextPage') && s.include?('limit=1000'),
 check(!s.match?(/require 'sigma_rest'/),
       'validate-sigma-formula.rb keeps its single auth path (no sigma_rest)', fails)
 
+# 9. fidelity-loop.rb's post-PUT guard must not claim "clean" when the columns
+#    read failed entirely (nil, not just truncated) — the same false-clean
+#    pattern gate 7/8 guard against for a truncated (but non-nil) read.
+src = File.read(File.join(__dir__, 'fidelity-loop.rb'))
+check(src.include?('cols_unread'),
+      'fidelity-loop.rb tracks an unread column guard so it cannot claim clean', fails)
+check(src.include?('column-type check SKIPPED'),
+      'fidelity-loop.rb reports a SKIPPED column check instead of implying it passed', fails)
+
 puts ''
 if fails.empty?
   puts "test-column-read-pagination.rb: ALL PASS"
