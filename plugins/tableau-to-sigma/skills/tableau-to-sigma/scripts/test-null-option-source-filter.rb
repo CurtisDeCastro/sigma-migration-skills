@@ -153,6 +153,11 @@ if helper
   hf = (helper['filters'] || []).first
   check(nn && hf && hf['columnId'] == nn['id'] && hf['values'] == [true],
         "helper filters IsNotNull == true (got #{hf.inspect})", fails)
+  # Field report: Sigma's spec verify endpoint 400s element filters without an
+  # `id` (`filters[N].id: Invalid string: undefined`) — the helper's filter must
+  # carry a deterministic one.
+  check(hf && hf['id'].to_s =~ /\Aflt-#{Regexp.escape(helper['id'].to_s)}-\d+\z/,
+        "helper filter carries a deterministic id (got #{hf && hf['id'].inspect})", fails)
   check(helper['visibleAsSource'] == false, 'helper is hidden (visibleAsSource:false)', fails)
 end
 

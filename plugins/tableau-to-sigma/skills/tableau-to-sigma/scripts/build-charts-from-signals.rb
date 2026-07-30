@@ -7387,7 +7387,10 @@ unless opts[:no_auto_controls]   # default-on: never miss a .twb parameter/filte
             { 'id' => opt_nn_col, 'name' => "#{cap.strip} Not Null",
               'formula' => "IsNotNull([Master/#{m['name']}])" }
           ],
-          'filters' => [{ 'columnId' => opt_nn_col, 'kind' => 'list', 'mode' => 'include',
+          # every element filter needs an `id` — the spec API 400s
+          # `filters[N].id: Invalid string: undefined` without one (field report)
+          'filters' => [{ 'id' => "flt-#{opt_id}-0", 'columnId' => opt_nn_col,
+                          'kind' => 'list', 'mode' => 'include',
                           'selectionMode' => 'multiple', 'values' => [true] }],
           'visibleAsSource' => false
         }

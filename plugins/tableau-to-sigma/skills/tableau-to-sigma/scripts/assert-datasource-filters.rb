@@ -124,7 +124,8 @@ if violations.any?
   violations.each { |v| warn "         - #{v}" }
   warn '       These render nothing on any dashboard, so a visual check cannot catch the miss — every'
   warn '       aggregate silently over-reports until they are applied. Apply each as a workbook-wide'
-  warn '       default filter on the master element (element filters {columnId, kind:"list", values:[...]}),'
+  warn '       default filter on the master element (element filters {id, columnId, kind:"list", values:[...]} —'
+  warn '       the id is required; the spec API rejects filters without it),'
   warn '       re-PUT, and re-run. Escape hatch: --skip-datasource-filters "<reason>" (name it in your report).'
   exit 1
 end
