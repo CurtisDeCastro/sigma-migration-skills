@@ -298,6 +298,7 @@ jobs:
             shared/lib/test_plugin_embed.rb
             shared/lib/test_composition.rb
             shared/lib/test_composition_lint.rb
+            shared/lib/test_shared_script_closure.rb
             shared/lib/test_styling.rb
             shared/lib/test_coverage_catalog.rb
             shared/lib/test_kpi_card.rb
