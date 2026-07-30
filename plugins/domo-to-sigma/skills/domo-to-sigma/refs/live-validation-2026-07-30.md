@@ -347,6 +347,54 @@ Standing lesson: probing v1–v3 and declaring absence was an overclaim. Domo
 versions its private endpoints independently and v4 exists for at least this
 resource.
 
+#### `includeV4PageLayouts=true` — confirmed no-op for a classic page
+
+The stacks call accepts `includeV4PageLayouts=true`. Passing it on a classic page
+adds **no layout key at all** to the response (top-level keys are unchanged:
+`cards, collections, id, isFavorite, locked, page, pageAnalyzerSettings, sizes,
+title, type`). That independently corroborates the empty v4 200 above: a classic
+page simply has no v4 layout record. Expect this flag to matter only for a
+Dashboard-type page.
+
+### ⭐ The stacks `parts` vocabulary is MUCH larger — and includes `subscriptions`
+
+The 9-value `parts` list documented earlier comes from the CARD endpoint. The
+**stacks** endpoint accepts a wider set:
+
+```
+GET /api/content/v3/stacks/{pageId}/cards
+    ?parts=metadata,datasources,library,drillPathURNs,owners,certification,
+           dateInfo,subscriptions,slicers,metadataOverrides
+    &includeV4PageLayouts=true
+```
+
+Verified live — each card in `cards[]` then carries `metadata, datasources,
+dateInfo, drillPathURNs, owners, certification, slicers, metadataOverrides` **and
+`subscriptions`**.
+
+**This is a significant efficiency and robustness win the extractor should adopt.**
+`subscriptions` here is the SAME binding data that `PUT /api/content/v3/cards/kpi/definition`
+returns — including `big_number` with its `column`/`aggregation`/`alias`/`format`,
+and a per-subscription `dataSourceId`:
+
+```json
+{"cardId": 390868622, "dataSourceId": "…", "dataSourceName": "…",
+ "componentName": "big_number",
+ "subscription": {"name": "big_number", "dataSourceId": "…",
+                  "columns": [{"column": "QUANTITY_ORDERED", "aggregation": "SUM", …}]}}
+```
+
+Today `domo-discover.rb` makes **one PUT per card** to get bindings. On the 36-card
+sample page that is 36 round-trips where **one** stacks call would do — and it also
+removes the need to join `datasetId` separately, since each subscription carries its
+own `dataSourceId`. Note the shape differs slightly (a LIST of
+`{cardId, componentName, subscription}` envelopes here, vs a dict keyed by
+subscription name on the PUT), so normalize both.
+
+Unexplored parts worth a look: `slicers` (Domo's card-level slicer controls),
+`dateInfo` (likely the date-grain/range summary), `metadataOverrides`, and
+`drillPathURNs` (drill hierarchies — currently dropped entirely).
+
 ## Render endpoint — confirmed, with a correction
 
 ```
