@@ -245,9 +245,17 @@ version gate.
 
 ## Also delivered
 
-Four beads issues — P0 pagination, P0 relationship coverage, P1 filter `id`, P2 provenance — linked to
-the adjacent open `beads-sigma-1k0t` ("view element sources the LOD helper (2 cols) not base fact →
-~300 dependency-not-found").
+Three beads issues, filed one-per-PR to match the tracker's bead ≈ plugin ≈ PR convention (M4 and M5
+share PR3, so they share a bead):
+
+| Bead | PR | Defects |
+|---|---|---|
+| `beads-sigma-tzly` (P0) | PR1 | M1 pagination |
+| `beads-sigma-ovy4` (P0) | PR2 | M2/M3 relationship coverage — `discovered-from: tzly` |
+| `beads-sigma-zjkw` (P1) | PR3 | M4 filter `id`, M5 provenance, `SKILL.md` exit-29 row |
+
+`beads-sigma-ovy4` notes the adjacent open `beads-sigma-1k0t` ("view element sources the LOD helper
+(2 cols) not base fact → ~300 dependency-not-found").
 
 Non-code: the prospect response, plus version-identification instructions. Version *numbers* are
 useless for diagnosis here — CI-enforced bumping only began 2026-07-28 and `marketplace.json` is still
