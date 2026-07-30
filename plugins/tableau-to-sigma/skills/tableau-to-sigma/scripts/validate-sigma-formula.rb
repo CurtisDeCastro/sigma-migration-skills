@@ -182,9 +182,25 @@ unless wb_id
 end
 
 # Walk both elements; we mostly care about the test element
-cols_resp = http(:get, "/v2/workbooks/#{wb_id}/elements/el-scout-test/columns")
-cols_data = JSON.parse(cols_resp.body)
-entries = cols_data['entries'] || []
+# PAGINATED with a LOCAL loop: this script mints its own token into TOK and uses
+# its own `http` helper, so pulling in sigma_rest would put two independent auth
+# paths in one script. Same semantics as Sigma.list_entries — limit=1000, follow
+# nextPage to exhaustion, defensive stop on a repeated or empty token.
+entries = []
+cols_page = nil
+cols_seen = {}
+loop do
+  qs = 'limit=1000'
+  qs += "&page=#{URI.encode_www_form_component(cols_page)}" if cols_page
+  cols_resp = http(:get, "/v2/workbooks/#{wb_id}/elements/el-scout-test/columns?#{qs}")
+  break unless cols_resp.is_a?(Net::HTTPSuccess)
+  cols_data = (JSON.parse(cols_resp.body) rescue nil)
+  break unless cols_data.is_a?(Hash)
+  entries.concat(cols_data['entries'] || [])
+  cols_page = cols_data['nextPage']
+  break if cols_page.nil? || cols_page.to_s.empty? || cols_seen[cols_page]
+  cols_seen[cols_page] = true
+end
 error_cols = entries.select do |c|
   t = c['type']
   tt = t.is_a?(Hash) ? t['type'] : t

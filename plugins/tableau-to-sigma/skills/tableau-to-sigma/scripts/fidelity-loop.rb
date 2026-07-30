@@ -531,8 +531,11 @@ when 'apply-patch'
     persist_patch_to_wb_spec(opts[:dir], patch) if opts[:patch] && patch
 
     # Re-run the same guards post-and-readback runs on the initial POST.
-    cols = Sigma.request(:get, "/v2/workbooks/#{wb}/columns") rescue nil
-    err = ((cols && cols['entries']) || []).select { |c| c.dig('type', 'type') == 'error' }
+    # PAGINATED: re-runs the same error-column guard post-and-readback runs on the
+    # initial POST, so it needs the same exhaustive read — otherwise a wide
+    # workbook's error columns past 50 pass this guard too.
+    cols = (Sigma.list_entries("/v2/workbooks/#{wb}/columns") rescue nil)
+    err = (cols || []).select { |c| c.dig('type', 'type') == 'error' }
     if err.any?
       warn "[FAIL] column-type guard: #{err.length} column(s) compiled to type=error after the patch:"
       err.first(10).each { |c| warn "         element=#{c['elementId']} col=#{c['columnId']} #{c['formula']}" }

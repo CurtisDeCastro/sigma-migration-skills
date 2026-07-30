@@ -145,6 +145,26 @@ check(src.include?('census_partial'),
 check(src.include?('census INCOMPLETE'),
       'a degraded census reports INCOMPLETE instead of "columns clean"', fails)
 
+# 8. WIRING PINS — the four sites Task 1's triage added. Two are error-column
+#    guards, so a truncated read means the same false-clean risk as gate 5.
+{
+  'synth-twb-e2e.rb'        => 'DM error-column repair loop',
+  'fidelity-loop.rb'        => 'post-PUT error-column guard'
+}.each do |file, why|
+  s = File.read(File.join(__dir__, file))
+  check(s.include?('Sigma.list_entries'), "#{file} paginates its columns read (#{why})", fails)
+  check(!s.match?(/Sigma\.request\(:get,[^)]*\/columns"\)/),
+        "#{file} no longer reads columns via a single Sigma.request", fails)
+end
+
+# validate-sigma-formula.rb paginates with a LOCAL loop: it mints its own token
+# and must not gain a second auth path via sigma_rest.
+s = File.read(File.join(__dir__, 'validate-sigma-formula.rb'))
+check(s.include?('nextPage') && s.include?('limit=1000'),
+      'validate-sigma-formula.rb paginates its element-columns read locally', fails)
+check(!s.match?(/require 'sigma_rest'/),
+      'validate-sigma-formula.rb keeps its single auth path (no sigma_rest)', fails)
+
 puts ''
 if fails.empty?
   puts "test-column-read-pagination.rb: ALL PASS"
