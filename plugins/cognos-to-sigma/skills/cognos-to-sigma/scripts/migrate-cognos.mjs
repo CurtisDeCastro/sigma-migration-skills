@@ -546,6 +546,26 @@ rWarnings.forEach((w) => line(`  ! ${w}`));
 const wbRemapped = join(WORK, 'wb.remapped.json');
 run('node', [join(HERE, 'remap-wb-to-dm-ids.mjs'), '--wb', wbPath, '--dm-id', dmId, '--out', wbRemapped]);
 
+// gate 7 (control-wiring lint): FAIL the build if a control does not filter
+// every same-page KPI/chart (partial reach), is dead, or points at a ghost
+// target — the shared, proven scripts/lib/control_lint.rb, on the remapped spec
+// that gets POSTed. Kills the "control only filters the table, not the
+// KPIs/charts" bug at build time, no live API. (Runtime flip / gate 7b needs a
+// live-posted workbook; run scripts/probe-controls.rb after POST — see SKILL.md.)
+const clPath = join(HERE, 'lib', 'control_lint.rb');
+if (existsSync(clPath)) {
+  const cl = spawnSync('ruby', [clPath, wbRemapped], { encoding: 'utf8' });
+  if (cl.stdout) process.stdout.write(cl.stdout);
+  if (cl.stderr) process.stderr.write(cl.stderr);
+  if (cl.status !== 0) {
+    die('gate 7 (control lint): control-wiring violation(s) above. A control must target the '
+      + 'page SOURCE element so Sigma propagates the filter to EVERY element (KPIs + charts + '
+      + 'tables), not just one. Fix the wiring before shipping.');
+  }
+} else {
+  line('! [WARN] gate 7: scripts/lib/control_lint.rb not vendored — control wiring UNLINTED');
+}
+
 // ---------------------------------------------------------------------------
 // Phase 5 — POST the workbook + readback (HARD GATE: error-typed columns).
 // ---------------------------------------------------------------------------
