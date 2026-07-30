@@ -20,7 +20,13 @@
 #      yields role_class 'unsupported' + actionable guidance and NO sigma target.
 #   2. ROLE CLASS decides severity. Losing a `control` (the page lost its filter),
 #      `kpi`, `chart` or `table` is a FUNCTIONAL loss the gate can fail on; losing
-#      a `decoration` or `text` is cosmetic. `functional?` is that test.
+#      a `decoration` or `text` is cosmetic. `functional?` is that test. `image`
+#      is ALSO non-functional (a missing logo is cosmetic, not a data loss) but
+#      is its OWN role_class, distinct from `decoration`: an image visual DOES
+#      build a real Sigma element when --image-map supplies a hosted URL, and
+#      has its own dedicated coverage entry when it can't — unlike a shape,
+#      which never builds anything. Conflating the two made every image visual
+#      return nil before ever reaching its build logic (review-caught regression).
 #
 # ALL prose (per-row guidance, the unknown/heuristic templates) lives in the
 # catalog JSON, never in code — so this resolver and its Python mirror

@@ -4,7 +4,7 @@
   "authoritative_doc": "https://learn.microsoft.com/en-us/power-bi/visuals/power-bi-visualization-types-for-reports-and-q-and-a",
   "sigma_target_doc": "https://help.sigmacomputing.com/docs/visualization-types",
   "on_unmapped_default": "resolve via viz-kind.json then custom-visual.json (regex) then the generic slicer/filter heuristic; a still-unresolved token is recorded role_class=unsupported with guidance and NEVER coerced to a chart. The historical `VISUAL_KIND.get(vt,'bar')` silent default is GONE.",
-  "description": "Power BI visual -> Sigma workbook element kind + ROLE CLASS. `source` is the coarse kind token the builder consumes (rec['sigma_kind']); `sigma` is the Sigma element kind; `pbi_visual_types` enumerates the raw PBI visualTypes feeding that token; `role_class` (control|kpi|chart|table|text|decoration|unsupported) says what the visual DOES, so the coverage gate can tell a functional loss (a lost slicer = the page lost its filter) from a cosmetic one (a lost decorative shape). Both the Ruby builder AND the Python extractors resolve through this one file via lib/pbi_viz_kind.{rb,py} — the previously-duplicated Python VISUAL_KIND dict is gone, so the two maps can no longer drift. Third-party/custom visuals live in custom-visual.json.",
+  "description": "Power BI visual -> Sigma workbook element kind + ROLE CLASS. `source` is the coarse kind token the builder consumes (rec['sigma_kind']); `sigma` is the Sigma element kind; `pbi_visual_types` enumerates the raw PBI visualTypes feeding that token; `role_class` (control|kpi|chart|table|text|image|decoration|unsupported) says what the visual DOES, so the coverage gate can tell a functional loss (a lost slicer = the page lost its filter) from a cosmetic one (a lost decorative shape) from a DIFFERENT cosmetic one that still builds a real element when it can (a logo/banner `image`, which — unlike `decoration` — is never routed to a bare 'nothing built' skip; PbiVizKind.functional? still treats it as non-functional). Both the Ruby builder AND the Python extractors resolve through this one file via lib/pbi_viz_kind.{rb,py} — the previously-duplicated Python VISUAL_KIND dict is gone, so the two maps can no longer drift. Third-party/custom visuals live in custom-visual.json.",
   "rows": [
     {
       "source": "kpi",
@@ -24,8 +24,12 @@
         "method": "LIVE demo-warehouse run (fresh DM): workbook POST clean, 0 type=error, render verified (KPI 127,513.88 = warehouse; column->vertical + bar->horizontal orientation correct)"
       },
       "on_unmapped": "n/a",
-      "notes": "PBI card / multiRowCard / kpi / gauge -> Sigma kpi-chart. gauge has no native Sigma kind (approximated). A multiRowCard fans out to one kpi-chart per measure in the builder. `cardVisual` is the MODERN card visual type (PBI 2023+); it was absent from the old map and silently became a bar-chart on real customer files.",
-      "role_class": "kpi"
+      "notes": "PBI card / multiRowCard / kpi / gauge -> Sigma kpi-chart. gauge and kpiMatrix have no native Sigma kind (approximated -> approximate_types below); card/multiRowCard/kpi/cardVisual ARE native (approximate:false). A multiRowCard fans out to one kpi-chart per measure in the builder. `cardVisual` is the MODERN card visual type (PBI 2023+); it was absent from the old map and silently became a bar-chart on real customer files.",
+      "role_class": "kpi",
+      "approximate_types": [
+        "gauge",
+        "kpiMatrix"
+      ]
     },
     {
       "source": "bar",
@@ -238,8 +242,8 @@
         "status": "n"
       },
       "on_unmapped": "n/a",
-      "notes": "Set directly by extract-report-classic.py for an imageUrl resource (extract-pbir.py has no 'image' visualType). Sigma images are URL-only: needs --image-map {resource: hostedUrl} or the element is skipped with a note.",
-      "role_class": "decoration"
+      "notes": "Set directly by extract-report-classic.py for an imageUrl resource (extract-pbir.py has no 'image' visualType). Sigma images are URL-only: needs --image-map {resource: hostedUrl} or the element is skipped with a note. role_class is its OWN 'image', distinct from 'decoration': an image DOES build a real Sigma element (given --image-map) and has its own dedicated coverage entry when it can't (severity:dropped, recoverable — 'Supply --image-map'), unlike a shape/blank which never builds anything and is genuinely cosmetic. Reusing 'decoration' here made every image visual return nil before ever reaching its own build/coverage logic — a regression caught in review.",
+      "role_class": "image"
     },
     {
       "source": "decoration",
