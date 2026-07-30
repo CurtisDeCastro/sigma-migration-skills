@@ -294,6 +294,7 @@ jobs:
             plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/test-trellis-emit.rb
             plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/test-qs-trellis.rb
             plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/test-metric-reference.rb
+            plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/test-deterministic-ids-kpi-format.rb
             shared/lib/test_metric_binding.rb
             shared/lib/test_plugin_embed.rb
             shared/lib/test_composition.rb
