@@ -114,41 +114,166 @@ So:
 ## Full card-type → element map
 
 **The card's top-level `type` is almost always `"kpi"`** — that is Domo's umbrella
-type for analyzer viz cards, NOT a signal that the tile is a single number. The
-real viz kind lives in the **`chartType`** string, and those tokens are
-**`badge_`-prefixed** (`badge` is a *universal prefix* on analyzer chart tokens,
-not a standalone single-value token). Officially confirmed tokens:
-`badge_vert_bar` (vertical bar) and `badge_xyscatterplot` (scatter). The others
-below (`badge_horiz_bar`, `badge_datagrid`, `badge_line`, `badge_pie`, …) are
-**plausible-but-unconfirmed** naming conventions.
+type for analyzer viz cards, NOT a signal that the tile is a single number.
+Worse, **`type` itself is not stable across API surfaces**: the public `GET
+/v1/cards` reports `type: "chart"` for the exact same card the private API
+reports `type: "kpi"` for. **Never key an element-kind decision on `type`.** The
+real viz kind lives in **`metadata.chartType`** (private read) / `chartType`
+(public create body) — key on that instead.
 
-**Detect on the SUBSTRING, not an exhaustive enum.** Key off the substrings
-`*bar*`, `*line*`, `*pie*`, `*scatter*`, `datagrid`/`table`,
-`singlevalue`/`summary` inside the `chartType` string. The PNG stays
-authoritative; use this table to translate once you've read the image.
+### ⚠️ `chartType` is a STRICT enum — exact-match it, never substring
 
-| Domo card (what the PNG shows) | `chartType` substring / token | Sigma element `kind` | Notes |
+Live validation (2026-07-30) probed Domo's `ChartType` enum exhaustively by
+creating real cards. **It rejects unknown values outright** — `POST
+/v1/cards/chart` 400s with `No enum constant com.domo.phoenix.model.ChartType.
+<token>` for a bad token. That means two things for this map:
+
+1. **Every token below is either a confirmed-valid enum value or explicitly
+   flagged as fabricated** — nothing here is a guessed naming convention anymore.
+2. **Substring matching is actively harmful**, not just imprecise:
+   `badge_line_bar` is a **combo** chart, but contains the substring
+   `badge_line`, which a `*line*` substring rule sends straight to `line-chart`.
+   `badge_symbol_bar` is also a combo (bar + symbol overlay), but contains
+   `_bar`, which a `*bar*` substring rule sends to a plain `bar-chart`. Both are
+   wrong element kinds shipped confidently. **Exact-match the full token**
+   against the table below.
+
+**The documented fallback for an unmapped token:** fall back to whatever
+upstream extraction's own best-effort kind hint says; if that's also absent or
+unrecognized, emit a `bar-chart` and a loud Phase-5e warning naming the card and
+the raw `chartType` string so a human verifies it against the PNG — **never
+guess silently and never drop the card.** (`scripts/build-workbook.rb`'s
+`chart_kind_for`/`CHART_TYPE_MAP` implement exactly this: exact match →
+upstream hint → warned bar-chart default.)
+
+### Four previously-documented tokens do not exist
+
+This map used to carry `badge_datagrid`, `badge_pivottable`, `badge_stackedarea`,
+and `badge_line` as "plausible-but-unconfirmed" tokens. Probing card creation
+proved all four are **invalid** — `ChartType` has no such members:
+
+| Documented (WRONG) | Verdict | Real token |
+|---|---|---|
+| `badge_datagrid` | ❌ invalid | `badge_table` |
+| `badge_pivottable` | ❌ invalid | none confirmed yet — see note below |
+| `badge_stackedarea` | ❌ invalid | none confirmed yet — see note below |
+| `badge_line` | ❌ invalid | `badge_symbolline` / `badge_curved_symbolline` / `badge_trendline` |
+
+If a card in extracted data carries one of these four, **that is an upstream
+extraction bug** (or stale/synthetic test data) — `build-workbook.rb` flags it
+loudly rather than mapping it, and the extraction path should be checked.
+Neither a valid pivot-table nor a valid stacked-area `ChartType` token has been
+observed yet (live or via probing); don't invent one — if/when a real instance
+produces a pivot or area-family card, capture the actual token before adding a
+row for it.
+
+### The verified map (exact match on the full token)
+
+Every token below has been observed accepted by Domo — either by creating a
+card with it directly, or as a real `metadata.chartType` value on a live
+instance (2026-07-30 validation, 48 cards / 22 distinct chartTypes). Sigma
+`kind` strings are verified against the `sigma-workbooks` skill
+(`plugins/sigma-authoring/skills/sigma-workbooks`) unless noted otherwise.
+
+| `chartType` (exact) | Sigma `kind` | Verified? | Notes |
 |---|---|---|---|
-| **Single big number** (see Rule 0) | `singlevalue`, `summary` (e.g. `badge_singlevalue`) | `kpi-chart` | Rule 0. |
-| **Table** (rows are the point) | `datagrid`, `table` (e.g. `badge_datagrid`) | `table` | Only when the grid itself is the content, not a summary number. |
-| **Pivot table** | `pivot` (e.g. `badge_pivottable`) | `pivot-table` | Needs both `rowsBy` **and** `columnsBy` — see `feedback_sigma_pivot_rowsby_columnsby`. |
-| Bar (vertical) | `badge_vert_bar` ✓ **confirmed** (`*bar*`) | `bar-chart` | orientation vertical. |
-| Bar (horizontal) | `badge_horiz_bar` (`*bar*`) | `bar-chart` | set horizontal orientation — see `sigma-bar-orientation-and-datelookback`. |
-| Line | `*line*` (e.g. `badge_line`) | `line-chart` | |
-| Area / stacked area | `*area*` (e.g. `badge_stackedarea`) | `area-chart` | |
-| Combo (bar + line) | `combo`, `barline` | `combo-chart` | explicit `yAxis2`; `columnIds` a subset — see `sigma-combo-dual-axis`. |
-| Pie / Donut | `*pie*` (e.g. `badge_pie`) | `donut-chart` | value uses `value.id` (NOT `columnId`) — opposite of KPI. |
-| Gauge (dial) | `gauge`, `dialgauge` | `kpi-chart` | Sigma has no dial; render as KPI + note the gauge target as a follow-up. |
-| Scatter / Bubble | `badge_xyscatterplot` ✓ **confirmed** (`*scatter*`, `bubble`) | `scatter-chart` | both axes measures; dimension → color. |
-| Heatmap | `heatmap` | `pivot-table` w/ conditional format, or `heatmap` if available | confirm element support. |
-| Funnel / Waterfall / Treemap / Sunburst / Sankey | various | closest Sigma kind + **warn** | Sigma may lack an exact match; pick nearest and flag in Phase 5e, don't silently substitute. |
-| Text / Title card | `text`, `title` | text element | |
-| Image / logo / drawing (static asset, no data columns) | `image`, `logo`, `drawing`, `picture` (substring, on `chartType` **only**) | `image` | Inline data-URI: `{id, kind:'image', url:"data:image/png;base64,<b64>"}` from the staged capture (`discovery/png/cards/<cardId>.png`, written by `domo-capture-visuals.rb`'s `capture_card`/`render_card_png`; `card['_pngPath']` overrides). No hosting needed — mirrors the tableau pattern (`build-charts-from-signals.rb:6655`); PNG/JPEG data-URIs POST + render cleanly. **Do not** also key off "no data columns + a staged PNG exists" — capture-visuals renders a PNG for every card on a page (filter widgets, text/title cards included), so that combination silently misroutes non-image cards. `richtext` is excluded (stays a text element — see the Text/Title row above). Tier B / PNG not captured, or chartType doesn't match → falls back to the text-placeholder path + a Phase-5e warning ("export from Domo UI and embed manually") — never ship an empty/broken image element. |
-| Map (geo) | `map`, `choropleth` | Sigma map element if available, else table + warn | |
+| `badge_vert_bar` | `bar-chart` | ✅ kind verified | vertical, `stacking: none`. |
+| `badge_horiz_bar` | `bar-chart` | ✅ kind verified | `orientation: horizontal`. |
+| `badge_vert_stackedbar` | `bar-chart` | ✅ kind verified | `stacking: stacked`. |
+| `badge_vert_multibar` | `bar-chart` | ✅ kind verified | grouped/clustered, `stacking: none`. |
+| `badge_horiz_multibar` | `bar-chart` | ✅ kind verified | `orientation: horizontal`, `stacking: none`. |
+| `badge_horiz_100pct` | `bar-chart` | ✅ kind verified | `orientation: horizontal`, `stacking: normalized` (Sigma's percent-stacked variant — the literal string is `normalized`, NOT `"100"`). |
+| `badge_vert_nestedbar` | `bar-chart` | ⚠️ approximated | Sigma's cartesian axis has no native 2-level nested category shelf; degrades to a flat grouped bar (the outer grouping tier is lost) — warned, not silent. |
+| `badge_symbolline` | `line-chart` | ✅ kind verified | line with point markers; marker styling itself is a chart-style detail, not a distinct kind. |
+| `badge_curved_symbolline` | `line-chart` | ✅ kind verified | curved/smoothed variant — same kind as above; curve styling is a line-style detail. |
+| `badge_trendline` | `line-chart` | ✅ kind verified | single metric over time. |
+| `badge_two_trendline` | `line-chart` | ✅ kind verified | two series on one line chart. |
+| `badge_xyscatterplot` | `scatter-chart` | ✅ kind verified, **confirmed live by card creation** | both axes are measures; see `sigma-workbooks/reference/specification/charts.md` — a scatter must bind to a **grouping**, or every point collapses to one x. |
+| `badge_bubble` | `scatter-chart` | ✅ kind verified | scatter + `size` channel; bind the `BUBBLESIZE`-mapped column to `size`. |
+| `badge_pie` | `pie-chart` | ✅ kind verified | Sigma has a **distinct** `pie-chart` kind (not just `donut-chart`) — `value`+`color`, no hole/holeValue/innerRadius. `value` uses `value.id` (NOT `columnId`) — opposite of a KPI. `pie-chart` does **not** support native `trellis` (silently stripped) — emit `donut-chart` if faceting is required. |
+| `badge_donut` | `donut-chart` | ✅ kind verified, **confirmed live by card creation** | same `value`/`color` shape as pie, plus optional `holeValue`/`innerRadius`. Supports native `trellis`. |
+| `badge_singlevalue` | `kpi-chart` | ✅ kind verified, **confirmed live by card creation** | Rule 0. |
+| `badge_table` | `table` | ✅ kind verified, **confirmed live by card creation** | the REAL table token — `badge_datagrid` does not exist. |
+| `badge_map` | `region-map` (default) | ✅ kind verified, ⚠️ per-card judgment | Sigma's real map kinds are `geography-map` / `point-map` / `region-map` — a bare `map` kind is **confirmed invalid** (rejected `400`). This converter defaults to `region-map` and infers `regionType` (`country` / `us-state` / `us-county` / `us-zipcode` / `us-cbsa` / `ca-province`) from the geography column's name; when it can't classify the column (a custom territory code, a non-US subdivision, etc.) it degrades honestly to a table + warns rather than emit a broken map spec. A lat/long pair should use `point-map` instead — not currently auto-detected. |
+| `badge_line_bar` | `combo-chart` | ✅ kind verified, **confirmed live by card creation** | bar + line combo. First measure → `bar` series, second → `line` series (Domo's enum doesn't say which is which; this is a documented heuristic, flagged if the measure count isn't 2). `yAxis2` needed only if the two series need different scales. |
+| `badge_line_stackedbar` | `combo-chart` | ✅ kind verified | line + **stacked** bar combo — same series heuristic, plus `stacking: stacked` on the bar side. |
+| `badge_symbol_bar` | `combo-chart` | ✅ kind verified | bar + a `scatter`-shaped symbol series (not a plain bar — the `_bar` substring is a trap here). |
+| `badge_treemap` | `bar-chart` | ❌ **no native equivalent** | see below. |
+| `badge_word_cloud` | `table` | ❌ **no native equivalent** | see below. |
+| `badge_calendar` | `table` | ❌ **no native equivalent** | see below. |
+| `badge_filledgauge` | `kpi-chart` | ❌ **no native equivalent** | see below. |
+| `badge_pop_bar_line` | `combo-chart` | ❌ **no native equivalent** | see below. |
+| `badge_vert_symbol_overlay` | `combo-chart` | ❌ **no native equivalent** | see below. |
 
-If a Domo `chartType` substring isn't in this table, **read the PNG, pick the
+### No native Sigma equivalent — do not silently substitute a bar chart
+
+Six observed tokens have **no true Sigma equivalent**. `CHART_TYPE_MAP` in
+`build-workbook.rb` still names the closest honest degradation (never a bare,
+unexplained bar chart), and `build_element` **always** emits a specific, loud
+Phase-5e warning naming the card and the gap — this is a hard requirement, not
+a nice-to-have:
+
+| `chartType` | Why Sigma has no match | Closest honest degradation |
+|---|---|---|
+| `badge_treemap` | No `treemap` kind was found anywhere in the sigma-workbooks skill (not in its documented kinds, and not in the confirmed-invalid list either — it is simply **unverified**; do not assume it exists). | `bar-chart`, sorted descending by measure — keeps relative magnitude, loses the area-proportional hierarchy. |
+| `badge_word_cloud` | No word-cloud kind exists. | A flat term + frequency `table`. |
+| `badge_calendar` | No calendar-heatmap kind exists. | A flat date + value `table`. |
+| `badge_filledgauge` | `gauge` is **confirmed invalid** — probing the workbook spec API returns `400 "Invalid kind"` (see `docs/sigma-trellis-chart-support.md` in sigma-workbooks: `box`, `heatmap`, `gauge`, `funnel`, `waterfall`, `single-value`, `geography`, `map` are all confirmed not part of the spec API). | `kpi-chart` on the CURRENT value; bind TARGET as a KPI `comparisonColumn` if present. |
+| `badge_pop_bar_line` | Sigma has no automatic period-over-period comparison primitive. | `combo-chart` (bar = current period, line = prior period) — the two periods must be modeled as two explicit measures; the automatic date-shift is lost. |
+| `badge_vert_symbol_overlay` | No actual-vs-target dial/overlay kind exists (and `gauge` itself is invalid — see above). | `combo-chart` (bar + a `scatter` marker series) approximates the visual; a true actual-vs-target dial is not representable. |
+
+**Follow-up, not handled by this converter today:** closing this gap for real —
+a genuine treemap, word cloud, calendar heatmap, or gauge/dial rendered in
+Sigma — is a candidate for a **Sigma custom plugin** (see the
+`sigma-plugin-development` skill for how those are built). That is tracked as
+future work, not something `build-workbook.rb` attempts; its job is to degrade
+honestly and warn loudly, never to silently ship a bar chart in place of a
+gauge.
+
+### Still using PNG + judgment (not yet a confirmed `chartType` token)
+
+These card types have not been observed with a confirmed live `chartType`
+token, so a substring-free exact match isn't possible for them yet — fall back
+to the PNG:
+
+| Domo card (what the PNG shows) | Sigma element `kind` | Notes |
+|---|---|---|
+| Heatmap | `pivot-table` w/ conditional format | Sigma has no standalone `heatmap` kind (confirmed invalid). |
+| Funnel / Waterfall / Sunburst / Sankey | closest Sigma kind + **warn** | `funnel`/`waterfall` are also confirmed-invalid Sigma kinds; treat like the no-native-equivalent table above. |
+| Text / Title card | text element | |
+| Image / logo / drawing (static asset, no data columns) | `image` | Inline data-URI: `{id, kind:'image', url:"data:image/png;base64,<b64>"}` from the staged capture (`discovery/png/cards/<cardId>.png`, written by `domo-capture-visuals.rb`'s `capture_card`/`render_card_png`; `card['_pngPath']` overrides). No hosting needed — mirrors the tableau pattern (`build-charts-from-signals.rb:6655`); PNG/JPEG data-URIs POST + render cleanly. **Do not** also key off "no data columns + a staged PNG exists" — capture-visuals renders a PNG for every card on a page (filter widgets, text/title cards included), so that combination silently misroutes non-image cards. `richtext` is excluded (stays a text element — see the Text/Title row above). Tier B / PNG not captured, or chartType doesn't match → falls back to the text-placeholder path + a Phase-5e warning ("export from Domo UI and embed manually") — never ship an empty/broken image element. |
+
+These rows key on substrings of `chartType` (`image`/`logo`/`drawing`/`picture`,
+`text`/`title`) as a still-unconfirmed heuristic for a **different signal**
+than the analyzer viz enum above — Domo's static-asset/text cards may not even
+route through the same `ChartType` enum family, so this is deliberately kept
+separate rather than folded into the exact-match table.
+
+If a Domo `chartType` isn't in any table above, **read the PNG, pick the
 nearest Sigma kind, and emit a Phase-5e warning** — never guess silently (see
 fidelity discipline below).
+
+### Column → visual-role binding (`main.columns[].mapping`)
+
+Live validation confirmed each column on a card's `main` subscription carries a
+**`mapping`** field binding it to a visual role — use this to bind axes/series
+instead of guessing by position or by aggregation presence. Confirmed
+vocabulary (10 values): `ITEM` (category/x), `VALUE` (measure), `SERIES`
+(split/color), `XTIME`, `BUBBLESIZE`, `CATEGORY`, `CURRENT`, `TARGET`, `DATE`,
+`EVENT`. `CURRENT`/`TARGET` together strongly imply a gauge/progress visual (see
+`badge_filledgauge` above). `build-workbook.rb`'s `split_cols` honors `mapping`
+per-column when present, falling back to the aggregation/groupBy heuristic for
+any column that doesn't carry one.
+
+### 6-column grid → Sigma's 24-column grid
+
+Domo's card grid (`preferredFullWidth`/`preferredFullHeight` on the create API)
+is **6 columns wide**, confirmed by the write-path enum (`1..6`; a `12` is
+rejected with *"height and width must have values between 1 and 6"*). Sigma's
+layout grid is 24 columns, so **the scale factor is 4×**, not 1×. (Layout itself
+is owned by `build-domo-layout.rb`/`lib/layout.rb` — this is documented here
+because it's a load-bearing fact about the same card records this map
+consumes, not a layout-builder change.)
 
 ---
 
@@ -157,14 +282,17 @@ fidelity discipline below).
 Reported bug: a Domo bar chart came out as a Sigma **table with in-cell data
 bars**. These are two different things — don't substitute one for the other.
 
-- A **real bar chart** has `chartType` = a `badge_*bar*` token (e.g.
-  `badge_vert_bar`, `badge_horiz_bar`). Emit a Sigma **`kind: bar-chart`** with
-  `xAxis` / `yAxis` bindings (orientation per
-  `sigma-bar-orientation-and-datelookback`). This is the correct target.
+- A **real bar chart** has `chartType` exactly `badge_vert_bar`,
+  `badge_horiz_bar`, `badge_vert_stackedbar`, `badge_vert_multibar`,
+  `badge_horiz_multibar`, or `badge_horiz_100pct` — see the verified map above.
+  Emit a Sigma **`kind: bar-chart`** with `xAxis` / `yAxis` bindings
+  (orientation/stacking per the exact token — `sigma-bar-orientation-and-datelookback`).
+  This is the correct target.
 - Sigma **table data bars** (`kind: table` + `conditionalFormats[].type:
-  dataBars`) are reserved **only** for a real Domo `badge_datagrid`/table card
-  that has in-cell bars via its own `conditionalFormats[]` (see
-  `sigma-table-databars-spec`). Detect that case from the Domo card's
+  dataBars`) are reserved **only** for a real Domo `badge_table` card that has
+  in-cell bars via its own `conditionalFormats[]` (see
+  `sigma-table-databars-spec`; `badge_datagrid` is NOT a valid token — see the
+  fabricated-tokens note above). Detect that case from the Domo card's
   `conditionalFormats[]`, not from the fact that the data would "fit" in a table.
 - **Never substitute a table+dataBars for a bar chart.** A grid where the source
   showed bars is a fidelity failure (checked in the Phase 5e QA list below).
@@ -275,3 +403,10 @@ Add these to the mandatory layout-visual-qa gate:
 - [ ] **Chart axes default to `format.marks: "none"`** (gridlines off) unless the
       source PNG actually showed gridlines (bug #8).
 - [ ] Any KPI that had a Domo spark/trend carries a "bind trend in UI" warning.
+- [ ] **`chartType` was matched EXACTLY**, never by substring — spot-check a
+      `badge_line_bar` (combo) and a `badge_symbol_bar` (combo) card didn't get
+      mis-routed to `line-chart` / `bar-chart` respectively.
+- [ ] Every card whose `chartType` is one of the six no-native-equivalent tokens
+      (`badge_treemap`, `badge_word_cloud`, `badge_calendar`, `badge_filledgauge`,
+      `badge_pop_bar_line`, `badge_vert_symbol_overlay`) carries a Phase-5e
+      warning naming the gap — never a silent, unexplained bar chart.

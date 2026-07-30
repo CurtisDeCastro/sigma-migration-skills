@@ -157,6 +157,23 @@ module Domo
     res.body.to_s.empty? ? {} : JSON.parse(res.body)
   end
 
+  # POST against the private API, parsed JSON body. Returns nil on Tier B — same
+  # convention as private_get/private_put. Used for the card-enumeration fallback
+  # (adminsummary — see cards_adminsummary below), which paginates via QUERY
+  # params even though it's a POST (the filter — pageIds/orderBy/ascending —
+  # goes in the body).
+  def private_post(path, body:, query: nil)
+    tok = dev_token or return nil
+    uri = URI("https://#{instance}.domo.com#{path}")
+    uri.query = URI.encode_www_form(query) if query
+    req = Net::HTTP::Post.new(uri)
+    req['X-DOMO-Developer-Token'] = tok
+    req['Content-Type'] = 'application/json'
+    req['Accept']       = 'application/json'
+    req.body = body.is_a?(String) ? body : JSON.generate(body)
+    handle(http(uri).request(req), 'application/json')
+  end
+
   # ---- Card definition: TWO shapes ----------------------------------------
   # Domo exposes a card's definition in two different shapes with DIFFERENT field
   # names. The extractor (domo-discover.rb) normalizes both into one record.
@@ -177,9 +194,10 @@ module Domo
   #        orderBy[], groupBy[]}, definition.formulas[]{id,name,columnPositions}.
   #    Beast-mode refs are ids prefixed "calculation_<uuid>" joining to a formula.
   #    Refs: brycewc/domo-toolkit, newli5737/domo-chousa, jsade/domo-query-cli.
+  # CONFIRMED live: {"urn": id} alone is sufficient — dynamicText/variables are
+  # optional and omitted here (refs/live-validation-2026-07-30.md Bug 3).
   def card_definition_v3(card_id)
-    private_put('/api/content/v3/cards/kpi/definition',
-                body: { dynamicText: true, variables: true, urn: card_id })
+    private_put('/api/content/v3/cards/kpi/definition', body: { urn: card_id })
   end
 
   # Standalone Beast Mode ("function template"). The `expression` field carries the
@@ -205,8 +223,47 @@ module Domo
     private_get("/api/content/v1/datasources/#{ds_id}/cards", query: { drill: true })
   end
 
+  # Card enumeration — Bug 1 (P0). `GET /v1/pages/{id}` (Domo.page, PUBLIC) returns
+  # cardIds: [] even on a page with dozens of cards (confirmed live). The THREE
+  # routes below are the working alternatives, in preference order; see
+  # domo-discover.rb's enumerate_page_cards for the fallback orchestration.
+
+  # 1. PRIMARY (private). The richest single call: full card objects (each with
+  #    `metadata.chartType`, matching the parts-read shape) PLUS `sizes[]`
+  #    (T-shirt size token per card) and `collections[]` (titled sections,
+  #    grouping cards BY INDEX into this response's own `cards[]`) — see Bug 5 /
+  #    DomoSigma.merge_geometry. This method already existed; nothing called it
+  #    until this fix.
   def cards_for_page(page_id, parts: 'metadata,datasources')
     private_get("/api/content/v3/stacks/#{page_id}/cards", query: { parts: parts })
+  end
+
+  # 2. FALLBACK (private, instance-wide sweep). Paginates via QUERY params
+  #    (skip/limit) — NOT the body, which instead carries the filter. Passing
+  #    `pageIds: [page_id]` scopes the sweep to one page server-side. Returns
+  #    lighter records ({id,type,title,badgeUpdated,locked,owners,pageHierarchy})
+  #    with NO `metadata`/chartType — callers fall back to the analyzer
+  #    definition's definition.charts.main.chartType for classification.
+  def cards_adminsummary(page_id, parts: 'metadata,datasources', skip: 0, limit: 100)
+    private_post('/api/content/v2/cards/adminsummary',
+                 body: { ascending: true, orderBy: 'cardTitle', pageIds: [page_id] },
+                 query: { parts: parts, skip: skip, limit: limit })
+  end
+
+  # 3. FALLBACK — the only one of the three reachable on Tier B (public, no dev
+  #    token). `limit` MUST be capped at 100: a higher limit silently returns an
+  #    EMPTY list rather than erroring, so callers must paginate via `offset`
+  #    instead of asking for more per page. Response: {totalCardCount,
+  #    cards:[{cardUrn,cardTitle,type,pages:[...],lastModified}]} — filter on
+  #    `pages` client-side to scope to one page id. This list is also
+  #    eventually-consistent right after bulk mutations — an empty result means
+  #    "unknown right now", not "definitely no cards".
+  #
+  #    NOTE: `type` here uses the PUBLIC vocabulary (e.g. "chart"), which
+  #    disagrees with the private API's "kpi" for the very same card — never key
+  #    element-kind decisions on `type`; use metadata.chartType instead.
+  def list_cards(limit: 100, offset: 0)
+    public_get('/v1/cards', query: { limit: [limit, 100].min, offset: offset })
   end
 
   def page_layout(page_id)
@@ -249,10 +306,18 @@ module Domo
 
   # ---- internals -----------------------------------------------------------
 
-  # Normalize a render response to raw binary bytes, tolerating both forms:
-  #   1. raw bytes      — Content-Type image/* or application/pdf
-  #   2. JSON + base64  — { "image": "<b64>" } / "imageData" / "data" / bare b64
-  # TODO(on-access): once the real shape is known, drop the branch we don't hit.
+  # Normalize a render response to raw binary bytes. CONFIRMED live shape
+  # (refs/live-validation-2026-07-30.md): 200, Content-Type: application/json,
+  # body = {"image": {"data": "<b64 PNG>", "notAllDataShown": false}, "limited":
+  # false, "notAllDataShown": false} — a JSON ENVELOPE, not raw bytes. Tolerates
+  # older/other-instance shapes too:
+  #   1. raw bytes           — Content-Type image/* or application/pdf
+  #   2. JSON, image is Hash — { "image": { "data": "<b64>" } }  (live/confirmed)
+  #   3. JSON, image is str  — { "image": "<b64>" } / "imageData" / "data"
+  # NOTE: json['image'] is a Hash in the confirmed shape, so it must be tried
+  # as a nested dig BEFORE the bare-string keys, not after — `a || b` short-
+  # circuits on the first truthy value, and a Hash is truthy even though it's
+  # not the base64 string we want.
   def decode_render(res)
     require 'base64'
     ctype = res['content-type'].to_s
@@ -262,8 +327,8 @@ module Domo
     if ctype.include?('json') || body.lstrip.start_with?('{')
       json = JSON.parse(body) rescue nil
       if json.is_a?(Hash)
-        b64 = json['image'] || json['imageData'] || json['data'] ||
-              json.dig('image', 'data')
+        b64 = json.dig('image', 'data') || json['imageData'] || json['data'] ||
+              (json['image'].is_a?(String) ? json['image'] : nil)
         return Base64.decode64(b64) if b64.is_a?(String) && !b64.empty?
       end
     end

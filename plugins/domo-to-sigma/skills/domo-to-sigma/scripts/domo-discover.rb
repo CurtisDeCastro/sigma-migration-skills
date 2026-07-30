@@ -63,14 +63,20 @@ def sigma_kind_hint(chart_type)
   nil
 end
 
-# Classify a Beast Mode as aggregate | window | lod | projection. Prefer the API
-# flags from the standalone template (aggregated/analytic) — no SQL parsing; fall
-# back to a regex heuristic when the template isn't available (Tier B).
+# Classify a Beast Mode as aggregate | window | lod | projection — no SQL
+# parsing. `template` may be EITHER an inline formula entry (Bug 4:
+# definition.formulas[] on the card, or a dataset's properties.formulas.
+# formulas map value — keyed isAnalytic/isAggregatable, confirmed live) OR a
+# standalone function-template fetch (keyed analytic/aggregated — the older,
+# pre-live-validation field names). Both are accepted here so callers can pass
+# whichever they have; see classify_beast_mode_for (below) for which one gets
+# preferred. Falls back to a regex heuristic only when neither flag is
+# available (e.g. Tier B, no dev token reaches either source).
 def classify_beast_mode(sql, template = nil)
   return 'lod'    if sql.to_s =~ /\bFIXED\s*\(/i          # Domo LOD → Sigma LOD
   if template.is_a?(Hash)
-    return 'window'    if template['analytic']
-    return 'aggregate' if template['aggregated']
+    return 'window'    if template['isAnalytic'] || template['analytic']
+    return 'aggregate' if template['isAggregatable'] || template['aggregated']
     return 'projection'
   end
   s = sql.to_s
@@ -80,8 +86,32 @@ def classify_beast_mode(sql, template = nil)
   'projection'
 end
 
-# Normalize a Component's column list ({column,alias,aggregation,format}) —
-# used for chartBody, summaryNumber, groupBy, orderBy (Shape A DataSetColumn[]).
+# Bug 4: an inline Beast Mode entry ALREADY carries isAnalytic/isAggregatable
+# — Domo's own classification of it — so PREFER that over an extra standalone
+# function-template HTTP round-trip. Only fall back to fetch_template (the
+# old behavior, still needed for a calc id a card references but that isn't
+# inlined anywhere reachable) when NEITHER flag key is present on `f` at all
+# (checked with key?, not truthiness — both flags legitimately being `false`
+# is itself a real, usable classification: projection).
+def classify_beast_mode_for(f, template_cache)
+  sql = f['formula'] || f['expression']
+  if f.key?('isAnalytic') || f.key?('isAggregatable')
+    classify_beast_mode(sql, f)
+  else
+    tmpl = fetch_template(f['templateId'] || f['id'], template_cache)
+    classify_beast_mode(sql, tmpl)
+  end
+end
+
+# Normalize a Component's column list ({column,alias,aggregation,format,mapping})
+# — used for chartBody, summaryNumber, groupBy, orderBy (Shape A DataSetColumn[])
+# and Shape B's subscriptions.main/big_number columns.
+#
+# `mapping` is the VISUAL-ROLE binding (confirmed live, 10-value vocabulary:
+# ITEM=category/x, VALUE=measure, SERIES=split, XTIME, BUBBLESIZE, CATEGORY,
+# CURRENT, TARGET, DATE, EVENT). It used to be dropped entirely; surfacing it
+# here is what lets build-workbook.rb bind axes/series instead of guessing
+# column order.
 def norm_columns(component)
   Array(component && component['columns']).map do |c|
     raw = c['column'] || c['dataColumn'] || c['field']
@@ -91,23 +121,80 @@ def norm_columns(component)
       'aggregation' => c['aggregation'] || c['aggr'],
       'format'      => c['format'] || c['numberFormat'],
       'order'       => c['order'],
+      'mapping'     => c['mapping'],                # visual-role binding (Bug 2)
       'beastModeId' => (raw.to_s.start_with?(CALC_PREFIX) ? raw : c['formulaId']),
     }.compact
   end
 end
 
-# Normalize a card definition (either shape) into one record.
-def normalize_card(raw, card_id)
+# Parse a JSON-encoded string with a rescue guard (Bug 3: metadata.
+# SummaryNumberFormat / .columnAliases / .columnFormats are STRINGS containing
+# JSON, not objects — they need a *second* JSON.parse). Returns nil for
+# anything that isn't a non-empty String, or that fails to parse (malformed
+# JSON on a live instance should degrade to "no data", never raise and abort
+# discovery for one bad card).
+def parse_json_string(s)
+  return nil unless s.is_a?(String) && !s.strip.empty?
+  JSON.parse(s)
+rescue JSON::ParserError
+  nil
+end
+
+# Read the parts-read card object's `metadata` block (Bug 3). `metadata.
+# chartType` — NOT the card root — is where chartType actually lives on that
+# endpoint; `columnAliases`/`columnFormats`/`SummaryNumberFormat` are
+# JSON-encoded strings needing the second parse above.
+#
+# `card_meta` is whichever raw record the CALLER already has that might carry
+# this `metadata` block — either the enumeration route's own per-card object
+# (Domo.cards_for_page's `cards[]` entries carry full metadata inline, so on
+# the common path this costs zero extra HTTP calls — see
+# domo-discover.rb's enumerate_page_cards) or, when that's unavailable, `raw`
+# itself in case the definition fetch fell back to the Shape-A parts read.
+def parse_card_metadata(card_meta)
+  md = card_meta.is_a?(Hash) ? card_meta['metadata'] : nil
+  return {} unless md.is_a?(Hash)
+  {
+    'chartType'           => md['chartType'],
+    'columnAliases'       => parse_json_string(md['columnAliases']),
+    'columnFormats'       => parse_json_string(md['columnFormats']),
+    'summaryNumberFormat' => parse_json_string(md['SummaryNumberFormat']),
+  }.compact
+end
+
+# Resolve chartType across every confirmed location, most-authoritative first
+# (Bug 3). `metadata.chartType` (from whichever source has it) wins; Shape B's
+# OWN `definition.charts.main.chartType` is a same-call fallback (no extra
+# HTTP — reliable on every card where the v3 analyzer fetch succeeded, even
+# when the enumeration route didn't supply `metadata` — see
+# enumerate_page_cards route 2/3); root-level `chartType` is kept last for the
+# create-body shape (offline tests / any future write-body reuse).
+def resolve_chart_type(raw, defn, meta)
+  meta['chartType'] ||
+    raw.dig('metadata', 'chartType') ||
+    (defn && defn.dig('charts', 'main', 'chartType')) ||
+    raw['chartType'] ||
+    (defn && defn['chartType'])
+end
+
+# Normalize a card definition (either shape) into one record. `card_meta` is
+# an OPTIONAL enumeration-route record for this card (see parse_card_metadata
+# above) — pass it when the caller has one; omit it and this still degrades
+# gracefully (chartType/mapping/etc. fall back to whatever `raw` itself has).
+def normalize_card(raw, card_id, card_meta: nil)
   # The parts-form (Shape A) endpoint can return an array of card objects.
   raw = raw.first if raw.is_a?(Array)
   raw ||= {}
   defn = raw['definition']
+  meta = parse_card_metadata(card_meta || raw)
+  chart_type = resolve_chart_type(raw, defn, meta)
 
   if defn.is_a?(Hash) && (defn['subscriptions'] || defn['formulas'])
     # ---- Shape B (internal analyzer definition) ----
     main = defn.dig('subscriptions', 'main') || {}
     title = defn.dig('dynamicTitle', 'text')&.map { |t| t['text'] }&.join ||
-            raw['title'] || raw.dig('metadata', 'title')
+            raw['title'] || raw.dig('metadata', 'title') ||
+            (card_meta.is_a?(Hash) && card_meta.dig('metadata', 'title'))
     columns = norm_columns(main.empty? ? nil : { 'columns' => main['columns'] })
     filters = Array(main['filters']).map do |f|
       { 'column' => f['column'], 'operator' => f['filterType'] || f['operator'],
@@ -116,16 +203,24 @@ def normalize_card(raw, card_id)
     {
       'id'                 => card_id,
       'title'              => title,
-      'chartType'          => raw['chartType'] || defn['chartType'],
-      'sigmaKindHint'      => sigma_kind_hint(raw['chartType'] || defn['chartType']),
+      'chartType'          => chart_type,
+      'sigmaKindHint'      => sigma_kind_hint(chart_type),
       'datasetId'          => raw['dataSetId'] || raw.dig('dataProvider', 'dataSourceId'),
       'columns'            => columns,
-      'summaryNumber'      => norm_summary_number(defn['summaryNumber'] || main['summaryNumber']),
+      # Bug 2 (P0): the summary number lives at subscriptions.big_number on a
+      # live instance — NOT defn['summaryNumber'] or main['summaryNumber']
+      # (neither of which exist there), so this used to be nil for 31/36
+      # cards and Rule 0 (summary number -> kpi-chart) never fired. Old paths
+      # kept as a fallback for compatibility / other Domo versions.
+      'summaryNumber'      => norm_summary_number(
+        defn.dig('subscriptions', 'big_number') || defn['summaryNumber'] || main['summaryNumber']
+      ),
       'groupBy'            => Array(main['groupBy']).map { |c| c['column'] }.compact,
       'orderBy'            => Array(main['orderBy']).map { |c| c['column'] }.compact,
       'filters'            => filters,
       'conditionalFormats' => Array(defn['conditionalFormats']),
       'cardFormulas'       => Array(defn['formulas']),  # {id,name,columnPositions,...}
+      '_metadata'          => (meta.empty? ? nil : meta),
       '_shape'             => 'B',
     }.compact
   else
@@ -138,8 +233,8 @@ def normalize_card(raw, card_id)
     {
       'id'                 => card_id,
       'title'              => raw['title'] || raw.dig('metadata', 'title'),
-      'chartType'          => raw['chartType'],
-      'sigmaKindHint'      => sigma_kind_hint(raw['chartType']),
+      'chartType'          => chart_type,
+      'sigmaKindHint'      => sigma_kind_hint(chart_type),
       'datasetId'          => raw['dataSetId'],
       'columns'            => norm_columns(body),
       'summaryNumber'      => norm_summary_number(raw['summaryNumber']),
@@ -148,6 +243,7 @@ def normalize_card(raw, card_id)
       'filters'            => filters,
       'conditionalFormats' => Array(raw['conditionalFormats']),
       'cardFormulas'       => Array(raw['calculatedFields']),  # {formula,id,name,saveToDataSet}
+      '_metadata'          => (meta.empty? ? nil : meta),
       '_shape'             => 'A',
     }.compact
   end
@@ -184,24 +280,27 @@ end
 #   - card-local formulas     (Shape A calculatedFields / Shape B definition.formulas)
 # Joins card column/filter refs via the "calculation_<uuid>" id, tags each with
 # scope (dataset|card) and class (aggregate|projection|window|lod).
+#
+# Bug 4: both formula sources are INLINE — definition.formulas[] already
+# carries the full formula object (isAnalytic/isAggregatable included), no
+# standalone template fetch required to get the SQL or classify it. See
+# classify_beast_mode_for for the prefer-inline / fall-back-to-fetch logic.
 def dig_beast_modes(card, ds_formula_map, template_cache)
   out = []
   # 1. Dataset-level Beast Modes (map → values).
   (ds_formula_map || {}).each_value do |f|
     sql = f['formula'] || f['expression']
     next unless sql
-    tmpl = fetch_template(f['templateId'] || f['id'], template_cache)
     out << { 'id' => f['id'], 'name' => f['name'], 'sql' => sql,
-             'scope' => 'dataset', 'class' => classify_beast_mode(sql, tmpl),
+             'scope' => 'dataset', 'class' => classify_beast_mode_for(f, template_cache),
              'dataSourceId' => card['datasetId'], 'cardId' => card['id'] }
   end
   # 2. Card-local Beast Modes.
   Array(card['cardFormulas']).each do |f|
     sql = f['formula'] || f['expression']
     next unless sql
-    tmpl = fetch_template(f['templateId'] || f['id'], template_cache)
     out << { 'id' => f['id'], 'name' => f['name'], 'sql' => sql,
-             'scope' => 'card', 'class' => classify_beast_mode(sql, tmpl),
+             'scope' => 'card', 'class' => classify_beast_mode_for(f, template_cache),
              'cardId' => card['id'] }
   end
   out
@@ -218,6 +317,99 @@ def fetch_card_def(card_id)
   b = (Domo.card_definition_v3(card_id) rescue nil)
   return b if b.is_a?(Hash) && b['definition']
   Domo.card_definition(card_id) rescue nil
+end
+
+# Bug 1 (P0): GET /v1/pages/{id} (Domo.page) returns cardIds: [] even for a
+# page with dozens of cards on a live instance — discovery used to derive its
+# card list from exactly that field, so it silently produced ZERO cards. This
+# tries the three confirmed-working routes in preference order, degrading
+# gracefully to the next when one comes back empty:
+#
+#   1. Domo.cards_for_page   (private, richest — full card objects + sizes[]/
+#                             collections[] for Bug 5 layout, in ONE call)
+#   2. Domo.cards_adminsummary (private, instance-wide; paginated via skip/limit
+#                             query params, scoped to this page via pageIds)
+#   3. Domo.list_cards       (PUBLIC — the only route reachable on Tier B;
+#                             limit capped at 100 inside the REST wrapper;
+#                             paginated via offset; filtered here to this page)
+#
+# Returns [card_ids, meta_by_id, stacks]:
+#   card_ids   — ordered array of card ids/urns for this page.
+#   meta_by_id — card id (String) => whatever per-card record that route
+#                supplied (full card object for route 1, the lighter
+#                adminsummary/public-list record for routes 2/3). Passed into
+#                normalize_card as `card_meta` (Bug 3 chartType/metadata).
+#   stacks     — the FULL route-1 response (nil for routes 2/3) — passed to
+#                DomoSigma.merge_geometry for the sizes[]/collections[] merge
+#                (Bug 5). Only route 1 carries this; routes 2/3 have no
+#                layout information at all, which is fine — merge_geometry
+#                treats a nil `stacks` as a no-op.
+def enumerate_page_cards(pid)
+  # Route 1 — private, single call, full fidelity (cards + sizes + collections).
+  stacks = (Domo.cards_for_page(pid) rescue nil)
+  cards = Array(stacks && stacks['cards'])
+  if cards.any?
+    meta_by_id = {}
+    ids = cards.map do |c|
+      next nil unless c.is_a?(Hash) && c['id']
+      meta_by_id[c['id'].to_s] = c
+      c['id']
+    end.compact
+    return [ids, meta_by_id, stacks]
+  end
+
+  # Route 2 — private, instance-wide sweep filtered server-side to this page.
+  if Domo.dev_token
+    ids = []
+    meta_by_id = {}
+    skip = 0
+    loop do
+      resp  = (Domo.cards_adminsummary(pid, skip: skip, limit: 100) rescue nil)
+      batch = Array(resp && resp['cardAdminSummaries'])
+      break if batch.empty?
+      batch.each do |c|
+        next unless c.is_a?(Hash) && c['id']
+        ids << c['id']
+        meta_by_id[c['id'].to_s] = c
+      end
+      skip += 100
+      break if batch.size < 100
+    end
+    return [ids, meta_by_id, nil] if ids.any?
+  end
+
+  # Route 3 — PUBLIC, the only route reachable on Tier B. `pages` is filtered
+  # client-side since this endpoint isn't page-scoped server-side. An empty
+  # result here (this list is documented as eventually-consistent right after
+  # bulk mutations) is the LAST fallback, so we can only warn, not degrade
+  # further — never silently report it as "confirmed zero cards".
+  ids = []
+  meta_by_id = {}
+  offset = 0
+  loop do
+    resp  = (Domo.list_cards(limit: 100, offset: offset) rescue nil)
+    batch = Array(resp && resp['cards'])
+    break if batch.nil? || batch.empty?
+    batch.each do |c|
+      next unless c.is_a?(Hash)
+      on_page = Array(c['pages']).any? do |p|
+        (p.is_a?(Hash) ? (p['id'] || p['pageId']) : p).to_s == pid.to_s
+      end
+      next unless on_page
+      urn = c['cardUrn'] || c['id']
+      next unless urn
+      ids << urn
+      meta_by_id[urn.to_s] = c
+    end
+    offset += 100
+    break if batch.size < 100
+  end
+  if ids.empty?
+    warn "  cards: all 3 enumeration routes returned zero for page #{pid} — " \
+         'public /v1/cards is eventually-consistent right after bulk mutations; ' \
+         'treat as UNKNOWN, not "confirmed no cards" (re-run if unexpected).'
+  end
+  [ids, meta_by_id, nil]
 end
 
 # C9 wiring: merge each dataset's `permission` block — captured below from the
@@ -318,15 +510,22 @@ if opts[:pages]
   template_cache      = {}   # templateId → standalone Beast Mode (for classification)
 
   opts[:pages].each do |pid|
-    page = Domo.page(pid) # PUBLIC: page hierarchy + card IDs
+    page = Domo.page(pid) # PUBLIC: page title/hierarchy — do NOT trust
+                          # page['cardIds']/['cards'] (confirmed empty even on
+                          # a live 36-card page; see enumerate_page_cards, Bug 1).
     pages_out << page
 
-    # PUBLIC gives card IDs; layout geometry + collections need PRIVATE. Merged
-    # onto each of this page's cards below (merge_geometry) so cards.json
-    # carries real x/y/w/h for the 2D layout builder instead of auto-stacking.
+    # PRIVATE, pixel-ish x/y/w/h geometry — present only on mason/Domo-App
+    # pages. Classic pages return none of this (Bug 5); their layout signal
+    # (sizes[]/collections[]) comes from `stacks` below instead. Both are
+    # independent and merge_geometry tolerates either/both/neither being nil.
     layout = (Domo.page_layout(pid) rescue nil)
 
-    card_ids = Array(page['cardIds'] || page['cards'])
+    # Bug 1 fix: enumerate cards via the three confirmed routes instead of the
+    # empty page['cardIds']. `stacks` (non-nil only when route 1 supplied it)
+    # also carries this page's sizes[]/collections[] for the Bug 5 geometry
+    # merge below.
+    card_ids, card_meta_by_id, stacks = enumerate_page_cards(pid)
     page_cards = []
 
     card_ids.each do |cid|
@@ -336,7 +535,7 @@ if opts[:pages]
           page_cards << { 'id' => cid, '_error' => 'card definition unavailable' }
           next
         end
-        card = normalize_card(raw, cid)
+        card = normalize_card(raw, cid, card_meta: card_meta_by_id[cid.to_s])
 
         # Fetch + cache dataset-level Beast Modes for this card's dataset. This
         # SAME response (parts=core,permission,formulas) also carries the C9
@@ -352,12 +551,20 @@ if opts[:pages]
         beast_out.concat(card['beastModes'])
         page_cards << card
       else
-        page_cards << { 'id' => cid, '_tierB' => true,
-                        '_note' => 'no private API — capture PNG + transcribe Beast Modes manually' }
+        # Tier B: still no private API, but card_meta_by_id now carries a real
+        # id + title (route 3, public /v1/cards) instead of nothing — this is
+        # what "Tier B can produce a card inventory" (Bug 1) means in practice;
+        # chart classification still requires a human to read the PNG.
+        meta = card_meta_by_id[cid.to_s] || {}
+        page_cards << {
+          'id' => cid, '_tierB' => true,
+          'title' => meta['cardTitle'] || meta['title'],
+          '_note' => 'no private API — capture PNG + transcribe Beast Modes manually',
+        }.compact
       end
     end
 
-    cards_out.concat(merge_geometry(page_cards, layout))
+    cards_out.concat(merge_geometry(page_cards, layout, stacks: stacks))
   end
 
   # De-dupe Beast Modes by id (a dataset formula shared by many cards appears once).

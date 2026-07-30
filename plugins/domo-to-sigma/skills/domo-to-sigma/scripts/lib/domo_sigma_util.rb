@@ -85,16 +85,67 @@ module DomoSigma
     end
   end
 
-  # Merge Domo page-layout grid geometry (x/y/w/h) onto each card record by id —
-  # ports domo-capture-visuals.rb's normalize_layout coordinate extraction so
+  # Merge Domo page-layout geometry onto each card record by id — ports
+  # domo-capture-visuals.rb's normalize_layout coordinate extraction so
   # domo-discover.rb's --pages path (not just the OPTIONAL capture-visuals
-  # script) hands build-domo-layout.rb real coordinates instead of forcing it to
-  # auto-stack every card. Pure/side-effect-free: returns a NEW array; a card
-  # with no matching layout entry (or no geometry fields on that entry) comes
-  # back unchanged — 'x'/'y'/'w'/'h' are OMITTED, never defaulted to 0 (0 is a
-  # valid top-left coordinate and must not be confused with "unknown").
-  def merge_geometry(cards, page_layout)
-    cards = Array(cards)
+  # script) hands build-domo-layout.rb real layout instead of forcing it to
+  # auto-stack every card.
+  #
+  # Bug 5 (P0, refs/live-validation-2026-07-30.md): CLASSIC Domo pages carry NO
+  # x/y/w/h pixel geometry anywhere. What a live `GET
+  # /api/content/v3/stacks/{pageId}/cards` response (Domo.cards_for_page, the
+  # PRIMARY card-enumeration route — see domo-discover.rb's
+  # enumerate_page_cards) actually gives you for layout is:
+  #
+  #   sizes[]       = [{"id"=>"<cardId>", "size"=>"medium"}, ...]
+  #                   — a T-SHIRT-SIZE TOKEN per card (small/medium/large/...),
+  #                   NOT pixels or a column span number.
+  #   collections[] = [{"id"=>.., "title"=>"Section Name", "description"=>..,
+  #                      "minimized"=>false, "cardIndices"=>[0,1,2,3]}, ...]
+  #                   — titled sections that group cards BY INDEX into the
+  #                   stacks response's OWN `cards[]` array (NOT by card id).
+  #                   An API-created page has collections: [] and just an
+  #                   ordered `sizes[]` entry per card — no sections at all.
+  #
+  # This method merges BOTH kinds of geometry onto each card record by id, and
+  # keeps them independent so either can be present, absent, or both:
+  #
+  #   - legacy 'x'/'y'/'w'/'h' (mason / Domo-App pages, pixel-ish grid coords)
+  #     — sourced from `page_layout`, UNCHANGED behavior from before this fix.
+  #   - '_size'        — the T-shirt token, from `stacks['sizes']`, keyed by
+  #                       card id.
+  #   - '_collection'  — {'id','title','index'} for the collection (if any)
+  #                       this card falls in. `index` is the card's 0-based
+  #                       position in the `cards` ARGUMENT passed to this
+  #                       method (NOT its id) — domo-discover.rb guarantees
+  #                       that position matches the stacks response's own
+  #                       `cards[]` order, since it builds the card list by
+  #                       walking that same array in order. Omitted (never
+  #                       defaulted) when the card's index isn't inside any
+  #                       collection's `cardIndices` (e.g. collections: [] on
+  #                       an API-created page).
+  #   - '_pageOrder'   — that same 0-based index, ALWAYS attached whenever
+  #                       `stacks` is given (regardless of collection
+  #                       membership), so the layout builder has an explicit
+  #                       ordering signal even on a page with zero collections.
+  #
+  # build-domo-layout.rb (owned by another agent) is the consumer of all of
+  # this — this method only DEFINES and documents the shape on discovery's
+  # output; it does not lay anything out itself.
+  #
+  # Pure/side-effect-free in both passes: returns a NEW array; a card with no
+  # matching entry in a given source is left unchanged by that source's pass —
+  # 'x'/'y'/'w'/'h' are OMITTED, never defaulted to 0 (0 is a valid top-left
+  # coordinate and must not be confused with "unknown").
+  def merge_geometry(cards, page_layout, stacks: nil)
+    out = Array(cards)
+    out = merge_xywh_geometry(out, page_layout)
+    out = merge_stacks_geometry(out, stacks)
+    out
+  end
+
+  # --- x/y/w/h pass (mason / Domo-App pages) — unchanged from before Bug 5 --
+  def merge_xywh_geometry(cards, page_layout)
     return cards unless page_layout.is_a?(Hash)
 
     raw_cards = page_layout['cards'] || page_layout.dig('pageLayoutV4', 'cards') || []
@@ -118,6 +169,36 @@ module DomoSigma
       next card unless geom
       coords = geom.each_with_object({}) { |(k, v), h| h[k] = v.to_i unless v.nil? }
       coords.empty? ? card : card.merge(coords)
+    end
+  end
+
+  # --- sizes[] / collections[] pass (classic pages) — Bug 5 -----------------
+  def merge_stacks_geometry(cards, stacks)
+    return cards unless stacks.is_a?(Hash)
+
+    size_by_id = {}
+    Array(stacks['sizes']).each do |s|
+      next unless s.is_a?(Hash) && s['id']
+      size_by_id[s['id'].to_s] = s['size']
+    end
+
+    collection_by_index = {}
+    Array(stacks['collections']).each do |col|
+      next unless col.is_a?(Hash)
+      Array(col['cardIndices']).each do |idx|
+        collection_by_index[idx] = { 'id' => col['id'], 'title' => col['title'], 'index' => idx }
+      end
+    end
+
+    cards.each_with_index.map do |card, idx|
+      next card unless card.is_a?(Hash)
+      extra = {}
+      size = size_by_id[card['id'].to_s]
+      extra['_size'] = size if size
+      coll = collection_by_index[idx]
+      extra['_collection'] = coll if coll
+      extra['_pageOrder'] = idx
+      extra.empty? ? card : card.merge(extra)
     end
   end
 end

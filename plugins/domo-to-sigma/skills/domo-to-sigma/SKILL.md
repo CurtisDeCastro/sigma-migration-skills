@@ -14,16 +14,21 @@ user-invocable: true
 
 # Domo → Sigma Conversion
 
-> **Status: offline-complete; live parity not yet claimed.** The private-API
-> shapes (card definitions, Beast Mode text, page layout) are **doc-confirmed**
-> against Domo's OpenAPI, official docs, and independent reference
-> implementations (see `refs/connection.md`), and the skill's offline test
-> suites pass hermetically. The public OAuth path is documented and stable.
-> **What remains live**: a field-path check on first contact with a real
-> instance (private endpoints can vary by Domo version) and a live parity run
-> against a real Sigma workbook. Neither is claimed done here — this skill
-> defers both, consistent with this repo's rule of never calling a conversion
-> validated until it passes live parity for that instance.
+> **Status: private-API shapes LIVE-CONFIRMED (2026-07-30); end-to-end Sigma
+> parity still not claimed.** A first live Tier-A validation ran against a real
+> Domo instance (48 cards / 24 chart types / 81 Beast Modes, plus 15 purpose-built
+> cards). It answered all three former open questions and **disproved several
+> doc-inferred shapes** in `refs/connection.md` — card enumeration, the
+> summary-number path, and page-layout geometry were all wrong.
+> **Read `refs/live-validation-2026-07-30.md` before trusting any private-API
+> shape**; where it and `refs/connection.md` disagree, live-validation wins.
+> The public OAuth path is documented and stable.
+> **What remains live**: a full `migrate-domo.rb` run whose resulting Sigma
+> workbook passes numeric parity and the Phase-5e visual gate for a given
+> instance. That is NOT claimed here — consistent with this repo's rule of never
+> calling a conversion validated until it passes live parity for that instance.
+> Domo's own `query/execute` parity mechanism *was* verified to reconcile exactly
+> against the warehouse.
 > **Compliance:** before a production run, confirm with the customer's Domo
 > account team that programmatic extraction for migration is acceptable — see
 > `refs/connection.md` "Compliance note".
@@ -343,9 +348,22 @@ Delete orphan test workbooks (`/v2/files/<id>`).
 
 ---
 
-## Open questions — resolve on first instance access
+## Open questions — RESOLVED 2026-07-30
 
-See `refs/connection.md` for the current confidence level on each private
-endpoint. The blockers that most change the skill: (1) does the dev token reach
-`/api/content/v1/cards`? (2) exact card-def JSON shape; (3) page-layout geometry
-units. Until confirmed on a live instance, treat Phases 1/2/5 as unvalidated.
+All three former blockers were answered by live contact. Full evidence in
+`refs/live-validation-2026-07-30.md`:
+
+1. **Does the dev token reach `/api/content/v1/cards`?** — **Yes.** Tier A is
+   reachable. OAuth bearer tokens are 401 on every private path; the two
+   credentials are not interchangeable.
+2. **Exact card-def JSON shape** — there are **three** distinct shapes, and the
+   previously-documented "Shape A" is the public *create body*, not a read
+   response. The summary number lives at `definition.subscriptions.big_number`.
+3. **Page-layout geometry units** — classic pages have **no x/y/w/h at all**.
+   Layout is `collections[]` (titled sections with `cardIndices[]`) plus a
+   per-card T-shirt `size` token, on a **6-column** Domo grid (so Domo→Sigma
+   width scales ×4).
+
+What is still genuinely open: a full end-to-end `migrate-domo.rb` run that
+passes numeric parity and the Phase-5e visual gate against a live Sigma workbook.
+Treat that as the remaining bar for calling an instance's conversion validated.

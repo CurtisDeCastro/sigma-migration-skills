@@ -38,6 +38,133 @@ def mref(display) "[Master/#{display}]" end
 $warnings = []
 def warn_card(card, msg) $warnings << { 'card' => card['title'] || card['id'], 'warning' => msg } end
 
+# ---- Domo chartType -> Sigma element kind (refs/card-to-element.md Problems 1-3) --
+#
+# `chartType` is a STRICT Domo enum, not a free-form string — substring matching
+# on it is actively harmful (`badge_line_bar` is a COMBO chart but contains
+# "badge_line"; `badge_symbol_bar` contains "_bar" but isn't a plain bar chart).
+# EXACT-match the full token against CHART_TYPE_MAP below; a token this map
+# hasn't seen falls back to `card['sigmaKindHint']` (upstream's own best-effort
+# guess) and, failing that, to the existing "unknown chartType" bar-chart
+# default at the bottom of build_element — never a silent drop.
+#
+# Four tokens the map used to carry (`badge_datagrid`, `badge_pivottable`,
+# `badge_stackedarea`, `badge_line`) are NOT valid Domo ChartType values —
+# probing card creation returned "No enum constant ... ChartType.<token>" for
+# each. They're kept here only so a card carrying one is flagged as an upstream
+# extraction bug (a real Domo instance will never produce them), not silently
+# mis-mapped.
+FABRICATED_CHART_TYPES = {
+  'badge_datagrid'    => 'badge_table',
+  'badge_pivottable'  => nil, # no confirmed-valid Domo pivot-table token observed yet
+  'badge_stackedarea' => nil, # no confirmed-valid Domo stacked-area token observed yet
+  'badge_line'        => 'badge_symbolline (or badge_curved_symbolline)',
+}.freeze
+
+# Every chartType this converter has actually seen accepted by Domo — either by
+# creating a card with it, or observed live on `metadata.chartType` of a real
+# card on a real instance (2026-07-30 validation) — mapped to the Sigma element
+# `kind` string that best represents it. Kind strings are verified against the
+# sigma-workbooks skill (plugins/sigma-authoring/skills/sigma-workbooks); values
+# here are the CLOSEST HONEST kind, not always an exact visual match — see
+# NO_NATIVE_EQUIVALENT below for the subset where Sigma has no true equivalent.
+CHART_TYPE_MAP = {
+  'badge_vert_bar'            => 'bar-chart',
+  'badge_horiz_bar'           => 'bar-chart',
+  'badge_vert_stackedbar'     => 'bar-chart',   # + stacking: stacked (bar_stacking_for)
+  'badge_vert_multibar'       => 'bar-chart',   # + stacking: none (grouped/clustered)
+  'badge_horiz_multibar'      => 'bar-chart',   # + orientation: horizontal, stacking: none
+  'badge_horiz_100pct'        => 'bar-chart',   # + orientation: horizontal, stacking: normalized
+  'badge_vert_nestedbar'      => 'bar-chart',   # approximated (no 2-level nested axis) — see warning
+  'badge_treemap'             => 'bar-chart',   # NO_NATIVE_EQUIVALENT — sorted desc by measure
+  'badge_symbolline'          => 'line-chart',
+  'badge_curved_symbolline'   => 'line-chart',
+  'badge_trendline'           => 'line-chart',
+  'badge_two_trendline'       => 'line-chart',
+  'badge_xyscatterplot'       => 'scatter-chart',
+  'badge_bubble'              => 'scatter-chart',  # + size channel from a BUBBLESIZE-mapped column
+  'badge_pie'                 => 'pie-chart',
+  'badge_donut'               => 'donut-chart',
+  'badge_singlevalue'         => 'kpi-chart',
+  'badge_filledgauge'         => 'kpi-chart',   # NO_NATIVE_EQUIVALENT — no gauge kind in Sigma
+  'badge_table'               => 'table',
+  'badge_word_cloud'          => 'table',       # NO_NATIVE_EQUIVALENT — term + frequency table
+  'badge_calendar'            => 'table',       # NO_NATIVE_EQUIVALENT — flat date + value table
+  'badge_map'                 => 'region-map',  # default; build_map falls back to a table when the
+                                                 # geography column can't be classified
+  'badge_line_bar'            => 'combo-chart',
+  'badge_line_stackedbar'     => 'combo-chart',
+  'badge_symbol_bar'          => 'combo-chart',
+  'badge_pop_bar_line'        => 'combo-chart', # NO_NATIVE_EQUIVALENT — no POP comparison primitive
+  'badge_vert_symbol_overlay' => 'combo-chart', # NO_NATIVE_EQUIVALENT — no actual-vs-target overlay
+}.freeze
+
+# Sigma has no true equivalent for these — CHART_TYPE_MAP above still names the
+# closest honest degradation (never silently substituted for a bar chart with
+# no explanation), but build_element ALSO emits a loud, specific warning naming
+# the card and the gap. Per refs/card-to-element.md, actually closing this gap
+# is tracked as a Sigma CUSTOM PLUGIN follow-up (see the sigma-plugin-development
+# skill) — building one is NOT this converter's job today.
+NO_NATIVE_EQUIVALENT = {
+  'badge_treemap' => 'Domo treemap — no treemap `kind` was found in the Sigma workbook spec ' \
+                      '(verified against the sigma-workbooks skill); degraded to a bar-chart sorted ' \
+                      'descending by measure, which loses the area-proportional hierarchy.',
+  'badge_word_cloud' => 'Domo word cloud — no word-cloud `kind` exists in Sigma; degraded to a flat ' \
+                         'term + frequency table.',
+  'badge_calendar' => 'Domo calendar heatmap — no calendar `kind` exists in Sigma; degraded to a flat ' \
+                       'date + value table.',
+  'badge_filledgauge' => 'Domo gauge/dial — `gauge` is a CONFIRMED-INVALID Sigma kind (rejected ' \
+                          '`400 Invalid kind` — not part of the workbook spec API); degraded to ' \
+                          'kpi-chart. Bind the TARGET column as a KPI comparison if present.',
+  'badge_pop_bar_line' => 'Domo period-over-period bar+line — combo-chart approximates the visual ' \
+                           '(bar = current period, line = prior period) but Sigma has no automatic ' \
+                           'prior-period comparison; the two periods must be modeled as two explicit measures.',
+  'badge_vert_symbol_overlay' => 'Domo bar + actual/target symbol overlay — combo-chart (bar + a ' \
+                                  'scatter marker series) is the closest native shape; a true ' \
+                                  'actual-vs-target dial is not representable.',
+}.freeze
+
+# Exact-match chartType tokens (never substring) whose Sigma bar-chart needs a
+# non-default orientation. Anything not listed renders Sigma's default (vertical).
+HORIZONTAL_CHART_TYPES = %w[badge_horiz_bar badge_horiz_multibar badge_horiz_100pct].freeze
+
+def bar_stacking_for(chart_type)
+  case chart_type.to_s.downcase
+  when 'badge_vert_stackedbar' then 'stacked'
+  when 'badge_horiz_100pct'    then 'normalized'
+  else 'none'
+  end
+end
+
+# Which shape the secondary (non-bar) series takes on a combo-chart, by exact
+# chartType token — Domo's ChartType alone doesn't say which measure is which,
+# so build_combo also documents/flags the first-measure-is-bar heuristic.
+COMBO_SECONDARY_TYPE = {
+  'badge_line_bar'            => 'line',
+  'badge_line_stackedbar'     => 'line',
+  'badge_pop_bar_line'        => 'line',
+  'badge_symbol_bar'          => 'scatter',
+  'badge_vert_symbol_overlay' => 'scatter',
+}.freeze
+
+# Resolve a card's Sigma element kind from its chartType via EXACT match
+# (never substring — see the header comment above). Returns nil — the
+# documented, explicit fallback — for a fabricated token (flagged separately,
+# via FABRICATED_CHART_TYPES) or a token this map hasn't seen; the caller
+# falls back to sigmaKindHint, then to the unknown-chartType bar-chart default.
+def chart_kind_for(card)
+  ct = card['chartType'].to_s.downcase
+  return nil if ct.empty?
+  if FABRICATED_CHART_TYPES.key?(ct)
+    real = FABRICATED_CHART_TYPES[ct]
+    warn_card(card, "chartType '#{card['chartType']}' is not a valid Domo ChartType value " \
+                    "(confirmed invalid by probing card creation)#{real ? " — the real token is #{real}" : ''} " \
+                    '— check the upstream extraction; falling back.')
+    return nil
+  end
+  CHART_TYPE_MAP[ct]
+end
+
 # A page whose cards carry no grid geometry (Task 1's merge_geometry 'x'/'y'
 # fields, sourced from domo-discover's --pages capture) has nothing for
 # build-domo-layout.rb/build-dashboard-layout.rb to place — it silently falls
@@ -50,11 +177,39 @@ def warn_missing_geometry(pname, pcards)
 end
 
 # Split a card's columns into dimensions (grouped / non-aggregated) and measures.
+#
+# Prefers Domo's own column->visual-role `mapping` vocabulary when a column
+# carries one (live-verified 2026-07-30: ITEM/CATEGORY/XTIME/DATE/SERIES bind
+# to the axis/series side, VALUE/CURRENT/TARGET/BUBBLESIZE are measures) —
+# more reliable than guessing from `aggregation`/`groupBy` alone. Falls back to
+# the aggregation/groupBy heuristic when no column carries a `mapping` (Tier B,
+# or an extraction pass that hasn't captured it yet).
+DIM_MAPPINGS = %w[ITEM CATEGORY XTIME DATE SERIES].freeze
+MEASURE_MAPPINGS = %w[VALUE CURRENT TARGET BUBBLESIZE].freeze
+
 def split_cols(card)
   cols = card['columns'] || []
   gb = Array(card['groupBy'])
-  dims = cols.select { |c| gb.include?(c['column']) || c['aggregation'].to_s.empty? }
-  meas = cols.select { |c| !c['aggregation'].to_s.empty? }
+  dims = []
+  meas = []
+  # Per-column: prefer Domo's own `mapping` when THIS column carries one (it's
+  # the more reliable signal); fall back to the aggregation/groupBy heuristic
+  # for any column that doesn't (Tier B, or an extraction pass that hasn't
+  # captured `mapping` yet) — mixing the two per-column, rather than an
+  # all-or-nothing switch, so a partially-tagged column set still classifies
+  # correctly instead of silently losing the untagged columns.
+  cols.each do |c|
+    m = c['mapping'].to_s.upcase
+    if DIM_MAPPINGS.include?(m)
+      dims << c
+    elsif MEASURE_MAPPINGS.include?(m)
+      meas << c
+    elsif gb.include?(c['column']) || c['aggregation'].to_s.empty?
+      dims << c
+    else
+      meas << c
+    end
+  end
   dims = cols.reject { |c| meas.include?(c) } if dims.empty? && !meas.empty?
   [dims, meas]
 end
@@ -112,6 +267,7 @@ def build_axis_chart(card, kind)
   if dims.empty? || meas.empty?
     warn_card(card, "#{kind}: could not resolve both a dimension and a measure — verify against the card PNG.")
   end
+  ct = card['chartType'].to_s.downcase
   xcol = dims.first
   dcols = dims.map { |d| dim_col(d) }
   mcols = meas.map { |m| measure_col(m) }
@@ -122,13 +278,131 @@ def build_axis_chart(card, kind)
   }
   if xcol
     xa = { 'columnId' => dcols.first['id'], 'format' => AXIS_OFF }
-    # sort by the first measure if the card ordered by a measure
-    xa['sort'] = { 'by' => mcols.first['id'], 'direction' => 'descending' } if mcols.first && Array(card['orderBy']).any?
+    # Sort by the first measure if the card ordered by a measure, OR if this is
+    # the badge_treemap degradation (no native treemap kind — see
+    # NO_NATIVE_EQUIVALENT — sorting descending by size is the closest a flat
+    # bar-chart gets to the area-proportional hierarchy).
+    is_treemap = ct == 'badge_treemap'
+    xa['sort'] = { 'by' => mcols.first['id'], 'direction' => 'descending' } if mcols.first && (Array(card['orderBy']).any? || is_treemap)
     el['xAxis'] = xa
   end
   el['yAxis'] = { 'columnIds' => mcols.map { |m| m['id'] }, 'format' => AXIS_OFF } unless mcols.empty?
-  el['orientation'] = 'horizontal' if card['chartType'].to_s.downcase.include?('horiz')
+  if kind == 'bar-chart'
+    # #2/#3: orientation/stacking keyed on the EXACT chartType token, not a
+    # `.include?('horiz')` substring check (the same class of bug this whole
+    # map fix addresses — see refs/card-to-element.md Problem 2).
+    el['orientation'] = 'horizontal' if HORIZONTAL_CHART_TYPES.include?(ct)
+    el['stacking'] = bar_stacking_for(ct)
+    if ct == 'badge_vert_nestedbar'
+      warn_card(card, 'badge_vert_nestedbar: Sigma has no 2-level nested-category axis — ' \
+                      'approximated as a flat grouped bar chart (the outer grouping tier is lost).')
+    end
+  end
+  if kind == 'scatter-chart'
+    # badge_bubble: bind the BUBBLESIZE-mapped column (if the extraction
+    # captured `mapping`) to the scatter's optional size channel.
+    bubble = (card['columns'] || []).find { |c| c['mapping'].to_s.upcase == 'BUBBLESIZE' }
+    el['size'] = { 'id' => measure_col(bubble)['id'] } if bubble
+  end
   el
+end
+
+# ---- pie-chart / donut-chart --------------------------------------------
+# Both use `value` (the measure, referenced by `id` — NOT `columnId`, the
+# opposite of a KPI) + `color` (the dimension) instead of xAxis/yAxis. The
+# previous implementation reused build_axis_chart and just overwrote `kind`,
+# which shipped an xAxis/yAxis-shaped element with no `value`/`color` at all —
+# not a valid pie/donut spec. `pie-chart` is the same shape as `donut-chart`
+# minus the donut-only hole/holeValue/innerRadius fields (verified against the
+# sigma-workbooks skill's charts.md).
+def build_pie_or_donut(card, kind)
+  dims, meas = split_cols(card)
+  warn_card(card, "#{kind}: could not resolve both a dimension (color) and a measure (value) — " \
+                  'verify against the card PNG.') if dims.empty? || meas.empty?
+  dcol = dims.first ? dim_col(dims.first) : nil
+  mcol = meas.first ? measure_col(meas.first) : nil
+  {
+    'id' => eid(card), 'kind' => kind, 'name' => card['title'],
+    'source' => { 'kind' => 'table', 'elementId' => 'master' },
+    'columns' => [dcol, mcol].compact,
+    'value' => mcol ? { 'id' => mcol['id'] } : nil,   # ⚠ donut/pie use value.id, NOT columnId
+    'color' => dcol ? { 'id' => dcol['id'] } : nil,
+  }.compact
+end
+
+# ---- combo-chart (badge_line_bar / badge_line_stackedbar / badge_pop_bar_line /
+# badge_symbol_bar / badge_vert_symbol_overlay) ------------------------------
+# Domo's ChartType alone doesn't say WHICH measure is the bar vs. the secondary
+# series, so this uses a documented, honest heuristic: the FIRST measure is the
+# primary (bar) series; every other measure takes the secondary shape (line or
+# scatter, per COMBO_SECONDARY_TYPE). Flagged for review when the measure count
+# isn't the expected 2.
+def build_combo(card)
+  dims, meas = split_cols(card)
+  ct = card['chartType'].to_s.downcase
+  secondary = COMBO_SECONDARY_TYPE[ct] || 'line'
+  if meas.size != 2
+    warn_card(card, "combo-chart: expected a bar measure + a #{secondary} measure (2 total) but found " \
+                    "#{meas.size} — verify the series assignment against the card PNG.")
+  end
+  dcols = dims.map { |d| dim_col(d) }
+  mcols = meas.map { |m| measure_col(m) }
+  series = mcols.each_with_index.map { |m, i| { 'columnId' => m['id'], 'type' => i.zero? ? 'bar' : secondary } }
+  el = {
+    'id' => eid(card), 'kind' => 'combo-chart', 'name' => card['title'],
+    'source' => { 'kind' => 'table', 'elementId' => 'master' },
+    'columns' => dcols + mcols,
+  }
+  el['xAxis'] = { 'columnId' => dcols.first['id'], 'format' => AXIS_OFF } if dcols.first
+  el['yAxis'] = { 'columnIds' => series, 'format' => AXIS_OFF } unless series.empty?
+  el['stacking'] = 'stacked' if ct == 'badge_line_stackedbar'
+  el
+end
+
+# ---- badge_map -> Sigma region-map -----------------------------------------
+# Sigma's real map kinds are geography-map / point-map / region-map (a bare
+# "map" kind is confirmed INVALID — verified against the sigma-workbooks
+# skill's docs/sigma-trellis-chart-support.md). This converter only attempts
+# region-map (Domo's geo cards are overwhelmingly country/state/zip choropleths,
+# not lat/long point plots) and degrades honestly to a table — with a loud
+# warning, never a silent substitution — when the geography column can't be
+# classified into one of Sigma's regionType values.
+REGION_TYPE_HINTS = [
+  [/zip|postal/i, 'us-zipcode'],
+  [/county/i,     'us-county'],
+  [/cbsa|metro/i, 'us-cbsa'],
+  [/province/i,   'ca-province'],
+  [/state/i,      'us-state'],
+  [/country/i,    'country'],
+].freeze
+
+def infer_region_type(dim)
+  name = (dim && (dim['alias'] || dim['column'])).to_s
+  hit = REGION_TYPE_HINTS.find { |(re, _)| name =~ re }
+  hit && hit[1]
+end
+
+def build_map(card)
+  dims, meas = split_cols(card)
+  geo = dims.first
+  region_type = infer_region_type(geo)
+  unless region_type
+    geo_name = geo && (geo['alias'] || geo['column'])
+    warn_card(card, "badge_map: could not classify the geography column '#{geo_name}' into a Sigma " \
+                    'regionType (country/us-state/us-county/us-zipcode/us-cbsa/ca-province) — no ' \
+                    'native Sigma equivalent for this geography; emitted a table instead (candidate ' \
+                    'for a Sigma custom plugin — see refs/card-to-element.md).')
+    return build_table(card)
+  end
+  gcol = dim_col(geo)
+  mcol = meas.first ? measure_col(meas.first) : nil
+  {
+    'id' => eid(card), 'kind' => 'region-map', 'name' => card['title'],
+    'source' => { 'kind' => 'table', 'elementId' => 'master' },
+    'columns' => [gcol, mcol].compact,
+    'region' => { 'id' => gcol['id'], 'regionType' => region_type },
+    'color' => mcol ? { 'by' => 'scale', 'column' => mcol['id'] } : nil,
+  }.compact
 end
 
 def build_table(card)
@@ -214,16 +488,36 @@ def build_element(card, overrides)
     warn_card(card, "image card #{card['id']}: no captured PNG — export from Domo UI and embed manually.")
   end
 
+  # #2/#3: chartType is a STRICT Domo enum — EXACT-match it (never substring)
+  # against the known-token table before falling back to any upstream hint.
+  # element-kind for chart family is decided HERE, after Rule 0 (KPI) already
+  # had first refusal above.
+  mapped = chart_kind_for(card)
+  kind = mapped || kind
+  ct = card['chartType'].to_s.downcase
+  if mapped && NO_NATIVE_EQUIVALENT.key?(ct)
+    warn_card(card, "no native Sigma equivalent for chartType '#{card['chartType']}' — " \
+                    "#{NO_NATIVE_EQUIVALENT[ct]} Tracked as a Sigma custom-plugin follow-up " \
+                    '(sigma-plugin-development skill) — not handled by this converter today.')
+  end
+
   case kind
-  when 'bar-chart', 'line-chart', 'area-chart', 'combo-chart', 'scatter-chart'
-    build_axis_chart(card, kind == 'combo-chart' ? 'bar-chart' : kind).tap do
-      warn_card(card, 'combo/dual-axis: emitted as bar-chart — set yAxis2 in the editor.') if kind == 'combo-chart'
-    end
-  when 'donut-chart'
-    warn_card(card, 'donut/pie: verify value binding (donut uses value.id, not columnId).')
-    build_axis_chart(card, 'bar-chart').merge('kind' => 'donut-chart')
+  when 'bar-chart', 'line-chart', 'area-chart', 'scatter-chart'
+    build_axis_chart(card, kind)
+  when 'combo-chart' then build_combo(card)
+  when 'pie-chart', 'donut-chart' then build_pie_or_donut(card, kind)
   when 'pivot-table'  then build_pivot(card)
   when 'table'        then build_table(card)
+  when 'region-map'   then build_map(card)
+  when 'kpi-chart'
+    # badge_filledgauge (and any other kpi-mapped chartType) may reach here
+    # without a summaryNumber — never silently drop the card; degrade to a
+    # table + warn rather than emit nil.
+    build_kpi(card, overrides) || begin
+      warn_card(card, "kpi-chart: chartType '#{card['chartType']}' has no summaryNumber to build a " \
+                      'value from — emitted a table instead so the card is not silently dropped.')
+      build_table(card)
+    end
   else
     warn_card(card, "unknown chartType '#{card['chartType']}' → emitted bar-chart; verify against the PNG.")
     build_axis_chart(card, 'bar-chart')

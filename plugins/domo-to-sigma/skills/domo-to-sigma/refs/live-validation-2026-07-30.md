@@ -196,8 +196,9 @@ create status code alone. **Verify every authored card by rendering it.**
    `calendar: true` on the date column in BOTH `columns[]` and `groupBy[]` makes
    `dateTimeElement: "MONTH"` take effect. Measure columns should **omit**
    `calendar` entirely (live cards have it absent, not `false`).
-3. ⚠️ **`dateGrain` needs a real `DATE` column.** A `YYYYMMDD` integer key (very
-   common in warehouse fact tables, and what `CSA.TJ.ORDER_FACT` uses) is a `LONG`
+3. ⚠️ **`dateGrain` needs a real `DATE` column.** A `YYYYMMDD` integer surrogate
+   date key — very common in warehouse fact tables, and the shape of the fact
+   table used for this validation — is a `LONG`
    to Domo and cannot drive a date grain. Migrations in the other direction must
    synthesize a real date; note Sigma can derive one from the integer key with
    `MakeDate` (see `refs/beast-mode-to-sigma.md`).

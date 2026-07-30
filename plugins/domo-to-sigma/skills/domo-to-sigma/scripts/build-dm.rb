@@ -10,10 +10,24 @@
 #     Beast Modes are handled at the workbook layer by build-workbook.rb)
 #
 # Domo data lands in a warehouse Sigma reads; that mapping is customer-specific and
-# CANNOT be guessed. Supply discovery/dataset-map.json:
+# CANNOT be guessed IN GENERAL. Supply discovery/dataset-map.json:
 #   { "<datasetId>": { "connectionId": "...", "database": "DB", "schema": "SCH",
 #                      "table": "TABLE", "name": "Nice Element Name" }, ... }
 # Run without it once and this writes discovery/dataset-map.template.json to fill.
+#
+# ── Auto-fill (2026-07-30 live validation) ──────────────────────────────────
+# For CONNECTOR-BACKED DataSets, database/schema/table is NOT actually a
+# guess: Domo's own stream configuration carries it 1:1 (see
+# refs/live-validation-2026-07-30.md "Snowflake connector — dataset→warehouse
+# mapping is discoverable"). Every missing/blank entry in dataset-map.json is
+# now auto-filled from `GET /api/data/v1/streams/{streamId}` where possible —
+# see derive_map_entry below for exactly what is and isn't derivable.
+# `connectionId` is a SIGMA-side id with no Domo analog and is NEVER derived —
+# it always needs a human, same as before. (If you're setting up a NEW
+# connector account to backfill a stream, prefer the live-validated keypair
+# Snowflake connector `com.domo.connector.snowflakekeypairauthentication` —
+# the plain `com.domo.connector.snowflake[.v2]` versions are rejected as
+# DEPRECATED for new streams.)
 #
 #   ruby scripts/build-dm.rb            # → discovery/dm-spec.json
 #
@@ -22,6 +36,7 @@
 require 'json'
 require 'fileutils'
 require_relative 'lib/domo_sigma_util'
+require_relative 'lib/domo_rest'   # auto-fill's thin network seam — see fetch_stream_config
 include DomoSigma   # display_name, rand_id, inode_id — shared with build-workbook.rb
 
 OUT = ENV['DOMO_DISCOVERY_DIR'] || File.expand_path('../discovery', __dir__)
@@ -37,6 +52,117 @@ rescue JSON::ParserError
   nil
 end
 
+# ---------------------------------------------------------------------------
+# Auto-fill dataset-map.json from Domo's stream configuration (2026-07-30 live
+# validation). Split into small pure pieces + one thin network seam so the
+# derivation logic is unit-testable with NO credentials and NO network
+# (test/test-build-dm.rb stubs `fetcher:`), while build-dm.rb's real run uses
+# the live Domo.private_get calls below.
+
+# Flatten a Domo stream's `configuration` array
+# ({streamId, category:"STREAM", name, type, value}) into a plain name=>value
+# Hash. Pure — no network. Observed names: databaseName, schemaName,
+# tableName, warehouseName, query, reportType.
+def stream_config_hash(configuration)
+  Array(configuration).each_with_object({}) do |c, h|
+    h[c['name']] = c['value'] if c.is_a?(Hash) && c['name']
+  end
+end
+
+# Network seam: DataSet id -> flattened stream-config Hash (or {} when there's
+# nothing to find). Deliberately tolerant of EVERY failure mode — no dev token
+# (Tier B), the dataset has no streamId, the stream fetch 404s/errors — because
+# a miss here must degrade to "couldn't auto-derive," never abort the build:
+# connectionId already requires a human regardless of what this finds.
+# `Domo.private_get` returns nil outright when DOMO_DEV_TOKEN is unset, so this
+# is also safe to call with zero Domo credentials configured.
+def fetch_stream_config(ds_id)
+  return {} if Domo.dev_token.nil?
+  detail = (Domo.private_get("/api/data/v3/datasources/#{ds_id}") rescue nil)
+  stream_id = detail.is_a?(Hash) ? detail['streamId'] : nil
+  return {} unless stream_id
+  stream = (Domo.private_get("/api/data/v1/streams/#{stream_id}") rescue nil)
+  stream.is_a?(Hash) ? stream_config_hash(stream['configuration']) : {}
+end
+
+# Derive one dataset-map.json entry from a DataSet + its flattened stream
+# config (`conf` — possibly {}, see fetch_stream_config). NEVER invents
+# `connectionId` (Sigma-side; has no Domo analog) and NEVER invents a table
+# name when one isn't actually derivable — those cases are FLAGGED via
+# `_source`/`_note`, not guessed, so nothing silently looks confirmed:
+#
+#   "domo-stream-config"              tableName present on the stream ->
+#                                      real warehouse-table mapping.
+#   "domo-stream-config-query-only"   a custom-SQL report stream (`query`
+#                                      present, no tableName) -> `table` stays
+#                                      nil; the SQL is recorded under `_query`
+#                                      for a human to turn into a table/view
+#                                      or a Sigma custom-SQL source.
+#   "domo-landed-data"                 no connector stream config at all (api /
+#                                      webform / excel-upload / sample-data
+#                                      DataSets) -> there is no warehouse
+#                                      location; land-vs-repoint applies.
+def derive_map_entry(dataset, conf)
+  conf = conf || {}
+  base = { 'connectionId' => '', 'name' => dataset['name'] }
+  if conf['tableName']
+    base.merge('database' => conf['databaseName'], 'schema' => conf['schemaName'],
+               'table' => conf['tableName'], '_source' => 'domo-stream-config')
+  elsif conf['query']
+    base.merge('database' => conf['databaseName'], 'schema' => conf['schemaName'],
+               'table' => nil, '_source' => 'domo-stream-config-query-only',
+               '_query' => conf['query'],
+               '_note' => 'custom-SQL report stream: no single table to derive — turn `_query` ' \
+                          'into a warehouse table/view, or a Sigma custom-SQL source, by hand')
+  else
+    base.merge('database' => nil, 'schema' => nil, 'table' => nil,
+               '_source' => 'domo-landed-data',
+               '_note' => 'no connector stream config found (api/webform/excel-upload/sample data) — ' \
+                          'this DataSet has no warehouse location; land it or repoint by hand')
+  end
+end
+
+# Fill in every id in `ids` whose dataset-map.json entry is missing a real
+# `table` — a completely absent id, an entry with a blank/empty table, or one
+# a PRIOR auto-fill pass already flagged (still nil). Never touches an entry
+# that already has a real table, hand-authored or previously derived, so a
+# human's work is never clobbered. The one field a human may already have
+# supplied that must never be overwritten either way is `connectionId` — it
+# can never be derived from Domo, so it always survives untouched.
+#
+# `fetcher` is the network seam (ds_id -> stream-config Hash via
+# fetch_stream_config); tests inject a stub here to stay fully offline.
+# Returns [merged_map, count_of_entries_touched_this_pass].
+def autofill_dataset_map(ds_map, ds_by_id, ids, fetcher: method(:fetch_stream_config))
+  merged = ds_map.dup
+  touched = 0
+  ids.each do |id|
+    entry = merged[id]
+    next if entry && !entry['table'].to_s.strip.empty?
+
+    dataset = ds_by_id[id] || { 'id' => id, 'name' => id }
+    derived = derive_map_entry(dataset, fetcher.call(id))
+    derived['connectionId'] = entry['connectionId'] if entry && !entry['connectionId'].to_s.strip.empty?
+    derived['name'] = entry['name'] if entry && !entry['name'].to_s.strip.empty?
+    merged[id] = derived
+    touched += 1
+  end
+  [merged, touched]
+end
+
+# When a dataset-map entry has no derivable table (query-only stream, or a
+# non-connector "landed data" DataSet — see derive_map_entry), build_element
+# must NEVER fall back to guessing a table from the DataSet's display name —
+# that would silently look like a confirmed warehouse mapping. Emit an
+# unmistakable sentinel instead, mirroring the existing '<CONNECTION_ID>'
+# placeholder convention, so a human catches it before this DM spec is posted.
+def placeholder_table(map_entry)
+  case map_entry['_source']
+  when 'domo-stream-config-query-only' then '<TABLE:QUERY_ONLY_NEEDS_HUMAN>'
+  when 'domo-landed-data'               then '<TABLE:LANDED_DATA_NO_WAREHOUSE_SOURCE>'
+  end
+end
+
 # Domo type → optional Sigma column format hint.
 def type_format(domo_type)
   case domo_type.to_s.upcase
@@ -48,7 +174,7 @@ end
 
 # Build one warehouse-table element for a DataSet.
 def build_element(ds, map_entry, projection_bms)
-  table = map_entry['table'] || map_entry['name'] || ds['name'] || 'TABLE'
+  table = map_entry['table'] || placeholder_table(map_entry) || map_entry['name'] || ds['name'] || 'TABLE'
   el_id = rand_id
   cols = []
   order = []
@@ -138,22 +264,37 @@ if $PROGRAM_NAME == __FILE__
   used = datasets.map { |d| d['id'] }.compact if used.empty?
   ds_by_id = datasets.each_with_object({}) { |d, h| h[d['id']] = d }
 
-  # Customer dataset→warehouse map (cannot be guessed).
+  # Customer dataset→warehouse map. connectionId is ALWAYS a human's job
+  # (Sigma-side id, no Domo analog); database/schema/table now auto-fill from
+  # Domo's connector stream config where derivable — see
+  # "Auto-fill (2026-07-30 live validation)" above and derive_map_entry.
   map_path = File.join(OUT, 'dataset-map.json')
-  unless File.exist?(map_path)
-    template = used.each_with_object({}) do |id, h|
-      d = ds_by_id[id] || {}
-      h[id] = { 'connectionId' => '', 'database' => '', 'schema' => '',
-                'table' => (d['name'] || '').to_s.upcase.gsub(/\s+/, '_'),
-                'name' => d['name'] }
+  if File.exist?(map_path)
+    existing = JSON.parse(File.read(map_path))
+    # File already exists — hand-authored, previously auto-filled, or a mix.
+    # Only fill entries still missing a real `table`; a complete entry
+    # (hand-authored or already-derived) is left untouched.
+    ds_map, filled = autofill_dataset_map(existing, ds_by_id, used)
+    if filled > 0
+      File.write(map_path, JSON.pretty_generate(ds_map))
+      warn "  auto-fill: derived a warehouse location for #{filled} dataset(s) from Domo stream " \
+           'config (see "_source" per entry in dataset-map.json) — connectionId still needs a human.'
     end
+  else
+    # No dataset-map.json at all yet: attempt auto-fill for every used
+    # DataSet and write a TEMPLATE (still requires one human pass —
+    # connectionId can never be derived) pre-filled with whatever Domo's
+    # stream config makes derivable, instead of a blank stub to hand-author
+    # from scratch.
+    ds_map, _ = autofill_dataset_map({}, ds_by_id, used)
     FileUtils.mkdir_p(OUT)
-    File.write(File.join(OUT, 'dataset-map.template.json'), JSON.pretty_generate(template))
-    warn "  No discovery/dataset-map.json. Wrote dataset-map.template.json — fill in"
-    warn "  connectionId/database/schema/table for each DataSet, rename to dataset-map.json, re-run."
+    File.write(File.join(OUT, 'dataset-map.template.json'), JSON.pretty_generate(ds_map))
+    warn "  No discovery/dataset-map.json. Wrote dataset-map.template.json — auto-filled what Domo's"
+    warn '  stream config can tell us per DataSet (see "_source"/"_note" per entry). Fill in the'
+    warn '  remaining connectionId (always a human) and resolve any flagged entries, rename to'
+    warn '  dataset-map.json, re-run.'
     exit 2
   end
-  ds_map = JSON.parse(File.read(map_path))
 
   # Projection Beast Modes grouped by dataset (only these become DM calc columns).
   proj_by_ds = Hash.new { |h, k| h[k] = [] }
@@ -178,5 +319,11 @@ if $PROGRAM_NAME == __FILE__
   warn "  wrote #{File.join(OUT, 'dm-spec.json')} (#{elements.size} element(s))"
   missing = ds_map.select { |_, v| v['connectionId'].to_s.empty? }.keys
   warn "  ⚠ #{missing.size} dataset(s) have no connectionId — fill dataset-map.json: #{missing.join(', ')}" unless missing.empty?
+  needs_review = ds_map.select { |_, v| %w[domo-stream-config-query-only domo-landed-data].include?(v['_source']) }.keys
+  unless needs_review.empty?
+    warn "  ⚠ #{needs_review.size} dataset(s) need human review before this DM is posted (query-only " \
+         'stream or no warehouse source at all — see "_source"/"_note" in dataset-map.json, and the ' \
+         "<TABLE:...> sentinel in dm-spec.json): #{needs_review.join(', ')}"
+  end
   warn "\n  Next (Phase 4): post-and-readback.rb dm-spec.json  (captures server element/column IDs)"
 end
