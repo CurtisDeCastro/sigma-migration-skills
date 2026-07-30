@@ -3,11 +3,11 @@
   "schemaVersion": 1,
   "pages": [
     {
-      "id": "id0001",
+      "id": "AU7CjXAo1r",
       "name": "Data",
       "elements": [
         {
-          "id": "id0002",
+          "id": "miXxbC05k2",
           "kind": "table",
           "source": {
             "connectionId": "conn-demo-warehouse",
@@ -20,11 +20,11 @@
           },
           "columns": [
             {
-              "id": "inode-NORM0003/ORDER_ID",
+              "id": "inode-CpX768vmRKVfvPQLDoEnob/ORDER_ID",
               "formula": "[ORDER_FACT/Order Id]"
             },
             {
-              "id": "inode-NORM0004/ORDER_DATE",
+              "id": "inode-mPf3xVJjvmIz9QxspCsygJ/ORDER_DATE",
               "formula": "[ORDER_FACT/Order Date]",
               "format": {
                 "kind": "datetime",
@@ -32,37 +32,41 @@
               }
             },
             {
-              "id": "inode-NORM0005/REGION",
+              "id": "inode-73gF5kIVmyxYtwaAk9JXnY/REGION",
               "formula": "[ORDER_FACT/Region]"
             },
             {
-              "id": "inode-NORM0006/SALES_AMOUNT",
+              "id": "inode-IMnMrhZ9qnUzy5wSvLtpvq/SALES_AMOUNT",
               "formula": "[ORDER_FACT/Sales Amount]"
             },
             {
-              "id": "inode-NORM0007/CUSTOMER_ID",
+              "id": "inode-bOGPRhKZPkIxli1gn3tT6v/CUSTOMER_ID",
               "formula": "[ORDER_FACT/Customer Id]"
             },
             {
-              "id": "id0008",
+              "id": "o5OXJvwz8F",
               "name": "Order Year",
               "formula": "Year([Order Date])"
             }
           ],
-          "metrics": [],
-          "order": [
-            "inode-NORM0003/ORDER_ID",
-            "inode-NORM0004/ORDER_DATE",
-            "inode-NORM0005/REGION",
-            "inode-NORM0006/SALES_AMOUNT",
-            "inode-NORM0007/CUSTOMER_ID",
-            "id0008"
+          "metrics": [
+
           ],
-          "relationships": [],
+          "order": [
+            "inode-CpX768vmRKVfvPQLDoEnob/ORDER_ID",
+            "inode-mPf3xVJjvmIz9QxspCsygJ/ORDER_DATE",
+            "inode-73gF5kIVmyxYtwaAk9JXnY/REGION",
+            "inode-IMnMrhZ9qnUzy5wSvLtpvq/SALES_AMOUNT",
+            "inode-bOGPRhKZPkIxli1gn3tT6v/CUSTOMER_ID",
+            "o5OXJvwz8F"
+          ],
+          "relationships": [
+
+          ],
           "_datasetId": "ds-order-fact"
         },
         {
-          "id": "id0009",
+          "id": "V3fEDsBDYd",
           "kind": "table",
           "source": {
             "connectionId": "conn-demo-warehouse",
@@ -75,25 +79,29 @@
           },
           "columns": [
             {
-              "id": "inode-NORM0010/CUSTOMER_ID",
+              "id": "inode-PXT7dJCRj1IDafZyDg4aqH/CUSTOMER_ID",
               "formula": "[CUSTOMER_DIM/Customer Id]"
             },
             {
-              "id": "inode-NORM0011/CUSTOMER_NAME",
+              "id": "inode-o8SBok09C48YIJ6QqIIYP5/CUSTOMER_NAME",
               "formula": "[CUSTOMER_DIM/Customer Name]"
             },
             {
-              "id": "inode-NORM0012/SEGMENT",
+              "id": "inode-nJ3Xzt456FQzzlLfO3SzZy/SEGMENT",
               "formula": "[CUSTOMER_DIM/Segment]"
             }
           ],
-          "metrics": [],
-          "order": [
-            "inode-NORM0010/CUSTOMER_ID",
-            "inode-NORM0011/CUSTOMER_NAME",
-            "inode-NORM0012/SEGMENT"
+          "metrics": [
+
           ],
-          "relationships": [],
+          "order": [
+            "inode-PXT7dJCRj1IDafZyDg4aqH/CUSTOMER_ID",
+            "inode-o8SBok09C48YIJ6QqIIYP5/CUSTOMER_NAME",
+            "inode-nJ3Xzt456FQzzlLfO3SzZy/SEGMENT"
+          ],
+          "relationships": [
+
+          ],
           "_datasetId": "ds-customer-dim"
         }
       ]
