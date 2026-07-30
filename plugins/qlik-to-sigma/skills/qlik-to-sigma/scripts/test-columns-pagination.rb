@@ -8,7 +8,7 @@
 #
 # Why this is a SHARED test: all three scripts below are canonical shared infra
 # synced into 7-10 converters, so the defect and its fix are fleet-wide. The worst
-# case is assert-phase6-ran.rb's gate-5 audit, which selects columns whose
+# case is assert-phase6-ran.rb's gate 3/7 audit, which selects columns whose
 # type == "error" and fails the run if any exist: reading one page makes it blind
 # past column 50, so a wide workbook whose error columns sit past the cut passes
 # as GREEN — a false GREEN in the one place built to prevent exactly that.
@@ -61,7 +61,7 @@ puts 'test-columns-pagination.rb — shared columns readers must paginate'
 
 # 1. BEHAVIORAL: a wide workbook spread over three pages is fully consumed, and
 #    an error column sitting past the default page size is still seen. This is the
-#    gate-5 false-GREEN scenario in miniature.
+#    gate 3/7 false-GREEN scenario in miniature.
 ENV['SIGMA_BASE_URL'] = 'https://sigma.example'
 ENV['SIGMA_API_TOKEN'] = 'tok'
 page1 = (1..50).map  { |i| { 'label' => "COL_#{i}", 'type' => { 'type' => 'text' } } }
@@ -75,7 +75,7 @@ http = FakeHttp.new([
 entries = Sigma.list_entries('/v2/workbooks/wb-1/columns', http: http)
 check(entries.size == 101, "all 101 columns across 3 pages are returned (got #{entries.size})", fails)
 check(entries.any? { |c| c.dig('type', 'type') == 'error' },
-      'an error column at ordinal 101 is SEEN — the gate-5 false-GREEN case', fails)
+      'an error column at ordinal 101 is SEEN — the gate 3/7 false-GREEN case', fails)
 check(http.reqs.size == 3 && http.reqs.all? { |r| r.path.include?('limit=1000') },
       'every page request carries limit=1000', fails)
 
@@ -98,8 +98,8 @@ end
 phase6_path = File.join(HERE, 'assert-phase6-ran.rb')
 if File.exist?(phase6_path)
   src = File.read(phase6_path)
-  check(src.include?('nextPage'), 'assert-phase6-ran.rb follows nextPage on its gate-5 audit', fails)
-  check(src.include?('limit=1000'), 'assert-phase6-ran.rb requests limit=1000 on its gate-5 audit', fails)
+  check(src.include?('nextPage'), 'assert-phase6-ran.rb follows nextPage on its gate 3/7 audit', fails)
+  check(src.include?('limit=1000'), 'assert-phase6-ran.rb requests limit=1000 on its gate 3/7 audit', fails)
   check(!src.match?(/require 'sigma_rest'/),
         'assert-phase6-ran.rb stays free of a sigma_rest dependency (it is the final gate)', fails)
 else

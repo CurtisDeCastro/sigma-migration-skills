@@ -1148,7 +1148,7 @@ unless opts[:skip_column]
       warn '       and re-run this gate. A credential-less run is NOT a passing run.'
       exit 5
     else
-      # PAGINATED: limit=1000, following nextPage to exhaustion. This is gate 5's
+      # PAGINATED: limit=1000, following nextPage to exhaustion. This is gate 3/7's
       # error-column audit. A bare first-page GET truncates at the server default of
       # 50, which would let THIS GATE pass a wide workbook whose type=="error"
       # columns sat past column 50 — the exact false GREEN the gate exists to
