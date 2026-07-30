@@ -116,3 +116,22 @@ Notes:
   artifact; every applied item is gated by a parity-unchanged spot-check
   that auto-reverts on divergence. Other skills should adopt the same
   vendored engine + flag convention when they grow a Phase E.
+
+### hex-to-sigma
+
+Hex uses "Phase" numbering (it joined after the table was set, and its
+discovery step is unique in the family — file-based, not a REST walk; see
+its `SKILL.md` for why). Its local mapping:
+
+| Canonical | hex-to-sigma |
+|---|---|
+| C1 Assess | `hex-assessment` skill (stub) |
+| C2 Discover | Phase 1 — Parse the `.hex.yaml` export (`converter/hex_yaml.py`) — no REST walk; Hex's API doesn't expose cell content |
+| C3 Reuse-check | Phase 1.5 — `find-or-pick-dm.rb` (vendored unmodified) |
+| C4 Convert | Phase 2 — `converter/convert_dm.py` (SQL cells → native-SQL DM element) + `converter/convert_workbook.py` (METRIC/EXPLORE cells → workbook elements, layout baked in) |
+| C5 Post-DM gate | Phase 3 — `post-and-readback.rb` (vendored pattern, not source-tool-specific) |
+| C6 Build workbook | Phase 4 — `post-and-readback.rb --type workbook` |
+| C7 Layout | within Phase 4/5 — layout baked into the workbook spec at convert time (no separate put-layout step; Hex's full `appLayout` is known upfront, unlike Metabase) |
+| C8 Parity hard gate | Phase 6 — `assert-phase6-ran.rb` |
+| C9 Security/RLS | "Security: RLS/CLS" section — not yet implemented, gap documented |
+| C10 Enhance | — |
