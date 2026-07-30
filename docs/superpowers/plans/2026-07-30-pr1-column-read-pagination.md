@@ -852,6 +852,199 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 ---
 
+### Task 6b: Paginate the four sites Task 1's triage added
+
+Task 1's triage found four genuine REST-COLUMNS readers the plan did not originally name. Two are
+**more error-column guards** — the same false-clean class as gate 5. All four were verified by
+reading the assigning line, and all four must be fixed or Task 7's lint cannot pass.
+
+**Files:**
+- Modify: `scripts/synth-twb-e2e.rb:230-231`
+- Modify: `scripts/probe-controls.rb:130-132`
+- Modify: `scripts/fidelity-loop.rb:534-535`
+- Modify: `scripts/validate-sigma-formula.rb:185-187` (+ no new require — see below)
+- Test: `scripts/test-column-read-pagination.rb` (append wiring pins)
+
+**Interfaces:**
+- Consumes: `Sigma.list_entries` — already available in `synth-twb-e2e.rb` (required at :53),
+  `probe-controls.rb` (:63-64), and `fidelity-loop.rb` (lazily required at :521, which executes
+  before :535).
+- `validate-sigma-formula.rb` deliberately does **not** get `sigma_rest`: it mints its own token via
+  `get_token` into `TOK` and uses its own `http` helper. Adding the library would put two independent
+  auth paths in one script. It gets a local pagination loop over its existing `http` instead.
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `scripts/test-column-read-pagination.rb` before the summary block:
+
+```ruby
+# 8. WIRING PINS — the four sites Task 1's triage added. Two are error-column
+#    guards, so a truncated read means the same false-clean risk as gate 5.
+{
+  'synth-twb-e2e.rb'        => 'DM error-column repair loop',
+  'probe-controls.rb'       => 'control column-label map',
+  'fidelity-loop.rb'        => 'post-PUT error-column guard'
+}.each do |file, why|
+  s = File.read(File.join(__dir__, file))
+  check(s.include?('Sigma.list_entries'), "#{file} paginates its columns read (#{why})", fails)
+  check(!s.match?(/Sigma\.request\(:get,[^)]*\/columns"\)/),
+        "#{file} no longer reads columns via a single Sigma.request", fails)
+end
+
+# validate-sigma-formula.rb paginates with a LOCAL loop: it mints its own token
+# and must not gain a second auth path via sigma_rest.
+s = File.read(File.join(__dir__, 'validate-sigma-formula.rb'))
+check(s.include?('nextPage') && s.include?('limit=1000'),
+      'validate-sigma-formula.rb paginates its element-columns read locally', fails)
+check(!s.match?(/require 'sigma_rest'/),
+      'validate-sigma-formula.rb keeps its single auth path (no sigma_rest)', fails)
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+```bash
+ruby scripts/test-column-read-pagination.rb
+```
+
+Expected: all eight new pins FAIL. Exit 1.
+
+- [ ] **Step 3: Fix `synth-twb-e2e.rb`**
+
+Lines 230-231. Old:
+
+```ruby
+  cols = Sigma.request(:get, "/v2/dataModels/#{dm['dataModelId']}/columns")
+  errs = (cols['entries'] || []).select { |c| c.dig('type', 'type') == 'error' }.map { |c| c['label'] }
+```
+
+New:
+
+```ruby
+  # PAGINATED: this is the DM error-column repair loop. A first-page-only read
+  # would report "no error-type columns" on a wide model whose error columns sat
+  # past the server default of 50, and the repair loop would abort as though the
+  # failure were unrelated.
+  cols = Sigma.list_entries("/v2/dataModels/#{dm['dataModelId']}/columns")
+  errs = cols.select { |c| c.dig('type', 'type') == 'error' }.map { |c| c['label'] }
+```
+
+- [ ] **Step 4: Fix `probe-controls.rb`**
+
+Lines 130-132. Old:
+
+```ruby
+cols = Sigma.request(:get, "/v2/workbooks/#{WB}/columns")
+col_label = {} # [elementId, columnId] -> display label
+(cols && cols['entries'] || []).each do |c|
+```
+
+New:
+
+```ruby
+# PAGINATED: this map resolves control targets to display labels. Truncation left
+# controls past column 50 unlabeled.
+cols = Sigma.list_entries("/v2/workbooks/#{WB}/columns")
+col_label = {} # [elementId, columnId] -> display label
+cols.each do |c|
+```
+
+- [ ] **Step 5: Fix `fidelity-loop.rb`**
+
+Lines 534-535. Old:
+
+```ruby
+    cols = Sigma.request(:get, "/v2/workbooks/#{wb}/columns") rescue nil
+    err = ((cols && cols['entries']) || []).select { |c| c.dig('type', 'type') == 'error' }
+```
+
+New:
+
+```ruby
+    # PAGINATED: re-runs the same error-column guard post-and-readback runs on the
+    # initial POST, so it needs the same exhaustive read — otherwise a wide
+    # workbook's error columns past 50 pass this guard too.
+    cols = (Sigma.list_entries("/v2/workbooks/#{wb}/columns") rescue nil)
+    err = (cols || []).select { |c| c.dig('type', 'type') == 'error' }
+```
+
+Note the shape change: `list_entries` returns an Array, not a Hash, so the `cols['entries']`
+indirection is gone. `rescue nil` is retained from the original, and `(cols || [])` still guards it.
+
+- [ ] **Step 6: Fix `validate-sigma-formula.rb`**
+
+Lines 185-187. Old:
+
+```ruby
+cols_resp = http(:get, "/v2/workbooks/#{wb_id}/elements/el-scout-test/columns")
+cols_data = JSON.parse(cols_resp.body)
+entries = cols_data['entries'] || []
+```
+
+New:
+
+```ruby
+# PAGINATED with a LOCAL loop: this script mints its own token into TOK and uses
+# its own `http` helper, so pulling in sigma_rest would put two independent auth
+# paths in one script. Same semantics as Sigma.list_entries — limit=1000, follow
+# nextPage to exhaustion, defensive stop on a repeated or empty token.
+entries = []
+cols_page = nil
+cols_seen = {}
+loop do
+  qs = 'limit=1000'
+  qs += "&page=#{URI.encode_www_form_component(cols_page)}" if cols_page
+  cols_resp = http(:get, "/v2/workbooks/#{wb_id}/elements/el-scout-test/columns?#{qs}")
+  break unless cols_resp.is_a?(Net::HTTPSuccess)
+  cols_data = (JSON.parse(cols_resp.body) rescue nil)
+  break unless cols_data.is_a?(Hash)
+  entries.concat(cols_data['entries'] || [])
+  cols_page = cols_data['nextPage']
+  break if cols_page.nil? || cols_page.to_s.empty? || cols_seen[cols_page]
+  cols_seen[cols_page] = true
+end
+```
+
+- [ ] **Step 7: Run the test to verify it passes**
+
+```bash
+ruby scripts/test-column-read-pagination.rb
+```
+
+Expected: ALL PASS, exit 0.
+
+- [ ] **Step 8: Run the affected scripts' own tests**
+
+```bash
+ruby scripts/test-fidelity-loop.rb
+ruby scripts/test-control-lint.rb
+```
+
+Expected: same results as on `main`. Baseline first with `git stash` if unsure.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/synth-twb-e2e.rb \
+        plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/probe-controls.rb \
+        plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/fidelity-loop.rb \
+        plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/validate-sigma-formula.rb \
+        plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-column-read-pagination.rb
+git commit -m "fix(tableau): paginate the four columns readers triage added (tzly)
+
+Task 1's receiver-tracing triage found four genuine /columns readers beyond the
+five originally planned. Two are more error-column guards — fidelity-loop.rb's
+post-PUT guard and synth-twb-e2e.rb's DM repair loop — carrying the same
+false-clean risk as gate 5. probe-controls.rb left controls past column 50
+unlabeled.
+
+validate-sigma-formula.rb gets a local nextPage loop rather than sigma_rest: it
+mints its own token, and the library would add a second auth path.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
+```
+
+---
+
 ### Task 7: Lock the pattern in with a lint
 
 The bug exists because the 2026-06 `list_entries` fix propagated to some callers and not others.
@@ -884,20 +1077,25 @@ Create `scripts/test-no-unpaginated-column-reads.rb`:
 # RULE: a script that issues an HTTP GET to a path containing "/columns" must
 # also contain either `list_entries` or `nextPage`.
 #
-# Files whose `entries` reads come from a LOCAL JSON ledger rather than a REST
-# response are allowlisted below with a reason — a ledger is a whole document, not
-# a paginated response.
+# KNOWN GRANULARITY LIMIT: this lint is FILE-level — once a file contains
+# `list_entries` or `nextPage` anywhere, it is considered compliant. Both
+# fidelity-loop.rb and assert-phase6-ran.rb legitimately mix REST-columns reads
+# with local-ledger reads that share an `entries` key, and both are fixed by this
+# PR, so both pass without an allowlist entry. The cost is that a NEW unpaginated
+# columns read added to an already-compliant file would not be caught. Tightening
+# this to line-level proximity needs real data-flow analysis; tracked as a
+# deferred minor rather than guessed at here.
 #
 # Usage: ruby scripts/test-no-unpaginated-column-reads.rb
 
 SCRIPTS = File.expand_path(__dir__)
 
 # path => reason. Every entry is a reviewed decision, not a silencer.
-ALLOWLIST = {
-  # Populated from docs/superpowers/plans/2026-07-30-pr1-triage.md.
-  # Example shape:
-  # 'fidelity-loop.rb' => "its ['entries'] reads are fidelity-ledger.json, a local file",
-}.freeze
+# EXPECTED EMPTY after this PR: Task 1's triage found no file whose ONLY
+# columns-endpoint contact is a local-ledger read. Add an entry only if the lint
+# flags a file that Tasks 2-6b did not cover AND tracing its receiver proves the
+# read is not a REST response.
+ALLOWLIST = {}.freeze
 
 fails = []
 checked = 0
@@ -937,11 +1135,16 @@ else
 end
 ```
 
-- [ ] **Step 2: Populate `ALLOWLIST` from the Task 1 triage record**
+- [ ] **Step 2: Confirm `ALLOWLIST` should stay empty**
 
-For every file Task 1 classified LOCAL-FILE or REST-OTHER that the lint would otherwise flag, add
-an entry with its one-sentence reason. Do **not** add a file classified REST-COLUMNS — those are
-Tasks 2-6 and must pass on their merits.
+Read `docs/superpowers/plans/2026-07-30-pr1-triage.md`. Every file it classified LOCAL-FILE
+(`fidelity-loop.rb`, `assert-phase6-ran.rb`) *also* carries a REST-COLUMNS read that Tasks 6b and 6
+fix, so each will contain `list_entries` or `nextPage` and pass without an entry. Leave `ALLOWLIST`
+empty and proceed.
+
+Add an entry only if Step 3 flags a file that Tasks 2-6b did not cover **and** tracing its receiver
+proves the read is not a REST response. An allowlist entry for a genuine REST read is a silencer,
+not a decision.
 
 - [ ] **Step 3: Run the lint — expect PASS**
 
@@ -949,10 +1152,10 @@ Tasks 2-6 and must pass on their merits.
 ruby scripts/test-no-unpaginated-column-reads.rb
 ```
 
-Expected: PASS, exit 0. Tasks 2-6 fixed every REST-COLUMNS site.
+Expected: PASS, exit 0. Tasks 2-6b fixed every REST-COLUMNS site the triage found.
 
-If it FAILs on a file not covered by Tasks 2-6, that is a real finding: Task 1's triage missed a
-site. Fix the site the same way, do not allowlist it.
+If it FAILs on a file not covered by Tasks 2-6b, that is a real finding: Task 1's triage missed a
+site. Trace its receiver and fix it the same way. Do not allowlist it.
 
 - [ ] **Step 4: Prove the lint actually catches the bug (seeded-violation check)**
 
