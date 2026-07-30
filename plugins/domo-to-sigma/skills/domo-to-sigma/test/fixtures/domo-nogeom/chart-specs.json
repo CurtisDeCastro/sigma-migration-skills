@@ -7,6 +7,11 @@
           "id": "el-2004",
           "kind": "combo-chart",
           "name": "Combo Metric"
+        },
+        {
+          "id": "ctl-region-filter",
+          "kind": "control",
+          "name": "Region Filter"
         }
       ]
     }

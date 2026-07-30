@@ -202,7 +202,12 @@ end
 # build-workbook.rb would write it after resolving the real element) says
 # 'combo-chart' for that same card — the resolved zone must reflect the
 # LATTER, proving load_chart_specs_kind_map is actually wired into the real
-# entrypoint, not just reachable in isolation.
+# entrypoint, not just reachable in isolation. And: chart-specs.json's
+# "Detail" page also carries "ctl-region-filter" (kind 'control') — a control
+# with NO backing card in cards.json at all, mirroring the REAL live Tier-2
+# "ctl-order_status" element (refs/live-validation-2026-07-30.md) — proving
+# load_chart_specs_controls's orphan-control synthesis is wired into the real
+# entrypoint too.
 # ===========================================================================
 Dir.mktmpdir('domo-build-layout-nogeom') do |dir|
   fixture = File.join(__dir__, 'fixtures', 'domo-nogeom')
@@ -250,6 +255,54 @@ Dir.mktmpdir('domo-build-layout-nogeom') do |dir|
   ztable = dzones.find { |z| z['id'].to_s == '2003' }
   eq(ztable['w_pct'], 100.0, "'Detail Table' gets full width")
   ok(ztable['h_pct'] > z_combo['h_pct'], "the table's row is taller than a chart row end to end")
+
+  # ---- "Detail": chart-specs-only orphan control ("ctl-region-filter") ----
+  z_ctl = dzones.find { |z| z['id'].to_s == 'ctl-region-filter' }
+  ok(z_ctl, "the orphan control (NO backing card in cards.json — synthesized purely from " \
+            "chart-specs.json's 'control'-kind element, mirroring the real ctl-order_status case) " \
+            'still produced a zone through the real CLI entrypoint')
+  eq(z_ctl['kind'], 'filter', "the orphan control's zone is kind 'filter'")
+  eq(z_ctl['caption'], 'Region Filter', "the zone's caption is the control's OWN name (the join key " \
+                                        'downstream zone_el_name/assign_controls matching needs), not its raw id')
+  eq(z_ctl['w_pct'], 100.0, 'the sole control on this page spans the full control band width')
+  ok(z_ctl['y_pct'] < z_combo['y_pct'] && z_ctl['y_pct'] < ztable['y_pct'],
+     'the control band sits ABOVE every other band on the page (house-style order: control -> ... -> table)')
+end
+
+# ===========================================================================
+# discovery/layout-observed.json wired through the REAL CLI entrypoint
+# (function-level coverage of build_dashboard_with_observed itself lives in
+# test-layout-tag.rb). A typo'd sidecar key (matching no card at all) must
+# WARN, never silently do nothing — same discipline as an unrecognized size
+# token.
+# ===========================================================================
+Dir.mktmpdir('domo-build-layout-observed') do |dir|
+  w = ->(name, obj) { File.write(File.join(dir, name), JSON.generate(obj)) }
+  w.call('cards.json', [
+    { 'id' => 'ov1', 'title' => 'Observed KPI', 'chartType' => 'badge_singlevalue', '_size' => '', '_pageOrder' => 0 },
+    { 'id' => 'ov2', 'title' => 'Composed Chart', 'chartType' => 'badge_vert_bar', '_size' => '', '_pageOrder' => 1 },
+  ])
+  w.call('pages.json', [{ 'id' => 'p1', 'title' => 'Observed Page', 'cardIds' => %w[ov1 ov2] }])
+  w.call('layout-observed.json', {
+    'ov1' => { 'x' => 0.0, 'y' => 0.0, 'w' => 0.4, 'h' => 0.15 },
+    'nonexistent-card-id' => { 'x' => 0.0, 'y' => 0.0, 'w' => 1.0, 'h' => 1.0 }, # typo -> must WARN
+  })
+
+  env = { 'DOMO_DISCOVERY_DIR' => dir }
+  out = IO.popen(env, ['ruby', File.join(SCRIPTS, 'build-domo-layout.rb')], err: [:child, :out], &:read)
+  status = $?.success?
+  ok(status, "build-domo-layout.rb exits 0 with a layout-observed.json sidecar present\n#{out unless status}")
+  ok(out.include?('nonexistent-card-id'),
+     "an observed-layout key matching NO card WARNS by name on stderr (captured via the combined subprocess output)")
+
+  dash = JSON.parse(File.read(File.join(dir, 'dashboard-layout.json'))).find { |d| d['dashboard'] == 'Observed Page' }
+  zov1 = dash['zones'].find { |z| z['id'] == 'ov1' }
+  zov2 = dash['zones'].find { |z| z['id'] == 'ov2' }
+  eq([zov1['x_pct'], zov1['y_pct'], zov1['w_pct'], zov1['h_pct']], [0.0, 0.0, 40.0, 15.0],
+     "ov1's zone is placed EXACTLY at its observed fraction * 100, through the real CLI entrypoint")
+  eq(zov1['_source'], 'observed-from-screenshot', "ov1's zone is tagged _source, end to end")
+  ok(zov2['_source'].nil?, 'ov2 (not in the sidecar) falls back to the kind-aware default composition, untagged')
+  ok(zov2['y_pct'] > zov1['y_pct'], 'the composed remainder (ov2) is placed below the observed region, end to end')
 end
 
 puts

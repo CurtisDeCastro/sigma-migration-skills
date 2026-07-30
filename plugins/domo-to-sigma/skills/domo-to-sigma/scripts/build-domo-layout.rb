@@ -340,9 +340,9 @@ HEADER_ROW_UNITS = 1
 # refs/layout-visual-qa.md ("a KPI occupies the same footprint as a full
 # chart"; "huge vertical whitespace").
 CONTROL_ROW_HEIGHT_UNITS = 2 # a control strip is short too — same order as a KPI row
-KPI_ROW_HEIGHT_UNITS   = 2 # a KPI needs far less height than a chart (WHAT TO BUILD #1)
-CHART_ROW_HEIGHT_UNITS = 5 # a chart-appropriate height for a paired 12-col tile (#2)
-TABLE_ROW_HEIGHT_UNITS = 8 # tables/pivots need more vertical room than a chart (#3)
+KPI_ROW_HEIGHT_UNITS     = 2 # a KPI needs far less height than a chart (WHAT TO BUILD #1)
+CHART_ROW_HEIGHT_UNITS   = 5 # a chart-appropriate height for a paired 12-col tile (#2)
+TABLE_ROW_HEIGHT_UNITS   = 8 # tables/pivots need more vertical room than a chart (#3)
 
 # A KPI row wraps to a new row past this many members — chosen so the LAST
 # row of a wrap is never a lone straggler for any n (see balanced_chunk_sizes):
@@ -628,7 +628,7 @@ end
 # ALWAYS first (see the file header / this section's own header note). Unlike
 # a KPI row, a SOLE control legitimately spans the full band width — there is
 # no "must never look chart-sized" constraint for a control the way there is
-# for a KPI (KPI_ROW_WIDTHS's half-width floor), so a single control is not
+# for a KPI (kpi_row_widths's half-width floor), so a single control is not
 # clamped to a half share.
 def control_rows_for(cards)
   return [] if cards.empty?

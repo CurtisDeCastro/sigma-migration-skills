@@ -9,6 +9,7 @@
 # KPI-row detection instead of grouping into one GridContainer.
 #   ruby test/test-layout-tag.rb
 require 'stringio'
+require 'tmpdir'
 require_relative '../scripts/lib/layout'
 require_relative '../scripts/build-domo-layout'
 
@@ -429,6 +430,91 @@ ok(z_k1['y_pct'] < z_ch1['y_pct'], 'the KPI row sits ABOVE the chart row')
 eq(z_ch1['y_pct'], z_ch2['y_pct'], 'the 2 charts still pair onto their own single row')
 ok(z_ch1['y_pct'] < z_tb1['y_pct'], 'the chart row sits ABOVE the table row (house-style band order: ' \
                                     'control -> KPI -> chart -> table, confirmed end to end)')
+
+# ===========================================================================
+# Spec refinement #2 (post-brief coordinator note): a NEW, higher-priority
+# geometry source — discovery/layout-observed.json, an OPERATOR-authored
+# sidecar (a human/agent reading a real page screenshot; this file NEVER
+# writes it, only reads it — same as dataset-map.json). Schema: flat, keyed
+# by card id (string), { x, y, w, h } as FRACTIONS of the page (0.0..1.0),
+# optional 'section'. See build_dashboard_with_observed's own header comment
+# for the full rationale.
+# ===========================================================================
+puts "== load_observed_layout: reads the sidecar; malformed/partial entries are skipped, never raise =="
+Dir.mktmpdir('domo-observed-load') do |dir|
+  File.write(File.join(dir, 'layout-observed.json'), JSON.generate(
+    '111' => { 'x' => 0.0, 'y' => 0.0, 'w' => 0.5, 'h' => 0.2 },
+    '222' => { 'x' => 0.5, 'y' => 0.0 }, # missing w/h -> skipped, not a crash
+    '333' => 'not a hash', # wrong shape -> skipped
+  ))
+  loaded = load_observed_layout(dir)
+  eq(loaded.keys.sort, %w[111], "only the well-formed entry ('111') survives; '222' (missing w/h) and " \
+                                "'333' (wrong shape) are silently dropped, never raise")
+  eq(loaded['111'], { 'x' => 0.0, 'y' => 0.0, 'w' => 0.5, 'h' => 0.2 }, 'the surviving entry round-trips exactly')
+end
+eq(load_observed_layout(Dir.mktmpdir), {}, 'no layout-observed.json at all -> {} (rung 1.5 never fires), no crash')
+
+puts "== build_dashboard_with_observed: observed geometry wins for its cards; unobserved cards fall back " \
+     "to the kind-aware default composition, placed BELOW, never overlapping =="
+obs_cards = [
+  { 'id' => 'o1', 'title' => 'Observed KPI', 'chartType' => 'badge_singlevalue', '_size' => '', '_pageOrder' => 0 },
+  { 'id' => 'o2', 'title' => 'Observed Chart', 'chartType' => 'badge_vert_bar', '_size' => '', '_pageOrder' => 1 },
+  { 'id' => 'o3', 'title' => 'Unobserved Table', 'chartType' => 'badge_table', 'sigmaKindHint' => 'table',
+    '_size' => '', '_pageOrder' => 2 },
+]
+observed_map = {
+  'o1' => { 'x' => 0.0, 'y' => 0.0, 'w' => 0.3, 'h' => 0.1 },
+  'o2' => { 'x' => 0.3, 'y' => 0.0, 'w' => 0.7, 'h' => 0.15 },
+}
+obs_dash = nil
+warned = capture_stderr { obs_dash = build_dashboard_with_observed('Observed Page', obs_cards, observed_map, {}) }
+ok(obs_dash, 'a page with at least one observed card returns a dashboard (never nil)')
+ok(warned.include?('Unobserved Table') && warned.include?('Observed Page'),
+   'the partial-coverage warning NAMES the unobserved card and the page, never silent')
+
+ozones = obs_dash['zones']
+zo1 = ozones.find { |z| z['id'] == 'o1' }
+zo2 = ozones.find { |z| z['id'] == 'o2' }
+zo3 = ozones.find { |z| z['id'] == 'o3' }
+eq([zo1['x_pct'], zo1['y_pct'], zo1['w_pct'], zo1['h_pct']], [0.0, 0.0, 30.0, 10.0],
+   "o1's zone is EXACTLY its observed fraction * 100 (x=0, y=0, w=0.3->30%, h=0.1->10%)")
+eq([zo2['x_pct'], zo2['w_pct']], [30.0, 70.0], "o2's zone is exactly its own observed x/w * 100")
+eq(zo1['_source'], 'observed-from-screenshot', "an observed zone is tagged _source 'observed-from-screenshot'")
+eq(zo2['_source'], 'observed-from-screenshot', 'so is the second observed zone')
+ok(zo3['_source'].nil?, 'the UNOBSERVED card\'s zone (kind-aware composed) carries NO _source tag — ' \
+                        'only genuinely-observed zones are marked as such')
+ok(zo3['y_pct'] > zo1['y_pct'] + zo1['h_pct'] - 0.01 && zo3['y_pct'] > zo2['y_pct'] + zo2['h_pct'] - 0.01,
+   "o3 (unobserved, composed) sits BELOW the entire observed region's bottom edge — never overlapping it")
+eq(zo3['w_pct'], 100.0, 'o3 (a table, no signal) still gets the kind-aware FULL-WIDTH table treatment ' \
+                        'for the composed remainder — build_dashboard_from_collections is reused, not duplicated')
+
+puts "== build_dashboard_with_observed: optional 'section' grouping -> one heading zone per named group =="
+sec_cards = [
+  { 'id' => 's1', 'title' => 'A' }, { 'id' => 's2', 'title' => 'B' }, { 'id' => 's3', 'title' => 'C' },
+]
+sec_map = {
+  's1' => { 'x' => 0.0, 'y' => 0.1, 'w' => 0.5, 'h' => 0.1, 'section' => 'Team Alpha' },
+  's2' => { 'x' => 0.5, 'y' => 0.1, 'w' => 0.5, 'h' => 0.1, 'section' => 'Team Alpha' },
+  's3' => { 'x' => 0.0, 'y' => 0.3, 'w' => 1.0, 'h' => 0.1, 'section' => 'Team Beta' },
+}
+sec_dash = build_dashboard_with_observed('Sectioned Page', sec_cards, sec_map, {})
+hdrs = sec_dash['zones'].select { |z| z['kind'] == 'text' }
+eq(hdrs.map { |h| h['caption'] }, ['Team Alpha', 'Team Beta'], "one heading zone per named 'section', in first-seen order")
+ok(hdrs.all? { |h| h['_source'] == 'observed-from-screenshot' }, 'section heading zones are ALSO tagged _source')
+
+puts "== build_dashboard_with_observed: no observed cards on this page at all -> nil (caller falls through) =="
+eq(build_dashboard_with_observed('No Match', [{ 'id' => 'zzz' }], { 'not-on-this-page' => { 'x' => 0, 'y' => 0, 'w' => 1, 'h' => 1 } }, {}),
+   nil, "an observed map with entries for OTHER pages' cards only -> nil, not a false-positive rung-1.5 hit")
+
+puts "== build_dashboard_for_page: rung 1.5 (observed) wins over rung 2 (collections/kind-aware) when present =="
+mixed_cards = [
+  { 'id' => 'm1', 'title' => 'M1', 'chartType' => 'badge_singlevalue', '_size' => '', '_pageOrder' => 0 },
+]
+plain = build_dashboard_for_page('Plain', mixed_cards)
+obs   = build_dashboard_for_page('Plain', mixed_cards, {}, { 'm1' => { 'x' => 0.1, 'y' => 0.2, 'w' => 0.3, 'h' => 0.4 } })
+ok(plain['zones'].first['_source'].nil?, 'WITHOUT an observed entry, the ordinary (unsourced) composition runs')
+eq(obs['zones'].first['_source'], 'observed-from-screenshot', 'WITH an observed entry, rung 1.5 wins and tags the zone')
+eq([obs['zones'].first['x_pct'], obs['zones'].first['y_pct']], [10.0, 20.0], "rung 1.5's geometry is used verbatim")
 
 puts
 if $failures.zero? then puts "ALL PASS"; exit 0 else puts "#{$failures} FAILURE(S)"; exit 1 end
