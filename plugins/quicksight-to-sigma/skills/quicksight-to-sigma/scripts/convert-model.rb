@@ -398,7 +398,11 @@ if opts[:fixup]
     field_well_measures(analysis).each do |rawcol, agg|
       sig = agg_map[agg] or next
       dn = titleize(rawcol)
-      metric_defs["#{sig}|#{dn}"] ||= { 'name' => "#{sig} of #{dn}", 'formula' => "#{sig}([#{dn}])" }
+      # `metrics[].id` is REQUIRED by the DM spec — omitting it 400s the whole POST with
+      # "pages[0].elements[0].metrics[0].id: Invalid string: undefined". Slug it
+      # deterministically (not SecureRandom) so re-POSTing the same analysis preserves ids.
+      metric_defs["#{sig}|#{dn}"] ||= { 'id' => "m-#{sig}-#{dn}".gsub(/[^A-Za-z0-9_-]+/, '-').downcase,
+                                        'name' => "#{sig} of #{dn}", 'formula' => "#{sig}([#{dn}])" }
     end
     emitted = 0
     unless metric_defs.empty?
@@ -409,7 +413,7 @@ if opts[:fixup]
           next if add.empty?
           existing = (el['metrics'] ||= [])
           have = existing.map { |m| m['name'] }.to_set
-          add.each { |m| (existing << m; have << m['name']; emitted += 1) unless have.include?(m['name']) }
+          add.each { |m| (existing << m.dup; have << m['name']; emitted += 1) unless have.include?(m['name']) }
         end
       end
     end
