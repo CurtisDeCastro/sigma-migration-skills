@@ -213,6 +213,16 @@ check(bad.empty?,
       "element.columns post-ensureCol (offenders: #{bad.uniq.join(', ')})",
       fails)
 
+# 5. The ledger gate 16 probes must carry the derivation, so an INFERRED key is
+#    proven against the warehouse rather than trusted. This is the entire safety
+#    argument for inference.
+src = File.read(File.join(HERE, 'lib', 'join_plan.rb'))
+check(src.include?('derived_via'),
+      'join_plan.rb records derived_via on each entry so gate 16 probes inferred keys', fails)
+check(src.include?('partial'),
+      'join_plan.rb records partial for a mixed-key relationship (a wider join than Tableau\'s)',
+      fails)
+
 puts ''
 if fails.empty?
   puts 'test-relationship-derivation.rb: ALL PASS'
