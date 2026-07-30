@@ -31,7 +31,15 @@ OUT = ENV['DOMO_DISCOVERY_DIR'] || File.expand_path('../discovery', __dir__)
 AGG = { 'SUM' => 'Sum', 'AVG' => 'Avg', 'AVERAGE' => 'Avg', 'COUNT' => 'Count',
         'COUNT DISTINCT' => 'CountDistinct', 'DISTINCT_COUNT' => 'CountDistinct',
         'COUNT_DISTINCT' => 'CountDistinct', 'MIN' => 'Min', 'MAX' => 'Max' }.freeze
-def sigma_agg(a) AGG[a.to_s.upcase] || 'Sum' end
+# Domo has NO distinct-count aggregation — it sends aggregation:'COUNT' plus a
+# separate distinct:true flag. Honour that flag or a CountDistinct silently
+# degrades to Count and the KPI shows a WRONG-but-plausible number (live run:
+# Orders 877 rows vs 872 distinct orders).
+def sigma_agg(a, distinct = false)
+  base = AGG[a.to_s.upcase] || 'Sum'
+  return 'CountDistinct' if distinct && base == 'Count'
+  base
+end
 
 def mref(display) "[Master/#{display}]" end
 
@@ -184,8 +192,23 @@ end
 # more reliable than guessing from `aggregation`/`groupBy` alone. Falls back to
 # the aggregation/groupBy heuristic when no column carries a `mapping` (Tier B,
 # or an extraction pass that hasn't captured it yet).
-DIM_MAPPINGS = %w[ITEM CATEGORY XTIME DATE SERIES].freeze
+DIM_MAPPINGS = %w[ITEM CATEGORY XTIME DATE].freeze
 MEASURE_MAPPINGS = %w[VALUE CURRENT TARGET BUBBLESIZE].freeze
+
+# SERIES is AMBIGUOUS and must be disambiguated by whether the column carries an
+# aggregation — it used to sit in DIM_MAPPINGS unconditionally, which silently
+# produced charts with ZERO measures.
+#
+# LIVE EVIDENCE (2026-07-30):
+#   * badge_line_bar / combo + two-axis cards bind every MEASURE via SERIES
+#     (mapping=SERIES with aggregation=SUM/AVG, date on ITEM+calendar:true) —
+#     verified against 3 real combo cards. Treating those as dimensions yielded
+#     "combo-chart: expected a bar measure + a line measure but found 0" and then
+#     a workbook POST rejection ("Invalid kind: combo-chart").
+#   * badge_vert_stackedbar / badge_vert_multibar bind a SPLIT DIMENSION via
+#     SERIES (a plain string column, NO aggregation).
+# So: SERIES + aggregation => measure; SERIES without => split dimension.
+SERIES_MAPPING = 'SERIES'
 
 def split_cols(card)
   cols = card['columns'] || []
@@ -200,7 +223,10 @@ def split_cols(card)
   # correctly instead of silently losing the untagged columns.
   cols.each do |c|
     m = c['mapping'].to_s.upcase
-    if DIM_MAPPINGS.include?(m)
+    if m == SERIES_MAPPING
+      # Ambiguous by design — see SERIES_MAPPING above.
+      c['aggregation'].to_s.empty? ? dims << c : meas << c
+    elsif DIM_MAPPINGS.include?(m)
       dims << c
     elsif MEASURE_MAPPINGS.include?(m)
       meas << c
@@ -221,12 +247,42 @@ def measure_col(c)
   disp = display_name(c['column'])
   { 'id' => "m-#{c['column'].to_s.downcase.gsub(/\W+/, '-')}",
     'name' => col_label(c),
-    'formula' => "#{sigma_agg(c['aggregation'])}(#{mref(disp)})",
+    'formula' => "#{sigma_agg(c['aggregation'], c['distinct'])}(#{mref(disp)})",
     'format' => sigma_format(c['format'], col_label(c)) }.compact
 end
 
+# Domo dateTimeElement -> Sigma DateTrunc unit.
+DATE_GRAIN_UNIT = {
+  'YEAR' => 'year', 'QUARTER' => 'quarter', 'MONTH' => 'month', 'WEEK' => 'week',
+  'DAY' => 'day', 'DATE' => 'day', 'HOUR' => 'hour', 'MINUTE' => 'minute',
+}.freeze
+
 # A dimension element column: [Master/<disp>].
-def dim_col(c)
+#
+# LIVE-VALIDATED FIX (2026-07-30): when a Domo card applies a date grain, the
+# component's column list contains a SYNTHETIC pseudo-column — `CalendarMonth`,
+# `CalendarWeek`, `CalendarYear`, … flagged `calendar: true` — which does NOT
+# exist in the DataSet. The real column and grain live on the component's
+# `dateGrain`:
+#   columns:   [{"column":"CalendarMonth","calendar":true,"mapping":"ITEM"}, ...]
+#   groupBy:   [{"column":"CalendarMonth","calendar":true}]
+#   dateGrain: {"column":"ORDER_DATE","dateTimeElement":"MONTH"}
+# Emitting the pseudo-column verbatim produced
+#   pages[N].elements[M]: Dependency not found: 'master/calendar month'
+# which fails the ENTIRE workbook POST. Translate it to a Sigma truncation of the
+# real column instead: DateTrunc("month", [Master/Order Date]).
+def dim_col(c, card = nil)
+  grain = card && card['dateGrain']
+  is_cal = c['calendar'] || c['column'].to_s =~ /\ACalendar/i
+  if is_cal && grain.is_a?(Hash) && !grain['column'].to_s.empty?
+    unit = DATE_GRAIN_UNIT[grain['dateTimeElement'].to_s.upcase]
+    if unit
+      disp = display_name(grain['column'])
+      return { 'id' => "d-#{c['column'].to_s.downcase.gsub(/\W+/, '-')}",
+               'name' => col_label(c),
+               'formula' => %(DateTrunc("#{unit}", #{mref(disp)})) }.compact
+    end
+  end
   { 'id' => "d-#{c['column'].to_s.downcase.gsub(/\W+/, '-')}",
     'name' => col_label(c), 'formula' => mref(display_name(c['column'])) }.compact
 end
@@ -256,7 +312,7 @@ def build_kpi(card, overrides)
     'id' => eid(card), 'kind' => 'kpi-chart', 'name' => label,
     'source' => { 'kind' => 'table', 'elementId' => 'master' },
     'columns' => [{ 'id' => vid, 'name' => label,
-                    'formula' => "#{sigma_agg(agg)}(#{mref(disp)})",
+                    'formula' => "#{sigma_agg(agg, sn['distinct'])}(#{mref(disp)})",
                     'format' => sigma_format(sn['format'], label) }.compact],
     'value' => { 'columnId' => vid },   # ⚠ columnId, NOT id (feedback_sigma_kpi_value_columnid)
   }
@@ -265,11 +321,23 @@ end
 def build_axis_chart(card, kind)
   dims, meas = split_cols(card)
   if dims.empty? || meas.empty?
-    warn_card(card, "#{kind}: could not resolve both a dimension and a measure — verify against the card PNG.")
+    # LIVE-VALIDATED FIX (2026-07-30): this used to WARN and then build the
+    # element anyway. Sigma requires `yAxis` on an axis chart, so an element with
+    # no measure is structurally invalid and the API rejects it with the
+    # misleading `Invalid kind: "bar-chart"` — which fails the WHOLE workbook
+    # POST, losing every other element too. The common trigger is a card whose
+    # only measure is an untranslated Beast Mode (see prune_unresolvable_columns!).
+    # Skipping the element keeps the rest of the workbook postable; the caller
+    # .compact's nils and this warning names exactly what was dropped.
+    warn_card(card, "#{kind}: SKIPPED — could not resolve both a dimension and a measure " \
+                    "(dims=#{dims.size}, measures=#{meas.size}). Sigma requires yAxis on an " \
+                    'axis chart, so emitting it would fail the entire workbook POST. Verify ' \
+                    'against the card PNG and re-add by hand.')
+    return nil
   end
   ct = card['chartType'].to_s.downcase
   xcol = dims.first
-  dcols = dims.map { |d| dim_col(d) }
+  dcols = dims.map { |d| dim_col(d, card) }
   mcols = meas.map { |m| measure_col(m) }
   el = {
     'id' => eid(card), 'kind' => kind, 'name' => card['title'],
@@ -319,7 +387,7 @@ def build_pie_or_donut(card, kind)
   dims, meas = split_cols(card)
   warn_card(card, "#{kind}: could not resolve both a dimension (color) and a measure (value) — " \
                   'verify against the card PNG.') if dims.empty? || meas.empty?
-  dcol = dims.first ? dim_col(dims.first) : nil
+  dcol = dims.first ? dim_col(dims.first, card) : nil
   mcol = meas.first ? measure_col(meas.first) : nil
   {
     'id' => eid(card), 'kind' => kind, 'name' => card['title'],
@@ -345,7 +413,7 @@ def build_combo(card)
     warn_card(card, "combo-chart: expected a bar measure + a #{secondary} measure (2 total) but found " \
                     "#{meas.size} — verify the series assignment against the card PNG.")
   end
-  dcols = dims.map { |d| dim_col(d) }
+  dcols = dims.map { |d| dim_col(d, card) }
   mcols = meas.map { |m| measure_col(m) }
   series = mcols.each_with_index.map { |m, i| { 'columnId' => m['id'], 'type' => i.zero? ? 'bar' : secondary } }
   el = {
@@ -394,7 +462,7 @@ def build_map(card)
                     'for a Sigma custom plugin — see refs/card-to-element.md).')
     return build_table(card)
   end
-  gcol = dim_col(geo)
+  gcol = dim_col(geo, card)
   mcol = meas.first ? measure_col(meas.first) : nil
   {
     'id' => eid(card), 'kind' => 'region-map', 'name' => card['title'],
@@ -407,9 +475,9 @@ end
 
 def build_table(card)
   dims, meas = split_cols(card)
-  cols = dims.map { |d| dim_col(d).merge('style' => { 'textWrap' => 'wrap' }) } +   # #5 wrap text cols
+  cols = dims.map { |d| dim_col(d, card).merge('style' => { 'textWrap' => 'wrap' }) } +   # #5 wrap text cols
          meas.map { |m| measure_col(m) }
-  cols = (card['columns'] || []).map { |c| dim_col(c).merge('style' => { 'textWrap' => 'wrap' }) } if cols.empty?
+  cols = (card['columns'] || []).map { |c| dim_col(c, card).merge('style' => { 'textWrap' => 'wrap' }) } if cols.empty?
   el = {
     'id' => eid(card), 'kind' => 'table', 'name' => card['title'],
     'source' => { 'kind' => 'table', 'elementId' => 'master' },
@@ -429,9 +497,9 @@ def build_pivot(card)
   {
     'id' => eid(card), 'kind' => 'pivot-table', 'name' => card['title'],
     'source' => { 'kind' => 'table', 'elementId' => 'master' },
-    'columns' => (dims + meas).map { |c| meas.include?(c) ? measure_col(c) : dim_col(c) },
-    'rowsBy' => dims.first(1).map { |d| dim_col(d)['id'] },
-    'columnsBy' => dims.drop(1).map { |d| dim_col(d)['id'] },   # pivot REQUIRES both (feedback_sigma_pivot_rowsby_columnsby)
+    'columns' => (dims + meas).map { |c| meas.include?(c) ? measure_col(c) : dim_col(c, card) },
+    'rowsBy' => dims.first(1).map { |d| dim_col(d, card)['id'] },
+    'columnsBy' => dims.drop(1).map { |d| dim_col(d, card)['id'] },   # pivot REQUIRES both (feedback_sigma_pivot_rowsby_columnsby)
     'values' => meas.map { |m| measure_col(m)['id'] },
   }
 end
@@ -472,7 +540,94 @@ def build_image(card)
     'url' => "data:image/png;base64,#{Base64.strict_encode64(File.binread(path))}" }
 end
 
-def build_element(card, overrides)
+# Translated Beast Mode ids (those that actually produced a sigmaFormula and so
+# EXIST as DM calc columns). convert-beast-modes.rb --lint deliberately DROPS
+# untranslated formulas rather than shipping bad SQL, so a card bound to one is
+# referencing a column the data model does not have.
+def translated_beast_mode_ids
+  return $translated_bm_ids if defined?($translated_bm_ids) && $translated_bm_ids
+  path = File.join(OUT, 'formulas.json')
+  list = (JSON.parse(File.read(path)) rescue nil)
+  ids = {}
+  Array(list).each do |f|
+    next unless f.is_a?(Hash)
+    ids[f['id'].to_s] = true unless f['sigmaFormula'].to_s.strip.empty?
+  end
+  $translated_bm_ids = ids
+end
+
+# Drop columns that CANNOT resolve to a real DM column, loudly.
+#
+# LIVE-VALIDATED FIX (2026-07-30): two ways a column silently became invalid —
+#   1. a Beast-Mode-bound column whose id never resolved to a name emitted
+#        Sum([Master/])            -> Sigma: "Invalid formula"
+#   2. a Beast-Mode-bound column whose formula never TRANSLATED (the common case:
+#      74% of real Beast Modes fail the SQL->Sigma converter, see
+#      refs/live-validation-2026-07-30.md) emitted
+#        Sum([Master/Avg Order Value])  -> Sigma: "dependency not found"
+# Either way Sigma rejects the request and the ENTIRE workbook POST fails — one
+# bad column takes down every other element. Dropping the column (and, if it
+# leaves nothing to plot, the element) keeps the rest of the migration postable
+# while naming exactly what was lost. Never silent: each drop is a warning the
+# Phase-5e gate surfaces.
+def prune_unresolvable_columns!(card)
+  cols = card['columns']
+  return card unless cols.is_a?(Array)
+  ok = []
+  cols.each do |c|
+    if c['column'].to_s.strip.empty?
+      warn_card(card, "dropped a column with no resolvable name (Beast Mode id " \
+                      "#{c['beastModeId'].inspect} did not resolve) — would have emitted " \
+                      'an empty [Master/] reference that Sigma rejects.')
+      next
+    end
+    if c['_isCalc'] && c['beastModeId'] && !translated_beast_mode_ids[c['beastModeId'].to_s]
+      warn_card(card, "dropped column #{c['column'].inspect}: its Beast Mode did not " \
+                      'translate to a Sigma formula, so no such data-model column exists. ' \
+                      'Hand-author the formula (see the Beast Mode section of ' \
+                      'refs/live-validation-2026-07-30.md) and re-run.')
+      next
+    end
+    ok << c
+  end
+  card['columns'] = ok
+  card
+end
+
+# The dataset the single shared `master` element is built from — every element
+# emitted here sources `master`, and build-workbook-spec.rb builds that master
+# from ONE data-model element. Cards bound to any OTHER DataSet would reference
+# columns the master does not have.
+#
+# LIVE-VALIDATED (2026-07-30): a page mixing two DataSets failed the whole
+# workbook POST with
+#   pages[N].elements[M]: Dependency not found: 'master/region'
+# (a customer-dim card on a page whose master is the order fact). Multi-dataset
+# pages are normal in Domo — cards are independently dataset-bound. Properly
+# supporting them means one master per used DataSet (bead ziht); until then,
+# SKIP the off-master cards loudly so the rest of the workbook still posts.
+def dominant_dataset_id(cards)
+  counts = {}
+  Array(cards).each do |c|
+    id = c['datasetId'].to_s
+    next if id.empty?
+    counts[id] = (counts[id] || 0) + 1
+  end
+  return nil if counts.empty?
+  counts.max_by { |_, n| n }.first
+end
+
+def build_element(card, overrides, master_ds = nil)
+  ds = card['datasetId'].to_s
+  if master_ds && !ds.empty? && ds != master_ds
+    warn_card(card, "SKIPPED — card is bound to DataSet #{ds} but this workbook's shared " \
+                    "master is built from #{master_ds}. Multi-dataset pages need one master " \
+                    'per DataSet (not yet supported); emitting it would fail the entire ' \
+                    'workbook POST with "Dependency not found". Rebuild this card by hand ' \
+                    'against its own source.')
+    return nil
+  end
+  card = prune_unresolvable_columns!(card)
   # Rule 0: a summary-number card with no real grouping → KPI, never a table.
   kind = card['sigmaKindHint']
   is_kpi = kind == 'kpi-chart' ||
@@ -562,10 +717,11 @@ if $PROGRAM_NAME == __FILE__
     Array(p['cardIds'] || p['cards']).each { |cid| card_page[cid.to_s] = p['title'] || p['name'] || p['id'] }
   end
   cards.each { |c| by_page[card_page[c['id'].to_s] || 'Overview'] << c }
+  master_ds = dominant_dataset_id(cards)
   by_page.each { |pname, pcards| warn_missing_geometry(pname, pcards) }
 
   out_pages = by_page.map do |pname, pcards|
-    els = pcards.map { |c| build_element(c, overrides) }.compact
+    els = pcards.map { |c| build_element(c, overrides, master_ds) }.compact
     els += build_controls(pcards)
     { 'name' => pname, 'elements' => els }
   end

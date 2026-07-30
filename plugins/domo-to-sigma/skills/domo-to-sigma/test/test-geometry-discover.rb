@@ -140,6 +140,46 @@ merged_f = merge_geometry(cards, layout, stacks: stacks_a)
 eq(merged_f[0]['x'], 0, 'x/y/w/h from page_layout still present')
 eq(merged_f[0]['_size'], 'medium', '_size from stacks also present on the very same card')
 
+# ===========================================================================
+# Bug B (refs/live-validation-2026-07-30.md): "size token join is broken two
+# ways" on a live instance —
+#   1. a TYPE MISMATCH: the live GET /api/content/v3/stacks/{pageId}/cards
+#      response has cards[].id as an INTEGER but sizes[].id as a STRING (a
+#      live probe: "card id types: ['int','int','int'] / size id types:
+#      ['str','str','str']") — 0/15 cards on that run got a merged _size.
+#   2. the size TOKEN ITSELF can be the EMPTY STRING for API-created cards
+#      (live: {"id":"189217601","size":""}), which is the NORMAL "unspecified"
+#      value, not an anomaly.
+# ===========================================================================
+puts "== merge_geometry: card ids INTEGER, stacks['sizes'] ids STRING — the exact live type mismatch joins correctly =="
+stacks_type_mismatch = {
+  'sizes' => [
+    { 'id' => '501', 'size' => 'medium' },
+    { 'id' => '502', 'size' => '' }, # API-created card: "" is normal, not an anomaly
+  ],
+  'collections' => [],
+}
+cards_type_mismatch = [{ 'id' => 501, 'title' => 'Int Card A' }, { 'id' => 502, 'title' => 'Int Card B' }]
+merged_g = merge_geometry(cards_type_mismatch, nil, stacks: stacks_type_mismatch)
+ok(cards_type_mismatch.all? { |c| c['id'].is_a?(Integer) }, 'sanity: card ids really are Integer, matching the live shape')
+ok(stacks_type_mismatch['sizes'].all? { |s| s['id'].is_a?(String) }, "sanity: stacks['sizes'] ids really are String, matching the live shape")
+eq(merged_g[0]['_size'], 'medium', 'Integer card id 501 joins String size id "501"')
+eq(merged_g[1].key?('_size'), true, 'Integer card id 502 STILL gets a _size key even though its token is ""')
+eq(merged_g[1]['_size'], '', 'the merged _size is the empty string itself, not silently dropped as "no size"')
+
+puts '== merge_geometry: stacks fixture (test/fixtures/domo-live-raw/stacks-page.json) — real captured shape, end to end =='
+stacks_fixture = JSON.parse(File.read(File.join(__dir__, 'fixtures', 'domo-live-raw', 'stacks-page.json')))
+fixture_cards = stacks_fixture['cards'].map { |c| { 'id' => c['id'], 'title' => c['title'] } }
+ok(fixture_cards.all? { |c| c['id'].is_a?(Integer) }, 'fixture card ids are Integer (as captured live)')
+ok(stacks_fixture['sizes'].all? { |s| s['id'].is_a?(String) }, 'fixture size ids are String (as captured live)')
+merged_fixture = merge_geometry(fixture_cards, nil, stacks: stacks_fixture)
+by_id = merged_fixture.each_with_object({}) { |c, h| h[c['id']] = c }
+eq(by_id[700000001]['_size'], 'medium', 'fixture card 700000001 (Integer id) joins its String-id size entry')
+eq(by_id[700000003]['_size'], 'large', 'fixture card 700000003 joins its "large" size token')
+eq(by_id[700000005].key?('_size'), true,
+   'fixture card 700000005 (API-created, unsized) STILL gets a _size key for its "" token')
+eq(by_id[700000005]['_size'], '', 'that _size is the empty string, not omitted')
+
 puts
 if $failures.zero?
   puts 'ALL PASS'

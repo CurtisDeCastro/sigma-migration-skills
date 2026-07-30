@@ -63,26 +63,57 @@ def sigma_kind_hint(chart_type)
   nil
 end
 
-# Classify a Beast Mode as aggregate | window | lod | projection — no SQL
-# parsing. `template` may be EITHER an inline formula entry (Bug 4:
-# definition.formulas[] on the card, or a dataset's properties.formulas.
-# formulas map value — keyed isAnalytic/isAggregatable, confirmed live) OR a
-# standalone function-template fetch (keyed analytic/aggregated — the older,
-# pre-live-validation field names). Both are accepted here so callers can pass
-# whichever they have; see classify_beast_mode_for (below) for which one gets
-# preferred. Falls back to a regex heuristic only when neither flag is
-# available (e.g. Tier B, no dev token reaches either source).
+# Function-CALL-shape regexes (Bug C): an identifier immediately followed by
+# an open paren, never a bare substring match. Domo columns are BACKTICK-quoted
+# (MySQL dialect) — `` `SUMMARY` `` — so a column literally named e.g. SUMMARY
+# can never satisfy "SUM" + "(" immediately after; a real function call always
+# has the paren right there (optionally with whitespace: "SUM (x)" is valid
+# SQL). Case-insensitive — Domo's SQL is not case-normalized.
+AGGREGATE_FN_RE = /\b(SUM|COUNT|AVG|MIN|MAX|MEDIAN|STDDEV|STDDEV_POP|STDDEV_SAMP|VARIANCE|
+                      VAR_POP|VAR_SAMP|CEILING|FLOOR|APPROXIMATE_COUNT_DISTINCT)\s*\(/ix
+WINDOW_FN_RE     = /\bOVER\s*\(|\b(RANK|DENSE_RANK|ROW_NUMBER|LAG|LEAD|NTILE|PERCENT_RANK|CUME_DIST)\s*\(/i
+
+def sql_has_aggregate_call?(sql)
+  !!(sql.to_s =~ AGGREGATE_FN_RE)
+end
+
+def sql_has_window_construct?(sql)
+  !!(sql.to_s =~ WINDOW_FN_RE)
+end
+
+# Classify a Beast Mode as aggregate | window | lod | projection. `template`
+# may be EITHER an inline formula entry (Bug 4: definition.formulas[] on the
+# card, or a dataset's properties.formulas.formulas map value — keyed
+# isAnalytic/isAggregatable, confirmed live) OR a standalone function-template
+# fetch (keyed analytic/aggregated — the older, pre-live-validation field
+# names). Both are accepted here so callers can pass whichever they have.
+#
+# BUG C (live-validated 2026-07-30, refs/live-validation-2026-07-30.md):
+# Domo's OWN isAnalytic/isAggregatable flags are NOT trustworthy — all 4 Beast
+# Modes on a live run reported isAggregatable:false, isAnalytic:false (this
+# appears to be a Domo quirk specific to card-local calcs created via the
+# public write API — see the "calculatedFields are referenced by name"
+# section of the live-validation doc) despite formulas like
+#   (CASE WHEN (SUM(`x`) = 0) THEN 0 ELSE (SUM(`y`) / SUM(`x`)) END )
+#   (SUM(`x`) / COUNT(DISTINCT `y`))
+# being plainly aggregates. The OLD code trusted a *present* flag pair
+# absolutely and never looked at the SQL at all once template.is_a?(Hash) was
+# true, so all four were misclassified 'projection' — silently wrong
+# downstream (a calc column instead of a metric/aggregate expression).
+#
+# Fix: ALWAYS scan the SQL for a function-call-shaped aggregate/window
+# construct, and let a positive SQL match override a `false` flag. A flag that
+# says "yes" but the SQL scan can't corroborate is still honored (Domo may
+# recognize constructs — e.g. a bucketed histogram — this regex heuristic
+# can't see). Most-specific class wins: lod > window > aggregate > projection.
 def classify_beast_mode(sql, template = nil)
-  return 'lod'    if sql.to_s =~ /\bFIXED\s*\(/i          # Domo LOD → Sigma LOD
-  if template.is_a?(Hash)
-    return 'window'    if template['isAnalytic'] || template['analytic']
-    return 'aggregate' if template['isAggregatable'] || template['aggregated']
-    return 'projection'
-  end
-  s = sql.to_s
-  return 'window'    if s =~ /\bOVER\s*\(/i
-  # A top-level aggregate wrapping the whole expression → aggregate.
-  return 'aggregate' if s =~ /\A\s*\(?\s*(SUM|COUNT|AVG|MIN|MAX|STDDEV_POP|STDDEV_SAMP|VAR_POP|VAR_SAMP|CEILING|FLOOR|APPROXIMATE_COUNT_DISTINCT)\s*\(/i
+  return 'lod' if sql.to_s =~ /\bFIXED\s*\(/i          # Domo LOD → Sigma LOD
+
+  window_hint    = template.is_a?(Hash) && (template['isAnalytic'] || template['analytic'])
+  aggregate_hint = template.is_a?(Hash) && (template['isAggregatable'] || template['aggregated'])
+
+  return 'window'    if sql_has_window_construct?(sql) || window_hint
+  return 'aggregate' if sql_has_aggregate_call?(sql) || aggregate_hint
   'projection'
 end
 
@@ -92,7 +123,8 @@ end
 # old behavior, still needed for a calc id a card references but that isn't
 # inlined anywhere reachable) when NEITHER flag key is present on `f` at all
 # (checked with key?, not truthiness — both flags legitimately being `false`
-# is itself a real, usable classification: projection).
+# still reaches classify_beast_mode, which (Bug C) cross-checks the SQL rather
+# than taking a `false`/`false` pair as a settled "projection").
 def classify_beast_mode_for(f, template_cache)
   sql = f['formula'] || f['expression']
   if f.key?('isAnalytic') || f.key?('isAggregatable')
@@ -112,17 +144,78 @@ end
 # CURRENT, TARGET, DATE, EVENT). It used to be dropped entirely; surfacing it
 # here is what lets build-workbook.rb bind axes/series instead of guessing
 # column order.
-def norm_columns(component)
+# Resolve the DataSet a card is bound to.
+#
+# LIVE-VALIDATED FIX (2026-07-30): this used to read only `raw['dataSetId']` and
+# `raw.dig('dataProvider','dataSourceId')`. NEITHER of those exists on a live
+# response. The real binding is the `datasources` PART:
+#   "datasources": [{"dataSourceId":"021e123b-…","dataSourceName":"Orders Fact",
+#                    "displayType":"api","providerType":"api", …}]
+# Consequence of getting this wrong was severe and silent: datasetId came back
+# nil for 15/15 cards, and because dataset-level enrichment is keyed on it, the
+# run skipped dataset Beast Modes, C9/PDP detection, AND the column-schema fetch
+# — leaving build-dm.rb with no columns to build from at all.
+#
+# `card_meta` is the enumeration record (from the stacks/adminsummary route),
+# which also carries `datasources` when fetched with parts=datasources — so a
+# card def missing the part can still resolve.
+def resolve_dataset_id(raw, card_meta = nil)
+  sources = []
+  [raw, card_meta].each do |h|
+    next unless h.is_a?(Hash)
+    sources.concat(Array(h['datasources']))
+    sources.concat(Array(h['dataSources']))
+  end
+  from_part = sources.find { |s| s.is_a?(Hash) && (s['dataSourceId'] || s['id']) }
+  (from_part && (from_part['dataSourceId'] || from_part['id'])) ||
+    (raw.is_a?(Hash) && (raw['dataSetId'] || raw['dataSourceId'] ||
+                         raw.dig('dataProvider', 'dataSourceId'))) ||
+    (card_meta.is_a?(Hash) && (card_meta['dataSetId'] || card_meta['dataSourceId']))
+end
+
+def norm_columns(component, formulas: nil)
+  by_id = {}
+  Array(formulas).each { |f| by_id[f['id'].to_s] = f if f.is_a?(Hash) && f['id'] }
+
   Array(component && component['columns']).map do |c|
     raw = c['column'] || c['dataColumn'] || c['field']
+    calc_id = raw.to_s.start_with?(CALC_PREFIX) ? raw : c['formulaId']
+
+    # LIVE-VALIDATED FIX (2026-07-30): a chart-body column bound to a Beast Mode
+    # carries `formulaId` and NO `column` — the same shape norm_summary_number
+    # already handles. Left unresolved, `column` stayed nil and build-workbook
+    # emitted a formula with an empty reference:
+    #   pages[N].elements[M].columns[K].formula: Invalid formula: 'Sum([Master/])'
+    # which Sigma rejects, taking down the ENTIRE workbook POST — one
+    # Beast-Mode-bound axis/series column kills every other element too. Resolve
+    # the id to the Beast Mode's NAME (that is the display name the DM calc
+    # column gets) and flag it so downstream can tell a calc from a warehouse
+    # column and skip it honestly when the formula never translated.
+    if raw.to_s.empty? && calc_id && (f = by_id[calc_id.to_s])
+      raw = f['name']
+    end
+
     {
       'column'      => raw,
       'alias'       => c['alias'],                 # display label override (fixes raw-name bug)
       'aggregation' => c['aggregation'] || c['aggr'],
+      # Domo expresses a DISTINCT count as aggregation:'COUNT' + distinct:true —
+      # there is no COUNT_DISTINCT aggregation in its enum. Dropping this flag
+      # silently turns CountDistinct into Count: live run showed Orders=877
+      # (row count) where Domo showed 872 (distinct orders). A plausible-looking
+      # WRONG number, which is worse than a hard failure.
+      'distinct'    => (c['distinct'] ? true : nil),
       'format'      => c['format'] || c['numberFormat'],
       'order'       => c['order'],
       'mapping'     => c['mapping'],                # visual-role binding (Bug 2)
-      'beastModeId' => (raw.to_s.start_with?(CALC_PREFIX) ? raw : c['formulaId']),
+      # `calendar: true` marks a SYNTHETIC Domo grain pseudo-column
+      # (CalendarMonth/CalendarWeek/...) that does NOT exist in the dataset —
+      # the real column + grain live on the component's dateGrain. Preserve the
+      # flag so build-workbook can emit a Sigma DateTrunc instead of a
+      # reference to a column that isn't there.
+      'calendar'    => (c['calendar'] ? true : nil),
+      'beastModeId' => calc_id,
+      '_isCalc'     => (calc_id ? true : nil),
     }.compact
   end
 end
@@ -192,10 +285,24 @@ def normalize_card(raw, card_id, card_meta: nil)
   if defn.is_a?(Hash) && (defn['subscriptions'] || defn['formulas'])
     # ---- Shape B (internal analyzer definition) ----
     main = defn.dig('subscriptions', 'main') || {}
+    # LIVE-VALIDATED FIX (2026-07-30): none of the old fallbacks resolve against a
+    # live Shape-B response, so EVERY card came back title-less and every migrated
+    # chart was unnamed (KPIs only looked fine because their label comes from the
+    # summary number's `alias`). A null element name then made Sigma reject the
+    # whole workbook POST with a MISLEADING error —
+    #   pages[N].elements[M]: Invalid kind: "bar-chart"
+    # — because the element stopped matching the bar-chart schema and the
+    # validator blames the `kind` discriminator rather than the null field.
+    # Real locations: Shape B keeps the title at definition.title, and the
+    # enumeration record from /stacks carries `title` at its ROOT, not under
+    # metadata.
     title = defn.dig('dynamicTitle', 'text')&.map { |t| t['text'] }&.join ||
-            raw['title'] || raw.dig('metadata', 'title') ||
-            (card_meta.is_a?(Hash) && card_meta.dig('metadata', 'title'))
-    columns = norm_columns(main.empty? ? nil : { 'columns' => main['columns'] })
+            raw['title'] || defn['title'] || raw.dig('metadata', 'title') ||
+            (card_meta.is_a?(Hash) &&
+             (card_meta['title'] || card_meta['cardTitle'] ||
+              card_meta.dig('metadata', 'title')))
+    columns = norm_columns((main.empty? ? nil : { 'columns' => main['columns'] }),
+                           formulas: defn['formulas'])
     filters = Array(main['filters']).map do |f|
       { 'column' => f['column'], 'operator' => f['filterType'] || f['operator'],
         'values' => f['values'] }.compact
@@ -205,7 +312,7 @@ def normalize_card(raw, card_id, card_meta: nil)
       'title'              => title,
       'chartType'          => chart_type,
       'sigmaKindHint'      => sigma_kind_hint(chart_type),
-      'datasetId'          => raw['dataSetId'] || raw.dig('dataProvider', 'dataSourceId'),
+      'datasetId'          => resolve_dataset_id(raw, card_meta),
       'columns'            => columns,
       # Bug 2 (P0): the summary number lives at subscriptions.big_number on a
       # live instance — NOT defn['summaryNumber'] or main['summaryNumber']
@@ -213,8 +320,12 @@ def normalize_card(raw, card_id, card_meta: nil)
       # cards and Rule 0 (summary number -> kpi-chart) never fired. Old paths
       # kept as a fallback for compatibility / other Domo versions.
       'summaryNumber'      => norm_summary_number(
-        defn.dig('subscriptions', 'big_number') || defn['summaryNumber'] || main['summaryNumber']
+        defn.dig('subscriptions', 'big_number') || defn['summaryNumber'] || main['summaryNumber'],
+        formulas: defn['formulas'], card_id: card_id
       ),
+      # The real date column + grain behind any `calendar: true` pseudo-column.
+      'dateGrain'          => main['dateGrain'],
+      'dateRangeFilter'    => main['dateRangeFilter'],
       'groupBy'            => Array(main['groupBy']).map { |c| c['column'] }.compact,
       'orderBy'            => Array(main['orderBy']).map { |c| c['column'] }.compact,
       'filters'            => filters,
@@ -232,12 +343,19 @@ def normalize_card(raw, card_id, card_meta: nil)
     end
     {
       'id'                 => card_id,
-      'title'              => raw['title'] || raw.dig('metadata', 'title'),
+      # Same title-resolution fix as Shape B above — also consult the /stacks
+      # enumeration record, whose `title` sits at the root.
+      'title'              => raw['title'] || raw.dig('metadata', 'title') ||
+                              (card_meta.is_a?(Hash) &&
+                               (card_meta['title'] || card_meta['cardTitle'] ||
+                                card_meta.dig('metadata', 'title'))) || nil,
       'chartType'          => chart_type,
       'sigmaKindHint'      => sigma_kind_hint(chart_type),
-      'datasetId'          => raw['dataSetId'],
-      'columns'            => norm_columns(body),
-      'summaryNumber'      => norm_summary_number(raw['summaryNumber']),
+      'datasetId'          => resolve_dataset_id(raw, card_meta),
+      'columns'            => norm_columns(body, formulas: raw['calculatedFields']),
+      'summaryNumber'      => norm_summary_number(raw['summaryNumber'], formulas: raw['calculatedFields'], card_id: card_id),
+      'dateGrain'          => body['dateGrain'],
+      'dateRangeFilter'    => body['dateRangeFilter'],
       'groupBy'            => norm_columns('columns' => body['groupBy']).map { |c| c['column'] },
       'orderBy'            => norm_columns('columns' => body['orderBy']).map { |c| c['column'] },
       'filters'            => filters,
@@ -258,20 +376,66 @@ end
 # with {column, aggregation, alias, format}. A Domo TABLE card's summary number
 # DEFAULTS to COUNT of the bound (often id/first) column — so a faithful read can
 # emit Count([id]). We flag that so build-workbook.rb prefers the authored measure.
-def norm_summary_number(sn)
+#
+# BUG A (live-validated 2026-07-30, refs/live-validation-2026-07-30.md): when the
+# summary number's MEASURE IS A BEAST MODE, live Domo binds that columns[] entry
+# by `formulaId` and supplies NEITHER `column` NOR `aggregation` — the aggregation
+# is baked into the Beast Mode's own SQL (e.g. "(CASE WHEN (SUM(`x`) = 0) THEN 0
+# ELSE (SUM(`y`) / SUM(`x`)) END )"). Before this fix, `col['column'] ||
+# col['dataColumn'] || col['field']` had nothing to read there, so both `column`
+# and `aggregation` silently came back nil — a Sigma KPI with NO bound measure at
+# all, and no warning that anything was wrong. Observed on a live 15-card run: 3
+# of 15 cards had summaryNumber.column == nil / aggregation == nil, and every one
+# of those three was a Beast Mode summary number.
+#
+# `formulas` is this card's OWN definition.formulas[] (Shape B) / calculatedFields[]
+# (Shape A) — the caller passes it in so this stays a pure function (no HTTP, no
+# global card registry). Resolution is strictly by `id` match (never by name —
+# Beast Mode names are not guaranteed unique on a page).
+def norm_summary_number(sn, formulas: [], card_id: nil)
   return nil unless sn.is_a?(Hash)
   col = sn['columns'].is_a?(Array) ? sn['columns'].first : sn
   return nil unless col.is_a?(Hash)
-  agg = col['aggregation'] || col['aggr'] || col['func']
+  agg    = col['aggregation'] || col['aggr'] || col['func']
+  column = col['column'] || col['dataColumn'] || col['field']
+  formula_id = col['formulaId']
+  is_calc = false
+
+  if column.nil? && formula_id
+    match = Array(formulas).find { |f| f.is_a?(Hash) && f['id'] == formula_id }
+    if match
+      # The Beast Mode's NAME becomes the measure. Do NOT invent an
+      # `aggregation` on top of it: the SQL already aggregates, so wrapping it
+      # in another Agg(...) in the build step would double-aggregate and
+      # silently produce a wrong number. `_isCalc` tells build-workbook.rb this
+      # is a calc/formula reference, not a raw warehouse column.
+      column  = match['name']
+      is_calc = true
+    else
+      # Never silently produce a nil measure: name the card so this is
+      # discoverable, and fall back to the raw formulaId as the "column" so
+      # downstream at least has a non-nil, traceable value instead of an
+      # inexplicably empty KPI.
+      warn "  WARNING: card #{card_id.inspect}: summary number references " \
+           "formulaId #{formula_id.inspect} but no matching entry was found " \
+           "in this card's own formulas[] — summary number measure NOT resolved."
+      column = formula_id
+    end
+  end
+
   {
-    'column'             => col['column'] || col['dataColumn'] || col['field'],
-    'aggregation'        => agg,
-    'label'              => col['alias'] || col['label'] || col['title'],
-    'format'             => col['format'] || col['numberFormat'],
+    'column'               => column,
+    'aggregation'          => agg,
+    # See norm_columns: Domo encodes a distinct count as COUNT + distinct:true.
+    'distinct'             => (col['distinct'] ? true : nil),
+    'label'                => col['alias'] || col['label'] || col['title'],
+    'format'               => col['format'] || col['numberFormat'],
+    'beastModeId'          => (is_calc ? formula_id : nil),
+    '_isCalc'              => (is_calc || nil),
     # Domo's default for a table card is COUNT — scrutinize in the build step so a
     # KPI shows the intended measure, not a distinct/row count of the row key.
     '_defaultCountSuspect' => (agg.to_s.upcase == 'COUNT'),
-    '_raw'               => sn,
+    '_raw'                 => sn,
   }.compact
 end
 
@@ -436,6 +600,32 @@ def merge_dataset_permissions(datasets, permission_cache)
   [merged, out]
 end
 
+# Merge real column schemas onto datasets.json.
+#
+# LIVE-VALIDATED FIX (2026-07-30): the PUBLIC LIST endpoint (GET /v1/datasets),
+# which is what populates datasets.json, does NOT return a schema — its
+# `columns` field is an Integer COUNT:
+#   {"id":"...","name":"Orders Fact","rows":877,"columns":29}
+# Only the per-dataset DETAIL endpoint (GET /v1/datasets/{id}) carries
+#   schema.columns[] = [{"name":"ORDER_ID","type":"STRING"}, ...]
+# (types seen live: STRING, LONG, DECIMAL, DOUBLE, DATE, DATETIME).
+# Without this enrichment build-dm.rb had nothing to build columns FROM — it
+# crashed on `29.each`, and a naive guard would instead have posted a data model
+# with zero columns. Same shape as merge_dataset_permissions so both merges
+# compose over one datasets.json.
+def merge_dataset_schemas(datasets, schema_cache)
+  return [0, Array(datasets)] if schema_cache.nil? || schema_cache.empty?
+  merged = 0
+  out = Array(datasets).map do |d|
+    next d unless d.is_a?(Hash)
+    sch = schema_cache[d['id']]
+    next d unless sch.is_a?(Hash) && sch['columns'].is_a?(Array)
+    merged += 1
+    d.merge('schema' => sch)
+  end
+  [merged, out]
+end
+
 # ---------------------------------------------------------------------------
 
 opts = {}
@@ -460,12 +650,29 @@ if opts[:probe]
     warn "  Card defs, Beast Modes, and layout will NOT be auto-extractable."
     warn "  Fall back to PNG-read per card (see feedback_phase1d_dashboard_png)."
   else
+    # Private-API reachability check.
+    #
+    # LIVE-VALIDATED FIX (2026-07-30): this used to probe
+    #   /api/content/v1/cards?urns=PROBE
+    # with the literal string "PROBE" as a card id and treat ANY exception as
+    # "unreachable". A live instance rejects that fake id with **400 Bad
+    # Request** — the token was fine, the id was not — so a fully working Tier A
+    # instance was misdetected as Tier B and the run silently threw away card
+    # defs, Beast Modes, and layout. Probe an **id-free** endpoint instead, and
+    # only treat an AUTH failure (401/403) as Tier B; a 4xx that isn't auth means
+    # the credential was accepted, i.e. the surface is reachable.
     private_ok = begin
-      # A cheap private-API reachability check.
-      Domo.private_get('/api/content/v1/cards', query: { urns: 'PROBE', parts: 'metadata' })
+      Domo.private_get('/api/content/v2/users/me')
       true
     rescue => e
-      warn "PRIVATE API: FAIL — #{e.message}"; false
+      if e.message =~ /\b(401|403)\b/
+        warn "PRIVATE API: FAIL (auth) — #{e.message}"
+        false
+      else
+        # Reachable: the token was accepted, the request shape was the problem.
+        warn "PRIVATE API: reachable (non-auth error on probe: #{e.message[0, 120]})"
+        true
+      end
     end
     warn(private_ok ? "PRIVATE API: OK => TIER A (full fidelity)" : "PRIVATE API: unreachable => TIER B")
   end
@@ -507,6 +714,7 @@ if opts[:pages]
   beast_out = []
   ds_formula_cache    = {}   # datasetId → formulas map
   ds_permission_cache = {}   # datasetId → raw `permission` value (C9 PDP wiring)
+  ds_schema_cache     = {}   # datasetId → PUBLIC detail `schema` (columns[]) — build-dm needs this
   template_cache      = {}   # templateId → standalone Beast Mode (for classification)
 
   opts[:pages].each do |pid|
@@ -545,6 +753,14 @@ if opts[:pages]
           det = (Domo.dataset_formulas(dsid) rescue nil)
           ds_formula_cache[dsid] = det&.dig('properties', 'formulas', 'formulas') || {}
           ds_permission_cache[dsid] = det['permission'] if det.is_a?(Hash) && det['permission']
+
+          # The PRIVATE detail above does NOT carry the documented column schema,
+          # and the PUBLIC LIST endpoint only reports a column COUNT — so fetch
+          # the PUBLIC per-dataset detail once per USED dataset to get
+          # schema.columns[]. build-dm.rb hard-fails without it rather than
+          # posting a column-less data model (see merge_dataset_schemas).
+          pub = (Domo.dataset(dsid) rescue nil)
+          ds_schema_cache[dsid] = pub['schema'] if pub.is_a?(Hash) && pub['schema'].is_a?(Hash)
         end
 
         card['beastModes'] = dig_beast_modes(card, ds_formula_cache[dsid], template_cache)
@@ -573,19 +789,39 @@ if opts[:pages]
   # C9/PDP: merge captured `permission` data onto datasets.json (this run's
   # in-memory list if --datasets ran too, else re-read the file from a prior
   # --datasets run) so DomoSigma.detect_pdp can see it in build-dm.rb.
-  if ds_permission_cache.any?
+  # Both merges compose over ONE datasets.json, so do them together and dump once.
+  # `schema` is not optional: build-dm.rb hard-fails without it (the PUBLIC LIST
+  # endpoint only gives a column COUNT — see merge_dataset_schemas).
+  if ds_permission_cache.any? || ds_schema_cache.any?
     ds_path  = File.join(OUT, 'datasets.json')
     existing = datasets_snapshot || (JSON.parse(File.read(ds_path)) rescue nil)
-    if existing.is_a?(Array)
-      merged, datasets = merge_dataset_permissions(existing, ds_permission_cache)
-      if merged > 0
-        dump('datasets.json', datasets)
-        warn "  C9/PDP: merged permission data into #{merged} datasets.json record(s) (see DomoSigma.detect_pdp)."
+
+    # `--pages` without a prior `--datasets` leaves no merge target. Rather than
+    # emit an un-buildable discovery set, synthesize minimal records for exactly
+    # the datasets this page set actually uses.
+    unless existing.is_a?(Array)
+      ids = (ds_schema_cache.keys + ds_permission_cache.keys).uniq
+      if ids.any?
+        existing = ids.map { |i| { 'id' => i } }
+        warn "  datasets.json absent — synthesized #{existing.size} record(s) for the " \
+             'dataset(s) used by these pages so the schema/permission merge has a target.'
       end
+    end
+
+    if existing.is_a?(Array)
+      sch_merged, datasets = merge_dataset_schemas(existing, ds_schema_cache)
+      perm_merged, datasets = merge_dataset_permissions(datasets, ds_permission_cache)
+      dump('datasets.json', datasets)
+      warn "  schema: merged column schemas into #{sch_merged} datasets.json record(s) " \
+           '(build-dm.rb requires these).' if sch_merged > 0
+      warn "  C9/PDP: merged permission data into #{perm_merged} datasets.json record(s) " \
+           '(see DomoSigma.detect_pdp).' if perm_merged > 0
+      missing = datasets.select { |d| d.is_a?(Hash) && !d.dig('schema', 'columns').is_a?(Array) }
+      warn "  ⚠ #{missing.size} dataset(s) still have NO schema.columns — build-dm.rb will " \
+           "refuse to build them: #{missing.map { |d| d['id'] }.join(', ')}" if missing.any?
     else
-      warn "  C9/PDP: fetched permission data for #{ds_permission_cache.size} dataset(s) but " \
-           'discovery/datasets.json is missing/unparseable — run --datasets (before or with ' \
-           '--pages) so the merge has a target.'
+      warn "  ⚠ fetched schema/permission data but discovery/datasets.json is missing and " \
+           'no dataset ids were captured — run --datasets (before or with --pages).'
     end
   end
 

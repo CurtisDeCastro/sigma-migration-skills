@@ -28,7 +28,15 @@ el = build_element(ds, map, proj)
 eq(el['kind'], 'table', 'element kind table')
 eq(el['source'], { 'connectionId' => 'conn-1', 'kind' => 'warehouse-table', 'path' => %w[DB SCH ORDERS] }, 'warehouse-table source path')
 eq(el['columns'][0]['formula'], '[ORDERS/Project Id]', 'base column formula uses table-prefixed display name')
-eq(el['columns'][2]['format'], { 'type' => 'date' }, 'date column format hint')
+# A Sigma column `format` keys on **kind**, never `type`, and there is no `date`
+# kind — `datetime` + formatString covers it. This assertion previously encoded
+# the bug ({'type' => 'date'}), which Sigma rejects outright:
+#   POST /v2/dataModels/spec ->
+#   "pages[0].elements[0].columns[8].format: Missing \"kind\" field"
+# so ANY source DATE column failed the whole data-model POST (live-validated
+# 2026-07-30; see refs/live-validation-2026-07-30.md).
+eq(el['columns'][2]['format'], { 'kind' => 'datetime', 'formatString' => '%Y-%m-%d' },
+   'date column format uses kind:datetime (never type:date — Sigma rejects that)')
 calc = el['columns'].find { |c| c['name'] == 'Full Region' }
 eq(!calc.nil?, true, 'projection Beast Mode added as DM calc column')
 eq(calc['formula'], 'Concat([City], ", ", [State])', 'calc column carries translated sigmaFormula')

@@ -87,6 +87,27 @@ warned = capture_stderr { eq(normalize_size_token('huge'), 'medium', "unrecogniz
 ok(warned.include?('huge') && warned.include?('medium'),
    'an UNRECOGNIZED size token WARNS (never a silent guess) and names the bad token')
 
+# ===========================================================================
+# Bug B (refs/live-validation-2026-07-30.md), part 2: for cards created via
+# Domo's public write API, live sizes[] carries the EMPTY STRING as the token
+# (e.g. {"id":"189217601","size":""}) — NOT "medium". "" is the NORMAL,
+# expected "unspecified" value, not a genuine anomaly, so it must degrade to
+# the documented default WITHOUT spamming a warning per card — unlike a truly
+# unrecognized non-empty token (asserted above), which still deserves one.
+# ===========================================================================
+puts "== normalize_size_token: the EMPTY STRING (API-created cards) degrades to 'medium' SILENTLY, like nil =="
+eq(normalize_size_token(''), 'medium', 'an empty-string token (the live API-created-card shape) defaults to medium')
+ok(capture_stderr { normalize_size_token('') }.strip.empty?,
+   '"" does NOT warn — it is the normal, expected value for an API-created card, not an unrecognized token')
+eq(normalize_size_token('   '), 'medium', 'a blank (whitespace-only) token also defaults to medium')
+ok(capture_stderr { normalize_size_token('   ') }.strip.empty?, 'a blank (whitespace-only) token does not warn either')
+
+puts "== card_width_units: an empty-string '_size' (API-created card) still resolves a usable width, no crash =="
+eq(card_width_units({ '_size' => '' }), 3.0,
+   "an empty '_size' token resolves via normalize_size_token's default ('medium' -> 3 of 6), not a KeyError")
+eq(card_width_units({ '_size' => '', 'preferredFullWidth' => 4 }), 4.0,
+   'preferredFullWidth STILL wins over an empty _size token, exactly as it does over a real token')
+
 puts "== card_width_units: preferredFullWidth overrides the size-token lookup =="
 # '_size' is DomoSigma.merge_geometry's field name (Bug 5) for the raw
 # stacks['sizes'] token.

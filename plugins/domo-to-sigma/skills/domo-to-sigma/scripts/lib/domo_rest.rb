@@ -282,9 +282,16 @@ module Domo
   # Body params (all optional): width, height, scale, queryOverrides, filters.
   # Returns binary image/PDF bytes, or nil on Tier B.
   #
-  # TODO(on-access): confirm the response form. Community sources report a
-  # JSON body carrying base64 under an "image"/"imageData" field; some instances
-  # return raw image bytes. We handle BOTH; verify the field name on first run.
+  # CONFIRMED live (refs/live-validation-2026-07-30.md, "Render endpoint: charts
+  # vs tables"): `parts` and the payload shape are BOTH card-kind-dependent, not
+  # just a format toggle. `parts=image` is the chart/KPI path — 200, base64 PNG
+  # under `image.data` (see decode_render). `parts=image` 400s outright on a
+  # TABLE card (`badge_table`); tables need `parts=imagePDF` — same query param
+  # this method already sends for format: :pdf — whose payload is NOT under
+  # `image.data` either: it arrives HTML-wrapped base64 under `html` (BUG 3;
+  # decode_render's third branch strips the tag and decodes it). Callers
+  # (domo-capture-visuals.rb) must pick `format: :pdf` for a table card — this
+  # method itself has no card-kind knowledge to do that automatically.
   def render_card(card_id, format: :png, width: 1000, height: 700, scale: 2,
                   query_overrides: nil, filters: nil)
     part = (format.to_sym == :pdf) ? 'imagePDF' : 'image'
@@ -330,6 +337,18 @@ module Domo
         b64 = json.dig('image', 'data') || json['imageData'] || json['data'] ||
               (json['image'].is_a?(String) ? json['image'] : nil)
         return Base64.decode64(b64) if b64.is_a?(String) && !b64.empty?
+
+        # THIRD payload shape (live-validated 2026-07-30): a TABLE card rendered
+        # with parts=imagePDF returns its payload under `html`, NOT image.data —
+        # an HTML-wrapped base64 PDF:
+        #   {"html": "<div class=\"kpi_chart\">JVBERi0xLjQ...</div>", ...}
+        # Strip the tags, then base64-decode to a %PDF-1.4 document. Without this
+        # branch a table card's visual silently captures as zero bytes.
+        # See refs/live-validation-2026-07-30.md "charts vs tables".
+        if json['html'].is_a?(String) && !json['html'].empty?
+          inner = json['html'].gsub(/<[^>]+>/, '').strip
+          return Base64.decode64(inner) if inner.match?(%r{\A[A-Za-z0-9+/=\s]+\z}) && inner.length > 100
+        end
       end
     end
     # Fall back: treat the whole body as a base64 string (some instances do this).

@@ -7,7 +7,8 @@
     { "id": "700000001", "size": "medium" },
     { "id": "700000002", "size": "medium" },
     { "id": "700000003", "size": "large" },
-    { "id": "700000004", "size": "medium" }
+    { "id": "700000004", "size": "medium" },
+    { "id": "700000005", "size": "" }
   ],
   "cards": [
     {
@@ -88,6 +89,18 @@
       "metadata": { "chartType": "badge_vert_bar" },
       "datasources": [
         { "dataSourceId": "aaaaaaaa-0000-0000-0000-000000000004", "dataSourceName": "Sample Source D" }
+      ]
+    },
+    {
+      "id": 700000005,
+      "urn": "700000005",
+      "type": "kpi",
+      "title": "Metric Epsilon (API-created, unsized)",
+      "active": true,
+      "locked": false,
+      "metadata": { "chartType": "badge_singlevalue" },
+      "datasources": [
+        { "dataSourceId": "aaaaaaaa-0000-0000-0000-000000000005", "dataSourceName": "Sample Source E" }
       ]
     }
   ],

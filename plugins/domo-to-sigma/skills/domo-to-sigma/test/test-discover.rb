@@ -12,11 +12,23 @@ ARGV.clear                       # ensure domo-discover.rb's main flow is a no-o
 require_relative '../scripts/domo-discover'
 require_relative '../scripts/lib/domo_sigma_util'
 require 'base64'
+require 'stringio'
 include DomoSigma
 
 FIXTURE_DIR = File.join(__dir__, 'fixtures', 'domo-live-raw')
 def load_fixture(name)
   JSON.parse(File.read(File.join(FIXTURE_DIR, name)))
+end
+
+# Kernel#warn writes to $stderr — swap it for a StringIO so a "warn loudly,
+# never silently" assertion is an actual check, not an eyeballed log line.
+def capture_stderr
+  old = $stderr
+  $stderr = StringIO.new
+  yield
+  $stderr.string
+ensure
+  $stderr = old
 end
 
 # Minimal stub harness for the Domo REST wrapper: temporarily override a
@@ -41,6 +53,9 @@ def eq(actual, expected, msg)
     $failures += 1
     puts "  FAIL: #{msg}\n        expected #{expected.inspect}\n        got      #{actual.inspect}"
   end
+end
+def ok(cond, msg)
+  eq(!!cond, true, msg)
 end
 
 puts "== sigma_kind_hint =="
@@ -189,6 +204,7 @@ stacks_fixture = load_fixture('stacks-page.json')
 admin_fixture  = load_fixture('cards-adminsummary.json')
 public_fixture = load_fixture('cards-public.json')
 v3_fixture     = load_fixture('card-definition-v3.json')
+v3_beastmode_kpi_fixture = load_fixture('card-definition-v3-beastmode-kpi.json')
 orig_dev_token_env = ENV['DOMO_DEV_TOKEN']
 
 puts "== Bug 1: enumerate_page_cards — route 1 (stacks) used when it returns cards =="
@@ -314,6 +330,98 @@ with_domo_stub(:beast_mode_template, ->(*_a) { template_calls2 += 1; { 'analytic
   eq(template_calls2, 1, 'the standalone template endpoint IS called when inline flags are absent (fallback preserved)')
   ENV['DOMO_DEV_TOKEN'] = orig_dev_token_env
 end
+
+# ===========================================================================
+# Bug A (refs/live-validation-2026-07-30.md): a KPI whose measure is a Beast
+# Mode extracted with NO value. Live Domo binds the summary number's measure
+# by `formulaId` (with NO `column`/`aggregation` on that columns[] entry) when
+# the measure is a Beast Mode — resolve it against the card's own
+# definition.formulas[] and surface the Beast Mode's name, never inventing an
+# aggregation the SQL already applies.
+# ===========================================================================
+puts "== Bug A: norm_summary_number — Beast Mode summary number resolved via formulaId =="
+beastmode_card = normalize_card(v3_beastmode_kpi_fixture, '700000010')
+sn_bm = beastmode_card['summaryNumber']
+eq(sn_bm && sn_bm['column'], 'Metric Ratio Pct',
+   "formulaId resolved against this card's OWN definition.formulas[] -> the Beast Mode's name becomes the measure " \
+   '(nil under old code, which only ever read column/dataColumn/field)')
+eq(sn_bm && sn_bm.key?('aggregation'), false,
+   'NO aggregation is invented for a Beast Mode measure — the SQL already aggregates; wrapping it in another ' \
+   'Agg(...) downstream would silently double-aggregate')
+eq(sn_bm && sn_bm['_isCalc'], true, '_isCalc marks this as a calc/formula reference, not a raw warehouse column')
+eq(sn_bm && sn_bm['beastModeId'], 'calculation_44444444-aaaa-bbbb-cccc-444444444444',
+   'beastModeId carries the formulaId so the build step can join it against dig_beast_modes\' output')
+eq(sn_bm && sn_bm['label'], 'Metric Ratio Pct', 'label still comes from the columns[] entry\'s own alias')
+eq(sn_bm && sn_bm['_defaultCountSuspect'], false,
+   '_defaultCountSuspect still correctly false for a Beast Mode measure (no aggregation to misread as COUNT)')
+
+puts "== Bug A: norm_summary_number — plain-column COUNT case is UNCHANGED (no regression) =="
+sn_count = norm_summary_number({ 'columns' => [{ 'column' => 'project_id', 'aggregation' => 'COUNT' }] })
+eq(sn_count['_defaultCountSuspect'], true, '_defaultCountSuspect keeps working for the plain-column COUNT case')
+eq(sn_count.key?('_isCalc'), false, 'a plain column is never marked _isCalc')
+
+puts "== Bug A: norm_summary_number — an UNRESOLVED formulaId warns loudly and never leaves a nil measure =="
+sn_unresolved = nil
+unresolved_warning = capture_stderr do
+  sn_unresolved = norm_summary_number(
+    { 'columns' => [{ 'formulaId' => 'calculation_does_not_exist', 'alias' => 'Mystery KPI' }] },
+    formulas: [{ 'id' => 'calculation_other', 'name' => 'Other Calc', 'formula' => 'SUM(`x`)' }],
+    card_id: 'card-mystery'
+  )
+end
+eq(sn_unresolved['column'], 'calculation_does_not_exist',
+   'an unresolved formulaId falls back to the raw formulaId — never a silent nil measure')
+eq(sn_unresolved.key?('_isCalc'), false, 'an unresolved formulaId is NOT marked _isCalc — we could not confirm it IS one')
+ok(unresolved_warning.include?('card-mystery') && unresolved_warning.include?('calculation_does_not_exist'),
+   'the warning names BOTH the card and the unresolved formulaId')
+
+# ===========================================================================
+# Bug C (refs/live-validation-2026-07-30.md): Beast Mode classification trusts
+# unreliable Domo flags. Live evidence: 4/4 Beast Modes on a run reported
+# isAggregatable:false, isAnalytic:false despite plainly-aggregate SQL, and
+# the OLD classify_beast_mode short-circuited on `template.is_a?(Hash)` and
+# never looked at the SQL at all once a flag pair was present. Fix: always
+# scan the SQL; let a positive scan override a `false` flag.
+# ===========================================================================
+puts "== Bug C: classify_beast_mode — SQL cross-check overrides an unreliable FALSE/FALSE flag pair =="
+false_flag_ratio_sql = '(CASE WHEN (SUM(`metric_denominator`) = 0) THEN 0 ELSE ' \
+                        '(SUM(`metric_numerator`) / SUM(`metric_denominator`)) END )'
+eq(classify_beast_mode(false_flag_ratio_sql, { 'isAnalytic' => false, 'isAggregatable' => false }), 'aggregate',
+   'a CASE-wrapped ratio-of-SUMs is classified aggregate even though BOTH flags say false — the exact live ' \
+   'misclassification (old code returned "projection" here)')
+
+count_distinct_sql = '(SUM(`metric_numerator`) / COUNT(DISTINCT `metric_denominator`))'
+eq(classify_beast_mode(count_distinct_sql, { 'isAnalytic' => false, 'isAggregatable' => false }), 'aggregate',
+   'SUM(...) / COUNT(DISTINCT ...) with false/false flags is still classified aggregate')
+
+window_false_flag_sql = 'ROW_NUMBER() OVER (ORDER BY `date_col`)'
+eq(classify_beast_mode(window_false_flag_sql, { 'isAnalytic' => false, 'isAggregatable' => false }), 'window',
+   'a ROW_NUMBER()/OVER construct is classified window even though isAnalytic says false')
+
+mixed_flags_sql = 'RANK() OVER (ORDER BY `metric_numerator`)'
+eq(classify_beast_mode(mixed_flags_sql, { 'isAnalytic' => false, 'isAggregatable' => true }), 'window',
+   'a window construct wins over an aggregate hint/flag — most-specific-class-wins ordering (window > aggregate)')
+
+puts "== Bug C: false-positive guard — a bare column that merely CONTAINS an aggregate name must not misfire =="
+eq(sql_has_aggregate_call?('`SUMMARY_COLUMN` + 1'), false,
+   'SUMMARY_COLUMN does not match SUM — only a function-CALL shape (name immediately followed by "(") counts')
+eq(sql_has_aggregate_call?('SUM(`x`)'), true, 'a genuine SUM( call still matches')
+eq(classify_beast_mode('`SUMMARY_COLUMN` + 1'), 'projection',
+   'end-to-end: a column named SUMMARY_COLUMN is classified projection, never aggregate')
+
+puts "== Bug C: dig_beast_modes end-to-end — a card-local Beast Mode with false/false flags is classified " \
+     'aggregate, not projection =='
+card_falseflag = {
+  'id' => 'c-falseflag',
+  'cardFormulas' => [
+    { 'id' => 'calculation_margin', 'name' => 'Margin Pct', 'formula' => false_flag_ratio_sql,
+      'isAnalytic' => false, 'isAggregatable' => false },
+  ],
+}
+bms_falseflag = dig_beast_modes(card_falseflag, {}, {})
+eq(bms_falseflag.first['class'], 'aggregate',
+   'end-to-end through dig_beast_modes: isAnalytic:false/isAggregatable:false but aggregate SQL is classified ' \
+   'aggregate, not projection — the exact live misclassification this bug describes')
 
 puts "== bonus: Domo.decode_render — image.data as a nested Hash (confirmed live shape) =="
 # refs/live-validation-2026-07-30.md: the render endpoint returns a JSON

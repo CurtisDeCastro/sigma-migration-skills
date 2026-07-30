@@ -164,10 +164,20 @@ def placeholder_table(map_entry)
 end
 
 # Domo type → optional Sigma column format hint.
+# Domo column type → Sigma column `format` object.
+#
+# LIVE-VALIDATED FIX (2026-07-30): this used to emit { 'type' => 'date' } /
+# { 'type' => 'datetime' }. Sigma rejects that outright —
+#   POST /v2/dataModels/spec →
+#   "pages[0].elements[0].columns[8].format: Missing \"kind\" field"
+# The format object keys on **kind**, never `type`, and there is no `date` kind:
+# `datetime` covers both, with formatString controlling display. See
+# plugins/sigma-authoring/skills/sigma-data-models/reference/formatting.md.
+# Any DATE column in the source made the whole DM POST fail.
 def type_format(domo_type)
   case domo_type.to_s.upcase
-  when 'DATE'            then { 'type' => 'date' }
-  when 'DATETIME'        then { 'type' => 'datetime' }
+  when 'DATE'     then { 'kind' => 'datetime', 'formatString' => '%Y-%m-%d' }
+  when 'DATETIME' then { 'kind' => 'datetime', 'formatString' => '%Y-%m-%d %H:%M:%S' }
   when 'LONG', 'DECIMAL', 'DOUBLE' then nil # numbers: leave default; number-format applied at workbook layer
   end
 end
@@ -179,16 +189,86 @@ def build_element(ds, map_entry, projection_bms)
   cols = []
   order = []
 
-  schema_cols = ds.dig('schema', 'columns') || ds['columns'] || []
+  # LIVE-VALIDATED FIX (2026-07-30): this used to fall back to `ds['columns']`,
+  # but discovery's datasets.json comes from the PUBLIC LIST endpoint
+  # (GET /v1/datasets), whose `columns` is an Integer COUNT — there is no
+  # `schema` key on a list entry at all:
+  #   {"id":"...","name":"Orders Fact","rows":877,"columns":29}
+  # So the fallback both crashed (`29.each`) and, worse, would have produced a
+  # data model with ZERO columns. Only the per-dataset DETAIL endpoint
+  # (GET /v1/datasets/{id}) carries schema.columns[] as an array of
+  # {"name","type"}; domo-discover.rb enriches datasets.json with it.
+  #
+  # A DM with no columns must NEVER be posted silently — fail loudly and name
+  # the dataset so the operator knows exactly which discovery record is thin.
+  schema_cols = ds.dig('schema', 'columns')
+  unless schema_cols.is_a?(Array)
+    raise ArgumentError, "dataset #{ds['id'].inspect} (#{ds['name'].inspect}) has no " \
+      "schema.columns array (got #{schema_cols.class}: #{schema_cols.inspect[0, 40]}). " \
+      "datasets.json was probably written from the PUBLIC LIST endpoint, whose " \
+      "`columns` is a COUNT. Re-run domo-discover.rb so each dataset is enriched " \
+      "from GET /v1/datasets/{id} (schema.columns), then rebuild."
+  end
+  # A Domo DataSet routinely carries columns the mapped WAREHOUSE table does not
+  # have — Domo-side derived/computed columns, or a landed copy that drifted from
+  # its source. Emitting a bare reference for those fails only at POST time, with
+  # an opaque server error:
+  #   "Cannot resolve columns on table 'X': dependency not found:
+  #    formula reference 'order_fact/order date'"
+  # (live-validated 2026-07-30; bead m655). Until build-dm can pre-flight columns
+  # against the warehouse itself, let the operator resolve it explicitly in
+  # dataset-map.json — the gap becomes declared and visible instead of a 400:
+  #
+  #   "<datasetId>": {
+  #     "connectionId": "...", "database": "DB", "schema": "SCH", "table": "T",
+  #     "excludeColumns": ["SOME_DOMO_ONLY_COL"],
+  #     "columnOverrides": {
+  #       "ORDER_DATE": { "formula": "MakeDate(Floor([Order Date Key]/10000), ...)" }
+  #     }
+  #   }
+  #
+  # `excludeColumns` drops a Domo-only column; `columnOverrides[<COL>].formula`
+  # keeps it but derives it from columns that DO exist (e.g. a YYYYMMDD integer
+  # surrogate key -> MakeDate). Both are reported so nothing is silent.
+  excluded  = Array(map_entry['excludeColumns']).map { |s| s.to_s.upcase }
+  overrides = (map_entry['columnOverrides'] || {}).each_with_object({}) do |(k, v), h|
+    h[k.to_s.upcase] = v
+  end
+  dropped = []
+  derived = []
+
   schema_cols.each do |c|
     raw = c['name'] || c['id']
     next unless raw
+    if excluded.include?(raw.to_s.upcase)
+      dropped << raw
+      next
+    end
     id  = inode_id(raw)
-    col = { 'id' => id, 'formula' => "[#{table}/#{display_name(raw)}]" }
-    fmt = type_format(c['type']); col['format'] = fmt if fmt
+    ov  = overrides[raw.to_s.upcase]
+    if ov.is_a?(Hash) && !ov['formula'].to_s.empty?
+      # An explicit `name` is REQUIRED on a calc column. Without it Sigma
+      # auto-names the column **"Calc"**, so every downstream reference
+      # ([Master/Order Date], DateTrunc("month", [Master/Order Date]), …) fails
+      # with "Dependency not found" — verified live 2026-07-30. A warehouse-table
+      # column doesn't need it (the name comes from the [TABLE/Display] ref); a
+      # derived one does.
+      col = { 'id' => id, 'name' => display_name(raw), 'formula' => ov['formula'].to_s }
+      derived << raw
+    else
+      col = { 'id' => id, 'formula' => "[#{table}/#{display_name(raw)}]" }
+    end
+    fmt = ov.is_a?(Hash) && ov['format'] ? ov['format'] : type_format(c['type'])
+    col['format'] = fmt if fmt
     cols << col
     order << id
   end
+
+  # Surface both resolutions — a declared gap the operator can audit, never silent.
+  warn "  dataset #{ds['id']}: dropped #{dropped.size} Domo-only column(s) per " \
+       "excludeColumns: #{dropped.join(', ')}" unless dropped.empty?
+  warn "  dataset #{ds['id']}: derived #{derived.size} column(s) via columnOverrides " \
+       "(not present in #{table}): #{derived.join(', ')}" unless derived.empty?
 
   # PROJECTION (row-level) Beast Modes → DM calc columns. Sibling refs are by
   # display name (no table prefix). sigmaFormula comes from convert-beast-modes.rb.
@@ -309,11 +389,30 @@ if $PROGRAM_NAME == __FILE__
     build_element(ds, entry, proj_by_ds[id])
   end
 
+  # LIVE-VALIDATED FIX (2026-07-30): the DM spec MUST carry a folderId or
+  # POST /v2/dataModels/spec rejects it outright:
+  #   "Expecting UUID at 0.folderId but instead got: undefined"
+  # This was never emitted, and migrate-domo.rb only threaded --folder-id into
+  # build-workbook-spec — so the data-model POST could not succeed in live mode
+  # at all. Accept it from --folder-id or SIGMA_FOLDER_ID (env), and warn
+  # explicitly when absent rather than writing a spec that is guaranteed to 400.
+  folder_id = nil
+  if (i = ARGV.index('--folder-id'))
+    folder_id = ARGV[i + 1]
+  end
+  folder_id ||= ENV['SIGMA_FOLDER_ID']
+
   spec = {
     'name' => 'Domo Migration',
     'schemaVersion' => 1,
     'pages' => [{ 'id' => rand_id, 'name' => 'Data', 'elements' => elements }],
   }
+  if folder_id.to_s.empty?
+    warn '  ⚠ no folderId (pass --folder-id <uuid> or set SIGMA_FOLDER_ID) — ' \
+         'POST /v2/dataModels/spec WILL fail with "Expecting UUID at 0.folderId".'
+  else
+    spec['folderId'] = folder_id
+  end
   FileUtils.mkdir_p(OUT)
   File.write(File.join(OUT, 'dm-spec.json'), JSON.pretty_generate(spec))
   warn "  wrote #{File.join(OUT, 'dm-spec.json')} (#{elements.size} element(s))"

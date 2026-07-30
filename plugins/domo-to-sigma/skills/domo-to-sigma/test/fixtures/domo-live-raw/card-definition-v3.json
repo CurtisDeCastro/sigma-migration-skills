@@ -91,6 +91,20 @@
         "isAggregatable": false,
         "dataType": "LONG",
         "usedByOtherCards": false
+      },
+      {
+        "templateId": 88,
+        "id": "calculation_33333333-aaaa-bbbb-cccc-333333333333",
+        "name": "Margin Pct",
+        "formula": "(CASE WHEN (SUM(`metric_denominator`) = 0) THEN 0 ELSE (SUM(`metric_numerator`) / SUM(`metric_denominator`)) END )",
+        "variable": false,
+        "status": "VALID",
+        "persistedOnDataSource": true,
+        "columnPositions": [],
+        "isAnalytic": false,
+        "isAggregatable": false,
+        "dataType": "DECIMAL",
+        "usedByOtherCards": false
       }
     ]
   }
