@@ -46,6 +46,76 @@ def mref(display) "[Master/#{display}]" end
 $warnings = []
 def warn_card(card, msg) $warnings << { 'card' => card['title'] || card['id'], 'warning' => msg } end
 
+$companion_elements = [] # bead 08sf — Task 5 populates this
+$sub_masters = {}        # bead ziht — datasetId => sub-master element Hash
+
+# bead ziht: dm-spec.json is build-dm.rb's PRE-post spec (already at this
+# script's own OUT dir — build-dm.rb writes it to discovery/, same as
+# cards.json/pages.json). It carries `_datasetId` on every DM element
+# (build-dm.rb) — a client-assigned tag Sigma neither knows nor round-trips.
+# dm-ids.json is the POST-readback (client ids are preserved by Sigma on
+# CREATE, but only the readback carries the real `dataModelId` + confirms the
+# element actually posted) — it lives in migrate-domo.rb's OUT, a DIFFERENT
+# directory than DISCOVERY, so it needs its own env var.
+DM_SPEC_PATH = File.join(OUT, 'dm-spec.json')
+DM_IDS_PATH  = ENV['DOMO_DM_IDS_PATH']
+
+# Which live DM element serves each Domo DataSet, keyed by datasetId. Both
+# inputs are optional — a hand run of build-workbook.rb alone, or a unit test,
+# has neither, and this degrades to {} (the caller's existing warn+SKIP path
+# for a card whose DataSet doesn't match the workbook's dominant master).
+def dataset_element_map
+  return $ds_element_map if $ds_element_map
+  unless DM_IDS_PATH && File.exist?(DM_SPEC_PATH.to_s) && File.exist?(DM_IDS_PATH.to_s)
+    return $ds_element_map = {}
+  end
+  dm_spec = (JSON.parse(File.read(DM_SPEC_PATH)) rescue nil)
+  dm_ids  = (JSON.parse(File.read(DM_IDS_PATH)) rescue nil)
+  return $ds_element_map = {} unless dm_spec && dm_ids
+
+  ds_by_el_id = {}
+  (dm_spec['pages'] || []).each do |p|
+    (p['elements'] || []).each { |e| ds_by_el_id[e['id']] = e['_datasetId'] if e['_datasetId'] }
+  end
+  map = {}
+  (dm_ids['pages'] || []).flat_map { |p| p['elements'] || [] }.each do |e|
+    ds_id = ds_by_el_id[e['id']]
+    map[ds_id] = e if ds_id && !map.key?(ds_id)
+  end
+  $ds_element_map = map
+end
+
+def dm_id
+  return $dm_id if defined?($dm_id) && $dm_id
+  return $dm_id = nil unless DM_IDS_PATH && File.exist?(DM_IDS_PATH.to_s)
+  ids = (JSON.parse(File.read(DM_IDS_PATH)) rescue nil)
+  $dm_id = ids && ids['dataModelId']
+end
+
+# A hidden sub-master for a non-dominant DataSet — the same auto-passthrough
+# shape build-workbook-spec.rb builds for the primary `master` (every column of
+# the named DM element, by name), reimplemented here rather than shared because
+# that file is VENDORED and must not diverge (see its header). nil when the
+# DataSet has no resolvable live element yet (caller falls back to the existing
+# warn+SKIP stopgap).
+def sub_master_for(ds_id)
+  return $sub_masters[ds_id] if $sub_masters[ds_id]
+  live_el = dataset_element_map[ds_id]
+  return nil unless live_el
+  cols = (live_el['columnLabels'] || live_el['columns'] || []).map do |c|
+    nm = c.is_a?(String) ? c : (c['name'] || c['id'])
+    next nil if nm.to_s.empty?
+    { 'id' => mcol_id(nm), 'name' => nm, 'formula' => "[#{live_el['name']}/#{nm}]" }
+  end.compact
+  return nil if cols.empty?
+  $sub_masters[ds_id] = {
+    'id' => "master-#{ds_id.to_s.downcase.gsub(/\W+/, '-')}", 'kind' => 'table',
+    'name' => "Master (#{live_el['name'] || ds_id})", 'visibleAsSource' => false,
+    'source' => { 'kind' => 'data-model', 'dataModelId' => dm_id, 'elementId' => live_el['id'] },
+    'columns' => cols, 'order' => cols.map { |c| c['id'] },
+  }
+end
+
 # ---- Domo chartType -> Sigma element kind (refs/card-to-element.md Problems 1-3) --
 #
 # `chartType` is a STRICT Domo enum, not a free-form string — substring matching

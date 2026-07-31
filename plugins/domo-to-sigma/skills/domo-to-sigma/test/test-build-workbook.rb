@@ -3,6 +3,28 @@
 #   ruby test/test-build-workbook.rb
 
 require_relative '../scripts/build-workbook'
+require 'tmpdir'
+
+# Temporarily override a top-level constant for the duration of a block, then
+# ALWAYS restore it — even on assertion failure — mirroring the with_domo_stub
+# pattern in test-discover.rb. Ruby warns on constant reassignment; silence it
+# locally rather than suppressing warnings globally.
+def stub_const(name, value)
+  target = Object
+  old = target.const_get(name) if target.const_defined?(name)
+  silence_warnings { target.send(:remove_const, name) if target.const_defined?(name); target.const_set(name, value) }
+  yield
+ensure
+  silence_warnings { target.send(:remove_const, name) if target.const_defined?(name); target.const_set(name, old) if old }
+end
+
+def silence_warnings
+  old_verbose = $VERBOSE
+  $VERBOSE = nil
+  yield
+ensure
+  $VERBOSE = old_verbose
+end
 
 $failures = 0
 def eq(a, b, m) if a == b then puts "  ok: #{m}" else $failures += 1; puts "  FAIL: #{m}\n    exp #{b.inspect}\n    got #{a.inspect}" end end
@@ -216,6 +238,50 @@ no_measure = build_element({ 'id' => 'c24', 'title' => 'Dim Only', 'chartType' =
                              'sigmaKindHint' => 'table', 'limit' => 10,
                              'columns' => [ { 'column' => 'order_id' } ] }, {})
 ok(!no_measure.key?('filters'), 'no measure column -> no top-n filter emitted')
+
+puts "== bead ziht: dataset_element_map resolves datasetId -> live DM element =="
+Dir.mktmpdir do |dir|
+  dm_spec_path = File.join(dir, 'dm-spec.json')
+  dm_ids_path  = File.join(dir, 'dm-ids.json')
+  File.write(dm_spec_path, JSON.generate('pages' => [{ 'elements' => [
+    { 'id' => 'el-fact-1', 'name' => 'Order Fact', '_datasetId' => 'ds-fact' },
+    { 'id' => 'el-dim-1',  'name' => 'Customer Dim', '_datasetId' => 'ds-dim' },
+  ] }]))
+  File.write(dm_ids_path, JSON.generate('dataModelId' => 'dm-live-1', 'pages' => [{ 'elements' => [
+    { 'id' => 'el-fact-1', 'name' => 'Order Fact', 'columnLabels' => ['Order Id', 'Region'] },
+    { 'id' => 'el-dim-1',  'name' => 'Customer Dim', 'columnLabels' => ['Customer Id', 'Segment'] },
+  ] }]))
+  stub_const('DM_SPEC_PATH', dm_spec_path) do
+    stub_const('DM_IDS_PATH', dm_ids_path) do
+      $ds_element_map = nil # force recompute against this dir's fixtures
+      map = dataset_element_map
+      eq(map.keys.sort, %w[ds-dim ds-fact], 'both datasets resolved')
+      eq(map['ds-dim']['id'], 'el-dim-1', 'ds-dim resolves to its own live element, not the fact')
+
+      $sub_masters = {}
+      sm = sub_master_for('ds-dim')
+      ok(!sm.nil?, 'sub-master built for a resolvable dataset')
+      eq(sm['kind'], 'table', 'sub-master is a table element')
+      eq(sm['visibleAsSource'], false, 'sub-master is hidden, like the primary master')
+      eq(sm['source'], { 'kind' => 'data-model', 'dataModelId' => 'dm-live-1', 'elementId' => 'el-dim-1' },
+         'sub-master sources the LIVE DM element for ds-dim, dataModelId included')
+      eq(sm['columns'].map { |c| c['name'] }, ['Customer Id', 'Segment'], 'auto-passthrough of the DM element\'s own columns')
+      eq(sm['columns'].first['formula'], '[Customer Dim/Customer Id]', 'column formula qualifies by the DM element\'s own name')
+
+      ok(sub_master_for('ds-dim').equal?(sm), 'memoized — a second call returns the SAME object, not a rebuild')
+      eq($ds_element_map.dig('ds-nope'), nil, 'unknown dataset -> nil, not an exception')
+      ok(sub_master_for('ds-nope').nil?, 'sub_master_for on an unresolvable dataset -> nil (caller falls back to today\'s skip)')
+    end
+  end
+end
+
+puts "== bead ziht: dataset_element_map degrades to {} when the inputs are absent (offline / unit-test default) =="
+stub_const('DM_SPEC_PATH', '/nonexistent/dm-spec.json') do
+  stub_const('DM_IDS_PATH', nil) do
+    $ds_element_map = nil
+    eq(dataset_element_map, {}, 'no dm-spec/dm-ids -> empty map, never an exception')
+  end
+end
 
 puts
 if $failures.zero? then puts "ALL PASS"; exit 0 else puts "#{$failures} FAILURE(S)"; exit 1 end
