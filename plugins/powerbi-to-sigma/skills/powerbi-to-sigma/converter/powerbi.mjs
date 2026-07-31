@@ -217,6 +217,7 @@ function buildDerivedElements(elements) {
     const derivedName = `${srcEl.name || sigmaDisplayName(srcTableName)} View`;
     const viewCols = [];
     const viewOrder = [];
+    const folderByTarget = /* @__PURE__ */ new Map();
     for (const col of srcEl.columns || []) {
       if (!col.formula || col.formula.startsWith("/*"))
         continue;
@@ -241,6 +242,12 @@ function buildDerivedElements(elements) {
       if (!tgtEl || tgtEl.source?.kind !== "warehouse-table" && tgtEl.source?.kind !== "sql")
         continue;
       const tgtKeyIds = new Set((rel.keys || []).map((k) => k.targetColumnId));
+      let tgtTableName = "";
+      if (tgtEl.source?.kind === "warehouse-table") {
+        const tgtPath = tgtEl.source.path || [];
+        tgtTableName = tgtPath[tgtPath.length - 1] || "";
+      }
+      const tgtFolderName = tgtEl.name || (tgtTableName ? sigmaDisplayName(tgtTableName) : "") || rel.name;
       for (const col of tgtEl.columns || []) {
         if (tgtKeyIds.has(col.id))
           continue;
@@ -262,19 +269,38 @@ function buildDerivedElements(elements) {
         if (dispName.includes("/"))
           continue;
         const cId = sigmaShortId();
-        viewCols.push({ id: cId, formula: `[${baseName}/${rel.name}/${dispName}]` });
+        viewCols.push({ id: cId, formula: `[${baseName}/${rel.name}/${dispName}]`, hidden: true });
         viewOrder.push(cId);
+        let folder = folderByTarget.get(rel.targetElementId);
+        if (!folder) {
+          folder = { id: sigmaShortId(), name: tgtFolderName, items: [], relName: rel.name };
+          folderByTarget.set(rel.targetElementId, folder);
+        }
+        folder.items.push(cId);
+      }
+    }
+    if (folderByTarget.size > 1) {
+      const countByName = /* @__PURE__ */ new Map();
+      for (const f of folderByTarget.values())
+        countByName.set(f.name, (countByName.get(f.name) || 0) + 1);
+      for (const f of folderByTarget.values()) {
+        if ((countByName.get(f.name) || 0) > 1)
+          f.name = `${f.name} (${f.relName})`;
       }
     }
     if (viewCols.length > 0) {
-      derived.push({
+      const derivedEl = {
         id: sigmaShortId(),
         kind: "table",
         name: derivedName,
         source: { kind: "table", elementId: srcEl.id },
         columns: viewCols,
         order: viewOrder
-      });
+      };
+      if (folderByTarget.size > 0) {
+        derivedEl.folders = [...folderByTarget.values()].map(({ id, name, items }) => ({ id, name, items }));
+      }
+      derived.push(derivedEl);
     }
   }
   return derived;
@@ -1265,11 +1291,73 @@ function rewriteCalculateConditionals(fIn, warnings, measureName, measureDax, ra
   }
   return { f, dropped: false };
 }
+function maskDaxStringLiterals(s) {
+  let out = "";
+  let i = 0;
+  while (i < s.length) {
+    const c = s[i];
+    if (c === "[") {
+      let j = i + 1;
+      while (j < s.length && s[j] !== "]" && s[j] !== "[")
+        j++;
+      if (j < s.length && s[j] === "]") {
+        out += s.slice(i, j + 1);
+        i = j + 1;
+      } else {
+        out += c;
+        i++;
+      }
+      continue;
+    }
+    if (c === '"') {
+      let j = i + 1;
+      let closed = false;
+      while (j < s.length) {
+        if (s[j] === '"') {
+          if (s[j + 1] === '"') {
+            j += 2;
+            continue;
+          }
+          j++;
+          closed = true;
+          break;
+        }
+        j++;
+      }
+      if (closed) {
+        out += " ".repeat(j - i);
+        i = j;
+      } else {
+        out += c;
+        i++;
+      }
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+function replaceOutsideDaxLiterals(s, re, replacer) {
+  const masked = maskDaxStringLiterals(s);
+  const scanner = new RegExp(re.source, re.flags.includes("g") ? re.flags : re.flags + "g");
+  let out = "";
+  let last = 0;
+  let m;
+  while (m = scanner.exec(masked)) {
+    const args = [...m, m.index, s];
+    out += s.slice(last, m.index) + replacer(...args);
+    last = m.index + m[0].length;
+    if (m[0].length === 0)
+      scanner.lastIndex++;
+  }
+  return out + s.slice(last);
+}
 function pruneDanglingMetrics(metrics, droppedNames, warnings) {
   for (let pass = 0; pass < 10; pass++) {
     const before = metrics.length;
     for (let i = metrics.length - 1; i >= 0; i--) {
-      const refs = (String(metrics[i].formula).match(/\[([^\]\/]+)\]/g) || []).map((r) => r.slice(1, -1));
+      const refs = (maskDaxStringLiterals(String(metrics[i].formula)).match(/\[([^\]\/]+)\]/g) || []).map((r) => r.slice(1, -1));
       const bad = refs.find((r) => droppedNames.has(r));
       if (bad) {
         if (warnings)
@@ -1363,19 +1451,20 @@ function pbiDaxToSigma(dax, warnings, measureName, measureDax = {}) {
   f = rewriteWeeknum(f);
   const divideMatch = f.match(/\bDIVIDE\s*\(/i);
   if (divideMatch) {
+    const maskedF = maskDaxStringLiterals(f);
     const startIdx = divideMatch.index + divideMatch[0].length;
     const divArgs = [];
     let depth = 1, argStart = startIdx;
-    for (let i = startIdx; i < f.length && depth > 0; i++) {
-      if (f[i] === "(")
+    for (let i = startIdx; i < maskedF.length && depth > 0; i++) {
+      if (maskedF[i] === "(")
         depth++;
-      else if (f[i] === ")") {
+      else if (maskedF[i] === ")") {
         depth--;
         if (depth === 0) {
           divArgs.push(f.slice(argStart, i).trim());
           break;
         }
-      } else if (f[i] === "," && depth === 1) {
+      } else if (maskedF[i] === "," && depth === 1) {
         divArgs.push(f.slice(argStart, i).trim());
         argStart = i + 1;
       }
@@ -1383,10 +1472,10 @@ function pbiDaxToSigma(dax, warnings, measureName, measureDax = {}) {
     if (divArgs.length >= 2) {
       const num = divArgs[0], den = divArgs[1], alt = divArgs[2];
       let d2 = 1, endPos = startIdx;
-      for (; endPos < f.length && d2 > 0; endPos++) {
-        if (f[endPos] === "(")
+      for (; endPos < maskedF.length && d2 > 0; endPos++) {
+        if (maskedF[endPos] === "(")
           d2++;
-        else if (f[endPos] === ")")
+        else if (maskedF[endPos] === ")")
           d2--;
       }
       let replacement;
@@ -1455,15 +1544,16 @@ function pbiDaxToSigma(dax, warnings, measureName, measureDax = {}) {
   f = f.replace(/\bNOW\s*\(\s*\)/gi, "Now()");
   f = f.replace(/\bDATE\s*\(/gi, "MakeDate(");
   f = f.replace(/\bDATEDIFF\s*\(/gi, "DateDiff(");
-  const quotedTablePrefixes = (f.match(/'([^']+)'\[/g) || []).map((m) => m.replace(/'\[$/g, "").replace(/^'/g, ""));
-  const unquotedTablePrefixes = (f.match(/\b([A-Za-z_]\w*)\[/g) || []).map((m) => m.replace(/\[$/, ""));
+  const maskedForPrefixes = maskDaxStringLiterals(f);
+  const quotedTablePrefixes = (maskedForPrefixes.match(/'([^']+)'\[/g) || []).map((m) => m.replace(/'\[$/g, "").replace(/^'/g, ""));
+  const unquotedTablePrefixes = (maskedForPrefixes.match(/\b([A-Za-z_]\w*)\[/g) || []).map((m) => m.replace(/\[$/, ""));
   const allTablePrefixes = [.../* @__PURE__ */ new Set([...quotedTablePrefixes, ...unquotedTablePrefixes])].filter((p) => !/^(If|Switch|Not|And|Or|Sum|Avg|Min|Max|Count|CountIf|CountDistinct|CumulativeSum|Coalesce|Nullif|Round|Floor|Ceiling|Abs|Upper|Lower|Trim|Left|Right|Mid|Replace|Find|Len|Year|Month|Day|Hour|Minute|Second|Today|Now|MakeDate|DateDiff|DateAdd|DateTrunc|DateFormat|IsNull|IsNotNull|Int|Number|Text|Sqrt|Power|Concat|In|GrandTotal|CumulativeAvg|Weekday|Mod|DateTrunc)$/.test(p));
   if (allTablePrefixes.length > 1 && warnings) {
     const tableNames = allTablePrefixes.join(", ");
     warnings.push(`\u26A0 Calculated column "${measureName}": references columns from multiple tables (${tableNames}). Column context has been simplified \u2014 verify formula references the correct columns.`);
   }
-  f = f.replace(/'[^']+'\[([^\]]+)\]/g, "[$1]");
-  f = f.replace(/\b[A-Za-z_]\w*\[([^\]]+)\]/g, "[$1]");
+  f = replaceOutsideDaxLiterals(f, /'[^']+'\[([^\]]+)\]/g, (_m, ref) => `[${ref}]`);
+  f = replaceOutsideDaxLiterals(f, /\b[A-Za-z_]\w*\[([^\]]+)\]/g, (_m, ref) => `[${ref}]`);
   f = f.replace(/\bRELATED\s*\(\s*(\[[^\]]+\])\s*\)/gi, "$1");
   f = f.replace(/(\[[^\]]+\])(\s*&)/g, "Text($1)$2");
   f = f.replace(/(&\s*)(\[[^\]]+\])/g, "$1Text($2)");
@@ -2565,7 +2655,7 @@ SELECT 1 AS _placeholder`;
         sigmaFormula = null;
       }
       if (sigmaFormula) {
-        sigmaFormula = sigmaFormula.replace(/\[([^\]\/]+)\]/g, (_m, colName) => {
+        sigmaFormula = replaceOutsideDaxLiterals(sigmaFormula, /\[([^\]\/]+)\]/g, (_m, colName) => {
           if (pbiToSigmaName[colName])
             return `[${pbiToSigmaName[colName]}]`;
           if (allPbiToSigmaNames[colName])
@@ -2605,7 +2695,7 @@ SELECT 1 AS _placeholder`;
         sigmaFormula = null;
       }
       if (sigmaFormula) {
-        sigmaFormula = sigmaFormula.replace(/\[([^\]\/]+)\]/g, (_m2, colName) => {
+        sigmaFormula = replaceOutsideDaxLiterals(sigmaFormula, /\[([^\]\/]+)\]/g, (_m2, colName) => {
           return pbiToSigmaName[colName] ? `[${pbiToSigmaName[colName]}]` : `[${colName}]`;
         });
         const _mFmt = inferSigmaFormat(sigmaFormula, m.name, m.formatString);
@@ -2646,13 +2736,13 @@ SELECT 1 AS _placeholder`;
         }
         const before = metrics.length;
         for (let i = metrics.length - 1; i >= 0; i--) {
-          metrics[i].formula = String(metrics[i].formula).replace(/\[([^\]\/]+)\]/g, (whole, ref) => {
+          metrics[i].formula = replaceOutsideDaxLiterals(String(metrics[i].formula), /\[([^\]\/]+)\]/g, (whole, ref) => {
             if (colDisplays.has(ref) || metricNames.has(ref))
               return whole;
             const c = canonicalCol.get(ref.toLowerCase()) || canonicalMetric.get(ref.toLowerCase());
             return c ? `[${c}]` : whole;
           });
-          const refs = (String(metrics[i].formula).match(/\[([^\]\/]+)\]/g) || []).map((r) => r.slice(1, -1));
+          const refs = (maskDaxStringLiterals(String(metrics[i].formula)).match(/\[([^\]\/]+)\]/g) || []).map((r) => r.slice(1, -1));
           const bad = refs.find((r) => !colDisplays.has(r) && !metricNames.has(r));
           if (bad) {
             const _rawDaxExpr = ((t.measures || []).find((mm) => mm.name === metrics[i].name) || {}).expression;
@@ -2920,7 +3010,7 @@ SELECT 1 AS _placeholder`;
         keep.push(c);
         continue;
       }
-      const refs = c.formula.match(/\[([^\]\/]+)\]/g) || [];
+      const refs = maskDaxStringLiterals(c.formula).match(/\[([^\]\/]+)\]/g) || [];
       const hasCross = refs.some((ref) => {
         const rn = ref.replace(/^\[|\]$/g, "");
         return !/^(true|false|null)$/i.test(rn) && !localNames.has(rn.toUpperCase());
@@ -3049,7 +3139,7 @@ SELECT 1 AS _placeholder`;
     }
     for (const c of calcs) {
       if (c.formula && Object.keys(relatedNameMap).length) {
-        c.formula = c.formula.replace(/\[([^\]\/]+)\]/g, (match, refName) => {
+        c.formula = replaceOutsideDaxLiterals(c.formula, /\[([^\]\/]+)\]/g, (match, refName) => {
           const rewritten = relatedNameMap[refName];
           return rewritten ? `[${rewritten}]` : match;
         });
@@ -3146,6 +3236,7 @@ export {
   extractUseRelationships,
   hasBareWindowFn,
   isAggCombination,
+  maskDaxStringLiterals,
   pbiDaxToSigma,
   pbiParseEarlierWindow,
   stripDaxComments

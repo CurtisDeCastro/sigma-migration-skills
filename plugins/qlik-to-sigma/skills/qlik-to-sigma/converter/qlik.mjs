@@ -1,6 +1,25 @@
-// ../../../Users/tjwells/sigma-data-model-mcp/build/sigma-ids.js
+// ../mcp-fresh/build/sigma-ids.js
 var SIGMA_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 var _usedIds = /* @__PURE__ */ new Set();
+var _idCounter = 0;
+function encodeBase62(n, len) {
+  let x = n, s = "";
+  while (x > 0) {
+    s = SIGMA_CHARS[x % 62] + s;
+    x = Math.floor(x / 62);
+  }
+  return s.padStart(len, SIGMA_CHARS[0]);
+}
+function fnv1a32(s) {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+var NS_MODULUS = 62 ** 4;
+var NS_BLOCK = 1e6;
 var SIGMA_LOWERCASE_WORDS = /* @__PURE__ */ new Set([
   "a",
   "an",
@@ -24,20 +43,21 @@ var SIGMA_LOWERCASE_WORDS = /* @__PURE__ */ new Set([
   "via",
   "per"
 ]);
-function resetIds() {
+function resetIds(seed) {
   _usedIds.clear();
+  _idCounter = seed == null ? 0 : fnv1a32(seed) % NS_MODULUS * NS_BLOCK;
 }
 function sigmaShortId(len = 10) {
   let id;
   do {
-    id = Array.from({ length: len }, () => SIGMA_CHARS[Math.floor(Math.random() * SIGMA_CHARS.length)]).join("");
+    id = encodeBase62(++_idCounter, len);
   } while (_usedIds.has(id));
   _usedIds.add(id);
   return id;
 }
 function sigmaDisplayName(s) {
   const normalized = (s || "").replace(/([a-z])([A-Z])/g, "$1_$2").replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2").replace(/([A-Za-z])([0-9])/g, "$1_$2").replace(/([0-9])([A-Za-z])/g, "$1_$2");
-  const words = normalized.toLowerCase().split(/[_\s]+/).filter(Boolean);
+  const words = normalized.toLowerCase().split(/[_\s/-]+/).filter(Boolean);
   return words.map((w, i) => i === 0 || !SIGMA_LOWERCASE_WORDS.has(w) ? w.charAt(0).toUpperCase() + w.slice(1) : w).join(" ");
 }
 function formatFromMask(mask) {
@@ -178,6 +198,7 @@ function buildDerivedElements(elements) {
     const derivedName = `${srcEl.name || sigmaDisplayName(srcTableName)} View`;
     const viewCols = [];
     const viewOrder = [];
+    const folderByTarget = /* @__PURE__ */ new Map();
     for (const col of srcEl.columns || []) {
       if (!col.formula || col.formula.startsWith("/*"))
         continue;
@@ -202,6 +223,12 @@ function buildDerivedElements(elements) {
       if (!tgtEl || tgtEl.source?.kind !== "warehouse-table" && tgtEl.source?.kind !== "sql")
         continue;
       const tgtKeyIds = new Set((rel.keys || []).map((k) => k.targetColumnId));
+      let tgtTableName = "";
+      if (tgtEl.source?.kind === "warehouse-table") {
+        const tgtPath = tgtEl.source.path || [];
+        tgtTableName = tgtPath[tgtPath.length - 1] || "";
+      }
+      const tgtFolderName = tgtEl.name || (tgtTableName ? sigmaDisplayName(tgtTableName) : "") || rel.name;
       for (const col of tgtEl.columns || []) {
         if (tgtKeyIds.has(col.id))
           continue;
@@ -223,25 +250,44 @@ function buildDerivedElements(elements) {
         if (dispName.includes("/"))
           continue;
         const cId = sigmaShortId();
-        viewCols.push({ id: cId, formula: `[${baseName}/${rel.name}/${dispName}]` });
+        viewCols.push({ id: cId, formula: `[${baseName}/${rel.name}/${dispName}]`, hidden: true });
         viewOrder.push(cId);
+        let folder = folderByTarget.get(rel.targetElementId);
+        if (!folder) {
+          folder = { id: sigmaShortId(), name: tgtFolderName, items: [], relName: rel.name };
+          folderByTarget.set(rel.targetElementId, folder);
+        }
+        folder.items.push(cId);
+      }
+    }
+    if (folderByTarget.size > 1) {
+      const countByName = /* @__PURE__ */ new Map();
+      for (const f of folderByTarget.values())
+        countByName.set(f.name, (countByName.get(f.name) || 0) + 1);
+      for (const f of folderByTarget.values()) {
+        if ((countByName.get(f.name) || 0) > 1)
+          f.name = `${f.name} (${f.relName})`;
       }
     }
     if (viewCols.length > 0) {
-      derived.push({
+      const derivedEl = {
         id: sigmaShortId(),
         kind: "table",
         name: derivedName,
         source: { kind: "table", elementId: srcEl.id },
         columns: viewCols,
         order: viewOrder
-      });
+      };
+      if (folderByTarget.size > 0) {
+        derivedEl.folders = [...folderByTarget.values()].map(({ id, name, items }) => ({ id, name, items }));
+      }
+      derived.push(derivedEl);
     }
   }
   return derived;
 }
 
-// ../../../Users/tjwells/sigma-data-model-mcp/build/qlik.js
+// ../mcp-fresh/build/qlik.js
 function convertQlikToSigma(rawJson, options = {}) {
   resetIds();
   const { connectionId = "<CONNECTION_ID>", database: dbOverride = "", schema: schOverride = "" } = options;
@@ -445,7 +491,7 @@ function convertQlikToSigma(rawJson, options = {}) {
         ...ctx.verify ? { verify: true } : {},
         note: ctx.notes?.length ? ctx.notes.join(" ") : "Translated Qlik inter-record expression."
       });
-      warnings.push(`\u2139 "${title}": inter-record/window expression \u2192 ready Sigma formula in result.workbookPatterns \u2014 place as a calculation in a GROUPED workbook element (group by the chart's dimension); not emitted as a DM metric (a metric aggregates across rows, so it can't express a per-row window; native window funcs belong in a workbook element or a DM-element calc column).`);
+      warnings.push(`\u2139 "${title}": inter-record/window expression \u2192 ready Sigma formula in result.workbookPatterns \u2014 place as a calculation in a GROUPED workbook element (group by the chart's dimension); not emitted as a DM metric (window functions silently error there).`);
       continue;
     }
     if (!measuresByElement[bestElementId])
@@ -572,7 +618,7 @@ function convertQlikToSigma(rawJson, options = {}) {
         ...ctx.verify ? { verify: true } : {},
         note: (ctx.notes?.length ? ctx.notes.join(" ") : "Translated Qlik inter-record expression.") + " (Qlik master dimension.)"
       });
-      warnings.push(`\u2139 Calc dimension "${title}": inter-record/window expression \u2192 ready Sigma formula in result.workbookPatterns \u2014 place in a GROUPED workbook element; not emitted as a DM column (native window funcs also resolve in a DM-element calc column; grouped here for the partition/order that match the Qlik chart).`);
+      warnings.push(`\u2139 Calc dimension "${title}": inter-record/window expression \u2192 ready Sigma formula in result.workbookPatterns \u2014 place in a GROUPED workbook element; not emitted as a DM column (window functions silently error there).`);
       continue;
     }
     const distinctElIds = Object.keys(elementHits);
@@ -744,6 +790,61 @@ function convertQvdsToSigma(qvds, options = {}) {
   result.warnings = [...warnings, ...result.warnings];
   return result;
 }
+function parseQlikLoadScript(script) {
+  const s = script.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/^[ \t]*\/\/.*$/gm, " ");
+  const tables = [];
+  const blockRe = /(?:^|\n)[ \t]*(?:([A-Za-z_]\w*)\s*:\s*)?(?:[A-Za-z]+[ \t]+)?\b(?:LOAD|SQL\s+SELECT)\b([\s\S]*?)(?:\b(?:FROM|RESIDENT|INLINE|AUTOGENERATE)\b([\s\S]*?))?;/gi;
+  let m;
+  while (m = blockRe.exec(s)) {
+    const label = m[1];
+    const body = m[2] || "";
+    const tail = m[3] || "";
+    const fields = [];
+    for (const raw of splitTopLevel(body, ",")) {
+      let f = raw.trim();
+      if (!f || f === "*")
+        continue;
+      const asM = f.match(/\s+AS\s+(.+)$/is);
+      if (asM)
+        f = asM[1].trim();
+      f = f.replace(/^[\["']+|[\]"']+$/g, "").trim();
+      if (!/^[A-Za-z_][\w ]*$/.test(f))
+        continue;
+      fields.push(f);
+    }
+    if (!fields.length)
+      continue;
+    let name = label;
+    if (!name) {
+      const fileM = tail.match(/\[[^\]]*?([A-Za-z0-9_]+)\.(?:qvd|csv|txt|xlsx?)\b/i) || tail.match(/\b([A-Za-z0-9_]+)\s*$/);
+      name = fileM ? fileM[1] : `Table${tables.length + 1}`;
+    }
+    tables.push({ name, fields });
+  }
+  return tables;
+}
+function convertQvwPrjToSigma(prjFiles, options = {}) {
+  const warnings = [];
+  const find = (re) => prjFiles.filter((f) => re.test(f.name));
+  const scriptFile = find(/LoadScript\.txt$/i)[0] || find(/\.qvs$/i)[0];
+  if (!scriptFile) {
+    throw new Error('No LoadScript.txt found in the -prj folder. Enable "Create project folder" in QlikView Desktop and upload the full <name>-prj/ contents.');
+  }
+  const tables = parseQlikLoadScript(scriptFile.content);
+  if (!tables.length)
+    warnings.push("LoadScript.txt parsed but no LOAD tables recovered \u2014 check the script syntax.");
+  warnings.push("QlikView -prj ingestion: relationships are inferred from shared field names only (no row counts in a -prj folder) \u2014 review join directions in Sigma.");
+  warnings.push("This converter builds the DATA MODEL from LoadScript.txt only. Chart expressions, measures, and the workbook layout in CH*.xml / QlikViewProject.xml are handled by the qlik-to-sigma skill (scripts/qlik-prj-discover.py -> full data-model + workbook pipeline).");
+  const qtr = tables.map((t) => ({
+    qName: t.name,
+    qNoOfRows: 0,
+    qFields: t.fields.map((name) => ({ qName: name }))
+  }));
+  const appName = scriptFile.name.match(/^(.*?)-prj/i)?.[1] || "QlikView App";
+  const result = convertQlikToSigma({ appName, qtr, masterMeasures: [], masterDimensions: [] }, options);
+  result.warnings = [...warnings, ...result.warnings];
+  return result;
+}
 function qlikParseInput(raw) {
   let tables = [], masterMeasures = [], masterDimensions = [], appName = "";
   if (Array.isArray(raw?.qtr)) {
@@ -824,6 +925,51 @@ function splitTopLevel(s, delim) {
   out.push(s.slice(start));
   return out;
 }
+var QLIK_LIT_SENT = "";
+var QLIK_LIT_SENT_RE = new RegExp(`${QLIK_LIT_SENT}(\\d+)${QLIK_LIT_SENT}`, "g");
+var QLIK_LIT_SENT_FULL_RE = new RegExp(`^${QLIK_LIT_SENT}(\\d+)${QLIK_LIT_SENT}$`);
+function maskQlikLiterals(s, lits = []) {
+  let out = "";
+  let i = 0;
+  while (i < s.length) {
+    const ch = s[i];
+    if (ch === "[" || ch === '"' || ch === "'") {
+      const closeChar = ch === "[" ? "]" : ch;
+      const close = s.indexOf(closeChar, i + 1);
+      if (close !== -1) {
+        const raw = s.slice(i, close + 1);
+        out += `${QLIK_LIT_SENT}${lits.push({ kind: ch, raw }) - 1}${QLIK_LIT_SENT}`;
+        i = close + 1;
+        continue;
+      }
+    }
+    out += ch;
+    i++;
+  }
+  return { masked: out, lits };
+}
+function qlikLitInner(lits, idx) {
+  const lit = lits[idx];
+  return lit === void 0 ? "" : lit.raw.slice(1, -1);
+}
+function qlikResolveLit(s, lits) {
+  const m = s.trim().match(QLIK_LIT_SENT_FULL_RE);
+  return m ? qlikLitInner(lits, Number(m[1])) : s;
+}
+function restoreQlikLiterals(s, lits) {
+  return s.replace(QLIK_LIT_SENT_RE, (_m, i) => lits[Number(i)]?.raw ?? _m);
+}
+function qlikMaskNew(lits, kind, raw) {
+  return `${QLIK_LIT_SENT}${lits.push({ kind, raw }) - 1}${QLIK_LIT_SENT}`;
+}
+function unmaskQlikLiterals(s, lits) {
+  return s.replace(QLIK_LIT_SENT_RE, (_m, i) => {
+    const lit = lits[Number(i)];
+    if (!lit)
+      return _m;
+    return lit.kind === "'" ? `"${lit.raw.slice(1, -1)}"` : lit.raw;
+  });
+}
 function lowerRangeFns(f, warnings, name) {
   const re = /\bRange(Sum|Avg|Min|Max)\s*\(/i;
   let guard = 0;
@@ -873,11 +1019,12 @@ function lowerClass(f, warnings, name) {
   }
   return f;
 }
-function setValueToCondition(field, rawVal, op) {
+function setValueToCondition(field, rawVal, op, lits) {
   let v = rawVal.trim();
-  const qm = v.match(/^['"](.*)['"]$/);
-  if (qm) {
-    const inner = qm[1].trim();
+  const sentM = v.match(QLIK_LIT_SENT_FULL_RE);
+  const dqM = !sentM ? v.match(/^"(.*)"$/) : null;
+  if (sentM || dqM) {
+    const inner = (sentM ? qlikLitInner(lits, Number(sentM[1])) : dqM[1]).trim();
     const cmp = inner.match(/^(>=|<=|<>|>|<|=)\s*(.+)$/);
     if (cmp) {
       let cop = cmp[1];
@@ -887,24 +1034,38 @@ function setValueToCondition(field, rawVal, op) {
       }
       const rhs = cmp[2].trim();
       const rhsNum = /^-?\d+(\.\d+)?$/.test(rhs);
-      return `[${field}]${cop}${rhsNum ? rhs : `"${rhs}"`}`;
+      return `[${field}]${cop}${rhsNum ? rhs : qlikMaskNew(lits, '"', `"${rhs}"`)}`;
     }
-    return `[${field}]${op}"${inner}"`;
+    return `[${field}]${op}${qlikMaskNew(lits, '"', `"${inner}"`)}`;
   }
   if (/^-?\d+(\.\d+)?$/.test(v))
     return `[${field}]${op}${v}`;
   if (/^[A-Za-z0-9_]+$/.test(v))
-    return `[${field}]${op}"${v}"`;
+    return `[${field}]${op}${qlikMaskNew(lits, '"', `"${v}"`)}`;
   return null;
 }
-function clauseToCondition(clause) {
-  const m = clause.match(/^\s*\[?([A-Za-z0-9_ .]+?)\]?\s*(-=|\+=|=)\s*\{([\s\S]*)\}\s*$/);
-  if (!m)
-    return null;
-  const field = m[1].trim();
-  const setOp = m[2];
+function clauseToCondition(clause, lits) {
+  const sentFieldRe = new RegExp(`^\\s*${QLIK_LIT_SENT}(\\d+)${QLIK_LIT_SENT}\\s*(-=|\\+=|=)\\s*\\{([\\s\\S]*)\\}\\s*$`);
+  const sm = clause.match(sentFieldRe);
+  let field;
+  let setOp;
+  let body;
+  if (sm) {
+    const lit = lits[Number(sm[1])];
+    if (!lit)
+      return null;
+    field = lit.raw.slice(1, -1).trim();
+    setOp = sm[2];
+    body = sm[3].trim();
+  } else {
+    const m = clause.match(/^\s*\[?([A-Za-z0-9_ .]+?)\]?\s*(-=|\+=|=)\s*\{([\s\S]*)\}\s*$/);
+    if (!m)
+      return null;
+    field = m[1].trim();
+    setOp = m[2];
+    body = m[3].trim();
+  }
   const op = setOp === "-=" ? "<>" : "=";
-  const body = m[3].trim();
   if (body === "")
     return null;
   if (/[+\-*/](?![=\d])/.test(body) && /\}|\{/.test(body))
@@ -914,7 +1075,7 @@ function clauseToCondition(clause) {
   const vals = splitTopLevel(body, ",").map((v) => v.trim()).filter(Boolean);
   const conds = [];
   for (const v of vals) {
-    const c = setValueToCondition(field, v, op);
+    const c = setValueToCondition(field, v, op, lits);
     if (!c)
       return null;
     conds.push(c);
@@ -960,7 +1121,7 @@ function bracketKnownBareFields(expr, displayMap) {
   s = s.replace(new RegExp(SENT + "(\\d+)" + SENT, "g"), (_m, i) => tokens[+i]);
   return s.replace(/ {2,}/g, " ").trim();
 }
-function translateSetAnalysis(f, warnings, name) {
+function translateSetAnalysis(f, warnings, name, lits) {
   const aggRe = new RegExp(`\\b(${QLIK_SET_AGGS.join("|")})\\s*\\(\\s*\\{`, "i");
   let guard = 0;
   while (aggRe.test(f) && guard++ < 50) {
@@ -1004,7 +1165,7 @@ function translateSetAnalysis(f, warnings, name) {
     const clauses = splitTopLevel(modifiers, ",").map((c) => c.trim()).filter(Boolean);
     const conds = [];
     for (const cl of clauses) {
-      const c = clauseToCondition(cl);
+      const c = clauseToCondition(cl, lits);
       if (!c) {
         warnings?.push(`"${name}": Set Analysis clause "${cl}" could not be translated \u2014 left untranslated.`);
         return null;
@@ -1134,9 +1295,9 @@ var QLIK_FSV_SENTINEL = "__QLIK_FSV__";
 function tidyFormula(f) {
   return f.replace(/\(\s+/g, "(").replace(/\s+\)/g, ")").replace(/\s+,/g, ",").replace(/ {2,}/g, " ").trim();
 }
-var QLIK_GROUPED_REQUIRES = "Place as a calculation in a GROUPED workbook element: group by the Qlik chart's dimension(s), sort the element to match the chart's sort order, and put this formula at the grouping level. (Spec gotcha, live-verified 2026-06-11: the element-level `sort` field 400s on grouped tables \u2014 'Sort column not found' \u2014 so a grouped element computes Lag/Lead over the group key ASCENDING at POST time; apply any other sort in the UI afterwards, or pick the grouping key so ascending order matches the Qlik chart.) When placing in a workbook element, prefix base-column refs with the source element name ([Element/Col]). Native window functions (Rank/RankDense/Lag/Lead/RowNumber/Cumulative*/Moving*) resolve in DM-element calc columns and in workbook tables (grouped OR ungrouped/master) \u2014 live-verified 2026-07-15; only the *Over family (SumOver/CountOver/...) errors in every spec context. A GROUPED element is still the recommended placement here because it gives Lag/Lead the partition + ordering that match the Qlik chart.";
+var QLIK_GROUPED_REQUIRES = "Place as a calculation in a GROUPED workbook element: group by the Qlik chart's dimension(s), sort the element to match the chart's sort order, and put this formula at the grouping level. (Spec gotcha, live-verified 2026-06-11: the element-level `sort` field 400s on grouped tables \u2014 'Sort column not found' \u2014 so a grouped element computes Lag/Lead over the group key ASCENDING at POST time; apply any other sort in the UI afterwards, or pick the grouping key so ascending order matches the Qlik chart.) When placing in a workbook element, prefix base-column refs with the source element name ([Element/Col]). Window functions (Rank/RankDense/Lag/Lead) silently error in data-model calc columns/metrics and in workbook master calc columns \u2014 they only work in grouped workbook elements.";
 var QLIK_IR_RE = /\b(Rank|HRank|VRank|Above|Below|Before|After|Top|Bottom|Previous|Peek)\s*\(/i;
-function lowerInterRecordFns(f, warnings, name, original, ctx) {
+function lowerInterRecordFns(f, warnings, name, original, ctx, lits) {
   const flagUnsupported = (note2) => {
     warnings?.push(`\u26A0 "${name}": ${note2} \u2014 left untranslated (flagged in workbookPatterns).`);
     ctx?.patterns?.push({ kind: "unsupported", name, source: original, note: note2 });
@@ -1235,7 +1396,7 @@ function lowerInterRecordFns(f, warnings, name, original, ctx) {
       if (args.length > 2 && args[2]) {
         return flagUnsupported(`Peek() with a table argument reads another table's load buffer (script-time semantics, not chart semantics)`);
       }
-      const fieldRaw = (args[0] || "").trim().replace(/^['"\[]/, "").replace(/['"\]]$/, "");
+      const fieldRaw = qlikResolveLit((args[0] || "").trim(), lits).replace(/^['"\[]/, "").replace(/['"\]]$/, "").trim();
       if (!fieldRaw)
         return flagUnsupported("Peek() missing field argument");
       let row = -1;
@@ -1384,6 +1545,8 @@ function qlikExprToSigma(expr, warnings, name, ctx) {
   let f = expr.trim();
   if (f.startsWith("="))
     f = f.slice(1).trim();
+  const { masked, lits } = maskQlikLiterals(f);
+  f = masked;
   f = f.replace(/\bDual\s*\(/gi, (_m, off) => "DUAL(");
   if (f.includes("DUAL(")) {
     let guard = 0;
@@ -1404,7 +1567,7 @@ function qlikExprToSigma(expr, warnings, name, ctx) {
   }
   const fsvM = f.match(/^FirstSortedValue\s*\(/i);
   if (fsvM && matchClose(f, f.indexOf("("), "(", ")") === f.length - 1) {
-    return QLIK_FSV_SENTINEL + f;
+    return QLIK_FSV_SENTINEL + restoreQlikLiterals(f, lits);
   }
   if (/\bFirstSortedValue\s*\(/i.test(f)) {
     warnings?.push(`\u26A0 "${name}": FirstSortedValue() nested inside a larger expression \u2014 left untranslated (flagged in workbookPatterns).`);
@@ -1412,19 +1575,19 @@ function qlikExprToSigma(expr, warnings, name, ctx) {
     return null;
   }
   if (/\{\s*[\$1<][^}]*\}/.test(f) || /\{\s*<[^}]*>\s*\}/.test(f)) {
-    const translated = translateSetAnalysis(f, warnings, name);
+    const translated = translateSetAnalysis(f, warnings, name, lits);
     if (translated === null)
       return null;
     f = translated;
   }
   if (/\bAggr\s*\(/i.test(f)) {
-    return QLIK_AGGR_SENTINEL + f;
+    return QLIK_AGGR_SENTINEL + restoreQlikLiterals(f, lits);
   }
   if (/\bGet(?:Field)?(?:Selections?|CurrentSelections?|PossibleCount|SelectedCount|AlternativeCount|ExcludedCount)\s*\(/i.test(f)) {
     warnings?.push(`"${name}": uses a Qlik selection-state function \u2014 no Sigma equivalent.`);
     return null;
   }
-  const ir = lowerInterRecordFns(f, warnings, name, expr, ctx);
+  const ir = lowerInterRecordFns(f, warnings, name, expr, ctx, lits);
   if (ir === null)
     return null;
   f = ir;
@@ -1452,7 +1615,7 @@ function qlikExprToSigma(expr, warnings, name, ctx) {
   f = f.replace(/\bConcat\s*\(/gi, "ListAgg(");
   f = f.replace(/\bNum\s*\(\s*([^,)]+)(,([^)]+))?\)/gi, (_m, val, hasComma, fmt) => {
     if (hasComma && warnings)
-      warnings.push(`"${name}": Num() format argument "${(fmt || "").trim()}" stripped.`);
+      warnings.push(`"${name}": Num() format argument "${qlikResolveLit((fmt || "").trim(), lits)}" stripped.`);
     return val.trim();
   });
   f = f.replace(/\bText\s*\(/gi, "ToString(").replace(/\bDate\$\s*\(/gi, "ToString(");
@@ -1464,8 +1627,7 @@ function qlikExprToSigma(expr, warnings, name, ctx) {
     warnings?.push(`"${name}": YearToDate() approximated as Year(${field.trim()}) = Year(Today())`);
     return `Year(${field}) = Year(Today())`;
   });
-  f = f.replace(/'([^']*)'/g, '"$1"');
-  return f.trim();
+  return unmaskQlikLiterals(f, lits).trim();
 }
 export {
   QLIK_AGGR_SENTINEL,
@@ -1473,5 +1635,7 @@ export {
   QLIK_GROUPED_REQUIRES,
   convertQlikToSigma,
   convertQvdsToSigma,
+  convertQvwPrjToSigma,
+  parseQlikLoadScript,
   parseQvdHeader
 };
