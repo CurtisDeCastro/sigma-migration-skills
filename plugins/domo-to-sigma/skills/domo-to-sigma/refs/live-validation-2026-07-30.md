@@ -465,7 +465,7 @@ Notes for a real engagement:
 
 ---
 
-## ⛔ The formula layer is NOT "nearly free" — 74% of real Beast Modes fail
+## ⛔ The formula layer is NOT "nearly free" — 74% of real Beast Modes fail — ✅ RESOLVED (PR #115, #116)
 
 > ## ✅ RESOLVED 2026-07-30 — all three bugs fixed upstream (sigma-data-model-mcp PR #115, then PR #116)
 >
@@ -477,8 +477,11 @@ Notes for a real engagement:
 > now translate correctly end-to-end. The "81 unique Beast Modes / 52 paren-wrapped
 > / 44 CASE+paren" figures below were later found to be per-card *instances*, not
 > distinct formulas; deduplicated by SQL text the corpus is **74 distinct
-> formulas**. Re-measured against the PR #115 fix, using the same
-> normalize_bm(backticks→brackets) input every entry below was measured with:
+> formulas**. Re-measured against the PR #115 fix with a single identical
+> harness applied to both the `0be8116` baseline and the fixed HEAD — same
+> `normalize_bm` steps both times (backticks → `[brackets]` AND `WEEKDAY` →
+> `DAYOFWEEK`), so the two columns are genuinely comparable, not measured at
+> different points with different inputs:
 >
 > | metric | before | after |
 > |---|---|---|
@@ -486,8 +489,22 @@ Notes for a real engagement:
 > | leaked `[Distinct]` | 5 | 0 |
 > | `And()`/`Or()` call form | 52 | 0 |
 > | `Today()()` | 21 | 0 |
-> | residual raw `CASE` in output | 16 | 0 |
+> | residual raw `CASE` in output | 54 | 0 |
 > | residual untranslated infix | — | 1 (honestly reported — infix `LIKE` still has no Sigma equivalent) |
+>
+> **Correction 2026-07-30 (review round 2):** an earlier draft of this table
+> published `16` for the "before" residual-raw-`CASE` figure. That number was
+> real, but it was measured at the *wrong point in time* — it's the
+> post-Task-5 intermediate figure (commit `1a47959`, the commit that first
+> introduced the `residualCase` check), not the pre-Track-A baseline (`0be8116`)
+> every other "before" figure in this table is measured against. Re-measured
+> with one identical harness against both endpoints: the real baseline is
+> **54**, not 16. The correct number *understates* the win (54→0 is a bigger
+> improvement than 16→0 would have been), but a measured number sitting in the
+> wrong column is wrong regardless of which direction the error points — worth
+> writing down as a lesson: when publishing a before/after table, measure both
+> ends with the same harness at the same time, don't reuse a number that was
+> measured at an intermediate commit along the way.
 >
 > Honest framing, not overstated: **37 of 74 (50%) now match a converter rule
 > exactly.** The rest fall through to the generic expression converter, which no

@@ -61,7 +61,10 @@ parser like Power BI's DAX.
 > are fixed upstream (sigma-data-model-mcp PR #115), and a third defect this
 > fix surfaced — Domo's real ALL-CAPS backtick-quoted columns coming back
 > double-bracketed (`[[Net Revenue]]`) — is also fixed (PR #116). Re-measured
-> on the deduplicated **74-distinct-formula** corpus:
+> on the deduplicated **74-distinct-formula** corpus. Both columns below were
+> measured with the identical harness and identical `normalize_bm` steps
+> (backticks → `[brackets]` AND `WEEKDAY` → `DAYOFWEEK`), so they are
+> genuinely comparable:
 >
 > | metric | before | after |
 > |---|---|---|
@@ -69,7 +72,7 @@ parser like Power BI's DAX.
 > | leaked `[Distinct]` | 5 | 0 |
 > | `And()`/`Or()` call form | 52 | 0 |
 > | `Today()()` | 21 | 0 |
-> | residual raw `CASE` in output | 16 | 0 |
+> | residual raw `CASE` in output | 54 | 0 |
 > | residual untranslated infix | — | 1, honestly reported |
 >
 > **Accurate framing: 37/74 (50%) now match a converter rule exactly.** The

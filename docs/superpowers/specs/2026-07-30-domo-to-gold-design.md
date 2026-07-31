@@ -127,7 +127,8 @@ runs), closing bead `qorq`. **Eleven defects fixed total, across two PRs — not
 two, not nine, not ten.**
 
 **The measured result (74-formula live corpus, cross-checked by three independent
-harnesses):**
+harnesses, both columns measured with one identical harness/normalize_bm so they
+are directly comparable):**
 
 | metric | before | after |
 |---|---|---|
@@ -135,8 +136,13 @@ harnesses):**
 | leaked `[Distinct]` | 5 | 0 |
 | `And()`/`Or()` call form | 52 | 0 |
 | `Today()()` | 21 | 0 |
-| residual raw `CASE` in output | 16 | 0 |
+| residual raw `CASE` in output | 54 | 0 |
 | residual untranslated infix | — | 1, honestly reported |
+
+(Corrected 2026-07-30, review round 2: this row previously published `16`,
+which was a real number but measured at the wrong point — the post-Task-5
+intermediate commit, not the pre-Track-A baseline. See
+`refs/live-validation-2026-07-30.md` for the full correction.)
 
 Accurate, not overstated: **37/74 (50%) now match a converter rule exactly**; the
 rest fall through to the generic converter, which no longer *corrupts* them but
