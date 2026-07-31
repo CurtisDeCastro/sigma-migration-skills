@@ -912,8 +912,13 @@ def append_geometryless_remainder(dash, cards, kind_map)
     shifted = z.dup
     shifted['y_pct'] = (dash_max_y + z['y_pct'] / 100.0 * remaining_budget).round(2)
     shifted['h_pct'] = (z['h_pct'] / 100.0 * remaining_budget).round(2)
+    # build_dashboard (rung 1) constructs 'zone_tree' and 'zones' as the SAME
+    # array object (line 877: `'zone_tree' => zones, 'zones' => zones`), not
+    # two independent lists — appending to both double-inserts every
+    # synthesized zone (verified live: a companion KPI's elementId landed
+    # TWICE in the merged layout XML, once degenerate zero-width). One append
+    # reaches both keys.
     dash['zone_tree'] << shifted
-    dash['zones'] << shifted
   end
   dash
 end
