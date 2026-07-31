@@ -25,44 +25,51 @@
 # UPDATE 2026-07-30: the shared `convert_sql_to_sigma_formula` DOES now
 # translate `CASE WHEN` (→ `If(cond, then, else)`) and `COUNT(DISTINCT x)`
 # (→ `CountDistinct(x)`) — fixed upstream in sigma-data-model-mcp PR #115
-# (squashed as 2ba3ea8). Beads jva2 and sqp1 are closed. That fix resolves the
-# measured historical baseline below (see refs/live-validation-2026-07-30.md,
-# "⛔ The formula layer is NOT 'nearly free'" — now annotated RESOLVED with the
-# corrected re-measurement) — those two constructs are no longer why a Beast
-# Mode ends up in this sidecar.
+# (squashed as 2ba3ea8). Beads jva2 and sqp1 are closed.
+#
+# UPDATE 2026-07-30 (later same day): the double-bracketing collision this
+# script's own step 1 used to trigger — handing the converter an
+# ALREADY-bracketed, ALL-CAPS identifier (`SUM(\`NET_REVENUE\`)` → step 1 →
+# `SUM([NET_REVENUE])`), which the converter's own bracket-wrapping pass used
+# to wrap AGAIN into invalid `Sum([[Net Revenue]])` — is **also fixed**
+# upstream, in sigma-data-model-mcp PR #116. Bead `qorq` is closed. Re-verified
+# live against PR #116: all four Beast Modes that previously needed this
+# sidecar (Margin Pct, Margin Pct 2, Avg Order Value, Return Rate) now convert
+# to the hand-authored formula exactly (two of the four differ only by a
+# semantically-inert wrapping paren — `(a / b)` vs `a / b`, the same formula in
+# Sigma) and their override entries have been removed. See
+# refs/live-validation-2026-07-30.md, "⛔ The formula layer is NOT 'nearly
+# free'" — now annotated RESOLVED (all three bugs) with the corrected
+# re-measurement.
 #
 # The sidecar mechanism STAYS: it is still the right escape hatch for whatever
-# the shared converter cannot yet do. As of this fix, the live gap is a
-# DIFFERENT, separate defect — bead qorq, "Bug 3" in the live-validation refs:
-# this script's own step 1 (backtick → `[Column]`) hands the converter an
-# ALREADY-bracketed, ALL-CAPS identifier; the converter's own bracket-wrapping
-# pass does not recognize that and wraps it AGAIN, e.g.
-# `SUM(\`NET_REVENUE\`)` → (step 1) → `SUM([NET_REVENUE])` → (converter) →
-# `Sum([[Net Revenue]])` — double-bracketed, invalid Sigma. Verified live
-# 2026-07-30 against PR #115: all four entries below still reproduce this,
-# even though the CASE/COUNT(DISTINCT) structure they exercise is now correct
-# in isolation. Bug 3 is tracked separately (bead qorq) and is NOT fixed here.
+# the shared converter cannot yet do next — e.g. the still-open gaps this
+# script itself flags via `preWarnings` (CEILING/FLOOR-as-aggregate, unmapped
+# functions, window/LOD Beast Modes) or a shape the corpus hasn't hit yet. It
+# is simply no longer load-bearing for the CASE WHEN / COUNT(DISTINCT) /
+# double-bracketing defect class.
 #
 # discovery/formula-overrides.json is an OPERATOR-authored sidecar (same
 # convention as discovery/kpi-overrides.json / dataset-map.json — this script
 # only ever READS it, so re-running normalize or --lint never clobbers it).
 # Keyed by the Beast Mode's stable `id` (`calculation_<uuid>`, survives
 # re-runs) or its human-friendly `name` (accepted alternate key, since ids are
-# opaque). Worked example — a CASE WHEN guard and a COUNT(DISTINCT) ratio that
-# both now convert correctly in isolation, but still need the override because
-# of Bug 3's double-bracketing on real (ALL-CAPS, backtick-quoted) Domo input:
+# opaque). Worked example — Beast Mode's `CEILING()` is an AGGREGATE (rounded
+# MAX), not math rounding, which the generic SQL converter has no way to know
+# (see the CEILING/FLOOR warning below); this is the kind of shape the sidecar
+# still earns its keep on:
 #
 #   {
 #     "calculation_4cd7e7c8-...": {
-#       "sigmaFormula": "If(Sum([Net Revenue]) = 0, 0, Sum([Gross Profit]) / Sum([Net Revenue]))",
-#       "note": "hand-authored: double-bracketed column refs on real ALL-CAPS input (bead qorq / Bug 3) — CASE WHEN itself now converts fine (jva2 fixed)"
+#       "sigmaFormula": "Round(Max([Net Revenue]), 0)",
+#       "note": "hand-authored: CEILING() is a Beast Mode AGGREGATE (rounded MAX), not math rounding — the generic converter cannot know this"
 #     },
 #     "Avg Order Value": {
 #       "sigmaFormula": "Sum([Net Revenue]) / CountDistinct([Order Id])"
 #     }
 #   }
 #
-# `If`, `Sum`, `CountDistinct` verified against
+# `Round`, `Max`, `Sum`, `CountDistinct` verified against
 # plugins/sigma-authoring/skills/sigma-workbooks/reference/specification/formulas.md.
 #
 # Rules (enforced in resolve_entry / unmatched_override_keys below):

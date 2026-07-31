@@ -40,11 +40,12 @@ Executed **one at a time**, each as its own spec → plan → subagent-driven
 implementation cycle. This document covers the decomposition; each track gets its own
 plan when it starts.
 
-### Track A — the shared SQL converter — ✅ DONE (sigma-data-model-mcp PR #115, squashed 2ba3ea8)
+### Track A — the shared SQL converter — ✅ DONE (sigma-data-model-mcp PR #115, then PR #116)
 
-`jva2` (P0) and `sqp1`, both closed. Both lived in the canonical
+`jva2`, `sqp1`, and `qorq`, all closed. All three lived in the canonical
 `convertSqlToSigmaFormula`, in the **separate `~/sigma-data-model-mcp` repo**
-(`src/formulas.ts`, `src/tools.ts`). Merged to `origin/main`.
+(`src/formulas.ts`, `src/tools.ts`). Both merged to `origin/main` (PR #115 squashed
+`2ba3ea8`; PR #116 the double-bracketing follow-up, `d02104b`).
 
 > **ROOT CAUSE FOUND 2026-07-30 — this is far smaller than first assumed.** `jva2`
 > is NOT "CASE WHEN is unimplemented." `lookConvertCase` ("Convert CASE WHEN … to
@@ -80,21 +81,34 @@ plan when it starts.
 > over-stripping: only strip when the parens are genuinely balanced and enclose the
 > WHOLE expression — `(a) + (b)` must not become `a) + (b`.
 
-**Scope grew during implementation: nine defects fixed, not two.** Discovery past
-the two beads in the original spec found seven independently-reviewable defects
-(A1 `jva2` outer-parens anchor; A2 `sqp1` `COUNT(DISTINCT x)`; A3 ALL-CAPS text
-*inside string literals* rewritten as a column ref; A4 SQL keywords before `(`
-treated as functions; A5 zero-arg mapped functions doubling their own parens —
-`Today()()`; A6 single-quoted literals surviving into Sigma output instead of
-Sigma's double-quoted form; A7 unmapped functions silently invented as fake Sigma
-names with no warning), plus two more found mid-implementation: an embedded/nested
-`CASE` inside arithmetic or an aggregate (`100 * (CASE …)`, `SUM((CASE …)) / COUNT(x)`)
-never reaching the CASE branch even after the A1 anchor fix, since the whole
-sub-expression isn't itself `^CASE`-anchored; and a final-whole-branch-review
-Critical finding that the `COUNT(DISTINCT …)` scanner (A2's fix) was not
-bracket-atomic, so an apostrophe inside a bracketed identifier
-(`COUNT(DISTINCT [Manager's Approval])`) could trap it mid-scan. All nine are
-fixed and covered by the shared regression suite.
+**Scope grew during implementation: ten defects fixed across two PRs, not two.**
+Discovery past the two beads in the original spec found seven
+independently-reviewable defects in PR #115 (A1 `jva2` outer-parens anchor; A2
+`sqp1` `COUNT(DISTINCT x)`; A3 ALL-CAPS text *inside string literals* rewritten as
+a column ref; A4 SQL keywords before `(` treated as functions; A5 zero-arg mapped
+functions doubling their own parens — `Today()()`; A6 single-quoted literals
+surviving into Sigma output instead of Sigma's double-quoted form; A7 unmapped
+functions silently invented as fake Sigma names with no warning), plus two more
+found mid-implementation: an embedded/nested `CASE` inside arithmetic or an
+aggregate (`100 * (CASE …)`, `SUM((CASE …)) / COUNT(x)`) never reaching the CASE
+branch even after the A1 anchor fix, since the whole sub-expression isn't itself
+`^CASE`-anchored; and a final-whole-branch-review Critical finding that the
+`COUNT(DISTINCT …)` scanner (A2's fix) was not bracket-atomic, so an apostrophe
+inside a bracketed identifier (`COUNT(DISTINCT [Manager's Approval])`) could trap
+it mid-scan. That is nine, all fixed in PR #115 and covered by the shared
+regression suite.
+
+**A tenth, found by Task 8's re-verification of `domo-to-sigma`'s own
+`formula-overrides.json` sidecar against the PR #115 fix: bead `qorq`** — the
+converter's bracket-wrapping pass re-wrapped an already-bracketed ALL-CAPS
+identifier (`[NET_REVENUE]` → `[[Net Revenue]]`, invalid Sigma), because its
+bare-identifier regex had no `[…]`-awareness. This is the one PR #115's own
+74-formula regression corpus never caught, because that corpus's sample
+identifiers are mostly mixed-case (Salesforce-style `IsWon`/`CloseDate`), not
+ALL-CAPS like real Domo/Snowflake columns — the corpus's own casing convention
+hid the defect from every measurement run against it. **Fixed in PR #116**
+(the bracket-wrapping pass now masks `[…]` spans before its bare-identifier regex
+runs), closing bead `qorq`. Ten defects fixed total, not two, and not nine.
 
 **The measured result (74-formula live corpus, cross-checked by three independent
 harnesses):**
@@ -113,17 +127,19 @@ rest fall through to the generic converter, which no longer *corrupts* them but
 also does not *fully translate* them. Infix `LIKE` still has no Sigma equivalent
 and is correctly reported as unconverted rather than silently shipped.
 
-**Known remaining gap — NOT fixed by this track, tracked separately (bead `qorq`):**
-`convert-beast-modes.rb`'s own backtick→`[Column]` pre-normalizer hands the shared
-converter an already-bracketed, ALL-CAPS identifier; the converter's own
-bracket-wrapping pass re-wraps it, producing `[[Net Revenue]]` instead of
-`[Net Revenue]` — invalid Sigma. This is local to the Domo side, not the shared
-converter, and does not regress anything Track A fixed. See
-`refs/live-validation-2026-07-30.md` "Bug 3" for the measured detail; it is why
-`domo-to-sigma`'s hand-authored `formula-overrides.json` entries built from real
-(ALL-CAPS-column) Domo Beast Modes still needed to stay hand-authored after this
-fix, even though the CASE/COUNT(DISTINCT) shapes they exercise now convert
-correctly in isolation.
+**Bead `qorq` (double-bracketing) — RESOLVED, PR #116.** `convert-beast-modes.rb`'s
+own backtick→`[Column]` pre-normalizer hands the shared converter an
+already-bracketed, ALL-CAPS identifier; the converter's bracket-wrapping pass used
+to re-wrap it, producing `[[Net Revenue]]` instead of `[Net Revenue]` — invalid
+Sigma. See `refs/live-validation-2026-07-30.md` "Bug 3" for the measured detail
+and the generalisable lesson it left behind: a regression corpus's
+identifier-casing convention is itself a variable that can hide a real defect —
+PR #115's own 74-formula corpus (mixed-case identifiers) measured zero instances
+of this bug while every one of `domo-to-sigma`'s real (ALL-CAPS-column)
+`formula-overrides.json` entries still hit it. Re-verified live against PR #116:
+all four of those entries now convert correctly with the shared converter alone
+(two byte-for-byte, two differing only by a semantically-inert wrapping paren)
+and have been removed from the sidecar.
 
 **Why this was done first, despite Track B being the stated goal.** Track B could
 reach GREEN using the `formula-overrides.json` sidecar alone — but that GREEN would
