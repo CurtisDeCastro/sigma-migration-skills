@@ -127,9 +127,11 @@ rows  = ControlLint.controls_report(spec)
 rows.select! { |r| opts[:controls].include?(r[:control_id]) } if opts[:controls].any?
 abort "no controls found in workbook #{WB}#{opts[:controls].any? ? " matching #{opts[:controls].inspect}" : ''}" if rows.empty?
 
-cols = Sigma.request(:get, "/v2/workbooks/#{WB}/columns")
+# PAGINATED: this map resolves control targets to display labels; truncation left
+# controls past column 50 unlabeled.
+cols = Sigma.list_entries("/v2/workbooks/#{WB}/columns")
 col_label = {} # [elementId, columnId] -> display label
-(cols && cols['entries'] || []).each do |c|
+cols.each do |c|
   col_label[[c['elementId'], c['columnId']]] = c['label'] if c['elementId'] && c['columnId']
 end
 

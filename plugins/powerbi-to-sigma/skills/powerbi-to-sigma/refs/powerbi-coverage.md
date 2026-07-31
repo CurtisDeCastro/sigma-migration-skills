@@ -6,20 +6,20 @@ Every documented source construct maps to a real, current Sigma target or a loud
 
 **`sigma_verified` legend:** ✅ y = the mapped Sigma target resolved at **query time** in a live migration (no `type=error` column) on the date shown; 🟡 n = target is documented but not yet query-verified.
 
-**Coverage:** 26 documented constructs across 4 dimensions; 3 live-verified.
+**Coverage:** 43 documented constructs across 5 dimensions; 3 live-verified.
 
 ## Visualization / chart kind
 
-_Power BI visual -> Sigma workbook element kind. VERBATIM extraction of build-workbook-from-pbir.rb's SIGMA_KIND hash: `source` is the coarse kind token the builder consumes (rec['sigma_kind']) and `sigma` is the Sigma element kind. The token itself is produced UPSTREAM by extract-pbir.py / extract-report-classic.py's VISUAL_KIND dict (raw PBI visualType -> token); the exact PBI visualTypes feeding each token are enumerated in `pbi_visual_types` so this one file grounds BOTH maps' semantics. Those Python dicts are NOT catalog-loaded here (this is a Ruby skill; no Python coverage_catalog loader is present) — their `VISUAL_KIND.get(vtype,'bar')` silent default is surfaced instead by the builder's LOUD fallback at build_element: an unmapped token OR any non-native/empty PBI visualType now warns + records an 'approximated' coverage entry (beads-sigma-kvza) rather than silently shipping a bar-chart. NATIVE_VISUAL_TYPES in the builder is the authoritative set of PBI visualTypes that map 1:1 to a Sigma kind; everything else is an approximation._
+_Power BI visual -> Sigma workbook element kind + ROLE CLASS. `source` is the coarse kind token the builder consumes (rec['sigma_kind']); `sigma` is the Sigma element kind; `pbi_visual_types` enumerates the raw PBI visualTypes feeding that token; `role_class` (control|kpi|chart|table|text|image|decoration|unsupported) says what the visual DOES, so the coverage gate can tell a functional loss (a lost slicer = the page lost its filter) from a cosmetic one (a lost decorative shape) from a DIFFERENT cosmetic one that still builds a real element when it can (a logo/banner `image`, which — unlike `decoration` — is never routed to a bare 'nothing built' skip; PbiVizKind.functional? still treats it as non-functional). Both the Ruby builder AND the Python extractors resolve through this one file via lib/pbi_viz_kind.{rb,py} — the previously-duplicated Python VISUAL_KIND dict is gone, so the two maps can no longer drift. Third-party/custom visuals live in custom-visual.json._
 
 Authoritative source: <https://learn.microsoft.com/en-us/power-bi/visuals/power-bi-visualization-types-for-reports-and-q-and-a>
 
 | construct | doc ref | Sigma target | sigma_verified | on-unmapped |
 |---|---|---|---|---|
 | `kpi` | [doc](https://learn.microsoft.com/en-us/power-bi/visuals/power-bi-visualization-kpi) | `kpi-chart` | ✅ y · 2026-07-13 | n/a |
-| | | | | _PBI card / multiRowCard / kpi / gauge -> Sigma kpi-chart. gauge has no native Sigma kind (approximated). A multiRowCard fans out to one kpi-chart per measure in the builder._ |
+| | | | | _PBI card / multiRowCard / kpi / gauge -> Sigma kpi-chart. gauge and kpiMatrix have no native Sigma kind (approximated -> approximate_types below); card/multiRowCard/kpi/cardVisual ARE native (approximate:false). A multiRowCard fans out to one kpi-chart per measure in the builder. `cardVisual` is the MODERN card visual type (PBI 2023+); it was absent from the old map and silently became a bar-chart on real customer files._ |
 | `bar` | [doc](https://learn.microsoft.com/en-us/power-bi/visuals/power-bi-visualization-types-for-reports-and-q-and-a) | `bar-chart` | ✅ y · 2026-07-13 | n/a |
-| | | | | _*Bar* families render horizontal (orientation:horizontal), *Column* families vertical (omit orientation). Stacking none\|stacked\|normalized from the type name. NOTE: hundredPercentStackedBarChart is in NATIVE_VISUAL_TYPES but is MISSING from VISUAL_KIND, so it currently falls through the Python default to 'bar' — the same silent coercion this catalog documents._ |
+| | | | | _*Bar* families render horizontal (orientation:horizontal), *Column* families vertical (omit orientation). Stacking none\|stacked\|normalized from the type name. hundredPercentStackedBarChart is now mapped explicitly (it previously fell through the Python `VISUAL_KIND.get(vt,'bar')` default). waterfall/funnel/treemap/ribbon/histogram are DATA-PRESERVING bar approximations -> approximate:true, so they are reported as approximated, not as losses._ |
 | `line` | [doc](https://learn.microsoft.com/en-us/power-bi/visuals/power-bi-visualization-types-for-reports-and-q-and-a) | `line-chart` | 🟡 n | n/a |
 | | | | | _Defaults to a SINGLE series unless a Series/Legend role is bound (bead c07)._ |
 | `area` | [doc](https://learn.microsoft.com/en-us/power-bi/visuals/power-bi-visualization-basic-area-chart) | `area-chart` | 🟡 n | n/a |
@@ -38,7 +38,11 @@ Authoritative source: <https://learn.microsoft.com/en-us/power-bi/visuals/power-
 | `map` | [doc](https://learn.microsoft.com/en-us/power-bi/visuals/power-bi-visualization-filled-maps-choropleths) | `map` | 🟡 n | n/a |
 | | | | | _Resolved to a Sigma region-map or point-map by resolve_map_kind using the model.bim geo dataCategory._ |
 | `image` | [doc](https://learn.microsoft.com/en-us/power-bi/visuals/power-bi-visualization-types-for-reports-and-q-and-a) | `image` | 🟡 n | n/a |
-| | | | | _Set directly by extract-report-classic.py for an imageUrl resource (extract-pbir.py has no 'image' visualType). Sigma images are URL-only: needs --image-map {resource: hostedUrl} or the element is skipped with a note._ |
+| | | | | _Set directly by extract-report-classic.py for an imageUrl resource (extract-pbir.py has no 'image' visualType). Sigma images are URL-only: needs --image-map {resource: hostedUrl} or the element is skipped with a note. role_class is its OWN 'image', distinct from 'decoration': an image DOES build a real Sigma element (given --image-map) and has its own dedicated coverage entry when it can't (severity:dropped, recoverable — 'Supply --image-map'), unlike a shape/blank which never builds anything and is genuinely cosmetic. Reusing 'decoration' here made every image visual return nil before ever reaching its own build/coverage logic — a regression caught in review._ |
+| `decoration` | [doc](https://learn.microsoft.com/en-us/power-bi/create-reports/desktop-shapes-add-report) | — (no Sigma equivalent) | 🟡 n | skip-silently-ok |
+| | | | | _Previously coerced to a bar-chart, producing phantom empty charts (5 measured across 2 customer files)._ |
+| `unsupported` | [doc](https://learn.microsoft.com/en-us/power-bi/visuals/power-bi-visualization-types-for-reports-and-q-and-a) | — (no Sigma equivalent) | 🟡 n | warn+record-unsupported |
+| | | | | _These previously became bar charts. A bar chart of a decomposition tree is not an approximation, it is a wrong answer — hence role_class unsupported, reported honestly._ |
 
 ## Number format
 
@@ -90,6 +94,37 @@ Authoritative source: <https://learn.microsoft.com/en-us/power-bi/visuals/power-
 | | | | | _Categorical list control (documented default): controlType:list + mode:include + selectionMode:multiple + source{kind:source,...} + filters[]. A slicer bound to a date column is overridden to date-range in code._ |
 | `slicer:date` | [doc](https://learn.microsoft.com/en-us/power-bi/create-reports/power-bi-slicer-numeric-range) | `date-range` | 🟡 n | warn+skip |
 | | | | | _Date/datetime-typed slicer: controlType:date-range + mode:between + includeNulls. Needs NO source (columns come from filters[]) but DOES require the flat mode or the POST 400s 'Invalid kind: control'._ |
+
+## custom-visual
+
+_Third-party / AppSource Power BI custom visuals -> Sigma element or control. A custom visual's `visualType` in the report Layout is the vendor's package id, so it is matched by CASE-INSENSITIVE REGEX on that token (`match`), first row wins, rather than by exact key. This catalog exists because the pipeline previously coerced every unrecognized visualType to a bar chart: on 4 real customer .pbix files that turned 21 third-party DATE-PICKER SLICERS into bar charts, silently removing the date filter from nearly every page. `role_class` control means the visual FILTERS and must become a Sigma control targeting the page's base element -- never a chart. `sigma_target` is the concrete Sigma control/element kind; `sigma` is the coarse builder token (rec['sigma_kind']). Vendor ids drift between releases, so patterns match the STABLE product-name substring, and lib/pbi_viz_kind.{rb,py} applies a generic slicer/filter/picker heuristic after this catalog so an unlisted filtering visual still lands as a control rather than a bogus chart._
+
+Authoritative source: <https://learn.microsoft.com/en-us/power-bi/developer/visuals/power-bi-custom-visuals>
+
+| construct | doc ref | Sigma target | sigma_verified | on-unmapped |
+|---|---|---|---|---|
+| `powerviz-datepicker` | [doc](https://appsource.microsoft.com/en-us/product/power-bi-visuals/powerviz1667398390543.datepickerbypowerviz) | `control` | 🟡 n | warn+record-unsupported (NEVER coerce a custom visual to a chart) |
+| | | | | _Measured 21 instances across 3 of 4 customer reports (7 + 9 + 5), every one previously emitted as a bar chart. This single row is the highest-impact entry in the catalog._ |
+| `chiclet-slicer` | [doc](https://appsource.microsoft.com/en-us/product/power-bi-visuals/WA104380756) | `control` | 🟡 n | warn+record-unsupported (NEVER coerce a custom visual to a chart) |
+| | | | | _One of the most common custom visuals in the wild._ |
+| `hierarchy-slicer` | [doc](https://appsource.microsoft.com/en-us/product/power-bi-visuals/WA104380820) | `control` | 🟡 n | warn+record-unsupported (NEVER coerce a custom visual to a chart) |
+| | | | | _Common with org / geography hierarchies -- exactly the org-hierarchy shape in customer report R1._ |
+| `timeline-slicer` | [doc](https://appsource.microsoft.com/en-us/product/power-bi-visuals/WA104380786) | `control` | 🟡 n | warn+record-unsupported (NEVER coerce a custom visual to a chart) |
+| `text-filter` | [doc](https://appsource.microsoft.com/en-us/product/power-bi-visuals/WA104381353) | `control` | 🟡 n | warn+record-unsupported (NEVER coerce a custom visual to a chart) |
+| `play-axis` | [doc](https://appsource.microsoft.com/en-us/product/power-bi-visuals/WA200001304) | — (no Sigma equivalent) | 🟡 n | warn+record-unsupported (NEVER coerce a custom visual to a chart) |
+| `zebra-bi` | [doc](https://appsource.microsoft.com/en-us/product/power-bi-visuals/zebrabi.zebrabicharts) | `pivot-table` | 🟡 n | warn+record-unsupported (NEVER coerce a custom visual to a chart) |
+| | | | | _Data and numbers are fully recoverable; only the IBCS styling is lost._ |
+| `inforiver` | [doc](https://appsource.microsoft.com/en-us/product/power-bi-visuals/inforiver.inforiver) | `pivot-table` | 🟡 n | warn+record-unsupported (NEVER coerce a custom visual to a chart) |
+| | | | | _Writeback usage is a scope decision, not a mechanical conversion -- always surface it._ |
+| `drill-down-zoomcharts` | [doc](https://appsource.microsoft.com/en-us/product/power-bi-visuals/zoomcharts.drilldowncombobar) | `bar` | 🟡 n | warn+record-unsupported (NEVER coerce a custom visual to a chart) |
+| `icon-map` | [doc](https://appsource.microsoft.com/en-us/product/power-bi-visuals/WA200001708) | `map` | 🟡 n | warn+record-unsupported (NEVER coerce a custom visual to a chart) |
+| | | | | _Measured 1 iconMapPro instance in customer report R1._ |
+| `bullet-chart` | [doc](https://appsource.microsoft.com/en-us/product/power-bi-visuals/WA104380750) | `bar` | 🟡 n | warn+record-unsupported (NEVER coerce a custom visual to a chart) |
+| `gantt` | [doc](https://appsource.microsoft.com/en-us/product/power-bi-visuals/WA104380765) | `table` | 🟡 n | warn+record-unsupported (NEVER coerce a custom visual to a chart) |
+| `sankey-wordcloud-network` | [doc](https://learn.microsoft.com/en-us/power-bi/developer/visuals/power-bi-custom-visuals) | — (no Sigma equivalent) | 🟡 n | warn+record-unsupported (NEVER coerce a custom visual to a chart) |
+| | | | | _Grouped into one row because the guidance and the decision are identical for all of them._ |
+| `infographic-cardbrowser` | [doc](https://appsource.microsoft.com/en-us/product/power-bi-visuals/WA104381044) | `kpi` | 🟡 n | warn+record-unsupported (NEVER coerce a custom visual to a chart) |
+| `calendar-heatmap` | [doc](https://appsource.microsoft.com/en-us/product/power-bi-visuals/WA200001930) | `pivot-table` | 🟡 n | warn+record-unsupported (NEVER coerce a custom visual to a chart) |
 
 ---
 _Compositional constructs that do not serialize to a flat table (Set Analysis, filtered `*If`, ratio measures, TO_CHAR/Excel mask parsers, count-on-joined-view) stay as cited predicates in the classifier; this matrix covers the enumerable maps._

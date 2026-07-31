@@ -69,7 +69,10 @@ require 'fileutils'
 require 'open3'
 require 'digest'
 require 'set'
-require_relative 'lib/py_resolve' # real-Python resolver (Windows Store-stub safe)
+require_relative 'lib/py_resolve'
+require_relative 'lib/pbi_field_alts'
+require_relative 'lib/pbi_master_key'
+require_relative 'lib/pbi_offramp_reason' # name the FAILING STAGE, never assert a cause we did not establish # role-playing dim copies must key on PBI table identity # derived field_map entries must wrap their ALTS too (pie/date-grain render bug) # real-Python resolver (Windows Store-stub safe)
 begin; require_relative 'lib/modeling_advisory'; rescue LoadError; end # shared, vendor-neutral CDW join-cost advisory (optional; synced from shared/)
 
 HERE = __dir__
@@ -112,6 +115,15 @@ OptionParser.new do |o|
   # UTF-16LE Report/Layout -> signals) locally, then the normal pipeline runs.
   # Mutually exclusive with --tmsl/--pbir (which it derives).
   o.on('--pbix PATH')       { |v| opts[:pbix]   = File.expand_path(v) }
+  # FIELD-LOSS GATE escape hatch (task 5). By default a run that loses field
+  # BINDINGS hard-stops at Phase 5c (exit 10): measured on 4 real reports, runs that
+  # had dropped 33-54% of their bindings still reported "12/12 source visual(s)
+  # carried over; 0 dropped", because coverage was counted per VISUAL and a table
+  # shipping 3 of 8 columns is only 'degraded'. Surfacing that was not enough — an
+  # unattended run shipped it anyway. Pass this when the loss is a KNOWN, accepted
+  # Sigma limit (USERELATIONSHIP / ISINSCOPE and friends); the reason is still
+  # printed, never suppressed.
+  o.on('--allow-field-loss', 'proceed despite field-binding loss (still reports it)') { opts[:allow_field_loss] = true }
   o.on('--connection ID')   { |v| opts[:conn]   = v }
   o.on('--database DB')     { |v| opts[:db]     = v }
   o.on('--schema S')        { |v| opts[:schema] = v }
@@ -531,13 +543,10 @@ all_measures.each { |tbl, mname, _| measure_orig_table[mname] = tbl }
 # dim NAME columns (beads-sigma-<1b>). Capture the map so the master-map can alias every
 # key under the friendly entity too.
 _normt = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]/, '') }
-physical_to_pbi = {} # normalized physical path-tail -> PBI friendly table name
-tables.each do |t|
-  _e = ((t['partitions'] || [])[0] || {}).dig('source', 'expression')
-  _e = _e.join("\n") if _e.is_a?(Array)
-  _tail = _e.to_s[/\[\s*Name\s*=\s*"([^"]+)"\s*,\s*Kind\s*=\s*"(?:Table|View)"\s*\]/i, 1]
-  physical_to_pbi[_normt.call(_tail)] = t['name'] if _tail && t['name'] && !t['name'].to_s.empty?
-end
+# 1:N, not 1:1. A model can import the SAME warehouse table under several names (six
+# role-playing DATE_DIMs on real report R2); the old 1:1 Hash kept only the LAST, so five
+# of the six copies got no alias at all.
+physical_to_pbi = PbiMasterKey.physical_to_pbi(tables)
 modes = tables.flat_map { |t| (t['partitions'] || []).map { |p| p['mode'] } }.compact.uniq
 mode_summ = modes.empty? ? 'unknown' : modes.join('/')
 
@@ -1015,6 +1024,24 @@ field_map = {}
 # so this is NOT a positional index — see lib/pbi_element_match.rb for the full
 # rationale + the run-2 SAFETY_INCIDENTS overwrite it prevents.
 dmel_for = PbiElementMatch.pair(conv_elements, dm_elements)
+# element index -> {table, confidence}. ORDER is authoritative (the converter emits one
+# element per model table in table order); the column-set overlap is a CONFIDENCE signal
+# only — making it authoritative measured WORSE than the old behaviour on 4 real models.
+_pbi_tbl_for = PbiMasterKey.pbi_table_for_elements(conv_elements, tables)
+_rp_dupes = _pbi_tbl_for.values.map { |v| v['table'] }.compact
+             .group_by { |n| n }.select { |_n, g| g.size > 1 }
+_lowconf = _pbi_tbl_for.values.select { |v| v['table'] && v['confidence'] < 0.8 }
+unless _lowconf.empty?
+  puts "   master-map: #{_lowconf.size} element(s) attributed by ORDER with low column agreement " \
+       "(#{_lowconf.map { |v| "#{v['table']} #{(v['confidence'] * 100).round}%" }.first(4).join(', ')}) — " \
+       'the converter adds columns the model lacks, so this is usually benign; verify if a tile looks wrong.'
+end
+_rp_groups = tables.group_by { |t| PbiMasterKey.norm_table(PbiMasterKey.physical_tail(t).to_s) }
+                   .select { |k, g| !k.empty? && g.size > 1 }
+unless _rp_groups.empty?
+  puts "   master-map: #{_rp_groups.size} role-playing dimension group(s) kept DISTINCT " \
+       "(#{_rp_groups.map { |k, g| "#{g.size}x #{k}" }.join(', ')}) — previously collapsed into one master."
+end
 conv_elements.each_with_index do |cel, cel_idx|
   cname = cel['name']
   dmel = dmel_for[cel_idx]
@@ -1025,8 +1052,16 @@ conv_elements.each_with_index do |cel, cel_idx|
             spec_elements[cel_idx]
   spec_name_for = (spec_el && spec_el['columns'] || [])
                   .each_with_object({}) { |c, h| h[c['formula'].to_s] = c['name'] if c['name'] }
-  mkey = cname
-  mid  = "master-#{Digest::SHA1.hexdigest(cname)[0, 8]}"
+  # ROLE-PLAYING DIMENSIONS. `cname` is the WAREHOUSE table (the converter names every
+  # element after it), so a model importing the same table N times under N names — six
+  # role-playing DATE_DIMs on real report R2 — collapsed into ONE master here:
+  # masters[mkey] overwrote (last copy won) and all N shared one id, while the report's
+  # visuals bind under the PBI name ("DATE_DIM submission date.CALENDAR_DATE"), a key
+  # that never existed. Key on the PBI table instead; fall back to `cname` when the
+  # element cannot be attributed, which is exactly the old behaviour.
+  _pbi_tbl = _pbi_tbl_for[cel_idx] && _pbi_tbl_for[cel_idx]['table']
+  mkey = _pbi_tbl || cname
+  mid  = PbiMasterKey.master_id(mkey)
   # Bug A: key the master-column id on the FULL cross-element path (not the leaf)
   # and use Sigma's disambiguated display name. For a JOIN/View element, base and
   # related columns can share a leaf ("Customer Key"), so leaf-keying collides on
@@ -1396,11 +1431,14 @@ all_visuals.flat_map { |v| (v['bindings'] || {}).values.flatten }.uniq.each do |
   if (m = r.match(/\A([A-Za-z ]+)\((.+)\)\z/)) && agg_names[m[1].downcase.delete(' ')]
     base = fm_norm[norm_key.call(m[2])]
     next unless base && base['ref'].to_s =~ /\A\[[^\]]+\]\z/
-    field_map[r] = base.merge('ref' => "#{agg_names[m[1].downcase.delete(' ')]}(#{base['ref']})", 'agg' => nil)
+    _fn = agg_names[m[1].downcase.delete(' ')]
+    # wrap the ALTS as well, not just the primary ref — see lib/pbi_field_alts.rb
+    field_map[r] = PbiFieldAlts.wrapped_entry(base) { |ref| "#{_fn}(#{ref})" }
   elsif (m = r.match(/\A(.+?)\.Variation\..*\.(Year|Quarter|Month|Week|Day)\z/i))
     base = fm_norm[norm_key.call(m[1])]
     next unless base && base['ref'].to_s =~ /\A\[[^\]]+\]\z/
-    field_map[r] = base.merge('ref' => "DateTrunc(\"#{m[2].downcase}\", #{base['ref']})", 'agg' => nil)
+    _lvl = m[2].downcase
+    field_map[r] = PbiFieldAlts.wrapped_entry(base) { |ref| "DateTrunc(\"#{_lvl}\", #{ref})" }
   end
 end
 
@@ -1415,7 +1453,12 @@ unless physical_to_pbi.empty?
   field_map.each do |k, v|
     ent, dot, leaf = k.rpartition('.')
     next if dot.empty? || ent.empty? || leaf.empty?
-    pbi = physical_to_pbi[_normt.call(ent)]
+    pbis = Array(physical_to_pbi[_normt.call(ent)])
+    # With N>1 copies the physical name is AMBIGUOUS — aliasing it to one of them is how
+    # a control ended up filtering the wrong date dimension. Alias only the unambiguous
+    # 1:1 case; the N-copy case is already keyed correctly under each PBI table name.
+    next unless pbis.size == 1
+    pbi = pbis.first
     next unless pbi && _normt.call(pbi) != _normt.call(ent)
     ak = "#{pbi}.#{leaf}"
     aliases[ak] = v unless field_map.key?(ak) || aliases.key?(ak)
@@ -1476,14 +1519,28 @@ rescue WorkbookBuildError => e
                           .map { |w| w[/[“"]([^”"]+)[”"]/, 1] || w.sub(/^⛔\s*/, '')[0, 60] }
                           .compact.uniq
   end
-  names = failed.empty? ? 'one or more fields' : failed.join(', ')
-  n = failed.empty? ? 'some' : failed.size.to_s
+  # Classify from the output we ACTUALLY captured. The old code asserted a
+  # field-translation failure unconditionally — when no field name could be culled it
+  # still printed "one or more fields" — so a LAYOUT-LINT tile-height violation after a
+  # SUCCESSFUL post was reported as untranslatable fields, sending the operator to rebuild
+  # the whole workbook when the real fix was one tile height. An undetermined cause is now
+  # reported as undetermined, with the captured output shown.
+  info = PbiOfframp.classify(e.captured_output, failed)
   puts
-  puts "── Mechanical path: data model built OK (dataModelId=#{dm_id}). The WORKBOOK " \
-       "layer hit #{n} field(s) the mechanical path can't translate (#{names}). " \
-       "Falling back to the agent path: rebuild the workbook via the skill's " \
-       "agent-authored flow (see SKILL.md) against this DM. The data model is " \
-       "posted and ready to attach."
+  puts "── Mechanical path: data model built OK (dataModelId=#{dm_id})."
+  puts "   FAILING STAGE: #{info['stage']} — #{info['message']}"
+  unless info['salient'].to_s.strip.empty?
+    puts '   captured output:'
+    info['salient'].to_s.lines.each { |l| puts "     #{l.rstrip}" }
+  end
+  if info['posted']
+    puts '   NOTE: the workbook POSTED — fix and re-apply with PUT /v2/workbooks/<id>/spec.'
+    puts '   Do NOT re-POST (it creates an orphan) and do NOT rebuild via the agent path.'
+  else
+    puts "   Falling back to the agent path: rebuild the workbook via the skill's " \
+         'agent-authored flow (see SKILL.md) against this DM. The data model is posted ' \
+         'and ready to attach.'
+  end
   exit 4
 end
 wb_rb = JSON.parse(File.read(wb_readback))
@@ -1540,6 +1597,11 @@ if coverage
   puts
   puts '==================== MIGRATION COVERAGE ===================='
   puts "   #{CoverageGate.headline(coverage)}"
+  # BOTH headlines, deliberately. The visual-level line above answers "did each tile
+  # come across?"; the binding-level line answers "did each FIELD come across?" — and
+  # only the second would have caught the customer's report, where every visual built
+  # but 33-54% of its field bindings were pruned.
+  puts "   #{CoverageGate.binding_headline(coverage)}"
   rlines = CoverageGate.report_lines_by_cause(coverage)
   unless rlines.empty?
     puts
@@ -1560,6 +1622,37 @@ if coverage
     end
   end
   puts '==========================================================='
+
+  # ---- FIELD-LOSS GATE (task 5) -------------------------------------------
+  # The readout above is INFORMATIONAL and always has been; that is exactly why a
+  # badly degraded migration could ship. This turns FIELD loss into a stop.
+  # Fails when (a) a functional component (control/kpi/chart/table) was DROPPED — a
+  # lost control means the page lost its filter — or (b) binding resolution is below
+  # the floor. --allow-field-loss converts either into a pass that STILL prints the
+  # reason. exit 10 is this orchestrator's established "open question" code, so the
+  # DM + workbook already posted above remain usable and attachable.
+  fl_status, fl_reason = CoverageGate.gate!(coverage, min_resolved: 0.95,
+                                                      allow_override: opts[:allow_field_loss])
+  if fl_status == :fail
+    puts
+    puts '########## FIELD-LOSS GATE: FAIL ##########'
+    # NB: the ratio-branch reason already embeds binding_headline, so print the
+    # headline only when the reason does not (the dropped-functional-component
+    # branch names components instead) — otherwise the block repeats itself.
+    puts "   #{fl_reason}"
+    bh = CoverageGate.binding_headline(coverage)
+    puts "   #{bh}" unless fl_reason.to_s.include?(bh)
+    cause_lines = CoverageGate.report_lines_by_cause(coverage)
+    puts cause_lines.join("\n") unless cause_lines.empty?
+    puts
+    puts '   The workbook and data model DID post and are usable, but the report lost'
+    puts '   FIELDS, not just styling — fix the cause above and re-run, or pass'
+    puts '   --allow-field-loss to accept it explicitly (the reason is still reported).'
+    puts '###########################################'
+    exit 10
+  elsif fl_reason.to_s.start_with?('overridden')
+    puts "   FIELD-LOSS GATE: #{fl_reason}"
+  end
 end
 
 # ---------------------------------------------------------------------------
