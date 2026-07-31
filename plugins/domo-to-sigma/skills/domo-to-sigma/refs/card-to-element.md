@@ -116,14 +116,29 @@ Rule 0 above covers the card where the Summary Number **is** the whole card
 But Domo also prints a Summary Number above a card that **is** a genuine
 chart or table — a bar chart with a real `groupBy`, say, still shows a big
 "Total Sales" number above its bars. Sigma's chart/table elements have no
-summary slot to carry that, so the fix is a **second, adjacent `kpi-chart`
+summary slot to carry that, so the fix is a **second, separate `kpi-chart`
 element** — a companion — built from the *same* Summary Number config Rule 0
 uses (same measure/aggregation/format resolution, including the COUNT-of-id
-guard), placed beside the primary chart/table element rather than replacing
-it. The companion's `id` is always the primary element's `id` + `-summary`
-so it never collides. When no resolvable column exists for the companion, the
+guard), rather than replacing the primary chart/table. The companion's `id`
+is always the primary element's `id` + `-summary` so it never collides. If
+the card's own primary chart/table element itself fails to build (e.g. no
+resolvable measure), the companion is dropped too — a standalone KPI with no
+primary beside it would be confusing, not a fix. When no resolvable column
+exists for the companion (independent of whether the primary built), the
 headline value is dropped with a named warning rather than silently emitted
 as a broken `Count([Master/])`.
+
+**Layout placement:** `build-domo-layout.rb` gives the companion its own
+zone via the same synthesis mechanism it already uses for an orphan control
+(a page-level filter with no backing card) — see `load_chart_specs_companions`
+/ `load_chart_specs_controls`. The companion lands wherever that page's
+kind-aware composition puts any other `kpi-chart` element (the page's shared
+KPI band, or — for a page with real pixel geometry — appended below the
+primary content), **not** guaranteed immediately adjacent to its own specific
+primary chart/table: the kind-grouped composition model buckets every KPI
+element on a page into one band together, regardless of which card produced
+it. Landing in the KPI band is the honest, tractable placement this
+converter can make today.
 
 ### Row limit → Sigma top-n filter (bead 2ef7)
 

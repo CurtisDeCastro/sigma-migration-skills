@@ -559,6 +559,39 @@ def load_chart_specs_controls(dir)
   out
 end
 
+# Final-review Important I1: load discovery/chart-specs.json's companion KPI
+# elements (bead 08sf's "-summary" elements, built by build_summary_companion
+# / eid(card, '-summary')), GROUPED BY PAGE NAME — same shape/contract as
+# load_chart_specs_controls directly above, and for the SAME underlying
+# reason: a companion KPI has no entry of its own in cards.json (it is
+# synthesized inside build-workbook.rb from a card that's really a chart or
+# table), so it would never reach this file's normal per-card kind resolution
+# (element_kind_for) and would never get a layout zone at all — present in
+# the workbook spec, but invisible on the migrated page. The caller (see
+# $PROGRAM_NAME == __FILE__) synthesizes a pseudo-card for each one it finds,
+# the exact same mechanism already used for an orphan control. Matched by the
+# id suffix build_summary_companion always uses ("-summary") plus kind
+# 'kpi-chart' so a coincidentally-named real KPI card is never mistaken for
+# one. Returns { page_name => [{'id'=>, 'name'=>}, ...] }; absent/unparsable
+# file -> {} (never raises, same degrade-gracefully contract as
+# load_chart_specs_controls).
+def load_chart_specs_companions(dir)
+  path = File.join(dir, 'chart-specs.json')
+  return {} unless File.exist?(path)
+  data = JSON.parse(File.read(path)) rescue nil
+  return {} unless data.is_a?(Hash) && data['pages'].is_a?(Array)
+  out = {}
+  data['pages'].each do |p|
+    pname = p['name']
+    next unless pname
+    comps = Array(p['elements']).select do |el|
+      el.is_a?(Hash) && el['kind'] == 'kpi-chart' && el['id'].to_s.end_with?('-summary') && el['name']
+    end
+    out[pname] = comps.map { |el| { 'id' => el['id'].to_s, 'name' => el['name'].to_s } } unless comps.empty?
+  end
+  out
+end
+
 # This card's best-known Sigma-ish kind string, per the priority above.
 # `kind_map` keys on "el-<cardId>" — build-workbook.rb's own element-id
 # convention for a card-derived element (confirmed against a live chart-specs
@@ -844,6 +877,47 @@ def build_stack_fallback(name, cards)
   { 'dashboard' => name, 'zone_tree' => zones, 'zones' => zones }
 end
 
+# I1 (final review, Important): rung 1 (build_dashboard) filters its input to
+# ONLY cards carrying real x/y/w/h — that's correct for genuine Domo cards
+# (a real page reports pixel geometry for ALL of its cards or NONE of them,
+# never a mix, live-validated), but a SYNTHESIZED pseudo-card (an orphan
+# control, or bead 08sf's companion KPI — see the $PROGRAM_NAME == __FILE__
+# block below) never carries geometry at all, so it silently falls out of
+# rung 1's own filter and never gets a zone — even on a page whose real cards
+# all have pixel geometry. Reuses the SAME "compose the remainder below the
+# primary content" idea rung 1.5 (build_dashboard_with_observed) already
+# applies to its own observed/unobserved split: run the geometry-less cards
+# through the kind-aware composition (build_dashboard_from_collections) and
+# append the result below whatever rung 1 already placed, proportionally
+# rescaled into whatever page fraction is left. A no-op (returns `dash`
+# unchanged) when every one of `cards` carried real geometry, which is true
+# for every ordinary (non-synthesized) page today.
+def append_geometryless_remainder(dash, cards, kind_map)
+  # Scoped to cards THIS file itself synthesized (`_synthesized` — see the
+  # main block below), never to an arbitrary real card that happens to carry
+  # no geometry: a real Domo page reports pixel geometry for ALL of its cards
+  # or NONE (live-validated), so a genuinely-geometry-less REAL card mixed in
+  # among geometry-bearing ones is a degraded/partial capture, not a case
+  # this remainder pass should rescue — it stays excluded from rung 1's
+  # output, unchanged (see test-build-domo-layout.rb's NoGeom/_error case).
+  synthesized = cards.select { |c| c['_synthesized'] }
+  return dash if synthesized.empty?
+
+  rest = build_dashboard_from_collections(dash['dashboard'], synthesized, kind_map)
+  return dash unless rest
+
+  dash_max_y = dash['zones'].map { |z| z['y_pct'].to_f + z['h_pct'].to_f }.max
+  remaining_budget = [100.0 - dash_max_y, 20.0].max
+  rest['zones'].each do |z|
+    shifted = z.dup
+    shifted['y_pct'] = (dash_max_y + z['y_pct'] / 100.0 * remaining_budget).round(2)
+    shifted['h_pct'] = (z['h_pct'] / 100.0 * remaining_budget).round(2)
+    dash['zone_tree'] << shifted
+    dash['zones'] << shifted
+  end
+  dash
+end
+
 # Orchestrates the fallback chain for one page's cards, highest-fidelity rung
 # first. Only returns nil when the page genuinely has zero cards. `kind_map`
 # threads through to rung 2/1.5's kind-aware composition (see
@@ -856,7 +930,7 @@ def build_dashboard_for_page(name, cards, kind_map = {}, observed = {})
   return nil if cards.empty?
 
   dash = build_dashboard(name, cards) # rung 1: genuine x/y/w/h pixel geometry
-  return dash if dash
+  return append_geometryless_remainder(dash, cards, kind_map) if dash
 
   unless observed.empty?
     dash = build_dashboard_with_observed(name, cards, observed, kind_map) # rung 1.5: operator-authored
@@ -915,12 +989,28 @@ if $PROGRAM_NAME == __FILE__
   # keyed by NAME (not id) so downstream zone_el_name/assign_controls
   # matching still resolves it to the real control element.
   orphan_controls_by_page = load_chart_specs_controls(OUT)
+  # I1 (final review, Important): a companion KPI element (bead 08sf) has no
+  # card of its own either — same problem as an orphan control immediately
+  # above, same fix. It lands wherever this file's kind-aware composition
+  # puts any other 'kpi-chart' element (the page's shared KPI band) rather
+  # than truly beside its own primary chart/table — the kind-grouped
+  # composition model (build_dashboard_from_collections's rung 2a) buckets
+  # ALL kpi-kind elements into one shared row regardless of which card
+  # produced them, so per-primary adjacency isn't a placement this model can
+  # express. Landing in the KPI band (a real, deliberate placement) beats not
+  # landing anywhere at all.
+  orphan_companions_by_page = load_chart_specs_companions(OUT)
   by_page.each do |pname, pcards|
     card_el_ids = pcards.map { |c| "el-#{c['id']}" }
     Array(orphan_controls_by_page[pname]).each do |ctl|
       next if card_el_ids.include?(ctl['id'])
       pcards << { 'id' => ctl['id'], 'title' => ctl['name'], 'chartType' => 'filter',
-                  'sigmaKindHint' => 'control', '_size' => '', '_pageOrder' => -1 }
+                  'sigmaKindHint' => 'control', '_size' => '', '_pageOrder' => -1, '_synthesized' => true }
+    end
+    Array(orphan_companions_by_page[pname]).each do |comp|
+      next if card_el_ids.include?(comp['id'])
+      pcards << { 'id' => comp['id'], 'title' => comp['name'], 'chartType' => 'badge_singlevalue',
+                  'sigmaKindHint' => 'kpi-chart', '_size' => '', '_pageOrder' => -1, '_synthesized' => true }
     end
   end
 

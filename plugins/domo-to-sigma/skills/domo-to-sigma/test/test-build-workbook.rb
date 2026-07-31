@@ -314,6 +314,20 @@ no_col_card = { 'id' => 'c30', 'title' => 'Orders', 'summaryNumber' => { 'column
 ok(build_summary_companion(no_col_card, {}).nil?,
    'nil when the summary number has no resolvable column (mirrors build_kpi\'s own "return nil unless col")')
 
+puts "== M1 (final review, minor): retarget_to_submaster! must NOT fabricate a 'source' key on " \
+     'an element that never had one (build_image) =='
+img_el = { 'id' => 'el-img1', 'kind' => 'image', 'url' => 'data:image/png;base64,AAAA' }
+sm_fixture = { 'id' => 'master-ds-dim', 'name' => 'Master (Customer Dim)' }
+retarget_to_submaster!(img_el, sm_fixture)
+ok(!img_el.key?('source'), "an image element (no 'source' key to begin with) still has none after retargeting " \
+                            '— no bogus source fabricated (M1)')
+eq(img_el['url'], 'data:image/png;base64,AAAA', "the image element's other fields are untouched")
+
+chart_el = { 'id' => 'el-c1', 'kind' => 'bar-chart', 'source' => { 'kind' => 'table', 'elementId' => 'master' } }
+retarget_to_submaster!(chart_el, sm_fixture)
+eq(chart_el['source'], { 'kind' => 'table', 'elementId' => 'master-ds-dim' },
+   'an element that DOES carry a source key still gets retargeted normally (unchanged behavior)')
+
 puts "== bead ziht: a card on a non-dominant DataSet routes to its own sub-master " \
      '(not skipped) once a live DM element is resolvable =='
 Dir.mktmpdir do |dir|
@@ -415,6 +429,56 @@ rule0 = build_element({ 'id' => 'c33', 'title' => 'One Number', 'chartType' => '
                         'summaryNumber' => { 'column' => 'total', 'aggregation' => 'SUM' } }, {})
 eq(rule0['kind'], 'kpi-chart', 'Rule 0 still routes straight to a single KPI')
 eq($companion_elements.size, 0, 'no companion is produced for a Rule-0 card (it IS the KPI, not a chart+companion)')
+
+puts "== C1 (final review, Critical): a ROUTED card whose PRIMARY element fails to build " \
+     'must NOT leak its companion KPI un-retargeted into $companion_elements =='
+Dir.mktmpdir do |dir|
+  dm_spec_path = File.join(dir, 'dm-spec.json')
+  dm_ids_path  = File.join(dir, 'dm-ids.json')
+  File.write(dm_spec_path, JSON.generate('pages' => [{ 'elements' => [
+    { 'id' => 'el-dim-1', 'name' => 'Customer Dim', '_datasetId' => 'ds-dim' },
+  ] }]))
+  File.write(dm_ids_path, JSON.generate('dataModelId' => 'dm-live-1', 'pages' => [{ 'elements' => [
+    { 'id' => 'el-dim-1', 'name' => 'Customer Dim', 'columnLabels' => ['Region', 'Segment'] },
+  ] }]))
+  stub_const('DM_SPEC_PATH', dm_spec_path) do
+    stub_const('DM_IDS_PATH', dm_ids_path) do
+      $ds_element_map = nil
+      $sub_masters = {}
+      $warnings = []
+      $companion_elements = []
+      before_companions = $companion_elements.length
+
+      # Routed to ds-dim's sub-master (resolvable, per the fixture above), so
+      # this DOES take the routing path (not the warn+SKIP "unresolvable
+      # DataSet" fallback). Two non-aggregated dimension columns (no
+      # 'aggregation', no groupBy/mapping signal) means split_cols resolves
+      # ZERO measures, so build_axis_chart's own "could not resolve both a
+      # dimension and a measure" guard fires and returns nil for the PRIMARY
+      # element — while the card ALSO carries a resolvable summaryNumber, so
+      # build_element_body has a companion ready to go before it discovers
+      # the primary failed.
+      failed = build_element({ 'id' => 'c34', 'title' => 'Customers (no measure)', 'chartType' => 'badge_vert_bar',
+                               'datasetId' => 'ds-dim',
+                               'columns' => [ { 'column' => 'region' }, { 'column' => 'segment' } ],
+                               'summaryNumber' => { 'column' => 'net_revenue', 'aggregation' => 'SUM',
+                                                    'label' => 'Total Revenue' } },
+                             {}, 'ds-fact')
+
+      ok(failed.nil?, 'build_element still returns nil when the routed primary element failed to build')
+      eq($companion_elements.length, before_companions,
+         '$companion_elements did NOT grow — the companion built during the failed attempt was ' \
+         'dropped, never leaked un-retargeted against the shared master (C1)')
+
+      # M3: the warning sequence must not claim a companion "represents" a
+      # card whose primary element was actually dropped.
+      ok(!$warnings.any? { |w| w['warning'].include?('ALSO represented') },
+         'the misleading "ALSO represented" warning does NOT fire when the primary failed to build (M3)')
+      ok($warnings.any? { |w| w['warning'].include?('was NOT emitted') && w['warning'].include?('failed to build') },
+         'a warning explains the companion was dropped BECAUSE the primary failed (M3)')
+    end
+  end
+end
 
 puts
 if $failures.zero? then puts "ALL PASS"; exit 0 else puts "#{$failures} FAILURE(S)"; exit 1 end

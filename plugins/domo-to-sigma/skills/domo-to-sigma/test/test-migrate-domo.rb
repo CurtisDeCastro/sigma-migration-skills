@@ -128,6 +128,29 @@ Dir.mktmpdir('migrate-domo-e2e') do |out_dir|
      "kpi-chart element count (#{kpi_els.size}) is one more than the #{rule0_kpi_cards} genuine Rule-0 " \
      'KPI card(s) — a companion KPI was emitted for the non-KPI card carrying a summaryNumber (bead 08sf)')
 
+  # Tightened per the final review (I2): a bare count bump could silently
+  # absorb an unrelated spurious KPI from a different bug. Assert the
+  # SPECIFIC companion element (id ends '-summary') is present, not just that
+  # the total moved by one.
+  companion_el = kpi_els.find { |e| e['id'].to_s.end_with?('-summary') }
+  ok(companion_el, "workbook-spec.json contains the SPECIFIC companion KPI element (id ending " \
+                   "'-summary'), not just an incidental kpi-chart count bump (bead 08sf)")
+
+  # ---- (g) final review Important I1/I2: the companion KPI element's id ---
+  # must appear in the MERGED <Page> layout XML, not just the element tree —
+  # otherwise it is present in the spec but never actually rendered on the
+  # migrated page (exactly what I1 found: build-domo-layout.rb derived zones
+  # from cards.json, and a companion's "-summary" id matches no card). Fixed
+  # via build-domo-layout.rb's load_chart_specs_companions + a
+  # pseudo-card synthesis, mirroring the pre-existing orphan-control pattern
+  # (see build-domo-layout.rb) — confirm it landed by checking the companion's
+  # own element id shows up as a LayoutElement's elementId= attribute.
+  if companion_el
+    ok(spec['layout'].to_s.include?(%(elementId="#{companion_el['id']}")),
+       "the companion KPI element '#{companion_el['id']}' has its OWN LayoutElement zone in the " \
+       'merged layout XML — it is placed on the page, not just present in the element tree (I1 fix)')
+  end
+
   # ---- idempotency: a second run with no --force is a no-op (all skip) --
   cmd2 = ['ruby', File.join(SCRIPTS, 'migrate-domo.rb'), '--offline', FIXTURE, '--out', out_dir]
   output2 = IO.popen(cmd2, err: [:child, :out], &:read)

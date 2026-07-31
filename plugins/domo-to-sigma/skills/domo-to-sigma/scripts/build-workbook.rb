@@ -395,10 +395,15 @@ end
 
 # bead 08sf: Domo prints a Summary Number above EVERY viz card, not just KPI
 # cards — a bar chart, a table, a combo all show one. Sigma's chart/table
-# elements have no summary slot, so the fix is a companion kpi-chart element
-# placed beside the primary one, reusing build_kpi (identical measure/format
-# resolution, including the #1 COUNT-of-row-key guard) with a distinct id so it
-# never collides with the primary element's own id.
+# elements have no summary slot, so the fix is a separate companion kpi-chart
+# element, reusing build_kpi (identical measure/format resolution, including
+# the #1 COUNT-of-row-key guard) with a distinct id so it never collides with
+# the primary element's own id. build-domo-layout.rb synthesizes this
+# companion its own layout zone in the page's KPI band (kind-aware
+# composition) — it is NOT guaranteed to land immediately adjacent to its own
+# primary chart/table (that band groups ALL of a page's KPI-kind elements
+# together, regardless of which card produced them); see refs/card-to-
+# element.md's "Companion KPI" section for the honest placement description.
 #
 # build_kpi's own "return nil unless col" guard is a bare truthiness check —
 # it only trips on a literal nil/false column, so an explicitly blank ''
@@ -823,8 +828,14 @@ end
 # at a per-DataSet sub-master instead of the shared primary master (bead ziht).
 # gsub (not sub) — an inlined aggregate Beast Mode formula can reference
 # [Master/...] more than once in a single string (e.g. an If() with two Sum()s).
+#
+# M1 (final review): guard the `source` rewrite — build_image's element has NO
+# `source` key at all (it's a bare data-URI), and unconditionally setting one
+# would fabricate a bogus source binding on an image element that never had
+# one. Every other element kind here (chart/table/kpi/pivot/map) always
+# carries `source`, so this only ever actually skips for an image.
 def retarget_to_submaster!(el, sm)
-  el['source'] = { 'kind' => 'table', 'elementId' => sm['id'] }
+  el['source'] = { 'kind' => 'table', 'elementId' => sm['id'] } if el.key?('source')
   walk = lambda do |n|
     case n
     when Hash   then n.each { |k, v| n[k] = walk.call(v) }
@@ -839,7 +850,9 @@ end
 
 def build_element(card, overrides, master_ds = nil)
   ds = card['datasetId'].to_s
-  if master_ds && !ds.empty? && ds != master_ds
+  routed = master_ds && !ds.empty? && ds != master_ds
+  sm = nil
+  if routed
     sm = sub_master_for(ds)
     unless sm
       warn_card(card, "SKIPPED — card is bound to DataSet #{ds} but this workbook's shared " \
@@ -848,17 +861,35 @@ def build_element(card, overrides, master_ds = nil)
                       'hand against its own source, or re-run once the data model has posted.')
       return nil
     end
-    before = $companion_elements.length
-    el = build_element_body(card, overrides)
-    return nil unless el
+  end
+
+  before = $companion_elements.length
+  el = build_element_body(card, overrides)
+  if el.nil?
+    # C1 (final review, promoted from a deferred Task-5 minor to BLOCKING): a
+    # card whose primary element failed to build must not leave behind an
+    # orphaned companion KPI. build_element_body itself now defers pushing a
+    # companion onto $companion_elements until it knows the primary built (see
+    # below) — so in the ordinary case this slice is a no-op — but truncate
+    # here too, defensively, at the one call site that actually decides
+    # whether this card's build succeeded: a companion that somehow reached
+    # $companion_elements during a failed attempt must never survive it. For
+    # the ROUTED (non-dominant-dataset) case specifically, surviving here
+    # would mean a companion still sourcing the SHARED master's namespace
+    # instead of the sub-master's — reintroducing the exact "Dependency not
+    # found" whole-workbook-POST failure bead ziht exists to prevent.
+    $companion_elements.slice!(before..-1)
+    return nil
+  end
+
+  if routed
     retarget_to_submaster!(el, sm)
-    $companion_elements[before..].each { |c| retarget_to_submaster!(c, sm) }
+    $companion_elements[before..-1].each { |c| retarget_to_submaster!(c, sm) }
     warn_card(card, "routed to sub-master '#{sm['name']}' for DataSet #{ds} (bead ziht) — " \
                     'verify column coverage against the card PNG; the sub-master passes through ' \
                     "every column of #{sm['name']}, not just the ones this card uses.")
-    return el
   end
-  build_element_body(card, overrides)
+  el
 end
 
 def build_element_body(card, overrides)
@@ -869,17 +900,20 @@ def build_element_body(card, overrides)
            (card['summaryNumber'] && Array(card['groupBy']).empty? && (card['columns'] || []).size <= 1)
   return build_kpi(card, overrides) if is_kpi
 
-  # Domo prints a Summary Number at the top of EVERY viz card, not just KPI cards.
-  # Sigma's chart/table elements have no summary slot, so Task 5 emits a companion
-  # KPI element (bead 08sf) via $companion_elements when one is resolvable.
+  # Domo prints a Summary Number at the top of EVERY viz card, not just KPI
+  # cards. Sigma's chart/table elements have no summary slot, so this
+  # RESOLVES a companion KPI element (bead 08sf) here, but does NOT push it
+  # onto $companion_elements (or warn about it) until the primary element
+  # below is confirmed to have actually built — see the bottom of this
+  # method. M3/C1 (final review): a companion pushed before that point would
+  # outlive a primary that then fails to build, leaving an orphaned KPI with
+  # no chart/table beside it and a warning claiming it "represents" a card
+  # that was actually dropped.
   sn = card['summaryNumber']
+  companion = nil
   if sn.is_a?(Hash) && !sn['column'].to_s.empty?
     companion = build_summary_companion(card, overrides)
-    if companion
-      $companion_elements << companion
-      warn_card(card, "source Summary Number ALSO represented as a companion KPI element " \
-                      "'#{companion['name']}' beside this #{kind || 'chart'} element (bead 08sf).")
-    else
+    unless companion
       agg = sn['aggregation'].to_s.empty? ? '(calc)' : sn['aggregation']
       warn_card(card, "source Summary Number NOT represented: Domo prints " \
                       "#{agg}(#{sn['column']}) above this card, but a Sigma " \
@@ -888,39 +922,70 @@ def build_element_body(card, overrides)
     end
   end
 
-  if image_card?(card)
-    img = build_image(card)
-    return img if img
-    warn_card(card, "image card #{card['id']}: no captured PNG — export from Domo UI and embed manually.")
-  end
-
-  mapped = chart_kind_for(card)
-  kind = mapped || kind
-  ct = card['chartType'].to_s.downcase
-  if mapped && NO_NATIVE_EQUIVALENT.key?(ct)
-    warn_card(card, "no native Sigma equivalent for chartType '#{card['chartType']}' — " \
-                    "#{NO_NATIVE_EQUIVALENT[ct]} Tracked as a Sigma custom-plugin follow-up " \
-                    '(sigma-plugin-development skill) — not handled by this converter today.')
-  end
-
-  case kind
-  when 'bar-chart', 'line-chart', 'area-chart', 'scatter-chart'
-    build_axis_chart(card, kind)
-  when 'combo-chart' then build_combo(card)
-  when 'pie-chart', 'donut-chart' then build_pie_or_donut(card, kind)
-  when 'pivot-table'  then build_pivot(card)
-  when 'table'        then build_table(card)
-  when 'region-map'   then build_map(card)
-  when 'kpi-chart'
-    build_kpi(card, overrides) || begin
-      warn_card(card, "kpi-chart: chartType '#{card['chartType']}' has no summaryNumber to build a " \
-                      'value from — emitted a table instead so the card is not silently dropped.')
-      build_table(card)
+  el =
+    if image_card?(card)
+      img = build_image(card)
+      if img
+        img
+      else
+        # PNG absent (Tier B / not captured) — honest fallback: fall through
+        # to the existing placeholder path below (unchanged) + flag it so it
+        # gets fixed by hand rather than shipping a broken/empty image element.
+        warn_card(card, "image card #{card['id']}: no captured PNG — export from Domo UI and embed manually.")
+        nil
+      end
     end
-  else
-    warn_card(card, "unknown chartType '#{card['chartType']}' → emitted bar-chart; verify against the PNG.")
-    build_axis_chart(card, 'bar-chart')
+
+  if el.nil?
+    # #2/#3: chartType is a STRICT Domo enum — EXACT-match it (never substring)
+    # against the known-token table before falling back to any upstream hint.
+    mapped = chart_kind_for(card)
+    kind = mapped || kind
+    ct = card['chartType'].to_s.downcase
+    if mapped && NO_NATIVE_EQUIVALENT.key?(ct)
+      warn_card(card, "no native Sigma equivalent for chartType '#{card['chartType']}' — " \
+                      "#{NO_NATIVE_EQUIVALENT[ct]} Tracked as a Sigma custom-plugin follow-up " \
+                      '(sigma-plugin-development skill) — not handled by this converter today.')
+    end
+
+    el = case kind
+         when 'bar-chart', 'line-chart', 'area-chart', 'scatter-chart'
+           build_axis_chart(card, kind)
+         when 'combo-chart' then build_combo(card)
+         when 'pie-chart', 'donut-chart' then build_pie_or_donut(card, kind)
+         when 'pivot-table'  then build_pivot(card)
+         when 'table'        then build_table(card)
+         when 'region-map'   then build_map(card)
+         when 'kpi-chart'
+           # badge_filledgauge (and any other kpi-mapped chartType) may reach
+           # here without a summaryNumber — never silently drop the card;
+           # degrade to a table + warn rather than emit nil.
+           build_kpi(card, overrides) || begin
+             warn_card(card, "kpi-chart: chartType '#{card['chartType']}' has no summaryNumber to build a " \
+                             'value from — emitted a table instead so the card is not silently dropped.')
+             build_table(card)
+           end
+         else
+           warn_card(card, "unknown chartType '#{card['chartType']}' → emitted bar-chart; verify against the PNG.")
+           build_axis_chart(card, 'bar-chart')
+         end
   end
+
+  if companion
+    if el
+      $companion_elements << companion
+      warn_card(card, "source Summary Number ALSO represented as a companion KPI element " \
+                      "'#{companion['name']}' alongside this #{el['kind'] || kind || 'chart'} element " \
+                      '(bead 08sf) — see build-domo-layout.rb for where it lands on the page.')
+    else
+      warn_card(card, "source Summary Number's companion KPI element '#{companion['name']}' was NOT " \
+                      "emitted: the primary #{kind || 'chart'} element for this card failed to build, " \
+                      'and a standalone companion with no primary chart/table beside it would be ' \
+                      'confusing, not helpful (bead 08sf / C1).')
+    end
+  end
+
+  el
 end
 
 # ---- controls (bug #2: fan out to EVERY element via the shared master) ------

@@ -12,6 +12,11 @@
           "id": "ctl-region-filter",
           "kind": "control",
           "name": "Region Filter"
+        },
+        {
+          "id": "el-2003-summary",
+          "kind": "kpi-chart",
+          "name": "Detail Table Total"
         }
       ]
     }
