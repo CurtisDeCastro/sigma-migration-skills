@@ -279,6 +279,36 @@ Dir.mktmpdir do |dir|
   end
 end
 
+puts "== live-found 2026-07-31: a NAMELESS DM element (build-dm.rb's rule 3 — no element-level " \
+     'name) still resolves a real sub-master formula, not "[/Col]" (an invalid, empty-table-name formula) =='
+Dir.mktmpdir do |dir|
+  dm_spec_path = File.join(dir, 'dm-spec.json')
+  dm_ids_path  = File.join(dir, 'dm-ids.json')
+  # Mirrors build-dm.rb's REAL output shape: no element-level `name`, plus the
+  # warehouse-table `source.path` build-workbook-spec.rb's own name-fallback
+  # already reads for the primary master.
+  File.write(dm_spec_path, JSON.generate('pages' => [{ 'elements' => [
+    { 'id' => 'el-dim-1', '_datasetId' => 'ds-dim',
+      'source' => { 'kind' => 'warehouse-table', 'path' => %w[CSA TJ CUSTOMER_DIM] } },
+  ] }]))
+  File.write(dm_ids_path, JSON.generate('dataModelId' => 'dm-live-1', 'pages' => [{ 'elements' => [
+    { 'id' => 'el-dim-1', 'name' => nil, 'columnLabels' => ['Customer Id', 'Region'] },
+  ] }]))
+  stub_const('DM_SPEC_PATH', dm_spec_path) do
+    stub_const('DM_IDS_PATH', dm_ids_path) do
+      $ds_element_map = nil
+      $sub_masters = {}
+      sm = sub_master_for('ds-dim')
+      ok(!sm.nil?, 'sub-master still built for a nameless DM element')
+      eq(sm['name'], 'Master (CUSTOMER_DIM)', "falls back to the warehouse table's own name (last path segment), " \
+                                              'the SAME resolution build-workbook-spec.rb uses for the primary master')
+      eq(sm['columns'].first['formula'], '[CUSTOMER_DIM/Customer Id]',
+         'formula is correctly table-qualified — never "[/Customer Id]" (an invalid, empty-table-name formula ' \
+         'that would 400 the whole workbook POST)')
+    end
+  end
+end
+
 puts "== bead ziht: dataset_element_map degrades to {} when the inputs are absent (offline / unit-test default) =="
 stub_const('DM_SPEC_PATH', '/nonexistent/dm-spec.json') do
   stub_const('DM_IDS_PATH', nil) do
@@ -327,6 +357,19 @@ chart_el = { 'id' => 'el-c1', 'kind' => 'bar-chart', 'source' => { 'kind' => 'ta
 retarget_to_submaster!(chart_el, sm_fixture)
 eq(chart_el['source'], { 'kind' => 'table', 'elementId' => 'master-ds-dim' },
    'an element that DOES carry a source key still gets retargeted normally (unchanged behavior)')
+
+puts "== live-found 2026-07-31: retarget_to_submaster! must not raise FrozenError on a " \
+     'shared frozen constant (AXIS_OFF) nested inside an axis-chart element =='
+axis_el = { 'id' => 'el-axis1', 'kind' => 'bar-chart',
+            'source' => { 'kind' => 'table', 'elementId' => 'master' },
+            'columns' => [{ 'id' => 'd-region', 'formula' => '[Master/Region]' }],
+            'xAxis' => { 'columnId' => 'd-region', 'format' => AXIS_OFF },
+            'yAxis' => { 'columnIds' => ['m-count'], 'format' => AXIS_OFF } }
+retarget_to_submaster!(axis_el, sm_fixture)
+ok(true, 'retargeting an element referencing the frozen AXIS_OFF constant does not raise FrozenError')
+eq(axis_el['columns'].first['formula'], '[Master (Customer Dim)/Region]', 'the real formula ref is still rewritten')
+eq(axis_el['xAxis']['format'], AXIS_OFF, "the frozen shared format hash is left as-is (never a rewrite target)")
+ok(AXIS_OFF.frozen?, 'sanity: AXIS_OFF itself is still frozen (unmutated) after being walked')
 
 puts "== bead ziht: a card on a non-dominant DataSet routes to its own sub-master " \
      '(not skipped) once a live DM element is resolvable =='
@@ -479,6 +522,31 @@ Dir.mktmpdir do |dir|
     end
   end
 end
+
+puts "== bead 08sf follow-up (live-found 2026-07-31): build_kpi inlines an aggregate " \
+     'Beast Mode summary number instead of referencing a non-existent DM column =='
+$translated_bms = {
+  'calculation_margin' => { 'id' => 'calculation_margin', 'name' => 'Margin Pct',
+                            'class' => 'aggregate',
+                            'sigmaFormula' => 'If(Sum([Net Revenue]) = 0, 0, Sum([Gross Profit]) / Sum([Net Revenue]))' },
+}
+calc_kpi = build_kpi({ 'id' => 'c34', 'title' => 'Margin % by Channel',
+                       'summaryNumber' => { 'column' => 'Margin Pct', 'beastModeId' => 'calculation_margin',
+                                            '_isCalc' => true, 'label' => 'Margin Pct' } }, {})
+ok(!calc_kpi.nil?, 'KPI still built for an aggregate-calc summary number')
+eq(calc_kpi['columns'][0]['formula'],
+   'If(Sum([Master/Net Revenue]) = 0, 0, Sum([Master/Gross Profit]) / Sum([Master/Net Revenue]))',
+   'formula is the INLINED, masterized Beast Mode expression — NOT Sum([Master/Margin Pct]), ' \
+   'a column that does not exist and would 400 the whole workbook POST')
+eq(calc_kpi['value'], { 'columnId' => calc_kpi['columns'][0]['id'] }, "value.columnId matches the inlined column's own id")
+$translated_bms = nil
+
+puts "== bead 08sf follow-up: a kpi-overrides.json entry still bypasses Beast Mode inlining =="
+override_kpi = build_kpi({ 'id' => 'c34', 'title' => 'Margin % by Channel',
+                           'summaryNumber' => { 'column' => 'Margin Pct', 'beastModeId' => 'calculation_margin',
+                                                '_isCalc' => true } },
+                         { 'c34' => { 'column' => 'net_revenue', 'aggregation' => 'SUM' } })
+eq(override_kpi['columns'][0]['formula'], 'Sum([Master/Net Revenue])', 'override still wins over the calc inlining')
 
 puts
 if $failures.zero? then puts "ALL PASS"; exit 0 else puts "#{$failures} FAILURE(S)"; exit 1 end

@@ -74,13 +74,36 @@ def dataset_element_map
   return $ds_element_map = {} unless dm_spec && dm_ids
 
   ds_by_el_id = {}
+  # LIVE-VALIDATED FIX (2026-07-31): build-dm.rb never sets an element-level
+  # `name` (rule 3), so the live readback's own `name` is null for both the
+  # primary master AND every other DM element. build-workbook-spec.rb already
+  # resolves this fallback for the ONE element it picks as the primary master
+  # (server assigns a name by kind: the warehouse table's last path segment,
+  # else "Custom SQL") — sub_master_for needs the identical resolution for
+  # every OTHER element, or its column formulas emit "[/Col]" (an empty table
+  # name — verified live against a nameless Customer Dim element: Sigma
+  # rejected "[/Phone]" as an invalid formula, which would 400 the whole
+  # workbook POST).
+  name_by_el_id = {}
   (dm_spec['pages'] || []).each do |p|
-    (p['elements'] || []).each { |e| ds_by_el_id[e['id']] = e['_datasetId'] if e['_datasetId'] }
+    (p['elements'] || []).each do |e|
+      ds_by_el_id[e['id']] = e['_datasetId'] if e['_datasetId']
+      src = e['source'] || {}
+      name_by_el_id[e['id']] =
+        if src['kind'] == 'warehouse-table' && !Array(src['path']).empty?
+          Array(src['path']).last
+        else
+          'Custom SQL'
+        end
+    end
   end
   map = {}
   (dm_ids['pages'] || []).flat_map { |p| p['elements'] || [] }.each do |e|
     ds_id = ds_by_el_id[e['id']]
-    map[ds_id] = e if ds_id && !map.key?(ds_id)
+    next unless ds_id && !map.key?(ds_id)
+    resolved = e.dup
+    resolved['name'] = name_by_el_id[e['id']] if e['name'].to_s.strip.empty?
+    map[ds_id] = resolved
   end
   $ds_element_map = map
 end
@@ -383,13 +406,22 @@ def build_kpi(card, overrides)
   disp = display_name(col)
   label = (sn['label'] && !sn['label'].to_s.strip.empty?) ? sn['label'] : disp
   vid = mcol_id(disp).sub(/\Am-/, 'v-')
+  # LIVE-VALIDATED FIX (2026-07-31): an aggregate/window Beast Mode summary
+  # number is not a data-model column — mirrors measure_col's own
+  # inline_beast_mode_measure handling. Without this, a KPI (or bead 08sf's
+  # companion KPI, which calls build_kpi for a card whose summary is bound to
+  # an aggregate calc like "Margin Pct") emitted Sum([Master/Margin Pct]), a
+  # column that does not exist, 400ing the ENTIRE workbook POST. Only applies
+  # when NOT overridden — a kpi-overrides.json entry points at a real column.
+  value_col = (!ov && sn['_isCalc'] && inline_beast_mode_measure(card, sn)) ||
+              { 'id' => vid, 'name' => label,
+                'formula' => "#{sigma_agg(agg, sn['distinct'])}(#{mref(disp)})",
+                'format' => sigma_format(sn['format'], label) }.compact
   {
     'id' => eid(card), 'kind' => 'kpi-chart', 'name' => label,
     'source' => { 'kind' => 'table', 'elementId' => 'master' },
-    'columns' => [{ 'id' => vid, 'name' => label,
-                    'formula' => "#{sigma_agg(agg, sn['distinct'])}(#{mref(disp)})",
-                    'format' => sigma_format(sn['format'], label) }.compact],
-    'value' => { 'columnId' => vid },   # ⚠ columnId, NOT id (feedback_sigma_kpi_value_columnid)
+    'columns' => [value_col],
+    'value' => { 'columnId' => value_col['id'] },   # ⚠ columnId, NOT id (feedback_sigma_kpi_value_columnid)
   }
 end
 
@@ -838,8 +870,15 @@ def retarget_to_submaster!(el, sm)
   el['source'] = { 'kind' => 'table', 'elementId' => sm['id'] } if el.key?('source')
   walk = lambda do |n|
     case n
-    when Hash   then n.each { |k, v| n[k] = walk.call(v) }
-    when Array  then n.map! { |v| walk.call(v) }
+    # LIVE-VALIDATED FIX (2026-07-31): AXIS_OFF ({'marks'=>'none'}.freeze) is a
+    # shared frozen constant referenced by every axis-chart element's
+    # xAxis/yAxis 'format' — mutating it in place raised FrozenError the first
+    # time this routed an axis-chart card (Domo page 'Orders Executive',
+    # "Customers by Region"). A frozen Hash/Array in this codebase is always
+    # static shared config, never a dynamic [Master/...] reference, so it's
+    # always safe to leave it untouched rather than walk into it.
+    when Hash   then (n.frozen? ? n : n.each { |k, v| n[k] = walk.call(v) })
+    when Array  then (n.frozen? ? n : n.map! { |v| walk.call(v) })
     when String then n.gsub('[Master/', "[#{sm['name']}/")
     else n
     end
