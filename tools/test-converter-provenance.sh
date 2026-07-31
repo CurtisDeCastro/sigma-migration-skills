@@ -241,9 +241,32 @@ cat > "$TOOLX/PROVENANCE.json" <<EOF
 EOF
 E3="$(commit_all stale-with-patches)"
 CONVERTER_STALENESS_DAYS=14 bash "$GUARD" --freshness "$E3" >"$TMP/out" 2>&1; RC=$?
-[ "$RC" -eq 1 ]; check $? "stale entry with local_patches still fails (got $RC)"
-grep -q "local_patches has 1 entry recorded" "$TMP/out"; check $? "failure surfaces the local_patches count"
-grep -q "do not just re-vendor blind" "$TMP/out"; check $? "failure points at the correct remediation (patch upstream, don't blind re-vendor)"
+# CONTRACT CHANGED (2026-07-31): a bundle held back by an OPEN local_patches entry is
+# pinned deliberately, so it WARNS rather than blocking. The old assertion here demanded
+# a hard failure while the guard's own message said "do not re-vendor blind" — it failed
+# you for not taking the action it warned against. Found the hard way: re-vendoring
+# quicksight-to-sigma destroyed an undocumented native window-fn lowering and broke
+# scripts/test-window-native.rb.
+[ "$RC" -eq 0 ]; check $? "stale entry with an OPEN local_patches entry WARNS, not fails (got $RC)"
+grep -q "STALE BUT PINNED" "$TMP/out"; check $? "warning is labelled as a deliberate pin"
+grep -q "1 OPEN local_patches entry" "$TMP/out"; check $? "warning surfaces the open-entry count"
+grep -q "Port each open entry upstream" "$TMP/out"; check $? "warning names the real remedy (port upstream, then re-vendor)"
+grep -q "^::warning" "$TMP/out"; check $? "emitted as ::warning, not ::error"
+
+# Teeth: a patch marked SUPERSEDED has landed upstream and no longer pins anything, so
+# the same staleness MUST still hard-fail. Without this, marking every entry superseded
+# would silently disarm the gate.
+python3 - "$TOOLX/PROVENANCE.json" <<'PYEOF'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d['local_patches'] = [{"commit": "1111111", "summary": "SUPERSEDED — folded upstream", "upstream_pr": "#1"}]
+json.dump(d, open(p, 'w'), indent=2)
+PYEOF
+E3b="$(commit_all stale-with-superseded-patches)"
+CONVERTER_STALENESS_DAYS=14 bash "$GUARD" --freshness "$E3b" >"$TMP/out" 2>&1; RC=$?
+[ "$RC" -eq 1 ]; check $? "stale entry whose local_patches are ALL superseded still FAILS (got $RC)"
+grep -q "all SUPERSEDED" "$TMP/out"; check $? "failure explains a re-vendor is safe here and should retire them"
 
 echo '{ not json' > "$TOOLX/PROVENANCE.json"
 E4="$(commit_all bad-json)"
