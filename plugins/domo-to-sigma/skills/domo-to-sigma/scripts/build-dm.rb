@@ -37,6 +37,7 @@ require 'json'
 require 'fileutils'
 require_relative 'lib/domo_sigma_util'
 require_relative 'lib/domo_rest'   # auto-fill's thin network seam — see fetch_stream_config
+require_relative 'lib/column_preflight' # shared SENTINEL_SOURCES — see the "needs review" warning below
 include DomoSigma   # display_name, rand_id, inode_id — shared with build-workbook.rb
 
 OUT = ENV['DOMO_DISCOVERY_DIR'] || File.expand_path('../discovery', __dir__)
@@ -394,6 +395,11 @@ if $PROGRAM_NAME == __FILE__
             'real warehouse table before this build). Waive with ' \
             'SIGMA_SKIP_COLUMN_PREFLIGHT="<reason>" ruby scripts/build-dm.rb'
     end
+    if File.mtime(preflight_path) < File.mtime(map_path)
+      abort "  build-dm.rb aborted: discovery/column-preflight.json predates discovery/dataset-map.json " \
+            '(the mapping changed since the last pre-flight check) — re-run ' \
+            'scripts/preflight-columns.rb to regenerate it, then re-run this.'
+    end
     preflight_report = begin
       JSON.parse(File.read(preflight_path))
     rescue JSON::ParserError => e
@@ -462,7 +468,7 @@ if $PROGRAM_NAME == __FILE__
   warn "  wrote #{File.join(OUT, 'dm-spec.json')} (#{elements.size} element(s))"
   missing = ds_map.select { |_, v| v['connectionId'].to_s.empty? }.keys
   warn "  ⚠ #{missing.size} dataset(s) have no connectionId — fill dataset-map.json: #{missing.join(', ')}" unless missing.empty?
-  needs_review = ds_map.select { |_, v| %w[domo-stream-config-query-only domo-landed-data].include?(v['_source']) }.keys
+  needs_review = ds_map.select { |_, v| ColumnPreflight::SENTINEL_SOURCES.include?(v['_source']) }.keys
   unless needs_review.empty?
     warn "  ⚠ #{needs_review.size} dataset(s) need human review before this DM is posted (query-only " \
          'stream or no warehouse source at all — see "_source"/"_note" in dataset-map.json, and the ' \

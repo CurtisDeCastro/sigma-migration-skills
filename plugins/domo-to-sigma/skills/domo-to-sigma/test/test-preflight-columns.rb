@@ -101,6 +101,25 @@ report5, any_missing5 = run_preflight(datasets, ds_map_resolved, %w[ds-1], fetch
 eq(any_missing5, false, 'the only gap is excluded -> clean')
 eq(report5['ds-1']['resolved_by_exclude'], ['ORDER_ID'], 'the exclusion is reported, not silently applied')
 
+puts '== fetch_warehouse_columns: honors SIGMA_HTTP_TIMEOUT for the real (non-stubbed) network path =='
+captured_timeouts = []
+Net::HTTP.define_singleton_method(:start) do |*args, **kwargs, &blk|
+  captured_timeouts << kwargs
+  # Return a minimal fake result so the block completes without a real connection.
+  blk.call(Object.new.tap { |o| o.define_singleton_method(:request) { |*_a| raise Sigma::Error, 'stub: no real request' } })
+end
+begin
+  ENV['SIGMA_HTTP_TIMEOUT'] = '45'
+  ENV['SIGMA_BASE_URL'] ||= 'https://example.sigmacomputing.com'
+  fetch_warehouse_columns('conn-timeout-test', %w[DB SCH T]) # requester/lister both nil -> real path
+rescue StandardError
+  # Expected — the stub raises past the lookup; we only care about the captured timeout kwargs.
+ensure
+  ENV.delete('SIGMA_HTTP_TIMEOUT')
+end
+ok(captured_timeouts.any? { |kw| kw[:read_timeout] == 45 }, "SIGMA_HTTP_TIMEOUT=45 was actually used as read_timeout, got #{captured_timeouts.inspect}")
+ok(captured_timeouts.any? { |kw| kw[:open_timeout] == 30 }, "open_timeout is capped at 30 even though read_timeout is 45, got #{captured_timeouts.inspect}")
+
 puts
 if $failures.zero?
   puts 'ALL PASS'

@@ -362,6 +362,11 @@ auto-applied) `columnOverrides` entry when a known derivable pattern matches (e.
 integer date key). Resolve via `excludeColumns`/`columnOverrides` in `dataset-map.json`, then
 re-run. Waivable like the doctor-gate: `SIGMA_SKIP_COLUMN_PREFLIGHT="<reason>"`.
 
+Note the one accepted gap: a human-authored `columnOverrides` entry is trusted as "resolved" as
+soon as it's present — the formula it contains is NOT independently re-checked against the
+warehouse, so an override that itself references a column the warehouse doesn't have will still
+only surface as an opaque error at DM POST time, same as before this pre-flight existed.
+
 ---
 
 ## Phases 4–6 — turnkey (one command)

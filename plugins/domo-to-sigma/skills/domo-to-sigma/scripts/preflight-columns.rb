@@ -23,13 +23,13 @@
 
 require 'json'
 require 'fileutils'
+require 'uri'
+require 'net/http'
 require_relative 'lib/column_preflight'
 require_relative 'lib/sigma_rest'
 include ColumnPreflight
 
 OUT = ENV['DOMO_DISCOVERY_DIR'] || File.expand_path('../discovery', __dir__)
-
-SENTINEL_SOURCES = %w[domo-stream-config-query-only domo-landed-data].freeze
 
 # Network seam: connection_id + [db,schema,table] -> {'columns'=>[...],
 # 'inode_id'=>...} or {'error'=>message} — NEVER raises, so run_preflight can
@@ -43,7 +43,31 @@ SENTINEL_SOURCES = %w[domo-stream-config-query-only domo-landed-data].freeze
 # `requester`/`lister` are injected (default: the real Sigma.request /
 # Sigma.list_entries) so test/test-preflight-columns.rb can stub Sigma
 # entirely, mirroring build-dm.rb's fetcher: seam for autofill_dataset_map.
-def fetch_warehouse_columns(connection_id, path, requester: Sigma.method(:request), lister: Sigma.method(:list_entries))
+def fetch_warehouse_columns(connection_id, path, requester: nil, lister: nil)
+  # Bound every live call — a cold warehouse or a very wide view can otherwise
+  # leave a catalog lookup blocked with no client-side cap (the "migration
+  # stuck for hours" hang Tableau's sibling discover-columns.rb guards
+  # against the same way). Only applies to the REAL default requester/lister
+  # — tests inject their own stubs directly and bypass this entirely. Compute
+  # timeout/uri lazily, ONLY when a default is actually needed: every existing
+  # test passes its own requester:/lister: stubs and must keep working with no
+  # SIGMA_BASE_URL set at all (Sigma.base_url raises when it's unset).
+  if requester.nil? || lister.nil?
+    timeout = (ENV['SIGMA_HTTP_TIMEOUT'] || '90').to_i
+    uri = URI(Sigma.base_url)
+  end
+  requester ||= lambda do |method, p, body: nil|
+    Net::HTTP.start(uri.host, uri.port, use_ssl: true,
+                    open_timeout: [timeout, 30].min, read_timeout: timeout) do |http|
+      Sigma.request(method, p, body: body, http: http)
+    end
+  end
+  lister ||= lambda do |p|
+    Net::HTTP.start(uri.host, uri.port, use_ssl: true,
+                    open_timeout: [timeout, 30].min, read_timeout: timeout) do |http|
+      Sigma.list_entries(p, http: http)
+    end
+  end
   # 1. Resolve the table to an inodeId. NOT GET /v2/connections/{conn}/tables
   #    — that endpoint does not exist (feedback_sigma_columns_api_endpoint).
   lookup = requester.call(:post, "/v2/connection/#{connection_id}/lookup",
@@ -112,7 +136,7 @@ def run_preflight(datasets, ds_map, used, fetcher: method(:fetch_warehouse_colum
     ds = ds_by_id[id]
     next unless entry && ds
     next if entry['connectionId'].to_s.strip.empty? || entry['table'].to_s.strip.empty? ||
-            SENTINEL_SOURCES.include?(entry['_source'])
+            ColumnPreflight::SENTINEL_SOURCES.include?(entry['_source'])
     schema_cols = ds.dig('schema', 'columns')
     next unless schema_cols.is_a?(Array) # build-dm.rb's own ArgumentError already covers this
 

@@ -579,27 +579,31 @@ def run_live!(opts)
     map_path = File.join(DISCOVERY, 'dataset-map.json')
     if File.exist?(map_path)
       hr('preflight-columns (Domo columns vs the real warehouse schema)')
-      preflight_path = File.join(DISCOVERY, 'column-preflight.json')
-      if !opts[:force] && File.exist?(preflight_path)
-        skip_phase!('preflight-columns', 'already checked (idempotent skip)')
-      else
-        pf_ok, pf_code, _pf_out = run_script!('preflight-columns.rb')
-        if !pf_ok
-          skip_env = ENV['SIGMA_SKIP_COLUMN_PREFLIGHT'].to_s.strip
-          if skip_env.empty?
-            fail_phase!('preflight-columns',
-                        "preflight-columns.rb exited #{pf_code} — unresolved column(s) or a fetch error " \
-                        'found; see discovery/column-preflight.json for names + any auto-suggested ' \
-                        'columnOverrides, resolve via excludeColumns/columnOverrides in dataset-map.json, ' \
-                        'then re-run (or set SIGMA_SKIP_COLUMN_PREFLIGHT="<reason>" to waive, same as ' \
-                        "build-dm.rb's gate)")
-          else
-            skip_phase!('preflight-columns',
-                        "unresolved columns found but WAIVED via SIGMA_SKIP_COLUMN_PREFLIGHT=#{skip_env.inspect}")
-          end
+      # Unlike other idempotent phases in this file, this one is NOT skipped
+      # just because its output file already exists: dataset-map.json is
+      # human-editable between runs (a newly-resolved connectionId, a fix via
+      # excludeColumns/columnOverrides), and a stale column-preflight.json
+      # would either silently re-admit a gap that was never actually
+      # re-checked, or permanently deadlock the fix-and-re-run loop (the
+      # operator's fix is never validated). The live check itself is cheap
+      # (a couple of Sigma API calls per dataset), so always re-running it
+      # here is the safe default.
+      pf_ok, pf_code, _pf_out = run_script!('preflight-columns.rb')
+      skip_env = ENV['SIGMA_SKIP_COLUMN_PREFLIGHT'].to_s.strip
+      if !pf_ok
+        if skip_env.empty?
+          fail_phase!('preflight-columns',
+                      "preflight-columns.rb exited #{pf_code} — unresolved column(s) or a fetch error " \
+                      'found; see discovery/column-preflight.json for names + any auto-suggested ' \
+                      'columnOverrides, resolve via excludeColumns/columnOverrides in dataset-map.json, ' \
+                      'then re-run (or set SIGMA_SKIP_COLUMN_PREFLIGHT="<reason>" to waive, same as ' \
+                      "build-dm.rb's gate)")
         else
-          done_phase!('preflight-columns')
+          skip_phase!('preflight-columns',
+                      "unresolved columns found but WAIVED via SIGMA_SKIP_COLUMN_PREFLIGHT=#{skip_env.inspect}")
         end
+      else
+        done_phase!('preflight-columns')
       end
     end
 

@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 require 'set'
+require_relative 'domo_sigma_util'
 
 #
 # Pure logic for the domo DM column pre-flight check (bead m655): diffing a
@@ -13,6 +14,14 @@ require 'set'
 # is pure and offline-testable (test/test-column-preflight.rb), matching
 # build-dm.rb's own derive_map_entry/autofill_dataset_map split.
 module ColumnPreflight
+  # A dataset-map.json entry flagged with one of these `_source` values (see
+  # build-dm.rb's derive_map_entry) has no real warehouse table to check yet —
+  # a query-only stream, or landed data with no connector at all. Shared here
+  # (not just preflight-columns.rb's own concern) so build-dm.rb's "needs
+  # human review" warning and preflight-columns.rb's/run_preflight's skip
+  # condition can never drift apart into two different lists.
+  SENTINEL_SOURCES = %w[domo-stream-config-query-only domo-landed-data].freeze
+
   module_function
 
   # Uppercase, strip every non-alphanumeric character — loose comparison
@@ -36,7 +45,17 @@ module ColumnPreflight
   # commonly return lowercase names for some connectors — Postgres, BigQuery —
   # while Domo's own names may be any case).
   def diff_columns(schema_cols, warehouse_cols, excluded, overrides)
-    warehouse_names = Array(warehouse_cols).map { |c| c['name'].to_s.upcase }.to_set
+    # Warehouse-existence is checked on the SAME transform build_element
+    # actually emits into the formula reference ([table/display_name(raw)] —
+    # see build-dm.rb) — not the raw Domo name and not the raw warehouse
+    # catalog name. Two differently-styled Domo names for the same column
+    # (e.g. "order_date" and "Order Date") must both resolve identically here,
+    # since build_element emits the identical reference for both.
+    # excludeColumns/columnOverrides matching stays on the RAW Domo name
+    # (unchanged) — those are human-authored keys, not a warehouse-existence
+    # check.
+    warehouse_display_names = Array(warehouse_cols)
+      .map { |c| DomoSigma.display_name(c['name'].to_s).upcase }.to_set
     missing = []
     resolved_by_exclude = []
     resolved_by_override = []
@@ -44,7 +63,7 @@ module ColumnPreflight
       raw = (c['name'] || c['id']).to_s
       next if raw.empty?
       up = raw.upcase
-      next if warehouse_names.include?(up)
+      next if warehouse_display_names.include?(DomoSigma.display_name(raw).upcase)
       if excluded.include?(up)
         resolved_by_exclude << raw
       elsif overrides.key?(up)

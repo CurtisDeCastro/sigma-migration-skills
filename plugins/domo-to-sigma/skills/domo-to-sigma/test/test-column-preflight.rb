@@ -50,6 +50,15 @@ warehouse_lower = [{ 'name' => 'order_id', 'type' => 'LONG' }, { 'name' => 'orde
 diff5 = diff_columns(schema, warehouse_lower, [], {})
 eq(diff5['missing'], [], 'lowercase warehouse names still match Domo\'s uppercase-ish names')
 
+puts '== diff_columns: differently-styled Domo names for the same column both resolve against the warehouse (display_name-matched, not raw-matched) =='
+schema_spaced = [{ 'name' => 'Order Date', 'type' => 'DATE' }]
+warehouse_raw = [{ 'name' => 'ORDER_DATE', 'type' => 'DATE' }]
+diff_spaced = diff_columns(schema_spaced, warehouse_raw, [], {})
+eq(diff_spaced['missing'], [], '"Order Date" (spaced) matches warehouse "ORDER_DATE" via the same display_name transform build_element emits')
+schema_snake = [{ 'name' => 'order_date', 'type' => 'DATE' }]
+diff_snake = diff_columns(schema_snake, warehouse_raw, [], {})
+eq(diff_snake['missing'], [], '"order_date" (snake_case) matches the same warehouse column too — both Domo naming styles resolve identically')
+
 puts '== suggest_derivation: exactly one numeric candidate whose name starts with the missing column\'s normalized name -> suggestion =='
 warehouse3 = [{ 'name' => 'ORDER_ID', 'type' => 'LONG' }, { 'name' => 'ORDER_DATE_KEY', 'type' => 'INTEGER' }, { 'name' => 'CUSTOMER_ID', 'type' => 'LONG' }]
 s = suggest_derivation('ORDER_DATE', 'DATE', warehouse3)
