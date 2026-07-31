@@ -15,6 +15,7 @@ this work follows. This file is the *state*; that file is the *plan*.
 | Track B — parity spine | not started, scoped |
 | Track C — `pageLayoutV4` as layout tier 1 | not started, scoped, **now a repair not a greenfield rung** |
 | Track D — deferred by design | not started |
+| **Track E — remove the sigma-data-model MCP dependency** | **designed, not started** — see below |
 | The bar (`assert-phase6-ran.rb` exits 0 on a live run) | **not met** — still blocked at gate 1 |
 
 Merged this session:
@@ -90,6 +91,99 @@ own code are already located and verified from source — this is a **repair**, 
 
 Grid is 60 wide → Domo→Sigma is **×0.4**. `HEADER` entries are positioned section dividers and beat
 inferring titles from `collections[]`.
+
+---
+
+## Track E — make `domo-to-sigma` independent of the sigma-data-model MCP
+
+**Requested 2026-07-31. Designed, not started.** Scope decision from the operator: drop the
+**`sigma-data-model`** MCP only. `mcp__sigma-mcp-v2__query` (3 refs) **stays** — that is live
+parity verification against a real Sigma org and cannot be vendored.
+
+### The pattern already exists — domo simply was never wired in
+
+`tools/vendor-converters.sh` bundles converters with esbuild into a committed, self-contained
+`.mjs` under `plugins/<skill>/skills/<skill>/converter/`, with a `PROVENANCE.json` and a CI
+freshness gate. Its own header states the goal verbatim: *"so conversion runs locally via `node`
+with NO clone, NO npm install, NO network, and NO MCP."*
+
+- **7 of 11 plugins already vendor.** Not wired in: `domo-to-sigma`, `gooddata-to-sigma`,
+  `microstrategy-to-sigma`, `sisense-to-sigma`. `vendor-converters.sh`'s `skill_for()` has no
+  `domo` case.
+- Two flavours exist: **bundle-from-MCP** (tableau, lookml, thoughtspot, qlik, powerbi,
+  quicksight — canonical source stays upstream) and **converter-TS-in-skill** (cognos). Domo wants
+  the **first**, so the formula converter stays canonical and keeps inheriting upstream fixes.
+- **`node` is already a domo prerequisite** — `bootstrap.sh`, `doctor.sh`, `verify-anchors.rb` and
+  `build-dashboard-layout.rb` all use it. This adds no new runtime dependency.
+
+### Measured dependency surface
+
+| tool | refs | disposition |
+|---|---|---|
+| `convert_sql_to_sigma_formula` | 18 | the whole dependency — vendor it |
+| `format_sigma_display_name` | 1 (`refs/card-to-element.md:312`) | `sigmaDisplayName` is exported from `src/sigma-ids.ts` — free in the bundle |
+| `diagnose_sigma_save_error` | 1 (`refs/beast-mode-to-sigma.md:250`) | replace with the local `/columns` readback check |
+| `mcp__sigma-mcp-v2__query` | 3 | **out of scope, stays** |
+
+### The real win is not the dependency — it is removing the agent from the loop
+
+`convert-beast-modes.rb` is today a **two-step flow with an agent in the middle**: it writes
+`formulas.pending.json`, then the skill calls the MCP tool **once per formula** and hand-writes
+each result back into `sigmaFormula`, then `--lint` runs.
+
+```
+today:  normalize → [AGENT calls MCP per formula, writes sigmaFormula] → --lint
+after:  normalize → convert (ONE node call, whole file) → lint       single run, no agent
+```
+
+One `node` invocation takes the whole pending file and returns every result. Fully scripted,
+offline-testable, no agent step to get wrong.
+
+### Track A's honesty signals become locally callable — a real upgrade
+
+`lookUnknownFunctions` (`formulas.ts:1120`), `hasResidualCaseKeyword` (`:767`) and
+`hasResidualInfixOperator` (`:794`) all ship in the bundle. Today `lint_formula` re-implements
+weaker checks in Ruby — its `And()`/`Or()` detection is **case-sensitive** and misses raw all-caps
+`CASE`/`WHEN` residue. Point it at the real signals instead. This is strictly better than the MCP
+path ever was.
+
+### Three-tier resolution, copied from `powerbi-to-sigma`
+
+That skill is the exemplar; read its `SKILL.md:183` and `QUICKSTART.md:55` before building.
+
+1. **Default** — vendored bundle via `node`. No MCP, no network.
+2. **Dev override** — `--mcp-dir` / `$DOMO_MCP_DIR` → a developer's own checkout wins.
+3. **Last resort** — bundle *and* `node` both absent → exit 10, print the exact MCP call, resume
+   with `--converter-out`. Keeps a manual escape hatch without making MCP load-bearing, and
+   degrades honestly.
+
+### Work items, in order
+
+1. **Upstream (`sigma-data-model-mcp`)** — add `src/formula-cli.ts`. `src/cli.ts` has **no** formula
+   path today (verified). It must emit the **same JSON shape `tools.ts` already returns**
+   (`{sigmaFormula, converted, warnings[], note?}`) so the domo Ruby is identical whether it calls
+   MCP or CLI. Accept a batch (the whole pending file) in one invocation, not one formula per call.
+   Reusable later by dbt / snowflake / looker. **This is a prerequisite PR.**
+2. **`tools/vendor-converters.sh`** — add the `domo` case to `skill_for()` and to the default
+   `WANT` list; bundle to `converter/formula-cli.mjs` + `PROVENANCE.json`.
+3. **CI freshness gate** — model on `tools/check-cognos-bundle.rb` so the bundle cannot silently
+   drift from canonical.
+4. **`convert-beast-modes.rb`** — collapse to a single run; invoke the bundle; implement the
+   three-tier resolution; point `lint_formula` at the real honesty signals.
+5. **Docs** — `SKILL.md`, `QUICKSTART.md`, `refs/beast-mode-to-sigma.md`,
+   `refs/card-to-element.md`: the Phase-2 agent step is gone, and MCP is a last-resort fallback
+   rather than the path.
+
+### Two sub-decisions — my recommendation, NOT separately confirmed
+
+Confirm before building:
+
+- **CLI lives upstream** rather than as a skill-local shim. Cleaner (one source of truth, reusable)
+  but costs a prerequisite PR. The alternative is a shim inside the skill, which is faster but puts
+  the contract somewhere it can drift.
+- **Tier 3 keeps a documented MCP fallback.** The alternative — zero MCP references and a hard gate
+  on the bundle — is a legitimate choice, just less graceful. PowerBI keeps the fallback, which is
+  why it is the recommendation.
 
 ---
 
