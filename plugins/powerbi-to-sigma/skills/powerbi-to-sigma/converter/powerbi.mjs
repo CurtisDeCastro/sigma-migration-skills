@@ -425,7 +425,7 @@ function isNeverHostable(rawDax) {
 }
 function triageCrossTable(args) {
   const { metricName, sigmaFormula, rawDax, homeTable, refs, columnOwners, relationships } = args;
-  const maxDepth = args.maxDepth ?? 2;
+  const maxDepth = args.maxDepth ?? 3;
   const metricRefSet = new Set(args.metricRefs ?? []);
   const dependsOnMetrics = [...new Set(refs.filter((r) => metricRefSet.has(r)))];
   const columnRefs = refs.filter((r) => !metricRefSet.has(r));
@@ -525,6 +525,15 @@ function describeVerdict(t) {
     return `TRIAGE: hostable on "${safe.baseTable} View" (${hop(safe)}, fan-out SAFE).`;
   const risky = t.candidates[0];
   return `TRIAGE: "${risky.baseTable} View" (${hop(risky)}) covers it but FAN-OUT RISK \u2014 [${risky.unsafeRefs.join(", ")}] would double-count across the join; rebuild at the visual's grain.`;
+}
+function isNoCoveringView(t) {
+  return !t.neverHostable && t.candidates.length === 0;
+}
+function describeMetricBlocker(b) {
+  if (b.kind === "cross-element-metric") {
+    return `TRIAGE: references metric "${b.metric}", which is declared on a DIFFERENT element ("${b.ownerTable}") \u2014 Sigma metrics cannot reference another element's metric, at any join distance; no hop limit fixes this. Recreate the dependency as a workbook-level calculation, or duplicate "${b.metric}" onto this element.`;
+  }
+  return `TRIAGE: depends on sibling metric "${b.metric}", which was itself dropped \u2014 its own drop reason: ${b.siblingReason} That dependency, not column reachability, is this measure's real blocker; resolve "${b.metric}" first, or rewrite this measure without it.`;
 }
 
 // ../mcp-fresh/build/powerbi.js
@@ -2307,6 +2316,13 @@ function convertPowerBIToSigma(modelJson, options = {}) {
     }
   }
   const triageRels = (model.relationships || []).filter((r) => r.fromTable && r.toTable).map((r) => ({ from: r.fromTable, to: r.toTable }));
+  const allMetricOwner = /* @__PURE__ */ Object.create(null);
+  for (const _t of model.tables || []) {
+    for (const _m of _t.measures || []) {
+      if (_m?.name && !allMetricOwner[_m.name])
+        allMetricOwner[_m.name] = _t.name;
+    }
+  }
   const measureToElementId = {};
   const measureAggMap = pbiBuildMeasureAggMap(model);
   const measureDaxMap = {};
@@ -2619,6 +2635,7 @@ SELECT 1 AS _placeholder`;
         if (!canonicalCol.has(k))
           canonicalCol.set(k, d);
       }
+      const siblingDropReason = /* @__PURE__ */ new Map();
       for (let pass = 0; pass < 5; pass++) {
         const metricNames = new Set(metrics.map((mm) => mm.name));
         const canonicalMetric = /* @__PURE__ */ new Map();
@@ -2648,9 +2665,24 @@ SELECT 1 AS _placeholder`;
               refs: [...new Set(refs)],
               columnOwners: triageColumnOwners,
               relationships: triageRels,
-              metricRefs: [...metricNames]
+              metricRefs: [...metricNames],
+              // Explicit, not just inherited from triageCrossTable's own default —
+              // measured on R1-R4: 9 of 32 `no-covering-View` drops are a filtered
+              // dimension reachable at 3 hops, not 2 (see powerbi-crosstable-triage.ts).
+              maxDepth: 3
             });
-            warnings.push(`\u26A0 "${metrics[i].name}": references "[${bad}]" which is not a column or metric on this element (cross-table measure) \u2014 dropped; recreate in a workbook element at the visual's grain (the joined "View" element has the dim columns). ${describeTriage(_triage)}`);
+            let _blocker = null;
+            if (isNoCoveringView(_triage)) {
+              if (allMetricOwner[bad] && allMetricOwner[bad] !== tableName) {
+                _blocker = { kind: "cross-element-metric", metric: bad, ownerTable: allMetricOwner[bad] };
+              } else if (siblingDropReason.has(bad)) {
+                _blocker = { kind: "dropped-sibling", metric: bad, siblingReason: siblingDropReason.get(bad) };
+              }
+            }
+            const _reasonText = _blocker ? describeMetricBlocker(_blocker) : describeTriage(_triage);
+            const _warning = _blocker ? `\u26A0 "${metrics[i].name}": references "[${bad}]" which is not a column or metric on this element (cross-table measure) \u2014 dropped. ${_reasonText}` : `\u26A0 "${metrics[i].name}": references "[${bad}]" which is not a column or metric on this element (cross-table measure) \u2014 dropped; recreate in a workbook element at the visual's grain (the joined "View" element has the dim columns). ${_reasonText}`;
+            warnings.push(_warning);
+            siblingDropReason.set(metrics[i].name, _reasonText);
             metrics.splice(i, 1);
           }
         }
