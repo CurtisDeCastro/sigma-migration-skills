@@ -41,8 +41,15 @@ Evidence and the full story:
   `VALUE`; treating SERIES as a dimension yields a chart with ZERO measures
 - **`columnOverrides`** — a Domo-only column derived from one that does exist,
   rather than emitting a reference the warehouse cannot resolve
-- **multi-dataset page** — the `ds-dim` card is expected to be SKIPPED with a named
-  warning (one master per dataset is bead ziht), not silently mis-bound
+- **multi-dataset page** — the `ds-dim` card now routes to its own hidden
+  sub-master (`master-ds-dim`, one master per DataSet — bead ziht landed) rather
+  than being SKIPPED, **provided** a live `dm-ids.json`/`dm-spec.json` pair is
+  available to resolve `ds-dim` to its data-model element; absent that pair, the
+  card still falls back to today's named-warning SKIP rather than a silent
+  mis-bind. `corpus/run-corpus.sh --check` for this case only validates
+  `golden/data-model.json` (build-dm.rb's output) — no golden `chart-specs.json`
+  exists here, so this case does not exercise the sub-master routing itself;
+  that is pinned by `test/test-migrate-domo.rb`'s full-chain fixture instead
 
 ## Converter
 

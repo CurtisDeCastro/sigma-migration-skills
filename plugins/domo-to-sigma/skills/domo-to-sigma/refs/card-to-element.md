@@ -109,6 +109,75 @@ So:
   (spec cannot carry it)."* Do not silently drop it and do not fake it with a
   table.
 
+### Companion KPI — a Summary Number beside a chart/table, not instead of it (bead 08sf)
+
+Rule 0 above covers the card where the Summary Number **is** the whole card
+(no real grouping, ≤1 column) — that becomes a `kpi-chart` and nothing else.
+But Domo also prints a Summary Number above a card that **is** a genuine
+chart or table — a bar chart with a real `groupBy`, say, still shows a big
+"Total Sales" number above its bars. Sigma's chart/table elements have no
+summary slot to carry that, so the fix is a **second, adjacent `kpi-chart`
+element** — a companion — built from the *same* Summary Number config Rule 0
+uses (same measure/aggregation/format resolution, including the COUNT-of-id
+guard), placed beside the primary chart/table element rather than replacing
+it. The companion's `id` is always the primary element's `id` + `-summary`
+so it never collides. When no resolvable column exists for the companion, the
+headline value is dropped with a named warning rather than silently emitted
+as a broken `Count([Master/])`.
+
+### Row limit → Sigma top-n filter (bead 2ef7)
+
+A Domo card's row **limit** ("Top 25 by revenue") has no query-level analog
+in Sigma — porting the card without translating it just renders every
+warehouse row instead of the limited set (live-validated: 872 rows instead of
+25). The fix is an **element-level `top-n` filter**:
+```jsonc
+"filters": [{
+  "id": "topn-<elementId>", "columnId": "<first measure column id>",
+  "kind": "top-n", "rankingFunction": "rank", "mode": "top-n", "rowCount": 25
+}]
+```
+- Ranked by the **first measure column** on the element (mirrors the
+  existing "sort by first measure" convention used for axis-chart x-axis
+  sorting).
+- Sigma's top-n `rowCount` is a **descending-only, static number literal** —
+  it cannot bind to a control, and an *ascending* Domo `orderBy` has no
+  equivalent, so it is left alone rather than silently reversed.
+- No measure column on the element → nothing to rank by → no filter is
+  emitted (never a `columnId: nil` filter).
+
+### One sub-master per non-dominant DataSet (bead ziht)
+
+Domo cards on the same page are frequently bound to **different DataSets** —
+a customer-dimension card sitting next to an order-fact chart. Every element
+this converter builds sources a single shared `master` table, built from
+whichever DataSet the page's cards use most (the **dominant** DataSet). A
+card bound to any *other* DataSet references columns `master` doesn't have —
+posting it unmodified 400s the **entire** workbook (`Dependency not found:
+'master/region'`, live-validated).
+
+The fix: resolve the card's own DataSet to its **live Sigma data-model
+element** (via the posted DM's readback, `dm-ids.json`, cross-referenced with
+`dm-spec.json`'s `_datasetId` tags) and build it a **hidden sub-master** —
+the same auto-passthrough shape (every column of the live element, by name)
+the primary `master` gets, named `master-<datasetId>`. The card's element is
+then retargeted: its `source.elementId` points at the sub-master instead of
+`master`, and every `[Master/...]` formula reference is rewritten to
+`[<sub-master name>/...]`. One sub-master per non-dominant DataSet **actually
+used** by a card — not one per DataSet in the data model.
+
+The sub-master itself is not a page element a user would browse to; it is
+carried through `chart-specs.json`'s top-level **`data_elements`** key and
+must land on the workbook's Data page alongside `master` (both the live
+`build-workbook-spec.rb` path and `migrate-domo.rb --offline`'s local
+assembly fold this key in) — a visible element retargeted to it would
+otherwise reference an id that doesn't exist on any page.
+
+When no live data-model element is yet resolvable for the card's DataSet
+(no `dm-ids.json`/`dm-spec.json` pair posted yet), the card is **skipped with
+a named warning** instead of silently mis-bound to the wrong master — rebuild
+it by hand, or re-run once the data model has posted.
+
 ---
 
 ## Full card-type → element map

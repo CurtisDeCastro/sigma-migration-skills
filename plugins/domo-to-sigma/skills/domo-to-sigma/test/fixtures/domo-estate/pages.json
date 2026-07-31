@@ -2,6 +2,6 @@
   {
     "id": "p1",
     "title": "Overview",
-    "cardIds": ["kpi1", "bar1", "img1", "table1"]
+    "cardIds": ["kpi1", "bar1", "img1", "table1", "table_topn", "dsdim1", "companion1"]
   }
 ]
