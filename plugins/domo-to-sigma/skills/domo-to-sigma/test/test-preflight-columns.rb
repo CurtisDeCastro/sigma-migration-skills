@@ -47,6 +47,20 @@ result_500 = fetch_warehouse_columns('conn-3', %w[DB SCH TABLE], requester: requ
 ok(result_500['error'], 'a 500 also produces an error result, not an exception')
 ok(!result_500['error'].include?('sync'), 'a non-404 error does NOT get the 404-specific sync guidance')
 
+puts '== fetch_warehouse_columns: a stray "404" in a 500 error BODY must not false-positive as a 404 (Finding 1 regression) =='
+requester_500_with_404_in_body = ->(*_a, **_kw) do
+  raise Sigma::Error, "POST /v2/connection/conn-5/lookup -> 500 Internal Server Error\n{\"error\":\"upstream call to service X returned 404\",\"code\":\"E404\"}"
+end
+result_500_body404 = fetch_warehouse_columns('conn-5', %w[DB SCH TABLE], requester: requester_500_with_404_in_body, lister: ->(_p) { [] })
+ok(result_500_body404['error'], 'a 500 whose body mentions 404 still produces an error result, not an exception')
+ok(!result_500_body404['error'].include?('sync'),
+   "a 404 token in the BODY (not the status line) must NOT trigger the 404-specific sync guidance, got #{result_500_body404['error'].inspect}")
+
+puts '== fetch_warehouse_columns: a network-level exception (timeout) is caught, not propagated (Finding 2 regression) =='
+requester_timeout = ->(*_a, **_kw) { raise Net::ReadTimeout, 'execution expired' }
+result_timeout = fetch_warehouse_columns('conn-6', %w[DB SCH TABLE], requester: requester_timeout, lister: ->(_p) { [] })
+ok(result_timeout.is_a?(Hash) && result_timeout['error'], 'a Net::ReadTimeout is caught and returned as an error Hash, not raised')
+
 puts '== fetch_warehouse_columns: lookup resolving to a non-table kind is an error =='
 requester_view = ->(*_a, **_kw) { { 'inodeId' => 'inode-9', 'kind' => 'view' } }
 result_view = fetch_warehouse_columns('conn-4', %w[DB SCH V], requester: requester_view, lister: ->(_p) { [] })

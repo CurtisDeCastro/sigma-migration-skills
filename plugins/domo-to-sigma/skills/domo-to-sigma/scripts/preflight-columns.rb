@@ -33,7 +33,13 @@ SENTINEL_SOURCES = %w[domo-stream-config-query-only domo-landed-data].freeze
 
 # Network seam: connection_id + [db,schema,table] -> {'columns'=>[...],
 # 'inode_id'=>...} or {'error'=>message} — NEVER raises, so run_preflight can
-# degrade one dataset at a time instead of aborting the whole run.
+# degrade one dataset at a time instead of aborting the whole run. Covers not
+# just Sigma::Error (a non-2xx HTTP response) but every other realistic live-
+# call failure mode: malformed JSON (JSON::ParserError), a slow/cold catalog
+# lookup (Net::OpenTimeout/Net::ReadTimeout/Timeout::Error), and DNS/connection
+# failures (SocketError/Errno::ECONNREFUSED) — matching the rescue set already
+# used elsewhere in this plugin (scripts/verify-anchors.rb) and by Tableau's
+# sibling scripts/discover-columns.rb.
 # `requester`/`lister` are injected (default: the real Sigma.request /
 # Sigma.list_entries) so test/test-preflight-columns.rb can stub Sigma
 # entirely, mirroring build-dm.rb's fetcher: seam for autofill_dataset_map.
@@ -60,13 +66,26 @@ def fetch_warehouse_columns(connection_id, path, requester: Sigma.method(:reques
   end
   { 'columns' => cols, 'inode_id' => inode }
 rescue Sigma::Error => e
-  if e.message =~ /\b404\b/
+  # Match only the status-code position on the FIRST line (sigma_rest.rb's
+  # request raises "#{METHOD} #{path} -> #{code} #{message}\n#{body}") — not
+  # anywhere in the full message+body. A bare /\b404\b/ over the whole string
+  # would false-positive on a genuine 500/401/403 whose JSON error body
+  # happens to contain a stray "404" token (a nested error code, a referenced
+  # upstream status, an unrelated ID) and mislabel it with the 404-specific
+  # "sync it first" guidance instead of the real error.
+  if e.message.lines.first.to_s =~ /-> 404\b/
     { 'error' => "table #{path.join('.')} not found in Sigma's catalog for connection " \
                  "#{connection_id} — sync it first: POST /v2/connections/#{connection_id}/sync " \
                  "with body {\"path\": #{JSON.generate(path)}}, then re-run." }
   else
     { 'error' => "Sigma error resolving #{path.join('.')}: #{e.message.lines.first.to_s.strip}" }
   end
+rescue JSON::ParserError => e
+  { 'error' => "Sigma returned malformed JSON resolving #{path.join('.')}: #{e.message}" }
+rescue Net::OpenTimeout, Net::ReadTimeout, Timeout::Error => e
+  { 'error' => "timeout resolving #{path.join('.')} (#{e.class}) — the warehouse catalog lookup did not return in time" }
+rescue SocketError, Errno::ECONNREFUSED => e
+  { 'error' => "network error resolving #{path.join('.')}: #{e.class}: #{e.message}" }
 end
 
 # Runs the full pre-flight over every used dataset. Pure orchestration —
