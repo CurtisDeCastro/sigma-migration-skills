@@ -50,9 +50,11 @@ collection; treat it as real but unverified until we see one.
   AND their real positions.
 - `PAGE_BREAK` entries also appear in `standard.template`.
 
-## Two defects in our current code
+## Two defects — fixed
 
-Both verified by reading the source, not assumed:
+Both verified by reading the source, not assumed, and now fixed (`Domo.cards_for_page`
+requests `includeV4PageLayouts=true`; `DomoSigma.merge_pagelayoutv4_geometry` performs the
+join below):
 
 1. **`scripts/lib/domo_rest.rb:238`** — `cards_for_page` sends only `parts`. Without
    `includeV4PageLayouts=true` a v4-inline page returns no `pageLayoutV4` at all, so
