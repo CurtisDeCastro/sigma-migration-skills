@@ -480,5 +480,30 @@ Dir.mktmpdir do |dir|
   end
 end
 
+puts "== bead 08sf follow-up (live-found 2026-07-31): build_kpi inlines an aggregate " \
+     'Beast Mode summary number instead of referencing a non-existent DM column =='
+$translated_bms = {
+  'calculation_margin' => { 'id' => 'calculation_margin', 'name' => 'Margin Pct',
+                            'class' => 'aggregate',
+                            'sigmaFormula' => 'If(Sum([Net Revenue]) = 0, 0, Sum([Gross Profit]) / Sum([Net Revenue]))' },
+}
+calc_kpi = build_kpi({ 'id' => 'c34', 'title' => 'Margin % by Channel',
+                       'summaryNumber' => { 'column' => 'Margin Pct', 'beastModeId' => 'calculation_margin',
+                                            '_isCalc' => true, 'label' => 'Margin Pct' } }, {})
+ok(!calc_kpi.nil?, 'KPI still built for an aggregate-calc summary number')
+eq(calc_kpi['columns'][0]['formula'],
+   'If(Sum([Master/Net Revenue]) = 0, 0, Sum([Master/Gross Profit]) / Sum([Master/Net Revenue]))',
+   'formula is the INLINED, masterized Beast Mode expression — NOT Sum([Master/Margin Pct]), ' \
+   'a column that does not exist and would 400 the whole workbook POST')
+eq(calc_kpi['value'], { 'columnId' => calc_kpi['columns'][0]['id'] }, "value.columnId matches the inlined column's own id")
+$translated_bms = nil
+
+puts "== bead 08sf follow-up: a kpi-overrides.json entry still bypasses Beast Mode inlining =="
+override_kpi = build_kpi({ 'id' => 'c34', 'title' => 'Margin % by Channel',
+                           'summaryNumber' => { 'column' => 'Margin Pct', 'beastModeId' => 'calculation_margin',
+                                                '_isCalc' => true } },
+                         { 'c34' => { 'column' => 'net_revenue', 'aggregation' => 'SUM' } })
+eq(override_kpi['columns'][0]['formula'], 'Sum([Master/Net Revenue])', 'override still wins over the calc inlining')
+
 puts
 if $failures.zero? then puts "ALL PASS"; exit 0 else puts "#{$failures} FAILURE(S)"; exit 1 end

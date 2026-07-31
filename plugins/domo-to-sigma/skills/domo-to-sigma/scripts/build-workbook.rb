@@ -383,13 +383,22 @@ def build_kpi(card, overrides)
   disp = display_name(col)
   label = (sn['label'] && !sn['label'].to_s.strip.empty?) ? sn['label'] : disp
   vid = mcol_id(disp).sub(/\Am-/, 'v-')
+  # LIVE-VALIDATED FIX (2026-07-31): an aggregate/window Beast Mode summary
+  # number is not a data-model column — mirrors measure_col's own
+  # inline_beast_mode_measure handling. Without this, a KPI (or bead 08sf's
+  # companion KPI, which calls build_kpi for a card whose summary is bound to
+  # an aggregate calc like "Margin Pct") emitted Sum([Master/Margin Pct]), a
+  # column that does not exist, 400ing the ENTIRE workbook POST. Only applies
+  # when NOT overridden — a kpi-overrides.json entry points at a real column.
+  value_col = (!ov && sn['_isCalc'] && inline_beast_mode_measure(card, sn)) ||
+              { 'id' => vid, 'name' => label,
+                'formula' => "#{sigma_agg(agg, sn['distinct'])}(#{mref(disp)})",
+                'format' => sigma_format(sn['format'], label) }.compact
   {
     'id' => eid(card), 'kind' => 'kpi-chart', 'name' => label,
     'source' => { 'kind' => 'table', 'elementId' => 'master' },
-    'columns' => [{ 'id' => vid, 'name' => label,
-                    'formula' => "#{sigma_agg(agg, sn['distinct'])}(#{mref(disp)})",
-                    'format' => sigma_format(sn['format'], label) }.compact],
-    'value' => { 'columnId' => vid },   # ⚠ columnId, NOT id (feedback_sigma_kpi_value_columnid)
+    'columns' => [value_col],
+    'value' => { 'columnId' => value_col['id'] },   # ⚠ columnId, NOT id (feedback_sigma_kpi_value_columnid)
   }
 end
 
