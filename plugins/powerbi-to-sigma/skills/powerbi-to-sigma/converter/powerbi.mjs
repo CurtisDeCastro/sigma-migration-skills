@@ -280,6 +280,253 @@ function buildDerivedElements(elements) {
   return derived;
 }
 
+// ../mcp-fresh/build/powerbi-crosstable-triage.js
+var AGGREGATES = /* @__PURE__ */ new Set([
+  "Sum",
+  "Count",
+  "CountDistinct",
+  "Avg",
+  "Min",
+  "Max",
+  "StdDev",
+  "Var",
+  "Median",
+  "Percentile",
+  "CountIf",
+  "SumIf"
+]);
+function maskAndCheckQuotes(s) {
+  let out = "";
+  let i = 0;
+  let wellFormed = true;
+  while (i < s.length) {
+    const c = s[i];
+    if (c === '"') {
+      const quote = c;
+      let j = i + 1;
+      let closed = false;
+      while (j < s.length) {
+        if (s[j] === "\\" && j + 1 < s.length) {
+          j += 2;
+          continue;
+        }
+        if (s[j] === quote) {
+          j++;
+          closed = true;
+          break;
+        }
+        j++;
+      }
+      if (closed) {
+        out += " ".repeat(j - i);
+        i = j;
+      } else {
+        out += c;
+        i++;
+        wellFormed = false;
+      }
+    } else {
+      out += c;
+      i++;
+    }
+  }
+  return { masked: out, wellFormed };
+}
+function maskStringLiterals(s) {
+  return maskAndCheckQuotes(s).masked;
+}
+function isWellFormedFormula(s) {
+  const { masked, wellFormed } = maskAndCheckQuotes(s);
+  if (!wellFormed)
+    return false;
+  const stack = [];
+  for (const ch of masked) {
+    if (ch === "(" || ch === "[")
+      stack.push(ch);
+    else if (ch === ")") {
+      if (stack.pop() !== "(")
+        return false;
+    } else if (ch === "]") {
+      if (stack.pop() !== "[")
+        return false;
+    }
+  }
+  return stack.length === 0;
+}
+function splitTopLevelArgs(s) {
+  const masked = maskStringLiterals(s);
+  const out = [];
+  let depth = 0, start = 0;
+  for (let i = 0; i < masked.length; i++) {
+    const c = masked[i];
+    if (c === "(" || c === "[")
+      depth++;
+    else if (c === ")" || c === "]")
+      depth--;
+    else if (c === "," && depth === 0) {
+      out.push(s.slice(start, i));
+      start = i + 1;
+    }
+  }
+  out.push(s.slice(start));
+  return out;
+}
+function aggregateSummand(name, operand) {
+  if (name === "CountIf")
+    return null;
+  if (name === "SumIf" || name === "Percentile")
+    return splitTopLevelArgs(operand)[0] ?? "";
+  return operand;
+}
+function enumerateAggregateCalls(formula) {
+  const f = String(formula || "");
+  const masked = maskStringLiterals(f);
+  const out = [];
+  const re = /([A-Za-z_]\w*)\s*\(/g;
+  let m;
+  while (m = re.exec(masked)) {
+    if (!AGGREGATES.has(m[1]))
+      continue;
+    const before = m.index > 0 ? masked[m.index - 1] : "";
+    if (/[A-Za-z0-9_]/.test(before))
+      continue;
+    const open = m.index + m[0].length - 1;
+    let d = 0;
+    for (let j = open; j < masked.length; j++) {
+      if (masked[j] === "(")
+        d++;
+      else if (masked[j] === ")" && --d === 0) {
+        out.push({ name: m[1], operand: f.slice(open + 1, j) });
+        break;
+      }
+    }
+  }
+  return out;
+}
+function reachableTables(from, rels, maxDepth) {
+  const out = /* @__PURE__ */ new Map([[from, 0]]);
+  let frontier = [from];
+  for (let d = 1; d <= maxDepth && frontier.length; d++) {
+    const next = [];
+    for (const t of frontier) {
+      for (const r of rels) {
+        if (r.from !== t || out.has(r.to))
+          continue;
+        out.set(r.to, d);
+        next.push(r.to);
+      }
+    }
+    frontier = next;
+  }
+  return out;
+}
+function isNeverHostable(rawDax) {
+  return /\b(?:SELECTEDVALUE|ISFILTERED)\s*\(/i.test(maskStringLiterals(String(rawDax || "")));
+}
+function triageCrossTable(args) {
+  const { metricName, sigmaFormula, rawDax, homeTable, refs, columnOwners, relationships } = args;
+  const maxDepth = args.maxDepth ?? 2;
+  const metricRefSet = new Set(args.metricRefs ?? []);
+  const dependsOnMetrics = [...new Set(refs.filter((r) => metricRefSet.has(r)))];
+  const columnRefs = refs.filter((r) => !metricRefSet.has(r));
+  const shell = {
+    metric: metricName,
+    homeTable,
+    refs,
+    neverHostable: false,
+    candidates: [],
+    reachability: "none",
+    dependsOnMetrics
+  };
+  if (isNeverHostable(rawDax))
+    return { ...shell, neverHostable: true };
+  const malformed = !isWellFormedFormula(sigmaFormula);
+  const bases = [...new Set(relationships.map((r) => r.from))].sort();
+  const candidates = [];
+  for (const b of bases) {
+    const reach = reachableTables(b, relationships, maxDepth);
+    const hopOf = (ref) => {
+      let hop = Infinity;
+      const owners = columnOwners[ref];
+      for (const o of Array.isArray(owners) ? owners : []) {
+        const h = reach.get(o);
+        if (h !== void 0 && h < hop)
+          hop = h;
+      }
+      return hop;
+    };
+    let covered = true, maxHop = 0;
+    for (const ref of columnRefs) {
+      const hop = hopOf(ref);
+      if (hop === Infinity) {
+        covered = false;
+        break;
+      }
+      if (hop > maxHop)
+        maxHop = hop;
+    }
+    if (!covered)
+      continue;
+    if (malformed) {
+      candidates.push({ baseTable: b, maxHop, verdict: "fanout-risk", unsafeRefs: ["malformed-formula"] });
+      continue;
+    }
+    const unsafeRefs = [];
+    for (const call of enumerateAggregateCalls(sigmaFormula)) {
+      const summand = aggregateSummand(call.name, call.operand);
+      const sRefs = summand === null ? [] : (maskStringLiterals(summand).match(/\[([^\]]+)\]/g) || []).map((s) => s.slice(1, -1)).filter((r) => !metricRefSet.has(r));
+      const cross = sRefs.filter((r) => hopOf(r) >= 1);
+      const hasBase = sRefs.some((r) => hopOf(r) === 0);
+      if (cross.length)
+        unsafeRefs.push(...cross);
+      else if (!hasBase)
+        unsafeRefs.push(`${call.name}()`);
+    }
+    candidates.push({
+      baseTable: b,
+      maxHop,
+      verdict: unsafeRefs.length ? "fanout-risk" : "safe",
+      unsafeRefs: [...new Set(unsafeRefs)]
+    });
+  }
+  candidates.sort((x, y) => (x.verdict === y.verdict ? 0 : x.verdict === "safe" ? -1 : 1) || x.maxHop - y.maxHop || x.baseTable.localeCompare(y.baseTable));
+  const safeCount = candidates.filter((c) => c.verdict === "safe").length;
+  return {
+    ...shell,
+    candidates,
+    reachability: safeCount === 0 ? "none" : safeCount === 1 ? "one" : "many"
+  };
+}
+function describeTriage(t) {
+  const msg = describeVerdict(t);
+  const deps = t.dependsOnMetrics || [];
+  if (deps.length) {
+    return `${msg} Also depends on metric${deps.length === 1 ? "" : "s"} ${deps.map((d) => `"${d}"`).join(", ")} \u2014 re-homing this measure requires re-homing ${deps.length === 1 ? "that one" : "those too"}.`;
+  }
+  return msg;
+}
+function describeVerdict(t) {
+  if (t.candidates.length && t.candidates.every((c) => c.unsafeRefs.includes("malformed-formula"))) {
+    return "TRIAGE: the translated formula could not be parsed confidently (unclosed quote or mis-nested brackets) \u2014 not classified; inspect the formula by hand.";
+  }
+  if (t.neverHostable) {
+    return "TRIAGE: report-context-dependent (SELECTEDVALUE/ISFILTERED) \u2014 no static View can host it; rebuild at the visual's grain.";
+  }
+  if (!t.candidates.length) {
+    return `TRIAGE: no View covers it within the configured depth (references: ${t.refs.join(", ")}).`;
+  }
+  const hop = (c) => `${c.maxHop} hop${c.maxHop === 1 ? "" : "s"}`;
+  if (t.reachability === "many") {
+    const names = t.candidates.filter((c) => c.verdict === "safe").map((c) => `"${c.baseTable} View"`);
+    return `TRIAGE: ambiguous \u2014 ${names.length} Views cover it (${names.join(", ")}); needs a human choice.`;
+  }
+  const safe = t.candidates.find((c) => c.verdict === "safe");
+  if (safe)
+    return `TRIAGE: hostable on "${safe.baseTable} View" (${hop(safe)}, fan-out SAFE).`;
+  const risky = t.candidates[0];
+  return `TRIAGE: "${risky.baseTable} View" (${hop(risky)}) covers it but FAN-OUT RISK \u2014 [${risky.unsafeRefs.join(", ")}] would double-count across the join; rebuild at the visual's grain.`;
+}
+
 // ../mcp-fresh/build/powerbi.js
 var PBI_COMMUNITY_LINKS = {
   lod: "community.sigmacomputing.com/t/tableau-level-of-detail-or-lod-calculations-in-sigma/6427",
@@ -2042,6 +2289,24 @@ function convertPowerBIToSigma(modelJson, options = {}) {
   const tableIdMap = {};
   const tableColMap = {};
   const allPbiToSigmaNames = {};
+  const triageColumnOwners = /* @__PURE__ */ Object.create(null);
+  const _own = (key, table) => {
+    if (!key)
+      return;
+    if (!triageColumnOwners[key])
+      triageColumnOwners[key] = [];
+    if (!triageColumnOwners[key].includes(table))
+      triageColumnOwners[key].push(table);
+  };
+  for (const _t of model.tables || []) {
+    if (_t.name?.startsWith("LocalDateTable_") || _t.name?.startsWith("DateTableTemplate_"))
+      continue;
+    for (const _c of _t.columns || []) {
+      _own(_c.name, _t.name);
+      _own(sigmaDisplayName(String(_c.sourceColumn || _c.name || "").replace(/^\[|\]$/g, "")), _t.name);
+    }
+  }
+  const triageRels = (model.relationships || []).filter((r) => r.fromTable && r.toTable).map((r) => ({ from: r.fromTable, to: r.toTable }));
   const measureToElementId = {};
   const measureAggMap = pbiBuildMeasureAggMap(model);
   const measureDaxMap = {};
@@ -2373,7 +2638,19 @@ SELECT 1 AS _placeholder`;
           const refs = (String(metrics[i].formula).match(/\[([^\]\/]+)\]/g) || []).map((r) => r.slice(1, -1));
           const bad = refs.find((r) => !colDisplays.has(r) && !metricNames.has(r));
           if (bad) {
-            warnings.push(`\u26A0 "${metrics[i].name}": references "[${bad}]" which is not a column or metric on this element (cross-table measure) \u2014 dropped; recreate in a workbook element at the visual's grain (the joined "View" element has the dim columns).`);
+            const _rawDaxExpr = ((t.measures || []).find((mm) => mm.name === metrics[i].name) || {}).expression;
+            const _rawDax = Array.isArray(_rawDaxExpr) ? _rawDaxExpr.join("\n") : String(_rawDaxExpr || "");
+            const _triage = triageCrossTable({
+              metricName: metrics[i].name,
+              sigmaFormula: String(metrics[i].formula),
+              rawDax: _rawDax,
+              homeTable: tableName,
+              refs: [...new Set(refs)],
+              columnOwners: triageColumnOwners,
+              relationships: triageRels,
+              metricRefs: [...metricNames]
+            });
+            warnings.push(`\u26A0 "${metrics[i].name}": references "[${bad}]" which is not a column or metric on this element (cross-table measure) \u2014 dropped; recreate in a workbook element at the visual's grain (the joined "View" element has the dim columns). ${describeTriage(_triage)}`);
             metrics.splice(i, 1);
           }
         }
