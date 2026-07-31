@@ -393,6 +393,31 @@ def build_kpi(card, overrides)
   }
 end
 
+# bead 08sf: Domo prints a Summary Number above EVERY viz card, not just KPI
+# cards — a bar chart, a table, a combo all show one. Sigma's chart/table
+# elements have no summary slot, so the fix is a companion kpi-chart element
+# placed beside the primary one, reusing build_kpi (identical measure/format
+# resolution, including the #1 COUNT-of-row-key guard) with a distinct id so it
+# never collides with the primary element's own id.
+#
+# build_kpi's own "return nil unless col" guard is a bare truthiness check —
+# it only trips on a literal nil/false column, so an explicitly blank ''
+# column (as opposed to an absent one) sails through it and build_kpi would
+# happily emit a broken Count([Master/]) reference. Re-check for blank here,
+# scoped only to this new function (build_kpi itself is untouched), using the
+# same .to_s.strip.empty? convention prune_unresolvable_columns! already uses
+# elsewhere in this file for "no resolvable column".
+def build_summary_companion(card, overrides)
+  sn = card['summaryNumber'] || {}
+  ov = overrides[card['id']]
+  col = ov && ov['column'] || sn['column']
+  return nil if col.to_s.strip.empty?
+  kpi = build_kpi(card, overrides)
+  return nil unless kpi
+  kpi['id'] = eid(card, '-summary')
+  kpi
+end
+
 def build_axis_chart(card, kind)
   dims, meas = split_cols(card)
   if dims.empty? || meas.empty?

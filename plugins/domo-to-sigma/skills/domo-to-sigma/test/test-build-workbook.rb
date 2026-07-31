@@ -300,5 +300,19 @@ end
 ok(Object.const_defined?(:DM_IDS_PATH), 'DM_IDS_PATH still defined after stub block exits (regression: used to vanish when the original value was nil/falsy)')
 eq(DM_IDS_PATH, nil, 'restored to its original nil value, not left undefined')
 
+puts "== bead 08sf: build_summary_companion mirrors build_kpi but with a distinct id =="
+kpi_card = { 'id' => 'c29', 'title' => 'Revenue by Channel',
+             'summaryNumber' => { 'column' => 'net_revenue', 'aggregation' => 'SUM', 'label' => 'Total Revenue' } }
+companion = build_summary_companion(kpi_card, {})
+ok(!companion.nil?, 'companion built when the summary number has a resolvable column')
+eq(companion['kind'], 'kpi-chart', 'companion is a kpi-chart element')
+eq(companion['name'], 'Total Revenue', 'companion carries the summary number\'s own label')
+eq(companion['id'], "#{eid(kpi_card)}-summary",
+   'companion id is the primary element\'s id + a -summary suffix (never collides with it)')
+
+no_col_card = { 'id' => 'c30', 'title' => 'Orders', 'summaryNumber' => { 'column' => '', 'aggregation' => 'COUNT' } }
+ok(build_summary_companion(no_col_card, {}).nil?,
+   'nil when the summary number has no resolvable column (mirrors build_kpi\'s own "return nil unless col")')
+
 puts
 if $failures.zero? then puts "ALL PASS"; exit 0 else puts "#{$failures} FAILURE(S)"; exit 1 end
