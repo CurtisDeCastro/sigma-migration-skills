@@ -328,6 +328,19 @@ retarget_to_submaster!(chart_el, sm_fixture)
 eq(chart_el['source'], { 'kind' => 'table', 'elementId' => 'master-ds-dim' },
    'an element that DOES carry a source key still gets retargeted normally (unchanged behavior)')
 
+puts "== live-found 2026-07-31: retarget_to_submaster! must not raise FrozenError on a " \
+     'shared frozen constant (AXIS_OFF) nested inside an axis-chart element =='
+axis_el = { 'id' => 'el-axis1', 'kind' => 'bar-chart',
+            'source' => { 'kind' => 'table', 'elementId' => 'master' },
+            'columns' => [{ 'id' => 'd-region', 'formula' => '[Master/Region]' }],
+            'xAxis' => { 'columnId' => 'd-region', 'format' => AXIS_OFF },
+            'yAxis' => { 'columnIds' => ['m-count'], 'format' => AXIS_OFF } }
+retarget_to_submaster!(axis_el, sm_fixture)
+ok(true, 'retargeting an element referencing the frozen AXIS_OFF constant does not raise FrozenError')
+eq(axis_el['columns'].first['formula'], '[Master (Customer Dim)/Region]', 'the real formula ref is still rewritten')
+eq(axis_el['xAxis']['format'], AXIS_OFF, "the frozen shared format hash is left as-is (never a rewrite target)")
+ok(AXIS_OFF.frozen?, 'sanity: AXIS_OFF itself is still frozen (unmutated) after being walked')
+
 puts "== bead ziht: a card on a non-dominant DataSet routes to its own sub-master " \
      '(not skipped) once a live DM element is resolvable =='
 Dir.mktmpdir do |dir|

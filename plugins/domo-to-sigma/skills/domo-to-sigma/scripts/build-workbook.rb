@@ -847,8 +847,15 @@ def retarget_to_submaster!(el, sm)
   el['source'] = { 'kind' => 'table', 'elementId' => sm['id'] } if el.key?('source')
   walk = lambda do |n|
     case n
-    when Hash   then n.each { |k, v| n[k] = walk.call(v) }
-    when Array  then n.map! { |v| walk.call(v) }
+    # LIVE-VALIDATED FIX (2026-07-31): AXIS_OFF ({'marks'=>'none'}.freeze) is a
+    # shared frozen constant referenced by every axis-chart element's
+    # xAxis/yAxis 'format' — mutating it in place raised FrozenError the first
+    # time this routed an axis-chart card (Domo page 'Orders Executive',
+    # "Customers by Region"). A frozen Hash/Array in this codebase is always
+    # static shared config, never a dynamic [Master/...] reference, so it's
+    # always safe to leave it untouched rather than walk into it.
+    when Hash   then (n.frozen? ? n : n.each { |k, v| n[k] = walk.call(v) })
+    when Array  then (n.frozen? ? n : n.map! { |v| walk.call(v) })
     when String then n.gsub('[Master/', "[#{sm['name']}/")
     else n
     end
