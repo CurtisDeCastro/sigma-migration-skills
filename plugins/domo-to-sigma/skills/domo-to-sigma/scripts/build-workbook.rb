@@ -819,16 +819,49 @@ def dominant_dataset_id(cards)
   counts.max_by { |_, n| n }.first
 end
 
+# Deep-rewrite every "[Master/" formula ref + the element's own source to point
+# at a per-DataSet sub-master instead of the shared primary master (bead ziht).
+# gsub (not sub) — an inlined aggregate Beast Mode formula can reference
+# [Master/...] more than once in a single string (e.g. an If() with two Sum()s).
+def retarget_to_submaster!(el, sm)
+  el['source'] = { 'kind' => 'table', 'elementId' => sm['id'] }
+  walk = lambda do |n|
+    case n
+    when Hash   then n.each { |k, v| n[k] = walk.call(v) }
+    when Array  then n.map! { |v| walk.call(v) }
+    when String then n.gsub('[Master/', "[#{sm['name']}/")
+    else n
+    end
+  end
+  walk.call(el)
+  el
+end
+
 def build_element(card, overrides, master_ds = nil)
   ds = card['datasetId'].to_s
   if master_ds && !ds.empty? && ds != master_ds
-    warn_card(card, "SKIPPED — card is bound to DataSet #{ds} but this workbook's shared " \
-                    "master is built from #{master_ds}. Multi-dataset pages need one master " \
-                    'per DataSet (not yet supported); emitting it would fail the entire ' \
-                    'workbook POST with "Dependency not found". Rebuild this card by hand ' \
-                    'against its own source.')
-    return nil
+    sm = sub_master_for(ds)
+    unless sm
+      warn_card(card, "SKIPPED — card is bound to DataSet #{ds} but this workbook's shared " \
+                      "master is built from #{master_ds}, and no live data-model element is " \
+                      'resolvable yet for its own DataSet (bead ziht). Rebuild this card by ' \
+                      'hand against its own source, or re-run once the data model has posted.')
+      return nil
+    end
+    before = $companion_elements.length
+    el = build_element_body(card, overrides)
+    return nil unless el
+    retarget_to_submaster!(el, sm)
+    $companion_elements[before..].each { |c| retarget_to_submaster!(c, sm) }
+    warn_card(card, "routed to sub-master '#{sm['name']}' for DataSet #{ds} (bead ziht) — " \
+                    'verify column coverage against the card PNG; the sub-master passes through ' \
+                    "every column of #{sm['name']}, not just the ones this card uses.")
+    return el
   end
+  build_element_body(card, overrides)
+end
+
+def build_element_body(card, overrides)
   card = prune_unresolvable_columns!(card)
   # Rule 0: a summary-number card with no real grouping → KPI, never a table.
   kind = card['sigmaKindHint']
@@ -837,38 +870,30 @@ def build_element(card, overrides, master_ds = nil)
   return build_kpi(card, overrides) if is_kpi
 
   # Domo prints a Summary Number at the top of EVERY viz card, not just KPI cards.
-  # Sigma's chart/table elements have no summary slot, so that headline number is
-  # dropped. Rule 0 already routes a card that is PRIMARILY a summary to a
-  # kpi-chart; this is the other case — a chart/table that ALSO prints one.
-  #
-  # Caught by the anchors oracle live (2026-07-30): 4 of 13 source anchors matched
-  # NOWHERE in the workbook, every one an overall summary whose per-group values
-  # were present and correct. Silent loss of a headline number is exactly what the
-  # anchors bar exists to surface, so name the card AND the lost value.
-  # Emitting a companion KPI element is tracked as bead 08sf.
+  # Sigma's chart/table elements have no summary slot, so Task 5 emits a companion
+  # KPI element (bead 08sf) via $companion_elements when one is resolvable.
   sn = card['summaryNumber']
   if sn.is_a?(Hash) && !sn['column'].to_s.empty?
-    agg = sn['aggregation'].to_s.empty? ? '(calc)' : sn['aggregation']
-    warn_card(card, "source Summary Number NOT represented: Domo prints " \
-                    "#{agg}(#{sn['column']}) above this card, but a Sigma " \
-                    "#{kind || 'chart'} element has no summary slot — the headline " \
-                    'value is dropped. Add a companion KPI element by hand if the ' \
-                    'number matters (bead 08sf).')
+    companion = build_summary_companion(card, overrides)
+    if companion
+      $companion_elements << companion
+      warn_card(card, "source Summary Number ALSO represented as a companion KPI element " \
+                      "'#{companion['name']}' beside this #{kind || 'chart'} element (bead 08sf).")
+    else
+      agg = sn['aggregation'].to_s.empty? ? '(calc)' : sn['aggregation']
+      warn_card(card, "source Summary Number NOT represented: Domo prints " \
+                      "#{agg}(#{sn['column']}) above this card, but a Sigma " \
+                      "#{kind || 'chart'} element has no summary slot, and a companion KPI " \
+                      'could not be built (no resolvable column) — the headline value is dropped.')
+    end
   end
 
   if image_card?(card)
     img = build_image(card)
     return img if img
-    # PNG absent (Tier B / not captured) — honest fallback: fall through to the
-    # existing placeholder path below (unchanged) + flag it so it gets fixed by
-    # hand rather than shipping a broken/empty image element.
     warn_card(card, "image card #{card['id']}: no captured PNG — export from Domo UI and embed manually.")
   end
 
-  # #2/#3: chartType is a STRICT Domo enum — EXACT-match it (never substring)
-  # against the known-token table before falling back to any upstream hint.
-  # element-kind for chart family is decided HERE, after Rule 0 (KPI) already
-  # had first refusal above.
   mapped = chart_kind_for(card)
   kind = mapped || kind
   ct = card['chartType'].to_s.downcase
@@ -887,9 +912,6 @@ def build_element(card, overrides, master_ds = nil)
   when 'table'        then build_table(card)
   when 'region-map'   then build_map(card)
   when 'kpi-chart'
-    # badge_filledgauge (and any other kpi-mapped chartType) may reach here
-    # without a summaryNumber — never silently drop the card; degrade to a
-    # table + warn rather than emit nil.
     build_kpi(card, overrides) || begin
       warn_card(card, "kpi-chart: chartType '#{card['chartType']}' has no summaryNumber to build a " \
                       'value from — emitted a table instead so the card is not silently dropped.')
@@ -902,12 +924,20 @@ def build_element(card, overrides, master_ds = nil)
 end
 
 # ---- controls (bug #2: fan out to EVERY element via the shared master) ------
-def build_controls(cards)
+def build_controls(cards, master_ds = nil)
   seen = {}
   controls = []
   cards.each do |card|
+    ds = card['datasetId'].to_s
     Array(card['filters']).each do |f|
       col = f['column']; next if col.nil? || seen[col]
+      if master_ds && !ds.empty? && ds != master_ds
+        warn_card(card, "control filter on '#{col}' SKIPPED — its card is bound to DataSet " \
+                        "#{ds}, not this workbook's shared master (#{master_ds}); binding it to " \
+                        'master would 400 the whole workbook POST. Per-sub-master controls are ' \
+                        'not yet supported (bead ziht follow-up).')
+        next
+      end
       seen[col] = true
       disp = display_name(col)
       controls << {
@@ -943,15 +973,18 @@ if $PROGRAM_NAME == __FILE__
   by_page.each { |pname, pcards| warn_missing_geometry(pname, pcards) }
 
   out_pages = by_page.map do |pname, pcards|
+    before = $companion_elements.length
     els = pcards.map { |c| build_element(c, overrides, master_ds) }.compact
-    els += build_controls(pcards)
+    els += $companion_elements[before..]
+    els += build_controls(pcards, master_ds)
     { 'name' => pname, 'elements' => els }
   end
 
   FileUtils.mkdir_p(OUT)
-  File.write(File.join(OUT, 'chart-specs.json'), JSON.pretty_generate('pages' => out_pages))
+  File.write(File.join(OUT, 'chart-specs.json'),
+             JSON.pretty_generate('pages' => out_pages, 'data_elements' => $sub_masters.values))
   File.write(File.join(OUT, 'warnings.json'), JSON.pretty_generate($warnings))
-  warn "  wrote #{File.join(OUT, 'chart-specs.json')} (#{out_pages.sum { |p| p['elements'].size }} elements across #{out_pages.size} page(s))"
+  warn "  wrote #{File.join(OUT, 'chart-specs.json')} (#{out_pages.sum { |p| p['elements'].size }} elements across #{out_pages.size} page(s), #{$sub_masters.size} sub-master(s))"
   warn "  wrote #{File.join(OUT, 'warnings.json')} (#{$warnings.size} warning(s))"
   $warnings.first(20).each { |w| warn "    ⚠ #{w['card']}: #{w['warning']}" }
   warn "\n  Next: build-workbook-spec.rb --chart-specs discovery/chart-specs.json --dm-ids discovery/dm-ids.json ..."

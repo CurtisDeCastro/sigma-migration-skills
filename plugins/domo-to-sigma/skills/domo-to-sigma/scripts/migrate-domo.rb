@@ -97,7 +97,7 @@ FileUtils.mkdir_p(OUT)
 DISCOVERY = File.join(OUT, 'discovery')
 FileUtils.mkdir_p(DISCOVERY)
 SCRIPTS = __dir__
-BASE_ENV = { 'DOMO_DISCOVERY_DIR' => DISCOVERY }.freeze
+BASE_ENV = { 'DOMO_DISCOVERY_DIR' => DISCOVERY, 'DOMO_DM_IDS_PATH' => File.join(OUT, 'dm-ids.json') }.freeze
 
 DomoRunState.record(OUT, 'mode' => (opts[:offline] ? 'offline' : 'live'), 'started_at' => Time.now.utc.iso8601)
 
