@@ -480,8 +480,8 @@ end
 
 def build_table(card)
   dims, meas = split_cols(card)
-  cols = dims.map { |d| dim_col(d, card).merge('style' => { 'textWrap' => 'wrap' }) } +   # #5 wrap text cols
-         meas.map { |m| measure_col(m, card) }
+  mcols = meas.map { |m| measure_col(m, card) }
+  cols = dims.map { |d| dim_col(d, card).merge('style' => { 'textWrap' => 'wrap' }) } + mcols
   cols = (card['columns'] || []).map { |c| dim_col(c, card).merge('style' => { 'textWrap' => 'wrap' }) } if cols.empty?
   el = {
     'id' => eid(card), 'kind' => 'table', 'name' => card['title'],
@@ -508,7 +508,7 @@ def build_table(card)
     grouping = {
       'id' => "grp-#{eid(card)}",
       'groupBy' => dims.map { |d| dim_col(d, card)['id'] },
-      'calculations' => meas.map { |m| measure_col(m, card)['id'] },
+      'calculations' => mcols.map { |m| m['id'] },
     }
     el['groupings'] = [grouping]
   end
@@ -516,7 +516,26 @@ def build_table(card)
   # #7: in-cell data bars belong ONLY to a real Domo table card that declared them.
   bars = Array(card['conditionalFormats']).select { |cf| cf.to_s.downcase.include?('databar') || cf.dig('format', 'dataBar') }
   unless bars.empty?
-    el['conditionalFormats'] = [{ 'type' => 'dataBars', 'columnIds' => meas.map { |m| measure_col(m, card)['id'] } }]
+    el['conditionalFormats'] = [{ 'type' => 'dataBars', 'columnIds' => mcols.map { |m| m['id'] } }]
+  end
+
+  # bead 2ef7: a Domo card's row LIMIT (e.g. limit:25 on a "Top 25" table) has no
+  # query-level analog in Sigma — without a translation the table just renders
+  # every warehouse row (872 instead of 25, live-validated 2026-07-30). The Sigma
+  # analog is an element-level top-n FILTER: `rowCount` takes a number literal
+  # only (reference/specification/tables.md "top-N, element-level row filters") —
+  # it cannot be bound to a control, so this is a direct, static translation.
+  # Ranks by the FIRST measure (mirrors the existing "sort by first measure"
+  # convention in build_axis_chart's xa['sort']) — Sigma's top-n ranks
+  # DESCENDING only; an ascending Domo orderBy has no equivalent here and is left
+  # alone rather than silently reversed. No measure column -> nothing to rank by
+  # -> no filter emitted (never a columnId: nil filter).
+  limit = card['limit'].to_i
+  if limit.positive? && mcols.any?
+    el['filters'] = [{
+      'id' => "topn-#{el['id']}", 'columnId' => mcols.first['id'],
+      'kind' => 'top-n', 'rankingFunction' => 'rank', 'mode' => 'top-n', 'rowCount' => limit,
+    }]
   end
   el
 end

@@ -189,5 +189,33 @@ dims, meas = split_cols({ 'columns' => [ { 'column' => 'region', 'mapping' => 'I
 eq(dims.map { |c| c['column'] }, ['region'], 'ITEM-mapped column is a dimension even with no aggregation/groupBy present')
 eq(meas.map { |c| c['column'] }, ['revenue'], 'VALUE-mapped column is a measure even with no aggregation present (fails under the old aggregation-only heuristic)')
 
+puts "== bead 2ef7: card['limit'] -> Sigma top-n element filter (table) =="
+$warnings = []
+topn = build_element({ 'id' => 'c22', 'title' => 'Order Detail (Top 25)', 'chartType' => 'badge_table',
+                       'sigmaKindHint' => 'table', 'limit' => 25,
+                       'columns' => [ { 'column' => 'order_id' },
+                                      { 'column' => 'net_revenue', 'aggregation' => 'SUM', 'alias' => 'Net Revenue' } ] }, {})
+eq(topn['kind'], 'table', 'still a table element')
+ok(topn.key?('filters'), 'limit produced an element filter')
+eq(topn['filters'].first['kind'], 'top-n', 'filter kind is top-n')
+eq(topn['filters'].first['rankingFunction'], 'rank', 'rankingFunction is rank')
+eq(topn['filters'].first['mode'], 'top-n', 'mode is top-n')
+eq(topn['filters'].first['rowCount'], 25, 'rowCount carries the Domo limit as a NUMBER LITERAL')
+eq(topn['filters'].first['columnId'], topn['columns'].last['id'], 'ranks by the measure column (Net Revenue), not the dimension')
+
+puts "== bead 2ef7: no limit declared -> no filters key at all =="
+no_topn = build_element({ 'id' => 'c23', 'title' => 'All Orders', 'chartType' => 'badge_table',
+                          'sigmaKindHint' => 'table',
+                          'columns' => [ { 'column' => 'order_id' },
+                                         { 'column' => 'net_revenue', 'aggregation' => 'SUM' } ] }, {})
+ok(!no_topn.key?('filters'), 'no limit -> no filters key (never emit an empty/default top-n)')
+
+puts "== bead 2ef7: limit with no measure column -> no filter (nothing to rank by)" \
+     ' — never crash, never emit a columnId:nil filter =='
+no_measure = build_element({ 'id' => 'c24', 'title' => 'Dim Only', 'chartType' => 'badge_table',
+                             'sigmaKindHint' => 'table', 'limit' => 10,
+                             'columns' => [ { 'column' => 'order_id' } ] }, {})
+ok(!no_measure.key?('filters'), 'no measure column -> no top-n filter emitted')
+
 puts
 if $failures.zero? then puts "ALL PASS"; exit 0 else puts "#{$failures} FAILURE(S)"; exit 1 end
