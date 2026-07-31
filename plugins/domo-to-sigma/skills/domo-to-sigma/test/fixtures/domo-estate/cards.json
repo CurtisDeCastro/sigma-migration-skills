@@ -54,5 +54,55 @@
     ],
     "filters": [],
     "x": 0, "y": 30, "w": 100, "h": 40
+  },
+  {
+    "id": "table_topn",
+    "title": "Top Projects",
+    "datasetId": "ds1",
+    "chartType": "badge_datagrid",
+    "sigmaKindHint": "table",
+    "groupBy": ["project_name"],
+    "columns": [
+      { "column": "project_name" },
+      { "column": "sales_amount", "aggregation": "SUM" }
+    ],
+    "filters": [],
+    "limit": 10,
+    "x": 0, "y": 70, "w": 50, "h": 30
+  },
+  {
+    "id": "dsdim1",
+    "title": "Region Detail",
+    "datasetId": "ds-dim",
+    "chartType": "badge_datagrid",
+    "sigmaKindHint": "table",
+    "groupBy": [],
+    "columns": [
+      { "column": "region" },
+      { "column": "segment" }
+    ],
+    "filters": [],
+    "x": 50, "y": 70, "w": 50, "h": 30
+  },
+  {
+    "id": "companion1",
+    "title": "Sales by Channel",
+    "datasetId": "ds1",
+    "chartType": "badge_vert_bar",
+    "sigmaKindHint": "bar-chart",
+    "groupBy": ["channel"],
+    "columns": [
+      { "column": "channel" },
+      { "column": "sales_amount", "aggregation": "SUM", "alias": "Sales" }
+    ],
+    "summaryNumber": {
+      "column": "sales_amount",
+      "aggregation": "SUM",
+      "label": "Total Channel Sales",
+      "format": { "type": "CURRENCY" },
+      "_defaultCountSuspect": false
+    },
+    "filters": [],
+    "x": 0, "y": 100, "w": 100, "h": 30
   }
 ]

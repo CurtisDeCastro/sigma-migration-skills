@@ -83,6 +83,45 @@ Dir.mktmpdir('domo-build-layout') do |dir|
 end
 
 # ===========================================================================
+# I1 (final review, Important): a companion KPI element (bead 08sf) on a page
+# that uses RUNG 1 (genuine x/y/w/h pixel geometry, build_dashboard) — the
+# exact shape test/fixtures/domo-estate/ (the migrate-domo.rb e2e fixture)
+# uses. rung 1's own geometry filter would otherwise silently drop the
+# companion pseudo-card (it never carries x/y/w/h) even though every real
+# card on the page has pixel geometry — append_geometryless_remainder is
+# what rescues it. Distinct from the rung-2a coverage above (the
+# domo-nogeom fixture, where NO card has pixel geometry at all).
+# ===========================================================================
+Dir.mktmpdir('domo-build-layout-rung1-companion') do |dir|
+  w = ->(name, obj) { File.write(File.join(dir, name), JSON.generate(obj)) }
+  w.call('cards.json', [
+    { 'id' => 'bar1', 'title' => 'Sales by Region', 'chartType' => 'badge_vert_bar',
+      'x' => 0, 'y' => 0, 'w' => 100, 'h' => 30 },
+  ])
+  w.call('pages.json', [{ 'id' => 'p1', 'title' => 'Overview', 'cardIds' => %w[bar1] }])
+  w.call('chart-specs.json', { 'pages' => [{ 'name' => 'Overview', 'elements' => [
+    { 'id' => 'el-bar1', 'kind' => 'bar-chart', 'name' => 'Sales by Region' },
+    { 'id' => 'el-bar1-summary', 'kind' => 'kpi-chart', 'name' => 'Total Sales' },
+  ] }] })
+
+  env = { 'DOMO_DISCOVERY_DIR' => dir }
+  out = IO.popen(env, ['ruby', File.join(SCRIPTS, 'build-domo-layout.rb')], err: [:child, :out], &:read)
+  ok($?.success?, "build-domo-layout.rb exits 0 on a rung-1 (pixel geometry) page carrying a companion KPI\n#{out unless $?.success?}")
+
+  dash = JSON.parse(File.read(File.join(dir, 'dashboard-layout.json'))).first
+  z_bar = dash['zones'].find { |z| z['id'].to_s == 'bar1' }
+  z_comp = dash['zones'].find { |z| z['id'].to_s == 'el-bar1-summary' }
+  ok(z_bar, "the real, pixel-geometry-bearing card's own zone is still placed (rung 1 unaffected)")
+  ok(z_comp, "the companion KPI (no geometry of its own) STILL gets a zone on a rung-1 page, " \
+             'not silently dropped by build_dashboard\'s own x/y/w/h filter (I1)')
+  if z_comp && z_bar
+    ok(z_comp['y_pct'].to_f >= z_bar['y_pct'].to_f + z_bar['h_pct'].to_f - 0.01,
+       "the companion's zone is appended BELOW the real content, not overlapping it")
+    eq(z_comp['caption'], 'Total Sales', "the companion zone's caption is its own name")
+  end
+end
+
+# ===========================================================================
 # Live-validation fix (refs/live-validation-2026-07-30.md): a real classic
 # Domo page's private read carries NO x/y/w/h at all — only a per-card
 # T-shirt size token (stacks['sizes']) and titled collections[] grouping
@@ -267,6 +306,27 @@ Dir.mktmpdir('domo-build-layout-nogeom') do |dir|
   eq(z_ctl['w_pct'], 100.0, 'the sole control on this page spans the full control band width')
   ok(z_ctl['y_pct'] < z_combo['y_pct'] && z_ctl['y_pct'] < ztable['y_pct'],
      'the control band sits ABOVE every other band on the page (house-style order: control -> ... -> table)')
+
+  # ---- "Detail": chart-specs-only companion KPI ("el-2003-summary", bead ----
+  # 08sf) — final review Important I1: a companion KPI has no card of its own
+  # either (build-workbook.rb synthesizes it from card 2003, the "Detail
+  # Table" card), so without load_chart_specs_companions it would never reach
+  # composition_class and would silently have no layout zone at all, even
+  # though it IS present in the workbook spec. Proves the fix is wired into
+  # the real CLI entrypoint, not just reachable in isolation.
+  z_comp = dzones.find { |z| z['id'].to_s == 'el-2003-summary' }
+  ok(z_comp, "the orphan companion KPI (NO backing card in cards.json — synthesized purely from " \
+             "chart-specs.json's 'kpi-chart' + '-summary'-suffixed element) still produced a zone " \
+             'through the real CLI entrypoint (I1)')
+  if z_comp
+    eq(z_comp['kind'], 'chart', "the companion's zone kind is 'chart' (not 'filter' — it's a KPI, not a control)")
+    eq(z_comp['chart_kind'], 'kpi', "the companion's zone chart_kind is the LOGICAL 'kpi' token " \
+                                     "(zone_chart_kind_for normalizes the Sigma element kind 'kpi-chart')")
+    eq(z_comp['caption'], 'Detail Table Total', "the zone's caption is the companion's OWN name — " \
+                                                 'downstream zone_el_name/els_by_name matching keys on ' \
+                                                 'name, not id, so this must be exact')
+    ok(z_comp['w_pct'].to_f.positive? && z_comp['h_pct'].to_f.positive?, 'the companion zone has a real, non-zero footprint')
+  end
 end
 
 # ===========================================================================

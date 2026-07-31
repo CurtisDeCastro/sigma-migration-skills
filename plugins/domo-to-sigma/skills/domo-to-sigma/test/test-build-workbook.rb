@@ -3,6 +3,32 @@
 #   ruby test/test-build-workbook.rb
 
 require_relative '../scripts/build-workbook'
+require 'tmpdir'
+
+# Temporarily override a top-level constant for the duration of a block, then
+# ALWAYS restore it — even on assertion failure — mirroring the with_domo_stub
+# pattern in test-discover.rb. Ruby warns on constant reassignment; silence it
+# locally rather than suppressing warnings globally.
+def stub_const(name, value)
+  target = Object
+  existed = target.const_defined?(name)
+  old = target.const_get(name) if existed
+  silence_warnings { target.send(:remove_const, name) if target.const_defined?(name); target.const_set(name, value) }
+  yield
+ensure
+  silence_warnings do
+    target.send(:remove_const, name) if target.const_defined?(name)
+    target.const_set(name, old) if existed
+  end
+end
+
+def silence_warnings
+  old_verbose = $VERBOSE
+  $VERBOSE = nil
+  yield
+ensure
+  $VERBOSE = old_verbose
+end
 
 $failures = 0
 def eq(a, b, m) if a == b then puts "  ok: #{m}" else $failures += 1; puts "  FAIL: #{m}\n    exp #{b.inspect}\n    got #{a.inspect}" end end
@@ -188,6 +214,271 @@ dims, meas = split_cols({ 'columns' => [ { 'column' => 'region', 'mapping' => 'I
                                          { 'column' => 'revenue', 'mapping' => 'VALUE' } ] })
 eq(dims.map { |c| c['column'] }, ['region'], 'ITEM-mapped column is a dimension even with no aggregation/groupBy present')
 eq(meas.map { |c| c['column'] }, ['revenue'], 'VALUE-mapped column is a measure even with no aggregation present (fails under the old aggregation-only heuristic)')
+
+puts "== bead 2ef7: card['limit'] -> Sigma top-n element filter (table) =="
+$warnings = []
+topn = build_element({ 'id' => 'c22', 'title' => 'Order Detail (Top 25)', 'chartType' => 'badge_table',
+                       'sigmaKindHint' => 'table', 'limit' => 25,
+                       'columns' => [ { 'column' => 'order_id' },
+                                      { 'column' => 'net_revenue', 'aggregation' => 'SUM', 'alias' => 'Net Revenue' } ] }, {})
+eq(topn['kind'], 'table', 'still a table element')
+ok(topn.key?('filters'), 'limit produced an element filter')
+eq(topn['filters'].first['kind'], 'top-n', 'filter kind is top-n')
+eq(topn['filters'].first['rankingFunction'], 'rank', 'rankingFunction is rank')
+eq(topn['filters'].first['mode'], 'top-n', 'mode is top-n')
+eq(topn['filters'].first['rowCount'], 25, 'rowCount carries the Domo limit as a NUMBER LITERAL')
+eq(topn['filters'].first['columnId'], topn['columns'].last['id'], 'ranks by the measure column (Net Revenue), not the dimension')
+
+puts "== bead 2ef7: no limit declared -> no filters key at all =="
+no_topn = build_element({ 'id' => 'c23', 'title' => 'All Orders', 'chartType' => 'badge_table',
+                          'sigmaKindHint' => 'table',
+                          'columns' => [ { 'column' => 'order_id' },
+                                         { 'column' => 'net_revenue', 'aggregation' => 'SUM' } ] }, {})
+ok(!no_topn.key?('filters'), 'no limit -> no filters key (never emit an empty/default top-n)')
+
+puts "== bead 2ef7: limit with no measure column -> no filter (nothing to rank by)" \
+     ' — never crash, never emit a columnId:nil filter =='
+no_measure = build_element({ 'id' => 'c24', 'title' => 'Dim Only', 'chartType' => 'badge_table',
+                             'sigmaKindHint' => 'table', 'limit' => 10,
+                             'columns' => [ { 'column' => 'order_id' } ] }, {})
+ok(!no_measure.key?('filters'), 'no measure column -> no top-n filter emitted')
+
+puts "== bead ziht: dataset_element_map resolves datasetId -> live DM element =="
+Dir.mktmpdir do |dir|
+  dm_spec_path = File.join(dir, 'dm-spec.json')
+  dm_ids_path  = File.join(dir, 'dm-ids.json')
+  File.write(dm_spec_path, JSON.generate('pages' => [{ 'elements' => [
+    { 'id' => 'el-fact-1', 'name' => 'Order Fact', '_datasetId' => 'ds-fact' },
+    { 'id' => 'el-dim-1',  'name' => 'Customer Dim', '_datasetId' => 'ds-dim' },
+  ] }]))
+  File.write(dm_ids_path, JSON.generate('dataModelId' => 'dm-live-1', 'pages' => [{ 'elements' => [
+    { 'id' => 'el-fact-1', 'name' => 'Order Fact', 'columnLabels' => ['Order Id', 'Region'] },
+    { 'id' => 'el-dim-1',  'name' => 'Customer Dim', 'columnLabels' => ['Customer Id', 'Segment'] },
+  ] }]))
+  stub_const('DM_SPEC_PATH', dm_spec_path) do
+    stub_const('DM_IDS_PATH', dm_ids_path) do
+      $ds_element_map = nil # force recompute against this dir's fixtures
+      map = dataset_element_map
+      eq(map.keys.sort, %w[ds-dim ds-fact], 'both datasets resolved')
+      eq(map['ds-dim']['id'], 'el-dim-1', 'ds-dim resolves to its own live element, not the fact')
+
+      $sub_masters = {}
+      sm = sub_master_for('ds-dim')
+      ok(!sm.nil?, 'sub-master built for a resolvable dataset')
+      eq(sm['kind'], 'table', 'sub-master is a table element')
+      eq(sm['visibleAsSource'], false, 'sub-master is hidden, like the primary master')
+      eq(sm['source'], { 'kind' => 'data-model', 'dataModelId' => 'dm-live-1', 'elementId' => 'el-dim-1' },
+         'sub-master sources the LIVE DM element for ds-dim, dataModelId included')
+      eq(sm['columns'].map { |c| c['name'] }, ['Customer Id', 'Segment'], 'auto-passthrough of the DM element\'s own columns')
+      eq(sm['columns'].first['formula'], '[Customer Dim/Customer Id]', 'column formula qualifies by the DM element\'s own name')
+
+      ok(sub_master_for('ds-dim').equal?(sm), 'memoized — a second call returns the SAME object, not a rebuild')
+      eq($ds_element_map.dig('ds-nope'), nil, 'unknown dataset -> nil, not an exception')
+      ok(sub_master_for('ds-nope').nil?, 'sub_master_for on an unresolvable dataset -> nil (caller falls back to today\'s skip)')
+    end
+  end
+end
+
+puts "== bead ziht: dataset_element_map degrades to {} when the inputs are absent (offline / unit-test default) =="
+stub_const('DM_SPEC_PATH', '/nonexistent/dm-spec.json') do
+  stub_const('DM_IDS_PATH', nil) do
+    $ds_element_map = nil
+    eq(dataset_element_map, {}, 'no dm-spec/dm-ids -> empty map, never an exception')
+  end
+end
+
+puts "== stub_const restores a constant whose ORIGINAL value was falsy (nil), not just truthy ones =="
+# DM_IDS_PATH's real original value in THIS offline test run is nil (nothing sets
+# DOMO_DM_IDS_PATH in the environment) — exactly the real-world case that used to
+# defeat restore-on-`ensure`'s old `if old` guard (nil is falsy, so the constant was
+# left REMOVED rather than restored to nil).
+ok(Object.const_defined?(:DM_IDS_PATH), 'DM_IDS_PATH is defined before the stub (as nil, since DOMO_DM_IDS_PATH is unset)')
+eq(DM_IDS_PATH, nil, 'sanity: DM_IDS_PATH really is nil in this offline test env')
+stub_const('DM_IDS_PATH', '/tmp/whatever-dm-ids.json') do
+  eq(DM_IDS_PATH, '/tmp/whatever-dm-ids.json', 'stubbed value visible inside the block')
+end
+ok(Object.const_defined?(:DM_IDS_PATH), 'DM_IDS_PATH still defined after stub block exits (regression: used to vanish when the original value was nil/falsy)')
+eq(DM_IDS_PATH, nil, 'restored to its original nil value, not left undefined')
+
+puts "== bead 08sf: build_summary_companion mirrors build_kpi but with a distinct id =="
+kpi_card = { 'id' => 'c29', 'title' => 'Revenue by Channel',
+             'summaryNumber' => { 'column' => 'net_revenue', 'aggregation' => 'SUM', 'label' => 'Total Revenue' } }
+companion = build_summary_companion(kpi_card, {})
+ok(!companion.nil?, 'companion built when the summary number has a resolvable column')
+eq(companion['kind'], 'kpi-chart', 'companion is a kpi-chart element')
+eq(companion['name'], 'Total Revenue', 'companion carries the summary number\'s own label')
+eq(companion['id'], "#{eid(kpi_card)}-summary",
+   'companion id is the primary element\'s id + a -summary suffix (never collides with it)')
+
+no_col_card = { 'id' => 'c30', 'title' => 'Orders', 'summaryNumber' => { 'column' => '', 'aggregation' => 'COUNT' } }
+ok(build_summary_companion(no_col_card, {}).nil?,
+   'nil when the summary number has no resolvable column (mirrors build_kpi\'s own "return nil unless col")')
+
+puts "== M1 (final review, minor): retarget_to_submaster! must NOT fabricate a 'source' key on " \
+     'an element that never had one (build_image) =='
+img_el = { 'id' => 'el-img1', 'kind' => 'image', 'url' => 'data:image/png;base64,AAAA' }
+sm_fixture = { 'id' => 'master-ds-dim', 'name' => 'Master (Customer Dim)' }
+retarget_to_submaster!(img_el, sm_fixture)
+ok(!img_el.key?('source'), "an image element (no 'source' key to begin with) still has none after retargeting " \
+                            '— no bogus source fabricated (M1)')
+eq(img_el['url'], 'data:image/png;base64,AAAA', "the image element's other fields are untouched")
+
+chart_el = { 'id' => 'el-c1', 'kind' => 'bar-chart', 'source' => { 'kind' => 'table', 'elementId' => 'master' } }
+retarget_to_submaster!(chart_el, sm_fixture)
+eq(chart_el['source'], { 'kind' => 'table', 'elementId' => 'master-ds-dim' },
+   'an element that DOES carry a source key still gets retargeted normally (unchanged behavior)')
+
+puts "== bead ziht: a card on a non-dominant DataSet routes to its own sub-master " \
+     '(not skipped) once a live DM element is resolvable =='
+Dir.mktmpdir do |dir|
+  dm_spec_path = File.join(dir, 'dm-spec.json')
+  dm_ids_path  = File.join(dir, 'dm-ids.json')
+  File.write(dm_spec_path, JSON.generate('pages' => [{ 'elements' => [
+    { 'id' => 'el-dim-1', 'name' => 'Customer Dim', '_datasetId' => 'ds-dim' },
+  ] }]))
+  File.write(dm_ids_path, JSON.generate('dataModelId' => 'dm-live-1', 'pages' => [{ 'elements' => [
+    { 'id' => 'el-dim-1', 'name' => 'Customer Dim', 'columnLabels' => ['Region', 'Segment'] },
+  ] }]))
+  stub_const('DM_SPEC_PATH', dm_spec_path) do
+    stub_const('DM_IDS_PATH', dm_ids_path) do
+      $ds_element_map = nil
+      $sub_masters = {}
+      $warnings = []
+      routed = build_element({ 'id' => 'c25', 'title' => 'Customers by Region', 'chartType' => 'badge_table',
+                               'sigmaKindHint' => 'table', 'datasetId' => 'ds-dim',
+                               'columns' => [ { 'column' => 'region' } ] }, {}, 'ds-fact')
+      ok(!routed.nil?, 'card is NOT skipped — a live sub-master was resolvable')
+      eq(routed['source'], { 'kind' => 'table', 'elementId' => 'master-ds-dim' }, 'routed to its own sub-master, not the shared master')
+      eq(routed['columns'].first['formula'], '[Master (Customer Dim)/Region]', 'formula re-qualified to the sub-master\'s namespace')
+      ok($warnings.any? { |w| w['warning'].include?('routed to sub-master') }, 'routing is reported, not silent')
+      ok($sub_masters.key?('ds-dim'), 'the sub-master was registered for the main block to emit under data_elements')
+    end
+  end
+end
+
+puts "== bead ziht: unresolvable DataSet still falls back to today's warn+SKIP =="
+$ds_element_map = {}
+$sub_masters = {}
+$warnings = []
+skipped = build_element({ 'id' => 'c26', 'title' => 'Orphan Dataset Card', 'chartType' => 'badge_table',
+                          'sigmaKindHint' => 'table', 'datasetId' => 'ds-unknown',
+                          'columns' => [ { 'column' => 'x' } ] }, {}, 'ds-fact')
+ok(skipped.nil?, 'still nil when no live DM element is resolvable for the DataSet (unchanged fallback)')
+ok($warnings.any? { |w| w['warning'].include?('SKIPPED') }, 'still warns loudly on fallback')
+
+puts "== bead ziht: build_controls skips (warns) a filter bound to a non-dominant DataSet\'s column " \
+     'rather than 400ing the whole POST binding it to the wrong master =='
+$warnings = []
+ctrls2 = build_controls([
+  { 'id' => 'c27', 'datasetId' => 'ds-fact', 'filters' => [{ 'column' => 'region' }] },
+  { 'id' => 'c28', 'datasetId' => 'ds-dim',  'filters' => [{ 'column' => 'segment' }] },
+], 'ds-fact')
+eq(ctrls2.size, 1, 'only the dominant-dataset filter becomes a control')
+eq(ctrls2.first['controlId'], 'Region', 'the surviving control is the dominant-dataset one')
+ok($warnings.any? { |w| w['warning'].include?('control filter') && w['warning'].include?('SKIPPED') },
+   'the non-dominant control is reported, not silently dropped')
+
+puts "== bead 08sf: a chart/table card with a summaryNumber gets a companion KPI via " \
+     'build_element, not just a warning =='
+$warnings = []
+$companion_elements = []
+chart_with_summary = build_element({ 'id' => 'c31', 'title' => 'Revenue by Channel', 'chartType' => 'badge_vert_bar',
+                                     'sigmaKindHint' => 'bar-chart',
+                                     'groupBy' => ['channel'],
+                                     'columns' => [ { 'column' => 'channel' },
+                                                    { 'column' => 'net_revenue', 'aggregation' => 'SUM', 'alias' => 'Net Revenue' } ],
+                                     'summaryNumber' => { 'column' => 'net_revenue', 'aggregation' => 'SUM', 'label' => 'Total Revenue' } }, {})
+eq(chart_with_summary['kind'], 'bar-chart', 'the primary element is still the bar chart, unchanged')
+eq($companion_elements.size, 1, 'exactly one companion KPI was produced')
+companion = $companion_elements.first
+eq(companion['kind'], 'kpi-chart', 'companion is a kpi-chart element')
+eq(companion['name'], 'Total Revenue', 'companion carries the summary number\'s own label')
+ok(companion['id'] != chart_with_summary['id'], 'companion has a DISTINCT id from the primary element (no duplicate-id 400)')
+ok($warnings.any? { |w| w['warning'].include?('companion KPI element') }, 'the companion is reported, not silent')
+
+puts "== bead 08sf: a card whose summaryNumber has no resolvable column still just warns " \
+     '(no crash, no half-built companion) =='
+$warnings = []
+$companion_elements = []
+# NOTE (task-5 self-review fix): a genuinely blank ('') summaryNumber column, with
+# only 1 total column and no groupBy, trips Rule 0's is_kpi check (unchanged, and
+# correctly so — see the Rule-0 test right below) BEFORE this code ever runs, and
+# even bypassing Rule 0, build_element_body's own outer guard
+# (`!sn['column'].to_s.empty?`) requires a raw non-blank column before it will even
+# attempt build_summary_companion. So a literal '' can never reach the "companion
+# could not be built" branch this test targets. A second (non-KPI-triggering)
+# column keeps this off the Rule-0 path, and a whitespace-only column (' ') passes
+# the outer guard's raw `.empty?` check while still failing
+# build_summary_companion's stricter `.strip.empty?` check — genuinely exercising
+# "column present but not resolvable", exactly the case this test names.
+no_companion = build_element({ 'id' => 'c32', 'title' => 'Orders', 'chartType' => 'badge_table',
+                               'sigmaKindHint' => 'table',
+                               'columns' => [ { 'column' => 'order_id' },
+                                              { 'column' => 'amount', 'aggregation' => 'SUM' } ],
+                               'summaryNumber' => { 'column' => ' ', 'aggregation' => 'COUNT' } }, {})
+ok(!no_companion.nil?, 'primary element still built')
+eq($companion_elements.size, 0, 'no companion when the summary number has no resolvable column')
+ok($warnings.any? { |w| w['warning'].include?('NOT represented') }, 'still warns loudly on the unresolvable case (unchanged existing behavior)')
+
+puts "== bead 08sf: Rule 0 (summary IS the whole card) still short-circuits to a single " \
+     'KPI, no companion (unchanged) =='
+$warnings = []
+$companion_elements = []
+rule0 = build_element({ 'id' => 'c33', 'title' => 'One Number', 'chartType' => 'badge_table',
+                        'sigmaKindHint' => 'table', 'groupBy' => [], 'columns' => [{ 'column' => 'total', 'aggregation' => 'SUM' }],
+                        'summaryNumber' => { 'column' => 'total', 'aggregation' => 'SUM' } }, {})
+eq(rule0['kind'], 'kpi-chart', 'Rule 0 still routes straight to a single KPI')
+eq($companion_elements.size, 0, 'no companion is produced for a Rule-0 card (it IS the KPI, not a chart+companion)')
+
+puts "== C1 (final review, Critical): a ROUTED card whose PRIMARY element fails to build " \
+     'must NOT leak its companion KPI un-retargeted into $companion_elements =='
+Dir.mktmpdir do |dir|
+  dm_spec_path = File.join(dir, 'dm-spec.json')
+  dm_ids_path  = File.join(dir, 'dm-ids.json')
+  File.write(dm_spec_path, JSON.generate('pages' => [{ 'elements' => [
+    { 'id' => 'el-dim-1', 'name' => 'Customer Dim', '_datasetId' => 'ds-dim' },
+  ] }]))
+  File.write(dm_ids_path, JSON.generate('dataModelId' => 'dm-live-1', 'pages' => [{ 'elements' => [
+    { 'id' => 'el-dim-1', 'name' => 'Customer Dim', 'columnLabels' => ['Region', 'Segment'] },
+  ] }]))
+  stub_const('DM_SPEC_PATH', dm_spec_path) do
+    stub_const('DM_IDS_PATH', dm_ids_path) do
+      $ds_element_map = nil
+      $sub_masters = {}
+      $warnings = []
+      $companion_elements = []
+      before_companions = $companion_elements.length
+
+      # Routed to ds-dim's sub-master (resolvable, per the fixture above), so
+      # this DOES take the routing path (not the warn+SKIP "unresolvable
+      # DataSet" fallback). Two non-aggregated dimension columns (no
+      # 'aggregation', no groupBy/mapping signal) means split_cols resolves
+      # ZERO measures, so build_axis_chart's own "could not resolve both a
+      # dimension and a measure" guard fires and returns nil for the PRIMARY
+      # element — while the card ALSO carries a resolvable summaryNumber, so
+      # build_element_body has a companion ready to go before it discovers
+      # the primary failed.
+      failed = build_element({ 'id' => 'c34', 'title' => 'Customers (no measure)', 'chartType' => 'badge_vert_bar',
+                               'datasetId' => 'ds-dim',
+                               'columns' => [ { 'column' => 'region' }, { 'column' => 'segment' } ],
+                               'summaryNumber' => { 'column' => 'net_revenue', 'aggregation' => 'SUM',
+                                                    'label' => 'Total Revenue' } },
+                             {}, 'ds-fact')
+
+      ok(failed.nil?, 'build_element still returns nil when the routed primary element failed to build')
+      eq($companion_elements.length, before_companions,
+         '$companion_elements did NOT grow — the companion built during the failed attempt was ' \
+         'dropped, never leaked un-retargeted against the shared master (C1)')
+
+      # M3: the warning sequence must not claim a companion "represents" a
+      # card whose primary element was actually dropped.
+      ok(!$warnings.any? { |w| w['warning'].include?('ALSO represented') },
+         'the misleading "ALSO represented" warning does NOT fire when the primary failed to build (M3)')
+      ok($warnings.any? { |w| w['warning'].include?('was NOT emitted') && w['warning'].include?('failed to build') },
+         'a warning explains the companion was dropped BECAUSE the primary failed (M3)')
+    end
+  end
+end
 
 puts
 if $failures.zero? then puts "ALL PASS"; exit 0 else puts "#{$failures} FAILURE(S)"; exit 1 end

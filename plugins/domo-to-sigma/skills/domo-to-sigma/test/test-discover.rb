@@ -94,6 +94,7 @@ shape_a = {
     'groupBy' => [{ 'column' => 'store_region' }],
     'orderBy' => [{ 'column' => 'sales_amount' }],
     'filters' => [{ 'column' => 'status', 'operand' => 'IN', 'values' => %w[Active Pending] }],
+    'limit' => 25,
   },
   'summaryNumber' => { 'columns' => [{ 'column' => 'sales_amount', 'aggregation' => 'SUM',
                                        'alias' => 'Total Revenue', 'format' => { 'type' => 'CURRENCY' } }] },
@@ -114,6 +115,7 @@ eq(a['summaryNumber']['aggregation'], 'SUM', 'summary number aggregation')
 eq(a['summaryNumber']['label'], 'Total Revenue', 'summary number label from alias')
 eq(a['summaryNumber']['_defaultCountSuspect'], false, 'SUM is not a COUNT-of-id suspect')
 eq(a['cardFormulas'].size, 1, 'card-local formula captured')
+eq(a['limit'], 25, 'limit carried through Shape A normalization (bead 2ef7)')
 
 puts "== normalize_card: Shape B =="
 shape_b = {
@@ -128,6 +130,7 @@ shape_b = {
       'filters' => [{ 'column' => 'region', 'filterType' => 'IN', 'values' => ['West'] }],
       'groupBy' => [{ 'column' => 'project_id' }],
       'orderBy' => [{ 'column' => 'project_id' }],
+      'limit' => 25,
     } },
     'formulas' => [{ 'id' => 'calculation_xyz', 'name' => 'Days Open', 'formula' => 'DATEDIFF(`close`,`open`)' }],
     'conditionalFormats' => [{ 'condition' => { 'column' => 'x' }, 'format' => {} }],
@@ -141,6 +144,11 @@ eq(b['columns'][1]['beastModeId'], 'calculation_xyz', 'beastModeId joined via ca
 eq(b['filters'], [{ 'column' => 'region', 'operator' => 'IN', 'values' => ['West'] }], 'filter normalized (filterType→operator)')
 eq(b['groupBy'], ['project_id'], 'groupBy flattened (Shape B)')
 eq(b['cardFormulas'].first['name'], 'Days Open', 'card formulas from definition.formulas')
+eq(b['limit'], 25, 'limit carried through Shape B normalization (bead 2ef7)')
+
+puts "== normalize_card: no limit declared -> key absent, not zero =="
+no_limit = normalize_card({ 'chartType' => 'badge_table', 'chartBody' => { 'columns' => [{ 'column' => 'x' }] } }, 'card-C')
+ok(!no_limit.key?('limit'), 'no limit key when the source declared none (compact drops nil, never defaults to 0)')
 
 puts "== norm_summary_number: COUNT-of-id trap =="
 sn = norm_summary_number({ 'columns' => [{ 'column' => 'project_id', 'aggregation' => 'COUNT' }] })

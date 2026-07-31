@@ -52,7 +52,25 @@
 #                                               #   statement (right_table null;
 #                                               #   probed as a subquery)
 #     "probe_keys"       => [...],              # physical columns to GROUP BY
+#     "derived_via"      => "serialized" | "name-inference",  # object-graph
+#                                               #   entries only (see below):
+#                                               #   Ruby snake_case of the
+#                                               #   converter's derivedVia —
+#                                               #   PROOF that an inferred key
+#                                               #   gets probed, not trusted.
+#     "partial"          => true,               # object-graph, serialized-only:
+#                                               #   a mixed physical+computed
+#                                               #   key kept the physical half
+#     "dropped_conditions" => 1,                # count of computed conditions
+#                                               #   dropped from a partial key
 #     ... }                                     # + per-kind provenance fields
+#
+# derived_via/partial/dropped_conditions PROVENANCE: gate 16's probe (below)
+# proves a key's grain-assumption (right unique on keys) against the
+# warehouse regardless of provenance — it does NOT and CANNOT prove a key is
+# the CORRECT one, only that it does not fan out. derived_via exists so an
+# inferred key is visible to that probe AND to a human/gate reading the
+# ledger afterward — it is not itself a correctness check.
 #
 # Ruby 2.6-compatible. Offline (no network); parsing via lib/twb_xml.rb
 # (Nokogiri when present, REXML fallback — same as the other .twb parsers).
@@ -76,7 +94,7 @@ module JoinPlan
   # then lookup syntheses (element order).
   def derive(dm_spec, twb_xml = nil, db: nil, schema: nil)
     entries = []
-    entries.concat(federated_joins(twb_xml, db, schema)) if twb_xml && !twb_xml.to_s.strip.empty?
+    entries.concat(federated_joins(twb_xml, db, schema, dm_spec)) if twb_xml && !twb_xml.to_s.strip.empty?
     entries.concat(lookup_syntheses(dm_spec)) if dm_spec.is_a?(Hash)
     entries
   end
@@ -114,7 +132,11 @@ module JoinPlan
   # also match the _.fcp.ObjectModelEncapsulateLegacy-wrapped trees an
   # embedded datasource serializes. Multi-key joins AND-wrap the '=' pairs;
   # the descendant scans handle both shapes.
-  def federated_joins(twb_xml, db = nil, schema = nil)
+  # dm_spec (optional): threaded through to object_graph_joins so a
+  # name-inferred object-graph relationship (no <expression> at all in the
+  # .twb for THIS method's own XML scan to find) still lands on the ledger —
+  # see object_graph_joins / dm_object_graph_index below.
+  def federated_joins(twb_xml, db = nil, schema = nil, dm_spec = nil)
     xml = twb_xml.to_s.encode('UTF-8', 'binary', invalid: :replace, undef: :replace, replace: '')
     xml = FcpNormalize.normalize(xml) if FcpNormalize.needed?(xml)
     doc = begin
@@ -157,7 +179,7 @@ module JoinPlan
         'probe_keys'       => keys.map { |p| physical_probe_key(p[:r][:column], captions) }
       }
     end
-    out.concat(object_graph_joins(doc, captions, db, schema))
+    out.concat(object_graph_joins(doc, captions, db, schema, dm_spec))
     out
   end
 
@@ -169,7 +191,18 @@ module JoinPlan
   # '[TABLE].[COL]'. Tableau culls these joins per-viz at query time; a Sigma
   # relationship/Lookup over the same tables fans out unless the second
   # end-point is unique on the keys — same grain assumption, same probe.
-  def object_graph_joins(doc, captions, db = nil, schema = nil)
+  # dm_spec (optional, see federated_joins): a name-inferred relationship has
+  # NO <expression> at all in the .twb (Tableau auto-matches it at query
+  # time), so this method's own XML-only pair extraction finds nothing for
+  # it — the exact gap this task closes. When the converter's dm_spec is
+  # available, dm_object_graph_index recovers what it actually wired (keys +
+  # derivedVia) so the relationship still lands on the ledger instead of
+  # being silently absent (worse than "trusted": nothing to probe at all).
+  # Without dm_spec (nil — e.g. the --reuse-dm path's live-readback spec,
+  # which does not round-trip these custom fields through the Sigma API),
+  # behavior is UNCHANGED from before this task: a relationship with no
+  # physical <expression> is skipped, same as always.
+  def object_graph_joins(doc, captions, db = nil, schema = nil, dm_spec = nil)
     # object-id -> its physical <relation type='table'> (label + node).
     objects = {}
     doc.elements.each('//object-graph/objects/object') do |obj|
@@ -181,6 +214,7 @@ module JoinPlan
         rel:   rel
       }
     end
+    dm_index = dm_object_graph_index(dm_spec)
     out = []
     doc.elements.each('//object-graph/relationships/relationship') do |r|
       first  = r.elements['first-end-point']
@@ -189,28 +223,121 @@ module JoinPlan
       lobj = objects[first.attributes['object-id'].to_s]
       robj = objects[second.attributes['object-id'].to_s]
       next unless lobj && robj
+      left  = lobj[:name].empty? ? lobj[:label] : lobj[:name]
+      right = robj[:name].empty? ? robj[:label] : robj[:name]
+      eq_nodes = r.elements.to_a(".//expression[@op='=']")
       pairs = []
-      r.elements.each(".//expression[@op='=']") do |eq|
+      eq_nodes.each do |eq|
         sides = eq.elements.to_a('expression').map { |e| unwrap_fn(e.attributes['op']) }
                   .map { |op| op.to_s[/\A\[([^\]]+)\]\z/, 1] }.compact
         pairs << { l: sides[0], r: sides[1] } if sides.size == 2
       end
-      next if pairs.empty?
-      out << {
+      dm_rel      = dm_index[[left, right]]
+      right_table = vc_physical_fqn(right, db, schema) || twb_table_fqn(doc, robj[:rel])
+      if pairs.empty?
+        # No physical key survives the .twb's own <expression> scan — either
+        # there was none at all (auto-matched) or every condition present is
+        # purely computed. Nothing to probe UNLESS the converter recovered a
+        # key by name-inference (dm_rel); if it didn't either, this
+        # relationship genuinely never got wired into the model — there is no
+        # join for gate 16 to probe, so (as before) no ledger entry.
+        next unless dm_rel
+        out << {
+          'kind'             => 'federated-join',
+          'join_type'        => 'relationship',
+          'shape'            => 'object-graph',
+          'left'             => left,
+          'right'            => right,
+          'keys'             => dm_rel[:keys],
+          'key_pairs'        => dm_rel[:keys].map { |k| { 'left' => k, 'right' => k } },
+          'grain_assumption' => GRAIN_ASSUMPTION,
+          'status'           => 'unprobed',
+          'right_table'      => right_table,
+          'probe_keys'       => dm_rel[:keys],
+          'derived_via'      => dm_rel[:derived_via]
+        }
+        next
+      end
+      entry = {
         'kind'             => 'federated-join',
         'join_type'        => 'relationship',
         'shape'            => 'object-graph',
-        'left'             => lobj[:name].empty? ? lobj[:label] : lobj[:name],
-        'right'            => robj[:name].empty? ? robj[:label] : robj[:name],
+        'left'             => left,
+        'right'            => right,
         'keys'             => pairs.map { |p| p[:r] },
         'key_pairs'        => pairs.map { |p| { 'left' => p[:l], 'right' => p[:r] } },
         'grain_assumption' => GRAIN_ASSUMPTION,
         'status'           => 'unprobed',
-        'right_table'      => vc_physical_fqn(robj[:name], db, schema) || twb_table_fqn(doc, robj[:rel]),
+        'right_table'      => right_table,
         'probe_keys'       => pairs.map { |p| relationship_probe_key(p[:r], captions) }
       }
+      # A physical pair was found, so this is necessarily the converter's
+      # "serialized" branch (name-inference only fires when NO physical pair
+      # survives — the pairs.empty? branch above). Prefer dm_rel's own count
+      # of dropped computed conditions when available (the converter's own
+      # isPhysical bookkeeping); fall back to this method's local count
+      # (total '=' expressions found minus the physical pairs kept) so the
+      # field is still populated when dm_spec is unavailable.
+      entry['derived_via'] = (dm_rel && dm_rel[:derived_via]) || 'serialized'
+      dropped = (dm_rel && dm_rel[:dropped_conditions]) || (eq_nodes.size - pairs.size)
+      if (dm_rel && dm_rel[:partial]) || dropped.to_i.positive?
+        entry['partial']            = true
+        entry['dropped_conditions'] = dropped
+      end
+      out << entry
     end
     out
+  end
+
+  # Index of ACTUALLY-WIRED object-graph relationships from the converter's
+  # dm_spec, keyed by [left element name, right element name] — the SAME two
+  # names object_graph_joins' own .twb-only extraction resolves (both derive
+  # from the physical warehouse table name: the .twb's
+  # <relation type='table' name=...> on this side, element_name()'s
+  # source.path.last on the dm_spec side — see converter/tableau.mjs's
+  # cleanName = path[path.length - 1]). An "unwired" relationship is NEVER in
+  # this index: the converter only ever pushes a relationship onto
+  # element['relationships'] once it is wired (see converter/tableau.mjs
+  # wireInferred / the serialized branch) — an unwired one is recorded only
+  # in the converter's OWN relationshipCoverage report, a different artifact
+  # (see emit-relationship-coverage.rb), never here. nil/malformed dm_spec
+  # (or one with no such relationship) yields no entry for that pair — the
+  # caller's pairs.empty? branch then correctly treats it as unwired.
+  def dm_object_graph_index(dm_spec)
+    idx = {}
+    return idx unless dm_spec.is_a?(Hash)
+    els   = (dm_spec['pages'] || []).flat_map { |p| p['elements'] || [] }
+    by_id = els.each_with_object({}) { |e, h| h[e['id']] = e }
+    els.each do |el|
+      (el['relationships'] || []).each do |rel|
+        next unless rel.is_a?(Hash) && rel['derivedVia']
+        tgt        = by_id[rel['targetElementId']]
+        right_name = (rel['name'] || (tgt && element_name(tgt))).to_s
+        next if right_name.empty?
+        keys = (rel['keys'] || []).map { |k| dm_column_physical_name(tgt, k['targetColumnId']) }.compact
+        next if keys.empty?
+        idx[[element_name(el), right_name]] = {
+          derived_via:        rel['derivedVia'],
+          partial:            rel['partial'] == true,
+          dropped_conditions: rel['droppedConditions'],
+          keys:               keys
+        }
+      end
+    end
+    idx
+  end
+
+  # A dm_spec column's PHYSICAL (warehouse) name: its explicit display `name`
+  # when set (real metadata-record columns carry one), else parsed from its
+  # `[Element/Display Name]` formula (a column ensureCol fabricated carries
+  # no `name`) — folded upcase+underscore via physical_name, same convention
+  # every other probe-key resolution in this file uses.
+  def dm_column_physical_name(el, col_id)
+    return nil unless el && col_id
+    col = (el['columns'] || []).find { |c| c['id'] == col_id }
+    return nil unless col
+    disp = col['name'] || (col['formula'].is_a?(String) && col['formula'][/\/([^\]]+)\]\z/, 1])
+    disp && physical_name(disp)
   end
 
   # A relationship key is a bare column ref: a GUID resolves via caption (as

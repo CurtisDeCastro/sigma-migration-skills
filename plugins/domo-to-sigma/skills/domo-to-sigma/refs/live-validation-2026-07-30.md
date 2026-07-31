@@ -279,7 +279,28 @@ is the fix.
 
 ---
 
-## ⛔ Domo layout is NOT reachable through the API — in either direction
+## ⛔ Domo layout is NOT reachable through the API — in either direction — ⚠️ NARROWED (see `refs/page-layout-v4.md`)
+
+> ## ⚠️ NARROWED 2026-07-30 — geometry IS readable, on a v4 page
+>
+> This section is kept as the **measured historical record** for the classic page
+> probed here — it was true for that page, and it is still true for any genuinely
+> legacy page (one with no `pageLayoutV4` in its stacks response). It is not the
+> whole picture, though.
+>
+> `refs/page-layout-v4.md` — corroborated on two independent live Domo tenants —
+> found a third page style, **v4-inline**, where geometry is readable and exact:
+> `pageLayoutV4.standard.template[]`, joined to `content[]` on `contentKey`, gives
+> real `x`/`y`/`width`/`height` per card (grid is 60-wide, so Domo → Sigma scales
+> ×0.4), including positioned `HEADER` section dividers.
+>
+> So the claim below in Consequence 1 — that card *size, position and order* are
+> UI-only — is a **narrowing, not a reversal**: still true for a page with no
+> `pageLayoutV4`, not true in general. `refs/page-layout-v4.md` also records two
+> defects in our own code (`domo_rest.rb`'s `cards_for_page` never requests the v4
+> payload; `domo_sigma_util.rb:151` digs a `pageLayoutV4.cards` key that doesn't
+> exist) that must be fixed before any of this is usable. Read it for the full
+> page-style taxonomy.
 
 Probed exhaustively on a live instance. For a **classic** Domo page there is no way
 to read OR write layout geometry:
@@ -296,10 +317,13 @@ to read OR write layout geometry:
 
 Consequences, and they are structural rather than cosmetic:
 
-1. **You cannot build a nicely-arranged Domo dashboard from code.** Card *content*
-   is fully API-controllable (dataset, chart type, columns, filters, formats,
-   conditional formats); card *size, position and order* are UI-only. If a demo or
-   fixture page needs to look composed in Domo, a human must arrange it.
+1. **You cannot build a nicely-arranged Domo dashboard from code — on a genuinely
+   legacy page.** Card *content* is fully API-controllable (dataset, chart type,
+   columns, filters, formats, conditional formats); card *size, position and
+   order* are UI-only **for a page with no `pageLayoutV4`** (see the narrowing
+   note above and `refs/page-layout-v4.md` — a v4-inline page's geometry, and
+   `HEADER`-divider order, IS readable). If a demo or fixture page needs to look
+   composed in Domo and turns out to be genuinely legacy, a human must arrange it.
 2. **A migration gets no layout signal from a classic page via any endpoint probed here**, so a converter that
    expects x/y/w/h will silently degrade to a vertical stack — exactly the
    field-reported failure. The only fidelity route is a **human-supplied page
@@ -465,12 +489,75 @@ Notes for a real engagement:
 
 ---
 
-## ⛔ The formula layer is NOT "nearly free" — 74% of real Beast Modes fail
+## ⛔ The formula layer is NOT "nearly free" — 74% of real Beast Modes fail — ✅ RESOLVED (PR #115, #116)
+
+> ## ✅ RESOLVED 2026-07-30 — all three bugs fixed upstream (sigma-data-model-mcp PR #115, then PR #116)
+>
+> This section is kept as the **measured historical baseline** — it was true, and it
+> is the reason this fix work happened. It is no longer the current state.
+>
+> Beads `jva2` (Bug 1, `CASE WHEN`), `sqp1` (Bug 2, `COUNT(DISTINCT x)`), and `qorq`
+> (Bug 3, double-bracketing — see below) are **all closed**. All three constructs
+> now translate correctly end-to-end. The "81 unique Beast Modes / 52 paren-wrapped
+> / 44 CASE+paren" figures below were later found to be per-card *instances*, not
+> distinct formulas; deduplicated by SQL text the corpus is **74 distinct
+> formulas**. Re-measured against the PR #115 fix with a single identical
+> harness applied to both the `0be8116` baseline and the fixed HEAD — same
+> `normalize_bm` steps both times (backticks → `[brackets]` AND `WEEKDAY` →
+> `DAYOFWEEK`), so the two columns are genuinely comparable, not measured at
+> different points with different inputs:
+>
+> | metric | before | after |
+> |---|---|---|
+> | matched a rule | 0 | 37 |
+> | leaked `[Distinct]` | 5 | 0 |
+> | `And()`/`Or()` call form | 52 | 0 |
+> | `Today()()` | 21 | 0 |
+> | residual raw `CASE` in output | 54 | 0 |
+> | residual untranslated infix | — | 1 (honestly reported — infix `LIKE` still has no Sigma equivalent) |
+>
+> **Correction 2026-07-30 (review round 2):** an earlier draft of this table
+> published `16` for the "before" residual-raw-`CASE` figure. That number was
+> real, but it was measured at the *wrong point in time* — it's the
+> post-Task-5 intermediate figure (commit `1a47959`, the commit that first
+> introduced the `residualCase` check), not the pre-Track-A baseline (`0be8116`)
+> every other "before" figure in this table is measured against. Re-measured
+> with one identical harness against both endpoints: the real baseline is
+> **54**, not 16. The correct number *understates* the win (54→0 is a bigger
+> improvement than 16→0 would have been), but a measured number sitting in the
+> wrong column is wrong regardless of which direction the error points — worth
+> writing down as a lesson: when publishing a before/after table, measure both
+> ends with the same harness at the same time, don't reuse a number that was
+> measured at an intermediate commit along the way.
+>
+> Honest framing, not overstated: **37 of 74 (50%) now match a converter rule
+> exactly.** The rest fall through to the generic expression converter, which no
+> longer *corrupts* them (no leaked `[Distinct]`, no `And()`/`Or()` call-form nulls,
+> no `Today()()`, no raw `CASE` residue) but also does not fully translate every
+> shape — 1 formula has a residual infix `LIKE` with no Sigma equivalent and is
+> correctly reported as unconverted rather than silently shipped.
+>
+> **This 74-formula corpus never actually exercised Bug 3** (below), because its
+> sample identifiers are mostly mixed-case Salesforce-style field names
+> (`IsWon`, `CloseDate`, `created_on`), and Bug 3 only triggers on an ALL-CAPS
+> bracketed ref. So "0 double-bracketing defects" measured here was never evidence
+> the shared converter handled a Snowflake-backed Domo instance's actual column
+> naming convention (`NET_REVENUE`, `ORDER_ID`, …) — it was an artifact of this
+> particular corpus's identifier casing. **The generalisable lesson: a regression
+> corpus's identifier-casing convention is itself a variable that can hide a real
+> defect from every measurement run against it — verify a fix against the TARGET
+> system's actual naming convention, not just whatever corpus happens to be
+> lying around.** Bug 3 was found and fixed exactly because this corpus's four
+> `formula-overrides.json` entries were re-verified live against real
+> Domo-native SQL (ALL-CAPS backtick-quoted columns) rather than assumed safe
+> once Bugs 1/2 closed. See the correction at the end of this section for the
+> re-verified detail.
 
 `SKILL.md`'s "one big idea" says Beast Mode is MySQL-dialect SQL and therefore
 routes straight through `convert_sql_to_sigma_formula`, so "the formula layer is
-nearly free." **Live testing disproves this.** Measured over the **81 unique Beast
-Modes** on the validation instance:
+nearly free." **Live testing disproves this — as measured 2026-07-30, before the
+fix above.** Measured over the **81 unique Beast Modes** on the validation
+instance:
 
 | Construct | Beast Modes using it | Converter handles it? |
 |---|---|---|
@@ -483,7 +570,7 @@ Modes** on the validation instance:
 
 **60 of 81 (74%) hit at least one of the two confirmed breakages.**
 
-### Bug 1 — `CASE WHEN` is not translated (invalid Sigma emitted)
+### Bug 1 — `CASE WHEN` is not translated (invalid Sigma emitted) — ✅ RESOLVED (PR #115)
 Sigma has **no `CASE` syntax**; conditionals are `If(cond, then, else)` (or
 `Switch`). The converter emits a mangled hybrid that is not valid Sigma:
 
@@ -499,7 +586,18 @@ Real Beast Modes nest this heavily — e.g. a `COUNT(CASE WHEN … THEN … END)
 an outer `CASE WHEN … = 0 THEN … ELSE … END` guard — so a naive regex fix is not
 enough; this needs real conditional-expression handling.
 
-### Bug 2 — `COUNT(DISTINCT x)` treats `DISTINCT` as a column
+**Fixed 2026-07-30** (sigma-data-model-mcp PR #115 / bead `jva2`). Root cause was
+narrower than it looked: `lookConvertCase` already existed and was correct — the
+bug was that `lookSqlToSigmaRules`'s CASE branch anchors on `/^CASE\b/i`, and Domo
+wraps every Beast Mode in outer parentheses, so `(CASE WHEN …)` always missed the
+anchor and silently fell through to the corrupting fallback. Stripping balanced
+outer parens before pattern matching (plus an embedded-CASE scanner for a CASE
+nested inside arithmetic/an aggregate, which the anchor alone can't reach) fixed
+it. Verified: the exact input above now returns
+`If(Sum([Net Revenue]) = 0, 0, Sum([Gross Profit]) / Sum([Net Revenue]))`
+byte-identical to the hand-authored override.
+
+### Bug 2 — `COUNT(DISTINCT x)` treats `DISTINCT` as a column — ✅ RESOLVED (PR #115)
 ```
 in : (SUM(NET_REVENUE) / COUNT(DISTINCT ORDER_ID))
 out: (Sum([Net Revenue]) / Count([Distinct] [Order Id]))
@@ -507,20 +605,63 @@ out: (Sum([Net Revenue]) / Count([Distinct] [Order Id]))
 `DISTINCT` becomes a bracketed **column reference**. Sigma's form is
 `CountDistinct([Order Id])`.
 
-### Bug 3 — double-bracketing at OUR interface (this repo's fault, not the converter's)
+**Fixed 2026-07-30** (sigma-data-model-mcp PR #115 / bead `sqp1`) — the converter
+now scans to the matching `)`, masks the whole `COUNT(DISTINCT …)` call out (the
+live corpus nests a whole CASE inside one, so a regex on the argument alone was not
+enough), converts the argument recursively, and splices back
+`CountDistinct(<arg>)`. Verified: the input above now returns
+`Sum([Net Revenue]) / CountDistinct([Order Id])` byte-identical to the
+hand-authored override (when fed Title-Case bracket refs — see Bug 3 for why the
+real ALL-CAPS-identifier case needed a second fix, now also resolved).
+
+### Bug 3 — double-bracketing at OUR interface (this repo's fault, not the converter's) — ✅ RESOLVED (PR #116)
 `convert-beast-modes.rb`'s pre-normalize step rewrites Domo's backtick-quoted
 columns to Sigma bracket refs *before* calling the converter, but the converter
-expects **bare SNAKE_CASE** identifiers and adds the brackets itself:
+expected **bare SNAKE_CASE** identifiers and added the brackets itself:
 
 ```
 bare  NET_REVENUE    -> [Net Revenue]     ✅
-ours  [NET_REVENUE]  -> [[Net Revenue]]   ❌ double-bracketed
+ours  [NET_REVENUE]  -> [[Net Revenue]]   ❌ double-bracketed (pre-fix)
 ```
-So the normalizer must **stop** converting backticks to brackets (just strip the
-backticks and leave the identifier bare), or the converter must be made
-idempotent for already-bracketed refs.
+So either the normalizer had to stop converting backticks to brackets, or the
+converter had to be made idempotent for already-bracketed refs. The fix took the
+second path.
 
-### Consequence — Beast Modes silently disappear from the migration
+**Correction 2026-07-30, re-verified after PR #115.** Bugs 1 and 2 were fixed
+(above); Bug 3 was not — it was unrelated to the CASE/COUNT(DISTINCT) fix and
+reproduced exactly as measured originally. Re-ran all four
+`formula-overrides.json` entries in this corpus (`Margin Pct`, `Margin Pct 2`,
+`Avg Order Value`, `Return Rate`) through the PR #115 converter with their real
+`normalizedSql` (ALL-CAPS brackets from backtick-quoting): all four still
+double-bracketed every column ref, e.g. `If(Sum([[Net Revenue]]) = 0, 0, …)`
+instead of `If(Sum([Net Revenue]) = 0, 0, …)` — still invalid Sigma. Fed the SAME
+formulas with Title-Case bracket refs (`[Net Revenue]`, not `[NET_REVENUE]`)
+instead, the double-bracketing did not trigger (the converter's bracket-wrapping
+pass keyed off an ALL-CAPS `[A-Z_][A-Z0-9_]*` pattern, which a mixed-case ref
+never matches) — and the CASE/COUNT(DISTINCT) fix was then visible cleanly,
+matching the hand-authored override byte-for-byte (aside from `Avg Order Value` /
+`Return Rate` retaining a harmless outer-paren wrapper on the
+generic-converter fallback path). This is why the shared 74-formula regression
+corpus (mostly Salesforce-style field names like `IsWon`, `CloseDate`) measured 0
+double-bracketing defects while these four Domo-native, ALL-CAPS-column Beast
+Modes still failed: the corpus's identifier casing convention never exercised Bug
+3 in the first place — **0/74 was never evidence the fix generalized to a real,
+Snowflake-backed Domo instance's actual naming convention, it was an artifact of
+this corpus's own (mixed-case) sample data.**
+
+**Fixed 2026-07-30** (sigma-data-model-mcp PR #116 / bead `qorq`) — the
+bracket-wrapping pass now masks `[…]` spans before its bare-ALL-CAPS-identifier
+regex runs, so an already-bracketed ref (whatever its case) passes through once,
+not twice. Re-verified live against PR #116: all four Beast Modes above now
+convert to the hand-authored formula — two byte-for-byte, two differing only by a
+semantically-inert wrapping paren (`(a / b)` vs `a / b`, the same formula in
+Sigma). All four `formula-overrides.json` entries in this corpus have been
+removed. **The generalisable lesson, worth keeping even though the bug itself is
+fixed: a regression corpus's identifier-casing convention is a variable that can
+hide a defect from every measurement run against it. Verify a fix against the
+TARGET system's actual naming convention, not just whatever corpus is on hand.**
+
+### Consequence — Beast Modes used to silently disappear from the migration (historical; all three bugs now fixed)
 `convert-beast-modes.rb --lint` **drops** entries lacking a `sigmaFormula` rather
 than shipping bad output (good, honest behaviour). But combined with the above,
 the live run produced:
@@ -530,19 +671,24 @@ wrote discovery/formulas.json (0 formulas)
 ⚠ 4 Beast Mode(s) still lack a sigmaFormula: …
 ```
 
-i.e. **every** Beast Mode was dropped, so the data model and workbook carry **no
-calc columns at all**. The warning is loud, but the fidelity loss is total. On a
-real customer dashboard where 71% of Beast Modes are conditional, this is the
+i.e. **every** Beast Mode was dropped, so the data model and workbook carried **no
+calc columns at all**. The warning was loud, but the fidelity loss was total. On a
+real customer dashboard where 71% of Beast Modes are conditional, this was the
 single largest fidelity gap in the skill — larger than the chart-type gap below.
+Post-fix (PRs #115 and #116): none of Bugs 1-3 contribute to this outcome any
+longer for a Beast Mode using the shapes measured here; the shared converter
+handles CASE WHEN, COUNT(DISTINCT), and ALL-CAPS bracket-quoted Domo columns
+without a hand-authored override.
 
 ### Where the fix belongs
-Bugs 1 and 2 are in the **canonical shared converter**
-(`convertSqlToSigmaFormula` in the `sigma-data-model` MCP source), which every
-SQL-ish converter in this repo depends on — so fixing it there is high leverage and
-benefits dbt / snowflake / sql / cognos alike. Bug 3 is local to
-`convert-beast-modes.rb`. Until Bugs 1–2 are fixed upstream, **do not describe the
-Domo formula layer as low-risk**, and expect to hand-author Sigma formulas for any
-conditional Beast Mode.
+All three bugs were in the **canonical shared converter**
+(`convertSqlToSigmaFormula` / its `formulas.ts` bracket-wrapping pass, in the
+`sigma-data-model` MCP source), which every SQL-ish converter in this repo
+depends on — so fixing them there was high leverage and benefits dbt / snowflake
+/ sql / cognos alike. **Fixed 2026-07-30: Bugs 1-2 in PR #115, Bug 3 in PR #116.**
+The `formula-overrides.json` sidecar mechanism in `convert-beast-modes.rb` stays
+as the right escape hatch for whatever the shared converter cannot yet do next —
+it is simply no longer load-bearing for this defect class.
 
 ## Chart-type coverage gap
 

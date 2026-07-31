@@ -97,7 +97,7 @@ FileUtils.mkdir_p(OUT)
 DISCOVERY = File.join(OUT, 'discovery')
 FileUtils.mkdir_p(DISCOVERY)
 SCRIPTS = __dir__
-BASE_ENV = { 'DOMO_DISCOVERY_DIR' => DISCOVERY }.freeze
+BASE_ENV = { 'DOMO_DISCOVERY_DIR' => DISCOVERY, 'DOMO_DM_IDS_PATH' => File.join(OUT, 'dm-ids.json') }.freeze
 
 DomoRunState.record(OUT, 'mode' => (opts[:offline] ? 'offline' : 'live'), 'started_at' => Time.now.utc.iso8601)
 
@@ -151,8 +151,27 @@ def seed_discovery!(fixture_dir)
   FileUtils.mkdir_p(DISCOVERY)
   copied = []
   Dir.glob(File.join(fixture_dir, '*.json')).sort.each do |f|
-    FileUtils.cp(f, File.join(DISCOVERY, File.basename(f)))
-    copied << File.basename(f)
+    base = File.basename(f)
+    if base == 'dm-ids.json'
+      # bead ziht (Task 6): dm-ids.json is a POST-READBACK artifact — the LIVE
+      # path writes it via post-and-readback.rb --type datamodel to
+      # DOMO_DM_IDS_PATH, which BASE_ENV above points at THIS run's OUT dir
+      # (not discovery/ — see build-workbook.rb's DM_IDS_PATH comment: it lives
+      # in migrate-domo.rb's OUT, a different directory than DISCOVERY,
+      # because a hand run of build-workbook.rb alone has no OUT of its own).
+      # --offline mode never runs post-and-readback.rb (no live DM exists to
+      # post — see the "post-and-readback" phase below, always skipped), so a
+      # fixture wanting to exercise sub_master_for's live-element resolution
+      # provides this file directly, as the synthesized equivalent of that
+      # readback. Route it to OUT/dm-ids.json to match DOMO_DM_IDS_PATH —
+      # dropping it in discovery/ alongside dm-spec.json (like every other
+      # fixture *.json) left it somewhere build-workbook.rb never looks.
+      FileUtils.cp(f, File.join(OUT, base))
+      copied << "#{base} (-> #{OUT}, matching DOMO_DM_IDS_PATH — not discovery/)"
+      next
+    end
+    FileUtils.cp(f, File.join(DISCOVERY, base))
+    copied << base
   end
   png_src = File.join(fixture_dir, 'png')
   if Dir.exist?(png_src)
@@ -226,6 +245,15 @@ def offline_build_workbook_spec!(chart_specs_path, name:, description:, folder_i
     seen_ids[c['id']] = true
   end
 
+  # bead ziht: build-workbook.rb may emit one hidden sub-master per
+  # non-dominant DataSet under chart-specs.json's top-level `data_elements`
+  # key (mirrors build-workbook-spec.rb's own `helper_elements` handling for
+  # the LIVE path — see its header comment on the Data page). Any visible
+  # element retargeted to one of these (retarget_to_submaster!) sources it by
+  # id, so it must land on the Data page here too or the reference dangles —
+  # the offline path had never wired this key in at all.
+  helper_elements = (specs['data_elements'].is_a?(Array) ? specs['data_elements'] : [])
+
   data_page = {
     'id' => 'page-data', 'name' => 'Data',
     'elements' => [{
@@ -234,8 +262,9 @@ def offline_build_workbook_spec!(chart_specs_path, name:, description:, folder_i
                     'note' => 'no live Domo/Sigma Data Model in --offline mode — replace with a real ' \
                               'data-model source (see post-and-readback --type datamodel) before posting.' },
       'columns' => master_columns, 'order' => master_columns.map { |c| c['id'] },
-    }],
+    }] + helper_elements,
   }
+  log "Data page: + #{helper_elements.size} hidden sub-master(s) [#{helper_elements.map { |h| h['id'] }.join(', ')}]" if helper_elements.any?
 
   used_ids = { 'page-data' => true }
   visible_pages = specs['pages'].map do |p|

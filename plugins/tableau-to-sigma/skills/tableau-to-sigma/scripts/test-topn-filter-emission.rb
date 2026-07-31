@@ -102,6 +102,24 @@ check(lcols.none? { |c| c['formula'].to_s =~ /RowNumber\(\)\s*<=/ },
 check(build_log =~ /top-N filter.*(?:LOD|untranslatable)/m,
       'builder SURFACED the LOD top-N (actionable warning, not silently dropped)', fails)
 
+# ---- bead zjkw: element-filter `id` is mandatory ---------------------------
+# The live /v2/workbooks POST rejects an element filter without an `id`. Every
+# emission site (top-n, keep-list, IsNotNull null-exclusion, wildcard,
+# date-range, number-range) funnels through ONE aggregation stamp in
+# build-charts-from-signals.rb (`el_filters.each_with_index { ... 'id' =>
+# "flt-<element>-<n>" }`) — these assertions pin that stamp through the
+# top-n path (the shape TJ's bead names) and sweep every built element so a
+# future push site that bypasses the stamp fails here, not at POST time.
+check(tn && tn['id'].to_s =~ /\Aflt-/,
+      "zjkw: top-n element filter carries a deterministic flt- slug id (got #{tn && tn['id'].inspect})", fails)
+all_el_filters = els.flat_map { |e| (e['filters'] || []).map { |f| [e['id'], f] } }
+idless = all_el_filters.select { |(_, f)| f['id'].to_s.strip.empty? }
+check(idless.empty?,
+      "zjkw: EVERY emitted element filter carries an id (missing on: #{idless.map { |(eid, f)| "#{eid}:#{f['kind']}" }.inspect})", fails)
+flt_ids = all_el_filters.map { |(_, f)| f['id'] }
+check(flt_ids.uniq.length == flt_ids.length,
+      "zjkw: element-filter ids are unique across the page (dups: #{flt_ids.group_by { |x| x }.select { |_, v| v.size > 1 }.keys.inspect})", fails)
+
 puts
 if fails.empty?
   puts 'ALL PASS — top-N filter idiom: clean operand → native Sigma top-n filter; LOD operand surfaced'

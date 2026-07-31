@@ -19,7 +19,7 @@ Evidence and the full story:
 |---|---|
 | `fixtures/datasets.json` | 2 DataSets carrying a real `schema.columns` array — the PUBLIC LIST endpoint returns `columns` as an Integer COUNT with no schema, which crashed `build-dm` (`29.each`) and would otherwise have posted a column-less DM |
 | `fixtures/cards.json` | 15 cards from the live run: 7 element kinds, `subscriptions.big_number` summary numbers, `datasources[].dataSourceId` bindings, `mapping` roles, `calendar` pseudo-columns + `dateGrain`, a combo whose measures bind via SERIES, a second-dataset card, and a table whose summary number is a COUNT |
-| `fixtures/formulas.json` | 5 Beast Modes, all class `aggregate`, with hand-authored `sigmaFormula`s (the shared converter cannot translate `CASE WHEN` / `COUNT(DISTINCT)` — beads jva2/sqp1) |
+| `fixtures/formulas.json` | 5 Beast Modes, all class `aggregate`, with hand-authored `sigmaFormula`s. Historical reason: the shared converter could not translate `CASE WHEN` / `COUNT(DISTINCT)` (beads jva2/sqp1), and a separate double-bracketing collision (bead qorq) corrupted real ALL-CAPS Domo column refs (`[[Net Revenue]]` instead of `[Net Revenue]`) even after that fix. **All three fixed 2026-07-30** (sigma-data-model-mcp PR #115 then PR #116) — re-verified live: all four of this corpus's Beast Modes that needed a hand-authored override now convert correctly with the shared converter alone (two match byte-for-byte; two differ only by a semantically-inert wrapping paren). This fixture's entries are frozen as a regression pin of the shapes that USED to require an override, not because they still do |
 | `fixtures/dataset-map.json` | warehouse map incl. a **`columnOverrides`** entry deriving a Domo-only DATE column from a `YYYYMMDD` integer key via `MakeDate` |
 
 ## Live-only shapes this case pins
@@ -41,8 +41,15 @@ Evidence and the full story:
   `VALUE`; treating SERIES as a dimension yields a chart with ZERO measures
 - **`columnOverrides`** — a Domo-only column derived from one that does exist,
   rather than emitting a reference the warehouse cannot resolve
-- **multi-dataset page** — the `ds-dim` card is expected to be SKIPPED with a named
-  warning (one master per dataset is bead ziht), not silently mis-bound
+- **multi-dataset page** — the `ds-dim` card now routes to its own hidden
+  sub-master (`master-ds-dim`, one master per DataSet — bead ziht landed) rather
+  than being SKIPPED, **provided** a live `dm-ids.json`/`dm-spec.json` pair is
+  available to resolve `ds-dim` to its data-model element; absent that pair, the
+  card still falls back to today's named-warning SKIP rather than a silent
+  mis-bind. `corpus/run-corpus.sh --check` for this case only validates
+  `golden/data-model.json` (build-dm.rb's output) — no golden `chart-specs.json`
+  exists here, so this case does not exercise the sub-master routing itself;
+  that is pinned by `test/test-migrate-domo.rb`'s full-chain fixture instead
 
 ## Converter
 

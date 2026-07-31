@@ -467,13 +467,17 @@ DRIVER = <<~JS
         statement: e.source && e.source.kind === 'sql' ? e.source.statement : null,
         relationships: (e.relationships || []).map((r) => ({
           target: byId[r.targetElementId] ? nameOf(byId[r.targetElementId]) : ('<missing ' + r.targetElementId + '>'),
-          keys: r.keys || []
+          keys: r.keys || [],
+          derivedVia: r.derivedVia || null,
+          partial: r.partial === true,
+          droppedConditions: r.droppedConditions || 0
         }))
       })),
       controls: els.filter((e) => e.kind === 'control').map((e) => ({ id: e.id, controlId: e.controlId })),
       warnings: out.warnings || [],
       security: out.security || (out.result && out.result.security) || [],
-      workbookPatterns: out.workbookPatterns || []
+      workbookPatterns: out.workbookPatterns || [],
+      relationshipCoverage: out.relationshipCoverage || null
     };
   }
   writeFileSync(outPath, JSON.stringify(results, null, 2));
@@ -531,16 +535,44 @@ check(e['warnings'].any? { |w| w =~ /lives on related element|dimension-table co
       'off-fact LOD/Top-N groupings are refused with an actionable warning', fails)
 
 puts 'Part 3 — named gaps for un-wire-able relationships; fully-wired stays quiet'
+# COMPOSED BEHAVIOR (wave/2-integration merge of #569's derivation ladder):
+# a keyless pair whose tables share exactly ONE key-shaped column name is no
+# longer a refuse — the ladder's name-inference rung recovers it (that IS the
+# flattened-star fix), the wire is announced with a VERIFY warning, and gate
+# 16's uniqueness probe validates it downstream via join-plan.json. What must
+# never happen: a silent wire (no warning), a missing ledger record, or a
+# leftover disconnected-tables refusal for a recoverable pair.
 c = results['c-nokeys']
 gaps = c['workbookPatterns'].select { |p| p['kind'] == 'unsupported' && p['name'] =~ /Object-model relationship/ }
-check(gaps.size == 2, "no-keys: both pairs land as kind:'unsupported' named gaps (got #{gaps.size})", fails)
-check(gaps.all? { |p| p['name'] =~ /no-serialized-key/ }, 'no-keys: gap entries carry the reason', fails)
-check(c['warnings'].any? { |w| w =~ /disconnected tables/i }, 'no-keys: disconnected-tables summary warning', fails)
+check(gaps.size == 0, "no-keys-but-name-matched: both pairs are recovered by name-inference, no gaps (got #{gaps.size})", fails)
+check(c['warnings'].none? { |w| w =~ /disconnected tables/i },
+      'no-keys-but-name-matched: no disconnected-tables refusal for recoverable pairs', fails)
+check(c['warnings'].count { |w| w =~ /no serialized join key.*inferred ".*_KEY".*VERIFY/ } == 2,
+      'no-keys-but-name-matched: BOTH inferred wires are announced with a VERIFY warning (never silent)', fails)
+c_fact = fact_of.call(c)
+c_rels = (c_fact && c_fact['relationships']) || []
+check(c_rels.map { |r| r['target'] }.sort == %w[DIM_DATES DIM_SITES] &&
+      c_rels.all? { |r| r['derivedVia'] == 'name-inference' },
+      "no-keys-but-name-matched: both edges attach to the elected fact with derivedVia name-inference " \
+      "(got #{c_rels.map { |r| [r['target'], r['derivedVia']] }.inspect})", fails)
+ccov = c['relationshipCoverage'] || {}
+check(ccov['serialized'] == 2 && ccov['wired'] == 2 && (ccov['entries'] || []).length == 2,
+      "no-keys-but-name-matched: coverage ledger records 2/2 wired (got #{ccov.reject { |k, _| k == 'entries' }.inspect})", fails)
 p1 = results['partial']
-check(p1['warnings'].any? { |w| w =~ /1 of 2 relationship\(s\) wired.*NOT wired/i },
-      'partial wire: summary warning names wired/unwired counts', fails)
-check(p1['workbookPatterns'].any? { |p| p['kind'] == 'unsupported' && p['name'] =~ /computed-only-key/ },
-      'partial wire: computed-only pair is a named gap', fails)
+check(p1['warnings'].none? { |w| w =~ /relationship\(s\) wired.*NOT wired/i },
+      'computed-then-inferred: no partial-wire refusal summary — the computed pair is recovered by name-inference', fails)
+check(p1['workbookPatterns'].none? { |p| p['kind'] == 'unsupported' && p['name'] =~ /computed-only-key/ },
+      'computed-then-inferred: computed-only pair is recovered, not a named gap', fails)
+check(p1['warnings'].any? { |w| w =~ /name-inference wired "DATE_KEY".*WIDER than Tableau/ },
+      'computed-then-inferred: the dropped computed condition is called out as a WIDER-than-Tableau join', fails)
+p_fact = fact_of.call(p1)
+p_rels = (p_fact && p_fact['relationships']) || []
+p_dates = p_rels.find { |r| r['target'] == 'DIM_DATES' }
+p_sites = p_rels.find { |r| r['target'] == 'DIM_SITES' }
+check(p_dates && p_dates['derivedVia'] == 'name-inference' && p_dates['partial'] == true && p_dates['droppedConditions'].to_i >= 1,
+      'computed-then-inferred: DIM_DATES edge carries name-inference + partial/droppedConditions through pass-2 attachment', fails)
+check(p_sites && p_sites['derivedVia'] == 'serialized' && p_sites['partial'] == false,
+      'computed-then-inferred: DIM_SITES edge stays cleanly serialized (no partial bleed-over)', fails)
 rg = results['range']
 check(rg['warnings'].any? { |w| w =~ /non-equality operator/i } &&
       rg['workbookPatterns'].any? { |p| p['name'] =~ /non-equality-key/ },

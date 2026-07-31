@@ -192,7 +192,8 @@
                     "targetColumnId": "inode-NORM0003/DATE_KEY"
                   }
                 ],
-                "name": "DIM_DATES"
+                "name": "DIM_DATES",
+                "derivedVia": "serialized"
               },
               {
                 "id": "id0025",
@@ -203,7 +204,8 @@
                     "targetColumnId": "inode-NORM0008/SITE_KEY"
                   }
                 ],
-                "name": "DIM_SITES"
+                "name": "DIM_SITES",
+                "derivedVia": "serialized"
               },
               {
                 "id": "id0026",
@@ -214,7 +216,8 @@
                     "targetColumnId": "inode-NORM0012/SITE_KEY"
                   }
                 ],
-                "name": "ENTITLEMENTS"
+                "name": "ENTITLEMENTS",
+                "derivedVia": "serialized"
               }
             ]
           },

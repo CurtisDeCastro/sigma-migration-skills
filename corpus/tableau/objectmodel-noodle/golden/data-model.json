@@ -233,7 +233,8 @@
                     "targetColumnId": "inode-NORM0004/DATE_KEY"
                   }
                 ],
-                "name": "DIM_DATES"
+                "name": "DIM_DATES",
+                "derivedVia": "serialized"
               },
               {
                 "id": "id0030",
@@ -244,7 +245,8 @@
                     "targetColumnId": "inode-NORM0009/SITE_KEY"
                   }
                 ],
-                "name": "DIM_SITES"
+                "name": "DIM_SITES",
+                "derivedVia": "serialized"
               },
               {
                 "id": "id0031",
@@ -255,7 +257,8 @@
                     "targetColumnId": "inode-NORM0013/PROVIDER_KEY"
                   }
                 ],
-                "name": "DIM_PROVIDERS"
+                "name": "DIM_PROVIDERS",
+                "derivedVia": "serialized"
               },
               {
                 "id": "id0032",
@@ -266,7 +269,8 @@
                     "targetColumnId": "inode-NORM0017/SITE_KEY"
                   }
                 ],
-                "name": "ENTITLEMENTS"
+                "name": "ENTITLEMENTS",
+                "derivedVia": "serialized"
               }
             ],
             "metrics": [

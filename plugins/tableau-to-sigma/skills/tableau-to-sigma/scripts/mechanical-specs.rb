@@ -884,7 +884,16 @@ module MechanicalSpecs
       // param-filters, window/LOD calcs) + parameters (control values/defaults)
       // are needed by the build layer to materialise controls/Switch tiles and by
       // the "Not Migrated (and why)" report — pass them through (was dropped).
-      writeFileSync(#{meta_out.to_json}, JSON.stringify({ model: bare, warnings: out.warnings || [], stats: out.stats || {}, security: out.security || [], workbookPatterns: out.workbookPatterns || [], parameters: out.parameters || [] }, null, 2));
+      // relationshipCoverage (PR2a) is the object-graph relationship-derivation
+      // AUDIT LEDGER — every relationship the converter considered, wired or
+      // not, with how it was derived (serialized/name-inference/unwired). It is
+      // the ONLY artifact that makes an inferred join key auditable after the
+      // fact. emit-relationship-coverage.rb reads it via --converter-out, which
+      // means THIS file is its sole real-run input — omitting the key here (as
+      // this write once did) leaves the ledger existing only in memory and in
+      // test fixtures, with no possible input for that script on any real run.
+      // Same failure class as the security/RLS drop above: pass it through.
+      writeFileSync(#{meta_out.to_json}, JSON.stringify({ model: bare, warnings: out.warnings || [], stats: out.stats || {}, security: out.security || [], workbookPatterns: out.workbookPatterns || [], parameters: out.parameters || [], relationshipCoverage: out.relationshipCoverage || null }, null, 2));
     JS
     o, e, st = Open3.capture3('node', shim)
     raise "converter failed: #{e}#{o}" unless st.success?
@@ -924,7 +933,8 @@ module MechanicalSpecs
     end
     result = { 'model' => bare, 'warnings' => out['warnings'] || [],
                'stats' => out['stats'] || {}, 'security' => out['security'] || [],
-               'workbookPatterns' => out['workbookPatterns'] || [], 'parameters' => out['parameters'] || [] }
+               'workbookPatterns' => out['workbookPatterns'] || [], 'parameters' => out['parameters'] || [],
+               'relationshipCoverage' => out['relationshipCoverage'] || nil }
     File.write(meta_out, JSON.pretty_generate(result))
     result
   end
