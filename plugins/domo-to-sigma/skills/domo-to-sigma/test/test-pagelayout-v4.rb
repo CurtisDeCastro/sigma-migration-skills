@@ -29,8 +29,30 @@ dash = build_dashboard_for_page('V4 Page', merged)
 ok(dash, 'build_dashboard_for_page returns a dashboard for the v4-merged cards')
 eq(dash['zones'].length, 3, 'all 3 real cards became zones (the HEADER content entry never became a phantom zone)')
 zone_by_id = dash['zones'].each_with_object({}) { |z, h| h[z['id']] = z }
-ok(zone_by_id[700000011]['x_pct'] > zone_by_id[700000010]['x_pct'],
-   'card 700000011 (template x=11) renders to the right of card 700000010 (template x=0) — real geometry drove placement, not a kind-based guess')
+
+# Exact values, not a relative ordering check: rung 1's build_dashboard derives
+# these from the v4 template's real x/y/w/h (scaled x0.4, then normalized to
+# max_x=12.0/max_y=15.6 across the 3 cards). Rung 2 (build_dashboard_from_
+# collections) would produce a DIFFERENT set of numbers from its own
+# equal-width/size-token composition — e.g. an even 3-up row gives x_pct 0/50/
+# 0 and w_pct 50/50/100, not the 0/36.67/0 and 36.67/26.67/100 below. Asserting
+# the exact numbers (not just "card B is right of card A") is what gives this
+# test the power to tell rung 1 and rung 2 apart; a relative ordering check
+# alone cannot, because the fixture's cards[] happens to already be in
+# left-to-right order, so rung 2's fallback would satisfy an ordering-only
+# assertion too. Values confirmed by running the actual code (not hand math):
+# see the fix-round-1 addendum in refs/task-3-report.md for both the real-run
+# and monkey-patched-stub proof.
+eq(zone_by_id[700000010]['x_pct'], 0.0,   'card 700000010: x_pct=0.0 (real x=0.0 / max_x=12.0)')
+eq(zone_by_id[700000010]['y_pct'], 12.82, 'card 700000010: y_pct=12.82 (real y=2.0 / max_y=15.6) — rung 2 would give 0.0')
+eq(zone_by_id[700000010]['w_pct'], 36.67, 'card 700000010: w_pct=36.67 (real w=4.4 / max_x=12.0) — rung 2 would give an even 50.0')
+eq(zone_by_id[700000010]['h_pct'], 35.9,  'card 700000010: h_pct=35.9 (real h=5.6 / max_y=15.6) — rung 2 would give 38.46')
+eq(zone_by_id[700000011]['x_pct'], 36.67, 'card 700000011: x_pct=36.67 (real x=4.4 / max_x=12.0) — rung 2 would give an even 50.0')
+eq(zone_by_id[700000011]['y_pct'], 12.82, 'card 700000011: y_pct=12.82 (real y=2.0 / max_y=15.6) — rung 2 would give 0.0')
+eq(zone_by_id[700000011]['w_pct'], 26.67, 'card 700000011: w_pct=26.67 (real w=3.2 / max_x=12.0) — rung 2 would give an even 50.0')
+eq(zone_by_id[700000011]['h_pct'], 35.9,  'card 700000011: h_pct=35.9 (real h=5.6 / max_y=15.6) — rung 2 would give 38.46')
+eq(zone_by_id[700000012]['y_pct'], 48.72, 'card 700000012: y_pct=48.72 (real y=7.6 / max_y=15.6) — rung 2 would give 38.46')
+eq(zone_by_id[700000012]['h_pct'], 51.28, 'card 700000012: h_pct=51.28 (real h=8.0 / max_y=15.6) — rung 2 would give 61.54')
 
 puts '== legacy (non-v4) page: unaffected, still falls through past rung 1 to rung 2 =='
 legacy_fixture = JSON.parse(File.read(File.join(__dir__, 'fixtures', 'domo-live-raw', 'stacks-page.json')))
