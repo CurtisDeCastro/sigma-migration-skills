@@ -19,8 +19,9 @@ their default state.
 
 1. **Control lint** (`scripts/lib/control_lint.rb`) — static spec analysis:
    dead controls, ghost filter targets, source-closure reach vs same-page
-   queryable elements, and source-signal coverage via the
-   `control-scope.json` sidecar. Runs automatically in
+   queryable elements, source-signal coverage via the `control-scope.json`
+   sidecar, and **conflicting cross-page control defaults** (the severe D11
+   case below). Runs automatically in
    `post-and-readback.rb --type workbook` (exit 4) and as
    `assert-phase6-ran.rb` **gate 7** (exit 9, `--skip-control-lint` escape).
 2. **control-scope.json contract** — emitted by the builder next to the
@@ -77,20 +78,65 @@ Consequences:
 - **partial reach, multi-master page** → add one filter target per master the
   control should govern (the column must exist on each); elements sourcing
   from those masters inherit via the closure.
-- **partial reach, chart bypasses the master** (sources the DM directly) →
-  either re-source the chart from the master or re-root it through a hidden
-  shared BASE TABLE (a `kind: table` element sourcing the same DM element,
-  carrying passthrough columns; the chart re-sourced through it) and target
-  the table. Control filter targets may only point at TABLE elements — a
-  chart/KPI target is rejected at POST/PUT with 400 "Dependency not found"
-  (live-verified 2026-06-12; the looker builder's listen-scope tables and
-  enhance-apply's `ensure_base_table!` are the two automated forms of this
-  pattern).
+- **partial reach, KPIs/charts unfiltered while the detail table filters**
+  (each visual sourced its own narrow master; the control only targeted the
+  table's master) → the fix is **one base table per page + control-targets-base**
+  (build-workbook-from-pbir.rb `--source-mode page-base`, the DEFAULT): every
+  visual on the page SOURCES the one page base master and each page control
+  targets THAT base table's column, so the filter propagates to every visual
+  through the source closure. Control filter targets a TABLE element (the base
+  master) — the always-safe target. **Do NOT add a filter "passthrough" column
+  to a chart or pivot to make it a direct control target**: the extra column
+  corrupts the chart/pivot grouping and it renders "No data" (verified on live
+  migrations). A passthrough column is tolerated only on a KPI (single-value,
+  no grouping) or a plain grouped table; charts/pivots must be reached by
+  PROPAGATION from a shared base table, never by a passthrough column. (This
+  mirrors tableau-to-sigma / qlik-to-sigma, where every chart sources one
+  master; the looker builder's listen-scope tables are the same idea.)
+- **boolean / indicator slicer** → a boolean-typed slicer must NOT ship the
+  string-slicer template (`controlType: list`, `mode: include`, `values: []`):
+  Sigma treats an unset boolean `include` list as "include nothing" and ZEROES
+  every targeted element. Seed the full boolean domain (`values: [true, false]`)
+  so an unset control includes everything (= no filter), matching a PBI boolean
+  slicer with nothing selected. The builder does this automatically for columns
+  the TMSL model types as boolean/bit (else falls back to indicator-name shape:
+  `Is…` / `Has…` / `…Ind` / `…Flag`).
 - **intentional narrow control** (grain switcher driving one chart by
   formula) → annotate `scope: [...]` in control-scope.json; don't fake-wire.
 
 After any repair: flip-test the workbook
 (`ruby scripts/probe-controls.rb --workbook-id <id> --check-out-of-closure`).
+
+## Severe D11 case: shared master + disjoint per-page control defaults = workbook-wide zero rows
+
+The documented D11 multi-page control-bind defect is cross-page *leakage*
+(flipping page A's control moves page B's numbers, because both bind the one
+shared hidden master). Its severe special case is a full, silent **data
+outage**: when two pages' controls default to non-empty, **disjoint** values on
+the same logical column, Sigma **AND-composes** every control that filters a
+shared source element — so the composed filter is `col IN [A] AND col IN [B]`
+with `A ∩ B = ∅` → the master matches **zero rows** → every chart/KPI/table on
+every page sourced from it reads EMPTY, with no error at build or POST.
+
+Sigma composes by the shared master **element** in the source chain, not by
+column identity, so duplicating the column under a second id (`m-website-type`
+vs `m-website-type-overview`, both formula `[Custom SQL/Website Type]`) does
+**not** dodge it. Control lint check (d) sees through that by grouping a target
+table's columns by normalized formula.
+
+Check (d) hard-fails this shape (blocks GREEN via gate 7). It fires only when
+two controls on **different** pages target the **same** element+column-alias
+with **non-empty, disjoint** defaults — the common default-all case
+(`values: []`) never trips it. Two fixes, both of which the lint recommends:
+
+- **Independent per-page masters** — give each audience/page its own
+  independently-sourced master element (a distinct filter-target elementId per
+  page), so the controls no longer compose against one source. (This is what
+  the archived pre-regression version of the workbook that surfaced #485 did:
+  `master-agent` / `master-leads` / `master-overview`.)
+- **Overlapping (or default-all) defaults** — make the per-page defaults share a
+  non-empty intersection, or leave them default-all, so the composed filter is
+  satisfiable.
 
 ## Gotcha: list-control targets on NUMERIC columns are silently stripped
 Same class as the datetime strip: a list control whose filter target column is

@@ -20,7 +20,7 @@ Usage:
      --data-model-id <uuid> --fact-element <elId> --fact-name ORDER_FACT \
      --rel-name EL_CUSTOMER --fact-dataset order --folder-id <uuid> --out wb_spec.json
 """
-import argparse, json, re, sys, os
+import argparse, json, re, sys, os, subprocess
 
 # ── documentation-grounded mapping catalogs (SINGLE SOURCE OF TRUTH) ─────────
 # Every enumerable classifier map below is loaded from refs/catalogs/<dimension>.json
@@ -33,6 +33,7 @@ import argparse, json, re, sys, os
 # BY ALL/WITHIN/FOR hard-MAQL flagging — STAYS as cited code (see each site).
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 import coverage_catalog as _cc  # noqa: E402
+import metric_binding as _mb    # noqa: E402  shared DM-metric binder ([Metrics/<name>] over inline re-derive)
 _CAT_DIR = _cc.default_catalog_dir(__file__)
 VIZ_CAT  = _cc.load(_CAT_DIR, "viz-kind")        # GoodData visualizationUrl -> Sigma element kind
 AGG_CAT  = _cc.load(_CAT_DIR, "aggregation")     # MAQL scalar aggregate fn  -> Sigma aggregate fn
@@ -68,9 +69,29 @@ def main():
     ap.add_argument("--fact-dataset", required=True)
     ap.add_argument("--folder-id", required=True)
     ap.add_argument("--dashboard", default=None, help="migrate only this dashboard id (+ its filterContext)")
+    ap.add_argument("--dm-spec", default=None,
+                    help="DM spec JSON (convert.py --out). When present, a measure whose inline "
+                         "aggregate matches a metric on the fact element binds to a governed "
+                         "[Metrics/<name>] reference instead of re-deriving it inline. Absent → "
+                         "inline, byte-identical to before.")
     ap.add_argument("--out", default="wb_spec.json")
     a = ap.parse_args()
     P = a.fact_name  # element-name prefix for the master's own (DM-sourced) formulas
+
+    # DM metrics referenceable on the master (it sources the fact element): a measure
+    # whose translated inline aggregate matches one binds to [Metrics/<name>] (governed)
+    # instead of re-deriving it. No --dm-spec → empty list → every measure stays inline
+    # (byte-identical). Resolution + formula-equivalence matching live in the shared
+    # binder (scripts/lib/metric_binding.py). --fact-element must be the DM element id
+    # convert.py assigned (CREATE preserves ids), so it keys into the spec's elements.
+    metrics = []
+    if a.dm_spec and os.path.exists(a.dm_spec):
+        try:
+            _dm = json.load(open(a.dm_spec))
+            _by_id = {e.get("id"): e for pg in _dm.get("pages", []) for e in (pg.get("elements") or [])}
+            metrics = _mb.available_metrics(a.fact_element, _by_id)
+        except (ValueError, OSError) as e:
+            print(f"--dm-spec unreadable ({e}); measures stay inline", file=sys.stderr)
 
     layout = json.load(open(a.workspace)); ldm = layout["ldm"]; an = layout["analytics"]
     # symbol tables
@@ -209,7 +230,9 @@ def main():
             flags.append({"insight": iid, "reason": "measure uses workbook-level MAQL (BY ALL / FOR)"}); continue
         mcols = []
         for m, t, f in meas:
-            c = {"id": cid(t) or m, "formula": to_master(f), "name": t}
+            # Prefer a governed [Metrics/<name>] ref when this inline aggregate matches a
+            # DM metric by formula equivalence; safe no-op (inline) otherwise.
+            c = {"id": cid(t) or m, "formula": _mb.metric_ref_or_inline(to_master(f), MASTER_NAME, metrics), "name": t}
             fmt = gd_fmt(metric_fmt.get(m))
             if fmt: c["format"] = fmt
             mcols.append(c)
@@ -398,6 +421,30 @@ def main():
     n_ctl = len(dash_control)
     print(f"workbook -> {a.out}: {len(pages)} page(s), {len(page_elements)} elements, "
           f"{len(mcolumns)} master cols, {n_ctl} date control(s), {len(flags)} flagged")
+
+    # gate 7 (control-wiring lint): FAIL the build if a control does not filter
+    # every same-page KPI/chart (partial reach), is dead (no resolving target),
+    # or points at a ghost element. Runs the shared, proven
+    # scripts/lib/control_lint.rb on the just-built spec — the same hard gate the
+    # other converters ship — so a control that "only filters the table, not the
+    # KPIs/charts" can never ship silently. No live API needed (lints the spec).
+    # (Runtime flip proof / gate 7b needs a live-posted workbook; the agent runs
+    # probe-controls.rb after POST — see SKILL.md.)
+    _cl = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib", "control_lint.rb")
+    if os.path.exists(_cl):
+        _lint = subprocess.run(["ruby", _cl, a.out], capture_output=True, text=True)
+        sys.stdout.write(_lint.stdout)
+        sys.stderr.write(_lint.stderr)
+        if _lint.returncode != 0:
+            sys.stderr.write(
+                "\n[FAIL] gate 7 (control lint): control-wiring violation(s) above. A control "
+                "must target the page's SOURCE element so Sigma propagates the filter to EVERY "
+                "element (KPIs + charts + tables), not just one. Fix the wiring before shipping.\n")
+            sys.exit(9)
+    else:
+        sys.stderr.write(
+            "[WARN] gate 7: scripts/lib/control_lint.rb not vendored — control wiring UNLINTED "
+            "(re-vendor; SHA-1 discipline)\n")
     for p in pages: print(f"   page '{p['name']}': {len(p['elements'])} elements")
     for fl in flags: print("   FLAG", fl)
 

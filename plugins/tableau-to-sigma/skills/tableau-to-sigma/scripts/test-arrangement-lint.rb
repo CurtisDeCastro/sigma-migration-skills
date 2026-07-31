@@ -222,7 +222,7 @@ Dir.mktmpdir do |d|
   File.write(File.join(d, 'dl.json'), JSON.generate(DL))
   File.write(File.join(d, 'wb.json'), JSON.generate(WB))
   out = File.join(d, 'layout.xml')
-  log = `#{RUBY} #{BUILD} --layout #{File.join(d, 'dl.json')} --wb-ids #{File.join(d, 'wb.json')} --out #{out} 2>&1`
+  log = IO.popen([RUBY, BUILD, '--layout', File.join(d, 'dl.json'), '--wb-ids', File.join(d, 'wb.json'), '--out', out], err: %i[child out], &:read)
   arr_path = File.join(d, 'layout-arrangement.json')
   ok('builder wrote layout-arrangement.json', File.exist?(arr_path))
   ok('builder announces the arrangement report', log.include?('layout-arrangement.json'))

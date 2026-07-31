@@ -216,7 +216,7 @@ def run_build2(png_read)
       args = ['--skip-dashboard-read', 'no PNG available (test)']
     end
     abort 'parse-twb-layout failed (part 2)' unless system('ruby', PARSER, twb, lay, out: File::NULL, err: File::NULL)
-    log = `ruby #{BUILD} --tableau-dir #{d} --layout #{lay} --meta #{lay.sub(/\.json$/, '-meta.json')} --master-map #{mm} --master-element-id master --out #{out} #{args.map { |a| "'#{a}'" }.join(' ')} 2>&1`
+    log = IO.popen(['ruby', BUILD, '--tableau-dir', d, '--layout', lay, '--meta', lay.sub(/\.json$/, '-meta.json'), '--master-map', mm, '--master-element-id', 'master', '--out', out, *args], err: %i[child out], &:read)
     if File.exist?(out)
       doc = JSON.parse(File.read(out))
       els = doc.is_a?(Array) ? doc : (doc['elements'] || (doc['pages'] || []).flat_map { |p| p['elements'] || [] })

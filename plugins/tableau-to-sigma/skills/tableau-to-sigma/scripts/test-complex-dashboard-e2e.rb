@@ -128,7 +128,11 @@ Dir.mktmpdir do |d|
               '--master-element-id', 'master', '--auto-controls',
               '--title', 'Pipeline Dashboard', '--out', out,
               err: '/dev/stdout', out: File::NULL) rescue false
-  build_log = `ruby #{BUILD} --tableau-dir #{d} --layout #{lay} --meta #{lay.sub(/\.json$/, '-meta.json')} --master-map #{mm} --master-element-id master --skip-dashboard-read unit-test --auto-controls --title Pipeline --out #{out} 2>&1`
+  build_log = IO.popen(['ruby', BUILD, '--tableau-dir', d, '--layout', lay,
+                        '--meta', lay.sub(/\.json$/, '-meta.json'), '--master-map', mm,
+                        '--master-element-id', 'master', '--skip-dashboard-read', 'unit-test',
+                        '--auto-controls', '--title', 'Pipeline', '--out', out],
+                       err: %i[child out], &:read)
   build_out = (JSON.parse(File.read(out)) rescue nil) if File.exist?(out)
 end
 

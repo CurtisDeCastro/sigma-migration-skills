@@ -121,10 +121,10 @@ require 'optparse'
 require 'fileutils'
 require 'open3'
 require_relative 'lib/py_resolve' # real-Python resolver (Windows Store-stub safe)
+begin; require_relative 'lib/modeling_advisory'; rescue LoadError; end # shared, vendor-neutral CDW join-cost advisory (optional; synced from shared/)
 require 'date'
 require 'time'
 require 'set'
-require 'digest' # loop-breaker failure signatures (Offramp.loop_check)
 require_relative 'lib/scout_gate'
 require_relative 'lib/dashboard_read'
 require_relative 'lib/recipe_multimetric'
@@ -133,6 +133,7 @@ require_relative 'lib/offramp' # structured "where did this run leave the golden
 require_relative 'lib/fast_path' # FAST-PATH routing + BOM-tolerant JSON reads
 require_relative 'lib/phase_cache' # sha-stamped phase-output reuse on re-entry (refs/performance.md)
 require_relative 'lib/sigma_rest' # in-process Sigma token minting (no bash/eval)
+require_relative 'lib/metric_binding' # shared DM-metric binder ([Metrics/<name>] over inline re-derive)
 require_relative 'lib/tableau_rest' # in-process Tableau token minting (Windows-safe; no bash/eval)
 require_relative 'hydrate-custom-sql'
 
@@ -242,6 +243,8 @@ OptionParser.new do |o|
                          'when the .twbx payload + connection id are already available') { opts[:no_auto_land] = true }
   o.on('--skip-postpublish-guide REASON', 'waive the finalize gate that requires POSTPUBLISH_GUIDE.md when the ' \
                                           'source carries dashboard actions (gate 11) — name it in your report') { |v| opts[:skip_postpublish_guide] = v }
+  o.on('--skip-datasource-filters REASON', 'waive the #483 datasource-filter gate (always-on Tableau data-source ' \
+                                           'filters must be applied as master defaults, not silently dropped) — REQUIRED reason; name it in your report') { |v| opts[:skip_datasource_filters] = v }
   o.on('--row-scale F', Float) { |v| opts[:row_scale] = v }
   o.on('--page-rows N', Integer, 'override the layout row model (passed through to build-dashboard-layout.rb; ' \
                                  'wins over the px-derived canvas rows)') { |v| opts[:page_rows] = v }
@@ -400,32 +403,17 @@ puts "── migrate-tableau #{opts[:finalize] ? '--finalize' : 'PASS'} · run #
 puts '   ⏱  a full pass runs 5–20+ minutes. Run me IN BACKGROUND (writing a log) or with a'
 puts '   tool timeout ≥ 20 minutes — the default 2-minute foreground limit WILL kill the pass.'
 
-# 🚧 Step-0 environment GATE. The doctor writes a doctor.json fingerprint; this
-# refuses to run on an env that never passed the doctor, instead of letting the
-# pipeline improvise around a missing runtime (the #1 source of cross-user
-# inconsistency at multi-user events). Waive with --skip-doctor-gate "<reason>"
-# or SIGMA_SKIP_DOCTOR_GATE=<reason>. Runs before every path (pass-1 + finalize).
-_dg_skip = opts[:skip_doctor_gate] || ENV['SIGMA_SKIP_DOCTOR_GATE']
-_dg_cmd = ['ruby', File.join(HERE, 'assert-doctor-ran.rb'), '--workdir', WORK]
-_dg_cmd += ['--skip-doctor-gate', _dg_skip] if _dg_skip && !_dg_skip.to_s.empty?
-unless system(*_dg_cmd)
-  # Host-dispatched bootstrap hint: PowerShell/cmd users get the .ps1 twin, not
-  # a bash script they cannot run (RbConfig::CONFIG['host_os'] — docs-level P1.3).
-  # PR-15: the remediation is the ONE bootstrap command (idempotent; ends in a
-  # doctor run + sentinel) — never a hand-driven runtime install.
-  _doc_hint = RbConfig::CONFIG['host_os'] =~ /mswin|mingw|cygwin/ ?
-                'powershell -ExecutionPolicy Bypass -File scripts\\bootstrap.ps1' :
-                'bash scripts/bootstrap.sh'
-  abort "FATAL: environment gate failed — run the bootstrap first (#{_doc_hint}; see remediation above), " \
-        'or re-run with --skip-doctor-gate "<reason>".'
-end
-
 # 🚧 Step-0 STALENESS HARD GATE (escalates the doctor's SHA/build-age WARN).
 # The doctor stamps {behind_count, days_since_commit} into doctor.json; a
 # checkout behind upstream (or >14 days old) silently re-hits bugs fixed weeks
 # earlier, so the WARN is now enforced at run start. Waive with
 # SIGMA_ALLOW_STALE="<reason>" (recorded as an off-ramp). Best-effort read:
 # a missing/unreadable doctor.json is the doctor gate's problem, not this one's.
+# ORDER IS DELIBERATE: staleness runs BEFORE the bootstrap-sentinel environment
+# gate below. A stale checkout must refuse with the stale remediation (git pull /
+# reinstall) even when the sentinel is missing — the sentinel gate's remediation
+# is "run the bootstrap", which on a stale checkout would just bootstrap (and
+# bless) a stale build. Pinned by test-stale-gate.rb legs 1-2.
 begin
   _st_path = [File.join(WORK, 'doctor.json'),
               File.expand_path('~/.sigma-migration/doctor.json')].find { |p| File.exist?(p) }
@@ -455,6 +443,28 @@ begin
   end
 rescue JSON::ParserError
   # unreadable doctor.json was already handled (or waived) by the doctor gate
+end
+
+# 🚧 Step-0 environment GATE. The doctor writes a doctor.json fingerprint; this
+# refuses to run on an env that never passed the doctor, instead of letting the
+# pipeline improvise around a missing runtime (the #1 source of cross-user
+# inconsistency at multi-user events). Waive with --skip-doctor-gate "<reason>"
+# or SIGMA_SKIP_DOCTOR_GATE=<reason>. Runs before every path (pass-1 + finalize).
+# Runs AFTER the staleness gate above (see ORDER IS DELIBERATE) — it also
+# enforces main's bootstrap-sentinel semantics (PR-15) for non-stale checkouts.
+_dg_skip = opts[:skip_doctor_gate] || ENV['SIGMA_SKIP_DOCTOR_GATE']
+_dg_cmd = ['ruby', File.join(HERE, 'assert-doctor-ran.rb'), '--workdir', WORK]
+_dg_cmd += ['--skip-doctor-gate', _dg_skip] if _dg_skip && !_dg_skip.to_s.empty?
+unless system(*_dg_cmd)
+  # Host-dispatched bootstrap hint: PowerShell/cmd users get the .ps1 twin, not
+  # a bash script they cannot run (RbConfig::CONFIG['host_os'] — docs-level P1.3).
+  # PR-15: the remediation is the ONE bootstrap command (idempotent; ends in a
+  # doctor run + sentinel) — never a hand-driven runtime install.
+  _doc_hint = RbConfig::CONFIG['host_os'] =~ /mswin|mingw|cygwin/ ?
+                'powershell -ExecutionPolicy Bypass -File scripts\\bootstrap.ps1' :
+                'bash scripts/bootstrap.sh'
+  abort "FATAL: environment gate failed — run the bootstrap first (#{_doc_hint}; see remediation above), " \
+        'or re-run with --skip-doctor-gate "<reason>".'
 end
 
 # 🚧 Step-0 CREDENTIAL GATE (fail-closed). The doctor treats missing creds as a
@@ -671,6 +681,7 @@ PHASE_BUDGET = {
   'cleanup-orphans'   => 45,
   'assert-run-state'  => 10,
   'assert-phase6-ran' => 90,
+  'assert-datasource-filters' => 15, # one GET /v2/workbooks/<id>/spec + local checks (SKIPs offline)
   'phaseE'            => 240,
   'pivot-totals-ship' => 20   # one GET+PUT to re-hide pivot grand totals at ship
 }.freeze
@@ -723,20 +734,32 @@ def run!(cmd, allow_fail: false, env: nil)
   [out, st]
 end
 
-# Mint a fresh Sigma bearer token IN-PROCESS (pure Ruby net/http via the Sigma
-# lib) — no bash, no `eval "$(get-token.sh)"`, so this works identically under
-# PowerShell / cmd / a Cowork sandbox. Refreshed per call to match the old
-# per-call get-token.sh behaviour, so a long run never carries a stale token.
+# Return a Sigma bearer token that is live RIGHT NOW, minting IN-PROCESS (pure
+# Ruby net/http via the Sigma lib) — no bash, no `eval "$(get-token.sh)"`, so
+# this works identically under PowerShell / cmd / a Cowork sandbox.
+# Mint once per TTL, not per child: this used to refresh_token! on every call,
+# so each child spawn paid a fresh client_credentials exchange (~15-25 mints
+# per run against Sigma's 1 req/s auth rate limit). The Sigma lib already
+# tracks mint time (TOKEN_TTL_SECONDS = 50 min, lib/sigma_rest.rb), so reuse
+# the current token while its age is KNOWN and under TTL; re-mint otherwise —
+# including an unknown-age env token, which gets minted-over ONCE and stamped,
+# so a long run still never carries a stale token.
 def sigma_token!
+  tok = ENV['SIGMA_API_TOKEN'].to_s
+  return tok unless tok.empty? || Sigma.token_minted_at.nil? || Sigma.token_stale?
   Sigma.refresh_token!
 rescue StandardError => e
   abort "FATAL: could not mint a Sigma token: #{e.message}\n" \
         '  Check SIGMA_BASE_URL / SIGMA_CLIENT_ID / SIGMA_CLIENT_SECRET (run: ruby scripts/setup.rb).'
 end
 
-# Wrap a command so a Sigma token is live for it (injected via child env).
+# Wrap a command so a Sigma token is live for it (injected via child env). The
+# mint stamp rides along so the child's own TTL logic ages the token from its
+# TRUE mint time instead of treating an inherited token as age-unknown.
 def sigma_run!(cmd, allow_fail: false)
-  run!(cmd, allow_fail: allow_fail, env: { 'SIGMA_API_TOKEN' => sigma_token! })
+  env = { 'SIGMA_API_TOKEN' => sigma_token!,
+          'SIGMA_TOKEN_MINTED_AT' => ENV['SIGMA_TOKEN_MINTED_AT'] }
+  run!(cmd, allow_fail: allow_fail, env: env.reject { |_, v| v.nil? })
 end
 
 # Mint a fresh Tableau token IN-PROCESS (pure Ruby via tableau_rest) and return
@@ -747,7 +770,17 @@ end
 # resolves the neutral cred file via Ruby's own ~ expansion and mints over
 # net/http — no shell involved. Falls back to a pre-set TABLEAU_AUTH_TOKEN when
 # no PAT creds are available to refresh (parity with a hand-minted token).
+# Sign in once per TTL, not per child: Tableau sessions outlive a single child
+# by hours (Cloud idle default: 240 min), so re-signing in on every spawn paid
+# ~10-20 PAT signins per run and multiplied exposure to the transient signin
+# 401s retried below. 50 min mirrors Sigma's token TTL — well inside even
+# strict site policies; a child that DOES hit an expired session re-signs
+# itself via tableau_rest's own 401 handler.
+TABLEAU_ENV_TTL_SECONDS = 50 * 60
 def tableau_env
+  if $tableau_env_cache && (Time.now - $tableau_env_cache[:minted_at]) < TABLEAU_ENV_TTL_SECONDS
+    return $tableau_env_cache[:env]
+  end
   begin
     # v5.2 (speed): PAT signin 401s are routinely TRANSIENT on Tableau Online
     # (session teardown races, concurrent signins on one PAT) — round 4's run
@@ -771,12 +804,16 @@ def tableau_env
   rescue Tableau::Error
     raise if ENV['TABLEAU_AUTH_TOKEN'].to_s.empty? # nothing to fall back on
   end
-  {
+  env = {
     'TABLEAU_SERVER_URL'  => (Tableau.server_url  rescue ENV['TABLEAU_SERVER_URL']),
     'TABLEAU_SITE_ID'     => (Tableau.site_id     rescue ENV['TABLEAU_SITE_ID']),
     'TABLEAU_AUTH_TOKEN'  => (Tableau.auth_token  rescue ENV['TABLEAU_AUTH_TOKEN']),
     'TABLEAU_API_VERSION' => (Tableau.api_version rescue (ENV['TABLEAU_API_VERSION'] || '3.22')),
   }.compact
+  # The hand-minted-fallback env is cached too — a revoked PAT would otherwise
+  # re-pay the failed-signin tax on every child (the fail-FAST rationale above).
+  $tableau_env_cache = { env: env, minted_at: Time.now }
+  env
 rescue StandardError => e
   abort "FATAL: could not mint a Tableau token in-process: #{e.message}\n" \
         '  Check Tableau creds (run: ruby scripts/setup-tableau.rb), or set TABLEAU_AUTH_TOKEN.'
@@ -812,7 +849,9 @@ end
 
 # sigma_run! variant that raises WorkbookBuildError instead of aborting.
 def sigma_run_wb!(cmd)
-  run_wb!(cmd, env: { 'SIGMA_API_TOKEN' => sigma_token! })
+  env = { 'SIGMA_API_TOKEN' => sigma_token!,
+          'SIGMA_TOKEN_MINTED_AT' => ENV['SIGMA_TOKEN_MINTED_AT'] }
+  run_wb!(cmd, env: env.reject { |_, v| v.nil? })
 end
 
 # Pull likely-offending field/column names out of a failed workbook build/POST log.
@@ -945,13 +984,13 @@ if opts[:finalize]
         '--finalize', '--actuals', opts[:actuals]]
   p6 += ['--extract-mode', '--extract-tol', '0.30'] if state['extract_mode']
   p6 += ['--regen-plan'] if opts[:regen_plan]
-  _, p6st = sigma_run!(p6, allow_fail: true)
+  p6out, p6st = sigma_run!(p6, allow_fail: true)
   line "phase6-parity finalize: #{p6st.success? ? 'PASS' : "FAIL (exit #{p6st.exitstatus})"}"
   mark('phase6-finalize')
 
   # Cleanup: delete orphan workbooks from spec-iteration retries (keep the live one).
-  _, clst = sigma_run!(['ruby', File.join(HERE, 'cleanup-orphan-workbooks.rb'),
-                        '--workdir', WORK, '--keep', wb_id], allow_fail: true)
+  clout, clst = sigma_run!(['ruby', File.join(HERE, 'cleanup-orphan-workbooks.rb'),
+                            '--workdir', WORK, '--keep', wb_id], allow_fail: true)
   line 'WARN: orphan cleanup reported failures — assert-phase6-ran will gate on it' unless clst.success?
   mark('cleanup-orphans')
 
@@ -1004,7 +1043,24 @@ if opts[:finalize]
   # in parity-final.json's waivers[] and counted toward the >2-waiver budget cap).
   gate += ['--skip-visual-gate', opts[:fast], '--skip-visual-comparison', opts[:fast]] if opts[:fast]
   _, gst = sigma_run!(gate, allow_fail: true)
+  # `_` holds the gate's captured output (run! returns [out, st]); the finalize
+  # breaker digests its error region below. Kept as `_, gst = …` because
+  # test-fast-flag.rb pins this exact line shape for its waiver-ordering check.
+  gout = _
   mark('assert-phase6-ran')
+
+  # #483 datasource-filter gate — always-on Tableau data-source filters (a
+  # <shared-view> database-domain filter like company_active=true, or a
+  # <datasource>/<extract> filter) render NOTHING on any dashboard, so a visual
+  # check can't catch a miss. This verifies each tagged filter was APPLIED as a
+  # workbook-wide master default (not silently dropped → every aggregate
+  # over-reports). Kept a STANDALONE tableau-local gate (not folded into the
+  # SHARED assert-phase6-ran.rb) so it ships in one plugin PR; blocks GREEN via
+  # all_green below. SKIPs cleanly offline / without a token.
+  dsf_cmd = ['ruby', File.join(HERE, 'assert-datasource-filters.rb'), '--workdir', WORK, '--workbook-id', wb_id]
+  dsf_cmd += ['--skip-datasource-filters', opts[:skip_datasource_filters]] if opts[:skip_datasource_filters]
+  dsfout, dsfst = sigma_run!(dsf_cmd, allow_fail: true)
+  mark('assert-datasource-filters')
 
   if gst.exitstatus == 7
     census = (JSON.parse(File.read(File.join(WORK, 'parity-final.json')))['tile_census'] rescue {}) || {}
@@ -1130,7 +1186,7 @@ if opts[:finalize]
   # With an explicit --min-pass-rate (honest NAMED divergences), the census-
   # aware gate is the parity authority — phase6's own exit stays strict-100%.
   parity_ok = p6st.success? || (opts[:min_pass_rate] && gst.success?)
-  all_green = parity_ok && clst.success? && gst.success?
+  all_green = parity_ok && clst.success? && gst.success? && dsfst.success?
 
   # ---------------------------------------------------------------------------
   # Phase E (OPT-IN) — Enhance. Runs ONLY when --enhance was passed (here or on
@@ -1218,30 +1274,74 @@ if opts[:finalize]
   else
     puts "PARITY      : #{pf['status'] || '?'} (#{pf['charts_pass']}/#{pf['charts_total']} charts#{state['extract_mode'] ? ', extract-mode' : ''})"
   end
-  puts "GATES       : phase6=#{p6st.success? ? 'PASS' : 'FAIL'} cleanup=#{clst.success? ? 'PASS' : 'FAIL'} assert-phase6-ran=#{gst.success? ? 'PASS' : "FAIL(#{gst.exitstatus})"}"
+  puts "GATES       : phase6=#{p6st.success? ? 'PASS' : 'FAIL'} cleanup=#{clst.success? ? 'PASS' : 'FAIL'} assert-phase6-ran=#{gst.success? ? 'PASS' : "FAIL(#{gst.exitstatus})"} ds-filters=#{dsfst.success? ? 'PASS' : "FAIL(#{dsfst.exitstatus})"}"
   puts "ENHANCE     : #{enhance_line}" if enhance_line
   puts "STATUS      : #{all_green ? 'GREEN' : 'NOT GREEN'}"
   puts '======================================='
   phase_summary
-  # ── Same-failure loop breaker (stop-at-2) ──────────────────────────────────
+  # ── Same-failure loop breaker (signature + attempt cap) ────────────────────
   # A NOT-GREEN finalize records its gate signature; re-running --finalize into
-  # the SAME failing exit codes a third time is grinding, not converging —
-  # hard-STOP and hand control to the operator instead of looping toward a
-  # forced green (refs/operating-contract.md: "don't spin, don't fake").
+  # the SAME failure a second time is grinding, not converging — hard-STOP and
+  # hand control to the operator instead of looping toward a forced green
+  # (refs/operating-contract.md: "don't spin, don't fake").
+  # The signature keys ALL FOUR gate statuses that decide all_green — phase6,
+  # cleanup, the census gate, AND assert-datasource-filters (PR-507 N1: the
+  # ds-filters status was in all_green but absent here, so a ds-filter-only
+  # NOT-GREEN signed as a tuple naming three PASSING gates — the exact
+  # pathology the cleanup-key note below records) — PLUS a digest of the first
+  # FAILING child's error region. Exit codes alone collapse distinct root
+  # causes (assert-phase6-ran.rb folds 84 exit sites into 31 codes; exit 18
+  # alone carries 6 causes), so a sub-cause flip used to read as "the EXACT
+  # same failure". No mode/measure here, deliberately: the S2 progress rule
+  # needs a known-polarity count, and these gates emit bigger-is-better rate
+  # lines ("pass-rate=83.3%") where "no strict decrease" would false-stop
+  # genuine progress; the unconditional attempt cap bounds finalize churn
+  # instead. (Note: enriching the key changes finalize signature strings, so
+  # 1-counts recorded by older builds no longer pair with new records —
+  # acceptable: the breaker restarts counting on the more truthful signature,
+  # the same trade taken when the cleanup key was added.)
   unless all_green
-    _fsig = "migrate-tableau:finalize:phase6=#{p6st.exitstatus}:gate=#{gst.exitstatus}"
-    if Offramp.loop_check(WORK, signature: _fsig) == :stop
-      _prior = Offramp.loop_trail(WORK).select { |r| r['signature'] == _fsig }[0..-2]
+    _fail_out = if !gst.success? then gout
+                elsif !parity_ok then p6out # p6 failure NOT excused by --min-pass-rate
+                elsif !dsfst.success? then dsfout
+                else clout
+                end
+    _fregion = Offramp.error_region(_fail_out)
+    _fsig = Offramp.failure_signature(script: 'migrate-tableau', context: 'finalize',
+                                      exit_code: { phase6: p6st.exitstatus, gate: gst.exitstatus,
+                                                   cleanup: clst.exitstatus,
+                                                   dsfilters: dsfst.exitstatus },
+                                      error_region: _fregion)
+    _fverdict = Offramp.loop_check(WORK, signature: _fsig, scope: 'migrate-tableau:finalize')
+    if _fverdict != :first
       puts
       puts '==================== LOOP STOP (operator action required) ==================='
-      puts "This EXACT finalize failure (#{_fsig}) has now occurred #{_prior.size + 1} times:"
-      _prior.each { |r| puts "  • #{r['at']}  #{_fsig}" }
-      puts "  • (now)                #{_fsig}"
+      if _fverdict == :cap
+        puts "#{Offramp.scope_attempts(WORK, 'migrate-tableau:finalize')} NOT-GREEN finalize attempts in this " \
+             'workdir — attempt budget exhausted'
+        puts "(SIGMA_LOOP_ATTEMPT_CAP=#{Offramp::ATTEMPT_CAP}). The failures kept changing, so the"
+        puts 'same-signature rule never fired; re-running --finalize is churning, not converging.'
+      else
+        _prior = Offramp.loop_active_trail(WORK).select { |r| r['signature'] == _fsig }[0..-2]
+        puts 'A finalize failure with this same signature — the same failing-gate statuses and'
+        puts "the same failing gate's error text — has now occurred #{_prior.size + 1} times:"
+        _prior.each { |r| puts "  • #{r['at']}" }
+        puts "  • (now)                #{_fsig}"
+      end
       puts 'Re-running the same --finalize will not converge. STOPPING — hand this to the'
       puts "operator with the gate output above and the loop log (#{File.join(WORK, 'loop-log.jsonl')})."
+      puts 'To re-arm the breaker once the cause is actually fixed: a GREEN finalize'
+      puts "re-arms it automatically; otherwise clear #{File.join(WORK, 'loop-log.jsonl')} (operator-only)."
       puts '============================================================================='
       Offramp.log(WORK, kind: 'loop-stop', reason: _fsig)
     end
+  else
+    # GREEN re-arms the breaker: append a reset record (append-only — never
+    # truncate) so signatures counted BEFORE this green cannot convert the
+    # next unrelated same-signature failure, possibly days later on this
+    # long-lived workdir, into a false hard-STOP. A green gate pass has just
+    # disproven that those earlier occurrences were a non-converging loop.
+    Offramp.loop_reset(WORK)
   end
   exit(all_green ? 0 : 3)
 end
@@ -1309,6 +1409,8 @@ if opts[:dm_spec] || opts[:wb_spec]
     if dm_json && !(dm_json.is_a?(Hash) && dm_json['pages'].is_a?(Array))
   abort 'FATAL: --wb-spec JSON is not a page-bearing workbook spec (no top-level "pages" array)' \
     unless wb_json.is_a?(Hash) && wb_json['pages'].is_a?(Array)
+  # Vendor-neutral CDW join-cost advisory (informational only; never gates). See refs/modeling-strategy.md.
+  ModelingAdvisory.from_dm_spec(dm_json) if dm_json && defined?(ModelingAdvisory) && ModelingAdvisory.respond_to?(:from_dm_spec)
   Object.const_set(:Specs, Module.new do
     # nil on the --reuse-dm path: the DM is read back from the API, never rebuilt
     # from this module (so dm_spec is only consulted on the fresh --dm-spec path).
@@ -2985,12 +3087,14 @@ if opts[:folder].to_s.empty?
   require 'sigma_rest'
   begin
     uid = Sigma.request(:get, '/v2/whoami')['userId']
-    entry = ((Sigma.request(:get, "/v2/members/#{uid}/files") || {})['entries'] || [])
-            .find { |e| e['path'] == 'My Documents' }
+    # list_entries: both file lists paginate (default page 50) — a busy account
+    # with 50+ root files used to lose My Documents past the first page.
+    entry = Sigma.list_entries("/v2/members/#{uid}/files")
+                 .find { |e| e['path'] == 'My Documents' }
     folder_id = entry && entry['parentId']
     unless folder_id
-      entry2 = ((Sigma.request(:get, '/v2/files?typeFilters=folder&limit=500') || {})['entries'] || [])
-               .find { |e| e['path'] == 'My Documents' && e['ownerId'] == uid }
+      entry2 = Sigma.list_entries('/v2/files?typeFilters=folder')
+                    .find { |e| e['path'] == 'My Documents' && e['ownerId'] == uid }
       folder_id = entry2 && entry2['parentId']
     end
     abort "FATAL: could not resolve the caller's My Documents folder id (the DM POST requires folderId) — pass --folder <id>" unless folder_id
@@ -3082,9 +3186,12 @@ if reuse_dm_id
           'SIGMA_* credentials (ruby scripts/setup.rb).'
   end
   abort "FATAL: could not read back reused DM #{reuse_dm_id} spec" unless dm_spec_rb.is_a?(Hash) && dm_spec_rb['pages']
-  cols_rb = (Sigma.request(:get, "/v2/dataModels/#{reuse_dm_id}/columns") rescue { 'entries' => [] })
+  # list_entries: /columns paginates (default page 50) — the reuse case that
+  # motivated the ref gate is a 599-column DM, so a first-page read starves
+  # the columnLabels map and every later-page ref false-fails resolution.
+  col_entries = (Sigma.list_entries("/v2/dataModels/#{reuse_dm_id}/columns") rescue [])
   labels_by_el = Hash.new { |h, k| h[k] = [] }
-  (cols_rb['entries'] || []).each { |c| labels_by_el[c['elementId']] << c['label'] if c['elementId'] && c['label'] }
+  col_entries.each { |c| labels_by_el[c['elementId']] << c['label'] if c['elementId'] && c['label'] }
   dm_ids = {
     'dataModelId' => reuse_dm_id,
     'pages' => (dm_spec_rb['pages'] || []).map do |p|
@@ -3421,6 +3528,21 @@ if mechanical
   File.write(mmap_path, JSON.pretty_generate(mmap))
   line "master-map: #{master_columns.size} master column(s) (fact element '#{fact['name']}', #{real_labels ? real_labels.size : 0} readback labels)"
 
+  # DM metrics referenceable on the master (own on the fact element + inherited via
+  # source.elementId): a chart/KPI measure whose inline aggregate matches one binds
+  # to a governed [Metrics/<name>] ref instead of re-deriving inline (formula
+  # equivalence; ratios/LODs/table-calcs/no-match stay inline — byte-identical).
+  metrics_path = File.join(WORK, 'metrics.json')
+  begin
+    els_by_id = MechanicalSpecs.all_elements(conv['model']).each_with_object({}) { |e, h| h[e['id']] = e }
+    wb_metrics = MetricBinding.available_metrics(conv_fact['id'], els_by_id)
+  rescue StandardError => e
+    line "metric-binding: could not resolve DM metrics (#{e.class}: #{e.message}) — measures stay inline"
+    wb_metrics = []
+  end
+  File.write(metrics_path, JSON.pretty_generate(wb_metrics))
+  line "metric-binding: #{wb_metrics.size} referenceable DM metric(s) for [Metrics/<name>] refs" if wb_metrics.any?
+
   # 2) Build the chart-element specs from the parsed zones + view CSVs + map.
   #    ONE SIGMA PAGE PER TABLEAU DASHBOARD (bead ptrt) — a fat workbook's 4
   #    dashboards become 4 laid-out pages, each with its own banded layout.
@@ -3428,6 +3550,7 @@ if mechanical
   build_cmd = ['ruby', File.join(HERE, 'build-charts-from-signals.rb'),
                '--tableau-dir', WORK, '--layout', layout_json,
                '--master-map', mmap_path, '--master-element-id', 'master',
+               '--metrics', metrics_path,
                '--page-per-dashboard',
                '--out', charts_path,
                '--coverage-out', File.join(WORK, 'coverage.json')]
@@ -3886,25 +4009,77 @@ rescue WorkbookBuildError => e
   end
   names = failed.empty? ? 'one or more fields' : failed.join(', ')
   n = failed.empty? ? 'some' : failed.size.to_s
-  # ── Same-failure loop breaker (stop-at-2) ──────────────────────────────────
-  # Every exit-4 handoff records a failure signature (script + exit code + SHA1
-  # of the first error line). A re-run that dies on the SAME signature a third
-  # time is grinding, not converging — hard-STOP and hand control to the
-  # operator (refs/operating-contract.md: "don't spin, don't fake").
-  _err_line = e.captured_output.to_s.lines.map(&:strip).reject(&:empty?).first ||
+  # ── Same-failure loop breaker (mode + progress measure + attempt cap) ──────
+  # Every exit-4 handoff records a failure signature: script + exit codes +
+  # error class + a digest of the ERROR REGION (the [FAIL] summary line and its
+  # blank-line-terminated ✗-detail block, identifiers normalized, detail
+  # sorted). Counts SURVIVE normalization now, so a converging repair loop
+  # (5 → 3 → 1 unresolved refs) mints distinct signatures and keeps going —
+  # the old whole-line digit masking collapsed every count into one signature
+  # and hard-stopped runs that were repairing (PR-507 finding 1A). Grinding is
+  # caught by the failure MODE (same region head with counts masked) recurring
+  # with no strict improvement in the measure (the head's leading count), by a
+  # verbatim signature repeat (identical/reordered failure), or by the
+  # unconditional SIGMA_LOOP_ATTEMPT_CAP budget — see Offramp.loop_check
+  # (refs/operating-contract.md: "don't spin, don't fake").
+  #
+  # Signature the ERROR, not the first output line: children print NORMALIZE:/
+  # WARN: report lines BEFORE their ERROR: lines (validate-spec.rb), so a
+  # stable leading report line would collide two DIFFERENT root causes into
+  # one false :stop — and removing a warning would mint a fresh signature for
+  # the SAME error (Offramp.first_error_line owns the selection rule;
+  # error_region starts at the same line). And key WHICH child failed + its
+  # real exit status (run_wb! raises the same WorkbookBuildError for
+  # validate-spec / assert-wb-refs-resolve / post-and-readback alike; the
+  # handoff exit is always 4) so different children with a similar first line
+  # cannot collide either.
+  _err_line = Offramp.first_error_line(e.captured_output) ||
               e.message.lines.first.to_s.strip
-  _sig = "migrate-tableau:exit4:#{Digest::SHA1.hexdigest(_err_line.to_s)[0, 12]}"
-  if Offramp.loop_check(WORK, signature: _sig) == :stop
-    _prior = Offramp.loop_trail(WORK).select { |r| r['signature'] == _sig }[0..-2]
+  _err_region = Offramp.error_region(e.captured_output)
+  _err_region = [_err_line.to_s] if _err_region.empty? # crashed before any output
+  _child_exit = e.message[/\Acommand failed \((\d+)\)/, 1]
+  _exit_key = _child_exit ? { handoff: 4, child: _child_exit } : 4
+  _mode = Offramp.failure_mode(script: 'migrate-tableau', context: 'exit4',
+                               exit_code: _exit_key, error_class: e.class,
+                               error_region: _err_region)
+  _measure = Offramp.region_measure(_err_region)
+  _sig = Offramp.failure_signature(script: 'migrate-tableau', context: 'exit4',
+                                   exit_code: _exit_key, error_class: e.class,
+                                   error_line: _err_line, error_region: _err_region)
+  _verdict = Offramp.loop_check(WORK, signature: _sig, mode: _mode, measure: _measure,
+                                scope: 'migrate-tableau:exit4')
+  if _verdict != :first
     puts
     puts '==================== LOOP STOP (operator action required) ==================='
-    puts "The SAME workbook-build failure has now occurred #{_prior.size + 1} times:"
-    _prior.each { |r| puts "  • #{r['at']}  #{_err_line.to_s[0, 160]}" }
-    puts "  • (now)                #{_err_line.to_s[0, 160]}"
+    if _verdict == :cap
+      puts "#{Offramp.scope_attempts(WORK, 'migrate-tableau:exit4')} workbook-build attempts in this workdir " \
+           'without reaching green — attempt budget exhausted'
+      puts "(SIGMA_LOOP_ATTEMPT_CAP=#{Offramp::ATTEMPT_CAP}). The failure kept changing, so the"
+      puts 'recurring-failure rules never fired; the budget is the backstop. Latest failure:'
+      puts "  • #{_err_line.to_s[0, 160]}"
+    else
+      _prior = Offramp.loop_active_trail(WORK).select { |r| r['mode'] == _mode }[0..-2]
+      puts "The workbook build has failed the same WAY #{_prior.size + 1} times with no improvement"
+      puts "in its failure count (#{_measure ? "now #{_measure}" : 'not measurable'}) — grinding, not converging:"
+      _prior.each { |r| puts "  • #{r['at']}  count=#{r['measure'] || '?'}" }
+      puts "  • (now)                count=#{_measure || '?'}  #{_err_line.to_s[0, 120]}"
+    end
     puts 'Re-running the same command will not converge. STOPPING — hand this to the'
     puts 'operator with the error above, the salvage inventory (if written), and the'
     puts "loop log (#{File.join(WORK, 'loop-log.jsonl')}). Signature: #{_sig}"
+    puts 'To re-arm the breaker once the cause is actually fixed: a GREEN --finalize'
+    puts "re-arms it automatically; otherwise clear #{File.join(WORK, 'loop-log.jsonl')} (operator-only)."
     puts '============================================================================='
+    # A loop STOP is still an orchestrator STOP: mint the manual-path token so
+    # the operator's sanctioned repair route (--reuse-dm/--wb-spec re-entry
+    # once the cause is fixed) is never stranded behind the manual-spec gate.
+    # The attempt-1 handoff below normally minted it already, but a crash
+    # between that attempt's loop_check and its authorize call leaves this
+    # stop tokenless — and re-stamping records WHICH stop last authorized the
+    # path (PR-507 review, design B §1b). The breaker itself still gates any
+    # grinding re-entry, so this loosens nothing.
+    authorize_manual_path!(via: 'loop-stop', reason: "loop breaker: #{_sig}",
+                           exit_code: 4, extra: { 'dataModelId' => dm_id, 'fields' => failed })
     Offramp.log(WORK, kind: 'loop-stop', reason: _sig, detail: _err_line.to_s[0, 200])
     mark('phase4-workbook')
     phase_summary
@@ -4105,9 +4280,12 @@ hdr(6, 'Parity (pass 1 of 2)')
 require 'sigma_rest'
 
 # Structural hard signal: no live column resolves to type "error".
-cols = (Sigma.request(:get, "/v2/workbooks/#{wb_id}/columns") rescue { 'entries' => [] })
-err_cols = (cols['entries'] || []).select { |c| c.dig('type', 'type') == 'error' }
-total_cols = (cols['entries'] || []).size
+# list_entries: /columns paginates (default page 50) — a first-page-only read
+# audited <10% of the 599-column field case, so an error-typed column past
+# page 1 sailed through this gate.
+col_entries = (Sigma.list_entries("/v2/workbooks/#{wb_id}/columns") rescue [])
+err_cols = col_entries.select { |c| c.dig('type', 'type') == 'error' }
+total_cols = col_entries.size
 # Compile-check chart elements (Unknown column / Circular ref markers).
 chart_els = wb_ids['pages'].reject { |p| p['id'].to_s =~ /data/ }
                            .flat_map { |p| p['elements'] || [] }

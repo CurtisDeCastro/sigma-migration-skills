@@ -16,6 +16,7 @@
 - [ ] `./corpus/run-corpus.sh --check` — green; affected case reconverted if a converter/builder changed
 - [ ] Phase numbers unchanged (or new skill added to `docs/phase-schema.md`)
 - [ ] No unrelated working-tree changes swept in (`git status` is clean of other sessions' WIP)
+- [ ] Bumped the touched plugin's `plugin.json` version (strict semver ↑), or added a `Skip-Version-Bump: <reason>` commit trailer for a non-user-facing change (#486)
 
 ## If this changes a shared lib
 

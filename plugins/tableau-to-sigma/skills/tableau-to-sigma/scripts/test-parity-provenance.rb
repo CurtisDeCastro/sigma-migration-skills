@@ -141,15 +141,20 @@ Dir.mktmpdir do |d|
   layout = JSON.parse(File.read(lay))
 
   specs = File.join(d, 'chart-specs.json')
-  build_log = `ruby #{BUILD} --tableau-dir #{d} --layout #{lay} --meta #{lay.sub(/\.json$/, '-meta.json')} \
-               --master-map #{mm} --master-element-id master --page-per-dashboard --out #{specs} 2>&1`
+  build_log = IO.popen(['ruby', BUILD, '--tableau-dir', d, '--layout', lay,
+                        '--meta', lay.sub(/\.json$/, '-meta.json'),
+                        '--master-map', mm, '--master-element-id', 'master',
+                        '--page-per-dashboard', '--out', specs],
+                       err: %i[child out], &:read)
   abort "build-charts failed:\n#{build_log}" unless File.exist?(specs)
 
   pv_path = File.join(d, 'chart-provenance.json')
   prov = File.exist?(pv_path) ? JSON.parse(File.read(pv_path)) : nil
 
   run_plan = lambda do |out|
-    log = `ruby #{PLAN} --tableau #{d} --workbook-spec #{specs} --master-id master --out #{out} 2>&1`
+    log = IO.popen(['ruby', PLAN, '--tableau', d, '--workbook-spec', specs,
+                    '--master-id', 'master', '--out', out],
+                   err: %i[child out], &:read)
     [File.exist?(out) ? JSON.parse(File.read(out)) : nil, log]
   end
 

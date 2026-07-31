@@ -59,6 +59,24 @@ Dir.mktmpdir('cc-rb-test-') do |dir|
   check('default_catalog_dir') do
     Coverage.default_catalog_dir('/a/b/skills/x/scripts/build.rb').end_with?(File.join('skills', 'x', 'refs', 'catalogs'))
   end
+
+  File.write(File.join(dir, 'viz-kind-plugin.json'), JSON.dump(
+    'dimension' => 'viz-kind', 'source_tool' => 'quicksight',
+    'rows' => [
+      { 'source' => 'GaugeChartVisual', 'sigma' => 'kpi-chart', 'plugin_archetype' => 'gauge' },
+      { 'source' => 'HeatMapVisual', 'sigma' => 'plugin:heatmap' },
+      { 'source' => 'BarChartVisual', 'sigma' => 'bar-chart' }
+    ]
+  ))
+  pcat = Coverage.load(dir, 'viz-kind-plugin')
+
+  check('plugin_archetype: explicit field wins') { pcat.plugin_archetype('GaugeChartVisual') == 'gauge' }
+  check('plugin_archetype: sigma "plugin:<x>" prefix') { pcat.plugin_archetype('HeatMapVisual') == 'heatmap' }
+  check('plugin_archetype: plain native row -> nil') { pcat.plugin_archetype('BarChartVisual').nil? }
+  check('plugin_archetype: miss -> nil') { pcat.plugin_archetype('NopeVisual').nil? }
+  check('non-breaking: target/resolve for gauge row still "kpi-chart"') do
+    pcat.target('GaugeChartVisual') == 'kpi-chart' && pcat.resolve('GaugeChartVisual')['sigma'] == 'kpi-chart'
+  end
 end
 
 if $failures.zero?

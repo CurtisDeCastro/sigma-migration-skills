@@ -102,6 +102,7 @@ Every field below **round-trips and renders** — verified live 2026-06-26 (POST
 **Gotchas:**
 - The server **lowercases hex** on save (`#0F172A` → `#0f172a`) — cosmetic, not a drop; don't treat it as a failed round-trip.
 - `themeOverrides` is the spec path to **donut/pie slice colors** — set `categoricalScheme` here (the per-element `color.scheme` is still silently dropped on donut/pie — see Recipe 5). This supersedes the old "set the theme in the UI" workaround.
+- `titleFont` sets every element's title **by default**, but a per-element `name:{fontSize,color}` (live-verified 2026-07-28 — see *Things that are NOT designable via spec* below, now corrected) **wins over** `titleFont` for that one element when both are set. Use `titleFont` for a workbook-wide title style and per-element `name` only where one title needs to stand out.
 - Theme vs. the recipes below: a theme is the global skin (selected, org-managed). The recipes here style individual elements from spec fields and **stack on top of** whatever theme is set. For a migration, prefer the source dashboard's look; reach for a theme only when the user asks to apply one.
 
 ---
@@ -530,15 +531,203 @@ value: Week
 
 ---
 
+## Composition styling — the `Styling` module
+
+The recipes above are written to hand-author; the same moves are also available as a small
+shared helper library — Ruby `shared/lib/styling.rb`, with a byte-identical Python twin
+`shared/lib/styling.py` — for applying a professional look on top of a layout built with the
+`Composition` engine (`reference/workflows/composition.md`) instead of re-transcribing hex
+codes and container shapes into every dashboard. Every field these helpers emit is one of the
+Task-1 live-verified GO surfaces above (`.superpowers/sdd/styling-task-1-report.md`); each
+helper is gated behind an internal `SURFACES` map so a future regression can flip a surface off
+in one place instead of emitting an unverified (or now-rejected) shape at every call site.
+
+### Theme
+
+`Styling.theme(accent: nil)` returns `DEFAULT_THEME` — **one** professional, host-agnostic
+palette: an 8-color categorical scale, `ink`/`muted` text colors, and the card/header container
+shapes below — or a shallow variant with `accent` swapped into categorical slot 0 (and
+`theme[:accent]`) when the caller supplies one. There's no branding/logo support and no second
+built-in palette: one palette, optionally re-tinted, matches this doc's stance in the note at the
+top — reach for a theme when the user wants design polish with no stated brand direction; a
+migration's source fidelity or a user's own branding always overrides this.
+
+### `chart_color(theme, categorical: false)`
+
+- Single-series (default): `{ "color": { "by": "single", "value": theme[:categorical][0] } }` —
+  merge onto a bar/line/area/combo element (Recipe 5's single-hue case).
+- Categorical (`categorical: true`): `{ "themeOverrides": { "categoricalScheme": theme[:categorical] } }`
+  — merge at the **workbook** level (a sibling of `pages`/`layout`), not per-element. This is the
+  verified path for donut/pie slice colors too (per-element `color.scheme` is still silently
+  dropped there — see Recipe 5 / *Workbook theme* above).
+
+### `kpi_accent(theme)`
+
+Returns `{ "color": theme[:accent] }` — merge into a KPI element's `name` object
+(`{ "name": { "text": "Revenue", "color": "#2563EB" } }`). This is the KPI **title** color,
+live-verified 2026-07-28 (see the corrected claim under *Things that are NOT designable* below) —
+distinct from `value.color`, which tints the number itself (already documented under
+*Field-observed idioms* above); combine both for a fully accented KPI card.
+
+### `format_for(semantic)`
+
+Returns a `format` fragment — `{ "kind": "number", "formatString": <d3> }` — for one of four
+semantics: `:currency` → `"$,.0f"`, `:integer` → `",.0f"`, `:percent` → `".1%"`, `:decimal` →
+`",.2f"`. These are **d3-format** strings, not Excel-style masks: `"$#,##0"` is hard-rejected at
+POST with a 400 (`Invalid number format string`), never silently dropped — never hand-write an
+Excel-style format string. See Recipe 6 above and `formatting.md` for the full grammar.
+
+### `header(id:, title:, theme:, page_cols: 24)` / `section_card(id:, band:, theme:, page_cols: 24)`
+
+Apply the Recipe-1 hero-header and Recipe-2-style card idioms on top of `Composition.bands()`
+output rather than hand-writing the container + child XML per dashboard:
+
+- `header` emits a `kind: container` styled `theme[:header]`
+  (`{backgroundColor:"#0F172A", borderRadius:"round"}`) plus a separate `kind: text` title child —
+  a container has no field of its own that renders visible text, see `layout.md`'s Container
+  elements section — and the wrapping `<GridContainer>`/`<LayoutElement>` XML fragment.
+- `section_card` wraps one `Composition.bands()` band (`{role:, ids:, r0:, r1:}`) in a
+  `kind: container` styled `theme[:card]`
+  (`{backgroundColor:"#FFFFFF", borderColor:"#E2E8F0", borderWidth:1, borderRadius:"round"}`),
+  tiling the band's element ids side-by-side inside it at the same relative split
+  `Composition.band` would use unwrapped.
+- Both container `style` shapes use the field name **`borderRadius`** (`square|round|pill`) —
+  never the guessed `cornerRadius`, which is silently dropped on readback (the *container-style*
+  row of Task 1's GO/NO-GO table). And **never combine `padding` with `borderColor`/`borderWidth`**
+  on the same container — POST 400s ("padding is 'none' but border fields... require default
+  padding"); omit `padding` (its default) whenever a border is set.
+
+### `gradient_header(id:, title:, subtitle:, gradient:, motif:, motif_side:, logo_url:, page_cols: 24)` — sleek header via a data-URI SVG
+
+A step up from the flat `header` band above: instead of a solid `backgroundColor`,
+the container's `backgroundImage` is a composed **inline SVG, base64-encoded as a
+`data:image/svg+xml;base64,...` URI** — a `linearGradient` (the `gradient:` stops)
+optionally layered with a decorative motif `<g>`. Same `{ element:, layout: }`
+return contract as `header`, so it drops into the same composition call sites.
+
+```yaml
+- id: hdr-bg
+  kind: container
+  style: { borderRadius: round }
+  backgroundImage:
+    url: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0i..."   # composed gradient(+motif) SVG
+    style: { fit: cover }
+- id: hdr-title
+  kind: text
+  verticalAlign: middle
+  body: '# <span style="color: #FFFFFF">Overview</span>'
+```
+
+- `gradient:` is an array of **2–3 hex stops** (default: a neutral, host-agnostic
+  3-stop slate→navy→blue ramp in `DEFAULT_THEME[:header_gradient]` — not red; red,
+  like `theme(accent:)` elsewhere in this file, is a caller override, never a
+  built-in default).
+- `motif:` picks a decorative element layered on top of the gradient, positioned by
+  `motif_side:` (`:right` default, `:left`, `:center`). It's a **menu, not a fixed
+  look** — six geometric, trademark-free options in `Styling::MOTIFS`:
+
+  | Key | Look |
+  |---|---|
+  | `:glow` (default) | A soft radial highlight — the plainest, least busy option. |
+  | `:rings` | Concentric circles + crosshair lines — a "signal/target" mark. |
+  | `:grid` | A faint repeating grid pattern. |
+  | `:waves` | Three nested arcs — a soft "signal wave" mark. |
+  | `:dots` | A repeating dot pattern. |
+  | `:none` | No motif — a plain gradient. |
+
+  A **String** value for `motif:` starting with `http` or `data:` is treated as a
+  **bring-your-own image** and used verbatim as the background instead of composing
+  from the menu — useful for a caller with their own hero graphic. Every menu motif
+  is geometric (circles, grids, arcs, dots) — no logos, letterforms, or third-party
+  marks.
+- `logo_url:` (optional) adds a left-column `image` element inside the same band.
+- NO-GO on the `gradient_header` surface falls back to the plain `header` band
+  above (graceful — never a broken shape); NO-GO on just `motif` (surface still GO)
+  drops to a plain gradient with no decorative `<g>`.
+
+### `gradient_card(id:, kpi_element:, gradient: DEFAULT_THEME[:card_gradient], page_cols: 24)` — gradient KPI card
+
+Decorate-only, like `section_card`: wraps a **caller-built** `kpi-chart` element
+(e.g. from `KpiCard.build`) in a gradient `backgroundImage` container. `gradient:`
+is **optional** — it defaults to `DEFAULT_THEME[:card_gradient]` (a dark slate
+pair, `['#1E293B', '#0F172A']`), so a caller with no brand gradient in mind still
+gets a legible dark card; pass a caller-specific 2–3 hex-stop array to override it.
+
+The composed background is **two layers**, not one — the caller's (or default)
+gradient rect, THEN a dark **scrim**: a vertical `linearGradient` from black at
+~0.55 opacity at the top (where the KPI name+value sit) fading to 0 opacity
+toward the bottom (where a `sparkline` sits). This is what makes a white KPI
+value legible on **any** gradient, bright or dark — not just a dark one — while
+the brand gradient still reads through in the lower half (never fully blacked
+out). It never mutates `kpi_element` or `kpi_card.rb` — it returns
+`{ element:, child_layout:, patch: }`: the container element to add, the inner
+`<LayoutElement>` fragment positioning the KPI inside it, and a `patch` Hash
+the caller merges onto their own copy of the KPI's `value`/`name`/`style` objects:
+
+```yaml
+value: { color: "#FFFFFF" }
+name:  { color: "#FFFFFF" }
+style: { backgroundColor: transparent, padding: none }
+```
+
+so the title and value read white against the gradient. **Merge all three keys
+— `value`, `name`, AND `style`** — not just `value`/`name`: the KPI element keeps
+its own opaque background otherwise, so a live render shows white-on-white even
+with the scrim in place. NO-GO returns the empty
+`{ element: [], child_layout: '', patch: {} }` marker — nothing half-decorated.
+
+### `sparkline(id:, source_element_id:, period_ref:, value_formula:, period_format:)` — the composite in-card sparkline (refines the earlier NO-GO)
+
+`reference/workflows/composition.md` documents an **in-kpi date-column sparkline**
+as NO-GO: adding a real date dimension to a `kpi-chart`'s own `columns` renders no
+line — that finding **still stands**, unchanged.
+
+What **is** live-verified GO is a different shape entirely: a **separate,
+borderless `line-chart`** element stacked *below* the KPI inside the same
+`gradient_card` (or any card) container — not a field on the KPI element at all.
+`Styling.sparkline` builds exactly this:
+
+```yaml
+- id: k-rev-spark
+  kind: line-chart
+  source: { kind: table, elementId: src }
+  columns:
+    - id: k-rev-spark-period
+      formula: '[Src/Period]'
+      format: { kind: datetime, formatString: "%b %Y" }
+    - id: k-rev-spark-value
+      formula: Sum([Src/Revenue])
+  xAxis: { columnId: k-rev-spark-period, format: { marks: none, labels: hidden } }
+  yAxis:
+    columnIds: [k-rev-spark-value]
+    format: { labels: hidden, marks: none, scale: { type: linear, zero: false, hideZeroLine: true } }
+  name: { visibility: hidden }
+  legend: { visibility: hidden }
+  lineAreaStyle: { interpolation: monotone }
+  style: { backgroundColor: transparent, padding: none }
+```
+
+Both axes hide their labels/marks (no chart chrome competing with the KPI above
+it); `scale.zero: false` so a small real trend isn't flattened against a forced
+zero baseline; `name`/`legend` hidden (no title, no legend on a mini chart);
+`backgroundColor: transparent` so it blends into the card around it. Place it in
+the same container as a `gradient_card`-wrapped (or plain) KPI, sized as a thin
+strip beneath the value.
+
+**So:** "no sparkline field on the KPI element" is still true and always will be
+(it's UI-only there) — but "no sparkline in the card" is not. The composite
+pattern (KPI + a stacked borderless line-chart, same card) is the GO way to get
+one.
+
 ## Things that are NOT designable via spec (as of 2026-05-29)
 
 Don't waste a round-trip trying to set these — the spec API silently drops them.
 
 - **Chart tooltip customization** (spec-findings #10)
 - **Trellis / small-multiples layout** (spec-findings #11)
-- **Donut / pie slice colors** (spec-findings #22)
-- **KPI title color or "hide title" toggle** — `name` always renders as a black title
-- **Element title font size / font family** — the `name` field has no `style` sibling. (Text *elements* CAN set fonts via `<span style="font-family: …">` — see field-observed idioms above; it's only the title `name` that can't.)
+- **Donut / pie slice colors** (spec-findings #22, per-element `color.scheme`; use workbook-level `themeOverrides.categoricalScheme` instead — see *Workbook theme* above)
+- ~~**KPI title color or "hide title" toggle** — `name` always renders as a black title~~ — **RESOLVED, live-verified 2026-07-28**: `name` on a `kpi-chart` (or any element) *is* colorable — `{ "name": { "text": "Revenue", "color": "#2563EB" } }` survives readback and renders the title in that color (workbook `e0586f0d-a2cd-431c-b495-555acf3ccae0`; see `.superpowers/sdd/styling-task-1-report.md`). This supersedes the "`name` always renders as a black title" claim this doc carried until now — for *this exact shape only*: there is still no `showTitle: false` / "hide title" toggle, so the `name: ' '` (single-space) workaround in Recipe 2 above still stands for suppressing a duplicate title.
+- ~~**Element title font size / font family** — the `name` field has no `style` sibling.~~ — **PARTIALLY RESOLVED, live-verified 2026-07-28**: a per-element `name` object also takes `fontSize` — `{ "name": { "text": "Category Detail", "fontSize": 22, "color": "#DC2626" } }` on a non-KPI element (e.g. a table) survives readback and renders both a visibly larger size and a distinct color, **overriding the workbook-wide `titleFont`** (see *Workbook theme* above) for that one element when both are set. This supersedes the "the `name` field has no `style` sibling" claim this doc carried until now. Font *family* per title remains untested — only `fontSize`/`color` were probed; `themeOverrides.fonts.textFont` (*Workbook theme* above) is still the only verified lever for text font family, and it's global, not per-title.
 - ~~**Workbook-level palette / theme** via spec~~ — **RESOLVED**: now spec-authorable via top-level `themeName` + `themeOverrides` (see *Workbook theme* above).
 - **Chart `tooltip` / `trellis*` fields** (UI-only)
 

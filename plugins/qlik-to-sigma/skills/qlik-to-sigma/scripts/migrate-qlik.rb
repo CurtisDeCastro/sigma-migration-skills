@@ -58,6 +58,7 @@ require 'open3'
 require 'time'
 require_relative 'lib/scout_gate'
 require_relative 'lib/py_resolve' # real-Python resolver (Windows Store-stub safe)
+begin; require_relative 'lib/modeling_advisory'; rescue LoadError; end # shared, vendor-neutral CDW join-cost advisory (optional; synced from shared/)
 
 $stdout.sync = true # lane/foreground progress lines interleave correctly
 
@@ -129,14 +130,35 @@ OptionParser.new do |o|
   o.on('--answers JSON')      { |v| opts[:answers]  = v }
   o.on('--yes')               {     opts[:yes]      = true }
   o.on('--from-discovery DIR'){ |v| opts[:from]     = File.expand_path(v) }
+  o.on('--prj DIR')           { |v| opts[:prj]      = File.expand_path(v) }
   o.on('--reuse-dm ID')       { |v| opts[:reuse_dm] = v }
   o.on('--no-reuse')          {     opts[:no_reuse] = true }
   o.on('--dry-run')           {     opts[:dry_run]  = true }
   o.on('--skip-layout-lint')  {     opts[:skip_layout_lint] = true }
+  o.on('--skip-control-flip [REASON]') { |v| opts[:skip_control_flip] = v || true } # waive gate 7b (runtime control-flip proof); name the reason in your report
   # Resolve + print which converter would run (vendored vs explicit dev build), then
   # exit 0 — no creds/args needed. Used by the converter-default regression test.
   o.on('--print-converter')   {     opts[:print_converter] = true }
 end.parse!
+
+# QlikView (.qvw) has no Cloud/REST API. A "-prj" project folder is the migration
+# surface: qlik-prj-discover.py parses it into the SAME discovery artifacts the Qlik
+# Sense pipeline consumes (script.qvs, converter-input.json, charts.json, measures.json,
+# layout.json), so the rest of this script (convert -> data model -> workbook) runs
+# UNCHANGED via the --from-discovery path. There is no live engine, so the Qlik-side
+# value snapshot / parity leg simply stays empty (warehouse-only parity downstream).
+if opts[:prj]
+  abort "FATAL: --prj dir not found: #{opts[:prj]}" unless File.directory?(opts[:prj])
+  prj_slug = File.basename(opts[:prj]).sub(/-prj\z/i, '').gsub(/[^A-Za-z0-9_-]/, '-')
+  disc_dir = opts[:out] || File.expand_path("~/qlik-migration/#{prj_slug}-prj")
+  FileUtils.mkdir_p(disc_dir)
+  warn "QlikView -prj → discovery artifacts in #{disc_dir}"
+  ok = system(*PyResolve.argv, File.join(HERE, 'qlik-prj-discover.py'),
+              '--prj', opts[:prj], '--out', disc_dir)
+  abort 'FATAL: qlik-prj-discover.py failed' unless ok
+  opts[:from] = disc_dir           # hand off to the standard --from-discovery pipeline
+  opts[:app]  = nil
+end
 
 # Converter resolution (issue #227). The pinned VENDORED bundle is the DEFAULT so a
 # developer machine and a customer machine produce identical output for the same
@@ -401,6 +423,8 @@ cstats = conv['stats'] || {}
 puts "   #{cstats['elements']} element(s), #{cstats['columns']} column(s), " \
      "#{cstats['metrics']} metric(s), #{cstats['relationships']} relationship(s); " \
      "#{conv_warnings.size} converter warning(s)"
+# Vendor-neutral CDW join-cost advisory (informational only; never gates). See refs/modeling-strategy.md.
+ModelingAdvisory.print_if_relevant(cstats['relationships']) if defined?(ModelingAdvisory)
 mark('phase2-convert')
 
 # ---------------------------------------------------------------------------
@@ -686,6 +710,11 @@ wb_cmd = [*PyResolve.argv, File.join(HERE, 'build-sigma-workbook.py'),
           '--out', File.join(WORK, 'wb-result.json'), '--spec-out', File.join(WORK, 'wb-spec.json'),
           '--layout-out', File.join(WORK, 'layout.xml'),
           '--element-map', File.join(WORK, 'element-map.json')]
+# Freshly-built DM only: hand the workbook builder the DM spec so measures whose
+# inline aggregate matches a metric on the denorm element bind to [Metrics/<name>]
+# (governed) instead of re-deriving inline. The reuse path writes no dm-spec.json,
+# so measures stay inline there (unchanged) until a live metric-fetch exists.
+wb_cmd += ['--dm-spec', File.join(WORK, 'dm-spec.json')] unless opts[:reuse_dm]
 wb_cmd += ['--folder', (opts[:folder] || dm_res['folderId'] || prep[:folder_id])] if opts[:folder] || dm_res['folderId'] || prep[:folder_id]
 wb_cmd << '--dry-run' if opts[:dry_run]
 run!(wb_cmd)
@@ -736,8 +765,26 @@ unless opts[:dry_run]
   puts "   ✓ rendered #{pngs.size}/#{content_pages.size} full-page PNG(s) for visual QA → #{vqa}"
   if pngs.any?
     puts '   VISUAL QA (mandatory review — do not skip): open each PNG and check vs'
-    puts '   refs/layout-visual-qa.md AND the source Qlik sheet capture — populated controls,'
-    puts '   titles present, right chart kinds, sensible colors/heights, no overlaps/dead zones.'
+    if opts[:prj]
+      # QlikView has no capture API — the source reference is a USER-PROVIDED screenshot
+      # per sheet (landed by the qlik-prj-discover assist). Armed if present, else WAIVED.
+      dash = File.join(WORK, 'dashboards')
+      shots = Dir[File.join(dash, '*.{png,jpg,jpeg,PNG,JPG,JPEG}')]
+      if shots.any?
+        puts "   refs/layout-visual-qa.md AND the #{shots.size} user-provided QlikView screenshot(s) in"
+        puts "   #{dash} (QlikView has no capture API) — right chart kinds, titles, populated data,"
+        puts '   sensible colors/heights, no overlaps/dead zones. Transcribe source-anchor values from'
+        puts '   those screenshots (Phase 1d) so verify-anchors + visual-similarity arm.'
+      else
+        puts '   refs/layout-visual-qa.md ONLY. No source screenshots were provided for this QlikView'
+        puts "   app (drop one PNG per sheet in #{dash} to arm the source-side gates) — the source-anchor"
+        puts '   / visual-compare / visual-similarity gates are WAIVED; STATE that waiver + reason in the'
+        puts '   Phase-6 report (never a silent skip).'
+      end
+    else
+      puts '   refs/layout-visual-qa.md AND the source Qlik sheet capture — populated controls,'
+      puts '   titles present, right chart kinds, sensible colors/heights, no overlaps/dead zones.'
+    end
   end
 end
 mark('phase5b-visual-qa')
@@ -935,6 +982,48 @@ else
   ctl_violations.each { |v| puts "       - #{v}" }
 end
 control_ok = ctl_violations.empty?
+
+# 7b — runtime control-flip proof (gate 7b). Gate 7 proves control WIRING, but a
+# builder listen->column mis-map can lint clean yet do NOTHING at runtime. Flip
+# each control live via probe-controls.rb and FAIL (RED) if a control is INERT —
+# the only independent proof the wiring works. DEFAULT-ON; --skip-control-flip
+# "<reason>" waives; offline/dry-run/0-controls SKIP (never hard-fail a run that
+# never reached the live API). Mirrors the powerbi Phase 6b + the shared gate 7b.
+puts
+puts '   ── CONTROL FLIP (gate 7b: each control actually FILTERS at runtime) ──'
+require 'flip_gate'
+flip_ok = true
+_flip_tok = (Sigma.auth_token rescue ENV['SIGMA_API_TOKEN'])
+if opts[:skip_control_flip]
+  puts "     [WAIVED] #{opts[:skip_control_flip] == true ? '(no reason given)' : opts[:skip_control_flip]} (name it in your report)"
+elsif ctl_rows.empty?
+  puts '     [OK] no controls — nothing to flip-test'
+elsif ENV['SIGMA_BASE_URL'].to_s.empty? || _flip_tok.to_s.empty?
+  puts '     [SKIP] offline (no SIGMA creds) — runtime flip UNVERIFIED'
+else
+  _probe_out = File.join(WORK, 'probe-controls')
+  system('ruby', File.join(HERE, 'probe-controls.rb'), '--workbook-id', WB_ID, '--out', _probe_out)
+  _probe_rc = $?.exitstatus
+  _results = (JSON.parse(File.read(File.join(_probe_out, 'probe-results.json'))) rescue nil)
+  _decision, _info = FlipGate.decide(_probe_rc, _results)
+  case _decision
+  when :ok
+    puts "     [OK] #{_info[:passes].length} control(s) proven live" \
+         "#{_info[:skips].any? ? "; #{_info[:skips].length} un-probeable skipped" : ''}"
+  when :fail
+    puts "     [FAIL] #{_info[:fails].length} control(s) wired but INERT on workbook #{WB_ID}:"
+    _info[:fails].each { |cid, note| puts "       - #{cid}: #{note}" }
+    puts '       Static lint clean (gate 7) but does not filter — a builder listen->column'
+    puts '       mis-map. Fix the build, or waive with --skip-control-flip "<reason>".'
+    flip_ok = false
+  when :advisory
+    puts "     [WARN] no control auto-probeable (#{_info[:skips].length} date/slider/unlabeled) — runtime wiring UNVERIFIED"
+  when :error
+    puts '     [FAIL] probe-controls.rb could not verify the wiring — an enforced gate must not pass silently.'
+    puts '       Re-run once the export API is reachable, or waive with --skip-control-flip "<reason>".'
+    flip_ok = false
+  end
+end
 mark('phase6-parity')
 
 # ---------------------------------------------------------------------------
@@ -951,6 +1040,7 @@ puts "LAYOUT      : #{layout_ok ? 'GREEN' : 'RED'} — gate 6 layout lint" \
      "#{(defined?(layout_violations) && layout_violations && layout_violations.any?) ? ", #{layout_violations.size} violation(s)" : (opts[:skip_layout_lint] ? ' (skipped)' : '')}"
 puts "CONTROLS    : #{control_ok ? 'GREEN' : 'RED'} — gate 7 control lint, #{ctl_rows.size} control(s) checked" \
      "#{ctl_violations.any? ? ", #{ctl_violations.size} violation(s)" : ''}"
+puts "CONTROL-FLIP: #{flip_ok ? 'GREEN' : 'RED'} — gate 7b runtime flip proof#{opts[:skip_control_flip] ? ' (waived)' : ''}"
 puts "freshness   : Qlik last reload #{app_meta['lastReloadTime'] || '?'} (#{stale_days} days ago)" if stale_days
 puts "warnings    : #{conv_warnings.size} converter, #{(wb_res['warnings'] || []).size} workbook-build" if conv_warnings.any? || (wb_res['warnings'] || []).any?
 # Empty-workbook guard + completion sentinel (parity with tableau/powerbi). A
@@ -958,13 +1048,13 @@ puts "warnings    : #{conv_warnings.size} converter, #{(wb_res['warnings'] || []
 # stamp a run-scoped success marker only on a genuine green so verify-complete.rb
 # (the done-check the SKILL points at) can't green an empty/hand-built result.
 n_elements = wb_res['elements'].to_i
-built_ok = parity_ok && layout_ok && control_ok && n_elements.positive?
+built_ok = parity_ok && layout_ok && control_ok && flip_ok && n_elements.positive?
 puts 'ELEMENTS    : 0 workbook elements built — EMPTY workbook, NOT done (investigate the build).' if n_elements.zero?
 begin
   succ = File.join(WORK, 'phase6-success.json')
   if built_ok
     File.write(succ, JSON.pretty_generate('workbookId' => WB_ID, 'chartCount' => n_elements,
-                                          'gates' => 'parity+layout+control',
+                                          'gates' => 'parity+layout+control+flip',
                                           'generatedAt' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')))
   elsif File.exist?(succ)
     File.delete(succ)

@@ -19,7 +19,8 @@ def run_gate(spec, dmids, *extra)
   Dir.mktmpdir do |d|
     File.write(File.join(d, 'wb.json'), JSON.generate(spec))
     File.write(File.join(d, 'dm.json'), JSON.generate(dmids))
-    out = `ruby #{GATE} --wb-spec #{d}/wb.json --dm-ids #{d}/dm.json #{extra.join(' ')} 2>&1`
+    out = IO.popen(['ruby', GATE, '--wb-spec', "#{d}/wb.json", '--dm-ids', "#{d}/dm.json", *extra],
+                   err: %i[child out], &:read)
     [$?.exitstatus, out]
   end
 end
@@ -68,7 +69,7 @@ check(rc == 1, 'empty DM fails (exit 1)')
 
 # waiver → skip (exit 0)
 rc, = run_gate({ 'pages' => [{ 'elements' => [{ 'columns' => [{ 'formula' => '[Master/Partner Name]' }] }] }] },
-               DM, '--skip-ref-check', '"known, building manually"')
+               DM, '--skip-ref-check', 'known, building manually')
 check(rc == 0, '--skip-ref-check waives (exit 0)')
 
 # PR-14: a waiver with --workdir writes a skip-flag-waived off-ramp record —

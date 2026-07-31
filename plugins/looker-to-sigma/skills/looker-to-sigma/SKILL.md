@@ -42,6 +42,7 @@ closely as possible — and verify the numbers match Looker AND the warehouse.
 
 **Read ALL of the following before replying or taking any action. Do not make assumptions about skill conventions, prompts, or global instructions — read the files.**
 - `refs/operating-contract.md` — **READ FIRST**: the fidelity guardrails (render + value-check EVERY page against the source; never ship empty or silently drop a tile; don't spin — surface blockers).
+- `refs/modeling-strategy.md` — faithful reproduction is the DEFAULT (parity is the gate); an upstream OBT / Sigma-native materialization is an OPT-IN optimization for hot, join-heavy dashboards, re-verified against the same oracle. The converter never auto-flattens.
 - `refs/dashboard-contract.md` — the normalized Looker Dashboard JSON contract both the live API fetch and the offline LookML parse produce. The dashboard pipeline is source-agnostic; it only sees this contract.
 - `refs/looker-dashboard-layout.md` — the deep desk study: Looker layout modes, newspaper→24-col grid math, tile-type / filter-type maps, and the full translation-hazard catalog (Liquid, `merged_results`, table calcs, view/explore field resolution, cross-filtering). **This is the design backbone of the dashboard pipeline.**
 - `refs/layered-lookml.md` — layered/derived LookML: derived tables on derived tables, cross-view `${view.SQL_TABLE_NAME}` refs (CTE inlining vs `LOOKER_SCRATCH` placeholders), CTE-continuation fragments, incremental/persisted PDTs → the **Sigma materialization handoff**, dimension_group edge cases, and untranslatable formatting measures. **Read before converting any project with `derived_table:` views.**
@@ -683,6 +684,31 @@ Tile-type, filter-type, and layout maps are in `refs/dashboard-contract.md` and
 | `looker_grid` / `table` | `table` |
 | `text` | `text` (markdown body) |
 | `looker_map` / geo / funnel / waterfall / boxplot / sankey / custom viz | none — approximate or drop + warn |
+
+**Table column order, labels & hidden columns.** A table's Sigma column order follows the Looker
+**visualization** order (`vis_config.column_order`, captured as contract `columnOrder`), NOT
+`query.fields` — the Data-tab order, which forces dimensions before measures. Fields not listed in
+`column_order` append in `fields` order (Looker appends newly-added fields at the end). Column
+**names** prefer the viz label (`vis_config.series_labels`, captured as `columnLabels`) over the
+humanized field name — a column renamed in the visualization can differ from the Data-tab name. Columns
+**hidden from the visualization** (`vis_config.hidden_fields`, captured as `hiddenFields`) get
+`hidden: true` on the Sigma column — but a hidden **dimension is KEPT in `groupings.groupBy`** so
+the aggregation grain (and therefore every measure value) is unchanged. Never *drop* a hidden
+dimension: Looker keeps it in the query ("Hide from Visualization" doesn't re-run the query), so
+dropping it would silently change the numbers. Both are additive contract keys — absent/empty →
+columns stay in `fields` order, byte-identical to before. Verified: `tests/test_table_column_order.py`.
+
+**DM metric references (leverage the semantic layer, don't duplicate it).** A table/pivot measure
+column prefers a governed **`[Metrics/<name>]`** reference over re-deriving the aggregation inline,
+when the measure's inline aggregate matches a metric defined on (or inherited by) the source DM
+element. Match is by FORMULA equivalence — strip the master prefix so `Sum([Data/Net Revenue])`
+equals a metric's `Sum([Net Revenue])` — so it's naming-independent and SAFE: ratios, filtered
+measures, custom/ad-hoc measures, and any non-match fall back to the inline formula. migrate-looker
+passes each element's referenceable metrics (name+formula) via `--dm-elements`, resolved through the
+`source.elementId` chain (a denorm "<X> View" element inherits its base fact's metrics — Sigma
+exposes them, and `[Metrics/<name>]` resolves on the denorm through the master→element chain,
+verified live). Absent metrics (the offline test/golden path) → inline, byte-identical. Verified:
+`tests/test_metric_reference.py`.
 
 Newspaper layout math (a single arithmetic transform, no spatial heuristic):
 `gridColumn = (col+1) / (col+1+width)`, `gridRow = (row+1) / (row+1+height)`. `tile` / `static`

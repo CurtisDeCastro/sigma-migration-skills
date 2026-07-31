@@ -74,7 +74,7 @@ def run_build(dl, wb, *extra)
     File.write(File.join(d, 'dl.json'), JSON.generate(dl))
     File.write(File.join(d, 'wb.json'), JSON.generate(wb))
     out = File.join(d, 'layout.xml')
-    log = `#{RUBY} #{BUILD} --layout #{File.join(d, 'dl.json')} --wb-ids #{File.join(d, 'wb.json')} --out #{out} #{extra.join(' ')} 2>&1`
+    log = IO.popen([RUBY, BUILD, '--layout', File.join(d, 'dl.json'), '--wb-ids', File.join(d, 'wb.json'), '--out', out, *extra], err: %i[child out], &:read)
     xml = File.exist?(out) ? File.read(out) : nil
     cf = File.join(d, 'layout-census.json')
     census = File.exist?(cf) ? JSON.parse(File.read(cf)) : nil

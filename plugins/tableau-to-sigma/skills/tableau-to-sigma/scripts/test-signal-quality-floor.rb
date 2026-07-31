@@ -156,7 +156,11 @@ check(els.none? { |e| e['name'].to_s == 'Pill Zone' },
 check(log =~ /ZONE DROPPED: 'Pill Zone'/, 'drop is LOUD (ZONE DROPPED warning names the zone)', fails)
 
 puts 'row counts are data'
-kpi = els.find { |e| e['kind'] == 'kpi-chart' && e['name'].to_s == 'Total Orders' }
+# kpi-chart elements carry `name` as the house-standard object form
+# {'text'=>...} (KpiCard.build); every other kind still carries a plain
+# String. Accept both so this name-based lookup doesn't break on the shape.
+name_of = ->(e) { n = e && e['name']; n.is_a?(Hash) ? n['text'] : n }
+kpi = els.find { |e| e['kind'] == 'kpi-chart' && name_of.call(e) == 'Total Orders' }
 kcol = kpi && (kpi['columns'] || []).first
 check(kcol && kcol['formula'] == 'Sum([Master/Number of Records])',
       "row-count KPI binds Sum([Master/Number of Records]) (got #{kcol && kcol['formula']})", fails)

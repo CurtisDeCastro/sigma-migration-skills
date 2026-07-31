@@ -39,7 +39,7 @@ def build(dl, wb, dir, extra = [])
   File.write(File.join(dir, 'dl.json'), JSON.generate(dl))
   File.write(File.join(dir, 'wb.json'), JSON.generate(wb))
   out = File.join(dir, 'layout.xml')
-  log = `#{RUBY} #{BUILD} --layout #{File.join(dir, 'dl.json')} --wb-ids #{File.join(dir, 'wb.json')} --out #{out} #{extra.join(' ')} 2>&1`
+  log = IO.popen([RUBY, BUILD, '--layout', File.join(dir, 'dl.json'), '--wb-ids', File.join(dir, 'wb.json'), '--out', out, *extra], err: %i[child out], &:read)
   xml = File.exist?(out) ? File.read(out) : nil
   census = File.exist?(File.join(dir, 'layout-census.json')) ? JSON.parse(File.read(File.join(dir, 'layout-census.json'))) : nil
   elements = File.exist?("#{out}.elements.json") ? File.read("#{out}.elements.json") : nil
@@ -461,7 +461,7 @@ Dir.mktmpdir do |d|
   dl = JSON.parse(JSON.generate(DL_TITLE))
   wb = JSON.parse(JSON.generate(WB_TITLE))
   wb['pages'][1]['elements'][1]['name'] = 'Net Margin Trend'
-  xml, _c, _log, = build(dl, wb, d, ["--rename 'Margin Trend=Net Margin Trend'"])
+  xml, _c, _log, = build(dl, wb, d, ['--rename', 'Margin Trend=Net Margin Trend'])
   ok('pass 1 (--rename) placed the renamed tile',
      !xml.nil? && xml.scan(/elementId="el-1"/).length == 1 && !xml.include?('-extra"'))
   rn = File.join(d, 'layout-renames.json')

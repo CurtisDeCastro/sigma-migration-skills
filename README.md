@@ -28,6 +28,7 @@ shared `~/.sigma-migration/env` under any agent.
 /plugin install microstrategy-to-sigma@sigma-migration-skills
 /plugin install sisense-to-sigma@sigma-migration-skills
 /plugin install gooddata-to-sigma@sigma-migration-skills
+/plugin install domo-to-sigma@sigma-migration-skills
 ```
 
 **Other agents (Cursor, Cortex Code, …)** — clone the repo and point your agent at the
@@ -53,7 +54,7 @@ and the skill drives discovery → translation → build → parity.
 |---|---|---|
 | [`tableau-to-sigma`](plugins/tableau-to-sigma/) | Tableau | `tableau-to-sigma`, `tableau-assessment`, `tableau-vds-to-cdw` |
 | [`powerbi-to-sigma`](plugins/powerbi-to-sigma/) | Power BI | `powerbi-to-sigma`, `powerbi-assessment`, `powerbi-import-to-snowflake` |
-| [`qlik-to-sigma`](plugins/qlik-to-sigma/) | Qlik Sense / Cloud | `qlik-to-sigma`, `qlik-assessment` |
+| [`qlik-to-sigma`](plugins/qlik-to-sigma/) | Qlik Sense / Cloud + QlikView (`.qvw` via `-prj`) | `qlik-to-sigma`, `qlik-assessment` |
 | [`thoughtspot-to-sigma`](plugins/thoughtspot-to-sigma/) | ThoughtSpot | `thoughtspot-to-sigma`, `thoughtspot-assessment` |
 | [`quicksight-to-sigma`](plugins/quicksight-to-sigma/) | Amazon QuickSight | `quicksight-to-sigma`, `quicksight-assessment` |
 | [`cognos-to-sigma`](plugins/cognos-to-sigma/) | IBM Cognos Analytics | `cognos-to-sigma`, `cognos-assessment` |
@@ -61,6 +62,7 @@ and the skill drives discovery → translation → build → parity.
 | [`microstrategy-to-sigma`](plugins/microstrategy-to-sigma/) | MicroStrategy (Strategy One) | `microstrategy-to-sigma`, `microstrategy-assessment` |
 | [`sisense-to-sigma`](plugins/sisense-to-sigma/) | Sisense (ElastiCube / Live) | `sisense-to-sigma`, `sisense-assessment` |
 | [`gooddata-to-sigma`](plugins/gooddata-to-sigma/) | GoodData Cloud / .CN | `gooddata-to-sigma`, `gooddata-assessment` |
+| [`domo-to-sigma`](plugins/domo-to-sigma/) | Domo | `domo-to-sigma` |
 
 In Claude Code, installed skills are namespaced — e.g. `/powerbi-to-sigma:powerbi-assessment`.
 
@@ -126,8 +128,3 @@ own Sigma + Snowflake test tenant (a retail/workforce star schema). They're incl
 ## License
 
 [MIT](LICENSE).
-
----
-
-> **Roadmap:** a `domo-to-sigma` plugin is in development and will join the marketplace
-> once it clears the same parity bar.

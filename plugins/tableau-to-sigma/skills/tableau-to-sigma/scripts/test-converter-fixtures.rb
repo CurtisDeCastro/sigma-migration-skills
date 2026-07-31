@@ -16,7 +16,9 @@
 #
 #   Part A: vendored converter/tableau.mjs internal tableauFormulaToSigma
 #           (export-appended tmp copy — the bundle only exports
-#           convertTableauToSigma) — 29 asserted fixtures + 1 PENDING (N-X2).
+#           convertTableauToSigma) — 44 asserted fixtures, 0 PENDING (N-X2 was
+#           promoted 2026-07-25 when the vendored ZN → native Zn fix landed;
+#           the N-Z*/N-D*/N-W* rows lock the same calc-hotfix batch).
 #           Needs `node` on PATH; when node itself is absent Part A is
 #           SKIPPED with a warning (CI runners may lack node) — but a
 #           re-vendor that renames/splits tableauFormulaToSigma still
@@ -52,13 +54,17 @@ end
 
 # ---------------------------------------------------------------------------
 # Part A fixture table — measured 2026-07-11 against converter/tableau.mjs
-# @ c33e5bd (see converter/PROVENANCE.json). :warn => substring that must
-# appear in the warnings array; no :warn => warnings must be EMPTY.
+# @ c33e5bd (see converter/PROVENANCE.json); ZN/date/window rows re-measured
+# 2026-07-25 against the calc-hotfix local patches (PROVENANCE local_patches).
+# :warn => substring that must appear in the warnings array; no :warn =>
+# warnings must be EMPTY.
 # ---------------------------------------------------------------------------
 NODE_FIXTURES = [
   { id: 'N-F1',  input: 'IFNULL([Sales], 0)',                    expect: 'Coalesce([Sales], 0)' },
   { id: 'N-F2',  input: 'ISNULL([Discount])',                    expect: 'IsNull([Discount])' },
-  { id: 'N-F3',  input: 'ZN([Profit])',                          expect: 'Coalesce([Profit], 0)' },
+  # ZN → native Sigma Zn (docs/zn) — name-map, robust for any nesting; the old
+  # Coalesce($1, 0) regex broke ZN(AGG(...)) (see N-X2).
+  { id: 'N-F3',  input: 'ZN([Profit])',                          expect: 'Zn([Profit])' },
   # tflex F4: DATEDIFF arg swap + pass-count parity chaos. Absent here — the
   # skill preserves Tableau (part, start, end) order, which is exactly Sigma's
   # DateDiff(part, start, end); single-pass regex, no double-swap.
@@ -103,17 +109,49 @@ NODE_FIXTURES = [
   # CASE → If-chain form (semantically = Switch).
   { id: 'N-X1',  input: 'CASE [Region] WHEN "West" THEN 1 ELSE 0 END',
     expect: 'If([Region] = "West", 1, 0)' },
-  # PENDING — the suite's one known-wrong row. The ZN rewrite
-  # /\bZN\s*\(([^)]+)\)/gi (tableau.mjs :2853) is not nesting-aware: [^)]+
-  # stops at the first ')', so the ', 0' lands INSIDE Sum(...). Current
-  # (malformed) output: Coalesce(Sum([Profit], 0)). The Ruby agg path (R-X2)
-  # gets the same input RIGHT — that pair is the cross-path divergence lock.
-  # Fix belongs UPSTREAM (twells89/sigma-data-model-mcp), then re-vendor via
-  # tools/vendor-converters.sh and promote this to a hard assertion. Never
-  # assert the wrong output as if it were desired.
-  { id: 'N-X2',  input: 'ZN(SUM([Profit]))',
-    pending: { expected: 'Coalesce(Sum([Profit]), 0)',
-               reason: 'ZN rewrite [^)]+ not nesting-aware (tableau.mjs :2853); fix upstream + re-vendor' } },
+  # PROMOTED 2026-07-25 (was the suite's one PENDING row): the single-paren
+  # Coalesce ZN rewrite emitted malformed Coalesce(Sum([Profit], 0)); the fix
+  # maps ZN → native Sigma Zn() by NAME, so any nesting survives. Landed as a
+  # vendored local patch (converter/PROVENANCE.json local_patches — upstream
+  # clone divergent), not the re-vendor the old note asked for.
+  { id: 'N-X2',  input: 'ZN(SUM([Profit]))',                     expect: 'Zn(Sum([Profit]))' },
+  # Locks the _TEXT_FN_RE fix: Coalesce/Zn are NOT text-producing, so numeric
+  # `+` between null-guards must stay `+` (was silently corrupted to `&`).
+  { id: 'N-Z1',  input: 'ZN([Sales]) + ZN([Profit])',            expect: 'Zn([Sales]) + Zn([Profit])' },
+  { id: 'N-Z2',  input: 'ZN(SUM([Sales])) - ZN(SUM([Profit]))',  expect: 'Zn(Sum([Sales])) - Zn(Sum([Profit]))' },
+  # …while the OTHER side of the same fix holds: _isTextOperand recurses into
+  # Coalesce's args, so a string-literal null-guard chain still converts + → &
+  # (was silently left as numeric +, which errors the column at render), and a
+  # ref-only Coalesce with no type info conservatively keeps +.
+  { id: 'N-Z3',  input: 'IFNULL([a], "x") + IFNULL([b], "y")',
+    expect: 'Coalesce([a], "x") & Coalesce([b], "y")' },
+  { id: 'N-Z4',  input: 'IFNULL([c], [e]) + IFNULL([d], [f])',
+    expect: 'Coalesce([c], [e]) + Coalesce([d], [f])' },
+  # Start-of-week arg has no Sigma slot — dropped LOUDLY (was silent drift)…
+  { id: 'N-D1',  input: "DATEDIFF('week', [Start], [Finish], 'monday')",
+    expect: 'DateDiff("week", [Start], [Finish])',  warn: "start-of-week 'monday' dropped" },
+  { id: 'N-D2',  input: "DATETRUNC('week', [Order Date], 'monday')",
+    expect: 'DateTrunc("week", [Order Date])',      warn: "start-of-week 'monday' dropped" },
+  # …and ONLY DateTrunc/DateDiff drop it — a weekday string that is a real last
+  # argument elsewhere survives (the old strip ate it: Contains([D], 'monday')
+  # became Contains([D])).
+  { id: 'N-D3',  input: "CONTAINS([Day Name], 'monday')",        expect: 'Contains([Day Name], "monday")' },
+  # Non-existent Sigma names purged from emission (function-index verified):
+  { id: 'N-D4',  input: 'DATETIME([Ship Date])',                 expect: 'Date([Ship Date])' },
+  { id: 'N-D5',  input: "DATEPART('weekday', [Order Date])",     expect: 'Weekday([Order Date])',
+    warn: 'verify numbering' },
+  { id: 'N-D6',  input: "DATENAME('week', [Order Date])",        expect: 'Text(DatePart("week", [Order Date]))' },
+  # Un-staled window mappings — MovingCorr/MovingVariance/MovingCount exist:
+  { id: 'N-W1',  input: 'WINDOW_CORR(SUM([Sales]), SUM([Profit]), -2, 0)',
+    expect: 'MovingCorr(Sum([Sales]), Sum([Profit]), 2)', warn: 'CHART/grouped-element context ONLY' },
+  { id: 'N-W2',  input: 'WINDOW_VAR(SUM([Sales]), -4, 0)',
+    expect: 'MovingVariance(Sum([Sales]), 4)',            warn: 'CHART/grouped-element context ONLY' },
+  { id: 'N-W3',  input: 'WINDOW_COUNT(COUNT([Sales]), -2, 0)',
+    expect: 'MovingCount(Count([Sales]), 2)',             warn: 'CHART/grouped-element context ONLY' },
+  # Population variant stays untranslatable (no Moving*Pop in Sigma):
+  { id: 'N-W4',  input: 'WINDOW_VARP(SUM([Sales]), -2, 0)',
+    expect: '/* table calc: WINDOW_VARP(SUM([Sales]), -2, 0) */',
+    warn: 'has no Sigma equivalent' },
   { id: 'N-X3',  input: 'COUNTD([Customer ID])',                 expect: 'CountDistinct([Customer ID])' },
   # Fail-open WITH warning is the B1 contract for unmapped functions.
   { id: 'N-X4',  input: 'FINDNTH([Path], "-", 2)',               expect: 'FINDNTH([Path], "-", 2)',
@@ -204,8 +242,10 @@ RUBY_FIXTURES = [
     expect: 'Sum([Master/PROFIT_RATIO]) * 100' },
   { id: 'R-X3',  entry: :kpi, input: 'COUNTD([Customer ID])',
     expect: 'CountDistinct([Master/CUSTOMER_ID])' },
-  # The paren-aware ZN loop gets right what node N-X2 gets wrong — this pair
-  # is the cross-path divergence lock (see the N-X2 PENDING row).
+  # Cross-path lock with node N-X2: both paths now translate ZN(AGG(...))
+  # correctly but through different idioms — node emits native Zn(...), the
+  # paren-aware Ruby agg loop emits Coalesce(..., 0). Semantically identical
+  # (Zn(x) ≡ Coalesce(x, 0)); each path's own shape is asserted exactly.
   { id: 'R-X2',  entry: :agg, input: 'ZN(SUM([Profit]))',
     expect: 'Coalesce(Sum([Master/PROFIT]), 0)' },
   { id: 'R-F16', entry: :win, input: 'RANK(SUM([Sales]))',

@@ -87,10 +87,10 @@ ok('leaf-name fallback resolves entity-mismatched target', res2['formats'].size 
 
 # --- 2. Python extractor: real PBIR bytes -> normalized CF records -------------
 require 'tempfile'
-# PBI_PY wins if set; else a real system Python via PyResolve (Windows Store-stub
-# safe). PyResolve.display is a shell-safe "tok1 tok2" string (e.g. "py -3") since
-# `py` is interpolated into a backtick command below, not splatted into argv.
-py = ENV['PBI_PY'] || PyResolve.display
+# PBI_PY wins if set (space-separated tokens, e.g. "py -3"); else a real system
+# Python via PyResolve (Windows Store-stub safe). Held as an argv array so the
+# spawn needs no shell quoting (paths with spaces survive).
+py = ENV['PBI_PY'] ? ENV['PBI_PY'].split : PyResolve.argv
 EXTRACTOR = File.join(__dir__, 'extract-pbir.py')
 def extract_cf(py, visual_json_path)
   Tempfile.create(['cf_extract', '.py']) do |f|
@@ -102,7 +102,7 @@ def extract_cf(py, visual_json_path)
       print(json.dumps(ep._conditional_formats(v, v.get("visualType"))))
     PY
     f.flush
-    out = `#{py} #{f.path.inspect} #{EXTRACTOR.inspect} #{visual_json_path.inspect} 2>/dev/null`
+    out = IO.popen([*py, f.path, EXTRACTOR, visual_json_path], err: File::NULL, &:read)
     return (JSON.parse(out) rescue nil)
   end
 end

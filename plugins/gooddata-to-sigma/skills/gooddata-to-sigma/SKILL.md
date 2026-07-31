@@ -22,6 +22,7 @@ user-invocable: true
 > **Windows / first run — run the environment doctor before anything else:**
 > `bash scripts/doctor.sh` (macOS/Linux/Git Bash) or `powershell -ExecutionPolicy Bypass -File scripts\doctor.ps1` (Windows).
 > It checks Ruby/Python/Node/bash and flags the Python "Store stub" + CRLF with exact fixes. Details: `refs/environment.md`.
+> **Modeling strategy — `refs/modeling-strategy.md`**: faithful reproduction of the source model is the DEFAULT (parity is the gate); an upstream OBT or Sigma-native materialization is an OPT-IN optimization for hot, join-heavy dashboards, re-verified against the same parity oracle. The converter never auto-flattens.
 
 > **Status: LIVE-VALIDATED — exact parity, data model + workbook.**
 > Proven end-to-end on a GoodData Cloud trial → Sigma (both on Snowflake): a
@@ -112,8 +113,20 @@ and resolves a related-dataset `view` attribute to a cross-element reference
 ```
 python3 scripts/build_workbook.py --workspace gd_workspace.json \
   --data-model-id <dm-uuid> --fact-element <elId> --fact-name <TABLE> \
-  --rel-name <REL_NAME> --fact-dataset <ds-id> --folder-id <folder> --out wb_spec.json
+  --rel-name <REL_NAME> --fact-dataset <ds-id> --folder-id <folder> \
+  --dm-spec dm_spec.json --out wb_spec.json
 ```
+**DM metric references (leverage the semantic layer, don't duplicate it).** Pass
+`--dm-spec dm_spec.json` (the Phase-2 `convert.py` output) and a measure column
+prefers a governed **`[Metrics/<name>]`** reference over re-deriving the aggregation
+inline, when its translated inline aggregate matches a metric on the fact element
+(formula-equivalence match via the shared binder `scripts/lib/metric_binding.py` —
+strip the `Data` master prefix so `Sum([Data/Net Revenue])` equals a metric's
+`Sum([Net Revenue])`). SAFE: `BY ALL`/`FOR` context measures (already flagged),
+metric-of-metric ratios (workbook expands them; the DM keeps `[MetricName]` refs),
+and any non-match fall back to inline. `--fact-element` must be the DM element id
+`convert.py` assigned (CREATE preserves ids), so it keys into the spec's elements.
+No `--dm-spec` → inline, byte-identical. Verified: `tests/test_metric_reference.py`.
 Apply the dashboard grid **layout as the LAST write** (after all elements exist;
 a bare spec PUT wipes layout) — match GoodData's section/widget arrangement.
 

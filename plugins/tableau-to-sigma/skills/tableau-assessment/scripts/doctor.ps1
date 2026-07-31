@@ -27,12 +27,16 @@ Write-Host "Environment doctor - host: windows (PowerShell)`n"
 # --- ruby ------------------------------------------------------------------
 $ruby = Get-Command ruby -ErrorAction SilentlyContinue
 if ($ruby) { Ok "ruby - $((& ruby -e 'print RUBY_VERSION' 2>$null))" }
-else { Bad "ruby not found" "Run the bootstrap: 'powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1' (user-scoped winget/scoop install, never admin)." }
+else { Bad "ruby not found" "Run the bootstrap: 'powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1' (user-scoped winget/scoop install, never admin; it re-runs this doctor when done)." }
 
 # --- python (reject the Microsoft Store App-Execution-Alias stub) ----------
 # Detect by PATH first: the stub lives under ...\WindowsApps\. We check py -3,
 # then python / python3, and accept the first whose interpreter is NOT in
 # WindowsApps. (We avoid invoking a WindowsApps stub, which can pop the Store.)
+# KEEP IN LOCKSTEP with bootstrap.ps1's Test-RealPython: same probe body, same
+# WindowsApps rejection, so bootstrap and doctor agree on what counts as "a
+# real Python" (the tableau skill's test-bootstrap-lockstep.sh Part C diffs
+# the two bodies, ignoring comments, and fails on drift).
 function Test-RealPython($exe, $pre) {
   $cmd = Get-Command $exe -ErrorAction SilentlyContinue
   if (-not $cmd) { return $null }
@@ -57,7 +61,7 @@ else {
   if ($py) { Ok "python - $py" }
   else {
     Bad "no real Python (the 'python'/'python3' on PATH is likely the Microsoft Store alias stub)" `
-        "Run the bootstrap: 'powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1' (user-scoped install that skips the Store stub, never admin)."
+        "Run the bootstrap: 'powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1' (installs a real user-scoped Python, never admin; the stub is rejected by its probe). Manual alternative: disable the stub under Settings > Apps > Advanced app settings > App execution aliases."
   }
 }
 
@@ -72,7 +76,7 @@ if ($script:PyExe) {
   if ($probe -eq 'TRUSTWARN') {
     $fix = "$script:PyExe"; if ($script:PyPre) { $fix = "$script:PyExe $script:PyPre" }
     Warn "python uses OpenSSL 3.x without 'truststore' - TLS verification may fail against some servers (e.g. Looker or Tableau Cloud) where curl/Ruby succeed" `
-         "Fix: '$fix -m pip install truststore' (uses the OS trust store). Do NOT disable TLS verification."
+         "Run the bootstrap: 'powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1' - installs 'truststore' and wires pip to the OS trust store. Do NOT disable TLS verification."
   }
 }
 
@@ -101,7 +105,7 @@ if (Test-Path (Join-Path $PSScriptRoot 'land-extracts.py')) {
 $node = Get-Command node -ErrorAction SilentlyContinue
 if ($node) { Ok "node - $((& node --version 2>$null))" }
 else { Bad "node not found (required - the vendored converters/*.mjs run via node)" `
-           "Run the bootstrap: 'powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1' (activates fnm/scoop installs or installs user-scoped - never admin, never an unpinned download)." }
+           "Run the bootstrap: 'powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1' - activates a version-manager Node when one exists (fnm/scoop dirs), else installs Node 22 LTS pinned via the winget-scoop fnm route (no admin, nothing unpinned). Details: refs/environment.md #5." }
 
 # --- bash (REQUIRED for get-token.sh / *-auth.sh token minting) ------------
 $bash = Get-Command bash -ErrorAction SilentlyContinue
@@ -109,7 +113,7 @@ if ($bash) {
   Ok "bash - $($bash.Source) (run the *.sh helpers like get-token.sh from Git Bash, or 'bash scripts/get-token.sh')"
 } else {
   $wsl = Get-Command wsl -ErrorAction SilentlyContinue
-  if ($wsl) { Warn "no native bash, but WSL is present" "Run the *.sh helpers via WSL, or install Git for Windows (Git Bash) for a native bash." }
+  if ($wsl) { Warn "no native bash, but WSL is present" "Run the *.sh helpers via WSL, or run the bootstrap: 'powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1' (installs Git for Windows user-scoped - it ships Git Bash)." }
   else { Bad "no bash found - get-token.sh / *-auth.sh (Sigma token minting) cannot run" `
              "Run the bootstrap: 'powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1' (installs Git for Windows user-scoped - it ships Git Bash)." }
 }
@@ -130,7 +134,10 @@ if ($crlf -eq 'true') {
 # {cred_smoke:{sigma: pass|fail|skipped}}.
 $script:SmokeSigma = "skipped"
 $envFile = Join-Path $env:USERPROFILE ".sigma-migration\env"
-$sigmaCreds = (Test-Path $envFile) -or $env:SIGMA_API_TOKEN -or $env:SIGMA_CLIENT_ID
+# Content-based presence (the Tableau check's pattern below): bare
+# file-existence would misread an env file holding only non-credential lines
+# (anything a future writer persists there) as "credentials present".
+$sigmaCreds = ((Test-Path $envFile) -and ((Get-Content $envFile -Raw -ErrorAction SilentlyContinue) -match 'SIGMA_(API_TOKEN|CLIENT_ID)')) -or $env:SIGMA_API_TOKEN -or $env:SIGMA_CLIENT_ID
 $sigmaLib = Join-Path $PSScriptRoot "lib\sigma_rest.rb"
 if (-not $sigmaCreds) {
   Bad "no Sigma credentials found (REQUIRED - the run would die at its first Sigma API call)" `
@@ -298,5 +305,5 @@ if ($WorkDir) { Write-DoctorJson (Join-Path $WorkDir "doctor.json") }
 
 Write-Host "`nSummary: $script:Pass ok, $script:Warn warning(s), $script:Fail missing/blocking."
 if ($script:Fail -eq 0) { Write-Host "Environment looks good - proceed."; exit 0 }
-Write-Host "Fix the [X] item(s) above, then re-run: powershell -ExecutionPolicy Bypass -File scripts\doctor.ps1"
+Write-Host "Fix the [X] item(s) above - missing runtimes/payloads are one command: powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1 - then re-run: powershell -ExecutionPolicy Bypass -File scripts\doctor.ps1"
 exit 1

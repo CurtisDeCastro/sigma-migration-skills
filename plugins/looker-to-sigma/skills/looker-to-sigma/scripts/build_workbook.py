@@ -20,6 +20,21 @@ def sid(p="el"): return p + "-" + "".join(secrets.choice(string.ascii_lowercase 
 def disp(seg):  return " ".join(w.capitalize() for w in str(seg).split("_"))
 def leaf(field): return field.split(".")[-1]            # users.traffic_source -> traffic_source
 
+
+def ordered_visible_fields(el):
+    """The DISPLAY order for a table/pivot tile's dimension+measure fields.
+
+    Looker's query.fields is the Data-tab order (dims forced before measures); the
+    tile's ACTUAL column order lives in vis_config.column_order (contract key
+    `columnOrder`), set by dragging columns in the viz. Honor columnOrder when present;
+    any query field not listed there is appended in fields order (Looker appends
+    newly-added fields at the end). Membership is UNCHANGED — hidden columns are handled
+    by the caller via a per-column `hidden` flag so the GROUP-BY grain is never altered.
+    Empty/absent columnOrder → fields order (non-reordered tiles stay byte-identical)."""
+    fields = el.get("fields") or []
+    order = [f for f in (el.get("columnOrder") or []) if f in fields]
+    return order + [f for f in fields if f not in order]
+
 # dimension_group timeframe expansion — MIRRORS the DM converter (lookml.ts
 # TIMEFRAME_MAP / DEFAULT_TIMEFRAMES): a `dimension_group: order_date` with >1
 # timeframes becomes DM columns "Order Date Raw" / "Order Date Date" /
@@ -433,6 +448,9 @@ def main():
                 # FLAT ('<Field> (<view>)'); the base fact element only reaches
                 # them through a relationship traversal. master_ref keys off this.
                 "denorm": (dme.get("name") or "").endswith(" View"),
+                # DM metrics on this element (name+formula) → build_workbook prefers a
+                # governed [Metrics/<name>] ref over re-deriving the aggregate inline.
+                "metrics": dme.get("metrics") or [],
                 "needed": {},
             }
             if n == 1:
@@ -640,6 +658,28 @@ def main():
                             f"master column — emitted Count() as a degraded fallback; verify parity.")
             return "Count()"
         return f"[{master_of(explore)['name']}/{cd}]"
+    def metric_or_inline(f, explore):
+        """Prefer a governed DM-metric reference `[Metrics/<name>]` over re-deriving the
+        aggregation inline, when the measure's inline aggregate matches a metric defined on
+        the source element. Match is by FORMULA equivalence — strip the master prefix so
+        `Sum([Data/Net Revenue])` equals the metric's `Sum([Net Revenue])` — which is
+        naming-independent and SAFE: any mismatch (ratios, filtered measures, custom/ad-hoc
+        measures, or an absent metric list, e.g. the offline test path) falls back to the
+        inline formula. A metric on the DM element resolves as `[Metrics/<name>]` through the
+        master→DM-element source chain (verified live). Scoped to table/pivot calc columns."""
+        inline = formula_for(f, explore)
+        if not is_measure(f) or not isinstance(inline, str):
+            return inline
+        mst = master_of(explore)
+        mets = mst.get("metrics") or []
+        if not mets:
+            return inline
+        want = re.sub(r"\s+", "", inline.replace(f"[{mst['name']}/", "["))
+        for m in mets:
+            mf, mn = m.get("formula"), m.get("name")
+            if mf and mn and re.sub(r"\s+", "", mf) == want:
+                return f"[Metrics/{mn}]"
+        return inline
     def _warn_count(f, el):
         if measures.get(f, (None,))[0] == "count":
             v = f.split(".")[0]
@@ -1201,8 +1241,16 @@ def main():
             # (emit_native_trellis), faceted by the panel-splitting dimension.
         elif kind == "table":
             cols, gids, cids = [], [], []
-            for f in el["fields"] + (el.get("pivots") or []):
-                tcol = {"id": sid("c"), "formula": formula_for(f, ex), "name": disp(leaf(f))}
+            hidden = set(el.get("hiddenFields") or [])
+            labels = el.get("columnLabels") or {}
+            # Column order = the Looker VIZ order (columnOrder), not query.fields (the
+            # Data-tab order). Column NAMES prefer the viz series label (columnLabels) over
+            # the humanized field name. Hidden columns get a `hidden` flag, but a hidden
+            # DIMENSION still joins the group-by below so the aggregation grain is unchanged.
+            for f in ordered_visible_fields(el) + (el.get("pivots") or []):
+                tcol = {"id": sid("c"), "formula": metric_or_inline(f, ex), "name": labels.get(f) or disp(leaf(f))}
+                if f in hidden:
+                    tcol["hidden"] = True
                 if is_measure(f):
                     apply_fmt(tcol, f); _warn_count(f, el); cids.append(tcol["id"])
                 else:
@@ -1217,6 +1265,12 @@ def main():
             # col ids]}].
             if gids and cids:
                 base["groupings"] = [{"id": sid("g"), "groupBy": gids, "calculations": cids}]
+            if hidden:
+                warnings.append(
+                    f"tile '{el['name']}': {len(hidden)} column(s) hidden in the Looker "
+                    f"viz ({', '.join(sorted(leaf(h) for h in hidden))}) → hidden in Sigma "
+                    "but KEPT in the group-by, so the aggregation grain (and every measure "
+                    "value) is preserved; confirm row counts in the visual-QA pass.")
             # Looker grid cell visualizations (vis_config.series_cell_visualizations) →
             # Sigma element-level conditionalFormats on the measure's calc column.
             # KEY (verified live 2026-06-24): Sigma `dataBars` are SIGN-colored — one fill
@@ -1258,8 +1312,12 @@ def main():
             # shelves replace `groupings`. Shape verified: sigma-workbooks tables.md.
             cols, row_ids, col_ids, val_ids = [], [], [], []
             pivset = set(el.get("pivots") or [])
-            for f in el["fields"] + (el.get("pivots") or []):
-                tcol = {"id": sid("c"), "formula": formula_for(f, ex), "name": disp(leaf(f))}
+            hidden = set(el.get("hiddenFields") or [])
+            labels = el.get("columnLabels") or {}
+            for f in ordered_visible_fields(el) + (el.get("pivots") or []):
+                tcol = {"id": sid("c"), "formula": metric_or_inline(f, ex), "name": labels.get(f) or disp(leaf(f))}
+                if f in hidden:
+                    tcol["hidden"] = True
                 if is_measure(f):
                     apply_fmt(tcol, f); _warn_count(f, el); val_ids.append(tcol["id"])
                 elif f in pivset:
@@ -1269,6 +1327,11 @@ def main():
                 cols.append(tcol)
                 field2cid[f] = tcol["id"]
             base["columns"] = cols
+            if hidden:
+                warnings.append(
+                    f"tile '{el['name']}': hidden viz column(s) "
+                    f"({', '.join(sorted(leaf(h) for h in hidden))}) hidden in Sigma but "
+                    "KEPT in the query so the pivot grain is preserved.")
             base["values"] = val_ids
             base["rowsBy"] = [{"id": i} for i in row_ids]
             base["columnsBy"] = [{"id": i} for i in col_ids]

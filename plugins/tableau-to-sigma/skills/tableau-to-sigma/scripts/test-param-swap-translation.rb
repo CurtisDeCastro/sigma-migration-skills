@@ -1,6 +1,6 @@
 #!/usr/bin/env ruby
 # Regression test for the parameter-driven field-swap path (the enterprise /
-# "Partner Landscape" Choose-Split-Table idiom). Deterministic + offline — no
+# partner-crosstab fixture Choose-Split-Table idiom). Deterministic + offline — no
 # Tableau or Sigma calls. Guards the six fixes that made param swaps migrate
 # end-to-end (proven 7/7 strict on the enterprise-mirror fixture, 2026-06-16):
 #
@@ -31,7 +31,10 @@ end
 # ---- Part A: translation unit test -----------------------------------------
 # Extract the translation helpers from the (non-requireable, CLI) script and
 # eval them over stubs, so we test the shipped bodies verbatim.
-src = File.read(BUILD)
+# encoding-explicit: BUILD carries UTF-8 prose; with LANG/LC_ALL unset a
+# default-external-encoding read returns US-ASCII and the regex below aborts
+# ("invalid byte sequence in US-ASCII") on a box without a UTF-8 locale.
+src = File.read(BUILD, encoding: 'UTF-8')
 defs = %w[canonical_switch_value coerce_case_literal remap_param_branch translate_case_on_param
           translate_if_chain_on_param param_control_ref rewire_param_switch!].map do |fn|
   boundary = fn =~ /[!?]\z/ ? '' : '\b'
@@ -115,7 +118,7 @@ spec = {
 }
 tmp = Tempfile.new(['param-swap-spec-', '.json'])
 tmp.write(JSON.generate(spec)); tmp.close
-out = `ruby #{VALIDATE.inspect} --type workbook #{tmp.path.inspect} 2>&1`
+out = IO.popen(['ruby', VALIDATE, '--type', 'workbook', tmp.path], err: %i[child out], &:read)
 tmp.unlink
 check(!out.include?('bare ref [ctl-param-choose-split-table] not a sibling'),
       'control ref not flagged as non-sibling', fails)

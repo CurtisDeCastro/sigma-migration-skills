@@ -332,6 +332,17 @@ if (conv.status !== 0) die(`module converter failed:\n${conv.stderr}`);
 const dmSpec = JSON.parse(conv.stdout);
 const dmPath = join(WORK, 'dm.json');
 writeFileSync(dmPath, JSON.stringify(dmSpec, null, 2));
+// DM metrics keyed by element display name (= the report converter's [Subject/…]
+// prefix), so a report measure binds to a governed [Metrics/<name>] ref instead of
+// re-deriving the aggregate inline. Deterministic converter output → keys line up
+// on both the build-new and reuse paths. Empty → inline (byte-identical).
+const metricsMap = {};
+for (const el of (dmSpec.pages || []).flatMap((p) => p.elements || [])) {
+  const ms = Array.isArray(el.metrics) ? el.metrics.filter((m) => m && m.name && m.formula) : [];
+  if (el.name && ms.length) metricsMap[el.name] = ms.map((m) => ({ name: m.name, formula: m.formula }));
+}
+const metricsPath = join(WORK, 'report-metrics.json');
+writeFileSync(metricsPath, JSON.stringify(metricsMap, null, 2));
 const convWarnings = conv.stderr.split('\n').filter((l) => l.trim().startsWith('!')).map((l) => l.replace(/^\s*!\s*/, ''));
 const statsLine = (conv.stderr.match(/stats: (\{.*\})/) || [])[1];
 const securityDetected = existsSync(securityPath) ? JSON.parse(readFileSync(securityPath, 'utf8')) : [];
@@ -483,7 +494,7 @@ if (opt['dry-run']) {
   hdr(3, 'Build data model');
   line(`DRY RUN: DM spec → ${dmPath} (no POST)`);
   hdr(4, 'Convert report');
-  const rconv = spawnSync('node', [...cliPre, cliCmd, reportPath, '--dm', 'DRY-RUN'],
+  const rconv = spawnSync('node', [...cliPre, cliCmd, reportPath, '--dm', 'DRY-RUN', '--metrics', metricsPath],
     { encoding: 'utf8', cwd: CONV, maxBuffer: 64 * 1024 * 1024 });
   if (rconv.status !== 0) die(`report converter failed:\n${rconv.stderr}`);
   writeFileSync(join(WORK, 'wb.json'), rconv.stdout);
@@ -522,7 +533,7 @@ writeFileSync(statePath, JSON.stringify(state, null, 2));
 // Phase 4 — Convert the report → workbook spec, remap to the real DM ids.
 // ---------------------------------------------------------------------------
 hdr(4, 'Convert report + remap');
-const rconv = spawnSync('node', [...cliPre, cliCmd, reportPath, '--dm', dmId],
+const rconv = spawnSync('node', [...cliPre, cliCmd, reportPath, '--dm', dmId, '--metrics', metricsPath],
   { encoding: 'utf8', cwd: CONV, maxBuffer: 64 * 1024 * 1024 });
 if (rconv.status !== 0) die(`report converter failed:\n${rconv.stderr}`);
 const wbSpec = JSON.parse(rconv.stdout);
@@ -534,6 +545,26 @@ line(`report → workbook spec (${rStats || 'no stats'}); ${rWarnings.length} wa
 rWarnings.forEach((w) => line(`  ! ${w}`));
 const wbRemapped = join(WORK, 'wb.remapped.json');
 run('node', [join(HERE, 'remap-wb-to-dm-ids.mjs'), '--wb', wbPath, '--dm-id', dmId, '--out', wbRemapped]);
+
+// gate 7 (control-wiring lint): FAIL the build if a control does not filter
+// every same-page KPI/chart (partial reach), is dead, or points at a ghost
+// target — the shared, proven scripts/lib/control_lint.rb, on the remapped spec
+// that gets POSTed. Kills the "control only filters the table, not the
+// KPIs/charts" bug at build time, no live API. (Runtime flip / gate 7b needs a
+// live-posted workbook; run scripts/probe-controls.rb after POST — see SKILL.md.)
+const clPath = join(HERE, 'lib', 'control_lint.rb');
+if (existsSync(clPath)) {
+  const cl = spawnSync('ruby', [clPath, wbRemapped], { encoding: 'utf8' });
+  if (cl.stdout) process.stdout.write(cl.stdout);
+  if (cl.stderr) process.stderr.write(cl.stderr);
+  if (cl.status !== 0) {
+    die('gate 7 (control lint): control-wiring violation(s) above. A control must target the '
+      + 'page SOURCE element so Sigma propagates the filter to EVERY element (KPIs + charts + '
+      + 'tables), not just one. Fix the wiring before shipping.');
+  }
+} else {
+  line('! [WARN] gate 7: scripts/lib/control_lint.rb not vendored — control wiring UNLINTED');
+}
 
 // ---------------------------------------------------------------------------
 // Phase 5 — POST the workbook + readback (HARD GATE: error-typed columns).

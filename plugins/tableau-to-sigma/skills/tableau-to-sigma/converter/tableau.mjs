@@ -24,9 +24,9 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   mod
 ));
 
-// ../dm-mcp/node_modules/fast-xml-parser/src/util.js
+// node_modules/fast-xml-parser/src/util.js
 var require_util = __commonJS({
-  "../dm-mcp/node_modules/fast-xml-parser/src/util.js"(exports) {
+  "node_modules/fast-xml-parser/src/util.js"(exports) {
     "use strict";
     var nameStartChar = ":A-Za-z_\\u00C0-\\u00D6\\u00D8-\\u00F6\\u00F8-\\u02FF\\u0370-\\u037D\\u037F-\\u1FFF\\u200C-\\u200D\\u2070-\\u218F\\u2C00-\\u2FEF\\u3001-\\uD7FF\\uF900-\\uFDCF\\uFDF0-\\uFFFD";
     var nameChar = nameStartChar + "\\-.\\d\\u00B7\\u0300-\\u036F\\u203F-\\u2040";
@@ -98,9 +98,9 @@ var require_util = __commonJS({
   }
 });
 
-// ../dm-mcp/node_modules/fast-xml-parser/src/validator.js
+// node_modules/fast-xml-parser/src/validator.js
 var require_validator = __commonJS({
-  "../dm-mcp/node_modules/fast-xml-parser/src/validator.js"(exports) {
+  "node_modules/fast-xml-parser/src/validator.js"(exports) {
     "use strict";
     var util = require_util();
     var defaultOptions = {
@@ -410,9 +410,9 @@ var require_validator = __commonJS({
   }
 });
 
-// ../dm-mcp/node_modules/fast-xml-parser/src/xmlparser/OptionsBuilder.js
+// node_modules/fast-xml-parser/src/xmlparser/OptionsBuilder.js
 var require_OptionsBuilder = __commonJS({
-  "../dm-mcp/node_modules/fast-xml-parser/src/xmlparser/OptionsBuilder.js"(exports) {
+  "node_modules/fast-xml-parser/src/xmlparser/OptionsBuilder.js"(exports) {
     var { DANGEROUS_PROPERTY_NAMES, criticalProperties } = require_util();
     var defaultOnDangerousProperty = (name) => {
       if (DANGEROUS_PROPERTY_NAMES.includes(name)) {
@@ -536,9 +536,9 @@ var require_OptionsBuilder = __commonJS({
   }
 });
 
-// ../dm-mcp/node_modules/fast-xml-parser/src/xmlparser/xmlNode.js
+// node_modules/fast-xml-parser/src/xmlparser/xmlNode.js
 var require_xmlNode = __commonJS({
-  "../dm-mcp/node_modules/fast-xml-parser/src/xmlparser/xmlNode.js"(exports, module) {
+  "node_modules/fast-xml-parser/src/xmlparser/xmlNode.js"(exports, module) {
     "use strict";
     var XmlNode = class {
       constructor(tagname) {
@@ -563,9 +563,9 @@ var require_xmlNode = __commonJS({
   }
 });
 
-// ../dm-mcp/node_modules/fast-xml-parser/src/xmlparser/DocTypeReader.js
+// node_modules/fast-xml-parser/src/xmlparser/DocTypeReader.js
 var require_DocTypeReader = __commonJS({
-  "../dm-mcp/node_modules/fast-xml-parser/src/xmlparser/DocTypeReader.js"(exports, module) {
+  "node_modules/fast-xml-parser/src/xmlparser/DocTypeReader.js"(exports, module) {
     var util = require_util();
     var DocTypeReader = class {
       constructor(options) {
@@ -851,9 +851,9 @@ var require_DocTypeReader = __commonJS({
   }
 });
 
-// ../dm-mcp/node_modules/strnum/strnum.js
+// node_modules/strnum/strnum.js
 var require_strnum = __commonJS({
-  "../dm-mcp/node_modules/strnum/strnum.js"(exports, module) {
+  "node_modules/strnum/strnum.js"(exports, module) {
     var hexRegex = /^[-+]?0x[a-fA-F0-9]+$/;
     var numRegex = /^([\-\+])?(0*)([0-9]*(\.[0-9]*)?)$/;
     var consider = {
@@ -939,9 +939,9 @@ var require_strnum = __commonJS({
   }
 });
 
-// ../dm-mcp/node_modules/fast-xml-parser/src/ignoreAttributes.js
+// node_modules/fast-xml-parser/src/ignoreAttributes.js
 var require_ignoreAttributes = __commonJS({
-  "../dm-mcp/node_modules/fast-xml-parser/src/ignoreAttributes.js"(exports, module) {
+  "node_modules/fast-xml-parser/src/ignoreAttributes.js"(exports, module) {
     function getIgnoreAttributesFn(ignoreAttributes) {
       if (typeof ignoreAttributes === "function") {
         return ignoreAttributes;
@@ -964,9 +964,9 @@ var require_ignoreAttributes = __commonJS({
   }
 });
 
-// ../dm-mcp/node_modules/fast-xml-parser/src/xmlparser/OrderedObjParser.js
+// node_modules/fast-xml-parser/src/xmlparser/OrderedObjParser.js
 var require_OrderedObjParser = __commonJS({
-  "../dm-mcp/node_modules/fast-xml-parser/src/xmlparser/OrderedObjParser.js"(exports, module) {
+  "node_modules/fast-xml-parser/src/xmlparser/OrderedObjParser.js"(exports, module) {
     "use strict";
     var util = require_util();
     var xmlNode = require_xmlNode();
@@ -1569,9 +1569,9 @@ var require_OrderedObjParser = __commonJS({
   }
 });
 
-// ../dm-mcp/node_modules/fast-xml-parser/src/xmlparser/node2json.js
+// node_modules/fast-xml-parser/src/xmlparser/node2json.js
 var require_node2json = __commonJS({
-  "../dm-mcp/node_modules/fast-xml-parser/src/xmlparser/node2json.js"(exports) {
+  "node_modules/fast-xml-parser/src/xmlparser/node2json.js"(exports) {
     "use strict";
     function prettify(node, options) {
       return compress(node, options);
@@ -1656,9 +1656,9 @@ var require_node2json = __commonJS({
   }
 });
 
-// ../dm-mcp/node_modules/fast-xml-parser/src/xmlparser/XMLParser.js
+// node_modules/fast-xml-parser/src/xmlparser/XMLParser.js
 var require_XMLParser = __commonJS({
-  "../dm-mcp/node_modules/fast-xml-parser/src/xmlparser/XMLParser.js"(exports, module) {
+  "node_modules/fast-xml-parser/src/xmlparser/XMLParser.js"(exports, module) {
     var { buildOptions } = require_OptionsBuilder();
     var OrderedObjParser = require_OrderedObjParser();
     var { prettify } = require_node2json();
@@ -1714,9 +1714,9 @@ var require_XMLParser = __commonJS({
   }
 });
 
-// ../dm-mcp/node_modules/fast-xml-parser/src/xmlbuilder/orderedJs2Xml.js
+// node_modules/fast-xml-parser/src/xmlbuilder/orderedJs2Xml.js
 var require_orderedJs2Xml = __commonJS({
-  "../dm-mcp/node_modules/fast-xml-parser/src/xmlbuilder/orderedJs2Xml.js"(exports, module) {
+  "node_modules/fast-xml-parser/src/xmlbuilder/orderedJs2Xml.js"(exports, module) {
     var EOL = "\n";
     function toXml(jArray, options) {
       let indentation = "";
@@ -1847,9 +1847,9 @@ var require_orderedJs2Xml = __commonJS({
   }
 });
 
-// ../dm-mcp/node_modules/fast-xml-parser/src/xmlbuilder/json2xml.js
+// node_modules/fast-xml-parser/src/xmlbuilder/json2xml.js
 var require_json2xml = __commonJS({
-  "../dm-mcp/node_modules/fast-xml-parser/src/xmlbuilder/json2xml.js"(exports, module) {
+  "node_modules/fast-xml-parser/src/xmlbuilder/json2xml.js"(exports, module) {
     "use strict";
     var buildFromOrderedJs = require_orderedJs2Xml();
     var getIgnoreAttributesFn = require_ignoreAttributes();
@@ -2093,9 +2093,9 @@ var require_json2xml = __commonJS({
   }
 });
 
-// ../dm-mcp/node_modules/fast-xml-parser/src/fxp.js
+// node_modules/fast-xml-parser/src/fxp.js
 var require_fxp = __commonJS({
-  "../dm-mcp/node_modules/fast-xml-parser/src/fxp.js"(exports, module) {
+  "node_modules/fast-xml-parser/src/fxp.js"(exports, module) {
     "use strict";
     var validator = require_validator();
     var XMLParser2 = require_XMLParser();
@@ -2108,10 +2108,10 @@ var require_fxp = __commonJS({
   }
 });
 
-// ../dm-mcp/build/tableau.js
+// ../sigma-data-model-mcp/build/tableau.js
 var import_fast_xml_parser = __toESM(require_fxp(), 1);
 
-// ../dm-mcp/build/sigma-ids.js
+// ../sigma-data-model-mcp/build/sigma-ids.js
 var SIGMA_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 var _usedIds = /* @__PURE__ */ new Set();
 var _idCounter = 0;
@@ -2374,7 +2374,7 @@ function buildDerivedElements(elements) {
   return derived;
 }
 
-// ../dm-mcp/build/formulas.js
+// ../sigma-data-model-mcp/build/formulas.js
 function decodeXmlEntities(s) {
   if (!s || s.indexOf("&") === -1)
     return s;
@@ -2495,26 +2495,86 @@ function tableauInToSigma(formula) {
   }
   return f;
 }
-var _TEXT_FN_RE = /(?:Coalesce|Concat|Text|Left|Right|Mid|Substring|Substr|Upper|Lower|Trim|Replace|MonthName|WeekdayName|DateName|Proper)$/i;
-function _isTextOperand(op, isTextRef) {
-  let s = op.trim();
-  while (/^\(.*\)$/s.test(s)) {
-    let depth = 0, ok = true;
+// Coalesce is deliberately NOT in the text set: its type follows its args, and
+// the null-guard idiom Coalesce(x, 0) is numeric — counting it as text turned
+// ZN(a)+ZN(b) addition into silent string concat (live-verified field bug).
+// Instead _isTextOperand recurses into Coalesce's args, so string-guard chains
+// (Coalesce([first], "x") + …) still convert + → & while numeric guards keep +.
+var _TEXT_FN_RE = /(?:Concat|Text|Left|Right|Mid|Substring|Substr|Upper|Lower|Trim|Replace|MonthName|WeekdayName|DateName|Proper)$/i;
+function _splitTopLevelArgs(s) {
+  const args = [];
+  let depth = 0, quote = null, buf = "";
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (quote) {
+      buf += ch;
+      if (ch === quote && s[i - 1] !== "\\")
+        quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'")
+      quote = ch;
+    else if (ch === "(" || ch === "[")
+      depth++;
+    else if (ch === ")" || ch === "]") {
+      depth--;
+      // Depth going negative means s is not a single call's arg list (e.g. an
+      // unwrapped compound like `Coalesce(a, 0) = X`) — report no args.
+      if (depth < 0)
+        return [];
+    } else if (ch === "," && depth === 0) {
+      args.push(buf.trim());
+      buf = "";
+      continue;
+    }
+    buf += ch;
+  }
+  if (buf.trim())
+    args.push(buf.trim());
+  return args;
+}
+function stripOuterParens(s) {
+  s = s.trim();
+  while (s.length > 1 && s.startsWith("(") && s.endsWith(")")) {
+    let depth = 0, quote = "", inBracket = false, wraps = true;
     for (let i = 0; i < s.length; i++) {
-      if (s[i] === "(")
+      const c = s[i];
+      if (inBracket) {
+        if (c === "]")
+          inBracket = false;
+        continue;
+      }
+      if (quote) {
+        if (c === quote)
+          quote = "";
+        continue;
+      }
+      if (c === "[") {
+        inBracket = true;
+        continue;
+      }
+      if (c === "'" || c === '"') {
+        quote = c;
+        continue;
+      }
+      if (c === "(")
         depth++;
-      else if (s[i] === ")") {
+      else if (c === ")") {
         depth--;
         if (depth === 0 && i < s.length - 1) {
-          ok = false;
+          wraps = false;
           break;
         }
       }
     }
-    if (!ok || depth !== 0)
+    if (!wraps || depth !== 0)
       break;
     s = s.slice(1, -1).trim();
   }
+  return s;
+}
+function _isTextOperand(op, isTextRef) {
+  let s = stripOuterParens(op.trim());
   if (!s)
     return false;
   if (/^"(?:[^"\\]|\\.)*"$/.test(s) || /^'(?:[^'\\]|\\.)*'$/.test(s))
@@ -2525,6 +2585,10 @@ function _isTextOperand(op, isTextRef) {
   const fn = s.match(/^([A-Za-z_]+)\s*\(.*\)$/s);
   if (fn && _TEXT_FN_RE.test(fn[1]))
     return true;
+  if (fn && /^Coalesce$/i.test(fn[1])) {
+    const args = _splitTopLevelArgs(s.slice(s.indexOf("(") + 1, -1));
+    return args.some((a) => _isTextOperand(a, isTextRef));
+  }
   return false;
 }
 function tableauTextConcatToSigma(formula, isTextRef) {
@@ -2680,7 +2744,9 @@ var TABLEAU_FUNC_MAP = {
   // to DatePart("week", date) below (verified via docs + live query 2026-07-10).
   "QUARTER": "Quarter",
   "DATE": "Date",
-  "DATETIME": "Datetime",
+  // DATETIME(x) → Date(x): Sigma has no Datetime() (absent from the function
+  // index) — Date() is the documented cast to the datetime type.
+  "DATETIME": "Date",
   "MAKEDATE": "MakeDate",
   // regex (same arg order as Tableau)
   "REGEXP_EXTRACT": "RegexpExtract",
@@ -2693,9 +2759,13 @@ var TABLEAU_FUNC_MAP = {
   "PERCENTILE": "PercentileCont",
   "CORR": "Corr",
   // string split — both 1-indexed, negatives count from the right
-  "SPLIT": "SplitPart"
+  "SPLIT": "SplitPart",
+  // null-guard — native Sigma Zn (docs/zn). Name-map, not an arg regex: the old
+  // single-paren Coalesce($1, 0) rewrite emitted malformed Coalesce(Sum([x], 0))
+  // for the dominant field idiom ZN(AGG(...)).
+  "ZN": "Zn"
 };
-var SIGMA_CHART_ONLY_WINDOW_RE = /\b(?:Cumulative(?:Sum|Avg|Min|Max|Count)|Moving(?:Sum|Avg|Min|Max|Count|StdDev)|RankDense|RankPercentile|Rank|PercentOfTotal|RowNumber|Lag|Lead)\s*\(/;
+var SIGMA_CHART_ONLY_WINDOW_RE = /\b(?:Cumulative(?:Sum|Avg|Min|Max|Count)|Moving(?:Sum|Avg|Min|Max|Count|StdDev|Variance|Corr)|RankDense|RankPercentile|Rank|PercentOfTotal|RowNumber|Lag|Lead)\s*\(/;
 var TABLEAU_TABLE_CALC_TOKEN_RE = /\b(?:WINDOW_[A-Z]+|RUNNING_[A-Z]+|LOOKUP|PREVIOUS_VALUE|RANK(?:_[A-Z]+)?|INDEX|SIZE|TOTAL|FIRST|LAST)\s*\(/;
 var TABLEAU_TABLE_CALC_TOKEN_CI_RE = /\b(?:WINDOW_[A-Za-z]+|RUNNING_[A-Za-z]+|PREVIOUS_VALUE)\s*\(/i;
 var TABLEAU_LOD_LEFTOVER_RE = /\{\s*(?:FIXED|INCLUDE|EXCLUDE)\b/i;
@@ -2735,8 +2805,11 @@ function _tcSameRef(a, b) {
   const norm = (s) => s.replace(/^\[|\]$/g, "").replace(/[^A-Za-z0-9_]/g, "_").toUpperCase();
   return norm(a) === norm(b);
 }
+// WINDOW_CORR / WINDOW_VAR / WINDOW_COUNT are NOT listed — Sigma ships
+// MovingCorr/MovingVariance/MovingCount (function index, verified 2026-07-25),
+// mapped below. The population variants (VARP/COVARP/STDEVP) stay: no Moving*Pop.
 function tableauWindowUntranslatable(formula) {
-  const m = (formula || "").match(/\b(WINDOW_MEDIAN|WINDOW_PERCENTILE|WINDOW_CORR|WINDOW_COVARP?|WINDOW_VARP?|WINDOW_STDEVP|PREVIOUS_VALUE|SIZE)\s*\(/i);
+  const m = (formula || "").match(/\b(WINDOW_MEDIAN|WINDOW_PERCENTILE|WINDOW_COVARP?|WINDOW_VARP|WINDOW_STDEVP|PREVIOUS_VALUE|SIZE)\s*\(/i);
   return m ? m[1].toUpperCase() : null;
 }
 function tableauWindowToSigmaChart(formula) {
@@ -2762,21 +2835,39 @@ function tableauWindowToSigmaChart(formula) {
     const fn = "Cumulative" + m[1].charAt(0).toUpperCase() + m[1].slice(1).toLowerCase();
     return { formula: `${fn}(${_tcAgg(m[1], m[2])})`, kind: "cumulative" };
   }
-  m = f.match(new RegExp(`^WINDOW_(SUM|AVG|MIN|MAX|STDEV)\\s*\\(\\s*${_TC_AGG_EXPR}\\s*,\\s*(-?\\d+)\\s*,\\s*(-?\\d+)\\s*\\)$`, "i"));
+  m = f.match(new RegExp(`^WINDOW_(SUM|AVG|MIN|MAX|STDEV|COUNT|VAR)\\s*\\(\\s*${_TC_AGG_EXPR}\\s*,\\s*(-?\\d+)\\s*,\\s*(-?\\d+)\\s*\\)$`, "i"));
   if (m) {
     const back = parseInt(m[4], 10);
     const fwd = parseInt(m[5], 10);
     if (back <= 0 && fwd >= 0) {
+      // COUNT/VAR → MovingCount/MovingVariance: present in the Sigma function
+      // index (verified 2026-07-25); previously mis-listed as untranslatable.
       const movMap = {
         SUM: "MovingSum",
         AVG: "MovingAvg",
         MIN: "MovingMin",
         MAX: "MovingMax",
-        STDEV: "MovingStdDev"
+        STDEV: "MovingStdDev",
+        COUNT: "MovingCount",
+        VAR: "MovingVariance"
       };
       const fn = movMap[m[1].toUpperCase()];
       const args = fwd === 0 ? `${-back}` : `${-back}, ${fwd}`;
       return { formula: `${fn}(${_tcAgg(m[2], m[3])}, ${args})`, kind: "moving" };
+    }
+    return null;
+  }
+  // WINDOW_CORR(AGG([x]), AGG([y]), -n, m) → MovingCorr(Agg([x]), Agg([y]), n[, m])
+  // (two-expression form; offsets must span the current row, like the other
+  // Moving* mappings). Offset-less WINDOW_CORR is a whole-partition corr with
+  // no validated Sigma window shape — it falls to the loud not-converted flag.
+  m = f.match(new RegExp(`^WINDOW_CORR\\s*\\(\\s*${_TC_AGG_EXPR}\\s*,\\s*${_TC_AGG_EXPR}\\s*,\\s*(-?\\d+)\\s*,\\s*(-?\\d+)\\s*\\)$`, "i"));
+  if (m) {
+    const back = parseInt(m[5], 10);
+    const fwd = parseInt(m[6], 10);
+    if (back <= 0 && fwd >= 0) {
+      const args = fwd === 0 ? `${-back}` : `${-back}, ${fwd}`;
+      return { formula: `MovingCorr(${_tcAgg(m[1], m[2])}, ${_tcAgg(m[3], m[4])}, ${args})`, kind: "moving" };
     }
     return null;
   }
@@ -2809,13 +2900,13 @@ function tableauWindowToSigmaChart(formula) {
   }
   return null;
 }
-function tableauIfToSigma(f) {
+function tableauIfToSigma(f, lits) {
   return f.replace(/\bIF\b([\s\S]+?)\bEND\b/gi, (match) => {
     let inner = match.replace(/^\s*IF\s*/i, "").replace(/\s*END\s*$/i, "");
     const elseIdx = inner.search(/\bELSE\b(?!\s*IF\b)/i);
     let elseVal = "null";
     if (elseIdx >= 0) {
-      elseVal = tableauFormulaToSigma(inner.slice(elseIdx).replace(/^\s*ELSE\s*/i, "").trim());
+      elseVal = _tableauRecurse(inner.slice(elseIdx).replace(/^\s*ELSE\s*/i, "").trim(), lits);
       inner = inner.slice(0, elseIdx);
     }
     const parts = inner.split(/\bELSEIF\b/i);
@@ -2824,86 +2915,150 @@ function tableauIfToSigma(f) {
       const thenParts = parts[i].split(/\bTHEN\b/i);
       if (thenParts.length < 2)
         continue;
-      const cond = tableauFormulaToSigma(thenParts[0].trim());
-      const val = tableauFormulaToSigma(thenParts[1].trim());
+      const cond = _tableauRecurse(thenParts[0].trim(), lits);
+      const val = _tableauRecurse(thenParts[1].trim(), lits);
       result = "If(" + cond + ", " + val + ", " + result + ")";
     }
     return result;
   });
 }
-function tableauCaseToSigma(f) {
+function tableauCaseToSigma(f, lits) {
   return f.replace(/\bCASE\b([\s\S]+?)\bEND\b/gi, (match, body) => {
     const elseIdx = body.search(/\bELSE\b/i);
     let elseVal = "null";
     let whenBody = body;
     if (elseIdx >= 0) {
-      elseVal = tableauFormulaToSigma(body.slice(elseIdx).replace(/^\s*ELSE\s*/i, "").trim());
+      elseVal = _tableauRecurse(body.slice(elseIdx).replace(/^\s*ELSE\s*/i, "").trim(), lits);
       whenBody = body.slice(0, elseIdx);
     }
     const fieldMatch = whenBody.match(/^([\s\S]*?)\bWHEN\b/i);
-    const field = fieldMatch ? tableauFormulaToSigma(fieldMatch[1].trim()) : "[?]";
+    const field = fieldMatch ? _tableauRecurse(fieldMatch[1].trim(), lits) : "[?]";
     const pairs = whenBody.replace(/^[\s\S]*?\bWHEN\b/i, "").split(/\bWHEN\b/i).filter(Boolean);
     let result = elseVal;
     for (let i = pairs.length - 1; i >= 0; i--) {
       const thenParts = pairs[i].split(/\bTHEN\b/i);
       if (thenParts.length < 2)
         continue;
-      result = "If(" + field + " = " + tableauFormulaToSigma(thenParts[0].trim()) + ", " + tableauFormulaToSigma(thenParts[1].trim()) + ", " + result + ")";
+      result = "If(" + field + " = " + _tableauRecurse(thenParts[0].trim(), lits) + ", " + _tableauRecurse(thenParts[1].trim(), lits) + ", " + result + ")";
     }
     return result;
   });
 }
+var _TABLEAU_LIT_SQ_RE = /'(?:[^'\\]|\\.)*'/g;
+var _TABLEAU_LIT_DQ_RE = /"(?:[^"\\]|\\.)*"/g;
+var _TABLEAU_SENTINEL_SRC = "\0(\\d+)";
+var _TABLEAU_SENTINEL_RE = / (\d+)/g;
+function _maskTableauLiterals(s, lits = []) {
+  let out = "";
+  let i = 0;
+  while (i < s.length) {
+    if (s[i] === "[") {
+      const close = s.indexOf("]", i + 1);
+      if (close !== -1) {
+        out += s.slice(i, close + 1);
+        i = close + 1;
+        continue;
+      }
+    }
+    if (s[i] === "'" || s[i] === '"') {
+      const re = s[i] === "'" ? _TABLEAU_LIT_SQ_RE : _TABLEAU_LIT_DQ_RE;
+      re.lastIndex = i;
+      const m = re.exec(s);
+      if (m && m.index === i) {
+        out += `\0${lits.push(m[0]) - 1}`;
+        i += m[0].length;
+        continue;
+      }
+    }
+    out += s[i];
+    i++;
+  }
+  return { masked: out, lits };
+}
+function _restoreRawTableauLiterals(s, lits) {
+  return s.replace(_TABLEAU_SENTINEL_RE, (_m, i) => lits[Number(i)] ?? _m);
+}
+function _tabLitInner(lits, idxStr) {
+  const raw = lits[Number(idxStr)];
+  return raw === void 0 ? "" : raw.slice(1, -1).replace(/\\(.)/g, "$1");
+}
+function _tabEscapeForSigma(inner) {
+  return inner.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+function _unmaskTableauLiterals(s, lits) {
+  return s.replace(_TABLEAU_SENTINEL_RE, (_m, i) => `"${_tabEscapeForSigma(_tabLitInner(lits, i))}"`);
+}
+function _tableauRecurse(maskedSlice, lits) {
+  const raw = _restoreRawTableauLiterals(maskedSlice, lits);
+  const converted = tableauFormulaToSigma(raw);
+  const { masked } = _maskTableauLiterals(converted, lits);
+  return masked;
+}
 function tableauFormulaToSigma(formula, warnings) {
   if (!formula || !formula.trim())
     return "";
-  let f = stripLineComments(decodeXmlEntities(formula)).trim();
+  const raw0 = stripLineComments(decodeXmlEntities(formula)).trim();
+  const { masked, lits } = _maskTableauLiterals(raw0);
+  let f = masked;
   if (/^\s*\{/.test(f)) {
     if (warnings)
-      warnings.push("\u26A0 LOD expression not converted: " + f.slice(0, 60));
-    return "/* LOD: " + f.replace(/\/\*/g, "").replace(/\*\//g, "") + " */";
+      warnings.push("\u26A0 LOD expression not converted: " + raw0.slice(0, 60));
+    return "/* LOD: " + raw0.replace(/\/\*/g, "").replace(/\*\//g, "") + " */";
   }
   {
-    const winChart = tableauWindowToSigmaChart(f);
+    const winChart = tableauWindowToSigmaChart(raw0);
     if (winChart) {
       if (warnings)
         warnings.push(`\u2139 Table calc \u2192 ${winChart.formula} \u2014 CHART/grouped-element context ONLY: place in a grouped workbook element (group by the viz dimensions); window functions silently error in data-model calc columns and workbook master calc columns.` + (winChart.note ? " " + winChart.note : ""));
       return winChart.formula;
     }
-    const untrans = tableauWindowUntranslatable(f);
+    const untrans = tableauWindowUntranslatable(raw0);
     if (untrans) {
       if (warnings)
-        warnings.push(`\u26A0 Table calculation NOT converted \u2014 ${untrans}() has no Sigma equivalent. Untranslated fragment: ${f.slice(0, 120)}`);
-      return "/* table calc: " + f.replace(/\/\*/g, "").replace(/\*\//g, "") + " */";
+        warnings.push(`\u26A0 Table calculation NOT converted \u2014 ${untrans}() has no Sigma equivalent. Untranslated fragment: ${raw0.slice(0, 120)}`);
+      return "/* table calc: " + raw0.replace(/\/\*/g, "").replace(/\*\//g, "") + " */";
     }
-    if (/^(WINDOW_|RUNNING_|FIRST\(|LAST\(|INDEX\(|RANK\b|RANK_|LOOKUP\(|TOTAL\s*\()/i.test(f)) {
-      const gt = f.match(/^WINDOW_SUM\s*\(\s*(SUM|COUNT|AVG|MIN|MAX)\s*\(\s*(\[[^\]]+\])\s*\)\s*\)$/i);
+    if (/^(WINDOW_|RUNNING_|FIRST\(|LAST\(|INDEX\(|RANK\b|RANK_|LOOKUP\(|TOTAL\s*\()/i.test(raw0)) {
+      const gt = raw0.match(/^WINDOW_SUM\s*\(\s*(SUM|COUNT|AVG|MIN|MAX)\s*\(\s*(\[[^\]]+\])\s*\)\s*\)$/i);
       if (gt) {
         const aggMap = { SUM: "Sum", COUNT: "Count", AVG: "Avg", MIN: "Min", MAX: "Max" };
         return "GrandTotal(" + (aggMap[gt[1].toUpperCase()] || gt[1]) + "(" + gt[2] + "))";
       }
       if (warnings)
-        warnings.push(`\u26A0 Table calculation not converted. Untranslated fragment: ${f.slice(0, 120)}`);
-      return "/* table calc: " + f.replace(/\/\*/g, "").replace(/\*\//g, "") + " */";
+        warnings.push(`\u26A0 Table calculation not converted. Untranslated fragment: ${raw0.slice(0, 120)}`);
+      return "/* table calc: " + raw0.replace(/\/\*/g, "").replace(/\*\//g, "") + " */";
     }
   }
   if (/\bCOVARP?\s*\(/i.test(f)) {
     if (warnings)
-      warnings.push(`\u26A0 COVAR/COVARP has no Sigma equivalent \u2014 not converted. Fragment: ${f.slice(0, 120)}`);
-    return "/* no Sigma equivalent: " + f.replace(/\/\*/g, "").replace(/\*\//g, "") + " */";
+      warnings.push(`\u26A0 COVAR/COVARP has no Sigma equivalent \u2014 not converted. Fragment: ${raw0.slice(0, 120)}`);
+    return "/* no Sigma equivalent: " + raw0.replace(/\/\*/g, "").replace(/\*\//g, "") + " */";
   }
-  f = f.replace(/\bZN\s*\(([^)]+)\)/gi, "Coalesce($1, 0)");
+  // (ZN → Zn happens in the TABLEAU_FUNC_MAP pass — nesting-safe name rename.)
   f = f.replace(/\bIFNULL\s*\(/gi, "Coalesce(").replace(/\bIFERROR\s*\(/gi, "Coalesce(");
   f = f.replace(/\bISNULL\s*\(/gi, "IsNull(");
   f = f.replace(/\bCOUNT\s*\(([^)]+)\)/gi, (m, arg) => "CountIf(IsNotNull(" + arg.trim() + "))");
   f = f.replace(/\bCOUNTD\s*\(/gi, "CountDistinct(");
   f = f.replace(/\bATTR\s*\(([^)]+)\)/gi, "$1");
   f = tableauInToSigma(f);
-  f = tableauIfToSigma(f);
+  f = tableauIfToSigma(f, lits);
   f = f.replace(/\bIIF\s*\(/gi, "If(");
-  f = tableauCaseToSigma(f);
-  f = f.replace(/\bDATEPART\s*\(\s*'(\w+)'\s*,\s*([^)]+)\)/gi, (m, part, dateArg) => {
-    if (part.toLowerCase() === "week")
+  f = tableauCaseToSigma(f, lits);
+  f = f.replace(new RegExp(`\\bDATEPART\\s*\\(\\s*${_TABLEAU_SENTINEL_SRC}\\s*,\\s*([^)]+)\\)`, "gi"), (m, litIdx, dateArg) => {
+    const part = _tabLitInner(lits, litIdx);
+    if (!/^\w+$/.test(part))
+      return m;
+    const p = part.toLowerCase();
+    if (p === "week")
       return 'DatePart("week", ' + dateArg.trim() + ")";
+    // 'weekday'/'dayofweek' → Weekday(date) — Sigma has no DayOfWeek() (absent
+    // from the function index). Sigma Weekday anchors Sunday=1..7; Tableau
+    // numbering follows the datasource start-of-week — flag to verify.
+    if (p === "weekday" || p === "dayofweek") {
+      if (warnings)
+        warnings.push(`⚠ DATEPART('${p}') → Weekday() — verify numbering: Sigma anchors Sunday=1..7; Tableau follows the datasource start-of-week.`);
+      return "Weekday(" + dateArg.trim() + ")";
+    }
     const partMap = {
       year: "Year",
       month: "Month",
@@ -2911,14 +3066,15 @@ function tableauFormulaToSigma(formula, warnings) {
       hour: "Hour",
       minute: "Minute",
       second: "Second",
-      quarter: "Quarter",
-      dayofweek: "DayOfWeek",
-      weekday: "DayOfWeek"
+      quarter: "Quarter"
     };
-    const fn = partMap[part.toLowerCase()];
+    const fn = partMap[p];
     return fn ? fn + "(" + dateArg.trim() + ")" : m;
   });
-  f = f.replace(/\bDATENAME\s*\(\s*'(\w+)'\s*,\s*([^,)]+)(?:,[^)]*)?\)/gi, (m, part, dateArg) => {
+  f = f.replace(new RegExp(`\\bDATENAME\\s*\\(\\s*${_TABLEAU_SENTINEL_SRC}\\s*,\\s*([^,)]+)(?:,[^)]*)?\\)`, "gi"), (m, litIdx, dateArg) => {
+    const part = _tabLitInner(lits, litIdx);
+    if (!/^\w+$/.test(part))
+      return m;
     const arg = dateArg.trim();
     switch (part.toLowerCase()) {
       case "month":
@@ -2933,7 +3089,8 @@ function tableauFormulaToSigma(formula, warnings) {
       case "day":
         return "Text(Day(" + arg + "))";
       case "week":
-        return "Text(Week(" + arg + "))";
+        // via DatePart("week", …) — Sigma has no Week() (see the WEEK note above)
+        return 'Text(DatePart("week", ' + arg + "))";
       case "hour":
         return "Text(Hour(" + arg + "))";
       case "minute":
@@ -2944,28 +3101,61 @@ function tableauFormulaToSigma(formula, warnings) {
         return m;
     }
   });
-  f = f.replace(/\bDATETRUNC\s*\(\s*'([^']+)'\s*,/gi, 'DateTrunc("$1",');
-  f = f.replace(/,\s*["'](?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)["']\s*\)/gi, ")");
-  f = f.replace(/\bDATEADD\s*\(\s*'([^']+)'\s*,/gi, 'DateAdd("$1",');
-  f = f.replace(/\bDATEDIFF\s*\(\s*'([^']+)'\s*,/gi, 'DateDiff("$1",');
+  f = f.replace(new RegExp(`\\bDATETRUNC\\s*\\(\\s*${_TABLEAU_SENTINEL_SRC}\\s*,`, "gi"), (_m, litIdx) => `DateTrunc("${_tabEscapeForSigma(_tabLitInner(lits, litIdx))}",`);
+  // Start-of-week literal — DATETRUNC('week', d, 'monday') 3rd arg / 4-arg
+  // DATEDIFF('week', a, b, 'monday'): Sigma DateTrunc/DateDiff have no
+  // start-of-week slot, so the literal is dropped — but never silently (week
+  // boundaries then follow the warehouse week start; silent drift shipped in
+  // the field). Scoped to those two callers via a balanced-paren walk back to
+  // the enclosing call, so e.g. Contains([Day], 'monday') keeps its argument.
+  // Local patch, ported onto d839036's sentinel-masked text (was raw-quote
+  // regex text before the masking rewrite): the walk reads `whole` (masked
+  // `f`) which never contains an unescaped paren inside a sentinel, so the
+  // balance count is unaffected by masking.
+  f = f.replace(new RegExp(`,\\s*${_TABLEAU_SENTINEL_SRC}\\s*\\)`, "gi"), (m, litIdx, off, whole) => {
+    const val = _tabLitInner(lits, litIdx);
+    if (!/^(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)$/i.test(val))
+      return m;
+    let fn = "", depth = 0;
+    for (let i = off; i >= 0; i--) {
+      const c = whole[i];
+      if (c === ")")
+        depth++;
+      else if (c === "(") {
+        if (depth === 0) {
+          const h = whole.slice(0, i).match(/([A-Za-z_][A-Za-z0-9_]*)\s*$/);
+          fn = h ? h[1] : "";
+          break;
+        }
+        depth--;
+      }
+    }
+    if (!/^(?:datetrunc|datediff)$/i.test(fn))
+      return m;
+    if (warnings)
+      warnings.push(`⚠ ${fn.toUpperCase()} start-of-week '${val}' dropped — Sigma ${/^datetrunc$/i.test(fn) ? "DateTrunc" : "DateDiff"} has no start-of-week argument; week boundaries follow the warehouse week start. Verify week-grain results.`);
+    return ")";
+  });
+  f = f.replace(new RegExp(`\\bDATEADD\\s*\\(\\s*${_TABLEAU_SENTINEL_SRC}\\s*,`, "gi"), (_m, litIdx) => `DateAdd("${_tabEscapeForSigma(_tabLitInner(lits, litIdx))}",`);
+  f = f.replace(new RegExp(`\\bDATEDIFF\\s*\\(\\s*${_TABLEAU_SENTINEL_SRC}\\s*,`, "gi"), (_m, litIdx) => `DateDiff("${_tabEscapeForSigma(_tabLitInner(lits, litIdx))}",`);
   f = f.replace(/\bWEEK\s*\(\s*([^()]*(?:\([^()]*\)[^()]*)*)\)/gi, 'DatePart("week", $1)');
   f = f.replace(/\bSTDEVP\s*\(([^()]+(?:\([^()]*\)[^()]*)*)\)/gi, "Sqrt(VariancePop($1))");
-  f = f.replace(/\bDATEPARSE\s*\(\s*('[^']*'|"[^"]*")\s*,\s*([^()]+(?:\([^()]*\)[^()]*)*)\)/gi, (_m, fmt, str) => {
-    const sf = fmt.slice(1, -1).replace(/yyyy/g, "%Y").replace(/yy/g, "%y").replace(/MMMM/g, "%B").replace(/MMM/g, "%b").replace(/MM/g, "%m").replace(/dd/g, "%d").replace(/HH/g, "%H").replace(/hh/g, "%I").replace(/mm/g, "%M").replace(/ss/g, "%S");
+  f = f.replace(new RegExp(`\\bDATEPARSE\\s*\\(\\s*${_TABLEAU_SENTINEL_SRC}\\s*,\\s*([^()]+(?:\\([^()]*\\)[^()]*)*)\\)`, "gi"), (_m, litIdx, str) => {
+    const fmtRaw = _tabLitInner(lits, litIdx);
+    const sf = fmtRaw.replace(/yyyy/g, "%Y").replace(/yy/g, "%y").replace(/MMMM/g, "%B").replace(/MMM/g, "%b").replace(/MM/g, "%m").replace(/dd/g, "%d").replace(/HH/g, "%H").replace(/hh/g, "%I").replace(/mm/g, "%M").replace(/ss/g, "%S");
     if (warnings)
       warnings.push("\u26A0 DATEPARSE format translated to strftime tokens \u2014 verify the pattern resolves on your warehouse.");
     return `DateParse(${str.trim()}, "${sf}")`;
   });
   f = f.replace(/\bUSERNAME\s*\(\s*\)/gi, "CurrentUserEmail()");
-  f = f.replace(/\bISMEMBEROF\s*\(\s*['"]([^'"]+)['"]\s*\)/gi, 'CurrentUserInTeam("$1")');
-  f = f.replace(/\bUSERATTRIBUTE\s*\(\s*['"]([^'"]+)['"]\s*\)/gi, 'CurrentUserAttributeText("$1")');
-  f = f.replace(/\bISUSERNAME\s*\(\s*['"]([^'"]+)['"]\s*\)/gi, '(CurrentUserEmail() = "$1")');
+  f = f.replace(new RegExp(`\\bISMEMBEROF\\s*\\(\\s*${_TABLEAU_SENTINEL_SRC}\\s*\\)`, "gi"), (_m, litIdx) => `CurrentUserInTeam("${_tabEscapeForSigma(_tabLitInner(lits, litIdx))}")`);
+  f = f.replace(new RegExp(`\\bUSERATTRIBUTE\\s*\\(\\s*${_TABLEAU_SENTINEL_SRC}\\s*\\)`, "gi"), (_m, litIdx) => `CurrentUserAttributeText("${_tabEscapeForSigma(_tabLitInner(lits, litIdx))}")`);
+  f = f.replace(new RegExp(`\\bISUSERNAME\\s*\\(\\s*${_TABLEAU_SENTINEL_SRC}\\s*\\)`, "gi"), (_m, litIdx) => `(CurrentUserEmail() = "${_tabEscapeForSigma(_tabLitInner(lits, litIdx))}")`);
   f = f.replace(/\bSQUARE\s*\(\s*([^()]*(?:\([^()]*\)[^()]*)*)\)/gi, "Power($1, 2)");
   f = f.replace(/\bSPACE\s*\(\s*([^()]*(?:\([^()]*\)[^()]*)*)\)/gi, 'Repeat(" ", $1)');
   for (const [tab, sig] of Object.entries(TABLEAU_FUNC_MAP)) {
     f = f.replace(new RegExp("\\b" + tab + "\\s*\\(", "gi"), sig + "(");
   }
-  f = f.replace(/'([^']*)'/g, '"$1"');
   f = f.replace(/\bNOT\b/g, "Not").replace(/\bAND\b/g, "and").replace(/\bOR\b/g, "or");
   f = f.replace(/\bTRUE\b/gi, "True").replace(/\bFALSE\b/gi, "False").replace(/\bNULL\b/gi, "null");
   f = f.replace(/\[([A-Z][A-Z0-9_]{2,})\]/g, (match, colName) => {
@@ -2973,16 +3163,17 @@ function tableauFormulaToSigma(formula, warnings) {
       return match;
     return "[" + sigmaDisplayName(colName) + "]";
   });
+  f = _unmaskTableauLiterals(f, lits);
   f = tableauTextConcatToSigma(f);
   if (warnings && TABLEAU_TABLE_CALC_TOKEN_RE.test(f)) {
     warnings.push(`\u26A0 Table-calc function embedded in a larger expression \u2014 NOT translated in place. Untranslated fragment: ${f.slice(0, 120)}`);
   }
   if (warnings) {
-    const masked = f.replace(/"[^"]*"/g, '""').replace(/\[[^\]]*\]/g, "[]");
+    const masked2 = f.replace(/"[^"]*"/g, '""').replace(/\[[^\]]*\]/g, "[]");
     const unmapped = /* @__PURE__ */ new Set();
     const scan = /\b([A-Z][A-Z0-9_]+)\s*\(/g;
     let mm;
-    while ((mm = scan.exec(masked)) !== null) {
+    while ((mm = scan.exec(masked2)) !== null) {
       const fn = mm[1];
       if (TABLEAU_TABLE_CALC_TOKEN_RE.test(fn + "("))
         continue;
@@ -3001,7 +3192,7 @@ function tableauFormulaIsRls(formula) {
   return /\b(USERNAME|FULLNAME|USERDOMAIN|ISMEMBEROF|ISUSERNAME|USERATTRIBUTE)\s*\(/i.test(formula || "");
 }
 
-// ../dm-mcp/build/tableau.js
+// ../sigma-data-model-mcp/build/tableau.js
 function paramControlId(rawName) {
   return clampId("ctl-" + rawName.replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-|-$/g, "").toLowerCase());
 }
@@ -4205,6 +4396,23 @@ function buildMultiDatasourceModel(xmlContent, options, datasources) {
     }
   };
 }
+function firstTopLevelSelectIndex(stmt) {
+  let depth = 0;
+  for (let i = 0; i < stmt.length; i++) {
+    const ch = stmt[i];
+    if (ch === "(") {
+      depth++;
+      continue;
+    }
+    if (ch === ")") {
+      depth--;
+      continue;
+    }
+    if (depth === 0 && /^SELECT\b/i.test(stmt.slice(i)))
+      return i;
+  }
+  return -1;
+}
 function convertTableauToSigma(xmlContent, options = {}) {
   if (!options.__multiDsChild) {
     resetIds(`ds${options.datasourceIndex ?? 0}\0${xmlContent}`);
@@ -4331,6 +4539,7 @@ function convertTableauToSigma(xmlContent, options = {}) {
     return false;
   }
   const elements = [];
+  let relationshipCoverage = null;
   let joinTableIndex = null;
   const connId = connectionId || "<CONNECTION_ID>";
   const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -4691,6 +4900,7 @@ function convertTableauToSigma(xmlContent, options = {}) {
         }
         const objGraph = nsChild(ds.ds, "object-graph");
         const relsList = asArray(objGraph?.relationships?.relationship || []);
+        const relCoverage = { serialized: relsList.length, wired: 0, entries: [] };
         const getCleanSeg = (name) => name.replace(/[\[\]]/g, "").split(".").pop()?.replace(/_[0-9A-Fa-f]{16,}$/, "").toUpperCase() || "";
         const findEntry = (objId) => {
           const exactKey = Object.keys(elementMap).find((k) => elementMap[k].objId === objId);
@@ -4710,15 +4920,77 @@ function convertTableauToSigma(xmlContent, options = {}) {
             return uuidInFn;
           return opAttr.replace(/^\[|\]$/g, "").replace(/\s*\(.*\)$/, "").trim().toUpperCase();
         };
+        // --- object-graph relationship key derivation ladder (PR2a) ---
+        // Tableau's 2020.2+ logical model AUTO-MATCHES relationships by column name at query
+        // time and serializes NO join key at all \u2014 that is the modern-star-schema common case,
+        // not an edge case. A purely-computed key (IF/DATETRUNC expression) is the other case
+        // Sigma cannot join on directly. Both fall through to this conservative name-match
+        // inference before being recorded as unwired, per docs/superpowers/plans/2026-07-30-pr2a-spike.md:
+        // never fabricate a column via ensureCol for a guessed name (only call it once existence
+        // is confirmed on both sides via colIdMap), and never combine multiple name matches into
+        // a composite key \u2014 an incidental second match (e.g. both sides carrying CREATED_AT)
+        // would over-constrain the join and silently drop rows. A single key-shaped candidate is
+        // wired; anything else (none, or more than one) is left for manual authoring.
+        const candidateNames = (entry) => (entry.element.columns || []).map((c) => c.name || (typeof c.formula === "string" && (c.formula.match(/\/([^\]]+)\]$/) || [])[1])).filter(Boolean).map((nm) => String(nm).replace(/\s+/g, "_").toUpperCase());
+        const hasCol = (entry, key) => Boolean(entry.colIdMap[key] || entry.colIdMap[key.replace(/-/g, "_")]);
+        const entityNameOf = (cleanName) => String(cleanName || "").toUpperCase().replace(/^(DIM|FACT|BRIDGE)_/, "");
+        const escapeRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        // Precise, NOT `includes`: a loose substring match on the entity name wires
+        // non-key denormalized columns (a fact's CUSTOMER_NAME shares "CUSTOMER" with
+        // DIM_CUSTOMER and would otherwise become the sole "candidate", getting wired
+        // on a name column a dim is usually unique on — gate 16's probe cannot catch
+        // that) AND discards genuine keys (ORDER_DATE contains "DATE", so a DIM_DATE
+        // pair sharing both DATE_KEY and ORDER_DATE would see 2 "key-shaped" candidates
+        // and refuse to wire the obvious DATE_KEY). A name is key-shaped only if it ends
+        // in an explicit key suffix (entity-agnostic — two unrelated *_ID columns
+        // shared between two tables correctly yields 2 candidates and no guess), IS the
+        // target entity name exactly, or is the target entity name plus a key suffix.
+        const isKeyShapedName = (name, entityName) => /_(ID|KEY|SK|CODE)$/.test(name) || !!entityName && (name === entityName || new RegExp(`^${escapeRe(entityName)}_(ID|KEY|SK|CODE)$`).test(name));
+        const inferRelationshipKeyByName = (firstEntry, secondEntry) => {
+          const leftNames = candidateNames(firstEntry);
+          const rightSet = new Set(candidateNames(secondEntry));
+          const seen = /* @__PURE__ */ new Set();
+          const candidates = [];
+          for (const n of leftNames) {
+            if (seen.has(n))
+              continue;
+            seen.add(n);
+            if (rightSet.has(n) && hasCol(firstEntry, n) && hasCol(secondEntry, n))
+              candidates.push(n);
+          }
+          const entityName = entityNameOf(secondEntry.cleanName);
+          const keyShaped = candidates.filter((n) => isKeyShapedName(n, entityName));
+          if (keyShaped.length === 1)
+            return { ok: true, name: keyShaped[0], candidates, keyShaped };
+          return { ok: false, candidates, keyShaped };
+        };
+        const unwiredReason = (inferred) => inferred.candidates.length === 0 ? "no existing column name matches on both sides" : inferred.keyShaped.length === 0 ? "candidate name(s) matched but none look key-shaped (a _ID/_KEY/_SK/_CODE suffix, the exact target entity name, or the entity name plus that suffix)" : `ambiguous: ${inferred.keyShaped.length} key-shaped candidates \u2014 refusing to guess a composite key`;
         for (const rel of relsList) {
           const firstEp = rel["first-end-point"];
           const secondEp = rel["second-end-point"];
-          if (!firstEp || !secondEp)
+          const firstObjId = firstEp ? attr(firstEp, "object-id") : "";
+          const secondObjId = secondEp ? attr(secondEp, "object-id") : "";
+          if (!firstEp || !secondEp) {
+            relCoverage.entries.push({
+              left: firstObjId || "(missing first-end-point)",
+              right: secondObjId || "(missing second-end-point)",
+              derivedVia: "unwired",
+              reason: "relationship XML is missing a first-end-point or second-end-point"
+            });
             continue;
-          const firstEntry = findEntry(attr(firstEp, "object-id"));
-          const secondEntry = findEntry(attr(secondEp, "object-id"));
-          if (!firstEntry || !secondEntry || firstEntry === secondEntry)
+          }
+          const firstEntry = findEntry(firstObjId);
+          const secondEntry = findEntry(secondObjId);
+          if (!firstEntry || !secondEntry || firstEntry === secondEntry) {
+            const reason = !firstEntry || !secondEntry ? `endpoint object-id unresolved to a known element (first=${firstObjId || "?"}, second=${secondObjId || "?"})` : "both endpoints resolve to the same element";
+            relCoverage.entries.push({
+              left: firstEntry ? firstEntry.cleanName : firstObjId || "(unresolved)",
+              right: secondEntry ? secondEntry.cleanName : secondObjId || "(unresolved)",
+              derivedVia: "unwired",
+              reason
+            });
             continue;
+          }
           const ensureCol = (entry, key) => {
             let id = entry.colIdMap[key] || entry.colIdMap[key.replace(/-/g, "_")];
             if (!id) {
@@ -4739,6 +5011,39 @@ function convertTableauToSigma(xmlContent, options = {}) {
             }
             return id;
           };
+          const wireInferred = (name, { droppedConditions = 0 } = {}) => {
+            const inferredKeys = [{
+              sourceColumnId: ensureCol(firstEntry, name),
+              targetColumnId: ensureCol(secondEntry, name)
+            }];
+            if (!firstEntry.element.relationships)
+              firstEntry.element.relationships = [];
+            firstEntry.element.relationships.push({
+              id: sigmaShortId(),
+              targetElementId: secondEntry.element.id,
+              keys: inferredKeys,
+              name: secondEntry.cleanName,
+              derivedVia: "name-inference",
+              ...droppedConditions > 0 ? { partial: true, droppedConditions } : {}
+            });
+            relCoverage.wired += 1;
+            relCoverage.entries.push({
+              left: firstEntry.cleanName,
+              right: secondEntry.cleanName,
+              derivedVia: "name-inference",
+              keyCount: inferredKeys.length,
+              ...droppedConditions > 0 ? { partial: true, droppedConditions } : {}
+            });
+          };
+          const recordUnwired = (inferred) => {
+            relCoverage.entries.push({
+              left: firstEntry.cleanName,
+              right: secondEntry.cleanName,
+              derivedVia: "unwired",
+              reason: unwiredReason(inferred),
+              candidates: inferred.candidates
+            });
+          };
           const collectEqs = (expr, acc) => {
             const op = nsAttr(expr, "op");
             const kids = asArray(expr.expression || []);
@@ -4753,7 +5058,14 @@ function convertTableauToSigma(xmlContent, options = {}) {
           for (const oe of asArray(rel.expression || []))
             collectEqs(oe, eqExprs);
           if (eqExprs.length === 0) {
+            const inferred = inferRelationshipKeyByName(firstEntry, secondEntry);
+            if (inferred.ok) {
+              wireInferred(inferred.name);
+              warnings.push(`\u2139 Relationship ${firstEntry.cleanName} \u2192 ${secondEntry.cleanName}: no serialized join key (Tableau auto-matches these at query time) \u2014 inferred "${inferred.name}" from a column name that exists on both sides. VERIFY this is the correct key before relying on it.`);
+              continue;
+            }
             warnings.push(`\u26A0 Relationship ${firstEntry.cleanName} \u2192 ${secondEntry.cleanName} carries no serialized join key \u2014 Tableau auto-matches these at query time; Sigma needs an explicit key. NOT wired: pick a join key and wire manually (LEFT from fact\u2192dim), and verify the dimension is unique on the key to avoid measure fan-out.`);
+            recordUnwired(inferred);
             continue;
           }
           const isPhysical = (op) => /^\[[^\]]+\]$/.test(op.trim());
@@ -4778,7 +5090,17 @@ function convertTableauToSigma(xmlContent, options = {}) {
             });
           }
           if (keys.length === 0) {
+            const inferred = inferRelationshipKeyByName(firstEntry, secondEntry);
+            if (inferred.ok) {
+              wireInferred(inferred.name, { droppedConditions: skippedComputed });
+              warnings.push(`\u2139 Relationship ${firstEntry.cleanName} \u2192 ${secondEntry.cleanName}: joins only on computed key(s) with no physical column to wire \u2014 inferred "${inferred.name}" from a column name that exists on both sides instead. VERIFY this is the correct key before relying on it.`);
+              if (skippedComputed > 0) {
+                warnings.push(`\u26A0 Relationship ${firstEntry.cleanName} \u2192 ${secondEntry.cleanName}: name-inference wired "${inferred.name}", but ${skippedComputed} computed condition(s) Tableau also required (e.g. IF/DATETRUNC expression) could not be carried into the join \u2014 this join is WIDER than Tableau's (it will match rows Tableau's computed condition would have excluded). Verify join grain in Sigma.`);
+              }
+              continue;
+            }
             warnings.push(`\u26A0 Relationship ${firstEntry.cleanName} \u2192 ${secondEntry.cleanName} joins only on computed key(s) (e.g. IF/DATETRUNC expression); Sigma joins on physical columns only \u2014 NOT wired. Needs a computed join column or manual authoring.`);
+            recordUnwired(inferred);
             continue;
           }
           if (skippedComputed > 0) {
@@ -4786,14 +5108,26 @@ function convertTableauToSigma(xmlContent, options = {}) {
           }
           if (!firstEntry.element.relationships)
             firstEntry.element.relationships = [];
+          const derivedVia = "serialized";
           firstEntry.element.relationships.push({
             id: sigmaShortId(),
             targetElementId: secondEntry.element.id,
             keys,
-            name: secondEntry.cleanName
+            name: secondEntry.cleanName,
+            derivedVia,
+            ...skippedComputed > 0 ? { partial: true, droppedConditions: skippedComputed } : {}
+          });
+          relCoverage.wired += 1;
+          relCoverage.entries.push({
+            left: firstEntry.cleanName,
+            right: secondEntry.cleanName,
+            derivedVia,
+            keyCount: keys.length,
+            ...skippedComputed > 0 ? { partial: true, droppedConditions: skippedComputed } : {}
           });
           warnings.push(`\u2139 Relationship ${firstEntry.cleanName} \u2192 ${secondEntry.cleanName} wired on ${keys.length} physical key(s).`);
         }
+        relationshipCoverage = relCoverage;
         const joinableEls = elements.filter((e) => e.source?.kind === "warehouse-table" || e.source?.kind === "sql");
         const wiredRelCount = elements.reduce((n, e) => n + (e.relationships?.length || 0), 0);
         if (joinableEls.length > 1 && wiredRelCount === 0) {
@@ -4912,25 +5246,10 @@ ${statement}
         const stmt = fe.source.statement;
         const upperStmt = stmt.trimStart();
         if (/^WITH\s/i.test(upperStmt)) {
-          let depth = 0;
-          let lastTopSelectIdx = -1;
-          for (let i = 0; i < stmt.length; i++) {
-            const ch = stmt[i];
-            if (ch === "(") {
-              depth++;
-              continue;
-            }
-            if (ch === ")") {
-              depth--;
-              continue;
-            }
-            if (depth === 0 && /^SELECT\b/i.test(stmt.slice(i))) {
-              lastTopSelectIdx = i;
-            }
-          }
-          if (lastTopSelectIdx > 0) {
-            const ctePart = stmt.slice(0, lastTopSelectIdx).replace(/^\s*WITH\s+/i, "").replace(/,?\s*$/, "");
-            const selectPart = stmt.slice(lastTopSelectIdx);
+          const firstTopSelectIdx = firstTopLevelSelectIndex(stmt);
+          if (firstTopSelectIdx > 0) {
+            const ctePart = stmt.slice(0, firstTopSelectIdx).replace(/^\s*WITH\s+/i, "").replace(/,?\s*$/, "");
+            const selectPart = stmt.slice(firstTopSelectIdx);
             return {
               ctePrefix: `${ctePart},
 __lod_base AS (
@@ -6676,6 +6995,7 @@ ${suggestion}
     ...security.length ? { security } : {},
     ...workbookPatterns.length ? { workbookPatterns } : {},
     ...parameters.length ? { parameters } : {},
+    ...relationshipCoverage ? { relationshipCoverage } : {},
     stats: {
       datasources: datasources.length,
       elements: elements.length,
@@ -6690,5 +7010,6 @@ ${suggestion}
 }
 export {
   collapseCustomSqlBlend,
-  convertTableauToSigma
+  convertTableauToSigma,
+  firstTopLevelSelectIndex
 };

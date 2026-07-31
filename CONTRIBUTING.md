@@ -83,22 +83,84 @@ Enable the repo's git hooks once per clone:
 git config core.hooksPath .githooks
 ```
 
-`pre-commit` and `pre-push` then run the same creds-free governance checks CI
-runs (`tools/check-shared.rb` + `tools/lint-skills.rb`, ~1s) so shared-lib drift
-or a missing gate is caught locally. Bypass with `--no-verify` if you must — CI
-still enforces.
+`pre-commit` and `pre-push` then run the same creds-free governance gate CI runs
+(`.githooks/run-governance-checks.sh`: shared-lib drift, skill conformance, the
+full hygiene sweep, the tracked-litter lint, the ESM-import and .twb-encoding
+lints, agent-variant sync, and the bootstrap/doctor lockstep guard — ~10s total,
+the sweep is most of it) so violations are caught locally instead of after a
+push. The same setting enables the `commit-msg` hook, which greps each commit
+message against the hygiene pattern sets (next section). Bypass with
+`--no-verify` if you must — CI runs the same gate server-side, including a
+push-range commit-message scan, so a bypass only defers the failure.
 
 ## Hygiene sweep (no test-org identifiers, ever)
 
-Run `bash tools/hygiene-sweep.sh` before every commit, alongside
-`tools/check-shared.rb` (the governance hook runs both). It greps every tracked
-file **and the staged diff** against `tools/hygiene-patterns.txt` and fails
-with named hits if any test-org or customer identifier (connection, workbook,
-customer, datasource, field/value literal, or object id) appears anywhere.
-When new test infrastructure or a customer transcript enters the vocabulary,
-add its stable identifiers to the pattern file first and write code/docs
-against neutral replacements ("the field workbook", `<connection-id>`,
-"Region A & B"-style literals).
+Run `bash tools/hygiene-sweep.sh` before every commit (the governance hook runs
+it). Five passes: every **tracked** file; the **staged diff** — including the
+staged blobs of files whose gitattributes unset `diff`, which `git diff` would
+otherwise hide as "Binary files differ"; every **untracked**, not-ignored file;
+an **encoding-aware** pass over fixture binaries and anything binary-classified
+(each candidate scanned as UTF-16LE/BE + UTF-32LE/BE + a strings view); and
+file/directory **paths** — a fixture named after a real workbook has perfectly
+neutral content, so names are scanned too. Patterns come from
+`tools/hygiene-patterns.txt` **plus** the gitignored
+`tools/hygiene-patterns.local.txt` (customer-derived guards; CI injects the
+same set from the `HYGIENE_PRIVATE_PATTERNS` secret — keep secret and local
+file in sync when you add one). Without the local file the sweep **WARNs**: a
+clean exit with committed patterns only proves nothing about customer
+identifiers. It fails with named hits if any test-org or customer identifier
+(connection, workbook, customer, datasource, field/value literal, or object id)
+appears anywhere. When new test infrastructure or a customer transcript enters
+the vocabulary, add its stable identifiers to the right pattern file first and
+write code/docs against neutral replacements ("the field workbook",
+`<connection-id>`, "Region A & B"-style literals).
+
+Commit messages and PR bodies are inside the hygiene boundary too — the file
+sweep never sees them. The `.githooks/commit-msg` hook greps each proposed
+message against the same pattern sets the sweep loads (committed file + the
+gitignored `tools/hygiene-patterns.local.txt` when present), scanning
+everything above the scissors line — **including `#`-prefixed lines**, which
+`git commit -m`/`-F` (cleanup=whitespace) keep in the landed message. The
+hygiene workflow applies the same check server-side: its "Commit-message
+hygiene" step feeds each push/PR-range commit's `%B` to the same hook, so
+`--no-verify` and unconfigured-hook bypasses are caught at the gate. Failures
+report pattern-file **line numbers only** — matched text is never echoed, so a
+hit on a private guard discloses nothing in a shared log.
+
+**History decision (recorded 2026-07-18; re-measured 2026-07-22 — counts only
+per the rule above):** history predating these guards carries identifier
+residue. Mechanical basis: `git log --format=%B` over every commit reachable
+from any pushed ref, grepped case-insensitively against both pattern sets (50
+committed + 62 local at measurement). Messages: **25 commits** match a private
+customer guard (22 reachable from `origin/main`, 3 only on two stale side
+branches); **124 commits** match any active pattern (89 on `origin/main`) —
+the committed-pattern bulk is test-infrastructure vocabulary from before the
+sweep existed. An earlier revision of this note said "six commits"; that
+undercounted (smaller pattern set, subjects only) and is superseded by the
+basis above. File contents: pre-neutralization revisions of later-neutralized
+files (a corpus case and a handoff doc) also remain reachable from
+`origin/main` history. Decision for messages and file history alike:
+**accept the residue — do not rewrite history.** A rewrite would orphan every
+clone, open PR, and pinned SHA to scrub name-level (non-credential) leaks,
+while the sweep, hooks, and CI range scan prevent recurrence. Cheap exposure
+reduction worth doing: delete stale pushed side branches whose hit-carrying
+commits never reached `main`. Revisit only if the repo is ever re-homed — a
+fresh-history mirror is the cheaper fix at that point. This note records
+counts only, never the identifiers.
+
+## Run state stays local
+
+Run registries and local run state never enter the repo. That covers the
+cross-run registries (`probe-artifacts.jsonl`, `posted-workbooks.jsonl`,
+`offramps.jsonl`), `workdir-*/` state a field run leaves inside a skill tree,
+and everything under `~/.tableau-to-sigma/` (customer learned rules appended by
+scout-validate-and-persist) — all of it carries run/environment fingerprints or
+customer-derived rule text. The skill-root `.gitignore` ignores these shapes,
+and `tools/lint-tree-litter.sh` (run by the governance hook) fails if one is
+ever tracked. When a run artifact holds something worth keeping, neutralize it
+into a `corpus/` fixture or a committed starter rule (neutral names and
+placeholder literals, per the hygiene sweep section) — the raw artifact itself
+is never committed.
 
 ## Regression: the corpus
 
@@ -125,3 +187,28 @@ Sessions can't talk live, so coordinate through shared state:
 
 `ruby tools/check-shared.rb && ruby tools/lint-skills.rb && bash tools/hygiene-sweep.sh && ./corpus/run-corpus.sh --check`
 — all green. The PR template (`.github/PULL_REQUEST_TEMPLATE.md`) lists the rest.
+
+## Versioning & releases
+
+Each plugin declares its release version in
+`plugins/<name>/.claude-plugin/plugin.json` (`"version"`). Claude Code's
+`claude plugin update` compares that string, so **if it doesn't move, consumers
+never see your fix** — the update reports "already at the latest version" and
+ships nothing (issue #486).
+
+**Rule:** any change under `plugins/<name>/**` must bump that plugin's
+`plugin.json` `version` — a strict [semver](https://semver.org/) increase
+(patch for fixes, minor for features, major for breaking changes). The
+`plugin-version-bump` CI gate enforces this over the PR's diff range.
+
+**Escape hatch:** for a genuinely non-user-facing change (a comment, an internal
+test, a typo that ships no behavior), add a commit trailer:
+
+```
+Skip-Version-Bump: <one-line reason>
+```
+
+The reason is required and is visible in history and review — use it honestly.
+The trailer is global to the PR's whole diff range: a single `Skip-Version-Bump`
+commit anywhere in the range exempts every otherwise-failing plugin in that PR,
+not just the plugin its own commit touched.

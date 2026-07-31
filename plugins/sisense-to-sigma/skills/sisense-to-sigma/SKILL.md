@@ -54,6 +54,7 @@ widgets) — never emit confidently-wrong logic.
 >   nothing to verify is not done.
 >
 > **READ FIRST — `refs/operating-contract.md`**: the fidelity guardrails (render + value-check EVERY page against the source; never ship empty or silently drop a tile; don't spin — surface blockers).
+> **Modeling strategy — `refs/modeling-strategy.md`**: faithful reproduction of the source model is the DEFAULT (parity is the gate); an upstream OBT or Sigma-native materialization is an OPT-IN optimization for hot, join-heavy dashboards, re-verified against the same parity oracle. The converter never auto-flattens.
 > Read `refs/` before relying on shapes: `sisense-rest-api.md` (validated
 > endpoint map + auth + the access-key-vs-token gotcha), `jaql-mapping.md`
 > (JAQL → Sigma formula + what's flagged), `widget-type-mapping.md` (widget →
@@ -143,6 +144,18 @@ creating DM sprawl.
 ids — the workbook's Master element sources the fact element by its read-back
 id, never the client-side one (DM POST reassigns ids; workbook CREATE preserves
 them).
+
+**DM metric references (emit-first — leverage the semantic layer, don't duplicate it).**
+Sisense has no source-side metrics, so pass `convert.py model … --dashboards dashboards.json`
+and the model step **EMITs** a governed metric per JAQL measure (`harvest_metrics` →
+`{name, formula:"<Agg>([<Col>])"}`) onto the DM element(s) that carry the columns. Then
+`convert.py dashboard … --dm-spec sigma_dm_spec.json` prefers a **`[Metrics/<name>]`**
+reference over the inline aggregate when they match by formula equivalence (strip the
+`Master` prefix so `Sum([Master/Revenue])` equals a metric's `Sum([Revenue])`) — via the
+shared binder `scripts/lib/metric_binding.py`. The reference binds only to the DM's ACTUAL
+metrics (from `--dm-spec`), so a workbook never points at an absent metric. SAFE:
+`J.Unsupported` measures are skipped; no `--dashboards`/`--dm-spec` → inline, byte-identical.
+Verified: `tests/test_metric_reference.py`.
 
 ## Phase 3 — Convert dashboards  ✅ live-validated
 `convert.py dashboard` → workbook spec: widget `type` → element

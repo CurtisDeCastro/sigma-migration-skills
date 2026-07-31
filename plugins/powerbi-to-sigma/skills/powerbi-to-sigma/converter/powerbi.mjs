@@ -1,4 +1,4 @@
-// ../wt-pbi-mparser/build/sigma-ids.js
+// ../mcp-fresh/build/sigma-ids.js
 var SIGMA_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 var _usedIds = /* @__PURE__ */ new Set();
 var _idCounter = 0;
@@ -10,6 +10,16 @@ function encodeBase62(n, len) {
   }
   return s.padStart(len, SIGMA_CHARS[0]);
 }
+function fnv1a32(s) {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+var NS_MODULUS = 62 ** 4;
+var NS_BLOCK = 1e6;
 var SIGMA_LOWERCASE_WORDS = /* @__PURE__ */ new Set([
   "a",
   "an",
@@ -33,9 +43,15 @@ var SIGMA_LOWERCASE_WORDS = /* @__PURE__ */ new Set([
   "via",
   "per"
 ]);
-function resetIds() {
+function resetIds(seed) {
   _usedIds.clear();
-  _idCounter = 0;
+  _idCounter = seed == null ? 0 : fnv1a32(seed) % NS_MODULUS * NS_BLOCK;
+}
+function clampId(id, max = 64) {
+  if (id.length <= max)
+    return id;
+  const suffix = "~" + encodeBase62(fnv1a32(id) % 62 ** 6, 6);
+  return id.slice(0, max - suffix.length) + suffix;
 }
 function sigmaShortId(len = 10) {
   let id;
@@ -47,7 +63,7 @@ function sigmaShortId(len = 10) {
 }
 function sigmaInodeId(identifier, casing = "upper") {
   const phys = casing === "lower" ? identifier.toLowerCase() : identifier.toUpperCase();
-  return `inode-${sigmaShortId(22)}/${phys}`;
+  return clampId(`inode-${sigmaShortId(22)}/${phys}`);
 }
 function sigmaPhysicalName(s, casing = "upper") {
   const r = (s || "").trim();
@@ -264,7 +280,263 @@ function buildDerivedElements(elements) {
   return derived;
 }
 
-// ../wt-pbi-mparser/build/powerbi.js
+// ../mcp-fresh/build/powerbi-crosstable-triage.js
+var AGGREGATES = /* @__PURE__ */ new Set([
+  "Sum",
+  "Count",
+  "CountDistinct",
+  "Avg",
+  "Min",
+  "Max",
+  "StdDev",
+  "Var",
+  "Median",
+  "Percentile",
+  "CountIf",
+  "SumIf"
+]);
+function maskAndCheckQuotes(s) {
+  let out = "";
+  let i = 0;
+  let wellFormed = true;
+  while (i < s.length) {
+    const c = s[i];
+    if (c === '"') {
+      const quote = c;
+      let j = i + 1;
+      let closed = false;
+      while (j < s.length) {
+        if (s[j] === "\\" && j + 1 < s.length) {
+          j += 2;
+          continue;
+        }
+        if (s[j] === quote) {
+          j++;
+          closed = true;
+          break;
+        }
+        j++;
+      }
+      if (closed) {
+        out += " ".repeat(j - i);
+        i = j;
+      } else {
+        out += c;
+        i++;
+        wellFormed = false;
+      }
+    } else {
+      out += c;
+      i++;
+    }
+  }
+  return { masked: out, wellFormed };
+}
+function maskStringLiterals(s) {
+  return maskAndCheckQuotes(s).masked;
+}
+function isWellFormedFormula(s) {
+  const { masked, wellFormed } = maskAndCheckQuotes(s);
+  if (!wellFormed)
+    return false;
+  const stack = [];
+  for (const ch of masked) {
+    if (ch === "(" || ch === "[")
+      stack.push(ch);
+    else if (ch === ")") {
+      if (stack.pop() !== "(")
+        return false;
+    } else if (ch === "]") {
+      if (stack.pop() !== "[")
+        return false;
+    }
+  }
+  return stack.length === 0;
+}
+function splitTopLevelArgs(s) {
+  const masked = maskStringLiterals(s);
+  const out = [];
+  let depth = 0, start = 0;
+  for (let i = 0; i < masked.length; i++) {
+    const c = masked[i];
+    if (c === "(" || c === "[")
+      depth++;
+    else if (c === ")" || c === "]")
+      depth--;
+    else if (c === "," && depth === 0) {
+      out.push(s.slice(start, i));
+      start = i + 1;
+    }
+  }
+  out.push(s.slice(start));
+  return out;
+}
+function aggregateSummand(name, operand) {
+  if (name === "CountIf")
+    return null;
+  if (name === "SumIf" || name === "Percentile")
+    return splitTopLevelArgs(operand)[0] ?? "";
+  return operand;
+}
+function enumerateAggregateCalls(formula) {
+  const f = String(formula || "");
+  const masked = maskStringLiterals(f);
+  const out = [];
+  const re = /([A-Za-z_]\w*)\s*\(/g;
+  let m;
+  while (m = re.exec(masked)) {
+    if (!AGGREGATES.has(m[1]))
+      continue;
+    const before = m.index > 0 ? masked[m.index - 1] : "";
+    if (/[A-Za-z0-9_]/.test(before))
+      continue;
+    const open = m.index + m[0].length - 1;
+    let d = 0;
+    for (let j = open; j < masked.length; j++) {
+      if (masked[j] === "(")
+        d++;
+      else if (masked[j] === ")" && --d === 0) {
+        out.push({ name: m[1], operand: f.slice(open + 1, j) });
+        break;
+      }
+    }
+  }
+  return out;
+}
+function reachableTables(from, rels, maxDepth) {
+  const out = /* @__PURE__ */ new Map([[from, 0]]);
+  let frontier = [from];
+  for (let d = 1; d <= maxDepth && frontier.length; d++) {
+    const next = [];
+    for (const t of frontier) {
+      for (const r of rels) {
+        if (r.from !== t || out.has(r.to))
+          continue;
+        out.set(r.to, d);
+        next.push(r.to);
+      }
+    }
+    frontier = next;
+  }
+  return out;
+}
+function isNeverHostable(rawDax) {
+  return /\b(?:SELECTEDVALUE|ISFILTERED)\s*\(/i.test(maskStringLiterals(String(rawDax || "")));
+}
+function triageCrossTable(args) {
+  const { metricName, sigmaFormula, rawDax, homeTable, refs, columnOwners, relationships } = args;
+  const maxDepth = args.maxDepth ?? 3;
+  const metricRefSet = new Set(args.metricRefs ?? []);
+  const dependsOnMetrics = [...new Set(refs.filter((r) => metricRefSet.has(r)))];
+  const columnRefs = refs.filter((r) => !metricRefSet.has(r));
+  const shell = {
+    metric: metricName,
+    homeTable,
+    refs,
+    neverHostable: false,
+    candidates: [],
+    reachability: "none",
+    dependsOnMetrics
+  };
+  if (isNeverHostable(rawDax))
+    return { ...shell, neverHostable: true };
+  const malformed = !isWellFormedFormula(sigmaFormula);
+  const bases = [...new Set(relationships.map((r) => r.from))].sort();
+  const candidates = [];
+  for (const b of bases) {
+    const reach = reachableTables(b, relationships, maxDepth);
+    const hopOf = (ref) => {
+      let hop = Infinity;
+      const owners = columnOwners[ref];
+      for (const o of Array.isArray(owners) ? owners : []) {
+        const h = reach.get(o);
+        if (h !== void 0 && h < hop)
+          hop = h;
+      }
+      return hop;
+    };
+    let covered = true, maxHop = 0;
+    for (const ref of columnRefs) {
+      const hop = hopOf(ref);
+      if (hop === Infinity) {
+        covered = false;
+        break;
+      }
+      if (hop > maxHop)
+        maxHop = hop;
+    }
+    if (!covered)
+      continue;
+    if (malformed) {
+      candidates.push({ baseTable: b, maxHop, verdict: "fanout-risk", unsafeRefs: ["malformed-formula"] });
+      continue;
+    }
+    const unsafeRefs = [];
+    for (const call of enumerateAggregateCalls(sigmaFormula)) {
+      const summand = aggregateSummand(call.name, call.operand);
+      const sRefs = summand === null ? [] : (maskStringLiterals(summand).match(/\[([^\]]+)\]/g) || []).map((s) => s.slice(1, -1)).filter((r) => !metricRefSet.has(r));
+      const cross = sRefs.filter((r) => hopOf(r) >= 1);
+      const hasBase = sRefs.some((r) => hopOf(r) === 0);
+      if (cross.length)
+        unsafeRefs.push(...cross);
+      else if (!hasBase)
+        unsafeRefs.push(`${call.name}()`);
+    }
+    candidates.push({
+      baseTable: b,
+      maxHop,
+      verdict: unsafeRefs.length ? "fanout-risk" : "safe",
+      unsafeRefs: [...new Set(unsafeRefs)]
+    });
+  }
+  candidates.sort((x, y) => (x.verdict === y.verdict ? 0 : x.verdict === "safe" ? -1 : 1) || x.maxHop - y.maxHop || x.baseTable.localeCompare(y.baseTable));
+  const safeCount = candidates.filter((c) => c.verdict === "safe").length;
+  return {
+    ...shell,
+    candidates,
+    reachability: safeCount === 0 ? "none" : safeCount === 1 ? "one" : "many"
+  };
+}
+function describeTriage(t) {
+  const msg = describeVerdict(t);
+  const deps = t.dependsOnMetrics || [];
+  if (deps.length) {
+    return `${msg} Also depends on metric${deps.length === 1 ? "" : "s"} ${deps.map((d) => `"${d}"`).join(", ")} \u2014 re-homing this measure requires re-homing ${deps.length === 1 ? "that one" : "those too"}.`;
+  }
+  return msg;
+}
+function describeVerdict(t) {
+  if (t.candidates.length && t.candidates.every((c) => c.unsafeRefs.includes("malformed-formula"))) {
+    return "TRIAGE: the translated formula could not be parsed confidently (unclosed quote or mis-nested brackets) \u2014 not classified; inspect the formula by hand.";
+  }
+  if (t.neverHostable) {
+    return "TRIAGE: report-context-dependent (SELECTEDVALUE/ISFILTERED) \u2014 no static View can host it; rebuild at the visual's grain.";
+  }
+  if (!t.candidates.length) {
+    return `TRIAGE: no View covers it within the configured depth (references: ${t.refs.join(", ")}).`;
+  }
+  const hop = (c) => `${c.maxHop} hop${c.maxHop === 1 ? "" : "s"}`;
+  if (t.reachability === "many") {
+    const names = t.candidates.filter((c) => c.verdict === "safe").map((c) => `"${c.baseTable} View"`);
+    return `TRIAGE: ambiguous \u2014 ${names.length} Views cover it (${names.join(", ")}); needs a human choice.`;
+  }
+  const safe = t.candidates.find((c) => c.verdict === "safe");
+  if (safe)
+    return `TRIAGE: hostable on "${safe.baseTable} View" (${hop(safe)}, fan-out SAFE).`;
+  const risky = t.candidates[0];
+  return `TRIAGE: "${risky.baseTable} View" (${hop(risky)}) covers it but FAN-OUT RISK \u2014 [${risky.unsafeRefs.join(", ")}] would double-count across the join; rebuild at the visual's grain.`;
+}
+function isNoCoveringView(t) {
+  return !t.neverHostable && t.candidates.length === 0;
+}
+function describeMetricBlocker(b) {
+  if (b.kind === "cross-element-metric") {
+    return `TRIAGE: references metric "${b.metric}", which is declared on a DIFFERENT element ("${b.ownerTable}") \u2014 Sigma metrics cannot reference another element's metric, at any join distance; no hop limit fixes this. Recreate the dependency as a workbook-level calculation, or duplicate "${b.metric}" onto this element.`;
+  }
+  return `TRIAGE: depends on sibling metric "${b.metric}", which was itself dropped \u2014 its own drop reason: ${b.siblingReason} That dependency, not column reachability, is this measure's real blocker; resolve "${b.metric}" first, or rewrite this measure without it.`;
+}
+
+// ../mcp-fresh/build/powerbi.js
 var PBI_COMMUNITY_LINKS = {
   lod: "community.sigmacomputing.com/t/tableau-level-of-detail-or-lod-calculations-in-sigma/6427",
   groupings: "community.sigmacomputing.com/t/how-to-use-groupings-aggregate-calculations/2003",
@@ -460,6 +732,26 @@ function rewriteCombineValues(f) {
     const vals = args.slice(1);
     const joined = vals.join(` & ${sep} & `);
     f = f.slice(0, m.index) + joined + f.slice(endPos);
+  }
+  return f;
+}
+function rewriteFormatNumeric(f) {
+  const re = /\bFORMAT\s*\(/gi;
+  for (let guard = 0; guard < 20; guard++) {
+    re.lastIndex = 0;
+    const m = re.exec(f);
+    if (!m)
+      break;
+    const { args, endPos } = splitCallArgs(f, m.index + m[0].length);
+    if (args.length !== 2)
+      break;
+    const expr = args[0].trim();
+    if (/^[A-Za-z0-9_()\-+*/. ]+$/.test(expr) && /[A-Za-z]\s*\(/.test(expr) && !/["'\[]/.test(expr)) {
+      const rep = `Text(${recaseDateFns(expr)})`;
+      f = f.slice(0, m.index) + rep + f.slice(endPos);
+      continue;
+    }
+    break;
   }
   return f;
 }
@@ -702,6 +994,19 @@ function translateDaxPredicate(predRaw) {
   let p = (predRaw || "").trim();
   if (!p)
     return { ok: false, reason: "empty predicate" };
+  {
+    const capDp = (s) => ({ MONTH: "Month", YEAR: "Year", DAY: "Day" })[s.toUpperCase()] || s;
+    const bareDp = (x) => x.replace(/'[^']+'\[([^\]]+)\]/g, "[$1]").replace(/\b[A-Za-z_]\w*\[([^\]]+)\]/g, "[$1]");
+    const DP_TODAY = String.raw`(MONTH|YEAR|DAY)\s*\(\s*TODAY\s*\(\s*\)\s*\)`;
+    const DP_COL = String.raw`(MONTH|YEAR|DAY)\s*\(\s*('?[A-Za-z_][\w ]*'?\[[^\]]+\])\s*\)`;
+    const OP = String.raw`(<>|>=|<=|=|>|<)`;
+    let dpm = p.match(new RegExp(`^\\s*${DP_TODAY}\\s*${OP}\\s*${DP_COL}\\s*$`, "i"));
+    if (dpm)
+      return { ok: true, sigma: `${capDp(dpm[1])}(Today()) ${dpm[2] === "<>" ? "!=" : dpm[2]} ${capDp(dpm[3])}(${bareDp(dpm[4])})` };
+    dpm = p.match(new RegExp(`^\\s*${DP_COL}\\s*${OP}\\s*${DP_TODAY}\\s*$`, "i"));
+    if (dpm)
+      return { ok: true, sigma: `${capDp(dpm[1])}(${bareDp(dpm[2])}) ${dpm[3] === "<>" ? "!=" : dpm[3]} ${capDp(dpm[4])}(Today())` };
+  }
   if (/\b(CALCULATE|FILTER|ALL|ALLEXCEPT|ALLSELECTED|REMOVEFILTERS|KEEPFILTERS|VALUES|RELATEDTABLE|EARLIER|TREATAS|USERELATIONSHIP|SELECTEDVALUE)\s*\(/i.test(p)) {
     return { ok: false, reason: `predicate contains filter-context functions (${p.slice(0, 60)})` };
   }
@@ -741,7 +1046,7 @@ function translateDaxPredicate(predRaw) {
     const chain = negate ? items.map((v) => `${ref} != ${v}`).join(" and ") : items.map((v) => `${ref} = ${v}`).join(" or ");
     p = p.slice(0, m.index) + `(${chain})` + p.slice(i + 1);
   }
-  p = p.replace(/\bNOT\s*\(/gi, "Not(");
+  p = p.replace(/\bNOT\s*\(/gi, "Not (");
   p = p.replace(/\bISBLANK\s*\(/gi, "IsNull(");
   p = p.replace(/\bTRUE\s*\(\s*\)/gi, "True").replace(/\bFALSE\s*\(\s*\)/gi, "False");
   p = p.replace(/<>/g, "!=");
@@ -755,7 +1060,11 @@ function translateDaxPredicate(predRaw) {
   }
   return { ok: true, sigma: p.replace(/\s+/g, " ").trim() };
 }
-var CALC_TIME_INTEL_RE = /\b(TOTALYTD|TOTALQTD|TOTALMTD|SAMEPERIODLASTYEAR|DATEADD|DATESYTD|DATESBETWEEN|DATESINPERIOD|PARALLELPERIOD|PREVIOUSMONTH|PREVIOUSQUARTER|PREVIOUSYEAR|PREVIOUSDAY|NEXTMONTH|NEXTQUARTER|NEXTYEAR)\s*\(/i;
+var CALC_TIME_INTEL_DEFER_RE = /\b(TOTALYTD|TOTALQTD|TOTALMTD|SAMEPERIODLASTYEAR|DATEADD|DATESYTD|DATESINPERIOD|PARALLELPERIOD|PREVIOUSMONTH|PREVIOUSQUARTER|PREVIOUSYEAR|PREVIOUSDAY|NEXTMONTH|NEXTQUARTER|NEXTYEAR)\s*\(/i;
+function recaseDateFns(expr) {
+  const map = { TODAY: "Today", NOW: "Now", DATE: "Date", YEAR: "Year", MONTH: "Month", DAY: "Day" };
+  return expr.replace(/\b(TODAY|NOW|DATE|YEAR|MONTH|DAY)\b/gi, (w) => map[w.toUpperCase()] || w);
+}
 function expandMeasureRefs(dax, measureDax) {
   let out = String(dax).trim();
   for (let depth = 0; depth < 8; depth++) {
@@ -799,7 +1108,7 @@ function rewriteCalculateConditionals(fIn, warnings, measureName, measureDax, ra
       f = f.slice(0, m.index) + args[0].trim() + f.slice(endPos);
       continue;
     }
-    if (CALC_TIME_INTEL_RE.test(args.join(","))) {
+    if (CALC_TIME_INTEL_DEFER_RE.test(args.join(","))) {
       cursor = m.index + m[0].length;
       continue;
     }
@@ -831,15 +1140,20 @@ function rewriteCalculateConditionals(fIn, warnings, measureName, measureDax, ra
     };
     const sigmaAggCond = (fn, arg, combined2) => {
       const F = fn.toUpperCase();
-      if (F === "COUNTROWS" || F === "COUNT" || F === "COUNTA")
+      const col = bareRef(arg.trim());
+      const hasCol = /\[[^\]]+\]/.test(col);
+      if (F === "COUNTROWS" || (F === "COUNT" || F === "COUNTA") && !hasCol)
         return `CountIf(${combined2})`;
+      if (F === "COUNT" || F === "COUNTA")
+        return `CountIf(${combined2} and IsNotNull(${col}))`;
       if (F === "DISTINCTCOUNT")
-        return `CountDistinctIf(${bareRef(arg.trim())}, ${combined2})`;
+        return `CountDistinct(If(${combined2}, ${col}, null))`;
       const map = { SUM: "SumIf", AVERAGE: "AvgIf", MIN: "MinIf", MAX: "MaxIf" };
-      return `${map[F] || "SumIf"}(${bareRef(arg.trim())}, ${combined2})`;
+      return `${map[F] || "SumIf"}(${col}, ${combined2})`;
     };
     let grandTotal = false;
     const preds = [];
+    const filterRemovalCols = [];
     let flagged = null;
     for (let a of args.slice(1).map((x) => x.trim())) {
       const km = a.match(/^KEEPFILTERS\s*\(/i);
@@ -854,13 +1168,27 @@ function rewriteCalculateConditionals(fIn, warnings, measureName, measureDax, ra
       }
       const colStrip = a.match(/^(ALL|REMOVEFILTERS)\s*\(\s*('?[A-Za-z_][\w ]*'?\[[^\]]+\])\s*\)$/i);
       if (colStrip) {
-        grandTotal = true;
+        filterRemovalCols.push(colStrip[2]);
         if (warnings)
-          warnings.push(`\u26A0 "${measureName}": ${colStrip[1].toUpperCase()}(${colStrip[2]}) strips filter context on ONE column \u2014 translated as GrandTotal(\u2026), which is EXACT when ${colStrip[2].replace(/^.*\[/, "[")} is the only grouping in the visual. In a multi-dimension visual, re-express as a window total over the remaining dimensions in a grouped workbook element. Original DAX: ${daxNote}`);
+          warnings.push(`\u26A0 "${measureName}": ${colStrip[1].toUpperCase()}(${colStrip[2]}) removes filter context on ONE column \u2014 translated as a filter-scoped metric that IGNORES any control bound to ${colStrip[2].replace(/^.*\[/, "[")}. Configure this metric in the workbook to ignore that control; it must NOT collapse to a GrandTotal. Original DAX: ${daxNote}`);
         continue;
       }
       if (/^(ALLEXCEPT|ALLSELECTED|ALL|REMOVEFILTERS)\s*\(/i.test(a)) {
         flagged = `\u26A0 "${measureName}": CALCULATE filter ${a.slice(0, 70)} re-scopes filter context (subtotal semantics) \u2014 no faithful Sigma scalar-metric equivalent. Recreate as a grouped workbook element (group by the kept dimensions, aggregate, then window-total). Original DAX: ${daxNote}`;
+        break;
+      }
+      const dbm = a.match(/^DATESBETWEEN\s*\(/i);
+      if (dbm) {
+        const dbr = splitCallArgs(a, dbm[0].length);
+        const colM = dbr.args.length === 3 ? dbr.args[0].match(/('?[A-Za-z_][\w ]*'?\[[^\]]+\])\s*$/) : null;
+        if (colM) {
+          const col = bareRef(colM[1]);
+          const start = recaseDateFns(dbr.args[1].trim());
+          const end = recaseDateFns(dbr.args[2].trim());
+          preds.push(`${col} >= ${start} and ${col} <= ${end}`);
+          continue;
+        }
+        flagged = `\u26A0 "${measureName}": DATESBETWEEN filter isn't the <date column>, <start>, <end> shape \u2014 recreate the window manually. Original DAX: ${daxNote}`;
         break;
       }
       const fm = a.match(/^FILTER\s*\(/i);
@@ -898,23 +1226,28 @@ function rewriteCalculateConditionals(fIn, warnings, measureName, measureDax, ra
       return { f, dropped: true };
     }
     const aggFnEarly = aggM ? aggM[1].toUpperCase() : "";
+    const plainAgg = () => {
+      if (composite)
+        return `(${composite.replace(SIMPLE_AGG_RE, (_mm, fn, arg) => sigmaAggPlain(fn, arg))})`;
+      if (aggFnEarly === "COUNTROWS")
+        return "Count()";
+      const map = { SUM: "Sum", AVERAGE: "Avg", MIN: "Min", MAX: "Max", COUNT: "Count", COUNTA: "Count", DISTINCTCOUNT: "CountDistinct" };
+      return `${map[aggFnEarly]}(${bareRef(aggM[2].trim())})`;
+    };
     if (!preds.length) {
-      if (!grandTotal) {
-        cursor = m.index + m[0].length;
+      if (grandTotal) {
+        const gOut = `GrandTotal(${plainAgg()})`;
+        f = f.slice(0, m.index) + gOut + f.slice(endPos);
+        cursor = m.index + gOut.length;
         continue;
       }
-      let aggSigma;
-      if (composite) {
-        aggSigma = `(${composite.replace(SIMPLE_AGG_RE, (_mm, fn, arg) => sigmaAggPlain(fn, arg))})`;
-      } else if (aggFnEarly === "COUNTROWS")
-        aggSigma = "Count()";
-      else {
-        const map = { SUM: "Sum", AVERAGE: "Avg", MIN: "Min", MAX: "Max", COUNT: "Count", COUNTA: "Count", DISTINCTCOUNT: "CountDistinct" };
-        aggSigma = `${map[aggFnEarly]}(${bareRef(aggM[2].trim())})`;
+      if (filterRemovalCols.length) {
+        const frOut = plainAgg();
+        f = f.slice(0, m.index) + frOut + f.slice(endPos);
+        cursor = m.index + frOut.length;
+        continue;
       }
-      const gOut = `GrandTotal(${aggSigma})`;
-      f = f.slice(0, m.index) + gOut + f.slice(endPos);
-      cursor = m.index + gOut.length;
+      cursor = m.index + m[0].length;
       continue;
     }
     const combined = preds.length === 1 ? preds[0] : preds.map((p) => /\b(or)\b/i.test(p) ? `(${p})` : p).join(" and ");
@@ -922,13 +1255,8 @@ function rewriteCalculateConditionals(fIn, warnings, measureName, measureDax, ra
     let out;
     if (composite) {
       out = `(${composite.replace(SIMPLE_AGG_RE, (_mm, fn, arg) => sigmaAggCond(fn, arg, combined))})`;
-    } else if (aggFn === "COUNTROWS" || aggFn === "COUNT" || aggFn === "COUNTA") {
-      out = `CountIf(${combined})`;
-    } else if (aggFn === "DISTINCTCOUNT") {
-      out = `CountDistinctIf(${bareRef(aggM[2].trim())}, ${combined})`;
     } else {
-      const aggMap = { SUM: "SumIf", AVERAGE: "AvgIf", MIN: "MinIf", MAX: "MaxIf" };
-      out = `${aggMap[aggFn] || "SumIf"}(${bareRef(aggM[2].trim())}, ${combined})`;
+      out = sigmaAggCond(aggFn, aggM[2], combined);
     }
     if (grandTotal)
       out = `GrandTotal(${out})`;
@@ -972,6 +1300,7 @@ function pbiDaxToSigma(dax, warnings, measureName, measureDax = {}) {
   }
   f = rewriteStatIterators(f);
   f = rewriteCombineValues(f);
+  f = rewriteFormatNumeric(f);
   f = rewriteSearch(f);
   f = rewriteSingleValue(f);
   f = rewriteSwitchTrue(f);
@@ -1064,7 +1393,7 @@ function pbiDaxToSigma(dax, warnings, measureName, measureDax = {}) {
       if (alt && alt.trim()) {
         replacement = `If((${den}) = 0, ${alt.trim()}, (${num}) / (${den}))`;
       } else {
-        replacement = `(${num}) / (${den})`;
+        replacement = `(${num}) / NullIf((${den}), 0)`;
       }
       f = f.slice(0, divideMatch.index) + replacement + f.slice(endPos);
     }
@@ -1087,7 +1416,7 @@ function pbiDaxToSigma(dax, warnings, measureName, measureDax = {}) {
   f = f.replace(/\bISBLANK\s*\(/gi, "IsNull(");
   f = f.replace(/\bCOALESCE\s*\(/gi, "Coalesce(");
   f = f.replace(/\bBLANK\s*\(\s*\)/gi, "null");
-  f = f.replace(/\bNOT\s*\(/gi, "Not(");
+  f = f.replace(/\bNOT\s*\(/gi, "Not (");
   f = f.replace(/\bTRUE\s*\(\s*\)/gi, "True");
   f = f.replace(/\bFALSE\s*\(\s*\)/gi, "False");
   f = f.replace(/&&/g, " and ");
@@ -1167,11 +1496,6 @@ function pbiExtractPathFromM(mExpr) {
         tbl = m[1];
     }
     if (tbl) {
-      if (!db && sch) {
-        const bare0 = mExpr.match(/\{\s*\[\s*Name\s*=\s*"([^"]+)"\s*\]\s*\}\s*\[\s*Data\s*\]/i);
-        if (bare0)
-          db = bare0[1];
-      }
       const parts = [db, sch, tbl].filter((s) => !!s);
       if (parts.length >= 2)
         return parts.map((s) => s.toUpperCase());
@@ -1188,34 +1512,9 @@ function pbiExtractPathFromM(mExpr) {
   if (nameNavMatches.length === 2) {
     return [nameNavMatches[0][1].toUpperCase(), nameNavMatches[1][1].toUpperCase()];
   }
-  const flatRec = mExpr.match(/\{\s*\[([^\]]*\bItem\s*=\s*"[^"]+"[^\]]*)\]\s*\}/i);
-  if (flatRec) {
-    const body = flatRec[1];
-    const key = (k) => (body.match(new RegExp("\\b" + k + '\\s*=\\s*"([^"]+)"', "i")) || [])[1] || null;
-    const item = key("Item");
-    const schema = key("Schema");
-    const recCatalog = key("Catalog");
-    const recDatabase = key("Database");
-    const sqlServerDb = (mExpr.match(/\bSql\.Database\s*\(\s*"[^"]*"\s*,\s*"([^"]+)"/i) || [])[1] || null;
-    const top = recCatalog || recDatabase || sqlServerDb;
-    if (item) {
-      const parts = [top, schema, item].filter((s) => !!s);
-      if (parts.length >= 2)
-        return parts.map((s) => s.toUpperCase());
-    }
-  }
-  const sql = mExpr.replace(/#\(lf\)|#\(tab\)|#\(cr\)/gi, " ");
-  const fromM = sql.match(/\bFROM\s+([`"\[]?[\w$-]+[`"\]]?(?:\s*\.\s*[`"\[]?[\w$-]+[`"\]]?){1,2})/i);
-  if (fromM) {
-    let parts = fromM[1].split(".").map((s) => s.replace(/[`"\[\]\s]/g, "")).filter(Boolean);
-    if (parts.length === 2) {
-      const navDb = (sql.match(/\[\s*Name\s*=\s*"([^"]+)"\s*,\s*Kind\s*=\s*"Database"\s*\]/i) || [])[1] || (sql.match(/\bCatalog\s*=\s*"([^"]+)"/i) || [])[1] || (sql.match(/\bSql\.Database\s*\(\s*"[^"]*"\s*,\s*"([^"]+)"/i) || [])[1] || null;
-      if (navDb && !/\bPostgreSQL\.Database\s*\(|\bAmazonRedshift\.Database\s*\(/i.test(mExpr)) {
-        parts = [navDb, ...parts];
-      }
-    }
-    if (parts.length >= 2)
-      return parts.map((s) => s.toUpperCase());
+  const tblMatch = mExpr.match(/FROM\s+(?:\[?(\w+)\]?\.)?\[?(\w+)\]?\.\[?(\w+)\]?/i);
+  if (tblMatch) {
+    return [tblMatch[1] || "", tblMatch[2], tblMatch[3]].filter(Boolean).map((s) => s.toUpperCase());
   }
   return null;
 }
@@ -1307,9 +1606,28 @@ function buildCalcTableSql(dax, seriesColName, colDisplayNames = []) {
   if (/\bCALENDAR\s*\(/i.test(dax)) {
     return buildCalendarSpineSql(dax, colDisplayNames);
   }
+  if (/\b(TODAY|NOW)\s*\(\s*\)/i.test(dax) && !/\bGENERATESERIES|\bADDCOLUMNS/i.test(dax) && !/\[[^\]]+\]/.test(dax)) {
+    const isNow = /\bNOW\s*\(\s*\)/i.test(dax);
+    const col2 = seriesColName || (isNow ? "Now" : "Date");
+    return { ok: true, sql: `SELECT ${isNow ? "CURRENT_TIMESTAMP" : "CURRENT_DATE"} AS "${col2}"` };
+  }
+  const braceList = dax.match(/\{\s*([^{}]*?)\s*\}/);
+  if (braceList && braceList[1].trim() && !/\[[^\]]+\]/.test(braceList[1])) {
+    const items = splitInList(braceList[1]).filter(Boolean);
+    const isLiteral = (v) => /^(".*"|'.*'|-?\d+(\.\d+)?)$/.test(v.trim());
+    if (items.length && items.every(isLiteral)) {
+      const col2 = seriesColName || "Value";
+      const rows2 = items.map((v) => {
+        const tkn = v.trim();
+        const sqlv = /^["']/.test(tkn) ? `'${tkn.slice(1, -1).replace(/'/g, "''")}'` : tkn;
+        return `SELECT ${sqlv} AS "${col2}"`;
+      }).join(" UNION ALL ");
+      return { ok: true, sql: rows2 };
+    }
+  }
   const gm = dax.match(/\bGENERATESERIES\s*\(/i);
   if (!gm) {
-    return { ok: false, reason: "DAX calculated table is not a GENERATESERIES or CALENDAR \u2014 no warehouse source exists; recreate manually as a Sigma SQL element or input table." };
+    return { ok: false, reason: "DAX calculated table is not a GENERATESERIES / CALENDAR / TODAY / literal-list constructor \u2014 no warehouse source exists; recreate manually as a Sigma SQL element or input table." };
   }
   const { args } = splitCallArgs(dax, gm.index + gm[0].length);
   if (args.length < 2) {
@@ -1765,6 +2083,81 @@ function extractUseRelationships(dax) {
   }
   return { dax: f, pairs };
 }
+function stripDaxComments(dax) {
+  const src = String(dax ?? "");
+  let out = "";
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    if (c === '"') {
+      out += c;
+      i++;
+      while (i < src.length) {
+        if (src[i] === '"') {
+          if (src[i + 1] === '"') {
+            out += '""';
+            i += 2;
+            continue;
+          }
+          out += '"';
+          i++;
+          break;
+        }
+        out += src[i];
+        i++;
+      }
+      continue;
+    }
+    if (c === "/" && src[i + 1] === "*") {
+      const end = src.indexOf("*/", i + 2);
+      i = end === -1 ? src.length : end + 2;
+      out += " ";
+      continue;
+    }
+    if (c === "/" && src[i + 1] === "/") {
+      while (i < src.length && src[i] !== "\n")
+        i++;
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+function extractCrossFilters(dax) {
+  let f = dax;
+  const pairs = [];
+  const re = /\bCROSSFILTER\s*\(/gi;
+  for (let guard = 0; guard < 20; guard++) {
+    re.lastIndex = 0;
+    const m = re.exec(f);
+    if (!m)
+      break;
+    const { args, endPos } = splitCallArgs(f, m.index + m[0].length);
+    if (args.length >= 2) {
+      const a = _pbiParseQualifiedRef(args[0]);
+      const b = _pbiParseQualifiedRef(args[1]);
+      const dir = (args[2] || "").trim().replace(/^["']|["']$/g, "") || "Both";
+      if (a && b)
+        pairs.push({ a, b, direction: dir });
+    }
+    let start = m.index, end = endPos;
+    let i = start - 1;
+    while (i >= 0 && /\s/.test(f[i]))
+      i--;
+    if (f[i] === ",")
+      start = i;
+    else {
+      let j = end;
+      while (j < f.length && /\s/.test(f[j]))
+        j++;
+      if (f[j] === ",")
+        end = j + 1;
+    }
+    f = f.slice(0, start) + f.slice(end);
+  }
+  return { dax: f, pairs };
+}
 function findModelRelationship(model, p) {
   for (const r of model.relationships || []) {
     const fwd = r.fromTable === p.a.table && r.fromColumn === p.a.column && r.toTable === p.b.table && r.toColumn === p.b.column;
@@ -1905,6 +2298,31 @@ function convertPowerBIToSigma(modelJson, options = {}) {
   const tableIdMap = {};
   const tableColMap = {};
   const allPbiToSigmaNames = {};
+  const triageColumnOwners = /* @__PURE__ */ Object.create(null);
+  const _own = (key, table) => {
+    if (!key)
+      return;
+    if (!triageColumnOwners[key])
+      triageColumnOwners[key] = [];
+    if (!triageColumnOwners[key].includes(table))
+      triageColumnOwners[key].push(table);
+  };
+  for (const _t of model.tables || []) {
+    if (_t.name?.startsWith("LocalDateTable_") || _t.name?.startsWith("DateTableTemplate_"))
+      continue;
+    for (const _c of _t.columns || []) {
+      _own(_c.name, _t.name);
+      _own(sigmaDisplayName(String(_c.sourceColumn || _c.name || "").replace(/^\[|\]$/g, "")), _t.name);
+    }
+  }
+  const triageRels = (model.relationships || []).filter((r) => r.fromTable && r.toTable).map((r) => ({ from: r.fromTable, to: r.toTable }));
+  const allMetricOwner = /* @__PURE__ */ Object.create(null);
+  for (const _t of model.tables || []) {
+    for (const _m of _t.measures || []) {
+      if (_m?.name && !allMetricOwner[_m.name])
+        allMetricOwner[_m.name] = _t.name;
+    }
+  }
   const measureToElementId = {};
   const measureAggMap = pbiBuildMeasureAggMap(model);
   const measureDaxMap = {};
@@ -1921,6 +2339,15 @@ function convertPowerBIToSigma(modelJson, options = {}) {
   };
   const relActivationNames = /* @__PURE__ */ new Map();
   const measureAltPath = {};
+  const processCrossFilters = (measureName, expr) => {
+    if (!/\bCROSSFILTER\s*\(/i.test(expr))
+      return expr;
+    const cf = extractCrossFilters(expr);
+    for (const pair of cf.pairs) {
+      warnings.push(`\u26A0 "${measureName}": CROSSFILTER(${pair.a.table}[${pair.a.column}], ${pair.b.table}[${pair.b.column}], ${pair.direction}) \u2014 Sigma has no cross-filter-direction control, so the modifier is dropped and the relationship keeps its model direction. The aggregate itself is unchanged; if the source measure relied on that direction change to widen or narrow its filter context, verify the number.`);
+    }
+    return cf.dax;
+  };
   const processUseRelationships = (measureName, expr) => {
     if (!/\bUSERELATIONSHIP\s*\(/i.test(expr))
       return expr;
@@ -2166,8 +2593,8 @@ SELECT 1 AS _placeholder`;
     for (const m of t.measures || []) {
       if (m.name)
         measureToElementId[m.name] = elementId;
-      const mExprRaw = Array.isArray(m.expression) ? m.expression.join("\n") : String(m.expression || "");
-      const mExpr = processUseRelationships(m.name, mExprRaw);
+      const mExprRaw = stripDaxComments(Array.isArray(m.expression) ? m.expression.join("\n") : String(m.expression || ""));
+      const mExpr = processUseRelationships(m.name, processCrossFilters(m.name, mExprRaw));
       const mWin = pbiParseRankx(mExpr, measureAggMap);
       if (mWin && lowerPBIWindowCalc(mWin, m.name, srcElProxy, winCtx, warnings)) {
         continue;
@@ -2202,14 +2629,60 @@ SELECT 1 AS _placeholder`;
         ...Object.values(pbiToSigmaName),
         ...Object.keys(pbiToSigmaName)
       ]);
+      const canonicalCol = /* @__PURE__ */ new Map();
+      for (const d of colDisplays) {
+        const k = d.toLowerCase();
+        if (!canonicalCol.has(k))
+          canonicalCol.set(k, d);
+      }
+      const siblingDropReason = /* @__PURE__ */ new Map();
       for (let pass = 0; pass < 5; pass++) {
         const metricNames = new Set(metrics.map((mm) => mm.name));
+        const canonicalMetric = /* @__PURE__ */ new Map();
+        for (const n of metricNames) {
+          const k = String(n).toLowerCase();
+          if (!canonicalMetric.has(k))
+            canonicalMetric.set(k, String(n));
+        }
         const before = metrics.length;
         for (let i = metrics.length - 1; i >= 0; i--) {
+          metrics[i].formula = String(metrics[i].formula).replace(/\[([^\]\/]+)\]/g, (whole, ref) => {
+            if (colDisplays.has(ref) || metricNames.has(ref))
+              return whole;
+            const c = canonicalCol.get(ref.toLowerCase()) || canonicalMetric.get(ref.toLowerCase());
+            return c ? `[${c}]` : whole;
+          });
           const refs = (String(metrics[i].formula).match(/\[([^\]\/]+)\]/g) || []).map((r) => r.slice(1, -1));
           const bad = refs.find((r) => !colDisplays.has(r) && !metricNames.has(r));
           if (bad) {
-            warnings.push(`\u26A0 "${metrics[i].name}": references "[${bad}]" which is not a column or metric on this element (cross-table measure) \u2014 dropped; recreate in a workbook element at the visual's grain (the joined "View" element has the dim columns).`);
+            const _rawDaxExpr = ((t.measures || []).find((mm) => mm.name === metrics[i].name) || {}).expression;
+            const _rawDax = Array.isArray(_rawDaxExpr) ? _rawDaxExpr.join("\n") : String(_rawDaxExpr || "");
+            const _triage = triageCrossTable({
+              metricName: metrics[i].name,
+              sigmaFormula: String(metrics[i].formula),
+              rawDax: _rawDax,
+              homeTable: tableName,
+              refs: [...new Set(refs)],
+              columnOwners: triageColumnOwners,
+              relationships: triageRels,
+              metricRefs: [...metricNames],
+              // Explicit, not just inherited from triageCrossTable's own default —
+              // measured on R1-R4: 9 of 32 `no-covering-View` drops are a filtered
+              // dimension reachable at 3 hops, not 2 (see powerbi-crosstable-triage.ts).
+              maxDepth: 3
+            });
+            let _blocker = null;
+            if (isNoCoveringView(_triage)) {
+              if (allMetricOwner[bad] && allMetricOwner[bad] !== tableName) {
+                _blocker = { kind: "cross-element-metric", metric: bad, ownerTable: allMetricOwner[bad] };
+              } else if (siblingDropReason.has(bad)) {
+                _blocker = { kind: "dropped-sibling", metric: bad, siblingReason: siblingDropReason.get(bad) };
+              }
+            }
+            const _reasonText = _blocker ? describeMetricBlocker(_blocker) : describeTriage(_triage);
+            const _warning = _blocker ? `\u26A0 "${metrics[i].name}": references "[${bad}]" which is not a column or metric on this element (cross-table measure) \u2014 dropped. ${_reasonText}` : `\u26A0 "${metrics[i].name}": references "[${bad}]" which is not a column or metric on this element (cross-table measure) \u2014 dropped; recreate in a workbook element at the visual's grain (the joined "View" element has the dim columns). ${_reasonText}`;
+            warnings.push(_warning);
+            siblingDropReason.set(metrics[i].name, _reasonText);
             metrics.splice(i, 1);
           }
         }
@@ -2252,15 +2725,30 @@ SELECT 1 AS _placeholder`;
   }
   if (measureOnlyTables.size > 0) {
     const factEl = elements.reduce((best, e) => (e.columns || []).length > (best.columns || []).length ? e : best, elements[0]);
+    const homeElFor = (rawDax) => {
+      const refs = [...String(rawDax).matchAll(/(?:'([^']+)'|\b([A-Za-z_]\w*))\s*\[([^\]]+)\]/g)];
+      for (const r of refs) {
+        const tbl = (r[1] || r[2] || "").trim();
+        const colName = r[3];
+        const elId = tableIdMap[tbl];
+        if (!elId || !(tableColMap[tbl] && colName in tableColMap[tbl]))
+          continue;
+        const el = elements.find((e) => e.id === elId);
+        if (el && (el.columns || []).length)
+          return el;
+      }
+      return factEl;
+    };
     if (factEl) {
       for (const tName of measureOnlyTables) {
         const t = model.tables.find((tb) => tb.name === tName);
         if (!t)
           continue;
         for (const m of t.measures || []) {
+          const moExpr = processUseRelationships(m.name, processCrossFilters(m.name, stripDaxComments(Array.isArray(m.expression) ? m.expression.join("\n") : String(m.expression || ""))));
+          const homeEl = homeElFor(moExpr);
           if (m.name)
-            measureToElementId[m.name] = factEl.id;
-          const moExpr = processUseRelationships(m.name, Array.isArray(m.expression) ? m.expression.join("\n") : String(m.expression || ""));
+            measureToElementId[m.name] = homeEl.id;
           let sigmaFormula = pbiDaxToSigma(moExpr, warnings, m.name, measureDaxMap);
           if (sigmaFormula && hasBareWindowFn(sigmaFormula)) {
             warnings.push(`\u26D4 "${m.name}": window-function measure has no Sigma DM-metric equivalent \u2014 use a workbook Rank()/ordered table or a grouped element. Dropped.`);
@@ -2270,18 +2758,21 @@ SELECT 1 AS _placeholder`;
             sigmaFormula = sigmaFormula.replace(/\[([^\]\/]+)\]/g, (_m2, colName) => {
               return allPbiToSigmaNames[colName] ? `[${allPbiToSigmaNames[colName]}]` : `[${colName}]`;
             });
-            if (!factEl.metrics)
-              factEl.metrics = [];
+            if (!homeEl.metrics)
+              homeEl.metrics = [];
             const _moFmt = inferSigmaFormat(sigmaFormula, m.name, m.formatString);
             const metric = { id: sigmaShortId(), formula: sigmaFormula, name: m.name };
             if (_moFmt)
               metric.format = _moFmt;
             if (m.description)
               metric.description = m.description;
-            factEl.metrics.push(metric);
+            homeEl.metrics.push(metric);
+            if (homeEl !== factEl) {
+              warnings.push(`\u2139 "${m.name}": bound to its home fact element "${homeEl.source?.path?.[homeEl.source.path.length - 1] || homeEl.id}" (the table that owns its aggregated column), not the largest element \u2014 preserves the measure's source fact (dax-fidelity #4).`);
+            }
           }
         }
-        warnings.push(`\u2139 Measures table "${tName}" \u2192 measures moved to "${factEl.source?.path?.[factEl.source.path.length - 1]}"`);
+        warnings.push(`\u2139 Measures table "${tName}" \u2192 measures moved to their home fact element(s).`);
       }
     }
   }
@@ -2651,9 +3142,11 @@ SELECT 1 AS _placeholder`;
 export {
   convertPowerBIToSigma,
   expandMeasureRefs,
+  extractCrossFilters,
   extractUseRelationships,
   hasBareWindowFn,
   isAggCombination,
   pbiDaxToSigma,
-  pbiParseEarlierWindow
+  pbiParseEarlierWindow,
+  stripDaxComments
 };

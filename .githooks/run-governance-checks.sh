@@ -20,10 +20,38 @@ fi
 fail=0
 ruby tools/check-shared.rb || fail=1
 ruby tools/lint-skills.rb   || fail=1
-[ -f tools/hygiene-sweep.sh ] && { bash tools/hygiene-sweep.sh || fail=1; }
+if [ "${GOVERNANCE_SKIP_SWEEP:-}" = "1" ]; then
+  # hygiene.yml's dedicated Sweep step (redacted output) already swept this
+  # tree; skip the redundant raw-output inner sweep in CI. Local hooks never
+  # set this knob — they keep sweeping.
+  echo "governance: inner hygiene sweep skipped (GOVERNANCE_SKIP_SWEEP=1 — CI's redacted Sweep step owns it)."
+else
+  [ -f tools/hygiene-sweep.sh ] && { bash tools/hygiene-sweep.sh || fail=1; }
+fi
+[ -f tools/lint-tree-litter.sh ] && { bash tools/lint-tree-litter.sh || fail=1; }
 [ -f tools/lint-esm-imports.rb ] && { ruby tools/lint-esm-imports.rb || fail=1; }
 [ -f tools/lint-twb-encoding.rb ] && { ruby tools/lint-twb-encoding.rb || fail=1; }
 [ -f tools/check-agent-variants.rb ] && { ruby tools/check-agent-variants.rb || fail=1; }
+[ -f tools/check-cognos-bundle.rb ] && { ruby tools/check-cognos-bundle.rb || fail=1; }
+# bootstrap<->doctor KEEP-IN-LOCKSTEP guard (E2.1): bootstrap.sh duplicates
+# doctor.sh's probes (py_real, the vm-node candidate globs, Test-RealPython)
+# under KEEP-IN-LOCKSTEP comments that name this test as the mechanical
+# no-drift guard. check-shared.rb only proves twins match canonical — NOT that
+# bootstrap's probes match doctor's — and a guard with no automated executor
+# regresses silently. Fixture-free and sub-second (~60ms), so it runs in the
+# local hook too; quiet on success.
+lockstep="plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-bootstrap-lockstep.sh"
+if [ -f "$lockstep" ]; then
+  lockstep_out="$(bash "$lockstep" 2>&1)" || { printf '%s\n' "$lockstep_out" >&2; fail=1; }
+fi
+# Fixture self-test suites run in CI only (hygiene.yml calls this script;
+# GitHub Actions sets CI=true): they spin throwaway git repos and would blow
+# the ~1s local-hook budget, but the litter/guard contracts must not regress
+# with no automated executor.
+if [ "${CI:-}" = "true" ]; then
+  [ -f tools/test-tree-litter.sh ] && { bash tools/test-tree-litter.sh || fail=1; }
+  [ -f tools/test-commit-msg-guard.sh ] && { bash tools/test-commit-msg-guard.sh || fail=1; }
+fi
 if [ "$fail" -ne 0 ]; then
   echo "" >&2
   echo "governance checks failed — fix above, or bypass with --no-verify (CI will still gate)." >&2

@@ -30,6 +30,7 @@ Idempotent: re-running overwrites signals.json; a fetch only re-downloads when
 --workspace/--report are given (otherwise it parses whatever is on disk).
 """
 import argparse, base64, json, os, sys, time
+import importlib.util
 
 CLIENT_ID = "ea0616ba-638b-4df5-95b9-636659ae5121"  # Power BI Desktop public client
 _TENANT   = os.environ.get("PBI_TENANT", "organizations")  # #347: guest/B2B tenant via PBI_TENANT
@@ -39,19 +40,26 @@ CACHE     = os.environ.get("PBI_TOKEN_CACHE") or ("/tmp/pbiauth/cache.bin" if _T
 FAB_BASE  = "https://api.fabric.microsoft.com/v1"
 
 # PBIR visualType -> Sigma element kind (research/powerbi-visual-layout.md §4e).
-VISUAL_KIND = {
-    "card": "kpi", "multiRowCard": "kpi", "kpi": "kpi", "gauge": "kpi",
-    "textbox": "text", "actionButton": "text",
-    "lineChart": "line", "areaChart": "area", "stackedAreaChart": "area",
-    "barChart": "bar", "clusteredBarChart": "bar", "stackedBarChart": "bar",
-    "columnChart": "bar", "clusteredColumnChart": "bar", "stackedColumnChart": "bar",
-    "hundredPercentStackedColumnChart": "bar",
-    "lineClusteredColumnComboChart": "combo", "lineStackedColumnComboChart": "combo",
-    "pieChart": "pie", "donutChart": "donut", "scatterChart": "scatter",
-    "tableEx": "table", "pivotTable": "pivot-table", "matrix": "pivot-table",
-    "slicer": "control",
-    "map": "map", "filledMap": "map", "shapeMap": "map", "azureMap": "map",
-}
+# visualType -> Sigma kind + ROLE CLASS resolves through the catalogs
+# (refs/catalogs/viz-kind.json + custom-visual.json) via lib/pbi_viz_kind.py — the
+# SAME files the Ruby builder and extract-report-classic.py read, so the three can
+# not drift. Replaces the hand-maintained VISUAL_KIND dict whose
+# `.get(vtype, "bar")` default silently coerced any unrecognized visual into a bar
+# chart (measured on 4 real customer .pbix files: 21 third-party date-picker
+# slicers became bar charts, so nearly every page lost its date filter).
+
+
+def _load_pbi_viz_kind():
+    """Import lib/pbi_viz_kind.py by path (no sys.path mutation)."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib", "pbi_viz_kind.py")
+    spec = importlib.util.spec_from_file_location("pbi_viz_kind", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_vk = _load_pbi_viz_kind()
+_VK = _vk.load(_vk.default_catalog_dir(__file__))
 
 # PBI bar families: *Bar* visuals render HORIZONTALLY; *Column* visuals render
 # vertically (Sigma's default). Sigma's bar-chart `orientation` field accepts
@@ -648,9 +656,17 @@ def extract(pbir_dir):
                 "visual_id": v.get("name", vid),
                 "visual_type": vtype,
                 "title": _visual_title(visual),
-                "sigma_kind": VISUAL_KIND.get(vtype, "bar"),
+                "sigma_kind": (_vkr := _VK.resolve_or_guidance(vtype))["builder_kind"] or _vkr["role_class"],
+            # role_class = what the visual DOES, so the coverage gate can tell a
+            # FUNCTIONAL loss (a lost slicer = the page lost its filter) from a
+            # cosmetic one; guidance names the closest Sigma construct.
+            "role_class": _vkr["role_class"],
+            "sigma_target": _vkr["sigma_target"],
+            "viz_guidance": _vkr["guidance"],
+            "viz_catalog": _vkr["catalog"],
+            "approximate": _vkr["approximate"],
                 "orientation": "horizontal" if vtype in HBAR_TYPES else None,
-                "stacking": _stacking(vtype) if VISUAL_KIND.get(vtype) in ("bar", "area") else None,
+                "stacking": _stacking(vtype) if _vkr["builder_kind"] in ("bar", "area") else None,
                 "x": pos.get("x", 0), "y": pos.get("y", 0),
                 "w": pos.get("width", 0), "h": pos.get("height", 0),
                 "z": pos.get("z", 0),

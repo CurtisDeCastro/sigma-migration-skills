@@ -44,7 +44,8 @@ Dir.mktmpdir do |d|
   File.write("#{d}/views/v1.csv", "Region,Net Revenue\nWest,100\n")
   csv_mtime = File.mtime("#{d}/views/v1.csv").to_i
   o = "#{d}/plan.json"
-  `ruby #{PLAN} --tableau #{d} --workbook-spec #{d}/wb.json --master-id master --out #{o} 2>&1`
+  IO.popen(['ruby', PLAN, '--tableau', d, '--workbook-spec', "#{d}/wb.json",
+            '--master-id', 'master', '--out', o], err: %i[child out], &:read)
   plan = JSON.parse(File.read(o)) if File.exist?(o)
 end
 

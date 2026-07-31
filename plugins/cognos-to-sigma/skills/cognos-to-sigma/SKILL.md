@@ -40,6 +40,7 @@ cleanly; **flag what doesn't** (runtime macros, running-totals, localization) in
 of emitting wrong logic.
 
 > **READ FIRST — `refs/operating-contract.md`**: the fidelity guardrails (render + value-check EVERY page against the source; never ship empty or silently drop a tile; don't spin — surface blockers).
+> **Modeling strategy — `refs/modeling-strategy.md`**: faithful reproduction of the source model is the DEFAULT (parity is the gate); an upstream OBT or Sigma-native materialization is an OPT-IN optimization for hot, join-heavy dashboards, re-verified against the same parity oracle. The converter never auto-flattens.
 > Read `refs/` before relying on shapes: `design-notes.md` (translation surface + scope),
 > `format-shapes.md` (the real CA Data-Module JSON + report-spec XML structures),
 > `expression-dsl.md` (the Cognos-expression → Sigma-formula mapping table),
@@ -245,7 +246,20 @@ node scripts/apply-layout.mjs --workbook <workbookId>          # clean dashboard
 Each Cognos **list/crosstab/chart/map** becomes the matching Sigma element sourced from
 the migrated DM element. The converter emits each element's `source.elementId` as the
 query **subject name** (a placeholder) — `remap-wb-to-dm-ids.mjs` rewrites those to the
-real ids from Phase 2's readback (matched by element name). Then post-and-readback POSTs
+real ids from Phase 2's readback (matched by element name).
+
+**DM metric references (leverage the semantic layer, don't duplicate it).** A measure
+column prefers a governed **`[Metrics/<name>]`** reference over re-deriving the aggregate
+inline, when its inline aggregate matches a metric on the referenced subject element
+(formula-equivalence match via the cognos-local binder `converter/metric-binding.ts` —
+strip the `[Subject/…]` prefix so `Sum([Sheet 1/Revenue])` equals a metric's
+`Sum([Revenue])`). `migrate-cognos.mjs` passes the DM's metrics (keyed by element
+display name) to the converter via `--metrics`. SAFE: KPI/crosstab measures are always
+`Sum(…)`-wrapped, so a non-Sum metric won't match (stays inline); composite/param-switch
+measures and any non-match fall back to inline; no `--metrics` is byte-identical.
+**Re-vendor after editing `converter/*.ts`:** `tools/vendor-converters.sh <mcp> cognos`
+rebuilds `converter/cli.mjs` (production runs the bundle). This is **enforced** — `tools/check-cognos-bundle.rb`
+(governance hook + CI) fails if a `converter/*.ts` edit ships without re-bundling. Verified: `scripts/test-metric-reference.mjs`. Then post-and-readback POSTs
 the workbook and re-runs the error-column gate. **`apply-layout.mjs` then gives the page a
 clean 24-col grid** (controls on top, content stacked full-width with per-kind heights) —
 Sigma auto-arrange otherwise squishes every element to the same height. It writes the

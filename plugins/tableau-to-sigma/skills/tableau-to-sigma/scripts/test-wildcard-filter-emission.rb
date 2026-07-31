@@ -119,7 +119,11 @@ Dir.mktmpdir do |d|
   abort 'parse-twb-layout failed' unless system('ruby', PARSER, twb, lay, out: File::NULL, err: File::NULL)
   meta = JSON.parse(File.read(lay.sub(/\.json$/, '-meta.json')))
   out = File.join(d, 'specs.json')
-  build_log = `ruby #{BUILD} --tableau-dir #{d} --layout #{lay} --meta #{lay.sub(/\.json$/, '-meta.json')} --master-map #{mm} --master-element-id master --skip-dashboard-read unit-test --auto-controls --title Dash --out #{out} 2>&1`
+  build_log = IO.popen(['ruby', BUILD, '--tableau-dir', d, '--layout', lay,
+                        '--meta', lay.sub(/\.json$/, '-meta.json'), '--master-map', mm,
+                        '--master-element-id', 'master', '--skip-dashboard-read', 'unit-test',
+                        '--auto-controls', '--title', 'Dash', '--out', out],
+                       err: %i[child out], &:read)
   build_log = build_log.to_s.force_encoding('UTF-8')
   build_out = JSON.parse(File.read(out)) if File.exist?(out)
 end

@@ -50,6 +50,7 @@ require 'fileutils'
 require 'open3'
 require_relative 'lib/scout_gate'
 require_relative 'lib/py_resolve' # real-Python resolver (Windows Store-stub safe)
+begin; require_relative 'lib/modeling_advisory'; rescue LoadError; end # shared, vendor-neutral CDW join-cost advisory (optional; synced from shared/)
 
 HERE = __dir__
 $LOAD_PATH.unshift File.expand_path('lib', HERE)
@@ -268,6 +269,8 @@ conv_warnings = conv['warnings'] || []
 model = conv['sigmaDataModel'] || conv['model'] || conv
 el_ct = (model['pages'] || []).flat_map { |p| p['elements'] || [] }.size
 puts "   #{el_ct} DM element(s) emitted; #{conv_warnings.size} converter warning(s)"
+# Vendor-neutral CDW join-cost advisory (informational only; never gates). See refs/modeling-strategy.md.
+ModelingAdvisory.from_dm_spec(model) if defined?(ModelingAdvisory) && ModelingAdvisory.respond_to?(:from_dm_spec)
 
 # ---------------------------------------------------------------------------
 # DECISIONS CHECKPOINT — surface the genuine human questions
@@ -668,9 +671,14 @@ fin_out, fin_st = Open3.capture2e(*fin)
 fin_out.each_line { |l| puts "   #{l.rstrip}" }
 parity_ok = fin_st.success?
 
-# the shared HARD GATE: parity sentinel + orphan + error-column + layout checks.
+# the shared HARD GATE: parity sentinel + orphan + error-column + layout checks,
+# plus gate 7b — the runtime control-flip proof (--require-control-flip): flips
+# each control live via probe-controls.rb and FAILS if a control is wired but
+# INERT (a static-lint-clean spec that does nothing when the user changes it).
+# DEFAULT-ON here, mirroring looker; waive with --skip-control-flip on this gate.
 gate_out, gate_st = Open3.capture2e('ruby', File.join(HERE, 'assert-phase6-ran.rb'),
-                                    '--workdir', WORK, '--workbook-id', wb_id)
+                                    '--workdir', WORK, '--workbook-id', wb_id,
+                                    '--require-control-flip')
 gate_out.each_line { |l| puts "   #{l.rstrip}" }
 gate_ok = gate_st.success?
 

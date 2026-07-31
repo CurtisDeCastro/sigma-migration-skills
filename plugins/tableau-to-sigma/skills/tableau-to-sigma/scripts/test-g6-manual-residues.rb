@@ -112,7 +112,11 @@ def run_build(d)
   lay = File.join(d, 'layout.json')
   abort 'parse-twb-layout failed' unless system('ruby', PARSER, File.join(d, 'wb.twb'), lay, out: File::NULL, err: File::NULL)
   out = File.join(d, 'specs.json')
-  log = `ruby #{BUILD} --tableau-dir #{d} --layout #{lay} --meta #{lay.sub(/\.json$/, '-meta.json')} --master-map #{File.join(d, 'master-map.json')} --master-element-id master --out #{out} 2>&1`
+  log = IO.popen(['ruby', BUILD, '--tableau-dir', d, '--layout', lay,
+                  '--meta', lay.sub(/\.json$/, '-meta.json'),
+                  '--master-map', File.join(d, 'master-map.json'),
+                  '--master-element-id', 'master', '--out', out],
+                 err: %i[child out], &:read)
   [log, File.join(d, 'manual-residues.json')]
 end
 
@@ -159,7 +163,9 @@ Dir.mktmpdir do |d|
   pr['tiles'][0].delete('measure')
   File.write(File.join(d, 'png-read.json'), JSON.pretty_generate(pr))
   out = File.join(d, 'specs.json')
-  `ruby #{BUILD} --tableau-dir #{d} --layout #{lay} --meta #{meta_path} --master-map #{File.join(d, 'master-map.json')} --master-element-id master --out #{out} 2>&1`
+  IO.popen(['ruby', BUILD, '--tableau-dir', d, '--layout', lay, '--meta', meta_path,
+            '--master-map', File.join(d, 'master-map.json'),
+            '--master-element-id', 'master', '--out', out], err: %i[child out], &:read)
   doc = (JSON.parse(File.read(File.join(d, 'manual-residues.json'))) rescue {})
   res = Array(doc['residues'])
   check(res.any? { |e| e['calc'] == 'Growth Index' && e['tile'] == 'Monthly Revenue Trend' },

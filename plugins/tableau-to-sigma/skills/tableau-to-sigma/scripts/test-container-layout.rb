@@ -94,7 +94,8 @@ Dir.mktmpdir do |d|
   wbf = File.join(d, 'wb-ids.json')
   out = File.join(d, 'layout.xml')
   File.write(wbf, JSON.dump(wb_ids))
-  build_log = `ruby #{BUILD} --layout #{lay} --wb-ids #{wbf} --out #{out} 2>&1`
+  build_log = IO.popen(['ruby', BUILD, '--layout', lay, '--wb-ids', wbf, '--out', out],
+                       err: %i[child out], &:read)
   if File.exist?(out)
     # The layout file has multiple top-level <Page> roots; wrap for REXML.
     body = File.read(out).sub(/\A<\?xml[^>]*\?>\s*/, '')

@@ -28,6 +28,7 @@ If the user didn't supply a destination (no `--folder <id-or-name>`), ASK before
 If a destination is already supplied, honor it silently — don't ask.
 
 > **READ FIRST — `refs/operating-contract.md`**: the fidelity guardrails (render + value-check EVERY page against the source; never ship empty or silently drop a tile; don't spin — surface blockers).
+> **Modeling strategy — `refs/modeling-strategy.md`**: faithful reproduction of the source model is the DEFAULT (parity is the gate); an upstream OBT or Sigma-native materialization is an OPT-IN optimization for hot, join-heavy dashboards, re-verified against the same parity oracle. The converter never auto-flattens.
 > Status: **foundation** (converter MCP + browser shipped 2026-05-28).
 > Beads: converter = `beads-sigma-j5e`; CustomSql/DIRECT_QUERY fixup = `beads-sigma-vy4k`.
 > Defers to: `sigma-workbooks` (canonical workbook spec), `sigma-data-models` (DM spec), the local vendored converter (`converter/quicksight.mjs`, exporting `convertQuickSightToSigma` — the `convert_quicksight_to_sigma` MCP tool is a manual fallback only), and the shared vendor-neutral Sigma-side scripts (`post-and-readback.rb`, `put-layout.rb`, `find-or-pick-dm.rb`, `verify-parity.rb`) reused across the migration skills.
@@ -208,6 +209,8 @@ ruby scripts/post-and-readback.rb --type datamodel --spec dm-spec.json --out dm-
 ```
 
 `--fixup` forces `schemaVersion: 1`, names every element + its passthrough columns (so workbook masters can reference them), rewrites sql refs to `[Custom SQL/<ALIAS>]` form, and injects `folderId`. `post-and-readback.rb` confirms every column resolved to a concrete type — **no `error` columns**.
+
+**DM metric references (emit-first — leverage the semantic layer, don't duplicate it).** QuickSight has no source-side metrics, so `--fixup` also **EMITS** a governed metric per field-well aggregation (reads `analysis.json`, resolves the aggregation via the same `aggregation.json` catalog the builder uses, and attaches `{name, formula:"<Agg>([<Col>])"}` to the element(s) that carry the column). Then `build-workbook-from-quicksight.rb` prefers a **`[Metrics/<name>]`** reference over its inline aggregate when they match by formula equivalence (strip the master prefix so `Sum([Master/Net Revenue])` equals the metric's `Sum([Net Revenue])`) — via the shared binder `scripts/lib/metric_binding.rb`. SAFE: an unmapped aggregation is skipped (the builder loudly neutralizes it), window/calc/no-match measures fall back to inline, and no emitted metrics is byte-identical. Verified: `scripts/test-metric-reference.rb`.
 
 ## Phase 5 — Build the workbook
 

@@ -1,17 +1,19 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
-# Regression test for discovery's conditional extract re-fetch (PR-2 field-ops).
+# Regression test for discovery's OPT-IN extract re-fetch (B6 default flip).
 #
-# tableau-discover.rb re-downloads workbook content WITH includeExtract=true
+# tableau-discover.rb can re-download workbook content WITH includeExtract=true
 # when extract markers are present but the thin download carried no .hyper —
-# a 120s-timeout task that used to burn up to 4 attempts even on routes that
-# never consume the extract bytes. Now: --no-extract-refetch skips it with one
-# clear line (migrate-tableau.rb passes it on the --skip-extract-landing live
-# repoint), and the re-fetch task is capped at 2 attempts. Proven with a
-# STUBBED Tableau lib (the script + its real zip/fcp libs are copied to a
-# tmpdir whose lib/ carries a stub tableau_rest.rb, so no network is possible):
-# the stub serves a thin .twb with extract markers and fails the extract
-# re-fetch retryably, logging every fetch. Offline.
+# a 120s-timeout task that is the heaviest in discovery, and whose payload only
+# extract-landing routes ever consume. Contract under test: the re-fetch is
+# SKIPPED by default with one clear breadcrumb naming the opt-in flag;
+# --extract-refetch opts in (attempts still capped at 2); the old opt-out
+# spelling --no-extract-refetch stays accepted (migrate-tableau.rb passes it on
+# the --skip-extract-landing live repoint). Proven with a STUBBED Tableau lib
+# (the script + its real zip/fcp libs are copied to a tmpdir whose lib/ carries
+# a stub tableau_rest.rb, so no network is possible): the stub serves a thin
+# .twb with extract markers and fails the extract re-fetch retryably, logging
+# every fetch. Offline.
 #
 # Usage: ruby scripts/test-discover-extract-skip.rb
 
@@ -76,32 +78,52 @@ Dir.mktmpdir do |tmp|
   end
   File.write(File.join(tmp, 'lib', 'tableau_rest.rb'), STUB)
 
-  # (1) default + extract route: re-fetch attempted, capped at 2 attempts.
+  # (1) DEFAULT + extract route: NO re-fetch, one skip line naming the opt-in.
   log1 = File.join(tmp, 'fetch1.log')
   File.write(log1, '')
   code, out = run_discover(script, File.join(tmp, 'out1'), log1)
   fetches = File.readlines(log1).map(&:strip)
   check(code == 0, "default run completes (exit #{code})", fails)
-  check(fetches.count('download include_extract=false') == 1, 'thin download fetched once', fails)
+  check(fetches.count('download include_extract=false') == 1, 'thin download fetched once by default', fails)
   n_extract = fetches.count('download include_extract=true')
-  check(n_extract == 2, "extract re-fetch attempted and CAPPED at 2 attempts (got #{n_extract})", fails)
-  check(out.include?('re-fetching WITH includeExtract=true'), 'default route announces the re-fetch', fails)
+  check(n_extract.zero?, "NO extract re-fetch by default (got #{n_extract} includeExtract=true fetches)", fails)
+  skip_lines = out.lines.grep(/extract re-fetch SKIPPED/)
+  check(skip_lines.size == 1, "exactly one clear skip line by default (got #{skip_lines.size})", fails)
+  check(out.include?('--extract-refetch'), 'default skip line names the opt-in flag', fails)
 
-  # (2) --no-extract-refetch: NO extract fetch, one clear skip line.
+  # (2) --extract-refetch: re-fetch attempted, still CAPPED at 2 attempts.
   log2 = File.join(tmp, 'fetch2.log')
   File.write(log2, '')
-  code, out = run_discover(script, File.join(tmp, 'out2'), log2, '--no-extract-refetch')
+  code, out = run_discover(script, File.join(tmp, 'out2'), log2, '--extract-refetch')
   fetches = File.readlines(log2).map(&:strip)
-  check(code == 0, "--no-extract-refetch run completes (exit #{code})", fails)
-  check(fetches.count('download include_extract=true').zero?, 'no extract fetch under --no-extract-refetch', fails)
-  skip_lines = out.lines.grep(/extract re-fetch SKIPPED/)
-  check(skip_lines.size == 1, "exactly one clear skip line logged (got #{skip_lines.size})", fails)
-  check(out.include?('--no-extract-refetch'), 'skip line names the flag', fails)
+  check(code == 0, "--extract-refetch run completes (exit #{code})", fails)
+  n_extract = fetches.count('download include_extract=true')
+  check(n_extract == 2, "--extract-refetch attempts the re-fetch, CAPPED at 2 (got #{n_extract})", fails)
+  check(out.include?('re-fetching WITH includeExtract=true'), '--extract-refetch announces the re-fetch', fails)
 
-  # (3) migrate-tableau.rb wires the flag on the live-repoint route.
+  # (3) --no-extract-refetch (old opt-out spelling) stays accepted: no fetch,
+  # skip line still logged.
+  log3 = File.join(tmp, 'fetch3.log')
+  File.write(log3, '')
+  code, out = run_discover(script, File.join(tmp, 'out3'), log3, '--no-extract-refetch')
+  fetches = File.readlines(log3).map(&:strip)
+  check(code == 0, "--no-extract-refetch still accepted (exit #{code})", fails)
+  check(fetches.count('download include_extract=true').zero?, 'no extract fetch under --no-extract-refetch', fails)
+  check(out.lines.grep(/extract re-fetch SKIPPED/).size == 1, 'skip line still logged under --no-extract-refetch', fails)
+
+  # (4) migrate-tableau.rb keeps the --skip-extract-landing live repoint on the
+  # skip path. TWO spellings are correct under the opt-in default and both are
+  # accepted, so this check survives the coordinated orchestrator flip that
+  # restores auto-land (extract-refetch on landing routes):
+  #   old: '--no-extract-refetch' if opts[:skip_extract_landing]   (explicit skip)
+  #   new: '--extract-refetch' unless opts[:skip_extract_landing]  (landing routes opt in)
+  # The backwards combos (refetch ON the live repoint, or opt-out on landing
+  # routes only) match neither string and keep failing here.
   wiring = File.read(File.join(DIR, 'migrate-tableau.rb'))
-  check(wiring.include?("'--no-extract-refetch' if opts[:skip_extract_landing]"),
-        'orchestrator passes --no-extract-refetch on --skip-extract-landing (live repoint)', fails)
+  wired_old = wiring.include?("'--no-extract-refetch' if opts[:skip_extract_landing]")
+  wired_new = wiring.include?("'--extract-refetch' unless opts[:skip_extract_landing]")
+  check(wired_old || wired_new,
+        'orchestrator wires extract-refetch against :skip_extract_landing (either correct spelling)', fails)
 end
 
 puts

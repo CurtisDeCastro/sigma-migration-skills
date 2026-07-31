@@ -402,7 +402,14 @@ def cmd_summarize(args)
 end
 
 OPENAPI_CACHE = File.join(Dir.tmpdir, 'sigma-api.json').freeze
-OPENAPI_URL = 'https://help.sigmacomputing.com/openapi/sigma-computing-public-rest-api.json'.freeze
+# Full REST spec (incl. /v2/workbooks/spec element/control/format shapes inlined
+# by `kind`). Content-addressed docs asset — the hash pins one docs build and can
+# rotate on redeploy. If `capabilities` fails to fetch it, grab the current link
+# from the Sigma API reference docs (the public help.sigmacomputing.com/openapi.json
+# index no longer lists the workbook-spec shapes), or read a live workbook spec
+# (`wb-rep.rb pull` / GET /v2/workbooks/{id}/spec) and navigate pages[].elements[]
+# by `kind`. See sigma-workbooks SKILL.md "Sources of truth".
+OPENAPI_URL = 'https://files.buildwithfern.com/sigma.docs.buildwithfern.com/006ce360082503c7b849529b4c183cc4dc63360aff76038ca64669572c662b87/assets/openapi/sigma-computing-public-rest-api.json'.freeze
 
 # Depth-first walk mirroring jq's `.. | objects`: yields every Hash reachable
 # from `node` (including `node` itself), descending through both Hash values
@@ -455,9 +462,33 @@ def find_field_schema(kind_schema, field)
 end
 
 def cmd_capabilities(args)
-  kind = field = nil
+  kind = field = wb = nil
   if (i = args.index('--kind')) then kind = args[i + 1]; args.slice!(i, 2); end
   if (i = args.index('--field')) then field = args[i + 1]; args.slice!(i, 2); end
+  if (i = args.index('--workbook')) then wb = args[i + 1]; args.slice!(i, 2); end
+
+  # --workbook <id>: enumerate kinds/fields from a LIVE workbook readback — the
+  # durable source for workbook element/control/format shapes (the split public
+  # specs don't inline them; the compiled OpenAPI asset is transitional). Selects
+  # on each object's instance `kind`, not an OpenAPI properties.kind.enum schema.
+  if wb
+    spec = YAML.load(api(:get, "/v2/workbooks/#{wb}/spec"))
+    die "workbook #{wb} spec has no pages" unless spec.is_a?(Hash) && spec['pages']
+    if kind.nil?
+      walk_objects(spec).map { |o| o['kind'] }.select { |k| k.is_a?(String) && !k.empty? }.uniq.sort.each { |k| puts k }
+    else
+      matches = walk_objects(spec).select { |o| o['kind'] == kind }
+      die "no element/source/control with kind #{kind.inspect} in workbook #{wb}" if matches.empty?
+      if field.nil?
+        matches.flat_map(&:keys).uniq.sort.each { |k| puts k }
+      else
+        sample = matches.map { |m| m[field] }.compact.first
+        puts sample.nil? ? 'null' : JSON.pretty_generate(sample)
+      end
+    end
+    return
+  end
+
   unless File.exist?(OPENAPI_CACHE)
     uri = URI(OPENAPI_URL)
     res = Net::HTTP.get_response(uri)

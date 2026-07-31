@@ -36,6 +36,7 @@ corpus/
 | cognos/great-outdoors-module | Data Module JSON (plugin fixtures) | DM (25 elements) |
 | cognos/sales-overview-charts-report | report-spec XML (plugin fixtures) | workbook (17 elements) |
 | looker/skilltest-orders | LookML model+views+dashboard (plugin fixtures) | DM (explore + join) |
+| domo/orders-smoke | synthetic Domo DataSets + cards + Beast Modes | DM (2 elements) |
 
 ## Runner
 

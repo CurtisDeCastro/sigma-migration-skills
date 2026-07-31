@@ -72,7 +72,15 @@ FATSCALE2|el-fat-crosstab
 # literal that could pass for a real credential).
 # JWT-shaped literal: eyJ… base64url header + a dot-separated payload segment.
 eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}
-# A long (32+ char) base64/hex-ish literal assigned to a *SECRET/*TOKEN/*PAT/*PASSWORD var.
-(SECRET|TOKEN|_PAT|PASSWORD)[A-Z0-9_]*\s*[=:]\s*["']?[A-Za-z0-9+/=_-]{32,}
+# A long (32+ char) base64/hex-ish literal assigned to a *SECRET/*TOKEN/*PAT/*PASSWORD
+# var. The _PAT arm is anchored so it cannot absorb the H of *_PATH (the value
+# class includes '/' and ':', so path lists would read as credentials).
+((SECRET|TOKEN|PASSWORD)[A-Z0-9_]*|_PAT(_[A-Z0-9_]*)?)\s*[=:]\s*["']?[A-Za-z0-9+/=_-]{32,}
+# Colon-delimited multi-segment token in credential-key context (PAT-style values
+# whose ':' splits each segment below the 32-char rule above — lower threshold here).
+((SECRET|TOKEN|PASSWORD)[A-Z0-9_]*|_PAT(_[A-Z0-9_]*)?)["']?\s*[=:]\s*["']?[A-Za-z0-9+/=_-]{16,}:[A-Za-z0-9+/=_-]{16,}
+# Bare 64-hex literal adjacent to a client-id/credential key name (ID-suffixed
+# vars the *SECRET/*TOKEN alternation above misses).
+(CLIENT_?ID|API_?KEY|ACCESS_?KEY|CREDENTIAL)[A-Z0-9_]*["']?\s*[=:]\s*["']?[0-9a-f]{64}
 # Customer-identifying guards live in tools/hygiene-patterns.local.txt (gitignored) —
 # committing them would itself disclose the customer. Sweep loads both files.

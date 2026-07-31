@@ -30,7 +30,7 @@ Authoritative source: <https://docs.aws.amazon.com/quicksight/latest/APIReferenc
 | `PivotTableVisual` | [doc](https://docs.aws.amazon.com/quicksight/latest/APIReference/API_PivotTableVisual.html) | `pivot-table` | 🟡 n | native |
 | | | | | _pivot-table columnsBy/rowsBy sorts are not spec-expressible (warned + skipped)._ |
 | `GaugeChartVisual` | [doc](https://docs.aws.amazon.com/quicksight/latest/APIReference/API_GaugeChartVisual.html) | `kpi-chart` | 🟡 n | native-approximation |
-| | | | | _Sigma has no gauge element kind; a gauge surfaces a single value -> kpi-chart (mirrors the PBI builder)._ |
+| | | | | _Sigma has no gauge element kind; a gauge surfaces a single value -> kpi-chart (mirrors the PBI builder). plugin_archetype:gauge is an opt-in higher-fidelity annotation for the recreate-as-plugin gap-scan; the live builder's dispatch is unchanged (still kpi-chart)._ |
 | `FunnelChartVisual` | [doc](https://docs.aws.amazon.com/quicksight/latest/APIReference/API_FunnelChartVisual.html) | `bar-chart` | 🟡 n | native-approximation |
 | | | | | _Sigma has no funnel element kind; category+measure reads as bars -> bar-chart._ |
 | `TreeMapVisual` | [doc](https://docs.aws.amazon.com/quicksight/latest/APIReference/API_TreeMapVisual.html) | `bar-chart` | 🟡 n | native-approximation |

@@ -54,7 +54,7 @@ security = [
 ]
 tmp = Tempfile.new(['security-', '.json'])
 tmp.write(JSON.generate(security)); tmp.close
-out = `#{PyResolve.display} #{File.join(DIR, 'apply_sigma_rls.py').inspect} --from-security #{tmp.path.inspect} --print-plan 2>&1`
+out = IO.popen([*PyResolve.argv, File.join(DIR, 'apply_sigma_rls.py'), '--from-security', tmp.path, '--print-plan'], err: %i[child out], &:read)
 ok = $?.success?
 tmp.unlink
 check(ok, 'print-plan exits 0 with no token / --dm-id (offline)', fails)

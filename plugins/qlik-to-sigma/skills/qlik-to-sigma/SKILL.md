@@ -92,6 +92,7 @@ independently runnable script if you need to intervene mid-pipeline.
 
 **Read ALL of the following before replying or taking any action:**
 - `refs/operating-contract.md` — **READ FIRST**: the fidelity guardrails (render + value-check EVERY page against the source; never ship empty or silently drop a tile; don't spin — surface blockers).
+- `refs/modeling-strategy.md` — faithful reproduction is the DEFAULT (parity is the gate); an upstream OBT / Sigma-native materialization is an OPT-IN optimization for hot, join-heavy dashboards, re-verified against the same oracle. The converter never auto-flattens.
 - `refs/sigma-build-gotchas.md` — the hard-won spec rules (SQL element, workbook master, YAML responses). **This is the difference between a 2xx that errors at query time and a working migration.**
 - The repo `~/Desktop/sigma-data-model-mcp/CLAUDE.md` — Sigma DM spec correctness rules + the verified DEMO_DB.DEMO test connection.
 - `~/sigma-skills/sigma-workbooks/SKILL.md` + the Sigma OpenAPI — canonical workbook spec.
@@ -127,8 +128,10 @@ qlik-cli context (OAuth M2M or API key). `qlik context use <ctx>`.
 > bundled shim instead — same pipeline, different transport (QRS + Engine
 > WebSocket): set up auth per `refs/connection-onprem.md` (certs or JWT virtual
 > proxy), then `export QLIK_BIN="$PWD/scripts/qlik-onprem-shim.py"` before
-> Phase 1. Everything else below is unchanged. QlikView is NOT covered —
-> confirm the product first.
+> Phase 1. Everything else below is unchanged. **QlikView (`.qvw`) is a DIFFERENT
+> product** (no Cloud/REST API) — migrate it from its `-prj` project folder via
+> `--prj` (data model + workbook; see the QlikView note in Phase 5/6 below);
+> confirm which product you have first.
 
 ### Sigma access
 ```bash
@@ -189,13 +192,36 @@ MATCH / STALE-EXPLAINED / DIVERGENT. Offer the user the option to reload/repoint
 Qlik app first if they need matching snapshots. Only DIVERGENT (delta NOT explained by
 staleness) blocks GREEN.
 
-> **Legacy QlikView `.qvw`?** There's no Qlik Cloud API and no `.qvw` parser. Have the
-> customer enable "Create project folder" in QlikView Desktop and send the `<name>-prj/`
-> folder, then call **`mcp__sigma-data-model__convert_qlikview_prj_to_sigma`** with the
-> folder's files (`[{name,content}]` — `LoadScript.txt` + `CH*.xml`). It parses the load
-> script (tables/fields incl. `AS` renames) + chart expressions (measures) and runs the
-> same Phase-2 translation. No row counts in a `-prj` folder → relationships are by shared
-> field name only; review join directions.
+> **Legacy QlikView `.qvw`?** QlikView is a DIFFERENT product from Qlik Sense — no Cloud/REST
+> API and no `.qvw` parser. Migrate it from the developer-opt-in **`-prj` project folder**: have
+> the customer enable "Create project folder" in QlikView Desktop and send the whole
+> `<name>-prj/` folder, then run the SAME command as any migration:
+> ```bash
+> ruby scripts/migrate-qlik.rb --prj <path/to/Name-prj> --connection <SIGMA_CONNECTION_ID> \
+>   [--database DB --schema SCHEMA --folder <SIGMA_FOLDER_ID> --name '<prefix>']
+> ```
+> A `--prj` folder is auto-detected: `scripts/qlik-prj-discover.py` parses it into the SAME
+> discovery artifacts the Qlik Sense pipeline consumes, so **the full pipeline runs unchanged —
+> data model AND workbook**. It reads:
+> - `LoadScript.txt` → tables/fields (incl. `AS` renames; a `lib://…/T.qvd` load resolves to
+>   warehouse table `T`) → the Sigma data model.
+> - `QlikViewProject.xml` → sheets + each object's `<Rect>` → the Sigma page layout (24-col grid).
+> - `CH*.xml` → `<GraphMode>` (chart kind → Sigma viz), `<Dimensions>`, and `<Expressions>`
+>   (measures, same Set Analysis / Range / Dual / Class translation) → the workbook charts.
+>
+> **Scope / caveats (be honest with customers):** a `-prj` folder has **no live engine**, so
+> parity is **warehouse-only** (Sigma vs. the source warehouse — no Qlik-side value snapshot), and
+> chart-kind/layout fidelity is best-effort (there is no QlikView renderer to diff against). Because
+> QlikView has **no capture API**, the `--prj` discovery step (`qlik-prj-discover.py`) prints an
+> `[ASSIST]` telling you to **`AskUserQuestion` for a screenshot of each sheet** and drop them in
+> `<workdir>/dashboards/<sheetId>.png` — that **arms** the source-side gates (Phase-1d source-anchors,
+> visual-compare, visual-similarity). If the user has none, those gates are **WAIVED with a stated
+> reason** at Phase 6 (never a silent skip). Relationships are inferred from **shared field names only** (a `-prj`
+> folder carries no row counts) → review join directions in Sigma. All **13 QlikView chart types**
+> are mapped (bar/line/combo/pie/scatter/straight-table/pivot-table exactly; gauge→KPI, and
+> radar/grid/block/funnel/mekko→closest Sigma kind, each flagged as an **approximation** in the
+> warnings since Sigma has no exact equivalent). An unrecognized `GraphMode` variant falls back to a
+> bar chart with a loud warning — never a silent wrong default.
 
 ## Phase 2 — Convert (convert_qlik_to_sigma)
 **Local by default, zero-config, no MCP.** `migrate-qlik.rb` runs
@@ -280,6 +306,18 @@ formats, sorts, null-suppression — see the script docstring for the full mappi
 The Qlik cell grid maps 1:1 onto the 24-col Sigma grid. Element shapes + the
 `source.dataModelId` requirement in `refs/sigma-build-gotchas.md`.
 POST `/v2/workbooks/spec`, then `scripts/vendor/put-layout.rb` applies the layout XML.
+
+**DM metric references (leverage the semantic layer, don't duplicate it).** A measure
+column prefers a governed **`[Metrics/<name>]`** reference over re-deriving the aggregation
+inline, when the measure's translated inline aggregate matches a metric hosted on the denorm
+element the master sources. Match is by FORMULA equivalence — strip the master prefix so
+`Sum([Master/Net Revenue])` equals a metric's `Sum([Net Revenue])` — so it's naming-independent
+and SAFE: ratios with no exact-metric match, measures in a different representation (e.g. the
+inline `CountDistinct(...)` vs a Qlik-form `Count(DISTINCT ...)` metric), and any non-match all
+fall back to inline. `migrate-qlik.rb` hands the freshly-built DM spec to the builder via
+`--dm-spec`; the shared binder (`scripts/lib/metric_binding.py`, resolving own + inherited
+metrics through the `source.elementId` chain) does the matching. No `--dm-spec` / the DM-reuse
+path → inline, byte-identical to before. Verified: `tests/test_metric_reference.py`.
 
 **Filterpanes/listboxes → controls (NOT skipped).** Each filterpane child
 listbox (discovered via `qChildList` + per-listbox layout) and standalone

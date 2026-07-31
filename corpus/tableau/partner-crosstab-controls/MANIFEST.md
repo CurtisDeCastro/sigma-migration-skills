@@ -1,7 +1,7 @@
 # tableau / partner-crosstab-controls
 
-Hand-authored minimal `.twb` reproducing the three EDNA "Partner Landscape"
-regressions a customer reported 2026-06-25 (a 10 MB, 86-worksheet partner
+Hand-authored minimal `.twb` reproducing three partner-crosstab regressions an
+enterprise customer reported 2026-06-25 (a 10 MB, 86-worksheet partner
 bookings workbook whose data we don't have, so this fixture mirrors the SHAPES
 on the live DEMO_DB.DEMO retail star instead):
 
@@ -10,8 +10,8 @@ on the live DEMO_DB.DEMO retail star instead):
    columns + Grand Total) authored with Tableau's DEFAULT `Automatic` mark —
    `parse-twb-layout.rb` only treated `Text`/`Square` marks as crosstabs, so
    they fell through to flat `table`/`kpi`, dropping the grouped column headers
-   and Grand Total. (Real EDNA: only 2 of 86 worksheets detected as crosstab;
-   ≥28 had dims on both shelves.)
+   and Grand Total. (Real customer workbook: only 2 of 86 worksheets detected
+   as crosstab; ≥28 had dims on both shelves.)
 2. **Dashboard quick-filters dropped.** ~40 left-rail filter controls whose
    columns carry NO `caption` attribute (`[none:Customer Geo:nk]`), are
    multi-word, are Tableau GROUPS (`[Partner Level (group)]`), or contain a
@@ -19,14 +19,26 @@ on the live DEMO_DB.DEMO retail star instead):
    caption-bearing columns and truncated multi-word names to the first word, and
    `guid_from_param` choked on `(group)` / `(copy)` / `/` — so every shared
    filter resolved to a null caption and `build-charts` skipped all of them
-   ("no resolvable column_caption"). (Real EDNA: 0 of 70 shared filters
-   resolved → fixed to 70/70.)
+   ("no resolvable column_caption"). (Real customer workbook: 0 of 70 shared
+   filters resolved → fixed to 70/70.)
 3. **Measure-switcher parameter showed raw integer codes.** An integer parameter
    (`Summary $ Choose`, 1→TCV / 2→Product TCV / 3→ACV) whose CASE swaps which
    aggregated FIELD is displayed. The segmented control emitted `labels: []` so
    it rendered as `1 / 2 / 3` instead of the alias labels.
 
 Synthetic XML (no live tenant), modeled on real Tableau 2024.1 `.twb` shapes.
+
+**Vocabulary retention decision (2026-07-22):** the field vocabulary this
+fixture family mirrors (the measure-switcher parameter name and its
+integer→measure mapping, the geo/group/slash filter captions) and the
+engagement metrics above (report date, size/worksheet/filter counts) were
+reviewed against the hygiene contract and judged **generic BI
+mirror-vocabulary, not customer-identifying** — retained deliberately across
+`.twb` + MANIFEST + tests, and intentionally NOT added to any hygiene pattern
+file. Recorded so the next hygiene pass does not re-litigate. If a future
+review disagrees, rename across the whole fixture family (`.twb`, this
+MANIFEST, `chart-specs.json`, and the param-swap test) in one PR, adding local
+guards first per the pattern-first rule.
 
 ## Artifacts
 
@@ -46,7 +58,7 @@ ruby $S/parse-twb-layout.rb workbook-content.twb dashboard-layout.json
 ruby $S/build-charts-from-signals.rb --tableau-dir . --layout dashboard-layout.json \
   --meta dashboard-layout-meta.json --master-map master-columns.json \
   --master-element-id master --auto-controls --page-per-worksheet \
-  --title "Partner Landscape" --out chart-specs.json
+  --title "Partner Bookings Crosstab" --out chart-specs.json
 ```
 
 `dashboard-layout*.json` / `control-scope.json` are regenerable intermediates

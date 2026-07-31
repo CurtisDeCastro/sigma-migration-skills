@@ -147,8 +147,13 @@ Dir.mktmpdir do |d|
   data_els = raw['data_elements'] || []
 end
 
+# kpi-chart elements carry `name` as the house-standard object form
+# {'text'=>...} (KpiCard.build); every other kind still carries a plain
+# String. Accept both so this name-based lookup doesn't break on the shape.
+name_of = ->(e) { n = e && e['name']; n.is_a?(Hash) ? n['text'] : n }
+
 puts 'placeholder rejection + scoped binding'
-kpi = els.find { |e| e['kind'] == 'kpi-chart' && e['name'].to_s == 'Students' }
+kpi = els.find { |e| e['kind'] == 'kpi-chart' && name_of.call(e) == 'Students' }
 check(!kpi.nil?, 'Students KPI element emitted', fails)
 kcol = kpi && (kpi['columns'] || []).first
 check(kcol && !kcol['formula'].to_s.include?('min(-1.0)'),
@@ -175,7 +180,7 @@ check(log.include?("'Students' KPI is parameter-scoped — emitted hidden filter
       'scoped recipe is disclosed in the build log', fails)
 
 puts 'unresolvable scope stays manual'
-myst = els.find { |e| e['kind'] == 'kpi-chart' && e['name'].to_s == 'Mystery' }
+myst = els.find { |e| e['kind'] == 'kpi-chart' && name_of.call(e) == 'Mystery' }
 check(!myst.nil?, 'Mystery KPI still emitted (fallback, not dropped)', fails)
 check(myst && myst.dig('source', 'elementId') != (helper && helper['id']),
       'Mystery KPI does NOT silently borrow another tile\'s scope', fails)

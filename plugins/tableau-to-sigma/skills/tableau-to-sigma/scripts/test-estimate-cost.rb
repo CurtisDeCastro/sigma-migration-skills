@@ -65,7 +65,7 @@ puts '— workdir mode: minimal signals fixture —'
 base_turns = nil
 Dir.mktmpdir do |d|
   write_fixture(d)
-  out = `ruby #{ESTIMATE} --workdir #{d} 2>&1`; st = $?.exitstatus
+  out = IO.popen(['ruby', ESTIMATE, '--workdir', d], err: %i[child out], &:read); st = $?.exitstatus
   ce_path = File.join(d, 'cost-estimate.json')
   check(st == 0, "estimator exits 0 (got #{st}: #{out.lines.first})", fails)
   check(File.exist?(ce_path), 'writes <workdir>/cost-estimate.json by default', fails)
@@ -99,7 +99,7 @@ end
 puts '— workdir mode: missing gap scan degrades gracefully —'
 Dir.mktmpdir do |d|
   write_fixture(d, with_gaps: false)
-  out = `ruby #{ESTIMATE} --workdir #{d} 2>&1`; st = $?.exitstatus
+  out = IO.popen(['ruby', ESTIMATE, '--workdir', d], err: %i[child out], &:read); st = $?.exitstatus
   ce = JSON.parse(File.read(File.join(d, 'cost-estimate.json'))) rescue nil
   check(st == 0 && ce, "no gap scan → still exits 0 and writes the artifact (got #{st})", fails)
   missing = (ce && ce.dig('inputs', 'missing') || []).map { |m| m['artifact'] }
@@ -117,7 +117,7 @@ end
 
 puts '— workdir mode: empty workdir (fully degraded) —'
 Dir.mktmpdir do |d|
-  out = `ruby #{ESTIMATE} --workdir #{d} 2>&1`; st = $?.exitstatus
+  out = IO.popen(['ruby', ESTIMATE, '--workdir', d], err: %i[child out], &:read); st = $?.exitstatus
   ce = JSON.parse(File.read(File.join(d, 'cost-estimate.json'))) rescue nil
   check(st == 0 && ce, "empty workdir → still exits 0 with an artifact (got #{st})", fails)
   missing = (ce && ce.dig('inputs', 'missing') || []).map { |m| m['artifact'] }
@@ -183,7 +183,7 @@ Dir.mktmpdir do |d|
     'workbook' => { 'name' => 'Legacy WB', 'views' => { 'view' => [
       { 'sheetType' => 'dashboard' }, { 'sheetType' => 'worksheet' }, { 'sheetType' => 'worksheet' }
     ] } }))
-  out = `ruby #{ESTIMATE} --workbook #{wb} 2>&1`; st = $?.exitstatus
+  out = IO.popen(['ruby', ESTIMATE, '--workbook', wb], err: %i[child out], &:read); st = $?.exitstatus
   ce = JSON.parse(out) rescue nil
   check(st == 0 && ce && ce['workbook'] == 'Legacy WB' && ce['confidence'] == 'rough',
         "legacy --workbook mode emits a rough estimate to stdout (got #{st})", fails)

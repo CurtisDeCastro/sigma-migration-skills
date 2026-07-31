@@ -183,7 +183,7 @@ Dir.mktmpdir do |d|
                   'asset' => nil, 'is_background' => false }]
              ))
   out = File.join(d, 'layout.xml')
-  log = `#{RUBY} #{BUILD} --layout #{File.join(d, 'dl.json')} --wb-ids #{File.join(d, 'wb.json')} --out #{out} 2>&1`
+  log = IO.popen([RUBY, BUILD, '--layout', File.join(d, 'dl.json'), '--wb-ids', File.join(d, 'wb.json'), '--out', out], err: %i[child out], &:read)
   xml = File.read(out) if File.exist?(out)
   cf = File.join(d, 'layout-census.json')
   census = JSON.parse(File.read(cf)) if File.exist?(cf)

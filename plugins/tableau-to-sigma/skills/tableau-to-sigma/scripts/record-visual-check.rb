@@ -7,7 +7,10 @@
 # comparison actually happened instead of trusting a prose "I looked at it".
 #
 # Run this AFTER you have rendered the Sigma page (sigma-export-png.py) AND read
-# it side-by-side against the source dashboard PNG (Tableau MCP get-view-image):
+# it side-by-side against the source dashboard PNG captured in discovery (Tableau MCP
+# get-view-image, Power BI page export, QuickSight StartDashboardSnapshotJob,
+# MicroStrategy export-dossier-pdf.py, … — whatever this plugin's Phase-1d step
+# writes; a customer screenshot dropped at the same path is equally valid):
 #
 #   ruby scripts/record-visual-check.rb --workdir /tmp/<name> --agent-vision true \
 #     --verdict pass            --notes "matches source; KPI row + 3 trend tiles aligned"
@@ -280,7 +283,10 @@ end
 path = File.join(opts[:dir], 'parity-final.json')
 unless File.exist?(path)
   warn "FATAL: #{path} not found — the visual verdict records ONTO the parity result, so finalize must run first:"
-  warn "  ruby scripts/phase6-parity.rb --tableau #{opts[:dir]} --finalize --actuals #{File.join(opts[:dir], 'parity-actuals.json')}"
+  # Each converter names its own parity script (phase6-parity.rb,
+  # phase6-parity-quicksight.rb, …) and its own source flag, so point at the
+  # plugin's finalize step generically rather than hard-coding one tool's CLI.
+  warn "  ruby scripts/phase6-parity*.rb --workdir #{opts[:dir]} --finalize   (this plugin's Phase-6/7 finalize step)"
   warn '  then re-run this exact record-visual-check command. (Field-caught ordering friction, run 2 ~2 min.)'
   exit 1
 end
