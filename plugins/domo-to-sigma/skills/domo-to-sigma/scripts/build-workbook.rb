@@ -633,10 +633,18 @@ end
 # LIVE-VALIDATED FIX (2026-07-30): two ways a column silently became invalid —
 #   1. a Beast-Mode-bound column whose id never resolved to a name emitted
 #        Sum([Master/])            -> Sigma: "Invalid formula"
-#   2. a Beast-Mode-bound column whose formula never TRANSLATED (the common case:
-#      74% of real Beast Modes fail the SQL->Sigma converter, see
-#      refs/live-validation-2026-07-30.md) emitted
+#   2. a Beast-Mode-bound column whose formula never TRANSLATED emitted
 #        Sum([Master/Avg Order Value])  -> Sigma: "dependency not found"
+#      HISTORICAL CONTEXT for why this path exists: when this was written, 74%
+#      of real Beast Modes failed the SQL->Sigma converter (CASE WHEN and
+#      COUNT(DISTINCT) both mistranslated; see refs/live-validation-2026-07-30.md).
+#      That's fixed now (sigma-data-model-mcp PR #115 then #116) — re-measured,
+#      37/74 distinct Beast Modes match a converter rule exactly, and the rest
+#      no longer come back corrupted, just not fully translated (e.g. an infix
+#      `LIKE` with no Sigma equivalent). This path stays: convert-beast-modes.rb
+#      still correctly DROPS a Beast Mode it can't translate rather than
+#      shipping bad SQL, so a bound column with no sigmaFormula is still a real,
+#      if now much rarer, case this guard must keep catching.
 # Either way Sigma rejects the request and the ENTIRE workbook POST fails — one
 # bad column takes down every other element. Dropping the column (and, if it
 # leaves nothing to plot, the element) keeps the rest of the migration postable

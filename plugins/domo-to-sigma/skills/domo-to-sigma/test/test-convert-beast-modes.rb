@@ -86,9 +86,13 @@ ok(errs2.empty?, 'clean aggregate has no lint errors')
 
 # ---------------------------------------------------------------------------
 # discovery/formula-overrides.json escape hatch (resolve_entry / find_override
-# / unmatched_override_keys) — the operator sidecar for Beast Modes the
-# shared converter cannot translate (CASE WHEN / COUNT(DISTINCT) — see
-# refs/live-validation-2026-07-30.md).
+# / unmatched_override_keys) — the operator sidecar for whatever a Beast Mode
+# the shared converter still can't translate. Historically that was CASE WHEN
+# / COUNT(DISTINCT) / double-bracketed ALL-CAPS refs; all three are fixed now
+# (sigma-data-model-mcp PR #115 then #116 — see
+# refs/live-validation-2026-07-30.md). The mechanism itself is unaffected by
+# that fix and is exercised below purely as a resolve_entry/find_override
+# mechanism test, independent of which construct currently needs it.
 # ---------------------------------------------------------------------------
 
 puts '== resolve_entry: override fills a formula that is missing (id-keyed) =='

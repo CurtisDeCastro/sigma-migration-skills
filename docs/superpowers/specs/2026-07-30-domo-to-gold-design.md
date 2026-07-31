@@ -81,24 +81,39 @@ plan when it starts.
 > over-stripping: only strip when the parens are genuinely balanced and enclose the
 > WHOLE expression — `(a) + (b)` must not become `a) + (b`.
 
-**Scope grew during implementation: ten defects fixed across two PRs, not two.**
-Discovery past the two beads in the original spec found seven
+**Scope grew during implementation: eleven defects fixed across two PRs, not
+two.** Discovery past the two beads in the original spec found seven
 independently-reviewable defects in PR #115 (A1 `jva2` outer-parens anchor; A2
 `sqp1` `COUNT(DISTINCT x)`; A3 ALL-CAPS text *inside string literals* rewritten as
 a column ref; A4 SQL keywords before `(` treated as functions; A5 zero-arg mapped
 functions doubling their own parens — `Today()()`; A6 single-quoted literals
 surviving into Sigma output instead of Sigma's double-quoted form; A7 unmapped
-functions silently invented as fake Sigma names with no warning), plus two more
-found mid-implementation: an embedded/nested `CASE` inside arithmetic or an
-aggregate (`100 * (CASE …)`, `SUM((CASE …)) / COUNT(x)`) never reaching the CASE
-branch even after the A1 anchor fix, since the whole sub-expression isn't itself
-`^CASE`-anchored; and a final-whole-branch-review Critical finding that the
-`COUNT(DISTINCT …)` scanner (A2's fix) was not bracket-atomic, so an apostrophe
-inside a bracketed identifier (`COUNT(DISTINCT [Manager's Approval])`) could trap
-it mid-scan. That is nine, all fixed in PR #115 and covered by the shared
-regression suite.
+functions silently invented as fake Sigma names with no warning), plus three more
+found mid-implementation, each a genuinely distinct root cause and symptom:
 
-**A tenth, found by Task 8's re-verification of `domo-to-sigma`'s own
+- **Task 4b** — `lookConvertCase` split on a bare `WHEN` with no nesting
+  awareness, so a CASE containing a *nested* CASE (Domo does this inside
+  `COUNT((CASE … END))`) got cut across the inner CASE's own keywords, one
+  branch value swallowing part of the inner CASE's text. Symptom: **unbalanced
+  parens, 14/74.** Pre-existing bug that A1's paren-strip made *reachable* (before
+  A1, these formulas never got as far as the CASE rule at all).
+- **Task 4c** — a `CASE` embedded inside arithmetic or an aggregate (`100 * (CASE
+  …)`, `SUM((CASE …)) / COUNT(x)`) never reached the CASE branch even after the
+  A1 anchor fix, because the *outer* expression isn't itself `^CASE`-anchored —
+  A1 only unblocks a CASE that IS the whole expression. Symptom: **residual raw
+  `CASE`/`WHEN`/`THEN`/`END` text surviving into output, 16/74.**
+- **Final-whole-branch-review Critical** — the `COUNT(DISTINCT …)` scanner (A2's
+  fix) was not bracket-atomic, so an apostrophe inside a bracketed identifier
+  (`COUNT(DISTINCT [Manager's Approval])`) could trap it mid-scan.
+
+4b and 4c are not the same defect — different root cause (a hand-rolled
+`WHEN`-splitter with no depth tracking vs. a rule anchor that only matches a
+whole-expression CASE), different symptom (unbalanced parens vs. residual raw
+CASE text), and different fixes (a depth-aware scanner vs. a new call site for
+the existing scanner) — do not collapse them into one line item. That's ten,
+all fixed in PR #115 and covered by the shared regression suite.
+
+**An eleventh, found by Task 8's re-verification of `domo-to-sigma`'s own
 `formula-overrides.json` sidecar against the PR #115 fix: bead `qorq`** — the
 converter's bracket-wrapping pass re-wrapped an already-bracketed ALL-CAPS
 identifier (`[NET_REVENUE]` → `[[Net Revenue]]`, invalid Sigma), because its
@@ -108,7 +123,8 @@ identifiers are mostly mixed-case (Salesforce-style `IsWon`/`CloseDate`), not
 ALL-CAPS like real Domo/Snowflake columns — the corpus's own casing convention
 hid the defect from every measurement run against it. **Fixed in PR #116**
 (the bracket-wrapping pass now masks `[…]` spans before its bare-identifier regex
-runs), closing bead `qorq`. Ten defects fixed total, not two, and not nine.
+runs), closing bead `qorq`. **Eleven defects fixed total, across two PRs — not
+two, not nine, not ten.**
 
 **The measured result (74-formula live corpus, cross-checked by three independent
 harnesses):**

@@ -225,8 +225,12 @@ def resolve_entry(entry, overrides)
     warnings << "#{entry['name'] || entry['id']}: sigmaFormula supplied by " \
       "discovery/formula-overrides.json (hand-authored) — automated conversion " \
       "(convert_sql_to_sigma_formula) did not produce a usable formula for this " \
-      "Beast Mode; verify by hand (refs/live-validation-2026-07-30.md — the " \
-      "formula layer is NOT 'nearly free')."
+      "Beast Mode; verify by hand. CASE WHEN / COUNT(DISTINCT) / double-bracketed " \
+      "ALL-CAPS refs are fixed (sigma-data-model-mcp PR #115, #116) so this is NOT " \
+      "that historical 74%-fail case — check refs/live-validation-2026-07-30.md " \
+      "and this script's still-open gaps (WEEKDAY→DAYOFWEEK, CEILING/FLOOR " \
+      "aggregates, untranslatable infix LIKE) for what actually still needs a " \
+      "hand-authored formula."
   end
   [resolved, warnings]
 end
