@@ -53,16 +53,45 @@ card→element map.
 existing `mcp__sigma-data-model__convert_sql_to_sigma_formula` tool — no bespoke
 parser like Power BI's DAX.
 
-> ⛔ **CORRECTED 2026-07-30 — the formula layer is NOT "nearly free."** This
-> section used to claim it was. Measured over 81 real Beast Modes on a live
-> instance, **74% translate to invalid Sigma**: `CASE WHEN` (used by **71%**) is
-> not converted to Sigma's `If()` at all, and `COUNT(DISTINCT x)` renders
-> `DISTINCT` as a column reference. Because `convert-beast-modes.rb` correctly
-> DROPS entries without a `sigmaFormula` rather than shipping bad output, the
-> practical result is that Beast Modes **vanish** from the migration and the DM
-> ships with no calc columns. Budget real time for hand-authoring conditional
-> Beast Modes until the shared converter is fixed. Full evidence and the exact
-> broken outputs: `refs/live-validation-2026-07-30.md`.
+> ✅ **UPDATED 2026-07-30 — the historical "NOT nearly free" finding is
+> RESOLVED, with a calibrated result, not a swing to "it just works."** A live
+> measurement on 81 real Beast Modes originally found 74% translating to
+> invalid Sigma: `CASE WHEN` (71% of formulas) wasn't converted to `If()` at
+> all, and `COUNT(DISTINCT x)` rendered `DISTINCT` as a column reference. Both
+> are fixed upstream (sigma-data-model-mcp PR #115), and a third defect this
+> fix surfaced — Domo's real ALL-CAPS backtick-quoted columns coming back
+> double-bracketed (`[[Net Revenue]]`) — is also fixed (PR #116). Re-measured
+> on the deduplicated **74-distinct-formula** corpus. Both columns below were
+> measured with the identical harness and identical `normalize_bm` steps
+> (backticks → `[brackets]` AND `WEEKDAY` → `DAYOFWEEK`), so they are
+> genuinely comparable:
+>
+> | metric | before | after |
+> |---|---|---|
+> | matched a rule | 0 | 37 |
+> | leaked `[Distinct]` | 5 | 0 |
+> | `And()`/`Or()` call form | 52 | 0 |
+> | `Today()()` | 21 | 0 |
+> | residual raw `CASE` in output | 54 | 0 |
+> | residual untranslated infix | — | 1, honestly reported |
+>
+> **Accurate framing: 37/74 (50%) now match a converter rule exactly.** The
+> rest fall through to the generic expression converter, which no longer
+> *corrupts* them (no leaked `[Distinct]`, no `And()`/`Or()` call-form nulls,
+> no `Today()()`, no raw `CASE` residue, no double-bracketing) but does not
+> *fully translate* every shape either — infix `LIKE` still has no Sigma
+> equivalent and is correctly reported as unconverted rather than silently
+> shipped. Because `convert-beast-modes.rb` correctly DROPS entries without a
+> `sigmaFormula` rather than shipping bad output, a Beast Mode using an
+> untranslatable construct still needs the `formula-overrides.json` sidecar —
+> that mechanism is unchanged and still the right escape hatch, it is just no
+> longer load-bearing for CASE WHEN or COUNT(DISTINCT). One more thing to
+> budget for: `convert-beast-modes.rb`'s own `WEEKDAY` → `DAYOFWEEK`
+> normalization step is *counterproductive* — `WEEKDAY(...)` converts cleanly
+> on its own, but this step rewrites it to `DAYOFWEEK(...)` first, which is
+> **not** a real Sigma function (still open; see the note in
+> `scripts/convert-beast-modes.rb`). Full evidence and the exact
+> before/after outputs: `refs/live-validation-2026-07-30.md`.
 
 The other work is *extraction* (card defs + Beast Mode text + layout out of Domo)
 and *layout/binding* (cards → Sigma elements on a 24-col grid; note Domo's own card
@@ -234,8 +263,22 @@ for a classic page** (live-validated 2026-07-30 — see
 - `collections[]` (sectioning) has no reachable write endpoint
 - even card **creation order does not control page order**
 
-So for a classic Domo page the ONLY route to real layout fidelity is a human-supplied
-image. **Explicitly ask the operator:**
+> **⚠️ NARROWED 2026-07-30 — this is true for a *classic* page, not for every
+> page.** `refs/page-layout-v4.md` — corroborated on two independent live Domo
+> tenants — found a page style, **v4-inline**, where geometry (and `HEADER`
+> section-divider position) IS readable and exact via the API:
+> `pageLayoutV4.standard.template[]` joined to `content[]` on `contentKey` (grid
+> is 60-wide, so Domo → Sigma scales ×0.4). A page qualifies if `pageLayoutV4` is
+> present in its stacks response with `includeV4PageLayouts=true` — read
+> `refs/page-layout-v4.md` for the full three-page-style taxonomy before assuming
+> a page is "classic." That ref also records two defects that currently keep
+> this unusable end-to-end: `domo_rest.rb`'s `cards_for_page` never requests the
+> v4 payload, and `domo_sigma_util.rb:151` digs a `pageLayoutV4.cards` key that
+> doesn't exist, so the v4 branch silently yields nothing until both are fixed.
+> Until then, treat a v4-inline page the same as a classic one below.
+
+So for a page without readable v4 geometry the ONLY route to real layout fidelity
+is a human-supplied image. **Explicitly ask the operator:**
 
 > "Domo's API doesn't expose this page's layout. Can you paste or export a
 > screenshot of the page? I'll read the arrangement from it so the Sigma dashboard
@@ -257,7 +300,9 @@ same composition the `sigma-workbooks` / `branded-dashboard-format` authoring sk
 use; see `refs/layout-visual-qa.md`.
 
 Geometry preference order used by Phase 5d, highest first:
-1. real API x/y/w/h pixel geometry (mason / Domo-App pages only)
+1. real API x/y/w/h pixel geometry (`pageLayoutV4` present — see the narrowing
+   note above; blocked by two open code defects documented in
+   `refs/page-layout-v4.md`)
 2. `discovery/layout-observed.json` (read from a screenshot)
 3. `collections[]` + a non-empty `size` token
 4. the element-kind default composition above

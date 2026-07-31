@@ -22,35 +22,54 @@
 #
 # HAND-AUTHORED ESCAPE HATCH — discovery/formula-overrides.json
 #
-# The shared `convert_sql_to_sigma_formula` does NOT translate `CASE WHEN`
-# (emits an invalid `CASE When(...) Else(...) END` hybrid — bead jva2) and
-# mis-renders `COUNT(DISTINCT x)` as a column reference (bead qorq is our own
-# double-bracketing bug on top of that; jva2/sqp1 are upstream). Measured live:
-# 74% of real Beast Modes hit one of these and are correctly left with no
-# sigmaFormula by whoever ran Phase 2 — see "⛔ The formula layer is NOT
-# 'nearly free'" in refs/live-validation-2026-07-30.md. Rather than ship bad
-# SQL, `--lint` DROPS those entries (good, honest behaviour) — but until the
-# upstream bugs are fixed, that means real calc columns silently vanish.
+# UPDATE 2026-07-30: the shared `convert_sql_to_sigma_formula` DOES now
+# translate `CASE WHEN` (→ `If(cond, then, else)`) and `COUNT(DISTINCT x)`
+# (→ `CountDistinct(x)`) — fixed upstream in sigma-data-model-mcp PR #115
+# (squashed as 2ba3ea8). Beads jva2 and sqp1 are closed.
+#
+# UPDATE 2026-07-30 (later same day): the double-bracketing collision this
+# script's own step 1 used to trigger — handing the converter an
+# ALREADY-bracketed, ALL-CAPS identifier (`SUM(\`NET_REVENUE\`)` → step 1 →
+# `SUM([NET_REVENUE])`), which the converter's own bracket-wrapping pass used
+# to wrap AGAIN into invalid `Sum([[Net Revenue]])` — is **also fixed**
+# upstream, in sigma-data-model-mcp PR #116. Bead `qorq` is closed. Re-verified
+# live against PR #116: all four Beast Modes that previously needed this
+# sidecar (Margin Pct, Margin Pct 2, Avg Order Value, Return Rate) now convert
+# to the hand-authored formula exactly (two of the four differ only by a
+# semantically-inert wrapping paren — `(a / b)` vs `a / b`, the same formula in
+# Sigma) and their override entries have been removed. See
+# refs/live-validation-2026-07-30.md, "⛔ The formula layer is NOT 'nearly
+# free'" — now annotated RESOLVED (all three bugs) with the corrected
+# re-measurement.
+#
+# The sidecar mechanism STAYS: it is still the right escape hatch for whatever
+# the shared converter cannot yet do next — e.g. the still-open gaps this
+# script itself flags via `preWarnings` (CEILING/FLOOR-as-aggregate, unmapped
+# functions, window/LOD Beast Modes) or a shape the corpus hasn't hit yet. It
+# is simply no longer load-bearing for the CASE WHEN / COUNT(DISTINCT) /
+# double-bracketing defect class.
 #
 # discovery/formula-overrides.json is an OPERATOR-authored sidecar (same
 # convention as discovery/kpi-overrides.json / dataset-map.json — this script
 # only ever READS it, so re-running normalize or --lint never clobbers it).
 # Keyed by the Beast Mode's stable `id` (`calculation_<uuid>`, survives
 # re-runs) or its human-friendly `name` (accepted alternate key, since ids are
-# opaque). Worked example — a CASE WHEN guard the converter mangles, and a
-# COUNT(DISTINCT) the converter mis-parses as a column ref:
+# opaque). Worked example — Beast Mode's `CEILING()` is an AGGREGATE (rounded
+# MAX), not math rounding, which the generic SQL converter has no way to know
+# (see the CEILING/FLOOR warning below); this is the kind of shape the sidecar
+# still earns its keep on:
 #
 #   {
 #     "calculation_4cd7e7c8-...": {
-#       "sigmaFormula": "If(Sum([Net Revenue]) = 0, 0, Sum([Gross Profit]) / Sum([Net Revenue]))",
-#       "note": "hand-authored: CASE WHEN unsupported by convert_sql_to_sigma_formula (bead jva2)"
+#       "sigmaFormula": "Round(Max([Net Revenue]), 0)",
+#       "note": "hand-authored: CEILING() is a Beast Mode AGGREGATE (rounded MAX), not math rounding — the generic converter cannot know this"
 #     },
 #     "Avg Order Value": {
 #       "sigmaFormula": "Sum([Net Revenue]) / CountDistinct([Order Id])"
 #     }
 #   }
 #
-# `If`, `Sum`, `CountDistinct` verified against
+# `Round`, `Max`, `Sum`, `CountDistinct` verified against
 # plugins/sigma-authoring/skills/sigma-workbooks/reference/specification/formulas.md.
 #
 # Rules (enforced in resolve_entry / unmatched_override_keys below):
@@ -84,6 +103,19 @@ def normalize_bm(sql, klass = nil)
   s = s.gsub(/`([^`]+)`/) { "[#{$1}]" }
 
   # 2. WEEKDAY → DAYOFWEEK (Beast Mode does this itself; replicate for parity).
+  #
+  # ⚠️ MEASURED 2026-07-30 (bead, not fixed here — see progress ledger for
+  # 2026-07-30-track-a-sql-formula-converter, "LIKELY REAL PRODUCTION BUG"):
+  # this rewrite makes the formula WORSE, not better. `WEEKDAY(...)` passed to
+  # the shared converter comes back clean (`Weekday(...)` — Sigma has it), but
+  # this step rewrites it to `DAYOFWEEK(...)` FIRST, and `Dayofweek(...)` is
+  # NOT a real Sigma function — the converter now warns on it
+  # (lookUnknownFunctions) where the untouched WEEKDAY form would not have
+  # warned at all. Do not "fix" this by just deleting the rewrite without
+  # checking Sigma's WEEKDAY offset (1=Sunday) actually matches Beast Mode's —
+  # that offset question is exactly why this was added "for parity" in the
+  # first place, and is unverified either way. Tracked as its own bead; needs
+  # its own investigation, not a silent revert.
   if s =~ /\bWEEKDAY\s*\(/i
     s = s.gsub(/\bWEEKDAY\s*\(/i, 'DAYOFWEEK(')
     warnings << 'WEEKDAY → DAYOFWEEK (1=Sunday base; verify offset).'
@@ -193,8 +225,12 @@ def resolve_entry(entry, overrides)
     warnings << "#{entry['name'] || entry['id']}: sigmaFormula supplied by " \
       "discovery/formula-overrides.json (hand-authored) — automated conversion " \
       "(convert_sql_to_sigma_formula) did not produce a usable formula for this " \
-      "Beast Mode; verify by hand (refs/live-validation-2026-07-30.md — the " \
-      "formula layer is NOT 'nearly free')."
+      "Beast Mode; verify by hand. CASE WHEN / COUNT(DISTINCT) / double-bracketed " \
+      "ALL-CAPS refs are fixed (sigma-data-model-mcp PR #115, #116) so this is NOT " \
+      "that historical 74%-fail case — check refs/live-validation-2026-07-30.md " \
+      "and this script's still-open gaps (WEEKDAY→DAYOFWEEK, CEILING/FLOOR " \
+      "aggregates, untranslatable infix LIKE) for what actually still needs a " \
+      "hand-authored formula."
   end
   [resolved, warnings]
 end
