@@ -328,6 +328,7 @@ def normalize_card(raw, card_id, card_meta: nil)
       'dateRangeFilter'    => main['dateRangeFilter'],
       'groupBy'            => Array(main['groupBy']).map { |c| c['column'] }.compact,
       'orderBy'            => Array(main['orderBy']).map { |c| c['column'] }.compact,
+      'limit'              => main['limit'],
       'filters'            => filters,
       'conditionalFormats' => Array(defn['conditionalFormats']),
       'cardFormulas'       => Array(defn['formulas']),  # {id,name,columnPositions,...}
@@ -358,6 +359,7 @@ def normalize_card(raw, card_id, card_meta: nil)
       'dateRangeFilter'    => body['dateRangeFilter'],
       'groupBy'            => norm_columns({ 'columns' => body['groupBy'] }).map { |c| c['column'] },
       'orderBy'            => norm_columns({ 'columns' => body['orderBy'] }).map { |c| c['column'] },
+      'limit'              => body['limit'],
       'filters'            => filters,
       'conditionalFormats' => Array(raw['conditionalFormats']),
       'cardFormulas'       => Array(raw['calculatedFields']),  # {formula,id,name,saveToDataSet}
