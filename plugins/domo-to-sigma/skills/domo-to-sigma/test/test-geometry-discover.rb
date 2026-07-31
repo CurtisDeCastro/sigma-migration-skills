@@ -66,10 +66,51 @@ ok(!card4.key?('x') && !card4.key?('y') && !card4.key?('w') && !card4.key?('h'),
 puts '== merge_geometry: nil page_layout -> cards passed through unchanged =='
 eq(merge_geometry(cards, nil), cards, 'nil layout is a no-op')
 
-puts '== merge_geometry: pageLayoutV4 nesting =="'
-layoutv4 = { 'pageLayoutV4' => { 'cards' => [{ 'id' => 'c1', 'x' => 9, 'y' => 9, 'w' => 9, 'h' => 9 }] } }
-merged5 = merge_geometry([{ 'id' => 'c1' }], layoutv4)
-eq([merged5[0]['x'], merged5[0]['w']], [9, 9], 'pageLayoutV4.cards nesting supported')
+puts '== merge_geometry: pageLayoutV4 (v4-inline pages, Track C) — content[]+standard.template[] joined on contentKey =='
+stacks_v4 = {
+  'pageLayoutV4' => {
+    'content' => [
+      { 'contentKey' => 0, 'cardId' => 700000010, 'type' => 'CARD' },
+      { 'contentKey' => 1, 'cardId' => 700000011, 'type' => 'CARD' },
+      { 'contentKey' => 2, 'type' => 'HEADER', 'text' => 'Sample Section' },
+    ],
+    'standard' => { 'width' => 60, 'template' => [
+      { 'contentKey' => 2, 'x' => 0,  'y' => 0,  'width' => 60, 'height' => 3,  'type' => 'HEADER' },
+      { 'contentKey' => 0, 'x' => 0,  'y' => 5,  'width' => 11, 'height' => 14, 'type' => 'CARD' },
+      { 'contentKey' => 1, 'x' => 11, 'y' => 5,  'width' => 8,  'height' => 14, 'type' => 'CARD' },
+      { 'contentKey' => 3, 'x' => 0,  'y' => 19, 'width' => 60, 'height' => 1,  'type' => 'PAGE_BREAK' },
+    ] },
+  },
+}
+merged_v4 = merge_geometry([{ 'id' => 700000010 }, { 'id' => 700000011 }], nil, stacks: stacks_v4)
+eq([merged_v4[0]['x'], merged_v4[0]['y'], merged_v4[0]['w'], merged_v4[0]['h']], [0.0, 2.0, 4.4, 5.6],
+   'card 700000010 geometry: Domo 60-wide grid scaled x0.4 to Sigma-comparable units')
+eq([merged_v4[1]['x'], merged_v4[1]['y'], merged_v4[1]['w'], merged_v4[1]['h']], [4.4, 2.0, 3.2, 5.6],
+   'card 700000011 gets its own distinct template entry, joined by its own contentKey')
+
+puts '== merge_geometry: pageLayoutV4 HEADER/PAGE_BREAK entries never produce a phantom card match =='
+no_match = merge_geometry([{ 'id' => 'no-such-card' }], nil, stacks: stacks_v4)
+ok(!no_match.first.key?('x'), 'a card id with no v4 content[] entry gets no geometry — HEADER/PAGE_BREAK carry no cardId to match against')
+
+puts '== merge_geometry: stacks without a pageLayoutV4 key -> v4 pass is a no-op (legacy pages unaffected) =='
+# NOTE: _pageOrder still gets attached by the separate, pre-existing
+# merge_stacks_geometry pass (unconditional whenever `stacks` is any Hash —
+# see the 'API-created page' test above) — that's out of scope for this v4
+# join and is exercised on its own elsewhere. What THIS assertion checks is
+# that no x/y/w/h geometry keys leak in when there's no pageLayoutV4 key.
+v4_noop = merge_geometry([{ 'id' => 700000010 }], nil, stacks: { 'sizes' => [] })
+eq(v4_noop, [{ 'id' => 700000010, '_pageOrder' => 0 }],
+   'no pageLayoutV4 key -> no x/y/w/h added (unrelated _pageOrder pass still applies)')
+ok(!v4_noop.first.key?('x'), 'specifically: no x/y/w/h geometry keys added by the v4 pass')
+
+puts '== merge_geometry: real captured pageLayoutV4 fixture (test/fixtures/domo-live-raw/stacks-page-v4.json) =='
+stacks_v4_fixture = JSON.parse(File.read(File.join(__dir__, 'fixtures', 'domo-live-raw', 'stacks-page-v4.json')))
+fixture_v4_cards = stacks_v4_fixture['cards'].map { |c| { 'id' => c['id'], 'title' => c['title'] } }
+merged_v4_fixture = merge_geometry(fixture_v4_cards, nil, stacks: stacks_v4_fixture)
+by_id_v4 = merged_v4_fixture.each_with_object({}) { |c, h| h[c['id']] = c }
+eq([by_id_v4[700000012]['x'], by_id_v4[700000012]['y'], by_id_v4[700000012]['w'], by_id_v4[700000012]['h']],
+   [0.0, 7.6, 12.0, 8.0], 'fixture card 700000012 gets exact scaled geometry from standard.template')
+ok(by_id_v4.values.all? { |c| c['x'] && c['y'] && c['w'] && c['h'] }, 'every real card in the fixture got geometry (the HEADER entry never became a phantom card)')
 
 # ===========================================================================
 # Bug 5 (P0, refs/live-validation-2026-07-30.md): classic Domo pages carry NO
