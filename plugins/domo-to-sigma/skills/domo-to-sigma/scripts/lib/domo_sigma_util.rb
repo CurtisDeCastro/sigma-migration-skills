@@ -107,11 +107,18 @@ module DomoSigma
   #                   An API-created page has collections: [] and just an
   #                   ordered `sizes[]` entry per card — no sections at all.
   #
-  # This method merges BOTH kinds of geometry onto each card record by id, and
-  # keeps them independent so either can be present, absent, or both:
+  # This method merges THREE kinds of geometry onto each card record by id, and
+  # keeps them independent so any can be present, absent, or combined:
   #
   #   - legacy 'x'/'y'/'w'/'h' (mason / Domo-App pages, pixel-ish grid coords)
   #     — sourced from `page_layout`, UNCHANGED behavior from before this fix.
+  #   - 'x'/'y'/'w'/'h' can ALSO come from the newer pageLayoutV4 pass (Track C,
+  #     refs/page-layout-v4.md), sourced from `stacks['pageLayoutV4']` via
+  #     `merge_pagelayoutv4_geometry` — scaled ×0.4 from Domo's 60-wide grid.
+  #     It is the more authoritative source and runs LAST among the two geometry
+  #     passes, so when both are present it wins outright (all 4 keys set
+  #     atomically together, never partially) over legacy `page_layout` geometry
+  #     for the same card id.
   #   - '_size'        — the T-shirt token, from `stacks['sizes']`, keyed by
   #                       card id.
   #   - '_collection'  — {'id','title','index'} for the collection (if any)
@@ -133,22 +140,70 @@ module DomoSigma
   # this — this method only DEFINES and documents the shape on discovery's
   # output; it does not lay anything out itself.
   #
-  # Pure/side-effect-free in both passes: returns a NEW array; a card with no
-  # matching entry in a given source is left unchanged by that source's pass —
-  # 'x'/'y'/'w'/'h' are OMITTED, never defaulted to 0 (0 is a valid top-left
+  # Pure/side-effect-free in all three passes: returns a NEW array; a card with
+  # no matching entry in a given source is left unchanged by that source's pass
+  # — 'x'/'y'/'w'/'h' are OMITTED, never defaulted to 0 (0 is a valid top-left
   # coordinate and must not be confused with "unknown").
   def merge_geometry(cards, page_layout, stacks: nil)
     out = Array(cards)
     out = merge_xywh_geometry(out, page_layout)
+    out = merge_pagelayoutv4_geometry(out, stacks)
     out = merge_stacks_geometry(out, stacks)
     out
+  end
+
+  # --- pageLayoutV4 pass (v4-inline pages) — Track C, refs/page-layout-v4.md ---
+  # stacks['pageLayoutV4'] (present once Domo.cards_for_page sends
+  # includeV4PageLayouts=true — see domo_rest.rb) carries two arrays that must
+  # be joined on contentKey: 'content' maps contentKey -> cardId (HEADER
+  # entries carry a 'text' field and NO cardId — they're section dividers, not
+  # cards, and are skipped here by the `next unless c['cardId']` guard).
+  # 'standard.template' maps contentKey -> x/y/width/height on Domo's 60-wide
+  # grid ('compact' is the 12-wide mobile grid — unused). PAGE_BREAK entries
+  # appear in 'standard.template' with no 'content' counterpart at all and are
+  # skipped the same way every unmatched contentKey is (`next unless card_id`).
+  # Domo 60-wide -> Sigma 24-wide grid is x0.4. build_dashboard (rung 1,
+  # build-domo-layout.rb) only ever consumes x/y/w/h as relative percentages
+  # of their own page's max, so this scale factor doesn't change its output —
+  # but storing genuinely Sigma-comparable units here keeps the record correct
+  # for any other consumer, and matches what was actually verified live.
+  def merge_pagelayoutv4_geometry(cards, stacks)
+    v4 = stacks.is_a?(Hash) ? stacks['pageLayoutV4'] : nil
+    return cards unless v4.is_a?(Hash)
+
+    content_map = {}
+    Array(v4['content']).each do |c|
+      next unless c.is_a?(Hash) && c['cardId']
+      content_map[c['contentKey'].to_s] = c['cardId'].to_s
+    end
+    return cards if content_map.empty?
+
+    geom_by_id = {}
+    Array(v4.dig('standard', 'template')).each do |t|
+      next unless t.is_a?(Hash)
+      card_id = content_map[t['contentKey'].to_s]
+      next unless card_id
+      next if [t['x'], t['y'], t['width'], t['height']].any?(&:nil?)
+      geom_by_id[card_id] = {
+        'x' => (t['x'].to_f     * 0.4).round(2),
+        'y' => (t['y'].to_f     * 0.4).round(2),
+        'w' => (t['width'].to_f  * 0.4).round(2),
+        'h' => (t['height'].to_f * 0.4).round(2),
+      }
+    end
+
+    cards.map do |card|
+      next card unless card.is_a?(Hash)
+      geom = geom_by_id[card['id'].to_s]
+      geom ? card.merge(geom) : card
+    end
   end
 
   # --- x/y/w/h pass (mason / Domo-App pages) — unchanged from before Bug 5 --
   def merge_xywh_geometry(cards, page_layout)
     return cards unless page_layout.is_a?(Hash)
 
-    raw_cards = page_layout['cards'] || page_layout.dig('pageLayoutV4', 'cards') || []
+    raw_cards = page_layout['cards'] || []
     geom_by_id = {}
     Array(raw_cards).each do |c|
       next unless c.is_a?(Hash)
