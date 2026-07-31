@@ -572,6 +572,37 @@ def run_live!(opts)
     log 'discovery/dm-spec.json already present — skip (idempotent; pass --force to rebuild)'
     skip_phase!('build-dm', 'already built (idempotent skip)')
   else
+    # Column pre-flight (bead m655): only meaningful once dataset-map.json is
+    # human-resolved — the FIRST build-dm.rb attempt below (no dataset-map.json
+    # yet) writes dataset-map.template.json and fails, same as before this
+    # bead; there is nothing to pre-flight until a human finishes that file.
+    map_path = File.join(DISCOVERY, 'dataset-map.json')
+    if File.exist?(map_path)
+      hr('preflight-columns (Domo columns vs the real warehouse schema)')
+      preflight_path = File.join(DISCOVERY, 'column-preflight.json')
+      if !opts[:force] && File.exist?(preflight_path)
+        skip_phase!('preflight-columns', 'already checked (idempotent skip)')
+      else
+        pf_ok, pf_code, _pf_out = run_script!('preflight-columns.rb')
+        if !pf_ok
+          skip_env = ENV['SIGMA_SKIP_COLUMN_PREFLIGHT'].to_s.strip
+          if skip_env.empty?
+            fail_phase!('preflight-columns',
+                        "preflight-columns.rb exited #{pf_code} — unresolved column(s) or a fetch error " \
+                        'found; see discovery/column-preflight.json for names + any auto-suggested ' \
+                        'columnOverrides, resolve via excludeColumns/columnOverrides in dataset-map.json, ' \
+                        'then re-run (or set SIGMA_SKIP_COLUMN_PREFLIGHT="<reason>" to waive, same as ' \
+                        "build-dm.rb's gate)")
+          else
+            skip_phase!('preflight-columns',
+                        "unresolved columns found but WAIVED via SIGMA_SKIP_COLUMN_PREFLIGHT=#{skip_env.inspect}")
+          end
+        else
+          done_phase!('preflight-columns')
+        end
+      end
+    end
+
     # --folder-id must reach build-dm too, not just build-workbook-spec: the DM
     # spec itself needs a folderId or POST /v2/dataModels/spec 400s with
     # "Expecting UUID at 0.folderId" (live-validated 2026-07-30).
