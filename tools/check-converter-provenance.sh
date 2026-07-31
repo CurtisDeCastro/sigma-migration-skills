@@ -133,16 +133,35 @@ for p in paths:
     mod = (d.get('vendored_modules') or '').split(',')[0].strip()
     mod = mod[:-4] if mod.endswith('.mjs') else (mod or '<module>')
     if age > stale_days:
-        note = ''
+        # A bundle carrying an OPEN local_patches entry (not yet landed upstream) is
+        # pinned ON PURPOSE — re-vendoring drops the patch. Hard-failing it demanded
+        # exactly the action the note warns against. Measured live on quicksight, whose
+        # UNDOCUMENTED native window-fn lowering was destroyed by a re-vendor:
+        # rank/denseRank/percentileRank/percentOfTotal all fell to Null and broke
+        # scripts/test-window-native.rb. So warn, don't block, and name what actually
+        # unblocks it — porting the entry upstream.
+        #
+        # The gate keeps its teeth: stale with NO open entry still hard-fails, which is
+        # the case it exists for (a bundle nobody remembered to refresh). "Open" means an
+        # entry not describing itself as SUPERSEDED; a superseded entry has landed
+        # upstream and no longer pins anything, so a re-vendor is safe and wanted.
         lp = d.get('local_patches')
-        if isinstance(lp, list) and lp:
-            note = (' NOTE: local_patches has %d entr%s recorded — a naive re-vendor overwrites '
-                     'this file and drops any not yet landed upstream; port each open entry '
-                     'upstream first (see local_patches / _upstream_and_revendor_tasks in this '
-                     'file), then re-vendor — do not just re-vendor blind.'
-                     % (len(lp), 'y' if len(lp) == 1 else 'ies'))
-        print('::error file=%s::STALE — %s pinned at %s (%s, %dd old, exceeds %dd) — run: tools/vendor-converters.sh <sigma-data-model-mcp checkout> %s%s' % (p, plugin, commit, date_str, age, stale_days, mod, note))
-        fail = True
+        open_lp = [x for x in (lp or []) if isinstance(x, dict)
+                   and 'SUPERSEDED' not in str(x.get('summary', '')).upper()]
+        if open_lp:
+            print('::warning file=%s::STALE BUT PINNED — %s at %s (%s, %dd old, exceeds %dd) '
+                  'with %d OPEN local_patches entr%s. Do NOT re-vendor blind: it would drop '
+                  'patches not yet landed upstream. Port each open entry upstream, retire it '
+                  'here, then re-vendor. Not failing the build — the pin is deliberate.'
+                  % (p, plugin, commit, date_str, age, stale_days,
+                     len(open_lp), 'y' if len(open_lp) == 1 else 'ies'))
+        else:
+            note = ''
+            if isinstance(lp, list) and lp:
+                note = (' NOTE: local_patches entries are all SUPERSEDED (landed upstream), so a '
+                        're-vendor is safe here and should also retire them.')
+            print('::error file=%s::STALE — %s pinned at %s (%s, %dd old, exceeds %dd) — run: tools/vendor-converters.sh <sigma-data-model-mcp checkout> %s%s' % (p, plugin, commit, date_str, age, stale_days, mod, note))
+            fail = True
     else:
         print('%-24s %-12s %-12s %-6d  %s' % (plugin, commit, date_str, age, 'OK — within %dd freshness window' % stale_days))
 sys.exit(1 if fail else 0)
