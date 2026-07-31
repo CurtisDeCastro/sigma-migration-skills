@@ -74,6 +74,27 @@ def _agg_formula(agg: str | None, colname: str) -> str:
     return template.format(ref=f"{SOURCE_PREFIX}/{colname}")
 
 
+def _axis_sort(field: dict, axis_col_id: str, measure_col_id: str) -> dict | None:
+    """Hex's field-level `sort.mode` (e.g. `cross-axis-descending`,
+    `value-ascending`) -> Sigma's `{by: <colId>, direction: ascending|
+    descending}` sort object. Without this, Sigma's default is an alphabetical
+    dimension sort (live-verified 2026-07-30: our "Revenue by Country - Top
+    10" chart rendered Australia/Canada/France/... instead of sorted by
+    revenue, because no explicit xAxis.sort was emitted). `cross-axis*` sorts
+    by the paired measure; `value*` sorts by the axis field's own value
+    (e.g. a Year axis sorted chronologically)."""
+    sort = field.get("sort") or {}
+    mode = sort.get("mode", "")
+    if mode.startswith("cross-axis"):
+        by = measure_col_id
+    elif mode.startswith("value"):
+        by = axis_col_id
+    else:
+        return None
+    direction = "descending" if mode.endswith("descending") else "ascending"
+    return {"by": by, "direction": direction}
+
+
 def _dm_source(dm_id: str, element_id: str) -> dict:
     return {"kind": "data-model", "dataModelId": dm_id, "elementId": element_id}
 
@@ -199,7 +220,11 @@ def build_explore_element(cell: dict, dm_id: str, element_id: str,
         value_id = add_column(value_fields[0])
         if not color_id or not value_id:
             return None
-        element["color"] = {"id": color_id}
+        color_spec = {"id": color_id}
+        sort_obj = _axis_sort(color_fields[0], color_id, value_id)
+        if sort_obj:
+            color_spec["sort"] = sort_obj
+        element["color"] = color_spec
         element["value"] = {"id": value_id}
         top_n = _top_n_filter(color_fields[0], value_id, warnings, label)
         if top_n:
@@ -214,7 +239,11 @@ def build_explore_element(cell: dict, dm_id: str, element_id: str,
         y_id = add_column(y_fields[0])
         if not x_id or not y_id:
             return None
-        element["xAxis"] = {"columnId": x_id}
+        x_axis_spec = {"columnId": x_id}
+        sort_obj = _axis_sort(x_fields[0], x_id, y_id)
+        if sort_obj:
+            x_axis_spec["sort"] = sort_obj
+        element["xAxis"] = x_axis_spec
         element["yAxis"] = {"columnIds": [y_id]}
         if kind == "bar-chart" and cell.get("orientation") == "horizontal":
             element["orientation"] = "horizontal"
@@ -308,10 +337,16 @@ def build_workbook(doc: dict, dm_id: str, dm_element_id: str,
     layout_xml = build_layout_xml(page_id, tabs[0], elements_by_cell) if tabs else None
 
     page = {"id": page_id, "name": tabs[0]["name"] if tabs else "Page 1", "elements": elements}
-    if layout_xml:
-        page["layout"] = layout_xml
 
     spec = {"name": wb_name, "schemaVersion": 1, "pages": [page]}
+    if layout_xml:
+        # `layout` is a TOP-LEVEL spec field (sibling to `pages`), not nested
+        # inside the page object — live-verified 2026-07-30: nesting it under
+        # the page is silently ignored (no error), and Sigma falls back to its
+        # own auto-arrange (a single stacked column), exactly matching the
+        # doc's "omit layout" behavior. The XML itself still wraps each page's
+        # content in its own <Page id="..."> tag.
+        spec["layout"] = layout_xml
     if folder_id:
         spec["folderId"] = folder_id
     return {"workbook": spec, "warnings": warnings, "stats": stats}

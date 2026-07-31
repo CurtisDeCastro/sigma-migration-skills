@@ -1,6 +1,7 @@
 {
   "workbook": {
     "name": "Commerce Dashboard",
+    "schemaVersion": 1,
     "pages": [
       {
         "id": "id0001",
@@ -63,7 +64,11 @@
               "elementId": "id0004"
             },
             "xAxis": {
-              "columnId": "id0009"
+              "columnId": "id0009",
+              "sort": {
+                "by": "id0010",
+                "direction": "descending"
+              }
             },
             "yAxis": {
               "columnIds": [
@@ -105,7 +110,11 @@
               "elementId": "id0004"
             },
             "color": {
-              "id": "id0013"
+              "id": "id0013",
+              "sort": {
+                "by": "id0014",
+                "direction": "descending"
+              }
             },
             "value": {
               "id": "id0014"
@@ -144,7 +153,11 @@
               "elementId": "id0004"
             },
             "xAxis": {
-              "columnId": "id0017"
+              "columnId": "id0017",
+              "sort": {
+                "by": "id0018",
+                "direction": "descending"
+              }
             },
             "yAxis": {
               "columnIds": [
@@ -175,7 +188,11 @@
               "elementId": "id0004"
             },
             "xAxis": {
-              "columnId": "id0020"
+              "columnId": "id0020",
+              "sort": {
+                "by": "id0020",
+                "direction": "ascending"
+              }
             },
             "yAxis": {
               "columnIds": [
@@ -195,10 +212,10 @@
               }
             ]
           }
-        ],
-        "layout": "<Page type=\"grid\" gridTemplateColumns=\"repeat(24, 1fr)\" gridTemplateRows=\"auto\" id=\"tsO3bCTADE\">\n  <LayoutElement elementId=\"4EB8Q4yDlN\" gridColumn=\"1 / 7\" gridRow=\"1 / 9\"/>\n  <LayoutElement elementId=\"xMkPKhtGp9\" gridColumn=\"1 / 7\" gridRow=\"9 / 17\"/>\n  <LayoutElement elementId=\"l6xJoAJFYS\" gridColumn=\"7 / 16\" gridRow=\"1 / 9\"/>\n  <LayoutElement elementId=\"tWIjakZoEy\" gridColumn=\"16 / 25\" gridRow=\"1 / 9\"/>\n  <LayoutElement elementId=\"fobFanth5R\" gridColumn=\"1 / 14\" gridRow=\"17 / 25\"/>\n  <LayoutElement elementId=\"ocZd7CSKAU\" gridColumn=\"14 / 25\" gridRow=\"17 / 25\"/>\n</Page>"
+        ]
       }
-    ]
+    ],
+    "layout": "<Page type=\"grid\" gridTemplateColumns=\"repeat(24, 1fr)\" gridTemplateRows=\"auto\" id=\"lIWWRpM6D1\">\n  <LayoutElement elementId=\"01MCoxRHN7\" gridColumn=\"1 / 7\" gridRow=\"1 / 9\"/>\n  <LayoutElement elementId=\"MblmujjMip\" gridColumn=\"1 / 7\" gridRow=\"9 / 17\"/>\n  <LayoutElement elementId=\"6z5S0vqaFW\" gridColumn=\"7 / 16\" gridRow=\"1 / 9\"/>\n  <LayoutElement elementId=\"IMg59kHAN5\" gridColumn=\"16 / 25\" gridRow=\"1 / 9\"/>\n  <LayoutElement elementId=\"T5pFgSdmEc\" gridColumn=\"1 / 14\" gridRow=\"17 / 25\"/>\n  <LayoutElement elementId=\"FCDniaNEBO\" gridColumn=\"14 / 25\" gridRow=\"17 / 25\"/>\n</Page>"
   },
   "warnings": [],
   "stats": {

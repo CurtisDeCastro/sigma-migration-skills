@@ -56,6 +56,13 @@ and microstrategy-to-sigma's YAML-parsing scripts in this repo).
   correction from this skill's initial design: Sigma has a first-class
   top-n chart filter, confirmed against `sigma-workbooks/reference/
   specification/charts.md`).
+- **Axis sort** (live-verified 2026-07-30): chart axes need an explicit
+  `sort` object or Sigma defaults to alphabetical — a "Top 10 by revenue"
+  chart rendered Australia/Canada/France/... instead of sorted by revenue,
+  making it LOOK like the Top-N filter had dropped the actual top country
+  (United States) when the underlying SQL (`rank() over (...) qualify rank
+  <= 10`) was correct the whole time. `_axis_sort()` maps Hex's field-level
+  `sort.mode` to Sigma's `{by, direction}`.
 - No Python (CODE) cells, no unsupported chart types, no multi-series/combo
   charts in this fixture. Those are the next fixtures to add once a source
   project exercises them (see SKILL.md "Gaps").
@@ -67,13 +74,23 @@ Quantity **`91,206`**, `COMMERCE` row count `613,002` — confirmed live in
 both the Hex source (`developers_migrating_from_hex_made_easy` QuickStart)
 and the underlying Snowflake warehouse.
 
-**Live Sigma-side test (2026-07-30, Phil's org)**: DM POST + readback
-succeeded after fixing the bare-ref and stale-column issues above — see
-`SKILL.md` for the full live-run log and the auth-method finding (Sigma's
-token endpoint required body-form `client_id`/`client_secret` params, not
-this skill family's usual HTTP Basic Auth header, for Phil's newly-created
-API credentials — unresolved whether that's org-specific or a broader
-family issue; flagged, not fixed in the canonical shared auth scripts).
+**Live Sigma-side test (2026-07-30, Phil's org) — PASSED end to end.** DM
+POST + readback, workbook POST + readback, layout lint, the deeper
+compiled-SQL verify (`sigma-workbooks/scripts/verify-workbook.sh`), a PNG
+export visual check, and numeric parity all passed clean. KPIs confirmed
+exact: Total Revenue `$39,759,625.52`, Total Quantity `91,206`. Layout
+matches the original Hex app's arrangement (2 KPIs stacked left, 3 charts
+across the top row, 2 charts across the second row) after fixing the
+top-level-vs-page-level `layout` placement bug. Chart sort order matches
+after the axis-sort fix. See `SKILL.md` for the full live-run log,
+including a separate auth-method finding: this family's shared
+`sigma_rest`/`get_token` scripts use an HTTP Basic Auth header for the
+`client_credentials` exchange, which 400'd against Phil's freshly-created
+API credentials — Sigma's own Postman guide documents body-form params
+instead, which worked immediately with the same credentials. Unresolved
+whether that's org-specific or a broader family issue; flagged, not fixed
+in the canonical shared auth scripts (a cross-cutting change beyond this
+skill's scope).
 
 ## Expectations
 

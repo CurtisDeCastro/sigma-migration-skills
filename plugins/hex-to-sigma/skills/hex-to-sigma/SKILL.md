@@ -6,14 +6,16 @@ user-invocable: true
 
 # Hex → Sigma
 
-> **Status: live-validated through Phase 5 (2026-07-30).** DM POST + readback,
-> workbook POST + readback, layout lint, and the deeper compiled-SQL check
-> (`sigma-workbooks/scripts/verify-workbook.sh`) all passed clean against
-> Phil's real Sigma org — 8/8 DM columns, 10/10 workbook columns, 6/6
-> elements, zero `type=error`, zero unresolved/circular formula refs. Phase 6
-> (numeric parity vs the known baseline) is pending a visual/query
-> confirmation, not blocked on anything structural. `corpus/hex/commerce/`
-> covers the structural regression test (no live org needed to re-run it).
+> **Status: live-validated through Phase 6 (2026-07-30).** DM POST + readback,
+> workbook POST + readback, layout lint, the deeper compiled-SQL check
+> (`sigma-workbooks/scripts/verify-workbook.sh`), a visual PNG export, AND
+> numeric parity all passed clean against Phil's real Sigma org — 8/8 DM
+> columns, 10/10 workbook columns, 6/6 elements, zero `type=error`, zero
+> unresolved/circular formula refs, KPI values confirmed exact
+> (`$39,759,625.52` / `91,206`), and the visual layout matches the original
+> Hex app (verified via PNG export, not just Phil eyeballing the live UI).
+> `corpus/hex/commerce/` covers the structural regression test (no live org
+> needed to re-run it).
 
 > Phase numbering is local to this skill; the canonical Assess→Discover→
 > Reuse→Convert→Post-DM→Build→Layout→Parity→Security→Enhance arc and this
@@ -187,6 +189,29 @@ anything not genuinely selected, with a loud warning — see
 400s with `"schemaVersion: Invalid 1: undefined"` without it. `1` is
 accepted for a fresh CREATE; the `sigma-workbooks` docs warn against
 hardcoding it for an UPDATE (re-fetch from the existing spec instead).
+
+**`layout` is a TOP-LEVEL spec field, not a page field** (live-verified
+2026-07-30): nesting it under `pages[].layout` (what the `sigma-workbooks`
+docs' phrasing "`layout` is a page-level property" reads as, at first
+glance) is silently ignored — no error, Sigma just falls back to its own
+auto-arrange (a single stacked column, every element full-width). The XML
+string itself still wraps each page's elements in a `<Page id="...">` tag;
+it's the JSON *placement* of that string that must be `spec.layout`, a
+sibling of `pages`, not `spec.pages[N].layout`.
+
+**Chart axes need an explicit `sort`, or Sigma defaults to alphabetical**
+(live-verified 2026-07-30): without `xAxis.sort` (cartesian) or
+`color.sort` (pie), a "Top 10 by revenue" chart rendered its dimension
+alphabetically (Australia, Canada, France, ... — missing the actual largest
+country, United States, entirely from the visible rows) instead of sorted
+by the measure. `convert_workbook.py`'s `_axis_sort()` maps Hex's
+`sort.mode` (`cross-axis-descending` → sort by the paired measure;
+`value-ascending` → sort by the axis field's own value, e.g. a
+chronological Year axis) to Sigma's `{by: <colId>, direction: ascending|
+descending}`. The underlying Top-N SQL (`rank() over (...) qualify rank <=
+10`) was correct the whole time — this was purely a display-order bug, not
+a data bug, but it looked exactly like one at first (missing categories) until
+the compiled SQL was inspected directly.
 
 ## Phase 3 — Post the data model + read back (C5) ← HARD GATE
 
