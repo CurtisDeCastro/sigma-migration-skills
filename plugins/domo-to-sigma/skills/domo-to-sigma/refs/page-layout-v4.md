@@ -60,16 +60,18 @@ Both verified by reading the source, not assumed, and now fixed (`Domo.cards_for
 requests `includeV4PageLayouts=true`; `DomoSigma.merge_pagelayoutv4_geometry` performs the
 join below):
 
-1. **`scripts/lib/domo_rest.rb:238`** — `cards_for_page` sends only `parts`. Without
-   `includeV4PageLayouts=true` a v4-inline page returns no `pageLayoutV4` at all, so
-   every such page falls through to the default-composition rung unnecessarily.
+1. **`scripts/lib/domo_rest.rb`, `cards_for_page`** — used to send only `parts`.
+   Without `includeV4PageLayouts=true` a v4-inline page returned no `pageLayoutV4`
+   at all, so every such page fell through to the default-composition rung
+   unnecessarily.
 
-2. **`scripts/lib/domo_sigma_util.rb:151`** — reads
+2. **`scripts/lib/domo_sigma_util.rb`, was at the top of what is now
+   `merge_xywh_geometry`** — used to read
    `page_layout['cards'] || page_layout.dig('pageLayoutV4', 'cards')`.
    There is no `cards` key under `pageLayoutV4`; the geometry is under
-   `standard.template`. **This dig can never match**, so the v4 branch is dead code
-   that silently yields nothing. It also reads from the separate layout endpoint's
-   response, whereas the v4 data arrives on the *stacks* response.
+   `standard.template`. **That dig could never match**, so the v4 branch was dead
+   code that silently yielded nothing. It also read from the separate layout
+   endpoint's response, whereas the v4 data arrives on the *stacks* response.
 
 The join, once both are fixed:
 

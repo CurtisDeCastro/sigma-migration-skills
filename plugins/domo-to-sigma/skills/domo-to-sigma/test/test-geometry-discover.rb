@@ -112,6 +112,40 @@ eq([by_id_v4[700000012]['x'], by_id_v4[700000012]['y'], by_id_v4[700000012]['w']
    [0.0, 7.6, 12.0, 8.0], 'fixture card 700000012 gets exact scaled geometry from standard.template')
 ok(by_id_v4.values.all? { |c| c['x'] && c['y'] && c['w'] && c['h'] }, 'every real card in the fixture got geometry (the HEADER entry never became a phantom card)')
 
+puts '== merge_geometry: pageLayoutV4 template entry missing x/y/width/height -> geometry keys OMITTED, never defaulted to 0 =='
+# Regression test for the nil.to_f-silently-becomes-0.0 bug: a template entry
+# that is genuinely missing geometry (e.g. an isDynamic:true layout) must NOT
+# produce x/y/w/h of 0/0.0 — that would be indistinguishable from a real
+# top-left coordinate and could make build_dashboard's rung-1 filter accept a
+# card (or even the whole page) that has no real geometry at all.
+# Before the `next if [...].any?(&:nil?)` guard, this would have produced
+# {'x'=>0.0,'y'=>0.0,'w'=>4.4,'h'=>5.6} instead of omitting the keys.
+stacks_v4_missing_geom = {
+  'pageLayoutV4' => {
+    'content' => [{ 'contentKey' => 0, 'cardId' => 700000099, 'type' => 'CARD' }],
+    'standard' => { 'width' => 60, 'template' => [
+      { 'contentKey' => 0, 'width' => 11, 'height' => 14, 'type' => 'CARD' }, # x, y missing
+    ] },
+  },
+}
+merged_missing = merge_geometry([{ 'id' => 700000099, 'title' => 'Dynamic' }], nil, stacks: stacks_v4_missing_geom)
+card_missing = merged_missing.first
+eq(card_missing['title'], 'Dynamic', 'card preserved even without geometry')
+ok(!card_missing.key?('x') && !card_missing.key?('y') && !card_missing.key?('w') && !card_missing.key?('h'),
+   'template entry missing x/y -> no x/y/w/h keys added at all (not defaulted to 0/0.0)')
+
+puts '== merge_geometry: v4 pass takes precedence over PARTIAL legacy xywh geometry for the same card id (no mixed-precision merge) =='
+# Regression test for the precedence-inversion bug: merge_xywh_geometry must
+# run BEFORE merge_pagelayoutv4_geometry so a page with a partial legacy
+# page_layout entry (e.g. only width/height, no x/y) for a card that ALSO has
+# real v4 geometry doesn't end up with a mixed-precision card — v4's scaled
+# x/y combined with the legacy pass's unscaled w/h.
+page_layout_partial = { 'cards' => [{ 'id' => 700000010, 'width' => 40, 'height' => 30 }] }
+merged_precedence = merge_geometry([{ 'id' => 700000010 }], page_layout_partial, stacks: stacks_v4)
+card_precedence = merged_precedence.first
+eq([card_precedence['x'], card_precedence['y'], card_precedence['w'], card_precedence['h']], [0.0, 2.0, 4.4, 5.6],
+   'v4 geometry (all 4 keys, atomically) wins outright over partial legacy w/h — no mixed-precision result')
+
 # ===========================================================================
 # Bug 5 (P0, refs/live-validation-2026-07-30.md): classic Domo pages carry NO
 # x/y/w/h at all. The `stacks` (GET /api/content/v3/stacks/{id}/cards)
