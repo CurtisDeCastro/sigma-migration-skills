@@ -263,8 +263,22 @@ for a classic page** (live-validated 2026-07-30 — see
 - `collections[]` (sectioning) has no reachable write endpoint
 - even card **creation order does not control page order**
 
-So for a classic Domo page the ONLY route to real layout fidelity is a human-supplied
-image. **Explicitly ask the operator:**
+> **⚠️ NARROWED 2026-07-30 — this is true for a *classic* page, not for every
+> page.** `refs/page-layout-v4.md` — corroborated on two independent live Domo
+> tenants — found a page style, **v4-inline**, where geometry (and `HEADER`
+> section-divider position) IS readable and exact via the API:
+> `pageLayoutV4.standard.template[]` joined to `content[]` on `contentKey` (grid
+> is 60-wide, so Domo → Sigma scales ×0.4). A page qualifies if `pageLayoutV4` is
+> present in its stacks response with `includeV4PageLayouts=true` — read
+> `refs/page-layout-v4.md` for the full three-page-style taxonomy before assuming
+> a page is "classic." That ref also records two defects that currently keep
+> this unusable end-to-end: `domo_rest.rb`'s `cards_for_page` never requests the
+> v4 payload, and `domo_sigma_util.rb:151` digs a `pageLayoutV4.cards` key that
+> doesn't exist, so the v4 branch silently yields nothing until both are fixed.
+> Until then, treat a v4-inline page the same as a classic one below.
+
+So for a page without readable v4 geometry the ONLY route to real layout fidelity
+is a human-supplied image. **Explicitly ask the operator:**
 
 > "Domo's API doesn't expose this page's layout. Can you paste or export a
 > screenshot of the page? I'll read the arrangement from it so the Sigma dashboard
@@ -286,7 +300,9 @@ same composition the `sigma-workbooks` / `branded-dashboard-format` authoring sk
 use; see `refs/layout-visual-qa.md`.
 
 Geometry preference order used by Phase 5d, highest first:
-1. real API x/y/w/h pixel geometry (mason / Domo-App pages only)
+1. real API x/y/w/h pixel geometry (`pageLayoutV4` present — see the narrowing
+   note above; blocked by two open code defects documented in
+   `refs/page-layout-v4.md`)
 2. `discovery/layout-observed.json` (read from a screenshot)
 3. `collections[]` + a non-empty `size` token
 4. the element-kind default composition above

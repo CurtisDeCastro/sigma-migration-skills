@@ -279,7 +279,28 @@ is the fix.
 
 ---
 
-## ⛔ Domo layout is NOT reachable through the API — in either direction
+## ⛔ Domo layout is NOT reachable through the API — in either direction — ⚠️ NARROWED (see `refs/page-layout-v4.md`)
+
+> ## ⚠️ NARROWED 2026-07-30 — geometry IS readable, on a v4 page
+>
+> This section is kept as the **measured historical record** for the classic page
+> probed here — it was true for that page, and it is still true for any genuinely
+> legacy page (one with no `pageLayoutV4` in its stacks response). It is not the
+> whole picture, though.
+>
+> `refs/page-layout-v4.md` — corroborated on two independent live Domo tenants —
+> found a third page style, **v4-inline**, where geometry is readable and exact:
+> `pageLayoutV4.standard.template[]`, joined to `content[]` on `contentKey`, gives
+> real `x`/`y`/`width`/`height` per card (grid is 60-wide, so Domo → Sigma scales
+> ×0.4), including positioned `HEADER` section dividers.
+>
+> So the claim below in Consequence 1 — that card *size, position and order* are
+> UI-only — is a **narrowing, not a reversal**: still true for a page with no
+> `pageLayoutV4`, not true in general. `refs/page-layout-v4.md` also records two
+> defects in our own code (`domo_rest.rb`'s `cards_for_page` never requests the v4
+> payload; `domo_sigma_util.rb:151` digs a `pageLayoutV4.cards` key that doesn't
+> exist) that must be fixed before any of this is usable. Read it for the full
+> page-style taxonomy.
 
 Probed exhaustively on a live instance. For a **classic** Domo page there is no way
 to read OR write layout geometry:
@@ -296,10 +317,13 @@ to read OR write layout geometry:
 
 Consequences, and they are structural rather than cosmetic:
 
-1. **You cannot build a nicely-arranged Domo dashboard from code.** Card *content*
-   is fully API-controllable (dataset, chart type, columns, filters, formats,
-   conditional formats); card *size, position and order* are UI-only. If a demo or
-   fixture page needs to look composed in Domo, a human must arrange it.
+1. **You cannot build a nicely-arranged Domo dashboard from code — on a genuinely
+   legacy page.** Card *content* is fully API-controllable (dataset, chart type,
+   columns, filters, formats, conditional formats); card *size, position and
+   order* are UI-only **for a page with no `pageLayoutV4`** (see the narrowing
+   note above and `refs/page-layout-v4.md` — a v4-inline page's geometry, and
+   `HEADER`-divider order, IS readable). If a demo or fixture page needs to look
+   composed in Domo and turns out to be genuinely legacy, a human must arrange it.
 2. **A migration gets no layout signal from a classic page via any endpoint probed here**, so a converter that
    expects x/y/w/h will silently degrade to a vertical stack — exactly the
    field-reported failure. The only fidelity route is a **human-supplied page
