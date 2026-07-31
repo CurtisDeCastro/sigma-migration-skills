@@ -84,7 +84,8 @@
         "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/lib/sigma_rest.rb",
         "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/lib/sigma_rest.rb",
         "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/lib/sigma_rest.rb",
-        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/lib/sigma_rest.rb"
+        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/lib/sigma_rest.rb",
+        "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/lib/sigma_rest.rb"
       ]
     },
     {
@@ -99,7 +100,8 @@
         "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/lib/preflight_lint.rb",
         "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/lib/preflight_lint.rb",
         "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/lib/preflight_lint.rb",
-        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/lib/preflight_lint.rb"
+        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/lib/preflight_lint.rb",
+        "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/lib/preflight_lint.rb"
       ]
     },
     {
@@ -114,7 +116,8 @@
         "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/lib/layout_lint.rb",
         "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/lib/layout_lint.rb",
         "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/lib/layout_lint.rb",
-        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/lib/layout_lint.rb"
+        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/lib/layout_lint.rb",
+        "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/lib/layout_lint.rb"
       ]
     },
     {
@@ -154,7 +157,8 @@
         "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/lib/control_lint.rb",
         "plugins/gooddata-to-sigma/skills/gooddata-to-sigma/scripts/lib/control_lint.rb",
         "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/lib/control_lint.rb",
-        "plugins/cognos-to-sigma/skills/cognos-to-sigma/scripts/lib/control_lint.rb"
+        "plugins/cognos-to-sigma/skills/cognos-to-sigma/scripts/lib/control_lint.rb",
+        "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/lib/control_lint.rb"
       ]
     },
     {
@@ -253,7 +257,8 @@
         "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/verify-warehouse.rb",
         "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/verify-warehouse.rb",
         "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/verify-warehouse.rb",
-        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/verify-warehouse.rb"
+        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/verify-warehouse.rb",
+        "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/verify-warehouse.rb"
       ]
     },
     {
@@ -282,7 +287,8 @@
         "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/escalate-gap.py",
         "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/escalate-gap.py",
         "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/escalate-gap.py",
-        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/escalate-gap.py"
+        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/escalate-gap.py",
+        "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/escalate-gap.py"
       ]
     },
     {
@@ -295,7 +301,8 @@
         "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/probe-controls.rb",
         "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/probe-controls.rb",
         "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/probe-controls.rb",
-        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/probe-controls.rb"
+        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/probe-controls.rb",
+        "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/probe-controls.rb"
       ]
     },
     {
@@ -323,7 +330,8 @@
         "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/sigma-export-png.py",
         "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/sigma-export-png.py",
         "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/sigma-export-png.py",
-        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/sigma-export-png.py"
+        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/sigma-export-png.py",
+        "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/sigma-export-png.py"
       ]
     },
     {
@@ -338,7 +346,8 @@
         "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/find-or-pick-dm.rb",
         "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/find-or-pick-dm.rb",
         "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/find-or-pick-dm.rb",
-        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/find-or-pick-dm.rb"
+        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/find-or-pick-dm.rb",
+        "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/find-or-pick-dm.rb"
       ]
     },
     {
@@ -350,7 +359,8 @@
         "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/assert-phase6-ran.rb",
         "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/assert-phase6-ran.rb",
         "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/assert-phase6-ran.rb",
-        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/assert-phase6-ran.rb"
+        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/assert-phase6-ran.rb",
+        "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/assert-phase6-ran.rb"
       ]
     },
     {
@@ -362,7 +372,8 @@
         "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/record-visual-check.rb",
         "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/record-visual-check.rb",
         "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/record-visual-check.rb",
-        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/record-visual-check.rb"
+        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/record-visual-check.rb",
+        "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/record-visual-check.rb"
       ]
     },
     {
@@ -374,7 +385,8 @@
         "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/lib/blind_grade.rb",
         "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/lib/blind_grade.rb",
         "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/lib/blind_grade.rb",
-        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/lib/blind_grade.rb"
+        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/lib/blind_grade.rb",
+        "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/lib/blind_grade.rb"
       ]
     },
     {
@@ -387,7 +399,8 @@
         "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/lib/cli_encoding.rb",
         "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/lib/cli_encoding.rb",
         "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/lib/cli_encoding.rb",
-        "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/lib/cli_encoding.rb"
+        "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/lib/cli_encoding.rb",
+        "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/lib/cli_encoding.rb"
       ]
     },
     {
@@ -405,7 +418,8 @@
         "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/get-token.sh",
         "plugins/thoughtspot-to-sigma/skills/thoughtspot-assessment/scripts/get-token.sh",
         "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/get-token.sh",
-        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/get-token.sh"
+        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/get-token.sh",
+        "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/get-token.sh"
       ]
     },
     {
@@ -423,7 +437,8 @@
         "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/get_token.py",
         "plugins/thoughtspot-to-sigma/skills/thoughtspot-assessment/scripts/get_token.py",
         "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/get_token.py",
-        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/get_token.py"
+        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/get_token.py",
+        "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/get_token.py"
       ]
     },
     {
@@ -790,7 +805,8 @@
         "plugins/cognos-to-sigma/skills/cognos-to-sigma/scripts/verify-anchors.rb",
         "plugins/gooddata-to-sigma/skills/gooddata-to-sigma/scripts/verify-anchors.rb",
         "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/verify-anchors.rb",
-        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/verify-anchors.rb"
+        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/verify-anchors.rb",
+        "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/verify-anchors.rb"
       ]
     },
     {
@@ -838,7 +854,8 @@
         "plugins/cognos-to-sigma/skills/cognos-to-sigma/scripts/lib/anchor_values.rb",
         "plugins/gooddata-to-sigma/skills/gooddata-to-sigma/scripts/lib/anchor_values.rb",
         "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/lib/anchor_values.rb",
-        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/lib/anchor_values.rb"
+        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/lib/anchor_values.rb",
+        "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/lib/anchor_values.rb"
       ]
     },
     {
@@ -971,7 +988,8 @@
         "plugins/looker-to-sigma/skills/looker-to-sigma/scripts/cleanup-orphan-workbooks.rb",
         "plugins/microstrategy-to-sigma/skills/microstrategy-to-sigma/scripts/cleanup-orphan-workbooks.rb",
         "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/cleanup-orphan-workbooks.rb",
-        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/cleanup-orphan-workbooks.rb"
+        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/cleanup-orphan-workbooks.rb",
+        "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/cleanup-orphan-workbooks.rb"
       ]
     },
     {
