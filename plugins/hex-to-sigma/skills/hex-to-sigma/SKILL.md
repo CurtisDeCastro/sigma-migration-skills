@@ -9,11 +9,11 @@ user-invocable: true
 > **Status: live-validated through Phase 6 (2026-07-30).** DM POST + readback,
 > workbook POST + readback, layout lint, the deeper compiled-SQL check
 > (`sigma-workbooks/scripts/verify-workbook.sh`), a visual PNG export, AND
-> numeric parity all passed clean against Phil's real Sigma org — 8/8 DM
+> numeric parity all passed clean against a real Sigma org — 8/8 DM
 > columns, 10/10 workbook columns, 6/6 elements, zero `type=error`, zero
 > unresolved/circular formula refs, KPI values confirmed exact
 > (`$39,759,625.52` / `91,206`), and the visual layout matches the original
-> Hex app (verified via PNG export, not just Phil eyeballing the live UI).
+> Hex app (verified via PNG export, not just eyeballing the live UI).
 > `corpus/hex/commerce/` covers the structural regression test (no live org
 > needed to re-run it).
 
@@ -64,7 +64,8 @@ The user exports their target project and hands you the file path.
 `get_token.py`/`get-token.sh` just work):** this family's shared auth
 scripts (`sigma_rest.rb`/`.py`, `get_token.py`, `get-token.sh`) exchange
 client credentials via an HTTP **Basic Auth header**. Against a freshly
-created API client in Phil's org, that got a `400 {"code":"invalid_request",
+created API client in the test org used to validate this skill, that got a
+`400 {"code":"invalid_request",
 "message":"Invalid access/refresh token"}` on every attempt (three separate
 fresh key pairs, all formatted correctly — 64/128-char id/secret, no
 whitespace/encoding issues). Sigma's own official Postman guide

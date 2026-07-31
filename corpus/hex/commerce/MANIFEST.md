@@ -1,6 +1,6 @@
 # hex / commerce
 
-`Commerce Dashboard.hex.yaml` — the real project export from Phil's Hex trial,
+`Commerce Dashboard.hex.yaml` — a real project export from a Hex trial,
 built against the same Commerce e-commerce dataset used across the migration
 family (`QUICKSTARTS.HEX_ECOMMERCE`, same 4 tables as `cognos/great-outdoors-module`
 and friends). Referenced from the plugin's own `fixtures/` dir, not duplicated —
@@ -74,7 +74,7 @@ Quantity **`91,206`**, `COMMERCE` row count `613,002` — confirmed live in
 both the Hex source (`developers_migrating_from_hex_made_easy` QuickStart)
 and the underlying Snowflake warehouse.
 
-**Live Sigma-side test (2026-07-30, Phil's org) — PASSED end to end.** DM
+**Live Sigma-side test (2026-07-30, test org) — PASSED end to end.** DM
 POST + readback, workbook POST + readback, layout lint, the deeper
 compiled-SQL verify (`sigma-workbooks/scripts/verify-workbook.sh`), a PNG
 export visual check, and numeric parity all passed clean. KPIs confirmed
@@ -85,7 +85,7 @@ top-level-vs-page-level `layout` placement bug. Chart sort order matches
 after the axis-sort fix. See `SKILL.md` for the full live-run log,
 including a separate auth-method finding: this family's shared
 `sigma_rest`/`get_token` scripts use an HTTP Basic Auth header for the
-`client_credentials` exchange, which 400'd against Phil's freshly-created
+`client_credentials` exchange, which 400'd against freshly-created
 API credentials — Sigma's own Postman guide documents body-form params
 instead, which worked immediately with the same credentials. Unresolved
 whether that's org-specific or a broader family issue; flagged, not fixed
