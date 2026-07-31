@@ -1,6 +1,25 @@
-// ../../../Users/tjwells/sigma-data-model-mcp/build/sigma-ids.js
+// ../mcp-fresh/build/sigma-ids.js
 var SIGMA_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 var _usedIds = /* @__PURE__ */ new Set();
+var _idCounter = 0;
+function encodeBase62(n, len) {
+  let x = n, s = "";
+  while (x > 0) {
+    s = SIGMA_CHARS[x % 62] + s;
+    x = Math.floor(x / 62);
+  }
+  return s.padStart(len, SIGMA_CHARS[0]);
+}
+function fnv1a32(s) {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+var NS_MODULUS = 62 ** 4;
+var NS_BLOCK = 1e6;
 var SIGMA_LOWERCASE_WORDS = /* @__PURE__ */ new Set([
   "a",
   "an",
@@ -24,23 +43,31 @@ var SIGMA_LOWERCASE_WORDS = /* @__PURE__ */ new Set([
   "via",
   "per"
 ]);
-function resetIds() {
+function resetIds(seed) {
   _usedIds.clear();
+  _idCounter = seed == null ? 0 : fnv1a32(seed) % NS_MODULUS * NS_BLOCK;
+}
+function clampId(id, max = 64) {
+  if (id.length <= max)
+    return id;
+  const suffix = "~" + encodeBase62(fnv1a32(id) % 62 ** 6, 6);
+  return id.slice(0, max - suffix.length) + suffix;
 }
 function sigmaShortId(len = 10) {
   let id;
   do {
-    id = Array.from({ length: len }, () => SIGMA_CHARS[Math.floor(Math.random() * SIGMA_CHARS.length)]).join("");
+    id = encodeBase62(++_idCounter, len);
   } while (_usedIds.has(id));
   _usedIds.add(id);
   return id;
 }
-function sigmaInodeId(identifier) {
-  return `inode-${sigmaShortId(22)}/${identifier.toUpperCase()}`;
+function sigmaInodeId(identifier, casing = "upper") {
+  const phys = casing === "lower" ? identifier.toLowerCase() : identifier.toUpperCase();
+  return clampId(`inode-${sigmaShortId(22)}/${phys}`);
 }
 function sigmaDisplayName(s) {
   const normalized = (s || "").replace(/([a-z])([A-Z])/g, "$1_$2").replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2").replace(/([A-Za-z])([0-9])/g, "$1_$2").replace(/([0-9])([A-Za-z])/g, "$1_$2");
-  const words = normalized.toLowerCase().split(/[_\s]+/).filter(Boolean);
+  const words = normalized.toLowerCase().split(/[_\s/-]+/).filter(Boolean);
   return words.map((w, i) => i === 0 || !SIGMA_LOWERCASE_WORDS.has(w) ? w.charAt(0).toUpperCase() + w.slice(1) : w).join(" ");
 }
 var DATA_MODEL_SCHEMA_SUMMARY = `
@@ -103,7 +130,47 @@ function makeRlsSecurity(opts) {
   };
 }
 
-// ../../../Users/tjwells/sigma-data-model-mcp/build/formulas.js
+// ../mcp-fresh/build/formulas.js
+function stripOuterParens(s) {
+  s = s.trim();
+  while (s.length > 1 && s.startsWith("(") && s.endsWith(")")) {
+    let depth = 0, quote = "", inBracket = false, wraps = true;
+    for (let i = 0; i < s.length; i++) {
+      const c = s[i];
+      if (inBracket) {
+        if (c === "]")
+          inBracket = false;
+        continue;
+      }
+      if (quote) {
+        if (c === quote)
+          quote = "";
+        continue;
+      }
+      if (c === "[") {
+        inBracket = true;
+        continue;
+      }
+      if (c === "'" || c === '"') {
+        quote = c;
+        continue;
+      }
+      if (c === "(")
+        depth++;
+      else if (c === ")") {
+        depth--;
+        if (depth === 0 && i < s.length - 1) {
+          wraps = false;
+          break;
+        }
+      }
+    }
+    if (!wraps || depth !== 0)
+      break;
+    s = s.slice(1, -1).trim();
+  }
+  return s;
+}
 function lookColRef(identifier) {
   return `[${sigmaDisplayName(identifier)}]`;
 }
@@ -181,73 +248,371 @@ var LOOK_FUNC_MAP = {
   "TO_NUMBER": "ToNumber",
   "TO_VARCHAR": "Text"
 };
-function lookConvertCase(expr) {
-  const body = expr.replace(/^CASE\s*/i, "").replace(/\s*END\s*$/i, "").trim();
-  const branches = [];
-  const parts = body.split(/\bWHEN\b/i).filter(Boolean);
-  let elseVal = null;
-  for (const part of parts) {
-    const elseMatch = part.match(/^([\s\S]+?)\s+THEN\s+([\s\S]+?)(?:\s+ELSE\s+([\s\S]+))?$/i);
-    if (!elseMatch) {
-      const e = part.match(/\bELSE\s+([\s\S]+)$/i);
-      if (e && !elseVal)
-        elseVal = e[1].trim();
+var _CASE_KW_RE = /^(CASE|WHEN|THEN|ELSE|END)\b/i;
+function _scanCase(s, pos) {
+  const markers = [];
+  let caseDepth = 1, parenDepth = 0, i = pos;
+  while (i < s.length) {
+    const c = s[i];
+    if (c === "[") {
+      const close = s.indexOf("]", i + 1);
+      i = close === -1 ? s.length : close + 1;
       continue;
     }
-    const cond = elseMatch[1].trim();
-    let val = elseMatch[2].trim();
-    const elseInVal = val.match(/^([\s\S]+?)\s+ELSE\s+([\s\S]+)$/i);
-    if (elseInVal) {
-      val = elseInVal[1].trim();
-      if (!elseVal)
-        elseVal = elseInVal[2].trim();
+    if (c === "(") {
+      parenDepth++;
+      i++;
+      continue;
     }
-    branches.push({ cond, val });
+    if (c === ")") {
+      parenDepth--;
+      i++;
+      continue;
+    }
+    if (/[A-Za-z]/.test(c) && (i === 0 || !/[A-Za-z0-9_]/.test(s[i - 1]))) {
+      const m = _CASE_KW_RE.exec(s.slice(i));
+      if (m) {
+        const kw = m[1].toUpperCase(), start = i, end = i + m[1].length;
+        if (kw === "CASE") {
+          caseDepth++;
+        } else if (kw === "END") {
+          caseDepth--;
+          if (caseDepth === 0)
+            return { endStart: start, endIndex: end, markers };
+        } else if (caseDepth === 1 && parenDepth === 0) {
+          markers.push({ type: kw, start, end });
+        }
+        i = end;
+        continue;
+      }
+    }
+    i++;
   }
-  const topElse = body.match(/\bELSE\s+([\s\S]+)$/i);
-  if (topElse && !elseVal)
-    elseVal = topElse[1].trim();
+  return { endStart: -1, endIndex: -1, markers };
+}
+function _isBalanced(s) {
+  let paren = 0, bracket = 0, inStr = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (inStr) {
+      if (c === "\\") {
+        i++;
+        continue;
+      }
+      if (c === '"')
+        inStr = false;
+      continue;
+    }
+    if (c === '"') {
+      inStr = true;
+      continue;
+    }
+    if (c === "(")
+      paren++;
+    else if (c === ")") {
+      paren--;
+      if (paren < 0)
+        return false;
+    } else if (c === "[")
+      bracket++;
+    else if (c === "]") {
+      bracket--;
+      if (bracket < 0)
+        return false;
+    }
+  }
+  return paren === 0 && bracket === 0 && !inStr;
+}
+var _NESTED_CASE_UNMASK_RE = /(\d+)/g;
+function _convertNestedCases(s, lits, onUnparseable = "abort", cdArgs = []) {
+  const blocks = [];
+  let out = "", last = 0, i = 0;
+  while (i < s.length) {
+    const c = s[i];
+    if (c === "[") {
+      const close = s.indexOf("]", i + 1);
+      i = close === -1 ? s.length : close + 1;
+      continue;
+    }
+    if (/[A-Za-z]/.test(c) && (i === 0 || !/[A-Za-z0-9_]/.test(s[i - 1])) && /^CASE\b/i.test(s.slice(i))) {
+      const caseStart = i;
+      const scan = _scanCase(s, i + 4);
+      if (scan.endIndex === -1) {
+        if (onUnparseable === "abort")
+          return null;
+        break;
+      }
+      const rawSpan = _restoreRawCountDistinct(_restoreRawLiterals(s.slice(caseStart, scan.endIndex), lits), cdArgs);
+      const converted = lookConvertCase(rawSpan);
+      if (converted === null) {
+        if (onUnparseable === "abort")
+          return null;
+        i = scan.endIndex;
+        continue;
+      }
+      out += s.slice(last, caseStart) + `${blocks.push(converted) - 1}`;
+      last = scan.endIndex;
+      i = scan.endIndex;
+      continue;
+    }
+    i++;
+  }
+  return { text: out + s.slice(last), blocks };
+}
+function _spliceNestedCases(s, blocks) {
+  return s.replace(_NESTED_CASE_UNMASK_RE, (_m, i) => blocks[Number(i)] ?? _m);
+}
+function lookConvertCase(expr) {
+  const trimmed = expr.trim();
+  const head = /^CASE\b/i.exec(trimmed);
+  if (!head)
+    return null;
+  const { masked, lits } = _maskLiterals(trimmed);
+  const scan = _scanCase(masked, head[0].length);
+  if (scan.endIndex === -1)
+    return null;
+  if (masked.slice(scan.endIndex).trim() !== "")
+    return null;
+  const m = scan.markers;
+  const firstMarkerStart = m.length ? m[0].start : scan.endStart;
+  if (masked.slice(head[0].length, firstMarkerStart).trim() !== "")
+    return null;
+  const branches = [];
+  let elseVal = null;
+  let idx = 0;
+  while (true) {
+    if (idx >= m.length || m[idx].type !== "WHEN")
+      return null;
+    const whenTok = m[idx++];
+    if (idx >= m.length || m[idx].type !== "THEN")
+      return null;
+    const thenTok = m[idx++];
+    const condText = masked.slice(whenTok.end, thenTok.start);
+    let valEnd, sawElse = false;
+    if (idx < m.length && m[idx].type === "WHEN") {
+      valEnd = m[idx].start;
+    } else if (idx < m.length && m[idx].type === "ELSE") {
+      valEnd = m[idx].start;
+      sawElse = true;
+    } else if (idx === m.length) {
+      valEnd = scan.endStart;
+    } else {
+      return null;
+    }
+    branches.push({ cond: condText, val: masked.slice(thenTok.end, valEnd) });
+    if (sawElse) {
+      const elseTok = m[idx++];
+      if (idx !== m.length)
+        return null;
+      elseVal = masked.slice(elseTok.end, scan.endStart);
+      break;
+    }
+    if (idx === m.length)
+      break;
+  }
   if (branches.length === 0)
     return null;
-  const convertVal = (v) => {
-    v = v.trim();
-    if (/^'[^']*'$/.test(v))
+  const convertLeaf = (maskedChunk, allowNumber) => {
+    const v = maskedChunk.trim();
+    if (allowNumber && /^-?\d+(\.\d+)?$/.test(v))
       return v;
-    if (/^-?\d+(\.\d+)?$/.test(v))
-      return v;
-    return lookConvertExpression(v);
+    const stripped = stripOuterParens(v);
+    const nc = _convertNestedCases(stripped, lits);
+    if (nc === null)
+      return null;
+    const raw = _restoreRawLiterals(nc.text, lits);
+    const converted = lookConvertExpression(raw);
+    const spliced = _spliceNestedCases(converted, nc.blocks);
+    if (!spliced.trim())
+      return null;
+    return spliced;
   };
-  let result = elseVal ? convertVal(elseVal) : "null";
+  let result = elseVal !== null ? convertLeaf(elseVal, true) : "null";
+  if (result === null)
+    return null;
   for (let i = branches.length - 1; i >= 0; i--) {
-    const sigmaCond = lookConvertExpression(branches[i].cond);
-    const sigmaVal = convertVal(branches[i].val);
+    const sigmaCond = convertLeaf(branches[i].cond, false);
+    const sigmaVal = convertLeaf(branches[i].val, true);
+    if (sigmaCond === null || sigmaVal === null)
+      return null;
     result = `If(${sigmaCond}, ${sigmaVal}, ${result})`;
   }
+  if (!_isBalanced(result))
+    return null;
   return result;
 }
 function lookConvertMathExpr(expr) {
   expr = expr.replace(/NULLIF\s*\(([A-Z_][A-Z0-9_]*)\s*,\s*([^)]+)\)/gi, (_, col, val) => `If(${lookColRef(col)} = ${val.trim()}, null, ${lookColRef(col)})`);
   return lookConvertExpression(expr);
 }
+var _LIT_RE = /'(?:[^']|'')*'/g;
+function _maskLiterals(s) {
+  const lits = [];
+  let out = "";
+  let i = 0;
+  while (i < s.length) {
+    if (s[i] === "[") {
+      const close = s.indexOf("]", i + 1);
+      if (close !== -1) {
+        out += s.slice(i, close + 1);
+        i = close + 1;
+        continue;
+      }
+    }
+    if (s[i] === "'") {
+      _LIT_RE.lastIndex = i;
+      const m = _LIT_RE.exec(s);
+      if (m && m.index === i) {
+        out += `\0${lits.push(m[0]) - 1}`;
+        i += m[0].length;
+        continue;
+      }
+    }
+    out += s[i];
+    i++;
+  }
+  return { masked: out, lits };
+}
+function _unmaskLiterals(s, lits) {
+  return s.replace(/\u0000(\d+)\u0001/g, (_m, i) => {
+    const inner = lits[Number(i)].slice(1, -1).replace(/''/g, "'").replace(/"/g, '\\"');
+    return `"${inner}"`;
+  });
+}
+function _restoreRawLiterals(s, lits) {
+  return s.replace(/\u0000(\d+)\u0001/g, (_m, i) => lits[Number(i)] ?? _m);
+}
+function _restoreRawCountDistinct(s, args) {
+  return s.replace(/\x02(\d+)\x03/g, (_m, i) => `COUNT(DISTINCT ${args[Number(i)] ?? ""})`);
+}
+function _maskCountDistinct(s) {
+  const args = [];
+  const re = /\bCOUNT\s*\(\s*DISTINCT\s+/gi;
+  let out = "", last = 0, m;
+  while ((m = re.exec(s)) !== null) {
+    const argStart = m.index + m[0].length;
+    let depth = 1, quote = "", i = argStart;
+    for (; i < s.length; i++) {
+      const c = s[i];
+      if (quote) {
+        if (c === quote)
+          quote = "";
+        continue;
+      }
+      if (c === "'" || c === '"') {
+        quote = c;
+        continue;
+      }
+      if (c === "[") {
+        const cl = s.indexOf("]", i + 1);
+        if (cl !== -1) {
+          i = cl;
+          continue;
+        }
+      }
+      if (c === "(")
+        depth++;
+      else if (c === ")") {
+        depth--;
+        if (depth === 0)
+          break;
+      }
+    }
+    if (depth !== 0)
+      break;
+    out += s.slice(last, m.index) + `${args.push(s.slice(argStart, i).trim()) - 1}`;
+    last = i + 1;
+    re.lastIndex = last;
+  }
+  return { masked: out + s.slice(last), args };
+}
+function hasResidualCaseKeyword(s) {
+  const masked = s.replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\[[^\]]*\]/g, " ");
+  return /\b(?:CASE|WHEN|THEN|END)\b/i.test(masked);
+}
+function hasResidualInfixOperator(s) {
+  const masked = s.replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\[[^\]]*\]/g, " ");
+  return /\b(?:LIKE|BETWEEN)\b/i.test(masked);
+}
+function _unmaskCountDistinct(s, args) {
+  return s.replace(/(\d+)/g, (_m, i) => {
+    const raw = stripOuterParens(args[Number(i)]);
+    const viaRules = lookSqlToSigmaRules(raw);
+    const converted = viaRules ?? lookConvertExpression(raw);
+    if (viaRules === null && hasResidualCaseKeyword(converted)) {
+      return `COUNT(DISTINCT ${raw})`;
+    }
+    return `CountDistinct(${converted})`;
+  });
+}
+var _SQL_KEYWORD_RE = /^(?:AND|OR|NOT|IN|IS|NULL|CASE|WHEN|THEN|ELSE|END|BETWEEN|LIKE|AS|ON|BY|DISTINCT|TRUE|FALSE|OVER|GROUP|EXISTS)$/i;
+function _naiveTitleCase(fn) {
+  return fn.charAt(0).toUpperCase() + fn.slice(1).toLowerCase();
+}
+var _BRACKET_UNMASK_RE = /\x0E(\d+)\x0F/g;
+function _bracketSpanFinalText(rawSpan) {
+  const inner = rawSpan.slice(1, -1);
+  if (/^[A-Z_][A-Z0-9_]*$/.test(inner) && !_SQL_KEYWORD_RE.test(inner)) {
+    return lookColRef(inner);
+  }
+  return rawSpan;
+}
+function _maskBrackets(s) {
+  const spans = [];
+  let out = "", i = 0;
+  while (i < s.length) {
+    if (s[i] === "[") {
+      const close = s.indexOf("]", i + 1);
+      if (close !== -1) {
+        const finalText = _bracketSpanFinalText(s.slice(i, close + 1));
+        out += `${spans.push(finalText) - 1}`;
+        i = close + 1;
+        continue;
+      }
+    }
+    out += s[i];
+    i++;
+  }
+  return { masked: out, spans };
+}
+function _unmaskBrackets(s, spans) {
+  return s.replace(_BRACKET_UNMASK_RE, (_m, i) => spans[Number(i)] ?? _m);
+}
 function lookConvertExpression(expr) {
+  const cd = _maskCountDistinct(expr);
+  const { masked, lits } = _maskLiterals(cd.masked);
+  expr = masked;
+  const ec = _convertNestedCases(expr, lits, "leave-raw", cd.args);
+  expr = ec.text;
   expr = expr.replace(/\b([A-Z_][A-Z0-9_]*)\s*(?=\()/gi, (match, fn) => {
     const upper = fn.toUpperCase();
-    return LOOK_FUNC_MAP[upper] || fn.charAt(0).toUpperCase() + fn.slice(1).toLowerCase();
+    if (_SQL_KEYWORD_RE.test(upper))
+      return match;
+    const mapped = LOOK_FUNC_MAP[upper];
+    if (mapped)
+      return mapped.endsWith("()") ? mapped.slice(0, -2) : mapped;
+    return _naiveTitleCase(fn);
   });
   expr = expr.replace(/(\[[^\]]+\]|[\w\]\)]+(?:\([^)]*\))?)\s+IN\s*\(([^)]+)\)/gi, (_, lhs, list) => {
     return `In(${lhs}, ${list})`;
   });
-  expr = expr.replace(/\b([A-Z_][A-Z0-9_]*)\b(?!\s*\()/g, (match) => {
-    if (/^(AND|OR|NOT|NULL|IS|IN|BETWEEN|LIKE|THEN|ELSE|END|WHEN|CASE|TRUE|FALSE)$/i.test(match))
-      return match;
-    if (/^\d+$/.test(match))
-      return match;
-    return lookColRef(match);
-  });
-  return expr.trim();
+  {
+    const { masked: bracketMasked, spans } = _maskBrackets(expr);
+    expr = bracketMasked.replace(/\b([A-Z_][A-Z0-9_]*)\b(?!\s*\()/g, (match) => {
+      if (_SQL_KEYWORD_RE.test(match))
+        return match;
+      if (/^\d+$/.test(match))
+        return match;
+      return lookColRef(match);
+    });
+    expr = _unmaskBrackets(expr, spans);
+  }
+  expr = _spliceNestedCases(expr, ec.blocks);
+  return _unmaskCountDistinct(_unmaskLiterals(expr, lits), cd.args).trim();
 }
 function lookSqlToSigmaRules(sql) {
   let expr = sql.replace(/\$\{TABLE\}\./gi, "").replace(/\$\{[^.}]+\.([^}]+)\}/g, (_, f) => f.toUpperCase()).replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_, n) => n.toUpperCase()).replace(/[\r\n]+\s*/g, " ").trim();
+  expr = stripOuterParens(expr);
   {
     const m = expr.match(/^([A-Z_][A-Z0-9_]*)\s*=\s*(\d+)$/i);
     if (m)
@@ -357,7 +722,7 @@ function lookSigmaMetric(measureType, colName) {
   return map[(measureType || "").toLowerCase()] || `CountIf(IsNotNull([${dn}]))`;
 }
 
-// ../../../Users/tjwells/sigma-data-model-mcp/build/lookml.js
+// ../mcp-fresh/build/lookml.js
 function lookmlNamedFormat(name) {
   const n = name.trim().toLowerCase();
   const CUR = { usd: "$", gbp: "\xA3", eur: "\u20AC", cad: "$", aud: "$" };
@@ -778,6 +1143,19 @@ ${c.sql}
     }
   }
   return body;
+}
+function maskFormulaStringLiterals(formula) {
+  let marker = "@@LIT@@";
+  while (formula.includes(marker))
+    marker += "@";
+  const literals = [];
+  const masked = formula.replace(/"(?:[^"\\]|\\.)*"/g, (lit) => {
+    const idx = literals.push(lit) - 1;
+    return `${marker}${idx}${marker}`;
+  });
+  const escapedMarker = marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const unmaskRe = new RegExp(`${escapedMarker}(\\d+)${escapedMarker}`, "g");
+  return { masked, unmask: (s) => s.replace(unmaskRe, (_m, i) => literals[Number(i)]) };
 }
 function lookExtractPath(view, sqlTableNameMap) {
   let raw = (view.sql_table_name || view.from || "").trim().replace(/`/g, "");
@@ -1572,7 +1950,7 @@ function lookConvertView(viewName, view, connectionId, warnings, sqlTableNameMap
         let viaRules = null;
         if (hasCase && !hasRawFn && !hasConcatOp && !hasCast) {
           viaRules = lookSqlToSigmaRules(expr.replace(/--[^\n]*/g, ""));
-          if (viaRules && /\b(CASE|WHEN|THEN)\b|\|\||::\s*\w/i.test(viaRules))
+          if (viaRules && (/\b(CASE|WHEN|THEN)\b|\|\||::\s*\w/i.test(viaRules) || hasResidualInfixOperator(viaRules)))
             viaRules = null;
         }
         if (viaRules) {
@@ -1839,9 +2217,15 @@ function convertLookMLToSigma(files, options = {}) {
       let relType = "N:1";
       if (j.rel === "one_to_one")
         relType = "1:1";
+      else if (j.rel === "one_to_many")
+        relType = "1:N";
+      else if (j.rel === "many_to_one")
+        relType = "N:1";
       else if (j.rel === "many_to_many") {
         relType = "N:1";
         warnings.push(`\u26A0 Relationship "${j.alias}": LookML relationship is many_to_many, which Sigma does not support natively. Mapped to the closest type (N:1) \u2014 verify cardinality and introduce a bridge/junction table if the join can fan out on both sides (otherwise aggregates may double-count).`);
+      } else {
+        warnings.push(`\u26A0 Relationship "${j.alias}": unrecognized LookML relationship "${j.rel}" \u2014 defaulted to N:1 (many-to-one); verify the cardinality.`);
       }
       const srcEl = srcRes.element;
       if (!srcEl.relationships)
@@ -1959,7 +2343,7 @@ function convertLookMLToSigma(files, options = {}) {
         keep.push(c);
         continue;
       }
-      const refs = c.formula.match(/\[([^\]\/]+)\]/g) || [];
+      const refs = maskFormulaStringLiterals(c.formula).masked.match(/\[([^\]\/]+)\]/g) || [];
       const hasCross = refs.some((ref) => {
         const n = ref.replace(/^\[|\]$/g, "");
         return !/^(true|false|null)$/i.test(n) && !localNames.has(n.toUpperCase());
@@ -2017,10 +2401,12 @@ function convertLookMLToSigma(files, options = {}) {
     }
     for (const c of calcs) {
       if (c.formula && Object.keys(relatedNameMap).length) {
-        c.formula = c.formula.replace(/\[([^\]\/]+)\]/g, (match, refName) => {
+        const { masked, unmask } = maskFormulaStringLiterals(c.formula);
+        const rewrittenMasked = masked.replace(/\[([^\]\/]+)\]/g, (match, refName) => {
           const rewritten = relatedNameMap[refName];
           return rewritten ? `[${rewritten}]` : match;
         });
+        c.formula = unmask(rewrittenMasked);
       }
       de.columns.push(c);
       de.order.push(c.id);
@@ -2129,5 +2515,6 @@ function buildDerivedElements(elements) {
 }
 export {
   convertLookMLToSigma,
+  maskFormulaStringLiterals,
   parseLookML
 };

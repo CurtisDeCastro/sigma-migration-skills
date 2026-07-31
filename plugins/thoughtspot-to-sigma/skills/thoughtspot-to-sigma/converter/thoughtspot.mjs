@@ -1,4 +1,4 @@
-// ../../../Users/tjwells/sigma-data-model-mcp/node_modules/js-yaml/dist/js-yaml.mjs
+// ../mcp-fresh/node_modules/js-yaml/dist/js-yaml.mjs
 function isNothing(subject) {
   return typeof subject === "undefined" || subject === null;
 }
@@ -2622,9 +2622,28 @@ var jsYaml = {
   safeDump
 };
 
-// ../../../Users/tjwells/sigma-data-model-mcp/build/sigma-ids.js
+// ../mcp-fresh/build/sigma-ids.js
 var SIGMA_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 var _usedIds = /* @__PURE__ */ new Set();
+var _idCounter = 0;
+function encodeBase62(n, len) {
+  let x = n, s = "";
+  while (x > 0) {
+    s = SIGMA_CHARS[x % 62] + s;
+    x = Math.floor(x / 62);
+  }
+  return s.padStart(len, SIGMA_CHARS[0]);
+}
+function fnv1a32(s) {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+var NS_MODULUS = 62 ** 4;
+var NS_BLOCK = 1e6;
 var SIGMA_LOWERCASE_WORDS = /* @__PURE__ */ new Set([
   "a",
   "an",
@@ -2648,23 +2667,31 @@ var SIGMA_LOWERCASE_WORDS = /* @__PURE__ */ new Set([
   "via",
   "per"
 ]);
-function resetIds() {
+function resetIds(seed) {
   _usedIds.clear();
+  _idCounter = seed == null ? 0 : fnv1a32(seed) % NS_MODULUS * NS_BLOCK;
+}
+function clampId(id, max = 64) {
+  if (id.length <= max)
+    return id;
+  const suffix = "~" + encodeBase62(fnv1a32(id) % 62 ** 6, 6);
+  return id.slice(0, max - suffix.length) + suffix;
 }
 function sigmaShortId(len = 10) {
   let id;
   do {
-    id = Array.from({ length: len }, () => SIGMA_CHARS[Math.floor(Math.random() * SIGMA_CHARS.length)]).join("");
+    id = encodeBase62(++_idCounter, len);
   } while (_usedIds.has(id));
   _usedIds.add(id);
   return id;
 }
-function sigmaInodeId(identifier) {
-  return `inode-${sigmaShortId(22)}/${identifier.toUpperCase()}`;
+function sigmaInodeId(identifier, casing = "upper") {
+  const phys = casing === "lower" ? identifier.toLowerCase() : identifier.toUpperCase();
+  return clampId(`inode-${sigmaShortId(22)}/${phys}`);
 }
 function sigmaDisplayName(s) {
   const normalized = (s || "").replace(/([a-z])([A-Z])/g, "$1_$2").replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2").replace(/([A-Za-z])([0-9])/g, "$1_$2").replace(/([0-9])([A-Za-z])/g, "$1_$2");
-  const words = normalized.toLowerCase().split(/[_\s]+/).filter(Boolean);
+  const words = normalized.toLowerCase().split(/[_\s/-]+/).filter(Boolean);
   return words.map((w, i) => i === 0 || !SIGMA_LOWERCASE_WORDS.has(w) ? w.charAt(0).toUpperCase() + w.slice(1) : w).join(" ");
 }
 function sigmaColFormula(tableName, identifier) {
@@ -2798,6 +2825,7 @@ function buildDerivedElements(elements) {
     const derivedName = `${srcEl.name || sigmaDisplayName(srcTableName)} View`;
     const viewCols = [];
     const viewOrder = [];
+    const folderByTarget = /* @__PURE__ */ new Map();
     for (const col of srcEl.columns || []) {
       if (!col.formula || col.formula.startsWith("/*"))
         continue;
@@ -2822,6 +2850,12 @@ function buildDerivedElements(elements) {
       if (!tgtEl || tgtEl.source?.kind !== "warehouse-table" && tgtEl.source?.kind !== "sql")
         continue;
       const tgtKeyIds = new Set((rel.keys || []).map((k) => k.targetColumnId));
+      let tgtTableName = "";
+      if (tgtEl.source?.kind === "warehouse-table") {
+        const tgtPath = tgtEl.source.path || [];
+        tgtTableName = tgtPath[tgtPath.length - 1] || "";
+      }
+      const tgtFolderName = tgtEl.name || (tgtTableName ? sigmaDisplayName(tgtTableName) : "") || rel.name;
       for (const col of tgtEl.columns || []) {
         if (tgtKeyIds.has(col.id))
           continue;
@@ -2843,25 +2877,44 @@ function buildDerivedElements(elements) {
         if (dispName.includes("/"))
           continue;
         const cId = sigmaShortId();
-        viewCols.push({ id: cId, formula: `[${baseName}/${rel.name}/${dispName}]` });
+        viewCols.push({ id: cId, formula: `[${baseName}/${rel.name}/${dispName}]`, hidden: true });
         viewOrder.push(cId);
+        let folder = folderByTarget.get(rel.targetElementId);
+        if (!folder) {
+          folder = { id: sigmaShortId(), name: tgtFolderName, items: [], relName: rel.name };
+          folderByTarget.set(rel.targetElementId, folder);
+        }
+        folder.items.push(cId);
+      }
+    }
+    if (folderByTarget.size > 1) {
+      const countByName = /* @__PURE__ */ new Map();
+      for (const f of folderByTarget.values())
+        countByName.set(f.name, (countByName.get(f.name) || 0) + 1);
+      for (const f of folderByTarget.values()) {
+        if ((countByName.get(f.name) || 0) > 1)
+          f.name = `${f.name} (${f.relName})`;
       }
     }
     if (viewCols.length > 0) {
-      derived.push({
+      const derivedEl = {
         id: sigmaShortId(),
         kind: "table",
         name: derivedName,
         source: { kind: "table", elementId: srcEl.id },
         columns: viewCols,
         order: viewOrder
-      });
+      };
+      if (folderByTarget.size > 0) {
+        derivedEl.folders = [...folderByTarget.values()].map(({ id, name, items }) => ({ id, name, items }));
+      }
+      derived.push(derivedEl);
     }
   }
   return derived;
 }
 
-// ../../../Users/tjwells/sigma-data-model-mcp/build/thoughtspot.js
+// ../mcp-fresh/build/thoughtspot.js
 function convertThoughtSpotToSigma(yamlText, options = {}) {
   resetIds();
   const { connectionId, database: dbOverride, schema: schOverride } = options;
@@ -3260,11 +3313,40 @@ function convertThoughtSpotToSigma(yamlText, options = {}) {
 function tsIsAggregateFormula(expr) {
   return /\b(sum|count|count_distinct|unique_count|count_not_null|average|avg|max|min|median|std_deviation|stddev|variance|cumulative_sum|running_total|sum_if|count_if|average_if|max_if|min_if|unique_count_if)\s*\(/i.test(expr || "");
 }
+var TS_LIT_SENT = "";
+var TS_LIT_SENT_RE = new RegExp(`${TS_LIT_SENT}(\\d+)${TS_LIT_SENT}`, "g");
+function tsMaskLiterals(s, lits = []) {
+  let out = "";
+  let i = 0;
+  while (i < s.length) {
+    const ch = s[i];
+    if (ch === "[" || ch === '"' || ch === "'") {
+      const closeChar = ch === "[" ? "]" : ch;
+      const close = s.indexOf(closeChar, i + 1);
+      if (close !== -1) {
+        const raw = s.slice(i, close + 1);
+        out += `${TS_LIT_SENT}${lits.push({ kind: ch, raw }) - 1}${TS_LIT_SENT}`;
+        i = close + 1;
+        continue;
+      }
+    }
+    out += ch;
+    i++;
+  }
+  return { masked: out, lits };
+}
+function tsUnmaskLiterals(s, lits) {
+  return s.replace(TS_LIT_SENT_RE, (_m, i) => {
+    const lit = lits[Number(i)];
+    if (!lit)
+      return _m;
+    return lit.kind === "'" ? `"${lit.raw.slice(1, -1)}"` : lit.raw;
+  });
+}
 function tsRlsExprToSigma(expr, elementByTable) {
   if (!expr?.trim())
     return "";
   let e = expr.trim();
-  e = e.replace(/'([^']*)'/g, '"$1"');
   e = e.replace(/\[([^\]]+)\]\s*(?:=|in)\s*ts_groups/gi, "CurrentUserInTeam([$1])");
   e = e.replace(/ts_groups\s*(?:=|in)\s*\[([^\]]+)\]/gi, "CurrentUserInTeam([$1])");
   e = e.replace(/\bts_username\b/gi, "CurrentUserEmail()");
@@ -3274,12 +3356,13 @@ function tsFormulaToSigma(expr, _elementByTable) {
   if (!expr)
     return "";
   let s = expr;
-  s = s.replace(/'([^']*)'/g, '"$1"');
   s = s.replace(/\[([^\]:]+)::([^\]]+)\]/g, (_, _tbl, col) => `[${sigmaDisplayName(col.trim())}]`);
+  const { masked, lits } = tsMaskLiterals(s);
+  s = masked;
   s = tsConvertIfThenElse(s);
-  s = s.replace(/(\[[^\]]+\]|\w+)\s+in\s*\{([^}]+)\}/gi, (_, col, vals) => {
+  s = s.replace(new RegExp(`(${TS_LIT_SENT}\\d+${TS_LIT_SENT}|\\w+)\\s+in\\s*\\{([^}]+)\\}`, "gi"), (_, col, vals) => {
     const vlist = vals.split(",").map((v) => v.trim()).join(", ");
-    const colRef = col.startsWith("[") ? col : `[${sigmaDisplayName(col.trim())}]`;
+    const colRef = new RegExp(`^${TS_LIT_SENT}\\d+${TS_LIT_SENT}$`).test(col) ? col : `[${sigmaDisplayName(col.trim())}]`;
     return `In(${colRef}, ${vlist})`;
   });
   s = s.replace(/\bunique[\s_]+count\s*\(/gi, "count_distinct(");
@@ -3299,7 +3382,7 @@ function tsFormulaToSigma(expr, _elementByTable) {
   };
   s = s.replace(/\b(sum|count_distinct|count_not_null|count|average|avg|max|min|median|std_deviation|variance|cumulative_sum)\s*\(([^)]+)\)/gi, (_, fn, arg) => {
     const sigmaFn = tsAggMap[fn.toLowerCase()] || fn;
-    return `${sigmaFn}(${tsWrapColumnRefs(arg.trim())})`;
+    return `${sigmaFn}(${arg.trim()})`;
   });
   s = tsRewriteSafeDivide(s);
   s = tsRewriteCondAgg(s, "sum_if", "SumIf");
@@ -3347,8 +3430,8 @@ function tsFormulaToSigma(expr, _elementByTable) {
   s = s.replace(/\btoday\s*\(\s*\)/gi, "Today()");
   s = s.replace(/\bdate_diff\s*\(/gi, "DateDiff(");
   s = s.replace(/\bdatediff\s*\(/gi, "DateDiff(");
-  s = tsWrapColumnRefs(s);
-  return s;
+  s = tsBracketIdents(s);
+  return tsUnmaskLiterals(s, lits);
 }
 function tsRewriteCondAgg(s, tsFn, sigmaFn) {
   let out = "";
@@ -3429,22 +3512,13 @@ function tsConvertIfThenElse(s) {
   }
   return s;
 }
-function tsWrapColumnRefs(expr) {
-  const saved = [];
-  let s = expr.replace(/\[[^\]]*\]/g, (m) => {
-    saved.push(m);
-    return `${saved.length - 1}`;
-  }).replace(/"[^"]*"/g, (m) => {
-    saved.push(m);
-    return `${saved.length - 1}`;
-  });
+function tsBracketIdents(expr) {
   const skip = /^(if|then|else|and|or|not|in|null|true|false|today|IsNull|If|In|List|Sum|Count|Avg|Max|Min|CountDistinct|StdDev|Variance|DateDiff|Today|CumulativeSum|Not)$/;
-  s = s.replace(/\b([A-Z_][A-Z0-9_]*)\b(?!\s*\()/gi, (match, ident) => {
+  return expr.replace(/\b([A-Z_][A-Z0-9_]*)\b(?!\s*\()/gi, (match, ident) => {
     if (skip.test(ident))
       return match;
     return `[${sigmaDisplayName(ident)}]`;
   });
-  return s.replace(/\x02(\d+)\x03/g, (_, i) => saved[+i]);
 }
 var TS_WINDOW_SIGMA = {
   cumulative_sum: "CumulativeSum",
