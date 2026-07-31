@@ -16,6 +16,18 @@
 #   Part D — string-pin: the real tableau converter PROVENANCE.json records
 #            the d8a049a in-place patch with the commit/summary/upstream_pr
 #            entry schema and carries the upstream-and-re-vendor task block
+#   Part E — --freshness (staleness-by-age gate, 2026-07-31): a vendored
+#            PROVENANCE.json whose source_commit_date is older than
+#            CONVERTER_STALENESS_DAYS fails naming the module + re-vendor
+#            command; the same fixture with today's date passes; a
+#            source_repo entry missing source_commit/source_commit_date
+#            fails; a stale entry carrying local_patches gets the
+#            do-not-re-vendor-blind note; an in-skill (cognos-shaped, no
+#            source_repo) entry is reported explicitly as not-applicable,
+#            never silently dropped or miscounted as stale
+#   Part F — --online soft-pass: with no local sigma-data-model-mcp checkout
+#            present, --online exits 0 with a warning rather than failing —
+#            it is a human-driven convenience, never a hard CI requirement
 #
 # All fixture names are synthetic (toolx) — no field-derived identifiers.
 # Runs standalone:  bash tools/test-converter-provenance.sh
@@ -161,6 +173,88 @@ for t in "TASK 1 —" "TASK 2 —" "TASK 3 —" "TASK 4 —"; do
 done
 grep -q "scripts/dev/vendor-converter.sh" "$REAL"
 check $? "TASK 3 names the second (skill-local) regenerator"
+
+echo "Part E — --freshness: staleness-by-age, in-skill shape, missing keys, local_patches note"
+new_repo "$TMP/freshness"
+TOOLX="plugins/toolx-to-sigma/skills/toolx-to-sigma/converter"
+TOOLY="plugins/tooly-to-sigma/skills/tooly-to-sigma/converter"
+mkdir -p "$TOOLX" "$TOOLY"
+OLD_DATE="$(python3 -c 'import datetime; print((datetime.date.today()-datetime.timedelta(days=40)).isoformat())')"
+TODAY_DATE="$(python3 -c 'import datetime; print(datetime.date.today().isoformat())')"
+
+cat > "$TOOLX/PROVENANCE.json" <<EOF
+{
+  "source_repo": "example/fixture-converters",
+  "source_commit": "aaaaaaa",
+  "source_commit_date": "$OLD_DATE",
+  "vendored_modules": "toolx.mjs"
+}
+EOF
+# tooly stands in for the cognos shape: in-skill converter, no source_repo,
+# so it has no source_commit at all by design — must be reported explicitly,
+# not silently skipped and not counted as stale.
+cat > "$TOOLY/PROVENANCE.json" <<'EOF'
+{
+  "source": "in-skill converter/cli.ts",
+  "vendored_modules": "cli.mjs",
+  "source_sha256": "deadbeef"
+}
+EOF
+E0="$(commit_all base)"
+CONVERTER_STALENESS_DAYS=14 bash "$GUARD" --freshness "$E0" >"$TMP/out" 2>&1; RC=$?
+[ "$RC" -eq 1 ]; check $? "40d-old source_commit_date fails freshness (got $RC)"
+grep -q "STALE" "$TMP/out"; check $? "failure says STALE"
+grep -q "vendor-converters.sh <sigma-data-model-mcp checkout> toolx" "$TMP/out"
+check $? "failure names the re-vendor command with the correct module"
+grep -q "in-skill converter, not vendored from sigma-data-model-mcp" "$TMP/out"
+check $? "cognos-shaped (no source_repo) entry reported explicitly as not-applicable"
+! grep -q "tooly-to-sigma.*STALE\|STALE.*tooly-to-sigma" "$TMP/out"
+check $? "cognos-shaped entry is never counted as stale"
+
+sed -i.bak "s/$OLD_DATE/$TODAY_DATE/" "$TOOLX/PROVENANCE.json" && rm -f "$TOOLX/PROVENANCE.json.bak"
+E1="$(commit_all fresh)"
+CONVERTER_STALENESS_DAYS=14 bash "$GUARD" --freshness "$E1" >"$TMP/out" 2>&1; RC=$?
+[ "$RC" -eq 0 ]; check $? "today's source_commit_date passes freshness (got $RC)"
+grep -q "guard OK" "$TMP/out"; check $? "passing state reports guard OK"
+
+cat > "$TOOLX/PROVENANCE.json" <<'EOF'
+{
+  "source_repo": "example/fixture-converters",
+  "vendored_modules": "toolx.mjs"
+}
+EOF
+E2="$(commit_all missing-commit)"
+CONVERTER_STALENESS_DAYS=14 bash "$GUARD" --freshness "$E2" >"$TMP/out" 2>&1; RC=$?
+[ "$RC" -eq 1 ]; check $? "vendored entry missing source_commit/source_commit_date fails (got $RC)"
+grep -q "missing source_commit/source_commit_date" "$TMP/out"; check $? "failure names the missing keys"
+
+cat > "$TOOLX/PROVENANCE.json" <<EOF
+{
+  "source_repo": "example/fixture-converters",
+  "source_commit": "bbbbbbb",
+  "source_commit_date": "$OLD_DATE",
+  "vendored_modules": "toolx.mjs",
+  "local_patches": [
+    { "commit": "1111111", "summary": "fixture patch", "upstream_pr": null }
+  ]
+}
+EOF
+E3="$(commit_all stale-with-patches)"
+CONVERTER_STALENESS_DAYS=14 bash "$GUARD" --freshness "$E3" >"$TMP/out" 2>&1; RC=$?
+[ "$RC" -eq 1 ]; check $? "stale entry with local_patches still fails (got $RC)"
+grep -q "local_patches has 1 entry recorded" "$TMP/out"; check $? "failure surfaces the local_patches count"
+grep -q "do not just re-vendor blind" "$TMP/out"; check $? "failure points at the correct remediation (patch upstream, don't blind re-vendor)"
+
+echo '{ not json' > "$TOOLX/PROVENANCE.json"
+E4="$(commit_all bad-json)"
+CONVERTER_STALENESS_DAYS=14 bash "$GUARD" --freshness "$E4" >"$TMP/out" 2>&1; RC=$?
+[ "$RC" -eq 1 ]; check $? "malformed JSON fails freshness (got $RC)"
+grep -q "not valid JSON" "$TMP/out"; check $? "failure says the file no longer parses"
+
+echo "Part F — --online soft-pass with no local checkout"
+bash "$GUARD" --online "$TMP/no-such-checkout-dir" >"$TMP/out" 2>&1; RC=$?
+[ "$RC" -eq 0 ]; check $? "--online soft-passes when the checkout path doesn't exist (got $RC)"
+grep -q "soft-passing" "$TMP/out"; check $? "soft-pass explains why (no checkout to compare against)"
 
 echo
 if [ "$fails" -gt 0 ]; then
