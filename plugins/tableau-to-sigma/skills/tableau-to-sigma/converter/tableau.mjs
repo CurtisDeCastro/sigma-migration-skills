@@ -24,9 +24,9 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   mod
 ));
 
-// ../sigma-data-model-mcp/node_modules/fast-xml-parser/src/util.js
+// node_modules/fast-xml-parser/src/util.js
 var require_util = __commonJS({
-  "../sigma-data-model-mcp/node_modules/fast-xml-parser/src/util.js"(exports) {
+  "node_modules/fast-xml-parser/src/util.js"(exports) {
     "use strict";
     var nameStartChar = ":A-Za-z_\\u00C0-\\u00D6\\u00D8-\\u00F6\\u00F8-\\u02FF\\u0370-\\u037D\\u037F-\\u1FFF\\u200C-\\u200D\\u2070-\\u218F\\u2C00-\\u2FEF\\u3001-\\uD7FF\\uF900-\\uFDCF\\uFDF0-\\uFFFD";
     var nameChar = nameStartChar + "\\-.\\d\\u00B7\\u0300-\\u036F\\u203F-\\u2040";
@@ -98,9 +98,9 @@ var require_util = __commonJS({
   }
 });
 
-// ../sigma-data-model-mcp/node_modules/fast-xml-parser/src/validator.js
+// node_modules/fast-xml-parser/src/validator.js
 var require_validator = __commonJS({
-  "../sigma-data-model-mcp/node_modules/fast-xml-parser/src/validator.js"(exports) {
+  "node_modules/fast-xml-parser/src/validator.js"(exports) {
     "use strict";
     var util = require_util();
     var defaultOptions = {
@@ -410,9 +410,9 @@ var require_validator = __commonJS({
   }
 });
 
-// ../sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/OptionsBuilder.js
+// node_modules/fast-xml-parser/src/xmlparser/OptionsBuilder.js
 var require_OptionsBuilder = __commonJS({
-  "../sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/OptionsBuilder.js"(exports) {
+  "node_modules/fast-xml-parser/src/xmlparser/OptionsBuilder.js"(exports) {
     var { DANGEROUS_PROPERTY_NAMES, criticalProperties } = require_util();
     var defaultOnDangerousProperty = (name) => {
       if (DANGEROUS_PROPERTY_NAMES.includes(name)) {
@@ -536,9 +536,9 @@ var require_OptionsBuilder = __commonJS({
   }
 });
 
-// ../sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/xmlNode.js
+// node_modules/fast-xml-parser/src/xmlparser/xmlNode.js
 var require_xmlNode = __commonJS({
-  "../sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/xmlNode.js"(exports, module) {
+  "node_modules/fast-xml-parser/src/xmlparser/xmlNode.js"(exports, module) {
     "use strict";
     var XmlNode = class {
       constructor(tagname) {
@@ -563,9 +563,9 @@ var require_xmlNode = __commonJS({
   }
 });
 
-// ../sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/DocTypeReader.js
+// node_modules/fast-xml-parser/src/xmlparser/DocTypeReader.js
 var require_DocTypeReader = __commonJS({
-  "../sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/DocTypeReader.js"(exports, module) {
+  "node_modules/fast-xml-parser/src/xmlparser/DocTypeReader.js"(exports, module) {
     var util = require_util();
     var DocTypeReader = class {
       constructor(options) {
@@ -851,9 +851,9 @@ var require_DocTypeReader = __commonJS({
   }
 });
 
-// ../sigma-data-model-mcp/node_modules/strnum/strnum.js
+// node_modules/strnum/strnum.js
 var require_strnum = __commonJS({
-  "../sigma-data-model-mcp/node_modules/strnum/strnum.js"(exports, module) {
+  "node_modules/strnum/strnum.js"(exports, module) {
     var hexRegex = /^[-+]?0x[a-fA-F0-9]+$/;
     var numRegex = /^([\-\+])?(0*)([0-9]*(\.[0-9]*)?)$/;
     var consider = {
@@ -939,9 +939,9 @@ var require_strnum = __commonJS({
   }
 });
 
-// ../sigma-data-model-mcp/node_modules/fast-xml-parser/src/ignoreAttributes.js
+// node_modules/fast-xml-parser/src/ignoreAttributes.js
 var require_ignoreAttributes = __commonJS({
-  "../sigma-data-model-mcp/node_modules/fast-xml-parser/src/ignoreAttributes.js"(exports, module) {
+  "node_modules/fast-xml-parser/src/ignoreAttributes.js"(exports, module) {
     function getIgnoreAttributesFn(ignoreAttributes) {
       if (typeof ignoreAttributes === "function") {
         return ignoreAttributes;
@@ -964,9 +964,9 @@ var require_ignoreAttributes = __commonJS({
   }
 });
 
-// ../sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/OrderedObjParser.js
+// node_modules/fast-xml-parser/src/xmlparser/OrderedObjParser.js
 var require_OrderedObjParser = __commonJS({
-  "../sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/OrderedObjParser.js"(exports, module) {
+  "node_modules/fast-xml-parser/src/xmlparser/OrderedObjParser.js"(exports, module) {
     "use strict";
     var util = require_util();
     var xmlNode = require_xmlNode();
@@ -1569,9 +1569,9 @@ var require_OrderedObjParser = __commonJS({
   }
 });
 
-// ../sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/node2json.js
+// node_modules/fast-xml-parser/src/xmlparser/node2json.js
 var require_node2json = __commonJS({
-  "../sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/node2json.js"(exports) {
+  "node_modules/fast-xml-parser/src/xmlparser/node2json.js"(exports) {
     "use strict";
     function prettify(node, options) {
       return compress(node, options);
@@ -1656,9 +1656,9 @@ var require_node2json = __commonJS({
   }
 });
 
-// ../sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/XMLParser.js
+// node_modules/fast-xml-parser/src/xmlparser/XMLParser.js
 var require_XMLParser = __commonJS({
-  "../sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlparser/XMLParser.js"(exports, module) {
+  "node_modules/fast-xml-parser/src/xmlparser/XMLParser.js"(exports, module) {
     var { buildOptions } = require_OptionsBuilder();
     var OrderedObjParser = require_OrderedObjParser();
     var { prettify } = require_node2json();
@@ -1714,9 +1714,9 @@ var require_XMLParser = __commonJS({
   }
 });
 
-// ../sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlbuilder/orderedJs2Xml.js
+// node_modules/fast-xml-parser/src/xmlbuilder/orderedJs2Xml.js
 var require_orderedJs2Xml = __commonJS({
-  "../sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlbuilder/orderedJs2Xml.js"(exports, module) {
+  "node_modules/fast-xml-parser/src/xmlbuilder/orderedJs2Xml.js"(exports, module) {
     var EOL = "\n";
     function toXml(jArray, options) {
       let indentation = "";
@@ -1847,9 +1847,9 @@ var require_orderedJs2Xml = __commonJS({
   }
 });
 
-// ../sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlbuilder/json2xml.js
+// node_modules/fast-xml-parser/src/xmlbuilder/json2xml.js
 var require_json2xml = __commonJS({
-  "../sigma-data-model-mcp/node_modules/fast-xml-parser/src/xmlbuilder/json2xml.js"(exports, module) {
+  "node_modules/fast-xml-parser/src/xmlbuilder/json2xml.js"(exports, module) {
     "use strict";
     var buildFromOrderedJs = require_orderedJs2Xml();
     var getIgnoreAttributesFn = require_ignoreAttributes();
@@ -2093,9 +2093,9 @@ var require_json2xml = __commonJS({
   }
 });
 
-// ../sigma-data-model-mcp/node_modules/fast-xml-parser/src/fxp.js
+// node_modules/fast-xml-parser/src/fxp.js
 var require_fxp = __commonJS({
-  "../sigma-data-model-mcp/node_modules/fast-xml-parser/src/fxp.js"(exports, module) {
+  "node_modules/fast-xml-parser/src/fxp.js"(exports, module) {
     "use strict";
     var validator = require_validator();
     var XMLParser2 = require_XMLParser();
@@ -2533,25 +2533,48 @@ function _splitTopLevelArgs(s) {
     args.push(buf.trim());
   return args;
 }
-function _isTextOperand(op, isTextRef) {
-  let s = op.trim();
-  while (/^\(.*\)$/s.test(s)) {
-    let depth = 0, ok = true;
+function stripOuterParens(s) {
+  s = s.trim();
+  while (s.length > 1 && s.startsWith("(") && s.endsWith(")")) {
+    let depth = 0, quote = "", inBracket = false, wraps = true;
     for (let i = 0; i < s.length; i++) {
-      if (s[i] === "(")
+      const c = s[i];
+      if (inBracket) {
+        if (c === "]")
+          inBracket = false;
+        continue;
+      }
+      if (quote) {
+        if (c === quote)
+          quote = "";
+        continue;
+      }
+      if (c === "[") {
+        inBracket = true;
+        continue;
+      }
+      if (c === "'" || c === '"') {
+        quote = c;
+        continue;
+      }
+      if (c === "(")
         depth++;
-      else if (s[i] === ")") {
+      else if (c === ")") {
         depth--;
         if (depth === 0 && i < s.length - 1) {
-          ok = false;
+          wraps = false;
           break;
         }
       }
     }
-    if (!ok || depth !== 0)
+    if (!wraps || depth !== 0)
       break;
     s = s.slice(1, -1).trim();
   }
+  return s;
+}
+function _isTextOperand(op, isTextRef) {
+  let s = stripOuterParens(op.trim());
   if (!s)
     return false;
   if (/^"(?:[^"\\]|\\.)*"$/.test(s) || /^'(?:[^'\\]|\\.)*'$/.test(s))
@@ -2877,13 +2900,13 @@ function tableauWindowToSigmaChart(formula) {
   }
   return null;
 }
-function tableauIfToSigma(f) {
+function tableauIfToSigma(f, lits) {
   return f.replace(/\bIF\b([\s\S]+?)\bEND\b/gi, (match) => {
     let inner = match.replace(/^\s*IF\s*/i, "").replace(/\s*END\s*$/i, "");
     const elseIdx = inner.search(/\bELSE\b(?!\s*IF\b)/i);
     let elseVal = "null";
     if (elseIdx >= 0) {
-      elseVal = tableauFormulaToSigma(inner.slice(elseIdx).replace(/^\s*ELSE\s*/i, "").trim());
+      elseVal = _tableauRecurse(inner.slice(elseIdx).replace(/^\s*ELSE\s*/i, "").trim(), lits);
       inner = inner.slice(0, elseIdx);
     }
     const parts = inner.split(/\bELSEIF\b/i);
@@ -2892,72 +2915,124 @@ function tableauIfToSigma(f) {
       const thenParts = parts[i].split(/\bTHEN\b/i);
       if (thenParts.length < 2)
         continue;
-      const cond = tableauFormulaToSigma(thenParts[0].trim());
-      const val = tableauFormulaToSigma(thenParts[1].trim());
+      const cond = _tableauRecurse(thenParts[0].trim(), lits);
+      const val = _tableauRecurse(thenParts[1].trim(), lits);
       result = "If(" + cond + ", " + val + ", " + result + ")";
     }
     return result;
   });
 }
-function tableauCaseToSigma(f) {
+function tableauCaseToSigma(f, lits) {
   return f.replace(/\bCASE\b([\s\S]+?)\bEND\b/gi, (match, body) => {
     const elseIdx = body.search(/\bELSE\b/i);
     let elseVal = "null";
     let whenBody = body;
     if (elseIdx >= 0) {
-      elseVal = tableauFormulaToSigma(body.slice(elseIdx).replace(/^\s*ELSE\s*/i, "").trim());
+      elseVal = _tableauRecurse(body.slice(elseIdx).replace(/^\s*ELSE\s*/i, "").trim(), lits);
       whenBody = body.slice(0, elseIdx);
     }
     const fieldMatch = whenBody.match(/^([\s\S]*?)\bWHEN\b/i);
-    const field = fieldMatch ? tableauFormulaToSigma(fieldMatch[1].trim()) : "[?]";
+    const field = fieldMatch ? _tableauRecurse(fieldMatch[1].trim(), lits) : "[?]";
     const pairs = whenBody.replace(/^[\s\S]*?\bWHEN\b/i, "").split(/\bWHEN\b/i).filter(Boolean);
     let result = elseVal;
     for (let i = pairs.length - 1; i >= 0; i--) {
       const thenParts = pairs[i].split(/\bTHEN\b/i);
       if (thenParts.length < 2)
         continue;
-      result = "If(" + field + " = " + tableauFormulaToSigma(thenParts[0].trim()) + ", " + tableauFormulaToSigma(thenParts[1].trim()) + ", " + result + ")";
+      result = "If(" + field + " = " + _tableauRecurse(thenParts[0].trim(), lits) + ", " + _tableauRecurse(thenParts[1].trim(), lits) + ", " + result + ")";
     }
     return result;
   });
 }
+var _TABLEAU_LIT_SQ_RE = /'(?:[^'\\]|\\.)*'/g;
+var _TABLEAU_LIT_DQ_RE = /"(?:[^"\\]|\\.)*"/g;
+var _TABLEAU_SENTINEL_SRC = "\0(\\d+)";
+var _TABLEAU_SENTINEL_RE = / (\d+)/g;
+function _maskTableauLiterals(s, lits = []) {
+  let out = "";
+  let i = 0;
+  while (i < s.length) {
+    if (s[i] === "[") {
+      const close = s.indexOf("]", i + 1);
+      if (close !== -1) {
+        out += s.slice(i, close + 1);
+        i = close + 1;
+        continue;
+      }
+    }
+    if (s[i] === "'" || s[i] === '"') {
+      const re = s[i] === "'" ? _TABLEAU_LIT_SQ_RE : _TABLEAU_LIT_DQ_RE;
+      re.lastIndex = i;
+      const m = re.exec(s);
+      if (m && m.index === i) {
+        out += `\0${lits.push(m[0]) - 1}`;
+        i += m[0].length;
+        continue;
+      }
+    }
+    out += s[i];
+    i++;
+  }
+  return { masked: out, lits };
+}
+function _restoreRawTableauLiterals(s, lits) {
+  return s.replace(_TABLEAU_SENTINEL_RE, (_m, i) => lits[Number(i)] ?? _m);
+}
+function _tabLitInner(lits, idxStr) {
+  const raw = lits[Number(idxStr)];
+  return raw === void 0 ? "" : raw.slice(1, -1).replace(/\\(.)/g, "$1");
+}
+function _tabEscapeForSigma(inner) {
+  return inner.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+function _unmaskTableauLiterals(s, lits) {
+  return s.replace(_TABLEAU_SENTINEL_RE, (_m, i) => `"${_tabEscapeForSigma(_tabLitInner(lits, i))}"`);
+}
+function _tableauRecurse(maskedSlice, lits) {
+  const raw = _restoreRawTableauLiterals(maskedSlice, lits);
+  const converted = tableauFormulaToSigma(raw);
+  const { masked } = _maskTableauLiterals(converted, lits);
+  return masked;
+}
 function tableauFormulaToSigma(formula, warnings) {
   if (!formula || !formula.trim())
     return "";
-  let f = stripLineComments(decodeXmlEntities(formula)).trim();
+  const raw0 = stripLineComments(decodeXmlEntities(formula)).trim();
+  const { masked, lits } = _maskTableauLiterals(raw0);
+  let f = masked;
   if (/^\s*\{/.test(f)) {
     if (warnings)
-      warnings.push("\u26A0 LOD expression not converted: " + f.slice(0, 60));
-    return "/* LOD: " + f.replace(/\/\*/g, "").replace(/\*\//g, "") + " */";
+      warnings.push("\u26A0 LOD expression not converted: " + raw0.slice(0, 60));
+    return "/* LOD: " + raw0.replace(/\/\*/g, "").replace(/\*\//g, "") + " */";
   }
   {
-    const winChart = tableauWindowToSigmaChart(f);
+    const winChart = tableauWindowToSigmaChart(raw0);
     if (winChart) {
       if (warnings)
         warnings.push(`\u2139 Table calc \u2192 ${winChart.formula} \u2014 CHART/grouped-element context ONLY: place in a grouped workbook element (group by the viz dimensions); window functions silently error in data-model calc columns and workbook master calc columns.` + (winChart.note ? " " + winChart.note : ""));
       return winChart.formula;
     }
-    const untrans = tableauWindowUntranslatable(f);
+    const untrans = tableauWindowUntranslatable(raw0);
     if (untrans) {
       if (warnings)
-        warnings.push(`\u26A0 Table calculation NOT converted \u2014 ${untrans}() has no Sigma equivalent. Untranslated fragment: ${f.slice(0, 120)}`);
-      return "/* table calc: " + f.replace(/\/\*/g, "").replace(/\*\//g, "") + " */";
+        warnings.push(`\u26A0 Table calculation NOT converted \u2014 ${untrans}() has no Sigma equivalent. Untranslated fragment: ${raw0.slice(0, 120)}`);
+      return "/* table calc: " + raw0.replace(/\/\*/g, "").replace(/\*\//g, "") + " */";
     }
-    if (/^(WINDOW_|RUNNING_|FIRST\(|LAST\(|INDEX\(|RANK\b|RANK_|LOOKUP\(|TOTAL\s*\()/i.test(f)) {
-      const gt = f.match(/^WINDOW_SUM\s*\(\s*(SUM|COUNT|AVG|MIN|MAX)\s*\(\s*(\[[^\]]+\])\s*\)\s*\)$/i);
+    if (/^(WINDOW_|RUNNING_|FIRST\(|LAST\(|INDEX\(|RANK\b|RANK_|LOOKUP\(|TOTAL\s*\()/i.test(raw0)) {
+      const gt = raw0.match(/^WINDOW_SUM\s*\(\s*(SUM|COUNT|AVG|MIN|MAX)\s*\(\s*(\[[^\]]+\])\s*\)\s*\)$/i);
       if (gt) {
         const aggMap = { SUM: "Sum", COUNT: "Count", AVG: "Avg", MIN: "Min", MAX: "Max" };
         return "GrandTotal(" + (aggMap[gt[1].toUpperCase()] || gt[1]) + "(" + gt[2] + "))";
       }
       if (warnings)
-        warnings.push(`\u26A0 Table calculation not converted. Untranslated fragment: ${f.slice(0, 120)}`);
-      return "/* table calc: " + f.replace(/\/\*/g, "").replace(/\*\//g, "") + " */";
+        warnings.push(`\u26A0 Table calculation not converted. Untranslated fragment: ${raw0.slice(0, 120)}`);
+      return "/* table calc: " + raw0.replace(/\/\*/g, "").replace(/\*\//g, "") + " */";
     }
   }
   if (/\bCOVARP?\s*\(/i.test(f)) {
     if (warnings)
-      warnings.push(`\u26A0 COVAR/COVARP has no Sigma equivalent \u2014 not converted. Fragment: ${f.slice(0, 120)}`);
-    return "/* no Sigma equivalent: " + f.replace(/\/\*/g, "").replace(/\*\//g, "") + " */";
+      warnings.push(`\u26A0 COVAR/COVARP has no Sigma equivalent \u2014 not converted. Fragment: ${raw0.slice(0, 120)}`);
+    return "/* no Sigma equivalent: " + raw0.replace(/\/\*/g, "").replace(/\*\//g, "") + " */";
   }
   // (ZN → Zn happens in the TABLEAU_FUNC_MAP pass — nesting-safe name rename.)
   f = f.replace(/\bIFNULL\s*\(/gi, "Coalesce(").replace(/\bIFERROR\s*\(/gi, "Coalesce(");
@@ -2966,10 +3041,13 @@ function tableauFormulaToSigma(formula, warnings) {
   f = f.replace(/\bCOUNTD\s*\(/gi, "CountDistinct(");
   f = f.replace(/\bATTR\s*\(([^)]+)\)/gi, "$1");
   f = tableauInToSigma(f);
-  f = tableauIfToSigma(f);
+  f = tableauIfToSigma(f, lits);
   f = f.replace(/\bIIF\s*\(/gi, "If(");
-  f = tableauCaseToSigma(f);
-  f = f.replace(/\bDATEPART\s*\(\s*'(\w+)'\s*,\s*([^)]+)\)/gi, (m, part, dateArg) => {
+  f = tableauCaseToSigma(f, lits);
+  f = f.replace(new RegExp(`\\bDATEPART\\s*\\(\\s*${_TABLEAU_SENTINEL_SRC}\\s*,\\s*([^)]+)\\)`, "gi"), (m, litIdx, dateArg) => {
+    const part = _tabLitInner(lits, litIdx);
+    if (!/^\w+$/.test(part))
+      return m;
     const p = part.toLowerCase();
     if (p === "week")
       return 'DatePart("week", ' + dateArg.trim() + ")";
@@ -2993,7 +3071,10 @@ function tableauFormulaToSigma(formula, warnings) {
     const fn = partMap[p];
     return fn ? fn + "(" + dateArg.trim() + ")" : m;
   });
-  f = f.replace(/\bDATENAME\s*\(\s*'(\w+)'\s*,\s*([^,)]+)(?:,[^)]*)?\)/gi, (m, part, dateArg) => {
+  f = f.replace(new RegExp(`\\bDATENAME\\s*\\(\\s*${_TABLEAU_SENTINEL_SRC}\\s*,\\s*([^,)]+)(?:,[^)]*)?\\)`, "gi"), (m, litIdx, dateArg) => {
+    const part = _tabLitInner(lits, litIdx);
+    if (!/^\w+$/.test(part))
+      return m;
     const arg = dateArg.trim();
     switch (part.toLowerCase()) {
       case "month":
@@ -3020,14 +3101,21 @@ function tableauFormulaToSigma(formula, warnings) {
         return m;
     }
   });
-  f = f.replace(/\bDATETRUNC\s*\(\s*'([^']+)'\s*,/gi, 'DateTrunc("$1",');
+  f = f.replace(new RegExp(`\\bDATETRUNC\\s*\\(\\s*${_TABLEAU_SENTINEL_SRC}\\s*,`, "gi"), (_m, litIdx) => `DateTrunc("${_tabEscapeForSigma(_tabLitInner(lits, litIdx))}",`);
   // Start-of-week literal — DATETRUNC('week', d, 'monday') 3rd arg / 4-arg
   // DATEDIFF('week', a, b, 'monday'): Sigma DateTrunc/DateDiff have no
   // start-of-week slot, so the literal is dropped — but never silently (week
   // boundaries then follow the warehouse week start; silent drift shipped in
   // the field). Scoped to those two callers via a balanced-paren walk back to
   // the enclosing call, so e.g. Contains([Day], 'monday') keeps its argument.
-  f = f.replace(/,\s*["'](monday|tuesday|wednesday|thursday|friday|saturday|sunday)["']\s*\)/gi, (m, day, off, whole) => {
+  // Local patch, ported onto d839036's sentinel-masked text (was raw-quote
+  // regex text before the masking rewrite): the walk reads `whole` (masked
+  // `f`) which never contains an unescaped paren inside a sentinel, so the
+  // balance count is unaffected by masking.
+  f = f.replace(new RegExp(`,\\s*${_TABLEAU_SENTINEL_SRC}\\s*\\)`, "gi"), (m, litIdx, off, whole) => {
+    const val = _tabLitInner(lits, litIdx);
+    if (!/^(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)$/i.test(val))
+      return m;
     let fn = "", depth = 0;
     for (let i = off; i >= 0; i--) {
       const c = whole[i];
@@ -3045,29 +3133,29 @@ function tableauFormulaToSigma(formula, warnings) {
     if (!/^(?:datetrunc|datediff)$/i.test(fn))
       return m;
     if (warnings)
-      warnings.push(`⚠ ${fn.toUpperCase()} start-of-week '${day}' dropped — Sigma ${/^datetrunc$/i.test(fn) ? "DateTrunc" : "DateDiff"} has no start-of-week argument; week boundaries follow the warehouse week start. Verify week-grain results.`);
+      warnings.push(`⚠ ${fn.toUpperCase()} start-of-week '${val}' dropped — Sigma ${/^datetrunc$/i.test(fn) ? "DateTrunc" : "DateDiff"} has no start-of-week argument; week boundaries follow the warehouse week start. Verify week-grain results.`);
     return ")";
   });
-  f = f.replace(/\bDATEADD\s*\(\s*'([^']+)'\s*,/gi, 'DateAdd("$1",');
-  f = f.replace(/\bDATEDIFF\s*\(\s*'([^']+)'\s*,/gi, 'DateDiff("$1",');
+  f = f.replace(new RegExp(`\\bDATEADD\\s*\\(\\s*${_TABLEAU_SENTINEL_SRC}\\s*,`, "gi"), (_m, litIdx) => `DateAdd("${_tabEscapeForSigma(_tabLitInner(lits, litIdx))}",`);
+  f = f.replace(new RegExp(`\\bDATEDIFF\\s*\\(\\s*${_TABLEAU_SENTINEL_SRC}\\s*,`, "gi"), (_m, litIdx) => `DateDiff("${_tabEscapeForSigma(_tabLitInner(lits, litIdx))}",`);
   f = f.replace(/\bWEEK\s*\(\s*([^()]*(?:\([^()]*\)[^()]*)*)\)/gi, 'DatePart("week", $1)');
   f = f.replace(/\bSTDEVP\s*\(([^()]+(?:\([^()]*\)[^()]*)*)\)/gi, "Sqrt(VariancePop($1))");
-  f = f.replace(/\bDATEPARSE\s*\(\s*('[^']*'|"[^"]*")\s*,\s*([^()]+(?:\([^()]*\)[^()]*)*)\)/gi, (_m, fmt, str) => {
-    const sf = fmt.slice(1, -1).replace(/yyyy/g, "%Y").replace(/yy/g, "%y").replace(/MMMM/g, "%B").replace(/MMM/g, "%b").replace(/MM/g, "%m").replace(/dd/g, "%d").replace(/HH/g, "%H").replace(/hh/g, "%I").replace(/mm/g, "%M").replace(/ss/g, "%S");
+  f = f.replace(new RegExp(`\\bDATEPARSE\\s*\\(\\s*${_TABLEAU_SENTINEL_SRC}\\s*,\\s*([^()]+(?:\\([^()]*\\)[^()]*)*)\\)`, "gi"), (_m, litIdx, str) => {
+    const fmtRaw = _tabLitInner(lits, litIdx);
+    const sf = fmtRaw.replace(/yyyy/g, "%Y").replace(/yy/g, "%y").replace(/MMMM/g, "%B").replace(/MMM/g, "%b").replace(/MM/g, "%m").replace(/dd/g, "%d").replace(/HH/g, "%H").replace(/hh/g, "%I").replace(/mm/g, "%M").replace(/ss/g, "%S");
     if (warnings)
       warnings.push("\u26A0 DATEPARSE format translated to strftime tokens \u2014 verify the pattern resolves on your warehouse.");
     return `DateParse(${str.trim()}, "${sf}")`;
   });
   f = f.replace(/\bUSERNAME\s*\(\s*\)/gi, "CurrentUserEmail()");
-  f = f.replace(/\bISMEMBEROF\s*\(\s*['"]([^'"]+)['"]\s*\)/gi, 'CurrentUserInTeam("$1")');
-  f = f.replace(/\bUSERATTRIBUTE\s*\(\s*['"]([^'"]+)['"]\s*\)/gi, 'CurrentUserAttributeText("$1")');
-  f = f.replace(/\bISUSERNAME\s*\(\s*['"]([^'"]+)['"]\s*\)/gi, '(CurrentUserEmail() = "$1")');
+  f = f.replace(new RegExp(`\\bISMEMBEROF\\s*\\(\\s*${_TABLEAU_SENTINEL_SRC}\\s*\\)`, "gi"), (_m, litIdx) => `CurrentUserInTeam("${_tabEscapeForSigma(_tabLitInner(lits, litIdx))}")`);
+  f = f.replace(new RegExp(`\\bUSERATTRIBUTE\\s*\\(\\s*${_TABLEAU_SENTINEL_SRC}\\s*\\)`, "gi"), (_m, litIdx) => `CurrentUserAttributeText("${_tabEscapeForSigma(_tabLitInner(lits, litIdx))}")`);
+  f = f.replace(new RegExp(`\\bISUSERNAME\\s*\\(\\s*${_TABLEAU_SENTINEL_SRC}\\s*\\)`, "gi"), (_m, litIdx) => `(CurrentUserEmail() = "${_tabEscapeForSigma(_tabLitInner(lits, litIdx))}")`);
   f = f.replace(/\bSQUARE\s*\(\s*([^()]*(?:\([^()]*\)[^()]*)*)\)/gi, "Power($1, 2)");
   f = f.replace(/\bSPACE\s*\(\s*([^()]*(?:\([^()]*\)[^()]*)*)\)/gi, 'Repeat(" ", $1)');
   for (const [tab, sig] of Object.entries(TABLEAU_FUNC_MAP)) {
     f = f.replace(new RegExp("\\b" + tab + "\\s*\\(", "gi"), sig + "(");
   }
-  f = f.replace(/'([^']*)'/g, '"$1"');
   f = f.replace(/\bNOT\b/g, "Not").replace(/\bAND\b/g, "and").replace(/\bOR\b/g, "or");
   f = f.replace(/\bTRUE\b/gi, "True").replace(/\bFALSE\b/gi, "False").replace(/\bNULL\b/gi, "null");
   f = f.replace(/\[([A-Z][A-Z0-9_]{2,})\]/g, (match, colName) => {
@@ -3075,16 +3163,17 @@ function tableauFormulaToSigma(formula, warnings) {
       return match;
     return "[" + sigmaDisplayName(colName) + "]";
   });
+  f = _unmaskTableauLiterals(f, lits);
   f = tableauTextConcatToSigma(f);
   if (warnings && TABLEAU_TABLE_CALC_TOKEN_RE.test(f)) {
     warnings.push(`\u26A0 Table-calc function embedded in a larger expression \u2014 NOT translated in place. Untranslated fragment: ${f.slice(0, 120)}`);
   }
   if (warnings) {
-    const masked = f.replace(/"[^"]*"/g, '""').replace(/\[[^\]]*\]/g, "[]");
+    const masked2 = f.replace(/"[^"]*"/g, '""').replace(/\[[^\]]*\]/g, "[]");
     const unmapped = /* @__PURE__ */ new Set();
     const scan = /\b([A-Z][A-Z0-9_]+)\s*\(/g;
     let mm;
-    while ((mm = scan.exec(masked)) !== null) {
+    while ((mm = scan.exec(masked2)) !== null) {
       const fn = mm[1];
       if (TABLEAU_TABLE_CALC_TOKEN_RE.test(fn + "("))
         continue;
