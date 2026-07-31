@@ -74,13 +74,36 @@ def dataset_element_map
   return $ds_element_map = {} unless dm_spec && dm_ids
 
   ds_by_el_id = {}
+  # LIVE-VALIDATED FIX (2026-07-31): build-dm.rb never sets an element-level
+  # `name` (rule 3), so the live readback's own `name` is null for both the
+  # primary master AND every other DM element. build-workbook-spec.rb already
+  # resolves this fallback for the ONE element it picks as the primary master
+  # (server assigns a name by kind: the warehouse table's last path segment,
+  # else "Custom SQL") — sub_master_for needs the identical resolution for
+  # every OTHER element, or its column formulas emit "[/Col]" (an empty table
+  # name — verified live against a nameless Customer Dim element: Sigma
+  # rejected "[/Phone]" as an invalid formula, which would 400 the whole
+  # workbook POST).
+  name_by_el_id = {}
   (dm_spec['pages'] || []).each do |p|
-    (p['elements'] || []).each { |e| ds_by_el_id[e['id']] = e['_datasetId'] if e['_datasetId'] }
+    (p['elements'] || []).each do |e|
+      ds_by_el_id[e['id']] = e['_datasetId'] if e['_datasetId']
+      src = e['source'] || {}
+      name_by_el_id[e['id']] =
+        if src['kind'] == 'warehouse-table' && !Array(src['path']).empty?
+          Array(src['path']).last
+        else
+          'Custom SQL'
+        end
+    end
   end
   map = {}
   (dm_ids['pages'] || []).flat_map { |p| p['elements'] || [] }.each do |e|
     ds_id = ds_by_el_id[e['id']]
-    map[ds_id] = e if ds_id && !map.key?(ds_id)
+    next unless ds_id && !map.key?(ds_id)
+    resolved = e.dup
+    resolved['name'] = name_by_el_id[e['id']] if e['name'].to_s.strip.empty?
+    map[ds_id] = resolved
   end
   $ds_element_map = map
 end

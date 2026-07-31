@@ -279,6 +279,36 @@ Dir.mktmpdir do |dir|
   end
 end
 
+puts "== live-found 2026-07-31: a NAMELESS DM element (build-dm.rb's rule 3 — no element-level " \
+     'name) still resolves a real sub-master formula, not "[/Col]" (an invalid, empty-table-name formula) =='
+Dir.mktmpdir do |dir|
+  dm_spec_path = File.join(dir, 'dm-spec.json')
+  dm_ids_path  = File.join(dir, 'dm-ids.json')
+  # Mirrors build-dm.rb's REAL output shape: no element-level `name`, plus the
+  # warehouse-table `source.path` build-workbook-spec.rb's own name-fallback
+  # already reads for the primary master.
+  File.write(dm_spec_path, JSON.generate('pages' => [{ 'elements' => [
+    { 'id' => 'el-dim-1', '_datasetId' => 'ds-dim',
+      'source' => { 'kind' => 'warehouse-table', 'path' => %w[CSA TJ CUSTOMER_DIM] } },
+  ] }]))
+  File.write(dm_ids_path, JSON.generate('dataModelId' => 'dm-live-1', 'pages' => [{ 'elements' => [
+    { 'id' => 'el-dim-1', 'name' => nil, 'columnLabels' => ['Customer Id', 'Region'] },
+  ] }]))
+  stub_const('DM_SPEC_PATH', dm_spec_path) do
+    stub_const('DM_IDS_PATH', dm_ids_path) do
+      $ds_element_map = nil
+      $sub_masters = {}
+      sm = sub_master_for('ds-dim')
+      ok(!sm.nil?, 'sub-master still built for a nameless DM element')
+      eq(sm['name'], 'Master (CUSTOMER_DIM)', "falls back to the warehouse table's own name (last path segment), " \
+                                              'the SAME resolution build-workbook-spec.rb uses for the primary master')
+      eq(sm['columns'].first['formula'], '[CUSTOMER_DIM/Customer Id]',
+         'formula is correctly table-qualified — never "[/Customer Id]" (an invalid, empty-table-name formula ' \
+         'that would 400 the whole workbook POST)')
+    end
+  end
+end
+
 puts "== bead ziht: dataset_element_map degrades to {} when the inputs are absent (offline / unit-test default) =="
 stub_const('DM_SPEC_PATH', '/nonexistent/dm-spec.json') do
   stub_const('DM_IDS_PATH', nil) do
