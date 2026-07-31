@@ -11,11 +11,15 @@ require 'tmpdir'
 # locally rather than suppressing warnings globally.
 def stub_const(name, value)
   target = Object
-  old = target.const_get(name) if target.const_defined?(name)
+  existed = target.const_defined?(name)
+  old = target.const_get(name) if existed
   silence_warnings { target.send(:remove_const, name) if target.const_defined?(name); target.const_set(name, value) }
   yield
 ensure
-  silence_warnings { target.send(:remove_const, name) if target.const_defined?(name); target.const_set(name, old) if old }
+  silence_warnings do
+    target.send(:remove_const, name) if target.const_defined?(name)
+    target.const_set(name, old) if existed
+  end
 end
 
 def silence_warnings
@@ -282,6 +286,19 @@ stub_const('DM_SPEC_PATH', '/nonexistent/dm-spec.json') do
     eq(dataset_element_map, {}, 'no dm-spec/dm-ids -> empty map, never an exception')
   end
 end
+
+puts "== stub_const restores a constant whose ORIGINAL value was falsy (nil), not just truthy ones =="
+# DM_IDS_PATH's real original value in THIS offline test run is nil (nothing sets
+# DOMO_DM_IDS_PATH in the environment) — exactly the real-world case that used to
+# defeat restore-on-`ensure`'s old `if old` guard (nil is falsy, so the constant was
+# left REMOVED rather than restored to nil).
+ok(Object.const_defined?(:DM_IDS_PATH), 'DM_IDS_PATH is defined before the stub (as nil, since DOMO_DM_IDS_PATH is unset)')
+eq(DM_IDS_PATH, nil, 'sanity: DM_IDS_PATH really is nil in this offline test env')
+stub_const('DM_IDS_PATH', '/tmp/whatever-dm-ids.json') do
+  eq(DM_IDS_PATH, '/tmp/whatever-dm-ids.json', 'stubbed value visible inside the block')
+end
+ok(Object.const_defined?(:DM_IDS_PATH), 'DM_IDS_PATH still defined after stub block exits (regression: used to vanish when the original value was nil/falsy)')
+eq(DM_IDS_PATH, nil, 'restored to its original nil value, not left undefined')
 
 puts
 if $failures.zero? then puts "ALL PASS"; exit 0 else puts "#{$failures} FAILURE(S)"; exit 1 end
