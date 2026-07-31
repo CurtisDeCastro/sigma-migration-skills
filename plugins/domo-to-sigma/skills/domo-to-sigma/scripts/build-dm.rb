@@ -376,6 +376,41 @@ if $PROGRAM_NAME == __FILE__
     exit 2
   end
 
+  # Column pre-flight gate (bead m655): refuse to build a DM spec until every
+  # used dataset's Domo columns are confirmed resolvable against the mapped
+  # warehouse table (or already excludeColumns/columnOverrides'd) — see
+  # docs/superpowers/specs/2026-07-31-domo-dm-column-preflight-design.md and
+  # scripts/preflight-columns.rb. Runs here (after dataset-map.json is
+  # confirmed to exist, before elements are built) — NOT before the C3
+  # reuse-shortcut above, which exits before building anything new and has
+  # nothing to pre-flight. Waivable the same way the doctor-gate above is:
+  # name a reason.
+  preflight_path = File.join(OUT, 'column-preflight.json')
+  preflight_skip = ENV['SIGMA_SKIP_COLUMN_PREFLIGHT'].to_s.strip
+  if preflight_skip.empty?
+    unless File.exist?(preflight_path)
+      abort "  build-dm.rb aborted: discovery/column-preflight.json not found — run " \
+            'scripts/preflight-columns.rb first (checks Domo dataset columns against the ' \
+            'real warehouse table before this build). Waive with ' \
+            'SIGMA_SKIP_COLUMN_PREFLIGHT="<reason>" ruby scripts/build-dm.rb'
+    end
+    preflight_report = JSON.parse(File.read(preflight_path)) rescue {}
+    unresolved = preflight_report.select { |_, v| !(v['missing'] || []).empty? || v['error'] }
+    unless unresolved.empty?
+      warn "  build-dm.rb aborted: #{unresolved.size} dataset(s) still have unresolved columns " \
+           '(see discovery/column-preflight.json for names + any auto-suggested columnOverrides):'
+      unresolved.each do |id, v|
+        detail = v['error'] || (v['missing'] || []).join(', ')
+        warn "    #{id} (#{v['table']}): #{detail}"
+      end
+      abort '  Resolve via excludeColumns/columnOverrides in dataset-map.json, then re-run ' \
+            'scripts/preflight-columns.rb.'
+    end
+  else
+    warn "  ⚠ column pre-flight gate WAIVED (SIGMA_SKIP_COLUMN_PREFLIGHT=#{preflight_skip.inspect}) — " \
+         'unresolved columns may still 400 at DM POST time.'
+  end
+
   # Projection Beast Modes grouped by dataset (only these become DM calc columns).
   proj_by_ds = Hash.new { |h, k| h[k] = [] }
   formulas.each do |f|
