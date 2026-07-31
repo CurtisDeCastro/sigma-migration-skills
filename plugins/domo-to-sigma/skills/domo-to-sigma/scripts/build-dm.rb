@@ -394,7 +394,16 @@ if $PROGRAM_NAME == __FILE__
             'real warehouse table before this build). Waive with ' \
             'SIGMA_SKIP_COLUMN_PREFLIGHT="<reason>" ruby scripts/build-dm.rb'
     end
-    preflight_report = JSON.parse(File.read(preflight_path)) rescue {}
+    preflight_report = begin
+      JSON.parse(File.read(preflight_path))
+    rescue JSON::ParserError => e
+      abort "  build-dm.rb aborted: discovery/column-preflight.json exists but failed to parse " \
+            "(#{e.message}) — re-run scripts/preflight-columns.rb to regenerate it."
+    end
+    unless preflight_report.is_a?(Hash)
+      abort "  build-dm.rb aborted: discovery/column-preflight.json did not parse to a Hash " \
+            "(got #{preflight_report.class}) — re-run scripts/preflight-columns.rb to regenerate it."
+    end
     unresolved = preflight_report.select { |_, v| !(v['missing'] || []).empty? || v['error'] }
     unless unresolved.empty?
       warn "  build-dm.rb aborted: #{unresolved.size} dataset(s) still have unresolved columns " \

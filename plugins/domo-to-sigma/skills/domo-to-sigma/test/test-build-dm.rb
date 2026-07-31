@@ -138,6 +138,23 @@ Dir.mktmpdir('build-dm-gate') do |dir|
   ok(out.include?('preflight-columns.rb'), "the failure names the script to run first, got:\n#{out}")
 end
 
+puts '== column-preflight gate: a corrupted (unparsable) column-preflight.json is a LOUD failure, never a silent pass =='
+Dir.mktmpdir('build-dm-gate') do |dir|
+  File.write(File.join(dir, 'datasets.json'), JSON.generate([
+    { 'id' => 'ds-1', 'name' => 'Orders', 'schema' => { 'columns' => [{ 'name' => 'ORDER_ID', 'type' => 'LONG' }] } },
+  ]))
+  File.write(File.join(dir, 'cards.json'), JSON.generate([{ 'datasetId' => 'ds-1' }]))
+  File.write(File.join(dir, 'dataset-map.json'), JSON.generate(
+    'ds-1' => { 'connectionId' => 'conn-1', 'database' => 'DB', 'schema' => 'SCH', 'table' => 'ORDER_FACT' }
+  ))
+  File.write(File.join(dir, 'column-preflight.json'), '{not valid json')
+  env = { 'DOMO_DISCOVERY_DIR' => dir, 'SIGMA_FOLDER_ID' => 'folder-1' }
+  out = IO.popen(env, ['ruby', File.join(SKILL_ROOT, 'scripts', 'build-dm.rb')], err: [:child, :out], &:read)
+  ok(!$?.success?, 'build-dm.rb fails when column-preflight.json fails to parse (never a silent pass)')
+  ok(out.include?('column-preflight.json'), "the failure names column-preflight.json, got:\n#{out}")
+  ok(out.include?('preflight-columns.rb'), "the failure names the script to re-run, got:\n#{out}")
+end
+
 puts '== column-preflight gate: build-dm.rb aborts when the report shows unresolved columns =='
 Dir.mktmpdir('build-dm-gate') do |dir|
   File.write(File.join(dir, 'datasets.json'), JSON.generate([
