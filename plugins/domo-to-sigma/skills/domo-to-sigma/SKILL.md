@@ -275,11 +275,15 @@ for a classic page** (live-validated 2026-07-30 — see
 > is 60-wide, so Domo → Sigma scales ×0.4). A page qualifies if `pageLayoutV4` is
 > present in its stacks response with `includeV4PageLayouts=true` — read
 > `refs/page-layout-v4.md` for the full three-page-style taxonomy before assuming
-> a page is "classic." That ref also records two defects that currently keep
-> this unusable end-to-end: `domo_rest.rb`'s `cards_for_page` never requests the
-> v4 payload, and `domo_sigma_util.rb:151` digs a `pageLayoutV4.cards` key that
-> doesn't exist, so the v4 branch silently yields nothing until both are fixed.
-> Until then, treat a v4-inline page the same as a classic one below.
+> a page is "classic." That ref also records two defects that WERE found and ARE
+> now fixed: `domo_rest.rb`'s `cards_for_page` now requests the v4 payload, and
+> `DomoSigma.merge_pagelayoutv4_geometry` (`scripts/lib/domo_sigma_util.rb`)
+> correctly performs the `content[]`/`standard.template[]` join. A v4-inline page
+> now gets real geometry automatically via `merge_geometry`/
+> `build_dashboard_for_page` — no extra agent action needed, same as any other
+> page. Do NOT route a v4-inline page to the classic/screenshot-request flow
+> below — that flow is correctly reserved for pages that genuinely have no
+> `pageLayoutV4` and no legacy `x`/`y`/`w`/`h`.
 
 So for a page without readable v4 geometry the ONLY route to real layout fidelity
 is a human-supplied image. **Explicitly ask the operator:**
