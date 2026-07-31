@@ -572,6 +572,41 @@ def run_live!(opts)
     log 'discovery/dm-spec.json already present — skip (idempotent; pass --force to rebuild)'
     skip_phase!('build-dm', 'already built (idempotent skip)')
   else
+    # Column pre-flight (bead m655): only meaningful once dataset-map.json is
+    # human-resolved — the FIRST build-dm.rb attempt below (no dataset-map.json
+    # yet) writes dataset-map.template.json and fails, same as before this
+    # bead; there is nothing to pre-flight until a human finishes that file.
+    map_path = File.join(DISCOVERY, 'dataset-map.json')
+    if File.exist?(map_path)
+      hr('preflight-columns (Domo columns vs the real warehouse schema)')
+      # Unlike other idempotent phases in this file, this one is NOT skipped
+      # just because its output file already exists: dataset-map.json is
+      # human-editable between runs (a newly-resolved connectionId, a fix via
+      # excludeColumns/columnOverrides), and a stale column-preflight.json
+      # would either silently re-admit a gap that was never actually
+      # re-checked, or permanently deadlock the fix-and-re-run loop (the
+      # operator's fix is never validated). The live check itself is cheap
+      # (a couple of Sigma API calls per dataset), so always re-running it
+      # here is the safe default.
+      pf_ok, pf_code, _pf_out = run_script!('preflight-columns.rb')
+      skip_env = ENV['SIGMA_SKIP_COLUMN_PREFLIGHT'].to_s.strip
+      if !pf_ok
+        if skip_env.empty?
+          fail_phase!('preflight-columns',
+                      "preflight-columns.rb exited #{pf_code} — unresolved column(s) or a fetch error " \
+                      'found; see discovery/column-preflight.json for names + any auto-suggested ' \
+                      'columnOverrides, resolve via excludeColumns/columnOverrides in dataset-map.json, ' \
+                      'then re-run (or set SIGMA_SKIP_COLUMN_PREFLIGHT="<reason>" to waive, same as ' \
+                      "build-dm.rb's gate)")
+        else
+          skip_phase!('preflight-columns',
+                      "unresolved columns found but WAIVED via SIGMA_SKIP_COLUMN_PREFLIGHT=#{skip_env.inspect}")
+        end
+      else
+        done_phase!('preflight-columns')
+      end
+    end
+
     # --folder-id must reach build-dm too, not just build-workbook-spec: the DM
     # spec itself needs a folderId or POST /v2/dataModels/spec 400s with
     # "Expecting UUID at 0.folderId" (live-validated 2026-07-30).

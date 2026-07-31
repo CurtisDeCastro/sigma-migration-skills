@@ -21,7 +21,8 @@ Dir.mktmpdir('domo-e2e') do |dir|
   # build LOGIC, not the environment, so waive it explicitly — keeps the suite
   # hermetic on a machine (e.g. CI) that never ran the doctor.
   env = { 'DOMO_DISCOVERY_DIR' => dir,
-          'SIGMA_SKIP_DOCTOR_GATE' => 'e2e: environment not under test' }
+          'SIGMA_SKIP_DOCTOR_GATE' => 'e2e: environment not under test',
+          'SIGMA_SKIP_COLUMN_PREFLIGHT' => 'e2e: build LOGIC under test, not the live warehouse check' }
   w = ->(name, obj) { File.write(File.join(dir, name), JSON.generate(obj)) }
   run = ->(script, *args) { system(env, 'ruby', File.join(SCRIPTS, script), *args, out: File::NULL, err: File::NULL) }
 
