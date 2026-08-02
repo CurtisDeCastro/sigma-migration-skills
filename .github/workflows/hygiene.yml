@@ -225,6 +225,17 @@ jobs:
         # string-pin that every listed plugin in this repo carries a semver
         # plugin.json (synthetic fixture names only).
         run: bash tools/test-plugin-version-bump.sh
+      - name: Skill byte-budget lint + self-test (E9 context diet, creds-free)
+        # Byte budgets for skill doc surfaces: SKILL.md <= 20KB, any single
+        # refs/*.md <= 32KB, mandatory pre-read <= 3 files — enforced by
+        # tools/lint-skills.rb (E9.2: one lint, ONE exception registry —
+        # tools/skill-lint-baseline.json, rule ids skill-md-bytes /
+        # ref-bytes:<file>.md / pre-read-width; a ratchet: diet the file,
+        # delete the entry). corpus-check runs the same lint; this job adds
+        # the fixture self-test proving trip AND no-false-trip behavior.
+        run: |
+          ruby tools/lint-skills.rb
+          bash tools/test-lint-skills-budgets.sh
       - name: Bootstrap/doctor lockstep self-test (creds-free)
         # bootstrap.sh duplicates doctor.sh's probes (py_real, the vm-node
         # candidate globs, Test-RealPython) under KEEP-IN-LOCKSTEP comments

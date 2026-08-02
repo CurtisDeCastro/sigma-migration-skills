@@ -40,10 +40,13 @@ Dir.mktmpdir do |d|
 end
 
 Dir.mktmpdir do |d|
-  # 4. send path: status is "sent" when the POST lands, "skipped" when the endpoint
-  #    is unreachable (offline CI). Both are honest (handoff FIX 3) and both satisfy
-  #    the gate — telemetry must never block. NEVER "sent" on a failed delivery.
-  ok('send writes a marker', report(d, '--duration', '120', '--mode', 'file'))
+  # 4. send path (R3 fail-closed: sending needs consent EVIDENCE — here the
+  #    explicit --consent-interactive wrap-up attestation; a checkpoint
+  #    'consented' record works identically, see 7): status is "sent" when the
+  #    POST lands, "skipped" when the endpoint is unreachable (offline CI).
+  #    Both are honest (handoff FIX 3) and both satisfy the gate — telemetry
+  #    must never block. NEVER "sent" on a failed delivery.
+  ok('send writes a marker', report(d, '--duration', '120', '--mode', 'file', '--consent-interactive'))
   rec = JSON.parse(File.read(File.join(d, 'telemetry-sent.json')))
   ok('send marker status sent|skipped', %w[sent skipped].include?(rec['status']))
   ok('send marker mode',    rec['mode'] == 'file')
@@ -57,6 +60,63 @@ Dir.mktmpdir do |d|
   # 6. corrupt/invalid status → gate FAILS
   File.write(File.join(d, 'telemetry-sent.json'), '{"status":"bogus"}')
   ok('invalid marker status fails', gate(d) == false)
+end
+
+Dir.mktmpdir do |d|
+  # 7. A1 (wave-1 review): consent recorded at the consolidated checkpoint
+  #    (<workdir>/consent-answer.json, written by the orchestrator) ENFORCES at
+  #    the send side — declined/no-response suppress the send even when the
+  #    driver forgets --declined; consented proceeds without a second ask.
+  File.write(File.join(d, 'consent-answer.json'),
+             JSON.generate('answer' => 'no-response', 'decided_by' => 'unattended-flag',
+                           'asked_at_checkpoint' => true))
+  ok('no-response checkpoint answer → send suppressed, marker written', report(d, '--duration', '5'))
+  rec = JSON.parse(File.read(File.join(d, 'telemetry-sent.json')))
+  ok('suppressed marker status declined', rec['status'] == 'declined')
+  ok('marker records the consent + its source',
+     rec['consent'] == 'no-response' && rec['consent_source'] == 'consent-answer.json')
+  ok('checkpoint-declined marker satisfies the gate', gate(d) == true)
+
+  File.write(File.join(d, 'consent-answer.json'), JSON.generate('answer' => 'declined'))
+  ok('declined checkpoint answer runs clean', report(d, '--duration', '5'))
+  rec = JSON.parse(File.read(File.join(d, 'telemetry-sent.json')))
+  ok('declined answer → declined marker', rec['status'] == 'declined' && rec['consent'] == 'declined')
+
+  File.write(File.join(d, 'consent-answer.json'), JSON.generate('answer' => 'consented'))
+  ok('consented checkpoint answer proceeds to the send path', report(d, '--duration', '5'))
+  rec = JSON.parse(File.read(File.join(d, 'telemetry-sent.json')))
+  ok('consented → sent|skipped (send attempted), never suppressed',
+     %w[sent skipped].include?(rec['status']))
+
+  # An unreadable answer file FAILS CLOSED (PR #509 review R3): a record
+  # exists but cannot be proven to say yes — suppress with a DISTINCT marker,
+  # never send, never crash. (The old fail-open-to-send here was the R3
+  # proven worst case: one driver lapse → unconsented send passing the gate.)
+  File.write(File.join(d, 'consent-answer.json'), '{not json')
+  ok('unparseable consent file suppresses the send (fail-closed)', report(d, '--duration', '5'))
+  rec = JSON.parse(File.read(File.join(d, 'telemetry-sent.json')))
+  ok('fail-closed marker is distinct (declined + unreadable + fail-closed source)',
+     rec['status'] == 'declined' && rec['consent'] == 'unreadable' && rec['consent_source'] == 'fail-closed')
+  ok('fail-closed unreadable marker still satisfies the gate', gate(d) == true)
+  # ...and --consent-interactive does NOT override an unreadable RECORD:
+  # unprovable consent is never consent.
+  ok('unreadable record wins over --consent-interactive', report(d, '--duration', '5', '--consent-interactive'))
+  rec = JSON.parse(File.read(File.join(d, 'telemetry-sent.json')))
+  ok('still suppressed with the distinct marker',
+     rec['status'] == 'declined' && rec['consent'] == 'unreadable')
+end
+
+Dir.mktmpdir do |d|
+  # 8. R3 FAIL-CLOSED, the absent-file pin: NO consent evidence at all
+  #    (consent-answer.json absent, no --consent-interactive) → NOTHING sent,
+  #    distinct suppression marker, gate still satisfied. This is the
+  #    "absent-file unattended = no send" contract: on an unattended chain a
+  #    bare wrap-up invocation can never become an unconsented send.
+  ok('absent consent file + bare invocation = NO send (fail-closed)', report(d, '--duration', '5'))
+  rec = JSON.parse(File.read(File.join(d, 'telemetry-sent.json')))
+  ok('absent-file marker is distinct (declined + absent + fail-closed source)',
+     rec['status'] == 'declined' && rec['consent'] == 'absent' && rec['consent_source'] == 'fail-closed')
+  ok('fail-closed absent marker still satisfies the gate', gate(d) == true)
 end
 
 puts $fail.zero? ? "\nall telemetry-gate tests passed" : "\n#{$fail} FAILED"

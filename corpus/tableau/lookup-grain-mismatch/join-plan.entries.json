@@ -17,7 +17,7 @@
     "status": "unprobed",
     "right_table": "DEMO_DB.ANALYTICS.ITEM_DIM",
     "probe_keys": [
-      "ITEM_KEY_(ITEM_DIM)"
+      "ITEM_KEY"
     ]
   },
   {
@@ -38,7 +38,7 @@
     "status": "unprobed",
     "right_table": "DEMO_DB.ANALYTICS.BUYER_DIM",
     "probe_keys": [
-      "BUYER_KEY_(BUYER_DIM)"
+      "BUYER_KEY"
     ]
   },
   {

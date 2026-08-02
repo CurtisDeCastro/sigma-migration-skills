@@ -4,7 +4,7 @@ What the `convert_tableau_to_sigma` converter (MCP `src/tableau.ts` + `src/formu
 
 Sourced from the translator code, not aspiration. Last reconciled 2026-07-10.
 
-> **Phase A reconciliation (2026-07-10, corpus gap-closure epic `beads-sigma-tt3z`).** A machine-readable enumeration of all **145 Tableau functions** with per-function status now lives in [`coverage-manifest.json`](./coverage-manifest.json) (71 spec · 18 chart-only · 4 RLS · 2 verify · 21 flagged · 29 unmapped). Two changes since the last reconcile:
+> **Wave 2 (W2.13): the per-function enumeration is now GENERATED.** [`functions.json`](./functions.json) is THE machine-readable table — one row per live-catalog function (187), emitted by `scripts/dev/gen-translation-table.mjs` by running the vendored converter's own `tableauFormulaToSigma` over a canonical probe per function; [`coverage-manifest.json`](./coverage-manifest.json) is a generated compat view of the same rows. Never hand-edit either — regenerate and commit (`scripts/test-translation-table.rb` CI-diffs a fresh regeneration and pins the Sigma-whitelist/tflex-catalog seams). Earlier hand-maintained history:
 > - **⛔ "Silent gap" is being retired.** A catch-all in `tableauFormulaToSigma` now emits a **loud warning** for any unmapped Tableau function instead of passing it through verbatim (`FINDNTH`, `CHAR`, `MAKEDATETIME`, `MODEL_QUANTILE`, trig, …) — these no longer fail silently at query time.
 > - **`WEEK` / `DATEPART('week', …)` fixed.** Sigma has no `Week()` function; both now emit `DatePart("week", date)` (caught by a live warehouse probe — `regression-corpus/tableau/formula_coverage`). The DM-probeable mappings are live-verified against the demo `ORDER_FACT` table (0 error columns).
 
@@ -29,7 +29,7 @@ Sourced from the translator code, not aspiration. Last reconciled 2026-07-10.
 |---|---|---|---|
 | Physical table / `.tds` relation | warehouse-table element | ✅ | path via `extractPath` (db/schema/table, hex-hash + UUID segments stripped) |
 | Physical joins (pre-2020.2) | relationships or physical joins | ✅ | Join Strategy dropdown: Auto routes `many_to_one`→relationship, else physical join |
-| Relationship model 2020.2+ ("noodles") | Sigma relationships on the fact | ✅ | both resolve grain at query time; cardinality preserved when present, default `N:1` |
+| Relationship model 2020.2+ ("noodles") | Sigma relationships carried by the ELECTED fact | 🟡 | Tableau serializes edges onto the `first-end-point` = the authoring-order BASE table (routinely a dimension) — fact-ness is NOT on the wire. Election is evidence-ranked (relationship degree → measure columns → not-dim-like name → width; `--fact-table` overrides) and ALWAYS announced: **VERIFY the announced fact** — every LOD/Top-N/window helper builds FROM it (wrong fact = mass `Dependency not found`, see `refs/troubleshooting.md`). Direction + keys are mapped; **Sigma stores no cardinality on a relationship** (fixed many-to-one/one-to-one LEFT join) — `unique-key` perf-option hints only produce verify warnings, they are not "preserved". Relationships without a serialized equality key (none/computed-only/non-equality/unresolved endpoints) are REFUSED into named gaps (gap-scan ❌ row + `object-graph-plan.json` punch list), never guessed. Corpus-pinned: `corpus/tableau/objectmodel-noodle`. |
 | Virtual connection (`type=collection`) | relationship model w/ role-playing dims | ✅ | columns read from `metadata-records`; GUID refs resolved to captions |
 | Custom SQL (`relation type=text`) | `kind:sql` element | ✅ | SQL passed through as-is; element name omitted, bare `[Display]` col refs |
 | **Data blend** (`<datasource-relationships>`) | **one merged model** | ✅ | secondary pre-grouped to link grain → `many_to_one` lookup; looked-up measure surfaced with `Max` (non-additive); cross-source `SUM(a)-SUM(b)`→`[Total a] op [b]`. See `refs/blending.md`. |
@@ -161,7 +161,7 @@ All 🧩 forms are **chart-context only** — place in a grouped workbook elemen
 | Warehouse-backed source | warehouse-table element | ✅ | |
 | Extract-only fields / extract filters (`.hyper`) | — | ❌ | converter reads the logical model, not the physical extract |
 | Non-warehouse source (Google Sheets, spatial/OGR, web data, Mapbox) | — | ❌ | can't repoint to a warehouse — should be surfaced in a "skipped sources" note |
-| Worksheets / dashboards / viz layout | (skill build scripts) | — | the **converter** emits the data model; charts, layout, controls and parity are built by the skill's `scripts/*.rb` (see `refs/workbook-layout.md`), not the converter |
+| Worksheets / dashboards / viz layout | (skill build scripts) | — | the **converter** emits the data model; charts, layout, controls and parity are built by the skill's `scripts/*.rb` (see `refs/chart-patterns.md`, `refs/element-kinds.md`, `refs/layout-grid.md`), not the converter |
 
 ---
 

@@ -54,7 +54,9 @@ CLASSIFICATION = {
     '--skip-postpublish-guide'   => :gate,     # → assert-phase6-ran census
     '--skip-flip-test'           => :gate,     # → --skip-control-flip census
     '--skip-telemetry-gate'      => :gate,     # #422: → assert-phase6-ran (gate 10 consent, policy exclusion)
-    '--skip-datasource-filters'  => :forwards  # → assert-datasource-filters.rb --workdir
+    '--skip-datasource-filters'  => :forwards, # → assert-datasource-filters.rb --workdir
+    '--skip-anchors-gate'        => :gate,     # W2.10: → assert-phase6-ran gate 13 (waiver budget, REASON required)
+    '--skip-sql-ident-gate'      => :offramp   # W2-OM: orchestrator logs kind skip-flag-waived before waiving check-sql-idents
   },
   'assert-datasource-filters.rb' => { '--skip-datasource-filters' => :offramp }, # records kind skip-flag-waived
   'intake.rb'                    => { '--skip-bootstrap-gate' => :offramp },     # records kind skip-flag-waived

@@ -35,6 +35,7 @@ require 'uri'
 
 $LOAD_PATH.unshift File.expand_path('lib', __dir__)
 require 'sigma_rest'
+require 'probe_registry'
 
 DM_ID   = ENV['DM_ID']   || '11111111-2222-4333-8444-555555555555' # WINPROBE Base
 EL_ID   = ENV['EL_ID']   || 'p13miPuGpa'                           # "Orders Base"
@@ -113,6 +114,32 @@ puts "source: dm=#{DM_ID} element=#{EL_NAME} (#{EL_ID})  home=#{HOME}  schemaVer
 created = [] # [type, id] for cleanup
 results = {} # context => { label => [status, display] }
 
+# Crash-safe cleanup (E7.1): the old end-of-script delete block never ran when
+# a raise/abort escaped the per-context rescues, orphaning every artifact in a
+# customer org. at_exit covers every exit path; the done-flag keeps it
+# idempotent; KEEP=1 still keeps everything. Dev probe: no workdir → ids
+# register in the ~/.tableau-to-sigma registry for sweep-run-artifacts.rb.
+cleanup_state = { 'done' => false }
+cleanup_probe_artifacts = lambda do
+  next if cleanup_state['done']
+  cleanup_state['done'] = true
+  if ENV['KEEP'] == '1'
+    puts "\nKEPT: #{created.map { |_, id| id }.join(', ')}" unless created.empty?
+  else
+    created.reverse_each do |_, id|
+      begin
+        Sigma.request(:delete, "/v2/files/#{id}", accept: 'application/json')
+        ProbeRegistry.cleaned(id, via: 'at_exit')
+      rescue StandardError => e
+        ProbeRegistry.cleaned(id, via: 'at_exit',
+                              outcome: e.message.lines.first.to_s =~ /\b404\b/ ? '404' : 'failed')
+      end
+    end
+    puts "\ndeleted #{created.size} throwaway artifact(s)" unless created.empty?
+  end
+end
+at_exit { cleanup_probe_artifacts.call }
+
 # ---- contexts 1 & 2: workbook table calc columns (grouped + ungrouped) ------
 date_col = { 'id' => 'g_date', 'name' => DATEDIM, 'formula' => "[#{EL_NAME}/#{DATEDIM}]" }
 wf_cols  = ALL.map { |lbl, f| { 'id' => "wf_#{lbl}", 'name' => lbl, 'formula' => f } }
@@ -138,6 +165,7 @@ wresp = Sigma.request(:post, '/v2/workbooks/spec', body: JSON.generate(wb_spec),
 wb = wresp['workbookId'] || wresp['id']
 abort "workbook CREATE failed: #{wresp.inspect}" unless wb
 created << ['file', wb]
+ProbeRegistry.created(wb, name: wb_spec['name'], script: 'probe-window-contexts.rb')
 puts "created workbook #{wb} (POST clean)"
 
 { 'grouped table' => 'tbl-grouped', 'ungrouped master' => 'tbl-master' }.each do |label, eid|
@@ -184,6 +212,7 @@ begin
   dm2 = dresp['dataModelId'] || dresp['id']
   raise "DM CREATE failed: #{dresp.inspect}" unless dm2
   created << ['file', dm2]
+  ProbeRegistry.created(dm2, name: dm_spec['name'], script: 'probe-window-contexts.rb')
 
   back = Sigma.request(:get, "/v2/dataModels/#{dm2}/spec")
   new_el = nil
@@ -204,6 +233,7 @@ begin
   wb2 = w2resp['workbookId'] || w2resp['id']
   raise "DM-WB CREATE failed: #{w2resp.inspect}" unless wb2
   created << ['file', wb2]
+  ProbeRegistry.created(wb2, name: wb2_spec['name'], script: 'probe-window-contexts.rb')
 
   results['DM-element'] = {}
   row = export_row(wb2, 't')
@@ -229,13 +259,8 @@ native_fail = NATIVE.keys.reject do |lbl|
 end
 control_ok = CONTROL.keys.all? { |lbl| contexts.any? { |c| (results[c][lbl] || [])[0] == :error } }
 
-# cleanup
-if ENV['KEEP'] == '1'
-  puts "\nKEPT: #{created.map { |_, id| id }.join(', ')}"
-else
-  created.reverse_each { |_, id| Sigma.request(:delete, "/v2/files/#{id}", accept: 'application/json') rescue nil }
-  puts "\ndeleted #{created.size} throwaway artifact(s)"
-end
+# cleanup (idempotent — the at_exit backstop above skips once this has run)
+cleanup_probe_artifacts.call
 
 if native_fail.empty? && control_ok
   puts "\nPASS — native window family resolves in ALL calc-column contexts; *Over family errors as expected."

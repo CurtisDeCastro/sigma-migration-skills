@@ -428,9 +428,28 @@ check(a34.size == 1 && a34.first.include?('POSTPUBLISH_GUIDE'),
 # A3-5: a plain STRING list control (no integer_dim, no decode sibling) → NO A3.
 check(rule(lint_warnings(valid_spec), 'A3').empty?, 'A3: ordinary string list control → no warning', fails)
 
+# ---- N2 (wave-2 §6.2): slash in a column display name — WARN, not FAIL ------
+# '/' inside a display name is ambiguous against the [Element/Column] path
+# syntax: cross-element refs to it mis-resolve and derived elements drop it.
+s = valid_spec
+s['pages'][0]['elements'][0]['columns'] << { 'id' => 'col-slash', 'name' => 'Date (Month /Year)',
+                                             'formula' => '[Src/Date Month Year]' }
+n2 = rule(lint_warnings(s), 'N2')
+check(n2.size == 1 && n2.first.include?('Date (Month /Year)') && n2.first.include?('Rename'),
+      "N2: slash-named column → 1 WARNING naming the column + rename fix (got #{n2.inspect})", fails)
+check(rule(lint(s), 'N2').empty?, 'N2 is WARN-only — never in the FAIL set', fails)
+# metrics are covered too
+s = valid_spec
+(s['pages'][0]['elements'][0]['metrics'] ||= []) << { 'id' => 'met-slash', 'name' => 'Rev H/L',
+                                                      'formula' => 'Sum([Revenue])' }
+check(rule(lint_warnings(s), 'N2').size == 1, 'N2: slash-named METRIC → warning', fails)
+# slash in a FORMULA (an [Element/Column] ref) must never trip N2
+check(rule(lint_warnings(valid_spec), 'N2').empty?,
+      'N2: slashes in formulas ([Src/Region] refs) never trip — names only', fails)
+
 puts
 if fails.empty?
-  puts 'ALL PASS — preflight_lint K1/S1/C5/N1 fail rules + P1/I1/A1/A2/A3 warnings + T1/C2/C3 regressions'
+  puts 'ALL PASS — preflight_lint K1/S1/C5/N1 fail rules + P1/I1/A1/A2/A3/N2 warnings + T1/C2/C3 regressions'
   exit 0
 else
   puts "FAILURES (#{fails.length}):"

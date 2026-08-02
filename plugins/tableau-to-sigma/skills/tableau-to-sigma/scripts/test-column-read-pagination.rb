@@ -157,13 +157,16 @@ check(src.include?('census INCOMPLETE'),
         "#{file} no longer reads columns via a single Sigma.request", fails)
 end
 
-# validate-sigma-formula.rb paginates with a LOCAL loop: it mints its own token
-# and must not gain a second auth path via sigma_rest.
+# validate-sigma-formula.rb paginates via the fleet helper. Its single auth
+# path IS lib/sigma_rest (the E7.1 port routed the POST, DELETE, and readback
+# through Sigma.request), so both element-columns readbacks — the singleton
+# scout and the --batch path — must go through Sigma.list_entries and never
+# regress to a bare first-page GET.
 s = File.read(File.join(__dir__, 'validate-sigma-formula.rb'))
-check(s.include?('nextPage') && s.include?('limit=1000'),
-      'validate-sigma-formula.rb paginates its element-columns read locally', fails)
-check(!s.match?(/require 'sigma_rest'/),
-      'validate-sigma-formula.rb keeps its single auth path (no sigma_rest)', fails)
+check(s.scan(%r{Sigma\.list_entries\([^)]*/columns"\)}).size == 2,
+      'validate-sigma-formula.rb paginates BOTH element-columns readbacks (singleton + batch) via Sigma.list_entries', fails)
+check(!s.match?(%r{Sigma\.request\(:get,[^)]*/columns"\)}),
+      'validate-sigma-formula.rb no longer reads columns via a single Sigma.request', fails)
 
 # 9. fidelity-loop.rb's post-PUT guard must not claim "clean" when the columns
 #    read failed entirely (nil, not just truncated) — the same false-clean

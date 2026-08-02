@@ -3,18 +3,19 @@
 # test-skill-coverage.rb — PR-15 SKILL.md-diet coverage gate (offline, stdlib).
 #
 # The diet relocated ~55KB of SKILL.md detail into refs/ — NOTHING was allowed
-# to be deleted outright. This test holds that contract mechanically:
-#
-#   1. every token in scripts/skill-coverage-manifest.json (all flags, script/
-#      artifact filenames, exit codes, and gate numbers the PRE-diet SKILL.md
-#      mentioned) must still resolve somewhere in SKILL.md + refs/*.md
-#      (+ MIGRATION_REQUEST.md / QUICKSTART.md);
-#   2. SKILL.md must stay at or under the diet budget (max_skill_md_bytes) —
-#      the doc surface every session pays for cannot silently regrow.
+# to be deleted outright. This test holds that contract mechanically: every
+# token in scripts/skill-coverage-manifest.json (all flags, script/artifact
+# filenames, exit codes, and gate numbers the PRE-diet SKILL.md mentioned)
+# must still resolve somewhere in SKILL.md + refs/*.md
+# (+ MIGRATION_REQUEST.md / QUICKSTART.md).
 #
 # A relocation is fine; a disappearance fails BY NAME. When a token is
 # deliberately retired, remove it from the manifest in the same PR and say
 # where its concept went.
+#
+# The SKILL.md byte budget is NOT asserted here — one budget governs, owned by
+# tools/lint-skills.rb (E9.2: 20480B + the skill-lint-baseline ratchet). The
+# old max_skill_md_bytes (40960) assert was retired with it.
 #
 # Run: ruby scripts/test-skill-coverage.rb
 require 'json'
@@ -59,17 +60,6 @@ else
   $fail += misses.size
   puts 'FAIL  pre-diet tokens no longer resolve anywhere in SKILL.md + refs:'
   misses.each { |m| puts "        #{m}" }
-end
-
-# 2. diet budget --------------------------------------------------------------
-skill_bytes = File.size(File.join(SKILL_DIR, 'SKILL.md'))
-budget = manifest['max_skill_md_bytes']
-if skill_bytes <= budget
-  puts "  ok  SKILL.md diet holds: #{skill_bytes} bytes <= #{budget}"
-else
-  $fail += 1
-  puts "FAIL  SKILL.md regrew past the diet budget: #{skill_bytes} bytes > #{budget}. " \
-       'Move detail into refs/ (see refs/script-map.md pattern) instead of the spine.'
 end
 
 puts $fail.zero? ? "\nall skill-coverage checks passed" : "\n#{$fail} FAILED"

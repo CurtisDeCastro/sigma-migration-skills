@@ -154,5 +154,42 @@ rc, = run_gate({ 'pages' => [{ 'elements' => [{ 'columns' => [
 ] }] }] }, DM)
 check(rc == 0, 'bare [ctl-*] and sibling refs are ignored (validate-spec.rb owns those)')
 
+# ---- slash-in-column-name (wave-2 §6.2: two-segment escape) -----------------
+# A COLUMN whose display name itself contains '/' ("Margin Pct H/L",
+# "Date (Month /Year)") used to be unconditionally split — the ref resolved as
+# its final fragment ("L" / "Year)"): a false FAIL, or a false PASS when a real
+# same-named column existed. The escape ported from mechanical-specs.rb's
+# derived-rel checker resolves the WHOLE slashed tail first.
+DM_SLASH = { 'dataModelId' => 'dm1', 'pages' => [{ 'elements' => [
+  { 'id' => 'e1', 'name' => 'Master',
+    'columnLabels' => ['Net Revenue', 'Margin Pct H/L', 'Date (Month /Year)'] }
+] }] }
+# false-FAIL direction: the slash-named DM column resolves as-is now
+rc, = run_gate({ 'pages' => [{ 'elements' => [{ 'columns' => [
+  { 'formula' => 'Sum([Master/Margin Pct H/L])' },
+  { 'formula' => '[Master/Date (Month /Year)]' }
+] }] }] }, DM_SLASH)
+check(rc == 0, 'slash-named DM columns resolve whole ("Margin Pct H/L", "Date (Month /Year)") — no false FAIL')
+# a slash-named column that is genuinely MISSING (and whose fragment resolves
+# nowhere either) still fails — the escape never widens what passes
+rc, out = run_gate({ 'pages' => [{ 'elements' => [{ 'columns' => [
+  { 'formula' => '[Master/Margin Pct A/B]' }
+] }] }] }, DM_SLASH)
+check(rc == 1, 'missing slash-named column still fails (exit 1)')
+# internal binding: a workbook element's OWN slash-named calc column (absent
+# from the DM by design) resolves via the element's own column set
+rc, = run_gate({ 'pages' => [{ 'elements' => [
+  master_el({ 'name' => 'Margin H/L', 'formula' => '[Master/Net Revenue] / 100' }),
+  { 'id' => 'el-kpi', 'kind' => 'kpi-chart',
+    'source' => { 'kind' => 'table', 'elementId' => 'el-master' },
+    'columns' => [{ 'name' => 'KPI', 'formula' => 'Sum([Master/Margin H/L])' }] }
+] }] }, DM)
+check(rc == 0, 'internal slash-named calc column resolves against the spec element (two-segment escape)')
+# regression: the escape must NOT break 3-part relationship-path resolution
+rc, = run_gate({ 'pages' => [{ 'elements' => [{ 'columns' => [
+  { 'formula' => '[Metric Series/FIXED Year/Revenue World]' }
+] }] }] }, DM_WORLD)
+check(rc == 0, '3-part relationship refs still resolve on the final segment after the escape')
+
 puts(FAILS.empty? ? "\nall wb-refs-resolve tests passed" : "\n#{FAILS.length} FAILED")
 exit(FAILS.empty? ? 0 : 1)

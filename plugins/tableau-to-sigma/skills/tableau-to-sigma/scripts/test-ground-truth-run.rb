@@ -140,6 +140,61 @@ Dir.mktmpdir do |dir|
      'missing plan → exit 1 pointing at derive-ground-truth.rb')
 end
 
+# ---------------------------------------------------------------------------
+# LIVE path (stubbed REST, no network) — E7.1/A11 (wave-1 review): every probe
+# workbook REGISTERS in <workdir>/probe-artifacts.jsonl at POST time and marks
+# its outcome at DELETE, so a crash between POST and DELETE can no longer
+# strand an orphan the sweep's registry-first mode cannot see.
+# ---------------------------------------------------------------------------
+GT_STUB = <<~'RUBY'
+  require 'json'
+  module Sigma
+    class Error < StandardError; end
+    def self.request(method, path, body: nil, accept: nil, binary: false, content_type: nil, http: nil)
+      File.open(ENV['GT_STUB_LOG'], 'a') { |f| f.puts(JSON.generate('m' => method.to_s, 'p' => path)) }
+      return { 'workbookId' => 'wb-gt-probe' } if method == :post && path == '/v2/workbooks/spec'
+      return { 'queryId' => 'q-gt' } if method == :post && path.include?('/export')
+      return "Region,Sales (sum)\nEast,100.5\n" if method == :get && path.start_with?('/v2/query/')
+      return {} if method == :delete
+      raise Error, "stub: unexpected #{method} #{path}"
+    end
+  end
+  real = ENV['REAL_SIGMA_REST']
+  $LOADED_FEATURES << real if real && !$LOADED_FEATURES.include?(real)
+RUBY
+
+puts '-- live path: probe workbook registered at POST, marked cleaned at DELETE (E7.1/A11) --'
+Dir.mktmpdir do |dir|
+  stub_dir = File.join(dir, 'stub')
+  Dir.mkdir(stub_dir)
+  File.write(File.join(stub_dir, 'sigma_rest.rb'), GT_STUB)
+  write_plan(dir, [entry('Tile A', 'warehouse-sql', SQL)])
+  log = File.join(dir, 'gt-stub-log.jsonl')
+  _out, err, st = Open3.capture3(
+    { 'GT_STUB_LOG' => log, 'REAL_SIGMA_REST' => File.join(__dir__, 'lib', 'sigma_rest.rb'),
+      'SIGMA_BASE_URL' => 'https://stub.invalid', 'SIGMA_API_TOKEN' => 'stub' },
+    RbConfig.ruby, '-I', stub_dir, '-r', 'sigma_rest',
+    SCRIPT, '--workdir', dir, '--connection-id', 'conn-1'
+  )
+  ok(st.exitstatus.zero?, "live stub run exits 0 (got #{st.exitstatus}: #{err.lines.first(2).join(' ').strip[0, 140]})")
+  calls = File.exist?(log) ? File.readlines(log).map { |l| JSON.parse(l) } : []
+  ok(calls.count { |c| c['m'] == 'delete' } == 1, 'probe workbook deleted exactly once')
+  reg_path = File.join(dir, 'probe-artifacts.jsonl')
+  ok(File.exist?(reg_path), 'probe-artifacts.jsonl written into the workdir (E7.1 registry)')
+  reg = File.exist?(reg_path) ? File.readlines(reg_path).map { |l| JSON.parse(l) } : []
+  created = reg.find { |r| r['created_at'] }
+  cleaned = reg.find { |r| r['deleted_at'] }
+  ok(created && created['id'] == 'wb-gt-probe' && created['script'] == 'run-ground-truth.rb' &&
+     created['name'].to_s.start_with?('_probe_groundtruth_'),
+     'created record: id + script + probe name registered AT POST time')
+  ok(cleaned && cleaned['id'] == 'wb-gt-probe' && cleaned['via'] == 'ensure' &&
+     cleaned['outcome'] == 'deleted',
+     'cleaned record: DELETE outcome marked via ensure')
+  # Registration order is the crash-safety contract: created BEFORE the export
+  # ever starts (a kill between POST and DELETE leaves a findable record).
+  ok(reg.index(created) < reg.index(cleaned), 'created line precedes cleaned line (register-at-creation)')
+end
+
 puts
 if $fails.empty?
   puts 'ALL PASS — run-ground-truth fixture-mode execution'

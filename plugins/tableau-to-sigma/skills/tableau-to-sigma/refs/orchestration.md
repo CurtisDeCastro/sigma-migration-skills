@@ -77,7 +77,7 @@ blocks a phase — but ignoring it is exactly how the 6-hour single-context
 field failure happened (zero subagents in 6 hours; by hour 3 the agent was
 grepping its own transcript to recover commands it had already run).
 
-## O3. Builder/verifier split (MUST — GREEN requires the countersignature)
+## O3. Builder/verifier split (MUST for Tier-M+ and `--certified` — a bare GREEN requires the countersignature; Tier-S factory runs ship the LABELED verdict instead, see the carve-out below)
 
 **The builder NEVER records the final visual verdict on its own work.** A
 builder that has spent an hour making the render match has every incentive —
@@ -132,8 +132,21 @@ The rules:
   adding one), pass it as well; the `VERIFIER:` notes prefix stays required
   either way.
 - A verdict of `pass` whose notes lack the `VERIFIER:` prefix is a builder
-  self-attestation, **not** a countersignature — the run is at best
-  self-attested YELLOW, never GREEN.
+  self-attestation, **not** a countersignature. On Tier-M+ or any
+  `--certified` run that means at best self-attested YELLOW, never GREEN.
+- **Tier-S factory carve-out (wave 2, W2.3 — the ratified factory default).**
+  On a Tier-S factory run (`migrate-state.json` `tier: "S"`, written by the
+  orchestrator's tier ratchet) the verifier context is **optional**: it is
+  spawned only for `--certified`, Tier-M+, or an explicit operator ask. A
+  self-attested Tier-S GREEN is real and shippable, but it is **labeled, not
+  bare**: the gate stamps `verdict_by: "builder-self-attested"`
+  (`parity-final.json` + `phase6-success.json`; closed vocabulary
+  `Offramp::VERDICT_BY`) and the verdict string everywhere — RESULT line,
+  markers, report headline — is **`GREEN (factory, self-attested)`**, never
+  the bare string `GREEN`. The label is greppable and `verify-complete.rb`
+  fails (exit 6) any report that strips it. A verifier countersignature +
+  gate re-run upgrades the workdir to a bare countersigned GREEN — which
+  remains the only GREEN a `--certified` run may claim.
 
 Result artifacts (who writes what):
 
@@ -142,16 +155,20 @@ Result artifacts (who writes what):
 | `<workdir>/MIGRATION_REPORT.md` + `<workdir>/migration-result.json` | builder | self-assessed outcome, `status: "awaiting-verification"`, every waiver named WITH evidence |
 | `<workdir>/verification-result.json` + the countersigned verdict in `parity-final.json` | verifier | the FINAL verdict (GREEN / YELLOW / RED) |
 | batch result line with `verdict_by: "verifier"` (batch runs) | verifier | the workbook's batch verdict — the builder's line is self-assessed only |
+| `verdict_by: "builder-self-attested"` + labeled `GREEN (factory, self-attested)` in `parity-final.json` / `phase6-success.json` | final gate (Tier-S factory) | the W2.3 self-attested factory verdict — real, labeled, greppable; countersigning + a gate re-run flips it to a bare GREEN |
 
-## O4. Single-workbook flows: same split
+## O4. Single-workbook flows: same split (with the same Tier-S carve-out)
 
-This is not a batch-only rule. In a one-workbook conversion the builder (the
-current session or a spawned agent) finishes pass 1 + the fidelity loop, stops
-short of the pass verdict, and then **the human or the driving session spawns
-the verifier** with `scripts/verifier-brief.md`. A solo session that
-self-records `pass` produces a self-attested result — acceptable when the user
-explicitly accepts it, but it is not a countersigned GREEN and the report must
-say so.
+This is not a batch-only rule. In a one-workbook **Tier-M+ or `--certified`**
+conversion the builder (the current session or a spawned agent) finishes pass
+1 + the fidelity loop, stops short of the pass verdict, and then **the human
+or the driving session spawns the verifier** with `scripts/verifier-brief.md`.
+A solo session that self-records `pass` produces a self-attested result —
+on a **Tier-S factory run** that is the sanctioned default and the result is
+the labeled `GREEN (factory, self-attested)` (quote the label verbatim in the
+report — `verify-complete.rb` fails a bare-GREEN claim); on Tier-M+ it is
+acceptable only when the user explicitly accepts it, it is not a countersigned
+GREEN, and the report must say so.
 
 ## O5. How to spawn (agent-neutral)
 
@@ -207,6 +224,51 @@ handle telemetry consent once at the end — not conversion work of its own.
 >    → layout → parity, and stops at exit 12 to collect actuals + `--finalize`. **A conversion
 >    is not done until `assert-phase6-ran.rb` exits 0**, on this path too.
 
+## Single-invocation flow (wave 1 — how the stops compose now)
+
+The gates are unchanged; the STOPS batch (speed review #2). One driving
+pattern per run:
+
+1. Launch pass 1 in the background (`--quiet` keeps the poll payload small —
+   refs/performance.md). Phase 1 is interleaved: the Tableau-side and
+   Sigma-side lanes join before anything consumes discovery output.
+2. **ONE pre-build checkpoint** consolidates gap review (exit 11), decisions
+   (exit 10), telemetry consent, and the WARN-only cost advisory into a single
+   stop + a single artifact (`<WORK>/open-questions.json`) + a single re-entry
+   (`--answers '<json>' [--force]` or `--yes`). Tagged entries embed their
+   computed `targeted_key` — copy it verbatim into `--answers` (targeted wins
+   over the bulk class id; unknown keys draw a WARN). Resolved answers are
+   ledgered in `<WORK>/decisions.jsonl`.
+3. **Phase-1d dashboard-read is a WAIT-GATE at the DM-POST barrier**: do the
+   PNG read while the orchestrator waits (`SIGMA_PNG_READ_TIMEOUT_S`, default
+   480s) and the run continues in-process; the deadline is exit 18 naming the
+   missing piece. Headless/CI callers with no driving agent to write the read
+   should set `SIGMA_PNG_READ_TIMEOUT_S=0` — the gate then fails fast (exit
+   18) instead of blocking the full bound; the wait banner's first line names
+   this switch. A `png-read.json` older than this run's discovery fetch is
+   set aside as `.stale` — never silently consumed.
+4. At the pass-1 tail, when the artifacts prove the agent-mediated actuals
+   list is EMPTY (all exportable charts machine-collected, no pivot grids, no
+   markers, no per-tile visual sidecar) AND the agent-side gate obligations
+   are already discharged (visual verdict recorded on `parity-final.json` —
+   gate 8b, waived by `--fast`; staged RCF ledger resolved — gate 8d),
+   `--finalize` chains **in the same invocation**; otherwise exit 12 is
+   unchanged. Cold runs never chain — the verdict only exists on re-entry
+   workdirs, so a cold chain would predictably stop at gate 8b and pre-spend
+   a finalize loop-log attempt. `SIGMA_NO_CHAIN_FINALIZE=1` opts out.
+5. **E9.6 — mission scope threads end-to-end**: a `mission.json` STATED scope
+   (`scope.dashboards`, or a single-view `/#/views/<wb>/<view>` URL in
+   `scope.value`) maps onto `--dashboard` and constrains the parse, the calc
+   working set, the open-questions surface, the ❌-gap STOP surface, and
+   build planning. The gap SCAN itself stays workbook-wide (expectations are
+   set for the whole file); at the checkpoint, an ❌ gap attributed entirely
+   to out-of-scope worksheets is ledgered (`gap-out-of-scope` off-ramp note)
+   instead of stopping, while unattributable gaps FAIL OPEN and still stop.
+   Explicit `--dashboard` flags override (narrowing below the mission is
+   recorded in `decisions.jsonl`); a scoped name matching nothing is a named
+   STOP (exit 19) listing the workbook's dashboards; unscoped missions are
+   unchanged.
+
 ## Still manual by design (the orchestrator stops and tells you)
 
 **Still manual by design (the orchestrator stops and tells you):**
@@ -216,11 +278,14 @@ handle telemetry consent once at the end — not conversion work of its own.
   `sigma_rest`'s auto-refresh) straight into `parity-actuals.json`. Only
   pivot-tables stay agent-mediated (their CSV export is the WIDE grid, not the
   long row/col/value tuples the plan compares) — pass 1 prints exactly those
-  `mcp__sigma-mcp-v2__query` calls; merge their rows into the same file.
+  `mcp__sigma-mcp-v2__query` calls; merge their rows into the same file. When
+  NOTHING stays agent-mediated (strict artifact-derived predicate), pass 1
+  chains `--finalize` in-process instead of stopping at exit 12.
 - **Empty-view-CSV recovery** — a view that exports an empty CSV produces no
-  chart; surfaced at the OPEN-QUESTIONS checkpoint AND by the tile census at
-  `--finalize` (exit 7 → rebuild the chart manually or explain with
-  `--allow-missing-tiles`, naming the zones in your report).
+  chart; surfaced at the consolidated pre-build checkpoint AND by the tile
+  census at `--finalize` (exit 7 → rebuild the chart manually or explain with
+  `--allow-missing-tiles`, naming the zones in your report). On a scoped run
+  (E9.6) only in-scope views are surfaced.
 - **Master-level calc overrides** — when the workbook layer exits 4 naming a
   field like `master/delivery speed tier`, translate the Tableau calc (see
   `calc-fields.json`) and re-run the same command with

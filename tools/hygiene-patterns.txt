@@ -82,5 +82,12 @@ eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}
 # Bare 64-hex literal adjacent to a client-id/credential key name (ID-suffixed
 # vars the *SECRET/*TOKEN alternation above misses).
 (CLIENT_?ID|API_?KEY|ACCESS_?KEY|CREDENTIAL)[A-Z0-9_]*["']?\s*[=:]\s*["']?[0-9a-f]{64}
+#
+# --- run-state litter paths (PLAN-v4 E7.1) --------------------------------------
+# The LOCAL probe registry (customer-org artifact ids) must never enter the
+# repo's corpus/ or fixture trees. gitignore blocks the accident; this guard
+# fails the sweep (path pass) when a planted registry is forced past it
+# (git add -f) or the ignore rule regresses.
+(corpus|fixtures?)/([^[:space:]"']*/)?probe-artifacts\.jsonl
 # Customer-identifying guards live in tools/hygiene-patterns.local.txt (gitignored) —
 # committing them would itself disclose the customer. Sweep loads both files.

@@ -63,6 +63,15 @@
   instead of declaring is itself a contract violation.
 
 ## Never negotiate fidelity down (field-caught, v5.5 e2e)
+- **This is a PRODUCTION migration, not a demo — regardless of who is watching
+  or why.** The bar is EXACT parity against the same warehouse, always. At a
+  wall you have exactly two moves: **follow the STOP/handoff the orchestrator
+  printed**, or **surface the blocker plainly and stop**. NEVER a third path:
+  no "lighter"/"simplified"/"good-enough-for-the-demo" builds, no dropping
+  tiles/filters/calcs to look finished. Cutting fidelity to escape a struggle
+  is a **worse failure than stopping**. If a lighter scope is wanted, the
+  **user** decides that explicitly — you never volunteer it.
+  *(Relocated verbatim from SKILL.md STEP 1 — E9 diet.)*
 - **NEVER propose reducing scope as a response to difficulty.** "Something lighter for
   the demo", "a simplified version", "skip the hard tiles for now" are all the same
   move: converting YOUR struggle into THE USER'S loss, silently. The mission is exact

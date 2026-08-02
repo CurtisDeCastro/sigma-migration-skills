@@ -27,6 +27,7 @@ corpus/
 | tableau/join-elision-fanout | synthetic field-twin .twb (LEFT JOIN on a flag key, no joined column on shelves + 2nd datasource) | join-plan pin + multi-ds/gap-scan/line-kind checks.sh (no golden DM) |
 | tableau/preagg-kpi | synthetic field-twin .twb ({FIXED day: COUNTD} LODs consumed additively + dual-axis combo) | lod-audit pin + gate-17/dual-axis checks.sh (no golden DM) |
 | tableau/structural-workarounds | synthetic .twb (story + blend + nested LOD/ISOYEAR/FINDNTH/bins) | skill-script pins: story-plan / blend-plan / lod-chains (no golden DM) |
+| tableau/objectmodel-noodle | synthetic field-twin .twbs (2020.2+ relationship graph: adverse endpoint orientation + entitlement table + keyless edges) | 2 DM goldens (fact election, orientation, controlId dedupe, rls-entitlement-table security) + gap-scan ✅/❌ checks.sh |
 | powerbi/model-fixtures | 8 TMSL .bim (plugin fixtures) | DM for fixture_01 |
 | powerbi/report-classic-employee-dashboard | legacy single report.json | artifact-pin only |
 | powerbi/report-pbir-retail-performance | exploded PBIR + bookmarks | artifact-pin only |

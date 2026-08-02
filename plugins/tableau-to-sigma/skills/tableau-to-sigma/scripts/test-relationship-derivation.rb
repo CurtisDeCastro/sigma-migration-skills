@@ -259,6 +259,35 @@ check(cust_jp && cust_jp['probe_keys'] == ['CUSTOMER_KEY'],
       "recovered entry's probe_keys resolve to the physical inferred key (got #{(cust_jp || {})['probe_keys'].inspect})",
       fails)
 
+# 8. COMPOSITION (wave/2-integration merge of #569 + W2-OM): the derivation
+#    ladder decides WHICH keys wire; the object-model passes decide HOW edges
+#    attach (evidence-ranked fact election, pass-2 orientation). These are two
+#    independently-authored rewrites of the same loop, so pin their composed
+#    behavior at the ELEMENT level, not just in the coverage ledger:
+#      - the name-INFERRED edge must ride pass 2 like a serialized one and
+#        attach to the ELECTED fact (a doc-order attachment, or an inference
+#        rung that bypasses orientation, both fail here);
+#      - derivedVia and the partial/droppedConditions census must SURVIVE
+#        pass-2 attachment onto the relationship object itself.
+fact_el = els.find { |e| ((e['source'] || {})['path'] || []).last == 'FACT_WIDE' }
+check(!fact_el.nil?, 'composition: FACT_WIDE element located by warehouse source path', fails)
+rels_on_fact = fact_el ? (fact_el['relationships'] || []) : []
+cust_rel = rels_on_fact.find { |r| r['name'] == 'DIM_CUSTOMER' }
+check(!cust_rel.nil?,
+      'composition: the name-inferred DIM_CUSTOMER edge attaches to the ELECTED fact via pass-2 ' \
+      'orientation (not first-end-point document order)', fails)
+check(cust_rel && cust_rel['derivedVia'] == 'name-inference',
+      "composition: derivedVia survives pass-2 attachment on the element relationship " \
+      "(got #{(cust_rel || {})['derivedVia'].inspect})", fails)
+store_rel = rels_on_fact.find { |r| r['name'] == 'DIM_STORE' }
+check(store_rel && store_rel['partial'] == true && store_rel['droppedConditions'].to_i >= 1,
+      'composition: partial/droppedConditions survive pass-2 attachment (wider-than-Tableau join ' \
+      'stays visible on the wired relationship object)', fails)
+check(!rels_on_fact.empty? && rels_on_fact.all? { |r| %w[serialized name-inference].include?(r['derivedVia']) },
+      'composition: every relationship attached in pass 2 carries a known derivedVia', fails)
+check((doc['warnings'] || []).any? { |w| w.include?('fact election') && w.include?('"FACT_WIDE"') },
+      'composition: evidence-ranked fact election ran and announced FACT_WIDE', fails)
+
 puts ''
 if fails.empty?
   puts 'test-relationship-derivation.rb: ALL PASS'

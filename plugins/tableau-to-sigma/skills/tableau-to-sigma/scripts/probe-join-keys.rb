@@ -39,6 +39,14 @@
 #   ruby scripts/probe-join-keys.rb --workdir <WORK> --resolve <INDEX> \
 #     --how <preaggregated|waived> --reason "<evidence>"
 #
+# IDENTIFIER LEGALITY (W2.9): every identifier interpolated into the probe SQL
+# passes through the single oracle, lib/sql_ident_check.rb — a legal bare name
+# (ORDER_KEY) emits byte-identically to before, a spaced/mixed-case physical
+# name emits double-quoted ("Order Key"), and a name the oracle REFUSES (the
+# Tableau role-parenthetical residue PRODUCT_KEY_(PRODUCT_DIM), a GUID field
+# id, quotes/control chars) is recorded as a clean status "error" and routed
+# to the --resolve path below — it is NEVER guessed into live SQL.
+#
 # Results are written back into the ledger: status "unique" | "non-unique"
 # (with counts + sample duplicate keys) | "error". A non-unique entry BLOCKS
 # (FATAL block + nonzero exit) until resolved via --resolve, which records the
@@ -57,6 +65,7 @@ require 'json'
 require 'csv'
 require 'optparse'
 require 'securerandom'
+require_relative 'lib/sql_ident_check' # single identifier-legality oracle (W2.9)
 
 opts = { dialect: 'snowflake' }
 OptionParser.new do |p|
@@ -109,6 +118,8 @@ end
 
 # ---------------------------------------------------------------------------
 # SQL builders (also recorded on the entry, so the ledger is auditable).
+# The `table`/`keys` arguments arrive PRE-EMITTED through emit_idents below —
+# these builders never see a raw ledger name.
 # ---------------------------------------------------------------------------
 def dup_sql(table, keys)
   cols = keys.join(', ')
@@ -120,15 +131,34 @@ def totals_sql(table, keys)
   "SELECT COUNT(*) AS TOTAL_ROWS, COUNT(DISTINCT #{concat}) AS DISTINCT_KEYS FROM #{table}"
 end
 
-# FROM-target for an entry: the physical right_table FQN, or — for a
-# lookup-synthesis whose target element is Custom SQL (right_table null,
-# right_sql recorded by the derivation) — the statement wrapped as a subquery.
-# nil when the entry carries neither (the entry errors; the gate keeps blocking).
-def probe_target(entry)
-  t = entry['right_table'].to_s
-  return t unless t.empty?
-  sql = entry['right_sql'].to_s
-  sql.empty? ? nil : "(#{sql}) t"
+# Emission gate (W2.9): map an entry's interpolable identifiers through the
+# SINGLE legality oracle (SqlIdentCheck.sql_ident — no second regex anywhere).
+#   keys    — each probe key's emission form (bare byte-identical, or quoted)
+#   table   — the FROM target: the right_table FQN emitted part-by-part; or,
+#             for a Custom-SQL Lookup target (right_table null, right_sql
+#             recorded), the statement wrapped as a subquery "(<sql>) t"
+#             (interpolated verbatim — it is a statement, not an identifier);
+#             nil when the entry carries neither (pre-existing error path).
+#   refused — [[name, reason], ...] every identifier the oracle refuses; any
+#             refusal means NO SQL may be built or sent for this entry.
+def emit_idents(entry)
+  refused = []
+  emit = lambda do |name|
+    form = SqlIdentCheck.sql_ident(name)
+    refused << [name, SqlIdentCheck.illegal_reason(name)] unless form
+    form
+  end
+  keys = (entry['probe_keys'] || entry['keys'] || []).map(&emit)
+  fqn = entry['right_table'].to_s
+  table =
+    if !fqn.empty?
+      parts = fqn.split('.').map(&emit)
+      parts.join('.') unless parts.include?(nil)
+    else
+      sql = entry['right_sql'].to_s
+      sql.empty? ? nil : "(#{sql}) t"
+    end
+  { keys: keys, table: table, refused: refused }
 end
 
 # ---------------------------------------------------------------------------
@@ -146,7 +176,10 @@ end
 
 # Run one SQL statement through a one-shot probe workbook (the established
 # warehouse-SQL seam — see probe-custom-sql-columns.rb) and return CSV rows.
-def sigma_sql_rows(conn_id, folder_id, sql, columns)
+# The created id is registered in the local probe registry BEFORE the first
+# export (E7.1) and the ensure-DELETE appends the matching cleaned record, so
+# a kill mid-export leaves a sweepable trace instead of silent litter.
+def sigma_sql_rows(conn_id, folder_id, sql, columns, workdir: nil)
   spec = {
     'name' => "_probe_joinkeys_#{SecureRandom.hex(4)}",
     'schemaVersion' => 1,
@@ -170,6 +203,8 @@ def sigma_sql_rows(conn_id, folder_id, sql, columns)
   end
   wb_id = r.is_a?(Hash) ? r['workbookId'] : nil
   raise "probe workbook POST failed: #{r.inspect[0, 160]}" unless wb_id
+  ProbeRegistry.created(wb_id, name: spec['name'], workdir: workdir,
+                        script: 'probe-join-keys.rb')
   begin
     exp = Sigma.request(:post, "/v2/workbooks/#{wb_id}/export",
                         body: JSON.generate('elementId' => 'probe', 'format' => { 'type' => 'csv' }))
@@ -188,16 +223,24 @@ def sigma_sql_rows(conn_id, folder_id, sql, columns)
     raise 'export did not complete in 30s' unless csv
     CSV.parse(csv, headers: true)
   ensure
-    Sigma.request(:delete, "/v2/files/#{wb_id}") rescue nil
+    begin
+      Sigma.request(:delete, "/v2/files/#{wb_id}")
+      ProbeRegistry.cleaned(wb_id, workdir: workdir, via: 'ensure')
+    rescue StandardError => e
+      ProbeRegistry.cleaned(wb_id, workdir: workdir, via: 'ensure',
+                            outcome: e.message.lines.first.to_s =~ /\b404\b/ ? '404' : 'failed')
+    end
   end
 end
 
-def live_result(conn_id, folder_id, entry)
-  table = probe_target(entry)
-  keys  = entry['probe_keys'] || entry['keys']
-  return { 'error' => 'no right_table FQN (or right_sql) on the entry — resolve the warehouse table and re-derive' } unless table
-  dup_rows = sigma_sql_rows(conn_id, folder_id, dup_sql(table, keys), keys + ['C'])
-  tot_rows = sigma_sql_rows(conn_id, folder_id, totals_sql(table, keys), %w[TOTAL_ROWS DISTINCT_KEYS])
+# `em` is emit_idents(entry) — the SQL interpolates only oracle-emitted forms;
+# the RAW key names still name the probe workbook's CSV columns (a quoted
+# "Order Key" SELECT yields a CSV header of Order Key, the raw name).
+def live_result(conn_id, folder_id, entry, em, workdir: nil)
+  keys = entry['probe_keys'] || entry['keys']
+  return { 'error' => 'no right_table FQN (or right_sql) on the entry — resolve the warehouse table and re-derive' } unless em[:table]
+  dup_rows = sigma_sql_rows(conn_id, folder_id, dup_sql(em[:table], em[:keys]), keys + ['C'], workdir: workdir)
+  tot_rows = sigma_sql_rows(conn_id, folder_id, totals_sql(em[:table], em[:keys]), %w[TOTAL_ROWS DISTINCT_KEYS], workdir: workdir)
   tot = tot_rows.first
   {
     'total'      => tot && tot['TOTAL_ROWS'].to_i,
@@ -221,6 +264,7 @@ unless opts[:resolve]
   if opts[:conn]
     $LOAD_PATH.unshift File.expand_path('lib', __dir__)
     require 'sigma_rest'
+    require 'probe_registry'
   end
   entries.each_with_index do |e, i|
     next unless %w[unprobed error].include?(e['status'].to_s)
@@ -231,10 +275,23 @@ unless opts[:resolve]
       puts "  ERROR  ##{i} #{e['kind']}: #{e['left']} -> #{e['right']} — no key columns"
       next
     end
-    tgt = probe_target(e) || '<right_table>'
-    e['probe_sql'] = { 'duplicates' => dup_sql(tgt, keys),
-                       'totals'     => totals_sql(tgt, keys) }
-    res = opts[:fixture] ? fixture_result(opts[:fixture], i) : live_result(opts[:conn], opts[:folder], e)
+    # W2.9 legality gate: a refused identifier never reaches SQL — no probe_sql
+    # is recorded, no fixture/live acquisition runs; the entry takes a clean
+    # 'error' routed to the SAME --resolve path as any other blocked entry.
+    em = emit_idents(e)
+    unless em[:refused].empty?
+      detail = em[:refused].map { |n, r| "#{n.inspect}: #{r}" }.join('; ')
+      e['status'] = 'error'
+      e['probe_error'] = "identifier(s) not legal to send to the warehouse — #{detail}. " \
+                         'Re-derive the ledger (join_plan strips Tableau role parentheticals from probe keys), ' \
+                         "or record an operator decision: --resolve #{i} --how waived --reason \"<operator>: <why>\""
+      puts "  ERROR  ##{i} #{e['kind']}: #{e['left']} -> #{e['right']} — refused by the identifier legality oracle (no SQL sent): #{detail}"
+      next
+    end
+    tgt = em[:table] || '<right_table>'
+    e['probe_sql'] = { 'duplicates' => dup_sql(tgt, em[:keys]),
+                       'totals'     => totals_sql(tgt, em[:keys]) }
+    res = opts[:fixture] ? fixture_result(opts[:fixture], i) : live_result(opts[:conn], opts[:folder], e, em, workdir: opts[:workdir])
     e['probed_at'] = now_utc
     if res['error']
       e['status'] = 'error'

@@ -252,6 +252,58 @@ import requests
 import json
 import re
 
+# --- vds-landing shared column-plan (keep in sync with scripts/vds_landing_lib.py) ---
+def sanitize_caption(caption):
+    # Legacy UPPER_SNAKE sanitizer — byte-identical to the historical one.
+    return re.sub(r'[^A-Z0-9_]', '_', caption.upper())
+
+def captions_from_fields(fields):
+    # Result captions in fields_json request order (= ordinal order). VDS keys
+    # OBJECTS rows by fieldAlias else fieldCaption; duplicate result captions
+    # collapse into one dict key (positionally unrecoverable) — refuse.
+    caps = [f.get('fieldAlias') or f['fieldCaption'] for f in fields]
+    seen = set()
+    for c in caps:
+        if c in seen:
+            raise ValueError('duplicate result caption %r in fields — '
+                             'positional recovery impossible; fix the request' % c)
+        seen.add(c)
+    return caps
+
+def build_column_plan(captions):
+    # plan[i] = {'ordinal': i, 'caption': captions[i], 'column': landed name}.
+    # First occurrence of a sanitized base keeps it; later collisions get _2,
+    # _3, ... in encounter order; a suffixed candidate that itself collides
+    # keeps counting. Pure function of the caption sequence — deterministic.
+    plan, taken, counts = [], set(), {}
+    for i, cap in enumerate(captions):
+        base = sanitize_caption(cap)
+        n = counts.get(base, 1)
+        col = base if n == 1 else '%s_%d' % (base, n)
+        while col in taken:
+            n += 1
+            col = '%s_%d' % (base, n)
+        counts[base] = n
+        taken.add(col)
+        plan.append({'ordinal': i, 'caption': cap, 'column': col})
+    return plan
+
+def resolve_projection(plan, ordinals):
+    # Landed columns for one logical table, by field ordinal ONLY (positions
+    # in the landing's fields_json order). Suffixes ride along. No caption
+    # matching, no re-sanitization, no name heuristics.
+    cols = []
+    for o in ordinals:
+        if not isinstance(o, int) or isinstance(o, bool):
+            raise TypeError('ordinal %r is not an int — resolve by position, '
+                            'never by name' % (o,))
+        if o < 0 or o >= len(plan):
+            raise ValueError('ordinal %d out of range for %d landed columns'
+                             % (o, len(plan)))
+        cols.append(plan[o]['column'])
+    return cols
+# --- end vds-landing shared column-plan ---
+
 def run(session, server_url, site_name, datasource_luid, target_table, fields_json):
     creds = json.loads(_snowflake.get_generic_secret_string('pat_creds'))
 
@@ -269,13 +321,18 @@ def run(session, server_url, site_name, datasource_luid, target_table, fields_js
     signin.raise_for_status()
     token = re.search(r'token="([^"]+)"', signin.text).group(1)
 
+    # Ordinal order = fields_json request order. Derive result captions from
+    # the REQUEST (not rows[0].keys()) so provenance is positional and stable.
+    fields = json.loads(fields_json)
+    captions = captions_from_fields(fields)
+
     # Query VDS
     resp = requests.post(
         f'{server_url}/api/v1/vizql-data-service/query-datasource',
         headers={'x-tableau-auth': token, 'Content-Type': 'application/json'},
         json={
             'datasource': {'datasourceLuid': datasource_luid},
-            'query': {'fields': json.loads(fields_json)},
+            'query': {'fields': fields},
             'options': {'returnFormat': 'OBJECTS'}
         },
         timeout=60
@@ -286,19 +343,29 @@ def run(session, server_url, site_name, datasource_luid, target_table, fields_js
     if not rows:
         return 'No rows returned'
 
-    # Sanitize column names to UPPER_SNAKE_CASE
-    orig_cols = list(rows[0].keys())
-    safe_cols = [re.sub(r'[^A-Z0-9_]', '_', c.upper()) for c in orig_cols]
+    # UPPER_SNAKE_CASE + deterministic collision suffixes (_2, _3 ...)
+    plan      = build_column_plan(captions)
+    safe_cols = [e['column'] for e in plan]
     col_defs  = ', '.join(f'{c} VARIANT' for c in safe_cols)
 
     session.sql(f'CREATE OR REPLACE TABLE {target_table} ({col_defs})').collect()
 
     from snowflake.snowpark import Row
-    sf_rows = [Row(**dict(zip(safe_cols, [row[c] for c in orig_cols]))) for row in rows]
+    sf_rows = [Row(**dict(zip(safe_cols, [row.get(c) for c in captions]))) for row in rows]
     df = session.create_dataframe(sf_rows)
     df.write.mode('overwrite').save_as_table(target_table)
 
-    return f'Loaded {len(rows)} rows into {target_table}'
+    # Ordinal->column provenance manifest — the ONLY sanctioned input for
+    # downstream per-logical-table splits (see refs/collision-provenance.md)
+    cm = [Row(ORDINAL=e['ordinal'], FIELD_CAPTION=e['caption'], COLUMN_NAME=e['column'])
+          for e in plan]
+    session.create_dataframe(cm).write.mode('overwrite') \
+        .save_as_table(f'{target_table}__VDS_COLMAP')
+
+    suffixed = sum(1 for e in plan if e['column'] != sanitize_caption(e['caption']))
+    return (f'Loaded {len(rows)} rows into {target_table} '
+            f'({len(safe_cols)} cols, {suffixed} collision-suffixed); '
+            f'colmap -> {target_table}__VDS_COLMAP')
 $$;
 ```
 
@@ -476,6 +543,60 @@ notebook source` first line and `# COMMAND ----------` cell separators matter):
 import requests, re, json
 from datetime import datetime, timezone
 
+# --- vds-landing shared column-plan (keep in sync with scripts/vds_landing_lib.py) ---
+def sanitize_caption(caption):
+    # Legacy UPPER_SNAKE sanitizer — byte-identical to the historical one.
+    return re.sub(r'[^A-Z0-9_]', '_', caption.upper())
+
+def captions_from_fields(fields):
+    # Result captions in fields_json request order (= ordinal order). VDS keys
+    # OBJECTS rows by fieldAlias else fieldCaption; duplicate result captions
+    # collapse into one dict key (positionally unrecoverable) — refuse.
+    caps = [f.get('fieldAlias') or f['fieldCaption'] for f in fields]
+    seen = set()
+    for c in caps:
+        if c in seen:
+            raise ValueError('duplicate result caption %r in fields — '
+                             'positional recovery impossible; fix the request' % c)
+        seen.add(c)
+    return caps
+
+def build_column_plan(captions):
+    # plan[i] = {'ordinal': i, 'caption': captions[i], 'column': landed name}.
+    # First occurrence of a sanitized base keeps it; later collisions get _2,
+    # _3, ... in encounter order; a suffixed candidate that itself collides
+    # keeps counting. Pure function of the caption sequence — deterministic.
+    plan, taken, counts = [], set(), {}
+    for i, cap in enumerate(captions):
+        base = sanitize_caption(cap)
+        n = counts.get(base, 1)
+        col = base if n == 1 else '%s_%d' % (base, n)
+        while col in taken:
+            n += 1
+            col = '%s_%d' % (base, n)
+        counts[base] = n
+        taken.add(col)
+        plan.append({'ordinal': i, 'caption': cap, 'column': col})
+    return plan
+
+def resolve_projection(plan, ordinals):
+    # Landed columns for one logical table, by field ordinal ONLY (positions
+    # in the landing's fields_json order). Suffixes ride along. No caption
+    # matching, no re-sanitization, no name heuristics.
+    cols = []
+    for o in ordinals:
+        if not isinstance(o, int) or isinstance(o, bool):
+            raise TypeError('ordinal %r is not an int — resolve by position, '
+                            'never by name' % (o,))
+        if o < 0 or o >= len(plan):
+            raise ValueError('ordinal %d out of range for %d landed columns'
+                             % (o, len(plan)))
+        cols.append(plan[o]['column'])
+    return cols
+# --- end vds-landing shared column-plan ---
+
+# COMMAND ----------
+
 server      = dbutils.widgets.get("server")        # https://us-west-2b.online.tableau.com
 site        = dbutils.widgets.get("site")          # contentUrl, e.g. mysite
 luid        = dbutils.widgets.get("luid")          # datasource LUID
@@ -499,13 +620,17 @@ signin = requests.post(
 signin.raise_for_status()
 tok = re.search(r'token="([^"]+)"', signin.text).group(1)
 
+# Ordinal order = fields_json request order (mirror the Snowflake proc)
+fields = json.loads(fields_json)
+captions = captions_from_fields(fields)
+
 # Query VDS
 resp = requests.post(
     f"{server}/api/v1/vizql-data-service/query-datasource",
     headers={"x-tableau-auth": tok, "Content-Type": "application/json"},
     json={
         "datasource": {"datasourceLuid": luid},
-        "query": {"fields": json.loads(fields_json)},
+        "query": {"fields": fields},
         "options": {"returnFormat": "OBJECTS"},
     },
     timeout=300,
@@ -515,18 +640,28 @@ rows = resp.json()["data"]
 if not rows:
     dbutils.notebook.exit("No rows returned")
 
-# Sanitize column names to UPPER_SNAKE_CASE (mirror the Snowflake proc)
-orig_cols = list(rows[0].keys())
-safe_cols = [re.sub(r"[^A-Z0-9_]", "_", c.upper()) for c in orig_cols]
-data = [tuple(r.get(c) for c in orig_cols) for r in rows]
+# UPPER_SNAKE_CASE + deterministic collision suffixes (mirror the Snowflake proc)
+plan      = build_column_plan(captions)
+safe_cols = [e["column"] for e in plan]
+data = [tuple(r.get(c) for c in captions) for r in rows]
 
 df = spark.createDataFrame(data, schema=safe_cols)
 cat, sch, tbl = target.split(".")
 spark.sql(f"CREATE SCHEMA IF NOT EXISTS `{cat}`.`{sch}`")
 df.write.mode("overwrite").saveAsTable(target)
 
+# Ordinal->column provenance manifest — the ONLY sanctioned input for
+# downstream per-logical-table splits (see refs/collision-provenance.md)
+colmap = spark.createDataFrame(
+    [(e["ordinal"], e["caption"], e["column"]) for e in plan],
+    schema="ordinal INT, field_caption STRING, column_name STRING")
+colmap.write.mode("overwrite").saveAsTable(f"{target}__vds_colmap")
+
 n = spark.table(target).count()
+suffixed = sum(1 for e in plan if e["column"] != sanitize_caption(e["caption"]))
 dbutils.notebook.exit(json.dumps({"rows": n, "target": target,
+                                  "collision_suffixed": suffixed,
+                                  "colmap": f"{target}__vds_colmap",
                                   "loaded_at": datetime.now(timezone.utc).isoformat()}))
 ```
 
@@ -648,6 +783,21 @@ SELECT
 FROM <db>.<schema>.<TABLE_NAME>;
 ```
 
+## Collision suffixes + ordinal provenance (shared)
+
+Distinct captions can sanitize to the same name (`Full Date`, `Full-Date`,
+`Full.Date` → `FULL_DATE`). The landing assigns **deterministic collision
+suffixes** — first occurrence keeps the base, later ones get `_2`, `_3` in
+`fields_json` order — and lands a **provenance manifest** next to every table:
+`<target>__VDS_COLMAP` (Snowflake) / `<target>__vds_colmap` (Databricks) with
+`(ordinal, field_caption, column_name)`, where `ordinal` = the field's position
+in the request. Anything downstream that projects a subset of the landed
+columns (typed views, per-logical-table splits) MUST resolve columns through
+the manifest **by ordinal** — never by re-sanitizing captions, which is blind
+to the suffixes and silently grabs another field's column. Contract, worked
+split example, and the offline test suite: `refs/collision-provenance.md`,
+`scripts/vds_landing_lib.py`, `scripts/test_vds_landing_lib.py`.
+
 ## Sigma column-metadata cache lag (shared)
 
 After a `CREATE OR REPLACE TABLE` / `saveAsTable` (which is what the load does every
@@ -676,7 +826,10 @@ re-syncs:
 | `json.decoder.JSONDecodeError` on auth | Tableau signin returns XML, not JSON | Parse with `re.search(r'token="([^"]+)"', resp.text)` |
 | VDS returns `{"error": "datasource not found"}` | LUID wrong or datasource moved/deleted | Re-fetch LUID via `list-datasources` |
 | Row count ~0.02% below Tableau total | VDS drops rows with NULL key fields | Expected drift; investigate only if exact parity required |
-| Columns with spaces/slashes/hyphens get `_` substitution | `re.sub(r'[^A-Z0-9_]','_',c.upper())` sanitizer | Expected — use a typed view or rename in the Sigma DM |
+| Columns with spaces/slashes/hyphens get `_` substitution | `sanitize_caption` UPPER_SNAKE sanitizer | Expected — use a typed view or rename in the Sigma DM |
+| A column landed as `<NAME>_2` / `<NAME>_3` | Two+ captions sanitize to the same name; collision suffixes assigned in `fields_json` order | Expected — read `<target>__VDS_COLMAP` for caption→column; resolve downstream projections by `ordinal`, never by re-sanitizing captions |
+| `ValueError: duplicate result caption ...` before the VDS call | Two fields resolve to the same result caption (alias == another caption) | Fix the request: give one field a distinct `fieldAlias` — identical result captions can't be recovered positionally |
+| Split/typed views mix columns from the wrong logical table | Downstream resolver re-sanitized captions instead of consuming the colmap | Rebuild projections from `<target>__VDS_COLMAP` ordinals — see `refs/collision-provenance.md` |
 | Sigma DM column type `error` for a date | Date landed as VARCHAR/string; Sigma auto-types datetime; `Left()`/`Text()` won't compile | Use `Date([SOURCE/Col Name])` directly |
 
 ### Snowflake landing

@@ -201,6 +201,46 @@ module CalcCoverage
     end
   end
 
+  # ------------------------------------------- generated translation table
+  # W2.13: THE one generated table (refs/functions.json, emitted by
+  # scripts/dev/gen-translation-table.mjs from the vendored converter bundle +
+  # this catalog). One row per catalog function with the translator's REAL
+  # verdict: status ∈ spec|verify|chart_only|rls|not_converted|unmapped.
+  # refs/coverage-manifest.json is a generated compat view of the same data —
+  # never hand-edit either; regenerate and commit (drift is CI-diffed by
+  # scripts/test-translation-table.rb).
+
+  TRANSLATION_TABLE_PATH = File.expand_path('../../refs/functions.json', __dir__)
+  TRANSLATION_STATUSES = %w[spec verify chart_only rls not_converted unmapped].freeze
+  # Statuses whose formulas the converter genuinely translates (chart_only is
+  # translated but chart-context-only; rls translates to CurrentUser*).
+  TRANSLATED_STATUSES = %w[spec verify chart_only rls].freeze
+
+  def translation_table
+    @translation_table ||= JSON.parse(File.read(TRANSLATION_TABLE_PATH))
+  end
+
+  # {UPPERCASE tableau_fn => row} over the generated table.
+  def translation_index
+    @translation_index ||= begin
+      idx = {}
+      translation_table['functions'].each { |r| idx[r['tableau_fn'].upcase] = r }
+      idx
+    end
+  end
+
+  # Sorted UPPERCASE Tableau function names the converter translates — the
+  # `translated:` set for coverage(), served from the ONE generated table
+  # instead of a hand-maintained list.
+  def translated_names(statuses: TRANSLATED_STATUSES)
+    want = {}
+    Array(statuses).each { |s| want[s.to_s] = true }
+    translation_table['functions']
+      .select { |r| want[r['status']] }
+      .map { |r| r['tableau_fn'].upcase }
+      .sort
+  end
+
   # coverage(formulas, translated:) -> {covered:, uncovered:, unknown:}
   #
   #   formulas   — Array of formula strings, or Hash {calc_name => formula}

@@ -2298,8 +2298,12 @@ function makeRlsSecurity(opts) {
     note: `Fail-closed RLS (boolean calc + element filter, only True rows). ${provision || "review"}. The skill provisions then applies \u2014 the converter does NOT inject it.`
   };
 }
-function buildDerivedElements(elements) {
+function buildDerivedElements(elements, warnings) {
   const derived = [];
+  const warnSlash = (dispName, where) => {
+    if (warnings)
+      warnings.push(`⚠ Column "${dispName}" contains "/" in its display name — ambiguous against Sigma's [Element/Column] path syntax; DROPPED from the derived ${where}. Rename the column (remove the slash) in Tableau or the DM spec to carry it through.`);
+  };
   for (const srcEl of elements) {
     if (!srcEl.relationships?.length)
       continue;
@@ -2322,8 +2326,10 @@ function buildDerivedElements(elements) {
         dispName = String(col.name);
       if (!dispName)
         continue;
-      if (dispName.includes("/"))
+      if (dispName.includes("/")) {
+        warnSlash(dispName, `"${derivedName}" element (own column)`);
         continue;
+      }
       const cId = sigmaShortId();
       viewCols.push({ id: cId, formula: `[${baseName}/${dispName}]` });
       viewOrder.push(cId);
@@ -2353,8 +2359,10 @@ function buildDerivedElements(elements) {
         }
         if (!dispName)
           continue;
-        if (dispName.includes("/"))
+        if (dispName.includes("/")) {
+          warnSlash(dispName, `"${derivedName}" element (related column via ${rel.name})`);
           continue;
+        }
         const cId = sigmaShortId();
         viewCols.push({ id: cId, formula: `[${baseName}/${rel.name}/${dispName}]` });
         viewOrder.push(cId);
@@ -2980,10 +2988,10 @@ function _restoreRawTableauLiterals(s, lits) {
 }
 function _tabLitInner(lits, idxStr) {
   const raw = lits[Number(idxStr)];
-  return raw === void 0 ? "" : raw.slice(1, -1).replace(/\\(.)/g, "$1");
+  return raw === void 0 ? "" : raw.slice(1, -1).replace(/\\(['"])/g, "$1");
 }
 function _tabEscapeForSigma(inner) {
-  return inner.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  return inner.replace(/"/g, '\\"');
 }
 function _unmaskTableauLiterals(s, lits) {
   return s.replace(_TABLEAU_SENTINEL_RE, (_m, i) => `"${_tabEscapeForSigma(_tabLitInner(lits, i))}"`);
@@ -3974,10 +3982,18 @@ function warehouseClassFromConn(connVal) {
   }
   return "";
 }
-function collectTables(rel, tables) {
+function collectTables(rel, tables, nestedUnions) {
   const type = attr(rel, "type") || "table";
   if (type === "table") {
     tables.push({ rel, leftKey: "", rightKey: "", joinType: "", leftKeys: [], rightKeys: [] });
+    return;
+  }
+  if (type === "union" && Array.isArray(nestedUnions)) {
+    // W2.16 fix-pass: a union subtree inside a join tree previously vanished
+    // here silently (neither branch matched) — the join flattened to its
+    // table branches and the union members' rows were DROPPED with elements
+    // still emitted. Record it so the join branch can refuse loudly instead.
+    nestedUnions.push(attr(rel, "name") || "(unnamed union)");
     return;
   }
   if (type === "join") {
@@ -4005,9 +4021,9 @@ function collectTables(rel, tables) {
     const leftKey = leftKeys[0] || "", rightKey = rightKeys[0] || "";
     const childRels = asArray(rel.relation);
     if (childRels.length === 2) {
-      collectTables(childRels[0], tables);
+      collectTables(childRels[0], tables, nestedUnions);
       const beforeRight = tables.length;
-      collectTables(childRels[1], tables);
+      collectTables(childRels[1], tables, nestedUnions);
       for (let i = beforeRight; i < tables.length; i++) {
         if (!tables[i].leftKey) {
           tables[i].joinType = joinType;
@@ -4019,7 +4035,7 @@ function collectTables(rel, tables) {
       }
     } else {
       for (const child of childRels) {
-        collectTables(child, tables);
+        collectTables(child, tables, nestedUnions);
       }
     }
   }
@@ -4417,7 +4433,7 @@ function convertTableauToSigma(xmlContent, options = {}) {
   if (!options.__multiDsChild) {
     resetIds(`ds${options.datasourceIndex ?? 0}\0${xmlContent}`);
   }
-  const { connectionId = "", database = "", schema = "", datasourceIndex = 0, tableMapping = {} } = options;
+  const { connectionId = "", database = "", schema = "", datasourceIndex = 0, tableMapping = {}, factTable = "", tableRowCounts = null } = options;
   _tableMapping = tableMapping || {};
   const dbOverride = database || "";
   const schOverride = schema || "";
@@ -4510,6 +4526,11 @@ function convertTableauToSigma(xmlContent, options = {}) {
   const warnings = [];
   const security = [];
   const workbookPatterns = [];
+  // Object-model (noodle) state: set by the collection branch below. The
+  // elected fact drives factEl (helper FROM anchoring) and the entry/edge
+  // inventory drives the structural entitlement-RLS detector.
+  let electedFactEl = null;
+  let objectModelInfo = null;
   function _reportChartWindowPattern(caption, formula, why) {
     const chartWin = tableauWindowToSigmaChart(formula);
     if (chartWin) {
@@ -4646,8 +4667,15 @@ function convertTableauToSigma(xmlContent, options = {}) {
       });
     } else if (relType === "join") {
       const tables = [];
-      collectTables(rootRelation, tables);
-      if (tables.length === 0) {
+      const nestedUnions = [];
+      collectTables(rootRelation, tables, nestedUnions);
+      if (nestedUnions.length > 0) {
+        // W2.16 fix-pass: refuse-don't-guess. Flattening a join over a union
+        // subtree previously emitted only the plain-table branches \u2014 the
+        // union members' rows were silently DROPPED (elements still emitted,
+        // no warning): the silent-partial-loss class W2.16 exists to kill.
+        warnings.push(`\u26A0 Datasource join tree contains ${nestedUnions.length} nested union relation(s) (${nestedUnions.join(", ")}) \u2014 NOT converted: flattening the join would silently drop the union members' rows. NO ELEMENTS EMITTED for this datasource \u2014 model it as a Custom SQL element (join over a UNION ALL subquery), or convert the union's member tables and re-point sources after conversion.`);
+      } else if (tables.length === 0) {
         warnings.push("\u26A0 Could not parse join structure");
       } else {
         const elementMap = {};
@@ -4900,15 +4928,67 @@ function convertTableauToSigma(xmlContent, options = {}) {
         }
         const objGraph = nsChild(ds.ds, "object-graph");
         const relsList = asArray(objGraph?.relationships?.relationship || []);
+        // ---- role-played logical tables (one physical table, N instances) ----
+        // Tableau serializes a role-played dim as N <relation> entries sharing
+        // ONE physical `table` attr; the <object-graph> object carries the ROLE
+        // caption ("Ship Date"). Capture the caption STRUCTURALLY (object ->
+        // properties -> relation name), give each instance element a distinct
+        // deterministic name and role-suffix its relationship name so every
+        // [Base/REL/Field] ref resolves to its OWN instance — no FK-display or
+        // table-name guessing downstream.
+        const physByRelName = {};
+        for (const rel of childRels) {
+          const nm = attr(rel, "name") || attr(rel, "table") || "TABLE";
+          physByRelName[nm] = String(attr(rel, "table") || "").toUpperCase();
+        }
+        const physInstanceCount = {};
+        for (const nm of Object.keys(physByRelName)) {
+          const p = physByRelName[nm];
+          if (p)
+            physInstanceCount[p] = (physInstanceCount[p] || 0) + 1;
+        }
+        for (const ob of asArray(objGraph?.objects?.object || [])) {
+          const cap = String(attr(ob, "caption") || "").trim();
+          if (!cap)
+            continue;
+          let obRelName = "";
+          for (const p of asArray(nsChild(ob, "properties") || ob?.properties || [])) {
+            const r = asArray(p?.relation || [])[0];
+            if (r) {
+              obRelName = attr(r, "name") || attr(r, "table") || "";
+              if (obRelName)
+                break;
+            }
+          }
+          const entry = obRelName ? elementMap[obRelName] : void 0;
+          if (!entry)
+            continue;
+          const phys = physByRelName[obRelName] || "";
+          if (phys && physInstanceCount[phys] >= 2 && cap.toUpperCase() !== entry.cleanName.toUpperCase()) {
+            entry.roleCaption = cap;
+            if (!entry.element.name)
+              entry.element.name = `${entry.cleanName} (${cap})`;
+          }
+        }
         const relCoverage = { serialized: relsList.length, wired: 0, entries: [] };
         const getCleanSeg = (name) => name.replace(/[\[\]]/g, "").split(".").pop()?.replace(/_[0-9A-Fa-f]{16,}$/, "").toUpperCase() || "";
+        // Role instances of one physical table cannot be told apart by NAME: a
+        // fallback (non-exact-objId) hit on any multi-instance table is
+        // AMBIGUOUS — a silent first-match would glue every role's relationship
+        // onto instance 0 (the role-collapse class). Refuse and report instead.
         const findEntry = (objId) => {
           const exactKey = Object.keys(elementMap).find((k) => elementMap[k].objId === objId);
           if (exactKey)
             return elementMap[exactKey];
           const cleanId = getCleanSeg(objId);
-          const key = Object.keys(elementMap).find((k) => getCleanSeg(k) === cleanId);
-          return key ? elementMap[key] : void 0;
+          const keys = Object.keys(elementMap).filter((k) => getCleanSeg(k) === cleanId);
+          if (keys.length === 0)
+            return void 0;
+          const phys = physByRelName[keys[0]] || "";
+          const instKeys = phys ? Object.keys(elementMap).filter((k) => physByRelName[k] === phys) : keys;
+          if (keys.length > 1 || instKeys.length > 1)
+            return { __roleAmbiguous: true, candidates: instKeys.length > 1 ? instKeys : keys };
+          return elementMap[keys[0]];
         };
         const extractOpUuid = (opAttr) => {
           const fnWrap = opAttr.match(/^\w+\(\[?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\]?\)$/i);
@@ -4920,6 +5000,27 @@ function convertTableauToSigma(xmlContent, options = {}) {
             return uuidInFn;
           return opAttr.replace(/^\[|\]$/g, "").replace(/\s*\(.*\)$/, "").trim().toUpperCase();
         };
+        const ensureCol = (entry, key) => {
+          let id = entry.colIdMap[key] || entry.colIdMap[key.replace(/-/g, "_")];
+          if (!id) {
+            id = sigmaInodeId(key.replace(/\s+/g, "_"));
+            const isUuid = /^[0-9A-F]{8}-[0-9A-F]{4}-/i.test(key);
+            const cap = isUuid ? guidCaption[key.toLowerCase()] : void 0;
+            const dispName = cap || (isUuid ? key : sigmaDisplayName(key));
+            const colObj = { id, formula: `[${entry.cleanName}/${dispName}]` };
+            if (cap)
+              colObj.name = cap;
+            entry.element.columns.push(colObj);
+            entry.element.order.push(id);
+            entry.colIdMap[key] = id;
+            if (cap) {
+              entry.colIdMap[cap.toUpperCase()] = id;
+              entry.colIdMap[cap.toUpperCase().replace(/\s+/g, "_")] = id;
+            }
+          }
+          return id;
+        };
+        const hasCol = (entry, key) => !!(entry.colIdMap[key] || entry.colIdMap[key.replace(/-/g, "_")]);
         // --- object-graph relationship key derivation ladder (PR2a) ---
         // Tableau's 2020.2+ logical model AUTO-MATCHES relationships by column name at query
         // time and serializes NO join key at all \u2014 that is the modern-star-schema common case,
@@ -4932,7 +5033,6 @@ function convertTableauToSigma(xmlContent, options = {}) {
         // would over-constrain the join and silently drop rows. A single key-shaped candidate is
         // wired; anything else (none, or more than one) is left for manual authoring.
         const candidateNames = (entry) => (entry.element.columns || []).map((c) => c.name || (typeof c.formula === "string" && (c.formula.match(/\/([^\]]+)\]$/) || [])[1])).filter(Boolean).map((nm) => String(nm).replace(/\s+/g, "_").toUpperCase());
-        const hasCol = (entry, key) => Boolean(entry.colIdMap[key] || entry.colIdMap[key.replace(/-/g, "_")]);
         const entityNameOf = (cleanName) => String(cleanName || "").toUpperCase().replace(/^(DIM|FACT|BRIDGE)_/, "");
         const escapeRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
         // Precise, NOT `includes`: a loose substring match on the entity name wires
@@ -4965,6 +5065,39 @@ function convertTableauToSigma(xmlContent, options = {}) {
           return { ok: false, candidates, keyShaped };
         };
         const unwiredReason = (inferred) => inferred.candidates.length === 0 ? "no existing column name matches on both sides" : inferred.keyShaped.length === 0 ? "candidate name(s) matched but none look key-shaped (a _ID/_KEY/_SK/_CODE suffix, the exact target entity name, or the entity name plus that suffix)" : `ambiguous: ${inferred.keyShaped.length} key-shaped candidates \u2014 refusing to guess a composite key`;
+        const collectEqs = (expr, acc) => {
+          const op = nsAttr(expr, "op");
+          const kids = asArray(expr.expression || []);
+          if (op === "=" && kids.length >= 2) {
+            acc.push(expr);
+            return;
+          }
+          for (const k of kids)
+            collectEqs(k, acc);
+        };
+        // Non-equality comparison clauses (range / inequality relationships,
+        // official operators per Tableau "Relate Your Data"): collectEqs walks
+        // PAST them silently, so census them separately \u2014 a rel whose only
+        // clauses are ranges must land in the named-gap path, not vanish.
+        const collectNonEq = (expr, acc) => {
+          const op = nsAttr(expr, "op");
+          if (["<", "<=", ">", ">=", "!=", "<>"].includes(String(op).trim()))
+            acc.push(op);
+          for (const k of asArray(expr.expression || []))
+            collectNonEq(k, acc);
+        };
+        const isPhysical = (op) => /^\[[^\]]+\]$/.test(op.trim());
+        // PASS 1 \u2014 collect every wire-able edge WITHOUT attaching it. Tableau
+        // serializes the already-on-canvas (base) table as first-end-point and
+        // the base is pure authoring order (docs: "the first table that you
+        // drag"), so endpoint order carries NO fact semantics. Attachment is
+        // decided after election, in pass 2.
+        // Composition with the PR2a ladder: the ladder decides WHICH keys
+        // wire (serialized -> name-inference -> unwired-and-recorded); the
+        // object-model passes decide HOW edges attach (fact election,
+        // orientation, role-played instancing).
+        const relEdges = [];
+        const unwiredRels = [];
         for (const rel of relsList) {
           const firstEp = rel["first-end-point"];
           const secondEp = rel["second-end-point"];
@@ -4981,50 +5114,60 @@ function convertTableauToSigma(xmlContent, options = {}) {
           }
           const firstEntry = findEntry(firstObjId);
           const secondEntry = findEntry(secondObjId);
+          if (firstEntry?.__roleAmbiguous || secondEntry?.__roleAmbiguous) {
+            // Refuse-don't-guess: the end-point matches SEVERAL instances of one
+            // role-played physical table and nothing identifies which role owns
+            // this relationship \u2014 first-match wiring here is exactly the silent
+            // role collapse (two roles keyed onto one element).
+            const amb = firstEntry?.__roleAmbiguous ? firstEntry : secondEntry;
+            const ambId = firstEntry?.__roleAmbiguous ? attr(firstEp, "object-id") : attr(secondEp, "object-id");
+            warnings.push(`\u26A0 Relationship end-point object-id "${ambId}" matches ${amb.candidates.length} role-played instances (${amb.candidates.map((c) => `"${c}"`).join(", ")}) and none exactly \u2014 role attribution AMBIGUOUS; NOT wired. Wire manually: one element instance per role, one relationship on that role's own key.`);
+            unwiredRels.push({ a: firstEntry?.cleanName || attr(firstEp, "object-id"), b: secondEntry?.cleanName || attr(secondEp, "object-id"), why: "role-ambiguous" });
+            relCoverage.entries.push({
+              left: firstEntry?.cleanName || firstObjId || "(unresolved)",
+              right: secondEntry?.cleanName || secondObjId || "(unresolved)",
+              derivedVia: "unwired",
+              reason: `end-point object-id "${ambId}" matches ${amb.candidates.length} role-played instances and none exactly \u2014 role attribution ambiguous`,
+              candidates: amb.candidates
+            });
+            continue;
+          }
           if (!firstEntry || !secondEntry || firstEntry === secondEntry) {
-            const reason = !firstEntry || !secondEntry ? `endpoint object-id unresolved to a known element (first=${firstObjId || "?"}, second=${secondObjId || "?"})` : "both endpoints resolve to the same element";
+            const missing = [!firstEntry ? attr(firstEp, "object-id") : null, !secondEntry ? attr(secondEp, "object-id") : null].filter(Boolean).join('", "');
+            warnings.push(`\u26A0 Relationship end-point object-id "${missing}" matches no logical table (renamed object / unsupported shape) \u2014 NOT wired; wire this relationship manually (LEFT from fact\u2192dim).`);
+            unwiredRels.push({ a: firstEntry?.cleanName || attr(firstEp, "object-id"), b: secondEntry?.cleanName || attr(secondEp, "object-id"), why: "endpoint-unresolved" });
             relCoverage.entries.push({
               left: firstEntry ? firstEntry.cleanName : firstObjId || "(unresolved)",
               right: secondEntry ? secondEntry.cleanName : secondObjId || "(unresolved)",
               derivedVia: "unwired",
-              reason
+              reason: !firstEntry || !secondEntry ? `endpoint object-id unresolved to a known element (first=${firstObjId || "?"}, second=${secondObjId || "?"})` : "both endpoints resolve to the same element"
             });
             continue;
           }
-          const ensureCol = (entry, key) => {
-            let id = entry.colIdMap[key] || entry.colIdMap[key.replace(/-/g, "_")];
-            if (!id) {
-              id = sigmaInodeId(key.replace(/\s+/g, "_"));
-              const isUuid = /^[0-9A-F]{8}-[0-9A-F]{4}-/i.test(key);
-              const cap = isUuid ? guidCaption[key.toLowerCase()] : void 0;
-              const dispName = cap || (isUuid ? key : sigmaDisplayName(key));
-              const colObj = { id, formula: `[${entry.cleanName}/${dispName}]` };
-              if (cap)
-                colObj.name = cap;
-              entry.element.columns.push(colObj);
-              entry.element.order.push(id);
-              entry.colIdMap[key] = id;
-              if (cap) {
-                entry.colIdMap[cap.toUpperCase()] = id;
-                entry.colIdMap[cap.toUpperCase().replace(/\s+/g, "_")] = id;
-              }
-            }
-            return id;
-          };
+          const eqExprs = [];
+          const nonEqOps = [];
+          for (const oe of asArray(rel.expression || [])) {
+            collectEqs(oe, eqExprs);
+            collectNonEq(oe, nonEqOps);
+          }
           const wireInferred = (name, { droppedConditions = 0 } = {}) => {
+            // Ladder x object-model composition: an inferred key joins the
+            // edge set like a serialized one \u2014 attachment/orientation is
+            // decided in pass 2 after fact election, so derivedVia and the
+            // dropped-condition census ride on the edge.
             const inferredKeys = [{
-              sourceColumnId: ensureCol(firstEntry, name),
-              targetColumnId: ensureCol(secondEntry, name)
+              aColId: ensureCol(firstEntry, name),
+              bColId: ensureCol(secondEntry, name)
             }];
-            if (!firstEntry.element.relationships)
-              firstEntry.element.relationships = [];
-            firstEntry.element.relationships.push({
-              id: sigmaShortId(),
-              targetElementId: secondEntry.element.id,
+            relEdges.push({
+              a: firstEntry,
+              b: secondEntry,
               keys: inferredKeys,
-              name: secondEntry.cleanName,
+              uniqueA: /^true$/i.test(String(attr(firstEp, "unique-key") || "")),
+              uniqueB: /^true$/i.test(String(attr(secondEp, "unique-key") || "")),
+              relExprText: JSON.stringify(rel.expression || ""),
               derivedVia: "name-inference",
-              ...droppedConditions > 0 ? { partial: true, droppedConditions } : {}
+              ...droppedConditions > 0 ? { droppedConditions } : {}
             });
             relCoverage.wired += 1;
             relCoverage.entries.push({
@@ -5044,50 +5187,108 @@ function convertTableauToSigma(xmlContent, options = {}) {
               candidates: inferred.candidates
             });
           };
-          const collectEqs = (expr, acc) => {
-            const op = nsAttr(expr, "op");
-            const kids = asArray(expr.expression || []);
-            if (op === "=" && kids.length >= 2) {
-              acc.push(expr);
-              return;
-            }
-            for (const k of kids)
-              collectEqs(k, acc);
-          };
-          const eqExprs = [];
-          for (const oe of asArray(rel.expression || []))
-            collectEqs(oe, eqExprs);
           if (eqExprs.length === 0) {
-            const inferred = inferRelationshipKeyByName(firstEntry, secondEntry);
-            if (inferred.ok) {
-              wireInferred(inferred.name);
-              warnings.push(`\u2139 Relationship ${firstEntry.cleanName} \u2192 ${secondEntry.cleanName}: no serialized join key (Tableau auto-matches these at query time) \u2014 inferred "${inferred.name}" from a column name that exists on both sides. VERIFY this is the correct key before relying on it.`);
-              continue;
+            if (nonEqOps.length === 0) {
+              // No serialized key at all: run the PR2a name-inference rung
+              // before recording the gap.
+              const inferred = inferRelationshipKeyByName(firstEntry, secondEntry);
+              if (inferred.ok) {
+                wireInferred(inferred.name);
+                warnings.push(`\u2139 Relationship ${firstEntry.cleanName} \u2192 ${secondEntry.cleanName}: no serialized join key (Tableau auto-matches these at query time) \u2014 inferred "${inferred.name}" from a column name that exists on both sides. VERIFY this is the correct key before relying on it.`);
+                continue;
+              }
+              warnings.push(`\u26A0 Relationship ${firstEntry.cleanName} \u2192 ${secondEntry.cleanName} carries no serialized join key \u2014 Tableau auto-matches these at query time; Sigma needs an explicit key. NOT wired: pick a join key and wire manually (LEFT from fact\u2192dim), and verify the dimension is unique on the key to avoid measure fan-out.`);
+              unwiredRels.push({ a: firstEntry.cleanName, b: secondEntry.cleanName, why: "no-serialized-key" });
+              recordUnwired(inferred);
+            } else {
+              // Range/inequality relationship: NEVER equality-inferred \u2014 an
+              // '=' join where Tableau declared a range predicate is a wrong
+              // join, not a recovered one. Refuse and record.
+              warnings.push(`\u26A0 Relationship ${firstEntry.cleanName} \u2192 ${secondEntry.cleanName} joins only on non-equality operator(s) (${nonEqOps.join(", ")}) \u2014 a range/inequality relationship has no Sigma relationship equivalent (relationships join on column equality). NOT wired: model as a join element or wire manually.`);
+              unwiredRels.push({ a: firstEntry.cleanName, b: secondEntry.cleanName, why: "non-equality-key" });
+              relCoverage.entries.push({
+                left: firstEntry.cleanName,
+                right: secondEntry.cleanName,
+                derivedVia: "unwired",
+                reason: `joins only on non-equality operator(s) (${nonEqOps.join(", ")}) \u2014 a range/inequality relationship has no Sigma relationship equivalent`
+              });
             }
-            warnings.push(`\u26A0 Relationship ${firstEntry.cleanName} \u2192 ${secondEntry.cleanName} carries no serialized join key \u2014 Tableau auto-matches these at query time; Sigma needs an explicit key. NOT wired: pick a join key and wire manually (LEFT from fact\u2192dim), and verify the dimension is unique on the key to avoid measure fan-out.`);
-            recordUnwired(inferred);
             continue;
           }
-          const isPhysical = (op) => /^\[[^\]]+\]$/.test(op.trim());
           const keys = [];
           let skippedComputed = 0;
           for (const eq of eqExprs) {
             const inner = asArray(eq.expression || []);
             if (inner.length < 2)
               continue;
-            const srcOpRaw = nsAttr(inner[0], "op") || "";
-            const tgtOpRaw = nsAttr(inner[1], "op") || "";
+            let srcOpRaw = nsAttr(inner[0], "op") || "";
+            let tgtOpRaw = nsAttr(inner[1], "op") || "";
             if (!isPhysical(srcOpRaw) || !isPhysical(tgtOpRaw)) {
+              // DATE()/DATETIME()-wrapped side (role-played date joins): when
+              // the wrapped column resolves on one of THIS relationship's own
+              // end-point entries, synthesize a deterministic calc key column
+              // (Date([Col])) on that side and wire the equality on it — the
+              // role's key stays on its own instance. Unknown functions and
+              // unresolvable wrapped columns keep the refuse path (computed-only
+              // named gap), never a guess.
+              const fnKeySigma = { DATE: "Date", DATETIME: "Date" };
+              const fnWrapOf = (raw) => {
+                const m = String(raw).trim().match(/^([A-Za-z_]+)\(\[?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\]?\)$/i);
+                return m && fnKeySigma[m[1].toUpperCase()] ? { fn: fnKeySigma[m[1].toUpperCase()], raw: m[1].toUpperCase(), uuid: m[2].toUpperCase() } : null;
+              };
+              const ensureCalcKey = (entry, wrap) => {
+                const baseId = entry.colIdMap[wrap.uuid] || entry.colIdMap[wrap.uuid.replace(/-/g, "_")];
+                if (!baseId)
+                  return "";
+                const baseCol = entry.element.columns.find((c) => c.id === baseId);
+                const bm = baseCol && String(baseCol.formula || "").match(/^\[[^/\]]+\/([^\]]+)\]$/);
+                const baseDisp = baseCol && baseCol.name || bm && bm[1] || "";
+                if (!baseDisp || baseDisp.includes("/"))
+                  return "";
+                const calcMapKey = `${wrap.uuid}::${wrap.fn}KEY`;
+                let calcId = entry.colIdMap[calcMapKey];
+                if (!calcId) {
+                  calcId = sigmaInodeId(wrap.uuid.replace(/-/g, "_") + "_KEY");
+                  entry.element.columns.push({ id: calcId, name: `${baseDisp} Join Key`, formula: `${wrap.fn}([${baseDisp}])` });
+                  entry.element.order.push(calcId);
+                  entry.colIdMap[calcMapKey] = calcId;
+                  warnings.push(`ℹ Relationship ${firstEntry.cleanName} → ${secondEntry.cleanName}: computed key ${wrap.raw}([${baseDisp}]) wired via synthesized calc key column "${baseDisp} Join Key".`);
+                }
+                return calcId;
+              };
+              const srcWrap = fnWrapOf(srcOpRaw);
+              const tgtWrap = fnWrapOf(tgtOpRaw);
+              let aId = "", bId = "";
+              if (srcWrap && !tgtWrap && isPhysical(tgtOpRaw)) {
+                aId = ensureCalcKey(firstEntry, srcWrap);
+                if (aId)
+                  bId = ensureCol(secondEntry, parseOpRef(tgtOpRaw));
+              } else if (tgtWrap && !srcWrap && isPhysical(srcOpRaw)) {
+                bId = ensureCalcKey(secondEntry, tgtWrap);
+                if (bId)
+                  aId = ensureCol(firstEntry, parseOpRef(srcOpRaw));
+              }
+              if (aId && bId) {
+                keys.push({ aColId: aId, bColId: bId });
+                continue;
+              }
               skippedComputed++;
               continue;
             }
-            const srcKey = parseOpRef(srcOpRaw), tgtKey = parseOpRef(tgtOpRaw);
+            let srcKey = parseOpRef(srcOpRaw), tgtKey = parseOpRef(tgtOpRaw);
             if (!srcKey || !tgtKey)
               continue;
-            keys.push({
-              sourceColumnId: ensureCol(firstEntry, srcKey),
-              targetColumnId: ensureCol(secondEntry, tgtKey)
-            });
+            // Operand order parallels end-point order by CONVENTION only \u2014 the
+            // format does not specify side-ownership. Verify by column ownership
+            // and swap when both operands resolve exclusively on the opposite
+            // side; genuinely ambiguous stays serialized-order.
+            if (!hasCol(firstEntry, srcKey) && !hasCol(secondEntry, tgtKey) && hasCol(secondEntry, srcKey) && hasCol(firstEntry, tgtKey)) {
+              const t = srcKey;
+              srcKey = tgtKey;
+              tgtKey = t;
+              warnings.push(`\u2139 Relationship ${firstEntry.cleanName} \u2194 ${secondEntry.cleanName}: operand order did not match end-point order \u2014 swapped by column ownership.`);
+            }
+            keys.push({ aColId: ensureCol(firstEntry, srcKey), bColId: ensureCol(secondEntry, tgtKey) });
           }
           if (keys.length === 0) {
             const inferred = inferRelationshipKeyByName(firstEntry, secondEntry);
@@ -5100,38 +5301,233 @@ function convertTableauToSigma(xmlContent, options = {}) {
               continue;
             }
             warnings.push(`\u26A0 Relationship ${firstEntry.cleanName} \u2192 ${secondEntry.cleanName} joins only on computed key(s) (e.g. IF/DATETRUNC expression); Sigma joins on physical columns only \u2014 NOT wired. Needs a computed join column or manual authoring.`);
+            unwiredRels.push({ a: firstEntry.cleanName, b: secondEntry.cleanName, why: "computed-only-key" });
             recordUnwired(inferred);
             continue;
           }
           if (skippedComputed > 0) {
             warnings.push(`\u26A0 Relationship ${firstEntry.cleanName} \u2192 ${secondEntry.cleanName}: wired ${keys.length} physical key(s); ${skippedComputed} computed condition(s) dropped \u2014 verify join grain in Sigma.`);
           }
-          if (!firstEntry.element.relationships)
-            firstEntry.element.relationships = [];
-          const derivedVia = "serialized";
-          firstEntry.element.relationships.push({
-            id: sigmaShortId(),
-            targetElementId: secondEntry.element.id,
+          relEdges.push({
+            a: firstEntry,
+            b: secondEntry,
             keys,
-            name: secondEntry.cleanName,
-            derivedVia,
-            ...skippedComputed > 0 ? { partial: true, droppedConditions: skippedComputed } : {}
+            uniqueA: /^true$/i.test(String(attr(firstEp, "unique-key") || "")),
+            uniqueB: /^true$/i.test(String(attr(secondEp, "unique-key") || "")),
+            relExprText: JSON.stringify(rel.expression || ""),
+            derivedVia: "serialized",
+            ...skippedComputed > 0 ? { droppedConditions: skippedComputed } : {}
           });
           relCoverage.wired += 1;
           relCoverage.entries.push({
             left: firstEntry.cleanName,
             right: secondEntry.cleanName,
-            derivedVia,
+            derivedVia: "serialized",
             keyCount: keys.length,
             ...skippedComputed > 0 ? { partial: true, droppedConditions: skippedComputed } : {}
           });
-          warnings.push(`\u2139 Relationship ${firstEntry.cleanName} \u2192 ${secondEntry.cleanName} wired on ${keys.length} physical key(s).`);
         }
+        // ---- evidence-ranked fact election (replaces first-in-document-order).
+        // Rank: relationship degree \u2192 measure-column count (numeric, non-key)
+        // \u2192 not-dim-like name \u2192 widest \u2192 warehouse row count when supplied
+        // (options.tableRowCounts). options.factTable overrides outright.
+        const entryList = Object.keys(elementMap).map((k) => elementMap[k]);
+        let electedEntry = null;
+        if (entryList.length > 1) {
+          const degree = /* @__PURE__ */ new Map();
+          const keyColIds = /* @__PURE__ */ new Set();
+          for (const e of relEdges) {
+            degree.set(e.a, (degree.get(e.a) || 0) + 1);
+            degree.set(e.b, (degree.get(e.b) || 0) + 1);
+            for (const k of e.keys) {
+              keyColIds.add(k.aColId);
+              keyColIds.add(k.bColId);
+            }
+          }
+          const dimLikeName = (n) => /(^|[\s_])(?:vw?_?)?dim/i.test(String(n || ""));
+          const measureCount = (entry) => {
+            let n = 0;
+            for (const c of entry.element.columns || []) {
+              const t = colTypeById[c.id];
+              if ((t === "integer" || t === "real") && !keyColIds.has(c.id))
+                n++;
+            }
+            return n;
+          };
+          const rowsOf = (entry) => {
+            if (!tableRowCounts)
+              return null;
+            const p = entry.element.source?.path || [];
+            for (const k of [p.join("."), p[p.length - 1], entry.cleanName]) {
+              if (!k)
+                continue;
+              if (tableRowCounts[k] != null)
+                return Number(tableRowCounts[k]);
+              if (tableRowCounts[String(k).toUpperCase()] != null)
+                return Number(tableRowCounts[String(k).toUpperCase()]);
+            }
+            return null;
+          };
+          const scoreOf = (entry) => [degree.get(entry) || 0, measureCount(entry), dimLikeName(entry.cleanName) ? 0 : 1, (entry.element.columns || []).length, rowsOf(entry) ?? -1];
+          if (factTable) {
+            const want = String(factTable).toUpperCase();
+            electedEntry = entryList.find((en) => en.cleanName.toUpperCase() === want || (en.element.source?.path || [])[en.element.source?.path?.length - 1]?.toUpperCase?.() === want) || null;
+            if (electedEntry) {
+              warnings.push(`\u2139 Object-model fact election: "${electedEntry.cleanName}" set by factTable override.`);
+            } else {
+              warnings.push(`\u26A0 factTable override "${factTable}" matches no logical table \u2014 falling back to evidence-ranked election.`);
+            }
+          }
+          if (!electedEntry) {
+            const scores = entryList.map((en) => ({ en, s: scoreOf(en) }));
+            const cmp = (x, y) => {
+              for (let i = 0; i < x.length; i++) {
+                if (x[i] !== y[i])
+                  return x[i] > y[i] ? 1 : -1;
+              }
+              return 0;
+            };
+            let best = scores[0];
+            for (const cand of scores.slice(1)) {
+              if (cmp(cand.s, best.s) > 0)
+                best = cand;
+            }
+            const tiedWith = scores.filter((c) => c !== best && cmp(c.s, best.s) === 0).map((c) => c.en.cleanName);
+            electedEntry = best.en;
+            const bs = best.s;
+            const rowsNote = bs[4] >= 0 ? `, rows ${bs[4]}` : "";
+            warnings.push(`\u2139 Object-model fact election: elected "${electedEntry.cleanName}" as the fact/base element (relationships ${bs[0]}, measure columns ${bs[1]}, ${bs[3]} column(s)${rowsNote}). Every LOD/Top-N/window helper builds its SQL FROM this element \u2014 if this is wrong, re-run with the factTable option (--fact-table) or re-point and re-validate the DM.`);
+            if (tiedWith.length > 0) {
+              warnings.push(`\u26A0 Fact election AMBIGUOUS \u2014 "${electedEntry.cleanName}" ties with ${tiedWith.map((n) => `"${n}"`).join(", ")} on every signal (relationships, measure columns, naming, width). Elected by document order; VERIFY, and pass factTable to override.`);
+            }
+          }
+        }
+        // PASS 2 \u2014 orient every collected edge off the elected fact: Sigma
+        // relationships are directional (source = the more granular / many
+        // side), so the carrier is the endpoint NEARER the fact \u2014 dims become
+        // targets and snowflake chains nest (fact reaches sub-dims through
+        // inherited relationships).
+        if (relEdges.length > 0) {
+          const adj = /* @__PURE__ */ new Map();
+          for (const e of relEdges) {
+            if (!adj.has(e.a))
+              adj.set(e.a, []);
+            if (!adj.has(e.b))
+              adj.set(e.b, []);
+            adj.get(e.a).push(e);
+            adj.get(e.b).push(e);
+          }
+          const dist = /* @__PURE__ */ new Map();
+          const visitOrder = /* @__PURE__ */ new Map();
+          let visitSeq = 0;
+          const bfs = (root) => {
+            if (dist.has(root))
+              return;
+            dist.set(root, 0);
+            visitOrder.set(root, visitSeq++);
+            const q = [root];
+            while (q.length) {
+              const cur = q.shift();
+              for (const e of adj.get(cur) || []) {
+                const other = e.a === cur ? e.b : e.a;
+                if (!dist.has(other)) {
+                  dist.set(other, dist.get(cur) + 1);
+                  visitOrder.set(other, visitSeq++);
+                  q.push(other);
+                }
+              }
+            }
+          };
+          if (electedEntry && adj.has(electedEntry))
+            bfs(electedEntry);
+          for (const en of entryList) {
+            if (adj.has(en) && !dist.has(en)) {
+              const hub = [...adj.keys()].filter((x) => !dist.has(x)).sort((x, y) => (adj.get(y)?.length || 0) - (adj.get(x)?.length || 0))[0];
+              if (electedEntry && hub !== electedEntry) {
+                warnings.push(`\u26A0 Object-model: a second relationship tree is NOT connected to the elected fact "${electedEntry.cleanName}" (multi-fact / disconnected forest) \u2014 rooted its edges at "${hub.cleanName}"; VERIFY, and wire the forests together (or split the model) before trusting cross-tree results.`);
+              }
+              bfs(hub);
+            }
+          }
+          const hintContradicted = [];
+          for (const e of relEdges) {
+            const da = dist.get(e.a) ?? 0;
+            const db = dist.get(e.b) ?? 0;
+            let carrier = e.a, target = e.b, carrierUnique = e.uniqueA, targetUnique = e.uniqueB;
+            let keys = e.keys.map((k) => ({ sourceColumnId: k.aColId, targetColumnId: k.bColId }));
+            const flip = db < da || db === da && (visitOrder.get(e.b) ?? 0) < (visitOrder.get(e.a) ?? 0);
+            if (flip) {
+              carrier = e.b;
+              target = e.a;
+              carrierUnique = e.uniqueB;
+              targetUnique = e.uniqueA;
+              keys = e.keys.map((k) => ({ sourceColumnId: k.bColId, targetColumnId: k.aColId }));
+            }
+            if (carrierUnique && !targetUnique)
+              hintContradicted.push(`${carrier.cleanName}\u2192${target.cleanName}`);
+            if (!carrier.element.relationships)
+              carrier.element.relationships = [];
+            carrier.element.relationships.push({
+              id: sigmaShortId(),
+              targetElementId: target.element.id,
+              keys,
+              // Role-played instances get role-suffixed relationship names so
+              // every [Base/REL/Field] ref resolves to its OWN instance.
+              name: target.roleCaption ? `${target.cleanName} (${target.roleCaption})` : target.cleanName,
+              // PR2a provenance survives orientation: how the key was derived
+              // (serialized | name-inference) rides on every attached edge.
+              derivedVia: e.derivedVia || "serialized",
+              ...e.droppedConditions > 0 ? { partial: true, droppedConditions: e.droppedConditions } : {}
+            });
+            warnings.push(`\u2139 Relationship ${carrier.cleanName} \u2192 ${target.cleanName} wired on ${keys.length} ${e.derivedVia === "name-inference" ? "name-inferred" : "physical"} key(s).`);
+          }
+          if (hintContradicted.length > 0) {
+            warnings.push(`\u26A0 Tableau performance-option hints (unique-key) mark the SOURCE side unique on ${hintContradicted.length} oriented edge(s): ${hintContradicted.join(", ")}. As oriented these would be one-to-many, which a Sigma relationship cannot express (many-to-one left join into a unique target) \u2014 the hints are often db-derived or stale, so VERIFY each edge's direction and target uniqueness; model a genuinely one-to-many edge as a join element instead.`);
+          }
+        }
+        electedFactEl = electedEntry ? electedEntry.element : null;
         relationshipCoverage = relCoverage;
         const joinableEls = elements.filter((e) => e.source?.kind === "warehouse-table" || e.source?.kind === "sql");
         const wiredRelCount = elements.reduce((n, e) => n + (e.relationships?.length || 0), 0);
         if (joinableEls.length > 1 && wiredRelCount === 0) {
           warnings.push(relsList.length === 0 ? `\u26A0 Tableau logical (relationship / noun) datasource: ${joinableEls.length} tables but NO relationships were serialized in <object-graph> \u2014 nothing to derive a join key from (Tableau matches these at query time). The DM is a set of disconnected tables. Pick an explicit join key for each table pair and wire relationships manually (LEFT from fact\u2192dim), and verify each dimension is unique on the key to avoid measure fan-out.` : `\u26A0 Tableau logical (relationship / noun) datasource: ${joinableEls.length} tables and ${relsList.length} relationship(s), but 0 could be wired \u2014 all lacked a physical equality key (auto-matched or computed-only; see per-relationship warnings above). The DM is a set of disconnected tables. Pick an explicit join key per pair and wire manually (LEFT from fact\u2192dim); verify dimension uniqueness on the key.`);
+        }
+        // Refuse-don't-guess: every relationship that could NOT be wired is a
+        // NAMED gap (structured, machine-readable), not just a drive-by WARN \u2014
+        // and a partial wire (some edges up, some down) gets its own summary so
+        // \u22651 wired can never read as all-clear.
+        for (const u of unwiredRels) {
+          workbookPatterns.push({
+            kind: "unsupported",
+            name: `Object-model relationship ${u.a} \u2194 ${u.b} (${u.why})`,
+            source: `<object-graph> relationship ${u.a} \u2194 ${u.b}`,
+            requires: "MANUAL relationship wiring in the Sigma data model: pick the join key column pair, add the relationship LEFT from the many (fact) side to the unique (dim) side, and verify dimension uniqueness on the key.",
+            note: `The serialized relationship carried no usable physical equality key (${u.why}). Until wired, this table pair is DISCONNECTED in the DM \u2014 cross-table results involving it are wrong or unavailable.`
+          });
+        }
+        if (unwiredRels.length > 0 && wiredRelCount > 0) {
+          warnings.push(`\u26A0 Object-model: ${wiredRelCount} of ${relsList.length} relationship(s) wired; ${unwiredRels.length} NOT wired (${unwiredRels.map((u) => `${u.a}\u2194${u.b}: ${u.why}`).join("; ")}). The unwired pairs are DISCONNECTED tables \u2014 wire them manually (LEFT from fact\u2192dim) before trusting cross-table results. Each is reported as a named gap in result.workbookPatterns.`);
+        }
+        if (relEdges.length > 0) {
+          const touched = /* @__PURE__ */ new Set();
+          for (const e of relEdges) {
+            touched.add(e.a);
+            touched.add(e.b);
+          }
+          const isolated = entryList.filter((en) => !touched.has(en) && (en.element.source?.kind === "warehouse-table" || en.element.source?.kind === "sql"));
+          for (const iso of isolated) {
+            warnings.push(`\u26A0 Object-model: logical table "${iso.cleanName}" has NO wired relationship to any other table \u2014 it is DISCONNECTED in the DM. Wire it manually (LEFT from fact\u2192dim) or drop it.`);
+            workbookPatterns.push({
+              kind: "unsupported",
+              name: `Object-model table ${iso.cleanName} disconnected`,
+              source: `<object-graph> logical table ${iso.cleanName}`,
+              requires: "MANUAL relationship wiring (or removal) of the isolated logical table.",
+              note: "No serialized relationship reaches this table \u2014 it is disconnected in the emitted DM."
+            });
+          }
+          objectModelInfo = { entries: entryList, edges: relEdges, elected: electedEntry };
+        } else if (entryList.length > 1) {
+          objectModelInfo = { entries: entryList, edges: [], elected: electedEntry };
         }
         elements.sort((a, b) => {
           const aR = !!a.relationships?.length;
@@ -5236,9 +5632,106 @@ ${statement}
           warnings.push(`\u2139 Custom SQL datasource \u2192 Sigma SQL element (source.kind:'sql', ${columns.length} column(s)). The SQL statement is preserved verbatim; verify column display names resolve against the query output.`);
         }
       }
+    } else if (relType === "union") {
+      // W2.16: Tableau union datasource. Emits the documented Sigma union
+      // source (kind:"union" + sources + matches) for the dominant
+      // same-connection wildcard-union shape; anything underivable falls to a
+      // LOUD named refusal \u2014 a unioned datasource previously converted to
+      // NOTHING, silently (the worst defect class under the program's rules).
+      // Shape per sigma-data-models reference/sources.md "Union" (live-verified):
+      //   - sources are elementId-based (direct warehouse-table entries fail on
+      //     special-char columns) \u2192 one intermediate warehouse-table element
+      //     per union member;
+      //   - the union element carries NO name (an explicit name breaks
+      //     self-referential column validation; the API auto-names it
+      //     "Union of N Sources") \u2192 its column formulas use that prefix;
+      //   - sourceColumns entries are bracketed friendly column names resolved
+      //     within each member element's own column set.
+      const allUnionKids = asArray(rootRelation.relation || []);
+      const unionChildren = allUnionKids.filter((r) => (attr(r, "type") || "table") === "table");
+      // W2.16 fix-pass: members that are NOT plain tables (custom-SQL text,
+      // nested union, join) used to be dropped by the filter above and the
+      // union emitted from the table members alone — a silent SUBSET (the
+      // missing members' rows vanished with no refusal). Any non-table member
+      // now refuses the whole union loudly instead.
+      const nonTableKids = allUnionKids.filter((r) => (attr(r, "type") || "table") !== "table");
+      const unionName = ((attr(rootRelation, "name") || ds.name || "Union").replace(/[\[\]]/g, "")) || "Union";
+      const srcPaths = unionChildren.map((r) => extractPath(r, dbEff, schEff, whCasing)).filter((pp) => pp && pp.length > 0);
+      const capByName = {};
+      for (const col of asArray(ds.ds?.column || [])) {
+        const nm = (attr(col, "name") || "").replace(/^\[|\]$/g, "");
+        const cap = attr(col, "caption");
+        if (nm && cap)
+          capByName[nm.toUpperCase()] = cap;
+      }
+      const outCols = [];
+      const seenUnionCols = /* @__PURE__ */ new Set();
+      for (const mr of asArray(rootConn?.["metadata-records"]?.["metadata-record"] || [])) {
+        if (attr(mr, "class") !== "column")
+          continue;
+        const remote = (mr["remote-name"] || "").trim();
+        if (!remote || seenUnionCols.has(remote.toUpperCase()))
+          continue;
+        if (/^(Sheet|Table Name)$/i.test(remote))
+          continue; // Tableau union-provenance bookkeeping columns, not warehouse columns
+        seenUnionCols.add(remote.toUpperCase());
+        outCols.push(remote);
+      }
+      if (nonTableKids.length > 0) {
+        const kidDesc = nonTableKids.map((r) => `${attr(r, "name") || "(unnamed)"}: type '${attr(r, "type")}'`).join("; ");
+        warnings.push(`\u26a0 Union datasource "${unionName}" NOT converted \u2014 ${nonTableKids.length} of ${allUnionKids.length} union member(s) are not plain tables (${kidDesc}); emitting the ${unionChildren.length} table member(s) alone would silently drop the other member(s)' rows. NO ELEMENTS EMITTED for this datasource \u2014 model it as a Custom SQL UNION ALL element, or re-point sources after conversion.`);
+      } else if (srcPaths.length >= 2 && outCols.length > 0) {
+        // Members FIRST (displayNameMap is last-writer-wins, so the union
+        // element \u2014 built last \u2014 owns every column's resolution), union
+        // element LAST; factEl selection prefers a union source so translated
+        // calcs and auto-metrics attach to the stacked rows, not one member.
+        const memberSources = [];
+        for (const pp of srcPaths) {
+          const memberTable = pp[pp.length - 1] || "MEMBER";
+          const mCols = [], mOrder = [];
+          for (const c of outCols) {
+            const mid = sigmaInodeId(c.replace(/[^A-Za-z0-9_]/g, "_").toUpperCase());
+            mCols.push({ id: mid, formula: `[${memberTable}/${sigmaDisplayName(c)}]`, name: sigmaDisplayName(c) });
+            mOrder.push(mid);
+          }
+          const mEl = {
+            id: sigmaShortId(),
+            kind: "table",
+            source: { connectionId: connId, kind: "warehouse-table", path: pp },
+            columns: mCols,
+            order: mOrder
+          };
+          elements.push(mEl);
+          memberSources.push({ kind: "table", elementId: mEl.id });
+        }
+        const unionPrefix = `Union of ${srcPaths.length} Sources`;
+        const matches = outCols.map((c) => ({ outputColumnName: sigmaDisplayName(c), sourceColumns: srcPaths.map(() => `[${sigmaDisplayName(c)}]`) }));
+        const columns = [], order = [];
+        for (const c of outCols) {
+          const id = sigmaInodeId(c.replace(/[^A-Za-z0-9_]/g, "_").toUpperCase());
+          columns.push({ id, formula: `[${unionPrefix}/${sigmaDisplayName(c)}]`, name: capByName[c.toUpperCase()] || sigmaDisplayName(c) });
+          order.push(id);
+        }
+        elements.push({
+          id: sigmaShortId(),
+          kind: "table",
+          source: { kind: "union", sources: memberSources, matches },
+          columns,
+          order
+        });
+        warnings.push(`\u26a0 Union datasource "${unionName}" \u2192 Sigma union source (${srcPaths.length} member element(s) + 1 union element, ${outCols.length} column(s)), assuming SAME-NAME columns across members (wildcard union). Sigma auto-names the union element "${unionPrefix}" \u2014 rename in the UI if desired (setting a spec name breaks self-referential column validation). VERIFY: a member with renamed/missing columns needs hand-edited matches (null for a member lacking the column).`);
+      } else {
+        warnings.push(`\u26a0 Union datasource "${unionName}" NOT converted \u2014 ${srcPaths.length} derivable member table(s), ${outCols.length} derivable output column(s); emitting a Sigma union source (kind:"union" + sources + matches) needs \u22652 members and \u22651 column. NO ELEMENTS EMITTED for this datasource \u2014 model it as a Custom SQL UNION ALL element, or re-point sources after conversion.`);
+      }
+    } else {
+      warnings.push(`\u26a0 Datasource root relation type "${relType}" is not supported by the converter \u2014 NO ELEMENTS EMITTED for this datasource. Supported: table, join, collection, text (Custom SQL), union.`);
     }
   }
-  const factEl = elements.find((e) => e.relationships?.length > 0) || (elements.length > 0 ? elements.reduce((best, e) => (e.columns?.length || 0) > (best.columns?.length || 0) ? e : best, elements[0]) : null);
+  // Fact resolution: the evidence-ranked object-model election wins when it
+  // ran (and its element survived blend collapse); otherwise keep the legacy
+  // fallback chain for non-noodle shapes — first relationship carrier, then
+  // union element (W2.16: calcs/metrics attach to the stacked rows), then widest.
+  const factEl = electedFactEl && elements.includes(electedFactEl) ? electedFactEl : elements.find((e) => e.relationships?.length > 0) || elements.find((e) => e.source?.kind === "union") || (elements.length > 0 ? elements.reduce((best, e) => (e.columns?.length || 0) > (best.columns?.length || 0) ? e : best, elements[0]) : null);
   if (factEl) {
     let _baseFromExpr2 = function() {
       const fe = factEl;
@@ -5330,11 +5823,19 @@ ${stmt}
       if (existing.find((r) => r.targetElementId === rec.element.id))
         return;
       const keys = [];
+      const factColIds = new Set((factEl.columns || []).map((c) => c.id));
       for (let i = 0; i < dimResolved.length; i++) {
         const baseColId = dimResolved[i].baseColId;
         const helperColId = rec.groupDimColIds[i];
         if (!baseColId || !helperColId)
           return;
+        // Ownership guard: a relationship's sourceColumnId MUST be a column of
+        // the carrying (fact) element — a related-table column id here is the
+        // spec-invalid shape that POSTs as "Dependency not found".
+        if (!factColIds.has(baseColId)) {
+          warnings.push(`⚠ Helper relationship "${relName}" skipped: grouping column [${dimResolved[i].displayName}] does not live on the fact element — a cross-element relationship key is spec-invalid. Author the helper join manually (grouped Custom SQL fact→dim).`);
+          return;
+        }
         keys.push({ sourceColumnId: baseColId, targetColumnId: helperColId });
       }
       if (!factEl.relationships)
@@ -5442,11 +5943,23 @@ ${joinSql}
         warnings.push(`\u26A0 Set "${top.caption}": ranking key [${top.dimField}] not found on base; skipped.`);
         return false;
       }
+      // Ownership guard (refuse-don't-guess): the helper's SQL builds FROM the
+      // fact and its surfacing relationship is keyed on the fact \u2014 an off-fact
+      // ranking/partition column would bake a wrong-FROM SELECT and a
+      // cross-element relationship key ("Dependency not found" at POST).
+      if (keyResolved.onFact === false) {
+        warnings.push(`\u26A0 Set "${top.caption}": ranking key [${top.dimField}] lives on related element "${keyResolved.el?.name || (keyResolved.el?.source?.path || []).slice(-1)[0] || "?"}", not the fact \u2014 a single-table Top-N helper would SELECT it FROM the wrong table. Skipped: author the Top-N as a grouped Custom SQL element joining fact\u2192dim on the relationship key, then relate it back to the fact.`);
+        return false;
+      }
       const partResolved = [];
       for (const p of top.partitionBy) {
         const r = _resolveDimDisplayName2(p);
         if (!r || !r.baseColId) {
           warnings.push(`\u26A0 Set "${top.caption}": partition dim [${p}] not found on base; skipped.`);
+          return false;
+        }
+        if (r.onFact === false) {
+          warnings.push(`\u26A0 Set "${top.caption}": partition dim [${p}] lives on related element "${r.el?.name || (r.el?.source?.path || []).slice(-1)[0] || "?"}", not the fact \u2014 refusing a wrong-FROM helper. Author as grouped Custom SQL joining fact\u2192dim.`);
           return false;
         }
         partResolved.push(r);
@@ -5633,7 +6146,16 @@ ${joinSql}
       windowChildElements.push(helperEl);
       const baseRels = factEl.relationships || [];
       const alreadyLinked = baseRels.find((r) => r.targetElementId === helperEl.id);
-      if (!alreadyLinked && partitionDims.length > 0 && partitionDims.every((d) => d.baseColId)) {
+      const _factColIds = new Set((factEl.columns || []).map((c) => c.id));
+      const partitionsOnFact = partitionDims.every((d) => d.baseColId && _factColIds.has(d.baseColId));
+      if (!alreadyLinked && partitionDims.length > 0 && partitionDims.every((d) => d.baseColId) && !partitionsOnFact) {
+        // Ownership guard: a partition dim resolved to a RELATED element's
+        // column would put a cross-element key on the fact relationship
+        // (spec-invalid, "Dependency not found" at POST). Keep the helper,
+        // skip the surfacing relationship, and say so.
+        warnings.push(`⚠ Window helper "${relName}": partition dim(s) live on a related element, not the fact — surfacing relationship skipped (cross-element keys are spec-invalid). Relate the helper manually or re-author as grouped Custom SQL joining fact→dim.`);
+      }
+      if (!alreadyLinked && partitionDims.length > 0 && partitionsOnFact) {
         if (!factEl.relationships)
           factEl.relationships = [];
         const keys = [];
@@ -5805,6 +6327,145 @@ ${joinSql}
       }
     }
     const factTableName = factEl.source?.path?.[factEl.source.path.length - 1] || "FACT";
+    // ---- structural RLS detection: datasource filters + entitlement tables.
+    // Doctrine (owner veto): the checkpoint fires on the DOCUMENTED STRUCTURAL
+    // SHAPE — a related/joined table carrying a user-identity column plus a
+    // user-function datasource filter (or a datasource filter / user-function
+    // relationship term tied to that table). A name regex (/RLS|ENTITLE/) may
+    // only color the report TEXT (low-confidence hint) — it never fires, and
+    // never suppresses, detection on its own. Datasource <filter> elements
+    // were previously NEVER scanned: a formula-regex over calc columns alone
+    // is blind to Tableau's documented entitlement-table best practice.
+    {
+      const _calcNodeOf = (col) => Array.isArray(col.calculation) ? col.calculation[0] : col.calculation;
+      const calcFormulaByName = {};
+      for (const col of asArray(ds.ds?.column || [])) {
+        const nm = (attr(col, "name") || "").replace(/^\[|\]$/g, "");
+        const calcNode = _calcNodeOf(col);
+        const f = calcNode ? nsAttr(calcNode, "formula") : "";
+        if (nm && f)
+          calcFormulaByName[nm.toUpperCase()] = String(f);
+      }
+      const dsFilters = asArray(ds.ds?.filter || []).map((f) => {
+        const rawCol = String(attr(f, "column") || "");
+        const groups = [...rawCol.matchAll(/\[([^\]]+)\]/g)].map((m) => m[1]);
+        let colName = groups.length ? groups[groups.length - 1] : rawCol;
+        colName = colName.replace(/^[a-z]+:/i, "").replace(/:(nk|qk|ok)$/i, "");
+        return {
+          klass: String(attr(f, "class") || ""),
+          colName,
+          exprRaw: String(nsAttr(f, "expression") || ""),
+          calcF: calcFormulaByName[colName.toUpperCase()] || ""
+        };
+      });
+      const ownerOf = (colName) => {
+        const key = String(colName || "").toUpperCase();
+        const found = displayNameMap[key] || displayNameMap[key.replace(/\s+/g, "_")] || displayNameMap[sigmaDisplayName(String(colName || "")).toUpperCase()];
+        return found ? found.el : null;
+      };
+      // (a) datasource filters carrying a user function — fact-local shape.
+      // A filter hosted on a CALC column is left to the calc-column pass
+      // below (which already emits fact-local rules) to avoid double-emits;
+      // this covers the pure `<filter class='expression'>` form.
+      for (const f of dsFilters) {
+        const formulaSrc = f.exprRaw || f.calcF;
+        if (!formulaSrc || !tableauFormulaIsRls(formulaSrc))
+          continue;
+        const refs = [...formulaSrc.matchAll(/\[([^\]]+)\]/g)].map((m) => m[1]);
+        const offFactOwner = refs.map((r) => ownerOf(r)).find((el) => el && el !== factEl);
+        if (offFactOwner)
+          continue;
+        if (f.calcF)
+          continue;
+        const sigmaFormula = tableauFormulaToSigma(formulaSrc, warnings);
+        if (sigmaFormula && !sigmaFormula.startsWith("/*")) {
+          security.push(makeRlsSecurity({ source: `Tableau datasource filter${f.colName ? ` on [${f.colName}]` : ""}`, element: factEl, name: "RLS: datasource filter", formula: sigmaFormula }));
+          warnings.push(`🔐 Datasource filter carries a user function → row-level security DETECTED (reported in result.security, not injected): ${sigmaFormula.slice(0, 80)}`);
+        } else {
+          security.push({
+            kind: "rls",
+            source: "Tableau datasource filter (untranslated)",
+            elementId: factEl.id,
+            elementName: _securityElementName(factEl),
+            rls: { name: "RLS: datasource filter", formula: `/* verify: ${formulaSrc.slice(0, 120)} */` },
+            note: "User-function datasource filter did not auto-translate — re-author fail-closed in Sigma (boolean calc + element filter keeping only True)."
+          });
+          warnings.push(`🔐 Datasource filter carries a user function (${formulaSrc.slice(0, 60)}) that did not fully translate — RLS reported in result.security for manual re-authoring (CurrentUserEmail()/CurrentUserAttributeText/CurrentUserInTeam); NOT silently dropped.`);
+        }
+      }
+      // (b) entitlement-table shape over the object-model graph.
+      if (objectModelInfo && objectModelInfo.entries.length > 1) {
+        const om = objectModelInfo;
+        const identityColRe = /^(?:user[\s_-]?)?e[\s_-]?mail(?:[\s_-]?address)?$|^user(?:[\s_-]?(?:name|id|login|key|principal[\s_-]?name))?$|^login$|^upn$/i;
+        for (const en of om.entries) {
+          if (en.element === factEl)
+            continue;
+          const edge = om.edges.find((e) => e.a === en || e.b === en);
+          if (!edge)
+            continue;
+          let identityCol = null, identityVia = null;
+          for (const f of dsFilters) {
+            const src = [f.exprRaw, f.calcF].filter(Boolean).join(" ");
+            if (!src || !tableauFormulaIsRls(src))
+              continue;
+            for (const rm of src.matchAll(/\[([^\]]+)\]/g)) {
+              if (ownerOf(rm[1]) === en.element) {
+                identityCol = rm[1];
+                identityVia = "a user-function datasource filter references it";
+                break;
+              }
+            }
+            if (identityCol)
+              break;
+          }
+          if (!identityCol && edge.relExprText && tableauFormulaIsRls(edge.relExprText)) {
+            identityCol = "(see relationship expression)";
+            identityVia = "a user-function term inside the relationship expression";
+          }
+          if (!identityCol) {
+            const filterTiedToEntry = dsFilters.some((f) => f.colName && ownerOf(f.colName) === en.element);
+            if (filterTiedToEntry) {
+              for (const c of en.element.columns || []) {
+                const disp = c.name || (typeof c.formula === "string" && (c.formula.match(/\/([^\]]+)\]$/) || [])[1]) || "";
+                if (identityColRe.test(String(disp).trim())) {
+                  identityCol = String(disp);
+                  identityVia = "an identity-shaped column plus a datasource filter on this table";
+                  break;
+                }
+              }
+            }
+          }
+          if (!identityCol)
+            continue;
+          const otherEntry = edge.a === en ? edge.b : edge.a;
+          const colNameOf = (el, id) => {
+            const c = (el.columns || []).find((x) => x.id === id);
+            return c ? c.name || (typeof c.formula === "string" && (c.formula.match(/\/([^\]]+)\]$/) || [])[1]) || c.id : "?";
+          };
+          const keys = edge.keys.map((k) => en === edge.a ? { entitlementColumn: colNameOf(edge.a.element, k.aColId), relatedColumn: colNameOf(edge.b.element, k.bColId) } : { entitlementColumn: colNameOf(edge.b.element, k.bColId), relatedColumn: colNameOf(edge.a.element, k.aColId) });
+          const nameHint = /(rls|entitle|securit)/i.test(en.cleanName) ? " (table name also reads entitlement-like — low-confidence hint only)" : "";
+          security.push({
+            kind: "rls-entitlement-table",
+            source: `object-model related table "${en.cleanName}" — ${identityVia}`,
+            elementId: en.element.id,
+            elementName: en.cleanName,
+            entitlement: {
+              identityColumn: identityCol,
+              relatedElementName: otherEntry.cleanName,
+              factElementName: _securityElementName(factEl) || factTableName,
+              keys,
+              strategies: [
+                "A (materialized gate): fail-closed filter on the entitlement element ([identity] = CurrentUserEmail() + include-True list filter), then INNER-JOIN the fact to the filtered element (join-source element). Probe (identity, key) uniqueness first — a non-unique pair fans out fact rows.",
+                "B (row-preserving gate): on the entitlement element add [Is Me] = ([identity] = CurrentUserEmail()); on the fact add Lookup(Sum(If([Is Me], 1, 0)), [key], [key]) > 0 with an include-True filter. Null-safe fail-closed; no fan-out by construction.",
+                "C (de-entitle): map entitlements onto Sigma user attributes (single-valued only — refuse multi-valued) or teams (group-shaped) and use the documented CurrentUserAttributeText / CurrentUserInTeam filter."
+              ]
+            },
+            note: "Table-based entitlement RLS detected STRUCTURALLY (related table + user-identity column + datasource-filter/user-function signal). NEVER auto-applied — until the RLS checkpoint decision the wired relationship is an UNCONSTRAINED live join: the Tableau restriction is gone and multi-entitlement users fan out row counts. Decide Port (A/B), Customize, or loud Skip (refs/security-rls.md)."
+          });
+          warnings.push(`🔐 Entitlement-table RLS pattern DETECTED: "${en.cleanName}" (identity column [${identityCol}]; ${identityVia})${nameHint} — reported in result.security as kind "rls-entitlement-table"; NOT applied. Until the RLS checkpoint decision the ${en.cleanName} relationship is an UNCONSTRAINED live join (restriction dropped + fan-out risk).`);
+        }
+      }
+    }
     const physToQuotedAlias = {};
     if (factEl?.source?.kind === "sql") {
       for (const col of factEl?.columns || []) {
@@ -6294,6 +6955,11 @@ ${suggestion}
                 warnings.push(`\u26A0 LOD "${caption}" view dim [${dn}] not found on base`);
                 break;
               }
+              if (m.onFact === false) {
+                ok = false;
+                warnings.push(`\u26A0 LOD "${caption}" view-context dim [${dn}] lives on related element "${m.el?.name || (m.el?.source?.path || []).slice(-1)[0] || "?"}", not the fact \u2014 refusing a wrong-FROM helper for this view context. Author as grouped Custom SQL joining fact\u2192dim if needed.`);
+                break;
+              }
               dimResolved.push(m);
             }
             if (!ok)
@@ -6559,7 +7225,7 @@ ${suggestion}
         m.formula = reconcile(m.formula, m.name);
       }
       if (rewrites > 0) {
-        warnings.push(`\u2139 Reconciled ${rewrites} calc-formula field reference(s) to their SQL-alias column names (caption\u2194alias) on "${factEl.name}".`);
+        warnings.push(`\u2139 Reconciled ${rewrites} calc-formula field reference(s) to their SQL-alias column names (caption\u2194alias) on "${factTableName}".`);
       }
       if (factEl?.source?.kind === "sql") {
         const nkey = (s) => s.replace(/[^a-zA-Z0-9]+/g, "").toLowerCase();
@@ -6629,7 +7295,7 @@ ${suggestion}
         });
         const n = before - factEl.columns.length;
         if (n)
-          warnings.push(`\u2139 Dropped ${n} self-referential rename calc(s) on "${factEl.name}" (redundant \u2014 the physical column is already present).`);
+          warnings.push(`\u2139 Dropped ${n} self-referential rename calc(s) on "${factTableName}" (redundant \u2014 the physical column is already present).`);
       }
       {
         const metricNames = new Set((factEl.metrics || []).map((m) => (m.name || "").toLowerCase()));
@@ -6687,9 +7353,9 @@ ${suggestion}
           }
         }
         if (promoted)
-          warnings.push(`\u2139 Promoted ${promoted} aggregate-ratio calc column(s) to metrics on "${factEl.name}" (they reference aggregate metrics \u2014 invalid as row-level columns).`);
+          warnings.push(`\u2139 Promoted ${promoted} aggregate-ratio calc column(s) to metrics on "${factTableName}" (they reference aggregate metrics \u2014 invalid as row-level columns).`);
         if (aggDims)
-          warnings.push(`\u2139 "${factEl.name}": ${aggDims} aggregate-derived dimension(s) (bucket an aggregate metric) \u2192 reported in result.workbookPatterns \u2014 CHART/grouped-element context only; group the viz by the binned aggregate (NOT a DM column or metric).`);
+          warnings.push(`\u2139 "${factTableName}": ${aggDims} aggregate-derived dimension(s) (bucket an aggregate metric) \u2192 reported in result.workbookPatterns \u2014 CHART/grouped-element context only; group the viz by the binned aggregate (NOT a DM column or metric).`);
       }
       const valid = /* @__PURE__ */ new Set();
       for (const c of factEl.columns || []) {
@@ -6734,7 +7400,7 @@ ${suggestion}
         warnings.push(`\u26A0 Dropped calc "${d.name}" \u2014 references [${d.bad}] which is not a resolvable column in the collapsed model (param-driven or field absent from the SQL). NOT migrated; recreate in the workbook layer if needed.`);
       }
       if (dropped.length) {
-        warnings.push(`\u2139 Dropped ${dropped.length} unresolvable calc column(s)/metric(s) on "${factEl.name}" after caption\u2194alias reconciliation (see per-calc warnings above).`);
+        warnings.push(`\u2139 Dropped ${dropped.length} unresolvable calc column(s)/metric(s) on "${factTableName}" after caption\u2194alias reconciliation (see per-calc warnings above).`);
       }
     }
     _finalizeHelpers2();
@@ -6875,10 +7541,36 @@ ${suggestion}
       warnings.push(`\u2139 Parameter "${p.name}" \u2192 number control (Top-N driver, default ${defVal})`);
       continue;
     }
+    const _paramLiteral = (s) => {
+      const t = (s || "").trim();
+      if (!t)
+        return "";
+      let m = t.match(/^"((?:[^"\\]|\\.)*)"$/);
+      if (m)
+        return m[1].replace(/\\(.)/g, "$1");
+      m = t.match(/^#\s*([^#]+?)\s*#$/);
+      if (m)
+        return m[1];
+      if (/^-?\d+(?:\.\d+)?$/.test(t) || /^(?:true|false)$/i.test(t))
+        return t;
+      return "";
+    };
+    const _isoDateValue = (s) => {
+      const m = (s || "").match(/^(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2})(?::(\d{2}))?)?/);
+      if (!m)
+        return "";
+      return m[2] ? `${m[1]}T${m[2]}:${m[3] || "00"}` : m[1];
+    };
+    // True parameter default: the .twb's own current value (value attr, or the
+    // initial-value calc when it is a plain literal). Empty when the workbook
+    // carries neither \u2014 every branch below falls back to its old shape then.
+    const _rawCur = (p.currentValue || "").trim();
+    const paramDefault = (/^#.*#$/.test(_rawCur) ? _paramLiteral(_rawCur) : _rawCur) || _paramLiteral(p.defaultVal);
     if (p.domainType === "list" && p.members.length > 0) {
       const aliasMap = p.memberAliases || {};
       const labels = p.members.map((v) => aliasMap[v] || v);
       const hasLabels = p.members.some((v) => aliasMap[v] && aliasMap[v] !== v);
+      const defSelected = paramDefault && p.members.includes(paramDefault) ? [paramDefault] : [];
       controls.push({
         kind: "control",
         controlId,
@@ -6886,42 +7578,86 @@ ${suggestion}
         controlType: "list",
         mode: "include",
         selectionMode: "single",
-        values: [],
+        values: defSelected,
         source: { kind: "manual", valueType: "text", values: p.members, ...hasLabels ? { labels } : {} }
       });
-      warnings.push(`\u2139 Parameter "${p.name}" \u2192 list control${hasLabels ? ` (${Object.keys(aliasMap).length} member alias(es) \u2192 labels[])` : ""}`);
+      warnings.push(`\u2139 Parameter "${p.name}" \u2192 list control${hasLabels ? ` (${Object.keys(aliasMap).length} member alias(es) \u2192 labels[])` : ""}${defSelected.length ? ` (default "${defSelected[0]}" from the workbook's current value)` : ""}`);
     } else if (p.type === "date" || p.type === "datetime") {
-      controls.push({
-        kind: "control",
-        controlId,
-        id: sigmaShortId() + "con",
-        controlType: "date-range",
-        mode: "last",
-        value: 90,
-        unit: "day",
-        includeToday: true
-      });
-      warnings.push(`\u2139 Parameter "${p.name}" \u2192 date-range control (default: last 90 days \u2014 adjust in Sigma UI)`);
+      const isoDef = _isoDateValue(paramDefault);
+      if (isoDef) {
+        controls.push({
+          kind: "control",
+          controlId,
+          id: sigmaShortId() + "con",
+          controlType: "date",
+          mode: "=",
+          value: isoDef
+        });
+        warnings.push(`\u2139 Parameter "${p.name}" \u2192 date control (default ${isoDef} from the workbook's current value)`);
+      } else {
+        controls.push({
+          kind: "control",
+          controlId,
+          id: sigmaShortId() + "con",
+          controlType: "date-range",
+          mode: "last",
+          value: 90,
+          unit: "day",
+          includeToday: true
+        });
+        warnings.push(`\u2139 Parameter "${p.name}" \u2192 date-range control (default: last 90 days \u2014 adjust in Sigma UI)`);
+      }
     } else if (p.type === "real" || p.type === "integer" || p.domainType === "range") {
-      controls.push({
-        kind: "control",
-        controlId,
-        id: sigmaShortId() + "con",
-        controlType: "number-range"
-      });
-      warnings.push(`\u2139 Parameter "${p.name}" \u2192 number-range control`);
+      const numDef = paramDefault !== "" && Number.isFinite(Number(paramDefault)) ? Number(paramDefault) : null;
+      if (numDef !== null && p.domainType !== "range") {
+        controls.push({
+          kind: "control",
+          controlId,
+          id: sigmaShortId() + "con",
+          controlType: "number",
+          mode: "=",
+          value: numDef,
+          includeNulls: "when-no-value-is-selected"
+        });
+        warnings.push(`\u2139 Parameter "${p.name}" \u2192 number control (default ${numDef} from the workbook's current value)`);
+      } else {
+        controls.push({
+          kind: "control",
+          controlId,
+          id: sigmaShortId() + "con",
+          controlType: "number-range"
+        });
+        warnings.push(`\u2139 Parameter "${p.name}" \u2192 number-range control${numDef !== null ? ` (workbook current value ${numDef} \u2014 range domain, no single-value default applied)` : ""}`);
+      }
     } else {
       controls.push({
         kind: "control",
         controlId,
         id: sigmaShortId() + "con",
         controlType: "text",
-        mode: "contains"
+        mode: "contains",
+        ...paramDefault !== "" ? { value: paramDefault } : {}
       });
-      warnings.push(`\u2139 Parameter "${p.name}" \u2192 text control`);
+      warnings.push(`\u2139 Parameter "${p.name}" \u2192 text control${paramDefault !== "" ? ` (default "${paramDefault}" from the workbook's current value)` : ""}`);
     }
   }
-  const derivedEls = buildDerivedElements(elements);
+  // controlId dedupe (mirror of buildMultiDatasourceModel's merge dedupe):
+  // sigmaDisplayName collapses punctuation/case, so near-identical parameter
+  // names ("Top N Sites" / "Top_N_Sites") mint the SAME controlId \u2014 and
+  // duplicate ids hard-fail the DM POST. First control wins; drops are loud.
+  {
+    const seenControlIds = /* @__PURE__ */ new Set();
+    for (let i = controls.length - 1; i >= 0; i--) {
+      const key = String(controls[i].controlId ?? controls[i].id);
+      if (!seenControlIds.has(key)) {
+        seenControlIds.add(key);
+        continue;
+      }
+      warnings.push(`\u26a0 Duplicate controlId "${key}" \u2014 two parameters normalize to the same control id; kept the first, dropped the duplicate control. Rename one parameter (or hand-author a second control with a distinct id) if both are needed.`);
+      controls.splice(i, 1);
+    }
+  }
+  const derivedEls = buildDerivedElements(elements, warnings);
   for (const de of derivedEls)
     elements.push(de);
   const placedSrcElIds = {};

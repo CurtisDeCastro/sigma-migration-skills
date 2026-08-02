@@ -117,7 +117,7 @@ FROM "connection"."<table-inodeId>"
 | Only some values of a categorical column appear | "Keep only" / dimension filter | `list` control with `mode: "include"`, or element-level filter |
 | Date min/max is narrower than warehouse | Date / relative-date filter | `date-range` control — `mode: "current"` + `unit: "year"\|"quarter"\|...` for relative; `mode: "between"` with explicit `startDate`/`endDate` for fixed |
 | Numeric column is bounded | Range filter | `number-range` or `range-slider` control, or element-level filter |
-| Only top N items by some measure | Top-N filter | `top-n` control or element-level `top-n` filter (see `refs/workbook-layout.md`) |
+| Only top N items by some measure | Top-N filter | `top-n` control or element-level `top-n` filter (see `refs/element-kinds.md`) |
 
 ### Where to apply the filter
 
@@ -132,7 +132,7 @@ Prefer a **workbook-level control filtering the master table** — every chart t
 > **Phase 6 will not catch a missed filter on its own.** Data parity in Phase 6 compares Sigma rows to Tableau rows for the dimensions you query — if your Sigma chart includes extra rows the CSV never had, the comparison only flags missing rows from Tableau, not extra rows in Sigma. Always sanity-check distinct values and date ranges side-by-side before declaring parity.
 
 > **Element-level filters DO work on viz elements — verify them the right way.** A boolean
-> `filters: [{columnId, kind:"list", mode:"include", values:[true]}]` on a `bar-chart` /
+> `filters: [{id, columnId, kind:"list", mode:"include", values:[true]}]` (`id` required — the API 400s without it) on a `bar-chart` /
 > `kpi-chart` is enforced in the render AND round-trips intact on `GET /v2/workbooks/{id}/spec`
 > (live-verified 2026-06-29 on a live Sigma org: a not-null filter cut 731→397 on both kinds,
 > confirmed via element CSV export and rendered PNG). So if a filter *looks* like it "doesn't

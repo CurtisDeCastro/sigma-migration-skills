@@ -308,6 +308,13 @@ jobs:
             plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/test-metric-reference.rb
             plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/test-deterministic-ids-kpi-format.rb
             shared/lib/test_metric_binding.rb
+            shared/lib/test_phase_metrics.rb
+            shared/scripts/test-intake-triage.rb
+            plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-intake-triage.rb
+            plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/test-validate-sigma-formula-cleanup.rb
+            # shared/scripts/test-validate-sigma-formula-cleanup.rb is INTENTIONALLY not listed: standalone it
+            # self-SKIPs; its coverage is the shared-manifest drift gate pinning it byte-identical to the
+            # quicksight twin above (PR #509 review R9 — the manifest entry is the coverage mechanism).
             shared/lib/test_plugin_embed.rb
             shared/lib/test_composition.rb
             shared/lib/test_composition_lint.rb

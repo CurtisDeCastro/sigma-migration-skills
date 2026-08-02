@@ -44,11 +44,140 @@ are now absorbed:
 > `--out`, or "starting clean" throws all of that away and re-pays the full
 > cold cost — the exact anti-pattern behind multi-hour field runs.
 
-The designed loop is: run → hit a STOP (exit 10/11/12/13/4/17) → do the one
-thing the stop asks → **re-run the same command**. Each re-entry should be
+The designed loop is: run → hit a STOP (exit 10/11/12/13/4/17/18/19) → do the
+one thing the stop asks → **re-run the same command**. Each re-entry should be
 dramatically cheaper than the first run. If a re-entry re-pays a phase listed
 as cached below, that's a bug — check the cache-invalidation notes first
 (did the `.twb` actually change?), then report it.
+
+## Single-invocation wave (speed review #2) — fewer stops, same gates
+
+Three control-flow changes remove the guaranteed re-invocations without
+changing any gate's semantics:
+
+- **Phase-1d is a WAIT-GATE, not an abort.** At the DM-POST barrier the
+  orchestrator now **waits** for a verified `png-read.json` (poll every 2s,
+  30s heartbeats, bound `SIGMA_PNG_READ_TIMEOUT_S`, default 480s; `0` = fail
+  immediately) — do the dashboard-PNG read **while it waits** and the run
+  continues in-process. Deadline passed → **exit 18** with a banner naming
+  exactly what is missing (absent / `verified: false` / stale). **No
+  stale-seed reuse:** a `png-read.json` older than this run's discovery fetch
+  is set aside as `png-read.stale.json` and must be re-verified against the
+  fresh PNG.
+- **ONE consolidated pre-build checkpoint.** Gap-scan review (exit 11),
+  decisions (exit 10), telemetry consent, and the E9.4 cost **advisory**
+  (WARN-only, ratified) batch into a single stop writing ONE artifact —
+  `<WORK>/open-questions.json` — with a single re-entry
+  (`--answers '<json>' [--force] | --yes`). Targeted answers
+  (`"<id>:<slug>"`) win over bulk class-id answers; every tagged entry in
+  `open-questions.json` embeds its computed key as `targeted_key` — copy it
+  verbatim rather than re-deriving the slug (an unrecognized `--answers` key
+  draws a WARN and is ignored, never a silent fallback). Resolved decisions
+  are ledgered append-only in `<WORK>/decisions.jsonl` (E3.6 vocab half).
+- **Empty agent-mediated actuals ⇒ finalize chains in-process.** When the
+  pass-1 tail derives from the artifacts (strict predicate: every exportable
+  plan chart machine-collected, no pivot grids, no render-verify/too-large
+  markers, no per-tile visual sidecar) that there is NOTHING for the agent to
+  collect, **and the agent-side gate obligations are already discharged** — a
+  visual verdict is recorded on `parity-final.json` (gate 8b; `--fast` waives
+  it) and the staged RCF ledger is resolved (gate 8d) — pass 1 execs
+  `--finalize` in the same invocation instead of exit 12. A chain that would
+  predictably stop at 8b/8d only burns the gate battery and pre-spends a
+  `migrate-tableau:finalize` loop-log attempt. A gate can still stop with its
+  usual banner. `SIGMA_NO_CHAIN_FINALIZE=1` restores the unconditional
+  exit-12 stop (and disables the tail wait below).
+- **W2.6 — the pass-1 tail WAITS for the visual verdict on cold runs.** The
+  verdict records ONTO `parity-final.json` (written by the finalize leg), so a
+  cold pass 1 could never satisfy the chain predicate — wave 1's chain fired
+  only on re-entry workdirs. Now, when the predicate fails ONLY on
+  agent-dischargeable obligations (no recorded verdict; staged RCF ledger
+  missing/unresolved), the tail prints a banner (first line names
+  `SIGMA_VISUAL_VERDICT_TIMEOUT_S`, default 480s, `0` = don't wait) with the
+  exact discharge commands — `phase6-parity.rb --finalize` → read the staged
+  6f pairs / resolve the RCF ledger → `record-visual-check.rb` — and polls the
+  predicate every 5s. Discharged in time ⇒ the chain fires and a COLD run is
+  single-invocation end-to-end. Deadline (or a recorded `not-executable`
+  verdict — that is an answer, not a pending one) ⇒ the unchanged exit-12
+  two-invocation contract, fail-open.
+- **W2.5 — `--wait[=SECONDS]` is the default driving pattern.** One tool call
+  (tool timeout ≥ 25 min): the run backgrounds itself into
+  `<WORK>/migrate-full.log`, the wrapper returns the inner exit code VERBATIM
+  within the budget (default 1500s), and **exit 26** = budget exhausted with
+  the run STILL ALIVE (pid + log + state named; re-run the same command to
+  re-attach — never treat 26 as a failure). Detached-agent cadence contract:
+  poll the log only on a `migrate-state.json` phase transition, else every
+  ≥90s — never tighter.
+- **W2.1/W2.2/W2.4 — tier ratchet + factory flow.** At 0c the run resolves
+  `tier`/`tier_basis` into `migrate-state.json` (`lib/tier.rb`, mechanical
+  predicate over on-disk artifacts; fail-closed → `full`; `--tier` overrides,
+  ledgered). Tier-S: RCF budget 5→1, clean-run checkpoint questions
+  auto-answer their safe defaults (ledgered as `unattended-tier-default`;
+  required/defaultless questions still stop), and the gate side scales
+  budgets — **no gate is ever removed**. Factory default = one pass +
+  measured parity + `<WORK>/PUNCHLIST.md` (one re-entry command per
+  degradation-ledger line, rendered at every finalize terminal);
+  `--certified` restores loop-to-green (RCF 5 + verifier contract).
+
+## `--quiet` — machine stdout for background-log poll turns
+
+Polling a background run's log re-ingests every ~60-line banner on every
+read. `--quiet` keeps stdout machine-small; **default output (no flag) is
+byte-identical to before**:
+
+- stdout carries ONLY: one JSON event line per phase entry/completion
+  (`{"ev":"phase"|"mark",...}`), stop/result/wait events
+  (`{"ev":"stop","code":10,...}`, `{"ev":"result","status":"GREEN",...}`,
+  `{"ev":"wait"|"waiting",...}` heartbeats), WARN/FATAL/error-shaped lines,
+  and a terminal `{"ev":"exit","code":N,"full_log":...}` event.
+- the FULL human output (banners, child output, stop instructions) streams to
+  `<WORK>/migrate-full.log` — read it once at a stop instead of on every poll.
+- `warn`/stderr is untouched (capture `2>&1` as usual).
+
+Poll pattern: `tail -5` the stdout log for the latest `ev` lines; on an
+`ev:stop`/`ev:exit`, read `migrate-full.log` (or the named artifact — e.g.
+`open-questions.json`) once for the full instructions.
+
+## Local phase metrics (`<WORK>/phase-metrics.jsonl`)
+
+Every `mark()` boundary appends `{phase, wall_s, at}` via
+`lib/phase_metrics.rb` (shared). Capture is LOCAL and decoupled from
+telemetry consent — the file is gitignored run state, never sent; consent
+gates only the SEND path. Absent lib = silent no-op. Summarize with
+`PhaseMetrics.summarize(<WORK>)`. This is the calibration source for
+`estimate-cost.rb`'s coefficients (ratified: measure before optimizing).
+
+Turn capture (W2.22): records may also carry `turn` (monotone per-invocation
+mark ordinal) and `inv` (per-process token, numbers only);
+`PhaseMetrics.run_stats(<WORK>)` derives `turn_events` / `invocations` /
+`re_entries` / walls / tokens from them. Absence of a capture is `nil`,
+never 0 — a rate is refused, not guessed, from pre-capture files.
+
+## Measured calibration + the cold-run exit gate (W2.22/W2.24)
+
+- `estimate-cost.rb --from-metrics <dir1,dir2,…>` re-fits the rate/phase
+  coefficients from measured runs' `phase-metrics.jsonl`; every output then
+  carries a PROVENANCE header (measured vs priors, n + range, refusals
+  named). Standalone (no `--workdir`) it prints per-tier measured bands. A
+  refit or published band needs **n ≥ 3 per tier** — below that it is
+  refused BY NAME and only observations are stated (a single flattering
+  minute is never a band).
+- `measure-cold-run.rb run … -- <orchestrator args>` drives one protocol
+  cold run: mechanical resume (exit 12 → `--finalize`, 26 → wait-continue),
+  operator stops attributed by exit code, metrics read from artifacts, then
+  the litter chain (sweep dry-run → `--delete` → cleanup-orphans → probe
+  registry MUST read zero-open). `measure-cold-run.rb gate` applies the
+  exit gate over TERMINAL runs only (the wall is intake→terminal; a stopped
+  run's partial wall is excluded by name, exactly like a fidelity void):
+  median wall ≤15 min ∧ ≤22 turns ∧ 1 invocation ∧ ≤1 stop ⇒
+  band-adjacent-measured (≤10 min ⇒ in-band); a miss publishes the
+  MEASURED band — the projection is never publishable. Fidelity is
+  non-negotiable: a run whose parity baseline does not hold has its speed
+  number VOIDED.
+- Protocol state is never repo state: workdirs and results files stay
+  /tmp-side (the harness refuses repo-side paths), run records carry
+  numbers + neutral labels + phase names only (orchestrator argv VALUES are
+  redacted to flag names), and the live runbook lives outside the repo.
+  Sweep + eyeball any diff before a writeup.
 
 ## Expected durations (budgets)
 
@@ -97,6 +226,7 @@ wedged, not busy: investigate, don't wait.
 | `cols-<TABLE>.json` (discover-columns) | file exists, non-empty, same connection + table path | delete the file |
 | `migrate-state.json` | drives `--finalize` (pass 2) — phases 1–5 are never re-run there | n/a (do not delete mid-run) |
 | `~/.tableau-to-sigma/calc-cache.json` | per-formula translation memo, cross-run/cross-workbook | `--no-cache` on extract-calc-fields |
+| `visual-qa/render-versions.json` + 5b page PNGs (W2.7) | `latestDocumentVersion` UNCHANGED since the 5b render — 6f stages the pairs from disk (0 fresh renders) and RCF pass 1 starts from the staged 6f render | any spec write bumps the doc version → fresh render, always (raw PNGs only; verdicts are never reused) |
 
 Deliberate: phases that create or mutate **live Sigma objects** (DM POST,
 workbook POST, layout PUT, renders, parity collection) are never cached — they
@@ -110,7 +240,12 @@ pollers (`sigma-export-png.py` 60×3s, `export-chart-png.rb` 20×3s,
 `enhance-*.rb` deadline-bounded), the discovery-lane waits
 (`lane_wait_for` 600s, join `TABLEAU_LANE_TIMEOUT` default 600s — a transient
 render wedge under the old 1800s default silently burned 30 min; large sites
-raise it via the env var — both with 30s heartbeats), lane reaps (60s), and all REST retry loops (attempt-capped
+raise it via the env var — both with 30s heartbeats), the Phase-1d
+dashboard-read WAIT-GATE (`SIGMA_PNG_READ_TIMEOUT_S` default 480s, 30s
+heartbeats, exit 18 at the deadline), the pass-1-tail visual-verdict wait
+(`SIGMA_VISUAL_VERDICT_TIMEOUT_S` default 480s, fail-open to exit 12 — W2.6),
+the `--wait` wrapper budget (default 1500s, exit 26 with the run still alive —
+W2.5), lane reaps (60s), and all REST retry loops (attempt-capped
 with exponential backoff). If you ever observe a script spinning past its
 documented bound, that's a bug — capture the command and file an issue.
 

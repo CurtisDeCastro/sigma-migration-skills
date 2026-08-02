@@ -6,12 +6,25 @@ asked for consent. Writes a marker file so the telemetry gate
 (assert-telemetry-ran.rb) can confirm the step was not silently skipped.
 
 Usage:
-    # send (consent given):
+    # send — consent recorded at the pre-build checkpoint
+    # (<workdir>/consent-answer.json answer == "consented"):
     python3 scripts/report-telemetry.py --tool tableau-to-sigma --duration 312 --workdir /tmp/run --mode live
+    # send — NO checkpoint record, but a human was just asked at wrap-up
+    # (SKILL.md Telemetry) and did not decline:
+    python3 scripts/report-telemetry.py --tool tableau-to-sigma --duration 312 --workdir /tmp/run --consent-interactive
     # send, but the migration failed:
     python3 scripts/report-telemetry.py --tool tableau-to-sigma --duration 180 --workdir /tmp/run --failed
     # user declined the ping — record the decision without sending:
     python3 scripts/report-telemetry.py --tool tableau-to-sigma --workdir /tmp/run --declined
+
+FAIL-CLOSED consent contract (PR #509 review R3): sending requires consent
+EVIDENCE — either a readable checkpoint record saying "consented", or the
+explicit --consent-interactive attestation that a human was actually asked at
+wrap-up. consent-answer.json absent or unreadable without that flag → NOTHING
+is sent, and a distinct suppression marker (status "declined",
+consent_source "fail-closed") still satisfies the telemetry gate. On an
+unattended chain there is nobody to ask, so a bare invocation can never turn
+into an unconsented send.
 
 Reads SIGMA_BASE_URL and SIGMA_CLIENT_ID from environment (set by get-token.sh).
 Prints what it sends; never raises; skips silently if endpoint unreachable.
@@ -77,6 +90,10 @@ parser.add_argument('--rubric-score', type=float, default=None,
 parser.add_argument('--visual-gate', default=None,
                     choices=['pass', 'fail', 'not-executable'],
                     help='visual gate verdict (not-executable = driving agent lacked vision)')
+parser.add_argument('--consent-interactive', dest='consent_interactive', action='store_true',
+                    help='attest that a human was present at wrap-up, the consent ask was actually '
+                         'made (SKILL.md Telemetry), and the user did not decline — the ONLY way to '
+                         'send when no consent-answer.json record exists (fail-closed, PR #509 R3)')
 args = parser.parse_args()
 
 
@@ -108,6 +125,66 @@ mode = args.mode if args.mode != 'unknown' else (_intake_mode or 'unknown')
 if args.declined:
     print("\nTelemetry declined by user — nothing sent.")
     _write_marker(args.workdir, {'status': 'declined', 'tool': args.tool})
+    sys.exit(0)
+
+
+def _checkpoint_consent(workdir):
+    """Enforcing side of the consolidated-checkpoint consent leg (A1 + R3,
+    wave-1 review + PR #509): orchestrators record the checkpoint answer to
+    <workdir>/consent-answer.json — consent rides that ONE stop, unattended
+    orchestrator runs are guaranteed a record on every terminal path
+    (ensure_unattended_consent_marker!), and this script must honor the record
+    even if a driver runs it without flags. Returns (state, answer):
+      ('recorded', '<answer>')  readable record — the answer governs;
+      ('invalid',  None)        the file EXISTS but is unreadable/unparseable
+                                or carries no answer → FAIL CLOSED (a record
+                                was made; we cannot prove it says yes);
+      ('absent',   None)        no record → send ONLY with an explicit
+                                --consent-interactive (a human was actually
+                                asked at wrap-up)."""
+    if not workdir:
+        return 'absent', None
+    path = os.path.join(workdir, 'consent-answer.json')
+    if not os.path.exists(path):
+        return 'absent', None
+    try:
+        with open(path, encoding='utf-8-sig') as fh:
+            answer = (json.load(fh).get('answer') or '').strip()
+            return ('recorded', answer) if answer else ('invalid', None)
+    except Exception:
+        return 'invalid', None
+
+
+_consent_state, _consent = _checkpoint_consent(args.workdir)
+if _consent_state == 'recorded' and _consent != 'consented':
+    # 'declined' / 'no-response' (or anything not an explicit yes): recorded,
+    # nothing sent — same contract as --declined, plus the record's provenance.
+    print(f"\nTelemetry consent recorded at the checkpoint: {_consent} — nothing sent.")
+    _write_marker(args.workdir, {'status': 'declined', 'tool': args.tool,
+                                 'consent': _consent, 'consent_source': 'consent-answer.json'})
+    sys.exit(0)
+if _consent_state == 'invalid':
+    # FAIL CLOSED (PR #509 review R3): a consent record EXISTS but cannot be
+    # read — unprovable consent is never consent, even with
+    # --consent-interactive; repair or re-record the answer instead. The old
+    # fail-open-to-send here was R3's proven worst case. Distinct marker;
+    # the telemetry gate is still satisfied (telemetry never blocks).
+    print("\nTelemetry consent record exists but is unreadable — FAIL CLOSED, nothing sent.")
+    print("  (repair <workdir>/consent-answer.json or re-record the checkpoint answer, then re-run)")
+    _write_marker(args.workdir, {'status': 'declined', 'tool': args.tool,
+                                 'consent': 'unreadable', 'consent_source': 'fail-closed'})
+    sys.exit(0)
+if _consent_state == 'absent' and not args.consent_interactive:
+    # FAIL CLOSED (PR #509 review R3): no consent evidence at all. On an
+    # unattended chain there is nobody to ask, so a bare invocation must
+    # never become an unconsented send that still passes the telemetry gate.
+    # Interactive wrap-up: ask the user (SKILL.md Telemetry), then re-run
+    # with --consent-interactive (or --declined).
+    print("\nNo telemetry consent evidence (consent-answer.json absent) — FAIL CLOSED, nothing sent.")
+    print("  interactive wrap-up: ask the user per SKILL.md Telemetry, then re-run with"
+          " --consent-interactive (consented) or --declined")
+    _write_marker(args.workdir, {'status': 'declined', 'tool': args.tool,
+                                 'consent': 'absent', 'consent_source': 'fail-closed'})
     sys.exit(0)
 
 # Environment fingerprint (P0.3): prefer <workdir>/doctor.json, fall back to the

@@ -183,19 +183,33 @@ module Sigma
   # (field case: a 599-column workbook whose error-column audit saw only the
   # first page). `path` may already carry a query string. The nextPage token
   # is opaque (URL-encoded on reuse); a repeated token or a non-Hash body ends
-  # the loop defensively rather than spinning.
+  # the loop defensively rather than spinning — and the repeated-token stop
+  # names itself on stderr, because a silent defensive stop is invisible
+  # truncation, the exact bug class this helper exists to remove.
+  #
+  # An optional block receives each page's parsed body as it arrives; callers
+  # use it for page-level observability (e.g. announcing a multi-page fetch on
+  # stderr) without re-implementing the loop.
   def list_entries(path, limit: 1000, http: nil)
     entries = []
     page = nil
     seen = {}
+    pages = 0
     loop do
       qs = "limit=#{limit.to_i}"
       qs += "&page=#{URI.encode_www_form_component(page)}" if page
       data = request(:get, "#{path}#{path.include?('?') ? '&' : '?'}#{qs}", http: http)
       break unless data.is_a?(Hash)
+      pages += 1
+      yield data if block_given?
       entries.concat(data['entries'] || [])
       page = data['nextPage']
-      break if page.nil? || page.to_s.empty? || seen[page]
+      break if page.nil? || page.to_s.empty?
+      if seen[page]
+        warn "#{path}: server repeated nextPage token #{page.inspect} — " \
+             "stopping after #{pages} page(s) to avoid an infinite loop (list may be incomplete)"
+        break
+      end
       seen[page] = true
     end
     entries

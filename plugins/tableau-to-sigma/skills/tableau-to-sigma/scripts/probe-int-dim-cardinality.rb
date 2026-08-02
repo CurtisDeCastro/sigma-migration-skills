@@ -74,8 +74,10 @@ end
 
 # One-shot probe-workbook Custom SQL runner (the shared warehouse seam — mirrors
 # probe-join-keys.rb sigma_sql_rows; kept self-contained so that script stays
-# byte-identical).
-def sigma_distinct(conn_id, folder_id, sql)
+# byte-identical). Created ids are registered in the local probe registry
+# BEFORE the first export and the ensure-DELETE appends the matching cleaned
+# record (E7.1).
+def sigma_distinct(conn_id, folder_id, sql, workdir: nil)
   spec = {
     'name' => "_probe_intdim_#{SecureRandom.hex(4)}", 'schemaVersion' => 1,
     'pages' => [{ 'id' => 'p1', 'name' => 'p1', 'elements' => [{
@@ -88,6 +90,8 @@ def sigma_distinct(conn_id, folder_id, sql)
   r = Sigma.request(:post, '/v2/workbooks/spec', body: JSON.generate(spec))
   wb_id = r.is_a?(Hash) ? r['workbookId'] : nil
   raise "probe workbook POST failed: #{r.inspect[0, 160]}" unless wb_id
+  ProbeRegistry.created(wb_id, name: spec['name'], workdir: workdir,
+                        script: 'probe-int-dim-cardinality.rb')
   begin
     exp = Sigma.request(:post, "/v2/workbooks/#{wb_id}/export",
                         body: JSON.generate('elementId' => 'probe', 'format' => { 'type' => 'csv' }))
@@ -107,7 +111,13 @@ def sigma_distinct(conn_id, folder_id, sql)
     row = CSV.parse(csv, headers: true).first
     { 'distinct' => row && row['DISTINCT_KEYS'].to_i }
   ensure
-    Sigma.request(:delete, "/v2/files/#{wb_id}") rescue nil
+    begin
+      Sigma.request(:delete, "/v2/files/#{wb_id}")
+      ProbeRegistry.cleaned(wb_id, workdir: workdir, via: 'ensure')
+    rescue StandardError => e
+      ProbeRegistry.cleaned(wb_id, workdir: workdir, via: 'ensure',
+                            outcome: e.message.lines.first.to_s =~ /\b404\b/ ? '404' : 'failed')
+    end
   end
 rescue StandardError => e
   { 'error' => e.message.to_s.gsub(/\s+/, ' ').strip[0, 240] }
@@ -116,6 +126,7 @@ end
 if opts[:conn]
   $LOAD_PATH.unshift File.expand_path('lib', __dir__)
   require 'sigma_rest'
+  require 'probe_registry'
 end
 
 probed = 0
@@ -129,7 +140,7 @@ candidates.each_with_index do |c, i|
   end
   sql = distinct_sql(table.empty? ? '<table>' : table, col.empty? ? '<col>' : col)
   c['probe_sql'] = sql
-  res = opts[:fixture] ? fixture_result(opts[:fixture], i) : sigma_distinct(opts[:conn], opts[:folder], sql)
+  res = opts[:fixture] ? fixture_result(opts[:fixture], i) : sigma_distinct(opts[:conn], opts[:folder], sql, workdir: opts[:workdir])
   c['probed_at'] = now_utc
   if res['error']
     c['cardinality_status'] = 'error'

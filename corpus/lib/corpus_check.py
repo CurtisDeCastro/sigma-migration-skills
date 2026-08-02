@@ -247,7 +247,10 @@ def main(argv):
         doc = json.load(open(argv[2], encoding="utf-8"))
         out = json.dumps(normalize(doc), indent=2, ensure_ascii=False) + "\n"
         if len(argv) > 3:
-            open(argv[3], "w", encoding="utf-8").write(out)
+            # newline="\n": text mode would CRLF-translate on Windows, and both
+            # the goldens (.gitattributes eol=lf) and cmp-based checks.sh
+            # consumers are byte-exact LF.
+            open(argv[3], "w", encoding="utf-8", newline="\n").write(out)
         else:
             sys.stdout.write(out)
         return 0

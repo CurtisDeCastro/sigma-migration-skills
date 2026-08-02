@@ -120,7 +120,8 @@ end
 PER_TOOL_BY_DESIGN = {
   'convert-model.rb'  => 'each converter parses a different source format end-to-end',
   'phase6-parity.rb'  => "per-tool parity CLI (--tableau vs --workdir) and per-tool oracles",
-  'learned-rules.rb'  => 'gap-scout rule store is keyed to one tool\'s expression language'
+  'learned-rules.rb'  => 'gap-scout rule store is keyed to one tool\'s expression language',
+  'probe_registry.rb' => 'local artifact registry binds to one tool\'s <TOOL>_TO_SIGMA_HOME dotdir (same convention as learned-rules.rb)'
 }.freeze
 
 DUP_BACKLOG = %w[

@@ -21,7 +21,14 @@ Nothing joins them at query time; they merely share dashboards.
 That is NOT a blend. A *blend* is one worksheet pulling fields from 2+
 datasources at once, linked on shared captions via
 `<datasource-dependencies>` secondary blocks — see `refs/blending.md` for
-that decision tree. The two shapes route differently:
+that decision tree.
+
+It is also NOT a **single-datasource relationship ("noodle" / object-model)
+workbook** — ONE datasource whose 2020.2+ logical graph joins N tables. That
+shape reports `Datasources: 1` and routes through `refs/object-model.md`
+(fact election + edge wiring + its own gap-scan stop); misreading it as
+"multiple data sources" was the 2026-07 field mis-diagnosis. The two shapes
+route differently:
 
 | | Blend (`refs/blending.md`) | Independent multi-DS (this doc) |
 |---|---|---|

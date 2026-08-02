@@ -68,7 +68,10 @@ def http(method, path, body = nil)
   # needs longer.
   timeout = (ENV['SIGMA_HTTP_TIMEOUT'] || '90').to_i
   begin
-    res = Net::HTTP.start(uri.host, uri.port, use_ssl: true,
+    # use_ssl keyed off the scheme (not hard-coded true) so the hermetic tests can
+    # point SIGMA_BASE_URL at a plain-http loopback stub. Production SIGMA_BASE_URL
+    # is https, so live behaviour is unchanged. Same pattern as find-or-pick-dm.rb.
+    res = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https',
                           open_timeout: [timeout, 30].min, read_timeout: timeout) do |h|
       h.request(req)
     end
@@ -118,20 +121,23 @@ end
 #    SUPPORT 2026-06-02. Truncation here is not a cosmetic loss: a join key past
 #    ordinal 50 leaves the DM builder no column to point a relationship at, and
 #    fields past the cut read as "not on the table", whose fallback is Custom SQL.
-#    Sigma.list_entries sends limit=1000 and follows nextPage to exhaustion.
+#    Sigma.list_entries sends limit=1000, follows nextPage (URL-encoded, opaque)
+#    to exhaustion, and stops loudly on a repeated token instead of spinning.
 #
 #    The connection is INJECTED so this read keeps this script's
 #    SIGMA_HTTP_TIMEOUT bound — the "migration stuck for hours" guard above —
 #    instead of the library's fixed 120s read timeout with no open timeout. Every
-#    page also shares the one TLS handshake.
+#    page also shares the one TLS handshake. The block counts pages so a
+#    multi-page (wide-table) fetch announces itself on stderr.
 cols_path = "/v2/connections/tables/#{inode}/columns"
 timeout   = (ENV['SIGMA_HTTP_TIMEOUT'] || '90').to_i
 cols_uri  = URI("#{BASE}#{cols_path}")
+pages = 0
 entries =
   begin
     Net::HTTP.start(cols_uri.host, cols_uri.port, use_ssl: cols_uri.scheme == 'https',
                     open_timeout: [timeout, 30].min, read_timeout: timeout) do |h|
-      Sigma.list_entries(cols_path, http: h)
+      Sigma.list_entries(cols_path, http: h) { pages += 1 }
     end
   rescue Net::OpenTimeout, Net::ReadTimeout, Timeout::Error => e
     abort "TIMEOUT after #{timeout}s listing columns for #{opts[:path]} (#{e.class}). " \
@@ -147,6 +153,7 @@ cols = entries.map do |c|
   t = t['type'] if t.is_a?(Hash) && t['type']
   { 'name' => c['name'], 'type' => t.to_s }
 end
+warn "columns list spanned #{pages} pages (#{cols.size} columns total) — wide table, all pages fetched" if pages > 1
 
 result = {
   'connection_id' => opts[:conn],

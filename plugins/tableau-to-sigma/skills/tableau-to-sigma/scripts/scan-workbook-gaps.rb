@@ -20,6 +20,14 @@
 #
 # The same data is also written as <name>-gaps.json so the gap-scout subagent
 # and other downstream tools can consume it programmatically.
+#
+# SCOPE: the scan itself is WORKBOOK-WIDE (no scope input — expectations are
+# set for the whole file). For SCOPED runs (E9.6), each detected feature
+# carries a best-effort `worksheets` attribution (direct worksheet-section
+# match, or calc-formula match → the worksheets referencing that calc) so the
+# orchestrator's gap STOP can skip gaps belonging entirely to out-of-scope
+# dashboards. A feature with NO attribution has no `worksheets` key —
+# consumers must FAIL OPEN (treat it as potentially in scope).
 
 require 'json'
 require 'set'
@@ -134,6 +142,47 @@ def categorize(content)
     entry.merge(count: matches)
   end
   results.select { |r| r[:count] > 0 }
+end
+
+# --- Worksheet attribution (E9.6/A2, wave-1 review) -------------------------
+# Best-effort per-feature worksheet membership so a SCOPED orchestrator run
+# (migrate-tableau.rb --dashboard) can tell an in-scope ❌ gap from one that
+# belongs entirely to out-of-scope dashboards. Two hops:
+#   1. DIRECT — the feature's pattern matches inside a <worksheet> raw section;
+#   2. CALC   — the pattern matches a datasource-level calc FORMULA; the gap
+#      then belongs to every worksheet whose section references that column's
+#      internal name (formulas live in the datasource block, so hop 1 alone
+#      would miss every calc-borne gap).
+# A feature matching neither hop (dashboard-/datasource-structural — device
+# layouts, multi-datasource collapse, …) gets NO :worksheets key, which
+# consumers MUST read as "unknown — fail open". Mutates `results` in place.
+def attribute_worksheets!(results, content, xml)
+  ws_bodies = content.scan(%r{<worksheet\s[^>]*?name=(?:'([^']*)'|"([^"]*)")[^>]*>(.*?)</worksheet>}m)
+                     .each_with_object({}) { |(sq, dq, body), h| h[(sq || dq).to_s] = body.to_s }
+  return if ws_bodies.empty?
+  calc_defs = {} # internal column name → decoded formula
+  begin
+    xml&.elements&.to_a('/workbook/datasources/datasource')&.each do |ds|
+      ds.elements.each('column') do |col|
+        f = col.elements['calculation']&.attributes&.[]('formula')
+        calc_defs[col.attributes['name'].to_s] = f if f && !col.attributes['name'].to_s.empty?
+      end
+    end
+  rescue StandardError
+    calc_defs = {} # attribution is best-effort — never sink the scan
+  end
+  results.each do |r|
+    pat = r[:pat]
+    next unless pat.is_a?(Regexp)
+    hits = ws_bodies.select { |_, body| body =~ pat }.keys
+    calc_names = calc_defs.select { |_, f| f =~ pat }.keys
+    if calc_names.any?
+      hits |= ws_bodies.select { |_, body| calc_names.any? { |n| body.include?(n) } }.keys
+    end
+    r[:worksheets] = hits.sort if hits.any?
+  end
+rescue StandardError
+  nil # never fatal: an unattributed report is still a valid (fail-open) report
 end
 
 # Detect point-map worksheets that declare geo-role latitude/longitude on a
@@ -286,10 +335,122 @@ def detect_blends(xml)
       name:   "Data blending (#{route})",
       status: route == 'same-warehouse-repoint' ? :hint : :manual,
       count:  rs.length,
-      blurb:  "#{ROUTE_BLURB[route]}. Worksheets: #{rs.map { |b| b['worksheet'] }.uniq.join(', ')}. "               'Full linking-field report in blend-plan.json; decision tree in refs/blending.md (beads-sigma-iq8).'
+      blurb:  "#{ROUTE_BLURB[route]}. Worksheets: #{rs.map { |b| b['worksheet'] }.uniq.join(', ')}. "               'Full linking-field report in blend-plan.json; decision tree in refs/blending.md (beads-sigma-iq8).',
+      worksheets: rs.map { |b| b['worksheet'].to_s }.uniq.sort # E9.6/A2 scope attribution
     }
   end
   [features, { 'datasources' => ds_info.values, 'blends' => blends }]
+end
+
+# --- Union datasources (W2.16) ----------------------------------------------
+# The converter (converter/tableau.mjs) emits the documented Sigma union
+# source for a ROOT-level wildcard union (>=2 derivable member tables + >=1
+# metadata output column): one warehouse-table element per member + an
+# elementId-sourced union element (auto-named "Union of N Sources" by the
+# API). Anything else — a root union missing members/columns, a union with
+# any NON-TABLE member (custom-SQL text / nested union: emitting only the
+# table members would silently subset the rows), or a union NESTED inside a
+# join tree (the join branch refuses via collectTables rather than flatten
+# it away) — the converter REFUSES loudly (named warning, NO elements
+# emitted). Before W2.16 a unioned datasource converted to NOTHING,
+# silently: the worst defect class under the program's rules.
+# TWO rows so the handled shape never false-trips the ❌ gate:
+#   :hint      — root wildcard union the converter emits (VERIFY matches[])
+#   :unhandled — underivable/mixed/nested union (❌ named refusal; drives
+#                the orchestrator's exit-11 gap stop, refuse-don't-guess)
+# Derivability here MIRRORS the converter's own test (every member a plain
+# table && members>=2 && cols>=1 at the connection root) so scan and
+# emission can't drift apart silently — the union-wildcard-seed corpus
+# checks.sh pins both against the same .twb.
+def detect_unions(xml)
+  return [] if xml.nil?
+  emitted = []
+  refused = []
+  xml.elements.each('/workbook/datasources/datasource') do |ds|
+    ds_name = ds.attributes['name'].to_s
+    next if ds_name == 'Parameters' || ds_name.start_with?('Parameters ')
+    sheets = []
+    xml.elements.each('//worksheet') do |ws|
+      used = ws.elements.to_a('.//view/datasources/datasource').map { |d| d.attributes['name'] }
+      sheets << ws.attributes['name'].to_s if used.include?(ds_name) && ws.attributes['name']
+    end
+    # Output columns the converter can derive: unique metadata-record remote
+    # names minus Tableau's union-provenance bookkeeping (Sheet / Table Name).
+    cols = 0
+    seen = Set.new
+    ds.elements.each('.//metadata-record') do |mr|
+      next unless mr.attributes['class'].to_s == 'column'
+      remote = mr.elements['remote-name']&.text.to_s.strip
+      next if remote.empty? || seen.include?(remote.upcase)
+      next if remote =~ /\A(Sheet|Table Name)\z/i
+      seen << remote.upcase
+      cols += 1
+    end
+    ds.elements.each('.//relation') do |rel|
+      next unless rel.attributes['type'].to_s == 'union'
+      root = rel.parent && rel.parent.name == 'connection'
+      kids = rel.elements.to_a('relation')
+      members = kids.count do |r|
+        r.attributes['type'].to_s == 'table' && !r.attributes['table'].to_s.empty?
+      end
+      # Fix-pass: members that are NOT plain tables (custom-SQL text, nested
+      # union, join). The converter refuses the whole union rather than emit
+      # a silent SUBSET of only its table members — mirror that refusal here
+      # (a missing type attr defaults to 'table', like the converter's attr()).
+      non_table = kids.count do |r|
+        t = r.attributes['type'].to_s
+        !t.empty? && t != 'table'
+      end
+      entry = { ds: ds_name, sheets: sheets.uniq.sort,
+                nested: !root, members: members, cols: cols, non_table: non_table }
+      if root && non_table.zero? && members >= 2 && cols >= 1
+        emitted << entry
+      else
+        refused << entry
+      end
+    end
+  end
+  feats = []
+  unless emitted.empty?
+    f = {
+      name:   'Union datasource (wildcard, converter-emitted)',
+      status: :hint,
+      count:  emitted.length,
+      blurb:  'Root-level union → Sigma union source: one warehouse-table element per member + an ' \
+              'elementId-sourced union element (auto-named "Union of N Sources" — a spec-set name breaks ' \
+              'self-referential column validation; rename in the UI). Emission assumes SAME-NAME columns ' \
+              'across members (wildcard union): VERIFY matches[] and hand-edit for renamed/missing member ' \
+              'columns (null for a member lacking the column). Datasources: ' +
+              emitted.map { |e| e[:ds] }.uniq.join(', ') + '.'
+    }
+    ws = emitted.flat_map { |e| e[:sheets] }.uniq.sort
+    f[:worksheets] = ws unless ws.empty? # empty = unknown → omit key, fail open
+    feats << f
+  end
+  unless refused.empty?
+    f = {
+      name:   'Union datasource (underivable / nested — NOT converted)',
+      status: :unhandled,
+      count:  refused.length,
+      blurb:  'Union the converter REFUSES loudly (named warning, NO elements emitted — silent loss is ' \
+              'dead): emission needs a ROOT-level union of ≥2 derivable member tables and ≥1 metadata ' \
+              'column with EVERY member a plain table; non-table members (custom SQL / nested union) and ' \
+              'unions nested inside a join tree are refused, never silently subset. Route: model as a ' \
+              'Custom SQL UNION ALL element, or convert the member tables and re-point sources ' \
+              'post-publish. ' +
+              refused.map { |e|
+                reason = if e[:nested] then 'nested'
+                         elsif e[:non_table].to_i > 0 then "#{e[:non_table]} non-table member(s)"
+                         else "#{e[:members]} member(s)/#{e[:cols]} column(s)"
+                         end
+                "#{e[:ds]} (#{reason})"
+              }.join(', ') + '.'
+    }
+    ws = refused.flat_map { |e| e[:sheets] }.uniq.sort
+    f[:worksheets] = ws unless ws.empty?
+    feats << f
+  end
+  feats
 end
 
 # Detect the "N independent datasources feeding different worksheets" case —
@@ -430,6 +591,118 @@ def detect_multi_datasource(xml, blend_plan = nil)
   feat = { name: 'Multiple independent datasources (converter collapses to primary)',
            status: :unhandled, count: primaries.size, blurb: blurb }
   [feat, detail, { 'independent' => true, 'datasources' => entries }]
+end
+
+# Detect the SINGLE-datasource multi-table relationship model (2020.2+
+# <object-graph>, the "noodle") — the shape the field failure proved invisible:
+# detect_multi_datasource returns early at ds_info.size < 2, so a 6-table
+# one-datasource workbook printed a reassuring "Datasources: 1" and sailed past
+# Phase 0 while the converter mis-elected a dimension as the fact and baked
+# wrong-FROM helper SQL. ONE detection pass feeds THREE outputs (same contract
+# style as detect_multi_datasource):
+#   - gap-report row(s): ✅-auto when every relationship carries a wire-able
+#     serialized equality key (a fully-wired noodle must NOT stop), ❌-unhandled
+#     when any relationship lacks one (no key / computed-only / range-only /
+#     unresolved endpoint) or any logical table is untouched by relationships —
+#     the DISCONNECTED-TABLES outcome. The ❌ row drives migrate-tableau's
+#     exit-11 stop with the per-relationship punch list in the blurb.
+#   - gaps-JSON `object_model` detail (per-relationship status).
+#   - object-graph-plan.json sidecar next to the report (fact candidate by
+#     relationship degree + the relationship wiring table) — the operator's
+#     manual-wiring punch list, modeled on multi-ds-plan.json.
+# Raw-text based (handles both plain and _.fcp.-wrapped spellings); works on
+# the same content string the INVENTORY scan uses.
+def detect_object_model(content)
+  features = []
+  detail = []
+  plan_entries = []
+  # Split into datasource chunks (same seam dominant_fact_table uses); only
+  # real datasource DEFINITIONS carry <object-graph>/<relation type='collection'>.
+  content.split(/<datasource\s/).drop(1).each do |chunk|
+    attrs = chunk[/\A([^>]*)>/, 1].to_s
+    ds_name = attrs[/\bname='([^']*)'/, 1]
+    next if ds_name.nil? || ds_name == 'Parameters' || ds_name.start_with?('Parameters ')
+    graph_open = chunk[/<((?:[^<>\s]*\.true\.\.\.)?object-graph)[\s>]/, 1]
+    next unless graph_open
+    graph = chunk[%r{<#{Regexp.escape(graph_open)}[\s>].*?</#{Regexp.escape(graph_open)}>}m] || chunk
+    # Logical tables: object-graph <object id=...> entries; fall back to the
+    # physical collection children when <objects> is absent.
+    object_ids = graph.scan(/<object\s[^>]*\bid='([^']+)'/).flatten
+    rel_names = chunk.scan(/<(?:[^<>\s]*\.\.\.)?relation\s[^>]*?\bname='([^']+)'[^>]*?\btype='(?:table|text)'/m).flatten.uniq
+    logical = object_ids.any? ? object_ids.map { |o| o.sub(/_[0-9A-Fa-f]{16,}\z/, '') } : rel_names
+    logical = logical.uniq
+    next if logical.size <= 1 # single object = legacy-migrated join model — flat table, no noodle semantics
+    rel_blocks = graph.scan(%r{<relationship>.*?</relationship>}m)
+    # Per-relationship wiring status (mirrors what the converter will do).
+    rel_rows = rel_blocks.map do |b|
+      eps = b.scan(/<(?:[^<>\s]*\.\.\.)?(first|second)-end-point\b[^>]*\bobject-id='([^']+)'/)
+      first = eps.find { |k, _| k == 'first' }&.last.to_s
+      second = eps.find { |k, _| k == 'second' }&.last.to_s
+      base = ->(oid) { oid.sub(/_[0-9A-Fa-f]{16,}\z/, '') }
+      resolves = ->(oid) { logical.any? { |l| l == base.call(oid) || oid == l || oid.start_with?("#{l}_") } }
+      has_eq = b =~ /<expression\s[^>]*op='='/
+      phys_ops = b.scan(/<expression\s[^>]*op='\[[^\]']+\]'/).size
+      non_eq = b =~ /op='(?:&lt;|&gt;)=?'|op='!='|op='&lt;&gt;'/
+      status =
+        if first.empty? || second.empty? || !resolves.call(first) || !resolves.call(second)
+          'endpoint-unresolved'
+        elsif has_eq && phys_ops >= 2
+          'wired'
+        elsif has_eq
+          'computed-only-key'
+        elsif non_eq
+          'non-equality-key'
+        else
+          'no-serialized-key'
+        end
+      keys = b.scan(/<expression\s[^>]*op='\[([^\]']+)\]'/).flatten.each_slice(2).to_a
+      { 'first' => base.call(first), 'second' => base.call(second), 'status' => status,
+        'keys' => keys }
+    end
+    degree = Hash.new(0)
+    rel_rows.each { |r| degree[r['first']] += 1; degree[r['second']] += 1 }
+    ranked = degree.sort_by { |_k, v| -v }
+    fact_candidate = ranked[0] && (ranked[1].nil? || ranked[0][1] > ranked[1][1]) ? ranked[0][0] : nil
+    untouched = logical.reject { |l| degree.key?(l) }
+    unwired = rel_rows.reject { |r| r['status'] == 'wired' }
+    caption = attrs[/\bcaption='([^']*)'/, 1] || ds_name
+    plan_entries << {
+      'datasource' => ds_name,
+      'caption' => caption,
+      'objects' => logical,
+      'fact_candidate' => fact_candidate,
+      'relationships' => rel_rows,
+      'untouched_objects' => untouched
+    }
+    detail << { 'datasource' => ds_name, 'caption' => caption, 'objects' => logical.size,
+                'relationships' => rel_rows.size, 'unwired' => unwired.size,
+                'untouched_objects' => untouched }
+    if unwired.any? || untouched.any? || rel_rows.empty?
+      punch = []
+      punch.concat(unwired.map { |r| "#{r['first']}↔#{r['second']}: #{r['status']}" })
+      punch.concat(untouched.map { |t| "#{t}: no relationship touches it" })
+      punch = ['ALL: no <relationship> entries serialized'] if rel_rows.empty?
+      blurb = "One datasource, #{logical.size} logical tables (2020.2+ relationship/object-model), but the DM " \
+              "would contain DISCONNECTED tables: #{punch.join('; ')}. The converter refuses to guess join keys " \
+              '(refuse-don\'t-guess) — each listed pair needs MANUAL wiring: add the relationship LEFT from the ' \
+              'fact (many) side to the unique dim side on the correct key column pair, then re-validate. ' \
+              "Fact candidate by relationship degree: #{fact_candidate || 'AMBIGUOUS — verify'}. Full wiring " \
+              'table: object-graph-plan.json (this directory). To proceed after wiring: patch dm-spec.json and ' \
+              're-enter the gated spine via --reuse-dm (never hand-POST).'
+      features << { name: 'Object-model relationships missing serialized join keys (disconnected tables)',
+                    status: :unhandled, count: (unwired.size + untouched.size).clamp(1, 99), blurb: blurb }
+    else
+      blurb = "One datasource, #{logical.size} logical tables joined by #{rel_rows.size} relationship(s), all " \
+              'carrying serialized equality keys — the converter wires them and ELECTS the fact by evidence ' \
+              "(relationship degree → measure columns → naming → width; candidate here: #{fact_candidate || 'ambiguous'}). " \
+              'VERIFY the "Object-model fact election" line in the converter output names the true fact — every ' \
+              'LOD/Top-N/window helper builds FROM it (override: --fact-table). Wiring table: object-graph-plan.json.'
+      features << { name: 'Relationship (object-model / noodle) datasource — keys serialized',
+                    status: :auto, count: logical.size, blurb: blurb }
+    end
+  end
+  return [[], nil, nil] if plan_entries.empty?
+  [features, detail, { 'object_model' => true, 'datasources' => plan_entries }]
 end
 
 # --- Field-usage + calc-dependency analysis --------------------------------
@@ -674,11 +947,15 @@ def main
   }
 
   results = categorize(content)
+  attribute_worksheets!(results, content, xml) # E9.6/A2: best-effort membership
   results.concat(detect_point_map_geo_role_gaps(content))
   blend_features, blend_plan = detect_blends(xml)
   results.concat(blend_features)
+  results.concat(detect_unions(xml)) # W2.16: emitted (hint) vs refused (❌)
   multi_ds_feature, multi_ds_detail, multi_ds_plan = detect_multi_datasource(xml, blend_plan)
   results << multi_ds_feature if multi_ds_feature
+  object_model_features, object_model_detail, object_model_plan = detect_object_model(content)
+  results.concat(object_model_features)
   md_path = out
   json_path = out.sub(/\.md$/, '.json')
 
@@ -697,6 +974,15 @@ def main
          multi_ds_plan['datasources'].map { |d| "#{d['caption']}→#{d['worksheets'].length} worksheet(s)" }.join(', ') + ')'
   end
 
+  if object_model_plan
+    object_model_plan_path = File.join(File.dirname(File.expand_path(out)), 'object-graph-plan.json')
+    File.write(object_model_plan_path, JSON.pretty_generate(object_model_plan))
+    warn "wrote #{object_model_plan_path} (" +
+         object_model_plan['datasources'].map { |d|
+           "#{d['caption']}: #{d['objects'].length} logical table(s), fact candidate #{d['fact_candidate'] || 'AMBIGUOUS'}"
+         }.join('; ') + ')'
+  end
+
   fields = nil
   begin
     fields = analyze_fields(xml, content) if xml
@@ -711,6 +997,7 @@ def main
   }
   json_payload['field_statistics'] = fields.reject { |k, _| k == 'components' } if fields
   json_payload['multi_datasource'] = multi_ds_detail if multi_ds_detail
+  json_payload['object_model'] = object_model_detail if object_model_detail
   File.write(json_path, JSON.pretty_generate(json_payload))
 
   if fields && !fields['components'].empty?

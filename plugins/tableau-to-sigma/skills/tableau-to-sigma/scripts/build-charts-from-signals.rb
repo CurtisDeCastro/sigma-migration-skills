@@ -123,6 +123,15 @@ opts[:metrics] = (opts[:metrics_file] && File.exist?(opts[:metrics_file]) ?
 # --skip-dashboard-read "<reason>". See scripts/lib/dashboard_read.rb + SKILL.md Phase 1d.
 require_relative 'lib/dashboard_read'
 require_relative 'lib/recipe_multimetric' # rollup_flag validator + caption-variant helpers
+# Evidence ledger (PLAN-v4 E3.1 / E5.11) — optional: png-read-vs-shelf kind
+# divergences are census entries in <WORK>/evidence-ledger.jsonl when the lib
+# is vendored; an older checkout keeps the stderr line only.
+EVIDENCE_LEDGER_LOADED = begin
+  require_relative 'lib/evidence_ledger'
+  true
+rescue LoadError
+  false
+end
 if opts[:skip_dashboard_read]
   warn "[SKIP] dashboard-read gate WAIVED (#{opts[:skip_dashboard_read]}) — name this in your migration report."
   # PR-14: every honored --skip-* leaves a record on the off-ramp trail.
@@ -4260,6 +4269,16 @@ layout.each do |dash|
     if png_ck
       if png_ck != z['chart_kind'].to_s
         warn "[png-read] '#{cap}': verified kind '#{png_ck}' OVERRIDES shelf-inferred '#{z['chart_kind']}' (png-read.json is the source-image truth)"
+        # E5.11 census entry: every png-read-vs-mechanical divergence is
+        # recorded, so a bent Phase-1d transcription can never silently
+        # convert source-vs-built divergence into a passing gate — gate 21
+        # (the single kind-parity comparator) and the punch list read these.
+        if EVIDENCE_LEDGER_LOADED
+          EvidenceLedger.append(opts[:tab], gate: 'build-charts', verdict: 'kind-override',
+                                evidence_kind: 'kind-divergence', evidence_path: 'png-read.json',
+                                detail: { 'tile' => cap.to_s, 'png_kind' => png_ck,
+                                          'shelf_kind' => z['chart_kind'].to_s })
+        end
         z['chart_kind'] = png_ck
       end
       z['chart_kind_inferred'] = false
@@ -7368,7 +7387,10 @@ unless opts[:no_auto_controls]   # default-on: never miss a .twb parameter/filte
             { 'id' => opt_nn_col, 'name' => "#{cap.strip} Not Null",
               'formula' => "IsNotNull([Master/#{m['name']}])" }
           ],
-          'filters' => [{ 'columnId' => opt_nn_col, 'kind' => 'list', 'mode' => 'include',
+          # every element filter needs an `id` — the spec API 400s
+          # `filters[N].id: Invalid string: undefined` without one (field report)
+          'filters' => [{ 'id' => "flt-#{opt_id}-0", 'columnId' => opt_nn_col,
+                          'kind' => 'list', 'mode' => 'include',
                           'selectionMode' => 'multiple', 'values' => [true] }],
           'visibleAsSource' => false
         }
