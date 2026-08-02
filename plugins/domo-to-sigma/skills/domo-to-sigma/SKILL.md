@@ -117,6 +117,7 @@ grid is only 6 wide, so widths scale ×4).
 | `scripts/domo-capture-visuals.rb` | 1b | Render per-card PNG + full-page PDF, normalize card geometry → layout JSON (design-fidelity reference) |
 | `scripts/convert-beast-modes.rb` | 2 | Beast Mode → Sigma: Domo-specific normalize + classify + POST-lint around `convert_sql_to_sigma_formula` |
 | `scripts/find-or-pick-dm.rb` *(vendored)* | 2.5 | Score existing Sigma data models against a signature and recommend reuse (non-destructive) |
+| `scripts/preflight-columns.rb` | 2.9 | Check every mapped dataset's Domo columns against the REAL warehouse table schema (live Sigma catalog lookup); reports gaps + auto-suggests (never auto-applies) a derivation formula for a known pattern |
 | `scripts/build-dm.rb` | 3 | DataSet schema + projection calc columns → Sigma DM spec (clean display names); honors a Phase-2.5 reuse decision |
 | `post-and-readback.rb` *(vendored)* | 4 | POST DM/WB + capture server element IDs / column labels |
 | `scripts/build-workbook.rb` | 5 | Cards → Sigma chart/table/KPI element specs (`chart-specs.json`) + controls |
@@ -354,6 +355,21 @@ metrics before committing to reuse.
 `ruby scripts/build-dm.rb` → one DM element per DataSet (flat table) + calc
 columns from translated Beast Modes. No star schema unless a DataFlow join is in
 scope (out of scope for v1 — DataSets are treated as opaque source tables).
+
+**Pre-flight (Phase 2.9, runs automatically via `migrate-domo.rb`):**
+`ruby scripts/preflight-columns.rb` checks every mapped dataset's Domo columns against the
+real warehouse table's schema before `build-dm.rb` will proceed — a Domo DataSet routinely
+carries columns (derived/computed, or a drifted landed copy) that the mapped warehouse table
+doesn't have, which otherwise only surfaces as an opaque `POST /v2/dataModels/spec` 400. Any
+gap is reported by name in `discovery/column-preflight.json`, with an auto-*suggested* (never
+auto-applied) `columnOverrides` entry when a known derivable pattern matches (e.g. a YYYYMMDD
+integer date key). Resolve via `excludeColumns`/`columnOverrides` in `dataset-map.json`, then
+re-run. Waivable like the doctor-gate: `SIGMA_SKIP_COLUMN_PREFLIGHT="<reason>"`.
+
+Note the one accepted gap: a human-authored `columnOverrides` entry is trusted as "resolved" as
+soon as it's present — the formula it contains is NOT independently re-checked against the
+warehouse, so an override that itself references a column the warehouse doesn't have will still
+only surface as an opaque error at DM POST time, same as before this pre-flight existed.
 
 ---
 
