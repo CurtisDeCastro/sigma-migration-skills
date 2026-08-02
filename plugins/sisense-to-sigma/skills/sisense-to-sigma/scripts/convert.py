@@ -256,16 +256,34 @@ def convert_model(model, connection_id, schema="SISENSE_ECOMMERCE",
     # every element that carries their referenced columns — so the fact element (which
     # the workbook master sources) gets them and the workbook can bind [Metrics/<name>]
     # instead of re-deriving the aggregate inline. No metrics → no change (byte-identical).
-    for m in (metrics or []):
-        cols_needed = _metric_ref_cols(m["formula"])
-        if not cols_needed:
-            continue
-        for el in elements:
-            names = {c["name"] for c in el.get("columns", [])}
-            if cols_needed <= names:
-                bag = el.setdefault("metrics", [])
-                if m["name"] not in {x["name"] for x in bag}:
-                    bag.append({"name": m["name"], "formula": m["formula"]})
+    # Never emit a metric NAMED like a column of its host element: that is the F4
+    # collision shape — Sigma's live readback drops a collision-shaped element's
+    # metrics wholesale, so the shared binder (metric_binding.py) refuses them all
+    # and every governed reference dies. A colliding name whose formula a clean-named
+    # sibling already carries is a duplicate alias (skipped); otherwise the metric is
+    # withheld and the workbook falls back to the inline aggregate (SAFE, flagged).
+    for el in elements:
+        names = {c["name"] for c in el.get("columns", [])}
+        for m in (metrics or []):
+            cols_needed = _metric_ref_cols(m["formula"])
+            if not cols_needed or not cols_needed <= names:
+                continue
+            bag = el.get("metrics") or []
+            if m["name"] in {x["name"] for x in bag}:
+                continue
+            if m["name"] in names:
+                covered = (m["formula"] in {x["formula"] for x in bag}
+                           or any(x["formula"] == m["formula"] and x["name"] not in names
+                                  for x in (metrics or []) if x is not m))
+                flags.append({"metric": m["name"], "element": el.get("name") or el.get("id"),
+                              "reason": "metric name collides with a column of its host element "
+                                        "(F4 collision shape — readback drops the element's metrics "
+                                        "wholesale); "
+                                        + ("duplicate alias of a clean-named metric — skipped"
+                                           if covered else
+                                           "withheld — the workbook falls back to the inline aggregate")})
+                continue
+            el.setdefault("metrics", []).append({"name": m["name"], "formula": m["formula"]})
     spec = {"name": name or f"{model.get('title', 'Model')} (from Sisense)",
             "pages": [{"id": "p1", "name": "Model", "elements": elements}]}
     return spec, flags
