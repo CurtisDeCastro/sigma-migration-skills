@@ -2988,10 +2988,10 @@ function _restoreRawTableauLiterals(s, lits) {
 }
 function _tabLitInner(lits, idxStr) {
   const raw = lits[Number(idxStr)];
-  return raw === void 0 ? "" : raw.slice(1, -1).replace(/\\(.)/g, "$1");
+  return raw === void 0 ? "" : raw.slice(1, -1).replace(/\\(['"])/g, "$1");
 }
 function _tabEscapeForSigma(inner) {
-  return inner.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  return inner.replace(/"/g, '\\"');
 }
 function _unmaskTableauLiterals(s, lits) {
   return s.replace(_TABLEAU_SENTINEL_RE, (_m, i) => `"${_tabEscapeForSigma(_tabLitInner(lits, i))}"`);
