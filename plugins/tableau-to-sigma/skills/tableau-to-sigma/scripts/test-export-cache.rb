@@ -737,12 +737,16 @@ PC_STUB = <<~'RUBY'
   require 'json'
   module Sigma
     class Error < StandardError; end
+    def self.list_entries(path, limit: 1000, http: nil)
+      data = request(:get, "#{path}?limit=#{limit}", http: http)
+      (data.is_a?(Hash) ? data['entries'] : data) || []
+    end
     def self.request(method, path, body: nil, accept: nil, binary: false, content_type: nil, http: nil)
       rec = { 'm' => method.to_s, 'p' => path }
       rec['body'] = body if body
       File.open(ENV['PC_LOG'], 'a') { |f| f.puts(JSON.generate(rec)) }
       return File.read(ENV['PC_SPEC']) if method == :get && path.end_with?('/spec')
-      if method == :get && path.end_with?('/columns')
+      if method == :get && path.split('?').first.end_with?('/columns')
         return { 'entries' => [{ 'elementId' => 'el-data', 'columnId' => 'c-reg', 'label' => 'Region' }] }
       end
       if method == :post && path.include?('/export')

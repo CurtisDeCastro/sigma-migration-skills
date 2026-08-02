@@ -68,6 +68,9 @@ STUB = <<~'RUBY'
       return {} if method == :delete && path.start_with?('/v2/files/')
       raise Error, "stub: unexpected #{method} #{path}"
     end
+    def self.list_entries(path, limit: 1000, http: nil)
+      (request(:get, path, http: http) || {})['entries'] || []
+    end
   end
   real = ENV['REAL_SIGMA_REST']
   $LOADED_FEATURES << real if real && !$LOADED_FEATURES.include?(real)

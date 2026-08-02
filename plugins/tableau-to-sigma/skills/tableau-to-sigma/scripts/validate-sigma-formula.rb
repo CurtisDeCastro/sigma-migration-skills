@@ -412,6 +412,11 @@ at_exit { delete_probe.call('at_exit') unless opts[:keep] }
 # Sigma.request calls in this script); the armed at_exit still deletes the
 # probe workbook on that path.
 entries = Sigma.list_entries("/v2/workbooks/#{wb_id}/elements/el-scout-test/columns")
+# The spec POSTed above always carries at least the probe column, so an empty
+# readback is a protocol failure (non-JSON/non-Hash body defensively swallowed
+# by list_entries, or a server-side truncation) — never a gradable "ok". Raise
+# before the ensure-delete so the armed at_exit owns the cleanup on this path.
+raise Sigma::Error, 'columns readback returned no entries — refusing to grade' if entries.empty?
 error_cols = entries.select do |c|
   t = c['type']
   tt = t.is_a?(Hash) ? t['type'] : t
