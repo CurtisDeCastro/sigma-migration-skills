@@ -76,7 +76,8 @@ module WarehouseColumnsPagination
         end
       break if next_cursor.nil? || next_cursor.to_s.empty?
       if seen[next_cursor]
-        warn "#{path}: server repeated cursor #{next_cursor.inspect} — " \
+        cursor_label = cursor_param == 'page' ? 'nextPage token' : 'nextPageToken cursor'
+        warn "#{path}: server repeated #{cursor_label} #{next_cursor.inspect} — " \
              "stopping after #{pages} page(s) to avoid an infinite loop (list may be incomplete)"
         break
       end
