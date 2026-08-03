@@ -133,10 +133,14 @@ for p in paths:
     # vendor_arg (when present) is the RECORDED tools/vendor-converters.sh arg
     # for this plugin — needed because domo's module basename ("sql") is NOT
     # its vendor arg ("domo"); vendored_modules alone would suggest running
-    # `tools/vendor-converters.sh <checkout> sql`, a silent no-op (not a
-    # registered converter). Falls back to the vendored_modules-derived guess
-    # for the mainline 6, which have no vendor_arg field and where the guess
-    # is correct (module basename == vendor arg == upstream src file basename).
+    # tools/vendor-converters.sh with the arg "sql", a silent no-op (not a
+    # registered converter). NOTE: this comment intentionally avoids backticks
+    # — this whole block is embedded in a bash python3 -c "..." DOUBLE-quoted
+    # string, where a backtick pair triggers bash command substitution before
+    # python ever sees the text (a real bug this exact comment tripped over).
+    # Falls back to the vendored_modules-derived guess for the mainline 6,
+    # which have no vendor_arg field and where the guess is correct (module
+    # basename == vendor arg == upstream src file basename).
     vendor_arg = d.get('vendor_arg')
     if vendor_arg:
         mod = vendor_arg
