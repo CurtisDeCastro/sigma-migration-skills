@@ -121,7 +121,14 @@ else
 end
 
 puts
-if fails.empty?
+if !node_present
+  # Zero fixtures ran — 'fails' is empty by construction, not because anything
+  # was verified. Never print the bare "ALL PASS" string here: a CI consumer
+  # that only checks the final line or exit code must not read a
+  # zero-coverage run as a clean, fully-exercised pass.
+  puts "SKIPPED — 0/#{FIXTURES.size + RESIDUAL_FIXTURES.size} fixtures exercised (node absent). This is NOT a verified pass."
+  exit 0
+elsif fails.empty?
   puts 'ALL PASS'
   exit 0
 else
