@@ -130,8 +130,19 @@ for p in paths:
         fail = True
         continue
     age = (today - pinned).days
-    mod = (d.get('vendored_modules') or '').split(',')[0].strip()
-    mod = mod[:-4] if mod.endswith('.mjs') else (mod or '<module>')
+    # vendor_arg (when present) is the RECORDED tools/vendor-converters.sh arg
+    # for this plugin — needed because domo's module basename ("sql") is NOT
+    # its vendor arg ("domo"); vendored_modules alone would suggest running
+    # `tools/vendor-converters.sh <checkout> sql`, a silent no-op (not a
+    # registered converter). Falls back to the vendored_modules-derived guess
+    # for the mainline 6, which have no vendor_arg field and where the guess
+    # is correct (module basename == vendor arg == upstream src file basename).
+    vendor_arg = d.get('vendor_arg')
+    if vendor_arg:
+        mod = vendor_arg
+    else:
+        mod = (d.get('vendored_modules') or '').split(',')[0].strip()
+        mod = mod[:-4] if mod.endswith('.mjs') else (mod or '<module>')
     if age > stale_days:
         # A bundle carrying an OPEN local_patches entry (not yet landed upstream) is
         # pinned ON PURPOSE — re-vendoring drops the patch. Hard-failing it demanded
@@ -202,8 +213,14 @@ print("in-skill" if "source_repo" not in d else "vendored")')"
     [ "$kind" = "vendored" ] || continue
     commit="$(printf '%s' "$d" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("source_commit") or "")')"
     mod="$(printf '%s' "$d" | python3 -c 'import json,sys; m=(json.load(sys.stdin).get("vendored_modules") or "").split(",")[0].strip(); print(m[:-4] if m.endswith(".mjs") else m)')"
+    # source_file (when present) is the RECORDED upstream path — needed
+    # because domo vendors src/formulas.ts, not src/sql.ts (module basename
+    # "sql" is unrelated to its real upstream source file). Falls back to the
+    # src/<mod>.ts guess for the mainline 6, which have no source_file field
+    # and where the guess is correct.
+    recorded_srcfile="$(printf '%s' "$d" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("source_file") or "")')"
     [ -n "$commit" ] || continue
-    srcfile="src/$mod.ts"
+    srcfile="${recorded_srcfile:-src/$mod.ts}"
     if ! git -C "$CHECKOUT" cat-file -e "$UP_HEAD:$srcfile" 2>/dev/null; then
       echo "  ? $p: $srcfile not found at $CHECKOUT HEAD ($UP_HEAD) — skipping live compare for this module"
       continue

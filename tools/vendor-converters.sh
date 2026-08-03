@@ -98,7 +98,26 @@ for mod in "${WANT[@]}"; do
       if (missing.length) { console.error('FATAL: $out missing exports: ' + missing.join(', ')); process.exit(1); }
     "
     echo "✓ $skill/converter/sql.mjs  ($(du -h "$out" | cut -f1))  [vendored from formulas.ts, custom export check]"
-    case "$STAMPED_DIRS" in *"|$dest|"*) : ;; *) STAMPED_DIRS="$STAMPED_DIRS|$dest|" ;; esac
+    # Domo is NOT added to STAMPED_DIRS: the shared post-loop block below
+    # writes a PROVENANCE.json shape that assumes vendored_modules' basename
+    # doubles as both the vendor-converters.sh arg AND the upstream src/<mod>.ts
+    # file — true for the mainline 6, false for domo (arg is "domo", upstream
+    # source is src/formulas.ts, not src/sql.ts). Write domo's own complete
+    # PROVENANCE.json here instead, with the two extra fields
+    # tools/check-converter-provenance.sh needs to get both right.
+    cat > "$dest/PROVENANCE.json" <<EOF
+{
+  "source_repo": "twells89/sigma-data-model-mcp",
+  "source_commit": "$SHA",
+  "source_commit_date": "$DATE",
+  "bundler": "esbuild --bundle --format=esm --platform=node",
+  "vendored_modules": "sql.mjs",
+  "source_file": "src/formulas.ts",
+  "vendor_arg": "domo",
+  "note": "Self-contained bundled artifacts, not source. Refresh with tools/vendor-converters.sh after the converter repo changes."
+}
+EOF
+    echo "✓ $skill/converter/PROVENANCE.json  [domo's own — source_file=src/formulas.ts, vendor_arg=domo]"
     continue
   fi
 
@@ -116,11 +135,16 @@ for mod in "${WANT[@]}"; do
   case "$STAMPED_DIRS" in *"|$dest|"*) : ;; *) STAMPED_DIRS="$STAMPED_DIRS|$dest|" ;; esac
 done
 
-# one PROVENANCE.json per touched skill converter dir
-echo "$STAMPED_DIRS" | tr '|' '\n' | grep -v '^$' | sort -u | while read -r dest; do
-  [ -d "$dest" ] || continue
-  mods=$(ls "$dest"/*.mjs 2>/dev/null | xargs -n1 basename | paste -sd, -)
-  cat > "$dest/PROVENANCE.json" <<EOF
+# one PROVENANCE.json per touched skill converter dir (generic shape — domo
+# is deliberately never added to STAMPED_DIRS; it writes its own complete
+# PROVENANCE.json above, right after its bundle is built). A domo-only run
+# leaves STAMPED_DIRS empty — guard the pipeline so `grep -v '^$'` finding no
+# lines (exit 1) doesn't abort the script under `set -euo pipefail`.
+if [ -n "$STAMPED_DIRS" ]; then
+  echo "$STAMPED_DIRS" | tr '|' '\n' | grep -v '^$' | sort -u | while read -r dest; do
+    [ -d "$dest" ] || continue
+    mods=$(ls "$dest"/*.mjs 2>/dev/null | xargs -n1 basename | paste -sd, -)
+    cat > "$dest/PROVENANCE.json" <<EOF
 {
   "source_repo": "twells89/sigma-data-model-mcp",
   "source_commit": "$SHA",
@@ -130,6 +154,7 @@ echo "$STAMPED_DIRS" | tr '|' '\n' | grep -v '^$' | sort -u | while read -r dest
   "note": "Self-contained bundled artifacts, not source. Refresh with tools/vendor-converters.sh after the converter repo changes."
 }
 EOF
-done
+  done
+fi
 
 echo "Done — source $SHA ($DATE). Commit the converter/ diffs."
