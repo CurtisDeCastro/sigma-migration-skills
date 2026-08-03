@@ -7,6 +7,7 @@
 require_relative '../scripts/convert-beast-modes'
 require 'json'
 require 'tmpdir'
+require 'fileutils'
 
 SCRIPT = File.expand_path('../scripts/convert-beast-modes.rb', __dir__)
 
@@ -207,6 +208,126 @@ Dir.mktmpdir('convert-beast-modes-no-overrides') do |dir|
   final = JSON.parse(File.read(out_path))
   ok(final.empty?, 'with no override and no sigmaFormula, the entry is still honestly dropped')
   ok(output.include?('Untranslated Metric'), 'the unresolved Beast Mode is still named in the drop warning')
+end
+
+# ---------------------------------------------------------------------------
+# resolve_sql_converter — Track E's 3-tier resolution (vendored default,
+# --mcp-dir/DOMO_MCP_DIR dev override, nil when neither resolves).
+# ---------------------------------------------------------------------------
+
+puts '== resolve_sql_converter: vendored bundle wins when no mcp_dir given =='
+Dir.mktmpdir('resolve-sql-conv') do |dir|
+  vendored = File.join(dir, 'sql.mjs')
+  File.write(vendored, '// fake bundle')
+  File.write(File.join(dir, 'PROVENANCE.json'), JSON.generate({ 'source_commit' => 'abc1234' }))
+  conv, dev_dir, desc = resolve_sql_converter(nil, vendored)
+  ok(conv == vendored, 'resolves to the vendored path')
+  ok(dev_dir.nil?, 'no dev build dir reported')
+  ok(desc.include?('VENDORED') && desc.include?('abc1234'), 'description names VENDORED + pinned commit')
+end
+
+puts '== resolve_sql_converter: --mcp-dir wins over vendored when both present =='
+Dir.mktmpdir('resolve-sql-conv-dev') do |dir|
+  vendored = File.join(dir, 'sql.mjs')
+  File.write(vendored, '// fake bundle')
+  mcp_dir = File.join(dir, 'mcp')
+  FileUtils.mkdir_p(File.join(mcp_dir, 'build'))
+  File.write(File.join(mcp_dir, 'build', 'formulas.js'), '// fake dev build')
+  conv, dev_dir, desc = resolve_sql_converter(mcp_dir, vendored)
+  ok(conv == File.join(mcp_dir, 'build', 'formulas.js'), 'resolves to the dev build, not vendored')
+  # resolve_sql_converter's 2nd tuple element is `dev_module` (the full resolved
+  # path), per the function's own doc comment and Step 7's usage — not the bare
+  # --mcp-dir. Same value as `conv` in this tier, since dev_module wins.
+  ok(dev_dir == File.join(mcp_dir, 'build', 'formulas.js'), 'dev build module path reported')
+  ok(desc.include?('DEV BUILD') && desc.include?('explicit opt-in'), 'description names DEV BUILD + opt-in')
+end
+
+puts '== resolve_sql_converter: nil when neither vendored nor --mcp-dir resolve =='
+Dir.mktmpdir('resolve-sql-conv-none') do |dir|
+  conv, dev_dir, desc = resolve_sql_converter(nil, File.join(dir, 'does-not-exist.mjs'))
+  ok(conv.nil?, 'no converter resolves')
+  ok(dev_dir.nil?, 'no dev dir')
+  ok(desc.nil?, 'no description when nothing resolves')
+end
+
+# ---------------------------------------------------------------------------
+# --convert CLI mode — plumbing test against a hand-authored FAKE stub module
+# (deterministic, no dependency on the real vendored bundle's translation
+# accuracy — that's covered separately by test-convert-beast-modes-fixtures.rb
+# against the real converter/sql.mjs). Exercises: shim generation, node
+# invocation, result merge, and the converted:false marking.
+# ---------------------------------------------------------------------------
+
+puts '== CLI --convert: dev-build tier (--mcp-dir) runs the fake stub end-to-end =='
+node_present = begin
+  _o, _e, st = Open3.capture3('node', '--version')
+  st.success?
+rescue Errno::ENOENT
+  false
+end
+
+if node_present
+  Dir.mktmpdir('convert-mode-fake-stub') do |dir|
+    mcp_dir = File.join(dir, 'fake-mcp')
+    FileUtils.mkdir_p(File.join(mcp_dir, 'build'))
+    File.write(File.join(mcp_dir, 'build', 'formulas.js'), <<~JS)
+      export function lookSqlToSigmaRules(sql) {
+        return sql.startsWith('FAIL_RULES') ? null : `RULES(${sql})`;
+      }
+      export function lookConvertExpression(sql) { return `EXPR(${sql})`; }
+      export function hasResidualCaseKeyword(s) { return s.includes('BADCASE'); }
+      export function hasResidualInfixOperator(s) { return s.includes('BADINFIX'); }
+      export function lookUnknownFunctions(sql) { return sql.includes('UNKNOWNFN') ? ['UNKNOWNFN'] : []; }
+    JS
+
+    pending_path = File.join(dir, 'formulas.pending.json')
+    out_path     = File.join(dir, 'formulas.pending.json') # in place
+    File.write(pending_path, JSON.generate([
+      { 'id' => 'calculation_clean-1', 'name' => 'Clean One', 'normalizedSql' => 'SUM([x])', 'sigmaFormula' => nil },
+      { 'id' => 'calculation_fallback-1', 'name' => 'Fallback One', 'normalizedSql' => 'FAIL_RULES SUM([x])', 'sigmaFormula' => nil },
+      { 'id' => 'calculation_badcase-1', 'name' => 'Bad Case One', 'normalizedSql' => 'BADCASE([x])', 'sigmaFormula' => nil },
+      { 'id' => 'calculation_unknownfn-1', 'name' => 'Unknown Fn One', 'normalizedSql' => 'UNKNOWNFN([x])', 'sigmaFormula' => nil },
+    ]))
+
+    cmd = ['ruby', SCRIPT, '--convert', '--mcp-dir', mcp_dir, '--in', pending_path, '--out', out_path]
+    output = IO.popen(cmd, err: [:child, :out], &:read)
+    ok($?.success?, "--convert exits 0 against a fake dev-build stub\n#{output unless $?.success?}")
+    ok(output.include?('DEV BUILD') && output.include?('explicit opt-in'), 'stderr names the DEV BUILD tier')
+
+    result = JSON.parse(File.read(out_path))
+    by_id = {}
+    result.each { |e| by_id[e['id']] = e }
+
+    ok(by_id['calculation_clean-1']['sigmaFormula'] == 'RULES(SUM([x]))', 'rule-engine path used when it returns non-null')
+    ok(by_id['calculation_clean-1']['converted'] == true, 'clean formula marked converted:true')
+
+    ok(by_id['calculation_fallback-1']['sigmaFormula'] == 'EXPR(FAIL_RULES SUM([x]))', 'falls back to lookConvertExpression when rules return null')
+
+    ok(by_id['calculation_badcase-1']['sigmaFormula'] == 'RULES(BADCASE([x]))', 'residual-flagged formula is still emitted, never dropped')
+    ok(by_id['calculation_badcase-1']['converted'] == false, 'residual CASE keyword marks converted:false')
+    ok(by_id['calculation_badcase-1']['note'].to_s.include?('Could not fully translate'), 'converted:false entry carries a note')
+
+    ok(by_id['calculation_unknownfn-1']['warnings'].any? { |w| w.include?('UNKNOWNFN') }, 'lookUnknownFunctions warning surfaced per entry')
+  end
+
+  puts '== CLI --convert: --converter-out tier-3 resume merges by id =='
+  Dir.mktmpdir('convert-mode-tier3') do |dir|
+    pending_path = File.join(dir, 'formulas.pending.json')
+    conv_out     = File.join(dir, 'manual-mcp-results.json')
+    File.write(pending_path, JSON.generate([
+      { 'id' => 'calculation_manual-1', 'name' => 'Manual One', 'normalizedSql' => 'SUM([x])', 'sigmaFormula' => nil },
+    ]))
+    File.write(conv_out, JSON.generate([
+      { 'id' => 'calculation_manual-1', 'sigmaFormula' => 'Sum([x])', 'converted' => true, 'warnings' => [] },
+    ]))
+    cmd = ['ruby', SCRIPT, '--convert', '--converter-out', conv_out, '--in', pending_path, '--out', pending_path]
+    output = IO.popen(cmd, err: [:child, :out], &:read)
+    ok($?.success?, "--converter-out resume exits 0\n#{output unless $?.success?}")
+    result = JSON.parse(File.read(pending_path))
+    ok(result.first['sigmaFormula'] == 'Sum([x])', 'manual MCP result merged into the pending file by id')
+  end
+else
+  puts '== CLI --convert: SKIPPED (node not on PATH) =='
 end
 
 puts

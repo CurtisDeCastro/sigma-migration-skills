@@ -87,8 +87,36 @@
 
 require 'json'
 require 'optparse'
+require 'open3'
+require 'tmpdir'
 
 OUT = ENV['DOMO_DISCOVERY_DIR'] || File.expand_path('../discovery', __dir__)
+
+# Track E — the vendored SQL-formula converter (tools/vendor-converters.sh domo).
+VENDORED_SQL = File.expand_path('../converter/sql.mjs', __dir__)
+
+# Converter resolution, same 3-tier ladder as powerbi-to-sigma's
+# migrate-powerbi.rb#resolve_converter: the vendored bundle is the DEFAULT (byte-
+# identical output on any machine); a local sigma-data-model-mcp build is used
+# ONLY when explicitly opted into via --mcp-dir/DOMO_MCP_DIR — no silent ~/…
+# auto-discovery (that's the "works in my checkout, differs for the customer"
+# footgun powerbi's own comment names). If neither resolves, the caller's
+# --convert branch takes the last-resort exit-10 path. Returns
+# [conv_module_path_or_nil, dev_build_dir_or_nil, description_or_nil].
+def resolve_sql_converter(mcp_dir, vendored)
+  dev_module = (mcp_dir && File.exist?(File.join(mcp_dir, 'build', 'formulas.js'))) ?
+    File.join(mcp_dir, 'build', 'formulas.js') : nil
+  conv = dev_module || (File.exist?(vendored) ? vendored : nil)
+  desc =
+    if conv && conv == vendored
+      prov = File.join(File.dirname(vendored), 'PROVENANCE.json')
+      commit = (JSON.parse(File.read(prov))['source_commit'] rescue nil)
+      "VENDORED converter/sql.mjs#{commit ? " (pinned #{commit})" : ''} — no data egress"
+    elsif conv
+      "DEV BUILD #{conv} (explicit opt-in via --mcp-dir/DOMO_MCP_DIR)"
+    end
+  [conv, dev_module, desc]
+end
 
 # Removed from Beast Mode / unsupported in Sigma — warn if seen.
 UNSUPPORTED = %w[SQRT CONVERT_TZ MICROSECOND WEEKDAY].freeze
@@ -231,6 +259,16 @@ def resolve_entry(entry, overrides)
       "and this script's still-open gaps (WEEKDAY→DAYOFWEEK, CEILING/FLOOR " \
       "aggregates, untranslatable infix LIKE) for what actually still needs a " \
       "hand-authored formula."
+  elsif entry['converted'] == false
+    # Track E: --convert already computed a REAL converted flag (via the
+    # vendored hasResidualCaseKeyword/hasResidualInfixOperator) — surface it
+    # loudly here rather than letting a "flagged unreliable but still has SOME
+    # string in sigmaFormula" entry ride through --lint silently. Does NOT
+    # change override-eligibility (still fills-missing-only, unchanged) — this
+    # is visibility only.
+    warnings << "#{entry['name'] || entry['id']}: automated conversion flagged this formula as " \
+      "converted:false (still contains raw CASE/WHEN/THEN or an infix LIKE/BETWEEN Sigma has no " \
+      "equivalent for) — review before shipping; consider a discovery/formula-overrides.json entry."
   end
   [resolved, warnings]
 end
@@ -247,12 +285,106 @@ if run_main
 opts = {}
 OptionParser.new do |o|
   o.on('--lint') { opts[:lint] = true }
+  o.on('--convert') { opts[:convert] = true }
   o.on('--in PATH')  { |v| opts[:in] = v }
   o.on('--out PATH') { |v| opts[:out] = v }
   o.on('--overrides PATH') { |v| opts[:overrides] = v }
+  # Track E 3-tier resolution: --mcp-dir/DOMO_MCP_DIR (tier 2, explicit dev
+  # opt-in) and --converter-out (tier 3 resume — an agent-produced JSON array
+  # of [{id, sigmaFormula, converted, warnings, note?}] filled by hand via the
+  # manual convert_sql_to_sigma_formula MCP call the exit-10 path prints).
+  o.on('--mcp-dir DIR') { |v| opts[:mcp_dir] = File.expand_path(v) }
+  o.on('--converter-out PATH') { |v| opts[:converter_out] = v }
 end.parse!(ARGV)
 
-if opts[:lint]
+if opts[:convert]
+  # ---- Track E: run the SQL-formula converter over the whole pending file,
+  # one node invocation, no agent/MCP call in the loop ----------------------
+  path = opts[:in] || File.join(OUT, 'formulas.pending.json')
+  pending = JSON.parse(File.read(path))
+
+  if opts[:converter_out]
+    # Tier 3 resume: an agent already ran convert_sql_to_sigma_formula by hand
+    # per the exit-10 instructions below and saved [{id, sigmaFormula,
+    # converted, warnings, note?}] to this file. Merge by id; never clobber
+    # fields this tier doesn't supply.
+    filled = JSON.parse(File.read(opts[:converter_out]))
+    by_id = {}
+    filled.each { |e| by_id[e['id']] = e }
+    pending.each do |e|
+      src = by_id[e['id']]
+      next unless src
+      e['sigmaFormula'] = src['sigmaFormula']
+      e['converted']    = src['converted']
+      e['warnings']     = src['warnings']
+      e['note']         = src['note'] if src['note']
+    end
+    out = opts[:out] || path
+    File.write(out, JSON.pretty_generate(pending))
+    warn "  filled #{filled.size} formula(s) from --converter-out #{opts[:converter_out]}"
+    exit 0
+  end
+
+  conv, _dev_dir, desc = resolve_sql_converter(opts[:mcp_dir] || ENV['DOMO_MCP_DIR'], VENDORED_SQL)
+  if conv.nil?
+    warn '  vendored converter (converter/sql.mjs) missing and no local sigma-data-model-mcp ' \
+         'build (--mcp-dir / DOMO_MCP_DIR).'
+    warn ''
+    warn '  >>> GATE: for EACH entry in discovery/formulas.pending.json, call'
+    warn '      convert_sql_to_sigma_formula(sql: normalizedSql), collect the result as'
+    warn '      {id, sigmaFormula, converted, warnings, note?}, write the whole array to a'
+    warn '      JSON file, then re-run:'
+    warn '        ruby scripts/convert-beast-modes.rb --convert --converter-out <that file>'
+    warn '      No formulas were translated.'
+    exit 10
+  end
+  warn "  converter: #{desc}"
+
+  import_specifier =
+    (Gem.win_platform? && conv.to_s.match?(/\A[A-Za-z]:/)) ? 'file:///' + conv.gsub('\\', '/') : conv
+
+  Dir.mktmpdir('domo-convert') do |dir|
+    in_path  = File.join(dir, 'pending.json')
+    res_path = File.join(dir, 'results.json')
+    File.write(in_path, JSON.generate(pending))
+
+    runner = File.join(dir, 'run.mjs')
+    File.write(runner, <<~JS)
+      import { readFileSync, writeFileSync } from 'node:fs';
+      import { lookSqlToSigmaRules, lookConvertExpression, hasResidualCaseKeyword, hasResidualInfixOperator, lookUnknownFunctions } from #{import_specifier.to_json};
+      const pending = JSON.parse(readFileSync(#{in_path.to_json}, 'utf8'));
+      // Same per-formula orchestration as sigma-data-model-mcp's src/tools.ts
+      // convert_sql_to_sigma_formula tool handler — try the rule engine first,
+      // fall back to the total mechanical converter, then check for residual
+      // untranslated SQL syntax the same way the live tool already does.
+      const NOTE = 'Could not fully translate — output still contains raw SQL syntax Sigma has no equivalent for (CASE/WHEN/THEN, or an infix LIKE/BETWEEN), do not use as-is';
+      const out = pending.map((entry) => {
+        const sql = entry.normalizedSql;
+        const warnings = lookUnknownFunctions(sql).map(fn => `${fn}() has no Sigma mapping — emitted as-is; verify it exists in Sigma.`);
+        let sigmaFormula = lookSqlToSigmaRules(sql);
+        if (sigmaFormula == null) sigmaFormula = lookConvertExpression(sql);
+        const converted = !hasResidualCaseKeyword(sigmaFormula) && !hasResidualInfixOperator(sigmaFormula);
+        const result = { ...entry, sigmaFormula, converted, warnings };
+        if (!converted) result.note = NOTE;
+        return result;
+      });
+      writeFileSync(#{res_path.to_json}, JSON.stringify(out));
+    JS
+
+    _stdout, stderr, status = Open3.capture3('node', runner)
+    abort "FATAL: converter failed:\n#{stderr}" unless status.success?
+    pending = JSON.parse(File.read(res_path))
+  end
+
+  out = opts[:out] || path
+  File.write(out, JSON.pretty_generate(pending))
+  unreliable = pending.count { |e| e['converted'] == false }
+  if unreliable.positive?
+    warn "  wrote #{out} (#{pending.size} formulas; #{unreliable} flagged converted:false — review before --lint)"
+  else
+    warn "  wrote #{out} (#{pending.size} formulas, all converted:true)"
+  end
+elsif opts[:lint]
   # ---- Validate a filled pending file → formulas.json --------------------
   path = opts[:in] || File.join(OUT, 'formulas.pending.json')
   pending = JSON.parse(File.read(path))
@@ -312,8 +444,7 @@ else
   require 'fileutils'; FileUtils.mkdir_p(OUT)
   File.write(out, JSON.pretty_generate(pending))
   warn "  wrote #{out} (#{pending.size} Beast Modes to translate)"
-  warn "\n  Next (Phase 2): for each entry call convert_sql_to_sigma_formula(sql: normalizedSql),"
-  warn "  write the result into `sigmaFormula`, apply preWarning overrides (CEILING/FLOOR/window/LOD),"
-  warn "  then: ruby scripts/convert-beast-modes.rb --lint"
+  warn "\n  Next (Phase 2): ruby scripts/convert-beast-modes.rb --convert   # local node, no MCP call"
+  warn "  then:            ruby scripts/convert-beast-modes.rb --lint"
 end
 end
