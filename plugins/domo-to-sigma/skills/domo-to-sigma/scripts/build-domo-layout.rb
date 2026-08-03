@@ -153,6 +153,24 @@ def kind_hint(chart_type)
   'bar-chart'
 end
 
+# Zone caption for a card. KPI-kind cards must match the name build_kpi
+# (build-workbook.rb) will actually give the built Sigma element -- it prefers
+# the card's Summary Number label over the card's own title (Domo lets an
+# author label a tile differently from the card's title; the label is what
+# actually renders ON the KPI). Every zone-building path in this file used the
+# card's title unconditionally, so a KPI whose summaryNumber.label differs
+# from its title (e.g. a card titled "Units Ordered" labeled "Units" on the
+# tile itself) got a zone build-dashboard-layout.rb's name-based matcher could
+# never find, silently dropping it into the generic bottom-band fallback
+# (bead wmkf).
+def zone_caption_for(card, chart_kind)
+  if chart_kind == 'kpi'
+    label = card['summaryNumber'] && card['summaryNumber']['label']
+    return label unless label.to_s.strip.empty?
+  end
+  card['title']
+end
+
 # Build one dashboard's zone tree from its own geometry-bearing cards (already
 # scoped to one page by the caller). `cards` — this page's cards.json records
 # that carry x/y/w/h (Task 1's merge_geometry). `name` — the page title, used
@@ -175,7 +193,7 @@ def build_dashboard(name, cards)
       'w_pct'     => (c['w'].to_f * 100.0 / max_x).round(2),
       'h_pct'     => (c['h'].to_f * 100.0 / max_y).round(2),
       'kind'      => is_filter ? 'filter' : 'chart',
-      'caption'   => c['title'],
+      'caption'   => zone_caption_for(c, kh),
       'chart_kind'=> is_filter ? nil : kh,
       # non-empty so ZoneCensus.plots? counts a data card as a real tile
       'measures'  => is_filter ? [] : ['value'],
@@ -255,7 +273,7 @@ def build_dashboard_with_observed(name, cards, observed, kind_map)
       'w_pct'      => (o['w'].to_f * 100.0).round(2),
       'h_pct'      => (o['h'].to_f * 100.0).round(2),
       'kind'       => is_filter ? 'filter' : 'chart',
-      'caption'    => c['title'],
+      'caption'    => zone_caption_for(c, kh),
       'chart_kind' => is_filter ? nil : kh,
       'measures'   => is_filter ? [] : ['value'],
       'children'   => [],
@@ -811,7 +829,7 @@ def build_dashboard_from_collections(name, cards, kind_map = {})
       row_h = rg['height'] || row.map { |c, _x, _w, _ck, _f| card_height_units(c) }.max
       row.each do |c, x, w, chart_kind, is_filter|
         raw << {
-          'kind' => is_filter ? 'filter' : 'chart', 'id' => c['id'], 'caption' => c['title'],
+          'kind' => is_filter ? 'filter' : 'chart', 'id' => c['id'], 'caption' => zone_caption_for(c, chart_kind),
           'chart_kind' => is_filter ? nil : chart_kind, 'x' => x, 'y' => y, 'w' => w, 'h' => row_h,
           'measures' => is_filter ? [] : ['value'],
         }
@@ -868,7 +886,7 @@ def build_stack_fallback(name, cards)
       'w_pct'      => 100.0,
       'h_pct'      => (100.0 / n).round(2),
       'kind'       => is_filter ? 'filter' : 'chart',
-      'caption'    => c['title'],
+      'caption'    => zone_caption_for(c, kh),
       'chart_kind' => is_filter ? nil : kh,
       'measures'   => is_filter ? [] : ['value'],
       'children'   => [],
