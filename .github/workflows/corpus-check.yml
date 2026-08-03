@@ -310,6 +310,7 @@ jobs:
             shared/lib/test_metric_binding.rb
             shared/lib/test_phase_metrics.rb
             shared/scripts/test-intake-triage.rb
+            shared/scripts/test-assert-phase6.rb
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-intake-triage.rb
             plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/test-validate-sigma-formula-cleanup.rb
             # shared/scripts/test-validate-sigma-formula-cleanup.rb is INTENTIONALLY not listed: standalone it
