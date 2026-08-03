@@ -54,8 +54,9 @@ card→element map.
 ## The one big idea
 
 **Beast Mode is MySQL-dialect SQL.** Domo's calc-field language routes through the
-existing `mcp__sigma-data-model__convert_sql_to_sigma_formula` tool — no bespoke
-parser like Power BI's DAX.
+vendored `converter/sql.mjs` (`scripts/convert-beast-modes.rb --convert`,
+running locally via `node` — no MCP call, no network) — no bespoke parser
+like Power BI's DAX.
 
 > ✅ **UPDATED 2026-07-30 — the historical "NOT nearly free" finding is
 > RESOLVED, with a calibrated result, not a swing to "it just works."** A live
@@ -115,7 +116,7 @@ grid is only 6 wide, so widths scale ×4).
 | `scripts/lib/domo_rest.rb` | prereq | Domo REST wrapper (public + private), auto token refresh |
 | `scripts/domo-discover.rb` | 1 | Enumerate DataSets, pages, cards; pull schemas + (private) card defs + Beast Modes |
 | `scripts/domo-capture-visuals.rb` | 1b | Render per-card PNG + full-page PDF, normalize card geometry → layout JSON (design-fidelity reference) |
-| `scripts/convert-beast-modes.rb` | 2 | Beast Mode → Sigma: Domo-specific normalize + classify + POST-lint around `convert_sql_to_sigma_formula` |
+| `scripts/convert-beast-modes.rb` | 2 | Beast Mode → Sigma: Domo-specific normalize + classify + POST-lint around the vendored `converter/sql.mjs` (`--convert`) |
 | `scripts/find-or-pick-dm.rb` *(vendored)* | 2.5 | Score existing Sigma data models against a signature and recommend reuse (non-destructive) |
 | `scripts/preflight-columns.rb` | 2.9 | Check every mapped dataset's Domo columns against the REAL warehouse table schema (live Sigma catalog lookup); reports gaps + auto-suggests (never auto-applies) a derivation formula for a known pattern |
 | `scripts/build-dm.rb` | 3 | DataSet schema + projection calc columns → Sigma DM spec (clean display names); honors a Phase-2.5 reuse decision |
@@ -321,8 +322,18 @@ Geometry preference order used by Phase 5d, highest first:
 
 ## Phase 2 — Translate Beast Modes
 
-`ruby scripts/convert-beast-modes.rb` → feeds each Beast Mode SQL string through
-`convert_sql_to_sigma_formula`. Apply the normalizations in
+Three scripted steps, no agent/MCP call in the loop (`migrate-domo.rb` runs all
+three automatically):
+```bash
+ruby scripts/convert-beast-modes.rb            # normalize → discovery/formulas.pending.json
+ruby scripts/convert-beast-modes.rb --convert  # vendored converter/sql.mjs fills sigmaFormula/converted/warnings, locally via node
+ruby scripts/convert-beast-modes.rb --lint     # validate → discovery/formulas.json
+```
+`--convert` resolves the converter via a 3-tier ladder: the vendored bundle
+(default, no MCP/network), a local `sigma-data-model-mcp` build via
+`--mcp-dir`/`DOMO_MCP_DIR` (explicit dev opt-in only), or — last resort, bundle
+or `node` absent — exit 10 with the manual `convert_sql_to_sigma_formula`
++ `--converter-out` fallback instructions. Applies the normalizations in
 `refs/beast-mode-to-sigma.md` FIRST (strip backticks, `WEEKDAY`→`DAYOFWEEK`,
 flag aggregate `CEILING`/`FLOOR`, reject unsupported `SQRT`/`CONVERT_TZ`).
 Outputs `discovery/formulas.json` (Beast Mode id → Sigma formula).

@@ -7,6 +7,9 @@
 require_relative '../scripts/convert-beast-modes'
 require 'json'
 require 'tmpdir'
+require 'fileutils'
+require 'open3'
+require 'rbconfig'
 
 SCRIPT = File.expand_path('../scripts/convert-beast-modes.rb', __dir__)
 
@@ -135,6 +138,48 @@ ok(resolved_filled['sigmaFormula'] == 'Sum([Net Revenue])', 'auto-translated for
 ok(!resolved_filled.key?('_source'), 'no formula-override attribution when the override was not actually used')
 ok(warns_filled.any? { |w| w.include?('NOT applied') }, 'still warns that the override existed but was ignored (not a silent no-op)')
 
+puts '== resolve_entry: override is still NOT applied when the entry is converted:true (fully resolved), same as legacy no-converted-key shape =='
+pending_true = { 'id' => 'calculation_true-1', 'name' => 'Cleanly Converted', 'class' => nil,
+                 'sigmaFormula' => 'Sum([Net Revenue])', 'converted' => true }
+overrides_true = { 'calculation_true-1' => { 'sigmaFormula' => 'Avg([Net Revenue])' } }
+resolved_true, warns_true = resolve_entry(pending_true, overrides_true)
+ok(resolved_true['sigmaFormula'] == 'Sum([Net Revenue])', 'converted:true formula wins; override is not applied over a cleanly-converted entry')
+ok(!resolved_true.key?('_source'), 'no formula-override attribution when converted:true blocked the override')
+ok(warns_true.any? { |w| w.include?('NOT applied') && w.include?('converted:true') },
+   'the NOT-applied warning names converted:true as the reason (widened-rule wording)')
+
+# ---------------------------------------------------------------------------
+# Fix 2 (final review): widen override eligibility to also supersede a
+# converted:false formula, not just a blank one — --convert's
+# lookConvertExpression fallback is total, so a truly blank sigmaFormula is
+# now nearly unreachable in the orchestrated pipeline; converted:false is the
+# realistic "this needs an override" signal an operator actually hits.
+# ---------------------------------------------------------------------------
+
+puts '== resolve_entry: override DOES supersede a formula flagged converted:false (the widened rule) =='
+pending_unreliable = { 'id' => 'calculation_unreliable-1', 'name' => 'Unreliable Auto', 'class' => nil,
+                       'sigmaFormula' => 'Lower([Country]) LIKE "usa"', 'converted' => false,
+                       'note' => 'Could not fully translate — output still contains raw SQL syntax Sigma has no equivalent for (CASE/WHEN/THEN, or an infix LIKE/BETWEEN), do not use as-is' }
+overrides_unreliable = { 'calculation_unreliable-1' => { 'sigmaFormula' => 'Lower([Country]) = "usa"',
+                                                          'note' => 'hand-authored: LIKE has no Sigma equivalent for an exact match here' } }
+resolved_unreliable, warns_unreliable = resolve_entry(pending_unreliable, overrides_unreliable)
+ok(!resolved_unreliable.nil?, 'override supersedes a converted:false entry → entry is NOT dropped')
+ok(resolved_unreliable['sigmaFormula'] == 'Lower([Country]) = "usa"', 'sigmaFormula came from the override, not the automated converted:false result')
+ok(resolved_unreliable['converted'] == true, 'overridden entry is marked converted:true (human-authored, trusted) — the stale converted:false is cleared')
+ok(resolved_unreliable['note'] == 'hand-authored: LIKE has no Sigma equivalent for an exact match here',
+   'the emitted note is the override\'s own note — the stale automated "could not fully translate" note does NOT survive')
+ok(resolved_unreliable['_source'] == 'formula-override', 'attributed with _source: formula-override')
+ok(warns_unreliable.any? { |w| w.include?('Unreliable Auto') }, 'using the override on a converted:false entry still warns, naming the Beast Mode')
+
+puts '== resolve_entry: a converted:false entry with NO matching override still keeps its (unreliable) formula, unchanged =='
+pending_unreliable_no_ov = { 'id' => 'calculation_unreliable-2', 'name' => 'Unreliable No Override', 'class' => nil,
+                             'sigmaFormula' => 'Lower([Country]) LIKE "usa"', 'converted' => false }
+resolved_no_ov, warns_no_ov = resolve_entry(pending_unreliable_no_ov, {})
+ok(!resolved_no_ov.nil?, 'no override available → converted:false entry is still emitted (never silently dropped)')
+ok(resolved_no_ov['sigmaFormula'] == 'Lower([Country]) LIKE "usa"', 'the unreliable automated formula is left untouched when no override matches')
+ok(resolved_no_ov['converted'] == false, 'converted stays false — nothing forces it to true without an applied override')
+ok(warns_no_ov.any? { |w| w.include?('converted:false') }, 'still warns that this formula was flagged converted:false and an override would supersede it')
+
 puts '== resolve_entry: no override + no sigmaFormula → still dropped (unchanged honest-drop behaviour) =='
 pending_none = { 'id' => 'calculation_none-1', 'name' => 'Untranslatable', 'class' => nil, 'sigmaFormula' => nil }
 resolved_none, warns_none = resolve_entry(pending_none, {})
@@ -207,6 +252,205 @@ Dir.mktmpdir('convert-beast-modes-no-overrides') do |dir|
   final = JSON.parse(File.read(out_path))
   ok(final.empty?, 'with no override and no sigmaFormula, the entry is still honestly dropped')
   ok(output.include?('Untranslated Metric'), 'the unresolved Beast Mode is still named in the drop warning')
+end
+
+# ---------------------------------------------------------------------------
+# resolve_sql_converter — Track E's 3-tier resolution (vendored default,
+# --mcp-dir/DOMO_MCP_DIR dev override, nil when neither resolves).
+# ---------------------------------------------------------------------------
+
+puts '== resolve_sql_converter: vendored bundle wins when no mcp_dir given =='
+Dir.mktmpdir('resolve-sql-conv') do |dir|
+  vendored = File.join(dir, 'sql.mjs')
+  File.write(vendored, '// fake bundle')
+  File.write(File.join(dir, 'PROVENANCE.json'), JSON.generate({ 'source_commit' => 'abc1234' }))
+  conv, dev_dir, desc = resolve_sql_converter(nil, vendored)
+  ok(conv == vendored, 'resolves to the vendored path')
+  ok(dev_dir.nil?, 'no dev build dir reported')
+  ok(desc.include?('VENDORED') && desc.include?('abc1234'), 'description names VENDORED + pinned commit')
+end
+
+puts '== resolve_sql_converter: --mcp-dir wins over vendored when both present =='
+Dir.mktmpdir('resolve-sql-conv-dev') do |dir|
+  vendored = File.join(dir, 'sql.mjs')
+  File.write(vendored, '// fake bundle')
+  mcp_dir = File.join(dir, 'mcp')
+  FileUtils.mkdir_p(File.join(mcp_dir, 'build'))
+  File.write(File.join(mcp_dir, 'build', 'formulas.js'), '// fake dev build')
+  conv, dev_dir, desc = resolve_sql_converter(mcp_dir, vendored)
+  ok(conv == File.join(mcp_dir, 'build', 'formulas.js'), 'resolves to the dev build, not vendored')
+  # resolve_sql_converter's 2nd tuple element is `dev_module` (the full resolved
+  # path), per the function's own doc comment and Step 7's usage — not the bare
+  # --mcp-dir. Same value as `conv` in this tier, since dev_module wins.
+  ok(dev_dir == File.join(mcp_dir, 'build', 'formulas.js'), 'dev build module path reported')
+  ok(desc.include?('DEV BUILD') && desc.include?('explicit opt-in'), 'description names DEV BUILD + opt-in')
+end
+
+puts '== resolve_sql_converter: nil when neither vendored nor --mcp-dir resolve =='
+Dir.mktmpdir('resolve-sql-conv-none') do |dir|
+  conv, dev_dir, desc = resolve_sql_converter(nil, File.join(dir, 'does-not-exist.mjs'))
+  ok(conv.nil?, 'no converter resolves')
+  ok(dev_dir.nil?, 'no dev dir')
+  ok(desc.nil?, 'no description when nothing resolves')
+end
+
+# ---------------------------------------------------------------------------
+# --convert CLI mode — plumbing test against a hand-authored FAKE stub module
+# (deterministic, no dependency on the real vendored bundle's translation
+# accuracy — that's covered separately by test-convert-beast-modes-fixtures.rb
+# against the real converter/sql.mjs). Exercises: shim generation, node
+# invocation, result merge, and the converted:false marking.
+# ---------------------------------------------------------------------------
+
+puts '== CLI --convert: dev-build tier (--mcp-dir) runs the fake stub end-to-end =='
+node_present = begin
+  _o, _e, st = Open3.capture3('node', '--version')
+  st.success?
+rescue Errno::ENOENT
+  false
+end
+
+if node_present
+  Dir.mktmpdir('convert-mode-fake-stub') do |dir|
+    mcp_dir = File.join(dir, 'fake-mcp')
+    FileUtils.mkdir_p(File.join(mcp_dir, 'build'))
+    File.write(File.join(mcp_dir, 'build', 'formulas.js'), <<~JS)
+      export function lookSqlToSigmaRules(sql) {
+        return sql.startsWith('FAIL_RULES') ? null : `RULES(${sql})`;
+      }
+      export function lookConvertExpression(sql) { return `EXPR(${sql})`; }
+      export function hasResidualCaseKeyword(s) { return s.includes('BADCASE'); }
+      export function hasResidualInfixOperator(s) { return s.includes('BADINFIX'); }
+      export function lookUnknownFunctions(sql) { return sql.includes('UNKNOWNFN') ? ['UNKNOWNFN'] : []; }
+    JS
+
+    pending_path = File.join(dir, 'formulas.pending.json')
+    out_path     = File.join(dir, 'formulas.pending.json') # in place
+    File.write(pending_path, JSON.generate([
+      { 'id' => 'calculation_clean-1', 'name' => 'Clean One', 'normalizedSql' => 'SUM([x])', 'sigmaFormula' => nil },
+      { 'id' => 'calculation_fallback-1', 'name' => 'Fallback One', 'normalizedSql' => 'FAIL_RULES SUM([x])', 'sigmaFormula' => nil },
+      { 'id' => 'calculation_badcase-1', 'name' => 'Bad Case One', 'normalizedSql' => 'BADCASE([x])', 'sigmaFormula' => nil },
+      { 'id' => 'calculation_unknownfn-1', 'name' => 'Unknown Fn One', 'normalizedSql' => 'UNKNOWNFN([x])', 'sigmaFormula' => nil },
+      # Re-run scenario: this entry already carries a stale converted:false +
+      # note from a PRIOR --convert run (e.g. before the bundle improved, or
+      # before normalizedSql was hand-edited to drop the offending syntax).
+      # Its normalizedSql is now clean — the note must NOT survive.
+      { 'id' => 'calculation_stale-note-1', 'name' => 'Stale Note One', 'normalizedSql' => 'SUM([y])',
+        'sigmaFormula' => 'RULES(OLD BAD SQL)', 'converted' => false,
+        'note' => 'STALE: a prior run flagged this as not fully translated' },
+    ]))
+
+    cmd = ['ruby', SCRIPT, '--convert', '--mcp-dir', mcp_dir, '--in', pending_path, '--out', out_path]
+    output = IO.popen(cmd, err: [:child, :out], &:read)
+    ok($?.success?, "--convert exits 0 against a fake dev-build stub\n#{output unless $?.success?}")
+    ok(output.include?('DEV BUILD') && output.include?('explicit opt-in'), 'stderr names the DEV BUILD tier')
+
+    result = JSON.parse(File.read(out_path))
+    by_id = {}
+    result.each { |e| by_id[e['id']] = e }
+
+    ok(by_id['calculation_clean-1']['sigmaFormula'] == 'RULES(SUM([x]))', 'rule-engine path used when it returns non-null')
+    ok(by_id['calculation_clean-1']['converted'] == true, 'clean formula marked converted:true')
+
+    ok(by_id['calculation_fallback-1']['sigmaFormula'] == 'EXPR(FAIL_RULES SUM([x]))', 'falls back to lookConvertExpression when rules return null')
+
+    ok(by_id['calculation_badcase-1']['sigmaFormula'] == 'RULES(BADCASE([x]))', 'residual-flagged formula is still emitted, never dropped')
+    ok(by_id['calculation_badcase-1']['converted'] == false, 'residual CASE keyword marks converted:false')
+    ok(by_id['calculation_badcase-1']['note'].to_s.include?('Could not fully translate'), 'converted:false entry carries a note')
+
+    ok(by_id['calculation_unknownfn-1']['warnings'].any? { |w| w.include?('UNKNOWNFN') }, 'lookUnknownFunctions warning surfaced per entry')
+
+    stale = by_id['calculation_stale-note-1']
+    ok(stale['converted'] == true, 'stale-note entry re-processed to converted:true on re-run (clean sql, fresh compute)')
+    ok(stale['note'].nil?, 'stale converted:false note does NOT survive onto a now-clean converted:true result')
+  end
+
+  puts '== CLI --convert: --converter-out tier-3 resume merges by id =='
+  Dir.mktmpdir('convert-mode-tier3') do |dir|
+    pending_path = File.join(dir, 'formulas.pending.json')
+    conv_out     = File.join(dir, 'manual-mcp-results.json')
+    File.write(pending_path, JSON.generate([
+      { 'id' => 'calculation_manual-1', 'name' => 'Manual One', 'normalizedSql' => 'SUM([x])', 'sigmaFormula' => nil },
+      # This entry already carries a stale converted:false + note from a prior
+      # run; the manual-mcp-results.json entry for it below has NO `note` key
+      # (the agent's hand-run convert_sql_to_sigma_formula call cleanly
+      # translated it this time) — the stale note must be cleared, not kept.
+      { 'id' => 'calculation_manual-stale-note', 'name' => 'Manual Stale Note', 'normalizedSql' => 'SUM([y])',
+        'sigmaFormula' => 'Old([y])', 'converted' => false, 'note' => 'STALE: previously flagged not fully translated' },
+    ]))
+    File.write(conv_out, JSON.generate([
+      { 'id' => 'calculation_manual-1', 'sigmaFormula' => 'Sum([x])', 'converted' => true, 'warnings' => [] },
+      { 'id' => 'calculation_manual-stale-note', 'sigmaFormula' => 'Sum([y])', 'converted' => true, 'warnings' => [] },
+      # Typo'd / stale id present in the supplied file but matching NO pending
+      # entry — must warn loudly (mirrors unmatched_override_keys), never
+      # silently no-op.
+      { 'id' => 'calculation_typo-does-not-exist', 'sigmaFormula' => 'Sum([z])', 'converted' => true, 'warnings' => [] },
+    ]))
+    cmd = ['ruby', SCRIPT, '--convert', '--converter-out', conv_out, '--in', pending_path, '--out', pending_path]
+    output = IO.popen(cmd, err: [:child, :out], &:read)
+    ok($?.success?, "--converter-out resume exits 0\n#{output unless $?.success?}")
+    result = JSON.parse(File.read(pending_path))
+    by_id2 = {}
+    result.each { |e| by_id2[e['id']] = e }
+
+    ok(by_id2['calculation_manual-1']['sigmaFormula'] == 'Sum([x])', 'manual MCP result merged into the pending file by id')
+
+    ok(by_id2['calculation_manual-stale-note']['sigmaFormula'] == 'Sum([y])', 'manual result merged for the stale-note entry too')
+    ok(by_id2['calculation_manual-stale-note']['converted'] == true, 'stale-note entry updated to converted:true via --converter-out')
+    ok(by_id2['calculation_manual-stale-note']['note'].nil?, 'stale note cleared by --converter-out merge when src has no note')
+
+    ok(output.include?('calculation_typo-does-not-exist'), 'stderr names the --converter-out id that matched no pending entry')
+    ok(output.downcase.include?('unmatched') || output.downcase.include?('no beast mode'),
+       'stderr flags the unmatched id as such, not just a bare mention')
+  end
+else
+  puts '== CLI --convert: SKIPPED (node not on PATH) =='
+end
+
+# ---------------------------------------------------------------------------
+# Review fix (Track E, 4/4): resolve_sql_converter only checks FILE EXISTENCE
+# of the bundle/dev build — it never confirmed `node` itself is invokable. A
+# resolved `conv` with no `node` on PATH used to fall straight into
+# Open3.capture3('node', runner), which raises an uncaught Errno::ENOENT — a
+# raw Ruby backtrace instead of the documented clean exit-10 fallback. This
+# test runs the REAL script (not a stub of the check) with a scrubbed PATH
+# that genuinely cannot resolve `node`, and proves it exits 10 with the same
+# GATE instructions a missing bundle gets — never a crash.
+#
+# `ruby` itself is invoked by RbConfig.ruby's ABSOLUTE path (not a bare 'ruby'
+# looked up on PATH), so only node's resolvability changes here. PATH is
+# trimmed to real coreutils dirs only (verified: neither nvm's nor Homebrew's
+# node lives under /usr/bin or /bin) with unsetenv_others — same idiom as
+# powerbi-to-sigma's test-bootstrap.rb "scrubbed environment" runs.
+# ---------------------------------------------------------------------------
+puts '== CLI --convert: resolved converter but `node` unavailable on PATH -> clean exit 10, never a raw crash =='
+Dir.mktmpdir('convert-mode-node-absent') do |dir|
+  mcp_dir = File.join(dir, 'fake-mcp')
+  FileUtils.mkdir_p(File.join(mcp_dir, 'build'))
+  File.write(File.join(mcp_dir, 'build', 'formulas.js'), <<~JS)
+    export function lookSqlToSigmaRules(sql) { return `RULES(${sql})`; }
+    export function lookConvertExpression(sql) { return `EXPR(${sql})`; }
+    export function hasResidualCaseKeyword(s) { return false; }
+    export function hasResidualInfixOperator(s) { return false; }
+    export function lookUnknownFunctions(sql) { return []; }
+  JS
+
+  pending_path = File.join(dir, 'formulas.pending.json')
+  before = JSON.generate([
+    { 'id' => 'calculation_x', 'name' => 'X', 'normalizedSql' => 'SUM([x])', 'sigmaFormula' => nil },
+  ])
+  File.write(pending_path, before)
+
+  env = { 'PATH' => '/usr/bin:/bin' }
+  cmd = [RbConfig.ruby, SCRIPT, '--convert', '--mcp-dir', mcp_dir, '--in', pending_path, '--out', pending_path]
+  out, status = Open3.capture2e(env, *cmd, unsetenv_others: true)
+
+  ok(status.exitstatus == 10, "resolved converter + node absent from PATH -> exit 10 (gate), not a crash\n#{out}")
+  ok(out.include?('GATE'), 'still prints the same GATE instructional fallback a missing bundle gets')
+  ok(out.downcase.include?('node'), 'names node as the specific reason (distinct from the missing-bundle message)')
+  ok(!out.include?('Errno::ENOENT') && !out.include?("#{SCRIPT}:"),
+     'no raw Ruby exception/backtrace leaks to the user (the bug this test guards against)')
+  ok(File.read(pending_path) == before, 'no formulas were translated — pending file is untouched by the aborted attempt')
 end
 
 puts

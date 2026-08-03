@@ -372,6 +372,15 @@ def phase_convert_beast_modes!(opts)
   ok, code, _out = run_script!('convert-beast-modes.rb')
   fail_phase!('convert-beast-modes', "normalize step exited #{code}") unless ok
 
+  ok, code, _out = run_script!('convert-beast-modes.rb', '--convert')
+  if !ok && code == 10
+    fail_phase!('convert-beast-modes',
+                'no vendored converter/sql.mjs and no --mcp-dir/DOMO_MCP_DIR — re-run ' \
+                "'ruby scripts/convert-beast-modes.rb --convert' directly to see the manual " \
+                'convert_sql_to_sigma_formula + --converter-out fallback instructions')
+  end
+  fail_phase!('convert-beast-modes', "--convert step exited #{code}") unless ok
+
   pending_path = File.join(DISCOVERY, 'formulas.pending.json')
   pending = begin
     JSON.parse(File.read(pending_path))
@@ -379,21 +388,29 @@ def phase_convert_beast_modes!(opts)
     []
   end
   unresolved = pending.count { |e| e['sigmaFormula'].nil? || e['sigmaFormula'].to_s.strip.empty? }
+  unreliable = pending.count { |e| e['converted'] == false }
   if unresolved.positive?
-    log "NOTE: #{unresolved} Beast Mode(s) still lack a sigmaFormula — normally filled by calling " \
-        'convert_sql_to_sigma_formula per pending entry (see the script header) before --lint. ' \
-        'Running --lint now anyway: unresolved entries are DROPPED from formulas.json (never shipped ' \
-        'silently as-is), so this phase is only fully complete once formulas.pending.json is filled in ' \
-        'and re-linted.'
+    log "NOTE: #{unresolved} Beast Mode(s) still lack a sigmaFormula after --convert — unexpected " \
+        '(lookConvertExpression is a total fallback that never returns nil); check ' \
+        "convert-beast-modes.rb --convert's stderr output above."
+  end
+  if unreliable.positive?
+    log "NOTE: #{unreliable} Beast Mode(s) flagged converted:false by --convert — has a sigmaFormula " \
+        '(never silently dropped) but still contains untranslated CASE/WHEN/THEN or an infix ' \
+        'LIKE/BETWEEN; review before shipping (discovery/formula-overrides.json can supply a ' \
+        'hand-authored replacement).'
   end
 
   ok, code, _out = run_script!('convert-beast-modes.rb', '--lint')
   fail_phase!('convert-beast-modes', "--lint step exited #{code}") unless ok
 
-  if unresolved.positive?
-    done_phase!('convert-beast-modes', "#{unresolved} Beast Mode(s) unresolved — see discovery/formulas.pending.json")
+  if unresolved.positive? || unreliable.positive?
+    done_phase!('convert-beast-modes',
+                "#{unresolved} unresolved, #{unreliable} unreliable (converted:false) — see " \
+                'discovery/formulas.pending.json')
   else
-    done_phase!('convert-beast-modes')
+    done_phase!('convert-beast-modes',
+                'no residual CASE/infix syntax detected — not a full validity guarantee')
   end
 end
 
