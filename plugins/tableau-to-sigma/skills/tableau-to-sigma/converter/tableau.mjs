@@ -5046,6 +5046,16 @@ function convertTableauToSigma(xmlContent, options = {}) {
         // shared between two tables correctly yields 2 candidates and no guess), IS the
         // target entity name exactly, or is the target entity name plus a key suffix.
         const isKeyShapedName = (name, entityName) => /_(ID|KEY|SK|CODE)$/.test(name) || !!entityName && (name === entityName || new RegExp(`^${escapeRe(entityName)}_(ID|KEY|SK|CODE)$`).test(name));
+        // Deny-list (unique-on-right NON-keys): EXTERNAL_ID / ROW_ID / GUID /
+        // HASH_KEY families are key-shaped by suffix and frequently unique on
+        // the right side, but they are lineage/tech columns, not the
+        // relationship key - and gate 16's warehouse probe proves UNIQUENESS,
+        // not CORRECTNESS, so a wired one silently returns wrong rows. Denied
+        // from INFERENCE candidacy only: a key Tableau explicitly serialized
+        // is still honored, and a denied-only match is recorded unwired with
+        // a named reason. Side effect by design: a denied name no longer
+        // manufactures false ambiguity beside a genuine key.
+        const INFERENCE_KEY_DENYLIST_RE = /(^|_)(EXTERNAL_ID|ROW_ID|GUID|HASH_KEY)$/;
         const inferRelationshipKeyByName = (firstEntry, secondEntry) => {
           const leftNames = candidateNames(firstEntry);
           const rightSet = new Set(candidateNames(secondEntry));
@@ -5059,12 +5069,14 @@ function convertTableauToSigma(xmlContent, options = {}) {
               candidates.push(n);
           }
           const entityName = entityNameOf(secondEntry.cleanName);
-          const keyShaped = candidates.filter((n) => isKeyShapedName(n, entityName));
+          const keyShapedAll = candidates.filter((n) => isKeyShapedName(n, entityName));
+          const denied = keyShapedAll.filter((n) => INFERENCE_KEY_DENYLIST_RE.test(n));
+          const keyShaped = keyShapedAll.filter((n) => !INFERENCE_KEY_DENYLIST_RE.test(n));
           if (keyShaped.length === 1)
-            return { ok: true, name: keyShaped[0], candidates, keyShaped };
-          return { ok: false, candidates, keyShaped };
+            return { ok: true, name: keyShaped[0], candidates, keyShaped, denied };
+          return { ok: false, candidates, keyShaped, denied };
         };
-        const unwiredReason = (inferred) => inferred.candidates.length === 0 ? "no existing column name matches on both sides" : inferred.keyShaped.length === 0 ? "candidate name(s) matched but none look key-shaped (a _ID/_KEY/_SK/_CODE suffix, the exact target entity name, or the entity name plus that suffix)" : `ambiguous: ${inferred.keyShaped.length} key-shaped candidates \u2014 refusing to guess a composite key`;
+        const unwiredReason = (inferred) => inferred.candidates.length === 0 ? "no existing column name matches on both sides" : inferred.keyShaped.length === 0 ? (inferred.denied || []).length ? `only deny-listed non-key name(s) matched (${inferred.denied.join(", ")}) - EXTERNAL_ID/ROW_ID/GUID/HASH_KEY-family columns are lineage/tech columns a probe can prove unique but never correct; author the relationship manually if one truly is the key` : "candidate name(s) matched but none look key-shaped (a _ID/_KEY/_SK/_CODE suffix, the exact target entity name, or the entity name plus that suffix)" : `ambiguous: ${inferred.keyShaped.length} key-shaped candidates \u2014 refusing to guess a composite key`;
         const collectEqs = (expr, acc) => {
           const op = nsAttr(expr, "op");
           const kids = asArray(expr.expression || []);
