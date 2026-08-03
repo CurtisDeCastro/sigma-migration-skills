@@ -311,6 +311,100 @@ scenario('3 budget-counted waivers (column+layout+orphan), 1 policy-excluded (vi
          HAPPY_FLAGS + ['--skip-orphan-check', 'budget test: deliberately exceed the cap of 2'])
 
 puts
+puts '== gate 3 (ruzs: silent SKIP paths are RECORDED, never a free pass) =='
+# A [SKIP] in gate 3/7 that leaves no artifact lets a workbook whose live
+# columns were never audited reach GREEN ("gates => all-pass" survives).
+# Ratified remedy: the skip is recorded to column-scan.json, which the
+# degradation ledger derives into a quality-waiver — capping the verdict at
+# YELLOW — rather than a hard exit (a transient outage must not hard-block).
+Dir.mktmpdir('domo-p6') do |dir|
+  write_good_fixtures(dir)
+  File.delete(File.join(dir, 'wb-ids.json')) # no workbook id resolvable at all
+  run_gate(dir, '--skip-layout-check', 'no wb id for gate 4 either',
+           '--skip-visual-comparison', 'verifier: pre-verified')
+  scan = (JSON.parse(File.read(File.join(dir, 'column-scan.json'))) rescue nil)
+  eq(scan.is_a?(Hash), true, 'no-wb-id skip writes column-scan.json')
+  eq(scan && scan['status'], 'skipped-no-workbook-id',
+     'column-scan.json records status=skipped-no-workbook-id')
+  ledger = (JSON.parse(File.read(File.join(dir, 'degradation-ledger.json'))) rescue nil)
+  entry = ledger && Array(ledger['entries']).find { |e| e['item'] == 'gate-3-column-scan' }
+  eq(!entry.nil?, true, 'the skip lands in the degradation ledger as gate-3-column-scan')
+  eq(entry && entry['class'], 'quality-waiver', 'ledger entry class is quality-waiver (caps at YELLOW)')
+end
+
+require 'socket'
+Dir.mktmpdir('domo-p6') do |dir|
+  write_good_fixtures(dir)
+  # Stub Sigma: first /columns page promises a nextPage, then the server 500s
+  # every later request — the mid-scan transient the ruzs bead describes.
+  server = TCPServer.new('127.0.0.1', 0)
+  port = server.addr[1]
+  th = Thread.new do
+    first = true
+    loop do
+      client = server.accept
+      while (l = client.gets) && l != "\r\n"; end
+      if first
+        first = false
+        body = JSON.generate('entries' => [{ 'columnId' => 'c1', 'label' => 'A',
+                                             'type' => { 'type' => 'number' } }],
+                             'nextPage' => 'p2')
+        client.write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n" \
+                     "Content-Length: #{body.bytesize}\r\nConnection: close\r\n\r\n#{body}")
+      else
+        client.write("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+      end
+      client.close
+    end
+  rescue StandardError
+    nil
+  end
+  env = { 'SIGMA_BASE_URL' => "http://127.0.0.1:#{port}", 'SIGMA_API_TOKEN' => 'stub-token' }
+  system(env, 'ruby', GATE, '--workdir', dir,
+         '--skip-layout-check', 'stub server serves only gate 3',
+         '--skip-visual-comparison', 'verifier: pre-verified',
+         out: File::NULL, err: File::NULL)
+  server.close rescue nil
+  th.kill
+  scan = (JSON.parse(File.read(File.join(dir, 'column-scan.json'))) rescue nil)
+  eq(scan.is_a?(Hash), true, 'incomplete scan writes column-scan.json')
+  eq(scan && scan['status'], 'skipped-incomplete', 'column-scan.json records status=skipped-incomplete')
+  eq(scan && scan['columns_read'], 1, 'the partial read count is recorded (1 column seen)')
+end
+
+# The clean COMPLETE scan must stay a free pass: complete-clean is recorded as
+# positive evidence and derives NO ledger entry (GREEN stays reachable).
+Dir.mktmpdir('domo-p6') do |dir|
+  write_good_fixtures(dir)
+  server = TCPServer.new('127.0.0.1', 0)
+  port = server.addr[1]
+  th = Thread.new do
+    loop do
+      client = server.accept
+      while (l = client.gets) && l != "\r\n"; end
+      body = JSON.generate('entries' => [{ 'columnId' => 'c1', 'label' => 'A',
+                                           'type' => { 'type' => 'number' } }])
+      client.write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n" \
+                   "Content-Length: #{body.bytesize}\r\nConnection: close\r\n\r\n#{body}")
+      client.close
+    end
+  rescue StandardError
+    nil
+  end
+  env = { 'SIGMA_BASE_URL' => "http://127.0.0.1:#{port}", 'SIGMA_API_TOKEN' => 'stub-token' }
+  system(env, 'ruby', GATE, '--workdir', dir,
+         '--skip-layout-check', 'stub server serves only gate 3',
+         '--skip-visual-comparison', 'verifier: pre-verified',
+         out: File::NULL, err: File::NULL)
+  server.close rescue nil
+  th.kill
+  scan = (JSON.parse(File.read(File.join(dir, 'column-scan.json'))) rescue nil)
+  eq(scan && scan['status'], 'complete-clean', 'a full clean scan records complete-clean')
+  ledger = (JSON.parse(File.read(File.join(dir, 'degradation-ledger.json'))) rescue nil)
+  entry = ledger && Array(ledger['entries']).find { |e| e['item'] == 'gate-3-column-scan' }
+  eq(entry, nil, 'complete-clean derives NO ledger entry (GREEN stays reachable)')
+end
+
 if $failures.zero? then puts 'ALL PASS'; exit 0 else puts "#{$failures} FAILURE(S)"; exit 1 end
 
 # NOTE on coverage boundaries NOT tested above (documented, not faked):

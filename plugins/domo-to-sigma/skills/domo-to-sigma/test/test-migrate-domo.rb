@@ -13,6 +13,7 @@
 
 require 'json'
 require 'tmpdir'
+require 'open3'
 
 SKILL   = File.expand_path('..', __dir__)
 SCRIPTS = File.join(SKILL, 'scripts')
@@ -43,7 +44,26 @@ ok(cards.any? { |c| c['summaryNumber'] && !Array(c['groupBy']).empty? },
    'sanity: fixture cards.json includes a non-Rule-0 card (real grouping) that ALSO carries a summaryNumber (bead 08sf)')
 ok(File.exist?(File.join(FIXTURE, 'dm-spec.json')), 'sanity: fixture stages dm-spec.json (build-dm.rb pre-post shape) for the ds-dim sub-master')
 ok(File.exist?(File.join(FIXTURE, 'dm-ids.json')), 'sanity: fixture stages dm-ids.json (synthesized post-and-readback) for the ds-dim sub-master')
+ok(File.exist?(File.join(FIXTURE, 'beast-modes.json')), 'sanity: fixture stages beast-modes.json so migrate-domo.rb\'s convert-beast-modes phase is actually exercised, not SKIPped')
 
+# Track E: the fixture's discovery/beast-modes.json (see test/fixtures/domo-estate/
+# beast-modes.json) drives migrate-domo.rb's convert-beast-modes phase through its
+# real --convert step, which shells out to `node` against the vendored
+# converter/sql.mjs (same as test-convert-beast-modes.rb / -fixtures.rb). Gate the
+# whole node-dependent pipeline run the same way those suites gate their node-only
+# assertions — a loud, honest SKIP (never a silent pass) when `node` is not on
+# PATH, rather than letting the entire offline pipeline hard-fail at the
+# convert-beast-modes phase (fail-fast semantics mean nothing downstream of that
+# phase — build-workbook, layout, etc. — would run either, so there is no useful
+# partial-assertion split here; the whole run is the unit that depends on node).
+node_present = begin
+  _o, _e, st = Open3.capture3('node', '--version')
+  st.success?
+rescue Errno::ENOENT
+  false
+end
+
+if node_present
 Dir.mktmpdir('migrate-domo-e2e') do |out_dir|
   cmd = ['ruby', File.join(SCRIPTS, 'migrate-domo.rb'), '--offline', FIXTURE, '--out', out_dir]
   output = IO.popen(cmd, err: [:child, :out], &:read)
@@ -62,6 +82,42 @@ Dir.mktmpdir('migrate-domo-e2e') do |out_dir|
   missing = required_phases.reject { |p| run_state['phases'].key?(p) }
   ok(missing.empty?, "run-state.json accounts for every phase in the chain (missing: #{missing.join(', ')})")
   eq(run_state['mode'], 'offline', 'run-state.json records mode=offline')
+
+  # ---- Track E: convert-beast-modes is actually exercised now that the -----
+  # fixture carries discovery/beast-modes.json (previously this phase was
+  # ALWAYS skip_phase!'d in this suite — no fixture ever supplied one).
+  ok(!output.include?('SKIP convert-beast-modes'),
+     'convert-beast-modes phase actually runs (no longer prints the SKIP convert-beast-modes line)')
+  eq(run_state['phases']['convert-beast-modes']['status'], 'done',
+     "run-state.json shows convert-beast-modes as done, not skip — #{run_state['phases']['convert-beast-modes'].inspect}")
+
+  formulas_path = File.join(out_dir, 'discovery', 'formulas.json')
+  ok(File.exist?(formulas_path), 'wrote discovery/formulas.json (the --convert + --lint steps ran for real, via node)')
+  if File.exist?(formulas_path)
+    formulas = JSON.parse(File.read(formulas_path))
+    eq(formulas.size, 3, 'all 3 fixture Beast Modes made it into formulas.json (none silently dropped)')
+    by_name = {}
+    formulas.each { |f| by_name[f['name']] = f }
+
+    revenue = by_name['Total Net Revenue']
+    ok(revenue && revenue['converted'] == true && revenue['sigmaFormula'] == 'Sum([Net Revenue])',
+       "Total Net Revenue (plain SUM) converts cleanly to Sum([Net Revenue]) — got #{revenue.inspect}")
+
+    margin = by_name['Gross Margin Pct']
+    ok(margin && margin['converted'] == true && margin['sigmaFormula'].to_s.start_with?('If('),
+       "Gross Margin Pct (CASE WHEN) converts cleanly to an If(...) (converted:true) — got #{margin.inspect}")
+
+    # Deliberately LIKE-shaped (design's known residual-operator case, same as
+    # test-convert-beast-modes-fixtures.rb's D-R1) — exercises converted:false.
+    us_customers = by_name['US Customers']
+    ok(us_customers && us_customers['converted'] == false,
+       "US Customers (LIKE) is honestly flagged converted:false, not silently marked clean — got #{us_customers.inspect}")
+    ok(us_customers && !us_customers['sigmaFormula'].to_s.strip.empty?,
+       'US Customers still carries a present (if unreliable) sigmaFormula — never silently dropped')
+
+    ok(formulas.all? { |f| Array(f['lintErrors']).empty? },
+       'none of the 3 fixture Beast Modes trip a lint ERROR')
+  end
 
   # ---- (a) layout-2d.flag == 'grid' (NOT 'stack') ------------------------
   flag_path = File.join(out_dir, 'layout-2d.flag')
@@ -167,6 +223,17 @@ Dir.mktmpdir('migrate-domo-e2e') do |out_dir|
   forced_state = JSON.parse(File.read(run_state_path))
   ok(built_phases.all? { |p| forced_state['phases'][p]['status'] == 'done' }, '--force rebuilds every phase (status done, not skip)')
   eq(File.read(flag_path).strip, 'grid', '--force re-run recomputes the same grid flag')
+end
+else
+  # Loud, honest skip — never a silent pass (same idiom as
+  # test-convert-beast-modes-fixtures.rb / test-convert-beast-modes.rb's
+  # node-gated sections). Zero assertions from the block above ran; do not
+  # print ALL PASS as if they had.
+  puts '  SKIPPED — 0 migrate-domo.rb --offline pipeline assertions exercised (`node` not on PATH). ' \
+       'test/fixtures/domo-estate/beast-modes.json now drives the convert-beast-modes phase\'s --convert ' \
+       'step, which requires node to run the vendored converter/sql.mjs (same as doctor.sh\'s hard node ' \
+       'requirement for this skill). Install node (see scripts/bootstrap.sh) to exercise this suite for real. ' \
+       'This is NOT a verified pass.'
 end
 
 # ---- fail-fast: a fixture missing cards.json aborts loudly, non-zero ------
