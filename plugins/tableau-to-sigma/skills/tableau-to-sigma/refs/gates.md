@@ -96,6 +96,7 @@ Exits 0 only when ALL pass. Full prose per gate: `refs/script-map.md` +
 | 26 | 19 agg semantics | `agg-semantics.json` unresolved additive-over-preagg / countd-as-sum / preagg-ratio (`audit-agg-semantics.rb --how <reaggregated\|n/a\|faithful-to-source>`); no skip flag |
 | 27 | 20 semantic edits | `semantic-edits.json` unproven or `match:false` (`probe-equivalence.rb`); NO waiver — revert or redesign |
 | 28 | 21 chart-kind parity | live element family ≠ verified `png-read.json` kind; substitutions recorded as `kind_waivers` at read time |
+| 29 | 8e layout arrangement | `--require-arrangement` set + `layout-arrangement.json` missing/malformed after a layout build, or violations present; WARN-only without the flag |
 | 30 | 4b layout ran | run-state shows the layout phase never entered |
 | 31 | 7c controls census | source control never built, undeclared in `control-scope.json` and unnamed in `controls-waivers.json`; no skip flag |
 
