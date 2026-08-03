@@ -321,8 +321,18 @@ Geometry preference order used by Phase 5d, highest first:
 
 ## Phase 2 — Translate Beast Modes
 
-`ruby scripts/convert-beast-modes.rb` → feeds each Beast Mode SQL string through
-`convert_sql_to_sigma_formula`. Apply the normalizations in
+Three scripted steps, no agent/MCP call in the loop (`migrate-domo.rb` runs all
+three automatically):
+```bash
+ruby scripts/convert-beast-modes.rb            # normalize → discovery/formulas.pending.json
+ruby scripts/convert-beast-modes.rb --convert  # vendored converter/sql.mjs fills sigmaFormula/converted/warnings, locally via node
+ruby scripts/convert-beast-modes.rb --lint     # validate → discovery/formulas.json
+```
+`--convert` resolves the converter via a 3-tier ladder: the vendored bundle
+(default, no MCP/network), a local `sigma-data-model-mcp` build via
+`--mcp-dir`/`DOMO_MCP_DIR` (explicit dev opt-in only), or — last resort, bundle
+and `node` both absent — exit 10 with the manual `convert_sql_to_sigma_formula`
++ `--converter-out` fallback instructions. Applies the normalizations in
 `refs/beast-mode-to-sigma.md` FIRST (strip backticks, `WEEKDAY`→`DAYOFWEEK`,
 flag aggregate `CEILING`/`FLOOR`, reject unsupported `SQRT`/`CONVERT_TZ`).
 Outputs `discovery/formulas.json` (Beast Mode id → Sigma formula).
