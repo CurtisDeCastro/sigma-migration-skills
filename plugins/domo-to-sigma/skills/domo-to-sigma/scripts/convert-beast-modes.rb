@@ -1,11 +1,18 @@
 #!/usr/bin/env ruby
 # Phase 2 — Beast Mode (MySQL SQL) → Sigma formula.
 #
-# Beast Mode is MySQL-dialect SQL, so the actual translation is delegated to the
-# ONE source of truth: the `convert_sql_to_sigma_formula` MCP tool (which already
-# handles CASE WHEN, IN lists, DATEDIFF, arithmetic, and SNAKE_CASE → [Title
-# Case] column refs). This script does NOT reimplement translation. It adds the
-# two layers the generic SQL converter can't know about:
+# Beast Mode is MySQL-dialect SQL. The actual translation runs LOCALLY via the
+# vendored converter/sql.mjs bundle (esbuild-bundled from sigma-data-model-mcp's
+# src/formulas.ts by `tools/vendor-converters.sh <checkout> domo` — see
+# converter/PROVENANCE.json for the pinned source commit), invoked through
+# `node`. No MCP call and no network in the automated path — see
+# resolve_sql_converter's 3-tier ladder below: the vendored bundle is the
+# default; --mcp-dir/DOMO_MCP_DIR is an explicit local-dev opt-in; a manual
+# convert_sql_to_sigma_formula MCP call + --converter-out is the tier-3 last
+# resort, reached only via the exit-10 GATE when neither of the first two
+# resolves (e.g. no vendored bundle and no dev checkout, or `node` missing).
+# This script does NOT reimplement translation itself. It adds the two layers
+# the generic SQL converter can't know about:
 #
 #   PRE  — Domo-specific normalization (backtick identifiers → [Col], WEEKDAY →
 #          DAYOFWEEK, flag unsupported fns, flag the CEILING/FLOOR-are-aggregates
@@ -14,11 +21,12 @@
 #          Not() function-call forms that silently null, window-fn workbook-master
 #          limits) — see refs/beast-mode-to-sigma.md + feedback_sigma_window_functions.
 #
-# Two-step flow (the skill's Phase 2 orchestrates the middle step):
-#   ruby scripts/convert-beast-modes.rb          # normalize → discovery/formulas.pending.json
-#   # → skill calls convert_sql_to_sigma_formula(sql: normalizedSql) per entry,
-#   #   writes the result into `sigmaFormula`, applies preWarning overrides.
-#   ruby scripts/convert-beast-modes.rb --lint   # validate filled pending → discovery/formulas.json
+# Three-step flow (SKILL.md's Phase 2 runs all three; no agent/MCP call in the
+# middle step unless the exit-10 GATE fires):
+#   ruby scripts/convert-beast-modes.rb            # normalize → discovery/formulas.pending.json
+#   ruby scripts/convert-beast-modes.rb --convert  # local node + vendored converter/sql.mjs —
+#                                                   #   fills sigmaFormula + converted (true/false) in place
+#   ruby scripts/convert-beast-modes.rb --lint     # validate filled pending → discovery/formulas.json
 #
 # HAND-AUTHORED ESCAPE HATCH — discovery/formula-overrides.json
 #
@@ -49,6 +57,11 @@
 # is simply no longer load-bearing for the CASE WHEN / COUNT(DISTINCT) /
 # double-bracketing defect class.
 #
+# Track E (2026-08-03): this translation now runs vendored/local (see the
+# 3-tier ladder above) instead of a live MCP call, so the PR #115/#116 fixes
+# above are inherited automatically on each `tools/vendor-converters.sh domo`
+# re-vendor — nothing in this script's own logic needed to change for that.
+#
 # discovery/formula-overrides.json is an OPERATOR-authored sidecar (same
 # convention as discovery/kpi-overrides.json / dataset-map.json — this script
 # only ever READS it, so re-running normalize or --lint never clobbers it).
@@ -73,8 +86,17 @@
 # plugins/sigma-authoring/skills/sigma-workbooks/reference/specification/formulas.md.
 #
 # Rules (enforced in resolve_entry / unmatched_override_keys below):
-#   - An override only SUPPLIES a MISSING sigmaFormula — it never silently
-#     replaces one convert_sql_to_sigma_formula already filled in.
+#   - An override SUPPLIES a MISSING sigmaFormula, OR SUPERSEDES one that
+#     --convert filled in but flagged converted:false (still-broken machine
+#     output) — widened 2026-08-03: --convert's mechanical fallback
+#     (lookConvertExpression) is total and always produces SOME sigmaFormula,
+#     so "missing" alone had become nearly unreachable in the orchestrated
+#     pipeline. It never silently replaces a formula that converted CLEANLY
+#     (converted:true, or a legacy entry with no `converted` key at all —
+#     unaffected by this widening). When an override IS applied, the emitted
+#     entry's `converted` is forced to `true` and any stale converted:false
+#     "could not fully translate" note is cleared first — a human-authored
+#     formula must never carry forward the discarded automated attempt's note.
 #   - Every use is still POST-linted by lint_formula (raw IN(, And()/Or()/
 #     Not() as calls, unbalanced brackets) — a hand-authored typo is a hard
 #     lintError in formulas.json, never a silent pass.
@@ -222,21 +244,30 @@ end
 # no sigmaFormula (no override applied) — the caller drops it, exactly
 # today's honest-drop behaviour (refs/live-validation-2026-07-30.md).
 #
-# An override only SUPPLIES a sigmaFormula that is missing; it never silently
-# clobbers one convert_sql_to_sigma_formula already filled in (if it matches
-# an already-resolved entry, that's a no-op override — warned, not applied).
+# An override SUPPLIES a sigmaFormula that is missing, OR SUPERSEDES one
+# --convert already filled in but flagged converted:false (still-broken
+# machine output) — widened 2026-08-03 because --convert's
+# lookConvertExpression fallback is total (always produces SOME sigmaFormula,
+# even a bad one), so "missing" alone had become nearly unreachable in the
+# orchestrated pipeline (there is no interposition point to hand-clear a
+# sigmaFormula between --convert and --lint in the automated flow). It never
+# silently clobbers a formula that converted CLEANLY — converted:true, or a
+# legacy entry with no `converted` key at all (entry['converted'] != false is
+# true for nil, so already_resolved's truth value is unchanged for those) — a
+# no-op override there is still warned, not applied.
 def resolve_entry(entry, overrides)
   warnings = []
   sigma = entry['sigmaFormula']
-  already_resolved = !(sigma.nil? || sigma.to_s.strip.empty?)
+  already_resolved = !(sigma.nil? || sigma.to_s.strip.empty?) && entry['converted'] != false
   override = find_override(entry, overrides)
   used_override = false
 
   if override && !override['sigmaFormula'].to_s.strip.empty?
     if already_resolved
       warnings << "formula-overrides.json has an entry for " \
-        "#{entry['name'] || entry['id']} but it already has a sigmaFormula — " \
-        "override NOT applied (clear the pending entry's sigmaFormula to force it)."
+        "#{entry['name'] || entry['id']} but it already has a sigmaFormula that " \
+        "converted cleanly (converted:true) — override NOT applied (an override " \
+        "only supersedes a missing or converted:false result)."
     else
       sigma = override['sigmaFormula']
       used_override = true
@@ -249,26 +280,35 @@ def resolve_entry(entry, overrides)
   resolved = entry.merge('sigmaFormula' => sigma, 'lintErrors' => errs, 'lintWarnings' => lint_warns)
   if used_override
     resolved['_source'] = 'formula-override'
+    # Human-authored, trusted — clear any stale automated converted:false +
+    # its "could not fully translate" note (which would otherwise describe
+    # formula content no longer even present in sigmaFormula) before applying
+    # the override's own note, if any.
+    resolved['converted'] = true
+    resolved.delete('note')
     resolved['note'] = override['note'] if override['note']
     warnings << "#{entry['name'] || entry['id']}: sigmaFormula supplied by " \
       "discovery/formula-overrides.json (hand-authored) — automated conversion " \
-      "(convert_sql_to_sigma_formula) did not produce a usable formula for this " \
-      "Beast Mode; verify by hand. CASE WHEN / COUNT(DISTINCT) / double-bracketed " \
-      "ALL-CAPS refs are fixed (sigma-data-model-mcp PR #115, #116) so this is NOT " \
-      "that historical 74%-fail case — check refs/live-validation-2026-07-30.md " \
-      "and this script's still-open gaps (WEEKDAY→DAYOFWEEK, CEILING/FLOOR " \
-      "aggregates, untranslatable infix LIKE) for what actually still needs a " \
-      "hand-authored formula."
+      "did not produce a fully reliable formula for this Beast Mode (missing, or " \
+      "flagged converted:false); verify by hand. CASE WHEN / COUNT(DISTINCT) / " \
+      "double-bracketed ALL-CAPS refs are fixed (sigma-data-model-mcp PR #115, " \
+      "#116) so this is NOT that historical 74%-fail case — check " \
+      "refs/live-validation-2026-07-30.md and this script's still-open gaps " \
+      "(WEEKDAY→DAYOFWEEK, CEILING/FLOOR aggregates, untranslatable infix LIKE) " \
+      "for what actually still needs a hand-authored formula."
   elsif entry['converted'] == false
     # Track E: --convert already computed a REAL converted flag (via the
     # vendored hasResidualCaseKeyword/hasResidualInfixOperator) — surface it
     # loudly here rather than letting a "flagged unreliable but still has SOME
-    # string in sigmaFormula" entry ride through --lint silently. Does NOT
-    # change override-eligibility (still fills-missing-only, unchanged) — this
-    # is visibility only.
+    # string in sigmaFormula" entry ride through --lint silently. No override
+    # was applied above (none exists for this id/name, or its sigmaFormula is
+    # blank) — per the widened eligibility rule, a discovery/formula-
+    # overrides.json entry for this id/name WOULD supersede this
+    # converted:false result, so suggest adding one.
     warnings << "#{entry['name'] || entry['id']}: automated conversion flagged this formula as " \
       "converted:false (still contains raw CASE/WHEN/THEN or an infix LIKE/BETWEEN Sigma has no " \
-      "equivalent for) — review before shipping; consider a discovery/formula-overrides.json entry."
+      "equivalent for) — review before shipping; a discovery/formula-overrides.json entry WILL " \
+      "supersede this converted:false result."
   end
   [resolved, warnings]
 end
@@ -412,7 +452,8 @@ if opts[:convert]
   if unreliable.positive?
     warn "  wrote #{out} (#{pending.size} formulas; #{unreliable} flagged converted:false — review before --lint)"
   else
-    warn "  wrote #{out} (#{pending.size} formulas, all converted:true)"
+    warn "  wrote #{out} (#{pending.size} formulas — no residual CASE/infix syntax detected in any of " \
+         "them; not a full validity guarantee)"
   end
 elsif opts[:lint]
   # ---- Validate a filled pending file → formulas.json --------------------

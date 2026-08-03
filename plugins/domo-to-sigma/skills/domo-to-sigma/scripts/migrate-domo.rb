@@ -409,7 +409,8 @@ def phase_convert_beast_modes!(opts)
                 "#{unresolved} unresolved, #{unreliable} unreliable (converted:false) — see " \
                 'discovery/formulas.pending.json')
   else
-    done_phase!('convert-beast-modes')
+    done_phase!('convert-beast-modes',
+                'no residual CASE/infix syntax detected — not a full validity guarantee')
   end
 end
 

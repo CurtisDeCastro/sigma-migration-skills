@@ -138,6 +138,48 @@ ok(resolved_filled['sigmaFormula'] == 'Sum([Net Revenue])', 'auto-translated for
 ok(!resolved_filled.key?('_source'), 'no formula-override attribution when the override was not actually used')
 ok(warns_filled.any? { |w| w.include?('NOT applied') }, 'still warns that the override existed but was ignored (not a silent no-op)')
 
+puts '== resolve_entry: override is still NOT applied when the entry is converted:true (fully resolved), same as legacy no-converted-key shape =='
+pending_true = { 'id' => 'calculation_true-1', 'name' => 'Cleanly Converted', 'class' => nil,
+                 'sigmaFormula' => 'Sum([Net Revenue])', 'converted' => true }
+overrides_true = { 'calculation_true-1' => { 'sigmaFormula' => 'Avg([Net Revenue])' } }
+resolved_true, warns_true = resolve_entry(pending_true, overrides_true)
+ok(resolved_true['sigmaFormula'] == 'Sum([Net Revenue])', 'converted:true formula wins; override is not applied over a cleanly-converted entry')
+ok(!resolved_true.key?('_source'), 'no formula-override attribution when converted:true blocked the override')
+ok(warns_true.any? { |w| w.include?('NOT applied') && w.include?('converted:true') },
+   'the NOT-applied warning names converted:true as the reason (widened-rule wording)')
+
+# ---------------------------------------------------------------------------
+# Fix 2 (final review): widen override eligibility to also supersede a
+# converted:false formula, not just a blank one — --convert's
+# lookConvertExpression fallback is total, so a truly blank sigmaFormula is
+# now nearly unreachable in the orchestrated pipeline; converted:false is the
+# realistic "this needs an override" signal an operator actually hits.
+# ---------------------------------------------------------------------------
+
+puts '== resolve_entry: override DOES supersede a formula flagged converted:false (the widened rule) =='
+pending_unreliable = { 'id' => 'calculation_unreliable-1', 'name' => 'Unreliable Auto', 'class' => nil,
+                       'sigmaFormula' => 'Lower([Country]) LIKE "usa"', 'converted' => false,
+                       'note' => 'Could not fully translate — output still contains raw SQL syntax Sigma has no equivalent for (CASE/WHEN/THEN, or an infix LIKE/BETWEEN), do not use as-is' }
+overrides_unreliable = { 'calculation_unreliable-1' => { 'sigmaFormula' => 'Lower([Country]) = "usa"',
+                                                          'note' => 'hand-authored: LIKE has no Sigma equivalent for an exact match here' } }
+resolved_unreliable, warns_unreliable = resolve_entry(pending_unreliable, overrides_unreliable)
+ok(!resolved_unreliable.nil?, 'override supersedes a converted:false entry → entry is NOT dropped')
+ok(resolved_unreliable['sigmaFormula'] == 'Lower([Country]) = "usa"', 'sigmaFormula came from the override, not the automated converted:false result')
+ok(resolved_unreliable['converted'] == true, 'overridden entry is marked converted:true (human-authored, trusted) — the stale converted:false is cleared')
+ok(resolved_unreliable['note'] == 'hand-authored: LIKE has no Sigma equivalent for an exact match here',
+   'the emitted note is the override\'s own note — the stale automated "could not fully translate" note does NOT survive')
+ok(resolved_unreliable['_source'] == 'formula-override', 'attributed with _source: formula-override')
+ok(warns_unreliable.any? { |w| w.include?('Unreliable Auto') }, 'using the override on a converted:false entry still warns, naming the Beast Mode')
+
+puts '== resolve_entry: a converted:false entry with NO matching override still keeps its (unreliable) formula, unchanged =='
+pending_unreliable_no_ov = { 'id' => 'calculation_unreliable-2', 'name' => 'Unreliable No Override', 'class' => nil,
+                             'sigmaFormula' => 'Lower([Country]) LIKE "usa"', 'converted' => false }
+resolved_no_ov, warns_no_ov = resolve_entry(pending_unreliable_no_ov, {})
+ok(!resolved_no_ov.nil?, 'no override available → converted:false entry is still emitted (never silently dropped)')
+ok(resolved_no_ov['sigmaFormula'] == 'Lower([Country]) LIKE "usa"', 'the unreliable automated formula is left untouched when no override matches')
+ok(resolved_no_ov['converted'] == false, 'converted stays false — nothing forces it to true without an applied override')
+ok(warns_no_ov.any? { |w| w.include?('converted:false') }, 'still warns that this formula was flagged converted:false and an override would supersede it')
+
 puts '== resolve_entry: no override + no sigmaFormula → still dropped (unchanged honest-drop behaviour) =='
 pending_none = { 'id' => 'calculation_none-1', 'name' => 'Untranslatable', 'class' => nil, 'sigmaFormula' => nil }
 resolved_none, warns_none = resolve_entry(pending_none, {})
