@@ -311,24 +311,28 @@ check(store_jp && store_jp['probe_keys'] == ['STORE_KEY'],
 #        rung that bypasses orientation, both fail here);
 #      - derivedVia and the partial/droppedConditions census must SURVIVE
 #        pass-2 attachment onto the relationship object itself.
-fact_el = els.find { |e| ((e['source'] || {})['path'] || []).last == 'FACT_WIDE' }
-check(!fact_el.nil?, 'composition: FACT_WIDE element located by warehouse source path', fails)
+#    Table/relationship names below are this fixture's real LMOG_-prefixed
+#    ones (see the header's live-verified correction), and the name-inference
+#    edge checked is LMOG_DIM_STORE (this fixture's sole name-inference case
+#    now — LMOG_DIM_CUSTOMER moved to a plain serialized key; see case 1's
+#    comment above).
+fact_el = els.find { |e| ((e['source'] || {})['path'] || []).last == 'LMOG_FACT_WIDE' }
+check(!fact_el.nil?, 'composition: LMOG_FACT_WIDE element located by warehouse source path', fails)
 rels_on_fact = fact_el ? (fact_el['relationships'] || []) : []
-cust_rel = rels_on_fact.find { |r| r['name'] == 'DIM_CUSTOMER' }
-check(!cust_rel.nil?,
-      'composition: the name-inferred DIM_CUSTOMER edge attaches to the ELECTED fact via pass-2 ' \
+store_pass2_rel = rels_on_fact.find { |r| r['name'] == 'LMOG_DIM_STORE' }
+check(!store_pass2_rel.nil?,
+      'composition: the name-inferred LMOG_DIM_STORE edge attaches to the ELECTED fact via pass-2 ' \
       'orientation (not first-end-point document order)', fails)
-check(cust_rel && cust_rel['derivedVia'] == 'name-inference',
+check(store_pass2_rel && store_pass2_rel['derivedVia'] == 'name-inference',
       "composition: derivedVia survives pass-2 attachment on the element relationship " \
-      "(got #{(cust_rel || {})['derivedVia'].inspect})", fails)
-store_rel = rels_on_fact.find { |r| r['name'] == 'DIM_STORE' }
-check(store_rel && store_rel['partial'] == true && store_rel['droppedConditions'].to_i >= 1,
+      "(got #{(store_pass2_rel || {})['derivedVia'].inspect})", fails)
+check(store_pass2_rel && store_pass2_rel['partial'] == true && store_pass2_rel['droppedConditions'].to_i >= 1,
       'composition: partial/droppedConditions survive pass-2 attachment (wider-than-Tableau join ' \
       'stays visible on the wired relationship object)', fails)
 check(!rels_on_fact.empty? && rels_on_fact.all? { |r| %w[serialized name-inference].include?(r['derivedVia']) },
       'composition: every relationship attached in pass 2 carries a known derivedVia', fails)
-check((doc['warnings'] || []).any? { |w| w.include?('fact election') && w.include?('"FACT_WIDE"') },
-      'composition: evidence-ranked fact election ran and announced FACT_WIDE', fails)
+check((doc['warnings'] || []).any? { |w| w.include?('fact election') && w.include?('"LMOG_FACT_WIDE"') },
+      'composition: evidence-ranked fact election ran and announced LMOG_FACT_WIDE', fails)
 
 puts ''
 if fails.empty?
