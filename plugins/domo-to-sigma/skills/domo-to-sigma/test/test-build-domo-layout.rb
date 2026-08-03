@@ -365,5 +365,64 @@ Dir.mktmpdir('domo-build-layout-observed') do |dir|
   ok(zov2['y_pct'] > zov1['y_pct'], 'the composed remainder (ov2) is placed below the observed region, end to end')
 end
 
+# ===========================================================================
+# bead wmkf: a KPI-kind card's ZONE caption must match the name build_kpi
+# (build-workbook.rb) will actually give the built Sigma element — it prefers
+# the card's Summary Number label over the card's own title (Domo lets an
+# author label a tile differently from the card's own title; the label is
+# what actually renders ON the KPI). Regression for a real live bug: a card
+# titled "Units Ordered" but labeled "Units" on the tile itself produced a
+# zone captioned "Units Ordered", which build-dashboard-layout.rb's NAME-based
+# zone matcher (els_by_name, keyed on the real built element's name "Units")
+# could never match — silently dropping the KPI out of the shared top KPI row
+# and into the generic "no zone matched" bottom-band fallback instead.
+#
+# No card here carries x/y/w/h, '_collection', or a real '_size' token, so
+# every card routes through rung 2a (compose_kind_aware_rows / kpi_rows_for)
+# — the same call site (build-domo-layout.rb's row-tuple `chart_kind`
+# destructure) the real live bug (card id 390868622) was reproduced through.
+# ===========================================================================
+Dir.mktmpdir('domo-build-layout-kpi-caption') do |dir|
+  w = ->(name, obj) { File.write(File.join(dir, name), JSON.generate(obj)) }
+  w.call('cards.json', [
+    { 'id' => 'kpi-label-diff', 'title' => 'Units Ordered', 'chartType' => 'badge_singlevalue',
+      'summaryNumber' => { 'column' => 'QUANTITY_ORDERED', 'aggregation' => 'SUM', 'label' => 'Units' },
+      '_size' => '', '_pageOrder' => 0 },
+    { 'id' => 'kpi-label-same', 'title' => 'Orders', 'chartType' => 'badge_singlevalue',
+      'summaryNumber' => { 'column' => 'ORDER_ID', 'aggregation' => 'COUNT', 'label' => 'Orders' },
+      '_size' => '', '_pageOrder' => 1 },
+    { 'id' => 'kpi-label-blank', 'title' => 'Net Revenue', 'chartType' => 'badge_singlevalue',
+      'summaryNumber' => { 'column' => 'NET_REVENUE', 'aggregation' => 'SUM', 'label' => '' },
+      '_size' => '', '_pageOrder' => 2 },
+    { 'id' => 'kpi-no-summary', 'title' => 'Gross Profit', 'chartType' => 'badge_singlevalue',
+      '_size' => '', '_pageOrder' => 3 },
+  ])
+  w.call('pages.json', [{ 'id' => 'p1', 'title' => 'KPI Caption Page',
+                          'cardIds' => %w[kpi-label-diff kpi-label-same kpi-label-blank kpi-no-summary] }])
+
+  env = { 'DOMO_DISCOVERY_DIR' => dir }
+  out = IO.popen(env, ['ruby', File.join(SCRIPTS, 'build-domo-layout.rb')], err: [:child, :out], &:read)
+  status = $?.success?
+  ok(status, "build-domo-layout.rb exits 0 on a page of KPI cards whose title/summaryNumber.label vary\n#{out unless status}")
+
+  dash = JSON.parse(File.read(File.join(dir, 'dashboard-layout.json'))).find { |d| d['dashboard'] == 'KPI Caption Page' }
+  zones = dash['zones']
+
+  z_diff  = zones.find { |z| z['id'] == 'kpi-label-diff' }
+  z_same  = zones.find { |z| z['id'] == 'kpi-label-same' }
+  z_blank = zones.find { |z| z['id'] == 'kpi-label-blank' }
+  z_none  = zones.find { |z| z['id'] == 'kpi-no-summary' }
+  ok(z_diff && z_same && z_blank && z_none, 'every KPI card in the fixture was placed')
+
+  eq(z_diff['caption'], 'Units',
+     "bead wmkf: a KPI whose summaryNumber.label ('Units') differs from its card title ('Units Ordered') " \
+     'gets a zone captioned with the LABEL — the same name build_kpi actually gives the built Sigma element')
+  eq(z_same['caption'], 'Orders', 'a KPI whose label already matches its title is unaffected (unchanged behavior)')
+  eq(z_blank['caption'], 'Net Revenue',
+     'a KPI with a BLANK summaryNumber.label falls back to the card title, unchanged (regression guard)')
+  eq(z_none['caption'], 'Gross Profit',
+     'a KPI card with no summaryNumber at all falls back to the card title, unchanged (regression guard)')
+end
+
 puts
 if $failures.zero? then puts "ALL PASS"; exit 0 else puts "#{$failures} FAILURE(S)"; exit 1 end
