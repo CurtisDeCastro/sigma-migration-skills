@@ -105,14 +105,21 @@ cleanly.
       if (missing.length) { console.error('FATAL: $out missing exports: ' + missing.join(', ')); process.exit(1); }
     "
     echo "✓ $skill/converter/sql.mjs  ($(du -h "$out" | cut -f1))  [vendored from formulas.ts, custom export check]"
-    case "$STAMPED_DIRS" in *"|$dest|"*) : ;; *) STAMPED_DIRS="$STAMPED_DIRS|$dest|" ;; esac
     continue
   fi
   ```
-- Unlike cognos, domo's `dest` **is** added to `STAMPED_DIRS`, so the existing generic
+- ~~Unlike cognos, domo's `dest` **is** added to `STAMPED_DIRS`, so the existing generic
   PROVENANCE.json block (source_repo/source_commit/source_commit_date/bundler/
   vendored_modules) writes for domo too, unmodified — this is the standard
-  vendor-from-mcp provenance shape, not a bespoke one.
+  vendor-from-mcp provenance shape, not a bespoke one.~~ **Superseded 2026-08-03 (final
+  review fix wave):** domo's `dest` is deliberately **not** added to `STAMPED_DIRS`.
+  The generic block's derivation (vendor-arg == module basename == upstream source
+  basename) is exactly the assumption domo's third flavor breaks — see the
+  `source_file`/`vendor_arg` fix directly below. Domo's branch writes its own complete
+  `PROVENANCE.json` immediately (same `source_repo`/`source_commit`/`source_commit_date`
+  /`bundler`/`vendored_modules` fields as the generic shape, plus the two new ones), so
+  the shared post-loop block never touches it. The illustrated snippet above is updated
+  accordingly (the `STAMPED_DIRS` line is removed from it).
 - **No NEW CI freshness gate needed — correction, one already exists and applies.**
   Originally checked (incorrectly) as: `check-cognos-bundle.rb` only exists because
   cognos's canonical source lives *inside* this repo, and the 6 mainline vendor-from-mcp
