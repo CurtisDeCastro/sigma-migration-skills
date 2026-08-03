@@ -114,6 +114,15 @@
         "_tabEscapeForSigma: stop doubling backslashes on emission (inner bytes are already verbatim); keep escaping embedded double quotes for the Sigma double-quoted literal"
       ],
       "upstream_pr": null
+    },
+    {
+      "commit": "wave/3 (in-place bundle patch; join-key inference deny-list)",
+      "summary": "Deny-list for unique-on-right NON-keys in the PR2a relationship-key inference ladder (maintainer handoff §3+§6d, disclosed residual hole): EXTERNAL_ID / ROW_ID / GUID / HASH_KEY name families are key-shaped by the _ID/_KEY suffix leg and frequently unique on the right side, but they are lineage/tech columns, not the relationship key — and gate 16's warehouse probe proves uniqueness, not correctness, so a wired one silently returns wrong rows behind a green verdict. Denied from INFERENCE candidacy only (a key Tableau explicitly serialized is still honored); a denied-only match records unwired with a reason naming the denied column(s). Deliberate side effect: a denied name no longer manufactures false ambiguity beside a genuine key (previously 2 key-shaped candidates → refuse; now the genuine key wires alone). Pinned both directions by test-relationship-derivation.rb deny-list scenarios on surgically-modified fixture variants.",
+      "changes": [
+        "new INFERENCE_KEY_DENYLIST_RE ((^|_)(EXTERNAL_ID|ROW_ID|GUID|HASH_KEY)$) applied inside inferRelationshipKeyByName: keyShaped candidates are split denied/allowed before the single-candidate wire rule; denied list rides the inferred result",
+        "unwiredReason: a keyShaped-empty result whose denied list is non-empty names the denied column(s) and the manual-authoring remedy instead of the generic not-key-shaped text"
+      ],
+      "upstream_pr": null
     }
   ],
   "_upstream_and_revendor_tasks": [
