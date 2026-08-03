@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "mode-to-sigma",
+  "displayName": "Mode → Sigma",
+  "version": "0.1.0",
+  "description": "SCAFFOLD — TODO: fill in before first live run. Convert a Mode model + dashboards into a Sigma data model and matching workbook. Discovery, calc translation, DM + workbook creation via REST, layout, and warehouse parity verification. Bundles mode-to-sigma + mode-assessment (unregistered until SP1b).",
+  "author": { "name": "Thomas Wells" },
+  "license": "MIT",
+  "keywords": ["mode", "sigma", "migration", "bi", "converter"],
+  "skills": "./skills/"
+}
