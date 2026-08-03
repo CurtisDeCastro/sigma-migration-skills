@@ -2,17 +2,28 @@
 # logical-model-objectgraph — executable expectations (offline, creds-free).
 # Run by corpus/run-corpus.sh --check after corpus_check.py passes.
 #
+# This fixture's workbook-content.twb is GENUINE Tableau Server output (see
+# MANIFEST.md's Provenance section) — published to a real Tableau site with a
+# real Snowflake connection, then downloaded back. These checks are still
+# offline/creds-free: they run the converter and the skill's own contract test
+# against the vendored, already-served .twb; they do NOT re-publish or re-probe
+# the live warehouse (that live-only evidence — M1 pagination, gate 16 —
+# lives in MANIFEST.md's live validation section, not here, since it needs a
+# live Sigma connection + warehouse this offline check suite deliberately does
+# not have).
+#
 #   1. converter/tableau.mjs's object-graph relationship-derivation ladder
-#      (PR2a) on this HAND-AUTHORED/DERIVED .twb (see MANIFEST.md) produces
-#      EXACTLY the pinned relationshipCoverage ledger: 4 serialized
-#      relationships, 3 wired (auto-match name-inference + mixed
-#      serialized/partial + computed-only-but-name-inferred/partial), 1
+#      (PR2a) on this genuinely-served .twb produces EXACTLY the pinned
+#      relationshipCoverage ledger: 5 serialized relationships, 4 wired (plain
+#      physical key + mixed serialized/partial + computed-only-but-
+#      name-inferred/partial + a 5th plain physical key), 1
 #      recorded-but-unwired (computed-only, no shared key-shaped name) —
 #      never silently dropped from the report.
-#   2. The two WIRED join-key columns (CUSTOMER_KEY, PRODUCT_KEY) on
-#      FACT_WIDE sit past metadata-record ordinal 50 (54 and 57 of 62) — see
-#      MANIFEST.md's "Ordinal placement" note for what this does and does not
-#      prove offline.
+#   2. The four WIRED join-key columns (CUSTOMER_KEY, PRODUCT_KEY, STORE_KEY,
+#      REGION_KEY) on FACT_WIDE sit past metadata-record ordinal 50 (54, 57,
+#      62, 63 of 64) — see MANIFEST.md's "Ordinal placement" note for what
+#      this does and does not prove offline (the live M1 pagination proof
+#      against the real warehouse table is documented there, not here).
 #   3. plugins/tableau-to-sigma/skills/tableau-to-sigma's own
 #      test-relationship-derivation.rb (the Task 2 contract test) passes
 #      against this fixture at its default (no-override) path.
@@ -76,19 +87,20 @@ JS
 node "$TMP/_convert.mjs" 2>"$TMP/convert.err" || { note "FAIL: converter invocation failed"; sed -n '1,20p' "$TMP/convert.err"; fail=1; }
 
 if [ -f "$TMP/coverage.json" ] && cmp -s <(tr -d "\r" < "$TMP/coverage.json") <(tr -d "\r" < "$CASE_DIR/relationship-coverage.expected.json"); then
-  note "ok: relationshipCoverage matches relationship-coverage.expected.json (4 serialized, 3 wired, DIM_DATE recorded unwired)"
+  note "ok: relationshipCoverage matches relationship-coverage.expected.json (5 serialized, 4 wired, DIM_DATE recorded unwired)"
 else
   note "FAIL: relationshipCoverage drifted from relationship-coverage.expected.json:"
   diff <(tr -d "\r" < "$CASE_DIR/relationship-coverage.expected.json") <(tr -d "\r" < "$TMP/coverage.json") 2>/dev/null | head -40
   fail=1
 fi
 
-# -- 2. the two wired join keys sit past metadata-record ordinal 50 ----------
+# -- 2. the four wired join keys sit past metadata-record ordinal 50 ---------
 ruby -e '
   raw = File.read(ARGV[0], encoding: "utf-8")
   records = raw.scan(%r{<metadata-record\b[^>]*>.*?</metadata-record>}m)
   bad = []
-  { "CUSTOMER_KEY" => "Customer Key", "PRODUCT_KEY" => "Product Key" }.each do |key, caption|
+  { "CUSTOMER_KEY" => "Customer Key", "PRODUCT_KEY" => "Product Key",
+    "STORE_KEY" => "Store Key", "REGION_KEY" => "Region Key" }.each do |key, caption|
     rec = records.find { |r| r.include?("<caption>#{caption}</caption>") }
     unless rec
       bad << "#{key}: metadata-record with caption #{caption.inspect} not found"
@@ -103,7 +115,7 @@ ruby -e '
   end
   abort bad.join("; ") unless bad.empty?
 ' "$CASE_DIR/workbook-content.twb" \
-  && note "ok: CUSTOMER_KEY and PRODUCT_KEY metadata-records sit past ordinal 50 on the 62-column FACT_WIDE" \
+  && note "ok: CUSTOMER_KEY, PRODUCT_KEY, STORE_KEY, and REGION_KEY metadata-records sit past ordinal 50 on the 64-column FACT_WIDE" \
   || { note "FAIL: join-key ordinal placement check"; fail=1; }
 
 # -- 3. the skill's own contract test passes against this fixture directly ---

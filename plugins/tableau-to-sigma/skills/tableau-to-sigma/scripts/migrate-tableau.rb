@@ -182,6 +182,7 @@ begin
 rescue LoadError, StandardError
   nil
 end
+require 'join_plan_resolutions' # join-plan.json gate-16 resolutions → consolidated report (beads-sigma-zjkw)
 
 require 'rbconfig'
 # Children (post-and-readback.rb, phase6-parity.rb, …) inherit this marker so
@@ -4662,6 +4663,27 @@ if mechanical
       end
     end
     puts '==========================================================='
+  end
+
+  # JOIN-CARDINALITY RESOLUTIONS — surfaces gate-16's operator-recorded
+  # explanations (beads-sigma-zjkw) for any join-plan.json entry resolved via
+  # `probe-join-keys.rb --resolve <i> --how preaggregated|waived --reason
+  # "<...>"`. Without this, a `preaggregated` resolution's helper element (a
+  # pre-aggregated / Custom-SQL-shaped table added to the DM to fix a
+  # non-unique join target) had a recorded reason that never reached any
+  # customer-visible surface — confirmed root cause of a field report ("it
+  # created a custom SQL aggregate table in a data model that didn't exist in
+  # the Tableau data set"). Same consolidated readout as MIGRATION COVERAGE
+  # above, not a stderr-only warning. Non-blocking; purely informational.
+  jp_doc = JoinPlanResolutions.load(File.join(WORK, 'join-plan.json'))
+  jp_resolved_lines = JoinPlanResolutions.report_lines(jp_doc)
+  unless jp_resolved_lines.empty?
+    puts
+    puts '============== JOIN-CARDINALITY RESOLUTIONS (gate 16) =============='
+    puts "   #{JoinPlanResolutions.headline(jp_doc)}"
+    puts
+    puts jp_resolved_lines.join("\n")
+    puts '======================================================================'
   end
 
   # 3) Assemble the workbook spec (page-data master [+ hidden helpers] + one

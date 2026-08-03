@@ -4,11 +4,23 @@
 # Contract test: object-graph relationships whose join key Tableau did NOT
 # serialize must still be wired, and every derivation must be recorded.
 #
-# WHY: Tableau AUTO-MATCHES relationships by column name at query time and
-# serializes no key. That is how modern star schemas are built, so the converter
-# saw a star and emitted disconnected tables — after which a parity gate with no
-# relationships to satisfy it pushes the run into joined/aggregated Custom SQL.
-# That is the "flattened star schema" a field report described.
+# WHY: Tableau AUTO-MATCHES relationships by column name at query time, and can
+# serialize a relationship whose only usable key is a computed expression Sigma
+# cannot join on physically. That is how modern star schemas are built, so the
+# converter saw a star and emitted disconnected tables — after which a parity
+# gate with no relationships to satisfy it pushes the run into joined/
+# aggregated Custom SQL. That is the "flattened star schema" a field report
+# described.
+#
+# LIVE-VERIFIED CORRECTION (2026-08, logical-model-objectgraph fixture): a
+# relationship with literally NO <expression> at all — this test's original
+# model of "auto-matched, no serialized key" — does not survive a real Tableau
+# Server publish (HTTP 400011, "The relationship/expression tag is missing or
+# invalid"). Every relationship in genuine Tableau output carries SOME
+# expression. The name-inference rung this test exercises is instead reached
+# via a relationship whose serialized expression is present but not a usable
+# PHYSICAL key (e.g. wrapped in IFNULL/DATETRUNC) — see case 4 (LMOG_DIM_STORE)
+# below, now the sole name-inference case in this fixture.
 #
 # Inference is only safe because inferred keys are written into join-plan.json,
 # where gate 16's warehouse uniqueness probe validates them before GREEN. A wrong
@@ -157,34 +169,43 @@ doc = run_converter_capture(twb_path)
 puts 'test-relationship-derivation.rb — object-graph key derivation'
 
 cov = doc['relationshipCoverage'] || {}
-check(cov['serialized'].to_i == 4,
-      "coverage reports all 4 serialized relationships (got #{cov['serialized'].inspect})", fails)
+check(cov['serialized'].to_i == 5,
+      "coverage reports all 5 serialized relationships (got #{cov['serialized'].inspect})", fails)
 entries = cov['entries'] || []
 by_target = entries.each_with_object({}) { |e, h| h[e['right']] = e }
-# The auto-matched, mixed-key, and computed-only-but-name-inferred relationships
-# MUST wire. The computed-only/no-shared-name one may legitimately stay unwired
-# under the conservative rule (no key-shaped name match) — what matters is that
-# it is RECORDED, never silently absent.
-check(cov['wired'].to_i >= 3,
-      "at least the auto-matched, mixed-key, and computed-only-but-name-inferred relationships are WIRED " \
-      "(got #{cov['wired'].inspect}) — fewer means the star still becomes disconnected tables", fails)
-check(entries.length == 4,
-      "all 4 relationships appear in the ledger, wired or not (got #{entries.length})", fails)
+# The plain-physical-key, mixed-key, computed-only-but-name-inferred, and
+# 5th (new, plain physical) relationships MUST wire. The computed-only/
+# no-shared-name one may legitimately stay unwired under the conservative rule
+# (no key-shaped name match) — what matters is that it is RECORDED, never
+# silently absent.
+check(cov['wired'].to_i >= 4,
+      "at least the plain-physical-key, mixed-key, computed-only-but-name-inferred, and 5th relationships " \
+      "are WIRED (got #{cov['wired'].inspect}) — fewer means the star still becomes disconnected tables", fails)
+check(entries.length == 5,
+      "all 5 relationships appear in the ledger, wired or not (got #{entries.length})", fails)
 
 entries = cov['entries'] || []
 by_target = entries.each_with_object({}) { |e, h| h[e['right']] = e }
 
-# 1. AUTO-MATCHED: Tableau serialized no key at all. Must be inferred by name.
-cust = by_target['DIM_CUSTOMER'] || {}
-check(cust['derivedVia'] == 'name-inference',
-      "auto-matched FACT_WIDE->DIM_CUSTOMER is derived by name-inference (got #{cust['derivedVia'].inspect})",
+# 1. PLAIN PHYSICAL KEY (CUSTOMER_KEY = CUSTOMER_KEY). LIVE-VERIFIED CORRECTION
+#    (see header note above): this fixture originally modeled this
+#    relationship with NO serialized expression at all ("auto-matched, no
+#    serialized key"), to exercise name-inference on a relationship Tableau
+#    itself never wrote a key for. Publishing that shape to real Tableau
+#    Server 400s — every relationship needs an expression — so this case is
+#    now a plain serialized physical key instead. It still proves the
+#    baseline "serialized physical key wires cleanly" rung; name-inference is
+#    now exercised solely by case 4 (LMOG_DIM_STORE) below.
+cust = by_target['LMOG_DIM_CUSTOMER'] || {}
+check(cust['derivedVia'] == 'serialized',
+      "plain-physical-key LMOG_FACT_WIDE->LMOG_DIM_CUSTOMER is derived as serialized (got #{cust['derivedVia'].inspect})",
       fails)
-check(cust['partial'] != true, 'auto-matched relationship is not marked partial', fails)
+check(cust['partial'] != true, 'plain-physical-key relationship is not marked partial', fails)
 
 # 2. MIXED keys: physical subset wired, computed condition recorded as dropped.
-prod = by_target['DIM_PRODUCT'] || {}
+prod = by_target['LMOG_DIM_PRODUCT'] || {}
 check(prod['derivedVia'] == 'serialized',
-      "mixed-key FACT_WIDE->DIM_PRODUCT keeps its serialized physical key (got #{prod['derivedVia'].inspect})",
+      "mixed-key LMOG_FACT_WIDE->LMOG_DIM_PRODUCT keeps its serialized physical key (got #{prod['derivedVia'].inspect})",
       fails)
 check(prod['partial'] == true && prod['droppedConditions'].to_i >= 1,
       'mixed-key relationship is marked partial with a dropped-condition count', fails)
@@ -192,26 +213,41 @@ check(prod['partial'] == true && prod['droppedConditions'].to_i >= 1,
 # 3. COMPUTED-ONLY key, inference fails (no shared key-shaped name): no physical
 #    column to join on, so inference by name is the only route. Whatever the
 #    outcome, it must be RECORDED, never silently absent.
-date = by_target['DIM_DATE'] || {}
-check(!date.empty?, 'computed-key FACT_WIDE->DIM_DATE appears in the coverage ledger', fails)
+date = by_target['LMOG_DIM_DATE'] || {}
+check(!date.empty?, 'computed-key LMOG_FACT_WIDE->LMOG_DIM_DATE appears in the coverage ledger', fails)
 check(%w[serialized name-inference unwired].include?(date['derivedVia']),
       "computed-key relationship records a known derivedVia (got #{date['derivedVia'].inspect})", fails)
 
 # 4. COMPUTED-ONLY key, inference SUCCEEDS (review fix-wave, 2026-07-30,
-#    Important finding 2): FACT_WIDE/DIM_STORE's sole condition
-#    (IFNULL([STORE_KEY],-1) = [STORE_KEY]) is computed on its left operand, so
-#    no physical pair survives — but STORE_KEY is a shared key-shaped column
-#    name on both sides, so name-inference wires it. Before the fix this wired
-#    cleanly with no partial/droppedConditions, hiding that the IFNULL
-#    condition Tableau required was dropped (a WIDER-than-Tableau join). The
-#    ledger entry must now say so explicitly, exactly like the mixed-key case.
-store = by_target['DIM_STORE'] || {}
+#    Important finding 2 — this is now the fixture's SOLE name-inference case,
+#    since case 1 above moved to a plain serialized key): FACT_WIDE/DIM_STORE's
+#    sole condition (IFNULL([STORE_KEY],-1) = [STORE_KEY]) is computed on its
+#    left operand, so no physical pair survives — but STORE_KEY is a shared
+#    key-shaped column name on both sides, so name-inference wires it. Before
+#    the fix this wired cleanly with no partial/droppedConditions, hiding that
+#    the IFNULL condition Tableau required was dropped (a WIDER-than-Tableau
+#    join). The ledger entry must now say so explicitly, exactly like the
+#    mixed-key case.
+store = by_target['LMOG_DIM_STORE'] || {}
 check(store['derivedVia'] == 'name-inference',
-      "computed-only-but-name-matched FACT_WIDE->DIM_STORE is derived by name-inference " \
+      "computed-only-but-name-matched LMOG_FACT_WIDE->LMOG_DIM_STORE is derived by name-inference " \
       "(got #{store['derivedVia'].inspect})", fails)
 check(store['partial'] == true && store['droppedConditions'].to_i >= 1,
       'computed-only-but-name-inferred relationship is marked partial with a dropped-condition count ' \
       '(a wider-than-Tableau join must never look clean)', fails)
+
+# 5. NEW (live-fixture addition, orthogonal to the derivation ladder): a plain
+#    serialized physical equality key with no complexity at all. Exists to
+#    exercise gate 16's join-cardinality probe live (LMOG_DIM_REGION is
+#    deliberately non-unique on REGION_KEY in the live warehouse fixture —
+#    see MANIFEST.md's live validation section) — the offline converter
+#    check here only proves the key wires; the non-uniqueness itself is a
+#    live-warehouse-only behavior no offline check can exercise.
+region = by_target['LMOG_DIM_REGION'] || {}
+check(region['derivedVia'] == 'serialized',
+      "plain-physical-key LMOG_FACT_WIDE->LMOG_DIM_REGION is derived as serialized (got #{region['derivedVia'].inspect})",
+      fails)
+check(region['partial'] != true, 'plain-physical-key LMOG_FACT_WIDE->LMOG_DIM_REGION relationship is not marked partial', fails)
 
 # 5. Every wired relationship's keys must trace back to a column NAME the
 #    .twb itself declared — not merely one present in element.columns, which
@@ -251,20 +287,26 @@ check(src.include?('partial'),
       fails)
 
 # 7. BEHAVIORAL pin (not a source grep): JoinPlan.derive must actually RECOVER
-#    the name-inferred FACT_WIDE->DIM_CUSTOMER relationship — the .twb alone
-#    carries no <expression> for it, so this only passes if join_plan.rb reads
-#    the converter's dm-spec relationships (dm_object_graph_index), not merely
-#    if it mentions the string "derived_via" somewhere. This is the check that
-#    pins the recovery branch AND the dm-spec/.twb name-matching together.
+#    the name-inferred LMOG_FACT_WIDE->LMOG_DIM_STORE relationship — the .twb's
+#    sole serialized condition for it (IFNULL([STORE_KEY],-1) = [STORE_KEY]) is
+#    computed, not a bare physical key, so this only passes if join_plan.rb
+#    reads the converter's dm-spec relationships (dm_object_graph_index), not
+#    merely if it mentions the string "derived_via" somewhere. This is the
+#    check that pins the recovery branch AND the dm-spec/.twb name-matching
+#    together. (Pinned against LMOG_DIM_STORE, not LMOG_DIM_CUSTOMER, per the
+#    header's live-verified correction: LMOG_DIM_CUSTOMER now carries a plain
+#    serialized physical key, so it is derived as "serialized", not
+#    "name-inference" — LMOG_DIM_STORE is this fixture's only remaining
+#    name-inference case.)
 jp_entries = JoinPlan.derive(doc['model'], File.read(twb_path, encoding: 'UTF-8'))
-cust_jp = jp_entries.find { |e| e['left'] == 'FACT_WIDE' && e['right'] == 'DIM_CUSTOMER' }
-check(!cust_jp.nil?,
-      'JoinPlan.derive recovers a join-plan.json entry for the name-inferred FACT_WIDE->DIM_CUSTOMER ' \
+store_jp = jp_entries.find { |e| e['left'] == 'LMOG_FACT_WIDE' && e['right'] == 'LMOG_DIM_STORE' }
+check(!store_jp.nil?,
+      'JoinPlan.derive recovers a join-plan.json entry for the name-inferred LMOG_FACT_WIDE->LMOG_DIM_STORE ' \
       'relationship (absent before this task — nothing for gate 16 to probe)', fails)
-check(cust_jp && cust_jp['derived_via'] == 'name-inference',
-      "recovered entry's derived_via is name-inference (got #{(cust_jp || {})['derived_via'].inspect})", fails)
-check(cust_jp && cust_jp['probe_keys'] == ['CUSTOMER_KEY'],
-      "recovered entry's probe_keys resolve to the physical inferred key (got #{(cust_jp || {})['probe_keys'].inspect})",
+check(store_jp && store_jp['derived_via'] == 'name-inference',
+      "recovered entry's derived_via is name-inference (got #{(store_jp || {})['derived_via'].inspect})", fails)
+check(store_jp && store_jp['probe_keys'] == ['STORE_KEY'],
+      "recovered entry's probe_keys resolve to the physical inferred key (got #{(store_jp || {})['probe_keys'].inspect})",
       fails)
 
 # 8. COMPOSITION (wave/2-integration merge of #569 + W2-OM): the derivation
@@ -277,24 +319,28 @@ check(cust_jp && cust_jp['probe_keys'] == ['CUSTOMER_KEY'],
 #        rung that bypasses orientation, both fail here);
 #      - derivedVia and the partial/droppedConditions census must SURVIVE
 #        pass-2 attachment onto the relationship object itself.
-fact_el = els.find { |e| ((e['source'] || {})['path'] || []).last == 'FACT_WIDE' }
-check(!fact_el.nil?, 'composition: FACT_WIDE element located by warehouse source path', fails)
+#    Table/relationship names below are this fixture's real LMOG_-prefixed
+#    ones (see the header's live-verified correction), and the name-inference
+#    edge checked is LMOG_DIM_STORE (this fixture's sole name-inference case
+#    now — LMOG_DIM_CUSTOMER moved to a plain serialized key; see case 1's
+#    comment above).
+fact_el = els.find { |e| ((e['source'] || {})['path'] || []).last == 'LMOG_FACT_WIDE' }
+check(!fact_el.nil?, 'composition: LMOG_FACT_WIDE element located by warehouse source path', fails)
 rels_on_fact = fact_el ? (fact_el['relationships'] || []) : []
-cust_rel = rels_on_fact.find { |r| r['name'] == 'DIM_CUSTOMER' }
-check(!cust_rel.nil?,
-      'composition: the name-inferred DIM_CUSTOMER edge attaches to the ELECTED fact via pass-2 ' \
+store_pass2_rel = rels_on_fact.find { |r| r['name'] == 'LMOG_DIM_STORE' }
+check(!store_pass2_rel.nil?,
+      'composition: the name-inferred LMOG_DIM_STORE edge attaches to the ELECTED fact via pass-2 ' \
       'orientation (not first-end-point document order)', fails)
-check(cust_rel && cust_rel['derivedVia'] == 'name-inference',
+check(store_pass2_rel && store_pass2_rel['derivedVia'] == 'name-inference',
       "composition: derivedVia survives pass-2 attachment on the element relationship " \
-      "(got #{(cust_rel || {})['derivedVia'].inspect})", fails)
-store_rel = rels_on_fact.find { |r| r['name'] == 'DIM_STORE' }
-check(store_rel && store_rel['partial'] == true && store_rel['droppedConditions'].to_i >= 1,
+      "(got #{(store_pass2_rel || {})['derivedVia'].inspect})", fails)
+check(store_pass2_rel && store_pass2_rel['partial'] == true && store_pass2_rel['droppedConditions'].to_i >= 1,
       'composition: partial/droppedConditions survive pass-2 attachment (wider-than-Tableau join ' \
       'stays visible on the wired relationship object)', fails)
 check(!rels_on_fact.empty? && rels_on_fact.all? { |r| %w[serialized name-inference].include?(r['derivedVia']) },
       'composition: every relationship attached in pass 2 carries a known derivedVia', fails)
-check((doc['warnings'] || []).any? { |w| w.include?('fact election') && w.include?('"FACT_WIDE"') },
-      'composition: evidence-ranked fact election ran and announced FACT_WIDE', fails)
+check((doc['warnings'] || []).any? { |w| w.include?('fact election') && w.include?('"LMOG_FACT_WIDE"') },
+      'composition: evidence-ranked fact election ran and announced LMOG_FACT_WIDE', fails)
 
 # ── deny-list: unique-on-right NON-keys never inferred as join keys ─────────
 # TJ handoff §3+§6d (disclosed residual hole): EXTERNAL_ID / ROW_ID / GUID /
