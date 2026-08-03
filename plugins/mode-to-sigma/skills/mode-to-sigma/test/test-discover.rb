@@ -14,6 +14,14 @@ eq(columns_from_csv_header("ORDER_DATE,REVENUE,REGION\n2026-01-01,100,West\n"),
 eq(columns_from_csv_header("\"Order Date\",\"Revenue\"\n2026-01-01,100\n"),
    ['Order Date', 'Revenue'], 'strips CSV quoting from quoted aliases')
 
+puts "== Finding 2: columns_from_csv_header uses real CSV parsing, not a bare comma-split =="
+eq(columns_from_csv_header(%(ORDER_DATE,"Revenue, Net",REGION\n2026-01-01,100,West\n)),
+   ['ORDER_DATE', 'Revenue, Net', 'REGION'],
+   'a quoted header value with an embedded comma parses as one column, not two')
+eq(columns_from_csv_header(%("Say ""Hi""",REVENUE\nx,100\n)),
+   ['Say "Hi"', 'REVENUE'],
+   'doubled-quote escaping inside a quoted header value unescapes to a single quote')
+
 puts "== normalize_query =="
 raw = { 'token' => 'q1', 'name' => 'Monthly Revenue', 'raw_query' => 'select * from orders',
         'data_source_id' => '49894' }

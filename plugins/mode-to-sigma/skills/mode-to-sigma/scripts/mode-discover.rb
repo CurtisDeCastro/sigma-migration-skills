@@ -7,10 +7,17 @@
 #   ruby scripts/mode-discover.rb --report <report-token>
 require 'optparse'
 require 'json'
+require 'csv'
 require 'fileutils'
 require_relative 'lib/mode_rest'
 
 OUT = ENV['MODE_DISCOVERY_DIR'] || File.expand_path('../discovery', __dir__)
+
+# Wall-clock cap on run_report_and_fetch_csvs's state-poll loop, matching the
+# 60s bound used by this converter's other export/render poll loops (e.g.
+# sigma-export-png.py's export-poll) — a stuck Mode run must fail loudly
+# rather than poll every 2s forever.
+RUN_POLL_TIMEOUT = 60
 
 def dump(name, obj)
   FileUtils.mkdir_p(OUT)
@@ -21,7 +28,7 @@ end
 
 def columns_from_csv_header(csv_text)
   header = csv_text.lines.first.to_s.chomp
-  header.split(',').map { |c| c.gsub(/\A"|"\z/, '') }
+  CSV.parse_line(header) || []
 end
 
 def normalize_query(raw, columns:)
@@ -40,8 +47,13 @@ end
 # place.
 def run_report_and_fetch_csvs(report_token)
   run = Mode.post("/api/#{Mode.account}/reports/#{report_token}/runs", body: {})
+  deadline = Time.now + RUN_POLL_TIMEOUT
   loop do
     break if %w[succeeded completed failed cancelled].include?(run['state'])
+    if Time.now > deadline
+      raise Mode::Error, "report run #{run['token']} timed out after #{RUN_POLL_TIMEOUT}s " \
+                          "waiting for a terminal state (last seen state: #{run['state']})"
+    end
     sleep 2
     run = Mode.follow(run, 'self')
   end
@@ -81,7 +93,12 @@ if __FILE__ == $PROGRAM_NAME
       Mode.get("/api/#{Mode.account}/reports/#{opts[:report]}/queries/#{q['token']}/charts")
           ['_embedded']['charts'].map { |c| normalize_chart(c, q['token']) }
     end
-    filters = Mode.get("/api/#{Mode.account}/reports/#{opts[:report]}/report_filters")['_embedded']['report_filters'] rescue []
+    filters = begin
+      Mode.get("/api/#{Mode.account}/reports/#{opts[:report]}/report_filters")['_embedded']['report_filters']
+    rescue Mode::Error => e
+      warn "report_filters fetch failed for #{opts[:report]}: #{e.message}"
+      []
+    end
 
     dump("report-#{opts[:report]}.json", {
       'report'  => { 'token' => report['token'], 'name' => report['name'], 'space_token' => report['space_token'] },
