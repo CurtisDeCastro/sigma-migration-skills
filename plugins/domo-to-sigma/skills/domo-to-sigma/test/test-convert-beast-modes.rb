@@ -287,6 +287,13 @@ if node_present
       { 'id' => 'calculation_fallback-1', 'name' => 'Fallback One', 'normalizedSql' => 'FAIL_RULES SUM([x])', 'sigmaFormula' => nil },
       { 'id' => 'calculation_badcase-1', 'name' => 'Bad Case One', 'normalizedSql' => 'BADCASE([x])', 'sigmaFormula' => nil },
       { 'id' => 'calculation_unknownfn-1', 'name' => 'Unknown Fn One', 'normalizedSql' => 'UNKNOWNFN([x])', 'sigmaFormula' => nil },
+      # Re-run scenario: this entry already carries a stale converted:false +
+      # note from a PRIOR --convert run (e.g. before the bundle improved, or
+      # before normalizedSql was hand-edited to drop the offending syntax).
+      # Its normalizedSql is now clean — the note must NOT survive.
+      { 'id' => 'calculation_stale-note-1', 'name' => 'Stale Note One', 'normalizedSql' => 'SUM([y])',
+        'sigmaFormula' => 'RULES(OLD BAD SQL)', 'converted' => false,
+        'note' => 'STALE: a prior run flagged this as not fully translated' },
     ]))
 
     cmd = ['ruby', SCRIPT, '--convert', '--mcp-dir', mcp_dir, '--in', pending_path, '--out', out_path]
@@ -308,6 +315,10 @@ if node_present
     ok(by_id['calculation_badcase-1']['note'].to_s.include?('Could not fully translate'), 'converted:false entry carries a note')
 
     ok(by_id['calculation_unknownfn-1']['warnings'].any? { |w| w.include?('UNKNOWNFN') }, 'lookUnknownFunctions warning surfaced per entry')
+
+    stale = by_id['calculation_stale-note-1']
+    ok(stale['converted'] == true, 'stale-note entry re-processed to converted:true on re-run (clean sql, fresh compute)')
+    ok(stale['note'].nil?, 'stale converted:false note does NOT survive onto a now-clean converted:true result')
   end
 
   puts '== CLI --convert: --converter-out tier-3 resume merges by id =='
@@ -316,15 +327,37 @@ if node_present
     conv_out     = File.join(dir, 'manual-mcp-results.json')
     File.write(pending_path, JSON.generate([
       { 'id' => 'calculation_manual-1', 'name' => 'Manual One', 'normalizedSql' => 'SUM([x])', 'sigmaFormula' => nil },
+      # This entry already carries a stale converted:false + note from a prior
+      # run; the manual-mcp-results.json entry for it below has NO `note` key
+      # (the agent's hand-run convert_sql_to_sigma_formula call cleanly
+      # translated it this time) — the stale note must be cleared, not kept.
+      { 'id' => 'calculation_manual-stale-note', 'name' => 'Manual Stale Note', 'normalizedSql' => 'SUM([y])',
+        'sigmaFormula' => 'Old([y])', 'converted' => false, 'note' => 'STALE: previously flagged not fully translated' },
     ]))
     File.write(conv_out, JSON.generate([
       { 'id' => 'calculation_manual-1', 'sigmaFormula' => 'Sum([x])', 'converted' => true, 'warnings' => [] },
+      { 'id' => 'calculation_manual-stale-note', 'sigmaFormula' => 'Sum([y])', 'converted' => true, 'warnings' => [] },
+      # Typo'd / stale id present in the supplied file but matching NO pending
+      # entry — must warn loudly (mirrors unmatched_override_keys), never
+      # silently no-op.
+      { 'id' => 'calculation_typo-does-not-exist', 'sigmaFormula' => 'Sum([z])', 'converted' => true, 'warnings' => [] },
     ]))
     cmd = ['ruby', SCRIPT, '--convert', '--converter-out', conv_out, '--in', pending_path, '--out', pending_path]
     output = IO.popen(cmd, err: [:child, :out], &:read)
     ok($?.success?, "--converter-out resume exits 0\n#{output unless $?.success?}")
     result = JSON.parse(File.read(pending_path))
-    ok(result.first['sigmaFormula'] == 'Sum([x])', 'manual MCP result merged into the pending file by id')
+    by_id2 = {}
+    result.each { |e| by_id2[e['id']] = e }
+
+    ok(by_id2['calculation_manual-1']['sigmaFormula'] == 'Sum([x])', 'manual MCP result merged into the pending file by id')
+
+    ok(by_id2['calculation_manual-stale-note']['sigmaFormula'] == 'Sum([y])', 'manual result merged for the stale-note entry too')
+    ok(by_id2['calculation_manual-stale-note']['converted'] == true, 'stale-note entry updated to converted:true via --converter-out')
+    ok(by_id2['calculation_manual-stale-note']['note'].nil?, 'stale note cleared by --converter-out merge when src has no note')
+
+    ok(output.include?('calculation_typo-does-not-exist'), 'stderr names the --converter-out id that matched no pending entry')
+    ok(output.downcase.include?('unmatched') || output.downcase.include?('no beast mode'),
+       'stderr flags the unmatched id as such, not just a bare mention')
   end
 else
   puts '== CLI --convert: SKIPPED (node not on PATH) =='

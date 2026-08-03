@@ -311,17 +311,27 @@ if opts[:convert]
     filled = JSON.parse(File.read(opts[:converter_out]))
     by_id = {}
     filled.each { |e| by_id[e['id']] = e }
+    applied_ids = []
     pending.each do |e|
       src = by_id[e['id']]
       next unless src
+      applied_ids << e['id']
       e['sigmaFormula'] = src['sigmaFormula']
       e['converted']    = src['converted']
       e['warnings']     = src['warnings']
-      e['note']         = src['note'] if src['note']
+      # Always overwrite — nil when src has no note — so a formula that is
+      # NOW cleanly converted never carries forward a stale "could not fully
+      # translate" note from a prior run's pending entry.
+      e['note']         = src['note']
+    end
+    unmatched_ids = by_id.keys - applied_ids
+    unmatched_ids.each do |id|
+      warn "  ⚠ --converter-out id '#{id}' matches no Beast Mode in #{path} — typo'd id? (ignored)"
     end
     out = opts[:out] || path
     File.write(out, JSON.pretty_generate(pending))
-    warn "  filled #{filled.size} formula(s) from --converter-out #{opts[:converter_out]}"
+    warn "  filled #{applied_ids.size}/#{filled.size} formula(s) from --converter-out " \
+         "#{opts[:converter_out]}#{unmatched_ids.empty? ? '' : " (#{unmatched_ids.size} unmatched — see warnings above)"}"
     exit 0
   end
 
@@ -365,7 +375,10 @@ if opts[:convert]
         if (sigmaFormula == null) sigmaFormula = lookConvertExpression(sql);
         const converted = !hasResidualCaseKeyword(sigmaFormula) && !hasResidualInfixOperator(sigmaFormula);
         const result = { ...entry, sigmaFormula, converted, warnings };
-        if (!converted) result.note = NOTE;
+        // entry may carry a stale `note` from a prior run (e.g. re-running
+        // --convert after the bundle improves, or after a hand-edit to
+        // normalizedSql) — never let it survive onto a now-clean result.
+        if (!converted) { result.note = NOTE; } else { delete result.note; }
         return result;
       });
       writeFileSync(#{res_path.to_json}, JSON.stringify(out));
