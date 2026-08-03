@@ -1124,10 +1124,11 @@ else
     # pool is legitimately empty. The numbers are still machine-verified when
     # BOTH hold: (a) anchors-verdict.json passes with EVERY source anchor
     # matched against live element exports, and (b) every empty-export tile is
-    # image-verified (visual-verify manifest all true). Then the anchors
-    # oracle IS the parity evidence — same doctrine as the conditional
-    # --skip-parity-gate acceptance, but deterministic, and it burns no waiver
-    # budget because nothing is skipped.
+    # image-verified (visual-verify manifest all true — or, when no manifest
+    # exists at all, a recorded page-level visual verdict stands in, see
+    # below). Then the anchors oracle IS the parity evidence — same doctrine
+    # as the conditional --skip-parity-gate acceptance, but deterministic, and
+    # it burns no waiver budget because nothing is skipped.
     _av = (JSON.parse(File.read(File.join(opts[:tab], 'anchors-verdict.json'))) rescue nil)
     _vv = (JSON.parse(File.read(File.join(opts[:tab], 'visual-verify', 'manifest.json'))) rescue nil)
     if _vv.is_a?(Array) && _vv.any?
@@ -1199,7 +1200,7 @@ else
       warn '       anchors oracle can stand in — ALL FOUR must hold:'
       warn "         a) verify-anchors.rb pass with EVERY anchor matched (#{_av ? "currently #{_av['matched']}/#{_av['checked']}" : 'anchors-verdict.json missing'})"
       warn "         b) every visual-verify tile confirmed (#{_vv_ok ? 'ok' : 'incomplete'})"
-      unless _vv_ok
+      if _vv_source == :page_verdict && !_vv_ok
         warn '            (no manifest.json + no recorded page-level visual verdict — run'
         warn '             scripts/record-visual-check.rb to satisfy this condition when your'
         warn '             converter has no visual-verify/manifest.json generator)'
@@ -1643,6 +1644,11 @@ else
   # image-verified. Count a zone as matched when its tile carries a confirmed
   # visual-verify entry (the per-tile side-by-side oracle) — deterministic,
   # per-name, and loud below.
+  # NOTE: `_vv_ok` here is a fresh top-level reassignment for an UNRELATED
+  # purpose (an Array of visually-verified worksheet NAMES for gate 5/7's own
+  # name-matching), not the Boolean `_vv_ok`/`_vv_source` computed above for
+  # gate 2's anchors-oracle condition (b) — gate 2's use is fully consumed
+  # before this point, but don't assume shared meaning between the two blocks.
   _vv_ok = begin
     Array(JSON.parse(File.read(File.join(opts[:tab], 'visual-verify', 'manifest.json'))))
       .select { |t| t['visual_verified'] == true }.map { |t| t['worksheet'].to_s }

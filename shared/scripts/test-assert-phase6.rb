@@ -77,15 +77,19 @@ def write_json(dir, name, obj)
   File.write(File.join(dir, name), JSON.generate(obj))
 end
 
-# Like run_gate, but also captures stdout — needed where a scenario must
-# assert on the exact PRINTED success/failure message, not just the exit
-# code (a crash before the print, or the wrong branch's message, could still
-# coincidentally produce the same exit code without this).
+# Like run_gate, but also captures stdout AND stderr — needed where a
+# scenario must assert on the exact PRINTED success/failure message, not just
+# the exit code (a crash before the print, or the wrong branch's message,
+# could still coincidentally produce the same exit code without this). Every
+# `warn` call in the gate (all of its diagnostic/remediation text, including
+# FAIL-branch hints) goes to stderr, not stdout — callers that only need
+# stdout can still destructure just `code, out = run_gate_capture(...)` and
+# the captured stderr string is simply dropped.
 def run_gate_capture(dir, *extra_args)
   cmd = ['ruby', GATE, '--workdir', dir] + extra_args
   env = { 'SIGMA_BASE_URL' => '', 'SIGMA_API_TOKEN' => '' }
-  out, _err, status = Open3.capture3(env, *cmd)
-  [status.exitstatus, out]
+  out, err, status = Open3.capture3(env, *cmd)
+  [status.exitstatus, out, err]
 end
 
 # A workdir with valid, minimal fixtures for every FILE-DRIVEN gate this
@@ -497,6 +501,34 @@ Dir.mktmpdir('domo-p6') do |dir|
   eq(code, 0, 'anchors-oracle: manifest PRESENT and fully verified -> unchanged existing behavior (regression guard)')
   eq(out.include?('all 2 tile(s) image-verified'), true,
      'success line keeps the ORIGINAL manifest-path wording ("all N tile(s) image-verified") — proves the manifest path is untouched by the fallback')
+end
+
+# Regression guard for the misdirection this fix corrects: a REAL manifest
+# that exists but has a failing tile must never be reported with the
+# no-manifest-at-all remediation hint ("no manifest.json + no recorded
+# page-level visual verdict... run scripts/record-visual-check.rb") — that
+# hint is only correct when NO manifest exists at all (_vv_source ==
+# :page_verdict); here a manifest genuinely exists and one tile failed real
+# per-tile verification, so the fix is verify-visual-tiles.rb, not
+# record-visual-check.rb. Without this guard, a future edit could reintroduce
+# the exact misdirection two prior whole-branch reviews missed.
+Dir.mktmpdir('domo-p6') do |dir|
+  write_good_fixtures(dir)
+  write_json(dir, 'anchors-verdict.json', PASSING_ANCHORS_ORACLE)
+  write_json(dir, 'parity-final.json',
+             'charts_total' => 0, 'charts_pass' => 0, 'status' => 'PASS', 'mode' => 'live')
+  FileUtils.mkdir_p(File.join(dir, 'visual-verify'))
+  write_json(dir, File.join('visual-verify', 'manifest.json'),
+             [{ 'worksheet' => 'Tile A', 'visual_verified' => true },
+              { 'worksheet' => 'Tile B', 'visual_verified' => false }])
+  code, _out, err = run_gate_capture(dir, *HAPPY_FLAGS)
+  eq(code, 2, 'anchors-oracle: manifest PRESENT with a failing tile -> condition (b) incomplete, gate fails')
+  eq(err.include?('every visual-verify tile confirmed (incomplete)'), true,
+     'stderr reports condition (b) as incomplete (the real, manifest-driven failure)')
+  eq(err.include?('no manifest.json'), false,
+     'stderr does NOT print the no-manifest remediation hint when a manifest genuinely exists — the Fix-2 regression guard')
+  eq(err.include?('record-visual-check.rb'), false,
+     'stderr does NOT recommend record-visual-check.rb (the wrong remediation for a manifest-present failure) — re-running verify-visual-tiles.rb is the real fix')
 end
 
 if $failures.zero? then puts 'ALL PASS'; exit 0 else puts "#{$failures} FAILURE(S)"; exit 1 end
