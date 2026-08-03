@@ -348,9 +348,10 @@ check((doc['warnings'] || []).any? { |w| w.include?('fact election') && w.includ
 # are lineage/tech columns, not the relationship key. Gate 16's probe proves
 # UNIQUENESS, not CORRECTNESS, so a wired one silently returns wrong rows.
 # Two directions pinned on surgically-modified fixture variants:
-#   (a) deny blocks the wrong wire: the ONLY shared key-shaped name is
-#       EXTERNAL_ID → unwired, reason names the deny-list;
-#   (b) deny rescues a right wire: EXTERNAL_ID beside the genuine CUSTOMER_KEY
+#   (a) deny blocks the wrong wire: the ONLY shared key-shaped name on the
+#       store pair (the fixture's sole name-inference case) is EXTERNAL_ID →
+#       unwired, reason names the deny-list;
+#   (b) deny rescues a right wire: EXTERNAL_ID beside the genuine STORE_KEY
 #       previously made 2 key-shaped candidates (ambiguous → refuse); denied
 #       from candidacy, the genuine key wires alone.
 puts ''
@@ -358,11 +359,11 @@ puts 'deny-list: unique-on-right non-keys'
 raw_twb = File.read(TWB, encoding: 'utf-8')
 
 Dir.mktmpdir('deny-a') do |dir|
-  variant = raw_twb.gsub('customer_key', 'external_id').gsub('Customer Key', 'External Id')
+  variant = raw_twb.gsub('store_key', 'external_id').gsub('Store Key', 'External Id')
   vp = File.join(dir, 'variant-a.twb')
   File.write(vp, variant)
   vdoc = run_converter_capture(vp)
-  vcust = ((vdoc['relationshipCoverage'] || {})['entries'] || []).find { |e| e['right'] == 'DIM_CUSTOMER' } || {}
+  vcust = ((vdoc['relationshipCoverage'] || {})['entries'] || []).find { |e| e['right'] == 'LMOG_DIM_STORE' } || {}
   check(vcust['derivedVia'] == 'unwired',
         "sole shared key-shaped name EXTERNAL_ID → unwired, never guessed (got #{vcust['derivedVia'].inspect})", fails)
   check(vcust['reason'].to_s =~ /deny/i && vcust['reason'].to_s.include?('EXTERNAL_ID'),
@@ -372,15 +373,15 @@ end
 Dir.mktmpdir('deny-b') do |dir|
   # Twin every customer_key metadata-record (both parents) as external_id, so
   # BOTH sides share customer_key AND external_id.
-  variant = raw_twb.gsub(/<metadata-record class='column'>\s*<remote-name>customer_key<\/remote-name>.*?<\/metadata-record>/m) do |block|
-    block + "\n" + block.gsub('customer_key', 'external_id').gsub('Customer Key', 'External Id')
+  variant = raw_twb.gsub(/<metadata-record class='column'>\s*<remote-name>store_key<\/remote-name>.*?<\/metadata-record>/m) do |block|
+    block + "\n" + block.gsub('store_key', 'external_id').gsub('Store Key', 'External Id')
   end
   vp = File.join(dir, 'variant-b.twb')
   File.write(vp, variant)
   vdoc = run_converter_capture(vp)
-  vcust = ((vdoc['relationshipCoverage'] || {})['entries'] || []).find { |e| e['right'] == 'DIM_CUSTOMER' } || {}
+  vcust = ((vdoc['relationshipCoverage'] || {})['entries'] || []).find { |e| e['right'] == 'LMOG_DIM_STORE' } || {}
   check(vcust['derivedVia'] == 'name-inference',
-        "genuine CUSTOMER_KEY beside denied EXTERNAL_ID still wires (no false ambiguity; got #{vcust['derivedVia'].inspect})", fails)
+        "genuine STORE_KEY beside denied EXTERNAL_ID still wires (no false ambiguity; got #{vcust['derivedVia'].inspect})", fails)
 end
 
 puts ''
