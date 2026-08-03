@@ -77,7 +77,10 @@ Dir.mktmpdir do |dir|
   entries = ledger(dir)
   summary = entries.find { |e| e['gate'] == 'phase6-gates' }
   check(!summary.nil?, 'terminal run-summary entry appended')
-  check(summary && summary['verdict'] == 'GREEN' && summary['evidence_kind'] == 'gate-summary',
+  # ruzs: this offline harness resolves no workbook id, so gate 3/7's live
+  # column audit auto-skips and is RECORDED — an unaudited run is YELLOW, not
+  # GREEN. The summary MECHANISM (entry shape, keying) is what this pins.
+  check(summary && summary['verdict'] == 'YELLOW' && summary['evidence_kind'] == 'gate-summary',
         "summary carries the PR-14 verdict (got #{summary && summary['verdict']})")
   check(summary && summary['evidence_key'] =~ /\Awb:.*@v/ && summary['at'] =~ /Z\z/,
         'summary is version-keyed and timestamped')

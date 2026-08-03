@@ -1343,8 +1343,24 @@ unless opts[:skip_column]
     end
   end
 
+  # ruzs: a runtime SKIP of this audit must be RECORDED, never a free pass —
+  # column-scan.json is derived into the degradation ledger (quality-waiver →
+  # verdict at most YELLOW). complete-clean is the positive evidence that
+  # keeps GREEN reachable. Written best-effort: bookkeeping must not sink the
+  # gate run, and the hard-fail paths (creds, error columns) exit 5 anyway.
+  record_column_scan = lambda do |h|
+    File.write(File.join(opts[:tab], 'column-scan.json'),
+               JSON.pretty_generate({ 'gate' => 'gate 3/7 live column type=error scan' }.merge(h)))
+  rescue StandardError
+    nil
+  end
+
   if wb_id.nil? || wb_id.empty?
     puts "[SKIP] gate 3/7: no workbook ID resolvable (pass --workbook-id or ensure wb-ids.json exists)"
+    puts '       Recorded to column-scan.json — joins the degradation ledger as a'
+    puts '       quality-waiver: an unaudited workbook caps the verdict at YELLOW.'
+    record_column_scan.call('status' => 'skipped-no-workbook-id',
+                            'reason' => 'no workbook ID resolvable (no --workbook-id and no wb-ids.json)')
   else
     base = ENV['SIGMA_BASE_URL']
     tok  = ENV['SIGMA_API_TOKEN']
@@ -1411,8 +1427,15 @@ unless opts[:skip_column]
              "(#{cols.length} column(s) read; HTTP #{res&.code}) — cannot verify."
         warn '       No type=error column was found in what WAS read, but an incomplete'
         warn '       scan does not prove the workbook clean. Re-run this gate.'
+        warn '       Recorded to column-scan.json — joins the degradation ledger as a'
+        warn '       quality-waiver: an unverified scan caps the verdict at YELLOW.'
+        record_column_scan.call('status' => 'skipped-incomplete',
+                                'columns_read' => cols.length,
+                                'http' => res&.code,
+                                'reason' => "live column scan of #{wb_id} did not complete")
       else
         puts "[OK] gate 3/7: #{cols.length} live columns clean (no type=error)"
+        record_column_scan.call('status' => 'complete-clean', 'columns_read' => cols.length)
       end
     end
   end
