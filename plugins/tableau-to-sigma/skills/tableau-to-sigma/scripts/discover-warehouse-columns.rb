@@ -18,22 +18,27 @@ abort 'no inodeIds given' if INODES.empty?
 BASE = ENV.fetch('SIGMA_BASE_URL')
 $LOAD_PATH.unshift File.expand_path('lib', __dir__)
 require 'sigma_rest'
+require 'warehouse_columns_pagination'
 FileUtils.mkdir_p(OUT_DIR)
 
 # Fans out to N inodes in parallel; Sigma.request handles 401-refresh
 # (single-flight mutex so threads don't all refresh at once).
 #
-# PAGINATED. Sigma.list_entries sends limit=1000 and follows nextPage to
-# exhaustion, and returns the concatenated entries already parsed — it requests
-# accept: application/json, so there is no raw body to JSON.parse and no
-# `entries` key to remember. A bare first-page GET truncated wide tables at the
-# server default of 50.
+# PAGINATED. Sends limit=1000 and follows this endpoint's ACTUAL cursor to
+# exhaustion via WarehouseColumnsPagination (scripts/lib/warehouse_columns_pagination.rb),
+# not Sigma.list_entries — live verification against this exact endpoint
+# (2026-08, logical-model-objectgraph fixture) found it returns
+# `nextPageToken`/expects `pageToken`, not list_entries' assumed `nextPage`/
+# `page` — see that file's header for the full repro. Still built on
+# Sigma.request, so 401-refresh is unchanged, and the returned entries are
+# already parsed the same way list_entries' were. A bare first-page GET
+# truncated wide tables at the server default of 50.
 #
 # Deliberately NO `http:` injection: one thread per inode, so each must open its
 # own connection (the library default). A shared Net::HTTP would be raced.
 threads = INODES.map do |inode|
   Thread.new do
-    cols = Sigma.list_entries("/v2/connections/tables/#{inode}/columns")
+    cols = WarehouseColumnsPagination.list("/v2/connections/tables/#{inode}/columns")
     File.write("#{OUT_DIR}/#{inode}.json", JSON.pretty_generate(cols))
     [inode, cols.size]
   end
