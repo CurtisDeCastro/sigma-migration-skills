@@ -49,9 +49,15 @@ Every converter already CAN produce a page-level visual verdict via
 the source and records `pass` or `divergent` into `parity-final.json`). When no
 `visual-verify/manifest.json` exists at all, accept that recorded page-level
 verdict as satisfying condition (b) for every displayed tile on that page.
-**Manifest-bearing converters (Tableau) are completely unaffected** — this is
-purely a fallback for the "no manifest" case, not a loosening of the existing
-per-tile check.
+**Tableau is unaffected whenever its manifest is a non-empty array** (the
+normal case) — this is purely a fallback for the "no manifest" case, not a
+loosening of the existing per-tile check. The fallback triggers on
+`!(_vv.is_a?(Array) && _vv.any?)`, which also catches a manifest that is
+present but genuinely EMPTY (`[]`) — e.g. `verify-visual-tiles.rb` writing an
+empty array for a zero-tile run. Previously that was a hard fail at condition
+(b); now it is eligible for the page-level fallback too. This is a
+defensible, not a regressive, change: an empty manifest carries zero per-tile
+evidence, informationally identical to no manifest existing at all.
 
 The recorded-verdict signal to reuse is the SAME one gate 8b already reads
 (`shared/scripts/assert-phase6-ran.rb:2181-2187`, reading `parity-final.json`'s
