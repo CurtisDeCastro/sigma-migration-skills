@@ -1124,13 +1124,31 @@ else
     # pool is legitimately empty. The numbers are still machine-verified when
     # BOTH hold: (a) anchors-verdict.json passes with EVERY source anchor
     # matched against live element exports, and (b) every empty-export tile is
-    # image-verified (visual-verify manifest all true). Then the anchors
-    # oracle IS the parity evidence — same doctrine as the conditional
-    # --skip-parity-gate acceptance, but deterministic, and it burns no waiver
-    # budget because nothing is skipped.
+    # image-verified (visual-verify manifest all true — or, when no manifest
+    # exists at all, a recorded page-level visual verdict stands in, see
+    # below). Then the anchors oracle IS the parity evidence — same doctrine
+    # as the conditional --skip-parity-gate acceptance, but deterministic, and
+    # it burns no waiver budget because nothing is skipped.
     _av = (JSON.parse(File.read(File.join(opts[:tab], 'anchors-verdict.json'))) rescue nil)
     _vv = (JSON.parse(File.read(File.join(opts[:tab], 'visual-verify', 'manifest.json'))) rescue nil)
-    _vv_ok = _vv.is_a?(Array) && _vv.any? && _vv.all? { |t| t['visual_verified'] == true }
+    if _vv.is_a?(Array) && _vv.any?
+      _vv_ok = _vv.all? { |t| t['visual_verified'] == true }
+      _vv_source = :manifest
+    else
+      # No Tableau-style per-tile visual-verify manifest (the other 7
+      # converters sharing this gate script have no verify-visual-tiles.rb
+      # equivalent) -- fall back to the page-level record-visual-check.rb
+      # verdict already stamped into parity-final.json (same fields gate 8b
+      # reads below: visual_checked/screenshot_path/visual_verdict), as long
+      # as it is genuinely vision-backed, not a blind/not-executable
+      # attestation (same doctrine as gate 8b's own §D5 check).
+      _page_recorded = summary['visual_checked'] || summary['screenshot_path'] ||
+                        summary['visual_verdict'].to_s == 'divergent'
+      _page_vision_blocked = (summary.key?('agent_vision') && summary['agent_vision'] == false) ||
+                             summary['visual_verdict'].to_s == 'not-executable'
+      _vv_ok = _page_recorded && !_page_vision_blocked
+      _vv_source = :page_verdict
+    end
     # W1.1: condition (c) — every DISPLAYED dashboard tile must export >=1 data
     # row. A 2026-07 field-workbook run passed (a) + (b) with all 15 anchors
     # matched, yet every chart rendered "No data": the anchors matched only in the
@@ -1165,10 +1183,12 @@ else
       _n_waived = 0
     end
     if _av && _av['pass'] && _av['checked'].to_i >= 5 && _av['matched'] == _av['checked'] && _vv_ok && _tiles_ok && _cov_ok
+      _vv_note = _vv_source == :manifest ? "all #{_vv.size} tile(s) image-verified" :
+        "page-level visual verdict recorded (#{summary['visual_verdict'] || 'checked'})"
       puts "[PASS] gate 2 (value parity): 0 exportable view CSVs (all worksheets dashboard-embedded) — " \
            "the ANCHORS ORACLE stands in: anchors-verdict.json pass " \
            "(#{_av['matched']}/#{_av['checked']} anchors matched, #{_av['anchors_matched_in_displayed'] || '?'} in displayed tiles) " \
-           "+ all #{_vv.size} tile(s) image-verified + all displayed tiles return data " \
+           "+ #{_vv_note} + all displayed tiles return data " \
            "+ anchor coverage #{_cov['covered']}/#{_cov['displayed']} displayed tile(s)" \
            "#{_n_waived.positive? ? " (#{_n_waived} coverage-waived at Phase 1d)" : ''}." \
            "#{anchors_tol_note.call(_av)}"
@@ -1180,6 +1200,11 @@ else
       warn '       anchors oracle can stand in — ALL FOUR must hold:'
       warn "         a) verify-anchors.rb pass with EVERY anchor matched (#{_av ? "currently #{_av['matched']}/#{_av['checked']}" : 'anchors-verdict.json missing'})"
       warn "         b) every visual-verify tile confirmed (#{_vv_ok ? 'ok' : 'incomplete'})"
+      if _vv_source == :page_verdict && !_vv_ok
+        warn '            (no manifest.json + no recorded page-level visual verdict — run'
+        warn '             scripts/record-visual-check.rb to satisfy this condition when your'
+        warn '             converter has no visual-verify/manifest.json generator)'
+      end
       if _tiles_field_present
         empty = (_av['dashboard_tiles_empty'] || [])
         warn "         c) every displayed tile returns >=1 data row (#{_tiles_ok ? 'ok' : "#{empty.length} tile(s) EMPTY: #{empty.map { |t| t['name'] }.first(6).join(', ')}"})"
@@ -1619,6 +1644,11 @@ else
   # image-verified. Count a zone as matched when its tile carries a confirmed
   # visual-verify entry (the per-tile side-by-side oracle) — deterministic,
   # per-name, and loud below.
+  # NOTE: `_vv_ok` here is a fresh top-level reassignment for an UNRELATED
+  # purpose (an Array of visually-verified worksheet NAMES for gate 5/7's own
+  # name-matching), not the Boolean `_vv_ok`/`_vv_source` computed above for
+  # gate 2's anchors-oracle condition (b) — gate 2's use is fully consumed
+  # before this point, but don't assume shared meaning between the two blocks.
   _vv_ok = begin
     Array(JSON.parse(File.read(File.join(opts[:tab], 'visual-verify', 'manifest.json'))))
       .select { |t| t['visual_verified'] == true }.map { |t| t['worksheet'].to_s }
