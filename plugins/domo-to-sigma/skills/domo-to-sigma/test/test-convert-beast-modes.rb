@@ -8,6 +8,8 @@ require_relative '../scripts/convert-beast-modes'
 require 'json'
 require 'tmpdir'
 require 'fileutils'
+require 'open3'
+require 'rbconfig'
 
 SCRIPT = File.expand_path('../scripts/convert-beast-modes.rb', __dir__)
 
@@ -361,6 +363,52 @@ if node_present
   end
 else
   puts '== CLI --convert: SKIPPED (node not on PATH) =='
+end
+
+# ---------------------------------------------------------------------------
+# Review fix (Track E, 4/4): resolve_sql_converter only checks FILE EXISTENCE
+# of the bundle/dev build — it never confirmed `node` itself is invokable. A
+# resolved `conv` with no `node` on PATH used to fall straight into
+# Open3.capture3('node', runner), which raises an uncaught Errno::ENOENT — a
+# raw Ruby backtrace instead of the documented clean exit-10 fallback. This
+# test runs the REAL script (not a stub of the check) with a scrubbed PATH
+# that genuinely cannot resolve `node`, and proves it exits 10 with the same
+# GATE instructions a missing bundle gets — never a crash.
+#
+# `ruby` itself is invoked by RbConfig.ruby's ABSOLUTE path (not a bare 'ruby'
+# looked up on PATH), so only node's resolvability changes here. PATH is
+# trimmed to real coreutils dirs only (verified: neither nvm's nor Homebrew's
+# node lives under /usr/bin or /bin) with unsetenv_others — same idiom as
+# powerbi-to-sigma's test-bootstrap.rb "scrubbed environment" runs.
+# ---------------------------------------------------------------------------
+puts '== CLI --convert: resolved converter but `node` unavailable on PATH -> clean exit 10, never a raw crash =='
+Dir.mktmpdir('convert-mode-node-absent') do |dir|
+  mcp_dir = File.join(dir, 'fake-mcp')
+  FileUtils.mkdir_p(File.join(mcp_dir, 'build'))
+  File.write(File.join(mcp_dir, 'build', 'formulas.js'), <<~JS)
+    export function lookSqlToSigmaRules(sql) { return `RULES(${sql})`; }
+    export function lookConvertExpression(sql) { return `EXPR(${sql})`; }
+    export function hasResidualCaseKeyword(s) { return false; }
+    export function hasResidualInfixOperator(s) { return false; }
+    export function lookUnknownFunctions(sql) { return []; }
+  JS
+
+  pending_path = File.join(dir, 'formulas.pending.json')
+  before = JSON.generate([
+    { 'id' => 'calculation_x', 'name' => 'X', 'normalizedSql' => 'SUM([x])', 'sigmaFormula' => nil },
+  ])
+  File.write(pending_path, before)
+
+  env = { 'PATH' => '/usr/bin:/bin' }
+  cmd = [RbConfig.ruby, SCRIPT, '--convert', '--mcp-dir', mcp_dir, '--in', pending_path, '--out', pending_path]
+  out, status = Open3.capture2e(env, *cmd, unsetenv_others: true)
+
+  ok(status.exitstatus == 10, "resolved converter + node absent from PATH -> exit 10 (gate), not a crash\n#{out}")
+  ok(out.include?('GATE'), 'still prints the same GATE instructional fallback a missing bundle gets')
+  ok(out.downcase.include?('node'), 'names node as the specific reason (distinct from the missing-bundle message)')
+  ok(!out.include?('Errno::ENOENT') && !out.include?("#{SCRIPT}:"),
+     'no raw Ruby exception/backtrace leaks to the user (the bug this test guards against)')
+  ok(File.read(pending_path) == before, 'no formulas were translated — pending file is untouched by the aborted attempt')
 end
 
 puts

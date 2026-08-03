@@ -336,9 +336,26 @@ if opts[:convert]
   end
 
   conv, _dev_dir, desc = resolve_sql_converter(opts[:mcp_dir] || ENV['DOMO_MCP_DIR'], VENDORED_SQL)
-  if conv.nil?
-    warn '  vendored converter (converter/sql.mjs) missing and no local sigma-data-model-mcp ' \
-         'build (--mcp-dir / DOMO_MCP_DIR).'
+  # resolve_sql_converter only checks FILE EXISTENCE of the bundle/dev build —
+  # it never confirms `node` itself is invokable. A resolved `conv` with no
+  # `node` on PATH (e.g. this script run directly, bypassing doctor.sh's usual
+  # node-prerequisite gate) must NOT fall through to the raw Open3::ENOENT
+  # crash below; it gets the same clean instructional exit-10 as a missing
+  # bundle.
+  node_available = conv && begin
+    _o, _e, st = Open3.capture3('node', '--version')
+    st.success?
+  rescue Errno::ENOENT
+    false
+  end
+  if conv.nil? || !node_available
+    if conv.nil?
+      warn '  vendored converter (converter/sql.mjs) missing and no local sigma-data-model-mcp ' \
+           'build (--mcp-dir / DOMO_MCP_DIR).'
+    else
+      warn "  converter: #{desc}"
+      warn '  but `node` is not on PATH — required to run it locally (doctor.sh normally gates on this).'
+    end
     warn ''
     warn '  >>> GATE: for EACH entry in discovery/formulas.pending.json, call'
     warn '      convert_sql_to_sigma_formula(sql: normalizedSql), collect the result as'

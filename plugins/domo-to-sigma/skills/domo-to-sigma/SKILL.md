@@ -54,8 +54,9 @@ card→element map.
 ## The one big idea
 
 **Beast Mode is MySQL-dialect SQL.** Domo's calc-field language routes through the
-existing `mcp__sigma-data-model__convert_sql_to_sigma_formula` tool — no bespoke
-parser like Power BI's DAX.
+vendored `converter/sql.mjs` (`scripts/convert-beast-modes.rb --convert`,
+running locally via `node` — no MCP call, no network) — no bespoke parser
+like Power BI's DAX.
 
 > ✅ **UPDATED 2026-07-30 — the historical "NOT nearly free" finding is
 > RESOLVED, with a calibrated result, not a swing to "it just works."** A live
@@ -115,7 +116,7 @@ grid is only 6 wide, so widths scale ×4).
 | `scripts/lib/domo_rest.rb` | prereq | Domo REST wrapper (public + private), auto token refresh |
 | `scripts/domo-discover.rb` | 1 | Enumerate DataSets, pages, cards; pull schemas + (private) card defs + Beast Modes |
 | `scripts/domo-capture-visuals.rb` | 1b | Render per-card PNG + full-page PDF, normalize card geometry → layout JSON (design-fidelity reference) |
-| `scripts/convert-beast-modes.rb` | 2 | Beast Mode → Sigma: Domo-specific normalize + classify + POST-lint around `convert_sql_to_sigma_formula` |
+| `scripts/convert-beast-modes.rb` | 2 | Beast Mode → Sigma: Domo-specific normalize + classify + POST-lint around the vendored `converter/sql.mjs` (`--convert`) |
 | `scripts/find-or-pick-dm.rb` *(vendored)* | 2.5 | Score existing Sigma data models against a signature and recommend reuse (non-destructive) |
 | `scripts/preflight-columns.rb` | 2.9 | Check every mapped dataset's Domo columns against the REAL warehouse table schema (live Sigma catalog lookup); reports gaps + auto-suggests (never auto-applies) a derivation formula for a known pattern |
 | `scripts/build-dm.rb` | 3 | DataSet schema + projection calc columns → Sigma DM spec (clean display names); honors a Phase-2.5 reuse decision |
