@@ -34,11 +34,12 @@ skill_for() {
     powerbi) echo powerbi-to-sigma ;;
     quicksight) echo quicksight-to-sigma ;;
     cognos|cognos-report) echo cognos-to-sigma ;;
+    domo) echo domo-to-sigma ;;
     *) echo "" ;;
   esac
 }
 
-WANT=("$@"); [ ${#WANT[@]} -eq 0 ] && WANT=(tableau lookml thoughtspot qlik powerbi quicksight cognos)
+WANT=("$@"); [ ${#WANT[@]} -eq 0 ] && WANT=(tableau lookml thoughtspot qlik powerbi quicksight cognos domo)
 
 [ -d "$SRC" ] || { echo "FATAL: converter source not found: $SRC"; exit 1; }
 ESBUILD="$SRC/node_modules/.bin/esbuild"
@@ -75,6 +76,29 @@ for mod in "${WANT[@]}"; do
     # source_sha256 here (single owner: tools/check-cognos-bundle.rb) is what lets the
     # freshness gate detect a converter/*.ts edit that skipped this re-bundle.
     ruby "$ROOT/tools/check-cognos-bundle.rb" --write
+    continue
+  fi
+
+  # Domo is a third flavor: same ongoing vendor-from-mcp relationship as the
+  # mainline 6 (canonical source stays upstream, re-vendor periodically — domo
+  # inherits future accuracy fixes the same way they do), but its source module
+  # doesn't follow the convert<Tool>ToSigma naming convention. It vendors
+  # formulas.ts, a shared low-level SQL-formula toolkit already used internally
+  # by lookml/dbt/snowflake/tableau's own converters — not a top-level
+  # converter — so the entry file and the export sanity-check are both custom.
+  if [ "$mod" = "domo" ]; then
+    entry="$SRC/build/formulas.js"
+    out="$dest/sql.mjs"
+    [ -f "$entry" ] || { echo "FATAL: $entry missing (build the converter repo first)"; exit 1; }
+    "$ESBUILD" "$entry" --bundle --format=esm --platform=node --outfile="$out" >/dev/null
+    node --input-type=module -e "
+      import * as m from '$out';
+      const need = ['lookSqlToSigmaRules','lookConvertExpression','hasResidualCaseKeyword','hasResidualInfixOperator','lookUnknownFunctions'];
+      const missing = need.filter(k => typeof m[k] !== 'function');
+      if (missing.length) { console.error('FATAL: $out missing exports: ' + missing.join(', ')); process.exit(1); }
+    "
+    echo "✓ $skill/converter/sql.mjs  ($(du -h "$out" | cut -f1))  [vendored from formulas.ts, custom export check]"
+    case "$STAMPED_DIRS" in *"|$dest|"*) : ;; *) STAMPED_DIRS="$STAMPED_DIRS|$dest|" ;; esac
     continue
   fi
 
