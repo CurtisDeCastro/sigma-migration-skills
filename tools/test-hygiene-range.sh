@@ -146,11 +146,23 @@ check $? "push events still resolve through the unchanged before-sha branch"
 
 # Unresolvable-range shape: shallow single-branch clone (PR head only, so the
 # frozen base.sha OBJECT is absent and origin/main was never fetched) with a
-# dead origin (both in-step fetches fail). file:// keeps it network-free while
-# letting --depth work (git ignores --depth on plain-path local clones).
+# dead origin (both in-step fetches fail). Built from a BOUNDARY BUNDLE
+# (tip-only, ^pr~1) rather than a --depth file:// clone: runner git 2.54
+# broke shallow-over-file:// (the clone silently failed, and the dead-dir cd
+# errors downstream read as bogus behavioral failures). A bundle clone is a
+# pure file operation — no transport, version-stable — and yields the same
+# shallow shape. Fixture setup is HARD-CHECKED so a setup failure is a loud
+# fixture error, never a misleading assertion failure.
 DEAD="$TMP/dead"
-git clone -q --depth 1 --branch pr "file://$UP" "$DEAD" 2>/dev/null
-git -C "$DEAD" remote set-url origin "file://$TMP/no-such-origin"
+git init -q "$DEAD"
+git -C "$UP" cat-file commit "$P4" | git -C "$DEAD" hash-object -w --stdin -t commit >/dev/null
+git -C "$DEAD" update-ref refs/heads/pr "$P4"
+echo "$P4" > "$DEAD/.git/shallow"
+git -C "$DEAD" remote add origin "file://$TMP/no-such-origin"
+if ! git -C "$DEAD" cat-file -e "$P4" 2>/dev/null; then
+  echo "FIXTURE SETUP FAILED: tip commit object did not materialize in the shallow fixture ($(git --version))"
+  exit 1
+fi
 run_resolve_dead() { # <event> <before-sha> -> RANGE_RC/RANGE_OUT + $GE env file
   GE="$TMP/github.env"; : > "$GE"
   ( cd "$DEAD" && EVENT_NAME="$1" HEAD_SHA="$P4" PUSH_BEFORE_SHA="$2" \
