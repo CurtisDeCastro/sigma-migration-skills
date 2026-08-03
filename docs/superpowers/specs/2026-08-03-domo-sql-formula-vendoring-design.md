@@ -113,11 +113,25 @@ cleanly.
   PROVENANCE.json block (source_repo/source_commit/source_commit_date/bundler/
   vendored_modules) writes for domo too, unmodified — this is the standard
   vendor-from-mcp provenance shape, not a bespoke one.
-- **No CI freshness gate.** Checked: `check-cognos-bundle.rb` only exists because
-  cognos's canonical source lives *inside* this repo (CI can hash it without cloning
-  anything). The 6 mainline vendor-from-mcp converters have no CI freshness gate at all
-  — `PROVENANCE.json` is informational, refreshed by a human running the script
-  periodically. Domo matches that; no new tooling.
+- **No NEW CI freshness gate needed — correction, one already exists and applies.**
+  Originally checked (incorrectly) as: `check-cognos-bundle.rb` only exists because
+  cognos's canonical source lives *inside* this repo, and the 6 mainline vendor-from-mcp
+  converters have no CI freshness gate at all. **That premise was wrong.**
+  `tools/check-converter-provenance.sh --freshness` IS a standing CI gate (wired in
+  `.github/workflows/hygiene.yml`), and it already applies to every vendored
+  (`source_repo`-bearing) `PROVENANCE.json` in the repo — domo's included, the moment
+  domo has one. The gate derives its `--freshness` remediation command and its
+  (non-CI, human-run) `--online` upstream-diff source file from `PROVENANCE.json`,
+  assuming a mainline-converter shape where the module basename doubles as both the
+  vendor-converters.sh arg and the upstream `src/<mod>.ts` file — true for the 6
+  mainline converters, false for domo (vendor arg is `domo`, upstream source is
+  `src/formulas.ts`, not `src/sql.ts`). Fixed by recording two explicit fields in
+  domo's `PROVENANCE.json` — `source_file: "src/formulas.ts"` and `vendor_arg: "domo"`
+  — which `check-converter-provenance.sh` now prefers when present, falling back to
+  the mainline-converter inference otherwise (see the vendor-converters.sh /
+  check-converter-provenance.sh diffs). No new gate was built; the existing one just
+  needed domo's `PROVENANCE.json` to carry data accurate enough for its existing
+  remediation/online-check logic to work.
 
 ### 2. `converter/sql.mjs` (new, vendored artifact)
 
@@ -218,14 +232,22 @@ MCP results — proving the rewire is behavior-preserving (or better, via the ne
 
 - **No upstream `sigma-data-model-mcp` change of any kind.** Both prior docs assumed
   one was needed (a CLI, or a reason to avoid depending on main); neither holds.
-- **No new CI freshness gate.** Matches the 6 mainline converters' (lack of) precedent.
+- **No new CI freshness gate needed.** Correction (see the vendor-converters.sh /
+  `converter/sql.mjs` section above): the standing `check-converter-provenance.sh
+  --freshness` gate already covers every vendored `PROVENANCE.json`, domo included —
+  it was never true that the 6 mainline converters had no freshness gate. Domo just
+  needed accurate `source_file`/`vendor_arg` fields for that existing gate's
+  remediation/online-check logic to point at the right things.
 - **No Ruby port of the residual-CASE/infix-operator regexes.** The vendored JS
   functions supply this directly and more reliably.
-- **No change to override-eligibility semantics** (`formula-overrides.json` still only
-  fills a missing `sigmaFormula`, never overrides a `converted:false`-but-present one).
-  Widening this is a legitimate future improvement given the new real `converted` signal,
-  but it's separate scope from removing the MCP dependency — flag as a candidate
-  follow-up bead, not built here.
+- ~~No change to override-eligibility semantics~~ **Superseded 2026-08-03 (final review
+  fix wave):** the follow-up flagged here was built in the same branch. Confirmed
+  decision: `formula-overrides.json` now also supersedes a pending entry flagged
+  `converted: false` (still-broken machine output), not just a blank `sigmaFormula` —
+  because `--convert`'s `lookConvertExpression` fallback is total (always produces
+  SOME `sigmaFormula`), so "blank" alone had become nearly unreachable in the
+  orchestrated pipeline. It still never overrides a `converted: true` (or legacy,
+  no-`converted`-key) entry. See `resolve_entry` in `scripts/convert-beast-modes.rb`.
 - **No change to `mcp__sigma-mcp-v2__query`** (live parity verification) — out of scope
   per the original 2026-07-31 scope decision, unaffected by any of the above.
 
