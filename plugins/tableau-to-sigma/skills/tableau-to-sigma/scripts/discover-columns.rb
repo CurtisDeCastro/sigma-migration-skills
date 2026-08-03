@@ -35,6 +35,7 @@ require 'json'
 require 'optparse'
 $LOAD_PATH.unshift File.expand_path('lib', __dir__)
 require 'sigma_rest'
+require 'warehouse_columns_pagination'
 
 opts = {}
 OptionParser.new do |p|
@@ -121,8 +122,17 @@ end
 #    SUPPORT 2026-06-02. Truncation here is not a cosmetic loss: a join key past
 #    ordinal 50 leaves the DM builder no column to point a relationship at, and
 #    fields past the cut read as "not on the table", whose fallback is Custom SQL.
-#    Sigma.list_entries sends limit=1000, follows nextPage (URL-encoded, opaque)
-#    to exhaustion, and stops loudly on a repeated token instead of spinning.
+#
+#    Sends limit=1000 and follows this endpoint's ACTUAL cursor to exhaustion via
+#    WarehouseColumnsPagination (scripts/lib/warehouse_columns_pagination.rb),
+#    not Sigma.list_entries: live verification against this endpoint (2026-08,
+#    the logical-model-objectgraph fixture's real 64-column FACT_WIDE table)
+#    found it returns `nextPageToken`/expects `pageToken`, not the `nextPage`/
+#    `page` shape list_entries assumes — list_entries silently stops after page
+#    1 (50 columns) against this specific endpoint. See that file's header for
+#    the full repro. Built on the same Sigma.request primitive, so 401-refresh
+#    behavior is unchanged, and it stops loudly (not spinning) on a repeated
+#    cursor exactly like Sigma.list_entries does.
 #
 #    The connection is INJECTED so this read keeps this script's
 #    SIGMA_HTTP_TIMEOUT bound — the "migration stuck for hours" guard above —
@@ -137,7 +147,7 @@ entries =
   begin
     Net::HTTP.start(cols_uri.host, cols_uri.port, use_ssl: cols_uri.scheme == 'https',
                     open_timeout: [timeout, 30].min, read_timeout: timeout) do |h|
-      Sigma.list_entries(cols_path, http: h) { pages += 1 }
+      WarehouseColumnsPagination.list(cols_path, http: h) { pages += 1 }
     end
   rescue Net::OpenTimeout, Net::ReadTimeout, Timeout::Error => e
     abort "TIMEOUT after #{timeout}s listing columns for #{opts[:path]} (#{e.class}). " \

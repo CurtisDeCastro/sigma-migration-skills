@@ -95,10 +95,17 @@ check(entries.any? { |c| c['name'] == 'COL_54' },
       'a column at ordinal 54 (past the default page size) is discovered', fails)
 
 # 3. WIRING PIN — discover-columns.rb issues its columns read through
-#    Sigma.list_entries and no longer parses a single first-page body.
+#    WarehouseColumnsPagination (NOT Sigma.list_entries — see
+#    lib/warehouse_columns_pagination.rb's header: live verification against
+#    the real /v2/connections/tables/<inode>/columns endpoint, 2026-08 on the
+#    logical-model-objectgraph fixture's real 64-column FACT_WIDE table, found
+#    it paginates via nextPageToken/pageToken, not list_entries' assumed
+#    nextPage/page — list_entries silently stops after page 1 (50 columns)
+#    against this specific endpoint) and no longer parses a single first-page
+#    body.
 src = File.read(File.join(__dir__, 'discover-columns.rb'))
-check(src.include?('Sigma.list_entries'),
-      'discover-columns.rb reads columns via Sigma.list_entries', fails)
+check(src.include?('WarehouseColumnsPagination.list'),
+      'discover-columns.rb reads columns via WarehouseColumnsPagination (live-correct cursor handling)', fails)
 check(!src.match?(/JSON\.parse\(body\)\['entries'\]/),
       'discover-columns.rb no longer reads a bare first-page body', fails)
 check(src.include?('SIGMA_HTTP_TIMEOUT'),
@@ -110,17 +117,47 @@ check(src.include?("not found in Sigma's catalog") && src.include?('/sync'),
 check(src.include?('exit 4'),
       'discover-columns.rb still exits 4 on a catalog miss', fails)
 
-# 4. WIRING PIN — discover-warehouse-columns.rb paginates, and does NOT inject a
-#    shared connection: it runs one thread per inode, so each thread must get its
-#    own Net::HTTP (the http: nil default) or they race on one socket.
+# 4. WIRING PIN — discover-warehouse-columns.rb paginates via the same live-
+#    correct helper, and does NOT inject a shared connection: it runs one
+#    thread per inode, so each thread must get its own Net::HTTP (the http:
+#    nil default) or they race on one socket.
 src = File.read(File.join(__dir__, 'discover-warehouse-columns.rb'))
-check(src.include?('Sigma.list_entries'),
-      'discover-warehouse-columns.rb reads columns via Sigma.list_entries', fails)
+check(src.include?('WarehouseColumnsPagination.list'),
+      'discover-warehouse-columns.rb reads columns via WarehouseColumnsPagination (live-correct cursor handling)', fails)
 check(!src.match?(/body\['entries'\]/),
       'discover-warehouse-columns.rb no longer reads a bare first-page body', fails)
-check(!src.match?(/list_entries\([^)]*http:/),
+check(!src.match?(/WarehouseColumnsPagination\.list\([^)]*http:/),
       'discover-warehouse-columns.rb does NOT inject a shared connection into its thread fan-out',
       fails)
+
+# 5. REGRESSION PIN — WarehouseColumnsPagination follows nextPageToken/pageToken
+#    (the endpoint's REAL shape, live-verified against a real 64-column warehouse fact table),
+#    not just nextPage/page (Sigma.list_entries' assumed shape, which this
+#    endpoint never actually sends). Fixture mirrors the real 64-column
+#    FACT_WIDE table: page 1 = 50 entries + nextPageToken, page 2 = 14 entries
+#    + nextPageToken: nil.
+require_relative 'lib/warehouse_columns_pagination'
+
+def token_paged_table
+  page1 = (1..50).map  { |i| { 'name' => "COL_#{i}",  'type' => { 'type' => 'text' } } }
+  page2 = (51..64).map { |i| { 'name' => "COL_#{i}", 'type' => { 'type' => 'text' } } }
+  [
+    http_res(Net::HTTPOK, 200, JSON.generate('entries' => page1, 'nextPageToken' => 50)),
+    http_res(Net::HTTPOK, 200, JSON.generate('entries' => page2, 'nextPageToken' => nil))
+  ]
+end
+
+reset_state!
+ENV['SIGMA_BASE_URL'] = 'https://sigma.example'
+ENV['SIGMA_API_TOKEN'] = 'tok'
+entries = WarehouseColumnsPagination.list('/v2/connections/tables/inode-1/columns',
+                                          http: FakeHttp.new(token_paged_table))
+check(entries.size == 64,
+      "a 64-column table paginated via nextPageToken returns ALL 64 columns (got #{entries.size})", fails)
+check(entries.any? { |c| c['name'] == 'COL_54' },
+      'a column at ordinal 54 (past the default page size, nextPageToken-paginated) is discovered', fails)
+check(entries.first['name'] == 'COL_1' && entries.last['name'] == 'COL_64',
+      'first and last column both survive nextPageToken pagination', fails)
 
 # 6. WIRING PIN — post-and-readback.rb's column census paginates. The census
 #    drives the error-column quarantine decision, so a truncated read can
