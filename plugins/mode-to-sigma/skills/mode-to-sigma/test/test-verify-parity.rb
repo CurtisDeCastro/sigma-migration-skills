@@ -49,6 +49,24 @@ eq(orphan['chart'], 'Orphan Chart', 'KeyError path still names the chart being c
 eq(orphan['pass'], false, 'KeyError degrades to a graceful per-chart FAIL instead of crashing the process')
 eq(orphan.key?('reason'), true, 'KeyError path records a human-readable reason')
 
+puts "== compare_entry (re-review follow-up: malformed CSV degrades to a FAIL tuple, never raises) =="
+# Stub the live-network sigma_export_csv (same top-level-redefine stubbing
+# convention test-mode-rest.rb uses via Mode.define_singleton_method) so this
+# proves the CSV::MalformedCSVError rescue in compare_entry closes the crash
+# with zero live network calls — the malformed payload lives on the Mode side,
+# which is parsed inside data_rows_match? after the (stubbed) Sigma export.
+def sigma_export_csv(*)
+  "b\n1\n"
+end
+malformed = compare_entry(
+  { 'chart_name' => 'Malformed Chart', 'query_token' => 'tok-1', 'chart_element_id' => 'el-y' },
+  { 'tok-1' => %(a,b\n"unterminated,2\n) }, # unbalanced quote -> CSV::MalformedCSVError from CSV.parse
+  'wb-1'
+)
+eq(malformed['chart'], 'Malformed Chart', 'malformed-CSV path still names the chart being compared')
+eq(malformed['pass'], false, 'malformed CSV degrades to a graceful per-chart FAIL instead of crashing the process')
+eq(malformed.key?('reason'), true, 'malformed-CSV path records a human-readable reason')
+
 puts "== summarize_parity =="
 results = [
   { 'chart' => 'Monthly Revenue KPI', 'pass' => true },

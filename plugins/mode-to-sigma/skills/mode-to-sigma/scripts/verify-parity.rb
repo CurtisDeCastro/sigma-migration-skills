@@ -102,7 +102,13 @@ def compare_entry(entry, mode_csv_by_token, workbook_id)
 rescue KeyError
   { 'chart' => entry['chart_name'], 'pass' => false,
     'reason' => "no fresh Mode result for query_token #{entry['query_token'].inspect}" }
-rescue Sigma::Error, Timeout::Error, Errno::ETIMEDOUT => e
+# CSV::MalformedCSVError covers a genuinely malformed CSV payload (e.g. an
+# unbalanced/stray quote in a cell) from either the Mode re-run or the Sigma
+# export — real-world Mode/Sigma export data, not a hypothetical. Without
+# this, CSV.parse (inside data_rows_match?) raises past compare_entry's rescue
+# and crashes the whole script before parity-final.json is ever written,
+# failing every chart instead of just the one with bad CSV.
+rescue Sigma::Error, Timeout::Error, Errno::ETIMEDOUT, CSV::MalformedCSVError => e
   { 'chart' => entry['chart_name'], 'pass' => false, 'reason' => e.message.lines.first.to_s.strip[0, 160] }
 end
 
