@@ -15,8 +15,23 @@ is `examples/gauge-embed.json`.
 ```
 POST /v2/plugins
 { "name": "<unique plugin name>", "description": "<what it does>",
-  "url": "<hosted index.html URL>", "type": "element" }
+  "url": "<hosted index.html URL>", "devUrl": "<dev-mode URL, e.g. http://localhost:5173>" }
 ```
+
+`name` is the only required field. `description` and `url` are optional
+(an omitted `url` registers the plugin with an empty URL — fine to backfill
+later, see "`url` is set-once" below). `devUrl` is also optional and
+defaults to `http://localhost:5173` if omitted — Sigma loads the plugin from
+this URL when it runs in dev mode — but **set it explicitly** rather than
+relying on the implicit default whenever you're actively iterating on a
+plugin locally.
+
+Note there is **no `type` field in the request body** — confirmed via the
+live Sigma OpenAPI create-plugin schema (`request.body` lists exactly
+`name`/`description`/`devUrl`/`url`; not live-tested by POSTing it). `type`
+is response-only: every `GET`/`POST /v2/plugins` response entry hardcodes
+`"type": "element"` regardless of what (if anything) was sent. Don't include
+it in the request body.
 
 A successful register returns a `pluginId`. **Always call
 `shared/scripts/register-plugin.rb` (`PluginRegister.register_or_get`)** rather

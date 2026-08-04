@@ -10,14 +10,25 @@
 # scripts/skills that need to register a Sigma plugin don't have to
 # re-derive the masked-404-tolerant confirmation logic.
 #
-# PluginRegister.register_or_get(name:, description:, url:) is IDEMPOTENT:
+# PluginRegister.register_or_get(name:, description:, url:, dev_url:) is
+# IDEMPOTENT:
 #   1. GET /v2/plugins first — if a plugin with this exact `name` already
 #      exists, return its pluginId. Never creates a duplicate.
-#   2. Else POST /v2/plugins {name,description,url,type:"element"}, then
-#      re-GET /v2/plugins and find by name. A non-2xx POST is NEVER treated
-#      as a hard failure by itself — Sigma is documented to sometimes return
-#      a masked 404 (or other error) on an otherwise-successful register, so
+#   2. Else POST /v2/plugins {name,description,url,devUrl}, then re-GET
+#      /v2/plugins and find by name. A non-2xx POST is NEVER treated as a
+#      hard failure by itself — Sigma is documented to sometimes return a
+#      masked 404 (or other error) on an otherwise-successful register, so
 #      the confirming GET is always attempted before deciding.
+#      Per the live create-plugin request schema (confirmed via the Sigma
+#      OpenAPI docs, not a live POST — see plugin-lifecycle.md §1), the
+#      request body has no `type` property at all: `type` is response-only,
+#      hardcoded to "element" on every GET/POST response entry. Sending it
+#      is schema-unsupported, so it's omitted here (previously sent as
+#      `type: 'element'`, which the schema never accepted as request input).
+#      `devUrl` IS a real (optional) request property — the API defaults it
+#      to `http://localhost:5173` if omitted, but this helper sets it
+#      explicitly (same default) so dev-mode registration doesn't rely on an
+#      implicit server-side default.
 #   3. Only if, after POST+GET, the plugin still isn't found AND the POST
 #      response clearly indicated an auth/permission failure (401/403) does
 #      this raise PluginRegister::PermissionError: "plugin registration is
@@ -28,13 +39,15 @@
 #   $LOAD_PATH.unshift File.expand_path('../scripts', __dir__)  # adjust as needed
 #   require 'register-plugin'
 #   plugin_id = PluginRegister.register_or_get(
-#     name: "My Plugin", description: "...", url: "https://example.com/plugin/"
+#     name: "My Plugin", description: "...", url: "https://example.com/plugin/",
+#     dev_url: "http://localhost:5173"  # optional — this is the default
 #   )
 #
 # Usage (CLI):
-#   ruby shared/scripts/register-plugin.rb "<name>" "<url>" ["<description>"]
+#   ruby shared/scripts/register-plugin.rb "<name>" "<url>" ["<description>"] ["<devUrl>"]
 #   -> prints the pluginId to stdout on success (exit 0); on failure, prints
-#      an error to stderr and exits non-zero.
+#      an error to stderr and exits non-zero. `<devUrl>` defaults to
+#      `http://localhost:5173` (the API's own default) if omitted.
 #
 # Env: SIGMA_BASE_URL / SIGMA_CLIENT_ID / SIGMA_CLIENT_SECRET (or
 #      ~/.sigma-migration/env — sigma_rest.rb self-bootstraps).
@@ -67,7 +80,12 @@ module PluginRegister
   # Idempotent register-or-get. Returns the pluginId (String). Raises
   # PermissionError on a confirmed 401/403 with no plugin found afterward, or
   # a plain RuntimeError for any other unresolved failure.
-  def register_or_get(name:, description:, url:)
+  #
+  # `dev_url:` defaults to the API's own default (`http://localhost:5173`)
+  # and is sent explicitly rather than omitted. `type` is intentionally NOT
+  # sent — the create-plugin request schema doesn't define it (response-only,
+  # always "element"); see the module comment above.
+  def register_or_get(name:, description:, url:, dev_url: 'http://localhost:5173')
     existing = find_by_name(name)
     existing_id = existing && (existing['pluginId'] || existing['id'])
     return existing_id if existing_id
@@ -75,7 +93,7 @@ module PluginRegister
     post_error = nil
     begin
       Sigma.request(:post, '/v2/plugins',
-                    body: JSON.generate(name: name, description: description, url: url, type: 'element'))
+                    body: JSON.generate(name: name, description: description, url: url, devUrl: dev_url))
     rescue Sigma::Error => e
       # Never trust the POST's own status — the masked-404 quirk means even a
       # successful register can raise here. Always fall through to the
@@ -101,14 +119,15 @@ if $PROGRAM_NAME == __FILE__
   name        = ARGV[0]
   url         = ARGV[1]
   description = ARGV[2] || ''
+  dev_url     = ARGV[3] || 'http://localhost:5173'
 
   if name.nil? || url.nil?
-    warn 'Usage: ruby register-plugin.rb "<name>" "<url>" ["<description>"]'
+    warn 'Usage: ruby register-plugin.rb "<name>" "<url>" ["<description>"] ["<devUrl>"]'
     exit 2
   end
 
   begin
-    plugin_id = PluginRegister.register_or_get(name: name, description: description, url: url)
+    plugin_id = PluginRegister.register_or_get(name: name, description: description, url: url, dev_url: dev_url)
     puts plugin_id
   rescue PluginRegister::PermissionError => e
     warn e.message

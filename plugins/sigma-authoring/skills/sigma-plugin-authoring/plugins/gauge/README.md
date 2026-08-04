@@ -50,14 +50,20 @@ a locale-grouped number.
    static host (for headless PNG export to work) or `localhost` for local
    preview/dev (data-parity still works either way; only the headless
    screenshot needs a public host).
-2. **Register** the plugin:
+2. **Register** the plugin — prefer `shared/scripts/register-plugin.rb`
+   (`PluginRegister.register_or_get`) over hand-rolling this, since it
+   already encodes the masked-404/403 handling below:
    ```ruby
-   Sigma.request(:post, '/v2/plugins',
-     body: JSON.generate(name: 'Gauge (value vs. target)',
-                          description: 'Recreate-as-plugin radial gauge',
-                          url: PLUGIN_URL, type: 'element'))
+   PluginRegister.register_or_get(
+     name: 'Gauge (value vs. target)',
+     description: 'Recreate-as-plugin radial gauge',
+     url: PLUGIN_URL,
+     dev_url: 'http://localhost:5173' # optional — this is the API's own default
+   )
    # A masked HTTP 404 can accompany a SUCCESSFUL register — always confirm
    # by name via GET /v2/plugins, never trust the POST status alone.
+   # Note: the create-plugin request body has no `type` field (response-only,
+   # always "element") — don't send one.
    ```
    The `url` is set-once per registration; re-register (or use the update
    path, if available in your org) to change it. A 403 means registration is
