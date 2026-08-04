@@ -130,4 +130,64 @@ class TestPostAndReadback < Minitest::Test
                  "Sigma::CodeRep call(s) reachable OUTSIDE the workbook branch: " +
                  bad.map { |f| "line #{f[:line]} (.#{f[:method]}, ctx=#{f[:ctx]})" }.join(', ')
   end
+
+  # Re-scan finding (post-#609): POST /v2/workbooks/spec/verify is a THIRD
+  # workbook-only call site (verify_spec!, tableau-to-sigma only among the 6
+  # plugins this PR touches — the others have no /verify preflight) — besides
+  # the readback GET and the create/update POST|PUT already covered above. Its
+  # own header comment (post-and-readback.rb, "v5.0 preflight") and
+  # code_rep.rb's own module header both say /verify requires the identical
+  # nested `document` envelope and 400s on a flat body exactly like create/
+  # update — and verify_spec! is fail-closed (aborts the whole run) on a
+  # parseable 400/409/422, so a still-flat body here would abort EVERY
+  # `--type workbook` run before the already-fixed POST/PUT is ever reached.
+  #
+  # Investigation for this task found the call sites (post-and-readback.rb
+  # lines ~443-447 and ~498-502) already wrap put_body/post_body via
+  # Sigma::CodeRep.wrap "immediately before both calls" (the existing code
+  # comment's own words) — i.e. verify_spec! receives the SAME wrapped
+  # variable used for the real PUT/POST, as part of the original Task 3.1
+  # commit (34d301cc), not a separate unpatched gap. The two tests below prove
+  # this and guard against a future regression:
+  #
+  #   1. test_verify_body_wraps_flat_spec_with_name_and_folder_id — the same
+  #      wrap/document/metadata call the script uses, applied to a flat spec,
+  #      nests it under `document` while keeping `name`/`folderId` top-level
+  #      (the shape /verify requires).
+  #   2. test_verify_preflight_runs_after_the_wrap — a static ordering check
+  #      that the Sigma::CodeRep.wrap assignment to put_body/post_body appears
+  #      (by line number) BEFORE the verify_spec!(...) call that consumes the
+  #      same variable, in both the PUT and POST branches — so verify_spec!
+  #      can never be hit with the pre-wrap flat body.
+  def test_verify_body_wraps_flat_spec_with_name_and_folder_id
+    flat_spec = {
+      'name'          => 'My Workbook',
+      'folderId'      => 'folder-123',
+      'schemaVersion' => 1,
+      'pages'         => [{ 'id' => 'p1', 'elements' => [] }]
+    }
+    verify_body = Sigma::CodeRep.wrap(Sigma::CodeRep.document(flat_spec),
+                                       extra: Sigma::CodeRep.metadata(flat_spec))
+    assert verify_body.key?('document'), 'verify body must nest the spec under document'
+    assert_equal flat_spec['pages'], verify_body['document']['pages']
+    assert_equal 'My Workbook', verify_body['name']
+    assert_equal 'folder-123', verify_body['folderId']
+    refute verify_body.key?('pages'), 'pages must not remain top-level in the verify body'
+  end
+
+  def test_verify_preflight_runs_after_the_wrap
+    src   = File.read(File.join(__dir__, '..', 'post-and-readback.rb'))
+    lines = src.lines
+    %w[put_body post_body].each do |var|
+      wrap_idx   = lines.find_index { |l| l =~ /^\s*#{var}\s*=\s*JSON\.generate\(Sigma::CodeRep\.wrap/ }
+      verify_idx = lines.find_index { |l| l =~ /verify_spec!\(#{var},/ }
+      refute_nil wrap_idx,   "expected a Sigma::CodeRep.wrap assignment to #{var}"
+      refute_nil verify_idx, "expected a verify_spec!(#{var}, ...) call"
+      assert wrap_idx < verify_idx,
+             "verify_spec!(#{var}, ...) at line #{verify_idx + 1} must run AFTER the " \
+             "Sigma::CodeRep.wrap assignment to #{var} at line #{wrap_idx + 1} — the /verify " \
+             'preflight requires the identical nested envelope as the real POST/PUT, so it ' \
+             'must never be handed the still-flat body.'
+    end
+  end
 end
