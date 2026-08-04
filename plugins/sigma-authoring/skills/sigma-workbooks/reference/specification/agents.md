@@ -9,7 +9,7 @@ element that just references the agent's id.
 
 > **Not in the compiled/public OpenAPI as of this writing.** Unlike most of this
 > skill's surface, `agents[]` / `dataSources` / `tools` / the `chat` element kind
-> do not appear in the compiled Fern OpenAPI asset this skill points to (see
+> do not appear in the compiled OpenAPI asset this skill points to (see
 > `SKILL.md`'s *Sources of truth*) — this shape was recovered by live POST +
 > GET-readback + render probing on a test org, not read off a schema. Treat field
 > names as verified-by-example, not exhaustive; if you need a field not listed
@@ -97,9 +97,9 @@ from a button (see `reference/workflows/actions.md`) — instead of pulling from
 control's current value or a hard-coded constant, the value comes from an argument
 the agent fills in when it decides to call the tool, keyed by `inputName`.
 
-> **Scope note:** the write/action agent shape above documents the *pattern*
-> from the design spec's live probe — it is not independently exercised end-to-end
-> in this pass (no automated test drives an agent into actually invoking a tool).
+> **Scope note:** the write/action agent shape above documents a live-verified
+> *pattern* — it is not independently exercised end-to-end in this pass (no
+> automated test drives an agent into actually invoking a tool).
 > `Richness.agent`'s `tools:` parameter passes an already-shaped array through
 > **verbatim** (never reshapes it) for exactly this reason: confirm any non-trivial
 > tool/step shape against a live POST + readback before shipping it, same discipline
@@ -136,13 +136,13 @@ gated feature look implemented.
 
 ## Cross-links
 
-- `shared/lib/richness.rb` / `richness.py` — `Richness.agent(id:, name:,
-  instructions:, data_source_ids:, tools: [])` builds the `agents[]` entry
-  (`data_source_ids` maps to `dataSources`; empty `tools:` is omitted from the
-  emitted Hash, matching the read-only shape above). `Richness.chat(id:,
-  agent_id:)` builds the page element. Both are gated behind
-  `Richness::SURFACES[:agent]`; a NO-GO flip returns `{opt_in: true, id:}` rather
-  than emitting an unverified shape.
+- `scripts/lib/richness.rb` — `Richness.agent(id:, name:, instructions:,
+  data_source_ids:, tools: [])` builds the `agents[]` entry (`data_source_ids`
+  maps to `dataSources`; empty `tools:` is omitted from the emitted Hash,
+  matching the read-only shape above). `Richness.chat(id:, agent_id:)` builds
+  the page element. Both are gated behind `Richness::SURFACES[:agent]`; a
+  NO-GO flip returns `{opt_in: true, id:}` rather than emitting an unverified
+  shape.
 - `reference/workflows/actions.md` — the `insert-rows`/`clear-control`/
   `set-control-value` effect shapes a write-agent's tool `steps[]` reuses, and
   the append-only-log input-table pattern a logging tool typically targets.

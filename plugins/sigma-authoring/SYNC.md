@@ -7,7 +7,7 @@ hard dependency on `sigma-workbooks` (the canonical Sigma spec reference) ships
 in the **same marketplace** — installing any converter, install this too.
 
 - **Source of truth:** https://github.com/twells89/sigma-skills (edit there)
-- **Vendored at:** sigma-skills `7e40dfa`
+- **Vendored at:** sigma-skills `feat/openapi-spec-update-2026-08` @ `9fc3cb5dbddea7a52cd3be556a7a2886c53a5f9c` (not yet merged to `main`; re-vendor from `main` once that PR merges — plain fast-forward, not a re-vendor)
 
 ## Refresh
 
