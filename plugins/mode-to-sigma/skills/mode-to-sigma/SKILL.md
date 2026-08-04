@@ -64,10 +64,48 @@ comparison. That waiver never touches the parity check above: it still
 runs against every Query, and is never skipped.
 
 ## Security: RLS / CLS (C9)
-Mode has no row- or column-level security on query results — access
-control is Space/Report visibility only, confirmed against this
-account's Space metadata (`restricted: false`). Documented as not
-applicable rather than silently omitted.
+No row- or column-level security construct was found on the one account
+this skill was built and tested against: the single Space inspected during
+discovery reports `restricted: false` in its own metadata, and Mode's
+public API surface exposes no per-user row/column filtering endpoint to
+discover in the first place. That is evidence about **one account's one
+Space** — not a general proof that Mode has no RLS/CLS feature anywhere
+(e.g. a paid-tier row-level feature this account's plan doesn't have); the
+design doc's own open question here ("confirm there isn't a paid-tier
+row-level feature we're missing") was never actually closed. Practical
+conclusion for v1 is unchanged: nothing is built for RLS/CLS, since none
+was observed — but if a customer's Mode account turns out to carry a row-
+security feature this discovery missed, that is a real gap to fix, not a
+silent omission this note already covers.
+
+## Known v1 limitations
+Read this before running against real Mode content — several things below
+are detected/partially built but not finished, and the parity gate is
+expected to fail honestly until they land:
+
+- **Chart elements currently bind only `kind` + `source`** — no axis/value/
+  rowsBy fields are set yet, so charts will not render real data until this
+  is completed. Finishing this needs to see a real Mode chart's `view` JSON
+  shape from a live Report — nobody has seen one yet, since no Mode content
+  has been seeded live. Guessing the shape now would repeat the mistake
+  this plan already made once elsewhere; it is deliberately left open
+  rather than built on a guess.
+- **Report Filter → Sigma control building is not implemented.** A
+  "portable" (simple WHERE-clause) Report Filter is *detected*
+  (`detect_simple_param_filter`, `param-gaps.json`) but nothing is actually
+  built from it — no Sigma control is created, no element filter is wired.
+- **`verify-parity.rb` compares a chart's FULL source query result against
+  its Sigma export column-for-column.** This will show false FAILs for any
+  chart that aggregates or selects a subset of the query's columns — only a
+  degenerate 1:1 chart (every query column, no aggregation) compares
+  correctly today.
+- **Mode's CSV content fetch does not follow pagination** — only the first
+  page of a query's results is read (both for column discovery and for
+  parity comparison).
+
+**Because of the above, the C8 parity hard gate is expected to genuinely
+FAIL on real content until this follow-up work lands — that is correct,
+honest behavior, not a bug to suppress.**
 
 ## Gaps
 Unsupported source features → `python3 scripts/escalate-gap.py` (opt-in issue filer). Never fake a feature; flag it.

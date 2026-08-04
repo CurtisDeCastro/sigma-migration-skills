@@ -36,21 +36,46 @@ def view_field_names(view)
   VIEW_FIELD_KEYS.flat_map { |k| Array(view[k]) }.compact.map(&:to_s).uniq
 end
 
-# [<Query Name>/<Column>] formula prefix -- matches build-dm.rb's own DM
-# column formulas (`[#{name}/#{c}]`), since the chart element's source is the
-# hidden Data-page table wrapping that DM element under the SAME name.
+# [<Data-page element name>/<DM column DISPLAY NAME>] formula prefix -- this
+# is the `table`-kind workbook-element cross-reference rule: a formula
+# references a source element's columns by their `name` (display name), never
+# the raw SQL output alias. The chart's `source` is the hidden Data-page table
+# element (see chart_element below), whose own name is `query_name` here --
+# but that table element passes through the DM element's own columns
+# untouched, each carrying the DISPLAY name build-dm.rb's `title_case`
+# assigned (e.g. raw column `order_month` displays as "Order Month"), NOT the
+# raw field name Mode's chart `view` actually carries. A formula built from
+# the raw field directly (`[Monthly Revenue/order_month]`) is simply wrong --
+# it must read `[Monthly Revenue/Order Month]`.
+#
+# `dm_columns` is the `columns` array post-dm.rb now captures per DM element
+# from its live GET-back readback (`[{"id" => <raw field>, "name" => <display
+# name>}, ...]` -- see post-dm.rb's columns_for_lookup) -- the only place this
+# raw-field -> display-name mapping is available. Falls back to a locally
+# recomputed title_case(field) (the pre-fix behavior) when no match is found,
+# with a loud warning, since that indicates a real drift between what the
+# chart's view references and what the DM element actually has.
 #
 # Column `id` is qualified with the chart's own token (never the bare view
 # field name) so two charts bound to a same-named field (e.g. both charts'
 # `y` referencing `revenue`) don't mint identical column ids -- the same
 # collision class build-dm.rb's build_sql_element guards against, and the one
 # the corpus/mode/orders-report golden caught (two Revenue columns sharing
-# one normalized id). Purely an internal bookkeeping key -- `formula` is
-# untouched and still references `[<Query Name>/<EXACT_SQL_OUTPUT_COLUMN_NAME>]`
-# exactly as Sigma requires.
-def columns_for_chart(view, query_name, chart_token)
+# one normalized id). Purely an internal bookkeeping key, distinct from
+# `dm_columns`' own `id` (the raw field, used only for the lookup) -- never
+# sent as part of a `formula`.
+def display_name_for_field(field, dm_columns)
+  match = (dm_columns || []).find { |c| c['id'] == field }
+  return match['name'] if match
+  warn "  ⚠ no DM column found for raw field #{field.inspect} in dm-elements.json's columns[] -- " \
+       'falling back to a locally recomputed display name; this formula may not resolve against the real DM.'
+  title_case(field)
+end
+
+def columns_for_chart(view, query_name, chart_token, dm_columns)
   view_field_names(view).map do |field|
-    { 'id' => "#{chart_token}_#{field}", 'name' => title_case(field), 'formula' => "[#{query_name}/#{field}]" }
+    display = display_name_for_field(field, dm_columns)
+    { 'id' => "#{chart_token}_#{field}", 'name' => display, 'formula' => "[#{query_name}/#{display}]" }
   end
 end
 
@@ -80,7 +105,35 @@ def chart_element(chart, dm_elements)
   kind = ModeChartMap.sigma_kind_for(chart.dig('view', 'selectedChart'))
   { 'id' => "chart-#{chart['token']}", 'kind' => kind, 'name' => chart.dig('view', 'chartTitle') || info['name'],
     'source' => { 'kind' => 'table', 'elementId' => "data-#{chart['query_token']}" },
-    'columns' => columns_for_chart(chart['view'], info['name'], chart.fetch('token')) }
+    'columns' => columns_for_chart(chart['view'], info['name'], chart.fetch('token'), info['columns']) }
+end
+
+# Builds every chart element that maps cleanly, routing a chart whose Mode
+# type has no known Sigma `kind` (ModeChartMap::UnknownChartType) into a gap
+# entry and skipping just THAT one chart -- instead of letting the exception
+# propagate past this loop and abort the ENTIRE workbook build over one
+# undocumented Mode chart type (Mode's real chart-type list is bigger than
+# the 8 kinds ModeChartMap knows -- Funnel, Map, Table, Histogram, etc.).
+# Returns [chart_elements, chart_pairs, gaps] -- chart_pairs is
+# [[chart, element], ...] for ONLY the charts that built successfully, since
+# a plain `charts.zip(chart_elements)` (what parity_plan used to do) would
+# silently misalign chart<->element pairing the moment any chart is skipped.
+def build_chart_elements(charts, dm_elements)
+  elements = []
+  pairs = []
+  gaps = []
+  charts.each do |c|
+    begin
+      el = chart_element(c, dm_elements)
+      elements << el
+      pairs << [c, el]
+    rescue ModeChartMap::UnknownChartType => e
+      gaps << { 'chart' => c['token'], 'chart_type' => c.dig('view', 'selectedChart'), 'reason' => e.message }
+      warn "  ⚠ chart #{c['token'].inspect}: #{e.message} -- skipping this one chart " \
+           '(see discovery/unmapped-chart-gaps.json); the rest of the workbook still builds.'
+    end
+  end
+  [elements, pairs, gaps]
 end
 
 # Only a bare `<col> = {{param}}` (or reverse) in a WHERE clause is portable
@@ -190,13 +243,26 @@ if __FILE__ == $PROGRAM_NAME
   File.write(File.join(File.dirname(opts[:out]), 'chart-column-gaps.json'), JSON.pretty_generate(chart_column_gaps))
 
   data_elements = queries.map { |q| data_page_element(q['token'], dm_elements) }
-  chart_elements = charts.map { |c| chart_element(c, dm_elements) }
+  # Any chart whose Mode type has no known Sigma mapping is skipped here (not
+  # crashed on) -- see build_chart_elements -- with its own gap file, mirroring
+  # the chart-column-gaps.json / param-gaps.json convention below.
+  chart_elements, chart_pairs, unmapped_chart_gaps = build_chart_elements(charts, dm_elements)
+  File.write(File.join(File.dirname(opts[:out]), 'unmapped-chart-gaps.json'), JSON.pretty_generate(unmapped_chart_gaps))
 
-  parity_plan = charts.zip(chart_elements).map { |c, el| parity_entry_for(c, el['name']) }
+  # zips ONLY the charts that actually built (chart_pairs), never the raw
+  # `charts` array -- a plain charts.zip(chart_elements) would silently
+  # misalign chart<->element pairing once any chart above was skipped.
+  parity_plan = chart_pairs.map { |c, el| parity_entry_for(c, el['name']) }
   File.write(File.join(File.dirname(opts[:out]), 'parity-plan.json'), JSON.pretty_generate(parity_plan))
 
   spec = {
-    'name'  => report.fetch('name'),
+    'name'          => report.fetch('name'),
+    # LIVE-VALIDATED FIX (see domo-to-sigma/scripts/build-workbook-spec.rb:244;
+    # error shape confirmed in hex-to-sigma/SKILL.md:188): POST
+    # /v2/workbooks/spec 400s ("schemaVersion: Invalid 1: undefined") without
+    # this on a fresh CREATE -- this converter has no workbook extend path, so
+    # it is always the fresh-CREATE value.
+    'schemaVersion' => 1,
     'pages' => [
       { 'id' => 'page-data', 'name' => 'Data', 'hidden' => true, 'elements' => data_elements },
       { 'id' => 'page-report', 'name' => 'Report', 'elements' => chart_elements }
@@ -221,5 +287,6 @@ if __FILE__ == $PROGRAM_NAME
   warn "wrote #{opts[:out]} (#{data_elements.length} data element(s), #{chart_elements.length} chart(s)), " \
        "#{File.join(File.dirname(opts[:out]), 'parity-plan.json')}, " \
        "#{File.join(File.dirname(opts[:out]), 'param-gaps.json')} (#{gaps.length} gap(s)), " \
-       "#{File.join(File.dirname(opts[:out]), 'chart-column-gaps.json')} (#{chart_column_gaps.length} gap(s))"
+       "#{File.join(File.dirname(opts[:out]), 'chart-column-gaps.json')} (#{chart_column_gaps.length} gap(s)), " \
+       "#{File.join(File.dirname(opts[:out]), 'unmapped-chart-gaps.json')} (#{unmapped_chart_gaps.length} gap(s))"
 end

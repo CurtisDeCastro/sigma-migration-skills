@@ -28,10 +28,26 @@ def build_sql_element(query, connection_id:)
     # don't mint identical column ids across elements -- a real collision the
     # corpus/mode/orders-report golden caught (two Revenue columns silently
     # sharing one normalized id). This `id` is purely an internal bookkeeping
-    # key; the `formula` below is untouched and still references
-    # `[<Query Name>/<EXACT_SQL_OUTPUT_COLUMN_NAME>]` exactly as Sigma
-    # requires -- the id is never part of the formula.
-    'columns' => query.fetch('columns').map { |c| { 'id' => "#{token}_#{c}", 'name' => title_case(c), 'formula' => "[#{name}/#{c}]" } }
+    # key -- never sent as part of a `formula`.
+    #
+    # `formula` prefix is the FIXED sentinel `Custom SQL`, never this
+    # element's own authored `name` -- live-verified 2026-07-30 (see
+    # hex-to-sigma/SKILL.md ~L165-178): Sigma does NOT honor a `sql`-kind
+    # element's authored name for its own internal column self-references; it
+    # always reads back as the literal string "Custom SQL", and a
+    # self-reference using the element's own name (e.g. `[Monthly Revenue/x]`
+    # for the very element named "Monthly Revenue") compiles to a **Ref
+    # Cycle** error. Corroborated by every sibling converter's own sql-element
+    # columns: quicksight-to-sigma/scripts/convert-model.rb:226,
+    # tableau-to-sigma/scripts/mechanical-specs.rb:441,529,
+    # powerbi-to-sigma/scripts/dax-restructure-patterns.rb:55-57 -- all use
+    # `[Custom SQL/<RAW_COLUMN>]` for a sql element's own columns. The
+    # element's `name` field itself (`name` above) is unaffected -- it is
+    # still used elsewhere (e.g. as the id for reuse-check signatures, and as
+    # the prefix OTHER elements use to cross-reference this one — see
+    # build-mode-workbook.rb) -- only a sql element's OWN internal column
+    # formulas must use this fixed sentinel instead.
+    'columns' => query.fetch('columns').map { |c| { 'id' => "#{token}_#{c}", 'name' => title_case(c), 'formula' => "[Custom SQL/#{c}]" } }
   }
 end
 
@@ -83,10 +99,23 @@ if __FILE__ == $PROGRAM_NAME
     sig_path = File.join(File.dirname(opts[:out]), 'mode-signature.json')
     File.write(sig_path, JSON.pretty_generate(signature_for(report, queries)))
     match_path = File.join(File.dirname(opts[:out]), 'dm-match.json')
-    _out, _err, status = Open3.capture3(
+    out, err, status = Open3.capture3(
       'ruby', File.expand_path('find-or-pick-dm.rb', __dir__),
       '--workbook-signature', sig_path, '--out', match_path, '--auto-pick'
     )
+    unless status.success?
+      # A failed subprocess here is otherwise INDISTINGUISHABLE from "no
+      # match found" -- the code below just falls through to "create a new
+      # DM" either way. But a real failure (bad token, a genuine API error)
+      # is not the same thing as a clean no-match, and silently swallowing
+      # captured stdout/stderr hides exactly the evidence a human would need
+      # to tell the two apart. Warn loudly with whatever the subprocess
+      # actually said; still fall through to creating a new DM (never abort
+      # here -- a reuse-check failure must not block the whole migration).
+      warn "reuse-check: find-or-pick-dm.rb exited #{status.exitstatus} -- falling back to creating a new DM. " \
+           'This may be a REAL failure (bad token, API error), not genuinely "no match found" -- ' \
+           "captured output:\n#{[err, out].reject { |s| s.to_s.strip.empty? }.join("\n").strip}"
+    end
     if status.success?
       match = JSON.parse(File.read(match_path))
       if match['auto_picked']
@@ -111,7 +140,16 @@ if __FILE__ == $PROGRAM_NAME
   end
 
   spec = {
-    'name'  => "#{report.fetch('name')} (Mode)",
+    'name'          => "#{report.fetch('name')} (Mode)",
+    # LIVE-VALIDATED FIX (see domo-to-sigma/scripts/build-dm.rb:457,
+    # build-workbook-spec.rb:244; error shape confirmed in
+    # hex-to-sigma/SKILL.md:188): a brand-new spec MUST carry `schemaVersion`
+    # or POST /v2/dataModels/spec rejects it outright
+    # ("schemaVersion: Invalid 1: undefined"). `1` is only valid for a fresh
+    # CREATE -- the extend path above PUTs an existing GET-back spec that
+    # already carries whatever schemaVersion Sigma itself last wrote, so it is
+    # never touched here.
+    'schemaVersion' => 1,
     'pages' => [{ 'id' => 'page-data', 'name' => 'Data',
                   'elements' => queries.map { |q| build_sql_element(q, connection_id: opts[:connection_id]) } }]
   }

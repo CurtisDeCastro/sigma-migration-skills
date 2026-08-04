@@ -2,7 +2,6 @@
 #   ruby test/test-migrate-mode.rb
 require_relative '../scripts/migrate-mode'
 require 'tmpdir'
-require 'fileutils'
 
 $failures = 0
 def eq(a, b, m)
@@ -24,25 +23,31 @@ end
 
 puts "== run_script! threads env: into the child process (Finding 1 regression guard) =="
 # Live proof that Open3.capture3(env, ...) actually reaches the child — a stub
-# sibling script (run_script! always resolves `name` relative to THIS file's
-# own __dir__, i.e. test/) that writes its MODE_DISCOVERY_DIR env var to a
-# file, so we can assert the orchestrator's env: kwarg was really threaded
-# through rather than silently dropped (the exact bug that left
-# mode-discover.rb writing to a fixed plugin-dir path on every real run).
+# script that writes its MODE_DISCOVERY_DIR env var to a file, so we can
+# assert the orchestrator's env: kwarg was really threaded through rather than
+# silently dropped (the exact bug that left mode-discover.rb writing to a
+# fixed plugin-dir path on every real run).
+#
+# The stub is written into Dir.mktmpdir, NEVER into the tracked test/ tree —
+# run_script!('name', ...) resolves `name` via File.expand_path(name, __dir__)
+# (its OWN __dir__, i.e. scripts/), and File.expand_path leaves an already-
+# absolute path untouched regardless of that base, so passing the tmpdir
+# stub's absolute path works exactly the same as the old test/-relative one.
+# This closes the litter risk the old version had (writing directly into
+# test/ and relying on an `ensure` block to clean it up — a crash before that
+# ensure ran would have left the stub committed-tree litter); Dir.mktmpdir's
+# own block form guarantees cleanup even on a hard crash, with nothing ever
+# touching the repo tree.
 Dir.mktmpdir do |dir|
-  stub = File.join(__dir__, 'stub-env-echo.rb')
+  stub = File.join(dir, 'stub-env-echo.rb')
   marker = File.join(dir, 'seen-env.txt')
   File.write(stub, <<~RUBY)
     File.write(#{marker.inspect}, ENV['MODE_DISCOVERY_DIR'].to_s)
   RUBY
-  begin
-    ok, code = run_script!('../test/stub-env-echo.rb', env: { 'MODE_DISCOVERY_DIR' => dir })
-    eq(ok, true, 'stub script exits 0')
-    eq(code, 0, 'stub script exitstatus is 0')
-    eq(File.read(marker), dir, "child process saw MODE_DISCOVERY_DIR=#{dir.inspect} via env:")
-  ensure
-    FileUtils.rm_f(stub)
-  end
+  ok, code = run_script!(stub, env: { 'MODE_DISCOVERY_DIR' => dir })
+  eq(ok, true, 'stub script exits 0')
+  eq(code, 0, 'stub script exitstatus is 0')
+  eq(File.read(marker), dir, "child process saw MODE_DISCOVERY_DIR=#{dir.inspect} via env:")
 end
 
 if $failures.zero? then puts "ALL PASS"; exit 0 else puts "#{$failures} FAILURE(S)"; exit 1 end

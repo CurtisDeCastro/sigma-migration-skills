@@ -1,5 +1,6 @@
 {
   "name": "Orders Report",
+  "schemaVersion": 1,
   "pages": [
     {
       "id": "id0001",
@@ -44,12 +45,12 @@
             {
               "id": "id0009",
               "name": "Order Month",
-              "formula": "[Monthly Revenue/order_month]"
+              "formula": "[Monthly Revenue/Order Month]"
             },
             {
               "id": "id0010",
               "name": "Revenue",
-              "formula": "[Monthly Revenue/revenue]"
+              "formula": "[Monthly Revenue/Revenue]"
             }
           ]
         },
@@ -65,12 +66,12 @@
             {
               "id": "id0012",
               "name": "Region",
-              "formula": "[Region Revenue/region]"
+              "formula": "[Region Revenue/Region]"
             },
             {
               "id": "id0013",
               "name": "Revenue",
-              "formula": "[Region Revenue/revenue]"
+              "formula": "[Region Revenue/Revenue]"
             }
           ]
         }

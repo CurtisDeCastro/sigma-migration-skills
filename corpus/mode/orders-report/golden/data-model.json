@@ -1,5 +1,6 @@
 {
   "name": "Orders Report (Mode)",
+  "schemaVersion": 1,
   "pages": [
     {
       "id": "id0001",
@@ -18,12 +19,12 @@
             {
               "id": "id0003",
               "name": "Order Month",
-              "formula": "[Monthly Revenue/order_month]"
+              "formula": "[Custom SQL/order_month]"
             },
             {
               "id": "id0004",
               "name": "Revenue",
-              "formula": "[Monthly Revenue/revenue]"
+              "formula": "[Custom SQL/revenue]"
             }
           ]
         },
@@ -40,12 +41,12 @@
             {
               "id": "id0006",
               "name": "Region",
-              "formula": "[Region Revenue/region]"
+              "formula": "[Custom SQL/region]"
             },
             {
               "id": "id0007",
               "name": "Revenue",
-              "formula": "[Region Revenue/revenue]"
+              "formula": "[Custom SQL/revenue]"
             }
           ]
         }

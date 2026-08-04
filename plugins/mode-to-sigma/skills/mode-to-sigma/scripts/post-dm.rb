@@ -29,14 +29,40 @@ def post_or_put_dm(authored, dm_mode)
   end
 end
 
+# Positionally pairs each AUTHORED column (build-dm.rb's own
+# `"#{token}_#{raw_column}"` ids, in authoring order) with its server-readback
+# counterpart column (same order Sigma preserves elements in — see
+# element_lookup_from_readback above), producing
+# `[{"id" => <raw SQL column, i.e. token-prefix stripped>, "name" => <the
+# DISPLAY name Sigma actually persisted>}, ...]`. This is the ONLY place a raw
+# field name -> DM display name mapping is available for
+# build-mode-workbook.rb's chart column binding to look up (dm-elements.json,
+# Task 6's own output, previously carried no per-column info at all — a chart
+# formula referencing a raw field name like `order_month` is wrong once
+# build-dm.rb's `title_case` has renamed that column's DISPLAY name to
+# "Order Month"; Sigma resolves cross-element column references by name, not
+# by raw SQL alias). Falls back to the authored name if the live readback is
+# ever missing that position (defensive; should not happen in practice).
+def columns_for_lookup(authored_el, live_el, token)
+  authored_cols = authored_el['columns'] || []
+  live_cols = live_el['columns'] || []
+  authored_cols.each_with_index.map do |ac, i|
+    raw = ac['id'].to_s.sub(/\A#{Regexp.escape(token)}_/, '')
+    live_name = live_cols[i].is_a?(Hash) ? live_cols[i]['name'] : nil
+    { 'id' => raw, 'name' => live_name || ac['name'] }
+  end
+end
+
 # original_ids: {query_token => authoring_element_id}; spec: the GET-back spec.
 # Server assigns elements in the SAME ORDER they were authored, so pair positionally.
-def element_lookup_from_readback(spec, original_ids, data_model_id:)
+def element_lookup_from_readback(spec, original_ids, authored_elements, data_model_id:)
   ordered_tokens = original_ids.keys # insertion order == authoring order
   live_elements = spec['pages'].first['elements']
   ordered_tokens.each_with_index.each_with_object({}) do |(token, i), acc|
     el = live_elements[i]
-    acc[token] = { 'dataModelId' => data_model_id, 'elementId' => el['id'], 'name' => el['name'] }
+    authored_el = authored_elements[i]
+    acc[token] = { 'dataModelId' => data_model_id, 'elementId' => el['id'], 'name' => el['name'],
+                   'columns' => columns_for_lookup(authored_el, el, token) }
   end
 end
 
@@ -50,14 +76,15 @@ if __FILE__ == $PROGRAM_NAME
 
   authored = JSON.parse(File.read(opts[:spec]))
   dm_mode = JSON.parse(File.read(opts[:mode]))
-  original_ids = authored['pages'].first['elements'].each_with_object({}) do |el, acc|
+  authored_elements = authored['pages'].first['elements']
+  original_ids = authored_elements.each_with_object({}) do |el, acc|
     acc[el['id'].sub(/\Ael-/, '')] = el['id']
   end
 
   dm_id = post_or_put_dm(authored, dm_mode)
 
   readback = Sigma.request(:get, "/v2/dataModels/#{dm_id}/spec")
-  lookup = element_lookup_from_readback(readback, original_ids, data_model_id: dm_id)
+  lookup = element_lookup_from_readback(readback, original_ids, authored_elements, data_model_id: dm_id)
   File.write(opts[:out], JSON.pretty_generate(lookup))
   warn "#{dm_mode['mode'] == 'extend' ? 'extended' : 'posted'} data model #{dm_id}, wrote #{opts[:out]}"
 end

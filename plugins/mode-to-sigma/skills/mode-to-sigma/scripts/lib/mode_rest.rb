@@ -49,8 +49,11 @@ module Mode
     uri
   end
 
-  # Sleep out `Retry-After` (default 2s) and retry the same call exactly once
-  # on a 429. RFC 7231 also permits an HTTP-date form for Retry-After (not just
+  # Parses `Retry-After` into a delay in seconds (default 2s), used by each
+  # caller below right before its single retry on a 429 -- never inside
+  # handle() itself (see handle()'s own comment: sleeping there would sleep
+  # out the delay even on an already-exhausted retry, achieving nothing).
+  # RFC 7231 also permits an HTTP-date form for Retry-After (not just
   # delay-seconds), and a header could in principle be malformed — `Integer()`
   # raises ArgumentError (bad string) or TypeError (nil header) in those cases,
   # so fall back to the 2s default rather than blowing up.
@@ -68,7 +71,12 @@ module Mode
     res = http.request(req)
     handle(res)
   rescue Error
-    raise unless res.code.to_i == 429 && !_retried
+    # `res &&`: a pre-request error (e.g. `token`/`secret` raising Mode::Error
+    # for a missing credential, inside req.basic_auth above) leaves `res` nil
+    # — without this guard, `res.code` raises NoMethodError on nil, burying
+    # the original clear credential-error message under a confusing crash.
+    raise unless res && res.code.to_i == 429 && !_retried
+    sleep(retry_after_seconds(res))
     get(path, query: query, _retried: true)
   end
 
@@ -82,7 +90,8 @@ module Mode
     res = http.request(req)
     handle(res, parse: false)
   rescue Error
-    raise unless res.code.to_i == 429 && !_retried
+    raise unless res && res.code.to_i == 429 && !_retried
+    sleep(retry_after_seconds(res))
     get_raw(path, _retried: true)
   end
 
@@ -96,7 +105,8 @@ module Mode
     res = http.request(req)
     handle(res)
   rescue Error
-    raise unless res.code.to_i == 429 && !_retried
+    raise unless res && res.code.to_i == 429 && !_retried
+    sleep(retry_after_seconds(res))
     post(path, body: body, _retried: true)
   end
 
@@ -110,12 +120,16 @@ module Mode
   # `parse: false` returns the raw body string (for get_raw) instead of
   # JSON-parsing it — mirrors domo_rest.rb's handle(res, accept) split for
   # its CSV-export path.
+  #
+  # Deliberately does NOT sleep on a 429 here (previously did) — every caller
+  # (get/get_raw/post) only retries once, so sleeping inside handle() slept
+  # out the FULL Retry-After delay even on the second attempt's failure (the
+  # one that will NOT be retried — the caller's `!_retried` guard re-raises
+  # instead), achieving nothing but a pointless wait. The sleep now happens in
+  # each caller's rescue clause, gated on the same condition that decides
+  # whether a retry will actually happen.
   def handle(res, parse: true)
     code = res.code.to_i
-    if code == 429
-      sleep(retry_after_seconds(res))
-      raise Error, 'rate limited (429) — caller should retry'
-    end
     raise Error, "#{res.code}: #{res.body}" unless code.between?(200, 299)
     return (parse ? {} : '') if res.body.nil? || res.body.empty?
     parse ? JSON.parse(res.body) : res.body

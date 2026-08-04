@@ -10,7 +10,8 @@ connection required).
 | File | What it is |
 |---|---|
 | `../../../plugins/mode-to-sigma/skills/mode-to-sigma/test/fixtures/report-fixture.json` | mode-discover.rb-shaped Report: 2 Queries (`Monthly Revenue`, `Region Revenue`, 2 columns each), 2 Charts (Line, Bar), 0 Report Filters |
-| `fixtures/dm-elements.json` | hand-authored `{query_token => {dataModelId, elementId, name}}` map standing in for `post-dm.rb`'s real POST+readback (Task 6) — this corpus case is offline, so there is no live DM to read back |
+| `fixtures/dm-elements.json` | hand-authored `{query_token => {dataModelId, elementId, name, columns}}` map standing in for `post-dm.rb`'s real POST+readback (Task 6) — this corpus case is offline, so there is no live DM to read back. `columns` (added in the final-review fix wave) is the per-column `{raw field id -> DM display name}` list `post-dm.rb`'s readback now captures, letting `build-mode-workbook.rb` bind chart formulas to the real DM display name instead of the raw SQL alias |
+| `checks.sh` | offline reconvert + schemaVersion assertion (see below) |
 
 ## Features exercised
 
@@ -23,6 +24,15 @@ connection required).
   empty
 - No Report Filters → `param-gaps.json` and `chart-column-gaps.json` both
   empty, no RLS/control-lint noise
+- (final-review fix wave) DM element self-reference columns use the fixed
+  `[Custom SQL/<raw column>]` sentinel, never the element's own authored name
+  (`golden/data-model.json`'s column formulas)
+- (final-review fix wave) chart columns reference the DM's real column
+  DISPLAY NAME (e.g. `[Monthly Revenue/Order Month]`), looked up from
+  `fixtures/dm-elements.json`'s `columns[]`, never the raw SQL alias
+  (`[Monthly Revenue/order_month]` would be wrong)
+- (final-review fix wave) both specs carry `schemaVersion: 1` — asserted by
+  `checks.sh`, not visible to the plain goldens counts check
 
 ## Converter
 
@@ -57,7 +67,8 @@ python3 corpus/lib/corpus_check.py normalize /tmp/mode-wb.json > corpus/mode/ord
 {
   "artifacts": [
     {"path": "../../../plugins/mode-to-sigma/skills/mode-to-sigma/test/fixtures/report-fixture.json", "format": "json"},
-    {"path": "fixtures/dm-elements.json", "format": "json"}
+    {"path": "fixtures/dm-elements.json", "format": "json"},
+    {"path": "checks.sh", "format": "text"}
   ],
   "goldens": {
     "data-model.json": {

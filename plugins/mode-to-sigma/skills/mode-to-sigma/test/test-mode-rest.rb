@@ -106,7 +106,9 @@ begin
   Mode.handle(FakeResponse.new('429', '', { 'Retry-After' => '0' }))
   $failures += 1; puts "  FAIL: handle() should raise on 429"
 rescue Mode::Error => e
-  eq(e.message.include?('429'), true, 'handle() sleeps out Retry-After then raises Mode::Error on 429')
+  eq(e.message.include?('429'), true,
+     'handle() raises Mode::Error on 429 WITHOUT sleeping itself (sleep now lives in the caller\'s rescue, ' \
+     'gated on whether a retry will actually happen -- see the sleep-gate test below)')
 end
 
 begin
@@ -162,6 +164,58 @@ retry_exhausted('post()') { Mode.post('/api/acme/single-retry', body: { x: 1 }) 
 retry_succeeds('get_raw()')  { Mode.get_raw('/api/acme/single-retry') }
 retry_exhausted('get_raw()') { Mode.get_raw('/api/acme/single-retry') }
 
+puts "== Finding (minor, bundled with I4): handle() no longer sleeps on 429 itself -- the sleep is caller-gated on " \
+     "!_retried, never wasted on an already-exhausted retry =="
+fake_sleep_gate = FakeHTTP.new(
+  FakeResponse.new('429', '', { 'Retry-After' => '0' }),
+  FakeResponse.new('429', '', { 'Retry-After' => '0' })
+)
+Mode.define_singleton_method(:http) { fake_sleep_gate }
+sleep_gate_calls = 0
+orig_retry_after_seconds = Mode.method(:retry_after_seconds)
+# retry_after_seconds is called at exactly the same site each caller's
+# rescue clause calls sleep(...) -- counting its invocations is an exact
+# proxy for "a sleep was attempted" without monkeypatching Kernel#sleep.
+Mode.define_singleton_method(:retry_after_seconds) { |res| sleep_gate_calls += 1; orig_retry_after_seconds.call(res) }
+begin
+  Mode.get('/api/acme/sleep-gate')
+  $failures += 1; puts "  FAIL: get() should raise Mode::Error once the single retry is exhausted"
+rescue Mode::Error
+  # expected
+end
+eq(sleep_gate_calls, 1,
+   'the Retry-After delay is computed/consumed exactly ONCE across the whole exhausted-retry sequence -- the ' \
+   'SECOND (already-exhausted) 429 failure must not sleep out Retry-After pointlessly before re-raising (the ' \
+   'pre-fix handle() slept unconditionally on EVERY 429 response, including this wasted one)')
+Mode.define_singleton_method(:retry_after_seconds, orig_retry_after_seconds)
+
 Mode.define_singleton_method(:http, orig_http)
+
+puts "== Finding I4: a missing credential surfaces mode_rest's OWN clear error, never a NoMethodError on a nil res =="
+# `token`/`secret` raise Mode::Error for a missing env var INSIDE
+# req.basic_auth(token, secret) -- before `res` is ever assigned. The pre-fix
+# rescue clause unconditionally called `res.code.to_i`, which raised
+# NoMethodError on that still-nil `res`, burying the original clear
+# credential-error message under a confusing crash.
+saved_token = ENV.delete('MODE_API_TOKEN')
+begin
+  [
+    ['get()',     -> { Mode.get('/api/acme/anything') }],
+    ['post()',    -> { Mode.post('/api/acme/anything', body: {}) }],
+    ['get_raw()', -> { Mode.get_raw('/api/acme/anything') }]
+  ].each do |label, call|
+    begin
+      call.call
+      $failures += 1; puts "  FAIL: #{label} should raise when MODE_API_TOKEN is unset"
+    rescue Mode::Error => e
+      eq(e.message, 'MODE_API_TOKEN not set',
+         "#{label} with no MODE_API_TOKEN raises the ORIGINAL clear credential error, not a NoMethodError on a nil res")
+    rescue NoMethodError => e
+      $failures += 1; puts "  FAIL: #{label} raised NoMethodError instead of surfacing the clear credential error: #{e.message}"
+    end
+  end
+ensure
+  ENV['MODE_API_TOKEN'] = saved_token
+end
 
 if $failures.zero? then puts "ALL PASS"; exit 0 else puts "#{$failures} FAILURE(S)"; exit 1 end
