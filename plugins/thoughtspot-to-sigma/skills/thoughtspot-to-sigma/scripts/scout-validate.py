@@ -26,6 +26,7 @@ Prints JSON: {status: validated|error, workbook_id, error, ...}. Cleans up the t
 import json, os, sys, ssl, urllib.request, argparse, datetime, re, hashlib
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 import scout_gate
+import code_rep
 _SSL = ssl._create_unverified_context()
 
 BASE = os.environ["SIGMA_BASE_URL"]; TOK = os.environ["SIGMA_API_TOKEN"]
@@ -113,8 +114,13 @@ def main():
     else:
         test = {"id":"scout","kind":"table","name":"scout","source":{"elementId":"m","kind":"table"},
                 "columns":[{"id":"sc","formula":a.formula,"name":"scout_test"}]}
-    spec = {"name":f"SCOUT TEST {a.feature}","folderId":a.folder_id,"schemaVersion":1,
-            "pages":[{"id":"d","name":"Data","elements":[master]},{"id":"t","name":"Test","elements":[test]}]}
+    doc = {"schemaVersion":1,
+           "pages":[{"id":"d","name":"Data","elements":[master]},{"id":"t","name":"Test","elements":[test]}]}
+    # Live POST /v2/workbooks/spec now REJECTS the old flat body with a 400
+    # (verified 2026-08-03/04) — every non-metadata field must nest under a
+    # top-level `document` key. code_rep.wrap keeps the metadata (name,
+    # folderId) alongside it.
+    spec = code_rep.wrap(doc, {"name":f"SCOUT TEST {a.feature}","folderId":a.folder_id})
     st, body = api("POST","/v2/workbooks/spec",spec)
     wb = None
     try: wb = json.loads(body).get("workbookId")
