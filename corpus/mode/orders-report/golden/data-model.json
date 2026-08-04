@@ -43,7 +43,7 @@
               "formula": "[Region Revenue/region]"
             },
             {
-              "id": "id0004",
+              "id": "id0007",
               "name": "Revenue",
               "formula": "[Region Revenue/revenue]"
             }
@@ -52,5 +52,5 @@
       ]
     }
   ],
-  "folderId": "id0007"
+  "folderId": "id0008"
 }

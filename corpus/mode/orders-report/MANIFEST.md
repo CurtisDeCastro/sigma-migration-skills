@@ -40,7 +40,7 @@ instead of hitting a live Sigma org:
 ```
 cd plugins/mode-to-sigma/skills/mode-to-sigma
 ruby scripts/build-mode-workbook.rb --report-json test/fixtures/report-fixture.json \
-  --dm-elements ../../../corpus/mode/orders-report/fixtures/dm-elements.json \
+  --dm-elements ../../../../corpus/mode/orders-report/fixtures/dm-elements.json \
   --folder-id folder-test --out /tmp/mode-wb.json
 ```
 

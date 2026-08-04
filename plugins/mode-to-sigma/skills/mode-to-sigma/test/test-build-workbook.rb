@@ -34,14 +34,25 @@ eq(entry, { 'chart_element_id' => 'chart-c1', 'chart_name' => 'Monthly Revenue',
    'parity plan entry maps the Sigma chart element id back to the Mode query token Task 8 must re-run')
 
 puts "== columns_for_chart (formula-prefixed against the Data-page element's own name) =="
-cols = columns_for_chart({ 'selectedChart' => 'Line', 'x' => 'ORDER_DATE', 'y' => ['REVENUE'] }, 'Monthly Revenue')
+cols = columns_for_chart({ 'selectedChart' => 'Line', 'x' => 'ORDER_DATE', 'y' => ['REVENUE'] }, 'Monthly Revenue', 'c1')
 eq(cols, [
-  { 'id' => 'ORDER_DATE', 'name' => 'Order Date', 'formula' => '[Monthly Revenue/ORDER_DATE]' },
-  { 'id' => 'REVENUE',    'name' => 'Revenue',    'formula' => '[Monthly Revenue/REVENUE]' }
-], 'x/y view fields become formula-bound columns instead of a chart-kind-agnostic stub')
-big_number_cols = columns_for_chart({ 'selectedChart' => 'Big Number', 'field' => 'REVENUE', 'aggregate' => 'sum' }, 'Monthly Revenue')
-eq(big_number_cols, [{ 'id' => 'REVENUE', 'name' => 'Revenue', 'formula' => '[Monthly Revenue/REVENUE]' }],
+  { 'id' => 'c1_ORDER_DATE', 'name' => 'Order Date', 'formula' => '[Monthly Revenue/ORDER_DATE]' },
+  { 'id' => 'c1_REVENUE',    'name' => 'Revenue',    'formula' => '[Monthly Revenue/REVENUE]' }
+], 'x/y view fields become formula-bound columns instead of a chart-kind-agnostic stub; ' \
+   'id is qualified with the chart token (formula is untouched -- id is bookkeeping only)')
+big_number_cols = columns_for_chart({ 'selectedChart' => 'Big Number', 'field' => 'REVENUE', 'aggregate' => 'sum' }, 'Monthly Revenue', 'c5')
+eq(big_number_cols, [{ 'id' => 'c5_REVENUE', 'name' => 'Revenue', 'formula' => '[Monthly Revenue/REVENUE]' }],
    'a Big Number view binds its single `field`, not x/y (which it does not carry)')
+
+puts "== columns_for_chart: same-named field across two different charts never collides =="
+cols_c1 = columns_for_chart({ 'selectedChart' => 'Line', 'y' => ['REVENUE'] }, 'Monthly Revenue', 'c1')
+cols_c2 = columns_for_chart({ 'selectedChart' => 'Bar', 'y' => ['REVENUE'] }, 'Region Revenue', 'c2')
+eq(cols_c1.first['id'] == cols_c2.first['id'], false,
+   'two different charts binding the SAME raw field name (REVENUE) mint DIFFERENT column ids')
+eq([cols_c1.first['id'], cols_c2.first['id']], ['c1_REVENUE', 'c2_REVENUE'], 'ids are qualified with each chart\'s own token')
+eq([cols_c1.first['formula'], cols_c2.first['formula']],
+   ['[Monthly Revenue/REVENUE]', '[Region Revenue/REVENUE]'],
+   'formulas still reference [ElementName/EXACT_SQL_OUTPUT_COLUMN_NAME] verbatim -- only id changed, never the formula')
 
 puts "== chart_element wires real columns, never the empty placeholder =="
 line_chart = { 'token' => 'c2', 'query_token' => 'q1', 'view' => { 'selectedChart' => 'Line', 'x' => 'ORDER_DATE', 'y' => ['REVENUE'] } }
@@ -70,7 +81,7 @@ eq(chart_column_gap_for(unknown_shape_chart),
    { 'chart' => 'c4', 'chart_type' => 'Funnel', 'view_keys' => %w[selectedChart stages] },
    "a view using none of VIEW_FIELD_KEYS (here 'stages', not in the 8-key allowlist) produces a gap entry " \
    'recording the chart token, Mode chart type, and the actual view keys -- instead of silently shipping columns: []')
-eq(columns_for_chart(unknown_shape_chart['view'], 'Monthly Revenue'), [],
+eq(columns_for_chart(unknown_shape_chart['view'], 'Monthly Revenue', 'c4'), [],
    'confirms the failure mode this gap protects against: columns_for_chart really does return [] for this shape')
 
 puts "== param_gap_for (Finding 2: unmatched query_token -> visible param-gaps entry, never a silent drop) =="

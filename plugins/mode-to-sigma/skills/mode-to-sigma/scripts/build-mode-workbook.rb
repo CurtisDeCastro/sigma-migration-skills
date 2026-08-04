@@ -39,9 +39,18 @@ end
 # [<Query Name>/<Column>] formula prefix -- matches build-dm.rb's own DM
 # column formulas (`[#{name}/#{c}]`), since the chart element's source is the
 # hidden Data-page table wrapping that DM element under the SAME name.
-def columns_for_chart(view, query_name)
+#
+# Column `id` is qualified with the chart's own token (never the bare view
+# field name) so two charts bound to a same-named field (e.g. both charts'
+# `y` referencing `revenue`) don't mint identical column ids -- the same
+# collision class build-dm.rb's build_sql_element guards against, and the one
+# the corpus/mode/orders-report golden caught (two Revenue columns sharing
+# one normalized id). Purely an internal bookkeeping key -- `formula` is
+# untouched and still references `[<Query Name>/<EXACT_SQL_OUTPUT_COLUMN_NAME>]`
+# exactly as Sigma requires.
+def columns_for_chart(view, query_name, chart_token)
   view_field_names(view).map do |field|
-    { 'id' => field, 'name' => title_case(field), 'formula' => "[#{query_name}/#{field}]" }
+    { 'id' => "#{chart_token}_#{field}", 'name' => title_case(field), 'formula' => "[#{query_name}/#{field}]" }
   end
 end
 
@@ -71,7 +80,7 @@ def chart_element(chart, dm_elements)
   kind = ModeChartMap.sigma_kind_for(chart.dig('view', 'selectedChart'))
   { 'id' => "chart-#{chart['token']}", 'kind' => kind, 'name' => chart.dig('view', 'chartTitle') || info['name'],
     'source' => { 'kind' => 'table', 'elementId' => "data-#{chart['query_token']}" },
-    'columns' => columns_for_chart(chart['view'], info['name']) }
+    'columns' => columns_for_chart(chart['view'], info['name'], chart.fetch('token')) }
 end
 
 # Only a bare `<col> = {{param}}` (or reverse) in a WHERE clause is portable

@@ -17,9 +17,25 @@ eq(el['name'], 'Monthly Revenue', 'element name = query name (becomes the formul
 eq(el['source'], { 'kind' => 'sql', 'connectionId' => 'conn-1',
                     'statement' => 'select order_date, revenue from orders' }, 'sql source shape')
 eq(el['columns'], [
-  { 'id' => 'ORDER_DATE', 'name' => 'Order Date', 'formula' => '[Monthly Revenue/ORDER_DATE]' },
-  { 'id' => 'REVENUE',    'name' => 'Revenue',     'formula' => '[Monthly Revenue/REVENUE]' }
-], 'columns use the element\'s own name as formula prefix, not literal Custom SQL')
+  { 'id' => 'q1_ORDER_DATE', 'name' => 'Order Date', 'formula' => '[Monthly Revenue/ORDER_DATE]' },
+  { 'id' => 'q1_REVENUE',    'name' => 'Revenue',     'formula' => '[Monthly Revenue/REVENUE]' }
+], 'columns use the element\'s own name as formula prefix, not literal Custom SQL; ' \
+   'id is qualified with the query token (formula is untouched -- id is bookkeeping only)')
+
+puts "== build_sql_element: same-named column across two different queries never collides =="
+query_a = { 'token' => 'q1', 'name' => 'Monthly Revenue', 'raw_query' => 'select order_month, revenue from widget_orders',
+            'columns' => ['revenue'] }
+query_b = { 'token' => 'q2', 'name' => 'Region Revenue', 'raw_query' => 'select region, revenue from widget_orders',
+            'columns' => ['revenue'] }
+el_a = build_sql_element(query_a, connection_id: 'conn-1')
+el_b = build_sql_element(query_b, connection_id: 'conn-1')
+id_a = el_a['columns'].first['id']
+id_b = el_b['columns'].first['id']
+eq(id_a == id_b, false, 'two different queries selecting the SAME raw column name (revenue) mint DIFFERENT column ids')
+eq([id_a, id_b], ['q1_revenue', 'q2_revenue'], 'ids are qualified with each query\'s own token')
+eq([el_a['columns'].first['formula'], el_b['columns'].first['formula']],
+   ['[Monthly Revenue/revenue]', '[Region Revenue/revenue]'],
+   'formulas still reference [ElementName/EXACT_SQL_OUTPUT_COLUMN_NAME] verbatim -- only id changed, never the formula')
 
 puts "== signature_for (find-or-pick-dm.rb input) =="
 report = { 'name' => 'Sigma Migration Test' }

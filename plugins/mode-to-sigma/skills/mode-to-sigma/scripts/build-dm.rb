@@ -16,12 +16,22 @@ end
 
 def build_sql_element(query, connection_id:)
   name = query.fetch('name')
+  token = query.fetch('token')
   {
-    'id'     => "el-#{query.fetch('token')}",
+    'id'     => "el-#{token}",
     'kind'   => 'table',
     'name'   => name,
     'source' => { 'kind' => 'sql', 'connectionId' => connection_id, 'statement' => query.fetch('raw_query') },
-    'columns' => query.fetch('columns').map { |c| { 'id' => c, 'name' => title_case(c), 'formula' => "[#{name}/#{c}]" } }
+    # Column `id` is qualified with the query's own token (never the bare SQL
+    # column name) so two queries selecting a same-named column (e.g. both a
+    # "Monthly Revenue" and a "Region Revenue" query selecting `revenue`)
+    # don't mint identical column ids across elements -- a real collision the
+    # corpus/mode/orders-report golden caught (two Revenue columns silently
+    # sharing one normalized id). This `id` is purely an internal bookkeeping
+    # key; the `formula` below is untouched and still references
+    # `[<Query Name>/<EXACT_SQL_OUTPUT_COLUMN_NAME>]` exactly as Sigma
+    # requires -- the id is never part of the formula.
+    'columns' => query.fetch('columns').map { |c| { 'id' => "#{token}_#{c}", 'name' => title_case(c), 'formula' => "[#{name}/#{c}]" } }
   }
 end
 
