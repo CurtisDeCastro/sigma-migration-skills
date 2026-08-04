@@ -45,10 +45,51 @@ const check = (cond, msg) => { if (!cond) fail++; console.log(`  ${cond ? 'PASS'
 // Real regression signal: post-and-readback.mjs itself must route its
 // workbook branch through CodeRep, not a flat `{ folderId, ...spec, name }`
 // spread — that's the actual bug this task fixes.
+const src = readFileSync(join(__dirname, 'post-and-readback.mjs'), 'utf8');
+check(/CodeRep\.(document|wrap|metadata)/.test(src),
+      'post-and-readback.mjs must call CodeRep for its workbook branch');
+
+// The property the check above does NOT protect: that CodeRep is reachable
+// ONLY from the workbook side of the `a.type === 'workbook' ? ... : ...`
+// ternary, never from the datamodel (else) side. A regex/substring match
+// would still pass even if a future edit moved a CodeRep call into the
+// datamodel branch of the same ternary. Locate the ternary's `?` after the
+// workbook guard, then its own top-level `:` and terminating `;` by
+// tracking ([{ }]) depth (object-literal colons inside a deeper `{...}`
+// are skipped, not mistaken for the ternary's own `:`).
 {
-  const src = readFileSync(join(__dirname, 'post-and-readback.mjs'), 'utf8');
-  check(/CodeRep\.(document|wrap|metadata)/.test(src),
-        'post-and-readback.mjs must call CodeRep for its workbook branch');
+  const guardIdx = src.indexOf("a.type === 'workbook'");
+  check(guardIdx !== -1, "post-and-readback.mjs: expected an `a.type === 'workbook'` guard");
+  const rest = src.slice(guardIdx);
+  const qMark = rest.indexOf('?');
+  check(qMark !== -1, 'post-and-readback.mjs: expected a ternary (`?`) after the workbook guard');
+
+  const findAtDepth0 = (from, chars) => {
+    let depth = 0;
+    for (let i = from; i < rest.length; i++) {
+      const ch = rest[i];
+      if ('([{'.includes(ch)) depth++;
+      else if (')]}'.includes(ch)) depth--;
+      else if (depth === 0 && chars.includes(ch)) return i;
+    }
+    return -1;
+  };
+
+  const colonIdx = qMark === -1 ? -1 : findAtDepth0(qMark + 1, ':');
+  check(colonIdx !== -1,
+        "post-and-readback.mjs: could not locate the ternary's top-level `:` — structure may have changed; update this test");
+  const semiIdx = colonIdx === -1 ? -1 : findAtDepth0(colonIdx + 1, ';');
+  check(semiIdx !== -1,
+        'post-and-readback.mjs: could not locate the ternary\'s terminating `;` — structure may have changed; update this test');
+
+  if (qMark !== -1 && colonIdx !== -1 && semiIdx !== -1) {
+    const workbookBranch = rest.slice(qMark + 1, colonIdx);
+    const datamodelBranch = rest.slice(colonIdx + 1, semiIdx);
+    check(/CodeRep\.(document|wrap|metadata)/.test(workbookBranch),
+          'ternary workbook branch must call CodeRep');
+    check(!/CodeRep\.(document|wrap|metadata)/.test(datamodelBranch),
+          'ternary datamodel (else) branch must NOT call CodeRep');
+  }
 }
 
 console.log(fail === 0
