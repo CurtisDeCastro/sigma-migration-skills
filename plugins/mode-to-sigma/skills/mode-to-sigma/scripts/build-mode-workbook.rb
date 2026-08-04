@@ -45,6 +45,27 @@ def columns_for_chart(view, query_name)
   end
 end
 
+# When a chart's view carries NONE of VIEW_FIELD_KEYS, view_field_names (and
+# so columns_for_chart) returns [] and chart_element would silently ship
+# 'columns' => [] -- reproducing, invisibly, the exact blank-chart failure
+# this file exists to prevent. Since VIEW_FIELD_KEYS is only an allowlist
+# guess (field/x/y are confirmed by fixtures; groups/labels/values/series/
+# categories are not), a real chart view outside all 8 keys is a genuine
+# unconfirmed shape, not a "no fields" chart -- surface it as a gap (chart
+# token, Mode chart type, and the view's own actual keys, so a human can see
+# what shape it really was) instead of shipping a signal-free chart quietly.
+# Never fires for a view that DOES match field/x/y (or any of the other 5
+# guessed keys) -- behavior for those is unchanged.
+def chart_column_gap_for(chart)
+  view = chart['view']
+  return nil unless view_field_names(view).empty?
+  {
+    'chart' => chart['token'],
+    'chart_type' => view.is_a?(Hash) ? view['selectedChart'] : nil,
+    'view_keys' => view.is_a?(Hash) ? view.keys : []
+  }
+end
+
 def chart_element(chart, dm_elements)
   info = dm_elements.fetch(chart['query_token'])
   kind = ModeChartMap.sigma_kind_for(chart.dig('view', 'selectedChart'))
@@ -61,6 +82,27 @@ def detect_simple_param_filter(raw_sql, param:)
   m = raw_sql.match(/(\w+)\s*=\s*\{\{\s*#{Regexp.escape(param)}\s*\}\}/) ||
       raw_sql.match(/\{\{\s*#{Regexp.escape(param)}\s*\}\}\s*=\s*(\w+)/)
   m ? { 'column' => m[1], 'portable' => true } : { 'column' => nil, 'portable' => false }
+end
+
+# Maps a single Report Filter to its param-gaps.json entry (nil if it's
+# portable). Two distinct gap cases, both surfaced -- never a silent skip:
+#   1. `query_token` doesn't match any parsed query in this report at all.
+#      Task 4's mode-discover.rb passes `report_filters` through
+#      UNNORMALIZED (unlike queries/charts), so this is a real possibility,
+#      not just defensive paranoia -- and dropping it via `next nil unless q`
+#      would violate this file's own "never silently dropped" discipline
+#      (every other filter-portability case already gets a param-gaps entry).
+#   2. the query DOES match, but the {{ param }} substitution isn't a simple
+#      WHERE-clause value swap (see detect_simple_param_filter).
+def param_gap_for(filter, queries)
+  q = queries.find { |qq| qq['token'] == filter['query_token'] }
+  unless q
+    return { 'filter' => filter['token'], 'query' => filter['query_token'],
+              'reason' => 'query_token does not match any parsed query in this report' }
+  end
+  result = detect_simple_param_filter(q['raw_query'], param: filter['name'] || filter['token'])
+  return nil if result['portable']
+  { 'filter' => filter['token'], 'query' => q['token'], 'reason' => 'param substitution is not a simple WHERE-clause value swap' }
 end
 
 # One entry per chart: maps the Sigma chart element id back to the Mode
@@ -120,15 +162,23 @@ if __FILE__ == $PROGRAM_NAME
   # WHERE-clause value swap gets flagged here, never silently dropped --
   # Sigma's `sql` source statement is static text, so anything more dynamic
   # (a param inside an aggregate, a table/column name swap, etc.) can't be
-  # ported to a Sigma control 1:1 and needs a human decision.
-  gaps = filters.map do |f|
-    q = queries.find { |qq| qq['token'] == f['query_token'] }
-    next nil unless q
-    result = detect_simple_param_filter(q['raw_query'], param: f['name'] || f['token'])
-    next nil if result['portable']
-    { 'filter' => f['token'], 'query' => q['token'], 'reason' => 'param substitution is not a simple WHERE-clause value swap' }
-  end.compact
+  # ported to a Sigma control 1:1 and needs a human decision. Also flags a
+  # filter whose query_token doesn't even resolve (see param_gap_for).
+  gaps = filters.map { |f| param_gap_for(f, queries) }.compact
   File.write(File.join(File.dirname(opts[:out]), 'param-gaps.json'), JSON.pretty_generate(gaps))
+
+  # Any chart whose view matched none of VIEW_FIELD_KEYS gets flagged here too
+  # -- see chart_column_gap_for. Warn immediately (same stderr visibility a
+  # lint violation gets below), not just via the gaps file, since an empty-
+  # columns chart is exactly the silent blank-chart failure this file exists
+  # to prevent.
+  chart_column_gaps = charts.map { |c| chart_column_gap_for(c) }.compact
+  chart_column_gaps.each do |g|
+    warn "  ⚠ chart #{g['chart'].inspect} (Mode type #{g['chart_type'].inspect}): view matched none of " \
+         "VIEW_FIELD_KEYS #{VIEW_FIELD_KEYS.inspect} -- actual view keys were #{g['view_keys'].inspect}. " \
+         'columns will be empty; this chart will render blank in Sigma. See discovery/chart-column-gaps.json.'
+  end
+  File.write(File.join(File.dirname(opts[:out]), 'chart-column-gaps.json'), JSON.pretty_generate(chart_column_gaps))
 
   data_elements = queries.map { |q| data_page_element(q['token'], dm_elements) }
   chart_elements = charts.map { |c| chart_element(c, dm_elements) }
@@ -161,5 +211,6 @@ if __FILE__ == $PROGRAM_NAME
   File.write(opts[:out], JSON.pretty_generate(spec))
   warn "wrote #{opts[:out]} (#{data_elements.length} data element(s), #{chart_elements.length} chart(s)), " \
        "#{File.join(File.dirname(opts[:out]), 'parity-plan.json')}, " \
-       "#{File.join(File.dirname(opts[:out]), 'param-gaps.json')} (#{gaps.length} gap(s))"
+       "#{File.join(File.dirname(opts[:out]), 'param-gaps.json')} (#{gaps.length} gap(s)), " \
+       "#{File.join(File.dirname(opts[:out]), 'chart-column-gaps.json')} (#{chart_column_gaps.length} gap(s))"
 end

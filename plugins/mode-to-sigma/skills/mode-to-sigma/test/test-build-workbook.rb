@@ -60,6 +60,29 @@ eq(xml.include?('<Page type="grid"') && xml.include?('id="page-report"'), true,
 spec_probe = { 'pages' => [{ 'id' => 'page-report', 'name' => 'Report', 'elements' => els }], 'layout' => xml }
 eq(LayoutLint.lint(spec_probe), [], 'the generated notebook-flow layout lints CLEAN against the real vendored LayoutLint (C7 gate is meaningful, not a silent no-op)')
 
+puts "== chart_column_gap_for (Finding 1: unconfirmed view shape -> visible gap, not a silent empty-columns ship) =="
+known_shape_chart = { 'token' => 'c3', 'query_token' => 'q1', 'view' => { 'selectedChart' => 'Line', 'x' => 'ORDER_DATE', 'y' => ['REVENUE'] } }
+eq(chart_column_gap_for(known_shape_chart), nil,
+   'a view matching a confirmed key (x/y) never produces a gap -- behavior for the 3 confirmed cases is unchanged')
+unknown_shape_chart = { 'token' => 'c4', 'query_token' => 'q1',
+                        'view' => { 'selectedChart' => 'Funnel', 'stages' => ['SIGNUP', 'PURCHASE'] } }
+eq(chart_column_gap_for(unknown_shape_chart),
+   { 'chart' => 'c4', 'chart_type' => 'Funnel', 'view_keys' => %w[selectedChart stages] },
+   "a view using none of VIEW_FIELD_KEYS (here 'stages', not in the 8-key allowlist) produces a gap entry " \
+   'recording the chart token, Mode chart type, and the actual view keys -- instead of silently shipping columns: []')
+eq(columns_for_chart(unknown_shape_chart['view'], 'Monthly Revenue'), [],
+   'confirms the failure mode this gap protects against: columns_for_chart really does return [] for this shape')
+
+puts "== param_gap_for (Finding 2: unmatched query_token -> visible param-gaps entry, never a silent drop) =="
+queries_fixture = [{ 'token' => 'q1', 'raw_query' => 'select * from orders where region = {{region}}' }]
+matched_portable = { 'token' => 'f1', 'query_token' => 'q1', 'name' => 'region' }
+eq(param_gap_for(matched_portable, queries_fixture), nil,
+   'a portable filter whose query_token DOES match produces no gap (unchanged behavior)')
+unmatched_filter = { 'token' => 'f2', 'query_token' => 'q-does-not-exist', 'name' => 'region' }
+eq(param_gap_for(unmatched_filter, queries_fixture),
+   { 'filter' => 'f2', 'query' => 'q-does-not-exist', 'reason' => 'query_token does not match any parsed query in this report' },
+   'a filter whose query_token matches no parsed query produces a param-gaps entry instead of being silently skipped')
+
 puts "== dm-elements.json tolerates extra non-token-keyed entries (Task 6 extend-mode note) =="
 dm_elements_extend = dm_elements.merge('inode-old-1' => { 'dataModelId' => 'dm-1', 'elementId' => 'inode-old-1', 'name' => 'Pre-existing Element' })
 eq(data_page_element('q1', dm_elements_extend), data_page_element('q1', dm_elements),
