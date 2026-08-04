@@ -32,9 +32,13 @@ end
 
 # Shells out to a sibling script in THIS script's own directory (never the
 # post-chdir cwd) with an argv array — Windows-safe, no shell-string
-# injection. Returns [success?, exitstatus].
-def run_script!(name, *args)
-  out, err, status = Open3.capture3('ruby', File.expand_path(name, __dir__), *args)
+# injection. `env:` is merged into the child's environment (mirrors
+# migrate-domo.rb's BASE_ENV pattern) so a phase script that resolves its own
+# output location from an ENV var (e.g. mode-discover.rb's MODE_DISCOVERY_DIR)
+# writes into THIS run's workdir instead of a fixed path under the plugin's
+# own skill directory. Returns [success?, exitstatus].
+def run_script!(name, *args, env: {})
+  out, err, status = Open3.capture3(env, 'ruby', File.expand_path(name, __dir__), *args)
   warn out unless out.empty?
   warn err unless err.empty?
   [status.success?, status.exitstatus]
@@ -56,12 +60,24 @@ if __FILE__ == $PROGRAM_NAME
     abort "missing #{flag}" if opts[k].to_s.empty?
   end
 
-  workdir = opts[:workdir] || Dir.pwd
+  # Absolutized so a relative --workdir doesn't get re-passed, still relative,
+  # to a child (assert-phase6-ran.rb) whose cwd is already inside it — that
+  # would double the path (out/run1/out/run1/...).
+  workdir = File.expand_path(opts[:workdir] || Dir.pwd)
   FileUtils.mkdir_p(workdir)
 
   begin
     Dir.chdir(workdir) do
-      ok, code = run_script!('mode-discover.rb', '--report', opts[:report])
+      # mode-discover.rb defaults its OUT dir to a FIXED path under the
+      # plugin's own skill directory (lexical __dir__, not cwd-relative)
+      # unless MODE_DISCOVERY_DIR is set — without this, report-<token>.json
+      # never lands at the relative path ("discovery/report-...json") the
+      # rest of this pipeline assumes, and build-dm.rb's File.read raises
+      # Errno::ENOENT on every real run. Mirrors migrate-domo.rb's BASE_ENV /
+      # DOMO_DISCOVERY_DIR threading.
+      discovery_dir = File.join(workdir, 'discovery')
+      ok, code = run_script!('mode-discover.rb', '--report', opts[:report],
+                              env: { 'MODE_DISCOVERY_DIR' => discovery_dir })
       fail_phase!('discover', "exit #{code}") unless ok
 
       report_json = "discovery/report-#{opts[:report]}.json"
@@ -90,7 +106,14 @@ if __FILE__ == $PROGRAM_NAME
                               '--plan', 'parity-plan.json', '--out', 'parity-final.json')
       fail_phase!('verify-parity', "exit #{code}") unless ok || code == 2 # 2 = ran, reported FAIL — still writes parity-final.json for gate 1 to see
 
-      ok, code = run_script!('assert-phase6-ran.rb', '--workdir', workdir, '--workbook-id', workbook_id)
+      # gate 8 (Phase 6f visual render) is MANDATORY in assert-phase6-ran.rb —
+      # a real render PNG or an explicit --skip-visual-gate REASON is the only
+      # way past it (exit 10 otherwise). This converter has no browser access
+      # to Mode's UI and no render step in PHASE_ORDER, so a render can never
+      # be produced in v1; waive honestly, matching migrate-domo.rb's Tier B
+      # '--skip-visual-gate' precedent rather than silently bypassing it.
+      ok, code = run_script!('assert-phase6-ran.rb', '--workdir', workdir, '--workbook-id', workbook_id,
+                              '--skip-visual-gate', 'mode-to-sigma v1 — no Mode UI render capability')
       fail_phase!('assert-phase6', "exit #{code}") unless ok
 
       warn "migrate-mode: workbook #{workbook_id} passed assert-phase6-ran"
