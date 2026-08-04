@@ -40,6 +40,15 @@ FIXTURES = [
   { id: 'D-8', sql: 'ROUND([Margin Pct], 2)',                     expect: 'Round([Margin Pct], 2)' },
   { id: 'D-9', sql: "DATEDIFF('day', [Order Date], [Ship Date])", expect: 'DateDiff("day", [Order Date], [Ship Date])' },
   { id: 'D-10', sql: 'COALESCE([Discount], 0)',                   expect: 'Coalesce([Discount], 0)' },
+  # beads-sigma-nrml: normalize_bm no longer rewrites WEEKDAY(...) to the
+  # nonexistent-in-Sigma DAYOFWEEK — it now passes the call straight through
+  # unchanged (verified: Beast Mode's actual runtime WEEKDAY() numbering
+  # already matches Sigma's Weekday(), despite Domo's own docs claiming
+  # otherwise — see convert-beast-modes.rb normalize_bm step 2). Locks that
+  # this exact post-normalize_bm shape converts cleanly through the real
+  # vendored converter, matching what normalize_bm's own unit test
+  # (test-convert-beast-modes.rb) asserts it emits.
+  { id: 'D-11', sql: 'WEEKDAY([Order Date])',                      expect: 'Weekday([Order Date])' },
 ]
 # NOTE (converted:false expected): the vendored converter has no Sigma mapping
 # for LIKE/BETWEEN — this is intentional, not a bug (see design doc's Error

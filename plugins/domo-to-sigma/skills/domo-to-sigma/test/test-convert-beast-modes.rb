@@ -25,10 +25,51 @@ ok(n == "CONCAT([StringColumnCity], ', ', [StringColumnState])", 'backticks → 
 n, _ = normalize_bm("SUM(`Operating Budget`)")
 ok(n == 'SUM([Operating Budget])', 'spaced identifier preserved in brackets')
 
-puts "== normalize_bm: WEEKDAY → DAYOFWEEK =="
+puts "== normalize_bm: WEEKDAY passes through unrewritten, NOT to DAYOFWEEK (beads-sigma-nrml) =="
+# beads-sigma-nrml — RESOLVED: the old rewrite (WEEKDAY → DAYOFWEEK) made
+# things WORSE — WEEKDAY(...) already converts cleanly to Weekday(...) (a real
+# Sigma function; see LOOK_FUNC_MAP in converter/sql.mjs) while DAYOFWEEK(...)
+# has no Sigma mapping and gets flagged unknown.
+#
+# Before just deleting the rewrite, the day-numbering question the old code's
+# comment flagged as unverified had to be checked: does Sigma's Weekday()
+# (1=Sunday) actually match Beast Mode's own WEEKDAY()? VERIFIED (Domo
+# Community Forum — "error in documentation of weekday beast mode function"
+# and others; corroborated independently by multiple threads): Domo's own
+# published docs claim WEEKDAY() is MySQL-native 0=Monday, but that
+# documentation is ITSELF wrong — Domo silently executes WEEKDAY() as
+# DAYOFWEEK() under the hood, so it actually returns 1=Sunday..7=Saturday in
+# practice, identical to Sigma's Weekday(). So there is NO numbering mismatch
+# to compensate for — a bare, unrewritten passthrough is the fully correct
+# fix, not just the simpler one. (If a real mismatch had been found, a
+# compensating formula or a residual-gap warning would have been required
+# instead of a silent passthrough — this test would look very different.)
 n, w = normalize_bm('WEEKDAY(`d`)')
-ok(n == 'DAYOFWEEK([d])', 'WEEKDAY rewritten to DAYOFWEEK')
-ok(w.any? { |x| x.include?('WEEKDAY') }, 'WEEKDAY warning emitted')
+ok(n == 'WEEKDAY([d])', 'WEEKDAY(...) is passed straight through — only the backtick→bracket step (1) touches it')
+ok(!n.include?('DAYOFWEEK'), 'no more rewrite to the nonexistent-in-Sigma DAYOFWEEK name')
+ok(w.any? { |x| x.include?('WEEKDAY') && x.include?('Weekday') }, 'still emits an informational spot-check warning naming both functions')
+ok(w.none? { |x| x.include?('DAYOFWEEK') }, 'the warning does not suggest the old (wrong) DAYOFWEEK rewrite')
+
+puts "== normalize_bm: WEEKDAY(...) converts cleanly through the real vendored converter, matching Beast Mode's numbering =="
+if system('node', '--version', out: File::NULL, err: File::NULL)
+  out, status = Open3.capture2('node', '-e', <<~JS)
+    import(#{File.expand_path('../converter/sql.mjs', __dir__).to_json}).then(async (m) => {
+      const { lookSqlToSigmaRules, lookConvertExpression, hasResidualCaseKeyword, hasResidualInfixOperator, lookUnknownFunctions } = m;
+      const sql = #{n.to_json};
+      let sigma = lookSqlToSigmaRules(sql);
+      if (sigma == null) sigma = lookConvertExpression(sql);
+      const converted = !hasResidualCaseKeyword(sigma) && !hasResidualInfixOperator(sigma);
+      console.log(JSON.stringify({ sigma, converted, unknown: lookUnknownFunctions(sql) }));
+    });
+  JS
+  result = JSON.parse(out.lines.last.to_s)
+  ok(status.success?, "node conversion of the passthrough formula ran cleanly\n#{out}")
+  ok(result['sigma'] == 'Weekday([d])', "converts to Weekday([d]) exactly, got #{result['sigma'].inspect}")
+  ok(result['converted'] == true, 'no residual CASE/infix syntax — flagged converted:true')
+  ok(result['unknown'].empty?, 'no unknown-function warning (the DAYOFWEEK bug this replaces used to trigger one)')
+else
+  puts '  SKIPPED (node not on PATH)'
+end
 
 puts "== normalize_bm: unsupported functions flagged =="
 _, w = normalize_bm('SQRT(`x`)')
@@ -52,6 +93,62 @@ ok(errs.any? { |e| e.include?('IsIn') }, 'raw IN(...) → error (no IsIn)')
 errs, _ = lint_formula('If([col]="A" or [col]="B", 1, 0)')
 ok(errs.empty?, 'expanded OR-chain passes clean')
 
+# ---------------------------------------------------------------------------
+# beads-sigma-kn8s: lint_formula used to blanket-ban ANY "IN(" substring,
+# which also rejected Sigma's own documented In(col, "a", "b") FUNCTION CALL
+# (plugins/sigma-authoring/skills/sigma-workbooks/reference/specification/
+# formulas.md line 244 confirms it's real). The fix narrows the rule to shape,
+# not substring: a raw SQL infix IN always has a left-hand operand touching
+# it (an identifier, bracketed column, or quoted literal); the Sigma function-
+# call form starts a fresh expression instead.
+# ---------------------------------------------------------------------------
+puts "== lint_formula: Sigma's real In(...) FUNCTION CALL passes clean (beads-sigma-kn8s) =="
+errs, _ = lint_formula('In([Status], "Open", "Pending")')
+ok(errs.empty?, 'In([Status], "Open", "Pending") is a valid Sigma function call — no lint error')
+
+puts "== lint_formula: raw SQL infix `x IN (...)` is still FLAGGED (Sigma has no infix IN) =="
+errs, _ = lint_formula("status IN ('a', 'b', 'c')")
+ok(errs.any? { |e| e.include?('IsIn') }, "bare identifier IN (...) is still a lint error")
+errs, _ = lint_formula("[Status] IN ('a','b')")
+ok(errs.any? { |e| e.include?('IsIn') }, "[Status] IN (...) is still a lint error")
+
+puts "== lint_formula: In(...) used inside a larger formula (after and/or/If() ) still passes =="
+errs, _ = lint_formula('If([Status]="Active" or In([Region], "East", "West"), 1, 0)')
+ok(errs.empty?, 'In(...) preceded by `or ` is still the function-call form — no lint error')
+errs, _ = lint_formula('If(In([Status], "Open", "Pending"), 1, 0)')
+ok(errs.empty?, 'In(...) as the first argument to If( is still the function-call form — no lint error')
+
+# ---------------------------------------------------------------------------
+# Review fix (Critical regression found by independent review): the first cut
+# of raw_sql_infix_in? put `not` in NON_OPERAND_KEYWORDS unconditionally, so
+# `x NOT IN (...)` — a raw SQL infix operator, not a hint of Sigma's In(...)
+# function call — was wrongly treated as "not" starting a fresh expression
+# (the legitimate `not In(...)` boolean-prefix-negation case) and silently
+# NOT flagged. There is no Sigma spelling of a two-word "NOT IN" operator, so
+# `NOT IN (` must ALWAYS be treated as raw infix — the only question is
+# whether the preceding `not` itself has an operand before it (`[Region] NOT
+# IN (...)` — raw infix) or not (`not In(...)` — genuine prefix negation of a
+# real Sigma function call, same convention as this file's own `Not (...)`
+# infix-negation guidance).
+# ---------------------------------------------------------------------------
+puts "== lint_formula: raw SQL infix `x NOT IN (...)` is FLAGGED, same as bare IN (critical regression fix) =="
+errs, _ = lint_formula('If([Region] NOT IN ("Test","Internal"), 1, 0)')
+ok(errs.any? { |e| e.include?('IsIn') }, '[Region] NOT IN (...) is a lint error — bracketed operand before NOT')
+errs, _ = lint_formula('If(status NOT IN (1,2,3), 1, 0)')
+ok(errs.any? { |e| e.include?('IsIn') }, 'status NOT IN (...) is a lint error — bare identifier operand before NOT')
+
+puts "== lint_formula: genuine boolean-prefix `not In(...)` (negating Sigma's real function call) still passes =="
+errs, _ = lint_formula('If(not In([x], "a"), 1, 0)')
+ok(errs.empty?, 'not In(...) with nothing but `(` before `not` is still the function-call form — no lint error')
+errs, _ = lint_formula('If([a]=1 and not In([x], "a"), 1, 0)')
+ok(errs.empty?, 'not In(...) preceded by `and ` is still the function-call form — no lint error')
+
+puts "== lint_formula: bracket-close correctly disambiguates a column literally named Case/Category before IN (Low finding — verified NOT a gap) =="
+errs, _ = lint_formula('If([Category] IN ("a","b"), 1, 0)')
+ok(errs.any? { |e| e.include?('IsIn') }, '[Category] IN (...) is still flagged — the `]` immediately before IN is the operand signal, not the word "Category"')
+errs, _ = lint_formula('If([Case] IN ("a","b"), 1, 0)')
+ok(errs.any? { |e| e.include?('IsIn') }, '[Case] IN (...) is still flagged even though "case" is in NON_OPERAND_KEYWORDS — bracket-close `]` is checked first, so the bracketed identifier "Case" never reaches the bare-word keyword check')
+
 puts "== lint_formula: And()/Or()/Not() function-call warnings =="
 _, w = lint_formula('If(And([a]>1, [b]<2), 1, 0)')
 ok(w.any? { |x| x.include?('infix') }, 'And() function-call warned (use infix)')
@@ -70,10 +167,11 @@ puts "== lint_formula: valid multi-condition If passes =="
 errs, w = lint_formula('If([Status]="Active","Active",[Status]="Pending","Pending","Other")')
 ok(errs.empty?, 'native multi-condition If is clean (no nesting needed)')
 
-puts '== normalize_bm: unsupported + WEEKDAY rewrite =='
+puts '== normalize_bm: unsupported + WEEKDAY passthrough (unbracketed identifier) =='
 n, w = normalize_bm('WEEKDAY(order_date)')
-ok(n.include?('DAYOFWEEK'), 'WEEKDAY → DAYOFWEEK')
-ok(!w.empty?, 'WEEKDAY rewrite warns')
+ok(n == 'WEEKDAY(order_date)', 'WEEKDAY(...) is unchanged even when the identifier is not backtick-quoted')
+ok(!n.include?('DAYOFWEEK'), 'still no DAYOFWEEK rewrite')
+ok(!w.empty?, 'WEEKDAY still emits its informational spot-check warning')
 _, w2 = normalize_bm('SQRT(x)')
 ok(w2.join.match?(/SQRT/i), 'SQRT flagged unsupported')
 

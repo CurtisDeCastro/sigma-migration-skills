@@ -69,11 +69,27 @@ Apply these to the raw Beast Mode string first:
 
 1. **Strip backtick / bracket identifier quoting** → Sigma uses `[Column Name]`.
    `` `Sales` `` and `` `Operating Budget` `` → `[Sales]`, `[Operating Budget]`.
-2. **`WEEKDAY` → `DAYOFWEEK`.** Beast Mode silently does this substitution itself;
-   replicate it so behavior matches. (`WEEKDAY` is in the unsupported list.)
+2. **`WEEKDAY(...)` — pass through unrewritten.** (beads-sigma-nrml, RESOLVED
+   2026-08-03.) An earlier version of this script rewrote `WEEKDAY` →
+   `DAYOFWEEK` "for parity" — that made things worse: `WEEKDAY(...)` already
+   converts cleanly to Sigma's real `Weekday(...)` function, while
+   `DAYOFWEEK(...)` (the rewritten name) has no Sigma mapping and gets flagged
+   as an unknown function. Domo's own Beast Mode docs claim `WEEKDAY()` is
+   MySQL-native (0=Monday), but that documentation is itself wrong — Domo
+   silently executes a Beast Mode `WEEKDAY()` call as `DAYOFWEEK()` under the
+   hood (Domo Community Forum: "error in documentation of weekday beast mode
+   function" and others — "WEEKDAY and DAYOFWEEK used to display the same
+   value, even though the beast mode editor function description indicated
+   one was 0-start and the other was 1-start"), so it actually returns
+   1=Sunday..7=Saturday in practice — identical to Sigma's `Weekday()`. No
+   numbering compensation is needed; a bare passthrough is correct. (Residual,
+   non-blocking caveat: at least one report ties the returned value to the
+   target instance's first-day-of-week/timezone configuration, which cannot be
+   known at conversion time — spot-check against the real instance.)
 3. **Reject / flag unsupported functions** (no longer supported in Beast Mode, so
-   they shouldn't appear, but guard anyway): `SQRT`, `CONVERT_TZ`, `MICROSECOND`,
-   `WEEKDAY`. If present, warn — likely a legacy formula.
+   they shouldn't appear, but guard anyway): `SQRT`, `CONVERT_TZ`, `MICROSECOND`.
+   If present, warn — likely a legacy formula. (`WEEKDAY` is NOT in this list —
+   it is fully supported; see #2 above.)
 4. **Flag the aggregate `CEILING` / `FLOOR` trap** — see below. These are NOT math
    rounding in Beast Mode.
 5. **Decide row vs aggregate context.** If a top-level aggregate (`SUM`, `AVG`,
@@ -90,7 +106,7 @@ Apply these to the raw Beast Mode string first:
 | `CEILING(Budget)` | math ceiling | **aggregate**: rounded `MAX` | `Round(Max([Budget]))` |
 | `FLOOR(Budget)` | math floor | **aggregate**: rounded `MIN` | `Round(Min([Budget]))` |
 | `POWER(Values,2)` | per-row power | per-row power, but **sums per series** if multi-series | `Power([Values],2)` (handle series via grouping) |
-| `WEEKDAY(d)` | MySQL WEEKDAY (0=Mon) | replaced with `DAYOFWEEK` (1=Sun) | `Weekday([d])` — mind the 1=Sunday base |
+| `WEEKDAY(d)` | MySQL WEEKDAY (0=Mon), per Domo's own (incorrect) docs | Domo silently executes it as `DAYOFWEEK` (1=Sun) — verified, matches Sigma | `Weekday([d])` — passthrough, no rewrite needed |
 | `SQRT(x)` | square root | **unsupported** in Beast Mode | use `Power([x], 0.5)` if it appears |
 | Summary Number Beast Mode | a column | must be aggregated to be a summary | maps to a Sigma **KPI** element — see `refs/card-to-element.md` Rule 0 (KPI, never a table) |
 | `SUM(SUM([x]) FIXED (BY [Region]))` | a nested aggregate | **level-of-detail** (LOD) | Sigma **level-of-detail** — do NOT flatten to a plain aggregate; flag for review (see `lod_conditional_inner`) |
@@ -138,7 +154,7 @@ Apply these to the raw Beast Mode string first:
 | `CASE WHEN c THEN a ELSE b END` | `If(c, a, b)` |
 | `CASE WHEN c1 THEN 1 WHEN c2 THEN 2 END` | **native multi-pair** `If(c1, 1, c2, 2, null)` — no nesting needed |
 | `CASE col WHEN x THEN a WHEN y THEN b END` | `If([col]=x, a, [col]=y, b, null)` |
-| `col IN (v1, v2, ...)` | **`[col]=v1 or [col]=v2 ...`** — Sigma has **no `IsIn`** (see `feedback_sigma_formula_isin`) |
+| `col IN (v1, v2, ...)` | **`[col]=v1 or [col]=v2 ...`**, or Sigma's own **`In([col], v1, v2, ...)`** function — Sigma has no *infix* `IN` (see `feedback_sigma_formula_isin`). `lint_formula` (beads-sigma-kn8s) only flags the raw infix shape; it does not reject a legitimate `In(...)` function call. |
 | `col LIKE '%TX%'` | `Contains([col], "TX")` |
 | `col LIKE 'TX%'` | `StartsWith([col], "TX")` |
 | `col LIKE '%TX'` | `EndsWith([col], "TX")` |
@@ -194,6 +210,7 @@ string** (`"day"`, `"month"`, `"year"`, …) and use **format tokens** (`YYYY`,
 | `DAY(d)` / `DAYOFMONTH(d)` | `Day([d])` |
 | `DAYNAME(d)` | `DateFormat([d], "dddd")` |
 | `DAYOFWEEK(d)` | `Weekday([d])` (1=Sunday) |
+| `WEEKDAY(d)` | `Weekday([d])` (1=Sunday) — passes straight through, no rewrite; see the gotchas table below for why |
 | `DAYOFYEAR(d)` | `DateDiff("day", DateTrunc("year",[d]), [d]) + 1` |
 | `HOUR(d)` / `MINUTE(d)` / `SECOND(d)` | `Hour([d])` / `Minute([d])` / `Second([d])` |
 | `QUARTER(d)` | `Quarter([d])` |

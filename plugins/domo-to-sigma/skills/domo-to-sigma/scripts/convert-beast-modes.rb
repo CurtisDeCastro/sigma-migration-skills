@@ -14,12 +14,17 @@
 # This script does NOT reimplement translation itself. It adds the two layers
 # the generic SQL converter can't know about:
 #
-#   PRE  — Domo-specific normalization (backtick identifiers → [Col], WEEKDAY →
-#          DAYOFWEEK, flag unsupported fns, flag the CEILING/FLOOR-are-aggregates
-#          trap, flag window/LOD Beast Modes) — see refs/beast-mode-to-sigma.md.
-#   POST — Sigma-specific lint of the returned formula (leftover IN(, And()/Or()/
-#          Not() function-call forms that silently null, window-fn workbook-master
-#          limits) — see refs/beast-mode-to-sigma.md + feedback_sigma_window_functions.
+#   PRE  — Domo-specific normalization (backtick identifiers → [Col], flag
+#          unsupported fns, flag the CEILING/FLOOR-are-aggregates trap, flag
+#          window/LOD Beast Modes) — see refs/beast-mode-to-sigma.md. WEEKDAY(...)
+#          is deliberately passed through unrewritten (beads-sigma-nrml, see
+#          normalize_bm step 2) — it converts cleanly and its numbering already
+#          matches Sigma's Weekday().
+#   POST — Sigma-specific lint of the returned formula (raw SQL infix IN (...),
+#          And()/Or()/Not() function-call forms that silently null, window-fn
+#          workbook-master limits) — see refs/beast-mode-to-sigma.md +
+#          feedback_sigma_window_functions. Sigma's own In(col, ...) function
+#          call is NOT flagged (beads-sigma-kn8s) — only a raw SQL infix IN is.
 #
 # Three-step flow (SKILL.md's Phase 2 runs all three; no agent/MCP call in the
 # middle step unless the exit-10 GATE fires):
@@ -140,8 +145,10 @@ def resolve_sql_converter(mcp_dir, vendored)
   [conv, dev_module, desc]
 end
 
-# Removed from Beast Mode / unsupported in Sigma — warn if seen.
-UNSUPPORTED = %w[SQRT CONVERT_TZ MICROSECOND WEEKDAY].freeze
+# Removed from Beast Mode / unsupported in Sigma — warn if seen. WEEKDAY is
+# NOT in this list (see normalize_bm step 2) — it is fully supported, both in
+# Beast Mode and in Sigma.
+UNSUPPORTED = %w[SQRT CONVERT_TZ MICROSECOND].freeze
 
 # Convert a raw Beast Mode string toward what convert_sql_to_sigma_formula expects,
 # applying only the Domo-specific deltas. Returns [normalizedSql, warnings].
@@ -152,28 +159,51 @@ def normalize_bm(sql, klass = nil)
   # 1. Backtick / bracket MySQL identifier quoting → Sigma [Column Name].
   s = s.gsub(/`([^`]+)`/) { "[#{$1}]" }
 
-  # 2. WEEKDAY → DAYOFWEEK (Beast Mode does this itself; replicate for parity).
+  # 2. WEEKDAY(...) — beads-sigma-nrml, RESOLVED 2026-08-03: deliberately NO
+  #    rewrite here anymore (the old code rewrote WEEKDAY → DAYOFWEEK "for
+  #    parity"). That rewrite made things WORSE: `WEEKDAY(...)` passed to the
+  #    shared converter already comes back clean as `Weekday(...)` — a real
+  #    Sigma function (LOOK_FUNC_MAP in converter/sql.mjs) — but the old
+  #    rewrite's `DAYOFWEEK(...)` has NO Sigma mapping and gets flagged
+  #    unknown by lookUnknownFunctions. Verified live against the vendored
+  #    converter: `WEEKDAY([d])` → `Weekday([d])`, zero warnings;
+  #    `DAYOFWEEK([d])` → `Dayofweek([d])`, unknown-function warning.
   #
-  # ⚠️ MEASURED 2026-07-30 (bead, not fixed here — see progress ledger for
-  # 2026-07-30-track-a-sql-formula-converter, "LIKELY REAL PRODUCTION BUG"):
-  # this rewrite makes the formula WORSE, not better. `WEEKDAY(...)` passed to
-  # the shared converter comes back clean (`Weekday(...)` — Sigma has it), but
-  # this step rewrites it to `DAYOFWEEK(...)` FIRST, and `Dayofweek(...)` is
-  # NOT a real Sigma function — the converter now warns on it
-  # (lookUnknownFunctions) where the untouched WEEKDAY form would not have
-  # warned at all. Do not "fix" this by just deleting the rewrite without
-  # checking Sigma's WEEKDAY offset (1=Sunday) actually matches Beast Mode's —
-  # that offset question is exactly why this was added "for parity" in the
-  # first place, and is unverified either way. Tracked as its own bead; needs
-  # its own investigation, not a silent revert.
+  #    Before just deleting the old rewrite, the day-NUMBERING question this
+  #    script's prior comment flagged as unverified ("does Sigma's Weekday()
+  #    1=Sunday base actually match Beast Mode's own WEEKDAY()?") had to be
+  #    checked — a numbering mismatch would mean trading "wrong function name"
+  #    for "wrong day numbers", equally bad. VERIFIED (2026-08-03, Domo
+  #    Community Forum — "error in documentation of weekday beast mode
+  #    function" and others): Domo's own Beast Mode Functions Reference Guide
+  #    documents WEEKDAY() as MySQL-native 0=Monday, but that documentation is
+  #    itself wrong — Domo silently executes a Beast Mode WEEKDAY() call as
+  #    DAYOFWEEK() under the hood, so it ACTUALLY returns 1-7 with 1=Sunday in
+  #    practice (multiple independent reports: "WEEKDAY and DAYOFWEEK used to
+  #    display the same value, even though the beast mode editor function
+  #    description indicated one was 0-start and the other was 1-start").
+  #    Sigma's Weekday() is also 1=Sunday..7=Saturday (this file's own
+  #    refs/beast-mode-to-sigma.md DAYOFWEEK row; corroborated independently by
+  #    tableau-to-sigma's refs/column-gotchas.md and refs/window-functions.md).
+  #    So Beast Mode's REAL runtime numbering already matches Sigma's — no
+  #    compensating offset is needed, and none is applied. A bare passthrough
+  #    (i.e. no rewrite at all) is the fully correct fix, not just the
+  #    simpler one.
+  #
+  #    Residual, non-blocking caveat surfaced below rather than silently
+  #    assumed: at least one report says the value "depends on the instance
+  #    configuration (first day of the week) or time zone settings" — this
+  #    script has no way to know a specific target Domo instance's
+  #    first-day-of-week setting at conversion time, so a WEEKDAY() sighting
+  #    still gets a spot-check warning (not a lintError — the default/common
+  #    case is verified correct) rather than a claim of unconditional
+  #    correctness for every possible instance config.
   if s =~ /\bWEEKDAY\s*\(/i
-    s = s.gsub(/\bWEEKDAY\s*\(/i, 'DAYOFWEEK(')
-    warnings << 'WEEKDAY → DAYOFWEEK (1=Sunday base; verify offset).'
+    warnings << 'WEEKDAY(...) converts straight through to Sigma\'s Weekday() (1=Sunday) — verified to match Beast Mode\'s actual runtime numbering (also 1=Sunday, despite Domo\'s own docs claiming 0=Monday; Domo Community Forum-confirmed documentation bug — see refs/beast-mode-to-sigma.md). Spot-check the built formula against this specific Domo instance\'s actual WEEKDAY() output before shipping — at least one report ties the returned value to the instance\'s first-day-of-week/timezone config, which this script cannot see at conversion time.'
   end
 
   # 3. Unsupported functions.
   UNSUPPORTED.each do |fn|
-    next if fn == 'WEEKDAY' # handled above
     warnings << "Unsupported function #{fn}() present — legacy formula; review (SQRT → Power([x],0.5))." if s =~ /\b#{fn}\s*\(/i
   end
 
@@ -199,6 +229,66 @@ end
 
 NEEDS_REVIEW = %w[window lod].freeze
 
+# beads-sigma-kn8s: `IN(`/`In(` is textually identical whether it is a raw SQL
+# infix construct Sigma cannot express (`status IN (...)`, `[Status] IN
+# (...)` — must become an OR-chain, or Sigma's own In(...) rewritten by hand)
+# or Sigma's own documented `In([col], "a", "b")` FUNCTION CALL
+# (plugins/sigma-authoring/skills/sigma-workbooks/reference/specification/
+# formulas.md — a real, valid Sigma function). A blanket substring ban wrongly
+# rejected the latter. The distinguishing signal is what sits immediately
+# BEFORE the keyword: a raw SQL infix always has a left-hand operand touching
+# it (an identifier, a bracketed column, a quoted literal, or a closing
+# paren/bracket/digit); the Sigma function-call form instead starts a fresh
+# expression — nothing before it (start of formula), or a `(`, `,`, or a
+# boolean/control keyword (and/or/if/then/else/when/case). `not` is deliberately
+# NOT in this list — see operand_immediately_before?'s special-case handling
+# below; unlike the others it cannot be treated as a plain keyword boundary
+# because `not` is also half of the two-word raw SQL infix operator `NOT IN`.
+NON_OPERAND_KEYWORDS = %w[and or if then else when case].freeze
+
+# Is there an "operand" (something that could be the left-hand side of a raw
+# SQL infix expression) immediately before position `pos` in `s`, ignoring
+# whitespace?
+#
+# Review fix (Critical regression): the first cut of this logic put `not` in
+# NON_OPERAND_KEYWORDS unconditionally, so `[Region] NOT IN (...)` — a raw SQL
+# infix operator, not a hint of Sigma's In(...) — was wrongly read as "not"
+# starting a fresh expression (the legitimate `not In(...)` boolean-prefix-
+# negation case) and silently NOT flagged. There is no Sigma spelling of a
+# two-word "NOT IN" operator, so `NOT IN (` must ALWAYS be raw infix — the
+# only real question is whether the `not` itself has an operand before IT
+# (`[Region] NOT IN (...)` — raw infix) or not (`not In(...)` — genuine prefix
+# negation of a real Sigma function call, same convention as this file's own
+# `Not (...)` infix-negation guidance elsewhere). So when the word immediately
+# before `IN (` is `not`, recurse one hop further back to answer that
+# question instead of treating `not` as an ordinary keyword boundary.
+def operand_immediately_before?(s, pos)
+  j = pos - 1
+  j -= 1 while j >= 0 && s[j] =~ /\s/
+  return false if j < 0 # start of formula — no operand
+
+  ch = s[j]
+  return true if ch =~ /[\]"'\)\d]/ # bracket-close, quote, paren-close, digit
+  return false unless ch =~ /\w/
+
+  k = j
+  k -= 1 while k >= 0 && s[k] =~ /\w/
+  word = s[(k + 1)..j].downcase
+
+  return operand_immediately_before?(s, k + 1) if word == 'not'
+
+  !NON_OPERAND_KEYWORDS.include?(word)
+end
+
+def raw_sql_infix_in?(formula)
+  s = formula.to_s
+  s.scan(/\bIN\s*\(/i) do
+    m = Regexp.last_match
+    return true if operand_immediately_before?(s, m.begin(0))
+  end
+  false
+end
+
 # Lint a translated Sigma formula for the traps that ship silently-broken output.
 # Returns [errors, warnings].
 def lint_formula(sigma, klass = nil)
@@ -206,9 +296,11 @@ def lint_formula(sigma, klass = nil)
   warnings = []
   f = sigma.to_s
 
-  # IN(...) survived translation → Sigma has no IsIn; it silently blanks the column.
-  if f =~ /\bIN\s*\(/i && f !~ /\bContains\s*\(/i
-    errors << 'Contains a raw IN(...) — Sigma has no IsIn; expand to an OR-chain ([c]=a or [c]=b) or it silently blanks the column (feedback_sigma_formula_isin).'
+  # A raw SQL infix IN (...) survived translation → Sigma has no infix IN; it
+  # silently blanks the column. Sigma's own In(col, "a", "b") function-call
+  # form is valid and must NOT be flagged here — see raw_sql_infix_in? above.
+  if raw_sql_infix_in?(f)
+    errors << 'Contains a raw SQL infix IN (...) — Sigma has no infix IN/IsIn; expand to an OR-chain ([c]=a or [c]=b), or use Sigma\'s own In([c], "a", "b") function form, or it silently blanks the column (feedback_sigma_formula_isin).'
   end
 
   # And()/Or()/Not() as FUNCTION CALLS silently produce null rows — must be infix.
