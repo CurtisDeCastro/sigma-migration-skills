@@ -62,8 +62,11 @@ a locale-grouped number.
    )
    # A masked HTTP 404 can accompany a SUCCESSFUL register — always confirm
    # by name via GET /v2/plugins, never trust the POST status alone.
-   # Note: the create-plugin request body has no `type` field (response-only,
-   # always "element") — don't send one.
+   # register_or_get sends `type: 'element'` automatically. Its request
+   # schema documents `type` as response-only (not a request field), but
+   # the body including `type` is the one proven live against a real
+   # Sigma org — see reference/plugin-lifecycle.md §1 for why it's kept
+   # rather than dropped on an unverified schema reading alone.
    ```
    The `url` is set-once per registration; re-register (or use the update
    path, if available in your org) to change it. A 403 means registration is
