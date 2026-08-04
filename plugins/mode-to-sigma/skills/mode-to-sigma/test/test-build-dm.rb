@@ -26,5 +26,12 @@ report = { 'name' => 'Sigma Migration Test' }
 sig = signature_for(report, [query])
 eq(sig['tableau_workbook'], 'Sigma Migration Test', 'signature key is literally tableau_workbook (source-agnostic field, read verbatim by find-or-pick-dm.rb)')
 eq(sig['referenced_columns'], ['ORDER_DATE', 'REVENUE'], 'referenced_columns = union of all query columns')
+eq(sig['warehouse_tables'], ['CUSTOM_SQL'],
+   'warehouse_tables carries the CUSTOM_SQL sentinel (not []) so find-or-pick-dm.rb\'s ' \
+   'fqn_covers? can actually score a table_match instead of auto_picked being permanently unreachable')
+
+query2 = { 'token' => 'q2', 'name' => 'Signups', 'raw_query' => 'select day, signups from users', 'columns' => ['DAY', 'SIGNUPS'] }
+sig2 = signature_for(report, [query, query2])
+eq(sig2['warehouse_tables'], ['CUSTOM_SQL'], 'warehouse_tables stays a single deduped CUSTOM_SQL sentinel across multiple all-SQL queries')
 
 if $failures.zero? then puts "ALL PASS"; exit 0 else puts "#{$failures} FAILURE(S)"; exit 1 end

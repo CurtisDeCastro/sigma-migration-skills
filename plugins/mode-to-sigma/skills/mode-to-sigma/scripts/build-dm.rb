@@ -28,7 +28,16 @@ end
 def signature_for(report, queries)
   {
     'tableau_workbook'   => report.fetch('name'),
-    'warehouse_tables'   => [], # Mode queries are arbitrary SQL, not single-table refs — left empty on purpose
+    # Every Mode query becomes a `sql`-kind element (raw SQL wrap, not a
+    # literal warehouse-table reference), so there is no FQN to contribute
+    # here. Tag with the same 'CUSTOM_SQL' sentinel find-or-pick-dm.rb already
+    # special-cases for `sql`-kind DM elements (see its `fqn_covers?` — a
+    # 'CUSTOM_SQL' vs 'CUSTOM_SQL' match is an equality check, never a real
+    # path match) and that migrate-tableau.rb's own signature-builder emits
+    # for `s['kind'] == 'sql'` elements. Leaving this `[]` makes table_match
+    # 0.0 forever (tableau_tables.empty? => 0.0), which makes `auto_picked`
+    # permanently unreachable and defeats the whole reuse-check.
+    'warehouse_tables'   => queries.map { 'CUSTOM_SQL' }.uniq,
     'referenced_columns' => queries.flat_map { |q| q['columns'] }.uniq,
     'measures'           => []
   }
@@ -43,6 +52,19 @@ if __FILE__ == $PROGRAM_NAME
     o.on('--out PATH')          { |v| opts[:out] = v }
     o.on('--skip-reuse-check')  { opts[:skip_reuse] = true }
   end.parse!(ARGV)
+  # Required-opt validation, matching the vendored find-or-pick-dm.rb's own
+  # convention (`abort` on a missing required flag) instead of letting a
+  # missing flag raise an unfriendly Ruby exception deep in the script (a bare
+  # `File.read(nil)` TypeError, or a `Sigma.request` 400 with no context).
+  { report_json: '--report-json', connection_id: '--connection-id', out: '--out' }.each do |k, flag|
+    abort "missing #{flag}" if opts[k].to_s.empty?
+  end
+  # folderId is not in the strict abort list above (a --folder-id-less run can
+  # still be useful to inspect dm-spec.json locally), but every sibling
+  # converter that POSTs /v2/dataModels/spec without one gets a guaranteed
+  # 400 ("Expecting UUID at 0.folderId but instead got: undefined" — see
+  # domo-to-sigma/scripts/build-dm.rb's live-validated fix) — warn loudly.
+  warn '  ⚠ no --folder-id — POST /v2/dataModels/spec WILL fail with "Expecting UUID at 0.folderId" once Task 6 posts this spec.' if opts[:folder_id].to_s.empty?
 
   data = JSON.parse(File.read(opts[:report_json]))
   report, queries = data['report'], data['queries']
@@ -64,6 +86,11 @@ if __FILE__ == $PROGRAM_NAME
         # PUT (extend this exact dataModelId) — the reuse-check's whole
         # point is defeated if this always POSTs a brand-new DM.
         existing = Sigma.request(:get, "/v2/dataModels/#{match['recommended_dm_id']}/spec")
+        if !existing.is_a?(Hash) || !existing['pages'].is_a?(Array) || existing['pages'].empty? || !existing['pages'].first['elements'].is_a?(Array)
+          abort "build-dm.rb aborted: existing DM #{match['recommended_dm_id']}'s spec has no pages[0].elements " \
+                "to extend (got #{existing.class}#{existing.is_a?(Hash) ? " with pages=#{existing['pages'].inspect}" : ''}) " \
+                '— cannot safely append the new Mode elements. Re-run with --skip-reuse-check to force a new DM instead.'
+        end
         existing['pages'].first['elements'].concat(queries.map { |q| build_sql_element(q, connection_id: opts[:connection_id]) })
         File.write(opts[:out], JSON.pretty_generate(existing))
         mode_path = File.join(File.dirname(opts[:out]), 'dm-mode.json')
@@ -78,6 +105,14 @@ if __FILE__ == $PROGRAM_NAME
     'pages' => [{ 'id' => 'page-data', 'name' => 'Data',
                   'elements' => queries.map { |q| build_sql_element(q, connection_id: opts[:connection_id]) } }]
   }
+  # LIVE-VALIDATED FIX (see domo-to-sigma/scripts/build-dm.rb, ~L442-465):
+  # a brand-new DM spec MUST carry a folderId or POST /v2/dataModels/spec
+  # rejects it outright ("Expecting UUID at 0.folderId but instead got:
+  # undefined"). --folder-id was parsed into opts[:folder_id] but never
+  # actually threaded onto the spec — a guaranteed 400 at Task 6's POST.
+  # (The extend-path spec above is an existing DM's own spec, already
+  # carrying whichever folderId it originally lived in — left untouched.)
+  spec['folderId'] = opts[:folder_id] if opts[:folder_id]
   mode_path = File.join(File.dirname(opts[:out]), 'dm-mode.json')
   File.write(mode_path, JSON.pretty_generate({ 'mode' => 'create' }))
   File.write(opts[:out], JSON.pretty_generate(spec))
