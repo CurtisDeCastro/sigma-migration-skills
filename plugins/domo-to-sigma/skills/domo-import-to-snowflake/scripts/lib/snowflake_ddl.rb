@@ -3,12 +3,17 @@
 # Pure logic: Domo schema.columns[] -> Snowflake typed DDL. No network, no
 # filesystem — matches column_preflight.rb's own pure/offline-testable style.
 module SnowflakeDDL
-  # Domo's dataset schema column `type` enum (confirmed live via
-  # Domo.dataset(id)['schema']['columns'] — same field build-dm.rb already
-  # consumes; its own test fixtures use STRING/LONG/DECIMAL/DATE) -> a
-  # Snowflake column type. An unrecognized type falls back to VARCHAR rather
-  # than raising — see unknown_types for the audit trail — so one odd column
-  # never blocks landing a whole DataSet.
+  # Domo's query_dataset metadata[].type enum -> a Snowflake column type.
+  # schema_cols (this module's input everywhere) is built by
+  # DomoExtract.extract_rows from the FIRST extraction page's `columns` +
+  # `metadata[].type`, NOT from Domo.dataset(id)['schema']['columns'] — live
+  # validation found that field empty for 9 of 10 real sample DataSets, so
+  # this skill never reads it for typing (see refs/live-validation.md).
+  # STRING/LONG/DATETIME were confirmed live; DECIMAL/DOUBLE/DATE below are
+  # inferred from Domo's documented type enum, not independently confirmed.
+  # An unrecognized type falls back to VARCHAR rather than raising — see
+  # unknown_types for the audit trail — so one odd column never blocks
+  # landing a whole DataSet.
   DOMO_TO_SNOWFLAKE = {
     'STRING'   => 'VARCHAR',
     'LONG'     => 'NUMBER(38,0)',

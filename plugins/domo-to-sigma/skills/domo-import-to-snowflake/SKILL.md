@@ -39,15 +39,18 @@ Track 2 needs no separate repoint step: `build-dm.rb` already reads
 1. **Select** — reads the sibling `domo-to-sigma` skill's
    `discovery/dataset-map.json`; auto-detects every `_source: "domo-landed-data"`
    entry, or takes an explicit `--dataset-id` subset.
-2. **Schema** — `Domo.dataset(id)` → `schema.columns[]`, mapped to typed
-   Snowflake DDL (see `refs/type-mapping.md`).
-3. **Extract** — `Domo.query_dataset(id, sql)`, paginated explicitly, with a
-   measured `COUNT(*)` row-count parity check (never assumed).
-4. **Load** — typed `CREATE TABLE` + `snow sql` `PUT`/`COPY INTO`, then a
+2. **Extract + schema** — `Domo.query_dataset(id, sql)`, paginated
+   explicitly, with a measured `COUNT(*)` row-count parity check (never
+   assumed). Column types come from the same response's `metadata[].type`
+   (paired positionally with `columns`), **not** `Domo.dataset(id)['schema']`
+   — live validation found that field empty for 9 of 10 real sample
+   DataSets. See `refs/type-mapping.md` for the Domo → Snowflake type table
+   and `refs/live-validation.md` for what was confirmed live.
+3. **Load** — typed `CREATE TABLE` + `snow sql` `PUT`/`COPY INTO`, then a
    `GRANT SELECT` (default role `PUBLIC`, overridable).
-5. **Sync** — `--sigma-connection <uuid>` triggers `POST /v2/connections/<id>/sync`
+4. **Sync** — `--sigma-connection <uuid>` triggers `POST /v2/connections/<id>/sync`
    once after the whole batch, so new tables resolve immediately.
-6. **Patch** — rewrites the landed entries' `database`/`schema`/`table` and
+5. **Patch** — rewrites the landed entries' `database`/`schema`/`table` and
    `_source` in `dataset-map.json` (see `refs/naming-and-sentinel.md`).
    `connectionId` is never touched — same rule as every other entry type.
 
@@ -87,3 +90,7 @@ beyond supplying `connectionId` for any entry that doesn't already have one.
 - `refs/naming-and-sentinel.md` — why `_source` gets rewritten to
   `domo-landed-snowflake` instead of left as the sentinel, and why
   `connectionId` is never touched.
+- `refs/live-validation.md` — what the live run actually confirmed: the real
+  `query_dataset` response shape, the fully-qualified PUT stage requirement,
+  the `NULL_IF = ('')` COPY INTO requirement, and the scope of what was
+  measured (row-count parity only — not column type or cell-value fidelity).

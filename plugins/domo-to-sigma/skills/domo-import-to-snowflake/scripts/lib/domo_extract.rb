@@ -10,13 +10,15 @@
 # response Hash. Production callers (Task 5) pass Domo.method(:query_dataset);
 # tests inject a stub — no live credentials needed to test pagination/parity.
 #
-# OPEN RISK (flagged in the design doc, confirm on the FIRST live run): Domo's
-# documented /v1/datasets/query/execute/{id} response shape is
-# {"columns" => [...], "rows" => [[...], ...], "numRows" => N} and `table` is
-# the literal FROM-target keyword for this endpoint — domo_rest.rb's
-# query_dataset has zero other call sites in this repo to confirm the exact
-# dialect against before now. If a live call returns a different shape, fix
-# row_count/extract_rows's parsing here, not by working around it in Task 5.
+# CONFIRMED LIVE (see refs/live-validation.md for the full record): the real
+# /v1/datasets/query/execute/{id} response shape is
+# {"columns" => [...], "metadata" => [{"type" => "STRING", ...}, ...],
+# "rows" => [[...], ...], "numRows" => N, ...} — `metadata` is parallel-
+# indexed to `columns`, and `table` is accepted as the literal FROM-target
+# keyword. This is also this skill's ONLY source of column types
+# (extract_rows below builds schema_cols from `columns` + `metadata[].type`
+# on the first page) — Domo.dataset(id)['schema']['columns'] was found empty
+# for 9 of 10 real sample DataSets, so that field is never used for typing.
 module DomoExtract
   class RowCountMismatch < StandardError; end
 
