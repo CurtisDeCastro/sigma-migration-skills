@@ -52,8 +52,14 @@ STUB = <<~'RUBY'
                                                 'columns' => [{ 'name' => 'Net Revenue', 'formula' => '[T/Net Revenue]' }] }] }] }
       end
       if method == :post && path == '/v2/workbooks/spec'
-        spec = JSON.parse(body)
-        test = (spec['pages'] || []).flat_map { |p| p['elements'] || [] }.find { |e| e['id'] == 'el-scout-test' }
+        posted = JSON.parse(body)
+        # Workbook code-rep POSTs nest pages under a top-level `document` key
+        # (live since 2026-08) — validate-sigma-formula.rb now wraps its probe
+        # spec before POSTing, so the pages this stub inspects live at
+        # posted['document']['pages'], not posted['pages'].
+        raise Error, 'stub: probe POST body is not `document`-wrapped' unless posted.is_a?(Hash) && posted['document'].is_a?(Hash)
+        doc = posted['document']
+        test = (doc['pages'] || []).flat_map { |p| p['elements'] || [] }.find { |e| e['id'] == 'el-scout-test' }
         File.write(ENV['STUB_STATE'], JSON.generate((test && test['columns']) || []))
         return { 'workbookId' => 'wb-probe-1' }
       end
