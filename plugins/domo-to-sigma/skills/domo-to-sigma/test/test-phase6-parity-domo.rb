@@ -137,8 +137,12 @@ Dir.mktmpdir do |dir|
   truthy(g[:accepted], "assert-phase6-ran.rb gate 1 ACCEPTS a clean 5/5 run (got exit #{g[:exit]})")
 end
 
-puts '== A3. regression guard: the raw score doc alone is NOT gate-readable =='
-# This is the pre-fix state — proves the suite would have caught the original bug.
+puts '== A3. characterisation: the raw score doc alone is NOT gate-readable =='
+# CHARACTERISATION, not a regression guard for this fix. It documents the shared
+# gate's behaviour on the pre-fix artifact (a tiles_*-shaped parity-final.json)
+# and never invokes the finalizer, so reverting the production change would NOT
+# flip it. The actual revert-detecting coverage is groups A/A2/B, which shell out
+# to phase6-parity-domo.rb and fail outright when it is absent.
 Dir.mktmpdir do |dir|
   setup_wd(dir, TILES5)
   VP = File.expand_path('../scripts/verify-parity.rb', __dir__)
@@ -189,7 +193,7 @@ Dir.mktmpdir do |dir|
   eq(r[:exit], 0, 'finalizer exits 0 when every omission is recorded with a reason')
   eq(at(r[:final],'status'), 'PASS', 'status=PASS on the recorded-exclusion run')
   eq(at(r[:final],'charts_total'), 3, 'charts_total is the VERIFIED pool')
-  census = at(r[:final],'tile_census') || {}
+  census = at(r[:final],'parity_tile_census') || {}
   eq(census['chartable_total'], 5, 'census records the true denominator')
   eq(census['excluded_total'],  2, 'census records how many were excluded')
   eq(Array(census['unaccounted']).size, 0, 'census balances: plan + exclusions == chartable')
@@ -231,7 +235,7 @@ Dir.mktmpdir do |dir|
   setup_wd(dir, TILES5)
   r = run_finalizer(dir)
   eq(r[:exit], 0, 'a complete plan passes despite 5 non-chartable elements in the spec')
-  eq(at(r[:final],'tile_census','chartable_total'), 5,
+  eq(at(r[:final],'parity_tile_census','chartable_total'), 5,
      'census excludes controls, text, image, container and hidden masters')
 end
 
@@ -243,7 +247,7 @@ Dir.mktmpdir do |dir|
              JSON.pretty_generate({ 'document' => { 'pages' => flat['pages'] } }))
   r = run_finalizer(dir)
   eq(r[:exit], 0, 'a {document:{pages:[...]}} spec is understood (wrapper migration in flight)')
-  eq(at(r[:final],'tile_census','chartable_total'), 5, 'wrapped spec yields the same denominator')
+  eq(at(r[:final],'parity_tile_census','chartable_total'), 5, 'wrapped spec yields the same denominator')
 end
 
 # --- F. do not clobber a recorded visual verdict ----------------------------
@@ -258,6 +262,132 @@ Dir.mktmpdir do |dir|
   eq(at(r[:final],'visual_verdict'), 'divergent', 'visual_verdict is preserved')
   eq(at(r[:final],'screenshot_path'), 'sigma-render.png', 'screenshot_path is preserved')
   eq(at(r[:final],'charts_total'), 5, 'and the gate contract is still written')
+end
+
+# --- G. duplicate tile names must not launder an unverified tile ------------
+# Review finding 1 (critical). Ruby's Array#- is SET difference: it removes
+# EVERY occurrence of a matching value, not one per match. With two chartable
+# elements sharing a name, a plan verifying only ONE of them produced
+# `unaccounted == []` and a PASS contract — precisely the silent inflation the
+# census exists to stop. The census must compare MULTISETS.
+
+puts '== G. two same-named tiles, only one verified -> caught (Array#- set-difference trap) =='
+Dir.mktmpdir do |dir|
+  setup_wd(dir, ['Region Total', 'Region Total', 'Pipeline'], plan_tiles: ['Region Total', 'Pipeline'])
+  r = run_finalizer(dir)
+  truthy(r[:exit] != 0,
+         "one of two same-named chartable tiles is unverified -> must FAIL (got exit #{r[:exit]})")
+  truthy((r[:stdout] + r[:stderr]).include?('Region Total'),
+         'the under-verified duplicate name is reported')
+  truthy(!(r[:final] && at(r[:final], 'status') == 'PASS'),
+         'no PASS contract for a plan that covers only one of two same-named tiles')
+end
+
+puts '== G2. both same-named tiles verified -> census balances =='
+Dir.mktmpdir do |dir|
+  setup_wd(dir, ['Region Total', 'Region Total', 'Pipeline'],
+           plan_tiles: ['Region Total', 'Region Total', 'Pipeline'])
+  r = run_finalizer(dir)
+  eq(r[:exit], 0, 'verifying both duplicates passes the census')
+  eq(at(r[:final], 'status'), 'PASS', 'and yields a PASS contract')
+  eq(at(r[:final], 'parity_tile_census', 'chartable_total'), 3, 'denominator counts both duplicates')
+end
+
+puts '== G3. one reasoned exclusion does not silence BOTH same-named tiles =='
+Dir.mktmpdir do |dir|
+  excl = { 'exclusions' => [{ 'chart' => 'Region Total', 'reason' => 'top-N tie-break unstable' }] }
+  setup_wd(dir, ['Region Total', 'Region Total', 'Pipeline'],
+           plan_tiles: ['Pipeline'], exclusions: excl)
+  r = run_finalizer(dir)
+  truthy(r[:exit] != 0,
+         "1 plan + 1 exclusion cannot account for 2 same-named tiles (got exit #{r[:exit]})")
+end
+
+# --- H. a stale score document must not be read as this run's result --------
+# Review finding 2 (critical). verify-parity.rb exits non-zero on a genuine
+# divergence, so the finalizer deliberately ignores its exit code and treats a
+# missing score file as the only crash signal. But presence-of-file is not
+# freshness-of-file: on a reused workdir (the NORMAL path — migrate-domo.rb is
+# idempotent and skips phases whose artifacts exist) a crashing verify-parity
+# left the PREVIOUS run's score document on disk, which was then finalized into a
+# fresh-timestamped PASS.
+
+puts '== H. a crashing verify-parity cannot be masked by a previous run\'s score doc =='
+Dir.mktmpdir do |dir|
+  # 1. a clean run leaves a passing parity-score.json behind
+  setup_wd(dir, ['Tile A'])
+  first = run_finalizer(dir)
+  eq(at(first[:final], 'status'), 'PASS', 'setup: the first clean run PASSes')
+  truthy(File.exist?(File.join(dir, 'parity-score.json')), 'setup: a score document is on disk')
+
+  # 2. re-verify the SAME workdir with a plan that makes verify-parity.rb abort
+  #    (its documented missing-requested-column guard), writing nothing new
+  crash_plan = { 'charts' => [
+    { 'chart' => 'Tile A',
+      'expected' => { 'columns' => %w[lines orders], 'rows' => [[1, 2]],
+                      'requested_columns' => %w[lines totally_absent_measure] },
+      'actual' => { 'rows' => [[1, 2]] } },
+  ] }
+  File.write(File.join(dir, 'parity-plan.json'), JSON.pretty_generate(crash_plan))
+  r = run_finalizer(dir)
+  truthy(r[:exit] != 0,
+         "a crashed verify-parity must FAIL the finalizer, not inherit a stale score (got exit #{r[:exit]})")
+  truthy(!(r[:final] && at(r[:final], 'status') == 'PASS'),
+         'no PASS contract may be derived from a previous run\'s score document')
+end
+
+# --- I. the census is not optional ------------------------------------------
+# Review finding 3. The census was skipped with a bare [WARN] when
+# workbook-spec.json was absent, so the whole anti-inflation guarantee silently
+# evaporated for any standalone invocation — and the script's own usage banner
+# documents standalone use. An absent denominator must be a NAMED decision.
+
+puts '== I. a missing workbook-spec is a hard failure, not a silent [WARN] =='
+Dir.mktmpdir do |dir|
+  setup_wd(dir, TILES5)
+  File.delete(File.join(dir, 'workbook-spec.json'))
+  r = run_finalizer(dir)
+  truthy(r[:exit] != 0,
+         "no workbook-spec -> no denominator -> must FAIL rather than warn (got exit #{r[:exit]})")
+  truthy(!(r[:final] && at(r[:final], 'status') == 'PASS'),
+         'no PASS contract without a verified denominator')
+end
+
+puts '== I2. ...unless the operator names the reason, which is recorded in the contract =='
+Dir.mktmpdir do |dir|
+  setup_wd(dir, TILES5)
+  File.delete(File.join(dir, 'workbook-spec.json'))
+  r = run_finalizer(dir, '--allow-missing-census', 'spec pruned by an external archive step')
+  eq(r[:exit], 0, 'an explicitly named opt-out is accepted')
+  eq(at(r[:final], 'census_waiver'), 'spec pruned by an external archive step',
+     'the reason is recorded in the contract so the report cannot omit it')
+end
+
+# --- J. gate 5 must keep its honest SKIP -----------------------------------
+# Review finding 4 (self-inflicted). The shared gate's gate 5 reads
+# summary['tile_census'] and, when present, pulls tableau's ZONE-census keys
+# (zones_total / charts_built / zones_unmatched / unmatched_zone_names). Emitting
+# a differently-shaped doc under that exact key turned gate 5's honest
+# "[SKIP] no tile_census" into a always-true "[OK] ... 0 zones, 0 unmatched".
+# domo has no dashboard zone tree, so the honest answer is SKIP.
+
+puts '== J. the parity census does not hijack gate 5\'s zone-census key =='
+Dir.mktmpdir do |dir|
+  setup_wd(dir, TILES5)
+  r = run_finalizer(dir)
+  truthy(!(r[:final] || {}).key?('tile_census'),
+         'parity-final.json must NOT carry a tile_census key (gate 5 would misread it as zones)')
+  truthy((r[:final] || {}).key?('parity_tile_census'),
+         'the census is still recorded, under its own key')
+  # Gate 5 itself cannot be exercised offline — it sits behind gate 3, which
+  # live-GETs the workbook. So assert the CONTRACT statically instead: the gate
+  # keys its zone census on 'tile_census', and our document must not answer to
+  # that name. This is checked against the real gate source, not a copy of it.
+  gate_src = File.read(GATE)
+  truthy(gate_src.include?("summary['tile_census']"),
+         "sanity: the shared gate really does key gate 5 on 'tile_census'")
+  truthy(gate_src.include?("census['zones_total']"),
+         'sanity: and reads tableau ZONE keys out of it, which domo has no equivalent for')
 end
 
 puts

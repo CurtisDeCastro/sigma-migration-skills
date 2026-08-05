@@ -34,11 +34,16 @@
 # Usage:
 #   ruby scripts/phase6-parity-domo.rb --workdir <wd> --plan <wd>/parity-plan.json \
 #     --workbook-id <id> [--workbook-spec PATH] [--exclusions PATH] [--out PATH]
-#     [--score-out PATH] [--skip-verify]
+#     [--score-out PATH] [--skip-verify] [--allow-missing-census REASON]
 #
 # Exit codes: 0 = contract written; 1 = bad invocation / missing input;
-#             5 = census unbalanced (unaccounted or reasonless-excluded tiles);
-#             6 = verify-parity.rb produced no score document.
+#             5 = census unbalanced or unverifiable (unaccounted tiles, a
+#                 reasonless exclusion, or no workbook spec and no named waiver);
+#             6 = verify-parity.rb produced no score document (it crashed).
+#
+# On every non-zero exit any pre-existing parity-final.json is INVALIDATED
+# (status=FAIL + finalize_error) rather than left behind, so a prior run's PASS
+# can never be read as this run's evidence. See die! below.
 require 'json'
 require 'optparse'
 require 'open3'
@@ -57,6 +62,10 @@ OptionParser.new do |p|
   p.on('--score-out PATH', 'default <workdir>/parity-score.json')      { |v| opts[:score_out] = v }
   p.on('--extract-mode', 'pass --extract-mode through to verify-parity.rb') { opts[:extract_mode] = true }
   p.on('--skip-verify', 'finalize from an existing parity-score.json (do not re-run verify-parity)') { opts[:skip_verify] = true }
+  p.on('--allow-missing-census REASON',
+       'proceed without a workbook spec (and therefore WITHOUT the anti-inflation census) — ' \
+       'REQUIRED reason string, recorded in parity-final.json as census_waiver and MUST be ' \
+       'named in the migration report') { |v| opts[:allow_missing_census] = v }
 end.parse!
 
 abort('phase6-parity-domo: --workdir is required') unless opts[:workdir]
@@ -109,6 +118,42 @@ rescue StandardError => e
   abort("phase6-parity-domo: cannot read #{path}: #{e.message}")
 end
 
+# Exit non-zero WITHOUT leaving a stale PASS contract behind.
+#
+# Every failure path here runs in a workdir that may already hold a
+# parity-final.json from an earlier, successful finalize (migrate-domo.rb is
+# idempotent and re-running into a populated workdir is the normal path). Simply
+# exiting would leave that prior `status: "PASS"` on disk for assert-phase6-ran.rb
+# to read as this run's evidence — the same presence-is-not-freshness trap as the
+# score document, one level up, and a direct route to an unearned GREEN.
+#
+# The prior contract is therefore overwritten with an explicit FAIL carrying the
+# reason. Visual-verdict keys are preserved (record-visual-check.rb owns them and
+# cannot re-derive them), but nothing that could read as passing parity survives.
+def die!(code, out_path, reason)
+  if File.exist?(out_path)
+    prior = (JSON.parse(File.read(out_path)) rescue nil)
+    prior = {} unless prior.is_a?(Hash)
+    invalid = {
+      'ran_at'          => Time.now.utc.iso8601,
+      'status'          => 'FAIL',
+      'charts_total'    => 0,
+      'charts_pass'     => 0,
+      'charts_fail'     => 0,
+      'finalize_error'  => reason,
+      'note'            => 'phase6-parity-domo.rb could not finalize; any previous PASS in this ' \
+                           'file has been invalidated so the gate cannot read it as fresh evidence.',
+    }
+    %w[visual_checked visual_verdict screenshot_path agent_vision visual_similarity].each do |k|
+      invalid[k] = prior[k] if prior.key?(k)
+    end
+    File.write(out_path, JSON.pretty_generate(invalid))
+    warn "       invalidated the prior #{File.basename(out_path)} (status=FAIL) — it would otherwise " \
+         'have been read as this run\'s parity evidence.'
+  end
+  exit code
+end
+
 # ---------------------------------------------------------------------------
 # 1. Census FIRST — fail before spending a parity run on a narrowed plan.
 # ---------------------------------------------------------------------------
@@ -136,17 +181,42 @@ if File.exist?(opts[:spec])
       end
       warn '       A reason is REQUIRED so the exclusion lands in the migration report'
       warn '       instead of quietly shrinking the parity denominator.'
-      exit 5
+      die!(5, opts[:out], "exclusion(s) with no reason in #{File.basename(opts[:excl])}")
     end
   end
   excluded_names = excluded.map { |e| e['chart'].to_s }
 
-  unaccounted = chartable_names - plan_names - excluded_names
+  # MULTISET comparison, deliberately not `chartable_names - plan_names`.
+  # Ruby's Array#- is SET difference: it removes EVERY occurrence of a matching
+  # value. Two chartable elements sharing a name (the same KPI title repeated on
+  # two pages is routine) and a plan verifying only ONE of them therefore came out
+  # as fully accounted — exactly the silent inflation this census exists to catch.
+  # Counting per name closes that: a name verified 1x but chartable 2x leaves a
+  # deficit of 1. Hand-rolled because Array#tally is Ruby 2.7+ and the system
+  # ruby here is 2.6.
+  def tally(arr)
+    arr.each_with_object(Hash.new(0)) { |x, h| h[x] += 1 }
+  end
+  chartable_tally = tally(chartable_names)
+  accounted_tally = tally(plan_names + excluded_names)
+  unaccounted = []
+  chartable_tally.each do |name, want|
+    deficit = want - accounted_tally.fetch(name, 0)
+    deficit.times { unaccounted << name } if deficit.positive?
+  end
+  # A plan/exclusion naming something the workbook has no chartable element for is
+  # not fatal (a renamed or removed tile), but it means the denominator and the
+  # plan disagree, so say so rather than absorbing it silently.
+  stray = accounted_tally.keys - chartable_tally.keys
+  warn "[WARN] phase6-parity-domo: #{stray.length} plan/exclusion entr(ies) match no chartable " \
+       "element: #{stray.join(', ')}" unless stray.empty?
+
   census = {
     'chartable_total' => chartable_names.length,
     'plan_total'      => plan_names.length,
     'excluded_total'  => excluded_names.length,
     'unaccounted'     => unaccounted,
+    'stray_entries'   => stray,
     'source'          => File.basename(opts[:spec]),
   }
 
@@ -159,13 +229,25 @@ if File.exist?(opts[:spec])
     warn '       A plan narrowed to the easy tiles reports "100% (n/n)" and reads exactly like a'
     warn '       full pass. Either verify these, or record each in'
     warn "       #{opts[:excl]} as {\"chart\":\"<name>\",\"reason\":\"<why>\"}."
-    exit 5
+    die!(5, opts[:out], "#{unaccounted.length} chartable element(s) neither verified nor excluded: #{unaccounted.join(', ')}")
   end
   warn "census: #{census['chartable_total']} chartable, #{census['plan_total']} verified, " \
        "#{census['excluded_total']} excluded — balanced"
+elsif opts[:allow_missing_census]
+  warn "[WAIVED] phase6-parity-domo: no #{opts[:spec]} — anti-inflation census SKIPPED by explicit " \
+       "request: #{opts[:allow_missing_census]}"
+  warn '          This waiver MUST be named in the migration report: the parity denominator was NOT verified.'
 else
-  warn "[WARN] phase6-parity-domo: no #{opts[:spec]} — census SKIPPED, the parity denominator " \
-       'is unverified. Pass --workbook-spec to enable the anti-inflation check.'
+  # Fail closed. A bare [WARN] here silently voided the whole anti-inflation
+  # guarantee for any invocation that did not happen to have workbook-spec.json
+  # beside it — and this script documents standalone use, so that is reachable.
+  # An unverifiable denominator is now a NAMED decision, never a default.
+  warn "[FAIL] phase6-parity-domo: no #{opts[:spec]} — cannot verify the parity denominator."
+  warn '       Without it, a plan narrowed to the easy tiles reports "100% (n/n)" and reads exactly'
+  warn '       like a full pass, which is the failure mode this census exists to prevent.'
+  warn '       Pass --workbook-spec PATH, or, if the spec is genuinely unavailable, waive it'
+  warn '       explicitly with --allow-missing-census "<reason>" (recorded in parity-final.json).'
+  die!(5, opts[:out], "no #{File.basename(opts[:spec])} — parity denominator unverifiable")
 end
 
 # ---------------------------------------------------------------------------
@@ -174,6 +256,17 @@ end
 unless opts[:skip_verify]
   vp = File.expand_path('verify-parity.rb', __dir__)
   abort("phase6-parity-domo: #{vp} not found") unless File.exist?(vp)
+  # Remove any prior score document FIRST, so "the file exists afterwards" can
+  # only mean "this invocation wrote it".
+  #
+  # verify-parity.rb exits non-zero on a genuine divergence, so its exit code
+  # cannot distinguish a finding from a crash, and the crash check below is
+  # presence-of-file. But migrate-domo.rb is idempotent and re-runs into an
+  # ALREADY-POPULATED workdir as the normal path — so a verify-parity that
+  # aborted (e.g. its own missing-requested-column guard) left the PREVIOUS
+  # run's score on disk, which was then finalized into a fresh-timestamped PASS.
+  # Presence is not freshness.
+  File.delete(opts[:score_out]) if File.exist?(opts[:score_out])
   argv = ['ruby', vp, '--plan', opts[:plan], '--score-out', opts[:score_out]]
   argv << '--extract-mode' if opts[:extract_mode]
   out, err, _st = Open3.capture3(*argv)
@@ -186,7 +279,7 @@ end
 unless File.exist?(opts[:score_out])
   warn "[FAIL] phase6-parity-domo: verify-parity.rb wrote no #{opts[:score_out]} — it crashed " \
        'rather than reporting a divergence. Fix that before finalizing; do NOT hand-author the score.'
-  exit 6
+  die!(6, opts[:out], 'verify-parity.rb wrote no score document (it crashed)')
 end
 score = load_json(opts[:score_out])
 tiles = Array(score['tiles'])
@@ -225,7 +318,17 @@ end
 # read (it fails closed when value_parity_score is absent).
 summary['value_parity_score'] = score['value_parity_score']
 summary['per_tile_scores']    = tiles
-summary['tile_census']        = census if census
+# Deliberately NOT the key `tile_census`. The shared gate's gate 5 reads
+# summary['tile_census'] and, whenever it is present, pulls tableau's ZONE-census
+# keys out of it (zones_total / charts_built / zones_unmatched /
+# unmatched_zone_names — assert-phase6-ran.rb:1637-1640). Publishing a
+# differently-shaped document under that name turned gate 5's honest
+# "[SKIP] no tile_census" into an always-true "[OK] ... 0 zones, 0 unmatched":
+# a gate that had been abstaining started reporting success it had not measured.
+# domo builds no dashboard zone tree, so SKIP is the truthful answer, and this
+# census lives under its own key.
+summary['parity_tile_census'] = census if census
+summary['census_waiver']      = opts[:allow_missing_census] if opts[:allow_missing_census]
 if census && census['excluded_total'].to_i.positive?
   doc = load_json(opts[:excl])
   summary['excluded_with_reason'] = (doc.is_a?(Hash) ? (doc['exclusions'] || []) : Array(doc))

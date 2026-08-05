@@ -24,7 +24,10 @@
 #   runs AFTER verify-parity rather than immediately after the render: it
 #   hard-requires parity-final.json to already exist on disk (it merges into
 #   it, never creates it from nothing), and that file is first written by
-#   verify-parity.rb's --score-out. This orchestrator has no image input, so
+#   phase6-parity-domo.rb, the parity finalizer (bead 2tkm — it used to be
+#   written by verify-parity.rb's --score-out, which is what BROKE gate 1:
+#   --score-out emits the tiles_* score schema, not the gate's charts_*
+#   contract. --score-out now targets parity-score.json). This orchestrator has no image input, so
 #   it records the only HONEST verdict it is entitled to — not-executable —
 #   rather than fabricate a pass; see phase_record_visual_check! below.
 #
