@@ -16,8 +16,8 @@ eq(csv, "a,b\n\"x,y\",\"z\"\"w\"\n", 'quotes fields containing commas/embedded q
 puts "== load_sql =="
 sql = SnowflakeLoad.load_sql('CREATE TABLE DB.SCH.T (...);', 'DB', 'SCH', 'T', 'file:///tmp/x.csv')
 ok(sql.include?('CREATE TABLE DB.SCH.T'), 'includes the caller-supplied CREATE TABLE statement verbatim')
-ok(sql.include?("PUT 'file:///tmp/x.csv' @DB.SCH.%T"), 'PUTs to the fully-qualified table stage')
-ok(sql.include?('COPY INTO DB.SCH.T'), 'COPYs into the target table')
+ok(sql.include?(%q{PUT 'file:///tmp/x.csv' @DB.SCH.%"T"}), 'PUTs to the fully-qualified table stage (identifier always quoted)')
+ok(sql.include?('COPY INTO DB.SCH."T"'), 'COPYs into the target table (identifier always quoted)')
 ok(sql.include?('ON_ERROR = ABORT_STATEMENT'), 'aborts the whole COPY on any bad row, never a silent partial load')
 ok(sql.include?("NULL_IF = ('')"), 'treats empty CSV fields as NULL to handle sparse/nullable columns')
 
@@ -26,10 +26,10 @@ sql_quoted = SnowflakeLoad.load_sql('CREATE TABLE DB.SCH."My Table" (...);', 'DB
 ok(sql_quoted.include?('@DB.SCH.%"My Table"'), 'PUT stage reference is fully qualified with database.schema.%table')
 
 puts "== grant_sql =="
-eq(SnowflakeLoad.grant_sql('DB', 'SCH', 'T', 'PUBLIC'), 'GRANT SELECT ON DB.SCH.T TO ROLE PUBLIC;', 'grants SELECT to the given role')
+eq(SnowflakeLoad.grant_sql('DB', 'SCH', 'T', 'PUBLIC'), 'GRANT SELECT ON DB.SCH."T" TO ROLE PUBLIC;', 'grants SELECT to the given role')
 
 puts "== count_sql =="
-eq(SnowflakeLoad.count_sql('DB', 'SCH', 'T'), 'SELECT COUNT(*) AS CNT FROM DB.SCH.T;', 'builds a COUNT(*) AS CNT query against the target table')
+eq(SnowflakeLoad.count_sql('DB', 'SCH', 'T'), 'SELECT COUNT(*) AS CNT FROM DB.SCH."T";', 'builds a COUNT(*) AS CNT query against the target table')
 
 puts "== run_sql!: success path =="
 ok_runner = ->(cmd) { ok(cmd.include?('--connection'), 'passes --connection through to the snow CLI'); ['all good', true] }
