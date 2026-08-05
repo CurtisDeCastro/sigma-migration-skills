@@ -37,6 +37,14 @@ module DomoExtract
   # metadata from the first page's response and builds schema_cols, the
   # authoritative column-name + type pairs for DDL, eliminating an unreliable
   # separate Domo.dataset(id)['schema'] lookup (which is empty for most real datasets).
+  #
+  # metadata is only required/validated on the FIRST page — that's the only
+  # page whose metadata is ever consumed (types is captured once via `||=`
+  # below), so requiring it on every later page would be over-strict. Without
+  # this guard, a live response with 'columns' present but 'metadata' absent
+  # or short would silently type every affected column nil -> VARCHAR with no
+  # error and no skip, exactly the silent-schema-loss failure class this
+  # metadata-derivation approach was meant to eliminate.
   def extract_rows(dataset_id, query:, band_size: 20_000)
     rows = []
     columns = nil
@@ -47,8 +55,15 @@ module DomoExtract
       unless page.is_a?(Hash) && page['rows'].is_a?(Array) && page['columns'].is_a?(Array)
         raise "dataset #{dataset_id}: malformed page response at offset #{offset} (expected 'rows'/'columns' arrays): #{page.inspect}"
       end
-      columns ||= page['columns']
-      types ||= Array(page['metadata']).map { |m| m.is_a?(Hash) ? m['type'] : nil }
+      if columns.nil?
+        unless page['metadata'].is_a?(Array) && page['metadata'].size == page['columns'].size
+          raise "dataset #{dataset_id}: malformed page response at offset #{offset} " \
+                "(expected 'metadata' to be an Array the same size as 'columns' " \
+                "(#{page['columns'].size}), got: #{page['metadata'].inspect})"
+        end
+        columns = page['columns']
+        types = page['metadata'].map { |m| m.is_a?(Hash) ? m['type'] : nil }
+      end
       page_rows = page['rows']
       rows.concat(page_rows)
       break if page_rows.size < band_size

@@ -55,6 +55,22 @@ rescue => e
   ok(e.message.include?('malformed page response') && e.message.include?('ds-1'), "raises on rows not Array: #{e.message}")
 end
 
+begin
+  bad_missing_metadata = ->(_id, _sql) { { 'columns' => %w[A B], 'rows' => [%w[1 2]] } }
+  DomoExtract.extract_rows('ds-1', query: bad_missing_metadata, band_size: 10)
+  ok(false, 'first page missing metadata key should raise, not silently type columns nil -> VARCHAR')
+rescue => e
+  ok(e.message.include?('malformed page response') && e.message.include?('ds-1') && e.message.include?('metadata'), "raises on missing 'metadata': #{e.message}")
+end
+
+begin
+  bad_short_metadata = ->(_id, _sql) { { 'columns' => %w[A B], 'metadata' => [{ 'type' => 'STRING' }], 'rows' => [%w[1 2]] } }
+  DomoExtract.extract_rows('ds-1', query: bad_short_metadata, band_size: 10)
+  ok(false, 'first page metadata shorter than columns should raise')
+rescue => e
+  ok(e.message.include?('malformed page response') && e.message.include?('ds-1') && e.message.include?('metadata'), "raises on metadata shorter than columns: #{e.message}")
+end
+
 puts "== extract_rows: single page shorter than band_size stops immediately =="
 one_page = ->(_id, _sql) { { 'columns' => %w[A B], 'metadata' => [{'type' => 'STRING'}, {'type' => 'LONG'}], 'rows' => [%w[1 2], %w[3 4]] } }
 result = DomoExtract.extract_rows('ds-1', query: one_page, band_size: 10)
