@@ -70,21 +70,22 @@ results = ids.map do |id|
   print "#{id} ... "
   begin
     dataset = Domo.dataset(id)
-    schema_cols = (dataset['schema'] || {})['columns'] || []
+
+    extracted = DomoExtract.extract_with_parity(id, query: Domo.method(:query_dataset), band_size: opts[:band_size])
+    schema_cols = extracted['schema_cols'] || []
     if schema_cols.empty?
-      puts 'SKIPPED (no schema.columns — nothing to land)'
+      puts 'SKIPPED (no columns — nothing to land)'
       next { id: id, status: :skipped }
     end
 
-    unknown = SnowflakeDDL.unknown_types(schema_cols)
-    warn "  note: unmapped Domo type(s) #{unknown.join(', ')} on #{id} — landed as VARCHAR" unless unknown.empty?
-
-    extracted = DomoExtract.extract_with_parity(id, query: Domo.method(:query_dataset), band_size: opts[:band_size])
     rows = opts[:limit_rows] ? extracted['rows'].first(opts[:limit_rows]) : extracted['rows']
     if rows.empty?
       puts 'SKIPPED (0 rows — nothing to land)'
       next { id: id, status: :skipped }
     end
+
+    unknown = SnowflakeDDL.unknown_types(schema_cols)
+    warn "  note: unmapped Domo type(s) #{unknown.join(', ')} on #{id} — landed as VARCHAR" unless unknown.empty?
 
     table = derive_table_name(ds_map[id], dataset)
     create_sql = SnowflakeDDL.create_table_sql(opts[:target_db], opts[:target_schema], table, schema_cols)
