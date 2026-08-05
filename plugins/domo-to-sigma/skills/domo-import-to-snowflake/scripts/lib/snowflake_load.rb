@@ -31,7 +31,7 @@ module SnowflakeLoad
       #{create_table_sql}
       PUT '#{file_uri}' @#{database}.#{schema}.%#{quoted} AUTO_COMPRESS=TRUE OVERWRITE=TRUE;
       COPY INTO #{database}.#{schema}.#{quoted}
-        FILE_FORMAT = (TYPE = CSV FIELD_OPTIONALLY_ENCLOSED_BY = '"' SKIP_HEADER = 0)
+        FILE_FORMAT = (TYPE = CSV FIELD_OPTIONALLY_ENCLOSED_BY = '"' SKIP_HEADER = 0 NULL_IF = (''))
         ON_ERROR = ABORT_STATEMENT;
     SQL
   end

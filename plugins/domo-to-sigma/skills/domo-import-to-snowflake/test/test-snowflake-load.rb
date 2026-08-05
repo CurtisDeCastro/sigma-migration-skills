@@ -19,6 +19,7 @@ ok(sql.include?('CREATE TABLE DB.SCH.T'), 'includes the caller-supplied CREATE T
 ok(sql.include?("PUT 'file:///tmp/x.csv' @DB.SCH.%T"), 'PUTs to the fully-qualified table stage')
 ok(sql.include?('COPY INTO DB.SCH.T'), 'COPYs into the target table')
 ok(sql.include?('ON_ERROR = ABORT_STATEMENT'), 'aborts the whole COPY on any bad row, never a silent partial load')
+ok(sql.include?("NULL_IF = ('')"), 'treats empty CSV fields as NULL to handle sparse/nullable columns')
 
 # Regression test: table names requiring quoting (spaces, etc) must be quoted in PUT stage ref
 sql_quoted = SnowflakeLoad.load_sql('CREATE TABLE DB.SCH."My Table" (...);', 'DB', 'SCH', 'My Table', 'file:///tmp/x.csv')
