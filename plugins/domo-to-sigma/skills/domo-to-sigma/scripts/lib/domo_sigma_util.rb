@@ -32,6 +32,28 @@ module DomoSigma
     }.join(' ')
   end
 
+  # The name to use INSIDE a warehouse-column formula reference,
+  # i.e. the X in "[TABLE/X]". Normally that is display_name — Sigma normalizes
+  # underscores, spaces and case when resolving a reference, so 'created_on',
+  # 'Created On', '_BATCH_ID_' and 'BATCH ID' all resolve to the same column
+  # (each verified against the live write API).
+  #
+  # The ONE exception is a column whose raw name contains a DOT. There,
+  # display_name's camel-split injects a space and the combination of dot AND
+  # space stops resolving: for warehouse column 'Account.BillingState',
+  #   '[T/Account.Billing State]'  -> 400 dependency not found
+  #   '[T/Account.BillingState]'   -> resolves
+  #   '[T/Account Billing State]'  -> resolves
+  # (all three probed live; case is irrelevant, the dot+space pairing is not).
+  # So for a dotted name we emit the raw warehouse name verbatim, which is the
+  # form Sigma's own catalog reports and is proven to resolve. The human-facing
+  # column `name` still uses display_name — only the reference changes.
+  # Bead xo56, found when the 36-card cold run 400'd the whole data-model POST.
+  def column_ref_name(raw)
+    s = raw.to_s
+    s.include?('.') ? s : display_name(s)
+  end
+
   B62 = (('0'..'9').to_a + ('a'..'z').to_a + ('A'..'Z').to_a).freeze
 
   # Client-side id. Sigma preserves client IDs on CREATE (feedback_sigma_spec_id_stability).
