@@ -15,7 +15,20 @@ module DomoSigma
            .gsub(/([A-Za-z])([0-9])/, '\1_\2')
            .gsub(/([0-9])([A-Za-z])/, '\1_\2')
     s.split(%r{[_\s/]+}).reject(&:empty?).map { |w|
-      (w =~ /\A[A-Z0-9]+\z/) ? w : w.capitalize
+      # Upcase the FIRST character only — never String#capitalize, which also
+      # LOWERCASES the remainder. A dot is not a split boundary, so a dotted
+      # column arrives as one token that still holds an internal capital:
+      #   'Account.BillingState' -> camel-split -> ['Account.Billing', 'State']
+      #   .capitalize            -> 'Account.billing State'   <- 'B' destroyed
+      #   first-char-only        -> 'Account.Billing State'   <- matches Sigma
+      # Sigma camel-splits the same way we do ('IsWon' -> 'Is Won' resolves
+      # fine), so the dotted case was the ONLY divergence — and it 400'd the
+      # data-model POST with "dependency not found: formula reference
+      # 'pdp_example_dataset/account.billing state'" on a live cold run
+      # (bead xo56). Column pre-flight could never catch it: it compares
+      # display_name to display_name on both sides, so the two agreed with
+      # each other while both disagreed with Sigma.
+      (w =~ /\A[A-Z0-9]+\z/) ? w : w.sub(/\A./) { |c| c.upcase }
     }.join(' ')
   end
 
