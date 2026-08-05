@@ -318,6 +318,12 @@ formulas that don't resolve at query time). Do not proceed on errors —
 
 ## Phase 4 — Re-emit the workbook with real ids, POST it
 
+> **`sigma_workbook_spec.json` must be `document`-wrapped, not flat** (verified live
+> 2026-08-03, including on `/verify` 2026-08-04): `schemaVersion`/`pages`/`kind`/`layout`
+> nest under a top-level `document` key; `folderId` stays outside it. The old flat body
+> (these fields at the file's root) 400s. `scripts/convert.py` must emit the wrapped
+> shape here — the Phase 3 DM spec above is unaffected and stays flat.
+
 ```bash
 python3 scripts/convert.py ... --data-model-id <dataModelId> \
   --dm-element-ids dm_element_ids.json [--ae-winners ae_winners.json]
@@ -370,7 +376,8 @@ dashboard** — right numbers, wrong look. This gate has TWO parts: source
 **fidelity** (does it resemble the original?) and intrinsic **quality** (is it
 cleanly laid out?). Both must pass. Sigma's grid has no z-order; the shared
 layout lib de-overlaps bands, but this gate is the safety net (without a
-top-level layout the workbook renders as a single-column stack).
+layout — `document.layout` in the current wrapped spec shape, see Phase 4 —
+the workbook renders as a single-column stack).
 
 1. Render every page to PNG (token first: `eval "$(scripts/get-token.sh)"`):
    `python3 scripts/sigma-export-png.py --workbook <id> --page <pageId> --out /tmp/<page>.png --w 1600`

@@ -13,7 +13,9 @@ The `tableau-to-sigma` skill ships a Phase 3 layout pipeline that mirrors a Tabl
 1. POSTing a workbook spec (charts, KPIs, controls) without layout.
 2. GETing the spec back to learn server-assigned element IDs.
 3. Generating layout XML in Ruby — `<Page>`, `<GridContainer>`, `<LayoutElement>` — with `gridColumn="c0 / c1"` / `gridRow="r0 / r1"` span notation against `repeat(24, 1fr)` columns.
-4. PUTing the spec back with one **top-level** `layout` field (per-page `layout` is silently ignored).
+4. PUTing the spec back with one `layout` field on the spec's `document` object (per-page
+   `layout` is silently ignored). The workbook body is `document`-wrapped as of 2026-08-03
+   — `schemaVersion`/`pages`/`kind`/`layout` all nest under `document`; DM specs stay flat.
 
 We want Phase 3 coverage for Looker dashboards — i.e. given a Looker dashboard, produce equivalent Sigma element specs and a layout XML string that places those tiles where the Looker original placed them.
 
@@ -360,7 +362,7 @@ After publishing, pull a chart's data from Sigma (already supported via `query`/
 1. **Discovery** — `fetch_looker_dashboard` (or `parse_lookml`) returns dashboard JSON.
 2. **Field resolution** — walk explore joins, resolve `view.field` prefixes, emit a Sigma data-model spec with one element per resolved view; POST it; GET the spec back to capture server-assigned IDs.
 3. **Workbook spec** — for each Looker `dashboard_element`, emit a Sigma element of the matching `kind`. Use the converter's tile-type table (§5e). Source from the master data-model element; column formulas use `[ElementName/Column]`. POST without layout; GET back to capture element IDs.
-4. **Layout XML** — generate via Ruby helpers in `tableau-to-sigma/refs/workbook-layout.md`, using `(col+1, col+1+width)` / `(row+1, row+1+height)` from the Looker components. Single top-level `layout`, no per-page `layout`.
+4. **Layout XML** — generate via Ruby helpers in `tableau-to-sigma/refs/workbook-layout.md`, using `(col+1, col+1+width)` / `(row+1, row+1+height)` from the Looker components. Single `document.layout`, no per-page `layout`.
 5. **PUT** the spec with layout. Strip read-only fields per `tableau-to-sigma/SKILL.md` Phase 5e.
 6. **Verify** — query each Sigma chart and compare to Looker tile data.
 

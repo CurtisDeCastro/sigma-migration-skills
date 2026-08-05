@@ -77,7 +77,9 @@ strips with a `%` `width`; each column has `cells[]` stacked top-to-bottom; each
 cell has `subcells[]` placed left-to-right (each a `%` of the column); each
 subcell holds `elements[]` keyed by `widgetid` with a px `height`.
 
-**Sigma** (top-level `layout`, a single XML string): one `<Page type="grid"
+**Sigma** (`document.layout`, a single XML string — the workbook body is
+`document`-wrapped as of 2026-08-03; `schemaVersion`/`pages`/`kind`/`layout` all nest
+under `document`, DM specs stay flat): one `<Page type="grid"
 gridTemplateColumns="repeat(24, 1fr)">` per page; elements positioned by
 `<LayoutElement elementId gridColumn="start / end" gridRow="start / end"/>` where
 **`end` is exclusive** (full width = `1 / 25`). A `<GridContainer>` can group a

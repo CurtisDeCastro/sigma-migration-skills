@@ -82,6 +82,15 @@ When Phase 1d recorded a list control that **filters** some tiles (`target_tiles
 
 > **`folderId` is required here too.**
 
+> **The workbook body is `document`-wrapped, not flat (verified live 2026-08-03,
+> including on `POST /v2/workbooks/spec/verify` 2026-08-04).** `schemaVersion`,
+> `pages`, `kind`, and `layout` all nest under a top-level `document` key; only
+> ownership/location metadata (`name`, `folderId`, `ownerId`) stays outside it.
+> The old flat body (these fields at the request root) now 400s fleet-wide.
+> Data-model specs (`POST /v2/dataModels/spec`) are unaffected and remain flat
+> — do not wrap those. `shared/lib/code_rep.{rb,py,mjs}` (`Sigma::CodeRep.wrap`)
+> is the canonical adapter; reads tolerate both shapes, writes always nest.
+
 #### The two-page rule — master always on a dedicated "Data" page
 
 > **MANDATORY.** Every workbook spec MUST have at least two pages: one named `Data`
@@ -97,56 +106,58 @@ Spec skeleton (two pages, master on `Data`, all charts on `Orders Overview`):
 {
   "name": "Orders Overview",
   "folderId": "<folder-id>",
-  "schemaVersion": 1,
-  "pages": [
-    {
-      "id": "page-data",
-      "name": "Data",
-      "elements": [
-        {
-          "id": "master",
-          "kind": "table",
-          "name": "Master",
-          "visibleAsSource": false,
-          "source": {
-            "kind": "data-model",
-            "dataModelId": "<dataModelId>",
-            "elementId": "<elementId from dm-ids.json>"
+  "document": {
+    "schemaVersion": 1,
+    "pages": [
+      {
+        "id": "page-data",
+        "name": "Data",
+        "elements": [
+          {
+            "id": "master",
+            "kind": "table",
+            "name": "Master",
+            "visibleAsSource": false,
+            "source": {
+              "kind": "data-model",
+              "dataModelId": "<dataModelId>",
+              "elementId": "<elementId from dm-ids.json>"
+            },
+            "columns": [
+              { "id": "m-sales", "formula": "[Order Fact/Sales]", "name": "Sales" }
+            ],
+            "order": ["m-sales"]
+          }
+        ]
+      },
+      {
+        "id": "page-overview",
+        "name": "Orders Overview",
+        "elements": [
+          { "id": "txt-title", "kind": "text", "body": "# Orders Dashboard" },
+          {
+            "id": "el-ctl-date",
+            "kind": "control",
+            "controlId": "ctl-date",
+            "name": "Order Date",
+            "controlType": "date-range",
+            "selectionMode": "ranges",
+            "source": { "kind": "source" },
+            "mode": "between",
+            "filters": [{ "source": { "kind": "table", "elementId": "master" }, "columnId": "m-order-date" }],
+            "includeNulls": "when-no-value-is-selected"
           },
-          "columns": [
-            { "id": "m-sales", "formula": "[Order Fact/Sales]", "name": "Sales" }
-          ],
-          "order": ["m-sales"]
-        }
-      ]
-    },
-    {
-      "id": "page-overview",
-      "name": "Orders Overview",
-      "elements": [
-        { "id": "txt-title", "kind": "text", "body": "# Orders Dashboard" },
-        {
-          "id": "el-ctl-date",
-          "kind": "control",
-          "controlId": "ctl-date",
-          "name": "Order Date",
-          "controlType": "date-range",
-          "selectionMode": "ranges",
-          "source": { "kind": "source" },
-          "mode": "between",
-          "filters": [{ "source": { "kind": "table", "elementId": "master" }, "columnId": "m-order-date" }],
-          "includeNulls": "when-no-value-is-selected"
-        },
-        {
-          "id": "el-kpi-sales",
-          "kind": "kpi-chart",
-          "source": { "kind": "table", "elementId": "master" },
-          "columns": [{ "id": "k-sales", "formula": "Sum([Master/Sales])", "name": "Total Sales" }],
-          "value": { "columnId": "k-sales" }
-        }
-      ]
-    }
-  ]
+          {
+            "id": "el-kpi-sales",
+            "kind": "kpi-chart",
+            "source": { "kind": "table", "elementId": "master" },
+            "columns": [{ "id": "k-sales", "formula": "Sum([Master/Sales])", "name": "Total Sales" }],
+            "value": { "columnId": "k-sales" }
+          }
+        ]
+      }
+    ]
+  }
 }
 ```
 
@@ -249,7 +260,8 @@ ruby scripts/post-and-readback.rb --type workbook \
 
 > **Skip this step and Sigma renders every tile as a single-column stack** —
 > the CoCo regression (beads-sigma-bw3). `assert-phase6-ran.rb` gate 4
-> rejects any workbook without a non-empty top-level `layout` XML.
+> rejects any workbook without a non-empty `layout` XML (`document.layout`
+> in the current wrapped shape — see 5a).
 
 **Preferred path — auto-layout from the parsed Tableau zone tree:**
 
@@ -285,12 +297,13 @@ workbooks with no `<dashboard>` element, or a layout you want to redesign),
 write a per-workbook layout config that `require`s the helper library.
 Never hand-write layout XML directly.
 
-> **PUT /v2/workbooks/{id}/spec wipes the top-level `layout` string.** If you
-> re-PUT the workbook spec after a formula fix (or any other spec edit), the
-> existing layout is **erased** and the workbook reverts to a single
-> auto-stacked column. Two ways to avoid the round trip:
+> **PUT /v2/workbooks/{id}/spec wipes the `layout` string** (`document.layout`
+> in the current wrapped shape). If you re-PUT the workbook spec after a
+> formula fix (or any other spec edit), the existing layout is **erased** and
+> the workbook reverts to a single auto-stacked column. Two ways to avoid the
+> round trip:
 > 1. **Preferred:** re-emit the layout XML in the same PUT body — set
->    `spec.layout` to the assembled XML string before PUTting.
+>    `document.layout` to the assembled XML string before PUTting.
 > 2. Or PUT layout separately AFTER spec via `scripts/put-layout.rb`. That
 >    script GETs the spec, replaces just the layout field, and PUTs back. Cost:
 >    one extra round trip (~5-15s) and an export to confirm.
@@ -341,7 +354,7 @@ ruby scripts/put-layout.rb \
 
 The script:
 - GETs the current workbook spec,
-- replaces per-page `layout` with a single top-level `layout` (per-page layouts are silently dropped),
+- replaces per-page `layout` with a single `document.layout` (per-page layouts are silently dropped),
 - strips read-only fields (`workbookId`, `url`, `ownerId`, `createdBy`, `updatedBy`, `createdAt`, `updatedAt`, `latestDocumentVersion`),
 - aborts if any `elementId=""` appears in the XML,
 - PUTs the full payload back.

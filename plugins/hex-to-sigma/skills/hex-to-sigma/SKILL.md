@@ -191,14 +191,25 @@ anything not genuinely selected, with a loud warning — see
 accepted for a fresh CREATE; the `sigma-workbooks` docs warn against
 hardcoding it for an UPDATE (re-fetch from the existing spec instead).
 
-**`layout` is a TOP-LEVEL spec field, not a page field** (live-verified
-2026-07-30): nesting it under `pages[].layout` (what the `sigma-workbooks`
-docs' phrasing "`layout` is a page-level property" reads as, at first
-glance) is silently ignored — no error, Sigma just falls back to its own
-auto-arrange (a single stacked column, every element full-width). The XML
-string itself still wraps each page's elements in a `<Page id="...">` tag;
-it's the JSON *placement* of that string that must be `spec.layout`, a
-sibling of `pages`, not `spec.pages[N].layout`.
+> **The two specs diverge here as of 2026-08-03: DM stays flat, workbook is
+> now `document`-wrapped.** DM's `schemaVersion` + `folderId` are still flat
+> at the request root, unchanged. The **workbook** POST/PUT/`verify` body now
+> nests `schemaVersion` (and `pages`/`kind`/`layout`) under a top-level
+> `document` key — `folderId` is the one field that stays outside it
+> (ownership metadata, not document content). The old flat workbook body
+> 400s fleet-wide. `convert_workbook.py` must emit the wrapped shape; don't
+> generalize the DM fixup to the workbook path.
+
+**`layout` is a spec field on `document`, not a page field** (live-verified
+2026-07-30, wrapper confirmed live 2026-08-03): nesting it under
+`pages[].layout` (what the `sigma-workbooks` docs' phrasing "`layout` is a
+page-level property" reads as, at first glance) is silently ignored — no
+error, Sigma just falls back to its own auto-arrange (a single stacked
+column, every element full-width). The XML string itself still wraps each
+page's elements in a `<Page id="...">` tag; it's the JSON *placement* of
+that string that must be `spec.document.layout`, a sibling of
+`document.pages`, not `spec.document.pages[N].layout` (and, pre-wrapper,
+never `spec.pages[N].layout` either).
 
 **Chart axes need an explicit `sort`, or Sigma defaults to alphabetical**
 (live-verified 2026-07-30): without `xAxis.sort` (cartesian) or

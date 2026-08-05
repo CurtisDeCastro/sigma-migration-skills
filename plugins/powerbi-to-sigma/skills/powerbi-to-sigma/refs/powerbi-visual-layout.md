@@ -10,8 +10,10 @@
 
 ## 1. Target — what Sigma's layout expects
 
-The `tableau-to-sigma` skill's Phase 5d generates a single top-level `layout` XML
-string on the workbook spec. The grid is fixed:
+The `tableau-to-sigma` skill's Phase 5d generates a single `layout` XML string on the
+workbook spec's `document` object (the workbook body is `document`-wrapped as of
+2026-08-03 — `schemaVersion`/`pages`/`kind`/`layout` all nest there; DM specs are
+unaffected and stay flat). The grid is fixed:
 
 - 24 columns (`gridTemplateColumns="repeat(24, 1fr)"`), span notation `1 / 25` = full width
 - Auto-sized rows; conventional row units (KPI ≈ 6–9 rows, half-width chart ≈ 12–13 rows, table ≈ 15–20 rows)

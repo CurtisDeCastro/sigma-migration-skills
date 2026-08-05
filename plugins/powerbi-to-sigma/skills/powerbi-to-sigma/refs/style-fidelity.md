@@ -19,6 +19,12 @@ captures the signals, the builder emits the Sigma equivalents. No UI editing.
 ## What's emitted (build-workbook-from-pbir.rb)
 
 ### 1. Workbook theme (`lib/pbi_theme.rb`)
+> The workbook spec is `document`-wrapped, not flat: `schemaVersion`/`pages`/`kind`/
+> `layout`/`settings`/`agents` all nest under a top-level `document` key (confirmed live
+> 2026-08-03, including on `/verify` 2026-08-04). The theme is workbook content, so it
+> travels inside `document` too — at `document.settings.theme`, not the request root.
+> Data-model specs are unaffected and stay flat.
+
 Every PBI migration emits a top-level `settings.theme.name: Light` + `settings.theme.overrides`:
 `hasCards: shown` (card chrome), `elementBorder` (subtle 1px), `borderRadius: round`,
 and `categoricalScheme` = the report theme's **data-color sequence**. The palette

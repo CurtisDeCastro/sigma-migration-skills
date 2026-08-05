@@ -164,8 +164,10 @@ panel JAQL → formulas via `jaql_expr.py`, filters → controls.
 
 **Layout comes over too.** Sisense's `layout.columns[]` (vertical strips →
 `cells[]` stacked → `subcells[]` side-by-side → `elements[]` by `widgetid`+px
-height) is translated into Sigma's top-level `layout` XML (24-col grid,
-`<LayoutElement gridColumn gridRow/>`). A real multi-column/subcell layout is
+height) is translated into Sigma's `layout` XML (24-col grid,
+`<LayoutElement gridColumn gridRow/>`), which lives on the workbook spec's
+`document` object (`document.layout` — the workbook body is `document`-wrapped
+as of 2026-08-03; DM specs are unaffected and stay flat). A real multi-column/subcell layout is
 ported **faithfully** — column %widths → proportional grid spans, side-by-side
 stays side-by-side. A degenerate single full-width stack (Sisense's default) is
 **auto-arranged** into something clean: leading KPIs flow into rows of up to 4

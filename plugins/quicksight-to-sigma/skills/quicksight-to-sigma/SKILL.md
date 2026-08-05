@@ -223,6 +223,12 @@ ruby scripts/build-workbook-from-quicksight.rb \
 ruby scripts/post-and-readback.rb --type workbook --spec wb-spec.json --out wb-readback.json
 ```
 
+> The workbook spec is `document`-wrapped, not flat: `schemaVersion`/`pages`/`kind`/
+> `layout`/`settings`/`agents` all nest under a top-level `document` key (confirmed live
+> 2026-08-03, including on `/verify` 2026-08-04). The theme is workbook content, so it
+> travels inside `document` too — at `document.settings.theme`, not the request root.
+> Data-model specs are unaffected and stay flat.
+
 **Color + style fidelity (theme).** QuickSight visual colors AND its card/big-number chrome are theme-driven and NOT in the definition export, so the builder reads `signals.json.theme` (resolved in Phase 2) and applies:
 - **Colors:** top-level `settings.theme.overrides.categoricalScheme` = the QS data-color palette (the ONLY spec path to pie/donut slice colors, and the palette for every categorical chart), plus `color:{by:single, value:<primaryColor>}` on single-measure bar/line/area (QuickSight paints those in the theme's primary data color), and `settings.theme.name:Dark` when the QS theme is dark.
 - **Card chrome:** QuickSight renders every tile as a bordered card, so `settings.theme.overrides.hasCards:shown` + `borderRadius:round` + a subtle `elementBorder` (light border skipped on dark themes) mirror that look theme-agnostically.

@@ -17,7 +17,7 @@
 | `429` on Tableau view image | Rate limited | Wait and retry |
 | Column fetch returns empty list | Response key is `entries`, not `columns` | Use `discover-warehouse-columns.rb` (handles this) |
 | PUT returns `invalid_request` with no field named | Read-only metadata fields included in PUT body | Use `put-layout.rb` (strips them) |
-| PUT returns `Invalid 1: schemaVersion, got undefined` | `schemaVersion` stripped from PUT body | Keep `schemaVersion`; the script preserves it |
+| PUT returns `Invalid 1: schemaVersion, got undefined` | `schemaVersion` stripped from PUT body — now `document.schemaVersion` on a workbook PUT (spec is `document`-wrapped as of 2026-08-03; DM PUT stays flat) | Keep `schemaVersion` (nested under `document` for a workbook); the script preserves it |
 | Layout PUT rejected, some elements not visible | `elementId=""` in layout XML | Script aborts on this; check the per-workbook layout config for nil IDs and guard with `.compact` |
 | Layout has elements stacked vertically | No layout XML provided, or wrong IDs | Read IDs from `wb-ids.json` (Phase 5c readback), not your spec |
 | KPI names invisible / truncated inside container | Inner `gridRow` smaller than container's outer span — `gridTemplateRows="auto"` does NOT expand | Set inner KPI `gridRow` end = container outer end |
