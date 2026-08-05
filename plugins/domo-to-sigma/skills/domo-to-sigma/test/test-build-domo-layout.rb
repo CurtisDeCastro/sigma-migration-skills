@@ -122,6 +122,94 @@ Dir.mktmpdir('domo-build-layout-rung1-companion') do |dir|
 end
 
 # ===========================================================================
+# F3 / blocker 3 (2026-08-05 batch-verify): pages.json's cardIds is unreliable
+# (GET /v1/pages/{id} reports cardIds: [] even for a page that genuinely owns
+# every card — domo-discover.rb's "Bug 1 (P0)"). When that happens and there
+# is exactly ONE page in scope, this file must fall back to that page's REAL
+# title — the SAME fallback build-workbook.rb's group_cards_by_page already
+# uses (see test-build-workbook.rb's own F3 tests) — not the literal
+# 'Overview'. Before this fix, build-domo-layout.rb still hard-coded
+# 'Overview' while build-workbook.rb had already been fixed to use the real
+# title, so load_chart_specs_companions'/load_chart_specs_controls' page-NAME
+# keyed lookup missed every companion/control: measured on the real cold run,
+# 50 zones w/ 5 companion KPIs (name-matched) vs 45 zones w/ 0 companion KPIs
+# (as-landed, before this fix). Reproduced at fixture scale below: a companion
+# KPI keyed under the page's real title in chart-specs.json must still reach
+# a zone even though pages.json's cardIds is empty.
+# ===========================================================================
+Dir.mktmpdir('domo-build-layout-f3-page-name') do |dir|
+  w = ->(name, obj) { File.write(File.join(dir, name), JSON.generate(obj)) }
+  w.call('cards.json', [
+    { 'id' => 'c1', 'title' => 'Revenue', 'chartType' => 'badge_vert_bar',
+      'x' => 0, 'y' => 0, 'w' => 100, 'h' => 30 },
+  ])
+  # Deliberately cardIds: [] (the real Domo shape) on a title that is NOT
+  # 'Overview' — the exact real-data mismatch (page 'Sample DataSets +
+  # Cards', pages.json's cardIds: []).
+  w.call('pages.json', [{ 'id' => 59931332, 'title' => 'Sample DataSets + Cards', 'cardIds' => [] }])
+  w.call('chart-specs.json', { 'pages' => [{ 'name' => 'Sample DataSets + Cards', 'elements' => [
+    { 'id' => 'el-c1', 'kind' => 'bar-chart', 'name' => 'Revenue' },
+    { 'id' => 'el-c1-summary', 'kind' => 'kpi-chart', 'name' => 'Total Revenue' },
+  ] }] })
+
+  env = { 'DOMO_DISCOVERY_DIR' => dir }
+  out = IO.popen(env, ['ruby', File.join(SCRIPTS, 'build-domo-layout.rb')], err: [:child, :out], &:read)
+  ok($?.success?, "build-domo-layout.rb exits 0 with an empty cardIds and a companion KPI keyed by the " \
+                   "page's real title\n#{out unless $?.success?}")
+
+  dashboards = JSON.parse(File.read(File.join(dir, 'dashboard-layout.json')))
+  ok(dashboards.none? { |d| d['dashboard'] == 'Overview' },
+     "the placeholder 'Overview' name is NOT used when there is exactly one real page in scope (F3)")
+  dash = dashboards.find { |d| d['dashboard'] == 'Sample DataSets + Cards' }
+  ok(dash, "the dashboard is named after the page's REAL title, not 'Overview' " \
+           "(dashboards seen: #{dashboards.map { |d| d['dashboard'] }.inspect})")
+  if dash
+    z_comp = dash['zones'].find { |z| z['id'].to_s == 'el-c1-summary' }
+    ok(z_comp, 'the companion KPI (chart-specs.json, keyed by the REAL page title) reaches a zone — ' \
+               "before this fix it was silently dropped (page-NAME mismatch: 'Overview' vs the real title)")
+    eq(z_comp['caption'], 'Total Revenue', 'the recovered companion zone is captioned with its own name') if z_comp
+  end
+end
+
+# ===========================================================================
+# F3 / blocker 3 cross-file consistency: build-workbook.rb's
+# group_cards_by_page and build-domo-layout.rb's group_cards_by_page_for_layout
+# MUST resolve the same default page name for the same pages.json input — a
+# mismatch here is exactly what silently drops layout zones (see above). Both
+# real functions are exercised directly (not re-implemented here) so a future
+# edit to either one's fallback logic that de-syncs them fails this test.
+# ===========================================================================
+# Both scripts independently assign OUT = ENV['DOMO_DISCOVERY_DIR'] || ... at
+# their own top level (same value, never read below) — requiring both in one
+# process trips Ruby's unconditional "already initialized constant" notice.
+# Silence just that, not real warnings from the assertions below.
+old_verbose = $VERBOSE
+$VERBOSE = nil
+require_relative '../scripts/build-workbook'
+require_relative '../scripts/build-domo-layout' # group_cards_by_page_for_layout lives here
+$VERBOSE = old_verbose
+
+[
+  ['single page, empty cardIds -> falls back to the page\'s real title',
+   [{ 'id' => 'card-1' }, { 'id' => 'card-2' }],
+   [{ 'id' => 59931332, 'title' => 'Sample DataSets + Cards', 'cardIds' => [] }]],
+  ['multiple pages, no reliable attribution -> both fall back to the honest Overview placeholder',
+   [{ 'id' => 'card-1' }, { 'id' => 'card-2' }],
+   [{ 'id' => 1, 'title' => 'Page One', 'cardIds' => [] }, { 'id' => 2, 'title' => 'Page Two', 'cardIds' => [] }]],
+  ['reliable cardIds present -> both honor the real per-page attribution identically',
+   [{ 'id' => 'card-1' }, { 'id' => 'card-2' }],
+   [{ 'id' => 1, 'title' => 'Page One', 'cardIds' => ['card-1'] }, { 'id' => 2, 'title' => 'Page Two', 'cards' => ['card-2'] }]],
+].each do |desc, cards, pages|
+  from_workbook = group_cards_by_page(cards, pages)
+  from_layout   = group_cards_by_page_for_layout(cards, pages)
+  eq(from_workbook.keys.sort, from_layout.keys.sort, "#{desc} — page names agree")
+  from_workbook.each do |pname, pcards|
+    eq(pcards.map { |c| c['id'] }.sort, Array(from_layout[pname]).map { |c| c['id'] }.sort,
+       "#{desc} — page '#{pname}' gets the SAME cards from both functions")
+  end
+end
+
+# ===========================================================================
 # Live-validation fix (refs/live-validation-2026-07-30.md): a real classic
 # Domo page's private read carries NO x/y/w/h at all — only a per-card
 # T-shirt size token (stacks['sizes']) and titled collections[] grouping
