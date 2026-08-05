@@ -301,6 +301,7 @@ jobs:
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-intake-offramp.rb
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-offramp-attribution.rb
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-pbi-flip-gate.rb
+            plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-control-flip-coderep-unwrap.rb
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-suite-registration.rb
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-verify-anchors.rb
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-viz-kind-catalog.rb

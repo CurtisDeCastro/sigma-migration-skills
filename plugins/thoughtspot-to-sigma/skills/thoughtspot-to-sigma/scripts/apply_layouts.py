@@ -17,6 +17,8 @@ Usage: python3 apply_layouts.py [--workdir DIR]   # all workbooks in <workdir>/m
 Env: SIGMA_BASE_URL, SIGMA_API_TOKEN, TS_WORKDIR (default for --workdir), TS_ROW_SCALE
 """
 import argparse, json, os, ssl, sys, urllib.request, urllib.error
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
+import code_rep  # workbook code-rep document-wrapper adapter (nested GET/PUT shape)
 _SSL = ssl._create_unverified_context()
 
 TS_GRID_COLS = 12                                   # ThoughtSpot Liveboard grid
@@ -234,7 +236,13 @@ def build_layout(spec, tiles=None, controls=None):
     return "\n".join(lines) + "\n", main, extra
 
 def apply(wb, tiles=None, controls=None):
-    spec = json.loads(req("GET", f"/v2/workbooks/{wb}/spec"))
+    # Workbook code-rep GETs nest pages/schemaVersion/layout under a top-level
+    # `document` key (live since 2026-08) — flatten metadata+document onto ONE
+    # dict so every spec["pages"]/spec["layout"] read below (and the eventual
+    # PUT, wrapped back at the wire boundary) sees the same flat shape this
+    # file always worked with.
+    raw = json.loads(req("GET", f"/v2/workbooks/{wb}/spec"))
+    spec = {**code_rep.metadata(raw), **code_rep.document(raw)}
     xml, main, extra = build_layout(spec, tiles=tiles, controls=controls)
     # idempotent: drop previously-injected band elements, then add this run's
     main["elements"] = [e for e in main["elements"]
@@ -246,7 +254,11 @@ def apply(wb, tiles=None, controls=None):
     for k in ("workbookId", "url", "ownerId", "createdBy", "updatedBy", "createdAt",
               "updatedAt", "latestDocumentVersion"):
         spec.pop(k, None)
-    resp = req("PUT", f"/v2/workbooks/{wb}/spec", json.dumps(spec))
+    # Workbook code-rep PUTs require the nested `document` envelope (verified
+    # live 2026-08-03/04: a flat body 400s) — wrap the flattened `spec` back
+    # up before sending it over the wire.
+    put_body = code_rep.wrap(code_rep.document(spec), code_rep.metadata(spec))
+    resp = req("PUT", f"/v2/workbooks/{wb}/spec", json.dumps(put_body))
     return "workbookId" in resp
 
 def main():

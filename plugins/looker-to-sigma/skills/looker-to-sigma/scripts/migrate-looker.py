@@ -77,6 +77,7 @@ from concurrent.futures import ThreadPoolExecutor
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 import scout_gate
+import code_rep  # workbook code-rep document-wrapper adapter (nested POST shape)
 from build_workbook import build_field_index, parse_join_aliases, disp, leaf
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -1002,7 +1003,11 @@ console.error('stats:', JSON.stringify(res.stats));
     wspec = json.load(open(wb_spec_path))
     wspec["name"] = f"{prefix}{dash['title']} (from Looker)"
     try:
-        resp = sigma("POST", "/v2/workbooks/spec", wspec)   # responds in YAML
+        # Workbook code-rep POSTs require the nested `document` envelope
+        # (verified live 2026-08-03/04: a flat body 400s) — wrap the
+        # build_workbook.py-produced flat spec before sending it over the wire.
+        post_body = code_rep.wrap(code_rep.document(wspec), code_rep.metadata(wspec))
+        resp = sigma("POST", "/v2/workbooks/spec", post_body)   # responds in YAML
     except RuntimeError as e:
         msg = str(e)
         dep = re.search(r"Dependency not found: '([^']+)'", msg)

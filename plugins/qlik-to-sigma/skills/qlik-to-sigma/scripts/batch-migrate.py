@@ -15,6 +15,8 @@ container/header spec elements). The spec elements MUST be in the POSTed spec or
 GridContainers are silently dropped.
 """
 import json, os, sys, urllib.request, subprocess, re, argparse
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
+import code_rep  # workbook code-rep document-wrapper adapter (nested POST shape)
 
 BASE=os.environ["SIGMA_BASE_URL"]; TOK=os.environ["SIGMA_API_TOKEN"]
 # Reuse an existing Sigma data model: set these to YOUR ids (from the data-model build
@@ -74,7 +76,11 @@ def build(app_name):
     xml,extra=auto_layout("pg-ov",[{"id":e["id"],"kind":e["kind"]} for e in elems],title=app_name)
     spec={"name":f"{app_name} → Sigma","folderId":FOLDER,"schemaVersion":1,
           "pages":[{"id":"pg-data","name":"Data","elements":[master]},{"id":"pg-ov","name":"Overview","elements":elems+extra}]}
-    res=post("/v2/workbooks/spec",spec)
+    # Workbook code-rep POSTs require the nested `document` envelope (verified
+    # live 2026-08-03/04: a flat body 400s) — wrap the flat spec built above
+    # before sending it over the wire.
+    post_body=code_rep.wrap(code_rep.document(spec),code_rep.metadata(spec))
+    res=post("/v2/workbooks/spec",post_body)
     if not res: return None
     wb=re.search(r'workbookId:\s*(\S+)',res)
     wb=wb.group(1) if wb else None

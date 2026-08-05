@@ -22,6 +22,9 @@ import sys
 import time
 import urllib.request
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
+import code_rep  # workbook code-rep document-wrapper adapter (nested GET/POST shape)
+
 BASE = os.environ.get("SIGMA_BASE_URL", "https://aws-api.sigmacomputing.com")
 TOKEN = os.environ.get("SIGMA_API_TOKEN") or sys.exit(
     'SIGMA_API_TOKEN not set — run: eval "$(scripts/get-token.sh)"')
@@ -100,10 +103,15 @@ def main():
     if st >= 300:
         raise SystemExit(f"spec GET failed {st}: {out[:300]}")
     try:
-        spec = json.loads(out)
+        raw_spec = json.loads(out)
     except json.JSONDecodeError:
         import yaml
-        spec = yaml.safe_load(out)
+        raw_spec = yaml.safe_load(out)
+    # Workbook code-rep GETs nest pages/schemaVersion under a top-level
+    # `document` key (live since 2026-08); a bare spec["pages"] read here was
+    # always a KeyError, so the report-name -> element-id map below never
+    # even ran.
+    spec = {**code_rep.metadata(raw_spec), **code_rep.document(raw_spec)}
     el_by_name = {}
     for pg in spec["pages"]:
         for el in pg["elements"]:

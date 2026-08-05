@@ -943,8 +943,15 @@ parity_ok = err_cols.empty? && entries.size.positive? && divergent.zero?
 $LOAD_PATH.unshift File.expand_path('lib', HERE)
 require 'layout_lint'
 require 'control_lint'
+require 'code_rep'
 live = Sigma.request(:get, "/v2/workbooks/#{WB_ID}/spec") rescue {}
-live_spec = live.is_a?(Hash) ? (live['spec'] || live) : {}
+# Workbook code-rep GETs nest pages/schemaVersion under a top-level `document`
+# key (live since 2026-08); LayoutLint.lint/ControlLint.lint|controls_report
+# expect a flat spec['pages'] (same "unwrap at the caller, not in the lib"
+# contract as the other LayoutLint/ControlLint callers). The old `live['spec']
+# || live` fallback here predates that shape and never matched a real
+# envelope key — replaced with the real adapter.
+live_spec = live.is_a?(Hash) ? Sigma::CodeRep.metadata(live).merge(Sigma::CodeRep.document(live)) : {}
 
 # 6d — layout-quality lint, gate 6 (scripts/lib/layout_lint.rb, shared —
 # vendored byte-identical across the migration plugins). Flags raw-id element

@@ -39,6 +39,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 import yaml, ts_common, apply_layouts, scout_gate
 import metric_binding as _mb    # shared DM-metric binder ([Metrics/<name>] over inline re-derive)
+import code_rep  # workbook code-rep document-wrapper adapter (nested POST shape)
 yaml.SafeLoader.add_constructor("tag:yaml.org,2002:value", lambda l, n: l.construct_scalar(n))
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -197,7 +198,11 @@ def build_dm(conv, name, folder):
     return dm, denorm_id, denorm_name
 
 def post_workbook(spec, wd):
-    resp = sigma("POST", "/v2/workbooks/spec", spec)
+    # Workbook code-rep POSTs require the nested `document` envelope (verified
+    # live 2026-08-03/04: a flat body 400s) — wrap the flat spec this
+    # converter builds before sending it over the wire.
+    post_body = code_rep.wrap(code_rep.document(spec), code_rep.metadata(spec))
+    resp = sigma("POST", "/v2/workbooks/spec", post_body)
     m = re.search(r'workbookId["\s:]+([0-9a-f-]{36})', resp)
     if not m:
         raise RuntimeError("workbook POST: " + resp[:300])

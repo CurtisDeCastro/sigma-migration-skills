@@ -1986,6 +1986,7 @@ begin
   require_relative 'lib/pbi_flip'
   require_relative 'lib/control_lint'
   require_relative 'lib/flip_gate'
+  require_relative 'lib/code_rep'
 rescue LoadError => e
   _flip_libs = false
   warn "   [WARN] Phase 6b: #{e.message} — re-vendor scripts/lib (SHA-1 discipline); control flip UNVERIFIED"
@@ -2009,7 +2010,16 @@ else
         _spec = (YAML.safe_load(_spec, permitted_classes: [Date, Time]) rescue nil)
       end
     end
-    n_controls = ControlLint.controls_report(_spec).length if _spec.is_a?(Hash)
+    if _spec.is_a?(Hash)
+      # Workbook code-rep GETs nest pages/schemaVersion under a top-level
+      # `document` key (live since 2026-08); ControlLint.controls_report
+      # expects a flat spec['pages'] (same "unwrap at the caller, not in the
+      # lib" contract as the other ControlLint callers) — a bare _spec here
+      # would always report 0 controls, silently skipping the runtime
+      # control-flip proof instead of running it.
+      _spec = Sigma::CodeRep.metadata(_spec).merge(Sigma::CodeRep.document(_spec))
+      n_controls = ControlLint.controls_report(_spec).length
+    end
   rescue StandardError => e
     warn "   [WARN] Phase 6b: could not fetch/parse the live spec to count controls (#{e.message})"
   end
