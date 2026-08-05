@@ -38,14 +38,17 @@ module SnowflakeDDL
       .uniq
   end
 
-  # Snowflake identifiers: unquoted names uppercase automatically and accept
-  # only [A-Za-z_][A-Za-z0-9_]*; a raw Domo column name with spaces/symbols
-  # is double-quoted verbatim instead of mangled, so column order stays 1:1
-  # with what the COPY step (snowflake_load.rb) positionally relies on.
+  # ALWAYS double-quote, so the identifier lands with the source's exact case.
+  # Snowflake case-folds an UNQUOTED identifier to upper case; that silently
+  # destroys the camelCase word boundary domo-to-sigma's DomoSigma.display_name
+  # splits on downstream ('IsClosed' -> 'Is Closed', but 'ISCLOSED' -> the
+  # single token 'ISCLOSED'), so a landed column stops matching the Domo-declared
+  # one and column_preflight.rb reports it missing. Quoting only the names that
+  # strictly require it — the previous behavior — meant multi-word camelCase
+  # columns broke while single-word and symbol-bearing ones happened to survive.
+  # Found live by the 48-card cold run against the real PDP DataSet (bead q5dz).
   def quote_identifier(name)
-    s = name.to_s
-    return s if s =~ /\A[A-Za-z_][A-Za-z0-9_]*\z/
-    "\"#{s.gsub('"', '""')}\""
+    "\"#{name.to_s.gsub('"', '""')}\""
   end
 
   # database/schema/table: plain strings already chosen by the caller
