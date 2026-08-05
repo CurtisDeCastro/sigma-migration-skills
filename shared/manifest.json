@@ -198,9 +198,11 @@
         "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/lib/degradation_ledger.rb",
         "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/lib/degradation_ledger.rb",
         "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/lib/degradation_ledger.rb",
-        "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/lib/degradation_ledger.rb"
+        "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/lib/degradation_ledger.rb",
+        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/lib/degradation_ledger.rb",
+        "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/lib/degradation_ledger.rb"
       ],
-      "note": "domo intentionally NOT a target — STANDING EXEMPTION (W2.23 decision, 2026-07-29, sibling of the evidence_ledger.rb note above): domo's gap here is main-inherited; the deliberate fan-out to domo happens for BOTH ledger sibs together (early Wave 3), with domo suites run — never as a sync-tooling accident."
+      "note": "W2.23's STANDING EXEMPTION for domo/hex was DISCHARGED 2026-08-05: this is the deliberate early-Wave-3 fan-out it called for — BOTH ledger sibs (this file + evidence_ledger.rb) added to domo and hex together, in one atomic commit, with domo's suites run — not a sync-tooling accident. Motivation: assert-phase6-ran.rb is vendored to 8 plugins but this lib was vendored to only 6, so on domo and hex the gate fell through to its legacy uncapped path (\"all gates pass — conversion may declare GREEN\") with no PR-14 verdict derivation — a GREEN there was strictly weaker than the same string from the 6 synced converters. Found while driving domo's 48-card cold run to a defensible gold verdict."
     },
     {
       "canonical": "shared/lib/control_lint.rb",
@@ -915,9 +917,11 @@
         "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/lib/evidence_ledger.rb",
         "plugins/cognos-to-sigma/skills/cognos-to-sigma/scripts/lib/evidence_ledger.rb",
         "plugins/gooddata-to-sigma/skills/gooddata-to-sigma/scripts/lib/evidence_ledger.rb",
-        "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/lib/evidence_ledger.rb"
+        "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/lib/evidence_ledger.rb",
+        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/lib/evidence_ledger.rb",
+        "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/lib/evidence_ledger.rb"
       ],
-      "note": "domo intentionally NOT a target — STANDING EXEMPTION (W2.23 decision, 2026-07-29; adjudicated R7/§3-A4): adding it materializes a new domo lib and activates real ledger writes in domo's gate script — a runtime behavior change to be taken deliberately as the scheduled early-Wave-3 two-sibling fan-out (this file + the main-inherited degradation_ledger.rb gap below, domo suites run in the same change); until then domo's assert-phase6-ran.rb uses its guarded inline ev_append fallback."
+      "note": "W2.23's STANDING EXEMPTION (adjudicated R7/§3-A4) was DISCHARGED 2026-08-05 — this is the scheduled early-Wave-3 two-sibling fan-out it described: this file AND degradation_ledger.rb added to domo and hex together, one atomic commit, domo suites run. It is a deliberate runtime behavior change: domo's assert-phase6-ran.rb previously used its guarded inline ev_append fallback and now writes the real ledger."
     },
     {
       "canonical": "shared/lib/export_pool.rb",
