@@ -3,8 +3,27 @@
 **Written:** 2026-08-03, same day as (and directly following) `docs/handoff/2026-08-03-domo-to-gold-track-e-done.md`.
 **Read first:** that doc — it's the "what's left" menu this session worked from. This doc reports what happened against that menu; it doesn't repeat rationale already covered there.
 
-**Beads:** `beads-sigma-kn8s`, `beads-sigma-nrml` — fixed, PR open, not yet merged (see below,
-don't close until merge). New beads filed this session: `beads-sigma-ou66`, `beads-sigma-fbqw`,
+> **Update — 2026-08-04, before this doc merged:** two corrections to what's below, plus a
+> sharpened pointer for whoever picks this up next.
+> 1. **`kn8s`/`nrml` are merged — but not via #606.** They landed as two separate PRs, **#604**
+>    and **#605**, both merged. PR **#606** (`fix/domo-beast-mode-lint-kn8s-nrml`, the *combined*
+>    fix this doc originally pointed at) is now **stale/superseded** — its content is already on
+>    `main` via #604/#605. It was never merged itself and should be **closed, not merged**
+>    (TJ to confirm/action — not done automatically here, per this repo's convention that
+>    closing a PR is a call for a human, not a session). Both beads are now **closed** to match
+>    reality.
+> 2. `main` has also picked up two unrelated merges since this doc was branched: **#608**
+>    (shared `code_rep` workbook document-wrapper adapter) and **#615** (sigma-authoring
+>    OpenAPI re-vendor). Neither touches `domo-to-sigma` — different workstream, no interaction
+>    with anything below. Flagging only so a fresh session isn't surprised by extra commits on
+>    `main` that this doc doesn't mention.
+> 3. **The next real step toward gold is `beads-sigma-2bj9`** (the data-landing gap below) — not
+>    the fidelity gaps or the gate-tooling gap. Those two are independent polish on the 3
+>    already-working Orders tiers; `2bj9` is what actually unblocks the 48-card cold-run
+>    milestone, which is the thing "gold" is measured against. Start there.
+
+**Beads:** `beads-sigma-kn8s`, `beads-sigma-nrml` — fixed, **merged** (via #604/#605 — see update
+above, not #606). New beads filed this session: `beads-sigma-ou66`, `beads-sigma-fbqw`,
 `beads-sigma-u07f`, `beads-sigma-2tkm`, `beads-sigma-2bj9`.
 
 ---
@@ -13,18 +32,21 @@ don't close until merge). New beads filed this session: `beads-sigma-ou66`, `bea
 
 | | |
 |---|---|
-| Track D — `kn8s` (`In(...)` lint false positive) | **Fixed**, PR [#606](https://github.com/twells89/sigma-migration-skills/pull/606), awaiting merge |
-| Track D — `nrml` (`WEEKDAY`→`DAYOFWEEK` rewrite) | **Fixed**, same PR #606 |
+| Track D — `kn8s` (`In(...)` lint false positive) | **Fixed & merged**, PR [#604](https://github.com/twells89/sigma-migration-skills/pull/604) (not #606 — see update above) |
+| Track D — `nrml` (`WEEKDAY`→`DAYOFWEEK` rewrite) | **Fixed & merged**, PR [#605](https://github.com/twells89/sigma-migration-skills/pull/605) (not #606 — see update above) |
 | Fidelity gaps (number-format, palette, line-markers) | **Beaded** (`ou66`, `fbqw`, `u07f`) — not fixed, evidence-only per the prior handoff's own recommendation |
 | Gate-tooling gap (domo parity never registers as gate-1) | **Beaded** (`2tkm`) — not fixed, cross-cutting shared-file scope |
 | The 48-card cold run | **Scoped, blocked** — real numbers measured (36 cards / 22 chart types, not 48/24), blocked immediately at the data layer by a newly-found, newly-beaded gap (`2bj9`): no landing path for the sample page's 10 non-warehouse DataSets |
 
 ---
 
-## 1. Track D closed out — PR #606 (awaiting merge)
+## 1. Track D closed out — merged via #604/#605 (originally attempted as one combined PR #606)
 
 Both of Track D's last two items (from the prior handoff's "roughly cheapest/most-diagnosed
-first" list) are fixed in one PR, `fix/domo-beast-mode-lint-kn8s-nrml`:
+first" list) were built together in one branch, `fix/domo-beast-mode-lint-kn8s-nrml` (PR #606),
+but ended up landing on `main` as two separate PRs instead — #604 (`kn8s`) and #605 (`nrml`).
+#606 itself is stale/superseded now; the fix content below is accurate, just read "#604/#605"
+wherever this section says "#606":
 
 - **`kn8s`**: `lint_formula`'s blanket `IN(` substring ban wrongly rejected Sigma's real
   `In([col], "a", "b")` function call. Replaced with shape-based detection
@@ -49,9 +71,10 @@ of self-corrected reasoning that's easy to rubber-stamp, and here the review ste
 Full plugin suite: 862 `ok:` assertions green (up from 844 pre-PR). Corpus check 2/2. Plugin
 version bumped 0.10.6 → 0.10.7. Governance hooks clean at push time.
 
-**Per this repo's PR-flow convention, this was NOT self-merged** — PR #606 is open for TJ's
-review. Both beads have a note pointing at the PR and are explicitly left **open** (not closed)
-until it actually merges — don't close them from this doc alone.
+**Per this repo's PR-flow convention, this was NOT self-merged** — it went through review as
+#604/#605, both now merged. Both beads (`kn8s`, `nrml`) are **closed** as of 2026-08-04. PR #606,
+the original combined-fix branch, is now redundant with what's on `main` and should be closed
+unmerged rather than merged (a call for a human, not automated here).
 
 ## 2. Fidelity gaps and the gate-tooling gap — now real beads, not just prose
 
@@ -110,22 +133,28 @@ The 48-card cold run itself remains not-yet-attempted; it's now gated on `2bj9`,
 
 ---
 
-## What's left for gold (updated menu)
+## What's left for gold (updated menu, re-ranked 2026-08-04)
 
-Unchanged from the prior handoff except: Track D is now fully closed (pending merge), the 3
-fidelity gaps + the gate-tooling gap have real beads, and the cold-run milestone has a concrete,
-sized blocker instead of being untouched.
+Track D is now fully closed (merged), the 3 fidelity gaps + the gate-tooling gap have real
+beads, and the cold-run milestone has a concrete, sized blocker instead of being untouched.
+Re-ranked so the critical path is unambiguous — `2bj9` is the actual next step, not a "someday":
 
-1. **Merge PR #606** (`kn8s`/`nrml`) — routine, just needs review.
-2. **`beads-sigma-2bj9`** (data-landing gap) — the actual next big piece of work if the cold-run
-   milestone is the priority. Comparable in size to the PBI `powerbi-import-to-snowflake` build.
-3. Fidelity gaps (`ou66`, `fbqw`, `u07f`) — each independently fixable without the landing skill,
-   since they only affect the 3 already-working Orders tiers' rendering, not new content.
-4. Gate-tooling gap (`2tkm`) — shared-file scope, same governance class as the already-merged
-   `co6m` fix; a natural follow-up PR reusing that same pattern.
-5. The 48-card cold run itself — blocked on #2 above; once landing exists, re-run the same
+1. **`beads-sigma-2bj9`** (data-landing gap) — **the next real step toward gold.** This is what
+   blocks the 48-card cold-run milestone; everything else in this list is independent of it.
+   Comparable in size to the PBI `powerbi-import-to-snowflake` build (extract → typed DDL →
+   Snowflake COPY → GRANT → Sigma connection sync → manifest), and Domo already has the raw
+   ingredient (`Domo.query_dataset`/`Domo.dataset_csv` in `scripts/lib/domo_rest.rb`) — a
+   `domo-import-to-snowflake` companion skill mirroring that shape is the natural build.
+2. The 48-card cold run itself — blocked on #1; once landing exists, re-run the same
    live-validation methodology the prior handoff documented (steps 1-5, unchanged) against the
-   real sample page instead of an authored one.
+   real sample page (id `59931332`) instead of an authored one.
+3. Close PR #606 (superseded by #604/#605 — see update at top) — small housekeeping, not on the
+   critical path.
+4. Fidelity gaps (`ou66`, `fbqw`, `u07f`) — each independently fixable without the landing skill,
+   since they only affect the 3 already-working Orders tiers' rendering, not new content. Doesn't
+   block gold; pick up opportunistically.
+5. Gate-tooling gap (`2tkm`) — shared-file scope, same governance class as the already-merged
+   `co6m` fix; a natural follow-up PR reusing that same pattern. Also doesn't block gold.
 
 ---
 
@@ -133,12 +162,18 @@ sized blocker instead of being untouched.
 
 No new environment setup this session — same `~/.sigma-migration/env` credentials, same
 `thomas-dev-1107913.domo.com` instance, same `~/wt-domo-*` persist-worktrees convention (this
-session's fix worktree: `~/wt-domo-beast-mode-lint`).
+session's fix worktree: `~/wt-domo-beast-mode-lint`; superseded by `~/wt-domo-kn8s-fix` and
+`~/wt-domo-nrml-fix`, the worktrees behind the #604/#605 PRs that actually merged).
+
+As of 2026-08-04, `main` is also ahead by two unrelated merges (#608 shared `code_rep` workbook
+document-wrapper adapter, #615 sigma-authoring OpenAPI re-vendor) — different workstream, doesn't
+touch anything in this doc.
 
 ---
 
 Related: `docs/handoff/2026-08-03-domo-to-gold-track-e-done.md` (prior session, the menu this one
-worked from), PR #606 (Track D fixes, open), beads `beads-sigma-kn8s`/`nrml` (fixed, open pending
-merge), `beads-sigma-ou66`/`fbqw`/`u07f` (fidelity gaps, open), `beads-sigma-2tkm` (gate-tooling
-gap, open, related-to `co6m`), `beads-sigma-2bj9` (data-landing gap, open, blocks the cold-run
-milestone).
+worked from), PR #604/#605 (Track D fixes, merged; #606 superseded, recommend closing unmerged),
+beads `beads-sigma-kn8s`/`nrml` (fixed, closed), `beads-sigma-ou66`/`fbqw`/`u07f` (fidelity gaps,
+open, non-blocking), `beads-sigma-2tkm` (gate-tooling gap, open, related-to `co6m`,
+non-blocking), **`beads-sigma-2bj9` (data-landing gap, open — the next real step toward gold,
+blocks the cold-run milestone)**.
