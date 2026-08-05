@@ -168,9 +168,16 @@ warn "  Data page: + #{helper_elements.size} hidden helper element(s) [#{helper_
 visible_pages = []
 if specs.is_a?(Hash) && specs['pages']
   specs['pages'].each do |p|
-    slug = p['name'].to_s.downcase
-    %w[ / ( ) %].each { |ch| slug = slug.tr(ch, '-') }
-    slug = slug.tr(' ', '-').gsub(/-+/, '-').sub(/^-/, '').sub(/-$/, '')[0..40]
+    # Sigma enforces /^[a-zA-Z0-9_-]{1,64}$/ on a page id. Squash anything
+    # outside that set — an ALLOWLIST, not a denylist: the previous
+    # hand-picked "/ ( ) %" list let other punctuation straight through, and a
+    # real Domo page title ("Sample DataSets + Cards") 400'd the whole workbook
+    # POST with `Invalid id format: 'page-sample-datasets-+-cards'`. Only
+    # surfaced once the page id started deriving from the REAL title instead of
+    # the hardcoded "Overview" placeholder.
+    slug = p['name'].to_s.downcase.gsub(/[^a-z0-9]+/, '-')
+                    .gsub(/-+/, '-').sub(/\A-/, '').sub(/-\z/, '')[0..40].to_s
+    slug = 'page' if slug.empty?   # a title of pure punctuation still needs an id
     visible_pages << {
       'id'       => "page-#{slug}",
       'name'     => p['name'],
@@ -242,6 +249,12 @@ end
 wb = {
   'name'          => opts[:name],
   'schemaVersion' => 1,
+  # The workbook code-rep surface nests non-metadata fields under `document`
+  # (lib/code_rep.rb) and requires `kind` INSIDE it: without this the POST 400s
+  # with `Expecting "workbook" at 0.document.0.3.kind but instead got: undefined`.
+  # 'kind' is one of CodeRep::DOC_KEYS, so declaring it at the top level here is
+  # what lands it inside the wrapper. Live-confirmed on the 36-card cold run.
+  'kind'          => 'workbook',
   'folderId'      => opts[:folder_id],
   'pages'         => [data_page] + visible_pages
 }

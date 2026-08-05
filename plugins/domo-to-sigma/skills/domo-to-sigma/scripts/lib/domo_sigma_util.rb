@@ -14,7 +14,7 @@ module DomoSigma
            .gsub(/([A-Z]+)([A-Z][a-z])/, '\1_\2')
            .gsub(/([A-Za-z])([0-9])/, '\1_\2')
            .gsub(/([0-9])([A-Za-z])/, '\1_\2')
-    s.split(%r{[_\s/]+}).reject(&:empty?).map { |w|
+    s.split(%r{[_\s/.]+}).reject(&:empty?).map { |w|
       # Upcase the FIRST character only — never String#capitalize, which also
       # LOWERCASES the remainder. A dot is not a split boundary, so a dotted
       # column arrives as one token that still holds an internal capital:
@@ -32,26 +32,24 @@ module DomoSigma
     }.join(' ')
   end
 
-  # The name to use INSIDE a warehouse-column formula reference,
-  # i.e. the X in "[TABLE/X]". Normally that is display_name — Sigma normalizes
-  # underscores, spaces and case when resolving a reference, so 'created_on',
-  # 'Created On', '_BATCH_ID_' and 'BATCH ID' all resolve to the same column
-  # (each verified against the live write API).
+  # Kept as the single named seam for "the name used INSIDE a formula
+  # reference", now that display_name itself can never emit a dot.
   #
-  # The ONE exception is a column whose raw name contains a DOT. There,
-  # display_name's camel-split injects a space and the combination of dot AND
-  # space stops resolving: for warehouse column 'Account.BillingState',
-  #   '[T/Account.Billing State]'  -> 400 dependency not found
-  #   '[T/Account.BillingState]'   -> resolves
-  #   '[T/Account Billing State]'  -> resolves
-  # (all three probed live; case is irrelevant, the dot+space pairing is not).
-  # So for a dotted name we emit the raw warehouse name verbatim, which is the
-  # form Sigma's own catalog reports and is proven to resolve. The human-facing
-  # column `name` still uses display_name — only the reference changes.
-  # Bead xo56, found when the 36-card cold run 400'd the whole data-model POST.
+  # Why the dot matters: Sigma resolves a reference case-insensitively and
+  # treats underscore and space as equivalent ('created_on' == 'Created On',
+  # '_BATCH_ID_' == 'BATCH ID' — both probed live), but a name carrying BOTH a
+  # dot AND a space does NOT resolve:
+  #   '[T/Account.Billing State]' -> 400 dependency not found
+  #   '[T/Account Billing State]' -> resolves
+  #   '[T/Account.BillingState]'  -> resolves
+  # display_name used to produce the first form for a dotted warehouse column
+  # like 'Account.BillingState', which 400'd BOTH the data-model POST (against
+  # the warehouse column) and then the workbook POST (against the master
+  # element's column of the same name). Splitting on '.' as well removes the
+  # dot entirely and yields the second, resolving form everywhere.
+  # Bead xo56, found on the 36-card cold run.
   def column_ref_name(raw)
-    s = raw.to_s
-    s.include?('.') ? s : display_name(s)
+    display_name(raw)
   end
 
   B62 = (('0'..'9').to_a + ('a'..'z').to_a + ('A'..'Z').to_a).freeze

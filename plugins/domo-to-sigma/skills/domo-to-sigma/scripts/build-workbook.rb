@@ -1010,6 +1010,104 @@ def retarget_to_submaster!(el, sm)
   el
 end
 
+# Sigma rejects a workbook whose element repeats a column id
+# ("pages[1].elements[1].columns[3].id: Duplicate id: 'm-engaged-users'").
+# mcol_id() derives an id from the DISPLAY NAME alone, so plotting the same
+# source column twice with DIFFERENT aggregations — a normal Domo combo /
+# scatter shape, e.g. Avg(Engaged Users) and Sum(Engaged Users) on one chart —
+# collapses both onto one id. Four real cards on the 36-card sample page hit
+# this; the 3 authored Orders pages never did because none plots one measure
+# twice.
+#
+# Keep the FIRST occurrence's id byte-identical (control filters and the
+# `order` array target it by name, so the primary column must stay stable) and
+# suffix only the later collisions. Rewrites `order` in lockstep, positionally,
+# so the renamed column keeps its slot.
+def uniquify_column_ids!(el)
+  return el unless el.is_a?(Hash)
+  cols = el['columns']
+  return el unless cols.is_a?(Array)
+  seen = Hash.new(0)
+  renames = []
+  cols.each do |c|
+    next unless c.is_a?(Hash) && c['id']
+    id = c['id']
+    seen[id] += 1
+    next if seen[id] == 1
+    fresh = "#{id}-#{seen[id]}"
+    fresh = "#{id}-#{seen[id] += 1}" while cols.any? { |o| o.is_a?(Hash) && o['id'] == fresh }
+    renames << [id, fresh]
+    c['id'] = fresh
+  end
+  return el if renames.empty?
+  # `order` mirrors `columns` everywhere this file builds an element
+  # ("'order' => cols.map { |c| c['id'] }"), so the correct repair is simply to
+  # re-derive it. Only do that when it really is a 1:1 mirror; if some caller
+  # ever ships a partial or reordered list, leave it alone rather than
+  # silently rewriting an intent we do not understand.
+  if el['order'].is_a?(Array) && el['order'].length == cols.length
+    el['order'] = cols.map { |c| c.is_a?(Hash) ? c['id'] : c }
+  elsif el['order'].is_a?(Array)
+    warn "  ⚠ #{el['name'].inspect}: deduped #{renames.length} duplicate column id(s) " \
+         "but 'order' (#{el['order'].length}) does not mirror 'columns' (#{cols.length}) — " \
+         "left as-is; verify the element's column order after POST."
+  end
+  el
+end
+
+# Sigma rejects an element that puts ONE column on two channels:
+# "Column 'm-uniqueclicks' is referenced from both 'yAxis' and 'size'; a column
+# can only be on one channel at a time". Domo happily sizes a scatter/bubble by
+# the same measure it plots on an axis (real card "Top Performing Subjects":
+# Unique Clicks on both yAxis and size), so this is a shape difference, not bad
+# input.
+#
+# Resolve it by giving the SECONDARY channel its own duplicate column rather
+# than dropping the channel — dropping would silently lose the bubble sizing,
+# which is real information the source encoded. Axes win; size/color get the
+# copy. The duplicate reuses the original's formula, so it evaluates
+# identically.
+SECONDARY_CHANNELS = %w[size color].freeze
+
+def resolve_channel_collisions!(el)
+  return el unless el.is_a?(Hash)
+  cols = el['columns']
+  return el unless cols.is_a?(Array)
+
+  axis_ids = []
+  %w[xAxis yAxis].each do |ax|
+    a = el[ax]
+    next unless a.is_a?(Hash)
+    axis_ids << a['columnId'] if a['columnId']
+    axis_ids.concat(Array(a['columnIds']))
+  end
+  axis_ids = axis_ids.compact.uniq
+  return el if axis_ids.empty?
+
+  SECONDARY_CHANNELS.each do |ch|
+    c = el[ch]
+    next unless c.is_a?(Hash)
+    key = c.key?('columnId') ? 'columnId' : (c.key?('id') ? 'id' : nil)
+    next unless key
+    ref = c[key]
+    next unless axis_ids.include?(ref)
+
+    src = cols.find { |x| x.is_a?(Hash) && x['id'] == ref }
+    next unless src   # dangling ref — leave it for the ref-resolution gate to flag
+
+    fresh = "#{ref}-#{ch}"
+    n = 1
+    fresh = "#{ref}-#{ch}#{n += 1}" while cols.any? { |x| x.is_a?(Hash) && x['id'] == fresh }
+    cols << src.merge('id' => fresh)
+    el['order'] << fresh if el['order'].is_a?(Array)
+    c[key] = fresh
+    warn "  note: #{el['name'].inspect} had #{ref.inspect} on both an axis and '#{ch}' — " \
+         "duplicated it as #{fresh.inspect} so both channels keep their meaning " \
+         "(Sigma allows a column on only one channel)."
+  end
+  el
+end
+
 def build_element(card, overrides, master_ds = nil)
   ds = card['datasetId'].to_s
   routed = master_ds && !ds.empty? && ds != master_ds
@@ -1027,6 +1125,8 @@ def build_element(card, overrides, master_ds = nil)
 
   before = $companion_elements.length
   el = build_element_body(card, overrides)
+  uniquify_column_ids!(el)
+  resolve_channel_collisions!(el)
   if el.nil?
     # C1 (final review, promoted from a deferred Task-5 minor to BLOCKING): a
     # card whose primary element failed to build must not leave behind an

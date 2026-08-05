@@ -22,9 +22,9 @@ eq(display_name(display_name('order_date')), 'Order Date', 'idempotent (case-saf
 # String#capitalize would lowercase its remainder ('Account.Billing' ->
 # 'Account.billing'), emitting a formula reference Sigma cannot resolve and
 # 400ing the whole data-model POST. Live-found on the 36-card cold run.
-eq(display_name('Account.BillingState'), 'Account.Billing State', 'dotted camelCase keeps its internal capital (xo56)')
-eq(display_name('Account.BillingCountry'), 'Account.Billing Country', 'second dotted camelCase column')
-eq(display_name('Account.Name'), 'Account.Name', 'dotted single-word column unchanged')
+eq(display_name('Account.BillingState'), 'Account Billing State', 'dot is a word separator — no dot survives (xo56)')
+eq(display_name('Account.BillingCountry'), 'Account Billing Country', 'second dotted camelCase column')
+eq(display_name('Account.Name'), 'Account Name', 'dotted single-word column loses its dot too')
 eq(display_name('IsWon'), 'Is Won', 'plain camelCase still splits (Sigma does too)')
 
 puts "== build_element =="
