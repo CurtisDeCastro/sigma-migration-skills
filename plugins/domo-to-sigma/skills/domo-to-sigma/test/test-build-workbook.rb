@@ -98,14 +98,18 @@ r0 = build_element({ 'id' => 'c6', 'title' => 'One Number', 'chartType' => 'badg
                      'summaryNumber' => { 'column' => 'total', 'aggregation' => 'SUM' } }, {})
 eq(r0['kind'], 'kpi-chart', 'summary-number table card → KPI, not a grid')
 
-puts "== #2 controls: one per distinct filter column, bound to shared master =="
+puts "== B4: build_controls no longer manufactures a page control from CARD-level filters =="
+# This used to turn every distinct `card['filters'][].column` into a
+# page-level `list` control with NO values — 3 spurious workbook-wide
+# controls the source page never had, per the 2026-08-05 cold-run audit.
+# Card-level filters now become ELEMENT filters instead (see the B4 tests
+# below) — build_controls is reserved for a genuine Domo PAGE filter, which
+# does not exist in any real discovered data yet.
 ctrls = build_controls([
   { 'id' => 'a', 'filters' => [{ 'column' => 'region', 'operator' => 'IN', 'values' => %w[W E] }] },
   { 'id' => 'b', 'filters' => [{ 'column' => 'region' }, { 'column' => 'status' }] },
 ])
-eq(ctrls.size, 2, 'deduped to distinct filter columns (region, status)')
-eq(ctrls[0]['filters'], [{ 'source' => { 'kind' => 'table', 'elementId' => 'master' }, 'columnId' => 'm-region' }],
-   'control binds to master column → fans out to every element (fixes fall-off)')
+eq(ctrls, [], 'no spurious page control emitted for card-level filters (B4)')
 
 puts "== Phase-5 geometry gate: warn when a page's cards carry no x/y =="
 $warnings = []
@@ -409,17 +413,20 @@ skipped = build_element({ 'id' => 'c26', 'title' => 'Orphan Dataset Card', 'char
 ok(skipped.nil?, 'still nil when no live DM element is resolvable for the DataSet (unchanged fallback)')
 ok($warnings.any? { |w| w['warning'].include?('SKIPPED') }, 'still warns loudly on fallback')
 
-puts "== bead ziht: build_controls skips (warns) a filter bound to a non-dominant DataSet\'s column " \
-     'rather than 400ing the whole POST binding it to the wrong master =='
+puts "== B4: build_controls stays a no-op regardless of dataset mix or master_ds =="
+# (Superseded case: this used to test that a filter bound to a non-dominant
+# DataSet's column was SKIPPED as a control, to avoid 400ing the whole POST
+# by binding it to the wrong master. Card-level filters no longer become
+# controls at all — see apply_card_filters! / build_element for how a
+# sub-master-routed card's OWN filters are now handled, entirely independent
+# of the shared master.)
 $warnings = []
 ctrls2 = build_controls([
   { 'id' => 'c27', 'datasetId' => 'ds-fact', 'filters' => [{ 'column' => 'region' }] },
   { 'id' => 'c28', 'datasetId' => 'ds-dim',  'filters' => [{ 'column' => 'segment' }] },
 ], 'ds-fact')
-eq(ctrls2.size, 1, 'only the dominant-dataset filter becomes a control')
-eq(ctrls2.first['controlId'], 'Region', 'the surviving control is the dominant-dataset one')
-ok($warnings.any? { |w| w['warning'].include?('control filter') && w['warning'].include?('SKIPPED') },
-   'the non-dominant control is reported, not silently dropped')
+eq(ctrls2, [], 'still no controls, dominant dataset or not')
+ok($warnings.empty?, 'no warnings either — there is nothing to skip')
 
 puts "== bead 08sf: a chart/table card with a summaryNumber gets a companion KPI via " \
      'build_element, not just a warning =='
@@ -547,6 +554,225 @@ override_kpi = build_kpi({ 'id' => 'c34', 'title' => 'Margin % by Channel',
                                                 '_isCalc' => true } },
                          { 'c34' => { 'column' => 'net_revenue', 'aggregation' => 'SUM' } })
 eq(override_kpi['columns'][0]['formula'], 'Sum([Master/Net Revenue])', 'override still wins over the calc inlining')
+
+puts "== B4 (real-data shape): a card-level filter on a column the card does NOT already " \
+     'plot becomes an ELEMENT filter with its real values, on a new HIDDEN column =='
+# Mirrors the real "Projected Sales" card (1eb93e0f dataset, chartType
+# badge_trendline) from the 2026-08-05 cold run: columns CalendarQuarter/
+# Amount, filters: [{"column":"IsWon","operator":"LEGACY","values":["true"]}].
+$warnings = []
+$companion_elements = []
+projected_sales = build_element({
+  'id' => '1998254736', 'title' => 'Projected Sales', 'chartType' => 'badge_trendline',
+  'sigmaKindHint' => 'line-chart',
+  'columns' => [ { 'column' => 'CalendarQuarter', 'mapping' => 'ITEM' },
+                 { 'column' => 'Amount', 'aggregation' => 'SUM', 'mapping' => 'VALUE' } ],
+  'filters' => [ { 'column' => 'IsWon', 'operator' => 'LEGACY', 'values' => ['true'] } ],
+}, {})
+eq(projected_sales['kind'], 'line-chart', 'still the expected chart kind')
+ok(projected_sales.key?('filters'), 'the card filter produced an element filter (it used to produce NOTHING)')
+flt = projected_sales['filters'].find { |f| f['values'] == ['true'] }
+ok(!flt.nil?, 'the filter carries the REAL value ["true"] — not dropped, not empty (B4 core fix)')
+eq(flt['kind'], 'list', "LEGACY (Domo's classic 'value is one of' filter) maps to a list filter")
+eq(flt['mode'], 'include', 'LEGACY maps to include, not exclude')
+hidden_col = projected_sales['columns'].find { |c| c['id'] == flt['columnId'] }
+ok(!hidden_col.nil?, 'the filter targets a real column present in the element\'s own columns array')
+eq(hidden_col['formula'], '[Master/Is Won]', 'the new column references the master, display-named IsWon -> Is Won')
+eq(hidden_col['hidden'], true, "the filter-only column is marked hidden — IsWon wasn't a plotted dim/measure")
+ok(projected_sales['columns'].size == 3, 'exactly one new column was added (2 plotted + 1 hidden filter column)')
+
+puts "== B4: a filter on a column the card ALREADY plots reuses that column — no duplicate =="
+# Mirrors the real "Top Salespeople" card: columns IsWon/Amount/Owner.Name/
+# Amount, filters: [{"column":"IsWon",...,"values":["true"]}].
+$warnings = []
+$companion_elements = []
+top_salespeople = build_element({
+  'id' => '2071758146', 'title' => 'Top Salespeople', 'chartType' => 'badge_bubble',
+  'sigmaKindHint' => 'scatter-chart',
+  'columns' => [ { 'column' => 'IsWon', 'mapping' => 'ITEM' },
+                 { 'column' => 'Amount', 'aggregation' => 'SUM', 'mapping' => 'VALUE' } ],
+  'filters' => [ { 'column' => 'IsWon', 'operator' => 'LEGACY', 'values' => ['true'] } ],
+}, {})
+before_size = top_salespeople['columns'].size
+flt2 = top_salespeople['filters'].find { |f| f['values'] == ['true'] }
+dim_col_for_iswon = top_salespeople['columns'].find { |c| c['id'] == 'd-iswon' }
+ok(!dim_col_for_iswon.nil?, 'IsWon is plotted as the dimension column, id d-iswon')
+eq(flt2['columnId'], 'd-iswon', 'the filter reuses the EXISTING dimension column\'s id, not a new hidden one')
+eq(before_size, 2, 'no extra column was appended — reuse, not duplication')
+
+puts "== B4: an operator with no faithful Sigma translation is dropped LOUDLY, never silently =="
+$warnings = []
+$companion_elements = []
+weird_op = build_element({
+  'id' => 'c40', 'title' => 'Big Deals', 'chartType' => 'badge_vert_bar', 'sigmaKindHint' => 'bar-chart',
+  'columns' => [ { 'column' => 'region' }, { 'column' => 'amount', 'aggregation' => 'SUM' } ],
+  'filters' => [ { 'column' => 'amount', 'operator' => 'BETWEEN', 'values' => [100, 500] } ],
+}, {})
+ok(!weird_op.key?('filters'), 'BETWEEN has no list-filter translation here — nothing was emitted')
+ok($warnings.any? { |w| w['warning'].include?("card filter on 'amount' dropped") && w['warning'].include?('BETWEEN') },
+   'the drop is reported by name — never a silent loss (per refs/card-to-element.md\'s "diff the filter inventory")')
+
+puts "== B4: a filter on a translated (even mis-classified) Beast Mode inlines its formula, " \
+     'like inline_beast_mode_measure does for a measure =='
+# Mirrors the real card 1267439679's second filter clause: column
+# "calculation_ea1150fd-..." ("State"), values [""].
+$warnings = []
+$companion_elements = []
+$translated_bms = {
+  'calculation_ea1150fd' => { 'id' => 'calculation_ea1150fd', 'name' => 'State', 'class' => 'aggregate',
+                              'sigmaFormula' => 'If(Equals([Account.BillingState], "CA"), "California", "Other")' },
+}
+calc_filter_card = build_element({
+  'id' => '1267439679', 'title' => 'PDP Example', 'chartType' => 'badge_map', 'sigmaKindHint' => nil,
+  'columns' => [ { 'column' => 'State' }, { 'column' => 'Name' } ],
+  'filters' => [ { 'column' => 'calculation_ea1150fd', 'operator' => 'LEGACY', 'values' => [''] } ],
+}, {})
+ok(!calc_filter_card.nil?, 'card still builds (State classifies as a us-state region-map geography)')
+flt3 = calc_filter_card['filters'].find { |f| f['values'] == [''] }
+ok(!flt3.nil?, 'the calc-id filter clause produced a real filter, values carried as-is')
+calc_col = calc_filter_card['columns'].find { |c| c['id'] == flt3['columnId'] }
+eq(calc_col['name'], 'State', 'the new column takes the Beast Mode\'s real name, not the raw calc id')
+eq(calc_col['formula'], 'If(Equals([Master/Account.BillingState], "CA"), "California", "Other")',
+   'the Beast Mode formula is INLINED and masterized — not Sum([Master/State]), which does not exist')
+$translated_bms = nil
+
+puts "== B4: a filter on an UNTRANSLATED Beast Mode is dropped LOUDLY, mirroring " \
+     'prune_unresolvable_columns! for ordinary data columns =='
+$warnings = []
+$companion_elements = []
+$translated_bms = {}
+untranslated = build_element({
+  'id' => 'c41', 'title' => 'US Leads', 'chartType' => 'badge_map', 'sigmaKindHint' => nil,
+  'columns' => [ { 'column' => 'Account.BillingState' }, { 'column' => 'Name' } ],
+  'filters' => [ { 'column' => 'calculation_deadbeef', 'operator' => 'LEGACY', 'values' => ['x'] } ],
+}, {})
+ok(!untranslated.nil?, 'card still builds')
+ok(!untranslated.key?('filters') || untranslated['filters'].none? { |f| f['values'] == ['x'] },
+   'the untranslated calc filter was never emitted')
+ok($warnings.any? { |w| w['warning'].include?("card filter on 'calculation_deadbeef' dropped") &&
+                        w['warning'].include?('Beast Mode did not translate') },
+   'dropped loudly, naming the reason (never a silent loss)')
+$translated_bms = nil
+
+puts "== B4: pivot-table element filters are a documented Sigma silent-drop trap — " \
+     'warn and do NOT emit rather than ship a filter Sigma will ignore =='
+$warnings = []
+$companion_elements = []
+pivot_card = build_element({
+  'id' => 'c42', 'title' => 'Sales Pivot', 'chartType' => 'badge_pivottable', 'sigmaKindHint' => 'pivot-table',
+  'columns' => [ { 'column' => 'region' }, { 'column' => 'quarter' }, { 'column' => 'amount', 'aggregation' => 'SUM' } ],
+  'filters' => [ { 'column' => 'region', 'operator' => 'LEGACY', 'values' => ['West'] } ],
+}, {})
+eq(pivot_card['kind'], 'pivot-table', 'still a pivot-table element')
+ok(!pivot_card.key?('filters'), 'the filter was NOT attached to the pivot-table element (Sigma silently drops it there)')
+ok($warnings.any? { |w| w['warning'].include?('NOT applied') && w['warning'].include?('pivot-table') },
+   'the pivot-table trap is flagged loudly instead of shipping an ignored filter')
+
+puts "== B4: the companion KPI (bead 08sf) carries the SAME card filters as its primary " \
+     'element — Domo\'s Summary Number is scoped to the same card-level filters =='
+$warnings = []
+$companion_elements = []
+with_companion = build_element({
+  'id' => 'c43', 'title' => 'Revenue by Channel (Won only)', 'chartType' => 'badge_vert_bar',
+  'sigmaKindHint' => 'bar-chart',
+  'columns' => [ { 'column' => 'channel' }, { 'column' => 'net_revenue', 'aggregation' => 'SUM' } ],
+  'summaryNumber' => { 'column' => 'net_revenue', 'aggregation' => 'SUM', 'label' => 'Total Revenue' },
+  'filters' => [ { 'column' => 'IsWon', 'operator' => 'LEGACY', 'values' => ['true'] } ],
+}, {})
+ok(!with_companion.nil?, 'primary element built')
+eq($companion_elements.size, 1, 'companion KPI built')
+comp = $companion_elements.first
+ok(comp.key?('filters'), 'the companion KPI ALSO carries an element filter')
+comp_flt = comp['filters'].find { |f| f['values'] == ['true'] }
+ok(!comp_flt.nil?, 'same filter, same real value, on the companion too — no unfiltered total beside a filtered chart')
+
+puts "== F3: page name resolution falls back to the page's REAL title, not the literal " \
+     "'Overview', when cardIds/cards is empty and there is exactly ONE page in scope =="
+# Mirrors the real 2026-08-05 cold run: page 'Sample DataSets + Cards' (id
+# 59931332) reports cardIds: [] while genuinely owning all 36 cards.
+real_page = [{ 'id' => 59931332, 'title' => 'Sample DataSets + Cards', 'cardIds' => [] }]
+real_cards = [{ 'id' => 'card-1' }, { 'id' => 'card-2' }]
+grouped = group_cards_by_page(real_cards, real_page)
+eq(grouped.keys, ['Sample DataSets + Cards'], 'the single real page\'s own title is used, not "Overview"')
+eq(grouped['Sample DataSets + Cards'].size, 2, 'both cards attributed to it')
+
+puts "== F3: multiple pages with no reliable cardIds attribution keep the honest " \
+     "'Overview' placeholder — guessing which page owns which card would be worse =="
+ambiguous_pages = [{ 'id' => 1, 'title' => 'Page One', 'cardIds' => [] },
+                   { 'id' => 2, 'title' => 'Page Two', 'cardIds' => [] }]
+grouped2 = group_cards_by_page(real_cards, ambiguous_pages)
+eq(grouped2.keys, ['Overview'], 'falls back to the placeholder rather than mis-attributing to one of two pages')
+
+puts "== F3: cardIds/cards, when actually populated, still take priority over any fallback =="
+reliable_pages = [{ 'id' => 1, 'title' => 'Page One', 'cardIds' => ['card-1'] },
+                  { 'id' => 2, 'title' => 'Page Two', 'cards' => ['card-2'] }]
+grouped3 = group_cards_by_page(real_cards, reliable_pages)
+eq(grouped3.keys.sort, ['Page One', 'Page Two'], 'real per-page attribution is honored when present')
+eq(grouped3['Page One'].map { |c| c['id'] }, ['card-1'], 'card-1 -> Page One via cardIds')
+eq(grouped3['Page Two'].map { |c| c['id'] }, ['card-2'], 'card-2 -> Page Two via cards')
+
+puts "== F4: badge_filledgauge's NO_NATIVE_EQUIVALENT warning fires even when Rule 0 " \
+     'short-circuits straight to build_kpi (sigmaKindHint == "kpi-chart", the REAL shape ' \
+     'domo-discover.rb\'s sigma_kind_hint produces for every gauge card) =='
+$warnings = []
+$companion_elements = []
+real_gauge = build_element({
+  'id' => '983053598', 'title' => 'Quota Attainment', 'chartType' => 'badge_filledgauge',
+  'sigmaKindHint' => 'kpi-chart',   # verified real shape: sigma_kind_hint substring-matches 'gauge'
+  'summaryNumber' => { 'column' => 'attainment', 'aggregation' => 'SUM', 'label' => 'Attainment' },
+  'columns' => [ { 'column' => 'attainment', 'aggregation' => 'SUM' } ],
+}, {})
+eq(real_gauge['kind'], 'kpi-chart', 'Rule 0 still degrades it to a KPI (that part was always correct)')
+ok($warnings.any? { |w| w['warning'].include?('no native Sigma equivalent') && w['warning'].include?('gauge') },
+   'the honest NO_NATIVE_EQUIVALENT warning ALSO fires on this path (F4 — it used to be swallowed here)')
+
+puts "== F4: the warning fires exactly once per card, not duplicated on the non-Rule-0 path =="
+$warnings = []
+$companion_elements = []
+gauge_via_case = build_element({
+  'id' => 'c44', 'title' => 'Other Gauge', 'chartType' => 'badge_filledgauge', 'sigmaKindHint' => nil,
+  'summaryNumber' => { 'column' => 'attainment', 'aggregation' => 'SUM' },
+  'columns' => [ { 'column' => 'attainment', 'aggregation' => 'SUM' }, { 'column' => 'target', 'aggregation' => 'SUM' } ],
+}, {})
+eq(gauge_via_case['kind'], 'kpi-chart', 'still resolves to kpi-chart via the case-statement path (not Rule 0)')
+gauge_warnings = $warnings.select { |w| w['warning'].include?('no native Sigma equivalent') && w['warning'].include?('gauge') }
+eq(gauge_warnings.size, 1, 'exactly one NO_NATIVE_EQUIVALENT warning — never double-fired')
+
+puts "== B4 + bead ziht: a card-level filter on a SUB-MASTER-routed card is retargeted " \
+     'to that sub-master\'s namespace, just like every other column — never left ' \
+     'pointing at the shared "[Master/...]" it does not source from =='
+Dir.mktmpdir do |dir|
+  dm_spec_path = File.join(dir, 'dm-spec.json')
+  dm_ids_path  = File.join(dir, 'dm-ids.json')
+  File.write(dm_spec_path, JSON.generate('pages' => [{ 'elements' => [
+    { 'id' => 'el-dim-1', 'name' => 'Customer Dim', '_datasetId' => 'ds-dim' },
+  ] }]))
+  File.write(dm_ids_path, JSON.generate('dataModelId' => 'dm-live-1', 'pages' => [{ 'elements' => [
+    { 'id' => 'el-dim-1', 'name' => 'Customer Dim', 'columnLabels' => ['Region', 'Segment'] },
+  ] }]))
+  stub_const('DM_SPEC_PATH', dm_spec_path) do
+    stub_const('DM_IDS_PATH', dm_ids_path) do
+      $ds_element_map = nil
+      $sub_masters = {}
+      $warnings = []
+      $companion_elements = []
+      routed_filtered = build_element({
+        'id' => 'c45', 'title' => 'Customers by Region', 'chartType' => 'badge_table',
+        'sigmaKindHint' => 'table', 'datasetId' => 'ds-dim',
+        'columns' => [ { 'column' => 'region' } ],
+        'filters' => [ { 'column' => 'segment', 'operator' => 'LEGACY', 'values' => ['Enterprise'] } ],
+      }, {}, 'ds-fact')
+      ok(!routed_filtered.nil?, 'card is not skipped — the sub-master is resolvable')
+      eq(routed_filtered['source'], { 'kind' => 'table', 'elementId' => 'master-ds-dim' }, 'sourced from its own sub-master')
+      flt = routed_filtered['filters'].find { |f| f['values'] == ['Enterprise'] }
+      ok(!flt.nil?, 'the card filter still produced an element filter even though it never touches the shared master')
+      seg_col = routed_filtered['columns'].find { |c| c['id'] == flt['columnId'] }
+      eq(seg_col['formula'], '[Master (Customer Dim)/Segment]',
+         'the new filter column was retargeted to the SUB-MASTER\'s own namespace, not left as ' \
+         '"[Master/Segment]" (which does not exist for this card\'s element)')
+    end
+  end
+end
 
 puts
 if $failures.zero? then puts "ALL PASS"; exit 0 else puts "#{$failures} FAILURE(S)"; exit 1 end

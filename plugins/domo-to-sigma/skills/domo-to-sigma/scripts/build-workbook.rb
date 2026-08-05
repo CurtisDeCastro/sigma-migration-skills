@@ -833,6 +833,129 @@ def prune_unresolvable_columns!(card)
   card
 end
 
+# ---- card-level filters -> ELEMENT filters (bead B4) -----------------------
+#
+# Domo's classic card "Filter" widget (`chartBody.filters` / `main.filters`
+# INSIDE the card definition — a per-card row predicate, never a page-wide
+# one) is written with `operand` but read back with the operator field
+# ALWAYS collapsed to the opaque token `filterType: "LEGACY"`, regardless of
+# what was actually written (refs/live-validation-2026-07-30.md, confirmed
+# live). Every filter clause observed on a real instance (2026-08-05 cold
+# run, 20 clauses across 18 real cards) carries `values: [...]` — a discrete
+# list, never a min/max pair — consistent with Domo's classic filter UI,
+# which is fundamentally "column value is one of {checked boxes}". That maps
+# cleanly onto Sigma's `list` element filter (`mode: include`); refs/
+# connection.md's documented (but, live, never-observed-post-LEGACY-collapse)
+# operator vocabulary also names `NOT_IN`/`NOT_EQUALS`, mapped to `mode:
+# exclude` for the day a non-LEGACY-collapsed source shows up. Any other
+# operator token has no confident, faithful translation here — WARN and drop
+# ONLY that clause rather than guess (never silently drop a filter — refs/
+# card-to-element.md's "diff the filter inventory" contract).
+DOMO_FILTER_LIST_MODE = {
+  'LEGACY' => 'include', 'IN' => 'include', 'EQUALS' => 'include',
+  'NOT_IN' => 'exclude', 'NOT_EQUALS' => 'exclude',
+}.freeze
+
+# Resolve a filter clause's `column` to a [name, formula] pair for a NEW
+# element column — the same resolution measure_col/dim_col apply to an
+# ordinary data column, extended to cover a Beast-Mode calc id
+# (`calculation_<uuid>`) the SAME way inline_beast_mode_measure does: through
+# the translated-formula lookup, never the raw id. Skipping that lookup would
+# emit `[Master/Calculation Ea1150Fd...]` — a column that does not exist —
+# and 400 the ENTIRE workbook POST, exactly the failure
+# prune_unresolvable_columns! exists to prevent for ordinary data columns.
+# Returns nil (never a broken formula) when a calc id never translated.
+def resolve_filter_column(col)
+  col = col.to_s
+  if col.start_with?('calculation_')
+    bm = translated_beast_modes[col]
+    return nil unless bm.is_a?(Hash) && !bm['sigmaFormula'].to_s.strip.empty?
+    disp = (bm['name'] && !bm['name'].to_s.empty?) ? bm['name'] : display_name(col)
+    [disp, masterize_formula(bm['sigmaFormula'])]
+  else
+    disp = display_name(col)
+    [disp, mref(disp)]
+  end
+end
+
+# Find (or create, HIDDEN) the element column a filter clause needs to target.
+# Reuses an existing dimension/measure column when the card already plots
+# this same raw column (the common case — e.g. "Top Salespeople" both shows
+# AND filters on `IsWon`) via the identical `d-`/`m-` id-slug convention
+# dim_col/measure_col already use, so a filter never ships a visible
+# duplicate of a column the card already has. `hidden: true` on the new-
+# column path is the SAME shape a translated sort-helper column already uses
+# elsewhere in this monorepo (build-workbook-from-pbir.rb, enhance-apply.rb)
+# — a filter-only column has no reason to also show up as a visible table/
+# chart column the source card never rendered. Mutates `el['columns']` (and
+# `el['order']`, when the element kind has one — only `table` does) in place.
+def filter_target_column(el, col)
+  slug = col.to_s.downcase.gsub(/\W+/, '-')
+  existing = Array(el['columns']).find { |c| %W[d-#{slug} m-#{slug} f-#{slug}].include?(c['id']) }
+  return existing['id'] if existing
+  name, formula = resolve_filter_column(col)
+  return nil unless formula
+  new_col = { 'id' => "f-#{slug}", 'name' => name, 'formula' => formula, 'hidden' => true }
+  el['columns'] = Array(el['columns']) + [new_col]
+  el['order'] = Array(el['order']) + [new_col['id']] if el.key?('order')
+  new_col['id']
+end
+
+# Turn THIS card's own `filters[]` into Sigma ELEMENT filters on `el` —
+# refs/card-to-element.md:430-435's "card-level filters (the filter clauses
+# inside each card definition) -> element/source filters on that element."
+# Never a page control (see build_controls below, which is reserved for a
+# GENUINE Domo page filter — none exist in the data this converter has ever
+# seen). Appends to (never overwrites) `el['filters']`, so a table's own
+# top-N row-limit filter (bead 2ef7, built earlier in build_table) survives
+# alongside these.
+#
+# Two known Sigma traps, both handled by NOT emitting a broken/ignored
+# filter rather than shipping one: an `image` element has no `source`/
+# `columns` to filter at all, and a `pivot-table` element's OWN `filters[]`
+# is silently DROPPED by Sigma (card-to-element.md) — apply the predicate on
+# its source element instead (not automated here; this converter has never
+# needed it — no real pivot-table card carries a card-level filter to date).
+def apply_card_filters!(card, el)
+  return el if el.nil?
+  clauses = Array(card['filters'])
+  return el if clauses.empty?
+  if el['kind'] == 'image'
+    warn_card(card, "#{clauses.size} card filter(s) NOT applied: an image element has no source/columns " \
+                    'to filter — the card was exported to a static PNG that already reflects the source ' \
+                    'query, so this is informational only.')
+    return el
+  end
+  if el['kind'] == 'pivot-table'
+    warn_card(card, "#{clauses.size} card filter(s) NOT applied: Sigma silently DROPS a pivot-table " \
+                    "element's own filters — apply the predicate on its source element instead (not yet " \
+                    'automated here); verify against the card PNG.')
+    return el
+  end
+  added = []
+  clauses.each do |f|
+    col = f['column']
+    next if col.to_s.strip.empty?
+    mode = DOMO_FILTER_LIST_MODE[f['operator'].to_s.upcase]
+    unless mode
+      warn_card(card, "card filter on '#{col}' dropped: operator '#{f['operator']}' has no faithful Sigma " \
+                      'element-filter translation here (handled: LEGACY/IN/EQUALS/NOT_IN/NOT_EQUALS) — ' \
+                      'hand-author the equivalent element filter and re-run.')
+      next
+    end
+    cid = filter_target_column(el, col)
+    unless cid
+      warn_card(card, "card filter on '#{col}' dropped: its Beast Mode did not translate to a Sigma " \
+                      'formula, so no such data-model column exists (mirrors prune_unresolvable_columns!).')
+      next
+    end
+    added << { 'id' => "cf-#{el['id']}-#{added.size}", 'columnId' => cid,
+               'kind' => 'list', 'mode' => mode, 'values' => Array(f['values']) }
+  end
+  el['filters'] = Array(el['filters']) + added unless added.empty?
+  el
+end
+
 # The dataset the single shared `master` element is built from — every element
 # emitted here sources `master`, and build-workbook-spec.rb builds that master
 # from ONE data-model element. Cards bound to any OTHER DataSet would reference
@@ -933,11 +1056,31 @@ end
 
 def build_element_body(card, overrides)
   card = prune_unresolvable_columns!(card)
+
+  # F4 (live-found 2026-08-05): this NO_NATIVE_EQUIVALENT warning used to sit
+  # further down, gated behind `chart_kind_for(card)` returning non-nil — but
+  # Rule 0 immediately below can RETURN straight to build_kpi before that code
+  # ever runs. `badge_filledgauge`'s own `sigmaKindHint` substring-matches
+  # 'gauge' -> 'kpi-chart' in domo-discover.rb's sigma_kind_hint, so every real
+  # gauge card hits Rule 0 and returns silently (verified against both real
+  # gauge cards on the 2026-08-05 cold run: sigmaKindHint == 'kpi-chart' on
+  # both) — the honest "Sigma has no gauge kind" warning never fired. Checking
+  # chartType alone, unconditionally, before ANY kind resolution or early
+  # return, means the warning fires no matter which branch below actually
+  # builds the element. (The later chart_kind_for-gated check this replaced is
+  # removed below — never warn twice for the same card.)
+  ct0 = card['chartType'].to_s.downcase
+  if NO_NATIVE_EQUIVALENT.key?(ct0)
+    warn_card(card, "no native Sigma equivalent for chartType '#{card['chartType']}' — " \
+                    "#{NO_NATIVE_EQUIVALENT[ct0]} Tracked as a Sigma custom-plugin follow-up " \
+                    '(sigma-plugin-development skill) — not handled by this converter today.')
+  end
+
   # Rule 0: a summary-number card with no real grouping → KPI, never a table.
   kind = card['sigmaKindHint']
   is_kpi = kind == 'kpi-chart' ||
            (card['summaryNumber'] && Array(card['groupBy']).empty? && (card['columns'] || []).size <= 1)
-  return build_kpi(card, overrides) if is_kpi
+  return apply_card_filters!(card, build_kpi(card, overrides)) if is_kpi
 
   # Domo prints a Summary Number at the top of EVERY viz card, not just KPI
   # cards. Sigma's chart/table elements have no summary slot, so this
@@ -978,14 +1121,10 @@ def build_element_body(card, overrides)
   if el.nil?
     # #2/#3: chartType is a STRICT Domo enum — EXACT-match it (never substring)
     # against the known-token table before falling back to any upstream hint.
+    # (The NO_NATIVE_EQUIVALENT warning for this chartType, if any, already
+    # fired unconditionally at the top of this method — F4.)
     mapped = chart_kind_for(card)
     kind = mapped || kind
-    ct = card['chartType'].to_s.downcase
-    if mapped && NO_NATIVE_EQUIVALENT.key?(ct)
-      warn_card(card, "no native Sigma equivalent for chartType '#{card['chartType']}' — " \
-                      "#{NO_NATIVE_EQUIVALENT[ct]} Tracked as a Sigma custom-plugin follow-up " \
-                      '(sigma-plugin-development skill) — not handled by this converter today.')
-    end
 
     el = case kind
          when 'bar-chart', 'line-chart', 'area-chart', 'scatter-chart'
@@ -1010,8 +1149,21 @@ def build_element_body(card, overrides)
          end
   end
 
+  # B4: this card's OWN filter clauses -> ELEMENT filters on its element (see
+  # apply_card_filters! above) — never a page control (see build_controls
+  # below). Applied here, after the case-branch, so it covers every kind
+  # (bar/line/scatter/donut/table/map/combo/kpi-fallback) built above.
+  el = apply_card_filters!(card, el)
+
   if companion
     if el
+      # The companion KPI mirrors the SAME Domo Summary Number the primary
+      # element shows above it (bead 08sf) — Domo scopes that number to the
+      # SAME card-level filters as the rest of the card, so the companion
+      # must carry them too, or it would show an unfiltered total next to a
+      # correctly filtered chart (the exact B4 divergence this fix exists to
+      # close, just one element over).
+      companion = apply_card_filters!(card, companion)
       $companion_elements << companion
       warn_card(card, "source Summary Number ALSO represented as a companion KPI element " \
                       "'#{companion['name']}' alongside this #{el['kind'] || kind || 'chart'} element " \
@@ -1028,36 +1180,70 @@ def build_element_body(card, overrides)
 end
 
 # ---- controls (bug #2: fan out to EVERY element via the shared master) ------
+#
+# B4 (live-found 2026-08-05, the highest-value correctness fix in this
+# converter): this used to iterate every CARD's `filters[]` and turn each
+# distinct column into a page-level control with NO `values` — manufacturing
+# 3 workbook-wide interactive controls the source page never had, AND (since
+# a control's own `filters[]` carries no `values`) shipping every one of the
+# 18 real filtered cards completely UNFILTERED. Per refs/card-to-
+# element.md:430-435, a Sigma `control` is the correct shape ONLY for a
+# genuine Domo PAGE filter (a filter widget that applies across the whole
+# page) — card-level filter clauses (what `card['filters']` actually is: the
+# predicate INSIDE one card's own definition) now become ELEMENT filters on
+# that card's own element instead (see apply_card_filters!, called from
+# build_element_body).
+#
+# domo-discover.rb does not capture a genuine page-level filter as a distinct
+# structure today — `pages.json` carries no `filters` field (verified: the
+# real page 'Sample DataSets + Cards' has none), and no card on a real
+# instance carries a `chartType` identifying it as a page-filter widget
+# either. So `cards`/`master_ds` are accepted (matching the existing call
+# site) but currently unused: there is nothing genuine to turn into a
+# control yet. This stays a real, callable function — rather than being
+# deleted — for the day page-filter capture lands; when it does, preserve the
+# master-dataset guard this used to have (a control bound to the shared
+# `master` would 400 for a card whose element sources a per-DataSet
+# sub-master instead — bead ziht; per-sub-master controls are not yet
+# supported), which no longer needs to exist here today because it has
+# nothing to guard.
 def build_controls(cards, master_ds = nil)
-  seen = {}
-  controls = []
-  cards.each do |card|
-    ds = card['datasetId'].to_s
-    Array(card['filters']).each do |f|
-      col = f['column']; next if col.nil? || seen[col]
-      if master_ds && !ds.empty? && ds != master_ds
-        warn_card(card, "control filter on '#{col}' SKIPPED — its card is bound to DataSet " \
-                        "#{ds}, not this workbook's shared master (#{master_ds}); binding it to " \
-                        'master would 400 the whole workbook POST. Per-sub-master controls are ' \
-                        'not yet supported (bead ziht follow-up).')
-        next
-      end
-      seen[col] = true
-      disp = display_name(col)
-      controls << {
-        'id' => "ctl-#{col.to_s.downcase.gsub(/\W+/, '-')}",
-        'kind' => 'control',
-        'controlId' => disp.gsub(/\s+/, ''),
-        'controlType' => 'list',
-        'name' => disp,
-        # Bind to the shared master column ONCE — every element sourcing master
-        # inherits it, so the filter no longer falls off after the first element.
-        'filters' => [{ 'source' => { 'kind' => 'table', 'elementId' => 'master' },
-                        'columnId' => mcol_id(disp) }],
-      }
-    end
+  []
+end
+
+# ---- page grouping (F3) -----------------------------------------------------
+#
+# `pages.json`'s own `cardIds`/`cards` field is unreliable — GET /v1/pages/
+# {id} returns `cardIds: []` even for a page with dozens of real cards
+# (domo-discover.rb's "Bug 1 (P0)"; verified: the real page 'Sample DataSets
+# + Cards' reports `cardIds: []` while genuinely owning 36 cards).
+# domo-discover.rb works around this AT DISCOVERY TIME via
+# enumerate_page_cards (three fallback API routes) — but build-workbook.rb
+# only ever sees the already-serialized `cards.json`/`pages.json`, with no
+# live API call left to make, and no per-card page-id field either. So when
+# `cardIds`/`cards` comes back empty, there is genuinely no way here to
+# attribute a card to one of SEVERAL candidate pages — but when there is
+# exactly ONE page in scope (the common case for a single-page cold run),
+# every surviving card unambiguously belongs to it, and falling back to the
+# literal string 'Overview' instead of that page's REAL title (verified:
+# 'Sample DataSets + Cards', not 'Overview') is simply wrong. Use the page's
+# own title in that case; keep the old placeholder only for the genuinely
+# ambiguous multi-page/no-attribution case, where guessing which page is
+# which would be worse than an honest placeholder.
+def group_cards_by_page(cards, pages)
+  by_page = Hash.new { |h, k| h[k] = [] }
+  card_page = {}
+  pages.each do |p|
+    Array(p['cardIds'] || p['cards']).each { |cid| card_page[cid.to_s] = p['title'] || p['name'] || p['id'] }
   end
-  controls
+  default_name =
+    if pages.size == 1
+      pages.first['title'] || pages.first['name'] || pages.first['id'].to_s
+    else
+      'Overview'
+    end
+  cards.each { |c| by_page[card_page[c['id'].to_s] || default_name] << c }
+  by_page
 end
 
 if $PROGRAM_NAME == __FILE__
@@ -1066,13 +1252,7 @@ if $PROGRAM_NAME == __FILE__
   overrides = (JSON.parse(File.read(File.join(OUT, 'kpi-overrides.json'))) rescue {}) || {}
 
   cards = cards.reject { |c| c['_error'] || c['_tierB'] }
-  # Group cards by page (fall back to a single page when page membership is absent).
-  by_page = Hash.new { |h, k| h[k] = [] }
-  card_page = {}
-  pages.each do |p|
-    Array(p['cardIds'] || p['cards']).each { |cid| card_page[cid.to_s] = p['title'] || p['name'] || p['id'] }
-  end
-  cards.each { |c| by_page[card_page[c['id'].to_s] || 'Overview'] << c }
+  by_page = group_cards_by_page(cards, pages)
   master_ds = dominant_dataset_id(cards)
   by_page.each { |pname, pcards| warn_missing_geometry(pname, pcards) }
 
