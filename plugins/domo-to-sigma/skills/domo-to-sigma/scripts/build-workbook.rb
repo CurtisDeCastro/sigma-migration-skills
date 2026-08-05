@@ -1413,8 +1413,20 @@ if $PROGRAM_NAME == __FILE__
   end
 
   FileUtils.mkdir_p(OUT)
+  # Record WHICH dataset the plain 'Master' element stands for. build-workbook-spec.rb
+  # otherwise picks the data model's FIRST non-Dim element, which is only the dominant
+  # dataset by luck — on a multi-dataset page it silently binds Master to the wrong
+  # table and every dominant-master card reads the wrong data (bead 0ku5).
+  dominant_el    = dataset_element_map[master_ds.to_s] || {}
+  dominant_table = dominant_el['name']
   File.write(File.join(OUT, 'chart-specs.json'),
-             JSON.pretty_generate('pages' => out_pages, 'data_elements' => $sub_masters.values))
+             JSON.pretty_generate('pages' => out_pages,
+                                  'data_elements' => $sub_masters.values,
+                                  'dominant_dataset_id' => master_ds,
+                                  'dominant_table' => dominant_table,
+                                  'dominant_dm_element_id' => dominant_el['id']))
+  warn "  ⚠ could not resolve the dominant dataset's warehouse table — build-workbook-spec.rb " \
+       "will fall back to positional DM-element selection (bead 0ku5)" if dominant_table.to_s.empty?
   File.write(File.join(OUT, 'warnings.json'), JSON.pretty_generate($warnings))
   warn "  wrote #{File.join(OUT, 'chart-specs.json')} (#{out_pages.sum { |p| p['elements'].size }} elements across #{out_pages.size} page(s), #{$sub_masters.size} sub-master(s))"
   warn "  wrote #{File.join(OUT, 'warnings.json')} (#{$warnings.size} warning(s))"

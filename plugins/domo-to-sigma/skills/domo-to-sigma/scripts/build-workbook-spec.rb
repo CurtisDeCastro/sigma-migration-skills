@@ -38,6 +38,7 @@
 # the YAML explicitly.
 
 require 'json'
+require 'set'
 require 'yaml'
 require 'optparse'
 require 'net/http'
@@ -83,7 +84,26 @@ target = if opts[:dm_el_name]
            width = ->(e) { (e['columnLabels'] || e['columns'] || []).size }
            bearing = dm_elements.select { |e| width.call(e).positive? }
            bearing = dm_elements if bearing.empty?
-           bearing.find { |e| !(e['name'] || '').end_with?(' Dim') } || bearing.first
+           # PREFER the element build-workbook.rb identified as the DOMINANT
+           # dataset's. Falling straight through to "first non-Dim" is only
+           # correct when the dominant dataset happens to be the data model's
+           # first element — true for the single-fact Orders pages, FALSE on a
+           # real multi-dataset page. Measured on the 36-card cold run: Master
+           # bound to PDP_EXAMPLE_DATASET (element 0, 11 columns) while the
+           # dominant dataset was SALESFORCE (element 7, 15 columns), and there
+           # was no sub-master for SALESFORCE because it was supposed to BE the
+           # Master. That is a SILENT wrong-data bug, not just a 400: it only
+           # errored on a column name absent from PDP ('Close Date'); every
+           # card referencing a name present in BOTH tables would have POSTed
+           # fine and rendered the wrong table's numbers. Bead 0ku5.
+           dominant_id = specs['dominant_dm_element_id']
+           dominant = dominant_id && bearing.find { |e| e['id'] == dominant_id }
+           if dominant_id && !dominant
+             warn "  ⚠ chart-specs names DM element #{dominant_id.inspect} as the dominant " \
+                  "dataset's, but it is not among the data model's column-bearing elements — " \
+                  "falling back to positional selection (bead 0ku5)."
+           end
+           dominant || bearing.find { |e| !(e['name'] || '').end_with?(' Dim') } || bearing.first
          end
 dm_el_id   = target['id']
 dm_el_name = target['name']
@@ -244,6 +264,41 @@ def derive_theme(layout)
   theme['backgroundCanvas'] = canvas if canvas
   theme['categoricalScheme'] = scheme if scheme.size >= 2
   theme
+end
+
+# GUARD (bead 0ku5): every reference into the primary Master must name a column
+# the Master actually has. This exists because binding Master to the WRONG data
+# model element failed SILENTLY — the POST only errored on a column name absent
+# from the wrong table, so any card using a name present in both tables would
+# have rendered the wrong table's numbers with no error at all. Catch it here,
+# at build time, instead of trusting a POST-succeeds signal.
+#
+# Only the bare [Master/...] namespace is checked; a sub-master reference
+# ([Master (TABLE)/...]) is validated by its own element's column list.
+master_el = ([data_page] + visible_pages).flat_map { |pg| pg['elements'] || [] }
+            .find { |e| e['id'] == 'master' }
+if master_el
+  have = (master_el['columns'] || []).map { |c| c['name'].to_s.downcase }.to_set
+  missing = Hash.new { |h, k| h[k] = [] }
+  ([data_page] + visible_pages).each do |pg|
+    (pg['elements'] || []).each do |el|
+      next if el['id'] == 'master'
+      (el['columns'] || []).each do |c|
+        c['formula'].to_s.scan(/\[Master\/([^\[\]\/]+)\]/) do |(col)|
+          missing[col] << (el['name'] || el['id']) unless have.include?(col.to_s.downcase)
+        end
+      end
+    end
+  end
+  unless missing.empty?
+    warn "\n  MASTER REFERENCE CHECK FAILED — #{missing.size} column(s) referenced on the primary"
+    warn "  Master that it does not have. The Master is bound to DM element #{dm_el_id.inspect}"
+    warn "  (#{dm_el_name.inspect}); if that is not the dominant dataset's table, THAT is the bug"
+    warn "  (bead 0ku5) — a wrong binding renders the wrong table's data, mostly WITHOUT erroring."
+    missing.each { |col, els| warn "    #{col.inspect} <- #{els.uniq.first(4).join(', ')}" }
+    warn "  Master has: #{(master_el['columns'] || []).map { |c| c['name'] }.join(', ')}"
+    abort('  aborting before POST rather than shipping a workbook that reads the wrong table')
+  end
 end
 
 wb = {
