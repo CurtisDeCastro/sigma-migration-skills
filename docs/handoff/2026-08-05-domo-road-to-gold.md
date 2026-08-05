@@ -15,14 +15,16 @@ The 48-card cold run — really **36 cards / 22 chart types / 10 DataSets** on D
 through the **workbook POST**. Fourteen real bugs were found and fixed getting there, several of
 them silent-wrong-data classes that a "did the POST succeed?" check would never have caught.
 
-**Gold was NOT reached.** Two things stand between here and a legitimate `assert-phase6-ran.rb`
-exit 0, and the second is large:
+**Gold was NOT reached.** A follow-up audit (see the addendum) put a number on the remaining work:
+**~8–12 working days**, dominated by two items —
 
-1. 15 columns compile to `type=error` on the live workbook (bead `znvg`).
-2. Gate 1 needs a real parity result, and the honest route for Domo — an oracle that computes
-   expected values from Domo's own aggregation API — **has not been started**.
+1. 15 columns compile to `type=error` (bead `znvg`). **9 of them are one converter bug**, verified
+   offline; the other 6 need one live diagnostic.
+2. The parity oracle — and, *before* it, a schema mismatch that means gate 1 cannot read what
+   `verify-parity.rb` writes at all.
 
-Do not try to shortcut (2). See "Waivers that would be a fudge".
+The audit's verdict: gold IS achievable, ending at all 25 gates passing with **one legitimate
+recorded waiver**. Do not shortcut it — see "Waivers that would be a fudge".
 
 ---
 
@@ -57,7 +59,7 @@ Full log of that run: `/tmp/gold-run12.log`.
 | #622 | **merged** `b6197683` | Always quote identifiers — Snowflake was case-folding camelCase columns (bead `q5dz`, closed) |
 | #624 | **merged** `eaa43d86` | Vendored **both** ledger sibs to domo + hex, discharging the W2.23 exemption. **Before this, domo's gate printed an UNCAPPED green** |
 | #625 | **merged** `66fb96f1` | `list_entries` silently truncating at 50 (bead `0h11`) |
-| #623 | **open** | Everything else — the blocker batch, the workbook-POST fixes, the dominant-master fix + guard, and this doc |
+| #623 | **merged** `94176054` | Everything else — the blocker batch, the workbook-POST fixes, the dominant-master fix + guard |
 
 ---
 
@@ -161,23 +163,62 @@ silent-wrong-data to a loud build failure.
 
 ### Blocker 1 — the 15 `type=error` columns (bead `znvg`, P1)
 
-Two apparent groups:
+> **CORRECTION (post-audit).** My first read of this — "aggregate-in-a-calc-column, a direct
+> consequence of today's inlining fix" — was **WRONG**, and a follow-up audit disproved it with a
+> control case. Do not act on it. The real split is below. I'm leaving the correction visible
+> rather than quietly editing, because the wrong theory is the intuitive one and the next person
+> will otherwise re-derive it.
 
-- **Aggregate-in-a-calc-column.** Inlined aggregate Beast Modes of the form
-  `If(Sum(If(<date window>, [col], 0)) = 0, 0, Sum(…)/Sum(…) - 1)` sitting in row-level calc
-  columns. `post-and-readback`'s own hint names this class.
-  **Be honest about the causality:** this is a *direct consequence* of today's aggregate-Beast-Mode
-  inlining. Inlining was still right — it converted a hard POST rejection into typed, enumerable,
-  per-column errors that gate 3 catches — but the **placement** must change. An aggregate belongs
-  in an element whose grain supports it, not a row-level calc column.
-- **The `State` / `US Regions` nested `If(In(...))` chains.** Check whether these fail for their own
-  reason (nesting depth, `In()` arity, or the corrupted literals from `0goi` below) before assuming
-  shared cause.
+**9 of 15 — a 2-argument `DateDiff`. Verified, reproducible offline in seconds.**
+`converter/sql.mjs` maps `DATEDIFF` by bare name (`:381`) and only handles the 3-arg LookML form
+(`:857`), so it emits `DateDiff(Today(), [Created At])`. Sigma requires
+`DateDiff(datepart, start, end)`. The skill's **own reference already documents the right rule** and
+the converter doesn't implement it — `refs/beast-mode-to-sigma.md:213`. There is zero test coverage
+for the 2-arg form.
 
-### Blocker 2 — the Domo parity oracle (gate 1). **The big one, not started.**
+The control that kills the aggregate theory: across all 502 formula columns in `workbook-spec.json`,
+every column containing `DateDiff(` errored (9/9), and `el-2071758146-summary/m-deals-won` — a
+`Sum(If(...))` element-level calc column **without** `Today()` — **compiles fine**. So
+aggregate-of-`If` in a calc column is not the problem.
 
-Gate 1 requires a real `parity-final.json`. `build-parity-plan.rb` emits the chart/column list but
-**no expected values, by design**. The honest route for Domo is to compute expected values from
+⚠️ **The dangerous part of this fix:** Domo's `DATEDIFF(current_date(), created_on)` means "days
+since created_on". The Sigma equivalent is `DateDiff("day", [created_on], Today())` — **operands
+swapped**. Fix the arity without swapping and every `< 7` / `>= 7` predicate silently inverts: the
+formula compiles green and all nine KPIs return the wrong number with no error anywhere. This is
+the single highest-risk change on the whole path.
+
+**6 of 15 — the `State` / `US Regions` mega-`If` chains.** 50–51 nested `If`s, 3.6–3.8 K chars. The
+next-largest formula in the entire spec is 785 chars / 5 `If`s, so this is a ~5× outlier with a
+clean gap — but depth/length is only the *offline-visible* discriminator and the actual compile
+failure is still **INFERRED**. Get it with one `diagnose_sigma_save_error` call or a UI paste
+before writing code.
+
+**Upstream cause worth fixing regardless:** `domo-discover.rb:109-118` (`classify_beast_mode`)
+trusts a positive `isAggregatable` flag with no SQL corroboration. Measured on this run: **all 81
+Beast Modes are class `aggregate`, and 14 of them contain no aggregate function at all** (`US
+Regions`, `State`, `Day of Week`, `Tweet Text`…). Since `build-dm.rb:432` promotes only
+`projection`-class ones, **zero Beast Modes become DM columns** and all 81 fall through to
+element-level inlining. Refusing `isAggregatable` when the SQL has no aggregate token turns those
+14 back into DM columns — which may resolve the mega-`If` case for free.
+
+### Blocker 2 — gate 1 cannot read what `verify-parity.rb` writes. **Fix this FIRST.**
+
+Found by the audit; I had wrongly filed it as non-blocking (bead `2tkm`). It is *the* blocker.
+
+- `assert-phase6-ran.rb:1116-1118` reads `charts_total` / `charts_pass` / `status`.
+- `verify-parity.rb --score-out` (`:404-423`) writes `tiles_total` / `tiles_pass` / `tiles_fail` /
+  `value_parity_score` / `tiles`. **None of the three keys the gate reads.**
+
+So a flawless 65/65 Domo-vs-Sigma parity run produces a `parity-final.json` the gate reads as
+`charts_total = 0`, which drops it into the anchors-oracle substitution branch, finds no
+`anchors-verdict.json`, and **exits 2**. Building the oracle without fixing this first means doing
+days of work and still failing the gate. The only script that currently emits a gate-shaped
+`parity-final.json` is `verify-warehouse.rb:174-190`. ~2 h, and it is a SHARED file — its own PR.
+
+### Blocker 3 — the Domo parity oracle itself. **~3–5 days, not started.**
+
+`build-parity-plan.rb` emits the chart/column list but **no expected values, by design**. The
+honest route for Domo is to compute expected values from
 `Domo.query_dataset` aggregations (the Track E technique) and feed
 `verify-parity.rb --plan … --score-out <workdir>/parity-final.json`.
 
@@ -261,3 +302,102 @@ live in a scratch Snowflake schema; identifiers deliberately not repeated here �
 Other artifacts: `~/domo-cold-run-20260805/AUDIT-SYNTHESIS.md` (the parallel pipeline audit that
 predicted most of these bugs) and `BATCH-VERIFY.md` (the verification pass that caught three
 regressions in the first cut of the fixes).
+
+---
+
+# Addendum — gold-path audit (3 parallel investigators + synthesis)
+
+Run at end of session against the real artifacts. Full text, with file:line for every claim:
+**`~/domo-coldrun-v4/ROAD-TO-GOLD-AUDIT.md`** (also committed alongside this doc as
+`2026-08-05-domo-gold-audit-full.md`). It overturned three things I had believed, including one
+in an earlier draft of this doc — read it before planning.
+
+## Sizing
+
+| Step | Effort | Blocks gate? | Confidence |
+|---|---|---|---|
+| 1. `DateDiff` arity **+ operand order** | 2–3 h | Yes (gate 3) | High — verified offline |
+| 2. `State` / `US Regions` 6 columns | 4–6 h + 1 live diagnostic | Yes (3) | Medium — mechanism inferred |
+| 3. Re-run hygiene / orphan cleanup | 15 m | Yes (2) | High |
+| 4. `parity-final.json` schema shim | 2 h (shared-file PR) | **Yes (1)** | High |
+| 5. Parity oracle (2 collectors + join + exclusion ledger) | **3–5 days** | Yes (1) | Medium |
+| 6. `dateRangeFilter` restore | 1–2 days | No (fidelity + oracle honesty) | High |
+| 7. `limit` on non-table charts | 2 h | No | High |
+| 8. Render + vision verdict | 2 h | Yes (8, 8b) | High |
+| 9. Telemetry consent | 10 m | Yes (10) | High |
+| 10. Ledger rebase onto the branch | 30 m | No (verdict honesty) | High |
+| 11. Gate 4b registration | 15 m | No | High |
+| — live re-runs, 4–6 iterations | ~1 day | — | — |
+
+## The denominator is 65, not 36
+
+`build-parity-plan.rb`'s own `chartable?` predicate over `workbook-spec.json`: **75 elements → 65
+chartable** (10 hidden Masters excluded). 31 `kpi-chart`, 9 bar, 8 combo, 6 region-map, 5 line,
+3 table, 2 scatter, 1 donut — **29 of the 65 are `-summary` companion KPIs**. Every conversation
+today said "36 cards"; the gate counts **65 tiles**.
+
+## Oracle scoreability, measured
+
+| bucket | count | why |
+|---|---|---|
+| Cleanly oracle-able today | **7 cards** | no relative dates |
+| Need date-window sync (same UTC day, both sides in one invocation) | **28 cards** | rolling 7/14/28/30-day windows |
+| **Never** statically scoreable | **1** — `983053598` "Survey Completion Rate" | the date window is baked into the plotted VALUE, not the filter; the true answer changes daily |
+| Top-N tie-break risk | 4 (+1 ordered-unlimited) | no documented secondary sort |
+
+`min_pass_rate` defaults to **1.0** — every tile must pass. Lowering it is a named, budget-counted
+waiver.
+
+**The failure mode to design against:** the gate computes `total` purely from what's in the plan.
+Nothing cross-checks it against the 65 chartable elements. **Silently omitting the 20 hard tiles
+yields "100% (45/45)" that reads identically to a genuine full pass.** Build
+`parity-plan-exclusions.json` and assert `plan + exclusions == 65`. None of that exists yet.
+
+## Waiver budget: 2, and you should spend only 1
+
+- **Legitimate:** `--verdict divergent` for the visual gate. There is genuinely **no source
+  dashboard PNG** — Domo 404'd the page render (`discovery/page-visual-unavailable.json`);
+  `discovery/png/pages/` has 0 files, `png/cards/` has 36. `divergent` is honest and accurate.
+- **A fudge:** compositing the 36 card PNGs into a fake "source dashboard" — and it would also arm
+  gates 13/14 (see T5 below).
+- Avoid the second waiver by building the exclusion ledger instead of silently dropping the card.
+
+⚠️ **Verdict honesty:** with the ledger unvendored on the working branch, the gate prints the legacy
+"may declare GREEN" line. Under PR-14 semantics a recorded `visual-divergent` would cap the run at
+**YELLOW**. Do step 10 and report what the ledger actually derives — otherwise you'd be claiming
+GREEN precisely because the capping mechanism isn't installed. (#624 put the ledger on `main`; the
+integration branch predates it.)
+
+## Traps, from the audit (supersede my shorter list above)
+
+- **T1 — idempotency is per-artifact.** `formulas.json`→skips convert-beast-modes;
+  `chart-specs.json`→build-workbook; `dm-spec.json`→build-dm; `dm-ids.json`→DM POST;
+  `workbook-spec.json`→build-workbook-spec; **`wb-ids.json`→skips the workbook POST entirely**;
+  `layout.xml`→layout; `sigma-render.png`→render. After a **converter** fix delete
+  `formulas.json`, `formulas.pending.json`, `chart-specs.json`, `workbook-spec.json`, `wb-ids.json`.
+  After a **classification** fix also delete `dm-spec.json`, `dm-ids.json`.
+- **T2 — every re-POST orphans a workbook.** `posted-workbooks.jsonl` already lists `333f35ce`.
+  Two unique ids → gate 2 exit 4. Run `cleanup-orphan-workbooks.rb --workdir <wd>` (never
+  `--dry-run`; it treats 404 as success, so the already-deleted one cleans fine).
+- **T3 — deleting a broken workbook makes the gate QUIETER, not louder.** Gates 3/4/6/7 live-GET
+  the id; a 404 downgrades them to bare SKIPs with **no waiver recorded** — invisible to the budget.
+  Never gate a run whose workbook you already deleted.
+- **T4 — no `--parity-plan` can never reach gold.** `migrate-domo.rb` auto-adds
+  `--skip-parity-gate`, which gate 1 rejects with exit 18 absent a passing `anchors-verdict.json`.
+- **T5 — do NOT drop a source PNG into `<workdir>/views/` or `/dashboards/`.** Gate 13 globs exactly
+  those; today it finds nothing and 13/14 cleanly SKIP. Put one there and gate 13 becomes enforced
+  (needs ≥5 transcribed anchors + a passing `verify-anchors.rb`, else exit 18). Use a path outside
+  those dirs.
+- **T6 — `record-visual-check.rb` always records `not-executable` when driven by the orchestrator**
+  (deliberately), so gate 8b exits 13. Expect to stop after the orchestrator, read the render as a
+  vision-capable agent, re-record, then run `assert-phase6-ran.rb` standalone.
+
+## Where the audit corrected me
+
+1. **The 15 error columns.** I said aggregate-in-a-calc-column caused by my own inlining fix. Wrong
+   — 9 of 15 are the 2-arg `DateDiff`, and a control column (`Sum(If(...))` without `Today()`)
+   compiles fine. Corrected inline above.
+2. **Bead `2tkm` is blocking, not cosmetic.** The gate reads `charts_total`/`charts_pass`/`status`;
+   `verify-parity.rb --score-out` writes `tiles_*`. A perfect parity run reads as zero.
+3. **All 81 Beast Modes are classified `aggregate`**, 14 of them with no aggregate function at all,
+   so **zero** become DM columns. I had assumed the projection/aggregate split was working.
