@@ -66,6 +66,23 @@ def derive_table_name(existing_entry, dataset)
   (dataset['name'] || dataset['id']).to_s.upcase.gsub(/[^A-Z0-9]+/, '_').gsub(/\A_+|_+\z/, '')
 end
 
+# Writes dataset-map.json atomically: serialize to a temp file in the SAME
+# directory as MAP_PATH, then File.rename it into place (atomic on POSIX
+# filesystems). Never writes MAP_PATH directly in place — a mid-write crash
+# on a direct write could truncate the sibling domo-to-sigma skill's key
+# artifact file with no backup.
+def write_map_atomically!(path, ds_map)
+  dir = File.dirname(path)
+  tmp = File.join(dir, ".#{File.basename(path)}.tmp-#{Process.pid}-#{Time.now.to_i}")
+  File.write(tmp, JSON.pretty_generate(ds_map))
+  File.rename(tmp, path)
+end
+
+if opts[:limit_rows]
+  warn 'note: --limit-rows given, dataset-map.json will NOT be updated for this run — ' \
+       'this is a smoke test, not a real landing'
+end
+
 results = ids.map do |id|
   print "#{id} ... "
   begin
@@ -100,11 +117,34 @@ results = ids.map do |id|
         File.write(csv_path, SnowflakeLoad.rows_to_csv(rows))
         load_sql = SnowflakeLoad.load_sql(create_sql, opts[:target_db], opts[:target_schema], table, "file://#{csv_path}")
         SnowflakeLoad.run_sql!(load_sql, connection: opts[:sf_conn])
+        # Measured, not assumed: run_sql!'s zero exit code only proves the
+        # COPY command didn't error, not that the table actually holds the
+        # rows that were supposed to land (a re-run against an
+        # already-landed table after an interrupted batch could silently
+        # duplicate rows). See SnowflakeLoad.verify_landed_count!.
+        SnowflakeLoad.verify_landed_count!(opts[:target_db], opts[:target_schema], table, rows.size, connection: opts[:sf_conn])
         grant_sql = SnowflakeLoad.grant_sql(opts[:target_db], opts[:target_schema], table, opts[:grant_role])
         SnowflakeLoad.run_sql!(grant_sql, connection: opts[:sf_conn])
       end
-      puts "landed #{rows.size} rows -> #{opts[:target_db]}.#{opts[:target_schema]}.#{table}"
-      { id: id, status: :landed, table: table }
+      puts "landed #{rows.size} rows -> #{opts[:target_db]}.#{opts[:target_schema]}.#{table} (verified)"
+
+      # Incremental + atomic: patch and write dataset-map.json immediately
+      # for THIS dataset, right after it lands successfully — not batched at
+      # the end of the whole run. An interrupted process (crash, timeout,
+      # kill) must not lose the manifest update for every dataset that
+      # already landed durably in Snowflake before the interruption.
+      # --limit-rows is a smoke test, not a real landing — never patch the
+      # manifest for it (see the warning printed above), regardless of this
+      # incremental-write behavior.
+      if opts[:limit_rows]
+        { id: id, status: :landed, table: table }
+      else
+        ds_map[id] = LandingManifest.patched_entry(ds_map[id],
+          database: opts[:target_db], schema: opts[:target_schema], table: table)
+        write_map_atomically!(MAP_PATH, ds_map)
+        puts "  patched #{MAP_PATH}"
+        { id: id, status: :landed, table: table }
+      end
     end
   rescue StandardError => e
     puts "FAILED: #{e.message}"
@@ -113,18 +153,9 @@ results = ids.map do |id|
 end
 
 landed = results.select { |r| r[:status] == :landed }
-unless opts[:dry_run] || landed.empty?
-  landed.each do |r|
-    ds_map[r[:id]] = LandingManifest.patched_entry(ds_map[r[:id]],
-      database: opts[:target_db], schema: opts[:target_schema], table: r[:table])
-  end
-  File.write(MAP_PATH, JSON.pretty_generate(ds_map))
-  puts "patched #{landed.size} entr#{landed.size == 1 ? 'y' : 'ies'} in #{MAP_PATH}"
-
-  if opts[:sigma_connection]
-    Sigma.request(:post, "/v2/connections/#{opts[:sigma_connection]}/sync")
-    puts "synced Sigma connection #{opts[:sigma_connection]}"
-  end
+if !opts[:dry_run] && !landed.empty? && opts[:sigma_connection]
+  Sigma.request(:post, "/v2/connections/#{opts[:sigma_connection]}/sync")
+  puts "synced Sigma connection #{opts[:sigma_connection]}"
 end
 
 failed  = results.select { |r| r[:status] == :failed }
