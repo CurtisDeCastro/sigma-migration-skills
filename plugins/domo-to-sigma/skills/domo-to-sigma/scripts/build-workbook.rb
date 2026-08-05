@@ -369,7 +369,29 @@ DATE_GRAIN_UNIT = {
 #   pages[N].elements[M]: Dependency not found: 'master/calendar month'
 # which fails the ENTIRE workbook POST. Translate it to a Sigma truncation of the
 # real column instead: DateTrunc("month", [Master/Order Date]).
+# Dimension-side twin of inline_beast_mode_measure. A Beast Mode used as a
+# GROUPING column hits exactly the same wall: build-dm materializes only
+# PROJECTION Beast Modes as data-model columns, so an aggregate/window one
+# referenced as [Master/<name>] dangles —
+#   'Dependency not found: master/state'
+# (live, 36-card cold run: "State" is a class=aggregate CASE over
+# Account.BillingState, used as the grouping column of a region map).
+# measure_col has inlined these since Track B; dim_col never did.
+# No aggregation wrapper and no numeric format — this is a dimension.
+def inline_beast_mode_dimension(card, c)
+  bm = translated_beast_modes[c['beastModeId'].to_s] ||
+       translated_beast_modes[c['column'].to_s]
+  return nil unless bm.is_a?(Hash)
+  return nil unless %w[aggregate window].include?(bm['class'].to_s)
+  return nil if bm['sigmaFormula'].to_s.strip.empty?
+  { 'id' => "d-#{c['column'].to_s.downcase.gsub(/\W+/, '-')}",
+    'name' => col_label(c),
+    'formula' => masterize_formula(bm['sigmaFormula']) }.compact
+end
+
 def dim_col(c, card = nil)
+  inlined = inline_beast_mode_dimension(card || {}, c)
+  return inlined if inlined
   grain = card && card['dateGrain']
   is_cal = c['calendar'] || c['column'].to_s =~ /\ACalendar/i
   if is_cal && grain.is_a?(Hash) && !grain['column'].to_s.empty?
@@ -749,7 +771,14 @@ end
 # read [Master/Net Revenue]. Already-qualified refs (any "<something>/") are left
 # alone so this is idempotent.
 def masterize_formula(formula)
-  formula.to_s.gsub(/\[([^\[\]\/]+)\]/) { "[Master/#{Regexp.last_match(1)}]" }
+  # Re-point a converted Beast Mode's bare column refs at the master element,
+  # AND normalize the column name the same way the master's columns are named.
+  # A Beast Mode's SQL carries the RAW Domo column name (e.g. Account.BillingState
+  # in the "US Regions" CASE), but build-dm names the master column via
+  # display_name ("Account Billing State"), so a bare re-point dangles:
+  #   'Dependency not found: master (pdp_example_dataset)/account.billingstate'
+  # display_name is idempotent, so a ref already in display form is unchanged.
+  formula.to_s.gsub(/\[([^\[\]\/]+)\]/) { "[Master/#{display_name(Regexp.last_match(1))}]" }
 end
 
 # An AGGREGATE (or window) Beast Mode cannot be a data-model column — build-dm
@@ -874,7 +903,26 @@ def resolve_filter_column(col)
     [disp, masterize_formula(bm['sigmaFormula'])]
   else
     disp = display_name(col)
-    [disp, mref(disp)]
+    # The column may already be a RESOLVED Beast Mode NAME rather than a raw
+    # calculation_<uuid> — domo-discover.rb now resolves filter column refs the
+    # same way it has always resolved card COLUMN refs (bead B3). That defeats
+    # the calculation_ prefix test above, so look the name up too:
+    # translated_beast_modes is keyed by BOTH id and name.
+    #
+    # Only inline when the Beast Mode is NOT materialized in the data model.
+    # build-dm.rb emits PROJECTION (row-level) Beast Modes as real DM calc
+    # columns — for those, mref() is correct and inlining would duplicate the
+    # logic. Aggregate/window/LOD ones are deliberately left to the workbook
+    # layer, so a reference to them dangles:
+    #   'Dependency not found: master (pdp_example_dataset)/us regions'
+    # (live, 36-card cold run — 'US Regions' is class=aggregate).
+    bm = translated_beast_modes[disp] || translated_beast_modes[col]
+    if bm.is_a?(Hash) && bm['class'].to_s != 'projection' &&
+       !bm['sigmaFormula'].to_s.strip.empty?
+      [disp, masterize_formula(bm['sigmaFormula'])]
+    else
+      [disp, mref(disp)]
+    end
   end
 end
 

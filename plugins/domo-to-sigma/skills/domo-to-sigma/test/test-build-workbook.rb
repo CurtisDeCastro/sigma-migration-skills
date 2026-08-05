@@ -632,8 +632,8 @@ flt3 = calc_filter_card['filters'].find { |f| f['values'] == [''] }
 ok(!flt3.nil?, 'the calc-id filter clause produced a real filter, values carried as-is')
 calc_col = calc_filter_card['columns'].find { |c| c['id'] == flt3['columnId'] }
 eq(calc_col['name'], 'State', 'the new column takes the Beast Mode\'s real name, not the raw calc id')
-eq(calc_col['formula'], 'If(Equals([Master/Account.BillingState], "CA"), "California", "Other")',
-   'the Beast Mode formula is INLINED and masterized — not Sum([Master/State]), which does not exist')
+eq(calc_col['formula'], 'If(Equals([Master/Account Billing State], "CA"), "California", "Other")',
+   'the Beast Mode formula is INLINED, masterized, and display_name-normalized (the master column is "Account Billing State", not the raw dotted Domo name)')
 $translated_bms = nil
 
 puts "== B4: a filter on an UNTRANSLATED Beast Mode is dropped LOUDLY, mirroring " \
