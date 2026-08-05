@@ -58,6 +58,7 @@ FileUtils.mkdir_p(opts[:workdir])
 $LOAD_PATH.unshift File.expand_path('lib', __dir__)
 require 'sigma_rest'
 require 'dm_quarantine'
+require 'code_rep'
 
 QUARANTINE = opts[:quarantine] && opts[:type] == 'datamodel'
 DEFERRED_PATH = File.join(opts[:workdir], 'deferred-elements.json')
@@ -125,6 +126,9 @@ if update_id
     if out_spec.is_a?(Hash) && out_spec['layout'].to_s.strip.empty?
       live = http(:get, format(GET_PATH, update_id))
       live_spec = (YAML.safe_load(live.body, permitted_classes: [Date, Time]) rescue nil)
+      # Workbook code-rep nests pages/layout under `document` (live since
+      # 2026-08); unwrap before reading — this GET is workbook-only here.
+      live_spec = Sigma::CodeRep.document(live_spec) if live_spec.is_a?(Hash)
       live_layout = live_spec.is_a?(Hash) ? live_spec['layout'].to_s : ''
       unless live_layout.strip.empty?
         # The layout XML references element ids. Banded layouts reference container
@@ -160,13 +164,28 @@ if update_id
       end
     end
   end
+  # Workbook code-rep nests non-metadata fields under `document` (verified
+  # live 2026-08-03/04) and REJECTS the old flat body with HTTP 400. Applied
+  # LAST, once the layout-preservation rewrite above (flat `pages`/`layout`
+  # access) is done — the datamodel surface is confirmed NOT changing, so
+  # only the workbook branch wraps.
+  if opts[:type] == 'workbook'
+    wb_doc = JSON.parse(put_body)
+    put_body = JSON.generate(Sigma::CodeRep.wrap(Sigma::CodeRep.document(wb_doc), extra: Sigma::CodeRep.metadata(wb_doc)))
+  end
   resp = http(:put, format(GET_PATH, update_id), put_body)
   parsed = YAML.safe_load(resp.body, permitted_classes: [Date, Time])
   oid = parsed[ID_FIELD] || update_id
   abort("PUT failed (HTTP #{resp.code}): #{parsed.inspect}") unless resp.is_a?(Net::HTTPSuccess)
   warn "PUT ok: #{ID_FIELD}=#{oid}"
 else
-  resp = http(:post, POST_PATH, File.read(opts[:spec]))
+  post_body = if opts[:type] == 'workbook'
+                wb_doc = JSON.parse(File.read(opts[:spec]))
+                JSON.generate(Sigma::CodeRep.wrap(Sigma::CodeRep.document(wb_doc), extra: Sigma::CodeRep.metadata(wb_doc)))
+              else
+                File.read(opts[:spec])
+              end
+  resp = http(:post, POST_PATH, post_body)
   parsed = YAML.safe_load(resp.body, permitted_classes: [Date, Time])
   oid = parsed.is_a?(Hash) ? parsed[ID_FIELD] : nil
   # Rec5 quarantine (opt-in): a POST killed by ONE broken element must not lose
@@ -217,7 +236,11 @@ columns_path = opts[:type] == 'datamodel' ?
   "/v2/dataModels/#{oid}/columns" :
   "/v2/workbooks/#{oid}/columns"
 readback = lambda do
-  spec = JSON.parse(http(:get, format(GET_PATH, oid), accept_json: true).body)
+  # Workbook code-rep responses nest non-metadata fields (pages/layout/
+  # schemaVersion/kind) under `document` (live since 2026-08); the DM
+  # readback is unchanged and stays flat.
+  raw_spec = JSON.parse(http(:get, format(GET_PATH, oid), accept_json: true).body)
+  spec = opts[:type] == 'workbook' ? Sigma::CodeRep.document(raw_spec) : raw_spec
   cols_res = http(:get, columns_path, accept_json: true)
   cols_json = cols_res.is_a?(Net::HTTPSuccess) ? (JSON.parse(cols_res.body) rescue { 'entries' => [] }) : nil
   labels_by_el = Hash.new { |h, k| h[k] = [] }
