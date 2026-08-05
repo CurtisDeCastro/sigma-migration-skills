@@ -1,4 +1,4 @@
-// ../../../private/tmp/sigma-data-model-mcp-vendor/build/sigma-ids.js
+// ../../../../sigma-data-model-mcp/.git-wt/main-vendor/build/sigma-ids.js
 var NS_MODULUS = 62 ** 4;
 var SIGMA_LOWERCASE_WORDS = /* @__PURE__ */ new Set([
   "a",
@@ -58,7 +58,7 @@ Groupings (for LOD / different aggregation levels):
   Array order = nesting hierarchy. Use child elements for LOD patterns.
 `.trim();
 
-// ../../../private/tmp/sigma-data-model-mcp-vendor/build/formulas.js
+// ../../../../sigma-data-model-mcp/.git-wt/main-vendor/build/formulas.js
 function decodeXmlEntities(s) {
   if (!s || s.indexOf("&") === -1)
     return s;
@@ -365,6 +365,84 @@ function lookIsComplexSql(sql) {
   if (/[=<>!+\-*\/%]/.test(cleaned.replace(/'[^']*'/g, "")))
     return true;
   return false;
+}
+function _splitTopLevelArgs(s) {
+  const args = [];
+  let depth = 0, quote = "", bracket = false, cur = "";
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (quote) {
+      cur += c;
+      if (c === quote)
+        quote = "";
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      quote = c;
+      cur += c;
+      continue;
+    }
+    if (c === "[")
+      bracket = true;
+    else if (c === "]")
+      bracket = false;
+    if (!bracket) {
+      if (c === "(")
+        depth++;
+      else if (c === ")")
+        depth--;
+      else if (c === "," && depth === 0) {
+        args.push(cur);
+        cur = "";
+        continue;
+      }
+    }
+    cur += c;
+  }
+  args.push(cur);
+  return args;
+}
+var _MYSQL_DIFF_UNIT = { DATEDIFF: "day", TIMEDIFF: "second" };
+function _rewriteMysqlDateDiff(expr) {
+  const NAME = /\b(DATEDIFF|TIMEDIFF)\s*\(/i;
+  let out = "", rest = expr;
+  for (; ; ) {
+    const m = NAME.exec(rest);
+    if (!m) {
+      out += rest;
+      break;
+    }
+    const open = m.index + m[0].length - 1;
+    let depth = 0, close = -1;
+    for (let i = open; i < rest.length; i++) {
+      if (rest[i] === "(")
+        depth++;
+      else if (rest[i] === ")") {
+        depth--;
+        if (depth === 0) {
+          close = i;
+          break;
+        }
+      }
+    }
+    if (close === -1) {
+      out += rest;
+      break;
+    }
+    const inner = rest.slice(open + 1, close);
+    const args = _splitTopLevelArgs(inner);
+    out += rest.slice(0, m.index);
+    if (args.length === 2) {
+      const unit = _MYSQL_DIFF_UNIT[m[1].toUpperCase()];
+      const end = _rewriteMysqlDateDiff(args[0]).trim();
+      const start = _rewriteMysqlDateDiff(args[1]).trim();
+      out += `DateDiff("${unit}", ${start}, ${end})`;
+    } else {
+      out += `${rest.slice(m.index, open + 1)}${_rewriteMysqlDateDiff(inner)})`;
+    }
+    rest = rest.slice(close + 1);
+  }
+  return out;
 }
 var LOOK_FUNC_MAP = {
   "MONTH": "Month",
@@ -738,6 +816,7 @@ function lookConvertExpression(expr) {
   const cd = _maskCountDistinct(expr);
   const { masked, lits } = _maskLiterals(cd.masked);
   expr = masked;
+  expr = _rewriteMysqlDateDiff(expr);
   const ec = _convertNestedCases(expr, lits, "leave-raw", cd.args);
   expr = ec.text;
   expr = expr.replace(/\b([A-Z_][A-Z0-9_]*)\s*(?=\()/gi, (match, fn) => {
