@@ -318,6 +318,7 @@ jobs:
             shared/scripts/test-assert-phase6.rb
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-intake-triage.rb
             plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/test-validate-sigma-formula-cleanup.rb
+            plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/test-validate-sigma-formula-wrap.rb
             # shared/scripts/test-validate-sigma-formula-cleanup.rb is INTENTIONALLY not listed: standalone it
             # self-SKIPs; its coverage is the shared-manifest drift gate pinning it byte-identical to the
             # quicksight twin above (PR #509 review R9 — the manifest entry is the coverage mechanism).
