@@ -29,8 +29,9 @@
 #   push [dir]                   reassemble -> drift-check -> validate -> PUT (or POST create)
 #   assemble [dir] [-o file]     print/write the reassembled spec without pushing
 #   import <spec.yaml> [dir]     explode an existing local spec file (create mode: push POSTs)
-#   verify <spec-file>           dry-run: POST to /v2/workbooks/spec/verify — zero-persistence
-#                                schema/reference check; prints valid: true or the errors array
+#   verify <spec-file>           dry-run (Beta endpoint): POST to /v2/workbooks/spec/verify —
+#                                zero-persistence schema/reference check; prints valid: true or
+#                                the errors array
 #   render [dir] [--page X]      export page(s) (or --element <id>) as PNG into <dir>/renders/
 #                                — LOOK at what you built and iterate; renders server state
 #
@@ -281,16 +282,32 @@ def cmd_import(args)
   puts "imported #{src} -> #{dir} (create mode: push will POST a new workbook)"
 end
 
+# Root-cause correction (2026-08-04): an earlier version of this comment blamed a lone
+# "/verify Beta drift" — that diagnosis was wrong. Live A/B testing showed the REAL create
+# endpoint (POST /v2/workbooks/spec) 400s identically on the flat shape, with the exact same
+# fix. Both endpoints now require the request wrapped as
+# { name, folderId, document: { schemaVersion, kind: "workbook", pages, layout } } —
+# not the flat { name, folderId, schemaVersion, pages, layout } shape the OpenAPI text still
+# documents and that every other command in this file (push/pull/import/assemble) still
+# reads/writes on disk. This is a known, broader mismatch across this codebase (tracked
+# separately, well beyond this one file) — see reference/workflows/validate.md section 1 for
+# the full story. This helper fixes it ONLY for verify's outbound request; it does not change
+# the on-disk rep format push/pull/import/assemble use, and does not fix those commands' own
+# create/update calls, which hit the same 400 live and are still flat today.
+def wrap_for_verify(spec)
+  return spec if spec['document'] # already wrapped — pass through unchanged
+
+  document_keys = %w[schemaVersion kind pages layout]
+  document = spec.select { |k, _| document_keys.include?(k) }
+  document['kind'] ||= 'workbook'
+  spec.reject { |k, _| document_keys.include?(k) }.merge('document' => document)
+end
+
 def cmd_verify(args)
-  # Known caveat (2026-08-03): /v2/workbooks/spec/verify is a private Beta endpoint that has
-  # been observed rejecting well-formed requests matching its own documented OpenAPI schema,
-  # 400ing for an undocumented { document: {...}, layout } envelope instead of this flat one
-  # (which POST /v2/workbooks/spec, the real create endpoint, does accept). If you land here
-  # debugging a mysterious 400, your spec is likely fine — see reference/workflows/validate.md
-  # section 1 and fall back to section 5's post-create verification.
   path = args.shift or die 'usage: wb-rep.rb verify <spec-file>'
   die "no such file: #{path}" unless File.exist?(path)
-  result = YAML.load(api(:post, '/v2/workbooks/spec/verify', File.read(path)))
+  spec = wrap_for_verify(strip_response_only(load_yaml_file(path)))
+  result = YAML.load(api(:post, '/v2/workbooks/spec/verify', YAML.dump(spec)))
   if result['valid']
     puts 'valid: true'
   else
@@ -399,7 +416,12 @@ def cmd_push(args, force:, validate: true)
 end
 
 # Zoom-style reads (no full-spec load): summarize a workbook or rep cheaply,
-# and distil authorable capabilities live from the public OpenAPI.
+# and distil authorable capabilities live from the public OpenAPI. `capabilities`
+# is inherently a BULK-discovery tool (every kind, or every field on one kind) —
+# for a single endpoint's current request/response shape, the stable per-endpoint
+# pages at https://help.sigmacomputing.com/reference/<endpoint-slug> (see
+# SKILL.md's "Sources of truth") are the better source; this command doesn't
+# cover that case and isn't meant to.
 def cmd_summarize(args)
   target = args.shift || '.'
   spec = if File.directory?(target)
@@ -422,6 +444,17 @@ def cmd_summarize(args)
   puts "  sources: #{sources.compact.uniq.join(', ')}" unless sources.compact.empty?
 end
 
+# Content-addressed Fern docs asset — pins one docs build, so this hash goes dead
+# (403 AccessDenied, not a redirect) on every docs redeploy. This exact hash has
+# already gone dead twice since being pinned here (most recently reconfirmed via
+# curl while documenting this — see SKILL.md's "Sources of truth" for the count).
+# If `capabilities` fails with "failed to fetch OpenAPI", rediscover the current
+# link from https://help.sigmacomputing.com/openapi.json and update this constant
+# — but don't expect the replacement to be durable either; that's inherent to
+# content-addressing, not a one-off bug. For a single endpoint's shape rather than
+# bulk kind/field discovery, prefer the durable per-endpoint pages documented in
+# SKILL.md's "Sources of truth" (https://help.sigmacomputing.com/reference/<endpoint-slug>)
+# — they don't rotate, so there's nothing to keep in sync here.
 OPENAPI_CACHE = File.join(Dir.tmpdir, 'sigma-api.json').freeze
 OPENAPI_URL = 'https://fdr-prod-docs-files-public.s3.us-east-1.amazonaws.com/sigma.docs.buildwithfern.com/964b7dcf73aa353d3ab89b1550fa14ea8a4d0a6300aed16bcbe329d1bb4cfd9e/assets/openapi/sigma-computing-public-rest-api.json'.freeze
 
