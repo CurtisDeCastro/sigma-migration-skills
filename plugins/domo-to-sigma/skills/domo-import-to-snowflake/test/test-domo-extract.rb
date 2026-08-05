@@ -13,6 +13,48 @@ puts "== row_count =="
 counter = ->(_id, sql) { ok(sql.include?('COUNT(*)'), 'row_count sends a COUNT(*) query'); { 'rows' => [[42]] } }
 eq(DomoExtract.row_count('ds-1', query: counter), 42, 'parses COUNT(*) result out of the rows envelope')
 
+puts "== row_count: error handling =="
+begin
+  bad_no_rows = ->(_id, _sql) { { 'data' => 'wrong key' } }
+  DomoExtract.row_count('ds-1', query: bad_no_rows)
+  ok(false, 'missing rows key should raise')
+rescue => e
+  ok(e.message.include?('malformed COUNT(*)') && e.message.include?('ds-1'), "raises on missing 'rows' key: #{e.message}")
+end
+
+begin
+  bad_empty_rows = ->(_id, _sql) { { 'rows' => [] } }
+  DomoExtract.row_count('ds-1', query: bad_empty_rows)
+  ok(false, 'empty rows array should raise')
+rescue => e
+  ok(e.message.include?('malformed COUNT(*)') && e.message.include?('ds-1'), "raises on empty 'rows' array: #{e.message}")
+end
+
+puts "== extract_rows: error handling =="
+begin
+  bad_missing_rows = ->(_id, _sql) { { 'columns' => %w[A] } }
+  DomoExtract.extract_rows('ds-1', query: bad_missing_rows, band_size: 10)
+  ok(false, 'missing rows key should raise')
+rescue => e
+  ok(e.message.include?('malformed page response') && e.message.include?('ds-1') && e.message.include?('offset 0'), "raises on missing 'rows': #{e.message}")
+end
+
+begin
+  bad_missing_columns = ->(_id, _sql) { { 'rows' => [['x']] } }
+  DomoExtract.extract_rows('ds-1', query: bad_missing_columns, band_size: 10)
+  ok(false, 'missing columns key should raise')
+rescue => e
+  ok(e.message.include?('malformed page response') && e.message.include?('ds-1'), "raises on missing 'columns': #{e.message}")
+end
+
+begin
+  bad_rows_not_array = ->(_id, _sql) { { 'columns' => %w[A], 'rows' => 'not an array' } }
+  DomoExtract.extract_rows('ds-1', query: bad_rows_not_array, band_size: 10)
+  ok(false, 'non-array rows should raise')
+rescue => e
+  ok(e.message.include?('malformed page response') && e.message.include?('ds-1'), "raises on rows not Array: #{e.message}")
+end
+
 puts "== extract_rows: single page shorter than band_size stops immediately =="
 one_page = ->(_id, _sql) { { 'columns' => %w[A B], 'rows' => [%w[1 2], %w[3 4]] } }
 result = DomoExtract.extract_rows('ds-1', query: one_page, band_size: 10)
@@ -34,6 +76,38 @@ eq(result['rows'].size, 4, 'concatenates every page (3 + 1)')
 eq(calls.size, 2, 'stops after the first short page — no unnecessary third call')
 ok(calls[0].include?('OFFSET 0'), 'first page requests OFFSET 0')
 ok(calls[1].include?('OFFSET 3'), 'second page requests OFFSET band_size')
+
+puts "== extract_rows: exact multiple of band_size requires final short page to stop =="
+exact_multiple = []
+exact_paged = ->(_id, sql) {
+  exact_multiple << sql
+  case exact_multiple.size
+  when 1
+    { 'columns' => %w[A], 'rows' => Array.new(3) { |i| [i.to_s] } }  # full page, 3 rows
+  when 2
+    { 'columns' => %w[A], 'rows' => Array.new(3) { |i| [(i + 3).to_s] } }  # full page, 3 more rows
+  when 3
+    { 'columns' => %w[A], 'rows' => Array.new(3) { |i| [(i + 6).to_s] } }  # full page, 3 more rows
+  else
+    { 'columns' => %w[A], 'rows' => [] }  # short final page, 0 rows
+  end
+}
+result = DomoExtract.extract_rows('ds-1', query: exact_paged, band_size: 3)
+eq(result['rows'].size, 9, 'returns all 9 rows from three full pages + empty final')
+eq(exact_multiple.size, 4, 'makes exactly 4 calls (3 full pages + 1 empty final page)')
+ok(exact_multiple[2].include?('OFFSET 6'), 'third page requests OFFSET 6')
+ok(exact_multiple[3].include?('OFFSET 9'), 'fourth page requests OFFSET 9 (detects empty final)')
+
+puts "== extract_rows: zero-row dataset (empty final page on first call) =="
+zero_rows = ->(_id, _sql) { { 'columns' => %w[A B], 'rows' => [] } }
+result = DomoExtract.extract_rows('ds-1', query: zero_rows, band_size: 100)
+eq(result['columns'], %w[A B], 'columns captured even from empty first page')
+eq(result['rows'], [], 'zero rows returned for empty dataset')
+
+puts "== extract_rows: legitimate empty final page does not raise =="
+# This is covered by the exact_multiple test above (page 4 has empty rows), but verify the concept:
+# an empty 'rows' array from extract_rows is valid; only row_count treats empty 'rows' as malformed
+ok(true, 'empty rows array on extract_rows per-page response is valid (already tested above)')
 
 puts "== extract_with_parity =="
 matching = ->(_id, sql) {

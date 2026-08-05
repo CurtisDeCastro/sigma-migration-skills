@@ -24,7 +24,10 @@ module DomoExtract
 
   def row_count(dataset_id, query:)
     result = query.call(dataset_id, 'SELECT COUNT(*) FROM table')
-    Array(result['rows']).dig(0, 0).to_i
+    unless result.is_a?(Hash) && result['rows'].is_a?(Array) && !result['rows'].empty?
+      raise "dataset #{dataset_id}: malformed COUNT(*) response (expected a non-empty 'rows' array): #{result.inspect}"
+    end
+    result['rows'].dig(0, 0).to_i
   end
 
   # Pulls every row via explicit LIMIT/OFFSET pages of `band_size`, so no
@@ -37,8 +40,11 @@ module DomoExtract
     offset = 0
     loop do
       page = query.call(dataset_id, "SELECT * FROM table LIMIT #{band_size} OFFSET #{offset}")
+      unless page.is_a?(Hash) && page['rows'].is_a?(Array) && page['columns'].is_a?(Array)
+        raise "dataset #{dataset_id}: malformed page response at offset #{offset} (expected 'rows'/'columns' arrays): #{page.inspect}"
+      end
       columns ||= page['columns']
-      page_rows = Array(page['rows'])
+      page_rows = page['rows']
       rows.concat(page_rows)
       break if page_rows.size < band_size
       offset += band_size
