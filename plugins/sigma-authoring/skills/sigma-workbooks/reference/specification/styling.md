@@ -534,13 +534,12 @@ value: Week
 ## Composition styling — the `Styling` module
 
 The recipes above are written to hand-author; the same moves are also available as a small
-shared helper library — Ruby `shared/lib/styling.rb`, with a byte-identical Python twin
-`shared/lib/styling.py` — for applying a professional look on top of a layout built with the
-`Composition` engine (`reference/workflows/composition.md`) instead of re-transcribing hex
-codes and container shapes into every dashboard. Every field these helpers emit is one of the
-Task-1 live-verified GO surfaces above (`.superpowers/sdd/styling-task-1-report.md`); each
-helper is gated behind an internal `SURFACES` map so a future regression can flip a surface off
-in one place instead of emitting an unverified (or now-rejected) shape at every call site.
+shared helper library — `scripts/lib/styling.rb` — for applying a professional look on top of
+a layout built with the `Composition` engine (`reference/workflows/composition.md`) instead of
+re-transcribing hex codes and container shapes into every dashboard. Every field these helpers
+emit is one of the live-verified GO surfaces above; each helper is gated behind an internal
+`SURFACES` map so a future regression can flip a surface off in one place instead of emitting
+an unverified (or now-rejected) shape at every call site.
 
 ### Theme
 
@@ -593,7 +592,7 @@ output rather than hand-writing the container + child XML per dashboard:
   `Composition.band` would use unwrapped.
 - Both container `style` shapes use the field name **`borderRadius`** (`square|round|pill`) —
   never the guessed `cornerRadius`, which is silently dropped on readback (the *container-style*
-  row of Task 1's GO/NO-GO table). And **never combine `padding` with `borderColor`/`borderWidth`**
+  row of the GO/NO-GO surface map above). And **never combine `padding` with `borderColor`/`borderWidth`**
   on the same container — POST 400s ("padding is 'none' but border fields... require default
   padding"); omit `padding` (its default) whenever a border is set.
 
@@ -726,7 +725,7 @@ Don't waste a round-trip trying to set these — the spec API silently drops the
 - **Chart tooltip customization** (spec-findings #10)
 - **Trellis / small-multiples layout** (spec-findings #11)
 - **Donut / pie slice colors** (spec-findings #22, per-element `color.scheme`; use workbook-level `themeOverrides.categoricalScheme` instead — see *Workbook theme* above)
-- ~~**KPI title color or "hide title" toggle** — `name` always renders as a black title~~ — **RESOLVED, live-verified 2026-07-28**: `name` on a `kpi-chart` (or any element) *is* colorable — `{ "name": { "text": "Revenue", "color": "#2563EB" } }` survives readback and renders the title in that color (workbook `e0586f0d-a2cd-431c-b495-555acf3ccae0`; see `.superpowers/sdd/styling-task-1-report.md`). This supersedes the "`name` always renders as a black title" claim this doc carried until now — for *this exact shape only*: there is still no `showTitle: false` / "hide title" toggle, so the `name: ' '` (single-space) workaround in Recipe 2 above still stands for suppressing a duplicate title.
+- ~~**KPI title color or "hide title" toggle** — `name` always renders as a black title~~ — **RESOLVED, live-verified 2026-07-28**: `name` on a `kpi-chart` (or any element) *is* colorable — `{ "name": { "text": "Revenue", "color": "#2563EB" } }` survives readback and renders the title in that color. This supersedes the "`name` always renders as a black title" claim this doc carried until now — for *this exact shape only*: there is still no `showTitle: false` / "hide title" toggle, so the `name: ' '` (single-space) workaround in Recipe 2 above still stands for suppressing a duplicate title.
 - ~~**Element title font size / font family** — the `name` field has no `style` sibling.~~ — **PARTIALLY RESOLVED, live-verified 2026-07-28**: a per-element `name` object also takes `fontSize` — `{ "name": { "text": "Category Detail", "fontSize": 22, "color": "#DC2626" } }` on a non-KPI element (e.g. a table) survives readback and renders both a visibly larger size and a distinct color, **overriding the workbook-wide `titleFont`** (see *Workbook theme* above) for that one element when both are set. This supersedes the "the `name` field has no `style` sibling" claim this doc carried until now. Font *family* per title remains untested — only `fontSize`/`color` were probed; `themeOverrides.fonts.textFont` (*Workbook theme* above) is still the only verified lever for text font family, and it's global, not per-title.
 - ~~**Workbook-level palette / theme** via spec~~ — **RESOLVED**: now spec-authorable via top-level `themeName` + `themeOverrides` (see *Workbook theme* above).
 - **Chart `tooltip` / `trellis*` fields** (UI-only)

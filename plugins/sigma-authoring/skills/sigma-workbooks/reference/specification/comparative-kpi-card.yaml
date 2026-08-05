@@ -3,16 +3,18 @@
 # A minimal two-element spec: a source table exposing a current-period and a
 # prior-period numeric column, and a `kpi-chart` bound to both via `value` +
 # `comparisonColumn` + `comparison:{display:"delta"}` — the verified,
-# readback-stable shape (live-verified 2026-07-27; see ../refs/kpi-comparison.md
-# for the full write-up and gotchas). This is the house default for any
-# headline number on a dashboard — don't hand-roll it: emit it with
-# `shared/lib/kpi_card.rb` (`KpiCard.build`) / `shared/lib/kpi_card.py`
-# (`kpi_card.build`), which already encodes every gotcha below.
+# readback-stable shape (live-verified 2026-07-27; see kpis.md's `layout`,
+# `comparison`, and `trend` blocks section for the full write-up and
+# gotchas). This is the house default for any headline number on a
+# dashboard — reach for a second column/second KPI only when the two
+# numbers being compared don't share the same underlying scope (e.g.
+# genuinely different sources) and can't be expressed as one value + one
+# comparison column.
 #
 # Required top-level fields for POST /v2/workbooks/spec are name, folderId,
-# schemaVersion, pages (see reference/workflows/crud.md). Swap `folderId` and
-# the source's `connectionId` / `path` for your own before posting — the
-# element shapes below can be cloned as-is.
+# schemaVersion, pages (see reference/workflows/crud.md). Swap `folderId`
+# and the source's `connectionId` / `path` for your own before posting —
+# the element shapes below can be cloned as-is.
 
 name: Comparative KPI card example
 folderId: <your-folder-id>
@@ -46,9 +48,7 @@ pages:
         name: KPI Source
       - id: kpi-revenue
         kind: kpi-chart
-        name:
-          text: Revenue
-          color: '#0B3D2E'          # kpi-chart name.color IS honored (a text ELEMENT's style.color is not — see refs/kpi-comparison.md)
+        name: Revenue
         source:
           kind: table
           elementId: kpi-source
