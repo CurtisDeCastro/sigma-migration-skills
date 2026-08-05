@@ -33,10 +33,14 @@ module DomoExtract
   # Pulls every row via explicit LIMIT/OFFSET pages of `band_size`, so no
   # single call can silently truncate without this loop knowing (a page
   # shorter than band_size ends the loop; a full-length final page would
-  # otherwise look identical to "more data exists").
+  # otherwise look identical to "more data exists"). Also captures type
+  # metadata from the first page's response and builds schema_cols, the
+  # authoritative column-name + type pairs for DDL, eliminating an unreliable
+  # separate Domo.dataset(id)['schema'] lookup (which is empty for most real datasets).
   def extract_rows(dataset_id, query:, band_size: 20_000)
     rows = []
     columns = nil
+    types = nil
     offset = 0
     loop do
       page = query.call(dataset_id, "SELECT * FROM table LIMIT #{band_size} OFFSET #{offset}")
@@ -44,12 +48,15 @@ module DomoExtract
         raise "dataset #{dataset_id}: malformed page response at offset #{offset} (expected 'rows'/'columns' arrays): #{page.inspect}"
       end
       columns ||= page['columns']
+      types ||= Array(page['metadata']).map { |m| m.is_a?(Hash) ? m['type'] : nil }
       page_rows = page['rows']
       rows.concat(page_rows)
       break if page_rows.size < band_size
       offset += band_size
     end
-    { 'columns' => columns || [], 'rows' => rows }
+    columns = columns || []
+    schema_cols = columns.each_with_index.map { |name, i| { 'name' => name, 'type' => (types || [])[i] } }
+    { 'columns' => columns, 'schema_cols' => schema_cols, 'rows' => rows }
   end
 
   # Extracts + asserts the extracted row count matches a fresh COUNT(*) —
