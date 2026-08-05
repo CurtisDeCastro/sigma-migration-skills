@@ -25,6 +25,7 @@
 // Idempotent (band elements are re-derived each run). Run it as the last step
 // of the build/verify phase.
 import { api, parseArgs } from './lib/sigma-rest.mjs';
+import { document as docOf, metadata as metaOf, wrap as wrapDoc } from './lib/code_rep.mjs';
 import { pythonArgv } from './lib/py_resolve.mjs';
 import { spawnSync } from 'node:child_process';
 import { writeFileSync, mkdirSync } from 'node:fs';
@@ -138,7 +139,12 @@ function pageLayout(page, fallbackTitle) {
 
 const got = await api('GET', `/v2/workbooks/${a.workbook}/spec`);
 if (!got.json) { console.error(`GET spec failed (HTTP ${got.status}): ${got.text.slice(0, 300)}`); process.exit(1); }
-const spec = got.json;
+// Workbook code-rep GETs nest pages/schemaVersion/layout under a top-level
+// `document` key (live since 2026-08) — flatten metadata+document onto ONE
+// object so every `spec.pages`/`spec.layout` read below (and the eventual
+// PUT, wrapped back at the wire boundary) sees the same flat shape this file
+// always worked with.
+const spec = { ...metaOf(got.json), ...docOf(got.json) };
 // The layout is a SINGLE top-level `spec.layout` XML holding one <Page> block per page
 // (NOT pages[].layout — that's silently dropped). Strip read-only fields before the PUT.
 const pageBlocks = [];
@@ -157,12 +163,20 @@ spec.layout = `<?xml version="1.0" encoding="utf-8"?>\n${pageBlocks.join('\n')}`
 for (const k of ['workbookId', 'url', 'ownerId', 'createdBy', 'updatedBy', 'createdAt', 'updatedAt', 'latestDocumentVersion', 'documentVersion']) delete spec[k];
 if (a.folder && !spec.folderId) spec.folderId = a.folder;
 
-const put = await api('PUT', `/v2/workbooks/${a.workbook}/spec`, spec);
+// Workbook code-rep PUTs require the nested `document` envelope (verified
+// live 2026-08-03/04: a flat body 400s) — wrap the flattened `spec` back up
+// before sending it over the wire.
+const putBody = wrapDoc(docOf(spec), metaOf(spec));
+const put = await api('PUT', `/v2/workbooks/${a.workbook}/spec`, putBody);
 if (!put.ok) { console.error(`PUT failed (HTTP ${put.status}): ${put.text.slice(0, 400)}`); process.exit(1); }
 
 // verify the layout (containers included) survived readback
 const rb = await api('GET', `/v2/workbooks/${a.workbook}/spec`);
-const rbLayout = rb.json?.layout || '';
+// Same nested-`document` unwrap as the GET above — every downstream read of
+// this readback (layout string, the lint payload, the visual-QA page list)
+// expects a flat spec, not the live nested shape.
+const rbSpec = { ...metaOf(rb.json), ...docOf(rb.json) };
+const rbLayout = rbSpec.layout || '';
 const ok = /<LayoutElement/.test(rbLayout) && /<GridContainer/.test(rbLayout);
 console.log(JSON.stringify({ workbookId: a.workbook, pagesLaidOut: pageBlocks.length, layoutOnReadback: ok }, null, 2));
 if (!ok) { console.error('FAIL: container layout did not survive readback (check elementId matches — a GridContainer with an unknown elementId is silently dropped)'); process.exit(1); }
@@ -175,7 +189,7 @@ if (!ok) { console.error('FAIL: container layout did not survive readback (check
 // --skip-layout-lint bypasses.
 if (!a['skip-layout-lint'] && rb.json) {
   const tmp = join(tmpdir(), `cognos-layout-lint-${a.workbook}.json`);
-  writeFileSync(tmp, JSON.stringify(rb.json));
+  writeFileSync(tmp, JSON.stringify(rbSpec));
   const lint = spawnSync('ruby', [join(HERE, 'lib', 'layout_lint.rb'), tmp], { encoding: 'utf8' });
   if (lint.stdout) process.stderr.write(lint.stdout);
   if (lint.stderr) process.stderr.write(lint.stderr);
@@ -198,7 +212,7 @@ console.error(`container-banded layout applied (${pageBlocks.length} page block(
 // child via env (inherited SIGMA_API_TOKEN; same one the api() helper uses).
 // --skip-visual-qa bypasses.
 if (!a['skip-visual-qa'] && rb.json) {
-  const contentPages = (rb.json.pages || []).filter((p) => {
+  const contentPages = (rbSpec.pages || []).filter((p) => {
     const tag = `${p.id || ''} ${p.name || ''}`.toLowerCase();
     return p.id && !tag.includes('data');
   });
