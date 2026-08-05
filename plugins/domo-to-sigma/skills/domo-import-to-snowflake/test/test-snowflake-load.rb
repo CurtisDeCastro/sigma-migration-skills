@@ -16,13 +16,13 @@ eq(csv, "a,b\n\"x,y\",\"z\"\"w\"\n", 'quotes fields containing commas/embedded q
 puts "== load_sql =="
 sql = SnowflakeLoad.load_sql('CREATE TABLE DB.SCH.T (...);', 'DB', 'SCH', 'T', 'file:///tmp/x.csv')
 ok(sql.include?('CREATE TABLE DB.SCH.T'), 'includes the caller-supplied CREATE TABLE statement verbatim')
-ok(sql.include?("PUT 'file:///tmp/x.csv' @%T"), 'PUTs to the table stage')
+ok(sql.include?("PUT 'file:///tmp/x.csv' @DB.SCH.%T"), 'PUTs to the fully-qualified table stage')
 ok(sql.include?('COPY INTO DB.SCH.T'), 'COPYs into the target table')
 ok(sql.include?('ON_ERROR = ABORT_STATEMENT'), 'aborts the whole COPY on any bad row, never a silent partial load')
 
 # Regression test: table names requiring quoting (spaces, etc) must be quoted in PUT stage ref
 sql_quoted = SnowflakeLoad.load_sql('CREATE TABLE DB.SCH."My Table" (...);', 'DB', 'SCH', 'My Table', 'file:///tmp/x.csv')
-ok(sql_quoted.include?('@%"My Table"'), 'PUT stage reference uses quoted table name when table needs quoting')
+ok(sql_quoted.include?('@DB.SCH.%"My Table"'), 'PUT stage reference is fully qualified with database.schema.%table')
 
 puts "== grant_sql =="
 eq(SnowflakeLoad.grant_sql('DB', 'SCH', 'T', 'PUBLIC'), 'GRANT SELECT ON DB.SCH.T TO ROLE PUBLIC;', 'grants SELECT to the given role')
