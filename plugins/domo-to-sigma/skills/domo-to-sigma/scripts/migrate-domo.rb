@@ -24,7 +24,10 @@
 #   runs AFTER verify-parity rather than immediately after the render: it
 #   hard-requires parity-final.json to already exist on disk (it merges into
 #   it, never creates it from nothing), and that file is first written by
-#   verify-parity.rb's --score-out. This orchestrator has no image input, so
+#   phase6-parity-domo.rb, the parity finalizer (bead 2tkm — it used to be
+#   written by verify-parity.rb's --score-out, which is what BROKE gate 1:
+#   --score-out emits the tiles_* score schema, not the gate's charts_*
+#   contract. --score-out now targets parity-score.json). This orchestrator has no image input, so
 #   it records the only HONEST verdict it is entitled to — not-executable —
 #   rather than fabricate a pass; see phase_record_visual_check! below.
 #
@@ -819,15 +822,30 @@ def run_live!(opts)
 
   hr('verify-parity')
   if opts[:parity_plan] && File.exist?(opts[:parity_plan])
-    # --score-out (bead B6): without it verify-parity.rb only prints a report —
-    # parity-final.json is never written, so assert-phase6-ran.rb's gate 1
-    # (:715 reads it) sees no parity result even on a run that DID supply a
-    # plan. verify-parity.rb has supported --score-out since before this fix
-    # (see its own option parsing + writer); this was simply never plumbed
-    # through from here.
-    ok, code, _out = run_script!('verify-parity.rb', '--plan', opts[:parity_plan],
-                                  '--score-out', File.join(OUT, 'parity-final.json'))
-    fail_phase!('verify-parity', "verify-parity.rb exited #{code}") unless ok
+    # Bead 2tkm — finalize through phase6-parity-domo.rb, do NOT aim
+    # verify-parity.rb's --score-out at parity-final.json.
+    #
+    # B6 correctly spotted that --score-out was never plumbed through (without it
+    # verify-parity.rb only prints a report). But it aimed the score document at
+    # parity-final.json, which is the GATE'S contract file: assert-phase6-ran.rb
+    # reads charts_total/charts_pass/status, while --score-out writes
+    # tiles_total/tiles_pass/tiles_fail. So a flawless 65/65 run wrote a document
+    # in which the gate found none of its three keys, computed charts_total = 0,
+    # dropped into the anchors-oracle substitution branch, found no
+    # anchors-verdict.json, and exited 2 — a perfect parity run was
+    # indistinguishable from parity never having run.
+    #
+    # domo was the only converter of six with no phase6-parity-*.rb finalizer
+    # (tableau's phase6-parity.rb:344-382 is the reference). It now runs
+    # verify-parity.rb itself (--score-out -> parity-score.json), derives the
+    # gate contract into parity-final.json, and refuses to emit a contract when
+    # the plan silently omits chartable tiles.
+    ok, code, _out = run_script!('phase6-parity-domo.rb',
+                                  '--workdir', OUT,
+                                  '--plan', opts[:parity_plan],
+                                  '--workbook-id', workbook_id,
+                                  '--score-out', File.join(OUT, 'parity-score.json'))
+    fail_phase!('verify-parity', "phase6-parity-domo.rb exited #{code}") unless ok
     done_phase!('verify-parity')
   else
     skip_phase!('verify-parity', 'no --parity-plan supplied — run verify-parity.rb by hand before declaring GREEN')

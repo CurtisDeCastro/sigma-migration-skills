@@ -85,9 +85,22 @@ end
 # just a guard against the exact regression each fix closes (--score-out
 # silently dropped again, or the render/record calls silently removed)
 # slipping back in unnoticed between now and the next live validation.
-ok(migrate_src.include?("'verify-parity.rb', '--plan', opts[:parity_plan],") &&
-   migrate_src.include?("'--score-out', File.join(OUT, 'parity-final.json')"),
-   'bead B6: run_live! passes --score-out to verify-parity.rb so parity-final.json actually gets written')
+#
+# CORRECTED 2026-08-05 (bead beads-sigma-2tkm). B6's original assertion pinned
+# `--score-out File.join(OUT, 'parity-final.json')` — which was itself the bug.
+# parity-final.json is the GATE'S contract file (assert-phase6-ran.rb reads
+# charts_total/charts_pass/status); verify-parity.rb --score-out writes
+# tiles_total/tiles_pass/tiles_fail. Aiming one at the other meant a flawless
+# 65/65 parity run landed a tiles_*-shaped document where the gate expected
+# charts_*, so the gate read charts_total = 0 and exited 2. The two documents are
+# now distinct, with phase6-parity-domo.rb finalizing score -> contract.
+ok(migrate_src.include?("'phase6-parity-domo.rb'"),
+   'bead 2tkm: run_live! finalizes parity through phase6-parity-domo.rb (the gate-contract writer)')
+ok(!migrate_src.include?("'--score-out', File.join(OUT, 'parity-final.json')"),
+   'bead 2tkm: verify-parity.rb --score-out no longer overwrites the gate contract file')
+ok(migrate_src.include?("'--score-out', File.join(OUT, 'parity-score.json')") ||
+   migrate_src.include?('phase6-parity-domo.rb'),
+   'bead 2tkm: the tiles_* score document lands in parity-score.json, not parity-final.json')
 
 render_call_at  = migrate_src.index('phase_render_visual!(opts, workbook_id, wb_ids)')
 parity_hdr_at   = migrate_src.index("hr('verify-parity')")
