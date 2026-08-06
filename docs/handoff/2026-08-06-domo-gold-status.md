@@ -75,14 +75,57 @@ corrected or its operands swapped — silently negating every date-window predic
 vendored into this repo by **PR #633**.
 
 **The measured gap:** #633 merged at **2026-08-05 16:47:37**. The last live run was at **14:32** —
-over two hours *earlier*. **The vendored fix has never been exercised against the live pipeline.**
+over two hours *earlier*. **The vendored fix had never been exercised against the live pipeline.**
 
-So the single highest-value, lowest-cost next action is simply **re-run the cold run** and see
-what the 15 becomes. Do this before designing anything. The plausible outcome is 15 → 6.
+### Verified offline 2026-08-06 — the vendoring took, and the 15 splits 9 + 6
 
-The remaining 6 are expected to be the **`State` / `US Regions` nested `If(In(...))` chains**.
-Check whether they fail for their own reason (nesting depth, `In()` arity) rather than assuming
-they share a cause with the DATEDIFF class.
+Rather than guess, the vendored bundle was run against the real corpus
+(`~/domo-coldrun-v4/discovery/formulas.json`, 81 Beast Modes, 23 of them DATEDIFF-bearing) with no
+live run spent. `_rewriteMysqlDateDiff` is present and correct:
+
+```
+datediff(current_date(), `Date`)               ->  DateDiff("day", `Date`, Today())
+DateDiff(AddDate(Current_Date(),-1), `Date`)   ->  DateDiff("day", `Date`, Adddate(Today(),-1))
+```
+
+Unit added, operands swapped, nesting handled. **The vendoring did take.**
+
+Categorising the 15 from `/tmp/gold-run12.log` shows they split exactly **9 + 6**, matching the
+bead's "9 of 15" claim:
+
+| Class | N | Columns |
+|---|---|---|
+| DATEDIFF 2-arg | 9 | the four `Last 7 Vs Prev 7 Days …` metrics, `Change Over 7 Days`, `Daily Unique Visitors - Last 7 Days`, `Sent Tweets Last 7 Days`, `Completion Rate 30-Day`, `% Change - Pageviews` |
+| `State` / `US Regions` | 6 | `State` ×2, `US Regions` ×4 — 50–51-deep nested `If` chains |
+
+### ⚠️ Expect 15 → **7**, not 15 → 6 — a second bug was found doing this
+
+**`beads-sigma-zmnt` (P1, new):** the converter also emits **`Adddate(...)`, which is not a Sigma
+function.** MySQL's `ADDDATE(date, N)` is renamed by bare name and passed through; the correct
+target is `DateAdd("day", N, date)` — different spelling *and* different arity/arg-order. **Exactly
+the same class as the DATEDIFF bug**, in 7 Beast Modes / 27 call sites.
+
+The converter's own oracle already knows:
+
+```
+lookUnknownFunctions('Adddate(Today(),-1)')       ->  ["ADDDATE"]
+lookUnknownFunctions('DateAdd("day",-1,Today())') ->  []
+```
+
+`convert-beast-modes.rb:562` *does* surface it — but only as a **warning**, so nothing failed and
+it was passed over in the live run.
+
+**Why this matters for the re-run:** `% Change - Pageviews` is in the 15 and carries **both** bugs
+(`DateDiff(Adddate(Today(), -1), [Date])`), so it will still be `type=error` after #633. Anyone
+expecting 15 → 6 will see **15 → 7** and may wrongly conclude the vendoring failed. It didn't.
+
+**Worth considering:** promote the `lookUnknownFunctions` warning to a hard failure, or route it
+into the degradation ledger. A function Sigma doesn't have is not a soft warning — it's a
+guaranteed `type=error` at POST time, and the warning demonstrably did not stop a bad run.
+
+The remaining 6 are the **`State` / `US Regions` chains**. Nesting depth is the leading hypothesis;
+the `State` pair also carries the `0goi` source-corrupted `IllINois`/`INdiana` literals (Domo's own
+data — converter exonerated). Check them for their own cause rather than assuming shared blame.
 
 Note the honest causality the bead records: the aggregate-in-a-calc-column errors are a *direct
 consequence* of the same day's aggregate-Beast-Mode inlining. Inlining was still correct — it
@@ -146,7 +189,8 @@ Its bug write-ups remain accurate and worth reading. Its ledger has drifted:
 
 | Bead | P | State | Note |
 |---|---|---|---|
-| `znvg` | P1 | **open** | 9/15 fixed upstream + vendored (#633); **never re-run live** |
+| `znvg` | P1 | **open** | 15 = 9 DATEDIFF + 6 `State`/`US Regions`. Fix vendored (#633), verified offline; **never re-run live**. Expect 15 → **7** |
+| `zmnt` | P1 | **open (new 08-06)** | converter emits `Adddate()` — not a Sigma function; same class as the DATEDIFF bug. Blocks 1 of znvg's 9 |
 | `ruzs` | P1 | open | SKIP still allows GREEN — re-verify now that the ledger is vendored (#624) |
 | `qzdg` | P2 | open | landing skill's `--sigma-connection` sync POSTs no body, 400s |
 | `tkcu` | P2 | **blocked** | PDP field path — the sample page's 5 PDP cards are the first live chance |
@@ -192,10 +236,14 @@ they land upstream, rebuild the integration branch from `main` instead.
 
 ## Recommended order of work
 
-1. **Re-run the cold run** against the current vendored converter. Costs one run, has never been
-   done, and directly resolves how much of `znvg` is left. *Start here.*
-2. Fix whatever `znvg` remainder survives — likely the `State`/`US Regions` `If(In(...))` chains,
-   plus re-placing aggregate calc columns into grain-appropriate elements.
+1. **Fix `zmnt` (ADDDATE → `DateAdd`) first, *then* re-run.** It is the same one-line-class fix as
+   DATEDIFF, in the same upstream file (`sigma-data-model-mcp`, beside `_rewriteMysqlDateDiff`),
+   re-vendored the same way. Landing it before the run turns an expected 15 → 7 into 15 → 6 and
+   saves a whole extra cycle. If you'd rather not wait, re-run anyway — but **record the 7
+   up front** so it isn't misread as the vendoring having failed.
+2. Fix the `znvg` remainder: the 6 `State`/`US Regions` deep-nested `If` chains (test the
+   nesting-depth hypothesis first — it is cheap to probe with a single hand-built column), plus
+   re-placing aggregate calc columns into grain-appropriate elements.
 3. **Build the parity oracle** (Blocker 2). This is the real remaining distance. Budget design time
    for the un-verifiable-card exclusion policy, not just implementation.
 4. Then expect **first-contact bugs in put-layout / render / verify-parity** — those three phases
