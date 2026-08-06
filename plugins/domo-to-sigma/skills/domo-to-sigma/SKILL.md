@@ -134,12 +134,13 @@ grid is only 6 wide, so widths scale ×4).
 | `scripts/build-domo-layout.rb` | 5d | Domo card geometry → zone-schema `dashboard-layout.json` (relative-normalized) |
 | `build-dashboard-layout.rb` *(vendored)* | 5d | Zone JSON → 24-col grid XML |
 | `put-layout.rb` *(vendored)* | 5d | PUT layout to workbook |
-| `verify-parity.rb` *(vendored)* | 6 | Compare Domo `query/execute` aggregations vs Sigma `query` |
+| `verify-parity.rb` *(vendored)* | 6 | Compare Domo `query/execute` aggregations vs Sigma `query` → `parity-score.json` (`tiles_*`) |
+| `scripts/phase6-parity-domo.rb` | 6 | **Finalizer.** Runs `verify-parity.rb`, derives the gate contract (`charts_*`/`status`) into `parity-final.json`, and refuses to emit one when the plan silently omits chartable tiles |
 | `assert-phase6-ran.rb` *(vendored)* | 6 | Hard gate before declaring GREEN (run with `--workdir`) |
 
 > The Domo-specific scripts — `convert-beast-modes.rb` (2), `find-or-pick-dm.rb`
 > integration (2.5), `build-dm.rb` (3), `build-workbook.rb` + `qa-check.rb` (5),
-> `build-domo-layout.rb` (5d), plus `get-domo-token.sh`, `lib/domo_rest.rb`,
+> `build-domo-layout.rb` (5d), `phase6-parity-domo.rb` (6), plus `get-domo-token.sh`, `lib/domo_rest.rb`,
 > `lib/domo_sigma_util.rb`, `domo-discover.rb`, `domo-capture-visuals.rb` — ship
 > with unit + end-to-end tests under `test/`. A final live field-path check on
 > first instance contact is still recommended.

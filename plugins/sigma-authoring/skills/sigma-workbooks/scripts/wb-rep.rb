@@ -29,6 +29,9 @@
 #   push [dir]                   reassemble -> drift-check -> validate -> PUT (or POST create)
 #   assemble [dir] [-o file]     print/write the reassembled spec without pushing
 #   import <spec.yaml> [dir]     explode an existing local spec file (create mode: push POSTs)
+#   verify <spec-file>           dry-run (Beta endpoint): POST to /v2/workbooks/spec/verify —
+#                                zero-persistence schema/reference check; prints valid: true or
+#                                the errors array
 #   render [dir] [--page X]      export page(s) (or --element <id>) as PNG into <dir>/renders/
 #                                — LOOK at what you built and iterate; renders server state
 #
@@ -279,6 +282,41 @@ def cmd_import(args)
   puts "imported #{src} -> #{dir} (create mode: push will POST a new workbook)"
 end
 
+# Root-cause correction (2026-08-04): an earlier version of this comment blamed a lone
+# "/verify Beta drift" — that diagnosis was wrong. Live A/B testing showed the REAL create
+# endpoint (POST /v2/workbooks/spec) 400s identically on the flat shape, with the exact same
+# fix. Both endpoints now require the request wrapped as
+# { name, folderId, document: { schemaVersion, kind: "workbook", pages, layout } } —
+# not the flat { name, folderId, schemaVersion, pages, layout } shape the OpenAPI text still
+# documents and that every other command in this file (push/pull/import/assemble) still
+# reads/writes on disk. This is a known, broader mismatch across this codebase (tracked
+# separately, well beyond this one file) — see reference/workflows/validate.md section 1 for
+# the full story. This helper fixes it ONLY for verify's outbound request; it does not change
+# the on-disk rep format push/pull/import/assemble use, and does not fix those commands' own
+# create/update calls, which hit the same 400 live and are still flat today.
+def wrap_for_verify(spec)
+  return spec if spec['document'] # already wrapped — pass through unchanged
+
+  document_keys = %w[schemaVersion kind pages layout]
+  document = spec.select { |k, _| document_keys.include?(k) }
+  document['kind'] ||= 'workbook'
+  spec.reject { |k, _| document_keys.include?(k) }.merge('document' => document)
+end
+
+def cmd_verify(args)
+  path = args.shift or die 'usage: wb-rep.rb verify <spec-file>'
+  die "no such file: #{path}" unless File.exist?(path)
+  spec = wrap_for_verify(strip_response_only(load_yaml_file(path)))
+  result = YAML.load(api(:post, '/v2/workbooks/spec/verify', YAML.dump(spec)))
+  if result['valid']
+    puts 'valid: true'
+  else
+    puts 'valid: false'
+    (result['errors'] || []).each { |e| puts "  - #{e['summary']}" }
+    exit 1
+  end
+end
+
 def cmd_status(args)
   dir = args.shift || '.'
   snap = snapshot_spec(dir)
@@ -378,7 +416,12 @@ def cmd_push(args, force:, validate: true)
 end
 
 # Zoom-style reads (no full-spec load): summarize a workbook or rep cheaply,
-# and distil authorable capabilities live from the public OpenAPI.
+# and distil authorable capabilities live from the public OpenAPI. `capabilities`
+# is inherently a BULK-discovery tool (every kind, or every field on one kind) —
+# for a single endpoint's current request/response shape, the stable per-endpoint
+# pages at https://help.sigmacomputing.com/reference/<endpoint-slug> (see
+# SKILL.md's "Sources of truth") are the better source; this command doesn't
+# cover that case and isn't meant to.
 def cmd_summarize(args)
   target = args.shift || '.'
   spec = if File.directory?(target)
@@ -401,15 +444,19 @@ def cmd_summarize(args)
   puts "  sources: #{sources.compact.uniq.join(', ')}" unless sources.compact.empty?
 end
 
+# Content-addressed Fern docs asset — pins one docs build, so this hash goes dead
+# (403 AccessDenied, not a redirect) on every docs redeploy. This exact hash has
+# already gone dead twice since being pinned here (most recently reconfirmed via
+# curl while documenting this — see SKILL.md's "Sources of truth" for the count).
+# If `capabilities` fails with "failed to fetch OpenAPI", rediscover the current
+# link from https://help.sigmacomputing.com/openapi.json and update this constant
+# — but don't expect the replacement to be durable either; that's inherent to
+# content-addressing, not a one-off bug. For a single endpoint's shape rather than
+# bulk kind/field discovery, prefer the durable per-endpoint pages documented in
+# SKILL.md's "Sources of truth" (https://help.sigmacomputing.com/reference/<endpoint-slug>)
+# — they don't rotate, so there's nothing to keep in sync here.
 OPENAPI_CACHE = File.join(Dir.tmpdir, 'sigma-api.json').freeze
-# Full REST spec (incl. /v2/workbooks/spec element/control/format shapes inlined
-# by `kind`). Content-addressed docs asset — the hash pins one docs build and can
-# rotate on redeploy. If `capabilities` fails to fetch it, grab the current link
-# from the Sigma API reference docs (the public help.sigmacomputing.com/openapi.json
-# index no longer lists the workbook-spec shapes), or read a live workbook spec
-# (`wb-rep.rb pull` / GET /v2/workbooks/{id}/spec) and navigate pages[].elements[]
-# by `kind`. See sigma-workbooks SKILL.md "Sources of truth".
-OPENAPI_URL = 'https://files.buildwithfern.com/sigma.docs.buildwithfern.com/006ce360082503c7b849529b4c183cc4dc63360aff76038ca64669572c662b87/assets/openapi/sigma-computing-public-rest-api.json'.freeze
+OPENAPI_URL = 'https://fdr-prod-docs-files-public.s3.us-east-1.amazonaws.com/sigma.docs.buildwithfern.com/964b7dcf73aa353d3ab89b1550fa14ea8a4d0a6300aed16bcbe329d1bb4cfd9e/assets/openapi/sigma-computing-public-rest-api.json'.freeze
 
 # Depth-first walk mirroring jq's `.. | objects`: yields every Hash reachable
 # from `node` (including `node` itself), descending through both Hash values
@@ -462,33 +509,9 @@ def find_field_schema(kind_schema, field)
 end
 
 def cmd_capabilities(args)
-  kind = field = wb = nil
+  kind = field = nil
   if (i = args.index('--kind')) then kind = args[i + 1]; args.slice!(i, 2); end
   if (i = args.index('--field')) then field = args[i + 1]; args.slice!(i, 2); end
-  if (i = args.index('--workbook')) then wb = args[i + 1]; args.slice!(i, 2); end
-
-  # --workbook <id>: enumerate kinds/fields from a LIVE workbook readback — the
-  # durable source for workbook element/control/format shapes (the split public
-  # specs don't inline them; the compiled OpenAPI asset is transitional). Selects
-  # on each object's instance `kind`, not an OpenAPI properties.kind.enum schema.
-  if wb
-    spec = YAML.load(api(:get, "/v2/workbooks/#{wb}/spec"))
-    die "workbook #{wb} spec has no pages" unless spec.is_a?(Hash) && spec['pages']
-    if kind.nil?
-      walk_objects(spec).map { |o| o['kind'] }.select { |k| k.is_a?(String) && !k.empty? }.uniq.sort.each { |k| puts k }
-    else
-      matches = walk_objects(spec).select { |o| o['kind'] == kind }
-      die "no element/source/control with kind #{kind.inspect} in workbook #{wb}" if matches.empty?
-      if field.nil?
-        matches.flat_map(&:keys).uniq.sort.each { |k| puts k }
-      else
-        sample = matches.map { |m| m[field] }.compact.first
-        puts sample.nil? ? 'null' : JSON.pretty_generate(sample)
-      end
-    end
-    return
-  end
-
   unless File.exist?(OPENAPI_CACHE)
     uri = URI(OPENAPI_URL)
     res = Net::HTTP.get_response(uri)
@@ -575,6 +598,7 @@ cmd = argv.shift
 case cmd
 when 'pull'     then cmd_pull(argv, force: force)
 when 'import'   then cmd_import(argv)
+when 'verify'   then cmd_verify(argv)
 when 'status'   then cmd_status(argv)
 when 'assemble' then cmd_assemble(argv)
 when 'push'         then cmd_push(argv, force: force, validate: !no_validate)
@@ -582,5 +606,5 @@ when 'render'       then cmd_render(argv)
 when 'summarize'    then cmd_summarize(argv)
 when 'capabilities' then cmd_capabilities(argv)
 else
-  die "usage: wb-rep.rb {pull <workbook-id> [dir] | import <spec.yaml> [dir] | status [dir] | assemble [dir] [-o file] | push [dir] | render [dir] [--page <id|name>] [--element <id>] | summarize [dir|workbook-id] | capabilities [--kind K [--field F]]} [--force] [--no-validate]"
+  die "usage: wb-rep.rb {pull <workbook-id> [dir] | import <spec.yaml> [dir] | verify <spec-file> | status [dir] | assemble [dir] [-o file] | push [dir] | render [dir] [--page <id|name>] [--element <id>] | summarize [dir|workbook-id] | capabilities [--kind K [--field F]]} [--force] [--no-validate]"
 end

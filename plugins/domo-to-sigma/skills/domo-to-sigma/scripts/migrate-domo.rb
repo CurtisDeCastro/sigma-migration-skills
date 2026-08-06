@@ -14,7 +14,22 @@
 #   discover -> capture-visuals -> convert-beast-modes -> build-dm* ->
 #   post-and-readback(data-model)* -> build-workbook -> build-workbook-spec ->
 #   post-and-readback(workbook) -> build-domo-layout -> build-dashboard-layout ->
-#   put-layout -> verify-parity -> assert-phase6-ran
+#   put-layout -> render-visual -> verify-parity -> record-visual-check ->
+#   assert-phase6-ran
+#
+#   render-visual (bead B5) renders the posted workbook's first visible page
+#   to <out>/sigma-render.png via sigma-export-png.py — assert-phase6-ran.rb's
+#   gate 8 hard-requires this file and nothing upstream of this fix ever
+#   produced it. record-visual-check.rb (the verdict recorder gate 8b reads)
+#   runs AFTER verify-parity rather than immediately after the render: it
+#   hard-requires parity-final.json to already exist on disk (it merges into
+#   it, never creates it from nothing), and that file is first written by
+#   phase6-parity-domo.rb, the parity finalizer (bead 2tkm — it used to be
+#   written by verify-parity.rb's --score-out, which is what BROKE gate 1:
+#   --score-out emits the tiles_* score schema, not the gate's charts_*
+#   contract. --score-out now targets parity-score.json). This orchestrator has no image input, so
+#   it records the only HONEST verdict it is entitled to — not-executable —
+#   rather than fabricate a pass; see phase_record_visual_check! below.
 #
 #   * build-dm + the data-model half of post-and-readback are NOT named as
 #     their own step in this task's phase list, but build-workbook-spec.rb
@@ -125,6 +140,26 @@ def run_script!(script, *args)
   out.each_line { |l| print "    #{l}" }
   puts if !out.empty? && !out.end_with?("\n")
   [status.success?, status.exitstatus, out]
+end
+
+# Same argv-array discipline as run_script!, for this skill's one Python
+# phase script (sigma-export-png.py — the /v2/workbooks/{id}/export REST
+# contract; see its header). Unlike the vendored converters (tableau/
+# quicksight/qlik/powerbi) this skill never carried a lib/py_resolve.rb
+# python3/python/py-3 Windows resolver for a single call site — invoked the
+# same plain `python3` refs/layout-visual-qa.md already documents. Returns
+# [success?, exitstatus-or-nil, combined_output]; exitstatus is nil ONLY when
+# python3 itself is missing from PATH (Errno::ENOENT) — the caller treats
+# that as a genuinely-absent prerequisite (honest SKIP), never a phase FAIL.
+def run_py_script!(script, *args)
+  path = File.join(SCRIPTS, script)
+  log "$ python3 #{script} #{args.join(' ')}".rstrip
+  out, status = Open3.capture2e('python3', path, *args)
+  out.each_line { |l| print "    #{l}" }
+  puts if !out.empty? && !out.end_with?("\n")
+  [status.success?, status.exitstatus, out]
+rescue Errno::ENOENT
+  [false, nil, '']
 end
 
 def fail_phase!(name, reason)
@@ -334,6 +369,20 @@ def wb_ids_from_spec(spec)
 end
 
 # ---------------------------------------------------------------------------
+# Phase 6f (gate 8) — which posted page to render. The hidden "Data" page
+# (id 'page-data' — build-workbook-spec.rb's master-table container) carries
+# no user-visible content; rendering it would produce a blank/placeholder
+# PNG that satisfies gate 8's file-exists check while proving nothing. Pick
+# the first VISIBLE page instead — the same id-substring filter every sibling
+# converter's own visual-QA phase uses (tableau/quicksight/qlik/powerbi
+# migrate-*.rb: `.reject { |p| p['id'].to_s.downcase.include?('data') }`).
+# Pure/no I/O so it is unit-testable without a live wb-ids.json (see
+# test-migrate-domo.rb).
+def render_target_page(wb_ids)
+  Array(wb_ids['pages']).find { |p| !p['id'].to_s.downcase.include?('data') }
+end
+
+# ---------------------------------------------------------------------------
 # 'grid' vs 'stack' — see header comment for the derivation rule.
 def compute_2d_flag(dashboard_layout_path)
   dashboards = JSON.parse(File.read(dashboard_layout_path))
@@ -467,6 +516,76 @@ def phase_write_2d_flag!
   flag
 end
 
+# bead B5: nothing upstream of this ever rendered a Sigma PNG, so
+# assert-phase6-ran.rb's gate 8 (requires <out>/sigma-render.png or a
+# screenshots manifest) deterministically exit-10'd on every LIVE run. Render
+# the posted workbook's first visible page via the existing sigma-export-png.py
+# (the /v2/workbooks/{id}/export REST contract — see its header for the
+# POST-then-poll shape); non-fatal on a genuinely-absent prerequisite (no
+# page to render, or no python3 on PATH), but a real export failure still
+# fails the phase — a render that silently never happened is exactly the bug
+# this closes.
+def phase_render_visual!(opts, workbook_id, wb_ids)
+  hr('render-visual (Phase 6f render — gate 8)')
+  render_path = File.join(OUT, 'sigma-render.png')
+  if !opts[:force] && File.exist?(render_path)
+    log 'sigma-render.png already present — skip (idempotent; pass --force to re-render)'
+    skip_phase!('render-visual', 'already rendered (idempotent skip)')
+    return
+  end
+  page = render_target_page(wb_ids)
+  if page.nil?
+    skip_phase!('render-visual', 'wb-ids.json has no non-Data page to render (only the hidden master page exists)')
+    return
+  end
+  ok, code, _out = run_py_script!('sigma-export-png.py', '--workbook', workbook_id, '--page', page['id'], '--out', render_path)
+  if code.nil?
+    skip_phase!('render-visual', 'python3 not found on PATH — cannot run sigma-export-png.py; render by ' \
+                                  "hand per refs/layout-visual-qa.md (--out #{render_path}), then re-run")
+    return
+  end
+  fail_phase!('render-visual', "sigma-export-png.py exited #{code}") unless ok
+  done_phase!('render-visual', "rendered page #{page['id'].inspect} -> #{render_path}")
+end
+
+# bead B5 (continued): gate 8b needs a RECORDED source-vs-target verdict, not
+# just a render — but record-visual-check.rb (a) hard-requires parity-final.json
+# to already exist (it merges into it; never creates it from nothing — see its
+# own "run finalize first" abort) and (b) refuses to accept a --verdict pass
+# from a caller that has no image input (its VISION PRECONDITION). This
+# orchestrator is an unattended Ruby process — it cannot itself read
+# sigma-render.png against the source, so recording a fabricated pass would be
+# exactly the false attestation record-visual-check.rb exists to prevent.
+# --verdict not-executable is the ONLY honest verdict available here: it is
+# genuinely recorded (never silently omitted), and gate 8b will correctly keep
+# failing on it until a vision-capable agent reads the render and re-records
+# pass/divergent (or the operator names an explicit --skip-visual-comparison
+# waiver at the gate).
+def phase_record_visual_check!(_opts)
+  hr('record-visual-check (Phase 6f verdict — gate 8b)')
+  parity_final_path = File.join(OUT, 'parity-final.json')
+  unless File.exist?(parity_final_path)
+    skip_phase!('record-visual-check',
+                'no parity-final.json yet — verify-parity ran without a --parity-plan (nothing to ' \
+                'record the visual verdict onto). Once a plan is supplied, read ' \
+                "#{File.join(OUT, 'sigma-render.png')} against the source and record the real verdict " \
+                "by hand: ruby scripts/record-visual-check.rb --workdir #{OUT} --agent-vision true --verdict pass ...")
+    return
+  end
+  render_path = File.join(OUT, 'sigma-render.png')
+  ok, code, _out = run_script!('record-visual-check.rb', '--workdir', OUT, '--agent-vision', 'false',
+                                '--verdict', 'not-executable',
+                                '--notes', 'migrate-domo.rb is an unattended orchestrator with no image ' \
+                                           "input and cannot itself judge #{render_path} against the source " \
+                                           'dashboard (record-visual-check.rb VISION PRECONDITION); a ' \
+                                           'vision-capable agent must read it and re-record --verdict ' \
+                                           'pass|divergent, or the operator must waive gate 8b explicitly via ' \
+                                           'assert-phase6-ran.rb --skip-visual-comparison "<reason>".')
+  fail_phase!('record-visual-check', "record-visual-check.rb exited #{code}") unless ok
+  done_phase!('record-visual-check',
+              'recorded not-executable — a vision-capable agent must re-judge and re-record before gate 8b can pass')
+end
+
 # ---------------------------------------------------------------------------
 # offline driver
 
@@ -531,8 +650,14 @@ def run_offline!(opts)
 
   phase_write_2d_flag!
 
+  hr('render-visual')
+  skip_phase!('render-visual', 'offline: no live posted workbook to render (see --offline header note)')
+
   hr('verify-parity')
   skip_phase!('verify-parity', 'offline: no live Sigma query results to compare against')
+
+  hr('record-visual-check')
+  skip_phase!('record-visual-check', 'offline: no live render / parity-final.json to record a verdict onto')
 
   hr('assert-phase6-ran')
   skip_phase!('assert-phase6-ran', 'offline: gate requires a live posted workbook + source parity; not applicable to --offline')
@@ -693,15 +818,40 @@ def run_live!(opts)
   done_phase!('put-layout')
 
   phase_write_2d_flag!
+  phase_render_visual!(opts, workbook_id, wb_ids)
 
   hr('verify-parity')
   if opts[:parity_plan] && File.exist?(opts[:parity_plan])
-    ok, code, _out = run_script!('verify-parity.rb', '--plan', opts[:parity_plan])
-    fail_phase!('verify-parity', "verify-parity.rb exited #{code}") unless ok
+    # Bead 2tkm — finalize through phase6-parity-domo.rb, do NOT aim
+    # verify-parity.rb's --score-out at parity-final.json.
+    #
+    # B6 correctly spotted that --score-out was never plumbed through (without it
+    # verify-parity.rb only prints a report). But it aimed the score document at
+    # parity-final.json, which is the GATE'S contract file: assert-phase6-ran.rb
+    # reads charts_total/charts_pass/status, while --score-out writes
+    # tiles_total/tiles_pass/tiles_fail. So a flawless 65/65 run wrote a document
+    # in which the gate found none of its three keys, computed charts_total = 0,
+    # dropped into the anchors-oracle substitution branch, found no
+    # anchors-verdict.json, and exited 2 — a perfect parity run was
+    # indistinguishable from parity never having run.
+    #
+    # domo was the only converter of six with no phase6-parity-*.rb finalizer
+    # (tableau's phase6-parity.rb:344-382 is the reference). It now runs
+    # verify-parity.rb itself (--score-out -> parity-score.json), derives the
+    # gate contract into parity-final.json, and refuses to emit a contract when
+    # the plan silently omits chartable tiles.
+    ok, code, _out = run_script!('phase6-parity-domo.rb',
+                                  '--workdir', OUT,
+                                  '--plan', opts[:parity_plan],
+                                  '--workbook-id', workbook_id,
+                                  '--score-out', File.join(OUT, 'parity-score.json'))
+    fail_phase!('verify-parity', "phase6-parity-domo.rb exited #{code}") unless ok
     done_phase!('verify-parity')
   else
     skip_phase!('verify-parity', 'no --parity-plan supplied — run verify-parity.rb by hand before declaring GREEN')
   end
+
+  phase_record_visual_check!(opts)
 
   hr('assert-phase6-ran')
   args = ['--workdir', OUT, '--workbook-id', workbook_id]

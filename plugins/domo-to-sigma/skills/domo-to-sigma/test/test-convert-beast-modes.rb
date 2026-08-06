@@ -149,6 +149,63 @@ errs, _ = lint_formula('If([a] = 1 and [Status] IN (1,2), 1, 0)')
 ok(errs.any? { |e| e.include?('infix') },
    'a genuine infix IN still flags alongside an unrelated comparison operator')
 
+# ---------------------------------------------------------------------------
+# F5 (audit): lint_formula never checked for a residual infix LIKE — the
+# live "Non-US Leads" Beast Mode (`... LIKE "united states"`, converted:false)
+# shipped with an EMPTY lintErrors, so the script's exit code never flagged
+# an unevaluable formula. Fixed by checking a WHOLE-WORD `LIKE` on the
+# formula with quoted strings/[bracketed] identifiers masked out first
+# (mask_strings_and_brackets) — not a bare substring test, which would hit
+# the false-positive class this file has already been burned by twice on
+# the IN( rule (see raw_infix_in_position?'s history comment above).
+#
+# Blocker 1 (2026-08-05 batch-verify): landed as a hard lintError with no
+# override path, this aborted the very cold run it was meant to protect —
+# migrate-domo.rb's convert-beast-modes phase treats any --lint exit 1 as
+# fatal, and the real "Non-US Leads" Beast Mode trips exactly this rule. A
+# raw infix IN( stays a hard ERROR (Sigma silently BLANKS the column — the
+# dangerous, quiet failure mode the error tier exists to catch); a residual
+# LIKE fails LOUDLY instead (visible in Sigma's own UI, same shape --convert
+# already flags via converted:false) and downgraded to a WARNING —
+# reported in lintWarnings/stderr, never silenced, but non-fatal. See
+# convert-beast-modes.rb's lint_formula comment for the full rationale.
+# ---------------------------------------------------------------------------
+
+puts "== lint_formula: leftover infix LIKE is a non-fatal WARNING (F5 / blocker 1) =="
+errs, warns = lint_formula('Lower([Account.BillingCountry]) LIKE "united states"')
+ok(errs.empty?, 'raw infix LIKE (the real "Non-US Leads" shape) is NOT a lintError (non-fatal)')
+ok(warns.any? { |w| w.include?('LIKE') }, 'raw infix LIKE (the real "Non-US Leads" shape) → warning')
+errs, warns = lint_formula('If([col] LIKE "abc%", 1, 0)')
+ok(errs.empty?, 'infix LIKE inside an If condition is not a lintError')
+ok(warns.any? { |w| w.include?('LIKE') }, 'infix LIKE inside an If condition → warning')
+errs, warns = lint_formula('[col] like \'%foo%\'')
+ok(errs.empty?, 'lowercase infix like is not a lintError')
+ok(warns.any? { |w| w.include?('LIKE') }, 'lowercase infix like → warning')
+errs, warns = lint_formula('[Status] NOT LIKE \'closed%\'')
+ok(errs.empty?, 'infix NOT LIKE is not a lintError')
+ok(warns.any? { |w| w.include?('LIKE') }, 'infix NOT LIKE → warning')
+errs, warns = lint_formula('Sum(If(Lower([Account.BillingCountry]) LIKE \'united states\', 0, If(Lower([Account.BillingCountry]) LIKE \'usa\', 0, 1)))')
+ok(errs.empty?, 'LIKE nested inside a real converted CASE→If chain is not a lintError')
+ok(warns.any? { |w| w.include?('LIKE') }, 'LIKE nested inside a real converted CASE→If chain still flags as a warning')
+
+puts '== lint_formula (F5): near-miss false positives must NOT flag =='
+errs, warns = lint_formula('Contains([Notes], "I like turtles")')
+ok(errs.empty? && warns.none? { |w| w.include?('LIKE') }, 'the word "like" inside a STRING LITERAL is masked out, not flagged')
+errs, warns = lint_formula('Sum([Like Button Clicks])')
+ok(errs.empty? && warns.none? { |w| w.include?('LIKE') }, 'the word "Like" inside a [bracketed column name] is masked out, not flagged')
+errs, warns = lint_formula('If([Dislike Count] > 0, 1, 0)')
+ok(errs.empty? && warns.none? { |w| w.include?('LIKE') }, '"like" as a non-whole-word substring ("Dislike") is not flagged even without masking')
+errs, warns = lint_formula('If([Unlike Score] > 0, 1, 0)')
+ok(errs.empty? && warns.none? { |w| w.include?('LIKE') }, '"like" as a non-whole-word substring ("Unlike") is not flagged')
+errs, warns = lint_formula('Contains([col], "abc") and StartsWith([col2], "xyz")')
+ok(errs.empty? && warns.none? { |w| w.include?('LIKE') }, "Sigma's own legitimate string functions (Contains/StartsWith) pass clean — no residual LIKE")
+# Sanity: masking must not blanket-suppress a genuine infix LIKE that sits
+# alongside a string literal/bracket elsewhere in the same formula.
+errs, warns = lint_formula('Contains([Notes], "I like turtles") and [Status] LIKE \'closed%\'')
+ok(errs.empty?, 'a genuine infix LIKE elsewhere is still not a lintError')
+ok(warns.any? { |w| w.include?('LIKE') },
+   'a genuine infix LIKE elsewhere still flags (as a warning) even when the formula also contains an unrelated "like" string literal')
+
 puts "== lint_formula: And()/Or()/Not() function-call warnings =="
 _, w = lint_formula('If(And([a]>1, [b]<2), 1, 0)')
 ok(w.any? { |x| x.include?('infix') }, 'And() function-call warned (use infix)')

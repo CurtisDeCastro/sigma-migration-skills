@@ -968,6 +968,39 @@ def build_dashboard_for_page(name, cards, kind_map = {}, observed = {})
   build_stack_fallback(name, cards) # rung 3: last resort, warns loudly
 end
 
+# F3 (blocker 3, 2026-08-05 batch-verify): this MUST resolve a page's default
+# name IDENTICALLY to build-workbook.rb's own group_cards_by_page — a
+# mismatch here silently drops layout zones. load_chart_specs_companions /
+# load_chart_specs_controls (above) key the companion-KPI/control lookup by
+# page NAME, and build-dashboard-layout.rb matches a workbook page to a
+# layout dashboard by that same name; if this file falls back to the literal
+# 'Overview' while build-workbook.rb attributes the same cardIds-less page to
+# its REAL title, every companion/control lookup here misses. Measured on the
+# real cold run (page 'Sample DataSets + Cards', pages.json's cardIds: []):
+# name-matched = 50 zones with the 5 real bead-08sf companion KPIs; as-landed
+# (this file still hard-coded 'Overview') = 45 zones, 0 companion KPIs — all 5
+# companion elements POSTed but invisible, no layout zone at all. Verbatim
+# same default-name resolution as build-workbook.rb's group_cards_by_page
+# (kept as a separate function, not a shared require, matching this
+# codebase's existing per-script duplication of small helpers); see
+# test/test-build-domo-layout.rb's cross-file consistency test, which calls
+# both functions with the same inputs and asserts they agree.
+def group_cards_by_page_for_layout(cards, pages)
+  by_page = Hash.new { |h, k| h[k] = [] }
+  card_page = {}
+  pages.each do |p|
+    Array(p['cardIds'] || p['cards']).each { |cid| card_page[cid.to_s] = p['title'] || p['name'] || p['id'] }
+  end
+  default_name =
+    if pages.size == 1
+      pages.first['title'] || pages.first['name'] || pages.first['id'].to_s
+    else
+      'Overview'
+    end
+  cards.each { |c| by_page[card_page[c['id'].to_s] || default_name] << c }
+  by_page
+end
+
 if $PROGRAM_NAME == __FILE__
   cards = JSON.parse(File.read(File.join(OUT, 'cards.json'))) rescue []
   pages = JSON.parse(File.read(File.join(OUT, 'pages.json'))) rescue []
@@ -993,15 +1026,10 @@ if $PROGRAM_NAME == __FILE__
     end
   end
 
-  # Group cards by page — same membership resolution build-workbook.rb uses,
-  # so a page's layout dashboard and its workbook page carry the SAME cards.
-  card_page = {}
-  pages.each do |p|
-    pname = p['title'] || p['name'] || p['id']
-    Array(p['cardIds'] || p['cards']).each { |cid| card_page[cid.to_s] = pname }
-  end
-  by_page = Hash.new { |h, k| h[k] = [] }
-  cards.each { |c| by_page[card_page[c['id'].to_s] || 'Overview'] << c }
+  # Group cards by page — same membership resolution (AND the same default-
+  # name fallback — F3/blocker 3) build-workbook.rb uses, so a page's layout
+  # dashboard and its workbook page carry the SAME cards under the SAME name.
+  by_page = group_cards_by_page_for_layout(cards, pages)
 
   # Synthesize a pseudo-card for any chart-specs.json 'control' element that
   # has NO backing card at all (file header "2a" note — a page-level filter

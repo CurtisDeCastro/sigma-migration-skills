@@ -14,9 +14,42 @@ module DomoSigma
            .gsub(/([A-Z]+)([A-Z][a-z])/, '\1_\2')
            .gsub(/([A-Za-z])([0-9])/, '\1_\2')
            .gsub(/([0-9])([A-Za-z])/, '\1_\2')
-    s.split(%r{[_\s/]+}).reject(&:empty?).map { |w|
-      (w =~ /\A[A-Z0-9]+\z/) ? w : w.capitalize
+    s.split(%r{[_\s/.]+}).reject(&:empty?).map { |w|
+      # Upcase the FIRST character only — never String#capitalize, which also
+      # LOWERCASES the remainder. A dot is not a split boundary, so a dotted
+      # column arrives as one token that still holds an internal capital:
+      #   'Account.BillingState' -> camel-split -> ['Account.Billing', 'State']
+      #   .capitalize            -> 'Account.billing State'   <- 'B' destroyed
+      #   first-char-only        -> 'Account.Billing State'   <- matches Sigma
+      # Sigma camel-splits the same way we do ('IsWon' -> 'Is Won' resolves
+      # fine), so the dotted case was the ONLY divergence — and it 400'd the
+      # data-model POST with "dependency not found: formula reference
+      # 'pdp_example_dataset/account.billing state'" on a live cold run
+      # (bead xo56). Column pre-flight could never catch it: it compares
+      # display_name to display_name on both sides, so the two agreed with
+      # each other while both disagreed with Sigma.
+      (w =~ /\A[A-Z0-9]+\z/) ? w : w.sub(/\A./) { |c| c.upcase }
     }.join(' ')
+  end
+
+  # Kept as the single named seam for "the name used INSIDE a formula
+  # reference", now that display_name itself can never emit a dot.
+  #
+  # Why the dot matters: Sigma resolves a reference case-insensitively and
+  # treats underscore and space as equivalent ('created_on' == 'Created On',
+  # '_BATCH_ID_' == 'BATCH ID' — both probed live), but a name carrying BOTH a
+  # dot AND a space does NOT resolve:
+  #   '[T/Account.Billing State]' -> 400 dependency not found
+  #   '[T/Account Billing State]' -> resolves
+  #   '[T/Account.BillingState]'  -> resolves
+  # display_name used to produce the first form for a dotted warehouse column
+  # like 'Account.BillingState', which 400'd BOTH the data-model POST (against
+  # the warehouse column) and then the workbook POST (against the master
+  # element's column of the same name). Splitting on '.' as well removes the
+  # dot entirely and yields the second, resolving form everywhere.
+  # Bead xo56, found on the 36-card cold run.
+  def column_ref_name(raw)
+    display_name(raw)
   end
 
   B62 = (('0'..'9').to_a + ('a'..'z').to_a + ('A'..'Z').to_a).freeze
