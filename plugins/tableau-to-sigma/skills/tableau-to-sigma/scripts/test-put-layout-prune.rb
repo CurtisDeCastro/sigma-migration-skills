@@ -85,8 +85,19 @@ Dir.mktmpdir do |work|
                             'ruby', SCRIPT, '--workbook', 'wb-test', '--layout', layout)
   ok('re-PUT exits 0') { st.exitstatus == 0 }
   ok('a PUT was sent') { put_bodies.length == 1 }
-  spec = put_bodies.empty? ? {} : (JSON.parse(put_bodies.first) rescue {})
+  raw_put = put_bodies.empty? ? {} : (JSON.parse(put_bodies.first) rescue {})
+  # Workbook code-rep nests the document under a top-level `document` key, and the
+  # old flat PUT body is now REJECTED with a 400 — so put-layout.rb wraps what it
+  # sends. Accept either envelope: this test pins the PRUNE behaviour, not the
+  # transport shape.
+  #
+  # Without this unwrap `spec['pages']` was nil, so `ids` came out EMPTY — which
+  # made the three "stale ... pruned" checks below pass VACUOUSLY (they are negative
+  # assertions: `!ids.include?`). Only the positive assertions failed, so the suite
+  # under-reported the breakage. The envelope-sanity check keeps that from recurring.
+  spec = raw_put['document'].is_a?(Hash) ? raw_put['document'] : raw_put
   els = (spec['pages'] || []).flat_map { |p| p['elements'] || [] }
+  ok('the PUT body carries a document with pages (envelope sanity)') { !els.empty? }
   ids = els.map { |e| e['id'] }
   ok('stale injected safety-net container pruned (tc-page-pw-extra)') { !ids.include?('tc-page-pw-extra') }
   ok('stale fabricated header text pruned (band-page-pw-hdrtext)') { !ids.include?('band-page-pw-hdrtext') }
