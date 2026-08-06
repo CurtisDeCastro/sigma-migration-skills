@@ -1,5 +1,12 @@
 # Handoff — `domo-to-sigma` road to gold (supersedes the earlier 2026-08-05 doc)
 
+> **⚠️ Superseded for STATUS by `docs/handoff/2026-08-06-domo-gold-status.md`.**
+> This doc's analysis of the 14 cold-run bugs and its "traps" section remain the best deep
+> reference and are still accurate. Its **PR/bead ledger has drifted** — #623/#631/#633 have since
+> merged, `2tkm` has a merged fix, `znvg` is 9/15 done, and `0goi` was re-triaged to
+> **not-our-bug** (the converter was exonerated; the corrupted literals are in Domo's source).
+> Read the 08-06 doc for current state; read this one for *why* each bug happened.
+
 **Written:** 2026-08-05, end of session.
 **Supersedes:** `docs/handoff/2026-08-05-domo-cold-run-progress.md` (written mid-session, now stale
 — it says the workbook POST is the frontier; it isn't any more).

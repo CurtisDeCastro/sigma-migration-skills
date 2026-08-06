@@ -3,6 +3,29 @@
 **Written:** 2026-08-03, same day as (and directly following) `docs/handoff/2026-08-03-domo-to-gold-track-e-done.md`.
 **Read first:** that doc — it's the "what's left" menu this session worked from. This doc reports what happened against that menu; it doesn't repeat rationale already covered there.
 
+> ## ⚠️ HISTORICAL — do not act on this doc's "what's left" list
+>
+> **Merged 2026-08-06, three days after it was written.** It is kept because
+> `docs/handoff/2026-08-05-domo-road-to-gold.md` and
+> `docs/superpowers/specs/2026-08-05-domo-import-to-snowflake-design.md` both cite it by
+> filename for *how the cold-run milestone was scoped* — that scoping (§3 below) is still
+> accurate and is this doc's lasting value.
+>
+> **Its forward-looking sections are not.** Specifically:
+>
+> - **§"What's left for gold" item 1 — `beads-sigma-2bj9`, "the next real step toward gold" —
+>   is DONE.** Built, live-validated, and merged as **PR #621** (`a86af0f4`) on 2026-08-05:
+>   the `domo-import-to-snowflake` companion skill. All 10 sample-page DataSets landed in
+>   Snowflake at exact measured row-count parity — **205,975 rows, 100% match**. Bead closed.
+>   Followed by **#622** (identifier quoting, bead `q5dz`). **Do not build this again.**
+> - **§"What's left for gold" item 2 — the cold run — is no longer blocked, and has been run.**
+>   It now goes end-to-end *through the workbook POST* and stops at `post-and-readback`.
+> - **Item 3 — close PR #606 — is done.** #606 is CLOSED.
+> - **Item 5 — the gate-tooling gap `2tkm` — has a merged fix** (#631).
+>
+> **For current status, read `docs/handoff/2026-08-06-domo-gold-status.md` instead.**
+> Everything below this banner is preserved as written on 2026-08-03/04.
+
 > **Update — 2026-08-04, before this doc merged:** two corrections to what's below, plus a
 > sharpened pointer for whoever picks this up next.
 > 1. **`kn8s`/`nrml` are merged — but not via #606.** They landed as two separate PRs, **#604**
