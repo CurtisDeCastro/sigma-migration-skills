@@ -176,3 +176,76 @@ Every gate change here was proven to **fail on a planted defect**, not merely to
 **What is still unproven:** anything requiring a live run. Do not read a passing gate on
 `integration/domo-gold-run-v2` as a gold verdict — no parity oracle exists yet, so gate 1 has
 nothing real to score.
+
+---
+
+# Addendum — the oracle's real blocker is step 6, not step 5
+
+Added after starting the oracle. Two measurements, both from the run's own artifacts
+(`~/domo-coldrun-v4`), reconcile a disagreement with the audit and **reorder the plan**.
+
+## The audit's structural numbers reproduce exactly
+
+Measured from `workbook-spec.json` with `build-parity-plan.rb`'s own `chartable?` predicate:
+
+- 75 elements → **65 chartable** ✓
+- **31** `kpi-chart`, 9 bar, 8 combo, 6 region-map, 5 line, 3 table, 2 scatter, 1 donut ✓
+- **29** of the 65 are `-summary` companions ✓
+
+## Its scoreability buckets do not — and the gap is the whole story
+
+The audit reported *"Cleanly oracle-able today: **7 cards**"* and *"Need date-window sync: **28
+cards**"*. Measured on the Sigma side:
+
+| signal | count |
+|---|---|
+| chartable tiles whose own formula carries `Today()` / `Now()` | **9** of 65 |
+| chartable tiles carrying `DateDiff` / `DateAdd` | **9** |
+| DM-level (`dm-spec.json`) formulas with any relative-date token | **0** |
+| `top-n` filters in the Sigma spec | **1** |
+
+(The DM count is 0 because all 81 Beast Modes classified as `aggregate` and fell through to
+element-level inlining — so the element scan already sees every date expression.)
+
+Both numbers are right; they measure **different sides**:
+
+```
+Domo cards carrying a date window (dateRangeFilter / dateTimeRange):  31 of 36
+Date filters present in the generated Sigma spec:                      0
+Sigma spec filters, by kind:              {list: 36, top-n: 1}
+```
+
+**The audit's 28 is a Domo-side count. The Sigma side has no date filters at all.** The gap *is*
+the dropped-`dateRangeFilter` bug — step 6 in the plan.
+
+## Why this reorders the plan
+
+Step 6 is listed as **"Blocks gate? No (fidelity + oracle honesty)"**, scheduled *after* the oracle.
+That is wrong, and the consequence is concrete:
+
+- The oracle computes expected values **from Domo**, which applies the card's date window.
+- The Sigma tile has **no** window, so it aggregates over all history.
+- So ~31 of 65 tiles would diverge for a reason **no amount of oracle work can fix**.
+- `min_pass_rate` defaults to **1.0** — every tile must pass. Gate 1 therefore *cannot* pass until
+  the windows are restored, no matter how good the oracle is.
+
+The audit's own mitigation — *"need date-window sync (same UTC day, both sides in one
+invocation)"* — **cannot work as described**: clock-syncing presumes both sides have the window.
+Sigma's side has none. There is nothing to sync.
+
+**Do step 6 before (or with) step 5.** Building the oracle first means building it against tiles that
+are guaranteed to diverge, and discovering that only after the 3–5 days are spent — the same
+build-the-oracle-first trap the audit correctly flagged for bead `2tkm`, one layer up.
+
+## Revised order
+
+1. **Step 6 — `dateRangeFilter` restore (1–2 days).** Now a prerequisite. 31 of 36 cards affected.
+2. **Step 5 — the oracle (3–5 days).** With windows restored, the scoreable pool is large: 65 − 9
+   date-expression tiles − 1 top-N ≈ **55 cleanly scoreable**, not the audit's 7. The oracle gets
+   *cheaper* once step 6 lands; it is only expensive if attempted first.
+3. Then steps 3 / 7 / 8 / 11, and the exclusion ledger for the genuine residue (the 1 permanently
+   unscoreable `983053598` "Survey Completion Rate", plus the top-N tie-break).
+
+`parity-plan-exclusions.json` still has no generator — `phase6-parity-domo.rb` (#631) *enforces* it
+but nothing writes it yet. That is a small, offline, testable piece and the right next increment
+after step 6.
