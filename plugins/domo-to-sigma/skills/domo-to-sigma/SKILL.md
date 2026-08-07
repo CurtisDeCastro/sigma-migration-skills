@@ -135,12 +135,13 @@ grid is only 6 wide, so widths scale ×4).
 | `build-dashboard-layout.rb` *(vendored)* | 5d | Zone JSON → 24-col grid XML |
 | `put-layout.rb` *(vendored)* | 5d | PUT layout to workbook |
 | `verify-parity.rb` *(vendored)* | 6 | Compare Domo `query/execute` aggregations vs Sigma `query` → `parity-score.json` (`tiles_*`) |
+| `scripts/build-parity-exclusions.rb` | 6 | Derives `parity-plan-exclusions.json` from machine facts in `warnings.json` (today: refused date windows). Carries the originating warning as evidence; **aborts** rather than excluding a runaway share of the pool |
 | `scripts/phase6-parity-domo.rb` | 6 | **Finalizer.** Runs `verify-parity.rb`, derives the gate contract (`charts_*`/`status`) into `parity-final.json`, and refuses to emit one when the plan silently omits chartable tiles |
 | `assert-phase6-ran.rb` *(vendored)* | 6 | Hard gate before declaring GREEN (run with `--workdir`) |
 
 > The Domo-specific scripts — `convert-beast-modes.rb` (2), `find-or-pick-dm.rb`
 > integration (2.5), `build-dm.rb` (3), `build-workbook.rb` + `qa-check.rb` (5),
-> `build-domo-layout.rb` (5d), `phase6-parity-domo.rb` (6), plus `get-domo-token.sh`, `lib/domo_rest.rb`,
+> `build-domo-layout.rb` (5d), `phase6-parity-domo.rb` + `build-parity-exclusions.rb` (6), plus `get-domo-token.sh`, `lib/domo_rest.rb`,
 > `lib/domo_sigma_util.rb`, `domo-discover.rb`, `domo-capture-visuals.rb` — ship
 > with unit + end-to-end tests under `test/`. A final live field-path check on
 > first instance contact is still recommended.

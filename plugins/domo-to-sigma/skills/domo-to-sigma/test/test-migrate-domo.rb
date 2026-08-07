@@ -96,6 +96,16 @@ end
 # now distinct, with phase6-parity-domo.rb finalizing score -> contract.
 ok(migrate_src.include?("'phase6-parity-domo.rb'"),
    'bead 2tkm: run_live! finalizes parity through phase6-parity-domo.rb (the gate-contract writer)')
+
+# The census in phase6-parity-domo.rb CONSUMES parity-plan-exclusions.json, and
+# #631 shipped that check with nothing writing the file. Pin both that the
+# generator runs and that it runs BEFORE the finalizer — reversed, the census
+# would read a stale or absent exclusions file and fail a run that was fine.
+gen_at = migrate_src.index("'build-parity-exclusions.rb'")
+fin_at = migrate_src.index("'phase6-parity-domo.rb'")
+ok(!gen_at.nil?, 'run_live! generates parity-plan-exclusions.json (the census consumes it)')
+ok(gen_at && fin_at && gen_at < fin_at,
+   'the exclusions generator runs BEFORE the finalizer that reads its output')
 ok(!migrate_src.include?("'--score-out', File.join(OUT, 'parity-final.json')"),
    'bead 2tkm: verify-parity.rb --score-out no longer overwrites the gate contract file')
 ok(migrate_src.include?("'--score-out', File.join(OUT, 'parity-score.json')") ||
