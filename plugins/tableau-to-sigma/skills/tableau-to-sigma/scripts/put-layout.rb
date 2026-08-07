@@ -153,7 +153,7 @@ end
 # rewrite (below) and the navigate-button target.page repair (further below,
 # from the actions-emitted manifest) resolve provisional page references
 # through this SAME lookup. Do not build a second name->page map.
-page_id_by_name = spec['pages'].each_with_object({}) { |p, h| h[p['name'].to_s.strip.downcase] = p['id'] }
+page_id_by_name = (spec['pages'] || []).each_with_object({}) { |p, h| h[p['name'].to_s.strip.downcase] = p['id'] }
 
 # ---- v5.0-P2: navigation-button URL rewrite ---------------------------------
 # Nav buttons are POSTed with the machine-recognizable placeholder

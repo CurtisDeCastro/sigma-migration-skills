@@ -53,15 +53,60 @@ module ActionGates
     (spec['pages'] || []).sum { |pg| (pg['elements'] || []).sum { |el| Array(el['actions']).size } }
   end
 
+  # Ledger/spec contradiction check — the built `spec` (--spec) is the one
+  # ground truth for "how many actions actually exist"; `ledger['emitted']`
+  # is a CLAIM about how many of those the converter auto-wired. The two are
+  # written by the SAME code path in build-charts-from-signals.rb (every
+  # `actions' => [action]` it adds to a spec element is paired, in the same
+  # statement block, with an append to the manifest that becomes
+  # ledger['emitted']) — so in a healthy run they are exactly equal, not just
+  # both-nonzero-or-both-zero. Exists because build-postpublish-guide.rb run
+  # without --emitted-manifest defaults to emitted: [] regardless of what the
+  # spec actually contains (ActionLedger.read_manifest(nil) == []): a spec
+  # with N real emitted actions then pairs with a ledger claiming 0, the guide
+  # instructs the customer to hand-wire work that is already done, AND
+  # guide_residue_violations (below) had nothing to compare against, so the
+  # gate printed [OK] on both checks in the same run a spec inspection would
+  # show is a lie. Checking strict equality (not just "spec>0 && emitted==0")
+  # also catches the mirror-image drift — a stale/partial manifest that
+  # UNDER- or OVER-claims relative to the spec that was actually built.
+  # Returns an array of error strings; empty means valid.
+  def ledger_spec_mismatch_violations(spec, ledger)
+    return [] if spec.nil?
+    spec_n   = action_count(spec)
+    ledger_n = (ledger['emitted'] || []).size
+    return [] if spec_n == ledger_n
+    ["ledger/spec mismatch — the built spec contains #{spec_n} action(s) but the ledger claims " \
+     "#{ledger_n} emitted (residue reports #{(ledger['residue'] || []).size}) — the ledger is not " \
+     'trustworthy here; re-run build-postpublish-guide.rb with the correct --emitted-manifest ' \
+     '(the actions-emitted.json sidecar build-charts-from-signals.rb wrote for this spec) and ' \
+     'rebuild the guide before trusting it']
+  end
+
   # Guide-residue check — `ledger` (the parsed action-ledger.json contents)
   # must have its conservation invariant hold (detectedCount == emitted.size +
-  # residue.size), and `guide_text` (POSTPUBLISH_GUIDE.md's contents) must
-  # mention NONE of the ledger's `emitted` captions — a guide instructing the
-  # customer to hand-wire an action the converter already built is a FAIL, not
-  # a pass. Returns an array of error strings; empty means valid. Callers
-  # check ledger/guide file existence and JSON-parseability themselves before
-  # calling this (existence is a distinct failure mode from content
-  # violations, and the CLI reports them with distinct remedies).
+  # residue.size), and `guide_text` (POSTPUBLISH_GUIDE.md's contents) must not
+  # render any of the ledger's `emitted` entries as still-open work — a guide
+  # instructing the customer to hand-wire an action the converter already
+  # built is a FAIL, not a pass. Returns an array of error strings; empty
+  # means valid. Callers check ledger/guide file existence and
+  # JSON-parseability themselves before calling this (existence is a distinct
+  # failure mode from content violations, and the CLI reports them with
+  # distinct remedies).
+  #
+  # Matches STRUCTURALLY, not by caption substring. A caption can legitimately
+  # recur in unrelated prose — e.g. an uncaptioned nav-button's caption falls
+  # back to its target DASHBOARD NAME (build-charts-from-signals.rb), and the
+  # guide legitimately renders dashboard names in OTHER actions' residue prose
+  # (build-postpublish-guide.rb's `parse_source` — "any sheet on dashboard
+  # '<name>'"). `guide_text.include?(cap)` matched that unrelated prose and
+  # FAILED a run that was actually fine. build-postpublish-guide.rb's
+  # render_guide now stamps each rendered residue entry with an invisible
+  # `<!-- ledger-key: [...] -->` marker carrying its ActionLedger.key_of
+  # identity (actionName-preferred, [kind, caption] fallback — the SAME
+  # identity ActionLedger.join uses to compute residue in the first place);
+  # this check parses those markers back out and compares by identity, never
+  # by scanning the human-readable text.
   def guide_residue_violations(ledger, guide_text)
     errs = []
     if ledger['detectedCount'] != ledger['emitted'].size + ledger['residue'].size
@@ -69,13 +114,22 @@ module ActionGates
               "emitted=#{ledger['emitted'].size} residue=#{ledger['residue'].size}"
       return errs
     end
-    ledger['emitted'].each do |e|
-      cap = e.dig('source', 'caption').to_s
-      next if cap.empty?
-      if guide_text.include?(cap)
-        errs << "the guide instructs hand-wiring #{cap.inspect}, but the converter already emitted it " \
-                '— the guide must describe ONLY the residue, work still to do'
+    # map + compact, not filter_map — that's Ruby 2.7+; this skill's floor is
+    # the system Ruby 2.6 (see lib/offramp.rb, lib/calc_coverage.rb).
+    rendered_keys = guide_text.scan(/<!--\s*ledger-key:\s*(\[.*?\])\s*-->/).map do |raw|
+      begin
+        JSON.parse(raw.first)
+      rescue JSON::ParserError
+        nil
       end
+    end.compact
+    ledger['emitted'].each do |e|
+      key = ActionLedger.key_of(e['source'] || {})
+      next if key.nil? || key[1].to_s.empty? # no stable identity to compare against
+      next unless rendered_keys.include?(key)
+      cap = e.dig('source', 'caption').to_s
+      errs << "the guide instructs hand-wiring #{cap.inspect} (action #{key.inspect}), but the " \
+              'converter already emitted it — the guide must describe ONLY the residue, work still to do'
     end
     errs
   end

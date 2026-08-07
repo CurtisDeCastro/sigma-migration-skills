@@ -17,13 +17,22 @@
 #   Guide-residue check — <workdir>/action-ledger.json (written by
 #     build-postpublish-guide.rb --json-out) must exist with its conservation
 #     invariant holding (detectedCount == emitted.size + residue.size),
-#     <workdir>/POSTPUBLISH_GUIDE.md must exist, and the guide text must
-#     mention NONE of the ledger's `emitted` captions. Previously this lived
-#     as gate 11 inside the SHARED assert-phase6-ran.rb as a bare
-#     file-exists check, so a guide instructing the customer to hand-wire an
-#     action the converter had ALREADY built still passed green. That weak
-#     check stays in the shared script (it's canonical to 7 other converters
-#     with no action-ledger concept) — THIS is the strong version, Tableau-only.
+#     <workdir>/POSTPUBLISH_GUIDE.md must exist, the guide must not render any
+#     of the ledger's `emitted` entries as still-open work (matched
+#     STRUCTURALLY by ActionLedger identity via an invisible per-entry marker
+#     build-postpublish-guide.rb stamps into the guide — never by scanning
+#     visible prose for a caption substring, which false-FAILed whenever a
+#     caption legitimately recurred in unrelated prose, e.g. a dashboard
+#     name), and — when --spec is also given — action_count(spec) must equal
+#     ledger['emitted'].size (ActionGates.ledger_spec_mismatch_violations): a
+#     ledger claiming fewer/more auto-emitted actions than the spec actually
+#     contains is not trustworthy input for either check above, however
+#     clean the guide text itself looks. Previously this lived as gate 11
+#     inside the SHARED assert-phase6-ran.rb as a bare file-exists check, so a
+#     guide instructing the customer to hand-wire an action the converter had
+#     ALREADY built still passed green. That weak check stays in the shared
+#     script (it's canonical to 7 other converters with no action-ledger
+#     concept) — THIS is the strong version, Tableau-only.
 #
 # WHY THIS IS A SEPARATE, TABLEAU-ONLY SCRIPT (not folded into
 # assert-phase6-ran.rb): that script is vendored CANONICAL to 8 converters
@@ -73,6 +82,10 @@ end.parse!(ARGV)
 abort 'usage: assert-action-gates.rb --workdir <WORK> [--spec <built-spec.json>]' if opts[:work].nil? || opts[:work].empty?
 
 failed = false
+spec = nil # populated below when --spec resolves; reused by the guide-residue
+           # section's ledger/spec mismatch check so a spec with real actions
+           # can never be paired with a ledger that lies about how many were
+           # emitted (see ActionGates.ledger_spec_mismatch_violations).
 
 # ---------------------------------------------------------------------------
 # G1 — action schema validation (NEVER waivable).
@@ -133,6 +146,7 @@ else
     else
       guide = File.read(guide_path)
       errs = ActionGates.guide_residue_violations(ledger, guide)
+      errs += ActionGates.ledger_spec_mismatch_violations(spec, ledger)
       if errs.empty?
         puts "[OK] guide-residue check: guide matches ledger residue " \
              "(#{ledger['emitted'].size} auto-emitted, #{ledger['residue'].size} manual)"

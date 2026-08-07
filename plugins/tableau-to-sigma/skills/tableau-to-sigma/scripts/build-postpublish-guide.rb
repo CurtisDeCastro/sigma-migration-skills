@@ -918,6 +918,25 @@ module PostpublishGuide
     "**Sigma status:** #{STATUS_LABEL[s] || s}"
   end
 
+  # Invisible (HTML-comment) machine-readable identity marker for the
+  # guide-residue gate (scripts/lib/action_gates.rb#guide_residue_violations).
+  # Stamped on every rendered residue entry so that gate can verify
+  # structurally which detected action each section corresponds to, instead
+  # of scanning the human-readable prose for a caption substring — a caption
+  # can legitimately recur in unrelated prose (e.g. an uncaptioned nav-button
+  # whose caption falls back to its target DASHBOARD NAME, which some OTHER
+  # action's residue prose also legitimately names — parse_source's "any
+  # sheet on dashboard '<name>'"), which made substring matching produce false
+  # FAILs on runs that were actually fine. Uses the SAME identity
+  # ActionLedger.key_of already computes for ActionLedger.join (actionName-
+  # preferred, [kind, caption] fallback), JSON-encoded so the gate can parse
+  # it back exactly with no separator-collision risk.
+  def ledger_marker(entry)
+    key = ActionLedger.key_of(entry)
+    return '' if key.nil?
+    "<!-- ledger-key: #{JSON.generate(key)} -->\n"
+  end
+
   def describe_targets(entry)
     ts = entry['targets'] || []
     return nil if ts.empty?
@@ -990,6 +1009,7 @@ module PostpublishGuide
       rows.each_with_index do |e, i|
         title = e['caption'].to_s.empty? ? SECTION_SINGULAR[kind] : e['caption']
         md << "### #{sec}.#{i + 1} #{title}\n\n"
+        md << ledger_marker(e)
         src = e['source'] || {}
         what = String.new("- **Tableau:** #{src['description'] || '(source unknown)'}")
         what << " — trigger: #{e['trigger']}" if e['trigger']
@@ -1045,6 +1065,10 @@ module PostpublishGuide
       md << "| #{e['caption']} | #{cap_list(e['fields'], 6)} | #{e['viz_in_tooltip'] ? 'yes — no Sigma equivalent' : 'no'} | #{STATUS_LABEL[status_for(e)]} |\n"
     end
     md << "| _…and #{rows.length - TOOLTIP_TABLE_CAP} more_ | | | |\n" if rows.length > TOOLTIP_TABLE_CAP
+    # Markers go AFTER the whole table (not interleaved between rows) —
+    # inserting a non-`|`-prefixed line between table rows ends a Markdown
+    # table early, breaking the guide's rendering for a human reader.
+    rows.each { |e| md << ledger_marker(e) }
     md << "\n**Steps (field tooltips):** #{STEPS_TOOLTIP}\n"
     if rows.any? { |e| e['viz_in_tooltip'] }
       md << "\n**Embedded viz-in-tooltip** has no Sigma equivalent (no spec or UI path to\n"

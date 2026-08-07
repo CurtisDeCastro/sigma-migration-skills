@@ -148,5 +148,53 @@ check(out2.include?('WARN') && out2.include?('act-btn-10-1') && out2.include?('N
 check(!out2.include?('navigate targets: 1 button'), 'no repair claimed on stdout for the unresolved case')
 puts out2 unless st2.exitstatus == 0
 
+puts
+puts 'Case 3 - --apply-pivot-totals with no --layout must not crash when the GET spec omits `pages`'
+# Minor-3 regression (final-review finding): `page_id_by_name = spec['pages']
+# .each_with_object(...)` used to sit ABOVE every existing guard, so it was an
+# UNCONDITIONAL spec['pages'] access. On the totals-ONLY ship pass
+# (--apply-pivot-totals, no --layout — exactly how migrate-tableau.rb:1627
+# invokes it) it is the FIRST spec['pages'] access on that code path; every
+# earlier one in the file already sits inside `if opts[:layout]` /
+# `if hidden_ids.any?`. No live GET has been observed to omit `pages`, but
+# nothing guarantees one never will (a brand-new/edge-case workbook document,
+# a future API shape) — this pins the defensive `(spec['pages'] || [])` guard
+# by simulating exactly that response shape.
+Dir.mktmpdir do |work|
+  put_bodies = []
+  srv = WEBrick::HTTPServer.new(Port: 0, BindAddress: '127.0.0.1',
+                                Logger: WEBrick::Log.new(File::NULL), AccessLog: [])
+  port = srv.config[:Port]
+  srv.mount_proc('/') do |req, res|
+    if req.request_method == 'GET' && req.path.end_with?('/spec')
+      # A `document` with no `pages` key at all — Sigma::CodeRep.document()
+      # returns this Hash as-is, so spec['pages'] is nil downstream.
+      res.body = JSON.generate('document' => { 'schemaVersion' => 2, 'kind' => 'workbook' })
+    elsif req.request_method == 'GET'
+      res.body = JSON.generate('url' => "http://127.0.0.1:#{port}/wb")
+    else # PUT
+      put_bodies << req.body
+      res.body = { 'workbookId' => 'wb-test' }.to_json
+    end
+    res['Content-Type'] = 'application/json'
+    res.status = 200
+  end
+  th = Thread.new { srv.start }
+
+  File.write(File.join(work, 'auth.json'),
+             { 'SIGMA_API_TOKEN' => 'filetok', 'SIGMA_BASE_URL' => "http://127.0.0.1:#{port}" }.to_json)
+
+  scrub = { 'SIGMA_API_TOKEN' => nil, 'SIGMA_BASE_URL' => nil,
+            'SIGMA_CLIENT_ID' => nil, 'SIGMA_CLIENT_SECRET' => nil, 'HOME' => work }
+  out3, st3 = Open3.capture2e(scrub.merge('SIGMA_WORKDIR' => work),
+                              'ruby', SCRIPT, '--workbook', 'wb-test',
+                              '--apply-pivot-totals', '--workdir', work)
+
+  check(st3.exitstatus == 0, "exits 0 (no --layout, GET spec has no `pages`) — got #{st3.exitstatus}")
+  check(!out3.include?('NoMethodError'), "no NoMethodError on a nil spec['pages']")
+  check(put_bodies.length == 1, 'PUT still sent (the totals pass ran to completion, not just avoided crashing)')
+  puts out3 unless st3.exitstatus == 0
+end
+
 puts($fails.empty? ? "\nALL PASS" : "\n#{$fails.size} FAILED")
 exit($fails.empty? ? 0 : 1)
