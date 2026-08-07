@@ -61,6 +61,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib
 import coverage_catalog as _cc  # noqa: E402
 import trellis_emit as _te      # noqa: E402  shared native-trellis emitter (supported-kind gate + fallbacks)
 import metric_binding as _mb    # noqa: E402  shared DM-metric binder ([Metrics/<name>] over inline re-derive)
+import code_rep as _cr          # noqa: E402  workbook code-rep document-wrapper adapter (nested POST shape)
 
 # Native-trellis round-trip sidecar records (element_id/kind/name/axis/columnId).
 # Populated by emit_trellis; written to native-trellis-emitted.json ONLY when a
@@ -1004,7 +1005,11 @@ def main():
     if a.dry_run:
         print(f"DRY RUN: spec -> {a.spec_out} ({len(pages)} pages, {n_elem} elements)", file=sys.stderr)
     else:
-        res = api_post("/v2/workbooks/spec", spec)
+        # Workbook code-rep POSTs require the nested `document` envelope
+        # (verified live 2026-08-03/04: a flat body 400s) — wrap the flat
+        # spec built above before sending it over the wire.
+        post_body = _cr.wrap(_cr.document(spec), _cr.metadata(spec))
+        res = api_post("/v2/workbooks/spec", post_body)
         try:
             wb = json.loads(res).get("workbookId")
         except json.JSONDecodeError:

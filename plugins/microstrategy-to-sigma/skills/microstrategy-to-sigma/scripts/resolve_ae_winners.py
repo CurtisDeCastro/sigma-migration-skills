@@ -27,11 +27,16 @@ import argparse
 import csv
 import io
 import json
+import os
+import sys
 import time
 
 import mstr
 from convert import Bundle, friendly
 from verify_parity import api, export_element
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
+import code_rep  # workbook code-rep document-wrapper adapter (nested GET/POST shape)
 
 
 def run_mstr_grid(s, report_id):
@@ -70,7 +75,10 @@ def clean_groups_via_sigma(b, args, report, quirk_aid, parent_aids):
             ],
         }]}],
     }
-    st, out = api("POST", "/v2/workbooks/spec", spec)
+    # Workbook code-rep POSTs require the nested `document` envelope (verified
+    # live 2026-08-03/04: a flat body 400s) — wrap the throwaway probe spec.
+    post_body = code_rep.wrap(code_rep.document(spec), code_rep.metadata(spec))
+    st, out = api("POST", "/v2/workbooks/spec", post_body)
     if st >= 300:
         raise SystemExit(f"probe workbook POST failed {st}: {out[:500]}")
     wb_id = json.loads(out)["workbookId"]
@@ -78,7 +86,12 @@ def clean_groups_via_sigma(b, args, report, quirk_aid, parent_aids):
         # element id may be remapped — read back
         import yaml
         st, out = api("GET", f"/v2/workbooks/{wb_id}/spec")
-        eid = yaml.safe_load(out)["pages"][0]["elements"][0]["id"]
+        # Workbook code-rep GETs nest pages under a top-level `document` key
+        # (live since 2026-08); a bare ["pages"] index here was always a
+        # KeyError, so the probe's remapped element id was never recovered.
+        raw_readback = yaml.safe_load(out)
+        readback = {**code_rep.metadata(raw_readback), **code_rep.document(raw_readback)}
+        eid = readback["pages"][0]["elements"][0]["id"]
         csv_text = export_element(wb_id, eid)
     finally:
         api("DELETE", f"/v2/files/{wb_id}")
