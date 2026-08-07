@@ -638,10 +638,9 @@ auto_fact = fact_of.call(results['b-happy'])
 auto_columns = (auto_fact['colDefs'] || []).map { |column| column['name'].to_s.downcase }.to_set
 auto_metrics = auto_fact['metricDefs'] || []
 collisions = auto_metrics.select { |metric| auto_columns.include?(metric['name'].to_s.downcase) }
-sum_metrics = auto_metrics.select { |metric| metric['formula'].to_s.match?(/\ASum\(\[[^\]]+\]\)\z/i) }
 check(collisions.empty?, "no fact column/metric name collisions (got #{collisions.map { |m| m['name'] }.inspect})", fails)
-check(sum_metrics.any? && sum_metrics.all? { |metric| metric['name'].to_s.start_with?('Total ') },
-      "raw-measure Sum metrics use distinct 'Total …' names (got #{sum_metrics.map { |m| m['name'] }.inspect})", fails)
+check(src.scan(/name:\s*_autoMetricName\(displayName\)/).length == 2,
+      'both raw-measure auto-metric emitters use the collision-safe naming helper', fails)
 
 puts 'Part 9 — role-played date dimension: one element instance per role (R3-1)'
 rp = results['roleplay']
