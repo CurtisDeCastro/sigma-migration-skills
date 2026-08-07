@@ -140,11 +140,33 @@ end
 
 verified = []
 exclusions = []
+seen_eids = Set.new
 
 charts.each do |c|
   name = c['chart'].to_s
   eid  = c['sigma_element_id'].to_s
   cid, is_summary = card_id_for(eid)
+
+  # The SAME element id listed twice in the plan. collect-parity-actuals.rb
+  # records this in `unavailable` and refuses to overwrite the first export —
+  # but that reason was unreachable here, because act_by_eid[eid] resolves for
+  # every occurrence, so the second entry looked perfectly healthy and was
+  # scored a second time against the first one's data. Two plan rows, one
+  # measurement, both reported.
+  #
+  # Reachable from real data: a Domo card pinned to two dashboard pages is
+  # ordinary, domo-discover.rb applies no cross-page dedup, and build-workbook's
+  # element id derives purely from the card id — so cards.json can legitimately
+  # carry the same card twice and the plan inherits the duplicate.
+  if seen_eids.include?(eid)
+    exclusions << { 'chart' => name, 'element_id' => eid, 'reason' =>
+      'element id appears more than once in the parity plan — only the first ' \
+      'occurrence is scored; a duplicate would be measured twice against one ' \
+      'export. Investigate why the plan double-lists this element (a card ' \
+      'pinned to two pages is the usual cause).' }
+    next
+  end
+  seen_eids << eid
 
   # Already excluded upstream for a construction-level reason — carry it through
   # verbatim rather than re-deriving or overriding it. Element id first; a
@@ -158,7 +180,7 @@ charts.each do |c|
 
   # --- the Domo (expected) side ---
   if cid.nil?
-    exclusions << { 'chart' => name, 'reason' =>
+    exclusions << { 'chart' => name, 'element_id' => eid, 'reason' =>
       "element id #{eid.inspect} is not of the form el-<cardId>[-summary], so it cannot be " \
       'traced back to a Domo card — no source value exists to compare against' }
     next
@@ -166,7 +188,8 @@ charts.each do |c|
   card = exp_cards[cid]
   if card.nil?
     reason = exp_unavail[cid] || 'Domo card-data returned nothing for this card'
-    exclusions << { 'chart' => name, 'reason' => "no Domo source value: #{reason}" }
+    exclusions << { 'chart' => name, 'element_id' => eid,
+                    'reason' => "no Domo source value: #{reason}" }
     next
   end
   # A KPI tile plots ONE value however it was built. That is true of a `-summary`
@@ -198,7 +221,8 @@ charts.each do |c|
   else
     exp_rows = card['rows']
     if !exp_rows.is_a?(Array) || exp_rows.empty?
-      exclusions << { 'chart' => name, 'reason' => 'Domo card returned no rows' }
+      exclusions << { 'chart' => name, 'element_id' => eid,
+                      'reason' => 'Domo card returned no rows' }
       next
     end
   end

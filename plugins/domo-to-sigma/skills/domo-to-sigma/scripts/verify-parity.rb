@@ -357,13 +357,14 @@ results = plan.map do |p|
                   'then set "render_verified": true on this chart in the plan ' \
                   '(or replace the marker with actual rows) and re-run'] }
       end
-    next result.merge(chart: p['chart'], extract: this_extract, columns: [])
+    next result.merge(chart: p['chart'], element_id: p['sigma_element_id'],
+                      extract: this_extract, columns: [])
   end
 
   act = extract_rows(p['actual']).map { |r| round_row(r) }
 
   result = this_extract ? extract_compare(exp, act, tol: opts[:tol]) : strict_compare(exp, act)
-  result.merge(chart: p['chart'], extract: this_extract,
+  result.merge(chart: p['chart'], element_id: p['sigma_element_id'], extract: this_extract,
                columns: per_column_scores(exp, act, p['sigma_columns']))
 end
 
@@ -410,7 +411,13 @@ if opts[:score_out]
     'tiles_fail'          => failed,
     'value_parity_score'  => overall,
     'tiles'               => results.map { |r|
-      { 'chart' => r[:chart], 'status' => r[:status], 'extract' => r[:extract],
+      # element_id rides along so a DIVERGE can be localised. Domo reuses generic
+      # summary labels — 11 of the real 65 tiles share a display name with
+      # another — so a fail_names entry of "New Visits in Period" names FOUR
+      # possible elements and tells an operator nothing about which one broke.
+      # Nil for a hand-authored plan that carries no sigma_element_id.
+      { 'chart' => r[:chart], 'element_id' => r[:element_id],
+        'status' => r[:status], 'extract' => r[:extract],
         # PENDING (render-verify) tiles carry score:null — unscored, not zero.
         'score' => (r[:status] == 'PENDING' ? nil : (r[:score] || 0.0)),
         'n_expected' => r[:n_expected], 'n_actual' => r[:n_actual], 'n_matched' => r[:n_matched],

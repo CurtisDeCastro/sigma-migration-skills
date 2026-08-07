@@ -877,6 +877,7 @@ def run_live!(opts)
   # Waive with --skip-parity-oracle "<reason>" — which lands you back on the
   # dead-end path, so the reason had better be good.
   oracle_plan = nil
+  oracle_skip_reason = nil
   if !opts[:parity_plan] && !opts[:skip_parity_oracle]
     hr('parity-oracle')
     plan_path = File.join(OUT, 'parity-plan.json')
@@ -890,7 +891,17 @@ def run_live!(opts)
                                '--workbook-id', workbook_id,
                                '--out', plan_path)
     if !ok
-      skip_phase!('parity-oracle', "build-parity-plan.rb exited #{code} — no chartable tiles to score")
+      # Exit 2 is build-parity-plan.rb's DELIBERATE "zero chartable elements".
+      # Anything else is a crash (it has no rescue around JSON.parse, so a
+      # truncated workbook-spec.json raises and exits 1). Reporting a crash as
+      # "no chartable tiles" is a lie that propagates: the same wording ends up
+      # in the --skip-parity-gate waiver text below, sending whoever debugs the
+      # non-GREEN run to look for an empty workbook instead of a broken artifact.
+      why = code == 2 ? 'build-parity-plan.rb found no chartable tiles (exit 2)'
+                      : "build-parity-plan.rb FAILED with exit #{code} — this is a crash, not an " \
+                        'empty workbook; check workbook-spec.json is complete and parseable'
+      oracle_skip_reason = why
+      skip_phase!('parity-oracle', why)
     else
       ok_e, code_e, _e = run_script!('collect-parity-expected.rb', '--workdir', OUT)
       ok_a, code_a, _a = run_script!('collect-parity-actuals.rb',
@@ -1012,7 +1023,11 @@ def run_live!(opts)
     why = if opts[:skip_parity_oracle]
             "parity oracle waived via --skip-parity-oracle: #{opts[:skip_parity_oracle]}"
           else
-            'parity oracle produced no plan (build-parity-plan.rb found no chartable tiles)'
+            # Reuse the reason the oracle phase actually recorded, so a CRASH in
+            # build-parity-plan.rb is not laundered into the benign-sounding
+            # "found no chartable tiles". This text is the run's permanent record
+            # of why gate 1 had no evidence.
+            oracle_skip_reason || 'parity oracle produced no plan'
           end
     args += ['--skip-parity-gate', why]
   end

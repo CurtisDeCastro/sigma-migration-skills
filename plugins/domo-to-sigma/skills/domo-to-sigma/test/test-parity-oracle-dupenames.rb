@@ -150,5 +150,97 @@ Dir.mktmpdir('dupe-nameonly') do |dir|
   eq(v['charts'].length, 2, 'the other two are still scored')
 end
 
+# ---- round 2: re-running the join must be IDEMPOTENT ----------------------
+# The round-1 fix added element_id to the two exclusion sites it happened to
+# touch and missed three others. Those element_id-less entries were then
+# indistinguishable from a legacy name-only exclusion on the NEXT standalone
+# run, so .shift handed one to the FIRST same-named tile in plan order — which
+# could be a tile carrying a real divergence. Measured: a caught 999-vs-100 bug
+# became "2/2 pass = 100%" on the second invocation. A bare
+# `build-parity-oracle.rb --workdir` re-run is documented, supported usage.
+Dir.mktmpdir('dupe-rerun') do |dir|
+  # The scenario must actually PRODUCE an exclusion of a self-written kind, or
+  # the "every exclusion carries element_id" check is vacuously true on an empty
+  # array. (First cut of this test was exactly that — it passed with the fix
+  # deliberately reverted.) So: FOUR same-named tiles, one with NO Domo card
+  # (fires the element_id-less "no Domo source value" path), and one carrying a
+  # real divergence that must survive every re-run.
+  ids = %w[el-1393001267-summary el-1037345428-summary el-579213727-summary el-1124999128-summary]
+  actual = { ids[0] => '999', ids[1] => '5', ids[2] => '5', ids[3] => '5' }
+  File.write(File.join(dir, 'fixture.json'),
+             JSON.generate(ids.to_h { |i| [i, "value\n#{actual[i]}\n"] }))
+  File.write(File.join(dir, 'parity-plan.json'), JSON.generate(
+    'charts' => ids.map do |i|
+      { 'chart' => 'New Visits in Period', 'sigma_element_id' => i,
+        'sigma_kind' => 'kpi-chart', 'sigma_columns' => ['m'] }
+    end))
+  # el-1393001267-summary expects 100 but Sigma exports 999 -> a REAL divergence.
+  # el-1124999128-summary has NO card entry at all -> "no Domo source value".
+  File.write(File.join(dir, 'parity-expected.json'), JSON.generate(
+    'fetched_at' => '2026-08-07T13:00:00Z', 'unavailable' => [],
+    'cards' => { '1393001267' => { 'card_id' => '1393001267', 'title' => 'a',
+                                   'rows' => [['x', 1]], 'summary_value' => 100 },
+                 '1037345428' => { 'card_id' => '1037345428', 'title' => 'b',
+                                   'rows' => [['x', 1]], 'summary_value' => 5 },
+                 '579213727'  => { 'card_id' => '579213727', 'title' => 'c',
+                                   'rows' => [['x', 1]], 'summary_value' => 5 } }))
+  run(File.join(SCRIPTS, 'collect-parity-actuals.rb'),
+      '--plan', File.join(dir, 'parity-plan.json'), '--workbook-id', 'wb1',
+      '--out', File.join(dir, 'parity-actuals.json'), '--pool', '1',
+      '--fixture', File.join(dir, 'fixture.json'))
+
+  scores = (1..3).map do
+    run(File.join(SCRIPTS, 'build-parity-oracle.rb'), '--workdir', dir)
+    _, vout = run(File.join(SCRIPTS, 'verify-parity.rb'), '--plan',
+                  File.join(dir, 'parity-plan-verified.json'))
+    [vout.scan(/^PASS/).length, vout.scan(/^DIVERGE/).length]
+  end
+  eq(scores, [[2, 1], [2, 1], [2, 1]],
+     'three consecutive joins score identically — the real 999-vs-100 DIVERGE is never ' \
+     'laundered into an unearned exclusion by a stale element_id-less entry')
+
+  x = JSON.parse(File.read(File.join(dir, 'parity-plan-exclusions.json')))
+  ok(!x['exclusions'].empty?,
+     'the scenario really does produce an exclusion (guard below is not vacuous)')
+  ok(x['exclusions'].all? { |e| !e['element_id'].to_s.empty? || !e.dig('evidence', 'element_id').to_s.empty? },
+     'every exclusion this script writes carries an element_id, so its own output can never ' \
+     'be mistaken for a legacy name-only entry on the next run')
+  eq(x['exclusions'].map { |e| e['element_id'] }, [ids[3]],
+     'and it is the tile that genuinely has no Domo card — not whichever came first by name')
+end
+
+# ---- round 2: the same ELEMENT ID listed twice in the plan -----------------
+# A Domo card pinned to two dashboard pages is ordinary; discovery applies no
+# cross-page dedup and the element id derives purely from the card id, so the
+# plan can legitimately double-list one element. act_by_eid resolves for BOTH
+# occurrences, so the second was scored a second time against the first one's
+# single measurement — two plan rows, one measurement, both reported.
+Dir.mktmpdir('dupe-eid') do |dir|
+  File.write(File.join(dir, 'fixture.json'), JSON.generate('el-777-summary' => "value\n5\n"))
+  File.write(File.join(dir, 'parity-plan.json'), JSON.generate('charts' => [
+    { 'chart' => 'Pinned Card', 'sigma_element_id' => 'el-777-summary',
+      'sigma_kind' => 'kpi-chart', 'sigma_columns' => ['m'] },
+    { 'chart' => 'Pinned Card', 'sigma_element_id' => 'el-777-summary',
+      'sigma_kind' => 'kpi-chart', 'sigma_columns' => ['m'] },
+  ]))
+  File.write(File.join(dir, 'parity-expected.json'), JSON.generate(
+    'fetched_at' => '2026-08-07T13:00:00Z', 'unavailable' => [],
+    'cards' => { '777' => { 'card_id' => '777', 'title' => 'Pinned Card',
+                            'rows' => [['x', 1]], 'summary_value' => 5 } }))
+  run(File.join(SCRIPTS, 'collect-parity-actuals.rb'),
+      '--plan', File.join(dir, 'parity-plan.json'), '--workbook-id', 'wb1',
+      '--out', File.join(dir, 'parity-actuals.json'), '--pool', '1',
+      '--fixture', File.join(dir, 'fixture.json'))
+  run(File.join(SCRIPTS, 'build-parity-oracle.rb'), '--workdir', dir)
+
+  v = JSON.parse(File.read(File.join(dir, 'parity-plan-verified.json')))
+  x = JSON.parse(File.read(File.join(dir, 'parity-plan-exclusions.json')))
+  eq(v['charts'].length, 1, 'a double-listed element is scored ONCE, not twice')
+  eq(x['exclusions'].length, 1, 'and its duplicate is excluded, not silently dropped')
+  ok(x['exclusions'].first['reason'].to_s.include?('more than once'),
+     'with a reason naming the actual problem (the plan double-lists the element)')
+  eq(v['charts'].length + x['exclusions'].length, 2, 'coverage invariant still exact')
+end
+
 puts $failures.zero? ? "\nALL PASS" : "\n#{$failures} FAILURE(S)"
 exit($failures.zero? ? 0 : 1)
