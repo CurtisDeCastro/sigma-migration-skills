@@ -103,7 +103,12 @@ OptionParser.new do |o|
   o.on('--description STR', 'Workbook description.') { |v| opts[:description] = v }
   o.on('--mode MODE', %w[dashboard page-per-worksheet], 'build-workbook-spec.rb page layout mode ' \
        '(default page-per-worksheet).') { |v| opts[:mode] = v }
-  o.on('--parity-plan PATH', 'LIVE mode: verify-parity.rb plan (phase skipped with a note when absent).') { |v| opts[:parity_plan] = v }
+  o.on('--parity-plan PATH', 'LIVE mode: a hand-supplied verify-parity.rb plan. Overrides the ' \
+       'built-in parity oracle, which otherwise builds one automatically.') { |v| opts[:parity_plan] = v }
+  o.on('--skip-parity-oracle REASON', 'Do NOT build the parity oracle automatically. Without a ' \
+       '--parity-plan this leaves the run with no gate-1 evidence at all, so ' \
+       'assert-phase6-ran.rb gets --skip-parity-gate and rejects it (exit 18) absent a passing ' \
+       'anchors-verdict.json. In other words: this run cannot then be GREEN.') { |v| opts[:skip_parity_oracle] = v }
 end.parse!(ARGV)
 
 abort('FATAL: --out DIR is required') unless opts[:out]
@@ -820,7 +825,64 @@ def run_live!(opts)
   phase_write_2d_flag!
   phase_render_visual!(opts, workbook_id, wb_ids)
 
+  # ---- parity oracle (gate 1) ---------------------------------------------
+  # DEFAULT-ON, same stance as gate 7b's --require-control-flip above, and for a
+  # blunter reason: WITHOUT A PLAN THIS RUN CANNOT REACH GOLD. With no
+  # --parity-plan the orchestrator auto-adds --skip-parity-gate below, and gate 1
+  # rejects that waiver with exit 18 unless a passing anchors-verdict.json
+  # already exists. So the historic default path was a guaranteed dead end that
+  # merely looked like a skip.
+  #
+  # build-parity-plan.rb emits the tile LIST but, by design, no values —
+  # verify-parity.rb is a pure differ needing BOTH sides pre-collected. The two
+  # collectors supply them:
+  #   collect-parity-expected.rb  Domo's own rendered card values
+  #   collect-parity-actuals.rb   the live Sigma element exports
+  #   build-parity-oracle.rb      joins them + writes the exclusion ledger
+  # Both sides are fetched inside THIS run so a card's relative date window is
+  # evaluated once (build-parity-oracle refuses a cross-UTC-day join).
+  #
+  # Waive with --skip-parity-oracle "<reason>" — which lands you back on the
+  # dead-end path, so the reason had better be good.
+  oracle_plan = nil
+  if !opts[:parity_plan] && !opts[:skip_parity_oracle]
+    hr('parity-oracle')
+    plan_path = File.join(OUT, 'parity-plan.json')
+    # --workbook-spec, NOT --workbook-id: phase6-parity-domo.rb's anti-inflation
+    # census reads <workdir>/workbook-spec.json, so the plan must be built from
+    # the SAME document or the two disagree about what "chartable" means and the
+    # census fails on tiles that were never really missing (put-layout injects
+    # header elements into the live spec that the local one has no idea about).
+    ok, code, _o = run_script!('build-parity-plan.rb',
+                               '--workbook-spec', File.join(OUT, 'workbook-spec.json'),
+                               '--workbook-id', workbook_id,
+                               '--out', plan_path)
+    if !ok
+      skip_phase!('parity-oracle', "build-parity-plan.rb exited #{code} — no chartable tiles to score")
+    else
+      ok_e, code_e, _e = run_script!('collect-parity-expected.rb', '--workdir', OUT)
+      ok_a, code_a, _a = run_script!('collect-parity-actuals.rb',
+                                     '--plan', plan_path,
+                                     '--workbook-id', workbook_id,
+                                     '--out', File.join(OUT, 'parity-actuals.json'))
+      if !ok_e || !ok_a
+        # Deliberately a hard FAIL, not a skip. A half-collected oracle would
+        # join into a plan missing tiles, and a shrunken denominator reads
+        # exactly like a clean pass — the one failure mode this whole chain is
+        # built to refuse.
+        fail_phase!('parity-oracle',
+                    "collector failed (expected exit #{code_e}, actuals exit #{code_a}) — " \
+                    'refusing to build a partial plan')
+      end
+      ok_j, code_j, _j = run_script!('build-parity-oracle.rb', '--workdir', OUT)
+      fail_phase!('parity-oracle', "build-parity-oracle.rb exited #{code_j}") unless ok_j
+      oracle_plan = File.join(OUT, 'parity-plan-verified.json')
+      done_phase!('parity-oracle')
+    end
+  end
+
   hr('verify-parity')
+  opts[:parity_plan] ||= oracle_plan
   if opts[:parity_plan] && File.exist?(opts[:parity_plan])
     # Bead 2tkm — finalize through phase6-parity-domo.rb, do NOT aim
     # verify-parity.rb's --score-out at parity-final.json.
@@ -861,7 +923,12 @@ def run_live!(opts)
     fail_phase!('verify-parity', "phase6-parity-domo.rb exited #{code}") unless ok
     done_phase!('verify-parity')
   else
-    skip_phase!('verify-parity', 'no --parity-plan supplied — run verify-parity.rb by hand before declaring GREEN')
+    skip_phase!('verify-parity',
+                opts[:skip_parity_oracle] ?
+                  "parity oracle waived (#{opts[:skip_parity_oracle]}) and no --parity-plan given — " \
+                  'gate 1 has no evidence; this run cannot be GREEN' :
+                  'no parity plan available (the oracle found no chartable tiles) — ' \
+                  'run verify-parity.rb by hand before declaring GREEN')
   end
 
   phase_record_visual_check!(opts)
@@ -873,7 +940,19 @@ def run_live!(opts)
   # looker reference; waive with --skip-control-flip "<reason>".
   args += ['--require-control-flip']
   args += ['--skip-visual-gate', 'Tier B — private render endpoint unavailable'] if tier_b
-  args += ['--skip-parity-gate', 'no --parity-plan supplied to migrate-domo.rb'] unless opts[:parity_plan]
+  # The reason must say what ACTUALLY happened — it is recorded as a waiver and
+  # read later by someone reconstructing why a run was not GREEN. "no
+  # --parity-plan supplied" was true when that was the only way to get a plan;
+  # now the oracle builds one by default, so the honest reason is whichever of
+  # these applies.
+  unless opts[:parity_plan]
+    why = if opts[:skip_parity_oracle]
+            "parity oracle waived via --skip-parity-oracle: #{opts[:skip_parity_oracle]}"
+          else
+            'parity oracle produced no plan (build-parity-plan.rb found no chartable tiles)'
+          end
+    args += ['--skip-parity-gate', why]
+  end
   ok, code, _out = run_script!('assert-phase6-ran.rb', *args)
   fail_phase!('assert-phase6-ran', "assert-phase6-ran.rb exited #{code}") unless ok
   done_phase!('assert-phase6-ran')
