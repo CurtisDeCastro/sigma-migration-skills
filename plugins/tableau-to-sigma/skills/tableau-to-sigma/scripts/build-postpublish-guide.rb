@@ -1169,7 +1169,16 @@ module PostpublishGuide
     abort('missing --twb')  unless opts[:twb]
     abort("not found: #{opts[:twb]}") unless File.exist?(opts[:twb])
 
-    xml   = TwbXml.parse(File.read(opts[:twb], encoding: 'UTF-8'))
+    xml =
+      begin
+        TwbXml.parse(File.read(opts[:twb], encoding: 'UTF-8'))
+      rescue TwbXml::ParseError => e
+        # Abort rather than continue with a partial tree. Every extract_* method
+        # would return [] against a recovered stub, and --detect-only's consumer
+        # (build-charts-from-signals.rb --detected-actions) cannot tell that
+        # apart from a workbook with no actions.
+        abort "FATAL: cannot parse #{opts[:twb]}: #{e.message}"
+      end
     wbids = load_wb_ids(opts[:wb_ids])
 
     if opts[:detect_only]

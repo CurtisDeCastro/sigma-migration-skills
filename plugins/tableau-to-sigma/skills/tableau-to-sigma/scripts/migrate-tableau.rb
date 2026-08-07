@@ -4562,10 +4562,16 @@ if mechanical
   #      action-ledger.json — only the late guide invocation owns that
   #      CONTRACTUAL path, so an early run here can never be mistaken by gate
   #      11 for the authoritative ledger.
+  #
+  #      NOT allow_fail. Detection feeding emission means a crashed detection and a
+  #      zero-action workbook produce the same downstream artifact — the exact
+  #      silent no-op this workstream has now hit four times. build-postpublish-guide.rb
+  #      aborts on a malformed parse and writes no file, so reaching here with a
+  #      non-zero status means something worse; fail the run.
   detected_actions_path = File.join(WORK, 'detected-actions.json')
   if have_twb
     run!(['ruby', File.join(HERE, 'build-postpublish-guide.rb'),
-          '--twb', twb, '--detect-only', detected_actions_path], allow_fail: true)
+          '--twb', twb, '--detect-only', detected_actions_path])
   end
 
   # 2) Build the chart-element specs from the parsed zones + view CSVs + map.
