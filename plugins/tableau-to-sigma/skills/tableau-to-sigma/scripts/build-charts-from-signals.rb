@@ -5329,11 +5329,14 @@ layout.each do |dash|
                     'over a grouped calculation on the hidden source (one value per point)'
       end
       unless rows.any? { |r| r[0].nil? || r[0].to_s.strip.empty? }
+        # S11/K20: list filters reject boolean-typed columns ("Invalid filter",
+        # blank tile) while /export still returns rows. Cast via Text() and pass
+        # string values — same shape as the hf-* keep-filter family.
         element['columns'] << { 'id' => "nn-c-#{el_id}", 'name' => "#{dim['name']} Not Null",
-                                'formula' => "IsNotNull([#{src_name}/#{dim['name']}])" }
+                                'formula' => "Text(IsNotNull([#{src_name}/#{dim['name']}]))" }
         element['filters'] = [{ 'id' => "flt-#{el_id}-nn", 'columnId' => "nn-c-#{el_id}",
                                 'kind' => 'list', 'mode' => 'include',
-                                'selectionMode' => 'multiple', 'values' => [true] }]
+                                'selectionMode' => 'multiple', 'values' => ['true'] }]
       end
       element['_worksheet'] = cap
       element['_dashboard'] = dash['dashboard']
@@ -5472,10 +5475,10 @@ layout.each do |dash|
     # Null-dim exclusion (Tableau↔Sigma join-semantics parity): Sigma DM
     # relationships are LEFT joins, so fact rows without a dim match surface a
     # NULL dim bucket that the Tableau view excluded. When the Tableau CSV has
-    # NO null dim values, mirror the exclusion with a verified bool-filter
-    # (IsNotNull calc column + include:[true] list filter — the spec shape from
-    # reference_sigma_rls_cls_spec_shape). A no-null dataset makes this a
-    # harmless no-op.
+    # NO null dim values, mirror the exclusion with a Text(IsNotNull(...))
+    # column + include:["true"] list filter (S11/K20 — boolean-typed list
+    # filter targets render "Invalid filter" and blank the tile while /export
+    # still returns rows). A no-null dataset makes this a harmless no-op.
     null_excl_filters = []
     # Charts only: a table/pivot RENDERS every column, so the helper column
     # would show up as a visible "X Not Null" column (and crosstabs keep their
@@ -5487,12 +5490,12 @@ layout.each do |dash|
       next if rows.any? { |r| r[ci].nil? || r[ci].to_s.strip.empty? } # Tableau kept nulls
       nn_id = "nn-#{cobj['id']}"
       element['columns'] << { 'id' => nn_id, 'name' => "#{cobj['name']} Not Null",
-                              'formula' => "IsNotNull(#{cobj['formula'] || "[Master/#{cobj['name']}]"})" }
+                              'formula' => "Text(IsNotNull(#{cobj['formula'] || "[Master/#{cobj['name']}]"}))" }
       null_excl_filters << { 'columnId' => nn_id, 'kind' => 'list', 'mode' => 'include',
-                             'selectionMode' => 'multiple', 'values' => [true] }
+                             'selectionMode' => 'multiple', 'values' => ['true'] }
     end
     unless null_excl_filters.empty?
-      warnings << "'#{cap}' null-dim exclusion: #{null_excl_filters.size} IsNotNull filter(s) emitted (Tableau view shows no null dim bucket; Sigma LEFT joins would)"
+      warnings << "'#{cap}' null-dim exclusion: #{null_excl_filters.size} Text(IsNotNull) filter(s) emitted (Tableau view shows no null dim bucket; Sigma LEFT joins would)"
     end
 
     # Reference lines / bands / trendlines from Tableau → Sigma `refMarks`.
@@ -7469,14 +7472,15 @@ unless opts[:no_auto_controls]   # default-on: never miss a .twb parameter/filte
           'source' => { 'kind' => 'table', 'elementId' => opts[:master_id] },
           'columns' => [
             { 'id' => opt_val_col, 'name' => cap.strip, 'formula' => "[Master/#{m['name']}]" },
+            # S11/K20: Text() + string values — boolean list filters blank the tile
             { 'id' => opt_nn_col, 'name' => "#{cap.strip} Not Null",
-              'formula' => "IsNotNull([Master/#{m['name']}])" }
+              'formula' => "Text(IsNotNull([Master/#{m['name']}]))" }
           ],
           # every element filter needs an `id` — the spec API 400s
           # `filters[N].id: Invalid string: undefined` without one (field report)
           'filters' => [{ 'id' => "flt-#{opt_id}-0", 'columnId' => opt_nn_col,
                           'kind' => 'list', 'mode' => 'include',
-                          'selectionMode' => 'multiple', 'values' => [true] }],
+                          'selectionMode' => 'multiple', 'values' => ['true'] }],
           'visibleAsSource' => false
         }
         spec['source'] = {
