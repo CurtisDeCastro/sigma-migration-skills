@@ -234,7 +234,7 @@ After workbook PUT and before declaring GREEN you MUST:
 
 > **Visual QA is a mandatory gate — never skip, never declare done on HTTP 200.** A workbook that POSTs cleanly and passes CSV parity can still be visually broken (overlapping tiles, clipped titles, dead zones, floating filters; Sigma's grid has no z-order). After `export-chart-png.rb` renders the pages/elements:
 > 1. **Read each PNG** and check it against `refs/layout-visual-qa.md` (no overlaps/stacking, no dead zones, controls placed in-band, no clipped titles, even heights, right chart kind/format). Pair with the Tableau MCP `get-view-image` for source-vs-target.
-> 2. Fix any failure in the spec — for multi-page workbooks use `sigma-skills/sigma-workbooks/scripts/wb-rep.rb` (pull → edit → push) — then **re-render and re-read**.
+> 2. Fix any failure in the spec — for multi-page workbooks use the companion **sigma-workbooks** skill's `scripts/wb-rep.rb` (full-clone: `plugins/sigma-authoring/skills/sigma-workbooks/scripts/wb-rep.rb`; pull → edit → push) — then **re-render and re-read**.
 > 3. Loop until the render passes inspection.
 
 ```bash

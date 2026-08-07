@@ -16,6 +16,8 @@ column to that table.
 
 Mandatory gates (CI lints each converter SKILL.md for them — `tools/lint-skills.rb`):
 
+Path hygiene is separate: `tools/lint-skill-paths.rb` bans legacy `sigma-skills/` runtime paths and marketplace-unsafe `../../../../docs/` relatives from skills.
+
 - **C3 Reuse-check** — score existing Sigma DMs before creating one (`find-or-pick-dm.rb`).
 - **C5 Post-DM gate** — POST the DM, **read back** real ids, wire the workbook to those.
 - **C7 Layout** — apply layout as the **LAST write** (a bare spec PUT wipes it).

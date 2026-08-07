@@ -85,8 +85,7 @@ File.write("#{conv_dir}/SKILL.md", <<~MD)
   > SCAFFOLD — fill every TODO before first live run. Phase numbering is local to
   > this skill; the canonical Assess→Discover→Reuse→Convert→Post-DM→Build→Layout→
   > Parity→Security→Enhance arc and this skill's mapping live in
-  > [`docs/phase-schema.md`](../../../../docs/phase-schema.md). Add this skill's
-  > column there.
+  > `docs/phase-schema.md` (full clone only). Add this skill's column there.
 
   ## Phase 0 — Assess (C1)
   TODO: feature-gap scan + scope. Defer tenant inventory to the `#{tool}-assessment` skill.

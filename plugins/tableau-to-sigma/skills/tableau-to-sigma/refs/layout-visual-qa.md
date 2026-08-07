@@ -34,7 +34,7 @@ migration done.
    below (source-fidelity → structural → design-quality, in that order).
 3. **Fix** any failure (re-band, resize, move a control into its chart's container, shorten a
    map title) by editing the spec — for large multi-page workbooks use
-   `sigma-skills/sigma-workbooks/scripts/wb-rep.rb` (pull → edit element files → push) — then
+   the companion **sigma-workbooks** skill's `scripts/wb-rep.rb` (full-clone path: `plugins/sigma-authoring/skills/sigma-workbooks/scripts/wb-rep.rb`; pull → edit element files → push) — then
    **re-render and re-read**.
 4. **Loop until the render passes inspection.** Declare the migration done on a *clean render*,
    never on an HTTP 200.

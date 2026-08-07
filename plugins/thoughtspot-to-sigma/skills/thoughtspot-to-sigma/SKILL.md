@@ -297,7 +297,7 @@ python3 scripts/migrate.py --model-tml fixtures/retail-analytics-model.tml \
       overlaps/stacking, no dead zones, controls placed in-band, no clipped
       titles, even heights, right chart kind/format).
    2. Fix any failure in the spec — for multi-page workbooks use
-      `sigma-skills/sigma-workbooks/scripts/wb-rep.rb` (pull → edit → push) —
+      the companion **sigma-workbooks** skill's `scripts/wb-rep.rb` (full-clone: `plugins/sigma-authoring/skills/sigma-workbooks/scripts/wb-rep.rb`; pull → edit → push) —
       then **re-render and re-read**.
    3. Loop until the render passes inspection.
 
