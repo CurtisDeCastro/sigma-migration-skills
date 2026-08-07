@@ -109,7 +109,11 @@ kpi-chart/bar-chart (each sourcing the migrated DM fact element; charts
 auto-aggregate by axis), recursively inlines metric MAQL into measure formulas,
 and resolves a related-dataset `view` attribute to a cross-element reference
 `[FACT/REL_NAME/Dim]` (exercises the migrated relationship). POST to
-`/v2/workbooks/spec`. Defers chart/layout/theming idioms to **sigma-workbooks**.
+`/v2/workbooks/spec` — **the body is `document`-wrapped, not flat** (verified live
+2026-08-03, including on `/verify` 2026-08-04): `schemaVersion`/`pages`/`kind`/`layout`
+nest under a top-level `document` key; `folderId` stays outside it. The DM POST above
+is a different surface and stays flat. Defers chart/layout/theming idioms to
+**sigma-workbooks**.
 ```
 python3 scripts/build_workbook.py --workspace gd_workspace.json \
   --data-model-id <dm-uuid> --fact-element <elId> --fact-name <TABLE> \

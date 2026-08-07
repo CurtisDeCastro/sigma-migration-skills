@@ -5,6 +5,13 @@ The exact Sigma workbook-spec shapes the builder (`ts_common.py` /
 Sigma either 400s at POST or **silently degrades** (pivot collapses to one
 cell, KPI fails validation only at POST, sorts dropped).
 
+> **The workbook body is `document`-wrapped, not flat** (verified live 2026-08-03,
+> including on `POST /v2/workbooks/spec/verify` 2026-08-04): `schemaVersion`, `pages`,
+> `kind`, and `layout` all nest under a top-level `document` key; `folderId` stays
+> outside it. The element/column shapes below are unaffected (they're inside
+> `document.pages[].elements[]` either way) — the wrapper only changes the request
+> root. Data-model specs (`POST /v2/dataModels/spec`) remain flat.
+
 ## Chart-kind map
 
 | ThoughtSpot | Sigma | Notes |
@@ -68,7 +75,7 @@ on the master — it propagates into every chart that sources it.
   1:1 rows make bands too short: Sigma suppresses axis category labels and hides
   KPI titles below ~5 grid rows (~150px) — same fix as looker's `ROW_SCALE=2`.
 
-Apply layout as the **LAST** write — a bare spec PUT wipes `spec.layout`
+Apply layout as the **LAST** write — a bare spec PUT wipes `document.layout`
 (strip `workbookId/url/ownerId/created*/updated*/latestDocumentVersion` before
 the PUT; see `apply_layouts.py`).
 

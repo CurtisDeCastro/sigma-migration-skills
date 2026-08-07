@@ -381,7 +381,7 @@ The conversion is gated by `scripts/assert-phase6-ran.rb`, which checks **four**
   <li><strong>Phase 6 ran</strong> — <code>parity-final.json</code> exists with <code>status=PASS</code> at the required pass-rate</li>
   <li><strong>No orphan workbooks</strong> — <code>posted-workbooks.jsonl</code> has ≤ 1 entry, or <code>cleanup-marker.json</code> shows a successful non-dry-run cleanup</li>
   <li><strong>No <code>type=error</code> columns</strong> on the live workbook — catches circular references and runtime errors introduced after the initial POST</li>
-  <li><strong>Real layout applied</strong> — the workbook spec's top-level <code>layout</code> field is non-empty and isn't Sigma's auto-stack signature</li>
+  <li><strong>Real layout applied</strong> — the workbook spec's <code>layout</code> field (nested under the top-level <code>document</code> key as of 2026-08-03 — <code>document.layout</code>, not a bare top-level field) is non-empty and isn't Sigma's auto-stack signature</li>
 </ol>
 
 ```console

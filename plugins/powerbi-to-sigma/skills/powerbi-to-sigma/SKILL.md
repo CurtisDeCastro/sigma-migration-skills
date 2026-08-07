@@ -258,7 +258,7 @@ Then: `tableau-to-sigma/scripts/post-and-readback.rb --type datamodel`. See `ref
   - pie/donut: `color:{id}`, `value:{id}`
   - text: `{kind:text, body:"## ..."}`
   - measure formula wraps the master col: `CountDistinct([Master/Col])`, `Sum([Master/Col])`, date dim `DateTrunc("month",[Master/Col])`.
-- `POST /v2/workbooks/spec` (post-and-readback `--type workbook`). Chart-element shapes mirror `tableau-to-sigma/scripts/build-charts-from-signals.rb`.
+- `POST /v2/workbooks/spec` (post-and-readback `--type workbook`). Chart-element shapes mirror `tableau-to-sigma/scripts/build-charts-from-signals.rb`. **The body is `document`-wrapped, not flat** (verified live 2026-08-03, including on `/verify` 2026-08-04) — `schemaVersion`/`pages`/`kind`/`layout` nest under `document`; `folderId`/`ownerId` stay outside it. `post-and-readback.rb` handles the wrapping; the DM POST in Phase 4 above is unaffected and stays flat. See `refs/spec-fixups.md`.
 
 ## Phase 5c — Coverage report (NEVER silently drop a component)
 The build **never silently drops** what it can't resolve — every drop, downgrade,
@@ -278,7 +278,7 @@ answered with the real number.
 - The recoverable items are **hard-gated** at Phase 5e: `assert-visual-compare.rb --coverage` will not go GREEN until each is recovered or explicitly acknowledged.
 
 ## Phase 5d — Layout (do NOT skip — stacked ≠ done)
-Map each visual's `x,y,w,h` → 24-col grid (`COL_UNIT = page_w/24`, `ROW_UNIT ≈ 30`) → single top-level `layout` XML (one `<Page>` per page, server page IDs) → `tableau-to-sigma/scripts/put-layout.rb`. Math + snap rules in `research/powerbi-visual-layout.md §4`.
+Map each visual's `x,y,w,h` → 24-col grid (`COL_UNIT = page_w/24`, `ROW_UNIT ≈ 30`) → single `document.layout` XML (one `<Page>` per page, server page IDs) → `tableau-to-sigma/scripts/put-layout.rb`. Math + snap rules in `research/powerbi-visual-layout.md §4`.
 
 ## Phase 5e — VISUAL COMPARE vs the SOURCE (MANDATORY — numbers lie about looks)
 Phase 6 proves the NUMBERS; this phase proves the PAGES. A conversion shipped

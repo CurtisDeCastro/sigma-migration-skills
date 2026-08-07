@@ -18,17 +18,26 @@ Row heights are relative units (auto). KPIs are ~6 units tall, charts 12-18 unit
 
 ## Layout XML structure
 
-The layout is a **single top-level field on the workbook spec** — NOT a per-page field.
-It is one XML string containing all pages concatenated, each identified by the server-assigned page ID.
+The layout is a **single field on the workbook spec's `document` object** — NOT a per-page
+field. It is one XML string containing all pages concatenated, each identified by the
+server-assigned page ID.
+
+> Workbook specs require a top-level `document` key wrapping `schemaVersion`/`pages`/`kind`/
+> `layout` (confirmed live 2026-08-03, including on `POST /v2/workbooks/spec/verify`
+> 2026-08-04); only `name`/`folderId`/`ownerId` stay outside it. Data-model specs remain
+> flat — do not wrap those. `layout` lived at the request root before this change; every
+> `spec['layout']` / `spec.layout` reference below means `spec['document']['layout']` now.
 
 ```json
 {
   "name": "My Workbook",
-  "layout": "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<Page type=\"grid\" ...>...</Page>\n<Page ...>...</Page>",
-  "pages": [
-    {"id": "Hn2bYOjeRL", "name": "Overview", "elements": [...]},
-    {"id": "gAPPHE3kaD", "name": "Product",  "elements": [...]}
-  ]
+  "document": {
+    "layout": "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<Page type=\"grid\" ...>...</Page>\n<Page ...>...</Page>",
+    "pages": [
+      {"id": "Hn2bYOjeRL", "name": "Overview", "elements": [...]},
+      {"id": "gAPPHE3kaD", "name": "Product",  "elements": [...]}
+    ]
+  }
 }
 ```
 
@@ -235,22 +244,24 @@ overview_layout = page_xml(
 ```ruby
 # Merge layout into a copy of the current spec, then PUT
 spec = YAML.safe_load(File.read('/tmp/current-spec.yaml'), permitted_classes: [Date, Time])
+doc = Sigma::CodeRep.document(spec)  # tolerates a legacy flat GET too — see shared/lib/code_rep.rb
 
 # Build per-page XML using server-assigned IDs
-pages_by_name = spec['pages'].each_with_object({}) { |p, h| h[p['name']] = p }
+pages_by_name = doc['pages'].each_with_object({}) { |p, h| h[p['name']] = p }
 
 overview_xml  = page_xml(pages_by_name['Overview']['id'],  ...)
 product_xml   = page_xml(pages_by_name['Product']['id'],   ...)
 # ...
 
-# Set ONE top-level layout field — remove any layout from page objects
-spec['pages'].each { |p| p.delete('layout') }
-spec['layout'] = [
+# Set ONE layout field on `document` — remove any layout from page objects
+doc['pages'].each { |p| p.delete('layout') }
+doc['layout'] = [
   "<?xml version=\"1.0\" encoding=\"utf-8\"?>",
   overview_xml,
   product_xml
 ].join("\n")
 
+spec = Sigma::CodeRep.wrap(doc, extra: Sigma::CodeRep.metadata(spec))  # writes always nest
 File.write('/tmp/workbook-with-layout.json', JSON.pretty_generate(spec))
 ```
 
@@ -272,7 +283,7 @@ curl -s -X PUT \
 | Using `"kind": "donut"` | `"Invalid kind: 'donut'"` | The correct kind is `"donut-chart"` — the official example library is wrong here |
 | KPI names invisible or truncated inside container | Inner `gridRow` too small — e.g., `1 / 2` inside a 6-row container | Set inner end value = container outer end value: container `1 / 9` → KPIs `1 / 9` |
 | KPIs appear as a tiny sliver at top of container | Same root cause as above | Same fix — match inner row span to container outer span |
-| Setting `layout` on each page object instead of top-level | PUT returns success but UI shows no layout change | Set `spec['layout']` once at the top level; strip `layout` from all page objects |
+| Setting `layout` on each page object instead of on `document` | PUT returns success but UI shows no layout change | Set `spec['document']['layout']` once; strip `layout` from all page objects |
 | Bare `<Page>` tag without `type`/`id` attributes | Layout ignored silently | Use `<Page type="grid" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto" id="<pageId>">` |
 | Using `measures` instead of `yAxis` on bar/line charts | `"Invalid array: ...yAxis, got undefined"` | Replace `measures` with `yAxis` |
 | KPI missing `value` field | `"Invalid object: ...value, got undefined"` | Add `"value": {"columnId": "<col-id>"}` to every `kpi-chart` element |

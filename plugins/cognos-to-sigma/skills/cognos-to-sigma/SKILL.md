@@ -263,7 +263,9 @@ rebuilds `converter/cli.mjs` (production runs the bundle). This is **enforced** 
 the workbook and re-runs the error-column gate. **`apply-layout.mjs` then gives the page a
 clean 24-col grid** (controls on top, content stacked full-width with per-kind heights) —
 Sigma auto-arrange otherwise squishes every element to the same height. It writes the
-top-level `spec.layout` XML (matched to readback ids) and confirms it survives readback.
+`document.layout` XML (matched to readback ids) and confirms it survives readback — the
+workbook body is `document`-wrapped as of 2026-08-03 (`schemaVersion`/`pages`/`kind`/
+`layout` all nest there; DM specs are unaffected and stay flat).
 **It then runs the shared layout-quality lint as a gate** (`scripts/lib/layout_lint.rb`,
 vendored byte-identical; cognos shells out to ruby) on the final readback spec — flags
 raw-id element display names, controls orphaned outside containers, and generic Sigma

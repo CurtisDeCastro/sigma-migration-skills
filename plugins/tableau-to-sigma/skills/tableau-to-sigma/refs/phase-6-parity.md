@@ -86,7 +86,8 @@ The gate checks five independent things and rejects on any failure:
    was introduced by a later PUT (layout update, spec edit during error
    recovery).
 4. **Layout applied** — fetches `/v2/workbooks/{id}/spec` and rejects
-   when the top-level `layout` field is empty or has fewer than 2
+   when the `layout` field (`document.layout` in the current wrapped spec
+   shape) is empty or has fewer than 2
    `<LayoutElement>` tags. Catches the CoCo regression where the agent
    forgot to PUT a layout and Sigma rendered every tile as a
    single-column stack instead of the dashboard grid.

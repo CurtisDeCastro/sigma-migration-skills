@@ -19,6 +19,12 @@ Signature of a page that needs it (catch on the Phase 5b render): every tile the
 stacked in one column; >40% of the page empty; the title invisible; source viz missing.
 
 ## The composition recipe (verified to render on `/v2/workbooks/{id}/spec` PUT)
+> The workbook spec is `document`-wrapped, not flat: `schemaVersion`/`pages`/`kind`/
+> `layout`/`settings`/`agents` all nest under a top-level `document` key (confirmed live
+> 2026-08-03, including on `/verify` 2026-08-04). The theme is workbook content, so it
+> travels inside `document` too — at `document.settings.theme`, not the request root.
+> Data-model specs are unaffected and stay flat.
+
 1. **Workbook theme** — `document.settings.theme: {name: Light, overrides: {...}}`, with `overrides.borderRadius: round`,
    `overrides.hasCards: hidden` (so *you* control which elements get card chrome), and
    `overrides.categoricalScheme: [...]` — the **only** spec path to donut/pie slice colors (per-element

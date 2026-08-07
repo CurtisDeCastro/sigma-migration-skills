@@ -128,8 +128,11 @@ python3 scripts/build_workbook.py /tmp/look/<dash>.contract.json \
   --out /tmp/look/<dash>.workbook.json
 ```
 Emits a `/v2/workbooks/spec` body: hidden Data page + master table, one element per tile,
-controls from filters, newspaper→24-col layout XML. POST it to `/v2/workbooks/spec` (returns
-YAML → record `workbookId`). **POST once; PUT every later edit** (re-POST leaves orphans).
+controls from filters, newspaper→24-col layout XML — **`document`-wrapped, not flat**
+(verified live 2026-08-03, including on `/verify` 2026-08-04): `schemaVersion`/`pages`/
+`kind`/`layout` nest under a top-level `document` key, `folderId` stays outside it. POST
+it to `/v2/workbooks/spec` (returns YAML → record `workbookId`). **POST once; PUT every
+later edit** (re-POST leaves orphans).
 
 ## 5. Verify parity (3-way) — MANDATORY (scripted hard gate)
 

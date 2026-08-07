@@ -212,7 +212,8 @@ Duration: 3
   `[Custom SQL/<RAW_ALIAS>]`.
 - **Tables aggregate via `groupings`** (`groupBy` + `calculations`); bar/line via
   `xAxis`/`yAxis`; pie/donut via `value`+`color`; combo via dual-axis `yAxis.columnIds`.
-- **Workbook layout** is a separate top-level XML step (1-based grid lines).
+- **Workbook layout** is a separate `document.layout` XML step (1-based grid lines) —
+  the workbook body is `document`-wrapped as of 2026-08-03; see `refs/sigma-build-gotchas.md`.
 - **Building Qlik fixtures:** charts created via the API render only as `auto-chart`
   (concrete `bar`/`line`/`pie` come up blank); sheets must be UI-created (or impersonated)
   to list in the hub; copy an app to clone its data without a reload.

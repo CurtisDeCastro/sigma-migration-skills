@@ -305,7 +305,11 @@ combo/table elements translated from each object's hypercube (kinds, labels, num
 formats, sorts, null-suppression — see the script docstring for the full mapping).
 The Qlik cell grid maps 1:1 onto the 24-col Sigma grid. Element shapes + the
 `source.dataModelId` requirement in `refs/sigma-build-gotchas.md`.
-POST `/v2/workbooks/spec`, then `scripts/vendor/put-layout.rb` applies the layout XML.
+POST `/v2/workbooks/spec` — **`document`-wrapped, not flat** (verified live 2026-08-03,
+including on `/verify` 2026-08-04): `schemaVersion`/`pages`/`kind`/`layout` nest under a
+top-level `document` key, `folderId` stays outside it; the DM POST above is unaffected
+and stays flat — then `scripts/vendor/put-layout.rb` applies the layout XML
+(`document.layout`).
 
 **DM metric references (leverage the semantic layer, don't duplicate it).** A measure
 column prefers a governed **`[Metrics/<name>]`** reference over re-deriving the aggregation

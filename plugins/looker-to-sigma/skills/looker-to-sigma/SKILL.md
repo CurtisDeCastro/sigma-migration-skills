@@ -668,6 +668,11 @@ emits a `/v2/workbooks/spec` body:
 - **controls** from the dashboard filters,
 - a **newspaper → 24-col grid layout** XML string.
 
+> **The body above is `document`-wrapped, not flat** (verified live 2026-08-03, including
+> on `POST /v2/workbooks/spec/verify` 2026-08-04): `schemaVersion`, `pages`, `kind`, and
+> `layout` all nest under a top-level `document` key; only `folderId` stays outside it.
+> The Phase-2 DM POST (`/v2/dataModels/spec`) is a different surface and remains flat.
+
 Tile-type, filter-type, and layout maps are in `refs/dashboard-contract.md` and
 `refs/looker-dashboard-layout.md` — **do not duplicate them; defer there.** Summary:
 
