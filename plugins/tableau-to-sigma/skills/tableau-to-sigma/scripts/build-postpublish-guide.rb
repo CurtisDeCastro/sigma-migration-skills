@@ -529,6 +529,13 @@ module PostpublishGuide
         'trigger'   => activation_of(a),
         'fields'    => [field_caption(src_field, lut)].compact,
         'targets'   => [{ 'name' => field_caption(tgt_param, lut), 'parameter' => true }],
+        # RAW refs, alongside the human captions above. field_caption strips the
+        # derivation qualifier (none:X:nk) and tidies the name, which is right
+        # for rendering and useless for resolution — emission needs to map the
+        # Tableau field to an emitted Sigma columnId, and the caption cannot do
+        # that. Additive: every rendered surface still reads `fields`/`targets`.
+        'sourceFieldRef'     => src_field,
+        'targetParameterRef' => tgt_param,
         'ui_steps'  => '',   # filled in by the wb-ids pass / renderer
         'notes'     => []
       }
@@ -855,8 +862,8 @@ module PostpublishGuide
         e['ui_steps'] =
           if ctl
             "Already replicated: the Sigma control '#{ctl}' replaces parameter '#{pname}' — " \
-            'clicking the control sets the same value. The click-driven flavor ' \
-            '(chart-click-sets-control) is on the Sigma UI roadmap; control-click is the equivalent today.'
+            'clicking the control sets the same value. Click-to-set is auto-wired when the ' \
+            'source column resolves; otherwise set the control by hand.'
           else
             # No exact-name control match; when wb-ids resolves the source
             # dashboard to a page, name that page's controls as candidates so
@@ -868,8 +875,8 @@ module PostpublishGuide
               hint = " (page '#{src['sigma_page']}' has controls: #{cap_list(cands, 5)})" unless cands.empty?
             end
             "The conversion normally replicates this parameter as a control — check the published " \
-            "workbook for a control replacing '#{pname}'#{hint}. The click-driven flavor " \
-            '(chart-click-sets-control) is on the Sigma UI roadmap; control-click is the equivalent today.'
+            "workbook for a control replacing '#{pname}'#{hint}. Click-to-set is auto-wired when the " \
+            'source column resolves; otherwise set the control by hand.'
           end
       end
     end
