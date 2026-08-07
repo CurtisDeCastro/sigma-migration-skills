@@ -83,6 +83,7 @@ module Sigma
         return doc unless elements.is_a?(Array) && pages.is_a?(Array)
         return doc if pages.any? { |page| page['elements'].is_a?(Array) }
         return doc if pages.empty?
+        return doc.reject { |key, _| key == 'elements' } if elements.empty?
 
         page_ids_by_element = {}
         doc['layout'].to_s.scan(
