@@ -17,15 +17,15 @@ module ActionColumnResolver
 
   # ref:             raw Tableau ref, e.g. "[federated.f1].[none:Calculation_100:nk]"
   # mmap:            the master map (regex string => {'name' => <sigma column>})
-  # columns_by_guid: internal calc name => friendly caption
+  # columns_by_guid: internal calc name => { 'caption' => <friendly caption>, ... }
   def resolve(ref:, mmap:, columns_by_guid:)
     inner = strip_qualifier(ref)
     return nil if inner.nil?
 
     # An internal calc name (Calculation_NNN, optionally blend-suffixed " 1")
     # is never a master-map key — bridge it to its friendly caption first.
-    caption = columns_by_guid[inner] ||
-              columns_by_guid[inner.sub(/\s+\d+\z/, '')] ||
+    caption = (columns_by_guid[inner].is_a?(Hash) && columns_by_guid[inner]['caption']) ||
+              (columns_by_guid[inner.sub(/\s+\d+\z/, '')].is_a?(Hash) && columns_by_guid[inner.sub(/\s+\d+\z/, '')]['caption']) ||
               inner
 
     info = match_column(caption, mmap)

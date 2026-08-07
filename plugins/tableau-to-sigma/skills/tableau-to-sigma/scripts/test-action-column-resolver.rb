@@ -13,7 +13,7 @@ end
 
 MMAP = { '(?i)^region$' => { 'name' => 'Region' },
          '(?i)^metric button$' => { 'name' => 'Metric Button' } }.freeze
-GUIDS = { 'Calculation_100' => 'Metric Button' }.freeze
+GUIDS = { 'Calculation_100' => { 'caption' => 'Metric Button' } }.freeze
 
 puts '== Plain federated refs ================================================='
 check(ActionColumnResolver.resolve(ref: '[federated.abc].[none:Region:nk]',
@@ -35,6 +35,13 @@ check(ActionColumnResolver.resolve(ref: nil, mmap: MMAP, columns_by_guid: {}).ni
       'a nil ref resolves to nil')
 check(ActionColumnResolver.resolve(ref: '', mmap: MMAP, columns_by_guid: {}).nil?,
       'an empty ref resolves to nil')
+
+puts '== Degradation: flat-String columns_by_guid does not raise ============='
+flat_guids = { 'Calculation_100' => 'Metric Button' }
+result = ActionColumnResolver.resolve(ref: '[federated.f1].[none:Calculation_100:nk]',
+                                      mmap: MMAP, columns_by_guid: flat_guids)
+check(result.nil? || result == 'Calculation_100',
+      'flat-String columns_by_guid value degrades to nil or the inner name')
 
 puts
 if $fails.empty?
