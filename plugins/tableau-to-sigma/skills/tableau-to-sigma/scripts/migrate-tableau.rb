@@ -1451,9 +1451,19 @@ if opts[:finalize]
     puts 'parameter actions, dynamic zones, drills) that workbooks-as-code CANNOT port.'
     puts 'The user must be handed exact Sigma UI steps for each — generate the guide,'
     puts 'then re-run this exact --finalize command:'
+    # `--emitted-manifest` is the actions-emitted sidecar build-charts-from-signals.rb
+    # writes next to its --out (always 'chart-specs.json' in this orchestrator —
+    # see the build_cmd assembly above); derived with the SAME
+    # .sub(/\.json$/, '-actions-emitted.json') build-charts-from-signals.rb itself
+    # uses to write it, not a separately-guessed filename. Without this flag the
+    # guide can't tell an auto-wired nav-button apart from one still needing
+    # manual wiring, and will wrongly re-instruct the user to redo it by hand.
+    manifest_path = File.join(WORK, 'chart-specs.json').sub(/\.json$/, '-actions-emitted.json')
     puts "    ruby scripts/build-postpublish-guide.rb --twb #{File.join(WORK, 'workbook-content.twb')} \\"
     puts "      --wb-ids #{File.join(WORK, 'wb-ids.json')} --out #{File.join(WORK, 'POSTPUBLISH_GUIDE.md')} \\"
-    puts "      --json-out #{File.join(WORK, 'postpublish-guide.json')}"
+    puts "      --emitted-manifest #{manifest_path} \\"
+    # CONTRACTUAL path — gate 11 (a later task) reads exactly <workdir>/action-ledger.json.
+    puts "      --json-out #{File.join(WORK, 'action-ledger.json')}"
     puts 'LINK the guide in your migration report and walk the user through it.'
     puts 'Waivable ONLY via --skip-postpublish-guide "<reason>" — name it in the report.'
     puts '============================================================================='
@@ -5557,9 +5567,17 @@ puts 'INTERACTIVITY: generate the post-publish handoff guide — dashboard actio
 puts '              buttons, dynamic zones, drills, and tooltips cannot ride the spec;'
 puts '              the guide walks the user through adding each in the Sigma UI'
 puts '              (gate 11 at --finalize REQUIRES the file when the source has actions):'
+# Same derivation as the exitstatus==16 advisory above — recomputed locally
+# (not read off `charts_path`) since this print site is reached from a
+# different point in the run than that one; deriving it fresh from the same
+# fixed 'chart-specs.json' --out name build-charts-from-signals.rb was
+# actually invoked with, rather than assuming a variable from elsewhere in
+# the script is in scope, keeps both sites correct independently.
+manifest_path2 = File.join(WORK, 'chart-specs.json').sub(/\.json$/, '-actions-emitted.json')
 puts "                ruby scripts/build-postpublish-guide.rb --twb #{File.join(WORK, 'workbook-content.twb')} \\"
 puts "                  --wb-ids #{File.join(WORK, 'wb-ids.json')} --out #{File.join(WORK, 'POSTPUBLISH_GUIDE.md')} \\"
-puts "                  --json-out #{File.join(WORK, 'postpublish-guide.json')}"
+puts "                  --emitted-manifest #{manifest_path2} \\"
+puts "                  --json-out #{File.join(WORK, 'action-ledger.json')}"
 puts '              LINK the guide in your migration report and walk the user through it.'
 finalize_cmd = "  ruby scripts/migrate-tableau.rb #{opts[:wb_id] ? "--workbook-id #{opts[:wb_id]}" : "--workbook \"#{opts[:wb_name]}\""}" \
                "#{opts[:out] ? " --out #{WORK}" : ''} \\\n    --finalize --actuals #{File.join(WORK, 'parity-actuals.json')}"

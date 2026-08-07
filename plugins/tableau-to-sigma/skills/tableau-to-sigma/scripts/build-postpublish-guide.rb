@@ -27,7 +27,8 @@
 #     --twb  /tmp/<name>/workbook-content.twb \
 #     --out  /tmp/<name>/POSTPUBLISH_GUIDE.md \
 #     [--wb-ids   /tmp/<name>/wb-ids.json]        # name real Sigma elements/pages
-#     [--json-out /tmp/<name>/postpublish-guide.json]
+#     [--emitted-manifest /tmp/<name>/chart-specs-actions-emitted.json]  # what build-charts-from-signals.rb already auto-wired
+#     [--json-out /tmp/<name>/action-ledger.json]  # CONTRACTUAL path — gate 11 reads <workdir>/action-ledger.json
 #     [--sigma-url https://app.sigmacomputing.com/.../workbook/...]
 #
 # What gets parsed (structures verified against a 10-workbook live migration:
