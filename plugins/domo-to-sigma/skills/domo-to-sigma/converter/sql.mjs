@@ -1,4 +1,4 @@
-// ../../../../sigma-data-model-mcp/.git-wt/main-vendor/build/sigma-ids.js
+// ../wt-mcp-adddate/build/sigma-ids.js
 var NS_MODULUS = 62 ** 4;
 var SIGMA_LOWERCASE_WORDS = /* @__PURE__ */ new Set([
   "a",
@@ -58,7 +58,7 @@ Groupings (for LOD / different aggregation levels):
   Array order = nesting hierarchy. Use child elements for LOD patterns.
 `.trim();
 
-// ../../../../sigma-data-model-mcp/.git-wt/main-vendor/build/formulas.js
+// ../wt-mcp-adddate/build/formulas.js
 function decodeXmlEntities(s) {
   if (!s || s.indexOf("&") === -1)
     return s;
@@ -377,16 +377,22 @@ function _splitTopLevelArgs(s) {
         quote = "";
       continue;
     }
-    if (c === "'" || c === '"') {
-      quote = c;
+    if (c === "[") {
+      bracket = true;
       cur += c;
       continue;
     }
-    if (c === "[")
-      bracket = true;
-    else if (c === "]")
+    if (c === "]") {
       bracket = false;
+      cur += c;
+      continue;
+    }
     if (!bracket) {
+      if (c === "'" || c === '"') {
+        quote = c;
+        cur += c;
+        continue;
+      }
       if (c === "(")
         depth++;
       else if (c === ")")
@@ -439,6 +445,83 @@ function _rewriteMysqlDateDiff(expr) {
       out += `DateDiff("${unit}", ${start}, ${end})`;
     } else {
       out += `${rest.slice(m.index, open + 1)}${_rewriteMysqlDateDiff(inner)})`;
+    }
+    rest = rest.slice(close + 1);
+  }
+  return out;
+}
+var _MYSQL_ADD_SPEC = {
+  ADDDATE: { unit: "day", negate: false },
+  SUBDATE: { unit: "day", negate: true },
+  DATE_ADD: { unit: "day", negate: false },
+  DATE_SUB: { unit: "day", negate: true }
+};
+var _MYSQL_INTERVAL_UNIT = {
+  SECOND: "second",
+  MINUTE: "minute",
+  HOUR: "hour",
+  DAY: "day",
+  WEEK: "week",
+  MONTH: "month",
+  QUARTER: "quarter",
+  YEAR: "year"
+};
+function _negateAmount(amount) {
+  const t = amount.trim();
+  const num = t.match(/^([+-]?)(\d+(?:\.\d+)?)$/);
+  if (num)
+    return num[1] === "-" ? num[2] : `-${num[2]}`;
+  return `-(${t})`;
+}
+function _rewriteMysqlDateAdd(expr) {
+  const NAME = /\b(ADDDATE|SUBDATE|DATE_ADD|DATE_SUB)\s*\(/i;
+  let out = "", rest = expr;
+  for (; ; ) {
+    const m = NAME.exec(rest);
+    if (!m) {
+      out += rest;
+      break;
+    }
+    const open = m.index + m[0].length - 1;
+    let depth = 0, close = -1;
+    for (let i = open; i < rest.length; i++) {
+      if (rest[i] === "(")
+        depth++;
+      else if (rest[i] === ")") {
+        depth--;
+        if (depth === 0) {
+          close = i;
+          break;
+        }
+      }
+    }
+    if (close === -1) {
+      out += rest;
+      break;
+    }
+    const inner = rest.slice(open + 1, close);
+    const args = _splitTopLevelArgs(inner);
+    out += rest.slice(0, m.index);
+    const spec = _MYSQL_ADD_SPEC[m[1].toUpperCase()];
+    let unit = spec.unit;
+    let amount = null;
+    if (args.length === 2) {
+      const iv = args[1].trim().match(/^INTERVAL\s+(.+?)\s+([A-Za-z_]+)\s*$/i);
+      if (iv) {
+        const mapped = _MYSQL_INTERVAL_UNIT[iv[2].toUpperCase()];
+        if (mapped) {
+          unit = mapped;
+          amount = _rewriteMysqlDateAdd(iv[1]).trim();
+        }
+      } else {
+        amount = _rewriteMysqlDateAdd(args[1]).trim();
+      }
+    }
+    if (amount !== null) {
+      const date = _rewriteMysqlDateAdd(args[0]).trim();
+      out += `DateAdd("${unit}", ${spec.negate ? _negateAmount(amount) : amount}, ${date})`;
+    } else {
+      out += `${rest.slice(m.index, open + 1)}${_rewriteMysqlDateAdd(inner)})`;
     }
     rest = rest.slice(close + 1);
   }
@@ -664,16 +747,62 @@ function lookConvertCase(expr) {
   let result = elseVal !== null ? convertLeaf(elseVal, true) : "null";
   if (result === null)
     return null;
+  const conv = new Array(branches.length);
   for (let i = branches.length - 1; i >= 0; i--) {
     const sigmaCond = convertLeaf(branches[i].cond, false);
     const sigmaVal = convertLeaf(branches[i].val, true);
     if (sigmaCond === null || sigmaVal === null)
       return null;
-    result = `If(${sigmaCond}, ${sigmaVal}, ${result})`;
+    conv[i] = { cond: sigmaCond, val: sigmaVal };
+  }
+  const flat = _flattenToSwitch(conv, result);
+  if (flat !== null)
+    return _isBalanced(flat) ? flat : null;
+  for (let i = conv.length - 1; i >= 0; i--) {
+    result = `If(${conv[i].cond}, ${conv[i].val}, ${result})`;
   }
   if (!_isBalanced(result))
     return null;
   return result;
+}
+var _SWITCH_MIN_BRANCHES = 45;
+var _SWITCH_LITERAL_RE = /^(?:"(?:[^"]|"")*"|-?\d+(?:\.\d+)?)$/;
+function _flattenToSwitch(conv, elseVal) {
+  if (conv.length < _SWITCH_MIN_BRANCHES)
+    return null;
+  let subject = null;
+  const pairs = [];
+  for (const { cond, val } of conv) {
+    let subj = null;
+    let matches = null;
+    const eq = /^(.+?)\s*=\s*(.+)$/.exec(cond);
+    if (eq && !/[<>!=]$/.test(eq[1].trim()) && _SWITCH_LITERAL_RE.test(eq[2].trim())) {
+      subj = eq[1].trim();
+      matches = [eq[2].trim()];
+    } else {
+      const inm = /^In\(([\s\S]*)\)$/i.exec(cond.trim());
+      if (inm) {
+        const args = _splitTopLevelArgs(inm[1]);
+        if (args.length >= 2) {
+          subj = args[0].trim();
+          matches = args.slice(1).map((a) => a.trim());
+        }
+      }
+    }
+    if (subj === null || matches === null || matches.length === 0)
+      return null;
+    if (!matches.every((m) => _SWITCH_LITERAL_RE.test(m)))
+      return null;
+    if (subject === null)
+      subject = subj;
+    else if (subject !== subj)
+      return null;
+    for (const m of matches)
+      pairs.push(`${m}, ${val}`);
+  }
+  if (subject === null)
+    return null;
+  return `Switch(${subject}, ${pairs.join(", ")}, ${elseVal})`;
 }
 function lookConvertMathExpr(expr) {
   expr = expr.replace(/NULLIF\s*\(([A-Z_][A-Z0-9_]*)\s*,\s*([^)]+)\)/gi, (_, col, val) => `If(${lookColRef(col)} = ${val.trim()}, null, ${lookColRef(col)})`);
@@ -817,6 +946,7 @@ function lookConvertExpression(expr) {
   const { masked, lits } = _maskLiterals(cd.masked);
   expr = masked;
   expr = _rewriteMysqlDateDiff(expr);
+  expr = _rewriteMysqlDateAdd(expr);
   const ec = _convertNestedCases(expr, lits, "leave-raw", cd.args);
   expr = ec.text;
   expr = expr.replace(/\b([A-Z_][A-Z0-9_]*)\s*(?=\()/gi, (match, fn) => {
@@ -869,7 +999,8 @@ function _sigmaPassthrough() {
   return names;
 }
 function lookUnknownFunctions(sql) {
-  const { masked } = _maskLiterals(sql);
+  const { masked: rawMasked } = _maskLiterals(sql);
+  const masked = _rewriteMysqlDateAdd(_rewriteMysqlDateDiff(rawMasked));
   const passthrough = _sigmaPassthrough();
   const seen = /* @__PURE__ */ new Set();
   for (const m of masked.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)\s*(?=\()/g)) {
