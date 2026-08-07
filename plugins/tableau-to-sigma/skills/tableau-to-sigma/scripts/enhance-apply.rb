@@ -50,6 +50,7 @@ require 'optparse'
 HERE = __dir__
 $LOAD_PATH.unshift File.expand_path('lib', HERE)
 require 'sigma_rest'
+require 'code_rep'
 
 opts = { probes: 3 }
 OptionParser.new do |o|
@@ -97,6 +98,25 @@ def clean(spec)
   s = JSON.parse(JSON.generate(spec))
   READONLY_KEYS.each { |k| s.delete(k) }
   s
+end
+
+# Workbook code-rep nests pages/layout/schemaVersion/kind under a top-level
+# `document` key (live since 2026-08-03/04). Every helper below this point
+# (ensure_banded!, apply_patch!, find_element, etc.) was written against the
+# pre-nesting flat shape and freely mixes document fields (spec['pages'],
+# spec['layout']) with metadata (spec['name']) on the SAME hash — so rather
+# than threading two hashes through a dozen functions, flatten a live GET back
+# onto one hash and keep that as the single working `current` spec throughout.
+# Sigma::CodeRep.metadata/.document partition any hash with no risk of
+# collision (metadata explicitly excludes the document keys), so this round-
+# trips losslessly. Pair with wrap_spec below at every PUT boundary.
+def flatten_spec(raw)
+  Sigma::CodeRep.metadata(raw).merge(Sigma::CodeRep.document(raw))
+end
+
+# Inverse of flatten_spec — re-nest a flattened working spec for the wire.
+def wrap_spec(flat)
+  Sigma::CodeRep.wrap(Sigma::CodeRep.document(flat), extra: Sigma::CodeRep.metadata(flat))
 end
 
 # Sigma's workbook POST/PUT responses can come back as YAML — parse leniently.
@@ -729,7 +749,12 @@ end
 # ---------------------------------------------------------------------------
 orig_meta_before = Sigma.request(:get, "/v2/workbooks/#{ORIG_WB}")
 orig_spec = Sigma.request(:get, "/v2/workbooks/#{ORIG_WB}/spec")
-abort "FATAL: cannot read spec of #{ORIG_WB}" unless orig_spec.is_a?(Hash) && orig_spec['pages']
+# orig_spec stays the RAW (possibly document-nested) GET response — it is
+# POSTed close to verbatim below (clean() only strips top-level readonly
+# keys, leaving a `document` key untouched), and POST /v2/workbooks/spec
+# requires that nesting. orig_doc is the unwrapped view used for reads only.
+orig_doc = Sigma::CodeRep.document(orig_spec)
+abort "FATAL: cannot read spec of #{ORIG_WB}" unless orig_spec.is_a?(Hash) && orig_doc['pages']
 clone_name = opts[:name] || "#{orig_spec['name']} — Enhanced"
 
 clone_spec = clean(orig_spec)
@@ -745,7 +770,7 @@ puts "enhance-apply: clone '#{clone_name}' = #{clone_id} (original #{ORIG_WB} un
 # ---------------------------------------------------------------------------
 all_touched = accepted.flat_map { |c| touched_ids(c) }
 viz_kinds = %w[bar-chart line-chart area-chart pie-chart combo-chart scatter-chart kpi-chart table pivot-table]
-probe_pool = (orig_spec['pages'] || []).reject { |p| p['id'] == 'page-data' }
+probe_pool = (orig_doc['pages'] || []).reject { |p| p['id'] == 'page-data' }
                                        .flat_map { |p| p['elements'] || [] }
                                        .select { |e| viz_kinds.include?(e['kind']) }
                                        .reject { |e| all_touched.include?(e['id']) }
@@ -773,12 +798,16 @@ puts "   baseline: clone == original on #{probes.size}/#{probes.size} probe(s)"
 # ---------------------------------------------------------------------------
 # 3. Apply accepted items ONE AT A TIME with the parity-unchanged gate.
 # ---------------------------------------------------------------------------
+# `spec` here is the FLATTENED working document (flatten_spec below) — wrap
+# it back into the live nested shape right at the wire boundary so every
+# helper upstream (ensure_banded!, apply_patch!, find_element, ...) keeps
+# reading/writing spec['pages']/spec['layout']/spec['name'] on one flat hash.
 def put_spec(wb, spec)
   lenient(Sigma.request(:put, "/v2/workbooks/#{wb}/spec",
-                        body: JSON.generate(spec), binary: true))
+                        body: JSON.generate(wrap_spec(spec)), binary: true))
 end
 
-current = clean(Sigma.request(:get, "/v2/workbooks/#{clone_id}/spec"))
+current = flatten_spec(clean(Sigma.request(:get, "/v2/workbooks/#{clone_id}/spec")))
 
 # Pre-container clone? (parity workbook built before banded layouts existed.)
 # Regenerate a banded layout FIRST so every applied item has a container
@@ -786,7 +815,7 @@ current = clean(Sigma.request(:get, "/v2/workbooks/#{clone_id}/spec"))
 # parity probes are unaffected by construction.
 if ensure_banded!(current)
   put_spec(clone_id, current)
-  current = clean(Sigma.request(:get, "/v2/workbooks/#{clone_id}/spec"))
+  current = flatten_spec(clean(Sigma.request(:get, "/v2/workbooks/#{clone_id}/spec")))
   puts '   clone layout predates containers — regenerated banded layout (header + row bands)'
 end
 
@@ -848,7 +877,11 @@ end
 # must lint CLEAN — a parity-green visual mess is exactly the regression this
 # phase exists to prevent.
 require 'layout_lint'
-live_spec = clean(Sigma.request(:get, "/v2/workbooks/#{clone_id}/spec"))
+# layout_lint/control_lint keep their existing contract ("give me a plain
+# document") — unwrap/flatten at this caller rather than teaching the libs
+# about the document wrapper (they're also fed local pre-POST specs
+# elsewhere, which never carry one).
+live_spec = flatten_spec(clean(Sigma.request(:get, "/v2/workbooks/#{clone_id}/spec")))
 lint_violations = LayoutLint.lint(live_spec)
 if lint_violations.any?
   warn "enhance-apply FINALIZE FAIL — layout lint: #{lint_violations.size} violation(s) on the clone:"

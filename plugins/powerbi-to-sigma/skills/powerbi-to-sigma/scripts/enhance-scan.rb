@@ -58,6 +58,7 @@ require 'optparse'
 HERE = __dir__
 $LOAD_PATH.unshift File.expand_path('lib', HERE)
 require 'sigma_rest'
+require 'code_rep'
 
 opts = { max_exports: 12 }
 OptionParser.new do |o|
@@ -92,8 +93,14 @@ source ||= 'unknown'
 # ---------------------------------------------------------------------------
 # Load the live spec + export element data (read-only).
 # ---------------------------------------------------------------------------
-spec = Sigma.request(:get, "/v2/workbooks/#{WB}/spec")
-abort "FATAL: could not read spec for workbook #{WB}" unless spec.is_a?(Hash) && spec['pages']
+# Workbook code-rep nests pages/layout/schemaVersion/kind under a top-level
+# `document` key (live since 2026-08-03/04); flatten metadata (name, etc.)
+# and document content back onto one hash so every existing spec['...'] read
+# below (mixing both) keeps working unchanged. Read-only file — no PUT here,
+# so there is no wrap-back to worry about.
+raw_spec = Sigma.request(:get, "/v2/workbooks/#{WB}/spec")
+spec = Sigma::CodeRep.metadata(raw_spec).merge(Sigma::CodeRep.document(raw_spec))
+abort "FATAL: could not read spec for workbook #{WB}" unless raw_spec.is_a?(Hash) && spec['pages']
 wb_name = spec['name'].to_s
 
 VIZ_KINDS = %w[bar-chart line-chart area-chart pie-chart combo-chart scatter-chart].freeze

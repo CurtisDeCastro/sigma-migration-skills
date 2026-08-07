@@ -609,6 +609,7 @@ else
   $LOAD_PATH.unshift File.expand_path('lib', __dir__)
   require 'sigma_rest'
   require 'export_pool'
+  require 'code_rep'
 
   # ONE deadline for the entire run (issue #416: --timeout used to bound only
   # the per-element poll wait, so total runtime was unbounded). Computed here,
@@ -629,13 +630,22 @@ else
     end
 
   body = Sigma.request(:get, "/v2/workbooks/#{wb}/spec", accept: 'text/yaml')
-  spec = begin
+  raw_spec = begin
     JSON.parse(body)
   rescue JSON::ParserError, TypeError
     require 'yaml'
     require 'date'
     body.is_a?(Hash) ? body : (YAML.safe_load(body.to_s, permitted_classes: [Date, Time]) || {})
   end
+  # Workbook code-rep nests pages/layout/schemaVersion/kind under a top-level
+  # `document` key (live since 2026-08-03/04). Flatten metadata (workbookId,
+  # latestDocumentVersion, ...) and document content onto one hash: this file
+  # reads BOTH off `spec` below (elements from spec['pages'], the doc version
+  # from spec['latestDocumentVersion'] via ExportPool.resolve_doc_version, the
+  # workbook id from spec['workbookId']) and mutates elements in place for the
+  # pivot-totals strip/restore bracket, so one flat hash keeps every existing
+  # read/mutation site below working unchanged. put_spec re-nests at the wire.
+  spec = Sigma::CodeRep.metadata(raw_spec).merge(Sigma::CodeRep.document(raw_spec))
   elements = (spec['pages'] || []).flat_map { |p| p['elements'] || [] }
   queryable = elements.reject { |el| %w[control text image container].include?(el['kind'].to_s) }
 
@@ -650,7 +660,8 @@ else
   # step. Read-only spec fields are stripped before each PUT (Sigma rejects them).
   READONLY_SPEC_KEYS = %w[workbookId url ownerId createdBy updatedBy createdAt updatedAt latestDocumentVersion].freeze
   put_spec = lambda do |s|
-    body = s.reject { |k, _| READONLY_SPEC_KEYS.include?(k) }
+    meta = Sigma::CodeRep.metadata(s).reject { |k, _| READONLY_SPEC_KEYS.include?(k) }
+    body = Sigma::CodeRep.wrap(Sigma::CodeRep.document(s), extra: meta)
     Sigma.request(:put, "/v2/workbooks/#{wb}/spec", body: JSON.generate(body))
   end
   captured_totals = {}
