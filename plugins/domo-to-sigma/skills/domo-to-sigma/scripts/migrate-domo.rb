@@ -906,6 +906,23 @@ def run_live!(opts)
                     "collector failed (expected exit #{code_e}, actuals exit #{code_a}) — " \
                     'refusing to build a partial plan')
       end
+      # build-parity-exclusions.rb (#649) FIRST, so its construction-level
+      # exclusions exist before the join reads them. The two are complementary:
+      # #649 excludes tiles that can never agree (a refused date window — Domo
+      # aggregates over a window the Sigma tile lacks), while the join excludes
+      # tiles it could not COLLECT. Both write parity-plan-exclusions.json, so
+      # order decides who wins: run the join first and #649 overwrites its
+      # exclusions, after which the census sees collection-failed tiles as
+      # neither verified nor excluded and dies (exit 5). Run #649 first and the
+      # join carries its entries through, honouring them over verification —
+      # which matters, because such a tile IS collectable and would otherwise be
+      # "verified" into a guaranteed DIVERGE that says nothing about fidelity.
+      ok_x, code_x, _x = run_script!('build-parity-exclusions.rb', '--workdir', OUT)
+      fail_phase!('parity-oracle',
+                  "build-parity-exclusions.rb exited #{code_x} — either the runaway guard " \
+                  'tripped (fix the converter, do not widen exclusions) or the artifact is ' \
+                  'unreadable; continuing would hand the join a stale exclusions file') unless ok_x
+
       ok_j, code_j, _j = run_script!('build-parity-oracle.rb', '--workdir', OUT)
       fail_phase!('parity-oracle', "build-parity-oracle.rb exited #{code_j}") unless ok_j
       oracle_plan = File.join(OUT, 'parity-plan-verified.json')
@@ -944,8 +961,22 @@ def run_live!(opts)
     # A non-zero exit here is FATAL, not advisory: it means either the runaway
     # guard tripped (fix the converter) or the artifact is unreadable — and
     # continuing would hand the census a stale or absent exclusions file.
-    ok, code, _out = run_script!('build-parity-exclusions.rb', '--workdir', OUT)
-    fail_phase!('verify-parity', "build-parity-exclusions.rb exited #{code}") unless ok
+    #
+    # SKIPPED when the oracle already ran it. The oracle path invokes this
+    # generator BEFORE the join so the join can carry its entries through
+    # (build-parity-oracle.rb honours prior exclusions over verification).
+    # Re-running it here would rewrite the file from warnings.json alone and
+    # discard every collection-failure exclusion the join added — after which the
+    # census sees those tiles as neither verified nor excluded and dies (exit 5).
+    # This branch therefore only serves the hand-supplied --parity-plan path,
+    # where no oracle ran and nothing else writes the file.
+    if oracle_plan
+      log 'exclusions: already generated before the oracle join (not re-running — it would ' \
+          'discard the join\'s collection-failure exclusions)'
+    else
+      ok, code, _out = run_script!('build-parity-exclusions.rb', '--workdir', OUT)
+      fail_phase!('verify-parity', "build-parity-exclusions.rb exited #{code}") unless ok
+    end
 
     ok, code, _out = run_script!('phase6-parity-domo.rb',
                                   '--workdir', OUT,

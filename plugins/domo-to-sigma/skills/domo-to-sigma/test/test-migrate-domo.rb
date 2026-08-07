@@ -148,6 +148,23 @@ ok(migrate_src.include?("'collect-parity-actuals.rb'"),
 ok(migrate_src.include?("'build-parity-oracle.rb'"),
    'oracle: run_live! joins the two sides into a verify-parity plan')
 
+# ORDER IS LOAD-BEARING between the two exclusions writers (#649's generator and
+# the join). Both write parity-plan-exclusions.json:
+#   #649  excludes tiles that cannot agree BY CONSTRUCTION (refused date window)
+#   join  excludes tiles it could not COLLECT
+# Run the join first and #649 overwrites its entries, after which the census sees
+# collection-failed tiles as neither verified nor excluded and dies (exit 5). Run
+# #649 first and the join carries them through, honouring them over verification
+# — which matters because such a tile IS collectable and would otherwise be
+# "verified" into a guaranteed DIVERGE that says nothing about fidelity.
+excl_gen_at = migrate_src.index("'build-parity-exclusions.rb'")
+join_at = migrate_src.index("'build-parity-oracle.rb'")
+ok(excl_gen_at && join_at && excl_gen_at < join_at,
+   'oracle: the exclusions generator runs BEFORE the join, so the join can carry its entries through')
+ok(migrate_src.include?('if oracle_plan') &&
+   migrate_src.match?(/exclusions: already generated before the oracle join/),
+   'oracle: the generator is NOT re-run after the join (that would discard the join\'s exclusions)')
+
 # DEFAULT-ON, not opt-in. The condition must fire when NO --parity-plan was
 # given; if someone flips this to require an opt-in flag, the default path goes
 # back to being unable to reach gold.

@@ -37,6 +37,7 @@
 # date boundary is refused rather than silently scored as a divergence. The gold
 # audit flagged this for 28 of the 36 cards.
 require 'json'
+require 'set'
 require 'optparse'
 require 'time'
 
@@ -96,6 +97,22 @@ def card_id_for(element_id)
   [m[1], !m[2].nil?]
 end
 
+# PRIOR exclusions, loaded BEFORE the loop and honoured over verification.
+#
+# build-parity-exclusions.rb (#649) excludes tiles that cannot agree BY
+# CONSTRUCTION — today, a refused date window: Domo aggregates over a window the
+# Sigma tile does not have. Such a tile is still present in parity-plan.json (the
+# plan lists every chartable element), and both its sides are perfectly
+# collectable — so without this check the oracle would happily "verify" it and
+# score a guaranteed DIVERGE that says nothing about conversion quality. The
+# construction-level reason is the more fundamental one, so it wins.
+prior_excl = {}
+if File.exist?(excl_path)
+  doc = (JSON.parse(File.read(excl_path)) rescue nil)
+  list = doc.is_a?(Hash) ? Array(doc['exclusions']) : Array(doc)
+  list.each { |e| prior_excl[e['chart'].to_s] = e if e.is_a?(Hash) }
+end
+
 verified = []
 exclusions = []
 
@@ -103,6 +120,13 @@ charts.each do |c|
   name = c['chart'].to_s
   eid  = c['sigma_element_id'].to_s
   cid, is_summary = card_id_for(eid)
+
+  # Already excluded upstream for a construction-level reason — carry it through
+  # verbatim rather than re-deriving or overriding it.
+  if (pe = prior_excl[name])
+    exclusions << pe
+    next
+  end
 
   # --- the Domo (expected) side ---
   if cid.nil?
@@ -175,6 +199,20 @@ covered = verified.size + exclusions.size
 if covered != charts.size
   abort "INTERNAL: #{covered} tiles accounted for but the plan lists #{charts.size} — " \
         'every tile must be verified or excluded; refusing to emit a partial plan.'
+end
+
+# A prior exclusion naming a tile that is NOT in the plan would otherwise be
+# dropped on write, since the loop above only ever visits plan tiles. That should
+# not happen (both derive from the same chartable set) but if it does, the census
+# in phase6-parity-domo.rb — which measures against workbook-spec.json, not the
+# plan — would fail on a tile that WAS legitimately accounted for. Carry them
+# through and say so, rather than trusting the two derivations to agree forever.
+emitted = exclusions.map { |e| e['chart'].to_s }.to_set
+orphaned = prior_excl.reject { |name, _| emitted.include?(name) }
+unless orphaned.empty?
+  warn "carrying through #{orphaned.size} prior exclusion(s) for tile(s) absent from the plan:"
+  orphaned.each { |name, e| warn "    #{name} — #{e['reason']}" }
+  exclusions.concat(orphaned.values)
 end
 
 File.write(out_path, JSON.pretty_generate('charts' => verified))
