@@ -508,6 +508,27 @@ rescue LoadError
   end
 end
 
+# Workbook code-rep document wrapper (#608) — same vendoring rule as the
+# ledgers above. GET /v2/workbooks/{id}/spec now nests pages/layout/
+# schemaVersion/kind under a top-level `document` key (verified live
+# 2026-08-03/04); a legacy flat readback (older wb-readback.json snapshots)
+# still carries them at top level. fetch_live_spec below (gates 4/6/7/7b's
+# shared live-spec memo) reads through CODE_REP_LOADED so a stale checkout
+# without the lib keeps the old flat read (stated via a one-time WARN) rather
+# than crashing — but every vendored copy carries it (manifest-listed
+# alongside this file), so the flat fallback is not expected to fire live.
+CODE_REP_LOADED = begin
+  require_relative 'lib/code_rep'
+  true
+rescue LoadError
+  begin
+    require_relative '../lib/code_rep'
+    true
+  rescue LoadError
+    false
+  end
+end
+
 opts = { min_pass_rate: 1.0, allow_extract: false, min_layout_elements: 2,
          allow_missing_tiles: 0, min_parity_score: 0.0, min_grid_fill: 0.45 }
 OptionParser.new do |p|
@@ -1512,6 +1533,19 @@ fetch_live_spec = lambda do |wb_id, base, tok|
                ' Re-run phase6-parity.rb PASS 1 to refresh it.'
         end
         ev_identity['ver'] = live_ver.to_s # evidence keys bind to LIVE state
+      end
+      # Unwrap ONCE here so every downstream gate (4/6/7/7b, all read through
+      # this memo) inherits the fix: the live GET nests pages/layout under
+      # `document` (see CODE_REP_LOADED above) — without this, gate 4's
+      # spec['layout'] read is always nil and hard-FAILs exit 6 on every
+      # workbook, the regression this memo fixes. A stale checkout without
+      # lib/code_rep.rb keeps the old flat spec (WARNed once, not silent).
+      if CODE_REP_LOADED
+        spec = Sigma::CodeRep.document(spec)
+      else
+        warn '[WARN] scripts/lib/code_rep.rb not vendored alongside this script (re-vendor;' \
+             ' md5 discipline) — gates 4/6/7/7b read the RAW (possibly document-nested) spec' \
+             ' and may misreport an empty layout/pages on a live nested readback.'
       end
       { 'spec' => spec, 'code' => nil }
     else
