@@ -48,10 +48,10 @@ def theme(accent=None):
 SURFACES = {
     "kpi_name_color": True,      # name:{text,color} on a kpi-chart (value.color bonus also GO, not emitted here)
     "chart_color_by": True,      # color:{by:"single",value:"#hex"} on a chart element
-    "categorical_scheme": True,  # workbook-level themeOverrides:{categoricalScheme:[...]}
+    "categorical_scheme": True,  # workbook-level settings.theme.overrides:{categoricalScheme:[...]}
     "format_string": True,       # format:{kind:"number",formatString:<d3>} -- Excel-style formatString is 400-rejected, never emitted
     "container_style": True,     # container style:{backgroundColor,borderRadius,borderColor,borderWidth} (borderRadius, NOT cornerRadius; never combine with padding)
-    "typography": True,          # themeOverrides.titleFont + per-element name:{fontSize} -- GO, but no helper below emits it (out of this task's scope); kept for a complete surface map
+    "typography": True,          # settings.theme.overrides.titleFont + per-element name:{fontSize} -- GO, but no helper below emits it (out of this task's scope); kept for a complete surface map
     # WS4 Task 2 (build-plugs-command-center.rb HDRBG probe): container
     # backgroundImage:{url:"data:image/svg+xml;base64,...",style:{fit:"cover"}}
     # carrying a composed <linearGradient>+motif SVG survived readback + a
@@ -144,7 +144,11 @@ def chart_color(theme, categorical=False, surfaces=None):
     if categorical:
         if not s["categorical_scheme"]:
             return {}
-        return {"themeOverrides": {"categoricalScheme": theme["categorical"]}}
+        # Workbook-level palette patch. Lives at settings.theme.overrides - the
+        # removed top-level themeOverrides key is silently dropped by the API.
+        # NOTE for callers: this is a NESTED patch, so deep-merge it into the
+        # spec; a shallow merge of `settings` would clobber sibling settings.
+        return {"settings": {"theme": {"overrides": {"categoricalScheme": theme["categorical"]}}}}
     if not s["chart_color_by"]:
         return {}
     return {"color": {"by": "single", "value": theme["categorical"][0]}}
