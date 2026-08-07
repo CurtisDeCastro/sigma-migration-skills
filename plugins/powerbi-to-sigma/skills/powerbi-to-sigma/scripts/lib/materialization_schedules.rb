@@ -11,7 +11,9 @@ module MaterializationSchedules
 
   def validate!(cron:, timezone: nil)
     raise ArgumentError, 'materialization cron must contain exactly 5 fields' unless cron.to_s.split(/\s+/).size == 5
-    if timezone && !timezone.empty? && timezone !~ %r{\A[A-Za-z_+-]+(?:/[A-Za-z0-9_+.-]+)+\z}
+    valid_timezone = timezone.to_s.empty? || timezone == 'UTC' ||
+                     timezone.match?(%r{\A[A-Za-z_+-]+(?:/[A-Za-z0-9_+.-]+)+\z})
+    unless valid_timezone
       raise ArgumentError, "materialization timezone must be an IANA name (got #{timezone.inspect})"
     end
   end

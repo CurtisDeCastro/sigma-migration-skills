@@ -73,6 +73,12 @@ check.call(action['remediation'].include?('Schedule materializations'), 'permiss
 
 puts "\n4. invalid schedules fail before API calls"
 begin
+  MaterializationSchedules.validate!(cron: '0 2 * * *', timezone: 'UTC')
+  check.call(true, 'UTC is accepted as an IANA timezone')
+rescue ArgumentError
+  check.call(false, 'UTC is accepted as an IANA timezone')
+end
+begin
   MaterializationSchedules.validate!(cron: 'hourly')
   check.call(false, 'invalid cron rejected')
 rescue ArgumentError
