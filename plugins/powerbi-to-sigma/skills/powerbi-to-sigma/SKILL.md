@@ -136,6 +136,9 @@ Caches `<WORK>/connection.json` (the orchestrator reads it when `--connection` i
 point `--out` at the same `<WORK>`) and writes `intake.json` (run-start + mode feed the
 telemetry ping). Multiple connections + no id/name → it lists them and asks you to pick;
 never guesses. (Power BI input is almost always `--mode file` — TMSL + PBIR exports.)
+Every orchestrated run also writes `<WORK>/run-provenance.json` with the plugin
+version, repository SHA (when installed from Git), real skill path, and pinned
+converter provenance. Include that file in any migration incident summary.
 
 > **ASK FOR SOURCE DASHBOARD SCREENSHOTS UP FRONT (file mode).** Layout is inferred from the
 > export's `x,y,w,h` **coordinates only** — never from an image — and those free-form/absolute
@@ -188,6 +191,22 @@ resume with `--converter-out`. The hosted MCP is a fallback, not the default pat
 
 `convertPowerBIToSigma(model_json, connection_id, database, schema)`.
 
+**Native warehouse SQL is preserved.** TMSL partitions that use
+`Value.NativeQuery(...)` or a connector `[Query="SELECT …"]` option are restored
+after conversion as named Sigma Custom SQL elements (`source.kind: "sql"`) with
+the complete statement and exact `[Custom SQL/<sourceColumn>]` bindings. They
+must never be reduced to the first table in the query's `FROM`. Distinct Power BI
+tables remain distinct even when their queries share that first physical table.
+Array-valued calculation-item expressions are normalized before the pinned
+converter runs. The run records these repairs in
+`<WORK>/native-query-conversion.json`.
+
+If a native query is followed by Power Query steps such as
+`Table.RenameColumns` or `Table.SelectRows`, the orchestrator stops at an OPEN
+QUESTION: preserving the SQL alone would drop those semantics. Fold the steps
+into the SQL and rerun. `--allow-native-m-transforms` is only for a model whose
+SQL was already corrected manually.
+
 > **Databricks / lower-case warehouses (beads-sigma-lanq.7):** physical identifiers default to
 > UPPER (Snowflake/BigQuery fold that way). Databricks/Spark store identifiers **lower-case** and
 > bind only against a lower-cased warehouse path, so an UPPER path fails at POST with
@@ -211,7 +230,9 @@ resume with `--converter-out`. The hosted MCP is a fallback, not the default pat
 
 - DAX measures → Sigma metrics. ~70% mechanical; see `refs/dax-to-sigma-coverage.md` and `fixtures/MANIFEST.md` (test oracle: 94 DAX expressions bucketed a/b/c).
 - **PromoteHeaders**: if `pbi-dm-signature.py` reports `promoted_header_tables` (the model's M-query used `Table.PromoteHeaders`), the warehouse table's real columns are auto-named (`C1`, `C2`, …) with the semantic names in row 0 — the TMSL `sourceColumn` names will NOT resolve. Verify the landed table's real columns and remap with `convert-model.rb --table-map` (in Sigma formulas the columns appear as `C 1`, `C 2`, … and in JOIN SQL alias them, e.g. `c.C2 AS CUSTOMER_NAME`).
-- **Known gap `j89`**: the Snowflake `Snowflake.Databases(...) + Navigation` M pattern isn't parsed → pass `database`/`schema` explicitly until fixed.
+- Snowflake/Databricks/SQL-family navigation paths and native-query partitions are
+  regression-covered. Caller `--database`/`--schema` values remain explicit
+  single-schema repoints; they never replace a native SQL statement.
 - **DAX gaps → gap-scout**: for measures the converter buckets `b` (restructure) or `c` (no-equivalent) — `RANKX`, `ALLEXCEPT`, `SUMMARIZE`, `USERELATIONSHIP`, `PATH*` — spawn the **gap-scout** sub-agent (`scripts/gap-scout.md`): it proposes a Sigma translation, validates it against the live API (`scripts/scout-validate.py`), and persists the rule to `~/.powerbi-to-sigma/learned-rules.yaml` (loaded by `scripts/learned-rules.py`) so future conversions auto-apply it. Time-intelligence (YTD/SPLY) is usually translatable — see `refs/measure-patterns.md`, not the scout.
 
 ## Phase 3.5 — Reuse an existing DM? (avoid sprawl — the reuse-first DM gate every converter runs before building)
@@ -236,6 +257,29 @@ The converter output (`sigmaDataModel`) needs 3 fixups before `POST /v2/dataMode
 3. **Element `name`** on each base warehouse-table element (= `source.path[-1]`) — the converter only names joined View elements, but workbook masters reference DM elements by name.
    > These joined View elements are query-time joins Sigma runs in the warehouse. For *why* Sigma modeling differs and when to consider an upstream OBT / Sigma-native materialization instead (an opt-in optimization, not something this skill does automatically), see `refs/modeling-strategy.md`. When the converted model has ≥2 joins, the orchestrator prints a one-line MODELING ADVISORY pointing there.
 Then: `tableau-to-sigma/scripts/post-and-readback.rb --type datamodel`. See `refs/spec-fixups.md`.
+
+### Optional after Phase 4 — materialize Custom SQL elements
+
+For expensive converted native SQL, opt in to a data-model element
+materialization schedule (the schedule API is Beta; scheduling is OFF by
+default):
+
+```bash
+ruby scripts/migrate-powerbi.rb ... \
+  --materialization-cron "0 2 * * *" \
+  --materialization-timezone "America/Chicago" \
+  [--materialization-elements "COR,Property"]   # omitted = every Custom SQL element
+```
+
+The post-readback step lists existing schedules and is idempotent: it creates a
+missing schedule, leaves an identical schedule unchanged, or patches a changed
+cron/timezone. Results go to `<WORK>/materialization-actions.json`. The API
+credential owner needs **Schedule materializations** permission and the
+connection needs warehouse write access. A schedule failure is surfaced with a
+specific remediation but does not invalidate the already-correct data model.
+Materialization is performance-only; Phase 6 parity still runs against the
+materialized result. Workbook-element schedules are a separate API surface and
+are not created by this Power BI migration option.
 
 > **What Phase 4 "validation" catches — and what it does NOT (read before trusting a clean DM).**
 > `validate-spec.rb` is spec-**shape** only (kinds, formula function names, ref prefixes — no
@@ -497,6 +541,8 @@ The conversion is script-driven (mirrors `tableau-to-sigma/scripts/`). `scripts/
 | `sigma-export-png.py` | 5e/5f compare | Renders a built Sigma page to PNG (`--workbook <id> --page <pageId> --out … --w 1600`) for the source-vs-target compare AND the Phase 5f Visual QA read (checked against `refs/layout-visual-qa.md`). |
 | `assert-visual-compare.rb` | 5e gate | HARD GATE: blocks Phase 6 unless visual-compare.json has a PASS/ACCEPTED verdict (with explained deltas) for every content page. |
 | `convert-model.rb` | 2–3 convert/post | MODE A prints the exact `convert_powerbi_to_sigma` MCP call for a `model.bim`; MODE B takes the converter output and applies the 3 fixups (schemaVersion + folderId/ownerId via a ref-DM harvest + base-element names) → postable DM spec. |
+| `lib/pbi_native_query.rb` | 2 convert | Compatibility layer around the provenance-pinned converter: joins array calc-item expressions, preserves full `Value.NativeQuery`/`Query=` SQL as named Custom SQL elements, and gates downstream M transforms. |
+| `lib/materialization_schedules.rb` | 4 post-DM (optional) | Idempotent Beta lifecycle client for data-model element schedules: paginated list, create/no-op/patch with exact cron/timezone, and actionable permission/write-access errors. |
 | `build-workbook-from-pbir.rb` | 4 build | `signals.json` + a `master-map.json` → full workbook spec + 24-col layout XML. Applies the measure-translation patterns in `refs/measure-patterns.md`; **line charts default to a single series** (`beads-sigma-c07`) unless PBI bound a Series/Legend role. **Carries the PBI visual sort** (`f972` — PBIR `query.sortDefinition` / classic `prototypeQuery.OrderBy` → chart `xAxis.sort`/`color.sort`; grouped table → `groupings[0].sort` — element-level sort is rejected on grouped tables). Analog of `build-charts-from-signals.rb`. **Writes `coverage.json`** (`--coverage-out`): every dropped/degraded/approximated component aggregated (Phase 5c) — nothing silently dropped. |
 | `phase6-parity-pbi.rb` | 7 parity | executeQueries(DAX) adapter: `--emit-dax` runs the PBI side and writes the parity plan's `expected` rows; `--finalize` injects Sigma actuals and runs the shared `verify-parity.rb`. The PBI analog of Tableau's view-CSV parity adapter. |
 | `enhance-scan.rb` | E scan (opt-in) | **Phase E part 1 — SCAN (read-only).** Source signals + built spec + live element exports → `enhancements.json` candidates `{id, category, evidence, proposed, risk, verdict_hint, patch}` + descoped propose-in-UI notes. Shared Phase-E engine, vendored byte-identical across plugins (md5 discipline). |

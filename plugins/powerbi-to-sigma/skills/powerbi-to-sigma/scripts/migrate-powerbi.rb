@@ -69,6 +69,7 @@ require 'fileutils'
 require 'open3'
 require 'digest'
 require 'set'
+require 'time'
 require_relative 'lib/py_resolve'
 require_relative 'lib/pbi_field_alts'
 require_relative 'lib/pbi_master_key'
@@ -82,6 +83,9 @@ require 'dax_gate'      # DAX warning → decision-question classifier (regressi
 require 'coverage_gate' # workbook-build coverage.json → consolidated report + assistance prompt
 require 'pbi_element_match' # converter→readback element pairing (POST reorders; regression-tested)
 require 'pbi_timeintel_route' # time-intel fallback-router fact-provenance guard (regression-tested)
+require 'pbi_native_query' # preserve Value.NativeQuery/Query= SQL around the pinned converter
+require 'pbi_composite' # remote-model detection; NativeQuery is warehouse SQL
+require 'materialization_schedules' # opt-in DM element schedule lifecycle
 
 # Converter resolution (issue #227). The pinned VENDORED bundle is the DEFAULT so a
 # developer machine and a customer machine produce identical output for the same
@@ -187,7 +191,21 @@ OptionParser.new do |o|
   # model lives in the local .pbix (prefer --pbix). Pass this to proceed anyway
   # on the (known-incomplete) Fabric model.
   o.on('--allow-incomplete-model') { opts[:allow_incomplete_model] = true }
+  # Native SQL followed by Table.RenameColumns/Table.SelectRows/etc. cannot be
+  # represented by preserving the SQL alone. Gate by default; this override is
+  # only for a user who has manually folded those transforms into the SQL.
+  o.on('--allow-native-m-transforms') { opts[:allow_native_m_transforms] = true }
+  # Opt-in materialization schedule for converted Custom SQL elements. Cron is
+  # required; timezone is IANA. Without --materialization-elements every SQL
+  # source element is targeted. A comma-list selects exact element names.
+  o.on('--materialization-cron CRON') { |v| opts[:materialization_cron] = v }
+  o.on('--materialization-timezone TZ') { |v| opts[:materialization_timezone] = v }
+  o.on('--materialization-elements LIST') { |v| opts[:materialization_elements] = v }
 end.parse!
+
+if opts[:materialization_timezone] && !opts[:materialization_cron]
+  abort 'FATAL: --materialization-timezone requires --materialization-cron'
+end
 
 # #347: publish the target tenant into the env so EVERY Power BI child process
 # (fabric-extract.py, pbi-freshness.py, phase6 harness, …) inherits it and
@@ -264,6 +282,24 @@ name_slug = File.basename(opts[:tmsl] || opts[:pbix], '.*').gsub(/[^A-Za-z0-9_-]
 WORK = opts[:out] || File.expand_path("~/powerbi-migration/#{name_slug}")
 FileUtils.mkdir_p(WORK)
 WB_NAME = opts[:name] || "#{name_slug.gsub(/[_]+/, ' ').strip} (from Power BI)"
+
+# Persist exact executable provenance for every incident report. A plugin file
+# copy may have no git metadata; the plugin version + converter pin + real path
+# still identify what actually ran.
+plugin_manifest = File.expand_path('../../../.claude-plugin/plugin.json', HERE)
+plugin_json = JSON.parse(File.read(plugin_manifest)) rescue {}
+converter_prov_path = File.join(File.dirname(VENDORED_PBI), 'PROVENANCE.json')
+converter_prov = JSON.parse(File.read(converter_prov_path)) rescue {}
+repo_sha, repo_status = Open3.capture2('git', '-C', HERE, 'rev-parse', '--short', 'HEAD')
+run_provenance = {
+  'pluginVersion' => plugin_json['version'],
+  'repoSha' => repo_status.success? ? repo_sha.strip : nil,
+  'skillPath' => File.realpath(File.expand_path('..', HERE)),
+  'converter' => CONVERTER_DESC,
+  'converterProvenance' => converter_prov,
+  'recordedAt' => Time.now.utc.iso8601
+}
+File.write(File.join(WORK, 'run-provenance.json'), JSON.pretty_generate(run_provenance))
 
 # ---- phase timings (always written to <WORK>/timings.json) ------------------
 # Fast-discovery evidence trail: every terminal exit (success, decisions gate,
@@ -385,28 +421,6 @@ end
 # Returns a list of human-readable reason strings ([] when the model is a
 # complete import model). The offline analog is the .pbix Connections
 # RemoteArtifacts tell (extract-model-pbix.py is_composite_connections).
-def detect_incomplete_composite(model)
-  reasons = []
-  (model['tables'] || []).each do |t|
-    name = t['name']
-    next if name.to_s.start_with?('LocalDateTable_', 'DateTableTemplate_')
-    Array(t['partitions']).each do |p|
-      mode = p['mode'].to_s.downcase
-      reasons << "table '#{name}' has a DirectQuery partition" if mode == 'directquery'
-      src = p['source'] || {}
-      reasons << "table '#{name}' is an 'entity' partition bound to a remote model" \
-        if src['type'].to_s.downcase == 'entity'
-      expr = src['expression']
-      expr = expr.join("\n") if expr.is_a?(Array)
-      if expr.is_a?(String) &&
-         expr =~ /AnalysisServices\.Database|PowerBIServiceLive|DirectQueryToAS|pbiazure|PowerBI\.Datasets|Value\.NativeQuery/i
-        reasons << "table '#{name}' M expression references a remote Power BI dataset"
-      end
-    end
-  end
-  reasons.uniq
-end
-
 TOTAL = 6
 
 # Python interpreter resolution (shared by Phase 0 local extract + Phase 1).
@@ -499,13 +513,36 @@ signals = JSON.parse(File.read(signals_path))
 tmsl = JSON.parse(File.read(opts[:tmsl]))
 model = tmsl['model'] || tmsl
 
+# NativeQuery is ordinary warehouse SQL, not evidence of a remote/composite
+# semantic model. Preserve it through the pinned converter. Downstream M steps
+# are a separate fidelity question: they must be folded into the SQL or
+# explicitly accepted, never silently discarded.
+native_queries = PbiNativeQuery.native_queries(model)
+native_transform_gaps = native_queries.select(&:post_transform)
+if native_transform_gaps.any? && !opts[:allow_native_m_transforms]
+  puts
+  puts '╭─ OPEN QUESTION — NativeQuery has downstream Power Query transforms ─'
+  native_transform_gaps.each do |native|
+    puts "│  • #{native.table}: #{native.source} is followed by M transform steps"
+  end
+  puts '│'
+  puts '│  The SQL itself can be preserved, but Table.RenameColumns/Table.SelectRows/etc.'
+  puts '│  after it are not part of that SQL. Fold those steps into the SQL and rerun.'
+  puts '│  If they are already represented manually, rerun with --allow-native-m-transforms.'
+  puts '╰──────────────────────────────────────────────────────────────────────────────'
+  exit 10
+end
+
+normalized_tmsl_path = File.join(WORK, 'model-normalized.bim')
+File.write(normalized_tmsl_path, JSON.pretty_generate(PbiNativeQuery.normalize_tmsl(tmsl)))
+
 # COMPOSITE GATE (Fabric --tmsl path only; --pbix already IS the complete local
 # model). getDefinition returns an INCOMPLETE model for composite / live-
 # connected reports — the full model lives in the local .pbix. Detect it and
 # PROMPT for the .pbix instead of silently building a broken DM. --allow-
 # incomplete-model overrides. This is what MOTIVATES the local front door.
 unless opts[:pbix] || opts[:allow_incomplete_model]
-  composite_reasons = detect_incomplete_composite(model)
+  composite_reasons = PbiComposite.incomplete_reasons(model)
   unless composite_reasons.empty?
     puts
     puts '╭─ OPEN QUESTION — composite / live-connected report (incomplete Fabric model) ─'
@@ -624,7 +661,7 @@ import_specifier =
 File.write(shim, <<~JS)
   import { readFileSync, writeFileSync } from 'node:fs';
   import { convertPowerBIToSigma } from #{import_specifier.to_json};
-  const model = JSON.parse(readFileSync(#{opts[:tmsl].to_json}, 'utf8'));
+  const model = JSON.parse(readFileSync(#{normalized_tmsl_path.to_json}, 'utf8'));
   const out = convertPowerBIToSigma(model, {
     connectionId: #{(opts[:conn] || '').to_json},
     database: #{opts[:db].to_json},
@@ -647,6 +684,22 @@ conv = JSON.parse(File.read(File.join(WORK, 'conv-meta.json')))
 dm_model = conv['model']
 conv_warnings = conv['warnings'] || []
 conv_stats = conv['stats'] || {}
+native_result = PbiNativeQuery.apply!(dm_model, model)
+native_blockers = native_result['blockers'].reject do |blocker|
+  opts[:allow_native_m_transforms] &&
+    blocker['reason'].to_s.include?('followed by Power Query M transforms')
+end
+unless native_blockers.empty?
+  abort "FATAL: NativeQuery restoration failed:\n" +
+        native_blockers.map { |b| "  - #{b['table']}: #{b['reason']}" }.join("\n")
+end
+if native_result['converted'].any?
+  File.write(File.join(WORK, 'native-query-conversion.json'), JSON.pretty_generate(native_result))
+  File.write(File.join(WORK, 'dm-raw.json'), JSON.pretty_generate(dm_model))
+  conv['model'] = dm_model
+  File.write(File.join(WORK, 'conv-meta.json'), JSON.pretty_generate(conv))
+  puts "   restored #{native_result['converted'].size} NativeQuery source(s) as Custom SQL"
+end
 puts "   #{conv_stats['elements'] || (dm_model['pages'] || []).flat_map { |p| p['elements'] || [] }.size} element(s), " \
      "#{conv_stats['columns']} column(s), #{conv_stats['metrics']} metric(s); #{conv_warnings.size} converter warning(s)"
 # Vendor-neutral CDW join-cost advisory (informational only; never gates). See refs/modeling-strategy.md.
@@ -971,6 +1024,68 @@ dm_rb = JSON.parse(File.read(dm_readback))
 dm_id = dm_rb['dataModelId']
 puts "   dataModelId = #{dm_id}"
 end # unless reuse_dm_id (build-new path)
+
+# Optional data-model materialization schedules (Beta). Run after readback so
+# schedule calls use authoritative server element IDs. This is performance-only:
+# failures are recorded and surfaced but do not invalidate the migrated model.
+if opts[:materialization_cron]
+  spec_elements = (dm_model['pages'] || []).flat_map { |page| page['elements'] || [] }
+  readback_elements = (dm_rb['pages'] || []).flat_map { |page| page['elements'] || [] }
+  paired = PbiElementMatch.pair(spec_elements, readback_elements)
+  sql_with_readback = spec_elements.each_with_index.filter_map do |element, index|
+    next unless element.dig('source', 'kind') == 'sql'
+    server = paired[index]
+    next unless server
+    [element, { 'id' => server['id'], 'name' => server['name'] || element['name'] || element['id'] }]
+  end
+
+  selectors = opts[:materialization_elements].to_s.split(',').map(&:strip).reject(&:empty?)
+  selected =
+    if selectors.empty? || selectors == ['all-sql']
+      sql_with_readback
+    else
+      sql_with_readback.select do |spec_element, server|
+        selectors.include?(spec_element['name'].to_s) || selectors.include?(server['name'].to_s)
+      end
+    end
+
+  missing = selectors.reject do |selector|
+    selector == 'all-sql' || sql_with_readback.any? do |spec_element, server|
+      selector == spec_element['name'].to_s || selector == server['name'].to_s
+    end
+  end
+  actions = missing.map do |selector|
+    {
+      'elementName' => selector,
+      'status' => 'error',
+      'error' => 'requested materialization element was not found among Custom SQL elements',
+      'remediation' => 'use an exact Custom SQL element name or all-sql'
+    }
+  end
+
+  if selected.empty?
+    puts '   materialization: no matching Custom SQL elements'
+  else
+    puts "   materialization: reconciling #{selected.size} Custom SQL schedule(s)"
+    actions.concat(
+      MaterializationSchedules.reconcile(
+        data_model_id: dm_id,
+        elements: selected.map(&:last),
+        cron: opts[:materialization_cron],
+        timezone: opts[:materialization_timezone]
+      )
+    )
+  end
+  File.write(File.join(WORK, 'materialization-actions.json'), JSON.pretty_generate(actions))
+  actions.each do |action|
+    if action['status'] == 'error'
+      warn "   [warn] materialization #{action['elementName']}: #{action['error'].to_s.lines.first.to_s.strip[0, 140]}"
+      warn "          remediation: #{action['remediation']}"
+    else
+      puts "   materialization #{action['status']}: #{action['elementName']}"
+    end
+  end
+end
 
 # ---------------------------------------------------------------------------
 # Phase 4 — Build workbook (auto master-map from converter + signals, then build+POST)
