@@ -11,7 +11,7 @@ Reads stay tolerant of the legacy flat shape because flat artifacts still exist
 on disk (committed workbook snapshots, fixtures).
 """
 
-DOC_KEYS = ("schemaVersion", "pages", "kind", "layout")
+DOC_KEYS = ("schemaVersion", "pages", "kind", "layout", "settings", "agents")
 
 
 def document(response):

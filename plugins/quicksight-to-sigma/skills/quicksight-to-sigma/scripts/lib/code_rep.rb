@@ -14,7 +14,15 @@
 module Sigma
   module CodeRep
     # The non-metadata fields that live INSIDE `document`. Confirmed by live readback.
-    DOC_KEYS = %w[schemaVersion pages kind layout].freeze
+    #
+    # `settings` and `agents` are load-bearing: omitting them here does not merely
+    # misplace them, it SILENTLY LOSES DATA. metadata() would push them to the top
+    # level of the request body, where (live-probed 2026-08-06) a top-level
+    # `settings` passes /verify, creates 200, and the theme is gone with no error
+    # anywhere. (A top-level `agents` at least fails loudly, 400 on the chat
+    # element's agentId.) `settings` holds theme + navigation; see the workbook
+    # spec's document schema.
+    DOC_KEYS = %w[schemaVersion pages kind layout settings agents].freeze
 
     class << self
       # Read path: accepts the live nested shape OR a legacy flat artifact.

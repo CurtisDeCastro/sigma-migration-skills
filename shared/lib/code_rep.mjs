@@ -3,7 +3,7 @@
 // /v2/workbooks/spec/verify); flat bodies 400. The DATA-MODEL code-rep surface is
 // NOT changing — do not use this on /v2/dataModels/.../spec payloads.
 
-export const DOC_KEYS = ['schemaVersion', 'pages', 'kind', 'layout'];
+export const DOC_KEYS = ['schemaVersion', 'pages', 'kind', 'layout', 'settings', 'agents'];
 
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
