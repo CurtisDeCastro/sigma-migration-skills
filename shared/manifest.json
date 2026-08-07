@@ -104,7 +104,8 @@
         "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/lib/code_rep.rb",
         "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/lib/code_rep.rb",
         "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/lib/code_rep.rb",
-        "plugins/sigma-authoring/skills/sigma-workbooks/scripts/lib/code_rep.rb"
+        "plugins/sigma-authoring/skills/sigma-workbooks/scripts/lib/code_rep.rb",
+        "plugins/sigma-authoring/skills/custom-sql-to-data-model/scripts/lib/code_rep.rb"
       ]
     },
     {
