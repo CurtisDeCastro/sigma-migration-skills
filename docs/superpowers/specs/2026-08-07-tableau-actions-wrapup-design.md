@@ -147,12 +147,73 @@ be born, and `:7780` must follow or the controls-coverage gate goes red.
 (`needs-wiring`, `needs-materialization`, `needs-master-default`, plus the emitting path). Deciding
 which status an action filter takes needs its own design pass.
 
-PR E is therefore **not planned alongside PRs A–D**. It also depends on the
-`ActionColumnResolver.resolve` signature, which does not exist until PR D lands. Write PR E's plan
-after PR D merges.
+### SECOND CORRECTION, 2026-08-07 — the correction above is also wrong
 
-Reconcile the `:8832` `-actions.md` writer with the ledger in this PR — it is the filter-action
-hand-wiring table, so it belongs here rather than with the earlier PRs.
+The design pass ran, and it measured rather than read. **`:7335` is not "the real change" either —
+on its own it is very nearly a no-op.**
+
+Real line is `build-charts-from-signals.rb:7419`. It sits in a loop over
+`(meta['shared_filters'] || []) + promoted_int_dim_filters`, and `meta['shared_filters']` is
+populated **only** from `//shared-view/filter` (`parse-twb-layout.rb:2149-2163`). Tableau's
+`[Action (X)]` filters are per-worksheet `sheet_link` filters, not shared-view filters. Measured on
+the one corpus workbook that has a filter action:
+
+```
+shared_filters total=3  is_action=0        <-- ZERO reach :7419
+worksheets carrying [Action (Region)]: 5
+zones carrying [Action (Region)]:      5
+```
+
+So un-picking `:7419` emits nothing. The population lives in `meta['worksheets'][ws]['filters']`
+and `layout[].zones[].filters`.
+
+**PR E needs a NEW emitter, not an un-pick.** All four rejection sites stay exactly as they are —
+which also means zero-action workbooks are byte-identical by construction, retiring the corpus
+regression risk named in the Risks section below.
+
+The new emitter joins `detected_actions[kind='filter-action']` (source sheet, `actionName`) with
+the worksheet-level `[Action (X)]` filters (the column, and the true set of affected sheets), and
+appends its control to `auto_controls` so the existing `ctl_rewrites` namespacing picks it up.
+
+Supporting findings, each verified against the code:
+
+- **No new status is needed.** `normalize_filter` returns early for `is_action`
+  (`parse-twb-layout.rb:378-381`), so an action filter carries exactly seven keys — no `topn`, no
+  `members`, no `datatype`, `kind == 'action'`. Branches 3, 5, 6 and 9a–9e of the dispatch are
+  structurally unreachable for it. Reuse `emitted` / `needs-materialization` / `dropped` /
+  `needs-wiring`.
+- **Unwrap `[Action (X)]` → `X` before `map_column`.** Without it the caption never resolves and the
+  control is literally named "Action (Region)".
+- **The census (`:7864`) must change its key from `name` to `[kind, name]`**, and index on the
+  unwrapped caption. A quick filter "Region" and an action filter "Region" otherwise collapse to one
+  row, last-writer-wins, hiding a `needs-wiring` behind an `emitted` — and gate 7c (exit 31) then
+  passes falsely.
+- **The `-actions.md` writer (`:9128`) must render from `ActionLedger.join(...)['residue']`.** Its
+  zone-derived rows carry no `actionName`, so they cannot be joined as-is.
+- **Dead code found:** the action-filter warning at `:5834` tests `f['column']`, a key that never
+  exists on an action filter. Dead since it was written, and documented as live behaviour in
+  `refs/phase-5-workbook.md:73`.
+
+**Biggest risk:** `special-fields=all` — the default "Use as Filter" shape, and the only real corpus
+instance — emits no `<link>`, so the detected entry's `fields` is the sentinel
+`"(all shared fields)"`. The entire design then depends on the `[Action (X)]` back-channel to name
+the column.
+
+**Cannot be settled without a live org:** whether `set-control-value` writing a numeric host column
+into a `Text()`-decoded control target matches anything (most likely a silent runtime failure);
+whether an include-mode `values: []` means "no filtering"; whether the target control must live on
+the host's page; and Tableau's `auto-clear`, which has no Sigma analogue.
+
+Full findings, with reproduction commands and V/VR/I tags on every claim, are in the design-pass
+report referenced from `beads-sigma-bfxd`.
+
+### Sequencing
+
+PR E is **not planned alongside PRs A–D**. It also depends on the `ActionColumnResolver.resolve`
+signature, which does not exist until PR D lands. Write PR E's plan after PR D merges.
+
+Reconcile the `-actions.md` writer with the ledger in this PR — it is the filter-action hand-wiring
+table, so it belongs here rather than with the earlier PRs.
 
 **Named fidelity loss.** Tableau targets *sheets*; Sigma targets an element's *source root*. Two
 sheets sharing a root collapse, so a `<param name='exclude'>` that separates them cannot be
