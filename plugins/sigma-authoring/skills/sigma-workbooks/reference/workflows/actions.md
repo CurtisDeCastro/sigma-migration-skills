@@ -87,6 +87,36 @@ neither relates to actions. `pivot-table` requires exactly
 `id, kind, source, columns, values`; `pie`/`donut` need `color:{id}` +
 `value:{id}` (not `segment`).
 
+## Modals: `open-overlay` / `close-overlay`
+
+A workbook page can be marked `type: modal` — a page that renders as an overlay
+rather than a navigable tab. A button's effect opens/closes it:
+
+```yaml
+pages:
+  - id: pg
+    name: Main
+    elements: [ ... , btn-open ]
+  - id: modal-detail
+    type: modal
+    name: Detail
+    elements: [ ... ]
+```
+
+```yaml
+# on the trigger button (lives on the main page)
+effect: open-overlay
+overlayId: modal-detail    # the modal PAGE's `id`, not an element id
+
+# on a close button (typically inside the modal itself)
+effect: close-overlay
+```
+
+`open-overlay` requires `overlayId` (the modal page's id, not an element id);
+`close-overlay` takes no other fields and closes whatever overlay is currently
+open. **Design constraint:** one button cannot toggle an overlay — you need
+separate buttons (one with `open-overlay`, one with `close-overlay`).
+
 ## The append-only-log pattern
 
 The recurring write-back shape: an **empty input table** as a log, a **control**
@@ -149,7 +179,7 @@ listed cause **first** before assuming the element kind itself is unsupported.
 |---|---|---|
 | `Invalid kind: "input-table"` | `inputMode` was omitted. | Always set `inputMode: edit` (or `explore`/`view` — see `input-tables.md`). It's technically documented as required in `tables.md`, but omitting it produces this generic message rather than a field-specific one. |
 | `Invalid kind: "control"` (on a `text`/`text-area` control used for **entry**, not filtering) | One or more of `mode`, `case`, `includeNulls`, `showOperators` was omitted. | Set all four — see `controls.md`'s "Entry (write) text controls" section. |
-| Button silently does nothing on click | An element/container-scoped `clear-control`. | Use `scope: { type: page, page: <id> }` only (see above). |
+| Button silently does nothing on click | An element/container-scoped `clear-control`. | The `scope` field has three shapes (`control`, `container`, `page`), but only `page` scope is verified to work. Use `scope: { type: page, page: <id> }` only. |
 
 ## Cross-links
 
