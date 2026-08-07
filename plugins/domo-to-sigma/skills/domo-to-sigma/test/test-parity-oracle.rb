@@ -74,6 +74,65 @@ if sv_src
 end
 
 # ---------------------------------------------------------------------------
+# dedupe_channels — Domo sometimes plots ONE measure on TWO channels, so its row
+# carries the value twice while Sigma's export carries it once. Whole-tuple
+# comparison then fails the tile on arity before any value is looked at.
+#
+# Every shape below is verbatim from the 2026-08-07 live run.
+dc_src = expected_src[/^def dedupe_channels\(rows, columns, mappings\)\n.*?\nend\n/m]
+ok(dc_src, 'extracted dedupe_channels from collect-parity-expected.rb')
+eval(dc_src, TOPLEVEL_BINDING) if dc_src # rubocop:disable Security/Eval
+
+if dc_src
+  # Top 20 Organic Tweets: ['Text','Favorite Count','Favorite Count'] -> 2817 twice
+  rows, cols, maps, dropped = dedupe_channels(
+    [['a', 2817, 2817], ['b', 2320, 2320]],
+    ['Text', 'Favorite Count', 'Favorite Count'], %w[ITEM SERIES SERIES])
+  eq(cols, ['Text', 'Favorite Count'], 'a repeated channel with identical values is collapsed')
+  eq(rows, [['a', 2817], ['b', 2320]], 'and the rows lose exactly that column')
+  eq(maps, %w[ITEM SERIES], 'mappings stay parallel to columns')
+  eq(dropped, ['Favorite Count'], 'and the drop is RECORDED, never invisible')
+
+  # Page Engagement Rate: 3288.0 at one index, 3288 at another — numerically equal.
+  _, cols2, _, dropped2 = dedupe_channels(
+    [['2026-07-25', 3288.0, 202283, 3288]],
+    ['Date', 'Engaged Users', 'Unique Impressions', 'Engaged Users'],
+    %w[ITEM SERIES SERIES SERIES])
+  eq(cols2, ['Date', 'Engaged Users', 'Unique Impressions'],
+     'int/float variance of the same value still counts as a duplicate')
+  eq(dropped2, ['Engaged Users'], 'and is recorded')
+
+  # THE DANGEROUS CASE. Domo's table default counts the row-key column, so the
+  # column appears as BOTH the dimension and the counted measure under ONE name
+  # with DIFFERENT data. Deduping on name alone would delete the measure.
+  _, cols3, _, dropped3 = dedupe_channels(
+    [['Gembucket campaign', 2], ['Zoolab campaign', 5]],
+    %w[campaign_title campaign_title], %w[ITEM VALUE])
+  eq(cols3, %w[campaign_title campaign_title],
+     'same NAME but different DATA (Domo table-default COUNT) is NOT collapsed')
+  eq(dropped3, [], 'and nothing is reported dropped')
+
+  _, cols4, _, dropped4 = dedupe_channels(
+    [['d', 1, 2, 3]], %w[Date A B C], %w[ITEM SERIES SERIES SERIES])
+  eq(cols4, %w[Date A B C], 'genuinely distinct series are untouched')
+  eq(dropped4, [], 'with nothing dropped')
+
+  _, cols5, = dedupe_channels([], %w[Date A], %w[ITEM SERIES])
+  eq(cols5, %w[Date A], 'an empty row set is returned unchanged (no false collapse)')
+end
+
+# ---------------------------------------------------------------------------
+# A headers-only Sigma export is a DEFECT, not an empty comparison. Four elements
+# did this on the live run; recording them as successful exports made the join
+# compare N Domo rows against 0 Sigma rows, scoring as an ordinary DIVERGE and
+# burying the real finding ("this tile renders nothing") among value mismatches.
+actuals_src = File.read(File.join(SCRIPTS, 'collect-parity-actuals.rb'))
+ok(actuals_src.include?('ZERO data rows'),
+   'collect-parity-actuals routes a headers-only export to `unavailable` with a measured reason')
+ok(actuals_src.match?(/if rows\.empty\?/),
+   'and it checks for it explicitly after shifting the header row')
+
+# ---------------------------------------------------------------------------
 oracle_src = File.read(File.join(SCRIPTS, 'build-parity-oracle.rb'))
 cid_src = oracle_src[/^def card_id_for\(element_id\)\n.*?\nend\n/m]
 ok(cid_src, 'extracted card_id_for(element_id) from build-parity-oracle.rb')

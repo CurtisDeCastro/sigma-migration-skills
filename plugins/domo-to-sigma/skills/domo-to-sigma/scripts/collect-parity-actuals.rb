@@ -114,6 +114,26 @@ threads = [opts[:pool], 1].max.times.map do
         next
       end
       headers = rows.shift.map { |h| h.to_s.strip }
+
+      # HEADERS BUT NO DATA ROWS is a real defect, not an empty comparison.
+      # Measured on the 2026-08-07 run: FOUR elements exported column headers and
+      # zero rows — a bar chart, a table, a region-map and a scatter. The element
+      # renders nothing in Sigma. Recording it as a successful export made the
+      # join compare N Domo rows against 0 Sigma rows, which scores as an
+      # ordinary DIVERGE and hides the actual finding ("this tile is blank")
+      # among value mismatches. It belongs in `unavailable` so it becomes an
+      # exclusion with a reason an operator can act on.
+      if rows.empty?
+        mutex.synchronize do
+          unavailable << { 'chart' => name, 'element_id' => eid,
+                           'columns' => headers,
+                           'reason' => 'Sigma element exported column headers but ZERO data rows ' \
+                                       "(#{headers.size} column(s): #{headers.join(', ')}) — the " \
+                                       'tile renders nothing; fix the element rather than scoring it' }
+          warn "  NO ROWS #{eid} #{name[0, 30]} (#{headers.size} header(s), 0 rows)"
+        end
+        next
+      end
       mutex.synchronize do
         # Keyed by element id — see the header. A collision here would mean the
         # PLAN listed the same element twice, which is a different (and louder)

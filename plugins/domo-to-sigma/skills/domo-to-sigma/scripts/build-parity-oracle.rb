@@ -127,6 +127,30 @@ def parse_date(v)
   nil
 end
 
+# Canonicalise Domo's month-bucket rendering to the ISO form Sigma exports.
+# Domo renders a CalendarMonth dimension as "2026-Apr"; Sigma's CSV export gives
+# "2026-04". Same month, different rendering — comparing the strings fails the
+# tile with every measure identical. Measured on 2 tiles (Unsubscribes, Bounces
+# Trend) on the 2026-08-07 run.
+#
+# This is normalisation, not masking: it only rewrites a value that parses as
+# EXACTLY `YYYY-Mon`, and only into the same month's ISO form. A value that means
+# something different is left alone, so a genuine dimension difference still
+# fails. Anything not matching that one pattern is untouched.
+def canonicalise_dim(rows)
+  return [rows, 0] unless rows.is_a?(Array)
+  n = 0
+  out = rows.map do |r|
+    a = Array(r).dup
+    if (m = /\A(\d{4})-([A-Z][a-z]{2})\z/.match(a.first.to_s)) && MONTH_ABBR[m[2]]
+      a[0] = format('%s-%02d', m[1], MONTH_ABBR[m[2]])
+      n += 1
+    end
+    a
+  end
+  [out, n]
+end
+
 # The newest date appearing in a row set's FIRST column, or nil if that column is
 # not uniformly a date.
 def max_date(rows)
@@ -137,6 +161,7 @@ def max_date(rows)
 end
 
 stale_evidence = []
+canonicalised = 0
 
 # PRIOR exclusions, loaded BEFORE the loop and honoured over verification.
 #
@@ -273,6 +298,12 @@ charts.each do |c|
                     'reason' => "no Sigma actual: #{reason}" }
     next
   end
+
+  # Canonicalise the dimension BEFORE the row is recorded — doing it afterwards
+  # mutates a local the emitted hash no longer references, which is exactly the
+  # bug this comment exists to stop recurring.
+  exp_rows, canon_n = canonicalise_dim(exp_rows)
+  canonicalised += canon_n
 
   verified << {
     'chart'          => name,
