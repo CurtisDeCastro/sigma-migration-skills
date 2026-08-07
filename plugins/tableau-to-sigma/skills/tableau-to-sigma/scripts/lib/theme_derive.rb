@@ -21,6 +21,7 @@
 #
 # Contract: returns {} when the source declares nothing (emit neither
 # themeName nor themeOverrides — an unstyled workbook gets pure Sigma
+require_relative 'code_rep'
 # defaults, byte-identical to the pre-theme output).
 require_relative 'series_colors'
 
@@ -143,10 +144,10 @@ module ThemeDerive
     end
     overrides['colorOverrides'] = { 'backgroundCanvas' => theme['backgroundCanvas'] } if theme['backgroundCanvas']
     overrides['categoricalScheme'] = theme['categoricalScheme'] if theme['categoricalScheme']
-    unless overrides.empty?
-      spec['themeName'] = 'Light'
-      spec['themeOverrides'] = overrides
-    end
+    # The theme lives at settings.theme.{name,overrides}. The removed top-level
+    # themeName/themeOverrides pair is not a valid key on any workbook code-rep
+    # endpoint and is dropped silently, taking the whole derived theme with it.
+    Sigma::CodeRep.set_theme(spec, name: 'Light', overrides: overrides) unless overrides.empty?
     spec
   end
 end

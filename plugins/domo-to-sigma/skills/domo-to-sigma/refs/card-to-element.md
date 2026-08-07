@@ -401,7 +401,7 @@ Never emit the raw `column` when an `alias` exists.
 Long-text table cells that overflow are fixable in the spec — this is **not**
 UI-only. Set it per-column or via the theme default:
 - Per column: `columns[].style.textWrap: "wrap"` (enum `wrap | clip`).
-- Theme default: `themeOverrides.tableStyles.textStyles.*.textWrap`.
+- Theme default: `settings.theme.overrides.tableStyles.textStyles.*.textWrap`.
 
 Set `"wrap"` on long-text columns so they don't clip.
 

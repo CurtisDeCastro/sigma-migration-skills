@@ -19,7 +19,7 @@ Signature of a page that needs it (catch on the Phase 5b render): every tile the
 stacked in one column; >40% of the page empty; the title invisible; source viz missing.
 
 ## The composition recipe (verified to render on `/v2/workbooks/{id}/spec` PUT)
-1. **Workbook theme** — top-level `themeName: Light` + `themeOverrides`: `borderRadius: round`,
+1. **Workbook theme** — top-level `settings.theme.name: Light` + `settings.theme.overrides`: `borderRadius: round`,
    `hasCards: hidden` (so *you* control which elements get card chrome), and
    `categoricalScheme: [...]` — the **only** spec path to donut/pie slice colors (per-element
    `color.scheme` is silently dropped on donut/pie).
@@ -36,7 +36,7 @@ Donut specifics: `holeValue:{id:<a column whose id ≠ value's>}` puts the **cen
 ring; `legend:{visibility:hidden}` on donuts that share a legend with a sibling (show it once).
 
 **Extract brand colors from the source file** (grep `<style>`/`format`/`run` for `#`-hex near the
-title worksheets and dashboard style); apply via `themeOverrides` + the hero/section bars. A generic
+title worksheets and dashboard style); apply via `settings.theme.overrides` + the hero/section bars. A generic
 blue reads as "close but not their brand." (`scan-customer-style.rb` can supply org-level defaults.)
 
 ## Value-fidelity — why migrated numbers come out wrong
@@ -96,7 +96,7 @@ Migrations commonly drop the interactive layer. Rebuild from the source's parame
   `<span style>` allows only `color`/`background-color`/`font-size`/`font-family`. Centre/right via
   `<p style="text-align: center|right">`; **`text-align: left` is rejected** (default) — use a plain
   span/heading. A full-width colored bar is only achievable via a `container` `style.backgroundColor`.
-- **Donut/pie:** `color.scheme` is silently stripped (use `themeOverrides.categoricalScheme`);
+- **Donut/pie:** `color.scheme` is silently stripped (use `settings.theme.overrides.categoricalScheme`);
   `holeValue.id == value.id` silently drops the element (use a distinct column).
 - **KPI title suppression:** only `name: ' '` (single space) works; omitting re-derives the title.
 - **Bar/line `color`** = `{by, column, scheme}`, not a bare `{scheme}`. Single-series charts omit it.

@@ -2835,8 +2835,11 @@ spec = {
   # Style fidelity: reproduce the PBI report's look — card chrome, subtle borders,
   # and the source theme's categorical palette (drives donut/pie + multi-series
   # colors). Stacked on the built-in Light theme. See lib/pbi_theme.rb.
-  'themeName'      => 'Light',
-  'themeOverrides' => PbiTheme.overrides($pbi_theme)
+  #
+  # The theme lives at settings.theme.{name,overrides}. The removed top-level
+  # themeName/themeOverrides pair is silently dropped by the API, which would
+  # take the entire PBI palette with it.
+  'settings' => { 'theme' => { 'name' => 'Light', 'overrides' => PbiTheme.overrides($pbi_theme) } }
 }
 spec['folderId'] = opts[:folder] if opts[:folder]
 

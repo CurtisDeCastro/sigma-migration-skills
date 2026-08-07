@@ -20,7 +20,7 @@
 #     --folder-id   <uuid>
 #     [--mode dashboard|page-per-worksheet]         # default: page-per-worksheet
 #     [--dm-element-name "Order Fact"]              # which DM element the master sources from (default: first non-Date)
-#     [--layout /tmp/<name>/dashboard-layout.json]  # parse-twb-layout output — derives themeName + themeOverrides
+#     [--layout /tmp/<name>/dashboard-layout.json]  # parse-twb-layout output — derives settings.theme.{name,overrides}
 #                                                    #   (backgroundCanvas from the page fill; categoricalScheme
 #                                                    #   from the tinted region-card palette). Omit → no theme.
 #     --out /tmp/<name>/wb-spec.json
@@ -41,6 +41,7 @@ require 'json'
 require 'set'
 require 'yaml'
 require 'optparse'
+require_relative 'lib/code_rep'
 require 'net/http'
 require 'uri'
 require 'base64'
@@ -216,8 +217,9 @@ else
 end
 
 # Derive the workbook theme from the parsed layout (Phase-1 composition/style,
-# gaps D1 + Pass-7 canvas). Two pieces, both spec-authorable (themeName +
-# themeOverrides), emitted only when the source actually declares them:
+# gaps D1 + Pass-7 canvas). Two pieces, both spec-authorable
+# (settings.theme.name + settings.theme.overrides), emitted only when the
+# source actually declares them:
 #   - backgroundCanvas: the outermost dashboard zone's fill (the page canvas).
 #   - categoricalScheme: the SOURCE region palette, recovered from the tinted
 #     container cards. Tableau stores region-card tints as 8-digit-alpha hex
@@ -319,11 +321,12 @@ wb['description'] = opts[:description] if opts[:description]
 if opts[:layout]
   theme = derive_theme(JSON.parse(File.read(opts[:layout])))
   unless theme.empty?
-    wb['themeName'] = 'Light'
     overrides = {}
     overrides['colorOverrides'] = { 'backgroundCanvas' => theme['backgroundCanvas'] } if theme['backgroundCanvas']
     overrides['categoricalScheme'] = theme['categoricalScheme'] if theme['categoricalScheme']
-    wb['themeOverrides'] = overrides unless overrides.empty?
+    # settings.theme.{name,overrides} — the removed top-level themeName/
+    # themeOverrides pair is silently dropped by the API.
+    Sigma::CodeRep.set_theme(wb, name: 'Light', overrides: overrides)
     warn "  theme: canvas=#{theme['backgroundCanvas'] || '(default)'}, categoricalScheme=#{(theme['categoricalScheme'] || []).size} color(s)"
   end
 end

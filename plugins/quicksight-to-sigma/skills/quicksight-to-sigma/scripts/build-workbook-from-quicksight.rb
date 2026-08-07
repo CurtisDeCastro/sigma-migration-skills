@@ -27,6 +27,7 @@
 #     --folder-id ID --out /tmp/wb-spec.json
 require 'json'
 require 'optparse'
+require_relative 'lib/code_rep'
 require 'digest'
 require 'set'
 require_relative 'lib/coverage_catalog'
@@ -1650,12 +1651,16 @@ spec['folderId'] = opts[:folder] if opts[:folder]
 #      border is skipped on a dark QS theme, which also flips the base to Sigma "Dark").
 unless THEME_COLORS.empty?
   ov = { 'categoricalScheme' => THEME_COLORS, 'hasCards' => 'shown', 'borderRadius' => 'round' }
+  theme_name = nil
   if THEME && THEME['isDark']
-    spec['themeName'] = 'Dark'
+    theme_name = 'Dark'
   else
     ov['elementBorder'] = { 'color' => '#E2E8F0', 'width' => 1 }
   end
-  spec['themeOverrides'] = ov
+  # settings.theme.{name,overrides} — the removed top-level themeName/
+  # themeOverrides pair is silently dropped by the API. A light QS theme sets no
+  # name at all (Sigma's default), same as before.
+  Sigma::CodeRep.set_theme(spec, name: theme_name, overrides: ov)
   STDERR.puts "  theme: applied QuickSight palette (#{THEME_COLORS.size} colors) + card chrome via themeOverrides#{THEME['isDark'] ? ' + themeName:Dark' : ''}"
 end
 

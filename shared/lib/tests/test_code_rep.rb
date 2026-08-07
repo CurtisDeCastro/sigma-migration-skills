@@ -54,6 +54,71 @@ class TestCodeRep < Minitest::Test
     end
   end
 
+  # --- theme relocation -----------------------------------------------------
+  # themeName/themeOverrides were REMOVED from the API (zero occurrences in the
+  # published OpenAPI); the theme is settings.theme.{name,overrides}. Emitters
+  # that still write the flat pair lose the whole theme silently, so document()
+  # folds it forward and set_theme() gives builders the correct shape.
+  LEGACY_THEME = { 'workbookId' => 'w1', 'name' => 'N', 'schemaVersion' => 1, 'pages' => [],
+                   'themeName' => 'Light',
+                   'themeOverrides' => { 'categoricalScheme' => %w[#111 #222] } }.freeze
+
+  def test_legacy_theme_folds_into_settings
+    doc = Sigma::CodeRep.document(LEGACY_THEME)
+    assert_equal 'Light', doc.dig('settings', 'theme', 'name')
+    assert_equal %w[#111 #222], doc.dig('settings', 'theme', 'overrides', 'categoricalScheme')
+  end
+
+  def test_removed_theme_keys_never_survive
+    doc = Sigma::CodeRep.document(LEGACY_THEME)
+    refute_includes doc.keys, 'themeName'
+    refute_includes doc.keys, 'themeOverrides'
+    meta = Sigma::CodeRep.metadata(LEGACY_THEME)
+    refute_includes meta.keys, 'themeName'
+    refute_includes meta.keys, 'themeOverrides'
+    assert_equal %w[name workbookId], meta.keys.sort # real metadata still passes through
+  end
+
+  def test_fold_does_not_clobber_an_existing_nested_theme
+    src = LEGACY_THEME.merge('settings' => { 'theme' => { 'name' => 'Dark' },
+                                             'navigation' => { 'pageHeader' => 'enabled' } })
+    doc = Sigma::CodeRep.document(src)
+    assert_equal 'Dark', doc.dig('settings', 'theme', 'name') # nested wins over legacy
+    assert_equal 'enabled', doc.dig('settings', 'navigation', 'pageHeader') # sibling preserved
+  end
+
+  def test_document_leaves_a_correct_doc_untouched
+    good = { 'schemaVersion' => 1, 'pages' => [], 'settings' => { 'theme' => { 'name' => 'Dark' } } }
+    assert_equal good, Sigma::CodeRep.document(good)
+    assert_same good, Sigma::CodeRep.document({ 'document' => good })
+  end
+
+  def test_set_theme_writes_the_current_shape
+    doc = { 'schemaVersion' => 1, 'pages' => [] }
+    Sigma::CodeRep.set_theme(doc, name: 'Light', overrides: { 'hasCards' => 'shown' })
+    assert_equal 'Light', doc.dig('settings', 'theme', 'name')
+    assert_equal 'shown', doc.dig('settings', 'theme', 'overrides', 'hasCards')
+    refute_includes doc.keys, 'themeName'
+    # merges rather than replacing, and preserves sibling settings
+    doc['settings']['navigation'] = { 'pageHeader' => 'enabled' }
+    Sigma::CodeRep.set_theme(doc, overrides: { 'borderRadius' => 'round' })
+    assert_equal %w[borderRadius hasCards], doc.dig('settings', 'theme', 'overrides').keys.sort
+    assert_equal 'enabled', doc.dig('settings', 'navigation', 'pageHeader')
+  end
+
+  def test_set_theme_is_a_no_op_without_a_theme
+    doc = { 'pages' => [] }
+    assert_equal({ 'pages' => [] }, Sigma::CodeRep.set_theme(doc, overrides: {}))
+  end
+
+  def test_theme_reader_handles_both_shapes
+    assert_equal 'Light', Sigma::CodeRep.theme(LEGACY_THEME)['name']
+    assert_equal %w[#111 #222], Sigma::CodeRep.theme(LEGACY_THEME)['overrides']['categoricalScheme']
+    nested = { 'document' => { 'settings' => { 'theme' => { 'name' => 'Dark' } } } }
+    assert_equal 'Dark', Sigma::CodeRep.theme(nested)['name']
+    assert_equal({}, Sigma::CodeRep.theme({ 'pages' => [] })['overrides'])
+  end
+
   def test_settings_and_agents_round_trip_through_wrap
     [LIVE_WITH_SETTINGS, LEGACY_WITH_SETTINGS].each do |r|
       doc = Sigma::CodeRep.document(r)

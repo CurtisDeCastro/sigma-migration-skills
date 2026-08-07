@@ -2,8 +2,8 @@
 """harvest-theme-registry.py — build a persistent per-org theme registry.
 
 Themes have no list API (unlike plugins, which now have GET /v2/plugins). The
-only place a theme id appears is a workbook spec's top-level `themeName`. So we
-harvest: list every workbook, GET each spec, collect the distinct `themeName`
+only place a theme id appears is a workbook spec's `settings.theme.name`. So we
+harvest: list every workbook, GET each spec, collect the distinct theme name
 values (built-in names + org-theme UUIDs) and how many workbooks use each.
 
 Persists to ~/.sigma-migration/theme-registry.yaml keyed by org host, so the
@@ -17,6 +17,9 @@ Env file must export SIGMA_BASE_URL / SIGMA_CLIENT_ID / SIGMA_CLIENT_SECRET.
 """
 import argparse, json, os, re, sys, time, urllib.request, urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
+import code_rep  # workbook code-rep shape adapter (document envelope + theme path)
 
 REGISTRY = os.path.expanduser("~/.sigma-migration/theme-registry.yaml")
 
@@ -80,7 +83,9 @@ def list_workbooks(base, tok, cap=None):
 def theme_of(base, tok, wb):
     try:
         spec = api(base, tok, f"/v2/workbooks/{wb}/spec")
-        return spec.get("themeName")  # None if no theme set
+        # The theme id lives at document.settings.theme.name. code_rep.theme()
+        # reads that and still understands a legacy flat readback.
+        return code_rep.theme(spec)["name"]  # None if no theme set
     except Exception as e:
         return ("__error__", str(e)[:40])
 

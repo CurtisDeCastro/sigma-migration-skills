@@ -105,7 +105,7 @@ class StylingHelpersTest(unittest.TestCase):
 
     def test_chart_color_categorical(self):
         self.assertEqual(styling.chart_color(self.theme, categorical=True),
-                          {"themeOverrides": {"categoricalScheme": self.theme["categorical"]}})
+                          {"settings": {"theme": {"overrides": {"categoricalScheme": self.theme["categorical"]}}}})
 
     def test_chart_color_no_go_chart_color_by(self):
         surfaces = dict(styling.SURFACES, chart_color_by=False)
