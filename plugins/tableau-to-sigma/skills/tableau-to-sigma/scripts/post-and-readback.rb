@@ -65,6 +65,7 @@ FileUtils.mkdir_p(opts[:workdir])
 $LOAD_PATH.unshift File.expand_path('lib', __dir__)
 require 'sigma_rest'
 require 'dm_quarantine'
+require 'code_rep'
 begin
   require 'offramp' # off-ramp trail (waiver observability); optional — never load-bearing
 rescue LoadError
@@ -380,6 +381,9 @@ if update_id
     if out_spec.is_a?(Hash) && out_spec['layout'].to_s.strip.empty?
       live = http(:get, format(GET_PATH, update_id))
       live_spec = (YAML.safe_load(live.body, permitted_classes: [Date, Time]) rescue nil)
+      # Workbook code-rep nests pages/layout under `document` (live since
+      # 2026-08); unwrap before reading — this GET is workbook-only here.
+      live_spec = Sigma::CodeRep.document(live_spec) if live_spec.is_a?(Hash)
       live_layout = live_spec.is_a?(Hash) ? live_spec['layout'].to_s : ''
       unless live_layout.strip.empty?
         # The layout XML references element ids. Banded layouts reference container
@@ -430,6 +434,16 @@ if update_id
   put_body = style_normalize!(put_body, opts[:workdir], opts[:skip_style_normalize])
   put_body = ensure_theme!(put_body, opts[:workdir])
   put_body = strip_relationship_derivation_fields_from_json(put_body)
+  # Workbook code-rep (verify AND the PUT itself) requires the nested
+  # `document` envelope (verified live 2026-08-03/04: the flat body 400s,
+  # INCLUDING on /verify) — wrap immediately before both calls, once every
+  # flat-JSON mutation above (style/theme/relationship-strip) is done. The
+  # datamodel surface is confirmed NOT changing, so only the workbook branch
+  # wraps.
+  if opts[:type] == 'workbook'
+    wb_doc = JSON.parse(put_body)
+    put_body = JSON.generate(Sigma::CodeRep.wrap(Sigma::CodeRep.document(wb_doc), extra: Sigma::CodeRep.metadata(wb_doc)))
+  end
   verify_spec!(put_body, opts[:skip_spec_verify], update: true)
   # W2.5: DM PUT id-stability guard. A Sigma dataModel PUT can RE-MINT element ids
   # (field-caught 2026-07: AAAAAAAAAB -> b4pAUi0swJ), which silently bricks any
@@ -474,6 +488,16 @@ else
     end
   rescue JSON::ParserError
     nil # non-JSON body (YAML spec) — the API remains the validator
+  end
+  # Workbook code-rep (verify AND the POST itself) requires the nested
+  # `document` envelope (verified live 2026-08-03/04: the flat body 400s,
+  # INCLUDING on /verify) — wrap immediately before both calls, AFTER the
+  # duplicate-id preflight above (which needs flat `pages`/`elements`). The
+  # datamodel surface is confirmed NOT changing, so only the workbook branch
+  # wraps.
+  if opts[:type] == 'workbook'
+    wb_doc = JSON.parse(post_body)
+    post_body = JSON.generate(Sigma::CodeRep.wrap(Sigma::CodeRep.document(wb_doc), extra: Sigma::CodeRep.metadata(wb_doc)))
   end
   verify_spec!(post_body, opts[:skip_spec_verify])
   resp = http(:post, POST_PATH, post_body)
@@ -532,7 +556,11 @@ columns_path = opts[:type] == 'datamodel' ?
   "/v2/dataModels/#{oid}/columns" :
   "/v2/workbooks/#{oid}/columns"
 readback = lambda do
-  spec = JSON.parse(http(:get, format(GET_PATH, oid), accept_json: true).body)
+  # Workbook code-rep responses nest non-metadata fields (pages/layout/
+  # schemaVersion/kind) under `document` (live since 2026-08); the DM
+  # readback is unchanged and stays flat.
+  raw_spec = JSON.parse(http(:get, format(GET_PATH, oid), accept_json: true).body)
+  spec = opts[:type] == 'workbook' ? Sigma::CodeRep.document(raw_spec) : raw_spec
   cols_res = http(:get, columns_path, accept_json: true)
   # cols_res is the FIRST page and is kept only for its HTTP status, which the
   # quarantine guards below check. The entries are re-read EXHAUSTIVELY: the

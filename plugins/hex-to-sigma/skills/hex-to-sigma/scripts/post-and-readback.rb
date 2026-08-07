@@ -37,6 +37,7 @@ FileUtils.mkdir_p(opts[:workdir])
 
 $LOAD_PATH.unshift File.expand_path('lib', __dir__)
 require 'sigma_rest'
+require 'code_rep'
 
 POST_PATH = opts[:type] == 'datamodel' ? '/v2/dataModels/spec'    : '/v2/workbooks/spec'
 GET_PATH  = opts[:type] == 'datamodel' ? '/v2/dataModels/%s/spec' : '/v2/workbooks/%s/spec'
@@ -46,6 +47,16 @@ ID_FIELD  = opts[:type] == 'datamodel' ? 'dataModelId'            : 'workbookId'
 # — unwrap to the bare spec before POSTing.
 raw = JSON.parse(File.read(opts[:spec]))
 spec = raw['dataModel'] || raw['workbook'] || raw
+
+# Workbook code-rep nests non-metadata fields under `document` (verified live
+# 2026-08-03/04) and REJECTS the old flat body with HTTP 400. The datamodel
+# surface is confirmed NOT changing — it ignores `document` — so only the
+# workbook branch wraps.
+spec_body = if opts[:type] == 'workbook'
+              JSON.generate(Sigma::CodeRep.wrap(Sigma::CodeRep.document(spec), extra: Sigma::CodeRep.metadata(spec)))
+            else
+              spec.to_json
+            end
 
 # Orphan-prevention: workbook POSTs are create-only. Track ids posted in this
 # conversion so a re-run PUTs (updates) instead of orphaning a prior attempt.
@@ -58,11 +69,11 @@ update_id = opts[:update_id] || (prior_ids.last if opts[:type] == 'workbook' && 
 
 if update_id
   warn "UPDATE mode: PUT #{opts[:type]} #{update_id} (no new #{opts[:type]} created)"
-  resp = Sigma.request(:put, format(GET_PATH, update_id), body: spec.to_json)
+  resp = Sigma.request(:put, format(GET_PATH, update_id), body: spec_body)
   oid = resp[ID_FIELD] || update_id
   warn "PUT ok: #{ID_FIELD}=#{oid}"
 else
-  resp = Sigma.request(:post, POST_PATH, body: spec.to_json)
+  resp = Sigma.request(:post, POST_PATH, body: spec_body)
   oid = resp[ID_FIELD] or abort("POST failed: #{resp.inspect}")
   warn "POST ok: #{ID_FIELD}=#{oid}"
   if posted_log
@@ -70,12 +81,15 @@ else
   end
 end
 
-# Read back the spec with server-assigned ids.
+# Read back the spec with server-assigned ids. Workbook code-rep responses
+# nest non-metadata fields (pages/layout/schemaVersion/kind) under `document`
+# (live since 2026-08); the DM readback is unchanged and stays flat.
 readback = Sigma.request(:get, format(GET_PATH, oid))
+doc = opts[:type] == 'workbook' ? Sigma::CodeRep.document(readback) : readback
 
 out = {
   ID_FIELD => oid,
-  'pages' => (readback['pages'] || []).map do |p|
+  'pages' => (doc['pages'] || []).map do |p|
     {
       'id' => p['id'], 'name' => p['name'],
       'elements' => (p['elements'] || []).map { |e| { 'id' => e['id'], 'kind' => e['kind'], 'name' => e['name'] } }
@@ -111,7 +125,7 @@ end
 # Layout-quality lint (vendored byte-identical from shared/lib/layout_lint.rb).
 if opts[:type] == 'workbook' && !opts[:skip_lint]
   require_relative 'lib/layout_lint'
-  violations = LayoutLint.lint(readback)
+  violations = LayoutLint.lint(doc)
   if violations.any?
     warn "\n========================================"
     warn "FAIL — layout lint: #{violations.size} violation(s):"

@@ -31,6 +31,7 @@ FileUtils.mkdir_p(opts[:workdir])
 
 $LOAD_PATH.unshift File.expand_path('lib', __dir__)
 require 'sigma_rest'
+require 'code_rep'
 
 BASE = ENV.fetch('SIGMA_BASE_URL')
 
@@ -80,15 +81,26 @@ end
 # explicit --update-id (Phase 3 normally reuses a DM via the ref-dm path).
 update_id = opts[:update_id] || (prior_ids.last if opts[:type] == 'workbook' && prior_ids.any?)
 
+# Workbook code-rep nests non-metadata fields under `document` (verified live
+# 2026-08-03/04) and REJECTS the old flat body with HTTP 400. The datamodel
+# surface is confirmed NOT changing — it ignores `document` — so only the
+# workbook branch wraps the outgoing body.
+spec_body = if opts[:type] == 'workbook'
+              posting_doc = JSON.parse(File.read(opts[:spec]))
+              JSON.generate(Sigma::CodeRep.wrap(Sigma::CodeRep.document(posting_doc), extra: Sigma::CodeRep.metadata(posting_doc)))
+            else
+              File.read(opts[:spec])
+            end
+
 if update_id
   warn "UPDATE mode: PUT #{opts[:type]} #{update_id} (no new #{opts[:type]} created)"
-  resp = http(:put, format(GET_PATH, update_id), File.read(opts[:spec]))
+  resp = http(:put, format(GET_PATH, update_id), spec_body)
   parsed = YAML.safe_load(resp.body, permitted_classes: [Date, Time])
   oid = parsed[ID_FIELD] || update_id
   abort("PUT failed (HTTP #{resp.code}): #{parsed.inspect}") unless resp.is_a?(Net::HTTPSuccess)
   warn "PUT ok: #{ID_FIELD}=#{oid}"
 else
-  resp = http(:post, POST_PATH, File.read(opts[:spec]))
+  resp = http(:post, POST_PATH, spec_body)
   parsed = YAML.safe_load(resp.body, permitted_classes: [Date, Time])
   oid = parsed[ID_FIELD] or abort("POST failed: #{parsed.inspect}")
   warn "POST ok: #{ID_FIELD}=#{oid}"
@@ -103,8 +115,11 @@ else
   end
 end
 
-# Read back
-spec = JSON.parse(http(:get, format(GET_PATH, oid), accept_json: true).body)
+# Read back. Workbook code-rep responses nest non-metadata fields (pages/
+# layout/schemaVersion/kind) under `document` (live since 2026-08); the DM
+# readback is unchanged and stays flat.
+raw_readback = JSON.parse(http(:get, format(GET_PATH, oid), accept_json: true).body)
+spec = opts[:type] == 'workbook' ? Sigma::CodeRep.document(raw_readback) : raw_readback
 
 # Fetch the resolved /columns BEFORE writing the id-map so we can attach the
 # AUTHORITATIVE per-element column labels (the suffixed display names Sigma
