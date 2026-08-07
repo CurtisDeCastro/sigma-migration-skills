@@ -181,8 +181,10 @@ nothing real to score.
 
 # Addendum — the oracle's real blocker is step 6, not step 5
 
-Added after starting the oracle. Two measurements, both from the run's own artifacts
-(`~/domo-coldrun-v4`), reconcile a disagreement with the audit and **reorder the plan**.
+Added after starting the oracle. All measurements below come from the run's own artifacts
+(`~/domo-coldrun-v4`). The audit's numbers all reproduce — the contribution here is not a
+correction to it but a **reordering of the plan**, plus a retraction of my own earlier mis-reading
+(see the RETRACTION below).
 
 ## The audit's structural numbers reproduce exactly
 
@@ -192,10 +194,28 @@ Measured from `workbook-spec.json` with `build-parity-plan.rb`'s own `chartable?
 - **31** `kpi-chart`, 9 bar, 8 combo, 6 region-map, 5 line, 3 table, 2 scatter, 1 donut ✓
 - **29** of the 65 are `-summary` companions ✓
 
-## Its scoreability buckets do not — and the gap is the whole story
+## Its scoreability buckets reproduce exactly too — an earlier draft of this file was WRONG
 
-The audit reported *"Cleanly oracle-able today: **7 cards**"* and *"Need date-window sync: **28
-cards**"*. Measured on the Sigma side:
+> **RETRACTION.** An earlier version of this addendum said the audit's scoreability buckets "do not
+> reproduce" and implied its **28** was a miscount. That was my error, from a coarse regex over
+> `cards.json` instead of reading `dateTimeRangeType`. Corrected here rather than quietly edited,
+> because the wrong version was published in PR #634 and the audit deserves the record straight.
+
+Keyed precisely on `dateTimeRange.dateTimeRangeType` across all 36 cards:
+
+| bucket | count | audit said |
+|---|---|---|
+| `ROLLING_PERIOD` (rolling 7/14/28/30-day windows) | **24** | — |
+| `INTERVAL_OFFSET` | **5** | — |
+| **subtotal carrying a date window** | **29** | 28 date-sync **+ 1 never = 29** ✓ |
+| **no date window at all** | **7** | "Cleanly oracle-able today: **7 cards**" ✓ |
+
+`36 − 24 − 5 = 7`. And the audit's "1 never statically scoreable — `983053598` Survey Completion
+Rate" is confirmed as one of the five `INTERVAL_OFFSET` cards
+(`{interval: "WEEK", offset: 1, count: 0}` on `created_on`), exactly as described.
+
+**The audit's numbers were right, and per-card throughout.** What I measured separately — 9 of 65
+Sigma tiles carrying a relative-date *expression* — is a different axis, not a contradiction:
 
 | signal | count |
 |---|---|
@@ -207,16 +227,20 @@ cards**"*. Measured on the Sigma side:
 (The DM count is 0 because all 81 Beast Modes classified as `aggregate` and fell through to
 element-level inlining — so the element scan already sees every date expression.)
 
-Both numbers are right; they measure **different sides**:
+The audit counted **Domo cards carrying a window**; I counted **Sigma tiles carrying a date
+expression in a formula**. Both are correct measurements of different things.
+
+The finding that survives the retraction — and the one that actually matters — is the third
+measurement, which nothing in the audit contradicts:
 
 ```
-Domo cards carrying a date window (dateRangeFilter / dateTimeRange):  31 of 36
-Date filters present in the generated Sigma spec:                      0
+Domo cards carrying a date window (dateTimeRangeType present):   29 of 36
+Date filters present in the generated Sigma spec:                 0
 Sigma spec filters, by kind:              {list: 36, top-n: 1}
 ```
 
-**The audit's 28 is a Domo-side count. The Sigma side has no date filters at all.** The gap *is*
-the dropped-`dateRangeFilter` bug — step 6 in the plan.
+**29 Domo cards apply a date window; the generated Sigma spec contains zero date filters.** That gap
+*is* the dropped-`dateRangeFilter` bug — step 6 in the plan.
 
 ## Why this reorders the plan
 
@@ -225,13 +249,16 @@ That is wrong, and the consequence is concrete:
 
 - The oracle computes expected values **from Domo**, which applies the card's date window.
 - The Sigma tile has **no** window, so it aggregates over all history.
-- So ~31 of 65 tiles would diverge for a reason **no amount of oracle work can fix**.
+- **55 of the 65 chartable tiles derive from one of the 29 windowed cards** — 29 base tiles plus 26
+  `-summary` companions (tile ids carry the Domo card id: `el-<cardId>[-summary]`). Only **10** tiles
+  are unaffected. So ~85% of the pool would diverge for a reason **no amount of oracle work can fix**.
 - `min_pass_rate` defaults to **1.0** — every tile must pass. Gate 1 therefore *cannot* pass until
   the windows are restored, no matter how good the oracle is.
 
-The audit's own mitigation — *"need date-window sync (same UTC day, both sides in one
-invocation)"* — **cannot work as described**: clock-syncing presumes both sides have the window.
-Sigma's side has none. There is nothing to sync.
+The audit's mitigation — *"need date-window sync (same UTC day, both sides in one invocation)"* — is
+the right technique, but it is only applicable **after** step 6: clock-syncing presumes both sides
+have a window to align. Today Sigma's side has none, so there is nothing to sync yet. That is a
+sequencing gap, not an error in the audit.
 
 **Do step 6 before (or with) step 5.** Building the oracle first means building it against tiles that
 are guaranteed to diverge, and discovering that only after the 3–5 days are spent — the same
@@ -239,12 +266,16 @@ build-the-oracle-first trap the audit correctly flagged for bead `2tkm`, one lay
 
 ## Revised order
 
-1. **Step 6 — `dateRangeFilter` restore (1–2 days).** Now a prerequisite. 31 of 36 cards affected.
-2. **Step 5 — the oracle (3–5 days).** With windows restored, the scoreable pool is large: 65 − 9
-   date-expression tiles − 1 top-N ≈ **55 cleanly scoreable**, not the audit's 7. The oracle gets
-   *cheaper* once step 6 lands; it is only expensive if attempted first.
-3. Then steps 3 / 7 / 8 / 11, and the exclusion ledger for the genuine residue (the 1 permanently
-   unscoreable `983053598` "Survey Completion Rate", plus the top-N tie-break).
+1. **Step 6 — `dateRangeFilter` restore (1–2 days). Now a prerequisite**, not a fidelity nicety.
+   29 of 36 cards carry a window → **55 of 65 tiles** depend on it. Two shapes to handle:
+   **24 `ROLLING_PERIOD`** cards (mechanical — `{interval, offset, count}`, e.g. rolling 14 days) and
+   **5 `INTERVAL_OFFSET`** cards (needs a design call on expressing an offset window as a Sigma
+   element filter).
+2. **Step 5 — the oracle (3–5 days).** Only once windows exist on both sides is the audit's
+   date-window-sync technique applicable at all. The genuine un-scoreable residue then stays what the
+   audit already identified: `983053598` "Survey Completion Rate" (window baked into the plotted
+   value) plus the top-N tie-break risk — *not* a large exclusion list.
+3. Then steps 3 / 7 / 8 / 11, and the exclusion ledger for that residue.
 
 `parity-plan-exclusions.json` still has no generator — `phase6-parity-domo.rb` (#631) *enforces* it
 but nothing writes it yet. That is a small, offline, testable piece and the right next increment
