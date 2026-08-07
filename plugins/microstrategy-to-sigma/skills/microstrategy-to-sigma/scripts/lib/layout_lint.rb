@@ -37,7 +37,7 @@
 #       kind's minimum (KIND_MIN_ROWS). Sigma renders chart/KPI tiles BLANK
 #       under ~3-4 grid rows — in the live page AND in page/element PNG
 #       exports (hit twice in a 2026-07 live migration). Element kinds come
-#       from the spec's page elements; layout-only container shells (no spec
+#       from the spec's flat document elements; layout-only container shells (no spec
 #       kind) are skipped. A child's span is measured in its own container's
 #       row units (matched-inner-span convention: inner rows track page rows).
 #
@@ -47,6 +47,8 @@
 #
 # Standalone:
 #   ruby scripts/lib/layout_lint.rb <spec.json>   # exit 1 + list on violations
+require_relative 'code_rep'
+
 module LayoutLint
   RAW_ID_NAME = /\A(?:[0-9a-f]{12,}|el-[0-9a-f]+)\z/i
   DEAD_ZONE_MAX = 0.25
@@ -79,11 +81,12 @@ module LayoutLint
     KIND_MIN_ROWS['text']
   end
 
-  # All [element, page] pairs in the spec (skips layout-only container shells).
+  # All [element, page] pairs in the workbook document. Elements are flat;
+  # page metadata is joined through the required layout's <Page> membership.
+  # Layout-only container shells are naturally skipped because they are not in
+  # document.elements.
   def named_elements(spec)
-    (spec['pages'] || []).flat_map do |pg|
-      (pg['elements'] || []).map { |el| [el, pg] }
-    end
+    Sigma::CodeRep.workbook_elements_with_pages(spec)
   end
 
   # Per-page layout blocks: { page_id => page_inner_xml }.
@@ -174,6 +177,7 @@ module LayoutLint
   end
 
   def lint(spec)
+    spec = Sigma::CodeRep.document(spec)
     violations = []
     el_kind = {}
     el_body = {}
@@ -187,8 +191,9 @@ module LayoutLint
       name = el['name'].to_s
       next if name.empty?
       next unless name.match?(RAW_ID_NAME)
+      page_name = pg && (pg['name'] || pg['id'])
       violations << "raw-id display name: element #{el['id']} (#{el['kind']}) on page " \
-                    "'#{pg['name'] || pg['id']}' is named #{name.inspect} — derive a human title " \
+                    "'#{page_name || '(unplaced: missing from layout)'}' is named #{name.inspect} — derive a human title " \
                     '(the source visual had no explicit title; see derived_title in the builder)'
     end
 

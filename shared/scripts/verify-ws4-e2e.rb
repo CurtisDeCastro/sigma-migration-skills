@@ -70,6 +70,7 @@ require 'kpi_card'
 require 'richness'
 require 'styling'
 require 'actions'
+require 'code_rep'
 
 def log(msg)
   $stderr.puts("[verify-ws4-e2e] #{msg}")
@@ -198,7 +199,8 @@ def reference_schema_version
     wid = w['workbookId'] || w['id']
     next unless wid
     spec = (Sigma.request(:get, "/v2/workbooks/#{wid}/spec", accept: 'application/json') rescue nil)
-    return spec['schemaVersion'] if spec.is_a?(Hash) && spec['schemaVersion']
+    doc = Sigma::CodeRep.document(spec) if spec.is_a?(Hash)
+    return doc['schemaVersion'] if doc && doc['schemaVersion']
   end
   raise 'could not discover schemaVersion from any existing workbook'
 end
@@ -432,37 +434,31 @@ def build_spec(home, schema_version)
     </Page>
   XML
 
-  {
-    'name' => "WS4 surfaces probe — E2E proof (#{RUN_TAG})",
-    'folderId' => home,
+  elements = [
+    *hdr_main[:element],
+    k_rev[:container], k_rev[:kpi], k_rev[:spark],
+    k_ord[:container], k_ord[:kpi], k_ord[:spark],
+    chat_hd, chat,
+    *hdr_actions[:element],
+    note_ctl, btn_reset, btn_preset, btn_log,
+    targets, review_log,
+    *gh_glow[:element], *gh_rings[:element], *gh_byo[:element],
+    src, cat_pivot
+  ]
+  doc = {
     'schemaVersion' => schema_version,
-    'description' => 'Live GO/NO-GO proof of WS4 shared-lib surfaces: Richness.agent/chat, ' \
-                      'Styling.gradient_header (+motif menu)/gradient_card/sparkline, Actions.* ' \
-                      '(buttons/effects, empty + linked input tables). Throwaway test artifact.',
     'agents' => [agent],
     'pages' => [
-      { 'id' => PG_MAIN, 'name' => 'Overview',
-        'elements' => [
-          *hdr_main[:element],
-          k_rev[:container], k_rev[:kpi], k_rev[:spark],
-          k_ord[:container], k_ord[:kpi], k_ord[:spark],
-          chat_hd, chat
-        ] },
-      { 'id' => PG_ACTIONS, 'name' => 'Actions & Write-back',
-        'elements' => [
-          *hdr_actions[:element],
-          note_ctl, btn_reset, btn_preset, btn_log,
-          targets, review_log
-        ] },
-      { 'id' => PG_MOTIFS, 'name' => 'Motif gallery',
-        'elements' => [*gh_glow[:element], *gh_rings[:element], *gh_byo[:element]] },
-      { 'id' => PG_DATA, 'name' => 'Data', 'visibility' => 'hidden',
-        'elements' => [src, cat_pivot] },
+      { 'id' => PG_MAIN, 'name' => 'Overview' },
+      { 'id' => PG_ACTIONS, 'name' => 'Actions & Write-back' },
+      { 'id' => PG_MOTIFS, 'name' => 'Motif gallery' },
+      { 'id' => PG_DATA, 'name' => 'Data', 'visibility' => 'hidden' },
     ],
+    'elements' => elements,
     # IMPORTANT (live-discovered, this task): layout is a single WORKBOOK-TOP-
-    # LEVEL field (sibling of `pages`), matching build-plugs-command-center.rb
-    # — NOT a per-page `layout` key (the shape verify-richness-surfaces-e2e.rb
-    # uses). An isolated A/B POST probe during this task's run confirmed a
+    # LEVEL document field (sibling of `pages` and `elements`), matching
+    # build-plugs-command-center.rb — NOT a per-page `layout` key. An isolated
+    # A/B POST probe during this task's run confirmed a
     # per-page `layout` key is silently IGNORED and replaced by Sigma's own
     # auto-arrange (all elements squeezed into the left half of the page,
     # stacked in element-array order) — only ONE combined top-level `layout`
@@ -470,6 +466,13 @@ def build_spec(home, schema_version)
     # concatenated) is actually honored.
     'layout' => [pg_main_layout, pg_actions_layout, pg_motifs_layout, pg_data_layout].join("\n")
   }
+  Sigma::CodeRep.wrap(doc, extra: {
+    'name' => "WS4 surfaces probe — E2E proof (#{RUN_TAG})",
+    'folderId' => home,
+    'description' => 'Live GO/NO-GO proof of WS4 shared-lib surfaces: Richness.agent/chat, ' \
+                     'Styling.gradient_header (+motif menu)/gradient_card/sparkline, Actions.* ' \
+                     '(buttons/effects, empty + linked input tables). Throwaway test artifact.'
+  })
 end
 
 # ---------------------------------------------------------------------------
@@ -494,7 +497,8 @@ begin
 
   # --- structural (GET) readback ------------------------------------------
   spec_back = Sigma.request(:get, "/v2/workbooks/#{wb}/spec", accept: 'application/json')
-  els = spec_back['pages'].flat_map { |p| p['elements'] || [] }
+  spec_back = Sigma::CodeRep.document(spec_back)
+  els = Sigma::CodeRep.workbook_elements(spec_back)
   find_el = ->(id) { els.find { |e| e['id'] == id } }
   agents_back = spec_back['agents'] || []
 

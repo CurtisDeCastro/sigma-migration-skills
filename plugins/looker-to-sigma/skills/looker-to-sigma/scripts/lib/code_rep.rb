@@ -14,10 +14,14 @@
 module Sigma
   module CodeRep
     # The non-metadata fields that live INSIDE `document`. Confirmed by live readback.
-    # `settings` (theme/navigation) and `agents` belong here too — omitting them
-    # sweeps themeName/themeOverrides/agents onto the top level, where they are
-    # not valid keys, silently dropping theme + agents on every write.
-    DOC_KEYS = %w[schemaVersion pages kind layout settings agents].freeze
+    # `elements`, `overlays`, and `panels` are workbook-document collections,
+    # alongside page metadata and the required layout. `settings`
+    # (theme/navigation) and `agents` belong here too. Omitting any of these
+    # sweeps them onto the metadata envelope, where they are invalid and are
+    # silently dropped on write.
+    DOC_KEYS = %w[
+      schemaVersion pages elements overlays panels kind layout settings agents
+    ].freeze
 
     # REMOVED from the API. The workbook theme is now `settings.theme.name` and
     # `settings.theme.overrides` (published OpenAPI: createWorkbookSpec — there
@@ -69,6 +73,46 @@ module Sigma
       # Write path: every live workbook code-rep endpoint requires the wrapper.
       def wrap(document_hash, extra: {})
         extra.merge('document' => document_hash)
+      end
+
+      # WORKBOOK-ONLY shape helpers. Workbook elements are a flat document
+      # collection; pages contain metadata only. Page membership is encoded by
+      # the required layout's <Page> blocks. Keep these helpers in CodeRep so
+      # callers cannot accidentally apply this shape to data-model specs, whose
+      # pages[*].elements nesting is unchanged.
+      def workbook_elements(spec)
+        els = document(spec)['elements']
+        els.is_a?(Array) ? els.select { |el| el.is_a?(Hash) } : []
+      end
+
+      # { page_id => [element_id, ...] }, in layout order.
+      def workbook_page_element_ids(spec)
+        doc = document(spec)
+        doc['layout'].to_s
+                     .scan(%r{<Page\b[^>]*\bid="([^"]*)"[^>]*>(.*?)</Page>}m)
+                     .each_with_object({}) do |(page_id, body), out|
+          out[page_id] = body.scan(/\belementId="([^"]*)"/).flatten.uniq
+        end
+      end
+
+      # { element_id => page metadata hash }. Layout is authoritative; pages
+      # that appear only in layout still receive a minimal {id,name} descriptor.
+      def workbook_page_by_element(spec)
+        doc = document(spec)
+        pages = doc['pages'].is_a?(Array) ? doc['pages'].select { |pg| pg.is_a?(Hash) } : []
+        pages_by_id = pages.each_with_object({}) { |pg, out| out[pg['id']] = pg if pg['id'] }
+        workbook_page_element_ids(doc).each_with_object({}) do |(page_id, element_ids), out|
+          page = pages_by_id[page_id] || { 'id' => page_id, 'name' => page_id }
+          element_ids.each { |element_id| out[element_id] ||= page }
+        end
+      end
+
+      # [[element, page_metadata_or_nil], ...] for flat workbook elements.
+      def workbook_elements_with_pages(spec)
+        page_by_element = workbook_page_by_element(spec)
+        workbook_elements(spec).map do |el|
+          [el, page_by_element[el['id'] || el['elementId']]]
+        end
       end
 
       private

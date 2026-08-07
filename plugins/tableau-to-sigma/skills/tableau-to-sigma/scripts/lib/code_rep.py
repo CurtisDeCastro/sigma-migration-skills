@@ -11,10 +11,14 @@ Reads stay tolerant of the legacy flat shape because flat artifacts still exist
 on disk (committed workbook snapshots, fixtures).
 """
 
-# `settings` (theme/navigation) and `agents` belong INSIDE `document` too — omitting
-# them sweeps themeName/themeOverrides/agents onto the top level, where they are not
-# valid keys, silently dropping theme + agents on every write.
-DOC_KEYS = ("schemaVersion", "pages", "kind", "layout", "settings", "agents")
+# Workbook elements are flat document collections; `overlays` and `panels` live
+# beside them. `settings` (theme/navigation) and `agents` belong inside
+# `document` too. Omitting any of these sweeps it onto the metadata envelope,
+# where it is invalid and silently dropped on write.
+DOC_KEYS = (
+    "schemaVersion", "pages", "elements", "overlays", "panels",
+    "kind", "layout", "settings", "agents",
+)
 
 # REMOVED from the API. The workbook theme is now settings.theme.name /
 # settings.theme.overrides (published OpenAPI: createWorkbookSpec has zero

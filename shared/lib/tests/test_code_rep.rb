@@ -2,15 +2,23 @@ require 'minitest/autorun'
 require_relative '../code_rep'
 
 class TestCodeRep < Minitest::Test
+  LAYOUT = '<Page id="p"><LayoutElement elementId="e1"/></Page>'
   LIVE   = { 'workbookId' => 'w1', 'name' => 'N',
-             'document' => { 'schemaVersion' => 1, 'pages' => [{ 'id' => 'p' }] } }
+             'document' => { 'schemaVersion' => 1, 'pages' => [{ 'id' => 'p' }],
+                             'elements' => [{ 'id' => 'e1', 'kind' => 'table' }],
+                             'overlays' => [{ 'id' => 'o1' }], 'panels' => [{ 'id' => 'pn1' }],
+                             'layout' => LAYOUT } }
   LEGACY = { 'workbookId' => 'w1', 'name' => 'N',
-             'schemaVersion' => 1, 'pages' => [{ 'id' => 'p' }] }
+             'schemaVersion' => 1, 'pages' => [{ 'id' => 'p' }],
+             'elements' => [{ 'id' => 'e1', 'kind' => 'table' }],
+             'overlays' => [{ 'id' => 'o1' }], 'panels' => [{ 'id' => 'pn1' }],
+             'layout' => LAYOUT }
 
   def test_reads_both_shapes
     [LIVE, LEGACY].each do |r|
       assert_equal 1, Sigma::CodeRep.document(r)['schemaVersion']
       assert_equal [{ 'id' => 'p' }], Sigma::CodeRep.document(r)['pages']
+      assert_equal ['e1'], Sigma::CodeRep.document(r)['elements'].map { |el| el['id'] }
     end
   end
 
@@ -29,6 +37,24 @@ class TestCodeRep < Minitest::Test
       doc = Sigma::CodeRep.document(r)
       assert_equal doc, Sigma::CodeRep.document(Sigma::CodeRep.wrap(doc))
     end
+  end
+
+  def test_document_collections_stay_inside_document
+    [LIVE, LEGACY].each do |r|
+      doc = Sigma::CodeRep.document(r)
+      assert_equal [{ 'id' => 'o1' }], doc['overlays']
+      assert_equal [{ 'id' => 'pn1' }], doc['panels']
+      %w[elements overlays panels].each { |key| refute_includes Sigma::CodeRep.metadata(r), key }
+    end
+  end
+
+  def test_workbook_page_membership_comes_from_layout
+    doc = Sigma::CodeRep.document(LIVE)
+    assert_nil doc['pages'].first['elements']
+    assert_equal({ 'p' => ['e1'] }, Sigma::CodeRep.workbook_page_element_ids(doc))
+    element, page = Sigma::CodeRep.workbook_elements_with_pages(doc).first
+    assert_equal 'e1', element['id']
+    assert_equal 'p', page['id']
   end
 
   LIVE_WITH_SETTINGS = { 'workbookId' => 'w1', 'name' => 'N',

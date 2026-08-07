@@ -5,10 +5,23 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 import code_rep
 
-LIVE = {'workbookId': 'w1', 'name': 'N',
-        'document': {'schemaVersion': 1, 'pages': [{'id': 'p'}]}}
-LEGACY = {'workbookId': 'w1', 'name': 'N',
-          'schemaVersion': 1, 'pages': [{'id': 'p'}]}
+LAYOUT = '<Page id="p"><LayoutElement elementId="e1"/></Page>'
+LIVE = {
+    'workbookId': 'w1', 'name': 'N',
+    'document': {
+        'schemaVersion': 1, 'pages': [{'id': 'p'}],
+        'elements': [{'id': 'e1', 'kind': 'table'}],
+        'overlays': [{'id': 'o1'}], 'panels': [{'id': 'pn1'}],
+        'layout': LAYOUT,
+    },
+}
+LEGACY = {
+    'workbookId': 'w1', 'name': 'N',
+    'schemaVersion': 1, 'pages': [{'id': 'p'}],
+    'elements': [{'id': 'e1', 'kind': 'table'}],
+    'overlays': [{'id': 'o1'}], 'panels': [{'id': 'pn1'}],
+    'layout': LAYOUT,
+}
 
 
 class TestCodeRep(unittest.TestCase):
@@ -16,6 +29,7 @@ class TestCodeRep(unittest.TestCase):
         for r in (LIVE, LEGACY):
             self.assertEqual(code_rep.document(r)['schemaVersion'], 1)
             self.assertEqual(code_rep.document(r)['pages'], [{'id': 'p'}])
+            self.assertEqual(code_rep.document(r)['elements'][0]['id'], 'e1')
 
     def test_metadata_split(self):
         for r in (LIVE, LEGACY):
@@ -30,6 +44,14 @@ class TestCodeRep(unittest.TestCase):
         for r in (LIVE, LEGACY):
             doc = code_rep.document(r)
             self.assertEqual(code_rep.document(code_rep.wrap(doc)), doc)
+
+    def test_document_collections_stay_inside_document(self):
+        for r in (LIVE, LEGACY):
+            doc = code_rep.document(r)
+            self.assertEqual(doc['overlays'], [{'id': 'o1'}])
+            self.assertEqual(doc['panels'], [{'id': 'pn1'}])
+            for key in ('elements', 'overlays', 'panels'):
+                self.assertNotIn(key, code_rep.metadata(r))
 
 
 LIVE_WITH_SETTINGS = {

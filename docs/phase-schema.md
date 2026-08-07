@@ -16,8 +16,8 @@ check" in an unfamiliar skill, look up its local name here.
 | C3 | **Reuse-check** | Before creating a DM, look for an existing Sigma DM with the same signature (avoid sprawl) |
 | C4 | **Convert** | Source model → Sigma data-model JSON (MCP `convert_*` tool or in-repo converter) |
 | C5 | **Post-DM gate** | POST the DM, read back real element/column ids — hard gate before any workbook work |
-| C6 | **Build workbook** | Report/dashboard → Sigma workbook spec wired to the DM ids |
-| C7 | **Layout** | Apply the grid layout as the LAST write (stacked ≠ done; bare spec PUT wipes layout) |
+| C6 | **Build workbook** | Report/dashboard → Sigma workbook spec wired to the DM ids, with every element completely placed in the layout on the create write |
+| C7 | **Layout safety** | Preserve the complete layout on every write; make the final write layout-safe and last (stacked ≠ done; any write that omits layout wipes it) |
 | C8 | **Parity hard gate** | Source values vs Sigma values (vs warehouse where possible) — mandatory, never skip |
 | C9 | **Security / RLS** | Port detected RLS/CLS to Sigma user-attributes + DM filters (detect always; apply opt-in) |
 | C10 | **Enhance** | Post-publish polish, UI-only features, optional extras |

@@ -2363,11 +2363,12 @@ else
               _census = nil
               if File.file?(_rb)
                 _rb_doc = (JSON.parse(File.read(_rb)) rescue nil)
-                if _rb_doc.is_a?(Hash) && _rb_doc['pages'].is_a?(Array)
-                  _census = _rb_doc['pages'].flat_map { |pg| Array(pg.is_a?(Hash) ? pg['elements'] : nil) }
-                                            .select { |el| el.is_a?(Hash) && el['visibleAsSource'] != false }
-                                            .map { |el| _fam.call(el['kind']) }
-                                            .select { |f| _chartf.include?(f) }
+                if _rb_doc.is_a?(Hash)
+                  _els = CODE_REP_LOADED ? Sigma::CodeRep.workbook_elements(_rb_doc) :
+                                           Array(_rb_doc['elements'])
+                  _census = _els.select { |el| el.is_a?(Hash) && el['visibleAsSource'] != false }
+                                .map { |el| _fam.call(el['kind']) }
+                                .select { |f| _chartf.include?(f) }
                 end
               end
               if _census.is_a?(Array) && _census.any?
@@ -3724,8 +3725,13 @@ if File.exist?(kp21_path)
     kp21_rb = JSON.parse(File.read(kp21_rb_path)) rescue nil
     kp21_els = {}      # normalized element name → [family, ...]
     kp21_el_kinds = {} # normalized element name → [raw kind, ...] (for the message)
-    Array(kp21_rb.is_a?(Hash) ? kp21_rb['pages'] : nil).each do |pg|
-      Array(pg.is_a?(Hash) ? pg['elements'] : nil).each do |el|
+    kp21_elements = if kp21_rb.is_a?(Hash)
+                      CODE_REP_LOADED ? Sigma::CodeRep.workbook_elements(kp21_rb) :
+                                        Array(kp21_rb['elements'])
+                    else
+                      []
+                    end
+    kp21_elements.each do |el|
         next unless el.is_a?(Hash) && el['visibleAsSource'] != false # hidden data-page masters
         f = kp21_fam.call(el['kind'])
         next unless kp21_chartf.include?(f) || f == 'other'
@@ -3736,7 +3742,6 @@ if File.exist?(kp21_path)
         next if k.empty?
         (kp21_els[k] ||= []) << f
         (kp21_el_kinds[k] ||= []) << el['kind'].to_s
-      end
     end
     kp21_waivers = {} # normalized tile → reason
     Array(kp21['kind_waivers']).each do |w|

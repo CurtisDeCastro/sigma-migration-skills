@@ -270,29 +270,7 @@ def build_spec(home, schema_version, src_formula_fn, flags)
   }
   cat_chart_el['color'] = cat_color if cat_color
 
-  {
-    'name' => "WS3 styling-surface probe — E2E proof (#{RUN_TAG})",
-    'folderId' => home,
-    'schemaVersion' => schema_version,
-    'description' => 'Live GO/NO-GO proof of dashboard-styling spec surfaces. Throwaway test artifact.',
-    # Live since 2026-08: themeName/themeOverrides moved to
-    # document.settings.theme.{name,overrides} (shared/lib/code_rep.rb
-    # DOC_KEYS) — a flat top-level themeName/themeOverrides is invalid on
-    # write and gets silently dropped by the code-rep wrapper.
-    'settings' => {
-      'theme' => {
-        'name' => 'Light',
-        'overrides' => {
-          'categoricalScheme' => CATEGORICAL_HEXES,
-          'titleFont' => { 'color' => TITLEFONT_COLOR, 'fontSize' => 20, 'fontWeight' => 'bold' },
-        },
-      },
-    },
-    'pages' => [
-      {
-        'id' => PAGE_ID,
-        'name' => 'Styling Probe',
-        'elements' => [
+  elements = [
           {
             'id' => SRC_ID, 'kind' => 'table', 'name' => SRC_NAME,
             'source' => { 'kind' => 'sql', 'connectionId' => CONNECTION_ID, 'statement' => DEMO_SQL },
@@ -339,9 +317,24 @@ def build_spec(home, schema_version, src_formula_fn, flags)
             'body' => "# <span style=\"color: #FFFFFF\">Styling Surface Probe</span>\n" \
                       "<span style=\"color: #94A3B8\">WS3 Task 1 — live GO/NO-GO (#{RUN_TAG})</span>",
           },
-        ],
+  ]
+  doc = {
+    'schemaVersion' => schema_version,
+    # Live since 2026-08: themeName/themeOverrides moved to
+    # document.settings.theme.{name,overrides} (shared/lib/code_rep.rb
+    # DOC_KEYS) — a flat top-level themeName/themeOverrides is invalid on
+    # write and gets silently dropped by the code-rep wrapper.
+    'settings' => {
+      'theme' => {
+        'name' => 'Light',
+        'overrides' => {
+          'categoricalScheme' => CATEGORICAL_HEXES,
+          'titleFont' => { 'color' => TITLEFONT_COLOR, 'fontSize' => 20, 'fontWeight' => 'bold' },
+        },
       },
-    ],
+    },
+    'pages' => [{ 'id' => PAGE_ID, 'name' => 'Styling Probe' }],
+    'elements' => elements,
     'layout' => <<~XML,
       <?xml version="1.0" encoding="utf-8"?>
       <Page type="grid" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto" id="#{PAGE_ID}">
@@ -356,6 +349,11 @@ def build_spec(home, schema_version, src_formula_fn, flags)
       </Page>
     XML
   }
+  Sigma::CodeRep.wrap(doc, extra: {
+    'name' => "WS3 styling-surface probe — E2E proof (#{RUN_TAG})",
+    'folderId' => home,
+    'description' => 'Live GO/NO-GO proof of dashboard-styling spec surfaces. Throwaway test artifact.'
+  })
 end
 
 # ---------------------------------------------------------------------------
@@ -661,7 +659,7 @@ begin
   # --- structural (GET) readback -------------------------------------------
   spec = Sigma.request(:get, "/v2/workbooks/#{wb}/spec", accept: 'application/json')
   spec = Sigma::CodeRep.document(spec) if spec.is_a?(Hash) # live GET nests under `document`
-  els = spec['pages'].flat_map { |p| p['elements'] || [] }
+  els = Sigma::CodeRep.workbook_elements(spec)
   find_el = ->(id) { els.find { |e| e['id'] == id } }
 
   kpi_el     = find_el.call(KPI_ID)
