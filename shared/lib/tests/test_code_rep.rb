@@ -6,6 +6,17 @@ class TestCodeRep < Minitest::Test
              'document' => { 'schemaVersion' => 1, 'pages' => [{ 'id' => 'p' }] } }
   LEGACY = { 'workbookId' => 'w1', 'name' => 'N',
              'schemaVersion' => 1, 'pages' => [{ 'id' => 'p' }] }
+  LIVE_FLAT_ELEMENTS = {
+    'workbookId' => 'w1',
+    'name' => 'N',
+    'document' => {
+      'schemaVersion' => 1,
+      'pages' => [{ 'id' => 'page-data', 'name' => 'Data' }, { 'id' => 'page-1', 'name' => 'Overview' }],
+      'elements' => [{ 'id' => 'source', 'kind' => 'table' }, { 'id' => 'chart', 'kind' => 'bar-chart' }],
+      'layout' => '<Page id="page-data"><LayoutElement elementId="source"/></Page>' \
+                  '<Page id="page-1"><LayoutElement elementId="chart"/></Page>'
+    }
+  }.freeze
 
   def test_reads_both_shapes
     [LIVE, LEGACY].each do |r|
@@ -20,8 +31,9 @@ class TestCodeRep < Minitest::Test
 
   def test_wrap_always_nests
     doc = { 'schemaVersion' => 1, 'pages' => [] }
-    assert_equal({ 'document' => doc }, Sigma::CodeRep.wrap(doc))
-    assert_equal({ 'name' => 'N', 'document' => doc }, Sigma::CodeRep.wrap(doc, extra: { 'name' => 'N' }))
+    api_doc = doc.merge('elements' => [])
+    assert_equal({ 'document' => api_doc }, Sigma::CodeRep.wrap(doc))
+    assert_equal({ 'name' => 'N', 'document' => api_doc }, Sigma::CodeRep.wrap(doc, extra: { 'name' => 'N' }))
   end
 
   def test_round_trip_lossless_from_both_shapes
@@ -29,6 +41,21 @@ class TestCodeRep < Minitest::Test
       doc = Sigma::CodeRep.document(r)
       assert_equal doc, Sigma::CodeRep.document(Sigma::CodeRep.wrap(doc))
     end
+  end
+
+  def test_current_flat_elements_inflate_from_layout
+    doc = Sigma::CodeRep.document(LIVE_FLAT_ELEMENTS)
+    assert_nil doc['elements']
+    assert_equal ['source'], doc['pages'][0]['elements'].map { |element| element['id'] }
+    assert_equal ['chart'], doc['pages'][1]['elements'].map { |element| element['id'] }
+  end
+
+  def test_page_nested_elements_flatten_for_api_and_round_trip
+    doc = Sigma::CodeRep.document(LIVE_FLAT_ELEMENTS)
+    wrapped = Sigma::CodeRep.wrap(doc, extra: Sigma::CodeRep.metadata(LIVE_FLAT_ELEMENTS))
+    assert_equal %w[chart source], wrapped.dig('document', 'elements').map { |element| element['id'] }.sort
+    assert wrapped.dig('document', 'pages').all? { |page| !page.key?('elements') }
+    assert_equal doc, Sigma::CodeRep.document(wrapped)
   end
 
   LIVE_WITH_SETTINGS = { 'workbookId' => 'w1', 'name' => 'N',
@@ -123,7 +150,7 @@ class TestCodeRep < Minitest::Test
     [LIVE_WITH_SETTINGS, LEGACY_WITH_SETTINGS].each do |r|
       doc = Sigma::CodeRep.document(r)
       wrapped = Sigma::CodeRep.wrap(doc, extra: Sigma::CodeRep.metadata(r))
-      assert_equal doc, wrapped['document']
+      assert_equal doc, Sigma::CodeRep.document(wrapped)
       assert_nil wrapped['settings'] # must NOT leak to top level — PUT allowlists document only
       assert_nil wrapped['agents']
     end
