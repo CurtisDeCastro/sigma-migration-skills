@@ -6914,6 +6914,77 @@ unless opts[:pages_mode] == :worksheet
   # for the identical reason).
 end
 
+# ---- nav-action MARK CLICKS (bfxd step 1) ----------------------------------
+# A Tableau <nav-action> fires from a mark click on a WORKSHEET, not from a
+# dashboard-object button. on-select -> navigate is runtime-proven, so these
+# are auto-wirable; only three shapes are not, and each stays residue with its
+# reason named rather than being silently dropped:
+#   - on-hover / tooltip-menu activation: Sigma has no equivalent trigger.
+#   - a WORKSHEET target: Sigma navigates to a PAGE; there is no element-id
+#     index that would let us target a sheet within one.
+#   - a source naming zero or multiple worksheets: no unambiguous host element.
+#
+# Page ids are provisional here for the same reason as the nav-button block
+# above — two id schemes coexist and put-layout.rb repairs navigate.target.page
+# BY NAME after publish using targetPageName.
+unless opts[:pages_mode] == :worksheet
+  Array(opts[:detected_actions]).each do |det|
+    next unless det['kind'] == 'nav-action'
+
+    caption = det['caption'].to_s
+    unless det['trigger'].to_s.strip.casecmp('on select').zero?
+      warnings << "nav-action '#{caption}' activates on #{det['trigger'].inspect} — " \
+                  'Sigma has no equivalent trigger (named residue)'
+      next
+    end
+    sheets = Array(det.dig('source', 'worksheets'))
+    if sheets.length != 1
+      warnings << "nav-action '#{caption}' sources #{sheets.length} worksheet(s) — " \
+                  'no unambiguous host element (named residue)'
+      next
+    end
+    target = Array(det['targets']).first || {}
+    unless target['dashboard'] == true
+      warnings << "nav-action '#{caption}' targets worksheet '#{target['name']}', not a " \
+                  'dashboard — Sigma navigates to a page, and there is no element-id ' \
+                  'index for a sheet within one (named residue)'
+      next
+    end
+
+    host_el = elements.find { |e| e['_worksheet'] == sheets.first }
+    if host_el.nil?
+      warnings << "nav-action '#{caption}' sources worksheet '#{sheets.first}', which " \
+                  'produced no emitted element (named residue)'
+      next
+    end
+
+    slug = target['name'].to_s.downcase.gsub(/[^a-z0-9]+/, '-')
+             .sub(/\A-/, '').sub(/-\z/, '')[0..40].to_s
+    action = {
+      'id'      => ActionLedger.new_id(action_id_registry, host_el['id']),
+      'trigger' => 'on-select',
+      'effects' => [{ 'effect' => 'navigate',
+                      'target' => { 'type' => 'page', 'page' => "page-#{slug}" } }]
+    }
+    errs = ActionLedger.validate_action(action)
+    raise "emitted an invalid nav-action on #{host_el['id']}: #{errs.join('; ')}" if errs.any?
+
+    manifest_entry = {
+      'actionId'       => action['id'],
+      'source'         => { 'kind' => 'nav-action', 'caption' => caption,
+                            'sourceSheet' => sheets.first,
+                            'actionName' => det['actionName'] },
+      'hostElementId'  => host_el['id'],
+      'targetPageName' => target['name'],
+      'trigger'        => action['trigger'],
+      'effects'        => action['effects']
+    }
+    emitted_actions << manifest_entry
+    emitted_action_index[[host_el['_dashboard'], host_el['id']]] = manifest_entry
+    (host_el['actions'] ||= []) << action
+  end
+end
+
 styled_text_all = styled_text_by_dash.values.flatten(1)
 
 # ---- Control targeting: intended-scope closure ------------------------------

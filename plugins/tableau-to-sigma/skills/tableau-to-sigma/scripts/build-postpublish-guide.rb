@@ -500,7 +500,7 @@ module PostpublishGuide
         'targets' => [{ 'name' => target_sheet, 'dashboard' => is_dash }],
         'fields'  => [],
         'ui_steps' => STEPS_BUTTON_NAV,
-        'notes'   => ['Sigma buttons support page navigation in the UI; this wiring is not spec-persistable, so it must be added after publish.']
+        'notes'   => []
       }
       entry['actionName'] = name unless name.empty?
       out << entry
