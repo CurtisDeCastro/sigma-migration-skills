@@ -123,6 +123,29 @@ module ActionGates
         nil
       end
     end.compact
+    # Marker-ABSENCE blind spot (live reviewer repro, follow-up to the
+    # structural-match fix above): a guide with ZERO `ledger-key` markers —
+    # a stale pre-fix file, a hand-edited guide, or output from any code path
+    # that isn't the current render_guide — makes the per-entry loop below
+    # silently vacuous: `rendered_keys.include?(key)` is false for every
+    # emitted entry because there is nothing to match against, so a guide
+    # that genuinely instructs hand-wiring an already-emitted action passes
+    # with zero violations reported. Fail closed instead: if something was
+    # actually emitted, a marker-less guide cannot be verified at all, so it
+    # must not report OK. Do NOT fall back to substring matching here — that
+    # is exactly what reintroduces the dashboard-name false-FAIL these
+    # markers exist to avoid (see the caption-collision case above).
+    # Legitimate zero case: when `emitted` is empty, nothing was auto-wired,
+    # so a marker-less guide's open-work prose — however it's written —
+    # cannot be mis-describing already-done work as still open; that guide
+    # is fine and must not be failed here.
+    if !ledger['emitted'].empty? && rendered_keys.empty?
+      return ["the guide carries zero <!-- ledger-key --> markers but the ledger claims " \
+              "#{ledger['emitted'].size} action(s) emitted — this guide cannot be verified against the " \
+              'ledger (it appears to predate or bypass render_guide: a stale file, a hand-edited copy, or ' \
+              'output from a different code path) — regenerate it with build-postpublish-guide.rb before ' \
+              'trusting it']
+    end
     ledger['emitted'].each do |e|
       key = ActionLedger.key_of(e['source'] || {})
       next if key.nil? || key[1].to_s.empty? # no stable identity to compare against

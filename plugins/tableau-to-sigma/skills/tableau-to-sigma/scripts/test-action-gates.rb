@@ -262,6 +262,52 @@ Dir.mktmpdir do |dir|
         'OK line names the auto-emitted/manual split', fails)
 end
 
+# ---- PLANTED DEFECT 5 — marker-less guide leaks an emitted caption → FAIL ---
+# Live reviewer repro: a guide that carries NO `<!-- ledger-key -->` markers
+# AT ALL — a stale pre-fix file, a hand-edited guide, or output from any path
+# that isn't the current render_guide — while `emitted` is non-empty and the
+# guide's prose plainly instructs hand-wiring the SAME button the ledger says
+# was already emitted. Structural matching (rendered_keys.include?(key)) is
+# silently vacuous when rendered_keys is empty: every emitted entry fails to
+# match (there is nothing to match against), so the per-entry loop alone
+# reports zero violations — a false OK. The marker-ABSENCE check must catch
+# this on its own, independent of the per-entry loop.
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'action-ledger.json'),
+             JSON.pretty_generate('schemaVersion' => 1, 'detectedCount' => 1,
+                                   'emitted' => [EMITTED_NAV_BUTTON], 'residue' => []))
+  File.write(File.join(dir, 'POSTPUBLISH_GUIDE.md'),
+             "# Post-publish wiring\n\n### Go to Details\n\n" \
+             "Add a button 'Go to Details' navigating to page 2.\n") # zero ledger-key markers anywhere
+  _out, err, st = run_gate(dir)
+  check(!st.success?, 'marker-less guide leaking an emitted caption → FAIL (fail closed, not a silent OK)', fails)
+  check(err.include?('zero') && err.include?('ledger-key') && err.include?('render_guide') &&
+        err.include?('build-postpublish-guide.rb'),
+        'failure names the marker absence and points at build-postpublish-guide.rb to regenerate', fails)
+end
+
+# ---- marker-less guide, nothing emitted → still PASS (over-failing guard) ---
+# The legitimate zero case: a marker-less guide is FINE when `emitted` is
+# empty — nothing was auto-wired, so open-work prose with no markers cannot
+# possibly be mis-describing already-done work as still open. The marker-
+# absence check above must NOT fire here, or every guide on a fully-manual
+# run (nothing auto-wired) would false-FAIL.
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  home_residue = { 'kind' => 'nav-button', 'caption' => 'Home' }
+  File.write(File.join(dir, 'action-ledger.json'),
+             JSON.pretty_generate('schemaVersion' => 1, 'detectedCount' => 1,
+                                   'emitted' => [], 'residue' => [home_residue]))
+  File.write(File.join(dir, 'POSTPUBLISH_GUIDE.md'),
+             "# Post-publish wiring\n\n### Home\n\n" \
+             "Add a button 'Home' navigating to the home page (no Sigma equivalent wiring today).\n") # no marker
+  out, _err, st = run_gate(dir)
+  check(st.success?, 'marker-less guide with emitted: [] → still PASS (nothing to leak)', fails)
+  check(out.include?('guide matches ledger residue') && out.include?('0 auto-emitted') && out.include?('1 manual'),
+        'OK line still names the 0 auto-emitted / 1 manual split', fails)
+end
+
 # ==============================================================================
 # Ledger/spec mismatch — final-review Important-1
 # ==============================================================================
