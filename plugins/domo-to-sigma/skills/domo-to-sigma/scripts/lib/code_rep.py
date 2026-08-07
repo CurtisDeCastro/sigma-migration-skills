@@ -11,7 +11,10 @@ Reads stay tolerant of the legacy flat shape because flat artifacts still exist
 on disk (committed workbook snapshots, fixtures).
 """
 
-DOC_KEYS = ("schemaVersion", "pages", "kind", "layout")
+# `settings` (theme/navigation) and `agents` belong INSIDE `document` too — omitting
+# them sweeps themeName/themeOverrides/agents onto the top level, where they are not
+# valid keys, silently dropping theme + agents on every write.
+DOC_KEYS = ("schemaVersion", "pages", "kind", "layout", "settings", "agents")
 
 
 def document(response):

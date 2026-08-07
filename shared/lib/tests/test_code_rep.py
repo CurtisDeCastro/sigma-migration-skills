@@ -32,5 +32,38 @@ class TestCodeRep(unittest.TestCase):
             self.assertEqual(code_rep.document(code_rep.wrap(doc)), doc)
 
 
+LIVE_WITH_SETTINGS = {
+    'workbookId': 'w1', 'name': 'N',
+    'document': {'schemaVersion': 1, 'pages': [{'id': 'p'}],
+                 'settings': {'theme': {'name': 'dark'}}, 'agents': [{'id': 'a1'}]},
+}
+LEGACY_WITH_SETTINGS = {
+    'workbookId': 'w1', 'name': 'N',
+    'schemaVersion': 1, 'pages': [{'id': 'p'}],
+    'settings': {'theme': {'name': 'dark'}}, 'agents': [{'id': 'a1'}],
+}
+
+
+class TestCodeRepSettingsAgents(unittest.TestCase):
+    # Regression for the "themeName/agents silently dropped" bug: DOC_KEYS previously
+    # listed only schemaVersion/pages/kind/layout, so settings/agents fell through to
+    # metadata() and got wrapped OUTSIDE `document` on write.
+    def test_settings_and_agents_stay_inside_document(self):
+        for r in (LIVE_WITH_SETTINGS, LEGACY_WITH_SETTINGS):
+            doc = code_rep.document(r)
+            self.assertEqual(doc['settings'], {'theme': {'name': 'dark'}})
+            self.assertEqual(doc['agents'], [{'id': 'a1'}])
+            self.assertNotIn('settings', code_rep.metadata(r))
+            self.assertNotIn('agents', code_rep.metadata(r))
+
+    def test_settings_and_agents_round_trip_through_wrap(self):
+        for r in (LIVE_WITH_SETTINGS, LEGACY_WITH_SETTINGS):
+            doc = code_rep.document(r)
+            wrapped = code_rep.wrap(doc, extra=code_rep.metadata(r))
+            self.assertEqual(wrapped['document'], doc)
+            self.assertNotIn('settings', wrapped)
+            self.assertNotIn('agents', wrapped)
+
+
 if __name__ == '__main__':
     unittest.main()

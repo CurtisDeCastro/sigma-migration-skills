@@ -14,7 +14,10 @@
 module Sigma
   module CodeRep
     # The non-metadata fields that live INSIDE `document`. Confirmed by live readback.
-    DOC_KEYS = %w[schemaVersion pages kind layout].freeze
+    # `settings` (theme/navigation) and `agents` belong here too — omitting them
+    # sweeps themeName/themeOverrides/agents onto the top level, where they are
+    # not valid keys, silently dropping theme + agents on every write.
+    DOC_KEYS = %w[schemaVersion pages kind layout settings agents].freeze
 
     class << self
       # Read path: accepts the live nested shape OR a legacy flat artifact.

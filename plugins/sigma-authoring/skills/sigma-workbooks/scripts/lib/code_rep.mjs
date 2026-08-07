@@ -3,7 +3,10 @@
 // /v2/workbooks/spec/verify); flat bodies 400. The DATA-MODEL code-rep surface is
 // NOT changing — do not use this on /v2/dataModels/.../spec payloads.
 
-export const DOC_KEYS = ['schemaVersion', 'pages', 'kind', 'layout'];
+// `settings` (theme/navigation) and `agents` belong INSIDE `document` too — omitting
+// them sweeps themeName/themeOverrides/agents onto the top level, where they are not
+// valid keys, silently dropping theme + agents on every write.
+export const DOC_KEYS = ['schemaVersion', 'pages', 'kind', 'layout', 'settings', 'agents'];
 
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
