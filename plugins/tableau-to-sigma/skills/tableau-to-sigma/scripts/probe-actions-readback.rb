@@ -98,23 +98,62 @@ begin
     got_effects = Array(got_action['effects'])
     added_keys = {}
     posting_issues = []
-    posted_effects.each do |posted_eff|
+    # HOW EFFECTS ARE PAIRED. Emitted effects carry NO `id` key — nothing in
+    # build-charts-from-signals.rb mints one and the API does not require one —
+    # so an `id`-equality find compares nil == nil. On a HEALTHY workbook that
+    # returned got_effects[0] for EVERY posted effect: a two-effect action
+    # reported its second effect DROPPED, with an empty id in the message, the
+    # first time this harness ran with credentials. Two id-less effects also
+    # both resolved to the same readback effect, so a genuine drop could hide
+    # behind a duplicate match.
+    #
+    # Pair, in order: (1) by `id`, but only when BOTH sides actually carry one;
+    # (2) by a stable composite signature — the effect name plus whichever
+    # field identifies its target (`control` for set-control-value, `target`
+    # for navigate/refresh-element, and so on) — because the server is free to
+    # reorder effects; (3) positionally, when the effect name at that index
+    # agrees. Every match CONSUMES its readback effect, so no two posted
+    # effects can pair with the same one.
+    consumed = {}
+    signature = lambda do |eff|
+      [eff['effect'], eff['control'], eff['target'], eff['overlayId'],
+       eff['tabbedContainer'], eff['selectedTab'], eff['url'], eff['document'],
+       eff['scope'], eff['table']]
+    end
+    posted_effects.each_with_index do |posted_eff, pi|
       next unless posted_eff.is_a?(Hash)
-      matching = got_effects.find do |got_eff|
-        got_eff.is_a?(Hash) && got_eff['id'] == posted_eff['id']
+      posted_id = posted_eff['id'].to_s
+      # Without an id there is nothing to name the effect by, so name it the
+      # only way that stays useful in a failure message: position + kind.
+      label = posted_id.empty? ? "effects[#{pi}] (#{posted_eff['effect'].inspect})" : posted_id
+      gi = nil
+      unless posted_id.empty?
+        gi = got_effects.each_index.find do |i|
+          !consumed[i] && got_effects[i].is_a?(Hash) && got_effects[i]['id'].to_s == posted_id
+        end
       end
-      if matching.nil?
-        posting_issues << "effect #{posted_eff['id']} DROPPED"
+      gi ||= got_effects.each_index.find do |i|
+        !consumed[i] && got_effects[i].is_a?(Hash) &&
+          signature.call(got_effects[i]) == signature.call(posted_eff)
+      end
+      if gi.nil? && got_effects[pi].is_a?(Hash) && !consumed[pi] &&
+         got_effects[pi]['effect'] == posted_eff['effect']
+        gi = pi
+      end
+      if gi.nil?
+        posting_issues << "#{label} DROPPED"
         next
       end
+      consumed[gi] = true
+      matching = got_effects[gi]
       # Check every posted key is present and equal
       posted_eff.each do |key, val|
         unless matching.key?(key)
-          posting_issues << "effect #{posted_eff['id']}: key #{key.inspect} dropped on readback"
+          posting_issues << "#{label}: key #{key.inspect} dropped on readback"
           next
         end
         next if matching[key] == val
-        posting_issues << "effect #{posted_eff['id']}: key #{key.inspect} " \
+        posting_issues << "#{label}: key #{key.inspect} " \
                           "posted #{val.inspect}, readback #{matching[key].inspect}"
       end
       # Collect any server-added keys (informational, not a failure)
