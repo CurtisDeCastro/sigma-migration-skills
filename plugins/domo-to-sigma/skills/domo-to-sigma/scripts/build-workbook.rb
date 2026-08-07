@@ -983,6 +983,16 @@ DOMO_FILTER_LIST_MODE = {
   'NOT_IN' => 'exclude', 'NOT_EQUALS' => 'exclude',
 }.freeze
 
+# Numeric comparisons. Domo really does emit these — MEASURED 2026-08-07, 4 of
+# the 20 filters on page 59931332 are GREATER_THAN. They were invisible until
+# domo-discover.rb stopped preferring `filterType` (always the literal "LEGACY")
+# over the real `operand`. Sigma element filters are `list`-only, so these become
+# a hidden in/out predicate column plus a list include — see apply_card_filters!.
+DOMO_FILTER_COMPARISON = {
+  'GREATER_THAN' => '>', 'GREATER_THAN_EQUAL' => '>=', 'GREATER_THAN_OR_EQUAL' => '>=',
+  'LESS_THAN' => '<', 'LESS_THAN_EQUAL' => '<=', 'LESS_THAN_OR_EQUAL' => '<=',
+}.freeze
+
 # Resolve a filter clause's `column` to a [name, formula] pair for a NEW
 # element column — the same resolution measure_col/dim_col apply to an
 # ordinary data column, extended to cover a Beast-Mode calc id
@@ -1246,11 +1256,14 @@ def apply_card_filters!(card, el)
   clauses.each do |f|
     col = f['column']
     next if col.to_s.strip.empty?
-    mode = DOMO_FILTER_LIST_MODE[f['operator'].to_s.upcase]
-    unless mode
+    op = f['operator'].to_s.upcase
+    mode = DOMO_FILTER_LIST_MODE[op]
+    cmp  = DOMO_FILTER_COMPARISON[op]
+    unless mode || cmp
       warn_card(card, "card filter on '#{col}' dropped: operator '#{f['operator']}' has no faithful Sigma " \
-                      'element-filter translation here (handled: LEGACY/IN/EQUALS/NOT_IN/NOT_EQUALS) — ' \
-                      'hand-author the equivalent element filter and re-run.')
+                      'element-filter translation here (handled: LEGACY/IN/EQUALS/NOT_IN/NOT_EQUALS and ' \
+                      'GREATER_THAN/GREATER_THAN_EQUAL/LESS_THAN/LESS_THAN_EQUAL) — hand-author the ' \
+                      'equivalent element filter and re-run.')
       next
     end
     cid = filter_target_column(el, col)
@@ -1259,6 +1272,41 @@ def apply_card_filters!(card, el)
                       'formula, so no such data-model column exists (mirrors prune_unresolvable_columns!).')
       next
     end
+
+    if cmp
+      # A COMPARISON, not a set membership. Sigma element filters only do `list`,
+      # so the predicate becomes a hidden in/out calc column and the list filter
+      # includes "in" — the identical shape the date-window filter already uses.
+      #
+      # Emitting these as a list include of the literal operand (what happened
+      # while `operand` was being discarded upstream) means "only rows EQUAL to
+      # 0" for a `> 0` card, which returns nothing. That is what made four tiles
+      # render zero rows: Response Progress, Least Clicked Campaigns, Top
+      # Performing Subjects, and PDP Example (bead beads-sigma-i0co).
+      val = Array(f['values']).first
+      unless val.to_s.strip.match?(/\A-?\d+(\.\d+)?\z/)
+        warn_card(card, "card filter on '#{col}' dropped: #{op} needs a numeric operand, got " \
+                        "#{val.inspect} — refused rather than emit a comparison against a non-number.")
+        next
+      end
+      col_formula = (Array(el['columns']).find { |c| c['id'] == cid } || {})['formula']
+      if col_formula.to_s.strip.empty?
+        warn_card(card, "card filter on '#{col}' dropped: resolved column carries no formula to " \
+                        "build a #{op} predicate from.")
+        next
+      end
+      pid = "f-cmp-#{col.to_s.downcase.gsub(/\W+/, '-')}-#{added.size}"
+      unless Array(el['columns']).any? { |c| c['id'] == pid }
+        el['columns'] = Array(el['columns']) + [{
+          'id' => pid, 'name' => "#{col} #{cmp} #{val}", 'hidden' => true,
+          'formula' => "If(#{col_formula} #{cmp} #{val}, \"in\", \"out\")",
+        }]
+      end
+      added << { 'id' => "cf-#{el['id']}-#{added.size}", 'columnId' => pid,
+                 'kind' => 'list', 'mode' => 'include', 'values' => ['in'] }
+      next
+    end
+
     added << { 'id' => "cf-#{el['id']}-#{added.size}", 'columnId' => cid,
                'kind' => 'list', 'mode' => mode, 'values' => Array(f['values']) }
   end

@@ -341,8 +341,16 @@ def normalize_card(raw, card_id, card_meta: nil)
     # resolve_calc_ref) instead of copying f['column'] verbatim.
     calc_by_id = formulas_by_id(defn['formulas'])
     filters = Array(main['filters']).map do |f|
+      # `operand` FIRST. `filterType` is the literal "LEGACY" on every card filter
+      # Domo returns, so preferring it discarded the ACTUAL operator and every
+      # clause came out as an include. Measured 2026-08-07 across the 20 filters
+      # on page 59931332: 14 IN, 3 NOT_IN, 4 GREATER_THAN — so 7 of 20 were
+      # emitted as the wrong filter entirely, and the NOT_IN ones as their exact
+      # inverse. The sibling extraction path below already got this right
+      # (`f['operand'] || f['operator']`); the two had silently diverged.
       { 'column' => resolve_calc_ref(f['column'], calc_by_id),
-        'operator' => f['filterType'] || f['operator'], 'values' => f['values'] }.compact
+        'operator' => f['operand'] || f['filterType'] || f['operator'],
+        'values' => f['values'] }.compact
     end
     {
       'id'                 => card_id,
