@@ -310,6 +310,8 @@ TWB2 = <<~XML
       </dashboard>
     </dashboards>
     <windows>
+      <window class='dashboard' name='Dash One'/>
+      <window class='dashboard' name='Dash Two'/>
       <window class='dashboard' name='Detail View'><simple-id uuid='{ABC-999}'/></window>
     </windows>
   </workbook>
