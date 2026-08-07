@@ -277,7 +277,7 @@
               {
                 "id": "id0033",
                 "formula": "Sum([Visit Revenue])",
-                "name": "VISIT_REVENUE"
+                "name": "Total VISIT_REVENUE"
               }
             ]
           },
