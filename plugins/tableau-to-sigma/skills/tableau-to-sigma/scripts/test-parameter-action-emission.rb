@@ -137,8 +137,20 @@ Dir.mktmpdir do |d|
   # DETERMINISTIC by design (Correction 2): the fixture above always resolves
   # the source column AND wires the target control's filters[], so emission is
   # never optional here — a residue fallback would hide a real regression.
+  #
+  # On failure, name the reason from the REAL build log (`blog`, captured
+  # above via Open3.capture2e — stdout+stderr merged), not from `spec`:
+  # build-charts-from-signals.rb never writes a `warnings` key into the
+  # output JSON (warnings only ever go to stderr via `warn`, :8960-8962) — a
+  # `spec['warnings']` read is always nil and always prints an empty array,
+  # which is exactly the silent-drop failure mode this whole feature exists
+  # to avoid. Every one of the six parameter-action rejection paths' messages
+  # starts with "parameter-action '<caption>'" (build-charts-from-signals.rb
+  # :7909, :7915, :7921, :7929, :7946, :7951), so grepping the log for that
+  # substring surfaces the actual named-residue reason.
   check(pas.length == 1, "exactly one parameter-action was emitted (got #{pas.length})" +
-        (pas.empty? ? " — warnings: #{(spec['warnings'] || []).inspect}" : ''))
+        (pas.empty? ? " — build log's parameter-action line(s): " \
+                       "#{blog.lines.grep(/parameter-action/).map(&:strip).inspect}" : ''))
 
   pa_entry = pas.first
   if pa_entry
