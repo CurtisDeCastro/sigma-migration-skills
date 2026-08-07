@@ -70,6 +70,7 @@ require_relative 'lib/trellis_emit'   # shared native-trellis emitter (supported
 require_relative 'lib/metric_binding' # shared DM-metric binder ([Metrics/<name>] over inline re-derive)
 require_relative 'lib/kpi_card'       # shared KPI-chart emitter (comparative-KPI-ready)
 require_relative 'lib/kpi_comparison_detect' # Task 5: prior/target comparison-measure detector
+require_relative 'lib/action_ledger' # workbook-wide action id registry + validate/manifest
 require 'erb'
 
 opts = { master_id: 'master' }
@@ -6717,6 +6718,8 @@ end
 # machine-recognizable placeholder URL https://nav.invalid/#page=<name>;
 # put-layout.rb rewrites it to the live workbook page URL post-publish
 # (the workbook URL doesn't exist until the POST returns).
+action_id_registry = {} # workbook-wide — ActionLedger.new_id, never per-dash/per-zone
+emitted_actions = []
 nav_button_records = []
 unless opts[:pages_mode] == :worksheet
   layout.each do |dash|
@@ -6733,15 +6736,46 @@ unless opts[:pages_mode] == :worksheet
       url = "https://nav.invalid/#page=#{ERB::Util.url_encode(z['button_nav_target'])}"
       el =
         if ENV['SIGMA_BUTTON_ELEMENTS'] == 'on'
-          e = { 'id' => "btn-#{z['id']}", 'kind' => 'button', 'text' => label,
+          host = "btn-#{z['id']}"
+          # Target page id: mirrors build-workbook-spec.rb's page slug exactly
+          # (allow-list gsub + single leading/trailing dash strip + 41-char cap,
+          # same rule K2 fixed for page ids generally) — NOT VERIFIED against
+          # the orchestrated mechanical-specs.rb path, which assigns
+          # "page-dash-<N>" by chart_pages ARRAY POSITION instead of by name.
+          # migrate-tableau.rb (the primary end-to-end driver) always uses that
+          # index-based path, so this id will not resolve there yet. Stage 1
+          # only: flagged in the Task 3 report for Task 4/6 to reconcile, the
+          # same way put-layout.rb resolves page NAMES to real ids post-publish
+          # for the nav.invalid URL placeholder below.
+          slug = z['button_nav_target'].to_s.downcase.gsub(/[^a-z0-9]+/, '-')
+                  .sub(/\A-/, '').sub(/-\z/, '')[0..40].to_s
+          target_page_id = "page-#{slug}"
+          action = {
+            'id'      => ActionLedger.new_id(action_id_registry, host),
+            'trigger' => 'on-click',
+            'effects' => [{ 'effect' => 'navigate',
+                            'target' => { 'type' => 'page', 'page' => target_page_id } }]
+          }
+          errs = ActionLedger.validate_action(action)
+          raise "emitted an invalid action on #{host}: #{errs.join('; ')}" if errs.any?
+          emitted_actions << {
+            'actionId'      => action['id'],
+            'source'        => { 'kind' => 'nav-button', 'caption' => label,
+                                 'sourceSheet' => dash['dashboard'] },
+            'hostElementId' => host,
+            'trigger'       => action['trigger'],
+            'effects'       => action['effects']
+          }
+          e = { 'id' => host, 'kind' => 'button', 'text' => label,
                 'appearance' => 'filled', 'align' => 'center', 'size' => 'small',
-                'actions' => [{ 'trigger' => 'on-click', 'effects' => [{
-                  'effect' => 'open-url', 'openTarget' => '_self', 'url' => url }] }] }
+                'actions' => [action] }
           e['fillColor'] = z['fill_color'][0, 7] if z['fill_color']
           e['fontColor'] = z['button_font_color'] if z['button_font_color']
           e
         else
           # Text-pill fallback (proven live): bold markdown link, pill bg.
+          # UNCHANGED — kind:text cannot host actions[], so this branch keeps
+          # the nav.invalid placeholder; put-layout.rb rewrites it post-publish.
           body = "[**#{label}**](#{url})"
           body = %(<span style="background-color: #{z['fill_color'][0, 7]}">#{body}</span>) if z['fill_color']
           { 'id' => "btn-#{z['id']}", 'kind' => 'text',
@@ -6758,6 +6792,12 @@ unless opts[:pages_mode] == :worksheet
     File.write(side, JSON.pretty_generate(nav_button_records))
     warn "wrote #{side} (#{nav_button_records.size} navigation button(s) — put-layout.rb rewrites the placeholder URLs post-publish)"
   end
+  # Written unconditionally (even when empty) — an empty manifest means
+  # "nothing was auto-emitted," which Task 4's join must distinguish from
+  # "no manifest at all."
+  manifest_path = opts[:out].sub(/\.json$/, '-actions-emitted.json')
+  ActionLedger.write_manifest(manifest_path, emitted_actions)
+  warn "wrote #{manifest_path} (#{emitted_actions.size} auto-emitted Sigma action(s))"
 end
 
 styled_text_all = styled_text_by_dash.values.flatten(1)

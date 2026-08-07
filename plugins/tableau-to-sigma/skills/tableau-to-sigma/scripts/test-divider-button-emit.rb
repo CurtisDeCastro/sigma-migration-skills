@@ -17,6 +17,7 @@ DIR = __dir__
 $LOAD_PATH.unshift File.join(DIR, 'lib')
 require 'zone_census'
 require 'layout'
+require 'action_ledger'
 
 fails = []
 def check(cond, msg, fails)
@@ -167,6 +168,70 @@ tog = entries.select { |e| e['detail'].include?('toggle') }
 check(exp && exp['recoverable'] == true, 'export button → recoverable residue (Sigma has a built-in export menu)', fails)
 check(tog.size == 1 && tog.first['visual'].include?('×3'),
       "3 identical toggles dedupe to ONE ledger row with a count (got #{tog.map { |t| t['visual'] }.inspect})", fails)
+
+puts
+puts 'Part 5 — Stage 1: navigate buttons emit a valid action (SIGMA_BUTTON_ELEMENTS=on)'
+# Re-run the SAME fixture (the TWB constant from Part 3, zones 10 + 11) through
+# the REAL parse + emit path (parse-twb-layout.rb -> build-charts-from-signals.rb
+# as subprocesses, exactly like Parts 3/4 drive the real parser/residue code) —
+# never a locally-constructed element. That is the only way this check can
+# fail when the emitter regresses, which is how the missing-`id` bug shipped.
+els = nil
+charts_log = ''
+ENV['SIGMA_BUTTON_ELEMENTS'] = 'on'
+Dir.mktmpdir do |d|
+  twb = File.join(d, 'wb.twb')
+  lay = File.join(d, 'layout.json')
+  mm  = File.join(d, 'master-map.json')
+  File.write(twb, TWB)
+  File.write(mm, JSON.dump({}))
+  File.write(File.join(d, 'get-workbook.json'),
+             JSON.dump('views' => { 'view' => [{ 'id' => 'v1', 'name' => 'Trend' }] }))
+  Dir.mkdir(File.join(d, 'views'))
+  File.write(File.join(d, 'views', 'v1.csv'), '')
+  abort 'parse-twb-layout failed' unless system('ruby', File.join(DIR, 'parse-twb-layout.rb'), twb, lay,
+                                                out: File::NULL, err: File::NULL)
+
+  out = File.join(d, 'specs.json')
+  charts_log = IO.popen(['ruby', File.join(DIR, 'build-charts-from-signals.rb'),
+                         '--tableau-dir', d, '--layout', lay,
+                         '--meta', lay.sub(/\.json$/, '-meta.json'), '--master-map', mm,
+                         '--master-element-id', 'master', '--skip-dashboard-read', 'unit-test',
+                         '--title', 'Overview', '--out', out], err: %i[child out], &:read)
+  els = JSON.parse(File.read(out)) if File.exist?(out)
+end
+ENV.delete('SIGMA_BUTTON_ELEMENTS')
+
+if els.nil?
+  check(false, "build-charts-from-signals.rb produced no --out — log tail:\n#{charts_log.to_s.lines.last(15).join}", fails)
+  els = []
+end
+
+btn = els.find { |e| e['kind'] == 'button' }
+check(!btn.nil?, 'a kind:button element is emitted with the flag on', fails)
+act = btn && (btn['actions'] || []).first
+check(!act.nil?, 'the button carries an action', fails)
+check(!act.nil? && !act['id'].to_s.empty?,
+      "the action has an id (THE SHIPPING BUG - got #{act && act['id'].inspect})", fails)
+check(!act.nil? && act['trigger'] == 'on-click', 'trigger is on-click', fails)
+check(!act.nil? && act['effects'].is_a?(Array) && act['effects'][0]['effect'] == 'navigate',
+      "effect is navigate, not open-url (got #{act && act['effects'] && act['effects'][0] && act['effects'][0]['effect'].inspect})", fails)
+check(!act.nil? && act['effects'].is_a?(Array) && act['effects'][0].dig('target', 'type') == 'page',
+      'target.type is page', fails)
+check(!JSON.generate(els).include?('nav.invalid'),
+      'the emitted button carries no nav.invalid placeholder', fails)
+
+# workbook-global id uniqueness across BOTH button zones (10 and 11)
+ids = els.select { |e| e['kind'] == 'button' }
+         .flat_map { |e| (e['actions'] || []).map { |a| a['id'] } }
+check(ids.size == ids.uniq.size, "action ids unique workbook-wide (#{ids.inspect})", fails)
+
+els.select { |e| e['kind'] == 'button' }.each do |e|
+  (e['actions'] || []).each do |a|
+    errs = ActionLedger.validate_action(a)
+    check(errs.empty?, "emitted action #{a['id'].inspect} validates: #{errs.inspect}", fails)
+  end
+end
 
 puts
 if fails.empty?
