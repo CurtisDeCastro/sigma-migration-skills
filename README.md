@@ -33,18 +33,18 @@ shared `~/.sigma-migration/env` under any agent.
 ```
 
 **Other agents (Cursor, Cortex Code, …)** — clone the repo and point your agent at the
-skill folders; [`AGENTS.md`](AGENTS.md) maps each task to its skill. For example, Cortex Code:
+skill folders; [`AGENTS.md`](AGENTS.md) maps each task to its skill (with maturity labels).
+Full load rules (companion `sigma-authoring`, path rules, MCP stance):
+[`docs/agent-entry.md`](docs/agent-entry.md). For example, Cortex Code:
 
 ```bash
 git clone https://github.com/twells89/sigma-migration-skills
 cortex skill add sigma-migration-skills/plugins/tableau-to-sigma/skills/tableau-to-sigma
+cortex skill add sigma-migration-skills/plugins/sigma-authoring/skills/sigma-workbooks
 ```
 
-**Connect the Sigma MCP server (required).** These skills drive your Sigma org through the
-**Sigma MCP server** — connect it in your coding agent following Sigma's official guide:
-**[Use the Sigma MCP server](https://help.sigmacomputing.com/docs/use-sigma-mcp-server)**.
-It's how the agent reads/queries Sigma (e.g. the parity gate) and builds + validates the
-migrated data model and workbook. Install it alongside the plugins, before running a migration.
+**Sigma access:** converters drive your org through the **Sigma REST API** (client id/secret -> bearer token via `scripts/get-token.sh`). The optional Sigma MCP server is recommended for interactive query/parity checks when your agent supports MCP; it is **not required** for the core migrate -> POST -> parity scripts. Setup details: [`docs/agent-entry.md`](docs/agent-entry.md).
+
 
 Then just describe what you want migrated — e.g. *"migrate this Power BI report to Sigma"* —
 and the skill drives discovery → translation → build → parity.
@@ -63,8 +63,9 @@ and the skill drives discovery → translation → build → parity.
 | [`microstrategy-to-sigma`](plugins/microstrategy-to-sigma/) | MicroStrategy (Strategy One) | `microstrategy-to-sigma`, `microstrategy-assessment` |
 | [`sisense-to-sigma`](plugins/sisense-to-sigma/) | Sisense (ElastiCube / Live) | `sisense-to-sigma`, `sisense-assessment` |
 | [`gooddata-to-sigma`](plugins/gooddata-to-sigma/) | GoodData Cloud / .CN | `gooddata-to-sigma`, `gooddata-assessment` |
-| [`domo-to-sigma`](plugins/domo-to-sigma/) | Domo | `domo-to-sigma` |
-| [`hex-to-sigma`](plugins/hex-to-sigma/) | Hex | `hex-to-sigma` |
+| [`domo-to-sigma`](plugins/domo-to-sigma/) | Domo | `domo-to-sigma`, `domo-assessment`, `domo-import-to-snowflake` |
+| [`hex-to-sigma`](plugins/hex-to-sigma/) | Hex | `hex-to-sigma`, `hex-assessment` (scaffold) |
+| [`sigma-authoring`](plugins/sigma-authoring/) | (companion) | `sigma-workbooks`, `sigma-data-models`, … — install alongside every converter |
 
 In Claude Code, installed skills are namespaced — e.g. `/powerbi-to-sigma:powerbi-assessment`.
 
@@ -116,9 +117,10 @@ corpus/run-corpus.sh --check      # no creds needed; CI-safe
 ## Requirements
 
 - **A coding agent that runs skills** (Claude Code, Cursor, Cortex Code, …).
-- The **[Sigma MCP server](https://help.sigmacomputing.com/docs/use-sigma-mcp-server)** connected in your agent — how the agent reads/queries your Sigma org and builds + validates the migrated data model and workbook. Follow Sigma's setup guide.
-- **No converter to install** — each skill bundles its data-model converter (`convert_*_to_sigma`) and runs it **locally by default** (no network, no data egress). A [hosted converter MCP](https://github.com/twells89/sigma-data-model-mcp) is available as an **optional, opt-in fallback** that sends the source spec off-machine.
-- A **Sigma API token** and a Sigma **connection** pointing at the same warehouse as the source content (needed for the parity gate).
+- **Sigma API credentials** (`SIGMA_CLIENT_ID` / `SIGMA_CLIENT_SECRET` / `SIGMA_BASE_URL`) and a Sigma **connection** pointing at the same warehouse as the source content (needed for the parity gate). See [`AGENTS.md`](AGENTS.md) §Credentials.
+- **`sigma-authoring` installed alongside** any converter (canonical workbook/DM spec).
+- **No converter binary to install** — each skill bundles its data-model converter (`convert_*_to_sigma`) and runs it **locally by default** (no network, no data egress). A [hosted converter MCP](https://github.com/twells89/sigma-data-model-mcp) is available as an **optional, opt-in fallback** that sends the source spec off-machine.
+- **Optional:** Sigma MCP for interactive read/query during parity — not required for the REST pipeline ([`docs/agent-entry.md`](docs/agent-entry.md)).
 - Per-tool source access — see each plugin's `refs/connection.md` (e.g. `qlik-cli` for Qlik; device-code / Fabric `getDefinition` for Power BI).
 
 ## Provenance
