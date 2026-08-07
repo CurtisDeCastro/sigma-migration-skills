@@ -72,6 +72,7 @@ require_relative 'lib/tableau_dynamic_title'
 require_relative 'lib/kpi_card'       # shared KPI-chart emitter (comparative-KPI-ready)
 require_relative 'lib/kpi_comparison_detect' # Task 5: prior/target comparison-measure detector
 require_relative 'lib/action_ledger' # workbook-wide action id registry + validate/manifest
+require_relative 'lib/action_column_resolver' # Task 5: raw Tableau source-field ref -> emitted Sigma column name
 require 'erb'
 
 opts = { master_id: 'master' }
@@ -7941,6 +7942,115 @@ rescue => e
   warnings << "control-coverage reconciliation error: #{e.message}"
 end
 
+# ---- PARAMETER actions (bfxd step 2) ---------------------------------------
+# on-select -> set-control-value {type: "column"}: the mark click sets a control
+# to the clicked row's value. RUNTIME-PROVEN 2026-08-06 end to end.
+#
+# Placement note: structurally this cannot sit right after Task 3's nav-action
+# block (immediately after the zones/nav-button loop, before `param_controls`/
+# `auto_controls` are even declared) — resolving `target_name` to a control
+# needs both arrays fully populated, and they aren't until further down. This
+# is the earliest point after both exist, while `elements` still carry
+# `_worksheet`/`_dashboard` (stripped inside the pages_mode branches below) and
+# before the actions-emitted manifest is written — the same two constraints
+# Task 3's block had to satisfy.
+#
+# Three hard constraints, each confirmed by breaking it:
+#   - `control` takes the controlId, NOT the control element's id. /verify
+#     ACCEPTS the wrong form; the live create rejects it.
+#   - a control with no filters[] makes this a SILENT no-op. There is no direct
+#     chart->chart filter effect; it always routes through a control.
+#   - the clicked column must exist on the HOST element for {type: "column"} to
+#     bind. When it does not, that is residue, not a guess.
+unless opts[:pages_mode] == :worksheet
+  Array(opts[:detected_actions]).each do |det|
+    next unless det['kind'] == 'parameter-action'
+
+    caption = det['caption'].to_s
+    unless det['trigger'].to_s.strip.casecmp('on select').zero?
+      warnings << "parameter-action '#{caption}' activates on #{det['trigger'].inspect} — " \
+                  'Sigma has no equivalent trigger (named residue)'
+      next
+    end
+    sheets = Array(det.dig('source', 'worksheets'))
+    if sheets.length != 1
+      warnings << "parameter-action '#{caption}' sources #{sheets.length} worksheet(s) — " \
+                  'no unambiguous host element (named residue)'
+      next
+    end
+    host_el = elements.find { |e| e['_worksheet'] == sheets.first }
+    if host_el.nil?
+      warnings << "parameter-action '#{caption}' sources worksheet '#{sheets.first}', " \
+                  'which produced no emitted element (named residue)'
+      next
+    end
+
+    col = ActionColumnResolver.resolve(ref: det['sourceFieldRef'], mmap: mmap,
+                                       columns_by_guid: meta['columns_by_guid'] || {})
+    if col.nil?
+      warnings << "parameter-action '#{caption}' source field " \
+                  "#{det['sourceFieldRef'].inspect} does not resolve to an emitted column — " \
+                  'add a master-columns.json regex, or wire it by hand (named residue)'
+      next
+    end
+
+    # The control the parameter already migrated to. A Tableau parameter's
+    # auto-generated control lives in `param_controls` (built from
+    # meta['parameters']); a quick-filter's lives in `auto_controls` (built
+    # from meta['shared_filters']) — search both, exactly as every other
+    # consumer of "all controls" in this file does (control-coverage above,
+    # and the page-emission duplication passes at :8437/:8515/:8659).
+    # targetParameterRef's caption is what extract_parameter_actions rendered
+    # into targets[0]['name'].
+    target_name = Array(det['targets']).first.to_h['name'].to_s
+    ctl = (param_controls + auto_controls).find { |c| c['name'].to_s.strip.casecmp(target_name.strip).zero? }
+    if ctl.nil?
+      warnings << "parameter-action '#{caption}' targets parameter '#{target_name}', which " \
+                  'has no emitted control — the click has nothing to set (named residue)'
+      next
+    end
+    if Array(ctl['filters']).empty?
+      warnings << "parameter-action '#{caption}' targets control '#{ctl['controlId']}', " \
+                  'which carries no filters[] — setting it would be a SILENT no-op ' \
+                  '(named residue)'
+      next
+    end
+
+    action = {
+      'id'      => ActionLedger.new_id(action_id_registry, host_el['id']),
+      'trigger' => 'on-select',
+      'effects' => [{ 'effect'  => 'set-control-value',
+                      # controlId, NOT the control element's id. In
+                      # --page-per-dashboard/--page-per-worksheet mode this
+                      # captured id is PROVISIONAL: the per-page control-
+                      # duplication pass further down suffixes every
+                      # param/auto control's controlId per page via
+                      # `ctl_rewrites`, and that pass has been extended (see
+                      # the two `ctl_rewrites` loops below) to rewrite this
+                      # exact field in lockstep — mirroring how
+                      # emitted_action_index keeps nav-action/nav-button
+                      # references correct across that same per-page rename.
+                      'control' => ctl['controlId'],
+                      'value'   => { 'type' => 'column', 'column' => col } }]
+    }
+    errs = ActionLedger.validate_action(action)
+    raise "emitted an invalid parameter-action on #{host_el['id']}: #{errs.join('; ')}" if errs.any?
+
+    manifest_entry = {
+      'actionId'      => action['id'],
+      'source'        => { 'kind' => 'parameter-action', 'caption' => caption,
+                           'sourceSheet' => sheets.first,
+                           'actionName' => det['actionName'] },
+      'hostElementId' => host_el['id'],
+      'trigger'       => action['trigger'],
+      'effects'       => action['effects']
+    }
+    emitted_actions << manifest_entry
+    emitted_action_index[[host_el['_dashboard'], host_el['id']]] = manifest_entry
+    (host_el['actions'] ||= []) << action
+  end
+end
+
 # ---- v5.1 leaked-ref guard (fail-closed) ------------------------------------
 # A column ref whose inner name contains formula punctuation or a Tableau pill
 # qualifier ([Master/-WINDOW_MAX(…)], [Master/Rank N (copy)_…:ok:9]) is ALWAYS
@@ -8516,6 +8626,19 @@ if opts[:pages_mode] == :worksheet
         end
         col['formula'] = f
       end
+      # A set-control-value effect's `control` names a param/auto controlId —
+      # the SAME id this page just suffixed above. Without this, an emitted
+      # action (parameter-action emission is currently gated off in
+      # page-per-worksheet mode, but this keeps the two duplication sites in
+      # lockstep against future changes) would reference a controlId that no
+      # longer exists on this page, exactly the staleness class the
+      # formula-rewrite above exists to prevent.
+      (el['actions'] || []).each do |a|
+        (a['effects'] || []).each do |eff|
+          nxt = ctl_rewrites[eff['control']]
+          eff['control'] = nxt if eff['effect'] == 'set-control-value' && nxt
+        end
+      end
     end
     pages << {
       'name'     => ws_name,
@@ -8617,6 +8740,21 @@ elsif opts[:pages_mode] == :dashboard
         f = col['formula'].to_s
         ctl_rewrites.each { |from, to| f = f.gsub("[#{from}]", "[#{to}]") }
         col['formula'] = f
+      end
+      # A parameter-action's set-control-value effect names a param/auto
+      # controlId — the SAME id this dashboard page just suffixed above via
+      # ctl_rewrites. Without this rewrite the emitted action would reference
+      # a controlId that only existed pre-namespacing and never appears in
+      # this page's own control list — a schema-valid action the live create
+      # rejects ("references unknown control"), same failure mode as passing
+      # an element id instead of a controlId. Mirrors the formula rewrite
+      # immediately above; mutates the effect hash in place, which the
+      # actions-emitted manifest (built from the SAME object) picks up too.
+      (el['actions'] || []).each do |a|
+        (a['effects'] || []).each do |eff|
+          nxt = ctl_rewrites[eff['control']]
+          eff['control'] = nxt if eff['effect'] == 'set-control-value' && nxt
+        end
       end
     end
     # K3: page_extras (styled text, title text, images) carry Tableau ZONE ids,
