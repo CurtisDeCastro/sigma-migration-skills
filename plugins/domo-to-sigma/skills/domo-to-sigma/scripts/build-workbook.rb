@@ -481,6 +481,97 @@ def build_summary_companion(card, overrides)
   kpi = build_kpi(card, overrides)
   return nil unless kpi
   kpi['id'] = eid(card, '-summary')
+  apply_latest_bucket_scope!(card, kpi)
+  kpi
+end
+
+# A Domo summary number carries its OWN query, and when that query GROUPS and
+# takes `limit: 1` with a DESCENDING order, the value is the MOST RECENT BUCKET —
+# not an aggregate over the card's whole window.
+#
+# MEASURED 2026-08-07 on "Bounces Trend" (card 973209148). Its summaryNumber._raw:
+#     groupBy [{column: CalendarMonth, calendar: true}]
+#     orderBy [{column: CalendarMonth, calendar: true, order: DESCENDING}]
+#     limit   1
+# Domo renders 24,777 — exactly the 2026-08 bucket. The converter emitted
+# Sum(Hard) + Sum(Soft) + Sum(Other) over the full 6-month window: 433,804. A
+# 17.5x error with no error anywhere, and note its CHART tile passes byte-exactly,
+# so nothing about the chart hints at it. Domo's own label says so out loud:
+# "Bounces this Period", against "... in Period" on the window-wide cards.
+#
+# Scope: 3 of the 36 cards on this page have the grouped-limit-1 shape (Bounces
+# this Period, Sales this Period, Bounce Rate in Most Recent Period) and all three
+# failed gate 1. The other 28 carry `limit: 1` with NO groupBy, which is just a
+# scalar aggregate and is already correct — this must not touch them.
+#
+# Implemented as a period-equality filter rather than a window function:
+# DateTrunc(grain, [date]) = DateTrunc(grain, Today()). Sigma's window functions
+# silently error in master/DM calc columns (memory sigma-window-functions), so
+# ranking is not available here; the current-period identity is, and it is what
+# "this Period" means. It is only correct while the data actually reaches the
+# current period — which the parity oracle's warehouse-freshness guard now
+# enforces, and which is otherwise a loud FAIL rather than a silent drift.
+def apply_latest_bucket_scope!(card, kpi)
+  sn = card['summaryNumber']
+  return kpi unless sn.is_a?(Hash)
+  raw = sn['_raw']
+  return kpi unless raw.is_a?(Hash)
+  return kpi unless raw['limit'].to_i == 1
+  gb = Array(raw['groupBy'])
+  return kpi if gb.empty?
+  ob = Array(raw['orderBy'])
+  # Only a DESCENDING order over the grouped column means "latest".
+  return kpi unless ob.any? { |o| o.is_a?(Hash) && o['order'].to_s.upcase == 'DESCENDING' }
+
+  gcol = gb.first.is_a?(Hash) ? gb.first['column'].to_s : gb.first.to_s
+  return kpi if gcol.strip.empty?
+
+  # The grouped column is Domo's synthetic calendar pseudo-column
+  # (CalendarMonth/CalendarWeek/...); the REAL date column and grain live on
+  # dateGrain, the same pair domo-discover.rb records.
+  grain_info = card['dateGrain']
+  date_col = grain_info.is_a?(Hash) ? grain_info['column'].to_s : ''
+  grain = DOMO_DATE_INTERVAL_UNIT[(grain_info.is_a?(Hash) ? grain_info['dateTimeElement'] : nil).to_s.upcase]
+  if date_col.strip.empty? || grain.nil?
+    warn_card(card, "summary number is a LATEST-BUCKET query (groupBy #{gcol}, limit 1, DESCENDING) " \
+                    'but the card carries no usable dateGrain to scope it to the current period — ' \
+                    'the KPI will aggregate the WHOLE window and read too high. Refused to guess.')
+    return kpi
+  end
+
+  date_cid = filter_target_column(kpi, date_col)
+  unless date_cid
+    warn_card(card, "summary number is a LATEST-BUCKET query but date column '#{date_col}' does not " \
+                    'resolve to a data-model column — KPI left window-wide rather than shipping a ' \
+                    'filter with a nil columnId.')
+    return kpi
+  end
+  date_formula = (Array(kpi['columns']).find { |c| c['id'] == date_cid } || {})['formula']
+  if date_formula.to_s.strip.empty?
+    warn_card(card, "summary number is a LATEST-BUCKET query but resolved date column '#{date_col}' " \
+                    'carries no formula to build the predicate from.')
+    return kpi
+  end
+
+  slug = date_col.downcase.gsub(/\W+/, '-')
+  cur_id = "f-curperiod-#{slug}-#{grain}"
+  unless Array(kpi['columns']).any? { |c| c['id'] == cur_id }
+    kpi['columns'] = Array(kpi['columns']) + [{
+      'id' => cur_id,
+      'name' => "Current #{grain} (#{date_col})",
+      'hidden' => true,
+      # An explicit escaped string, NOT %(...): a %-literal balances the nested
+      # parens and mangles the formula (test-build-workbook.rb warns about this
+      # exact footgun; the first cut of this line shipped `) +\n %(` INTO the
+      # formula and Sigma rejected the whole PUT with HTTP 400).
+      'formula' => "If(DateTrunc(\"#{grain}\", #{date_formula}) = " \
+                   "DateTrunc(\"#{grain}\", Today()), \"in\", \"out\")",
+    }]
+  end
+  kpi['filters'] = Array(kpi['filters']) + [{
+    'id' => "cp-#{kpi['id']}-#{Array(kpi['filters']).size}",
+    'columnId' => cur_id, 'kind' => 'list', 'mode' => 'include', 'values' => ['in'],
+  }]
   kpi
 end
 
