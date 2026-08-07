@@ -70,6 +70,7 @@ require_relative 'lib/trellis_emit'   # shared native-trellis emitter (supported
 require_relative 'lib/metric_binding' # shared DM-metric binder ([Metrics/<name>] over inline re-derive)
 require_relative 'lib/kpi_card'       # shared KPI-chart emitter (comparative-KPI-ready)
 require_relative 'lib/kpi_comparison_detect' # Task 5: prior/target comparison-measure detector
+require_relative 'lib/action_ledger' # workbook-wide action id registry + validate/manifest
 require 'erb'
 
 opts = { master_id: 'master' }
@@ -6717,6 +6718,18 @@ end
 # machine-recognizable placeholder URL https://nav.invalid/#page=<name>;
 # put-layout.rb rewrites it to the live workbook page URL post-publish
 # (the workbook URL doesn't exist until the POST returns).
+action_id_registry = {} # workbook-wide — ActionLedger.new_id, never per-dash/per-zone
+emitted_actions = []
+# (dash_name, pre-namespacing host id) → the SAME hash object held in
+# emitted_actions, so the --page-per-dashboard rename hook below (namespace_ids)
+# can mutate the manifest entry in place when its host element id gets
+# suffixed. Keyed by a compound (dashboard, host) pair, NOT by host alone —
+# two unrelated dashboards' buttons can share a host string ("btn-10") purely
+# because Tableau zone ids restart per dashboard, and a stem-only key (the
+# pattern chart-provenance uses, which assumes stem collisions are the SAME
+# worksheet reused) would silently pair one dashboard's caption with another's
+# action.
+emitted_action_index = {}
 nav_button_records = []
 unless opts[:pages_mode] == :worksheet
   layout.each do |dash|
@@ -6733,15 +6746,65 @@ unless opts[:pages_mode] == :worksheet
       url = "https://nav.invalid/#page=#{ERB::Util.url_encode(z['button_nav_target'])}"
       el =
         if ENV['SIGMA_BUTTON_ELEMENTS'] == 'on'
-          e = { 'id' => "btn-#{z['id']}", 'kind' => 'button', 'text' => label,
+          host = "btn-#{z['id']}"
+          # Target page id is PROVISIONAL, not a fact. Two page-id schemes exist
+          # in this codebase and there is no way to know at this call site which
+          # one the final workbook spec will use:
+          #   - build-workbook-spec.rb:177   "page-#{slug}"      (name-derived)
+          #   - mechanical-specs.rb:1881     "page-dash-#{i+1}"  (array-position)
+          # migrate-tableau.rb (the primary end-to-end driver) always assembles
+          # through mechanical-specs.rb, so the slug id below will NOT match
+          # there. We still emit it — it's the best guess available pre-publish
+          # — but the real fix is the same one already proven for the
+          # nav.invalid URL placeholder a few lines down: put-layout.rb repairs
+          # `navigate.target.page` BY NAME after publish, once the real page ids
+          # exist, using `targetPageName` recorded on the manifest entry below.
+          # Do not treat this id as authoritative anywhere downstream.
+          slug = z['button_nav_target'].to_s.downcase.gsub(/[^a-z0-9]+/, '-')
+                  .sub(/\A-/, '').sub(/-\z/, '')[0..40].to_s
+          target_page_id = "page-#{slug}"
+          action = {
+            'id'      => ActionLedger.new_id(action_id_registry, host),
+            'trigger' => 'on-click',
+            'effects' => [{ 'effect' => 'navigate',
+                            'target' => { 'type' => 'page', 'page' => target_page_id } }]
+          }
+          errs = ActionLedger.validate_action(action)
+          raise "emitted an invalid action on #{host}: #{errs.join('; ')}" if errs.any?
+          manifest_entry = {
+            'actionId'       => action['id'],
+            # 'actionName' mirrors build-postpublish-guide.rb's extract_buttons
+            # (dashboard + Tableau zone id — dashboard-object button zones
+            # carry no Tableau `name=` attribute, so this is the closest
+            # workbook-wide-unique substitute). ActionLedger.key_of prefers
+            # this over [kind, caption]: without it, two same-captioned
+            # nav-buttons (e.g. two "Home" buttons on different dashboards)
+            # where only one is actually auto-wired would collide on
+            # [kind, caption] and the join could silently drop the unemitted
+            # one out of residue instead of flagging it for manual wiring.
+            'source'         => { 'kind' => 'nav-button', 'caption' => label,
+                                  'sourceSheet' => dash['dashboard'],
+                                  'actionName' => "#{dash['dashboard']}::zone-#{z['id']}" },
+            'hostElementId'  => host,
+            # The key put-layout.rb's publish-time repair resolves against —
+            # see the page-id comment above: target_page_id is provisional,
+            # and this is the raw dashboard NAME the real page id must match.
+            'targetPageName' => z['button_nav_target'],
+            'trigger'        => action['trigger'],
+            'effects'        => action['effects']
+          }
+          emitted_actions << manifest_entry
+          emitted_action_index[[dash['dashboard'], host]] = manifest_entry
+          e = { 'id' => host, 'kind' => 'button', 'text' => label,
                 'appearance' => 'filled', 'align' => 'center', 'size' => 'small',
-                'actions' => [{ 'trigger' => 'on-click', 'effects' => [{
-                  'effect' => 'open-url', 'openTarget' => '_self', 'url' => url }] }] }
+                'actions' => [action] }
           e['fillColor'] = z['fill_color'][0, 7] if z['fill_color']
           e['fontColor'] = z['button_font_color'] if z['button_font_color']
           e
         else
           # Text-pill fallback (proven live): bold markdown link, pill bg.
+          # UNCHANGED — kind:text cannot host actions[], so this branch keeps
+          # the nav.invalid placeholder; put-layout.rb rewrites it post-publish.
           body = "[**#{label}**](#{url})"
           body = %(<span style="background-color: #{z['fill_color'][0, 7]}">#{body}</span>) if z['fill_color']
           { 'id' => "btn-#{z['id']}", 'kind' => 'text',
@@ -6758,6 +6821,16 @@ unless opts[:pages_mode] == :worksheet
     File.write(side, JSON.pretty_generate(nav_button_records))
     warn "wrote #{side} (#{nav_button_records.size} navigation button(s) — put-layout.rb rewrites the placeholder URLs post-publish)"
   end
+  # NOTE: the actions-emitted manifest is intentionally NOT written here. In
+  # --page-per-dashboard mode, the id-namespacing pass further down (rename
+  # site: `namespace_ids`, guarded by `opts[:pages_mode] == :dashboard`) can
+  # still rename this button's element id (a Tableau zone id collision across
+  # two dashboards — zone ids restart per dashboard, so "btn-10" recurring on a
+  # second dashboard is common, not exotic). `emitted_action_index` lets that
+  # rename site update this exact entry in place; write_manifest itself runs
+  # AFTER that whole pass, once ids are final (see below, alongside the
+  # chart-provenance/hidden-titles sidecars, which write "after the emitters"
+  # for the identical reason).
 end
 
 styled_text_all = styled_text_by_dash.values.flatten(1)
@@ -8402,6 +8475,17 @@ elsif opts[:pages_mode] == :dashboard
           if (pv = $chart_provenance[stem])
             $chart_provenance[ns] = pv.merge('dashboard' => dash_name)
           end
+          # A nav-button's manifest entry (keyed by the EXACT (dashboard, host)
+          # pair — never by stem alone, since two unrelated dashboards' buttons
+          # can share a host string) gets updated IN PLACE so its
+          # hostElementId/actionId track the same rename this gsub is about to
+          # apply to the real element. Without this, write_manifest below would
+          # ship a hostElementId/actionId that no longer exists in the spec —
+          # exactly the staleness the manifest exists to prevent.
+          if (entry = emitted_action_index[[dash_name, stem]])
+            entry['hostElementId'] = ns
+            entry['actionId'] = entry['actionId'].to_s.gsub(stem, ns)
+          end
           JSON.parse(el.to_json.gsub(stem, ns))
         else
           seen_el_ids[stem] = true
@@ -8519,6 +8603,24 @@ begin
   end
 rescue => e
   warn "  WARN  chart-provenance sidecar write error (parity plan falls back to display-name matching): #{e.message}"
+end
+
+# actions-emitted manifest sidecar WRITE — after the emitters for the SAME
+# reason as chart-provenance/hidden-titles just above: --page-per-dashboard's
+# namespacing pass (the `namespace_ids` rename site) can still rename a
+# nav-button's element id after `emitted_actions` was first populated, and
+# `emitted_action_index` hooks that exact rename to keep each entry's
+# hostElementId/actionId in step. Writing here, not at the point of emission,
+# is what makes the manifest match the FINAL spec instead of a stale
+# mid-build snapshot. Written unconditionally (even empty) whenever
+# nav-button processing could have run at all (never in --page-per-worksheet
+# mode, which has no dashboard-object zones to process) — an empty manifest
+# means "nothing was auto-emitted," which Task 4's join must distinguish from
+# "no manifest at all."
+unless opts[:pages_mode] == :worksheet
+  manifest_path = opts[:out].sub(/\.json$/, '-actions-emitted.json')
+  ActionLedger.write_manifest(manifest_path, emitted_actions)
+  warn "wrote #{manifest_path} (#{emitted_actions.size} auto-emitted Sigma action(s))"
 end
 
 # ---- Intended-scope contract (control-scope.json) ---------------------------

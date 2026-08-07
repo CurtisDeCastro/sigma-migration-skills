@@ -149,6 +149,12 @@ if elements_path && File.exist?(elements_path)
   end
   puts "injected #{injected} container/header element(s) from #{elements_path}"
 end
+# Page NAME -> live page id. Built ONCE here — both the nav.invalid URL
+# rewrite (below) and the navigate-button target.page repair (further below,
+# from the actions-emitted manifest) resolve provisional page references
+# through this SAME lookup. Do not build a second name->page map.
+page_id_by_name = (spec['pages'] || []).each_with_object({}) { |p, h| h[p['name'].to_s.strip.downcase] = p['id'] }
+
 # ---- v5.0-P2: navigation-button URL rewrite ---------------------------------
 # Nav buttons are POSTed with the machine-recognizable placeholder
 # https://nav.invalid/#page=<name> (the workbook URL doesn't exist until the
@@ -162,7 +168,6 @@ if nav_path && File.exist?(nav_path)
   if wb_url.empty?
     warn 'WARN: workbook URL unavailable — nav-button placeholders left in place'
   else
-    page_id_by_name = spec['pages'].each_with_object({}) { |p, h| h[p['name'].to_s.strip.downcase] = p['id'] }
     rewritten = 0
     unresolved = []
     rewrite = lambda do |s|
@@ -191,6 +196,49 @@ if nav_path && File.exist?(nav_path)
     puts "nav buttons: #{rewritten} placeholder URL(s) rewritten to live page links"
     unresolved.uniq.each { |n| warn "WARN: nav button targets page #{n.inspect} — no live page by that name; placeholder left (verify by hand)" }
   end
+end
+
+# ---- v5.5: navigate-button target.page repair -------------------------------
+# `navigate` effects on real kind:button elements (SIGMA_BUTTON_ELEMENTS=on)
+# carry a PROVISIONAL target.page id: two page-id schemes coexist in this
+# codebase — build-workbook-spec.rb:177 assigns "page-<slug>" while
+# mechanical-specs.rb:1881 (the orchestrated pipeline customers actually run)
+# assigns "page-dash-<N>" by array index — and build-charts-from-signals.rb
+# cannot know at build time which scheme the final spec will use. It emits its
+# best guess and records the human-readable target dashboard/page NAME on the
+# <out>-actions-emitted.json manifest (`targetPageName`, keyed by `actionId`).
+# Repair target.page BY NAME now that real page ids exist, through the SAME
+# page_id_by_name lookup the nav.invalid URL rewrite above uses (built once,
+# near the top of this file — do not build a second name->page map). Mirrors
+# that rewrite's philosophy: never crash, never silently leave a broken
+# target — an unresolved name gets a loud WARN naming the action and the page,
+# with the provisional value left in place so it's easy to spot and fix.
+manifest_path = opts[:layout] && Dir.glob(File.join(File.dirname(opts[:layout]), '*-actions-emitted.json')).first
+if manifest_path && File.exist?(manifest_path)
+  manifest = (JSON.parse(File.read(manifest_path)) rescue nil)
+  manifest = [] unless manifest.is_a?(Array)
+  nav_repaired = 0
+  spec['pages'].each do |p|
+    (p['elements'] || []).each do |el|
+      (el['actions'] || []).each do |a|
+        entry = manifest.find { |m| m['actionId'] == a['id'] }
+        next unless entry && entry['targetPageName']
+        (a['effects'] || []).each do |eff|
+          next unless eff['effect'] == 'navigate' && eff.dig('target', 'type') == 'page'
+          resolved = page_id_by_name[entry['targetPageName'].to_s.strip.downcase]
+          if resolved
+            eff['target']['page'] = resolved
+            nav_repaired += 1
+          else
+            warn "WARN: navigate action #{entry['actionId'].inspect} (#{a['id'].inspect}) targets page " \
+                 "#{entry['targetPageName'].inspect} — no live page by that name; provisional target " \
+                 "#{eff['target']['page'].inspect} left in place (verify by hand)"
+          end
+        end
+      end
+    end
+  end
+  puts "navigate targets: #{nav_repaired} button action(s) repaired to live page ids" if nav_repaired > 0
 end
 
 # ---- v5.1: hidden-titles application ----------------------------------------
