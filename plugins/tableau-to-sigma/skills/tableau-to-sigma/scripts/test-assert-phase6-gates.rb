@@ -8,11 +8,21 @@
 #     required"), never pass on a blind attestation — even when a verdict /
 #     screenshot_path was recorded. --skip-visual-comparison stays the escape.
 #
-#   gate 11 post-publish interactivity guide (§D4, exit 16): when the source
-#     dashboards carry filter/highlight/nav ACTIONS (dashboard-layout-meta.json
-#     is_action filters, or the *-gaps-report.json action feature) and
-#     <workdir>/POSTPUBLISH_GUIDE.md does not exist → fail; guide present or
-#     --skip-postpublish-guide "<reason>" → pass.
+#   gate G1 action schema validation (Task 6, exit 16 — shared with gate 11,
+#     see below): every actions[] entry in the built spec must be
+#     ActionLedger.validate_action-clean and every action id unique across the
+#     WHOLE workbook. Standalone via `--spec <file> --gate G1`; wired into the
+#     full run via <workdir>/wb-spec.json (absent → stated SKIP). NEVER
+#     waivable, including by --skip-postpublish-guide.
+#
+#   gate 11 post-publish interactivity guide, REWRITTEN (Task 6, exit 16): no
+#     longer a bare file-exists check keyed off a source-side action count.
+#     Now requires <workdir>/action-ledger.json to exist with its conservation
+#     invariant holding (detectedCount == emitted.size + residue.size) AND
+#     <workdir>/POSTPUBLISH_GUIDE.md to exist and mention NONE of the ledger's
+#     `emitted` captions (a guide that instructs the customer to hand-wire an
+#     action the converter already built is a FAIL, not a pass). Guide present
+#     and matching residue, or --skip-postpublish-guide "<reason>" → pass.
 #
 # Runs the real script per scenario in a scratch workdir with no SIGMA_* env, so
 # the live gates (3/4/6/7) SKIP and the file-based gates are exercised.
@@ -47,6 +57,16 @@ def base_workdir(dir, parity_extra: {}, blind: true)
   File.binwrite(File.join(dir, 'sigma-render.png'), "\x89PNG\r\n\x1a\n".b + ("\x00".b * 6000))
   File.write(File.join(dir, 'telemetry-sent.json'), JSON.generate('status' => 'sent', 'tool' => 'test'))
   BlindFixture.install(dir) if blind
+  # Gate 11 (Task 6, rewritten): a zero-action ledger + the matching guide
+  # build-postpublish-guide.rb would write for a workbook with no detected
+  # interactions — conservation holds (0 == 0 + 0) and there is nothing an
+  # emitted caption could leak into the guide. Individual gate-11 tests below
+  # overwrite these two files to exercise the real behavior.
+  File.write(File.join(dir, 'action-ledger.json'),
+             JSON.pretty_generate('schemaVersion' => 1, 'detectedCount' => 0,
+                                   'emitted' => [], 'residue' => []))
+  File.write(File.join(dir, 'POSTPUBLISH_GUIDE.md'),
+             "# Post-publish interactivity guide\n\nNo interactive actions detected.\n")
 end
 
 def run_gate(dir, *args)
@@ -54,16 +74,6 @@ def run_gate(dir, *args)
   out, err, st = Open3.capture3(env, RbConfig.ruby, SCRIPT, '--workdir', dir, *args)
   [out, err, st]
 end
-
-# Action-bearing meta: two action-driven worksheet filters (is_action / kind).
-ACTION_META = {
-  'worksheets' => {
-    'Region Map'  => { 'filters' => [{ 'raw_class' => 'categorical', 'is_action' => true, 'kind' => 'action' }] },
-    'Trend'       => { 'filters' => [{ 'raw_class' => 'categorical', 'is_action' => true, 'kind' => 'action' },
-                                     { 'raw_class' => 'categorical', 'is_action' => false, 'kind' => 'list' }] },
-    'Plain Table' => { 'filters' => [] }
-  }
-}.freeze
 
 # ---- baseline: everything green → exit 0 -------------------------------------
 Dir.mktmpdir do |dir|
@@ -253,69 +263,188 @@ Dir.mktmpdir do |dir|
         'budget failure lists the no-vision waiver among the census', fails)
 end
 
-# ---- gate 11: actions in dashboard-layout-meta.json, no guide → exit 16 ------
-Dir.mktmpdir do |dir|
-  base_workdir(dir)
-  File.write(File.join(dir, 'dashboard-layout-meta.json'), JSON.pretty_generate(ACTION_META))
-  _out, err, st = run_gate(dir)
-  check(st.exitstatus == 16, "meta actions + no guide → exit 16 (got #{st.exitstatus})", fails)
-  check(err.include?('2 interactive actions') && err.include?('workbooks-as-code'),
-        'gate 11 failure counts the actions (2 is_action filters)', fails)
-  check(err.include?('build-postpublish-guide.rb'), 'gate 11 failure points at the generator script', fails)
-  check(err.include?('--skip-postpublish-guide'), 'gate 11 failure names the escape hatch', fails)
+# ==============================================================================
+# Task 6 — Gate G1 (action schema) + gate 11 REWRITE (ledger-based residue).
+# ==============================================================================
+
+# ---- G1 — standalone mode (--spec <file> --gate G1), no --workdir needed ----
+puts 'G1 — action schema (standalone --spec/--gate mode)'
+Dir.mktmpdir do |d|
+  spec = File.join(d, 'wb.json')
+
+  valid = { 'pages' => [{ 'id' => 'p1', 'elements' => [
+    { 'id' => 'btn-1', 'kind' => 'button', 'actions' => [
+      { 'id' => 'act-btn-1-1', 'trigger' => 'on-click',
+        'effects' => [{ 'effect' => 'navigate',
+                        'target' => { 'type' => 'page', 'page' => 'p2' } }] }] }] }] }
+  File.write(spec, JSON.generate(valid))
+  out, _err, st = Open3.capture3(RbConfig.ruby, SCRIPT, '--spec', spec, '--gate', 'G1')
+  check(st.success?, 'G1 PASSES on a valid action', fails)
+  check(out.include?('gate G1') && out.include?('1 action'), 'G1 OK line names the validated count', fails)
+
+  # PLANTED DEFECT 1 — the shipping bug: no id
+  no_id = Marshal.load(Marshal.dump(valid))
+  no_id['pages'][0]['elements'][0]['actions'][0].delete('id')
+  File.write(spec, JSON.generate(no_id))
+  _out, err, st = Open3.capture3(RbConfig.ruby, SCRIPT, '--spec', spec, '--gate', 'G1')
+  check(!st.success?, 'G1 FAILS on a missing action id (the shipping bug)', fails)
+  check(st.exitstatus == 16, "G1 missing-id failure exits 16, gate 11's family (got #{st.exitstatus})", fails)
+  check(err.include?('missing required key `id`'), 'failure names the missing id', fails)
+
+  # PLANTED DEFECT 2 — duplicate id across two elements (a real live 400)
+  dup = Marshal.load(Marshal.dump(valid))
+  second = Marshal.load(Marshal.dump(dup['pages'][0]['elements'][0]))
+  second['id'] = 'btn-2'
+  dup['pages'][0]['elements'] << second
+  File.write(spec, JSON.generate(dup))
+  _out, err, st = Open3.capture3(RbConfig.ruby, SCRIPT, '--spec', spec, '--gate', 'G1')
+  check(!st.success?, 'G1 FAILS on a workbook-duplicate action id', fails)
+  check(err.include?('duplicate action id') && err.include?('act-btn-1-1'),
+        'failure names the duplicate id', fails)
+
+  # PLANTED DEFECT 3 — open-url with no url (schema-valid upstream, silent no-op)
+  nourl = Marshal.load(Marshal.dump(valid))
+  nourl['pages'][0]['elements'][0]['actions'][0]['effects'] =
+    [{ 'effect' => 'open-url', 'openTarget' => '_blank' }]
+  File.write(spec, JSON.generate(nourl))
+  _out, err, st = Open3.capture3(RbConfig.ruby, SCRIPT, '--spec', spec, '--gate', 'G1')
+  check(!st.success?, 'G1 FAILS on open-url with no url', fails)
+  check(err.include?('open-url') && err.include?('url'), 'failure names the missing url', fails)
 end
 
-# ---- gate 11: guide present → pass --------------------------------------------
+# ---- G1 — wired into the full run via <workdir>/wb-spec.json ----------------
+G1_SPEC_BAD = { 'pages' => [{ 'id' => 'p1', 'elements' => [
+  { 'id' => 'btn-1', 'kind' => 'button', 'actions' => [
+    { 'trigger' => 'on-click', # PLANTED DEFECT — no id
+      'effects' => [{ 'effect' => 'navigate', 'target' => { 'type' => 'page', 'page' => 'p2' } }] }
+  ] }
+] }] }.freeze
+
+G1_SPEC_GOOD = { 'pages' => [{ 'id' => 'p1', 'elements' => [
+  { 'id' => 'btn-1', 'kind' => 'button', 'actions' => [
+    { 'id' => 'act-btn-1-1', 'trigger' => 'on-click',
+      'effects' => [{ 'effect' => 'navigate', 'target' => { 'type' => 'page', 'page' => 'p2' } }] }
+  ] }
+] }] }.freeze
+
 Dir.mktmpdir do |dir|
-  base_workdir(dir)
-  File.write(File.join(dir, 'dashboard-layout-meta.json'), JSON.pretty_generate(ACTION_META))
-  File.write(File.join(dir, 'POSTPUBLISH_GUIDE.md'), "# Post-publish wiring\n")
+  base_workdir(dir) # no wb-spec.json written
   out, _err, st = run_gate(dir)
-  check(st.success?, 'actions + POSTPUBLISH_GUIDE.md present → exit 0', fails)
-  check(out.include?('POSTPUBLISH_GUIDE.md present'), 'gate 11 OK line names the guide', fails)
+  check(st.success?, 'no wb-spec.json → G1 SKIPs, baseline still exit 0', fails)
+  check(out.include?('SKIP') && out.include?('gate G1'), 'G1 skip is stated, not silent', fails)
 end
 
-# ---- gate 11: --skip-postpublish-guide waives (recorded in waivers.json) ------
 Dir.mktmpdir do |dir|
   base_workdir(dir)
-  File.write(File.join(dir, 'dashboard-layout-meta.json'), JSON.pretty_generate(ACTION_META))
+  File.write(File.join(dir, 'wb-spec.json'), JSON.pretty_generate(G1_SPEC_BAD))
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 16, "bad wb-spec.json → G1 fails the full run, exit 16 (got #{st.exitstatus})", fails)
+  check(err.include?('gate G1') && err.include?('missing required key `id`'),
+        'full-run failure identifies gate G1 and the missing id', fails)
+end
+
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'wb-spec.json'), JSON.pretty_generate(G1_SPEC_GOOD))
+  out, _err, st = run_gate(dir)
+  check(st.success?, 'valid wb-spec.json → G1 passes, exit 0', fails)
+  check(out.include?('gate G1') && out.include?('validated'), 'G1 OK line names the validated action count', fails)
+end
+
+# ---- --skip-postpublish-guide waives gate 11 but MUST NOT waive G1 ----------
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.delete(File.join(dir, 'action-ledger.json')) # would ALSO fail gate 11, if G1 didn't stop the run first
+  File.write(File.join(dir, 'wb-spec.json'), JSON.pretty_generate(G1_SPEC_BAD))
+  _out, err, st = run_gate(dir, '--skip-postpublish-guide', 'no handoff doc needed')
+  check(st.exitstatus == 16, "--skip-postpublish-guide does NOT waive G1 (got #{st.exitstatus})", fails)
+  check(err.include?('gate G1') && !err.include?('WAIVED'),
+        'the failure is G1 itself, not a masked/waived gate 11', fails)
+end
+
+# ---- gate 11 (rewritten): no action-ledger.json → exit 16 -------------------
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.delete(File.join(dir, 'action-ledger.json'))
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 16, "no action-ledger.json → exit 16 (got #{st.exitstatus})", fails)
+  check(err.include?('action-ledger.json') && err.include?('missing'),
+        'failure names the missing ledger file', fails)
+  check(err.include?('build-postpublish-guide.rb') && err.include?('--json-out'),
+        'failure points at the generator script and the --json-out flag', fails)
+end
+
+# ---- gate 11 (rewritten): ledger conservation broken → exit 16 --------------
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'action-ledger.json'),
+             JSON.pretty_generate('schemaVersion' => 1, 'detectedCount' => 3, 'emitted' => [], 'residue' => []))
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 16, "ledger conservation broken → exit 16 (got #{st.exitstatus})", fails)
+  check(err.include?('conservation broken') && err.include?('detected=3') && err.include?('emitted=0') && err.include?('residue=0'),
+        'failure names the conservation break with the actual counts', fails)
+end
+
+# ---- gate 11 (rewritten): ledger valid, guide missing → exit 16 -------------
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.delete(File.join(dir, 'POSTPUBLISH_GUIDE.md'))
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 16, "ledger present, guide missing → exit 16 (got #{st.exitstatus})", fails)
+  check(err.include?('POSTPUBLISH_GUIDE.md') && err.include?('missing'),
+        'failure names the missing guide', fails)
+end
+
+EMITTED_NAV_BUTTON = { 'actionId' => 'act-btn-1-1', 'hostElementId' => 'btn-1', 'trigger' => 'on-click',
+                       'effects' => [{ 'effect' => 'navigate', 'target' => { 'type' => 'page', 'page' => 'p2' } }],
+                       'targetPageName' => 'Page 2',
+                       'source' => { 'kind' => 'nav-button', 'caption' => 'Go to Details',
+                                     'sourceSheet' => nil, 'actionName' => 'Dashboard::zone-3' } }.freeze
+
+# ---- gate 11 (rewritten) PLANTED DEFECT — guide mentions an auto-emitted
+# action's caption. This is the exact regression the rewrite exists to catch:
+# previously a guide instructing the customer to hand-wire something the
+# converter had ALREADY built passed green because gate 11 only checked
+# file-existence, never content.
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'action-ledger.json'),
+             JSON.pretty_generate('schemaVersion' => 1, 'detectedCount' => 1,
+                                   'emitted' => [EMITTED_NAV_BUTTON], 'residue' => []))
+  File.write(File.join(dir, 'POSTPUBLISH_GUIDE.md'),
+             "# Post-publish wiring\n\n### Go to Details\n\nAdd a button 'Go to Details' navigating to page 2.\n")
+  _out, err, st = run_gate(dir)
+  check(st.exitstatus == 16, "guide mentions an auto-emitted caption → exit 16 (got #{st.exitstatus})", fails)
+  check(err.include?('Go to Details') && err.include?('already emitted'),
+        'failure names the leaked caption and states it was already auto-wired', fails)
+end
+
+# ---- gate 11 (rewritten): guide correctly omits emitted captions → pass -----
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'action-ledger.json'),
+             JSON.pretty_generate('schemaVersion' => 1, 'detectedCount' => 2,
+                                   'emitted' => [EMITTED_NAV_BUTTON],
+                                   'residue' => [{ 'kind' => 'highlight-action', 'caption' => 'Region Highlight' }]))
+  File.write(File.join(dir, 'POSTPUBLISH_GUIDE.md'),
+             "# Post-publish wiring\n\n### Region Highlight\n\nNo Sigma equivalent; closest pattern: ...\n")
+  out, _err, st = run_gate(dir)
+  check(st.success?, "guide matches residue, omits the emitted caption → exit 0 (got #{st.exitstatus})", fails)
+  check(out.include?('gate 11') && out.include?('guide matches ledger residue') &&
+        out.include?('1 auto-emitted') && out.include?('1 manual'),
+        'gate 11 OK line names the auto-emitted/manual split', fails)
+end
+
+# ---- gate 11 (rewritten): --skip-postpublish-guide still waives it ----------
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.delete(File.join(dir, 'action-ledger.json')) # would fail gate 11 outright without the waiver
   out, _err, st = run_gate(dir, '--skip-postpublish-guide', 'customer declined the handoff doc')
-  check(st.success?, 'actions + --skip-postpublish-guide → exit 0', fails)
+  check(st.success?, "missing ledger + --skip-postpublish-guide → exit 0 (got #{st.exitstatus})", fails)
   check(out.include?('WAIVED'), 'gate 11 waiver is stated loudly', fails)
   waivers = JSON.parse(File.read(File.join(dir, 'waivers.json'))) rescue []
   check(waivers.any? { |w| w['gate'].to_s.include?('post-publish') && w['reason'] == 'customer declined the handoff doc' },
         'gate 11 waiver lands in waivers.json with its reason', fails)
-end
-
-# ---- gate 11: gaps-report fallback (no meta) -----------------------------------
-Dir.mktmpdir do |dir|
-  base_workdir(dir)
-  gaps = { 'workbook' => { 'Workbook' => 'x.twb' },
-           'detected_features' => [
-             { 'name' => 'Dashboard filter / highlight / nav actions',
-               'pat' => "(?-mix:command='tsc:tsl-(filter|highlight|navigate|set-action|parameter-action|url)')",
-               'status' => 'manual', 'count' => 3 }
-           ] }
-  File.write(File.join(dir, 'wb-gaps-report.json'), JSON.pretty_generate(gaps))
-  _out, err, st = run_gate(dir)
-  check(st.exitstatus == 16, "gaps-report actions + no guide → exit 16 (got #{st.exitstatus})", fails)
-  check(err.include?('3 interactive actions'), 'gaps-report fallback carries its action count', fails)
-end
-
-# ---- gate 11: zero actions → OK, no census files → stated SKIP ----------------
-Dir.mktmpdir do |dir|
-  base_workdir(dir)
-  File.write(File.join(dir, 'dashboard-layout-meta.json'),
-             JSON.pretty_generate('worksheets' => { 'A' => { 'filters' => [{ 'is_action' => false, 'kind' => 'list' }] } }))
-  out, _err, st = run_gate(dir)
-  check(st.success? && out.include?('no dashboard filter/highlight/nav actions'),
-        'meta with zero actions → gate 11 OK (guide not required)', fails)
-end
-Dir.mktmpdir do |dir|
-  base_workdir(dir)
-  out, _err, st = run_gate(dir)
-  check(st.success? && out.include?('census unavailable'),
-        'no meta / gaps files → gate 11 stated SKIP (never silent)', fails)
 end
 
 # ---- gate 16: join-cardinality ledger (exit 23) -------------------------------
@@ -1559,7 +1688,7 @@ check(mig_src.include?("'control_flip_required' => true"),
 
 puts
 if fails.empty?
-  puts 'ALL PASS — assert-phase6-ran gate 8b vision precondition + PR-9 blind-grade binding + divergent-verdict budget injection + gate 11 post-publish guide + gate 16 join-cardinality ledger + gate 17 LOD translation ledger + gate 18 ground-truth numeric coverage + gate 19 aggregation-semantics ledger + gate 20 semantic-edit equivalence ledger (incl. withdrawn entries) + gate 21 chart-kind parity (png-read vs readback, kind_waivers ledger) + PR-11 gate 8d default-on / gate 4b layout-phase sentinel (exit 30) / gate 8e arrangement parity (exit 29) + PR-13 gate 7c controls census (exit 31, ledger doctrine) / gate 7b flip test default-on (marker-or-waiver, budget-counted) + PR-14 degradation ledger + GREEN/YELLOW/PARTIAL verdict model (empty-ledger GREEN, scope-cut PARTIAL cap, verdict-stamped DONE marker)'
+  puts 'ALL PASS — assert-phase6-ran gate 8b vision precondition + PR-9 blind-grade binding + divergent-verdict budget injection + Task 6 gate G1 action-schema validation (standalone --spec/--gate + wired into the full run, immune to --skip-postpublish-guide) + gate 11 post-publish guide REWRITTEN against the action ledger (conservation + no-leaked-caption checks) + gate 16 join-cardinality ledger + gate 17 LOD translation ledger + gate 18 ground-truth numeric coverage + gate 19 aggregation-semantics ledger + gate 20 semantic-edit equivalence ledger (incl. withdrawn entries) + gate 21 chart-kind parity (png-read vs readback, kind_waivers ledger) + PR-11 gate 8d default-on / gate 4b layout-phase sentinel (exit 30) / gate 8e arrangement parity (exit 29) + PR-13 gate 7c controls census (exit 31, ledger doctrine) / gate 7b flip test default-on (marker-or-waiver, budget-counted) + PR-14 degradation ledger + GREEN/YELLOW/PARTIAL verdict model (empty-ledger GREEN, scope-cut PARTIAL cap, verdict-stamped DONE marker)'
   exit 0
 else
   puts "FAILURES (#{fails.length}):"
