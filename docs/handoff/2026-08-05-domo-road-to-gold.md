@@ -28,6 +28,32 @@ recorded waiver**. Do not shortcut it — see "Waivers that would be a fudge".
 
 ---
 
+## If you are picking this up cold — do this, in this order
+
+1. **Read this doc, then `2026-08-05-domo-gold-audit-full.md`** (committed alongside). The audit has
+   file:line for every claim and overturned three things I believed — including one of my own
+   diagnoses. Trust it over me where they differ.
+2. **Set up.** Worktree `~/wt-domo-gold-integration` (branch `integration/domo-gold-run`). Confirm
+   it still carries wrapper PRs **#609/#613** — if those merged upstream, rebuild from `main`
+   instead. Also rebase the ledger onto it (step 10) or your verdict is uncapped.
+3. **First code change: the 2-arg `DateDiff`** (2–3 h, clears 9 of the 15 error columns). Verify
+   offline before any live run: re-run `convert-beast-modes.rb` on the existing
+   `discovery/beast-modes.json` and assert zero 2-arg `DateDiff(` in `discovery/formulas.json`.
+   **Swap the operands** — see the warning below; getting this half-right returns wrong numbers
+   with no error.
+4. **Then one live diagnostic** for the remaining 6 (`State`/`US Regions`) before writing any code
+   for them — the mechanism is inferred, not verified.
+5. **Fix the parity schema shim (`2tkm`) BEFORE building the oracle.** Otherwise you can do 3–5 days
+   of oracle work and still fail gate 1 because it reads keys `verify-parity.rb` never writes.
+6. Only then the oracle itself.
+
+**Before every live re-run,** clear the right artifacts — `migrate-domo.rb` is idempotent per
+artifact and this cost a full run today. See trap **T1**.
+
+**One warehouse workstream at a time** (org rule) — don't start a second live run in parallel.
+
+---
+
 ## Where the run actually stops
 
 ```
@@ -231,10 +257,17 @@ equivalent). Excluding them is legitimate **only if the exclusion is recorded so
 silently inflated**.
 
 ### Then, in order
-3. **`0goi` (P1)** — the SQL converter uppercases `in` **inside string literals**: `Illinois` →
-   `IllINois`, `Indiana` → `INdiana`. Silent label corruption; any literal containing "in" is at
-   risk (Marketing, Inbound, Washington…). Fix by masking string literals before the IN
-   normalization — the same technique `convert-beast-modes.rb`'s own lint already uses.
+3. **`0goi` (now P3, `[not-our-bug]`) — I GOT THIS ONE WRONG.** I originally filed it as "the SQL
+   converter uppercases `in` inside string literals" (`Illinois` → `IllINois`, `Indiana` →
+   `INdiana`) and briefed it that way. **That is false.** Verified afterwards by reading
+   `originalSql` in `discovery/formulas.json`: **Domo's own source Beast Mode already contains
+   `'IllINois'` and `'INdiana'`.** Someone at Domo mangled the literals long ago; our converter
+   passed them through faithfully. The converter is exonerated — do not go "fix" it.
+   The real open question is a product decision, not a bug: do we reproduce the source's garbage
+   labels verbatim (defensible — a migration should be faithful), or warn on suspicious
+   mixed-case literals? Left open at P3.
+   **Method note for the next person:** I asserted a converter bug from output alone without
+   checking the input. Diff against `originalSql` before blaming the converter.
 4. **F1** — `domo-capture-visuals.rb` enumerates cards via the page payload's `cardIds`, which is
    empty on a real page, so it may be capturing **zero** PNGs while recording "done". Blocks all
    visual/anchor work. `domo-discover.rb` already solved this with `enumerate_page_cards`.
@@ -288,7 +321,7 @@ the truncated error-column audit (#625) — plus the wrong-numbers one (dropped 
 
 **Open, fixed and merged:** `0h11` (pagination — #625).
 
-**Open, not started:** `znvg` (15 type=error) · `0goi` (string-literal corruption) · `qzdg` (sync
+**Open, not started:** `znvg` (15 type=error) · `0goi` (P3, `[not-our-bug]` — source data, see above) · `qzdg` (sync
 body) · `ruzs` (SKIP still allows GREEN — re-verify now that the ledger is vendored) · `2tkm`
 (parity not registering as gate-1 evidence) · `ou66` / `fbqw` / `u07f` (fidelity) · `tkcu` (PDP
 field path — the sample page's 5 PDP cards are the first live chance to test it).
@@ -401,3 +434,8 @@ integration branch predates it.)
    `verify-parity.rb --score-out` writes `tiles_*`. A perfect parity run reads as zero.
 3. **All 81 Beast Modes are classified `aggregate`**, 14 of them with no aggregate function at all,
    so **zero** become DM columns. I had assumed the projection/aggregate split was working.
+
+4. **(Self-correction, found after the audit.) `0goi` was not a converter bug at all.** I claimed
+   the converter uppercases `in` inside string literals. Domo's SOURCE SQL already contains
+   `'IllINois'`/`'INdiana'` — verified against `originalSql`. I diagnosed from output without
+   checking the input. Retitled `[not-our-bug]`, dropped to P3, converter exonerated.
