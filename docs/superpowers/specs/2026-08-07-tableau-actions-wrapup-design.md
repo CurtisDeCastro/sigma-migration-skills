@@ -126,10 +126,33 @@ Emit `on-select → set-control-value {type:"column"}`.
 
 Highest value: 8 of 12 corpus workbooks have at least one filter action; NHL has 23.
 
-Blocked on un-picking the `is_action` column rejection at the five sites listed above. The action's
-source column may not be present on the host element at all, and `{type:"column"}` needs it there.
+**Corrected 2026-08-07, before implementation.** The framing above — "un-pick the `is_action`
+rejection at the five sites" — is wrong, and following it would cause real damage. Reading the
+sites shows they are not five instances of one thing:
 
-Reconcile the `:8832` `-actions.md` writer with the ledger in this PR.
+| Site | What it does | Correct action |
+|---|---|---|
+| `:4270` | rejects action filters from datasource-level filters | **keep rejecting** |
+| `:4329` | rejects them on the pivot fast path | **keep rejecting** |
+| `:5872` | rejects them from per-chart value filters | **keep rejecting** |
+| `:7335` | skips them when building `auto_controls` | **the real change** |
+| `:7780` | skips them in the controls-coverage census | **must move in lockstep with `:7335`** |
+
+Un-picking `:4329` or `:5872` converts an action filter into a *static element filter*,
+hard-filtering the chart to the action's default value — the opposite of making it interactive.
+Only `:7335` matters, because that is where the control the `set-control-value` effect needs would
+be born, and `:7780` must follow or the controls-coverage gate goes red.
+
+`:7335` is a ~100-line branchy dispatch with four distinct `control_scope_records` statuses
+(`needs-wiring`, `needs-materialization`, `needs-master-default`, plus the emitting path). Deciding
+which status an action filter takes needs its own design pass.
+
+PR E is therefore **not planned alongside PRs A–D**. It also depends on the
+`ActionColumnResolver.resolve` signature, which does not exist until PR D lands. Write PR E's plan
+after PR D merges.
+
+Reconcile the `:8832` `-actions.md` writer with the ledger in this PR — it is the filter-action
+hand-wiring table, so it belongs here rather than with the earlier PRs.
 
 **Named fidelity loss.** Tableau targets *sheets*; Sigma targets an element's *source root*. Two
 sheets sharing a root collapse, so a `<param name='exclude'>` that separates them cannot be
