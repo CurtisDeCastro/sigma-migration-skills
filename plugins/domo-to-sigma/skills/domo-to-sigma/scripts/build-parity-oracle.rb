@@ -88,8 +88,13 @@ end
 exp_cards = expected['cards'] || {}
 # reasons the Domo side already recorded, keyed by card id
 exp_unavail = (expected['unavailable'] || []).each_with_object({}) { |u, h| h[u['card_id'].to_s] = u['reason'] }
-act_charts = actuals['charts'] || {}
-act_unavail = (actuals['unavailable'] || []).each_with_object({}) { |u, h| h[u['chart'].to_s] = u['reason'] }
+# Actuals are keyed by ELEMENT ID, never by display name. Domo reuses generic
+# summary labels, so 11 of the real 65 tiles share a name with another tile
+# ("New Visits in Period" names 4 distinct elements). Name-keying let one
+# element's export be scored as another's — a reproduced unearned PASS. See the
+# header of collect-parity-actuals.rb.
+act_by_eid = actuals['charts'] || {}
+act_unavail = (actuals['unavailable'] || []).each_with_object({}) { |u, h| h[u['element_id'].to_s] = u['reason'] }
 
 def card_id_for(element_id)
   m = /\Ael-(\d+)(-summary)?\z/.match(element_id.to_s)
@@ -106,11 +111,31 @@ end
 # collectable — so without this check the oracle would happily "verify" it and
 # score a guaranteed DIVERGE that says nothing about conversion quality. The
 # construction-level reason is the more fundamental one, so it wins.
-prior_excl = {}
+# KEYED BY ELEMENT ID WHERE AVAILABLE. build-parity-exclusions.rb records
+# `evidence.element_id` on every entry, so the match can be exact. Keying by
+# display name instead swept every same-named tile into one tile's exclusion:
+# with "New Visits in Period" naming 4 elements and only one card carrying a
+# refused date window, all four were exempted from scoring — three of them fully
+# collectable and never disqualified. That is silent inflation (a smaller
+# denominator reads as a cleaner pass), which is what this chain exists to refuse.
+#
+# A name-only entry (no element_id) is still honoured, but consumed ONCE rather
+# than matching every same-named tile — an ambiguous exclusion should under-apply,
+# not over-apply.
+prior_by_eid = {}
+prior_by_name = {}
 if File.exist?(excl_path)
   doc = (JSON.parse(File.read(excl_path)) rescue nil)
   list = doc.is_a?(Hash) ? Array(doc['exclusions']) : Array(doc)
-  list.each { |e| prior_excl[e['chart'].to_s] = e if e.is_a?(Hash) }
+  list.each do |e|
+    next unless e.is_a?(Hash)
+    eid = (e['element_id'] || e.dig('evidence', 'element_id')).to_s
+    if eid.empty?
+      (prior_by_name[e['chart'].to_s] ||= []) << e
+    else
+      prior_by_eid[eid] = e
+    end
+  end
 end
 
 verified = []
@@ -122,8 +147,11 @@ charts.each do |c|
   cid, is_summary = card_id_for(eid)
 
   # Already excluded upstream for a construction-level reason — carry it through
-  # verbatim rather than re-deriving or overriding it.
-  if (pe = prior_excl[name])
+  # verbatim rather than re-deriving or overriding it. Element id first; a
+  # name-only entry is consumed once (shift) so it cannot sweep its same-named
+  # siblings.
+  pe = prior_by_eid[eid] || (prior_by_name[name] && prior_by_name[name].shift)
+  if pe
     exclusions << pe
     next
   end
@@ -141,11 +169,20 @@ charts.each do |c|
     exclusions << { 'chart' => name, 'reason' => "no Domo source value: #{reason}" }
     next
   end
-  if is_summary
+  # A KPI tile plots ONE value however it was built. That is true of a `-summary`
+  # companion AND of a Rule-0 KPI — a card whose own element is `kpi-chart`, with
+  # no separate companion. Keying only on `-summary` left every Rule-0 KPI taking
+  # the card's full `rows` payload, which for a multi-column card (a
+  # CATEGORY|CURRENT|TARGET gauge, say) can never match Sigma's single-cell KPI
+  # export: a shape mismatch that reads as a value divergence, exactly the bug
+  # already fixed once for the companions below.
+  is_kpi = is_summary || c['sigma_kind'].to_s == 'kpi-chart'
+
+  if is_kpi
     sv = card['summary_value']
     if sv.nil?
-      exclusions << { 'chart' => name, 'reason' =>
-        'companion KPI tile, but the Domo card reports no summary number ' \
+      exclusions << { 'chart' => name, 'element_id' => eid, 'reason' =>
+        'KPI tile, but the Domo card reports no summary number ' \
         '(summary.status was not a completed run) — Domo declining to compute a ' \
         'KPI is not a zero, so there is no value to compare' }
       next
@@ -167,10 +204,13 @@ charts.each do |c|
   end
 
   # --- the Sigma (actual) side ---
-  act = act_charts[name]
+  # BY ELEMENT ID. Looking this up by display name scored one element's export as
+  # another's whenever two tiles shared a title (11 of the real 65 do).
+  act = act_by_eid[eid]
   if act.nil?
-    reason = act_unavail[name] || 'no Sigma export recorded for this element'
-    exclusions << { 'chart' => name, 'reason' => "no Sigma actual: #{reason}" }
+    reason = act_unavail[eid] || 'no Sigma export recorded for this element'
+    exclusions << { 'chart' => name, 'element_id' => eid,
+                    'reason' => "no Sigma actual: #{reason}" }
     next
   end
 
@@ -207,12 +247,13 @@ end
 # in phase6-parity-domo.rb — which measures against workbook-spec.json, not the
 # plan — would fail on a tile that WAS legitimately accounted for. Carry them
 # through and say so, rather than trusting the two derivations to agree forever.
-emitted = exclusions.map { |e| e['chart'].to_s }.to_set
-orphaned = prior_excl.reject { |name, _| emitted.include?(name) }
+emitted = exclusions.map { |e| e.object_id }.to_set
+orphaned = prior_by_eid.values.reject { |e| emitted.include?(e.object_id) } +
+           prior_by_name.values.flatten           # anything left unconsumed
 unless orphaned.empty?
   warn "carrying through #{orphaned.size} prior exclusion(s) for tile(s) absent from the plan:"
-  orphaned.each { |name, e| warn "    #{name} — #{e['reason']}" }
-  exclusions.concat(orphaned.values)
+  orphaned.each { |e| warn "    #{e['chart']} — #{e['reason']}" }
+  exclusions.concat(orphaned)
 end
 
 File.write(out_path, JSON.pretty_generate('charts' => verified))

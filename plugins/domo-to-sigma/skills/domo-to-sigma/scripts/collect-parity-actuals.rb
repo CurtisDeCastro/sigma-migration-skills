@@ -9,10 +9,31 @@
 #   ruby scripts/collect-parity-actuals.rb --plan <dir>/parity-plan.json \
 #     --workbook-id <wb> --out <dir>/parity-actuals.json [--pool 4] [--timeout 120]
 #
-# Output (--out): { "<chart name>": { "rows": [[...], ...], "columns": [...] }, ... }
-# and, for anything it could not serve, an `unavailable` entry carrying a
-# MEASURED reason — never a silent omission, because a tile missing from the
-# plan shrinks gate 1's denominator and reads exactly like a clean pass.
+# Output (--out): { "<sigma_element_id>": { "chart": "...", "rows": [[...]],
+# "columns": [...] }, ... } and, for anything it could not serve, an
+# `unavailable` entry carrying a MEASURED reason — never a silent omission,
+# because a tile missing from the plan shrinks gate 1's denominator and reads
+# exactly like a clean pass.
+#
+# KEYED BY ELEMENT ID, NOT DISPLAY NAME — this is load-bearing.
+# An earlier cut keyed `results` by the chart's display name. Domo hands the same
+# generic summary label to many cards, so on the real 65-tile page ELEVEN tiles
+# share a name with at least one other: "New Visits in Period" names 4 distinct
+# elements, "Change over 7 Days" 3, "Surveys in Period" and "US Leads in Period"
+# 2 each. phase6-parity-domo.rb:190-193 says as much in its own comment ("the
+# same KPI title repeated on two pages is routine") and compares as a MULTISET
+# for exactly this reason.
+#
+# Name-keying broke two ways at once, both silent:
+#   * last writer wins in the thread pool, non-deterministically, and the losing
+#     exports vanished with NO `unavailable` entry — contradicting the guarantee
+#     stated above;
+#   * the join then attached that ONE surviving export to EVERY tile sharing the
+#     name, so N-1 tiles were scored against another element's data.
+# Reproduced on the real element ids: a genuine match reported DIVERGE, and a
+# genuine migration bug (42 vs 7) reported PASS 100% — an unearned pass, the
+# precise failure this whole chain exists to prevent.
+# Element ids are unique by construction, so they are the only safe key.
 #
 # WHY THIS IS NOT A PORT OF tableau-to-sigma's collect-parity-actuals.rb.
 # That script is 441 lines and only 2 of them are Tableau-specific, so a port
@@ -79,7 +100,7 @@ threads = [opts[:pool], 1].max.times.map do
       if status == :fail
         mutex.synchronize do
           unavailable << { 'chart' => name, 'element_id' => eid, 'reason' => payload.to_s }
-          warn "  FAIL #{name[0, 44]} — #{payload.to_s[0, 60]}"
+          warn "  FAIL #{eid} #{name[0, 34]} — #{payload.to_s[0, 50]}"
         end
         next
       end
@@ -88,20 +109,32 @@ threads = [opts[:pool], 1].max.times.map do
         mutex.synchronize do
           unavailable << { 'chart' => name, 'element_id' => eid,
                            'reason' => 'export CSV empty / unparseable' }
-          warn "  EMPTY #{name[0, 44]}"
+          warn "  EMPTY #{eid} #{name[0, 34]}"
         end
         next
       end
       headers = rows.shift.map { |h| h.to_s.strip }
       mutex.synchronize do
-        results[name] = {
-          'element_id' => eid,
-          'columns'    => headers,
-          'rows'       => rows,
-          'n_columns'  => headers.size,
-          'n_rows'     => rows.size,
-        }
-        warn "  [#{results.size + unavailable.size}/#{charts.size}] #{name[0, 44]} " \
+        # Keyed by element id — see the header. A collision here would mean the
+        # PLAN listed the same element twice, which is a different (and louder)
+        # problem than two elements sharing a title, so say so rather than
+        # overwrite.
+        if results.key?(eid)
+          unavailable << { 'chart' => name, 'element_id' => eid,
+                           'reason' => 'element id appears more than once in the parity plan — ' \
+                                       'refusing to overwrite the first export' }
+          warn "  DUPLICATE ELEMENT ID #{eid} — recorded, not overwritten"
+        else
+          results[eid] = {
+            'chart'      => name,
+            'element_id' => eid,
+            'columns'    => headers,
+            'rows'       => rows,
+            'n_columns'  => headers.size,
+            'n_rows'     => rows.size,
+          }
+        end
+        warn "  [#{results.size + unavailable.size}/#{charts.size}] #{eid} #{name[0, 30]} " \
              "(#{rows.size}r x #{headers.size}c)"
       end
     end
