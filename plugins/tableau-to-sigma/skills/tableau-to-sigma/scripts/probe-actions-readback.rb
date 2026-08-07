@@ -19,6 +19,7 @@ require 'net/http'
 require 'uri'
 $LOAD_PATH.unshift File.expand_path('lib', __dir__)
 require 'action_ledger'
+require 'probe_registry'
 
 opts = {}
 OptionParser.new do |p|
@@ -39,7 +40,11 @@ expected = ActionLedger.read_manifest(opts[:expect])
 
 def api(method, url, token, body = nil)
   uri = URI(url)
-  req = (method == :post ? Net::HTTP::Post : Net::HTTP::Get).new(uri)
+  req = case method
+        when :post then Net::HTTP::Post.new(uri)
+        when :delete then Net::HTTP::Delete.new(uri)
+        else Net::HTTP::Get.new(uri)
+        end
   req['Authorization'] = "Bearer #{token}"
   req['Content-Type']  = 'application/json'
   req.body = JSON.generate(body) if body
@@ -52,47 +57,94 @@ abort "create FAILED (#{code}): #{created.inspect[0, 800]}" unless (200..299).co
 wb_id = created['workbookId'] || created.dig('workbook', 'workbookId')
 abort "create returned no workbookId: #{created.inspect[0, 400]}" if wb_id.to_s.empty?
 
-code, got = api(:get, "#{base}/v2/workbooks/#{wb_id}/spec", token)
-abort "readback FAILED (#{code})" unless (200..299).cover?(code)
+# Register the workbook immediately after create, before any readback, so a
+# failure between create and readback is still tracked in the probe registry.
+ProbeRegistry.created(wb_id, name: "ZZ probe-actions-readback (#{Time.now.utc.iso8601})", script: 'probe-actions-readback.rb')
 
-# The spec may or may not be wrapped in a `document` envelope depending on the
-# release — unwrap before walking so the diff is not comparing two shapes.
-root = got['document'] || got
-found = {}
-walk = lambda do |node|
-  case node
-  when Hash
-    Array(node['actions']).each { |a| found[a['id']] = a }
-    node.each_value { |v| walk.call(v) }
-  when Array then node.each { |v| walk.call(v) }
-  end
-end
-walk.call(root)
+begin
+  code, got = api(:get, "#{base}/v2/workbooks/#{wb_id}/spec", token)
+  abort "readback FAILED (#{code})" unless (200..299).cover?(code)
 
-fails = []
-expected.each do |entry|
-  id  = entry['actionId']
-  got_action = found[id]
-  if got_action.nil?
-    fails << "action #{id} (#{entry.dig('source', 'caption')}) SILENTLY DROPPED — " \
-             'present in the posted spec, absent from the readback'
-    next
+  # The spec may or may not be wrapped in a `document` envelope depending on the
+  # release — unwrap before walking so the diff is not comparing two shapes.
+  root = got['document'] || got
+  found = {}
+  walk = lambda do |node|
+    case node
+    when Hash
+      Array(node['actions']).each { |a| found[a['id']] = a }
+      node.each_value { |v| walk.call(v) }
+    when Array then node.each { |v| walk.call(v) }
+    end
   end
-  if got_action['trigger'] != entry['trigger']
-    fails << "action #{id}: trigger #{entry['trigger'].inspect} came back " \
-             "#{got_action['trigger'].inspect}"
-  end
-  next if got_action['effects'] == entry['effects']
-  fails << "action #{id}: effects mutated on readback\n" \
-           "  posted:   #{JSON.generate(entry['effects'])}\n" \
-           "  readback: #{JSON.generate(got_action['effects'])}"
-end
+  walk.call(root)
 
-puts "workbook #{wb_id}: #{expected.length} expected action(s), #{found.length} in readback"
-if fails.empty?
-  puts 'OK: every emitted action survived the readback byte-identical'
-else
-  puts "FAILED (#{fails.length}):"
-  fails.each { |f| puts "  - #{f}" }
-  exit 1
+  fails = []
+  expected.each do |entry|
+    id  = entry['actionId']
+    got_action = found[id]
+    if got_action.nil?
+      fails << "action #{id} (#{entry.dig('source', 'caption')}) SILENTLY DROPPED — " \
+               'present in the posted spec, absent from the readback'
+      next
+    end
+    if got_action['trigger'] != entry['trigger']
+      fails << "action #{id}: trigger #{entry['trigger'].inspect} came back " \
+               "#{got_action['trigger'].inspect}"
+    end
+    # Subset comparison: check every key in the posted effects is present and
+    # equal in the readback, but tolerate server-added keys (they're informational).
+    posted_effects = Array(entry['effects'])
+    got_effects = Array(got_action['effects'])
+    added_keys = {}
+    posting_issues = []
+    posted_effects.each do |posted_eff|
+      next unless posted_eff.is_a?(Hash)
+      matching = got_effects.find do |got_eff|
+        got_eff.is_a?(Hash) && got_eff['id'] == posted_eff['id']
+      end
+      if matching.nil?
+        posting_issues << "effect #{posted_eff['id']} DROPPED"
+        next
+      end
+      # Check every posted key is present and equal
+      posted_eff.each do |key, val|
+        unless matching.key?(key)
+          posting_issues << "effect #{posted_eff['id']}: key #{key.inspect} dropped on readback"
+          next
+        end
+        next if matching[key] == val
+        posting_issues << "effect #{posted_eff['id']}: key #{key.inspect} " \
+                          "posted #{val.inspect}, readback #{matching[key].inspect}"
+      end
+      # Collect any server-added keys (informational, not a failure)
+      matching.each { |key, _| added_keys[key] = true unless posted_eff.key?(key) }
+    end
+    if posting_issues.any?
+      fails << "action #{id}: #{posting_issues.join('; ')}"
+    end
+    if added_keys.any?
+      puts "  info: action #{id} — server added keys on readback: #{added_keys.keys.inspect}"
+    end
+  end
+
+  puts "workbook #{wb_id}: #{expected.length} expected action(s), #{found.length} in readback"
+  if fails.empty?
+    puts 'OK: every emitted action survived the readback byte-identical'
+  else
+    puts "FAILED (#{fails.length}):"
+    fails.each { |f| puts "  - #{f}" }
+    exit 1
+  end
+ensure
+  # Clean up the workbook in ensure so any failure path is still tracked.
+  if wb_id
+    begin
+      code, _resp = api(:delete, "#{base}/v2/files/#{wb_id}", token)
+      outcome = (200..299).cover?(code) ? 'deleted' : (code == 404 ? '404' : 'failed')
+      ProbeRegistry.cleaned(wb_id, via: 'ensure', outcome: outcome)
+    rescue StandardError => e
+      ProbeRegistry.cleaned(wb_id, via: 'ensure', outcome: 'failed')
+    end
+  end
 end

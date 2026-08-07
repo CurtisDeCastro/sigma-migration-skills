@@ -9,7 +9,6 @@
 // Usage:
 //   node scripts/probe-actions-runtime.mjs --url <workbook-url> \
 //        --click-text "West" --expect-rows-before 911 --expect-rows-after 319
-import puppeteer from 'puppeteer';
 
 const arg = (name, dflt) => {
   const i = process.argv.indexOf(`--${name}`);
@@ -21,6 +20,12 @@ if (!url) {
   console.error('SKIP: no --url given — runtime probe not run (this is not a pass)');
   process.exit(0);
 }
+
+// Dynamic import: only load puppeteer if we're actually running with a URL.
+// This way the SKIP path works even if puppeteer is not installed.
+const puppeteerModule = await import('puppeteer');
+const puppeteer = puppeteerModule.default;
+
 const clickText = arg('click-text');
 const before = Number(arg('expect-rows-before', '0'));
 const after = Number(arg('expect-rows-after', '0'));
