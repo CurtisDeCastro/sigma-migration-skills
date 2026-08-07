@@ -8676,6 +8676,19 @@ elsif opts[:pages_mode] == :dashboard
         if (pv = $chart_provenance[stem])
           $chart_provenance[ns] = pv.merge('dashboard' => dash_name)
         end
+        # A nav-action's manifest entry (keyed by the EXACT (dashboard, host)
+        # pair, same as namespace_ids above) gets updated IN PLACE so its
+        # hostElementId/actionId track the same rename this gsub is about to
+        # apply to the real element. Without this, put-layout.rb's
+        # navigate.target.page repair looks up the manifest by actionId
+        # against the POSTED spec's action id, finds nothing (stale), and
+        # silently skips the repair — no warning — leaving the provisional
+        # page id live. Mirrors namespace_ids exactly; do not invent a
+        # different mechanism.
+        if (entry = emitted_action_index[[dash_name, stem]])
+          entry['hostElementId'] = ns
+          entry['actionId'] = entry['actionId'].to_s.gsub(stem, ns)
+        end
         src_before = el.dig('source', 'elementId')
         el2 = JSON.parse(el.to_json.gsub(stem, ns))
         # v5.1.3: the stem gsub also rewrites a source.elementId that EMBEDS
