@@ -82,11 +82,16 @@ module ActionLedger
   end
 
   # detected: entries from build-postpublish-guide's extractors
-  #           (each has at least 'kind' and 'caption')
+  #           (each has at least 'kind' and 'caption', and 'actionName' when
+  #           the source Tableau action carries a per-instance identifier)
   # emitted:  entries from build-charts-from-signals' manifest
-  #           (each has 'actionId' and 'source' => {'kind','caption',...})
+  #           (each has 'actionId' and 'source' => {'kind','caption',
+  #           'actionName', ...})
   #
-  # Invariant: detectedCount == emitted.size + residue.size, disjoint.
+  # Invariant: detectedCount == emitted.size + residue.size, disjoint. This
+  # only holds if `key_of` can tell apart two detected entries that happen to
+  # share [kind, caption] — see key_of's comment for why it prefers
+  # `actionName` for that reason.
   def self.join(detected:, emitted:)
     claimed = emitted.map { |e| key_of(e['source'] || {}) }.compact
     residue = detected.reject { |d| claimed.include?(key_of(d)) }
@@ -101,8 +106,23 @@ module ActionLedger
   # Identity of a detected action. Uses a two-element ARRAY, not string
   # concatenation: a "kind|caption" string would let ["a|b", "c"] and
   # ["a", "b|c"] collide, and any separator character can appear in a caption.
+  #
+  # [kind, caption] alone collides whenever two DIFFERENT Tableau actions
+  # share both — e.g. two "Home" nav-buttons on different dashboards. If only
+  # one of them is actually emitted, BOTH detected entries would match the
+  # single claimed key and both would vanish from `residue`: the unemitted
+  # one is silently dropped and nobody is told to wire it by hand. Prefer
+  # `actionName` (a Tableau-sourced per-instance identifier — the <action>
+  # element's `name` attribute where one exists, or an equivalent stable
+  # handle the caller derives when it doesn't) when the entry carries one;
+  # fall back to [kind, caption] only when it is absent. Not every detected
+  # kind has an actionName (e.g. dynamic zone-visibility nodes have no
+  # <action> element at all) — that is fine, since those kinds are never
+  # currently auto-emitted and so never actually collide in `join`.
   def self.key_of(entry)
     return nil if entry.nil?
+    name = entry['actionName']
+    return [entry['kind'], name] if name && !name.to_s.empty?
     [entry['kind'], entry['caption']]
   end
 end

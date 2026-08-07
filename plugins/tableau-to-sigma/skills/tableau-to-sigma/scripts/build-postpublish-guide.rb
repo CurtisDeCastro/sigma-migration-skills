@@ -48,9 +48,15 @@
 #                                 <export-button-action> export buttons, and
 #                                 <zone type-v2='button'> zones
 #
-# JSON sidecar (--json-out): [{kind, caption, source, targets, fields,
-# sigma_status, ui_steps, notes}] for downstream tooling / the conversion
-# report, which must LINK the guide (refs/postpublish-interactivity.md).
+# JSON sidecar (--json-out): the ACTION LEDGER object
+# {schemaVersion, detectedCount, emitted, residue} — not a bare entries
+# array. `emitted` echoes back whatever --emitted-manifest supplied (the
+# actions-emitted.json sidecar from build-charts-from-signals.rb, when the
+# converter auto-wired some of them); `residue` is every detected
+# interaction {kind, caption, source, targets, fields, ui_steps, notes, ...}
+# that was NOT already auto-wired — this is exactly what render_guide renders
+# and what downstream tooling / the conversion report should read, which
+# must LINK the guide (refs/postpublish-interactivity.md).
 
 require 'json'
 require 'optparse'
@@ -58,6 +64,7 @@ require 'uri'
 # Nokogiri-backed REXML drop-in — REXML is O(n^2) on large .twb files.
 $LOAD_PATH.unshift File.expand_path('lib', __dir__)
 require 'twb_xml'
+require 'action_ledger'
 
 module PostpublishGuide
   module_function
@@ -71,6 +78,38 @@ module PostpublishGuide
     STATUS_BUILT => 'control-based equivalent already built',
     STATUS_NONE  => 'no equivalent'
   }.freeze
+
+  # ---- Status is derived, not asserted -------------------------------------
+  # Every extract_* method used to hardcode 'sigma_status' on each entry it
+  # built. That was a per-KIND classification masquerading as a per-entry
+  # fact, and it had nothing to do with whether THIS SPECIFIC action was
+  # actually auto-wired by the converter (the ActionLedger join, driven by
+  # --emitted-manifest, is what answers that). Only entries that survive the
+  # join as residue ever reach render_guide, so "status" here answers a
+  # narrower, honest question: for interactions Sigma can't auto-wire, is
+  # there a UI path, an already-built control equivalent, or no equivalent at
+  # all? That answer is constant per KIND for every extractor except
+  # custom-tooltip, whose status depends on whether THIS tooltip embeds a
+  # viz (see extract_tooltips' 'viz_in_tooltip' flag).
+  KIND_STATUS = {
+    'filter-action'      => STATUS_UI,
+    'highlight-action'   => STATUS_NONE,
+    'url-action'         => STATUS_UI,
+    'nav-action'         => STATUS_UI,
+    'parameter-action'   => STATUS_BUILT,
+    'set-action'         => STATUS_NONE,
+    'zone-visibility'    => STATUS_NONE,
+    'drill-hierarchy'    => STATUS_UI,
+    'show-hide-button'   => STATUS_NONE,
+    'nav-button'         => STATUS_UI,
+    'export-button'      => STATUS_UI,
+    'integer-dim-decode' => STATUS_NONE
+  }.freeze
+
+  def status_for(entry)
+    return entry['viz_in_tooltip'] ? STATUS_NONE : STATUS_UI if entry['kind'] == 'custom-tooltip'
+    KIND_STATUS[entry['kind']]
+  end
 
   # ---- Verified Sigma UI step patterns --------------------------------------
   # These are the ONLY UI paths the guide states as fact. Anything else must be
@@ -327,7 +366,12 @@ module PostpublishGuide
   # ==== Interaction extraction ===============================================
   # Every extractor returns entries shaped:
   #   { 'kind' =>, 'caption' =>, 'source' => {…}, 'targets' => [...],
-  #     'fields' => [...], 'sigma_status' =>, 'ui_steps' =>, 'notes' => [...] }
+  #     'fields' => [...], 'ui_steps' =>, 'notes' => [...],
+  #     'actionName' => (when the Tableau action carries a per-instance
+  #                       identifier — see ActionLedger.key_of) }
+  # No 'sigma_status' here any more — status is derived at render time by
+  # status_for(entry), keyed on 'kind' (see KIND_STATUS above). It is not a
+  # per-entry fact the extractor asserts.
 
   def extract_action_blocks(xml, lut, dashboards)
     out = []
@@ -360,6 +404,11 @@ module PostpublishGuide
 
       entry = { 'kind' => kind, 'caption' => caption, 'source' => source,
                 'trigger' => trigger, 'notes' => [] }
+      # `name` is the Tableau <action> element's own `name=` attribute (e.g.
+      # "[Action1_AAAA]") — already used above to dedupe; carry it through so
+      # ActionLedger.key_of can disambiguate two actions that happen to share
+      # a kind+caption instead of colliding on [kind, caption] alone.
+      entry['actionName'] = name unless name.empty?
 
       case kind
       when 'filter-action'
@@ -367,14 +416,12 @@ module PostpublishGuide
         fields = ['(all shared fields)'] if fields.empty? && params['special-fields'] == 'all'
         entry['fields']  = fields
         entry['targets'] = expand_target(params['target'], params['exclude'], dashboards)
-        entry['sigma_status'] = STATUS_UI
         entry['ui_steps'] = STEPS_USE_AS_FILTER
         entry['notes'] << "Applies element-to-element filters; verify the join columns match the Tableau action's field mapping."
       when 'highlight-action'
         fields = (params['field-captions'] || '').split(',').map { |f| tidy_name(f) }.reject(&:empty?)
         entry['fields']  = fields
         entry['targets'] = expand_target(params['target'], params['exclude'], dashboards)
-        entry['sigma_status'] = STATUS_NONE
         entry['ui_steps'] =
           "No Sigma equivalent (no cross-element highlight). Closest: the same " \
           "source→target wiring as a filter — #{STEPS_USE_AS_FILTER} — or a shared " \
@@ -388,7 +435,6 @@ module PostpublishGuide
         entry['targets'] = [{ 'name' => link_expr.to_s }]
         entry['url_template']  = link_expr
         entry['sigma_formula'] = sigma_url_formula(link_expr, lut)
-        entry['sigma_status']  = STATUS_UI
         entry['ui_steps'] = STEPS_URL_COLUMN
       end
       out << entry
@@ -423,17 +469,18 @@ module PostpublishGuide
         target_sheet = p.attributes['value'].to_s if p.attributes['name'].to_s == 'sheet'
       end
       is_dash = dashboards.any? { |d| d[:name] == target_sheet }
-      out << {
+      entry = {
         'kind'    => 'nav-action',
         'caption' => a.attributes['caption'].to_s,
         'source'  => parse_source(a),
         'trigger' => activation_of(a),
         'targets' => [{ 'name' => target_sheet, 'dashboard' => is_dash }],
         'fields'  => [],
-        'sigma_status' => STATUS_UI,
         'ui_steps' => STEPS_BUTTON_NAV,
         'notes'   => ['Sigma buttons support page navigation in the UI; this wiring is not spec-persistable, so it must be added after publish.']
       }
+      entry['actionName'] = name unless name.empty?
+      out << entry
     end
     out
   end
@@ -452,17 +499,18 @@ module PostpublishGuide
         when 'target-parameter'  then tgt_param = p.attributes['value'].to_s
         end
       end
-      out << {
+      entry = {
         'kind'      => 'parameter-action',
         'caption'   => a.attributes['caption'].to_s,
         'source'    => parse_source(a),
         'trigger'   => activation_of(a),
         'fields'    => [field_caption(src_field, lut)].compact,
         'targets'   => [{ 'name' => field_caption(tgt_param, lut), 'parameter' => true }],
-        'sigma_status' => STATUS_BUILT,
         'ui_steps'  => '',   # filled in by the wb-ids pass / renderer
         'notes'     => []
       }
+      entry['actionName'] = name unless name.empty?
+      out << entry
     end
     out
   end
@@ -478,19 +526,20 @@ module PostpublishGuide
       a.elements.each('params/param') do |p|
         tgt_set = p.attributes['value'].to_s if p.attributes['name'].to_s == 'target-set'
       end
-      out << {
+      entry = {
         'kind'      => 'set-action',
         'caption'   => a.attributes['caption'].to_s,
         'source'    => parse_source(a),
         'trigger'   => activation_of(a),
         'fields'    => [],
         'targets'   => [{ 'name' => field_caption(tgt_set, lut), 'set' => true }],
-        'sigma_status' => STATUS_NONE,
         'ui_steps'  =>
           'No Sigma sets. Closest pattern: a list control on the same dimension ' \
           'plus a boolean helper column (If(Contains(...))) that downstream calcs reference in place of the set.',
         'notes'     => []
       }
+      entry['actionName'] = name unless name.empty?
+      out << entry
     end
     out
   end
@@ -525,7 +574,6 @@ module PostpublishGuide
         'trigger' => nil,
         'fields'  => [field].compact,
         'targets' => [{ 'name' => zone ? zone[:desc] : "zone #{zid}", 'zone_id' => zid }],
-        'sigma_status' => STATUS_NONE,
         'ui_steps' =>
           'No direct equivalent today; shipped pattern: the conversion creates a page per ' \
           'visibility state (when applicable) — the control that replaced the driving ' \
@@ -546,6 +594,12 @@ module PostpublishGuide
       key = [name, levels].inspect
       next if seen[key]
       seen[key] = true
+      # No actionName here: a drill-path's `name` is a hierarchy LABEL, not a
+      # per-instance action identifier — two different hierarchies (distinct
+      # `levels`) can legitimately share one name. extract_drill_paths already
+      # dedupes on the compound [name, levels] key above; drill-hierarchy is
+      # never auto-emitted by build-charts-from-signals, so it never actually
+      # reaches ActionLedger.join, and [kind, caption] is a fine fallback.
       out << {
         'kind'    => 'drill-hierarchy',
         'caption' => name,
@@ -553,7 +607,6 @@ module PostpublishGuide
         'trigger' => nil,
         'fields'  => levels,
         'targets' => [],
-        'sigma_status' => STATUS_UI,
         'ui_steps' => "#{STEPS_DRILL} Drill order: #{levels.join(' → ')}.",
         'notes'   => []
       }
@@ -594,13 +647,11 @@ module PostpublishGuide
         'notes'   => []
       }
       if has_viz
-        entry['sigma_status'] = STATUS_NONE
         entry['ui_steps'] =
           'Embedded viz-in-tooltip has no Sigma equivalent. Closest: add the fields to the ' \
           "tooltip (#{STEPS_TOOLTIP.sub(/\.$/, '')}) and give the embedded viz its own chart, " \
           "wired via 'Use as filter' from this element."
       else
-        entry['sigma_status'] = STATUS_UI
         entry['ui_steps'] = "#{STEPS_TOOLTIP.sub(/ listed\.$/, '')}: #{fields.join(', ')}."
       end
       out << entry
@@ -641,6 +692,19 @@ module PostpublishGuide
       dname = d.attributes['name'].to_s
       dash  = dashboards.find { |x| x[:name] == dname }
       d.elements.each('.//zone') do |z|
+        # Dashboard-object button zones carry NO Tableau `name=` attribute
+        # (verified against the schema — only sheet-placeholder zones do), so
+        # there is no literal action name to carry through here. The zone id
+        # is scoped per-dashboard (Tableau zone ids restart per dashboard —
+        # the same reason build-charts-from-signals.rb's emitted_action_index
+        # keys on (dashboard, host) instead of host alone), so pair it with
+        # the dashboard name for a workbook-wide-unique substitute identity.
+        # This is what actually closes the collision the ledger's key_of
+        # fix exists for: nav-button is the ONLY kind ActionLedger.join ever
+        # sees on the `emitted` side today, so two same-captioned buttons
+        # (e.g. two "Home" buttons on different dashboards) MUST disambiguate
+        # here or the join can silently drop the unemitted one from residue.
+        zone_action_name = "#{dname}::zone-#{z.attributes['id']}"
         btn = z.elements['button']
         if btn.nil?
           next unless z.attributes['type-v2'].to_s == 'button'
@@ -649,7 +713,7 @@ module PostpublishGuide
             'kind' => 'nav-button', 'caption' => "button zone #{z.attributes['id']}",
             'source' => { 'dashboard' => dname, 'description' => "dashboard '#{dname}'" },
             'trigger' => nil, 'fields' => [], 'targets' => [],
-            'sigma_status' => STATUS_UI, 'ui_steps' => STEPS_BUTTON_NAV, 'notes' => []
+            'actionName' => zone_action_name, 'ui_steps' => STEPS_BUTTON_NAV, 'notes' => []
           )
           next
         end
@@ -680,7 +744,7 @@ module PostpublishGuide
             'trigger' => 'on click',
             'fields'  => [],
             'targets' => targets,
-            'sigma_status' => STATUS_NONE,
+            'actionName' => zone_action_name,
             'ui_steps' =>
               'No direct equivalent today (Sigma has no show/hide container toggle in the ' \
               "workbook spec). Closest pattern: move the toggled content to its own page and add a " \
@@ -696,7 +760,7 @@ module PostpublishGuide
             'trigger' => 'on click',
             'fields'  => [],
             'targets' => [{ 'name' => "export as #{fmt || 'file'}" }],
-            'sigma_status' => STATUS_UI,
+            'actionName' => zone_action_name,
             'ui_steps' =>
               'No per-dashboard export button element is needed: Sigma exposes export/download ' \
               'natively from the workbook and element menus (verify in your Sigma version).',
@@ -714,7 +778,7 @@ module PostpublishGuide
             'trigger' => 'on click',
             'fields'  => [],
             'targets' => target_name ? [{ 'name' => target_name, 'dashboard' => true }] : [],
-            'sigma_status' => STATUS_UI,
+            'actionName' => zone_action_name,
             'ui_steps' => STEPS_BUTTON_NAV,
             'notes'   => []
           }
@@ -903,7 +967,7 @@ module PostpublishGuide
     md << "## Summary\n\n"
     md << "| Interaction | Count | Sigma status |\n|---|---|---|\n"
     ordered.each do |k|
-      statuses = groups[k].map { |e| STATUS_LABEL[e['sigma_status']] }.uniq.join(' / ')
+      statuses = groups[k].map { |e| STATUS_LABEL[status_for(e)] }.uniq.join(' / ')
       md << "| #{SECTION_TITLE[k]} | #{groups[k].length} | #{statuses} |\n"
     end
     md << "\n"
@@ -936,7 +1000,7 @@ module PostpublishGuide
           md << "- **Tableau URL template:** `#{e['url_template']}`\n"
           md << "- **Sigma URL formula:** `#{e['sigma_formula']}`\n" if e['sigma_formula']
         end
-        md << "- #{status_badge(e['sigma_status'])}\n"
+        md << "- #{status_badge(status_for(e))}\n"
         md << "- **Steps:** #{e['ui_steps']}\n" unless e['ui_steps'].to_s.empty?
         (e['notes'] || []).each { |n| md << "- Note: #{n}\n" }
         md << "\n"
@@ -957,7 +1021,7 @@ module PostpublishGuide
       rows.each do |e|
         label = e['caption'].to_s.empty? ? SECTION_TITLE[kind] : e['caption']
         act =
-          case e['sigma_status']
+          case status_for(e)
           when STATUS_UI    then 'Add in Sigma UI'
           when STATUS_BUILT then 'Verify built control'
           else                   'Review closest pattern / accept gap'
@@ -977,7 +1041,7 @@ module PostpublishGuide
     md = String.new
     md << "| Sheet | Tooltip fields | Embedded viz | Sigma status |\n|---|---|---|---|\n"
     rows.first(TOOLTIP_TABLE_CAP).each do |e|
-      md << "| #{e['caption']} | #{cap_list(e['fields'], 6)} | #{e['viz_in_tooltip'] ? 'yes — no Sigma equivalent' : 'no'} | #{STATUS_LABEL[e['sigma_status']]} |\n"
+      md << "| #{e['caption']} | #{cap_list(e['fields'], 6)} | #{e['viz_in_tooltip'] ? 'yes — no Sigma equivalent' : 'no'} | #{STATUS_LABEL[status_for(e)]} |\n"
     end
     md << "| _…and #{rows.length - TOOLTIP_TABLE_CAP} more_ | | | |\n" if rows.length > TOOLTIP_TABLE_CAP
     md << "\n**Steps (field tooltips):** #{STEPS_TOOLTIP}\n"
@@ -1019,7 +1083,6 @@ module PostpublishGuide
     Array(doc['manual']).map do |m|
       col = m['column'] || m['name']
       { 'kind' => 'integer-dim-decode', 'caption' => (m['name'] || col).to_s,
-        'sigma_status' => STATUS_NONE,
         'source' => { 'description' => "Tableau quick filter on integer-coded dimension #{col.inspect}" },
         'ui_steps' => "In the Sigma workbook, add a hidden column `Text([#{col}])` on the table the " \
                       "control targets (the master or the base table the charts source through), then set " \
@@ -1040,11 +1103,15 @@ module PostpublishGuide
   def run(argv)
     opts = {}
     OptionParser.new do |p|
-      p.banner = 'usage: build-postpublish-guide.rb --twb <workbook-content.twb> --out <workdir>/POSTPUBLISH_GUIDE.md [--wb-ids wb-ids.json] [--json-out out.json] [--sigma-url URL]'
+      p.banner = 'usage: build-postpublish-guide.rb --twb <workbook-content.twb> --out <workdir>/POSTPUBLISH_GUIDE.md [--wb-ids wb-ids.json] [--json-out out.json] [--emitted-manifest actions-emitted.json] [--sigma-url URL]'
       p.on('--twb PATH')       { |v| opts[:twb] = v }
       p.on('--out PATH')       { |v| opts[:out] = v }
       p.on('--wb-ids PATH')    { |v| opts[:wb_ids] = v }
       p.on('--json-out PATH')  { |v| opts[:json_out] = v }
+      p.on('--emitted-manifest PATH',
+           'actions-emitted.json from build-charts-from-signals (default: none = nothing auto-emitted)') do |v|
+        opts[:emitted_manifest] = v
+      end
       p.on('--sigma-url URL')  { |v| opts[:sigma_url] = v }
     end.parse!(argv)
     abort('missing --twb')  unless opts[:twb]
@@ -1057,16 +1124,35 @@ module PostpublishGuide
     entries.concat(extract_integer_dim_manual(opts[:twb])) # PR-18 manual-decode notes
 
     opts[:workbook_name] = workbook_name(opts[:twb])
-    File.write(opts[:out], render_guide(entries, opts))
-    warn "wrote #{opts[:out]} (#{entries.length} interaction(s): " +
-         (entries.empty? ? 'none detected' :
-          entries.group_by { |e| e['kind'] }.map { |k, v| "#{v.length} #{k}" }.join(', ')) + ')'
 
+    # `read_manifest` returns [] both when --emitted-manifest was never
+    # passed AND when the file it points at doesn't exist (e.g. worksheet
+    # mode, where build-charts-from-signals.rb never writes the manifest at
+    # all because it never attempts the button auto-wiring either) — in both
+    # cases "nothing auto-wired" is the correct, honest default.
+    emitted = ActionLedger.read_manifest(opts[:emitted_manifest])
+    ledger  = ActionLedger.join(detected: entries, emitted: emitted)
+
+    # The guide instructs the human. It must describe ONLY work still to do —
+    # an action build-charts-from-signals.rb already auto-wired is done, not
+    # a checklist item that tells the customer to redo it by hand.
+    File.write(opts[:out], render_guide(ledger['residue'], opts))
+    warn "wrote #{opts[:out]} (#{entries.length} interaction(s) detected, " \
+         "#{ledger['emitted'].size} already auto-wired, #{ledger['residue'].size} still manual: " +
+         (ledger['residue'].empty? ? 'none' :
+          ledger['residue'].group_by { |e| e['kind'] }.map { |k, v| "#{v.length} #{k}" }.join(', ')) + ')'
+
+    # The ledger path is CONTRACTUAL: gate 11 reads <workdir>/action-ledger.json.
+    # migrate-tableau.rb must invoke this script with
+    #   --json-out <workdir>/action-ledger.json
+    # --json-out writes the FULL LEDGER OBJECT
+    # ({schemaVersion, detectedCount, emitted, residue}), not a bare entries
+    # array — Task 6's gates read this shape.
     if opts[:json_out]
-      File.write(opts[:json_out], JSON.pretty_generate(entries))
+      File.write(opts[:json_out], JSON.pretty_generate(ledger))
       warn "wrote #{opts[:json_out]}"
     end
-    entries
+    ledger
   end
 end
 

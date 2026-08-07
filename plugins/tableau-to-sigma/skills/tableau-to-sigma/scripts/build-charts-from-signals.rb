@@ -6773,8 +6773,18 @@ unless opts[:pages_mode] == :worksheet
           raise "emitted an invalid action on #{host}: #{errs.join('; ')}" if errs.any?
           manifest_entry = {
             'actionId'       => action['id'],
+            # 'actionName' mirrors build-postpublish-guide.rb's extract_buttons
+            # (dashboard + Tableau zone id — dashboard-object button zones
+            # carry no Tableau `name=` attribute, so this is the closest
+            # workbook-wide-unique substitute). ActionLedger.key_of prefers
+            # this over [kind, caption]: without it, two same-captioned
+            # nav-buttons (e.g. two "Home" buttons on different dashboards)
+            # where only one is actually auto-wired would collide on
+            # [kind, caption] and the join could silently drop the unemitted
+            # one out of residue instead of flagging it for manual wiring.
             'source'         => { 'kind' => 'nav-button', 'caption' => label,
-                                  'sourceSheet' => dash['dashboard'] },
+                                  'sourceSheet' => dash['dashboard'],
+                                  'actionName' => "#{dash['dashboard']}::zone-#{z['id']}" },
             'hostElementId'  => host,
             # The key put-layout.rb's publish-time repair resolves against —
             # see the page-id comment above: target_page_id is provisional,

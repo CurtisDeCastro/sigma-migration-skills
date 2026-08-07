@@ -69,6 +69,42 @@ check(led['residue'][0]['kind'] == 'highlight-action', 'the right one is residue
 check(led['detectedCount'] == led['emitted'].size + led['residue'].size,
       'CONSERVATION: detected == emitted + residue')
 
+puts 'key_of'
+check(ActionLedger.key_of(nil).nil?, 'key_of(nil) is nil')
+check(ActionLedger.key_of('kind' => 'nav-action', 'caption' => 'Go') == ['nav-action', 'Go'],
+      'key_of falls back to [kind, caption] when actionName is absent')
+check(ActionLedger.key_of('kind' => 'nav-action', 'caption' => 'Go', 'actionName' => '[Action4_DDDD]') ==
+      ['nav-action', '[Action4_DDDD]'],
+      'key_of prefers actionName over caption when present')
+check(ActionLedger.key_of('kind' => 'nav-action', 'caption' => 'Go', 'actionName' => '').is_a?(Array) &&
+      ActionLedger.key_of('kind' => 'nav-action', 'caption' => 'Go', 'actionName' => '') == ['nav-action', 'Go'],
+      'an EMPTY actionName is treated as absent, not as the key')
+check(ActionLedger.key_of('kind' => 'nav-action', 'caption' => 'Go').is_a?(Array),
+      'key_of always returns an Array, never a concatenated string')
+
+puts 'join — the known collision defect (two same-kind/same-caption actions, only one emitted)'
+# THE SHIPPING BUG this proves fixed: two DIFFERENT Tableau actions share a
+# kind+caption (e.g. two "Home" nav-buttons on different dashboards). Only
+# ONE of them was actually auto-wired (has a manifest entry). Under the old
+# key_of == [kind, caption], BOTH detected entries match the ONE claimed key,
+# so BOTH vanish from residue — the unemitted one is silently dropped and
+# nobody is told to wire it by hand. detectedCount == emitted.size +
+# residue.size then breaks (2 != 1 + 0).
+home_a = { 'kind' => 'nav-button', 'caption' => 'Home', 'actionName' => 'Overview::zone-11' }
+home_b = { 'kind' => 'nav-button', 'caption' => 'Home', 'actionName' => 'Detail Page::zone-9' }
+emitted_one = [{ 'actionId' => 'act-btn-11-1',
+                 'source' => { 'kind' => 'nav-button', 'caption' => 'Home',
+                               'actionName' => 'Overview::zone-11' } }]
+led_collide = ActionLedger.join(detected: [home_a, home_b], emitted: emitted_one)
+check(led_collide['detectedCount'] == 2, 'both same-caption actions are counted as detected')
+check(led_collide['emitted'].size == 1, 'exactly one manifest entry was emitted')
+check(led_collide['residue'].size == 1,
+      "exactly ONE of the two survives as residue, not zero and not both (got #{led_collide['residue'].size})")
+check((led_collide['residue'].map { |e| e['actionName'] }) == ['Detail Page::zone-9'],
+      'the UNEMITTED action (home_b) is the one that lands in residue, not home_a')
+check(led_collide['detectedCount'] == led_collide['emitted'].size + led_collide['residue'].size,
+      'CONSERVATION holds even when kind+caption collide (this is what the old key_of broke)')
+
 puts 'round-trip'
 Dir.mktmpdir do |d|
   p = File.join(d, 'm.json')
