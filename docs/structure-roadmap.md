@@ -6,10 +6,11 @@ skill's local phases.
 
 ## Landed / in flight
 
-| PR theme | Intent |
+| PR | Intent |
 |---|---|
-| Agent entry contract + maturity index | `docs/agent-entry.md`, `AGENTS.md` maturity, MCP stance, docs taxonomy |
-| Skill path hygiene | Ban `sigma-skills/` + marketplace-unsafe relatives; fix shared `layout-visual-qa` + converter SKILL refs; CI lint |
+| #650 | Agent entry contract + maturity index + docs taxonomy |
+| #651 | Skill path hygiene + `tools/lint-skill-paths.rb` |
+| #652 (stacked on #651) | `new-skill.rb` stamps marketplace / AGENTS / `plugin.json` |
 
 ## Next (highest ROI)
 
@@ -33,11 +34,7 @@ Drive `tools/skill-lint-baseline.json` toward empty: shrink each over-budget
 `SKILL.md` into phase-scoped `refs/` (tableau-to-sigma is the template). Order
 by baseline size: looker → powerbi → qlik → quicksight → thoughtspot → …
 
-### R3 — `new-skill.rb` registry stamp
-
-Scaffold should append `AGENTS.md` rows (with `scaffold` maturity), a
-`plugin.json`, and a marketplace stub — not only `phase-schema.md` — so indexes
-cannot drift on day one.
+### R3 — `new-skill.rb` registry stamp — **in #652**
 
 ### R4 — Companion dependency check
 
