@@ -59,7 +59,7 @@ abort "create returned no workbookId: #{created.inspect[0, 400]}" if wb_id.to_s.
 
 # Register the workbook immediately after create, before any readback, so a
 # failure between create and readback is still tracked in the probe registry.
-ProbeRegistry.created(wb_id, name: "ZZ probe-actions-readback (#{Time.now.utc.iso8601})", script: 'probe-actions-readback.rb')
+ProbeRegistry.created(wb_id, name: "ZZ probe-actions-readback (#{Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')})", script: 'probe-actions-readback.rb')
 
 begin
   code, got = api(:get, "#{base}/v2/workbooks/#{wb_id}/spec", token)
