@@ -112,6 +112,97 @@ ok(migrate_src.include?("'--score-out', File.join(OUT, 'parity-score.json')") ||
    migrate_src.include?('phase6-parity-domo.rb'),
    'bead 2tkm: the tiles_* score document lands in parity-score.json, not parity-final.json')
 
+# ---------------------------------------------------------------------------
+# Coverage census wiring. coverage.json is the ONLY path by which a dropped Domo
+# card reaches the degradation ledger (the other scope-cut source,
+# parity-final.json's tile_census, is reserved for tableau's zone shape and domo
+# must never publish there — memory gate5-tile-census-key-reserved). GREEN
+# requires an EMPTY ledger, so without this call a run that silently dropped
+# cards could still be declared GREEN.
+ok(migrate_src.include?("'build-coverage-census.rb'"),
+   'coverage: run_live! emits coverage.json so a dropped card can reach the degradation ledger')
+# Search for the assert header that FOLLOWS the census, not the first in the
+# file: run_offline! emits its own hr('assert-phase6-ran') earlier, so a bare
+# .index compares against the offline occurrence and this ordering check fails
+# on correct code. (Made this exact mistake on the oracle ordering guard below
+# too — both hr() titles appear twice.)
+cov_at = migrate_src.index("hr('coverage-census')")
+assert_at = cov_at && migrate_src.index("hr('assert-phase6-ran')", cov_at)
+ok(cov_at && assert_at && cov_at < assert_at,
+   'coverage: the census runs BEFORE assert-phase6-ran reads the ledger')
+
+# ---------------------------------------------------------------------------
+# Parity oracle wiring (gate 1). Same static-guard caveat as above: run_live!
+# cannot be exercised offline, so these pin the WIRING, not the behaviour.
+#
+# Why this needs a guard at all: without a plan, migrate-domo auto-adds
+# --skip-parity-gate, and assert-phase6-ran.rb REJECTS that waiver (exit 18)
+# unless a passing anchors-verdict.json exists. So a silently-removed oracle
+# call does not look like a missing feature — it looks like a run that skipped
+# parity, which is a guaranteed non-GREEN dead end (trap T4 in the 2026-08-05
+# handoff). Cheap to regress, expensive to notice.
+ok(migrate_src.include?("'collect-parity-expected.rb'"),
+   'oracle: run_live! collects the Domo-side expected values')
+ok(migrate_src.include?("'collect-parity-actuals.rb'"),
+   'oracle: run_live! collects the Sigma-side actuals')
+ok(migrate_src.include?("'build-parity-oracle.rb'"),
+   'oracle: run_live! joins the two sides into a verify-parity plan')
+
+# ORDER IS LOAD-BEARING between the two exclusions writers (#649's generator and
+# the join). Both write parity-plan-exclusions.json:
+#   #649  excludes tiles that cannot agree BY CONSTRUCTION (refused date window)
+#   join  excludes tiles it could not COLLECT
+# Run the join first and #649 overwrites its entries, after which the census sees
+# collection-failed tiles as neither verified nor excluded and dies (exit 5). Run
+# #649 first and the join carries them through, honouring them over verification
+# — which matters because such a tile IS collectable and would otherwise be
+# "verified" into a guaranteed DIVERGE that says nothing about fidelity.
+excl_gen_at = migrate_src.index("'build-parity-exclusions.rb'")
+join_at = migrate_src.index("'build-parity-oracle.rb'")
+ok(excl_gen_at && join_at && excl_gen_at < join_at,
+   'oracle: the exclusions generator runs BEFORE the join, so the join can carry its entries through')
+ok(migrate_src.include?('if oracle_plan') &&
+   migrate_src.match?(/exclusions: already generated before the oracle join/),
+   'oracle: the generator is NOT re-run after the join (that would discard the join\'s exclusions)')
+
+# DEFAULT-ON, not opt-in. The condition must fire when NO --parity-plan was
+# given; if someone flips this to require an opt-in flag, the default path goes
+# back to being unable to reach gold.
+ok(migrate_src.include?('if !opts[:parity_plan] && !opts[:skip_parity_oracle]'),
+   'oracle: builds by DEFAULT when no --parity-plan is supplied (opt-out, not opt-in)')
+ok(migrate_src.include?('--skip-parity-oracle'),
+   'oracle: there is an explicit opt-out flag')
+
+# The plan must be built from the SAME document phase6-parity-domo.rb's census
+# reads (<workdir>/workbook-spec.json), or the two disagree about what counts as
+# chartable and the census fails on tiles that were never missing.
+ok(migrate_src.include?("'build-parity-plan.rb'") &&
+   migrate_src.include?("'--workbook-spec', File.join(OUT, 'workbook-spec.json')"),
+   'oracle: the plan is built from the same workbook-spec.json the census audits')
+
+# A half-collected oracle must be a hard FAIL. Joining a partial collection
+# yields a plan missing tiles, and a shrunken denominator reads exactly like a
+# clean pass — 45/45 is indistinguishable from 65/65.
+ok(migrate_src.include?("fail_phase!('parity-oracle'"),
+   'oracle: a failed collector is a hard FAIL, never a skip that silently shrinks the denominator')
+
+# The recorded waiver reason must be derived, not the old hardcoded string —
+# it is read later by whoever reconstructs why a run was not GREEN.
+ok(!migrate_src.include?("'--skip-parity-gate', 'no --parity-plan supplied to migrate-domo.rb'"),
+   'oracle: the skip-parity-gate reason is no longer the stale hardcoded "no --parity-plan" text')
+ok(migrate_src.include?('opts[:skip_parity_oracle]') &&
+   migrate_src.include?("args += ['--skip-parity-gate', why]"),
+   'oracle: the skip-parity-gate waiver records WHY parity is absent (waived vs no chartable tiles)')
+
+# NB: hr('verify-parity') occurs TWICE — run_offline! emits one as a skip before
+# run_live!'s. A bare .index finds the offline one and this ordering check then
+# compares against the wrong occurrence, so search for the verify-parity header
+# that FOLLOWS the oracle header.
+oracle_hdr_at = migrate_src.index("hr('parity-oracle')")
+live_parity_at = oracle_hdr_at && migrate_src.index("hr('verify-parity')", oracle_hdr_at)
+ok(oracle_hdr_at && live_parity_at && oracle_hdr_at < live_parity_at,
+   'oracle: the plan is built BEFORE verify-parity consumes it')
+
 render_call_at  = migrate_src.index('phase_render_visual!(opts, workbook_id, wb_ids)')
 parity_hdr_at   = migrate_src.index("hr('verify-parity')")
 record_call_at  = migrate_src.index('phase_record_visual_check!(opts)')

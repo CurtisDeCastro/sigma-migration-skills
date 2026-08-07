@@ -31,6 +31,26 @@
 #     [--json-out /tmp/<name>/action-ledger.json]  # CONTRACTUAL path — gate 11 reads <workdir>/action-ledger.json
 #     [--sigma-url https://app.sigmacomputing.com/.../workbook/...]
 #
+# DETECT-ONLY MODE (--detect-only PATH): runs the SAME extract_* detection
+# from --twb alone and writes the raw detected-entries ARRAY to PATH, then
+# exits — no POSTPUBLISH_GUIDE.md, no --json-out, no ledger of any kind.
+# Detection only needs the .twb (which lands well before chart build), while
+# --wb-ids/--sigma-url are optional POST-PUBLISH enrichment — so migrate-
+# tableau.rb can run this pass EARLY, before build-charts-from-signals.rb, and
+# hand it the array via that script's --detected-actions flag. This is the
+# bridge between this script's DETECTION half and build-charts-from-signals.rb's
+# EMISSION half; it does not itself emit or auto-wire anything.
+#   ruby scripts/build-postpublish-guide.rb --twb /tmp/<name>/workbook-content.twb \
+#     --detect-only /tmp/<name>/detected-actions.json
+#
+# CRITICAL: --detect-only must NEVER write action-ledger.json or anything
+# ledger-shaped ({schemaVersion, detectedCount, emitted, residue}). Gate 11
+# reads <workdir>/action-ledger.json and asserts conservation over it; an
+# early half-ledger with `emitted: []` (nothing auto-wired YET, because the
+# chart build hasn't run) would be read as the AUTHORITATIVE final ledger —
+# exactly the failure mode this mode must avoid. The bare array has no such
+# authority.
+#
 # What gets parsed (structures verified against a 10-workbook live migration:
 # ecommerce-admin, dynamic-zoning-kpi, superstore-performance, supermart-sales):
 #   <actions>/<action>            command tsc:tsl-filter → filter action
@@ -1128,7 +1148,8 @@ module PostpublishGuide
   def run(argv)
     opts = {}
     OptionParser.new do |p|
-      p.banner = 'usage: build-postpublish-guide.rb --twb <workbook-content.twb> --out <workdir>/POSTPUBLISH_GUIDE.md [--wb-ids wb-ids.json] [--json-out out.json] [--emitted-manifest actions-emitted.json] [--sigma-url URL]'
+      p.banner = 'usage: build-postpublish-guide.rb --twb <workbook-content.twb> --out <workdir>/POSTPUBLISH_GUIDE.md [--wb-ids wb-ids.json] [--json-out out.json] [--emitted-manifest actions-emitted.json] [--sigma-url URL]' \
+                 "\n   or: build-postpublish-guide.rb --twb <workbook-content.twb> --detect-only <workdir>/detected-actions.json"
       p.on('--twb PATH')       { |v| opts[:twb] = v }
       p.on('--out PATH')       { |v| opts[:out] = v }
       p.on('--wb-ids PATH')    { |v| opts[:wb_ids] = v }
@@ -1138,13 +1159,38 @@ module PostpublishGuide
         opts[:emitted_manifest] = v
       end
       p.on('--sigma-url URL')  { |v| opts[:sigma_url] = v }
+      p.on('--detect-only PATH',
+           'Run detection ONLY from --twb (no --out/--wb-ids/--json-out needed) and write the raw ' \
+           'detected-entries ARRAY to PATH, then exit — no guide rendered, no ledger written. Lets an ' \
+           'early detection pass hand its array to build-charts-from-signals.rb via --detected-actions.') do |v|
+        opts[:detect_only] = v
+      end
     end.parse!(argv)
     abort('missing --twb')  unless opts[:twb]
-    abort('missing --out')  unless opts[:out]
     abort("not found: #{opts[:twb]}") unless File.exist?(opts[:twb])
 
-    xml   = TwbXml.parse(File.read(opts[:twb], encoding: 'UTF-8'))
+    xml =
+      begin
+        TwbXml.parse(File.read(opts[:twb], encoding: 'UTF-8'))
+      rescue TwbXml::ParseError => e
+        # Abort rather than continue with a partial tree. Every extract_* method
+        # would return [] against a recovered stub, and --detect-only's consumer
+        # (build-charts-from-signals.rb --detected-actions) cannot tell that
+        # apart from a workbook with no actions.
+        abort "FATAL: cannot parse #{opts[:twb]}: #{e.message}"
+      end
     wbids = load_wb_ids(opts[:wb_ids])
+
+    if opts[:detect_only]
+      entries = extract_all(xml, wbids)
+      File.write(opts[:detect_only], JSON.pretty_generate(entries))
+      warn "wrote #{opts[:detect_only]} (#{entries.length} interaction(s) detected) " \
+           '[--detect-only: no POSTPUBLISH_GUIDE.md rendered, no action-ledger.json written]'
+      return entries
+    end
+
+    abort('missing --out')  unless opts[:out]
+
     entries = extract_all(xml, wbids)
     entries.concat(extract_integer_dim_manual(opts[:twb])) # PR-18 manual-decode notes
 

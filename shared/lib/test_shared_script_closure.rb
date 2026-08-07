@@ -121,7 +121,16 @@ PER_TOOL_BY_DESIGN = {
   'convert-model.rb'  => 'each converter parses a different source format end-to-end',
   'phase6-parity.rb'  => "per-tool parity CLI (--tableau vs --workdir) and per-tool oracles",
   'learned-rules.rb'  => 'gap-scout rule store is keyed to one tool\'s expression language',
-  'probe_registry.rb' => 'local artifact registry binds to one tool\'s <TOOL>_TO_SIGMA_HOME dotdir (same convention as learned-rules.rb)'
+  'probe_registry.rb' => 'local artifact registry binds to one tool\'s <TOOL>_TO_SIGMA_HOME dotdir (same convention as learned-rules.rb)',
+  'collect-parity-actuals.rb' => 'per-tool Sigma-actuals collector, same reasoning as phase6-parity.rb. ' \
+    'tableau\'s is 441 lines whose bulk is machinery for problems MEASURED ON TABLEAU workbooks — a ' \
+    'wide pivot-grid CSV export needing a totals-JSON fallback, multi-million-row detail tables that ' \
+    'hung the pool, per-chart row-limit accounting. None of that has been observed on a Domo workbook, ' \
+    'and domo already owns the identical export+poll fetch (lib/element_export.rb, live-proven since ' \
+    '2026-07-30). Sharing would mean domo carrying and maintaining behaviour justified by another ' \
+    'converter\'s evidence. They also key their results differently ON PURPOSE: domo keys by ' \
+    'sigma_element_id because Domo reuses generic summary labels (11 of one real 65-tile page share a ' \
+    'display name), which name-keying silently cross-wired into an unearned PASS.'
 }.freeze
 
 DUP_BACKLOG = %w[
