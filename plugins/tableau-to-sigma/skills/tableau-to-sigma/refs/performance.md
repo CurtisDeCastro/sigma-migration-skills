@@ -366,6 +366,12 @@ One GET of the posted workbook spec + local filter checks (#483 gate). SKIPs
 cleanly offline / without a token, so slowness is pure Sigma API latency on a
 single spec fetch.
 
+### slow-assert-action-gates
+Local checks only (built spec + action-ledger.json + POSTPUBLISH_GUIDE.md, all
+already on disk by --finalize time) — no network call at all (Task 6). If this
+is slow, something is wrong with the workdir (e.g. a pathologically large spec
+JSON), not the API.
+
 ### slow-fastpath-route
 DM readback only. If slow, the Sigma API is slow — everything else will be too.
 

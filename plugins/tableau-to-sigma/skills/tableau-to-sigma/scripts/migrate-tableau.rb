@@ -300,8 +300,12 @@ OptionParser.new do |o|
                                         'landing manifest was found (exit 17 otherwise) — you own the DM table paths') { |v| opts[:skip_extract_landing] = v }
   o.on('--no-auto-land', 'keep the manual extract-landing gate (exit 17) instead of auto-running land-extracts.py ' \
                          'when the .twbx payload + connection id are already available') { opts[:no_auto_land] = true }
-  o.on('--skip-postpublish-guide REASON', 'waive the finalize gate that requires POSTPUBLISH_GUIDE.md when the ' \
-                                          'source carries dashboard actions (gate 11) — name it in your report') { |v| opts[:skip_postpublish_guide] = v }
+  o.on('--skip-postpublish-guide REASON', 'waive the shared gate 11 (POSTPUBLISH_GUIDE.md must exist when the ' \
+                                          'source carries dashboard actions) AND the Tableau-only guide-residue ' \
+                                          'check (assert-action-gates.rb — the guide must equal the action ' \
+                                          'ledger residue) — name it in your report. Does NOT waive G1 ' \
+                                          '(action-schema validation, also in assert-action-gates.rb): a waiver ' \
+                                          'on the hand-off guide is not a waiver on spec validity.') { |v| opts[:skip_postpublish_guide] = v }
   o.on('--skip-datasource-filters REASON', 'waive the #483 datasource-filter gate (always-on Tableau data-source ' \
                                            'filters must be applied as master defaults, not silently dropped) — REQUIRED reason; name it in your report') { |v| opts[:skip_datasource_filters] = v }
   o.on('--row-scale F', Float) { |v| opts[:row_scale] = v }
@@ -942,6 +946,7 @@ PHASE_BUDGET = {
   'assert-run-state'  => 10,
   'assert-phase6-ran' => 90,
   'assert-datasource-filters' => 15, # one GET /v2/workbooks/<id>/spec + local checks (SKIPs offline)
+  'assert-action-gates' => 10, # local checks only (spec + ledger + guide) — no network
   'phaseE'            => 240,
   'pivot-totals-ship' => 20   # one GET+PUT to re-hide pivot grand totals at ship
 }.freeze
@@ -1380,6 +1385,46 @@ if opts[:finalize]
   dsfout, dsfst = sigma_run!(dsf_cmd, allow_fail: true)
   mark('assert-datasource-filters')
 
+  # Task 6 (2026-08-07 restructure) — action gates (G1 action-schema
+  # validation + the post-publish guide-residue check). Kept a STANDALONE
+  # tableau-local gate (scripts/assert-action-gates.rb, NOT folded into the
+  # SHARED assert-phase6-ran.rb — same #483 pattern as assert-datasource-
+  # filters.rb above) because the action-ledger concept it checks (Tableau
+  # dashboard filter/highlight/nav/parameter/set actions) has no equivalent in
+  # the other 7 converters that vendor assert-phase6-ran.rb.
+  #
+  # Resolve the built spec the SAME way Phase 4 itself wrote it: the
+  # mechanical/hosted-converter path writes <WORK>/wb-spec.json; the
+  # agent-authored manual-spec route (--wb-spec) writes
+  # <WORK>/wb-spec.resolved.json instead, specifically so the authored,
+  # re-resolvable placeholders file is never clobbered (see Phase 4's own
+  # "NON-DESTRUCTIVE placeholder resolution" comment). By --finalize time
+  # Phase 4 has ALWAYS run (migrate-state.json exists, wb_id resolved above),
+  # so exactly one of these two files must exist. If NEITHER does, that is a
+  # real gap, not a "nothing to check" SKIP — FAIL LOUDLY here rather than let
+  # G1 silently no-op on whichever route left no spec file behind (the
+  # manual-spec route is exactly the one MOST likely to carry a hand-authored
+  # action with a missing/duplicate id, so silently skipping it there would be
+  # worse than not having the gate at all).
+  ag_spec_path = File.join(WORK, 'wb-spec.json')
+  ag_spec_path = File.join(WORK, 'wb-spec.resolved.json') unless File.exist?(ag_spec_path)
+  unless File.exist?(ag_spec_path)
+    puts
+    puts '================ ACTION-GATES STOP (no built spec found) ===================='
+    puts "Neither #{File.join(WORK, 'wb-spec.json')} nor #{File.join(WORK, 'wb-spec.resolved.json')}"
+    puts 'exists, but Phase 4 must have already run by --finalize time (migrate-state.json'
+    puts 'and a workbook_id are both present). G1 (action-schema validation) cannot silently'
+    puts 'skip here — investigate why Phase 4 left no spec file on disk, then re-run --finalize.'
+    puts '==============================================================================='
+    exit 32
+  end
+  ag_cmd = ['ruby', File.join(HERE, 'assert-action-gates.rb'), '--workdir', WORK, '--spec', ag_spec_path]
+  # Waives the guide-residue check ONLY — assert-action-gates.rb never lets
+  # this flag touch G1.
+  ag_cmd += ['--skip-postpublish-guide', opts[:skip_postpublish_guide]] if opts[:skip_postpublish_guide]
+  agout, agst = sigma_run!(ag_cmd, allow_fail: true)
+  mark('assert-action-gates')
+
   if gst.exitstatus == 7
     census = (JSON.parse(File.read(File.join(WORK, 'parity-final.json')))['tile_census'] rescue {}) || {}
     unmatched = census['unmatched_zone_names'] || []
@@ -1514,7 +1559,7 @@ if opts[:finalize]
   # With an explicit --min-pass-rate (honest NAMED divergences), the census-
   # aware gate is the parity authority — phase6's own exit stays strict-100%.
   parity_ok = p6st.success? || (opts[:min_pass_rate] && gst.success?)
-  all_green = parity_ok && clst.success? && gst.success? && dsfst.success?
+  all_green = parity_ok && clst.success? && gst.success? && dsfst.success? && agst.success?
 
   # ---------------------------------------------------------------------------
   # Phase E (OPT-IN) — Enhance. Runs ONLY when --enhance was passed (here or on
@@ -1622,7 +1667,7 @@ if opts[:finalize]
   else
     puts "PARITY      : #{pf['status'] || '?'} (#{pf['charts_pass']}/#{pf['charts_total']} charts#{state['extract_mode'] ? ', extract-mode' : ''})"
   end
-  puts "GATES       : phase6=#{p6st.success? ? 'PASS' : 'FAIL'} cleanup=#{clst.success? ? 'PASS' : 'FAIL'} assert-phase6-ran=#{gst.success? ? 'PASS' : "FAIL(#{gst.exitstatus})"} ds-filters=#{dsfst.success? ? 'PASS' : "FAIL(#{dsfst.exitstatus})"}"
+  puts "GATES       : phase6=#{p6st.success? ? 'PASS' : 'FAIL'} cleanup=#{clst.success? ? 'PASS' : 'FAIL'} assert-phase6-ran=#{gst.success? ? 'PASS' : "FAIL(#{gst.exitstatus})"} ds-filters=#{dsfst.success? ? 'PASS' : "FAIL(#{dsfst.exitstatus})"} action-gates=#{agst.success? ? 'PASS' : "FAIL(#{agst.exitstatus})"}"
   puts "ENHANCE     : #{enhance_line}" if enhance_line
   puts "PUNCH LIST  : #{_pl_note}" if _pl_note
   puts "STATUS      : #{all_green ? 'GREEN' : 'NOT GREEN'}"
@@ -1630,21 +1675,24 @@ if opts[:finalize]
   quiet_event('result', 'stage' => 'finalize', 'status' => all_green ? 'GREEN' : 'NOT GREEN',
               'workbook_id' => wb_id, 'data_model_id' => state['data_model_id'],
               'gates' => { 'phase6' => p6st.exitstatus, 'cleanup' => clst.exitstatus,
-                           'assert_phase6_ran' => gst.exitstatus, 'ds_filters' => dsfst.exitstatus })
+                           'assert_phase6_ran' => gst.exitstatus, 'ds_filters' => dsfst.exitstatus,
+                           'action_gates' => agst.exitstatus })
   phase_summary
   # ── Same-failure loop breaker (signature + attempt cap) ────────────────────
   # A NOT-GREEN finalize records its gate signature; re-running --finalize into
   # the SAME failure a second time is grinding, not converging — hard-STOP and
   # hand control to the operator instead of looping toward a forced green
   # (refs/operating-contract.md: "don't spin, don't fake").
-  # The signature keys ALL FOUR gate statuses that decide all_green — phase6,
-  # cleanup, the census gate, AND assert-datasource-filters (PR-507 N1: the
+  # The signature keys ALL FIVE gate statuses that decide all_green — phase6,
+  # cleanup, the census gate, assert-datasource-filters (PR-507 N1: the
   # ds-filters status was in all_green but absent here, so a ds-filter-only
   # NOT-GREEN signed as a tuple naming three PASSING gates — the exact
-  # pathology the cleanup-key note below records) — PLUS a digest of the first
-  # FAILING child's error region. Exit codes alone collapse distinct root
-  # causes (assert-phase6-ran.rb folds 84 exit sites into 31 codes; exit 18
-  # alone carries 6 causes), so a sub-cause flip used to read as "the EXACT
+  # pathology the cleanup-key note below records), AND assert-action-gates
+  # (Task 6 restructure — same reasoning: an action-gates-only NOT-GREEN must
+  # not sign as a tuple naming four PASSING gates) — PLUS a digest of the
+  # first FAILING child's error region. Exit codes alone collapse distinct
+  # root causes (assert-phase6-ran.rb folds 84 exit sites into 31 codes; exit
+  # 18 alone carries 6 causes), so a sub-cause flip used to read as "the EXACT
   # same failure". No mode/measure here, deliberately: the S2 progress rule
   # needs a known-polarity count, and these gates emit bigger-is-better rate
   # lines ("pass-rate=83.3%") where "no strict decrease" would false-stop
@@ -1657,13 +1705,15 @@ if opts[:finalize]
     _fail_out = if !gst.success? then gout
                 elsif !parity_ok then p6out # p6 failure NOT excused by --min-pass-rate
                 elsif !dsfst.success? then dsfout
+                elsif !agst.success? then agout
                 else clout
                 end
     _fregion = Offramp.error_region(_fail_out)
     _fsig = Offramp.failure_signature(script: 'migrate-tableau', context: 'finalize',
                                       exit_code: { phase6: p6st.exitstatus, gate: gst.exitstatus,
                                                    cleanup: clst.exitstatus,
-                                                   dsfilters: dsfst.exitstatus },
+                                                   dsfilters: dsfst.exitstatus,
+                                                   actiongates: agst.exitstatus },
                                       error_region: _fregion)
     _fverdict = Offramp.loop_check(WORK, signature: _fsig, scope: 'migrate-tableau:finalize')
     if _fverdict != :first

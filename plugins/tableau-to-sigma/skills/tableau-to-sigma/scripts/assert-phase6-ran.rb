@@ -199,24 +199,13 @@
 #      opt-out) is honored but RECORDED as the named waiver
 #      --skip-fidelity-gate (budget-counted), never silence. Converters that
 #      never stage the loop (no flag, no rcf_passes key) are unaffected.
-#  16  TWO gates share this exit code (Task 6) — the orchestrator's exit-16
-#      handling is unchanged, so both raise the same INTERACTIVITY STOP:
-#        Gate G1 (action schema) — an actions[] entry in <workdir>/wb-spec.json
-#          fails ActionLedger.validate_action (e.g. missing `id` — a REAL
-#          shipping bug), or an action id repeats on two different elements
-#          (a REAL live API 400), or an open-url effect has no `url` (schema-
-#          valid, but a silent no-op — rejected on purpose). NOT waivable by
-#          any flag, including --skip-postpublish-guide. No wb-spec.json →
-#          stated SKIP. Standalone check: `--spec <file> --gate G1`.
-#        Gate 11 (post-publish interactivity guide), REWRITTEN — no longer a
-#          bare file-exists check. <workdir>/action-ledger.json (written by
-#          scripts/build-postpublish-guide.rb --json-out) must exist with its
-#          conservation invariant holding (detectedCount == emitted.size +
-#          residue.size), <workdir>/POSTPUBLISH_GUIDE.md must exist, and the
-#          guide text must mention NONE of the ledger's `emitted` captions —
-#          previously a guide instructing the customer to hand-wire an action
-#          the converter had ALREADY built still passed green.
-#          Escape hatch: --skip-postpublish-guide "<reason>" (gate 11 ONLY).
+#  16  Post-publish interactivity guide missing (gate 11) — the source dashboards
+#      carry filter/highlight/nav ACTIONS (dashboard-layout-meta.json worksheets'
+#      is_action filters, or the *-gaps-report.json "Dashboard filter / highlight /
+#      nav actions" feature) that workbooks-as-code cannot port, and
+#      <workdir>/POSTPUBLISH_GUIDE.md does not exist. Run
+#      scripts/build-postpublish-guide.rb to generate the user handoff guide.
+#      Escape hatch: --skip-postpublish-guide "<reason>".
 #  17  Deferred DM elements unresolved (gate 12) — <workdir>/deferred-elements.json
 #      is non-empty: post-and-readback.rb --quarantine-on-failure removed broken
 #      element(s) at DM POST time to save the rest, so the LIVE data model is
@@ -489,46 +478,6 @@ require 'optparse'
 require 'rbconfig'
 require 'digest'
 
-# Action ledger (Task 6) — scripts/lib/action_ledger.rb, vendored directly in
-# this plugin (same $LOAD_PATH convention build-postpublish-guide.rb uses for
-# the same lib).
-$LOAD_PATH.unshift File.expand_path('lib', __dir__)
-require 'action_ledger'
-
-# Gate G1 — every actions[] entry in the built spec is schema-valid
-# (ActionLedger.validate_action) and its id is unique across the WHOLE
-# workbook (not per-element — a per-element counter produces a live 400
-# "Duplicate action id"). Exists because a previously-shipped button action
-# omitted `id` on every run and nothing noticed until a live POST 400.
-def gate_g1_action_schema(spec)
-  errs = []
-  seen = {}
-  (spec['pages'] || []).each do |page|
-    (page['elements'] || []).each do |el|
-      (el['actions'] || []).each do |action|
-        ActionLedger.validate_action(action).each do |e|
-          errs << "#{page['id']}/#{el['id']}: #{e}"
-        end
-        id = action['id']
-        next if id.to_s.empty?
-        if seen[id]
-          errs << "duplicate action id #{id.inspect} on #{el['id']} (already on #{seen[id]}) " \
-                  '— action ids must be unique across the WHOLE workbook'
-        end
-        seen[id] = el['id']
-      end
-    end
-  end
-  errs
-end
-
-# Shared FAIL helper — prints the message with the same "[FAIL] " prefix every
-# other gate in this file uses, then exits with the gate's documented code.
-def fail_gate(code, msg)
-  warn "[FAIL] #{msg}"
-  exit code
-end
-
 # Degradation ledger (PLAN-v3 PR-14) — vendored at scripts/lib/ in adopting
 # plugins; the canonical checkout resolves it from shared/lib. A checkout
 # without it keeps the legacy final line (stated below, never silent).
@@ -612,7 +561,7 @@ OptionParser.new do |p|
   p.on('--min-grid-fill F', Float, 'gate 8c: minimum per-page grid_fill_pct (0..1, default 0.45) — pages below fail as mostly-empty') { |v| opts[:min_grid_fill] = v }
   p.on('--skip-layout-fill REASON', 'waive gate 8c (layout fill / grid coverage) — REQUIRED reason string. Use ONLY when a sparse/partial page is intentional. The reason MUST be named in your migration report.') { |v| opts[:skip_layout_fill] = v }
   p.on('--skip-telemetry-gate REASON', 'waive gate 10 (telemetry consent decision) — REQUIRED reason string. Use ONLY when the run genuinely cannot prompt (e.g. unattended CI). The reason MUST be named in your migration report.') { |v| opts[:skip_telemetry] = v }
-  p.on('--skip-postpublish-guide REASON', 'waive gate 11 (post-publish interactivity guide) — REQUIRED reason string. Use ONLY when the source dashboard actions are genuinely not worth a handoff guide. The reason MUST be named in your migration report. (does NOT waive G1 action-schema validation — a waiver on the hand-off guide is not a waiver on spec validity.)') { |v| opts[:skip_postpublish] = v }
+  p.on('--skip-postpublish-guide REASON', 'waive gate 11 (post-publish interactivity guide) — REQUIRED reason string. Use ONLY when the source dashboard actions are genuinely not worth a handoff guide. The reason MUST be named in your migration report.') { |v| opts[:skip_postpublish] = v }
   p.on('--accept-deferred-elements REASON', 'waive gate 12 (deferred/quarantined DM elements) — REQUIRED reason string. Use ONLY when knowingly shipping a PARTIAL data model; the reason AND the dropped elements MUST be named in your migration report.') { |v| opts[:accept_deferred] = v }
   p.on('--require-fidelity-ledger', 'gate 8d: require an RCF fidelity-ledger.json (Phase 5g) with zero UNRESOLVED spec-fixable deltas. DEFAULT-ON (PR-11) for workdirs whose migrate-state.json staged the loop (rcf_passes > 0 — tableau-to-sigma); this flag forces it for everyone else.') { opts[:require_fidelity] = true }
   p.on('--fidelity-ledger PATH', 'gate 8d: path to the RCF ledger (default: <workdir>/fidelity-ledger.json)') { |v| opts[:fidelity_ledger] = v }
@@ -624,34 +573,7 @@ OptionParser.new do |p|
   p.on('--allow-empty-tiles REASON', 'gate 13: accept displayed dashboard tile(s) that export ZERO data rows — REQUIRED reason string that MUST cite the source PNG showing the chart is genuinely empty on the SOURCE dashboard. Never use this to wave away a broken data path (filter/calc bug). Counted against the waiver budget; name it in your migration report.') { |v| opts[:allow_empty_tiles] = v }
   p.on('--skip-visual-similarity REASON', 'waive gate 14 (measured visual-similarity floor) — REQUIRED reason string. Counted against the waiver budget; name it in your migration report.') { |v| opts[:skip_vsim] = v }
   p.on('--accept-manual-residues LIST', 'gate 15: comma-separated residue CALC names from <workdir>/manual-residues.json to WAIVE as accepted-unbuilt (their tiles keep the magnitude proxy — name each in your migration report). Counted against the waiver budget. Unnamed unbuilt residues still fail (exit 22).') { |v| opts[:accept_manual_residues] = v.split(',').map(&:strip).reject(&:empty?) }
-  p.on('--spec PATH', 'gate G1 standalone mode: path to a workbook spec JSON file ({"pages":[...]}) to validate. Requires --gate G1; does not require --workdir.') { |v| opts[:spec_path] = v }
-  p.on('--gate NAME', 'run ONLY the named gate against --spec and exit (currently: G1) — isolated/testable entry point; does NOT run the full gate suite and is not itself waivable by any --skip-* flag.') { |v| opts[:only_gate] = v }
 end.parse!
-
-# Standalone G1 entry point — deliberately checked BEFORE the --workdir
-# requirement below: G1 validates a single spec file and has no use for a
-# workdir at all. This is also what makes G1 immune to --skip-postpublish-guide
-# (that flag is parsed into opts[:skip_postpublish], which this branch never
-# consults) and to every other workdir-scoped waiver flag.
-if opts[:only_gate]
-  unless opts[:only_gate] == 'G1'
-    abort("--gate #{opts[:only_gate].inspect} is not recognised (only G1 runs standalone)")
-  end
-  abort('--spec PATH required with --gate G1') unless opts[:spec_path]
-  abort("--spec not found: #{opts[:spec_path]}") unless File.exist?(opts[:spec_path])
-  spec = JSON.parse(File.read(opts[:spec_path]))
-  errs = gate_g1_action_schema(spec)
-  if errs.empty?
-    n = (spec['pages'] || []).sum { |pg| (pg['elements'] || []).sum { |el| Array(el['actions']).size } }
-    puts "[OK] gate G1: #{n} action(s) validated"
-    exit 0
-  else
-    warn "[FAIL] gate G1: #{errs.length} action-schema violation(s):"
-    errs.each { |e| warn "       - #{e}" }
-    exit 16
-  end
-end
-
 abort('--workdir (or --tableau) required') unless opts[:tab]
 
 # A waived gate must never pass SILENTLY. record_waiver prints a loud banner and
@@ -3035,84 +2957,65 @@ else
 end
 
 # ---------------------------------------------------------------------------
-# Gate G1 — action schema validation (exit 16 — same code as gate 11 right
-# below; the orchestrator's exit-16 handling is unchanged either way, per
-# Task 6). Every actions[] entry in the built spec must be schema-valid
-# (ActionLedger.validate_action) and every action id unique across the WHOLE
-# workbook. Deliberately OUTSIDE the --skip-postpublish-guide branch below and
-# consults no waiver flag of its own — a waiver on the hand-off GUIDE is not a
-# waiver on spec VALIDITY, so G1 always runs. Reads the deterministic local
-# <workdir>/wb-spec.json (the authored/resolved spec migrate-tableau.rb writes
-# — see its "local wb-spec.json (deterministic; the live /spec readback is
-# flaky...)" note); no such file → stated SKIP, never a silent pass. For an
-# isolated/CI check against an arbitrary spec file, run this script standalone
-# with `--spec <file> --gate G1` (see near the top of this file) instead.
-# ---------------------------------------------------------------------------
-wb_spec_path = File.join(opts[:tab], 'wb-spec.json')
-if File.exist?(wb_spec_path)
-  g1_spec = JSON.parse(File.read(wb_spec_path)) rescue nil
-  if g1_spec.nil?
-    warn "[SKIP] gate G1: #{wb_spec_path} is not valid JSON — cannot validate actions"
-  else
-    g1_errs = gate_g1_action_schema(g1_spec)
-    if g1_errs.any?
-      warn "[FAIL] gate G1: #{g1_errs.length} action-schema violation(s) in #{wb_spec_path}:"
-      g1_errs.each { |e| warn "       - #{e}" }
-      warn '       Fix the emitting builder (every action needs `id`; ids are unique per WORKBOOK,'
-      warn '       not per element) and re-build. G1 is NOT waivable — spec validity is not optional.'
-      exit 16
-    end
-    g1_n = (g1_spec['pages'] || []).sum { |pg| (pg['elements'] || []).sum { |el| Array(el['actions']).size } }
-    puts "[OK] gate G1: #{g1_n} action(s) validated"
-  end
-else
-  puts "[SKIP] gate G1: no #{wb_spec_path} in the workdir — action-schema census unavailable"
-end
-
-# ---------------------------------------------------------------------------
-# Gate 11 — post-publish interactivity guide (exit 16), REWRITTEN (Task 6).
-# Previously this only checked POSTPUBLISH_GUIDE.md EXISTED, keyed off a
-# source-side action count — a guide that instructed the customer to hand-wire
-# something build-charts-from-signals.rb had ALREADY auto-emitted still passed
-# green. Now the gate reads the action ledger (scripts/lib/action_ledger.rb;
-# CONTRACTUAL path <workdir>/action-ledger.json, written by
-# build-postpublish-guide.rb --json-out) and asserts the guide describes
-# exactly the residue, no more and no less:
-#   - the ledger must exist and its conservation invariant must hold
-#     (detectedCount == emitted.size + residue.size);
-#   - the guide must exist (build-postpublish-guide.rb always writes it,
-#     even for a zero-action workbook — see its header comment);
-#   - no `emitted` action's caption may appear in the guide text.
+# Gate 11 — post-publish interactivity guide (exit 16). Dashboard ACTIONS
+# (filter / highlight / navigate / set-action / parameter-action / URL) are the
+# one interactivity class workbooks-as-code cannot port — the customer wires
+# cross-element filtering in the Sigma UI after publish. Every workbook in the
+# 10-conversion live run that carried actions needed a hand-written handoff
+# note; this gate makes the guide (POSTPUBLISH_GUIDE.md, generated by
+# scripts/build-postpublish-guide.rb) mandatory whenever the source recorded
+# actions. Action census sources, broadest wins:
+#   - <workdir>/dashboard-layout-meta.json — parse-twb-layout.rb marks each
+#     action-driven worksheet filter with is_action:true / kind:"action"
+#   - <workdir>/*-gaps-report.json — scan-workbook-gaps.rb's "Dashboard filter /
+#     highlight / nav actions" feature (command='tsc:tsl-*' matches; also covers
+#     highlight/nav actions that never materialize as worksheet filters)
+# Neither file present → census unavailable → stated SKIP (never a silent pass).
 # ---------------------------------------------------------------------------
 if opts[:skip_postpublish]
   record_waiver.call('--skip-postpublish-guide', 'gate 11 (post-publish interactivity guide)', opts[:skip_postpublish])
 else
-  ledger_path = File.join(opts[:tab], 'action-ledger.json')
-  guide_path  = File.join(opts[:tab], 'POSTPUBLISH_GUIDE.md')
-  unless File.exist?(ledger_path)
-    fail_gate(16, "gate 11: #{ledger_path} missing — build-postpublish-guide.rb must be run with " \
-                  '--json-out (escape hatch: --skip-postpublish-guide "<reason>", names it in your report)')
-  end
-  ledger = JSON.parse(File.read(ledger_path))
-  if ledger['detectedCount'] != ledger['emitted'].size + ledger['residue'].size
-    fail_gate(16, "gate 11: ledger conservation broken — detected=#{ledger['detectedCount']} " \
-                  "emitted=#{ledger['emitted'].size} residue=#{ledger['residue'].size} (#{ledger_path})")
-  end
-  unless File.exist?(guide_path)
-    fail_gate(16, "gate 11: #{guide_path} missing — build-postpublish-guide.rb writes it " \
-                  'unconditionally (even for zero detected actions); re-run it')
-  end
-  guide = File.read(guide_path)
-  ledger['emitted'].each do |e|
-    cap = e.dig('source', 'caption').to_s
-    next if cap.empty?
-    if guide.include?(cap)
-      fail_gate(16, "gate 11: the guide instructs hand-wiring #{cap.inspect}, but the converter " \
-                    'already emitted it — the guide must describe ONLY the residue, work still to do')
+  meta_actions = 0
+  gaps_actions = 0
+  census_sources = []
+  meta_path = File.join(opts[:tab], 'dashboard-layout-meta.json')
+  if File.exist?(meta_path)
+    meta = JSON.parse(File.read(meta_path)) rescue nil
+    if meta.is_a?(Hash) && meta['worksheets'].is_a?(Hash)
+      meta_actions = meta['worksheets'].values.sum do |ws|
+        next 0 unless ws.is_a?(Hash)
+        Array(ws['filters']).count { |f| f.is_a?(Hash) && (f['is_action'] == true || f['kind'] == 'action') }
+      end
+      census_sources << meta_path
     end
   end
-  puts "[OK] gate 11: guide matches ledger residue " \
-       "(#{ledger['emitted'].size} auto-emitted, #{ledger['residue'].size} manual)"
+  Dir.glob(File.join(opts[:tab], '*-gaps-report.json')).sort.each do |gp|
+    gj = JSON.parse(File.read(gp)) rescue nil
+    next unless gj.is_a?(Hash)
+    feat = Array(gj['detected_features']).find do |f|
+      f.is_a?(Hash) && (f['pat'].to_s.include?('tsc:tsl-') || f['name'].to_s =~ %r{filter\s*/\s*highlight\s*/\s*nav actions}i)
+    end
+    next unless feat
+    gaps_actions = [gaps_actions, feat['count'].to_i].max
+    census_sources << gp
+  end
+  n_actions = [meta_actions, gaps_actions].max
+  guide_path = File.join(opts[:tab], 'POSTPUBLISH_GUIDE.md')
+  if census_sources.empty?
+    puts '[SKIP] gate 11: no dashboard-layout-meta.json / *-gaps-report.json in the workdir — dashboard-action census unavailable'
+  elsif n_actions.zero?
+    puts '[OK] gate 11: source recorded no dashboard filter/highlight/nav actions — post-publish guide not required'
+  elsif File.exist?(guide_path)
+    puts "[OK] gate 11: #{n_actions} source dashboard action(s) detected; POSTPUBLISH_GUIDE.md present (#{guide_path})"
+  else
+    warn "[FAIL] gate 11: source dashboards carry #{n_actions} interactive actions that workbooks-as-code"
+    warn '       cannot port — run scripts/build-postpublish-guide.rb to generate the user handoff guide.'
+    warn "       (census: #{census_sources.join(', ')})"
+    warn "       The guide must land at #{guide_path} — it tells the customer which"
+    warn '       cross-element filter/highlight/nav wirings to add in the Sigma UI after publish.'
+    warn '       Escape hatch: --skip-postpublish-guide "<reason>" (name it in your migration report).'
+    exit 16
+  end
 end
 
 # ---------------------------------------------------------------------------
