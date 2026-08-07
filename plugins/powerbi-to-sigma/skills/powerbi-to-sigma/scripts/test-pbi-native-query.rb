@@ -51,7 +51,8 @@ Dir.mktmpdir('pbi-native-query-test') do |dir|
   File.write(input, JSON.generate(normalized))
   File.write(shim, <<~JS)
     import { readFileSync, writeFileSync } from 'node:fs';
-    import { convertPowerBIToSigma } from #{converter.to_json};
+    import { pathToFileURL } from 'node:url';
+    const { convertPowerBIToSigma } = await import(pathToFileURL(#{converter.to_json}).href);
     const out = convertPowerBIToSigma(JSON.parse(readFileSync(#{input.to_json}, 'utf8')), { connectionId: 'conn' });
     writeFileSync(#{output.to_json}, JSON.stringify(out.model || out.sigmaDataModel || out));
   JS
