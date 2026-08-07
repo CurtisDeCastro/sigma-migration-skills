@@ -6532,6 +6532,22 @@ ${joinSql}
     const rewriteSqlExactExpr = (expr) => !hasSqlExact ? expr : expr.replace(/\b([A-Za-z_][A-Za-z0-9_]*)\b/g, (m, tok) => sqlExactByUpper[tok.toUpperCase()] || m);
     const lodChildElements = [];
     const wsIndex = _buildWorksheetIndex(parsed);
+    // Sigma accepts a metric whose name equals a sibling column, but live
+    // readback then drops the element's entire metric collection (F4). Raw
+    // numeric measures already exist as columns, so their convenience Sum()
+    // metrics must use a distinct, deterministic display name.
+    const _autoMetricName = (displayName) => {
+      const occupied = new Set([
+        ...(factEl.columns || []).map((c) => String(c.name || "").toLowerCase()),
+        ...(factEl.metrics || []).map((m) => String(m.name || "").toLowerCase())
+      ]);
+      const base = `Total ${displayName}`;
+      let candidate = base;
+      let suffix = 2;
+      while (occupied.has(candidate.toLowerCase()))
+        candidate = `${base} (${suffix++})`;
+      return candidate;
+    };
     const lodHelpers = {};
     const usedAliases = /* @__PURE__ */ new Set();
     const topNHelpers = [];
@@ -6845,9 +6861,10 @@ ${joinSql}
               factEl.metrics = [];
             const _mets = factEl.metrics;
             if (_tracked.el === factEl) {
-              if (!_mets.some((m) => (m.name || "").toUpperCase() === displayName.toUpperCase())) {
+              const _sumFormula = `Sum([${displayName}])`;
+              if (!_mets.some((m) => String(m.formula || "").toLowerCase() === _sumFormula.toLowerCase())) {
                 const _fmt = inferSigmaFormat(`Sum([${displayName}])`, displayName);
-                const _met = { id: sigmaShortId(), formula: `Sum([${displayName}])`, name: displayName };
+                const _met = { id: sigmaShortId(), formula: _sumFormula, name: _autoMetricName(displayName) };
                 if (_fmt)
                   _met.format = _fmt;
                 _mets.push(_met);
@@ -6874,7 +6891,7 @@ ${joinSql}
             if (!factEl.metrics)
               factEl.metrics = [];
             const _autoFmt = inferSigmaFormat(`Sum([${displayName}])`, displayName);
-            const _autoMetric = { id: sigmaShortId(), formula: `Sum([${displayName}])`, name: displayName };
+            const _autoMetric = { id: sigmaShortId(), formula: `Sum([${displayName}])`, name: _autoMetricName(displayName) };
             if (_autoFmt)
               _autoMetric.format = _autoFmt;
             factEl.metrics.push(_autoMetric);
