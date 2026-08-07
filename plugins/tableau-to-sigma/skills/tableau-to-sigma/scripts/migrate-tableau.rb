@@ -163,6 +163,7 @@ require_relative 'lib/offramp' # structured "where did this run leave the golden
 require_relative 'lib/fast_path' # FAST-PATH routing + BOM-tolerant JSON reads
 require_relative 'lib/phase_cache' # sha-stamped phase-output reuse on re-entry (refs/performance.md)
 require_relative 'lib/sigma_rest' # in-process Sigma token minting (no bash/eval)
+require_relative 'lib/code_rep' # workbook code-rep document-wrapper adapter (nested GET/PUT shape)
 require_relative 'lib/metric_binding' # shared DM-metric binder ([Metrics/<name>] over inline re-derive)
 require_relative 'lib/tableau_rest' # in-process Tableau token minting (Windows-safe; no bash/eval)
 require_relative 'hydrate-custom-sql'
@@ -4765,7 +4766,15 @@ if opts[:wb_target]
   existing = begin
     # accept: application/json ⇒ Sigma.request returns an ALREADY-PARSED Hash
     # (see lib/sigma_rest.rb) — do not JSON.parse again.
-    Sigma.request(:get, "/v2/workbooks/#{opts[:wb_target]}/spec", accept: 'application/json')
+    raw_existing = Sigma.request(:get, "/v2/workbooks/#{opts[:wb_target]}/spec", accept: 'application/json')
+    # Workbook code-rep GETs nest pages/schemaVersion under a top-level `document`
+    # key (live since 2026-08); flatten metadata+document onto ONE hash so the
+    # existing['pages']/existing_el_ids reads below (and the eventual PUT via
+    # post-and-readback --update-id, which re-wraps at the wire boundary) see the
+    # same flat shape this file always worked with. Without this, a bare
+    # existing['pages'] read is nil and the FATAL guard just below fires on
+    # EVERY --workbook-target append, even against a perfectly valid workbook.
+    Sigma::CodeRep.metadata(raw_existing).merge(Sigma::CodeRep.document(raw_existing))
   rescue StandardError => e
     abort "FATAL: could not GET existing workbook #{opts[:wb_target]} spec for append (#{e.class}: #{e.message}). " \
           'Verify the id and that the token can read it.'

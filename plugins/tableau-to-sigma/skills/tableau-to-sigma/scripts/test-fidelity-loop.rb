@@ -130,6 +130,32 @@ Dir.mktmpdir do |dir|
               '--dry-run', '--live-spec', File.join(dir, 'nopages.json'),
               '--out', File.join(dir, 'x.json'), dir: dir)
   ok(st.exitstatus == 4, 'apply-patch refuses a live spec with no pages (exit 4)')
+
+  # Workbook code-rep GETs nest pages/layout/schemaVersion under `document`
+  # (live since 2026-08). A --live-spec fixture shaped like the LIVE response
+  # (workbookId/name at top level, pages/layout nested) must merge correctly
+  # instead of tripping the "no `pages`" guard (exit 4) on a workbook that
+  # actually has pages.
+  nested_live = {
+    'workbookId' => 'wb1', 'name' => 'Exec Overview',
+    'document' => {
+      'schemaVersion' => 5,
+      'pages' => [{ 'id' => 'PG', 'elements' => [{ 'elementId' => 'k1', 'kind' => 'kpi-chart' }] }],
+      'layout' => '<Page><LayoutElement/></Page>'
+    }
+  }
+  File.write(File.join(dir, 'nested-live.json'), JSON.generate(nested_live))
+  out, st = run('apply-patch', '--patch', File.join(dir, 'patch.json'),
+                '--dry-run', '--live-spec', File.join(dir, 'nested-live.json'),
+                '--out', File.join(dir, 'nested-merged.json'), dir: dir)
+  ok(st.exitstatus.zero?, 'apply-patch on a nested-document --live-spec exits 0 (not exit 4)')
+  nested_merged = (JSON.parse(File.read(File.join(dir, 'nested-merged.json'))) rescue nil)
+  ok(nested_merged.is_a?(Hash) && nested_merged['pages'].is_a?(Array) && nested_merged['pages'].length == 1,
+     'nested `document.pages` recovered onto the flat merged spec')
+  ok(nested_merged && nested_merged['layout'] == nested_live['document']['layout'],
+     'nested `document.layout` preserved through the merge')
+  ok(nested_merged && nested_merged['themeOverrides']['categoricalScheme'] == ['#0e7c7b'],
+     'patch still applies on top of a flattened nested live spec')
 end
 
 puts 'RCF page picking (#422):'

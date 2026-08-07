@@ -97,6 +97,7 @@ end.parse!
 $LOAD_PATH.unshift File.expand_path('lib', __dir__)
 require 'sigma_rest'
 require 'export_pool'
+require 'code_rep'
 
 # Default = ExportPool::DEFAULT_EXPORT_ROW_LIMIT, the ONE shared default with
 # verify-anchors.rb (A3, wave-1 review: rowLimit is part of the raw-export
@@ -149,6 +150,12 @@ if opts[:drift_warn_min].to_f.positive?
 end
 
 spec = JSON.parse(File.read(opts[:spec]))
+# The --workbook-spec readback file may be a pre-fix flat artifact OR (once the
+# writer is fixed) a live-shaped nested `document` readback — Sigma::CodeRep's
+# document()/metadata() both tolerate either, so flatten unconditionally rather
+# than assume the file's vintage. Without this, spec['pages'] silently reads []
+# on a nested file and every chart is (wrongly) reported "no matching element".
+spec = Sigma::CodeRep.metadata(spec).merge(Sigma::CodeRep.document(spec))
 elements = (spec['pages'] || []).flat_map { |p| p['elements'] || [] }
 el_by_id = elements.each_with_object({}) { |e, h| h[e['id']] = e }
 

@@ -62,6 +62,7 @@
 
 require 'json'
 require_relative 'lib/cli_encoding'
+require_relative 'lib/code_rep'
 require 'optparse'
 
 # ---------------------------------------------------------------------------
@@ -478,6 +479,12 @@ when 'apply-patch'
             YAML.safe_load(body, permitted_classes: [Date, Time]) || {}
           end
         end
+      # Workbook code-rep GETs nest pages/layout/schemaVersion under `document`
+      # (live since 2026-08); flatten metadata+document onto ONE hash so every
+      # live['pages']/merged['layout'] read below stays correct whether `live`
+      # came from a live nested GET or a legacy flat --live-spec fixture (the
+      # adapter's document()/metadata() both tolerate an already-flat input).
+      live = Sigma::CodeRep.metadata(live).merge(Sigma::CodeRep.document(live))
       die 'live spec has no `pages` — refusing to PUT a spec that would blank the workbook', 4 unless live['pages']
       FidelityLoop.deep_merge(live, patch)
     end
@@ -521,7 +528,11 @@ when 'apply-patch'
     require_relative 'lib/sigma_rest'
     layout_was = merged['layout'].to_s
     begin
-      Sigma.request(:put, "/v2/workbooks/#{wb}/spec", body: merged.to_json)
+      # Workbook code-rep PUTs require the nested `document` envelope
+      # (verified live 2026-08-03/04: a flat body 400s) — split the flat
+      # `merged` hash back into document fields + metadata and wrap.
+      put_body = Sigma::CodeRep.wrap(Sigma::CodeRep.document(merged), extra: Sigma::CodeRep.metadata(merged))
+      Sigma.request(:put, "/v2/workbooks/#{wb}/spec", body: JSON.generate(put_body))
     rescue StandardError => e
       die "PUT /v2/workbooks/#{wb}/spec failed (atomic — nothing written): #{e.message}", 4
     end
@@ -555,6 +566,9 @@ when 'apply-patch'
         require 'yaml'; require 'date'
         YAML.safe_load(fresh, permitted_classes: [Date, Time]) || {}
       end
+    # Same nested-`document` unwrap as the live GET above — the post-patch
+    # lints below need flat `pages`/`layout`.
+    spec = Sigma::CodeRep.metadata(spec).merge(Sigma::CodeRep.document(spec))
     lint_fail = false
     begin
       require_relative 'lib/layout_lint'
