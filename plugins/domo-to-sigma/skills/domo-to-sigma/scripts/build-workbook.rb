@@ -44,7 +44,14 @@ end
 def mref(display) "[Master/#{display}]" end
 
 $warnings = []
-def warn_card(card, msg) $warnings << { 'card' => card['title'] || card['id'], 'warning' => msg } end
+# `card_id` is additive (existing consumers read 'card'/'warning') and exists so
+# warnings.json is MACHINE-JOINABLE to workbook-spec tile ids, which follow
+# `el-<cardId>[-summary]`. build-parity-exclusions.rb derives parity exclusions
+# from recorded warnings, and joining on a human title would be ambiguous the
+# moment two cards share one.
+def warn_card(card, msg)
+  $warnings << { 'card' => card['title'] || card['id'], 'card_id' => card['id'].to_s, 'warning' => msg }
+end
 
 $companion_elements = [] # bead 08sf — Task 5 populates this
 $sub_masters = {}        # bead ziht — datasetId => sub-master element Hash

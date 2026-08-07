@@ -840,6 +840,19 @@ def run_live!(opts)
     # verify-parity.rb itself (--score-out -> parity-score.json), derives the
     # gate contract into parity-final.json, and refuses to emit a contract when
     # the plan silently omits chartable tiles.
+    # Generate parity-plan-exclusions.json FIRST — the finalizer's census consumes
+    # it, and #631 shipped the census with nothing writing the file it reads. The
+    # generator derives exclusions only from machine facts already in
+    # warnings.json (today: refused date windows, where Domo applies a window the
+    # Sigma tile lacks, so the two cannot agree by construction) and aborts rather
+    # than excluding a runaway share of the pool.
+    #
+    # A non-zero exit here is FATAL, not advisory: it means either the runaway
+    # guard tripped (fix the converter) or the artifact is unreadable — and
+    # continuing would hand the census a stale or absent exclusions file.
+    ok, code, _out = run_script!('build-parity-exclusions.rb', '--workdir', OUT)
+    fail_phase!('verify-parity', "build-parity-exclusions.rb exited #{code}") unless ok
+
     ok, code, _out = run_script!('phase6-parity-domo.rb',
                                   '--workdir', OUT,
                                   '--plan', opts[:parity_plan],
