@@ -280,3 +280,85 @@ build-the-oracle-first trap the audit correctly flagged for bead `2tkm`, one lay
 `parity-plan-exclusions.json` still has no generator — `phase6-parity-domo.rb` (#631) *enforces* it
 but nothing writes it yet. That is a small, offline, testable piece and the right next increment
 after step 6.
+
+---
+
+# Status — end of the 2026-08-06/07 push
+
+## Everything now on `main`
+
+`main` carries the full set the gold run needs, so **`integration/domo-gold-run-v2` is obsolete —
+drive runs from `main`.**
+
+| commit | What |
+|---|---|
+| `8f9a2c65` (#631) | Bead `2tkm` — parity finalizer + anti-inflation census |
+| `8df58fe8` (#633) | Re-vendored `sql.mjs` @ `0641a62` (the `DateDiff` fix) |
+| `05e7881a` (#613) | `put-layout` code-rep wrapper (6 plugins) |
+| `184c6e57` (#609) | `post-and-readback` code-rep wrapper |
+| `dd06b47b` (#639) | **Step 6** — card date-window restore |
+| #649 *(open)* | `parity-plan-exclusions.json` generator |
+
+Verified on `main`: both ledgers present at `scripts/lib/` (so the gate derives a real PR-14 verdict
+instead of the legacy uncapped line), the finalizer present, both wrappers present, converter at
+`0641a62`, domo `0.14.5`. Domo offline suite and both CI job equivalents green.
+
+**Telemetry: DECLINED.** Gate 10 is discharged at run time with
+`report-telemetry.py --declined` — a recorded consent decision, not a waiver, so it costs nothing
+against the budget.
+
+## Sizing, current
+
+| Step | Status |
+|---|---|
+| 1. `DateDiff` arity + operand order | **DONE** (mcp#122 + #633) — 9 of 15 error columns |
+| 2. `State` / `US Regions` 6 columns | open — needs ONE live `diagnose_sigma_save_error`; see below |
+| 3. Re-run hygiene / orphan cleanup | open (run-time) |
+| 4. `parity-final.json` contract | **DONE** (#631), domo-only, zero shared files |
+| 5. **Parity oracle** | **not started — the remaining critical path, 3–5 days** |
+| 6. `dateRangeFilter` restore | **DONE** (#639) — was a prerequisite, not a nicety |
+| 7. `limit` on non-table charts | open |
+| 8. Render + vision verdict | open |
+| 9. Telemetry consent | **DONE** — declined |
+| 10. Ledger rebase | **not work** — use `main` |
+| 11. Gate 4b registration | open, non-blocking |
+| — exclusions generator | **DONE** (#649) — #631 enforced the file; nothing wrote it |
+
+**Remaining: the oracle plus the small items, and the live re-runs. Gold is not reached.**
+
+## Two open unknowns — do not budget either as understood
+
+1. **The 6 `State` / `US Regions` `type=error` columns.** Still unexplained. Both convert to valid,
+   lint-clean Sigma (`converted:true`, `lintErrors:[]`), and two candidate mechanisms were actively
+   **disproved** (a dotted-identifier/infix-`IN` mangling — never occurs, backticks are normalised to
+   brackets before the converter; and the `0goi` literal corruption — source data). The offline signal
+   is exhausted. This needs the one live diagnostic the doc asked for.
+2. **The `ROLLING_PERIOD` boundary.** #639 emits `>= DateAdd(unit, -N, Today())`. If Domo's window is
+   N units **inclusive of today**, the correct constant is `-(N-1)`. One token
+   (`ROLLING_LOOKBACK_OFFSET`), pinned by a test — but **unconfirmed**. Check it against a card PNG
+   before any value-parity claim. Same silent class as the `DateDiff` operand order: a wrong window
+   compiles clean and every number is off.
+
+## What the last two PRs deliberately refuse to do
+
+Both #639 and #649 refuse rather than guess, because the failure mode here is silent:
+
+- **#639** refuses the 5 `INTERVAL_OFFSET` windows (Domo's boundary semantics for them aren't
+  documented in any source available here) and warns with the exact payload.
+- **#649** derives exclusions ONLY from machine facts already in `warnings.json`, carries the
+  originating warning as `evidence`, and **aborts** above 40% of the pool — telling the operator to
+  fix the converter rather than widen the exclusions. An exclusions generator that can excuse the
+  whole pool is the silent-inflation bug wearing a different hat.
+
+Measured on the real corpus: 65 chartable tiles, **2 excluded (3.1%)**. A full live run should land
+near 10 of 65 (~15%) — projected, not measured.
+
+## The honest read
+
+Two of the three things the audit called blocking are closed (`2tkm`, and `znvg`'s dominant half),
+and one it called non-blocking turned out to be a prerequisite and is now closed too (step 6). The
+gate can now *read* a parity result, the census can be *satisfied* honestly, and the tiles it will
+score are no longer guaranteed to diverge on their date windows.
+
+What is still true, and worth repeating: **none of this is evidence of parity.** No live run has
+executed since #623. The oracle does not exist. A gate run today would have nothing real to score.
