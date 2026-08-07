@@ -68,6 +68,7 @@ require_relative 'lib/threshold_halo'  # C2: threshold-halo (computed-boolean co
 require_relative 'lib/integer_dim'    # PR-18: integer-coded dimension decode-to-text routing
 require_relative 'lib/trellis_emit'   # shared native-trellis emitter (supported-kind gate + fallbacks)
 require_relative 'lib/metric_binding' # shared DM-metric binder ([Metrics/<name>] over inline re-derive)
+require_relative 'lib/tableau_dynamic_title'
 require_relative 'lib/kpi_card'       # shared KPI-chart emitter (comparative-KPI-ready)
 require_relative 'lib/kpi_comparison_detect' # Task 5: prior/target comparison-measure detector
 require_relative 'lib/action_ledger' # workbook-wide action id registry + validate/manifest
@@ -251,7 +252,9 @@ SIGMA_KIND = {
 # source labels them, not by internal sheet name.
 def tile_title(zone, fallback)
   t = zone && zone['display_title']
-  t && !t.to_s.strip.empty? ? t.to_s.strip : fallback
+  return fallback unless t && !t.to_s.strip.empty?
+
+  TableauDynamicTitle.translate(t.to_s.strip, zone['calculations'])
 end
 
 # ---- Tableau derivation → Sigma aggregation function name ----
