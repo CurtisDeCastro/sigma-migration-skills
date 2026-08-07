@@ -46,6 +46,72 @@ ok(File.exist?(File.join(FIXTURE, 'dm-spec.json')), 'sanity: fixture stages dm-s
 ok(File.exist?(File.join(FIXTURE, 'dm-ids.json')), 'sanity: fixture stages dm-ids.json (synthesized post-and-readback) for the ds-dim sub-master')
 ok(File.exist?(File.join(FIXTURE, 'beast-modes.json')), 'sanity: fixture stages beast-modes.json so migrate-domo.rb\'s convert-beast-modes phase is actually exercised, not SKIPped')
 
+# ---------------------------------------------------------------------------
+# bead B5 — render_target_page (pure logic, no I/O): migrate-domo.rb's top
+# level unconditionally OptionParser.parse!(ARGV)s + aborts without --out, so
+# it cannot be require_relative'd here like a normal library without either
+# faking ARGV (which would then run the FULL live-or-offline pipeline as a
+# require side effect — not a unit test) or restructuring the whole file
+# behind a $PROGRAM_NAME == __FILE__ guard (out of scope for this fix; see
+# build-workbook.rb for where this skill DOES use that pattern). Extract just
+# this one self-contained pure function's source and eval it in isolation —
+# no live call, no other migrate-domo.rb code executes.
+migrate_src = File.read(File.join(SCRIPTS, 'migrate-domo.rb'))
+render_target_page_src = migrate_src[/^def render_target_page\(wb_ids\)\n.*?\nend\n/m]
+ok(render_target_page_src, 'extracted render_target_page(wb_ids) source from migrate-domo.rb for isolated unit testing')
+if render_target_page_src
+  eval(render_target_page_src, TOPLEVEL_BINDING) # rubocop:disable Security/Eval — trusted, same-repo source, test-only
+
+  multi_page = { 'pages' => [{ 'id' => 'page-data', 'name' => 'Data' },
+                              { 'id' => 'page-overview', 'name' => 'Overview' },
+                              { 'id' => 'page-detail', 'name' => 'Detail' }] }
+  picked = render_target_page(multi_page)
+  eq(picked && picked['id'], 'page-overview',
+     "render_target_page skips the hidden 'page-data' page and picks the first visible one")
+
+  data_only = { 'pages' => [{ 'id' => 'page-data', 'name' => 'Data' }] }
+  ok(render_target_page(data_only).nil?,
+     'render_target_page returns nil when wb-ids.json has no non-Data page to render (honest — the ' \
+     'caller SKIPs the render phase instead of rendering a blank/placeholder page)')
+
+  ok(render_target_page({ 'pages' => [] }).nil?, 'render_target_page returns nil for an empty pages array')
+end
+
+# ---------------------------------------------------------------------------
+# bead B6 / B5 — static wiring regression guard for the LIVE-only code path.
+# run_live! shells out to real Domo/Sigma/Snowflake APIs, so it cannot be
+# exercised here (this test suite, like every offline suite in this skill,
+# never drives a live run) — this is NOT a substitute for a real live run,
+# just a guard against the exact regression each fix closes (--score-out
+# silently dropped again, or the render/record calls silently removed)
+# slipping back in unnoticed between now and the next live validation.
+#
+# CORRECTED 2026-08-05 (bead beads-sigma-2tkm). B6's original assertion pinned
+# `--score-out File.join(OUT, 'parity-final.json')` — which was itself the bug.
+# parity-final.json is the GATE'S contract file (assert-phase6-ran.rb reads
+# charts_total/charts_pass/status); verify-parity.rb --score-out writes
+# tiles_total/tiles_pass/tiles_fail. Aiming one at the other meant a flawless
+# 65/65 parity run landed a tiles_*-shaped document where the gate expected
+# charts_*, so the gate read charts_total = 0 and exited 2. The two documents are
+# now distinct, with phase6-parity-domo.rb finalizing score -> contract.
+ok(migrate_src.include?("'phase6-parity-domo.rb'"),
+   'bead 2tkm: run_live! finalizes parity through phase6-parity-domo.rb (the gate-contract writer)')
+ok(!migrate_src.include?("'--score-out', File.join(OUT, 'parity-final.json')"),
+   'bead 2tkm: verify-parity.rb --score-out no longer overwrites the gate contract file')
+ok(migrate_src.include?("'--score-out', File.join(OUT, 'parity-score.json')") ||
+   migrate_src.include?('phase6-parity-domo.rb'),
+   'bead 2tkm: the tiles_* score document lands in parity-score.json, not parity-final.json')
+
+render_call_at  = migrate_src.index('phase_render_visual!(opts, workbook_id, wb_ids)')
+parity_hdr_at   = migrate_src.index("hr('verify-parity')")
+record_call_at  = migrate_src.index('phase_record_visual_check!(opts)')
+ok([render_call_at, parity_hdr_at, record_call_at].all?,
+   'bead B5: run_live! calls phase_render_visual! and phase_record_visual_check! at all')
+ok(render_call_at && parity_hdr_at && record_call_at &&
+   render_call_at < parity_hdr_at && parity_hdr_at < record_call_at,
+   'bead B5: run_live! renders BEFORE verify-parity (gate 8 render) and records the verdict AFTER it ' \
+   '(record-visual-check.rb hard-requires parity-final.json to already exist)')
+
 # Track E: the fixture's discovery/beast-modes.json (see test/fixtures/domo-estate/
 # beast-modes.json) drives migrate-domo.rb's convert-beast-modes phase through its
 # real --convert step, which shells out to `node` against the vendored
@@ -77,11 +143,22 @@ Dir.mktmpdir('migrate-domo-e2e') do |out_dir|
   run_state = JSON.parse(File.read(run_state_path))
   required_phases = %w[discover capture-visuals convert-beast-modes build-workbook
                        build-workbook-spec post-and-readback build-domo-layout
-                       build-dashboard-layout put-layout layout-2d-flag
-                       verify-parity assert-phase6-ran]
+                       build-dashboard-layout put-layout layout-2d-flag render-visual
+                       verify-parity record-visual-check assert-phase6-ran]
   missing = required_phases.reject { |p| run_state['phases'].key?(p) }
   ok(missing.empty?, "run-state.json accounts for every phase in the chain (missing: #{missing.join(', ')})")
   eq(run_state['mode'], 'offline', 'run-state.json records mode=offline')
+
+  # ---- bead B5: the render + verdict-recording phases are never silently ---
+  # omitted offline (no live workbook to render / no parity-final.json to
+  # record a verdict onto) — they must show up as an honest, named SKIP, per
+  # the --offline header note's "any render/visual gate" promise.
+  %w[render-visual record-visual-check].each do |p|
+    entry = run_state['phases'][p]
+    eq(entry && entry['status'], 'skip', "run-state.json stamps '#{p}' as skip in --offline mode (#{entry.inspect})")
+    ok(entry && !entry['note'].to_s.strip.empty?,
+       "run-state.json's '#{p}' skip carries a non-empty note explaining WHY (never a silent omission) — #{entry.inspect}")
+  end
 
   # ---- Track E: convert-beast-modes is actually exercised now that the -----
   # fixture carries discovery/beast-modes.json (previously this phase was
@@ -117,6 +194,12 @@ Dir.mktmpdir('migrate-domo-e2e') do |out_dir|
 
     ok(formulas.all? { |f| Array(f['lintErrors']).empty? },
        'none of the 3 fixture Beast Modes trip a lint ERROR')
+    # Blocker 1 (2026-08-05 batch-verify): a residual infix LIKE is downgraded
+    # from lintError to lintWarning (see convert-beast-modes.rb's lint_formula)
+    # so migrate-domo.rb's --offline run above completes instead of aborting
+    # at convert-beast-modes — but the finding must still surface, not vanish.
+    ok(us_customers && Array(us_customers['lintWarnings']).any? { |w| w.include?('LIKE') },
+       'US Customers still carries a visible lintWarning naming the residual LIKE — downgraded, not silenced')
   end
 
   # ---- (a) layout-2d.flag == 'grid' (NOT 'stack') ------------------------

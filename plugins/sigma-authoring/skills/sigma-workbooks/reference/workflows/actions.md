@@ -183,7 +183,7 @@ listed cause **first** before assuming the element kind itself is unsupported.
 
 ## Cross-links
 
-- `shared/lib/actions.rb` / `actions.py` — `Actions.button(id:, text:, effects:,
+- `scripts/lib/actions.rb` — `Actions.button(id:, text:, effects:,
   appearance:)`, `Actions.input_table_empty(id:, connection_id:, columns:,
   name:)`, `Actions.input_table_linked(id:, from:, connection_id:, columns:,
   name:)`, and the three effect builders `Actions.insert_rows_effect(table:,

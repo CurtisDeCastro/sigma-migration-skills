@@ -19,9 +19,10 @@
 #          Sigma disagree on which int means which weekday) and the
 #          CEILING/FLOOR-are-aggregates trap, flag window/LOD Beast Modes) —
 #          see refs/beast-mode-to-sigma.md.
-#   POST — Sigma-specific lint of the returned formula (leftover IN(, And()/Or()/
-#          Not() function-call forms that silently null, window-fn workbook-master
-#          limits) — see refs/beast-mode-to-sigma.md + feedback_sigma_window_functions.
+#   POST — Sigma-specific lint of the returned formula (leftover infix IN(/LIKE,
+#          And()/Or()/Not() function-call forms that silently null, window-fn
+#          workbook-master limits) — see refs/beast-mode-to-sigma.md +
+#          feedback_sigma_window_functions.
 #
 # Three-step flow (SKILL.md's Phase 2 runs all three; no agent/MCP call in the
 # middle step unless the exit-10 GATE fires):
@@ -265,6 +266,18 @@ def contains_raw_infix_in?(f)
   false
 end
 
+# Strip out quoted string literals and [Column Name] references so a
+# residual-SQL-keyword scan never mistakes the CONTENTS of a string or an
+# identifier for the keyword itself (e.g. a pattern literal "united states"
+# or a column named [Like Button Clicks]). Same masking the vendored
+# converter's own hasResidualInfixOperator/hasResidualCaseKeyword do
+# (converter/sql.mjs) — reproduced independently here because lint_formula
+# runs on the FINAL sigmaFormula, downstream of that converter, not on its
+# internals.
+def mask_strings_and_brackets(f)
+  f.to_s.gsub(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\[[^\]]*\]/, ' ')
+end
+
 # Lint a translated Sigma formula for the traps that ship silently-broken output.
 # Returns [errors, warnings].
 def lint_formula(sigma, klass = nil)
@@ -291,6 +304,42 @@ def lint_formula(sigma, klass = nil)
   # and actively wrong to keep.)
   if contains_raw_infix_in?(f)
     errors << "Contains a raw SQL infix IN (...) — Sigma has no infix IN/IsIn operator; expand to an OR-chain ([c]=a or [c]=b), or rewrite as Sigma's own In([c], a, b) function, or it silently blanks the column (feedback_sigma_formula_isin)."
+  end
+
+  # A raw SQL infix `x LIKE 'pattern'` (or `NOT LIKE`) survived translation —
+  # Sigma has no LIKE operator at all (unlike IN, there is no Sigma FUNCTION
+  # form named Like(...) to also rule out — LIKE is always a bare infix SQL
+  # keyword), and it will fail to evaluate rather than silently blank. Checked
+  # as a WHOLE-WORD match on the formula with quoted strings and [bracketed]
+  # identifiers masked out first (mask_strings_and_brackets, above) — not a
+  # bare substring test. A bare /like/i substring test is exactly the
+  # false-positive class this file has already been burned by twice on the
+  # IN( rule above (see raw_infix_in_position?'s and the removed Contains(
+  # guard's history comments): it would misfire on a pattern literal that
+  # itself contains the word ("...LIKE 'i like turtles'" — masked away here)
+  # or a column reference that happens to contain "Like" as a standalone word
+  # ([Like Button Clicks] — also masked away), even though Sigma has entirely
+  # legitimate string functions (Contains/StartsWith/EndsWith) that a LIKE
+  # clause should have been translated to instead.
+  #
+  # WARNING, not error (2026-08-05 batch-verify blocker 1): a raw infix IN(
+  # above is a hard error because Sigma silently BLANKS the column — the
+  # wrong-but-quiet failure mode this file's error tier exists to catch
+  # loudly before it ships. A residual LIKE is a DIFFERENT failure shape: it
+  # fails to evaluate (loud, visible in Sigma's own UI), and it is exactly
+  # the shape `--convert` already flags via `converted:false` (see
+  # resolve_entry) — a Beast Mode has never had a "missing" tier separate
+  # from converted:false to route this through cleanly. Making it a hard
+  # lintError with no override path meant this check aborted the very cold
+  # run it was added to protect (migrate-domo.rb's convert-beast-modes phase
+  # treats any --lint exit 1 as fatal, with no waiver — measured on the real
+  # "Non-US Leads" Beast Mode). A warning still lands in the emitted entry's
+  # `lintWarnings` (formulas.json) AND gets a loud stderr summary at --lint
+  # time (see the CLI section below) — never silenced — but does not abort
+  # the run; discovery/formula-overrides.json remains the fix path for the
+  # underlying formula.
+  if mask_strings_and_brackets(f) =~ /\bLIKE\b/i
+    warnings << "Contains a raw SQL infix LIKE '...' — Sigma has no LIKE operator; rewrite using Contains([col], \"pattern\"), StartsWith([col], \"pattern\"), or EndsWith([col], \"pattern\"), or it will fail to evaluate. Non-fatal (see discovery/formula-overrides.json), but review before shipping."
   end
 
   # And()/Or()/Not() as FUNCTION CALLS silently produce null rows — must be infix.
@@ -570,6 +619,18 @@ elsif opts[:lint]
   unless bad.empty?
     warn "\n  ⚠ #{bad.size} formula(s) have lint ERRORS — fix before building:"
     bad.each { |e| warn "    - #{e['name'] || e['id']}: #{e['lintErrors'].join('; ')}" }
+  end
+  # Blocker 1 (2026-08-05 batch-verify): lint_formula's per-entry `lintWarnings`
+  # (e.g. residual infix LIKE, And()/Or()/Not() function-call form, window
+  # functions) already ride along in formulas.json, but until now nothing
+  # printed a loud stderr summary of them the way the ERRORS block above
+  # does — a real finding (residual LIKE) could sit in the artifact
+  # unnoticed. Non-fatal (does not affect the exit code below), but never
+  # silent.
+  cautioned = final.select { |e| !Array(e['lintWarnings']).empty? }
+  unless cautioned.empty?
+    warn "\n  ⚠ #{cautioned.size} formula(s) have lint WARNINGS — non-fatal, review before shipping:"
+    cautioned.each { |e| warn "    - #{e['name'] || e['id']}: #{Array(e['lintWarnings']).join('; ')}" }
   end
   unless unresolved.empty?
     warn "\n  ⚠ #{unresolved.size} Beast Mode(s) still lack a sigmaFormula: #{unresolved.join(', ')}"

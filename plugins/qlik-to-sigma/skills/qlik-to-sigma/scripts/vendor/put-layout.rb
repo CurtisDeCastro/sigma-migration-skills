@@ -20,6 +20,8 @@ require 'json'
 require 'yaml'
 require 'date'
 require 'optparse'
+$LOAD_PATH.unshift File.expand_path('lib', __dir__)
+require 'code_rep'
 
 opts = {}
 OptionParser.new do |p|
@@ -46,7 +48,12 @@ end
 xml = File.read(opts[:layout])
 abort "FATAL: empty elementId in layout XML" if xml.match?(/elementId=""/)
 
-spec = JSON.parse(http(:get, "/v2/workbooks/#{opts[:wb]}/spec").body)
+raw_spec = JSON.parse(http(:get, "/v2/workbooks/#{opts[:wb]}/spec").body)
+# Workbook code-rep nests pages/layout/schemaVersion/kind under a top-level
+# `document` key (live since 2026-08) and REJECTS the old flat body on PUT
+# with a 400 — unwrap the GET before any spec['pages'] access below; this
+# endpoint is workbook-only (data-model code-rep is confirmed unchanged).
+spec = Sigma::CodeRep.document(raw_spec)
 spec['pages'].each { |p| p.delete('layout') }
 spec['layout'] = xml
 
@@ -71,9 +78,12 @@ if File.exist?(elements_path)
   end
   puts "injected #{injected} container/header element(s) from #{elements_path}"
 end
-%w[workbookId url ownerId createdBy updatedBy createdAt updatedAt latestDocumentVersion].each { |k| spec.delete(k) }
-
-resp = http(:put, "/v2/workbooks/#{opts[:wb]}/spec", JSON.pretty_generate(spec))
+# Read-only metadata (workbookId, url, ownerId, createdBy, updatedBy,
+# createdAt, updatedAt, latestDocumentVersion) never reaches `spec` in the
+# first place now — Sigma::CodeRep.document() above already unwraps to just
+# the document fields (schemaVersion/pages/kind/layout), so there is nothing
+# left here to strip before the PUT.
+resp = http(:put, "/v2/workbooks/#{opts[:wb]}/spec", JSON.pretty_generate(Sigma::CodeRep.wrap(spec)))
 parsed = YAML.safe_load(resp.body, permitted_classes: [Date, Time])
 puts parsed['workbookId'] ? "PUT ok: workbookId=#{parsed['workbookId']}" : "ERROR: #{parsed.inspect}"
 exit(parsed['workbookId'] ? 0 : 1)
