@@ -741,7 +741,7 @@ def extract(pbir_dir):
         except Exception:
             report_json = {}
     return {"source": "pbir", "pbir_dir": pbir_dir,
-            # style fidelity: report base-theme name -> Sigma themeOverrides palette
+            # style fidelity: report base-theme name -> Sigma settings.theme.overrides palette
             "theme": _report_theme(defn),
             "filters": _filter_signals(report_json, "report"),
             "pages": out_pages}

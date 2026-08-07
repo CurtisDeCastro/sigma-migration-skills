@@ -2,7 +2,7 @@
 
 A Sigma workbook can carry a **spec-authorable AI agent** that end users chat with
 inside the workbook. It is easy to miss: it is **not a page element** — it's a
-**workbook-top-level `agents:[]` array**, a sibling of `pages`/`layout`/`themeName`.
+**workbook-top-level `agents:[]` array**, a sibling of `pages`/`layout`/`settings.theme.name`.
 An element-kind scan of `pages[].elements[]` alone will never find it and can wrongly
 conclude "not authorable." The agent is *surfaced* on a page via a small `chat`
 element that just references the agent's id.

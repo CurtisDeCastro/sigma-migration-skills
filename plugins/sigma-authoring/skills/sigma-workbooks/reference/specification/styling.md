@@ -51,7 +51,7 @@ never an override of a user's stated branding or a migration's source fidelity.*
 
 ---
 
-## Workbook theme (2026-06-18 release; `themeOverrides` schema documented 2026-06-25)
+## Workbook theme (2026-06-18 release; `settings.theme.overrides` schema documented 2026-06-25)
 
 A workbook carries a **top-level theme**, alongside `pages` and `layout`:
 
@@ -60,23 +60,31 @@ name: My Workbook
 schemaVersion: 1
 pages: [ ... ]
 layout: ...
-themeName: Dark          # built-in: Light | Dark | Surface  — OR an org theme UUID
-themeOverrides:          # optional — colors / fonts / layout style / table defaults
-  colors:
-    text: "#FFFFFF"
-    highlight: "#1E88E5"
-    surface: "#101826"
+settings:                    # document-level settings (theme + navigation)
+  theme:
+    name: Dark               # built-in: Light | Dark | Surface  — OR an org theme UUID
+    overrides:               # optional — colors / fonts / layout style / table defaults
+      colors:
+        text: "#FFFFFF"
+        highlight: "#1E88E5"
+        surface: "#101826"
 ```
 
-The **full `themeOverrides` schema is now in the public OpenAPI** (`.../spec` POST/PUT request body and GET response — added 2026-06-25; earlier release notes shipped the feature before the spec documented it). The OpenAPI is the source of truth for every field; the list below is the verified summary.
+> The theme moved. It was once a top-level `themeName` + `themeOverrides` pair;
+> both were removed from the API and are now `settings.theme.name` and
+> `settings.theme.overrides` — inside `document`, alongside `pages`/`layout`.
+> The individual override keys below are unchanged. A spec that still writes the
+> old pair loses its whole theme silently (no error).
 
-### `themeName`
+The **full `settings.theme.overrides` schema is now in the public OpenAPI** (`.../spec` POST/PUT request body and GET response — added 2026-06-25; earlier release notes shipped the feature before the spec documented it). The OpenAPI is the source of truth for every field; the list below is the verified summary.
+
+### `settings.theme.name`
 
 - Accepts a **built-in** name (`Light` / `Dark` / `Surface`) or an **org theme id** (a UUID). All round-trip. Only the **format** is checked, not existence: a malformed value 400s, but a well-formed but nonexistent UUID is accepted as-is and renders broken (like a bad `pluginId`) — so a clean POST is not proof the theme exists.
 - **There is no API to discover theme names.** Built-ins are the three above; an org theme id can only be learned by reading a workbook spec that already uses it (admin Branding Settings shows names, not ids). So the theme id has to come from somewhere external — an agent cannot enumerate them from a single call.
-- **Use the per-org theme registry instead of asking blind.** `harvest-theme-registry.py` (in `sigma-migration-skills/shared/scripts/`) scans an org's workbook specs once and writes `~/.sigma-migration/theme-registry.yaml`, keyed by API host, with each `themeName` and how many workbooks use it. Read it to suggest the org's themes ranked by frequency — **the most-used org-UUID is almost always the org default.** If the registry is missing or stale, run the harvester (a full scan is ~20–40s and persists), then fall back to asking the user only if no org themes are found. Singletons are often test/transient junk — prefer the high-count entries.
+- **Use the per-org theme registry instead of asking blind.** `harvest-theme-registry.py` (in `sigma-migration-skills/shared/scripts/`) scans an org's workbook specs once and writes `~/.sigma-migration/theme-registry.yaml`, keyed by API host, with each `settings.theme.name` and how many workbooks use it. Read it to suggest the org's themes ranked by frequency — **the most-used org-UUID is almost always the org default.** If the registry is missing or stale, run the harvester (a full scan is ~20–40s and persists), then fall back to asking the user only if no org themes are found. Singletons are often test/transient junk — prefer the high-count entries.
 
-### `themeOverrides` — one-off tweaks stacked on the base theme
+### `settings.theme.overrides` — one-off tweaks stacked on the base theme
 
 Every field below **round-trips and renders** — verified live 2026-06-26 (POST → GET round-trip with 0 dropped fields, + PNG export showing the override applied; a 14-key override on a `Light` base produced a dark canvas, pill cards, cyan headers, row banding, and a monospace data font).
 
@@ -101,7 +109,7 @@ Every field below **round-trips and renders** — verified live 2026-06-26 (POST
 
 **Gotchas:**
 - The server **lowercases hex** on save (`#0F172A` → `#0f172a`) — cosmetic, not a drop; don't treat it as a failed round-trip.
-- `themeOverrides` is the spec path to **donut/pie slice colors** — set `categoricalScheme` here (the per-element `color.scheme` is still silently dropped on donut/pie — see Recipe 5). This supersedes the old "set the theme in the UI" workaround.
+- `settings.theme.overrides` is the spec path to **donut/pie slice colors** — set `categoricalScheme` here (the per-element `color.scheme` is still silently dropped on donut/pie — see Recipe 5). This supersedes the old "set the theme in the UI" workaround.
 - `titleFont` sets every element's title **by default**, but a per-element `name:{fontSize,color}` (live-verified 2026-07-28 — see *Things that are NOT designable via spec* below, now corrected) **wins over** `titleFont` for that one element when both are set. Use `titleFont` for a workbook-wide title style and per-element `name` only where one title needs to stand out.
 - Theme vs. the recipes below: a theme is the global skin (selected, org-managed). The recipes here style individual elements from spec fields and **stack on top of** whatever theme is set. For a migration, prefer the source dashboard's look; reach for a theme only when the user asks to apply one.
 
@@ -293,7 +301,7 @@ For bar / line / area / combo charts, pin slice colors to the vetted palette:
 
 `scheme` is positional — pin colors to category sort order, not to category names. Sort by the value descending to get "biggest bar = primary blue, smaller = warning amber/red."
 
-> **Donut and pie do NOT accept `scheme`.** The field is silently stripped on those chart kinds. To customize donut/pie slice colors from spec, set `themeOverrides.categoricalScheme` at the workbook level (see *Workbook theme* above) — that path is now spec-authorable and verified. See `charts.md` donut section for the verified gotchas.
+> **Donut and pie do NOT accept `scheme`.** The field is silently stripped on those chart kinds. To customize donut/pie slice colors from spec, set `settings.theme.overrides.categoricalScheme` at the workbook level (see *Workbook theme* above) — that path is now spec-authorable and verified. See `charts.md` donut section for the verified gotchas.
 
 ---
 
@@ -555,8 +563,9 @@ migration's source fidelity or a user's own branding always overrides this.
 
 - Single-series (default): `{ "color": { "by": "single", "value": theme[:categorical][0] } }` —
   merge onto a bar/line/area/combo element (Recipe 5's single-hue case).
-- Categorical (`categorical: true`): `{ "themeOverrides": { "categoricalScheme": theme[:categorical] } }`
-  — merge at the **workbook** level (a sibling of `pages`/`layout`), not per-element. This is the
+- Categorical (`categorical: true`): `{ "settings": { "theme": { "overrides": { "categoricalScheme": theme[:categorical] } } } }`
+  — deep-merge at the **workbook** level (inside `document`, a sibling of `pages`/`layout`),
+  not per-element. Deep-merge, not shallow: a shallow merge of `settings` clobbers `navigation`. This is the
   verified path for donut/pie slice colors too (per-element `color.scheme` is still silently
   dropped there — see Recipe 5 / *Workbook theme* above).
 
@@ -724,10 +733,10 @@ Don't waste a round-trip trying to set these — the spec API silently drops the
 
 - **Chart tooltip customization** (spec-findings #10)
 - **Trellis / small-multiples layout** (spec-findings #11)
-- **Donut / pie slice colors** (spec-findings #22, per-element `color.scheme`; use workbook-level `themeOverrides.categoricalScheme` instead — see *Workbook theme* above)
+- **Donut / pie slice colors** (spec-findings #22, per-element `color.scheme`; use workbook-level `settings.theme.overrides.categoricalScheme` instead — see *Workbook theme* above)
 - ~~**KPI title color or "hide title" toggle** — `name` always renders as a black title~~ — **RESOLVED, live-verified 2026-07-28**: `name` on a `kpi-chart` (or any element) *is* colorable — `{ "name": { "text": "Revenue", "color": "#2563EB" } }` survives readback and renders the title in that color. This supersedes the "`name` always renders as a black title" claim this doc carried until now — for *this exact shape only*: there is still no `showTitle: false` / "hide title" toggle, so the `name: ' '` (single-space) workaround in Recipe 2 above still stands for suppressing a duplicate title.
-- ~~**Element title font size / font family** — the `name` field has no `style` sibling.~~ — **PARTIALLY RESOLVED, live-verified 2026-07-28**: a per-element `name` object also takes `fontSize` — `{ "name": { "text": "Category Detail", "fontSize": 22, "color": "#DC2626" } }` on a non-KPI element (e.g. a table) survives readback and renders both a visibly larger size and a distinct color, **overriding the workbook-wide `titleFont`** (see *Workbook theme* above) for that one element when both are set. This supersedes the "the `name` field has no `style` sibling" claim this doc carried until now. Font *family* per title remains untested — only `fontSize`/`color` were probed; `themeOverrides.fonts.textFont` (*Workbook theme* above) is still the only verified lever for text font family, and it's global, not per-title.
-- ~~**Workbook-level palette / theme** via spec~~ — **RESOLVED**: now spec-authorable via top-level `themeName` + `themeOverrides` (see *Workbook theme* above).
+- ~~**Element title font size / font family** — the `name` field has no `style` sibling.~~ — **PARTIALLY RESOLVED, live-verified 2026-07-28**: a per-element `name` object also takes `fontSize` — `{ "name": { "text": "Category Detail", "fontSize": 22, "color": "#DC2626" } }` on a non-KPI element (e.g. a table) survives readback and renders both a visibly larger size and a distinct color, **overriding the workbook-wide `titleFont`** (see *Workbook theme* above) for that one element when both are set. This supersedes the "the `name` field has no `style` sibling" claim this doc carried until now. Font *family* per title remains untested — only `fontSize`/`color` were probed; `settings.theme.overrides.fonts.textFont` (*Workbook theme* above) is still the only verified lever for text font family, and it's global, not per-title.
+- ~~**Workbook-level palette / theme** via spec~~ — **RESOLVED**: now spec-authorable via `settings.theme.name` + `settings.theme.overrides` (see *Workbook theme* above).
 - **Chart `tooltip` / `trellis*` fields** (UI-only)
 
 If a customer needs slice color branding on donut/pie, set the workbook theme in the UI after the spec is posted.
