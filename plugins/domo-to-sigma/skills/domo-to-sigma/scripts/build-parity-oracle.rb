@@ -137,13 +137,40 @@ end
 # EXACTLY `YYYY-Mon`, and only into the same month's ISO form. A value that means
 # something different is left alone, so a genuine dimension difference still
 # fails. Anything not matching that one pattern is untouched.
+#
+# THREE grains are handled, each VERIFIED against the live corpus rather than
+# assumed, because a wrong rule here would silently fail a tile forever:
+#
+#   month    "2026-Apr"      -> "2026-04"     (Unsubscribes, Bounces Trend)
+#   quarter  "2025-Q3"       -> "2025-07"     first month of the quarter
+#                                             (Projected Sales; 3/3 samples)
+#   week     "Week-28 2026"  -> "2026-07-05"  SUNDAY-anchored week start, where
+#                                             week 1 begins on the Sunday on or
+#                                             before Jan 1 (Click-Through Rate,
+#                                             Traffic Trend; 4/4 samples)
+#
+# THE WEEK RULE IS NOT ISO. ISO calls 2026-07-05 week 27; Domo calls it week 28.
+# Using isocalendar() would have been off by one on every week-grained tile and
+# looked like a data difference. Checked, not guessed.
 def canonicalise_dim(rows)
   return [rows, 0] unless rows.is_a?(Array)
   n = 0
   out = rows.map do |r|
     a = Array(r).dup
-    if (m = /\A(\d{4})-([A-Z][a-z]{2})\z/.match(a.first.to_s)) && MONTH_ABBR[m[2]]
+    s = a.first.to_s
+    if (m = /\A(\d{4})-([A-Z][a-z]{2})\z/.match(s)) && MONTH_ABBR[m[2]]
       a[0] = format('%s-%02d', m[1], MONTH_ABBR[m[2]])
+      n += 1
+    elsif (m = /\A(\d{4})-Q([1-4])\z/.match(s))
+      a[0] = format('%s-%02d', m[1], ((m[2].to_i - 1) * 3) + 1)
+      n += 1
+    elsif (m = /\AWeek-(\d{1,2})\s+(\d{4})\z/.match(s))
+      wk = m[1].to_i
+      yr = m[2].to_i
+      jan1 = Date.new(yr, 1, 1)
+      # Sunday on or before Jan 1 == start of Domo's week 1.
+      wk1 = jan1 - ((jan1.wday) % 7)
+      a[0] = (wk1 + ((wk - 1) * 7)).to_s
       n += 1
     end
     a

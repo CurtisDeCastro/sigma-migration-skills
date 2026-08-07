@@ -1004,8 +1004,28 @@ DOMO_DATE_INTERVAL_UNIT = {
   'QUARTER' => 'quarter', 'YEAR' => 'year', 'HOUR' => 'hour', 'MINUTE' => 'minute'
 }.freeze
 
-# 0 = "N units back from today"; set to 1 for "N units inclusive of today".
-ROLLING_LOOKBACK_OFFSET = 0
+# 0 = "N units back from today"; 1 = "N units INCLUSIVE of today".
+#
+# RESOLVED TO 1 on 2026-08-07, against the evidence the comment above asked for —
+# and stronger than the suggested card PNG: Domo's own rendered bucket counts from
+# GET /api/content/v1/cards/{id}/data, on the live 36-card page.
+#
+#   Visitors          ROLLING_PERIOD DAY   count=30 -> Domo renders 30 daily
+#                     buckets, 2026-07-09..08-07 (today). Offset 0 emitted
+#                     >= Today()-30, i.e. 07-08..08-07 = 31 buckets.
+#   Page View Growth  ROLLING_PERIOD DAY   count=30 -> same one-bucket overhang
+#                     (extra 2026-07-08).
+#   Abuse Reports     ROLLING_PERIOD MONTH count=6  -> Domo renders 6 month
+#                     buckets; offset 0 emitted >= Today()-6 months = 7 buckets
+#                     (extra 2026-02).
+#
+# So Domo's `count` INCLUDES the current period, and offset 0 made every rolling
+# window exactly one period too wide. Precisely the silent class the comment
+# warned about: the filter compiles, the chart looks right, and every windowed
+# total is inflated by one period's data. Measured on gate 1 it failed 5 chart
+# tiles and their 5 companion KPIs, with ratios that are exactly the extra
+# period's contribution (x1.0365, x1.0249, x1.1564, x1.1023, x1.1010).
+ROLLING_LOOKBACK_OFFSET = 1
 
 def apply_card_date_window!(card, el)
   return el if el.nil?

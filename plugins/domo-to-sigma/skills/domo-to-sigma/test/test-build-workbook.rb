@@ -809,7 +809,8 @@ eq(dfs.first['values'], ['in'], 'includes only the in-window sentinel')
 wc = Array(win['columns']).find { |c| c['id'] == dfs.first['columnId'] }
 ok(!wc.nil?, 'the filter targets a column the element actually has')
 eq(wc['hidden'], true, 'the window column is HIDDEN — the source card never rendered it')
-ok(wc['formula'].include?('DateAdd("day", -14,'),
+# count=14 INCLUSIVE of today -> a 13-unit lookback (ROLLING_LOOKBACK_OFFSET=1).
+ok(wc['formula'].include?('DateAdd("day", -13,'),
    "predicate uses DateAdd(\"day\", -14, ...) — got #{wc && wc['formula']}")
 ok(wc['formula'].include?('Today()'), 'predicate is anchored on Today()')
 
@@ -828,7 +829,11 @@ puts "== step 6: unit mapping covers every interval the corpus actually uses =="
   c = Array(e['columns']).find { |x| x['id'].to_s.start_with?('f-datewin') }
   # NB: a %(...) literal would balance the nested paren and silently append ")"
   # to the needle — use an explicit escaped string.
-  needle = "DateAdd(\"#{sigma}\", -3,"
+  # count=3 INCLUSIVE of today -> a 2-unit lookback (ROLLING_LOOKBACK_OFFSET=1).
+  # Resolved 2026-08-07 from Domo's own rendered bucket counts: a count=30 DAY
+  # window renders 30 daily buckets and a count=6 MONTH window renders 6, so
+  # emitting -count made every rolling window one period too wide.
+  needle = "DateAdd(\"#{sigma}\", -2,"
   ok(c && c['formula'].include?(needle),
      "#{domo} -> \"#{sigma}\" (got #{c && c['formula']})")
 end
