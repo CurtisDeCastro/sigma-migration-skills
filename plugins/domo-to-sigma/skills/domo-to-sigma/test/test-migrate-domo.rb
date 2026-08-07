@@ -113,6 +113,25 @@ ok(migrate_src.include?("'--score-out', File.join(OUT, 'parity-score.json')") ||
    'bead 2tkm: the tiles_* score document lands in parity-score.json, not parity-final.json')
 
 # ---------------------------------------------------------------------------
+# Coverage census wiring. coverage.json is the ONLY path by which a dropped Domo
+# card reaches the degradation ledger (the other scope-cut source,
+# parity-final.json's tile_census, is reserved for tableau's zone shape and domo
+# must never publish there — memory gate5-tile-census-key-reserved). GREEN
+# requires an EMPTY ledger, so without this call a run that silently dropped
+# cards could still be declared GREEN.
+ok(migrate_src.include?("'build-coverage-census.rb'"),
+   'coverage: run_live! emits coverage.json so a dropped card can reach the degradation ledger')
+# Search for the assert header that FOLLOWS the census, not the first in the
+# file: run_offline! emits its own hr('assert-phase6-ran') earlier, so a bare
+# .index compares against the offline occurrence and this ordering check fails
+# on correct code. (Made this exact mistake on the oracle ordering guard below
+# too — both hr() titles appear twice.)
+cov_at = migrate_src.index("hr('coverage-census')")
+assert_at = cov_at && migrate_src.index("hr('assert-phase6-ran')", cov_at)
+ok(cov_at && assert_at && cov_at < assert_at,
+   'coverage: the census runs BEFORE assert-phase6-ran reads the ledger')
+
+# ---------------------------------------------------------------------------
 # Parity oracle wiring (gate 1). Same static-guard caveat as above: run_live!
 # cannot be exercised offline, so these pin the WIRING, not the behaviour.
 #

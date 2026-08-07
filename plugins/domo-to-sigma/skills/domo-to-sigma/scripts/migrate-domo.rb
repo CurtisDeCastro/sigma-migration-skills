@@ -825,6 +825,38 @@ def run_live!(opts)
   phase_write_2d_flag!
   phase_render_visual!(opts, workbook_id, wb_ids)
 
+  # ---- coverage census ----------------------------------------------------
+  # Emits coverage.json: which source cards produced NO Sigma element.
+  #
+  # This is the ONLY route by which a dropped Domo card can reach the degradation
+  # ledger. DegradationLedger.scope_cuts derives scope-cuts from just two places
+  # — coverage.json, and parity-final.json's `tile_census` — and domo can never
+  # fill the second, because `tile_census` is reserved for tableau's ZONE shape
+  # (publishing anything else there turns gate 5's honest SKIP into a vacuous
+  # "0 zones, 0 unmatched"; caught in review on #631, hence `parity_tile_census`).
+  #
+  # Until now domo emitted no coverage.json at all, so a card that never became
+  # an element was invisible to the ledger — and since GREEN requires an EMPTY
+  # ledger, a run that silently dropped cards could still be declared GREEN.
+  # phase6-parity-domo.rb's census does not cover this: its denominator is
+  # elements in workbook-spec.json, so a card missing from the spec entirely is
+  # missing from the census too.
+  #
+  # Verified by planting a drop: removing one card's elements yields 35/36, one
+  # scope-cut, and a verdict of PARTIAL where an empty ledger gives GREEN.
+  hr('coverage-census')
+  ok_cov, code_cov, _cov = run_script!('build-coverage-census.rb', '--workdir', OUT)
+  if ok_cov
+    done_phase!('coverage-census')
+  else
+    # Not fatal — but say plainly what was lost, because the ledger will now be
+    # silent about dropped cards rather than empty-because-clean.
+    skip_phase!('coverage-census',
+                "build-coverage-census.rb exited #{code_cov} — no coverage.json, so a dropped " \
+                'card cannot reach the degradation ledger; do not read a GREEN verdict as ' \
+                'evidence that every card was migrated')
+  end
+
   # ---- parity oracle (gate 1) ---------------------------------------------
   # DEFAULT-ON, same stance as gate 7b's --require-control-flip above, and for a
   # blunter reason: WITHOUT A PLAN THIS RUN CANNOT REACH GOLD. With no
