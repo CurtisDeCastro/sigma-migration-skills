@@ -243,7 +243,7 @@ module StyleNormalize
   def normalize_scheme_defaults!(spec, el, changes)
     cfs = el['conditionalFormats']
     return unless cfs.is_a?(Array)
-    theme = spec['themeOverrides'].is_a?(Hash) ? spec['themeOverrides']['categoricalScheme'] : nil
+    theme = spec.dig('settings', 'theme', 'overrides', 'categoricalScheme')
     return unless theme.is_a?(Array) && !theme.empty?
     dominant = theme.first.to_s.strip.downcase
     cfs.each_with_index do |cf, i|
@@ -253,7 +253,7 @@ module StyleNormalize
       next unless scheme.any? { |c| ROYAL_DEFAULT_LITERALS.include?(c.to_s.strip.downcase) }
       unless dominant =~ /\A#\h{6}\z/
         warnings << "#{RULE_SCHEME} #{element_label(el)}: conditionalFormats[#{i}] carries the " \
-                    "Sigma default royal scheme but themeOverrides.categoricalScheme[0] " \
+                    "Sigma default royal scheme but settings.theme.overrides.categoricalScheme[0] " \
                     "(#{theme.first.inspect}) is not #rrggbb hex — left untouched"
         next
       end
