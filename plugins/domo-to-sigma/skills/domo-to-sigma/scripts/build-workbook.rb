@@ -949,6 +949,150 @@ def filter_target_column(el, col)
   new_col['id']
 end
 
+
+# ---------------------------------------------------------------------------
+# Step 6 / bead beads-sigma-datewin — a card's Domo DATE WINDOW.
+#
+# MEASURED on the 36-card cold run: 29 of 36 cards carry a date window (24
+# ROLLING_PERIOD + 5 INTERVAL_OFFSET) and the generated Sigma spec carried ZERO
+# date filters. Mapping tiles back to cards via `el-<cardId>[-summary]`, 55 of the
+# 65 chartable tiles derive from a windowed card — so ~85% of the parity pool was
+# aggregating over ALL history while its Domo counterpart aggregated over a
+# rolling window. `min_pass_rate` defaults to 1.0, so that alone makes gate 1
+# unpassable no matter how good the parity oracle is. This is a PREREQUISITE for
+# the oracle, not a fidelity nicety.
+#
+# WHY A HIDDEN BOOLEAN COLUMN + A `list` FILTER, and not the obvious things:
+#
+#   - Sigma has NO element-level date-range filter kind. Live-verified by
+#     PUT+GET round-trip: only `list`, `top-n` and `number-range` persist on an
+#     element's own `filters[]`. There is nothing to emit directly.
+#   - A `controlType: date-range` CONTROL is the documented way to express a
+#     relative window — but a control targets a TABLE, so it propagates to every
+#     element sourcing the shared master. The corpus has 20 DISTINCT windows
+#     across 9 datasets, and up to 4 different windows on a SINGLE dataset, so one
+#     control per master cannot express them. Per-window masters would be a
+#     structural rewrite.
+#   - Baking the window into each measure (`Sum(If(<window>, [x], 0))`) filters
+#     the aggregate but not the ROW SET, so a grouped chart would still render
+#     empty categories that the source card does not show.
+#
+# So: one HIDDEN calc column per (element, date column) returning "in"/"out", and
+# a `list` filter including only "in". Uses only the verified-supported `list`
+# kind, stays element-local (no propagation), and matches the hidden-column shape
+# `filter_target_column` already uses. Safe here because no tile in this corpus is
+# a `pivot-table` — the one kind whose own `filters[]` Sigma silently drops (the
+# 65 chartable tiles are kpi-chart/bar/combo/region-map/line/table/scatter/donut).
+#
+# BOUNDARY CONVENTION, stated because getting it wrong is silent: a Domo
+# ROLLING_PERIOD of `count` N is emitted as `>= DateAdd(unit, -N, Today())`, i.e.
+# an N-unit lookback measured back from today. If Domo's rolling window is instead
+# N units INCLUSIVE of today, the correct constant is -(N-1). That is a one-token
+# change here (ROLLING_LOOKBACK_OFFSET) and it is pinned by a test rather than
+# left implicit. Confirm against a card PNG before declaring value parity — this
+# is the same class of silent-wrong-numbers risk as the 2-arg DateDiff operand
+# order (bead znvg), where a wrong window compiles clean and every number is off.
+DOMO_DATE_INTERVAL_UNIT = {
+  'DAY' => 'day', 'WEEK' => 'week', 'MONTH' => 'month',
+  'QUARTER' => 'quarter', 'YEAR' => 'year', 'HOUR' => 'hour', 'MINUTE' => 'minute'
+}.freeze
+
+# 0 = "N units back from today"; set to 1 for "N units inclusive of today".
+ROLLING_LOOKBACK_OFFSET = 0
+
+def apply_card_date_window!(card, el)
+  return el if el.nil?
+  drf = card['dateRangeFilter'] || card['dateTimeRange']
+  return el unless drf.is_a?(Hash)
+  rng = drf['dateTimeRange']
+  return el unless rng.is_a?(Hash)
+
+  type     = rng['dateTimeRangeType'].to_s
+  interval = rng['interval'].to_s.upcase
+  count    = rng['count'].to_i
+  offset   = rng['offset'].to_i
+  payload  = "type=#{type} interval=#{interval} offset=#{offset} count=#{count}"
+  date_col = (drf['column'].is_a?(Hash) ? drf['column']['column'] : drf['column']).to_s
+
+  # Same two Sigma traps apply_card_filters! guards: an image element has nothing
+  # to filter, and a pivot-table's own filters[] is silently dropped.
+  if el['kind'] == 'image'
+    warn_card(card, "date window NOT applied (#{payload}): an image element has no source/columns to " \
+                    'filter — the card was exported to a static PNG that already reflects the windowed query.')
+    return el
+  end
+  if el['kind'] == 'pivot-table'
+    warn_card(card, "date window NOT applied (#{payload}): Sigma silently DROPS a pivot-table element's " \
+                    'own filters — apply the predicate on its source element instead.')
+    return el
+  end
+
+  # Refuse anything whose boundary semantics are not established. Guessing is the
+  # same silent-wrong-numbers class as bead znvg: a wrong window compiles green.
+  unless type == 'ROLLING_PERIOD'
+    warn_card(card, "date window NOT applied (#{payload}): only ROLLING_PERIOD has an established Sigma " \
+                    "mapping here. Domo's exact boundary semantics for #{type} (offset/count) are not " \
+                    'documented in any source available to this converter, and a wrong window compiles ' \
+                    'cleanly while returning wrong numbers everywhere — so it is refused rather than ' \
+                    'guessed. Hand-author the equivalent window and re-run, or establish the semantics live.')
+    return el
+  end
+  unless offset.zero?
+    warn_card(card, "date window NOT applied (#{payload}): a non-zero ROLLING_PERIOD offset shifts the " \
+                    'window back by whole intervals; that boundary is unestablished here. Refused rather ' \
+                    'than guessed.')
+    return el
+  end
+  unit = DOMO_DATE_INTERVAL_UNIT[interval]
+  unless unit
+    warn_card(card, "date window NOT applied (#{payload}): interval '#{interval}' has no Sigma datepart " \
+                    "mapping (handled: #{DOMO_DATE_INTERVAL_UNIT.keys.join('/')}).")
+    return el
+  end
+  unless count.positive?
+    warn_card(card, "date window NOT applied (#{payload}): count must be positive to express a lookback.")
+    return el
+  end
+  if date_col.strip.empty?
+    warn_card(card, "date window NOT applied (#{payload}): the card names no date column.")
+    return el
+  end
+
+  date_cid = filter_target_column(el, date_col)
+  unless date_cid
+    warn_card(card, "date window NOT applied (#{payload}): date column '#{date_col}' does not resolve to a " \
+                    'data-model column (mirrors prune_unresolvable_columns!) — never ship a filter with a ' \
+                    'nil columnId.')
+    return el
+  end
+  date_formula = (Array(el['columns']).find { |c| c['id'] == date_cid } || {})['formula']
+  if date_formula.to_s.strip.empty?
+    warn_card(card, "date window NOT applied (#{payload}): resolved date column '#{date_col}' carries no " \
+                    'formula to build the predicate from.')
+    return el
+  end
+
+  lookback = count - ROLLING_LOOKBACK_OFFSET
+  slug = date_col.downcase.gsub(/\W+/, '-')
+  win_id = "f-datewin-#{slug}-#{unit}-#{count}"
+  unless Array(el['columns']).any? { |c| c['id'] == win_id }
+    el['columns'] = Array(el['columns']) + [{
+      'id' => win_id,
+      'name' => "In last #{count} #{unit}#{count == 1 ? '' : 's'} (#{date_col})",
+      'formula' => %(If(#{date_formula} >= DateAdd("#{unit}", -#{lookback}, Today()), "in", "out")),
+      'hidden' => true
+    }]
+    el['order'] = Array(el['order']) + [win_id] if el.key?('order')
+  end
+  already = Array(el['filters']).any? { |f| f['columnId'] == win_id && f['id'].to_s.start_with?('dw-') }
+  unless already
+    el['filters'] = Array(el['filters']) +
+                    [{ 'id' => "dw-#{el['id']}-#{Array(el['filters']).size}", 'columnId' => win_id,
+                       'kind' => 'list', 'mode' => 'include', 'values' => ['in'] }]
+  end
+  el
+end
+
 # Turn THIS card's own `filters[]` into Sigma ELEMENT filters on `el` —
 # refs/card-to-element.md:430-435's "card-level filters (the filter clauses
 # inside each card definition) -> element/source filters on that element."
@@ -1228,7 +1372,7 @@ def build_element_body(card, overrides)
   kind = card['sigmaKindHint']
   is_kpi = kind == 'kpi-chart' ||
            (card['summaryNumber'] && Array(card['groupBy']).empty? && (card['columns'] || []).size <= 1)
-  return apply_card_filters!(card, build_kpi(card, overrides)) if is_kpi
+  return apply_card_date_window!(card, apply_card_filters!(card, build_kpi(card, overrides))) if is_kpi
 
   # Domo prints a Summary Number at the top of EVERY viz card, not just KPI
   # cards. Sigma's chart/table elements have no summary slot, so this
@@ -1302,6 +1446,7 @@ def build_element_body(card, overrides)
   # below). Applied here, after the case-branch, so it covers every kind
   # (bar/line/scatter/donut/table/map/combo/kpi-fallback) built above.
   el = apply_card_filters!(card, el)
+  el = apply_card_date_window!(card, el)
 
   if companion
     if el
@@ -1312,6 +1457,7 @@ def build_element_body(card, overrides)
       # correctly filtered chart (the exact B4 divergence this fix exists to
       # close, just one element over).
       companion = apply_card_filters!(card, companion)
+      companion = apply_card_date_window!(card, companion)
       $companion_elements << companion
       warn_card(card, "source Summary Number ALSO represented as a companion KPI element " \
                       "'#{companion['name']}' alongside this #{el['kind'] || kind || 'chart'} element " \

@@ -774,5 +774,115 @@ Dir.mktmpdir do |dir|
   end
 end
 
+
+puts "== step 6 / dateRangeFilter: a ROLLING_PERIOD card window becomes an element filter =="
+# MEASURED on the 36-card cold run: 29 of 36 cards carry a date window
+# (24 ROLLING_PERIOD + 5 INTERVAL_OFFSET), and the generated Sigma spec carried
+# ZERO date filters — so 55 of the 65 chartable tiles aggregated over ALL history
+# while their Domo counterparts aggregated over a rolling window. Against
+# min_pass_rate 1.0 that alone makes gate 1 unpassable, no matter how good the
+# parity oracle is.
+#
+# Sigma has NO element-level date-range filter kind (live-verified 2026-07-17:
+# only list / top-n / number-range round-trip), and a date-range CONTROL is not
+# usable here: a control targets a TABLE, so it would propagate to every element
+# sourcing the shared master — yet the corpus has 20 DISTINCT windows across 9
+# datasets, up to 4 different windows on a single dataset. So the window has to be
+# element-local: a HIDDEN boolean window column + a `list` filter including "in".
+# That shape uses only the verified-supported `list` kind, is element-local (no
+# propagation), and no tile in this corpus is a pivot-table (the one kind whose
+# own filters Sigma silently drops).
+$warnings = []
+win = build_element({ 'id' => 'c40', 'title' => 'Page Views (last 14 days)', 'chartType' => 'badge_line',
+                      'dateRangeFilter' => {
+                        'column' => { 'column' => 'Date', 'exprType' => 'COLUMN' },
+                        'dateTimeRange' => { 'dateTimeRangeType' => 'ROLLING_PERIOD',
+                                             'interval' => 'DAY', 'offset' => 0, 'count' => 14 } },
+                      'columns' => [{ 'column' => 'Date' },
+                                    { 'column' => 'views', 'aggregation' => 'SUM' }] }, {})
+ok(win.key?('filters'), 'a ROLLING_PERIOD window produced an element filter')
+dfs = Array(win['filters']).select { |f| f['id'].to_s.start_with?('dw-') }
+eq(dfs.size, 1, 'exactly one date-window filter')
+eq(dfs.first['kind'], 'list', "filter kind is list (Sigma has NO element date-range kind)")
+eq(dfs.first['mode'], 'include', 'mode is include')
+eq(dfs.first['values'], ['in'], 'includes only the in-window sentinel')
+wc = Array(win['columns']).find { |c| c['id'] == dfs.first['columnId'] }
+ok(!wc.nil?, 'the filter targets a column the element actually has')
+eq(wc['hidden'], true, 'the window column is HIDDEN — the source card never rendered it')
+ok(wc['formula'].include?('DateAdd("day", -14,'),
+   "predicate uses DateAdd(\"day\", -14, ...) — got #{wc && wc['formula']}")
+ok(wc['formula'].include?('Today()'), 'predicate is anchored on Today()')
+
+puts "== step 6: unit mapping covers every interval the corpus actually uses =="
+# MEASURED intervals in the corpus: DAY, MONTH, QUARTER, WEEK, YEAR.
+{ 'DAY' => 'day', 'MONTH' => 'month', 'QUARTER' => 'quarter',
+  'WEEK' => 'week', 'YEAR' => 'year' }.each do |domo, sigma|
+  $warnings = []
+  e = build_element({ 'id' => "c41-#{domo}", 'title' => "T #{domo}", 'chartType' => 'badge_line',
+                      'dateRangeFilter' => {
+                        'column' => { 'column' => 'Date' },
+                        'dateTimeRange' => { 'dateTimeRangeType' => 'ROLLING_PERIOD',
+                                             'interval' => domo, 'offset' => 0, 'count' => 3 } },
+                      'columns' => [{ 'column' => 'Date' },
+                                    { 'column' => 'v', 'aggregation' => 'SUM' }] }, {})
+  c = Array(e['columns']).find { |x| x['id'].to_s.start_with?('f-datewin') }
+  # NB: a %(...) literal would balance the nested paren and silently append ")"
+  # to the needle — use an explicit escaped string.
+  needle = "DateAdd(\"#{sigma}\", -3,"
+  ok(c && c['formula'].include?(needle),
+     "#{domo} -> \"#{sigma}\" (got #{c && c['formula']})")
+end
+
+puts "== step 6: no dateRangeFilter -> no window column and no window filter =="
+$warnings = []
+nowin = build_element({ 'id' => 'c42', 'title' => 'All History', 'chartType' => 'badge_line',
+                        'columns' => [{ 'column' => 'Date' },
+                                      { 'column' => 'v', 'aggregation' => 'SUM' }] }, {})
+ok(Array(nowin['filters']).none? { |f| f['id'].to_s.start_with?('dw-') },
+   'never emit a default/empty date window')
+ok(Array(nowin['columns']).none? { |c| c['id'].to_s.start_with?('f-datewin') },
+   'and no orphan window column')
+
+puts "== step 6: INTERVAL_OFFSET is NOT guessed — it is dropped LOUDLY =="
+# 5 of the 29 windowed cards are INTERVAL_OFFSET (offset>=1, count=0). Domo's
+# exact boundary semantics for those are not documented in any source available
+# here, and guessing is the SAME silent-wrong-numbers class as the 2-arg DateDiff
+# operand order (bead znvg): a wrong window compiles clean and returns wrong
+# values everywhere. So it is refused with a warning naming the exact payload,
+# rather than shipped as a plausible guess.
+$warnings = []
+io = build_element({ 'id' => 'c43', 'title' => 'Survey Completion Rate', 'chartType' => 'badge_line',
+                     'dateRangeFilter' => {
+                       'column' => { 'column' => 'created_on' },
+                       'dateTimeRange' => { 'dateTimeRangeType' => 'INTERVAL_OFFSET',
+                                            'interval' => 'WEEK', 'offset' => 1, 'count' => 0 } },
+                     'columns' => [{ 'column' => 'created_on' },
+                                   { 'column' => 'v', 'aggregation' => 'SUM' }] }, {})
+ok(Array(io['filters']).none? { |f| f['id'].to_s.start_with?('dw-') },
+   'no window filter is invented for INTERVAL_OFFSET')
+ok($warnings.any? { |w| w['warning'].to_s.include?('INTERVAL_OFFSET') },
+   'the refusal is warned, not silent')
+ok($warnings.any? { |w| w['warning'].to_s.include?('offset') },
+   'the warning echoes the payload so it is actionable')
+
+puts "== step 6: an unresolvable date column is dropped LOUDLY, never a broken filter =="
+$warnings = []
+# The card needs a real dimension, or build_element legitimately declines to emit a
+# line element at all and this would assert nothing.
+bad = build_element({ 'id' => 'c44', 'title' => 'Bad Col', 'chartType' => 'badge_line',
+                      'dateRangeFilter' => {
+                        'column' => { 'column' => '' },
+                        'dateTimeRange' => { 'dateTimeRangeType' => 'ROLLING_PERIOD',
+                                             'interval' => 'DAY', 'offset' => 0, 'count' => 7 } },
+                      'columns' => [{ 'column' => 'region' },
+                                    { 'column' => 'v', 'aggregation' => 'SUM' }] }, {})
+ok(!bad.nil?, 'the card still produces an element (the window is dropped, not the card)')
+ok(Array(bad && bad['filters']).none? { |f| f['id'].to_s.start_with?('dw-') },
+   'no filter with a nil/blank columnId is ever emitted')
+ok(Array(bad && bad['columns']).none? { |c| c['id'].to_s.start_with?('f-datewin') },
+   'and no orphan window column is left behind')
+ok($warnings.any? { |w| w['warning'].to_s.include?('names no date column') },
+   'the blank date column is warned, not silent')
+
 puts
 if $failures.zero? then puts "ALL PASS"; exit 0 else puts "#{$failures} FAILURE(S)"; exit 1 end
