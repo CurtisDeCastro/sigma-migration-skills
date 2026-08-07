@@ -1650,13 +1650,20 @@ spec['folderId'] = opts[:folder] if opts[:folder]
 #      border is skipped on a dark QS theme, which also flips the base to Sigma "Dark").
 unless THEME_COLORS.empty?
   ov = { 'categoricalScheme' => THEME_COLORS, 'hasCards' => 'shown', 'borderRadius' => 'round' }
-  if THEME && THEME['isDark']
-    spec['themeName'] = 'Dark'
+  dark = THEME && THEME['isDark']
+  if dark
+    theme_name = 'Dark'
   else
     ov['elementBorder'] = { 'color' => '#E2E8F0', 'width' => 1 }
   end
-  spec['themeOverrides'] = ov
-  STDERR.puts "  theme: applied QuickSight palette (#{THEME_COLORS.size} colors) + card chrome via themeOverrides#{THEME['isDark'] ? ' + themeName:Dark' : ''}"
+  # Live since 2026-08: themeName/themeOverrides moved to
+  # document.settings.theme.{name,overrides} (shared/lib/code_rep.rb
+  # DOC_KEYS) — a flat top-level themeName/themeOverrides is invalid on
+  # write and gets silently dropped by the code-rep wrapper.
+  theme = { 'overrides' => ov }
+  theme['name'] = theme_name if theme_name
+  spec['settings'] = (spec['settings'] || {}).merge('theme' => theme)
+  STDERR.puts "  theme: applied QuickSight palette (#{THEME_COLORS.size} colors) + card chrome via settings.theme.overrides#{dark ? ' + settings.theme.name:Dark' : ''}"
 end
 
 File.write(opts[:out], JSON.pretty_generate(spec))

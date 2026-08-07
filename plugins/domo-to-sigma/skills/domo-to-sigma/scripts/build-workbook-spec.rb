@@ -319,11 +319,14 @@ wb['description'] = opts[:description] if opts[:description]
 if opts[:layout]
   theme = derive_theme(JSON.parse(File.read(opts[:layout])))
   unless theme.empty?
-    wb['themeName'] = 'Light'
     overrides = {}
     overrides['colorOverrides'] = { 'backgroundCanvas' => theme['backgroundCanvas'] } if theme['backgroundCanvas']
     overrides['categoricalScheme'] = theme['categoricalScheme'] if theme['categoricalScheme']
-    wb['themeOverrides'] = overrides unless overrides.empty?
+    # Live since 2026-08: themeName/themeOverrides moved to
+    # document.settings.theme.{name,overrides} (shared/lib/code_rep.rb
+    # DOC_KEYS) — a flat top-level themeName/themeOverrides is invalid on
+    # write and gets silently dropped by the code-rep wrapper.
+    wb['settings'] = (wb['settings'] || {}).merge('theme' => { 'name' => 'Light', 'overrides' => overrides }) unless overrides.empty?
     warn "  theme: canvas=#{theme['backgroundCanvas'] || '(default)'}, categoricalScheme=#{(theme['categoricalScheme'] || []).size} color(s)"
   end
 end
