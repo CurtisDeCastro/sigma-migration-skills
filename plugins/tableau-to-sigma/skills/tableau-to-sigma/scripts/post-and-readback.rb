@@ -65,6 +65,9 @@ FileUtils.mkdir_p(opts[:workdir])
 $LOAD_PATH.unshift File.expand_path('lib', __dir__)
 require 'sigma_rest'
 require 'dm_quarantine'
+# Hoisted to file level: ensure_theme! is extracted and eval'd by
+# scripts/test-theme-ensure.rb, where require_relative cannot infer a basepath.
+require_relative 'lib/theme_derive'
 require 'code_rep'
 begin
   require 'offramp' # off-ramp trail (waiver observability); optional — never load-bearing
@@ -186,12 +189,13 @@ end
 # own palette, because only build_wb_spec applied the theme). The derived
 # theme lives in the builder's output ('theme' key of chart-specs.json) or
 # its flat-mode sidecar (chart-specs-theme.json). No-op when the spec already
-# carries themeOverrides or no derived theme exists; never load-bearing.
+# carries a theme (document.settings.theme.overrides) or no derived theme
+# exists; never load-bearing.
 def ensure_theme!(body_str, workdir)
   return body_str unless $opts_type == 'workbook'
   spec = JSON.parse(body_str) rescue nil
   return body_str unless spec.is_a?(Hash) && spec['pages']
-  return body_str if spec['themeOverrides'].is_a?(Hash) && spec['themeOverrides'].any?
+  return body_str if ThemeDerive.theme_overrides(spec)
   theme = nil
   side = File.join(workdir, 'chart-specs-theme.json')
   main = File.join(workdir, 'chart-specs.json')
@@ -202,10 +206,10 @@ def ensure_theme!(body_str, workdir)
     theme = cs['theme'] if cs.is_a?(Hash)
   end
   return body_str unless theme.is_a?(Hash) && theme.any?
-  require_relative 'lib/theme_derive'
   ThemeDerive.apply!(spec, theme)
-  if spec['themeOverrides'].is_a?(Hash) && spec['themeOverrides'].any?
-    warn "theme: source-derived theme applied at post time (#{spec['themeOverrides'].keys.join(', ')}) — " \
+  applied = ThemeDerive.theme_overrides(spec)
+  if applied
+    warn "theme: source-derived theme applied at post time (#{applied.keys.join(', ')}) — " \
          'path-independent palette (the incoming spec carried none)'
     return JSON.generate(spec)
   end

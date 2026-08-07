@@ -55,6 +55,8 @@
 # NOT here: SN-1 title-hide ships separately via put-layout — the live API
 # rejects name:{text, visibility:'hidden'} (probed 2026-07-11: 400 "cannot mix
 # visibility:'hidden' with title content").
+require_relative 'theme_derive'
+
 module StyleNormalize
   RULE_TOTALS  = 'SN-2-pivot-totals'
   RULE_GRAMMAR = 'SN-3-format-grammar'
@@ -243,7 +245,10 @@ module StyleNormalize
   def normalize_scheme_defaults!(spec, el, changes)
     cfs = el['conditionalFormats']
     return unless cfs.is_a?(Array)
-    theme = spec['themeOverrides'].is_a?(Hash) ? spec['themeOverrides']['categoricalScheme'] : nil
+    # theme moved to document.settings.theme.overrides; ThemeDerive.theme_overrides
+    # reads the current shape with a legacy fallback.
+    ov = defined?(ThemeDerive) ? ThemeDerive.theme_overrides(spec) : nil
+    theme = ov.is_a?(Hash) ? ov['categoricalScheme'] : nil
     return unless theme.is_a?(Array) && !theme.empty?
     dominant = theme.first.to_s.strip.downcase
     cfs.each_with_index do |cf, i|

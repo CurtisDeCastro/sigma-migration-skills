@@ -2835,8 +2835,12 @@ spec = {
   # Style fidelity: reproduce the PBI report's look — card chrome, subtle borders,
   # and the source theme's categorical palette (drives donut/pie + multi-series
   # colors). Stacked on the built-in Light theme. See lib/pbi_theme.rb.
-  'themeName'      => 'Light',
-  'themeOverrides' => PbiTheme.overrides($pbi_theme)
+  # Theme path: document.settings.theme.{name,overrides}. The old top-level
+  # themeName/themeOverrides keys were REMOVED — a top-level themeName is
+  # silently ignored (workbook created UNTHEMED, no error). Canonical builder:
+  # Sigma::CodeRep.theme_settings in shared/lib.
+  'settings' => { 'theme' => { 'name' => 'Light',
+                               'overrides' => PbiTheme.overrides($pbi_theme) } }
 }
 spec['folderId'] = opts[:folder] if opts[:folder]
 

@@ -144,9 +144,32 @@ module ThemeDerive
     overrides['colorOverrides'] = { 'backgroundCanvas' => theme['backgroundCanvas'] } if theme['backgroundCanvas']
     overrides['categoricalScheme'] = theme['categoricalScheme'] if theme['categoricalScheme']
     unless overrides.empty?
-      spec['themeName'] = 'Light'
-      spec['themeOverrides'] = overrides
+      # Theme path: document.settings.theme.{name,overrides}. The old top-level
+      # themeName/themeOverrides keys were REMOVED from the workbook spec — a
+      # top-level themeName is silently ignored (workbook created UNTHEMED, no
+      # error). Canonical builder: Sigma::CodeRep.theme_settings in shared/lib.
+      spec['settings'] = (spec['settings'] || {}).merge(
+        'theme' => { 'name' => 'Light', 'overrides' => overrides }
+      )
     end
     spec
+  end
+
+  # Gotcha (live-verified 2026-08-06): Sigma LOWERCASES hex colors on readback
+  # (#0E8DA0 -> #0e8da0). Any parity/round-trip comparison of theme colors must
+  # be case-insensitive or it reports a false mismatch.
+  #
+  # Read side, so callers never hand-roll the path. Current shape first, with a
+  # legacy fallback for flat artifacts still on disk (committed spec snapshots,
+  # fixtures) written before the move.
+  def theme_overrides(spec)
+    return nil unless spec.is_a?(Hash)
+
+    doc = spec['document'].is_a?(Hash) ? spec['document'] : spec
+    ov = ((doc['settings'] || {})['theme'] || {})['overrides']
+    return ov if ov.is_a?(Hash) && ov.any?
+
+    legacy = doc['themeOverrides'] || spec['themeOverrides']
+    legacy.is_a?(Hash) && legacy.any? ? legacy : nil
   end
 end

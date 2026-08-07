@@ -98,6 +98,32 @@ fb = derive_theme([{
 check(fb['categoricalScheme'] == %w[#07b4a2 #e8519a],
       "single-colour brand_palette falls back to the tint palette (got #{fb['categoricalScheme'].inspect})", fails)
 
+# --- apply! writes the CURRENT path; theme_overrides reads both -------------
+# The old top-level themeName/themeOverrides keys were REMOVED from the workbook
+# spec. A top-level themeName is silently ignored (workbook created UNTHEMED,
+# no error), so a regression here is invisible without these assertions.
+puts
+puts '-- theme path (settings.theme) --'
+applied = ThemeDerive.apply!({ 'pages' => [] },
+                             { 'categoricalScheme' => %w[#111111 #222222] })
+check(applied.dig('settings', 'theme', 'name') == 'Light',
+      'apply! writes settings.theme.name', fails)
+check(applied.dig('settings', 'theme', 'overrides', 'categoricalScheme') == %w[#111111 #222222],
+      'apply! writes settings.theme.overrides', fails)
+check(!applied.key?('themeName') && !applied.key?('themeOverrides'),
+      'apply! never writes the REMOVED top-level keys', fails)
+
+check(ThemeDerive.theme_overrides(applied)['categoricalScheme'] == %w[#111111 #222222],
+      'theme_overrides reads the current shape', fails)
+check(ThemeDerive.theme_overrides({ 'document' => applied })['categoricalScheme'] == %w[#111111 #222222],
+      'theme_overrides reads through a document wrapper', fails)
+check(ThemeDerive.theme_overrides({ 'themeOverrides' => { 'categoricalScheme' => ['#333'] } })['categoricalScheme'] == ['#333'],
+      'theme_overrides still reads legacy flat artifacts on disk', fails)
+check(ThemeDerive.theme_overrides({ 'pages' => [] }).nil?,
+      'theme_overrides is nil when there is no theme', fails)
+check(ThemeDerive.theme_overrides(nil).nil?,
+      'theme_overrides tolerates garbage', fails)
+
 puts
 if fails.empty?
   puts 'ALL PASS — D1/Pass-7 theme derivation (canvas + region palette + brand palette)'

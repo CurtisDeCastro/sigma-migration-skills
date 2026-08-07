@@ -32,22 +32,23 @@ Dir.mktmpdir do |d|
   File.write(File.join(d, 'chart-specs-theme.json'), JSON.generate(THEME))
   out = ensure_theme!(JSON.generate(SPEC), d)
   spec = JSON.parse(out)
-  check(spec.dig('themeOverrides', 'categoricalScheme') == THEME['categoricalScheme'],
+  check(spec.dig('settings', 'theme', 'overrides', 'categoricalScheme') == THEME['categoricalScheme'],
         'sidecar theme applied to a spec that carried none', fails)
-  check(spec['themeName'] == 'Light', 'themeName stamped by ThemeDerive.apply!', fails)
+  check(spec.dig('settings', 'theme', 'name') == 'Light',
+        "settings.theme.name stamped by ThemeDerive.apply! (NOT the removed top-level themeName)", fails)
 
-  # a spec that ALREADY carries themeOverrides is untouched
-  themed = SPEC.merge('themeOverrides' => { 'categoricalScheme' => ['#ABCDEF'] })
+  # a spec that ALREADY carries a theme is untouched
+  themed = SPEC.merge('settings' => { 'theme' => { 'overrides' => { 'categoricalScheme' => ['#ABCDEF'] } } })
   out2 = ensure_theme!(JSON.generate(themed), d)
-  check(JSON.parse(out2)['themeOverrides'] == themed['themeOverrides'],
-        'existing themeOverrides never overwritten', fails)
+  check(JSON.parse(out2)['settings'] == themed['settings'],
+        'existing settings.theme never overwritten', fails)
 end
 
 Dir.mktmpdir do |d|
   # theme via the pages-mode 'theme' key of chart-specs.json
   File.write(File.join(d, 'chart-specs.json'), JSON.generate('pages' => [], 'theme' => THEME))
   out = ensure_theme!(JSON.generate(SPEC), d)
-  check(JSON.parse(out).dig('themeOverrides', 'colorOverrides', 'backgroundCanvas') == '#FFFFFF',
+  check(JSON.parse(out).dig('settings', 'theme', 'overrides', 'colorOverrides', 'backgroundCanvas') == '#FFFFFF',
         "builder-output 'theme' key applied", fails)
 end
 

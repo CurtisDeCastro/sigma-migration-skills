@@ -319,11 +319,16 @@ wb['description'] = opts[:description] if opts[:description]
 if opts[:layout]
   theme = derive_theme(JSON.parse(File.read(opts[:layout])))
   unless theme.empty?
-    wb['themeName'] = 'Light'
+    # Theme path: document.settings.theme.{name,overrides}. The old top-level
+    # themeName/themeOverrides keys were REMOVED from the workbook spec — a
+    # top-level themeName is silently ignored (workbook created UNTHEMED, no
+    # error). Canonical builder: Sigma::CodeRep.theme_settings in shared/lib.
     overrides = {}
     overrides['colorOverrides'] = { 'backgroundCanvas' => theme['backgroundCanvas'] } if theme['backgroundCanvas']
     overrides['categoricalScheme'] = theme['categoricalScheme'] if theme['categoricalScheme']
-    wb['themeOverrides'] = overrides unless overrides.empty?
+    theme_block = { 'name' => 'Light' }
+    theme_block['overrides'] = overrides unless overrides.empty?
+    wb['settings'] = (wb['settings'] || {}).merge('theme' => theme_block)
     warn "  theme: canvas=#{theme['backgroundCanvas'] || '(default)'}, categoricalScheme=#{(theme['categoricalScheme'] || []).size} color(s)"
   end
 end

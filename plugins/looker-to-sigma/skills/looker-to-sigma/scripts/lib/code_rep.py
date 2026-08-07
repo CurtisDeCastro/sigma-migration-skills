@@ -35,3 +35,38 @@ def wrap(doc, extra=None):
     out = dict(extra or {})
     out["document"] = doc
     return out
+
+
+def theme_settings(name=None, overrides=None):
+    """The ONE place that knows where theming lives.
+
+    `themeName` / `themeOverrides` were REMOVED from the workbook spec. Theming
+    is now `document.settings.theme.{name,overrides}`. Live-probed 2026-08-06:
+    `document.themeName` is a hard 400 ("no longer supported. Use
+    document.settings.theme.name instead"), and a themeName that lands at the
+    TOP level (outside `document`) is accepted and SILENTLY IGNORED — the
+    workbook is created unthemed with no error. Emitters must route through
+    here rather than hand-rolling either key.
+
+    Returns {} when there is nothing to say, so it is safe to merge blindly.
+    """
+    theme = {}
+    if name:
+        theme["name"] = name
+    if overrides:
+        theme["overrides"] = overrides
+    if not theme:
+        return {}
+    return {"settings": {"theme": theme}}
+
+
+def merge_settings(doc, fragment):
+    """Deep-merge a {'settings': ...} fragment without clobbering siblings."""
+    if not fragment:
+        return doc
+    out = dict(doc)
+    for section, value in (fragment.get("settings") or {}).items():
+        existing = (out.get("settings") or {}).get(section)
+        merged = {**existing, **value} if isinstance(existing, dict) and isinstance(value, dict) else value
+        out["settings"] = {**(out.get("settings") or {}), section: merged}
+    return out

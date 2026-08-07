@@ -2,9 +2,9 @@
 """harvest-theme-registry.py — build a persistent per-org theme registry.
 
 Themes have no list API (unlike plugins, which now have GET /v2/plugins). The
-only place a theme id appears is a workbook spec's top-level `themeName`. So we
-harvest: list every workbook, GET each spec, collect the distinct `themeName`
-values (built-in names + org-theme UUIDs) and how many workbooks use each.
+only place a theme id appears is a workbook spec's `document.settings.theme.name`.
+So we harvest: list every workbook, GET each spec, collect the distinct theme
+names (built-in names + org-theme UUIDs) and how many workbooks use each.
 
 Persists to ~/.sigma-migration/theme-registry.yaml keyed by org host, so the
 authoring skill can offer known themes instead of asking the user to supply a
@@ -77,10 +77,30 @@ def list_workbooks(base, tok, cap=None):
         page = d["nextPage"]
 
 
+def theme_name_from_spec(spec):
+    """Pull the theme id out of a workbook spec, current shape first.
+
+    The theme moved: it is now `document.settings.theme.name`. The old
+    top-level `themeName` was REMOVED from the spec (live-probed 2026-08-06:
+    `document.themeName` 400s, a top-level one is silently ignored). Reading
+    only the old key made this harvester return None for every workbook and
+    silently write an EMPTY registry — which reads identically to "this org
+    has no themes". The legacy branch stays for flat artifacts still on disk.
+    """
+    if not isinstance(spec, dict):
+        return None
+    doc = spec.get("document")
+    doc = doc if isinstance(doc, dict) else spec
+    theme = ((doc.get("settings") or {}).get("theme") or {})
+    name = theme.get("name")
+    if name:
+        return name
+    return doc.get("themeName") or spec.get("themeName")  # legacy flat artifacts
+
+
 def theme_of(base, tok, wb):
     try:
-        spec = api(base, tok, f"/v2/workbooks/{wb}/spec")
-        return spec.get("themeName")  # None if no theme set
+        return theme_name_from_spec(api(base, tok, f"/v2/workbooks/{wb}/spec"))
     except Exception as e:
         return ("__error__", str(e)[:40])
 
