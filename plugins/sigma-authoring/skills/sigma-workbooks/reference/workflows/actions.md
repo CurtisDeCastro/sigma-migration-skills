@@ -33,57 +33,59 @@ actions:
 A button typically carries one `actions[]` entry with one or more `effects[]` —
 effects in the same action run together off the same click.
 
-## Verified effects
+## Workbook action effects — 12, not 9
 
-These three round-tripped and rendered correctly on a live test-org build:
+`clear-control`, `close-overlay`, `delete-rows`, `insert-rows`, `navigate`,
+`open-document`, `open-overlay`, `open-url`, `refresh-element`, `select-tab`,
+`set-control-value`, `update-rows`
 
-### `insert-rows` — write a row into an input table
+Triggers (5): `on-click`, `on-select`, `on-close`, `on-primary-cta-click`,
+`on-secondary-cta-click`.
 
-```yaml
-effect: insert-rows
-table: annotations             # an input-table element's id
-values:
-  an-note: { type: control, control: NoteCtl }
-  an-tag:  { type: constant, value: { type: text, value: "manual" } }
-```
+Entry shape: `{id, trigger, effects[]}` all required; `{name, state}` optional.
 
-`values` is a map of the input table's **own column ids** to a value descriptor:
-- `{ type: control, control: <controlId> }` — the current value of a control.
-- `{ type: constant, value: { type: text, value: <literal> } }` — a hard-coded
-  literal.
+### Actions are NOT button/modal-only
 
-**Never include a system column** (`ID`/`CREATED_AT`/`CREATED_BY`/`UPDATED_AT`/
-`UPDATED_BY`) in `values` — Sigma auto-fills those; see *the append-only-log
-pattern* below.
+`actions[]` is hostable on data elements. Verified surviving an exact readback on
+`table`, `pivot-table`, `bar-chart`, `kpi-chart`, `pie-chart`, `donut-chart`,
+`button`, `image`. `on-select` fires from a mark click — the analogue of a
+Tableau filter/parameter action.
 
-### `clear-control` — reset a control (page scope only)
+Cannot host actions: `control` (all 29 controlType leaves), `divider`, `embed`,
+`plugin`, `progress`, `text`.
 
-```yaml
-effect: clear-control
-scope: { type: page, page: pg }
-usePublishedValue: true
-```
+### Four constraints found by breaking them (each a real 400)
 
-The OpenAPI's `scope` discriminator actually has **three** shapes —
-`{ type: control, control: <controlId> }` (clear one control), `{ type:
-container, container: <containerElementId> }` (clear every control in a
-container), and `{ type: page, page: <pageId> }` (clear every control on a
-page). **Only `page` scope is live-verified here** — an element/container-scoped
-`clear-control` masked-failed the button in live testing (the button silently
-didn't work; no clear error pointed at the cause). Until `control`/`container`
-scope is independently re-verified, build resets around `page` scope only.
+1. Action `id` must be unique across the WHOLE workbook, not per element.
+2. `set-control-value.control` takes the `controlId`, NOT the control element's
+   `id`. Control refs ARE validated at create.
+3. `/verify` accepted the bad `control` ref that the real create rejected.
+   Verify-accept is not evidence; always finish with a create + readback diff.
+4. The create body needs the `{name, folderId, document:{…}}` wrapper. The
+   OpenAPI's flat `allOf[0].required=[name,folderId]` is misleading.
 
-### `set-control-value` — set a control programmatically
+### open-url has no required url
 
-```yaml
-effect: set-control-value
-control: RegionFilter
-value: { type: constant, value: { type: text, value: "West" } }
-```
+`{effect:"open-url", openTarget} & Partial<{url}>` — a generator bug that drops
+`url` ships a schema-valid action that does nothing. Assert `url` yourself.
 
-The only verified `value` shape is a constant text value (e.g. a "quick filter
-preset" button). Useful paired with a `list`/`segmented` control to give users a
-one-click shortcut into a known filter state.
+### Runtime behaviour (Puppeteer-verified)
+
+`on-select` → `navigate` moves the page. `on-select` → `set-control-value
+{type:"column"}` sets the control to the clicked mark's value, and the control's
+`filters[]` then filters the target (911 rows → 319).
+
+⚠️ Action-set control state lives in a "Custom view" and a FRESH PAGE LOAD
+DISCARDS IT. A deep link does not carry an action-set control value; only
+in-session navigation does.
+
+### Masked errors
+
+An invalid SIBLING key collapses the whole element to `Invalid kind: "<kind>"`.
+`groupings` on a `table` and `rowsBy` on a `pivot-table` both do this, and
+neither relates to actions. `pivot-table` requires exactly
+`id, kind, source, columns, values`; `pie`/`donut` need `color:{id}` +
+`value:{id}` (not `segment`).
 
 ## Modals: `open-overlay` / `close-overlay`
 
@@ -110,12 +112,10 @@ overlayId: modal-detail    # the modal PAGE's `id`, not an element id
 effect: close-overlay
 ```
 
-`open-overlay` requires `overlayId`; `close-overlay` takes no other fields (it
-closes whatever overlay is open). **These two shapes are documented in the
-compiled OpenAPI** (unlike `insert-rows`, which isn't inlined there as of this
-writing) but were **not** part of this round's live-render probe — confirm with
-a POST + PNG export before shipping a modal flow, same discipline as any other
-shape in this doc.
+`open-overlay` requires `overlayId` (the modal page's id, not an element id);
+`close-overlay` takes no other fields and closes whatever overlay is currently
+open. **Design constraint:** one button cannot toggle an overlay — you need
+separate buttons (one with `open-overlay`, one with `close-overlay`).
 
 ## The append-only-log pattern
 
@@ -179,7 +179,7 @@ listed cause **first** before assuming the element kind itself is unsupported.
 |---|---|---|
 | `Invalid kind: "input-table"` | `inputMode` was omitted. | Always set `inputMode: edit` (or `explore`/`view` — see `input-tables.md`). It's technically documented as required in `tables.md`, but omitting it produces this generic message rather than a field-specific one. |
 | `Invalid kind: "control"` (on a `text`/`text-area` control used for **entry**, not filtering) | One or more of `mode`, `case`, `includeNulls`, `showOperators` was omitted. | Set all four — see `controls.md`'s "Entry (write) text controls" section. |
-| Button silently does nothing on click | An element/container-scoped `clear-control`. | Use `scope: { type: page, page: <id> }` only (see above). |
+| Button silently does nothing on click | An element/container-scoped `clear-control`. | The `scope` field has three shapes (`control`, `container`, `page`), but only `page` scope is verified to work. Use `scope: { type: page, page: <id> }` only. |
 
 ## Cross-links
 
