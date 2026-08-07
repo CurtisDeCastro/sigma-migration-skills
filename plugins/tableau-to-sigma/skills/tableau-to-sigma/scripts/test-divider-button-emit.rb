@@ -394,6 +394,82 @@ else
 end
 
 puts
+puts 'Part 7 - Default mode (flag OFF): nav buttons stay kind:text with the nav.invalid placeholder'
+# Same fixture, same real subprocess pipeline as Part 5 (parse-twb-layout.rb ->
+# build-charts-from-signals.rb) - but with SIGMA_BUTTON_ELEMENTS explicitly
+# UNSET, not merely absent by luck of part ordering. Save/restore whatever the
+# env held before so this part's outcome can never depend on what ran earlier
+# (Parts 5/6 set the flag to 'on'). The brief calls a regression here Critical:
+# this is the path every real conversion runs by default.
+had_flag = ENV.key?('SIGMA_BUTTON_ELEMENTS')
+prev_flag = ENV['SIGMA_BUTTON_ELEMENTS']
+ENV.delete('SIGMA_BUTTON_ELEMENTS')
+
+els7 = nil
+manifest7 = nil
+charts_log7 = ''
+begin
+  Dir.mktmpdir do |d|
+    twb = File.join(d, 'wb.twb')
+    lay = File.join(d, 'layout.json')
+    mm  = File.join(d, 'master-map.json')
+    File.write(twb, TWB)
+    File.write(mm, JSON.dump({}))
+    File.write(File.join(d, 'get-workbook.json'),
+               JSON.dump('views' => { 'view' => [{ 'id' => 'v1', 'name' => 'Trend' }] }))
+    Dir.mkdir(File.join(d, 'views'))
+    File.write(File.join(d, 'views', 'v1.csv'), '')
+    abort 'parse-twb-layout failed' unless system('ruby', File.join(DIR, 'parse-twb-layout.rb'), twb, lay,
+                                                  out: File::NULL, err: File::NULL)
+
+    out = File.join(d, 'specs.json')
+    charts_log7 = IO.popen(['ruby', File.join(DIR, 'build-charts-from-signals.rb'),
+                            '--tableau-dir', d, '--layout', lay,
+                            '--meta', lay.sub(/\.json$/, '-meta.json'), '--master-map', mm,
+                            '--master-element-id', 'master', '--skip-dashboard-read', 'unit-test',
+                            '--title', 'Overview', '--out', out], err: %i[child out], &:read)
+    els7 = JSON.parse(File.read(out)) if File.exist?(out)
+    mpath = out.sub(/\.json$/, '-actions-emitted.json')
+    manifest7 = JSON.parse(File.read(mpath)) if File.exist?(mpath)
+  end
+ensure
+  check(!ENV.key?('SIGMA_BUTTON_ELEMENTS'), 'SIGMA_BUTTON_ELEMENTS stayed unset for the whole subprocess run', fails)
+  if had_flag
+    ENV['SIGMA_BUTTON_ELEMENTS'] = prev_flag
+  else
+    ENV.delete('SIGMA_BUTTON_ELEMENTS')
+  end
+end
+
+if els7.nil?
+  check(false, "build-charts-from-signals.rb produced no --out -- log tail:\n#{charts_log7.to_s.lines.last(15).join}", fails)
+  els7 = []
+end
+
+nav_els7 = els7.select { |e| %w[btn-10 btn-11].include?(e['id']) }
+check(nav_els7.size == 2,
+      "both nav-button elements (zones 10 + 11) present in default mode (got ids #{els7.map { |e| e['id'] }.inspect})", fails)
+
+nav_els7.each do |e|
+  check(e['kind'] == 'text',
+        "default mode: nav-button #{e['id'].inspect} is kind:text (got #{e['kind'].inspect})", fails)
+  check(e['kind'] != 'button',
+        "default mode: nav-button #{e['id'].inspect} is NOT kind:button", fails)
+  check(JSON.generate(e).include?('nav.invalid'),
+        "default mode: nav-button #{e['id'].inspect} still carries the nav.invalid placeholder URL", fails)
+  check(!e.key?('actions'),
+        "default mode: nav-button #{e['id'].inspect} has no actions key " \
+        "(kind:text cannot host actions -- got keys #{e.keys.inspect})", fails)
+end
+
+check(!manifest7.nil?, 'default mode: the emitted-actions manifest sidecar was still written (empty is meaningful)', fails)
+manifest7_hosts = Array(manifest7).map { |m| m['hostElementId'] }
+check((manifest7_hosts & %w[btn-10 btn-11]).empty?,
+      "default mode: manifest claims NO entry for either nav-button (nothing was auto-wired; got hosts #{manifest7_hosts.inspect})", fails)
+check(Array(manifest7).empty?,
+      "default mode: manifest is an empty array -- no actions were auto-emitted at all (got #{manifest7.inspect})", fails)
+
+puts
 if fails.empty?
   puts 'OK — divider synthesis + button semantics hold (predicate, shapes, parser, residue dedupe)'
   exit 0
