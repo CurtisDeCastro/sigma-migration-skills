@@ -4549,6 +4549,25 @@ if mechanical
   File.write(metrics_path, JSON.pretty_generate(wb_metrics))
   line "metric-binding: #{wb_metrics.size} referenceable DM metric(s) for [Metrics/<name>] refs" if wb_metrics.any?
 
+  # 1.5) Detect Tableau dashboard actions from the .twb BEFORE the chart build.
+  #      Detection (build-postpublish-guide.rb's extract_* methods) only needs
+  #      the .twb, which has been sitting in WORK since Phase 1 — no need to
+  #      wait for wb-ids.json/--sigma-url, those are optional POST-PUBLISH
+  #      enrichment the LATE guide invocation (its two advisory print sites,
+  #      unchanged) applies after publish. Handing the raw detected-entries
+  #      array to build-charts-from-signals.rb via --detected-actions is the
+  #      BRIDGE between detection and emission; this step does not itself
+  #      auto-wire anything (no nav-action/parameter-action emission here —
+  #      that is a follow-up task). --detect-only never writes
+  #      action-ledger.json — only the late guide invocation owns that
+  #      CONTRACTUAL path, so an early run here can never be mistaken by gate
+  #      11 for the authoritative ledger.
+  detected_actions_path = File.join(WORK, 'detected-actions.json')
+  if have_twb
+    run!(['ruby', File.join(HERE, 'build-postpublish-guide.rb'),
+          '--twb', twb, '--detect-only', detected_actions_path], allow_fail: true)
+  end
+
   # 2) Build the chart-element specs from the parsed zones + view CSVs + map.
   #    ONE SIGMA PAGE PER TABLEAU DASHBOARD (bead ptrt) — a fat workbook's 4
   #    dashboards become 4 laid-out pages, each with its own banded layout.
@@ -4562,6 +4581,7 @@ if mechanical
                '--coverage-out', File.join(WORK, 'coverage.json')]
   build_cmd += ['--meta', layout_json.sub(/\.json$/, '-meta.json')] if File.exist?(layout_json.sub(/\.json$/, '-meta.json'))
   build_cmd += ['--auto-controls'] if File.exist?(layout_json.sub(/\.json$/, '-meta.json'))
+  build_cmd += ['--detected-actions', detected_actions_path] if File.exist?(detected_actions_path)
   # Per-dashboard scope (defensive — the layout is already pre-scoped, so a single
   # dashboard yields exactly one page; passing the flags keeps a standalone build
   # honest if it's ever handed a full layout).

@@ -108,6 +108,16 @@ OptionParser.new do |p|
   # source.elementId) — a measure whose inline aggregate matches one binds to a
   # governed [Metrics/<name>] ref instead of re-deriving inline. Absent → inline.
   p.on('--metrics PATH', 'JSON array of DM metrics {name,formula} referenceable on the master element') { |v| opts[:metrics_file] = v }
+  # Bridge input from build-postpublish-guide.rb --detect-only — the raw
+  # detected-entries array (nav-action/parameter-action/etc.) from the .twb
+  # parse, available here to the element-building code below. Optional:
+  # absent or missing file behaves exactly like today (empty list) — this
+  # flag does not itself change what gets emitted (no nav-action/parameter-
+  # action emission yet; that is a follow-up task's job).
+  p.on('--detected-actions PATH',
+       'detected-actions.json from build-postpublish-guide.rb --detect-only (default: none = empty list)') do |v|
+    opts[:detected_actions_file] = v
+  end
 end.parse!
 %i[tab layout mmap out].each { |k| abort("missing --#{k.to_s.tr('_','-')}") unless opts[k] }
 
@@ -116,6 +126,16 @@ end.parse!
 # equivalence (strip the literal 'Master' prefix). Empty/absent → inline, byte-identical.
 opts[:metrics] = (opts[:metrics_file] && File.exist?(opts[:metrics_file]) ?
                   JSON.parse(File.read(opts[:metrics_file], encoding: 'UTF-8')) : [])
+
+# Detected Tableau dashboard actions (the bridge's payload) — reuses
+# ActionLedger.read_manifest, which already returns [] for a nil/missing path
+# and rescues an unparseable file to [], so omitting --detected-actions is
+# byte-identical to today. `opts[:detected_actions]` is a top-level local,
+# visible everywhere below (including inside the element-building loop) via
+# normal closure scoping — no plumbing through method args needed yet.
+opts[:detected_actions] = ActionLedger.read_manifest(opts[:detected_actions_file])
+warn "loaded #{opts[:detected_actions].size} detected action(s) from " \
+     "#{opts[:detected_actions_file] || '(no --detected-actions given)'}"
 
 # 🚧 GATE (Phase 1d) — refuse to build charts until the SOURCE dashboard PNG has
 # been read and enumerated. png-read.json is the artifact of that read; without it
