@@ -92,17 +92,34 @@ def shape_rows(data)
   rows.map { |r| Array(r) }
 end
 
-# A Domo summaryNumber is the card's own KPI value — the thing the migrated
-# `<el>-summary` companion tile plots. `summary.value` is the richer form;
-# `summaryNumber` is the pre-formatted string. Prefer the raw value, fall back
-# to the formatted one, and refuse a `status` that is not a completed run —
-# "not_ran" means Domo declined to compute it, which is not a zero.
+# The card's own KPI value — what the migrated `<el>-summary` companion tile
+# plots. `summary` carries BOTH forms:
+#
+#   {"label": "Sales in Period", "value": "$9.7M", "number": 9690690.9317, ...}
+#
+# TAKE `number`. `value` and the top-level `summaryNumber` are DISPLAY strings,
+# and comparing one of those against Sigma's raw export is a guaranteed false
+# divergence — a bug this returned on its first cut. verify-parity.rb normalises
+# numerically, and in Ruby "$9.7M".to_f is 0.0, so the tile compared 0.0 against
+# 9690690.93 and DIVERGED. Percent cards fail differently and just as silently:
+# "35.61%".to_f is 35.61 while `number` is 0.3561, a 100x mismatch. All 29
+# companion KPI tiles on the live page would have failed this way — a ~45% false
+# failure rate on gate 1, reading exactly like a catastrophic conversion bug and
+# sending the next person hunting something that was never broken.
+#
+# A display string is used ONLY as a last resort, when no numeric form exists at
+# all, and even then it is left to verify-parity to normalise — better a tile
+# that fails loudly than one silently scored on a formatted string.
+#
+# `status` is still honoured: "not_ran" means Domo declined to compute the
+# summary, which is not a zero.
 def summary_value(doc)
   s = doc['summary']
-  if s.is_a?(Hash)
-    status = s['status'].to_s
+  if s.is_a?(Hash) && s['status'].to_s != 'not_ran'
+    n = s['number']
+    return n if n.is_a?(Numeric)
     v = s['value']
-    return v if !v.nil? && v.to_s.strip != '' && status != 'not_ran'
+    return v if !v.nil? && v.to_s.strip != ''
   end
   sn = doc['summaryNumber']
   return sn if !sn.nil? && sn.to_s.strip != ''
