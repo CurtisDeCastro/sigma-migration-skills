@@ -499,8 +499,14 @@ GT_POOL_STUB = <<~'RUBY'
     def self.request(method, path, body: nil, accept: nil, binary: false, content_type: nil, http: nil)
       File.open(ENV['GTP_LOG'], 'a') { |f| f.puts(JSON.generate('m' => method.to_s, 'p' => path)) }
       if method == :post && path == '/v2/workbooks/spec'
-        spec = JSON.parse(body)
-        n_els = spec['pages'][0]['elements'].length
+        posted = JSON.parse(body)
+        # Task 3.2: pooled_sql_probe now nests the workbook document under a
+        # top-level `document` key (the live surface 400s on the old flat
+        # body) — read pages from there. run-ground-truth.rb's own SERIAL
+        # per-entry probe POST (a different, untouched call site) still posts
+        # the flat shape, so tolerate both — same read-side tolerance as
+        # Sigma::CodeRep.document().
+        n_els = (posted['document'] || posted)['pages'][0]['elements'].length
         raise Error, 'stub: HTTP 502 pooled spec POST refused' if n_els > 1 && ENV['GTP_POOL_SPEC_FAIL'] == '1'
         n = File.exist?(ENV['GTP_SEQ']) ? File.read(ENV['GTP_SEQ']).to_i + 1 : 1
         File.write(ENV['GTP_SEQ'], n.to_s)
