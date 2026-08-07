@@ -903,7 +903,7 @@ migrated pages with `sigma-export-png.py` (side-by-side vs `looker-render-dashbo
 1. **Read each migrated PNG** and check it against `refs/layout-visual-qa.md` (no overlaps/stacking,
    no dead zones, controls placed in-band, no clipped KPI titles, even heights, right chart kind/format).
 2. Fix any failure in the spec — for multi-page workbooks use
-   `sigma-skills/sigma-workbooks/scripts/wb-rep.rb` (pull → edit → push) — then **re-render and re-read**.
+   the companion **sigma-workbooks** skill's `scripts/wb-rep.rb` (full-clone: `plugins/sigma-authoring/skills/sigma-workbooks/scripts/wb-rep.rb`; pull → edit → push) — then **re-render and re-read**.
 3. Loop until the render passes inspection.
 
 **Record the RLS outcome here.** If Phase 1d found RLS, the migration summary MUST list, per

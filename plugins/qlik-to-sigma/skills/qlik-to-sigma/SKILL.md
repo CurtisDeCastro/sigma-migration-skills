@@ -95,7 +95,7 @@ independently runnable script if you need to intervene mid-pipeline.
 - `refs/modeling-strategy.md` — faithful reproduction is the DEFAULT (parity is the gate); an upstream OBT / Sigma-native materialization is an OPT-IN optimization for hot, join-heavy dashboards, re-verified against the same oracle. The converter never auto-flattens.
 - `refs/sigma-build-gotchas.md` — the hard-won spec rules (SQL element, workbook master, YAML responses). **This is the difference between a 2xx that errors at query time and a working migration.**
 - The repo `~/Desktop/sigma-data-model-mcp/CLAUDE.md` — Sigma DM spec correctness rules + the verified DEMO_DB.DEMO test connection.
-- `~/sigma-skills/sigma-workbooks/SKILL.md` + the Sigma OpenAPI — canonical workbook spec.
+- the companion **sigma-workbooks** skill (`plugins/sigma-authoring/skills/sigma-workbooks/SKILL.md` in a full clone) + the Sigma OpenAPI — canonical workbook spec.
 
 ---
 
@@ -391,7 +391,7 @@ A workbook that POSTs 200 and passes numeric/bucket parity can still be visually
 1. `migrate-qlik.rb` now **auto-renders** every content page to a full-page PNG (Phase 5b → `<workdir>/visual-qa/<pageId>.png`) so the gate runs by default. To re-render a page manually (token first: `eval "$(scripts/vendor/get-token.sh)"`):
    `python3 scripts/sigma-export-png.py --workbook <id> --page <pageId> --out /tmp/<page>.png --w 1600`
 2. **Read each PNG** and check it against `refs/layout-visual-qa.md` (no overlaps/stacking, no dead zones, controls in their own band, no clipped titles, even heights, right chart kind/format).
-3. Fix any failure in the spec — for multi-page workbooks use `sigma-skills/sigma-workbooks/scripts/wb-rep.rb` (pull → edit element files → push) — then **re-render and re-read**.
+3. Fix any failure in the spec — for multi-page workbooks use the companion **sigma-workbooks** skill's `scripts/wb-rep.rb` (full-clone: `plugins/sigma-authoring/skills/sigma-workbooks/scripts/wb-rep.rb`; pull → edit element files → push) — then **re-render and re-read**.
 4. Declare the migration done on a **clean render**, not on HTTP 200.
 
 ---

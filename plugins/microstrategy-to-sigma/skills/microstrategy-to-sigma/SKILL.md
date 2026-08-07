@@ -411,7 +411,7 @@ the workbook renders as a single-column stack).
 3. **Quality check** — also verify each PNG against the intrinsic checklist (no
    overlaps/stacking, no dead zones, controls in-band, no clipped titles, even
    heights, right format).
-4. Fix any failure in the spec — for multi-page workbooks use `sigma-skills/sigma-workbooks/scripts/wb-rep.rb` (pull → edit → push) — then **re-render and re-compare**.
+4. Fix any failure in the spec — for multi-page workbooks use the companion **sigma-workbooks** skill's `scripts/wb-rep.rb` (full-clone: `plugins/sigma-authoring/skills/sigma-workbooks/scripts/wb-rep.rb`; pull → edit → push) — then **re-render and re-compare**.
 5. Declare the migration done on a render that **matches the source PDF**, not on HTTP 200 and not on row-parity alone. If the user explicitly scoped styling down (e.g. "layout + metrics, skip branding"), record exactly what was descoped — don't silently drop it.
 
 ## Phase 6 — Finalize (hard gate before declaring GREEN)
