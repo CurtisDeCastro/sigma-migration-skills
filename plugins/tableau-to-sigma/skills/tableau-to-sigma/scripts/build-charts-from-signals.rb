@@ -8389,15 +8389,23 @@ elsif opts[:pages_mode] == :dashboard
   # 4 dashboards must become 4 laid-out pages, each with its own title text and
   # its own copy of the dashboard-global controls (ids suffixed for global
   # uniqueness, control refs in calc formulas rewritten per page).
-  dash_order = layout.map { |d| d['dashboard'] }
+  # Storyboards are emitted by build-story-pages.rb, not as ordinary dashboard
+  # pages. parse-twb-layout may also mark hidden/parameter dashboards
+  # `emit_page:false`; retaining either here creates migration-debris tabs.
+  page_layout = layout.reject { |d| d['is_story'] || d['emit_page'] == false }
+  dash_order = page_layout.map { |d| d['dashboard'] }
   by_dash = elements.group_by { |e| e['_dashboard'] }
   pages = []
   seen_el_ids = {}   # element id → true; a worksheet reused on N dashboards
                      # yields N element copies sharing one id → "Duplicate id"
                      # on POST. Namespace the 2nd+ occurrence per page.
   dash_order.each do |dash_name|
-    els = by_dash[dash_name]
-    next if els.nil? || els.empty?
+    els = by_dash[dash_name] || []
+    # A Tableau dashboard can be intentionally chartless (User Guide / help /
+    # methodology tabs made entirely of styled text, images, and buttons).
+    # Those zones already live in styled_text_by_dash; do not discard the page
+    # merely because it has no worksheet-backed element.
+    next if els.empty? && styled_text_by_dash[dash_name].empty?
     els.each { |e| e.delete('_worksheet'); e.delete('_dashboard') }
     d_slug = dash_name.to_s.downcase.gsub(/\W+/, '-')[0..30].sub(/-$/, '')
     # Skip the synthetic "# <dashboard>" title when this dashboard has its OWN top

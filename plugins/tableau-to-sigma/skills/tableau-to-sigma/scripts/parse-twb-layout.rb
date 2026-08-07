@@ -1445,12 +1445,24 @@ end
 # i.e. 1:1 Sigma pages). Export/toggle buttons have no Sigma spec equivalent
 # and become named residue downstream.
 WINDOW_BY_UUID = {}
+VISIBLE_DASHBOARD_WINDOWS = []
 xml.elements.each('//windows/window') do |w|
   sid = w.elements['simple-id']
   WINDOW_BY_UUID[sid.attributes['uuid']] = {
     'name' => w.attributes['name'], 'class' => w.attributes['class']
   } if sid
+  if w.attributes['class'] == 'dashboard' && w.attributes['hidden'] != 'true'
+    VISIBLE_DASHBOARD_WINDOWS << w.attributes['name']
+  end
 end
+VISIBLE_DASHBOARD_WINDOWS.compact!
+VISIBLE_DASHBOARD_WINDOWS.uniq!
+STORY_CAPTURED_SHEETS = []
+xml.elements.each('//story-point') do |story_point|
+  captured = story_point.attributes['captured-sheet']
+  STORY_CAPTURED_SHEETS << captured if captured
+end
+STORY_CAPTURED_SHEETS.uniq!
 
 def zone_button_fields(z)
   b = z.elements['button'] or return {}
@@ -1919,6 +1931,13 @@ xml.elements.each('//dashboard') do |d|
   dash_h = {
     'dashboard'     => d.attributes['name'],
     'is_story'      => is_story,
+    # Tableau's <windows> collection is the visible-tab contract. A dashboard
+    # absent from it is hidden migration plumbing (parameter hosts are common),
+    # not a Sigma page. Older/minimal TWBs may omit <windows>; fail open there.
+    # Story-captured sheets remain eligible so build-story-pages can clone them.
+    'emit_page'     => (VISIBLE_DASHBOARD_WINDOWS.empty? ||
+                        VISIBLE_DASHBOARD_WINDOWS.include?(dash_name) ||
+                        STORY_CAPTURED_SHEETS.include?(dash_name)),
     'canvas_px'     => canvas_px,
     # Theme channel: this dashboard's Format▸Dashboard rules + the workbook's
     # Format▸Workbook rules (lib/theme_derive resolves precedence).
