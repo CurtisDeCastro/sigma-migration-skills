@@ -136,8 +136,8 @@ dm['name'] = opts[:name] if opts[:name]
 # is the customer's manual "proper-case element naming" workaround, automated. Only
 # rewrite a base element's OWN 2-segment ref whose prefix matches NO element name — a
 # valid cross-element ref (prefix IS a known element) is left untouched.
-known_norm = []
-(dm['pages'] || []).each { |pg| (pg['elements'] || []).each { |el| known_norm << el['name'].to_s.downcase.gsub(/[^a-z0-9]/, '') } }
+known_names = []
+(dm['pages'] || []).each { |pg| (pg['elements'] || []).each { |el| known_names << el['name'].to_s } }
 reprefixed = 0
 (dm['pages'] || []).each do |pg|
   (pg['elements'] || []).each do |el|
@@ -151,7 +151,10 @@ reprefixed = 0
       next unless m
       pfx = m[1]
       next if pfx == name # already references its own element
-      next if known_norm.include?(pfx.downcase.gsub(/[^a-z0-9]/, '')) # valid ref to a known element
+      # Sigma element references are literal. Treating spaces/underscores or
+      # case as equivalent makes `[Cost Center/X]` look valid when the actual
+      # element is `COST_CENTER`, leaving a dependency-not-found formula.
+      next if known_names.include?(pfx) # exact valid ref to a known element
       c['formula'] = "[#{name}/#{m[2]}]"
       reprefixed += 1
     end

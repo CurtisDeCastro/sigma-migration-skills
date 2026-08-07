@@ -16,7 +16,7 @@ lowercase, mostly-ungranted multi-schema, 100s of tables, heavy `CALCULATE`.
 ## VERIFIED gaps (grepped; beaded)
 | Gap | Stage | Bead |
 |---|---|---|
-| M-parser misses whole warehouse families: SQL-family flat `[Schema=,Item=]`, the common `Sql.Databases()` two-tier (Kind db step **then** flat Schema/Item), Databricks shape-B `{[Item=,Schema=,Catalog=]}`, native-query (`Value.NativeQuery`/`[Query=SELECT…]`), BigQuery Name-only 3-tier | convert | `beads-sigma-lanq.9` (P1) |
+| M-parser warehouse families: SQL-family flat `[Schema=,Item=]`, `Sql.Databases()` two-tier, Databricks shape-B, BigQuery Name-only 3-tier | convert | `beads-sigma-lanq.9` (path families remain regression targets; do not lose them during re-vendor) |
 | Field parameters (`NAMEOF` calc tables) → phantom warehouse table; should be a control-driven `Switch([ctl],…)` picker | convert | `beads-sigma-lanq.10` (P2) |
 | Multi-partition tables + incremental-refresh `refreshPolicy.sourceExpression` + Direct Lake/`entity` partitions (only `partitions[0]` read) | convert | `beads-sigma-lanq.11` (P2) |
 | Relationship fidelity: many-to-many + bidirectional `crossFilteringBehavior` not inspected (fan-out / wrong subtotals) | convert | `beads-sigma-lanq.12` (P2) |
@@ -32,7 +32,10 @@ converter) — the critic's "completely absent" was wrong. Don't bead it.
 ## Already-handled (don't re-flag)
 Kind-chain nav (Snowflake/Databricks-A/BigQuery-with-Kind/Athena), Redshift 2-level
 Name-nav, calculated tables (CALENDAR/GENERATESERIES → SQL spine; else loud
-placeholder), calc groups (excluded as source + loud item stubs), RLS/OLS
+placeholder), native-query partitions (`Value.NativeQuery` / connector `Query=`
+preserved as complete named Custom SQL by `lib/pbi_native_query.rb`; post-query M
+steps gate), calc groups (excluded as source + loud item stubs; array-valued item
+expressions normalized before conversion), RLS/OLS
 (makeRlsSecurity/makeClsSecurity, surfaced not injected), USERELATIONSHIP (activated
 as named alt join), inactive rels (only emitted if a measure uses them), rowNumber/
 isGenerated skipped, calc columns (window/EARLIER → SQL helpers), binary skipped,
