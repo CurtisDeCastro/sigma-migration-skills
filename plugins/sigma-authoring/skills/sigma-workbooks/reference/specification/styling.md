@@ -53,30 +53,31 @@ never an override of a user's stated branding or a migration's source fidelity.*
 
 ## Workbook theme (2026-06-18 release; `settings.theme.overrides` schema documented 2026-06-25)
 
-A workbook carries a **top-level theme**, alongside `pages` and `layout`:
+A workbook carries a theme under `document.settings`, alongside `pages` and `layout`:
 
 ```yaml
 name: My Workbook
-schemaVersion: 1
-pages: [ ... ]
-layout: ...
-settings:                    # document-level settings (theme + navigation)
-  theme:
-    name: Dark               # built-in: Light | Dark | Surface  — OR an org theme UUID
-    overrides:               # optional — colors / fonts / layout style / table defaults
-      colors:
-        text: "#FFFFFF"
-        highlight: "#1E88E5"
-        surface: "#101826"
+document:
+  schemaVersion: 1
+  pages: [ ... ]
+  layout: ...
+  settings:
+    theme:
+      name: Dark           # built-in: Light | Dark | Surface — OR an org theme UUID
+      overrides:           # optional — colors / fonts / layout style / table defaults
+        colors:
+          text: "#FFFFFF"
+          highlight: "#1E88E5"
+          surface: "#101826"
 ```
 
-> The theme moved. It was once a top-level `themeName` + `themeOverrides` pair;
-> both were removed from the API and are now `settings.theme.name` and
-> `settings.theme.overrides` — inside `document`, alongside `pages`/`layout`.
-> The individual override keys below are unchanged. A spec that still writes the
-> old pair loses its whole theme silently (no error).
+> **The theme moved.** It was once a top-level `themeName` + `themeOverrides` pair; both
+> were **removed from the API** and are now `settings.theme.name` and
+> `settings.theme.overrides` — inside `document`, alongside `pages`/`layout`. The individual
+> override keys below are unchanged; only the container moved. A spec that still writes the
+> old pair loses its whole theme **silently** (no error, just an unthemed workbook).
 
-The **full `settings.theme.overrides` schema is now in the public OpenAPI** (`.../spec` POST/PUT request body and GET response — added 2026-06-25; earlier release notes shipped the feature before the spec documented it). The OpenAPI is the source of truth for every field; the list below is the verified summary.
+The **full overrides schema is in the public OpenAPI** (`.../spec` POST/PUT request body and GET response). The OpenAPI is the source of truth for every field; the list below is the verified summary.
 
 ### `settings.theme.name`
 
@@ -564,8 +565,9 @@ migration's source fidelity or a user's own branding always overrides this.
 - Single-series (default): `{ "color": { "by": "single", "value": theme[:categorical][0] } }` —
   merge onto a bar/line/area/combo element (Recipe 5's single-hue case).
 - Categorical (`categorical: true`): `{ "settings": { "theme": { "overrides": { "categoricalScheme": theme[:categorical] } } } }`
-  — deep-merge at the **workbook** level (inside `document`, a sibling of `pages`/`layout`),
-  not per-element. Deep-merge, not shallow: a shallow merge of `settings` clobbers `navigation`. This is the
+  — **deep-merge** at the workbook level (inside `document`, a sibling of `pages`/`layout`), not per-element.
+  Deep-merge, not shallow: a shallow merge of `settings` clobbers `navigation`.
+  — merge at the **workbook** level (a sibling of `pages`/`layout`), not per-element. This is the
   verified path for donut/pie slice colors too (per-element `color.scheme` is still silently
   dropped there — see Recipe 5 / *Workbook theme* above).
 

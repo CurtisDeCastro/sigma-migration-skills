@@ -46,7 +46,7 @@ module Styling
   SURFACES = {
     kpi_name_color: true,     # name:{text,color} on a kpi-chart (value.color bonus also GO, not emitted here)
     chart_color_by: true,     # color:{by:"single",value:"#hex"} on a chart element
-    categorical_scheme: true, # workbook-level settings.theme.overrides:{categoricalScheme:[...]}
+    categorical_scheme: true, # document.settings.theme.overrides:{categoricalScheme:[...]}
     format_string: true,      # format:{kind:"number",formatString:<d3>} — Excel-style formatString is 400-rejected, never emitted
     container_style: true,    # container style:{backgroundColor,borderRadius,borderColor,borderWidth} (borderRadius, NOT cornerRadius; never combine with padding)
     typography: true,         # settings.theme.overrides.titleFont + per-element name:{fontSize} — verified GO live, but no helper below emits it (out of scope here); kept for a complete surface map
@@ -135,8 +135,8 @@ module Styling
   def self.chart_color(theme, categorical: false, surfaces: SURFACES)
     if categorical
       return {} unless surfaces[:categorical_scheme]
-      # Workbook-level palette patch. Lives at settings.theme.overrides — the
-      # removed top-level themeOverrides key is silently dropped by the API.
+      # Workbook-level palette patch at settings.theme.overrides (the removed
+      # top-level themeOverrides key is silently dropped by the API).
       # NOTE for callers: this is a NESTED patch, so deep-merge it into the spec;
       # a shallow merge of `settings` would clobber sibling settings (navigation).
       { 'settings' => { 'theme' => { 'overrides' => { 'categoricalScheme' => theme[:categorical] } } } }
