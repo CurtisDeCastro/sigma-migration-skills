@@ -107,12 +107,17 @@ if !opts[:finalize]
   abort('--workbook-id required for pass 1') unless opts[:wb]
   $LOAD_PATH.unshift File.expand_path('lib', __dir__)
   require 'sigma_rest'
+  require 'code_rep'
 
   warn "Parity PASS 1: reading workbook spec #{opts[:wb]}"
   # binary:true returns the raw body — the spec endpoint answers in YAML even
   # when asked for JSON, so parse both.
   raw = Sigma.request(:get, "/v2/workbooks/#{opts[:wb]}/spec", binary: true)
-  spec = parse_spec(raw)
+  # Live GET now nests non-metadata fields under `document` (verified 2026-08-03/04);
+  # unwrap so both this pass's flat `spec['pages']` read below and the on-disk
+  # wb-readback.json stay the flat shape this script (and any downstream reader)
+  # expects.
+  spec = Sigma::CodeRep.document(parse_spec(raw))
   File.write(File.join(opts[:dir], 'wb-readback.json'), JSON.pretty_generate(spec))
 
   charts = []
