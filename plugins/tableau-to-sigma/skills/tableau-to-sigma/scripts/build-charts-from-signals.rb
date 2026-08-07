@@ -6802,15 +6802,27 @@ end
 # (the workbook URL doesn't exist until the POST returns).
 action_id_registry = {} # workbook-wide — ActionLedger.new_id, never per-dash/per-zone
 emitted_actions = []
-# (dash_name, pre-namespacing host id) → the SAME hash object held in
-# emitted_actions, so the --page-per-dashboard rename hook below (namespace_ids)
-# can mutate the manifest entry in place when its host element id gets
-# suffixed. Keyed by a compound (dashboard, host) pair, NOT by host alone —
-# two unrelated dashboards' buttons can share a host string ("btn-10") purely
-# because Tableau zone ids restart per dashboard, and a stem-only key (the
-# pattern chart-provenance uses, which assumes stem collisions are the SAME
-# worksheet reused) would silently pair one dashboard's caption with another's
-# action.
+# (dash_name, pre-namespacing host id) → an ARRAY of the SAME hash objects held
+# in emitted_actions, so the --page-per-dashboard rename hooks below
+# (namespace_ids and the els.map! pass) can mutate every affected manifest entry
+# in place when its host element id gets suffixed. Keyed by a compound
+# (dashboard, host) pair, NOT by host alone — two unrelated dashboards' buttons
+# can share a host string ("btn-10") purely because Tableau zone ids restart per
+# dashboard, and a stem-only key (the pattern chart-provenance uses, which
+# assumes stem collisions are the SAME worksheet reused) would silently pair one
+# dashboard's caption with another's action.
+#
+# The value is an ARRAY, never a single entry: ONE host element can carry
+# actions of MORE THAN ONE KIND (a worksheet with both a <nav-action> and an
+# <edit-parameter-action> yields an on-select→navigate AND an
+# on-select→set-control-value on the same chart, both keyed by the same
+# (dashboard, host) pair). A scalar value made the second writer EVICT the
+# first; the rename pass then synced only the survivor, and the evicted entry
+# shipped a stale hostElementId/actionId. put-layout.rb:224 looks the manifest
+# up BY actionId against the posted spec — a stale id misses, and the whole
+# navigate.target.page repair is skipped with NO warning, leaving the
+# provisional page id live in the published workbook. Action counts still
+# match, so no gate catches it. Append here; iterate at both rename sites.
 emitted_action_index = {}
 nav_button_records = []
 unless opts[:pages_mode] == :worksheet
@@ -6876,7 +6888,7 @@ unless opts[:pages_mode] == :worksheet
             'effects'        => action['effects']
           }
           emitted_actions << manifest_entry
-          emitted_action_index[[dash['dashboard'], host]] = manifest_entry
+          (emitted_action_index[[dash['dashboard'], host]] ||= []) << manifest_entry
           e = { 'id' => host, 'kind' => 'button', 'text' => label,
                 'appearance' => 'filled', 'align' => 'center', 'size' => 'small',
                 'actions' => [action] }
@@ -6981,7 +6993,7 @@ unless opts[:pages_mode] == :worksheet
       'effects'        => action['effects']
     }
     emitted_actions << manifest_entry
-    emitted_action_index[[host_el['_dashboard'], host_el['id']]] = manifest_entry
+    (emitted_action_index[[host_el['_dashboard'], host_el['id']]] ||= []) << manifest_entry
     (host_el['actions'] ||= []) << action
   end
 end
@@ -7961,7 +7973,10 @@ end
 #   - a control with no filters[] makes this a SILENT no-op. There is no direct
 #     chart->chart filter effect; it always routes through a control.
 #   - the clicked column must exist on the HOST element for {type: "column"} to
-#     bind. When it does not, that is residue, not a guess.
+#     bind, and the effect carries that column's ID. When the host does not
+#     carry it, that is residue, not a guess. Enforced by the HOST-COLUMN
+#     BINDING guard below — `mmap` answers a workbook-global question and
+#     cannot enforce this on its own.
 unless opts[:pages_mode] == :worksheet
   Array(opts[:detected_actions]).each do |det|
     next unless det['kind'] == 'parameter-action'
@@ -7993,6 +8008,40 @@ unless opts[:pages_mode] == :worksheet
                   'add a master-columns.json regex, or wire it by hand (named residue)'
       next
     end
+
+    # HOST-COLUMN BINDING — the third hard constraint in this block's header,
+    # and the one `mmap` alone cannot enforce. `ActionColumnResolver.resolve`
+    # answers a WORKBOOK-GLOBAL question ("which Sigma column NAME does this
+    # Tableau ref mean?"); {type: "column"} asks a per-element one ("which
+    # column OF THE HOST does the clicked mark carry?"). A source field that
+    # resolves globally but is not on this chart binds to nothing: the click
+    # sets the control to the wrong value (or to nothing at all), through a
+    # schema-valid action every gate passes — action_column_resolver.rb's own
+    # stated anti-goal. Proven before this guard existed: an [Order ID] source
+    # field on a host carrying only Region / Profit Ratio / Region Not Null
+    # emitted column "Order ID" with no warning at all.
+    #
+    # The effect takes the host column's **id**, not its name — the
+    # live-probed shape is `value: {type: "column", column: <columnId>}` (the
+    # design's VERIFIED SIGMA SHAPES). Host columns are {id:, name:, formula:}
+    # (e.g. {"id" => "x-el-sales-by-region", "name" => "Region"}), and their
+    # `name` is the same master-map `name` the resolver returns, so an exact
+    # match is the normal case; the strip/case-insensitive second pass covers
+    # incidental whitespace/casing drift between the two, never a different
+    # column. No match at all is RESIDUE, never a guess.
+    host_cols = Array(host_el['columns']).select { |c| c.is_a?(Hash) && c['id'] }
+    host_col  = host_cols.find { |c| c['name'].to_s == col.to_s } ||
+                host_cols.find { |c| c['name'].to_s.strip.casecmp(col.to_s.strip).zero? }
+    if host_col.nil?
+      warnings << "parameter-action '#{caption}' source field " \
+                  "#{det['sourceFieldRef'].inspect} resolves to column #{col.inspect}, which is " \
+                  "NOT a column of its host element '#{host_el['id']}' " \
+                  "(has: #{host_cols.map { |c| c['name'] }.inspect}) — a {type: \"column\"} value " \
+                  'can only bind a column the clicked mark actually carries, so this would set the ' \
+                  'control to the wrong value; wire it by hand (named residue)'
+      next
+    end
+    col_id = host_col['id']
 
     # The control the parameter already migrated to. A Tableau parameter's
     # auto-generated control lives in `param_controls` (built from
@@ -8031,7 +8080,12 @@ unless opts[:pages_mode] == :worksheet
                       # emitted_action_index keeps nav-action/nav-button
                       # references correct across that same per-page rename.
                       'control' => ctl['controlId'],
-                      'value'   => { 'type' => 'column', 'column' => col } }]
+                      # The HOST element's columnId (not a bare column name):
+                      # the live-probed shape is
+                      # {type: "column", column: <columnId>}. Resolved just
+                      # above against host_el['columns'] — see the
+                      # HOST-COLUMN BINDING note there.
+                      'value'   => { 'type' => 'column', 'column' => col_id } }]
     }
     errs = ActionLedger.validate_action(action)
     raise "emitted an invalid parameter-action on #{host_el['id']}: #{errs.join('; ')}" if errs.any?
@@ -8046,7 +8100,7 @@ unless opts[:pages_mode] == :worksheet
       'effects'       => action['effects']
     }
     emitted_actions << manifest_entry
-    emitted_action_index[[host_el['_dashboard'], host_el['id']]] = manifest_entry
+    (emitted_action_index[[host_el['_dashboard'], host_el['id']]] ||= []) << manifest_entry
     (host_el['actions'] ||= []) << action
   end
 end
@@ -8774,16 +8828,25 @@ elsif opts[:pages_mode] == :dashboard
           if (pv = $chart_provenance[stem])
             $chart_provenance[ns] = pv.merge('dashboard' => dash_name)
           end
-          # A nav-button's manifest entry (keyed by the EXACT (dashboard, host)
-          # pair — never by stem alone, since two unrelated dashboards' buttons
-          # can share a host string) gets updated IN PLACE so its
-          # hostElementId/actionId track the same rename this gsub is about to
-          # apply to the real element. Without this, write_manifest below would
-          # ship a hostElementId/actionId that no longer exists in the spec —
-          # exactly the staleness the manifest exists to prevent.
-          if (entry = emitted_action_index[[dash_name, stem]])
+          # EVERY manifest entry hosted here (keyed by the EXACT (dashboard,
+          # host) pair — never by stem alone, since two unrelated dashboards'
+          # buttons can share a host string) gets updated IN PLACE so its
+          # hostElementId/actionId/effects track the same rename this gsub is
+          # about to apply to the real element. Without this, write_manifest
+          # below would ship a hostElementId/actionId that no longer exists in
+          # the spec — exactly the staleness the manifest exists to prevent.
+          # ITERATE, never `= entry`: one host can carry actions of several
+          # kinds (see the emitted_action_index declaration), and syncing only
+          # one of them re-creates the stale-actionId silent skip.
+          Array(emitted_action_index[[dash_name, stem]]).each do |entry|
             entry['hostElementId'] = ns
             entry['actionId'] = entry['actionId'].to_s.gsub(stem, ns)
+            # Effects can EMBED the stem too — a set-control-value's
+            # value.column is the host column's id (x-<stem>/y-<stem>/…), which
+            # the whole-element gsub below rewrites in the spec. The manifest
+            # copy must move in lockstep or probe-actions-readback.rb diffs a
+            # pre-rename column id against the posted one.
+            entry['effects'] = JSON.parse(entry['effects'].to_json.gsub(stem, ns)) if entry['effects']
           end
           JSON.parse(el.to_json.gsub(stem, ns))
         else
@@ -8814,18 +8877,29 @@ elsif opts[:pages_mode] == :dashboard
         if (pv = $chart_provenance[stem])
           $chart_provenance[ns] = pv.merge('dashboard' => dash_name)
         end
-        # A nav-action's manifest entry (keyed by the EXACT (dashboard, host)
-        # pair, same as namespace_ids above) gets updated IN PLACE so its
-        # hostElementId/actionId track the same rename this gsub is about to
-        # apply to the real element. Without this, put-layout.rb's
+        # EVERY manifest entry hosted here (keyed by the EXACT (dashboard,
+        # host) pair, same as namespace_ids above) gets updated IN PLACE so its
+        # hostElementId/actionId/effects track the same rename this gsub is
+        # about to apply to the real element. Without this, put-layout.rb's
         # navigate.target.page repair looks up the manifest by actionId
         # against the POSTED spec's action id, finds nothing (stale), and
         # silently skips the repair — no warning — leaving the provisional
         # page id live. Mirrors namespace_ids exactly; do not invent a
         # different mechanism.
-        if (entry = emitted_action_index[[dash_name, stem]])
+        #
+        # ITERATE over an ARRAY, never `if (entry = ...)`: one chart element
+        # can host BOTH a nav-action (on-select→navigate) and a
+        # parameter-action (on-select→set-control-value) when its worksheet is
+        # the source of both Tableau actions. A scalar index let the second
+        # emitter evict the first, and syncing only the survivor left the
+        # evicted entry's actionId stale — the exact silent-skip this block
+        # exists to prevent, reintroduced through the back door.
+        Array(emitted_action_index[[dash_name, stem]]).each do |entry|
           entry['hostElementId'] = ns
           entry['actionId'] = entry['actionId'].to_s.gsub(stem, ns)
+          # See namespace_ids above: value.column is a host column id, which
+          # embeds the stem, so the manifest's effects must be rewritten too.
+          entry['effects'] = JSON.parse(entry['effects'].to_json.gsub(stem, ns)) if entry['effects']
         end
         src_before = el.dig('source', 'elementId')
         el2 = JSON.parse(el.to_json.gsub(stem, ns))
