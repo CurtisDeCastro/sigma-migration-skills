@@ -63,4 +63,51 @@ class TestCodeRep < Minitest::Test
       assert_nil wrapped['agents']
     end
   end
+
+  # --- theme_settings: the ONE place that knows the theme path ----------------
+  #
+  # `themeName` / `themeOverrides` were REMOVED from the workbook spec; theming
+  # is `document.settings.theme.{name,overrides}`. Live-probed 2026-08-06:
+  # `document.themeName` 400s ("no longer supported"), and a top-level
+  # `themeName` is silently ignored. Emitters must go through this helper.
+
+  def test_theme_settings_name_only
+    assert_equal({ 'settings' => { 'theme' => { 'name' => 'Dark' } } },
+                 Sigma::CodeRep.theme_settings(name: 'Dark'))
+  end
+
+  def test_theme_settings_overrides_only
+    ov = { 'categoricalScheme' => %w[#111 #222] }
+    assert_equal({ 'settings' => { 'theme' => { 'overrides' => ov } } },
+                 Sigma::CodeRep.theme_settings(overrides: ov))
+  end
+
+  def test_theme_settings_both
+    got = Sigma::CodeRep.theme_settings(name: 'Light', overrides: { 'hasCards' => 'shown' })
+    assert_equal 'Light', got.dig('settings', 'theme', 'name')
+    assert_equal({ 'hasCards' => 'shown' }, got.dig('settings', 'theme', 'overrides'))
+  end
+
+  def test_theme_settings_empty_when_nothing_to_say
+    assert_equal({}, Sigma::CodeRep.theme_settings)
+    assert_equal({}, Sigma::CodeRep.theme_settings(overrides: {}))
+  end
+
+  def test_theme_settings_never_emits_the_removed_keys
+    got = Sigma::CodeRep.theme_settings(name: 'Dark', overrides: { 'hasCards' => 'shown' })
+    flat = got.to_s
+    refute_includes flat, 'themeName'
+    refute_includes flat, 'themeOverrides'
+  end
+
+  def test_merge_settings_is_deep_and_non_destructive
+    doc = { 'schemaVersion' => 1, 'settings' => { 'navigation' => { 'tabs' => 'shown' } } }
+    out = Sigma::CodeRep.merge_settings(doc, Sigma::CodeRep.theme_settings(name: 'Dark'))
+    assert_equal({ 'tabs' => 'shown' }, out.dig('settings', 'navigation'),
+                 'merging a theme must not clobber sibling settings like navigation')
+    assert_equal 'Dark', out.dig('settings', 'theme', 'name')
+    assert_equal 1, out['schemaVersion']
+    # input untouched
+    refute doc['settings'].key?('theme')
+  end
 end

@@ -64,6 +64,36 @@ class TestCodeRepSettingsAgents(unittest.TestCase):
             self.assertNotIn('settings', wrapped)
             self.assertNotIn('agents', wrapped)
 
+    # --- theme_settings: the ONE place that knows the theme path ------------
+    #
+    # themeName/themeOverrides were REMOVED. document.themeName is a hard 400;
+    # a top-level themeName is silently ignored. Emitters go through here.
+
+    def test_theme_settings_name_only(self):
+        self.assertEqual(code_rep.theme_settings(name='Dark'),
+                         {'settings': {'theme': {'name': 'Dark'}}})
+
+    def test_theme_settings_overrides_only(self):
+        ov = {'categoricalScheme': ['#111', '#222']}
+        self.assertEqual(code_rep.theme_settings(overrides=ov),
+                         {'settings': {'theme': {'overrides': ov}}})
+
+    def test_theme_settings_empty_when_nothing_to_say(self):
+        self.assertEqual(code_rep.theme_settings(), {})
+        self.assertEqual(code_rep.theme_settings(overrides={}), {})
+
+    def test_theme_settings_never_emits_removed_keys(self):
+        flat = str(code_rep.theme_settings(name='Dark', overrides={'hasCards': 'shown'}))
+        self.assertNotIn('themeName', flat)
+        self.assertNotIn('themeOverrides', flat)
+
+    def test_merge_settings_is_deep_and_non_destructive(self):
+        doc = {'schemaVersion': 1, 'settings': {'navigation': {'tabs': 'shown'}}}
+        out = code_rep.merge_settings(doc, code_rep.theme_settings(name='Dark'))
+        self.assertEqual(out['settings']['navigation'], {'tabs': 'shown'})
+        self.assertEqual(out['settings']['theme']['name'], 'Dark')
+        self.assertNotIn('theme', doc['settings'])
+
 
 if __name__ == '__main__':
     unittest.main()

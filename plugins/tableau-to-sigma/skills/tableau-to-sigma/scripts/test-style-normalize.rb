@@ -152,7 +152,7 @@ check(col.call('p8')['format'] == { 'kind' => 'number', 'formatString' => ',.1%'
 # ---- SN-5: royal default scheme guard --------------------------------------
 puts '-- SN-5 default scheme guard'
 themed = lambda do |cfs|
-  { 'themeOverrides' => { 'categoricalScheme' => ['#52baee', '#c5e8f9'] },
+  { 'settings' => { 'theme' => { 'overrides' => { 'categoricalScheme' => ['#52baee', '#c5e8f9'] } } },
     'pages' => [{ 'elements' => [{ 'id' => 'pv-s', 'kind' => 'pivot-table',
       'totals' => {}, 'conditionalFormats' => cfs }] }] }
 end
@@ -192,7 +192,7 @@ check(spec_nt['pages'][0]['elements'][0]['conditionalFormats'][0]['scheme'] ==
 # uppercase theme hue still derives (downcased) correctly
 spec_uc = themed.call([{ 'type' => 'dataBars', 'columnIds' => %w[v1],
                          'scheme' => ['#1a70f1'] }])
-spec_uc['themeOverrides']['categoricalScheme'] = ['#52BAEE']
+spec_uc['settings']['theme']['overrides']['categoricalScheme'] = ['#52BAEE']
 StyleNormalize.normalize!(spec_uc)
 check(spec_uc['pages'][0]['elements'][0]['conditionalFormats'][0]['scheme'] == derived,
       'uppercase theme hue normalizes to the same derived scheme', fails)
@@ -209,7 +209,7 @@ check(StyleNormalize.el_name({}) == '' && StyleNormalize.el_name(nil) == '',
 puts '-- integration mini-spec + idempotence'
 mini = {
   'name' => 'Hero Art Mini',
-  'themeOverrides' => { 'categoricalScheme' => ['#52baee', '#c5e8f9', '#f1f1f1'] },
+  'settings' => { 'theme' => { 'overrides' => { 'categoricalScheme' => ['#52baee', '#c5e8f9', '#f1f1f1'] } } },
   'pages' => [{ 'name' => 'Dashboard', 'elements' => [
     { 'id' => 'el-room', 'kind' => 'pivot-table', 'name' => 'Room Presets',
       'columns' => [

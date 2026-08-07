@@ -35,7 +35,7 @@
 #   chart-categorical (bar-chart)         — SURFACE 3: color:{by:category,
 #                                           column} with NO per-element scheme,
 #                                           relying on workbook-level
-#                                           themeOverrides.categoricalScheme;
+#                                           settings.theme.overrides.categoricalScheme;
 #                                           a side-experiment then adds an
 #                                           explicit per-element `scheme` (the
 #                                           documented Recipe-5 alternative) to
@@ -54,7 +54,7 @@
 #                                           or the docs' `borderRadius` is the
 #                                           real one) + a top-level (NOT
 #                                           pages[].layout) <GridContainer>.
-#   workbook-level themeOverrides.titleFont — SURFACE 6: the documented
+#   workbook-level settings.theme.overrides.titleFont — SURFACE 6: the documented
 #                                           workbook-wide typography lever,
 #                                           tested against the two bare chart
 #                                           titles (which carry no per-element
@@ -122,7 +122,7 @@ HERO_BG              = '#0B3D91' # surface 5: container style.backgroundColor
 # distinct from every other test color (checked against each within the
 # pixel-probe's tol=40) so no region's signal can be attributed to this one.
 HERO_BORDER          = '#1E293B'
-TITLEFONT_COLOR      = '#7C3AED' # surface 6: workbook-level themeOverrides.titleFont
+TITLEFONT_COLOR      = '#7C3AED' # surface 6: workbook-level settings.theme.overrides.titleFont
 TABLE_NAME_COLOR     = '#DC2626' # surface 6: per-element `name` object (table)
 
 # Generic demo data — region/category/revenue/orders/margin. No customer/
@@ -270,10 +270,17 @@ def build_spec(home, schema_version, src_formula_fn, flags)
     'folderId' => home,
     'schemaVersion' => schema_version,
     'description' => 'Live GO/NO-GO proof of dashboard-styling spec surfaces. Throwaway test artifact.',
-    'themeName' => 'Light',
-    'themeOverrides' => {
-      'categoricalScheme' => CATEGORICAL_HEXES,
-      'titleFont' => { 'color' => TITLEFONT_COLOR, 'fontSize' => 20, 'fontWeight' => 'bold' },
+    # Theme path: document.settings.theme.{name,overrides}. The old top-level
+    # themeName/themeOverrides keys were REMOVED — a top-level themeName is
+    # silently ignored, so probing the old shape would report a false NO-GO.
+    'settings' => {
+      'theme' => {
+        'name' => 'Light',
+        'overrides' => {
+          'categoricalScheme' => CATEGORICAL_HEXES,
+          'titleFont' => { 'color' => TITLEFONT_COLOR, 'fontSize' => 20, 'fontWeight' => 'bold' },
+        },
+      },
     },
     'pages' => [
       {
@@ -661,8 +668,8 @@ begin
     kpi_value: kpi_el && kpi_el['value'],
     chart_single_color: cs_el && cs_el['color'],
     chart_cat_color: cc_el && cc_el['color'],
-    workbook_categorical_scheme: spec['themeOverrides'] && spec['themeOverrides']['categoricalScheme'],
-    workbook_title_font: spec['themeOverrides'] && spec['themeOverrides']['titleFont'],
+    workbook_categorical_scheme: spec.dig('settings', 'theme', 'overrides', 'categoricalScheme'),
+    workbook_title_font: spec.dig('settings', 'theme', 'overrides', 'titleFont'),
     table_name: tbl_el && tbl_el['name'],
     table_formats: tbl_el && (tbl_el['columns'] || []).map { |c| { id: c['id'], format: c['format'] } },
     hero_style: hero_el && hero_el['style'],
@@ -682,7 +689,7 @@ begin
 
   # --- side experiment: does an EXPLICIT per-element `scheme` (the
   # documented Recipe-5 shape) do what the workbook-level
-  # themeOverrides.categoricalScheme alone didn't? Same workbook, one extra
+  # settings.theme.overrides.categoricalScheme alone didn't? Same workbook, one extra
   # PUT + a targeted element-only render (cheaper than a full-page re-render).
   flags[:categorical_explicit_scheme] = true
   spec2 = build_spec(home, schema_version, src_formula_candidates.find { |c| c[:label] == resolved[:candidate] }[:fn], flags)
@@ -791,11 +798,11 @@ begin
         per_element_explicit_scheme: { attempted: !probe2.nil?, rendered: !!cat_explicit_scheme_rendered },
         surviving_shape:
           if cat_theme_only_rendered
-            { themeOverrides: { categoricalScheme: CATEGORICAL_HEXES } }
+            { settings: { theme: { overrides: { categoricalScheme: CATEGORICAL_HEXES } } } }
           elsif cat_explicit_scheme_rendered
             { color: { by: 'category', column: '<category-col-id>', scheme: CATEGORICAL_HEXES } }
           end,
-        note: 'brief literally asks for workbook-level themeOverrides.categoricalScheme driving a bar chart ' \
+        note: 'brief literally asks for workbook-level settings.theme.overrides.categoricalScheme driving a bar chart ' \
               'with NO per-element color.scheme. Also tested the documented Recipe-5 alternative (an explicit ' \
               'per-element `color.scheme`) as a side experiment, since that is the field the module would fall ' \
               'back to if the workbook-level lever does not drive non-donut/pie charts.',
@@ -840,7 +847,7 @@ begin
         go: !!((titlefont_survived && titlefont_rendered) || (table_name_object_survived && table_name_object_rendered)),
         workbook_level_titleFont: { readback_survived: !!titlefont_survived, rendered: !!titlefont_rendered,
                                      surviving_shape: (titlefont_survived && titlefont_rendered ?
-                                       { themeOverrides: { titleFont: { color: TITLEFONT_COLOR, fontSize: 20, fontWeight: 'bold' } } } : nil) },
+                                       { settings: { theme: { overrides: { titleFont: { color: TITLEFONT_COLOR, fontSize: 20, fontWeight: 'bold' } } } } } : nil) },
         per_element_name_object: {
           readback_survived: !!table_name_object_survived,
           rendered_color: !!table_name_object_rendered,
@@ -855,7 +862,7 @@ begin
                   'is now pixel-verified via rendered_color above (a distinct test hex from the workbook-wide ' \
                   'titleFont, so a hit here cannot be confused with that lever).'),
         },
-        note: 'stretch surface. Two INDEPENDENT levers both tested live: workbook-wide themeOverrides.titleFont ' \
+        note: 'stretch surface. Two INDEPENDENT levers both tested live: workbook-wide settings.theme.overrides.titleFont ' \
               '(applies to every element title with no per-element override) and a per-element `name` object ' \
               'with fontSize/color (table only, isolated with a different test hex) — the per-element color, ' \
               'where present, wins over the workbook-wide one (see table_title pixel evidence).',

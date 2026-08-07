@@ -1650,12 +1650,18 @@ spec['folderId'] = opts[:folder] if opts[:folder]
 #      border is skipped on a dark QS theme, which also flips the base to Sigma "Dark").
 unless THEME_COLORS.empty?
   ov = { 'categoricalScheme' => THEME_COLORS, 'hasCards' => 'shown', 'borderRadius' => 'round' }
+  theme_block = {}
   if THEME && THEME['isDark']
-    spec['themeName'] = 'Dark'
+    theme_block['name'] = 'Dark'
   else
     ov['elementBorder'] = { 'color' => '#E2E8F0', 'width' => 1 }
   end
-  spec['themeOverrides'] = ov
+  theme_block['overrides'] = ov
+  # Theme path: document.settings.theme.{name,overrides}. The old top-level
+  # themeName/themeOverrides keys were REMOVED — a top-level themeName is
+  # silently ignored (workbook created UNTHEMED, no error). Canonical builder:
+  # Sigma::CodeRep.theme_settings in shared/lib.
+  spec['settings'] = (spec['settings'] || {}).merge('theme' => theme_block)
   STDERR.puts "  theme: applied QuickSight palette (#{THEME_COLORS.size} colors) + card chrome via themeOverrides#{THEME['isDark'] ? ' + themeName:Dark' : ''}"
 end
 

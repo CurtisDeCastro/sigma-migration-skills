@@ -4695,8 +4695,9 @@ if mechanical
     data_elements: data_elements,
     theme: (raw_charts.is_a?(Hash) ? raw_charts['theme'] : nil),
     folder_id: opts[:folder])
-  if spec['themeOverrides']
-    line "theme: #{spec['themeOverrides'].keys.join(', ')} (derived from source style rules)"
+  theme_ov = ThemeDerive.theme_overrides(spec)
+  if theme_ov
+    line "theme: #{theme_ov.keys.join(', ')} (derived from source style rules)"
   end
   # Formula-normalize hook (sibling workstream): case-fix converter-derived
   # formulas on the mechanical workbook spec before validate/POST.

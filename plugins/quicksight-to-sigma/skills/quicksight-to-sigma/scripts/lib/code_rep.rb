@@ -37,6 +37,40 @@ module Sigma
       def wrap(document_hash, extra: {})
         extra.merge('document' => document_hash)
       end
+
+      # The ONE place that knows where theming lives.
+      #
+      # `themeName` / `themeOverrides` were REMOVED from the workbook spec.
+      # Theming is now `document.settings.theme.{name,overrides}`. Live-probed
+      # 2026-08-06: `document.themeName` is a hard 400 ("no longer supported.
+      # Use document.settings.theme.name instead"), and a themeName that lands
+      # at the TOP level (outside `document`) is accepted and SILENTLY IGNORED —
+      # the workbook is created unthemed with no error. Emitters must route
+      # through here rather than hand-rolling either key.
+      #
+      # Returns {} when there is nothing to say, so it is safe to merge blindly.
+      def theme_settings(name: nil, overrides: nil)
+        theme = {}
+        theme['name'] = name if name && !name.to_s.empty?
+        theme['overrides'] = overrides if overrides && !overrides.empty?
+        return {} if theme.empty?
+
+        { 'settings' => { 'theme' => theme } }
+      end
+
+      # Deep-merge a `{'settings' => ...}` fragment into a document without
+      # clobbering sibling settings (e.g. `navigation`). Non-destructive.
+      def merge_settings(document_hash, fragment)
+        return document_hash if fragment.nil? || fragment.empty?
+
+        out = document_hash.dup
+        (fragment['settings'] || {}).each do |section, value|
+          existing = (out['settings'] || {})[section]
+          merged = existing.is_a?(Hash) && value.is_a?(Hash) ? existing.merge(value) : value
+          out['settings'] = (out['settings'] || {}).merge(section => merged)
+        end
+        out
+      end
     end
   end
 end

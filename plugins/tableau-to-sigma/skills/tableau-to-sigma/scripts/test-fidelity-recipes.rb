@@ -27,7 +27,7 @@ end
 # A representative live workbook spec: two elements + a real layout string.
 def base_spec
   {
-    'themeName' => 'Light',
+    'settings' => { 'theme' => { 'name' => 'Light' } },
     'pages' => [{
       'id' => 'p1',
       'elements' => [

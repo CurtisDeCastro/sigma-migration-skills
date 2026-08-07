@@ -31,12 +31,14 @@ end
 
 puts 'deep_merge:'
 # Hash recursion
-base = { 'themeName' => 'Light', 'themeOverrides' => { 'borderRadius' => 'round' } }
-patch = { 'themeOverrides' => { 'categoricalScheme' => %w[#0e7c7b #14b8a6] } }
+base = { 'schemaVersion' => 1,
+         'settings' => { 'theme' => { 'name' => 'Light', 'overrides' => { 'borderRadius' => 'round' } } } }
+patch = { 'settings' => { 'theme' => { 'overrides' => { 'categoricalScheme' => %w[#0e7c7b #14b8a6] } } } }
 m = FidelityLoop.deep_merge(base, patch)
-ok(m['themeName'] == 'Light', 'untouched scalar preserved')
-ok(m['themeOverrides']['borderRadius'] == 'round', 'nested untouched key preserved')
-ok(m['themeOverrides']['categoricalScheme'].length == 2, 'nested new key added')
+ok(m['schemaVersion'] == 1, 'untouched scalar preserved')
+ok(m.dig('settings', 'theme', 'name') == 'Light', 'untouched nested scalar preserved')
+ok(m.dig('settings', 'theme', 'overrides', 'borderRadius') == 'round', 'nested untouched key preserved')
+ok(m.dig('settings', 'theme', 'overrides', 'categoricalScheme').length == 2, 'nested new key added')
 
 # Array-of-hashes merge by elementId — patch one element's style, others intact
 base2 = { 'pages' => [{ 'id' => 'p1', 'elements' => [
@@ -105,19 +107,22 @@ Dir.mktmpdir do |dir|
   _, st = run('status', dir: dir)
   ok(st.exitstatus == 6, 'status exits 6 while a spec-fixable delta is unresolved')
 
-  # dry-run apply-patch: merge a themeOverrides patch into a fake live spec
+  # dry-run apply-patch: merge a theme patch into a fake live spec
   live = { 'pages' => [{ 'id' => 'PG', 'elements' => [{ 'elementId' => 'k1', 'kind' => 'kpi-chart' }] }],
-           'layout' => '<Page><LayoutElement/></Page>', 'themeName' => 'Light' }
+           'layout' => '<Page><LayoutElement/></Page>',
+           'settings' => { 'theme' => { 'name' => 'Light' } } }
   File.write(File.join(dir, 'live.json'), JSON.generate(live))
   File.write(File.join(dir, 'patch.json'),
-             JSON.generate({ 'themeOverrides' => { 'categoricalScheme' => ['#0e7c7b'] } }))
+             JSON.generate({ 'settings' => { 'theme' => { 'overrides' => { 'categoricalScheme' => ['#0e7c7b'] } } } }))
   out, st = run('apply-patch', '--patch', File.join(dir, 'patch.json'),
                 '--dry-run', '--live-spec', File.join(dir, 'live.json'),
                 '--out', File.join(dir, 'merged.json'), '--resolves', 'e0', dir: dir)
   ok(st.exitstatus.zero?, 'dry-run apply-patch exits 0')
   merged = JSON.parse(File.read(File.join(dir, 'merged.json')))
   ok(merged['layout'] == live['layout'], 'layout preserved through the merge (PUT-wipes-layout trap avoided)')
-  ok(merged['themeOverrides']['categoricalScheme'] == ['#0e7c7b'], 'patch applied to merged spec')
+  ok(merged.dig('settings', 'theme', 'overrides', 'categoricalScheme') == ['#0e7c7b'],
+     'patch applied to merged spec')
+  ok(merged.dig('settings', 'theme', 'name') == 'Light', 'sibling theme key survived the merge')
   ok(merged['pages'][0]['elements'][0]['elementId'] == 'k1', 'existing element retained')
 
   # after --resolves e0, status clears
@@ -125,7 +130,8 @@ Dir.mktmpdir do |dir|
   ok(st.exitstatus.zero?, 'status exits 0 after the delta is resolved')
 
   # apply-patch refuses a merge that would blank the workbook (no pages)
-  File.write(File.join(dir, 'nopages.json'), JSON.generate({ 'themeName' => 'Light' }))
+  File.write(File.join(dir, 'nopages.json'),
+             JSON.generate({ 'settings' => { 'theme' => { 'name' => 'Light' } } }))
   _, st = run('apply-patch', '--patch', File.join(dir, 'patch.json'),
               '--dry-run', '--live-spec', File.join(dir, 'nopages.json'),
               '--out', File.join(dir, 'x.json'), dir: dir)
@@ -209,20 +215,21 @@ Dir.mktmpdir do |dir|
   run('init', '--workbook-id', 'WB', '--page-id', 'PG', dir: dir)
   wb_spec = { 'pages' => [{ 'id' => 'page-ov', 'elements' => [
     { 'elementId' => 'k1', 'kind' => 'kpi-chart', 'style' => { 'x' => 1 } },
-    { 'elementId' => 'k2', 'kind' => 'bar-chart' }] }], 'themeName' => 'Light' }
+    { 'elementId' => 'k2', 'kind' => 'bar-chart' }] }],
+           'settings' => { 'theme' => { 'name' => 'Light' } } }
   File.write(File.join(dir, 'wb-spec.json'), JSON.generate(wb_spec))
   live = { 'pages' => [{ 'id' => 'PG', 'elements' => [{ 'elementId' => 'k1', 'kind' => 'kpi-chart' }] }] }
   File.write(File.join(dir, 'live.json'), JSON.generate(live))
   File.write(File.join(dir, 'patch.json'),
-             JSON.generate('themeOverrides' => { 'categoricalScheme' => ['#0e7c7b'] }))
+             JSON.generate('settings' => { 'theme' => { 'overrides' => { 'categoricalScheme' => ['#0e7c7b'] } } }))
   out, st = run('apply-patch', '--patch', File.join(dir, 'patch.json'), '--dry-run',
                 '--live-spec', File.join(dir, 'live.json'), '--out', File.join(dir, 'merged.json'), dir: dir)
   ok(st.exitstatus.zero?, 'apply-patch (dual-write) exits 0')
   ok(out.include?('persisted into'), 'apply-patch reports the wb-spec.json persistence')
   ws = JSON.parse(File.read(File.join(dir, 'wb-spec.json')))
-  ok(ws['themeOverrides'] == { 'categoricalScheme' => ['#0e7c7b'] },
+  ok(ws.dig('settings', 'theme', 'overrides') == { 'categoricalScheme' => ['#0e7c7b'] },
      'patch deep-merged into wb-spec.json (a re-entry full-spec PUT now carries the fix)')
-  ok(ws['pages'][0]['elements'].length == 2 && ws['themeName'] == 'Light',
+  ok(ws['pages'][0]['elements'].length == 2 && ws.dig('settings', 'theme', 'name') == 'Light',
      'wb-spec.json untouched keys/elements preserved by the merge')
 
   # guard: unparseable wb-spec.json → warned, left untouched, apply still succeeds
