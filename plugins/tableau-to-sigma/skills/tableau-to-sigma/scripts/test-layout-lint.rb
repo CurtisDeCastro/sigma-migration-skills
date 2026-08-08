@@ -25,7 +25,22 @@ def check(name)
 end
 
 def lint(spec)
-  LayoutLint.lint(spec)
+  # Keep the scenario declarations compact while exercising the released
+  # workbook contract: metadata-only pages, flat document.elements, and the
+  # canonical Element/Container layout tags.
+  pages = Array(spec['pages'])
+  elements = pages.flat_map { |page| Array(page['elements']) }
+  document = {
+    'schemaVersion' => 2,
+    'kind' => 'workbook',
+    'pages' => pages.map { |page| page.reject { |key, _| key == 'elements' } },
+    'elements' => elements,
+    'layout' => spec['layout'].to_s
+                              .gsub('<GridContainer', '<Container')
+                              .gsub('</GridContainer>', '</Container>')
+                              .gsub('<LayoutElement', '<Element')
+  }
+  LayoutLint.lint('document' => document)
 end
 
 def has?(viol, frag)
