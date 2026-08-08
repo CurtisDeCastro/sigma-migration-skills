@@ -489,7 +489,9 @@ when 'apply-patch'
       # came from a live nested GET or a legacy flat --live-spec fixture (the
       # adapter's document()/metadata() both tolerate an already-flat input).
       live = WorkbookCode.legacy_view(live)
-      die 'live spec has no `pages` — refusing to PUT a spec that would blank the workbook', 4 unless live['pages']
+      unless live['pages'].is_a?(Array) && live['pages'].any?
+        die 'live spec has no `pages` — refusing to PUT a spec that would blank the workbook', 4
+      end
       FidelityLoop.deep_merge(live, patch)
     end
 
@@ -497,7 +499,7 @@ when 'apply-patch'
   # PUT crosses back through the release representation: metadata outside,
   # flat document.elements, metadata-only pages, and authoritative layout.
   merged = WorkbookCode.legacy_view(WorkbookCode.canonicalize(merged))
-  die 'merged spec has no `pages`', 4 unless merged['pages']
+  die 'merged spec has no `pages`', 4 unless merged['pages'].is_a?(Array) && merged['pages'].any?
 
   # v5.1.1: the SAME style contract post-and-readback enforces (pivot totals,
   # format grammar, scheme defaults) — a fidelity patch PUT was the one write

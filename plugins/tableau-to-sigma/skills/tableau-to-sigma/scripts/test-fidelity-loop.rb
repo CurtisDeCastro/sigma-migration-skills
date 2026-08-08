@@ -245,11 +245,27 @@ end
 puts 'apply-patch dual-write (#422):'
 Dir.mktmpdir do |dir|
   run('init', '--workbook-id', 'WB', '--page-id', 'PG', dir: dir)
-  wb_spec = { 'pages' => [{ 'id' => 'page-ov', 'elements' => [
-    { 'elementId' => 'k1', 'kind' => 'kpi-chart', 'style' => { 'x' => 1 } },
-    { 'elementId' => 'k2', 'kind' => 'bar-chart' }] }], 'themeName' => 'Light' }
+  wb_spec = {
+    'document' => {
+      'schemaVersion' => 1, 'kind' => 'workbook',
+      'pages' => [{ 'id' => 'page-ov' }],
+      'elements' => [
+        { 'id' => 'k1', 'kind' => 'kpi-chart', 'style' => { 'x' => 1 } },
+        { 'id' => 'k2', 'kind' => 'bar-chart' }
+      ],
+      'layout' => '<Page id="page-ov"><Element elementId="k1"/><Element elementId="k2"/></Page>',
+      'themeName' => 'Light'
+    }
+  }
   File.write(File.join(dir, 'wb-spec.json'), JSON.generate(wb_spec))
-  live = { 'pages' => [{ 'id' => 'PG', 'elements' => [{ 'elementId' => 'k1', 'kind' => 'kpi-chart' }] }] }
+  live = {
+    'document' => {
+      'schemaVersion' => 1, 'kind' => 'workbook',
+      'pages' => [{ 'id' => 'PG' }],
+      'elements' => [{ 'id' => 'k1', 'kind' => 'kpi-chart' }],
+      'layout' => '<Page id="PG"><Element elementId="k1"/></Page>'
+    }
+  }
   File.write(File.join(dir, 'live.json'), JSON.generate(live))
   File.write(File.join(dir, 'patch.json'),
              JSON.generate('themeOverrides' => { 'categoricalScheme' => ['#0e7c7b'] }))
@@ -258,9 +274,9 @@ Dir.mktmpdir do |dir|
   ok(st.exitstatus.zero?, 'apply-patch (dual-write) exits 0')
   ok(out.include?('persisted into'), 'apply-patch reports the wb-spec.json persistence')
   ws = JSON.parse(File.read(File.join(dir, 'wb-spec.json')))
-  ok(ws['themeOverrides'] == { 'categoricalScheme' => ['#0e7c7b'] },
+  ok(ws.dig('document', 'settings', 'theme', 'overrides') == { 'categoricalScheme' => ['#0e7c7b'] },
      'patch deep-merged into wb-spec.json (a re-entry full-spec PUT now carries the fix)')
-  ok(ws['pages'][0]['elements'].length == 2 && ws['themeName'] == 'Light',
+  ok(ws.dig('document', 'elements').length == 2 && ws.dig('document', 'settings', 'theme', 'name') == 'Light',
      'wb-spec.json untouched keys/elements preserved by the merge')
 
   # guard: unparseable wb-spec.json → warned, left untouched, apply still succeeds
