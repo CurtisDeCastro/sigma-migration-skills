@@ -244,14 +244,15 @@ def test_build_layout_xml_scales_hex_grid_to_sigma_grid():
     tab = {"rows": [{"columns": [{"start": 0, "end": 120, "cell_ids": ["c1"]}]}]}
     xml = convert_workbook.build_layout_xml("page-1", tab, {"c1": "el-1"})
     assert '<Page type="grid"' in xml and 'id="page-1"' in xml
-    assert 'elementId="el-1"' in xml
+    assert '<Element elementId="el-1"' in xml
+    assert "<LayoutElement" not in xml
     assert 'gridColumn="1 / 25"' in xml  # 0-120 Hex scale -> 1-25 Sigma grid lines (24 cols)
 
 
 def test_build_layout_xml_skips_unmapped_cells():
     tab = {"rows": [{"columns": [{"start": 0, "end": 60, "cell_ids": ["missing"]}]}]}
     xml = convert_workbook.build_layout_xml("page-1", tab, {})
-    assert "<LayoutElement" not in xml
+    assert "<Element" not in xml
 
 
 def test_build_layout_xml_uses_hex_cell_height():
@@ -294,7 +295,8 @@ def test_build_workbook_integration():
     assert len(workbook_doc["elements"]) == 2
     assert {e["kind"] for e in workbook_doc["elements"]} == {"kpi-chart", "bar-chart"}
     assert all("_hex_cell_id" not in e for e in workbook_doc["elements"])
-    assert workbook_doc["layout"].count("<LayoutElement") == 2
+    assert workbook_doc["layout"].count("<Element") == 2
+    assert "<LayoutElement" not in workbook_doc["layout"]
     assert "layout" not in page
     assert result["stats"] == {"metric_cells": 1, "explore_cells": 1, "elements": 2}
     assert result["warnings"] == []
@@ -335,7 +337,8 @@ def test_build_workbook_all_tabs_and_unplaced_elements_have_authoritative_layout
     assert all("elements" not in page for page in workbook_doc["pages"])
     assert len(workbook_doc["elements"]) == 3
     assert workbook_doc["layout"].count("<Page ") == 2
-    assert workbook_doc["layout"].count("<LayoutElement") == 3
+    assert workbook_doc["layout"].count("<Element") == 3
+    assert "<LayoutElement" not in workbook_doc["layout"]
     assert workbook_doc["settings"]["navigation"]["pageTabsInViewMode"] == "shown"
     assert workbook_doc["settings"]["theme"]["overrides"]["pageWidth"] == "full"
     assert any("explorable/drill" in warning for warning in result["warnings"])
@@ -351,6 +354,8 @@ def test_commerce_golden_is_current_shape_with_total_layout_membership():
     assert "document" in workbook
     assert all("elements" not in page for page in workbook_doc["pages"])
     assert len(workbook_doc["elements"]) == 6
+    assert workbook_doc["layout"].count("<Element") == 6
+    assert "<LayoutElement" not in workbook_doc["layout"]
     pairs = convert_workbook.code_rep.workbook_elements_with_pages(workbook)
     assert len(pairs) == 6
     assert all(page is not None for _, page in pairs)

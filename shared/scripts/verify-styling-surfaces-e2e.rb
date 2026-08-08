@@ -53,7 +53,7 @@
 #                                           see whether the brief's field name
 #                                           or the docs' `borderRadius` is the
 #                                           real one) + a top-level (NOT
-#                                           pages[].layout) <GridContainer>.
+#                                           pages[].layout) <Container>.
 #   workbook-level settings.theme.overrides.titleFont — SURFACE 6: the documented
 #                                           workbook-wide typography lever,
 #                                           tested against the two bare chart
@@ -338,14 +338,14 @@ def build_spec(home, schema_version, src_formula_fn, flags)
     'layout' => <<~XML,
       <?xml version="1.0" encoding="utf-8"?>
       <Page type="grid" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto" id="#{PAGE_ID}">
-        <GridContainer elementId="#{HERO_ID}" type="grid" gridColumn="1 / 25" gridRow="1 / 5" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto">
-          <LayoutElement elementId="#{HERO_TITLE_ID}" gridColumn="1 / 25" gridRow="1 / 5"/>
-        </GridContainer>
-        <LayoutElement elementId="#{KPI_ID}" gridColumn="1 / 9" gridRow="5 / 13"/>
-        <LayoutElement elementId="#{CHART_SINGLE_ID}" gridColumn="9 / 17" gridRow="5 / 17"/>
-        <LayoutElement elementId="#{CHART_CAT_ID}" gridColumn="17 / 25" gridRow="5 / 17"/>
-        <LayoutElement elementId="#{TABLE_ID}" gridColumn="1 / 25" gridRow="17 / 29"/>
-        <LayoutElement elementId="#{SRC_ID}" gridColumn="1 / 25" gridRow="29 / 31"/>
+        <Container elementId="#{HERO_ID}" type="grid" gridColumn="1 / 25" gridRow="1 / 5" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto">
+          <Element elementId="#{HERO_TITLE_ID}" gridColumn="1 / 25" gridRow="1 / 5"/>
+        </Container>
+        <Element elementId="#{KPI_ID}" gridColumn="1 / 9" gridRow="5 / 13"/>
+        <Element elementId="#{CHART_SINGLE_ID}" gridColumn="9 / 17" gridRow="5 / 17"/>
+        <Element elementId="#{CHART_CAT_ID}" gridColumn="17 / 25" gridRow="5 / 17"/>
+        <Element elementId="#{TABLE_ID}" gridColumn="1 / 25" gridRow="17 / 29"/>
+        <Element elementId="#{SRC_ID}" gridColumn="1 / 25" gridRow="29 / 31"/>
       </Page>
     XML
   }
@@ -678,7 +678,7 @@ begin
     table_name: tbl_el && tbl_el['name'],
     table_formats: tbl_el && (tbl_el['columns'] || []).map { |c| { id: c['id'], format: c['format'] } },
     hero_style: hero_el && hero_el['style'],
-    layout_has_gridcontainer: spec['layout'].to_s.include?("<GridContainer elementId=\"#{HERO_ID}\""),
+    layout_has_gridcontainer: spec['layout'].to_s.include?("<Container elementId=\"#{HERO_ID}\""),
   }
   log "readback: #{JSON.generate(readback)[0, 2000]}"
 

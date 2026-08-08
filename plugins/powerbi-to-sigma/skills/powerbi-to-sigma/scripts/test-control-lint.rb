@@ -29,7 +29,7 @@ end
 SPEC = {
   'pages' => [{ 'id' => 'p1', 'name' => 'P1' }],
   'elements' => [{ 'id' => 'tbl-1', 'kind' => 'table', 'name' => 'T' }],
-  'layout' => '<Page id="p1"><LayoutElement elementId="tbl-1"/></Page>'
+  'layout' => '<Page id="p1"><Element elementId="tbl-1"/></Page>'
 }.freeze
 
 def scope_with(status)
@@ -82,7 +82,7 @@ SPEC_CTLS = {
     { 'id' => 'el-c2', 'kind' => 'control', 'controlId' => 'UnifiedPersonkey', 'name' => 'User',
       'filters' => [{ 'source' => { 'kind' => 'table', 'elementId' => 'tbl-1' }, 'columnId' => 'c-dim' }] }
   ],
-  'layout' => '<Page id="p1"><LayoutElement elementId="tbl-1"/><LayoutElement elementId="el-c1"/><LayoutElement elementId="el-c2"/></Page>'
+  'layout' => '<Page id="p1"><Element elementId="tbl-1"/><Element elementId="el-c1"/><Element elementId="el-c2"/></Page>'
 }.freeze
 drift_msg = ->(vs) { vs.any? { |v| v.include?('control-scope drift') } }
 drift_scope = { 'sourceFilterSignals' => 2, 'controls' => [

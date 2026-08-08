@@ -95,7 +95,7 @@ class TestPostAndReadback < Minitest::Test
       'document' => {
         'pages' => [{ 'id' => 'p1', 'name' => 'Overview' }],
         'elements' => [{ 'id' => 'e1', 'kind' => 'bar-chart' }],
-        'layout' => '<Page id="p1"><LayoutElement elementId="e1"/></Page>'
+        'layout' => '<Page id="p1"><Element elementId="e1"/></Page>'
       }
     }
     assert_equal [{ 'id' => 'p1', 'name' => 'Overview' }],

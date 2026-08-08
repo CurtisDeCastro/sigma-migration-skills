@@ -354,13 +354,14 @@ def _row_span(height: int | None) -> int:
 
 
 def build_layout_xml(page_id: str, tab: dict, elements_by_cell: dict[str, str]) -> str:
-    """Two-tag grammar (sigma-workbooks/reference/specification/layout.md):
-    one <Page> per workbook page, <LayoutElement> per leaf. Hex's column
-    start/end are on a 0-120 scale; Sigma's grid is 24 columns (1-25 lines).
-    Rows stack top-to-bottom per Hex row band; a band's height is its
-    tallest element's row span. This is a first-pass proportional mapping —
-    verify against a readback + PNG export (refs/layout-visual-qa.md) before
-    treating it as final, same as every sibling skill's layout gate."""
+    """Live layout grammar (sigma-workbooks/reference/specification/layout.md):
+    one <Page> per workbook page and <Element> for each leaf (<Container> is
+    reserved for grouped grid regions). Hex's column start/end are on a 0-120
+    scale; Sigma's grid is 24 columns (1-25 lines). Rows stack top-to-bottom
+    per Hex row band; a band's height is its tallest element's row span. This
+    is a first-pass proportional mapping — verify against a readback + PNG
+    export (refs/layout-visual-qa.md) before treating it as final, same as
+    every sibling skill's layout gate."""
     lines = [f'<Page type="grid" gridTemplateColumns="repeat({_SIGMA_GRID_WIDTH}, 1fr)" '
              f'gridTemplateRows="auto" id="{page_id}">']
     row_cursor = 1
@@ -383,7 +384,7 @@ def build_layout_xml(page_id: str, tab: dict, elements_by_cell: dict[str, str]) 
                 span = _row_span(cell.get("height"))
                 el_id = elements_by_cell[cid]
                 col_lines.append(
-                    f'  <LayoutElement elementId="{el_id}" gridColumn="{start} / {end}" '
+                    f'  <Element elementId="{el_id}" gridColumn="{start} / {end}" '
                     f'gridRow="{sub_cursor} / {sub_cursor + span}"/>'
                 )
                 sub_cursor += span

@@ -163,11 +163,11 @@ PLAN-v3 PR-14 and is not built yet; until then the budget is the cap.
 
 ## Building clean in the first place (so the gate rarely fails)
 
-Group every page into horizontal **band containers** — never a flat list of `<LayoutElement>`s:
+Group every page into horizontal **band containers** — never a flat list of `<Element>`s:
 header band → control band → KPI band → chart rows → detail row. Verified container contract:
 
 - Spec side: a `kind: container` placeholder element per band.
-- Layout side: a `<GridContainer>` (NOT `<LayoutElement type="grid">`, which silently drops
+- Layout side: a `<Container>` (NOT `<Element type="grid">`, which silently drops
   children); child `gridRow`/`gridColumn` are **container-relative** (restart at 1);
   `gridTemplateRows="auto"`; every `elementId` must match a real spec element (mismatch =
   silent drop); GET before a layout PUT (POST reassigns ids; PUT preserves them).

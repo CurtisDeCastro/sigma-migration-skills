@@ -158,7 +158,7 @@ end
 # ---------------------------------------------------------------------------
 # Container-aware layout placement (phase-e layout-quality fix).
 #
-# The first Phase E shipped enhancements by APPENDING <LayoutElement>s at the
+# The first Phase E shipped enhancements by APPENDING <Element>s at the
 # bottom of the Page block — controls/KPIs/notes dumped below the fold, the
 # grain switcher orphaned at the foot. Every applied item now lands in the
 # container system instead:
@@ -167,7 +167,7 @@ end
 #   - grain/drill switcher     -> INSIDE its chart's own container (slim row
 #                                 above the chart)
 #   - migration/freshness note -> a slim note band directly under the header
-# If the cloned parity workbook PREDATES container layouts (no <GridContainer>
+# If the cloned parity workbook PREDATES container layouts (no <Container>
 # in its layout), the clone's layout is REGENERATED as a banded layout first,
 # using the builder's shared container machinery (lib/layout.rb).
 # ---------------------------------------------------------------------------
@@ -197,13 +197,14 @@ end
 def scan_top(inner)
   out = []
   pos = 0
-  while (m = inner.match(%r{<(GridContainer|LayoutElement)\b[^>]*?(/>|>)}m, pos))
-    tag = m[1]
+  while (m = inner.match(%r{<(Container|GridContainer|Element|LayoutElement)\b[^>]*?(/>|>)}m, pos))
+    source_tag = m[1]
+    tag = %w[Container GridContainer].include?(source_tag) ? 'Container' : 'Element'
     open_e = m.end(0)
     ent_end = open_e
     body = nil
-    if tag == 'GridContainer' && m[2] == '>'
-      close = inner.match(%r{</GridContainer>}m, open_e)
+    if tag == 'Container' && m[2] == '>'
+      close = inner.match(%r{</#{source_tag}>}m, open_e)
       ent_end = close ? close.end(0) : open_e
       body = close ? inner[open_e...close.begin(0)] : ''
     end
@@ -243,10 +244,10 @@ def shift_top_rows(inner, from_row, delta)
 end
 
 # Regenerate a banded layout for every dashboard page of a pre-container clone
-# (flat <LayoutElement> list -> header band + row-band GridContainers via the
+# (flat <Element> list -> header band + row-band Containers via the
 # builder's shared SigmaLayout machinery). No-op when containers exist.
 def ensure_banded!(spec)
-  return false if spec['layout'].to_s.include?('<GridContainer')
+  return false if spec['layout'].to_s.match?(%r{<(?:Container|GridContainer)\b})
   changed = false
   all_elements = Sigma::CodeRep.workbook_elements(spec)
   (spec['pages'] || []).each do |pg|
@@ -255,7 +256,7 @@ def ensure_banded!(spec)
     page_ids = Sigma::CodeRep.workbook_page_element_ids(spec)[pg['id']] || []
     page_elements = all_elements.select { |e| page_ids.include?(e['id']) }
     kind_of = page_elements.to_h { |e| [e['id'], e['kind']] }
-    items = scan_top(m[2]).select { |t| t[:tag] == 'LayoutElement' }
+    items = scan_top(m[2]).select { |t| t[:tag] == 'Element' }
                           .map { |t| [t[:eid], t[:c0], t[:c1], t[:r0], t[:r1]] }
     next if items.empty?
     # an existing short top text element (the dashboard's own title) becomes
@@ -294,7 +295,7 @@ end
 # header band (the row-1 container), below any already-created phasee band of
 # lower priority.
 def band_anchor_row(ents, prefix)
-  hdr = ents.select { |t| t[:tag] == 'GridContainer' }
+  hdr = ents.select { |t| t[:tag] == 'Container' }
             .find { |t| t[:r0] <= 1 }
   row = hdr ? hdr[:r1] : (ents.map { |t| t[:r0] }.min || 1)
   ents.each do |t|
@@ -356,7 +357,7 @@ def band_add!(spec, page_id, band_cid, element_id, grid_column, height)
   entry = SigmaLayout.le(element_id, place_c0, place_c0 + width, row, row + h)
   new_band_inner = "#{band[:inner]}\n#{entry}"
   new_band_head = set_rows(m[2][band[:s]...band[:head_e]], band[:r0], band[:r1] + grow)
-  new_band = "#{new_band_head}#{new_band_inner}\n</GridContainer>"
+  new_band = "#{new_band_head}#{new_band_inner}\n</Container>"
   inner = m[2].dup
   inner[band[:s]...band[:e]] = new_band
   inner = shift_below!(inner, band[:eid], band[:r1], grow) if grow.positive?
@@ -382,14 +383,14 @@ CHART_CTRL_ROWS = 2
 def add_into_chart_container!(spec, page_id, chart_eid, ctrl_eid, grid_column)
   m = page_block(spec, page_id) or return nil
   ents = scan_top(m[2])
-  host = ents.find { |t| t[:tag] == 'GridContainer' && t[:inner].to_s.include?(%(elementId="#{chart_eid}")) }
+  host = ents.find { |t| t[:tag] == 'Container' && t[:inner].to_s.include?(%(elementId="#{chart_eid}")) }
   return nil unless host
   c0, c1 = grid_column.to_s.scan(/\d+/).map(&:to_i)
   c0, c1 = 17, 25 if c0.nil? || c1.nil? || c1 <= c0
   kids_shifted = shift_top_rows(host[:inner].to_s, 1, CHART_CTRL_ROWS)
   entry = SigmaLayout.le(ctrl_eid, c0, c1, 1, 1 + CHART_CTRL_ROWS)
   new_head = set_rows(m[2][host[:s]...host[:head_e]], host[:r0], host[:r1] + CHART_CTRL_ROWS)
-  new_host = "#{new_head}#{entry}\n#{kids_shifted}\n</GridContainer>"
+  new_host = "#{new_head}#{entry}\n#{kids_shifted}\n</Container>"
   inner = m[2].dup
   inner[host[:s]...host[:e]] = new_host
   inner = shift_below!(inner, host[:eid], host[:r1], CHART_CTRL_ROWS)
@@ -768,10 +769,8 @@ end
 # ---------------------------------------------------------------------------
 orig_meta_before = Sigma.request(:get, "/v2/workbooks/#{ORIG_WB}")
 orig_spec = Sigma.request(:get, "/v2/workbooks/#{ORIG_WB}/spec")
-# orig_spec stays the RAW (possibly document-nested) GET response — it is
-# POSTed close to verbatim below (clean() only strips top-level readonly
-# keys, leaving a `document` key untouched), and POST /v2/workbooks/spec
-# requires that nesting. orig_doc is the unwrapped view used for reads only.
+# Keep the raw GET for metadata/document partitioning. The clone POST passes
+# through wrap_spec so legacy layout aliases can never be re-emitted.
 orig_doc = Sigma::CodeRep.document(orig_spec)
 abort "FATAL: cannot read complete spec of #{ORIG_WB}" unless orig_spec.is_a?(Hash) &&
                                                            orig_doc['pages'].is_a?(Array) &&
@@ -779,10 +778,10 @@ abort "FATAL: cannot read complete spec of #{ORIG_WB}" unless orig_spec.is_a?(Ha
                                                            !orig_doc['layout'].to_s.empty?
 clone_name = opts[:name] || "#{orig_spec['name']} — Enhanced"
 
-clone_spec = clean(orig_spec)
+clone_spec = flatten_spec(clean(orig_spec))
 clone_spec['name'] = clone_name
 post = lenient(Sigma.request(:post, '/v2/workbooks/spec',
-                             body: JSON.generate(clone_spec), binary: true))
+                             body: JSON.generate(wrap_spec(clone_spec)), binary: true))
 clone_id = post.is_a?(Hash) && (post['workbookId'] || post['id'])
 abort "FATAL: clone POST returned no workbookId: #{post.inspect[0, 300]}" unless clone_id
 puts "enhance-apply: clone '#{clone_name}' = #{clone_id} (original #{ORIG_WB} untouched)"

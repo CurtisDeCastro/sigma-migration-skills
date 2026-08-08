@@ -265,13 +265,15 @@ workbook spec `convert_workbook.py` emits** — no separate `put-layout.rb`
 step for this skill. `appLayout.tabs[].rows[].columns[].{start,end}` is on a
 **0–120 scale** (confirmed from a real export — not Metabase's 24-col grid);
 `build_layout_xml()` maps it proportionally onto Sigma's 24-column
-`<Page>`/`<LayoutElement>` grammar. This is a first-pass proportional
-mapping. Every Hex tab becomes a metadata-only Sigma page and an
-authoritative `<Page>` layout block; elements live flat under
-`document.elements`. Cell heights drive row spans, duplicate placements
-warn and keep the first, and converted cells absent from appLayout are
-appended visibly to page 1 rather than becoming layout orphans. Multi-tab
-workbooks explicitly show page tabs through
+live `<Page>`/`<Element>` grammar (`<Container>` is used for grouped grid
+regions). Legacy `<LayoutElement>`/`<GridContainer>` tags are accepted only
+when reading older artifacts and must never be emitted. This is a first-pass
+proportional mapping. Every Hex tab becomes a metadata-only Sigma page and
+an authoritative `<Page>` layout block; elements live flat under
+`document.elements`. Cell heights drive row spans, duplicate placements warn
+and keep the first, and converted cells absent from appLayout are appended
+visibly to page 1 rather than becoming layout orphans. Multi-tab workbooks
+explicitly show page tabs through
 `settings.navigation.pageTabsInViewMode`. Verify against a readback + PNG export
 (`scripts/sigma-export-png.py`, `refs/layout-visual-qa.md`) before treating
 it as final, same as every sibling skill's layout gate.
