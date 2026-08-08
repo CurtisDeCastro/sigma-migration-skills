@@ -240,8 +240,11 @@ module WorkbookCode
       errors << "document.elements[#{index}].id is required" if element['id'].to_s.empty?
     end
     ids = element_records.filter_map { |element| element['id'] }.reject(&:empty?)
-    duplicates = ids.tally.select { |_, count| count > 1 }.keys
-    errors << "duplicate document element ids: #{duplicates.join(', ')}" if duplicates.any?
+    duplicate_ids = ids.tally.select { |_, count| count > 1 }
+    if duplicate_ids.any?
+      detail = duplicate_ids.map { |id, count| %(duplicate id "#{id}" (used #{count}x)) }.join(', ')
+      errors << "document element ids must be globally unique: #{detail}"
+    end
 
     page_records = pages(doc)
     page_records.each_with_index do |page, index|
@@ -261,8 +264,20 @@ module WorkbookCode
     unknown_pages = placed.keys - page_ids
     errors << "layout references unknown pages: #{unknown_pages.join(', ')}" if unknown_pages.any?
     refs = placed.values.flatten
-    duplicate_refs = refs.tally.select { |_, count| count > 1 }.keys
-    errors << "layout places elements more than once: #{duplicate_refs.join(', ')}" if duplicate_refs.any?
+    duplicate_refs = refs.tally.select { |_, count| count > 1 }
+    if duplicate_refs.any?
+      page_names = page_records.each_with_object({}) do |page, index|
+        index[page['id']] = page['name'] || page['id']
+      end
+      owners = Hash.new { |hash, key| hash[key] = [] }
+      placed.each do |page_id, element_ids|
+        element_ids.each { |element_id| owners[element_id] << page_names.fetch(page_id, page_id) }
+      end
+      detail = duplicate_refs.map do |id, count|
+        %(duplicate id "#{id}" (used #{count}x across #{owners[id].join(', ')}))
+      end.join(', ')
+      errors << "layout must place each element exactly once: #{detail}"
+    end
     missing = ids - refs
     unknown = refs - ids
     errors << "layout does not place elements: #{missing.join(', ')}" if missing.any?
