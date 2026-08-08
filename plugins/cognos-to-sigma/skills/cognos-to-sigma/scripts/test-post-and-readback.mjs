@@ -14,6 +14,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as CodeRep from './lib/code_rep.mjs';
+import { workbookContractErrors } from './lib/workbook_contract.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -29,10 +30,16 @@ const check = (cond, msg) => { if (!cond) fail++; console.log(`  ${cond ? 'PASS'
 
 // workbook post body is nested
 {
-  const doc = { schemaVersion: 1, pages: [], kind: 'workbook' };
+  const doc = { schemaVersion: 1, pages: [{ id: 'p1' }], elements: [{ id: 'e1', kind: 'text', body: 'x' }],
+    layout: '<Page id="p1"><Element elementId="e1"/></Page>', kind: 'workbook' };
   const body = CodeRep.wrap(doc, { name: 'n', folderId: 'f' });
   check(JSON.stringify(body.document) === JSON.stringify(doc), 'workbook POST body: document key holds the doc verbatim');
   check(!('pages' in body), 'workbook POST body: pages must not remain top-level');
+  check(workbookContractErrors(body, { requireWrapper: true }).length === 0,
+    'workbook POST body: flat elements + metadata-only pages + authoritative layout pass');
+  const bad = { name: 'bad', document: { schemaVersion: 1, pages: [{ id: 'p1', elements: [{ id: 'e1' }] }] } };
+  check(workbookContractErrors(bad, { requireWrapper: true }).some((e) => /metadata-only/.test(e)),
+    'workbook POST body: legacy page-nested elements fail loudly');
 }
 
 // the DM branch must be left alone — that surface is not changing
@@ -48,6 +55,8 @@ const check = (cond, msg) => { if (!cond) fail++; console.log(`  ${cond ? 'PASS'
 const src = readFileSync(join(__dirname, 'post-and-readback.mjs'), 'utf8');
 check(/CodeRep\.(document|wrap|metadata)/.test(src),
       'post-and-readback.mjs must call CodeRep for its workbook branch');
+check(/assertWorkbookContract/.test(src),
+      'post-and-readback.mjs must gate the required authoritative layout before and after POST');
 
 // The property the check above does NOT protect: that CodeRep is reachable
 // ONLY from the workbook side of the `a.type === 'workbook' ? ... : ...`
