@@ -664,13 +664,17 @@ ids before POSTing.)
 `view.field` as a measure — agg + base col — or a dimension, and derive the Sigma formula) and
 emits a `/v2/workbooks/spec` body:
 - a **hidden "Data" page** with a master table sourced from the DM element,
-- a **dashboard page** with one element per Looker tile,
+- one metadata-only page per Looker dashboard tab (or one dashboard page),
+- a flat **`document.elements`** collection with one element per Looker tile,
 - **controls** from the dashboard filters,
-- a **newspaper → 24-col grid layout** XML string.
+- a required, authoritative **newspaper → 24-col grid layout** XML string that
+  places every flat element exactly once.
 
 > **The body above is `document`-wrapped, not flat** (verified live 2026-08-03, including
 > on `POST /v2/workbooks/spec/verify` 2026-08-04): `schemaVersion`, `pages`, `kind`, and
-> `layout` all nest under a top-level `document` key; only `folderId` stays outside it.
+> `layout`, and flat `elements` all nest under a top-level `document` key; workbook
+> metadata (`name`, `folderId`) stays outside it. Pages contain metadata only;
+> page membership comes from the required layout.
 > The Phase-2 DM POST (`/v2/dataModels/spec`) is a different surface and remains flat.
 
 Tile-type, filter-type, and layout maps are in `refs/dashboard-contract.md` and
@@ -686,9 +690,18 @@ Tile-type, filter-type, and layout maps are in `refs/dashboard-contract.md` and
 | `looker_pie` | `pie-chart` |
 | `looker_donut_multiples` | `donut-chart` (single ring) + warn |
 | `looker_scatter` | `scatter-chart` |
+| `looker_waterfall` | native `waterfall-chart` for dimension + measure; measure-only warns + skips |
 | `looker_grid` / `table` | `table` |
 | `text` | `text` (markdown body) |
-| `looker_map` / geo / funnel / waterfall / boxplot / sankey / custom viz | none — approximate or drop + warn |
+| `looker_boxplot` | none until released `box-chart` is published — drop + loud gate |
+| `looker_map` / geo / funnel / timeline / wordcloud / sankey / custom viz | none — approximate or drop + warn |
+
+Released workbook feature mappings and deliberate gaps (legend, progress,
+navigation/tabs, drill, page-break, panels, repeaters, styling, and box-chart)
+are cataloged in `refs/catalogs/workbook-feature.json` and summarized in
+`refs/workbook-code-release-gaps.md`. Emit only when the source carries the
+documented intent; a released Sigma capability is not by itself permission to
+invent source behavior.
 
 **Table column order, labels & hidden columns.** A table's Sigma column order follows the Looker
 **visualization** order (`vis_config.column_order`, captured as contract `columnOrder`), NOT
@@ -722,7 +735,7 @@ Newspaper layout math (a single arithmetic transform, no spatial heuristic):
 ### 3b. Workbook-spec gotchas (learned the hard way)
 
 - **`/v2/workbooks/spec` returns YAML** — don't `json.load` the response.
-- **control elements** live in `page.elements[]` with `kind: control` but REQUIRE an `id`
+- **control elements** live in flat `document.elements[]` with `kind: control` but REQUIRE an `id`
   (separate from `controlId`); a missing `id` → `Invalid kind: "control"`.
 - **KPI `value` uses `value.columnId`** on the live API (the `sigma-workbooks`
   `example-full.yaml` shows `value.id` — the API wants `columnId`). **BUT donut/pie `value`
