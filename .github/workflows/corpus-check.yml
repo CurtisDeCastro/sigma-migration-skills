@@ -283,6 +283,7 @@ jobs:
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-materialization-schedules.rb
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-pbi-timeintel-route.rb
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-drop-unresolved-columns.rb
+            plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-table-map-manifest.rb
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-scout-ledger-integrity.rb
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-trellis-emit.rb
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-pbi-trellis.rb
