@@ -85,6 +85,8 @@ require 'open3'
 require_relative 'lib/run_state'
 require_relative 'lib/domo_sigma_util'
 require_relative 'lib/zone_census'
+require_relative 'lib/code_rep'
+require_relative 'lib/layout'
 include DomoSigma
 
 opts = { mode: 'page-per-worksheet', workbook_name: 'Domo Migration' }
@@ -311,14 +313,60 @@ def offline_build_workbook_spec!(chart_specs_path, name:, description:, folder_i
     { 'id' => slugify_page_id(p['name'], used_ids), 'name' => p['name'], 'elements' => p['elements'] }
   end
 
-  wb = {
-    'name' => name, 'schemaVersion' => 1, 'folderId' => folder_id,
-    'pages' => [data_page] + visible_pages,
+  if visible_pages.size > 1
+    page_labels = visible_pages.each_with_object({}) { |page, labels| labels[page['id']] = page['name'] }
+    visible_pages.each do |page|
+      page['elements'].unshift(
+        'id' => "nav-#{page['id']}",
+        'kind' => 'navigation',
+        'mode' => 'auto',
+        'pageLabels' => page_labels
+      )
+    end
+  end
+
+  page_records = [data_page] + visible_pages
+  layout_pages = page_records.map do |page|
+    row = 1
+    children = Array(page['elements']).map do |element|
+      height = case element['kind']
+               when 'page-break' then 1
+               when 'control', 'text', 'navigation', 'progress', 'image', 'divider' then 3
+               when 'kpi-chart' then 6
+               when 'table', 'pivot-table' then 12
+               else 10
+               end
+      placed = SigmaLayout.le(element['id'], 1, 25, row, row + height)
+      row += height
+      placed
+    end
+    SigmaLayout.page_xml(page['id'], children.join("\n"))
+  end
+  document = {
+    'schemaVersion' => 1,
+    'kind' => 'workbook',
+    'pages' => page_records.map do |page|
+      metadata = page.reject { |key, _| key == 'elements' }
+      metadata['visibility'] = 'hidden' if page['id'] == 'page-data'
+      metadata
+    end,
+    'elements' => page_records.flat_map { |page| Array(page['elements']) },
+    'layout' => SigmaLayout.assemble(*layout_pages),
+    'panels' => [],
+    'overlays' => []
+  }
+  if visible_pages.size > 1
+    document['settings'] = { 'navigation' => { 'pageTabsInViewMode' => 'shown' } }
+  end
+
+  metadata = {
+    'name' => name, 'folderId' => folder_id,
     '_offline' => true,
     '_note' => 'assembled by migrate-domo.rb --offline without a live Sigma Data Model readback — ' \
                'the master element source and folderId are placeholders; NOT postable as-is.',
   }
-  wb['description'] = description if description
+  metadata['description'] = description if description
+  wb = Sigma::CodeRep.wrap(document, extra: metadata)
   File.write(out_path, JSON.pretty_generate(wb) + "\n")
   wb
 end
@@ -332,7 +380,9 @@ def offline_put_layout!(spec_path, layout_xml_path, elements_sidecar_path)
   xml = File.read(layout_xml_path, encoding: 'UTF-8')
   raise 'FATAL: empty elementId in layout XML' if xml.match?(/elementId=""/)
 
-  spec = JSON.parse(File.read(spec_path))
+  raw_spec = JSON.parse(File.read(spec_path))
+  spec = Sigma::CodeRep.document(raw_spec)
+  metadata = Sigma::CodeRep.metadata(raw_spec)
   spec['pages'].each { |p| p.delete('layout') }
   spec['layout'] = xml
 
@@ -345,19 +395,33 @@ def offline_put_layout!(spec_path, layout_xml_path, elements_sidecar_path)
         log "WARN: layout elements sidecar references unknown page #{page_id.inspect} — skipped"
         next
       end
-      page['elements'] ||= []
-      existing = page['elements'].map { |e| e['id'] }
+      spec['elements'] ||= []
+      existing = spec['elements'].map { |e| e['id'] }
       els.each do |el|
         next if existing.include?(el['id'])
-        page['elements'] << el
+        spec['elements'] << el
+        existing << el['id']
         injected += 1
       end
     end
     log "injected #{injected} container/header element(s) from #{File.basename(elements_sidecar_path)}"
   end
 
-  File.write(spec_path, JSON.pretty_generate(spec) + "\n")
-  spec
+  element_ids = Array(spec['elements']).map { |element| element['id'] }
+  placed_ids = xml.scan(/\belementId="([^"]+)"/).flatten
+  duplicate_elements = element_ids.tally.select { |_id, count| count > 1 }.keys
+  duplicate_placements = placed_ids.tally.select { |_id, count| count > 1 }.keys
+  unplaced = element_ids - placed_ids
+  unknown = placed_ids - element_ids
+  unless duplicate_elements.empty? && duplicate_placements.empty? && unplaced.empty? && unknown.empty?
+    raise "FATAL: layout must place every flat workbook element exactly once: " \
+          "duplicate element ids=#{duplicate_elements.inspect}; duplicate placements=#{duplicate_placements.inspect}; " \
+          "unplaced=#{unplaced.inspect}; unknown=#{unknown.inspect}"
+  end
+
+  wrapped = Sigma::CodeRep.wrap(spec, extra: metadata)
+  File.write(spec_path, JSON.pretty_generate(wrapped) + "\n")
+  wrapped
 end
 
 # wb-ids.json (the shape post-and-readback.rb --type workbook emits and
@@ -365,10 +429,19 @@ end
 # just-assembled workbook-spec.json's pages/elements — no live workbook exists
 # in --offline mode to read this back from.
 def wb_ids_from_spec(spec)
+  document = Sigma::CodeRep.document(spec)
+  elements_by_id = Sigma::CodeRep.workbook_elements(document).each_with_object({}) do |element, index|
+    index[element['id']] = element if element['id']
+  end
+  page_element_ids = Sigma::CodeRep.workbook_page_element_ids(document)
   {
-    'pages' => spec['pages'].map do |p|
+    'pages' => Array(document['pages']).map do |p|
       { 'id' => p['id'], 'name' => p['name'],
-        'elements' => Array(p['elements']).map { |e| { 'id' => e['id'], 'name' => e['name'] }.compact } }
+        'visibility' => p['visibility'],
+        'elements' => Array(page_element_ids[p['id']]).filter_map do |element_id|
+          element = elements_by_id[element_id]
+          { 'id' => element['id'], 'kind' => element['kind'], 'name' => element['name'] }.compact if element
+        end }
     end,
   }
 end
@@ -644,7 +717,8 @@ def run_offline!(opts)
   layout_xml = phase_build_dashboard_layout!(opts, wb_ids_path)
 
   hr('put-layout')
-  if !opts[:force] && (JSON.parse(File.read(spec_path))['layout'])
+  existing_document = Sigma::CodeRep.document(JSON.parse(File.read(spec_path)))
+  if !opts[:force] && !existing_document['layout'].to_s.strip.empty?
     log 'workbook-spec.json already has a layout — skip (idempotent; pass --force to rebuild)'
     skip_phase!('put-layout', 'already merged (idempotent skip)')
   else

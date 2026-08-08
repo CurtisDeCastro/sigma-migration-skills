@@ -25,7 +25,7 @@ class TestPutLayoutShape < Minitest::Test
 
   def test_put_body_is_wrapped
     doc = { 'pages' => [], 'layout' => '<Layout/>' }
-    assert_equal doc, Sigma::CodeRep.wrap(doc)['document']
+    assert_equal doc.merge('elements' => []), Sigma::CodeRep.wrap(doc)['document']
   end
 
   # Real regression signal: the two tests above only prove the already-shipped
@@ -42,6 +42,12 @@ class TestPutLayoutShape < Minitest::Test
     src = File.read(File.join(__dir__, '..', 'put-layout.rb'))
     assert_match(/Sigma::CodeRep\.wrap\(/, src,
                  'put-layout.rb must wrap the PUT body via Sigma::CodeRep.wrap')
+    assert_match(/spec\['elements'\]\s*<<\s*el/, src,
+                 'layout sidecar elements must join document.elements')
+    refute_match(/page\['elements'\]\s*<<\s*el/, src,
+                 'metadata-only pages must never regain nested elements')
+    assert_match(/layout must place every flat workbook element exactly once/, src,
+                 'layout PUT must fail closed on missing or duplicate placements')
   end
 
   # Ordering: the document() unwrap must happen before the PUT, and the

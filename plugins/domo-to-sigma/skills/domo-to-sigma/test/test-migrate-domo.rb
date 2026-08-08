@@ -14,6 +14,7 @@
 require 'json'
 require 'tmpdir'
 require 'open3'
+require_relative '../scripts/lib/code_rep'
 
 SKILL   = File.expand_path('..', __dir__)
 SCRIPTS = File.join(SKILL, 'scripts')
@@ -309,12 +310,32 @@ Dir.mktmpdir('migrate-domo-e2e') do |out_dir|
   flag = File.read(flag_path).strip
   eq(flag, 'grid', "layout-2d.flag is 'grid' (fixture has >= 2 zones at distinct x within a row) — NOT 'stack'")
 
+  layout_path = File.join(out_dir, 'layout.xml')
+  ok(File.exist?(layout_path), 'wrote layout.xml')
+  emitted_layout = File.read(layout_path)
+  ok(emitted_layout.include?('<Element') && emitted_layout.include?('<Container'),
+     'standalone Domo layout emits the live Element/Container vocabulary')
+  ok(!emitted_layout.match?(%r{</?(?:LayoutElement|GridContainer)\b}),
+     'standalone Domo layout never emits rejected legacy layout aliases')
+
   # ---- workbook-spec.json assembled with the layout merged in ------------
   spec_path = File.join(out_dir, 'workbook-spec.json')
   ok(File.exist?(spec_path), 'wrote workbook-spec.json')
   spec = JSON.parse(File.read(spec_path))
-  all_elements = spec['pages'].flat_map { |p| p['elements'] || [] }
-  ok(spec['layout'].is_a?(String) && spec['layout'].include?('<Page'), 'workbook-spec.json has a merged <Page> layout XML (put-layout offline step ran)')
+  document = Sigma::CodeRep.document(spec)
+  all_elements = Sigma::CodeRep.workbook_elements(spec)
+  ok(spec['name'] && spec['folderId'] && spec['document'].is_a?(Hash),
+     'workbook-spec.json keeps metadata outside the released document envelope')
+  ok(document['pages'].all? { |page| !page.key?('elements') },
+     'workbook document pages are metadata-only')
+  ok(document['layout'].is_a?(String) && document['layout'].include?('<Page'),
+     'workbook document has a merged authoritative <Page> layout XML (put-layout offline step ran)')
+  ok(!document['layout'].match?(%r{</?(?:LayoutElement|GridContainer)\b}),
+     'workbook document layout contains no rejected legacy layout aliases')
+  placed = document['layout'].scan(/\belementId="([^"]+)"/).flatten
+  eq(placed.sort, all_elements.map { |element| element['id'] }.sort,
+     'authoritative layout places every flat element exactly once')
+  eq(placed.length, placed.uniq.length, 'authoritative layout contains no duplicate element placements')
 
   # ---- (b) an inline data-URI image element ------------------------------
   image_el = all_elements.find { |e| e['kind'] == 'image' }
@@ -346,15 +367,18 @@ Dir.mktmpdir('migrate-domo-e2e') do |out_dir|
   # ---- (e) bead ziht: a card on a non-dominant DataSet (ds-dim) routes to --
   # its own hidden sub-master (master-<dataset>), not the shared master, and
   # that sub-master element appears exactly once under the Data page.
-  data_page = spec['pages'].find { |p| p['id'] == 'page-data' || p['name'] == 'Data' }
+  data_page = document['pages'].find { |p| p['id'] == 'page-data' || p['name'] == 'Data' }
   ok(data_page, 'workbook-spec.json has a Data page')
   submaster_el = all_elements.find { |e| e.dig('source', 'elementId').to_s.start_with?('master-') }
   ok(submaster_el, "workbook-spec.json contains an element sourced from a per-dataset sub-master " \
                    "(bead ziht) — got source #{submaster_el && submaster_el['source']}")
   if submaster_el && data_page
     sm_id = submaster_el.dig('source', 'elementId')
-    on_data_page = Array(data_page['elements']).select { |e| e['id'] == sm_id }
-    eq(on_data_page.size, 1, "the sub-master '#{sm_id}' appears exactly once under the Data page")
+    submaster = all_elements.find { |element| element['id'] == sm_id }
+    page_by_element = Sigma::CodeRep.workbook_page_by_element(spec)
+    ok(submaster, "the sub-master '#{sm_id}' appears exactly once in document.elements")
+    eq(page_by_element.dig(sm_id, 'id'), data_page['id'],
+       "the authoritative layout places sub-master '#{sm_id}' on the Data page")
   end
 
   # ---- (f) bead 08sf: a companion kpi-chart element for a card whose ------
@@ -384,10 +408,10 @@ Dir.mktmpdir('migrate-domo-e2e') do |out_dir|
   # via build-domo-layout.rb's load_chart_specs_companions + a
   # pseudo-card synthesis, mirroring the pre-existing orphan-control pattern
   # (see build-domo-layout.rb) — confirm it landed by checking the companion's
-  # own element id shows up as a LayoutElement's elementId= attribute.
+  # own element id shows up as an Element's elementId= attribute.
   if companion_el
-    ok(spec['layout'].to_s.include?(%(elementId="#{companion_el['id']}")),
-       "the companion KPI element '#{companion_el['id']}' has its OWN LayoutElement zone in the " \
+    ok(document['layout'].to_s.include?(%(elementId="#{companion_el['id']}")),
+       "the companion KPI element '#{companion_el['id']}' has its OWN Element zone in the " \
        'merged layout XML — it is placed on the page, not just present in the element tree (I1 fix)')
   end
 

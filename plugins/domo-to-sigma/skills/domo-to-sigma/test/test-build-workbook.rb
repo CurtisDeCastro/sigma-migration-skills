@@ -191,14 +191,45 @@ gauge = build_element({ 'id' => 'c19', 'title' => 'Quota Attainment', 'chartType
                         'summaryNumber' => { 'column' => 'attainment', 'aggregation' => 'SUM', 'label' => 'Attainment' },
                         'columns' => [ { 'column' => 'attainment', 'aggregation' => 'SUM' },
                                        { 'column' => 'target', 'aggregation' => 'SUM' } ] }, {})
-eq(gauge['kind'], 'kpi-chart', 'badge_filledgauge degrades to kpi-chart (gauge is a CONFIRMED-INVALID Sigma kind)')
-ok($warnings.any? { |w| w['warning'].include?('no native Sigma equivalent') && w['warning'].include?('gauge') }, 'the gauge gap is flagged loudly')
+eq(gauge['kind'], 'kpi-chart', 'filled gauge without explicit CURRENT/TARGET roles degrades to kpi-chart')
+ok($warnings.any? { |w| w['warning'].include?('requires explicit CURRENT and TARGET') },
+   'the ungrounded progress range is flagged loudly')
+
+$warnings = []
+native_progress = build_element({
+  'id' => 'c19-native', 'title' => 'Quota Attainment', 'chartType' => 'badge_filledgauge',
+  'columns' => [
+    { 'column' => 'attainment', 'aggregation' => 'SUM', 'mapping' => 'CURRENT' },
+    { 'column' => 'target', 'aggregation' => 'SUM', 'mapping' => 'TARGET' },
+  ],
+}, {})
+eq(native_progress['kind'], 'progress', 'filled gauge with grounded CURRENT/TARGET roles maps to released progress')
+eq(native_progress['shape'], 'ring', 'Domo filled gauge maps to ring progress')
+eq(native_progress['min'], '0', 'progress uses the grounded zero baseline')
+eq(native_progress['value'], 'Sum([Master/Attainment])', 'CURRENT role maps to the progress value formula')
+eq(native_progress['max'], 'Sum([Master/Target])', 'TARGET role maps to the progress maximum formula')
+ok($warnings.empty?, 'fully grounded progress emits no fallback warning')
+
+$warnings = []
+drill_gap = build_element({
+  'id' => 'c19-drill', 'title' => 'Revenue hierarchy', 'chartType' => 'badge_vert_bar',
+  'allowTableDrill' => true, 'drillPath' => { 'fields' => %w[region city] },
+  'columns' => [
+    { 'column' => 'region', 'mapping' => 'ITEM' },
+    { 'column' => 'revenue', 'aggregation' => 'SUM', 'mapping' => 'VALUE' },
+  ],
+}, {})
+eq(drill_gap['kind'], 'bar-chart', 'a drill-bearing card retains its grounded base chart')
+ok($warnings.any? { |w| w['warning'].include?('complete ordered hierarchy') &&
+                         w['warning'].include?('not fabricated') },
+   'incomplete Domo drill metadata is a loud gap, never dead drill UI')
 
 $warnings = []
 nogauge = build_element({ 'id' => 'c19b', 'title' => 'Orphan Gauge', 'chartType' => 'badge_filledgauge',
                           'columns' => [] }, {})
 eq(nogauge['kind'], 'table', 'a gauge card with no summaryNumber still emits an element (table) — never silently dropped')
-ok($warnings.any? { |w| w['warning'].include?('not silently dropped') }, 'the missing-summaryNumber gauge case is flagged')
+ok($warnings.any? { |w| w['warning'].include?('requires explicit CURRENT and TARGET') },
+   'the missing-summaryNumber gauge case carries the grounded progress-fallback warning')
 
 puts "== badge_map: region-map when the geography column is classifiable, honest table fallback otherwise =="
 $warnings = []
@@ -711,9 +742,8 @@ eq(grouped3.keys.sort, ['Page One', 'Page Two'], 'real per-page attribution is h
 eq(grouped3['Page One'].map { |c| c['id'] }, ['card-1'], 'card-1 -> Page One via cardIds')
 eq(grouped3['Page Two'].map { |c| c['id'] }, ['card-2'], 'card-2 -> Page Two via cards')
 
-puts "== F4: badge_filledgauge's NO_NATIVE_EQUIVALENT warning fires even when Rule 0 " \
-     'short-circuits straight to build_kpi (sigmaKindHint == "kpi-chart", the REAL shape ' \
-     'domo-discover.rb\'s sigma_kind_hint produces for every gauge card) =='
+puts "== F4: an ungrounded badge_filledgauge warning fires even when Rule 0 " \
+     'short-circuits straight to build_kpi =='
 $warnings = []
 $companion_elements = []
 real_gauge = build_element({
@@ -723,8 +753,8 @@ real_gauge = build_element({
   'columns' => [ { 'column' => 'attainment', 'aggregation' => 'SUM' } ],
 }, {})
 eq(real_gauge['kind'], 'kpi-chart', 'Rule 0 still degrades it to a KPI (that part was always correct)')
-ok($warnings.any? { |w| w['warning'].include?('no native Sigma equivalent') && w['warning'].include?('gauge') },
-   'the honest NO_NATIVE_EQUIVALENT warning ALSO fires on this path (F4 — it used to be swallowed here)')
+ok($warnings.any? { |w| w['warning'].include?('requires explicit CURRENT and TARGET') },
+   'the honest progress-range warning ALSO fires on this path')
 
 puts "== F4: the warning fires exactly once per card, not duplicated on the non-Rule-0 path =="
 $warnings = []
@@ -735,8 +765,8 @@ gauge_via_case = build_element({
   'columns' => [ { 'column' => 'attainment', 'aggregation' => 'SUM' }, { 'column' => 'target', 'aggregation' => 'SUM' } ],
 }, {})
 eq(gauge_via_case['kind'], 'kpi-chart', 'still resolves to kpi-chart via the case-statement path (not Rule 0)')
-gauge_warnings = $warnings.select { |w| w['warning'].include?('no native Sigma equivalent') && w['warning'].include?('gauge') }
-eq(gauge_warnings.size, 1, 'exactly one NO_NATIVE_EQUIVALENT warning — never double-fired')
+gauge_warnings = $warnings.select { |w| w['warning'].include?('requires explicit CURRENT and TARGET') }
+eq(gauge_warnings.size, 1, 'exactly one progress-range warning — never double-fired')
 
 puts "== B4 + bead ziht: a card-level filter on a SUB-MASTER-routed card is retargeted " \
      'to that sub-master\'s namespace, just like every other column — never left ' \

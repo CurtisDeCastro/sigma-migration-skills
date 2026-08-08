@@ -232,6 +232,39 @@ module DomoSigma
     end
   end
 
+  # Preserve the non-card content PageLayoutV4 exposes. HEADER and PAGE_BREAK
+  # are real authored page semantics, not phantom cards: the workbook builder
+  # emits released `text` / `page-break` elements from these records and the
+  # Domo layout adapter places them at this geometry. Unknown v4 template
+  # types stay out until their meaning is grounded.
+  def pagelayoutv4_content(stacks, page_id)
+    v4 = stacks.is_a?(Hash) ? stacks['pageLayoutV4'] : nil
+    return [] unless v4.is_a?(Hash)
+
+    content_by_key = Array(v4['content']).each_with_object({}) do |content, out|
+      out[content['contentKey'].to_s] = content if content.is_a?(Hash)
+    end
+    Array(v4.dig('standard', 'template')).filter_map do |template|
+      next unless template.is_a?(Hash)
+      type = template['type'].to_s.upcase
+      next unless %w[HEADER PAGE_BREAK].include?(type)
+      next if [template['x'], template['y'], template['width'], template['height']].any?(&:nil?)
+
+      key = template['contentKey'].to_s
+      source = content_by_key[key] || {}
+      slug_type = type.downcase.tr('_', '-')
+      {
+        'id' => "domo-layout-#{page_id}-#{slug_type}-#{key}".gsub(/[^a-zA-Z0-9_-]/, '-')[0, 64],
+        'type' => slug_type,
+        'text' => source['text'],
+        'x' => (template['x'].to_f * 0.4).round(2),
+        'y' => (template['y'].to_f * 0.4).round(2),
+        'w' => (template['width'].to_f * 0.4).round(2),
+        'h' => (template['height'].to_f * 0.4).round(2)
+      }.compact
+    end
+  end
+
   # --- x/y/w/h pass (mason / Domo-App pages) — unchanged from before Bug 5 --
   def merge_xywh_geometry(cards, page_layout)
     return cards unless page_layout.is_a?(Hash)

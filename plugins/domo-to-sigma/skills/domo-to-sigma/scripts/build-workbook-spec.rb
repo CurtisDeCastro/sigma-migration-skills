@@ -44,6 +44,9 @@ require 'optparse'
 require 'net/http'
 require 'uri'
 require 'base64'
+$LOAD_PATH.unshift File.expand_path('lib', __dir__)
+require 'code_rep'
+require 'layout'
 
 opts = { mode: 'page-per-worksheet' }
 OptionParser.new do |p|
@@ -115,7 +118,6 @@ dm_el_name = target['name']
 #   • warehouse-table  → the table's last path segment (e.g. an extract-landed
 #                        or direct-table element: MY_SCHEMA.MY_TABLE → "MY_TABLE")
 #   • everything else  → "Custom SQL" (SQL / published-DS elements)
-$LOAD_PATH.unshift File.expand_path('lib', __dir__)
 require 'sigma_rest'
 spec = Sigma.request(:get, "/v2/dataModels/#{dm_id}/spec")
 el = spec['pages'].flat_map { |p| p['elements'] }.find { |e| e['id'] == dm_el_id }
@@ -302,18 +304,62 @@ if master_el
 end
 
 wb = {
-  'name'          => opts[:name],
-  'schemaVersion' => 1,
-  # The workbook code-rep surface nests non-metadata fields under `document`
-  # (lib/code_rep.rb) and requires `kind` INSIDE it: without this the POST 400s
-  # with `Expecting "workbook" at 0.document.0.3.kind but instead got: undefined`.
-  # 'kind' is one of CodeRep::DOC_KEYS, so declaring it at the top level here is
-  # what lands it inside the wrapper. Live-confirmed on the 36-card cold run.
-  'kind'          => 'workbook',
-  'folderId'      => opts[:folder_id],
-  'pages'         => [data_page] + visible_pages
+  'name' => opts[:name],
+  'folderId' => opts[:folder_id]
 }
 wb['description'] = opts[:description] if opts[:description]
+
+# The released workbook representation differs from the unchanged data-model
+# representation: pages are metadata only, elements are document-global, and
+# layout is the sole authority for page membership. Add released auto
+# navigation only when the Domo source really has multiple pages.
+if visible_pages.size > 1
+  page_labels = visible_pages.each_with_object({}) { |page, labels| labels[page['id']] = page['name'] }
+  visible_pages.each do |page|
+    page['elements'].unshift(
+      'id' => "nav-#{page['id']}",
+      'kind' => 'navigation',
+      'mode' => 'auto',
+      'pageLabels' => page_labels
+    )
+  end
+end
+
+page_records = [data_page] + visible_pages
+flat_elements = page_records.flat_map { |page| page['elements'] || [] }
+layout_pages = page_records.map do |page|
+  row = 1
+  children = (page['elements'] || []).map do |element|
+    height = case element['kind']
+             when 'page-break' then 1
+             when 'control', 'text', 'navigation', 'progress', 'image', 'divider' then 3
+             when 'kpi-chart' then 6
+             when 'table', 'pivot-table' then 12
+             else 10
+             end
+    xml = SigmaLayout.le(element['id'], 1, 25, row, row + height)
+    row += height
+    xml
+  end
+  SigmaLayout.page_xml(page['id'], children.join("\n"))
+end
+
+document = {
+  'schemaVersion' => 1,
+  'kind' => 'workbook',
+  'pages' => page_records.map do |page|
+    metadata = page.reject { |key, _| key == 'elements' }
+    metadata['visibility'] = 'hidden' if page['id'] == 'page-data'
+    metadata
+  end,
+  'elements' => flat_elements,
+  'layout' => SigmaLayout.assemble(*layout_pages),
+  'panels' => [],
+  'overlays' => []
+}
+if visible_pages.size > 1
+  document['settings'] = { 'navigation' => { 'pageTabsInViewMode' => 'shown' } }
+end
 
 # Phase-1 theme (D1 palette + Pass-7 canvas), when a --layout was provided.
 if opts[:layout]
@@ -326,11 +372,12 @@ if opts[:layout]
     # document.settings.theme.{name,overrides} (shared/lib/code_rep.rb
     # DOC_KEYS) — a flat top-level themeName/themeOverrides is invalid on
     # write and gets silently dropped by the code-rep wrapper.
-    wb['settings'] = (wb['settings'] || {}).merge('theme' => { 'name' => 'Light', 'overrides' => overrides }) unless overrides.empty?
+    Sigma::CodeRep.set_theme(document, name: 'Light', overrides: overrides) unless overrides.empty?
     warn "  theme: canvas=#{theme['backgroundCanvas'] || '(default)'}, categoricalScheme=#{(theme['categoricalScheme'] || []).size} color(s)"
   end
 end
 
+wb = Sigma::CodeRep.wrap(document, extra: wb)
 File.write(opts[:out], JSON.pretty_generate(wb))
 warn "wrote #{opts[:out]}"
 warn "  mode: #{opts[:mode]}"

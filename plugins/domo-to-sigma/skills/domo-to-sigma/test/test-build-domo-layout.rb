@@ -512,5 +512,32 @@ Dir.mktmpdir('domo-build-layout-kpi-caption') do |dir|
      'a KPI card with no summaryNumber at all falls back to the card title, unchanged (regression guard)')
 end
 
+Dir.mktmpdir('domo-build-layout-v4-content') do |dir|
+  w = ->(name, obj) { File.write(File.join(dir, name), JSON.generate(obj)) }
+  w.call('cards.json', [
+    { 'id' => 'c1', 'title' => 'Revenue', 'chartType' => 'badge_vert_bar',
+      'x' => 0, 'y' => 2, 'w' => 24, 'h' => 8 },
+  ])
+  w.call('pages.json', [{
+    'id' => 'p1', 'title' => 'Printable', 'cardIds' => ['c1'],
+    '_layoutContent' => [
+      { 'id' => 'domo-layout-p1-header-1', 'type' => 'header', 'text' => 'Revenue section',
+        'x' => 0, 'y' => 0, 'w' => 24, 'h' => 2 },
+      { 'id' => 'domo-layout-p1-page-break-2', 'type' => 'page-break',
+        'x' => 0, 'y' => 10, 'w' => 24, 'h' => 1 },
+    ],
+  }])
+
+  env = { 'DOMO_DISCOVERY_DIR' => dir }
+  out = IO.popen(env, ['ruby', File.join(SCRIPTS, 'build-domo-layout.rb')], err: [:child, :out], &:read)
+  ok($?.success?, "build-domo-layout.rb exits 0 with authored v4 header/page-break content\n#{out unless $?.success?}")
+  dash = JSON.parse(File.read(File.join(dir, 'dashboard-layout.json'))).first
+  header = dash['zones'].find { |zone| zone['id'] == 'domo-layout-p1-header-1' }
+  page_break = dash['zones'].find { |zone| zone['id'] == 'domo-layout-p1-page-break-2' }
+  eq(header && header['chart_kind'], 'text', 'v4 HEADER reaches layout as a text zone')
+  eq(header && header['caption'], 'Revenue section', 'v4 HEADER keeps its authored caption')
+  eq(page_break && page_break['chart_kind'], 'page-break', 'v4 PAGE_BREAK reaches layout as a page-break zone')
+end
+
 puts
 if $failures.zero? then puts "ALL PASS"; exit 0 else puts "#{$failures} FAILURE(S)"; exit 1 end

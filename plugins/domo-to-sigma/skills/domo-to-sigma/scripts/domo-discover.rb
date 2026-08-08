@@ -369,6 +369,9 @@ def normalize_card(raw, card_id, card_meta: nil)
       'filters'            => filters,
       'conditionalFormats' => Array(defn['conditionalFormats']),
       'cardFormulas'       => Array(defn['formulas']),  # {id,name,columnPositions,...}
+      'allowTableDrill'     => defn['allowTableDrill'] || raw['allowTableDrill'],
+      'drillPath'           => defn['drillPath'] || defn['drillpath'] ||
+                               raw['drillPath'] || raw['drillpath'],
       '_metadata'          => (meta.empty? ? nil : meta),
       '_shape'             => 'B',
     }.compact
@@ -402,6 +405,8 @@ def normalize_card(raw, card_id, card_meta: nil)
       'filters'            => filters,
       'conditionalFormats' => Array(raw['conditionalFormats']),
       'cardFormulas'       => Array(raw['calculatedFields']),  # {formula,id,name,saveToDataSet}
+      'allowTableDrill'     => raw['allowTableDrill'],
+      'drillPath'           => raw['drillPath'] || raw['drillpath'],
       '_metadata'          => (meta.empty? ? nil : meta),
       '_shape'             => 'A',
     }.compact
@@ -870,6 +875,12 @@ if opts[:pages]
     # also carries this page's sizes[]/collections[] for the Bug 5 geometry
     # merge below.
     card_ids, card_meta_by_id, stacks = enumerate_page_cards(pid)
+    if stacks.is_a?(Hash)
+      layout_content = pagelayoutv4_content(stacks, pid)
+      page['_layoutContent'] = layout_content unless layout_content.empty?
+      analyzer = stacks['pageAnalyzerSettings']
+      page['_pageAnalyzerSettings'] = analyzer if analyzer.is_a?(Hash)
+    end
     page_cards = []
 
     card_ids.each do |cid|

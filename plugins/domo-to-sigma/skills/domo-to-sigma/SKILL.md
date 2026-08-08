@@ -446,6 +446,21 @@ Then translate the rest per the ref:
 - **No liberties:** one card → one element; reproduce labels/formats/layout; every
   unsupported/dropped item → a Phase-5e warning, never a silent substitution
 
+**Workbook-as-code release contract:** read
+`refs/workbook-code-release-gaps.md` and the machine-readable
+`refs/catalogs/{viz-kind,workbook-feature}.json`. Workbook payloads are outer
+metadata plus `document:{schemaVersion,kind,pages,elements,layout,...}`;
+`document.pages` is metadata-only, `document.elements` is flat, and the required
+layout is the sole page-membership authority. Layout XML emitted by Domo uses
+the live `<Element>` / `<Container>` tags; the historical `LayoutElement` /
+`GridContainer` aliases are accepted only while reading old artifacts and are
+rejected if they escape an emission boundary. Data models are deliberately
+unchanged (`pages[].elements`). Released target capabilities are not permission
+to invent source intent: this converter emits grounded multi-page navigation,
+explicit v4 page breaks/headers, and bounded CURRENT/TARGET progress. Waterfall,
+legend/drill wiring, panels, tabbed/repeated containers, and ungrounded styling
+remain loud gaps; `box-chart` remains entitlement-gated.
+
 ### Phase 5d — Layout
 `ruby scripts/build-domo-layout.rb` turns `discovery/cards.json` geometry (from
 Phase 1a's `merge_geometry`) + `discovery/pages.json` names into
