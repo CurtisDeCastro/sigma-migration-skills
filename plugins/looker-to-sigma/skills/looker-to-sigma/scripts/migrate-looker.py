@@ -961,7 +961,9 @@ console.error('stats:', JSON.stringify(res.stats));
     # ── Phase 4b — Build + POST the workbook (layout XML inline) ─────────────
     hdr(4, TOTAL, "Build workbook (4b)")
     wb_spec_path = os.path.join(wd, "wb-spec.json")
-    # Full element catalog (id+name) → one master per explore for multi-explore
+    # Full DATA-MODEL element catalog (id+name) → one master per explore for
+    # multi-explore dashboards. Data-model specs intentionally retain
+    # pages[].elements; the workbook-only flat-element rule does not apply here.
     # dashboards (each explore matched to its DM element by normalized name).
     dm_els_path = os.path.join(wd, "dm-elements.json")
     # Attach each element's REFERENCEABLE DM metrics (name + formula) so build_workbook can
@@ -1003,9 +1005,9 @@ console.error('stats:', JSON.stringify(res.stats));
     wspec = json.load(open(wb_spec_path))
     wspec["name"] = f"{prefix}{dash['title']} (from Looker)"
     try:
-        # Workbook code-rep POSTs require the nested `document` envelope
-        # (verified live 2026-08-03/04: a flat body 400s) — wrap the
-        # build_workbook.py-produced flat spec before sending it over the wire.
+        # Builder output is already a current workbook envelope. Re-wrapping via
+        # CodeRep is deliberate: it tolerates legacy local artifacts while
+        # preserving outer metadata and the full current document collections.
         post_body = code_rep.wrap(code_rep.document(wspec), code_rep.metadata(wspec))
         resp = sigma("POST", "/v2/workbooks/spec", post_body)   # responds in YAML
     except RuntimeError as e:
@@ -1086,7 +1088,8 @@ console.error('stats:', JSON.stringify(res.stats));
     hdr(4, TOTAL, "Visual QA (4c)")
     vqa = os.path.join(wd, "visual-qa")
     os.makedirs(vqa, exist_ok=True)
-    content_pages = [pg for pg in (wspec.get("pages") or [])
+    workbook_doc = code_rep.document(wspec)
+    content_pages = [pg for pg in (workbook_doc.get("pages") or [])
                      if "data" not in str(pg.get("id")).lower()]
     rendered = 0
     render_png = None  # first successful page PNG — wired to gate 8 (--sigma-render)

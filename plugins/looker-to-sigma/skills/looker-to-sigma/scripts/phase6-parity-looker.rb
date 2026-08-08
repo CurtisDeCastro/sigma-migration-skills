@@ -123,32 +123,28 @@ if !opts[:finalize]
   # binary:true returns the raw body — the spec endpoint answers in YAML even
   # when asked for JSON, so parse both.
   raw = Sigma.request(:get, "/v2/workbooks/#{opts[:wb]}/spec", binary: true)
-  # Live GET now nests non-metadata fields under `document` (verified 2026-08-03/04);
-  # unwrap so both this pass's flat `spec['pages']` read below and the on-disk
-  # wb-readback.json stay the flat shape this script (and any downstream reader)
-  # expects.
+  # Keep the on-disk readback as the unwrapped document. Workbook elements are
+  # flat; page membership is layout-authoritative.
   spec = Sigma::CodeRep.document(parse_spec(raw))
   File.write(File.join(opts[:dir], 'wb-readback.json'), JSON.pretty_generate(spec))
 
   charts = []
-  Array(spec['pages']).each do |page|
-    Array(page['elements']).each do |el|
-      if el['kind'].to_s.end_with?('-chart')
-        pairs = chart_columns(el)
-        next unless pairs
-        charts << { 'chart' => el['name'], 'sigma_element_id' => el['id'],
-                    'kind' => el['kind'],
-                    'sigma_columns' => pairs.compact.map { |id_name| id_name[1] },
-                    'sigma_column_ids' => pairs.compact.map { |id_name| id_name[0] },
-                    'workbook_id' => opts[:wb] }
-      elsif %w[table pivot-table].include?(el['kind'].to_s)
-        tt = table_total_column(el)
-        next unless tt
-        charts << { 'chart' => el['name'], 'sigma_element_id' => el['id'],
-                    'kind' => 'table-total', 'source_kind' => el['kind'],
-                    'sigma_columns' => [tt[1]], 'sigma_column_ids' => [tt[0]],
-                    'workbook_id' => opts[:wb] }
-      end
+  Sigma::CodeRep.workbook_elements(spec).each do |el|
+    if el['kind'].to_s.end_with?('-chart')
+      pairs = chart_columns(el)
+      next unless pairs
+      charts << { 'chart' => el['name'], 'sigma_element_id' => el['id'],
+                  'kind' => el['kind'],
+                  'sigma_columns' => pairs.compact.map { |id_name| id_name[1] },
+                  'sigma_column_ids' => pairs.compact.map { |id_name| id_name[0] },
+                  'workbook_id' => opts[:wb] }
+    elsif %w[table pivot-table].include?(el['kind'].to_s)
+      tt = table_total_column(el)
+      next unless tt
+      charts << { 'chart' => el['name'], 'sigma_element_id' => el['id'],
+                  'kind' => 'table-total', 'source_kind' => el['kind'],
+                  'sigma_columns' => [tt[1]], 'sigma_column_ids' => [tt[0]],
+                  'workbook_id' => opts[:wb] }
     end
   end
   abort('no plannable chart elements found in the workbook spec') if charts.empty?

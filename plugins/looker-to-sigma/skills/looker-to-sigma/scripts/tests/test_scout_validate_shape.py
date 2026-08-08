@@ -29,7 +29,8 @@ class TestScoutValidateShape(unittest.TestCase):
     def test_wrap_nests_document(self):
         doc = {"schemaVersion": 1, "pages": []}
         body = code_rep.wrap(doc, {"name": "n", "folderId": "f"})
-        self.assertEqual(body["document"], doc)
+        self.assertEqual(body["document"],
+                         {"schemaVersion": 1, "pages": [], "elements": []})
         self.assertNotIn("pages", body)
 
     def test_document_resolves_nested_readback(self):
@@ -48,6 +49,12 @@ class TestScoutValidateShape(unittest.TestCase):
         var = m.group(1)
         assign = re.search(rf"\b{re.escape(var)}\s*=\s*code_rep\.wrap\(", src)
         self.assertIsNotNone(assign, f"{var} (the POST body) must be built via code_rep.wrap(...)")
+
+    def test_layout_uses_canonical_tags(self):
+        with open(SCRIPT) as fh:
+            src = fh.read()
+        self.assertRegex(src, r"<Element elementId=")
+        self.assertNotRegex(src, r"</?(?:LayoutElement|GridContainer)\b")
 
 
 if __name__ == "__main__":
