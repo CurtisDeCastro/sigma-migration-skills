@@ -12,11 +12,22 @@ require_relative 'mechanical-specs'
 RUBY = RbConfig.ruby
 STORIES = File.join(__dir__, 'build-story-pages.rb')
 PARSER = File.join(__dir__, 'parse-twb-layout.rb')
+ANCHOR_READONLY_KEYS = %w[
+  workbookId url ownerId createdBy updatedBy createdAt updatedAt latestDocumentVersion
+].freeze
 $failures = 0
 
 def check(label, value)
   puts "#{value ? '  ok  ' : 'FAIL  '}#{label}"
   $failures += 1 unless value
+end
+
+# Mirror the shared verify-anchors pivot-totals PUT boundary here rather than
+# forking that vendored script. This Tableau-owned release check proves the
+# shared CodeRep adapter retains every currently released document collection.
+def anchor_put_body(spec)
+  metadata = Sigma::CodeRep.metadata(spec).reject { |key, _| ANCHOR_READONLY_KEYS.include?(key) }
+  Sigma::CodeRep.wrap(Sigma::CodeRep.document(spec), extra: metadata)
 end
 
 master_columns = [
@@ -59,6 +70,37 @@ check('elements are document-global', Array(doc['elements']).map { |element| ele
       %w[break master nav progress wf])
 check('layout is required', doc['layout'].to_s.include?('<Page'))
 check('canonical workbook validates', WorkbookCode.validate(spec).empty?)
+
+anchor_spec = JSON.parse(JSON.generate(spec))
+anchor_spec.merge!(
+  'workbookId' => 'wb-release', 'latestDocumentVersion' => 7,
+  'url' => 'https://example.invalid/workbook/wb-release'
+)
+anchor_doc = Sigma::CodeRep.document(anchor_spec)
+anchor_doc['settings'] = { 'theme' => { 'name' => 'Release Theme' } }
+anchor_doc['panels'] = [{ 'id' => 'panel-release' }]
+anchor_doc['overlays'] = [{ 'id' => 'overlay-release' }]
+anchor_doc['agents'] = [{ 'id' => 'agent-release' }]
+anchor_flat = Sigma::CodeRep.metadata(anchor_spec).merge(anchor_doc)
+anchor_element = Sigma::CodeRep.workbook_elements(anchor_flat).find { |element| element['id'] == 'wf' }
+anchor_element['totals'] = { 'showGrandTotals' => false, 'showSubtotals' => false }
+captured_totals = anchor_element.delete('totals')
+stripped_anchor_body = anchor_put_body(anchor_flat)
+anchor_element['totals'] = captured_totals
+restored_anchor_body = anchor_put_body(anchor_flat)
+
+check('shared anchor PUT boundary strips read-only response metadata',
+      ANCHOR_READONLY_KEYS.none? { |key| restored_anchor_body.key?(key) })
+check('shared anchor totals bracket emits valid workbook code',
+      WorkbookCode.validate(stripped_anchor_body).empty? &&
+      WorkbookCode.validate(restored_anchor_body).empty?)
+check('shared anchor totals bracket preserves released document collections',
+      %w[settings panels overlays agents].all? do |key|
+        Sigma::CodeRep.document(restored_anchor_body)[key] == anchor_doc[key]
+      end)
+check('shared anchor totals bracket restores the complete totals value',
+      Sigma::CodeRep.workbook_elements(restored_anchor_body)
+        .find { |element| element['id'] == 'wf' }['totals'] == captured_totals)
 
 ids = Sigma::CodeRep.workbook_elements(doc).filter_map { |element| element['id'] }
 placed = doc['layout'].scan(/\belementId="([^"]+)"/).flatten
