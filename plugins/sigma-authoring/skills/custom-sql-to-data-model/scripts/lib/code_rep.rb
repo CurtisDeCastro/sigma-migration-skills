@@ -71,11 +71,21 @@ module Sigma
       end
 
       # Write path: every live workbook code-rep endpoint requires the wrapper
-      # and flat document.elements. Flatten legacy page-nested artifacts at this
-      # boundary so older converter output remains postable during migration;
-      # reads always expose the current flat shape.
+      # and flat document.elements. Flatten legacy page-nested artifacts and
+      # canonicalize legacy layout tags at this boundary so older converter
+      # output remains postable during migration; emitters always send the
+      # live-verified <Element>/<Container> vocabulary.
       def wrap(document_hash, extra: {})
-        extra.merge('document' => flatten_elements(document_hash))
+        extra.merge('document' => canonicalize_document(flatten_elements(document_hash)))
+      end
+
+      # Read compatibility for pre-2026-08-08 artifacts. LayoutElement and
+      # GridContainer are rejected by the live workbook verify endpoint, so
+      # they must never cross an emission boundary unchanged.
+      def canonicalize_layout(layout_xml)
+        layout_xml.to_s
+                  .gsub(%r{<(/?)LayoutElement\b}, '<\1Element')
+                  .gsub(%r{<(/?)GridContainer\b}, '<\1Container')
       end
 
       # WORKBOOK-ONLY shape helpers. Workbook elements are a flat document
@@ -94,7 +104,12 @@ module Sigma
         doc['layout'].to_s
                      .scan(%r{<Page\b[^>]*\bid="([^"]*)"[^>]*>(.*?)</Page>}m)
                      .each_with_object({}) do |(page_id, body), out|
-          out[page_id] = body.scan(/\belementId="([^"]*)"/).flatten.uniq
+          # Restrict ownership to actual layout nodes. A generic elementId
+          # scan can accidentally claim ids from unrelated nested attributes.
+          # Legacy aliases remain readable, but all writes canonicalize them.
+          out[page_id] = body.scan(
+            %r{<(?:Element|Container|TabbedContainer|LayoutElement|GridContainer)\b[^>]*\belementId="([^"]*)"}
+          ).flatten.uniq
         end
       end
 
@@ -119,6 +134,11 @@ module Sigma
       end
 
       private
+
+      def canonicalize_document(doc)
+        return doc unless doc.is_a?(Hash) && doc.key?('layout')
+        doc.merge('layout' => canonicalize_layout(doc['layout']))
+      end
 
       # Emit only the current API shape. Elements are workbook-global in the
       # payload; layout XML retains their page placement. Existing flat

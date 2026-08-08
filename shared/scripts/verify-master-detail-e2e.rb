@@ -210,10 +210,10 @@ def build_spec(home, schema_version, master_formula_fn)
     'elements' => elements,
     'layout' => <<~XML,
       <Page type="grid" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto" id="#{PAGE_ID}">
-        <LayoutElement elementId="#{MASTER_SRC_ID}" gridColumn="1 / 25" gridRow="1 / 9"/>
-        <LayoutElement elementId="#{MASTER_CHART_ID}" gridColumn="1 / 13" gridRow="9 / 21"/>
-        <LayoutElement elementId="#{CONTROL_EL_ID}" gridColumn="13 / 25" gridRow="9 / 12"/>
-        <LayoutElement elementId="#{DETAIL_ID}" gridColumn="13 / 25" gridRow="12 / 21"/>
+        <Element elementId="#{MASTER_SRC_ID}" gridColumn="1 / 25" gridRow="1 / 9"/>
+        <Element elementId="#{MASTER_CHART_ID}" gridColumn="1 / 13" gridRow="9 / 21"/>
+        <Element elementId="#{CONTROL_EL_ID}" gridColumn="13 / 25" gridRow="9 / 12"/>
+        <Element elementId="#{DETAIL_ID}" gridColumn="13 / 25" gridRow="12 / 21"/>
       </Page>
     XML
   }

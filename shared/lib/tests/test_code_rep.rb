@@ -2,7 +2,7 @@ require 'minitest/autorun'
 require_relative '../code_rep'
 
 class TestCodeRep < Minitest::Test
-  LAYOUT = '<Page id="p"><LayoutElement elementId="e1"/></Page>'
+  LAYOUT = '<Page id="p"><Element elementId="e1"/></Page>'
   LIVE   = { 'workbookId' => 'w1', 'name' => 'N',
              'document' => { 'schemaVersion' => 1, 'pages' => [{ 'id' => 'p' }],
                              'elements' => [{ 'id' => 'e1', 'kind' => 'table' }],
@@ -21,8 +21,8 @@ class TestCodeRep < Minitest::Test
       { 'id' => 'page-1', 'name' => 'Overview',
         'elements' => [{ 'id' => 'chart', 'kind' => 'bar-chart' }] }
     ],
-    'layout' => '<Page id="page-data"><LayoutElement elementId="source"/></Page>' \
-                '<Page id="page-1"><LayoutElement elementId="chart"/></Page>'
+    'layout' => '<Page id="page-data"><Element elementId="source"/></Page>' \
+                '<Page id="page-1"><Element elementId="chart"/></Page>'
   }.freeze
 
   def test_reads_both_shapes
@@ -74,6 +74,20 @@ class TestCodeRep < Minitest::Test
     assert_equal %w[chart source], wrapped.dig('document', 'elements').map { |element| element['id'] }.sort
     assert wrapped.dig('document', 'pages').all? { |page| !page.key?('elements') }
     assert_equal %w[chart source], Sigma::CodeRep.workbook_elements(wrapped).map { |element| element['id'] }.sort
+  end
+
+  def test_wrap_canonicalizes_rejected_legacy_layout_tags
+    legacy_layout = '<Page id="p"><GridContainer elementId="c"><LayoutElement elementId="e1"/></GridContainer></Page>'
+    emitted = Sigma::CodeRep.wrap(LEGACY.merge('layout' => legacy_layout)).dig('document', 'layout')
+    assert_equal '<Page id="p"><Container elementId="c"><Element elementId="e1"/></Container></Page>', emitted
+    refute_match(/LayoutElement|GridContainer/, emitted)
+  end
+
+  def test_page_membership_accepts_legacy_aliases_but_ignores_unrelated_attributes
+    legacy_layout = '<Page id="p"><GridContainer elementId="c"><LayoutElement elementId="e1"/>' \
+                    '<Noise elementId="not-layout"/></GridContainer></Page>'
+    assert_equal({ 'p' => %w[c e1] },
+                 Sigma::CodeRep.workbook_page_element_ids(LEGACY.merge('layout' => legacy_layout)))
   end
 
   LIVE_WITH_SETTINGS = { 'workbookId' => 'w1', 'name' => 'N',
