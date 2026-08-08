@@ -199,6 +199,10 @@ jobs:
         run: |
           ruby tools/lint-skill-paths.rb
           bash tools/test-lint-skill-paths.sh
+      - name: new-skill.rb registry stamp self-test
+        # Scaffolds a throwaway plugin, asserts marketplace/AGENTS/plugin.json
+        # were stamped, then deletes it. Creds-free.
+        run: bash tools/test-new-skill-registry.sh
       - name: Cognos vendored bundle is fresh vs converter/*.ts
         # cognos ships its converter as in-skill TS bundled into converter/cli.mjs
         # (production runs the bundle). Fail if a converter/*.ts edit shipped without
