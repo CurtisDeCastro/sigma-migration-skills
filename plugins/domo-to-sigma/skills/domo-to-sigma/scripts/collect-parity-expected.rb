@@ -92,6 +92,56 @@ def shape_rows(data)
   rows.map { |r| Array(r) }
 end
 
+# Domo sometimes plots ONE measure on TWO channels, so its row carries the same
+# value twice while Sigma's export carries it once. Measured 2026-08-07:
+#   Top 20 Organic Tweets   ['Text','Favorite Count','Favorite Count']
+#                           -> ["...", 2817, 2817]     Sigma: ["...", 1287]
+#   Page Engagement Rate    ['Date','Engaged Users','Unique Impressions','Engaged Users']
+#                           -> ["2026-07-25", 3288.0, 202283, 3288]
+#   Page View Growth        ['Date','Unique Page Views','Page Views','Unique Page Views']
+# Comparing whole tuples, that arity difference fails the tile before any value
+# is looked at — a pure artifact of how Domo reports channels.
+#
+# THE TEST IS DELIBERATELY STRICTER THAN "SAME COLUMN NAME". A later channel is
+# dropped only when its name matches an earlier one AND every row's value is
+# numerically equal. Name alone would corrupt Domo's table-default COUNT shape,
+# where the row-key column appears as BOTH the dimension and the counted measure
+# — e.g. Least Clicked Campaigns is ['campaign_title','campaign_title'] with
+# values ["Gembucket campaign", 2]. Those are different data under one name and
+# must both survive; the strict test leaves them alone.
+#
+# Returns [rows, columns, mappings, dropped] — dropped names are recorded on the
+# card so the collapse is auditable, never invisible.
+def dedupe_channels(rows, columns, mappings)
+  cols = Array(columns)
+  return [rows, cols, Array(mappings), []] if cols.size < 2 || rows.empty?
+
+  numeric = ->(v) { f = Float(v.to_s) rescue nil; f }
+  drop = []
+  (1...cols.size).each do |j|
+    (0...j).each do |i|
+      next if drop.include?(i)
+      next unless cols[j].to_s == cols[i].to_s
+      same = rows.all? do |r|
+        a = numeric.call(Array(r)[i])
+        b = numeric.call(Array(r)[j])
+        (a && b) ? a == b : Array(r)[i].to_s == Array(r)[j].to_s
+      end
+      if same
+        drop << j
+        break
+      end
+    end
+  end
+  return [rows, cols, Array(mappings), []] if drop.empty?
+
+  keep = (0...cols.size).reject { |k| drop.include?(k) }
+  [rows.map { |r| keep.map { |k| Array(r)[k] } },
+   keep.map { |k| cols[k] },
+   keep.map { |k| Array(mappings)[k] },
+   drop.map { |k| cols[k] }]
+end
+
 # The card's own KPI value — what the migrated `<el>-summary` companion tile
 # plots. `summary` carries BOTH forms:
 #
@@ -154,16 +204,18 @@ threads = [opts[:pool], 1].max.times.map do
                                     'value from a window baked into the plotted measure)',
                         'mappings' => data['mappings'], 'num_rows' => data['numRows'] }
           else
+            rows, cols, maps, dropped = dedupe_channels(rows, data['columns'], data['mappings'])
             results[cid] = {
               'card_id'   => cid,
               'title'     => title,
               'rows'      => rows,
-              'columns'   => data['columns'],
-              'mappings'  => data['mappings'],
+              'columns'   => cols,
+              'mappings'  => maps,
               'num_rows'  => data['numRows'],
               'datasource' => data['datasource'],
               'source'    => 'domo-card-data',
             }
+            results[cid]['dropped_duplicate_channels'] = dropped unless dropped.empty?
           end
           results[cid]['summary_value'] = sv if sv && results[cid]
           warn "  [#{results.size + errors.size}/#{cards.size}] #{title[0, 46]}"
