@@ -331,7 +331,7 @@ scenario('verified source kind (line) disagrees with the live readback (bar) -> 
              'pages' => [{ 'id' => 'overview', 'name' => 'Overview' }],
              'elements' => [{ 'id' => 'sales-region', 'name' => 'Sales by Region',
                               'kind' => 'bar-chart', 'visibleAsSource' => true }],
-             'layout' => '<Page id="overview"><LayoutElement elementId="sales-region"/></Page>')
+             'layout' => '<Page id="overview"><Element elementId="sales-region"/></Page>')
 end
 
 puts '== waiver budget (exit 19; checked LAST, after every other gate passes) =='

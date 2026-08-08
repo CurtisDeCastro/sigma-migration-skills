@@ -19,8 +19,8 @@
 # ENV['SIGMA_TEST_CONNECTION_ID'] via a small deterministic custom-SQL demo
 # dataset (same shape discipline as verify-ws4-e2e.rb's DEMO_SQL — no
 # customer/personal/company names). Each tab's `inner` layout is built with
-# Composition.band/Composition.le (bare LayoutElements — no nested
-# GridContainer inside a <Tab>, per the verified gotcha).
+# Composition.band/Composition.le (bare Elements — no nested
+# Container inside a <Tab>, per the verified gotcha).
 #
 # Usage:  ruby shared/scripts/verify-ws5-tabbed-e2e.rb
 # Env (ALL from ENV; this script NEVER hardcodes a connection/org/workbook id
@@ -190,7 +190,7 @@ def build_spec(home, schema_version)
                 'stacking' => 'none' }
 
   # ==== SURFACE under test: Composition.tabbed_container ===================
-  # Composition.band returns an Array of <LayoutElement> lines — join into
+  # Composition.band returns an Array of <Element> lines — join into
   # the single XML string `inner` expects (a tab holding more than one band
   # would join multiple band() calls the same way).
   tabbed = Composition.tabbed_container(
@@ -206,7 +206,7 @@ def build_spec(home, schema_version)
     <?xml version="1.0" encoding="utf-8"?>
     <Page type="grid" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto" id="#{PG_MAIN}">
     #{tabbed[:layout]}
-      <LayoutElement elementId="#{SRC_ID}" gridColumn="1 / 25" gridRow="24 / 34"/>
+      <Element elementId="#{SRC_ID}" gridColumn="1 / 25" gridRow="24 / 34"/>
     </Page>
   XML
 

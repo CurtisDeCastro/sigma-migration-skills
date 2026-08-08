@@ -5,7 +5,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 import code_rep
 
-LAYOUT = '<Page id="p"><LayoutElement elementId="e1"/></Page>'
+LAYOUT = '<Page id="p"><Element elementId="e1"/></Page>'
 LIVE = {
     'workbookId': 'w1', 'name': 'N',
     'document': {
@@ -68,6 +68,29 @@ class TestCodeRep(unittest.TestCase):
         wrapped = code_rep.wrap(nested)['document']
         self.assertEqual([element['id'] for element in wrapped['elements']], ['old'])
         self.assertNotIn('elements', wrapped['pages'][0])
+
+    def test_wrap_canonicalizes_rejected_legacy_layout_tags(self):
+        legacy_layout = (
+            '<Page id="p"><GridContainer elementId="c">'
+            '<LayoutElement elementId="e1"/></GridContainer></Page>'
+        )
+        emitted = code_rep.wrap({**LEGACY, 'layout': legacy_layout})['document']['layout']
+        self.assertEqual(
+            emitted,
+            '<Page id="p"><Container elementId="c"><Element elementId="e1"/></Container></Page>',
+        )
+        self.assertNotRegex(emitted, r'LayoutElement|GridContainer')
+
+    def test_page_membership_accepts_legacy_aliases_only_for_layout_nodes(self):
+        legacy_layout = (
+            '<Page id="p"><GridContainer elementId="c">'
+            '<LayoutElement elementId="e1"/><Noise elementId="not-layout"/>'
+            '</GridContainer></Page>'
+        )
+        self.assertEqual(
+            code_rep.workbook_page_element_ids({**LEGACY, 'layout': legacy_layout}),
+            {'p': ['c', 'e1']},
+        )
 
 
 LIVE_WITH_SETTINGS = {

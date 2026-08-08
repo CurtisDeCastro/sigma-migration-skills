@@ -45,7 +45,7 @@ end
 def spec_of(*pages)
   page_meta = pages.map.with_index { |_els, i| { 'id' => "p#{i + 1}", 'name' => "P#{i + 1}" } }
   layout = pages.map.with_index do |els, i|
-    placed = els.map { |el| %(<LayoutElement elementId="#{el['id']}"/>) }.join
+    placed = els.map { |el| %(<Element elementId="#{el['id']}"/>) }.join
     %(<Page id="p#{i + 1}">#{placed}</Page>)
   end.join
   { 'pages' => page_meta, 'elements' => pages.flatten, 'layout' => layout }

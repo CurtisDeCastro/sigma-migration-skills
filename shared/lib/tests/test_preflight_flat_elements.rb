@@ -12,7 +12,7 @@ class TestPreflightFlatElements < Minitest::Test
           { 'id' => 'm', 'name' => 'Revenue', 'formula' => 'Sum([Source/Revenue])' }
         ]
       }],
-      'layout' => '<Page id="p1"><LayoutElement elementId="t1"/></Page>'
+      'layout' => '<Page id="p1"><Element elementId="t1"/></Page>'
     }
 
     assert lint(spec).any? { |message| message.start_with?('T1 ') }
@@ -26,7 +26,7 @@ class TestPreflightFlatElements < Minitest::Test
     spec = {
       'pages' => [{ 'id' => 'p1', 'name' => 'P1' }],
       'elements' => controls,
-      'layout' => '<Page id="p1"><LayoutElement elementId="el-legend"/><LayoutElement elementId="el-drill"/></Page>'
+      'layout' => '<Page id="p1"><Element elementId="el-legend"/><Element elementId="el-drill"/></Page>'
     }
 
     refute lint(spec).any? { |message| message.start_with?('C6 ') }

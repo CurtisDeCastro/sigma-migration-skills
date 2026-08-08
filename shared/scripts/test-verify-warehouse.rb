@@ -21,8 +21,8 @@ SPEC = {
     { 'id' => 'el-piv',   'columns' => [{ 'id' => 'c-a', 'name' => 'A' }] },
     { 'id' => 'el-blank', 'columns' => [{ 'id' => 'c-b', 'name' => 'B' }] },
   ],
-  'layout' => '<Page id="p1"><LayoutElement elementId="el-rev"/><LayoutElement elementId="el-empty"/>' \
-              '<LayoutElement elementId="el-piv"/><LayoutElement elementId="el-blank"/></Page>'
+  'layout' => '<Page id="p1"><Element elementId="el-rev"/><Element elementId="el-empty"/>' \
+              '<Element elementId="el-piv"/><Element elementId="el-blank"/></Page>'
 }
 
 def run(dir, charts, fixture)

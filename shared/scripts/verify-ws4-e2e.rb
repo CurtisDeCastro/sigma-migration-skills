@@ -250,7 +250,7 @@ end
 # white-text patch merged onto a COPY, never mutating the original kpi Hash)
 # -> Styling.sparkline (a separate borderless line-chart stacked below the
 # kpi inside the SAME container). Returns the three elements + the inner
-# layout fragment (relative to the outer GridContainer the caller still has
+# layout fragment (relative to the outer Container the caller still has
 # to place on the page — gradient_card's own contract: "placing the container
 # on the page is the caller's job").
 # ---------------------------------------------------------------------------
@@ -281,7 +281,7 @@ def build_gradient_kpi(id:, title:, cur_formula:, pri_formula:, fmt_sym:, gradie
 
   inner_layout = [
     gc[:child_layout],
-    "  <LayoutElement elementId=\"#{spark['id']}\" gridColumn=\"1 / 25\" gridRow=\"7 / 11\"/>"
+    "  <Element elementId=\"#{spark['id']}\" gridColumn=\"1 / 25\" gridRow=\"7 / 11\"/>"
   ].join("\n")
 
   { container: gc[:element].first, kpi: patched_card, spark: spark, inner_layout: inner_layout }
@@ -398,26 +398,26 @@ def build_spec(home, schema_version)
     <?xml version="1.0" encoding="utf-8"?>
     <Page type="grid" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto" id="#{PG_MAIN}">
     #{hdr_main[:layout]}
-      <GridContainer elementId="#{k_rev[:container]['id']}" type="grid" gridColumn="1 / 13" gridRow="6 / 18" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto">
+      <Container elementId="#{k_rev[:container]['id']}" type="grid" gridColumn="1 / 13" gridRow="6 / 18" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto">
     #{k_rev[:inner_layout]}
-      </GridContainer>
-      <GridContainer elementId="#{k_ord[:container]['id']}" type="grid" gridColumn="13 / 25" gridRow="6 / 18" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto">
+      </Container>
+      <Container elementId="#{k_ord[:container]['id']}" type="grid" gridColumn="13 / 25" gridRow="6 / 18" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto">
     #{k_ord[:inner_layout]}
-      </GridContainer>
-      <LayoutElement elementId="chat-hd" gridColumn="1 / 25" gridRow="18 / 19"/>
-      <LayoutElement elementId="chat" gridColumn="1 / 25" gridRow="19 / 36"/>
+      </Container>
+      <Element elementId="chat-hd" gridColumn="1 / 25" gridRow="18 / 19"/>
+      <Element elementId="chat" gridColumn="1 / 25" gridRow="19 / 36"/>
     </Page>
   XML
 
   pg_actions_layout = <<~XML
     <Page type="grid" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto" id="#{PG_ACTIONS}">
     #{hdr_actions[:layout]}
-      <LayoutElement elementId="#{NOTE_CTL_ID}" gridColumn="1 / 13" gridRow="5 / 8"/>
-      <LayoutElement elementId="btn-reset" gridColumn="13 / 17" gridRow="5 / 8"/>
-      <LayoutElement elementId="btn-preset" gridColumn="17 / 21" gridRow="5 / 8"/>
-      <LayoutElement elementId="btn-log" gridColumn="21 / 25" gridRow="5 / 8"/>
-      <LayoutElement elementId="targets" gridColumn="1 / 25" gridRow="8 / 20"/>
-      <LayoutElement elementId="review-log" gridColumn="1 / 25" gridRow="20 / 30"/>
+      <Element elementId="#{NOTE_CTL_ID}" gridColumn="1 / 13" gridRow="5 / 8"/>
+      <Element elementId="btn-reset" gridColumn="13 / 17" gridRow="5 / 8"/>
+      <Element elementId="btn-preset" gridColumn="17 / 21" gridRow="5 / 8"/>
+      <Element elementId="btn-log" gridColumn="21 / 25" gridRow="5 / 8"/>
+      <Element elementId="targets" gridColumn="1 / 25" gridRow="8 / 20"/>
+      <Element elementId="review-log" gridColumn="1 / 25" gridRow="20 / 30"/>
     </Page>
   XML
 
@@ -429,8 +429,8 @@ def build_spec(home, schema_version)
 
   pg_data_layout = <<~XML
     <Page type="grid" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto" id="#{PG_DATA}">
-      <LayoutElement elementId="#{SRC_ID}" gridColumn="1 / 25" gridRow="1 / 10"/>
-      <LayoutElement elementId="#{CAT_PIVOT_ID}" gridColumn="1 / 25" gridRow="10 / 20"/>
+      <Element elementId="#{SRC_ID}" gridColumn="1 / 25" gridRow="1 / 10"/>
+      <Element elementId="#{CAT_PIVOT_ID}" gridColumn="1 / 25" gridRow="10 / 20"/>
     </Page>
   XML
 
