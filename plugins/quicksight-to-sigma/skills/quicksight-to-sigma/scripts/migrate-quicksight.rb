@@ -293,9 +293,7 @@ end
 APPROX = {
   'TreeMapVisual'       => 'approximate-to-bar',
   'FunnelChartVisual'   => 'approximate-to-bar',
-  'WaterfallVisual'     => 'approximate-to-bar',
   'HistogramVisual'     => 'approximate-to-bar',
-  'GaugeChartVisual'    => 'approximate-to-kpi',
   'HeatMapVisual'       => 'data-migrate-as-table',
   'BoxPlotVisual'       => 'data-migrate-as-table',
   'SankeyDiagramVisual' => 'data-migrate-as-table',
@@ -607,7 +605,8 @@ FileUtils.mkdir_p(vqa)
 # (returns YAML / silently zero pages); POST preserves these ids, so the local
 # copy is authoritative. Exclude any id containing "data" (hidden data pages).
 wbspec = (JSON.parse(File.read(wb_spec)) rescue {})
-content_pages = (wbspec['pages'] || []).reject { |p| p['id'].to_s.downcase.include?('data') }
+wbdoc = wbspec['document'].is_a?(Hash) ? wbspec['document'] : wbspec
+content_pages = (wbdoc['pages'] || []).reject { |p| p['id'].to_s.downcase.include?('data') }
 tok = (Sigma.auth_token rescue ENV['SIGMA_API_TOKEN'])
 pngs = []
 content_pages.each do |pg|
