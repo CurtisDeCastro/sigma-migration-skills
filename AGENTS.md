@@ -60,6 +60,7 @@ Maturity labels (`gold` / `live` / `foundation` / `scaffold`) are defined in
 | Land Domo API/upload/sample DataSets in Snowflake (before converting) | `domo-import-to-snowflake` | foundation | `plugins/domo-to-sigma/skills/domo-import-to-snowflake/` |
 | Convert a Hex project (SQL/METRIC cells, EXPLORE charts, app layout) → Sigma | `hex-to-sigma` | live | `plugins/hex-to-sigma/skills/hex-to-sigma/` |
 | Scope/assess a Hex instance | `hex-assessment` | scaffold | `plugins/hex-to-sigma/skills/hex-assessment/` |
+| Convert a Mode Report (SQL Queries + Charts) → Sigma | `mode-to-sigma` | foundation | `plugins/mode-to-sigma/skills/mode-to-sigma/` |
 | Author / repair Sigma workbooks (canonical spec) | `sigma-workbooks` | live | `plugins/sigma-authoring/skills/sigma-workbooks/` |
 | Author / repair Sigma data models (canonical spec) | `sigma-data-models` | live | `plugins/sigma-authoring/skills/sigma-data-models/` |
 

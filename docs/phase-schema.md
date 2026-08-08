@@ -152,3 +152,21 @@ Domo uses "Phase" numbering (it joined after the mapping table was set). Its loc
 | C8 Parity hard gate | Phase 6 — Parity vs the same warehouse (`verify-parity.rb`, hard-gated by `assert-phase6-ran.rb`) |
 | C9 Security/RLS | Phase 6 — RLS (Domo PDP policies → Sigma row-level security; detect always, apply opt-in) |
 | C10 Enhance | Phase 5e — visual QA + KPI-count parity (defer idioms to `sigma-workbooks`) |
+
+### mode-to-sigma
+
+Mode uses "Phase" numbering (it joined after the mapping table was set). Its
+local mapping:
+
+| Canonical | mode-to-sigma |
+|---|---|
+| C1 Assess | `mode-assessment` skill (scaffolded; not registered in `marketplace.json`/`AGENTS.md` this release — SP1 ships the converter only) |
+| C2 Discover | Phase 0 — Discover (`mode-discover.rb`: Queries, Charts, Filters + a live run to sample each Query's output columns) |
+| C3 Reuse-check | Phase 1 — Reuse check (`build-dm.rb`'s `mode-signature.json` + `find-or-pick-dm.rb --auto-pick`) |
+| C4 Convert | Phase 2 — Build the Data Model (`build-dm.rb`: every Query → one `sql`-kind table element, raw SQL verbatim — no formula translation needed) |
+| C5 Post-DM gate | Phase 3 — Post + read back (`post-dm.rb`, hard gate) |
+| C6 Build workbook | Phase 4 — Build the workbook + layout (`build-mode-workbook.rb`: hidden Data page + visible Report page) |
+| C7 Layout | within Phase 4 — notebook-flow layout baked in as the last write before POST (no separate layout PUT) |
+| C8 Parity hard gate | Phase 5 — Parity (`verify-parity.rb`, hard-gated by `assert-phase6-ran.rb`); the separate visual-render sub-gate (gate 8) is honestly waived in v1 (`--skip-visual-gate` — no Mode UI render capability), but the parity comparison itself is never skipped |
+| C9 Security/RLS | "Security: RLS/CLS" section — Mode has no row/column-level security on query results; access control is Space/Report visibility only |
+| C10 Enhance | — |

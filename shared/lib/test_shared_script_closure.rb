@@ -119,6 +119,13 @@ end
 # per-tool, delete the line and add the name to PER_TOOL_BY_DESIGN with a reason.
 PER_TOOL_BY_DESIGN = {
   'convert-model.rb'  => 'each converter parses a different source format end-to-end',
+  'build-dm.rb' => 'each converter builds the Sigma DM from a structurally different source: ' \
+    'domo-to-sigma\'s (478 lines) maps flat, materialized Domo DataSets through a customer-specific ' \
+    'discovery/dataset-map.json onto warehouse tables, plus PROJECTION Beast Mode calc columns. ' \
+    'mode-to-sigma\'s (167 lines) wraps each Mode Query verbatim as a single `sql`-kind element — ' \
+    'Mode\'s SQL already runs against the target warehouse dialect, so there is no schema-mapping or ' \
+    'formula-translation step at all. Sharing would mean one plugin carrying machinery the other has ' \
+    'no source shape to exercise.',
   'phase6-parity.rb'  => "per-tool parity CLI (--tableau vs --workdir) and per-tool oracles",
   'learned-rules.rb'  => 'gap-scout rule store is keyed to one tool\'s expression language',
   'probe_registry.rb' => 'local artifact registry binds to one tool\'s <TOOL>_TO_SIGMA_HOME dotdir (same convention as learned-rules.rb)',

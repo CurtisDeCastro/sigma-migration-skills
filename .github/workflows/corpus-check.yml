@@ -359,6 +359,14 @@ jobs:
             plugins/domo-to-sigma/skills/domo-import-to-snowflake/test/test-landing-manifest.rb
             plugins/domo-to-sigma/skills/domo-import-to-snowflake/test/test-domo-extract.rb
             plugins/domo-to-sigma/skills/domo-import-to-snowflake/test/test-snowflake-load.rb
+            plugins/mode-to-sigma/skills/mode-to-sigma/test/test-mode-rest.rb
+            plugins/mode-to-sigma/skills/mode-to-sigma/test/test-mode-chart-map.rb
+            plugins/mode-to-sigma/skills/mode-to-sigma/test/test-discover.rb
+            plugins/mode-to-sigma/skills/mode-to-sigma/test/test-build-dm.rb
+            plugins/mode-to-sigma/skills/mode-to-sigma/test/test-post-dm.rb
+            plugins/mode-to-sigma/skills/mode-to-sigma/test/test-build-workbook.rb
+            plugins/mode-to-sigma/skills/mode-to-sigma/test/test-verify-parity.rb
+            plugins/mode-to-sigma/skills/mode-to-sigma/test/test-migrate-mode.rb
           )
           fail=0
           for t in "${tests[@]}"; do
