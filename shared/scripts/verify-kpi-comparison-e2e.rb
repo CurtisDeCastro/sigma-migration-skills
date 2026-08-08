@@ -55,8 +55,8 @@ doc = {
   'pages' => [{ 'id' => 'p1', 'name' => 'P1' }],
   'elements' => elements,
   'layout' => '<Page type="grid" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto" id="p1">' \
-              "<LayoutElement elementId=\"#{tbl_id}\" gridColumn=\"1 / 13\" gridRow=\"1 / 13\"/>" \
-              "<LayoutElement elementId=\"#{kpi_id}\" gridColumn=\"13 / 25\" gridRow=\"1 / 13\"/>" \
+              "<Element elementId=\"#{tbl_id}\" gridColumn=\"1 / 13\" gridRow=\"1 / 13\"/>" \
+              "<Element elementId=\"#{kpi_id}\" gridColumn=\"13 / 25\" gridRow=\"1 / 13\"/>" \
               '</Page>'
 }
 spec = Sigma::CodeRep.wrap(doc, extra: { 'name' => 'KPI comparison E2E proof',

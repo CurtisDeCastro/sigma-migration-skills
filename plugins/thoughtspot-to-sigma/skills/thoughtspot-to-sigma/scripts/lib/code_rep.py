@@ -108,7 +108,11 @@ def workbook_page_element_ids(spec):
     layout = str(document(spec).get("layout") or "")
     for match in re.finditer(r'<Page\b[^>]*\bid="([^"]*)"[^>]*>(.*?)</Page>', layout, re.S):
         result[match.group(1)] = list(dict.fromkeys(
-            re.findall(r'\belementId="([^"]*)"', match.group(2))
+            re.findall(
+                r'<(?:Element|Container|TabbedContainer|LayoutElement|GridContainer)\b'
+                r'[^>]*\belementId="([^"]*)"',
+                match.group(2),
+            )
         ))
     return result
 
@@ -157,8 +161,20 @@ def _flatten_elements(doc):
     return {**doc, "pages": pages, "elements": elements}
 
 
+def canonicalize_layout(layout_xml):
+    """Map legacy layout aliases to the live-verified canonical tag names."""
+    import re
+
+    layout = str(layout_xml or "")
+    layout = re.sub(r'<(/?)LayoutElement\b', r'<\1Element', layout)
+    return re.sub(r'<(/?)GridContainer\b', r'<\1Container', layout)
+
+
 def wrap(doc, extra=None):
-    """Build a current request body, flattening legacy page-nested elements."""
+    """Build a current request body with flat elements and canonical layout."""
     out = dict(extra or {})
-    out["document"] = _flatten_elements(doc)
+    flattened = _flatten_elements(doc)
+    if isinstance(flattened, dict) and "layout" in flattened:
+        flattened = {**flattened, "layout": canonicalize_layout(flattened["layout"])}
+    out["document"] = flattened
     return out

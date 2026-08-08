@@ -16,7 +16,7 @@ const live = {
     elements: [{ id: 'e1', kind: 'table' }],
     overlays: [{ id: 'o1' }],
     panels: [{ id: 'panel1' }],
-    layout: '<Page id="p"><LayoutElement elementId="e1"/></Page>',
+    layout: '<Page id="p"><Element elementId="e1"/></Page>',
   },
 };
 
@@ -32,5 +32,19 @@ const nested = {
 const wrapped = wrap(nested).document;
 assert.deepEqual(wrapped.elements.map((element) => element.id), ['old']);
 assert.equal('elements' in wrapped.pages[0], false);
+
+const legacyLayout = '<Page id="p"><GridContainer elementId="c"><LayoutElement elementId="e1"/>'
+  + '<Noise elementId="not-layout"/></GridContainer></Page>';
+assert.deepEqual(
+  workbookPageElementIds({ ...live.document, layout: legacyLayout }),
+  { p: ['c', 'e1'] },
+);
+const canonicalLayout = wrap({ ...live.document, layout: legacyLayout }).document.layout;
+assert.equal(
+  canonicalLayout,
+  '<Page id="p"><Container elementId="c"><Element elementId="e1"/>'
+    + '<Noise elementId="not-layout"/></Container></Page>',
+);
+assert.doesNotMatch(canonicalLayout, /LayoutElement|GridContainer/);
 
 console.log('PASS — JavaScript workbook code representation');

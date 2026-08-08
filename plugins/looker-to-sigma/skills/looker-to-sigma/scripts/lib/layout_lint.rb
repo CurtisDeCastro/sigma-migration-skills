@@ -15,7 +15,7 @@
 #   (a) raw-id display names — any element display name matching a raw-id
 #       pattern (^[0-9a-f]{12,}$ or ^el-[0-9a-f]+$). A human must never see a
 #       visual id as a chart title.
-#   (b) orphan controls — input controls placed OUTSIDE any <GridContainer>
+#   (b) orphan controls — input controls placed OUTSIDE any <Container>
 #       on a page that HAS containers (banded layout). Controls belong in a
 #       band (control band, or their chart's container), never loose at the
 #       page foot.
@@ -28,7 +28,7 @@
 #       display name, or the workbook name — never the Sigma page name (the
 #       PHASEE2 PBI regression: header read "Page 1" while the real title sat
 #       inside band 1).
-#   (e) band column fill — a band (top-level GridContainer) whose children
+#   (e) band column fill — a band (top-level Container) whose children
 #       cover <60% of the 24 grid columns, i.e. shipped dead space (the
 #       PHASEE2 PBI regression: band 1 = one small bar chart at columns 1-6
 #       next to a 19-column hole). Deliberate KPI bands (<=4 tiles, all
@@ -100,24 +100,25 @@ module LayoutLint
     entries = []
     s = page_xml.to_s
     pos = 0
-    while (m = s.match(%r{<(GridContainer|LayoutElement)\b([^>]*?)(/>|>)}m, pos))
+    while (m = s.match(%r{<(Container|GridContainer|Element|LayoutElement)\b([^>]*?)(/>|>)}m, pos))
       tag, attrs, close = m[1], m[2], m[3]
+      container = %w[Container GridContainer].include?(tag)
       eid = attrs[/elementId="([^"]*)"/, 1]
       rows = attrs[/gridRow="\s*(\d+)\s*/, 1].to_i
       rowe = attrs[/gridRow="\s*\d+\s*\/\s*(\d+)\s*"/, 1].to_i
-      if tag == 'GridContainer' && close == '>'
-        endm = s.match(%r{</GridContainer>}m, m.end(0))
+      if container && close == '>'
+        endm = s.match(%r{</#{tag}>}m, m.end(0))
         entries << [:container, eid, rows, rowe]
         pos = endm ? endm.end(0) : m.end(0)
       else
-        entries << [tag == 'GridContainer' ? :container : :element, eid, rows, rowe]
+        entries << [container ? :container : :element, eid, rows, rowe]
         pos = m.end(0)
       end
     end
     entries
   end
 
-  # Top-level GridContainers of a page block with their direct children:
+  # Top-level Containers of a page block with their direct children:
   # [{eid:, r0:, r1:, children: [[child_eid, c0, c1, r0, r1], ...]}, ...]
   # The column count a container's children are laid out against — its OWN
   # gridTemplateColumns (a child's gridColumn refs are LOCAL to its container,
@@ -134,13 +135,13 @@ module LayoutLint
     n.positive? ? n : GRID_COLS
   end
 
-  # NESTING-AWARE GridContainer extraction. The old version matched the FIRST
-  # </GridContainer> after an open tag, so an OUTER band's body was truncated
+  # NESTING-AWARE Container extraction. The old version matched the FIRST
+  # </Container> after an open tag, so an OUTER band's body was truncated
   # at its first nested container's close — the band then appeared to hold
   # only that fragment's leaves and false-failed the fill check on every
   # container-tree layout (live-caught: the whole-page content container
   # "held" only the region control). Children are the container's DIRECT
-  # LayoutElements PLUS its direct child containers' spans (a nested
+  # Elements PLUS its direct child containers' spans (a nested
   # container's own leaves live in a different local column space, but the
   # container itself covers its gridColumn span in the parent's grid).
   def containers(page_xml)
@@ -151,19 +152,21 @@ module LayoutLint
        tag[/gridColumn="\s*(\d+)/, 1].to_i, tag[/gridColumn="\s*\d+\s*\/\s*(\d+)/, 1].to_i,
        tag[/gridRow="\s*(\d+)/, 1].to_i, tag[/gridRow="\s*\d+\s*\/\s*(\d+)/, 1].to_i]
     end
-    page_xml.to_s.scan(%r{</GridContainer>|<GridContainer\b[^>]*?/?>|<LayoutElement\b[^>]*?/?>}m) do
+    page_xml.to_s.scan(
+      %r{</(?:Container|GridContainer)>|<(?:Container|GridContainer)\b[^>]*?/?>|<(?:Element|LayoutElement)\b[^>]*?/?>}m
+    ) do
       tag = Regexp.last_match(0)
-      if tag.start_with?('</GridContainer')
+      if tag.match?(%r{\A</(?:Container|GridContainer)})
         c = stack.pop
         out << c if c
-      elsif tag.start_with?('<GridContainer')
+      elsif tag.match?(%r{\A<(?:Container|GridContainer)\b})
         stack.last[:children] << span.call(tag) unless stack.empty?
         c = { eid: tag[/elementId="([^"]*)"/, 1], cols: grid_col_count(tag),
               r0: tag[/gridRow="\s*(\d+)/, 1].to_i,
               r1: tag[/gridRow="\s*\d+\s*\/\s*(\d+)/, 1].to_i,
               children: [] }
         tag.end_with?('/>') ? (out << c) : (stack << c)
-      else # LayoutElement — a direct child of the innermost open container
+      else # Element — a direct child of the innermost open container
         stack.last[:children] << span.call(tag) unless stack.empty?
       end
     end
@@ -207,12 +210,12 @@ module LayoutLint
       # first section band (the standard "filter over a banded grid" pattern the
       # exemplar hand migrations use). It's only orphaned when it floats AT or
       # BELOW the first band — i.e. lost among the banded chart content.
-      if body.include?('<GridContainer')
+      if body.match?(%r{<(?:Container|GridContainer)\b})
         first_band_r0 = entries.select { |k,| k == :container }.map { |e| e[2] }.min
         entries.each do |kind, eid, r0, _r1|
           next unless kind == :element && el_kind[eid] == 'control'
           next if first_band_r0 && r0.positive? && r0 < first_band_r0
-          violations << "orphan control: #{eid} sits OUTSIDE every GridContainer on page #{page_id} " \
+          violations << "orphan control: #{eid} sits OUTSIDE every Container on page #{page_id} " \
                         'and is not in the control region above the first band — place it in the ' \
                         'control band or its chart\'s container'
         end

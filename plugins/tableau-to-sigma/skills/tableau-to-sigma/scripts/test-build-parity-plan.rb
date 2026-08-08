@@ -21,7 +21,7 @@ ELEMENTS = [
     'columns' => [{ 'id' => 'x1', 'name' => 'Region' }, { 'id' => 'y1', 'name' => 'Sales' }, { 'id' => 'h1', 'name' => 'Hidden' }],
     'xAxis' => { 'columnId' => 'x1' }, 'yAxis' => { 'columnIds' => [{ 'columnId' => 'y1' }] } },
 ].freeze
-LAYOUT = "<Page id=\"p1\">#{ELEMENTS.map { |el| %(<LayoutElement elementId="#{el['id']}"/>) }.join}</Page>"
+LAYOUT = "<Page id=\"p1\">#{ELEMENTS.map { |el| %(<Element elementId="#{el['id']}"/>) }.join}</Page>"
 SPEC = { 'pages' => [{ 'id' => 'p1', 'name' => 'P1' }],
          'elements' => ELEMENTS, 'layout' => LAYOUT }.freeze
 
@@ -49,7 +49,7 @@ Dir.mktmpdir do |d|
   File.write(File.join(d, 'spec.json'), JSON.generate(
     'pages' => [{ 'id' => 'p1', 'name' => 'P1' }],
     'elements' => [{ 'id' => 't', 'kind' => 'text', 'columns' => [] }],
-    'layout' => '<Page id="p1"><LayoutElement elementId="t"/></Page>'
+    'layout' => '<Page id="p1"><Element elementId="t"/></Page>'
   ))
   st = system(RUBY, BPP, '--workbook-id', 'WB', '--workbook-spec', File.join(d, 'spec.json'),
               '--out', File.join(d, 'p.json'), out: File::NULL, err: File::NULL)

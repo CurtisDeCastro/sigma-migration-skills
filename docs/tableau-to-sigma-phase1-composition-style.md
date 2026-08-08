@@ -46,7 +46,7 @@ Phase 1 turns the root cause into a **two-part build**:
 
 **Builder — `build-charts-from-signals.rb` (3837 lines).** Main loop L1778 iterates `layout → dash['zones']`, routes each chart zone to `build_pivot_element` / `build_kpi_element` (L1625) / the general chart path, appends to `elements`. Extras: a **title text element** (L3044-3067) and **controls**: param controls (L3172, `controlType` hardcoded `segmented` at **L3206**) and shared-view filter controls (L3266, `list`/`date-range`/`range-slider`). `dataLabel` already wired (L3373-3380). Output (L3460): flat array, `--page-per-worksheet`, or `--page-per-dashboard`.
 
-**Layout — `build-dashboard-layout.rb` + `lib/layout.rb`.** A *separate* stage (run after the chart specs) that assigns `<GridContainer>`/`<LayoutElement>` positions. `lib/layout.rb` is the **only** place that emits `style` today: `HEADER_STYLE = {backgroundColor:"#0F172A", borderRadius:"round"}` (L12) applied via `container_el(id, style)` (L55). Band containers (`band_container_xml`, `container_el(cid)` with **no style**) are plain. This is the natural home for **container tints** and **canvas theme**.
+**Layout — `build-dashboard-layout.rb` + `lib/layout.rb`.** A *separate* stage (run after the chart specs) that assigns `<Container>`/`<Element>` positions. `lib/layout.rb` is the **only** place that emits `style` today: `HEADER_STYLE = {backgroundColor:"#0F172A", borderRadius:"round"}` (L12) applied via `container_el(id, style)` (L55). Band containers (`band_container_xml`, `container_el(cid)` with **no style**) are plain. This is the natural home for **container tints** and **canvas theme**.
 
 **Key architectural fact for Phase 1:** style is split across two stages. **Element-level style** (KPI `value.fontSize`, chart `color.scheme`, text spans, `dataLabel`) belongs in **`build-charts-from-signals.rb`** because it lives on the element spec. **Container/band-level style** (tint `backgroundColor`, header bar, canvas `themeOverrides`) belongs in the **layout stage (`lib/layout.rb` / `build-dashboard-layout.rb`)** because that's where containers are born. The composition emitter therefore has **two touch-points**, both fed by new parser sidecar fields.
 
@@ -283,7 +283,7 @@ Tied to the benchmark: teal-tinted column, teal header bar with "South", the `2.
 }
 ```
 
-The layout stage places `region-south` as a `<GridContainer>` (via existing `gc`/`container_el`), applies its `style`, nests `south-header-bar` (teal) at the top, then the KPI composite, the bar, and the strip — reproducing the teal column. The single teal `color.scheme[0]` on the South bar and the `#00000000` chart backgrounds are what make Pass-4 (header bars, labels) and Pass-7 (transparent-over-tint) unnecessary as manual passes.
+The layout stage places `region-south` as a `<Container>` (via existing `gc`/`container_el`), applies its `style`, nests `south-header-bar` (teal) at the top, then the KPI composite, the bar, and the strip — reproducing the teal column. The single teal `color.scheme[0]` on the South bar and the `#00000000` chart backgrounds are what make Pass-4 (header bars, labels) and Pass-7 (transparent-over-tint) unnecessary as manual passes.
 
 > **Note on B1:** the above is *one* region emitted explicitly. Phase 1 ships the primitives; the B1 card-trellis (later) is the loop that stamps this same triple for West/Northeast/Midwest with each region's palette entry and an element-level `[Region] = "West"` filter.
 
