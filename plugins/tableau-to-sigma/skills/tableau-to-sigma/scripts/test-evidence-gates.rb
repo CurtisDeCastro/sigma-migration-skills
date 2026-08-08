@@ -68,6 +68,21 @@ def ledger(dir)
   File.exist?(p) ? File.readlines(p).map { |l| JSON.parse(l) rescue nil }.compact : []
 end
 
+def workbook_response(workbook_id:, version:, elements:)
+  layout = "<Page id=\"pg1\">#{elements.map { |el| %(<Element elementId="#{el['id']}"/>) }.join}</Page>"
+  {
+    'workbookId' => workbook_id,
+    'latestDocumentVersion' => version,
+    'document' => {
+      'schemaVersion' => 4,
+      'kind' => 'workbook',
+      'pages' => [{ 'id' => 'pg1', 'name' => 'Overview' }],
+      'elements' => elements,
+      'layout' => layout
+    }
+  }
+end
+
 # ---- A. offline: terminal summary + waive + fail entries ---------------------
 puts '-- ledger: success summary / waived gate / failing gate --'
 Dir.mktmpdir do |dir|
@@ -111,15 +126,11 @@ end
 
 # ---- B. gate 21: divergence → ledger + kind_parity census stamp --------------
 puts '-- gate 21: kind-parity divergences land in ledger + census --'
-KP_READBACK_BAR = {
-  'workbookId' => 'wb-kp', 'latestDocumentVersion' => '3',
-  'document' => {
-    'schemaVersion' => 1, 'kind' => 'workbook',
-    'pages' => [{ 'id' => 'pg1' }],
-    'elements' => [{ 'id' => 'el-1', 'name' => 'Trend', 'kind' => 'bar-chart' }],
-    'layout' => '<Page id="pg1"><Element elementId="el-1"/></Page>'
-  }
-}.freeze
+KP_READBACK_BAR = workbook_response(
+  workbook_id: 'wb-kp',
+  version: '3',
+  elements: [{ 'id' => 'el-1', 'name' => 'Trend', 'kind' => 'bar-chart' }]
+).freeze
 Dir.mktmpdir do |dir|
   base_workdir(dir, per_tile: [{ 'position' => 'r1c1', 'source_family' => 'line', 'target_family' => 'bar' }])
   File.write(File.join(dir, 'wb-readback.json'), JSON.pretty_generate(KP_READBACK_BAR))

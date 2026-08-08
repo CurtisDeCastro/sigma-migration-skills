@@ -150,13 +150,11 @@ if opts[:drift_warn_min].to_f.positive?
 end
 
 spec = JSON.parse(File.read(opts[:spec]))
-# The --workbook-spec readback file may be a pre-fix flat artifact OR (once the
-# writer is fixed) a live-shaped nested `document` readback — Sigma::CodeRep's
-# document()/metadata() both tolerate either, so flatten unconditionally rather
-# than assume the file's vintage. Without this, spec['pages'] silently reads []
-# on a nested file and every chart is (wrongly) reported "no matching element".
+# The --workbook-spec readback may be a flat artifact or a live response with
+# the released top-level `document` envelope. Preserve response metadata for
+# cache/version checks, while reading workbook-global elements through CodeRep.
 spec = Sigma::CodeRep.metadata(spec).merge(Sigma::CodeRep.document(spec))
-elements = (spec['pages'] || []).flat_map { |p| p['elements'] || [] }
+elements = Sigma::CodeRep.workbook_elements(spec)
 el_by_id = elements.each_with_object({}) { |e, h| h[e['id']] = e }
 
 # ── RAW export cache (#7a/#7d) + readback version check (#7b) ────────────────

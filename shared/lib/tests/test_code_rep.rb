@@ -70,6 +70,8 @@ class TestCodeRep < Minitest::Test
   end
 
   def test_page_nested_elements_flatten_for_api
+    assert_equal %w[chart source],
+                 Sigma::CodeRep.workbook_elements(LEGACY_NESTED).map { |element| element['id'] }.sort
     wrapped = Sigma::CodeRep.wrap(LEGACY_NESTED)
     assert_equal %w[chart source], wrapped.dig('document', 'elements').map { |element| element['id'] }.sort
     assert wrapped.dig('document', 'pages').all? { |page| !page.key?('elements') }
