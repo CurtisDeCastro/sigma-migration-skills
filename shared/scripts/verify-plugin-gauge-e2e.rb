@@ -373,8 +373,8 @@ def build_spec(home, schema_version, plugin_id, actual_formula, target_formula)
     'elements' => elements,
     'layout' => <<~XML,
       <Page type="grid" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto" id="#{PAGE_ID}">
-        <LayoutElement elementId="#{SRC_ELEMENT_ID}" gridColumn="1 / 13" gridRow="1 / 13"/>
-        <LayoutElement elementId="#{GAUGE_EL_ID}" gridColumn="13 / 25" gridRow="1 / 13"/>
+        <Element elementId="#{SRC_ELEMENT_ID}" gridColumn="1 / 13" gridRow="1 / 13"/>
+        <Element elementId="#{GAUGE_EL_ID}" gridColumn="13 / 25" gridRow="1 / 13"/>
       </Page>
     XML
   }

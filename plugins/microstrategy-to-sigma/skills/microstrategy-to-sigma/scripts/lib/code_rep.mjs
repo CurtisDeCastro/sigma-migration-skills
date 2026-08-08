@@ -91,7 +91,9 @@ export function workbookPageElementIds(spec) {
   const pagePattern = /<Page\b[^>]*\bid="([^"]*)"[^>]*>(.*?)<\/Page>/gs;
   for (const match of layout.matchAll(pagePattern)) {
     result[match[1]] = [...new Set(
-      [...match[2].matchAll(/\belementId="([^"]*)"/g)].map((element) => element[1]),
+      [...match[2].matchAll(
+        /<(?:Element|Container|TabbedContainer|LayoutElement|GridContainer)\b[^>]*\belementId="([^"]*)"/g,
+      )].map((element) => element[1]),
     )];
   }
   return result;
@@ -137,6 +139,16 @@ function flattenElements(doc) {
   return { ...doc, pages, elements };
 }
 
+export function canonicalizeLayout(layoutXml) {
+  return String(layoutXml || '')
+    .replace(/<([/]?)LayoutElement\b/g, '<$1Element')
+    .replace(/<([/]?)GridContainer\b/g, '<$1Container');
+}
+
 export function wrap(doc, extra = {}) {
-  return { ...extra, document: flattenElements(doc) };
+  const flattened = flattenElements(doc);
+  const canonical = isObj(flattened) && 'layout' in flattened
+    ? { ...flattened, layout: canonicalizeLayout(flattened.layout) }
+    : flattened;
+  return { ...extra, document: canonical };
 }

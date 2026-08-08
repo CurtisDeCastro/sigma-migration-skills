@@ -11,7 +11,7 @@ require_relative '../code_rep'
 # which this test pins.
 class TestPhase6WorkbookReadback < Minitest::Test
   NESTED = { 'workbookId' => 'w',
-             'document' => { 'layout' => '<Page id="p"><LayoutElement elementId="kpi"/></Page>',
+             'document' => { 'layout' => '<Page id="p"><Element elementId="kpi"/></Page>',
                              'pages' => [{ 'id' => 'p' }],
                              'elements' => [{ 'id' => 'kpi', 'kind' => 'kpi-chart' }] } }
 
@@ -31,7 +31,7 @@ class TestPhase6WorkbookReadback < Minitest::Test
 
   def test_legacy_flat_readback_still_works
     flat = { 'workbookId' => 'w',
-             'layout' => '<Page id="p"><LayoutElement elementId="e"/></Page>',
+             'layout' => '<Page id="p"><Element elementId="e"/></Page>',
              'pages' => [{ 'id' => 'p' }], 'elements' => [{ 'id' => 'e' }] }
     assert_equal [{ 'id' => 'p' }], Sigma::CodeRep.document(flat)['pages']
     assert_equal [{ 'id' => 'e' }], Sigma::CodeRep.workbook_elements(flat)

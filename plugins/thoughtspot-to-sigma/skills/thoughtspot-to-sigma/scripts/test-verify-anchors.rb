@@ -204,7 +204,7 @@ def write_fixture(dir, exports_rows, anchors)
   elements = exports_rows.each_with_index.map do |(name, _), i|
     { 'id' => "el#{i}", 'name' => name, 'kind' => 'table' }
   end
-  layout = "<Page id=\"pg1\">#{elements.map { |el| %(<LayoutElement elementId="#{el['id']}"/>) }.join}</Page>"
+  layout = "<Page id=\"pg1\">#{elements.map { |el| %(<Element elementId="#{el['id']}"/>) }.join}</Page>"
   spec = { 'pages' => [{ 'id' => 'pg1', 'name' => 'P1' }],
            'elements' => elements, 'layout' => layout }
   File.write(File.join(dir, 'wb-spec.json'), JSON.pretty_generate(spec))

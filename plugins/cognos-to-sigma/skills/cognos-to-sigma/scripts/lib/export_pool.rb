@@ -426,7 +426,7 @@ module ExportPool
     probe_name = name || "_probe_pooled_#{SecureRandom.hex(4)}"
     layout_elements = elements.each_with_index.map do |el, i|
       r0 = 1 + (i * 12)
-      "  <LayoutElement elementId=\"#{el['id']}\" gridColumn=\"1 / 25\" gridRow=\"#{r0} / #{r0 + 12}\"/>"
+      "  <Element elementId=\"#{el['id']}\" gridColumn=\"1 / 25\" gridRow=\"#{r0} / #{r0 + 12}\"/>"
     end
     layout = [
       '<?xml version="1.0" encoding="utf-8"?>',

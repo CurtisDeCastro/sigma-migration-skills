@@ -5,7 +5,7 @@ class TestParityChainShape < Minitest::Test
   NESTED = { 'workbookId' => 'w',
              'document' => { 'pages' => [{ 'id' => 'p' }],
                              'elements' => [{ 'id' => 'table', 'kind' => 'table' }],
-                             'layout' => '<Page id="p"><LayoutElement elementId="table"/></Page>' } }
+                             'layout' => '<Page id="p"><Element elementId="table"/></Page>' } }
 
   # build-parity-plan.rb — the keystone silent failure.
   def test_parity_plan_sees_flat_document_elements
@@ -30,7 +30,7 @@ class TestParityChainShape < Minitest::Test
 
   def test_legacy_flat_readback_still_supported
     flat = { 'pages' => [{ 'id' => 'p' }], 'elements' => [{ 'id' => 'e' }],
-             'layout' => '<Page id="p"><LayoutElement elementId="e"/></Page>' }
+             'layout' => '<Page id="p"><Element elementId="e"/></Page>' }
     assert_equal [{ 'id' => 'e' }], Sigma::CodeRep.workbook_elements(flat)
   end
 end

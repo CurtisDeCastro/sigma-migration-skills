@@ -48,7 +48,7 @@
 #   4. Value styling + uniform card — a `kpi-chart` with
 #      `value: {columnId, color, fontSize}` (already individually documented
 #      in styling.md) placed as the MIDDLE of three stacked kpi-charts inside
-#      a `<GridContainer gridTemplateRows="repeat(3,1fr)">`. The new question
+#      a `<Container gridTemplateRows="repeat(3,1fr)">`. The new question
 #      is whether `repeat(3,1fr)` forces UNIFORM (equal) card heights even
 #      when one card's own content is visibly taller (a much bigger
 #      `value.fontSize`) — CSS Grid's `fr` unit is only guaranteed to
@@ -243,7 +243,7 @@ def probe_cortex_model(home, schema_version, model)
         'columns' => [{ 'id' => 'r', 'name' => 'Resp', 'formula' => '[Custom SQL/resp]' }] }
     ],
     'layout' => '<Page type="grid" gridTemplateColumns="repeat(24, 1fr)" id="p1">' \
-                '<LayoutElement elementId="cx" gridColumn="1 / 25" gridRow="1 / 10"/></Page>'
+                '<Element elementId="cx" gridColumn="1 / 25" gridRow="1 / 10"/></Page>'
   }
   spec = Sigma::CodeRep.wrap(doc, extra: {
     'name' => "Cortex model probe — #{model} (#{RUN_TAG})",
@@ -343,11 +343,11 @@ def build_spec(home, schema_version, cortex_model, flags)
   page1_layout = <<~XML
     <?xml version="1.0" encoding="utf-8"?>
     <Page type="grid" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto" id="#{PAGE1_ID}">
-      <LayoutElement elementId="#{KPI_SPARK_ID}" gridColumn="1 / 13" gridRow="1 / 11"/>
-      <LayoutElement elementId="#{AI_TEXT_ID}" gridColumn="13 / 25" gridRow="1 / 11"/>
-      <LayoutElement elementId="#{GRAIN_CTL_ID}" gridColumn="1 / 9" gridRow="11 / 13"/>
-      <LayoutElement elementId="#{GRAIN_CHART_ID}" gridColumn="1 / 25" gridRow="13 / 25"/>
-      <LayoutElement elementId="#{SRC_ID}" gridColumn="1 / 25" gridRow="25 / 29"/>
+      <Element elementId="#{KPI_SPARK_ID}" gridColumn="1 / 13" gridRow="1 / 11"/>
+      <Element elementId="#{AI_TEXT_ID}" gridColumn="13 / 25" gridRow="1 / 11"/>
+      <Element elementId="#{GRAIN_CTL_ID}" gridColumn="1 / 9" gridRow="11 / 13"/>
+      <Element elementId="#{GRAIN_CHART_ID}" gridColumn="1 / 25" gridRow="13 / 25"/>
+      <Element elementId="#{SRC_ID}" gridColumn="1 / 25" gridRow="25 / 29"/>
     </Page>
   XML
 
@@ -377,11 +377,11 @@ def build_spec(home, schema_version, cortex_model, flags)
   ]
   page2_layout = <<~XML
     <Page type="grid" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto" id="#{PAGE2_ID}">
-      <GridContainer elementId="#{UNIFORM_WRAP_ID}" type="grid" gridColumn="1 / 25" gridRow="1 / 19" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="repeat(3, 1fr)">
-        <LayoutElement elementId="#{CARD_A_ID}" gridColumn="1 / 25" gridRow="1 / 2"/>
-        <LayoutElement elementId="#{CARD_B_ID}" gridColumn="1 / 25" gridRow="2 / 3"/>
-        <LayoutElement elementId="#{CARD_C_ID}" gridColumn="1 / 25" gridRow="3 / 4"/>
-      </GridContainer>
+      <Container elementId="#{UNIFORM_WRAP_ID}" type="grid" gridColumn="1 / 25" gridRow="1 / 19" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="repeat(3, 1fr)">
+        <Element elementId="#{CARD_A_ID}" gridColumn="1 / 25" gridRow="1 / 2"/>
+        <Element elementId="#{CARD_B_ID}" gridColumn="1 / 25" gridRow="2 / 3"/>
+        <Element elementId="#{CARD_C_ID}" gridColumn="1 / 25" gridRow="3 / 4"/>
+      </Container>
     </Page>
   XML
   doc = {

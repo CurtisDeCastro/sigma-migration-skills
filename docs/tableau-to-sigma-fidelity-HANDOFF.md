@@ -24,7 +24,7 @@ A conversion flows through three scripts under `plugins/tableau-to-sigma/skills/
 |-------|--------|-------|--------------------------|
 | **Parser** | `parse-twb-layout.rb` (1189→~1240 ln) | per-dashboard `zones[]` (flat) + `zone_tree` (nested) + `-meta.json` (worksheets/params) | it's a signal to **extract** from the `.twb` |
 | **Chart builder** | `build-charts-from-signals.rb` (~3870 ln) | element specs (charts/KPIs/controls) + `data_elements`/`control-scope` sidecars | it lives on an **element** (KPI `value.fontSize`, chart `color.scheme`, `dataLabel`, styled text) |
-| **Layout** | `build-dashboard-layout.rb` + `lib/layout.rb` | `<GridContainer>`/`<LayoutElement>` XML + `<out>.elements.json` (container specs w/ `style`) | it's **container/band-level** (tint `backgroundColor`, header bar) |
+| **Layout** | `build-dashboard-layout.rb` + `lib/layout.rb` | `<Container>`/`<Element>` XML + `<out>.elements.json` (container specs w/ `style`) | it's **container/band-level** (tint `backgroundColor`, header bar) |
 | **Workbook assembler** | `build-workbook-spec.rb` (~215 ln) | the final POST body (`pages`, `themeName`, `themeOverrides`) | it's **workbook-level** (canvas, `categoricalScheme`) |
 
 **Root cause (from the gap report):** the parser read geometry/semantics but never a fill color, palette, or control mode; the builder never emitted them. Phase 1 closes both ends.
@@ -107,7 +107,7 @@ Priorities/owners from `TABLEAU_TO_SIGMA_SKILL_GAPS.md`. Effort: **S** ≈ hours
 ### Phase 2 — highest-leverage P0s (build on Phase 1 primitives)
 | Gap | What | Files | Effort |
 |-----|------|-------|--------|
-| **B1** | **Card-trellis** — the 4 repeated per-region container cards. Detect a container repeated per dimension member → emit N `GridContainer`s, each with a per-category element filter (`[Region]="West"`) + the shared color map. **Biggest visual win; hardest.** Reference `layout.xml` in the oracle for the exact 4-column structure. | parser (detect repetition) + builder + layout | **L** |
+| **B1** | **Card-trellis** — the 4 repeated per-region container cards. Detect a container repeated per dimension member → emit N `Container`s, each with a per-category element filter (`[Region]="West"`) + the shared color map. **Biggest visual win; hardest.** Reference `layout.xml` in the oracle for the exact 4-column structure. | parser (detect repetition) + builder + layout | **L** |
 | **C2** | **Threshold / second-layer highlight** (the yellow >100K halo). Emit a computed boolean column `[m] > N` + chart `color:{by:category, scheme:[regionColor, '#F2C037']}` + WARN the halo is approximated. Needs marks-layer detection (`element='map-layer'`, §3a). | builder | **M** |
 | **D2** | Consistent per-category color everywhere: pin one `category→color` dict + a fixed category sort so a region keeps its color across all charts. (`categoricalScheme` from #248 gives the colors; this pins the ordering.) | builder | **S** |
 
