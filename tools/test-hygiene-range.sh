@@ -69,6 +69,8 @@ grep -q 'UNDER-SCAN' "$TMP/coverage.sh"
 check $? "coverage assertion names the failure mode"
 awk '/- name: Resolve push\/PR diff range/,/^        run: \|/' "$YML" | grep -q 'PR_COMMITS:'
 check $? "PR_COMMITS is wired into the step env (assertion has its denominator)"
+grep -qF 'git merge-base --is-ancestor "$BASE" "$HEAD_SHA"' "$TMP/resolve.sh"
+check $? "#680: BASE is ancestor-validated, not just checked for object existence"
 
 # --- fixture: 4-commit PR, base drifts by one commit after PR creation -------
 UP="$TMP/upstream"
@@ -183,6 +185,48 @@ check $? "refused step exports no RANGE_BASE for the guards to consume"
 run_resolve_dead push ""
 [ "$RANGE_RC" -eq 0 ] && grep -q "no diff range to check" "$RANGE_OUT"
 check $? "same dead fixture on a PUSH event still skips green (silent skip is push-only)"
+
+echo "Part E — force-push: before-sha exists but is not an ancestor of the new head (#680)"
+# github.event.before survives a force-push as a real, fetchable commit object
+# (still reachable via some surviving ref — here modeled explicitly with a
+# marker ref, matching how a stale PR-ref/reflog keeps it alive in the real
+# GitHub case) but is no longer an ancestor of the rewritten branch tip. The
+# old check here only asked "does this object exist" (`git cat-file -e`),
+# which a force-pushed-away commit still passes, so RANGE_BASE stayed pinned
+# to it and the diff range walked the full history divergence instead of the
+# PR's real (small) change — issue #680's "observed: 734 unrelated files".
+gitu checkout -q -b force-pushed main
+printf 'real change\n' > "$UP/force-pushed-real.txt"
+gitu add force-pushed-real.txt && gitu commit -q -m "the actual PR change"
+E_OLDTIP="$(git -C "$UP" rev-parse HEAD)"          # github.event.before, pre-force-push
+gitu update-ref refs/heads/old-tip-marker "$E_OLDTIP"  # keeps it fetchable post-rebase
+gitu checkout -q main
+for i in 1 2 3 4 5 6; do
+  printf 'unrelated %s\n' "$i" > "$UP/unrelated-e$i.txt"
+  gitu add "unrelated-e$i.txt" && gitu commit -q -m "unrelated merged PR $i"
+done
+E_NEWMAIN="$(git -C "$UP" rev-parse main)"
+gitu checkout -q force-pushed
+gitu rebase -q main >/dev/null 2>&1
+E_NEWTIP="$(git -C "$UP" rev-parse force-pushed)"  # github.sha, post-force-push
+
+git -C "$CI" fetch -q origin '+refs/heads/*:refs/remotes/origin/*' >/dev/null 2>&1
+git -C "$CI" cat-file -e "$E_OLDTIP" 2>/dev/null
+check $? "fixture sanity: force-pushed-away tip is still a resolvable object in the fetched history"
+! git -C "$CI" merge-base --is-ancestor "$E_OLDTIP" "$E_NEWTIP" 2>/dev/null
+check $? "fixture sanity: that tip is NOT an ancestor of the new head (the bug's precondition)"
+NAIVE_N="$(git -C "$CI" rev-list --count "$E_OLDTIP..$E_NEWTIP" 2>/dev/null || echo 0)"
+[ "$NAIVE_N" -gt 1 ]; check $? "naively trusting before-sha would over-scan (got $NAIVE_N commits, want >1)"
+
+run_resolve push "$E_NEWTIP" "$E_OLDTIP"
+[ "$RANGE_RC" -eq 0 ]; check $? "shipped step exits 0 on the force-push shape (got $RANGE_RC)"
+[ "$RANGE_BASE" != "$E_OLDTIP" ]
+check $? "shipped step does NOT trust the non-ancestor before-sha as RANGE_BASE"
+EXPECT_BASE="$(git -C "$CI" merge-base "origin/main" "$E_NEWTIP" 2>/dev/null)"
+[ "$RANGE_BASE" = "$EXPECT_BASE" ]
+check $? "shipped step falls back to the default-branch merge-base (got $RANGE_BASE, want $EXPECT_BASE)"
+N_NEW_E="$(git -C "$CI" rev-list --count "$RANGE_BASE..$E_NEWTIP")"
+[ "$N_NEW_E" -eq 1 ]; check $? "corrected range covers only the real PR commit (got $N_NEW_E)"
 
 echo
 if [ "$fails" -gt 0 ]; then

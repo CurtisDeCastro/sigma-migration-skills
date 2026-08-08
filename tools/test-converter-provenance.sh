@@ -279,6 +279,22 @@ bash "$GUARD" --online "$TMP/no-such-checkout-dir" >"$TMP/out" 2>&1; RC=$?
 [ "$RC" -eq 0 ]; check $? "--online soft-passes when the checkout path doesn't exist (got $RC)"
 grep -q "soft-passing" "$TMP/out"; check $? "soft-pass explains why (no checkout to compare against)"
 
+echo "Part G — changed_has() SIGPIPE/pipefail race fix (#681)"
+# The old changed_has() re-piped the full $changed list through `grep -qxF`
+# on every lookup: grep -q exits the instant it matches, closing its end of
+# the pipe; on a long list the still-writing printf can get SIGPIPE, and
+# `set -uo pipefail` (this script's own shebang option) turns that signal
+# into a false "not found" — non-deterministic, firing only once the list is
+# long enough that the writer outlives the reader. String-pin that the pipe
+# form is gone and the subprocess-free case/glob replacement is in place
+# (functional correctness of the replacement is already exercised at every
+# scale by Parts A-C above, which all drive changed_has() through real
+# lookups and all pass).
+! grep -qF 'printf '"'"'%s\n'"'"' "$changed" | grep -qxF' "$GUARD"
+check $? "the SIGPIPE-racy 'printf | grep -qxF' pipe form is gone from the guard (comment mentions may remain)"
+grep -qF 'case $'"'"'\n'"'"'"$changed"$'"'"'\n'"'"' in' "$GUARD"
+check $? "changed_has() now uses a subprocess-free case/glob membership test"
+
 echo
 if [ "$fails" -gt 0 ]; then
   echo "$fails FAILURE(S)"
