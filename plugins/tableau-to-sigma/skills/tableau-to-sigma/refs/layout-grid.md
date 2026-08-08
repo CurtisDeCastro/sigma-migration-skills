@@ -57,27 +57,31 @@ Each page in the layout XML must use this exact format, with the server-assigned
 
 A bare `<Page>` tag without `type`, `gridTemplateColumns`, `gridTemplateRows`, and `id` is ignored.
 
-### LayoutElement — for plain elements (charts, tables, KPIs)
+### Element — for plain elements (charts, tables, KPIs)
 
 ```xml
-<LayoutElement elementId="abc123" gridColumn="1 / 25" gridRow="1 / 7"/>
+<Element elementId="abc123" gridColumn="1 / 25" gridRow="1 / 7"/>
 ```
 
-### GridContainer — for container elements that wrap children
+### Container — for container elements that wrap children
 
 ```xml
-<GridContainer elementId="container-id" type="grid"
+<Container elementId="container-id" type="grid"
   gridColumn="1 / 25" gridRow="1 / 9"
   gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto">
-  <LayoutElement elementId="kpi-1-id" gridColumn="1 / 7" gridRow="1 / 9"/>
-  <LayoutElement elementId="kpi-2-id" gridColumn="7 / 13" gridRow="1 / 9"/>
-  <LayoutElement elementId="kpi-3-id" gridColumn="13 / 19" gridRow="1 / 9"/>
-  <LayoutElement elementId="kpi-4-id" gridColumn="19 / 25" gridRow="1 / 9"/>
-</GridContainer>
+  <Element elementId="kpi-1-id" gridColumn="1 / 7" gridRow="1 / 9"/>
+  <Element elementId="kpi-2-id" gridColumn="7 / 13" gridRow="1 / 9"/>
+  <Element elementId="kpi-3-id" gridColumn="13 / 19" gridRow="1 / 9"/>
+  <Element elementId="kpi-4-id" gridColumn="19 / 25" gridRow="1 / 9"/>
+</Container>
 ```
 
-**Critical:** Container elements MUST use `<GridContainer>`, not `<LayoutElement type="grid">`.
-Using `<LayoutElement>` for a container causes empty containers to appear in the published workbook.
+Only `<Element>` and `<Container>` are valid on live Sigma workbook endpoints.
+The historical `<LayoutElement>` and `<GridContainer>` aliases receive HTTP 400
+and must be accepted only when reading old local artifacts.
+
+**Critical:** Container elements MUST use `<Container>`, not `<Element type="grid">`.
+Using `<Element>` for a container causes empty containers to appear in the published workbook.
 
 **Critical — inner KPI row spans must match the container outer span.** `gridTemplateRows="auto"`
 does NOT fill available container height — rows size to content minimum. A KPI at `gridRow="1 / 2"`
@@ -93,13 +97,13 @@ require 'date'
 require 'json'
 
 def gc(eid, c0, c1, r0, r1, inner)
-  "<GridContainer elementId=\"#{eid}\" type=\"grid\" " \
+  "<Container elementId=\"#{eid}\" type=\"grid\" " \
   "gridColumn=\"#{c0} / #{c1}\" gridRow=\"#{r0} / #{r1}\" " \
-  "gridTemplateColumns=\"repeat(24, 1fr)\" gridTemplateRows=\"auto\">\n#{inner}\n</GridContainer>"
+  "gridTemplateColumns=\"repeat(24, 1fr)\" gridTemplateRows=\"auto\">\n#{inner}\n</Container>"
 end
 
 def le(eid, c0, c1, r0, r1)
-  "  <LayoutElement elementId=\"#{eid}\" gridColumn=\"#{c0} / #{c1}\" gridRow=\"#{r0} / #{r1}\"/>"
+  "  <Element elementId=\"#{eid}\" gridColumn=\"#{c0} / #{c1}\" gridRow=\"#{r0} / #{r1}\"/>"
 end
 
 # page_id is the server-assigned page ID (e.g. "Hn2bYOjeRL"), NOT the page name
@@ -227,7 +231,7 @@ overview_layout = page_xml(
 | Data table | 15–20 rows |
 
 > **Critical — KPI inner row span must equal the container outer span.**
-> `gridTemplateRows="auto"` inside a GridContainer does NOT expand rows to fill
+> `gridTemplateRows="auto"` inside a Container does NOT expand rows to fill
 > the container height. If your KPIs use `gridRow="1 / 2"` inside a container
 > that spans 6 outer rows, the KPIs render as a tiny sliver — names invisible,
 > values barely readable.
@@ -289,7 +293,7 @@ curl -s -X PUT \
 | KPI missing `value` field | `"Invalid object: ...value, got undefined"` | Add `"value": {"columnId": "<col-id>"}` to every `kpi-chart` element |
 | Using `rows`/`columnGroups` on a pivot table | API accepts silently but pivot does not render | Use `rowsBy`/`columnsBy` (object arrays) and `values` (string array) |
 | Using IDs from POST body instead of GET response | Layout elements don't appear | Always GET spec after POST to get real IDs |
-| `<LayoutElement>` for a container | Empty container visible | Use `<GridContainer>` for elements that have children |
+| `<Element>` for a container | Empty container visible | Use `<Container>` for elements that have children |
 | Hand-writing layout XML | Off-grid sizing, overlapping elements | Use Ruby helpers; let math determine positions |
 | Overlapping row ranges | Elements hidden behind each other | Draw row ranges on paper; ensure no two elements share rows on the same column span |
 | Fallback `els.values[N]` when page has fewer elements than expected | `elementId=""` in XML — PUT rejected with `invalid_request` | Guard with `(le(id, ...) if id)` and call `.compact` on the children array before passing to `page_xml` |

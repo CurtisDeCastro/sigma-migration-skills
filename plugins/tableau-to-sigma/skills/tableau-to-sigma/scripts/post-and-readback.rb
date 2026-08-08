@@ -66,6 +66,7 @@ $LOAD_PATH.unshift File.expand_path('lib', __dir__)
 require 'sigma_rest'
 require 'dm_quarantine'
 require 'code_rep'
+require 'workbook_code'
 begin
   require 'offramp' # off-ramp trail (waiver observability); optional — never load-bearing
 rescue LoadError
@@ -169,9 +170,12 @@ def style_normalize!(body_str, workdir, skip_reason)
     return body_str
   end
   spec = JSON.parse(body_str) rescue nil
-  return body_str unless spec.is_a?(Hash) && spec['pages']
+  return body_str unless spec.is_a?(Hash)
+  doc = WorkbookCode.document(spec)
+  return body_str unless doc['elements'].is_a?(Array)
   require_relative 'lib/style_normalize'
-  changes = StyleNormalize.normalize!(spec)
+  changes = StyleNormalize.normalize!(
+    { 'pages' => [{ 'elements' => doc['elements'] }], 'settings' => doc['settings'] })
   if changes.any?
     File.write(File.join(workdir, 'style-normalize.json'), JSON.pretty_generate(changes)) rescue nil
     warn "style-normalize: #{changes.size} change(s) applied (#{changes.map { |c| c['rule'] }.uniq.join(', ')}) — style-normalize.json"
@@ -191,8 +195,10 @@ end
 def ensure_theme!(body_str, workdir)
   return body_str unless $opts_type == 'workbook'
   spec = JSON.parse(body_str) rescue nil
-  return body_str unless spec.is_a?(Hash) && spec['pages']
-  return body_str if spec.dig('settings', 'theme', 'overrides').is_a?(Hash) && spec['settings']['theme']['overrides'].any?
+  return body_str unless spec.is_a?(Hash)
+  doc = WorkbookCode.document(spec)
+  return body_str unless doc['elements'].is_a?(Array)
+  return body_str if doc.dig('settings', 'theme', 'overrides').is_a?(Hash) && doc['settings']['theme']['overrides'].any?
   theme = nil
   side = File.join(workdir, 'chart-specs-theme.json')
   main = File.join(workdir, 'chart-specs.json')
@@ -204,8 +210,8 @@ def ensure_theme!(body_str, workdir)
   end
   return body_str unless theme.is_a?(Hash) && theme.any?
   require_relative 'lib/theme_derive'
-  ThemeDerive.apply!(spec, theme)
-  overrides = spec.dig('settings', 'theme', 'overrides')
+  ThemeDerive.apply!(doc, theme)
+  overrides = doc.dig('settings', 'theme', 'overrides')
   if overrides.is_a?(Hash) && overrides.any?
     warn "theme: source-derived theme applied at post time (#{overrides.keys.join(', ')}) — " \
          'path-independent palette (the incoming spec carried none)'
@@ -366,7 +372,7 @@ if update_id
   warn "UPDATE mode: PUT #{opts[:type]} #{update_id} (no new #{opts[:type]} created)"
   put_body = File.read(opts[:spec])
   # Layout preservation (bead: layout-wipe-on-re-PUT). A workbook's applied layout
-  # lives at top-level spec['layout'] (put-layout.rb writes it there). PUTting a
+  # lives at document.layout (put-layout.rb writes it there). PUTting a
   # spec WITHOUT that field REPLACES the whole spec and wipes the layout, so the
   # workbook falls back to a single-column stack. If the outgoing spec carries no
   # layout, carry over the LIVE workbook's current layout so this PUT is
@@ -380,7 +386,8 @@ if update_id
   # no follow-up put-layout) still get the carry.
   if opts[:type] == 'workbook' && ENV['SIGMA_ORCHESTRATED_RUN'] != '1'
     out_spec = (YAML.safe_load(put_body, permitted_classes: [Date, Time]) rescue nil)
-    if out_spec.is_a?(Hash) && out_spec['layout'].to_s.strip.empty?
+    out_doc = out_spec.is_a?(Hash) ? WorkbookCode.document(out_spec) : {}
+    if out_spec.is_a?(Hash) && out_doc['layout'].to_s.strip.empty?
       live = http(:get, format(GET_PATH, update_id))
       live_spec = (YAML.safe_load(live.body, permitted_classes: [Date, Time]) rescue nil)
       # Workbook code-rep nests pages/layout under `document` (live since
@@ -395,7 +402,7 @@ if update_id
         # any layout-referenced elements this spec lacks from the live spec (match
         # page by id, then name) so the refs resolve, then carry the layout.
         ref_ids  = live_layout.scan(/elementId="([^"]+)"/).flatten.uniq
-        have_ids = (out_spec['pages'] || []).flat_map { |p| (p['elements'] || []).map { |e| e['id'] } }.compact
+        have_ids = Array(out_doc['elements']).filter_map { |element| element['id'] }
         missing  = ref_ids - have_ids
         # GENERATION check: a carry is only sound when the outgoing spec still
         # contains the elements the layout places (a spot fix — ids stable). A
@@ -409,21 +416,17 @@ if update_id
           warn "layout NOT carried: the live layout places #{ref_ids.size} element(s) but only " \
                "#{(ref_ids & have_ids).size} exist in the outgoing spec (stale generation — full rebuild). " \
                'Run put-layout.rb AFTER this PUT or it renders single-column (the orchestrator does).'
-        elsif missing.any? && live_spec['pages'].is_a?(Array)
-          live_by_id = {}
-          live_spec['pages'].each { |p| (p['elements'] || []).each { |e| live_by_id[e['id']] = [p, e] } }
-          out_by_id  = (out_spec['pages'] || []).each_with_object({}) { |p, h| h[p['id']] = p }
+        elsif missing.any? && live_spec['elements'].is_a?(Array)
+          live_by_id = live_spec['elements'].each_with_object({}) { |element, index| index[element['id']] = element }
           missing.dup.each do |mid|
-            lp, le = live_by_id[mid]
+            le = live_by_id[mid]
             next unless le
-            tgt = out_by_id[lp['id']] || (out_spec['pages'] || []).find { |p| p['name'] == lp['name'] } || (out_spec['pages'] || []).last
-            next unless tgt
-            (tgt['elements'] ||= []) << le
+            (out_doc['elements'] ||= []) << le
             missing.delete(mid)
           end
         end
         if !stale_generation && missing.empty?
-          out_spec['layout'] = live_layout
+          out_doc['layout'] = live_layout
           put_body = JSON.generate(out_spec)
           warn 'layout-preserve: carried the live workbook layout (+ its container/header elements) into the PUT.'
         elsif !stale_generation
@@ -444,6 +447,8 @@ if update_id
   # wraps.
   if opts[:type] == 'workbook'
     wb_doc = JSON.parse(put_body)
+    shape_errors = WorkbookCode.validate(wb_doc)
+    abort("workbook code-representation invalid:\n  - #{shape_errors.join("\n  - ")}") if shape_errors.any?
     put_body = JSON.generate(Sigma::CodeRep.wrap(Sigma::CodeRep.document(wb_doc), extra: Sigma::CodeRep.metadata(wb_doc)))
   end
   verify_spec!(put_body, opts[:skip_spec_verify], update: true)
@@ -474,11 +479,15 @@ else
   begin
     _pf = JSON.parse(post_body)
     _ids = Hash.new(0)
-    (_pf['pages'] || []).each do |pg|
-      (pg['elements'] || []).each do |el|
-        _ids["element id #{el['id']}"] += 1 if el['id']
-        _ids["controlId #{el['controlId']}"] += 1 if el['controlId']
+    _elements =
+      if opts[:type] == 'workbook'
+        Sigma::CodeRep.workbook_elements(_pf)
+      else
+        (_pf['pages'] || []).flat_map { |page| page['elements'] || [] }
       end
+    _elements.each do |el|
+      _ids["element id #{el['id']}"] += 1 if el['id']
+      _ids["controlId #{el['controlId']}"] += 1 if el['controlId']
     end
     _dupes = _ids.select { |_k, n| n > 1 }
     if _dupes.any?
@@ -499,6 +508,8 @@ else
   # wraps.
   if opts[:type] == 'workbook'
     wb_doc = JSON.parse(post_body)
+    shape_errors = WorkbookCode.validate(wb_doc)
+    abort("workbook code-representation invalid:\n  - #{shape_errors.join("\n  - ")}") if shape_errors.any?
     post_body = JSON.generate(Sigma::CodeRep.wrap(Sigma::CodeRep.document(wb_doc), extra: Sigma::CodeRep.metadata(wb_doc)))
   end
   verify_spec!(post_body, opts[:skip_spec_verify])
@@ -729,21 +740,34 @@ if QUARANTINE && $quarantined.nil? && cols_res.is_a?(Net::HTTPSuccess)
   end
 end
 
-out = {
-  ID_FIELD => oid,
-  'pages'  => spec.fetch('pages', []).map do |p|
-    {
-      'id'       => p['id'],
-      'name'     => p['name'],
-      'visibility' => p['visibility'],
-      'elements' => (p['elements'] || []).map do |e|
-        el = { 'id' => e['id'], 'kind' => e['kind'], 'name' => e['name'] }
-        el['columnLabels'] = labels_by_el[e['id']] if labels_by_el.key?(e['id'])
-        el
-      end
-    }
+if opts[:type] == 'workbook'
+  out_doc = spec.dup
+  out_doc['pages'] = Array(spec['pages']).map do |page|
+    page.reject { |key, _| key == 'elements' }
   end
-}
+  out_doc['elements'] = Sigma::CodeRep.workbook_elements(spec).map do |element|
+    summary = { 'id' => element['id'], 'kind' => element['kind'], 'name' => element['name'] }
+    summary['columnLabels'] = labels_by_el[element['id']] if labels_by_el.key?(element['id'])
+    summary
+  end
+  out = Sigma::CodeRep.wrap(out_doc, extra: { ID_FIELD => oid })
+else
+  out = {
+    ID_FIELD => oid,
+    'pages'  => spec.fetch('pages', []).map do |p|
+      {
+        'id'       => p['id'],
+        'name'     => p['name'],
+        'visibility' => p['visibility'],
+        'elements' => (p['elements'] || []).map do |e|
+          el = { 'id' => e['id'], 'kind' => e['kind'], 'name' => e['name'] }
+          el['columnLabels'] = labels_by_el[e['id']] if labels_by_el.key?(e['id'])
+          el
+        end
+      }
+    end
+  }
+end
 File.write(opts[:out], JSON.pretty_generate(out))
 puts JSON.pretty_generate(out)
 
@@ -848,10 +872,14 @@ end
 begin
   posted_spec ||= (JSON.parse(File.read(opts[:spec])) rescue nil)
   if posted_spec && spec.is_a?(Hash)
-    rb_els = (spec['pages'] || []).flat_map { |p| p['elements'] || [] }
+    rb_els = opts[:type] == 'workbook' ? Sigma::CodeRep.workbook_elements(spec) :
+      (spec['pages'] || []).flat_map { |p| p['elements'] || [] }
     rb_by_id   = rb_els.each_with_object({}) { |e, h| h[e['id']] = e if e['id'] }
     rb_by_name = rb_els.each_with_object({}) { |e, h| h[e['name']] = e if e['name'] }
-    (posted_spec['pages'] || []).flat_map { |p| p['elements'] || [] }.each do |pel|
+    posted_els = opts[:type] == 'workbook' ?
+      Sigma::CodeRep.workbook_elements(WorkbookCode.canonicalize(posted_spec)) :
+      (posted_spec['pages'] || []).flat_map { |p| p['elements'] || [] }
+    posted_els.each do |pel|
       posted_f = Array(pel['filters'])
       next if posted_f.empty?
       live = rb_by_id[pel['id']] || rb_by_name[pel['name']]
@@ -883,7 +911,8 @@ begin
   posted_spec ||= (JSON.parse(File.read(opts[:spec])) rescue nil)
   if opts[:type] == 'workbook' && posted_spec && spec.is_a?(Hash)
     require_relative 'lib/control_field_census'
-    cf_problems = ControlFieldCensus.census(posted_spec, spec)
+    cf_problems = ControlFieldCensus.census(
+      WorkbookCode.legacy_view(posted_spec), WorkbookCode.legacy_view(spec))
     if cf_problems.any?
       warn "\n========================================"
       warn "WARN — CONTROL FIELD(S) silently dropped by the spec API: #{cf_problems.size} control(s) " \
@@ -900,7 +929,7 @@ begin
       warn 'unresolvable (re-point it at a TABLE element, or record it in POSTPUBLISH_GUIDE.md).'
       warn '========================================'
     else
-      n = ControlFieldCensus.controls(posted_spec).size
+      n = ControlFieldCensus.controls(WorkbookCode.legacy_view(posted_spec)).size
       warn "control-field census: #{n} posted control(s), no silently-dropped fields" if n.positive?
     end
   end
@@ -934,7 +963,7 @@ end
 
 # Layout-quality lint (shared scripts/lib/layout_lint.rb — vendored byte-
 # identical, md5 discipline): fails loudly on raw-id element display names,
-# input controls outside the GridContainer bands of a banded page, and dead
+# input controls outside the Container bands of a banded page, and dead
 # zones (>25% empty grid rows between a page's first and last element). The
 # "PHASEE PBI Employee Dashboard" regression shipped a parity-green workbook
 # that was a visual mess — every data gate passed. Escape: --skip-layout-lint

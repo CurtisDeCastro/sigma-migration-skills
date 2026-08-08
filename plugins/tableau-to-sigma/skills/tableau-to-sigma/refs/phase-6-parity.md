@@ -88,7 +88,7 @@ The gate checks five independent things and rejects on any failure:
 4. **Layout applied** — fetches `/v2/workbooks/{id}/spec` and rejects
    when the `layout` field (`document.layout` in the current wrapped spec
    shape) is empty or has fewer than 2
-   `<LayoutElement>` tags. Catches the CoCo regression where the agent
+   `<Element>` tags. Catches the CoCo regression where the agent
    forgot to PUT a layout and Sigma rendered every tile as a
    single-column stack instead of the dashboard grid.
 5. **Tile census** — reads `tile_census` from `parity-final.json`

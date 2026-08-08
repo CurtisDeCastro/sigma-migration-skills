@@ -268,6 +268,7 @@ return if $PROGRAM_NAME != __FILE__ && !ENV['VERIFY_INTERACTION_CLI'] # allow `r
 # ---------------------------------------------------------------------------
 require 'sigma_rest'
 require 'code_rep'
+require 'workbook_code'
 require_relative 'lib/py_resolve'
 
 opts = { values: {}, controls: [], per_dashboard: 1, timeout: 90, renders: true }
@@ -371,7 +372,7 @@ Array(parity['charts']).each do |c|
 end
 
 wb_ids = (JSON.parse(File.read(File.join(W, 'wb-ids.json'))) rescue {})
-page_id_by_name = (wb_ids['pages'] || []).each_with_object({}) { |p, h| h[p['name']] = p['id'] if p['name'] }
+page_id_by_name = WorkbookCode.pages(wb_ids).each_with_object({}) { |p, h| h[p['name']] = p['id'] if p['name'] }
 
 spec  = fetch_spec(WB)
 elems = ControlLint.elements(spec)

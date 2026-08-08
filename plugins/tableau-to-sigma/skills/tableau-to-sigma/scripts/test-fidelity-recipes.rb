@@ -35,7 +35,7 @@ def base_spec
         { 'elementId' => 'b1', 'kind' => 'bar-chart', 'name' => 'By Region' }
       ]
     }],
-    'layout' => '<Page id="p1"><GridContainer><LayoutElement elementId="k1"/><LayoutElement elementId="b1"/></GridContainer></Page>'
+    'layout' => '<Page id="p1"><Container><Element elementId="k1"/><Element elementId="b1"/></Container></Page>'
   }
 end
 

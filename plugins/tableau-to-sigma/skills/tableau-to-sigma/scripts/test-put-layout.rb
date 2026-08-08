@@ -85,18 +85,11 @@ puts 'Case 1 - navigate target repaired by name to the DIFFERENT live page id'
 # build-charts-from-signals.rb would under the page-<slug> scheme), but the
 # orchestrated pipeline actually assigned this page 'page-dash-2' by array
 # index — the exact page-id-scheme mismatch the amendment describes.
-LIVE_SPEC_1 = {
-  'workbookId' => 'wb-test',
-  'pages' => [
-    { 'id' => 'page-dash-1', 'name' => 'Overview', 'elements' => [] },
-    { 'id' => 'page-dash-2', 'name' => 'Detail View', 'elements' => [
-      { 'id' => 'ph', 'kind' => 'text', 'name' => nil }
-    ] }
-  ]
-}.freeze
 LAYOUT_XML_1 = <<~XML
   <Page type="grid" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto" id="page-dash-1">
-  <LayoutElement elementId="btn-10" gridColumn="1 / 25" gridRow="1 / 3"/>
+  <Element elementId="btn-10" gridColumn="1 / 25" gridRow="1 / 3"/>
+  </Page>
+  <Page type="grid" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto" id="page-dash-2">
   </Page>
 XML
 MANIFEST_1 = [
@@ -107,15 +100,21 @@ MANIFEST_1 = [
 ].freeze
 LIVE_SPEC_1_WITH_BUTTON = {
   'workbookId' => 'wb-test',
-  'pages' => [
-    { 'id' => 'page-dash-1', 'name' => 'Overview', 'elements' => [
+  'document' => {
+    'schemaVersion' => 1,
+    'kind' => 'workbook',
+    'pages' => [
+      { 'id' => 'page-dash-1', 'name' => 'Overview' },
+      { 'id' => 'page-dash-2', 'name' => 'Detail View' }
+    ],
+    'elements' => [
       { 'id' => 'btn-10', 'kind' => 'button', 'text' => 'Details',
         'actions' => [{ 'id' => 'act-btn-10-1', 'trigger' => 'on-click',
                         'effects' => [{ 'effect' => 'navigate',
                                         'target' => { 'type' => 'page', 'page' => 'page-wrong-slug' } }] }] }
-    ] },
-    { 'id' => 'page-dash-2', 'name' => 'Detail View', 'elements' => [] }
-  ]
+    ],
+    'layout' => LAYOUT_XML_1
+  }
 }.freeze
 
 st1, out1, puts1 = run_case(LIVE_SPEC_1_WITH_BUTTON, LAYOUT_XML_1, MANIFEST_1)
@@ -153,17 +152,10 @@ check(!out2.include?('navigate targets: 1 button'), 'no repair claimed on stdout
 puts out2 unless st2.exitstatus == 0
 
 puts
-puts 'Case 3 - --apply-pivot-totals with no --layout must not crash when the GET spec omits `pages`'
-# Minor-3 regression (final-review finding): `page_id_by_name = spec['pages']
-# .each_with_object(...)` used to sit ABOVE every existing guard, so it was an
-# UNCONDITIONAL spec['pages'] access. On the totals-ONLY ship pass
-# (--apply-pivot-totals, no --layout — exactly how migrate-tableau.rb:1627
-# invokes it) it is the FIRST spec['pages'] access on that code path; every
-# earlier one in the file already sits inside `if opts[:layout]` /
-# `if hidden_ids.any?`. No live GET has been observed to omit `pages`, but
-# nothing guarantees one never will (a brand-new/edge-case workbook document,
-# a future API shape) — this pins the defensive `(spec['pages'] || [])` guard
-# by simulating exactly that response shape.
+puts 'Case 3 - --apply-pivot-totals with no --layout accepts a valid empty workbook'
+# The released workbook-code contract requires pages, elements, and layout.
+# Exercise the totals-only ship pass with their valid empty values; malformed
+# readbacks are now intentionally rejected by put-layout's pre-PUT validator.
 Dir.mktmpdir do |work|
   put_bodies = []
   srv = WEBrick::HTTPServer.new(Port: 0, BindAddress: '127.0.0.1',
@@ -171,9 +163,12 @@ Dir.mktmpdir do |work|
   port = srv.config[:Port]
   srv.mount_proc('/') do |req, res|
     if req.request_method == 'GET' && req.path.end_with?('/spec')
-      # A `document` with no `pages` key at all — Sigma::CodeRep.document()
-      # returns this Hash as-is, so spec['pages'] is nil downstream.
-      res.body = JSON.generate('document' => { 'schemaVersion' => 2, 'kind' => 'workbook' })
+      res.body = JSON.generate(
+        'document' => {
+          'schemaVersion' => 1, 'kind' => 'workbook',
+          'pages' => [], 'elements' => [], 'layout' => '<Workbook/>'
+        }
+      )
     elsif req.request_method == 'GET'
       res.body = JSON.generate('url' => "http://127.0.0.1:#{port}/wb")
     else # PUT
@@ -194,8 +189,7 @@ Dir.mktmpdir do |work|
                               'ruby', SCRIPT, '--workbook', 'wb-test',
                               '--apply-pivot-totals', '--workdir', work)
 
-  check(st3.exitstatus == 0, "exits 0 (no --layout, GET spec has no `pages`) — got #{st3.exitstatus}")
-  check(!out3.include?('NoMethodError'), "no NoMethodError on a nil spec['pages']")
+  check(st3.exitstatus == 0, "exits 0 (no --layout, valid empty workbook) — got #{st3.exitstatus}")
   check(put_bodies.length == 1, 'PUT still sent (the totals pass ran to completion, not just avoided crashing)')
   puts out3 unless st3.exitstatus == 0
 end

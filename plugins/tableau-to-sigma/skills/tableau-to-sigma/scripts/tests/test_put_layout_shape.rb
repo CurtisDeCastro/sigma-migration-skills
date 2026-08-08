@@ -12,6 +12,7 @@
 
 require 'minitest/autorun'
 require_relative '../lib/code_rep'
+require_relative '../lib/workbook_code'
 
 class TestPutLayoutShape < Minitest::Test
   NESTED = { 'workbookId' => 'w', 'document' => { 'pages' => [{ 'id' => 'p' }], 'layout' => nil } }
@@ -24,8 +25,16 @@ class TestPutLayoutShape < Minitest::Test
   end
 
   def test_put_body_is_wrapped
-    doc = { 'pages' => [], 'layout' => '<Layout/>' }
-    assert_equal doc, Sigma::CodeRep.wrap(doc)['document']
+    body = WorkbookCode.canonicalize(
+      'pages' => [{ 'id' => 'p', 'elements' => [{ 'id' => 'e', 'kind' => 'text' }] }]
+    )
+    doc = body['document']
+    assert_equal 1, doc['schemaVersion']
+    assert_equal 'workbook', doc['kind']
+    assert_equal [{ 'id' => 'p' }], doc['pages']
+    assert_equal ['e'], doc['elements'].map { |element| element['id'] }
+    assert_includes doc['layout'], 'elementId="e"'
+    assert_empty WorkbookCode.validate(body)
   end
 
   # Real regression signal: the two tests above only prove the already-shipped

@@ -28,6 +28,7 @@ $LOAD_PATH.unshift File.expand_path('lib', __dir__)
 require 'sigma_functions'
 require 'formula_normalize'
 require 'metric_binding' # F4: column/metric collision shape — census admissibility
+require 'workbook_code'
 
 opts = { type: nil, dm_context: nil }
 op = OptionParser.new do |p|
@@ -40,7 +41,16 @@ op.parse!
 abort('--type required (datamodel|workbook)') unless opts[:type]
 abort('usage: validate-spec.rb --type T [--dm-context P] <spec.json>') if ARGV.empty?
 
-spec = JSON.parse(File.read(ARGV[0]))
+raw_spec = JSON.parse(File.read(ARGV[0]))
+workbook_shape_errors = []
+if opts[:type] == 'workbook'
+  workbook_shape_errors = WorkbookCode.validate(raw_spec)
+  # The validation logic below predates flat workbook elements. Feed it a
+  # transient page view derived from layout; this is never written back.
+  spec = WorkbookCode.legacy_view(raw_spec)
+else
+  spec = raw_spec
+end
 
 # Known prefixes the validator considers valid for cross-element refs
 external_names = []  # element names that are sources OUTSIDE this spec (e.g., DM elements when validating a workbook)
@@ -193,6 +203,7 @@ if metrics_file
 end
 
 errors = []
+errors.concat(workbook_shape_errors)
 warnings = []
 warnings.concat(census_warnings) # F4 census exclusions, surfaced with the report
 all_element_names = []
@@ -243,9 +254,14 @@ errors << 'spec contains rgb(...) color strings (Cloudflare WAF blocks)' if JSON
 # ENVELOPE checks (field-caught round 2): a hand-authored spec missing these
 # passed "0 errors" locally and then burned one live 400 per defect, one
 # network round-trip at a time.
-errors << 'missing top-level "schemaVersion" (POST 400s with schemaVersion: Invalid)' unless spec.key?('schemaVersion')
-errors << 'missing top-level "name" (the workbook/DM display name)' if spec['name'].to_s.strip.empty?
-warnings << 'no top-level "folderId" — the POST lands in My Documents (pass the assigned folder)' unless spec.key?('folderId')
+if opts[:type] == 'workbook'
+  errors << 'missing outer "name" (the workbook display name)' if raw_spec['name'].to_s.strip.empty?
+  warnings << 'no outer "folderId" — the POST lands in My Documents (pass the assigned folder)' unless raw_spec.key?('folderId')
+else
+  errors << 'missing top-level "schemaVersion" (POST 400s with schemaVersion: Invalid)' unless spec.key?('schemaVersion')
+  errors << 'missing top-level "name" (the data-model display name)' if spec['name'].to_s.strip.empty?
+  warnings << 'no top-level "folderId" — the POST lands in My Documents (pass the assigned folder)' unless spec.key?('folderId')
+end
 spec.fetch('pages', []).each_with_index do |page, pi|
   errors << "pages[#{pi}] has no \"id\" — PUT/layout targeting needs stable page ids" unless page['id']
   page.fetch('elements', []).each do |el|

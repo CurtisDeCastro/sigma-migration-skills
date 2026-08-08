@@ -66,6 +66,7 @@ $LOAD_PATH.unshift File.expand_path('lib', __dir__)
 require 'sigma_rest'
 require 'probe_registry'
 require 'code_rep'
+require 'workbook_code'
 
 opts = {
   chart_kind: 'table',
@@ -218,7 +219,7 @@ if batch_entries
   parsed = begin
     # Workbook code-rep POSTs require the nested `document` envelope (verified
     # live 2026-08-03/04: a flat body 400s) — wrap the throwaway batch probe spec.
-    post_body = Sigma::CodeRep.wrap(Sigma::CodeRep.document(spec), extra: Sigma::CodeRep.metadata(spec))
+    post_body = WorkbookCode.canonicalize(spec)
     Sigma.request(:post, '/v2/workbooks/spec', body: JSON.generate(post_body))
   rescue StandardError => e
     { 'raw' => e.message }
@@ -366,7 +367,7 @@ spec['folderId'] = opts[:folder_id] if opts[:folder_id]
 parsed = begin
   # Workbook code-rep POSTs require the nested `document` envelope (verified
   # live 2026-08-03/04: a flat body 400s) — wrap the throwaway singleton probe spec.
-  post_body = Sigma::CodeRep.wrap(Sigma::CodeRep.document(spec), extra: Sigma::CodeRep.metadata(spec))
+  post_body = WorkbookCode.canonicalize(spec)
   Sigma.request(:post, '/v2/workbooks/spec', body: JSON.generate(post_body))
 rescue StandardError => e
   { 'raw' => e.message }

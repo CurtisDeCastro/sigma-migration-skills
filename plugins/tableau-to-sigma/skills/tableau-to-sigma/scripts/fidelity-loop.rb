@@ -63,6 +63,7 @@
 require 'json'
 require_relative 'lib/cli_encoding'
 require_relative 'lib/code_rep'
+require_relative 'lib/workbook_code'
 require 'optparse'
 
 # ---------------------------------------------------------------------------
@@ -247,6 +248,8 @@ end
 def auto_pick_rcf_page(dir)
   wb_ids  = (JSON.parse(File.read(File.join(dir, 'wb-ids.json'))) rescue nil)
   wb_spec = (JSON.parse(File.read(File.join(dir, 'wb-spec.json'))) rescue nil)
+  wb_ids = WorkbookCode.legacy_view(wb_ids) if wb_ids
+  wb_spec = WorkbookCode.legacy_view(wb_spec) if wb_spec
   spec_by_name = {}
   ((wb_spec && wb_spec['pages']) || []).each { |p| spec_by_name[p['name']] = p if p.is_a?(Hash) }
   pages = (((wb_ids && wb_ids['pages']) || (wb_spec && wb_spec['pages'])) || []).map do |p|
@@ -302,7 +305,8 @@ def persist_patch_to_wb_spec(dir, patch)
     warn "WARN: #{path} does not parse (#{e.message}) — patch NOT persisted; a re-entry full-spec PUT will revert this fix"
     return
   end
-  File.write(path, JSON.pretty_generate(FidelityLoop.deep_merge(spec, patch)) + "\n")
+  merged = FidelityLoop.deep_merge(WorkbookCode.legacy_view(WorkbookCode.canonicalize(spec)), patch)
+  File.write(path, JSON.pretty_generate(WorkbookCode.canonicalize(merged)) + "\n")
   puts "[OK] patch persisted into #{path} (re-entry full-spec PUTs carry this fix)"
 rescue StandardError => e
   warn "WARN: could not persist patch into #{path}: #{e.class}: #{e.message}"
@@ -484,12 +488,18 @@ when 'apply-patch'
       # live['pages']/merged['layout'] read below stays correct whether `live`
       # came from a live nested GET or a legacy flat --live-spec fixture (the
       # adapter's document()/metadata() both tolerate an already-flat input).
-      live = Sigma::CodeRep.metadata(live).merge(Sigma::CodeRep.document(live))
-      die 'live spec has no `pages` — refusing to PUT a spec that would blank the workbook', 4 unless live['pages']
+      live = WorkbookCode.legacy_view(live)
+      unless live['pages'].is_a?(Array) && live['pages'].any?
+        die 'live spec has no `pages` — refusing to PUT a spec that would blank the workbook', 4
+      end
       FidelityLoop.deep_merge(live, patch)
     end
 
-  die 'merged spec has no `pages`', 4 unless merged['pages']
+  # RCF transforms still use a transient page-assigned view. Every artifact and
+  # PUT crosses back through the release representation: metadata outside,
+  # flat document.elements, metadata-only pages, and authoritative layout.
+  merged = WorkbookCode.legacy_view(WorkbookCode.canonicalize(merged))
+  die 'merged spec has no `pages`', 4 unless merged['pages'].is_a?(Array) && merged['pages'].any?
 
   # v5.1.1: the SAME style contract post-and-readback enforces (pivot totals,
   # format grammar, scheme defaults) — a fidelity patch PUT was the one write
@@ -521,22 +531,21 @@ when 'apply-patch'
 
   if opts[:dry]
     out = opts[:out] || File.join(opts[:dir], 'rcf-merged-spec.json')
-    File.write(out, JSON.pretty_generate(merged))
+    File.write(out, JSON.pretty_generate(WorkbookCode.canonicalize(merged)))
     puts "[DRY] merged spec → #{out} (no PUT, no lint)"
     persist_patch_to_wb_spec(opts[:dir], patch) if opts[:patch] && patch
   else
     require_relative 'lib/sigma_rest'
     layout_was = merged['layout'].to_s
     begin
-      # Workbook code-rep PUTs require the nested `document` envelope
-      # (verified live 2026-08-03/04: a flat body 400s) — split the flat
-      # `merged` hash back into document fields + metadata and wrap.
-      put_body = Sigma::CodeRep.wrap(Sigma::CodeRep.document(merged), extra: Sigma::CodeRep.metadata(merged))
+      put_body = WorkbookCode.canonicalize(merged)
+      shape_errors = WorkbookCode.validate(put_body)
+      die "merged workbook code representation is invalid: #{shape_errors.join('; ')}", 4 if shape_errors.any?
       Sigma.request(:put, "/v2/workbooks/#{wb}/spec", body: JSON.generate(put_body))
     rescue StandardError => e
       die "PUT /v2/workbooks/#{wb}/spec failed (atomic — nothing written): #{e.message}", 4
     end
-    puts "[OK] PUT merged spec to #{wb} (layout preserved: #{layout_was.empty? ? 'NONE' : "#{layout_was.scan(/<LayoutElement\b/).length} elements"})"
+    puts "[OK] PUT merged spec to #{wb} (layout preserved: #{layout_was.empty? ? 'NONE' : "#{layout_was.scan(/<Element\b/).length} elements"})"
     # Persist BEFORE the post-PUT guards: the fix is live either way, and an
     # exit-5 guard failure must not leave wb-spec.json behind the live state.
     persist_patch_to_wb_spec(opts[:dir], patch) if opts[:patch] && patch

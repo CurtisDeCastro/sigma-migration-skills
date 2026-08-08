@@ -1850,7 +1850,7 @@ module MechanicalSpecs
   # orchestrated path previously dropped it, so every mechanical run shipped
   # themeless even when the source declared fonts/canvas/palette (v5.0 fix).
   def build_wb_spec(name:, dm_id:, fact_eid:, master_columns:, chart_elements:, folder_id: nil,
-                    data_elements: [], theme: nil)
+                    data_elements: [], theme: nil, canonical: true)
     master = {
       'id' => 'master', 'kind' => 'table', 'name' => 'Master', 'visibleAsSource' => false,
       'source' => { 'kind' => 'data-model', 'dataModelId' => dm_id, 'elementId' => fact_eid },
@@ -1900,7 +1900,15 @@ module MechanicalSpecs
     }
     spec['folderId'] = folder_id if folder_id
     ThemeDerive.apply!(spec, theme) if defined?(ThemeDerive)
-    spec
+    if canonical
+      require_relative 'lib/workbook_code'
+      WorkbookCode.canonicalize(spec)
+    else
+      # The orchestrator still has several pre-serialization, Tableau-specific
+      # transforms whose input is a page assignment. It requests this private
+      # compatibility shape, then canonicalizes exactly once before writing.
+      spec
+    end
   end
 
   # Bind an agent-authored (--wb-spec) workbook spec to the LIVE data model. The
