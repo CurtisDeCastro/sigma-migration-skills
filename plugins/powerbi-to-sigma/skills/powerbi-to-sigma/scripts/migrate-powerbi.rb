@@ -73,6 +73,7 @@ require 'time'
 require_relative 'lib/py_resolve'
 require_relative 'lib/pbi_field_alts'
 require_relative 'lib/pbi_master_key'
+require_relative 'lib/code_rep'
 require_relative 'lib/pbi_offramp_reason' # name the FAILING STAGE, never assert a cause we did not establish # role-playing dim copies must key on PBI table identity # derived field_map entries must wrap their ALTS too (pie/date-grain render bug) # real-Python resolver (Windows Store-stub safe)
 begin; require_relative 'lib/modeling_advisory'; rescue LoadError; end # shared, vendor-neutral CDW join-cost advisory (optional; synced from shared/)
 
@@ -1791,7 +1792,8 @@ begin
   vqa = File.join(WORK, 'visual-qa')
   FileUtils.mkdir_p(vqa)
   local_spec = (JSON.parse(File.read(wb_spec)) rescue {})
-  content_pages_qa = (local_spec['pages'] || []).reject { |p| p['id'].to_s.downcase.include?('data') }
+  local_doc = Sigma::CodeRep.document(local_spec)
+  content_pages_qa = (local_doc['pages'] || []).reject { |p| p['id'].to_s.downcase.include?('data') }
   tok = (Sigma.auth_token rescue ENV['SIGMA_API_TOKEN'])
   pngs = []
   content_pages_qa.each do |pg|
@@ -1854,8 +1856,8 @@ end
 cols = (Sigma.request(:get, "/v2/workbooks/#{wb_id}/columns") rescue { 'entries' => [] })
 err_cols = (cols['entries'] || []).select { |c| c.dig('type', 'type') == 'error' }
 total_cols = (cols['entries'] || []).size
-chart_pages = wb_rb['pages'].reject { |p| p['id'] == 'page-data' }
-chart_els = chart_pages.flat_map { |p| (p['elements'] || []) }
+wb_pairs = Sigma::CodeRep.workbook_elements_with_pages(wb_rb)
+chart_els = wb_pairs.select { |_el, page| page && page['id'] != 'page-data' }.map(&:first)
 
 # (2) warehouse-vs-snapshot compare (bead fmte). For every table the preflight
 # snapshotted, export the matching Data-page master element (Sigma = LIVE
@@ -1886,9 +1888,9 @@ export_rows = lambda do |element_id|
 end
 
 fresh_classes = []
-data_page = wb_rb['pages'].find { |p| p['id'] == 'page-data' } ||
-            wb_rb['pages'].find { |p| p['name'].to_s =~ /data/i }
-data_els = data_page ? (data_page['elements'] || []) : []
+data_els = wb_pairs.select do |_el, page|
+  page && (page['id'] == 'page-data' || page['name'].to_s =~ /data/i)
+end.map(&:first)
 (freshness['snapshot'] || {}).each do |table, snap|
   pbi_rows = snap['rows']
   next if pbi_rows.nil?

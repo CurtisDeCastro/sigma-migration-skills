@@ -70,7 +70,7 @@ def headcount_formula(metrics)
                                  '--coverage-out', File.join(d, 'cov.json'))
     abort "builder failed:\n#{err}" unless st.success?
     spec = JSON.parse(File.read(wb))
-    els = spec['pages'] ? spec['pages'].flat_map { |p| p['elements'] || [] } : (spec['elements'] || [])
+    els = spec.dig('document', 'elements') || []
     # the bar-chart element (NOT the Data-page master 'table', which also carries a
     # plain "Headcount" column)
     chart = els.find { |e| e['name'].to_s == 'HC by Dept' }

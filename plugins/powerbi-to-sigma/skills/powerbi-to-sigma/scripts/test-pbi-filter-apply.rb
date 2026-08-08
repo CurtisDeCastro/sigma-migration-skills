@@ -113,12 +113,11 @@ Dir.mktmpdir('pbi-filter-apply') do |dir|
   spec = JSON.parse(File.read(out))
   cov  = JSON.parse(File.read(File.join(dir, 'coverage.json')))
 
-  els = spec['pages'].flat_map { |p| p['elements'] }
+  els = spec.dig('document', 'elements')
   bar = els.find { |e| e['kind'] == 'bar-chart' }
   piv = els.find { |e| e['kind'] == 'pivot-table' }
-  dp  = spec['pages'].find { |p| p['id'] == 'page-data' }['elements']
-  master_t = dp.find { |e| e['id'] == 'master-t' }
-  master_z = dp.find { |e| e['id'] == 'master-z' }
+  master_t = els.find { |e| e['id'] == 'master-t' }
+  master_z = els.find { |e| e['id'] == 'master-z' }
   bf = bar['filters'] || []
   mtf = master_t['filters'] || []
 

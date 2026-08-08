@@ -97,8 +97,18 @@ class TestPostAndReadback < Minitest::Test
   def test_workbook_post_body_is_nested
     doc  = { 'schemaVersion' => 1, 'pages' => [], 'kind' => 'workbook' }
     body = Sigma::CodeRep.wrap(doc, extra: { 'name' => 'n', 'folderId' => 'f' })
-    assert_equal doc, body['document']
+    assert_equal doc.merge('elements' => []), body['document']
     refute body.key?('pages'), 'pages must not remain top-level'
+  end
+
+  def test_legacy_page_elements_flatten_once_and_pages_become_metadata_only
+    doc = {
+      'schemaVersion' => 1, 'kind' => 'workbook', 'layout' => '<Page id="p"/>',
+      'pages' => [{ 'id' => 'p', 'name' => 'P', 'elements' => [{ 'id' => 'e', 'kind' => 'text' }] }]
+    }
+    written = Sigma::CodeRep.wrap(doc)['document']
+    assert_equal [{ 'id' => 'p', 'name' => 'P' }], written['pages']
+    assert_equal ['e'], written['elements'].map { |e| e['id'] }
   end
 
   # The DM branch must be left alone — that surface is not changing.

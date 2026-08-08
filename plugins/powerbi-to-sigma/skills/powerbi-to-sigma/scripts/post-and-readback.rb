@@ -1,6 +1,7 @@
 #!/usr/bin/env ruby
 # POST a DM or workbook spec, parse the YAML response, then GET the spec back
-# and emit a clean JSON map of pages → elements with server-assigned IDs.
+# and emit a normalized readback. Workbook readbacks keep flat document
+# elements; data-model readbacks retain their unchanged nested page shape.
 #
 # Usage:
 #   ruby post-and-readback.rb --type datamodel|workbook --spec <spec.json> --out <id-map.json>
@@ -136,21 +137,34 @@ labels_by_el = Hash.new { |h, k| h[k] = [] }
   labels_by_el[c['elementId']] << c['label'] if c['elementId'] && c['label']
 end
 
-out = {
-  ID_FIELD => oid,
-  'pages'  => spec.fetch('pages', []).map do |p|
-    {
-      'id'       => p['id'],
-      'name'     => p['name'],
-      'visibility' => p['visibility'],
-      'elements' => (p['elements'] || []).map do |e|
-        el = { 'id' => e['id'], 'kind' => e['kind'], 'name' => e['name'] }
+out =
+  if opts[:type] == 'workbook'
+    # Keep the complete document so downstream checks see panels/settings and
+    # layout as well as pages/elements. Elements stay flat; page membership is
+    # recoverable exclusively from the authoritative layout.
+    spec.merge(
+      ID_FIELD => oid,
+      'elements' => Sigma::CodeRep.workbook_elements(spec).map do |e|
+        el = e.dup
         el['columnLabels'] = labels_by_el[e['id']] if labels_by_el.key?(e['id'])
         el
       end
+    )
+  else
+    {
+      ID_FIELD => oid,
+      'pages' => spec.fetch('pages', []).map do |p|
+        {
+          'id' => p['id'], 'name' => p['name'], 'visibility' => p['visibility'],
+          'elements' => (p['elements'] || []).map do |e|
+            el = { 'id' => e['id'], 'kind' => e['kind'], 'name' => e['name'] }
+            el['columnLabels'] = labels_by_el[e['id']] if labels_by_el.key?(e['id'])
+            el
+          end
+        }
+      end
     }
   end
-}
 File.write(opts[:out], JSON.pretty_generate(out))
 puts JSON.pretty_generate(out)
 
@@ -195,7 +209,7 @@ end
 
 # Layout-quality lint (shared scripts/lib/layout_lint.rb — vendored byte-
 # identical, md5 discipline): fails loudly on raw-id element display names,
-# input controls outside the GridContainer bands of a banded page, and dead
+# input controls outside the Container bands of a banded page, and dead
 # zones (>25% empty grid rows between a page's first and last element). The
 # "PHASEE PBI Employee Dashboard" regression shipped a parity-green workbook
 # that was a visual mess — every data gate passed. Escape: --skip-layout-lint
