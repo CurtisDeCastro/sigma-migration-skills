@@ -169,22 +169,17 @@ Dir.mktmpdir do |dir|
 end
 
 # ---- C. live: one spec GET + gate 7b recorded-RAW acceptance ----------------
-LIVE_SPEC = {
-  'workbookId' => 'wb-7b', 'latestDocumentVersion' => '7',
-  'document' => {
-    'schemaVersion' => 1, 'kind' => 'workbook',
-    'layout' => '<Layout><Page id="pg1"><Element elementId="el-chart" gridColumn="1 / 13"/>' \
-                '<Element elementId="el-ctl" gridColumn="13 / 25"/></Page></Layout>',
-    'pages' => [{ 'id' => 'pg1', 'name' => 'Overview' }],
-    'elements' => [
-      { 'id' => 'el-chart', 'kind' => 'bar-chart', 'name' => 'Region Chart',
-        'columns' => [{ 'id' => 'c-r', 'name' => 'Region' }, { 'id' => 'c-v', 'name' => 'Revenue' }] },
-      { 'id' => 'el-ctl', 'kind' => 'control', 'controlId' => 'ctl-1', 'name' => 'Region Filter',
-        'controlType' => 'list-values',
-        'filters' => [{ 'source' => { 'elementId' => 'el-chart' }, 'columnId' => 'c-r' }] }
-    ]
-  }
-}.freeze
+LIVE_SPEC = workbook_response(
+  workbook_id: 'wb-7b',
+  version: '7',
+  elements: [
+    { 'id' => 'el-chart', 'kind' => 'bar-chart', 'name' => 'Region Chart',
+      'columns' => [{ 'id' => 'c-r', 'name' => 'Region' }, { 'id' => 'c-v', 'name' => 'Revenue' }] },
+    { 'id' => 'el-ctl', 'kind' => 'control', 'controlId' => 'ctl-1', 'name' => 'Region Filter',
+      'controlType' => 'list-values',
+      'filters' => [{ 'source' => { 'elementId' => 'el-chart' }, 'columnId' => 'c-r' }] }
+  ]
+).freeze
 
 def start_stub(counters)
   server = TCPServer.new('127.0.0.1', 0)
