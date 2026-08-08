@@ -291,9 +291,9 @@ Dir.mktmpdir do |d3|
   # worksheet 'Sales by Region' emits only Region / Profit Ratio / Region Not
   # Null. Exactly the case proven to ship a wrong binding before the guard.
   mmap3 = stage_fixture(d3,
-                        '(?i)^Region$'        => { 'id' => 'm-region',        'name' => 'Region' },
-                        '(?i)^Order ID$'      => { 'id' => 'm-orderid',       'name' => 'Order ID' },
-                        '(?i)^Metric Button$' => { 'id' => 'm-metric-button', 'name' => 'Metric Button' })
+                        { '(?i)^Region$'        => { 'id' => 'm-region',        'name' => 'Region' },
+                          '(?i)^Order ID$'      => { 'id' => 'm-orderid',       'name' => 'Order ID' },
+                          '(?i)^Metric Button$' => { 'id' => 'm-metric-button', 'name' => 'Metric Button' } })
 
   detected3 = File.join(d3, 'detected-actions.json')
   File.write(detected3, JSON.generate([
