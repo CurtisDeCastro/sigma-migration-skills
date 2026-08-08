@@ -87,14 +87,36 @@ end
 readback = Sigma.request(:get, format(GET_PATH, oid))
 doc = opts[:type] == 'workbook' ? Sigma::CodeRep.document(readback) : readback
 
-out = {
-  ID_FIELD => oid,
-  'pages' => (doc['pages'] || []).map do |p|
+if opts[:type] == 'workbook'
+  pages = Array(doc['pages']).map do |page|
+    { 'id' => page['id'], 'name' => page['name'], 'elements' => [] }
+  end
+  pages_by_id = pages.each_with_object({}) { |page, out_hash| out_hash[page['id']] = page }
+  unplaced = []
+  Sigma::CodeRep.workbook_elements_with_pages(doc).each do |element, page|
+    summary = { 'id' => element['id'], 'kind' => element['kind'], 'name' => element['name'] }
+    target = page && pages_by_id[page['id']]
+    target ? target['elements'] << summary : unplaced << summary
+  end
+  unless unplaced.empty?
+    abort("readback layout is not authoritative: #{unplaced.size} flat workbook element(s) " \
+          "have no Page membership: #{unplaced.map { |e| e['id'] }.join(', ')}")
+  end
+else
+  # Data-model code representation deliberately retains pages[*].elements.
+  pages = (doc['pages'] || []).map do |page|
     {
-      'id' => p['id'], 'name' => p['name'],
-      'elements' => (p['elements'] || []).map { |e| { 'id' => e['id'], 'kind' => e['kind'], 'name' => e['name'] } }
+      'id' => page['id'], 'name' => page['name'],
+      'elements' => (page['elements'] || []).map do |element|
+        { 'id' => element['id'], 'kind' => element['kind'], 'name' => element['name'] }
+      end
     }
   end
+end
+
+out = {
+  ID_FIELD => oid,
+  'pages' => pages
 }
 File.write(opts[:out], JSON.pretty_generate(out))
 puts JSON.pretty_generate(out)

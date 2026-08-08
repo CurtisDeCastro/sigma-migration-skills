@@ -90,14 +90,25 @@ end
 
 class TestPostAndReadback < Minitest::Test
   def test_workbook_readback_pages_found_when_nested
-    readback = { 'workbookId' => 'w', 'document' => { 'pages' => [{ 'id' => 'p1' }] } }
-    assert_equal [{ 'id' => 'p1' }], Sigma::CodeRep.document(readback)['pages']
+    readback = {
+      'workbookId' => 'w',
+      'document' => {
+        'pages' => [{ 'id' => 'p1', 'name' => 'Overview' }],
+        'elements' => [{ 'id' => 'e1', 'kind' => 'bar-chart' }],
+        'layout' => '<Page id="p1"><Element elementId="e1"/></Page>'
+      }
+    }
+    assert_equal [{ 'id' => 'p1', 'name' => 'Overview' }],
+                 Sigma::CodeRep.document(readback)['pages']
+    element, page = Sigma::CodeRep.workbook_elements_with_pages(readback).first
+    assert_equal 'e1', element['id']
+    assert_equal 'Overview', page['name']
   end
 
   def test_workbook_post_body_is_nested
     doc  = { 'schemaVersion' => 1, 'pages' => [], 'kind' => 'workbook' }
     body = Sigma::CodeRep.wrap(doc, extra: { 'name' => 'n', 'folderId' => 'f' })
-    assert_equal doc, body['document']
+    assert_equal doc.merge('elements' => []), body['document']
     refute body.key?('pages'), 'pages must not remain top-level'
   end
 
@@ -116,6 +127,10 @@ class TestPostAndReadback < Minitest::Test
     src = File.read(File.join(__dir__, '..', 'post-and-readback.rb'))
     assert_match(/Sigma::CodeRep\.(document|wrap|metadata)/, src,
                  'post-and-readback.rb must call Sigma::CodeRep for its workbook branch')
+    assert_match(/Sigma::CodeRep\.workbook_elements_with_pages/, src,
+                 'readback summary must join flat elements to metadata-only pages via layout')
+    refute_match(/\(p\['elements'\] \|\| \[\]\)/, src,
+                 'workbook readback must not look for removed pages[].elements nesting')
   end
 
   # The property the test above does NOT protect: that a CodeRep call site
