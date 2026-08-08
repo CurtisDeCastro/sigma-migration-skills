@@ -1,13 +1,13 @@
 # sigma-authoring — vendored from `twells89/sigma-skills`
 
-The skills under `skills/` (`sigma-workbooks`, `sigma-data-models`,
+The skills under `skills/` (`sigma-api`, `sigma-workbooks`, `sigma-data-models`,
 `custom-sql-to-data-model`) are **vendored copies** of the canonical
 `twells89/sigma-skills` repo. They live here so the migration converters'
 hard dependency on `sigma-workbooks` (the canonical Sigma spec reference) ships
 in the **same marketplace** — installing any converter, install this too.
 
 - **Source of truth:** https://github.com/twells89/sigma-skills (edit there)
-- **Vendored at:** sigma-skills `main` @ `7d6da64` (2026-08-07)
+- **Vendored at:** sigma-skills `cursor/workbook-code-release-2e8c` @ `22eda6f` (2026-08-08)
 
 ## Refresh
 
@@ -15,7 +15,7 @@ Re-vendor when the canonical skills change:
 
 ```sh
 SRC=/path/to/sigma-skills    # a fresh clone of twells89/sigma-skills
-for s in sigma-workbooks sigma-data-models custom-sql-to-data-model; do
+for s in sigma-api sigma-workbooks sigma-data-models custom-sql-to-data-model; do
   rm -rf "plugins/sigma-authoring/skills/$s"
   cp -R "$SRC/$s" "plugins/sigma-authoring/skills/$s"
 done
@@ -24,7 +24,9 @@ done
 # shared files (scripts/doctor.{sh,ps1}, scripts/bootstrap.{sh,ps1},
 # refs/environment.md, the token scripts, …) that do NOT exist upstream — the
 # rm -rf above deletes them. Re-fan them from shared/manifest.json and verify,
-# or the shared-lib drift gate (tools/check-shared.rb in CI) fails:
+# or the shared-lib drift gate (tools/check-shared.rb in CI) fails. In
+# particular, retain this repo's canonical shared code_rep.{rb,py,mjs} copies:
+# upstream's per-skill copies are not authoritative in this migration repo.
 ruby tools/sync-shared.rb        # restore the fanned shared copies the cp -R dropped
 ruby tools/check-shared.rb       # MUST be green before committing
 
@@ -36,8 +38,8 @@ ruby tools/check-shared.rb       # MUST be green before committing
 # have silently DELETED ~33 lines of Windows/shell-neutral token guidance from
 # custom-sql-to-data-model's four variants. Regenerate from the canonical
 # SKILL.md instead of shipping what upstream had:
-ruby tools/gen-agent-variants.rb --all   # regenerate all 16 from SKILL.md
-ruby tools/check-agent-variants.rb       # MUST be green (16/16, drift 0)
+ruby tools/gen-agent-variants.rb --all   # regenerate all 20 from SKILL.md
+ruby tools/check-agent-variants.rb       # MUST be green (20/20, drift 0)
 
 # EXECUTE THE VENDORED RUBY. Nothing else here does. sync-shared.rb and
 # check-shared.rb compare SHA1s; gen-agent-variants.rb reads markdown; and
