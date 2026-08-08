@@ -1,6 +1,6 @@
 # Migration Runtime Contract
 
-**Status:** proposed · **Owner:** tj@sigmacomputing.com · **Date:** 2026-06-26
+**Status:** proposed (rollout tracked in [`structure-roadmap.md`](structure-roadmap.md) §R1) · **Date:** 2026-06-26
 
 ## Problem
 
