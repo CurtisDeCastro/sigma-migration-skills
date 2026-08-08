@@ -254,7 +254,21 @@ HEAD="${2:?usage: check-converter-provenance.sh <BASE> <HEAD>}"
 changed="$(git diff --name-only "$BASE" "$HEAD")" || { echo "git diff $BASE..$HEAD failed — cannot check provenance pairing"; exit 1; }
 fail=0
 
-changed_has() { printf '%s\n' "$changed" | grep -qxF "$1"; }
+# Subprocess-free membership test (#681): the old `printf ... | grep -qxF`
+# form re-piped the full $changed list through grep on every lookup. grep -q
+# exits the instant it finds a match, closing its end of the pipe; on a long
+# list printf/the shell is often still mid-write when that happens, the next
+# write() gets SIGPIPE, and `set -uo pipefail` (above) turns that signal into
+# a false "not found" — non-deterministic, and it only fires once the list is
+# long enough that the writer outlives the reader (latent on small diffs,
+# firing on the large ranges #680's force-push bug produces). A case/glob
+# match against the newline-delimited list needs no subprocess and can't race.
+changed_has() {
+  case $'\n'"$changed"$'\n' in
+    *$'\n'"$1"$'\n'*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 at_head() { git cat-file -e "$HEAD:$1" 2>/dev/null; }
 prov_kind() { # reads the HEAD copy; anything unparsable counts as vendored
   git show "$HEAD:$1" 2>/dev/null | python3 -c '
