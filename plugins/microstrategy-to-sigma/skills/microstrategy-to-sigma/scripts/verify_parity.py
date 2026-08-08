@@ -111,15 +111,13 @@ def main():
     # `document` key (live since 2026-08); a bare spec["pages"] read here was
     # always a KeyError, so the report-name -> element-id map below never
     # even ran.
-    spec = {**code_rep.metadata(raw_spec), **code_rep.document(raw_spec)}
     el_by_name = {}
-    for pg in spec["pages"]:
-        for el in pg["elements"]:
-            # skip layout containers / header text / controls (no name or
-            # not a queryable element)
-            if el.get("name") and el.get("kind") not in ("container", "text",
-                                                         "control"):
-                el_by_name[el["name"]] = el["id"]
+    for el in code_rep.workbook_elements(raw_spec):
+        # skip layout containers / header text / controls (no name or
+        # not a queryable element)
+        if el.get("name") and el.get("kind") not in ("container", "text",
+                                                     "control"):
+            el_by_name[el["name"]] = el["id"]
 
     os.makedirs(args.save_csv_dir, exist_ok=True)
     lines = ["# MicroStrategy -> Sigma Parity Report", "",

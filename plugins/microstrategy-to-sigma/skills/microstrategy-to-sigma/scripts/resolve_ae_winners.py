@@ -60,24 +60,33 @@ def clean_groups_via_sigma(b, args, report, quirk_aid, parent_aids):
     """Run the clean per-(parents, key) aggregation on the warehouse through a
     temporary Sigma workbook (sql element) and return the rows."""
     sql = b.build_clean_group_sql(args.database, report)
-    spec = {
-        "name": "zz-ae-resolver-probe",
-        "folderId": args.folder_id,
+    element = {
+        "id": "t1", "kind": "table", "name": "Probe",
+        "source": {"kind": "sql", "connectionId": args.connection_id,
+                   "statement": sql},
+        "columns": [
+            {"id": f"c{i}", "name": alias,
+             "formula": f"[Custom SQL/{alias}]"}
+            for i, alias in enumerate(b.clean_group_aliases(report))
+        ],
+    }
+    document = {
         "schemaVersion": 1,
-        "pages": [{"id": "p1", "name": "P", "elements": [{
-            "id": "t1", "kind": "table", "name": "Probe",
-            "source": {"kind": "sql", "connectionId": args.connection_id,
-                       "statement": sql},
-            "columns": [
-                {"id": f"c{i}", "name": alias,
-                 "formula": f"[Custom SQL/{alias}]"}
-                for i, alias in enumerate(b.clean_group_aliases(report))
-            ],
-        }]}],
+        "kind": "workbook",
+        "pages": [{"id": "p1", "name": "P"}],
+        "elements": [element],
+        "layout": ('<?xml version="1.0" encoding="utf-8"?>\n'
+                   '<Page type="grid" gridTemplateColumns="repeat(24, 1fr)" '
+                   'gridTemplateRows="auto" id="p1">\n'
+                   '  <Element elementId="t1" gridColumn="1 / 25" '
+                   'gridRow="1 / 13"/>\n</Page>'),
     }
     # Workbook code-rep POSTs require the nested `document` envelope (verified
     # live 2026-08-03/04: a flat body 400s) — wrap the throwaway probe spec.
-    post_body = code_rep.wrap(code_rep.document(spec), code_rep.metadata(spec))
+    post_body = code_rep.wrap(
+        document,
+        {"name": "zz-ae-resolver-probe", "folderId": args.folder_id},
+    )
     st, out = api("POST", "/v2/workbooks/spec", post_body)
     if st >= 300:
         raise SystemExit(f"probe workbook POST failed {st}: {out[:500]}")
@@ -90,8 +99,10 @@ def clean_groups_via_sigma(b, args, report, quirk_aid, parent_aids):
         # (live since 2026-08); a bare ["pages"] index here was always a
         # KeyError, so the probe's remapped element id was never recovered.
         raw_readback = yaml.safe_load(out)
-        readback = {**code_rep.metadata(raw_readback), **code_rep.document(raw_readback)}
-        eid = readback["pages"][0]["elements"][0]["id"]
+        elements = code_rep.workbook_elements(raw_readback)
+        if not elements:
+            raise SystemExit("probe workbook readback contains no flat document elements")
+        eid = elements[0]["id"]
         csv_text = export_element(wb_id, eid)
     finally:
         api("DELETE", f"/v2/files/{wb_id}")
