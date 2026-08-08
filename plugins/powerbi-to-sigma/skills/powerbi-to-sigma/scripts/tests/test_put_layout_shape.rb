@@ -25,7 +25,7 @@ class TestPutLayoutShape < Minitest::Test
 
   def test_put_body_is_wrapped
     doc = { 'pages' => [], 'layout' => '<Layout/>' }
-    assert_equal doc, Sigma::CodeRep.wrap(doc)['document']
+    assert_equal doc.merge('elements' => []), Sigma::CodeRep.wrap(doc)['document']
   end
 
   # Real regression signal: the two tests above only prove the already-shipped

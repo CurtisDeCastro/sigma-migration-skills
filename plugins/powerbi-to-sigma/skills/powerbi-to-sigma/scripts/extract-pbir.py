@@ -267,6 +267,36 @@ def _color_literal(prop):
     return _color_literal(solid) if solid else None
 
 
+def _background_style(owner):
+    """Power BI visual/page background -> released Sigma style fields.
+
+    PBIR has used both `background` and `general` object buckets. Preserve a
+    visible solid fill and map 100% transparency to Sigma's transparent token;
+    dynamic/theme expressions without a literal remain unset rather than being
+    guessed.
+    """
+    objects = (owner or {}).get("objects", {}) or {}
+    for key in ("background", "general"):
+        for item in objects.get(key, []) or []:
+            props = (item or {}).get("properties", {}) or {}
+            show = _literal(props.get("show", {}))
+            if str(show).lower() == "false":
+                continue
+            color = (_color_literal(props.get("color", {})) or
+                     _color_literal(props.get("fill", {})) or
+                     _color_literal(props.get("background", {})))
+            transparency = _literal(props.get("transparency", {}))
+            if transparency is not None:
+                try:
+                    if float(transparency) >= 100:
+                        color = "transparent"
+                except (TypeError, ValueError):
+                    pass
+            if color:
+                return {"backgroundColor": color}
+    return None
+
+
 # bead (A) reference lines: PBI analytics-pane lines live in the visual's
 # `objects` under axis-scoped keys. Each is a list of instances; each instance's
 # `properties` carries {value, displayName, lineColor, show, ...}. A `value`
@@ -702,6 +732,8 @@ def extract(pbir_dir):
                 # style fidelity §6: PBI card callout alignment -> KPI layout.anchor
                 # (None = centered default).
                 "value_align": _card_alignment(visual),
+                # released element style surface: preserve literal PBI fills.
+                "style": _background_style(visual),
                 # table/matrix conditional formatting (background/font color-scales,
                 # rules, field-value measures, data bars) -> Sigma conditionalFormats.
                 "conditional_formats": _conditional_formats(visual, vtype),
@@ -727,6 +759,7 @@ def extract(pbir_dir):
             "page_title": page.get("displayName", pname),
             "page_w": page.get("width", 1280),
             "page_h": page.get("height", 720),
+            "style": _background_style(page),
             "visuals": visuals,
             "interactions": interactions,
             # page-level Filters-pane filters -> Sigma page/master filters (beads-sigma-3tx6)

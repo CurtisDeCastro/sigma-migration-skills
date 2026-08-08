@@ -29,7 +29,7 @@ class TestScoutValidateShape(unittest.TestCase):
     def test_wrap_nests_document(self):
         doc = {"schemaVersion": 1, "pages": []}
         body = code_rep.wrap(doc, {"name": "n", "folderId": "f"})
-        self.assertEqual(body["document"], doc)
+        self.assertEqual(body["document"], {**doc, "elements": []})
         self.assertNotIn("pages", body)
 
     def test_document_resolves_nested_readback(self):

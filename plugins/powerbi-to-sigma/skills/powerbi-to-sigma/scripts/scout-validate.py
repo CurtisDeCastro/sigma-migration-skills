@@ -113,8 +113,16 @@ def main():
     else:
         test = {"id":"scout","kind":"table","name":"scout","source":{"elementId":"m","kind":"table"},
                 "columns":[{"id":"sc","formula":a.formula,"name":"scout_test"}]}
-    doc = {"schemaVersion":1,
-           "pages":[{"id":"d","name":"Data","elements":[master]},{"id":"t","name":"Test","elements":[test]}]}
+    layout = ('<?xml version="1.0" encoding="utf-8"?>\n'
+              '<Page id="d" type="grid" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto">\n'
+              '  <LayoutElement elementId="m" gridColumn="1 / 25" gridRow="1 / 11"/>\n'
+              '</Page>\n'
+              '<Page id="t" type="grid" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto">\n'
+              '  <LayoutElement elementId="scout" gridColumn="1 / 25" gridRow="1 / 11"/>\n'
+              '</Page>')
+    doc = {"schemaVersion":1, "kind":"workbook",
+           "pages":[{"id":"d","name":"Data","visibility":"hidden"},{"id":"t","name":"Test"}],
+           "elements":[master, test], "layout":layout}
     # Live POST /v2/workbooks/spec now REJECTS the old flat body with a 400
     # (verified 2026-08-03/04) — every non-metadata field must nest under a
     # top-level `document` key. code_rep.wrap keeps the metadata (name,

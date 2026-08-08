@@ -627,11 +627,11 @@ end
 # recording an approximation for e.g. a bare `treemap` instead of silently
 # recording none. Anything NOT on this list, for such a legacy record, is
 # treated as approximated — the original behavior. beads-sigma-kvza.
-NATIVE_VISUAL_TYPES = %w[card multiRowCard kpi textbox actionButton lineChart areaChart
+NATIVE_VISUAL_TYPES = %w[card multiRowCard kpi gauge textbox actionButton pageNavigator lineChart areaChart
                          stackedAreaChart barChart clusteredBarChart stackedBarChart columnChart
                          clusteredColumnChart stackedColumnChart hundredPercentStackedColumnChart
                          hundredPercentStackedBarChart lineClusteredColumnComboChart
-                         lineStackedColumnComboChart pieChart donutChart scatterChart tableEx
+                         lineStackedColumnComboChart waterfallChart pieChart donutChart scatterChart tableEx
                          pivotTable matrix slicer map filledMap shapeMap azureMap image].freeze
 
 # PBI kind token -> Sigma element kind. DERIVED from refs/catalogs/viz-kind.json
@@ -803,6 +803,8 @@ end
 KIND_LABEL = {
   'kpi-chart' => 'KPI', 'bar-chart' => 'Bar Chart', 'line-chart' => 'Line Chart',
   'area-chart' => 'Area Chart', 'combo-chart' => 'Combo Chart',
+  'waterfall-chart' => 'Waterfall Chart', 'progress' => 'Progress',
+  'navigation' => 'Page Navigation',
   'scatter-chart' => 'Scatter Plot', 'pie-chart' => 'Pie Chart',
   'donut-chart' => 'Donut Chart', 'table' => 'Table', 'pivot-table' => 'Pivot Table'
 }.freeze
@@ -1458,6 +1460,14 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
     return { 'id' => eid, 'kind' => 'text', 'body' => body.empty? ? ' ' : body }
   end
 
+  if kind == 'navigation'
+    # Power BI's pageNavigator is an auto-maintained page tab strip. Sigma's
+    # native auto navigation has the same semantics and follows page additions
+    # without hard-coded destinations. Bookmark navigators remain an explicit
+    # catalog gap: bookmarks carry saved visual/filter state, not just pages.
+    return { 'id' => eid, 'kind' => 'navigation', 'mode' => 'auto' }
+  end
+
   if kind == 'image'
     url = ($image_map || {})[rec['resource']]
     unless url
@@ -1502,7 +1512,7 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
   # `source: Invalid value: undefined`. Skip it loudly rather than ship a broken
   # element. (control/text/image are handled elsewhere and legitimately carry no
   # value binding, so they are NOT in this set.)
-  value_driven = %w[kpi-chart bar-chart line-chart area-chart combo-chart
+  value_driven = %w[kpi-chart progress waterfall-chart bar-chart line-chart area-chart combo-chart
                     scatter-chart pie-chart donut-chart region-map point-map
                     table pivot-table].include?(kind)
   if value_driven
@@ -1742,6 +1752,25 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
                         '_leaf' => leaf,
                         '_wired_ids' => filters.map { |f| f.dig('source', 'elementId') },
                         'scope' => [], 'excluded' => [] }
+  when 'progress'
+    # A PBI gauge is a value against an optional min/max/target. Native Sigma
+    # progress is the closest released construct: ring preserves the gauge
+    # affordance and mode:value avoids the percent control's 0..1 requirement.
+    value_qr = (b['Values'] || b['Y'] || []).first
+    min_qr = (b['MinValue'] || b['Minimum'] || []).first
+    max_qr = (b['MaxValue'] || b['Maximum'] || []).first
+    target_qr = (b['TargetValue'] || b['Target'] || []).first
+    value_fs = field_spec(value_qr, fields, master)
+    el.delete('source') # progress owns formula strings; it is not a sourced chart
+    el['mode'] = 'value'
+    el['shape'] = 'ring'
+    el['value'] = measure_formula(value_fs)
+    el['min'] = min_qr ? measure_formula(field_spec(min_qr, fields, master)) : '0'
+    if max_qr
+      el['max'] = measure_formula(field_spec(max_qr, fields, master))
+    elsif target_qr
+      el['max'] = measure_formula(field_spec(target_qr, fields, master))
+    end
   when 'kpi-chart'
     # A single-value PBI card -> kpi-chart. A multiRowCard (multiple Values) ->
     # ONE kpi-chart tile per measure (bead x81l: a kpi-chart renders only
@@ -1829,7 +1858,7 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
       cols << col
       el['size'] = { 'id' => scid }
     end
-  when 'bar-chart', 'line-chart', 'area-chart'
+  when 'bar-chart', 'line-chart', 'area-chart', 'waterfall-chart'
     # b['Group'] is the treemap/funnel category role (1zh9) — alias it to the dim
     # so a treemap-as-bar fallback keeps its category instead of emitting '[]'.
     dim_role = (b['Category'] || b['Axis'] || b['X'] || b['Group'] || [])
@@ -1894,6 +1923,15 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
     # "normalized" = scaled to 100%). extract-pbir already maps PBI 100%-stacked
     # -> "normalized", so pass it through verbatim (bead pi8v).
     el['stacking'] = rec['stacking'] if %w[bar-chart area-chart].include?(kind) && rec['stacking']
+    if kind == 'waterfall-chart'
+      # Power BI waterfall values are deltas accumulated from zero. Sigma's
+      # native shape expresses that directly; an optional Legend/Breakdown role
+      # maps to splitBy instead of being discarded as it was in the bar fallback.
+      el['waterfallShape'] = { 'calculation' => 'sum', 'connectorLine' => 'shown' }
+      el['startPoint'] = { 'value' => { 'type' => 'constant', 'value' => 0 },
+                           'visibility' => 'hidden' }
+      el['grouping'] = 'stacked'
+    end
     # bead n9u9: honor the PBI per-visual data-label signal (objects.labels show)
     # when the extractor provided one: true -> shown, false -> omit (Sigma default
     # is off). Verified `dataLabel:{labels:"shown"}` persists + renders for bar AND
@@ -1908,12 +1946,16 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
       scid = "#{eid}-c"
       cols << { 'id' => scid, 'formula' => sfs['ref'], 'name' => qr_leaf(series, 'Series') }
       qr_cids[series] = scid
-      el['color'] = { 'by' => 'category', 'column' => scid }
+      if kind == 'waterfall-chart'
+        el['splitBy'] = { 'id' => scid }
+      else
+        el['color'] = { 'by' => 'category', 'column' => scid }
+      end
     else
       # bead (B) by-measure color: only when PBI did NOT bind a categorical
       # Series/Legend (that wins — a column can't be on color twice).
       cc = measure_color_channel(rec, fields, master, vfmts, eid, cols, ycids)
-      el['color'] = cc if cc
+      el['color'] = cc if cc && kind != 'waterfall-chart'
     end
     # bead (A) reference lines / trend line -> Sigma refMarks / trendlines.
     rms = build_ref_marks(rec)
@@ -2207,13 +2249,16 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
     el['conditionalFormats'] = cf if cf
   end
 
-  # Controls reference a master column; they carry no columns array of their own.
-  el['columns'] = cols unless el['kind'] == 'control'
+  # Controls and progress reference existing formulas/columns; they carry no
+  # columns collection of their own.
+  owns_columns = !%w[control progress navigation page-break].include?(el['kind'])
+  el['columns'] = cols if owns_columns
+  el['style'] = rec['style'] if rec['style'].is_a?(Hash) && !rec['style'].empty?
   # Power BI "Small multiples" field well -> Sigma native `trellis` (detection-
   # gated: no SmallMultiples role -> no-op, byte-identical build). Runs after the
   # columns are attached so the facet joins a real columns[] and before
   # drop_unresolved_columns! so the (reachable) facet column is retained.
-  apply_small_multiples!(el, rec, fields, master, eid, qr_cids) unless el['kind'] == 'control'
+  apply_small_multiples!(el, rec, fields, master, eid, qr_cids) if owns_columns
   # Style fidelity (refs/style-fidelity.md §5-7) — applied AFTER columns are
   # attached so the measure-column formats exist to rewrite:
   #   §5 number abbreviation — KPI/chart measure columns render compact ("$126k")
@@ -2224,7 +2269,7 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
   PbiStyle.presentation_table!(el, el['kind'])
   # bead miu7: never ship an unresolved literal-ref column (type=error). Drop it
   # and prune its references — the tile degrades honestly into coverage instead.
-  drop_unresolved_columns!(el, rec, kind) unless el['kind'] == 'control'
+  drop_unresolved_columns!(el, rec, kind) if owns_columns
   # FAIL-LOUD binding guard (report-build hardening): after the drop pass, a
   # chart/KPI that lost its essential binding (an xAxis-less bar with a yAxis
   # measure aggregated into one giant bar; a KPI with no value; a chart with no
@@ -2232,7 +2277,7 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
   # so the gap surfaces in the per-report summary instead of a mystery empty
   # tile. This is the safety net behind page-base sourcing (which normally keeps
   # every raw column on the one base so bindings resolve).
-  check_binding_complete!(el, rec) unless el['kind'] == 'control'
+  check_binding_complete!(el, rec) if owns_columns
   # Track 3b: queryRef -> built column id, so a visual filter can resolve its
   # target to a column this element actually projects (element filters reference
   # the element's own columns). Transient — stripped before the spec is written.
@@ -2248,7 +2293,7 @@ def check_binding_complete!(el, rec)
   name = el['name'].is_a?(Hash) ? el['name']['text'] : el['name'].to_s
   miss = nil
   case kind
-  when 'bar-chart', 'line-chart', 'area-chart', 'combo-chart'
+  when 'bar-chart', 'line-chart', 'area-chart', 'combo-chart', 'waterfall-chart'
     ycount = Array(el.dig('yAxis', 'columnIds')).length
     miss = 'lost its category/dimension (xAxis) — it will aggregate every row into one mark' if el['xAxis'].nil? || el.dig('xAxis', 'columnId').nil?
     miss = 'has no measure on its yAxis' if ycount.zero?
@@ -2372,7 +2417,7 @@ content_pages = signals['pages'].map do |pg|
   # data visuals but NONE built (every measure/formula failed to bind), do not
   # ship a silently-blank page — warn + drop a visible annotation element so the
   # gap is obvious in the workbook, and surface it in coverage.
-  data_kinds = %w[kpi-chart bar-chart line-chart area-chart combo-chart scatter-chart
+  data_kinds = %w[kpi-chart progress waterfall-chart bar-chart line-chart area-chart combo-chart scatter-chart
                   pie-chart donut-chart region-map point-map table pivot-table]
   built_data = els.count { |e| data_kinds.include?(e['kind']) }
   src_data = (pg['visuals'] || []).count do |v|
@@ -2454,7 +2499,7 @@ _gate_master_ids = masters.values.map { |m| m['id'] }.compact
 _gate_master_by_name = data_elements.each_with_object({}) do |de, h|
   h[de['name']] = de['id'] if _gate_master_ids.include?(de['id']) && de['name']
 end
-_gate_data_kinds = %w[kpi-chart bar-chart line-chart area-chart combo-chart scatter-chart
+_gate_data_kinds = %w[kpi-chart waterfall-chart bar-chart line-chart area-chart combo-chart scatter-chart
                       pie-chart donut-chart region-map point-map table pivot-table].freeze
 content_pages.each do |pg|
   pg['elements'].each do |el|
@@ -2582,6 +2627,14 @@ pages_xml = signals['pages'].map do |pg|
   if page_spec
     built_ids = page_spec['elements'].map { |e| e['id'] }
     items = items.select { |i| built_ids.include?(i[0]) }
+    # Builder-generated elements (not backed by a source visual), such as the
+    # fail-loud empty-page placeholder, still need one authoritative placement.
+    # Put them below the source-derived tiles; later layout modes may reflow.
+    synthetic_ids = built_ids - items.map(&:first)
+    next_row = items.map { |i| i[4] }.max || 1
+    synthetic_ids.each_with_index do |id, i|
+      items << [id, 1, 25, next_row + i * 4, next_row + (i + 1) * 4]
+    end
   end
   next nil if items.empty?
 
@@ -2609,7 +2662,7 @@ pages_xml = signals['pages'].map do |pg|
       if hdr_text_id.nil? && txt && txt != '' && r['h'].to_f >= 40 && r['y'].to_f < 120
         hdr_text_id = it[0]
         drop << it[0]
-      elsif r.nil? || r['h'].to_f < 60 || txt == ''
+      elsif r && (r['h'].to_f < 60 || txt == '')
         warn "[build-workbook] clean layout: decorative textbox '#{it[0]}' dropped (#{txt.to_s[0, 30].inspect})."
         page_spec['elements'] = page_spec['elements'].reject { |e| e['id'] == it[0] } if page_spec
         drop << it[0]
@@ -2808,7 +2861,14 @@ pages_xml = signals['pages'].map do |pg|
   page_spec['elements'] = page_spec['elements'] + extra if page_spec
   xml
 end.compact.join("\n")
-layout_xml = %(<?xml version="1.0" encoding="utf-8"?>\n#{pages_xml}\n)
+# Hidden source/helper elements are still workbook elements and therefore must
+# be placed exactly once. Keep them on a hidden Data page; layout is the sole
+# page-membership authority in the released workbook code representation.
+data_layout = data_elements.each_with_index.map do |el, i|
+  SigmaLayout.le(el['id'], 1, 25, i * 10 + 1, i * 10 + 11)
+end.join("\n")
+data_page_xml = SigmaLayout.page_xml('page-data', data_layout)
+layout_xml = %(<?xml version="1.0" encoding="utf-8"?>\n#{data_page_xml}\n#{pages_xml}\n)
 
 # Strip transient build-only keys (e.g. Track 3b's `_qr_cids`) from every element
 # before the spec is written — the API rejects unknown `_`-prefixed properties.
@@ -2824,28 +2884,67 @@ layout_xml = %(<?xml version="1.0" encoding="utf-8"?>\n#{pages_xml}\n)
   end
 end
 
+page_background = signals['pages'].filter_map { |pg| pg.dig('style', 'backgroundColor') }.first
+theme_overrides = PbiTheme.overrides($pbi_theme).merge(
+  'space' => { 'unit' => 'small', 'showElementPadding' => 'hidden' }
+)
+if page_background && page_background != 'transparent'
+  theme_overrides['colorOverrides'] =
+    (theme_overrides['colorOverrides'] || {}).merge('backgroundCanvas' => page_background)
+end
+
+document = {
+  'schemaVersion' => 1,
+  'kind' => 'workbook',
+  # Workbook pages are metadata only. Every element is document-global and its
+  # page/container/tab membership is expressed exactly once by layout XML.
+  'pages' => [{ 'id' => 'page-data', 'name' => 'Data', 'visibility' => 'hidden' }] +
+             content_pages.map { |p| p.reject { |k, _| k == 'elements' } },
+  'elements' => data_elements + content_pages.flat_map { |p| p['elements'] || [] },
+  'layout' => layout_xml,
+  # Panels/overlays are document collections. Preserve normalized source
+  # records when an extractor or caller supplies them; never sweep them into
+  # the outer metadata envelope.
+  'panels' => Array(signals['panels']),
+  'overlays' => Array(signals['overlays']),
+  # Style fidelity: reproduce the PBI report's look — card chrome, subtle borders,
+  # categorical palette, and dense canvas spacing.
+  'settings' => {
+    'theme' => {
+      'name' => 'Light',
+      'overrides' => theme_overrides
+    },
+    # PBI page tabs/pageNavigator semantics map to Sigma workbook navigation.
+    'navigation' => { 'pageTabsInViewMode' => 'shown' }
+  }
+}
+
+# Layout is authoritative and every flat element must occur exactly once,
+# whether as a leaf or a container. Abort before writing an invalid artifact:
+# duplicate placement makes tab/container ownership ambiguous; an unplaced
+# element is invisible despite being present in document.elements.
+placed_ids = layout_xml.scan(/\belementId="([^"]+)"/).flatten
+element_ids = document['elements'].map { |el| el['id'] }
+duplicate_ids = placed_ids.group_by(&:itself).select { |_id, rows| rows.length > 1 }.keys
+missing_ids = element_ids - placed_ids
+unknown_ids = placed_ids - element_ids
+unless duplicate_ids.empty? && missing_ids.empty? && unknown_ids.empty? &&
+       element_ids.compact.uniq.length == element_ids.length
+  abort "[build-workbook] FATAL invalid authoritative layout: duplicate placements=#{duplicate_ids.inspect}; " \
+        "unplaced elements=#{missing_ids.inspect}; unknown layout ids=#{unknown_ids.inspect}; " \
+        "duplicate element ids=#{element_ids.group_by(&:itself).select { |_id, rows| rows.length > 1 }.keys.inspect}"
+end
+
 spec = {
   'name' => opts[:name] || opts[:source_title] ||
             signals.dig('pages', 0, 'page_title') || 'Power BI Import',
-  'schemaVersion' => 1,
-  'pages' => [{ 'id' => 'page-data', 'name' => 'Data', 'elements' => data_elements }] + content_pages,
-  # bead 16i: embed the layout so the very first POST does not trigger Sigma's
-  # single-column auto-layout (which would wipe put-layout.rb's grid).
-  'layout' => layout_xml,
-  # Style fidelity: reproduce the PBI report's look — card chrome, subtle borders,
-  # and the source theme's categorical palette (drives donut/pie + multi-series
-  # colors). Stacked on the built-in Light theme. See lib/pbi_theme.rb.
-  # Live since 2026-08: themeName/themeOverrides moved to
-  # document.settings.theme.{name,overrides} (shared/lib/code_rep.rb DOC_KEYS)
-  # — a flat top-level themeName/themeOverrides is invalid on write and gets
-  # silently dropped by the code-rep wrapper.
-  'settings' => { 'theme' => { 'name' => 'Light', 'overrides' => PbiTheme.overrides($pbi_theme) } }
+  'document' => document
 }
 spec['folderId'] = opts[:folder] if opts[:folder]
 
 File.write(opts[:out], JSON.pretty_generate(spec))
 warn "[build-workbook] wrote #{opts[:out]} (#{data_elements.size} master(s), " \
-     "#{content_pages.sum { |p| p['elements'].size }} chart element(s); layout embedded)"
+     "#{content_pages.sum { |p| p['elements'].size }} content element(s); flat document + authoritative layout)"
 
 # Native-trellis round-trip guard sidecar — written ONLY when a small-multiples
 # visual actually emitted a native trellis (a workbook with none stays byte-

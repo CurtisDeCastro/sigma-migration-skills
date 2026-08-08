@@ -6,7 +6,7 @@ Every documented source construct maps to a real, current Sigma target or a loud
 
 **`sigma_verified` legend:** ✅ y = the mapped Sigma target resolved at **query time** in a live migration (no `type=error` column) on the date shown; 🟡 n = target is documented but not yet query-verified.
 
-**Coverage:** 43 documented constructs across 5 dimensions; 3 live-verified.
+**Coverage:** 46 documented constructs across 5 dimensions; 3 live-verified.
 
 ## Visualization / chart kind
 
@@ -17,9 +17,13 @@ Authoritative source: <https://learn.microsoft.com/en-us/power-bi/visuals/power-
 | construct | doc ref | Sigma target | sigma_verified | on-unmapped |
 |---|---|---|---|---|
 | `kpi` | [doc](https://learn.microsoft.com/en-us/power-bi/visuals/power-bi-visualization-kpi) | `kpi-chart` | ✅ y · 2026-07-13 | n/a |
-| | | | | _PBI card / multiRowCard / kpi / gauge -> Sigma kpi-chart. gauge and kpiMatrix have no native Sigma kind (approximated -> approximate_types below); card/multiRowCard/kpi/cardVisual ARE native (approximate:false). A multiRowCard fans out to one kpi-chart per measure in the builder. `cardVisual` is the MODERN card visual type (PBI 2023+); it was absent from the old map and silently became a bar-chart on real customer files._ |
+| | | | | _PBI card / multiRowCard / kpi -> Sigma kpi-chart. kpiMatrix remains an approximation; card/multiRowCard/kpi/cardVisual ARE native (approximate:false). A multiRowCard fans out to one kpi-chart per measure in the builder. `cardVisual` is the MODERN card visual type (PBI 2023+); it was absent from the old map and silently became a bar-chart on real customer files._ |
+| `progress` | [doc](https://learn.microsoft.com/en-us/power-bi/visuals/power-bi-visualization-radial-gauge-charts) | `progress` | 🟡 n | n/a |
+| | | | | _PBI gauge -> native Sigma progress with shape:ring and mode:value. Value and optional min/max/target roles become progress formula strings. Sigma's ring is circular rather than Power BI's semicircle, so shape fidelity still requires visual review, but this is no longer a KPI fallback._ |
+| `waterfall` | [doc](https://learn.microsoft.com/en-us/power-bi/visuals/power-bi-visualization-waterfall-charts) | `waterfall-chart` | 🟡 n | n/a |
+| | | | | _Native mapping. Category -> xAxis, values -> yAxis, and Power BI Breakdown/Legend -> Sigma splitBy. Emits cumulative sum shape with connector lines and a hidden zero start point._ |
 | `bar` | [doc](https://learn.microsoft.com/en-us/power-bi/visuals/power-bi-visualization-types-for-reports-and-q-and-a) | `bar-chart` | ✅ y · 2026-07-13 | n/a |
-| | | | | _*Bar* families render horizontal (orientation:horizontal), *Column* families vertical (omit orientation). Stacking none\|stacked\|normalized from the type name. hundredPercentStackedBarChart is now mapped explicitly (it previously fell through the Python `VISUAL_KIND.get(vt,'bar')` default). waterfall/funnel/treemap/ribbon/histogram are DATA-PRESERVING bar approximations -> approximate:true, so they are reported as approximated, not as losses._ |
+| | | | | _*Bar* families render horizontal (orientation:horizontal), *Column* families vertical (omit orientation). Stacking none\|stacked\|normalized from the type name. hundredPercentStackedBarChart is now mapped explicitly (it previously fell through the Python `VISUAL_KIND.get(vt,'bar')` default). funnel/treemap/ribbon/histogram are DATA-PRESERVING bar approximations -> approximate:true, so they are reported as approximated, not as losses. Waterfall has its own native row._ |
 | `line` | [doc](https://learn.microsoft.com/en-us/power-bi/visuals/power-bi-visualization-types-for-reports-and-q-and-a) | `line-chart` | 🟡 n | n/a |
 | | | | | _Defaults to a SINGLE series unless a Series/Legend role is bound (bead c07)._ |
 | `area` | [doc](https://learn.microsoft.com/en-us/power-bi/visuals/power-bi-visualization-basic-area-chart) | `area-chart` | 🟡 n | n/a |
@@ -31,8 +35,10 @@ Authoritative source: <https://learn.microsoft.com/en-us/power-bi/visuals/power-
 | `table` | [doc](https://learn.microsoft.com/en-us/power-bi/visuals/desktop-tables) | `table` | 🟡 n | n/a |
 | `pivot-table` | [doc](https://learn.microsoft.com/en-us/power-bi/visuals/desktop-matrix-visual) | `pivot-table` | 🟡 n | n/a |
 | | | | | _PBI matrix/tableEx show a bold Grand Total row by default -> Sigma pivot totals block._ |
+| `navigation` | [doc](https://learn.microsoft.com/en-us/power-bi/create-reports/button-navigators) | `navigation` | 🟡 n | n/a |
+| | | | | _Power BI page navigator -> native Sigma navigation mode:auto, which renders and maintains one tab per workbook page._ |
 | `text` | [doc](https://learn.microsoft.com/en-us/power-bi/visuals/power-bi-visualization-types-for-reports-and-q-and-a) | `text` | 🟡 n | n/a |
-| | | | | _Boxes >= ~60px tall render as an H2 heading; smaller boxes as plain body text._ |
+| | | | | _Boxes >= ~60px tall render as an H2 heading; smaller boxes as plain body text. bookmarkNavigator remains a text/explicit gap because a Power BI bookmark restores visual/filter state and cannot be represented by page-only auto navigation without extracting its destinations and state._ |
 | `control` | [doc](https://learn.microsoft.com/en-us/power-bi/visuals/power-bi-visualization-slicers) | `control` | 🟡 n | n/a |
 | | | | | _PBI slicer -> Sigma control. list vs date-range is decided in code (tmsl_date_column?); see control.json._ |
 | `map` | [doc](https://learn.microsoft.com/en-us/power-bi/visuals/power-bi-visualization-filled-maps-choropleths) | `map` | 🟡 n | n/a |
@@ -122,7 +128,7 @@ Authoritative source: <https://learn.microsoft.com/en-us/power-bi/developer/visu
 | `bullet-chart` | [doc](https://appsource.microsoft.com/en-us/product/power-bi-visuals/WA104380750) | `bar` | 🟡 n | warn+record-unsupported (NEVER coerce a custom visual to a chart) |
 | `gantt` | [doc](https://appsource.microsoft.com/en-us/product/power-bi-visuals/WA104380765) | `table` | 🟡 n | warn+record-unsupported (NEVER coerce a custom visual to a chart) |
 | `sankey-wordcloud-network` | [doc](https://learn.microsoft.com/en-us/power-bi/developer/visuals/power-bi-custom-visuals) | — (no Sigma equivalent) | 🟡 n | warn+record-unsupported (NEVER coerce a custom visual to a chart) |
-| | | | | _Grouped into one row because the guidance and the decision are identical for all of them._ |
+| | | | | _Grouped into one row because the guidance and the decision are identical for all of them. Keep box plots on this fallback even if another Sigma surface names box-chart; the workbook code representation does not publish it yet._ |
 | `infographic-cardbrowser` | [doc](https://appsource.microsoft.com/en-us/product/power-bi-visuals/WA104381044) | `kpi` | 🟡 n | warn+record-unsupported (NEVER coerce a custom visual to a chart) |
 | `calendar-heatmap` | [doc](https://appsource.microsoft.com/en-us/product/power-bi-visuals/WA200001930) | `pivot-table` | 🟡 n | warn+record-unsupported (NEVER coerce a custom visual to a chart) |
 

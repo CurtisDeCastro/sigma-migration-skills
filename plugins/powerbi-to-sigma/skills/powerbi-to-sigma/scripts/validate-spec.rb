@@ -15,6 +15,7 @@ require 'optparse'
 require 'set'
 $LOAD_PATH.unshift File.expand_path('lib', __dir__)
 require 'sigma_functions'
+require 'code_rep'
 
 opts = { type: nil, dm_context: nil }
 op = OptionParser.new do |p|
@@ -26,6 +27,13 @@ abort('--type required (datamodel|workbook)') unless opts[:type]
 abort('usage: validate-spec.rb --type T [--dm-context P] <spec.json>') if ARGV.empty?
 
 spec = JSON.parse(File.read(ARGV[0]))
+document = opts[:type] == 'workbook' ? Sigma::CodeRep.document(spec) : spec
+elements =
+  if opts[:type] == 'workbook'
+    Sigma::CodeRep.workbook_elements(document)
+  else
+    document.fetch('pages', []).flat_map { |page| page.fetch('elements', []) }
+  end
 
 # Known prefixes the validator considers valid for cross-element refs
 external_names = []  # element names that are sources OUTSIDE this spec (e.g., DM elements when validating a workbook)
@@ -48,15 +56,13 @@ end
 
 errors = []
 all_element_names = []
-spec.fetch('pages', []).each do |page|
-  page.fetch('elements', []).each do |el|
-    all_element_names << el['name'] if el['name']
-    # Workbook formulas reference a master/source element by its ELEMENT ID
-    # (e.g. [master-4e5cfb1f/Sales]), not its display name — so the element id is
-    # itself a valid cross-ref prefix. Without this the prefix check false-flags
-    # every chart that sources a master (it only knew the names).
-    all_element_names << el['id'] if el['id']
-  end
+elements.each do |el|
+  all_element_names << el['name'] if el['name']
+  # Workbook formulas reference a master/source element by its ELEMENT ID
+  # (e.g. [master-4e5cfb1f/Sales]), not its display name — so the element id is
+  # itself a valid cross-ref prefix. Without this the prefix check false-flags
+  # every chart that sources a master (it only knew the names).
+  all_element_names << el['id'] if el['id']
 end
 require 'set' rescue nil
 # RESERVED reference prefixes that are always valid regardless of the spec's own
@@ -72,8 +78,22 @@ all_known_set = all_known_prefixes.is_a?(Set) ? all_known_prefixes : Set.new(all
 
 errors << 'spec contains rgb(...) color strings (Cloudflare WAF blocks)' if JSON.generate(spec).include?('rgb(')
 
-spec.fetch('pages', []).each do |page|
-  page.fetch('elements', []).each do |el|
+if opts[:type] == 'workbook'
+  errors << 'workbook document missing required `kind: workbook`' unless document['kind'] == 'workbook'
+  errors << 'workbook document missing required non-empty `layout`' if document['layout'].to_s.strip.empty?
+  nested = Array(document['pages']).select { |p| p.is_a?(Hash) && p.key?('elements') }
+  errors << "workbook pages must be metadata-only (#{nested.size} page(s) still contain elements)" if nested.any?
+  placed = document['layout'].to_s.scan(/\belementId="([^"]+)"/).flatten
+  ids = elements.map { |el| el['id'] }.compact
+  dup_placed = placed.group_by(&:itself).select { |_id, rows| rows.length > 1 }.keys
+  dup_ids = ids.group_by(&:itself).select { |_id, rows| rows.length > 1 }.keys
+  errors << "layout places element(s) more than once: #{dup_placed.join(', ')}" if dup_placed.any?
+  errors << "document has duplicate element id(s): #{dup_ids.join(', ')}" if dup_ids.any?
+  errors << "layout omits element(s): #{(ids - placed).join(', ')}" if (ids - placed).any?
+  errors << "layout references unknown element(s): #{(placed - ids).join(', ')}" if (placed - ids).any?
+end
+
+elements.each do |el|
     kind = el['kind'] || ''
     name = el['name'] || el['id'] || '?'
     cols = (el['columns'] || []) + (el['metrics'] || [])
@@ -287,12 +307,15 @@ spec.fetch('pages', []).each do |page|
         end
       end
     end
-  end
 end
 
 if opts[:type] == 'workbook'
-  spec.fetch('pages', []).each do |page|
-    els = page.fetch('elements', [])
+  by_page = Sigma::CodeRep.workbook_elements_with_pages(document).group_by do |_el, page|
+    page && page['id']
+  end
+  by_page.each do |page_id, pairs|
+    page = Array(document['pages']).find { |p| p['id'] == page_id } || { 'id' => page_id }
+    els = pairs.map(&:first)
     masters = els.select do |e|
       e['kind'] == 'table' &&
         e['visibleAsSource'] == false &&

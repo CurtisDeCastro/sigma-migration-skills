@@ -1,0 +1,150 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Focused offline regression for the Aug-2026 workbook-as-code release.
+require 'json'
+require 'open3'
+require 'tmpdir'
+require 'rbconfig'
+
+BUILD = File.join(__dir__, 'build-workbook-from-pbir.rb')
+ASSEMBLE = File.join(__dir__, 'build-workbook-spec.rb')
+VALIDATE = File.join(__dir__, 'validate-spec.rb')
+RUBY = RbConfig.ruby
+$fail = 0
+
+def ok(label, value)
+  puts "#{value ? '  ok  ' : 'FAIL  '}#{label}"
+  $fail += 1 unless value
+end
+
+master = {
+  'masters' => {
+    'S' => {
+      'id' => 'master-s', 'element_id' => 'dm-s', 'data_model' => 'dm-1',
+      'columns' => [
+        { 'id' => 'm-region', 'name' => 'Region', 'formula' => '[S/Region]' },
+        { 'id' => 'm-amount', 'name' => 'Amount', 'formula' => '[S/Amount]' }
+      ]
+    }
+  },
+  'fields' => {
+    'S.Region' => { 'master' => 'S', 'ref' => '[master-s/Region]', 'agg' => nil },
+    'S.Amount' => { 'master' => 'S', 'ref' => '[master-s/Amount]', 'agg' => 'Sum' }
+  }
+}
+
+visual = lambda do |id, type, token, role, bindings, title, y|
+  {
+    'visual_id' => id, 'visual_type' => type, 'sigma_kind' => token,
+    'role_class' => role, 'approximate' => false, 'title' => title,
+    'x' => 0, 'y' => y, 'w' => 500, 'h' => 140, 'z' => 0,
+    'bindings' => bindings, 'formats' => {}, 'style' => { 'backgroundColor' => '#F8FAFC' }
+  }
+end
+
+signals = {
+  'source' => 'powerbi',
+  'pages' => [{
+    'page_id' => 'p1', 'page_title' => 'Overview', 'page_w' => 1280, 'page_h' => 720,
+    'style' => { 'backgroundColor' => '#EEF2F7' }, 'interactions' => [],
+    'visuals' => [
+      visual.call('wf', 'waterfallChart', 'waterfall', 'chart',
+                  { 'Category' => ['S.Region'], 'Y' => ['S.Amount'], 'Legend' => ['S.Region'] },
+                  'Amount Change', 0),
+      visual.call('g', 'gauge', 'progress', 'chart', { 'Values' => ['S.Amount'] }, 'Goal', 150),
+      visual.call('nav', 'pageNavigator', 'navigation', 'text', {}, 'Pages', 300),
+      visual.call('ctl', 'slicer', 'control', 'control', { 'Values' => ['S.Region'] }, 'Region', 450),
+      visual.call('tbl', 'tableEx', 'table', 'table',
+                  { 'Values' => ['S.Region', 'S.Amount'] }, 'Details', 600)
+    ]
+  }]
+}
+
+Dir.mktmpdir('pbi-workbook-code') do |dir|
+  sig = File.join(dir, 'signals.json')
+  mmap = File.join(dir, 'master-map.json')
+  out = File.join(dir, 'workbook.json')
+  File.write(sig, JSON.generate(signals))
+  File.write(mmap, JSON.generate(master))
+  _stdout, stderr, status = Open3.capture3(
+    RUBY, BUILD, '--signals', sig, '--master-map', mmap, '--data-model', 'dm-1',
+    '--out', out, '--layout-out', File.join(dir, 'layout.xml'), '--name', 'Release'
+  )
+  ok('builder succeeds', status.success? || (warn(stderr) && false))
+  next unless status.success?
+
+  envelope = JSON.parse(File.read(out))
+  doc = envelope['document'] || {}
+  ok('outer envelope contains metadata only', envelope['name'] == 'Release' && !envelope.key?('pages'))
+  ok('document declares schemaVersion and kind', doc['schemaVersion'] == 1 && doc['kind'] == 'workbook')
+  ok('pages are metadata-only', Array(doc['pages']).all? { |p| !p.key?('elements') })
+  ok('elements are flat', doc['elements'].is_a?(Array) && doc['elements'].length >= 6)
+  ok('layout is required and present', doc['layout'].to_s.include?('<Page'))
+
+  ids = doc['elements'].map { |e| e['id'] }
+  placed = doc['layout'].scan(/\belementId="([^"]+)"/).flatten
+  ok('every element is placed exactly once', ids.sort == placed.sort && placed.uniq.length == placed.length)
+
+  waterfall = doc['elements'].find { |e| e['kind'] == 'waterfall-chart' }
+  ok('waterfall uses native kind and splitBy', waterfall && waterfall.dig('splitBy', 'id') &&
+     waterfall.dig('waterfallShape', 'connectorLine') == 'shown')
+  progress = doc['elements'].find { |e| e['kind'] == 'progress' }
+  ok('gauge uses native ring progress', progress && progress['shape'] == 'ring' &&
+     progress['mode'] == 'value' && progress['value'].to_s.include?('master-s'))
+  nav = doc['elements'].find { |e| e['kind'] == 'navigation' }
+  ok('page navigator uses native auto navigation', nav && nav['mode'] == 'auto')
+  ok('background and spacing survive', waterfall.dig('style', 'backgroundColor') == '#F8FAFC' &&
+     doc.dig('settings', 'theme', 'overrides', 'colorOverrides', 'backgroundCanvas') == '#EEF2F7' &&
+     doc.dig('settings', 'theme', 'overrides', 'space', 'unit') == 'small')
+
+  control = doc['elements'].find { |e| e['kind'] == 'control' }
+  target_ids = Array(control && control['filters']).filter_map { |f| f.dig('source', 'elementId') }
+  ok('control references resolve to flat elements', target_ids.any? && (target_ids - ids).empty?)
+
+  table = doc['elements'].find { |e| e['name'] == 'Details' }
+  valid_columns = Array(table && table['columns']).map { |c| c['id'] }
+  grouping_refs = Array(table && table['groupings']).flat_map do |g|
+    Array(g['groupBy']) + Array(g['calculations'])
+  end
+  ok('table grouping references survive flattening and resolve', grouping_refs.any? &&
+     (grouping_refs - valid_columns).empty?)
+
+  _vo, ve, vst = Open3.capture3(RUBY, VALIDATE, '--type', 'workbook', out)
+  ok('flat workbook passes validate-spec', vst.success? || (warn(ve) && false))
+end
+
+Dir.mktmpdir('pbi-legacy-assembler') do |dir|
+  charts = File.join(dir, 'charts.json')
+  dm_ids = File.join(dir, 'dm-ids.json')
+  columns = File.join(dir, 'columns.yml')
+  out = File.join(dir, 'workbook.json')
+  File.write(charts, JSON.generate([
+    { 'id' => 'chart-1', 'kind' => 'text', 'body' => 'Legacy assembler' }
+  ]))
+  # Data-model id maps intentionally remain nested.
+  File.write(dm_ids, JSON.generate(
+    'dataModelId' => 'dm-1',
+    'pages' => [{ 'elements' => [{ 'id' => 'dm-source', 'name' => 'Fact' }] }]
+  ))
+  File.write(columns, "columns:\n  - { id: m-region, name: Region, formula: \"[Fact/Region]\" }\n")
+  _ao, ae, ast = Open3.capture3(
+    RUBY, ASSEMBLE, '--chart-specs', charts, '--dm-ids', dm_ids,
+    '--master-cols', columns, '--workbook-name', 'Assembler', '--folder-id', 'folder',
+    '--mode', 'dashboard', '--out', out
+  )
+  ok('secondary workbook assembler succeeds', ast.success? || (warn(ae) && false))
+  if ast.success?
+    assembled = JSON.parse(File.read(out))
+    adoc = assembled['document'] || {}
+    ok('secondary assembler emits flat document elements',
+       Array(adoc['pages']).all? { |p| !p.key?('elements') } &&
+       Array(adoc['elements']).map { |e| e['id'] }.sort == %w[chart-1 master])
+    aplaced = adoc['layout'].to_s.scan(/\belementId="([^"]+)"/).flatten
+    ok('secondary assembler places every element once',
+       aplaced.sort == %w[chart-1 master] && aplaced.uniq.length == aplaced.length)
+  end
+end
+
+puts($fail.zero? ? "\nall workbook-code release tests passed" : "\n#{$fail} FAILED")
+exit($fail.zero? ? 0 : 1)

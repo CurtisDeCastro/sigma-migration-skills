@@ -258,7 +258,7 @@ Then: `tableau-to-sigma/scripts/post-and-readback.rb --type datamodel`. See `ref
   - pie/donut: `color:{id}`, `value:{id}`
   - text: `{kind:text, body:"## ..."}`
   - measure formula wraps the master col: `CountDistinct([Master/Col])`, `Sum([Master/Col])`, date dim `DateTrunc("month",[Master/Col])`.
-- `POST /v2/workbooks/spec` (post-and-readback `--type workbook`). Chart-element shapes mirror `tableau-to-sigma/scripts/build-charts-from-signals.rb`. **The body is `document`-wrapped, not flat** (verified live 2026-08-03, including on `/verify` 2026-08-04) — `schemaVersion`/`pages`/`kind`/`layout` nest under `document`; `folderId`/`ownerId` stay outside it. `post-and-readback.rb` handles the wrapping; the DM POST in Phase 4 above is unaffected and stays flat. See `refs/spec-fixups.md`.
+- `POST /v2/workbooks/spec` (post-and-readback `--type workbook`). Chart-element shapes mirror `tableau-to-sigma/scripts/build-charts-from-signals.rb`. **The body is an outer metadata envelope plus `document`** (verified live 2026-08-03, including on `/verify` 2026-08-04): `name`/`folderId` stay outside; `document` owns `schemaVersion`, `kind:"workbook"`, metadata-only `pages`, one flat `elements` collection, required authoritative `layout`, settings, panels, and overlays. Every element must occur exactly once in layout. Never put workbook elements back under a page (data-model specs are unchanged and remain nested). `post-and-readback.rb` preserves the complete workbook document on write. See `refs/spec-fixups.md` and `refs/workbook-code-release-gaps.md`.
 
 ## Phase 5c — Coverage report (NEVER silently drop a component)
 The build **never silently drops** what it can't resolve — every drop, downgrade,
