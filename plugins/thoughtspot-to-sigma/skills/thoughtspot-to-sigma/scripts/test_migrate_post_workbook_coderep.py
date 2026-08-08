@@ -52,8 +52,19 @@ MIG.sigma = fake_sigma
 FLAT_SPEC = {
     "name": "Test WB",
     "folderId": "home-1",
-    "schemaVersion": 3,
-    "pages": [{"id": "pg1", "elements": [{"id": "c1", "kind": "bar-chart"}]}],
+    "document": {
+        "schemaVersion": 1,
+        "kind": "workbook",
+        "pages": [{"id": "pg1", "name": "Dashboard"}],
+        "elements": [{"id": "c1", "kind": "bar-chart"}],
+        "layout": (
+            '<?xml version="1.0" encoding="utf-8"?>\n'
+            '<Page type="grid" gridTemplateColumns="repeat(24, 1fr)" '
+            'gridTemplateRows="auto" id="pg1">\n'
+            '  <Element elementId="c1" gridColumn="1 / 25" gridRow="1 / 12"/>\n'
+            '</Page>\n'
+        ),
+    },
 }
 
 with tempfile.TemporaryDirectory() as wd:
@@ -66,8 +77,13 @@ with tempfile.TemporaryDirectory() as wd:
           "POST body carries a top-level `document` key (the wrap the bug omitted)")
     check(posted is not None and "pages" not in posted,
           "POST body has NO top-level `pages` (must be nested, not flat)")
-    check(posted is not None and posted["document"].get("pages") == FLAT_SPEC["pages"],
-          "wrapped document carries the converter's pages unchanged")
+    check(posted is not None and posted["document"].get("pages") == FLAT_SPEC["document"]["pages"],
+          "wrapped document carries metadata-only pages unchanged")
+    check(posted is not None and posted["document"].get("elements") == FLAT_SPEC["document"]["elements"],
+          "wrapped document carries the flat element collection")
+    check(posted is not None and posted["document"].get("kind") == "workbook"
+          and posted["document"].get("layout"),
+          "posted document includes required kind and authoritative layout")
     check(posted is not None and posted.get("name") == "Test WB",
           "name stays OUTSIDE document as metadata")
     check(posted is not None and posted.get("folderId") == "home-1",

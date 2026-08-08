@@ -5,10 +5,8 @@
 #
 # Live GET /v2/workbooks/{id}/spec now nests non-metadata fields under a
 # top-level `document` key (verified 2026-08-03/04). phase6-parity-thoughtspot.rb
-# GETs the live spec in PASS 1, reads spec['pages'] directly to enumerate
-# chart elements, and writes the spec to wb-readback.json — this checks both
-# reads route through the vendored Sigma::CodeRep.document() adapter rather
-# than the raw (now-nested) GET response.
+# GETs the live spec in PASS 1, enumerates flat document.elements, and writes
+# the unwrapped document to wb-readback.json.
 #
 # Run: ruby scripts/tests/test_phase6_parity_shape.rb
 
@@ -28,11 +26,15 @@ class TestPhase6ParityShape < Minitest::Test
   end
 
   # Real regression signal: the script must route its GET readback through
-  # Sigma::CodeRep.document(...) before writing wb-readback.json / reading
-  # spec['pages'] -- not the raw (now-nested) GET response.
+  # Sigma::CodeRep.document(...) before writing wb-readback.json and enumerate
+  # charts through workbook_elements (never pages[*].elements).
   def test_script_uses_code_rep_for_readback
     src = File.read(File.join(__dir__, '..', SCRIPT_NAME))
     assert_match(/Sigma::CodeRep\.document\(/, src,
                  "#{SCRIPT_NAME} must unwrap the GET readback via Sigma::CodeRep.document(...)")
+    assert_match(/Sigma::CodeRep\.workbook_elements\(/, src,
+                 "#{SCRIPT_NAME} must enumerate flat workbook elements")
+    refute_match(/page\['elements'\]/, src,
+                 "#{SCRIPT_NAME} must not assume pages own elements")
   end
 end
