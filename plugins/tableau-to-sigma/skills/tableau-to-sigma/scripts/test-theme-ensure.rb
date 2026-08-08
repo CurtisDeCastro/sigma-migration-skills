@@ -13,6 +13,7 @@ DIR = __dir__
 SRC = File.read(File.join(DIR, 'post-and-readback.rb'))
 m = SRC.match(/^def ensure_theme!.*?\n^end$/m) or abort('could not extract ensure_theme!')
 require_relative 'lib/theme_derive'
+require_relative 'lib/workbook_code'
 # require_relative cannot infer a basepath inside eval — the lib is preloaded.
 eval(m[0].sub(/require_relative\s+'lib\/theme_derive'/, 'nil')) # rubocop:disable Security/Eval
 
@@ -23,7 +24,16 @@ def check(c, msg, fails)
 end
 
 THEME = { 'categoricalScheme' => ['#0E8DA0', '#123456'], 'backgroundCanvas' => '#FFFFFF' }.freeze
-SPEC  = { 'name' => 'W', 'pages' => [{ 'id' => 'p', 'elements' => [] }] }.freeze
+SPEC  = {
+  'name' => 'W',
+  'document' => {
+    'schemaVersion' => 4,
+    'kind' => 'workbook',
+    'pages' => [{ 'id' => 'p', 'name' => 'P' }],
+    'elements' => [],
+    'layout' => '<Page id="p"></Page>'
+  }
+}.freeze
 
 $opts_type = 'workbook'
 
