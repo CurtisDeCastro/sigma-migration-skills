@@ -29,8 +29,9 @@ require 'rbconfig'
 SCRIPT = File.join(__dir__, 'collect-parity-actuals.rb')
 REAL_SIGMA_REST = File.expand_path('lib/sigma_rest.rb', __dir__)
 
-# A --workbook-spec readback shaped like the LIVE (nested) response: metadata
-# (workbookId) sits alongside `document`, which carries schemaVersion/pages.
+# A --workbook-spec readback shaped like the LIVE response: metadata
+# (workbookId) sits alongside `document`, which carries flat elements,
+# metadata-only pages, and their required layout.
 # No latestDocumentVersion/latestVersion anywhere — the raw-export cache
 # build must short-circuit on that (nil rb_ver) rather than attempt a live
 # version-probe GET.
@@ -38,13 +39,13 @@ NESTED_WB_SPEC = {
   'workbookId' => 'wb-test',
   'document' => {
     'schemaVersion' => 4,
-    'pages' => [{
-      'id' => 'p1',
-      'elements' => [
-        { 'id' => 'c1', 'kind' => 'bar-chart', 'name' => 'Revenue by Region',
-          'columns' => [{ 'id' => 'col-region', 'name' => 'Region' }] }
-      ]
-    }]
+    'kind' => 'workbook',
+    'pages' => [{ 'id' => 'p1', 'name' => 'Overview' }],
+    'elements' => [
+      { 'id' => 'c1', 'kind' => 'bar-chart', 'name' => 'Revenue by Region',
+        'columns' => [{ 'id' => 'col-region', 'name' => 'Region' }] }
+    ],
+    'layout' => '<Page id="p1"><Element elementId="c1"/></Page>'
   }
 }.freeze
 
@@ -104,7 +105,7 @@ def check(cond, msg, fails)
   puts "  #{cond ? 'PASS' : 'FAIL'}  #{msg}"
 end
 
-puts '== collect-parity-actuals: nested --workbook-spec file must resolve the chart element =='
+puts '== collect-parity-actuals: wrapped --workbook-spec file must resolve the chart element =='
 Dir.mktmpdir do |dir|
   log = File.join(dir, 'stub.log')
   out, err, st, out_path = run_collect(dir, { 'SIGMA_STUB_LOG' => log })
@@ -113,7 +114,7 @@ Dir.mktmpdir do |dir|
   check(out.include?('1/1 chart(s) collected'),
         "reports 1/1 charts collected, not 0/1 (got: #{out.inspect})", fails)
   check(!out.include?('NOT COLLECTED'),
-        "does NOT report 'element not in workbook spec' (nested pages must resolve) (got: #{out.inspect})", fails)
+        "does NOT report 'element not in workbook spec' (flat elements must resolve) (got: #{out.inspect})", fails)
 
   check(File.exist?(out_path), 'parity-actuals.json written', fails)
   if File.exist?(out_path)

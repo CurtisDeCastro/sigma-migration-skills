@@ -65,6 +65,7 @@ class TestCodeRep(unittest.TestCase):
             'schemaVersion': 1,
             'pages': [{'id': 'p', 'elements': [{'id': 'old', 'kind': 'text'}]}],
         }
+        self.assertEqual([element['id'] for element in code_rep.workbook_elements(nested)], ['old'])
         wrapped = code_rep.wrap(nested)['document']
         self.assertEqual([element['id'] for element in wrapped['elements']], ['old'])
         self.assertNotIn('elements', wrapped['pages'][0])

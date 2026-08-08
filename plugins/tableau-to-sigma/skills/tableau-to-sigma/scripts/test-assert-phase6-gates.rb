@@ -187,9 +187,14 @@ end
 Dir.mktmpdir do |dir|
   base_workdir(dir, blind: false)
   File.write(File.join(dir, 'wb-readback.json'), JSON.pretty_generate(
-               'pages' => [{ 'elements' => [{ 'id' => 'e1', 'kind' => 'kpi-chart' },
-                                            { 'id' => 'e2', 'kind' => 'bar-chart' },
-                                            { 'id' => 'e3', 'kind' => 'bar-chart' }] }]))
+               'document' => {
+                 'kind' => 'workbook',
+                 'pages' => [{ 'id' => 'p1', 'name' => 'Overview' }],
+                 'elements' => [{ 'id' => 'e1', 'kind' => 'kpi-chart' },
+                                { 'id' => 'e2', 'kind' => 'bar-chart' },
+                                { 'id' => 'e3', 'kind' => 'bar-chart' }],
+                 'layout' => '<Page id="p1"><Element elementId="e1"/><Element elementId="e2"/><Element elementId="e3"/></Page>'
+               }))
   BlindFixture.install(dir, per_tile: [
                          { 'position' => 'r1c1', 'source_family' => 'kpi', 'target_family' => 'kpi' },
                          { 'position' => 'r2c1', 'source_family' => 'line', 'target_family' => 'line' },
@@ -205,9 +210,14 @@ end
 Dir.mktmpdir do |dir|
   base_workdir(dir, blind: false)
   File.write(File.join(dir, 'wb-readback.json'), JSON.pretty_generate(
-               'pages' => [{ 'elements' => [{ 'id' => 'e1', 'kind' => 'kpi-chart' },
-                                            { 'id' => 'e2', 'kind' => 'bar-chart' },
-                                            { 'id' => 'e3', 'kind' => 'bar-chart' }] }]))
+               'document' => {
+                 'kind' => 'workbook',
+                 'pages' => [{ 'id' => 'p1', 'name' => 'Overview' }],
+                 'elements' => [{ 'id' => 'e1', 'kind' => 'kpi-chart' },
+                                { 'id' => 'e2', 'kind' => 'bar-chart' },
+                                { 'id' => 'e3', 'kind' => 'bar-chart' }],
+                 'layout' => '<Page id="p1"><Element elementId="e1"/><Element elementId="e2"/><Element elementId="e3"/></Page>'
+               }))
   BlindFixture.install(dir, per_tile: [
                          { 'position' => 'r1c1', 'source_family' => 'kpi', 'target_family' => 'kpi' },
                          { 'position' => 'r2c1', 'source_family' => 'bar', 'target_family' => 'bar' },
@@ -871,7 +881,14 @@ def kp_png(tiles, extra = {})
 end
 
 def kp_rb(els)
-  { 'pages' => [{ 'elements' => els }] }
+  {
+    'document' => {
+      'kind' => 'workbook',
+      'pages' => [{ 'id' => 'p1', 'name' => 'Overview' }],
+      'elements' => els,
+      'layout' => "<Page id=\"p1\">#{els.map { |el| %(<Element elementId="#{el['id']}"/>) }.join}</Page>"
+    }
+  }
 end
 
 KP_TILES = [{ 'title' => 'KPI', 'kind' => 'kpi-chart' },
