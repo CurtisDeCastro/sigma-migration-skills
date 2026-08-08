@@ -162,7 +162,25 @@ def test_build_explore_element_unknown_series_type_warns():
             "series": [{"type": "histogram"}], "orientation": None, "fields": []}
     el = convert_workbook.build_explore_element(cell, DM_ID, DM_ELEMENT_ID, COLUMNS_BY_VARIABLE, warnings)
     assert el is None
-    assert any("no confirmed Sigma chart-kind mapping" in w for w in warnings)
+    assert any("documented gap" in w and "histogram" in w for w in warnings)
+
+
+def test_build_explore_element_unknown_catalog_type_warns():
+    warnings = []
+    cell = {"cell_id": "c1", "label": "Mystery", "dataframe": "query_result",
+            "series": [{"type": "future-chart"}], "orientation": None, "fields": []}
+    el = convert_workbook.build_explore_element(cell, DM_ID, DM_ELEMENT_ID, COLUMNS_BY_VARIABLE, warnings)
+    assert el is None
+    assert any("absent from the grounded viz catalog" in w for w in warnings)
+
+
+def test_build_explore_element_box_is_plugin_gated():
+    warnings = []
+    cell = {"cell_id": "c1", "label": "Distribution", "dataframe": "query_result",
+            "series": [{"type": "boxplot"}], "orientation": None, "fields": []}
+    el = convert_workbook.build_explore_element(cell, DM_ID, DM_ELEMENT_ID, COLUMNS_BY_VARIABLE, warnings)
+    assert el is None
+    assert any("gated" in w and "plugin" in w for w in warnings)
 
 
 def test_build_explore_element_missing_axis_fields_warns():
@@ -182,6 +200,40 @@ def test_build_explore_element_top_n_filter_from_lump():
     assert el["filters"][0]["kind"] == "top-n" and el["filters"][0]["rowCount"] == 10
 
 
+def test_build_explore_element_legend_and_static_color():
+    sigma_ids.reset_ids()
+    cell = _bar_cell()
+    cell["series"] = [{"type": "bar", "color": {"staticValue": "#4C78A8"}}]
+    cell["settings"] = {"legend": {"position": "right"}}
+    el = convert_workbook.build_explore_element(
+        cell, DM_ID, DM_ELEMENT_ID, COLUMNS_BY_VARIABLE, []
+    )
+    assert el["kind"] == "bar-chart"
+    assert el["legend"] == {"position": "right"}
+    assert el["color"] == {"by": "single", "value": "#4C78A8"}
+
+
+def test_build_explore_element_waterfall_is_loud_not_in_source_gap():
+    cell = _bar_cell()
+    cell["series"] = [{"type": "waterfall"}]
+    warnings = []
+    el = convert_workbook.build_explore_element(
+        cell, DM_ID, DM_ELEMENT_ID, COLUMNS_BY_VARIABLE, warnings
+    )
+    assert el is None
+    assert any("documented gap" in warning and "public export schema" in warning
+               for warning in warnings)
+
+
+def test_build_explore_element_hidden_legend():
+    cell = _bar_cell()
+    cell["settings"] = {"legend": {"position": "none"}}
+    el = convert_workbook.build_explore_element(
+        cell, DM_ID, DM_ELEMENT_ID, COLUMNS_BY_VARIABLE, []
+    )
+    assert el["legend"] == {"visibility": "hidden"}
+
+
 # --- build_layout_xml ---------------------------------------------------------
 
 def test_build_layout_xml_scales_hex_grid_to_sigma_grid():
@@ -196,6 +248,15 @@ def test_build_layout_xml_skips_unmapped_cells():
     tab = {"rows": [{"columns": [{"start": 0, "end": 60, "cell_ids": ["missing"]}]}]}
     xml = convert_workbook.build_layout_xml("page-1", tab, {})
     assert "<LayoutElement" not in xml
+
+
+def test_build_layout_xml_uses_hex_cell_height():
+    tab = {"rows": [{"columns": [{
+        "start": 0, "end": 120, "cell_ids": ["c1"],
+        "cells": [{"cell_id": "c1", "height": 400}],
+    }]}]}
+    xml = convert_workbook.build_layout_xml("page-1", tab, {"c1": "el-1"})
+    assert 'gridRow="1 / 11"' in xml
 
 
 # --- build_workbook (integration) --------------------------------------------
@@ -221,15 +282,60 @@ def test_build_workbook_integration():
     result = convert_workbook.build_workbook(doc, DM_ID, DM_ELEMENT_ID, COLUMNS_BY_VARIABLE, "Demo WB")
     wb = result["workbook"]
     assert wb["name"] == "Demo WB"
-    page = wb["pages"][0]
+    assert "schemaVersion" not in wb and "pages" not in wb
+    workbook_doc = wb["document"]
+    page = workbook_doc["pages"][0]
     assert page["name"] == "Overview"
-    assert len(page["elements"]) == 2
-    assert {e["kind"] for e in page["elements"]} == {"kpi-chart", "bar-chart"}
-    assert all("_hex_cell_id" not in e for e in page["elements"])  # stripped before output
-    assert "layout" in wb and wb["layout"].count("<LayoutElement") == 2
-    assert "layout" not in page  # top-level spec field, NOT nested under the page
+    assert "elements" not in page  # workbook pages are metadata-only
+    assert len(workbook_doc["elements"]) == 2
+    assert {e["kind"] for e in workbook_doc["elements"]} == {"kpi-chart", "bar-chart"}
+    assert all("_hex_cell_id" not in e for e in workbook_doc["elements"])
+    assert workbook_doc["layout"].count("<LayoutElement") == 2
+    assert "layout" not in page
     assert result["stats"] == {"metric_cells": 1, "explore_cells": 1, "elements": 2}
     assert result["warnings"] == []
+
+
+def test_build_workbook_all_tabs_and_unplaced_elements_have_authoritative_layout():
+    sigma_ids.reset_ids()
+    doc = {
+        "cells": [
+            {"cellId": "m1", "cellType": "METRIC", "cellLabel": "One",
+             "config": {"valueVariableName": "query_result", "valueColumn": "Revenue"}},
+            {"cellId": "m2", "cellType": "METRIC", "cellLabel": "Two",
+             "config": {"valueVariableName": "query_result", "valueColumn": "Revenue"}},
+            {"cellId": "m3", "cellType": "METRIC", "cellLabel": "Unplaced",
+             "config": {"valueVariableName": "query_result", "valueColumn": "Revenue"}},
+        ],
+        "appLayout": {
+            "fullWidth": True,
+            "tabs": [
+                {"name": "Overview", "rows": [{"columns": [{
+                    "start": 0, "end": 120,
+                    "elements": [{"type": "CELL", "cellId": "m1"}],
+                }]}]},
+                {"name": "Details", "rows": [{"columns": [{
+                    "start": 0, "end": 120,
+                    "elements": [{"type": "CELL", "cellId": "m2", "explorable": True}],
+                }]}]},
+            ],
+        },
+    }
+    result = convert_workbook.build_workbook(
+        doc, DM_ID, DM_ELEMENT_ID, COLUMNS_BY_VARIABLE, "Tabs", "folder-1"
+    )
+    wb = result["workbook"]
+    workbook_doc = wb["document"]
+    assert wb["folderId"] == "folder-1"
+    assert [page["name"] for page in workbook_doc["pages"]] == ["Overview", "Details"]
+    assert all("elements" not in page for page in workbook_doc["pages"])
+    assert len(workbook_doc["elements"]) == 3
+    assert workbook_doc["layout"].count("<Page ") == 2
+    assert workbook_doc["layout"].count("<LayoutElement") == 3
+    assert workbook_doc["settings"]["navigation"]["pageTabsInViewMode"] == "shown"
+    assert workbook_doc["settings"]["theme"]["overrides"]["pageWidth"] == "full"
+    assert any("explorable/drill" in warning for warning in result["warnings"])
+    assert any("absent from appLayout" in warning for warning in result["warnings"])
 
 
 if __name__ == "__main__":
