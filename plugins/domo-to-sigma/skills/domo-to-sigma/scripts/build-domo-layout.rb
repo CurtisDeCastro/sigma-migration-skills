@@ -144,6 +144,7 @@ OUT = ENV['DOMO_DISCOVERY_DIR'] || File.expand_path('../discovery', __dir__)
 def kind_hint(chart_type)
   t = chart_type.to_s.downcase
   return 'filter'       if t.include?('filter')
+  return 'progress'     if t.include?('gauge')
   return 'kpi'          if t.include?('singlevalue') || t.include?('summary') || t == 'badge'
   return 'table'        if t.include?('datagrid') || t.include?('table')
   return 'bar-chart'    if t.include?('bar')
@@ -184,7 +185,7 @@ def build_dashboard(name, cards)
   max_x = 1.0 if max_x.zero?
   max_y = 1.0 if max_y.zero?
   zones = cards.map do |c|
-    kh = kind_hint(c['chartType'])
+    kh = c['sigmaKindHint'].to_s.empty? ? kind_hint(c['chartType']) : c['sigmaKindHint']
     is_filter = kh == 'filter'
     {
       'id'        => c['id'],
@@ -615,7 +616,7 @@ end
 # convention for a card-derived element (confirmed against a live chart-specs
 # capture: card id 390868622 -> element id "el-390868622").
 def element_kind_for(card, kind_map)
-  resolved = kind_map["el-#{card['id']}"].to_s
+  resolved = (kind_map[card['id'].to_s] || kind_map["el-#{card['id']}"]).to_s
   return resolved unless resolved.empty?
   hint = card['sigmaKindHint'].to_s
   return hint unless hint.empty?
@@ -1051,6 +1052,25 @@ if $PROGRAM_NAME == __FILE__
   # express. Landing in the KPI band (a real, deliberate placement) beats not
   # landing anywhere at all.
   orphan_companions_by_page = load_chart_specs_companions(OUT)
+  # PageLayoutV4 non-card content is authored page content, not furniture:
+  # discovery preserved HEADER/PAGE_BREAK geometry on pages.json and
+  # build-workbook emitted matching text/page-break elements with these ids.
+  pages.each do |page|
+    pname = page['title'] || page['name'] || page['id'].to_s
+    Array(page['_layoutContent']).each do |content|
+      next unless %w[header page-break].include?(content['type'])
+      title = content['text'].to_s.strip
+      title = 'Page break' if title.empty?
+      by_page[pname] << {
+        'id' => content['id'],
+        'title' => title,
+        'chartType' => content['type'],
+        'sigmaKindHint' => (content['type'] == 'header' ? 'text' : 'page-break'),
+        'x' => content['x'], 'y' => content['y'], 'w' => content['w'], 'h' => content['h'],
+        '_synthesized' => true
+      }
+    end
+  end
   by_page.each do |pname, pcards|
     card_el_ids = pcards.map { |c| "el-#{c['id']}" }
     Array(orphan_controls_by_page[pname]).each do |ctl|

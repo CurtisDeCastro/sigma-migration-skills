@@ -95,10 +95,26 @@ class TestPostAndReadback < Minitest::Test
   end
 
   def test_workbook_post_body_is_nested
-    doc  = { 'schemaVersion' => 1, 'pages' => [], 'kind' => 'workbook' }
+    doc  = { 'schemaVersion' => 1, 'pages' => [], 'elements' => [],
+             'layout' => '<?xml version="1.0"?><Page id="p"/>', 'kind' => 'workbook' }
     body = Sigma::CodeRep.wrap(doc, extra: { 'name' => 'n', 'folderId' => 'f' })
     assert_equal doc, body['document']
     refute body.key?('pages'), 'pages must not remain top-level'
+  end
+
+  def test_workbook_wrap_flattens_legacy_pages_but_not_datamodels
+    legacy = {
+      'schemaVersion' => 1, 'kind' => 'workbook', 'layout' => '<Page id="p"/>',
+      'pages' => [{ 'id' => 'p', 'name' => 'P',
+                    'elements' => [{ 'id' => 'e', 'kind' => 'text' }] }]
+    }
+    document = Sigma::CodeRep.wrap(legacy)['document']
+    assert_equal [{ 'id' => 'p', 'name' => 'P' }], document['pages']
+    assert_equal ['e'], document['elements'].map { |element| element['id'] }
+
+    datamodel = { 'schemaVersion' => 1, 'pages' => legacy['pages'] }
+    assert datamodel['pages'].first.key?('elements'),
+           'data-model pages remain nested because CodeRep is never applied to that branch'
   end
 
   # The DM branch must be left alone — that surface is not changing.
@@ -116,6 +132,8 @@ class TestPostAndReadback < Minitest::Test
     src = File.read(File.join(__dir__, '..', 'post-and-readback.rb'))
     assert_match(/Sigma::CodeRep\.(document|wrap|metadata)/, src,
                  'post-and-readback.rb must call Sigma::CodeRep for its workbook branch')
+    assert_match(/missing required document\.layout/, src)
+    assert_match(/pages must be metadata-only/, src)
   end
 
   # The property the test above does NOT protect: that a CodeRep call site

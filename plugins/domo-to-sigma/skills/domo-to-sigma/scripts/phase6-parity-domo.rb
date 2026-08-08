@@ -48,6 +48,8 @@ require 'json'
 require 'optparse'
 require 'open3'
 require 'time'
+$LOAD_PATH.unshift File.expand_path('lib', __dir__)
+require 'domo_workbook_code'
 
 opts = { workdir: nil, plan: nil, wb: nil, spec: nil, excl: nil, out: nil,
          score_out: nil, skip_verify: false, extract_mode: false }
@@ -97,19 +99,6 @@ def element_name(el)
   n = el['name'].is_a?(Hash) ? el['name']['text'] : el['name']
   n = nil if n.to_s.empty?
   (n || el['title'] || el['id']).to_s
-end
-
-def spec_pages(spec)
-  # workbook-spec.json is flat; a GET-back readback nests under `document`
-  # (code-rep wrapper migration) — accept either.
-  return spec['pages'] if spec.is_a?(Hash) && spec['pages'].is_a?(Array)
-  wrapped = spec.is_a?(Hash) ? spec['document'] : nil
-  return wrapped['pages'] if wrapped.is_a?(Hash) && wrapped['pages'].is_a?(Array)
-  if wrapped.is_a?(Array)
-    pg = wrapped.find { |e| e.is_a?(Hash) && e['pages'].is_a?(Array) }
-    return pg['pages'] if pg
-  end
-  []
 end
 
 def load_json(path)
@@ -163,8 +152,12 @@ plan_names  = plan_charts.map { |c| c['chart'].to_s }.reject(&:empty?)
 
 census = nil
 if File.exist?(opts[:spec])
-  chartable_names = spec_pages(load_json(opts[:spec]))
-                    .flat_map { |pg| (pg['elements'] || []) }
+  # Workbook elements are document-global in the released representation;
+  # pages are metadata-only and layout owns page membership. CodeRep accepts
+  # both the released envelope and legacy page-nested fixtures.
+  raw_spec = load_json(opts[:spec])
+  normalized_spec = DomoSigma::WorkbookCode.normalized_document(raw_spec)
+  chartable_names = Sigma::CodeRep.workbook_elements(normalized_spec)
                     .select { |el| chartable?(el) }
                     .map { |el| element_name(el) }
 

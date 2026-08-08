@@ -194,7 +194,7 @@ CHART_TYPE_MAP = {
   'badge_pie'                 => 'pie-chart',
   'badge_donut'               => 'donut-chart',
   'badge_singlevalue'         => 'kpi-chart',
-  'badge_filledgauge'         => 'kpi-chart',   # NO_NATIVE_EQUIVALENT — no gauge kind in Sigma
+  'badge_filledgauge'         => 'progress',    # native only with grounded CURRENT + TARGET range
   'badge_table'               => 'table',
   'badge_word_cloud'          => 'table',       # NO_NATIVE_EQUIVALENT — term + frequency table
   'badge_calendar'            => 'table',       # NO_NATIVE_EQUIVALENT — flat date + value table
@@ -221,9 +221,6 @@ NO_NATIVE_EQUIVALENT = {
                          'term + frequency table.',
   'badge_calendar' => 'Domo calendar heatmap — no calendar `kind` exists in Sigma; degraded to a flat ' \
                        'date + value table.',
-  'badge_filledgauge' => 'Domo gauge/dial — `gauge` is a CONFIRMED-INVALID Sigma kind (rejected ' \
-                          '`400 Invalid kind` — not part of the workbook spec API); degraded to ' \
-                          'kpi-chart. Bind the TARGET column as a KPI comparison if present.',
   'badge_pop_bar_line' => 'Domo period-over-period bar+line — combo-chart approximates the visual ' \
                            '(bar = current period, line = prior period) but Sigma has no automatic ' \
                            'prior-period comparison; the two periods must be modeled as two explicit measures.',
@@ -452,6 +449,29 @@ def build_kpi(card, overrides)
     'columns' => [value_col],
     'value' => { 'columnId' => value_col['id'] },   # ⚠ columnId, NOT id (feedback_sigma_kpi_value_columnid)
   }
+end
+
+# Released native progress/ring element for a grounded Domo filled gauge. Domo
+# exposes CURRENT and TARGET as explicit visual roles; those map directly to
+# value and max, with a documented zero baseline. A gauge without both roles,
+# or one carrying card-local filters/date windows that a source-less progress
+# element cannot preserve, falls back loudly to the existing KPI path.
+def build_progress(card)
+  return nil unless Array(card['filters']).empty? && !card['dateRangeFilter'].is_a?(Hash)
+  current = Array(card['columns']).find { |column| column['mapping'].to_s.upcase == 'CURRENT' }
+  target = Array(card['columns']).find { |column| column['mapping'].to_s.upcase == 'TARGET' }
+  return nil unless current && target
+
+  {
+    'id' => eid(card),
+    'kind' => 'progress',
+    'name' => card['title'],
+    'mode' => 'value',
+    'shape' => 'ring',
+    'min' => '0',
+    'max' => measure_col(target, card)['formula'],
+    'value' => measure_col(current, card)['formula']
+  }.compact
 end
 
 # bead 08sf: Domo prints a Summary Number above EVERY viz card, not just KPI
@@ -746,7 +766,7 @@ end
 def build_image(card)
   path = png_path(card)
   return nil unless path && File.exist?(path.to_s)
-  { 'id' => eid(card), 'kind' => 'image',
+  { 'id' => eid(card), 'kind' => 'image', 'name' => card['title'],
     'url' => "data:image/png;base64,#{Base64.strict_encode64(File.binread(path))}" }
 end
 
@@ -1369,6 +1389,19 @@ def build_element_body(card, overrides)
   # builds the element. (The later chart_kind_for-gated check this replaced is
   # removed below — never warn twice for the same card.)
   ct0 = card['chartType'].to_s.downcase
+  if card['allowTableDrill'] || (card['drillPath'].is_a?(Hash) && !card['drillPath'].empty?)
+    warn_card(card, 'Domo drill is present, but discovery did not provide a complete ordered hierarchy ' \
+                    'that can be grounded as a Sigma drill control; drill behavior was not fabricated.')
+  end
+
+  if ct0 == 'badge_filledgauge'
+    progress = build_progress(card)
+    return progress if progress
+    warn_card(card, 'Domo filled gauge could not use released Sigma progress: native emission requires ' \
+                    'explicit CURRENT and TARGET columns and no card-local filter/date window. Falling ' \
+                    'back to a KPI so the value/filter semantics remain honest; no range was guessed.')
+  end
+
   if NO_NATIVE_EQUIVALENT.key?(ct0)
     warn_card(card, "no native Sigma equivalent for chartType '#{card['chartType']}' — " \
                     "#{NO_NATIVE_EQUIVALENT[ct0]} Tracked as a Sigma custom-plugin follow-up " \
@@ -1433,6 +1466,8 @@ def build_element_body(card, overrides)
          when 'pivot-table'  then build_pivot(card)
          when 'table'        then build_table(card)
          when 'region-map'   then build_map(card)
+         when 'progress'
+           build_progress(card) || build_kpi(card, overrides) || build_table(card)
          when 'kpi-chart'
            # badge_filledgauge (and any other kpi-mapped chartType) may reach
            # here without a summaryNumber — never silently drop the card;
@@ -1547,6 +1582,23 @@ def group_cards_by_page(cards, pages)
   by_page
 end
 
+def page_name(page)
+  page['title'] || page['name'] || page['id'].to_s
+end
+
+def page_layout_elements(page)
+  Array(page['_layoutContent']).filter_map do |content|
+    case content['type']
+    when 'header'
+      text = content['text'].to_s.strip
+      next if text.empty?
+      { 'id' => content['id'], 'kind' => 'text', 'body' => "## #{text}", 'name' => text }
+    when 'page-break'
+      { 'id' => content['id'], 'kind' => 'page-break' }
+    end
+  end
+end
+
 if $PROGRAM_NAME == __FILE__
   cards = JSON.parse(File.read(File.join(OUT, 'cards.json'))) rescue []
   pages = JSON.parse(File.read(File.join(OUT, 'pages.json'))) rescue []
@@ -1554,6 +1606,7 @@ if $PROGRAM_NAME == __FILE__
 
   cards = cards.reject { |c| c['_error'] || c['_tierB'] }
   by_page = group_cards_by_page(cards, pages)
+  pages.each { |page| by_page[page_name(page)] ||= [] }
   master_ds = dominant_dataset_id(cards)
   by_page.each { |pname, pcards| warn_missing_geometry(pname, pcards) }
 
@@ -1562,6 +1615,13 @@ if $PROGRAM_NAME == __FILE__
     els = pcards.map { |c| build_element(c, overrides, master_ds) }.compact
     els += $companion_elements[before..]
     els += build_controls(pcards, master_ds)
+    source_page = pages.find { |page| page_name(page) == pname }
+    els += page_layout_elements(source_page || {})
+    if source_page&.dig('_pageAnalyzerSettings', 'showFilterBar')
+      warn_card(pcards.first || { 'id' => source_page['id'], 'title' => pname },
+                'Domo page filter-bar chrome is present, but no exported filter definitions were captured; ' \
+                'document.panels remains empty and no workbook panel/control was fabricated.')
+    end
     { 'name' => pname, 'elements' => els }
   end
 
