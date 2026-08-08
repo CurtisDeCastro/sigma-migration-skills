@@ -23,7 +23,7 @@ user-invocable: true
 > Phase numbering is local to this skill; the canonical Assess→Discover→
 > Reuse→Convert→Post-DM→Build→Layout→Parity→Security→Enhance arc and this
 > skill's mapping live in
-> [`docs/phase-schema.md`](../../../../docs/phase-schema.md).
+> `docs/phase-schema.md` (full clone only — see repo `docs/phase-schema.md`).
 
 > Read `refs/hex-file-schema.json` (the vendored public JSON Schema for
 > Hex's `.hex.yaml` format) before relying on a cell shape not covered
@@ -292,7 +292,8 @@ specs at POST and only surfaces the failure as a string literal baked into
 the compiled query, e.g. `select 'Unknown column "[X]"' ...`):
 
 ```bash
-bash ../sigma-authoring/skills/sigma-workbooks/scripts/verify-workbook.sh <workbookId>
+bash ../../../sigma-authoring/skills/sigma-workbooks/scripts/verify-workbook.sh <workbookId>
+# (full clone from this skill dir; Claude Code: run verify-workbook.sh from the installed sigma-workbooks skill)
 ```
 
 Then the numeric gate:

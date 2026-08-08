@@ -236,6 +236,10 @@ jobs:
         run: |
           ruby tools/lint-skills.rb
           bash tools/test-lint-skills-budgets.sh
+      - name: Skill path lint + self-test (marketplace-safe refs)
+        run: |
+          ruby tools/lint-skill-paths.rb
+          bash tools/test-lint-skill-paths.sh
       - name: Bootstrap/doctor lockstep self-test (creds-free)
         # bootstrap.sh duplicates doctor.sh's probes (py_real, the vm-node
         # candidate globs, Test-RealPython) under KEEP-IN-LOCKSTEP comments
