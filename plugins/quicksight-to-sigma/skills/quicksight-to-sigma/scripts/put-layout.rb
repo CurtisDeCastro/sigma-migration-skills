@@ -2,9 +2,9 @@
 # GET a workbook spec, replace per-page layouts with a single top-level layout
 # XML (provided), strip read-only fields, PUT back.
 #
-# Container layouts: a <GridContainer> in the layout XML must be paired with a
+# Container layouts: a <Container> in the layout XML must be paired with a
 # `kind: container` placeholder element in the spec (else it is silently
-# dropped — layout-playbook.md). Layout builders that emit GridContainers
+# dropped — layout-playbook.md). Layout builders that emit Containers
 # write a sidecar `<layout>.elements.json` ({pageId: [element, ...]}) next to
 # the layout XML; this script injects those elements (containers + header
 # text) into the matching pages before the PUT. Pass --elements to override
@@ -49,7 +49,10 @@ spec = Sigma::CodeRep.document(raw_spec)
 spec['pages'].each { |p| p.delete('layout') }
 spec['layout'] = xml
 
-# Inject container/header-text spec elements (see header comment).
+# Inject container/header-text spec elements (see header comment). Workbook
+# elements are document-global in the released representation; the sidecar's
+# page keys describe layout ownership only and must never recreate
+# pages[].elements.
 elements_path = opts[:elements] || "#{opts[:layout]}.elements.json"
 if File.exist?(elements_path)
   inject = JSON.parse(File.read(elements_path))
@@ -60,11 +63,12 @@ if File.exist?(elements_path)
       warn "WARN: elements sidecar references unknown page #{page_id.inspect} — skipped"
       next
     end
-    page['elements'] ||= []
-    existing = page['elements'].map { |e| e['id'] }
+    spec['elements'] ||= []
+    existing = spec['elements'].map { |e| e['id'] }
     els.each do |el|
       next if existing.include?(el['id'])
-      page['elements'] << el
+      spec['elements'] << el
+      existing << el['id']
       injected += 1
     end
   end
@@ -75,6 +79,18 @@ end
 # first place now — Sigma::CodeRep.document() above already unwraps to just
 # the document fields (schemaVersion/pages/kind/layout), so there is nothing
 # left here to strip before the PUT.
+
+element_ids = Array(spec['elements']).map { |element| element['id'] }
+placed_ids = xml.scan(/\belementId="([^"]+)"/).flatten
+duplicate_elements = element_ids.tally.select { |_id, count| count > 1 }.keys
+duplicate_placements = placed_ids.tally.select { |_id, count| count > 1 }.keys
+missing = element_ids - placed_ids
+unknown = placed_ids - element_ids
+unless duplicate_elements.empty? && duplicate_placements.empty? && missing.empty? && unknown.empty?
+  abort "FATAL: layout must place every flat workbook element exactly once: " \
+        "duplicate element ids=#{duplicate_elements.inspect}; duplicate placements=#{duplicate_placements.inspect}; " \
+        "unplaced=#{missing.inspect}; unknown=#{unknown.inspect}"
+end
 
 begin
   resp_body = http(:put, "/v2/workbooks/#{opts[:wb]}/spec", JSON.pretty_generate(Sigma::CodeRep.wrap(spec)))

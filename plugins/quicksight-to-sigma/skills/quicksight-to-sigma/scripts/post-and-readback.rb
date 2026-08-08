@@ -136,17 +136,31 @@ labels_by_el = Hash.new { |h, k| h[k] = [] }
   labels_by_el[c['elementId']] << c['label'] if c['elementId'] && c['label']
 end
 
+page_elements =
+  if opts[:type] == 'workbook'
+    elements_by_id = Sigma::CodeRep.workbook_elements(spec).each_with_object({}) do |element, index|
+      index[element['id']] = element if element['id']
+    end
+    Sigma::CodeRep.workbook_page_element_ids(spec).transform_values do |ids|
+      ids.filter_map { |id| elements_by_id[id] }
+    end
+  else
+    spec.fetch('pages', []).each_with_object({}) do |page, out_pages|
+      out_pages[page['id']] = page['elements'] || []
+    end
+  end
+
 out = {
   ID_FIELD => oid,
-  'pages'  => spec.fetch('pages', []).map do |p|
+  'pages' => spec.fetch('pages', []).map do |page|
     {
-      'id'       => p['id'],
-      'name'     => p['name'],
-      'visibility' => p['visibility'],
-      'elements' => (p['elements'] || []).map do |e|
-        el = { 'id' => e['id'], 'kind' => e['kind'], 'name' => e['name'] }
-        el['columnLabels'] = labels_by_el[e['id']] if labels_by_el.key?(e['id'])
-        el
+      'id' => page['id'],
+      'name' => page['name'],
+      'visibility' => page['visibility'],
+      'elements' => Array(page_elements[page['id']]).map do |element|
+        row = { 'id' => element['id'], 'kind' => element['kind'], 'name' => element['name'] }
+        row['columnLabels'] = labels_by_el[element['id']] if labels_by_el.key?(element['id'])
+        row
       end
     }
   end
@@ -195,7 +209,7 @@ end
 
 # Layout-quality lint (shared scripts/lib/layout_lint.rb — vendored byte-
 # identical, md5 discipline): fails loudly on raw-id element display names,
-# input controls outside the GridContainer bands of a banded page, and dead
+# input controls outside the Container bands of a banded page, and dead
 # zones (>25% empty grid rows between a page's first and last element). The
 # "PHASEE PBI Employee Dashboard" regression shipped a parity-green workbook
 # that was a visual mess — every data gate passed. Escape: --skip-layout-lint
