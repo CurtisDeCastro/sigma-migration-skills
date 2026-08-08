@@ -143,8 +143,7 @@
           "value": "#2563EB"
         },
         "legend": {
-          "visibility": "hidden",
-          "position": "right"
+          "visibility": "hidden"
         }
       },
       {

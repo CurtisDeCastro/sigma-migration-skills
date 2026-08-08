@@ -54,8 +54,20 @@ INCIDENT = /incident-id|An error has occurred/i
 # spec (real converter output with its own folderId) is untouched — this only
 # backfills what's missing, so a minimal structural fixture can isolate the
 # layout-tag question without embedding an org id.
+#
+# Some converter goldens under corpus/ (e.g. gooddata) are shared with the
+# OFFLINE, creds-free corpus runner (corpus/run-corpus.sh), which stores
+# goldens id-NORMALIZED (see corpus/README.md — "Goldens are id-normalized"):
+# a real folderId a converter emitted gets rewritten to a stable placeholder
+# token like "inode-FOLDER00" for byte-diffing. That's correct for the
+# offline use case but is NOT a real UUID, so a *present-but-placeholder*
+# folderId must be treated the same as a *missing* one here — otherwise this
+# harness ships the placeholder straight to the live API, which 400s with
+# "Expecting UUID at 0.folderId". Detect "present but not UUID-shaped" and
+# backfill it too, rather than only checking presence.
 DEFAULT_SCHEMA_VERSION = 1
 DEFAULT_KIND = 'workbook'
+UUID_RE = /\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/i
 
 @home_folder_id = nil
 def home_folder_id
@@ -71,9 +83,16 @@ end
 
 def ensure_postable!(spec, path)
   filled = []
-  unless spec['folderId']
+  existing = spec['folderId']
+  if existing.nil?
     spec['folderId'] = home_folder_id
     filled << 'folderId'
+  elsif !(existing.is_a?(String) && existing.match?(UUID_RE))
+    log "  fixture folderId #{existing.inspect} is not a live UUID " \
+        '(looks like an offline corpus normalization placeholder) — ' \
+        'replacing with the resolved home folder, not posting it verbatim'
+    spec['folderId'] = home_folder_id
+    filled << 'folderId (placeholder replaced)'
   end
   unless spec['name']
     spec['name'] = "layout-contract-probe — #{File.basename(path)} — #{Time.now.utc.strftime('%Y%m%dT%H%M%SZ')}"
