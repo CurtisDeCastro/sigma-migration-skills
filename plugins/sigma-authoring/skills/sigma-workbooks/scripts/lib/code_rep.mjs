@@ -80,6 +80,63 @@ export function metadata(response) {
   );
 }
 
+export function workbookElements(spec) {
+  const elements = document(spec).elements;
+  return Array.isArray(elements) ? elements.filter(isObj) : [];
+}
+
+export function workbookPageElementIds(spec) {
+  const result = {};
+  const layout = String(document(spec).layout || '');
+  const pagePattern = /<Page\b[^>]*\bid="([^"]*)"[^>]*>(.*?)<\/Page>/gs;
+  for (const match of layout.matchAll(pagePattern)) {
+    result[match[1]] = [...new Set(
+      [...match[2].matchAll(/\belementId="([^"]*)"/g)].map((element) => element[1]),
+    )];
+  }
+  return result;
+}
+
+export function workbookPageByElement(spec) {
+  const doc = document(spec);
+  const pages = Array.isArray(doc.pages) ? doc.pages.filter(isObj) : [];
+  const pagesById = Object.fromEntries(pages.filter((page) => page.id).map((page) => [page.id, page]));
+  const result = {};
+  for (const [pageId, elementIds] of Object.entries(workbookPageElementIds(doc))) {
+    const page = pagesById[pageId] || { id: pageId, name: pageId };
+    for (const elementId of elementIds) result[elementId] ||= page;
+  }
+  return result;
+}
+
+export function workbookElementsWithPages(spec) {
+  const pageByElement = workbookPageByElement(spec);
+  return workbookElements(spec).map((element) => [
+    element,
+    pageByElement[element.id || element.elementId],
+  ]);
+}
+
+function flattenElements(doc) {
+  if (!isObj(doc) || !Array.isArray(doc.pages)) return doc;
+  const nested = [];
+  const pages = doc.pages.map((page) => {
+    const copy = { ...page };
+    if (Array.isArray(copy.elements)) nested.push(...copy.elements);
+    delete copy.elements;
+    return copy;
+  });
+  const elements = [];
+  const seen = new Set();
+  for (const element of [...(Array.isArray(doc.elements) ? doc.elements : []), ...nested]) {
+    const id = isObj(element) ? element.id : null;
+    if (id && seen.has(id)) continue;
+    if (id) seen.add(id);
+    elements.push(element);
+  }
+  return { ...doc, pages, elements };
+}
+
 export function wrap(doc, extra = {}) {
-  return { ...extra, document: doc };
+  return { ...extra, document: flattenElements(doc) };
 }

@@ -37,8 +37,9 @@ class TestCodeRep(unittest.TestCase):
 
     def test_wrap_always_nests(self):
         doc = {'schemaVersion': 1, 'pages': []}
-        self.assertEqual(code_rep.wrap(doc), {'document': doc})
-        self.assertEqual(code_rep.wrap(doc, extra={'name': 'N'}), {'name': 'N', 'document': doc})
+        api_doc = {**doc, 'elements': []}
+        self.assertEqual(code_rep.wrap(doc), {'document': api_doc})
+        self.assertEqual(code_rep.wrap(doc, extra={'name': 'N'}), {'name': 'N', 'document': api_doc})
 
     def test_round_trip_lossless_from_both_shapes(self):
         for r in (LIVE, LEGACY):
@@ -52,6 +53,21 @@ class TestCodeRep(unittest.TestCase):
             self.assertEqual(doc['panels'], [{'id': 'pn1'}])
             for key in ('elements', 'overlays', 'panels'):
                 self.assertNotIn(key, code_rep.metadata(r))
+
+    def test_page_membership_comes_from_layout(self):
+        self.assertEqual(code_rep.workbook_page_element_ids(LIVE), {'p': ['e1']})
+        element, page = code_rep.workbook_elements_with_pages(LIVE)[0]
+        self.assertEqual(element['id'], 'e1')
+        self.assertEqual(page['id'], 'p')
+
+    def test_wrap_flattens_legacy_page_elements(self):
+        nested = {
+            'schemaVersion': 1,
+            'pages': [{'id': 'p', 'elements': [{'id': 'old', 'kind': 'text'}]}],
+        }
+        wrapped = code_rep.wrap(nested)['document']
+        self.assertEqual([element['id'] for element in wrapped['elements']], ['old'])
+        self.assertNotIn('elements', wrapped['pages'][0])
 
 
 LIVE_WITH_SETTINGS = {
@@ -82,7 +98,9 @@ class TestCodeRepSettingsAgents(unittest.TestCase):
         for r in (LIVE_WITH_SETTINGS, LEGACY_WITH_SETTINGS):
             doc = code_rep.document(r)
             wrapped = code_rep.wrap(doc, extra=code_rep.metadata(r))
-            self.assertEqual(wrapped['document'], doc)
+            self.assertEqual(wrapped['document']['settings'], doc['settings'])
+            self.assertEqual(wrapped['document']['agents'], doc['agents'])
+            self.assertEqual(wrapped['document']['elements'], [])
             self.assertNotIn('settings', wrapped)
             self.assertNotIn('agents', wrapped)
 
