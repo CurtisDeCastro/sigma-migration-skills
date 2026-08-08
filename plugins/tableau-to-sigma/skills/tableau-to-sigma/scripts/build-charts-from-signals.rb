@@ -72,6 +72,7 @@ require_relative 'lib/tableau_dynamic_title'
 require_relative 'lib/kpi_card'       # shared KPI-chart emitter (comparative-KPI-ready)
 require_relative 'lib/kpi_comparison_detect' # Task 5: prior/target comparison-measure detector
 require_relative 'lib/action_ledger' # workbook-wide action id registry + validate/manifest
+require_relative 'lib/action_column_resolver' # Task 5: raw Tableau source-field ref -> emitted Sigma column name
 require 'erb'
 
 opts = { master_id: 'master' }
@@ -6801,15 +6802,27 @@ end
 # (the workbook URL doesn't exist until the POST returns).
 action_id_registry = {} # workbook-wide — ActionLedger.new_id, never per-dash/per-zone
 emitted_actions = []
-# (dash_name, pre-namespacing host id) → the SAME hash object held in
-# emitted_actions, so the --page-per-dashboard rename hook below (namespace_ids)
-# can mutate the manifest entry in place when its host element id gets
-# suffixed. Keyed by a compound (dashboard, host) pair, NOT by host alone —
-# two unrelated dashboards' buttons can share a host string ("btn-10") purely
-# because Tableau zone ids restart per dashboard, and a stem-only key (the
-# pattern chart-provenance uses, which assumes stem collisions are the SAME
-# worksheet reused) would silently pair one dashboard's caption with another's
-# action.
+# (dash_name, pre-namespacing host id) → an ARRAY of the SAME hash objects held
+# in emitted_actions, so the --page-per-dashboard rename hooks below
+# (namespace_ids and the els.map! pass) can mutate every affected manifest entry
+# in place when its host element id gets suffixed. Keyed by a compound
+# (dashboard, host) pair, NOT by host alone — two unrelated dashboards' buttons
+# can share a host string ("btn-10") purely because Tableau zone ids restart per
+# dashboard, and a stem-only key (the pattern chart-provenance uses, which
+# assumes stem collisions are the SAME worksheet reused) would silently pair one
+# dashboard's caption with another's action.
+#
+# The value is an ARRAY, never a single entry: ONE host element can carry
+# actions of MORE THAN ONE KIND (a worksheet with both a <nav-action> and an
+# <edit-parameter-action> yields an on-select→navigate AND an
+# on-select→set-control-value on the same chart, both keyed by the same
+# (dashboard, host) pair). A scalar value made the second writer EVICT the
+# first; the rename pass then synced only the survivor, and the evicted entry
+# shipped a stale hostElementId/actionId. put-layout.rb:224 looks the manifest
+# up BY actionId against the posted spec — a stale id misses, and the whole
+# navigate.target.page repair is skipped with NO warning, leaving the
+# provisional page id live in the published workbook. Action counts still
+# match, so no gate catches it. Append here; iterate at both rename sites.
 emitted_action_index = {}
 nav_button_records = []
 unless opts[:pages_mode] == :worksheet
@@ -6875,7 +6888,7 @@ unless opts[:pages_mode] == :worksheet
             'effects'        => action['effects']
           }
           emitted_actions << manifest_entry
-          emitted_action_index[[dash['dashboard'], host]] = manifest_entry
+          (emitted_action_index[[dash['dashboard'], host]] ||= []) << manifest_entry
           e = { 'id' => host, 'kind' => 'button', 'text' => label,
                 'appearance' => 'filled', 'align' => 'center', 'size' => 'small',
                 'actions' => [action] }
@@ -6912,6 +6925,77 @@ unless opts[:pages_mode] == :worksheet
   # AFTER that whole pass, once ids are final (see below, alongside the
   # chart-provenance/hidden-titles sidecars, which write "after the emitters"
   # for the identical reason).
+end
+
+# ---- nav-action MARK CLICKS (bfxd step 1) ----------------------------------
+# A Tableau <nav-action> fires from a mark click on a WORKSHEET, not from a
+# dashboard-object button. on-select -> navigate is runtime-proven, so these
+# are auto-wirable; only three shapes are not, and each stays residue with its
+# reason named rather than being silently dropped:
+#   - on-hover / tooltip-menu activation: Sigma has no equivalent trigger.
+#   - a WORKSHEET target: Sigma navigates to a PAGE; there is no element-id
+#     index that would let us target a sheet within one.
+#   - a source naming zero or multiple worksheets: no unambiguous host element.
+#
+# Page ids are provisional here for the same reason as the nav-button block
+# above — two id schemes coexist and put-layout.rb repairs navigate.target.page
+# BY NAME after publish using targetPageName.
+unless opts[:pages_mode] == :worksheet
+  Array(opts[:detected_actions]).each do |det|
+    next unless det['kind'] == 'nav-action'
+
+    caption = det['caption'].to_s
+    unless det['trigger'].to_s.strip.casecmp('on select').zero?
+      warnings << "nav-action '#{caption}' activates on #{det['trigger'].inspect} — " \
+                  'Sigma has no equivalent trigger (named residue)'
+      next
+    end
+    sheets = Array(det.dig('source', 'worksheets'))
+    if sheets.length != 1
+      warnings << "nav-action '#{caption}' sources #{sheets.length} worksheet(s) — " \
+                  'no unambiguous host element (named residue)'
+      next
+    end
+    target = Array(det['targets']).first || {}
+    unless target['dashboard'] == true
+      warnings << "nav-action '#{caption}' targets worksheet '#{target['name']}', not a " \
+                  'dashboard — Sigma navigates to a page, and there is no element-id ' \
+                  'index for a sheet within one (named residue)'
+      next
+    end
+
+    host_el = elements.find { |e| e['_worksheet'] == sheets.first }
+    if host_el.nil?
+      warnings << "nav-action '#{caption}' sources worksheet '#{sheets.first}', which " \
+                  'produced no emitted element (named residue)'
+      next
+    end
+
+    slug = target['name'].to_s.downcase.gsub(/[^a-z0-9]+/, '-')
+             .sub(/\A-/, '').sub(/-\z/, '')[0..40].to_s
+    action = {
+      'id'      => ActionLedger.new_id(action_id_registry, host_el['id']),
+      'trigger' => 'on-select',
+      'effects' => [{ 'effect' => 'navigate',
+                      'target' => { 'type' => 'page', 'page' => "page-#{slug}" } }]
+    }
+    errs = ActionLedger.validate_action(action)
+    raise "emitted an invalid nav-action on #{host_el['id']}: #{errs.join('; ')}" if errs.any?
+
+    manifest_entry = {
+      'actionId'       => action['id'],
+      'source'         => { 'kind' => 'nav-action', 'caption' => caption,
+                            'sourceSheet' => sheets.first,
+                            'actionName' => det['actionName'] },
+      'hostElementId'  => host_el['id'],
+      'targetPageName' => target['name'],
+      'trigger'        => action['trigger'],
+      'effects'        => action['effects']
+    }
+    emitted_actions << manifest_entry
+    (emitted_action_index[[host_el['_dashboard'], host_el['id']]] ||= []) << manifest_entry
+    (host_el['actions'] ||= []) << action
+  end
 end
 
 styled_text_all = styled_text_by_dash.values.flatten(1)
@@ -7870,6 +7954,157 @@ rescue => e
   warnings << "control-coverage reconciliation error: #{e.message}"
 end
 
+# ---- PARAMETER actions (bfxd step 2) ---------------------------------------
+# on-select -> set-control-value {type: "column"}: the mark click sets a control
+# to the clicked row's value. RUNTIME-PROVEN 2026-08-06 end to end.
+#
+# Placement note: structurally this cannot sit right after Task 3's nav-action
+# block (immediately after the zones/nav-button loop, before `param_controls`/
+# `auto_controls` are even declared) — resolving `target_name` to a control
+# needs both arrays fully populated, and they aren't until further down. This
+# is the earliest point after both exist, while `elements` still carry
+# `_worksheet`/`_dashboard` (stripped inside the pages_mode branches below) and
+# before the actions-emitted manifest is written — the same two constraints
+# Task 3's block had to satisfy.
+#
+# Three hard constraints, each confirmed by breaking it:
+#   - `control` takes the controlId, NOT the control element's id. /verify
+#     ACCEPTS the wrong form; the live create rejects it.
+#   - a control with no filters[] makes this a SILENT no-op. There is no direct
+#     chart->chart filter effect; it always routes through a control.
+#   - the clicked column must exist on the HOST element for {type: "column"} to
+#     bind, and the effect carries that column's ID. When the host does not
+#     carry it, that is residue, not a guess. Enforced by the HOST-COLUMN
+#     BINDING guard below — `mmap` answers a workbook-global question and
+#     cannot enforce this on its own.
+unless opts[:pages_mode] == :worksheet
+  Array(opts[:detected_actions]).each do |det|
+    next unless det['kind'] == 'parameter-action'
+
+    caption = det['caption'].to_s
+    unless det['trigger'].to_s.strip.casecmp('on select').zero?
+      warnings << "parameter-action '#{caption}' activates on #{det['trigger'].inspect} — " \
+                  'Sigma has no equivalent trigger (named residue)'
+      next
+    end
+    sheets = Array(det.dig('source', 'worksheets'))
+    if sheets.length != 1
+      warnings << "parameter-action '#{caption}' sources #{sheets.length} worksheet(s) — " \
+                  'no unambiguous host element (named residue)'
+      next
+    end
+    host_el = elements.find { |e| e['_worksheet'] == sheets.first }
+    if host_el.nil?
+      warnings << "parameter-action '#{caption}' sources worksheet '#{sheets.first}', " \
+                  'which produced no emitted element (named residue)'
+      next
+    end
+
+    col = ActionColumnResolver.resolve(ref: det['sourceFieldRef'], mmap: mmap,
+                                       columns_by_guid: meta['columns_by_guid'] || {})
+    if col.nil?
+      warnings << "parameter-action '#{caption}' source field " \
+                  "#{det['sourceFieldRef'].inspect} does not resolve to an emitted column — " \
+                  'add a master-columns.json regex, or wire it by hand (named residue)'
+      next
+    end
+
+    # HOST-COLUMN BINDING — the third hard constraint in this block's header,
+    # and the one `mmap` alone cannot enforce. `ActionColumnResolver.resolve`
+    # answers a WORKBOOK-GLOBAL question ("which Sigma column NAME does this
+    # Tableau ref mean?"); {type: "column"} asks a per-element one ("which
+    # column OF THE HOST does the clicked mark carry?"). A source field that
+    # resolves globally but is not on this chart binds to nothing: the click
+    # sets the control to the wrong value (or to nothing at all), through a
+    # schema-valid action every gate passes — action_column_resolver.rb's own
+    # stated anti-goal. Proven before this guard existed: an [Order ID] source
+    # field on a host carrying only Region / Profit Ratio / Region Not Null
+    # emitted column "Order ID" with no warning at all.
+    #
+    # The effect takes the host column's **id**, not its name — the
+    # live-probed shape is `value: {type: "column", column: <columnId>}` (the
+    # design's VERIFIED SIGMA SHAPES). Host columns are {id:, name:, formula:}
+    # (e.g. {"id" => "x-el-sales-by-region", "name" => "Region"}), and their
+    # `name` is the same master-map `name` the resolver returns, so an exact
+    # match is the normal case; the strip/case-insensitive second pass covers
+    # incidental whitespace/casing drift between the two, never a different
+    # column. No match at all is RESIDUE, never a guess.
+    host_cols = Array(host_el['columns']).select { |c| c.is_a?(Hash) && c['id'] }
+    host_col  = host_cols.find { |c| c['name'].to_s == col.to_s } ||
+                host_cols.find { |c| c['name'].to_s.strip.casecmp(col.to_s.strip).zero? }
+    if host_col.nil?
+      warnings << "parameter-action '#{caption}' source field " \
+                  "#{det['sourceFieldRef'].inspect} resolves to column #{col.inspect}, which is " \
+                  "NOT a column of its host element '#{host_el['id']}' " \
+                  "(has: #{host_cols.map { |c| c['name'] }.inspect}) — a {type: \"column\"} value " \
+                  'can only bind a column the clicked mark actually carries, so this would set the ' \
+                  'control to the wrong value; wire it by hand (named residue)'
+      next
+    end
+    col_id = host_col['id']
+
+    # The control the parameter already migrated to. A Tableau parameter's
+    # auto-generated control lives in `param_controls` (built from
+    # meta['parameters']); a quick-filter's lives in `auto_controls` (built
+    # from meta['shared_filters']) — search both, exactly as every other
+    # consumer of "all controls" in this file does (control-coverage above,
+    # and the page-emission duplication passes at :8437/:8515/:8659).
+    # targetParameterRef's caption is what extract_parameter_actions rendered
+    # into targets[0]['name'].
+    target_name = Array(det['targets']).first.to_h['name'].to_s
+    ctl = (param_controls + auto_controls).find { |c| c['name'].to_s.strip.casecmp(target_name.strip).zero? }
+    if ctl.nil?
+      warnings << "parameter-action '#{caption}' targets parameter '#{target_name}', which " \
+                  'has no emitted control — the click has nothing to set (named residue)'
+      next
+    end
+    if Array(ctl['filters']).empty?
+      warnings << "parameter-action '#{caption}' targets control '#{ctl['controlId']}', " \
+                  'which carries no filters[] — setting it would be a SILENT no-op ' \
+                  '(named residue)'
+      next
+    end
+
+    action = {
+      'id'      => ActionLedger.new_id(action_id_registry, host_el['id']),
+      'trigger' => 'on-select',
+      'effects' => [{ 'effect'  => 'set-control-value',
+                      # controlId, NOT the control element's id. In
+                      # --page-per-dashboard/--page-per-worksheet mode this
+                      # captured id is PROVISIONAL: the per-page control-
+                      # duplication pass further down suffixes every
+                      # param/auto control's controlId per page via
+                      # `ctl_rewrites`, and that pass has been extended (see
+                      # the two `ctl_rewrites` loops below) to rewrite this
+                      # exact field in lockstep — mirroring how
+                      # emitted_action_index keeps nav-action/nav-button
+                      # references correct across that same per-page rename.
+                      'control' => ctl['controlId'],
+                      # The HOST element's columnId (not a bare column name):
+                      # the live-probed shape is
+                      # {type: "column", column: <columnId>}. Resolved just
+                      # above against host_el['columns'] — see the
+                      # HOST-COLUMN BINDING note there.
+                      'value'   => { 'type' => 'column', 'column' => col_id } }]
+    }
+    errs = ActionLedger.validate_action(action)
+    raise "emitted an invalid parameter-action on #{host_el['id']}: #{errs.join('; ')}" if errs.any?
+
+    manifest_entry = {
+      'actionId'      => action['id'],
+      'source'        => { 'kind' => 'parameter-action', 'caption' => caption,
+                           'sourceSheet' => sheets.first,
+                           'actionName' => det['actionName'] },
+      'hostElementId' => host_el['id'],
+      'trigger'       => action['trigger'],
+      'effects'       => action['effects']
+    }
+    emitted_actions << manifest_entry
+    (emitted_action_index[[host_el['_dashboard'], host_el['id']]] ||= []) << manifest_entry
+    (host_el['actions'] ||= []) << action
+  end
+end
+
 # ---- v5.1 leaked-ref guard (fail-closed) ------------------------------------
 # A column ref whose inner name contains formula punctuation or a Tableau pill
 # qualifier ([Master/-WINDOW_MAX(…)], [Master/Rank N (copy)_…:ok:9]) is ALWAYS
@@ -8445,6 +8680,19 @@ if opts[:pages_mode] == :worksheet
         end
         col['formula'] = f
       end
+      # A set-control-value effect's `control` names a param/auto controlId —
+      # the SAME id this page just suffixed above. Without this, an emitted
+      # action (parameter-action emission is currently gated off in
+      # page-per-worksheet mode, but this keeps the two duplication sites in
+      # lockstep against future changes) would reference a controlId that no
+      # longer exists on this page, exactly the staleness class the
+      # formula-rewrite above exists to prevent.
+      (el['actions'] || []).each do |a|
+        (a['effects'] || []).each do |eff|
+          nxt = ctl_rewrites[eff['control']]
+          eff['control'] = nxt if eff['effect'] == 'set-control-value' && nxt
+        end
+      end
     end
     pages << {
       'name'     => ws_name,
@@ -8547,6 +8795,21 @@ elsif opts[:pages_mode] == :dashboard
         ctl_rewrites.each { |from, to| f = f.gsub("[#{from}]", "[#{to}]") }
         col['formula'] = f
       end
+      # A parameter-action's set-control-value effect names a param/auto
+      # controlId — the SAME id this dashboard page just suffixed above via
+      # ctl_rewrites. Without this rewrite the emitted action would reference
+      # a controlId that only existed pre-namespacing and never appears in
+      # this page's own control list — a schema-valid action the live create
+      # rejects ("references unknown control"), same failure mode as passing
+      # an element id instead of a controlId. Mirrors the formula rewrite
+      # immediately above; mutates the effect hash in place, which the
+      # actions-emitted manifest (built from the SAME object) picks up too.
+      (el['actions'] || []).each do |a|
+        (a['effects'] || []).each do |eff|
+          nxt = ctl_rewrites[eff['control']]
+          eff['control'] = nxt if eff['effect'] == 'set-control-value' && nxt
+        end
+      end
     end
     # K3: page_extras (styled text, title text, images) carry Tableau ZONE ids,
     # which are unique per dashboard but NOT globally — "text-550" recurs on the
@@ -8565,16 +8828,25 @@ elsif opts[:pages_mode] == :dashboard
           if (pv = $chart_provenance[stem])
             $chart_provenance[ns] = pv.merge('dashboard' => dash_name)
           end
-          # A nav-button's manifest entry (keyed by the EXACT (dashboard, host)
-          # pair — never by stem alone, since two unrelated dashboards' buttons
-          # can share a host string) gets updated IN PLACE so its
-          # hostElementId/actionId track the same rename this gsub is about to
-          # apply to the real element. Without this, write_manifest below would
-          # ship a hostElementId/actionId that no longer exists in the spec —
-          # exactly the staleness the manifest exists to prevent.
-          if (entry = emitted_action_index[[dash_name, stem]])
+          # EVERY manifest entry hosted here (keyed by the EXACT (dashboard,
+          # host) pair — never by stem alone, since two unrelated dashboards'
+          # buttons can share a host string) gets updated IN PLACE so its
+          # hostElementId/actionId/effects track the same rename this gsub is
+          # about to apply to the real element. Without this, write_manifest
+          # below would ship a hostElementId/actionId that no longer exists in
+          # the spec — exactly the staleness the manifest exists to prevent.
+          # ITERATE, never `= entry`: one host can carry actions of several
+          # kinds (see the emitted_action_index declaration), and syncing only
+          # one of them re-creates the stale-actionId silent skip.
+          Array(emitted_action_index[[dash_name, stem]]).each do |entry|
             entry['hostElementId'] = ns
             entry['actionId'] = entry['actionId'].to_s.gsub(stem, ns)
+            # Effects can EMBED the stem too — a set-control-value's
+            # value.column is the host column's id (x-<stem>/y-<stem>/…), which
+            # the whole-element gsub below rewrites in the spec. The manifest
+            # copy must move in lockstep or probe-actions-readback.rb diffs a
+            # pre-rename column id against the posted one.
+            entry['effects'] = JSON.parse(entry['effects'].to_json.gsub(stem, ns)) if entry['effects']
           end
           JSON.parse(el.to_json.gsub(stem, ns))
         else
@@ -8604,6 +8876,30 @@ elsif opts[:pages_mode] == :dashboard
         # view CSV by design).
         if (pv = $chart_provenance[stem])
           $chart_provenance[ns] = pv.merge('dashboard' => dash_name)
+        end
+        # EVERY manifest entry hosted here (keyed by the EXACT (dashboard,
+        # host) pair, same as namespace_ids above) gets updated IN PLACE so its
+        # hostElementId/actionId/effects track the same rename this gsub is
+        # about to apply to the real element. Without this, put-layout.rb's
+        # navigate.target.page repair looks up the manifest by actionId
+        # against the POSTED spec's action id, finds nothing (stale), and
+        # silently skips the repair — no warning — leaving the provisional
+        # page id live. Mirrors namespace_ids exactly; do not invent a
+        # different mechanism.
+        #
+        # ITERATE over an ARRAY, never `if (entry = ...)`: one chart element
+        # can host BOTH a nav-action (on-select→navigate) and a
+        # parameter-action (on-select→set-control-value) when its worksheet is
+        # the source of both Tableau actions. A scalar index let the second
+        # emitter evict the first, and syncing only the survivor left the
+        # evicted entry's actionId stale — the exact silent-skip this block
+        # exists to prevent, reintroduced through the back door.
+        Array(emitted_action_index[[dash_name, stem]]).each do |entry|
+          entry['hostElementId'] = ns
+          entry['actionId'] = entry['actionId'].to_s.gsub(stem, ns)
+          # See namespace_ids above: value.column is a host column id, which
+          # embeds the stem, so the manifest's effects must be rewritten too.
+          entry['effects'] = JSON.parse(entry['effects'].to_json.gsub(stem, ns)) if entry['effects']
         end
         src_before = el.dig('source', 'elementId')
         el2 = JSON.parse(el.to_json.gsub(stem, ns))
