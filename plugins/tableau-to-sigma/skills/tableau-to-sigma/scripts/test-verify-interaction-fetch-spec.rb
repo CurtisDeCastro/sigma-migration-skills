@@ -11,8 +11,9 @@
 # subprocess.)
 #
 # fetch_spec GETs the live workbook spec; ControlLint.elements/controls_report
-# need a flat `spec['pages']`. Workbook code-rep GETs nest `pages` under a
-# top-level `document` key (live since 2026-08) — pre-fix, a control that IS
+# need flat document elements plus layout-derived page membership. Workbook
+# code-rep GETs nest the workbook document under a top-level `document` key
+# (live since 2026-08) — pre-fix, a control that IS
 # correctly wired (filters a same-page queryable element) would silently read
 # as "control not present in the live workbook spec" on every probe, because
 # ControlLint never saw the nested pages.
@@ -43,21 +44,22 @@ require 'rbconfig'
 SCRIPT = File.join(__dir__, 'verify-interaction.rb')
 REAL_SIGMA_REST = File.expand_path('lib/sigma_rest.rb', __dir__)
 
-# The live (nested) readback: a `filters`-mechanism control ("Region") wired
+# The live (wrapped) readback: a `filters`-mechanism control ("Region") wired
 # to a same-page queryable table element.
+ELEMENTS = [
+  { 'id' => 'ctl1', 'kind' => 'control', 'controlType' => 'list',
+    'controlId' => 'c-cid', 'name' => 'Region',
+    'filters' => [{ 'source' => { 'elementId' => 'tbl1' } }] },
+  { 'id' => 'tbl1', 'kind' => 'table', 'name' => 'Revenue Table' }
+].freeze
 NESTED_SPEC = {
   'workbookId' => 'wb-test',
   'document' => {
     'schemaVersion' => 4,
-    'pages' => [{
-      'id' => 'p1', 'name' => 'Dashboard',
-      'elements' => [
-        { 'id' => 'ctl1', 'kind' => 'control', 'controlType' => 'list',
-          'controlId' => 'c-cid', 'name' => 'Region',
-          'filters' => [{ 'source' => { 'elementId' => 'tbl1' } }] },
-        { 'id' => 'tbl1', 'kind' => 'table', 'name' => 'Revenue Table' }
-      ]
-    }]
+    'kind' => 'workbook',
+    'pages' => [{ 'id' => 'p1', 'name' => 'Dashboard' }],
+    'elements' => ELEMENTS,
+    'layout' => '<Page id="p1"><Element elementId="ctl1"/><Element elementId="tbl1"/></Page>'
   }
 }.freeze
 
@@ -118,7 +120,7 @@ def check(cond, msg, fails)
   puts "  #{cond ? 'PASS' : 'FAIL'}  #{msg}"
 end
 
-puts "== verify-interaction fetch_spec: nested spec GET must resolve the control's reach =="
+puts "== verify-interaction fetch_spec: wrapped spec GET must resolve the control's reach =="
 Dir.mktmpdir do |dir|
   log = File.join(dir, 'stub.log')
   _out, err, st = run_verify(dir, { 'SIGMA_STUB_LOG' => log })

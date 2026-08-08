@@ -79,14 +79,21 @@ def export_posts(log)
 end
 
 def write_spec(path, version)
+  elements = [
+    { 'id' => 'el-anchor', 'name' => 'Top Accounts', 'kind' => 'table',
+      'columns' => [{ 'id' => 'c-a', 'name' => 'Account' }, { 'id' => 'c-v', 'name' => 'Revenue' }] },
+    { 'id' => 'el-ok', 'name' => 'Region Chart', 'kind' => 'bar-chart',
+      'columns' => [{ 'id' => 'c-r', 'name' => 'Region' }, { 'id' => 'c-v2', 'name' => 'Revenue' }] }
+  ]
   File.write(path, JSON.pretty_generate(
                'workbookId' => 'wb', 'latestDocumentVersion' => version,
-               'pages' => [{ 'id' => 'pg1', 'elements' => [
-                 { 'id' => 'el-anchor', 'name' => 'Top Accounts', 'kind' => 'table',
-                   'columns' => [{ 'id' => 'c-a', 'name' => 'Account' }, { 'id' => 'c-v', 'name' => 'Revenue' }] },
-                 { 'id' => 'el-ok', 'name' => 'Region Chart', 'kind' => 'bar-chart',
-                   'columns' => [{ 'id' => 'c-r', 'name' => 'Region' }, { 'id' => 'c-v2', 'name' => 'Revenue' }] }
-               ] }]))
+               'document' => {
+                 'schemaVersion' => 4,
+                 'kind' => 'workbook',
+                 'pages' => [{ 'id' => 'pg1', 'name' => 'Overview' }],
+                 'elements' => elements,
+                 'layout' => "<Page id=\"pg1\">#{elements.map { |el| %(<Element elementId="#{el['id']}"/>) }.join}</Page>"
+               }))
 end
 
 def write_anchors(dir, anchors)
@@ -262,8 +269,9 @@ Dir.mktmpdir do |dir|
   check(s2.exitstatus.zero?, "collect-parity-actuals exits 0 (got #{s2.exitstatus})", fails)
   check(export_posts(log).zero?,
         "collect-parity-actuals re-used verify-anchors' export — ZERO export POSTs (got #{export_posts(log)})", fails)
-  check(JSON.parse(File.read(out_path))['Region Chart'] == [['East', 100.0], ['West', 200.0]],
-        'actuals recomputed from the cross-script cached raw bytes', fails)
+  cached_actuals = JSON.parse(File.read(out_path))['Region Chart']
+  check(cached_actuals == [['East', 100.0], ['West', 200.0]],
+        "actuals recomputed from the cross-script cached raw bytes (got #{cached_actuals.inspect})", fails)
 end
 
 # ============================================================================
@@ -805,7 +813,13 @@ def pc_spec(path, with_unlabeled: false)
   end
   File.write(path, JSON.pretty_generate(
                'workbookId' => 'wb', 'latestDocumentVersion' => 5,
-               'pages' => [{ 'id' => 'p1', 'name' => 'p1', 'elements' => elements }]))
+               'document' => {
+                 'schemaVersion' => 4,
+                 'kind' => 'workbook',
+                 'pages' => [{ 'id' => 'p1', 'name' => 'p1' }],
+                 'elements' => elements,
+                 'layout' => "<Page id=\"p1\">#{elements.map { |el| %(<Element elementId="#{el['id']}"/>) }.join}</Page>"
+               }))
 end
 
 def pc_export_posts(log)
@@ -942,6 +956,7 @@ Dir.mktmpdir do |dir|
   Dir.mkdir(File.join(fb_dir, 'lib'))
   FileUtils.cp(PC_SCRIPT, File.join(fb_dir, 'probe-controls.rb'))
   FileUtils.cp(File.join(SCRIPTS, 'lib', 'control_lint.rb'), File.join(fb_dir, 'lib', 'control_lint.rb'))
+  FileUtils.cp(File.join(SCRIPTS, 'lib', 'code_rep.rb'), File.join(fb_dir, 'lib', 'code_rep.rb'))
   # deliberately NO lib/export_pool.rb — the domo manifest shape
   spec_path = File.join(dir, 'pc-spec.json')
   pc_spec(spec_path)
