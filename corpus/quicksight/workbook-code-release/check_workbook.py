@@ -27,7 +27,9 @@ for element in elements:
 waterfall = by_kind["waterfall-chart"][0]
 assert waterfall["splitBy"]["id"]
 assert waterfall["waterfallShape"]["connectorLine"] == "shown"
-assert waterfall["legend"] == {"visibility": "hidden", "position": "right"}
+assert waterfall["legend"] == {"visibility": "hidden"}  # live API: cannot mix
+# visibility:'hidden' with legend content (position) -- oneOf branch is either
+# {visibility:'hidden'} alone, or {position,...} with no visibility field.
 assert by_kind["progress"][0]["max"] == "500"
 assert len(by_kind["navigation"]) == 2
 assert by_kind["control"][0]["controlType"] == "drill"
