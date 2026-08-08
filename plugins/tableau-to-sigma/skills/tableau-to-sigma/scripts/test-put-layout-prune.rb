@@ -25,8 +25,13 @@ SCRIPT = File.expand_path('put-layout.rb', __dir__)
 # divider) alongside chrome the new layout still uses.
 LIVE_SPEC = {
   'workbookId' => 'wb-test',
-  'pages' => [
-    { 'id' => 'page-pw', 'name' => 'Profitability Watch', 'elements' => [
+  'document' => {
+    'schemaVersion' => 1,
+    'kind' => 'workbook',
+    'pages' => [
+      { 'id' => 'page-pw', 'name' => 'Profitability Watch' }
+    ],
+    'elements' => [
       { 'id' => 'el-a', 'kind' => 'bar-chart', 'name' => 'Margin Trend' },
       { 'id' => 'title-profitability-watch', 'kind' => 'text', 'name' => nil },
       { 'id' => 'text-z9', 'kind' => 'text', 'name' => nil },              # user element, unreferenced — keep
@@ -34,8 +39,8 @@ LIVE_SPEC = {
       { 'id' => 'tc-page-pw-extra', 'kind' => 'container' },               # stale safety band — prune
       { 'id' => 'band-page-pw-hdrtext', 'kind' => 'text' },                # stale fabricated header — prune
       { 'id' => 'dv-page-pw-z3', 'kind' => 'divider' }                     # stale divider — prune
-    ] }
-  ]
+    ]
+  }
 }.freeze
 
 # The REBUILT layout: header band + title + chart. No -extra band, no

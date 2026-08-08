@@ -25,7 +25,15 @@ def check(name)
 end
 
 def lint(spec)
-  LayoutLint.lint(spec)
+  # Keep the terse per-case fixtures below readable, but exercise the released
+  # workbook code representation: page metadata only, document-global elements.
+  canonical = Marshal.load(Marshal.dump(spec))
+  canonical['elements'] = Array(canonical['pages']).flat_map do |page|
+    Array(page.delete('elements'))
+  end
+  canonical['schemaVersion'] = 1
+  canonical['kind'] = 'workbook'
+  LayoutLint.lint('document' => canonical)
 end
 
 def has?(viol, frag)
