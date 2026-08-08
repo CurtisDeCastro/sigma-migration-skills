@@ -42,13 +42,13 @@ LIVE_SPEC = {
 # fabricated hdrtext, no divider.
 NEW_XML = <<~XML
   <Page type="grid" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto" id="page-pw">
-  <GridContainer elementId="band-page-pw-hdr" type="grid" gridColumn="1 / 25" gridRow="1 / 4" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto">
-    <LayoutElement elementId="title-profitability-watch" gridColumn="1 / 25" gridRow="1 / 4"/>
-  </GridContainer>
-  <GridContainer elementId="band-page-pw-1" type="grid" gridColumn="1 / 25" gridRow="4 / 15" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto">
-    <LayoutElement elementId="el-a" gridColumn="1 / 25" gridRow="1 / 12"/>
-    <LayoutElement elementId="text-z9" gridColumn="1 / 4" gridRow="1 / 2"/>
-  </GridContainer>
+  <Container elementId="band-page-pw-hdr" type="grid" gridColumn="1 / 25" gridRow="1 / 4" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto">
+    <Element elementId="title-profitability-watch" gridColumn="1 / 25" gridRow="1 / 4"/>
+  </Container>
+  <Container elementId="band-page-pw-1" type="grid" gridColumn="1 / 25" gridRow="4 / 15" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto">
+    <Element elementId="el-a" gridColumn="1 / 25" gridRow="1 / 12"/>
+    <Element elementId="text-z9" gridColumn="1 / 4" gridRow="1 / 2"/>
+  </Container>
   </Page>
 XML
 

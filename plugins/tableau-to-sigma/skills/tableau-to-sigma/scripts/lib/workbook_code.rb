@@ -40,7 +40,7 @@ module WorkbookCode
     Array(document(spec)['pages']).select { |page| page.is_a?(Hash) }
   end
 
-  # Page id => element ids, in layout order. A nested GridContainer,
+  # Page id => element ids, in layout order. A nested Container,
   # TabbedContainer, or repeated-container still contributes each elementId
   # exactly once.
   def placements(spec)
@@ -103,7 +103,7 @@ module WorkbookCode
     row = 1
     children = page_elements.map do |element|
       height = row_span(element)
-      xml = %(  <LayoutElement elementId="#{CGI.escapeHTML(element.fetch('id'))}" gridColumn="1 / #{GRID_COLUMNS + 1}" gridRow="#{row} / #{row + height}"/>)
+      xml = %(  <Element elementId="#{CGI.escapeHTML(element.fetch('id'))}" gridColumn="1 / #{GRID_COLUMNS + 1}" gridRow="#{row} / #{row + height}"/>)
       row += height
       xml
     end
@@ -139,7 +139,7 @@ module WorkbookCode
       row = match[2].scan(/\bgridRow="(?:\d+)\s*\/\s*(\d+)"/).flatten.map(&:to_i).max || 1
       additions = missing.map do |element|
         height = row_span(element)
-        line = %(  <LayoutElement elementId="#{CGI.escapeHTML(element.fetch('id'))}" gridColumn="1 / #{GRID_COLUMNS + 1}" gridRow="#{row} / #{row + height}"/>)
+        line = %(  <Element elementId="#{CGI.escapeHTML(element.fetch('id'))}" gridColumn="1 / #{GRID_COLUMNS + 1}" gridRow="#{row} / #{row + height}"/>)
         row += height
         line
       end.join("\n")

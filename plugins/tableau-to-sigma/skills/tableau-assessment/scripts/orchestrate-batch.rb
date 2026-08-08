@@ -261,7 +261,7 @@ def agent_brief(sub, cluster, batch_results_path, leader_dm_id_path, out_dir, ov
        tiles. Read the .twb zone tree at `<out-dir>/twbs/<luid>.twb` or
        use `scripts/parse-twb-layout.rb` for per-tile `x_pct, y_pct,
        w_pct, h_pct` — translate those into 24-column / multi-row
-       `<LayoutElement>` positions. A 3-column × 2-row source dashboard
+       `<Element>` positions. A 3-column × 2-row source dashboard
        MUST become a 3-column × 2-row Sigma layout, NOT a single-column
        stack. Single-column layouts are the most common visual regression
        across audit batches — every chart at `gridColumn="1 / 13"` is

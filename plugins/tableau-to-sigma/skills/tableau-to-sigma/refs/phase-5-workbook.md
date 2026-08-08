@@ -166,7 +166,7 @@ Rules:
 - Master-column formulas use the DM element's `name` as prefix (`[Order Fact/Sales]`, not the element ID).
 - Charts and controls source the master with `"elementId": "master"` regardless of which page they live on — cross-page **source** references (chart → master) resolve fine.
 - Chart-column formulas use the master table's `name` as prefix (`[Master/Sales]`).
-- Layout XML must produce **one `<Page>` tag per page**, including a tiny full-width `<LayoutElement elementId="master" .../>` inside the Data page's `<Page>` (one entry **per master instance** when per-page masters are on — see below).
+- Layout XML must produce **one `<Page>` tag per page**, including a tiny full-width `<Element elementId="master" .../>` inside the Data page's `<Page>` (one entry **per master instance** when per-page masters are on — see below).
 
 > **⚠️ Per-page masters (PLAN-v3 PR-17, flag-staged).** A control filter *propagates
 > along source chains, not page boundaries* — so when **multiple content pages share
@@ -337,11 +337,11 @@ File.write('<WORK>/layout.xml', xml)
 ```
 
 Layout helpers (in `scripts/lib/layout.rb`): `gc(eid, c0, c1, r0, r1, inner)` for
-`<GridContainer>`, `le(eid, c0, c1, r0, r1)` for `<LayoutElement>`, `page_xml(page_id, *children)`
+`<Container>`, `le(eid, c0, c1, r0, r1)` for `<Element>`, `page_xml(page_id, *children)`
 to wrap a page, `assemble(*pages)` to add the XML prologue.
 
 See `refs/layout-grid.md` for typical page layouts (4 KPIs + line chart + 2 bars,
-multi-row containers, etc.) and rules (`<GridContainer>` for nesting, KPI inner `gridRow`
+multi-row containers, etc.) and rules (`<Container>` for nesting, KPI inner `gridRow`
 must match container outer span).
 
 ### 5e. PUT the layout

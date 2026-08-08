@@ -32,7 +32,7 @@ stacked in one column; >40% of the page empty; the title invisible; source viz m
 2. **Hero strip** — a full-width `kind: container` with `style.backgroundColor` holding the
    title text. This is the real full-width bar; a text element alone cannot make one (below).
 3. **Section panels** — one white `container` per source section, each opening with a **nested**
-   colored `container` header bar (nested `<GridContainer>` works).
+   colored `container` header bar (nested `<Container>` works).
 4. **Stat cards** — mirror the source card grouping. A source "2-value" card → one card container
    holding a label text + two `kpi-chart`s side-by-side, each with a grey subtitle. Set each
    KPI's value-column `name: ' '` (single space) so its own title doesn't duplicate the label.
@@ -110,7 +110,7 @@ Migrations commonly drop the interactive layer. Rebuild from the source's parame
   so a rename throws `Dependency not found`. Rename only element-local pivot columns, or set friendly
   names at build time on freshly-created columns.
 - **Sigma auto-appends unplaced elements to the layout on save.** To delete an element, remove BOTH the
-  element AND its (possibly auto-added) `<LayoutElement>` ref, or the next PUT 400s on a dangling ref.
+  element AND its (possibly auto-added) `<Element>` ref, or the next PUT 400s on a dangling ref.
 - **API tokens are short-lived** — re-auth immediately before each GET/PUT/export.
 
 ## Wiring into the converter (the actual leverage)

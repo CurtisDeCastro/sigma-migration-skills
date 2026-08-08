@@ -107,7 +107,7 @@ Dir.mktmpdir do |dir|
 
   # dry-run apply-patch: merge a themeOverrides patch into a fake live spec
   live = { 'pages' => [{ 'id' => 'PG', 'elements' => [{ 'elementId' => 'k1', 'kind' => 'kpi-chart' }] }],
-           'layout' => '<Page><LayoutElement/></Page>', 'themeName' => 'Light' }
+           'layout' => '<Page><Element/></Page>', 'themeName' => 'Light' }
   File.write(File.join(dir, 'live.json'), JSON.generate(live))
   File.write(File.join(dir, 'patch.json'),
              JSON.generate({ 'themeOverrides' => { 'categoricalScheme' => ['#0e7c7b'] } }))
@@ -141,7 +141,7 @@ Dir.mktmpdir do |dir|
     'document' => {
       'schemaVersion' => 5,
       'pages' => [{ 'id' => 'PG', 'elements' => [{ 'elementId' => 'k1', 'kind' => 'kpi-chart' }] }],
-      'layout' => '<Page><LayoutElement/></Page>'
+      'layout' => '<Page><Element/></Page>'
     }
   }
   File.write(File.join(dir, 'nested-live.json'), JSON.generate(nested_live))

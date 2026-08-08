@@ -338,16 +338,16 @@ b64=$(base64 < extracted/Image/title-art.png | tr -d '\n')
 > backgroundImage. Composite art + text into one image only when the art must sit between two
 > specific elements rather than behind a whole page/container.
 
-In layout XML, image elements use a standard `<LayoutElement>`:
+In layout XML, image elements use a standard `<Element>`:
 ```xml
-<LayoutElement elementId="img-logo" gridColumn="1 / 9" gridRow="1 / 9"/>
+<Element elementId="img-logo" gridColumn="1 / 9" gridRow="1 / 9"/>
 ```
 
 ### Divider element
 
 `{"id": …, "kind": "divider", "direction": "horizontal|vertical", "style": {"color": "#hex6",
 "width": 1-4, "strokeStyle": "solid|dashed|dotted"}}` — live-verified POST + readback
-2026-07-11. The stroke centers in its grid cell, so a 1-row `<LayoutElement>` renders a clean
+2026-07-11. The stroke centers in its grid cell, so a 1-row `<Element>` renders a clean
 hairline. This is the native target for Tableau's thin filled rules (spacers / childless
 containers / blank-text bars ≤12px with a fill — `ZoneCensus.divider_zone?`); the layout
 builder emits them automatically (`dv-<page>-<zone>` ids). Unfilled thin zones are true gaps
@@ -368,8 +368,8 @@ nothing (named residue in coverage.json).
 
 ### Container element
 
-Uses `"kind": "container"`. Children are nested inside it via `<GridContainer>` in the layout
-XML (see the GridContainer section in `refs/layout-grid.md`). Style + background image are spec-supported (live-probed
+Uses `"kind": "container"`. Children are nested inside it via `<Container>` in the layout
+XML (see the Container section in `refs/layout-grid.md`). Style + background image are spec-supported (live-probed
 2026-07-11: pill radius + border + data-URI backgroundImage all render):
 
 ```json

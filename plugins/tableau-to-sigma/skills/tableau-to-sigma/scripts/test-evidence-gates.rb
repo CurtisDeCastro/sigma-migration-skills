@@ -155,8 +155,8 @@ end
 # ---- C. live: one spec GET + gate 7b recorded-RAW acceptance ----------------
 LIVE_SPEC = {
   'workbookId' => 'wb-7b', 'latestDocumentVersion' => '7',
-  'layout' => '<Layout><Page id="pg1"><LayoutElement elementId="el-chart" gridColumn="1 / 13"/>' \
-              '<LayoutElement elementId="el-ctl" gridColumn="13 / 25"/></Page></Layout>',
+  'layout' => '<Layout><Page id="pg1"><Element elementId="el-chart" gridColumn="1 / 13"/>' \
+              '<Element elementId="el-ctl" gridColumn="13 / 25"/></Page></Layout>',
   'pages' => [{ 'id' => 'pg1', 'name' => 'Overview', 'elements' => [
     { 'id' => 'el-chart', 'kind' => 'bar-chart', 'name' => 'Region Chart',
       'columns' => [{ 'id' => 'c-r', 'name' => 'Region' }, { 'id' => 'c-v', 'name' => 'Revenue' }] },

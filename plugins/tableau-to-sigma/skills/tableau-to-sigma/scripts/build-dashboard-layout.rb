@@ -298,7 +298,7 @@ def chart_pos(z, opts)
 end
 
 # ---- Faithful container-tree layout (preferred when a control rail exists) --
-# Mirror Tableau's nested zone tree as nested Sigma GridContainers so each
+# Mirror Tableau's nested zone tree as nested Sigma Containers so each
 # filter / parameter / chart lands INSIDE the container it lives in — preserving
 # the left-rail / sidebar idiom and arbitrary nesting — instead of re-banding by
 # raw geometry (which lumps every control into one top strip). Activates only
@@ -399,7 +399,7 @@ def resolve_leaf(node, ctx)
 end
 
 # Recursively emit a zone node as Sigma layout XML at grid cell (c0,c1,r0,r1)
-# RELATIVE to its parent container. Container nodes become GridContainers whose
+# RELATIVE to its parent container. Container nodes become Containers whose
 # children are placed in the container's own 24-col internal grid; empty
 # containers (no resolvable children) are dropped. Appends new container spec
 # placeholders to ctx[:extra]; records placed element ids in ctx[:placed].
@@ -502,7 +502,7 @@ def plan_node(node, c0, c1, r0, r1, ctx)
     kids = node['children'] || []
     # Wrapper-chain collapse: Tableau nests single-child pass-through
     # containers several levels deep (authoring artifacts). Each one used to
-    # become a real GridContainer — 12 no-op containers on the benchmark,
+    # become a real Container — 12 no-op containers on the benchmark,
     # each adding padding + a rounding pass that drifts the geometry. A
     # single-child container that carries NO visual identity of its own
     # (no fill/border/corner style) is pure structure: plan the child
@@ -890,12 +890,12 @@ end
 #   header band (rows 1..3) — title text full-width; colored only when the
 #                             source has a band-like fill (header_from_source);
 #                             detected source header text zones join the band
-#   sidebar rail            — one vertical GridContainer (repeat(1,1fr)) of
+#   sidebar rail            — one vertical Container (repeat(1,1fr)) of
 #                             stacked controls at the page edge; the content
 #                             grid gets the remaining columns
 #   control band            — non-rail controls side-by-side under the header
-#   KPI rows                — ONE GridContainer per detected row, inner
-#                             LayoutElements at equal spans, inner gridRow
+#   KPI rows                — ONE Container per detected row, inner
+#                             Elements at equal spans, inner gridRow
 #                             matching the container span (the KPI-sliver
 #                             rule: gridTemplateRows="auto" does NOT stretch
 #                             short children — see refs/workbook-layout.md)
@@ -1429,7 +1429,7 @@ end
 # means the group is now a SINGLE element, so we prune the absorbed SIBLING
 # member zones (keeping only the base) and EXPAND the base zone to the group's
 # bounding box — the one trellis element then lands full-size via the ordinary
-# banded/synth path (no per-card GridContainers). Mutates `dashboard` in place;
+# banded/synth path (no per-card Containers). Mutates `dashboard` in place;
 # only touches a dashboard that carries `trellis`, so non-trellis output is
 # byte-identical to the flat build.
 def prune_trellis_zones!(dashboard)
@@ -1488,7 +1488,7 @@ def build_page_for_dashboard(dashboard, page, opts)
     end
   end
 
-  used_el_ids = {} # one zone per element — a duplicate LayoutElement id makes
+  used_el_ids = {} # one zone per element — a duplicate Element id makes
   #   Sigma reject the whole layout PUT (same guard as the tree/synth paths)
   chart_layouts = chart_zones.map do |z|
     lookup_name = zone_el_name(z, o[:renames])

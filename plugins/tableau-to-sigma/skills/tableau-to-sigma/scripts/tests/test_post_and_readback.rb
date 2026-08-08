@@ -103,7 +103,7 @@ class TestPostAndReadback < Minitest::Test
       'schemaVersion' => 1, 'pages' => [{ 'id' => 'p1' }],
       'elements' => [{ 'id' => 'e1', 'kind' => 'text' }],
       'kind' => 'workbook',
-      'layout' => '<Page id="p1"><LayoutElement elementId="e1"/></Page>'
+      'layout' => '<Page id="p1"><Element elementId="e1"/></Page>'
     }
     body = Sigma::CodeRep.wrap(doc, extra: { 'name' => 'n', 'folderId' => 'f' })
     assert_equal doc, body['document']

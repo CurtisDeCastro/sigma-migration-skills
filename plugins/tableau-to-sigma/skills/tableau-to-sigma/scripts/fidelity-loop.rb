@@ -543,7 +543,7 @@ when 'apply-patch'
     rescue StandardError => e
       die "PUT /v2/workbooks/#{wb}/spec failed (atomic — nothing written): #{e.message}", 4
     end
-    puts "[OK] PUT merged spec to #{wb} (layout preserved: #{layout_was.empty? ? 'NONE' : "#{layout_was.scan(/<LayoutElement\b/).length} elements"})"
+    puts "[OK] PUT merged spec to #{wb} (layout preserved: #{layout_was.empty? ? 'NONE' : "#{layout_was.scan(/<Element\b/).length} elements"})"
     # Persist BEFORE the post-PUT guards: the fix is live either way, and an
     # exit-5 guard failure must not leave wb-spec.json behind the live state.
     persist_patch_to_wb_spec(opts[:dir], patch) if opts[:patch] && patch

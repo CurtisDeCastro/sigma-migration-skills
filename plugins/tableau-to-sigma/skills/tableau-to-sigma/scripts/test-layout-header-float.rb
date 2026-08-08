@@ -193,17 +193,17 @@ end
 abort "build produced no layout\n#{log}" if xml.nil?
 doc = REXML::Document.new("<Root>#{xml.sub(/\A<\?xml[^>]*\?>\s*/, '')}</Root>")
 
-# Resolve PAGE-ABSOLUTE row/col extents for every LayoutElement (container
+# Resolve PAGE-ABSOLUTE row/col extents for every Element (container
 # children use container-relative coordinates that restart at 1).
 def abs_rects(page_el)
   out = {}
   walk = lambda do |node, row_off, col_off|
     node.elements.each do |e|
-      next unless %w[GridContainer LayoutElement].include?(e.name)
+      next unless %w[Container Element].include?(e.name)
       c0, c1 = e.attributes['gridColumn'].to_s.split('/').map { |s| s.strip.to_i }
       r0, r1 = e.attributes['gridRow'].to_s.split('/').map { |s| s.strip.to_i }
       ar = [c0 + col_off, c1 + col_off, r0 + row_off, r1 + row_off]
-      if e.name == 'GridContainer'
+      if e.name == 'Container'
         walk.call(e, ar[2] - 1, ar[0] - 1)
       else
         out[e.attributes['elementId']] = ar
@@ -246,9 +246,9 @@ puts
 puts '-- defect 2 (control case): a genuine short top text banner still extracts'
 d2_xml = xml[/(<Page[^>]*id="page-d2".*?<\/Page>)/m, 1].to_s
 check(d2_xml.include?('tc-page-d2-hdr'), 'header band emitted for the text-titled page', fails)
-hdr_gc = pages['page-d2'] && pages['page-d2'].elements.to_a('.//GridContainer')
+hdr_gc = pages['page-d2'] && pages['page-d2'].elements.to_a('.//Container')
                                              .find { |g| g.attributes['elementId'] == 'tc-page-d2-hdr' }
-hdr_ids = hdr_gc ? hdr_gc.elements.to_a('.//LayoutElement').map { |l| l.attributes['elementId'] } : []
+hdr_ids = hdr_gc ? hdr_gc.elements.to_a('.//Element').map { |l| l.attributes['elementId'] } : []
 check(hdr_ids == ['text-b1'], "the source banner text owns the header band (got #{hdr_ids.inspect})", fails)
 check(!d2_xml.include?('hdrtext'), 'no fabricated page-name H1 alongside the extracted banner', fails)
 

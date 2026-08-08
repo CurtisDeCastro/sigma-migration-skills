@@ -65,11 +65,11 @@ STUB_SPEC = {
     ] }
   ],
   'layout' => '<Page type="grid" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto" id="p0">' \
-              '<LayoutElement elementId="master" gridColumn="1 / 25" gridRow="1 / 21"/></Page>' \
+              '<Element elementId="master" gridColumn="1 / 25" gridRow="1 / 21"/></Page>' \
               '<Page type="grid" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto" id="p1">' \
-              '<GridContainer elementId="band1" type="grid" gridColumn="1 / 25" gridRow="1 / 10" ' \
+              '<Container elementId="band1" type="grid" gridColumn="1 / 25" gridRow="1 / 10" ' \
               'gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto">' \
-              '<LayoutElement elementId="el1" gridColumn="1 / 25" gridRow="1 / 9"/></GridContainer></Page>'
+              '<Element elementId="el1" gridColumn="1 / 25" gridRow="1 / 9"/></Container></Page>'
 }.freeze
 STUB_COLS = { 'entries' => [{ 'elementId' => 'el1', 'columnId' => 'c1', 'label' => 'Sales',
                               'type' => { 'type' => 'number' } }] }.freeze

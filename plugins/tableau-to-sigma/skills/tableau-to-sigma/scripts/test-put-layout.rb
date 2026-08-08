@@ -87,7 +87,7 @@ puts 'Case 1 - navigate target repaired by name to the DIFFERENT live page id'
 # index — the exact page-id-scheme mismatch the amendment describes.
 LAYOUT_XML_1 = <<~XML
   <Page type="grid" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto" id="page-dash-1">
-  <LayoutElement elementId="btn-10" gridColumn="1 / 25" gridRow="1 / 3"/>
+  <Element elementId="btn-10" gridColumn="1 / 25" gridRow="1 / 3"/>
   </Page>
   <Page type="grid" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto" id="page-dash-2">
   </Page>

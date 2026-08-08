@@ -2,9 +2,9 @@
 # GET a workbook spec, replace per-page layouts with a single top-level layout
 # XML (provided), strip read-only fields, PUT back.
 #
-# Container layouts: a <GridContainer> in the layout XML must be paired with a
+# Container layouts: a <Container> in the layout XML must be paired with a
 # `kind: container` placeholder element in the spec (else it is silently
-# dropped — layout-playbook.md). Layout builders that emit GridContainers
+# dropped — layout-playbook.md). Layout builders that emit Containers
 # write a sidecar `<layout>.elements.json` ({pageId: [element, ...]}) next to
 # the layout XML; this script injects those elements (containers + header
 # text) into the matching pages before the PUT. Pass --elements to override

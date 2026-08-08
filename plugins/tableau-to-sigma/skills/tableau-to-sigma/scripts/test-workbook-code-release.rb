@@ -69,6 +69,9 @@ check('pages are metadata-only', Array(doc['pages']).all? { |page| !page.key?('e
 check('elements are document-global', Array(doc['elements']).map { |element| element['id'] }.sort ==
       %w[break master nav progress wf])
 check('layout is required', doc['layout'].to_s.include?('<Page'))
+check('layout uses live canonical Element/Container tags',
+      doc['layout'].to_s.include?('<Element') &&
+      !doc['layout'].to_s.match?(%r{</?(?:LayoutElement|GridContainer)\b}))
 check('canonical workbook validates', WorkbookCode.validate(spec).empty?)
 
 anchor_spec = JSON.parse(JSON.generate(spec))
