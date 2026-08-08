@@ -70,9 +70,12 @@ module Sigma
         { 'name' => t['name'], 'overrides' => t['overrides'] || {} }
       end
 
-      # Write path: every live workbook code-rep endpoint requires the wrapper.
+      # Write path: every live workbook code-rep endpoint requires the wrapper
+      # and flat document.elements. Flatten legacy page-nested artifacts at this
+      # boundary so older converter output remains postable during migration;
+      # reads always expose the current flat shape.
       def wrap(document_hash, extra: {})
-        extra.merge('document' => document_hash)
+        extra.merge('document' => flatten_elements(document_hash))
       end
 
       # WORKBOOK-ONLY shape helpers. Workbook elements are a flat document
@@ -116,6 +119,35 @@ module Sigma
       end
 
       private
+
+      # Emit only the current API shape. Elements are workbook-global in the
+      # payload; layout XML retains their page placement. Existing flat
+      # elements win ordering, while legacy page-nested elements are appended
+      # once by id.
+      def flatten_elements(doc)
+        return doc unless doc.is_a?(Hash)
+        pages = doc['pages']
+        return doc unless pages.is_a?(Array)
+
+        flattened_pages = []
+        nested_elements = []
+        pages.each do |page|
+          page_copy = page.dup
+          nested_elements.concat(Array(page_copy.delete('elements')))
+          flattened_pages << page_copy
+        end
+        existing_elements = Array(doc['elements'])
+        elements = []
+        seen = {}
+        (existing_elements + nested_elements).each do |element|
+          key = element.is_a?(Hash) && element['id']
+          next if key && seen[key]
+          seen[key] = true if key
+          elements << element
+        end
+
+        doc.merge('pages' => flattened_pages, 'elements' => elements)
+      end
 
       # themeName/themeOverrides -> settings.theme.{name,overrides}. Non-mutating:
       # only builds a new hash when a legacy key is actually present, so the

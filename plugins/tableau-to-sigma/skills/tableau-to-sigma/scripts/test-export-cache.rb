@@ -502,11 +502,11 @@ GT_POOL_STUB = <<~'RUBY'
         posted = JSON.parse(body)
         # Task 3.2: pooled_sql_probe now nests the workbook document under a
         # top-level `document` key (the live surface 400s on the old flat
-        # body) — read pages from there. run-ground-truth.rb's own SERIAL
-        # per-entry probe POST (a different, untouched call site) still posts
-        # the flat shape, so tolerate both — same read-side tolerance as
-        # Sigma::CodeRep.document().
-        n_els = (posted['document'] || posted)['pages'][0]['elements'].length
+        # body), with current writes flattening elements into
+        # document.elements. run-ground-truth.rb's own SERIAL per-entry probe
+        # POST can still use the legacy nested-page shape, so tolerate both.
+        doc = posted['document'] || posted
+        n_els = (doc['elements'] || (doc['pages'] || []).flat_map { |page| page['elements'] || [] }).length
         raise Error, 'stub: HTTP 502 pooled spec POST refused' if n_els > 1 && ENV['GTP_POOL_SPEC_FAIL'] == '1'
         n = File.exist?(ENV['GTP_SEQ']) ? File.read(ENV['GTP_SEQ']).to_i + 1 : 1
         File.write(ENV['GTP_SEQ'], n.to_s)

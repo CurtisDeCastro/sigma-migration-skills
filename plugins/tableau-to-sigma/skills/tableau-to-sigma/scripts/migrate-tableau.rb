@@ -195,7 +195,7 @@ ENV['SIGMA_ORCHESTRATED_RUN'] = '1'
 # rescue). :recommended reuse comes from auto-pick, never a CLI arg, so the
 # snapshot carries no --reuse-dm to strip.
 ORIGINAL_ARGV = ARGV.dup.freeze
-opts = {}
+opts = { per_page_masters: true }
 OptionParser.new do |o|
   o.banner = <<~BANNER
     Usage: ruby scripts/migrate-tableau.rb --workbook <name>|--workbook-id <luid> \\
@@ -318,13 +318,13 @@ OptionParser.new do |o|
     abort "--master-col expects 'Name=<Sigma formula>', got #{v.inspect}" if nm.to_s.empty? || fx.to_s.empty?
     (opts[:master_cols] ||= []) << [nm, fx]
   end
-  # PLAN-v3 PR-17 (flag-staged, default OFF). De-share the single hidden master
+  # PLAN-v3 PR-17 (default ON). De-share the single hidden master
   # into per-page (per-dashboard) instances so a page's controls filter only
   # that page's tiles (a shared cross-page master composes every page's filters
   # on one master — V5.6-CONTROLS-AUDIT D11). Self-gating: a no-op unless >=2
   # pages draw on the master, so single-page builds stay byte-identical.
-  o.on('--per-page-masters', 'PR-17: give each dashboard page its own master instance (fixes cross-page control leakage; ' \
-                             'no-op for single-page workbooks)') { opts[:per_page_masters] = true }
+  o.on('--per-page-masters', 'give each dashboard page its own thin master instance (default; fixes cross-page control ' \
+                             'leakage and wide-master query cost; no-op for single-page workbooks)') { opts[:per_page_masters] = true }
   o.on('--finalize')         {     opts[:finalize] = true }
   o.on('--actuals PATH')     { |v| opts[:actuals] = File.expand_path(v) }
   # Finalize ergonomics (issue #422): forward two flags phase6-parity /
@@ -4562,10 +4562,16 @@ if mechanical
   #      action-ledger.json — only the late guide invocation owns that
   #      CONTRACTUAL path, so an early run here can never be mistaken by gate
   #      11 for the authoritative ledger.
+  #
+  #      NOT allow_fail. Detection feeding emission means a crashed detection and a
+  #      zero-action workbook produce the same downstream artifact — the exact
+  #      silent no-op this workstream has now hit four times. build-postpublish-guide.rb
+  #      aborts on a malformed parse and writes no file, so reaching here with a
+  #      non-zero status means something worse; fail the run.
   detected_actions_path = File.join(WORK, 'detected-actions.json')
   if have_twb
     run!(['ruby', File.join(HERE, 'build-postpublish-guide.rb'),
-          '--twb', twb, '--detect-only', detected_actions_path], allow_fail: true)
+          '--twb', twb, '--detect-only', detected_actions_path])
   end
 
   # 2) Build the chart-element specs from the parsed zones + view CSVs + map.
@@ -4815,7 +4821,7 @@ else
   spec['folderId'] = opts[:folder] if opts[:folder]
   layout_xml = (Specs.respond_to?(:layout_xml) ? Specs.layout_xml : nil)
 end
-# ---- PR-17: per-page master instances (flag-staged, default OFF) ------------
+# ---- PR-17: thin per-page master instances (default ON) ---------------------
 # Final structural pass over the assembled spec — runs AFTER the multi-metric
 # recipe and formula-normalize so those see the shared-master shape they were
 # written against, then de-shares. Self-gating (no-op unless >=2 pages use the
@@ -4825,7 +4831,8 @@ if opts[:per_page_masters]
   ppm = PerPageMasters.split!(spec)
   if ppm[:applied]
     line "per-page-masters (PR-17): #{ppm[:masters]} master instance(s) across #{ppm[:pages]} page(s) " \
-         "(#{ppm[:clones]} Data-page element(s)); each page's controls now filter only its own tiles"
+         "(#{ppm[:clones]} Data-page element(s), #{ppm[:master_columns_before]} -> " \
+         "#{ppm[:master_columns_after]} master columns); each page's controls now filter only its own tiles"
   else
     line 'per-page-masters (PR-17): no split needed (<=1 page draws on the master) — shared master kept'
   end
