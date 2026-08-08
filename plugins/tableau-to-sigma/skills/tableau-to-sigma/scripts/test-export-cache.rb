@@ -124,10 +124,14 @@ Dir.mktmpdir do |dir|
   log = File.join(dir, 'stub-log.jsonl')
   env = { 'STUB_SPEC' => spec_path, 'STUB_LOG' => log }
   va = File.join(SCRIPTS, 'verify-anchors.rb')
+  # This section tests cache semantics, not worker scheduling. Keep exports
+  # serial so each strict cache key is asserted deterministically; pool
+  # concurrency has dedicated coverage in test-bounded-exports.rb.
+  va_args = ['--workdir', dir, '--workbook-id', 'wb', '--timeout', '60', '--pool', '1']
 
   # Run 1 — cold cache: a1 matches, a2 misses → exit 1; both elements exported.
   write_anchors(dir, [A1, A2])
-  _o1, e1, s1 = run_stubbed(stub_dir, env, va, '--workdir', dir, '--workbook-id', 'wb', '--timeout', '60')
+  _o1, e1, s1 = run_stubbed(stub_dir, env, va, *va_args)
   check(s1.exitstatus == 1, "run 1 (cold): a2 missing → exit 1 (got #{s1.exitstatus})", fails)
   check(export_posts(log) == 2, "run 1 exported both elements (got #{export_posts(log)})", fails)
   check(e1.include?('raw export cache active'), 'cache states itself active with the doc version', fails)
@@ -135,14 +139,14 @@ Dir.mktmpdir do |dir|
   check(cache_files.any? { |f| f =~ /\.csv(\.r\d+)?\z/ } && cache_files.any? { |f| f.end_with?('.meta.json') },
         'payload + meta sidecar written under <workdir>/export-cache/', fails)
   raw = File.read(Dir[File.join(dir, 'export-cache', 'el-anchor.csv*')].reject { |f| f.end_with?('.meta.json') }.first)
-  check(raw.start_with?('Account,Revenue'), 'cache holds the RAW wire CSV bytes', fails)
+  check(raw.start_with?('Account,Revenue'), "cache holds the RAW wire CSV bytes (got #{raw.inspect})", fails)
   check(!raw.include?('verdict') && !Dir[File.join(dir, 'export-cache', '*.meta.json')]
         .any? { |f| JSON.parse(File.read(f)).key?('pass') || JSON.parse(File.read(f)).key?('verdict') },
         'nothing verdict-shaped is stored anywhere in the cache', fails)
 
   # Run 2 — warm cache, same workbook version: ZERO exports, same verdict.
   File.write(log, '')
-  _o2, e2, s2 = run_stubbed(stub_dir, env, va, '--workdir', dir, '--workbook-id', 'wb', '--timeout', '60')
+  _o2, e2, s2 = run_stubbed(stub_dir, env, va, *va_args)
   check(s2.exitstatus == 1, "run 2 (warm): verdict recomputed → still exit 1 (got #{s2.exitstatus})", fails)
   check(export_posts(log).zero?, "run 2 made ZERO export POSTs (got #{export_posts(log)})", fails)
   check(e2.include?('CACHED') && e2.include?('verdicts recomputed'),
@@ -156,7 +160,7 @@ Dir.mktmpdir do |dir|
   # recorded RAW bytes with still ZERO wire exports.
   write_anchors(dir, [A1, A2, A3])
   File.write(log, '')
-  _o3, _e3, s3 = run_stubbed(stub_dir, env, va, '--workdir', dir, '--workbook-id', 'wb', '--timeout', '60')
+  _o3, _e3, s3 = run_stubbed(stub_dir, env, va, *va_args)
   vd3 = JSON.parse(File.read(File.join(dir, 'anchors-verdict.json')))
   check(s3.exitstatus == 1 && vd3['checked'] == 3 && vd3['matched'] == 2,
         "run 3: verdict RECOMPUTED over cached raw (3 checked, 2 matched; got #{vd3['checked']}/#{vd3['matched']})", fails)
@@ -166,7 +170,7 @@ Dir.mktmpdir do |dir|
   # cache must refuse the stale payloads and re-export everything.
   write_spec(spec_path, 6)
   File.write(log, '')
-  _o4, e4, s4 = run_stubbed(stub_dir, env, va, '--workdir', dir, '--workbook-id', 'wb', '--timeout', '60')
+  _o4, e4, s4 = run_stubbed(stub_dir, env, va, *va_args)
   check(s4.exitstatus == 1, "run 4 (bumped version) still verdicts honestly (got #{s4.exitstatus})", fails)
   check(export_posts(log) == 2, "run 4 re-exported both elements after the version bump (got #{export_posts(log)})", fails)
   check(e4.include?('doc v6'), 'cache re-keys to the new document version', fails)
@@ -247,7 +251,7 @@ Dir.mktmpdir do |dir|
   # Script 1: verify-anchors exports BOTH elements at the shared default limit.
   write_anchors(dir, [A1, A3]) # both match → exit 0
   _o1, _e1, s1 = run_stubbed(stub_dir, env, File.join(SCRIPTS, 'verify-anchors.rb'),
-                             '--workdir', dir, '--workbook-id', 'wb', '--timeout', '60')
+                             '--workdir', dir, '--workbook-id', 'wb', '--timeout', '60', '--pool', '1')
   check(s1.exitstatus.zero?, "verify-anchors run exits 0 (got #{s1.exitstatus})", fails)
   check(export_posts(log) == 2, "verify-anchors exported both elements (got #{export_posts(log)})", fails)
   check(Dir[File.join(dir, 'export-cache', 'el-ok.csv.r100000*')].any?,
