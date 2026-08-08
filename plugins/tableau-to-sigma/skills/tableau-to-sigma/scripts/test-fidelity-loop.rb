@@ -126,7 +126,7 @@ Dir.mktmpdir do |dir|
   merged = JSON.parse(File.read(File.join(dir, 'merged.json')))
   merged_doc = merged['document']
   ok(merged_doc['layout'] == live['document']['layout'], 'layout preserved through the merge (PUT-wipes-layout trap avoided)')
-  ok(merged_doc['themeOverrides']['categoricalScheme'] == ['#0e7c7b'], 'patch applied to merged spec')
+  ok(merged['themeOverrides']['categoricalScheme'] == ['#0e7c7b'], 'patch applied to merged spec')
   ok(merged_doc['elements'][0]['id'] == 'k1', 'existing element retained')
 
   # after --resolves e0, status clears
@@ -165,8 +165,8 @@ Dir.mktmpdir do |dir|
      'nested `document.pages` retained in the canonical merged spec')
   ok(nested_doc && nested_doc['layout'] == nested_live['document']['layout'],
      'nested `document.layout` preserved through the merge')
-  ok(nested_doc && nested_doc['themeOverrides']['categoricalScheme'] == ['#0e7c7b'],
-     'patch still applies inside the canonical nested live spec')
+  ok(nested_merged && nested_merged['themeOverrides']['categoricalScheme'] == ['#0e7c7b'],
+     'patch still applies alongside the canonical nested live spec')
 end
 
 puts 'RCF page picking (#422):'
