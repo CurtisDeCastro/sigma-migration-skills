@@ -303,7 +303,8 @@ Inner `gridRow` matches the container's outer span (`3 / 8`) per the
 
 | PBIX `visualType` | Sigma kind | Notes |
 |---|---|---|
-| `card`, `multiRowCard`, `kpi`, `gauge` | `kpi-chart` | Need `value` field |
+| `card`, `multiRowCard`, `kpi` | `kpi-chart` | Need `value` field |
+| `gauge` | `progress` | Native ring progress when value/min/max are grounded |
 | `textbox`, `actionButton` (text-only) | `text` | `body` from `objects.general.text` |
 | `image`, `shape` (image-bg) | `image` | `url` from resourcePackages (rare) |
 | `lineChart` | `line-chart` | Multi-measure → multiple `yAxis` entries |
@@ -311,6 +312,7 @@ Inner `gridRow` matches the container's outer span (`3 / 8`) per the
 | `barChart`, `clusteredBarChart`, `stackedBarChart` | `bar-chart` (horizontal) | UI-only orientation; flag for post-publish |
 | `columnChart`, `clusteredColumnChart`, `stackedColumnChart`, `hundredPercentStackedColumnChart` | `bar-chart` | Default vertical |
 | `lineClusteredColumnComboChart`, `lineStackedColumnComboChart` | `combo-chart` | Mark line series with `type:"line"` |
+| `waterfallChart` | `waterfall-chart` | Native category/value/breakdown → x/y/splitBy |
 | `pieChart` | `pie-chart` | `color` + `value` required |
 | `donutChart` | `donut-chart` | `color` + `value` + `holeValue` required |
 | `scatterChart` | `scatter-chart` | |
@@ -319,7 +321,7 @@ Inner `gridRow` matches the container's outer span (`3 / 8`) per the
 | `slicer` | `control` | Type derived from slicer mode (list/dropdown/range/date-range) |
 | `map`, `filledMap`, `shapeMap`, `azureMap` | `bar-chart` | Sigma has no map; degrade to sorted bar-chart per the existing Tableau pattern |
 | `groupVisualContainer` / `visualGroup` | `container` | Wraps children via `<Container>` |
-| `funnel`, `treemap`, `waterfallChart`, `ribbonChart`, `decompositionTreeVisual`, `keyInfluencersVisual`, `qnaVisual` | (no equivalent) | Approximate with `bar-chart` or skip with warning |
+| `funnel`, `treemap`, `ribbonChart`, `decompositionTreeVisual`, `keyInfluencersVisual`, `qnaVisual` | (no equivalent) | Approximate with `bar-chart` or skip with warning |
 
 ---
 
