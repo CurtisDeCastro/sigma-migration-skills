@@ -95,9 +95,18 @@ def metadata(response):
 
 
 def workbook_elements(spec):
-    """Return the flat workbook element collection."""
-    elements = document(spec).get("elements")
-    return [element for element in elements if isinstance(element, dict)] if isinstance(elements, list) else []
+    """Return flat elements, with read-only compatibility for old artifacts."""
+    doc = document(spec)
+    elements = doc.get("elements")
+    if isinstance(elements, list):
+        return [element for element in elements if isinstance(element, dict)]
+    return [
+        element
+        for page in doc.get("pages", [])
+        if isinstance(page, dict)
+        for element in page.get("elements", [])
+        if isinstance(element, dict)
+    ]
 
 
 def workbook_page_element_ids(spec):
