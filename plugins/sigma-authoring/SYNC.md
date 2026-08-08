@@ -7,7 +7,7 @@ hard dependency on `sigma-workbooks` (the canonical Sigma spec reference) ships
 in the **same marketplace** — installing any converter, install this too.
 
 - **Source of truth:** https://github.com/twells89/sigma-skills (edit there)
-- **Vendored at:** sigma-skills `cursor/workbook-code-release-2e8c` @ `22eda6f` (2026-08-08)
+- **Vendored at:** sigma-skills `cursor/workbook-code-release-2e8c` @ `d64a61e0ee93709a5a3e377062747fbd449becb6` (2026-08-08)
 
 ## Refresh
 
@@ -61,9 +61,11 @@ ruby -c plugins/sigma-authoring/skills/sigma-workbooks/scripts/wb-rep.rb
 
 ## Two things this recipe does NOT cover
 
-**1. `sigma-plugin-authoring` is not in the loop above.** It exists in both repos
-and has been re-vendored before (`81483db1`), but the `for s in …` list omits it.
-Either add it deliberately or record why it is excluded — today it silently drifts.
+**1. `sigma-plugin-authoring` is intentionally not in the loop above.** It exists
+in both repos and has been re-vendored before (`81483db1`), but this repository's
+copy integrates the migration-owned shared plugin emitter, registration helper,
+Python twin, and coverage catalog. Upstream's standalone copy does not carry
+those integrations. Reconcile it deliberately instead of replacing the tree.
 
 **2. `cp -R` is only safe when upstream is a strict superset.** It is not always.
 Before re-vendoring, check whether any vendored file has been edited DOWNSTREAM —
