@@ -1,7 +1,13 @@
 {
   "name": "Structural Workarounds Test",
-  "pages": [
-    { "id": "page-data", "name": "Data", "elements": [
+  "document": {
+    "schemaVersion": 1,
+    "kind": "workbook",
+    "pages": [
+      { "id": "page-data", "name": "Data" },
+      { "id": "page-overview", "name": "Overview Dash" }
+    ],
+    "elements": [
       { "id": "master", "kind": "table", "name": "Master",
         "source": { "kind": "table", "elementId": "dm-base" },
         "columns": [
@@ -9,8 +15,7 @@
           { "id": "m-sales", "name": "Sales" },
           { "id": "m-orderdate", "name": "Order Date" },
           { "id": "m-custid", "name": "Customer Id" }
-        ] } ] },
-    { "name": "Overview Dash", "elements": [
+        ] },
       { "id": "el-attainment-by-region", "kind": "bar-chart", "name": "Attainment by Region",
         "source": { "kind": "table", "elementId": "master" },
         "columns": [
@@ -31,6 +36,7 @@
         "columns": [
           { "id": "x-3", "name": "Customer Id", "formula": "[Master/Customer Id]" },
           { "id": "y-3", "name": "Sales", "formula": "[Master/Sales]" } ] }
-    ] }
-  ]
+    ],
+    "layout": "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<Page type=\"grid\" gridTemplateColumns=\"repeat(24, 1fr)\" gridTemplateRows=\"auto\" id=\"page-data\">\n  <LayoutElement elementId=\"master\" gridColumn=\"1 / 25\" gridRow=\"1 / 11\"/>\n</Page>\n<Page type=\"grid\" gridTemplateColumns=\"repeat(24, 1fr)\" gridTemplateRows=\"auto\" id=\"page-overview\">\n  <LayoutElement elementId=\"el-attainment-by-region\" gridColumn=\"1 / 25\" gridRow=\"1 / 9\"/>\n  <LayoutElement elementId=\"el-sales-trend\" gridColumn=\"1 / 25\" gridRow=\"9 / 17\"/>\n  <LayoutElement elementId=\"el-ctl-region\" gridColumn=\"1 / 25\" gridRow=\"17 / 19\"/>\n  <LayoutElement elementId=\"el-customer-detail\" gridColumn=\"1 / 25\" gridRow=\"19 / 29\"/>\n</Page>"
+  }
 }

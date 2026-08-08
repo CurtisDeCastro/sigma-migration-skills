@@ -164,6 +164,7 @@ require_relative 'lib/fast_path' # FAST-PATH routing + BOM-tolerant JSON reads
 require_relative 'lib/phase_cache' # sha-stamped phase-output reuse on re-entry (refs/performance.md)
 require_relative 'lib/sigma_rest' # in-process Sigma token minting (no bash/eval)
 require_relative 'lib/code_rep' # workbook code-rep document-wrapper adapter (nested GET/PUT shape)
+require_relative 'lib/workbook_code' # flat workbook elements + layout-owned page membership
 require_relative 'lib/metric_binding' # shared DM-metric binder ([Metrics/<name>] over inline re-derive)
 require_relative 'lib/tableau_rest' # in-process Tableau token minting (Windows-safe; no bash/eval)
 require_relative 'hydrate-custom-sql'
@@ -1818,8 +1819,8 @@ if opts[:dm_spec] || opts[:wb_spec]
   end
   abort 'FATAL: --dm-spec JSON is not a page-bearing data-model spec (no top-level "pages" array)' \
     if dm_json && !(dm_json.is_a?(Hash) && dm_json['pages'].is_a?(Array))
-  abort 'FATAL: --wb-spec JSON is not a page-bearing workbook spec (no top-level "pages" array)' \
-    unless wb_json.is_a?(Hash) && wb_json['pages'].is_a?(Array)
+  abort 'FATAL: --wb-spec JSON is not a page-bearing workbook spec (no document.pages array)' \
+    unless wb_json.is_a?(Hash) && WorkbookCode.document(wb_json)['pages'].is_a?(Array)
   # Vendor-neutral CDW join-cost advisory (informational only; never gates). See refs/modeling-strategy.md.
   ModelingAdvisory.from_dm_spec(dm_json) if dm_json && defined?(ModelingAdvisory) && ModelingAdvisory.respond_to?(:from_dm_spec)
   Object.const_set(:Specs, Module.new do
@@ -4781,7 +4782,7 @@ if mechanical
     chart_elements: (chart_pages && chart_pages.any? ? chart_pages : chart_elements),
     data_elements: data_elements,
     theme: (raw_charts.is_a?(Hash) ? raw_charts['theme'] : nil),
-    folder_id: opts[:folder])
+    folder_id: opts[:folder], canonical: false)
   if (theme_overrides = spec.dig('settings', 'theme', 'overrides'))
     line "theme: #{theme_overrides.keys.join(', ')} (derived from source style rules)"
   end
@@ -4817,6 +4818,12 @@ else
   spec = MechanicalSpecs.bind_manual_wb_spec(
     spec, dm_id: dm_id, fact_eid: fact_eid,
     dm_els: (defined?(dm_els) && dm_els) || []) if opts[:wb_spec]
+  # Manual specs may already use the release document envelope. The
+  # Tableau-specific transforms below still need a transient page assignment;
+  # derive it from layout and never serialize this compatibility view.
+  if spec['document'].is_a?(Hash) || spec['elements'].is_a?(Array)
+    spec = WorkbookCode.legacy_view(WorkbookCode.canonicalize(spec))
+  end
   spec['name'] = display_wb_name if opts[:name]
   spec['folderId'] = opts[:folder] if opts[:folder]
   layout_xml = (Specs.respond_to?(:layout_xml) ? Specs.layout_xml : nil)
@@ -4861,7 +4868,7 @@ if opts[:wb_target]
     # same flat shape this file always worked with. Without this, a bare
     # existing['pages'] read is nil and the FATAL guard just below fires on
     # EVERY --workbook-target append, even against a perfectly valid workbook.
-    Sigma::CodeRep.metadata(raw_existing).merge(Sigma::CodeRep.document(raw_existing))
+    WorkbookCode.legacy_view(raw_existing)
   rescue StandardError => e
     abort "FATAL: could not GET existing workbook #{opts[:wb_target]} spec for append (#{e.class}: #{e.message}). " \
           'Verify the id and that the token can read it.'
@@ -4916,11 +4923,11 @@ end
 # sibling file and leave the authored source untouched.
 if MANUAL_JSON_SPECS
   resolved_path = File.join(WORK, 'wb-spec.resolved.json')
-  File.write(resolved_path, JSON.pretty_generate(spec))
+  File.write(resolved_path, JSON.pretty_generate(WorkbookCode.canonicalize(spec)))
   line "resolved spec → #{File.basename(resolved_path)} (authored wb-spec.json left untouched — placeholders stay re-resolvable)"
   wb_spec_path = resolved_path
 else
-  File.write(wb_spec_path, JSON.pretty_generate(spec))
+  File.write(wb_spec_path, JSON.pretty_generate(WorkbookCode.canonicalize(spec)))
 end
 # LOD translation ledger (#423): one entry per source {FIXED/INCLUDE/EXCLUDE}
 # calc, classified against the emitted dm-spec + wb-spec. The converter/builder
@@ -5322,7 +5329,7 @@ def render_reuse_plan(work, doc_version)
   views = gw.dig('workbook', 'views', 'view') || gw.dig('views', 'view') || []
   views = [views] unless views.is_a?(Array)
   view_id_by_name = views.each_with_object({}) { |v, h| h[v['name']] = v['id'] if v.is_a?(Hash) && v['name'] }
-  page_id_by_name = (wb_ids['pages'] || []).each_with_object({}) { |p, h| h[p['name']] = p['id'] if p['name'] }
+  page_id_by_name = WorkbookCode.pages(wb_ids).each_with_object({}) { |p, h| h[p['name']] = p['id'] if p['name'] }
   slugify = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]+/, '-').gsub(/^-|-$/, '')[0..50] }
   names = (dash_layout.is_a?(Array) ? dash_layout : []).map { |d| d['dashboard'] }
                                                        .reject { |n| n.to_s.start_with?('[synthetic]') }
@@ -5355,7 +5362,7 @@ end
 hdr('5b', 'Visual QA')
 vqa = File.join(WORK, 'visual-qa'); FileUtils.mkdir_p(vqa)
 wbspec_local = (JSON.parse(File.read(wb_spec_path)) rescue {})
-content_pages = (wbspec_local['pages'] || []).reject { |p| p['id'].to_s.downcase.include?('data') }
+content_pages = WorkbookCode.pages(wbspec_local).reject { |p| p['id'].to_s.downcase.include?('data') }
 # v5.2 (speed): pages render CONCURRENTLY (pool 3) — each export is a 30-90s
 # server-side render; multi-page workbooks paid it serially.
 rendered = 0
@@ -5425,8 +5432,8 @@ col_entries = (Sigma.list_entries("/v2/workbooks/#{wb_id}/columns") rescue [])
 err_cols = col_entries.select { |c| c.dig('type', 'type') == 'error' }
 total_cols = col_entries.size
 # Compile-check chart elements (Unknown column / Circular ref markers).
-chart_els = wb_ids['pages'].reject { |p| p['id'].to_s =~ /data/ }
-                           .flat_map { |p| p['elements'] || [] }
+chart_els = WorkbookCode.pages(wb_ids).reject { |p| p['id'].to_s =~ /data/ }
+                           .flat_map { |p| WorkbookCode.elements_for_page(wb_ids, p) }
                            .select { |e| e['kind'].to_s.end_with?('-chart') }
 bad = []
 chart_els.each do |e|

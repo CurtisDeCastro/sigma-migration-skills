@@ -615,6 +615,7 @@ else
   require 'sigma_rest'
   require 'export_pool'
   require 'code_rep'
+  require 'workbook_code'
 
   # ONE deadline for the entire run (issue #416: --timeout used to bound only
   # the per-element poll wait, so total runtime was unbounded). Computed here,
@@ -642,16 +643,11 @@ else
     require 'date'
     body.is_a?(Hash) ? body : (YAML.safe_load(body.to_s, permitted_classes: [Date, Time]) || {})
   end
-  # Workbook code-rep nests pages/layout/schemaVersion/kind under a top-level
-  # `document` key (live since 2026-08-03/04). Flatten metadata (workbookId,
-  # latestDocumentVersion, ...) and document content onto one hash: this file
-  # reads BOTH off `spec` below (flat document elements, the doc version
-  # from spec['latestDocumentVersion'] via ExportPool.resolve_doc_version, the
-  # workbook id from spec['workbookId']) and mutates elements in place for the
-  # pivot-totals strip/restore bracket, so one flat hash keeps every existing
-  # read/mutation site below working unchanged. put_spec re-nests at the wire.
-  spec = Sigma::CodeRep.metadata(raw_spec).merge(Sigma::CodeRep.document(raw_spec))
-  elements = Sigma::CodeRep.workbook_elements(spec)
+  # Work against a page-assigned compatibility view, but retain the exact live
+  # document partition so the temporary pivot-totals PUTs preserve settings,
+  # panels, overlays, agents, and future document fields.
+  spec = WorkbookCode.legacy_view(raw_spec)
+  elements = WorkbookCode.elements(spec)
   queryable = elements.reject { |el| %w[control text image container].include?(el['kind'].to_s) }
 
   # v5.4 PIVOT-TOTALS CEILING: a pivot carrying a `totals` key 500s its CSV
@@ -665,8 +661,10 @@ else
   # step. Read-only spec fields are stripped before each PUT (Sigma rejects them).
   READONLY_SPEC_KEYS = %w[workbookId url ownerId createdBy updatedBy createdAt updatedAt latestDocumentVersion].freeze
   put_spec = lambda do |s|
-    meta = Sigma::CodeRep.metadata(s).reject { |k, _| READONLY_SPEC_KEYS.include?(k) }
-    body = Sigma::CodeRep.wrap(Sigma::CodeRep.document(s), extra: meta)
+    body = WorkbookCode.canonicalize(s)
+    READONLY_SPEC_KEYS.each { |key| body.delete(key) }
+    errors = WorkbookCode.validate(body)
+    raise "anchor bracket produced invalid workbook: #{errors.join('; ')}" if errors.any?
     Sigma.request(:put, "/v2/workbooks/#{wb}/spec", body: JSON.generate(body))
   end
   captured_totals = {}

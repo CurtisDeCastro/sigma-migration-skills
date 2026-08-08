@@ -37,6 +37,7 @@ require 'optparse'
 require 'net/http'
 require 'uri'
 require_relative 'lib/theme_derive'
+require_relative 'lib/workbook_code'
 require 'base64'
 
 opts = { mode: 'page-per-worksheet' }
@@ -231,7 +232,7 @@ if opts[:ppm]
   warn "  per-page-masters (PR-17): #{ppm[:applied] ? "#{ppm[:masters]} master instance(s) across #{ppm[:pages]} page(s), #{ppm[:clones]} Data-page element(s)" : 'no split needed (<=1 page draws on the master)'}"
 end
 
-File.write(opts[:out], JSON.pretty_generate(wb))
+File.write(opts[:out], JSON.pretty_generate(WorkbookCode.canonicalize(wb)))
 warn "wrote #{opts[:out]}"
 warn "  mode: #{opts[:mode]}"
 warn "  Data page: master sourced from '#{dm_el_name}' (#{dm_el_id})  #{master_columns.size} columns"

@@ -86,6 +86,7 @@ require 'uri'
 $LOAD_PATH.unshift File.expand_path('lib', __dir__)
 require 'twb_xml'
 require 'action_ledger'
+require 'workbook_code'
 
 module PostpublishGuide
   module_function
@@ -327,15 +328,16 @@ module PostpublishGuide
   end
 
   # ---- wb-ids.json mapping ---------------------------------------------------
-  # {workbookId, pages:[{id,name,elements:[{id,kind,name}]}]} — match Tableau
-  # names to built Sigma pages/elements so the guide names real elements.
+  # Current wb-ids uses the workbook code representation: metadata outside,
+  # metadata-only document.pages, flat document.elements, and layout-owned page
+  # membership. Match Tableau names to the resolved page/element summaries.
   def load_wb_ids(path)
     return nil unless path && File.exist?(path)
     data = JSON.parse(File.read(path))
-    pages = data['pages'] || []
+    pages = WorkbookCode.pages(data)
     elements = []
     pages.each do |pg|
-      (pg['elements'] || []).each do |el|
+      WorkbookCode.elements_for_page(data, pg).each do |el|
         elements << el.merge('page' => pg['name'])
       end
     end

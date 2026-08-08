@@ -140,10 +140,10 @@ if available.empty?
 end
 
 wb = JSON.parse(File.read(opts[:spec], encoding: 'bom|utf-8'))
+require_relative 'lib/workbook_code'
 
 # --- workbook-internal element index (name → own columns, id → doc order) ---
-wb_elements = []
-(wb['pages'] || []).each { |pg| (pg['elements'] || []).each { |el| wb_elements << el } }
+wb_elements = WorkbookCode.elements(wb)
 wb_order_by_id = {}
 wb_internal = {} # element name -> { names: Set(normalized own column names), order: min doc index }
 wb_elements.each_with_index do |el, i|

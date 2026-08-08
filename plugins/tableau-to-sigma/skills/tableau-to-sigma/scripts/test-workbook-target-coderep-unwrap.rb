@@ -24,8 +24,8 @@ def check(c, m, fails) fails << m unless c; puts "  #{c ? 'PASS' : 'FAIL'}  #{m}
 
 mig = File.read(File.join(__dir__, 'migrate-tableau.rb'))
 
-check(mig.include?("require_relative 'lib/code_rep'"),
-      'migrate-tableau.rb requires lib/code_rep', fails)
+check(mig.include?("require_relative 'lib/workbook_code'"),
+      'migrate-tableau.rb requires lib/workbook_code', fails)
 
 # Isolate the --workbook-target append block for a scoped check (don't just
 # grep the whole 5800-line file — a Sigma::CodeRep call anywhere wouldn't
@@ -35,11 +35,11 @@ check(!block.nil?, 'the `if opts[:wb_target]` PUT-append block is present', fail
 
 if block
   get_idx    = block.index(/Sigma\.request\(:get,.*workbooks.*spec/)
-  unwrap_idx = block.index(/Sigma::CodeRep\.metadata\(raw_existing\)\.merge\(Sigma::CodeRep\.document\(raw_existing\)\)/)
+  unwrap_idx = block.index(/WorkbookCode\.legacy_view\(raw_existing\)/)
   guard_idx  = block.index(/unless existing\.is_a\?\(Hash\) && existing\['pages'\]\.is_a\?\(Array\)/)
 
   check(!get_idx.nil?, 'the existing-workbook spec GET is present', fails)
-  check(!unwrap_idx.nil?, 'the `document` unwrap (metadata+document merge) is present', fails)
+  check(!unwrap_idx.nil?, 'the layout-aware workbook compatibility view is present', fails)
   check(!guard_idx.nil?, "the page-bearing-spec FATAL guard is present", fails)
   if get_idx && unwrap_idx && guard_idx
     check(get_idx < unwrap_idx && unwrap_idx < guard_idx,

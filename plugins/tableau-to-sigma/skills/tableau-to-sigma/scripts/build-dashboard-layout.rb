@@ -54,6 +54,7 @@ require 'optparse'
 require_relative 'lib/layout'
 require_relative 'lib/zone_census'
 require_relative 'lib/arrangement_lint'
+require_relative 'lib/workbook_code'
 include SigmaLayout
 
 # ---- Source-derived header chrome -----------------------------------------
@@ -185,7 +186,8 @@ end
 # page_rows * row_scale mapping byte-identically (bead tkkv).
 
 dash_layout = JSON.parse(File.read(opts[:layout]))
-wb_ids      = JSON.parse(File.read(opts[:wb_ids]))
+wb_ids_raw  = JSON.parse(File.read(opts[:wb_ids]))
+wb_ids      = WorkbookCode.legacy_view(wb_ids_raw)
 
 # ---- Chart provenance (orphan-fix, class 2 prevention) ----------------------
 # chart-provenance.json (written by build-charts-from-signals beside
@@ -321,7 +323,8 @@ end
 # path is what preserves them (and falls back safely if the tree can't build).
 def tree_has_styled_containers?(tree)
   (tree || []).any? do |n|
-    (n['kind'] == 'container' && (n['fill_color'] || n['border_color'])) ||
+    (n['kind'] == 'container' &&
+      (n['fill_color'] || n['border_color'] || n['corner_radius'] || n['rounding'])) ||
       tree_has_styled_containers?(n['children'])
   end
 end
@@ -540,12 +543,21 @@ def plan_node(node, c0, c1, r0, r1, ctx)
     # border_color from the zone's <zone-style>. 8-digit-alpha hex renders over the
     # canvas verbatim (Sigma accepts it), so the region columns keep their color
     # without a separate pastel-flattening step. Unstyled zones → plain container.
-    cstyle = nil
-    if node['fill_color']
-      cstyle = { 'backgroundColor' => node['fill_color'], 'borderRadius' => 'round' }
-      cstyle['borderColor'] = node['border_color'] if node['border_color']
+    cstyle = {}
+    cstyle['backgroundColor'] = node['fill_color'] if node['fill_color']
+    if node['border_color']
+      cstyle['borderColor'] = node['border_color']
+      width = node['border_width'].to_i
+      cstyle['borderWidth'] = [[width, 1].max, 3].min
     end
-    ctx[:extra] << container_el(cid, cstyle)
+    radius = node['corner_radius'].to_i
+    if radius.positive? || node['rounding']
+      height_px = ctx.dig(:canvas_px, 'h').to_f * node['h_pct'].to_f / 100.0
+      cstyle['borderRadius'] = height_px.positive? && radius / height_px > 0.3 ? 'pill' : 'round'
+    elsif node['fill_color']
+      cstyle['borderRadius'] = 'round'
+    end
+    ctx[:extra] << container_el(cid, cstyle.empty? ? nil : cstyle)
     emit = proc do |fc0, fc1, fr0, fr1|
       inner = plans.each_with_index.map { |(_, _, ep), i| ep.call(*packed[i]) }.join("\n")
       gc(cid, fc0, fc1, fr0, fr1, inner)
@@ -1617,21 +1629,17 @@ def build_page_for_dashboard(dashboard, page, opts)
    census, min_exp]
 end
 
-# PR-17: place EVERY hidden master instance on the Data page. Pre-PR-17 there is
-# exactly one master (id 'master'); with --per-page-masters the Data page carries
-# one clone per content page ('master-<page-slug>'). Each is stacked in its own
-# 21-row band so none auto-flows. Single-master output is byte-identical (the
-# lone master keeps rows 1..21). Helpers (submaster-/opt-src-/…) keep auto-flowing
-# on this hidden utility page exactly as before.
-master_page_els = data_page['elements'].select do |e|
-  e.is_a?(Hash) && e['kind'] == 'table' &&
-    (e['id'] == 'master' || e['id'].to_s.start_with?('master-') || e['name'] == 'Master')
+# Place EVERY hidden Data-page element. Layout is the authoritative page
+# membership map in workbook code-rep; leaving helpers unreferenced is no
+# longer an auto-flow convenience, it is an invalid document.
+data_row = 1
+master_les = data_page['elements'].map do |element|
+  height = [WorkbookCode.row_span(element), 10].max
+  xml = le(element['id'], 1, opts[:page_cols] + 1, data_row, data_row + height)
+  data_row += height
+  xml
 end
-master_page_els = [master_el] if master_page_els.empty?
-master_les = master_page_els.each_with_index.map do |m, i|
-  le(m['id'], 1, opts[:page_cols] + 1, 1 + (i * 21), 21 + (i * 21))
-end
-data_page_xml = page_xml('page-data', *master_les)
+data_page_xml = page_xml(data_page['id'], *master_les)
 
 # ---- Layout-arrangement parity record (PLAN-v3 PR-11; WARN-level release) ---
 # Compares the SOURCE zone arrangement (normalized bboxes) against the BUILT
@@ -1800,6 +1808,16 @@ layout_out = assemble(*page_xmls) + "\n"
 # Documented output-shape guard: an empty elementId is always a builder bug
 # and makes Sigma reject the whole layout PUT.
 abort 'FATAL: empty elementId in generated layout XML — builder bug' if layout_out.include?('elementId=""')
+declared_ids = WorkbookCode.elements(wb_ids_raw).filter_map { |element| element['id'] } +
+               sidecar.values.flatten.filter_map { |element| element['id'] }
+layout_ids = layout_out.scan(/elementId="([^"]+)"/).flatten
+duplicate_ids = layout_ids.tally.select { |_, count| count > 1 }.keys
+missing_ids = declared_ids - layout_ids
+unknown_ids = layout_ids - declared_ids
+unless duplicate_ids.empty? && missing_ids.empty? && unknown_ids.empty?
+  abort "FATAL: generated layout must place every element exactly once " \
+        "(duplicates=#{duplicate_ids.inspect}, missing=#{missing_ids.inspect}, unknown=#{unknown_ids.inspect})"
+end
 File.write(opts[:out], layout_out)
 File.write("#{opts[:out]}.elements.json", JSON.pretty_generate(sidecar))
 

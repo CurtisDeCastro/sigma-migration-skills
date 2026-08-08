@@ -62,6 +62,7 @@ ENV['SIGMA_WORKDIR'] ||= opts[:workdir] ||
 $LOAD_PATH.unshift File.expand_path('lib', __dir__)
 require 'sigma_rest'
 require 'code_rep'
+require 'workbook_code'
 
 BASE = ENV.fetch('SIGMA_BASE_URL') # sigma_rest fills this from auth.json when unset
 
@@ -99,7 +100,6 @@ spec = Sigma::CodeRep.document(raw_spec)
 if opts[:layout]
   xml = File.read(opts[:layout], encoding: 'UTF-8')
   abort "FATAL: empty elementId in layout XML" if xml.match?(/elementId=""/)
-  spec['pages'].each { |p| p.delete('layout') }
   spec['layout'] = xml
 
   # PRUNE stale injected layout chrome (orphan-fix, class 2). A rebuilt layout
@@ -114,16 +114,14 @@ if opts[:layout]
   # still references is kept.
   refd = xml.scan(/elementId="([^"]+)"/).flatten
   pruned = []
-  spec['pages'].each do |p|
-    (p['elements'] || []).reject! do |el|
-      id = el['id'].to_s
-      injected = (el['kind'] == 'container' && id.match?(/\A(tc|syn|band)-/)) ||
-                 (el['kind'] == 'text' && id.match?(/\A(tc|syn|band)-.*-hdrtext\z/)) ||
-                 (el['kind'] == 'divider' && id.start_with?('dv-'))
-      next false unless injected && !refd.include?(id)
-      pruned << id
-      true
-    end
+  (spec['elements'] || []).reject! do |el|
+    id = el['id'].to_s
+    injected = (el['kind'] == 'container' && id.match?(/\A(tc|syn|band)-/)) ||
+               (el['kind'] == 'text' && id.match?(/\A(tc|syn|band)-.*-hdrtext\z/)) ||
+               (el['kind'] == 'divider' && id.start_with?('dv-'))
+    next false unless injected && !refd.include?(id)
+    pruned << id
+    true
   end
   puts "pruned #{pruned.length} stale injected layout element(s) not referenced by the new layout: #{pruned.join(', ')}" if pruned.any?
 end
@@ -139,11 +137,12 @@ if elements_path && File.exist?(elements_path)
       warn "WARN: elements sidecar references unknown page #{page_id.inspect} — skipped"
       next
     end
-    page['elements'] ||= []
-    existing = page['elements'].map { |e| e['id'] }
+    spec['elements'] ||= []
+    existing = spec['elements'].map { |e| e['id'] }
     els.each do |el|
       next if existing.include?(el['id'])
-      page['elements'] << el
+      spec['elements'] << el
+      existing << el['id']
       injected += 1
     end
   end
@@ -183,13 +182,11 @@ if nav_path && File.exist?(nav_path)
         end
       end
     end
-    spec['pages'].each do |p|
-      (p['elements'] || []).each do |el|
-        el['body'] = rewrite.call(el['body']) if el['body'].is_a?(String) && el['body'].include?('nav.invalid')
-        (el['actions'] || []).each do |a|
-          (a['effects'] || []).each do |ef|
-            ef['url'] = rewrite.call(ef['url']) if ef['url'].is_a?(String) && ef['url'].include?('nav.invalid')
-          end
+    (spec['elements'] || []).each do |el|
+      el['body'] = rewrite.call(el['body']) if el['body'].is_a?(String) && el['body'].include?('nav.invalid')
+      (el['actions'] || []).each do |a|
+        (a['effects'] || []).each do |ef|
+          ef['url'] = rewrite.call(ef['url']) if ef['url'].is_a?(String) && ef['url'].include?('nav.invalid')
         end
       end
     end
@@ -218,22 +215,20 @@ if manifest_path && File.exist?(manifest_path)
   manifest = (JSON.parse(File.read(manifest_path)) rescue nil)
   manifest = [] unless manifest.is_a?(Array)
   nav_repaired = 0
-  spec['pages'].each do |p|
-    (p['elements'] || []).each do |el|
-      (el['actions'] || []).each do |a|
-        entry = manifest.find { |m| m['actionId'] == a['id'] }
-        next unless entry && entry['targetPageName']
-        (a['effects'] || []).each do |eff|
-          next unless eff['effect'] == 'navigate' && eff.dig('target', 'type') == 'page'
-          resolved = page_id_by_name[entry['targetPageName'].to_s.strip.downcase]
-          if resolved
-            eff['target']['page'] = resolved
-            nav_repaired += 1
-          else
-            warn "WARN: navigate action #{entry['actionId'].inspect} (#{a['id'].inspect}) targets page " \
-                 "#{entry['targetPageName'].inspect} — no live page by that name; provisional target " \
-                 "#{eff['target']['page'].inspect} left in place (verify by hand)"
-          end
+  (spec['elements'] || []).each do |el|
+    (el['actions'] || []).each do |a|
+      entry = manifest.find { |m| m['actionId'] == a['id'] }
+      next unless entry && entry['targetPageName']
+      (a['effects'] || []).each do |eff|
+        next unless eff['effect'] == 'navigate' && eff.dig('target', 'type') == 'page'
+        resolved = page_id_by_name[entry['targetPageName'].to_s.strip.downcase]
+        if resolved
+          eff['target']['page'] = resolved
+          nav_repaired += 1
+        else
+          warn "WARN: navigate action #{entry['actionId'].inspect} (#{a['id'].inspect}) targets page " \
+               "#{entry['targetPageName'].inspect} — no live page by that name; provisional target " \
+               "#{eff['target']['page'].inspect} left in place (verify by hand)"
         end
       end
     end
@@ -278,12 +273,10 @@ begin
     hide_caps -= shown_caps
     non_viz = %w[kpi-chart control text image container divider]
     if hide_caps.any?
-      spec['pages'].each do |p|
-        (p['elements'] || []).each do |el|
-          next unless el['name'].is_a?(String) && !non_viz.include?(el['kind'].to_s)
-          next unless hide_caps.include?(el['name'].strip.downcase)
-          hidden_ids << el['id'] unless hidden_ids.include?(el['id'])
-        end
+      (spec['elements'] || []).each do |el|
+        next unless el['name'].is_a?(String) && !non_viz.include?(el['kind'].to_s)
+        next unless hide_caps.include?(el['name'].strip.downcase)
+        hidden_ids << el['id'] unless hidden_ids.include?(el['id'])
       end
     end
   end
@@ -292,12 +285,10 @@ rescue StandardError => e
 end
 if hidden_ids.any?
   hid = 0
-  spec['pages'].each do |p|
-    (p['elements'] || []).each do |el|
-      next unless hidden_ids.include?(el['id'])
-      el['name'] = { 'visibility' => 'hidden' }
-      hid += 1
-    end
+  (spec['elements'] || []).each do |el|
+    next unless hidden_ids.include?(el['id'])
+    el['name'] = { 'visibility' => 'hidden' }
+    hid += 1
   end
   puts "hidden titles: #{hid}/#{hidden_ids.size} element title(s) hidden (source show-title=false; " \
        "#{ht_paths.any? ? ht_paths.map { |p| File.basename(p) }.join(', ') : 'caption fallback'})"
@@ -332,26 +323,26 @@ if opts[:apply_pivot_totals]
   end
   puts "pivot totals: sidecar override(s) read from #{side.join(', ')}" if side.any?
   applied = 0
-  (spec['pages'] || []).each do |p|
-    (p['elements'] || []).each do |el|
-      next unless el.is_a?(Hash) && el['kind'] == 'pivot-table'
-      ov = overrides[el['id'].to_s]
-      if ov
-        el['totals'] = ov; applied += 1
-      elsif !el.key?('totals')
-        el['totals'] = { 'showGrandTotals' => 'hidden' }; applied += 1
-      end
+  (spec['elements'] || []).each do |el|
+    next unless el.is_a?(Hash) && el['kind'] == 'pivot-table'
+    ov = overrides[el['id'].to_s]
+    if ov
+      el['totals'] = ov; applied += 1
+    elsif !el.key?('totals')
+      el['totals'] = { 'showGrandTotals' => 'hidden' }; applied += 1
     end
   end
   puts "pivot totals: showGrandTotals applied to #{applied} pivot(s)" \
        "#{overrides.any? ? " (#{overrides.size} sidecar override(s))" : ''}"
 end
 
-# Read-only metadata (workbookId, url, ownerId, createdBy, updatedBy,
-# createdAt, updatedAt, latestDocumentVersion) never reaches `spec` in the
-# first place now — Sigma::CodeRep.document() above already unwraps to just
-# the document fields (schemaVersion/pages/kind/layout), so there is nothing
-# left here to strip before the PUT.
+# Fail before the destructive PUT if an element is absent from layout, appears
+# twice, or pages carry legacy nested elements.
+shape_errors = WorkbookCode.validate(Sigma::CodeRep.wrap(spec))
+abort("FATAL: invalid workbook layout:\n  - #{shape_errors.join("\n  - ")}") if shape_errors.any?
+
+# Preserve the complete document (settings, overlays/panels, agents, and any
+# future fields), changing only the fields above.
 resp = http(:put, "/v2/workbooks/#{opts[:wb]}/spec", JSON.pretty_generate(Sigma::CodeRep.wrap(spec)))
 parsed = YAML.safe_load(resp.body, permitted_classes: [Date, Time])
 puts parsed['workbookId'] ? "PUT ok: workbookId=#{parsed['workbookId']}" : "ERROR: #{parsed.inspect}"

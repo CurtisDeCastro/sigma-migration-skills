@@ -255,6 +255,7 @@ SIGMA_KIND = {
   'pie'           => 'pie-chart',
   'scatter'       => 'scatter-chart',
   'combo'         => 'combo-chart',
+  'waterfall'     => 'waterfall-chart',
   'map-region'    => 'region-map',
   'map-point'     => 'point-map',
   'pivot-table'   => 'pivot-table',
@@ -275,6 +276,43 @@ def tile_title(zone, fallback)
   return fallback unless t && !t.to_s.strip.empty?
 
   TableauDynamicTitle.translate(t.to_s.strip, zone['calculations'])
+end
+
+# Carry an explicitly-authored Tableau color-legend zone into Sigma's native
+# chart legend controls when attribution is unambiguous. A legend is attributable
+# when its caption/param names the worksheet, or when the dashboard has exactly
+# one color-encoded chart and one legend. Free-floating pixel offsets have no
+# Sigma equivalent; map the legend to the nearest chart edge.
+def legend_config_for(zone, dashboard)
+  legends = Array(dashboard['zones']).select { |candidate| candidate['kind'] == 'legend' }
+  return nil if legends.empty?
+
+  caption = zone['caption'].to_s
+  matches = legends.select do |legend|
+    [legend['caption'], legend['view_ref']].compact.any? { |value| value.to_s.include?(caption) }
+  end
+  if matches.empty?
+    color_charts = Array(dashboard['zones']).select do |candidate|
+      candidate['kind'] == 'chart' && candidate.dig('channels', 'color', 'column')
+    end
+    matches = legends if legends.one? && color_charts.one? && color_charts.first.equal?(zone)
+  end
+  return nil unless matches.one?
+
+  legend = matches.first
+  chart_left = zone['x_pct'].to_f
+  chart_right = chart_left + zone['w_pct'].to_f
+  chart_top = zone['y_pct'].to_f
+  chart_bottom = chart_top + zone['h_pct'].to_f
+  legend_x = legend['x_pct'].to_f + (legend['w_pct'].to_f / 2.0)
+  legend_y = legend['y_pct'].to_f + (legend['h_pct'].to_f / 2.0)
+  distances = {
+    'left' => (legend_x - chart_left).abs,
+    'right' => (legend_x - chart_right).abs,
+    'top' => (legend_y - chart_top).abs,
+    'bottom' => (legend_y - chart_bottom).abs
+  }
+  { 'position' => distances.min_by { |_, distance| distance }.first }
 end
 
 # ---- Tableau derivation → Sigma aggregation function name ----
@@ -4391,7 +4429,7 @@ layout.each do |dash|
     end
 
     # v5.4 ZONE-DROP HONESTY: a NAMED mark class with no Sigma equivalent
-    # (GanttBar waterfalls/candlesticks/strips, VizExtension third-party
+    # (GanttBar timelines/candlesticks/strips, VizExtension third-party
     # marks, …) previously fell through SIGMA_KIND['other'] → 'bar-chart' and
     # shipped a silently WRONG chart shape. Emit a LOUD named handoff instead:
     # the zone is not auto-built, the coverage ledger records it dropped with
@@ -4405,8 +4443,9 @@ layout.each do |dash|
       else
         warnings << "ZONE DROPPED / STAYS-MANUAL: '#{cap}' uses Tableau mark class '#{mc}' with no Sigma " \
                     'chart equivalent — NOT auto-built (a bar-chart stand-in misrepresents the mark). ' \
-                    'Re-author in Sigma by hand (waterfall/candlestick: bar + running-total helper; ' \
-                    'gantt: no native equivalent; viz-extension: rebuild with a native chart). ' \
+                    'Re-author in Sigma by hand (gantt/candlestick: no native equivalent; ' \
+                    'a GanttBar with RUNNING_SUM is detected separately and emits native waterfall-chart; ' \
+                    'viz-extension: rebuild with a native chart). ' \
                     'The Phase-6 tile census will report this zone unmatched.'
         next
       end
@@ -5230,6 +5269,9 @@ layout.each do |dash|
     kind = SIGMA_KIND[z['chart_kind']] || 'bar-chart'
     if z['chart_kind'] == 'automatic'
       warnings << "'#{cap}' has chart_kind=automatic — defaulted to bar-chart; verify against PNG"
+    elsif kind == 'waterfall-chart'
+      warnings << "'#{cap}' GanttBar + RUNNING_SUM signature emitted as native waterfall-chart — " \
+                  'verify that the selected y-series is the per-category delta (not an already-cumulative export)'
     end
     # v5.4 DONUT discriminator: Tableau has no donut mark — a donut is a Pie
     # mark whose rows/cols shelf carries ONLY constant-aggregate placeholder
@@ -5408,6 +5450,14 @@ layout.each do |dash|
       'source'  => { 'kind' => 'table', 'elementId' => chart_source_eid },
       'columns' => [dim_col_obj, meas_col_obj]
     }
+    if kind == 'waterfall-chart'
+      element['waterfallShape'] = { 'calculation' => 'sum', 'connectorLine' => 'shown' }
+      element['startPoint'] = {
+        'value' => { 'type' => 'constant', 'value' => 0 },
+        'visibility' => 'hidden'
+      }
+      element['grouping'] = 'stacked'
+    end
     element['columns'] << extra_meas_col if extra_meas_col
 
     # C2 THRESHOLD HALO (gap ubr5.11): a color channel driven by a threshold on
@@ -5495,6 +5545,11 @@ layout.each do |dash|
                   'palette in the Sigma editor if Tableau used one'
     end
 
+    if (legend = legend_config_for(z, dash))
+      element['legend'] = legend
+      warnings << "'#{cap}' explicit Tableau legend zone mapped to Sigma legend.position=#{legend['position']}"
+    end
+
     # Null-dim exclusion (Tableau↔Sigma join-semantics parity): Sigma DM
     # relationships are LEFT joins, so fact rows without a dim match surface a
     # NULL dim bucket that the Tableau view excluded. When the Tableau CSV has
@@ -5506,7 +5561,7 @@ layout.each do |dash|
     # Charts only: a table/pivot RENDERS every column, so the helper column
     # would show up as a visible "X Not Null" column (and crosstabs keep their
     # null buckets in Tableau anyway).
-    null_excl_kinds = %w[bar-chart line-chart area-chart combo-chart pie-chart donut-chart scatter-chart]
+    null_excl_kinds = %w[bar-chart line-chart area-chart combo-chart waterfall-chart pie-chart donut-chart scatter-chart]
     [[dim_csv_idx, dim_col_obj], [color_csv_idx, color_col_obj]].each do |(ci, cobj)|
       next unless null_excl_kinds.include?(kind)
       next if ci.nil? || cobj.nil?
@@ -5536,7 +5591,7 @@ layout.each do |dash|
     # live API only accepts the wrapped object form. `value.type: column` is
     # also rejected — use `formula` with a column ref instead.
     ref_emit, trend_emit, ref_skip = [], [], []
-    if z['ref_marks'] && !z['ref_marks'].empty? && %w[bar-chart line-chart area-chart combo-chart scatter-chart].include?(kind)
+    if z['ref_marks'] && !z['ref_marks'].empty? && %w[bar-chart line-chart area-chart combo-chart waterfall-chart scatter-chart].include?(kind)
       meas_name = meas_col_obj['name']
       tab_to_sigma_agg = { 'average' => 'Avg', 'median' => 'Median', 'max' => 'Max', 'min' => 'Min', 'sum' => 'Sum', 'count' => 'Count' }
       # Trendline shape verified 2026-05-22 against a UI-built workbook
@@ -5860,7 +5915,7 @@ layout.each do |dash|
     #      from <pane><style><style-rule element='mark'>
     #             <format attr='mark-labels-show' value='true'/>
     #      (verified against "Orders Conversion Test" workbook, 2026-05-22)
-    if %w[bar-chart line-chart area-chart combo-chart scatter-chart pie-chart donut-chart].include?(kind)
+    if %w[bar-chart line-chart area-chart combo-chart waterfall-chart scatter-chart pie-chart donut-chart].include?(kind)
       has_label_channel = z.dig('channels', 'label', 'column') || z.dig('channels', 'text', 'column')
       has_mark_labels   = z['mark_labels_show'] == true
       if has_label_channel || has_mark_labels

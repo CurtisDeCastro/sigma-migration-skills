@@ -11,6 +11,7 @@
 
 require 'minitest/autorun'
 require_relative '../lib/code_rep'
+require_relative '../lib/workbook_code'
 
 # Static AST check: does every Sigma::CodeRep call site in a script live
 # STRICTLY inside the "then" clause of an `if`/ternary keyed on
@@ -24,7 +25,10 @@ require_relative '../lib/code_rep'
 # DATAMODEL branch through the adapter too (e.g. by deleting the `else` or
 # copying the wrapped body into both branches).
 module CodeRepGuardCheck
-  CODE_REP_METHODS = %i[document wrap metadata].freeze
+  CODE_REP_METHODS = %i[
+    document wrap metadata workbook_elements workbook_page_element_ids
+    workbook_page_by_element workbook_elements_with_pages
+  ].freeze
 
   module_function
 
@@ -95,10 +99,16 @@ class TestPostAndReadback < Minitest::Test
   end
 
   def test_workbook_post_body_is_nested
-    doc  = { 'schemaVersion' => 1, 'pages' => [], 'kind' => 'workbook' }
+    doc  = {
+      'schemaVersion' => 1, 'pages' => [{ 'id' => 'p1' }],
+      'elements' => [{ 'id' => 'e1', 'kind' => 'text' }],
+      'kind' => 'workbook',
+      'layout' => '<Page id="p1"><LayoutElement elementId="e1"/></Page>'
+    }
     body = Sigma::CodeRep.wrap(doc, extra: { 'name' => 'n', 'folderId' => 'f' })
     assert_equal doc, body['document']
     refute body.key?('pages'), 'pages must not remain top-level'
+    refute body['document']['pages'].first.key?('elements')
   end
 
   # The DM branch must be left alone — that surface is not changing.
@@ -166,10 +176,11 @@ class TestPostAndReadback < Minitest::Test
       'schemaVersion' => 1,
       'pages'         => [{ 'id' => 'p1', 'elements' => [] }]
     }
-    verify_body = Sigma::CodeRep.wrap(Sigma::CodeRep.document(flat_spec),
-                                       extra: Sigma::CodeRep.metadata(flat_spec))
+    verify_body = WorkbookCode.canonicalize(flat_spec)
     assert verify_body.key?('document'), 'verify body must nest the spec under document'
-    assert_equal flat_spec['pages'], verify_body['document']['pages']
+    assert_equal [{ 'id' => 'p1' }], verify_body['document']['pages']
+    assert_equal [], verify_body['document']['elements']
+    assert_includes verify_body['document']['layout'], '<Page'
     assert_equal 'My Workbook', verify_body['name']
     assert_equal 'folder-123', verify_body['folderId']
     refute verify_body.key?('pages'), 'pages must not remain top-level in the verify body'

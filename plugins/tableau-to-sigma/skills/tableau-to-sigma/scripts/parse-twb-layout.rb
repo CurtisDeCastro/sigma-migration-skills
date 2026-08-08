@@ -1326,6 +1326,17 @@ def chart_kind_for(meta)
   return 'map-region' if geo_mark || meta[:has_geometry]
   return 'map-point'  if has_xy
 
+  # Tableau implements waterfalls with a Gantt Bar mark positioned by a
+  # running-total table calculation. Gantt bars are also used for timelines and
+  # candlesticks, so only the explicit running-total signature maps to Sigma's
+  # native waterfall-chart; every other GanttBar remains an honest manual gap.
+  if mc == 'ganttbar'
+    running_total = Array(meta[:calculations]).any? do |calculation|
+      calculation.is_a?(Hash) && calculation['formula'].to_s.match?(/\bRUNNING_SUM\s*\(/i)
+    end
+    return running_total ? 'waterfall' : 'other'
+  end
+
   case mc
   when 'bar'        then 'bar'
   when 'line'       then 'line'
@@ -1882,6 +1893,7 @@ xml.elements.each('//dashboard') do |d|
       'is_pill'    => ztext['is_pill'],
       # v5.0 design-compiler signals (nil when absent — additive)
       'corner_radius' => zstyle['corner_radius'],
+      'rounding'      => zstyle['rounding'],
       'border_width'  => zstyle['border_width'],
       'is_fixed'      => (z.attributes['is-fixed'] == 'true' || nil),
       'fixed_size'    => (z.attributes['fixed-size'] ? z.attributes['fixed-size'].to_i : nil),
