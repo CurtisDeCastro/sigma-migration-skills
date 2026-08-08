@@ -68,6 +68,7 @@ require_relative 'lib/threshold_halo'  # C2: threshold-halo (computed-boolean co
 require_relative 'lib/integer_dim'    # PR-18: integer-coded dimension decode-to-text routing
 require_relative 'lib/trellis_emit'   # shared native-trellis emitter (supported-kind gate + fallbacks)
 require_relative 'lib/metric_binding' # shared DM-metric binder ([Metrics/<name>] over inline re-derive)
+require_relative 'lib/tableau_dynamic_title'
 require_relative 'lib/kpi_card'       # shared KPI-chart emitter (comparative-KPI-ready)
 require_relative 'lib/kpi_comparison_detect' # Task 5: prior/target comparison-measure detector
 require_relative 'lib/action_ledger' # workbook-wide action id registry + validate/manifest
@@ -271,7 +272,9 @@ SIGMA_KIND = {
 # source labels them, not by internal sheet name.
 def tile_title(zone, fallback)
   t = zone && zone['display_title']
-  t && !t.to_s.strip.empty? ? t.to_s.strip : fallback
+  return fallback unless t && !t.to_s.strip.empty?
+
+  TableauDynamicTitle.translate(t.to_s.strip, zone['calculations'])
 end
 
 # ---- Tableau derivation → Sigma aggregation function name ----
@@ -5349,11 +5352,14 @@ layout.each do |dash|
                     'over a grouped calculation on the hidden source (one value per point)'
       end
       unless rows.any? { |r| r[0].nil? || r[0].to_s.strip.empty? }
+        # S11/K20: list filters reject boolean-typed columns ("Invalid filter",
+        # blank tile) while /export still returns rows. Cast via Text() and pass
+        # string values — same shape as the hf-* keep-filter family.
         element['columns'] << { 'id' => "nn-c-#{el_id}", 'name' => "#{dim['name']} Not Null",
-                                'formula' => "IsNotNull([#{src_name}/#{dim['name']}])" }
+                                'formula' => "Text(IsNotNull([#{src_name}/#{dim['name']}]))" }
         element['filters'] = [{ 'id' => "flt-#{el_id}-nn", 'columnId' => "nn-c-#{el_id}",
                                 'kind' => 'list', 'mode' => 'include',
-                                'selectionMode' => 'multiple', 'values' => [true] }]
+                                'selectionMode' => 'multiple', 'values' => ['true'] }]
       end
       element['_worksheet'] = cap
       element['_dashboard'] = dash['dashboard']
@@ -5492,10 +5498,10 @@ layout.each do |dash|
     # Null-dim exclusion (Tableau↔Sigma join-semantics parity): Sigma DM
     # relationships are LEFT joins, so fact rows without a dim match surface a
     # NULL dim bucket that the Tableau view excluded. When the Tableau CSV has
-    # NO null dim values, mirror the exclusion with a verified bool-filter
-    # (IsNotNull calc column + include:[true] list filter — the spec shape from
-    # reference_sigma_rls_cls_spec_shape). A no-null dataset makes this a
-    # harmless no-op.
+    # NO null dim values, mirror the exclusion with a Text(IsNotNull(...))
+    # column + include:["true"] list filter (S11/K20 — boolean-typed list
+    # filter targets render "Invalid filter" and blank the tile while /export
+    # still returns rows). A no-null dataset makes this a harmless no-op.
     null_excl_filters = []
     # Charts only: a table/pivot RENDERS every column, so the helper column
     # would show up as a visible "X Not Null" column (and crosstabs keep their
@@ -5507,12 +5513,12 @@ layout.each do |dash|
       next if rows.any? { |r| r[ci].nil? || r[ci].to_s.strip.empty? } # Tableau kept nulls
       nn_id = "nn-#{cobj['id']}"
       element['columns'] << { 'id' => nn_id, 'name' => "#{cobj['name']} Not Null",
-                              'formula' => "IsNotNull(#{cobj['formula'] || "[Master/#{cobj['name']}]"})" }
+                              'formula' => "Text(IsNotNull(#{cobj['formula'] || "[Master/#{cobj['name']}]"}))" }
       null_excl_filters << { 'columnId' => nn_id, 'kind' => 'list', 'mode' => 'include',
-                             'selectionMode' => 'multiple', 'values' => [true] }
+                             'selectionMode' => 'multiple', 'values' => ['true'] }
     end
     unless null_excl_filters.empty?
-      warnings << "'#{cap}' null-dim exclusion: #{null_excl_filters.size} IsNotNull filter(s) emitted (Tableau view shows no null dim bucket; Sigma LEFT joins would)"
+      warnings << "'#{cap}' null-dim exclusion: #{null_excl_filters.size} Text(IsNotNull) filter(s) emitted (Tableau view shows no null dim bucket; Sigma LEFT joins would)"
     end
 
     # Reference lines / bands / trendlines from Tableau → Sigma `refMarks`.
@@ -7489,14 +7495,15 @@ unless opts[:no_auto_controls]   # default-on: never miss a .twb parameter/filte
           'source' => { 'kind' => 'table', 'elementId' => opts[:master_id] },
           'columns' => [
             { 'id' => opt_val_col, 'name' => cap.strip, 'formula' => "[Master/#{m['name']}]" },
+            # S11/K20: Text() + string values — boolean list filters blank the tile
             { 'id' => opt_nn_col, 'name' => "#{cap.strip} Not Null",
-              'formula' => "IsNotNull([Master/#{m['name']}])" }
+              'formula' => "Text(IsNotNull([Master/#{m['name']}]))" }
           ],
           # every element filter needs an `id` — the spec API 400s
           # `filters[N].id: Invalid string: undefined` without one (field report)
           'filters' => [{ 'id' => "flt-#{opt_id}-0", 'columnId' => opt_nn_col,
                           'kind' => 'list', 'mode' => 'include',
-                          'selectionMode' => 'multiple', 'values' => [true] }],
+                          'selectionMode' => 'multiple', 'values' => ['true'] }],
           'visibleAsSource' => false
         }
         spec['source'] = {
@@ -8405,15 +8412,23 @@ elsif opts[:pages_mode] == :dashboard
   # 4 dashboards must become 4 laid-out pages, each with its own title text and
   # its own copy of the dashboard-global controls (ids suffixed for global
   # uniqueness, control refs in calc formulas rewritten per page).
-  dash_order = layout.map { |d| d['dashboard'] }
+  # Storyboards are emitted by build-story-pages.rb, not as ordinary dashboard
+  # pages. parse-twb-layout may also mark hidden/parameter dashboards
+  # `emit_page:false`; retaining either here creates migration-debris tabs.
+  page_layout = layout.reject { |d| d['is_story'] || d['emit_page'] == false }
+  dash_order = page_layout.map { |d| d['dashboard'] }
   by_dash = elements.group_by { |e| e['_dashboard'] }
   pages = []
   seen_el_ids = {}   # element id → true; a worksheet reused on N dashboards
                      # yields N element copies sharing one id → "Duplicate id"
                      # on POST. Namespace the 2nd+ occurrence per page.
   dash_order.each do |dash_name|
-    els = by_dash[dash_name]
-    next if els.nil? || els.empty?
+    els = by_dash[dash_name] || []
+    # A Tableau dashboard can be intentionally chartless (User Guide / help /
+    # methodology tabs made entirely of styled text, images, and buttons).
+    # Those zones already live in styled_text_by_dash; do not discard the page
+    # merely because it has no worksheet-backed element.
+    next if els.empty? && styled_text_by_dash[dash_name].empty?
     els.each { |e| e.delete('_worksheet'); e.delete('_dashboard') }
     d_slug = dash_name.to_s.downcase.gsub(/\W+/, '-')[0..30].sub(/-$/, '')
     # Skip the synthetic "# <dashboard>" title when this dashboard has its OWN top

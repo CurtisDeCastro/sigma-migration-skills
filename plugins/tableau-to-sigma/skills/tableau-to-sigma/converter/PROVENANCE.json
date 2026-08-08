@@ -123,6 +123,15 @@
         "unwiredReason: a keyShaped-empty result whose denied list is non-empty names the denied column(s) and the manual-authoring remedy instead of the generic not-key-shaped text"
       ],
       "upstream_pr": null
+    },
+    {
+      "commit": "2f980f6",
+      "summary": "Collision-safe names for the two convenience Sum() metrics emitted from raw Tableau measures. Sigma accepts a metric whose name equals a sibling column during write validation but drops the element's full metric collection on readback; this in-place patch preserves the raw column name and gives its generated aggregate a deterministic Total <column> name.",
+      "changes": [
+        "added _autoMetricName(displayName), which checks sibling column and metric names case-insensitively and emits Total <displayName> with a deterministic numeric suffix when needed",
+        "routed both raw-measure auto-metric emitters through _autoMetricName so no convenience aggregate collides with a sibling column"
+      ],
+      "upstream_pr": null
     }
   ],
   "_upstream_and_revendor_tasks": [

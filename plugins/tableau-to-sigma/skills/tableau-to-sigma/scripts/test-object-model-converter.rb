@@ -39,6 +39,7 @@
 
 require 'json'
 require 'open3'
+require 'set'
 require 'tmpdir'
 
 VENDORED = File.expand_path('../converter/tableau.mjs', __dir__)
@@ -463,6 +464,7 @@ DRIVER = <<~JS
         kind: e.source && e.source.kind,
         colIds: (e.columns || []).map((c) => c.id),
         colDefs: (e.columns || []).map((c) => ({ id: c.id, name: c.name || null, formula: c.formula || null })),
+        metricDefs: (e.metrics || []).map((m) => ({ id: m.id, name: m.name || null, formula: m.formula || null })),
         columns: (e.columns || []).length,
         statement: e.source && e.source.kind === 'sql' ? e.source.statement : null,
         relationships: (e.relationships || []).map((r) => ({
@@ -631,7 +633,16 @@ check(names.any? { |n| n.include?('FACT_VISITS') } && names.any? { |n| n.include
 check(md['warnings'].any? { |w| w =~ /multi-element data model|Multi-datasource workbook/i },
       'multi-element build announced (nothing silently dropped)', fails)
 
-puts 'Part 8 — role-played date dimension: one element instance per role (R3-1)'
+puts 'Part 8 — auto Sum metrics never collide with sibling column names (F4)'
+auto_fact = fact_of.call(results['b-happy'])
+auto_columns = (auto_fact['colDefs'] || []).map { |column| column['name'].to_s.downcase }.to_set
+auto_metrics = auto_fact['metricDefs'] || []
+collisions = auto_metrics.select { |metric| auto_columns.include?(metric['name'].to_s.downcase) }
+check(collisions.empty?, "no fact column/metric name collisions (got #{collisions.map { |m| m['name'] }.inspect})", fails)
+check(src.scan(/name:\s*_autoMetricName\(displayName\)/).length == 2,
+      'both raw-measure auto-metric emitters use the collision-safe naming helper', fails)
+
+puts 'Part 9 — role-played date dimension: one element instance per role (R3-1)'
 rp = results['roleplay']
 insts = rp['elements'].select { |e| e['name'].to_s =~ /\ADIM_DATES \((Admit|Discharge|Followup) Date\)\z/ }
 check(insts.size == 3,

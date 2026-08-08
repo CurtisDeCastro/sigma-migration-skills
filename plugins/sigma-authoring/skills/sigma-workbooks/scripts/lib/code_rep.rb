@@ -17,7 +17,7 @@ module Sigma
     # `settings` (theme/navigation) and `agents` belong here too — omitting them
     # sweeps themeName/themeOverrides/agents onto the top level, where they are
     # not valid keys, silently dropping theme + agents on every write.
-    DOC_KEYS = %w[schemaVersion pages kind layout settings agents].freeze
+    DOC_KEYS = %w[schemaVersion elements pages kind layout settings agents].freeze
 
     # REMOVED from the API. The workbook theme is now `settings.theme.name` and
     # `settings.theme.overrides` (published OpenAPI: createWorkbookSpec — there
@@ -34,7 +34,7 @@ module Sigma
         return {} unless response.is_a?(Hash)
         inner = response['document']
         doc = inner.is_a?(Hash) ? inner : response.select { |k, _| DOC_KEYS.include?(k) }
-        fold_legacy_theme(doc, response)
+        inflate_elements(fold_legacy_theme(doc, response))
       end
 
       def metadata(response)
@@ -68,10 +68,71 @@ module Sigma
 
       # Write path: every live workbook code-rep endpoint requires the wrapper.
       def wrap(document_hash, extra: {})
-        extra.merge('document' => document_hash)
+        extra.merge('document' => flatten_elements(document_hash))
       end
 
       private
+
+      # The live API moved elements from pages[].elements to document.elements
+      # in August 2026. Keep the converter's page-nested internal shape so all
+      # page-local control/layout logic remains valid, deriving page ownership
+      # from the layout's <Page> blocks on read.
+      def inflate_elements(doc)
+        elements = doc['elements']
+        pages = doc['pages']
+        return doc unless elements.is_a?(Array) && pages.is_a?(Array)
+        return doc if pages.any? { |page| page['elements'].is_a?(Array) }
+        return doc if pages.empty?
+        return doc.reject { |key, _| key == 'elements' } if elements.empty?
+
+        page_ids_by_element = {}
+        doc['layout'].to_s.scan(
+          /<Page\b[^>]*\bid=(["'])(.*?)\1[^>]*>(.*?)<\/Page>/m
+        ) do |_quote, page_id, body|
+          body.scan(/elementId=(["'])(.*?)\1/) do |_element_quote, element_id|
+            page_ids_by_element[element_id] ||= page_id
+          end
+        end
+
+        inflated_pages = pages.map { |page| page.merge('elements' => []) }
+        pages_by_id = inflated_pages.each_with_object({}) do |page, out|
+          out[page['id']] = page if page['id']
+        end
+        fallback = pages_by_id['page-data'] || inflated_pages.first
+        elements.each do |element|
+          page = pages_by_id[page_ids_by_element[element['id']]] || fallback
+          page['elements'] << element
+        end
+
+        doc.merge('pages' => inflated_pages).reject { |key, _| key == 'elements' }
+      end
+
+      # Emit only the current API shape. Elements are workbook-global in the
+      # payload; layout XML retains their page placement.
+      def flatten_elements(doc)
+        return doc unless doc.is_a?(Hash)
+        pages = doc['pages']
+        return doc unless pages.is_a?(Array)
+
+        flattened_pages = []
+        nested_elements = []
+        pages.each do |page|
+          page_copy = page.dup
+          nested_elements.concat(Array(page_copy.delete('elements')))
+          flattened_pages << page_copy
+        end
+        existing_elements = Array(doc['elements'])
+        elements = []
+        seen = {}
+        (existing_elements + nested_elements).each do |element|
+          key = element.is_a?(Hash) && element['id']
+          next if key && seen[key]
+          seen[key] = true if key
+          elements << element
+        end
+
+        doc.merge('pages' => flattened_pages, 'elements' => elements)
+      end
 
       # themeName/themeOverrides -> settings.theme.{name,overrides}. Non-mutating:
       # only builds a new hash when a legacy key is actually present, so the

@@ -75,6 +75,10 @@ def run_case(live_spec, layout_xml, manifest_entries)
   end
 end
 
+def elements_from_spec(spec)
+  spec['elements'] || spec.fetch('pages', []).flat_map { |page| page['elements'] || [] }
+end
+
 # ---------------------------------------------------------------------------
 puts 'Case 1 - navigate target repaired by name to the DIFFERENT live page id'
 # The button was emitted with a PROVISIONAL target 'page-wrong-slug' (as
@@ -117,7 +121,7 @@ LIVE_SPEC_1_WITH_BUTTON = {
 st1, out1, puts1 = run_case(LIVE_SPEC_1_WITH_BUTTON, LAYOUT_XML_1, MANIFEST_1)
 check(st1.exitstatus == 0, 'exits 0')
 check(puts1.length == 1, 'exactly one PUT sent')
-btn1 = (puts1.first || {}).fetch('pages', []).flat_map { |p| p['elements'] || [] }.find { |e| e['id'] == 'btn-10' }
+btn1 = elements_from_spec(puts1.first || {}).find { |e| e['id'] == 'btn-10' }
 eff1 = btn1 && (btn1['actions'] || []).first&.dig('effects', 0)
 # Assert on the REPAIRED spec that came back over the wire, not on a locally
 # constructed expectation.
@@ -139,7 +143,7 @@ MANIFEST_2 = [
 
 st2, out2, puts2 = run_case(LIVE_SPEC_1_WITH_BUTTON, LAYOUT_XML_1, MANIFEST_2)
 check(st2.exitstatus == 0, 'exits 0 (unresolved target is a warning, not a crash)')
-btn2 = (puts2.first || {}).fetch('pages', []).flat_map { |p| p['elements'] || [] }.find { |e| e['id'] == 'btn-10' }
+btn2 = elements_from_spec(puts2.first || {}).find { |e| e['id'] == 'btn-10' }
 eff2 = btn2 && (btn2['actions'] || []).first&.dig('effects', 0)
 check(!eff2.nil? && eff2['target']['page'] == 'page-wrong-slug',
       'provisional target.page left in place (page-wrong-slug) when the name does not resolve')
