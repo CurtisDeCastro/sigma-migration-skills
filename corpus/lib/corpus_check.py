@@ -135,6 +135,17 @@ def summarize(doc):
     return out
 
 
+def rejected_layout_tags(doc):
+    """Return legacy workbook layout tags that the live API rejects."""
+    spec = _spec_root(doc)
+    document = spec.get("document") if isinstance(spec, dict) else None
+    workbook = document if isinstance(document, dict) else spec
+    layout = workbook.get("layout") if isinstance(workbook, dict) else None
+    if not isinstance(layout, str):
+        return []
+    return sorted(set(re.findall(r"</?(LayoutElement|GridContainer)\b", layout)))
+
+
 # -------------------------------------------------------------------- check
 
 def _read_manifest_expectations(case_dir):
@@ -197,6 +208,13 @@ def _check_golden(case_dir, fname, expect):
         return False, ["golden/%s: invalid JSON (%s)" % (fname, e)]
     got = summarize(doc)
     msgs, ok = [], True
+    legacy_tags = rejected_layout_tags(doc)
+    if legacy_tags:
+        ok = False
+        msgs.append(
+            "golden/%s: rejected legacy layout tag(s): %s; emit Element/Container"
+            % (fname, ", ".join(legacy_tags))
+        )
     for key in ("pages", "elements", "columns", "metrics", "relationships", "warnings"):
         if key in expect and expect[key] != got[key]:
             ok = False
