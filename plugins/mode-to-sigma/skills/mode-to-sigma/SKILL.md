@@ -8,7 +8,7 @@ description: Convert a Mode Report (Queries + Charts) into a Sigma data model an
 > Phase numbering is local to this skill; the canonical Assess→Discover→Reuse→
 > Convert→Post-DM→Build→Layout→Parity→Security→Enhance arc and this skill's
 > mapping live in
-> [`docs/phase-schema.md`](../../../../docs/phase-schema.md).
+> `docs/phase-schema.md` (full clone only — see repo `docs/phase-schema.md`).
 
 > **Assessment is a separate skill and isn't installable yet.** Tenant-level
 > inventory, dedup, and a value/cost migration shortlist are `mode-assessment`'s
