@@ -10,9 +10,15 @@
 # text) into the matching pages before the PUT. Pass --elements to override
 # the sidecar path. Injection is idempotent (existing element ids are kept).
 #
+# A builder may intentionally omit a displaced decorative element only by
+# writing `<layout>.prune-elements.json`. This script accepts version-1
+# `manual-composite` records only and removes those exact ids from flat
+# document.elements before final coverage validation. Arbitrary missing
+# elements remain fatal.
+#
 # Usage:
 #   ruby put-layout.rb --workbook <wbId> --layout <layout.xml> \
-#     [--elements <elements.json>]
+#     [--elements <elements.json>] [--prune-elements <prune-elements.json>]
 
 require 'net/http'
 require 'uri'
@@ -27,6 +33,7 @@ OptionParser.new do |p|
   p.on('--workbook ID') { |v| opts[:wb] = v }
   p.on('--layout PATH') { |v| opts[:layout] = v }
   p.on('--elements PATH', 'spec elements to inject (default: <layout>.elements.json if present)') { |v| opts[:elements] = v }
+  p.on('--prune-elements PATH', 'explicit manual-composite elements to remove (default: <layout>.prune-elements.json if present)') { |v| opts[:prune_elements] = v }
   p.on('--nav-buttons PATH', 'nav-button sidecar (default: sibling *-nav-buttons.json) — rewrites the nav.invalid placeholder URLs to live page URLs') { |v| opts[:nav_buttons] = v }
   # v5.4: the pivot grand-totals SHIP step. A pivot carrying a `totals` key
   # 500s its CSV export (probe-isolated v5.4: `totals` is the SOLE trigger —
@@ -113,6 +120,42 @@ if opts[:layout]
   # sidecar) — user elements are never touched, and anything the new layout
   # still references is kept.
   refd = xml.scan(/elementId="([^"]+)"/).flatten
+
+  # Explicit manual-composite prune contract. A decorative floating image that
+  # cannot be represented without being stranded far below its source is
+  # intentionally absent from the layout. The builder names every such element
+  # in a strict sidecar; remove only those exact ids from flat document.elements
+  # so WorkbookCode.validate can continue enforcing complete placement for
+  # everything else. An absent id is allowed for idempotent re-PUTs, but a
+  # malformed record, unknown page, duplicate id, or still-referenced id is
+  # fatal rather than becoming a broad missing-element escape hatch.
+  prune_path = opts[:prune_elements] || "#{opts[:layout]}.prune-elements.json"
+  if File.exist?(prune_path)
+    prune_doc = JSON.parse(File.read(prune_path))
+    records = prune_doc.is_a?(Hash) ? prune_doc['elements'] : nil
+    abort "FATAL: invalid explicit prune sidecar #{prune_path}: version must be 1" unless prune_doc.is_a?(Hash) && prune_doc['version'] == 1
+    abort "FATAL: invalid explicit prune sidecar #{prune_path}: elements must be an array" unless records.is_a?(Array)
+    page_ids = Array(spec['pages']).filter_map { |page| page['id'] if page.is_a?(Hash) }
+    invalid = records.reject do |record|
+      record.is_a?(Hash) && !record['element_id'].to_s.empty? &&
+        record['reason'] == 'manual-composite' && page_ids.include?(record['page_id'])
+    end
+    abort "FATAL: invalid explicit prune record(s) in #{prune_path}: #{invalid.inspect}" if invalid.any?
+    prune_ids = records.map { |record| record['element_id'] }
+    duplicates = prune_ids.tally.select { |_, count| count > 1 }.keys
+    abort "FATAL: duplicate explicit prune id(s) in #{prune_path}: #{duplicates.join(', ')}" if duplicates.any?
+    referenced = prune_ids & refd
+    abort "FATAL: explicit prune id(s) are still referenced by layout: #{referenced.join(', ')}" if referenced.any?
+
+    removed = []
+    (spec['elements'] || []).reject! do |element|
+      next false unless element.is_a?(Hash) && prune_ids.include?(element['id'])
+      removed << element['id']
+      true
+    end
+    puts "pruned #{removed.length}/#{prune_ids.length} explicit manual-composite element(s) before PUT: #{prune_ids.join(', ')}" if prune_ids.any?
+  end
+
   pruned = []
   (spec['elements'] || []).reject! do |el|
     id = el['id'].to_s

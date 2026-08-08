@@ -106,7 +106,7 @@ def header_from_source(dashboard)
 end
 
 opts = { page_cols: 24, page_rows: 32, row_scale: 1.5, chart_y0: 29.7,
-         chart_y1: 100.0, chart_row0: 6, renames: {} }
+         chart_y1: 100.0, chart_row0: 6, renames: {}, pruned_elements: [] }
 OptionParser.new do |p|
   p.on('--layout PATH')        { |v| opts[:layout] = v }
   p.on('--wb-ids PATH')        { |v| opts[:wb_ids] = v }
@@ -848,11 +848,21 @@ def build_page_from_tree(dashboard, page, opts)
     fs = float_src[i]
     if fs && fs[:node]['kind'] == 'image' && (packed[i][2] - fs[:r0]) > page_rows * 0.25
       # Hard invariant (v5.1): a decorative float stranded far below its source
-      # y is worse than absent — drop it, keep it recoverable.
+      # y is worse than absent — drop it, keep it recoverable, and explicitly
+      # remove its declared element during put-layout. The prune record is the
+      # only exception to the every-declared-element-is-placed contract.
+      eid = resolve_leaf(fs[:node], ctx)
       warn "WARN: floating image zone #{fs[:node]['id']} would be packed " \
            "#{packed[i][2] - fs[:r0]} rows below its source position — dropped from " \
            'the grid (placement: manual-composite in image-assets.json)'
       record_manual_composite(opts[:layout], dashboard['dashboard'], fs[:node]['id'])
+      opts[:pruned_elements] << {
+        'element_id' => eid,
+        'page_id' => page['id'],
+        'reason' => 'manual-composite',
+        'dashboard' => dashboard['dashboard'],
+        'zone_id' => fs[:node]['id'].to_s
+      }
       next
     end
     children << ep.call(*packed[i])
@@ -1769,12 +1779,16 @@ dash_layout.each do |d|
     # per-path bookkeeping. Gate 8c (assert-phase6-ran.rb) fails on a
     # non-empty list.
     refd = pxml.scan(/elementId="([^"]+)"/).flatten
+    explicitly_pruned = opts[:pruned_elements]
+                        .select { |record| record['page_id'] == page['id'] }
+                        .map { |record| record['element_id'] }
     unplaced = page['elements'].select do |e|
       k = e['kind'].to_s
       (k.end_with?('-chart') || %w[table pivot-table control text image button].include?(k)) &&
-        e['id'] && !refd.include?(e['id'])
+        e['id'] && !refd.include?(e['id']) && !explicitly_pruned.include?(e['id'])
     end.map { |e| e['id'] }
     census['unplaced_elements'] = unplaced
+    census['pruned_elements'] = explicitly_pruned.sort
     if unplaced.any?
       warn "WARN: #{unplaced.length} element(s) on page #{page['name'].inspect} are absent from the " \
            "built layout — Sigma will auto-flow them as stray cards: #{unplaced.join(', ')}"
@@ -1812,14 +1826,30 @@ declared_ids = WorkbookCode.elements(wb_ids_raw).filter_map { |element| element[
                sidecar.values.flatten.filter_map { |element| element['id'] }
 layout_ids = layout_out.scan(/elementId="([^"]+)"/).flatten
 duplicate_ids = layout_ids.tally.select { |_, count| count > 1 }.keys
-missing_ids = declared_ids - layout_ids
+prune_records = opts[:pruned_elements].sort_by do |record|
+  [record['page_id'].to_s, record['element_id'].to_s, record['zone_id'].to_s]
+end
+prune_ids = prune_records.map { |record| record['element_id'] }
+invalid_pruned = prune_records.reject do |record|
+  record['reason'] == 'manual-composite' && !record['element_id'].to_s.empty? &&
+    declared_ids.count(record['element_id']) == 1 && !layout_ids.include?(record['element_id'])
+end
+duplicate_pruned = prune_ids.tally.select { |_, count| count > 1 }.keys
+missing_ids = declared_ids - layout_ids - prune_ids
 unknown_ids = layout_ids - declared_ids
-unless duplicate_ids.empty? && missing_ids.empty? && unknown_ids.empty?
+unless duplicate_ids.empty? && missing_ids.empty? && unknown_ids.empty? &&
+       invalid_pruned.empty? && duplicate_pruned.empty?
   abort "FATAL: generated layout must place every element exactly once " \
-        "(duplicates=#{duplicate_ids.inspect}, missing=#{missing_ids.inspect}, unknown=#{unknown_ids.inspect})"
+        "(duplicates=#{duplicate_ids.inspect}, missing=#{missing_ids.inspect}, unknown=#{unknown_ids.inspect}, " \
+        "invalid_explicit_prunes=#{invalid_pruned.inspect}, duplicate_explicit_prunes=#{duplicate_pruned.inspect})"
 end
 File.write(opts[:out], layout_out)
 File.write("#{opts[:out]}.elements.json", JSON.pretty_generate(sidecar))
+prune_path = "#{opts[:out]}.prune-elements.json"
+File.write(prune_path, JSON.pretty_generate({
+  'version' => 1,
+  'elements' => prune_records
+}) + "\n")
 
 # ---- layout-census.json (gate 8c producer, #259) --------------------------
 # One record per dashboard page (zones / placed / dropped / grid_fill_pct) —
@@ -1827,6 +1857,9 @@ File.write("#{opts[:out]}.elements.json", JSON.pretty_generate(sidecar))
 #   unplaced_elements  ids in the built page but ABSENT from the layout XML
 #                      (gate 8c fails on non-empty — Sigma auto-flows these
 #                      as stray cards)
+#   pruned_elements     ids deliberately omitted under the explicit
+#                      manual-composite contract; put-layout removes them
+#                      from flat document.elements before validating/PUT
 #   synthetic_header   true when the header band carries the synthetic
 #                      "title-*" element with no source header zone (the
 #                      title is then counted in zones/placed)
@@ -1863,6 +1896,7 @@ end.join(', ')
 puts "wrote #{opts[:out]} (#{page_for_dash.size} dashboard page(s): #{totals[:charts]} charts in #{totals[:bands]} band container(s), " \
      "#{totals[:controls]} controls, header bands, gap-closing applied, rows: #{rows_report})"
 puts "wrote #{opts[:out]}.elements.json (#{sidecar.values.sum(&:length)} container/header spec element(s) — put-layout.rb injects these)"
+puts "wrote #{prune_path} (#{prune_records.length} explicit manual-composite element prune(s) — put-layout.rb removes these before PUT)"
 puts "wrote #{census_out} (#{census_pages.size} page census record(s): " \
      "#{census_pages.map { |c| "#{c['page']} #{c['placed']}/#{c['zones']} tiles, fill #{(c['grid_fill_pct'] * 100).round}%" }.join('; ')})"
 puts "wrote #{arr_out} (#{arrangement_pages.size} page arrangement record(s), " \
