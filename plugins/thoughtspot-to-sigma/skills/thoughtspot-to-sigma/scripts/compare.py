@@ -19,7 +19,8 @@ SBASE = os.environ["SIGMA_BASE_URL"]; STOK = os.environ["SIGMA_API_TOKEN"]; _SSL
 # TS chart type -> the Sigma element kind the migration produces (for the structural check)
 EXPECTED = {"KPI": "kpi-chart", "COLUMN": "bar-chart", "BAR": "bar-chart", "LINE": "line-chart",
             "PIE": "donut-chart", "DONUT": "donut-chart", "TABLE": "table", "ADVANCED_COLUMN": "table",
-            "PIVOT_TABLE": "pivot-table", "STACKED_COLUMN": "bar-chart"}
+            "PIVOT_TABLE": "pivot-table", "STACKED_COLUMN": "bar-chart",
+            "WATERFALL": "waterfall-chart", "WHISKER_SCATTER": "table"}
 
 import time
 def ts_png(lb_id, viz_guid):
@@ -74,12 +75,10 @@ def main():
     # Workbook code-rep GETs nest pages under a top-level `document` key (live
     # since 2026-08); a bare wbspec.get("pages", []) read here was always
     # empty, so every viz silently reported as "not resolved" in the report.
-    wbspec = {**code_rep.metadata(raw_wbspec), **code_rep.document(raw_wbspec)}
     sig_els = {}
-    for pg in wbspec.get("pages", []):
-        for el in pg.get("elements", []):
-            if el.get("kind") != "table" or el.get("name") != "OFV":   # skip the master
-                sig_els[el.get("name")] = el
+    for el in code_rep.workbook_elements(raw_wbspec):
+        if el.get("kind") != "table" or el.get("name") != "OFV":   # skip the master
+            sig_els[el.get("name")] = el
     sig_els.pop("OFV", None)
 
     rows = []

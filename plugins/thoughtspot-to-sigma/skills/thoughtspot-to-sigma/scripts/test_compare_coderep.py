@@ -61,9 +61,11 @@ NESTED_WBSPEC = {
     "workbookId": "wb-test",
     "name": "Test WB",
     "document": {
-        "pages": [{"id": "pg1", "elements": [
+        "pages": [{"id": "pg1", "name": "Dashboard"}],
+        "elements": [
             {"id": "c1", "kind": "bar-chart", "name": "Revenue by Region"},
-        ]}],
+        ],
+        "layout": '<Page id="pg1"><Element elementId="c1"/></Page>',
     },
 }
 

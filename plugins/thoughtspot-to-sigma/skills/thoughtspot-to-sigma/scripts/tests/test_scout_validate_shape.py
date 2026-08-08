@@ -27,7 +27,13 @@ class TestScoutValidateShape(unittest.TestCase):
     # this alone would NOT fail pre-fix -- it documents the expected shape
     # that the real regression test below actually enforces against the script.
     def test_wrap_nests_document(self):
-        doc = {"schemaVersion": 1, "pages": []}
+        doc = {
+            "schemaVersion": 1,
+            "kind": "workbook",
+            "pages": [],
+            "elements": [],
+            "layout": "",
+        }
         body = code_rep.wrap(doc, {"name": "n", "folderId": "f"})
         self.assertEqual(body["document"], doc)
         self.assertNotIn("pages", body)

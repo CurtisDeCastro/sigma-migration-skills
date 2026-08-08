@@ -122,25 +122,23 @@ if !opts[:finalize]
 
   charts = []
   flagged = []
-  Array(spec['pages']).each do |page|
-    Array(page['elements']).each do |el|
-      plannable = el['kind'].to_s.end_with?('-chart') ||
-                  (%w[table pivot-table].include?(el['kind'].to_s) && el['id'].to_s != 'm-ofv')
-      next unless plannable
-      if el['name'].to_s.include?('[FLAGGED')
-        # flag-not-drop tile (window formula, bead 5d9k): present in the workbook,
-        # excluded from value parity, surfaced in the summary as flagged.
-        flagged << { 'chart' => el['name'], 'sigma_element_id' => el['id'], 'kind' => el['kind'] }
-        next
-      end
-      pairs = chart_columns(el)
-      next unless pairs
-      charts << { 'chart' => el['name'], 'sigma_element_id' => el['id'],
-                  'kind' => el['kind'],
-                  'sigma_columns' => pairs.compact.map { |id_name| id_name[1] },
-                  'sigma_column_ids' => pairs.compact.map { |id_name| id_name[0] },
-                  'workbook_id' => opts[:wb] }
+  Sigma::CodeRep.workbook_elements(spec).each do |el|
+    plannable = el['kind'].to_s.end_with?('-chart') ||
+                (%w[table pivot-table].include?(el['kind'].to_s) && el['id'].to_s != 'm-ofv')
+    next unless plannable
+    if el['name'].to_s.include?('[FLAGGED')
+      # flag-not-drop tile (window formula, bead 5d9k): present in the workbook,
+      # excluded from value parity, surfaced in the summary as flagged.
+      flagged << { 'chart' => el['name'], 'sigma_element_id' => el['id'], 'kind' => el['kind'] }
+      next
     end
+    pairs = chart_columns(el)
+    next unless pairs
+    charts << { 'chart' => el['name'], 'sigma_element_id' => el['id'],
+                'kind' => el['kind'],
+                'sigma_columns' => pairs.compact.map { |id_name| id_name[1] },
+                'sigma_column_ids' => pairs.compact.map { |id_name| id_name[0] },
+                'workbook_id' => opts[:wb] }
   end
   abort('no plannable chart elements found in the workbook spec') if charts.empty?
 
