@@ -11,6 +11,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { api, extractId, parseArgs, elementsOf } from './lib/sigma-rest.mjs';
 import * as CodeRep from './lib/code_rep.mjs';
+import { assertWorkbookContract } from './lib/workbook_contract.mjs';
 
 const a = parseArgs(process.argv.slice(2));
 if (!a.type || !a.spec || !a.folder) { console.error('need --type datamodel|workbook --spec <spec.json> --folder <folderId>'); process.exit(2); }
@@ -27,8 +28,13 @@ const name = a.name || spec.name || `cognos ${a.type} ${Date.now()}`;
 // workbook branch wraps; the datamodel body construction below is untouched
 // (still `{folderId, ...spec, name}`, name last so it can't be silently
 // overridden by a spec.name).
+let workbookDoc;
+if (a.type === 'workbook') {
+  try { workbookDoc = assertWorkbookContract(spec, { requireWrapper: true }); }
+  catch (error) { console.error(`REFUSE POST: ${error.message}`); process.exit(1); }
+}
 const body = a.type === 'workbook'
-  ? CodeRep.wrap(CodeRep.document(spec), { folderId: a.folder, ...CodeRep.metadata(spec), name })
+  ? CodeRep.wrap(workbookDoc, { folderId: a.folder, ...CodeRep.metadata(spec), name })
   : { folderId: a.folder, ...spec, name };
 const post = await api('POST', postPath, body);
 const id = extractId(post, idField);
@@ -44,7 +50,22 @@ for (const c of (Array.isArray(list) ? list : [])) {
   if (String(t).toLowerCase() === 'error') errors.push(c.name || c.columnName || c.columnId);
 }
 const elements = elementsOf((await api('GET', a.type === 'datamodel' ? `/v2/dataModels/${id}/elements` : `/v2/workbooks/${id}/elements`)).json);
-const result = { [idField]: id, elements, errors };
+let layoutOnReadback;
+if (a.type === 'workbook') {
+  const readback = await api('GET', `/v2/workbooks/${id}/spec`);
+  if (!readback.ok || !readback.json) {
+    console.error(`FAIL: workbook spec readback failed (HTTP ${readback.status}): ${readback.text.slice(0, 500)}`);
+    process.exit(1);
+  }
+  try {
+    assertWorkbookContract(readback.json, { requireWrapper: true });
+    layoutOnReadback = true;
+  } catch (error) {
+    console.error(`FAIL: posted workbook did not survive the code/layout readback gate: ${error.message}`);
+    process.exit(1);
+  }
+}
+const result = { [idField]: id, elements, errors, ...(a.type === 'workbook' ? { layoutOnReadback } : {}) };
 if (a.out) writeFileSync(a.out, JSON.stringify(result, null, 2));
 console.log(JSON.stringify(result, null, 2));
 if (errors.length) { console.error(`FAIL: ${errors.length} error-typed column(s): ${errors.join(', ')}`); process.exit(1); }

@@ -1,11 +1,7 @@
 #!/usr/bin/env node
-// Regression test for apply-layout.mjs's workbook code-rep `document` envelope
-// handling (2026-08, task 3.9). Before this fix: the pre-PUT GET was unwrapped
-// but the PUT itself still sent the flattened working spec FLAT (no `document`
-// wrapper — a live 400), and the post-PUT verification GET (whose result also
-// feeds the layout-lint payload and the visual-QA page list) read straight off
-// the still-nested response, so `rb.json.layout` / `rb.json.pages` were
-// silently undefined/empty even on a 200.
+// Regression test for the authoritative workbook layout gate. The gate must
+// consume the current wrapped/flat representation and must not synthesize or
+// PUT a replacement layout after creation.
 //
 // Runs IN-PROCESS (stubs `globalThis.fetch` + `process.exit`, then dynamically
 // imports apply-layout.mjs) rather than spawning `node apply-layout.mjs` as a
@@ -25,18 +21,19 @@ const SCRIPT = pathToFileURL(join(HERE, 'apply-layout.mjs')).href;
 const fails = [];
 const check = (cond, msg) => { console.error(`  ${cond ? 'PASS' : 'FAIL'}  ${msg}`); if (!cond) fails.push(msg); };
 
-// The LIVE shape: non-metadata fields (schemaVersion/pages) nested under `document`.
+// The LIVE shape: metadata-only pages + flat elements + required layout.
 const NESTED_DOC = {
   workbookId: 'wb-test',
   name: 'Test WB',
   folderId: 'home-1',
   document: {
     schemaVersion: 3,
-    pages: [{ id: 'pg1', name: 'Page 1', elements: [{ id: 'c1', kind: 'bar-chart' }] }],
+    pages: [{ id: 'pg1', name: 'Page 1' }],
+    elements: [{ id: 'c1', kind: 'bar-chart' }],
+    layout: '<?xml version="1.0"?><Page id="pg1"><Element elementId="c1" gridColumn="1 / 25" gridRow="1 / 12"/></Page>',
   },
 };
 
-let putBody = null;
 let getCount = 0;
 let putCount = 0;
 
@@ -47,16 +44,10 @@ globalThis.fetch = async (url, init = {}) => {
   if (!u.endsWith('/v2/workbooks/wb-test/spec')) return new Response('not found', { status: 404 });
   if (method === 'GET') {
     getCount += 1;
-    // 1st GET (pre-layout): the live nested readback. 2nd GET (post-PUT verify):
-    // echo back whatever was PUT — still nested — so the survives-readback
-    // check and the layout-lint/visual-QA reads exercise the SAME unwrap this
-    // fix adds, not a pre-flattened fixture.
-    const payload = getCount === 1 ? NESTED_DOC : putBody;
-    return new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    return new Response(JSON.stringify(NESTED_DOC), { status: 200, headers: { 'Content-Type': 'application/json' } });
   }
   if (method === 'PUT') {
     putCount += 1;
-    putBody = JSON.parse(init.body);
     return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'Content-Type': 'application/json' } });
   }
   return new Response('unsupported method', { status: 405 });
@@ -88,23 +79,15 @@ globalThis.fetch = realFetch;
 
 check(exitCode === null && !threw,
   `apply-layout.mjs runs to completion without exiting/throwing (exit=${exitCode}, threw=${threw ? threw.message : 'no'})`);
-check(putCount === 1, `exactly one PUT issued (got ${putCount})`);
-check(!!putBody && typeof putBody.document === 'object' && putBody.document !== null,
-  'PUT body carries a top-level `document` key (the wrap the bug omitted)');
-check(!!putBody && putBody.pages === undefined,
-  'PUT body has NO top-level `pages` (must be nested, not flat)');
-check(!!putBody && Array.isArray(putBody.document?.pages) && putBody.document.pages.length === 1,
-  'wrapped document carries the one page');
-check(!!putBody && typeof putBody.document?.layout === 'string' && putBody.document.layout.includes('<GridContainer'),
-  'wrapped document carries the synthesized layout XML');
-check(!!putBody && putBody.name === 'Test WB', 'name stays OUTSIDE document as metadata');
+check(putCount === 0, `no replacement PUT issued (got ${putCount})`);
 
 const out = logs.join('\n');
 let parsed = null;
 try { parsed = JSON.parse(out); } catch { /* left null */ }
 check(!!parsed && parsed.layoutOnReadback === true,
-  `layout survives the (nested, now-unwrapped) post-PUT readback (got stdout: ${out.slice(0, 200)})`);
-check(getCount === 2, `exactly 2 GETs issued (pre-PUT + post-PUT verify; got ${getCount})`);
+  `authoritative nested readback passes (got stdout: ${out.slice(0, 200)})`);
+check(!!parsed && parsed.elementsLaidOut === 1, 'gate counted the flat document element');
+check(getCount === 1, `exactly one authoritative GET issued (got ${getCount})`);
 
 console.log();
 if (fails.length) { console.log(`${fails.length} FAILURE(S):`); fails.forEach((f) => console.log(`  - ${f}`)); process.exit(1); }
