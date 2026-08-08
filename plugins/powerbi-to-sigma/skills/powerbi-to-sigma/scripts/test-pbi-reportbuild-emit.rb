@@ -294,13 +294,14 @@ Dir.mktmpdir do |d|
   ok('9b) the single-value KPI name is a String (was a {text,color} Hash)',
      kpi && kpi['name'].is_a?(String) && !kpi['name'].empty?)
 
-  # 10. BUG 5 — controls sit inside a GridContainer (no "orphan control" lint fail)
+  # 10. BUG 5 — controls sit inside a Container (no "orphan control" lint fail)
   lint_v = LayoutLint.lint(spec)
   orphan = lint_v.select { |v| v.to_s.include?('orphan control') }
   ok('10a) layout lint reports NO orphan control',
      orphan.empty? || (puts("    #{orphan.inspect}") && false))
-  ok('10b) the page emits a control-band GridContainer holding the slicers',
-     doc['layout'].to_s.include?("band-page-p1-ctrl"))
+  ok('10b) the page emits a canonical control-band Container holding the slicers',
+     doc['layout'].to_s.include?('<Container elementId="band-page-p1-ctrl"') &&
+       !doc['layout'].to_s.match?(%r{<(?:LayoutElement|GridContainer)\b}))
 
   # regression guard: the LEGACY per-visual mode still builds (escape hatch)
   wb2 = File.join(d, 'wb2.json')

@@ -209,7 +209,7 @@ end
 
 # Layout-quality lint (shared scripts/lib/layout_lint.rb — vendored byte-
 # identical, md5 discipline): fails loudly on raw-id element display names,
-# input controls outside the GridContainer bands of a banded page, and dead
+# input controls outside the Container bands of a banded page, and dead
 # zones (>25% empty grid rows between a page's first and last element). The
 # "PHASEE PBI Employee Dashboard" regression shipped a parity-green workbook
 # that was a visual mess — every data gate passed. Escape: --skip-layout-lint

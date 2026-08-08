@@ -89,6 +89,10 @@ Dir.mktmpdir('pbi-workbook-code') do |dir|
   ok('pages are metadata-only', Array(doc['pages']).all? { |p| !p.key?('elements') })
   ok('elements are flat', doc['elements'].is_a?(Array) && doc['elements'].length >= 6)
   ok('layout is required and present', doc['layout'].to_s.include?('<Page'))
+  ok('layout emits only live canonical Element/Container tags',
+     doc['layout'].to_s.include?('<Element ') &&
+       doc['layout'].to_s.include?('<Container ') &&
+       !doc['layout'].to_s.match?(%r{<(?:LayoutElement|GridContainer)\b}))
 
   ids = doc['elements'].map { |e| e['id'] }
   placed = doc['layout'].scan(/\belementId="([^"]+)"/).flatten
@@ -166,6 +170,9 @@ Dir.mktmpdir('pbi-legacy-assembler') do |dir|
     aplaced = adoc['layout'].to_s.scan(/\belementId="([^"]+)"/).flatten
     ok('secondary assembler places every element once',
        aplaced.sort == %w[chart-1 master] && aplaced.uniq.length == aplaced.length)
+    ok('secondary assembler emits canonical Element tags',
+       adoc['layout'].to_s.include?('<Element ') &&
+         !adoc['layout'].to_s.match?(%r{<(?:LayoutElement|GridContainer)\b}))
   end
 end
 

@@ -452,7 +452,7 @@ page foot (that was the "PHASEE PBI Employee Dashboard" regression):
   drive**;
 - migration/freshness notes → a **slim note band directly under the header**.
 
-If the cloned parity workbook predates container layouts (no `<GridContainer>`
+If the cloned parity workbook predates container layouts (no `<Container>`
 in its layout), `enhance-apply.rb` **regenerates a banded layout** for the
 clone first (builder machinery, `scripts/lib/layout.rb`), then applies items.
 The finalize runs the shared layout lint (`scripts/lib/layout_lint.rb`: no

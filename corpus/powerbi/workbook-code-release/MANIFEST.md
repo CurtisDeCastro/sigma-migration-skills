@@ -8,6 +8,7 @@ master map and source signals.
 
 - Outer workbook metadata plus `document:{schemaVersion,kind,pages,elements,layout}`
 - Metadata-only pages, flat elements, and layout-authoritative membership
+- Live canonical `<Element>` layout tags (`<Container>` for nested layouts)
 - Native waterfall and ring progress elements
 - Native drill control from a complete Power BI chart hierarchy
 - Native legend control from a visible categorical legend binding

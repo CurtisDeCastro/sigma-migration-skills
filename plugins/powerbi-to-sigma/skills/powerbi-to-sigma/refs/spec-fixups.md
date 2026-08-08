@@ -35,7 +35,7 @@ Post with `tableau-to-sigma/scripts/post-and-readback.rb --type datamodel --spec
 Charts post fine with no `layout` (they stack vertically) — but that's not done. Apply the
 24-col grid via a single `document.layout` XML string (see *Workbook* above) and
 `put-layout.rb`. See `research/powerbi-visual-layout.md §4` for the px→grid math and
-`tableau-to-sigma/refs/workbook-layout.md` for the XML shape (`<Page>`/`<LayoutElement>`/`<GridContainer>`).
+`tableau-to-sigma/refs/workbook-layout.md` for the XML shape (`<Page>`/`<Element>`/`<Container>`).
 
 ## Reference IDs from the validated run (the demo Sigma org)
 - Snowflake connection `gxb98765` = `ab12cd34-5678-40ab-8def-1234567890ab` (holds `DEMO_DB.DEMO.*` workforce tables).

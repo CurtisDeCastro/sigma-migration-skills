@@ -49,6 +49,12 @@ class TestScoutValidateShape(unittest.TestCase):
         assign = re.search(rf"\b{re.escape(var)}\s*=\s*code_rep\.wrap\(", src)
         self.assertIsNotNone(assign, f"{var} (the POST body) must be built via code_rep.wrap(...)")
 
+    def test_layout_uses_live_canonical_element_tag(self):
+        with open(SCRIPT) as fh:
+            src = fh.read()
+        self.assertIn('<Element elementId="scout"', src)
+        self.assertNotRegex(src, r'<(?:LayoutElement|GridContainer)\b')
+
 
 if __name__ == "__main__":
     unittest.main()

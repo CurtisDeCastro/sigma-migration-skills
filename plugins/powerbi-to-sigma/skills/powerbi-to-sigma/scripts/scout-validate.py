@@ -115,10 +115,10 @@ def main():
                 "columns":[{"id":"sc","formula":a.formula,"name":"scout_test"}]}
     layout = ('<?xml version="1.0" encoding="utf-8"?>\n'
               '<Page id="d" type="grid" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto">\n'
-              '  <LayoutElement elementId="m" gridColumn="1 / 25" gridRow="1 / 11"/>\n'
+              '  <Element elementId="m" gridColumn="1 / 25" gridRow="1 / 11"/>\n'
               '</Page>\n'
               '<Page id="t" type="grid" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto">\n'
-              '  <LayoutElement elementId="scout" gridColumn="1 / 25" gridRow="1 / 11"/>\n'
+              '  <Element elementId="scout" gridColumn="1 / 25" gridRow="1 / 11"/>\n'
               '</Page>')
     doc = {"schemaVersion":1, "kind":"workbook",
            "pages":[{"id":"d","name":"Data","visibility":"hidden"},{"id":"t","name":"Test"}],

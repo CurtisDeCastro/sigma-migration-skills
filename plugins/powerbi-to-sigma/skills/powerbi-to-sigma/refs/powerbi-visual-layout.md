@@ -17,7 +17,7 @@ unaffected and stay flat). The grid is fixed:
 
 - 24 columns (`gridTemplateColumns="repeat(24, 1fr)"`), span notation `1 / 25` = full width
 - Auto-sized rows; conventional row units (KPI ≈ 6–9 rows, half-width chart ≈ 12–13 rows, table ≈ 15–20 rows)
-- Container elements (`<GridContainer>`) wrap KPI rows; child `<LayoutElement>` row spans MUST equal the container's outer span (auto rows do not stretch to fill)
+- Container elements (`<Container>`) wrap KPI rows; child `<Element>` row spans MUST equal the container's outer span (auto rows do not stretch to fill)
 
 Whatever we extract from PowerBI, we must reduce it to four integers per visual:
 `gridColumnStart, gridColumnEnd, gridRowStart, gridRowEnd` — plus a child/parent
@@ -220,7 +220,7 @@ arithmetic is what the converter would actually run.
 | Sales by Region (bar)   | `clusteredColumnChart` | 650 | 460 | 610 | 240 |
 
 (In a real extraction the four KPIs would also be reported as children of a
-`visualGroup` parent — that group becomes the Sigma `<GridContainer>`.)
+`visualGroup` parent — that group becomes the Sigma `<Container>`.)
 
 ### 4b. Conversion math
 
@@ -318,7 +318,7 @@ Inner `gridRow` matches the container's outer span (`3 / 8`) per the
 | `pivotTable`, `matrix` | `pivot-table` | Use `rowsBy`/`columnsBy`/`values` shape |
 | `slicer` | `control` | Type derived from slicer mode (list/dropdown/range/date-range) |
 | `map`, `filledMap`, `shapeMap`, `azureMap` | `bar-chart` | Sigma has no map; degrade to sorted bar-chart per the existing Tableau pattern |
-| `groupVisualContainer` / `visualGroup` | `container` | Wraps children via `<GridContainer>` |
+| `groupVisualContainer` / `visualGroup` | `container` | Wraps children via `<Container>` |
 | `funnel`, `treemap`, `waterfallChart`, `ribbonChart`, `decompositionTreeVisual`, `keyInfluencersVisual`, `qnaVisual` | (no equivalent) | Approximate with `bar-chart` or skip with warning |
 
 ---

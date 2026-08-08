@@ -2786,7 +2786,7 @@ col_for = ->(x, w, pw) {
 }
 ROW_UNIT = 20.0
 # Container-banded pages (layout-playbook.md): the PBI canvas regions cluster
-# into horizontal row bands, each band a full-width <GridContainer> whose
+# into horizontal row bands, each band a full-width <Container> whose
 # children keep the canvas-derived geometry (container-relative rows). Every
 # page gets a dark header band carrying the page title; the matching
 # `kind: container` / header-text spec elements are appended to the page below.
@@ -2897,7 +2897,7 @@ pages_xml = signals['pages'].map do |pg|
     # 2) bands from the SOURCE rows, columns from the SOURCE x-positions
     min_rows = { 'kpi-chart' => 4, 'control' => 2, 'text' => 2, 'image' => 20,
                  'scatter-chart' => 9, 'region-map' => 9, 'point-map' => 9 }
-    # BUG 5: page controls must live INSIDE a GridContainer — a loose top-level
+    # BUG 5: page controls must live INSIDE a Container — a loose top-level
     # control below the first band fails the layout lint ("orphan control"), which
     # crashed the POST. Pull every control out of the content bands and place them
     # in a dedicated filter-strip control band right under the header (the standard
@@ -2966,7 +2966,7 @@ pages_xml = signals['pages'].map do |pg|
   end
 
   # ---- PBI-fidelity FLAT layout (--layout pbi) ------------------------------
-  # The page mirrors the PBI canvas 1:1: flat LayoutElements at the canvas-
+  # The page mirrors the PBI canvas 1:1: flat Elements at the canvas-
   # proportional grid coords (exactly the shape Sigma's own UI writes), no
   # header band, no row containers. Band containers with auto rows COLLAPSE
   # around short content (KPIs lost their titles; map/scatter bands rendered
@@ -2985,7 +2985,7 @@ pages_xml = signals['pages'].map do |pg|
       c1 = c0 + 2 if c1 - c0 < 2
       [id, c0, c1, r0, r1]
     end
-    # Sigma rejects overlapping LayoutElements ("Element collisions") while a
+    # Sigma rejects overlapping Elements ("Element collisions") while a
     # PBI canvas freely z-stacks (decorative text over chart corners). Resolve
     # deterministically: later/lower items push DOWN past whatever they hit.
     items = items.sort_by { |i| [i[3], i[1]] }

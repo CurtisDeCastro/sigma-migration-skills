@@ -12,6 +12,8 @@ assert "pages" not in envelope and "elements" not in envelope
 document = envelope["document"]
 assert document["schemaVersion"] == 1 and document["kind"] == "workbook"
 assert document["layout"]
+assert "<Element " in document["layout"]
+assert not re.search(r"<(?:LayoutElement|GridContainer)\b", document["layout"])
 assert all("elements" not in page for page in document["pages"])
 
 elements = document["elements"]
