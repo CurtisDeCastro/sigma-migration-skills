@@ -50,9 +50,12 @@ NESTED_SPEC = {
     "name": "Test WB",
     "document": {
         "schemaVersion": 3,
-        "pages": [{"id": "pg1", "elements": [
+        "kind": "workbook",
+        "pages": [{"id": "pg1", "name": "Overview"}],
+        "elements": [
             {"id": "e1", "name": "Revenue Report", "kind": "table"},
-        ]}],
+        ],
+        "layout": '<Page id="pg1"><Element elementId="e1"/></Page>',
     },
 }
 

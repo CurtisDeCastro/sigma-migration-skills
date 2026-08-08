@@ -25,7 +25,7 @@ class TestPutLayoutShape < Minitest::Test
 
   def test_put_body_is_wrapped
     doc = { 'pages' => [], 'layout' => '<Layout/>' }
-    assert_equal doc, Sigma::CodeRep.wrap(doc)['document']
+    assert_equal doc.merge('elements' => []), Sigma::CodeRep.wrap(doc)['document']
   end
 
   # Real regression signal: the two tests above only prove the already-shipped
@@ -42,6 +42,14 @@ class TestPutLayoutShape < Minitest::Test
     src = File.read(File.join(__dir__, '..', 'put-layout.rb'))
     assert_match(/Sigma::CodeRep\.wrap\(/, src,
                  'put-layout.rb must wrap the PUT body via Sigma::CodeRep.wrap')
+  end
+
+  def test_sidecar_elements_are_injected_into_flat_collection
+    src = File.read(File.join(__dir__, '..', 'put-layout.rb'))
+    assert_match(/spec\['elements'\]\s*\|\|=/, src)
+    assert_match(/spec\['elements'\]\s*<<\s*el/, src)
+    refute_match(/page\['elements'\]\s*<<\s*el/, src,
+                 'workbook pages are metadata-only; sidecar elements must be flat')
   end
 
   # Ordering: the document() unwrap must happen before the PUT, and the

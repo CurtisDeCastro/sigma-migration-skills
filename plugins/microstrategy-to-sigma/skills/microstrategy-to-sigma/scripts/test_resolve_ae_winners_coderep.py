@@ -54,7 +54,10 @@ NESTED_PROBE_READBACK = {
     "name": "zz-ae-resolver-probe",
     "document": {
         "schemaVersion": 1,
-        "pages": [{"id": "p1", "elements": [{"id": "t1-remapped"}]}],
+        "kind": "workbook",
+        "pages": [{"id": "p1", "name": "P"}],
+        "elements": [{"id": "t1-remapped"}],
+        "layout": '<Page id="p1"><Element elementId="t1-remapped"/></Page>',
     },
 }
 
@@ -101,6 +104,15 @@ check(post_body is not None and "pages" not in post_body,
       "POST body has NO top-level `pages` (must be nested, not flat)")
 check(post_body is not None and isinstance(post_body["document"].get("pages"), list),
       "wrapped document carries the probe's page")
+check(post_body is not None and post_body["document"]["pages"] == [{"id": "p1", "name": "P"}],
+      "probe pages are metadata-only")
+check(post_body is not None and post_body["document"].get("elements", [{}])[0].get("id") == "t1",
+      "probe workbook elements are flat under document.elements")
+probe_layout = post_body["document"].get("layout", "") if post_body is not None else ""
+check('<Element elementId="t1"' in probe_layout,
+      "probe carries required authoritative layout with the canonical Element tag")
+check("<LayoutElement" not in probe_layout and "<GridContainer" not in probe_layout,
+      "probe layout does not emit rejected legacy tags")
 check(post_body is not None and post_body.get("name") == "zz-ae-resolver-probe",
       "name stays OUTSIDE document as metadata")
 check(calls["get_n"] == 1,
