@@ -11,6 +11,7 @@ See corpus/hex/commerce/ for the full-fixture end-to-end regression.
 
 Run: python3 tests/test_convert_workbook.py   (exit 0 = pass)
 """
+import json
 import os
 import sys
 
@@ -25,6 +26,9 @@ import sigma_ids  # noqa: E402
 DM_ID, DM_ELEMENT_ID = "dm-1", "el-native-sql"
 COLUMNS_BY_VARIABLE = {"query_result": {"Country": "col-country", "Revenue": "col-revenue",
                                          "Category": "col-category"}}
+CORPUS_GOLDEN = os.path.normpath(os.path.join(
+    SKILL, "../../../../corpus/hex/commerce/golden/workbook.json"
+))
 
 
 # --- build_metric_element ----------------------------------------------------
@@ -336,6 +340,23 @@ def test_build_workbook_all_tabs_and_unplaced_elements_have_authoritative_layout
     assert workbook_doc["settings"]["theme"]["overrides"]["pageWidth"] == "full"
     assert any("explorable/drill" in warning for warning in result["warnings"])
     assert any("absent from appLayout" in warning for warning in result["warnings"])
+
+
+def test_commerce_golden_is_current_shape_with_total_layout_membership():
+    with open(CORPUS_GOLDEN, encoding="utf-8") as fh:
+        golden = json.load(fh)
+    workbook = golden["workbook"]
+    workbook_doc = convert_workbook.code_rep.document(workbook)
+    assert workbook["name"] == "Commerce Dashboard"
+    assert "document" in workbook
+    assert all("elements" not in page for page in workbook_doc["pages"])
+    assert len(workbook_doc["elements"]) == 6
+    pairs = convert_workbook.code_rep.workbook_elements_with_pages(workbook)
+    assert len(pairs) == 6
+    assert all(page is not None for _, page in pairs)
+    assert {element["id"] for element, _ in pairs} == {
+        element["id"] for element in workbook_doc["elements"]
+    }
 
 
 if __name__ == "__main__":

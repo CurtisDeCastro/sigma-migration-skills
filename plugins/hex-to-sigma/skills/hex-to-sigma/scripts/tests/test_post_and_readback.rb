@@ -108,7 +108,7 @@ class TestPostAndReadback < Minitest::Test
   def test_workbook_post_body_is_nested
     doc  = { 'schemaVersion' => 1, 'pages' => [], 'kind' => 'workbook' }
     body = Sigma::CodeRep.wrap(doc, extra: { 'name' => 'n', 'folderId' => 'f' })
-    assert_equal doc, body['document']
+    assert_equal doc.merge('elements' => []), body['document']
     refute body.key?('pages'), 'pages must not remain top-level'
   end
 
