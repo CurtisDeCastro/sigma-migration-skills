@@ -175,16 +175,16 @@ module Styling
     r0 = 1
     r1 = 3
     unless surfaces[:container_style]
-      layout = "  <LayoutElement elementId=\"#{title_id}\" gridColumn=\"1 / #{page_cols + 1}\" gridRow=\"#{r0} / #{r1}\"/>"
+      layout = "  <Element elementId=\"#{title_id}\" gridColumn=\"1 / #{page_cols + 1}\" gridRow=\"#{r0} / #{r1}\"/>"
       return { element: [text_el], layout: layout }
     end
     container_id = "#{id}-bg"
     container_el = { 'id' => container_id, 'kind' => 'container', 'style' => theme[:header] }
     layout = [
-      "<GridContainer elementId=\"#{container_id}\" type=\"grid\" gridColumn=\"1 / #{page_cols + 1}\" gridRow=\"#{r0} / #{r1}\" " \
+      "<Container elementId=\"#{container_id}\" type=\"grid\" gridColumn=\"1 / #{page_cols + 1}\" gridRow=\"#{r0} / #{r1}\" " \
         "gridTemplateColumns=\"repeat(#{page_cols}, 1fr)\" gridTemplateRows=\"auto\">",
-      "  <LayoutElement elementId=\"#{title_id}\" gridColumn=\"1 / #{page_cols + 1}\" gridRow=\"#{r0} / #{r1}\"/>",
-      '</GridContainer>'
+      "  <Element elementId=\"#{title_id}\" gridColumn=\"1 / #{page_cols + 1}\" gridRow=\"#{r0} / #{r1}\"/>",
+      '</Container>'
     ].join("\n")
     { element: [container_el, text_el], layout: layout }
   end
@@ -205,10 +205,10 @@ module Styling
     container_el = { 'id' => id, 'kind' => 'container', 'style' => theme[:card] }
     children = Composition.band(ids.map { |i| { id: i } }, 1, 1 + height, page_cols).join("\n")
     wrap = [
-      "<GridContainer elementId=\"#{id}\" type=\"grid\" gridColumn=\"1 / #{page_cols + 1}\" gridRow=\"#{band[:r0]} / #{band[:r1]}\" " \
+      "<Container elementId=\"#{id}\" type=\"grid\" gridColumn=\"1 / #{page_cols + 1}\" gridRow=\"#{band[:r0]} / #{band[:r1]}\" " \
         "gridTemplateColumns=\"repeat(#{page_cols}, 1fr)\" gridTemplateRows=\"auto\">",
       children,
-      '</GridContainer>'
+      '</Container>'
     ].join("\n")
     { element: container_el, wrap: wrap }
   end
@@ -295,14 +295,14 @@ module Styling
     r1 = 4
     title_r1 = subtitle ? 3 : r1
     text_c0 = logo_url ? 3 : 1
-    lines = ["<GridContainer elementId=\"#{container_id}\" type=\"grid\" gridColumn=\"1 / #{page_cols + 1}\" gridRow=\"#{r0} / #{r1}\" " \
+    lines = ["<Container elementId=\"#{container_id}\" type=\"grid\" gridColumn=\"1 / #{page_cols + 1}\" gridRow=\"#{r0} / #{r1}\" " \
               "gridTemplateColumns=\"repeat(#{page_cols}, 1fr)\" gridTemplateRows=\"auto\">"]
-    lines << "  <LayoutElement elementId=\"#{logo_id}\" gridColumn=\"1 / 3\" gridRow=\"#{r0} / #{r1}\"/>" if logo_url
-    lines << "  <LayoutElement elementId=\"#{title_id}\" gridColumn=\"#{text_c0} / #{page_cols + 1}\" gridRow=\"#{r0} / #{title_r1}\"/>"
+    lines << "  <Element elementId=\"#{logo_id}\" gridColumn=\"1 / 3\" gridRow=\"#{r0} / #{r1}\"/>" if logo_url
+    lines << "  <Element elementId=\"#{title_id}\" gridColumn=\"#{text_c0} / #{page_cols + 1}\" gridRow=\"#{r0} / #{title_r1}\"/>"
     if subtitle
-      lines << "  <LayoutElement elementId=\"#{subtitle_id}\" gridColumn=\"#{text_c0} / #{page_cols + 1}\" gridRow=\"#{title_r1} / #{r1}\"/>"
+      lines << "  <Element elementId=\"#{subtitle_id}\" gridColumn=\"#{text_c0} / #{page_cols + 1}\" gridRow=\"#{title_r1} / #{r1}\"/>"
     end
-    lines << '</GridContainer>'
+    lines << '</Container>'
 
     { element: elements, layout: lines.join("\n") }
   end
@@ -376,7 +376,7 @@ module Styling
     bg_url = svg_data_uri(compose_card_svg(gradient))
     container_el = { 'id' => id, 'kind' => 'container', 'style' => { 'borderRadius' => 'round' },
                       'backgroundImage' => { 'url' => bg_url, 'style' => { 'fit' => 'cover' } } }
-    child_layout = "<LayoutElement elementId=\"#{kpi_element['id']}\" gridColumn=\"1 / #{page_cols + 1}\" gridRow=\"1 / 7\"/>"
+    child_layout = "<Element elementId=\"#{kpi_element['id']}\" gridColumn=\"1 / #{page_cols + 1}\" gridRow=\"1 / 7\"/>"
     patch = { 'value' => { 'color' => '#FFFFFF' }, 'name' => { 'color' => '#FFFFFF' },
               'style' => { 'backgroundColor' => 'transparent', 'padding' => 'none' } }
     { element: [container_el], child_layout: child_layout, patch: patch }

@@ -149,10 +149,33 @@ class TestCodeRep < Minitest::Test
     assert_match(/<Page[^>]*id="p2".*elementId="c".*<\/Page>/m, d['layout'])
   end
 
+  # A designed layout stays authoritative for everything it placed; it is never
+  # replaced by the fallback.
   def test_wrap_preserves_an_existing_designed_layout
-    designed = %(<?xml version="1.0"?>\n<Page id="p1"><Element elementId="a"/></Page>)
+    designed = %(<?xml version="1.0"?>\n<Page id="p1">) +
+               %(<Element elementId="a" gridColumn="3 / 9" gridRow="1 / 7"/></Page>) +
+               %(\n<Page id="p2"><Element elementId="c"/></Page>)
     d = Sigma::CodeRep.wrap(HOISTABLE.merge('layout' => designed))['document']
-    assert_equal designed, d['layout'], 'put-layout\'s designed layout must not be overwritten'
+    assert_includes d['layout'], %(<Element elementId="a" gridColumn="3 / 9" gridRow="1 / 7"/>),
+                    'designed placement must survive verbatim'
+    refute_includes d['layout'], 'gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto" id="p1"',
+                    'must not be replaced by the synthesized fallback'
+  end
+
+  # ...but an element it FORGOT is appended rather than left unplaced, because an
+  # unplaced element is now a hard 400. Layout builders routinely omit hidden
+  # helper elements.
+  def test_wrap_backfills_elements_the_designed_layout_omitted
+    designed = %(<?xml version="1.0"?>\n<Page id="p1">) +
+               %(<Element elementId="a" gridColumn="1 / 25" gridRow="1 / 7"/></Page>) +
+               %(\n<Page id="p2"><Element elementId="c" gridColumn="1 / 25" gridRow="1 / 7"/></Page>)
+    d = Sigma::CodeRep.wrap(HOISTABLE.merge('layout' => designed))['document']
+    placed = d['layout'].scan(/elementId="([^"]+)"/).flatten
+    assert_equal [], d['elements'].map { |e| e['id'] } - placed, 'b must be backfilled'
+    # and onto ITS OWN page, below the existing content rather than on top of it
+    p1 = d['layout'][/<Page\b[^>]*id="p1".*?<\/Page>/m]
+    assert_includes p1, 'elementId="b"'
+    assert_includes p1, 'gridRow="7 / 27"', 'backfill starts below the designed content'
   end
 
   def test_wrap_is_idempotent_and_non_mutating
@@ -160,6 +183,50 @@ class TestCodeRep < Minitest::Test
     twice = Sigma::CodeRep.wrap(once)['document']
     assert_equal once, twice
     assert HOISTABLE['pages'][0].key?('elements'), 'input must not be mutated'
+  end
+
+  # The wire shape (flat) and the consumer shape (per-page) are a PAIR. document()
+  # re-attaches so callers that walk pages[].elements keep working; wrap() hoists
+  # again on the way out.
+  WIRE = {
+    'schemaVersion' => '1',
+    'pages' => [{ 'id' => 'p1', 'name' => 'One' }, { 'id' => 'p2', 'name' => 'Two' }],
+    'elements' => [{ 'id' => 'a' }, { 'id' => 'b' }, { 'id' => 'c' }],
+    'layout' => %(<Page id="p1"><Element elementId="a"/><Element elementId="b"/></Page>) +
+                %(<Page id="p2"><Element elementId="c"/></Page>)
+  }.freeze
+
+  def test_document_reattaches_flat_elements_to_their_pages_via_layout
+    d = Sigma::CodeRep.document('document' => WIRE)
+    assert_equal %w[a b], d['pages'][0]['elements'].map { |e| e['id'] }
+    assert_equal %w[c], d['pages'][1]['elements'].map { |e| e['id'] }
+  end
+
+  # A bare readback does not raise — it yields empty pages, so consumers see a
+  # workbook with no content and either crash far away or report nothing.
+  def test_document_never_yields_empty_pages_for_a_populated_workbook
+    d = Sigma::CodeRep.document('document' => WIRE)
+    refute d['pages'].any? { |p| Array(p['elements']).empty? }, 'no page may come back empty'
+  end
+
+  # An element the layout does not place must NOT vanish.
+  def test_document_keeps_unplaced_elements_instead_of_dropping_them
+    wire = WIRE.merge('elements' => WIRE['elements'] + [{ 'id' => 'orphan' }])
+    d = Sigma::CodeRep.document('document' => wire)
+    all = d['pages'].flat_map { |p| p['elements'] }.map { |e| e['id'] }
+    assert_includes all, 'orphan'
+    assert_equal 4, all.length
+  end
+
+  # Regression: document() left the flat array in place while ALSO populating the
+  # pages, so wrap() counted every element twice — a silent duplication of the
+  # whole workbook on the next save.
+  def test_read_then_write_does_not_duplicate_elements
+    d = Sigma::CodeRep.document('document' => WIRE)
+    refute d.key?('elements'), 'flat array must not survive alongside per-page elements'
+    w = Sigma::CodeRep.wrap(d)['document']
+    assert_equal 3, w['elements'].length, 'round-trip must not duplicate'
+    assert_equal WIRE['elements'].map { |e| e['id'] }.sort, w['elements'].map { |e| e['id'] }.sort
   end
 
   def test_settings_and_agents_round_trip_through_wrap

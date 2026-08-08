@@ -34,7 +34,7 @@ module Sigma
         return {} unless response.is_a?(Hash)
         inner = response['document']
         doc = inner.is_a?(Hash) ? inner : response.select { |k, _| DOC_KEYS.include?(k) }
-        fold_legacy_theme(doc, response)
+        distribute_elements(fold_legacy_theme(doc, response))
       end
 
       def metadata(response)
@@ -73,6 +73,59 @@ module Sigma
 
       private
 
+      # Read-side counterpart of hoist_elements, and the reason the pair exists:
+      # since 2026-08-07 the WIRE shape is one flat document.elements array, but
+      # every consumer in this codebase walks pages[].elements. Re-attaching here
+      # means the shape change stops at this file instead of rippling into every
+      # builder, linter and gate.
+      #
+      # This is not cosmetic. A readback with bare pages does not raise — it
+      # yields empty element lists, so callers see a workbook with no content and
+      # either crash far away (nil master element) or, worse, quietly report
+      # nothing to check.
+      #
+      # Page ownership survives only in the layout, so it is read back from the
+      # <Page> block that places each element. Elements no layout places are
+      # attached to the first page rather than dropped: losing them silently is
+      # the failure this method exists to prevent.
+      def distribute_elements(doc)
+        return doc unless doc.is_a?(Hash)
+        flat = doc['elements']
+        pages = doc['pages']
+        return doc unless flat.is_a?(Array) && !flat.empty?
+        return doc unless pages.is_a?(Array) && !pages.empty?
+        # Already in consumer shape — a caller that kept per-page elements wins.
+        return doc if pages.any? { |p| p.is_a?(Hash) && !Array(p['elements']).empty? }
+
+        owner = {}
+        page_blocks(doc['layout']).each do |pid, body|
+          body.scan(/elementId="([^"]+)"/).flatten.each { |eid| owner[eid] ||= pid }
+        end
+
+        buckets = Hash.new { |h, k| h[k] = [] }
+        first_id = pages.first.is_a?(Hash) ? pages.first['id'] : nil
+        flat.each do |el|
+          next unless el.is_a?(Hash)
+          buckets[owner[el['id']] || first_id] << el
+        end
+
+        out = doc.dup
+        out['pages'] = pages.map do |p|
+          next p unless p.is_a?(Hash)
+          p.merge('elements' => buckets[p['id']])
+        end
+        # Drop the flat array once its contents live on the pages. Keeping both
+        # makes the consumer shape ambiguous and, concretely, makes wrap() count
+        # each element TWICE on the way back out — a silent duplication of every
+        # element in the workbook on the next save.
+        out.delete('elements')
+        out
+      end
+
+      def page_blocks(layout_xml)
+        layout_xml.to_s.scan(%r{<Page\b[^>]*\bid="([^"]*)"[^>]*>(.*?)</Page>}m)
+      end
+
       # 2026-08-07 contract change. The write API now rejects per-page elements:
       #   "document.pages[].elements is no longer supported.
       #    Move elements to document.elements instead."
@@ -110,7 +163,44 @@ module Sigma
         out['pages'] = pages.map do |p|
           p.is_a?(Hash) ? p.reject { |k, _| k == 'elements' } : p
         end
-        out['layout'] = synth_layout(by_page) unless layout_present?(doc['layout'])
+        out['layout'] = if layout_present?(doc['layout'])
+                          place_missing(doc['layout'], by_page)
+                        else
+                          synth_layout(by_page)
+                        end
+        out
+      end
+
+      # A designed layout that omits even one element is now a hard 400
+      # ("element 'x' is not placed in layout"), and layout builders routinely
+      # omit HIDDEN helper elements — the data-page source tables nothing draws.
+      # Before the contract change that was harmless; now it fails the write.
+      #
+      # Appending the stragglers to the end of their own page's block keeps the
+      # designed layout authoritative for everything it DID place, while making
+      # the write legal. The alternative — every layout builder in every plugin
+      # separately learning to place hidden elements — is the same fix N times
+      # with N chances to miss one.
+      def place_missing(layout, by_page)
+        placed = layout.scan(/elementId="([^"]+)"/).flatten
+        out = layout.dup
+        by_page.each do |page_id, els|
+          next if page_id.nil?
+          missing = els.map { |e| e.is_a?(Hash) ? e['id'] : nil }.compact - placed
+          next if missing.empty?
+          # Close of THIS page's block, not the first one in the document.
+          m = out.match(%r{(<Page\b[^>]*\bid="#{Regexp.escape(page_id)}".*?)(</Page>)}m)
+          next unless m
+          # Start BELOW whatever the page already occupies. Stacking these at
+          # row 1 would overlap the designed tiles, and the overlap/dead-zone
+          # lints would then flag a layout that is actually fine.
+          base = m[1].scan(/gridRow="\s*\d+\s*\/\s*(\d+)\s*"/).flatten.map(&:to_i).max || 1
+          rows = missing.each_with_index.map do |eid, i|
+            %(  <Element elementId="#{eid}" gridColumn="1 / 25" ) +
+              %(gridRow="#{base + (i * 20)} / #{base + (i * 20) + 20}"/>)
+          end
+          out = out.sub(m[0], "#{m[1]}#{rows.join("\n")}\n#{m[2]}")
+        end
         out
       end
 

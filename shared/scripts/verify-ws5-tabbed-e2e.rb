@@ -188,7 +188,7 @@ def build_spec(home, schema_version)
                 'stacking' => 'none' }
 
   # ==== SURFACE under test: Composition.tabbed_container ===================
-  # Composition.band returns an Array of <LayoutElement> lines — join into
+  # Composition.band returns an Array of <Element> lines — join into
   # the single XML string `inner` expects (a tab holding more than one band
   # would join multiple band() calls the same way).
   tabbed = Composition.tabbed_container(

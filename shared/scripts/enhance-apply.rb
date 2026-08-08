@@ -94,6 +94,11 @@ end
 READONLY_KEYS = %w[workbookId url ownerId createdBy updatedBy createdAt updatedAt
                    documentVersion latestDocumentVersion].freeze
 
+# Layout container tags. Renamed 2026-08-07 (<GridContainer> -> <Container>);
+# both are recognised so this rewriter works on old and new artifacts, and it
+# always CLOSES with the tag it opened rather than a hardcoded name.
+CONTAINER_TAGS = %w[Container GridContainer].freeze
+
 def clean(spec)
   s = JSON.parse(JSON.generate(spec))
   READONLY_KEYS.each { |k| s.delete(k) }
@@ -197,13 +202,13 @@ end
 def scan_top(inner)
   out = []
   pos = 0
-  while (m = inner.match(%r{<(GridContainer|LayoutElement)\b[^>]*?(/>|>)}m, pos))
+  while (m = inner.match(%r{<(Container|GridContainer|Element|LayoutElement)\b[^>]*?(/>|>)}m, pos))
     tag = m[1]
     open_e = m.end(0)
     ent_end = open_e
     body = nil
-    if tag == 'GridContainer' && m[2] == '>'
-      close = inner.match(%r{</GridContainer>}m, open_e)
+    if CONTAINER_TAGS.include?(tag) && m[2] == '>'
+      close = inner.match(%r{</#{Regexp.escape(tag)}>}m, open_e)
       ent_end = close ? close.end(0) : open_e
       body = close ? inner[open_e...close.begin(0)] : ''
     end
@@ -342,7 +347,7 @@ def band_add!(spec, page_id, band_cid, element_id, grid_column, height)
   entry = SigmaLayout.le(element_id, place_c0, place_c0 + width, row, row + h)
   new_band_inner = "#{band[:inner]}\n#{entry}"
   new_band_head = set_rows(m[2][band[:s]...band[:head_e]], band[:r0], band[:r1] + grow)
-  new_band = "#{new_band_head}#{new_band_inner}\n</GridContainer>"
+  new_band = "#{new_band_head}#{new_band_inner}\n</#{band[:tag]}>"
   inner = m[2].dup
   inner[band[:s]...band[:e]] = new_band
   inner = shift_below!(inner, band[:eid], band[:r1], grow) if grow.positive?
@@ -368,14 +373,14 @@ CHART_CTRL_ROWS = 2
 def add_into_chart_container!(spec, page_id, chart_eid, ctrl_eid, grid_column)
   m = page_block(spec, page_id) or return nil
   ents = scan_top(m[2])
-  host = ents.find { |t| t[:tag] == 'GridContainer' && t[:inner].to_s.include?(%(elementId="#{chart_eid}")) }
+  host = ents.find { |t| CONTAINER_TAGS.include?(t[:tag]) && t[:inner].to_s.include?(%(elementId="#{chart_eid}")) }
   return nil unless host
   c0, c1 = grid_column.to_s.scan(/\d+/).map(&:to_i)
   c0, c1 = 17, 25 if c0.nil? || c1.nil? || c1 <= c0
   kids_shifted = shift_top_rows(host[:inner].to_s, 1, CHART_CTRL_ROWS)
   entry = SigmaLayout.le(ctrl_eid, c0, c1, 1, 1 + CHART_CTRL_ROWS)
   new_head = set_rows(m[2][host[:s]...host[:head_e]], host[:r0], host[:r1] + CHART_CTRL_ROWS)
-  new_host = "#{new_head}#{entry}\n#{kids_shifted}\n</GridContainer>"
+  new_host = "#{new_head}#{entry}\n#{kids_shifted}\n</#{host[:tag]}>"
   inner = m[2].dup
   inner[host[:s]...host[:e]] = new_host
   inner = shift_below!(inner, host[:eid], host[:r1], CHART_CTRL_ROWS)
