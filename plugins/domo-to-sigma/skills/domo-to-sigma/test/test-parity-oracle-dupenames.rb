@@ -27,11 +27,18 @@
 #
 #   ruby test/test-parity-oracle-dupenames.rb
 require 'json'
+require 'time'
 require 'open3'
 require 'tmpdir'
 require 'fileutils'
 
 SKILL   = File.expand_path('..', __dir__)
+# Stamped at RUN time, not hardcoded. The oracle's same-day guard compares the
+# expected side's fetched_at against the actuals side, and the actuals collector
+# stamps NOW — so a literal date here passes on the day it is written and aborts
+# ('REFUSING to join ... different UTC days') every day after. Time-bomb, not a
+# real cross-day case; the guard stays exercised by test-parity-freshness.rb.
+TODAY_UTC = Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')
 SCRIPTS = File.join(SKILL, 'scripts')
 $failures = 0
 def ok(c, m) if c then puts "  ok: #{m}" else $failures += 1; puts "  FAIL: #{m}" end end
@@ -60,7 +67,7 @@ def stage(dir, exclusions: nil)
         'sigma_kind' => 'kpi-chart', 'sigma_columns' => ['m'] }
     end))
   File.write(File.join(dir, 'parity-expected.json'), JSON.generate(
-    'fetched_at' => '2026-08-07T13:00:00Z', 'unavailable' => [],
+    'fetched_at' => TODAY_UTC, 'unavailable' => [],
     'cards' => IDS.to_h do |i|
       cid, sv = CARDS[i]
       [cid, { 'card_id' => cid, 'title' => "card #{cid}", 'rows' => [['x', 1]],
@@ -177,7 +184,7 @@ Dir.mktmpdir('dupe-rerun') do |dir|
   # el-1393001267-summary expects 100 but Sigma exports 999 -> a REAL divergence.
   # el-1124999128-summary has NO card entry at all -> "no Domo source value".
   File.write(File.join(dir, 'parity-expected.json'), JSON.generate(
-    'fetched_at' => '2026-08-07T13:00:00Z', 'unavailable' => [],
+    'fetched_at' => TODAY_UTC, 'unavailable' => [],
     'cards' => { '1393001267' => { 'card_id' => '1393001267', 'title' => 'a',
                                    'rows' => [['x', 1]], 'summary_value' => 100 },
                  '1037345428' => { 'card_id' => '1037345428', 'title' => 'b',
@@ -224,7 +231,7 @@ Dir.mktmpdir('dupe-eid') do |dir|
       'sigma_kind' => 'kpi-chart', 'sigma_columns' => ['m'] },
   ]))
   File.write(File.join(dir, 'parity-expected.json'), JSON.generate(
-    'fetched_at' => '2026-08-07T13:00:00Z', 'unavailable' => [],
+    'fetched_at' => TODAY_UTC, 'unavailable' => [],
     'cards' => { '777' => { 'card_id' => '777', 'title' => 'Pinned Card',
                             'rows' => [['x', 1]], 'summary_value' => 5 } }))
   run(File.join(SCRIPTS, 'collect-parity-actuals.rb'),

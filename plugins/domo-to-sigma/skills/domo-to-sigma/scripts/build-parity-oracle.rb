@@ -40,6 +40,7 @@ require 'json'
 require 'set'
 require 'optparse'
 require 'time'
+require 'date'
 
 opts = {}
 OptionParser.new do |p|
@@ -51,6 +52,9 @@ OptionParser.new do |p|
   p.on('--out PATH') { |v| opts[:out] = v }
   p.on('--exclusions PATH') { |v| opts[:excl] = v }
   p.on('--allow-cross-day', 'proceed even if the two sides straddle a UTC date boundary') { opts[:xday] = true }
+  p.on('--allow-stale-warehouse REASON', 'proceed even though the landed warehouse copy holds ' \
+       'OLDER data than Domo (see the freshness guard) — only safe when no plan tile has a date ' \
+       'dimension or a relative window') { |v| opts[:allow_stale] = v }
 end.parse!
 abort('--workdir required') unless opts[:wd] && Dir.exist?(opts[:wd])
 wd = opts[:wd]
@@ -101,6 +105,90 @@ def card_id_for(element_id)
   return [nil, false] unless m
   [m[1], !m[2].nil?]
 end
+
+# Parse the handful of date shapes the two sides actually emit. Domo's card-data
+# returns ISO days ("2026-07-13") and month buckets ("2026-Mar"); Sigma's CSV
+# export returns ISO ("2026-07-11", "2026-02"). Anything unrecognised is nil, and
+# a nil simply excludes that tile from the freshness check — never a false alarm.
+# A CONSTANT, not a local: a leading-underscore local is invisible inside `def`.
+MONTH_ABBR = %w[Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec]
+             .each_with_index.to_h { |m, i| [m, i + 1] }.freeze
+def parse_date(v)
+  s = v.to_s.strip
+  if (m = /\A(\d{4})-(\d{2})-(\d{2})/.match(s))
+    return (Date.new(m[1].to_i, m[2].to_i, m[3].to_i) rescue nil)
+  end
+  if (m = /\A(\d{4})-(\d{2})\z/.match(s))
+    return (Date.new(m[1].to_i, m[2].to_i, 1) rescue nil)
+  end
+  if (m = /\A(\d{4})-([A-Z][a-z]{2})\z/.match(s)) && MONTH_ABBR[m[2]]
+    return (Date.new(m[1].to_i, MONTH_ABBR[m[2]], 1) rescue nil)
+  end
+  nil
+end
+
+# Canonicalise Domo's month-bucket rendering to the ISO form Sigma exports.
+# Domo renders a CalendarMonth dimension as "2026-Apr"; Sigma's CSV export gives
+# "2026-04". Same month, different rendering — comparing the strings fails the
+# tile with every measure identical. Measured on 2 tiles (Unsubscribes, Bounces
+# Trend) on the 2026-08-07 run.
+#
+# This is normalisation, not masking: it only rewrites a value that parses as
+# EXACTLY `YYYY-Mon`, and only into the same month's ISO form. A value that means
+# something different is left alone, so a genuine dimension difference still
+# fails. Anything not matching that one pattern is untouched.
+#
+# THREE grains are handled, each VERIFIED against the live corpus rather than
+# assumed, because a wrong rule here would silently fail a tile forever:
+#
+#   month    "2026-Apr"      -> "2026-04"     (Unsubscribes, Bounces Trend)
+#   quarter  "2025-Q3"       -> "2025-07"     first month of the quarter
+#                                             (Projected Sales; 3/3 samples)
+#   week     "Week-28 2026"  -> "2026-07-05"  SUNDAY-anchored week start, where
+#                                             week 1 begins on the Sunday on or
+#                                             before Jan 1 (Click-Through Rate,
+#                                             Traffic Trend; 4/4 samples)
+#
+# THE WEEK RULE IS NOT ISO. ISO calls 2026-07-05 week 27; Domo calls it week 28.
+# Using isocalendar() would have been off by one on every week-grained tile and
+# looked like a data difference. Checked, not guessed.
+def canonicalise_dim(rows)
+  return [rows, 0] unless rows.is_a?(Array)
+  n = 0
+  out = rows.map do |r|
+    a = Array(r).dup
+    s = a.first.to_s
+    if (m = /\A(\d{4})-([A-Z][a-z]{2})\z/.match(s)) && MONTH_ABBR[m[2]]
+      a[0] = format('%s-%02d', m[1], MONTH_ABBR[m[2]])
+      n += 1
+    elsif (m = /\A(\d{4})-Q([1-4])\z/.match(s))
+      a[0] = format('%s-%02d', m[1], ((m[2].to_i - 1) * 3) + 1)
+      n += 1
+    elsif (m = /\AWeek-(\d{1,2})\s+(\d{4})\z/.match(s))
+      wk = m[1].to_i
+      yr = m[2].to_i
+      jan1 = Date.new(yr, 1, 1)
+      # Sunday on or before Jan 1 == start of Domo's week 1.
+      wk1 = jan1 - ((jan1.wday) % 7)
+      a[0] = (wk1 + ((wk - 1) * 7)).to_s
+      n += 1
+    end
+    a
+  end
+  [out, n]
+end
+
+# The newest date appearing in a row set's FIRST column, or nil if that column is
+# not uniformly a date.
+def max_date(rows)
+  return nil unless rows.is_a?(Array) && !rows.empty?
+  ds = rows.map { |r| parse_date(Array(r).first) }
+  return nil if ds.any?(&:nil?)
+  ds.max
+end
+
+stale_evidence = []
+canonicalised = 0
 
 # PRIOR exclusions, loaded BEFORE the loop and honoured over verification.
 #
@@ -238,6 +326,12 @@ charts.each do |c|
     next
   end
 
+  # Canonicalise the dimension BEFORE the row is recorded — doing it afterwards
+  # mutates a local the emitted hash no longer references, which is exactly the
+  # bug this comment exists to stop recurring.
+  exp_rows, canon_n = canonicalise_dim(exp_rows)
+  canonicalised += canon_n
+
   verified << {
     'chart'          => name,
     'sigma_element_id' => eid,
@@ -256,6 +350,76 @@ charts.each do |c|
     # element's plotted order. `columns` is still carried for diagnostics.
     'actual'         => { 'rows' => act['rows'], 'columns' => act['columns'] },
   }
+
+  # ---- warehouse-freshness evidence, collected as we go -------------------
+  # See the guard below. Recorded per tile whose first column parses as a date
+  # on BOTH sides, which is the only shape where "whose data is newer" is a
+  # meaningful question.
+  ed = max_date(exp_rows)
+  ad = max_date(act['rows'])
+  stale_evidence << { 'chart' => name, 'element_id' => eid,
+                      'domo_max' => ed.to_s, 'sigma_max' => ad.to_s,
+                      'days' => (ed - ad).to_i } if ed && ad && ed > ad
+end
+
+# ---- WAREHOUSE FRESHNESS GUARD ---------------------------------------------
+# THERE ARE THREE CLOCKS HERE AND THE SAME-DAY GUARD ABOVE ONLY WATCHES TWO.
+#
+# That guard refuses when the two COLLECTORS ran on different UTC days. But the
+# Sigma side does not read Domo — it reads a warehouse COPY that
+# domo-import-to-snowflake landed at some earlier moment. If that snapshot is
+# older than Domo's live data, both collectors can run in the same second and
+# still be comparing different data.
+#
+# MEASURED 2026-08-07, the run this guard exists because of. The landed table
+# carried Domo's own _BATCH_LAST_RUN_ = 2026-08-05T14:41:55Z with a newest fact
+# date of 2026-08-04, while Domo rendered through 2026-08-06. Two days stale, and
+# gate 1 reported 24.6% (14/57) — which read exactly like 43 broken tiles:
+#   * 3 trend tiles offset by 2 days, with measures aligning 1:1 by POSITION
+#   * every %-change KPI SIGN-INVERTED (+0.198 -> -0.312), because a 7-day
+#     window over data ending 2 days earlier reshuffles which rows fall in the
+#     current vs prior period, and a ratio near 1 flips
+#   * windowed counts off by ~3%
+#   * and the 14 that passed were exactly the non-windowed / static-dataset
+#     tiles, passing byte-exactly (3180018 == 3180018)
+# Nothing about that failure points at the warehouse being behind. Someone would
+# reasonably spend a day auditing the converter, whose formulas were correct.
+#
+# DETECTION USES DATA THE JOIN ALREADY HOLDS — no extra API call, no reliance on
+# _BATCH_LAST_RUN_ existing. For every tile whose first column is uniformly a
+# date on both sides, compare the newest date. Domo newer than Sigma means the
+# warehouse cannot possibly match, whatever the conversion does.
+#
+# TWO tiles must agree before refusing. One tile could legitimately differ (a
+# top-N or a filter truncating Sigma's range); a second independent tile showing
+# the same direction is no longer explainable that way. Reporting every tile
+# either way, so the operator sees the spread rather than one number.
+unless stale_evidence.empty?
+  worst = stale_evidence.max_by { |e| e['days'] }
+  if stale_evidence.size >= 2 && !opts[:allow_stale]
+    warn ''
+    warn 'REFUSING to emit a parity plan: the WAREHOUSE COPY IS STALE relative to Domo.'
+    warn ''
+    stale_evidence.sort_by { |e| -e['days'] }.first(8).each do |e|
+      warn format('    %-26s domo through %s, sigma through %s  (%+d days)',
+                  e['element_id'], e['domo_max'], e['sigma_max'], -e['days'])
+    end
+    warn "    ... and #{stale_evidence.size - 8} more" if stale_evidence.size > 8
+    warn ''
+    warn "#{stale_evidence.size} date-dimensioned tile(s) show Domo holding data newer than the"
+    warn "warehouse, by up to #{worst['days']} day(s). Scoring this would produce a large, entirely"
+    warn 'misleading FAIL: windowed KPIs shift, %-change ratios can invert sign, and only the'
+    warn 'non-windowed tiles would pass. The conversion is not what is wrong.'
+    warn ''
+    warn 'FIX: re-land the datasets, then re-run the parity phase, so both sides see one snapshot:'
+    warn '    ruby ../domo-import-to-snowflake/scripts/domo_import_to_snowflake.rb --workdir <wd> ...'
+    warn 'Override with --allow-stale-warehouse REASON only if you have established that every'
+    warn 'plan tile is insensitive to the gap (no relative windows, no date dimensions).'
+    exit 9
+  end
+  warn "WARNING: #{stale_evidence.size} tile(s) show Domo newer than the warehouse " \
+       "(worst #{worst['days']} day(s)) — proceeding because " \
+       "#{opts[:allow_stale] ? "--allow-stale-warehouse: #{opts[:allow_stale]}" : 'only one tile is affected'}."
 end
 
 # ---- the invariant ---------------------------------------------------------
