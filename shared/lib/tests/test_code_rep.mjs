@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {
   document,
   metadata,
+  workbookElements,
   workbookElementsWithPages,
   workbookPageElementIds,
   wrap,
@@ -29,6 +30,7 @@ const nested = {
   schemaVersion: 1,
   pages: [{ id: 'p', elements: [{ id: 'old', kind: 'text' }] }],
 };
+assert.deepEqual(workbookElements(nested).map((element) => element.id), ['old']);
 const wrapped = wrap(nested).document;
 assert.deepEqual(wrapped.elements.map((element) => element.id), ['old']);
 assert.equal('elements' in wrapped.pages[0], false);

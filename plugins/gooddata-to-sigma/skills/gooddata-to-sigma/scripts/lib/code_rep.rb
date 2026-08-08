@@ -94,8 +94,17 @@ module Sigma
       # callers cannot accidentally apply this shape to data-model specs, whose
       # pages[*].elements nesting is unchanged.
       def workbook_elements(spec)
-        els = document(spec)['elements']
-        els.is_a?(Array) ? els.select { |el| el.is_a?(Hash) } : []
+        doc = document(spec)
+        els = doc['elements']
+        return els.select { |el| el.is_a?(Hash) } if els.is_a?(Array)
+
+        # Transitional read compatibility for saved pre-release workbook
+        # artifacts. Current API payloads must still emit flat elements (wrap
+        # enforces that); this fallback only prevents readers from silently
+        # dropping elements while old local readbacks are being replaced.
+        Array(doc['pages']).flat_map do |page|
+          page.is_a?(Hash) ? Array(page['elements']).select { |el| el.is_a?(Hash) } : []
+        end
       end
 
       # { page_id => [element_id, ...] }, in layout order.

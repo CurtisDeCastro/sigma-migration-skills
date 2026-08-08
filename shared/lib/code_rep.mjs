@@ -81,8 +81,11 @@ export function metadata(response) {
 }
 
 export function workbookElements(spec) {
-  const elements = document(spec).elements;
-  return Array.isArray(elements) ? elements.filter(isObj) : [];
+  const doc = document(spec);
+  if (Array.isArray(doc.elements)) return doc.elements.filter(isObj);
+  return (Array.isArray(doc.pages) ? doc.pages : [])
+    .filter(isObj)
+    .flatMap((page) => (Array.isArray(page.elements) ? page.elements.filter(isObj) : []));
 }
 
 export function workbookPageElementIds(spec) {
