@@ -44,7 +44,8 @@ require_relative '../export_pool'
 class TestExportPoolShape < Minitest::Test
   # The adapter itself (brief's literal check): wrap() always nests.
   def test_workbook_post_body_is_wrapped
-    doc  = { 'schemaVersion' => 1, 'pages' => [], 'kind' => 'workbook' }
+    doc  = { 'schemaVersion' => 1, 'pages' => [], 'elements' => [],
+             'layout' => '', 'kind' => 'workbook' }
     body = Sigma::CodeRep.wrap(doc, extra: { 'name' => 'n', 'folderId' => 'f' })
     assert_equal doc, body['document'], 'workbook POST body must nest the document'
     refute body.key?('pages')
@@ -67,6 +68,11 @@ class TestExportPoolShape < Minitest::Test
            'POST body must nest the workbook document under a top-level `document` key'
     assert_equal 1, $pooled_post_body['document']['schemaVersion']
     assert $pooled_post_body['document']['pages'].is_a?(Array)
+    assert $pooled_post_body['document']['elements'].is_a?(Array)
+    assert_nil $pooled_post_body['document']['pages'].first['elements'],
+               'workbook elements must be flat document elements'
+    assert_includes $pooled_post_body['document']['layout'], 'elementId="probe0"',
+                    'create must carry complete element placement in required layout'
     refute $pooled_post_body.key?('pages'),
            'pages must not remain top-level (flat body is HTTP 400 on this surface)'
     refute $pooled_post_body.key?('schemaVersion'),

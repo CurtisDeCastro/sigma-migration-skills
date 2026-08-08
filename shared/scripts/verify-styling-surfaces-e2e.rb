@@ -53,7 +53,7 @@
 #                                           see whether the brief's field name
 #                                           or the docs' `borderRadius` is the
 #                                           real one) + a top-level (NOT
-#                                           pages[].layout) <GridContainer>.
+#                                           pages[].layout) <Container>.
 #   workbook-level settings.theme.overrides.titleFont — SURFACE 6: the documented
 #                                           workbook-wide typography lever,
 #                                           tested against the two bare chart
@@ -270,29 +270,7 @@ def build_spec(home, schema_version, src_formula_fn, flags)
   }
   cat_chart_el['color'] = cat_color if cat_color
 
-  {
-    'name' => "WS3 styling-surface probe — E2E proof (#{RUN_TAG})",
-    'folderId' => home,
-    'schemaVersion' => schema_version,
-    'description' => 'Live GO/NO-GO proof of dashboard-styling spec surfaces. Throwaway test artifact.',
-    # Live since 2026-08: themeName/themeOverrides moved to
-    # document.settings.theme.{name,overrides} (shared/lib/code_rep.rb
-    # DOC_KEYS) — a flat top-level themeName/themeOverrides is invalid on
-    # write and gets silently dropped by the code-rep wrapper.
-    'settings' => {
-      'theme' => {
-        'name' => 'Light',
-        'overrides' => {
-          'categoricalScheme' => CATEGORICAL_HEXES,
-          'titleFont' => { 'color' => TITLEFONT_COLOR, 'fontSize' => 20, 'fontWeight' => 'bold' },
-        },
-      },
-    },
-    'pages' => [
-      {
-        'id' => PAGE_ID,
-        'name' => 'Styling Probe',
-        'elements' => [
+  elements = [
           {
             'id' => SRC_ID, 'kind' => 'table', 'name' => SRC_NAME,
             'source' => { 'kind' => 'sql', 'connectionId' => CONNECTION_ID, 'statement' => DEMO_SQL },
@@ -339,23 +317,43 @@ def build_spec(home, schema_version, src_formula_fn, flags)
             'body' => "# <span style=\"color: #FFFFFF\">Styling Surface Probe</span>\n" \
                       "<span style=\"color: #94A3B8\">WS3 Task 1 — live GO/NO-GO (#{RUN_TAG})</span>",
           },
-        ],
+  ]
+  doc = {
+    'schemaVersion' => schema_version,
+    # Live since 2026-08: themeName/themeOverrides moved to
+    # document.settings.theme.{name,overrides} (shared/lib/code_rep.rb
+    # DOC_KEYS) — a flat top-level themeName/themeOverrides is invalid on
+    # write and gets silently dropped by the code-rep wrapper.
+    'settings' => {
+      'theme' => {
+        'name' => 'Light',
+        'overrides' => {
+          'categoricalScheme' => CATEGORICAL_HEXES,
+          'titleFont' => { 'color' => TITLEFONT_COLOR, 'fontSize' => 20, 'fontWeight' => 'bold' },
+        },
       },
-    ],
+    },
+    'pages' => [{ 'id' => PAGE_ID, 'name' => 'Styling Probe' }],
+    'elements' => elements,
     'layout' => <<~XML,
       <?xml version="1.0" encoding="utf-8"?>
       <Page type="grid" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto" id="#{PAGE_ID}">
-        <GridContainer elementId="#{HERO_ID}" type="grid" gridColumn="1 / 25" gridRow="1 / 5" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto">
-          <LayoutElement elementId="#{HERO_TITLE_ID}" gridColumn="1 / 25" gridRow="1 / 5"/>
-        </GridContainer>
-        <LayoutElement elementId="#{KPI_ID}" gridColumn="1 / 9" gridRow="5 / 13"/>
-        <LayoutElement elementId="#{CHART_SINGLE_ID}" gridColumn="9 / 17" gridRow="5 / 17"/>
-        <LayoutElement elementId="#{CHART_CAT_ID}" gridColumn="17 / 25" gridRow="5 / 17"/>
-        <LayoutElement elementId="#{TABLE_ID}" gridColumn="1 / 25" gridRow="17 / 29"/>
-        <LayoutElement elementId="#{SRC_ID}" gridColumn="1 / 25" gridRow="29 / 31"/>
+        <Container elementId="#{HERO_ID}" type="grid" gridColumn="1 / 25" gridRow="1 / 5" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto">
+          <Element elementId="#{HERO_TITLE_ID}" gridColumn="1 / 25" gridRow="1 / 5"/>
+        </Container>
+        <Element elementId="#{KPI_ID}" gridColumn="1 / 9" gridRow="5 / 13"/>
+        <Element elementId="#{CHART_SINGLE_ID}" gridColumn="9 / 17" gridRow="5 / 17"/>
+        <Element elementId="#{CHART_CAT_ID}" gridColumn="17 / 25" gridRow="5 / 17"/>
+        <Element elementId="#{TABLE_ID}" gridColumn="1 / 25" gridRow="17 / 29"/>
+        <Element elementId="#{SRC_ID}" gridColumn="1 / 25" gridRow="29 / 31"/>
       </Page>
     XML
   }
+  Sigma::CodeRep.wrap(doc, extra: {
+    'name' => "WS3 styling-surface probe — E2E proof (#{RUN_TAG})",
+    'folderId' => home,
+    'description' => 'Live GO/NO-GO proof of dashboard-styling spec surfaces. Throwaway test artifact.'
+  })
 end
 
 # ---------------------------------------------------------------------------
@@ -661,7 +659,7 @@ begin
   # --- structural (GET) readback -------------------------------------------
   spec = Sigma.request(:get, "/v2/workbooks/#{wb}/spec", accept: 'application/json')
   spec = Sigma::CodeRep.document(spec) if spec.is_a?(Hash) # live GET nests under `document`
-  els = spec['pages'].flat_map { |p| p['elements'] || [] }
+  els = Sigma::CodeRep.workbook_elements(spec)
   find_el = ->(id) { els.find { |e| e['id'] == id } }
 
   kpi_el     = find_el.call(KPI_ID)
@@ -680,7 +678,7 @@ begin
     table_name: tbl_el && tbl_el['name'],
     table_formats: tbl_el && (tbl_el['columns'] || []).map { |c| { id: c['id'], format: c['format'] } },
     hero_style: hero_el && hero_el['style'],
-    layout_has_gridcontainer: spec['layout'].to_s.include?("<GridContainer elementId=\"#{HERO_ID}\""),
+    layout_has_gridcontainer: spec['layout'].to_s.include?("<Container elementId=\"#{HERO_ID}\""),
   }
   log "readback: #{JSON.generate(readback)[0, 2000]}"
 

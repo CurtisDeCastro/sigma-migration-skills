@@ -328,8 +328,10 @@ puts '== gate 21 (chart-kind parity, PR-10) =='
 scenario('verified source kind (line) disagrees with the live readback (bar) -> exit 28', 28) do |dir|
   write_json(dir, 'png-read.json', 'verified' => true, 'tiles' => [{ 'title' => 'Sales by Region', 'kind' => 'line' }])
   write_json(dir, 'wb-readback.json',
-             'pages' => [{ 'elements' => [{ 'name' => 'Sales by Region', 'kind' => 'bar-chart',
-                                             'visibleAsSource' => true }] }])
+             'pages' => [{ 'id' => 'overview', 'name' => 'Overview' }],
+             'elements' => [{ 'id' => 'sales-region', 'name' => 'Sales by Region',
+                              'kind' => 'bar-chart', 'visibleAsSource' => true }],
+             'layout' => '<Page id="overview"><Element elementId="sales-region"/></Page>')
 end
 
 puts '== waiver budget (exit 19; checked LAST, after every other gate passes) =='

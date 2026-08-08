@@ -5,10 +5,23 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 import code_rep
 
-LIVE = {'workbookId': 'w1', 'name': 'N',
-        'document': {'schemaVersion': 1, 'pages': [{'id': 'p'}]}}
-LEGACY = {'workbookId': 'w1', 'name': 'N',
-          'schemaVersion': 1, 'pages': [{'id': 'p'}]}
+LAYOUT = '<Page id="p"><Element elementId="e1"/></Page>'
+LIVE = {
+    'workbookId': 'w1', 'name': 'N',
+    'document': {
+        'schemaVersion': 1, 'pages': [{'id': 'p'}],
+        'elements': [{'id': 'e1', 'kind': 'table'}],
+        'overlays': [{'id': 'o1'}], 'panels': [{'id': 'pn1'}],
+        'layout': LAYOUT,
+    },
+}
+LEGACY = {
+    'workbookId': 'w1', 'name': 'N',
+    'schemaVersion': 1, 'pages': [{'id': 'p'}],
+    'elements': [{'id': 'e1', 'kind': 'table'}],
+    'overlays': [{'id': 'o1'}], 'panels': [{'id': 'pn1'}],
+    'layout': LAYOUT,
+}
 
 
 class TestCodeRep(unittest.TestCase):
@@ -16,6 +29,7 @@ class TestCodeRep(unittest.TestCase):
         for r in (LIVE, LEGACY):
             self.assertEqual(code_rep.document(r)['schemaVersion'], 1)
             self.assertEqual(code_rep.document(r)['pages'], [{'id': 'p'}])
+            self.assertEqual(code_rep.document(r)['elements'][0]['id'], 'e1')
 
     def test_metadata_split(self):
         for r in (LIVE, LEGACY):
@@ -23,13 +37,61 @@ class TestCodeRep(unittest.TestCase):
 
     def test_wrap_always_nests(self):
         doc = {'schemaVersion': 1, 'pages': []}
-        self.assertEqual(code_rep.wrap(doc), {'document': doc})
-        self.assertEqual(code_rep.wrap(doc, extra={'name': 'N'}), {'name': 'N', 'document': doc})
+        api_doc = {**doc, 'elements': []}
+        self.assertEqual(code_rep.wrap(doc), {'document': api_doc})
+        self.assertEqual(code_rep.wrap(doc, extra={'name': 'N'}), {'name': 'N', 'document': api_doc})
 
     def test_round_trip_lossless_from_both_shapes(self):
         for r in (LIVE, LEGACY):
             doc = code_rep.document(r)
             self.assertEqual(code_rep.document(code_rep.wrap(doc)), doc)
+
+    def test_document_collections_stay_inside_document(self):
+        for r in (LIVE, LEGACY):
+            doc = code_rep.document(r)
+            self.assertEqual(doc['overlays'], [{'id': 'o1'}])
+            self.assertEqual(doc['panels'], [{'id': 'pn1'}])
+            for key in ('elements', 'overlays', 'panels'):
+                self.assertNotIn(key, code_rep.metadata(r))
+
+    def test_page_membership_comes_from_layout(self):
+        self.assertEqual(code_rep.workbook_page_element_ids(LIVE), {'p': ['e1']})
+        element, page = code_rep.workbook_elements_with_pages(LIVE)[0]
+        self.assertEqual(element['id'], 'e1')
+        self.assertEqual(page['id'], 'p')
+
+    def test_wrap_flattens_legacy_page_elements(self):
+        nested = {
+            'schemaVersion': 1,
+            'pages': [{'id': 'p', 'elements': [{'id': 'old', 'kind': 'text'}]}],
+        }
+        self.assertEqual([element['id'] for element in code_rep.workbook_elements(nested)], ['old'])
+        wrapped = code_rep.wrap(nested)['document']
+        self.assertEqual([element['id'] for element in wrapped['elements']], ['old'])
+        self.assertNotIn('elements', wrapped['pages'][0])
+
+    def test_wrap_canonicalizes_rejected_legacy_layout_tags(self):
+        legacy_layout = (
+            '<Page id="p"><GridContainer elementId="c">'
+            '<LayoutElement elementId="e1"/></GridContainer></Page>'
+        )
+        emitted = code_rep.wrap({**LEGACY, 'layout': legacy_layout})['document']['layout']
+        self.assertEqual(
+            emitted,
+            '<Page id="p"><Container elementId="c"><Element elementId="e1"/></Container></Page>',
+        )
+        self.assertNotRegex(emitted, r'LayoutElement|GridContainer')
+
+    def test_page_membership_accepts_legacy_aliases_only_for_layout_nodes(self):
+        legacy_layout = (
+            '<Page id="p"><GridContainer elementId="c">'
+            '<LayoutElement elementId="e1"/><Noise elementId="not-layout"/>'
+            '</GridContainer></Page>'
+        )
+        self.assertEqual(
+            code_rep.workbook_page_element_ids({**LEGACY, 'layout': legacy_layout}),
+            {'p': ['c', 'e1']},
+        )
 
 
 LIVE_WITH_SETTINGS = {
@@ -60,7 +122,9 @@ class TestCodeRepSettingsAgents(unittest.TestCase):
         for r in (LIVE_WITH_SETTINGS, LEGACY_WITH_SETTINGS):
             doc = code_rep.document(r)
             wrapped = code_rep.wrap(doc, extra=code_rep.metadata(r))
-            self.assertEqual(wrapped['document'], doc)
+            self.assertEqual(wrapped['document']['settings'], doc['settings'])
+            self.assertEqual(wrapped['document']['agents'], doc['agents'])
+            self.assertEqual(wrapped['document']['elements'], [])
             self.assertNotIn('settings', wrapped)
             self.assertNotIn('agents', wrapped)
 

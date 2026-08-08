@@ -3,10 +3,14 @@
 // /v2/workbooks/spec/verify); flat bodies 400. The DATA-MODEL code-rep surface is
 // NOT changing — do not use this on /v2/dataModels/.../spec payloads.
 
-// `settings` (theme/navigation) and `agents` belong INSIDE `document` too — omitting
-// them sweeps themeName/themeOverrides/agents onto the top level, where they are not
-// valid keys, silently dropping theme + agents on every write.
-export const DOC_KEYS = ['schemaVersion', 'pages', 'kind', 'layout', 'settings', 'agents'];
+// Workbook elements are flat document collections; `overlays` and `panels` live
+// beside them. `settings` (theme/navigation) and `agents` belong inside
+// `document` too. Omitting any of these sweeps it onto the metadata envelope,
+// where it is invalid and silently dropped on write.
+export const DOC_KEYS = [
+  'schemaVersion', 'pages', 'elements', 'overlays', 'panels',
+  'kind', 'layout', 'settings', 'agents',
+];
 
 // REMOVED from the API. The workbook theme is now settings.theme.name /
 // settings.theme.overrides (published OpenAPI: createWorkbookSpec has zero
@@ -76,6 +80,78 @@ export function metadata(response) {
   );
 }
 
+export function workbookElements(spec) {
+  const doc = document(spec);
+  if (Array.isArray(doc.elements)) return doc.elements.filter(isObj);
+  return (Array.isArray(doc.pages) ? doc.pages : [])
+    .filter(isObj)
+    .flatMap((page) => (Array.isArray(page.elements) ? page.elements.filter(isObj) : []));
+}
+
+export function workbookPageElementIds(spec) {
+  const result = {};
+  const layout = String(document(spec).layout || '');
+  const pagePattern = /<Page\b[^>]*\bid="([^"]*)"[^>]*>(.*?)<\/Page>/gs;
+  for (const match of layout.matchAll(pagePattern)) {
+    result[match[1]] = [...new Set(
+      [...match[2].matchAll(
+        /<(?:Element|Container|TabbedContainer|LayoutElement|GridContainer)\b[^>]*\belementId="([^"]*)"/g,
+      )].map((element) => element[1]),
+    )];
+  }
+  return result;
+}
+
+export function workbookPageByElement(spec) {
+  const doc = document(spec);
+  const pages = Array.isArray(doc.pages) ? doc.pages.filter(isObj) : [];
+  const pagesById = Object.fromEntries(pages.filter((page) => page.id).map((page) => [page.id, page]));
+  const result = {};
+  for (const [pageId, elementIds] of Object.entries(workbookPageElementIds(doc))) {
+    const page = pagesById[pageId] || { id: pageId, name: pageId };
+    for (const elementId of elementIds) result[elementId] ||= page;
+  }
+  return result;
+}
+
+export function workbookElementsWithPages(spec) {
+  const pageByElement = workbookPageByElement(spec);
+  return workbookElements(spec).map((element) => [
+    element,
+    pageByElement[element.id || element.elementId],
+  ]);
+}
+
+function flattenElements(doc) {
+  if (!isObj(doc) || !Array.isArray(doc.pages)) return doc;
+  const nested = [];
+  const pages = doc.pages.map((page) => {
+    const copy = { ...page };
+    if (Array.isArray(copy.elements)) nested.push(...copy.elements);
+    delete copy.elements;
+    return copy;
+  });
+  const elements = [];
+  const seen = new Set();
+  for (const element of [...(Array.isArray(doc.elements) ? doc.elements : []), ...nested]) {
+    const id = isObj(element) ? element.id : null;
+    if (id && seen.has(id)) continue;
+    if (id) seen.add(id);
+    elements.push(element);
+  }
+  return { ...doc, pages, elements };
+}
+
+export function canonicalizeLayout(layoutXml) {
+  return String(layoutXml || '')
+    .replace(/<([/]?)LayoutElement\b/g, '<$1Element')
+    .replace(/<([/]?)GridContainer\b/g, '<$1Container');
+}
+
 export function wrap(doc, extra = {}) {
-  return { ...extra, document: doc };
+  const flattened = flattenElements(doc);
+  const canonical = isObj(flattened) && 'layout' in flattened
+    ? { ...flattened, layout: canonicalizeLayout(flattened.layout) }
+    : flattened;
+  return { ...extra, document: canonical };
 }

@@ -14,10 +14,14 @@
 module Sigma
   module CodeRep
     # The non-metadata fields that live INSIDE `document`. Confirmed by live readback.
-    # `settings` (theme/navigation) and `agents` belong here too — omitting them
-    # sweeps themeName/themeOverrides/agents onto the top level, where they are
-    # not valid keys, silently dropping theme + agents on every write.
-    DOC_KEYS = %w[schemaVersion elements pages kind layout settings agents].freeze
+    # `elements`, `overlays`, and `panels` are workbook-document collections,
+    # alongside page metadata and the required layout. `settings`
+    # (theme/navigation) and `agents` belong here too. Omitting any of these
+    # sweeps them onto the metadata envelope, where they are invalid and are
+    # silently dropped on write.
+    DOC_KEYS = %w[
+      schemaVersion pages elements overlays panels kind layout settings agents
+    ].freeze
 
     # REMOVED from the API. The workbook theme is now `settings.theme.name` and
     # `settings.theme.overrides` (published OpenAPI: createWorkbookSpec — there
@@ -34,7 +38,7 @@ module Sigma
         return {} unless response.is_a?(Hash)
         inner = response['document']
         doc = inner.is_a?(Hash) ? inner : response.select { |k, _| DOC_KEYS.include?(k) }
-        inflate_elements(fold_legacy_theme(doc, response))
+        fold_legacy_theme(doc, response)
       end
 
       def metadata(response)
@@ -66,49 +70,89 @@ module Sigma
         { 'name' => t['name'], 'overrides' => t['overrides'] || {} }
       end
 
-      # Write path: every live workbook code-rep endpoint requires the wrapper.
+      # Write path: every live workbook code-rep endpoint requires the wrapper
+      # and flat document.elements. Flatten legacy page-nested artifacts and
+      # canonicalize legacy layout tags at this boundary so older converter
+      # output remains postable during migration; emitters always send the
+      # live-verified <Element>/<Container> vocabulary.
       def wrap(document_hash, extra: {})
-        extra.merge('document' => flatten_elements(document_hash))
+        extra.merge('document' => canonicalize_document(flatten_elements(document_hash)))
+      end
+
+      # Read compatibility for pre-2026-08-08 artifacts. LayoutElement and
+      # GridContainer are rejected by the live workbook verify endpoint, so
+      # they must never cross an emission boundary unchanged.
+      def canonicalize_layout(layout_xml)
+        layout_xml.to_s
+                  .gsub(%r{<(/?)LayoutElement\b}, '<\1Element')
+                  .gsub(%r{<(/?)GridContainer\b}, '<\1Container')
+      end
+
+      # WORKBOOK-ONLY shape helpers. Workbook elements are a flat document
+      # collection; pages contain metadata only. Page membership is encoded by
+      # the required layout's <Page> blocks. Keep these helpers in CodeRep so
+      # callers cannot accidentally apply this shape to data-model specs, whose
+      # pages[*].elements nesting is unchanged.
+      def workbook_elements(spec)
+        doc = document(spec)
+        els = doc['elements']
+        return els.select { |el| el.is_a?(Hash) } if els.is_a?(Array)
+
+        # Transitional read compatibility for saved pre-release workbook
+        # artifacts. Current API payloads must still emit flat elements (wrap
+        # enforces that); this fallback only prevents readers from silently
+        # dropping elements while old local readbacks are being replaced.
+        Array(doc['pages']).flat_map do |page|
+          page.is_a?(Hash) ? Array(page['elements']).select { |el| el.is_a?(Hash) } : []
+        end
+      end
+
+      # { page_id => [element_id, ...] }, in layout order.
+      def workbook_page_element_ids(spec)
+        doc = document(spec)
+        doc['layout'].to_s
+                     .scan(%r{<Page\b[^>]*\bid="([^"]*)"[^>]*>(.*?)</Page>}m)
+                     .each_with_object({}) do |(page_id, body), out|
+          # Restrict ownership to actual layout nodes. A generic elementId
+          # scan can accidentally claim ids from unrelated nested attributes.
+          # Legacy aliases remain readable, but all writes canonicalize them.
+          out[page_id] = body.scan(
+            %r{<(?:Element|Container|TabbedContainer|LayoutElement|GridContainer)\b[^>]*\belementId="([^"]*)"}
+          ).flatten.uniq
+        end
+      end
+
+      # { element_id => page metadata hash }. Layout is authoritative; pages
+      # that appear only in layout still receive a minimal {id,name} descriptor.
+      def workbook_page_by_element(spec)
+        doc = document(spec)
+        pages = doc['pages'].is_a?(Array) ? doc['pages'].select { |pg| pg.is_a?(Hash) } : []
+        pages_by_id = pages.each_with_object({}) { |pg, out| out[pg['id']] = pg if pg['id'] }
+        workbook_page_element_ids(doc).each_with_object({}) do |(page_id, element_ids), out|
+          page = pages_by_id[page_id] || { 'id' => page_id, 'name' => page_id }
+          element_ids.each { |element_id| out[element_id] ||= page }
+        end
+      end
+
+      # [[element, page_metadata_or_nil], ...] for flat workbook elements.
+      def workbook_elements_with_pages(spec)
+        page_by_element = workbook_page_by_element(spec)
+        workbook_elements(spec).map do |el|
+          [el, page_by_element[el['id'] || el['elementId']]]
+        end
       end
 
       private
 
-      # The live API moved elements from pages[].elements to document.elements
-      # in August 2026. Keep the converter's page-nested internal shape so all
-      # page-local control/layout logic remains valid, deriving page ownership
-      # from the layout's <Page> blocks on read.
-      def inflate_elements(doc)
-        elements = doc['elements']
-        pages = doc['pages']
-        return doc unless elements.is_a?(Array) && pages.is_a?(Array)
-        return doc if pages.any? { |page| page['elements'].is_a?(Array) }
-        return doc if pages.empty?
-        return doc.reject { |key, _| key == 'elements' } if elements.empty?
-
-        page_ids_by_element = {}
-        doc['layout'].to_s.scan(
-          /<Page\b[^>]*\bid=(["'])(.*?)\1[^>]*>(.*?)<\/Page>/m
-        ) do |_quote, page_id, body|
-          body.scan(/elementId=(["'])(.*?)\1/) do |_element_quote, element_id|
-            page_ids_by_element[element_id] ||= page_id
-          end
-        end
-
-        inflated_pages = pages.map { |page| page.merge('elements' => []) }
-        pages_by_id = inflated_pages.each_with_object({}) do |page, out|
-          out[page['id']] = page if page['id']
-        end
-        fallback = pages_by_id['page-data'] || inflated_pages.first
-        elements.each do |element|
-          page = pages_by_id[page_ids_by_element[element['id']]] || fallback
-          page['elements'] << element
-        end
-
-        doc.merge('pages' => inflated_pages).reject { |key, _| key == 'elements' }
+      def canonicalize_document(doc)
+        return doc unless doc.is_a?(Hash) && doc.key?('layout')
+        doc.merge('layout' => canonicalize_layout(doc['layout']))
       end
 
       # Emit only the current API shape. Elements are workbook-global in the
-      # payload; layout XML retains their page placement.
+      # payload; layout XML retains their page placement. Existing flat
+      # elements win ordering, while legacy page-nested elements are appended
+      # once by id.
       def flatten_elements(doc)
         return doc unless doc.is_a?(Hash)
         pages = doc['pages']

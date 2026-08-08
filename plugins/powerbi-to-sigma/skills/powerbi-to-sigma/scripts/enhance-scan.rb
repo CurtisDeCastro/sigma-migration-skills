@@ -93,24 +93,33 @@ source ||= 'unknown'
 # ---------------------------------------------------------------------------
 # Load the live spec + export element data (read-only).
 # ---------------------------------------------------------------------------
-# Workbook code-rep nests pages/layout/schemaVersion/kind under a top-level
+# Workbook code-rep nests pages/elements/layout/schemaVersion/kind under a top-level
 # `document` key (live since 2026-08-03/04); flatten metadata (name, etc.)
 # and document content back onto one hash so every existing spec['...'] read
 # below (mixing both) keeps working unchanged. Read-only file — no PUT here,
 # so there is no wrap-back to worry about.
 raw_spec = Sigma.request(:get, "/v2/workbooks/#{WB}/spec")
 spec = Sigma::CodeRep.metadata(raw_spec).merge(Sigma::CodeRep.document(raw_spec))
-abort "FATAL: could not read spec for workbook #{WB}" unless raw_spec.is_a?(Hash) && spec['pages']
+abort "FATAL: could not read spec for workbook #{WB}" unless raw_spec.is_a?(Hash) &&
+                                                           spec['pages'].is_a?(Array) &&
+                                                           spec['elements'].is_a?(Array) &&
+                                                           !spec['layout'].to_s.empty?
 wb_name = spec['name'].to_s
 
 VIZ_KINDS = %w[bar-chart line-chart area-chart pie-chart combo-chart scatter-chart].freeze
 pages = spec['pages'] || []
 data_page = pages.find { |p| p['id'] == 'page-data' } || pages.find { |p| p['name'].to_s =~ /\bdata\b/i }
 dash_pages = pages - [data_page].compact
-viz = dash_pages.flat_map { |p| (p['elements'] || []).map { |e| [p, e] } }
-                .select { |(_p, e)| VIZ_KINDS.include?(e['kind']) }
-controls = dash_pages.flat_map { |p| p['elements'] || [] }.select { |e| e['kind'] == 'control' }
-masters = data_page ? (data_page['elements'] || []) : []
+elements_with_pages = Sigma::CodeRep.workbook_elements_with_pages(spec)
+page_by_element = Sigma::CodeRep.workbook_page_by_element(spec)
+dash_page_ids = dash_pages.map { |p| p['id'] }
+viz = elements_with_pages.select do |e, page|
+  page && dash_page_ids.include?(page['id']) && VIZ_KINDS.include?(e['kind'])
+end.map { |e, page| [page, e] }
+controls = elements_with_pages.select do |e, page|
+  page && dash_page_ids.include?(page['id']) && e['kind'] == 'control'
+end.map(&:first)
+masters = data_page ? elements_with_pages.select { |_e, page| page && page['id'] == data_page['id'] }.map(&:first) : []
 master_by_id = masters.to_h { |e| [e['id'], e] }
 
 # Export an element's data rows via the REST export API (JSON). Best-effort.
@@ -241,8 +250,7 @@ if comparison_target
   el = t[:el]
   cur = "Sum(If(#{t[:d]} = Max(#{t[:d]}), #{t[:inner_v]}, Null))"
   prev = "Sum(If(#{t[:d]} = DateAdd(\"#{t[:unit]}\", -1, Max(#{t[:d]})), #{t[:inner_v]}, Null))"
-  page_id = dash_pages.find { |p| (p['elements'] || []).any? { |e| e['id'] == el['id'] } }&.dig('id') ||
-            dash_pages.first&.dig('id')
+  page_id = page_by_element[el['id']]&.dig('id') || dash_pages.first&.dig('id')
   kpi_cur = {
     'id' => 'el-phasee-kpi-current', 'kind' => 'kpi-chart',
     'name' => "Latest #{t[:unit].capitalize} #{t[:measure]}",
@@ -472,7 +480,7 @@ if signals
       'verdict_hint' => 'confirm — needs centroid synthesis; present to the user with the geo column list',
       'patch' => (approx && geo_cols.any? ? {
         'op' => 'replace_with_point_map', 'needs' => 'centroids',
-        'element_id' => approx['id'], 'page_id' => (dash_pages.find { |p| (p['elements'] || []).any? { |e| e['id'] == approx['id'] } } || {})['id'],
+        'element_id' => approx['id'], 'page_id' => page_by_element[approx['id']]&.dig('id'),
         'geo_column' => geo_cols.first, 'source' => approx['source'],
         'geo_ref' => "[#{src_el['name']}/#{geo_cols.first}]",
         'value_formula' => (y_col(approx) || {})['formula'],

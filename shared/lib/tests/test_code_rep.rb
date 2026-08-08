@@ -2,26 +2,34 @@ require 'minitest/autorun'
 require_relative '../code_rep'
 
 class TestCodeRep < Minitest::Test
+  LAYOUT = '<Page id="p"><Element elementId="e1"/></Page>'
   LIVE   = { 'workbookId' => 'w1', 'name' => 'N',
-             'document' => { 'schemaVersion' => 1, 'pages' => [{ 'id' => 'p' }] } }
+             'document' => { 'schemaVersion' => 1, 'pages' => [{ 'id' => 'p' }],
+                             'elements' => [{ 'id' => 'e1', 'kind' => 'table' }],
+                             'overlays' => [{ 'id' => 'o1' }], 'panels' => [{ 'id' => 'pn1' }],
+                             'layout' => LAYOUT } }
   LEGACY = { 'workbookId' => 'w1', 'name' => 'N',
-             'schemaVersion' => 1, 'pages' => [{ 'id' => 'p' }] }
-  LIVE_FLAT_ELEMENTS = {
-    'workbookId' => 'w1',
-    'name' => 'N',
-    'document' => {
-      'schemaVersion' => 1,
-      'pages' => [{ 'id' => 'page-data', 'name' => 'Data' }, { 'id' => 'page-1', 'name' => 'Overview' }],
-      'elements' => [{ 'id' => 'source', 'kind' => 'table' }, { 'id' => 'chart', 'kind' => 'bar-chart' }],
-      'layout' => '<Page id="page-data"><LayoutElement elementId="source"/></Page>' \
-                  '<Page id="page-1"><LayoutElement elementId="chart"/></Page>'
-    }
+             'schemaVersion' => 1, 'pages' => [{ 'id' => 'p' }],
+             'elements' => [{ 'id' => 'e1', 'kind' => 'table' }],
+             'overlays' => [{ 'id' => 'o1' }], 'panels' => [{ 'id' => 'pn1' }],
+             'layout' => LAYOUT }
+  LEGACY_NESTED = {
+    'schemaVersion' => 1,
+    'pages' => [
+      { 'id' => 'page-data', 'name' => 'Data',
+        'elements' => [{ 'id' => 'source', 'kind' => 'table' }] },
+      { 'id' => 'page-1', 'name' => 'Overview',
+        'elements' => [{ 'id' => 'chart', 'kind' => 'bar-chart' }] }
+    ],
+    'layout' => '<Page id="page-data"><Element elementId="source"/></Page>' \
+                '<Page id="page-1"><Element elementId="chart"/></Page>'
   }.freeze
 
   def test_reads_both_shapes
     [LIVE, LEGACY].each do |r|
       assert_equal 1, Sigma::CodeRep.document(r)['schemaVersion']
       assert_equal [{ 'id' => 'p' }], Sigma::CodeRep.document(r)['pages']
+      assert_equal ['e1'], Sigma::CodeRep.document(r)['elements'].map { |el| el['id'] }
     end
   end
 
@@ -43,19 +51,45 @@ class TestCodeRep < Minitest::Test
     end
   end
 
-  def test_current_flat_elements_inflate_from_layout
-    doc = Sigma::CodeRep.document(LIVE_FLAT_ELEMENTS)
-    assert_nil doc['elements']
-    assert_equal ['source'], doc['pages'][0]['elements'].map { |element| element['id'] }
-    assert_equal ['chart'], doc['pages'][1]['elements'].map { |element| element['id'] }
+  def test_document_collections_stay_inside_document
+    [LIVE, LEGACY].each do |r|
+      doc = Sigma::CodeRep.document(r)
+      assert_equal [{ 'id' => 'o1' }], doc['overlays']
+      assert_equal [{ 'id' => 'pn1' }], doc['panels']
+      %w[elements overlays panels].each { |key| refute_includes Sigma::CodeRep.metadata(r), key }
+    end
   end
 
-  def test_page_nested_elements_flatten_for_api_and_round_trip
-    doc = Sigma::CodeRep.document(LIVE_FLAT_ELEMENTS)
-    wrapped = Sigma::CodeRep.wrap(doc, extra: Sigma::CodeRep.metadata(LIVE_FLAT_ELEMENTS))
+  def test_workbook_page_membership_comes_from_layout
+    doc = Sigma::CodeRep.document(LIVE)
+    assert_nil doc['pages'].first['elements']
+    assert_equal({ 'p' => ['e1'] }, Sigma::CodeRep.workbook_page_element_ids(doc))
+    element, page = Sigma::CodeRep.workbook_elements_with_pages(doc).first
+    assert_equal 'e1', element['id']
+    assert_equal 'p', page['id']
+  end
+
+  def test_page_nested_elements_flatten_for_api
+    assert_equal %w[chart source],
+                 Sigma::CodeRep.workbook_elements(LEGACY_NESTED).map { |element| element['id'] }.sort
+    wrapped = Sigma::CodeRep.wrap(LEGACY_NESTED)
     assert_equal %w[chart source], wrapped.dig('document', 'elements').map { |element| element['id'] }.sort
     assert wrapped.dig('document', 'pages').all? { |page| !page.key?('elements') }
-    assert_equal doc, Sigma::CodeRep.document(wrapped)
+    assert_equal %w[chart source], Sigma::CodeRep.workbook_elements(wrapped).map { |element| element['id'] }.sort
+  end
+
+  def test_wrap_canonicalizes_rejected_legacy_layout_tags
+    legacy_layout = '<Page id="p"><GridContainer elementId="c"><LayoutElement elementId="e1"/></GridContainer></Page>'
+    emitted = Sigma::CodeRep.wrap(LEGACY.merge('layout' => legacy_layout)).dig('document', 'layout')
+    assert_equal '<Page id="p"><Container elementId="c"><Element elementId="e1"/></Container></Page>', emitted
+    refute_match(/LayoutElement|GridContainer/, emitted)
+  end
+
+  def test_page_membership_accepts_legacy_aliases_but_ignores_unrelated_attributes
+    legacy_layout = '<Page id="p"><GridContainer elementId="c"><LayoutElement elementId="e1"/>' \
+                    '<Noise elementId="not-layout"/></GridContainer></Page>'
+    assert_equal({ 'p' => %w[c e1] },
+                 Sigma::CodeRep.workbook_page_element_ids(LEGACY.merge('layout' => legacy_layout)))
   end
 
   LIVE_WITH_SETTINGS = { 'workbookId' => 'w1', 'name' => 'N',
@@ -150,7 +184,10 @@ class TestCodeRep < Minitest::Test
     [LIVE_WITH_SETTINGS, LEGACY_WITH_SETTINGS].each do |r|
       doc = Sigma::CodeRep.document(r)
       wrapped = Sigma::CodeRep.wrap(doc, extra: Sigma::CodeRep.metadata(r))
-      assert_equal doc, Sigma::CodeRep.document(wrapped)
+      wrapped_doc = Sigma::CodeRep.document(wrapped)
+      assert_equal doc['settings'], wrapped_doc['settings']
+      assert_equal doc['agents'], wrapped_doc['agents']
+      assert_equal [], wrapped_doc['elements']
       assert_nil wrapped['settings'] # must NOT leak to top level — PUT allowlists document only
       assert_nil wrapped['agents']
     end

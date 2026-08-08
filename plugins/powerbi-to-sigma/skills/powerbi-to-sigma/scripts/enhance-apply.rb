@@ -100,10 +100,10 @@ def clean(spec)
   s
 end
 
-# Workbook code-rep nests pages/layout/schemaVersion/kind under a top-level
+# Workbook code-rep nests pages/elements/layout/schemaVersion/kind under a top-level
 # `document` key (live since 2026-08-03/04). Every helper below this point
 # (ensure_banded!, apply_patch!, find_element, etc.) was written against the
-# pre-nesting flat shape and freely mixes document fields (spec['pages'],
+# pre-nesting working shape and freely mixes document fields (spec['pages'],
 # spec['layout']) with metadata (spec['name']) on the SAME hash — so rather
 # than threading two hashes through a dozen functions, flatten a live GET back
 # onto one hash and keep that as the single working `current` spec throughout.
@@ -158,7 +158,7 @@ end
 # ---------------------------------------------------------------------------
 # Container-aware layout placement (phase-e layout-quality fix).
 #
-# The first Phase E shipped enhancements by APPENDING <LayoutElement>s at the
+# The first Phase E shipped enhancements by APPENDING <Element>s at the
 # bottom of the Page block — controls/KPIs/notes dumped below the fold, the
 # grain switcher orphaned at the foot. Every applied item now lands in the
 # container system instead:
@@ -167,7 +167,7 @@ end
 #   - grain/drill switcher     -> INSIDE its chart's own container (slim row
 #                                 above the chart)
 #   - migration/freshness note -> a slim note band directly under the header
-# If the cloned parity workbook PREDATES container layouts (no <GridContainer>
+# If the cloned parity workbook PREDATES container layouts (no <Container>
 # in its layout), the clone's layout is REGENERATED as a banded layout first,
 # using the builder's shared container machinery (lib/layout.rb).
 # ---------------------------------------------------------------------------
@@ -197,13 +197,14 @@ end
 def scan_top(inner)
   out = []
   pos = 0
-  while (m = inner.match(%r{<(GridContainer|LayoutElement)\b[^>]*?(/>|>)}m, pos))
-    tag = m[1]
+  while (m = inner.match(%r{<(Container|GridContainer|Element|LayoutElement)\b[^>]*?(/>|>)}m, pos))
+    source_tag = m[1]
+    tag = %w[Container GridContainer].include?(source_tag) ? 'Container' : 'Element'
     open_e = m.end(0)
     ent_end = open_e
     body = nil
-    if tag == 'GridContainer' && m[2] == '>'
-      close = inner.match(%r{</GridContainer>}m, open_e)
+    if tag == 'Container' && m[2] == '>'
+      close = inner.match(%r{</#{source_tag}>}m, open_e)
       ent_end = close ? close.end(0) : open_e
       body = close ? inner[open_e...close.begin(0)] : ''
     end
@@ -217,6 +218,15 @@ def scan_top(inner)
     pos = ent_end
   end
   out
+end
+
+# Place a flat document element at the end of a page's required layout. Used
+# for hidden helper tables added during control-extension repair.
+def place_at_page_end!(spec, page_id, element_id, rows: 10)
+  m = page_block(spec, page_id) or raise "no layout block for page #{page_id}"
+  last_row = scan_top(m[2]).map { |entry| entry[:r1] }.max || 1
+  entry = SigmaLayout.le(element_id, 1, 25, last_row, last_row + rows)
+  replace_page_inner!(spec, page_id, "#{m[2]}\n#{entry}\n")
 end
 
 def set_rows(head, r0, r1)
@@ -234,16 +244,19 @@ def shift_top_rows(inner, from_row, delta)
 end
 
 # Regenerate a banded layout for every dashboard page of a pre-container clone
-# (flat <LayoutElement> list -> header band + row-band GridContainers via the
+# (flat <Element> list -> header band + row-band Containers via the
 # builder's shared SigmaLayout machinery). No-op when containers exist.
 def ensure_banded!(spec)
-  return false if spec['layout'].to_s.include?('<GridContainer')
+  return false if spec['layout'].to_s.match?(%r{<(?:Container|GridContainer)\b})
   changed = false
+  all_elements = Sigma::CodeRep.workbook_elements(spec)
   (spec['pages'] || []).each do |pg|
     next if pg['id'].to_s.downcase.include?('data')
     m = page_block(spec, pg['id']) or next
-    kind_of = (pg['elements'] || []).to_h { |e| [e['id'], e['kind']] }
-    items = scan_top(m[2]).select { |t| t[:tag] == 'LayoutElement' }
+    page_ids = Sigma::CodeRep.workbook_page_element_ids(spec)[pg['id']] || []
+    page_elements = all_elements.select { |e| page_ids.include?(e['id']) }
+    kind_of = page_elements.to_h { |e| [e['id'], e['kind']] }
+    items = scan_top(m[2]).select { |t| t[:tag] == 'Element' }
                           .map { |t| [t[:eid], t[:c0], t[:c1], t[:r0], t[:r1]] }
     next if items.empty?
     # an existing short top text element (the dashboard's own title) becomes
@@ -257,7 +270,7 @@ def ensure_banded!(spec)
     own_hdr = items.find { |i| i[3] <= top_row + 1 && kind_of[i[0]] == 'text' && (i[4] - i[3]) <= 5 }
     if own_hdr && items.length > 1
       items -= [own_hdr]
-      hdr_el = (pg['elements'] || []).find { |e| e['id'] == own_hdr[0] }
+      hdr_el = page_elements.find { |e| e['id'] == own_hdr[0] }
       if hdr_el && hdr_el['body'].is_a?(String) && !hdr_el['body'].include?('color:')
         plain = hdr_el['body'].gsub(/^#+\s*/, '').strip
         hdr_el['body'] = %(# <span style="color: #FFFFFF">#{plain}</span>)
@@ -269,8 +282,9 @@ def ensure_banded!(spec)
       xml, extra = SigmaLayout.banded_page(pg['id'], items, title: hdr_title,
                                            id_prefix: "band-#{pg['id']}")
     end
-    new_ids = (pg['elements'] || []).map { |e| e['id'] }
-    pg['elements'] = (pg['elements'] || []) + extra.reject { |e| new_ids.include?(e['id']) }
+    new_ids = all_elements.map { |e| e['id'] }
+    spec['elements'] = all_elements + extra.reject { |e| new_ids.include?(e['id']) }
+    all_elements = spec['elements']
     spec['layout'] = spec['layout'].to_s.sub(m[0]) { xml }
     changed = true
   end
@@ -281,7 +295,7 @@ end
 # header band (the row-1 container), below any already-created phasee band of
 # lower priority.
 def band_anchor_row(ents, prefix)
-  hdr = ents.select { |t| t[:tag] == 'GridContainer' }
+  hdr = ents.select { |t| t[:tag] == 'Container' }
             .find { |t| t[:r0] <= 1 }
   row = hdr ? hdr[:r1] : (ents.map { |t| t[:r0] }.min || 1)
   ents.each do |t|
@@ -305,7 +319,8 @@ def ensure_band!(spec, page, prefix)
   inner = shift_top_rows(m[2], anchor, rows)
   band = SigmaLayout.gc(cid, 1, 25, anchor, anchor + rows, '')
   replace_page_inner!(spec, page['id'], "#{inner}\n#{band}\n")
-  (page['elements'] ||= []) << SigmaLayout.container_el(cid) unless page['elements'].any? { |e| e['id'] == cid }
+  spec['elements'] ||= []
+  spec['elements'] << SigmaLayout.container_el(cid) unless spec['elements'].any? { |e| e['id'] == cid }
   cid
 end
 
@@ -342,7 +357,7 @@ def band_add!(spec, page_id, band_cid, element_id, grid_column, height)
   entry = SigmaLayout.le(element_id, place_c0, place_c0 + width, row, row + h)
   new_band_inner = "#{band[:inner]}\n#{entry}"
   new_band_head = set_rows(m[2][band[:s]...band[:head_e]], band[:r0], band[:r1] + grow)
-  new_band = "#{new_band_head}#{new_band_inner}\n</GridContainer>"
+  new_band = "#{new_band_head}#{new_band_inner}\n</Container>"
   inner = m[2].dup
   inner[band[:s]...band[:e]] = new_band
   inner = shift_below!(inner, band[:eid], band[:r1], grow) if grow.positive?
@@ -368,14 +383,14 @@ CHART_CTRL_ROWS = 2
 def add_into_chart_container!(spec, page_id, chart_eid, ctrl_eid, grid_column)
   m = page_block(spec, page_id) or return nil
   ents = scan_top(m[2])
-  host = ents.find { |t| t[:tag] == 'GridContainer' && t[:inner].to_s.include?(%(elementId="#{chart_eid}")) }
+  host = ents.find { |t| t[:tag] == 'Container' && t[:inner].to_s.include?(%(elementId="#{chart_eid}")) }
   return nil unless host
   c0, c1 = grid_column.to_s.scan(/\d+/).map(&:to_i)
   c0, c1 = 17, 25 if c0.nil? || c1.nil? || c1 <= c0
   kids_shifted = shift_top_rows(host[:inner].to_s, 1, CHART_CTRL_ROWS)
   entry = SigmaLayout.le(ctrl_eid, c0, c1, 1, 1 + CHART_CTRL_ROWS)
   new_head = set_rows(m[2][host[:s]...host[:head_e]], host[:r0], host[:r1] + CHART_CTRL_ROWS)
-  new_host = "#{new_head}#{entry}\n#{kids_shifted}\n</GridContainer>"
+  new_host = "#{new_head}#{entry}\n#{kids_shifted}\n</Container>"
   inner = m[2].dup
   inner[host[:s]...host[:e]] = new_host
   inner = shift_below!(inner, host[:eid], host[:r1], CHART_CTRL_ROWS)
@@ -404,10 +419,9 @@ def place_added_element!(spec, page, el, hint)
 end
 
 def find_element(spec, element_id)
-  (spec['pages'] || []).each do |p|
-    (p['elements'] || []).each { |e| return [p, e] if e['id'] == element_id }
-  end
-  nil
+  el = Sigma::CodeRep.workbook_elements(spec).find { |e| e['id'] == element_id }
+  return nil unless el
+  [Sigma::CodeRep.workbook_page_by_element(spec)[element_id], el]
 end
 
 # ---------------------------------------------------------------------------
@@ -436,7 +450,7 @@ VIZ_EXTENDABLE = %w[bar-chart line-chart area-chart pie-chart donut-chart combo-
 $control_scope_notes = []
 
 def spec_elements_by_id(spec)
-  (spec['pages'] || []).flat_map { |p| p['elements'] || [] }.to_h { |e| [e['id'], e] }
+  Sigma::CodeRep.workbook_elements(spec).to_h { |e| [e['id'], e] }
 end
 
 # Element ids on `el`'s source chain (excluding el itself); stops at a
@@ -490,9 +504,13 @@ def ensure_base_table!(spec, el, dm_src, cand_id)
   # The base lives on the Data page (same convention as the master and the
   # looker scope tables); page order puts it before every dashboard page, so
   # control filter targets resolve in Sigma's array-order dependency walk.
-  data_page = (spec['pages'] || []).find { |p| (p['elements'] || []).any? { |e| e['id'] == 'master' } } ||
+  master_page = Sigma::CodeRep.workbook_page_by_element(spec)['master']
+  data_page = (spec['pages'] || []).find { |p| p['id'] == master_page&.dig('id') } ||
+              (spec['pages'] || []).find { |p| p['id'].to_s.downcase.include?('data') } ||
               (spec['pages'] || []).first
-  (data_page['elements'] ||= []) << base
+  raise 'cannot place hidden enhancement base: workbook has no page metadata' unless data_page
+  (spec['elements'] ||= []) << base
+  place_at_page_end!(spec, data_page['id'], base['id'])
   base
 end
 
@@ -628,7 +646,7 @@ def apply_patch!(spec, cand)
     hints = Array(patch['layout']).to_h { |l| [l['element_id'], l] }
     Array(patch['elements']).each do |el|
       raise "element id #{el['id']} already exists" if find_element(spec, el['id'])
-      (page['elements'] ||= []) << el
+      (spec['elements'] ||= []) << el
       place_added_element!(spec, page, el, hints[el['id']])
     end
     # Extend existing controls to cover the added charts/KPIs (or their
@@ -641,14 +659,15 @@ def apply_patch!(spec, cand)
     warn "   [#{cand['id']}] control extension: #{missed} added element/control pair(s) NOT coverable — see control-scope.json" if missed.positive?
     if ext.positive?
       # Sigma resolves spec dependencies in ARRAY ORDER: a control whose
-      # `filters` target an element appended LATER in the page 400s at PUT with
+      # `filters` target an element appended LATER in document.elements 400s at PUT with
       # "Dependency not found" (live-verified; same rule the looker builder
       # honors by emitting tiles before controls). Stable-move controls to the
-      # end of the page so every extended target precedes its control. Formula
+      # end of the flat document collection so every extended target precedes
+      # its control. Formula
       # references ([controlId] in a chart calc) do NOT need array order —
       # the grain-switcher control already PUTs fine after its chart.
-      page['elements'] = page['elements'].reject { |e| e['kind'] == 'control' } +
-                         page['elements'].select { |e| e['kind'] == 'control' }
+      spec['elements'] = spec['elements'].reject { |e| e['kind'] == 'control' } +
+                         spec['elements'].select { |e| e['kind'] == 'control' }
     end
     "added #{Array(patch['elements']).size} element(s) into page #{page['id']}'s bands" \
       "#{ext.positive? ? " + extended #{ext} control target(s)" : ''}"
@@ -671,7 +690,7 @@ def apply_patch!(spec, cand)
     raise 'rewire column not found' unless col
     ctrl = patch['control']
     raise "control id #{ctrl['id']} already exists" if find_element(spec, ctrl['id'])
-    (pg['elements'] ||= []) << ctrl
+    (spec['elements'] ||= []) << ctrl
     col['formula'] = patch.dig('rewire', 'formula')
     # the switcher lives WITH the chart it drives: a slim row inside that
     # chart's container (falls back to the control band when uncontainered).
@@ -725,8 +744,9 @@ def apply_patch!(spec, cand)
       'color' => { 'by' => 'category', 'column' => 'map-phasee-geo' },
       'name' => "#{el['name']} (map restored)"
     }
-    pg['elements'].delete(el)
-    pg['elements'] << map_el
+    element_index = spec['elements'].index(el)
+    raise "element #{el['id']} missing from flat document collection" unless element_index
+    spec['elements'][element_index] = map_el
     spec['layout'] = spec['layout'].to_s.gsub(/elementId="#{Regexp.escape(el['id'])}"/,
                                               %(elementId="#{map_el['id']}"))
     "replaced #{el['id']} with point-map #{map_el['id']}"
@@ -749,18 +769,19 @@ end
 # ---------------------------------------------------------------------------
 orig_meta_before = Sigma.request(:get, "/v2/workbooks/#{ORIG_WB}")
 orig_spec = Sigma.request(:get, "/v2/workbooks/#{ORIG_WB}/spec")
-# orig_spec stays the RAW (possibly document-nested) GET response — it is
-# POSTed close to verbatim below (clean() only strips top-level readonly
-# keys, leaving a `document` key untouched), and POST /v2/workbooks/spec
-# requires that nesting. orig_doc is the unwrapped view used for reads only.
+# Keep the raw GET for metadata/document partitioning. The clone POST passes
+# through wrap_spec so legacy layout aliases can never be re-emitted.
 orig_doc = Sigma::CodeRep.document(orig_spec)
-abort "FATAL: cannot read spec of #{ORIG_WB}" unless orig_spec.is_a?(Hash) && orig_doc['pages']
+abort "FATAL: cannot read complete spec of #{ORIG_WB}" unless orig_spec.is_a?(Hash) &&
+                                                           orig_doc['pages'].is_a?(Array) &&
+                                                           orig_doc['elements'].is_a?(Array) &&
+                                                           !orig_doc['layout'].to_s.empty?
 clone_name = opts[:name] || "#{orig_spec['name']} — Enhanced"
 
-clone_spec = clean(orig_spec)
+clone_spec = flatten_spec(clean(orig_spec))
 clone_spec['name'] = clone_name
 post = lenient(Sigma.request(:post, '/v2/workbooks/spec',
-                             body: JSON.generate(clone_spec), binary: true))
+                             body: JSON.generate(wrap_spec(clone_spec)), binary: true))
 clone_id = post.is_a?(Hash) && (post['workbookId'] || post['id'])
 abort "FATAL: clone POST returned no workbookId: #{post.inspect[0, 300]}" unless clone_id
 puts "enhance-apply: clone '#{clone_name}' = #{clone_id} (original #{ORIG_WB} untouched)"
@@ -770,10 +791,11 @@ puts "enhance-apply: clone '#{clone_name}' = #{clone_id} (original #{ORIG_WB} un
 # ---------------------------------------------------------------------------
 all_touched = accepted.flat_map { |c| touched_ids(c) }
 viz_kinds = %w[bar-chart line-chart area-chart pie-chart combo-chart scatter-chart kpi-chart table pivot-table]
-probe_pool = (orig_doc['pages'] || []).reject { |p| p['id'] == 'page-data' }
-                                       .flat_map { |p| p['elements'] || [] }
-                                       .select { |e| viz_kinds.include?(e['kind']) }
-                                       .reject { |e| all_touched.include?(e['id']) }
+probe_pool = Sigma::CodeRep.workbook_elements_with_pages(orig_doc)
+                           .select { |_e, page| page && page['id'] != 'page-data' }
+                           .map(&:first)
+                           .select { |e| viz_kinds.include?(e['kind']) }
+                           .reject { |e| all_touched.include?(e['id']) }
 probes = probe_pool.first(opts[:probes]).map { |e| e['id'] }
 abort 'FATAL: no untouched element available as a parity probe' if probes.empty?
 puts "   parity probes (untouched elements): #{probes.join(', ')}"
@@ -801,7 +823,8 @@ puts "   baseline: clone == original on #{probes.size}/#{probes.size} probe(s)"
 # `spec` here is the FLATTENED working document (flatten_spec below) — wrap
 # it back into the live nested shape right at the wire boundary so every
 # helper upstream (ensure_banded!, apply_patch!, find_element, ...) keeps
-# reading/writing spec['pages']/spec['layout']/spec['name'] on one flat hash.
+# reading/writing metadata-only pages, flat elements, layout, and name on one
+# working hash.
 def put_spec(wb, spec)
   lenient(Sigma.request(:put, "/v2/workbooks/#{wb}/spec",
                         body: JSON.generate(wrap_spec(spec)), binary: true))

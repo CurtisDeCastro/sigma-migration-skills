@@ -25,7 +25,7 @@
 #      the workbook shipped with N-1 charts" escape (bead gjhe). Skipped
 #      (with a note) when the converter doesn't emit a census.
 #   6. Layout lint (scripts/lib/layout_lint.rb, shared) — no raw-id element
-#      display names, no input controls outside the GridContainer bands on a
+#      display names, no input controls outside the Container bands on a
 #      banded page, no dead zones (>25% empty grid rows between a page's
 #      first and last element), no generic header-band title ("Page 1" /
 #      "Sheet 3" / "Dashboard 2" must never title a dashboard), and no
@@ -110,7 +110,7 @@
 #                              # (probe --check-out-of-closure; doubles exports)
 #     [--min-layout-elements N] default 2 — single-page bare-element layouts
 #                              # often have just the page wrapper; require this
-#                              # many <LayoutElement> tags
+#                              # many <Element> tags
 #     [--allow-missing-tiles N] default 0 — tolerate up to N unmatched dashboard
 #                              # zones in the tile census (for legitimately
 #                              # unbuildable zones; name them in your report)
@@ -1556,7 +1556,7 @@ end
 # ---------------------------------------------------------------------------
 # Gate 4 — layout applied (beads-sigma-bw3)
 # Fetches the live workbook spec and confirms a non-empty top-level `layout`
-# XML is set, with at least --min-layout-elements <LayoutElement> tags.
+# XML is set, with at least --min-layout-elements canonical <Element> tags.
 # Catches the "agent forgot to PUT a layout" regression where elements
 # render as a single-column stack instead of the dashboard grid.
 # ---------------------------------------------------------------------------
@@ -1591,7 +1591,8 @@ unless opts[:skip_layout]
       if fetched['spec']
         spec = fetched['spec']
         layout_xml = spec['layout'].to_s
-        elem_count = layout_xml.scan(/<LayoutElement\b/).length
+        elem_count = layout_xml.scan(/<Element\b/).length
+        legacy_tag_count = layout_xml.scan(%r{</?(?:LayoutElement|GridContainer)\b}).length
         live_layout_positioned = elem_count
 
         # Detect the Sigma "auto-generated single-column stack" layout that
@@ -1600,7 +1601,7 @@ unless opts[:skip_layout]
         # gridColumn value (typically "1 / 13" — left half, vertically stacked).
         # Note: per-page detection — a workbook with one element per content
         # page is structurally fine (degenerate case, not a stack).
-        # Container-banded pages (<GridContainer> bands per layout-playbook.md)
+        # Container-banded pages (<Container> bands per layout-playbook.md)
         # are exempt: full-width band containers (and single-chart rows inside
         # them) legitimately share gridColumn="1 / 25" — that is deliberate
         # banding, not the auto-stack regression.
@@ -1608,9 +1609,9 @@ unless opts[:skip_layout]
         # Walk one page at a time using the <Page id="..."> blocks
         layout_xml.scan(/<Page\b[^>]*id="([^"]*)"[^>]*>(.*?)<\/Page>/m).each do |page_id, page_body|
           next if page_id.to_s.downcase.include?('data')
-          next if page_body.include?('<GridContainer')
+          next if page_body.include?('<Container')
           cols_on_page = page_body.scan(/gridColumn="([^"]+)"/).map(&:first).uniq
-          elems_on_page = page_body.scan(/<LayoutElement\b/).length
+          elems_on_page = page_body.scan(/<Element\b/).length
           if elems_on_page >= 2 && cols_on_page.length == 1
             non_data_stack_pages << [page_id, cols_on_page.first, elems_on_page]
           end
@@ -1626,8 +1627,12 @@ unless opts[:skip_layout]
           warn "           --layout #{opts[:tab]}/layout.xml"
           warn "       See beads-sigma-bw3."
           exit 6
+        elsif legacy_tag_count.positive?
+          warn "[FAIL] gate 4/7: layout XML contains #{legacy_tag_count} rejected legacy layout tag(s)."
+          warn '       Workbook layout emission must use <Element>/<Container>; never <LayoutElement>/<GridContainer>.'
+          exit 6
         elsif elem_count < opts[:min_layout_elements]
-          warn "[FAIL] gate 4/7: layout XML has only #{elem_count} <LayoutElement> tag(s);"
+          warn "[FAIL] gate 4/7: layout XML has only #{elem_count} <Element> tag(s);"
           warn "       at least #{opts[:min_layout_elements]} required (one master + ≥1 chart)."
           warn "       The layout likely covers only the Data page — chart page is unstyled."
           exit 6
@@ -2363,11 +2368,12 @@ else
               _census = nil
               if File.file?(_rb)
                 _rb_doc = (JSON.parse(File.read(_rb)) rescue nil)
-                if _rb_doc.is_a?(Hash) && _rb_doc['pages'].is_a?(Array)
-                  _census = _rb_doc['pages'].flat_map { |pg| Array(pg.is_a?(Hash) ? pg['elements'] : nil) }
-                                            .select { |el| el.is_a?(Hash) && el['visibleAsSource'] != false }
-                                            .map { |el| _fam.call(el['kind']) }
-                                            .select { |f| _chartf.include?(f) }
+                if _rb_doc.is_a?(Hash)
+                  _els = CODE_REP_LOADED ? Sigma::CodeRep.workbook_elements(_rb_doc) :
+                                           Array(_rb_doc['elements'])
+                  _census = _els.select { |el| el.is_a?(Hash) && el['visibleAsSource'] != false }
+                                .map { |el| _fam.call(el['kind']) }
+                                .select { |f| _chartf.include?(f) }
                 end
               end
               if _census.is_a?(Array) && _census.any?
@@ -2496,7 +2502,7 @@ elsif File.exist?(census_fill_path)
   # count). A HAND-AUTHORED workbook layout uses element ids the zone-derived
   # census can't match, so build-dashboard-layout.rb reports placed=0/N even
   # though the shipped layout positions every tile. If the live layout has at
-  # least as many positioned <LayoutElement> tags as there are source zones,
+  # least as many positioned <Element> tags as there are source zones,
   # trust it — the census is stale, not the layout. Conservative: only relaxes
   # when the live layout demonstrably covers every zone; never masks a genuine
   # drop when the live layout is actually short.
@@ -3724,8 +3730,13 @@ if File.exist?(kp21_path)
     kp21_rb = JSON.parse(File.read(kp21_rb_path)) rescue nil
     kp21_els = {}      # normalized element name → [family, ...]
     kp21_el_kinds = {} # normalized element name → [raw kind, ...] (for the message)
-    Array(kp21_rb.is_a?(Hash) ? kp21_rb['pages'] : nil).each do |pg|
-      Array(pg.is_a?(Hash) ? pg['elements'] : nil).each do |el|
+    kp21_elements = if kp21_rb.is_a?(Hash)
+                      CODE_REP_LOADED ? Sigma::CodeRep.workbook_elements(kp21_rb) :
+                                        Array(kp21_rb['elements'])
+                    else
+                      []
+                    end
+    kp21_elements.each do |el|
         next unless el.is_a?(Hash) && el['visibleAsSource'] != false # hidden data-page masters
         f = kp21_fam.call(el['kind'])
         next unless kp21_chartf.include?(f) || f == 'other'
@@ -3736,7 +3747,6 @@ if File.exist?(kp21_path)
         next if k.empty?
         (kp21_els[k] ||= []) << f
         (kp21_el_kinds[k] ||= []) << el['kind'].to_s
-      end
     end
     kp21_waivers = {} # normalized tile → reason
     Array(kp21['kind_waivers']).each do |w|
