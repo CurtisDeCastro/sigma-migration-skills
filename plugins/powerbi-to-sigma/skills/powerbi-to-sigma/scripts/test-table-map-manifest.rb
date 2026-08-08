@@ -42,24 +42,24 @@ end
 Dir.mktmpdir do |dir|
   # ── 1. manifest.json shape auto-detected; full-path repoint + formula rewrite ──
   manifest = {
-    'dataset' => 'x', 'workspace' => 'y', 'target' => 'CSA.PBI',
+    'dataset' => 'x', 'workspace' => 'y', 'target' => 'DEMO_DB.PBI',
     'tables' => [
-      { 'pbi_table' => 'SalesFlow', 'sf_table' => 'CSA.PBI.SALES_FLOW',
+      { 'pbi_table' => 'SalesFlow', 'sf_table' => 'DEMO_DB.PBI.SALES_FLOW',
         'columns' => [{ 'pbi' => 'SaleID', 'sf' => 'SALE_ID' }] },
-      { 'pbi_table' => 'StoreLake', 'sf_table' => 'CSA.PBI.STORE_LAKE', 'columns' => [] },
+      { 'pbi_table' => 'StoreLake', 'sf_table' => 'DEMO_DB.PBI.STORE_LAKE', 'columns' => [] },
     ]
   }
   mpath = write_json(dir, 'manifest.json', manifest)
   loaded = TableMap.load(mpath)
   ok('manifest shape auto-detected', loaded[:from_manifest] == true)
-  ok('manifest -> {name => sf_table} map', loaded[:tmap] == { 'SalesFlow' => 'CSA.PBI.SALES_FLOW', 'StoreLake' => 'CSA.PBI.STORE_LAKE' })
+  ok('manifest -> {name => sf_table} map', loaded[:tmap] == { 'SalesFlow' => 'DEMO_DB.PBI.SALES_FLOW', 'StoreLake' => 'DEMO_DB.PBI.STORE_LAKE' })
 
   dm = dm_fixture
   applied = TableMap.apply!(dm, loaded[:tmap])
   els = dm['pages'][0]['elements']
   ok('two elements repointed', applied.size == 2)
-  ok('normalized match: SalesFlow(name) -> SALES_FLOW(tail)', els[0]['source']['path'] == %w[CSA PBI SALES_FLOW])
-  ok('dotted sf_table repoints WHOLE path (db+schema+table)', els[1]['source']['path'] == %w[CSA PBI STORE_LAKE])
+  ok('normalized match: SalesFlow(name) -> SALES_FLOW(tail)', els[0]['source']['path'] == %w[DEMO_DB PBI SALES_FLOW])
+  ok('dotted sf_table repoints WHOLE path (db+schema+table)', els[1]['source']['path'] == %w[DEMO_DB PBI STORE_LAKE])
   ok('base column formula tail rewritten', els[0]['columns'][0]['formula'] == '[SALES_FLOW/NetAmount]')
   ok('unrelated warehouse element untouched', els[2]['source']['path'] == %w[ANALYTICS PUBLIC ORDER_FACT])
 
