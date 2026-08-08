@@ -25,7 +25,7 @@
 #      the workbook shipped with N-1 charts" escape (bead gjhe). Skipped
 #      (with a note) when the converter doesn't emit a census.
 #   6. Layout lint (scripts/lib/layout_lint.rb, shared) — no raw-id element
-#      display names, no input controls outside the GridContainer bands on a
+#      display names, no input controls outside the Container bands on a
 #      banded page, no dead zones (>25% empty grid rows between a page's
 #      first and last element), no generic header-band title ("Page 1" /
 #      "Sheet 3" / "Dashboard 2" must never title a dashboard), and no
@@ -110,7 +110,7 @@
 #                              # (probe --check-out-of-closure; doubles exports)
 #     [--min-layout-elements N] default 2 — single-page bare-element layouts
 #                              # often have just the page wrapper; require this
-#                              # many <LayoutElement> tags
+#                              # many <Element> tags
 #     [--allow-missing-tiles N] default 0 — tolerate up to N unmatched dashboard
 #                              # zones in the tile census (for legitimately
 #                              # unbuildable zones; name them in your report)
@@ -502,6 +502,27 @@ EV_LEDGER_LOADED = begin
 rescue LoadError
   begin
     require_relative '../lib/evidence_ledger'
+    true
+  rescue LoadError
+    false
+  end
+end
+
+# Workbook code-rep document wrapper (#608) — same vendoring rule as the
+# ledgers above. GET /v2/workbooks/{id}/spec now nests pages/layout/
+# schemaVersion/kind under a top-level `document` key (verified live
+# 2026-08-03/04); a legacy flat readback (older wb-readback.json snapshots)
+# still carries them at top level. fetch_live_spec below (gates 4/6/7/7b's
+# shared live-spec memo) reads through CODE_REP_LOADED so a stale checkout
+# without the lib keeps the old flat read (stated via a one-time WARN) rather
+# than crashing — but every vendored copy carries it (manifest-listed
+# alongside this file), so the flat fallback is not expected to fire live.
+CODE_REP_LOADED = begin
+  require_relative 'lib/code_rep'
+  true
+rescue LoadError
+  begin
+    require_relative '../lib/code_rep'
     true
   rescue LoadError
     false
@@ -1124,13 +1145,31 @@ else
     # pool is legitimately empty. The numbers are still machine-verified when
     # BOTH hold: (a) anchors-verdict.json passes with EVERY source anchor
     # matched against live element exports, and (b) every empty-export tile is
-    # image-verified (visual-verify manifest all true). Then the anchors
-    # oracle IS the parity evidence — same doctrine as the conditional
-    # --skip-parity-gate acceptance, but deterministic, and it burns no waiver
-    # budget because nothing is skipped.
+    # image-verified (visual-verify manifest all true — or, when no manifest
+    # exists at all, a recorded page-level visual verdict stands in, see
+    # below). Then the anchors oracle IS the parity evidence — same doctrine
+    # as the conditional --skip-parity-gate acceptance, but deterministic, and
+    # it burns no waiver budget because nothing is skipped.
     _av = (JSON.parse(File.read(File.join(opts[:tab], 'anchors-verdict.json'))) rescue nil)
     _vv = (JSON.parse(File.read(File.join(opts[:tab], 'visual-verify', 'manifest.json'))) rescue nil)
-    _vv_ok = _vv.is_a?(Array) && _vv.any? && _vv.all? { |t| t['visual_verified'] == true }
+    if _vv.is_a?(Array) && _vv.any?
+      _vv_ok = _vv.all? { |t| t['visual_verified'] == true }
+      _vv_source = :manifest
+    else
+      # No Tableau-style per-tile visual-verify manifest (the other 7
+      # converters sharing this gate script have no verify-visual-tiles.rb
+      # equivalent) -- fall back to the page-level record-visual-check.rb
+      # verdict already stamped into parity-final.json (same fields gate 8b
+      # reads below: visual_checked/screenshot_path/visual_verdict), as long
+      # as it is genuinely vision-backed, not a blind/not-executable
+      # attestation (same doctrine as gate 8b's own §D5 check).
+      _page_recorded = summary['visual_checked'] || summary['screenshot_path'] ||
+                        summary['visual_verdict'].to_s == 'divergent'
+      _page_vision_blocked = (summary.key?('agent_vision') && summary['agent_vision'] == false) ||
+                             summary['visual_verdict'].to_s == 'not-executable'
+      _vv_ok = _page_recorded && !_page_vision_blocked
+      _vv_source = :page_verdict
+    end
     # W1.1: condition (c) — every DISPLAYED dashboard tile must export >=1 data
     # row. A 2026-07 field-workbook run passed (a) + (b) with all 15 anchors
     # matched, yet every chart rendered "No data": the anchors matched only in the
@@ -1165,10 +1204,12 @@ else
       _n_waived = 0
     end
     if _av && _av['pass'] && _av['checked'].to_i >= 5 && _av['matched'] == _av['checked'] && _vv_ok && _tiles_ok && _cov_ok
+      _vv_note = _vv_source == :manifest ? "all #{_vv.size} tile(s) image-verified" :
+        "page-level visual verdict recorded (#{summary['visual_verdict'] || 'checked'})"
       puts "[PASS] gate 2 (value parity): 0 exportable view CSVs (all worksheets dashboard-embedded) — " \
            "the ANCHORS ORACLE stands in: anchors-verdict.json pass " \
            "(#{_av['matched']}/#{_av['checked']} anchors matched, #{_av['anchors_matched_in_displayed'] || '?'} in displayed tiles) " \
-           "+ all #{_vv.size} tile(s) image-verified + all displayed tiles return data " \
+           "+ #{_vv_note} + all displayed tiles return data " \
            "+ anchor coverage #{_cov['covered']}/#{_cov['displayed']} displayed tile(s)" \
            "#{_n_waived.positive? ? " (#{_n_waived} coverage-waived at Phase 1d)" : ''}." \
            "#{anchors_tol_note.call(_av)}"
@@ -1180,6 +1221,11 @@ else
       warn '       anchors oracle can stand in — ALL FOUR must hold:'
       warn "         a) verify-anchors.rb pass with EVERY anchor matched (#{_av ? "currently #{_av['matched']}/#{_av['checked']}" : 'anchors-verdict.json missing'})"
       warn "         b) every visual-verify tile confirmed (#{_vv_ok ? 'ok' : 'incomplete'})"
+      if _vv_source == :page_verdict && !_vv_ok
+        warn '            (no manifest.json + no recorded page-level visual verdict — run'
+        warn '             scripts/record-visual-check.rb to satisfy this condition when your'
+        warn '             converter has no visual-verify/manifest.json generator)'
+      end
       if _tiles_field_present
         empty = (_av['dashboard_tiles_empty'] || [])
         warn "         c) every displayed tile returns >=1 data row (#{_tiles_ok ? 'ok' : "#{empty.length} tile(s) EMPTY: #{empty.map { |t| t['name'] }.first(6).join(', ')}"})"
@@ -1488,6 +1534,19 @@ fetch_live_spec = lambda do |wb_id, base, tok|
         end
         ev_identity['ver'] = live_ver.to_s # evidence keys bind to LIVE state
       end
+      # Unwrap ONCE here so every downstream gate (4/6/7/7b, all read through
+      # this memo) inherits the fix: the live GET nests pages/layout under
+      # `document` (see CODE_REP_LOADED above) — without this, gate 4's
+      # spec['layout'] read is always nil and hard-FAILs exit 6 on every
+      # workbook, the regression this memo fixes. A stale checkout without
+      # lib/code_rep.rb keeps the old flat spec (WARNed once, not silent).
+      if CODE_REP_LOADED
+        spec = Sigma::CodeRep.document(spec)
+      else
+        warn '[WARN] scripts/lib/code_rep.rb not vendored alongside this script (re-vendor;' \
+             ' md5 discipline) — gates 4/6/7/7b read the RAW (possibly document-nested) spec' \
+             ' and may misreport an empty layout/pages on a live nested readback.'
+      end
       { 'spec' => spec, 'code' => nil }
     else
       { 'spec' => nil, 'code' => res.code }
@@ -1497,7 +1556,7 @@ end
 # ---------------------------------------------------------------------------
 # Gate 4 — layout applied (beads-sigma-bw3)
 # Fetches the live workbook spec and confirms a non-empty top-level `layout`
-# XML is set, with at least --min-layout-elements <LayoutElement> tags.
+# XML is set, with at least --min-layout-elements canonical <Element> tags.
 # Catches the "agent forgot to PUT a layout" regression where elements
 # render as a single-column stack instead of the dashboard grid.
 # ---------------------------------------------------------------------------
@@ -1532,7 +1591,8 @@ unless opts[:skip_layout]
       if fetched['spec']
         spec = fetched['spec']
         layout_xml = spec['layout'].to_s
-        elem_count = layout_xml.scan(/<LayoutElement\b/).length
+        elem_count = layout_xml.scan(/<Element\b/).length
+        legacy_tag_count = layout_xml.scan(%r{</?(?:LayoutElement|GridContainer)\b}).length
         live_layout_positioned = elem_count
 
         # Detect the Sigma "auto-generated single-column stack" layout that
@@ -1541,7 +1601,7 @@ unless opts[:skip_layout]
         # gridColumn value (typically "1 / 13" — left half, vertically stacked).
         # Note: per-page detection — a workbook with one element per content
         # page is structurally fine (degenerate case, not a stack).
-        # Container-banded pages (<GridContainer> bands per layout-playbook.md)
+        # Container-banded pages (<Container> bands per layout-playbook.md)
         # are exempt: full-width band containers (and single-chart rows inside
         # them) legitimately share gridColumn="1 / 25" — that is deliberate
         # banding, not the auto-stack regression.
@@ -1549,9 +1609,9 @@ unless opts[:skip_layout]
         # Walk one page at a time using the <Page id="..."> blocks
         layout_xml.scan(/<Page\b[^>]*id="([^"]*)"[^>]*>(.*?)<\/Page>/m).each do |page_id, page_body|
           next if page_id.to_s.downcase.include?('data')
-          next if page_body.include?('<GridContainer')
+          next if page_body.include?('<Container')
           cols_on_page = page_body.scan(/gridColumn="([^"]+)"/).map(&:first).uniq
-          elems_on_page = page_body.scan(/<LayoutElement\b/).length
+          elems_on_page = page_body.scan(/<Element\b/).length
           if elems_on_page >= 2 && cols_on_page.length == 1
             non_data_stack_pages << [page_id, cols_on_page.first, elems_on_page]
           end
@@ -1567,8 +1627,12 @@ unless opts[:skip_layout]
           warn "           --layout #{opts[:tab]}/layout.xml"
           warn "       See beads-sigma-bw3."
           exit 6
+        elsif legacy_tag_count.positive?
+          warn "[FAIL] gate 4/7: layout XML contains #{legacy_tag_count} rejected legacy layout tag(s)."
+          warn '       Workbook layout emission must use <Element>/<Container>; never <LayoutElement>/<GridContainer>.'
+          exit 6
         elsif elem_count < opts[:min_layout_elements]
-          warn "[FAIL] gate 4/7: layout XML has only #{elem_count} <LayoutElement> tag(s);"
+          warn "[FAIL] gate 4/7: layout XML has only #{elem_count} <Element> tag(s);"
           warn "       at least #{opts[:min_layout_elements]} required (one master + ≥1 chart)."
           warn "       The layout likely covers only the Data page — chart page is unstyled."
           exit 6
@@ -1619,6 +1683,11 @@ else
   # image-verified. Count a zone as matched when its tile carries a confirmed
   # visual-verify entry (the per-tile side-by-side oracle) — deterministic,
   # per-name, and loud below.
+  # NOTE: `_vv_ok` here is a fresh top-level reassignment for an UNRELATED
+  # purpose (an Array of visually-verified worksheet NAMES for gate 5/7's own
+  # name-matching), not the Boolean `_vv_ok`/`_vv_source` computed above for
+  # gate 2's anchors-oracle condition (b) — gate 2's use is fully consumed
+  # before this point, but don't assume shared meaning between the two blocks.
   _vv_ok = begin
     Array(JSON.parse(File.read(File.join(opts[:tab], 'visual-verify', 'manifest.json'))))
       .select { |t| t['visual_verified'] == true }.map { |t| t['worksheet'].to_s }
@@ -2299,11 +2368,12 @@ else
               _census = nil
               if File.file?(_rb)
                 _rb_doc = (JSON.parse(File.read(_rb)) rescue nil)
-                if _rb_doc.is_a?(Hash) && _rb_doc['pages'].is_a?(Array)
-                  _census = _rb_doc['pages'].flat_map { |pg| Array(pg.is_a?(Hash) ? pg['elements'] : nil) }
-                                            .select { |el| el.is_a?(Hash) && el['visibleAsSource'] != false }
-                                            .map { |el| _fam.call(el['kind']) }
-                                            .select { |f| _chartf.include?(f) }
+                if _rb_doc.is_a?(Hash)
+                  _els = CODE_REP_LOADED ? Sigma::CodeRep.workbook_elements(_rb_doc) :
+                                           Array(_rb_doc['elements'])
+                  _census = _els.select { |el| el.is_a?(Hash) && el['visibleAsSource'] != false }
+                                .map { |el| _fam.call(el['kind']) }
+                                .select { |f| _chartf.include?(f) }
                 end
               end
               if _census.is_a?(Array) && _census.any?
@@ -2432,7 +2502,7 @@ elsif File.exist?(census_fill_path)
   # count). A HAND-AUTHORED workbook layout uses element ids the zone-derived
   # census can't match, so build-dashboard-layout.rb reports placed=0/N even
   # though the shipped layout positions every tile. If the live layout has at
-  # least as many positioned <LayoutElement> tags as there are source zones,
+  # least as many positioned <Element> tags as there are source zones,
   # trust it — the census is stale, not the layout. Conservative: only relaxes
   # when the live layout demonstrably covers every zone; never masks a genuine
   # drop when the live layout is actually short.
@@ -3660,8 +3730,13 @@ if File.exist?(kp21_path)
     kp21_rb = JSON.parse(File.read(kp21_rb_path)) rescue nil
     kp21_els = {}      # normalized element name → [family, ...]
     kp21_el_kinds = {} # normalized element name → [raw kind, ...] (for the message)
-    Array(kp21_rb.is_a?(Hash) ? kp21_rb['pages'] : nil).each do |pg|
-      Array(pg.is_a?(Hash) ? pg['elements'] : nil).each do |el|
+    kp21_elements = if kp21_rb.is_a?(Hash)
+                      CODE_REP_LOADED ? Sigma::CodeRep.workbook_elements(kp21_rb) :
+                                        Array(kp21_rb['elements'])
+                    else
+                      []
+                    end
+    kp21_elements.each do |el|
         next unless el.is_a?(Hash) && el['visibleAsSource'] != false # hidden data-page masters
         f = kp21_fam.call(el['kind'])
         next unless kp21_chartf.include?(f) || f == 'other'
@@ -3672,7 +3747,6 @@ if File.exist?(kp21_path)
         next if k.empty?
         (kp21_els[k] ||= []) << f
         (kp21_el_kinds[k] ||= []) << el['kind'].to_s
-      end
     end
     kp21_waivers = {} # normalized tile → reason
     Array(kp21['kind_waivers']).each do |w|

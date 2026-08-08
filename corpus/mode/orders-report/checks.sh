@@ -37,15 +37,24 @@ note() { printf '     %s\n' "$*"; }
 
 if [ "$fail" -eq 0 ]; then
   # -- 1. schemaVersion present on both fresh CREATE-path specs --------------
-  for f in dm-spec wb-spec; do
-    v=$(ruby -rjson -e "print JSON.parse(File.read(ARGV[0]))['schemaVersion'].inspect" "$TMP/$f.json")
-    if [ "$v" = "1" ]; then
-      note "ok: $f.json carries schemaVersion: 1"
-    else
-      note "FAIL: $f.json schemaVersion is $v, expected 1 (POST /v2/dataModels|workbooks/spec 400s without it)"
-      fail=1
-    fi
-  done
+  # The data-model code-rep surface is unchanged (flat, top-level
+  # schemaVersion); the workbook surface nests it under `document`
+  # (shared workbook-code-release migration, shared/lib/code_rep.rb) --
+  # Sigma::CodeRep.wrap is what puts it there.
+  v=$(ruby -rjson -e "print JSON.parse(File.read(ARGV[0]))['schemaVersion'].inspect" "$TMP/dm-spec.json")
+  if [ "$v" = "1" ]; then
+    note "ok: dm-spec.json carries schemaVersion: 1"
+  else
+    note "FAIL: dm-spec.json schemaVersion is $v, expected 1 (POST /v2/dataModels/spec 400s without it)"
+    fail=1
+  fi
+  v=$(ruby -rjson -e "print JSON.parse(File.read(ARGV[0])).dig('document', 'schemaVersion').inspect" "$TMP/wb-spec.json")
+  if [ "$v" = "1" ]; then
+    note "ok: wb-spec.json carries document.schemaVersion: 1"
+  else
+    note "FAIL: wb-spec.json document.schemaVersion is $v, expected 1 (POST /v2/workbooks/spec 400s without it)"
+    fail=1
+  fi
 
   # -- 2. byte-stable reconvert against the committed goldens ----------------
   python3 "$REPO_ROOT/corpus/lib/corpus_check.py" normalize "$TMP/dm-spec.json" "$TMP/dm-spec.norm.json" >/dev/null

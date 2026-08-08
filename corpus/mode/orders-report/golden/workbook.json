@@ -1,83 +1,84 @@
 {
   "name": "Orders Report",
-  "schemaVersion": 1,
-  "pages": [
-    {
-      "id": "id0001",
-      "name": "Data",
-      "hidden": true,
-      "elements": [
-        {
-          "id": "id0002",
-          "kind": "table",
-          "name": "Monthly Revenue",
-          "source": {
-            "kind": "data-model",
-            "dataModelId": "id0003",
-            "elementId": "id0004"
-          }
-        },
-        {
-          "id": "id0005",
-          "kind": "table",
-          "name": "Region Revenue",
-          "source": {
-            "kind": "data-model",
-            "dataModelId": "id0003",
-            "elementId": "id0006"
-          }
+  "folderId": "id0001",
+  "document": {
+    "schemaVersion": 1,
+    "kind": "workbook",
+    "pages": [
+      {
+        "id": "id0002",
+        "name": "Data",
+        "hidden": true
+      },
+      {
+        "id": "id0003",
+        "name": "Report"
+      }
+    ],
+    "layout": "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<Page type=\"grid\" gridTemplateColumns=\"repeat(24, 1fr)\" gridTemplateRows=\"auto\" id=\"page-data\">\n  <Element elementId=\"data-q1\" gridColumn=\"1 / 25\" gridRow=\"1 / 11\"/>\n  <Element elementId=\"data-q2\" gridColumn=\"1 / 25\" gridRow=\"11 / 21\"/>\n</Page>\n<Page type=\"grid\" gridTemplateColumns=\"repeat(24, 1fr)\" gridTemplateRows=\"auto\" id=\"page-report\">\n  <Element elementId=\"chart-c1\" gridColumn=\"1 / 25\" gridRow=\"1 / 9\"/>\n  <Element elementId=\"chart-c2\" gridColumn=\"1 / 25\" gridRow=\"9 / 17\"/>\n</Page>",
+    "elements": [
+      {
+        "id": "id0004",
+        "kind": "table",
+        "name": "Monthly Revenue",
+        "source": {
+          "kind": "data-model",
+          "dataModelId": "id0005",
+          "elementId": "id0006"
         }
-      ]
-    },
-    {
-      "id": "id0007",
-      "name": "Report",
-      "elements": [
-        {
-          "id": "id0008",
-          "kind": "line-chart",
-          "name": "Monthly Revenue Trend",
-          "source": {
-            "kind": "table",
-            "elementId": "id0002"
-          },
-          "columns": [
-            {
-              "id": "id0009",
-              "name": "Order Month",
-              "formula": "[Monthly Revenue/Order Month]"
-            },
-            {
-              "id": "id0010",
-              "name": "Revenue",
-              "formula": "[Monthly Revenue/Revenue]"
-            }
-          ]
-        },
-        {
-          "id": "id0011",
-          "kind": "bar-chart",
-          "name": "Revenue by Region",
-          "source": {
-            "kind": "table",
-            "elementId": "id0005"
-          },
-          "columns": [
-            {
-              "id": "id0012",
-              "name": "Region",
-              "formula": "[Region Revenue/Region]"
-            },
-            {
-              "id": "id0013",
-              "name": "Revenue",
-              "formula": "[Region Revenue/Revenue]"
-            }
-          ]
+      },
+      {
+        "id": "id0007",
+        "kind": "table",
+        "name": "Region Revenue",
+        "source": {
+          "kind": "data-model",
+          "dataModelId": "id0005",
+          "elementId": "id0008"
         }
-      ]
-    }
-  ],
-  "folderId": "id0014",
-  "layout": "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<Page type=\"grid\" gridTemplateColumns=\"repeat(24, 1fr)\" gridTemplateRows=\"auto\" id=\"page-data\">\n  <LayoutElement elementId=\"data-q1\" gridColumn=\"1 / 25\" gridRow=\"1 / 11\"/>\n  <LayoutElement elementId=\"data-q2\" gridColumn=\"1 / 25\" gridRow=\"11 / 21\"/>\n</Page>\n<Page type=\"grid\" gridTemplateColumns=\"repeat(24, 1fr)\" gridTemplateRows=\"auto\" id=\"page-report\">\n  <LayoutElement elementId=\"chart-c1\" gridColumn=\"1 / 25\" gridRow=\"1 / 9\"/>\n  <LayoutElement elementId=\"chart-c2\" gridColumn=\"1 / 25\" gridRow=\"9 / 17\"/>\n</Page>"
+      },
+      {
+        "id": "id0009",
+        "kind": "line-chart",
+        "name": "Monthly Revenue Trend",
+        "source": {
+          "kind": "table",
+          "elementId": "id0004"
+        },
+        "columns": [
+          {
+            "id": "id0010",
+            "name": "Order Month",
+            "formula": "[Monthly Revenue/Order Month]"
+          },
+          {
+            "id": "id0011",
+            "name": "Revenue",
+            "formula": "[Monthly Revenue/Revenue]"
+          }
+        ]
+      },
+      {
+        "id": "id0012",
+        "kind": "bar-chart",
+        "name": "Revenue by Region",
+        "source": {
+          "kind": "table",
+          "elementId": "id0007"
+        },
+        "columns": [
+          {
+            "id": "id0013",
+            "name": "Region",
+            "formula": "[Region Revenue/Region]"
+          },
+          {
+            "id": "id0014",
+            "name": "Revenue",
+            "formula": "[Region Revenue/Revenue]"
+          }
+        ]
+      }
+    ]
+  }
 }

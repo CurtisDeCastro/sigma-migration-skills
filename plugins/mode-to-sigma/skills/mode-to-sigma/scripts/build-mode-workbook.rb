@@ -10,6 +10,7 @@ require 'json'
 require_relative 'lib/mode_chart_map'
 require_relative 'lib/control_lint'
 require_relative 'lib/layout_lint'
+require_relative 'lib/code_rep'
 
 def data_page_element(query_token, dm_elements)
   info = dm_elements.fetch(query_token)
@@ -263,6 +264,7 @@ if __FILE__ == $PROGRAM_NAME
     # this on a fresh CREATE -- this converter has no workbook extend path, so
     # it is always the fresh-CREATE value.
     'schemaVersion' => 1,
+    'kind'          => 'workbook',
     'pages' => [
       { 'id' => 'page-data', 'name' => 'Data', 'hidden' => true, 'elements' => data_elements },
       { 'id' => 'page-report', 'name' => 'Report', 'elements' => chart_elements }
@@ -283,7 +285,24 @@ if __FILE__ == $PROGRAM_NAME
     exit 9
   end
 
-  File.write(opts[:out], JSON.pretty_generate(spec))
+  # Released workbook code representation (live-verified 2026-08-03/04, shared
+  # workbook-code-release migration): non-metadata fields nest under a
+  # top-level `document` key, elements are workbook-global (not page-nested),
+  # and the live verify endpoint rejects the legacy LayoutElement/GridContainer
+  # tag vocabulary. Sigma::CodeRep.wrap does all three: flattens this script's
+  # page-nested elements into document.elements (pages become metadata-only),
+  # canonicalizes the layout XML this file's own notebook_flow_layout emits,
+  # and nests everything but the plain metadata (name/folderId) under
+  # `document`. Building the spec above in the pre-migration shape and wrapping
+  # only at the very end keeps LayoutLint/ControlLint's inputs unchanged (both
+  # already read either shape via Sigma::CodeRep) while guaranteeing the
+  # ARTIFACT written to disk -- what Task 8 actually POSTs -- is the one shape
+  # the live API accepts.
+  metadata = spec.slice('name', 'folderId')
+  document = spec.reject { |k, _| metadata.key?(k) }
+  final_spec = Sigma::CodeRep.wrap(document, extra: metadata)
+
+  File.write(opts[:out], JSON.pretty_generate(final_spec))
   warn "wrote #{opts[:out]} (#{data_elements.length} data element(s), #{chart_elements.length} chart(s)), " \
        "#{File.join(File.dirname(opts[:out]), 'parity-plan.json')}, " \
        "#{File.join(File.dirname(opts[:out]), 'param-gaps.json')} (#{gaps.length} gap(s)), " \
