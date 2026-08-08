@@ -119,6 +119,49 @@ class TestCodeRep < Minitest::Test
     assert_equal({}, Sigma::CodeRep.theme({ 'pages' => [] })['overrides'])
   end
 
+  # --- 2026-08-07 write-contract change -------------------------------------
+  # The API rejects document.pages[].elements ("Move elements to
+  # document.elements instead") AND rejects any element the layout does not
+  # place ("element 'x' is not placed in layout"). wrap() satisfies both.
+  HOISTABLE = {
+    'schemaVersion' => '1',
+    'pages' => [
+      { 'id' => 'p1', 'name' => 'One', 'elements' => [{ 'id' => 'a' }, { 'id' => 'b' }] },
+      { 'id' => 'p2', 'name' => 'Two', 'elements' => [{ 'id' => 'c' }] }
+    ]
+  }.freeze
+
+  def test_wrap_hoists_page_elements_to_document_level
+    d = Sigma::CodeRep.wrap(HOISTABLE)['document']
+    assert_equal %w[a b c], d['elements'].map { |e| e['id'] }
+    refute d['pages'].any? { |p| p.key?('elements') }, 'pages must not keep elements'
+    assert_equal [%w[id name], %w[id name]], d['pages'].map { |p| p.keys.sort }
+  end
+
+  # Hoisting DESTROYS the page->element association, so the synthesized layout
+  # is the only thing that preserves it. A hoist without a layout would both
+  # fail validation and lose information.
+  def test_wrap_synthesizes_a_layout_placing_every_element
+    d = Sigma::CodeRep.wrap(HOISTABLE)['document']
+    placed = d['layout'].scan(/elementId="([^"]+)"/).flatten
+    assert_equal [], d['elements'].map { |e| e['id'] } - placed, 'every element must be placed'
+    assert_match(/<Page[^>]*id="p1".*elementId="a".*elementId="b".*<\/Page>/m, d['layout'])
+    assert_match(/<Page[^>]*id="p2".*elementId="c".*<\/Page>/m, d['layout'])
+  end
+
+  def test_wrap_preserves_an_existing_designed_layout
+    designed = %(<?xml version="1.0"?>\n<Page id="p1"><Element elementId="a"/></Page>)
+    d = Sigma::CodeRep.wrap(HOISTABLE.merge('layout' => designed))['document']
+    assert_equal designed, d['layout'], 'put-layout\'s designed layout must not be overwritten'
+  end
+
+  def test_wrap_is_idempotent_and_non_mutating
+    once = Sigma::CodeRep.wrap(HOISTABLE)['document']
+    twice = Sigma::CodeRep.wrap(once)['document']
+    assert_equal once, twice
+    assert HOISTABLE['pages'][0].key?('elements'), 'input must not be mutated'
+  end
+
   def test_settings_and_agents_round_trip_through_wrap
     [LIVE_WITH_SETTINGS, LEGACY_WITH_SETTINGS].each do |r|
       doc = Sigma::CodeRep.document(r)

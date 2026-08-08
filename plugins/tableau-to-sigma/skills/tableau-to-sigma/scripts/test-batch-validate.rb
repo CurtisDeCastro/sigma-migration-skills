@@ -59,7 +59,9 @@ STUB = <<~'RUBY'
         # posted['document']['pages'], not posted['pages'].
         raise Error, 'stub: probe POST body is not `document`-wrapped' unless posted.is_a?(Hash) && posted['document'].is_a?(Hash)
         doc = posted['document']
-        test = (doc['pages'] || []).flat_map { |p| p['elements'] || [] }.find { |e| e['id'] == 'el-scout-test' }
+        _els = (doc['pages'] || []).flat_map { |p| p['elements'] || [] }
+        _els = Array(doc['elements']) if _els.empty?
+        test = _els.find { |e| e['id'] == 'el-scout-test' }
         File.write(ENV['STUB_STATE'], JSON.generate((test && test['columns']) || []))
         return { 'workbookId' => 'wb-probe-1' }
       end

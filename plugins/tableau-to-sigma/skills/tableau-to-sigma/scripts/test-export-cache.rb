@@ -506,7 +506,9 @@ GT_POOL_STUB = <<~'RUBY'
         # per-entry probe POST (a different, untouched call site) still posts
         # the flat shape, so tolerate both — same read-side tolerance as
         # Sigma::CodeRep.document().
-        n_els = (posted['document'] || posted)['pages'][0]['elements'].length
+        _d = posted['document'] || posted
+        _pe = ((_d['pages'] || [{}])[0] || {})['elements']
+        n_els = (_pe && !_pe.empty? ? _pe : Array(_d['elements'])).length
         raise Error, 'stub: HTTP 502 pooled spec POST refused' if n_els > 1 && ENV['GTP_POOL_SPEC_FAIL'] == '1'
         n = File.exist?(ENV['GTP_SEQ']) ? File.read(ENV['GTP_SEQ']).to_i + 1 : 1
         File.write(ENV['GTP_SEQ'], n.to_s)

@@ -176,5 +176,45 @@ check('tiles at their floors lint clean (no min-height violations)') do
   lint(tall).none? { |x| x.include?('below minimum height') }
 end
 
+# --- 2026-08-07 tag rename + flat-element shape ----------------------------
+# The API renamed <LayoutElement>/<GridContainer> to <Element>/<Container> and
+# moved page elements to a flat document.elements array.
+#
+# Both changes disarm this lint SILENTLY rather than breaking it: every check
+# walks placements and reports the bad ones, so a parser that matches nothing
+# reports nothing and the spec lints CLEAN. A tag-rename regression here does
+# not look like a failure, it looks like success.
+#
+# So the assertion is not "the new shape parses" — it is "the SAME defects are
+# still caught". `bad` above is reused verbatim (under-filled band + orphan
+# control + raw-id display name) and re-expressed in the new tags/shape; the
+# violation set must be identical, not merely non-empty.
+def to_new_tags(xml)
+  xml.gsub('<LayoutElement', '<Element')
+     .gsub('<GridContainer', '<Container').gsub('</GridContainer>', '</Container>')
+end
+
+# (i) new TAGS, legacy per-page elements
+bad_newtags = { 'layout' => to_new_tags(bad['layout']), 'pages' => bad['pages'] }
+check('new tags: same violations as the old-tag spec (not vacuously clean)') do
+  lint(bad_newtags).sort == bv.sort && !bv.empty?
+end
+
+# (ii) new tags AND flat document.elements with bare {id,name} pages — the
+# shape a live readback now returns. Page association survives only via the
+# layout, which is what named_elements has to reconstruct.
+bad_flat = {
+  'layout' => to_new_tags(bad['layout']),
+  'pages' => bad['pages'].map { |pg| { 'id' => pg['id'], 'name' => pg['name'] } },
+  'elements' => bad['pages'].flat_map { |pg| pg['elements'] }
+}
+fv = lint(bad_flat)
+check('flat document.elements: same violations (not vacuously clean)') do
+  fv.sort == bv.sort && !bv.empty?
+end
+check('flat shape still resolves element kinds (orphan control detected)') do
+  has?(fv, 'orphan control')
+end
+
 puts($failures.zero? ? "\nlayout-lint: all tests passed" : "\nlayout-lint: #{$failures} FAILED")
 exit($failures.zero? ? 0 : 1)

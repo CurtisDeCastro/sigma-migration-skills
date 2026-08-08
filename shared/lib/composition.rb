@@ -25,7 +25,7 @@ module Composition
   end
 
   def self.le(id, c0, c1, r0, r1)
-    "  <LayoutElement elementId=\"#{id}\" gridColumn=\"#{c0} / #{c1}\" gridRow=\"#{r0} / #{r1}\"/>"
+    "  <Element elementId=\"#{id}\" gridColumn=\"#{c0} / #{c1}\" gridRow=\"#{r0} / #{r1}\"/>"
   end
 
   def self.band(elements, r0, r1, page_cols)

@@ -48,6 +48,23 @@
 # Standalone:
 #   ruby scripts/lib/layout_lint.rb <spec.json>   # exit 1 + list on violations
 module LayoutLint
+  # Layout tag names. The API renamed these on 2026-08-07:
+  # <LayoutElement> -> <Element>, <GridContainer> -> <Container>.
+  #
+  # This lint parses BOTH spellings ON PURPOSE. Every check here is of the form
+  # "walk the placements, report the bad ones" — so a parser that matches
+  # nothing reports nothing and the lint PASSES VACUOUSLY. Recognising only the
+  # new names would silently disarm every check against an old fixture (and vice
+  # versa), which is the exact failure this lint exists to prevent. Accepting
+  # both means the parse can never go blind on a tag rename.
+  CONTAINER_TAGS = %w[Container GridContainer].freeze
+  ELEMENT_TAGS   = %w[Element LayoutElement].freeze
+  TAG_ALTERNATION = (CONTAINER_TAGS + ELEMENT_TAGS).join('|').freeze
+
+  def self.container_tag?(tag)
+    CONTAINER_TAGS.include?(tag)
+  end
+
   RAW_ID_NAME = /\A(?:[0-9a-f]{12,}|el-[0-9a-f]+)\z/i
   DEAD_ZONE_MAX = 0.25
   GENERIC_HEADER = /\A(?:page|sheet|dashboard)\s*\d+\z/i
@@ -80,10 +97,38 @@ module LayoutLint
   end
 
   # All [element, page] pairs in the spec (skips layout-only container shells).
+  # [[element, owning_page], ...] across BOTH spec shapes.
+  #
+  # Pre-2026-08-07 the elements hung off each page. Now the write API demands
+  # one flat document.elements array and bare {id,name} pages, and a live
+  # readback comes back in that shape. Reading only the legacy path against a
+  # new-shape spec returns [] — which does not fail anything, it makes el_kind
+  # empty so checks (a),(b),(d),(e),(f) find nothing to inspect and the lint
+  # reports CLEAN. Silent disarmament, not a visible break; that is why this
+  # handles both rather than being swapped over.
+  #
+  # In the flat shape the page association exists ONLY in the layout XML, so it
+  # is recovered from the <Page> block that places each element.
   def named_elements(spec)
-    (spec['pages'] || []).flat_map do |pg|
+    legacy = (spec['pages'] || []).flat_map do |pg|
       (pg['elements'] || []).map { |el| [el, pg] }
     end
+    return legacy unless legacy.empty?
+
+    flat = spec['elements']
+    return [] unless flat.is_a?(Array)
+
+    pages_by_id = (spec['pages'] || []).each_with_object({}) do |pg, h|
+      h[pg['id']] = pg if pg.is_a?(Hash)
+    end
+    owner = {}
+    page_blocks(spec['layout']).each do |pid, body|
+      body.scan(/elementId="([^"]*)"/).flatten.each do |eid|
+        owner[eid] ||= pages_by_id[pid]
+      end
+    end
+    # NB: Ruby 2.6 target — no filter_map (2.7+), no endless method defs (3.0+).
+    flat.select { |el| el.is_a?(Hash) }.map { |el| [el, owner[el['id']] || {}] }
   end
 
   # Per-page layout blocks: { page_id => page_inner_xml }.
@@ -97,17 +142,17 @@ module LayoutLint
     entries = []
     s = page_xml.to_s
     pos = 0
-    while (m = s.match(%r{<(GridContainer|LayoutElement)\b([^>]*?)(/>|>)}m, pos))
+    while (m = s.match(%r{<(#{TAG_ALTERNATION})\b([^>]*?)(/>|>)}m, pos))
       tag, attrs, close = m[1], m[2], m[3]
       eid = attrs[/elementId="([^"]*)"/, 1]
       rows = attrs[/gridRow="\s*(\d+)\s*/, 1].to_i
       rowe = attrs[/gridRow="\s*\d+\s*\/\s*(\d+)\s*"/, 1].to_i
-      if tag == 'GridContainer' && close == '>'
-        endm = s.match(%r{</GridContainer>}m, m.end(0))
+      if container_tag?(tag) && close == '>'
+        endm = s.match(%r{</#{Regexp.escape(tag)}>}m, m.end(0))
         entries << [:container, eid, rows, rowe]
         pos = endm ? endm.end(0) : m.end(0)
       else
-        entries << [tag == 'GridContainer' ? :container : :element, eid, rows, rowe]
+        entries << [container_tag?(tag) ? :container : :element, eid, rows, rowe]
         pos = m.end(0)
       end
     end
@@ -148,12 +193,14 @@ module LayoutLint
        tag[/gridColumn="\s*(\d+)/, 1].to_i, tag[/gridColumn="\s*\d+\s*\/\s*(\d+)/, 1].to_i,
        tag[/gridRow="\s*(\d+)/, 1].to_i, tag[/gridRow="\s*\d+\s*\/\s*(\d+)/, 1].to_i]
     end
-    page_xml.to_s.scan(%r{</GridContainer>|<GridContainer\b[^>]*?/?>|<LayoutElement\b[^>]*?/?>}m) do
+    ctags = CONTAINER_TAGS.join('|')
+    etags = ELEMENT_TAGS.join('|')
+    page_xml.to_s.scan(%r{</(?:#{ctags})>|<(?:#{ctags})\b[^>]*?/?>|<(?:#{etags})\b[^>]*?/?>}m) do
       tag = Regexp.last_match(0)
-      if tag.start_with?('</GridContainer')
+      if tag.start_with?('</')
         c = stack.pop
         out << c if c
-      elsif tag.start_with?('<GridContainer')
+      elsif CONTAINER_TAGS.any? { |t| tag.start_with?("<#{t}") }
         stack.last[:children] << span.call(tag) unless stack.empty?
         c = { eid: tag[/elementId="([^"]*)"/, 1], cols: grid_col_count(tag),
               r0: tag[/gridRow="\s*(\d+)/, 1].to_i,
@@ -202,12 +249,12 @@ module LayoutLint
       # first section band (the standard "filter over a banded grid" pattern the
       # exemplar hand migrations use). It's only orphaned when it floats AT or
       # BELOW the first band — i.e. lost among the banded chart content.
-      if body.include?('<GridContainer')
+      if CONTAINER_TAGS.any? { |t| body.include?("<#{t}") }
         first_band_r0 = entries.select { |k,| k == :container }.map { |e| e[2] }.min
         entries.each do |kind, eid, r0, _r1|
           next unless kind == :element && el_kind[eid] == 'control'
           next if first_band_r0 && r0.positive? && r0 < first_band_r0
-          violations << "orphan control: #{eid} sits OUTSIDE every GridContainer on page #{page_id} " \
+          violations << "orphan control: #{eid} sits OUTSIDE every container on page #{page_id} " \
                         'and is not in the control region above the first band — place it in the ' \
                         'control band or its chart\'s container'
         end

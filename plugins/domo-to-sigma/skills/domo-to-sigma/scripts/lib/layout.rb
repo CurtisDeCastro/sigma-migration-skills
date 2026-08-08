@@ -9,13 +9,29 @@
 # Container-based layouts (layout-playbook.md, verified 2026-06-10):
 #   - spec side: a `kind: container` placeholder element per band
 #     (container_el / header_text_el below build those spec objects)
-#   - layout side: a <GridContainer> (NOT <LayoutElement type="grid">, which
-#     silently drops children) whose child <LayoutElement>s use
-#     CONTAINER-RELATIVE coordinates (rows restart at 1).
+#   - layout side: a <Container> (NOT <Element type="grid">, which silently
+#     drops children) whose child <Element>s use CONTAINER-RELATIVE
+#     coordinates (rows restart at 1).
 require_relative 'zone_census'
 
 module SigmaLayout
   module_function
+
+  # Layout XML tag names. RENAMED BY THE API on 2026-08-07: what used to be
+  # <LayoutElement>/<GridContainer> is now <Element>/<Container>. The old names
+  # are no longer merely deprecated — they are rejected.
+  #
+  # The rejection is NOT a validation message. An unknown layout tag comes back
+  # as an opaque `{"message":"An error has occurred. Please try again later
+  # (incident-id=...)","code":"invalid_request"}`, which reads like a Sigma
+  # outage but is your XML. If a spec write starts failing that way, suspect
+  # these two names first.
+  #
+  # The <GridContainer> -> <Container> swap was checked for the child-dropping
+  # failure the note above warns about, rather than trusted on a 200: sent 26
+  # containers / 66 children, read back 26 containers / 66 children.
+  ELEMENT_TAG   = 'Element'
+  CONTAINER_TAG = 'Container'
 
   HEADER_STYLE = { 'backgroundColor' => '#0F172A', 'borderRadius' => 'round' }.freeze
   HEADER_ROWS  = 3 # header band height in grid rows
@@ -45,13 +61,13 @@ module SigmaLayout
   # Default 24 (the page grid); a vertical control rail declares cols: 1 so its
   # children stack full-width (children's gridColumn refs are LOCAL to this).
   def gc(eid, c0, c1, r0, r1, inner, cols: GRID_COLS)
-    "<GridContainer elementId=\"#{eid}\" type=\"grid\" " \
+    "<#{CONTAINER_TAG} elementId=\"#{eid}\" type=\"grid\" " \
     "gridColumn=\"#{c0} / #{c1}\" gridRow=\"#{r0} / #{r1}\" " \
-    "gridTemplateColumns=\"repeat(#{cols}, 1fr)\" gridTemplateRows=\"auto\">\n#{inner}\n</GridContainer>"
+    "gridTemplateColumns=\"repeat(#{cols}, 1fr)\" gridTemplateRows=\"auto\">\n#{inner}\n</#{CONTAINER_TAG}>"
   end
 
   def le(eid, c0, c1, r0, r1)
-    "  <LayoutElement elementId=\"#{eid}\" gridColumn=\"#{c0} / #{c1}\" gridRow=\"#{r0} / #{r1}\"/>"
+    "  <#{ELEMENT_TAG} elementId=\"#{eid}\" gridColumn=\"#{c0} / #{c1}\" gridRow=\"#{r0} / #{r1}\"/>"
   end
 
   def page_xml(page_id, *children)

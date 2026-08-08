@@ -809,6 +809,18 @@ end
 # layout-phase key participate; run-state.json absent → not tracked.
 # ---------------------------------------------------------------------------
 LAYOUT_PHASE_BY_TOOL = { 'tableau-to-sigma' => 'phase-5' }.freeze
+
+# Layout tag names, renamed by the API on 2026-08-07:
+# <LayoutElement> -> <Element>, <GridContainer> -> <Container>.
+#
+# These gates COUNT placements and treat a low count as a failure, so matching
+# only one spelling turns a tag rename into a phantom gate failure (new-shape
+# layout, zero <LayoutElement> hits, "layout XML has only 0 tags"). The
+# container check has the opposite polarity — it EXEMPTS banded pages from the
+# auto-stack heuristic, so missing the new spelling would produce phantom
+# stack-page failures instead. Both spellings are matched deliberately.
+LAYOUT_ELEMENT_RE   = /<(?:Element|LayoutElement)\b/.freeze
+LAYOUT_CONTAINER_RE = /<(?:Container|GridContainer)\b/.freeze
 run_state_doc = begin
   _p = File.join(opts[:tab], 'run-state.json')
   File.exist?(_p) ? JSON.parse(File.read(_p)) : nil
@@ -1591,7 +1603,7 @@ unless opts[:skip_layout]
       if fetched['spec']
         spec = fetched['spec']
         layout_xml = spec['layout'].to_s
-        elem_count = layout_xml.scan(/<LayoutElement\b/).length
+        elem_count = layout_xml.scan(LAYOUT_ELEMENT_RE).length
         live_layout_positioned = elem_count
 
         # Detect the Sigma "auto-generated single-column stack" layout that
@@ -1608,9 +1620,9 @@ unless opts[:skip_layout]
         # Walk one page at a time using the <Page id="..."> blocks
         layout_xml.scan(/<Page\b[^>]*id="([^"]*)"[^>]*>(.*?)<\/Page>/m).each do |page_id, page_body|
           next if page_id.to_s.downcase.include?('data')
-          next if page_body.include?('<GridContainer')
+          next if page_body.match?(LAYOUT_CONTAINER_RE)
           cols_on_page = page_body.scan(/gridColumn="([^"]+)"/).map(&:first).uniq
-          elems_on_page = page_body.scan(/<LayoutElement\b/).length
+          elems_on_page = page_body.scan(LAYOUT_ELEMENT_RE).length
           if elems_on_page >= 2 && cols_on_page.length == 1
             non_data_stack_pages << [page_id, cols_on_page.first, elems_on_page]
           end
@@ -1627,7 +1639,7 @@ unless opts[:skip_layout]
           warn "       See beads-sigma-bw3."
           exit 6
         elsif elem_count < opts[:min_layout_elements]
-          warn "[FAIL] gate 4/7: layout XML has only #{elem_count} <LayoutElement> tag(s);"
+          warn "[FAIL] gate 4/7: layout XML has only #{elem_count} <Element> tag(s);"
           warn "       at least #{opts[:min_layout_elements]} required (one master + ≥1 chart)."
           warn "       The layout likely covers only the Data page — chart page is unstyled."
           exit 6

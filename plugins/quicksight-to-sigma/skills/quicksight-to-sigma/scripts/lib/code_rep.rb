@@ -68,10 +68,74 @@ module Sigma
 
       # Write path: every live workbook code-rep endpoint requires the wrapper.
       def wrap(document_hash, extra: {})
-        extra.merge('document' => document_hash)
+        extra.merge('document' => hoist_elements(document_hash))
       end
 
       private
+
+      # 2026-08-07 contract change. The write API now rejects per-page elements:
+      #   "document.pages[].elements is no longer supported.
+      #    Move elements to document.elements instead."
+      # and additionally rejects any element the layout does not place:
+      #   "elements[0]: element 'master' is not placed in layout".
+      #
+      # Those two rules interact, and the interaction is the whole reason this
+      # lives in one method. Hoisting DESTROYS the page->element association —
+      # once every element sits in one flat document.elements array, the layout
+      # XML is the ONLY thing that says which page an element belongs to. So a
+      # hoist that does not also guarantee a layout does not just fail
+      # validation, it loses information. They cannot be separated.
+      #
+      # Builders that already emit a layout (put-layout's designed one) keep it
+      # untouched. Builders that write the spec BEFORE the layout phase — the
+      # normal post-and-readback ordering — get a synthesized stacked fallback
+      # so the write is legal; the later put-layout replaces it wholesale.
+      #
+      # Idempotent: a document already in the new shape has no pages[].elements
+      # and is returned unchanged.
+      def hoist_elements(doc)
+        return doc unless doc.is_a?(Hash)
+        pages = doc['pages']
+        return doc unless pages.is_a?(Array) && pages.any? { |p| p.is_a?(Hash) && p['elements'] }
+
+        by_page = pages.map do |p|
+          next [nil, []] unless p.is_a?(Hash)
+          [p['id'], Array(p['elements'])]
+        end
+
+        out = doc.dup
+        # Preserve any elements ALREADY at document level (they are placed by an
+        # existing layout); append the hoisted ones after.
+        out['elements'] = Array(doc['elements']) + by_page.flat_map(&:last)
+        out['pages'] = pages.map do |p|
+          p.is_a?(Hash) ? p.reject { |k, _| k == 'elements' } : p
+        end
+        out['layout'] = synth_layout(by_page) unless layout_present?(doc['layout'])
+        out
+      end
+
+      def layout_present?(layout)
+        layout.is_a?(String) && layout.include?('<Page')
+      end
+
+      # Minimal legal layout: every element stacked full-width on its own page.
+      # Deliberately dumb — it exists to make the write valid and to carry the
+      # page association, not to look good. put-layout overwrites it.
+      def synth_layout(by_page)
+        body = by_page.map do |page_id, els|
+          next nil if page_id.nil?
+          rows = els.each_with_index.map do |el, i|
+            id = el.is_a?(Hash) ? el['id'] : nil
+            next nil unless id
+            %(  <Element elementId="#{id}" gridColumn="1 / 25" ) +
+              %(gridRow="#{(i * 20) + 1} / #{(i * 20) + 21}"/>)
+          end.compact
+          [%(<Page type="grid" gridTemplateColumns="repeat(24, 1fr)" ) +
+             %(gridTemplateRows="auto" id="#{page_id}">),
+           *rows, '</Page>'].join("\n")
+        end.compact
+        %(<?xml version="1.0" encoding="utf-8"?>\n) + body.join("\n")
+      end
 
       # themeName/themeOverrides -> settings.theme.{name,overrides}. Non-mutating:
       # only builds a new hash when a legacy key is actually present, so the

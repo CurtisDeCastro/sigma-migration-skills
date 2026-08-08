@@ -12,7 +12,7 @@
 # tag doesn't truncate an outer container's body). Returns an array of
 # human-readable errors ([] = clean).
 module CompositionLint
-  TOKENS = %r{</GridContainer>|<GridContainer\b[^>]*?/?>|<LayoutElement\b[^>]*?/?>}m
+  TOKENS = %r{</(?:Container|GridContainer)>|<(?:Container|GridContainer)\b[^>]*?/?>|<(?:Element|LayoutElement)\b[^>]*?/?>}m
 
   module_function
 
@@ -44,10 +44,10 @@ module CompositionLint
     stack = []
     xml.to_s.scan(TOKENS) do
       tag = Regexp.last_match(0)
-      if tag.start_with?('</GridContainer')
+      if tag.start_with?('</Container', '</GridContainer')
         node = stack.pop
         (stack.empty? ? roots : stack.last[:children]) << node if node
-      elsif tag.start_with?('<GridContainer')
+      elsif tag.start_with?('<Container', '<GridContainer')
         node = rect_of(tag).merge(type: :container, tmpl_cols: tmpl_cols_of(tag), children: [])
         if tag.end_with?('/>')
           (stack.empty? ? roots : stack.last[:children]) << node

@@ -114,10 +114,21 @@ LIVE_SPEC_1_WITH_BUTTON = {
   ]
 }.freeze
 
+# Elements on the wire, across BOTH spec shapes. Since 2026-08-07 the write API
+# takes one flat document.elements array instead of per-page elements, so a
+# lookup through pages[].elements silently finds nothing on a current PUT body —
+# which would read here as "the repair did not happen" rather than as a shape
+# change. Checking both keeps this asserting on the repair, not on the layout.
+def wire_elements(body)
+  b = body || {}
+  per_page = b.fetch('pages', []).flat_map { |p| p['elements'] || [] }
+  per_page.empty? ? Array(b['elements']) : per_page
+end
+
 st1, out1, puts1 = run_case(LIVE_SPEC_1_WITH_BUTTON, LAYOUT_XML_1, MANIFEST_1)
 check(st1.exitstatus == 0, 'exits 0')
 check(puts1.length == 1, 'exactly one PUT sent')
-btn1 = (puts1.first || {}).fetch('pages', []).flat_map { |p| p['elements'] || [] }.find { |e| e['id'] == 'btn-10' }
+btn1 = wire_elements(puts1.first).find { |e| e['id'] == 'btn-10' }
 eff1 = btn1 && (btn1['actions'] || []).first&.dig('effects', 0)
 # Assert on the REPAIRED spec that came back over the wire, not on a locally
 # constructed expectation.
@@ -139,7 +150,7 @@ MANIFEST_2 = [
 
 st2, out2, puts2 = run_case(LIVE_SPEC_1_WITH_BUTTON, LAYOUT_XML_1, MANIFEST_2)
 check(st2.exitstatus == 0, 'exits 0 (unresolved target is a warning, not a crash)')
-btn2 = (puts2.first || {}).fetch('pages', []).flat_map { |p| p['elements'] || [] }.find { |e| e['id'] == 'btn-10' }
+btn2 = wire_elements(puts2.first).find { |e| e['id'] == 'btn-10' }
 eff2 = btn2 && (btn2['actions'] || []).first&.dig('effects', 0)
 check(!eff2.nil? && eff2['target']['page'] == 'page-wrong-slug',
       'provisional target.page left in place (page-wrong-slug) when the name does not resolve')

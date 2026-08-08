@@ -97,6 +97,7 @@ Dir.mktmpdir do |work|
   # under-reported the breakage. The envelope-sanity check keeps that from recurring.
   spec = raw_put['document'].is_a?(Hash) ? raw_put['document'] : raw_put
   els = (spec['pages'] || []).flat_map { |p| p['elements'] || [] }
+  els = Array(spec['elements']) if els.empty?
   ok('the PUT body carries a document with pages (envelope sanity)') { !els.empty? }
   ids = els.map { |e| e['id'] }
   ok('stale injected safety-net container pruned (tc-page-pw-extra)') { !ids.include?('tc-page-pw-extra') }
