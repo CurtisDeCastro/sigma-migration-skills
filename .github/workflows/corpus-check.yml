@@ -482,7 +482,7 @@ jobs:
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-coverage-gate.rb
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-verify-complete.rb
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/tests/test-grounding.rb
-            plugins/powerbi-to-sigma/skills/powerbi-to-sigma/tests/test-workbook-code-release.rb
+            plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-workbook-code-release.rb
             plugins/looker-to-sigma/skills/looker-to-sigma/scripts/test-flip-gate.rb
             plugins/looker-to-sigma/skills/looker-to-sigma/scripts/test-verify-complete.rb
             plugins/gooddata-to-sigma/skills/gooddata-to-sigma/scripts/test-verify-guards.rb
