@@ -2748,7 +2748,7 @@ source_signals = signals['pages'].sum do |pg|
   (pg['visuals'] || []).count { |v| (SIGMA_KIND[v['sigma_kind']] || v['sigma_kind']) == 'control' }
 end
 scope_controls = $control_scope.map { |sc| sc.reject { |k, _| k.start_with?('_') } }
-File.write(scope_path, JSON.pretty_generate(
+File.binwrite(scope_path, JSON.pretty_generate(
              { 'version' => 1, 'source' => 'powerbi',
                'sourceFilterSignals' => source_signals,
                'controls' => scope_controls,
@@ -3150,7 +3150,7 @@ spec = {
 }
 spec['folderId'] = opts[:folder] if opts[:folder]
 
-File.write(opts[:out], JSON.pretty_generate(spec))
+File.binwrite(opts[:out], JSON.pretty_generate(spec))
 warn "[build-workbook] wrote #{opts[:out]} (#{data_elements.size} master(s), " \
      "#{content_pages.sum { |p| p['elements'].size }} content element(s); flat document + authoritative layout)"
 
@@ -3162,7 +3162,7 @@ warn "[build-workbook] wrote #{opts[:out]} (#{data_elements.size} master(s), " \
 if ($native_trellis_records ||= []).any?
   begin
     nt_path = File.join(File.dirname(File.expand_path(opts[:out])), 'native-trellis-emitted.json')
-    File.write(nt_path, JSON.pretty_generate('version' => 1, 'elements' => $native_trellis_records))
+    File.binwrite(nt_path, JSON.pretty_generate('version' => 1, 'elements' => $native_trellis_records))
     warn "[build-workbook] wrote #{nt_path} (#{$native_trellis_records.size} native trellis element(s) — " \
          'verify survives readback with verify-trellis-survived.rb)'
   rescue => e
@@ -3183,7 +3183,7 @@ built_elements = content_pages.sum { |p| (p['elements'] || []).count { |e| e['ki
 by_sev = $unresolved.group_by { |u| u['severity'] }.transform_values(&:size)
 coverage_path = opts[:coverage_out] ||
                 File.join(File.dirname(File.expand_path(opts[:out])), 'coverage.json')
-File.write(coverage_path, JSON.pretty_generate(
+File.binwrite(coverage_path, JSON.pretty_generate(
              { 'version' => 1, 'source' => 'powerbi',
                'summary' => {
                  'sourceVisuals' => total_visuals,
@@ -3224,6 +3224,6 @@ warn "[build-workbook] wrote coverage -> #{coverage_path} " \
      "#{by_sev['approximated'] || 0} approximated)"
 
 if opts[:layout_out]
-  File.write(opts[:layout_out], layout_xml)
+  File.binwrite(opts[:layout_out], layout_xml)
   warn "[build-workbook] wrote layout -> #{opts[:layout_out]}"
 end
