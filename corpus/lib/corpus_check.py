@@ -91,36 +91,45 @@ def _spec_root(doc):
 def summarize(doc):
     """Counts + names for a Sigma data-model or workbook spec (pages/elements)."""
     spec = _spec_root(doc)
+    document = spec.get("document") if isinstance(spec, dict) else None
+    workbook = document if isinstance(document, dict) else spec
     out = {"elements": 0, "columns": 0, "metrics": 0, "relationships": 0,
            "pages": 0, "element_names": [], "element_kinds": {},
            "metric_names": [], "relationship_names": [], "warnings": 0}
     if isinstance(doc, dict) and isinstance(doc.get("warnings"), list):
         out["warnings"] = len(doc["warnings"])
-    pages = spec.get("pages") or []
+    pages = workbook.get("pages") or []
     out["pages"] = len(pages)
-    for page in pages:
-        for el in page.get("elements") or []:
-            out["elements"] += 1
-            name = el.get("name")
-            if not name and isinstance(el.get("source"), dict):
-                path = el["source"].get("path")
-                if isinstance(path, list) and path:
-                    name = path[-1]
-            out["element_names"].append(name or el.get("id", "?"))
-            kind = el.get("kind", "?")
-            out["element_kinds"][kind] = out["element_kinds"].get(kind, 0) + 1
-            out["columns"] += len(el.get("columns") or [])
-            for m in el.get("metrics") or []:
-                out["metrics"] += 1
-                out["metric_names"].append(m.get("name"))
-            for r in el.get("relationships") or []:
-                out["relationships"] += 1
-                out["relationship_names"].append(r.get("name"))
+    elements = workbook.get("elements")
+    if not isinstance(elements, list):
+        # Legacy data-models and pre-release workbooks keep elements per page.
+        elements = [
+            el
+            for page in pages if isinstance(page, dict)
+            for el in (page.get("elements") or [])
+        ]
+    for el in elements:
+        out["elements"] += 1
+        name = el.get("name")
+        if not name and isinstance(el.get("source"), dict):
+            path = el["source"].get("path")
+            if isinstance(path, list) and path:
+                name = path[-1]
+        out["element_names"].append(name or el.get("id", "?"))
+        kind = el.get("kind", "?")
+        out["element_kinds"][kind] = out["element_kinds"].get(kind, 0) + 1
+        out["columns"] += len(el.get("columns") or [])
+        for m in el.get("metrics") or []:
+            out["metrics"] += 1
+            out["metric_names"].append(m.get("name"))
+        for r in el.get("relationships") or []:
+            out["relationships"] += 1
+            out["relationship_names"].append(r.get("name"))
     # top-level metrics/relationships (some spec shapes)
-    for m in spec.get("metrics") or []:
+    for m in workbook.get("metrics") or []:
         out["metrics"] += 1
         out["metric_names"].append(m.get("name"))
-    for r in spec.get("relationships") or []:
+    for r in workbook.get("relationships") or []:
         out["relationships"] += 1
         out["relationship_names"].append(r.get("name"))
     return out
