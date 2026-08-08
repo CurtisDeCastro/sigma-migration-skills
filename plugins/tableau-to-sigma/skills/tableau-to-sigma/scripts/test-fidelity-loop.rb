@@ -274,7 +274,7 @@ Dir.mktmpdir do |dir|
   ok(st.exitstatus.zero?, 'apply-patch (dual-write) exits 0')
   ok(out.include?('persisted into'), 'apply-patch reports the wb-spec.json persistence')
   ws = JSON.parse(File.read(File.join(dir, 'wb-spec.json')))
-  ok(ws.dig('document', 'settings', 'theme', 'overrides') == { 'categoricalScheme' => ['#0e7c7b'] },
+  ok(ws['themeOverrides'] == { 'categoricalScheme' => ['#0e7c7b'] },
      'patch deep-merged into wb-spec.json (a re-entry full-spec PUT now carries the fix)')
   ok(ws.dig('document', 'elements').length == 2 && ws.dig('document', 'settings', 'theme', 'name') == 'Light',
      'wb-spec.json untouched keys/elements preserved by the merge')
