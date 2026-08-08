@@ -24,23 +24,25 @@ master = {
       'id' => 'master-s', 'element_id' => 'dm-s', 'data_model' => 'dm-1',
       'columns' => [
         { 'id' => 'm-region', 'name' => 'Region', 'formula' => '[S/Region]' },
+        { 'id' => 'm-state', 'name' => 'State', 'formula' => '[S/State]' },
         { 'id' => 'm-amount', 'name' => 'Amount', 'formula' => '[S/Amount]' }
       ]
     }
   },
   'fields' => {
     'S.Region' => { 'master' => 'S', 'ref' => '[master-s/Region]', 'agg' => nil },
+    'S.State' => { 'master' => 'S', 'ref' => '[master-s/State]', 'agg' => nil },
     'S.Amount' => { 'master' => 'S', 'ref' => '[master-s/Amount]', 'agg' => 'Sum' }
   }
 }
 
-visual = lambda do |id, type, token, role, bindings, title, y|
+visual = lambda do |id, type, token, role, bindings, title, y, extra = {}|
   {
     'visual_id' => id, 'visual_type' => type, 'sigma_kind' => token,
     'role_class' => role, 'approximate' => false, 'title' => title,
     'x' => 0, 'y' => y, 'w' => 500, 'h' => 140, 'z' => 0,
     'bindings' => bindings, 'formats' => {}, 'style' => { 'backgroundColor' => '#F8FAFC' }
-  }
+  }.merge(extra)
 end
 
 signals = {
@@ -50,13 +52,19 @@ signals = {
     'style' => { 'backgroundColor' => '#EEF2F7' }, 'interactions' => [],
     'visuals' => [
       visual.call('wf', 'waterfallChart', 'waterfall', 'chart',
-                  { 'Category' => ['S.Region'], 'Y' => ['S.Amount'], 'Legend' => ['S.Region'] },
-                  'Amount Change', 0),
-      visual.call('g', 'gauge', 'progress', 'chart', { 'Values' => ['S.Amount'] }, 'Goal', 150),
-      visual.call('nav', 'pageNavigator', 'navigation', 'text', {}, 'Pages', 300),
-      visual.call('ctl', 'slicer', 'control', 'control', { 'Values' => ['S.Region'] }, 'Region', 450),
+                  { 'Category' => ['S.State'], 'Y' => ['S.Amount'], 'Legend' => ['S.Region'] },
+                  'Amount Change', 0,
+                  { 'legend' => false,
+                    'drill' => { 'role' => 'Category', 'levels' => ['S.Region', 'S.State'],
+                                 'active' => 'S.State' } }),
+      visual.call('bar', 'clusteredColumnChart', 'bar', 'chart',
+                  { 'Category' => ['S.State'], 'Y' => ['S.Amount'], 'Legend' => ['S.Region'] },
+                  'Regional Trend', 150, { 'legend' => true }),
+      visual.call('g', 'gauge', 'progress', 'chart', { 'Values' => ['S.Amount'] }, 'Goal', 300),
+      visual.call('nav', 'pageNavigator', 'navigation', 'text', {}, 'Pages', 450),
+      visual.call('ctl', 'slicer', 'control', 'control', { 'Values' => ['S.Region'] }, 'Region', 600),
       visual.call('tbl', 'tableEx', 'table', 'table',
-                  { 'Values' => ['S.Region', 'S.Amount'] }, 'Details', 600)
+                  { 'Values' => ['S.Region', 'S.Amount'] }, 'Details', 750)
     ]
   }]
 }
@@ -89,6 +97,21 @@ Dir.mktmpdir('pbi-workbook-code') do |dir|
   waterfall = doc['elements'].find { |e| e['kind'] == 'waterfall-chart' }
   ok('waterfall uses native kind and splitBy', waterfall && waterfall.dig('splitBy', 'id') &&
      waterfall.dig('waterfallShape', 'connectorLine') == 'shown')
+  ok('legend visibility applies to native waterfall',
+     waterfall && waterfall['legend'] == { 'visibility' => 'hidden' })
+  drill = doc['elements'].find { |e| e['controlType'] == 'drill' }
+  ok('complete Power BI hierarchy emits native drill control',
+     drill && Array(drill['categories']).length == 2 &&
+       drill.dig('targets', 0, 'source', 'elementId') == waterfall['id'] &&
+       drill.dig('targets', 0, 'columnIds').length == 2)
+  bar = doc['elements'].find { |e| e['name'] == 'Regional Trend' }
+  legend = doc['elements'].find { |e| e['controlType'] == 'legend' }
+  ok('bound visible Power BI legend emits native legend control',
+     bar && legend &&
+       legend.dig('source', 'columnId') == 'm-region' &&
+       legend.dig('targets', 0, 'source', 'elementId') == bar['id'] &&
+       legend.dig('targets', 0, 'columnId') == bar.dig('color', 'column') &&
+       bar['legend'] == { 'visibility' => 'hidden' })
   progress = doc['elements'].find { |e| e['kind'] == 'progress' }
   ok('gauge uses native ring progress', progress && progress['shape'] == 'ring' &&
      progress['mode'] == 'value' && progress['value'].to_s.include?('master-s'))
@@ -98,7 +121,7 @@ Dir.mktmpdir('pbi-workbook-code') do |dir|
      doc.dig('settings', 'theme', 'overrides', 'colorOverrides', 'backgroundCanvas') == '#EEF2F7' &&
      doc.dig('settings', 'theme', 'overrides', 'space', 'unit') == 'small')
 
-  control = doc['elements'].find { |e| e['kind'] == 'control' }
+  control = doc['elements'].find { |e| e['controlType'] == 'list' }
   target_ids = Array(control && control['filters']).filter_map { |f| f.dig('source', 'elementId') }
   ok('control references resolve to flat elements', target_ids.any? && (target_ids - ids).empty?)
 

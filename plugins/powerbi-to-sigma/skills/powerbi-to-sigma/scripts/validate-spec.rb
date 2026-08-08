@@ -56,6 +56,7 @@ end
 
 errors = []
 all_element_names = []
+elements_by_id = elements.each_with_object({}) { |el, out| out[el['id']] = el if el['id'] }
 elements.each do |el|
   all_element_names << el['name'] if el['name']
   # Workbook formulas reference a master/source element by its ELEMENT ID
@@ -103,6 +104,47 @@ elements.each do |el|
     # coerced to '' below and slips past all the equality checks, then the API
     # rejects the POST with `Missing "kind" field`. Catch it here.
     errors << "#{name}: element missing required `kind` field" if (el['kind'] || '').to_s.strip.empty?
+
+    if kind == 'control' && %w[drill legend].include?(el['controlType'])
+      control_type = el['controlType']
+      source_id = el.dig('source', 'source', 'elementId')
+      source_col = el.dig('source', 'columnId')
+      errors << "#{name}: #{control_type} control missing source table/column" \
+        if source_id.to_s.empty? || source_col.to_s.empty?
+      if source = elements_by_id[source_id]
+        source_cols = Array(source['columns']).filter_map { |col| col['id'] }
+        errors << "#{name}: #{control_type} source column #{source_col.inspect} is not on #{source_id}" \
+          unless source_cols.include?(source_col)
+      elsif source_id
+        errors << "#{name}: #{control_type} source references unknown element #{source_id.inspect}"
+      end
+
+      if control_type == 'drill'
+        categories = Array(el['categories']).filter_map { |category| category['columnId'] }
+        errors << "#{name}: drill control requires at least two categories" if categories.length < 2
+        errors << "#{name}: drill categories must belong to the source table" \
+          if (source = elements_by_id[source_id]) &&
+             (categories - Array(source['columns']).filter_map { |col| col['id'] }).any?
+      end
+
+      targets = Array(el['targets'])
+      errors << "#{name}: #{control_type} control requires at least one target" if targets.empty?
+      targets.each do |target|
+        target_id = target.dig('source', 'elementId')
+        target_el = elements_by_id[target_id]
+        unless target_el
+          errors << "#{name}: #{control_type} target references unknown element #{target_id.inspect}"
+          next
+        end
+        target_cols = Array(target_el['columns']).filter_map { |col| col['id'] }
+        referenced = control_type == 'drill' ? Array(target['columnIds']).compact : [target['columnId']]
+        errors << "#{name}: #{control_type} target references unknown column(s) #{(referenced - target_cols).inspect}" \
+          if (referenced - target_cols).any?
+        if control_type == 'drill' && referenced.length != Array(el['categories']).length
+          errors << "#{name}: drill target column count must match categories"
+        end
+      end
+    end
 
     src = el['source'] || {}
     own_prefixes = Set.new

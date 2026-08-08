@@ -1371,6 +1371,82 @@ def apply_small_multiples!(el, rec, fields, master, eid, qr_cids)
   result
 end
 
+def prepare_drill_control!(el, rec, fields, masters, master, active_qr, active_column_id, columns)
+  drill = rec['drill']
+  return unless drill.is_a?(Hash) && Array(drill['levels']).length > 1
+
+  levels = Array(drill['levels']).compact
+  master_rec = master && masters[master]
+  source_column_ids = []
+  target_column_ids = []
+  missing_levels = []
+  levels.each_with_index do |qr, i|
+    fs = field_spec(qr, fields, master)
+    source_col = master_rec && match_master_column(master_rec, qr_leaf(qr), qr.to_s.split('.').first)
+    unless source_col && fs['master'] == master
+      missing_levels << qr
+      next
+    end
+    target_id = if qr.to_s.casecmp(active_qr.to_s).zero?
+                  active_column_id
+                else
+                  id = "#{el['id']}-drill#{i}"
+                  columns << { 'id' => id, 'formula' => fs['ref'], 'name' => qr_leaf(qr), 'hidden' => true }
+                  id
+                end
+    source_column_ids << source_col['id']
+    target_column_ids << target_id
+  end
+  if missing_levels.empty? && source_column_ids.length == levels.length
+    active_index = levels.index { |qr| qr.to_s.casecmp(drill['active'].to_s).zero? } || 0
+    el['_drill_control'] = {
+      'sourceColumnIds' => source_column_ids,
+      'targetColumnIds' => target_column_ids,
+      'activeIndex' => active_index
+    }
+  else
+    name = el['name'].is_a?(Hash) ? el['name']['text'] : el['name'].to_s
+    warn "[build-workbook] WARN visual '#{name}': Power BI drill hierarchy could not be wired; " \
+         "unresolved level(s): #{missing_levels.join(', ')}. Native drill control NOT emitted."
+    record_unresolved(visual: name, pbi_type: rec['visual_type'], sigma_kind: el['kind'],
+                      severity: 'degraded', recoverable: true,
+                      role_class: rec['role_class'], visual_id: rec['visual_id'],
+                      detail: "drill hierarchy not emitted — unresolved level(s): #{missing_levels.join(', ')}",
+                      action: 'Add every hierarchy level to the page base master and master-map fields, then re-run.')
+  end
+end
+
+def prepare_legend_control!(el, rec, fields, masters, master, legend_qr, target_column_id)
+  return if legend_qr.nil? || target_column_id.nil? || rec['legend'] == false
+  # Sigma legend controls require a categorical color target and do not support
+  # waterfall charts. Waterfall splitBy keeps its chart-local legend instead.
+  return unless %w[bar-chart line-chart area-chart combo-chart scatter-chart
+                   pie-chart donut-chart].include?(el['kind'])
+
+  fs = field_spec(legend_qr, fields, master)
+  master_rec = master && masters[master]
+  source_col = master_rec && match_master_column(master_rec, qr_leaf(legend_qr),
+                                                  legend_qr.to_s.split('.').first)
+  if source_col && fs['master'] == master
+    el['_legend_control'] = {
+      'sourceColumnId' => source_col['id'],
+      'targetColumnId' => target_column_id
+    }
+    # The companion native control is the visible legend. Hiding the chart-local
+    # copy avoids presenting two independent legend surfaces.
+    el['legend'] = { 'visibility' => 'hidden' }
+  else
+    name = el['name'].is_a?(Hash) ? el['name']['text'] : el['name'].to_s
+    warn "[build-workbook] WARN visual '#{name}': Power BI legend '#{legend_qr}' could not be wired; " \
+         'native legend control NOT emitted.'
+    record_unresolved(visual: name, pbi_type: rec['visual_type'], sigma_kind: el['kind'],
+                      severity: 'degraded', recoverable: true,
+                      role_class: rec['role_class'], visual_id: rec['visual_id'],
+                      detail: "legend control not emitted — '#{legend_qr}' is unresolved on master '#{master}'",
+                      action: "Add '#{legend_qr}' to master '#{master}' and master-map fields, then re-run.")
+  end
+end
+
 def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
   # role_class (from the viz-kind/custom-visual catalogs via the extractor,
   # task 1) says what the visual DOES: filter (control), show a number (kpi),
@@ -1888,6 +1964,9 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
     dcid = "#{eid}-x"
     cols << { 'id' => dcid, 'formula' => dfs['ref'], 'name' => qr_leaf(dim, 'Dim') }
     qr_cids[dim] = dcid if dim
+    # The active level stays on the chart; complete hierarchy metadata becomes
+    # a companion native drill control only when every column resolves.
+    prepare_drill_control!(el, rec, fields, masters, master, dim, dcid, cols)
     ycids = []
     meas.each_with_index do |qr, i|
       fs = field_spec(qr, fields, master)
@@ -1950,6 +2029,7 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
         el['splitBy'] = { 'id' => scid }
       else
         el['color'] = { 'by' => 'category', 'column' => scid }
+        prepare_legend_control!(el, rec, fields, masters, master, series, scid)
       end
     else
       # bead (B) by-measure color: only when PBI did NOT bind a categorical
@@ -1996,9 +2076,20 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
     end
     el['xAxis'] = { 'columnId' => dcid }
     el['yAxis'] = { 'columnIds' => ycids }
-    # bead (B) by-measure color on the combo's primary bars.
-    cc = measure_color_channel(rec, fields, master, vfmts, eid, cols, ycids)
-    el['color'] = cc if cc
+    prepare_drill_control!(el, rec, fields, masters, master, dim, dcid, cols)
+    series = (b['Series'] || b['Legend'] || []).first
+    if series
+      sfs = field_spec(series, fields, master)
+      scid = "#{eid}-c"
+      cols << { 'id' => scid, 'formula' => sfs['ref'], 'name' => qr_leaf(series, 'Series') }
+      qr_cids[series] = scid
+      el['color'] = { 'by' => 'category', 'column' => scid }
+      prepare_legend_control!(el, rec, fields, masters, master, series, scid)
+    else
+      # bead (B) by-measure color on the combo's primary bars.
+      cc = measure_color_channel(rec, fields, master, vfmts, eid, cols, ycids)
+      el['color'] = cc if cc
+    end
     # bead (A) reference lines / trend line.
     rms = build_ref_marks(rec)
     el['refMarks'] = rms unless rms.empty?
@@ -2064,6 +2155,8 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
       el['xAxis'] = { 'columnId' => xcid }
       el['yAxis'] = { 'columnIds' => [ycid] }
       el['color'] = { 'by' => 'category', 'column' => dcid }   # REQUIRED (see above)
+      qr_cids[detail] = dcid
+      prepare_legend_control!(el, rec, fields, masters, master, detail, dcid) if b['Legend'] || b['Series']
       if szname
         szcid = "#{eid}-s"
         cols << apply_fmt({ 'id' => szcid, 'formula' => "[#{src_name}/#{szname}]", 'name' => szname }, sizeqr, fields, vfmts)
@@ -2084,6 +2177,8 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
         dcid = "#{eid}-d"
         cols << { 'id' => dcid, 'formula' => dfs['ref'], 'name' => qr_leaf(detail, 'Detail') }
         el['color'] = { 'by' => 'category', 'column' => dcid }
+        qr_cids[detail] = dcid
+        prepare_legend_control!(el, rec, fields, masters, master, detail, dcid) if b['Legend'] || b['Series']
       end
       if (b['Size'] || []).first
         warn "[build-workbook] WARN scatter '#{name}': Size role '#{(b['Size'] || []).first}' DROPPED " \
@@ -2095,9 +2190,6 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
                           action: 'Add a Details/Category dimension in master-map.json so the scatter groups and the Size measure can bind.')
       end
     end
-    # PBI legend.show=false -> hide the Sigma legend (the detail-on-color split
-    # otherwise surfaces a legend PBI did not show).
-    el['legend'] = { 'visibility' => 'hidden' } if rec['legend'] == false
     # bead (A) reference lines on a scatter (e.g. a margin-target line at x=0.45).
     rms = build_ref_marks(rec)
     el['refMarks'] = rms unless rms.empty?
@@ -2122,6 +2214,8 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
     qr_cids[val] = vcid if val
     el['color'] = { 'id' => dcid }
     el['value'] = { 'id' => vcid }
+    prepare_drill_control!(el, rec, fields, masters, master, dim, dcid, cols)
+    prepare_legend_control!(el, rec, fields, masters, master, dim, dcid)
     # value labels on pie/donut slices — honor an explicit PBI labels-off signal
     # (bead n9u9); default (nil/absent) keeps the labels shown as before.
     unless rec['data_labels'] == false
@@ -2249,6 +2343,16 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
     el['conditionalFormats'] = cf if cf
   end
 
+  # Legend visibility is a shared chart surface, not scatter-only. Power BI's
+  # objects.legend.show=false must hide the legend on every released chart kind
+  # that can expose one (including native waterfall). An absent/true signal uses
+  # Sigma's normal configured/default legend branch.
+  if rec['legend'] == false &&
+     %w[bar-chart line-chart area-chart combo-chart waterfall-chart scatter-chart
+        pie-chart donut-chart].include?(el['kind'])
+    el['legend'] = { 'visibility' => 'hidden' }
+  end
+
   # Controls and progress reference existing formulas/columns; they carry no
   # columns collection of their own.
   owns_columns = !%w[control progress navigation page-break].include?(el['kind'])
@@ -2283,6 +2387,107 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
   # the element's own columns). Transient — stripped before the spec is written.
   el['_qr_cids'] = qr_cids
   el
+end
+
+# Build the companion native drill control after its chart is complete. Keeping
+# this separate from build_element means page interaction scope continues to
+# associate the source visual with the chart itself, not with its control UI.
+def build_drill_control(chart)
+  meta = chart.delete('_drill_control')
+  return nil unless meta.is_a?(Hash)
+
+  source_ids = Array(meta['sourceColumnIds'])
+  target_ids = Array(meta['targetColumnIds'])
+  active = meta['activeIndex'].to_i
+  master_id = chart.dig('source', 'elementId')
+  return nil if master_id.nil? || source_ids.empty? || source_ids.length != target_ids.length
+
+  base = "#{chart['name']}Drill".gsub(/[^A-Za-z0-9]/, '')
+  base = 'ChartDrill' if base.empty?
+  n = ($used_control_ids[base] += 1)
+  control_id = n > 1 ? "#{base}#{n}" : base
+  active = 0 unless active.between?(0, source_ids.length - 1)
+  element = {
+    'id' => "#{chart['id']}-drill",
+    'kind' => 'control',
+    'name' => "#{chart['name']} Drill",
+    'controlId' => control_id,
+    'controlType' => CTL_CAT.target('chart:drill'),
+    'source' => {
+      'kind' => 'source',
+      'source' => { 'kind' => 'table', 'elementId' => master_id },
+      'columnId' => source_ids[active]
+    },
+    'categories' => source_ids.map { |column_id| { 'columnId' => column_id } },
+    'targets' => [{
+      'source' => { 'kind' => 'table', 'elementId' => chart['id'] },
+      'columnIds' => target_ids
+    }],
+    'value' => source_ids[active],
+    # Standard control wiring keeps the shared control lint honest while the
+    # drill-specific targets above coordinate the ordered hierarchy.
+    'filters' => [{
+      'source' => { 'kind' => 'table', 'elementId' => chart['id'] },
+      'columnId' => target_ids[active]
+    }],
+    'controlScope' => [chart['id']]
+  }
+  $control_scope << {
+    'controlId' => control_id,
+    'sourceName' => "Power BI drill hierarchy for #{chart['name']} (#{chart['id']})",
+    'status' => 'wired',
+    'scope' => [chart['id']],
+    'excluded' => []
+  }
+  element
+end
+
+def build_legend_control(chart)
+  meta = chart.delete('_legend_control')
+  return nil unless meta.is_a?(Hash)
+
+  source_id = meta['sourceColumnId']
+  target_id = meta['targetColumnId']
+  master_id = chart.dig('source', 'elementId')
+  return nil if master_id.nil? || source_id.nil? || target_id.nil?
+
+  chart_name = chart['name'].is_a?(Hash) ? chart['name']['text'] : chart['name'].to_s
+  base = "#{chart_name}Legend".gsub(/[^A-Za-z0-9]/, '')
+  base = 'ChartLegend' if base.empty?
+  n = ($used_control_ids[base] += 1)
+  control_id = n > 1 ? "#{base}#{n}" : base
+  element = {
+    'id' => "#{chart['id']}-legend",
+    'kind' => 'control',
+    'name' => "#{chart_name} Legend",
+    'controlId' => control_id,
+    'controlType' => CTL_CAT.target('chart:legend-interaction'),
+    'source' => {
+      'kind' => 'source',
+      'source' => { 'kind' => 'table', 'elementId' => master_id },
+      'columnId' => source_id
+    },
+    'targets' => [{
+      'source' => { 'kind' => 'table', 'elementId' => chart['id'] },
+      'columnId' => target_id
+    }],
+    'values' => [],
+    # Keep standard filter wiring for converter-wide control linting; the native
+    # legend target above carries the chart color interaction.
+    'filters' => [{
+      'source' => { 'kind' => 'table', 'elementId' => chart['id'] },
+      'columnId' => target_id
+    }],
+    'controlScope' => [chart['id']]
+  }
+  $control_scope << {
+    'controlId' => control_id,
+    'sourceName' => "Power BI interactive legend for #{chart_name} (#{chart['id']})",
+    'status' => 'wired',
+    'scope' => [chart['id']],
+    'excluded' => []
+  }
+  element
 end
 
 # Verify a built chart/KPI still carries the binding it needs to render, AFTER
@@ -2346,11 +2551,14 @@ content_pages = signals['pages'].map do |pg|
     r = build_element(v, fields, masters, extra_data_elements, page_base)
     list = r.is_a?(Array) ? r : [r] # NB: not Array(r) — that explodes a Hash into pairs
     list = list.compact
-    vis_elements[v['visual_id']] = list.map { |e| e['id'] }
+    primary = list.dup
+    list.concat(primary.filter_map { |element| build_drill_control(element) })
+    list.concat(primary.filter_map { |element| build_legend_control(element) })
+    vis_elements[v['visual_id']] = primary.map { |e| e['id'] }
     # Track 3b: apply this visual's own Filters-pane filters onto its element(s).
     if v['filters'].is_a?(Array) && !v['filters'].empty?
       vlabel = (v['title'].to_s.strip.empty? ? v['visual_id'] : v['title'])
-      list.each { |el| apply_visual_filters!(el, v['filters'], vlabel) }
+      primary.each { |el| apply_visual_filters!(el, v['filters'], vlabel) }
     end
     list
   end

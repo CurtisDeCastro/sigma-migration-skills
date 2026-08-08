@@ -90,7 +90,7 @@ Authoritative source: <https://learn.microsoft.com/en-us/dax/aggregation-functio
 
 ## Control / filter
 
-_Power BI interaction -> Sigma control kind. Basic list/date slicers are emitted mechanically. The Aug-2026 hierarchy, drill, and legend control rows document valid semantic targets, but are emitted only when extraction proves every required hierarchy/target-chart reference; an unattached control is dead UI and must remain a surfaced gap._
+_Power BI interaction -> Sigma control kind. Basic list/date slicers are emitted mechanically. Native drill and legend controls are emitted only when source hierarchy/color bindings prove every source and target column; unresolved or unsupported mappings remain surfaced gaps because an unattached control is dead UI._
 
 Authoritative source: <https://learn.microsoft.com/en-us/power-bi/visuals/power-bi-visualization-slicers>
 
@@ -103,9 +103,9 @@ Authoritative source: <https://learn.microsoft.com/en-us/power-bi/visuals/power-
 | `slicer:hierarchy` | [doc](https://learn.microsoft.com/en-us/power-bi/create-reports/power-bi-slicer-hierarchy-multiple-fields) | `hierarchy` | 🟡 n | record-gap |
 | | | | | _Native hierarchy control is the released target when every hierarchy field and filter target is known. Current PBIR extraction often exposes only the active projection, so the builder keeps the active level and records the missing hierarchy rather than inventing columns._ |
 | `chart:drill` | [doc](https://learn.microsoft.com/en-us/power-bi/consumer/end-user-drill) | `drill` | 🟡 n | record-gap |
-| | | | | _Native drill control is the released target for a proven chart hierarchy. It requires target-chart and hierarchy-column references; emit only after extraction resolves both._ |
+| | | | | _A proven Category/Axis hierarchy emits a native drill control. The active projection remains the chart axis; the full ordered hierarchy maps to categories and target columnIds. Every level must resolve on both the page master and target chart or the converter records a loud gap and emits no dead control._ |
 | `chart:legend-interaction` | [doc](https://learn.microsoft.com/en-us/power-bi/visuals/power-bi-visualization-customize-title-background-and-legend) | `legend` | 🟡 n | record-gap |
-| | | | | _Use a native legend control only when the source legend is interactive and its target chart is known. Plain Power BI legend visibility is chart formatting and maps to the chart legend field, not an extra control._ |
+| | | | | _A visible categorical Legend/Series binding on a supported chart emits a native legend control sourced from the page master and targeted to the chart color column; the chart-local duplicate is hidden. Power BI legend.show=false remains chart formatting and emits no control. Sigma legend controls do not support waterfall, whose splitBy legend remains chart-local._ |
 
 ## custom-visual
 

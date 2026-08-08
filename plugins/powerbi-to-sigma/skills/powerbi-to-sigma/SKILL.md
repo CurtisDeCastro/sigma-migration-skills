@@ -256,6 +256,8 @@ Then: `tableau-to-sigma/scripts/post-and-readback.rb --type datamodel`. See `ref
 - **Chart elements** source from a master (`source:{kind:table, elementId:<master>}`), columns `[dim, meas]`:
   - bar/line: `xAxis:{columnId}`, `yAxis:{columnIds:[...]}`
   - pie/donut: `color:{id}`, `value:{id}`
+  - waterfall/gauge: native `waterfall-chart` / ring `progress`; never coerce them to bar/KPI.
+  - a proven chart hierarchy emits `controlType:drill`; a visible categorical legend on a supported chart emits `controlType:legend`. Emit neither unless every source/target column resolves.
   - text: `{kind:text, body:"## ..."}`
   - measure formula wraps the master col: `CountDistinct([Master/Col])`, `Sum([Master/Col])`, date dim `DateTrunc("month",[Master/Col])`.
 - `POST /v2/workbooks/spec` (post-and-readback `--type workbook`). Chart-element shapes mirror `tableau-to-sigma/scripts/build-charts-from-signals.rb`. **The body is an outer metadata envelope plus `document`** (verified live 2026-08-03, including on `/verify` 2026-08-04): `name`/`folderId` stay outside; `document` owns `schemaVersion`, `kind:"workbook"`, metadata-only `pages`, one flat `elements` collection, required authoritative `layout`, settings, panels, and overlays. Every element must occur exactly once in layout. Never put workbook elements back under a page (data-model specs are unchanged and remain nested). `post-and-readback.rb` preserves the complete workbook document on write. See `refs/spec-fixups.md` and `refs/workbook-code-release-gaps.md`.
@@ -272,9 +274,9 @@ its data; only a `dropped` visual is truly absent) so the common "it drops a lot
 perception — usually just gaps that were never surfaced in one place — is
 answered with the real number.
 
-- `severity`: `dropped` (no element built) · `degraded` (built, lost a role/field/sort) · `approximated` (built as a substituted Sigma kind, e.g. treemap/funnel/gauge/waterfall → bar/kpi).
+- `severity`: `dropped` (no element built) · `degraded` (built, lost a role/field/sort) · `approximated` (built as a substituted Sigma kind, e.g. treemap/funnel → bar).
 - `recoverable: true` items carry a concrete **action** (supply `--image-map`, add a joined master, re-point a drill level, supply a geo column). In an interactive run they print as an **ASSISTANCE AVAILABLE** block — present them to the user (one `AskUserQuestion` checklist: *recover* vs *accept*). Under `--yes`/`--answers` they take the accept default and are recorded as accepted degradations.
-- `recoverable: false` items are genuine Sigma spec limitations (no native gauge; region maps have no categorical legend) — reported, never asked about.
+- `recoverable: false` items are genuine Sigma spec limitations (for example, region maps have no categorical legend) — reported, never asked about.
 - The recoverable items are **hard-gated** at Phase 5e: `assert-visual-compare.rb --coverage` will not go GREEN until each is recovered or explicitly acknowledged.
 
 ## Phase 5d — Layout (do NOT skip — stacked ≠ done)

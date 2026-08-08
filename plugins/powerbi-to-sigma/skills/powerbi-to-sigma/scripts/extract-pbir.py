@@ -29,7 +29,7 @@ Usage:
 Idempotent: re-running overwrites signals.json; a fetch only re-downloads when
 --workspace/--report are given (otherwise it parses whatever is on disk).
 """
-import argparse, base64, json, os, sys, time
+import argparse, base64, json, os, re, sys, time
 import importlib.util
 
 CLIENT_ID = "ea0616ba-638b-4df5-95b9-636659ae5121"  # Power BI Desktop public client
@@ -128,6 +128,41 @@ def _role_bindings(query_state):
         refs = [p.get("queryRef") or p.get("nativeQueryRef") for p in projs]
         out[role] = [r for r in refs if r]
     return out
+
+
+def _drill_signal(query_state):
+    """Preserve a chart hierarchy when PBIR proves one exists.
+
+    The normal bindings keep only the active projection so the chart initially
+    renders at Power BI's saved drill level.  A Sigma drill control needs the
+    complete ordered hierarchy as well, so carry it separately.  Multiple
+    measures in one role are not a hierarchy: require either an explicit
+    projection ``active`` marker or date/hierarchy-shaped level names.
+    """
+    for role, blk in (query_state or {}).items():
+        projs = [p for p in (blk or {}).get("projections", []) if isinstance(p, dict)]
+        levels = [p.get("queryRef") or p.get("nativeQueryRef") for p in projs]
+        levels = [r for r in levels if r]
+        if len(levels) < 2:
+            continue
+        active = [
+            p.get("queryRef") or p.get("nativeQueryRef")
+            for p in projs if p.get("active") is True
+        ]
+        active = [r for r in active if r]
+        hierarchy_named = all(
+            re.search(r"(variation|hierarchy|(?:^|\.)(?:year|quarter|month|week|day|date)$)",
+                      str(ref), re.I)
+            for ref in levels
+        )
+        if not active and not hierarchy_named:
+            continue
+        return {
+            "role": role,
+            "levels": levels,
+            "active": active[0] if active else levels[0],
+        }
+    return None
 
 
 def _obj_flag(visual, key):
@@ -702,6 +737,9 @@ def extract(pbir_dir):
                 "z": pos.get("z", 0),
                 "parent_group": v.get("parentGroupName"),
                 "bindings": _role_bindings(qs),
+                # Full ordered hierarchy for native Sigma controlType:drill.
+                # bindings above intentionally keeps only the active level.
+                "drill": _drill_signal(qs),
                 # bead f972: visual sort ({queryRef, direction asc|desc}) or None
                 "sort": _sort_signal(visual),
                 "formats": formats,

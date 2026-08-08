@@ -7,8 +7,8 @@ Power BI mappings for the Aug-2026 Sigma workbook code representation:
 | Waterfall visual | `waterfall-chart` | Native: category/value/breakdown map to x/y/splitBy; connector and zero start emitted. |
 | Radial gauge | `progress` | Native `shape:ring`, `mode:value`; circular rather than semicircular, so visual review remains required. |
 | Page navigator / report tabs | `navigation` + `settings.navigation.pageTabsInViewMode` | Native auto navigation. |
-| Legend visibility | chart `legend` | Preserved when the source explicitly hides it. Do not add a `controlType:legend`: a Power BI legend is display encoding, not a filter control. |
-| Date/chart drill | `controlType:drill` / `hierarchy` | Active source drill level is preserved. A full hierarchy is not emitted until the extractor can identify the target chart and hierarchy-column IDs; fabricating an unattached drill control would be dead UI. |
+| Legend visibility and interaction | chart `legend`; `controlType:legend` | `legend.show=false` hides the chart legend and emits no control. A visible categorical Legend/Series binding emits a native legend control only when its page-master source and chart color target both resolve. Waterfall remains chart-local because Sigma legend controls do not support it. |
+| Date/chart drill | `controlType:drill` | PBIR/classic extractors preserve both the saved active level and complete proven Category/Axis hierarchy. The chart opens at the active level; a native drill control maps every ordered hierarchy level to the target chart. Any unresolved level is recorded loudly and suppresses the entire control. |
 | Visual/page background and spacing | element `style.backgroundColor`; theme `colorOverrides.backgroundCanvas` and `space` | Literal colors and dense spacing are emitted. Dynamic theme expressions remain a review item. |
 | Bookmark navigator | manual `navigation` or `tabbed-container` | Gap: PBIR bookmark state must be extracted first. Auto page navigation would lose saved filter/visibility state. |
 | Grouped alternate views | `tabbed-container` | Available, but Power BI layer groups are not tabs. Emit only when bookmark/view membership is known. |
