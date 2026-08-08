@@ -114,7 +114,7 @@ Posting chart elements WITHOUT a layout makes Sigma auto-stack them full-width
 `document.layout` XML string (NOT per-page), via the vendored `scripts/vendor/put-layout.rb`:
 ```
 <Page type="grid" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto" id="page-overview">
-  <LayoutElement elementId="<id>" gridColumn="1 / 9"  gridRow="1 / 4"/>   <!-- KPI -->
+  <Element elementId="<id>" gridColumn="1 / 9"  gridRow="1 / 4"/>   <!-- KPI -->
   ...
 </Page>
 ```

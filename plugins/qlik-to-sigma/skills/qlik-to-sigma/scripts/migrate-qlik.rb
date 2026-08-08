@@ -64,6 +64,7 @@ $stdout.sync = true # lane/foreground progress lines interleave correctly
 
 HERE = __dir__
 $LOAD_PATH.unshift File.expand_path('vendor/lib', HERE)
+require 'code_rep'
 
 # Phase-timing summary — printed at every terminal exit so the discovery
 # interleave speedup stays visible in every run (regressions show up in the
@@ -752,7 +753,8 @@ unless opts[:dry_run]
   # live GET /spec readback proved flaky inside the pipeline, silently yielding
   # zero pages; POST preserves these ids so the local copy is authoritative.)
   wbspec = (JSON.parse(File.read(File.join(WORK, 'wb-spec.json'))) rescue {})
-  content_pages = (wbspec['pages'] || []).reject { |p| p['id'].to_s.downcase.include?('data') }
+  wbdoc = Sigma::CodeRep.document(wbspec)
+  content_pages = (wbdoc['pages'] || []).reject { |p| p['id'].to_s.downcase.include?('data') }
   tok = (Sigma.auth_token rescue ENV['SIGMA_API_TOKEN'])
   pngs = []
   content_pages.each do |pg|
@@ -943,14 +945,10 @@ parity_ok = err_cols.empty? && entries.size.positive? && divergent.zero?
 $LOAD_PATH.unshift File.expand_path('lib', HERE)
 require 'layout_lint'
 require 'control_lint'
-require 'code_rep'
 live = Sigma.request(:get, "/v2/workbooks/#{WB_ID}/spec") rescue {}
-# Workbook code-rep GETs nest pages/schemaVersion under a top-level `document`
-# key (live since 2026-08); LayoutLint.lint/ControlLint.lint|controls_report
-# expect a flat spec['pages'] (same "unwrap at the caller, not in the lib"
-# contract as the other LayoutLint/ControlLint callers). The old `live['spec']
-# || live` fallback here predates that shape and never matched a real
-# envelope key — replaced with the real adapter.
+# Workbook code-rep GETs nest the complete document under `document`.
+# Preserve that document intact; both lints use CodeRep's flat-element/layout
+# helpers directly and no longer infer ownership from pages[].elements.
 live_spec = live.is_a?(Hash) ? Sigma::CodeRep.metadata(live).merge(Sigma::CodeRep.document(live)) : {}
 
 # 6d — layout-quality lint, gate 6 (scripts/lib/layout_lint.rb, shared —

@@ -25,7 +25,7 @@ class TestPutLayoutShape < Minitest::Test
 
   def test_put_body_is_wrapped
     doc = { 'pages' => [], 'layout' => '<Layout/>' }
-    assert_equal doc, Sigma::CodeRep.wrap(doc)['document']
+    assert_equal doc.merge('elements' => []), Sigma::CodeRep.wrap(doc)['document']
   end
 
   # Real regression signal: the two tests above only prove the already-shipped
@@ -42,6 +42,23 @@ class TestPutLayoutShape < Minitest::Test
     src = File.read(File.join(__dir__, '..', 'put-layout.rb'))
     assert_match(/Sigma::CodeRep\.wrap\(/, src,
                  'put-layout.rb must wrap the PUT body via Sigma::CodeRep.wrap')
+  end
+
+  def test_read_modify_write_preserves_complete_document
+    raw = {
+      'workbookId' => 'w',
+      'document' => {
+        'schemaVersion' => 1, 'pages' => [], 'elements' => [],
+        'layout' => '<Page/>', 'panels' => [{ 'id' => 'panel-1' }],
+        'overlays' => [{ 'id' => 'overlay-1' }], 'settings' => { 'navigation' => {} }
+      }
+    }
+    doc = Sigma::CodeRep.document(raw)
+    doc['layout'] = '<Page id="new"/>'
+    written = Sigma::CodeRep.wrap(doc)['document']
+    assert_equal [{ 'id' => 'panel-1' }], written['panels']
+    assert_equal [{ 'id' => 'overlay-1' }], written['overlays']
+    assert_equal({ 'navigation' => {} }, written['settings'])
   end
 
   # Ordering: the document() unwrap must happen before the PUT, and the

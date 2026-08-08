@@ -73,6 +73,17 @@ check(posted is not None and posted.get("schemaVersion") is None,
       "schemaVersion is NOT left at the top level (moved into document)")
 check(posted is not None and posted["document"].get("schemaVersion") == 1,
       "schemaVersion moved into document")
+check(posted is not None and all("elements" not in p for p in posted["document"]["pages"]),
+      "workbook pages are metadata-only")
+check(posted is not None and isinstance(posted["document"].get("elements"), list),
+      "workbook elements are flat under document")
+check(posted is not None and bool(posted["document"].get("layout")),
+      "the wrapped document carries required authoritative layout XML")
+layout = posted["document"]["layout"]
+check("<Element " in layout and "<Container " in layout,
+      "layout uses canonical Element and Container tags")
+check("<LayoutElement" not in layout and "<GridContainer" not in layout,
+      "layout does not emit rejected legacy tags")
 
 print()
 if FAILS:

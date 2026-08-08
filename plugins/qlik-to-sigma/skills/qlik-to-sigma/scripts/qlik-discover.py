@@ -144,6 +144,93 @@ def _reflines(refline):
     return {"x": conv(refline.get("refLinesX")), "y": conv(refline.get("refLines"))}
 
 
+def _legend(props):
+    """Normalize the authored legend fields the Sigma builder can preserve."""
+    raw = props.get("legend")
+    if not isinstance(raw, dict):
+        return None
+    show = raw.get("show")
+    if show is None:
+        show = raw.get("showLegend")
+    dock = raw.get("dock") or raw.get("position")
+    out = {}
+    if show is not None:
+        out["show"] = bool(show)
+    if dock:
+        out["dock"] = str(dock).lower()
+    return out or None
+
+
+def _presentation(props):
+    """Normalize only released chart presentation fields; never copy CSS."""
+    data_point = props.get("dataPoint") or {}
+    bar_grouping = props.get("barGrouping") or {}
+    orientation = props.get("orientation")
+    grouping = props.get("grouping") or bar_grouping.get("grouping")
+    show_labels = data_point.get("showLabels")
+    if show_labels is None:
+        show_labels = props.get("showLabels")
+    out = {}
+    if orientation:
+        out["orientation"] = str(orientation).lower()
+    if grouping:
+        out["grouping"] = str(grouping).lower()
+    if show_labels is not None:
+        out["showLabels"] = bool(show_labels)
+    return out or None
+
+
+def _gauge(props):
+    """Normalize Qlik gauge value-range/presentation fields."""
+    raw = props.get("gauge") or {}
+    if not isinstance(raw, dict):
+        raw = {}
+    out = {}
+    for key in ("min", "max"):
+        value = raw.get(key)
+        if value is None:
+            value = props.get(key)
+        if value is not None:
+            out[key] = value
+    shape = raw.get("shape") or raw.get("presentation") or props.get("shape")
+    if shape:
+        out["shape"] = shape
+    return out or None
+
+
+def _drill_groups(qdims):
+    """Capture every authored Qlik drill hierarchy, not just its active level."""
+    out = []
+    for i, dd in enumerate(qdims):
+        qdef = dd.get("qDef") or {}
+        fields = [f for f in (qdef.get("qFieldDefs") or []) if f]
+        if qdef.get("qGrouping") == "H" or len(fields) > 1:
+            labels = qdef.get("qFieldLabels") or []
+            out.append({"dimensionIndex": i, "fields": fields, "labels": labels})
+    return out
+
+
+def _container(props):
+    """Best-effort Qlik container children + tab labels from engine properties."""
+    content = props.get("content") or {}
+    raw = props.get("children") or props.get("cells") or content.get("children") or []
+    children, labels = [], []
+    for child in raw:
+        if isinstance(child, str):
+            cid, label = child, None
+        elif isinstance(child, dict):
+            info = child.get("qInfo") or {}
+            meta = child.get("qMeta") or child.get("qMetaDef") or {}
+            cid = child.get("name") or child.get("id") or child.get("qId") or info.get("qId")
+            label = child.get("label") or child.get("title") or meta.get("title")
+        else:
+            continue
+        if cid:
+            children.append(cid)
+            labels.append(label)
+    return children, labels
+
+
 def _trellis_field(d):
     """Facet field from a Qlik trellis dimension def (string / qDef / libId)."""
     if isinstance(d, str):
@@ -572,6 +659,20 @@ def main():
     with stage("filterpane-children"):
         fp_children = dict(zip(fp_ids, pmap(_fp_children, fp_ids, a.pool)))
 
+    # Standard Qlik containers also keep their tabs in evaluated child lists on
+    # some engine versions. Preserve that source composition signal so the
+    # workbook builder can emit a real tabbed-container instead of flattening.
+    container_ids = [o.get("qId") for o in objs if o.get("qType") == "container"]
+    def _container_meta(cid):
+        lay = qlik("app", "object", "layout", cid, "-a", a.app, *ctx) or {}
+        kids, labels = _container(lay)
+        if not kids:
+            items = ((lay.get("qChildList") or {}).get("qItems")) or []
+            kids, labels = _container({"children": items})
+        return {"children": kids, "labels": labels}
+    with stage("container-children"):
+        container_meta = dict(zip(container_ids, pmap(_container_meta, container_ids, a.pool)))
+
     # Listbox field metadata from the EVALUATED layout (qListObject.qDimensionInfo):
     # qTags carries the field's type tags ($date/$timestamp) — the workbook builder
     # needs them to emit a date-range control instead of a list (a list control's
@@ -638,6 +739,19 @@ def main():
             # or refLineExpr.label (an expression string).
             "refLines": _reflines(props.get("refLine") or {}),
         }
+        legend = _legend(props)
+        if legend:
+            rec["legend"] = legend
+        presentation = _presentation(props)
+        if presentation:
+            rec["presentation"] = presentation
+        drills = _drill_groups(qdims)
+        if drills:
+            rec["drillGroups"] = drills
+        if qtype == "gauge":
+            gauge = _gauge(props)
+            if gauge:
+                rec["gauge"] = gauge
         # Filter objects (control-targeting wave): a listbox's field lives on
         # qListObjectDef (NOT the hypercube), and an alternate-state object
         # carries qStateName — the workbook builder turns these into Sigma list
@@ -667,6 +781,13 @@ def main():
             rec["children"] = kids
             if tsig:
                 rec["trellis"] = tsig
+        elif qtype == "container":
+            kids, labels = _container(props)
+            if not kids:
+                meta = container_meta.get(oid) or {}
+                kids, labels = meta.get("children") or [], meta.get("labels") or []
+            rec["children"] = kids
+            rec["childLabels"] = labels
         else:
             # Chart-level native trellis (Appearance>Trellis): faceting one chart
             # into a panel grid. Only added when present -> byte-identical charts.json

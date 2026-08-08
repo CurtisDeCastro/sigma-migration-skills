@@ -73,6 +73,7 @@ _CAT_DIR = _cc.default_catalog_dir(__file__)
 VIZ_CAT  = _cc.load(_CAT_DIR, "viz-kind")       # Qlik vizType     -> Sigma element kind
 AGG_CAT  = _cc.load(_CAT_DIR, "aggregation")    # Qlik agg fn      -> Sigma aggregate fn
 CTRL_CAT = _cc.load(_CAT_DIR, "control")        # Qlik field kind  -> Sigma control kind
+FEATURE_CAT = _cc.load(_CAT_DIR, "workbook-feature")  # composition / interaction surfaces
 # number-format is COMPOSITIONAL (sigma_fmt parses the qNumFormat mask); its
 # catalog (refs/catalogs/number-format.json) pins the parser to documented
 # examples via tests/test_grounding.py rather than a flat lookup.
@@ -357,6 +358,42 @@ def qlik_refmarks(c):
             out.append(rm)
     return out
 
+
+def apply_presentation(el, c):
+    """Apply only Qlik presentation fields with released Sigma equivalents."""
+    legend = c.get("legend")
+    chart_kind = el.get("kind", "").endswith("-chart") or el.get("kind") in {
+        "region-map", "point-map", "geography-map"
+    }
+    if chart_kind and isinstance(legend, dict):
+        out = {}
+        if legend.get("show") is not None:
+            out["visibility"] = "shown" if legend.get("show") else "hidden"
+        dock = str(legend.get("dock") or "").lower()
+        if dock in ("top", "bottom", "left", "right"):
+            out["position"] = dock
+        if out:
+            el["legend"] = out
+
+    presentation = c.get("presentation") or {}
+    if el.get("kind") == "bar-chart":
+        orientation = str(presentation.get("orientation") or "").lower()
+        if orientation in ("horizontal", "vertical"):
+            el["orientation"] = orientation
+    if el.get("kind") == "bar-chart":
+        grouping = str(presentation.get("grouping") or "").lower()
+        if grouping in ("stacked", "stack"):
+            el["stacking"] = "stacked"
+        elif grouping in ("normalized", "stacked100", "100%"):
+            el["stacking"] = "normalized"
+        elif grouping in ("grouped", "clustered"):
+            el["stacking"] = "none"
+    if presentation.get("showLabels") is not None and el.get("kind", "").endswith("-chart"):
+        el["dataLabel"] = {
+            "labels": "shown" if presentation.get("showLabels") else "hidden"
+        }
+    return el
+
 # ---- native trellis (small multiples) — detection + emission ---------------
 # Qlik has TWO trellis shapes, both of which faithfully become Sigma's NATIVE
 # element `trellis` (ONE viz element + rowsBy/columnsBy facet — NOT N cloned
@@ -475,6 +512,13 @@ def build_element(c, resolve, warnings, metrics=None):
     mexprs = c.get("measures") or []
     mlabels = c.get("measureLabels") or [None] * len(mexprs)
     mfmts = c.get("measureFmts") or [None] * len(mexprs)
+    for drill in (c.get("drillGroups") or []):
+        fields = drill.get("fields") or []
+        if len(fields) > 1:
+            warnings.append(
+                f"'{title}': Qlik drill hierarchy {' > '.join(fields)} keeps active level "
+                f"'{fields[0]}' only; MANUAL GAP — Sigma hierarchy controls require "
+                "validated hierarchy metadata and cannot safely be synthesized from chart fields")
 
     # kind
     vt = c.get("vizType")
@@ -484,12 +528,17 @@ def build_element(c, resolve, warnings, metrics=None):
         elif dims_raw and TEMPORAL.search(dims_raw[0] or ""): kind = "line-chart"
         else: kind = "bar-chart"
     else:
-        kind = NATIVE.get(vt)
+        mapping = VIZ_CAT.resolve(vt)
+        kind = mapping.get("sigma") if mapping else None
         if kind is None:
             if not (dims_raw and mexprs):
                 warnings.append(f"skip '{title}' ({vt}): no native Sigma kind"); return None
             kind = "bar-chart"
             warnings.append(f"'{title}' ({vt}) approximated as bar-chart")
+        elif mapping.get("approximation"):
+            warnings.append(
+                f"'{title}' ({vt}) EXPLICIT APPROXIMATION: Sigma has no native box-plot "
+                f"kind; preserved dimensions/statistical measures as {kind} (visual gap)")
 
     if dims_raw and any(d is None for d in dim_disp):
         warnings.append(f"skip '{title}': dim(s) {dims_raw} not on the denorm element"); return None
@@ -517,10 +566,24 @@ def build_element(c, resolve, warnings, metrics=None):
           "kind": kind, "name": title,
           "source": {"elementId": MASTER_ID, "kind": "table"}}
 
+    if kind == "progress":
+        gauge = c.get("gauge") or {}
+        progress = {"id": el["id"], "kind": "progress", "name": title,
+                    "mode": "value", "value": cols[0]["formula"]}
+        for key, default in (("min", "0"), ("max", "100")):
+            progress[key] = str(gauge.get(key, default))
+        shape = str(gauge.get("shape") or gauge.get("presentation") or "").lower()
+        progress["shape"] = "ring" if shape in ("ring", "circular", "radial") else "bar"
+        return progress
+
     if kind == "kpi-chart":
         el["columns"] = cols
         el["value"] = {"columnId": mids[0]}   # value.columnId, NOT value.id (live API 400s)
-        return el
+        return apply_presentation(el, c)
+
+    if not dims_raw:
+        warnings.append(f"skip '{title}' ({vt}): released {kind} mapping requires a dimension")
+        return None
 
     dim_ids = []
     for i, d in enumerate(dim_disp):
@@ -551,7 +614,7 @@ def build_element(c, resolve, warnings, metrics=None):
         # Aggregating table needs explicit groupings or it renders 1 row/source row
         el["groupings"] = [{"id": nid("g"), "groupBy": dim_ids, "calculations": mids}]
         if sort: el["groupings"][0]["sort"] = [{"columnId": sort[0], "direction": sort[1]}]
-        return el
+        return apply_presentation(el, c)
     if kind == "region-map":
         # Qlik map layer dim -> Sigma region-map; only emit when the region
         # grain is recognizable (else flag, never guess a wrong regionType)
@@ -562,7 +625,7 @@ def build_element(c, resolve, warnings, metrics=None):
             return None
         el["region"] = {"id": dim_ids[0], "regionType": rtype}
         el["color"] = {"by": "scale", "column": mids[0]}
-        return el
+        return apply_presentation(el, c)
     if kind == "pivot-table":
         # cross-tab: first dim -> rowsBy, remaining dims -> columnsBy,
         # measures -> values (bare column-id strings; rowsBy/columnsBy = {id})
@@ -570,15 +633,15 @@ def build_element(c, resolve, warnings, metrics=None):
         el["rowsBy"] = [{"id": dim_ids[0]}]
         if len(dim_ids) > 1:
             el["columnsBy"] = [{"id": d} for d in dim_ids[1:]]
-        return el
+        return apply_presentation(el, c)
     if kind == "pie-chart":
         el["value"] = {"id": mids[0]}; el["color"] = {"id": dim_ids[0]}
         el["dataLabel"] = {"labels": "shown"}
-        return el
+        return apply_presentation(el, c)
     if kind == "combo-chart":
         y = [mids[0]] + [{"columnId": m, "type": "line"} for m in mids[1:]]
         el["xAxis"] = {"columnId": dim_ids[0]}; el["yAxis"] = {"columnIds": y}
-        return el
+        return apply_presentation(el, c)
     if kind == "scatter-chart":
         # A Qlik scatterplot is measure-vs-measure with the dimension as the POINT
         # identity (Qlik measure order = x, y, size). Sigma's scatter axis is a
@@ -614,37 +677,116 @@ def build_element(c, resolve, warnings, metrics=None):
             sc["columns"] = scols
             rm = qlik_refmarks(c)
             if rm: sc["refMarks"] = rm   # e.g. a Margin Target line at x=0.45
-            return sc
+            return apply_presentation(sc, c)
         # <2 measures or no dim: fall back to a plain dim-on-x cartesian
         el["xAxis"] = {"columnId": dim_ids[0] if dim_ids else mids[0]}
         el["yAxis"] = {"columnIds": mids}
-        return el
+        return apply_presentation(el, c)
     # bar / line
     el["xAxis"] = {"columnId": dim_ids[0]}
     el["yAxis"] = {"columnIds": mids}
     if sort: el["xAxis"]["sort"] = {"by": sort[0], "direction": sort[1]}
-    if kind == "bar-chart": el["dataLabel"] = {"labels": "shown"}
+    if kind in ("bar-chart", "waterfall-chart"):
+        el["dataLabel"] = {"labels": "shown"}
     cc = qlik_color(c.get("color"), dim_ids, mids, el)
     if cc: el["color"] = cc
     rm = qlik_refmarks(c)
     if rm: el["refMarks"] = rm
-    return el
+    return apply_presentation(el, c)
+
+
+def build_tabbed_container(c, charts, resolve, warnings, metrics=None):
+    """Qlik container -> Sigma tabbed-container plus one built child per tab."""
+    child_ids = c.get("children") or []
+    labels = c.get("childLabels") or []
+    built, sources, tabs = [], [], []
+    for i, child_id in enumerate(child_ids):
+        child = charts.get(child_id)
+        if child is None:
+            warnings.append(
+                f"container '{c.get('title') or c['id']}': child {child_id!r} was not "
+                "discovered — tab omitted")
+            continue
+        if child.get("vizType") == "container":
+            warnings.append(
+                f"container '{c.get('title') or c['id']}': nested container child "
+                f"{child_id!r} is unsupported — tab omitted")
+            continue
+        el = build_element(child, resolve, warnings, metrics)
+        if el is None:
+            continue
+        emit_trellis(el, child, resolve, warnings)
+        built.append(el)
+        sources.append(child)
+        label = labels[i] if i < len(labels) else None
+        tabs.append({"name": label or child.get("title") or f"Tab {len(tabs) + 1}"})
+    if not built:
+        warnings.append(
+            f"container '{c.get('title') or c['id']}': no convertible children — "
+            "explicit tabbed-container gap")
+        return None, None, [], []
+    element_id = "el-" + re.sub(r"[^a-z0-9]", "", str(c["id"]).lower())
+    spec_element = {"id": element_id, "kind": "tabbed-container", "tabs": tabs}
+    layout_element = {**spec_element, "_tabChildren": [el["id"] for el in built]}
+    return spec_element, layout_element, built, sources
+
+
+def emap_entry(el, source, page_id):
+    """Parity sidecar row for both data-bound charts and source-less elements."""
+    columns = el.get("columns") or []
+    return {
+        "elementId": el["id"], "pageId": page_id, "kind": el["kind"],
+        "name": el.get("name") or source.get("title") or source.get("vizType"),
+        "valueColumnName": columns[0].get("name") if columns else None,
+        "qlik": {
+            "objectId": source["id"],
+            "dims": [(d[0] if isinstance(d, list) else d)
+                     for d in (source.get("dimensions") or [])],
+            "measures": source.get("measures") or [],
+            "nullSuppression": source.get("dimNullSuppression") or [],
+            "drillGroups": source.get("drillGroups") or [],
+        },
+    }
+
 
 # ---- container-banded layout (layout-playbook.md, verified 2026-06-10) -----
 # Spec side: a `kind: container` placeholder element per band (+ a header text
-# element). Layout side: <GridContainer> (NOT <LayoutElement type="grid">,
-# which silently drops children) wrapping <LayoutElement>s whose coordinates
-# are CONTAINER-RELATIVE (rows restart at 1).
+# element). Layout side: canonical <Container> wrapping canonical <Element>
+# children whose coordinates are CONTAINER-RELATIVE (rows restart at 1).
 HEADER_STYLE = {"backgroundColor": "#0F172A", "borderRadius": "round"}
 HEADER_ROWS = 3
 
 def _le(eid, c0, c1, r0, r1):
-    return f'  <LayoutElement elementId="{eid}" gridColumn="{c0} / {c1}" gridRow="{r0} / {r1}"/>'
+    return f'  <Element elementId="{eid}" gridColumn="{c0} / {c1}" gridRow="{r0} / {r1}"/>'
 
 def _gc(cid, c0, c1, r0, r1, inner):
-    return (f'<GridContainer elementId="{cid}" type="grid" gridColumn="{c0} / {c1}" '
+    return (f'<Container elementId="{cid}" type="grid" gridColumn="{c0} / {c1}" '
             f'gridRow="{r0} / {r1}" gridTemplateColumns="repeat(24, 1fr)" '
-            f'gridTemplateRows="auto">\n{inner}\n</GridContainer>')
+            f'gridTemplateRows="auto">\n{inner}\n</Container>')
+
+
+def _tc(cid, child_ids, c0, c1, r0, r1):
+    """Tabbed-container layout; tabs bind to element.tabs positionally."""
+    tabs = []
+    for eid in child_ids:
+        tabs.append(
+            '  <Tab gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto">\n'
+            f'{_le(eid, 1, 25, 1, max(2, r1 - r0 + 1))}\n'
+            '  </Tab>')
+    return (f'<TabbedContainer elementId="{cid}" type="tabbed-container" '
+            f'gridColumn="{c0} / {c1}" gridRow="{r0} / {r1}">\n'
+            + "\n".join(tabs) + "\n</TabbedContainer>")
+
+
+def _item_layout(item, relative_r0=None):
+    """Render a normal leaf or a Qlik-container-derived tabbed container."""
+    eid, c0, c1, r0, r1 = item[:5]
+    if relative_r0 is not None:
+        r0, r1 = r0 - relative_r0 + 1, r1 - relative_r0 + 1
+    meta = item[5] if len(item) > 5 else {}
+    children = meta.get("_tabChildren") if isinstance(meta, dict) else None
+    return _tc(eid, children, c0, c1, r0, r1) if children else _le(eid, c0, c1, r0, r1)
+
 
 def _cluster_bands(items):
     """Cluster [eid,c0,c1,r0,r1] items into horizontal bands by row overlap."""
@@ -674,36 +816,40 @@ def _decollide_bands(bands):
             out.append(band); continue
         r0 = min(i[3] for i in band); r1 = max(i[4] for i in band)
         n = len(band)
-        out.append([[it[0], 1 + round(24 * j / n), 1 + round(24 * (j + 1) / n), r0, r1]
+        out.append([[it[0], 1 + round(24 * j / n), 1 + round(24 * (j + 1) / n), r0, r1, *it[5:]]
                     for j, it in enumerate(sorted(band, key=lambda i: (i[1], i[3])))])
     return out
 
-def banded_page(page_id, items, title, id_prefix=None):
-    """Header band + one full-width GridContainer per row band, children
+def banded_page(page_id, items, title, id_prefix=None, navigation_id=None):
+    """Header band + one full-width Container per row band, children
     container-relative. Returns (page_xml, extra_spec_elements)."""
     pfx = id_prefix or f"band-{page_id}"
     extra, children = [], []
     offset = 0
+    if navigation_id:
+        children.append(_le(navigation_id, 1, 25, 1, 4))
+        offset = 3
     if title:
         hdr, txt = f"{pfx}-hdr", f"{pfx}-hdrtext"
         extra.append({"id": hdr, "kind": "container", "style": dict(HEADER_STYLE)})
         extra.append({"id": txt, "kind": "text",
                       "body": f'# <span style="color: #FFFFFF">{title}</span>'})
-        children.append(_gc(hdr, 1, 25, 1, 1 + HEADER_ROWS, _le(txt, 1, 25, 1, 1 + HEADER_ROWS)))
-        offset = HEADER_ROWS
+        children.append(_gc(hdr, 1, 25, 1 + offset, 1 + offset + HEADER_ROWS,
+                            _le(txt, 1, 25, 1, 1 + HEADER_ROWS)))
+        offset += HEADER_ROWS
     if items:
         offset += 1 - min(i[3] for i in items)  # first band starts under the header
     for n, band in enumerate(_decollide_bands(_cluster_bands(items)), 1):
         cid = f"{pfx}-{n}"
         extra.append({"id": cid, "kind": "container"})
         r0 = min(i[3] for i in band); r1 = max(i[4] for i in band)
-        inner = "\n".join(_le(i[0], i[1], i[2], i[3] - r0 + 1, i[4] - r0 + 1) for i in band)
+        inner = "\n".join(_item_layout(i, relative_r0=r0) for i in band)
         children.append(_gc(cid, 1, 25, r0 + offset, r1 + offset, inner))
     body = "\n".join(children)
     return (f'<Page type="grid" gridTemplateColumns="repeat(24, 1fr)" '
             f'gridTemplateRows="auto" id="{page_id}">\n{body}\n</Page>', extra)
 
-def grid_layout(page_id, sheet, placed):
+def grid_layout(page_id, sheet, placed, navigation_id=None):
     """Map the Qlik sheet cell grid onto Sigma's 24-col grid, then wrap each
     cell-grid row in a band container (relative proportions preserved).
 
@@ -727,7 +873,7 @@ def grid_layout(page_id, sheet, placed):
         if el["kind"] == "control":
             ctls.append(el["id"])            # float-over-chart coords discarded
         else:
-            charts.append([el["id"], c0, c1, r0, r1])
+            charts.append([el["id"], c0, c1, r0, r1, el])
     items, row = [], 1
     if ctls:
         n = len(ctls)
@@ -737,10 +883,10 @@ def grid_layout(page_id, sheet, placed):
         row += 3
     if charts:
         shift = row - min(c[3] for c in charts)   # drop charts below the controls band
-        items += [[c[0], c[1], c[2], c[3] + shift, c[4] + shift] for c in charts]
-    return banded_page(page_id, items, sheet.get("title"))
+        items += [[c[0], c[1], c[2], c[3] + shift, c[4] + shift, *c[5:]] for c in charts]
+    return banded_page(page_id, items, sheet.get("title"), navigation_id=navigation_id)
 
-def auto_layout(page_id, elems, title=None):
+def auto_layout(page_id, elems, title=None, navigation_id=None):
     """Fallback when no layout.json: header band, controls band, KPI strip band,
     then chart rows 2-wide — each a container. Returns (page_xml, extra_spec_elements)."""
     ctls = [e for e in elems if e["kind"] == "control"]
@@ -751,21 +897,21 @@ def auto_layout(page_id, elems, title=None):
         w = 24 // len(ctls)
         for i, e in enumerate(ctls):
             c0 = 1 + i * w; c1 = c0 + w if i < len(ctls) - 1 else 25
-            items.append([e["id"], c0, c1, row, row + 3])
+            items.append([e["id"], c0, c1, row, row + 3, e])
         row += 3
     if kpis:
         w = 24 // len(kpis)
         for i, e in enumerate(kpis):
             c0 = 1 + i * w; c1 = c0 + w if i < len(kpis) - 1 else 25
-            items.append([e["id"], c0, c1, row, row + 5])
+            items.append([e["id"], c0, c1, row, row + 5, e])
         row += 5
     for i in range(0, len(charts), 2):
         pair = charts[i:i + 2]
         for j, e in enumerate(pair):
             c0 = 1 if j == 0 else 13; c1 = 13 if (j == 0 and len(pair) > 1) else 25
-            items.append([e["id"], c0, c1, row, row + 11])
+            items.append([e["id"], c0, c1, row, row + 11, e])
         row += 11
-    return banded_page(page_id, items, title or "Overview")
+    return banded_page(page_id, items, title or "Overview", navigation_id=navigation_id)
 
 def main():
     ap = argparse.ArgumentParser()
@@ -846,13 +992,19 @@ def main():
               "columns": [{"id": f"o{i}", "name": dn, "formula": f"[Custom SQL/{dn}]"}
                           for i, (dn, _raw) in enumerate(denorm_cols)]}
 
-    warnings, pages, layout_pages, emap = [], [], [], []
-    layout_pages.append(f'<Page type="grid" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto" id="page-data">\n'
-                        f'  <LayoutElement elementId="{MASTER_ID}" gridColumn="1 / 25" gridRow="1 / 15"/>\n</Page>')
-    pages.append({"id": "page-data", "name": "Data", "elements": [master]})
+    # Workbook-as-code keeps pages as metadata only. Elements are one flat
+    # document collection and layout XML is the sole page-membership authority.
+    # (Data-model code representation is deliberately unchanged and remains
+    # page-nested; the --dm-spec reader above is therefore still nested.)
+    warnings, pages, elements, page_elements, layout_pages, emap = (
+        [], [], [], {}, [], [])
+    pages.append({"id": "page-data", "name": "Data", "visibility": "hidden"})
+    elements.append(master)
+    page_elements["page-data"] = [master]
 
     CHARTY = {"kpi", "auto-chart", "barchart", "linechart", "piechart", "combochart",
-              "scatterplot", "table", "pivot-table"}
+              "scatterplot", "table", "pivot-table", "waterfallchart", "gauge",
+              "boxplot"}
     # master column id / raw warehouse column per display name — control
     # source/filter targets + date-typed detection fallback
     mcol_id = {dn: f"o{i}" for i, (dn, _raw) in enumerate(denorm_cols)}
@@ -881,6 +1033,11 @@ def main():
     # Base children owned by a trellis-container are emitted THROUGH the
     # container (one faceted element), never standalone.
     tr_children = trellis_child_ids(charts)
+    container_children = {
+        child for candidate in charts.values() if candidate.get("vizType") == "container"
+        for child in (candidate.get("children") or [])
+    }
+    nav_elements = []
     if sheets:
         for si, sheet in enumerate(sheets):
             pid = f"pg-{si + 1}"
@@ -889,6 +1046,7 @@ def main():
                 c = charts.get(cell["objectId"])
                 if c is None: continue
                 if cell["objectId"] in tr_children: continue   # emitted via its container
+                if cell["objectId"] in container_children: continue  # emitted in its parent's tab
                 if c["vizType"] in ("filterpane", "listbox"):
                     n_signals += 1
                     ctls = controls_for(c)
@@ -896,6 +1054,16 @@ def main():
                         elems.append(ctl)
                         placed.append((control_subcell(cell, i, len(ctls)), ctl))
                     n_controls += len(ctls)
+                    continue
+                if c["vizType"] == "container":
+                    tc, tc_layout, children, sources = build_tabbed_container(
+                        c, charts, resolve, warnings, metrics)
+                    if tc is None:
+                        continue
+                    elems.extend([tc, *children])
+                    placed.append((cell, tc_layout))
+                    emap.extend(emap_entry(child, source, pid)
+                                for child, source in zip(children, sources))
                     continue
                 # Resolve a trellis-container to its base child chart (carrying
                 # the container's facet); a plain chart passes through unchanged.
@@ -907,30 +1075,47 @@ def main():
                 if el is None: continue
                 emit_trellis(el, c, resolve, warnings)   # native trellis (no-op if no signal)
                 elems.append(el); placed.append((cell, el))
-                emap.append({"elementId": el["id"], "pageId": pid, "kind": el["kind"],
-                             "name": el["name"], "valueColumnName": el["columns"][0].get("name"),
-                             "qlik": {"objectId": c["id"],
-                                      "dims": [(d[0] if isinstance(d, list) else d) for d in (c.get("dimensions") or [])],
-                                      "measures": c.get("measures") or [],
-                                      "nullSuppression": c.get("dimNullSuppression") or []}})
+                emap.append(emap_entry(el, c, pid))
             if not elems: continue
-            xml, extra = grid_layout(pid, sheet, placed)
-            pages.append({"id": pid, "name": sheet["title"], "elements": elems + extra})
+            nav = None
+            if len(sheets) > 1:
+                nav = {"id": f"nav-{pid}", "kind": "navigation", "mode": "auto",
+                       "pageLabels": {}}
+                elems.insert(0, nav)
+                nav_elements.append(nav)
+            xml, extra = grid_layout(pid, sheet, placed,
+                                     navigation_id=nav["id"] if nav else None)
+            page_els = elems + extra
+            pages.append({"id": pid, "name": sheet["title"]})
+            elements.extend(page_els)
+            page_elements[pid] = page_els
             layout_pages.append(xml)
     else:
         # no sheet layout discovered — build every dim+measure chart, auto-layout;
         # filterpanes/listboxes still become controls (top band). Children of a
         # filterpane are skipped standalone (the pane emits them).
-        pid, elems = "pg-1", []
+        pid, elems, layout_elems = "pg-1", [], []
         child_ids = {ch for c in charts.values() if c["vizType"] == "filterpane"
                      for ch in (c.get("children") or [])}
         for c in charts.values():
-            if c["id"] in tr_children: continue   # base child emitted via its container
+            if c["id"] in tr_children or c["id"] in container_children:
+                continue   # child emitted through its owning composition object
             if c["vizType"] == "filterpane" or (c["vizType"] == "listbox" and c["id"] not in child_ids):
                 n_signals += 1
                 ctls = controls_for(c)
                 elems.extend(ctls)
+                layout_elems.extend(ctls)
                 n_controls += len(ctls)
+                continue
+            if c["vizType"] == "container":
+                tc, tc_layout, children, sources = build_tabbed_container(
+                    c, charts, resolve, warnings, metrics)
+                if tc is None:
+                    continue
+                elems.extend([tc, *children])
+                layout_elems.append(tc_layout)
+                emap.extend(emap_entry(child, source, pid)
+                            for child, source in zip(children, sources))
                 continue
             c = trellis_base(c, charts, warnings)   # container -> its base child chart
             if c is None: continue
@@ -939,27 +1124,60 @@ def main():
             if el is None: continue
             emit_trellis(el, c, resolve, warnings)   # native trellis (no-op if no signal)
             elems.append(el)
-            emap.append({"elementId": el["id"], "pageId": pid, "kind": el["kind"],
-                         "name": el["name"], "valueColumnName": el["columns"][0].get("name"),
-                         "qlik": {"objectId": c["id"],
-                                  "dims": [(d[0] if isinstance(d, list) else d) for d in (c.get("dimensions") or [])],
-                                  "measures": c.get("measures") or [],
-                                  "nullSuppression": c.get("dimNullSuppression") or []}})
-        xml, extra = auto_layout(pid, [{"id": e["id"], "kind": e["kind"]} for e in elems])
-        pages.append({"id": pid, "name": "Overview", "elements": elems + extra})
+            layout_elems.append(el)
+            emap.append(emap_entry(el, c, pid))
+        xml, extra = auto_layout(pid, layout_elems)
+        page_els = elems + extra
+        pages.append({"id": pid, "name": "Overview"})
+        elements.extend(page_els)
+        page_elements[pid] = page_els
         layout_pages.append(xml)
 
-    # Scatter charts emit a hidden grouped SOURCE table (one row per point dim);
-    # park them on the Data page next to the master (visibleAsSource:False, so
-    # they need no layout slot). build_element appended them to _SCATTER_SRC.
-    if _SCATTER_SRC:
-        data_page = next((p for p in pages if p["id"] == "page-data"), pages[0])
-        data_page["elements"].extend(_SCATTER_SRC)
+    page_labels = {page["id"]: page["name"] for page in pages
+                   if page["id"] != "page-data"}
+    for nav in nav_elements:
+        nav["pageLabels"] = page_labels
 
-    spec = {"name": a.name, "schemaVersion": 1, "pages": pages}
-    if a.folder: spec["folderId"] = a.folder
+    # Scatter charts emit a hidden grouped SOURCE table (one row per point dim);
+    # park them on the hidden Data page next to the master. Workbook-as-code
+    # requires every flat element to be placed exactly once, even hidden source
+    # tables, so each receives a deterministic Data-page layout slot.
+    if _SCATTER_SRC:
+        elements.extend(_SCATTER_SRC)
+        page_elements["page-data"].extend(_SCATTER_SRC)
+
+    data_layout = []
+    for i, element in enumerate(page_elements["page-data"]):
+        r0 = 1 + i * 14
+        data_layout.append(
+            f'  <Element elementId="{element["id"]}" '
+            f'gridColumn="1 / 25" gridRow="{r0} / {r0 + 14}"/>')
+    layout_pages.insert(
+        0,
+        '<Page type="grid" gridTemplateColumns="repeat(24, 1fr)" '
+        'gridTemplateRows="auto" id="page-data">\n'
+        + "\n".join(data_layout) + "\n</Page>")
+
+    layout_xml = '<?xml version="1.0" encoding="utf-8"?>\n' + "\n".join(layout_pages)
+    element_ids = [e.get("id") for e in elements]
+    layout_ids = re.findall(r'\belementId="([^"]+)"', layout_xml)
+    duplicate_elements = sorted({eid for eid in element_ids if element_ids.count(eid) > 1})
+    duplicate_layout = sorted({eid for eid in layout_ids if layout_ids.count(eid) > 1})
+    missing_layout = sorted(set(element_ids) - set(layout_ids))
+    unknown_layout = sorted(set(layout_ids) - set(element_ids))
+    if duplicate_elements or duplicate_layout or missing_layout or unknown_layout:
+        raise SystemExit(
+            "FATAL: workbook layout must place every flat element exactly once; "
+            f"duplicate elements={duplicate_elements}, duplicate layout refs={duplicate_layout}, "
+            f"unplaced={missing_layout}, unknown refs={unknown_layout}")
+
+    document = {"schemaVersion": 1, "kind": "workbook", "pages": pages,
+                "elements": elements, "layout": layout_xml}
+    spec = {"name": a.name, "document": document}
+    if a.folder:
+        spec["folderId"] = a.folder
     json.dump(spec, open(a.spec_out, "w"), indent=2)
-    open(a.layout_out, "w").write('<?xml version="1.0" encoding="utf-8"?>\n' + "\n".join(layout_pages))
+    open(a.layout_out, "w").write(layout_xml)
     json.dump(emap, open(a.element_map, "w"), indent=2)
     # native-trellis-emitted.json — round-trip guard sidecar. Written ONLY when a
     # native trellis was actually emitted (a non-trellis app stays byte-identical:
@@ -985,8 +1203,8 @@ def main():
     QUERYABLE = {"table", "pivot-table", "bar-chart", "line-chart", "pie-chart",
                  "donut-chart", "area-chart", "scatter-chart", "combo-chart",
                  "kpi-chart", "region-map", "point-map"}
-    must = [e["id"] for p in pages if p["id"] != "page-data"
-            for e in p["elements"] if e.get("kind") in QUERYABLE]
+    must = [e["id"] for pid, page_els in page_elements.items() if pid != "page-data"
+            for e in page_els if e.get("kind") in QUERYABLE]
     for sc in scope:
         if sc.get("status") == "wired":
             sc["mustReach"] = must
@@ -996,7 +1214,7 @@ def main():
                "controls": scope, "unbound": unbound},
               open(scope_path, "w"), indent=2)
 
-    n_elem = sum(len(p["elements"]) for p in pages) - 1
+    n_elem = len(elements) - 1
     result = {"workbookId": None, "pages": len(pages), "elements": n_elem,
               "kpis": sum(1 for e in emap if e["kind"] == "kpi-chart"),
               "controls": n_controls, "controlScope": scope_path,
