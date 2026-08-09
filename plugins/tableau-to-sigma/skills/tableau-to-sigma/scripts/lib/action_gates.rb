@@ -17,6 +17,7 @@
 require 'json'
 $LOAD_PATH.unshift File.expand_path(__dir__)
 require 'action_ledger'
+require_relative 'workbook_code'
 
 module ActionGates
   module_function
@@ -30,27 +31,25 @@ module ActionGates
   def action_schema_violations(spec)
     errs = []
     seen = {}
-    (spec['pages'] || []).each do |page|
-      (page['elements'] || []).each do |el|
-        (el['actions'] || []).each do |action|
-          ActionLedger.validate_action(action).each do |e|
-            errs << "#{page['id']}/#{el['id']}: #{e}"
-          end
-          id = action['id']
-          next if id.to_s.empty?
-          if seen[id]
-            errs << "duplicate action id #{id.inspect} on #{el['id']} (already on #{seen[id]}) " \
-                    '— action ids must be unique across the WHOLE workbook'
-          end
-          seen[id] = el['id']
+    WorkbookCode.elements_with_pages(spec).each do |element, page|
+      (element['actions'] || []).each do |action|
+        ActionLedger.validate_action(action).each do |error|
+          errs << "#{page&.dig('id') || '(unplaced)'}/#{element['id']}: #{error}"
         end
+        id = action['id']
+        next if id.to_s.empty?
+        if seen[id]
+          errs << "duplicate action id #{id.inspect} on #{element['id']} (already on #{seen[id]}) " \
+                  '— action ids must be unique across the WHOLE workbook'
+        end
+        seen[id] = element['id']
       end
     end
     errs
   end
 
   def action_count(spec)
-    (spec['pages'] || []).sum { |pg| (pg['elements'] || []).sum { |el| Array(el['actions']).size } }
+    WorkbookCode.elements(spec).sum { |element| Array(element['actions']).size }
   end
 
   # Ledger/spec contradiction check — the built `spec` (--spec) is the one

@@ -36,6 +36,19 @@ module WorkbookCode
     end
   end
 
+  def elements_with_pages(spec)
+    doc = document(spec)
+    legacy_pages = Array(doc['pages']).select { |page| page.is_a?(Hash) && page.key?('elements') }
+    if legacy_pages.any?
+      return legacy_pages.flat_map do |page|
+        Array(page['elements']).select { |element| element.is_a?(Hash) }
+                               .map { |element| [element, page] }
+      end
+    end
+
+    Sigma::CodeRep.workbook_elements_with_pages(doc)
+  end
+
   def pages(spec)
     Array(document(spec)['pages']).select { |page| page.is_a?(Hash) }
   end

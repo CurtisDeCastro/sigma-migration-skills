@@ -347,12 +347,16 @@ spec.fetch('pages', []).each do |page|
           # W2.8: governed-metric refs resolve against the METRICS CENSUS, not
           # element prefixes. A census HIT is valid — and is NOT an element
           # ref, so the cross-element render-500 guard below must not judge
-          # it. A census MISS is a hard ERROR (error-when-checkable), unless
-          # an element literally named "Metrics" makes the prefix known — then
-          # the pre-census checks judge the ref exactly as before.
-          if prefix == 'Metrics' && metrics_census
+          # it. Metrics is a reserved namespace: an element or column literally
+          # named "Metrics" can never satisfy [Metrics/<name>].
+          if prefix == 'Metrics'
             mname = ref.split('/', 2)[1].to_s
-            prefix_is_element = own_prefixes.include?(prefix) || all_known_set.include?(prefix)
+            if metrics_census.nil?
+              errors << "#{name}.#{col['name']}: ref [#{ref}] — no DM metrics census is available. " \
+                        'Pass --metrics <workdir>/metrics.json (or keep metrics.json beside --dm-context); ' \
+                        'column names and elements named "Metrics" are not valid metric evidence.'
+              next
+            end
             # F4 PRECEDENCE (review-caught): judge the structural exclusion
             # BEFORE census membership. Every pre-fix workdir carries a stale
             # machine-written metrics.json sidecar that still lists the
@@ -362,7 +366,7 @@ spec.fetch('pages', []).each do |page|
             # 1 without). Dual-carrier names were already cleared at the
             # census build, so anything still excluded rides ONLY a
             # collision-shaped element and cannot survive readback.
-            if metrics_excluded.key?(mname) && !prefix_is_element
+            if metrics_excluded.key?(mname)
               # F4: the metric IS defined — on a collision-shaped element, so
               # the live readback drops it and the ref cannot survive the
               # post-POST gate. Same admissibility rule as the binder.
@@ -374,19 +378,16 @@ spec.fetch('pages', []).each do |page|
               next
             end
             next if metrics_census.include?(mname)
-            unless prefix_is_element
-              listed = metrics_census.to_a.sort
-              errors << "#{name}.#{col['name']}: ref [#{ref}] — metric #{mname.empty? ? '(empty name)' : "\"#{mname}\""} is not in the DM metrics census " \
-                        "(#{listed.empty? ? 'the census is EMPTY' : "known metrics: #{listed.join(', ')}"}). " \
-                        'The governed-metric binder emits census names only — if the census is stale, re-run with the run\'s ' \
-                        'metrics.json (--metrics PATH, or the sidecar beside --dm-context).'
-              next
-            end
+            listed = metrics_census.to_a.sort
+            errors << "#{name}.#{col['name']}: ref [#{ref}] — metric #{mname.empty? ? '(empty name)' : "\"#{mname}\""} is not in the DM metrics census " \
+                      "(#{listed.empty? ? 'the census is EMPTY' : "known metrics: #{listed.join(', ')}"}). " \
+                      'The governed-metric binder emits census names only — if the census is stale, re-run with the run\'s ' \
+                      'metrics.json (--metrics PATH, or the sidecar beside --dm-context).'
+            next
           end
           unless own_prefixes.include?(prefix) || all_known_set.include?(prefix)
-            hint = prefix == 'Metrics' && !metrics_census ? ' — governed-metric refs need the DM metrics census: pass --metrics <workdir>/metrics.json (or keep metrics.json beside --dm-context)' : ''
             errors << "#{name}.#{col['name']}: ref [#{ref}] — prefix \"#{prefix}\" unknown " \
-                      "(known: #{(own_prefixes + all_known_set).to_a.sort.join(', ')})#{hint}"
+                      "(known: #{(own_prefixes + all_known_set).to_a.sort.join(', ')})"
           end
           # v5.3 RENDER-500 guard: a formula referencing a workbook element
           # that is NOT this element's source opaquely 500s EVERY png

@@ -168,6 +168,25 @@ Dir.mktmpdir do |dir|
      'nested `document.layout` preserved through the merge')
   ok(nested_doc && nested_doc.dig('settings', 'theme', 'overrides', 'categoricalScheme') == ['#0e7c7b'],
      'patch still applies inside the canonical nested live spec')
+
+  # #698 / live RCF regression: workbook patches use flat document.elements.
+  # A partial element patch must merge into the complete flat record, never
+  # shadow it with an id/style-only record after a legacy pages[] conversion.
+  nested_live['document']['elements'] << { 'id' => 'k2', 'kind' => 'bar-chart' }
+  nested_live['document']['layout'] = '<Page id="PG"><Element elementId="k1"/><Element elementId="k2"/></Page>'
+  File.write(File.join(dir, 'nested-live.json'), JSON.generate(nested_live))
+  File.write(File.join(dir, 'element-patch.json'),
+             JSON.generate('elements' => [{ 'id' => 'k1', 'style' => { 'backgroundColor' => '#ffffff' } }]))
+  out, st = run('apply-patch', '--patch', File.join(dir, 'element-patch.json'),
+                '--dry-run', '--live-spec', File.join(dir, 'nested-live.json'),
+                '--out', File.join(dir, 'element-merged.json'), dir: dir)
+  element_doc = JSON.parse(File.read(File.join(dir, 'element-merged.json')))['document']
+  element_k1 = element_doc['elements'].find { |element| element['id'] == 'k1' }
+  ok(st.exitstatus.zero?, 'flat document.elements fidelity patch exits 0')
+  ok(element_k1['kind'] == 'kpi-chart' && element_k1.dig('style', 'backgroundColor') == '#ffffff',
+     'partial flat element patch preserves required kind and merges style')
+  ok(element_doc['elements'].any? { |element| element['id'] == 'k2' && element['kind'] == 'bar-chart' },
+     'partial flat element patch preserves unpatched sibling elements')
 end
 
 puts 'RCF page picking (#422):'
