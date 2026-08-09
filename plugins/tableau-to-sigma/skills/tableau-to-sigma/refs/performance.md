@@ -289,6 +289,18 @@ backoff).
 - Re-entry NOT printing `dm-match REUSED`: signature changed (converter output
   differs) or the cache is >24h old.
 
+### slow-phase2-6-reuse-augment
+Reads back the reuse candidate's live spec, plans which derived columns a
+fresh build would have created (#691), and — only when at least one is
+CLOSABLE — PUTs one augmented spec via `post-and-readback.rb --update-id`.
+- No network beyond one GET + (at most) one PUT+readback; slow here almost
+  always means the underlying Sigma API call is slow, not this gate's own
+  logic.
+- Skipped entirely (near-zero time) whenever `reuse_dm_id` is unset (fresh
+  build) or the candidate already carries every field the workbook needs.
+- An UNCLOSABLE gap aborts reuse and falls through to the normal fresh-build
+  phases below — that time is charged to `phase3-dm`, not this phase.
+
 ### slow-phase2-columns
 ~2–5s per table via the Sigma catalog. Slow = catalog sync lag on the
 connection; re-entries reuse `cols-*.json`. A 404 here is not slowness — see

@@ -2026,6 +2026,148 @@ module MechanicalSpecs
     { 'master_columns' => master_columns, 'mmap' => mmap, 'untranslated_metrics' => untranslated }
   end
 
+  # ── DM-reuse augmentation (#691) ────────────────────────────────────────────
+  # A REUSED data model never runs through THIS conversion's Phase 3 build+POST
+  # — the converter's own fact element (conv_fact) can carry mechanically-
+  # derived columns (date-key synthesis like "Date(Left(Text([Order Date
+  # Key]),...))", cross-element Lookups, translated calc fields) that a FRESH
+  # build would have POSTed as real physical columns on the live DM. Reuse
+  # skips that POST entirely, so those columns simply never exist on the
+  # candidate — derive_master then falls back to a bare `[Fact/<name>]`
+  # reference that dangles at the pre-POST ref gate (exit 4).
+  #
+  # plan_reuse_derived_columns computes, for a chosen reuse candidate, exactly
+  # which of the converter's fact columns are MISSING and whether each one can
+  # be safely authored onto the live element:
+  #   CLOSABLE   — every column its formula references (bare same-element
+  #                refs, or slash-qualified cross-element refs) already
+  #                resolves against the candidate: present verbatim on the
+  #                live fact, another column we're already authoring, or
+  #                reachable on a sibling element via an EXISTING wired
+  #                relationship. Fixed-point over multiple passes so a chained
+  #                dependency (a calc column referencing another calc column)
+  #                still resolves once its own dependency is authored.
+  #   UNCLOSABLE — the formula depends on an element/relationship/column the
+  #                candidate does not have and cannot self-derive (e.g. a
+  #                role-playing date dimension behind a join the run could not
+  #                create). A workbook that needs this field must abandon the
+  #                reuse candidate and build fresh rather than ship a dangling
+  #                ref — a raw column-superset score cannot see this gap
+  #                because it counts a name existing ANYWHERE in the DM, not
+  #                whether it is reachable from the fact grain the workbook
+  #                actually needs.
+  #
+  # This intentionally does NOT re-derive formulas — it only replays the
+  # ALREADY-COMPUTED conv_fact column verbatim, so the reuse and fresh-build
+  # paths can never drift onto two different derivations of the same field.
+  def plan_reuse_derived_columns(conv_fact, live_spec, live_fact_name)
+    closable = []
+    unclosable = []
+    empty = { 'closable' => closable, 'unclosable' => unclosable }
+    return empty unless conv_fact && live_spec && live_fact_name
+
+    live_els = all_elements(live_spec)
+    live_fact = live_els.find { |e| e['name'].to_s.casecmp?(live_fact_name.to_s) }
+    return empty unless live_fact
+
+    known = (live_fact['columns'] || []).map { |c| col_display(c) }.compact.map(&:downcase).to_set
+    live_by_name = live_els.each_with_object({}) { |e, h| h[e['name'].to_s.downcase] = e }
+    wired = lambda do |el_name|
+      tgt = live_by_name[el_name.to_s.downcase]
+      return false unless tgt
+      (live_fact['relationships'] || []).any? { |r| r['targetElementId'] == tgt['id'] }
+    end
+    cross_ok = lambda do |el_name, col_name|
+      tgt = live_by_name[el_name.to_s.downcase]
+      next false unless tgt
+      tgt_cols = (tgt['columns'] || []).map { |c| col_display(c) }.compact.map(&:downcase)
+      tgt_cols.include?(col_name.to_s.downcase) && wired.call(el_name)
+    end
+
+    candidates = (conv_fact['columns'] || []).each_with_object([]) do |col, acc|
+      dname = col_display(col)
+      next if dname.nil? || dname.to_s.empty? || dname =~ GUID_RE
+      next if known.include?(dname.downcase) # already present verbatim — nothing to author
+      acc << { 'name' => dname, 'formula' => col['formula'].to_s, 'format' => col['format'] }.compact
+    end
+
+    loop do
+      progressed = false
+      candidates.reject! do |cand|
+        refs = cand['formula'].to_s.scan(/\[([^\]]+)\]/).flatten
+        missing = refs.reject do |ref|
+          parts = ref.split('/')
+          parts.size == 1 ? known.include?(parts[0].downcase) : cross_ok.call(parts[0], parts[-1])
+        end
+        if missing.empty?
+          closable << cand
+          known << cand['name'].downcase
+          progressed = true
+          true
+        else
+          cand['missing_refs'] = missing.uniq
+          false
+        end
+      end
+      break unless progressed
+    end
+    unclosable.concat(candidates)
+    empty
+  end
+
+  # Splice `closable` derived columns (from plan_reuse_derived_columns) onto
+  # the live spec's fact element in place, minting ids the same way derive_
+  # master/fresh-build columns are minted. The formula is carried VERBATIM —
+  # never re-derived — so this can only ever replay the fresh-build's own
+  # output. Returns the number of columns actually added (idempotent: a
+  # column already present by name is skipped, not duplicated).
+  def apply_reuse_augmentation!(live_spec, live_fact_name, closable)
+    return 0 if closable.nil? || closable.empty?
+    live_fact = all_elements(live_spec).find { |e| e['name'].to_s.casecmp?(live_fact_name.to_s) }
+    return 0 unless live_fact
+    live_fact['columns'] ||= []
+    registry = {}
+    live_fact['columns'].each do |c|
+      dn = col_display(c)
+      registry["c-#{slug(dn.to_s)}"] ||= dn.to_s if dn
+    end
+    added = 0
+    closable.each do |col|
+      next if live_fact['columns'].any? { |c| col_display(c).to_s.casecmp?(col['name'].to_s) }
+      id = mint_id('c-', col['name'], registry)
+      entry = { 'id' => id, 'name' => col['name'], 'formula' => col['formula'] }
+      entry['format'] = col['format'] if col['format']
+      live_fact['columns'] << entry
+      added += 1
+    end
+    added
+  end
+
+  # #691 requirement 4: find-or-pick-dm.rb's own ambiguous_wide_tie guard only
+  # refuses a WIDE (>=3-way) tie; a narrow tie at an identical/near-identical
+  # score still auto-picks — its own rationale even says so ("collapsing a
+  # 0.9-score tie — duplicate-DM sprawl"). Column-superset scoring is also
+  # computed over every element's RAW columns rather than the workbook's
+  # actual required (post-derivation) fields, so a tie between near-identical
+  # DM twins is exactly the case the picker's score cannot break on its own.
+  # Prefer a candidate whose name matches the source workbook (a genuine
+  # signal the picker's own tie-break already uses); otherwise refuse the
+  # auto-pick, log why, and let the caller fall back to a fresh, unambiguous
+  # build rather than an arbitrary pick.
+  def reuse_tie_guard(dm_match, source_name)
+    return { 'auto_picked' => false, 'blocked' => false } unless dm_match && dm_match['auto_picked']
+    tie_count = dm_match['tie_count'].to_i
+    best = (dm_match['candidates'] || []).first
+    name_matches = !!(best && source_name && best['dm_name'].to_s.strip.casecmp?(source_name.to_s.strip))
+    if tie_count >= 2 && !name_matches
+      return { 'auto_picked' => false, 'blocked' => true,
+               'reason' => "#{tie_count} candidate(s) tie at score #{dm_match['score']} and none is a " \
+                           'source-name match — refusing to auto-pick an arbitrary twin (#691); build fresh ' \
+                           'unless an explicit --reuse-dm is given.' }
+    end
+    { 'auto_picked' => true, 'blocked' => false }
+  end
+
   # Assemble the full workbook spec: a hidden master table on page-data sourcing
   # the DM fact element, plus dashboard page(s) of the build-charts elements.
   #

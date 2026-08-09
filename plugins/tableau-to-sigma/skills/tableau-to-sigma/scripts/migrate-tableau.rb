@@ -940,6 +940,7 @@ PHASE_BUDGET = {
   'phase1-lane(bg)'   => 240, # Tableau 5-fetch discovery pool, cold 2-4min; stamp-reused <5s
   'join-wait'         => 240, # foreground wait on the lane (≈ lane time on a cold run, ~0s on reuse)
   'phase1.6-dm-scan'  => 45,  # DM list + ≤25 spec fetches; signature-cached re-entry <1s
+  'phase2.6-reuse-augment' => 30, # #691: reuse-candidate readback + gap plan + one optional DM PUT
   'phase2-columns'    => 90,  # ~2-5s per table via the Sigma catalog; cols-*.json reused on re-entry
   'phase1-join'       => 120, # calc extraction + custom-SQL scan + gap-report parse (sha-cached on re-entry)
   'phase0c-cost'      => 15,  # estimate-cost.rb over workdir artifacts (pure local) + sign-off print
@@ -3036,9 +3037,16 @@ else
               '--auto-pick', '--auto-pick-threshold', '0.5'],
              allow_fail: true) # exit 1 = no candidate ≥ min-score (normal: build new)
   dm_match = (JSON.parse(File.read(match_path)) rescue {})
+  # #691: find-or-pick-dm.rb's own ambiguous_wide_tie guard only refuses a WIDE
+  # (>=3-way) tie; a narrow tie at an identical score still auto-picks (its
+  # rationale even says "collapsing a 0.9-score tie — duplicate-DM sprawl").
+  # Don't silently collapse that here either — prefer a source-name match,
+  # else refuse the auto-pick and fall back to a fresh build.
+  _tie = MechanicalSpecs.reuse_tie_guard(dm_match, wb_name)
+  line "DM-REUSE tie guard: #{_tie['reason']}" if _tie['blocked']
   # Reuse-first: if the picker auto-picked a safe candidate (covers ALL source
   # tables), reuse it automatically unless the user passed an explicit --reuse-dm.
-  if !opts[:reuse_dm] && dm_match['auto_picked'] && dm_match['recommended_dm_id']
+  if !opts[:reuse_dm] && _tie['auto_picked'] && dm_match['recommended_dm_id']
     opts[:reuse_dm] = :recommended
     line "DM-REUSE (auto): #{dm_match['rationale']}"
   end
@@ -4099,6 +4107,67 @@ elsif DashboardRead.expected?(WORK)
   end
   line "dashboard-read gate: #{DashboardRead.tile_count(WORK)} tile(s) verified (png-read.json)"
   RunState.stamp(WORK, 'phase-1d', note: 'source dashboard-read (png-read.json)')
+end
+
+# ---------------------------------------------------------------------------
+# Phase 2.6 — DM-reuse augmentation gate (#691). A reused DM never runs
+# through THIS conversion's Phase 3 build+POST, so the converter's own fact
+# element (conv_fact) can carry mechanically-derived columns (date-key
+# synthesis, cross-element Lookups, translated calc fields) that a fresh
+# build would have POSTed as real columns and reuse simply never emitted.
+# Verify the candidate against the ACTUAL columns the workbook will need
+# (not the raw column-superset score find-or-pick-dm.rb computed — a name
+# existing ANYWHERE in the DM is not the same as it being reachable from the
+# fact grain the workbook needs) and either author the missing ones onto the
+# live DM — replaying the SAME derivation a fresh build emits, never a second
+# implementation — or abandon reuse for a fresh build when a gap can't be
+# closed (a formula depends on an element/relationship the candidate lacks).
+# ---------------------------------------------------------------------------
+if reuse_dm_id && mechanical && conv_fact
+  hdr('2.6', 'DM-reuse augmentation gate')
+  $LOAD_PATH.unshift File.expand_path('lib', HERE) unless $LOAD_PATH.include?(File.expand_path('lib', HERE))
+  require 'sigma_rest'
+  _reuse_spec = begin
+    Sigma.request(:get, "/v2/dataModels/#{reuse_dm_id}/spec")
+  rescue StandardError => e
+    line "WARN: could not read back reuse candidate #{reuse_dm_id} to plan augmentation " \
+         "(#{e.class}: #{e.message.to_s[0, 100]}) — proceeding without it"
+    nil
+  end
+  if _reuse_spec.is_a?(Hash) && _reuse_spec['pages']
+    _reuse_els = MechanicalSpecs.all_elements(_reuse_spec)
+    _dim_re = /(^Dim\b| Dim$)/i
+    _reuse_fact = _reuse_els.reject { |e| e['name'] =~ _dim_re }
+                            .max_by { |e| (e['columns'] || []).size } ||
+                  _reuse_els.find { |e| e['name'] !~ _dim_re } || _reuse_els.first
+    if _reuse_fact
+      _plan = MechanicalSpecs.plan_reuse_derived_columns(conv_fact, _reuse_spec, _reuse_fact['name'])
+      if _plan['unclosable'].any?
+        _gap_names = _plan['unclosable'].map { |c| c['name'] }.join(', ')
+        line "REUSE REFUSED: candidate #{reuse_dm_id} is missing #{_plan['unclosable'].size} required " \
+             "derived field(s) with no derivable relationship/key on the live DM (#{_gap_names}) — " \
+             'abandoning reuse; building a fresh data model instead.'
+        Offramp.log(WORK, kind: 'reuse-gap-unclosable', detail: "#{reuse_dm_id}: #{_gap_names}") if defined?(Offramp)
+        reuse_dm_id = nil
+        opts[:reuse_dm] = nil
+      elsif _plan['closable'].any?
+        _added_names = _plan['closable'].map { |c| c['name'] }.join(', ')
+        line "REUSE AUGMENT: candidate #{reuse_dm_id} is missing #{_plan['closable'].size} derived " \
+             "field(s) a fresh build would have created (#{_added_names}) — authoring them onto the " \
+             'live DM (same derivation the fresh path would emit, not re-derived).'
+        _added = MechanicalSpecs.apply_reuse_augmentation!(_reuse_spec, _reuse_fact['name'], _plan['closable'])
+        _aug_path = File.join(WORK, 'dm-spec-reuse-augment.json')
+        File.write(_aug_path, JSON.pretty_generate(_reuse_spec))
+        sigma_run!(['ruby', File.join(HERE, 'post-and-readback.rb'), '--type', 'datamodel',
+                    '--spec', _aug_path, '--update-id', reuse_dm_id,
+                    '--out', File.join(WORK, 'dm-ids-reuse-augment.json')])
+        line "REUSE AUGMENT: added #{_added} column(s) to '#{_reuse_fact['name']}' on #{reuse_dm_id}"
+      else
+        line "REUSE: candidate #{reuse_dm_id} already carries every field the workbook needs — no augmentation required."
+      end
+    end
+  end
+  mark('phase2.6-reuse-augment')
 end
 
 # ---------------------------------------------------------------------------
