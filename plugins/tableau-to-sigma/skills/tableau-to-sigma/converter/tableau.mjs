@@ -3839,6 +3839,30 @@ function normalizeColumnName(name) {
   return name.replace(/[^a-zA-Z0-9]+/g, "_").replace(/^_|_$/g, "").toUpperCase();
 }
 var _qid = (name) => `"${String(name).replace(/"/g, '""')}"`;
+// LOCAL PATCH (#693): FIXED-LOD/window-helper raw-SQL emits GROUP-BY dimension
+// aliases straight from _resolveDimDisplayName2's `physicalUpper` — which by
+// design only collapses WHITESPACE (never sanitises other characters), so it
+// stays byte-for-byte aligned with the real warehouse column and keeps
+// resolving through quotePhysToken()/sqlExactByUpper() below. When the
+// physical name itself carries a character bare SQL can't take (a hyphen —
+// "Sub-Category", "Year-over-Year", "Ship-Mode" are all real Tableau
+// captions; same for embedded spaces or other punctuation), that un-mangled
+// name was reused BARE as the emitted `AS` alias, producing e.g.
+// `SUB_CATEGORY AS SUB-CATEGORY` — Snowflake reads the bare hyphen as a
+// minus operator (issue #693). Quote — never sanitise — so the emitted alias
+// and the [Custom SQL/<name>] formula reference built from the SAME string
+// elsewhere in this file keep agreeing byte-for-byte: quoting changes the
+// alias's legal-SQL REPRESENTATION, not its VALUE, and every name reaching
+// this helper is already upper-cased by _resolveDimDisplayName2, so a quoted
+// alias and Snowflake's own unquoted-identifier case-folding land on the
+// SAME output column name whenever quoting wasn't actually required.
+// Conditional (not _qid's unconditional quoting) to leave the common,
+// already-safe-bare-identifier case byte-identical to today
+// (test-lod-sql-quoting.rb Part B pins `AS CUSTOMER_REF_ID` bare — quoting it
+// unconditionally would needlessly change already-correct output). Charset
+// matches scripts/lib/sql_ident_check.rb's BARE_IDENT_RE (the Ruby-side
+// pre-POST gate's legality oracle) so both layers agree on "safe bare".
+var _qidIfNeeded = (name) => /^[A-Za-z_][A-Za-z0-9_$]*$/.test(String(name)) ? name : _qid(name);
 var _isNumericType = (t) => t === "integer" || t === "real";
 function qualifyTwoPartFqns(sql, db) {
   if (!sql || !db)
@@ -5950,7 +5974,7 @@ ${stmt}
       const dimSel = [];
       for (const d of dimsResolved) {
         if (!d.el || d.el === fe) {
-          dimSel.push(`__f.${qFact(d.dimUpper)} AS ${d.dimUpper}`);
+          dimSel.push(`__f.${qFact(d.dimUpper)} AS ${_qidIfNeeded(d.dimUpper)}`);
           continue;
         }
         const dimEl = d.el;
@@ -5972,7 +5996,7 @@ ${stmt}
           joins.push({ alias, path: dimEl.source.path.join("."), on });
           joinByEl.set(dimEl.id, alias);
         }
-        dimSel.push(`${alias}.${d.dimUpper} AS ${d.dimUpper}`);
+        dimSel.push(`${alias}.${d.dimUpper} AS ${_qidIfNeeded(d.dimUpper)}`);
       }
       if (joins.length === 0)
         return null;
@@ -5990,9 +6014,9 @@ ${joinSql}
       const useBase = fromClause === "__lod_base";
       for (const sigKey of Object.keys(lodHelpers)) {
         const rec = lodHelpers[sigKey];
-        const dimList = useBase ? rec.groupDimDisplayNames.map((dn) => physToQuotedAlias[dn.replace(/\s+/g, "_").toUpperCase()] || `"${dn}"`).join(", ") : rec.groupDimNames.map((dn) => {
+        const dimList = useBase ? rec.groupDimDisplayNames.map((dn) => physToQuotedAlias[dn.replace(/\s+/g, "_").toUpperCase()] || _qid(dn)).join(", ") : rec.groupDimNames.map((dn) => {
           const q = sqlExactByUpper[dn.toUpperCase()] || quotePhysToken(dn);
-          return q === dn ? dn : `${q} AS ${dn}`;
+          return q === dn ? dn : `${q} AS ${_qidIfNeeded(dn)}`;
         }).join(", ");
         const aggParts = [];
         for (const k of Object.keys(rec.aggsByExpr)) {
@@ -6256,9 +6280,9 @@ ${joinSql}
       return alias;
     }, _emitWindowOverClause2 = function(rec, win, windowAlias, innerAlias) {
       const _winUseBase = _baseFromExpr2().fromClause === "__lod_base";
-      const _emitPartDim = (d) => _winUseBase ? physToQuotedAlias[d] || d : d;
+      const _emitPartDim = (d) => _winUseBase ? physToQuotedAlias[d] || _qidIfNeeded(d) : _qidIfNeeded(d);
       const partBy = rec.partitionDimNames.length > 0 ? `PARTITION BY ${rec.partitionDimNames.map(_emitPartDim).join(", ")}` : "";
-      const orderBy = rec.orderDimAlias ? `ORDER BY ${rec.orderDimAlias}` : "";
+      const orderBy = rec.orderDimAlias ? `ORDER BY ${_qidIfNeeded(rec.orderDimAlias)}` : "";
       const windowSpec = (parts) => parts.filter(Boolean).join(" ");
       let overSql = "";
       switch (win.windowType) {
@@ -6344,9 +6368,9 @@ ${joinSql}
         const selectParts = [];
         const emitPartSource = (d) => {
           if (winUseBase)
-            return physToQuotedAlias[d] || d;
+            return physToQuotedAlias[d] || _qidIfNeeded(d);
           const q = quotePhysToken(d);
-          return q === d ? d : `${q} AS ${d}`;
+          return q === d ? d : `${q} AS ${_qidIfNeeded(d)}`;
         };
         for (const d of rec.partitionDimNames) {
           selectParts.push(emitPartSource(d));
@@ -6354,9 +6378,9 @@ ${joinSql}
         if (rec.orderDimRaw && rec.orderDimAlias) {
           const rawRef = winUseBase ? rewriteBaseExpr(rec.orderDimRaw) : rewritePhysExpr(rec.orderDimRaw);
           if (rec.orderDimDateTrunc) {
-            selectParts.push(`DATE_TRUNC('${rec.orderDimDateTrunc}', ${rawRef}) AS ${rec.orderDimAlias}`);
+            selectParts.push(`DATE_TRUNC('${rec.orderDimDateTrunc}', ${rawRef}) AS ${_qidIfNeeded(rec.orderDimAlias)}`);
           } else {
-            selectParts.push(`${rawRef} AS ${rec.orderDimAlias}`);
+            selectParts.push(`${rawRef} AS ${_qidIfNeeded(rec.orderDimAlias)}`);
           }
         }
         for (const k of Object.keys(rec.innerAggs)) {
@@ -6374,8 +6398,8 @@ ${joinSql}
         const groupByIdx = Array.from({ length: groupByCount }, (_, i) => i + 1).join(", ");
         const baseSelect = `SELECT ${selectParts.join(", ")} FROM ${winFrom} GROUP BY ${groupByIdx}`;
         const innerProjection = [
-          ...rec.partitionDimNames,
-          ...rec.orderDimAlias ? [rec.orderDimAlias] : [],
+          ...rec.partitionDimNames.map((d) => _qidIfNeeded(d)),
+          ...rec.orderDimAlias ? [_qidIfNeeded(rec.orderDimAlias)] : [],
           ...Object.values(rec.innerAggs).map((v) => v.alias)
         ];
         const outerProjection = innerProjection.concat(rec.windowOverParts);
