@@ -8,7 +8,7 @@
 #   SELECT SHIP_DATE AS SHIP_DATE, AVG(CASE WHEN DATETRUNC('month', SHIP_DATE)
 #     = DATETRUNC('month',DATE('12/01/2021')) THEN DAYS_TO_SHIP END)
 #     AS DAYS_TO_SHIP_CURRENT_MONTH_AVERAGE
-#   FROM CSA.TJ.EXECDASH_2FB33B_ORDERS GROUP BY 1
+#   FROM WHDB.WHSCHEMA.FIXTURE_ORDERS GROUP BY 1
 #
 # "Days to Ship" is actually a Tableau CALCULATED field —
 # DATEDIFF('day',[Order Date],[Ship Date]) — with NO physical counterpart on
@@ -43,7 +43,7 @@ def check(cond, msg, fails) fails << msg unless cond; puts "  #{cond ? 'PASS' : 
 STATEMENT = <<~SQL.strip
   SELECT SHIP_DATE AS SHIP_DATE, AVG(CASE WHEN DATETRUNC('month', SHIP_DATE) = DATETRUNC('month',DATE('12/01/2021'))
           THEN DAYS_TO_SHIP
-          END) AS DAYS_TO_SHIP_CURRENT_MONTH_AVERAGE FROM CSA.TJ.EXECDASH_2FB33B_ORDERS GROUP BY 1
+          END) AS DAYS_TO_SHIP_CURRENT_MONTH_AVERAGE FROM WHDB.WHSCHEMA.FIXTURE_ORDERS GROUP BY 1
 SQL
 
 CALC_FIELDS = [
@@ -51,7 +51,7 @@ CALC_FIELDS = [
     'depends_on' => ['Ship Date', 'Order Date'] }
 ]
 
-REAL_COLUMNS = { 'EXECDASH_2FB33B_ORDERS' => %w[ORDER_ID ORDER_DATE SHIP_DATE SHIP_MODE] }
+REAL_COLUMNS = { 'FIXTURE_ORDERS' => %w[ORDER_ID ORDER_DATE SHIP_DATE SHIP_MODE] }
 
 def build_model(statement)
   {
@@ -89,13 +89,13 @@ fixed_check = SqlIdentCheck.check(fixed_stmt, REAL_COLUMNS)
 check(fixed_check[:ok], "check-sql-idents passes on the fixed statement (unknown: #{fixed_check[:unknown].inspect})", fails)
 
 puts 'Part D — the gate is NOT weakened: a genuinely-unresolvable identifier still fails'
-untranslatable_stmt = 'SELECT SOME_TOTALLY_MADE_UP_COLUMN FROM CSA.TJ.EXECDASH_2FB33B_ORDERS'
+untranslatable_stmt = 'SELECT SOME_TOTALLY_MADE_UP_COLUMN FROM WHDB.WHSCHEMA.FIXTURE_ORDERS'
 still_fails = SqlIdentCheck.check(untranslatable_stmt, REAL_COLUMNS)
 check(!still_fails[:ok], 'an unrelated, genuinely-unknown identifier still fails the gate after our fixup exists', fails)
 
 puts 'Part E — a calc formula NOT confidently translatable is left completely alone (never guessed)'
 weird_calc = [{ 'name' => 'Weird Calc', 'formula' => 'IF [X] THEN [Y] ELSE [Z] END' }]
-weird_stmt = 'SELECT CASE WHEN 1=1 THEN WEIRD_CALC END AS W FROM CSA.TJ.EXECDASH_2FB33B_ORDERS'
+weird_stmt = 'SELECT CASE WHEN 1=1 THEN WEIRD_CALC END AS W FROM WHDB.WHSCHEMA.FIXTURE_ORDERS'
 weird_model = build_model(weird_stmt)
 weird_result = MechanicalSpecs.fix_calc_masquerading_as_physical!(weird_model, weird_calc, REAL_COLUMNS)
 check(weird_result[:rewritten].zero?, 'no substitution attempted for a non-DATEDIFF calc shape (refuse, never guess)', fails)
