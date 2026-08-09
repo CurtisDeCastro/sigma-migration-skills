@@ -483,12 +483,13 @@ when 'apply-patch'
             YAML.safe_load(body, permitted_classes: [Date, Time]) || {}
           end
         end
-      # Workbook code-rep GETs nest pages/layout/schemaVersion under `document`
-      # (live since 2026-08); flatten metadata+document onto ONE hash so every
-      # live['pages']/merged['layout'] read below stays correct whether `live`
-      # came from a live nested GET or a legacy flat --live-spec fixture (the
-      # adapter's document()/metadata() both tolerate an already-flat input).
-      live = WorkbookCode.legacy_view(live)
+      # Workbook code-rep GETs carry flat document.elements. Keep that canonical
+      # flat shape while merging a partial fidelity patch: converting the live
+      # spec to pages[].elements first would make a flat patch.elements array a
+      # second namespace, and canonicalize() would let those partial records
+      # (id/style but no kind) shadow the complete page-owned records.
+      canonical_live = WorkbookCode.canonicalize(live)
+      live = WorkbookCode.metadata(canonical_live).merge(WorkbookCode.document(canonical_live))
       unless live['pages'].is_a?(Array) && live['pages'].any?
         die 'live spec has no `pages` — refusing to PUT a spec that would blank the workbook', 4
       end
