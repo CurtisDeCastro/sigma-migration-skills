@@ -3020,7 +3020,10 @@ pages_xml = signals['pages'].map do |pg|
       pair = legend_pairs[i[0]]
       if pair
         nested = [
-          SigmaLayout.le(pair['chart'], 1, 19, 1, 9),
+          # Let the chart size from the full panel. The legend occupies the
+          # rightmost quarter as an overlay; reserving that width made Sigma
+          # shrink six-slice donuts to an unreadably small ring.
+          SigmaLayout.le(pair['chart'], 1, 25, 1, 9),
           SigmaLayout.le(pair['legend'], 19, 25, 1, 9)
         ].join("\n")
         SigmaLayout.gc(i[0], i[1], i[2], i[3], i[4], nested,
