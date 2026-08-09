@@ -1517,18 +1517,11 @@ end
 # the chart binds, but no field_map entry -> source:{} -> POST fails. Route every
 # remaining time-intel-shaped measure to the best-matching time-intel column.
 if ti_elements.any?
-  ti_re = /\b(SAMEPERIODLASTYEAR|TOTALYTD|TOTALQTD|TOTALMTD|DATESYTD|DATEADD|PARALLELPERIOD|PREVIOUSYEAR|PREVIOUSMONTH|PREVIOUSQUARTER)\b/i
   all_measures.each do |tbl, mname, expr|
     next if field_map.key?("#{tbl}.#{mname}")
-    e = expr.to_s
     # time-intel-shaped: a DAX time-intel function, OR a YoY/growth name, OR a
     # hand-rolled MAX(...)/ALL(...) prior-year ratio.
-    shape =
-      if e =~ ti_re then :generic
-      elsif mname =~ /YoY|Y\/Y|growth/i || e =~ /ALL\s*\([^)]*\[Year\]/i then :yoy
-      elsif mname =~ /\bYTD\b/i then :ytd
-      elsif mname =~ /\b(PY|Prior Year|Last Year|LY)\b/i then :prior
-      end
+    shape = PbiTimeIntelRoute.measure_shape(mname, expr)
     next unless shape
     # choose a target column across the emitted time-intel elements — but ONLY
     # those built from THIS measure's own fact. Cross-fact borrowing produced
