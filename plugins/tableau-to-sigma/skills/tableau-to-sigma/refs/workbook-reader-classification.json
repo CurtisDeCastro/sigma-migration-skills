@@ -60,6 +60,11 @@
       "reason": "Validates both workbook and data-model specs"
     },
     {
+      "path": "scripts/lib/lod_audit.rb",
+      "classification": "dual",
+      "reason": "Audits nested data-model elements and flat workbook elements for emitted LOD translations"
+    },
+    {
       "path": "scripts/lib/workbook_code.rb",
       "classification": "adapter",
       "reason": "Canonical workbook adapter with legacy nested-artifact compatibility"
