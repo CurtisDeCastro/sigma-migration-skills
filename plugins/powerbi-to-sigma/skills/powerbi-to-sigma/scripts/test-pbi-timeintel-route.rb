@@ -42,6 +42,10 @@ ok('explicit YTD name routes to cumulative column',
    R.measure_shape('Net Revenue YTD', 'CALCULATE(SUM(F[Revenue]), ALL(D[Month]))') == :ytd)
 ok('unnamed native time-intel expression retains generic routing',
    R.measure_shape('Revenue Comparison', 'CALCULATE([Revenue], SAMEPERIODLASTYEAR(D[Date]))') == :generic)
+ok('renamed reused element falls back to its source fact for sibling routing',
+   R.routing_table(nil, 'ORDER_FACT') == 'ORDER_FACT')
+ok('original measure table wins when the converter element name still matches',
+   R.routing_table('SALES_FACT', 'OTHER_FACT') == 'SALES_FACT')
 
 # --- routing simulation: mirror the gate in migrate-powerbi.rb. Only same-fact
 # elements are considered; a SAFETY prior-year measure with only ABSENCE elements

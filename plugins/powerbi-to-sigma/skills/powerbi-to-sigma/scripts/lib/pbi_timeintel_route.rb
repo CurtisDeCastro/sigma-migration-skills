@@ -55,6 +55,17 @@ module PbiTimeIntelRoute
     nil
   end
 
+  # A reused Sigma time-intel element may have been renamed since conversion
+  # ("Net Revenue PY" -> "Revenue by Year"), so no source measure name maps back
+  # to its original table. Preserve the source element's fact as the fallback
+  # routing table for co-locating base values and period dimensions.
+  def routing_table(original_table, time_intel_fact)
+    original = original_table.to_s.strip
+    return original unless original.empty?
+
+    time_intel_fact.to_s.strip
+  end
+
   def norm(str)
     str.to_s.gsub(/\s+/, '').downcase
   end

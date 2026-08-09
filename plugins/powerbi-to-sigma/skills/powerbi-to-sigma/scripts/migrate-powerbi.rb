@@ -1463,6 +1463,7 @@ conv_elements.each do |cel|
   hf = headline.call(pick['name'])
   ref['formula'] = hf if hf
   orig = ti_orig_table[mname]
+  route_table = PbiTimeIntelRoute.routing_table(orig, ti_fact)
   # route both the original-table queryRef and a self-named queryRef so whichever
   # form the PBIR binding used resolves to this element.
   field_map["#{orig}.#{mname}"] = ref if orig
@@ -1494,10 +1495,10 @@ conv_elements.each do |cel|
     valleaf  = base_val['name']
     valnorm  = valleaf.gsub(/\s+/, '').downcase
     all_measures.each do |t2, m2, e2|
-      next unless t2 == orig
+      next unless t2 == route_table
       enorm = e2.to_s.gsub(/\s+/, '').downcase
       agg_of_val = enorm =~ /(sum|average|avg|min|max|count|distinctcount)\([^)]*#{Regexp.escape(valnorm)}/
-      reg_alt.call("#{orig}.#{m2}", valleaf) if agg_of_val || m2 == valleaf
+      reg_alt.call("#{route_table}.#{m2}", valleaf) if agg_of_val || m2 == valleaf
     end
   end
   # The grouped element carries period dimension column(s) (Year and/or Month).
@@ -1506,7 +1507,7 @@ conv_elements.each do |cel|
   # date-dim queryRef forms (the calc-table date dim is the usual binding source).
   period_cols.each do |pc|
     %w[DATE_DIM DimDate DimMonth Date].each { |dt| reg_alt.call("#{dt}.#{pc['name']}", pc['name']) }
-    reg_alt.call("#{orig}.#{pc['name']}", pc['name'])
+    reg_alt.call("#{route_table}.#{pc['name']}", pc['name'])
   end
 end
 
