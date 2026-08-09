@@ -4249,6 +4249,23 @@ elsif mechanical
     dim_catalogs[tname.upcase] = cj['columns']
   end
   unless real_cols.empty?
+    # #700: the converter intentionally omits Tableau GUID-backed virtual-
+    # connection dates because their physical identity is not present in the
+    # converter output. Recover them BEFORE the phantom filter, and only when
+    # the TWB date metadata, owning relation, live physical column, and
+    # warehouse type all agree. --column-mapping is an explicit physical-name
+    # signal, but it does not weaken any of the other evidence requirements.
+    if have_twb
+      date_recovery = MechanicalSpecs.recover_guid_backed_date_fields!(
+        dm, File.binread(twb), real_cols, dim_catalogs,
+        column_mapping: opts[:column_mapping]
+      )
+      date_recovery[:messages].each do |message|
+        line message
+        Offramp.log(WORK, kind: 'guid-date-recovery-gap', detail: message.sub(/\AGAP:\s*/, '')) \
+          if message.start_with?('GAP:') && defined?(Offramp)
+      end
+    end
     pf = MechanicalSpecs.fixup_dm_spec(dm, real_cols, column_mapping: opts[:column_mapping])
     line "phantom-column filter: dropped #{pf[:phantom]} non-existent base column(s) using #{real_cols.size} live table catalog(s)" if pf[:phantom].to_i.positive?
     line "column-rename remap: rewired #{pf[:remapped]} base column(s) to their warehouse names (--column-mapping)" if pf[:remapped].to_i.positive?

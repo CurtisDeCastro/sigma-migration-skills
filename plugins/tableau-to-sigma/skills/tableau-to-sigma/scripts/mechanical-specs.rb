@@ -32,6 +32,8 @@ require 'set'
 require 'json'
 require 'open3'
 require 'zlib' # CRC32 — a cross-run-STABLE hash for case-disambiguating column ids (#455)
+require 'rexml/document'
+require 'rexml/xpath'
 require_relative 'lib/py_resolve' # real-Python resolver (Windows Store-stub safe)
 require_relative 'lib/theme_derive' # shared theme derivation/emission (v5.0)
 require_relative 'lib/sql_ident_check' # #685-C: calc-masquerading-as-physical fixup reuses its scanner/catalog check
@@ -1168,6 +1170,210 @@ module MechanicalSpecs
       end
     end
     out
+  end
+
+  # ---- GUID-backed date recovery (#700) -------------------------------------
+  # Recover converter-omitted virtual-connection dates only when Tableau type,
+  # parse format, owning relation, live physical column, and warehouse type all
+  # agree. Returns { recovered:, messages: }; "GAP:" messages are refusals.
+  def recover_guid_backed_date_fields!(model, twb_xml, real_cols, warehouse_catalogs,
+                                       column_mapping: nil)
+    result = { recovered: 0, messages: [] }
+    xml = twb_xml.to_s.encode('UTF-8', 'binary', invalid: :replace, undef: :replace, replace: '')
+    begin
+      document = REXML::Document.new(xml)
+    rescue REXML::ParseException => e
+      result[:messages] << "GAP: GUID date recovery could not parse the Tableau workbook: #{e.message.to_s.lines.first.to_s.strip}"
+      return result
+    end
+
+    warehouse_elements = all_elements(model).select do |element|
+      element.dig('source', 'kind') == 'warehouse-table'
+    end
+    by_table = warehouse_elements.group_by do |element|
+      Array(element.dig('source', 'path')).last.to_s.upcase
+    end
+
+    guid_of = lambda do |raw|
+      raw.to_s[/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i]&.downcase
+    end
+    table_token = lambda do |raw|
+      value = raw.to_s
+      bracketed = value.scan(/\[([^\]]+)\]/).flatten.last
+      value = bracketed unless bracketed.to_s.empty?
+      value = value.sub(/\s*\([^()]*\)\s*\z/, '').strip
+      value.split('.').last.to_s.gsub(/\A["`\[]|["`\]]\z/, '').upcase
+    end
+
+    relation_evidence = Hash.new { |hash, key| hash[key] = [] }
+    REXML::XPath.each(document, "//relation[@type='table']") do |relation|
+      owners = [relation.attributes['name'], relation.attributes['table']]
+               .map { |raw| table_token.call(raw) }.reject(&:empty?).uniq
+      owners.select! { |owner| by_table.key?(owner) }
+      REXML::XPath.each(relation, './columns/column') do |column|
+        guid = guid_of.call(column.attributes['name'])
+        next unless guid
+        relation_evidence[guid] << {
+          owners: owners,
+          format: column.attributes['date-parse-format'].to_s.strip
+        }
+      end
+    end
+
+    # parent-name is a second structural owner signal for vendor-wrapped
+    # relation attributes.
+    metadata_owners = Hash.new { |hash, key| hash[key] = [] }
+    REXML::XPath.each(document, '//metadata-record') do |record|
+      guid = guid_of.call(record.elements['local-name']&.text)
+      next unless guid
+      owner = table_token.call(record.elements['parent-name']&.text)
+      metadata_owners[guid] << owner if by_table.key?(owner)
+    end
+
+    fields = {}
+    REXML::XPath.each(document, '//column[@caption]') do |column|
+      guid = guid_of.call(column.attributes['name'])
+      next unless guid
+      next unless column.attributes['datatype'].to_s.casecmp?('date')
+      caption = column.attributes['caption'].to_s.strip
+      next if caption.empty?
+      fields[[guid, caption]] ||= { guid: guid, caption: caption }
+    end
+
+    normalized_mapping = {}
+    (column_mapping || {}).each do |source, destination|
+      normalized_mapping[source.to_s.strip.upcase] = destination.to_s.strip
+    end
+
+    physical_type_compatible = lambda do |format, type|
+      raw = type.to_s.downcase
+      next false if raw.empty? || raw =~ /bool|binary|variant|object|array/
+      next true if raw =~ /date|time|char|string|text/
+      format == 'yyyyMMdd' && raw =~ /int|number|numeric|decimal|float|double|real/
+    end
+
+    formula_for = lambda do |format, type, physical_display|
+      ref = "[#{physical_display}]"
+      next "Date(#{ref})" if type.to_s =~ /date|time/i
+      if format == 'yyyyMMdd'
+        text = "Text(#{ref})"
+        next %(Date(Left(#{text}, 4) & "-" & Mid(#{text}, 5, 2) & "-" & Right(#{text}, 2)))
+      end
+      strftime = {
+        'yyyy-MM-dd' => '%Y-%m-%d',
+        'MM/dd/yyyy' => '%m/%d/%Y',
+        'dd/MM/yyyy' => '%d/%m/%Y'
+      }[format]
+      strftime && %(Date(DateParse(Text(#{ref}), "#{strftime}")))
+    end
+
+    fields.each_value do |field|
+      guid = field[:guid]
+      caption = field[:caption]
+      evidence = relation_evidence[guid]
+      formats = evidence.map { |entry| entry[:format] }.reject(&:empty?).uniq
+      if formats.empty?
+        result[:messages] << "GAP: GUID-backed date #{caption.inspect} has no date-parse-format; NOT synthesized"
+        next
+      end
+      if formats.size != 1
+        result[:messages] << "GAP: GUID-backed date #{caption.inspect} has ambiguous date-parse-format values " \
+                             "#{formats.inspect}; NOT synthesized"
+        next
+      end
+      format = formats.first
+
+      owners = evidence.flat_map { |entry| entry[:owners] }
+      owners.concat(metadata_owners[guid])
+      owners = owners.reject(&:empty?).uniq
+      if owners.size != 1 || Array(by_table[owners.first]).size != 1
+        result[:messages] << "GAP: GUID-backed date #{caption.inspect} has ambiguous owning table evidence " \
+                             "#{owners.inspect}; NOT synthesized"
+        next
+      end
+      owner = owners.first
+      fact = by_table.fetch(owner).first
+
+      catalog = Array(warehouse_catalogs && (warehouse_catalogs[owner] || warehouse_catalogs[owner.upcase]))
+      live_names = Array(real_cols && (real_cols[owner] || real_cols[owner.upcase])).map { |name| name.to_s.upcase }
+      mapped = normalized_mapping[caption.upcase] || normalized_mapping[guid.upcase]
+      inferred = caption.gsub(/[^0-9A-Za-z]+/, '_').gsub(/\A_+|_+\z/, '').upcase
+      wanted = mapped.to_s.empty? ? [inferred, "#{inferred}_KEY"] : [mapped]
+      physical_candidates = catalog.select do |entry|
+        entry.is_a?(Hash) && wanted.any? { |name| entry['name'].to_s.casecmp?(name.to_s) }
+      end
+      physical_candidates.select! { |entry| live_names.include?(entry['name'].to_s.upcase) }
+      if physical_candidates.size != 1
+        reason = physical_candidates.empty? ? 'no verified physical warehouse column' : 'ambiguous physical warehouse columns'
+        result[:messages] << "GAP: GUID-backed date #{caption.inspect} has #{reason} on #{owner} " \
+                             "(expected #{wanted.join(' or ')}); NOT synthesized"
+        next
+      end
+      physical = physical_candidates.first
+      physical_name = physical['name'].to_s
+      physical_type = physical['type'].to_s
+      unless physical_type_compatible.call(format, physical_type)
+        result[:messages] << "GAP: GUID-backed date #{caption.inspect} maps to #{owner}.#{physical_name} with " \
+                             "incompatible warehouse type #{physical_type.inspect} for #{format.inspect}; NOT synthesized"
+        next
+      end
+
+      physical_display = display_name(physical_name)
+      physical_display = "#{caption} Key" if physical_display.casecmp?(caption)
+      date_formula = formula_for.call(format, physical_type, physical_display)
+      unless date_formula
+        result[:messages] << "GAP: GUID-backed date #{caption.inspect} uses unsupported date-parse-format " \
+                             "#{format.inspect}; NOT synthesized"
+        next
+      end
+
+      columns = (fact['columns'] ||= [])
+      existing_physical = columns.find do |column|
+        col_display(column).to_s.casecmp?(physical_display) ||
+          column['formula'].to_s.casecmp?("[#{owner}/#{display_name(physical_name)}]")
+      end
+      changed = false
+      unless existing_physical
+        existing_ids = columns.map { |column| column['id'] }.compact.to_set
+        physical_id = "c-#{slug(physical_display)}"
+        suffix = 2
+        while existing_ids.include?(physical_id)
+          physical_id = "c-#{slug(physical_display)}-#{suffix}"
+          suffix += 1
+        end
+        existing_physical = {
+          'id' => physical_id,
+          'name' => physical_display,
+          'formula' => "[#{owner}/#{display_name(physical_name)}]"
+        }
+        columns << existing_physical
+        fact['order'] << physical_id if fact['order']
+        changed = true
+      end
+
+      existing_date = columns.find { |column| col_display(column).to_s.casecmp?(caption) }
+      unless existing_date
+        existing_ids = columns.map { |column| column['id'] }.compact.to_set
+        date_id = "c-#{slug(caption)}"
+        suffix = 2
+        while existing_ids.include?(date_id)
+          date_id = "c-#{slug(caption)}-#{suffix}"
+          suffix += 1
+        end
+        columns << { 'id' => date_id, 'name' => caption, 'formula' => date_formula }
+        fact['order'] << date_id if fact['order']
+        changed = true
+      end
+
+      if changed
+        result[:recovered] += 1
+        source = mapped.to_s.empty? ? 'catalog match' : '--column-mapping'
+        result[:messages] << "GUID-backed date recovered: #{caption.inspect} on #{owner} via #{source} " \
+                             "#{physical_name} (#{physical_type}, #{format})"
+      end
+    end
+
+    result
   end
 
   # ---- computed-key join recovery (bead ovud; role-instanced, R3-1) -----------
