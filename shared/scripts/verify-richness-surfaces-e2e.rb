@@ -236,6 +236,7 @@ def probe_cortex_model(home, schema_version, model)
   sql = "SELECT SNOWFLAKE.CORTEX.COMPLETE('#{model}', 'Respond with exactly the single word: OK') AS resp"
   doc = {
     'schemaVersion' => schema_version,
+    'kind' => 'workbook', # PATCHED for live probe: current contract requires document.kind
     'pages' => [{ 'id' => 'p1', 'name' => 'P1' }],
     'elements' => [
       { 'id' => 'cx', 'kind' => 'table', 'name' => 'Cx',
@@ -386,6 +387,7 @@ def build_spec(home, schema_version, cortex_model, flags)
   XML
   doc = {
     'schemaVersion' => schema_version,
+    'kind' => 'workbook', # PATCHED for live probe: current contract requires document.kind
     'pages' => [
       { 'id' => PAGE1_ID, 'name' => 'Richness Probe — main' },
       { 'id' => PAGE2_ID, 'name' => 'Richness Probe — uniform card' }

@@ -212,6 +212,7 @@ def build_spec(home, schema_version)
 
   doc = {
     'schemaVersion' => schema_version,
+    'kind' => 'workbook', # PATCHED for live probe: current contract requires document.kind
     'pages' => [{ 'id' => PG_MAIN, 'name' => 'Overview' }],
     'elements' => [src, tab_table, tab_chart, tabbed[:element]],
     # layout is a single document field (sibling of `pages` and `elements`) — see
