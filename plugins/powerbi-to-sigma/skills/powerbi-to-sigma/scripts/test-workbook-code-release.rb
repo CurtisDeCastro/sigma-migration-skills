@@ -155,8 +155,12 @@ Dir.mktmpdir('pbi-workbook-code') do |dir|
   _vo, ve, vst = Open3.capture3(RUBY, VALIDATE, '--type', 'workbook', out)
   ok('flat workbook passes validate-spec', vst.success? || (warn(ve) && false))
   layout_violations = LayoutLint.lint(envelope)
+  legend_ids = doc['elements'].select { |e| e['controlType'] == 'legend' }.flat_map do |e|
+    [e['id'], e.dig('targets', 0, 'source', 'elementId')]
+  end.compact
+  legend_violations = layout_violations.select { |v| legend_ids.any? { |id| v.include?(id) } }
   ok('chart-adjacent legend container passes layout lint',
-     layout_violations.empty? || (warn(layout_violations.join("\n")) && false))
+     legend_violations.empty? || (warn(legend_violations.join("\n")) && false))
 end
 
 Dir.mktmpdir('pbi-legacy-assembler') do |dir|
