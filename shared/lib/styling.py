@@ -300,8 +300,12 @@ def gradient_header(id, title, subtitle=None, gradient=None, motif="glow", motif
     title_id = "%s-title" % id
     subtitle_id = "%s-subtitle" % id
 
+    # PATCHED for live probe (2026-08-08): live API now 400s "backgroundImage.source:
+    # Invalid value: undefined" -- the current contract nests the url under
+    # backgroundImage.source:{kind:"url",url:} instead of the old flat backgroundImage.url.
+    # See feature-coverage-report for the full finding (mirrors the styling.rb fix).
     container_el = {"id": container_id, "kind": "container", "style": {"borderRadius": "round"},
-                     "backgroundImage": {"url": bg_url, "style": {"fit": "cover"}}}
+                     "backgroundImage": {"source": {"kind": "url", "url": bg_url}, "style": {"fit": "cover"}}}
     title_el = {"id": title_id, "kind": "text", "verticalAlign": "middle",
                 "body": '# <span style="color: #FFFFFF">%s</span>' % title}
 
@@ -407,8 +411,9 @@ def gradient_card(id, kpi_element, gradient=None, page_cols=24, surfaces=None):
 
     grad = DEFAULT_THEME["card_gradient"] if gradient is None else gradient
     bg_url = svg_data_uri(compose_card_svg(grad))
+    # PATCHED for live probe (2026-08-08) -- see gradient_header's identical note above.
     container_el = {"id": id, "kind": "container", "style": {"borderRadius": "round"},
-                     "backgroundImage": {"url": bg_url, "style": {"fit": "cover"}}}
+                     "backgroundImage": {"source": {"kind": "url", "url": bg_url}, "style": {"fit": "cover"}}}
     child_layout = '<Element elementId="%s" gridColumn="1 / %d" gridRow="1 / 7"/>' % (
         kpi_element["id"], page_cols + 1)
     patch = {"value": {"color": "#FFFFFF"}, "name": {"color": "#FFFFFF"},

@@ -447,6 +447,7 @@ def build_spec(home, schema_version)
   ]
   doc = {
     'schemaVersion' => schema_version,
+    'kind' => 'workbook', # PATCHED for live probe: current contract requires document.kind
     'agents' => [agent],
     'pages' => [
       { 'id' => PG_MAIN, 'name' => 'Overview' },
@@ -521,17 +522,17 @@ begin
 
   surfaces = {
     'gradient_header :glow (hero, pg-main)' => {
-      post_accepted: !!(hdr_main_bg && hdr_main_bg.dig('backgroundImage', 'url').to_s.start_with?('data:image/svg+xml;base64,')),
+      post_accepted: !!(hdr_main_bg && hdr_main_bg.dig('backgroundImage', 'source', 'url').to_s.start_with?('data:image/svg+xml;base64,')),
       render_hint: 'Read the pg-main render — top band should show a dark-slate->blue diagonal gradient with a soft ' \
                     'radial glow motif (top-right) behind the white title/subtitle text.'
     },
     'gradient_header :rings (pg-actions)' => {
-      post_accepted: !!(hdr_actions_bg && hdr_actions_bg.dig('backgroundImage', 'url').to_s.start_with?('data:image/svg+xml;base64,')),
+      post_accepted: !!(hdr_actions_bg && hdr_actions_bg.dig('backgroundImage', 'source', 'url').to_s.start_with?('data:image/svg+xml;base64,')),
       render_hint: 'Read the pg-actions render — header band should show the purple gradient with concentric-ring ' \
                     '"signal" motif (top-right).'
     },
     'gradient_header bring-your-own (pg-motifs)' => {
-      post_accepted: !!(hdr_byo_bg && hdr_byo_bg.dig('backgroundImage', 'url') == BYO_URI),
+      post_accepted: !!(hdr_byo_bg && hdr_byo_bg.dig('backgroundImage', 'source', 'url') == BYO_URI),
       render_hint: 'Read the pg-motifs render (bottom band) — should show the teal/green diagonal gradient with the ' \
                     'hexagon-tile pattern verbatim (NOT the glow/rings library motifs), proving the bring-your-own ' \
                     'path bypasses SVG compose entirely.'
@@ -548,7 +549,7 @@ begin
                     'agents are enabled on this org) or a "not enabled" placeholder. Report exactly which.'
     },
     'KpiCard + gradient_card + sparkline (Revenue)' => {
-      post_accepted: !!(k_rev_bg && k_rev_bg.dig('backgroundImage', 'url').to_s.start_with?('data:') &&
+      post_accepted: !!(k_rev_bg && k_rev_bg.dig('backgroundImage', 'source', 'url').to_s.start_with?('data:') &&
                          k_rev_kpi && k_rev_kpi['comparisonColumn'] &&
                          k_rev_kpi.dig('value', 'color').to_s.downcase == '#ffffff' &&
                          k_rev_spark && k_rev_spark['kind'] == 'line-chart'),
@@ -557,7 +558,7 @@ begin
                     'validates the Task-3 padding:none fix).'
     },
     'KpiCard + gradient_card + sparkline (Orders)' => {
-      post_accepted: !!(k_ord_bg && k_ord_bg.dig('backgroundImage', 'url').to_s.start_with?('data:') &&
+      post_accepted: !!(k_ord_bg && k_ord_bg.dig('backgroundImage', 'source', 'url').to_s.start_with?('data:') &&
                          k_ord_kpi && k_ord_kpi['comparisonColumn'] &&
                          k_ord_kpi.dig('value', 'color').to_s.downcase == '#ffffff' &&
                          k_ord_spark && k_ord_spark['kind'] == 'line-chart'),

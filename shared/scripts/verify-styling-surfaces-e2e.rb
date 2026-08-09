@@ -320,6 +320,7 @@ def build_spec(home, schema_version, src_formula_fn, flags)
   ]
   doc = {
     'schemaVersion' => schema_version,
+    'kind' => 'workbook', # PATCHED for live probe: current contract requires document.kind
     # Live since 2026-08: themeName/themeOverrides moved to
     # document.settings.theme.{name,overrides} (shared/lib/code_rep.rb
     # DOC_KEYS) — a flat top-level themeName/themeOverrides is invalid on

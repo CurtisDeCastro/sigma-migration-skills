@@ -228,7 +228,7 @@ class MotifsTest(unittest.TestCase):
 
 class GradientHeaderTest(unittest.TestCase):
     def _decode(self, h):
-        url = h["element"][0]["backgroundImage"]["url"]
+        url = h["element"][0]["backgroundImage"]["source"]["url"]
         return base64.b64decode(url.replace("data:image/svg+xml;base64,", "")).decode()
 
     def test_default_glow_right_container_shape(self):
@@ -236,7 +236,7 @@ class GradientHeaderTest(unittest.TestCase):
         bg = h["element"][0]
         self.assertEqual(bg["kind"], "container")
         self.assertEqual(bg["style"], {"borderRadius": "round"})
-        self.assertTrue(bg["backgroundImage"]["url"].startswith("data:image/svg+xml;base64,"))
+        self.assertTrue(bg["backgroundImage"]["source"]["url"].startswith("data:image/svg+xml;base64,"))
         self.assertEqual(bg["backgroundImage"]["style"], {"fit": "cover"})
         self.assertTrue(any(e["kind"] == "text" and e["id"] == "ghdr-title" for e in h["element"]))
         self.assertIn("<Container", h["layout"])
@@ -283,12 +283,12 @@ class GradientHeaderTest(unittest.TestCase):
 
     def test_bring_your_own_http_url_used_verbatim(self):
         h = styling.gradient_header("ghdr", "X", motif="https://example.com/art.png")
-        self.assertEqual(h["element"][0]["backgroundImage"]["url"], "https://example.com/art.png")
+        self.assertEqual(h["element"][0]["backgroundImage"]["source"]["url"], "https://example.com/art.png")
 
     def test_bring_your_own_data_url_used_verbatim(self):
         uri = "data:image/png;base64,AAAA"
         h = styling.gradient_header("ghdr", "X", motif=uri)
-        self.assertEqual(h["element"][0]["backgroundImage"]["url"], uri)
+        self.assertEqual(h["element"][0]["backgroundImage"]["source"]["url"], uri)
 
     def test_gradient_wrong_stop_count_raises(self):
         with self.assertRaises(ValueError):
@@ -303,7 +303,7 @@ class GradientHeaderTest(unittest.TestCase):
     def test_no_go_motif_menu_key_falls_back_to_plain_gradient(self):
         surfaces = dict(styling.SURFACES, motif=False)
         h = styling.gradient_header("ghdr", "X", motif="rings", surfaces=surfaces)
-        bg = h["element"][0]["backgroundImage"]["url"]
+        bg = h["element"][0]["backgroundImage"]["source"]["url"]
         svg = base64.b64decode(bg.replace("data:image/svg+xml;base64,", "")).decode()
         self.assertTrue(bg.startswith("data:image/svg+xml;base64,"))
         self.assertIn("linearGradient", svg)
@@ -312,7 +312,7 @@ class GradientHeaderTest(unittest.TestCase):
     def test_no_go_motif_does_not_suppress_bring_your_own_url(self):
         surfaces = dict(styling.SURFACES, motif=False)
         h = styling.gradient_header("ghdr", "X", motif="https://example.com/art.png", surfaces=surfaces)
-        self.assertEqual(h["element"][0]["backgroundImage"]["url"], "https://example.com/art.png")
+        self.assertEqual(h["element"][0]["backgroundImage"]["source"]["url"], "https://example.com/art.png")
 
     def test_motif_side_center_translates_to_x_800_and_is_valid(self):
         h = styling.gradient_header("ghdr", "X", motif="rings", motif_side="center")
@@ -339,7 +339,7 @@ class GradientCardSparklineTest(unittest.TestCase):
         self.assertEqual(gc["element"][0]["id"], "card-1")
         self.assertEqual(gc["element"][0]["kind"], "container")
         self.assertEqual(gc["element"][0]["style"], {"borderRadius": "round"})
-        self.assertTrue(gc["element"][0]["backgroundImage"]["url"].startswith("data:image/svg+xml;base64,"))
+        self.assertTrue(gc["element"][0]["backgroundImage"]["source"]["url"].startswith("data:image/svg+xml;base64,"))
         self.assertEqual(gc["element"][0]["backgroundImage"]["style"], {"fit": "cover"})
         self.assertEqual(gc["child_layout"],
                           '<Element elementId="kpi-rev" gridColumn="1 / 25" gridRow="1 / 7"/>')
@@ -356,7 +356,7 @@ class GradientCardSparklineTest(unittest.TestCase):
 
     def test_gradient_card_decoded_svg_has_gradient_no_motif_group(self):
         gc = styling.gradient_card("card-1", self.GC_KPI_EL, ["#0F172A", "#2563EB"])
-        url = gc["element"][0]["backgroundImage"]["url"]
+        url = gc["element"][0]["backgroundImage"]["source"]["url"]
         svg = base64.b64decode(url.replace("data:image/svg+xml;base64,", "")).decode()
         self.assertIn("linearGradient", svg)
         self.assertNotIn("<g transform=", svg)
@@ -367,7 +367,7 @@ class GradientCardSparklineTest(unittest.TestCase):
         THEN a dark scrim rect on top -- so white KPI text stays legible on
         any gradient, bright or dark."""
         gc = styling.gradient_card("card-1", self.GC_KPI_EL, ["#0F172A", "#2563EB"])
-        url = gc["element"][0]["backgroundImage"]["url"]
+        url = gc["element"][0]["backgroundImage"]["source"]["url"]
         svg = base64.b64decode(url.replace("data:image/svg+xml;base64,", "")).decode()
         self.assertIn('id="card-scrim"', svg)
         self.assertIn('stop-opacity="%s"' % styling.CARD_SCRIM_TOP_OPACITY, svg)
@@ -376,7 +376,7 @@ class GradientCardSparklineTest(unittest.TestCase):
 
     def test_gradient_card_gradient_defaults_to_dark_slate_pair_when_omitted(self):
         gc = styling.gradient_card("card-1", self.GC_KPI_EL)
-        url = gc["element"][0]["backgroundImage"]["url"]
+        url = gc["element"][0]["backgroundImage"]["source"]["url"]
         svg = base64.b64decode(url.replace("data:image/svg+xml;base64,", "")).decode()
         default_gradient = styling.DEFAULT_THEME["card_gradient"]
         self.assertIn(default_gradient[0], svg)
