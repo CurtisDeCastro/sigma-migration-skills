@@ -244,7 +244,8 @@ puts "\n== W2.9: live path — refused identifier sends NOTHING (zero POSTs) =="
 Dir.mktmpdir do |dir|
   workdir_with(dir, [entry('probe_keys' => ['PRODUCT_KEY_(PRODUCT_DIM)'])])
   log = File.join(dir, 'stub.log')
-  _out, _err, st = run_probe_live(dir, { 'SIGMA_STUB_LOG' => log }, '--connection-id', 'conn-1')
+  _out, _err, st = run_probe_live(dir, { 'SIGMA_STUB_LOG' => log },
+                                  '--connection-id', 'conn-1', '--folder-id', 'fld-123')
   check(st.exitstatus == 3, "live refused → exit 3 (got #{st.exitstatus})", fails)
   check(!File.exist?(log) || spec_posts(log).empty?,
         'refused identifier → ZERO probe-workbook POSTs (never live SQL)', fails)
