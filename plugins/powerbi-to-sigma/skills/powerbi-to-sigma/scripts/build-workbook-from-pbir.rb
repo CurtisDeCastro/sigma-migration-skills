@@ -1416,7 +1416,8 @@ def prepare_drill_control!(el, rec, fields, masters, master, active_qr, active_c
   end
 end
 
-def prepare_legend_control!(el, rec, fields, masters, master, legend_qr, target_column_id)
+def prepare_legend_control!(el, rec, fields, masters, master, legend_qr, target_column_id,
+                            source_column_id = nil)
   return if legend_qr.nil? || target_column_id.nil? || rec['legend'] == false
   # Sigma legend controls require a categorical color target and do not support
   # waterfall charts. Waterfall splitBy keeps its chart-local legend instead.
@@ -1425,8 +1426,13 @@ def prepare_legend_control!(el, rec, fields, masters, master, legend_qr, target_
 
   fs = field_spec(legend_qr, fields, master)
   master_rec = master && masters[master]
-  source_col = master_rec && match_master_column(master_rec, qr_leaf(legend_qr),
-                                                  legend_qr.to_s.split('.').first)
+  source_col =
+    if source_column_id
+      Array(master_rec && master_rec['columns']).find { |c| c['id'] == source_column_id }
+    else
+      master_rec && match_master_column(master_rec, qr_leaf(legend_qr),
+                                        legend_qr.to_s.split('.').first)
+    end
   if source_col && fs['master'] == master
     el['_legend_control'] = {
       'sourceColumnId' => source_col['id'],
@@ -2203,9 +2209,30 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
     # the whole categoricalScheme on donut/pie (per-element color.scheme is dropped
     # there — theme palette is the only lever). Coalescing null -> "(Blank)" both
     # matches PBI's label and sorts ahead of letters ("(" < "A"), so every slice
-    # gets the same color PBI gave it. Only wrap a bare column ref.
+    # gets the same color PBI gave it. Materialize the coalesce on the workbook
+    # master when possible: Sigma otherwise preserves the source column's null
+    # color lineage and renders the dominant bucket gray/"Others" even though the
+    # chart-level display formula reads "(Blank)".
     dim_ref = dfs['ref']
-    dim_ref = %(Coalesce(#{dim_ref}, "(Blank)")) if dim_ref.to_s =~ /\A\[[^\]]+\]\z/
+    blank_safe_source_id = nil
+    if dim_ref.to_s =~ /\A\[[^\]]+\]\z/ && master && masters[master]
+      master_rec = masters[master]
+      source_col = match_master_column(master_rec, qr_leaf(dim), dim.to_s.split('.').first)
+      if source_col && source_col['formula']
+        blank_safe_source_id = "#{source_col['id']}-blank"
+        blank_name = "#{source_col['name']} (Blank-safe)"
+        unless Array(master_rec['columns']).any? { |c| c['id'] == blank_safe_source_id }
+          master_rec['columns'] << {
+            'id' => blank_safe_source_id,
+            'formula' => %(Coalesce(#{source_col['formula']}, "(Blank)")),
+            'name' => blank_name
+          }
+        end
+        dim_ref = "[#{master_rec['id']}/#{blank_name}]"
+      else
+        dim_ref = %(Coalesce(#{dim_ref}, "(Blank)"))
+      end
+    end
     cols << { 'id' => dcid, 'formula' => dim_ref, 'name' => qr_leaf(dim, 'Dim') }
     cv = { 'id' => vcid, 'formula' => measure_formula(vfs), 'name' => qr_leaf(val, 'Value') }
     apply_fmt(cv, val, fields, vfmts)
@@ -2223,7 +2250,8 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
     }
     el['value'] = { 'id' => vcid }
     prepare_drill_control!(el, rec, fields, masters, master, dim, dcid, cols)
-    prepare_legend_control!(el, rec, fields, masters, master, dim, dcid)
+    prepare_legend_control!(el, rec, fields, masters, master, dim, dcid,
+                            blank_safe_source_id)
     # value labels on pie/donut slices — honor an explicit PBI labels-off signal
     # (bead n9u9); default (nil/absent) keeps the labels shown as before.
     unless rec['data_labels'] == false
