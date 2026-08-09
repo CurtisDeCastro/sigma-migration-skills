@@ -121,6 +121,8 @@ Dir.mktmpdir('pbi-workbook-code') do |dir|
      progress['mode'] == 'value' && progress['value'].to_s.include?('master-s'))
   nav = doc['elements'].find { |e| e['kind'] == 'navigation' }
   ok('page navigator uses native auto navigation', nav && nav['mode'] == 'auto')
+  ok('feature-gated workbook navigation setting is omitted',
+     !doc.fetch('settings', {}).key?('navigation'))
   ok('background and spacing survive', waterfall.dig('style', 'backgroundColor') == '#F8FAFC' &&
      doc.dig('settings', 'theme', 'overrides', 'colorOverrides', 'backgroundCanvas') == '#EEF2F7' &&
      doc.dig('settings', 'theme', 'overrides', 'space', 'unit') == 'small')

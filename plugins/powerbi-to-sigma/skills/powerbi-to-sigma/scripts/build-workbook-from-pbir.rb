@@ -3121,9 +3121,7 @@ document = {
     'theme' => {
       'name' => 'Light',
       'overrides' => theme_overrides
-    },
-    # PBI page tabs/pageNavigator semantics map to Sigma workbook navigation.
-    'navigation' => { 'pageTabsInViewMode' => 'shown' }
+    }
   }
 }
 
