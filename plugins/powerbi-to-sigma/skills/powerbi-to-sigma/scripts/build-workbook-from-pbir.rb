@@ -1560,17 +1560,17 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
 
   # Report-build hardening: in page-base mode every visual sources the PAGE's one
   # base master (forced_master) so a single control target propagates to all —
-  # but only when at least one of the visual's own fields resolves on that base
-  # (else a genuinely different-fact visual would lose all its data; it keeps its
-  # own master and is surfaced as out-of-scope for the page control instead).
-  resolves_on = lambda do |m|
-    (rec['bindings'] || {}).values.flatten.compact.any? do |qr|
-      fs = field_spec(qr, fields)
-      fs['master'] == m || Array(fs['alts']).any? { |a| a['master'] == m }
-    end
+  # but only when ALL of the visual's fields resolve there. A partial match must
+  # retain per-visual master selection or a specialized grouped series (such as
+  # prior-year revenue) is silently dropped.
+  bound_qrs = (rec['bindings'] || {}).values.flatten.compact
+  masters_for = lambda do |qr|
+    fs = field_spec(qr, fields)
+    ([fs['master']] + Array(fs['alts']).map { |a| a['master'] }).compact.uniq
   end
   master =
-    if forced_master && masters[forced_master] && resolves_on.call(forced_master)
+    if forced_master && masters[forced_master] &&
+       PbiReportBuild.all_fields_resolve_on?(bound_qrs, forced_master, masters_for)
       forced_master
     else
       visual_master(rec, fields)
