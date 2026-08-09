@@ -1424,6 +1424,15 @@ def prepare_legend_control!(el, rec, fields, masters, master, legend_qr, target_
   return unless %w[bar-chart line-chart area-chart combo-chart scatter-chart
                    pie-chart donut-chart].include?(el['kind'])
 
+  # Pie/donut legends are presentation-first and already render in-panel in
+  # Sigma. A separate legend control consumes chart canvas height and shrinks the
+  # ring dramatically, so keep these chart-local. Cartesian legends retain the
+  # interactive companion control below.
+  if %w[pie-chart donut-chart].include?(el['kind'])
+    el['legend'] = { 'visibility' => 'shown' }
+    return
+  end
+
   fs = field_spec(legend_qr, fields, master)
   master_rec = master && masters[master]
   source_col =

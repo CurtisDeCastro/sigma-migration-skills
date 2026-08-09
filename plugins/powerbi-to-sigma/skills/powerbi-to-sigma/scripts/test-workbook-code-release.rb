@@ -141,8 +141,9 @@ Dir.mktmpdir('pbi-workbook-code') do |dir|
   ok('donut blank bucket is materialized on the master to avoid gray Others',
      blank_safe &&
        blank_safe['formula'] == 'Coalesce([S/Region], "(Blank)")' &&
-       donut_dim&.fetch('formula', nil) == '[master-s/Region (Blank-safe)]' &&
-       donut_legend&.dig('source', 'columnId') == 'm-region-blank')
+       donut_dim&.fetch('formula', nil) == '[master-s/Region (Blank-safe)]')
+  ok('donut keeps its legend chart-local so the ring fills the panel',
+     donut_legend.nil? && donut['legend'] == { 'visibility' => 'shown' })
   progress = doc['elements'].find { |e| e['kind'] == 'progress' }
   ok('gauge uses native ring progress', progress && progress['shape'] == 'ring' &&
      progress['mode'] == 'value' && progress['value'].to_s.include?('master-s'))
