@@ -1880,7 +1880,9 @@ cols = (Sigma.request(:get, "/v2/workbooks/#{wb_id}/columns") rescue { 'entries'
 err_cols = (cols['entries'] || []).select { |c| c.dig('type', 'type') == 'error' }
 total_cols = (cols['entries'] || []).size
 wb_pairs = Sigma::CodeRep.workbook_elements_with_pages(wb_rb)
-chart_els = wb_pairs.select { |_el, page| page && page['id'] != 'page-data' }.map(&:first)
+chart_pairs = wb_pairs.select { |_el, page| page && page['id'] != 'page-data' }
+chart_els = chart_pairs.map(&:first)
+chart_pages = chart_pairs.filter_map { |_el, page| page['id'] }.uniq
 
 # (2) warehouse-vs-snapshot compare (bead fmte). For every table the preflight
 # snapshotted, export the matching Data-page master element (Sigma = LIVE
