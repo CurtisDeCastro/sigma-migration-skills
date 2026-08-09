@@ -116,6 +116,11 @@ Dir.mktmpdir('pbi-workbook-code') do |dir|
        legend.dig('targets', 0, 'source', 'elementId') == bar['id'] &&
        legend.dig('targets', 0, 'columnId') == bar.dig('color', 'column') &&
        bar['legend'] == { 'visibility' => 'hidden' })
+  legend_pair = bar && legend &&
+                doc['layout'].match?(
+                  %r{<Container elementId="band-page-p1-legend-#{Regexp.escape(bar['id'])}"[^>]*>.*?<Element elementId="#{Regexp.escape(bar['id'])}"[^>]*/>.*?<Element elementId="#{Regexp.escape(legend['id'])}"[^>]*/>}m
+                )
+  ok('visible legend control stays beside its source chart', legend_pair)
   progress = doc['elements'].find { |e| e['kind'] == 'progress' }
   ok('gauge uses native ring progress', progress && progress['shape'] == 'ring' &&
      progress['mode'] == 'value' && progress['value'].to_s.include?('master-s'))

@@ -2894,6 +2894,25 @@ pages_xml = signals['pages'].map do |pg|
       children << SigmaLayout.header_band_xml(hdr_id, txt_id)
     end
 
+    # A generated Sigma legend control represents the source chart's in-panel
+    # legend, not a page filter. Keep it beside its chart in one container so it
+    # does not become a full-width control strip above the dashboard.
+    legend_pairs = {}
+    Array(page_spec && page_spec['elements']).each do |legend|
+      next unless legend['kind'] == 'control' && legend['controlType'] == 'legend'
+      chart_id = legend.dig('targets', 0, 'source', 'elementId')
+      chart_item = items.find { |it| it[0] == chart_id }
+      legend_item = items.find { |it| it[0] == legend['id'] }
+      next unless chart_item && legend_item
+
+      container_id = "band-#{page_id}-legend-#{chart_id}"
+      items = items.reject { |it| it[0] == chart_id || it[0] == legend['id'] }
+      items << [container_id, chart_item[1], chart_item[2], chart_item[3], chart_item[4]]
+      kind_of[container_id] = 'container'
+      extra << SigmaLayout.container_el(container_id)
+      legend_pairs[container_id] = { 'chart' => chart_id, 'legend' => legend['id'] }
+    end
+
     # 2) bands from the SOURCE rows, columns from the SOURCE x-positions
     min_rows = { 'kpi-chart' => 4, 'control' => 2, 'text' => 2, 'image' => 20,
                  'scatter-chart' => 9, 'region-map' => 9, 'point-map' => 9 }
@@ -2961,7 +2980,18 @@ pages_xml = signals['pages'].map do |pg|
       cursor += band_h
     end
     page_spec['elements'] = page_spec['elements'] + extra if page_spec
-    inner = les.map { |i| SigmaLayout.le(i[0], i[1], i[2], i[3], i[4]) }.join("\n")
+    inner = les.map do |i|
+      pair = legend_pairs[i[0]]
+      if pair
+        nested = [
+          SigmaLayout.le(pair['chart'], 1, 19, 1, 7),
+          SigmaLayout.le(pair['legend'], 19, 25, 1, 7)
+        ].join("\n")
+        SigmaLayout.gc(i[0], i[1], i[2], i[3], i[4], nested)
+      else
+        SigmaLayout.le(i[0], i[1], i[2], i[3], i[4])
+      end
+    end.join("\n")
     next SigmaLayout.page_xml(page_id, children.join("\n"), inner)
   end
 
