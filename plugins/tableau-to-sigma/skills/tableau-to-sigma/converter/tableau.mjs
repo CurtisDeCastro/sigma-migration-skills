@@ -2166,6 +2166,27 @@ function clampId(id, max = 64) {
   const suffix = "~" + encodeBase62(fnv1a32(id) % 62 ** 6, 6);
   return id.slice(0, max - suffix.length) + suffix;
 }
+// LOCAL PATCH (illegal controlId characters, 2026-08 bisect): the canonical
+// Sigma OpenAPI declares `controlId` as a bare string with NO documented
+// charset/pattern constraint, so this is not "the" charset — it is a
+// conservative SAFE SUBSET ([a-zA-Z0-9_-], <=64 chars) chosen because
+// restricting to a narrower set than the API actually accepts can never
+// cause a rejection, while a raw Tableau parameter caption CAN contain
+// characters a live DM POST rejects (observed: a caption using Tableau's own
+// pipe-delimited multi-value convention, e.g. "MultiParam | Category", was
+// rejected once the unstripped "|" reached a controlId). Collapses every run
+// of whitespace or other non-safe characters to a single "-", trims leading/
+// trailing "-", then reuses clampId's existing hash-suffixed truncation so a
+// long id cannot silently collide with another long id it was truncated
+// against. NOTE: shrinking the charset makes DISTINCT captions more likely
+// to normalize to the SAME id (e.g. "A | B" and "A @ B" both collapse to
+// "A-B") — callers must still run their controlId through a dedupe pass
+// (see the "controlId dedupe" block below) before treating the result as
+// collision-free.
+function sanitizeControlId(raw) {
+  const cleaned = String(raw || "").replace(/\s+/g, "-").replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/-{2,}/g, "-").replace(/^-+|-+$/g, "");
+  return clampId(cleaned || "control");
+}
 function sigmaShortId(len = 10) {
   let id;
   do {
@@ -3333,11 +3354,50 @@ function nsAttr(node, key) {
     return "";
   return node[keys.find((k) => k.includes(".true...")) || keys[0]] || "";
 }
+// LOCAL PATCH (FIXED-LOD raw-SQL dialect gap, 2026-08 bisect): the general
+// calc translator (tableauFormulaToSigma) maps Tableau function names to
+// Sigma's OWN DM-formula language (e.g. DATETRUNC -> DateTrunc(...) —
+// verified in refs/functions.json), but that translation target is Sigma
+// formula syntax, not SQL, so it cannot be reused verbatim here. FIXED-LOD
+// (and window-helper) lowering instead builds a raw Custom-SQL statement via
+// _tableauExprToSql, which previously did ONLY structural rewriting
+// (quote-style, IF/END -> CASE WHEN/END) and copied every function CALL name
+// through unchanged — emitting invalid Snowflake SQL like
+// DATETRUNC('month', ...) (Snowflake's function is DATE_TRUNC). This map is
+// the general fix: every Tableau function name that has a Snowflake SQL
+// equivalent with an IDENTICAL argument count/order (a safe 1:1 name swap,
+// never a restructure) is renamed at the point a function CALL is recognized
+// (name immediately followed by "(" — never a bare column token, which
+// by this point in the pipeline is already an unbracketed identifier and
+// could otherwise collide with a short map key like LEN/MID).
+//
+// Deliberately NOT included (name swap alone would be WRONG, not just
+// untranslated, because the calling convention differs): DATENAME (returns a
+// string; Snowflake has no same-signature equivalent, needs
+// TO_CHAR/MONTHNAME restructuring), FIND (Tableau FIND(string, substring) vs
+// Snowflake POSITION(substring, string) — argument ORDER is reversed),
+// ISNULL (Tableau function-call form vs SQL's "x IS NULL" operator form).
+// DATEADD and DATEDIFF are NOT in the map because their Tableau and
+// Snowflake forms already share the same name AND argument order — no
+// rewrite needed. Any Tableau function not covered here still passes through
+// unchanged (same behavior as before this patch), so remaining gaps fail
+// loudly as invalid SQL rather than silently miscompiling.
+var TABLEAU_TO_SQL_FUNC_MAP = {
+  DATETRUNC: "DATE_TRUNC",
+  DATEPART: "DATE_PART",
+  IIF: "IFF",
+  LEN: "LENGTH",
+  MID: "SUBSTR"
+};
 function _tableauExprToSql(s) {
   s = s.replace(/"([^"]*)"/g, (_m, inner) => `'${inner.replace(/'/g, "''")}'`);
   if (/\bIF\b/i.test(s) && /\bEND\b/i.test(s)) {
     s = s.replace(/\bELSE\s+IF\b/gi, "WHEN").replace(/\bELSEIF\b/gi, "WHEN").replace(/\bIF\b/gi, "CASE WHEN");
   }
+  s = s.replace(/\b([A-Za-z_][A-Za-z0-9_]*)(\s*\()/g, (m, fn, paren) => {
+    const sqlFn = TABLEAU_TO_SQL_FUNC_MAP[fn.toUpperCase()];
+    return sqlFn ? sqlFn + paren : m;
+  });
   return s;
 }
 function _tableauInnerToSql(expr) {
@@ -5983,7 +6043,7 @@ ${joinSql}
       } else if (top.countControl) {
         const param = parameters.find((p) => p.name.toUpperCase() === top.countControl.toUpperCase() || p.rawName?.toUpperCase() === top.countControl.toUpperCase() || sigmaDisplayName(p.name).toUpperCase() === sigmaDisplayName(top.countControl).toUpperCase());
         const ctlSourceName = param?.name || top.countControl;
-        const cidBase = clampId(sigmaDisplayName(ctlSourceName).replace(/\s+/g, "-"));
+        const cidBase = sanitizeControlId(sigmaDisplayName(ctlSourceName));
         controlId = cidBase;
         const defaultVal = parseInt(param?.defaultVal || "10", 10) || 10;
         if (param)
@@ -7554,7 +7614,7 @@ ${suggestion}
   }
   const controls = [];
   for (const p of parameters) {
-    const controlId = sigmaDisplayName(p.name).replace(/\s+/g, "-");
+    const controlId = sanitizeControlId(sigmaDisplayName(p.name));
     if (topNParamControls[p.name]) {
       const def = topNParamControls[p.name];
       const defVal = parseInt(p.defaultVal || String(def.defaultVal), 10) || def.defaultVal;
