@@ -72,7 +72,7 @@ end
 # bare spec['pages'] read here was always nil, so `elements` came back empty
 # and every run hit the "no matching elements" abort below.
 spec = Sigma::CodeRep.document(spec)
-elements = (spec['pages'] || []).flat_map { |p| p['elements'] || [] }
+elements = Sigma::CodeRep.workbook_elements(spec)
 targets = if opts[:element_ids]
             elements.select { |e| opts[:element_ids].include?(e['id']) }
           else
