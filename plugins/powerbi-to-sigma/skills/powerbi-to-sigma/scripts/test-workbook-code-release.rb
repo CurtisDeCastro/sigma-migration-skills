@@ -7,6 +7,7 @@ require 'open3'
 require 'tmpdir'
 require 'rbconfig'
 require_relative 'lib/layout_lint'
+require_relative 'lib/layout'
 
 BUILD = File.join(__dir__, 'build-workbook-from-pbir.rb')
 ASSEMBLE = File.join(__dir__, 'build-workbook-spec.rb')
@@ -121,9 +122,9 @@ Dir.mktmpdir('pbi-workbook-code') do |dir|
        bar['legend'] == { 'visibility' => 'hidden' })
   legend_pair = bar && legend &&
                 doc['layout'].match?(
-                  %r{<Container elementId="band-page-p1-legend-#{Regexp.escape(bar['id'])}"[^>]*>.*?<Element elementId="#{Regexp.escape(bar['id'])}"[^>]*/>.*?<Element elementId="#{Regexp.escape(legend['id'])}"[^>]*/>}m
+                  %r{<Container elementId="band-page-p1-legend-#{Regexp.escape(bar['id'])}"[^>]*gridTemplateRows="repeat\(8, 1fr\)"[^>]*>.*?<Element elementId="#{Regexp.escape(bar['id'])}"[^>]*/>.*?<Element elementId="#{Regexp.escape(legend['id'])}"[^>]*/>}m
                 )
-  ok('visible legend control stays beside its source chart', legend_pair)
+  ok('visible legend control stays beside and fills its source chart panel', legend_pair)
   donut = doc['elements'].find { |e| e['kind'] == 'donut-chart' }
   ok('donut category sort pins the positional Power BI palette',
      donut && donut.dig('color', 'sort') == {
@@ -152,6 +153,10 @@ Dir.mktmpdir('pbi-workbook-code') do |dir|
   ok('background and spacing survive', waterfall.dig('style', 'backgroundColor') == '#F8FAFC' &&
      doc.dig('settings', 'theme', 'overrides', 'colorOverrides', 'backgroundCanvas') == '#EEF2F7' &&
      doc.dig('settings', 'theme', 'overrides', 'space', 'unit') == 'small')
+  multiline_header = SigmaLayout.header_text_el('header', "Title\nSubtitle")
+  ok('multiline source header preserves a muted subtitle',
+     multiline_header['body'].include?('# <span style="color: #FFFFFF">Title</span>') &&
+       multiline_header['body'].include?('<span style="color: #94A3B8">Subtitle</span>'))
 
   control = doc['elements'].find { |e| e['controlType'] == 'list' }
   target_ids = Array(control && control['filters']).filter_map { |f| f.dig('source', 'elementId') }

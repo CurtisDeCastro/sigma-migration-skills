@@ -2921,7 +2921,7 @@ pages_xml = signals['pages'].map do |pg|
     if hdr_text_id
       hdr_el = page_spec && page_spec['elements'].find { |e| e['id'] == hdr_text_id }
       ttl = src_rec.call(hdr_text_id)['text'].to_s.strip
-      hdr_el['body'] = %(# <span style="color: #FFFFFF">#{ttl}</span>) if hdr_el
+      hdr_el['body'] = SigmaLayout.header_text_el(hdr_text_id, ttl)['body'] if hdr_el
       children << SigmaLayout.header_band_xml(hdr_id, hdr_text_id)
     else
       ttl = SigmaLayout.resolve_header_title(pg['page_title'], opts[:source_title], opts[:name]) || 'Dashboard'
@@ -3023,7 +3023,8 @@ pages_xml = signals['pages'].map do |pg|
           SigmaLayout.le(pair['chart'], 1, 19, 1, 9),
           SigmaLayout.le(pair['legend'], 19, 25, 1, 9)
         ].join("\n")
-        SigmaLayout.gc(i[0], i[1], i[2], i[3], i[4], nested)
+        SigmaLayout.gc(i[0], i[1], i[2], i[3], i[4], nested,
+                       row_template: 'repeat(8, 1fr)')
       else
         SigmaLayout.le(i[0], i[1], i[2], i[3], i[4])
       end
@@ -3121,7 +3122,7 @@ pages_xml = signals['pages'].map do |pg|
     items = items.reject { |i| i[0] == hdr_eid }
     next nil if items.empty?
     hdr_el = page_spec['elements'].find { |e| e['id'] == hdr_eid }
-    hdr_el['body'] = %(# <span style="color: #FFFFFF">#{hdr_vis['text']}</span>) if hdr_el
+    hdr_el['body'] = SigmaLayout.header_text_el(hdr_eid, hdr_vis['text'])['body'] if hdr_el
     xml, extra = banded_page(page_id, items, header_el: hdr_eid)
   else
     # No promotable source title — header text falls back, in priority order,
