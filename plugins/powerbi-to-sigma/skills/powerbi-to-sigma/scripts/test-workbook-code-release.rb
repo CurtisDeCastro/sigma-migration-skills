@@ -65,7 +65,9 @@ signals = {
       visual.call('nav', 'pageNavigator', 'navigation', 'text', {}, 'Pages', 450),
       visual.call('ctl', 'slicer', 'control', 'control', { 'Values' => ['S.Region'] }, 'Region', 600),
       visual.call('tbl', 'tableEx', 'table', 'table',
-                  { 'Values' => ['S.Region', 'S.Amount'] }, 'Details', 750)
+                  { 'Values' => ['S.Region', 'S.Amount'] }, 'Details', 750),
+      visual.call('donut', 'donutChart', 'donut', 'chart',
+                  { 'Category' => ['S.Region'], 'Y' => ['S.Amount'] }, 'Regional Share', 900)
     ]
   }]
 }
@@ -122,6 +124,11 @@ Dir.mktmpdir('pbi-workbook-code') do |dir|
                   %r{<Container elementId="band-page-p1-legend-#{Regexp.escape(bar['id'])}"[^>]*>.*?<Element elementId="#{Regexp.escape(bar['id'])}"[^>]*/>.*?<Element elementId="#{Regexp.escape(legend['id'])}"[^>]*/>}m
                 )
   ok('visible legend control stays beside its source chart', legend_pair)
+  donut = doc['elements'].find { |e| e['kind'] == 'donut-chart' }
+  ok('donut category sort pins the positional Power BI palette',
+     donut && donut.dig('color', 'sort') == {
+       'by' => donut.dig('color', 'id'), 'direction' => 'ascending'
+     })
   progress = doc['elements'].find { |e| e['kind'] == 'progress' }
   ok('gauge uses native ring progress', progress && progress['shape'] == 'ring' &&
      progress['mode'] == 'value' && progress['value'].to_s.include?('master-s'))

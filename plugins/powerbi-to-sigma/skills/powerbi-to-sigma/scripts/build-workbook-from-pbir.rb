@@ -2212,7 +2212,15 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
     cols << cv
     qr_cids[dim] = dcid if dim
     qr_cids[val] = vcid if val
-    el['color'] = { 'id' => dcid }
+    # Donut/pie colors come from the workbook categoricalScheme and are assigned
+    # positionally. Default Sigma ordering is value-descending; Power BI's
+    # categorical palette follows the category order (with "(Blank)" first).
+    # Seed that order here. An explicit source visual sort, when present, is
+    # applied later by apply_sort and overrides this default.
+    el['color'] = {
+      'id' => dcid,
+      'sort' => { 'by' => dcid, 'direction' => 'ascending' }
+    }
     el['value'] = { 'id' => vcid }
     prepare_drill_control!(el, rec, fields, masters, master, dim, dcid, cols)
     prepare_legend_control!(el, rec, fields, masters, master, dim, dcid)
