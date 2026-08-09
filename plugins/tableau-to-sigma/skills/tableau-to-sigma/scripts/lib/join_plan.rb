@@ -346,7 +346,7 @@ module JoinPlan
   # Role parentheticals are stripped BEFORE folding (see strip_role_paren).
   def relationship_probe_key(key, captions)
     # Duplicate logical-table roles suffix the field id itself, e.g.
-    #   <guid> (DATE_DIM (CSA.DATE_DIM)1)
+    #   <guid> (DATE_DIM (DEMO_SCHEMA.DATE_DIM)1)
     # That whole token is not GUID-shaped, but the datasource's column census
     # carries an exact caption for it. Prefer exact caption evidence before
     # falling back to the plain-GUID and display-name paths.
@@ -375,7 +375,7 @@ module JoinPlan
   # blocking, the safe direction.
   # Tableau appends a numeric role suffix after the closing physical-path
   # parenthesis when the same logical table appears more than once:
-  #   DATE_DIM (CSA.DATE_DIM)1
+  #   DATE_DIM (DEMO_SCHEMA.DATE_DIM)1
   # The suffix identifies the role, not a warehouse table.
   VC_LABEL_RE = /\(\s*([A-Za-z0-9_$]+(?:\.[A-Za-z0-9_$]+){1,2})\s*\)\d*\s*\z/
 
