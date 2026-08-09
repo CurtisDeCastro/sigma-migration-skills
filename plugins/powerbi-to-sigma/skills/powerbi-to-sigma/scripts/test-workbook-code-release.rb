@@ -6,6 +6,7 @@ require 'json'
 require 'open3'
 require 'tmpdir'
 require 'rbconfig'
+require_relative 'lib/layout_lint'
 
 BUILD = File.join(__dir__, 'build-workbook-from-pbir.rb')
 ASSEMBLE = File.join(__dir__, 'build-workbook-spec.rb')
@@ -146,6 +147,9 @@ Dir.mktmpdir('pbi-workbook-code') do |dir|
 
   _vo, ve, vst = Open3.capture3(RUBY, VALIDATE, '--type', 'workbook', out)
   ok('flat workbook passes validate-spec', vst.success? || (warn(ve) && false))
+  layout_violations = LayoutLint.lint(envelope)
+  ok('chart-adjacent legend container passes layout lint',
+     layout_violations.empty? || (warn(layout_violations.join("\n")) && false))
 end
 
 Dir.mktmpdir('pbi-legacy-assembler') do |dir|

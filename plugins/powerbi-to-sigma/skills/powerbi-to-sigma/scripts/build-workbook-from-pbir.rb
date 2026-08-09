@@ -2984,8 +2984,8 @@ pages_xml = signals['pages'].map do |pg|
       pair = legend_pairs[i[0]]
       if pair
         nested = [
-          SigmaLayout.le(pair['chart'], 1, 19, 1, 7),
-          SigmaLayout.le(pair['legend'], 19, 25, 1, 7)
+          SigmaLayout.le(pair['chart'], 1, 19, 1, 9),
+          SigmaLayout.le(pair['legend'], 19, 25, 1, 9)
         ].join("\n")
         SigmaLayout.gc(i[0], i[1], i[2], i[3], i[4], nested)
       else
