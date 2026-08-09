@@ -309,17 +309,26 @@ if unresolved.empty? && metric_fails.empty? && extra_fails.empty?
   exit 0
 end
 
-warn '[FAIL] workbook ref-resolution gate'
 if unresolved.any?
-  warn "       #{unresolved.size} of #{refs.size} referenced column(s) do NOT exist in the live DM " \
+  # Keep the progress count on the [FAIL] head. The retry breaker consumes
+  # this exact shape to distinguish a converging repair (18 -> 17 misses)
+  # from a repeating or growing failure.
+  warn "[FAIL] workbook ref-resolution gate — #{unresolved.size} of #{refs.size} referenced " \
+       "column(s) do NOT exist in the live DM " \
        "(#{available.size} columns):"
   unresolved.values.first(40).each do |r|
     warn "         ✗ #{r[:display]}   (referenced via #{r[:elements].to_a.map { |e| "[#{e}/…]" }.join(', ')})"
   end
   warn "         … and #{unresolved.size - 40} more." if unresolved.size > 40
+elsif metric_fails.any?
+  warn "[FAIL] workbook ref-resolution gate — #{metric_fails.size} of #{metric_refs.size} referenced " \
+       'metric(s) failed the DM metrics census:'
+else
+  warn '[FAIL] workbook ref-resolution gate'
 end
 if metric_fails.any?
-  warn "       #{metric_fails.size} of #{metric_refs.size} referenced metric(s) failed the DM metrics census:"
+  warn "       #{metric_fails.size} of #{metric_refs.size} referenced metric(s) failed the DM metrics census:" \
+    if unresolved.any?
   metric_fails.values.first(40).each { |failure| warn "         ✗ #{failure}" }
   warn "         … and #{metric_fails.size - 40} more." if metric_fails.size > 40
 end

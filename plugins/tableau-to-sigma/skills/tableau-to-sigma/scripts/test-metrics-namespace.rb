@@ -25,8 +25,8 @@
 #   T3 no-trip:  census names resolve via context / sidecar / --metrics /
 #                local element metrics (Parts A-D)
 #   T4 clear:    --type datamodel self-census admit + reject (Part I)
-#   T5 contract: NO census anywhere → the pre-W2.8 unknown-prefix ERROR is
-#                byte-compatible, plus a routing hint (Part H)
+#   T5 contract: NO census anywhere → a named metrics-census ERROR plus a
+#                routing hint (Part H); never fall back to column namespaces
 #   T6 degrade:  unparseable sidecar → WARN, never abort; validation proceeds
 #                census-less (Part J)
 #
@@ -148,11 +148,12 @@ Dir.mktmpdir do |dir|
   check(out.include?('prefix "Bogus" unknown'), 'bogus prefix still errors as unknown', fails)
 end
 
-puts 'Part H — NO census anywhere → unchanged unknown-prefix ERROR, with the routing hint'
+puts 'Part H — NO census anywhere → explicit metrics-census ERROR, with the routing hint'
 Dir.mktmpdir do |dir|
   out, code = run_validate(dir, wb_spec('[Metrics/Gross Revenue]'), ctx: dm_context) # no metrics, no sidecar
   check(code == 1, "no census → still exit 1 (got #{code})", fails)
-  check(out.include?('prefix "Metrics" unknown'), 'unknown-prefix error preserved', fails)
+  check(out.include?('no DM metrics census'),
+        'missing census is named explicitly (never resolved through columns)', fails)
   check(out.include?('--metrics'), 'error hints at the census routing (--metrics / sidecar)', fails)
 end
 
