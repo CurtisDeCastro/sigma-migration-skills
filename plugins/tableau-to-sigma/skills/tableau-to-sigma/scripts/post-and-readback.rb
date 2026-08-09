@@ -762,6 +762,11 @@ else
         'elements' => (p['elements'] || []).map do |e|
           el = { 'id' => e['id'], 'kind' => e['kind'], 'name' => e['name'] }
           el['columnLabels'] = labels_by_el[e['id']] if labels_by_el.key?(e['id'])
+          if e.key?('metrics')
+            el['metrics'] = Array(e['metrics']).map do |metric|
+              { 'id' => metric['id'], 'name' => metric['name'] }.compact
+            end
+          end
           el
         end
       }
@@ -853,14 +858,15 @@ if opts[:type] == 'datamodel' && res.is_a?(Net::HTTPSuccess)
     warn '========================================'
   elsif census_problems.any?
     warn "\n========================================"
-    warn "WARN — column census: #{census_problems.size} element(s) lost columns between POST and readback:"
+    warn "WARN — column/metric census: #{census_problems.size} element(s) lost columns or metrics between POST and readback:"
     ColumnCensus.report_lines(census_problems).each { |l| warn "  #{l}" }
-    warn 'These columns were POSTed but the live DM did not resolve them (silent drop —'
-    warn 'no HTTP error, no type=error entry). Downstream [Master/...] refs to missing'
-    warn 'columns will be caught by the pre-POST ref gate (assert-wb-refs-resolve.rb).'
+    warn 'Columns are compared only with GET /columns; metrics are compared only with the'
+    warn 'full DM readback metrics[] census. Downstream [Master/...] and [Metrics/...] refs'
+    warn 'to missing entries will be caught by assert-wb-refs-resolve.rb.'
     warn '========================================'
   elsif posted_spec
-    warn "column census: #{ColumnCensus.posted_column_count(posted_spec)} posted column(s) all resolved in readback"
+    warn "column/metric census: #{ColumnCensus.posted_column_count(posted_spec)} posted column(s) and " \
+         "#{ColumnCensus.posted_metric_count(posted_spec)} posted metric(s) all resolved in their readback namespaces"
   end
 end
 
