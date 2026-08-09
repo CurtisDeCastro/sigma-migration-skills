@@ -120,6 +120,15 @@ Encoding.default_external = Encoding::UTF_8
 # 19 = scoped-run mismatch: a --dashboard / mission.json stated scope named a
 #      dashboard that matches NOTHING in the workbook — the banner lists the
 #      workbook's dashboards (E9.6: never a silent full-workbook run);
+# 20 = the pre-POST Custom-SQL identifier gate (check-sql-idents.rb) found a
+#      statement referencing an identifier that does not exist on its FROM
+#      table — waive with --skip-sql-ident-gate "<reason>";
+# 21 = an element still carries the mechanical converter's placeholder
+#      warehouse-table name/path ("UNKNOWN") after every attribution chance
+#      (extract-landing manifest remap, phantom-column filter) has already
+#      run — POSTing it would 404 late with an unnamed "Source not found"
+#      error (#685-A). Land the embedded extract (or repoint the element by
+#      hand with --table-mapping) and re-run;
 # 3 = parity/guard fail; 4 = workbook layer needs the agent path; other = error.
 #
 # SINGLE-INVOCATION (speed review #2, wave 1):
@@ -2444,9 +2453,29 @@ if mechanical
   # a stray class='MapBox' (from a geo mark) otherwise would — dropping the
   # embedded path, the landing manifest, and the source.path remap.
   nondata_classes = %w[mapbox tableau-map wms wms-server]
-  if have_twb && !HydrateCustomSql.twb_has_sqlproxy?(twb)
+  # #685-A: sqlproxy detection must be scoped PER-DATASOURCE, not per-workbook.
+  # twb_has_sqlproxy?(twb) is a workbook-wide "does ANY datasource here use
+  # sqlproxy" question — gating this whole embedded-extract-landing block on
+  # its negation used to disable landing/remap for the ENTIRE workbook the
+  # moment ONE unrelated datasource was sqlproxy-backed (e.g. Superstore's
+  # "Commission Model" dashboard, fed by a published/file-based datasource
+  # with no landing path), even though a perfectly landable SIBLING datasource
+  # (the embedded "Sample - Superstore" Hyper extract) sat right next to it.
+  # non_sqlproxy_conn_classes scopes the eligibility scan to datasources that
+  # are NOT themselves sqlproxy-only, so the sqlproxy sibling's class can never
+  # leak into "is everything else here an embedded extract" — the sqlproxy
+  # datasource itself is still handled separately by the PDS-hydration block
+  # below (HydrateCustomSql.twb_has_sqlproxy? there is unchanged; both blocks
+  # can now fire in the SAME run for a mixed workbook).
+  if have_twb
+    sqlproxy_ds_names = HydrateCustomSql.sqlproxy_only_datasource_names(twb)
+    if sqlproxy_ds_names.any?
+      line "sqlproxy datasource(s) detected (#{sqlproxy_ds_names.join(', ')}) — scoping embedded-extract " \
+           'detection to the REMAINING datasource(s) only (#685-A: a sqlproxy datasource must not disable ' \
+           'landing/remap for an unrelated, landable sibling datasource)'
+    end
     conn_classes = begin
-      File.read(twb, encoding: 'UTF-8').scan(/<connection[^>]*\bclass='([^']+)'/).flatten.uniq
+      HydrateCustomSql.non_sqlproxy_conn_classes(twb)
         .reject { |c| c == 'federated' || nondata_classes.include?(c.to_s.downcase) }
     rescue StandardError
       []
@@ -4154,6 +4183,28 @@ elsif mechanical
     pf = MechanicalSpecs.fixup_dm_spec(dm, real_cols, column_mapping: opts[:column_mapping])
     line "phantom-column filter: dropped #{pf[:phantom]} non-existent base column(s) using #{real_cols.size} live table catalog(s)" if pf[:phantom].to_i.positive?
     line "column-rename remap: rewired #{pf[:remapped]} base column(s) to their warehouse names (--column-mapping)" if pf[:remapped].to_i.positive?
+    # Calc-field-as-physical-column guard (#685-C): a generated Custom-SQL
+    # window/LOD helper can reference a Tableau CALCULATED field's sanitized
+    # caption (e.g. DAYS_TO_SHIP for "Days to Ship" = DATEDIFF('day',[Order
+    # Date],[Ship Date])) as though it were a physical warehouse column. Fix
+    # it here, BEFORE the sql-ident gate / POST, using the SAME live catalogs
+    # just loaded — never weakens that gate; only prevents feeding it something
+    # it would rightly reject.
+    begin
+      _calc_path = File.join(WORK, 'calc-fields.json')
+      if File.exist?(_calc_path)
+        _calc_doc = JSON.parse(File.read(_calc_path, encoding: 'UTF-8'))
+        _calcs = Array(_calc_doc['calcs'])
+        cf = MechanicalSpecs.fix_calc_masquerading_as_physical!(dm, _calcs, real_cols)
+        if cf[:rewritten].to_i.positive?
+          line "calc-as-physical guard: substituted #{cf[:rewritten]} calculated-field reference(s) " \
+               "with their own translated SQL in #{cf[:elements].uniq.join(', ')} (#685-C)"
+        end
+      end
+    rescue StandardError => e
+      line "WARN: calc-as-physical guard failed (#{e.class}: #{e.message.to_s[0, 100]}) — " \
+           'a phantom physical-column reference (if any) is left for check-sql-idents to catch'
+    end
     # Retain the multi-metric recipe's point-in-time columns on the fact (the
     # discriminator / rollup flag + year the source didn't plot) so the
     # real-entity filter can run instead of being skipped as a dangling ref.
@@ -4274,6 +4325,32 @@ rescue StandardError => e
 end
 unless reuse_dm_id
   dm['folderId'] = opts[:folder] if opts[:folder]
+  # Unresolved-warehouse-table GATE (#685-A part 2): remap_from_manifest! and
+  # fixup_dm_spec have both had their chance by now. An element STILL carrying
+  # the converter's "UNKNOWN" placeholder name/path means nothing could
+  # attribute it to a real warehouse table (no landing manifest, --skip-
+  # extract-landing was waived, or 0% column-caption overlap with any manifest
+  # entry) — POSTing it 404s late and cryptically ("Source not found:
+  # warehouse table '<schema>.UNKNOWN'"). Fail loud and NAMED here instead.
+  unresolved = MechanicalSpecs.unresolved_warehouse_elements(dm)
+  if unresolved.any?
+    puts
+    puts '========== UNRESOLVED WAREHOUSE TABLE (exit 21) =========='
+    puts "The mechanical converter could not resolve a real warehouse table for #{unresolved.size} " \
+         'element(s) below — every attribution chance (extract-landing manifest remap, phantom-column'
+    puts 'filter) has already run. POSTing this DM would fail LATE with an unnamed "Source not found"'
+    puts 'error instead. Offending element(s):'
+    unresolved.each { |e| puts "  - #{e['name'].inspect}  path=#{(e.dig('source', 'path') || []).inspect}" }
+    puts
+    puts 'Likely causes, in order of likelihood:'
+    puts '  * an embedded-extract datasource that never got landed — check for a landing-manifest.json'
+    puts '    in this workdir (refs/extract-landing.md); land it (scripts/land-extracts.py), then re-run;'
+    puts '  * --skip-extract-landing was used and the DM table paths were knowingly left on you;'
+    puts "  * the manifest could not attribute this element by column-caption overlap (0% overlap) —"
+    puts '    repoint it by hand with --table-mapping.'
+    puts '==========================================================='
+    exit 21
+  end
   File.write(dm_spec_path, JSON.pretty_generate(dm))
   # In mechanical mode validate-spec.rb is advisory only: it flags cross-element
   # sibling refs that Sigma actually resolves via relationships (documented
