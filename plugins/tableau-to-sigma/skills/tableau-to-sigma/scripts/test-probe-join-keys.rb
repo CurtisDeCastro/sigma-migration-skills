@@ -13,9 +13,10 @@
 # Live-path coverage (stubbed sigma_rest, same -I <stub> -r sigma_rest seam as
 # test-parity-render-verify-fallback.rb): no --folder-id → the probe-workbook
 # POST body carries NO folderId key (an explicit null is a live 400, Twin B
-# e2e); --folder-id supplied → stamped; a POST 400 → probe_error records the
-# HTTP status + response-body excerpt and the console prints a --folder-id
-# hint when the error mentions the folder.
+# e2e); the body uses the current nested document envelope with flat elements;
+# --folder-id supplied → stamped; a POST 400 → probe_error records the HTTP
+# status + response-body excerpt and the console prints a --folder-id hint when
+# the error mentions the folder.
 #
 # W2.9 identifier-legality gate — six-trajectory matrix (the oracle itself is
 # unit-covered in test-sql-ident-check.rb Part J; derivation stripping in
@@ -332,7 +333,15 @@ Dir.mktmpdir do |dir|
   bodies = posts.map { |r| JSON.parse(r['body']) }
   check(bodies.all? { |b| !b.key?('folderId') },
         'no --folder-id → POST body carries NO folderId key (explicit null is a live 400)', fails)
-  check(bodies.all? { |b| b['schemaVersion'] == 1 && b['pages'] }, 'probe spec envelope otherwise intact', fails)
+  check(bodies.all? { |b|
+          doc = b['document']
+          doc.is_a?(Hash) && doc['schemaVersion'] == 1 && doc['kind'] == 'workbook' &&
+            doc['pages'].is_a?(Array) && doc['pages'].none? { |page| page.key?('elements') } &&
+            doc['elements'].is_a?(Array) && doc['elements'].one? &&
+            doc['elements'][0]['id'] == 'probe' && !doc['layout'].to_s.empty? &&
+            !b.key?('schemaVersion') && !b.key?('pages')
+        },
+        'probe POST uses nested document, flat elements, and layout-owned page membership', fails)
 end
 
 puts "\n== live probe, --folder-id supplied → folderId stamped on the POST body =="

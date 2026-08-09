@@ -65,6 +65,7 @@ require 'json'
 require 'csv'
 require 'optparse'
 require 'securerandom'
+require_relative 'lib/workbook_code'
 
 # K12(a): how long to wait for a probe's CSV export before giving up. Bounded by
 # wall-clock, not iteration count. The previous ~30s ceiling was routinely
@@ -202,7 +203,12 @@ def sigma_sql_rows(conn_id, folder_id, sql, columns, workdir: nil)
   # same way mechanical-specs.rb does.
   spec['folderId'] = folder_id if folder_id
   begin
-    r = Sigma.request(:post, '/v2/workbooks/spec', body: JSON.generate(spec))
+    # Workbook code-rep POSTs require the nested `document` envelope and flat
+    # document.elements. Keep this throwaway probe on the same canonical write
+    # boundary as production workbooks; the legacy flat pages[].elements body
+    # is rejected by the current API.
+    post_body = WorkbookCode.canonicalize(spec)
+    r = Sigma.request(:post, '/v2/workbooks/spec', body: JSON.generate(post_body))
   rescue Sigma::Error => e
     # Keep the HTTP status AND the response-body excerpt on one line so the
     # recorded probe_error names the real cause, not a bare "400 Bad Request".
