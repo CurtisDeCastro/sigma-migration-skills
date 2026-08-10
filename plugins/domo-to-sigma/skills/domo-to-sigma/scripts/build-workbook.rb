@@ -716,6 +716,23 @@ def build_axis_chart(card, kind)
     # bar-chart gets to the area-proportional hierarchy).
     is_treemap = ct == 'badge_treemap'
     xa['sort'] = { 'by' => mcols.first['id'], 'direction' => 'descending' } if mcols.first && (Array(card['orderBy']).any? || is_treemap)
+    order_override_path = File.join(OUT, 'category-order-overrides.json')
+    order_overrides = (JSON.parse(File.read(order_override_path)) rescue {}) if
+      File.exist?(order_override_path)
+    source_order = order_overrides && order_overrides[card['id'].to_s]
+    if source_order.is_a?(Array) && !source_order.empty?
+      source_formula = dcols[xidx]['formula']
+      rank_formula = source_order.each_with_index.reverse_each.reduce((source_order.length + 1).to_s) do |fallback, (label, rank)|
+        escaped = label.to_s.gsub('\\', '\\\\').gsub('"', '\\"')
+        %(If(#{source_formula} = "#{escaped}", #{rank + 1}, #{fallback}))
+      end
+      sort_col = {
+        'id' => "sort-source-order-#{card['id']}", 'name' => 'Source Order',
+        'formula' => rank_formula, 'hidden' => true
+      }
+      el['columns'] << sort_col
+      xa['sort'] = { 'by' => sort_col['id'], 'direction' => 'ascending' }
+    end
     el['xAxis'] = xa
   end
   unless mcols.empty?
