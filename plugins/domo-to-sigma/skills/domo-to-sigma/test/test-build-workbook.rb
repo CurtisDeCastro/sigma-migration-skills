@@ -628,7 +628,7 @@ calc_kpi = build_kpi({ 'id' => 'c34', 'title' => 'Margin % by Channel',
                                             '_isCalc' => true, 'label' => 'Margin Pct' } }, {})
 ok(!calc_kpi.nil?, 'KPI still built for an aggregate-calc summary number')
 eq(calc_kpi['columns'][0]['formula'],
-   'If(Sum([Master/Net Revenue]) = 0, 0, Sum([Master/Gross Profit]) / Sum([Master/Net Revenue]))',
+   'Coalesce(If(Sum([Master/Net Revenue]) = 0, 0, Sum([Master/Gross Profit]) / Sum([Master/Net Revenue])), 0)',
    'formula is the INLINED, masterized Beast Mode expression — NOT Sum([Master/Margin Pct]), ' \
    'a column that does not exist and would 400 the whole workbook POST')
 eq(calc_kpi['value'], { 'columnId' => calc_kpi['columns'][0]['id'] }, "value.columnId matches the inlined column's own id")
