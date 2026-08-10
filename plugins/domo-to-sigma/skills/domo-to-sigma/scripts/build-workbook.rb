@@ -2133,6 +2133,13 @@ def build_element_body(card, overrides)
       # close, just one element over).
       companion = apply_card_filters!(card, companion)
       companion = apply_card_date_window!(card, companion)
+      container_override_path = File.join(OUT, 'card-container-overrides.json')
+      container_overrides = (JSON.parse(File.read(container_override_path)) rescue {}) if
+        File.exist?(container_override_path)
+      if container_overrides&.dig(card['id'].to_s, 'summaryOwnsTitle')
+        companion['name'] = card['title']
+        el['name'] = ' '
+      end
       $companion_elements << companion
       warn_card(card, "source Summary Number ALSO represented as a companion KPI element " \
                       "'#{companion['name']}' alongside this #{el['kind'] || kind || 'chart'} element " \
