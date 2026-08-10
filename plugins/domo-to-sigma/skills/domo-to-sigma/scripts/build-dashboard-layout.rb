@@ -628,20 +628,6 @@ def build_page_synthesized(dashboard, page, opts, structure)
   kpi_rows     = structure[:kpi_rows]
   rail         = structure[:sidebar]
 
-  # A Domo chart's Summary Number is part of the SAME card, above the plot.
-  # Pair screenshot-observed `el-<card>-summary` zones with their primary card
-  # so they render in one Sigma container instead of detached KPI/chart bands.
-  observed_pairs = zones.filter_map do |summary|
-    next unless summary['_source'].to_s == 'observed-from-screenshot-summary'
-    card_id = summary['id'].to_s[/\Ael-(.+)-summary\z/, 1]
-    primary = zones.find { |z| z['id'].to_s == card_id.to_s }
-    primary ? { summary: summary, primary: primary } : nil
-  end
-  paired_zone_ids = observed_pairs.flat_map { |pair| [pair[:summary]['id'], pair[:primary]['id']] }
-  kpi_rows = Array(kpi_rows).map { |row|
-    Array(row).reject { |z| paired_zone_ids.include?(z['id']) }
-  }.reject(&:empty?)
-
   # --- header band (rows 1..1+HEADER_ROWS) -----------------------------------
   hdr_style, hdr_dark = header_from_source(dashboard)
   hdr_id = "#{prefix}-hdr"
@@ -711,7 +697,6 @@ def build_page_synthesized(dashboard, page, opts, structure)
     rail[:texts].each { |z| consumed[z['id']] = true }
   end
   kpi_rows.each { |row| row.each { |z| consumed[z['id']] = true } }
-  paired_zone_ids.each { |id| consumed[id] = true }
 
   resolve_zone_el = lambda do |z|
     case z['kind'].to_s
@@ -778,20 +763,6 @@ def build_page_synthesized(dashboard, page, opts, structure)
 
   # --- units: KPI rows, section text separators, section panels ---------------
   units = []
-  observed_pairs.each_with_index do |pair, pi|
-    summary_id = resolve_zone_el.call(pair[:summary])
-    primary_id = resolve_zone_el.call(pair[:primary])
-    next unless summary_id && primary_id
-    placed << summary_id
-    placed << primary_id
-    c0 = [to_icol.call(pair[:primary]['x_pct'].to_f), 24].min
-    c1 = [[to_icol.call(pair[:primary]['x_pct'].to_f + pair[:primary]['w_pct'].to_f), c0 + 1].max, 25].min
-    r0 = to_row.call(pair[:summary]['y_pct'].to_f)
-    r1 = to_row.call(pair[:primary]['y_pct'].to_f + pair[:primary]['h_pct'].to_f)
-    r1 = [r1, r0 + min_for.call(pair[:primary], primary_id) + 3].max
-    units << { kind: :card, c0: c0, c1: c1, r0: r0, r1: r1,
-               summary_id: summary_id, primary_id: primary_id, idx: pi }
-  end
   kpi_rows.each_with_index do |row, ki|
     ids  = []
     mins = []
@@ -861,12 +832,9 @@ def build_page_synthesized(dashboard, page, opts, structure)
   end
 
   # --- settle units top-to-bottom (never overlapping), then emit ---------------
-  rank = { text: 0, kpi: 1, card: 2, section: 3 }
+  rank = { text: 0, kpi: 1, section: 2 }
   units = units.sort_by { |u| [u[:r0], rank[u[:kind]], u[:idx]] }
-  urects = SigmaLayout.pack_rects(units.map { |u|
-    u[:kind] == :card ? [u[:c0], u[:c1], u[:r0], u[:r1]] :
-                        [content_c0, content_c1, u[:r0], u[:r1]]
-  })
+  urects = SigmaLayout.pack_rects(units.map { |u| [content_c0, content_c1, u[:r0], u[:r1]] })
   units.each_with_index do |u, i|
     c0, c1, r0, r1 = urects[i]
     case u[:kind]
@@ -883,14 +851,6 @@ def build_page_synthesized(dashboard, page, opts, structure)
       children << gc(cid, c0, c1, r0, r1, inner)
     when :text
       children << le(u[:id], c0, c1, r0, r1)
-    when :card
-      cid = "#{prefix}-card-#{u[:idx] + 1}"
-      extra_els << container_el(cid)
-      span = [r1 - r0, 5].max
-      kpi_h = [3, span - 2].min
-      inner = le(u[:summary_id], 1, 25, 1, 1 + kpi_h) + "\n" +
-              le(u[:primary_id], 1, 25, 1 + kpi_h, 1 + span)
-      children << gc(cid, c0, c1, r0, r1, inner)
     when :section
       cid = "#{prefix}-sec-#{u[:idx] + 1}"
       extra_els << container_el(cid)
