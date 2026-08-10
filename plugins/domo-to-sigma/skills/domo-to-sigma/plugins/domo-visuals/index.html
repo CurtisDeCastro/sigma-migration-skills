@@ -20,7 +20,7 @@
 </head>
 <body><div id="root"></div>
 <script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
-<script>document.write('<script src="https://unpkg.com/@sigma'+'computing/plugin"><\/script>')</script>
+<script src="https://unpkg.com/@sigmacomputing/plugin"></script> <!-- // pragma: allowlist secret -->
 <script>
 (function(){
   "use strict";
@@ -85,7 +85,11 @@
       })
     })
   }
-  new ResizeObserver(function(){draw(last)}).observe(root);
+  var resizeFrame=null;
+  new ResizeObserver(function(){
+    if(resizeFrame)cancelAnimationFrame(resizeFrame);
+    resizeFrame=requestAnimationFrame(function(){resizeFrame=null;draw(last)});
+  }).observe(root);
 })();
 </script>
 </body>
