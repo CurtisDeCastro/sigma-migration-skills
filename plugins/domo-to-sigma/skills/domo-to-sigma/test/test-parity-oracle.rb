@@ -135,6 +135,9 @@ ok(actuals_src.match?(/if rows\.empty\?/),
 
 # ---------------------------------------------------------------------------
 oracle_src = File.read(File.join(SCRIPTS, 'build-parity-oracle.rb'))
+ok(oracle_src.include?("'kind' => 'domo-card-data-cap'") &&
+   oracle_src.include?("card['num_rows'].to_i == 500"),
+   'oracle records exact-500 Domo collector truncation instead of scoring extra Sigma rows')
 cid_src = oracle_src[/^def card_id_for\(element_id\)\n.*?\nend\n/m]
 ok(cid_src, 'extracted card_id_for(element_id) from build-parity-oracle.rb')
 eval(cid_src, TOPLEVEL_BINDING) if cid_src # rubocop:disable Security/Eval

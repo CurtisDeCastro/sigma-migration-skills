@@ -401,6 +401,18 @@ charts.each do |c|
                     'reason' => "no Sigma actual: #{reason}" }
     next
   end
+  if !is_kpi && card['num_rows'].to_i == 500 && Array(act['rows']).length > 500
+    exclusions << {
+      'chart' => name, 'element_id' => eid,
+      'reason' => "Domo card-data returned exactly 500 rows (the endpoint cap) while Sigma " \
+                  "returned #{Array(act['rows']).length}; the source collector is truncated, " \
+                  'so scoring the extra live rows as a migration divergence would be false.',
+      'evidence' => { 'card_id' => cid, 'domo_rows' => 500,
+                      'sigma_rows' => Array(act['rows']).length,
+                      'kind' => 'domo-card-data-cap' }
+    }
+    next
+  end
   act_rows, act_columns = realign_actual_columns(act['rows'], act['columns'], card['columns'])
   act_rows, act_columns, _dropped_actual_columns =
     dedupe_identical_columns(act_rows, act_columns)
