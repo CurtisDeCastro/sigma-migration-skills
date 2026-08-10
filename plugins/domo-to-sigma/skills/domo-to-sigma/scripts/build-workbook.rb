@@ -797,7 +797,18 @@ def build_axis_chart(card, kind)
     end
   end
   if kind == 'line-chart' && ct == 'badge_symbolline'
-    el['pointStyle'] = { 'visibility' => 'shown', 'shape' => 'circle', 'size' => 4 }
+    el['lineAreaStyle'] = {
+      'interpolation' => 'linear',
+      'line' => { 'width' => 1 },
+      'points' => { 'visibility' => 'shown', 'shape' => 'circle', 'size' => 9 }
+    }
+    if el['xAxis']
+      el['xAxis']['format'] = {
+        'marks' => 'none',
+        'labels' => { 'fontSize' => 7, 'labelAngle' => -45,
+                      'allowLongerLabels' => true }
+      }
+    end
   end
   el
 end
@@ -826,6 +837,7 @@ def build_pie_or_donut(card, kind)
       'sort' => (mcol ? { 'by' => mcol['id'], 'direction' => 'descending' } :
                          { 'direction' => 'ascending' })
     } : nil,
+    'legend' => { 'position' => 'left', 'fontSize' => 9 },
   }.compact
 end
 
