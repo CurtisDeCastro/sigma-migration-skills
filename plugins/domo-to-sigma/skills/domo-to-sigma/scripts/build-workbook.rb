@@ -2148,11 +2148,6 @@ def build_element_body(card, overrides)
         'id' => "header-kpi-#{card['id']}", 'kind' => 'text',
         'body' => header_rule['body'].to_s
       }
-      $companion_elements << {
-        'id' => "divider-header-kpi-#{card['id']}", 'kind' => 'divider',
-        'direction' => 'horizontal',
-        'style' => { 'color' => '#D9DEE5', 'width' => 1, 'strokeStyle' => 'solid' }
-      }
       kpi['name'] = ' '
       value_col = Array(kpi['columns']).find { |column|
         column['id'] == kpi.dig('value', 'columnId')
@@ -2280,11 +2275,6 @@ def build_element_body(card, overrides)
         companion = {
           'id' => "header-#{card['id']}", 'kind' => 'text',
           'body' => header_rule['body'].to_s
-        }
-        $companion_elements << {
-          'id' => "divider-header-#{card['id']}", 'kind' => 'divider',
-          'direction' => 'horizontal',
-          'style' => { 'color' => '#D9DEE5', 'width' => 1, 'strokeStyle' => 'solid' }
         }
         el['name'] = ' '
       end
