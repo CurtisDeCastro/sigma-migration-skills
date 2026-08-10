@@ -1092,7 +1092,9 @@ def plugin_gauge_source(card)
   }&.dig('formula')
   current = Array(card['columns']).find { |c| c['mapping'].to_s.upcase == 'CURRENT' }
   target = Array(card['columns']).find { |c| c['mapping'].to_s.upcase == 'TARGET' }
-  grain_date = card.dig('dateGrain', 'column')
+  drf_column = card.dig('dateRangeFilter', 'column')
+  drf_column = drf_column['column'] if drf_column.is_a?(Hash)
+  grain_date = card.dig('dateGrain', 'column') || drf_column
   actual_expr =
     if percent && source_formula
       domo_formula_to_snowflake(source_formula)
@@ -1158,7 +1160,7 @@ def pluginize_visual(card, live_el)
     format =
       if card.dig('summaryNumber', 'format', 'type').to_s.downcase.include?('percent')
         '.1%'
-      elsif card.dig('dateGrain', 'column')
+      elsif card.dig('dateGrain', 'column') || card.dig('dateRangeFilter', 'column')
         '.0%'
       else
         'int'
