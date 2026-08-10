@@ -77,6 +77,10 @@ MONTH_NUM = {
 def canonicalize_dim(v)
   return v unless v.is_a?(String)
   s = v.strip
+  # Domo serializes a blank categorical value as "", while Sigma's warehouse
+  # export serializes the same missing value as null. They are one semantic
+  # bucket, not a value divergence (live Top Performing Subjects gold run).
+  return nil if s.empty?
   # ISO datetime at midnight → day bucket (T or space separator)
   if (m = s.match(/\A(\d{4})-(\d{2})-(\d{2})[T ]00:00:00(?:\.0+)?(?:Z|[+-]\d{2}:?\d{2})?\z/))
     return "#{m[1]}-#{m[2]}-#{m[3]}"

@@ -101,9 +101,9 @@ act_by_eid = actuals['charts'] || {}
 act_unavail = (actuals['unavailable'] || []).each_with_object({}) { |u, h| h[u['element_id'].to_s] = u['reason'] }
 
 def card_id_for(element_id)
-  m = /\Ael-(\d+)(-summary)?\z/.match(element_id.to_s)
+  m = /\Ael-(\d+)(?:-(summary))?(?:-verify)?\z/.match(element_id.to_s)
   return [nil, false] unless m
-  [m[1], !m[2].nil?]
+  [m[1], m[2] == 'summary']
 end
 
 # Parse the handful of date shapes the two sides actually emit. Domo's card-data
@@ -155,11 +155,15 @@ end
 def canonicalise_dim(rows)
   return [rows, 0] unless rows.is_a?(Array)
   n = 0
-  out = rows.map do |r|
+  week_rows = []
+  out = rows.map.with_index do |r, idx|
     a = Array(r).dup
     s = a.first.to_s
     if (m = /\A(\d{4})-([A-Z][a-z]{2})\z/.match(s)) && MONTH_ABBR[m[2]]
       a[0] = format('%s-%02d', m[1], MONTH_ABBR[m[2]])
+      n += 1
+    elsif (m = /\A([A-Z][a-z]{2})\s+(\d{2})\z/.match(s)) && MONTH_ABBR[m[1]]
+      a[0] = format('20%s-%02d', m[2], MONTH_ABBR[m[1]])
       n += 1
     elsif (m = /\A(\d{4})-Q([1-4])\z/.match(s))
       a[0] = format('%s-%02d', m[1], ((m[2].to_i - 1) * 3) + 1)
@@ -171,10 +175,37 @@ def canonicalise_dim(rows)
       # Sunday on or before Jan 1 == start of Domo's week 1.
       wk1 = jan1 - ((jan1.wday) % 7)
       a[0] = (wk1 + ((wk - 1) * 7)).to_s
+      week_rows << idx
       n += 1
     end
     a
   end
+
+  # Domo names a week by the calendar year attached to the label. Around New
+  # Year, `Week-53 2024` and `Week-1 2025` can describe the SAME Sunday-based
+  # physical week. Sigma emits one grouped row; after canonicalisation Domo has
+  # two rows with the same date. Coalesce only those week-derived collisions,
+  # and only when every trailing value is numeric/nil, so a legitimate second
+  # string dimension can never be collapsed.
+  by_date = Hash.new { |h, k| h[k] = [] }
+  week_rows.each { |idx| by_date[out[idx][0]] << idx }
+  removed = {}
+  by_date.each_value do |indices|
+    next unless indices.length > 1
+    candidates = indices.map { |idx| out[idx] }
+    width = candidates.map(&:length).max
+    next unless candidates.all? do |row|
+      (1...width).all? { |i| row[i].nil? || row[i].is_a?(Numeric) }
+    end
+    merged = [candidates.first[0]]
+    (1...width).each do |i|
+      values = candidates.map { |row| row[i] }.compact
+      merged << (values.empty? ? nil : values.sum)
+    end
+    out[indices.first] = merged
+    indices.drop(1).each { |idx| removed[idx] = true }
+  end
+  out = out.each_with_index.reject { |_row, idx| removed[idx] }.map(&:first)
   [out, n]
 end
 
@@ -185,6 +216,54 @@ def max_date(rows)
   ds = rows.map { |r| parse_date(Array(r).first) }
   return nil if ds.any?(&:nil?)
   ds.max
+end
+
+def same_parity_value?(left, right)
+  return true if left == right
+  return left.to_f == right.to_f if left.to_s.match?(/\A-?\d+(?:\.\d+)?\z/) &&
+                                    right.to_s.match?(/\A-?\d+(?:\.\d+)?\z/)
+  false
+end
+
+def dedupe_identical_columns(rows, columns)
+  rows = Array(rows).map { |row| Array(row) }
+  columns = Array(columns)
+  return [rows, columns, []] if rows.empty?
+  keep = []
+  dropped = []
+  (0...rows.map(&:length).max).each do |idx|
+    prior = keep.find { |candidate|
+      rows.all? { |row| same_parity_value?(row[candidate], row[idx]) }
+    }
+    prior ? dropped << idx : keep << idx
+  end
+  return [rows, columns, []] if dropped.empty?
+  [rows.map { |row| keep.map { |idx| row[idx] } },
+   keep.map { |idx| columns[idx] },
+   dropped.map { |idx| columns[idx] || idx }]
+end
+
+def normalize_parity_header(value)
+  value.to_s.gsub(/\([^)]*\)\z/, '').gsub(/[^a-z0-9]/i, '').downcase
+end
+
+def realign_actual_columns(rows, actual_columns, expected_columns)
+  actual_columns = Array(actual_columns)
+  expected_columns = Array(expected_columns)
+  return [rows, actual_columns] unless actual_columns.length == expected_columns.length
+  unused = (0...actual_columns.length).to_a
+  order = []
+  expected_columns.each do |wanted|
+    idx = unused.find {
+      |candidate| normalize_parity_header(actual_columns[candidate]) ==
+                   normalize_parity_header(wanted)
+    }
+    return [rows, actual_columns] unless idx
+    unused.delete(idx)
+    order << idx
+  end
+  [Array(rows).map { |row| order.map { |idx| Array(row)[idx] } },
+   order.map { |idx| actual_columns[idx] }]
 end
 
 stale_evidence = []
@@ -325,12 +404,28 @@ charts.each do |c|
                     'reason' => "no Sigma actual: #{reason}" }
     next
   end
+  if !is_kpi && card['num_rows'].to_i == 500 && Array(act['rows']).length > 500
+    exclusions << {
+      'chart' => name, 'element_id' => eid,
+      'reason' => "Domo card-data returned exactly 500 rows (the endpoint cap) while Sigma " \
+                  "returned #{Array(act['rows']).length}; the source collector is truncated, " \
+                  'so scoring the extra live rows as a migration divergence would be false.',
+      'evidence' => { 'card_id' => cid, 'domo_rows' => 500,
+                      'sigma_rows' => Array(act['rows']).length,
+                      'kind' => 'domo-card-data-cap' }
+    }
+    next
+  end
+  act_rows, act_columns = realign_actual_columns(act['rows'], act['columns'], card['columns'])
+  act_rows, act_columns, _dropped_actual_columns =
+    dedupe_identical_columns(act_rows, act_columns)
 
   # Canonicalise the dimension BEFORE the row is recorded — doing it afterwards
   # mutates a local the emitted hash no longer references, which is exactly the
   # bug this comment exists to stop recurring.
-  exp_rows, canon_n = canonicalise_dim(exp_rows)
-  canonicalised += canon_n
+  exp_rows, expected_canon_n = canonicalise_dim(exp_rows)
+  act_rows, actual_canon_n = canonicalise_dim(act_rows)
+  canonicalised += expected_canon_n + actual_canon_n
 
   verified << {
     'chart'          => name,
@@ -348,7 +443,7 @@ charts.each do |c|
     # requested columns makes every tile raise — measured here, not guessed.
     # Without it the export's own column order is used, which is already the
     # element's plotted order. `columns` is still carried for diagnostics.
-    'actual'         => { 'rows' => act['rows'], 'columns' => act['columns'] },
+    'actual'         => { 'rows' => act_rows, 'columns' => act_columns },
   }
 
   # ---- warehouse-freshness evidence, collected as we go -------------------
@@ -356,7 +451,7 @@ charts.each do |c|
   # on BOTH sides, which is the only shape where "whose data is newer" is a
   # meaningful question.
   ed = max_date(exp_rows)
-  ad = max_date(act['rows'])
+  ad = max_date(act_rows)
   stale_evidence << { 'chart' => name, 'element_id' => eid,
                       'domo_max' => ed.to_s, 'sigma_max' => ad.to_s,
                       'days' => (ed - ad).to_i } if ed && ad && ed > ad

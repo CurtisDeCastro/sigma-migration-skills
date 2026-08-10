@@ -9,6 +9,7 @@
 #
 #   ruby test/test-parity-oracle.rb
 require 'json'
+require 'date'
 
 SKILL   = File.expand_path('..', __dir__)
 SCRIPTS = File.join(SKILL, 'scripts')
@@ -134,6 +135,9 @@ ok(actuals_src.match?(/if rows\.empty\?/),
 
 # ---------------------------------------------------------------------------
 oracle_src = File.read(File.join(SCRIPTS, 'build-parity-oracle.rb'))
+ok(oracle_src.include?("'kind' => 'domo-card-data-cap'") &&
+   oracle_src.include?("card['num_rows'].to_i == 500"),
+   'oracle records exact-500 Domo collector truncation instead of scoring extra Sigma rows')
 cid_src = oracle_src[/^def card_id_for\(element_id\)\n.*?\nend\n/m]
 ok(cid_src, 'extracted card_id_for(element_id) from build-parity-oracle.rb')
 eval(cid_src, TOPLEVEL_BINDING) if cid_src # rubocop:disable Security/Eval
@@ -143,12 +147,73 @@ if cid_src
      'a base tile id yields the card id and is_summary=false')
   eq(card_id_for('el-922919965-summary'), ['922919965', true],
      'a companion tile id yields the same card id and is_summary=true')
+  eq(card_id_for('el-922919965-verify'), ['922919965', false],
+     'a static visual live-verification tile joins to the card as a base value tile')
+  eq(card_id_for('el-922919965-summary-verify'), ['922919965', true],
+     'a formatted companion KPI parity twin retains summary semantics')
   eq(card_id_for('master-1252fb63'), [nil, false],
      'a master element traces to no card (it is excluded, not silently skipped)')
   eq(card_id_for('header-block-1'), [nil, false],
      'a put-layout header element traces to no card')
   eq(card_id_for('el-922919965-summary-extra'), [nil, false],
      'the pattern is anchored — a longer suffix is not mistaken for a summary tile')
+end
+
+canon_src = oracle_src[/^def canonicalise_dim\(rows\)\n.*?(?=^def max_date\(rows\))/m]
+ok(canon_src, 'extracted canonicalise_dim(rows) from build-parity-oracle.rb')
+month_abbr_src = oracle_src[/^MONTH_ABBR = .*?\.freeze\n/m]
+eval(month_abbr_src, TOPLEVEL_BINDING) if month_abbr_src && !defined?(MONTH_ABBR) # rubocop:disable Security/Eval
+eval(canon_src, TOPLEVEL_BINDING) if canon_src # rubocop:disable Security/Eval
+
+if canon_src
+  rows, n = canonicalise_dim([
+    ['Week-53 2024', 206_226.0, 85_758.0, 60_993.0],
+    ['Week-1 2025', 204_276.0, 85_341.0, 62_985.0],
+    ['Week-2 2025', 10.0, 20.0, 30.0],
+  ])
+  eq(n, 3, 'all Domo week labels are canonicalised')
+  eq(rows,
+     [['2024-12-29', 410_502.0, 171_099.0, 123_978.0],
+      ['2025-01-05', 10.0, 20.0, 30.0]],
+     'year-boundary labels for one physical week coalesce by summing measures')
+
+  categorical, = canonicalise_dim([
+    ['Week-53 2024', 'A', 1.0],
+    ['Week-1 2025', 'B', 2.0],
+  ])
+  eq(categorical.length, 2,
+     'a second string dimension prevents coalescing legitimate category rows')
+
+  compact_months, compact_count = canonicalise_dim([['Jan 24', 10], ['Dec 26', 20]])
+  eq(compact_months, [['2024-01', 10], ['2026-12', 20]],
+     'compact Sigma month labels canonicalise to Domo ISO month buckets')
+  eq(compact_count, 2, 'each compact month rewrite is counted')
+end
+
+dedupe_src = oracle_src[/^def same_parity_value\?\(left, right\)\n.*?(?=^stale_evidence =)/m]
+ok(dedupe_src, 'extracted identical-column normalization helpers')
+eval(dedupe_src, TOPLEVEL_BINDING) if dedupe_src # rubocop:disable Security/Eval
+if dedupe_src
+  aligned, headers = realign_actual_columns(
+    [['Bree Spence', 8, 40_593.75, 324_750]],
+    ['Owner Name', 'Is Won', 'Amount (Value)', 'Amount (Bubblesize)'],
+    ['IsWon', 'Amount', 'Owner.Name', 'Amount']
+  )
+  eq(aligned, [[8, 40_593.75, 'Bree Spence', 324_750]],
+     'scatter export is realigned to Domo XTIME/VALUE/SERIES/BUBBLESIZE order')
+  eq(headers, ['Is Won', 'Amount (Value)', 'Owner Name', 'Amount (Bubblesize)'],
+     'realigned headers stay parallel')
+
+  rows, cols, dropped = dedupe_identical_columns(
+    [['2026-07-12', '129.0', 208, '129'],
+     ['2026-07-13', '66.0', 95, '66']],
+    ['Date', 'Unique Page Views', 'Page Views', 'Visitors']
+  )
+  eq(rows, [['2026-07-12', '129.0', 208], ['2026-07-13', '66.0', 95]],
+     'numeric-equivalent duplicate visual channel is removed from Sigma rows')
+  eq(cols, ['Date', 'Unique Page Views', 'Page Views'],
+     'column headers stay aligned after removal')
+  eq(dropped, ['Visitors'], 'dropped channel is auditable')
 end
 
 puts $failures.zero? ? "\nALL PASS" : "\n#{$failures} FAILURE(S)"

@@ -51,6 +51,8 @@ require 'json'
 require 'set'
 require 'optparse'
 require 'time'
+$LOAD_PATH.unshift File.expand_path('lib', __dir__)
+require 'code_rep'
 
 opts = {}
 OptionParser.new do |p|
@@ -73,8 +75,7 @@ abort("missing #{cards_path}") unless File.exist?(cards_path)
 raw_cards = JSON.parse(File.read(cards_path))
 cards = raw_cards.is_a?(Array) ? raw_cards : Array(raw_cards['cards'])
 spec = JSON.parse(File.read(spec_path))
-doc = spec['document'] || spec           # code-rep wrapper tolerated either way
-elements = Array(doc['pages']).flat_map { |p| Array(p['elements']) }
+elements = Sigma::CodeRep.workbook_elements(spec)
 
 # Every card id that reached the built spec. Element ids are `el-<cardId>` for a
 # card's own tile and `el-<cardId>-summary` for its companion KPI, so either

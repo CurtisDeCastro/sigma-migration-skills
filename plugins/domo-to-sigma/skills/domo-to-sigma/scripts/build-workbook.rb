@@ -55,6 +55,11 @@ end
 
 $companion_elements = [] # bead 08sf — Task 5 populates this
 $sub_masters = {}        # bead ziht — datasetId => sub-master element Hash
+$chart_helpers = []      # hidden grouped source tables for scatter/bubble charts
+$plugin_source_elements = [] # hidden live sources for hosted no-native plugin visuals
+$kpi_verification_elements = [] # raw-value twins when visible KPI display is scaled/formatted
+$chart_verification_elements = [] # raw-value twins when visible axes are display-scaled
+$table_verification_elements = [] # export-stable twins when visible table styling is presentation-only
 
 # bead ziht: dm-spec.json is build-dm.rb's PRE-post spec (already at this
 # script's own OUT dir — build-dm.rb writes it to discovery/, same as
@@ -186,8 +191,8 @@ CHART_TYPE_MAP = {
   'badge_vert_nestedbar'      => 'bar-chart',   # approximated (no 2-level nested axis) — see warning
   'badge_treemap'             => 'bar-chart',   # NO_NATIVE_EQUIVALENT — sorted desc by measure
   'badge_symbolline'          => 'line-chart',
-  'badge_curved_symbolline'   => 'line-chart',
-  'badge_trendline'           => 'line-chart',
+  'badge_curved_symbolline'   => 'area-chart',
+  'badge_trendline'           => 'area-chart',
   'badge_two_trendline'       => 'line-chart',
   'badge_xyscatterplot'       => 'scatter-chart',
   'badge_bubble'              => 'scatter-chart',  # + size channel from a BUBBLESIZE-mapped column
@@ -289,12 +294,12 @@ end
 # more reliable than guessing from `aggregation`/`groupBy` alone. Falls back to
 # the aggregation/groupBy heuristic when no column carries a `mapping` (Tier B,
 # or an extraction pass that hasn't captured it yet).
-DIM_MAPPINGS = %w[ITEM CATEGORY XTIME DATE].freeze
+DIM_MAPPINGS = %w[ITEM CATEGORY DATE].freeze
 MEASURE_MAPPINGS = %w[VALUE CURRENT TARGET BUBBLESIZE].freeze
 
-# SERIES is AMBIGUOUS and must be disambiguated by whether the column carries an
-# aggregation — it used to sit in DIM_MAPPINGS unconditionally, which silently
-# produced charts with ZERO measures.
+# SERIES and XTIME are AMBIGUOUS and must be disambiguated by whether the column
+# carries an aggregation. Treating aggregated XTIME as a dimension collapsed
+# the live Top Salespeople scatter to one row and dropped COUNT(IsWon).
 #
 # LIVE EVIDENCE (2026-07-30):
 #   * badge_line_bar / combo + two-axis cards bind every MEASURE via SERIES
@@ -306,10 +311,12 @@ MEASURE_MAPPINGS = %w[VALUE CURRENT TARGET BUBBLESIZE].freeze
 #     SERIES (a plain string column, NO aggregation).
 # So: SERIES + aggregation => measure; SERIES without => split dimension.
 SERIES_MAPPING = 'SERIES'
+RAW_SERIES_MEASURE_CHART_TYPES = %w[badge_line_stackedbar badge_symbol_bar].freeze
 
 def split_cols(card)
   cols = card['columns'] || []
   gb = Array(card['groupBy'])
+  chart_type = card['chartType'].to_s.downcase
   dims = []
   meas = []
   # Per-column: prefer Domo's own `mapping` when THIS column carries one (it's
@@ -320,9 +327,18 @@ def split_cols(card)
   # correctly instead of silently losing the untagged columns.
   cols.each do |c|
     m = c['mapping'].to_s.upcase
-    if m == SERIES_MAPPING
-      # Ambiguous by design — see SERIES_MAPPING above.
-      c['aggregation'].to_s.empty? ? dims << c : meas << c
+    if m == SERIES_MAPPING || m == 'XTIME'
+      # Ambiguous by design — see the role notes above.
+      if c['aggregation'].to_s.empty? && m == SERIES_MAPPING &&
+         RAW_SERIES_MEASURE_CHART_TYPES.include?(chart_type)
+        # Domo's line+bar/symbol+bar cards use a raw numeric SERIES as a
+        # benchmark/overlay (live: Industry Open Rate, Unique Page Views).
+        # Grouping by the raw value is equivalent to Max within each ITEM
+        # bucket, while treating it as an unbound dimension drops it entirely.
+        meas << c.merge('aggregation' => 'MAX', '_inferredAggregation' => true)
+      else
+        c['aggregation'].to_s.empty? ? dims << c : meas << c
+      end
     elsif DIM_MAPPINGS.include?(m)
       dims << c
     elsif MEASURE_MAPPINGS.include?(m)
@@ -443,12 +459,78 @@ def build_kpi(card, overrides)
               { 'id' => vid, 'name' => label,
                 'formula' => "#{sigma_agg(agg, sn['distinct'])}(#{mref(disp)})",
                 'format' => sigma_format(sn['format'], label) }.compact
+  if sn.dig('format', 'type').to_s.match?(/\A(?:currency|money)\z/i) && value_col
+    # Domo's big-number renderer abbreviates currency even when the component
+    # metadata carries a fixed currency pattern (source card: $146.7K while its
+    # subtitle is $146,737.9). Match the visible headline, not just metadata.
+    value_col['format'] = { 'kind' => 'number', 'formatString' => '$.4~s' }
+  end
+  if !ov && sn['_isCalc'] && value_col && !value_col['formula'].to_s.empty?
+    value_col['formula'] = "Coalesce(#{value_col['formula']}, 0)"
+  end
   {
     'id' => eid(card), 'kind' => 'kpi-chart', 'name' => label,
     'source' => { 'kind' => 'table', 'elementId' => 'master' },
     'columns' => [value_col],
     'value' => { 'columnId' => value_col['id'] },   # ⚠ columnId, NOT id (feedback_sigma_kpi_value_columnid)
   }
+end
+
+def apply_kpi_display_override!(card, kpi)
+  path = File.join(OUT, 'kpi-format-overrides.json')
+  all = (JSON.parse(File.read(path)) rescue {}) if File.exist?(path)
+  rule = all && all[card['id'].to_s]
+  return kpi unless rule.is_a?(Hash)
+  kpi['value']['fontSize'] = rule['fontSize'].to_i if rule['fontSize'].to_i.positive?
+  return kpi unless rule['scale'].to_f.nonzero?
+  raw = Marshal.load(Marshal.dump(kpi))
+  raw['id'] = "#{kpi['id']}-verify"
+  raw['name'] = "#{kpi['name']} (Parity)"
+  $kpi_verification_elements << raw
+
+  col = Array(kpi['columns']).find { |c| c['id'] == kpi.dig('value', 'columnId') }
+  return kpi unless col
+  col['formula'] = "(#{col['formula']}) / #{rule['scale'].to_f}"
+  decimals = rule['decimals'].to_i
+  prefix = rule['prefix'].to_s
+  col['format'] = {
+    'kind' => 'number', 'formatString' => "#{prefix},.#{decimals}f",
+    'suffix' => rule['suffix'].to_s
+  }
+  # Still renders normally; this flag only removes the display-scaled KPI from
+  # parity/source pickers so the raw hidden twin is the measured element.
+  kpi['visibleAsSource'] = false
+  kpi
+end
+
+def apply_chart_axis_override!(card, element)
+  path = File.join(OUT, 'chart-axis-overrides.json')
+  all = (JSON.parse(File.read(path)) rescue {}) if File.exist?(path)
+  rule = all && all[card['id'].to_s]
+  return element unless rule.is_a?(Hash) && rule['scale'].to_f.nonzero?
+  measure_ids = Array(element.dig('yAxis', 'columnIds'))
+  return element if measure_ids.empty?
+
+  raw = Marshal.load(Marshal.dump(element))
+  raw['id'] = "#{element['id']}-verify"
+  raw['name'] = "#{element['name']} (Parity)"
+  $chart_verification_elements << raw
+
+  decimals = rule['decimals'].to_i
+  Array(element['columns']).each do |column|
+    next unless measure_ids.include?(column['id'])
+    column['formula'] = "(#{column['formula']}) / #{rule['scale'].to_f}"
+    column['format'] = {
+      'kind' => 'number',
+      'formatString' => "#{rule['prefix']},.#{decimals}f",
+      'suffix' => rule['suffix'].to_s
+    }
+  end
+  element['yAxis']['format'] = {
+    'marks' => 'none', 'labels' => { 'fontSize' => 9 }
+  }
+  element['visibleAsSource'] = false
+  element
 end
 
 # Released native progress/ring element for a grounded Domo filled gauge. Domo
@@ -501,7 +583,124 @@ def build_summary_companion(card, overrides)
   kpi = build_kpi(card, overrides)
   return nil unless kpi
   kpi['id'] = eid(card, '-summary')
-  kpi
+  apply_kpi_display_override!(card, apply_summary_latest_bucket!(card, kpi))
+end
+
+def build_scatter_chart(card, dims, meas)
+  dcols = dims.map { |d| dim_col(d, card) }
+  mcols = meas.map { |m| measure_col(m, card) }
+  dims.each_with_index do |source, i|
+    if source['calendar'] || source['column'].to_s == card.dig('dateGrain', 'column').to_s
+      dcols[i]['format'] = { 'kind' => 'datetime', 'formatString' => '%b %y' }
+    end
+  end
+  meas.each_with_index do |source, i|
+    if source.dig('format', 'type').to_s.match?(/\A(?:currency|money)\z/i)
+      mcols[i]['format'] = { 'kind' => 'number', 'formatString' => '$.3~s' }
+    end
+  end
+  meas.each_with_index do |source, i|
+    next unless source['mapping'].to_s.upcase == 'BUBBLESIZE'
+    id = mcols[i]['id']
+    mcols[i]['id'] = "#{id}-size" if mcols.each_with_index.any? { |m, j| j != i && m['id'] == id }
+  end
+  measure_by_source = meas.zip(mcols).to_h
+  dim_by_source = dims.zip(dcols).to_h
+
+  # A Sigma scatter evaluates aggregates per raw row unless it sources an
+  # explicit table grouping. Build that hidden grouping first, then bind the
+  # visible scatter to it with raw references (the released, UI-readback shape).
+  # This is what turns 300 SEND_REPORT rows into one point per Subject.
+  helper_ordered = Array(card['columns']).filter_map do |source|
+    dim_hit = dims.find { |d| d['column'] == source['column'] && d['mapping'] == source['mapping'] }
+    next dim_by_source[dim_hit] if dim_hit
+    measure_hit = meas.find { |m| m['column'] == source['column'] && m['mapping'] == source['mapping'] }
+    measure_by_source[measure_hit] if measure_hit
+  end
+
+  # Raw refs are name-based. Give duplicated source names (Avg Amount / Sum
+  # Amount) role-qualified names so the grouped columns remain independently
+  # addressable.
+  names = Hash.new(0)
+  helper_ordered.each { |c| names[c['name']] += 1 }
+  meas.each do |source|
+    col = measure_by_source[source]
+    next unless col && names[col['name']] > 1
+    role = source['mapping'].to_s.split('_').map(&:capitalize).join(' ')
+    col['name'] = "#{col['name']} (#{role})"
+  end
+
+  helper_id = "src-#{eid(card)}"
+  grouping_id = "grp-#{eid(card)}"
+  helper_name = "#{card['title']} (Grouped Source)"
+  helper = {
+    'id' => helper_id, 'kind' => 'table', 'name' => helper_name,
+    'source' => { 'kind' => 'table', 'elementId' => 'master' },
+    'columns' => helper_ordered,
+    'order' => helper_ordered.map { |c| c['id'] },
+    'groupings' => [{
+      'id' => grouping_id,
+      'groupBy' => dcols.map { |c| c['id'] },
+      'calculations' => mcols.map { |c| c['id'] },
+    }],
+    'visibleAsSource' => false,
+  }
+  limit = card['limit'].to_i
+  if limit.positive?
+    order_name = Array(card['orderBy']).first.to_s
+    # When VALUE and BUBBLESIZE both bind the same source column (Avg Amount
+    # vs Sum Amount), Domo's top-N orders by the final size/total role.
+    rank_source = meas.reverse.find { |m| m['column'].to_s == order_name } || meas.last
+    rank_col = rank_source && measure_by_source[rank_source]
+    if rank_col
+      helper['filters'] = [{
+        'id' => "topn-#{helper_id}", 'columnId' => rank_col['id'],
+        'kind' => 'top-n', 'rankingFunction' => 'rank',
+        'mode' => 'top-n', 'rowCount' => limit,
+      }]
+    end
+  end
+
+  scatter_by_helper_id = {}
+  ordered = helper_ordered.map do |source_col|
+    sid = source_col['id'].sub(/\A[dm]-/, 's-')
+    sid = "s-#{source_col['id']}" if sid == source_col['id']
+    scatter_by_helper_id[source_col['id']] = {
+      'id' => sid, 'name' => source_col['name'],
+      'formula' => "[#{helper_name}/#{source_col['name']}]",
+    }
+  end
+
+  by_mapping = lambda do |mapping|
+    hit = meas.find { |m| m['mapping'].to_s.upcase == mapping }
+    helper_col = hit && measure_by_source[hit]
+    helper_col && scatter_by_helper_id[helper_col['id']]
+  end
+  xcol = by_mapping.call('XTIME') || mcols.first
+  ycol = by_mapping.call('VALUE') || mcols.find { |m| m != xcol }
+  size_col = by_mapping.call('BUBBLESIZE')
+  identity = dims.find { |d| d['mapping'].to_s.upcase == 'SERIES' } || dims.first
+  identity_helper = identity && dim_by_source[identity]
+  identity_col = identity_helper && scatter_by_helper_id[identity_helper['id']]
+
+  # Fallbacks above use helper columns; normalize them to visible scatter refs.
+  xcol = scatter_by_helper_id[xcol['id']] if xcol && !xcol['id'].to_s.start_with?('s-')
+  ycol = scatter_by_helper_id[ycol['id']] if ycol && !ycol['id'].to_s.start_with?('s-')
+
+  unless xcol && ycol
+    warn_card(card, 'scatter-chart: could not resolve distinct XTIME and VALUE measures — ' \
+                    'verify the axis assignments against the source card.')
+  end
+  {
+    'id' => eid(card), 'kind' => 'scatter-chart', 'name' => card['title'],
+    'source' => { 'kind' => 'table', 'elementId' => helper_id, 'groupingId' => grouping_id },
+    'columns' => ordered,
+    'xAxis' => xcol ? { 'columnId' => xcol['id'], 'format' => AXIS_OFF } : nil,
+    'yAxis' => ycol ? { 'columnIds' => [ycol['id']], 'format' => AXIS_OFF } : nil,
+    'size' => size_col ? { 'id' => size_col['id'] } : nil,
+    'color' => identity_col ? { 'by' => 'category', 'column' => identity_col['id'] } : nil,
+    '_scatterHelper' => helper,
+  }.compact
 end
 
 def build_axis_chart(card, kind)
@@ -521,26 +720,81 @@ def build_axis_chart(card, kind)
                     'against the card PNG and re-add by hand.')
     return nil
   end
+  return build_scatter_chart(card, dims, meas) if kind == 'scatter-chart'
+
   ct = card['chartType'].to_s.downcase
-  xcol = dims.first
+  xcol = dims.find { |d| %w[ITEM CATEGORY XTIME DATE].include?(d['mapping'].to_s.upcase) } ||
+         dims.first
   dcols = dims.map { |d| dim_col(d, card) }
   mcols = meas.map { |m| measure_col(m, card) }
+  dims.each_with_index do |source, i|
+    if source['calendar'] || source['column'].to_s == card.dig('dateGrain', 'column').to_s
+      dcols[i]['format'] = { 'kind' => 'datetime', 'formatString' => '%b %y' }
+    end
+  end
+  meas.each_with_index do |source, i|
+    if source.dig('format', 'type').to_s.match?(/\A(?:currency|money)\z/i)
+      mcols[i]['format'] = { 'kind' => 'number', 'formatString' => '$.3~s' }
+    end
+  end
+  xidx = dims.index(xcol) || 0
   el = {
     'id' => eid(card), 'kind' => kind, 'name' => card['title'],
     'source' => { 'kind' => 'table', 'elementId' => 'master' },
     'columns' => dcols + mcols,
   }
   if xcol
-    xa = { 'columnId' => dcols.first['id'], 'format' => AXIS_OFF }
+    xa = { 'columnId' => dcols[xidx]['id'], 'format' => AXIS_OFF }
+    if kind == 'bar-chart' && !HORIZONTAL_CHART_TYPES.include?(ct)
+      time_axis = xcol['calendar'] || card['dateGrain'].is_a?(Hash)
+      xa['format'] = if time_axis
+                       {
+                         'marks' => 'none',
+                         'labels' => { 'fontSize' => 7, 'labelAngle' => -45,
+                                       'allowLongerLabels' => true }
+                       }
+                     else
+                       {
+                         'marks' => 'none',
+                         'labels' => { 'fontSize' => 9, 'labelAngle' => 0,
+                                       'allowLongerLabels' => true }
+                       }
+                     end
+    end
     # Sort by the first measure if the card ordered by a measure, OR if this is
     # the badge_treemap degradation (no native treemap kind — see
     # NO_NATIVE_EQUIVALENT — sorting descending by size is the closest a flat
     # bar-chart gets to the area-proportional hierarchy).
     is_treemap = ct == 'badge_treemap'
     xa['sort'] = { 'by' => mcols.first['id'], 'direction' => 'descending' } if mcols.first && (Array(card['orderBy']).any? || is_treemap)
+    order_override_path = File.join(OUT, 'category-order-overrides.json')
+    order_overrides = (JSON.parse(File.read(order_override_path)) rescue {}) if
+      File.exist?(order_override_path)
+    source_order = order_overrides && order_overrides[card['id'].to_s]
+    if source_order.is_a?(Array) && !source_order.empty?
+      source_formula = dcols[xidx]['formula']
+      rank_formula = source_order.each_with_index.reverse_each.reduce((source_order.length + 1).to_s) do |fallback, (label, rank)|
+        escaped = label.to_s.gsub('\\', '\\\\').gsub('"', '\\"')
+        %(If(#{source_formula} = "#{escaped}", #{rank + 1}, #{fallback}))
+      end
+      sort_col = {
+        'id' => "sort-source-order-#{card['id']}", 'name' => 'Source Order',
+        'formula' => rank_formula, 'hidden' => true
+      }
+      el['columns'] << sort_col
+      xa['sort'] = { 'by' => sort_col['id'], 'direction' => 'ascending' }
+    end
     el['xAxis'] = xa
   end
-  el['yAxis'] = { 'columnIds' => mcols.map { |m| m['id'] }, 'format' => AXIS_OFF } unless mcols.empty?
+  unless mcols.empty?
+    currency_axis = meas.any? { |source|
+      source.dig('format', 'type').to_s.match?(/\A(?:currency|money)\z/i)
+    }
+    y_format = currency_axis ? { 'marks' => 'none', 'labels' => 'hidden' } : AXIS_OFF
+    el['yAxis'] = { 'columnIds' => mcols.map { |m| m['id'] }, 'format' => y_format }
+  end
+  split = dims.each_with_index.find { |d, i| i != xidx && d['mapping'].to_s.upcase == SERIES_MAPPING }
+  el['color'] = { 'by' => 'category', 'column' => dcols[split[1]]['id'] } if split
   if kind == 'bar-chart'
     # #2/#3: orientation/stacking keyed on the EXACT chartType token, not a
     # `.include?('horiz')` substring check (the same class of bug this whole
@@ -551,12 +805,29 @@ def build_axis_chart(card, kind)
       warn_card(card, 'badge_vert_nestedbar: Sigma has no 2-level nested-category axis — ' \
                       'approximated as a flat grouped bar chart (the outer grouping tier is lost).')
     end
+    if is_treemap && mcols.first
+      # The Domo rendered-card endpoint and treemap both cap this high-cardinality
+      # sample at its top 500 leaves. The flat bar fallback must keep the same
+      # visible set rather than exporting every 752 device category.
+      el['filters'] = Array(el['filters']) +
+                      [{ 'id' => "topn-#{el['id']}", 'columnId' => mcols.first['id'],
+                         'kind' => 'top-n', 'rankingFunction' => 'rank',
+                         'mode' => 'top-n', 'rowCount' => 500 }]
+    end
   end
-  if kind == 'scatter-chart'
-    # badge_bubble: bind the BUBBLESIZE-mapped column (if the extraction
-    # captured `mapping`) to the scatter's optional size channel.
-    bubble = (card['columns'] || []).find { |c| c['mapping'].to_s.upcase == 'BUBBLESIZE' }
-    el['size'] = { 'id' => measure_col(bubble, card)['id'] } if bubble
+  if kind == 'line-chart' && ct == 'badge_symbolline'
+    el['lineAreaStyle'] = {
+      'interpolation' => 'linear',
+      'line' => { 'width' => 1 },
+      'points' => { 'visibility' => 'shown', 'shape' => 'circle', 'size' => 9 }
+    }
+    if el['xAxis']
+      el['xAxis']['format'] = {
+        'marks' => 'none',
+        'labels' => { 'fontSize' => 7, 'labelAngle' => -45,
+                      'allowLongerLabels' => true }
+      }
+    end
   end
   el
 end
@@ -580,7 +851,12 @@ def build_pie_or_donut(card, kind)
     'source' => { 'kind' => 'table', 'elementId' => 'master' },
     'columns' => [dcol, mcol].compact,
     'value' => mcol ? { 'id' => mcol['id'] } : nil,   # ⚠ donut/pie use value.id, NOT columnId
-    'color' => dcol ? { 'id' => dcol['id'] } : nil,
+    'color' => dcol ? {
+      'id' => dcol['id'],
+      'sort' => (mcol ? { 'by' => mcol['id'], 'direction' => 'descending' } :
+                         { 'direction' => 'ascending' })
+    } : nil,
+    'legend' => { 'position' => 'left', 'fontSize' => 9 },
   }.compact
 end
 
@@ -601,7 +877,37 @@ def build_combo(card)
   end
   dcols = dims.map { |d| dim_col(d, card) }
   mcols = meas.map { |m| measure_col(m, card) }
-  series = mcols.each_with_index.map { |m, i| { 'columnId' => m['id'], 'type' => i.zero? ? 'bar' : secondary } }
+  seen = Hash.new(0)
+  mcols.each do |m|
+    seen[m['id']] += 1
+    m['id'] = "#{m['id']}-#{seen[m['id']]}" if seen[m['id']] > 1
+  end
+  series = mcols.each_with_index.map do |m, i|
+    type =
+      case ct
+      when 'badge_line_bar', 'badge_line_stackedbar'
+        # Domo's token is literal: line series first, bar series after it.
+        # When a card carries an explicit Posts count, it is the bar while
+        # reach/impression measures remain lines.
+        posts_measure = ->(src) { col_label(src).match?(/\A(?:number of )?posts\z/i) }
+        if meas.any? { |src| posts_measure.call(src) }
+          posts_measure.call(meas[i]) ? 'bar' : 'line'
+        else
+          i.zero? ? 'line' : 'bar'
+        end
+      when 'badge_symbol_bar'
+        if meas.any? { |src| src['_inferredAggregation'] }
+          meas[i]['_inferredAggregation'] ? 'bar' : 'scatter'
+        else
+          i.zero? ? 'bar' : 'scatter'
+        end
+      when 'badge_vert_symbol_overlay'
+        'scatter'
+      else
+        i.zero? ? 'bar' : secondary
+      end
+    { 'columnId' => m['id'], 'type' => type }
+  end
   el = {
     'id' => eid(card), 'kind' => 'combo-chart', 'name' => card['title'],
     'source' => { 'kind' => 'table', 'elementId' => 'master' },
@@ -609,6 +915,12 @@ def build_combo(card)
   }
   el['xAxis'] = { 'columnId' => dcols.first['id'], 'format' => AXIS_OFF } if dcols.first
   el['yAxis'] = { 'columnIds' => series, 'format' => AXIS_OFF } unless series.empty?
+  secondary_axis_ids = series.select { |s| s['type'] == 'bar' }.map { |s| s['columnId'] }
+  if %w[badge_line_bar badge_line_stackedbar badge_symbol_bar].include?(ct) &&
+     !secondary_axis_ids.empty? && secondary_axis_ids.length < series.length
+    el['yAxis2'] = { 'columnIds' => secondary_axis_ids,
+                     'format' => { 'visibility' => 'shown' } }
+  end
   el['stacking'] = 'stacked' if ct == 'badge_line_stackedbar'
   el
 end
@@ -630,16 +942,23 @@ REGION_TYPE_HINTS = [
   [/country/i,    'country'],
 ].freeze
 
-def infer_region_type(dim)
+def infer_region_type(dim, card = nil)
   name = (dim && (dim['alias'] || dim['column'])).to_s
   hit = REGION_TYPE_HINTS.find { |(re, _)| name =~ re }
-  hit && hit[1]
+  return hit[1] if hit
+  if name.casecmp?('region') && Array(card && card['filters']).any? { |f|
+       f['column'].to_s.casecmp?('country') &&
+         Array(f['values']).any? { |v| v.to_s.casecmp?('United States') }
+     }
+    return 'us-state'
+  end
+  nil
 end
 
 def build_map(card)
   dims, meas = split_cols(card)
   geo = dims.first
-  region_type = infer_region_type(geo)
+  region_type = infer_region_type(geo, card)
   unless region_type
     geo_name = geo && (geo['alias'] || geo['column'])
     warn_card(card, "badge_map: could not classify the geography column '#{geo_name}' into a Sigma " \
@@ -718,6 +1037,51 @@ def build_table(card)
       'kind' => 'top-n', 'rankingFunction' => 'rank', 'mode' => 'top-n', 'rowCount' => limit,
     }]
   end
+
+  override_path = File.join(OUT, 'table-display-overrides.json')
+  overrides = (JSON.parse(File.read(override_path)) rescue {}) if File.exist?(override_path)
+  display_rule = overrides && overrides[card['id'].to_s]
+  if display_rule.is_a?(Hash) && display_rule['formula'] && display_rule['max']
+    helper = {
+      'id' => display_rule['filterColumnId'].to_s,
+      'name' => display_rule['filterColumnName'].to_s,
+      'formula' => display_rule['formula'].to_s,
+      'hidden' => true
+    }
+    el['columns'] << helper
+    el['order'] << helper['id']
+    el['filters'] = Array(el['filters']).reject { |filter| filter['kind'] == 'top-n' }
+    el['filters'] << {
+      'id' => "source-cap-#{el['id']}", 'columnId' => helper['id'],
+      'kind' => 'number-range', 'max' => display_rule['max'].to_f
+    }
+    widths = display_rule['columnWidths']
+    if widths.is_a?(Hash)
+      (dims + meas).zip(cols).each do |source, column|
+        width = widths[source['column'].to_s]
+        next unless width.to_f.positive?
+        column['style'] = (column['style'] || {}).merge(
+          'width' => width.to_f, 'textWrap' => 'clip'
+        )
+      end
+    end
+    if display_rule['fontSize'].to_f.positive?
+      font_size = display_rule['fontSize'].to_f
+      el['tableStyle'] = {
+        'cellSpacing' => 'extra-small',
+        'textStyles' => {
+          'columnHeader' => { 'fontSize' => font_size },
+          'cell' => { 'fontSize' => font_size }
+        }
+      }
+    end
+    parity_table = Marshal.load(Marshal.dump(el))
+    parity_table['id'] = "#{el['id']}-verify"
+    parity_table['name'] = "#{el['name']} (Parity)"
+    parity_table.delete('tableStyle')
+    $table_verification_elements << parity_table
+    el['visibleAsSource'] = false
+  end
   el
 end
 
@@ -760,14 +1124,286 @@ def image_card?(card)
   card['chartType'].to_s =~ IMAGE_CHART_TYPE_RE ? true : false
 end
 
-# build_image(card) -> {id, kind:'image', url:"data:image/png;base64,<b64>"} or
+# build_image(card) -> {id, kind:'image', source:{kind:'url',url:"data:..."}} or
 # nil when no PNG was captured (Tier B / not captured) — the caller falls back
 # and warns; NEVER emit an image element with an empty/broken url.
 def build_image(card)
   path = png_path(card)
   return nil unless path && File.exist?(path.to_s)
-  { 'id' => eid(card), 'kind' => 'image', 'name' => card['title'],
-    'url' => "data:image/png;base64,#{Base64.strict_encode64(File.binread(path))}" }
+  { 'id' => eid(card), 'kind' => 'image', 'alt' => card['title'],
+    'source' => { 'kind' => 'url',
+                  'url' => "data:image/png;base64,#{Base64.strict_encode64(File.binread(path))}" } }
+end
+
+PLUGIN_VISUAL_MODE = {
+  'badge_treemap' => 'treemap',
+  'badge_word_cloud' => 'wordcloud',
+  'badge_calendar' => 'calendar',
+  'badge_filledgauge' => 'gauge',
+}.freeze
+
+def plugin_config
+  return $plugin_config if defined?($plugin_config) && $plugin_config.is_a?(Hash)
+  path = File.join(OUT, 'plugin-config.json')
+  $plugin_config = (JSON.parse(File.read(path)) rescue {}) if File.exist?(path)
+  $plugin_config ||= {}
+end
+
+def plugin_dataset_map
+  return $plugin_dataset_map if defined?($plugin_dataset_map) && $plugin_dataset_map.is_a?(Hash)
+  path = File.join(OUT, 'dataset-map.json')
+  $plugin_dataset_map = (JSON.parse(File.read(path)) rescue {}) if File.exist?(path)
+  $plugin_dataset_map ||= {}
+end
+
+def sf_ident(value)
+  %("#{value.to_s.gsub('"', '""')}")
+end
+
+def sf_literal(value)
+  return value.to_s if value.is_a?(Numeric)
+  "'#{value.to_s.gsub("'", "''")}'"
+end
+
+def plugin_sql_source(card, mode)
+  mapped = plugin_dataset_map[card['datasetId'].to_s]
+  return nil unless mapped.is_a?(Hash)
+  conn = mapped['connectionId'].to_s
+  path = %w[database schema table].map { |k| mapped[k].to_s }
+  return nil if conn.empty? || path.any?(&:empty?)
+
+  dims, meas = split_cols(card)
+  dim = dims.first
+  measure = meas.first
+  return nil unless dim
+  date_col = card.dig('dateGrain', 'column')
+  label_expr = mode == 'calendar' && date_col ?
+                 "DATE_TRUNC('DAY', #{sf_ident(date_col)})" : sf_ident(dim['column'])
+  value_expr =
+    if mode == 'calendar' || !measure
+      'COUNT(*)'
+    else
+      agg = sigma_agg(measure['aggregation'], measure['distinct']).upcase
+      agg = 'COUNT(DISTINCT' if agg == 'COUNTDISTINCT'
+      agg == 'COUNT(DISTINCT' ?
+        "COUNT(DISTINCT #{sf_ident(measure['column'])})" :
+        "#{agg}(#{sf_ident(measure['column'])})"
+    end
+  predicates = []
+  Array(card['filters']).each do |filter|
+    col = sf_ident(filter['column'])
+    vals = Array(filter['values'])
+    next if vals.empty?
+    list = vals.map { |v| sf_literal(v) }.join(', ')
+    case filter['operator'].to_s.upcase
+    when 'IN', 'EQUALS', 'LEGACY' then predicates << "#{col} IN (#{list})"
+    when 'NOT_IN', 'NOT_EQUALS'   then predicates << "#{col} NOT IN (#{list})"
+    when 'GREATER_THAN'           then predicates << "#{col} > #{sf_literal(vals.first)}"
+    when 'GREATER_THAN_OR_EQUAL'  then predicates << "#{col} >= #{sf_literal(vals.first)}"
+    when 'LESS_THAN'              then predicates << "#{col} < #{sf_literal(vals.first)}"
+    when 'LESS_THAN_OR_EQUAL'     then predicates << "#{col} <= #{sf_literal(vals.first)}"
+    end
+  end
+  drf = card['dateRangeFilter'] || {}
+  rng = drf['dateTimeRange'] || {}
+  if rng['dateTimeRangeType'] == 'ROLLING_PERIOD' && rng['count'].to_i.positive?
+    raw_date = drf['column'].is_a?(Hash) ? drf['column']['column'] : drf['column']
+    unit = DOMO_DATE_INTERVAL_UNIT[rng['interval'].to_s.upcase]
+    if raw_date && unit
+      lookback = rng['count'].to_i - 1
+      qdate = sf_ident(raw_date)
+      predicates << "#{qdate} >= DATE_TRUNC('#{unit.upcase}', DATEADD('#{unit.upcase}', -#{lookback}, CURRENT_DATE()))"
+      predicates << "#{qdate} < DATEADD('#{unit.upcase}', 1, DATE_TRUNC('#{unit.upcase}', CURRENT_DATE()))"
+    end
+  elsif rng['dateTimeRangeType'] == 'INTERVAL_OFFSET'
+    raw_date = drf['column'].is_a?(Hash) ? drf['column']['column'] : drf['column']
+    unit = DOMO_DATE_INTERVAL_UNIT[rng['interval'].to_s.upcase]
+    if raw_date && unit
+      qdate = sf_ident(raw_date)
+      offset = rng['offset'].to_i
+      lower =
+        if unit == 'week'
+          "DATEADD('day', -1, DATE_TRUNC('week', DATEADD('day', 1, DATEADD('week', -#{offset}, CURRENT_DATE()))))"
+        else
+          "DATE_TRUNC('#{unit.upcase}', DATEADD('#{unit.upcase}', -#{offset}, CURRENT_DATE()))"
+        end
+      predicates << "#{qdate} >= #{lower}"
+      predicates << "#{qdate} < DATEADD('#{unit.upcase}', 1, #{lower})"
+    end
+  end
+  table = path.map { |part| sf_ident(part) }.join('.')
+  sql = "SELECT #{label_expr} AS LABEL, #{value_expr} AS VALUE FROM #{table}"
+  sql += " WHERE #{predicates.join(' AND ')}" unless predicates.empty?
+  sql += " GROUP BY #{label_expr} ORDER BY VALUE DESC"
+  limit = card['limit'].to_i
+  limit = 500 if limit <= 0 && mode == 'treemap'
+  sql += " LIMIT #{limit}" if limit.positive?
+  {
+    'id' => "src-plugin-#{eid(card)}", 'kind' => 'table',
+    'name' => "#{card['title']} (Direct Plugin Source)",
+    'visibleAsSource' => false,
+    'source' => { 'kind' => 'sql', 'connectionId' => conn, 'statement' => sql },
+    'columns' => [
+      { 'id' => 'd-label', 'name' => (mode == 'calendar' ? 'Date' : col_label(dim)),
+        'formula' => '[Custom SQL/LABEL]' },
+      { 'id' => 'm-value', 'name' => (measure ? col_label(measure) : 'Count'),
+        'formula' => '[Custom SQL/VALUE]' },
+    ],
+    'order' => %w[d-label m-value],
+  }
+end
+
+def snowflake_aggregate(column)
+  agg = sigma_agg(column['aggregation'], column['distinct']).upcase
+  return "COUNT(DISTINCT #{sf_ident(column['column'])})" if agg == 'COUNTDISTINCT'
+  "#{agg}(#{sf_ident(column['column'])})"
+end
+
+def domo_formula_to_snowflake(formula)
+  sql = formula.to_s.gsub(/`([^`]+)`/) { sf_ident(Regexp.last_match(1)) }
+  sql.gsub!(/DATEDIFF\s*\(\s*current_date\(\)\s*,\s*("[^"]+")\s*\)/i,
+            "DATEDIFF('day', \\1, CURRENT_DATE())")
+  sql.gsub!(/Current_Date\(\)|current_date\(\)/i, 'CURRENT_DATE()')
+  sql
+end
+
+def plugin_gauge_source(card)
+  mapped = plugin_dataset_map[card['datasetId'].to_s]
+  return nil unless mapped.is_a?(Hash)
+  conn = mapped['connectionId'].to_s
+  path = %w[database schema table].map { |k| mapped[k].to_s }
+  return nil if conn.empty? || path.any?(&:empty?)
+  table = path.map { |part| sf_ident(part) }.join('.')
+  summary = card['summaryNumber'] || {}
+  percent = summary.dig('format', 'type').to_s.downcase.include?('percent')
+  source_formula = Array(card['cardFormulas']).find {
+    |formula| formula['id'].to_s == summary['beastModeId'].to_s
+  }&.dig('formula')
+  current = Array(card['columns']).find { |c| c['mapping'].to_s.upcase == 'CURRENT' }
+  target = Array(card['columns']).find { |c| c['mapping'].to_s.upcase == 'TARGET' }
+  drf_column = card.dig('dateRangeFilter', 'column')
+  drf_column = drf_column['column'] if drf_column.is_a?(Hash)
+  grain_date = card.dig('dateGrain', 'column') || drf_column
+  actual_expr =
+    if percent && source_formula
+      domo_formula_to_snowflake(source_formula)
+    elsif grain_date
+      "COUNT(DISTINCT #{sf_ident(grain_date)}) / 100.0"
+    elsif current
+      snowflake_aggregate(current)
+    else
+      '0'
+    end
+  target_expr = (percent || grain_date) ? '1' : (target ? snowflake_aggregate(target) : '1')
+  predicates = []
+  drf = card['dateRangeFilter'] || {}
+  rng = drf['dateTimeRange'] || {}
+  if rng['dateTimeRangeType'] == 'INTERVAL_OFFSET'
+    raw_date = drf['column'].is_a?(Hash) ? drf['column']['column'] : drf['column']
+    unit = DOMO_DATE_INTERVAL_UNIT[rng['interval'].to_s.upcase]
+    if raw_date && unit
+      offset = rng['offset'].to_i
+      lower =
+        if unit == 'week'
+          "DATEADD('day', -1, DATE_TRUNC('week', DATEADD('day', 1, DATEADD('week', -#{offset}, CURRENT_DATE()))))"
+        else
+          "DATE_TRUNC('#{unit.upcase}', DATEADD('#{unit.upcase}', -#{offset}, CURRENT_DATE()))"
+        end
+      predicates << "#{sf_ident(raw_date)} >= #{lower}"
+      predicates << "#{sf_ident(raw_date)} < DATEADD('#{unit.upcase}', 1, #{lower})"
+    end
+  end
+  where_sql = predicates.empty? ? '' : " WHERE #{predicates.join(' AND ')}"
+  {
+    'id' => "src-plugin-#{eid(card)}", 'kind' => 'table',
+    'name' => "#{card['title']} (Gauge Plugin Source)",
+    'visibleAsSource' => false,
+    'source' => {
+      'kind' => 'sql', 'connectionId' => conn,
+      'statement' => "SELECT #{actual_expr} AS ACTUAL, #{target_expr} AS TARGET FROM #{table}#{where_sql}",
+    },
+    'columns' => [
+      { 'id' => 'actual', 'name' => 'Actual', 'formula' => '[Custom SQL/ACTUAL]' },
+      { 'id' => 'target', 'name' => 'Target', 'formula' => '[Custom SQL/TARGET]' },
+    ],
+    'order' => %w[actual target],
+  }
+end
+
+def pluginize_visual(card, live_el)
+  mode = PLUGIN_VISUAL_MODE[card['chartType'].to_s.downcase]
+  plugin_id =
+    case mode
+    when 'calendar' then plugin_config['calendar_plugin_id']
+    when 'gauge' then plugin_config['gauge_plugin_id']
+    else plugin_config['visual_plugin_id']
+    end.to_s
+  return nil unless mode && !plugin_id.empty? && live_el.is_a?(Hash)
+
+  if mode == 'gauge'
+    gauge_source = plugin_gauge_source(card)
+    return nil unless gauge_source
+    headline = live_el
+    headline['id'] = "#{eid(card)}-summary"
+    $companion_elements << headline
+    format =
+      if card.dig('summaryNumber', 'format', 'type').to_s.downcase.include?('percent')
+        '.1%'
+      elsif card.dig('dateGrain', 'column') || card.dig('dateRangeFilter', 'column')
+        '.0%'
+      else
+        'int'
+      end
+    plugin = {
+      'id' => "#{eid(card)}-plugin-v1", 'kind' => 'plugin',
+      'pluginId' => plugin_id,
+      'config' => {
+        'source' => { 'kind' => 'element', 'elementId' => gauge_source['id'] },
+        'value' => { 'kind' => 'column', 'columnId' => 'actual', 'source' => 'source' },
+        'target' => { 'kind' => 'column', 'columnId' => 'target', 'source' => 'source' },
+        'format' => format,
+      },
+    }
+    return [plugin, [gauge_source]]
+  end
+
+  parity_source = live_el
+  parity_source['id'] = "#{eid(card)}-verify"
+  parity_source['name'] = "#{card['title']} (Parity Source)"
+  direct_source = plugin_sql_source(card, mode)
+  plugin_source = direct_source || parity_source
+  label_id = direct_source ? 'd-label' :
+             Array(parity_source['columns']).find { |c| !c['hidden'] && c['id'].to_s.start_with?('d-') }&.dig('id')
+  value_id = direct_source ? 'm-value' :
+             Array(parity_source['columns']).find { |c| !c['hidden'] && c['id'].to_s.start_with?('m-', 'v-') }&.dig('id')
+  source_binding = { 'kind' => 'element', 'elementId' => plugin_source['id'] }
+  column_binding = ->(column_id) {
+    { 'kind' => 'column', 'columnId' => column_id.to_s, 'source' => 'source' }
+  }
+  if mode == 'calendar'
+    config = {
+      'source' => source_binding,
+      'aggregation' => 'Sum',
+      'title' => card['title'].to_s,
+      'showTotal' => true,
+      'colorTheme' => 'Blue',
+      'firstDay' => 'Sunday',
+      'dateColumn' => column_binding.call(label_id),
+      'valueColumn' => column_binding.call(value_id),
+    }
+  else
+    config = { 'source' => source_binding, 'mode' => mode }
+    config['label'] = column_binding.call(label_id) if label_id
+    config['value'] = column_binding.call(value_id) if value_id
+  end
+  # Never change an existing native chart's kind in place to `plugin`: Sigma's
+  # PUT readback preserves config JSON but the editor/runtime can retain the
+  # old element state and leave every picker blank. A fresh plugin element id
+  # follows the proven WS2 acceptance create path and hydrates config.
+  plugin = { 'id' => "#{eid(card)}-plugin-v1", 'kind' => 'plugin',
+             'pluginId' => plugin_id, 'config' => config }
+  plugin['displayName'] = 'Heatmap Calendar' if mode == 'calendar'
+  [plugin, [parity_source, direct_source].compact]
 end
 
 # Translated Beast Mode ids (those that actually produced a sigmaFormula and so
@@ -911,6 +1547,10 @@ DOMO_FILTER_LIST_MODE = {
   'LEGACY' => 'include', 'IN' => 'include', 'EQUALS' => 'include',
   'NOT_IN' => 'exclude', 'NOT_EQUALS' => 'exclude',
 }.freeze
+DOMO_FILTER_COMPARISON = {
+  'GREATER_THAN' => '>', 'GREATER_THAN_OR_EQUAL' => '>=',
+  'LESS_THAN' => '<', 'LESS_THAN_OR_EQUAL' => '<=',
+}.freeze
 
 # Resolve a filter clause's `column` to a [name, formula] pair for a NEW
 # element column — the same resolution measure_col/dim_col apply to an
@@ -966,7 +1606,12 @@ end
 # `el['order']`, when the element kind has one — only `table` does) in place.
 def filter_target_column(el, col)
   slug = col.to_s.downcase.gsub(/\W+/, '-')
-  existing = Array(el['columns']).find { |c| %W[d-#{slug} m-#{slug} f-#{slug}].include?(c['id']) }
+  candidates = Array(el['columns']).select { |c| %W[d-#{slug} m-#{slug} f-#{slug}].include?(c['id']) }
+  existing = candidates.find { |c| c['id'].to_s.start_with?('d-', 'f-') }
+  existing ||= candidates.find { |c|
+    c['id'].to_s.start_with?('m-') &&
+      c['formula'].to_s !~ /\A(?:Sum|Avg|Count|CountDistinct|Min|Max)\(/
+  }
   return existing['id'] if existing
   name, formula = resolve_filter_column(col)
   return nil unless formula
@@ -1011,21 +1656,56 @@ end
 # a `pivot-table` — the one kind whose own `filters[]` Sigma silently drops (the
 # 65 chartable tiles are kpi-chart/bar/combo/region-map/line/table/scatter/donut).
 #
-# BOUNDARY CONVENTION, stated because getting it wrong is silent: a Domo
-# ROLLING_PERIOD of `count` N is emitted as `>= DateAdd(unit, -N, Today())`, i.e.
-# an N-unit lookback measured back from today. If Domo's rolling window is instead
-# N units INCLUSIVE of today, the correct constant is -(N-1). That is a one-token
-# change here (ROLLING_LOOKBACK_OFFSET) and it is pinned by a test rather than
-# left implicit. Confirm against a card PNG before declaring value parity — this
-# is the same class of silent-wrong-numbers risk as the 2-arg DateDiff operand
-# order (bead znvg), where a wrong window compiles clean and every number is off.
+# BOUNDARY CONVENTION, live-verified on the 2026-08-10 gold run: Domo's
+# ROLLING_PERIOD count is an inclusive count of CALENDAR BUCKETS (the current
+# bucket plus count-1 prior buckets), bounded at the start of the next current
+# bucket. It is not an elapsed-duration lookback from the current instant.
+#
+# Examples observed after a same-minute Domo/Sigma collection:
+#   6 MONTHS  -> Mar-Aug (not Feb-Aug)
+#   30 DAYS   -> Jul 12-Aug 10 (not Jul 11-Aug 10)
+#   5 QUARTERS -> 2025-Q3..2026-Q3 (never future 2026-Q4..2027-Q3 rows)
+#
+# Both bounds matter: omitting the upper bound admitted future-dated warehouse
+# rows and inflated period KPIs while compiling cleanly.
 DOMO_DATE_INTERVAL_UNIT = {
   'DAY' => 'day', 'WEEK' => 'week', 'MONTH' => 'month',
   'QUARTER' => 'quarter', 'YEAR' => 'year', 'HOUR' => 'hour', 'MINUTE' => 'minute'
 }.freeze
 
-# 0 = "N units back from today"; set to 1 for "N units inclusive of today".
-ROLLING_LOOKBACK_OFFSET = 0
+def apply_summary_latest_bucket!(card, kpi)
+  sn = card['summaryNumber'] || {}
+  raw = sn['_raw'] || {}
+  groups = Array(raw['groupBy'])
+  orders = Array(raw['orderBy'])
+  return kpi unless raw['limit'].to_i == 1 && !groups.empty? &&
+                    orders.any? { |o| o['order'].to_s.upcase == 'DESCENDING' }
+
+  grain = card['dateGrain'] || {}
+  unit = DATE_GRAIN_UNIT[grain['dateTimeElement'].to_s.upcase]
+  date_col = grain['column'].to_s
+  # Without a declared calendar grain, "latest" can mean a latest raw
+  # timestamp rather than the current calendar bucket. Do not guess.
+  return kpi unless unit && !date_col.empty?
+
+  date_cid = filter_target_column(kpi, date_col)
+  return kpi unless date_cid
+  date_formula = (Array(kpi['columns']).find { |c| c['id'] == date_cid } || {})['formula']
+  return kpi if date_formula.to_s.empty?
+
+  slug = date_col.downcase.gsub(/\W+/, '-')
+  bucket_id = "f-summary-latest-#{slug}-#{unit}"
+  kpi['columns'] = Array(kpi['columns']) + [{
+    'id' => bucket_id,
+    'name' => "Current #{unit} (#{date_col})",
+    'formula' => %(If(DateTrunc("#{unit}", #{date_formula}) = DateTrunc("#{unit}", Today()), "in", "out")),
+    'hidden' => true,
+  }]
+  kpi['filters'] = Array(kpi['filters']) +
+                   [{ 'id' => "summary-latest-#{kpi['id']}", 'columnId' => bucket_id,
+                      'kind' => 'list', 'mode' => 'include', 'values' => ['in'] }]
+  kpi
+end
 
 def apply_card_date_window!(card, el)
   return el if el.nil?
@@ -1053,18 +1733,18 @@ def apply_card_date_window!(card, el)
                     'own filters — apply the predicate on its source element instead.')
     return el
   end
-
-  # Refuse anything whose boundary semantics are not established. Guessing is the
-  # same silent-wrong-numbers class as bead znvg: a wrong window compiles green.
-  unless type == 'ROLLING_PERIOD'
-    warn_card(card, "date window NOT applied (#{payload}): only ROLLING_PERIOD has an established Sigma " \
-                    "mapping here. Domo's exact boundary semantics for #{type} (offset/count) are not " \
-                    'documented in any source available to this converter, and a wrong window compiles ' \
-                    'cleanly while returning wrong numbers everywhere — so it is refused rather than ' \
-                    'guessed. Hand-author the equivalent window and re-run, or establish the semantics live.')
+  if type == 'INTERVAL_OFFSET' && card['chartType'].to_s.downcase == 'badge_pop_bar_line'
+    warn_card(card, "date window NOT applied (#{payload}): Domo POP expands the selected bucket " \
+                    'with prior-period rows and synthetic period/index channels; a one-bucket ' \
+                    'predicate would drop those channels. Recreate this card with the POP plugin.')
     return el
   end
-  unless offset.zero?
+
+  unless %w[ROLLING_PERIOD INTERVAL_OFFSET].include?(type)
+    warn_card(card, "date window NOT applied (#{payload}): unsupported dateTimeRangeType #{type}.")
+    return el
+  end
+  if type == 'ROLLING_PERIOD' && !offset.zero?
     warn_card(card, "date window NOT applied (#{payload}): a non-zero ROLLING_PERIOD offset shifts the " \
                     'window back by whole intervals; that boundary is unestablished here. Refused rather ' \
                     'than guessed.')
@@ -1076,7 +1756,7 @@ def apply_card_date_window!(card, el)
                     "mapping (handled: #{DOMO_DATE_INTERVAL_UNIT.keys.join('/')}).")
     return el
   end
-  unless count.positive?
+  if type == 'ROLLING_PERIOD' && !count.positive?
     warn_card(card, "date window NOT applied (#{payload}): count must be positive to express a lookback.")
     return el
   end
@@ -1099,14 +1779,28 @@ def apply_card_date_window!(card, el)
     return el
   end
 
-  lookback = count - ROLLING_LOOKBACK_OFFSET
+  lookback = count - 1
   slug = date_col.downcase.gsub(/\W+/, '-')
-  win_id = "f-datewin-#{slug}-#{unit}-#{count}"
+  suffix = type == 'INTERVAL_OFFSET' ? "offset-#{offset}" : count.to_s
+  win_id = "f-datewin-#{slug}-#{unit}-#{suffix}"
   unless Array(el['columns']).any? { |c| c['id'] == win_id }
+    if type == 'INTERVAL_OFFSET'
+      # Live-established against the gold page: offset=1 means the previous
+      # completed calendar bucket (month/quarter/week); offset=0 means current.
+      # Sigma DateTrunc("week") is already Sunday-based like Domo. (The direct
+      # Snowflake plugin SQL path shifts explicitly because Snowflake is Monday.)
+      lower = %(DateTrunc("#{unit}", DateAdd("#{unit}", -#{offset}, Today())))
+      upper = %(DateAdd("#{unit}", 1, #{lower}))
+      label = "#{offset.zero? ? 'Current' : "#{offset} #{unit}#{offset == 1 ? '' : 's'} ago"} (#{date_col})"
+    else
+      lower = %(DateTrunc("#{unit}", DateAdd("#{unit}", -#{lookback}, Today())))
+      upper = %(DateAdd("#{unit}", 1, DateTrunc("#{unit}", Today())))
+      label = "In last #{count} #{unit}#{count == 1 ? '' : 's'} (#{date_col})"
+    end
     el['columns'] = Array(el['columns']) + [{
       'id' => win_id,
-      'name' => "In last #{count} #{unit}#{count == 1 ? '' : 's'} (#{date_col})",
-      'formula' => %(If(#{date_formula} >= DateAdd("#{unit}", -#{lookback}, Today()), "in", "out")),
+      'name' => label,
+      'formula' => %(If(#{date_formula} >= #{lower} and #{date_formula} < #{upper}, "in", "out")),
       'hidden' => true
     }]
     el['order'] = Array(el['order']) + [win_id] if el.key?('order')
@@ -1155,10 +1849,39 @@ def apply_card_filters!(card, el)
   clauses.each do |f|
     col = f['column']
     next if col.to_s.strip.empty?
-    mode = DOMO_FILTER_LIST_MODE[f['operator'].to_s.upcase]
+    operator = f['operator'].to_s.upcase
+    comparison = DOMO_FILTER_COMPARISON[operator]
+    if comparison
+      raw_value = Array(f['values']).first
+      begin
+        numeric = Float(raw_value)
+      rescue ArgumentError, TypeError
+        warn_card(card, "card filter on '#{col}' dropped: #{operator} requires a numeric value, " \
+                        "but got #{raw_value.inspect}.")
+        next
+      end
+      _name, formula = resolve_filter_column(col)
+      unless formula
+        warn_card(card, "card filter on '#{col}' dropped: its column did not resolve.")
+        next
+      end
+      slug = col.to_s.downcase.gsub(/\W+/, '-')
+      helper_id = "f-cmp-#{slug}-#{added.size}"
+      el['columns'] = Array(el['columns']) + [{
+        'id' => helper_id, 'name' => "#{col} #{comparison} #{raw_value}",
+        'formula' => %(If(#{formula} #{comparison} #{numeric}, "in", "out")),
+        'hidden' => true,
+      }]
+      added << { 'id' => "cf-#{el['id']}-#{added.size}", 'columnId' => helper_id,
+                 'kind' => 'list', 'mode' => 'include', 'values' => ['in'] }
+      next
+    end
+
+    mode = DOMO_FILTER_LIST_MODE[operator]
     unless mode
       warn_card(card, "card filter on '#{col}' dropped: operator '#{f['operator']}' has no faithful Sigma " \
-                      'element-filter translation here (handled: LEGACY/IN/EQUALS/NOT_IN/NOT_EQUALS) — ' \
+                      'element-filter translation here (handled: LEGACY/IN/EQUALS/NOT_IN/NOT_EQUALS/' \
+                      'GREATER_THAN/GREATER_THAN_OR_EQUAL/LESS_THAN/LESS_THAN_OR_EQUAL) — ' \
                       'hand-author the equivalent element filter and re-run.')
       next
     end
@@ -1344,6 +2067,7 @@ def build_element(card, overrides, master_ds = nil)
 
   before = $companion_elements.length
   el = build_element_body(card, overrides)
+  scatter_helper = el && el['_scatterHelper']
   uniquify_column_ids!(el)
   resolve_channel_collisions!(el)
   if el.nil?
@@ -1363,13 +2087,33 @@ def build_element(card, overrides, master_ds = nil)
     return nil
   end
 
+  plugin_sources = []
+  if (pluginized = pluginize_visual(card, el))
+    el, plugin_sources = pluginized
+    warn_card(card, "recreated #{card['chartType']} as hosted Sigma plugin '#{el['pluginId']}' " \
+                    'bound to a live hidden source element; no captured source pixels are embedded.')
+  end
+
   if routed
-    retarget_to_submaster!(el, sm)
+    if scatter_helper
+      retarget_to_submaster!(scatter_helper, sm)
+    elsif plugin_sources.any?
+      plugin_sources.each do |source|
+        retarget_to_submaster!(source, sm) unless source.dig('source', 'kind') == 'sql'
+      end
+    else
+      retarget_to_submaster!(el, sm)
+    end
     $companion_elements[before..-1].each { |c| retarget_to_submaster!(c, sm) }
     warn_card(card, "routed to sub-master '#{sm['name']}' for DataSet #{ds} (bead ziht) — " \
                     'verify column coverage against the card PNG; the sub-master passes through ' \
                     "every column of #{sm['name']}, not just the ones this card uses.")
   end
+  if scatter_helper
+    el.delete('_scatterHelper')
+    $chart_helpers << scatter_helper
+  end
+  $plugin_source_elements.concat(plugin_sources)
   el
 end
 
@@ -1412,7 +2156,25 @@ def build_element_body(card, overrides)
   kind = card['sigmaKindHint']
   is_kpi = kind == 'kpi-chart' ||
            (card['summaryNumber'] && Array(card['groupBy']).empty? && (card['columns'] || []).size <= 1)
-  return apply_card_date_window!(card, apply_card_filters!(card, build_kpi(card, overrides))) if is_kpi
+  if is_kpi
+    kpi = apply_card_filters!(card, build_kpi(card, overrides))
+    kpi = apply_kpi_display_override!(card, apply_card_date_window!(card, kpi))
+    header_path = File.join(OUT, 'kpi-card-header-overrides.json')
+    headers = (JSON.parse(File.read(header_path)) rescue {}) if File.exist?(header_path)
+    header_rule = headers && headers[card['id'].to_s]
+    if header_rule.is_a?(Hash) && !header_rule['body'].to_s.empty?
+      $companion_elements << {
+        'id' => "header-kpi-#{card['id']}", 'kind' => 'text',
+        'body' => header_rule['body'].to_s
+      }
+      kpi['name'] = ' '
+      value_col = Array(kpi['columns']).find { |column|
+        column['id'] == kpi.dig('value', 'columnId')
+      }
+      value_col['name'] = ' ' if value_col
+    end
+    return kpi
+  end
 
   # Domo prints a Summary Number at the top of EVERY viz card, not just KPI
   # cards. Sigma's chart/table elements have no summary slot, so this
@@ -1483,12 +2245,21 @@ def build_element_body(card, overrides)
          end
   end
 
-  # B4: this card's OWN filter clauses -> ELEMENT filters on its element (see
-  # apply_card_filters! above) — never a page control (see build_controls
-  # below). Applied here, after the case-branch, so it covers every kind
-  # (bar/line/scatter/donut/table/map/combo/kpi-fallback) built above.
-  el = apply_card_filters!(card, el)
-  el = apply_card_date_window!(card, el)
+  # Scatter/bubble charts aggregate through a hidden grouped source table.
+  # Their predicates must filter that source BEFORE grouping; attaching them to
+  # the visible scatter would evaluate against already-grouped raw refs and can
+  # leave one point per warehouse row.
+  if el && el['_scatterHelper']
+    helper = apply_card_filters!(card, el['_scatterHelper'])
+    helper = apply_card_date_window!(card, helper)
+    el['_scatterHelper'] = helper
+  else
+    # B4: this card's OWN filter clauses -> ELEMENT filters on its element (see
+    # apply_card_filters! above) — never a page control (see build_controls).
+    el = apply_card_filters!(card, el)
+    el = apply_card_date_window!(card, el)
+  end
+  el = apply_chart_axis_override!(card, el) if el
 
   if companion
     if el
@@ -1500,6 +2271,32 @@ def build_element_body(card, overrides)
       # close, just one element over).
       companion = apply_card_filters!(card, companion)
       companion = apply_card_date_window!(card, companion)
+      container_override_path = File.join(OUT, 'card-container-overrides.json')
+      container_overrides = (JSON.parse(File.read(container_override_path)) rescue {}) if
+        File.exist?(container_override_path)
+      if container_overrides&.dig(card['id'].to_s, 'summaryOwnsTitle')
+        companion['name'] = card['title']
+        el['name'] = ' '
+      end
+      header_override_path = File.join(OUT, 'card-header-overrides.json')
+      header_overrides = (JSON.parse(File.read(header_override_path)) rescue {}) if
+        File.exist?(header_override_path)
+      header_rule = header_overrides && header_overrides[card['id'].to_s]
+      if header_rule.is_a?(Hash) && !header_rule['body'].to_s.empty?
+        verify_id = "#{eid(card, '-summary')}-verify"
+        unless $kpi_verification_elements.any? { |item| item['id'] == verify_id }
+          raw_companion = Marshal.load(Marshal.dump(companion))
+          raw_companion['id'] = verify_id
+          raw_companion['name'] = "#{card['title']} Summary (Parity)"
+          raw_companion.delete('visibleAsSource')
+          $kpi_verification_elements << raw_companion
+        end
+        companion = {
+          'id' => "header-#{card['id']}", 'kind' => 'text',
+          'body' => header_rule['body'].to_s
+        }
+        el['name'] = ' '
+      end
       $companion_elements << companion
       warn_card(card, "source Summary Number ALSO represented as a companion KPI element " \
                       "'#{companion['name']}' alongside this #{el['kind'] || kind || 'chart'} element " \
@@ -1599,6 +2396,31 @@ def page_layout_elements(page)
   end
 end
 
+def observed_section_elements(cards)
+  path = File.join(OUT, 'layout-observed.json')
+  observed = (JSON.parse(File.read(path)) rescue nil) if File.exist?(path)
+  return [] unless observed.is_a?(Hash)
+  sections = Array(cards).filter_map do |card|
+    rec = observed[card['id'].to_s]
+    next unless rec.is_a?(Hash) && !rec['section'].to_s.strip.empty?
+    [rec['section'].to_s, rec['y'].to_f]
+  end
+  sections.group_by(&:first).map { |name, members| [name, members.map(&:last).min] }
+          .sort_by(&:last).each_with_index.flat_map do |(name, _y), i|
+    [
+      {
+        'id' => "text-observed-section-#{i}", 'kind' => 'text',
+        'name' => name, 'body' => "### #{name}",
+      },
+      {
+        'id' => "divider-observed-section-#{i}", 'kind' => 'divider',
+        'direction' => 'horizontal',
+        'style' => { 'color' => '#D9DEE5', 'width' => 1, 'strokeStyle' => 'solid' }
+      }
+    ]
+  end
+end
+
 if $PROGRAM_NAME == __FILE__
   cards = JSON.parse(File.read(File.join(OUT, 'cards.json'))) rescue []
   pages = JSON.parse(File.read(File.join(OUT, 'pages.json'))) rescue []
@@ -1617,6 +2439,7 @@ if $PROGRAM_NAME == __FILE__
     els += build_controls(pcards, master_ds)
     source_page = pages.find { |page| page_name(page) == pname }
     els += page_layout_elements(source_page || {})
+    els += observed_section_elements(pcards)
     if source_page&.dig('_pageAnalyzerSettings', 'showFilterBar')
       warn_card(pcards.first || { 'id' => source_page['id'], 'title' => pname },
                 'Domo page filter-bar chrome is present, but no exported filter definitions were captured; ' \
@@ -1634,14 +2457,18 @@ if $PROGRAM_NAME == __FILE__
   dominant_table = dominant_el['name']
   File.write(File.join(OUT, 'chart-specs.json'),
              JSON.pretty_generate('pages' => out_pages,
-                                  'data_elements' => $sub_masters.values,
+                                  'data_elements' => $sub_masters.values + $chart_helpers +
+                                                     $plugin_source_elements +
+                                                     $kpi_verification_elements +
+                                                     $chart_verification_elements +
+                                                     $table_verification_elements,
                                   'dominant_dataset_id' => master_ds,
                                   'dominant_table' => dominant_table,
                                   'dominant_dm_element_id' => dominant_el['id']))
   warn "  ⚠ could not resolve the dominant dataset's warehouse table — build-workbook-spec.rb " \
        "will fall back to positional DM-element selection (bead 0ku5)" if dominant_table.to_s.empty?
   File.write(File.join(OUT, 'warnings.json'), JSON.pretty_generate($warnings))
-  warn "  wrote #{File.join(OUT, 'chart-specs.json')} (#{out_pages.sum { |p| p['elements'].size }} elements across #{out_pages.size} page(s), #{$sub_masters.size} sub-master(s))"
+  warn "  wrote #{File.join(OUT, 'chart-specs.json')} (#{out_pages.sum { |p| p['elements'].size }} elements across #{out_pages.size} page(s), #{$sub_masters.size} sub-master(s), #{$chart_helpers.size} grouped chart helper(s), #{$plugin_source_elements.size} plugin source element(s), #{$kpi_verification_elements.size} KPI parity twin(s), #{$chart_verification_elements.size} chart parity twin(s), #{$table_verification_elements.size} table parity twin(s))"
   warn "  wrote #{File.join(OUT, 'warnings.json')} (#{$warnings.size} warning(s))"
   $warnings.first(20).each { |w| warn "    ⚠ #{w['card']}: #{w['warning']}" }
   warn "\n  Next: build-workbook-spec.rb --chart-specs discovery/chart-specs.json --dm-ids discovery/dm-ids.json ..."

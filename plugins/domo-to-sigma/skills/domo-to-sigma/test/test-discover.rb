@@ -146,6 +146,26 @@ eq(b['groupBy'], ['project_id'], 'groupBy flattened (Shape B)')
 eq(b['cardFormulas'].first['name'], 'Days Open', 'card formulas from definition.formulas')
 eq(b['limit'], 25, 'limit carried through Shape B normalization (bead 2ef7)')
 
+puts "== normalize_card: Shape B prefers operand over conflicting filterType =="
+shape_b_operand_wins = {
+  'chartType' => 'badge_bar', 'dataSetId' => 'ds-2b',
+  'definition' => {
+    'title' => 'Exclude Midwest',
+    'subscriptions' => { 'main' => {
+      'columns' => [{ 'column' => 'region' }],
+      # Live Shape-B often carries BOTH: real operator in `operand`, opaque
+      # collapsed token in `filterType`. operand must win or NOT_IN becomes
+      # LEGACY→include (exact inverse).
+      'filters' => [{ 'column' => 'region', 'operand' => 'NOT_IN',
+                     'filterType' => 'LEGACY', 'values' => ['Midwest'] }],
+    } },
+  },
+}
+b_op = normalize_card(shape_b_operand_wins, 'card-B-operand')
+eq(b_op['filters'],
+   [{ 'column' => 'region', 'operator' => 'NOT_IN', 'values' => ['Midwest'] }],
+   'Shape B: operand wins over conflicting filterType (NOT_IN not collapsed to LEGACY)')
+
 puts "== normalize_card: no limit declared -> key absent, not zero =="
 no_limit = normalize_card({ 'chartType' => 'badge_table', 'chartBody' => { 'columns' => [{ 'column' => 'x' }] } }, 'card-C')
 ok(!no_limit.key?('limit'), 'no limit key when the source declared none (compact drops nil, never defaults to 0)')

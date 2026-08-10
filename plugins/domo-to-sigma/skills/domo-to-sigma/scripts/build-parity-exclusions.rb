@@ -51,6 +51,8 @@
 require 'json'
 require 'optparse'
 require 'time'
+$LOAD_PATH.unshift File.expand_path('lib', __dir__)
+require 'code_rep'
 
 opts = { workdir: nil, spec: nil, warns: nil, out: nil, max_rate: 0.4, accept: nil }
 OptionParser.new do |p|
@@ -97,13 +99,6 @@ def element_name(el)
   (n || el['title'] || el['id']).to_s
 end
 
-def spec_pages(spec)
-  return spec['pages'] if spec.is_a?(Hash) && spec['pages'].is_a?(Array)
-  w = spec.is_a?(Hash) ? spec['document'] : nil
-  return w['pages'] if w.is_a?(Hash) && w['pages'].is_a?(Array)
-  []
-end
-
 def load_json(path, default)
   return default unless File.exist?(path)
   JSON.parse(File.read(path))
@@ -131,7 +126,7 @@ DISQUALIFYING = [
 ].freeze
 
 spec  = load_json(opts[:spec], {})
-tiles = spec_pages(spec).flat_map { |pg| pg['elements'] || [] }.select { |el| chartable?(el) }
+tiles = Sigma::CodeRep.workbook_elements(spec).select { |el| chartable?(el) }
 
 raw = load_json(opts[:warns], [])
 warns = raw.is_a?(Array) ? raw : Array(raw['warnings'])

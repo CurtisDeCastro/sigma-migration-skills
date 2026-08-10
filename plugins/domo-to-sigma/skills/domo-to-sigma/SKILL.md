@@ -14,21 +14,22 @@ user-invocable: true
 
 # Domo → Sigma Conversion
 
-> **Status: private-API shapes LIVE-CONFIRMED (2026-07-30); end-to-end Sigma
-> parity still not claimed.** A first live Tier-A validation ran against a real
-> Domo instance (48 cards / 24 chart types / 81 Beast Modes, plus 15 purpose-built
-> cards). It answered all three former open questions and **disproved several
-> doc-inferred shapes** in `refs/connection.md` — card enumeration, the
-> summary-number path, and page-layout geometry were all wrong.
+> **Status: GOLD — live end-to-end validated (2026-08-10).** The gold acceptance
+> run migrated a purpose-built 16-card Domo executive dashboard to a live Sigma
+> workbook and passed **28/28 strict value-parity checks (100%) with zero
+> exclusions**, a fresh context-free **6/6 visual PASS**, clean live column/layout/
+> control lint, and `assert-phase6-ran.rb` exit 0 / GREEN with an empty degradation
+> ledger (no scope cuts, waivers, or residuals). The earlier Tier-A validation
+> remains part of the evidence base: 48 cards / 24 chart types / 81 Beast Modes,
+> plus the purpose-built cards, against a real Domo instance. It answered all
+> three former open questions and **disproved several doc-inferred shapes** in
+> `refs/connection.md` — card enumeration, the summary-number path, and
+> page-layout geometry were all wrong.
 > **Read `refs/live-validation-2026-07-30.md` before trusting any private-API
 > shape**; where it and `refs/connection.md` disagree, live-validation wins.
-> The public OAuth path is documented and stable.
-> **What remains live**: a full `migrate-domo.rb` run whose resulting Sigma
-> workbook passes numeric parity and the Phase-5e visual gate for a given
-> instance. That is NOT claimed here — consistent with this repo's rule of never
-> calling a conversion validated until it passes live parity for that instance.
-> Domo's own `query/execute` parity mechanism *was* verified to reconcile exactly
-> against the warehouse.
+> The public OAuth path is documented and stable. Gold proves the converter's
+> live baseline; each customer migration must still run its own Phase-6 value,
+> visual, layout, and security gates rather than inheriting the fixture's result.
 > **Compliance:** before a production run, confirm with the customer's Domo
 > account team that programmatic extraction for migration is acceptable — see
 > `refs/connection.md` "Compliance note".
@@ -128,6 +129,7 @@ grid is only 6 wide, so widths scale ×4).
 | `scripts/preflight-columns.rb` | 2.9 | Check every mapped dataset's Domo columns against the REAL warehouse table schema (live Sigma catalog lookup); reports gaps + auto-suggests (never auto-applies) a derivation formula for a known pattern |
 | `scripts/build-dm.rb` | 3 | DataSet schema + projection calc columns → Sigma DM spec (clean display names); honors a Phase-2.5 reuse decision |
 | `post-and-readback.rb` *(vendored)* | 4 | POST DM/WB + capture server element IDs / column labels |
+| `scripts/derive-presentation-overrides.rb` | 5 (pre) | Source facts (discovery + early Domo card-data) → **layout-safe** styling sidecars (`kpi-format-overrides.json`, `chart-axis-overrides.json`, `category-order-overrides.json`) so Domo-faithful compact KPIs / axes / category order are automatic, not hand-authored. Preserves any operator-authored sidecar already on disk. |
 | `scripts/build-workbook.rb` | 5 | Cards → Sigma chart/table/KPI element specs (`chart-specs.json`) + controls |
 | `build-workbook-spec.rb` *(vendored)* | 5 | Assemble master + pages from `chart-specs.json` + `dm-ids.json` → POST-ready workbook spec |
 | `scripts/qa-check.rb` | 5e | Domo-specific spec gate: KPI-not-count-of-id, filter fan-out, no bar-as-table, text-wrap, gridlines-off |
@@ -417,6 +419,19 @@ server element IDs, verify zero error columns.
 
 ## Phase 5 — Workbook
 
+**Phase 5 (pre) — presentation overrides (automatic, runs before build-workbook).**
+`migrate-domo.rb` runs `scripts/derive-presentation-overrides.rb` first (live:
+after an early `collect-parity-expected.rb`, which reads Domo card-data only and
+needs no Sigma). It derives the **layout-safe** styling sidecars the builders
+consume — Domo-style compact KPI display, compact currency axes, and source
+category order — from source facts, so a customer run reproduces the gold-path
+styling without hand-authored files. It only writes sidecars that don't already
+exist (an operator's hand-authored sidecar always wins) and never fails the run.
+It deliberately does **not** auto-author `card-header-overrides.json` (that
+override adds `header-*` text elements the automated layout has no zone for; the
+source Summary Number is already surfaced by the companion-KPI mechanism). The
+`domo/orders-presentation` corpus case pins this derivation offline/creds-free.
+
 `ruby scripts/build-workbook.rb` → map each card to a Sigma element, following
 **`refs/card-to-element.md`** (the chart map). **Read the per-card PNG from
 `discovery/png/cards/` while mapping** — the image disambiguates chart kind and
@@ -546,6 +561,6 @@ All three former blockers were answered by live contact. Full evidence in
    per-card T-shirt `size` token, on a **6-column** Domo grid (so Domo→Sigma
    width scales ×4).
 
-What is still genuinely open: a full end-to-end `migrate-domo.rb` run that
-passes numeric parity and the Phase-5e visual gate against a live Sigma workbook.
-Treat that as the remaining bar for calling an instance's conversion validated.
+That former open bar is now closed by the 2026-08-10 gold acceptance run.
+Customer-specific source shapes remain subject to the same hard gates; do not
+generalize one fixture's pass to another tenant without rerunning them.

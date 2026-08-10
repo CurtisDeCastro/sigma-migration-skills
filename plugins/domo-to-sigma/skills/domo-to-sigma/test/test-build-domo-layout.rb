@@ -427,10 +427,19 @@ end
 Dir.mktmpdir('domo-build-layout-observed') do |dir|
   w = ->(name, obj) { File.write(File.join(dir, name), JSON.generate(obj)) }
   w.call('cards.json', [
-    { 'id' => 'ov1', 'title' => 'Observed KPI', 'chartType' => 'badge_singlevalue', '_size' => '', '_pageOrder' => 0 },
+    { 'id' => 'ov1', 'title' => 'Observed Chart', 'chartType' => 'badge_vert_bar', '_size' => '', '_pageOrder' => 0 },
     { 'id' => 'ov2', 'title' => 'Composed Chart', 'chartType' => 'badge_vert_bar', '_size' => '', '_pageOrder' => 1 },
   ])
   w.call('pages.json', [{ 'id' => 'p1', 'title' => 'Observed Page', 'cardIds' => %w[ov1 ov2] }])
+  w.call('chart-specs.json', {
+    'pages' => [{
+      'name' => 'Observed Page',
+      'elements' => [
+        { 'id' => 'el-ov1', 'kind' => 'bar-chart', 'name' => 'Observed Chart' },
+        { 'id' => 'el-ov1-summary', 'kind' => 'kpi-chart', 'name' => 'Observed Total' },
+      ],
+    }],
+  })
   w.call('layout-observed.json', {
     'ov1' => { 'x' => 0.0, 'y' => 0.0, 'w' => 0.4, 'h' => 0.15 },
     'nonexistent-card-id' => { 'x' => 0.0, 'y' => 0.0, 'w' => 1.0, 'h' => 1.0 }, # typo -> must WARN
@@ -446,8 +455,13 @@ Dir.mktmpdir('domo-build-layout-observed') do |dir|
   dash = JSON.parse(File.read(File.join(dir, 'dashboard-layout.json'))).find { |d| d['dashboard'] == 'Observed Page' }
   zov1 = dash['zones'].find { |z| z['id'] == 'ov1' }
   zov2 = dash['zones'].find { |z| z['id'] == 'ov2' }
-  eq([zov1['x_pct'], zov1['y_pct'], zov1['w_pct'], zov1['h_pct']], [0.0, 0.0, 40.0, 15.0],
-     "ov1's zone is placed EXACTLY at its observed fraction * 100, through the real CLI entrypoint")
+  zsum = dash['zones'].find { |z| z['id'] == 'el-ov1-summary' }
+  eq([zov1['x_pct'], zov1['y_pct'], zov1['w_pct'], zov1['h_pct']], [0.0, 3.6, 40.0, 11.4],
+     "ov1's observed card rectangle reserves its top 24% for the source Summary Number")
+  eq([zsum['x_pct'], zsum['y_pct'], zsum['w_pct'], zsum['h_pct']], [0.0, 0.0, 40.0, 3.6],
+     'the companion KPI occupies that source-card header area instead of a bottom KPI band')
+  eq(zsum['_source'], 'observed-from-screenshot-summary',
+     'the companion placement is explicitly tagged as screenshot-derived')
   eq(zov1['_source'], 'observed-from-screenshot', "ov1's zone is tagged _source, end to end")
   ok(zov2['_source'].nil?, 'ov2 (not in the sidecar) falls back to the kind-aware default composition, untagged')
   ok(zov2['y_pct'] > zov1['y_pct'], 'the composed remainder (ov2) is placed below the observed region, end to end')

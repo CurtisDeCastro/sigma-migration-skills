@@ -618,7 +618,13 @@ def build_page_synthesized(dashboard, page, opts, structure)
   minexp      = 0
   prefix      = "syn-#{page['id']}"
 
-  header_zones = structure[:header]
+  # Screenshot-transcribed collection headers are section separators, never
+  # page-title chrome. Keep them in the content flow even when the first one
+  # sits at y≈0; otherwise Salesforce + Google Analytics get packed side by
+  # side into the single page-header band and every later section shifts.
+  header_zones = Array(structure[:header]).reject {
+    |z| z['id'].to_s.start_with?('observed-section-')
+  }
   kpi_rows     = structure[:kpi_rows]
   rail         = structure[:sidebar]
 
@@ -695,7 +701,17 @@ def build_page_synthesized(dashboard, page, opts, structure)
   resolve_zone_el = lambda do |z|
     case z['kind'].to_s
     when 'chart'
-      el = els_by_name[zone_el_name(z, opts[:renames])]
+      # Screenshot-observed layouts can carry the exact workbook element id
+      # (notably companion KPIs whose human labels repeat: "Change over 7
+      # Days", "New Visits in Period"). Prefer that exact join before the
+      # legacy name fallback, which can map every duplicate label to one tile
+      # and strand the others in the generic bottom band.
+      zid = z['id'].to_s
+      el = els_by_id[zid] || els_by_id["el-#{zid}"] ||
+           els_by_id.values.find { |candidate|
+             candidate['id'].to_s.start_with?("el-#{zid}-plugin-")
+           } ||
+           els_by_name[zone_el_name(z, opts[:renames])]
       el && el['id']
     when 'text', 'title'
       el = els_by_id["text-#{z['id']}"]
@@ -736,7 +752,13 @@ def build_page_synthesized(dashboard, page, opts, structure)
   # layout_lint checks); the zone (chart_kind + plot signals) is the fallback.
   min_for = lambda do |z, eid|
     el = els_by_id[eid]
-    el && el['kind'] ? SigmaLayout.min_rows_for(el['kind']) : SigmaLayout.min_rows_for_zone(z)
+    base = el && el['kind'] ? SigmaLayout.min_rows_for(el['kind']) : SigmaLayout.min_rows_for_zone(z)
+    if z['_source'].to_s.start_with?('observed-from-screenshot') &&
+       z['chart_kind'].to_s != 'kpi'
+      [base, 10].max
+    else
+      base
+    end
   end
 
   # --- units: KPI rows, section text separators, section panels ---------------

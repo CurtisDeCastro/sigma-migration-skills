@@ -43,7 +43,8 @@ kpi = build_kpi({ 'id' => 'c1', 'title' => 'Revenue',
 eq(kpi['kind'], 'kpi-chart', 'kind kpi-chart')
 eq(kpi['columns'][0]['formula'], 'Sum([Master/Sales Amount])', 'value = Sum of measure, source-prefixed (NOT Count of id)')
 eq(kpi['value'], { 'columnId' => kpi['columns'][0]['id'] }, 'value uses columnId (not id)')
-eq(kpi['columns'][0]['format'], { 'kind' => 'number', 'decimalPlaces' => 0 }, 'currency format carried (proven decimalPlaces shape, not a d3 formatString)')
+eq(kpi['columns'][0]['format'], { 'kind' => 'number', 'formatString' => '$.4~s' },
+   'currency KPI matches Domo visible abbreviated headline')
 
 puts "== #1 KPI: COUNT-of-id (Domo table default) is flagged, not silent =="
 $warnings = []
@@ -70,11 +71,39 @@ bar = build_element({ 'id' => 'c3', 'title' => 'Sales by Region', 'chartType' =>
                                      { 'column' => 'sales_amount', 'aggregation' => 'SUM', 'alias' => 'Sales' } ] }, {})
 eq(bar['kind'], 'bar-chart', '#7 bar card → bar-chart element (NOT table+dataBars)')
 ok(bar['columns'].none? { |c| c['id'].to_s.start_with?('cf') }, 'no conditionalFormats/dataBars on a bar chart')
-eq(bar['xAxis']['format'], { 'marks' => 'none' }, '#8 x-axis gridlines off')
+eq(bar.dig('xAxis', 'format', 'marks'), 'none', '#8 x-axis gridlines off')
 eq(bar['yAxis']['format'], { 'marks' => 'none' }, '#8 y-axis gridlines off')
 eq(bar['columns'][0]['formula'], '[Master/Store Region]', 'dimension references master')
 eq(bar['columns'][1]['formula'], 'Sum([Master/Sales Amount])', 'measure aggregated + master-ref')
 eq(bar['columns'][1]['name'], 'Sales', 'measure label uses Domo alias (fixes raw names #4)')
+
+puts "== symbol line preserves source point markers =="
+symbol_line = build_element({
+  'id' => 'c3-line', 'title' => 'Sales by Month',
+  'chartType' => 'badge_symbolline', 'sigmaKindHint' => 'line-chart',
+  'dateGrain' => { 'column' => 'month', 'dateTimeElement' => 'MONTH' },
+  'groupBy' => ['month'],
+  'columns' => [
+    { 'column' => 'month', 'mapping' => 'ITEM', 'calendar' => true },
+    { 'column' => 'sales_amount', 'aggregation' => 'SUM', 'mapping' => 'SERIES' }
+  ]
+}, {})
+eq(symbol_line.dig('lineAreaStyle', 'points'),
+   { 'visibility' => 'shown', 'shape' => 'circle', 'size' => 9 },
+   'badge_symbolline emits released lineAreaStyle point markers')
+eq(symbol_line['columns'].first['format'],
+   { 'kind' => 'datetime', 'formatString' => '%b %y' },
+   'calendar axes use compact source-like month labels')
+
+puts "== visual roles: aggregated XTIME is a measure, plain XTIME is a dimension =="
+dims, measures = split_cols({
+  'columns' => [
+    { 'column' => 'period', 'mapping' => 'XTIME' },
+    { 'column' => 'won', 'mapping' => 'XTIME', 'aggregation' => 'COUNT' },
+  ],
+})
+eq(dims.map { |c| c['column'] }, ['period'], 'plain XTIME remains the grouping axis')
+eq(measures.map { |c| c['column'] }, ['won'], 'aggregated XTIME keeps its measure role')
 
 puts "== #5 table: text wrap on dimension columns; dataBars only when declared =="
 tbl = build_element({ 'id' => 'c4', 'title' => 'Projects', 'chartType' => 'badge_table',
@@ -135,9 +164,39 @@ combo = build_element({ 'id' => 'c11', 'title' => 'Revenue vs Target', 'chartTyp
                                        { 'column' => 'target', 'aggregation' => 'SUM', 'alias' => 'Target' } ] }, {})
 eq(combo['kind'], 'combo-chart', 'badge_line_bar → combo-chart, NOT line-chart (substring "badge_line" would mis-route it)')
 eq(combo['yAxis']['columnIds'],
-   [ { 'columnId' => combo['columns'][1]['id'], 'type' => 'bar' },
-     { 'columnId' => combo['columns'][2]['id'], 'type' => 'line' } ],
-   'first measure renders as the bar series, second as the line series')
+   [ { 'columnId' => combo['columns'][1]['id'], 'type' => 'line' },
+     { 'columnId' => combo['columns'][2]['id'], 'type' => 'bar' } ],
+   'badge_line_bar preserves Domo role order: first measure line, second bar')
+eq(combo.dig('yAxis2', 'columnIds'), [combo['columns'][2]['id']],
+   'bar series uses the secondary axis so line-rate and bar-volume scales both remain visible')
+
+duplicate_combo = build_element({
+  'id' => 'c11b', 'title' => 'Page View Growth', 'chartType' => 'badge_line_bar',
+  'columns' => [
+    { 'column' => 'Date', 'mapping' => 'ITEM' },
+    { 'column' => 'Unique Page Views', 'aggregation' => 'AVG', 'mapping' => 'SERIES' },
+    { 'column' => 'Page Views', 'aggregation' => 'SUM', 'mapping' => 'SERIES' },
+    { 'column' => 'Unique Page Views', 'aggregation' => 'SUM', 'mapping' => 'SERIES' },
+  ],
+}, {})
+combo_ids = duplicate_combo.dig('yAxis', 'columnIds').map { |s| s['columnId'] }
+eq(combo_ids.uniq.length, 3,
+   'duplicate raw columns keep distinct channel ids for Avg and Sum series')
+eq(combo_ids, duplicate_combo['columns'].drop(1).map { |c| c['id'] },
+   'combo channels retarget the suffixed duplicate id, never repeat the first formula')
+
+post_reach = build_element({
+  'id' => 'c11c', 'title' => 'Post Reach', 'chartType' => 'badge_line_bar',
+  'columns' => [
+    { 'column' => 'Date', 'mapping' => 'ITEM' },
+    { 'column' => 'Paid Post Impression', 'aggregation' => 'SUM', 'mapping' => 'SERIES' },
+    { 'column' => 'Organic Post Impression', 'aggregation' => 'SUM', 'mapping' => 'SERIES' },
+    { 'column' => 'Number of Posts', 'alias' => 'Posts', 'aggregation' => 'SUM', 'mapping' => 'SERIES' },
+  ],
+}, {})
+eq(post_reach.dig('yAxis', 'columnIds').map { |s| s['type'] },
+   %w[line line bar],
+   'post-impression measures stay lines while the exact Posts count is the bar')
 
 # badge_symbol_bar contains the substring '_bar' — must be combo-chart, not bar-chart.
 $warnings = []
@@ -147,6 +206,8 @@ symbar = build_element({ 'id' => 'c12', 'title' => 'Actual vs Marker', 'chartTyp
                                         { 'column' => 'marker', 'aggregation' => 'SUM' } ] }, {})
 eq(symbar['kind'], 'combo-chart', 'badge_symbol_bar → combo-chart, NOT bar-chart (substring "_bar" would mis-route it)')
 eq(symbar['yAxis']['columnIds'][1]['type'], 'scatter', 'the symbol overlay renders as a scatter series')
+eq(symbar.dig('yAxis2', 'columnIds'), [symbar['columns'][1]['id']],
+   'bar layer uses the secondary axis beside scatter markers')
 
 puts "== Problem 1: fabricated chartType tokens are flagged, never silently mapped =="
 $warnings = []
@@ -173,6 +234,8 @@ donut = build_element({ 'id' => 'c16', 'title' => 'Mix', 'chartType' => 'badge_d
 eq(donut['kind'], 'donut-chart', 'badge_donut → donut-chart')
 eq(donut['value'], { 'id' => donut['columns'].last['id'] }, 'donut value uses value.id (opposite of KPI columnId)')
 ok(!donut.key?('xAxis') && !donut.key?('yAxis'), 'donut/pie carry value/color, NOT xAxis/yAxis (fixes the old broken shape)')
+eq(donut['legend'], { 'position' => 'left', 'fontSize' => 9 },
+   'donut legend preserves Domo left-side placement')
 
 pie = build_element({ 'id' => 'c17', 'title' => 'Share', 'chartType' => 'badge_pie',
                       'columns' => [ { 'column' => 'family' }, { 'column' => 'sales', 'aggregation' => 'SUM' } ] }, {})
@@ -237,6 +300,18 @@ geomap = build_element({ 'id' => 'c20', 'title' => 'Sales by State', 'chartType'
                          'columns' => [ { 'column' => 'store_state' }, { 'column' => 'sales', 'aggregation' => 'SUM' } ] }, {})
 eq(geomap['kind'], 'region-map', 'badge_map with a recognizable state column → region-map')
 eq(geomap['region']['regionType'], 'us-state', 'regionType inferred from the column name')
+
+$warnings = []
+ga_region = build_element({
+  'id' => 'c20b', 'title' => 'New Visits by State', 'chartType' => 'badge_map',
+  'columns' => [{ 'column' => 'Region', 'mapping' => 'ITEM' },
+                { 'column' => 'New Visits', 'aggregation' => 'SUM', 'mapping' => 'VALUE' }],
+  'filters' => [{ 'column' => 'Country', 'operator' => 'IN', 'values' => ['United States'] }],
+}, {})
+eq(ga_region['kind'], 'region-map',
+   'Google Analytics Region + United States filter resolves as a US-state map')
+eq(ga_region.dig('region', 'regionType'), 'us-state',
+   'the card-local country context grounds the otherwise ambiguous Region field')
 
 $warnings = []
 badgeo = build_element({ 'id' => 'c21', 'title' => 'Custom Territory Map', 'chartType' => 'badge_map',
@@ -573,7 +648,7 @@ calc_kpi = build_kpi({ 'id' => 'c34', 'title' => 'Margin % by Channel',
                                             '_isCalc' => true, 'label' => 'Margin Pct' } }, {})
 ok(!calc_kpi.nil?, 'KPI still built for an aggregate-calc summary number')
 eq(calc_kpi['columns'][0]['formula'],
-   'If(Sum([Master/Net Revenue]) = 0, 0, Sum([Master/Gross Profit]) / Sum([Master/Net Revenue]))',
+   'Coalesce(If(Sum([Master/Net Revenue]) = 0, 0, Sum([Master/Gross Profit]) / Sum([Master/Net Revenue])), 0)',
    'formula is the INLINED, masterized Beast Mode expression — NOT Sum([Master/Margin Pct]), ' \
    'a column that does not exist and would 400 the whole workbook POST')
 eq(calc_kpi['value'], { 'columnId' => calc_kpi['columns'][0]['id'] }, "value.columnId matches the inlined column's own id")
@@ -600,7 +675,7 @@ projected_sales = build_element({
                  { 'column' => 'Amount', 'aggregation' => 'SUM', 'mapping' => 'VALUE' } ],
   'filters' => [ { 'column' => 'IsWon', 'operator' => 'LEGACY', 'values' => ['true'] } ],
 }, {})
-eq(projected_sales['kind'], 'line-chart', 'still the expected chart kind')
+eq(projected_sales['kind'], 'area-chart', 'Domo trendline keeps its filled area shape')
 ok(projected_sales.key?('filters'), 'the card filter produced an element filter (it used to produce NOTHING)')
 flt = projected_sales['filters'].find { |f| f['values'] == ['true'] }
 ok(!flt.nil?, 'the filter carries the REAL value ["true"] — not dropped, not empty (B4 core fix)')
@@ -617,6 +692,7 @@ puts "== B4: a filter on a column the card ALREADY plots reuses that column — 
 # Amount, filters: [{"column":"IsWon",...,"values":["true"]}].
 $warnings = []
 $companion_elements = []
+$chart_helpers = []
 top_salespeople = build_element({
   'id' => '2071758146', 'title' => 'Top Salespeople', 'chartType' => 'badge_bubble',
   'sigmaKindHint' => 'scatter-chart',
@@ -624,12 +700,32 @@ top_salespeople = build_element({
                  { 'column' => 'Amount', 'aggregation' => 'SUM', 'mapping' => 'VALUE' } ],
   'filters' => [ { 'column' => 'IsWon', 'operator' => 'LEGACY', 'values' => ['true'] } ],
 }, {})
-before_size = top_salespeople['columns'].size
-flt2 = top_salespeople['filters'].find { |f| f['values'] == ['true'] }
-dim_col_for_iswon = top_salespeople['columns'].find { |c| c['id'] == 'd-iswon' }
+top_salespeople_helper = $chart_helpers.last
+before_size = top_salespeople_helper['columns'].size
+flt2 = top_salespeople_helper['filters'].find { |f| f['values'] == ['true'] }
+dim_col_for_iswon = top_salespeople_helper['columns'].find { |c| c['id'] == 'd-iswon' }
 ok(!dim_col_for_iswon.nil?, 'IsWon is plotted as the dimension column, id d-iswon')
-eq(flt2['columnId'], 'd-iswon', 'the filter reuses the EXISTING dimension column\'s id, not a new hidden one')
-eq(before_size, 2, 'no extra column was appended — reuse, not duplication')
+eq(flt2['columnId'], 'd-iswon',
+   'the grouped source filter reuses its EXISTING dimension column, not a duplicate')
+eq(before_size, 2, 'no extra helper column was appended — reuse, not duplication')
+
+puts "== B4: a raw-value filter never targets an aggregated measure of the same column =="
+$chart_helpers = []
+build_element({
+  'id' => 'c39b', 'title' => 'Won Deals', 'chartType' => 'badge_bubble',
+  'columns' => [
+    { 'column' => 'IsWon', 'aggregation' => 'COUNT', 'mapping' => 'XTIME' },
+    { 'column' => 'Amount', 'aggregation' => 'AVG', 'mapping' => 'VALUE' },
+    { 'column' => 'Owner', 'mapping' => 'SERIES' },
+  ],
+  'filters' => [{ 'column' => 'IsWon', 'operator' => 'IN', 'values' => ['true'] }],
+}, {})
+agg_helper = $chart_helpers.last
+raw_filter = agg_helper['filters'].find { |f| f['values'] == ['true'] }
+eq(raw_filter['columnId'], 'f-iswon',
+   'list filter uses a hidden raw IsWon column, not Count(IsWon)')
+eq(agg_helper['columns'].find { |c| c['id'] == 'f-iswon' }['formula'], '[Master/Is Won]',
+   'hidden filter target preserves row-level boolean semantics')
 
 puts "== B4: an operator with no faithful Sigma translation is dropped LOUDLY, never silently =="
 $warnings = []
@@ -839,8 +935,11 @@ eq(dfs.first['values'], ['in'], 'includes only the in-window sentinel')
 wc = Array(win['columns']).find { |c| c['id'] == dfs.first['columnId'] }
 ok(!wc.nil?, 'the filter targets a column the element actually has')
 eq(wc['hidden'], true, 'the window column is HIDDEN — the source card never rendered it')
-ok(wc['formula'].include?('DateAdd("day", -14,'),
-   "predicate uses DateAdd(\"day\", -14, ...) — got #{wc && wc['formula']}")
+ok(wc['formula'].include?('DateTrunc("day", DateAdd("day", -13, Today()))'),
+   "lower bound includes 14 calendar-day buckets — got #{wc && wc['formula']}")
+ok(wc['formula'].include?('< DateAdd("day", 1, DateTrunc("day", Today()))'),
+   "upper bound excludes future buckets — got #{wc && wc['formula']}")
+ok(wc['formula'].include?(' and '), 'both calendar-bucket bounds are required')
 ok(wc['formula'].include?('Today()'), 'predicate is anchored on Today()')
 
 puts "== step 6: unit mapping covers every interval the corpus actually uses =="
@@ -858,9 +957,12 @@ puts "== step 6: unit mapping covers every interval the corpus actually uses =="
   c = Array(e['columns']).find { |x| x['id'].to_s.start_with?('f-datewin') }
   # NB: a %(...) literal would balance the nested paren and silently append ")"
   # to the needle — use an explicit escaped string.
-  needle = "DateAdd(\"#{sigma}\", -3,"
+  needle = "DateTrunc(\"#{sigma}\", DateAdd(\"#{sigma}\", -2, Today()))"
   ok(c && c['formula'].include?(needle),
      "#{domo} -> \"#{sigma}\" (got #{c && c['formula']})")
+  upper = "< DateAdd(\"#{sigma}\", 1, DateTrunc(\"#{sigma}\", Today()))"
+  ok(c && c['formula'].include?(upper),
+     "#{domo} carries an exclusive next-bucket upper bound")
 end
 
 puts "== step 6: no dateRangeFilter -> no window column and no window filter =="
@@ -873,13 +975,7 @@ ok(Array(nowin['filters']).none? { |f| f['id'].to_s.start_with?('dw-') },
 ok(Array(nowin['columns']).none? { |c| c['id'].to_s.start_with?('f-datewin') },
    'and no orphan window column')
 
-puts "== step 6: INTERVAL_OFFSET is NOT guessed — it is dropped LOUDLY =="
-# 5 of the 29 windowed cards are INTERVAL_OFFSET (offset>=1, count=0). Domo's
-# exact boundary semantics for those are not documented in any source available
-# here, and guessing is the SAME silent-wrong-numbers class as the 2-arg DateDiff
-# operand order (bead znvg): a wrong window compiles clean and returns wrong
-# values everywhere. So it is refused with a warning naming the exact payload,
-# rather than shipped as a plausible guess.
+puts "== step 6: INTERVAL_OFFSET maps to one completed calendar bucket =="
 $warnings = []
 io = build_element({ 'id' => 'c43', 'title' => 'Survey Completion Rate', 'chartType' => 'badge_line',
                      'dateRangeFilter' => {
@@ -888,12 +984,28 @@ io = build_element({ 'id' => 'c43', 'title' => 'Survey Completion Rate', 'chartT
                                             'interval' => 'WEEK', 'offset' => 1, 'count' => 0 } },
                      'columns' => [{ 'column' => 'created_on' },
                                    { 'column' => 'v', 'aggregation' => 'SUM' }] }, {})
-ok(Array(io['filters']).none? { |f| f['id'].to_s.start_with?('dw-') },
-   'no window filter is invented for INTERVAL_OFFSET')
-ok($warnings.any? { |w| w['warning'].to_s.include?('INTERVAL_OFFSET') },
-   'the refusal is warned, not silent')
-ok($warnings.any? { |w| w['warning'].to_s.include?('offset') },
-   'the warning echoes the payload so it is actionable')
+io_filter = Array(io['filters']).find { |f| f['id'].to_s.start_with?('dw-') }
+ok(io_filter, 'INTERVAL_OFFSET emits an element-local window filter')
+io_col = io['columns'].find { |c| c['id'] == io_filter['columnId'] }
+ok(io_col['formula'].include?('DateTrunc("week", DateAdd("week", -1, Today()))'),
+   'Sigma week offset uses its Domo-compatible Sunday boundary')
+ok(io_col['formula'].include?('< DateAdd("week", 1, DateTrunc("week"'),
+   'window ends exclusively at the next boundary')
+
+calc_kpi = build_element({
+  'id' => 'c43b', 'title' => 'Completion', 'chartType' => 'badge_filledgauge',
+  'summaryNumber' => { 'column' => 'Completion Rate 30-Day', '_isCalc' => true },
+  'dateRangeFilter' => {
+    'column' => { 'column' => 'created_on' },
+    'dateTimeRange' => { 'dateTimeRangeType' => 'INTERVAL_OFFSET',
+                         'interval' => 'WEEK', 'offset' => 1, 'count' => 0 },
+  },
+  'columns' => [{ 'column' => 'status', 'aggregation' => 'COUNT', 'mapping' => 'CURRENT' }],
+}, {})
+ok(Array(calc_kpi['filters']).any? { |f| f['id'].to_s.start_with?('dw-') },
+   'calculated KPI is scoped to the source card interval')
+ok(calc_kpi['columns'].first['formula'].start_with?('Coalesce('),
+   'empty calculated KPI windows render source-equivalent zero instead of null')
 
 puts "== step 6: an unresolvable date column is dropped LOUDLY, never a broken filter =="
 $warnings = []
@@ -913,6 +1025,236 @@ ok(Array(bad && bad['columns']).none? { |c| c['id'].to_s.start_with?('f-datewin'
    'and no orphan window column is left behind')
 ok($warnings.any? { |w| w['warning'].to_s.include?('names no date column') },
    'the blank date column is warned, not silent')
+
+puts "== live parity: raw SERIES overlays become Max measures on combo charts =="
+overlay = build_element({
+  'id' => 'c45', 'title' => 'Open Rate', 'chartType' => 'badge_line_stackedbar',
+  'columns' => [
+    { 'column' => 'CalendarMonth', 'mapping' => 'ITEM' },
+    { 'column' => 'industry_stats_open_rate', 'alias' => 'Industry Open Rate', 'mapping' => 'SERIES' },
+    { 'column' => 'opens_unique_opens', 'aggregation' => 'SUM', 'mapping' => 'SERIES' },
+  ],
+}, {})
+benchmark = overlay['columns'].find { |c| c['name'] == 'Industry Open Rate' }
+eq(benchmark['formula'], 'Max([Master/Industry Stats Open Rate])',
+   'raw benchmark SERIES survives as a grouped Max measure')
+ok(Array(overlay.dig('yAxis', 'columnIds')).any? {
+     |x| (x.is_a?(Hash) ? x['columnId'] : x) == benchmark['id']
+   },
+   'benchmark is bound to a visible series channel')
+
+puts "== live parity: split SERIES binds to color while ITEM remains x-axis =="
+revenue = build_element({
+  'id' => 'c46', 'title' => 'Revenue', 'chartType' => 'badge_vert_stackedbar',
+  'columns' => [
+    { 'column' => 'Account', 'mapping' => 'SERIES' },
+    { 'column' => 'Date', 'mapping' => 'ITEM' },
+    { 'column' => 'Revenue', 'aggregation' => 'SUM', 'mapping' => 'VALUE' },
+  ],
+}, {})
+eq(revenue.dig('xAxis', 'columnId'), 'd-date', 'ITEM date is the x-axis, not SERIES account')
+eq(revenue['color'], { 'by' => 'category', 'column' => 'd-account' },
+   'SERIES account remains a bound split dimension')
+
+puts "== live parity: scatter channels follow XTIME/VALUE/SERIES/BUBBLESIZE roles =="
+$chart_helpers = []
+scatter = build_element({
+  'id' => 'c47', 'title' => 'Top Subjects', 'chartType' => 'badge_bubble',
+  'orderBy' => ['Clicks'], 'limit' => 10,
+  'columns' => [
+    { 'column' => 'Subject', 'mapping' => 'SERIES' },
+    { 'column' => 'Delivered', 'aggregation' => 'SUM', 'mapping' => 'XTIME' },
+    { 'column' => 'Opens', 'aggregation' => 'SUM', 'mapping' => 'VALUE' },
+    { 'column' => 'Clicks', 'aggregation' => 'SUM', 'mapping' => 'BUBBLESIZE' },
+  ],
+}, {})
+eq(scatter['columns'].map { |c| c['id'] },
+   %w[s-subject s-delivered s-opens s-clicks],
+   'each source role appears once, in source order')
+eq(scatter.dig('xAxis', 'columnId'), 's-delivered', 'XTIME measure binds x')
+eq(scatter.dig('yAxis', 'columnIds'), ['s-opens'], 'VALUE measure binds y')
+eq(scatter.dig('size', 'id'), 's-clicks', 'BUBBLESIZE binds size without a duplicate export column')
+eq(scatter['color'], { 'by' => 'category', 'column' => 's-subject' }, 'SERIES identifies each point')
+helper = $chart_helpers.last
+eq(scatter['source'], { 'kind' => 'table', 'elementId' => helper['id'],
+                        'groupingId' => helper['groupings'].first['id'] },
+   'scatter binds to an explicit hidden grouping')
+eq(helper['groupings'].first['groupBy'], ['d-subject'], 'helper groups to one point per Subject')
+eq(helper['groupings'].first['calculations'], %w[m-delivered m-opens m-clicks],
+   'helper pre-aggregates every scatter measure')
+eq(helper['filters'].first['rowCount'], 10, 'source top-N is enforced on the grouped helper')
+
+puts "== live parity: numeric comparison filters compile to hidden boolean predicates =="
+compared = build_element({
+  'id' => 'c48', 'title' => 'Delivered', 'chartType' => 'badge_vert_bar',
+  'columns' => [
+    { 'column' => 'Subject', 'mapping' => 'ITEM' },
+    { 'column' => 'Delivered', 'aggregation' => 'SUM', 'mapping' => 'VALUE' },
+  ],
+  'filters' => [{ 'column' => 'Delivered', 'operator' => 'GREATER_THAN', 'values' => ['0'] }],
+}, {})
+cmp_filter = Array(compared['filters']).find { |f| f['columnId'].to_s.start_with?('f-cmp-') }
+ok(cmp_filter, 'GREATER_THAN emits an element-local list filter')
+cmp_col = compared['columns'].find { |c| c['id'] == cmp_filter['columnId'] }
+eq(cmp_col['formula'], 'If([Master/Delivered] > 0.0, "in", "out")',
+   'comparison helper preserves strict greater-than semantics')
+
+puts "== live parity: treemap degradation preserves Domo's 500 visible leaves =="
+treemap = build_element({
+  'id' => 'c49', 'title' => 'Devices', 'chartType' => 'badge_treemap',
+  'columns' => [
+    { 'column' => 'Device', 'mapping' => 'ITEM' },
+    { 'column' => 'Visits', 'aggregation' => 'SUM', 'mapping' => 'VALUE' },
+  ],
+}, {})
+top500 = Array(treemap['filters']).find { |f| f['kind'] == 'top-n' }
+eq(top500 && top500['rowCount'], 500, 'treemap fallback caps the same top 500 categories')
+
+puts "== live parity: grouped DESC limit-1 Summary Number filters to current bucket =="
+$companion_elements = []
+build_element({
+  'id' => 'c50', 'title' => 'Projected Sales', 'chartType' => 'badge_trendline',
+  'columns' => [
+    { 'column' => 'CalendarQuarter', 'mapping' => 'ITEM', 'calendar' => true },
+    { 'column' => 'Amount', 'aggregation' => 'SUM', 'mapping' => 'VALUE' },
+  ],
+  'summaryNumber' => {
+    'column' => 'Amount', 'aggregation' => 'SUM', 'label' => 'Sales this Period',
+    '_raw' => {
+      'groupBy' => [{ 'column' => 'CalendarQuarter', 'calendar' => true }],
+      'orderBy' => [{ 'column' => 'CalendarQuarter', 'calendar' => true, 'order' => 'DESCENDING' }],
+      'limit' => 1,
+    },
+  },
+  'dateGrain' => { 'column' => 'CloseDate', 'dateTimeElement' => 'QUARTER' },
+  'dateRangeFilter' => {
+    'column' => { 'column' => 'CloseDate' },
+    'dateTimeRange' => { 'dateTimeRangeType' => 'ROLLING_PERIOD',
+                         'interval' => 'QUARTER', 'offset' => 0, 'count' => 5 },
+  },
+}, {})
+latest = $companion_elements.find { |e| e['id'] == 'el-c50-summary' }
+latest_filter = Array(latest && latest['filters']).find { |f| f['id'].to_s.start_with?('summary-latest-') }
+ok(latest_filter, 'companion KPI has a machine-derived latest-bucket filter')
+latest_col = latest['columns'].find { |c| c['id'] == latest_filter['columnId'] }
+ok(latest_col['formula'].include?('DateTrunc("quarter"'),
+   'latest-bucket predicate uses the source calendar grain')
+
+puts "== screenshot-observed sections become real workbook text elements =="
+Dir.mktmpdir do |dir|
+  File.write(File.join(dir, 'layout-observed.json'), JSON.generate({
+    'a' => { 'x' => 0, 'y' => 0.4, 'w' => 0.2, 'h' => 0.1, 'section' => 'Second' },
+    'b' => { 'x' => 0, 'y' => 0.1, 'w' => 0.2, 'h' => 0.1, 'section' => 'First' },
+    'c' => { 'x' => 0.2, 'y' => 0.4, 'w' => 0.2, 'h' => 0.1, 'section' => 'Second' },
+  }))
+  stub_const(:OUT, dir) do
+    section_els = observed_section_elements([{ 'id' => 'a' }, { 'id' => 'b' }, { 'id' => 'c' }])
+    text_els = section_els.select { |e| e['kind'] == 'text' }
+    divider_els = section_els.select { |e| e['kind'] == 'divider' }
+    eq(text_els.map { |e| e['id'] },
+       %w[text-observed-section-0 text-observed-section-1],
+       'section ids match build-domo-layout observed-section ids')
+    eq(text_els.map { |e| e['name'] }, %w[First Second],
+       'section text follows screenshot y-order, not discovery card order')
+    eq(text_els.map { |e| e['body'] }, ['### First', '### Second'],
+       'each observed section is visible authored text')
+    eq(divider_els.map { |e| e['id'] },
+       %w[divider-observed-section-0 divider-observed-section-1],
+       'each observed section gets a real divider element')
+  end
+end
+
+puts "== no-native chart family uses a hosted plugin with live data source =="
+Dir.mktmpdir do |dir|
+  File.write(File.join(dir, 'plugin-config.json'),
+             JSON.generate('visual_plugin_id' => 'plugin-test-id',
+                           'calendar_plugin_id' => 'calendar-test-id',
+                           'gauge_plugin_id' => 'gauge-test-id'))
+  File.write(File.join(dir, 'dataset-map.json'), JSON.generate(
+    'ds-plugin' => { 'connectionId' => 'conn-1', 'database' => 'DB',
+                     'schema' => 'PUBLIC', 'table' => 'DEVICES' }
+  ))
+  stub_const(:OUT, dir) do
+    $plugin_config = nil
+    $plugin_dataset_map = nil
+    $plugin_source_elements = []
+    visual = build_element({
+      'id' => 'c51', 'title' => 'Device Treemap', 'chartType' => 'badge_treemap',
+      'datasetId' => 'ds-plugin',
+      'columns' => [
+        { 'column' => 'Device', 'mapping' => 'ITEM' },
+        { 'column' => 'Visits', 'aggregation' => 'SUM', 'mapping' => 'VALUE' },
+      ],
+    }, {})
+    eq(visual['kind'], 'plugin', 'visible element is a real Sigma plugin, not a captured image')
+    eq(visual['id'], 'el-c51-plugin-v1',
+       'plugin gets a fresh id instead of changing an existing chart kind in place')
+    eq(visual['pluginId'], 'plugin-test-id', 'plugin registration id comes from operator sidecar')
+    eq(visual.dig('config', 'mode'), 'treemap', 'Domo chart family selects plugin render mode')
+    parity_source = $plugin_source_elements.find { |e| e['id'] == 'el-c51-verify' }
+    direct_source = $plugin_source_elements.find { |e| e['id'] == 'src-plugin-el-c51' }
+    eq(parity_source['kind'], 'bar-chart',
+       'converted live chart remains as strict parity evidence')
+    eq(direct_source['kind'], 'table', 'plugin picker gets a direct SQL table like the proven gauge')
+    eq(direct_source.dig('source', 'kind'), 'sql', 'plugin source avoids a derived-element picker gap')
+    ok(direct_source.dig('source', 'statement').include?('"DB"."PUBLIC"."DEVICES"'),
+       'direct source SQL targets the mapped warehouse table')
+    eq(visual.dig('config', 'source', 'elementId'), direct_source['id'],
+       'plugin subscribes to the direct selectable table')
+    eq(visual.dig('config', 'label'),
+       { 'kind' => 'column', 'columnId' => 'd-label', 'source' => 'source' },
+       'plugin label uses the proven structured column binding')
+    eq(visual.dig('config', 'value'),
+       { 'kind' => 'column', 'columnId' => 'm-value', 'source' => 'source' },
+       'plugin value uses the proven structured column binding')
+
+    calendar = build_element({
+      'id' => 'c52', 'title' => 'Activity Calendar', 'chartType' => 'badge_calendar',
+      'datasetId' => 'ds-plugin',
+      'dateGrain' => { 'column' => 'Activity Date', 'dateTimeElement' => 'DAY' },
+      'columns' => [
+        { 'column' => 'Activity Date', 'mapping' => 'DATE' },
+        { 'column' => 'Description', 'mapping' => 'EVENT' },
+      ],
+    }, {})
+    eq(calendar['pluginId'], 'calendar-test-id',
+       'calendar card reuses the proven live calendar registration')
+    eq(calendar.dig('config', 'dateColumn'),
+       { 'kind' => 'column', 'columnId' => 'd-label', 'source' => 'source' },
+       'calendar date uses the working plugin column config shape')
+    eq(calendar.dig('config', 'valueColumn'),
+       { 'kind' => 'column', 'columnId' => 'm-value', 'source' => 'source' },
+       'calendar value uses the working plugin column config shape')
+
+    $companion_elements = []
+    gauge = build_element({
+      'id' => 'c53', 'title' => 'Completion', 'chartType' => 'badge_filledgauge',
+      'datasetId' => 'ds-plugin',
+      'summaryNumber' => {
+        'column' => 'Completion Rate', 'beastModeId' => 'calc-rate', '_isCalc' => true,
+        'format' => { 'type' => 'percent', 'format' => '0.0 %' },
+      },
+      'cardFormulas' => [{
+        'id' => 'calc-rate',
+        'formula' => "COUNT(CASE WHEN `status` = 'Closed' THEN `id` END) / COUNT(`id`)",
+      }],
+      'columns' => [
+        { 'column' => 'status', 'aggregation' => 'COUNT', 'mapping' => 'CURRENT' },
+        { 'column' => 'id', 'aggregation' => 'COUNT', 'mapping' => 'TARGET' },
+      ],
+    }, {})
+    eq(gauge['pluginId'], 'gauge-test-id', 'filled gauge uses hosted gauge plugin')
+    eq(gauge.dig('config', 'format'), '.1%', 'percent gauge preserves display format')
+    eq(gauge.dig('config', 'value'),
+       { 'kind' => 'column', 'columnId' => 'actual', 'source' => 'source' },
+       'gauge value uses structured working-plugin binding')
+    gauge_source = $plugin_source_elements.find { |e| e['id'] == 'src-plugin-el-c53' }
+    ok(gauge_source.dig('source', 'statement').include?('AS ACTUAL, 1 AS TARGET'),
+       'percent gauge binds a live formula fraction against target 1')
+    ok($companion_elements.any? { |e| e['id'] == 'el-c53-summary' },
+       'source Summary Number remains adjacent as a companion KPI')
+  end
+end
 
 puts
 if $failures.zero? then puts "ALL PASS"; exit 0 else puts "#{$failures} FAILURE(S)"; exit 1 end
