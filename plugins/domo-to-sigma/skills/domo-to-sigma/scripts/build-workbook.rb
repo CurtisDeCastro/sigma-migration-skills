@@ -533,6 +533,18 @@ def apply_chart_axis_override!(card, element)
   element
 end
 
+def apply_chart_style_override!(card, element)
+  path = File.join(OUT, 'chart-style-overrides.json')
+  all = (JSON.parse(File.read(path)) rescue {}) if File.exist?(path)
+  rule = all && all[card['id'].to_s]
+  return element unless rule.is_a?(Hash)
+  if rule['gridlines'] && element['yAxis']
+    element['yAxis']['format'] ||= {}
+    element['yAxis']['format']['marks'] = 'grid'
+  end
+  element
+end
+
 # Released native progress/ring element for a grounded Domo filled gauge. Domo
 # exposes CURRENT and TARGET as explicit visual roles; those map directly to
 # value and max, with a documented zero baseline. A gauge without both roles,
@@ -2250,6 +2262,7 @@ def build_element_body(card, overrides)
     el = apply_card_date_window!(card, el)
   end
   el = apply_chart_axis_override!(card, el) if el
+  el = apply_chart_style_override!(card, el) if el
 
   if companion
     if el
